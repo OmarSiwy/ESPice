@@ -1,0 +1,27 @@
+// Conformance: 6.6 — Generate constructs
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module resistor(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real r = 1.0k;
+    analog
+        I(p, n) <+ V(p, n) / r;
+endmodule
+
+module conf_hier_generate(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter integer N = 4;
+    electrical nodes[0:N];
+    genvar i;
+    generate
+        for (i = 0; i < N; i = i + 1) begin : stage
+            resistor #(.r(1.0k)) r_inst(nodes[i], nodes[i+1]);
+        end
+    endgenerate
+    analog begin
+        V(nodes[0]) <+ V(p);
+        V(n) <+ V(nodes[N]);
+    end
+endmodule

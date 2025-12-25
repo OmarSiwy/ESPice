@@ -1,0 +1,12 @@
+{
+    "status": "compile_ok",
+    "openvaf_validated": false,
+    "openvaf_unsupported": true,
+    "module_name": "conf_op_slew",
+    "param_count": 2,
+    "contrib_count": 1,
+    "has_ddt": false,
+    "has_idt": false,
+    "has_ddx": false,
+    "has_noise": false
+}

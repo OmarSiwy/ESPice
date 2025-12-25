@@ -1,0 +1,21 @@
+// Conformance: 4.3.1 — Standard math functions
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module conf_expr_math(p, n);
+    inout p, n;
+    electrical p, n;
+    real r;
+    analog begin
+        r = ln(2.0);
+        r = log(100.0);
+        r = exp(1.0);
+        r = sqrt(4.0);
+        r = pow(2.0, 10.0);
+        r = abs(-5.0);
+        r = floor(3.7);
+        r = ceil(3.2);
+        r = min(2.0, 5.0);
+        r = max(2.0, 5.0);
+        I(p, n) <+ r;
+    end
+endmodule

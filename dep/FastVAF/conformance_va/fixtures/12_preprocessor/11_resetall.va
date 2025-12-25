@@ -1,0 +1,12 @@
+// Conformance: 11.4 — `resetall clears text macros
+// EXPECT: parse_error
+`include "disciplines.vams"
+`define TEMP_VAL 300.15
+`resetall
+
+module conf_pp_resetall(p, n);
+    inout p, n;
+    electrical p, n;
+    analog
+        I(p, n) <+ V(p, n) / `TEMP_VAL;
+endmodule

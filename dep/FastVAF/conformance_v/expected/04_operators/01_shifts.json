@@ -1,0 +1,7 @@
+{
+    "status": "compile_ok",
+    "module_name": "shifter",
+    "input_count": 11,
+    "output_count": 16,
+    "is_sequential": false
+}

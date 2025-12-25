@@ -1,0 +1,18 @@
+// Conformance: 3.2 — Real variables
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module conf_dt_real(p, n);
+    inout p, n;
+    electrical p, n;
+    real x;
+    real y = 0.0;
+    real a, b, c;
+    real d = 1.0, e = 2.0;
+    analog begin
+        x = 1.0;
+        a = x + y;
+        b = d * e;
+        c = a + b;
+        I(p, n) <+ c;
+    end
+endmodule

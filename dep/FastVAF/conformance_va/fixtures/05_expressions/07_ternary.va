@@ -1,0 +1,14 @@
+// Conformance: 4.2.12 — Conditional (ternary) operator
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module conf_expr_ternary(p, n);
+    inout p, n;
+    electrical p, n;
+    real a, b, r;
+    analog begin
+        a = 5.0; b = 3.0;
+        r = (a > b) ? a : b;
+        r = (a > 0) ? ((b > 0) ? a + b : a) : b;
+        I(p, n) <+ r;
+    end
+endmodule

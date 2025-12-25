@@ -1,0 +1,4 @@
+// Conformance: edge — Comments only
+// EXPECT: no_module
+// Just comments
+/* Nothing else */

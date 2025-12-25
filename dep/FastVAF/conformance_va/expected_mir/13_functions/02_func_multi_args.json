@@ -1,0 +1,11 @@
+{
+    "status": "compile_ok",
+    "openvaf_validated": true,
+    "module_name": "conf_func_args",
+    "param_count": 0,
+    "contrib_count": 1,
+    "has_ddt": false,
+    "has_idt": false,
+    "has_ddx": false,
+    "has_noise": false
+}

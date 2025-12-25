@@ -1,0 +1,21 @@
+.{
+    .name = .arpice,
+    .version = "0.1.0",
+    .fingerprint = 0xae493373f3b93a69,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .devices = .{ .path = "modules/devices" },
+        .analysis = .{ .path = "modules/analysis" },
+        .solvers = .{ .path = "modules/solvers" },
+        .fastvaf = .{ .path = "dep/FastVAF" },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "modules",
+        "dep",
+        "docs",
+        "benchmark",
+    },
+}

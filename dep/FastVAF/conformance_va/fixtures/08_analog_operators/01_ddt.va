@@ -1,0 +1,10 @@
+// Conformance: 4.5.3 — Time derivative ddt
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module conf_op_ddt(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real C = 1.0p;
+    analog
+        I(p, n) <+ C * ddt(V(p, n));
+endmodule

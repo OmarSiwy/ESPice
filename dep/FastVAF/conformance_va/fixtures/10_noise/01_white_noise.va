@@ -1,0 +1,12 @@
+// Conformance: 4.6.4 — white_noise
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module conf_noise_white(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real R = 1.0k;
+    analog begin
+        I(p, n) <+ V(p, n) / R;
+        I(p, n) <+ white_noise(4.0 * 1.380650e-23 * $temperature / R, "thermal");
+    end
+endmodule

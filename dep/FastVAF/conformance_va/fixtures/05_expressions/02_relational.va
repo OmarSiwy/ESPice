@@ -1,0 +1,17 @@
+// Conformance: 4.2.5 — Relational operators
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module conf_expr_rel(p, n);
+    inout p, n;
+    electrical p, n;
+    real a, b;
+    integer r;
+    analog begin
+        a = 5.0; b = 3.0;
+        r = (a < b);
+        r = (a > b);
+        r = (a <= b);
+        r = (a >= b);
+        I(p, n) <+ r;
+    end
+endmodule

@@ -1,0 +1,1082 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chapter 4: Expressions &amp; Analog Operators &mdash; Verilog-A LRM 2.4.0</title>
+<style>
+body { font-family: 'Segoe UI', system-ui, sans-serif; max-width: 900px; margin: 0 auto; padding: 2rem; background: #fafafa; color: #1a1a1a; line-height: 1.6; }
+h1 { border-bottom: 3px solid #2563eb; padding-bottom: 0.5rem; }
+h2 { color: #1e40af; margin-top: 2rem; border-bottom: 1px solid #ddd; padding-bottom: 0.3rem; }
+h3 { color: #374151; }
+h4 { color: #4b5563; }
+code { background: #e5e7eb; padding: 0.15rem 0.4rem; border-radius: 3px; font-size: 0.9em; }
+pre { background: #1e293b; color: #e2e8f0; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; }
+pre code { background: none; padding: 0; color: inherit; }
+table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+th, td { border: 1px solid #d1d5db; padding: 0.5rem 0.75rem; text-align: left; }
+th { background: #2563eb; color: white; }
+tr:nth-child(even) { background: #f3f4f6; }
+.syntax { background: #fffbeb; border-left: 4px solid #f59e0b; padding: 1rem; margin: 1rem 0; font-family: monospace; white-space: pre-wrap; color: #1a1a1a; }
+.note { background: #eff6ff; border-left: 4px solid #2563eb; padding: 0.75rem 1rem; margin: 1rem 0; }
+nav { background: #1e293b; padding: 1rem; border-radius: 6px; margin-bottom: 2rem; }
+nav a { color: #93c5fd; text-decoration: none; margin-right: 1rem; }
+nav a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+
+<nav>
+<a href="index.html">Index</a>
+<a href="ch2-lexical.html">Ch2 Lexical</a>
+<a href="ch3-datatypes.html">Ch3 Data Types</a>
+<a href="ch4-expressions.html">Ch4 Expressions</a>
+<a href="ch5-analog.html">Ch5 Analog</a>
+<a href="ch6-hierarchy.html">Ch6 Hierarchy</a>
+<a href="ch9-system.html">Ch9 System</a>
+<a href="ch10-connectmodules.html">Ch10 Connect Modules</a>
+<a href="ch11-directives.html">Ch11 Directives</a>
+</nav>
+
+<h1>Chapter 4: Expressions &amp; Analog Operators</h1>
+
+<!-- 4.1 -->
+<h2 id="s4.1">4.1 Overview</h2>
+<p>An expression combines operands with operators to produce a result that is a function of the values of the operands and the semantic meaning of the operator. Any legal operand (such as an integer or an indexed element from an array of reals) without an operator is also considered an expression. Wherever a value is needed in a Verilog-AMS HDL statement, an expression can be used.</p>
+<p>Some statement constructs require an expression to be a <em>constant expression</em>. The operands of a constant expression consist of constant numbers and parameter names, but they can use any of the operators defined in Table 4-1, Table 4-14, and Table 4-15.</p>
+
+<!-- 4.2 -->
+<h2 id="s4.2">4.2 Operators</h2>
+<p>The symbols for operators are similar to those in the C programming language.</p>
+
+<table>
+<caption>Table 4-1 &mdash; Operators</caption>
+<tr><th>Symbol</th><th>Description</th></tr>
+<tr><td><code>{} {{}}</code></td><td>Concatenation, replication</td></tr>
+<tr><td><code>+ -</code> (unary)</td><td>Unary operators</td></tr>
+<tr><td><code>+ - * / **</code></td><td>Arithmetic</td></tr>
+<tr><td><code>%</code></td><td>Modulus</td></tr>
+<tr><td><code>&gt; &gt;= &lt; &lt;=</code></td><td>Relational</td></tr>
+<tr><td><code>!</code></td><td>Logical negation</td></tr>
+<tr><td><code>&amp;&amp;</code></td><td>Logical and</td></tr>
+<tr><td><code>||</code></td><td>Logical or</td></tr>
+<tr><td><code>==</code></td><td>Logical equality</td></tr>
+<tr><td><code>!=</code></td><td>Logical inequality</td></tr>
+<tr><td><code>===</code></td><td>Case equality</td></tr>
+<tr><td><code>!==</code></td><td>Case inequality</td></tr>
+<tr><td><code>~</code></td><td>Bitwise negation</td></tr>
+<tr><td><code>&amp;</code></td><td>Bitwise and</td></tr>
+<tr><td><code>|</code></td><td>Bitwise inclusive or</td></tr>
+<tr><td><code>^</code></td><td>Bitwise exclusive or</td></tr>
+<tr><td><code>^~</code> or <code>~^</code></td><td>Bitwise equivalence</td></tr>
+<tr><td><code>&amp;</code></td><td>Reduction and</td></tr>
+<tr><td><code>~&amp;</code></td><td>Reduction nand</td></tr>
+<tr><td><code>|</code></td><td>Reduction or</td></tr>
+<tr><td><code>~|</code></td><td>Reduction nor</td></tr>
+<tr><td><code>^</code></td><td>Reduction xor</td></tr>
+<tr><td><code>~^</code> or <code>^~</code></td><td>Reduction xnor</td></tr>
+<tr><td><code>&lt;&lt;</code></td><td>Logical left shift</td></tr>
+<tr><td><code>&gt;&gt;</code></td><td>Logical right shift</td></tr>
+<tr><td><code>&lt;&lt;&lt;</code></td><td>Arithmetic left shift</td></tr>
+<tr><td><code>&gt;&gt;&gt;</code></td><td>Arithmetic right shift</td></tr>
+<tr><td><code>?:</code></td><td>Conditional</td></tr>
+</table>
+
+<!-- 4.2.1 -->
+<h3 id="s4.2.1">4.2.1 Operators with Real Operands</h3>
+<p>The following operators are legal when applied to real operands. All other operators are illegal with real operands.</p>
+
+<table>
+<caption>Table 4-2 &mdash; Legal operators for use in real expressions</caption>
+<tr><th>Symbol</th><th>Description</th></tr>
+<tr><td><code>+ -</code> (unary)</td><td>Unary operators</td></tr>
+<tr><td><code>+ - * /</code></td><td>Arithmetic</td></tr>
+<tr><td><code>**</code></td><td>Power</td></tr>
+<tr><td><code>%</code></td><td>Modulus</td></tr>
+<tr><td><code>&gt; &gt;= &lt; &lt;=</code></td><td>Relational</td></tr>
+<tr><td><code>== !=</code></td><td>Logical equality</td></tr>
+<tr><td><code>! &amp;&amp; ||</code></td><td>Logical</td></tr>
+<tr><td><code>?:</code></td><td>Conditional</td></tr>
+</table>
+
+<p>The result of using logical or relational operators on real numbers is an integer value 0 (false) or 1 (true).</p>
+<p>If a real expression is used for the replication factor of a concatenation, the expression will first be converted to an integer using the rules in 4.2.1.1.</p>
+
+<h4 id="s4.2.1.1">4.2.1.1 Real to Integer Conversion</h4>
+<p>Real numbers are converted to integers by rounding the real number to the nearest integer, rather than by truncating it. If the fractional part of the real number is exactly 0.5, it shall be rounded away from zero.</p>
+<p>Examples: 35.7 and 35.5 both become 36; 35.2 becomes 35. Converting -1.5 yields -2; converting 1.5 yields 2.</p>
+
+<h4 id="s4.2.1.2">4.2.1.2 Integer to Real Conversion</h4>
+<p>Implicit conversion shall take place when an expression is assigned to a real. Individual bits that are x or z in the net or variable shall be an error.</p>
+
+<h4 id="s4.2.1.3">4.2.1.3 Arithmetic Conversion</h4>
+<p>If either operand is real, the other operand is converted to real. Implicit conversion takes place when an integer number is used with a real number in an operand.</p>
+<pre><code>a = 3 + 5.0;      // 3 cast to 3.0, result is 8.0
+b = 1 / 2;        // integer division, result is 0
+c = 8.0 + (1/2);  // (1/2) is integer division (0), cast to 0.0, result is 8.0
+d = 1 / 2.0;      // real division, result is 0.5</code></pre>
+
+<!-- 4.2.2 -->
+<h3 id="s4.2.2">4.2.2 Operator Precedence</h3>
+
+<table>
+<caption>Table 4-3 &mdash; Precedence rules for operators (highest to lowest)</caption>
+<tr><th>Operators</th><th>Precedence</th></tr>
+<tr><td><code>+ - ! ~ &amp; ~&amp; | ~| ^ ~^ ^~</code> (unary)</td><td>Highest</td></tr>
+<tr><td><code>**</code></td><td></td></tr>
+<tr><td><code>* / %</code></td><td></td></tr>
+<tr><td><code>+ -</code> (binary)</td><td></td></tr>
+<tr><td><code>&lt;&lt; &gt;&gt; &lt;&lt;&lt; &gt;&gt;&gt;</code></td><td></td></tr>
+<tr><td><code>&lt; &lt;= &gt; &gt;=</code></td><td></td></tr>
+<tr><td><code>== != === !==</code></td><td></td></tr>
+<tr><td><code>&amp;</code> (bitwise)</td><td></td></tr>
+<tr><td><code>^ ^~ ~^</code> (bitwise)</td><td></td></tr>
+<tr><td><code>|</code> (bitwise)</td><td></td></tr>
+<tr><td><code>&amp;&amp;</code></td><td></td></tr>
+<tr><td><code>||</code></td><td></td></tr>
+<tr><td><code>?:</code> (conditional)</td><td></td></tr>
+<tr><td><code>{} {{}}</code></td><td>Lowest</td></tr>
+</table>
+
+<p>Operators on the same row have the same precedence. All operators associate left to right, except the conditional operator (<code>?:</code>) which associates right to left.</p>
+<pre><code>A + B / C     // B is divided by C first, then added to A
+(A + B) / C   // not the same as A + B / C</code></pre>
+
+<!-- 4.2.3 -->
+<h3 id="s4.2.3">4.2.3 Expression Evaluation Order</h3>
+<p>Operators follow associativity rules. The operators <code>&amp;&amp;</code>, <code>||</code>, and <code>?:</code> shall use short-circuit evaluation: some operand expressions shall not be evaluated as long as the expression contains no analog operators and their value is not required to determine the final value. All other operators shall not use short-circuit evaluation.</p>
+
+<!-- 4.2.4 -->
+<h3 id="s4.2.4">4.2.4 Arithmetic Operators</h3>
+
+<table>
+<caption>Table 4-4 &mdash; Arithmetic operators</caption>
+<tr><th>Operator</th><th>Description</th></tr>
+<tr><td><code>a + b</code></td><td>a plus b</td></tr>
+<tr><td><code>a - b</code></td><td>a minus b</td></tr>
+<tr><td><code>a * b</code></td><td>a multiply by b</td></tr>
+<tr><td><code>a / b</code></td><td>a divide by b</td></tr>
+<tr><td><code>a % b</code></td><td>a modulo b</td></tr>
+</table>
+
+<p>Integer division truncates any fractional part toward zero.</p>
+
+<table>
+<caption>Table 4-5 &mdash; Unary operators</caption>
+<tr><th>Operator</th><th>Description</th></tr>
+<tr><td><code>+m</code></td><td>Unary plus m (same as m)</td></tr>
+<tr><td><code>-m</code></td><td>Unary minus m</td></tr>
+</table>
+
+<p>The modulus operator (<code>a % b</code>) gives the remainder when a is divided by b. The result takes the sign of the first operand. It shall be an error to pass zero as the second argument.</p>
+<p>For the case where either argument is real:</p>
+<pre><code>a % b = ((a/b) &lt; 0) ? (a - ceil(a/b)*b) : (a - floor(a/b)*b);</code></pre>
+
+<table>
+<caption>Table 4-6 &mdash; Examples of modulus operations</caption>
+<tr><th>Expression</th><th>Result</th><th>Comments</th></tr>
+<tr><td><code>11 % 3</code></td><td>2</td><td>11/3 yields a remainder of 2</td></tr>
+<tr><td><code>12 % 3</code></td><td>0</td><td>12/3 yields no remainder</td></tr>
+<tr><td><code>-10 % 3</code></td><td>-1</td><td>Result takes the sign of the first operand</td></tr>
+<tr><td><code>11 % -3</code></td><td>2</td><td>Result takes the sign of the first operand</td></tr>
+<tr><td><code>10 % 3.75</code></td><td>2.5</td><td>floor(10/3.75)*3.75 yields remainder of 2.5</td></tr>
+</table>
+
+<!-- 4.2.5 -->
+<h3 id="s4.2.5">4.2.5 Relational Operators</h3>
+
+<table>
+<caption>Table 4-7 &mdash; Relational operators</caption>
+<tr><th>Operator</th><th>Description</th></tr>
+<tr><td><code>a &lt; b</code></td><td>a less than b</td></tr>
+<tr><td><code>a &gt; b</code></td><td>a greater than b</td></tr>
+<tr><td><code>a &lt;= b</code></td><td>a less than or equal to b</td></tr>
+<tr><td><code>a &gt;= b</code></td><td>a greater than or equal to b</td></tr>
+</table>
+
+<p>An expression using relational operators yields 0 if false, 1 if true. Relational operators have lower precedence than arithmetic operators.</p>
+<pre><code>a &lt; foo - 1     // same as a &lt; (foo - 1)
+foo - (1 &lt; a)   // NOT the same as foo - 1 &lt; a</code></pre>
+
+<!-- 4.2.6 -->
+<h3 id="s4.2.6">4.2.6 Case Equality Operators</h3>
+<p>The case equality operators (<code>===</code>, <code>!==</code>) share the same precedence as the logical equality operators. These operators have limited support in the analog block (see 7.3.2).</p>
+
+<!-- 4.2.7 -->
+<h3 id="s4.2.7">4.2.7 Logical Equality Operators</h3>
+
+<table>
+<caption>Table 4-8 &mdash; Equality operators</caption>
+<tr><th>Operator</th><th>Description</th></tr>
+<tr><td><code>a == b</code></td><td>a equal to b</td></tr>
+<tr><td><code>a != b</code></td><td>a not equal to b</td></tr>
+</table>
+
+<p>Both equality operators have the same precedence, which is lower than relational operators. The result is 0 if comparison fails, 1 if it succeeds.</p>
+
+<!-- 4.2.8 -->
+<h3 id="s4.2.8">4.2.8 Logical Operators</h3>
+<p><code>&amp;&amp;</code> (logical and) and <code>||</code> (logical or) are logical connectives. The result is 1 (true) or 0 (false). <code>&amp;&amp;</code> has greater precedence than <code>||</code>, and both are lower than relational and equality operators.</p>
+<p>The unary logical negation operator (<code>!</code>) converts a non-zero operand into 0 and a zero operand into 1.</p>
+<pre><code>a &lt; param1 &amp;&amp; b != c &amp;&amp; index != lastone
+// equivalent to:
+(a &lt; param1) &amp;&amp; (b != c) &amp;&amp; (index != lastone)</code></pre>
+
+<!-- 4.2.9 -->
+<h3 id="s4.2.9">4.2.9 Bitwise Operators</h3>
+<p>Bitwise operators combine corresponding bits of each operand.</p>
+
+<table>
+<caption>Table 4-9 &mdash; Bitwise AND (<code>&amp;</code>)</caption>
+<tr><th><code>&amp;</code></th><th>0</th><th>1</th></tr>
+<tr><td><strong>0</strong></td><td>0</td><td>0</td></tr>
+<tr><td><strong>1</strong></td><td>0</td><td>1</td></tr>
+</table>
+
+<table>
+<caption>Table 4-10 &mdash; Bitwise OR (<code>|</code>)</caption>
+<tr><th><code>|</code></th><th>0</th><th>1</th></tr>
+<tr><td><strong>0</strong></td><td>0</td><td>1</td></tr>
+<tr><td><strong>1</strong></td><td>1</td><td>1</td></tr>
+</table>
+
+<table>
+<caption>Table 4-11 &mdash; Bitwise XOR (<code>^</code>)</caption>
+<tr><th><code>^</code></th><th>0</th><th>1</th></tr>
+<tr><td><strong>0</strong></td><td>0</td><td>1</td></tr>
+<tr><td><strong>1</strong></td><td>1</td><td>0</td></tr>
+</table>
+
+<table>
+<caption>Table 4-12 &mdash; Bitwise XNOR (<code>^~</code> / <code>~^</code>)</caption>
+<tr><th><code>^~</code></th><th>0</th><th>1</th></tr>
+<tr><td><strong>0</strong></td><td>1</td><td>0</td></tr>
+<tr><td><strong>1</strong></td><td>0</td><td>1</td></tr>
+</table>
+
+<table>
+<caption>Table 4-13 &mdash; Bitwise NOT (<code>~</code>)</caption>
+<tr><th>Input</th><th>Output</th></tr>
+<tr><td>0</td><td>1</td></tr>
+<tr><td>1</td><td>0</td></tr>
+</table>
+
+<p>When one or both operands are unsigned, the expression is interpreted as a comparison between unsigned values. If operands are of unequal bit lengths, the smaller operand is zero-extended. When both operands are signed, the smaller operand is sign-extended.</p>
+
+<!-- 4.2.10 -->
+<h3 id="s4.2.10">4.2.10 Reduction Operators</h3>
+<p>The reduction operators cannot be used inside the analog block and only have meaning in the digital context.</p>
+
+<!-- 4.2.11 -->
+<h3 id="s4.2.11">4.2.11 Shift Operators</h3>
+<p>Logical shift operators: <code>&lt;&lt;</code> and <code>&gt;&gt;</code>. Arithmetic shift operators: <code>&lt;&lt;&lt;</code> and <code>&gt;&gt;&gt;</code> (cannot be used in an analog block).</p>
+<p>The logical shift operators perform left and right shifts and fill vacated bit positions with zeroes. The right operand is always treated as unsigned.</p>
+<pre><code>integer start, result;
+analog begin
+    start = 1;
+    result = (start &lt;&lt; 2);   // result = 0100 (binary), i.e. 4
+end</code></pre>
+<pre><code>integer start, result;
+analog begin
+    start = 3;
+    result = (start &gt;&gt; 1);   // result = 0001 (binary), i.e. 1
+end</code></pre>
+
+<!-- 4.2.12 -->
+<h3 id="s4.2.12">4.2.12 Conditional Operator</h3>
+<p>The conditional (ternary) operator is right associative.</p>
+<pre class="syntax">conditional_expression ::=
+    expression1 ? { attribute_instance } expression2 : expression3</pre>
+
+<p>If <code>expression1</code> evaluates to false (0), <code>expression3</code> is used as the result. If <code>expression1</code> evaluates to true (nonzero), <code>expression2</code> is used.</p>
+
+<!-- 4.2.13 -->
+<h3 id="s4.2.13">4.2.13 Concatenations</h3>
+<p>A concatenation joins bits from one or more expressions into a single value, expressed using braces <code>{ }</code> with commas separating the expressions. Unsized constant numbers shall not be allowed in concatenations.</p>
+<pre><code>{1'b1, 3'b101}           // = 4'b1101
+{1'b1, 1'b1, 1'b0, 1'b1} // equivalent
+{ "hello", " ", "world" } // = "hello world"</code></pre>
+
+<p>Replication is a concatenation preceded by a non-negative, non-x, non-z constant expression (the replication constant):</p>
+<pre><code>{4{w}}            // same as {w, w, w, w}
+{b, {3{a, b}}}    // same as {b, a, b, a, b, a, b}</code></pre>
+
+<p>A replication with a zero replication constant has size zero and is ignored, but shall appear only within a concatenation where at least one operand has a positive size. When a replication expression is evaluated, the operands are evaluated exactly once even if the replication constant is zero.</p>
+
+<!-- 4.2.14 -->
+<h3 id="s4.2.14">4.2.14 Assignment Patterns</h3>
+<p>The assignment pattern <code>'{}</code> specifies lists of expressions of a particular type, particularly for array assignments.</p>
+<pre class="syntax">assignment_pattern ::=
+    '{ expression { , expression } }
+  | '{ constant_expression { expression { , expression } } }
+
+constant_assignment_pattern ::=
+    '{ constant_expression { , constant_expression } }
+  | '{ constant_expression { constant_expression { , constant_expression } } }</pre>
+
+<pre><code>parameter real data1[0:4] = '{3.4, 5.6, 2.3, 4.5, 7.1};
+parameter real data2[0:4] = '{ 5{0.0} };
+
+real measurements[0:2];
+real a, b, c;
+analog begin
+    // ...
+    measurements = '{a, b, c};
+end</code></pre>
+
+<p>Contexts where array assignment patterns are allowed:</p>
+<ul>
+<li>Analog operator arguments expected to be of type array (see <a href="#s4.5.1">4.5.1</a>)</li>
+<li>The <code>data_source</code> argument of <code>$table_model</code></li>
+<li>Parameter array assignment in an instantiation</li>
+<li>The RHS of an array variable or array parameter default assignment</li>
+<li>The RHS of an array variable assignment</li>
+<li>Array arguments in calls to user-defined functions</li>
+</ul>
+
+<!-- 4.3 -->
+<h2 id="s4.3">4.3 Built-in Mathematical Functions</h2>
+<p>Both the IEEE Std 1364-2005 Verilog HDL system function syntax style (<code>$ln</code>, <code>$sin</code>, etc.) and the traditional Verilog-AMS HDL style (<code>ln</code>, <code>sin</code>, etc.) are supported.</p>
+
+<!-- 4.3.1 -->
+<h3 id="s4.3.1">4.3.1 Standard Mathematical Functions</h3>
+<p>Operands shall be numeric (integer or real). For <code>min()</code>, <code>max()</code>, and <code>abs()</code>, if either operand is real, both are converted to real, as is the result. All other arguments are converted to real.</p>
+
+<table>
+<caption>Table 4-14 &mdash; Standard functions</caption>
+<tr><th>Verilog Style</th><th>Traditional Style</th><th>C Equivalent</th><th>Description</th><th>Domain</th></tr>
+<tr><td><code>$ln(x)</code></td><td><code>ln(x)</code></td><td><code>log(x)</code></td><td>Natural logarithm</td><td>x &gt; 0</td></tr>
+<tr><td><code>$log10(x)</code></td><td><code>log(x)</code></td><td><code>log10(x)</code></td><td>Decimal logarithm</td><td>x &gt; 0</td></tr>
+<tr><td><code>$exp(x)</code></td><td><code>exp(x)</code></td><td><code>exp(x)</code></td><td>Exponential</td><td>All x</td></tr>
+<tr><td><code>$sqrt(x)</code></td><td><code>sqrt(x)</code></td><td><code>sqrt(x)</code></td><td>Square root</td><td>x &gt;= 0</td></tr>
+<tr><td>&mdash;</td><td><code>min(x, y)</code></td><td>&mdash;</td><td>Minimum</td><td>All x, all y</td></tr>
+<tr><td>&mdash;</td><td><code>max(x, y)</code></td><td>&mdash;</td><td>Maximum</td><td>All x, all y</td></tr>
+<tr><td>&mdash;</td><td><code>abs(x)</code></td><td>&mdash;</td><td>Absolute value</td><td>All x</td></tr>
+<tr><td><code>$pow(x,y)</code></td><td><code>pow(x, y)</code></td><td><code>pow(x,y)</code></td><td>Power (x<sup>y</sup>)</td><td>x&gt;0: all y; x=0: y&gt;0; x&lt;0: int(y)</td></tr>
+<tr><td><code>$floor(x)</code></td><td><code>floor(x)</code></td><td><code>floor(x)</code></td><td>Floor</td><td>All x</td></tr>
+<tr><td><code>$ceil(x)</code></td><td><code>ceil(x)</code></td><td><code>ceil(x)</code></td><td>Ceiling</td><td>All x</td></tr>
+</table>
+
+<p>The <code>min()</code>, <code>max()</code>, and <code>abs()</code> functions have discontinuous derivatives. At the discontinuity they are defined as:</p>
+<pre><code>min(x,y) is equivalent to (x &lt; y) ? x : y
+max(x,y) is equivalent to (x &gt; y) ? x : y
+abs(x)   is equivalent to (x &gt; 0) ? x : -x</code></pre>
+
+<!-- 4.3.2 -->
+<h3 id="s4.3.2">4.3.2 Transcendental Functions</h3>
+<p>All operands are numeric (integer or real) and are converted to real if necessary. Arguments to trigonometric functions and return values of inverse trigonometric functions are in radians. Input values outside the valid range shall report an error.</p>
+
+<table>
+<caption>Table 4-15 &mdash; Trigonometric and hyperbolic functions</caption>
+<tr><th>Verilog Style</th><th>Traditional Style</th><th>C Equivalent</th><th>Description</th><th>Domain</th></tr>
+<tr><td><code>$sin(x)</code></td><td><code>sin(x)</code></td><td><code>sin(x)</code></td><td>Sine</td><td>All x</td></tr>
+<tr><td><code>$cos(x)</code></td><td><code>cos(x)</code></td><td><code>cos(x)</code></td><td>Cosine</td><td>All x</td></tr>
+<tr><td><code>$tan(x)</code></td><td><code>tan(x)</code></td><td><code>tan(x)</code></td><td>Tangent</td><td>x != n(pi/2), n odd</td></tr>
+<tr><td><code>$asin(x)</code></td><td><code>asin(x)</code></td><td><code>asin(x)</code></td><td>Arc-sine</td><td>-1 &lt;= x &lt;= 1</td></tr>
+<tr><td><code>$acos(x)</code></td><td><code>acos(x)</code></td><td><code>acos(x)</code></td><td>Arc-cosine</td><td>-1 &lt;= x &lt;= 1</td></tr>
+<tr><td><code>$atan(x)</code></td><td><code>atan(x)</code></td><td><code>atan(x)</code></td><td>Arc-tangent</td><td>All x</td></tr>
+<tr><td><code>$atan2(y,x)</code></td><td><code>atan2(y,x)</code></td><td><code>atan2(y,x)</code></td><td>Arc-tangent of y/x</td><td>All x, all y; atan2(0,0) = 0</td></tr>
+<tr><td><code>$hypot(x,y)</code></td><td><code>hypot(x,y)</code></td><td><code>hypot(x,y)</code></td><td>sqrt(x<sup>2</sup> + y<sup>2</sup>)</td><td>All x, all y</td></tr>
+<tr><td><code>$sinh(x)</code></td><td><code>sinh(x)</code></td><td><code>sinh(x)</code></td><td>Hyperbolic sine</td><td>All x</td></tr>
+<tr><td><code>$cosh(x)</code></td><td><code>cosh(x)</code></td><td><code>cosh(x)</code></td><td>Hyperbolic cosine</td><td>All x</td></tr>
+<tr><td><code>$tanh(x)</code></td><td><code>tanh(x)</code></td><td><code>tanh(x)</code></td><td>Hyperbolic tangent</td><td>All x</td></tr>
+<tr><td><code>$asinh(x)</code></td><td><code>asinh(x)</code></td><td><code>asinh(x)</code></td><td>Arc-hyperbolic sine</td><td>All x</td></tr>
+<tr><td><code>$acosh(x)</code></td><td><code>acosh(x)</code></td><td><code>acosh(x)</code></td><td>Arc-hyperbolic cosine</td><td>x &gt;= 1</td></tr>
+<tr><td><code>$atanh(x)</code></td><td><code>atanh(x)</code></td><td><code>atanh(x)</code></td><td>Arc-hyperbolic tangent</td><td>-1 &lt; x &lt; 1</td></tr>
+</table>
+
+<!-- 4.4 -->
+<h2 id="s4.4">4.4 Signal Access Functions</h2>
+<p>Access functions access signals on nets, ports, and branches. There are two types: branch access functions and port access functions. The name of the access function is taken from the discipline of the net, port, or branch. Branch access functions use the <code>()</code> operator; port access functions use the <code>&lt; &gt;</code> operator.</p>
+<p>The generic <code>potential</code> and <code>flow</code> access functions are also supported as alternatives to the discipline-specific access attribute (see <a href="ch5-analog.html#s5.5.1">5.5.1</a>).</p>
+<p>When used in an expression, the access function returns the signal value. On the left side of a contribution statement, it assigns a value. Port access functions cannot be used on the left side of a contribution statement.</p>
+
+<table>
+<caption>Table 4-16 &mdash; Access function examples (electrical discipline: V = potential, I = flow)</caption>
+<tr><th>Example</th><th>Comments</th></tr>
+<tr><td><code>V(b1)</code></td><td>Voltage across branch b1</td></tr>
+<tr><td><code>potential(b1)</code></td><td>Alternative access of voltage across branch b1</td></tr>
+<tr><td><code>V(n1)</code></td><td>Voltage of n1 relative to ground</td></tr>
+<tr><td><code>V(n1,n2)</code></td><td>Voltage difference between n1 and n2</td></tr>
+<tr><td><code>V(n1,n1)</code></td><td>Error</td></tr>
+<tr><td><code>I(b1)</code></td><td>Current flowing in branch b1</td></tr>
+<tr><td><code>I(n1)</code></td><td>Current in the unnamed branch from n1 to ground</td></tr>
+<tr><td><code>flow(n1)</code></td><td>Alternative access of current from n1 to ground</td></tr>
+<tr><td><code>I(n1,n2)</code></td><td>Current in the unnamed branch between n1 and n2</td></tr>
+<tr><td><code>I(n1,n1)</code></td><td>Error</td></tr>
+<tr><td><code>I(&lt;p1&gt;)</code></td><td>Current flow into the module through port p1</td></tr>
+</table>
+
+<p>The argument list shall be a branch identifier, or a list of one or two net or port expressions. If two net expressions are given to a flow access function, they shall not evaluate to the same signal. If only one net expression is given, the second terminal is implicitly ground.</p>
+
+<!-- 4.5 -->
+<h2 id="s4.5">4.5 Analog Operators</h2>
+<p>Analog operators are functions that operate on more than just the current value of their arguments. They maintain internal state and their output is a function of both the input and the internal state. They are also referred to as analog filter functions.</p>
+<p>They include: time derivative, time integral, delay operators, transition and slew filters (for removing discontinuities), Laplace and Z-transform filters, and <code>limexp()</code>.</p>
+
+<pre class="syntax">analog_filter_function_call ::=
+    ddt ( analog_expression [ , abstol_expression ] )
+  | ddx ( analog_expression , branch_probe_function_call )
+  | idt ( analog_expression [ , analog_expression [ , analog_expression [ , abstol_expression ] ] ] )
+  | idtmod ( analog_expression [ , analog_expression [ , analog_expression [ , analog_expression
+        [ , abstol_expression ] ] ] ] )
+  | absdelay ( analog_expression , analog_expression [ , constant_expression ] )
+  | transition ( analog_expression [ , analog_expression [ , analog_expression
+        [ , analog_expression [ , constant_expression ] ] ] ] )
+  | slew ( analog_expression [ , analog_expression [ , analog_expression ] ] )
+  | last_crossing ( analog_expression [ , analog_expression ] )
+  | limexp ( analog_expression )
+  | laplace_filter_name ( analog_expression , [ analog_filter_function_arg ] ,
+        [ analog_filter_function_arg ] [ , constant_expression ] )
+  | zi_filter_name ( analog_expression , [ analog_filter_function_arg ] ,
+        [ analog_filter_function_arg ] , constant_expression
+        [ , analog_expression [ , constant_expression ] ] )</pre>
+
+<!-- 4.5.1 -->
+<h3 id="s4.5.1">4.5.1 Vector or Array Arguments to Analog Operators</h3>
+<p>Certain analog operators require arrays or vectors as arguments: Laplace filters, Z-transform filters, <code>noise_table()</code>, and <code>noise_table_log()</code>. An array can be passed as an array identifier (e.g. an array parameter or variable) or an array assignment pattern (see <a href="#s4.2.14">4.2.14</a>).</p>
+
+<!-- 4.5.2 -->
+<h3 id="s4.5.2">4.5.2 Analog Operators and Equations</h3>
+<p>Simulators formulate the system in terms of first-order differential equations and solve numerically using iterative approaches. Each equation shall have a tolerance defined. Analog operators may require new equations and unknowns; the simulator attempts to determine the appropriate tolerance from context, or operators can specify tolerances explicitly.</p>
+
+<!-- 4.5.3 -->
+<h3 id="s4.5.3">4.5.3 Time Derivative Operator &mdash; <code>ddt</code></h3>
+<p>Computes the time derivative of its argument.</p>
+
+<table>
+<tr><th>Form</th><th>Description</th></tr>
+<tr><td><code>ddt(expr)</code></td><td>Returns d/dt of expr. In DC analysis, returns 0.</td></tr>
+<tr><td><code>ddt(expr, abstol)</code></td><td>Same, with explicit absolute tolerance.</td></tr>
+<tr><td><code>ddt(expr, nature)</code></td><td>Same, with tolerance derived from nature.</td></tr>
+</table>
+
+<p>The absolute tolerance applies to the output of the <code>ddt</code> operator and is the largest signal level considered negligible.</p>
+
+<!-- 4.5.4 -->
+<h3 id="s4.5.4">4.5.4 Time Integral Operator &mdash; <code>idt</code></h3>
+<p>Computes the time-integral of its argument.</p>
+
+<table>
+<tr><th>Form</th><th>Description</th></tr>
+<tr><td><code>idt(expr)</code></td><td>Returns the integral from t<sub>0</sub> to t of expr, plus c (initial value determined by the simulator, generally the DC value that makes expr equal to zero).</td></tr>
+<tr><td><code>idt(expr, ic)</code></td><td>Same, but c is the value of ic at t<sub>0</sub>.</td></tr>
+<tr><td><code>idt(expr, ic, assert)</code></td><td>Returns the integral from t<sub>a</sub> to t of expr, plus c (value of ic at t<sub>a</sub>), where t<sub>a</sub> is the time when assert was last nonzero (or t<sub>0</sub> if never nonzero).</td></tr>
+<tr><td><code>idt(expr, ic, assert, abstol)</code></td><td>Same, with explicit absolute tolerance for integration error.</td></tr>
+<tr><td><code>idt(expr, ic, assert, nature)</code></td><td>Same, with tolerance from specified nature.</td></tr>
+</table>
+
+<p>In DC or IC analyses, <code>idt()</code> returns the initial condition (ic) if specified. If not specified, the <code>idt</code> operator must be within a negative feedback loop that forces its argument to zero; otherwise the output is undefined.</p>
+<p>With initial conditions but without assert, <code>idt()</code> returns the ic value on the initial point of a transient analysis. With both ic and assert, <code>idt()</code> returns the ic during DC and IC analyses and whenever assert is nonzero. Once assert becomes zero, <code>idt()</code> returns the integral starting from the last instant where assert was nonzero.</p>
+<p>The absolute tolerance applies to the input of the <code>idt</code> operator.</p>
+
+<pre><code>// Simple opamp modeled as an integrator
+module opamp(out, pin, nin);
+    output out;
+    input pin, nin;
+    voltage out, pin, nin;
+    analog
+        V(out) &lt;+ idt(V(pin,nin));
+endmodule</code></pre>
+
+<pre><code>// Periodic ramp waveform using idt with assert
+module ramp_generator(out);
+    output out;
+    voltage out;
+    integer reset;
+    analog begin
+        reset = 0;
+        @(timer(1, 1))
+            reset = 1;
+        V(out) &lt;+ idt(1.0, 0, reset);
+    end
+endmodule</code></pre>
+
+<!-- 4.5.5 -->
+<h3 id="s4.5.5">4.5.5 Circular Integrator Operator &mdash; <code>idtmod</code></h3>
+<p>Converts an expression argument into its indefinitely integrated form, similar to <code>idt</code>, but with modular output.</p>
+
+<table>
+<tr><th>Form</th><th>Description</th></tr>
+<tr><td><code>idtmod(expr)</code></td><td>Returns the integral from t<sub>0</sub> to t of expr, plus c (determined by simulator).</td></tr>
+<tr><td><code>idtmod(expr, ic)</code></td><td>Same, but c is ic at t<sub>0</sub>.</td></tr>
+<tr><td><code>idtmod(expr, ic, modulus)</code></td><td>Returns k where 0 &lt;= k &lt; modulus, and integral + ic = n * modulus + k.</td></tr>
+<tr><td><code>idtmod(expr, ic, modulus, offset)</code></td><td>Returns k where offset &lt;= k &lt; offset + modulus.</td></tr>
+<tr><td><code>idtmod(expr, ic, modulus, offset, abstol)</code></td><td>Same, with explicit absolute tolerance.</td></tr>
+<tr><td><code>idtmod(expr, ic, modulus, offset, nature)</code></td><td>Same, with tolerance from specified nature.</td></tr>
+</table>
+
+<p>The initial condition defaults to zero if not specified. The modulus shall evaluate to a positive value. If modulus is not specified, <code>idtmod()</code> behaves like <code>idt()</code>. The default for offset is zero.</p>
+<p>The output of <code>idtmod()</code> remains in the range: <code>offset &lt;= idtmod &lt; offset + modulus</code>.</p>
+<p>The following relationship holds at all times: if <code>y = idt(expr, ic)</code> and <code>z = idtmod(expr, ic, modulus, offset)</code>, then <code>y = n * modulus + z</code> (n is an integer), where <code>offset &lt;= z &lt; modulus + offset</code>.</p>
+
+<pre><code>// VCO using circular integrator
+phase = idtmod(fc + gain*V(in), 0, 1, 0);
+V(OUT) &lt;+ sin(2*`M_PI*phase);</code></pre>
+
+<!-- 4.5.6 -->
+<h3 id="s4.5.6">4.5.6 Derivative Operator &mdash; <code>ddx</code></h3>
+<p>Provides access to symbolically-computed partial derivatives of expressions in the analog block.</p>
+<pre><code>ddx( expr, unknown_quantity )</code></pre>
+<p>Where:</p>
+<ul>
+<li><code>expr</code> &mdash; the expression for which the symbolic derivative is calculated.</li>
+<li><code>unknown_quantity</code> &mdash; the branch probe (voltage or current probe) with respect to which the derivative is computed.</li>
+</ul>
+<p>Returns the partial derivative of <code>expr</code> with respect to the unknown indicated by the second argument, holding all other unknowns fixed, evaluated at the current operating point. The second argument shall be the potential of a scalar net or port, or the flow through a branch.</p>
+<p>If the expression does not depend explicitly on the unknown, <code>ddx()</code> returns 0. No tolerance is required because the derivative is computed symbolically.</p>
+
+<pre><code>// Diode conductance via ddx
+module diode(a,c);
+    inout a, c;
+    electrical a, c;
+    parameter real IS = 1.0e-14;
+    real idio;
+    (*desc="small-signal conductance"*)
+    real gdio;
+    analog begin
+        idio = IS * (limexp(V(a,c)/$vt) - 1);
+        gdio = ddx(idio, V(a));
+        I(a,c) &lt;+ idio;
+    end
+endmodule</code></pre>
+
+<pre><code>// Diode with series resistance: effective conductance
+module diode(a,c);
+    inout a, c;
+    electrical a, c;
+    parameter real IS = 1.0e-14;
+    parameter real RS = 0.0;
+    real idio, gdio;
+    (*desc="effective conductance"*)
+    real geff;
+    analog begin
+        idio = IS * (limexp((V(a,c)-RS*I(a,c))/$vt) - 1);
+        gdio = ddx(idio, V(a));
+        geff = gdio / (RS * gdio + 1.0);
+        I(a,c) &lt;+ idio;
+    end
+endmodule</code></pre>
+
+<pre><code>// Voltage-controlled current source: partial derivatives
+module vccs(pout,nout,pin,nin);
+    inout pout, nout, pin, nin;
+    electrical pout, nout, pin, nin;
+    parameter real k = 1.0;
+    real vin, one, minusone, zero;
+    analog begin
+        vin = V(pin,nin);
+        one = ddx(vin, V(pin));        // +1
+        minusone = ddx(vin, V(nin));    // -1
+        zero = ddx(vin, V(pout));       //  0
+        I(pout,nout) &lt;+ k * vin;
+    end
+endmodule</code></pre>
+
+<!-- 4.5.7 -->
+<h3 id="s4.5.7">4.5.7 Absolute Delay Operator &mdash; <code>absdelay</code></h3>
+<p>Implements absolute transport delay for continuous waveforms. (Use <code>transition()</code> for discrete-valued waveforms.)</p>
+<pre><code>absdelay( input, td [, maxdelay ] )</code></pre>
+<p><code>input</code> is delayed by <code>td</code>. <code>td</code> shall be positive. If the optional <code>maxdelay</code> is specified, <code>td</code> can vary; if <code>td</code> exceeds <code>maxdelay</code>, <code>maxdelay</code> is used instead. If <code>maxdelay</code> is not specified, the value of <code>td</code> when first evaluated is used and future changes to <code>td</code> are ignored.</p>
+<p>In DC and operating point analyses, <code>absdelay()</code> returns the value of its input.</p>
+<p>In AC and small-signal analyses:</p>
+<pre><code>Output(w) = Input(w) * e^(-j*w*td)</code></pre>
+<p>In time-domain analyses:</p>
+<pre><code>Output(t) = Input( max(t - td, 0) )</code></pre>
+
+<!-- 4.5.8 -->
+<h3 id="s4.5.8">4.5.8 Transition Filter &mdash; <code>transition</code></h3>
+<p>Smooths out piecewise constant waveforms by controlling rise and fall times and adding delay.</p>
+<pre><code>transition( expr [, td [, rise_time [, fall_time [, time_tol ] ] ] ] )</code></pre>
+<p>The input expression is expected to be piecewise constant. <code>transition()</code> forces positive transitions to occur over <code>rise_time</code> and negative transitions over <code>fall_time</code> (after an initial delay of <code>td</code>). <code>td</code> models transport delay; <code>rise_time</code> and <code>fall_time</code> model inertial delay.</p>
+<p><code>transition()</code> returns a real number describing a piecewise linear function over time. The function causes the simulator to place time-points at both corners of a transition.</p>
+<p>All optional parameters shall be non-negative if specified. <code>td</code> defaults to 0. If only <code>rise_time</code> is specified, it is used for both rise and fall. If neither <code>rise_time</code> nor <code>fall_time</code> are specified (or are zero), they default to <code>`default_transition</code>. If <code>`default_transition</code> is not specified, a negligible but non-zero transition time is used.</p>
+<p>In DC analysis, <code>transition()</code> passes the value of expr directly to its output.</p>
+<p>In AC analysis, <code>transition()</code> has approximately unity transmission for all frequencies.</p>
+<p>If interrupted on a rising transition:</p>
+<ul>
+<li>If the new destination is below the current value, <code>transition()</code> uses the old destination as the origin.</li>
+<li>If the new destination is above the current level, the first origin is retained.</li>
+</ul>
+<p>New transitions specified before a previously scheduled transition starts cause deletion of any transitions that would follow the newly scheduled transition. An arbitrary number of transitions can be pending.</p>
+
+<pre><code>// QAM modulator
+module qam16(in, out);
+    input [0:3] in;
+    output out;
+    voltage [0:3] in;
+    voltage out;
+    parameter real freq = 1.0 from (0:inf);
+    parameter real ampl = 1.0;
+    parameter real thresh = 2.5;
+    parameter real tdelay = 0 from [0:inf);
+    localparam real ttransit = 1/freq;
+    real x, y, phi;
+    integer row, col;
+    analog begin
+        row = 2 * (V(in[3]) &gt; thresh) + (V(in[2]) &gt; thresh);
+        col = 2 * (V(in[1]) &gt; thresh) + (V(in[0]) &gt; thresh);
+        x = transition(row - 1.5, tdelay, ttransit);
+        y = transition(col - 1.5, tdelay, ttransit);
+        phi = `M_TWO_PI * freq * $abstime;
+        V(out) &lt;+ ampl * (x * cos(phi) + y * sin(phi));
+    end
+endmodule</code></pre>
+
+<pre><code>// N-bit A/D converter
+module adc(in, clk, out);
+    parameter bits = 8, fullscale = 1.0, dly = 0, ttime = 10n;
+    input in, clk;
+    output [0:bits-1] out;
+    electrical in, clk;
+    electrical [0:bits-1] out;
+    real sample, thresh;
+    integer result[0:bits-1];
+    genvar i;
+    analog begin
+        @(cross(V(clk)-2.5, +1)) begin
+            sample = V(in);
+            thresh = fullscale/2.0;
+            for (i = bits - 1; i &gt;= 0; i = i - 1) begin
+                if (sample &gt; thresh) begin
+                    result[i] = 1.0;
+                    sample = sample - thresh;
+                end else begin
+                    result[i] = 0.0;
+                end
+                sample = 2.0*sample;
+            end
+        end
+        for (i = 0; i &lt; bits; i = i + 1) begin
+            V(out[i]) &lt;+ transition(result[i], dly, ttime);
+        end
+    end
+endmodule</code></pre>
+
+<!-- 4.5.9 -->
+<h3 id="s4.5.9">4.5.9 Slew Filter &mdash; <code>slew</code></h3>
+<p>Bounds the rate of change (slope) of a waveform. Used for generating continuous signals from piecewise continuous signals. (For discrete-valued signals, use <code>transition()</code>.)</p>
+<pre><code>slew( expr [, max_pos_slew_rate [, max_neg_slew_rate ] ] )</code></pre>
+<p><code>max_pos_slew_rate</code> shall be greater than zero. <code>max_neg_slew_rate</code> shall be less than zero. If <code>max_neg_slew_rate</code> is not specified, it defaults to the opposite of <code>max_pos_slew_rate</code>. If no rates are specified, <code>slew()</code> passes the signal through unchanged. If the rate of change of expr is less than the specified maximum slew rates, <code>slew()</code> returns the value of expr.</p>
+<p>In DC analysis, <code>slew()</code> passes the value directly to its output. In small-signal analyses, the transfer function is 1.0 when not slewing and 0.0 when slewing.</p>
+
+<!-- 4.5.10 -->
+<h3 id="s4.5.10">4.5.10 Last Crossing Function &mdash; <code>last_crossing</code></h3>
+<p>Returns the simulation time when a signal expression last crossed zero.</p>
+<pre><code>last_crossing( expr [, direction ] )</code></pre>
+<p>The optional <code>direction</code> shall be +1, -1, or 0. If 0 (default), returns the most recent time of either a rising or falling edge transition. If +1 (-1), returns the last time of a rising (falling) edge.</p>
+<p><code>last_crossing()</code> does not control the timestep; it uses linear interpolation to estimate the crossing time. It can be combined with <code>cross()</code> for improved accuracy.</p>
+<p>Before the expression crosses zero for the first time, <code>last_crossing()</code> returns a negative value.</p>
+
+<pre><code>// Measure period of input signal
+module period(in);
+    input in;
+    voltage in;
+    integer crossings;
+    real latest, previous;
+    analog begin
+        @(initial_step) begin
+            crossings = 0;
+            previous = 0;
+        end
+        @(cross(V(in), +1)) begin
+            crossings = crossings + 1;
+            previous = latest;
+        end
+        latest = last_crossing(V(in), +1);
+        @(final_step) begin
+            if (crossings &lt; 2)
+                $strobe("Could not measure period.");
+            else
+                $strobe("period = %g, crossings = %d",
+                    latest-previous, crossings);
+        end
+    end
+endmodule</code></pre>
+
+<!-- 4.5.11 -->
+<h3 id="s4.5.11">4.5.11 Laplace Transform Filters</h3>
+<p>Implement lumped linear continuous-time filters. Each filter takes an optional parameter epsilon, which is a real number or a nature used for deriving an absolute tolerance (if needed). The zeros argument may be represented as a null argument (two adjacent commas <code>,,</code>).</p>
+
+<h4 id="s4.5.11.1">4.5.11.1 <code>laplace_zp</code> &mdash; Zero-Pole Form</h4>
+<pre><code>laplace_zp( expr, zeta, rho [, epsilon ] )</code></pre>
+<p><code>zeta</code> is a vector of M pairs of real numbers (real part, imaginary part) representing zeros. <code>rho</code> is a vector of N pairs representing poles in the same manner.</p>
+<p>Transfer function:</p>
+<pre><code>          M-1
+          PROD (1 - s / (zeta_k_r + j*zeta_k_i))
+          k=0
+H(s) = -------------------------------------------
+          N-1
+          PROD (1 - s / (rho_k_r + j*rho_k_i))
+          k=0</code></pre>
+<p>If a root is real, its imaginary part shall be specified as zero. If complex, its conjugate shall also be present. If a root is zero, the associated term is implemented as <code>s</code> rather than <code>(1 - s/r)</code>.</p>
+
+<h4 id="s4.5.11.2">4.5.11.2 <code>laplace_zd</code> &mdash; Zero-Denominator Form</h4>
+<pre><code>laplace_zd( expr, zeta, d [, epsilon ] )</code></pre>
+<p><code>zeta</code> is a vector of M zero pairs (real, imaginary). <code>d</code> is a vector of N real coefficients of the denominator polynomial.</p>
+<pre><code>          M-1
+          PROD (1 - s / (zeta_k_r + j*zeta_k_i))
+          k=0
+H(s) = -------------------------------------------
+          N-1
+          SUM  d_k * s^k
+          k=0</code></pre>
+
+<h4 id="s4.5.11.3">4.5.11.3 <code>laplace_np</code> &mdash; Numerator-Pole Form</h4>
+<pre><code>laplace_np( expr, n, rho [, epsilon ] )</code></pre>
+<p><code>n</code> is a vector of M real coefficients of the numerator polynomial. <code>rho</code> is a vector of N pole pairs (real, imaginary).</p>
+<pre><code>          M-1
+          SUM  n_k * s^k
+          k=0
+H(s) = -------------------------------------------
+          N-1
+          PROD (1 - s / (rho_k_r + j*rho_k_i))
+          k=0</code></pre>
+
+<h4 id="s4.5.11.4">4.5.11.4 <code>laplace_nd</code> &mdash; Numerator-Denominator Form</h4>
+<pre><code>laplace_nd( expr, n, d [, epsilon ] )</code></pre>
+<p><code>n</code> is a vector of M numerator coefficients. <code>d</code> is a vector of N denominator coefficients.</p>
+<pre><code>          M-1
+          SUM  n_k * s^k
+          k=0
+H(s) = --------------------
+          N-1
+          SUM  d_k * s^k
+          k=0</code></pre>
+
+<h4 id="s4.5.11.5">4.5.11.5 Laplace Filter Examples</h4>
+<pre><code>// H(s) = (1+s) / ((1 + s/(1-j)) * (1 + s/(1+j)))
+V(out) &lt;+ laplace_zp(V(in), '{-1,0}, '{-1,-1,-1,1});
+
+// H(s) = s / (s^2 - 1)
+V(out) &lt;+ laplace_nd(V(in), '{0,1}, '{-1,0,1});
+
+// Band-limited white noise: k / (s^2 - 1)^2
+V(out) &lt;+ laplace_zp(white_noise(k), , '{1,0,1,0,-1,0,-1,0});</code></pre>
+
+<!-- 4.5.12 -->
+<h3 id="s4.5.12">4.5.12 Z-Transform Filters</h3>
+<p>Implement linear discrete-time filters. A filter with unity transfer function acts like a simple sample-and-hold sampling every T seconds with no delay. The zeros argument may be a null argument (<code>,,</code>).</p>
+<p>Common arguments shared by all Z-transform filters:</p>
+<ul>
+<li><code>T</code> &mdash; period of the filter (mandatory, shall be positive).</li>
+<li><code>tau</code> &mdash; transition time (optional, shall be non-negative). If not specified, defaults to one unit of time as defined by <code>`default_transition</code> and the trailing corner is not resolved. If zero, output is abruptly discontinuous and shall not be directly assigned to a branch.</li>
+<li><code>t0</code> &mdash; time of first transition (optional, defaults to t=0).</li>
+</ul>
+
+<h4 id="s4.5.12.1">4.5.12.1 <code>zi_zp</code> &mdash; Zero-Pole Form</h4>
+<pre><code>zi_zp( expr, zeta, rho, T [, tau [, t0 ] ] )</code></pre>
+<p><code>zeta</code>: vector of M zero pairs (real, imaginary). <code>rho</code>: vector of N pole pairs.</p>
+<pre><code>          M-1
+          PROD (1 - z^-1 * (zeta_k_r + j*zeta_k_i))
+          k=0
+H(z) = -----------------------------------------------
+          N-1
+          PROD (1 - z^-1 * (rho_k_r + j*rho_k_i))
+          k=0</code></pre>
+<p>If a root is real, imaginary part shall be zero. If complex, its conjugate shall also be present. If a root is zero, the term is implemented as <code>z</code> rather than <code>(1 - z/r)</code>.</p>
+
+<h4 id="s4.5.12.2">4.5.12.2 <code>zi_zd</code> &mdash; Zero-Denominator Form</h4>
+<pre><code>zi_zd( expr, zeta, d, T [, tau [, t0 ] ] )</code></pre>
+<p><code>zeta</code>: vector of M zero pairs. <code>d</code>: vector of N denominator coefficients.</p>
+<pre><code>          M-1
+          PROD (1 - z^-1 * (zeta_k_r + j*zeta_k_i))
+          k=0
+H(z) = -----------------------------------------------
+          N-1
+          SUM  d_k * z^-k
+          k=0</code></pre>
+
+<h4 id="s4.5.12.3">4.5.12.3 <code>zi_np</code> &mdash; Numerator-Pole Form</h4>
+<pre><code>zi_np( expr, n, rho, T [, tau [, t0 ] ] )</code></pre>
+<p><code>n</code>: vector of M numerator coefficients. <code>rho</code>: vector of N pole pairs.</p>
+<pre><code>          M-1
+          SUM  n_k * z^-k
+          k=0
+H(z) = -----------------------------------------------
+          N-1
+          PROD (1 - z^-1 * (rho_k_r + j*rho_k_i))
+          k=0</code></pre>
+
+<h4 id="s4.5.12.4">4.5.12.4 <code>zi_nd</code> &mdash; Numerator-Denominator Form</h4>
+<pre><code>zi_nd( expr, n, d, T [, tau [, t0 ] ] )</code></pre>
+<p><code>n</code>: vector of M numerator coefficients. <code>d</code>: vector of N denominator coefficients.</p>
+<pre><code>          M-1
+          SUM  n_k * z^-k
+          k=0
+H(z) = --------------------
+          N-1
+          SUM  d_k * z^-k
+          k=0</code></pre>
+
+<!-- 4.5.13 -->
+<h3 id="s4.5.13">4.5.13 Limited Exponential &mdash; <code>limexp</code></h3>
+<pre><code>limexp( expr )</code></pre>
+<p>Returns a real value which is the exponential of its argument. Internally limits the change of its output from iteration to iteration to improve convergence. On any iteration where the output change is bounded, the simulator is prevented from terminating the iteration. The simulator can only converge when the output of <code>limexp()</code> equals the exponential of the input.</p>
+<p>The apparent behavior is not distinguishable from <code>exp()</code>, except that using <code>limexp()</code> to model semiconductor junctions generally results in dramatically improved convergence.</p>
+<div class="note">For other nonlinearities, the <code>$limit()</code> system function (<a href="ch9-system.html#s9.17.3">9.17.3</a>) provides a method to indicate nonlinearities to the simulator.</div>
+
+<!-- 4.5.14 -->
+<h3 id="s4.5.14">4.5.14 Constant versus Dynamic Arguments</h3>
+<p>Some arguments to analog operators expect dynamic expressions (can change during an analysis), others expect constant expressions (remain static throughout an analysis).</p>
+
+<table>
+<caption>Table 4-20 &mdash; Analog operator arguments</caption>
+<tr><th>Operator</th><th>Constant Expression Arguments</th><th>Dynamic Expression Arguments</th></tr>
+<tr><td><code>absdelay</code></td><td>maxdelay</td><td>expr, td</td></tr>
+<tr><td><code>ddt</code></td><td>abstol</td><td>expr</td></tr>
+<tr><td><code>ddx</code></td><td>wrt_what</td><td>expr</td></tr>
+<tr><td><code>idt</code></td><td>abstol</td><td>expr, ic, assert</td></tr>
+<tr><td><code>idtmod</code></td><td>abstol</td><td>expr, ic, modulus, offset</td></tr>
+<tr><td><code>laplace_zp</code></td><td>zeros, poles, abstol</td><td>expr</td></tr>
+<tr><td><code>laplace_zd</code></td><td>zeros, denominator, abstol</td><td>expr</td></tr>
+<tr><td><code>laplace_np</code></td><td>numerator, poles, abstol</td><td>expr</td></tr>
+<tr><td><code>laplace_nd</code></td><td>numerator, denominator, abstol</td><td>expr</td></tr>
+<tr><td><code>last_crossing</code></td><td>&mdash;</td><td>expr, dir</td></tr>
+<tr><td><code>limexp</code></td><td>&mdash;</td><td>expr</td></tr>
+<tr><td><code>slew</code></td><td>&mdash;</td><td>expr, max_pos_slew_rate, max_neg_slew_rate</td></tr>
+<tr><td><code>transition</code></td><td>time_tol</td><td>expr, td, rise_time, fall_time</td></tr>
+<tr><td><code>zi_zp</code></td><td>zeros, poles, T, t0</td><td>expr, tau</td></tr>
+<tr><td><code>zi_zd</code></td><td>zeros, denominator, T, t0</td><td>expr, tau</td></tr>
+<tr><td><code>zi_np</code></td><td>numerator, poles, T, t0</td><td>expr, tau</td></tr>
+<tr><td><code>zi_nd</code></td><td>numerator, denominator, T, t0</td><td>expr, tau</td></tr>
+</table>
+
+<p>If a dynamic expression is passed where a constant expression is expected, the value at the start of the analysis becomes the constant value and any further change is ignored.</p>
+
+<!-- 4.5.15 -->
+<h3 id="s4.5.15">4.5.15 Restrictions on Analog Operators</h3>
+<p>Analog operators maintain internal state and must be evaluated every iteration to keep that state valid. <code>ddx()</code> is the only exception (it does not require maintained internal state). All analog operators are considered to have no state history prior to time t == 0.</p>
+<ul>
+<li>Analog operators shall not be used inside conditional (<code>if</code>, <code>case</code>, or <code>?:</code>) statements unless the conditional expression consists of terms that cannot change their value during the course of a simulation.</li>
+<li>Analog operators shall not be used inside event-triggered statements.</li>
+<li>Analog operators are not allowed in <code>repeat</code>, <code>while</code>, and non-genvar <code>for</code> looping statements.</li>
+<li>Analog operators can only be used inside an analog block; not inside <code>initial</code> or <code>always</code> blocks, or inside a user-defined function.</li>
+<li>It is illegal to specify a null argument in the argument list of an analog operator, except as specified elsewhere (e.g. Laplace/Z-transform zeros argument).</li>
+</ul>
+
+<!-- 4.6 -->
+<h2 id="s4.6">4.6 Analysis-Dependent Functions</h2>
+
+<!-- 4.6.1 -->
+<h3 id="s4.6.1">4.6.1 <code>analysis()</code></h3>
+<p>Takes one or more string arguments and returns 1 if any argument matches the current analysis type; otherwise returns 0.</p>
+<pre><code>analysis( analysis_list )</code></pre>
+<p>There is no fixed set of analysis types. Each simulator can support its own set. Simulators shall use the following names for analyses similar to those provided by SPICE:</p>
+
+<table>
+<caption>Table 4-21 &mdash; Analysis types</caption>
+<tr><th>Name</th><th>Description</th></tr>
+<tr><td><code>"ac"</code></td><td>.AC analysis</td></tr>
+<tr><td><code>"dc"</code></td><td>.OP or .DC analysis (single point or dc sweep)</td></tr>
+<tr><td><code>"noise"</code></td><td>.NOISE analysis</td></tr>
+<tr><td><code>"tran"</code></td><td>.TRAN analysis</td></tr>
+<tr><td><code>"ic"</code></td><td>Initial-condition analysis preceding a transient analysis</td></tr>
+<tr><td><code>"static"</code></td><td>Any equilibrium point calculation, including DC analysis and those preceding AC, noise, or transient analyses</td></tr>
+<tr><td><code>"nodeset"</code></td><td>Phase during an equilibrium point calculation where nodesets are forced</td></tr>
+</table>
+
+<p>Any unsupported type names are assumed to not be a match.</p>
+
+<table>
+<caption>Table 4-22 &mdash; Analysis function return values (1=True, 0=False)</caption>
+<tr><th>Argument</th><th>DC op</th><th>DC Sweep (d1..dN)</th><th>TRAN op</th><th>TRAN</th><th>AC op</th><th>AC</th><th>NOISE op</th><th>NOISE</th></tr>
+<tr><td><code>"nodeset"</code></td><td>1</td><td>0</td><td>1</td><td>0</td><td>1</td><td>0</td><td>1</td><td>0</td></tr>
+<tr><td><code>"static"</code></td><td>1</td><td>1</td><td>1</td><td>0</td><td>1</td><td>0</td><td>1</td><td>0</td></tr>
+<tr><td><code>"ic"</code></td><td>0</td><td>0</td><td>1</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td></tr>
+<tr><td><code>"dc"</code></td><td>1</td><td>1</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td></tr>
+<tr><td><code>"tran"</code></td><td>0</td><td>0</td><td>1</td><td>1</td><td>0</td><td>0</td><td>0</td><td>0</td></tr>
+<tr><td><code>"ac"</code></td><td>0</td><td>0</td><td>0</td><td>0</td><td>1</td><td>1</td><td>0</td><td>0</td></tr>
+<tr><td><code>"noise"</code></td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>1</td><td>1</td></tr>
+</table>
+
+<pre><code>// Implement nodesets or initial conditions using analysis()
+if (analysis("ic"))
+    V(cap) &lt;+ initial_value;
+else
+    I(cap) &lt;+ ddt(C*V(cap));</code></pre>
+
+<!-- 4.6.2 -->
+<h3 id="s4.6.2">4.6.2 DC Analysis</h3>
+<p><code>analysis("dc")</code> and <code>analysis("static")</code> return true for a single-point DC analysis and for every DC point in a sweep analysis. <code>analysis("nodeset")</code> returns true only during the phase of an operating point analysis in which nodeset values are enforced; this may occur in a single-point DC analysis or the first point of a multipoint DC sweep, but not for subsequent points.</p>
+<p>During a DC sweep, variable values from one operating point are used as starting values for the next DC point. Variable values are not carried over between independent DC sweep analyses; variables are re-initialized to zero at the start of each new analysis.</p>
+
+<!-- 4.6.3 -->
+<h3 id="s4.6.3">4.6.3 AC Stimulus &mdash; <code>ac_stim</code></h3>
+<pre><code>ac_stim( [ analysis_name [, mag [, phase ] ] ] )</code></pre>
+<p>Returns zero during large-signal analyses (DC, transient) and on small-signal analyses whose names do not match <code>analysis_name</code>. The default <code>analysis_name</code> is <code>"ac"</code>. When matched, models a source with magnitude <code>mag</code> (default 1) and phase <code>phase</code> (default 0, in radians).</p>
+
+<!-- 4.6.4 -->
+<h3 id="s4.6.4">4.6.4 Noise Functions</h3>
+<p>Several functions support noise modeling during small-signal analyses. They are only active in small-signal noise analyses and return zero otherwise. For large-signal noise during transient analyses, use <code>$random()</code> or <code>$arandom()</code>.</p>
+
+<pre class="syntax">analog_small_signal_function_call ::=
+    ...
+  | white_noise ( analog_expression [ , string ] )
+  | flicker_noise ( analog_expression , analog_expression [ , string ] )
+  | noise_table ( noise_table_input_arg [ , string ] )
+  | noise_table_log ( noise_table_input_arg [ , string ] )</pre>
+
+<h4 id="s4.6.4.1">4.6.4.1 <code>white_noise</code></h4>
+<pre><code>white_noise( pwr [, name ] )</code></pre>
+<p>Generates white noise with a power of <code>pwr</code>. The spectral density does not depend on frequency. The optional <code>name</code> labels the noise source for output contribution summaries; sources with the same name from the same instance are combined.</p>
+<pre><code>I(a,b) &lt;+ V(a,b)/R +
+    white_noise(4 * `P_K * $temperature/R, "thermal");</code></pre>
+
+<h4 id="s4.6.4.2">4.6.4.2 <code>flicker_noise</code></h4>
+<pre><code>flicker_noise( pwr, exp [, name ] )</code></pre>
+<p>Generates flicker (1/f) noise with a power of <code>pwr</code> at 1 Hz, varying in proportion to 1/f<sup>exp</sup>. The optional <code>name</code> labels the noise source.</p>
+
+<h4 id="s4.6.4.3">4.6.4.3 <code>noise_table</code></h4>
+<pre><code>noise_table( input [, name ] )</code></pre>
+<p>Interpolates a set of values to model a process where spectral density varies as a piecewise linear function of frequency. The argument <code>input</code> can be a vector or a string indicating a filename.</p>
+<p>When <code>input</code> is a vector: pairs of real numbers (frequency in Hz, power). The vector can be an array parameter or an array assignment pattern.</p>
+<p>When <code>input</code> is a filename: the file contains frequency/power pairs separated by newlines; numbers in each pair separated by spaces or tabs. Comments begin with <code>#</code> and end at newline. The file shall be text format with real or integer numbers. The filename shall be constant (string literal or string parameter).</p>
+<p>The user is encouraged to specify pairs in ascending frequency order; the simulator shall sort them if needed. Each frequency value must be unique.</p>
+<p>Piecewise linear interpolation is performed between the lowest and highest frequency. Below the lowest frequency, the power of the lowest frequency is returned. Above the highest, the power of the highest is returned.</p>
+
+<h4 id="s4.6.4.4">4.6.4.4 <code>noise_table_log</code></h4>
+<pre><code>noise_table_log( input [, name ] )</code></pre>
+<p>Same as <code>noise_table()</code> except interpolation is logarithmic. For frequency f where f1 &lt; f &lt; f2:</p>
+<pre><code>P = pow(10, log10(p1) + (log10(p2)-log10(p1)) * (log10(f)-log10(f1)) / (log10(f2)-log10(f1)))</code></pre>
+<p>Below the lowest frequency, returns the lowest power; above the highest, returns the highest power.</p>
+<p><code>noise_table_log</code> produces a straight line on a log-log plot from just two points:</p>
+<pre><code>V(out) &lt;+ noise_table_log('{1,1, 1e6,1e-6});</code></pre>
+<p>Whereas <code>noise_table</code> produces curves between interpolating points:</p>
+<pre><code>V(out) &lt;+ noise_table('{1,1, 1e1,1e-1, 1e2,1e-2, 1e3,1e-3, 1e4,1e-4,
+    1e5,1e-5, 1e6,1e-6});</code></pre>
+
+<h4 id="s4.6.4.5">4.6.4.5 Noise Model for Diode</h4>
+<pre><code>I(a,c) &lt;+ is*(exp(V(a,c) / (n * $vt)) - 1)
+    + white_noise(2*`P_Q*I(&lt;a&gt;))
+    + flicker_noise(kf*pow(abs(I(&lt;a&gt;)), af), ef);</code></pre>
+
+<h4 id="s4.6.4.6">4.6.4.6 Correlated Noise</h4>
+<p>Each noise function generates uncorrelated noise. Perfectly correlated noise is generated by using one noise function output for multiple sources. Partially correlated noise is generated by combining shared and unshared noise functions.</p>
+<pre><code>// Perfectly correlated noise
+n = white_noise(pwr);
+V(a,b) &lt;+ c1*n;
+V(c,d) &lt;+ c2*n;</code></pre>
+<pre><code>// Partially correlated noise
+n1 = white_noise(1-corr);
+n2 = white_noise(1-corr);
+n12 = white_noise(corr);
+V(a,b) &lt;+ Kv*(n1 + n12);
+I(b,c) &lt;+ Ki*(n2 + n12);</code></pre>
+
+<!-- 4.7 -->
+<h2 id="s4.7">4.7 User-Defined Analog Functions</h2>
+<p>A user-defined function returns a value for an expression. All functions are defined within modules.</p>
+
+<!-- 4.7.1 -->
+<h3 id="s4.7.1">4.7.1 Defining an Analog User-Defined Function</h3>
+<pre class="syntax">analog_function_declaration ::=
+    analog function [ analog_function_type ] analog_function_identifier ;
+        analog_function_item_declaration { analog_function_item_declaration }
+        analog_function_statement
+    endfunction
+
+analog_function_type ::= integer | real
+
+analog_function_item_declaration ::=
+    analog_block_item_declaration
+  | input_declaration ;
+  | output_declaration ;
+  | inout_declaration ;
+
+analog_block_item_declaration ::=
+    { attribute_instance } parameter_declaration ;
+  | { attribute_instance } integer_declaration
+  | { attribute_instance } real_declaration</pre>
+
+<p>An analog user-defined function declaration begins with <code>analog function</code>, optionally followed by the return type (<code>real</code> or <code>integer</code>; default is <code>real</code>), then the function name and a semicolon, ending with <code>endfunction</code>.</p>
+
+<p>Restrictions on analog user-defined functions:</p>
+<ul>
+<li>Can use any statements available for conditional execution.</li>
+<li>Shall not use access functions.</li>
+<li>Shall not use analog filter functions (analog operators).</li>
+<li>Shall not use contribution statements or event control statements.</li>
+<li>Shall have at least one formal argument declared.</li>
+<li>All formal arguments shall have a data type declaration and a direction specification (<code>input</code>, <code>output</code>, or <code>inout</code>).</li>
+<li>Shall not use named blocks.</li>
+<li>Shall only reference locally-defined variables, variables passed as arguments, locally-defined parameters, and module-level parameters. If a locally-defined parameter with the specified name does not exist, the module-level parameter is used.</li>
+</ul>
+
+<pre><code>// Example 1: Determine max value
+analog function real maxValue;
+    input n1, n2;
+    real n1, n2;
+    begin
+        maxValue = (n1 &gt; n2) ? n1 : n2;
+    end
+endfunction</code></pre>
+
+<pre><code>// Example 2: Area and perimeter of a rectangle (multiple outputs)
+analog function real geomcalc;
+    input l, w;
+    output area, perim;
+    real l, w, area, perim;
+    begin
+        area = l * w;
+        perim = 2 * ( l + w );
+    end
+endfunction</code></pre>
+
+<pre><code>// Example 3: Array inout argument
+analog function real arrayadd;
+    inout [0:1]a;
+    input [0:1]b;
+    real a[0:1], b[0:1];
+    integer i;
+    begin
+        for(i = 0; i &lt; 2; i = i + 1) begin
+            a[i] = a[i] + b[i];
+        end
+    end
+endfunction</code></pre>
+
+<!-- 4.7.2 -->
+<h3 id="s4.7.2">4.7.2 Returning a Value from an Analog User-Defined Function</h3>
+<p>There are three ways to return a value:</p>
+
+<h4 id="s4.7.2.1">4.7.2.1 Implicit Function Identifier Variable</h4>
+<p>The function declaration implicitly declares an internal variable with the same name as the function. This variable inherits the declared type, is initialized to zero, and can be used within the function body. The last value assigned to it is the return value. If never assigned, the function returns the initialized value of zero. A function shall always return a scalar numerical value.</p>
+<pre><code>maxValue = (n1 &gt; n2) ? n1 : n2;</code></pre>
+
+<h4 id="s4.7.2.2">4.7.2.2 Output Arguments</h4>
+<p>An output argument returns more than one value. The argument passed to an output must be an analog variable reference. If defined as an array, the passed argument must be an analog variable or an array assignment pattern of analog variables of equivalent size. All output arguments are initialized to zero (resetting the passed argument to zero). During execution, they can be read and assigned. At the end, the last value assigned is written back to the corresponding analog variable reference.</p>
+
+<h4 id="s4.7.2.3">4.7.2.3 Inout Arguments</h4>
+<p>Inout arguments pass a value into the function and return a (possibly different) value via the same argument. The argument must be an analog variable reference (or array assignment pattern for array arguments). Unlike output arguments, inout arguments are <em>not</em> initialized to zero. If not assigned during execution, the corresponding analog variable is left untouched.</p>
+<div class="note">Inout arguments are not "pass by reference" but more closely "copy in" and "copy out". Avoid passing the same analog variable reference to different inout and output arguments of the same function, as the results are undefined.</div>
+
+<!-- 4.7.3 -->
+<h3 id="s4.7.3">4.7.3 Calling an Analog User-Defined Function</h3>
+<pre class="syntax">analog_function_call ::=
+    analog_function_identifier { attribute_instance } ( analog_expression { , analog_expression } )</pre>
+
+<p>The order of evaluation of arguments is undefined. Argument expressions are assigned to the declared inputs, outputs, and inouts in the order of their declaration.</p>
+<p>Restrictions on calling:</p>
+<ul>
+<li>Shall not call itself directly or indirectly (recursive functions are not permitted).</li>
+<li>Shall only be called within the analog context (from an analog block or from within another analog user-defined function).</li>
+</ul>
+
+<pre><code>// Using maxValue
+V(out) &lt;+ maxValue(val1, val2);
+
+// Using geomcalc (first two args are input expressions, last two are output variables)
+dummy = geomcalc(l-dl, w-dw, ar, per);
+
+// ERROR: V(a) is a probe, not a variable reference -- cannot be used as output argument
+dummy = geomcalc(l-dl, w-dw, ar, V(a));
+
+// Using arrayadd with array assignment pattern
+x[0] = 5; x[1] = 10;
+y = 3; z = 6;
+dummy = arrayadd(x, '{y,z});
+// Result: x[0] = 8, x[1] = 16</code></pre>
+
+</body>
+</html>

@@ -1,0 +1,12 @@
+// Conformance: 9.12 — $simparam
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module conf_sys_simparam(p, n);
+    inout p, n;
+    electrical p, n;
+    real gmin;
+    analog begin
+        gmin = $simparam("gmin", 1e-12);
+        I(p, n) <+ V(p, n) * gmin;
+    end
+endmodule

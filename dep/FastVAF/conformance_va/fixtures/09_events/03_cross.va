@@ -1,0 +1,14 @@
+// Conformance: 5.10.3 — cross() monitored event
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module conf_ev_cross(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real vth = 0.5;
+    integer count;
+    analog begin
+        @(cross(V(p, n) - vth, +1))
+            count = count + 1;
+        I(p, n) <+ V(p, n) / 1.0k;
+    end
+endmodule

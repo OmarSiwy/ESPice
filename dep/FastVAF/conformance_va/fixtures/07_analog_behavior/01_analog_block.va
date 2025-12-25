@@ -1,0 +1,10 @@
+// Conformance: 5.2 — Analog block
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module conf_ab_block(p, n);
+    inout p, n;
+    electrical p, n;
+    analog begin
+        I(p, n) <+ V(p, n) / 1.0k;
+    end
+endmodule

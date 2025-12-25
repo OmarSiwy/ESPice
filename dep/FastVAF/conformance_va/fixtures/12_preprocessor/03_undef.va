@@ -1,0 +1,13 @@
+// Conformance: 11.1.2 — `undef
+// EXPECT: compile_ok
+`include "disciplines.vams"
+`define TEMP_VAL 300.15
+`undef TEMP_VAL
+`define TEMP_VAL 273.15
+
+module conf_pp_undef(p, n);
+    inout p, n;
+    electrical p, n;
+    analog
+        I(p, n) <+ V(p, n) / `TEMP_VAL;
+endmodule

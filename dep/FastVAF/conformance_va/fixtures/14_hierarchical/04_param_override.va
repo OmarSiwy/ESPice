@@ -1,0 +1,18 @@
+// Conformance: 6.3.2, 6.3.3 — Parameter override by order and name
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module resistor(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real r = 1.0k;
+    analog
+        I(p, n) <+ V(p, n) / r;
+endmodule
+
+module conf_hier_override(a, b, c);
+    inout a, b, c;
+    electrical a, b, c;
+    electrical mid;
+    resistor #(2.0k) r_order(a, mid);
+    resistor #(.r(3.0k)) r_name(mid, b);
+endmodule

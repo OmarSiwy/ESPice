@@ -1,0 +1,13 @@
+// Conformance: 4.3.4 — min/max built-in functions
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module conf_expr_minmax(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real vclip = 1.0;
+    analog begin
+        real v_clamped;
+        v_clamped = min(max(V(p, n), -vclip), vclip);
+        I(p, n) <+ v_clamped / 1.0k;
+    end
+endmodule

@@ -1,0 +1,14 @@
+// Conformance: 6.2 — Multiple modules in one file
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module conf_mod_first(p, n);
+    inout p, n;
+    electrical p, n;
+    analog I(p, n) <+ V(p, n);
+endmodule
+
+module conf_mod_second(a, b);
+    inout a, b;
+    electrical a, b;
+    analog I(a, b) <+ V(a, b) / 2.0;
+endmodule

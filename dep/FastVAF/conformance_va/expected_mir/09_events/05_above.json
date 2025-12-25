@@ -1,0 +1,13 @@
+{
+    "status": "compile_ok",
+    "openvaf_validated": false,
+    "openvaf_unsupported": true,
+    "openvaf_error": "unknown",
+    "module_name": "conf_ev_above",
+    "param_count": 1,
+    "contrib_count": 1,
+    "has_ddt": false,
+    "has_idt": false,
+    "has_ddx": false,
+    "has_noise": false
+}

@@ -1,0 +1,13 @@
+// Conformance: 9.17 — $limit
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module conf_sys_limit(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real IS = 1e-14;
+    real vd;
+    analog begin
+        vd = $limit(V(p, n), "pnjlim", $vt, IS);
+        I(p, n) <+ IS * (limexp(vd / $vt) - 1);
+    end
+endmodule

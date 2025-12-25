@@ -1,0 +1,7 @@
+{
+    "status": "compile_ok",
+    "module_name": "mux2",
+    "input_count": 17,
+    "output_count": 8,
+    "is_sequential": false
+}

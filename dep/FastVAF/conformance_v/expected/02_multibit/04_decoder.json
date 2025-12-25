@@ -1,0 +1,7 @@
+{
+    "status": "compile_ok",
+    "module_name": "decoder2to4",
+    "input_count": 2,
+    "output_count": 4,
+    "is_sequential": false
+}

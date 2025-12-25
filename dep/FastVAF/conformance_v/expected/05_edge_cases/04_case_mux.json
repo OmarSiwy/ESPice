@@ -1,0 +1,7 @@
+{
+    "status": "compile_ok",
+    "module_name": "case_mux",
+    "input_count": 6,
+    "output_count": 1,
+    "is_sequential": false
+}

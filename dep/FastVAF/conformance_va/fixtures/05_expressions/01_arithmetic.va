@@ -1,0 +1,20 @@
+// Conformance: 4.2.4 — Arithmetic operators
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module conf_expr_arith(p, n);
+    inout p, n;
+    electrical p, n;
+    real a, b, r;
+    integer ia, ib, ir;
+    analog begin
+        a = 10.0; b = 3.0;
+        r = a + b;
+        r = a - b;
+        r = a * b;
+        r = a / b;
+        r = a ** b;
+        ia = 10; ib = 3;
+        ir = ia % ib;
+        I(p, n) <+ r;
+    end
+endmodule

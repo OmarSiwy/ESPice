@@ -1,0 +1,13 @@
+// Conformance: 5.10.2 — initial_step event
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module conf_ev_init(p, n);
+    inout p, n;
+    electrical p, n;
+    real startup_val;
+    analog begin
+        @(initial_step)
+            startup_val = 1.0;
+        I(p, n) <+ startup_val * V(p, n);
+    end
+endmodule

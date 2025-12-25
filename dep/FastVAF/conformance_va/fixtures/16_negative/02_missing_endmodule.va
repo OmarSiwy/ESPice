@@ -1,0 +1,8 @@
+// Conformance: negative — Missing endmodule
+// EXPECT: parse_error
+`include "disciplines.vams"
+module conf_neg_endmod(p, n);
+    inout p, n;
+    electrical p, n;
+    analog
+        I(p, n) <+ V(p, n);

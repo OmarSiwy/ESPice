@@ -1,0 +1,18 @@
+// Conformance: 4.3.2 — Hyperbolic functions
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module conf_expr_hyper(p, n);
+    inout p, n;
+    electrical p, n;
+    real r;
+    analog begin
+        r = sinh(1.0);
+        r = cosh(1.0);
+        r = tanh(0.5);
+        r = asinh(1.0);
+        r = acosh(2.0);
+        r = atanh(0.5);
+        r = hypot(3.0, 4.0);
+        I(p, n) <+ r;
+    end
+endmodule

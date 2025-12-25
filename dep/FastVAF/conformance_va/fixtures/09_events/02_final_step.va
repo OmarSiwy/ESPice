@@ -1,0 +1,12 @@
+// Conformance: 5.10.2 — final_step event
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module conf_ev_final(p, n);
+    inout p, n;
+    electrical p, n;
+    analog begin
+        I(p, n) <+ V(p, n);
+        @(final_step)
+            $display("simulation complete");
+    end
+endmodule

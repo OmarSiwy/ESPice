@@ -1,0 +1,11 @@
+// Conformance: 4.5.12 — Z-transform numerator-denominator
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module conf_op_zi(out, in);
+    input in;
+    output out;
+    electrical out, in;
+    parameter real T = 1.0e-9;
+    analog
+        V(out) <+ zi_nd(V(in), '{1.0}, '{1.0, -0.5}, T);
+endmodule

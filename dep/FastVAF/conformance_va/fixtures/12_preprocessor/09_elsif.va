@@ -1,0 +1,18 @@
+// Conformance: 11.2 — `elsif selects first true branch
+// EXPECT: compile_ok
+`include "disciplines.vams"
+`define USE_ALT
+
+module conf_pp_elsif(p, n);
+    inout p, n;
+    electrical p, n;
+    analog begin
+`ifdef USE_MAIN
+        I(p, n) <+ V(p, n) / 1.0k;
+`elsif USE_ALT
+        I(p, n) <+ V(p, n) / 2.0k;
+`else
+        I(p, n) <+ 0;
+`endif
+    end
+endmodule

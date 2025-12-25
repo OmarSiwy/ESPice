@@ -1,0 +1,17 @@
+// Conformance: 3.5 — Genvars
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module conf_dt_genvar(p, n);
+    inout p, n;
+    electrical p, n;
+    genvar i;
+    parameter integer N = 4;
+    real sum;
+    analog begin
+        sum = 0;
+        for (i = 0; i < N; i = i + 1) begin
+            sum = sum + i;
+        end
+        I(p, n) <+ sum;
+    end
+endmodule

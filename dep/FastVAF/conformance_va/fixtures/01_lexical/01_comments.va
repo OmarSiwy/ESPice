@@ -1,0 +1,16 @@
+// Conformance: 2.4 — Comments
+// EXPECT: compile_ok
+`include "disciplines.vams"
+// Line comment test
+/* Block comment test */
+/* Multi
+   line
+   block */
+module conf_lex_comments(p, n);
+    inout p, n;
+    electrical p, n;
+    // comment at end of declaration
+    parameter real R /* inline comment */ = 1.0;
+    analog
+        I(p, n) <+ V(p, n) / R; // trailing comment
+endmodule

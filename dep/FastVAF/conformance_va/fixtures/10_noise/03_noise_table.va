@@ -1,0 +1,12 @@
+// Conformance: 4.6.4 — noise_table
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module conf_noise_table(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real ndata[0:5] = '{1.0, 1e-20, 10.0, 1e-21, 100.0, 1e-22};
+    analog begin
+        I(p, n) <+ V(p, n) / 1.0k;
+        I(p, n) <+ noise_table(ndata, "table_noise");
+    end
+endmodule

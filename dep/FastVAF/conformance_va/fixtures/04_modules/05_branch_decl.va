@@ -1,0 +1,13 @@
+// Conformance: 3.12 — Branch declarations
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module conf_mod_branch(p, n);
+    inout p, n;
+    electrical p, n;
+    branch (p, n) res_br;
+    branch (p) to_gnd;
+    parameter real R = 1.0k;
+    analog begin
+        V(res_br) <+ R * I(res_br);
+    end
+endmodule

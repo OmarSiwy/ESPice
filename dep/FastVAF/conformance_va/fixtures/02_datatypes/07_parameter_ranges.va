@@ -1,0 +1,17 @@
+// Conformance: 3.4.2 — Parameter ranges
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module conf_dt_ranges(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real r1 = 1.0 from [0:inf);
+    parameter real r2 = 0.5 from (0:1];
+    parameter real r3 = 0.0 from [-1:1];
+    parameter real r4 = 5.0 from (-inf:inf);
+    parameter real r5 = 10.0 from [1:100] exclude 50;
+    parameter real r6 = 0.0 from [0:inf) exclude (10:20) exclude (30:40];
+    parameter integer n1 = 5 from [1:10];
+    parameter integer n2 = 0 from [-100:100] exclude 0;
+    analog
+        I(p, n) <+ V(p, n) / r1;
+endmodule

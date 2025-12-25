@@ -1,0 +1,33 @@
+// Conformance: 3.6.1.2 — Nature attributes
+// EXPECT: compile_ok
+nature Charge;
+    units = "coul";
+    access = Q;
+    abstol = 1e-14;
+endnature
+
+nature Voltage;
+    units = "V";
+    access = V;
+    abstol = 1u;
+    idt_nature = Charge;
+endnature
+
+nature Current;
+    units = "A";
+    access = I;
+    abstol = 1p;
+    ddt_nature = Charge;
+endnature
+
+discipline electrical;
+    potential Voltage;
+    flow Current;
+enddiscipline
+
+module conf_nat_attrs(p, n);
+    inout p, n;
+    electrical p, n;
+    analog
+        I(p, n) <+ V(p, n);
+endmodule

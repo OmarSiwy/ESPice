@@ -1,0 +1,14 @@
+// Conformance: 4.5.6 — Partial derivative ddx
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module conf_op_ddx(a, c);
+    inout a, c;
+    electrical a, c;
+    parameter real IS = 1.0e-14;
+    real idio, gdio;
+    analog begin
+        idio = IS * (limexp(V(a, c) / $vt) - 1);
+        gdio = ddx(idio, V(a));
+        I(a, c) <+ idio;
+    end
+endmodule
