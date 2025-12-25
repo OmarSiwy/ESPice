@@ -1,0 +1,214 @@
+//! Uniform GPU facade over the dlopen'd CUDA and HIP driver APIs.
+//!
+//! `Compute.init(null)` probes cuda -> hip -> cpu; `.cpu` means "no GPU" and
+//! every device operation on it is either a no-op (deinit/synchronize) or an
+//! error/unreachable — callers are expected to branch on `backend` once and
+//! keep GPU and CPU paths separate.
+//!
+//! No Vulkan backend by decision: SPICE workloads want the driver APIs
+//! (module load from memory, streams, graph capture), not a graphics API.
+
+const std = @import("std");
+const cuda = @import("backend_cuda.zig");
+const hip = @import("backend_hip.zig");
+const iface = @import("interface.zig");
+
+pub const Backend = enum { cpu, cuda, hip };
+pub const Dim3 = iface.Dim3;
+pub const Arg = iface.Arg;
+pub const Error = iface.Error;
+
+pub const Compute = struct {
+    backend: Backend,
+    cuda_ctx: cuda.Context = .{},
+    hip_ctx: hip.Context = .{},
+
+    pub fn init(preferred: ?Backend) Error!Compute {
+        if (preferred) |p| return initBackend(p);
+        if (initBackend(.cuda)) |c| return c else |_| {}
+        if (initBackend(.hip)) |c| return c else |_| {}
+        return .{ .backend = .cpu };
+    }
+
+    fn initBackend(b: Backend) Error!Compute {
+        return switch (b) {
+            .cuda => .{ .backend = .cuda, .cuda_ctx = try cuda.Context.init(0) },
+            .hip => .{ .backend = .hip, .hip_ctx = try hip.Context.init(0) },
+            .cpu => .{ .backend = .cpu },
+        };
+    }
+
+    pub fn deinit(self: *Compute) void {
+        switch (self.backend) {
+            .cuda => self.cuda_ctx.deinit(),
+            .hip => self.hip_ctx.deinit(),
+            .cpu => {},
+        }
+    }
+
+    pub fn synchronize(self: *Compute) Error!void {
+        switch (self.backend) {
+            .cuda => try self.cuda_ctx.synchronize(),
+            .hip => try self.hip_ctx.synchronize(),
+            .cpu => {},
+        }
+    }
+
+    pub fn alloc(self: *Compute, bytes: usize) Error!Buffer {
+        return switch (self.backend) {
+            .cuda => .{ .cuda = try self.cuda_ctx.alloc(bytes) },
+            .hip => .{ .hip = try self.hip_ctx.alloc(bytes) },
+            .cpu => error.AllocFailed,
+        };
+    }
+
+    /// `image` must be the backend's native module format: NUL-terminated PTX
+    /// text for CUDA, an AMDGCN code object (.hsaco) for HIP.
+    pub fn loadModule(self: *Compute, image: []const u8) Error!Module {
+        return switch (self.backend) {
+            .cuda => .{ .cuda = try self.cuda_ctx.loadModuleFromMemory(image) },
+            .hip => .{ .hip = try self.hip_ctx.loadModuleFromMemory(image) },
+            .cpu => error.ModuleLoadFailed,
+        };
+    }
+
+    pub fn createStream(self: *Compute) Error!Stream {
+        return switch (self.backend) {
+            .cuda => .{ .cuda = try self.cuda_ctx.createStream() },
+            // ponytail: HIP streams not ported yet — add when an AMD box exists to test on.
+            .hip => error.InitFailed,
+            .cpu => error.InitFailed,
+        };
+    }
+};
+
+pub const Buffer = union(Backend) {
+    cpu: void,
+    cuda: cuda.Buffer,
+    hip: hip.Buffer,
+
+    pub fn upload(self: *Buffer, host: *const anyopaque, n: usize) Error!void {
+        switch (self.*) {
+            .cuda => |*b| try b.upload(host, n),
+            .hip => |*b| try b.upload(host, n),
+            .cpu => unreachable,
+        }
+    }
+
+    pub fn download(self: *Buffer, host: *anyopaque, n: usize) Error!void {
+        switch (self.*) {
+            .cuda => |*b| try b.download(host, n),
+            .hip => |*b| try b.download(host, n),
+            .cpu => unreachable,
+        }
+    }
+
+    pub fn free(self: *Buffer) void {
+        switch (self.*) {
+            .cuda => |*b| b.free(),
+            .hip => |*b| b.free(),
+            .cpu => {},
+        }
+    }
+
+    pub fn argPtr(self: *Buffer) Arg {
+        return switch (self.*) {
+            .cuda => |*b| b.argPtr(),
+            .hip => |*b| b.argPtr(),
+            .cpu => unreachable,
+        };
+    }
+
+    pub fn copyFrom(self: *Buffer, src: *const Buffer, src_offset: usize, dst_offset: usize, n: usize) Error!void {
+        switch (self.*) {
+            .cuda => |*b| try b.copyFrom(&src.cuda, src_offset, dst_offset, n),
+            .hip => |*b| try b.copyFrom(&src.hip, src_offset, dst_offset, n),
+            .cpu => unreachable,
+        }
+    }
+};
+
+pub const Module = union(Backend) {
+    cpu: void,
+    cuda: cuda.Module,
+    hip: hip.Module,
+
+    pub fn getKernel(self: *Module, name: [*:0]const u8) Error!Kernel {
+        return switch (self.*) {
+            .cuda => |*m| .{ .cuda = try m.getKernel(name) },
+            .hip => |*m| .{ .hip = try m.getKernel(name) },
+            .cpu => unreachable,
+        };
+    }
+
+    pub fn deinit(self: *Module) void {
+        switch (self.*) {
+            .cuda => |*m| m.deinit(),
+            .hip => |*m| m.deinit(),
+            .cpu => {},
+        }
+    }
+};
+
+pub const Kernel = union(Backend) {
+    cpu: void,
+    cuda: cuda.Kernel,
+    hip: hip.Kernel,
+
+    pub fn launch(self: Kernel, grid: Dim3, block: Dim3, shared_bytes: u32, args: []const Arg) Error!void {
+        switch (self) {
+            .cuda => |k| try k.launch(grid, block, shared_bytes, args),
+            .hip => |k| try k.launch(grid, block, shared_bytes, args),
+            .cpu => unreachable,
+        }
+    }
+
+    pub fn launchOnStream(self: Kernel, grid: Dim3, block: Dim3, shared_bytes: u32, args: []const Arg, stream: *Stream) Error!void {
+        switch (self) {
+            .cuda => |k| try k.launchOnStream(grid, block, shared_bytes, args, stream.cuda.stream),
+            .hip => unreachable, // no HIP stream support yet
+            .cpu => unreachable,
+        }
+    }
+};
+
+pub const Stream = union(Backend) {
+    cpu: void,
+    cuda: cuda.Stream,
+    hip: void,
+
+    pub fn synchronize(self: *Stream) Error!void {
+        switch (self.*) {
+            .cuda => |*s| try s.synchronize(),
+            .hip => unreachable,
+            .cpu => unreachable,
+        }
+    }
+
+    pub fn deinit(self: *Stream) void {
+        switch (self.*) {
+            .cuda => |*s| s.deinit(),
+            .hip => {},
+            .cpu => {},
+        }
+    }
+};
+
+/// CUDA-only for now: record N launches once, replay as one submission.
+pub const Graph = cuda.Graph;
+
+pub fn beginCapture(stream: *Stream) Error!void {
+    switch (stream.*) {
+        .cuda => |*s| try cuda.beginCapture(s),
+        .hip => unreachable,
+        .cpu => unreachable,
+    }
+}
+
+pub fn endCapture(stream: *Stream) Error!Graph {
+    return switch (stream.*) {
+        .cuda => |*s| try cuda.endCapture(s),
+        .hip => unreachable,
+        .cpu => unreachable,
+    };
+}
