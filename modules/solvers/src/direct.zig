@@ -28,6 +28,7 @@
 const std = @import("std");
 const order_mod = @import("order.zig");
 const root = @import("root.zig");
+const bbd_mod = @import("bbd.zig");
 
 const Allocator = std.mem.Allocator;
 const NONE: u32 = std.math.maxInt(u32);
@@ -43,14 +44,17 @@ pub fn SolverT(comptime T: type) type {
         row_idx: []const u32,
         lu: ?Lu(T),
         tri: ?TriDiag(T),
+        bbd_eng: ?bbd_mod.Bbd(T) = null,
         gpa: std.mem.Allocator,
         factored: bool = false,
         bbd: ?root.BbdInfo = null,
 
         pub fn init(gpa: std.mem.Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32, bbd: ?root.BbdInfo) !Self {
-            // ponytail: BBD metadata stored for future block-LU exploitation.
-            // Currently falls through to flat solver; block factorization upgrade
-            // path: factor each unique block type once, Schur complement coupling.
+            // Dispatch precedence: tridiag > BBD > flat. The BBD engine
+            // (bbd.zig) re-factors every block dense per Newton iteration —
+            // blocks share STRUCTURE, not values (W/L vary per instance),
+            // so there is no factor-once-per-block-type shortcut.
+            // ZPICEY_NO_BBD=1 forces the flat path (A/B correctness switch).
             if (isTridiag(n, col_ptr, row_idx)) {
                 return .{
                     .n = n,
@@ -58,6 +62,27 @@ pub fn SolverT(comptime T: type) type {
                     .row_idx = row_idx,
                     .lu = null,
                     .tri = try TriDiag(T).init(gpa, n, col_ptr, row_idx),
+                    .gpa = gpa,
+                    .bbd = bbd,
+                };
+            }
+            if (bbd) |info| no_bbd: {
+                if (comptime @import("builtin").link_libc) {
+                    if (std.c.getenv("ZPICEY_NO_BBD") != null) break :no_bbd;
+                }
+                const eng = bbd_mod.Bbd(T).init(gpa, n, col_ptr, row_idx, info, .{}) catch |err| switch (err) {
+                    error.NotApplicable => break :no_bbd,
+                    error.OutOfMemory => return error.OutOfMemory,
+                };
+                // Flat Lu intentionally NOT allocated: on a factor-time
+                // singularity the facade constructs it lazily and stays flat.
+                return .{
+                    .n = n,
+                    .col_ptr = col_ptr,
+                    .row_idx = row_idx,
+                    .lu = null,
+                    .tri = null,
+                    .bbd_eng = eng,
                     .gpa = gpa,
                     .bbd = bbd,
                 };
@@ -76,6 +101,7 @@ pub fn SolverT(comptime T: type) type {
         pub fn deinit(self: *Self) void {
             if (self.lu) |*lu| lu.deinit(self.gpa);
             if (self.tri) |*tri| tri.deinit(self.gpa);
+            if (self.bbd_eng) |*eng| eng.deinit();
             self.* = undefined;
         }
 
@@ -85,6 +111,22 @@ pub fn SolverT(comptime T: type) type {
                 self.factored = true;
                 return;
             }
+            if (self.bbd_eng) |*eng| {
+                if (eng.factor(vals)) |_| {
+                    self.factored = true;
+                    return;
+                } else |_| {
+                    // Singular block or border in the BBD path: fall back to
+                    // the flat solver PERMANENTLY (mirrors the refactor →
+                    // full-factor philosophy below). Lu is constructed lazily
+                    // here — it was never allocated while BBD was active.
+                    eng.deinit();
+                    self.bbd_eng = null;
+                    self.factored = false;
+                }
+            }
+            if (self.lu == null)
+                self.lu = try Lu(T).init(self.gpa, self.n, self.col_ptr, self.row_idx);
             var lu = &self.lu.?;
             if (self.factored) {
                 lu.refactor(self.col_ptr, vals) catch {
@@ -108,6 +150,10 @@ pub fn SolverT(comptime T: type) type {
                 return;
             }
             negateSimd(T, rhs[0..self.n], x[0..self.n]);
+            if (self.bbd_eng) |*eng| {
+                eng.solveInPlace(x[0..self.n]);
+                return;
+            }
             self.lu.?.solve(x[0..self.n], x[0..self.n]);
         }
 
@@ -118,6 +164,10 @@ pub fn SolverT(comptime T: type) type {
                 return;
             }
             if (rhs.ptr != x.ptr) @memcpy(x[0..self.n], rhs[0..self.n]);
+            if (self.bbd_eng) |*eng| {
+                eng.solveInPlace(x[0..self.n]);
+                return;
+            }
             self.lu.?.solve(x[0..self.n], x[0..self.n]);
         }
 
@@ -128,6 +178,10 @@ pub fn SolverT(comptime T: type) type {
                 return;
             }
             if (rhs.ptr != x.ptr) @memcpy(x[0..self.n], rhs[0..self.n]);
+            if (self.bbd_eng) |*eng| {
+                eng.solveTInPlace(x[0..self.n]);
+                return;
+            }
             self.lu.?.solveT(x[0..self.n], x[0..self.n]);
         }
     };

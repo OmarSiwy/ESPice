@@ -70,7 +70,7 @@ pub fn DenseLu(comptime T: type) type {
         }
 
         pub fn solveFactored(n: usize, lu: []const T, piv: []const u32, b: []const T, x: []T) void {
-            @memcpy(x[0..n], b[0..n]);
+            if (x.ptr != b.ptr) @memcpy(x[0..n], b[0..n]);
 
             // factorize() swaps FULL rows (LAPACK convention): earlier-column
             // multipliers are permuted by later swaps, so ALL swaps must be applied
@@ -84,6 +84,36 @@ pub fn DenseLu(comptime T: type) type {
             }
 
             backSubstitute(n, lu, x);
+        }
+
+        /// x = A^-T b given PA = LU from factorize(). A = P^T L U, so
+        /// A^T = U^T L^T P: forward-sub U^T (lower triangular), back-sub
+        /// unit L^T, then x = P^-1 w — apply the pivot swaps in REVERSE.
+        /// `b` and `x` may alias.
+        pub fn solveFactoredT(n: usize, lu: []const T, piv: []const u32, b: []const T, x: []T) void {
+            if (x.ptr != b.ptr) @memcpy(x[0..n], b[0..n]);
+
+            // U^T z = b: U^T[i][j] = lu[j*n+i] for j <= i.
+            for (0..n) |i| {
+                var sum = x[i];
+                for (0..i) |j| sum -= lu[j * n + i] * x[j];
+                x[i] = sum / lu[i * n + i];
+            }
+            // L^T w = z: unit diagonal, L^T[i][j] = lu[j*n+i] for j > i.
+            var i = n;
+            while (i > 0) {
+                i -= 1;
+                var sum = x[i];
+                for (i + 1..n) |j| sum -= lu[j * n + i] * x[j];
+                x[i] = sum;
+            }
+            // x = P^-1 w: factorize() applied swaps k = 0..n-1 in order, so
+            // the inverse applies them in reverse.
+            var k = n;
+            while (k > 0) {
+                k -= 1;
+                if (piv[k] != k) std.mem.swap(T, &x[k], &x[piv[k]]);
+            }
         }
 
         /// argmax |a[i*n+k]| over i in k..n (partial-pivot row for column k).
@@ -198,6 +228,7 @@ pub const factorizeSolve = F64.factorizeSolve;
 pub const factorizeSolveNeg = F64.factorizeSolveNeg;
 pub const factorize = F64.factorize;
 pub const solveFactored = F64.solveFactored;
+pub const solveFactoredT = F64.solveFactoredT;
 pub const buildComplexAdmittance = F64.buildComplexAdmittance;
 
 // ============================================================================
@@ -255,6 +286,47 @@ test "dense_lu: singular matrix returns error" {
     var a2 = [_]f64{ 1, 2, 2, 4 };
     var piv: [2]u32 = undefined;
     try testing.expectError(error.Singular, factorize(2, &a2, &piv));
+}
+
+test "dense_lu: solveFactoredT solves A^T x = b (with pivoting, aliased)" {
+    // Asymmetric matrix with a zero leading diagonal to force row swaps.
+    const orig = [_]f64{
+        0, 2, 1,
+        3, 1, 0,
+        1, 0, 4,
+    };
+    var lu = orig;
+    var piv: [3]u32 = undefined;
+    try factorize(3, &lu, &piv);
+
+    var x = [_]f64{ 5, 7, 10 }; // aliased b/x
+    solveFactoredT(3, &lu, &piv, &x, &x);
+
+    // check A^T x = b
+    const b = [_]f64{ 5, 7, 10 };
+    for (0..3) |row| {
+        var sum: f64 = 0;
+        for (0..3) |col| sum += orig[col * 3 + row] * x[col];
+        try testing.expectApproxEqAbs(b[row], sum, 1e-10);
+    }
+}
+
+test "dense_lu: solveFactored aliased b/x matches non-aliased" {
+    const orig = [_]f64{
+        0, 2, 1,
+        3, 1, 0,
+        1, 0, 4,
+    };
+    var lu = orig;
+    var piv: [3]u32 = undefined;
+    try factorize(3, &lu, &piv);
+
+    const b = [_]f64{ 5, 7, 10 };
+    var x1: [3]f64 = undefined;
+    solveFactored(3, &lu, &piv, &b, &x1);
+    var x2 = b;
+    solveFactored(3, &lu, &piv, &x2, &x2);
+    for (x1, x2) |a, c| try testing.expectEqual(a, c);
 }
 
 test "dense_lu: buildComplexAdmittance" {
