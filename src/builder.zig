@@ -170,14 +170,25 @@ pub const Builder = struct {
         return id;
     }
 
+    /// Reserve hash-map/label capacity ahead of a known device count to
+    /// avoid incremental rehashing during netlist construction.
+    pub fn reserveNodes(self: *Builder, expected: u32) !void {
+        try self.node_names.ensureTotalCapacity(self.gpa, expected);
+        try self.node_labels.ensureTotalCapacity(self.gpa, expected + 1);
+    }
+
     pub fn internNode(self: *Builder, name: []const u8) !u32 {
         if (isGroundName(name)) return GROUND;
-        if (self.node_names.get(name)) |id| return id;
-        const owned = try self.gpa.dupe(u8, name);
-        errdefer self.gpa.free(owned);
+        const gop = try self.node_names.getOrPut(self.gpa, name);
+        if (gop.found_existing) return gop.value_ptr.*;
+        const owned = self.gpa.dupe(u8, name) catch |err| {
+            self.node_names.removeByPtr(gop.key_ptr);
+            return err;
+        };
+        gop.key_ptr.* = owned;
         const id = self.addNode();
         self.node_labels.items[id] = owned;
-        try self.node_names.put(self.gpa, owned, id);
+        gop.value_ptr.* = id;
         return id;
     }
 
