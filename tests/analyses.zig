@@ -2446,3 +2446,99 @@ test "PAC: full circuit integration — resistive divider (flat, no mixing)" {
     try testing.expect(up.mag() < direct_mag * 0.01);
     try testing.expect(down.mag() < direct_mag * 0.01);
 }
+
+// ============================================================================
+// converger: JFNK vs Newton
+// ============================================================================
+
+const converger = @import("analysis").converger;
+
+test "jfnk vs newton: divider OP agrees to 1e-9" {
+    var b = Builder.init(testing.allocator);
+    const vin = b.addNode();
+    const vout = b.addNode();
+    try b.addDevice(td.V, .{ .dc = 10 }, .{}, .{ vin, GROUND });
+    try b.addDevice(td.R, .{ .r = 1000 }, .{}, .{ vin, vout });
+    try b.addDevice(td.R, .{ .r = 3000 }, .{}, .{ vout, GROUND });
+    var ckt = try b.compile();
+    defer ckt.deinit();
+
+    try ckt.computeBaseline();
+
+    // Newton (direct)
+    var ws_n = try converger.Workspace.init(testing.allocator, &ckt);
+    defer ws_n.deinit(testing.allocator);
+    const x_n = try testing.allocator.alloc(f64, ckt.n);
+    defer testing.allocator.free(x_n);
+    @memset(x_n, 0);
+    const nr = try converger.newton(&ckt, &ws_n.slv, x_n, ws_n.dx, ws_n.x_old, 0, .{}, converger.EvalHook{});
+    try testing.expect(nr.converged);
+
+    // JFNK
+    var ws_j = try converger.Workspace.init(testing.allocator, &ckt);
+    defer ws_j.deinit(testing.allocator);
+    const x_j = try testing.allocator.alloc(f64, ckt.n);
+    defer testing.allocator.free(x_j);
+    const dx_j = try testing.allocator.alloc(f64, ckt.n);
+    defer testing.allocator.free(dx_j);
+    const x_old_j = try testing.allocator.alloc(f64, ckt.n);
+    defer testing.allocator.free(x_old_j);
+    @memset(x_j, 0);
+    const jr = try converger.jfnk(&ckt, &ws_j.slv, x_j, dx_j, x_old_j, 0, .{}, converger.EvalHook{}, testing.allocator);
+    try testing.expect(jr.converged);
+
+    // Compare solutions
+    for (0..ckt.n) |i| {
+        try testing.expectApproxEqAbs(x_n[i], x_j[i], 1e-9);
+    }
+}
+
+test "jfnk: 100-diode ladder converges" {
+    const n_diodes: usize = 100;
+    var b = Builder.init(testing.allocator);
+    const vin = b.addNode();
+    try b.addDevice(td.V, .{ .dc = 5 }, .{}, .{ vin, GROUND });
+
+    // Chain: R—D—R—D—...—GND
+    var prev: u32 = vin;
+    for (0..n_diodes) |_| {
+        const mid = b.addNode();
+        try b.addDevice(td.R, .{ .r = 100 }, .{}, .{ prev, mid });
+        try b.addDevice(td.D, .{ .is = 1e-14 }, .{}, .{ mid, GROUND });
+        prev = mid;
+    }
+    // Final resistor to ground
+    try b.addDevice(td.R, .{ .r = 100 }, .{}, .{ prev, GROUND });
+
+    var ckt = try b.compile();
+    defer ckt.deinit();
+    try ckt.computeBaseline();
+
+    var ws = try converger.Workspace.init(testing.allocator, &ckt);
+    defer ws.deinit(testing.allocator);
+    const x = try testing.allocator.alloc(f64, ckt.n);
+    defer testing.allocator.free(x);
+    const dx = try testing.allocator.alloc(f64, ckt.n);
+    defer testing.allocator.free(dx);
+    const x_old = try testing.allocator.alloc(f64, ckt.n);
+    defer testing.allocator.free(x_old);
+    @memset(x, 0);
+
+    const r = try converger.jfnk(&ckt, &ws.slv, x, dx, x_old, 0, .{
+        .max_iter = 200,
+        .abstol = 1e-9,
+    }, converger.EvalHook{}, testing.allocator);
+    try testing.expect(r.converged);
+
+    // Sanity: first node should be near 5V (source), diode nodes between 0 and 1V
+    try testing.expectApproxEqAbs(@as(f64, 5.0), x[vin], 1e-3);
+}
+
+test "strategy auto-pick: n<=5000 newton, n>5000 jfnk, gpu jfnk" {
+    try testing.expectEqual(converger.Strategy.newton, converger.pickStrategy(100, false));
+    try testing.expectEqual(converger.Strategy.newton, converger.pickStrategy(5000, false));
+    try testing.expectEqual(converger.Strategy.jfnk, converger.pickStrategy(5001, false));
+    try testing.expectEqual(converger.Strategy.jfnk, converger.pickStrategy(10000, false));
+    try testing.expectEqual(converger.Strategy.jfnk, converger.pickStrategy(1, true));
+    try testing.expectEqual(converger.Strategy.jfnk, converger.pickStrategy(100, true));
+}
