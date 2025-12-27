@@ -43,6 +43,9 @@ pub const Model = struct {
 
     // Multiplier mode
     reciprocm: i32 = 0, // When 1, divide by multiplier instead of multiply
+
+    // Output mode: 0 = voltage source (V={...}), 1 = current source (I={...})
+    imode: i32 = 0,
 };
 
 // ---------------------------------------------------------------------------
@@ -65,6 +68,7 @@ pub const Instance = struct {
 //   F_branch    depends on V(ctrl_p)       -> (branch, ctrl_p)
 //   F_branch    depends on V(ctrl_n)       -> (branch, ctrl_n)
 pub const g_pattern_override = [_]contract.Entry(n_u){
+    .{ .row = @intFromEnum(U.branch), .col = @intFromEnum(U.branch) }, // current mode: F_branch depends on I_branch
     .{ .row = @intFromEnum(U.p), .col = @intFromEnum(U.branch) },
     .{ .row = @intFromEnum(U.n), .col = @intFromEnum(U.branch) },
     .{ .row = @intFromEnum(U.branch), .col = @intFromEnum(U.p) },
@@ -128,8 +132,16 @@ pub fn eval(comptime S: type, x: [n_u]S, model: *const Model, instance: *const I
     // Polynomial expression: c0 + c1*Vctrl + c2*Vctrl^2
     const expr = v_ctrl.mul(v_ctrl).scale(c2).add(v_ctrl.scale(c1)).addC(c0);
 
-    // Source voltage: factor * expr
-    const v_source = expr.scale(factor);
+    // Scaled source value: factor * expr (a voltage or a current per imode)
+    const source = expr.scale(factor);
+
+    // Branch residual:
+    //   voltage mode (imode=0): F_branch = V(p) - V(n) - source  (KVL)
+    //   current mode (imode=1): F_branch = I_branch - source
+    const f_branch = if (model.imode != 0)
+        x[br].sub(source)
+    else
+        x[p].sub(x[n]).sub(source);
 
     // KCL / KVL residuals
     return .{
@@ -141,8 +153,7 @@ pub fn eval(comptime S: type, x: [n_u]S, model: *const Model, instance: *const I
         S.con(0.0),
         // F_ctrl_n = 0 (infinite input impedance)
         S.con(0.0),
-        // F_branch = V(p) - V(n) - V_source  (KVL residual)
-        x[p].sub(x[n]).sub(v_source),
+        f_branch,
     };
 }
 
@@ -175,6 +186,18 @@ test "bsource: polynomial residual, unity factor" {
     try testing.expectApproxEqAbs(@as(f64, 0.0), out[2], 1e-12);
     try testing.expectApproxEqAbs(@as(f64, 0.0), out[3], 1e-12);
     try testing.expectApproxEqAbs(@as(f64, -0.75), out[4], 1e-12);
+}
+
+test "bsource: current mode residual" {
+    // imode=1, c2=0.001, Vctrl = 2 - 0 = 2 -> I_source = 0.001*4 = 0.004
+    // x = { v_p=1, v_n=0, v_cp=2, v_cn=0, i_br=0.005 }
+    //   F_br = 0.005 - 0.004 = 0.001; F_p/F_n unchanged (+/- I_branch)
+    const model: Model = .{ .c2 = 0.001, .imode = 1 };
+    const inst: Instance = .{};
+    const out = contract.evalValues(Self, .{ 1.0, 0.0, 2.0, 0.0, 0.005 }, &model, &inst, 0);
+    try testing.expectApproxEqAbs(@as(f64, 0.005), out[0], 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, -0.005), out[1], 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 0.001), out[4], 1e-12);
 }
 
 test "bsource: temperature factor and reciprocal multiplier" {

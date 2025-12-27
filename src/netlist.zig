@@ -463,6 +463,8 @@ fn addBsource(b: *Builder, dev: types.Device, spice_models: []const types.Model)
     var ctrl_node_name: ?[]const u8 = null;
     for (dev.kv) |item| switch (item.value) {
         .expr => |expr| {
+            // Key selects output mode: i={...} = current source, v={...} = voltage source.
+            if (item.key.len > 0 and item.key[0] == 'i') model.imode = 1;
             ctrl_node_name = extractSingleVoltageProbe(expr);
             extractPolyCoeffs(expr, &model);
         },
