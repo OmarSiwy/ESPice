@@ -463,8 +463,8 @@ fn surfacePotential(
 
     // Householder correction -- Eq 3.4.21
     // Compute k0, k1 (pure f64 -- params only)
-    const k0 = gam0 * @exp((2.0 / 3.0) * @log(@max(cg_over_q, 1e-38)));
-    const k1 = gam1 * @exp((2.0 / 3.0) * @log(@max(cg_over_q, 1e-38)));
+    const k0 = gam0 * contract.fmath.exp((2.0 / 3.0) * contract.fmath.log(@max(cg_over_q, 1e-38)));
+    const k1 = gam1 * contract.fmath.exp((2.0 / 3.0) * contract.fmath.log(@max(cg_over_q, 1e-38)));
 
     const ef_unified = vf_unified;
     const vgef = vg0_eff.sub(ef_unified).maxC(1e-30);

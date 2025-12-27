@@ -356,7 +356,7 @@ pub fn generateDevice(allocator: std.mem.Allocator, spec: DeviceSpec) Error![]u8
     , .{ total_out, total_out });
 
     try w.writeAll(
-        \\pub fn initState(_: *const Model, _: *const Instance) State {
+        \\pub fn initState(model: *const Model, inst: *Instance) State {
         \\    var state = State{};
         \\
     );
@@ -366,6 +366,9 @@ pub fn generateDevice(allocator: std.mem.Allocator, spec: DeviceSpec) Error![]u8
         try w.writeAll("    state.outputs = evalBits(state.inputs);\n");
     }
     try w.writeAll(
+        \\    // Push the initial logic outputs into the analog drive targets so
+        \\    // eval sources current correctly before the first updateState.
+        \\    applyDrive(model, inst, state.outputs);
         \\    return state;
         \\}
         \\
@@ -468,13 +471,12 @@ pub fn generateDevice(allocator: std.mem.Allocator, spec: DeviceSpec) Error![]u8
         \\
     );
 
-    // ── Shared dyn ABI v3 + contract.validate footer ───────────────────────
-    try emit.emitDynAbi(w, .{
-        .has_state = true,
-        // Push the initial logic outputs into the analog drive targets so
-        // eval sources current correctly before the first update_state.
-        .state_init_extra = "    applyDrive(&m, &inst, s.outputs);\n",
-    });
+    try w.writeAll(
+        \\comptime {
+        \\    contract.validate(@This());
+        \\}
+        \\
+    );
 
     return try writer.toOwnedSlice();
 }

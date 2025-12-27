@@ -809,9 +809,9 @@ pub fn limit(model: *const Model, _: *const Instance, x_new: [n_u]f64, x_old: [n
         if (vbs_new > v_crit and @abs(vbs_new - vbs_old) > 2.0 * vt) {
             if (vbs_old > 0.0) {
                 const arg = 1.0 + (vbs_new - vbs_old) / vt;
-                vbs_limited = if (arg > 0.0) vbs_old + vt * @log(arg) else v_crit;
+                vbs_limited = if (arg > 0.0) vbs_old + vt * contract.fmath.log(arg) else v_crit;
             } else {
-                vbs_limited = vt * @log(vbs_new / vt);
+                vbs_limited = vt * contract.fmath.log(vbs_new / vt);
             }
         }
 
@@ -831,9 +831,9 @@ pub fn limit(model: *const Model, _: *const Instance, x_new: [n_u]f64, x_old: [n
         if (vbd_new > v_crit and @abs(vbd_new - vbd_old) > 2.0 * vt) {
             if (vbd_old > 0.0) {
                 const arg = 1.0 + (vbd_new - vbd_old) / vt;
-                vbd_limited = if (arg > 0.0) vbd_old + vt * @log(arg) else v_crit;
+                vbd_limited = if (arg > 0.0) vbd_old + vt * contract.fmath.log(arg) else v_crit;
             } else {
-                vbd_limited = vt * @log(vbd_new / vt);
+                vbd_limited = vt * contract.fmath.log(vbd_new / vt);
             }
         }
 

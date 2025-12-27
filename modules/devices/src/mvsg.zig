@@ -608,7 +608,7 @@ inline fn calc_iq(
 
     // Mobility and velocity: temperature dependent (temp part is f64)
     const temp_ratio = tamb / (tnom_k + 1.0e-30);
-    const mu_denom_temp = @exp(epsilon_v * @log(@max(temp_ratio, 1.0e-30)));
+    const mu_denom_temp = contract.fmath.exp(epsilon_v * contract.fmath.log(@max(temp_ratio, 1.0e-30)));
     // mu_f = mu0 / (mu_denom_temp * (1 + mtheta*qinv_v/cg))
     const mu_denom = qinv_v.scale(mtheta_v / (cg_v + 1.0e-30)).addC(1.0).scale(mu_denom_temp);
     const mu_f = S.con(mu0_v).div(mu_denom.addC(1.0e-30));
@@ -714,13 +714,13 @@ inline fn calc_ig_fwd(
     tfac_diode: f64,
 ) S {
     const scale = w_eff * ngf_v * ij_v * tfac_diode;
-    const base_exp = @exp(@min(-pg_param1_v * vjg_v / phi_t, 80.0)); // f64: no x
+    const base_exp = contract.fmath.exp(@min(-pg_param1_v * vjg_v / phi_t, 80.0)); // f64: no x
 
     // Gate breakdown term (x-dependent via vg_jn); kbd flag is f64 topology
     const igd_bd = if (kbd_v > 0.0) blk: {
         // kbd*(explim(-pbd*(vg+vbd) - pg1*vjg/phi) - explim(-pbd*vbd - pg1*vjg/phi))
         const a = explimS(S, vg_jn.addC(vbd_v).scale(-pbd_v).addC(-pg_param1_v * vjg_v / phi_t));
-        const b = @exp(@min(-pbd_v * vbd_v - pg_param1_v * vjg_v / phi_t, 80.0));
+        const b = contract.fmath.exp(@min(-pbd_v * vbd_v - pg_param1_v * vjg_v / phi_t, 80.0));
         break :blk a.addC(-b).scale(kbd_v);
     } else S.con(0.0);
 
@@ -735,9 +735,9 @@ inline fn calc_ig_fwd(
 
     // Evaluate both at vgsat for shift (vgsat is f64; but igd_bd carries x!)
     // i_nohinj_vgsat = scale*base_exp*(explim(pg*vgsat/phi)-1) - scale*igd_bd
-    const i_nohinj_vgsat = igd_bd.scale(-scale).addC(scale * base_exp * (@exp(@min(pg_param_v * vgsat_v / phi_t, 80.0)) - 1.0));
+    const i_nohinj_vgsat = igd_bd.scale(-scale).addC(scale * base_exp * (contract.fmath.exp(@min(pg_param_v * vgsat_v / phi_t, 80.0)) - 1.0));
     // i_hinj_un_vgsat = scale*(explim(frac_eff*pg*vgsat/phi) - base_exp - igd_bd)
-    const i_hinj_un_vgsat = igd_bd.neg().addC(@exp(@min(frac_eff * pg_param_v * vgsat_v / phi_t, 80.0)) - base_exp).scale(scale);
+    const i_hinj_un_vgsat = igd_bd.neg().addC(contract.fmath.exp(@min(frac_eff * pg_param_v * vgsat_v / phi_t, 80.0)) - base_exp).scale(scale);
     const shift_ratio = i_nohinj_vgsat.div(i_hinj_un_vgsat.addC(1.0e-38));
     const i_hinj = if (frac_v > 1.0e-30) i_hinj_un.mul(shift_ratio) else i_nohinj_vgsat;
 
@@ -1784,14 +1784,14 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     const v_sd_cbd = if (cbddbmod_val > 0.5) v_src.sub(v_drc) else v_si.sub(v_di);
     const v_sg_cbd = if (cbddbmod_val > 0.5) v_src.sub(v_gi2) else v_si.sub(v_gi2);
     // i = w*ngf*ijscbd*(explim(-pchbdgs*vchbdgs) - explim(-pchbdgs*(v_sd+v_sg-vchbdgs)))
-    const cbd_sd_term1 = @exp(@min(-pchbdgs * vchbdgs, 80.0));
+    const cbd_sd_term1 = contract.fmath.exp(@min(-pchbdgs * vchbdgs, 80.0));
     const cbd_sd_term2 = explimS(S, v_sd_cbd.add(v_sg_cbd).addC(-vchbdgs).scale(-pchbdgs));
     const i_cbd_sd_raw = cbd_sd_term2.neg().addC(cbd_sd_term1).scale(w * ngf * ijscbd);
 
     // Reverse channel breakdown (D->S direction)
     const v_ds_cbd = if (cbddbmod_val > 0.5) v_drc.sub(v_src) else v_di.sub(v_si);
     const v_dg_cbd = if (cbddbmod_val > 0.5) v_drc.sub(v_gi2) else v_di.sub(v_gi2);
-    const cbd_ds_term1 = @exp(@min(-pchbdgd * vchbdgd, 80.0));
+    const cbd_ds_term1 = contract.fmath.exp(@min(-pchbdgd * vchbdgd, 80.0));
     const cbd_ds_term2 = explimS(S, v_ds_cbd.add(v_dg_cbd).addC(-vchbdgd).scale(-pchbdgd));
     const i_cbd_ds_raw = cbd_ds_term2.neg().addC(cbd_ds_term1).scale(w * ngf * ijdcbd);
 
@@ -2340,7 +2340,7 @@ pub fn limit(model: *const Model, _: *const Instance, x_new: [n_u]f64, x_old: [n
 
     // --- DEVpnjlim for gate diodes (gi2p-si, gi2p-di) ---
     const ijs: f64 = @as(f64, model.ijs);
-    const v_crit = phi_t * @log(phi_t / (@sqrt(2.0) * @max(ijs, 1.0e-30)));
+    const v_crit = phi_t * contract.fmath.log(phi_t / (@sqrt(2.0) * @max(ijs, 1.0e-30)));
 
     // Gate-Source junction limiting (gi2p - si)
     const vgs_new = x_new[GI2P] - x_new[SI];
@@ -2380,7 +2380,7 @@ inline fn pnjlim(v_new: f64, v_old: f64, phi_t: f64, v_crit: f64) f64 {
     const small_step = v_abs < 2.0 * phi_t;
     const forward_big = v_new > v_crit;
     const arg = @min(1.0 + (v_new - v_old) / (phi_t + 1.0e-30), 80.0);
-    const v_log = v_old + phi_t * @log(@max(arg, 1.0e-30));
+    const v_log = v_old + phi_t * contract.fmath.log(@max(arg, 1.0e-30));
     const result = if (small_step) v_new else (if (forward_big) v_log else v_new);
     return result;
 }

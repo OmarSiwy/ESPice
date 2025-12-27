@@ -339,7 +339,7 @@ const g_short: f64 = 1.0e12;
 fn tempScaleVD(comptime S: type, VD_T0: f64, Vg: f64, mg: f64, VT: S, VT0: f64, r_T: S, ln_rT: S) S {
     // Auxiliary voltage at reference temperature (2-98) -- pure f64 (no x).
     const half_vd_vt0 = VD_T0 / (2.0 * VT0);
-    const VDj_T0 = 2.0 * VT0 * @log(@max(@exp(@min(half_vd_vt0, 80.0)) - @exp(@min(-half_vd_vt0, 80.0)), 1.0e-30));
+    const VDj_T0 = 2.0 * VT0 * contract.fmath.log(@max(contract.fmath.exp(@min(half_vd_vt0, 80.0)) - contract.fmath.exp(@min(-half_vd_vt0, 80.0)), 1.0e-30));
 
     // Classical built-in voltage at T (2-99): VDj_T0*r_T + Vg*(1-r_T) - mg*VT*ln_rT
     const VDj_T = r_T.scale(VDj_T0).add(r_T.neg().addC(1.0).scale(Vg)).sub(VT.mul(ln_rT).scale(mg));
@@ -660,7 +660,7 @@ pub fn eval(comptime S: type, x: [n_u]S, model: *const Model, instance: *const I
     // Temperature-Scaled Early Voltage (2-102, 2-103)
     // ========================================================================
     // dvgbe_pow is x-independent f64; VER_T uses VT (S).
-    const dvgbe_pow: f64 = if (@abs(DVGBE) < 1.0e-30) 0.0 else @exp(ZETAVGBE * @log(@abs(DVGBE)));
+    const dvgbe_pow: f64 = if (@abs(DVGBE) < 1.0e-30) 0.0 else contract.fmath.exp(ZETAVGBE * contract.fmath.log(@abs(DVGBE)));
     // VER_T = VER * exp(-dvgbe_pow/VT * one_m_rT)
     const VER_T = one_m_rT.scale(dvgbe_pow).div(VT).neg().exp().scale(VER);
     const AVER_T = ln_rT.scale(ZETAVER).exp().scale(AVER);
@@ -712,7 +712,7 @@ pub fn eval(comptime S: type, x: [n_u]S, model: *const Model, instance: *const I
     const v_jEi = Q_jE.div(CJE0_Tv);
 
     // Internal BC depletion capacitance (same as CjE but BC params)
-    const Vf_BCi = VDCI_T.scale(1.0 - @exp((-1.0 / ZCI) * @log(2.5))); // aje=2.5 equivalent for BC
+    const Vf_BCi = VDCI_T.scale(1.0 - contract.fmath.exp((-1.0 / ZCI) * contract.fmath.log(2.5))); // aje=2.5 equivalent for BC
     const x_bci = Vf_BCi.sub(v_bici).div(VT);
     const sqrt_x_bci = x_bci.mul(x_bci).addC(a_fj).sqrt();
     const vj_bci = Vf_BCi.sub(VT.mul(x_bci.add(sqrt_x_bci)).scale(0.5));
@@ -1156,7 +1156,7 @@ pub fn q(comptime S: type, x: [n_u]S, model: *const Model, instance: *const Inst
     const AJE_T = VDE_T.scale(AJE / VDE);
 
     // VEr temperature (2-102): dvgbe=0 => no temperature effect
-    const dvgbe_pow_q: f64 = if (@abs(DVGBE) < 1.0e-30) 0.0 else @exp(ZETAVGBE * @log(@abs(DVGBE)));
+    const dvgbe_pow_q: f64 = if (@abs(DVGBE) < 1.0e-30) 0.0 else contract.fmath.exp(ZETAVGBE * contract.fmath.log(@abs(DVGBE)));
     const VER_T = one_m_rT.scale(dvgbe_pow_q).div(VT).neg().exp().scale(VER);
     const AVER_T = ln_rT.scale(ZETAVER).exp().scale(AVER);
 
@@ -1190,7 +1190,7 @@ pub fn q(comptime S: type, x: [n_u]S, model: *const Model, instance: *const Inst
     // ========================================================================
     // Internal BC Depletion Charge
     // ========================================================================
-    const Vf_BCi = VDCI_T.scale(1.0 - @exp((-1.0 / ZCI) * @log(2.5)));
+    const Vf_BCi = VDCI_T.scale(1.0 - contract.fmath.exp((-1.0 / ZCI) * contract.fmath.log(2.5)));
     const x_bci = Vf_BCi.sub(v_bici).div(VT);
     const sqrt_x_bci = x_bci.mul(x_bci).addC(a_fj).sqrt();
     const vj_bci = Vf_BCi.sub(VT.mul(x_bci.add(sqrt_x_bci)).scale(0.5));
@@ -1202,7 +1202,7 @@ pub fn q(comptime S: type, x: [n_u]S, model: *const Model, instance: *const Inst
     // ========================================================================
     // External BC Depletion Charge (split portion C_jCx01, across rbx)
     // ========================================================================
-    const Vf_BCx = VDCX_T.scale(1.0 - @exp((-1.0 / ZCX) * @log(2.5)));
+    const Vf_BCx = VDCX_T.scale(1.0 - contract.fmath.exp((-1.0 / ZCX) * contract.fmath.log(2.5)));
     const x_bcx = Vf_BCx.sub(v_bxci).div(VT);
     const sqrt_x_bcx = x_bcx.mul(x_bcx).addC(a_fj).sqrt();
     const vj_bcx = Vf_BCx.sub(VT.mul(x_bcx.add(sqrt_x_bcx)).scale(0.5));
@@ -1213,7 +1213,7 @@ pub fn q(comptime S: type, x: [n_u]S, model: *const Model, instance: *const Inst
     // ========================================================================
     // CS Depletion Charge
     // ========================================================================
-    const Vf_CS = VDS_T.scale(1.0 - @exp((-1.0 / ZS) * @log(2.5)));
+    const Vf_CS = VDS_T.scale(1.0 - contract.fmath.exp((-1.0 / ZS) * contract.fmath.log(2.5)));
     const x_cs = Vf_CS.sub(v_sici).div(VT);
     const sqrt_x_cs = x_cs.mul(x_cs).addC(a_fj).sqrt();
     const vj_cs = Vf_CS.sub(VT.mul(x_cs.add(sqrt_x_cs)).scale(0.5));
@@ -1451,7 +1451,7 @@ pub fn attempt(model: Model, lambda: f64) Model {
 
 inline fn pnjlim(x_new: [n_u]f64, x_old: [n_u]f64, pos: usize, neg: usize, is_val: f64, n_em: f64, vtv: f64, type_f: f64) [n_u]f64 {
     const nvt = n_em * vtv;
-    const v_crit = nvt * @log(nvt / (@sqrt(2.0) * @max(is_val, 1.0e-30)));
+    const v_crit = nvt * contract.fmath.log(nvt / (@sqrt(2.0) * @max(is_val, 1.0e-30)));
 
     const vd_new = (x_new[pos] - x_new[neg]) * type_f;
     const vd_old = (x_old[pos] - x_old[neg]) * type_f;
@@ -1462,12 +1462,12 @@ inline fn pnjlim(x_new: [n_u]f64, x_old: [n_u]f64, pos: usize, neg: usize, is_va
         if (vd_old > 0.0) {
             const arg = (vd_new - vd_old) / nvt;
             if (arg > 0.0) {
-                vd_limited = vd_old + nvt * (2.0 + @log(@max(arg - 2.0, 1.0e-30)));
+                vd_limited = vd_old + nvt * (2.0 + contract.fmath.log(@max(arg - 2.0, 1.0e-30)));
             } else {
-                vd_limited = vd_old - nvt * (2.0 + @log(@max(2.0 - arg, 1.0e-30)));
+                vd_limited = vd_old - nvt * (2.0 + contract.fmath.log(@max(2.0 - arg, 1.0e-30)));
             }
         } else {
-            vd_limited = nvt * @log(@max(vd_new / nvt, 1.0e-30));
+            vd_limited = nvt * contract.fmath.log(@max(vd_new / nvt, 1.0e-30));
         }
     }
 

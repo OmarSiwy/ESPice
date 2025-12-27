@@ -822,7 +822,7 @@ pub const c_pattern_override = [_]contract.Entry(n_u){
 // Helper: cosh approximation (branchless, no std) — x-independent, f64.
 // ============================================================================
 inline fn cosh_approx(x: f64) f64 {
-    const ex = @exp(@min(@abs(x), 80.0));
+    const ex = contract.fmath.exp(@min(@abs(x), 80.0));
     return 0.5 * (ex + 1.0 / ex);
 }
 
@@ -842,8 +842,8 @@ inline fn junc_charge(comptime S: type, v: S, cj0: f64, pb: f64, mj: f64, fc: f6
     const q_rev = x_dep.log().scale(one_minus_mj).exp().neg().addC(1.0).scale(cj0 * pb / one_minus_mj);
     // Forward bias region: v > fc*pb (quadratic extension)
     const one_minus_fc = @max(1.0 - fc, 1e-30);
-    const f1 = (cj0 * pb / one_minus_mj) * (1.0 - @exp(one_minus_mj * @log(one_minus_fc)));
-    const f2 = @exp((1.0 + mj) * @log(one_minus_fc));
+    const f1 = (cj0 * pb / one_minus_mj) * (1.0 - contract.fmath.exp(one_minus_mj * contract.fmath.log(one_minus_fc)));
+    const f2 = contract.fmath.exp((1.0 + mj) * contract.fmath.log(one_minus_fc));
     const f3 = 1.0 - fc * (1.0 + mj);
     // q_fwd = f1 + (cj0/f2) * (f3*(v - fc_pb) + (mj/(2*pb))*(v*v - fc_pb*fc_pb))
     const term_lin = v.addC(-fc_pb).scale(f3);
@@ -1220,15 +1220,15 @@ fn prepEval(model: *const Model, instance: *const Instance, dt_sh: f64) EvalPrep
     const eg_tnom = bg0sub - tbgasub * tnom_k * tnom_k / (tnom_k + tbgbsub);
     const eg = bg0sub - tbgasub * t_eff * t_eff / (t_eff + tbgbsub);
 
-    const ni = ni0sub * @exp(0.5 * @log(@max(t_eff / 300.15, 1e-30)) * 3.0) *
-        @exp(@min(bg0sub * Q_ELEM / (2.0 * K_BOLTZ * 300.15) - eg * Q_ELEM / (2.0 * K_BOLTZ * t_eff), 80.0));
+    const ni = ni0sub * contract.fmath.exp(0.5 * contract.fmath.log(@max(t_eff / 300.15, 1e-30)) * 3.0) *
+        contract.fmath.exp(@min(bg0sub * Q_ELEM / (2.0 * K_BOLTZ * 300.15) - eg * Q_ELEM / (2.0 * K_BOLTZ * t_eff), 80.0));
 
-    const vbi = vt * @log(@max(nsd * nbody / (ni * ni), 1.0));
+    const vbi = vt * contract.fmath.log(@max(nsd * nbody / (ni * ni), 1.0));
     const psi_st = phibe;
 
     // Effective channel length
     const l_xl = l_drawn + xl_v;
-    const dl = lint + ll / @max(@exp(lln * @log(@max(l_xl, 1e-30))), 1e-30);
+    const dl = lint + ll / @max(contract.fmath.exp(lln * contract.fmath.log(@max(l_xl, 1e-30))), 1e-30);
     const l_eff = @max(l_xl - 2.0 * dl, 1e-9);
 
     // Effective width (GEOMOD-dependent)
@@ -1247,7 +1247,7 @@ fn prepEval(model: *const Model, instance: *const Instance, dt_sh: f64) EvalPrep
         else => hfin_i * tfin_i,
     };
     const c_ins: f64 = switch (model.geomod) {
-        3 => 2.0 * PI * eps_ox / @log(@max(1.0 + 2.0 * eot / @as(f64, instance.d_cyl), 1.001)),
+        3 => 2.0 * PI * eps_ox / contract.fmath.log(@max(1.0 + 2.0 * eot / @as(f64, instance.d_cyl), 1.001)),
         else => w_eff_ufcm * eps_ox / eot,
     };
 
@@ -1256,17 +1256,17 @@ fn prepEval(model: *const Model, instance: *const Instance, dt_sh: f64) EvalPrep
     const nf_total = nfin_f * nf_f;
 
     // Length scaling
-    const mu0_l: f64 = if (lpa > 0.0 and up_m != 0.0) mu0_base * (1.0 - up_m * @exp(-lpa * @log(@max(l_eff * 1e6, 1e-30)))) else mu0_base;
-    const mexp_l: f64 = if (bmexp != 0.0) mexp_m + amexp * @exp(-bmexp * @log(@max(l_eff, 1e-30))) else mexp_m;
-    const pclm_l: f64 = if (bpclm != 0.0) pclm + apclm * @exp(-l_eff / @max(bpclm, 1e-30)) else pclm;
-    const ua_l: f64 = if (bua != 0.0) ua_m + aua * @exp(-l_eff / @max(bua, 1e-30)) else ua_m;
-    const vsat_l: f64 = if (bvsat != 0.0) vsat_m + avsat * @exp(-l_eff / @max(bvsat, 1e-30)) else vsat_m;
-    const psat_l: f64 = if (bpsat != 0.0) psat_m + apsat * @exp(-l_eff / @max(bpsat, 1e-30)) else psat_m;
-    const rdsw_l: f64 = if (brdsw != 0.0) rdsw + ardsw * @exp(-l_eff / @max(brdsw, 1e-30)) else rdsw;
+    const mu0_l: f64 = if (lpa > 0.0 and up_m != 0.0) mu0_base * (1.0 - up_m * contract.fmath.exp(-lpa * contract.fmath.log(@max(l_eff * 1e6, 1e-30)))) else mu0_base;
+    const mexp_l: f64 = if (bmexp != 0.0) mexp_m + amexp * contract.fmath.exp(-bmexp * contract.fmath.log(@max(l_eff, 1e-30))) else mexp_m;
+    const pclm_l: f64 = if (bpclm != 0.0) pclm + apclm * contract.fmath.exp(-l_eff / @max(bpclm, 1e-30)) else pclm;
+    const ua_l: f64 = if (bua != 0.0) ua_m + aua * contract.fmath.exp(-l_eff / @max(bua, 1e-30)) else ua_m;
+    const vsat_l: f64 = if (bvsat != 0.0) vsat_m + avsat * contract.fmath.exp(-l_eff / @max(bvsat, 1e-30)) else vsat_m;
+    const psat_l: f64 = if (bpsat != 0.0) psat_m + apsat * contract.fmath.exp(-l_eff / @max(bpsat, 1e-30)) else psat_m;
+    const rdsw_l: f64 = if (brdsw != 0.0) rdsw + ardsw * contract.fmath.exp(-l_eff / @max(brdsw, 1e-30)) else rdsw;
 
     // Temperature-dependent parameters
     const dvth_temp = (kt1 + kt1l / l_eff) * (t_eff / tnom_k - 1.0);
-    const mu0_t: f64 = mu0_l * @exp(ute * @log(@max(t_eff / tnom_k, 1e-30))) + utl * dt_temp;
+    const mu0_t: f64 = mu0_l * contract.fmath.exp(ute * contract.fmath.log(@max(t_eff / tnom_k, 1e-30))) + utl * dt_temp;
     const ua_t = ua_l + ua1 * dt_temp;
     const uc_t = uc_m + uc1 * dt_temp;
     const ud_t = ud_m + ud1 * dt_temp;
@@ -1279,27 +1279,27 @@ fn prepEval(model: *const Model, instance: *const Instance, dt_sh: f64) EvalPrep
     const rdsw_t = rdsw_l * (1.0 + prt * dt_temp);
     const bgidl_t = bgidl * (1.0 + tgidl * dt_temp);
     const bgisl_t = bgisl * (1.0 + tgidl * dt_temp);
-    const ig_temp = @exp(igt * @log(@max(t_eff / tnom_k, 1e-30)));
+    const ig_temp = contract.fmath.exp(igt * contract.fmath.log(@max(t_eff / tnom_k, 1e-30)));
 
     const alpha0_t = alpha0 * (1.0 + @as(f64, model.alpha01) * dt_temp);
     const alpha1_t = alpha1 * (1.0 + @as(f64, model.alpha11) * dt_temp);
-    const ii_temp = @exp(iit * @log(@max(t_eff / tnom_k, 1e-30)));
+    const ii_temp = contract.fmath.exp(iit * contract.fmath.log(@max(t_eff / tnom_k, 1e-30)));
     const alphaii0_t = alphaii0 * (1.0 + @as(f64, model.alphaii01) * dt_temp);
     const alphaii1_t = alphaii1 * (1.0 + @as(f64, model.alphaii11) * dt_temp);
     const tii_m: f64 = @as(f64, model.tii);
-    const ii_temp2 = @exp(tii_m * @log(@max(t_eff / tnom_k, 1e-30)));
+    const ii_temp2 = contract.fmath.exp(tii_m * contract.fmath.log(@max(t_eff / tnom_k, 1e-30)));
 
-    const t3s = @exp(@min(Q_ELEM * eg_tnom / (K_BOLTZ * tnom_k) - Q_ELEM * eg / (K_BOLTZ * t_eff) +
-        @as(f64, model.xtis) * @log(@max(t_eff / tnom_k, 1e-30)), 80.0));
-    const t3d = @exp(@min(Q_ELEM * eg_tnom / (K_BOLTZ * tnom_k) - Q_ELEM * eg / (K_BOLTZ * t_eff) +
-        @as(f64, model.xtid) * @log(@max(t_eff / tnom_k, 1e-30)), 80.0));
+    const t3s = contract.fmath.exp(@min(Q_ELEM * eg_tnom / (K_BOLTZ * tnom_k) - Q_ELEM * eg / (K_BOLTZ * t_eff) +
+        @as(f64, model.xtis) * contract.fmath.log(@max(t_eff / tnom_k, 1e-30)), 80.0));
+    const t3d = contract.fmath.exp(@min(Q_ELEM * eg_tnom / (K_BOLTZ * tnom_k) - Q_ELEM * eg / (K_BOLTZ * t_eff) +
+        @as(f64, model.xtid) * contract.fmath.log(@max(t_eff / tnom_k, 1e-30)), 80.0));
 
-    const jss_t = jss * @exp(@min(njs_m * @log(@max(t3s, 1e-30)), 80.0));
-    const jsd_t = jsd * @exp(@min(njd_m * @log(@max(t3d, 1e-30)), 80.0));
-    const jsws_t = jsws * @exp(@min(njs_m * @log(@max(t3s, 1e-30)), 80.0));
-    const jswd_t = jswd * @exp(@min(njd_m * @log(@max(t3d, 1e-30)), 80.0));
-    const jswgs_t = jswgs * @exp(@min(njs_m * @log(@max(t3s, 1e-30)), 80.0));
-    const jswgd_t = jswgd * @exp(@min(njd_m * @log(@max(t3d, 1e-30)), 80.0));
+    const jss_t = jss * contract.fmath.exp(@min(njs_m * contract.fmath.log(@max(t3s, 1e-30)), 80.0));
+    const jsd_t = jsd * contract.fmath.exp(@min(njd_m * contract.fmath.log(@max(t3d, 1e-30)), 80.0));
+    const jsws_t = jsws * contract.fmath.exp(@min(njs_m * contract.fmath.log(@max(t3s, 1e-30)), 80.0));
+    const jswd_t = jswd * contract.fmath.exp(@min(njd_m * contract.fmath.log(@max(t3d, 1e-30)), 80.0));
+    const jswgs_t = jswgs * contract.fmath.exp(@min(njs_m * contract.fmath.log(@max(t3s, 1e-30)), 80.0));
+    const jswgd_t = jswgd * contract.fmath.exp(@min(njd_m * contract.fmath.log(@max(t3d, 1e-30)), 80.0));
 
     // Short channel effects (Vds-independent parts)
     const scl_arg = eps_sub * a_ch / c_ins;
@@ -1330,7 +1330,7 @@ fn prepEval(model: *const Model, instance: *const Instance, dt_sh: f64) EvalPrep
     const dvth_rsce = k1rsce * (@sqrt(@max(1.0 + lpe0 / l_eff, 0.0)) - 1.0) * psi_st;
     const dvth_all_base = dvth_sce + dvth_rsce + dvth_temp + delvtrand;
 
-    const phi_sub = easub + eg / 2.0 + vt * @log(@max(nbody / ni, 1.0));
+    const phi_sub = easub + eg / 2.0 + vt * contract.fmath.log(@max(nbody / ni, 1.0));
     const dphi = phig_m - phi_sub;
 
     const dvt_qm: f64 = if (qmfactor != 0.0)
@@ -1347,14 +1347,14 @@ fn prepEval(model: *const Model, instance: *const Instance, dt_sh: f64) EvalPrep
     const esat_l_over_dmob = 2.0 * vsat_t * l_eff / @max(mu0_t, 1e-30);
 
     // Series resistance base (RDSMOD=0)
-    const weff_wr = @exp(wr * @log(@max(w_eff0 * 1e6, 1e-30)));
+    const weff_wr = contract.fmath.exp(wr * contract.fmath.log(@max(w_eff0 * 1e6, 1e-30)));
     const rds_val: f64 = if (model.rdsmod == 0) @max(rdsw_t / weff_wr, rdswmin / weff_wr) else 0.0;
 
     // DIBL on Rout
     const theta_rout = 0.5 * pdibl1 / @max(cosh_approx(drout * l_eff / scl) - 1.0, 1e-10) + pdibl2;
 
     // Gate tunneling constants
-    const tox_ratio = (1.0 / (toxg * toxg)) * @exp(ntox * @log(@max(toxref / toxg, 1e-30)));
+    const tox_ratio = (1.0 / (toxg * toxg)) * contract.fmath.exp(ntox * contract.fmath.log(@max(toxref / toxg, 1e-30)));
     const aigc_t = aigc * (1.0 + @as(f64, model.aigc1) * dt_temp);
     const aigbinv_t = aigbinv * (1.0 + @as(f64, model.aigbinv1) * dt_temp);
     const aigbacc_t = aigbacc * (1.0 + @as(f64, model.aigbacc1) * dt_temp);
@@ -1362,7 +1362,7 @@ fn prepEval(model: *const Model, instance: *const Instance, dt_sh: f64) EvalPrep
     // Gen-recomb prep
     const gen_on = (aigen != 0.0 or bigen != 0.0);
     const l_gen = @max(l_eff - lintigen, 1e-12);
-    const gen_temp = @exp(@min(Q_ELEM * eg / (ntgen * K_BOLTZ * t_eff) * (t_eff / tnom_k - 1.0), 80.0));
+    const gen_temp = contract.fmath.exp(@min(Q_ELEM * eg / (ntgen * K_BOLTZ * t_eff) * (t_eff / tnom_k - 1.0), 80.0));
     const gen_coeff = hfin_i * tfin_i * l_gen * gen_temp * nf_total;
 
     // Junction prep
@@ -1370,8 +1370,8 @@ fn prepEval(model: *const Model, instance: *const Instance, dt_sh: f64) EvalPrep
     const nvtmd = njd_m * vt;
     const isbs = asej * jss_t + psej * jsws_t + tfin_i * nf_total * jswgs_t;
     const isbd = adej * jsd_t + pdej * jswd_t + tfin_i * nf_total * jswgd_t;
-    const xexpbvs: f64 = if (bvs > 0.0) @exp(@min(-bvs / nvtms, 80.0)) else 0.0;
-    const xexpbvd: f64 = if (bvd > 0.0) @exp(@min(-bvd / nvtmd, 80.0)) else 0.0;
+    const xexpbvs: f64 = if (bvs > 0.0) contract.fmath.exp(@min(-bvs / nvtms, 80.0)) else 0.0;
+    const xexpbvd: f64 = if (bvd > 0.0) contract.fmath.exp(@min(-bvd / nvtmd, 80.0)) else 0.0;
 
     // Series resistances
     const rd_eff: f64 = if (model.rdsmod == 1) @as(f64, model.rdw) / @max(weff_wr, 1e-30) + rshd * @as(f64, instance.nrd) else rshd * @as(f64, instance.nrd);
@@ -1382,7 +1382,7 @@ fn prepEval(model: *const Model, instance: *const Instance, dt_sh: f64) EvalPrep
     const g_rg: f64 = if (model.rgatemod != 0 and rg_eff > 0.0) 1.0 / rg_eff else GSHORT;
 
     // Self-heating conductance
-    const gth_numer = @as(f64, model.wth0) * @exp(bshexp * @log(@max(nf_f, 1.0))) + ash * fpitch * @exp(ashexp * @log(@max(nf_total, 1.0)));
+    const gth_numer = @as(f64, model.wth0) * contract.fmath.exp(bshexp * contract.fmath.log(@max(nf_f, 1.0))) + ash * fpitch * contract.fmath.exp(ashexp * contract.fmath.log(@max(nf_total, 1.0)));
     const gth = gth_numer / @max(rth0, 1e-30);
 
     return .{
@@ -1656,7 +1656,7 @@ pub fn eval(comptime S: type, x: [n_u]S, model: *const Model, instance: *const I
     const delta_qi_esat = dqi.div(esat1.scale(l_eff).maxC(1e-15));
     // dvsat_num = 1 + exp(psat_l*log(deltavsat + delta_qi_esat))
     const dvsat_num = delta_qi_esat.addC(p.deltavsat).maxC(1e-30).log().scale(p.psat_l).exp().addC(1.0);
-    const dvsat_den = 1.0 + @exp(p.psat_l * @log(@max(p.deltavsat, 1e-30)));
+    const dvsat_den = 1.0 + contract.fmath.exp(p.psat_l * contract.fmath.log(@max(p.deltavsat, 1e-30)));
     // d_vsat = dvsat_num/dvsat_den + 0.5*ptwg_t*qia*dqi*dqi
     var d_vsat = dvsat_num.scale(1.0 / dvsat_den).add(qia.mul(dqi).mul(dqi).scale(0.5 * p.ptwg_t));
     // Non-saturation effect
@@ -1884,7 +1884,7 @@ inline fn solveQmSource(comptime S: type, vov: S, t5: f64, q_dep: f64, qmfactor:
         // e0 = -vov + qm - log(-qm) - log(t5) - qmfactor*exp((2/3)*log(-(qm+q_dep)))
         const neg_qm = qm_norm.neg().maxC(1e-30);
         const neg_qmq = qm_norm.addC(q_dep).neg().maxC(1e-30);
-        const e0 = vov.neg().add(qm_norm).sub(neg_qm.log()).addC(-@log(@max(t5, 1e-30)))
+        const e0 = vov.neg().add(qm_norm).sub(neg_qm.log()).addC(-contract.fmath.log(@max(t5, 1e-30)))
             .sub(neg_qmq.log().scale(2.0 / 3.0).exp().scale(qmfactor));
         // e1 = -1 + 1/min(qm,-1e-30) - (2/3)*qmfactor*exp((-1/3)*log(-(qm+q_dep)))
         const e1 = qm_norm.minC(-1e-30).pow(-1.0).addC(-1.0)
@@ -1905,7 +1905,7 @@ inline fn solveQmDrain(comptime S: type, vov_d: S, t5: f64, q_dep: f64, qmfactor
     {
         const neg_qm = qm_d.neg().maxC(1e-30);
         const neg_qmq = qm_d.addC(q_dep).neg().maxC(1e-30);
-        const e0 = vov_d.neg().add(qm_d).sub(neg_qm.log()).addC(-@log(@max(t5, 1e-30)))
+        const e0 = vov_d.neg().add(qm_d).sub(neg_qm.log()).addC(-contract.fmath.log(@max(t5, 1e-30)))
             .sub(neg_qmq.log().scale(2.0 / 3.0).exp().scale(qmfactor));
         const e1 = qm_d.minC(-1e-30).pow(-1.0).addC(-1.0)
             .sub(neg_qmq.log().scale(-1.0 / 3.0).exp().scale((2.0 / 3.0) * qmfactor));
@@ -2023,7 +2023,7 @@ fn prepQ(model: *const Model, instance: *const Instance, dt_sh: f64) QPrep {
     const c_ox = 3.9 * EPS_0 / eot;
 
     const l_xl = l_drawn + xl_v;
-    const dlcv = @as(f64, model.dlc) + @as(f64, model.llc) / @max(@exp(@as(f64, model.lln) * @log(@max(l_xl, 1e-30))), 1e-30);
+    const dlcv = @as(f64, model.dlc) + @as(f64, model.llc) / @max(contract.fmath.exp(@as(f64, model.lln) * contract.fmath.log(@max(l_xl, 1e-30))), 1e-30);
     const l_eff_cv = @max(l_xl - 2.0 * dlcv, 1e-9);
 
     const w_eff_ufcm: f64 = switch (model.geomod) {
@@ -2044,16 +2044,16 @@ fn prepQ(model: *const Model, instance: *const Instance, dt_sh: f64) QPrep {
     const dt_temp = t_eff - tnom_k;
 
     const eg = bg0sub - tbgasub * t_eff * t_eff / (t_eff + tbgbsub);
-    const ni = ni0sub * @exp(0.5 * @log(@max(t_eff / 300.15, 1e-30)) * 3.0) *
-        @exp(@min(bg0sub * Q_ELEM / (2.0 * K_BOLTZ * 300.15) - eg * Q_ELEM / (2.0 * K_BOLTZ * t_eff), 80.0));
+    const ni = ni0sub * contract.fmath.exp(0.5 * contract.fmath.log(@max(t_eff / 300.15, 1e-30)) * 3.0) *
+        contract.fmath.exp(@min(bg0sub * Q_ELEM / (2.0 * K_BOLTZ * 300.15) - eg * Q_ELEM / (2.0 * K_BOLTZ * t_eff), 80.0));
 
     const lint: f64 = @as(f64, model.lint);
     const ll: f64 = @as(f64, model.ll);
     const lln: f64 = @as(f64, model.lln);
-    const dl = lint + ll / @max(@exp(lln * @log(@max(l_xl, 1e-30))), 1e-30);
+    const dl = lint + ll / @max(contract.fmath.exp(lln * contract.fmath.log(@max(l_xl, 1e-30))), 1e-30);
     const l_eff = @max(l_xl - 2.0 * dl, 1e-9);
 
-    const phi_sub = easub + eg / 2.0 + vt * @log(@max(nbody / ni, 1.0));
+    const phi_sub = easub + eg / 2.0 + vt * contract.fmath.log(@max(nbody / ni, 1.0));
     const dphi = phig_m - phi_sub;
 
     const a_ch: f64 = switch (model.geomod) {
@@ -2061,7 +2061,7 @@ fn prepQ(model: *const Model, instance: *const Instance, dt_sh: f64) QPrep {
         else => hfin_i * tfin_i,
     };
     const c_ins: f64 = switch (model.geomod) {
-        3 => 2.0 * PI * epsrox * EPS_0 / @log(@max(1.0 + 2.0 * eot / @as(f64, instance.d_cyl), 1.001)),
+        3 => 2.0 * PI * epsrox * EPS_0 / contract.fmath.log(@max(1.0 + 2.0 * eot / @as(f64, instance.d_cyl), 1.001)),
         else => w_eff_ufcm * epsrox * EPS_0 / eot,
     };
     const scl = @sqrt(@max(epsrsub * EPS_0 * a_ch / c_ins * (1.0 + a_ch * c_ins / (2.0 * epsrsub * EPS_0 * w_eff_ufcm * w_eff_ufcm)), 1e-30));
@@ -2083,7 +2083,7 @@ fn prepQ(model: *const Model, instance: *const Instance, dt_sh: f64) QPrep {
     const kt1: f64 = @as(f64, model.kt1);
     const kt1l: f64 = @as(f64, model.kt1l);
 
-    const vbi = vt * @log(@max(@as(f64, model.nsd) * nbody / (ni * ni), 1.0));
+    const vbi = vt * contract.fmath.log(@max(@as(f64, model.nsd) * nbody / (ni * ni), 1.0));
     const psi_st = phibe;
 
     const theta_sce = -0.5 / @max(cosh_approx(dvt1 * l_eff / scl) - 1.0, 1e-10);
@@ -2152,7 +2152,7 @@ fn prepQ(model: *const Model, instance: *const Instance, dt_sh: f64) QPrep {
         const bshexp: f64 = @as(f64, model.bshexp);
         const ashexp: f64 = @as(f64, model.ashexp);
         const ash: f64 = @as(f64, model.ash);
-        cth = cth0 * (wth0 * @exp(bshexp * @log(@max(nf_f, 1.0))) + ash * fpitch * @exp(ashexp * @log(@max(nf_total, 1.0))));
+        cth = cth0 * (wth0 * contract.fmath.exp(bshexp * contract.fmath.log(@max(nf_f, 1.0))) + ash * fpitch * contract.fmath.exp(ashexp * contract.fmath.log(@max(nf_total, 1.0))));
     }
 
     return .{
@@ -2212,7 +2212,7 @@ fn prepQ(model: *const Model, instance: *const Instance, dt_sh: f64) QPrep {
 inline fn solveQmCV(comptime S: type, vov: S, t5: f64) S {
     var qm = if (vov.val() > 40.0) vov.neg() else vov.neg().exp().addC(1.0).maxC(1e-30).log().neg();
     {
-        const e0 = vov.neg().add(qm).sub(qm.neg().maxC(1e-30).log()).addC(-@log(@max(t5, 1e-30)));
+        const e0 = vov.neg().add(qm).sub(qm.neg().maxC(1e-30).log()).addC(-contract.fmath.log(@max(t5, 1e-30)));
         const e1 = qm.minC(-1e-30).pow(-1.0).addC(-1.0);
         const correction = e0.div(e1.abs().maxC(1e-15));
         qm = if (e1.val() > 0) qm.sub(correction) else qm.add(correction);
@@ -2288,7 +2288,7 @@ pub fn q(comptime S: type, x: [n_u]S, model: *const Model, instance: *const Inst
     // num = 1 + exp(psatcv*log(deltavsatcv + dqi_cv/(esat_cv*l_eff_cv)))
     const d_vsat_cv_num = dqi_cv.div(S.con(@max(p.esat_cv * p.l_eff_cv, 1e-15))).addC(p.deltavsatcv).maxC(1e-30)
         .log().scale(p.psatcv).exp().addC(1.0);
-    const d_vsat_cv_den = 1.0 + @exp(p.psatcv * @log(@max(p.deltavsatcv, 1e-30)));
+    const d_vsat_cv_den = 1.0 + contract.fmath.exp(p.psatcv * contract.fmath.log(@max(p.deltavsatcv, 1e-30)));
     const d_vsat_cv = d_vsat_cv_num.scale(1.0 / d_vsat_cv_den);
 
     // Terminal charges (Ward-Dutton partition)
@@ -2499,7 +2499,7 @@ pub fn limit(model: *const Model, instance: *const Instance, x_new: [n_u]f64, x_
     // ====================================================================
     if (model.bulkmod != 0) {
         const is_val: f64 = @as(f64, model.jss) * @as(f64, instance.asej) + 1e-30;
-        const v_crit = vt * @log(vt / (@sqrt(2.0) * is_val));
+        const v_crit = vt * contract.fmath.log(vt / (@sqrt(2.0) * is_val));
 
         {
             const vbs_new = (x_new[e] - result[si]) * type_f;
@@ -2510,12 +2510,12 @@ pub fn limit(model: *const Model, instance: *const Instance, x_new: [n_u]f64, x_
                 if (vbs_old > 0.0) {
                     const arg = (vbs_new - vbs_old) / vt;
                     if (arg > 0.0) {
-                        vbs_limited = vbs_old + vt * (2.0 + @log(@max(arg - 2.0, 1e-30)));
+                        vbs_limited = vbs_old + vt * (2.0 + contract.fmath.log(@max(arg - 2.0, 1e-30)));
                     } else {
                         vbs_limited = v_crit;
                     }
                 } else {
-                    vbs_limited = vt * @log(@max(vbs_new / vt, 1e-30));
+                    vbs_limited = vt * contract.fmath.log(@max(vbs_new / vt, 1e-30));
                 }
             }
 
@@ -2533,12 +2533,12 @@ pub fn limit(model: *const Model, instance: *const Instance, x_new: [n_u]f64, x_
                 if (vbd_old > 0.0) {
                     const arg = (vbd_new - vbd_old) / vt;
                     if (arg > 0.0) {
-                        vbd_limited = vbd_old + vt * (2.0 + @log(@max(arg - 2.0, 1e-30)));
+                        vbd_limited = vbd_old + vt * (2.0 + contract.fmath.log(@max(arg - 2.0, 1e-30)));
                     } else {
                         vbd_limited = v_crit;
                     }
                 } else {
-                    vbd_limited = vt * @log(@max(vbd_new / vt, 1e-30));
+                    vbd_limited = vt * contract.fmath.log(@max(vbd_new / vt, 1e-30));
                 }
             }
 

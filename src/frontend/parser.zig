@@ -67,16 +67,17 @@ const SlicePool = struct {
 pub fn Parser(comptime Tok: type) type {
     return struct {
         pub fn parse(arena: std.mem.Allocator, src_in: anytype) Error!ir.Netlist {
+            // ponytail: always dupe before lowering (one bulk memcpy) so the
+            // original bytes survive — file paths (.hdl cards) are
+            // case-sensitive and must be recovered from `orig` by offset.
+            const orig: []const u8 = src_in;
             const src: []const u8 = blk: {
                 if (Tok.case_normalize) {
-                    const buf: []u8 = switch (@typeInfo(@TypeOf(src_in))) {
-                        .pointer => |p| if (p.is_const) try arena.dupe(u8, src_in) else src_in,
-                        else => try arena.dupe(u8, src_in),
-                    };
+                    const buf: []u8 = try arena.dupe(u8, orig);
                     simdLower(buf);
                     break :blk buf;
                 }
-                break :blk src_in;
+                break :blk orig;
             };
 
             const line_hint = countNewlines(src);
@@ -162,6 +163,15 @@ pub fn Parser(comptime Tok: type) type {
             var dl = try ir.DeviceList.fromUnsorted(arena, flat.items);
             dl.subckt_types = subckt_type_list.items;
 
+            // Foreign (.hdl) paths are case-sensitive; token slices point into
+            // the lowered buffer. Recover the original bytes by offset.
+            if (Tok.case_normalize) {
+                for (foreign.items) |*f| {
+                    const off = @intFromPtr(f.path.ptr) - @intFromPtr(src.ptr);
+                    if (off < orig.len) f.path = orig[off..][0..f.path.len];
+                }
+            }
+
             return .{
                 .title = title,
                 .devices = dl,
@@ -169,7 +179,6 @@ pub fn Parser(comptime Tok: type) type {
                 .directives = directives.items,
                 .params = params.items,
                 .foreign = foreign.items,
-                .generated_devices = &.{},
             };
         }
 
@@ -396,7 +405,7 @@ pub fn Parser(comptime Tok: type) type {
             for (element_shapes) |shape| {
                 if (std.mem.indexOfScalar(u8, shape.letters, letter) != null) return shape.nodes;
             }
-            return 0;
+            return null;
         }
 
         fn parseElement(arena: std.mem.Allocator, pool: *SlicePool, line: []const u8) Error!ir.Device {
@@ -993,6 +1002,44 @@ pub fn Parser(comptime Tok: type) type {
             }
         }
     };
+}
+
+test "parser: non-standard instance name in subcircuit expands correctly" {
+    // OSDI-era netlists (e.g. VACASK) name MOSFET instances like 'nm' (letter 'n')
+    // inside subcircuits. After expansion, the device must still be usable:
+    // nodes and model name must be parsed correctly via variable-node-count path.
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const src =
+        \\wrapper
+        \\.model mymod NMOS(level=1 VTO=0.7)
+        \\.subckt wrap d g s b
+        \\  nm d g s b mymod w=1u l=0.2u
+        \\.ends
+        \\xm1 out in vdd 0 wrap
+        \\vdd vdd 0 1.0
+        \\.op
+        \\.end
+        \\
+    ;
+    const nl = try Parser(@import("tokenizer.zig").ngspice).parse(arena_state.allocator(), src);
+    // After subcircuit expansion, the 'nm' device should appear in the flat list.
+    // It should have 4 nodes and positional[0] = "mymod" (the model name).
+    const dl = nl.devices;
+    var found = false;
+    for (0..dl.len()) |i| {
+        const d = dl.get(i);
+        if (std.mem.indexOf(u8, d.name, "nm") != null) {
+            try std.testing.expectEqual(@as(usize, 4), d.nodes.len);
+            try std.testing.expectEqual(@as(usize, 1), d.positional.len);
+            switch (d.positional[0]) {
+                .name => |n| try std.testing.expectEqualStrings("mymod", n),
+                else => return error.TestUnexpectedResult,
+            }
+            found = true;
+        }
+    }
+    try std.testing.expect(found);
 }
 
 test "parser: recognizes Verilog-A HDL includes as foreign devices" {

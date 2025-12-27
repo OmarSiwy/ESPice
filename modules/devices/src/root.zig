@@ -28,6 +28,7 @@ pub const coupled_tlines = @import("coupled_tlines.zig");
 pub const cswitch = @import("cswitch.zig");
 pub const diode = @import("diode.zig");
 pub const diode_cmc = @import("diode_cmc.zig");
+pub const ekv = @import("ekv.zig");
 pub const hfet1 = @import("hfet1.zig");
 pub const hfet2 = @import("hfet2.zig");
 pub const hicum_l0 = @import("hicum_l0.zig");
@@ -104,7 +105,13 @@ pub fn mosfetDeviceId(level: u16) DeviceId {
         6 => .mos6,
         8, 11, 49 => .bsim3,
         9 => .mos9,
+        10, 55 => .bsim_soi,
         14, 54 => .bsim4,
+        44 => .ekv,
+        72, 107 => .bsim_cmg,
+        103 => .bsim_bulk,
+        110 => .bsim_img,
+        1020, 1021, 1040 => .psp,
         else => .mos1,
     };
 }
@@ -112,10 +119,10 @@ pub fn mosfetDeviceId(level: u16) DeviceId {
 pub fn bjtDeviceId(level: u16) DeviceId {
     return switch (level) {
         1 => .bjt,
-        2 => .vbic,
-        4 => .hicum_l0,
-        5 => .mextram,
-        6 => .hicum_l2,
+        4 => .vbic,
+        8 => .hicum_l0,
+        9 => .mextram,
+        10 => .hicum_l2,
         else => .bjt,
     };
 }
@@ -159,6 +166,7 @@ pub const DeviceId = enum {
     cswitch,
     diode,
     diode_cmc,
+    ekv,
     hfet1,
     hfet2,
     hicum_l0,
@@ -221,6 +229,7 @@ pub const DeviceId = enum {
             .cswitch => cswitch,
             .diode => diode,
             .diode_cmc => diode_cmc,
+            .ekv => ekv,
             .hfet1 => hfet1,
             .hfet2 => hfet2,
             .hicum_l0 => hicum_l0,

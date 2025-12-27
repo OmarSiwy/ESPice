@@ -756,8 +756,8 @@ inline fn smoothLower(x: f64, xmin: f64, delta: f64) f64 {
 /// Limited exponential (value-form). Branch on .val() to reproduce the
 /// original piecewise definition exactly; each branch computed in S ops.
 inline fn lexpS(comptime S: type, x: S) S {
-    const exp80 = @exp(80.0);
-    const exp_neg80 = @exp(-80.0);
+    const exp80 = contract.fmath.exp(80.0);
+    const exp_neg80 = contract.fmath.exp(-80.0);
     if (x.val() > 80.0) {
         // exp80 * (1 + x - 80)
         return x.addC(1.0 - 80.0).scale(exp80);
@@ -970,15 +970,15 @@ fn prepI(model: *const Model, instance: *const Instance) IParams {
     const eg_t = p_eg0 - temp_k * (p_bgtmp1 + temp_k * p_bgtmp2);
     const eg_tnom = p_eg0 - tnom_k * (p_bgtmp1 + tnom_k * p_bgtmp2);
     const temp_ratio = temp_k / tnom_k;
-    const ni = NI_300K * @exp(0.5 * (eg_tnom / (KB_Q * 300.0) - eg_t / beta_inv));
+    const ni = NI_300K * contract.fmath.exp(0.5 * (eg_tnom / (KB_Q * 300.0) - eg_t / beta_inv));
 
     // Geometry
     const l_gate = inst_l + p_xl;
     const w_gate = inst_w / inst_nf + p_xw;
     const l_gate_um = l_gate * 1.0e6;
     const w_gate_um = w_gate * 1.0e6;
-    const dl = p_xld + p_ll / @exp(p_lln * @log(@max(l_gate + p_lld, 1.0e-30)));
-    const dw = p_xwd + p_wl / @exp(p_wln * @log(@max(w_gate + p_wld, 1.0e-30)));
+    const dl = p_xld + p_ll / contract.fmath.exp(p_lln * contract.fmath.log(@max(l_gate + p_lld, 1.0e-30)));
+    const dw = p_xwd + p_wl / contract.fmath.exp(p_wln * contract.fmath.log(@max(w_gate + p_wld, 1.0e-30)));
     const l_eff = @max(l_gate - 2.0 * dl, 1.0e-9);
     const w_eff = @max(w_gate - 2.0 * dw, 1.0e-9);
     const l_ch_init = l_eff;
@@ -988,12 +988,12 @@ fn prepI(model: *const Model, instance: *const Instance) IParams {
     const nsub = nsubc_cm3 * 1.0e6;
 
     // Flat-band voltage
-    const vfb = p_vfbc * (1.0 + p_vfbcl / @exp(p_vfbclp * @log(@max(l_gate_um, 1.0e-30))));
+    const vfb = p_vfbc * (1.0 + p_vfbcl / contract.fmath.exp(p_vfbclp * contract.fmath.log(@max(l_gate_um, 1.0e-30))));
 
     // Surface potential constants (note: c_ox here uses nominal tox since the
     // QME correction depends on Vgs; the QME term is folded into c_ox inside
     // eval where it becomes x-dependent).
-    const phi_b0 = 2.0 * beta_inv * @log(@max(nsub / ni, 1.0));
+    const phi_b0 = 2.0 * beta_inv * contract.fmath.log(@max(nsub / ni, 1.0));
     const cnst0 = @sqrt(2.0 * Q_ELEC * nsub * EPS_SI);
     const cnst1 = ni * ni / (nsub * nsub);
 
@@ -1018,7 +1018,7 @@ fn prepI(model: *const Model, instance: *const Instance) IParams {
 
     const delta_temp = temp_k - tnom_k;
     const xti_eff = p_xti + p_xti2 * delta_temp;
-    const jct_temp_factor = @exp(xti_eff / @max(p_nj, 0.01) * @log(temp_ratio)) * @exp((eg_tnom / (p_nj * KB_Q * tnom_k) - eg_t / (p_nj * beta_inv)));
+    const jct_temp_factor = contract.fmath.exp(xti_eff / @max(p_nj, 0.01) * contract.fmath.log(temp_ratio)) * contract.fmath.exp((eg_tnom / (p_nj * KB_Q * tnom_k) - eg_t / (p_nj * beta_inv)));
     const jct_temp_factor2 = 1.0 + p_ctemp * delta_temp;
 
     const is_d_bottom = p_js0 * ad_eff;
@@ -1450,7 +1450,7 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     const mu_ecb = rns.scale(p.p_muecb1 / 1.0e11).addC(p.p_muecb0);
 
     // Phonon scattering with temperature dependence (x-independent scalar)
-    const mu_eph = p.p_mueph1 * @exp(-p.p_muetmp * @log(temp_ratio));
+    const mu_eph = p.p_mueph1 * contract.fmath.exp(-p.p_muetmp * contract.fmath.log(temp_ratio));
     // e_eff_ph = exp(MUEPH0*log(max(e_eff_cgs,1)))
     const e_eff_ph = e_eff_cgs.maxC(1.0).log().scale(p.p_mueph0).exp();
 
@@ -1511,7 +1511,7 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     const delta_l_clm = t7_clm.neg().add(t7_clm.mul(t7_clm).add(t8_clm.scale(t4_clm)).maxC(0.0).sqrt()).scale(0.5).maxC(0.0);
 
     // CLM modification factor (x-independent)
-    const clm_mod = p.p_clm1 + p.p_clm6 * @exp(p.p_clm5 * @log(@max(l_gate_um, 1.0e-30)));
+    const clm_mod = p.p_clm1 + p.p_clm6 * contract.fmath.exp(p.p_clm5 * contract.fmath.log(@max(l_gate_um, 1.0e-30)));
     const l_ch_raw = delta_l_clm.scale(-clm_mod * p.p_clm3).addC(l_eff);
     const l_ch = l_ch_raw.maxC(l_eff * 0.1);
 
@@ -1559,7 +1559,7 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     const e_tun_num = vgsz.addC(-vfb).add(dvth.sub(dpg).scale(p.p_gleak4 * l_eff)).sub(psdl.scale(p.p_gleak3));
     // e_tun = max(e_tun_num/TOX,1)*(1 + e_y*1e-2/max(GLEAK5,1))
     const e_tun = e_tun_num.scale(1.0 / p.p_tox).maxC(1.0).mul(e_y.scale(1.0e-2 / @max(p.p_gleak5, 1.0)).addC(1.0));
-    const eg32 = @exp(1.5 * @log(@max(eg_t, 0.1)));
+    const eg32 = contract.fmath.exp(1.5 * contract.fmath.log(@max(eg_t, 0.1)));
     const eg12 = @sqrt(@max(eg_t, 0.1));
 
     const vg_vt_small = vg_vt.maxC(1.0e-20);
@@ -1599,7 +1599,7 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
         .add(dvth_sc.add(dvth_lp).scale(p.p_gidl5)).sub(qb0.div(c_ox).scale(p.p_gidl6));
     const e_gidl = e_gidl_num.scale(1.0 / p.p_tox).maxC(0.0);
     const eg12_gidl = @sqrt(@max(eg_t, 0.1));
-    const eg32_gidl = @exp(1.5 * @log(@max(eg_t, 0.1)));
+    const eg32_gidl = contract.fmath.exp(1.5 * contract.fmath.log(@max(eg_t, 0.1)));
     const e_gidl_pow = e_gidl.maxC(1.0e-30).pow(p.p_gidl7);
     const vdb3 = vdb.mul(vdb).mul(vdb);
     // igidl = gidl_enable*GIDL1*Q*w/eg12*e_gidl^2*exp(min(-GIDL2*eg32/max(e_gidl_pow,1e-30),80))*vdb3/(vdb3+0.5)
@@ -1640,7 +1640,7 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     var ibd = arg_bd_bot.exp().addC(-1.0).scale(is_d_bot_t).add(arg_bd_sw.exp().addC(-1.0).scale(is_d_sw_t));
     // Linearization above vdiffj (branch on value)
     if (vbd.val() >= p.p_vdiffj) {
-        ibd = ibd.add(vbd.addC(-p.p_vdiffj).scale(is_d / nj_vt * @exp(@min(p.p_vdiffj / nj_vt, 80.0))));
+        ibd = ibd.add(vbd.addC(-p.p_vdiffj).scale(is_d / nj_vt * contract.fmath.exp(@min(p.p_vdiffj / nj_vt, 80.0))));
     }
     // Reverse bias contribution
     ibd = ibd.add(vbd.scale(-p.p_cvb / nj_vt).minC(80.0).exp().addC(-1.0).scale(p.p_cisb * is_d));
@@ -1654,7 +1654,7 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     const arg_bs_sw = vbs_jct_eff.scale(1.0 / njsw_vt).minC(80.0);
     var ibs = arg_bs_bot.exp().addC(-1.0).scale(is_s_bot_t).add(arg_bs_sw.exp().addC(-1.0).scale(is_s_sw_t));
     if (vbs_jct.val() >= p.p_vdiffj) {
-        ibs = ibs.add(vbs_jct.addC(-p.p_vdiffj).scale(is_s / nj_vt * @exp(@min(p.p_vdiffj / nj_vt, 80.0))));
+        ibs = ibs.add(vbs_jct.addC(-p.p_vdiffj).scale(is_s / nj_vt * contract.fmath.exp(@min(p.p_vdiffj / nj_vt, 80.0))));
     }
     ibs = ibs.add(vbs_jct.scale(-p.p_cvb / nj_vt).minC(80.0).exp().addC(-1.0).scale(p.p_cisb * is_s));
     ibs = ibs.add(vbs_jct.scale(-p.p_cvbk / nj_vt).minC(80.0).exp().addC(-1.0).scale(p.p_cisbk));
@@ -1855,15 +1855,15 @@ fn prepQ(model: *const Model, instance: *const Instance) QParams {
     const eg_t = p_eg0 - temp_k * (p_bgtmp1 + temp_k * p_bgtmp2);
     const eg_tnom = p_eg0 - tnom_k * (p_bgtmp1 + tnom_k * p_bgtmp2);
     const delta_t = temp_k - tnom_k;
-    const ni = NI_300K * @exp(0.5 * (eg_tnom / (KB_Q * 300.0) - eg_t / beta_inv));
+    const ni = NI_300K * contract.fmath.exp(0.5 * (eg_tnom / (KB_Q * 300.0) - eg_t / beta_inv));
 
     // Geometry
     const l_gate = inst_l + p_xl;
     const w_gate = inst_w / inst_nf + p_xw;
     const l_gate_um = l_gate * 1.0e6;
     const w_gate_um = w_gate * 1.0e6;
-    const dl = p_xld + p_ll / @exp(p_lln * @log(@max(l_gate + p_lld, 1.0e-30)));
-    const dw = p_xwd + p_wl / @exp(p_wln * @log(@max(w_gate + p_wld, 1.0e-30)));
+    const dl = p_xld + p_ll / contract.fmath.exp(p_lln * contract.fmath.log(@max(l_gate + p_lld, 1.0e-30)));
+    const dw = p_xwd + p_wl / contract.fmath.exp(p_wln * contract.fmath.log(@max(w_gate + p_wld, 1.0e-30)));
     const l_eff = @max(l_gate - 2.0 * dl, 1.0e-9);
     const w_eff = @max(w_gate - 2.0 * dw, 1.0e-9);
     const w_eff_cv = w_eff;
@@ -1874,9 +1874,9 @@ fn prepQ(model: *const Model, instance: *const Instance) QParams {
     const nsubc_cm3 = @max(p_nsubc, 1.0);
     const nsub = nsubc_cm3 * 1.0e6;
 
-    const vfb = p_vfbc * (1.0 + p_vfbcl / @exp(p_vfbclp * @log(@max(l_gate_um, 1.0e-30))));
+    const vfb = p_vfbc * (1.0 + p_vfbcl / contract.fmath.exp(p_vfbclp * contract.fmath.log(@max(l_gate_um, 1.0e-30))));
 
-    const phi_b0 = 2.0 * beta_inv * @log(@max(nsub / ni, 1.0));
+    const phi_b0 = 2.0 * beta_inv * contract.fmath.log(@max(nsub / ni, 1.0));
     const cnst0 = @sqrt(2.0 * Q_ELEC * nsub * EPS_SI);
     const cnst1 = ni * ni / (nsub * nsub);
 
@@ -2283,7 +2283,7 @@ pub fn limit(model: *const Model, instance: *const Instance, x_new: [n_u]f64, x_
 
     // Critical voltage for pnjlim
     const is_jct = p_js0 * inst_w * 1.0e-6 + 1.0e-14;
-    const v_crit = vt * @log(vt / (@sqrt(2.0) * is_jct));
+    const v_crit = vt * contract.fmath.log(vt / (@sqrt(2.0) * is_jct));
 
     var result = x_new;
 
@@ -2370,12 +2370,12 @@ pub fn limit(model: *const Model, instance: *const Instance, x_new: [n_u]f64, x_
             if (vbs_old > 0.0) {
                 const arg = (vbs_new - vbs_old) / vt;
                 if (arg > 0.0) {
-                    vbs_limited = vbs_old + vt * (2.0 + @log(@max(arg - 2.0, 1.0e-30)));
+                    vbs_limited = vbs_old + vt * (2.0 + contract.fmath.log(@max(arg - 2.0, 1.0e-30)));
                 } else {
-                    vbs_limited = vbs_old - vt * (2.0 + @log(@max(2.0 - arg, 1.0e-30)));
+                    vbs_limited = vbs_old - vt * (2.0 + contract.fmath.log(@max(2.0 - arg, 1.0e-30)));
                 }
             } else {
-                vbs_limited = vt * @log(@max(vbs_new / vt, 1.0e-30));
+                vbs_limited = vt * contract.fmath.log(@max(vbs_new / vt, 1.0e-30));
             }
         }
 
@@ -2395,12 +2395,12 @@ pub fn limit(model: *const Model, instance: *const Instance, x_new: [n_u]f64, x_
             if (vbd_old > 0.0) {
                 const arg = (vbd_new - vbd_old) / vt;
                 if (arg > 0.0) {
-                    vbd_limited = vbd_old + vt * (2.0 + @log(@max(arg - 2.0, 1.0e-30)));
+                    vbd_limited = vbd_old + vt * (2.0 + contract.fmath.log(@max(arg - 2.0, 1.0e-30)));
                 } else {
-                    vbd_limited = vbd_old - vt * (2.0 + @log(@max(2.0 - arg, 1.0e-30)));
+                    vbd_limited = vbd_old - vt * (2.0 + contract.fmath.log(@max(2.0 - arg, 1.0e-30)));
                 }
             } else {
-                vbd_limited = vt * @log(@max(vbd_new / vt, 1.0e-30));
+                vbd_limited = vt * contract.fmath.log(@max(vbd_new / vt, 1.0e-30));
             }
         }
 

@@ -1094,11 +1094,11 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, _: *const
     // ========================================================================
     // Surface Potential and Depletion Width (x-independent)
     // ========================================================================
-    const phi_s_raw = 2.0 * kb_q * m_tnom * @log(@max(m_nch / ni, 1.0));
+    const phi_s_raw = 2.0 * kb_q * m_tnom * contract.fmath.log(@max(m_nch / ni, 1.0));
     const phi_s = if (phi_s_raw >= 0.1) phi_s_raw else 0.6;
     const sqrt_phi_s = @sqrt(phi_s);
 
-    const v_bi = kb_q * m_tnom * @log(@max(1.0e20 * m_nch / (ni * ni), 1.0));
+    const v_bi = kb_q * m_tnom * contract.fmath.log(@max(1.0e20 * m_nch / (ni * ni), 1.0));
     const v0 = v_bi - phi_s;
 
     const x_dep0 = @sqrt(2.0 * eps_si / (q_e * m_nch * 1.0e6)) * sqrt_phi_s;
@@ -1154,7 +1154,7 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, _: *const
     // DIBL
     const t1_dibl = @sqrt((eps_si / eps_ox) * m_tox * x_dep0);
     const dsub_half = P.e_dsub * l_eff / (2.0 * t1_dibl + 1.0e-20);
-    const exp_dsub = @exp(@min(@max(-dsub_half, -80.0), 80.0));
+    const exp_dsub = contract.fmath.exp(@min(@max(-dsub_half, -80.0), 80.0));
     const theta_0_vb0 = exp_dsub * (1.0 + 2.0 * exp_dsub);
     const eta_eff = v_bseff.scale(P.e_etab).addC(P.e_eta0).maxC(1.0e-4);
     const dibl_sft = eta_eff.mul(v_ds).scale(theta_0_vb0);
@@ -1188,7 +1188,8 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, _: *const
     // ========================================================================
     // Effective Gate Overdrive (Vgsteff)
     // ========================================================================
-    const v_gst = v_gs.sub(vth).addC(P.e_voff);
+    const v_gst_raw = v_gs.sub(vth);
+    const v_gst = v_gst_raw.addC(P.e_voff);
     // exp_arg = min(v_gst/(2*n_sub*vtm), 80)
     const two_nsub_vtm = n_sub.mul(vtm).scale(2.0);
     const exp_arg = v_gst.div(two_nsub_vtm).minC(80.0);
@@ -1241,7 +1242,7 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, _: *const
     // ========================================================================
     // Source-Drain Resistance (Rds)
     // ========================================================================
-    const rds0denom = @exp(P.e_wr * @log(@max(w_eff * 1.0e6, 1.0e-6)));
+    const rds0denom = contract.fmath.exp(P.e_wr * contract.fmath.log(@max(w_eff * 1.0e6, 1.0e-6)));
     // rdsw_t = e_rdsw + prt*temp_ratio_m1  (S)
     const rdsw_t = temp_ratio_m1.scale(P.m_prt).addC(P.e_rdsw);
     const rds0 = rdsw_t.scale(1.0 / (rds0denom + 1.0e-30));
@@ -1300,8 +1301,8 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, _: *const
     // ========================================================================
     const lt1_rout = factor1 * @sqrt(x_dep0);
     const drout_arg = P.e_drout * l_eff / (2.0 * lt1_rout + 1.0e-20);
-    const exp_drout = @exp(@min(@max(-drout_arg, -80.0), 80.0));
-    const theta_rout = P.e_pdiblc1 * (exp_drout + 2.0 * @exp(@min(@max(-2.0 * drout_arg, -80.0), 80.0))) + P.e_pdiblc2;
+    const exp_drout = contract.fmath.exp(@min(@max(-drout_arg, -80.0), 80.0));
+    const theta_rout = P.e_pdiblc1 * (exp_drout + 2.0 * contract.fmath.exp(@min(@max(-2.0 * drout_arg, -80.0), 80.0))) + P.e_pdiblc2;
 
     const t8_va = abulk.mul(vdsat);
     // va_dibl_num = vgst2vtm - (vgst2vtm*t8_va/(vgst2vtm+t8_va+1e-30))
@@ -1386,8 +1387,8 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, _: *const
     const i_bd2 = t10_rec_bd.add(t11_rec_bd).scale(irec_coeff);
 
     // BJT current (Ibs3/Ibd3/Ic)  -- lratio/alpha are x-independent
-    const lratio = @exp(P.e_nbjt * @log(@max(P.e_lbjt0 * (l_inv + 1.0 / m_ln), 1.0e-30)));
-    const alpha_bjt = @exp(-l_eff * l_eff / (2.0 * m_ln * m_ln));
+    const lratio = contract.fmath.exp(P.e_nbjt * contract.fmath.log(@max(P.e_lbjt0 * (l_inv + 1.0 / m_ln), 1.0e-30)));
+    const alpha_bjt = contract.fmath.exp(-l_eff * l_eff / (2.0 * m_ln * m_ln));
     const i_en = w_eff * m_tsi * @max(P.e_isbjt, 0.0) * lratio;
     const one_minus_alpha = 1.0 - alpha_bjt;
 
@@ -1426,8 +1427,8 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, _: *const
     const ii_active = (P.e_alpha0 > 0.0);
 
     const t1_sii = P.e_sii0 * P.e_esatii * l_eff / (1.0 + P.e_esatii * l_eff);
-    // vgs_step = t1_sii*v_gst*(1/(1+sii1*vgsteff+1e-30) + sii2)/(1+siid*v_ds+1e-30)
-    const vgs_step_num = v_gst.scale(t1_sii).mul(vgsteff.scale(P.e_sii1).addC(1.0 + 1.0e-30).pow(-1.0).addC(P.e_sii2));
+    // vgs_step = t1_sii*v_gst_raw*(1/(1+sii1*vgsteff+1e-30) + sii2)/(1+siid*v_ds+1e-30)
+    const vgs_step_num = v_gst_raw.scale(t1_sii).mul(vgsteff.scale(P.e_sii1).addC(1.0 + 1.0e-30).pow(-1.0).addC(P.e_sii2));
     const vgs_step = vgs_step_num.div(v_ds.scale(P.e_siid).addC(1.0 + 1.0e-30));
     const vdsatii = vgs_step.addC(P.e_vdsatii0 - P.e_lii_p * l_inv);
     const v_diff = v_ds.sub(vdsatii);
@@ -1450,7 +1451,7 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, _: *const
     const m_deltavox = P.m_deltavox;
     const m_toxref = P.m_toxref;
 
-    const tox_ratio = @exp(m_ntox * @log(@max(m_tox / m_toxref, 1.0e-30)));
+    const tox_ratio = contract.fmath.exp(m_ntox * contract.fmath.log(@max(m_tox / m_toxref, 1.0e-30)));
 
     // Vgb = Vgs - Vbs
     const v_gb = v_gs.sub(v_bs);
@@ -1605,7 +1606,7 @@ pub fn qFromPrep(comptime S: type, x: [n_u]S, _: *const PrepCache, model: *const
     const cox = eps_ox / m_tox;
 
     // Surface potential
-    const phi_s_raw = 2.0 * kb_q * m_tnom * @log(@max(m_nch / ni, 1.0));
+    const phi_s_raw = 2.0 * kb_q * m_tnom * contract.fmath.log(@max(m_nch / ni, 1.0));
     const phi_s = if (phi_s_raw >= 0.1) phi_s_raw else 0.6;
     const sqrt_phi_s = @sqrt(phi_s);
 
@@ -1642,12 +1643,12 @@ pub fn qFromPrep(comptime S: type, x: [n_u]S, _: *const PrepCache, model: *const
 
     // x-independent Vth pieces
     const factor1 = @sqrt(eps_si / cox);
-    const v_bi = kb_q * m_tnom * @log(@max(1.0e20 * m_nch / (ni * ni), 1.0));
+    const v_bi = kb_q * m_tnom * contract.fmath.log(@max(1.0e20 * m_nch / (ni * ni), 1.0));
     const v0 = v_bi - phi_s;
     const tmp2 = m_tox * phi_s / (w_eff + e_w0);
     const t1_dibl = @sqrt((eps_si / eps_ox) * m_tox * x_dep0);
     const dsub_half = e_dsub * l_eff / (2.0 * t1_dibl + 1.0e-20);
-    const exp_dsub = @exp(@min(@max(-dsub_half, -80.0), 80.0));
+    const exp_dsub = contract.fmath.exp(@min(@max(-dsub_half, -80.0), 80.0));
     const theta_0_vb0 = exp_dsub * (1.0 + 2.0 * exp_dsub);
 
     const m_dvt2: f64 = @as(f64, model.dvt2);
@@ -1657,9 +1658,9 @@ pub fn qFromPrep(comptime S: type, x: [n_u]S, _: *const PrepCache, model: *const
     const cdep0 = @sqrt(q_e * eps_si * m_nch * 1.0e6);
     const c_box = eps_ox / m_tbox;
     const vfbb = if (m_nsub > 0.0)
-        -kb_q * m_tnom * @log(@max(m_nch / m_nsub, 1.0e-30))
+        -kb_q * m_tnom * contract.fmath.log(@max(m_nch / m_nsub, 1.0e-30))
     else
-        -kb_q * m_tnom * @log(@max(-m_nch * m_nsub / (ni * ni), 1.0e-30));
+        -kb_q * m_tnom * contract.fmath.log(@max(-m_nch * m_nsub / (ni * ni), 1.0e-30));
 
     const jcap_active = (m_cjswg > 0.0 and m_pbswg > 0.0 and (1.0 - m_mjswg) > 0.01);
     const mjswg_exp = 1.0 - m_mjswg;
@@ -2003,12 +2004,12 @@ inline fn pnjlim(vnew: f64, vold: f64) f64 {
     const arg = (vnew - vold) / vt;
 
     // vold > 0 path
-    const lim_pos_rise = vold + vt * (2.0 + @log(@max(arg - 2.0, 1.0e-30)));
-    const lim_pos_fall = vold - vt * (2.0 + @log(@max(2.0 - arg, 1.0e-30)));
+    const lim_pos_rise = vold + vt * (2.0 + contract.fmath.log(@max(arg - 2.0, 1.0e-30)));
+    const lim_pos_fall = vold - vt * (2.0 + contract.fmath.log(@max(2.0 - arg, 1.0e-30)));
     const lim_pos = if (arg > 0.0) lim_pos_rise else lim_pos_fall;
 
     // vold <= 0 path
-    const lim_neg = vt * @log(@max(vnew / vt, 1.0e-30));
+    const lim_neg = vt * contract.fmath.log(@max(vnew / vt, 1.0e-30));
 
     const lim_val = if (vold > 0.0) lim_pos else lim_neg;
 

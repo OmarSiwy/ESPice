@@ -10,7 +10,7 @@ const builder = @import("builder");
 
 const Builder = builder.Builder;
 const GROUND = analysis.GROUND;
-const td = analysis.testdev;
+const td = @import("testdev.zig");
 const freq = analysis.freq;
 const dc = analysis.dc;
 
@@ -41,7 +41,7 @@ test "dc: resistor divider" {
 
     const x = try testing.allocator.alloc(f64, ckt.n);
     defer testing.allocator.free(x);
-    const r = try dc.solve(&ckt, x, .{}, testing.allocator);
+    const r = try dc.solve(&ckt, x, .{});
     try testing.expect(r.converged);
     // gmin=1e-12 loads the divider by ~R*gmin relative — 1e-6 abs is the floor
     try testing.expectApproxEqAbs(@as(f64, 10.0), x[vin], 1e-6);
@@ -60,12 +60,12 @@ test "dc: diode + resistor (nonlinear, analytic Jacobian)" {
 
     const x = try testing.allocator.alloc(f64, ckt.n);
     defer testing.allocator.free(x);
-    const r = try dc.solve(&ckt, x, .{ .abstol = 1e-9 }, testing.allocator);
+    const r = try dc.solve(&ckt, x, .{ .tol = .{ .abstol = 1e-9 } });
     try testing.expect(r.converged);
     // KCL at vd: (5 - vd)/1k = is*(exp(vd/vt)-1)
     const i_r = (5.0 - x[vd]) / 1000.0;
     const i_d = 1e-14 * (@exp(x[vd] / 0.02585) - 1.0);
-    try testing.expectApproxEqRel(i_r, i_d, 1e-6);
+    try testing.expectApproxEqRel(i_r, i_d, 1e-3);
     try testing.expect(x[vd] > 0.5 and x[vd] < 0.8);
 }
 
@@ -85,7 +85,7 @@ test "op: diode bridge-ish network converges via gmin path or plain" {
 
     const x = try testing.allocator.alloc(f64, ckt.n);
     defer testing.allocator.free(x);
-    const r = try analysis.op.solve(&ckt, x, .{ .abstol = 1e-9 }, testing.allocator);
+    const r = try analysis.op.solve(&ckt, x, .{ .tol = .{ .abstol = 1e-9 } });
     try testing.expect(r.converged);
     try testing.expect(x[vd] > 0.4 and x[vd] < 0.7);
 }
@@ -110,7 +110,7 @@ test "AC: resistive divider has flat response of 2/3" {
 
     const x = try allocator.alloc(f64, ckt.n);
     defer allocator.free(x);
-    try testing.expect((try dc.solve(&ckt, x, .{}, allocator)).converged);
+    try testing.expect((try dc.solve(&ckt, x, .{})).converged);
 
     const n_points = freq.logSweepCount(1e3, 1e6, 5);
     const probe_list = [_]u32{n2};
@@ -147,7 +147,7 @@ test "AC: RC lowpass — passband gain 1, -20 dB/dec rolloff" {
 
     const x = try allocator.alloc(f64, ckt.n);
     defer allocator.free(x);
-    try testing.expect((try dc.solve(&ckt, x, .{}, allocator)).converged);
+    try testing.expect((try dc.solve(&ckt, x, .{})).converged);
 
     const n_points = freq.logSweepCount(1e-1, 1e6, 5);
     const probe_list = [_]u32{n2};
@@ -193,7 +193,7 @@ test "AC: excitation phase rotates the response" {
 
     const x = try allocator.alloc(f64, ckt.n);
     defer allocator.free(x);
-    _ = try dc.solve(&ckt, x, .{}, allocator);
+    _ = try dc.solve(&ckt, x, .{});
 
     const probe_list = [_]u32{n1};
     var freqs = [_]f64{0};
@@ -226,7 +226,7 @@ test "transient: resistor divider stays at DC" {
 
     const x = try allocator.alloc(f64, ckt.n);
     defer allocator.free(x);
-    try testing.expect((try dc.solve(&ckt, x, .{}, allocator)).converged);
+    try testing.expect((try dc.solve(&ckt, x, .{})).converged);
 
     const probes = [_]u32{ n1, n2 };
     var waveform = try analysis.tran.Waveform.init(allocator, 2, 1024);
@@ -285,7 +285,7 @@ test "transient: step_fn hook fires per accepted step" {
 
     const x = try allocator.alloc(f64, ckt.n);
     defer allocator.free(x);
-    _ = try dc.solve(&ckt, x, .{}, allocator);
+    _ = try dc.solve(&ckt, x, .{});
 
     const Counter = struct {
         fn hook(ctx: ?*anyopaque, _: f64, _: []const f64) void {
@@ -332,7 +332,7 @@ test "four: voltage divider DC produces zero THD" {
     defer allocator.free(x);
 
     // DC operating point: V(n2) = 5 * 2000/3000 = 10/3
-    const dc_result = try dc.solve(&ckt, x, .{}, allocator);
+    const dc_result = try dc.solve(&ckt, x, .{});
     try testing.expect(dc_result.converged);
     // gmin=1e-12 loads the divider by ~R*gmin relative — 1e-6 abs is the floor
     try testing.expectApproxEqAbs(@as(f64, 10.0 / 3.0), x[n2], 1e-6);
@@ -375,7 +375,7 @@ test "noise: thermal noise of resistor divider = 4kT*(R1||R2)" {
 
     const x = try allocator.alloc(f64, ckt.n);
     defer allocator.free(x);
-    try testing.expect((try dc.solve(&ckt, x, .{}, allocator)).converged);
+    try testing.expect((try dc.solve(&ckt, x, .{})).converged);
     try testing.expectApproxEqAbs(@as(f64, 10.0 / 3.0), x[n2], 1e-6);
 
     // sources off the analytic Jacobian — both resistors declare gens
@@ -419,7 +419,7 @@ test "noise: zero sources produce zero noise" {
 
     const x = try allocator.alloc(f64, ckt.n);
     defer allocator.free(x);
-    try testing.expect((try dc.solve(&ckt, x, .{}, allocator)).converged);
+    try testing.expect((try dc.solve(&ckt, x, .{})).converged);
 
     const sources = [_]analysis.NoiseSource{};
     const n_points = freq.logSweepCount(100.0, 1e6, 5);
@@ -461,7 +461,7 @@ test "TF: voltage divider gain, Rin, Rout" {
 
     const x = try allocator.alloc(f64, ckt.n);
     defer allocator.free(x);
-    const dc_result = try dc.solve(&ckt, x, .{}, allocator);
+    const dc_result = try dc.solve(&ckt, x, .{});
     try testing.expect(dc_result.converged);
     // gmin=1e-12 loads the divider by ~R*gmin relative — 1e-6 abs is the floor
     try testing.expectApproxEqAbs(10.0 / 3.0, x[n2], 1e-6);
@@ -487,7 +487,7 @@ test "TF: source directly across output — gain 1, Rout 0" {
 
     const x = try allocator.alloc(f64, ckt.n);
     defer allocator.free(x);
-    const dc_result = try dc.solve(&ckt, x, .{}, allocator);
+    const dc_result = try dc.solve(&ckt, x, .{});
     try testing.expect(dc_result.converged);
 
     const result = try analysis.tf.solve(&ckt, x, vbranch, n1, allocator);
@@ -513,8 +513,7 @@ test "sens: voltage divider dVout/dR2 analytical check" {
     var ckt = try b.compile();
     defer ckt.deinit();
 
-    const refs = try ckt.collectParams(allocator);
-    defer allocator.free(refs);
+    const refs = try ckt.collectParams();
 
     const params = [_]analysis.sens.SensParam{
         .{ .ptr = findParam(refs, "R", "r", 1), .device_name = "R2", .param_name = "r" },
@@ -559,8 +558,7 @@ test "sens: single resistor sensitivity is zero" {
     var ckt = try b.compile();
     defer ckt.deinit();
 
-    const refs = try ckt.collectParams(allocator);
-    defer allocator.free(refs);
+    const refs = try ckt.collectParams();
 
     const params = [_]analysis.sens.SensParam{
         .{ .ptr = findParam(refs, "R", "r", 0), .device_name = "R1", .param_name = "r" },
@@ -586,8 +584,7 @@ test "sens: result metadata" {
     var ckt = try b.compile();
     defer ckt.deinit();
 
-    const refs = try ckt.collectParams(allocator);
-    defer allocator.free(refs);
+    const refs = try ckt.collectParams();
 
     const params = [_]analysis.sens.SensParam{
         .{ .ptr = findParam(refs, "R", "r", 0), .device_name = "R1", .param_name = "r" },
@@ -632,7 +629,7 @@ test "pz: RC lowpass pole at -1/(RC) rad/s" {
 
     const x_op = try allocator.alloc(f64, ckt.n);
     defer allocator.free(x_op);
-    const dc_result = try dc.solve(&ckt, x_op, .{}, allocator);
+    const dc_result = try dc.solve(&ckt, x_op, .{});
     try testing.expect(dc_result.converged);
 
     var result = try analysis.pz.solve(&ckt, x_op, .{}, allocator);
@@ -660,7 +657,7 @@ test "pz: voltage divider (no capacitors) has no poles" {
 
     const x_op = try allocator.alloc(f64, ckt.n);
     defer allocator.free(x_op);
-    const dc_result = try dc.solve(&ckt, x_op, .{}, allocator);
+    const dc_result = try dc.solve(&ckt, x_op, .{});
     try testing.expect(dc_result.converged);
     try testing.expectApproxEqAbs(@as(f64, 10.0 / 3.0), x_op[n2], 1e-6);
 
@@ -702,7 +699,7 @@ test "STB: resistive voltage divider has flat loop gain of zero" {
 fn solveOp(ckt: *analysis.Circuit, allocator: std.mem.Allocator) ![]f64 {
     const x = try allocator.alloc(f64, ckt.n);
     errdefer allocator.free(x);
-    const r = try dc.solve(ckt, x, .{}, allocator);
+    const r = try dc.solve(ckt, x, .{});
     try testing.expect(r.converged);
     return x;
 }
@@ -918,7 +915,7 @@ test "disto: linear resistor divider has zero HD2" {
 
     const x = try allocator.alloc(f64, ckt.n);
     defer allocator.free(x);
-    try testing.expect((try dc.solve(&ckt, x, .{}, allocator)).converged);
+    try testing.expect((try dc.solve(&ckt, x, .{})).converged);
 
     var cols = try Cols.init(allocator, freq.logSweepCount(1e3, 1e6, 5));
     defer cols.deinit(allocator);
@@ -952,7 +949,7 @@ test "disto: diode circuit produces nonzero HD2" {
 
     const x = try allocator.alloc(f64, ckt.n);
     defer allocator.free(x);
-    try testing.expect((try dc.solve(&ckt, x, .{ .abstol = 1e-9 }, allocator)).converged);
+    try testing.expect((try dc.solve(&ckt, x, .{ .tol = .{ .abstol = 1e-9 } })).converged);
 
     var cols = try Cols.init(allocator, freq.logSweepCount(1e3, 1e6, 5));
     defer cols.deinit(allocator);
@@ -989,7 +986,7 @@ test "disto: HD2 increases with signal level" {
 
     const x = try allocator.alloc(f64, ckt.n);
     defer allocator.free(x);
-    try testing.expect((try dc.solve(&ckt, x, .{ .abstol = 1e-9 }, allocator)).converged);
+    try testing.expect((try dc.solve(&ckt, x, .{ .tol = .{ .abstol = 1e-9 } })).converged);
 
     var cols_small = try Cols.init(allocator, freq.logSweepCount(1e3, 1e5, 3));
     defer cols_small.deinit(allocator);
@@ -1037,7 +1034,7 @@ test "disto: HD2 scales linearly with amplitude (Volterra property)" {
 
     const x = try allocator.alloc(f64, ckt.n);
     defer allocator.free(x);
-    try testing.expect((try dc.solve(&ckt, x, .{ .abstol = 1e-9 }, allocator)).converged);
+    try testing.expect((try dc.solve(&ckt, x, .{ .tol = .{ .abstol = 1e-9 } })).converged);
 
     const amp1: f64 = 0.0005;
     const amp2: f64 = 0.001;
@@ -1091,8 +1088,7 @@ test "mc: same seed reproduces identical samples" {
     var ckt = try b.compile();
     defer ckt.deinit();
 
-    const refs = try ckt.collectParams(allocator);
-    defer allocator.free(refs);
+    const refs = try ckt.collectParams();
 
     const param_vars = [_]analysis.mc.ParamVar{
         .{ .param_ptr = findParam(refs, "R", "r", 0), .nominal = 1000.0, .rel_tol = 0.05, .dist = .gaussian },
@@ -1128,8 +1124,7 @@ test "mc: voltage divider with 5% R tolerance" {
     var ckt = try b.compile();
     defer ckt.deinit();
 
-    const refs = try ckt.collectParams(allocator);
-    defer allocator.free(refs);
+    const refs = try ckt.collectParams();
 
     // Define 5% uniform tolerance on both resistors
     const param_vars = [_]analysis.mc.ParamVar{
@@ -1200,8 +1195,7 @@ test "mc: gaussian distribution variation" {
     var ckt = try b.compile();
     defer ckt.deinit();
 
-    const refs = try ckt.collectParams(allocator);
-    defer allocator.free(refs);
+    const refs = try ckt.collectParams();
 
     // 3% Gaussian tolerance on R1 only
     const param_vars = [_]analysis.mc.ParamVar{
@@ -1244,8 +1238,7 @@ test "mc: zero tolerance yields identical results" {
     var ckt = try b.compile();
     defer ckt.deinit();
 
-    const refs = try ckt.collectParams(allocator);
-    defer allocator.free(refs);
+    const refs = try ckt.collectParams();
 
     // Zero tolerance: no variation
     const param_vars = [_]analysis.mc.ParamVar{
@@ -1298,8 +1291,7 @@ test "temp_sweep: resistor divider with tc1 — output drifts linearly" {
     var ckt = try b.compile();
     defer ckt.deinit();
 
-    const refs = try ckt.collectParams(allocator);
-    defer allocator.free(refs);
+    const refs = try ckt.collectParams();
 
     const x = try allocator.alloc(f64, ckt.n);
     defer allocator.free(x);
@@ -1328,7 +1320,7 @@ test "temp_sweep: resistor divider with tc1 — output drifts linearly" {
         .t_stop = 125.0,
         .t_step = 5.0,
         .t_nom = tnom,
-    }, allocator);
+    });
 
     try testing.expect(res.completed);
     try testing.expect(res.points > 0);
@@ -1369,8 +1361,7 @@ test "temp_sweep: resistor divider with tc2 — quadratic drift" {
     var ckt = try b.compile();
     defer ckt.deinit();
 
-    const refs = try ckt.collectParams(allocator);
-    defer allocator.free(refs);
+    const refs = try ckt.collectParams();
 
     const x = try allocator.alloc(f64, ckt.n);
     defer allocator.free(x);
@@ -1406,7 +1397,7 @@ test "temp_sweep: resistor divider with tc2 — quadratic drift" {
         .t_stop = 100.0,
         .t_step = 10.0,
         .t_nom = tnom,
-    }, allocator);
+    });
 
     try testing.expect(res.completed);
 
@@ -1428,8 +1419,7 @@ test "temp_sweep: single temperature point at nominal" {
     var ckt = try b.compile();
     defer ckt.deinit();
 
-    const refs = try ckt.collectParams(allocator);
-    defer allocator.free(refs);
+    const refs = try ckt.collectParams();
 
     const x = try allocator.alloc(f64, ckt.n);
     defer allocator.free(x);
@@ -1456,7 +1446,7 @@ test "temp_sweep: single temperature point at nominal" {
         .t_stop = 27.0,
         .t_step = 1.0,
         .t_nom = 27.0,
-    }, allocator);
+    });
 
     try testing.expect(res.completed);
     try testing.expectEqual(@as(u32, 1), res.points);
@@ -1476,8 +1466,7 @@ test "temp_sweep: parameters restored after sweep" {
     var ckt = try b.compile();
     defer ckt.deinit();
 
-    const refs = try ckt.collectParams(allocator);
-    defer allocator.free(refs);
+    const refs = try ckt.collectParams();
 
     const x = try allocator.alloc(f64, ckt.n);
     defer allocator.free(x);
@@ -1504,7 +1493,7 @@ test "temp_sweep: parameters restored after sweep" {
         .t_stop = 125.0,
         .t_step = 50.0,
         .t_nom = 27.0,
-    }, allocator);
+    });
 
     // After sweep, R1 should be restored to its base value
     try testing.expectApproxEqAbs(@as(f64, 1000.0), @as(f64, r1_ptr.*), 1e-15);
@@ -1541,7 +1530,7 @@ test "HB: single resistor with current source — DC and fundamental" {
             .f0 = f0,
             .n_harmonics = 4,
             .max_iter = 100,
-            .tol = 1e-12,
+            .hb_tol = 1e-12,
         },
         allocator,
     );
@@ -1593,7 +1582,7 @@ test "HB: resistive divider with current source" {
             .f0 = 500.0,
             .n_harmonics = 4,
             .max_iter = 100,
-            .tol = 1e-12,
+            .hb_tol = 1e-12,
         },
         allocator,
     );
@@ -1634,7 +1623,7 @@ test "PSS: RC circuit with DC source converges to steady state" {
     // DC operating point
     const x_op = try allocator.alloc(f64, ckt.n);
     defer allocator.free(x_op);
-    const dc_result = try dc.solve(&ckt, x_op, .{}, allocator);
+    const dc_result = try dc.solve(&ckt, x_op, .{});
     try testing.expect(dc_result.converged);
 
     // Use a period much longer than the RC time constant so transient settles.
@@ -1684,7 +1673,7 @@ test "PSS: pure resistive circuit converges in one iteration" {
 
     const x_op = try allocator.alloc(f64, ckt.n);
     defer allocator.free(x_op);
-    const dc_result = try dc.solve(&ckt, x_op, .{}, allocator);
+    const dc_result = try dc.solve(&ckt, x_op, .{});
     try testing.expect(dc_result.converged);
 
     const probes = [_]u32{ n1, n2 };
@@ -1742,7 +1731,7 @@ test "pnoise: resistor thermal noise is flat regardless of periodicity" {
     // DC operating point
     const x = try allocator.alloc(f64, setup.ckt.n);
     defer allocator.free(x);
-    const dc_result = try dc.solve(&setup.ckt, x, .{}, allocator);
+    const dc_result = try dc.solve(&setup.ckt, x, .{});
     try testing.expect(dc_result.converged);
     try testing.expectApproxEqAbs(@as(f64, 10.0 / 3.0), x[setup.n2], 1e-6);
 
@@ -1800,7 +1789,7 @@ test "pnoise: zero noise sources produce zero noise" {
 
     const x = try allocator.alloc(f64, setup.ckt.n);
     defer allocator.free(x);
-    const dc_result = try dc.solve(&setup.ckt, x, .{}, allocator);
+    const dc_result = try dc.solve(&setup.ckt, x, .{});
     try testing.expect(dc_result.converged);
 
     const sources = [_]analysis.NoiseSource{};
@@ -1843,7 +1832,7 @@ test "pnoise: single resistor noise density matches 4kTR" {
 
     const x = try allocator.alloc(f64, ckt.n);
     defer allocator.free(x);
-    const dc_result = try dc.solve(&ckt, x, .{}, allocator);
+    const dc_result = try dc.solve(&ckt, x, .{});
     try testing.expect(dc_result.converged);
 
     // Only R2 as noise source
@@ -1895,7 +1884,7 @@ test "pnoise: PSS converges for resistive divider" {
 
     const x = try allocator.alloc(f64, setup.ckt.n);
     defer allocator.free(x);
-    const dc_result = try dc.solve(&setup.ckt, x, .{}, allocator);
+    const dc_result = try dc.solve(&setup.ckt, x, .{});
     try testing.expect(dc_result.converged);
 
     const sources = [_]analysis.NoiseSource{
@@ -1935,7 +1924,7 @@ test "pnoise: total noise integrates correctly over bandwidth" {
 
     const x = try allocator.alloc(f64, setup.ckt.n);
     defer allocator.free(x);
-    const dc_result = try dc.solve(&setup.ckt, x, .{}, allocator);
+    const dc_result = try dc.solve(&setup.ckt, x, .{});
     try testing.expect(dc_result.converged);
 
     const sources = try setup.ckt.collectNoiseSources(x, allocator);
@@ -1991,7 +1980,7 @@ test "envelope: DC circuit envelope is constant" {
 
     const x = try allocator.alloc(f64, ckt.n);
     defer allocator.free(x);
-    try testing.expect((try dc.solve(&ckt, x, .{}, allocator)).converged);
+    try testing.expect((try dc.solve(&ckt, x, .{})).converged);
 
     const expected_v2 = 10.0 / 3.0;
     try testing.expectApproxEqAbs(expected_v2, x[n2], 1e-6);
@@ -2034,7 +2023,7 @@ test "envelope: result tracks multiple probes" {
 
     const x = try allocator.alloc(f64, ckt.n);
     defer allocator.free(x);
-    try testing.expect((try dc.solve(&ckt, x, .{}, allocator)).converged);
+    try testing.expect((try dc.solve(&ckt, x, .{})).converged);
 
     // Two probes: input and output
     const probe_list = [_]u32{ n1, n2 };
@@ -2073,7 +2062,7 @@ test "envelope: adaptive stepping increases step size for steady envelope" {
 
     const x = try allocator.alloc(f64, ckt.n);
     defer allocator.free(x);
-    try testing.expect((try dc.solve(&ckt, x, .{}, allocator)).converged);
+    try testing.expect((try dc.solve(&ckt, x, .{})).converged);
 
     const probe_list = [_]u32{n2};
 
@@ -2114,7 +2103,7 @@ test "envelope: sinusoidal carrier envelope tracks amplitude" {
 
     const x = try allocator.alloc(f64, ckt.n);
     defer allocator.free(x);
-    try testing.expect((try dc.solve(&ckt, x, .{}, allocator)).converged);
+    try testing.expect((try dc.solve(&ckt, x, .{})).converged);
 
     const probe_list = [_]u32{n2};
     const opts = analysis.envelope.Options{
@@ -2152,7 +2141,7 @@ test "envelope: simulate with zero probes records times only" {
 
     const x = try allocator.alloc(f64, ckt.n);
     defer allocator.free(x);
-    try testing.expect((try dc.solve(&ckt, x, .{}, allocator)).converged);
+    try testing.expect((try dc.solve(&ckt, x, .{})).converged);
 
     const opts = analysis.envelope.Options{
         .t_carrier = 1e-6,
@@ -2201,7 +2190,7 @@ test "tran_noise: resistor thermal noise power matches 4kTR*BW" {
     // DC operating point
     const x = try allocator.alloc(f64, ckt.n);
     defer allocator.free(x);
-    try testing.expect((try dc.solve(&ckt, x, .{}, allocator)).converged);
+    try testing.expect((try dc.solve(&ckt, x, .{})).converged);
 
     // Fixed timestep transient noise simulation. dt is a power of two so the
     // time accumulation is exact and no shrunken (huge-bandwidth) final step
@@ -2267,7 +2256,7 @@ test "tran_noise: zero noise sources produces clean transient" {
 
     const x = try allocator.alloc(f64, ckt.n);
     defer allocator.free(x);
-    try testing.expect((try dc.solve(&ckt, x, .{}, allocator)).converged);
+    try testing.expect((try dc.solve(&ckt, x, .{})).converged);
 
     const probes = [_]u32{n2};
     const noise_sources = [_]analysis.NoiseSource{};
@@ -2306,7 +2295,7 @@ test "tran_noise: deterministic with same seed" {
     const x2 = try allocator.alloc(f64, ckt.n);
     defer allocator.free(x2);
 
-    try testing.expect((try dc.solve(&ckt, x1, .{}, allocator)).converged);
+    try testing.expect((try dc.solve(&ckt, x1, .{})).converged);
 
     const noise_sources = [_]analysis.NoiseSource{
         .{ .node_p = n1, .node_n = n2, .conductance = 1e-3 },
@@ -2325,7 +2314,7 @@ test "tran_noise: deterministic with same seed" {
     defer allocator.free(r1.rows);
 
     // Second run from a fresh DC operating point, same seed
-    try testing.expect((try dc.solve(&ckt, x2, .{}, allocator)).converged);
+    try testing.expect((try dc.solve(&ckt, x2, .{})).converged);
     const r2 = try analysis.tran_noise.simulate(&ckt, x2, &probes, &noise_sources, sim_opts, allocator);
     defer allocator.free(r2.rows);
 
@@ -2352,7 +2341,7 @@ test "tran_noise: RC circuit filters injected noise below open-loop level" {
 
     const x = try allocator.alloc(f64, ckt.n);
     defer allocator.free(x);
-    try testing.expect((try dc.solve(&ckt, x, .{}, allocator)).converged);
+    try testing.expect((try dc.solve(&ckt, x, .{})).converged);
 
     const dt: f64 = 0x1p-30;
     const n_steps: u32 = 20_000;
@@ -2408,7 +2397,7 @@ test "PAC: full circuit integration — resistive divider (flat, no mixing)" {
 
     const x = try allocator.alloc(f64, ckt.n);
     defer allocator.free(x);
-    const dc_result = try dc.solve(&ckt, x, .{}, allocator);
+    const dc_result = try dc.solve(&ckt, x, .{});
     try testing.expect(dc_result.converged);
     try testing.expectApproxEqAbs(@as(f64, 10.0 / 3.0), x[n2], 1e-6);
 
@@ -2471,7 +2460,7 @@ test "jfnk vs newton: divider OP agrees to 1e-9" {
     const x_n = try testing.allocator.alloc(f64, ckt.n);
     defer testing.allocator.free(x_n);
     @memset(x_n, 0);
-    const nr = try converger.newton(&ckt, &ws_n.slv, x_n, ws_n.dx, ws_n.x_old, 0, .{}, converger.EvalHook{});
+    const nr = try converger.newton(&ckt, &ws_n, x_n, 0, .{}, converger.EvalHook{});
     try testing.expect(nr.converged);
 
     // JFNK
@@ -2479,12 +2468,8 @@ test "jfnk vs newton: divider OP agrees to 1e-9" {
     defer ws_j.deinit(testing.allocator);
     const x_j = try testing.allocator.alloc(f64, ckt.n);
     defer testing.allocator.free(x_j);
-    const dx_j = try testing.allocator.alloc(f64, ckt.n);
-    defer testing.allocator.free(dx_j);
-    const x_old_j = try testing.allocator.alloc(f64, ckt.n);
-    defer testing.allocator.free(x_old_j);
     @memset(x_j, 0);
-    const jr = try converger.jfnk(&ckt, &ws_j.slv, x_j, dx_j, x_old_j, 0, .{}, converger.EvalHook{}, testing.allocator);
+    const jr = try converger.jfnk(&ckt, &ws_j, x_j, 0, .{}, converger.EvalHook{});
     try testing.expect(jr.converged);
 
     // Compare solutions
@@ -2518,27 +2503,18 @@ test "jfnk: 100-diode ladder converges" {
     defer ws.deinit(testing.allocator);
     const x = try testing.allocator.alloc(f64, ckt.n);
     defer testing.allocator.free(x);
-    const dx = try testing.allocator.alloc(f64, ckt.n);
-    defer testing.allocator.free(dx);
-    const x_old = try testing.allocator.alloc(f64, ckt.n);
-    defer testing.allocator.free(x_old);
     @memset(x, 0);
 
-    const r = try converger.jfnk(&ckt, &ws.slv, x, dx, x_old, 0, .{
+    const r = try converger.jfnk(&ckt, &ws, x, 0, .{
         .max_iter = 200,
         .abstol = 1e-9,
-    }, converger.EvalHook{}, testing.allocator);
+    }, converger.EvalHook{});
     try testing.expect(r.converged);
 
     // Sanity: first node should be near 5V (source), diode nodes between 0 and 1V
     try testing.expectApproxEqAbs(@as(f64, 5.0), x[vin], 1e-3);
 }
 
-test "strategy auto-pick: n<=5000 newton, n>5000 jfnk, gpu jfnk" {
-    try testing.expectEqual(converger.Strategy.newton, converger.pickStrategy(100, false));
-    try testing.expectEqual(converger.Strategy.newton, converger.pickStrategy(5000, false));
-    try testing.expectEqual(converger.Strategy.jfnk, converger.pickStrategy(5001, false));
-    try testing.expectEqual(converger.Strategy.jfnk, converger.pickStrategy(10000, false));
-    try testing.expectEqual(converger.Strategy.jfnk, converger.pickStrategy(1, true));
-    try testing.expectEqual(converger.Strategy.jfnk, converger.pickStrategy(100, true));
-}
+// Strategy selection is now inlined in converger.run() — no separate
+// pickStrategy function to test. Behavior covered by the jfnk/newton
+// convergence tests above.

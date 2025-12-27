@@ -1,0 +1,106 @@
+//! AC small-signal sweep: one eval() linearizes (the planes are G and C),
+//! then every frequency point is a fill + factor + solve. No circuit
+//! contact inside the sweep.
+const std = @import("std");
+const root = @import("../root.zig");
+const converger = @import("../helper/converger.zig");
+const FreqSolver = root.solvers.freq_solve.FreqSolver;
+const freq = @import("../helper/freq.zig");
+
+pub const Complex = freq.Complex;
+
+pub const Options = struct {
+    tol: converger.Tolerances = .{},
+    f_start: f64,
+    f_stop: f64,
+    points_per_decade: u16 = 10,
+};
+
+/// AC small-signal sweep. Excitation goes on the source vsource's BRANCH row
+/// (its branch equation is v_p − v_n − V = 0, so rhs[branch] = V_ac); driving
+/// the clamped + node instead yields identically zero response.
+///
+/// Caller owns the output: freqs[n_points], resp[probes.len * n_points]
+/// flat, probe-major (resp[p * n_points + k]). No per-point allocation.
+pub fn sweep(
+    ckt: *root.Circuit,
+    x_op: []const f64,
+    ac_branch: u32,
+    ac_mag: f64,
+    ac_phase_deg: f64,
+    probes: []const u32,
+    freqs: []f64,
+    resp: []Complex,
+    options: Options,
+    allocator: std.mem.Allocator,
+) !void {
+    const n: usize = ckt.n;
+    const nn = 2 * n;
+    const n_points = freqs.len;
+    std.debug.assert(resp.len == probes.len * n_points);
+
+    var fs = try FreqSolver.fromCircuit(allocator, ckt, x_op);
+    defer fs.deinit(allocator);
+
+    const rhs = try allocator.alloc(f64, nn);
+    defer allocator.free(rhs);
+    const x_work = try allocator.alloc(f64, nn);
+    defer allocator.free(x_work);
+
+    @memset(rhs, 0);
+    const phase_rad = ac_phase_deg * (std.math.pi / 180.0);
+    rhs[ac_branch] = ac_mag * @cos(phase_rad);
+    rhs[n + ac_branch] = ac_mag * @sin(phase_rad);
+
+    var sw = freq.logSweep(options.f_start, options.f_stop, options.points_per_decade);
+    var k: usize = 0;
+    while (sw.next()) |f| : (k += 1) {
+        try fs.solve(2.0 * std.math.pi * f, rhs, x_work);
+
+        freqs[k] = f;
+        for (probes, 0..) |node, p| {
+            resp[p * n_points + k] = .{
+                .re = x_work[node],
+                .im = x_work[n + node],
+            };
+        }
+    }
+}
+
+/// Contract entry: unit excitation on the first source branch, complex
+/// response at every probe. Data layout: point-major (freq, probes...) with
+/// (re, im) per variable.
+pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
+    const a = ctx.allocator;
+    const x_op = ctx.x_op orelse return error.NoOperatingPoint;
+    const n_points = freq.logSweepCount(opts.f_start, opts.f_stop, opts.points_per_decade);
+
+    const freqs = try a.alloc(f64, n_points);
+    defer a.free(freqs);
+    const resp = try a.alloc(Complex, ctx.probes.len * n_points);
+    defer a.free(resp);
+
+    try sweep(ctx.circuit, x_op, ctx.source_branch, 1.0, 0.0, ctx.probes, freqs, resp, opts, a);
+
+    const names = try root.probeNames(ctx, "frequency");
+    const ncols = names.len;
+    const data = try a.alloc(f64, n_points * ncols * 2);
+    for (0..n_points) |p| {
+        const row = data[p * ncols * 2 ..][0 .. ncols * 2];
+        row[0] = freqs[p];
+        row[1] = 0;
+        for (0..ctx.probes.len) |idx| {
+            const c = resp[idx * n_points + p];
+            row[(idx + 1) * 2] = c.re;
+            row[(idx + 1) * 2 + 1] = c.im;
+        }
+    }
+
+    return .{
+        .plotname = "AC Analysis",
+        .varnames = names,
+        .is_complex = true,
+        .npoints = n_points,
+        .data = data,
+    };
+}
