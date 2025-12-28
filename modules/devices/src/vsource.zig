@@ -59,53 +59,56 @@ pub const Model = struct {
     // ---- PULSE: PULSE(V1 V2 TD TR TF PW PER PHASE) ----
     pulse_v1: f32 = 0.0,
     pulse_v2: f32 = 0.0,
-    pulse_td: f32 = 0.0,
-    pulse_tr: f32 = 1.0e-9,
-    pulse_tf: f32 = 1.0e-9,
-    pulse_pw: f32 = 1.0e-9,
-    pulse_per: f32 = 2.0e-9,
-    pulse_phase: f32 = 0.0,
+    pulse_td: f64 = 0.0,
+    // ngspice defaults: TR = TF = TSTEP, PW = PER = TSTOP. Unknown at struct
+    // init — netlist.zig resolves the -1 sentinels from the .tran directive
+    // (an unspecified PULSE is a step, not a 2ns square wave).
+    pulse_tr: f64 = -1.0,
+    pulse_tf: f64 = -1.0,
+    pulse_pw: f64 = -1.0,
+    pulse_per: f64 = -1.0,
+    pulse_phase: f64 = 0.0,
 
     // ---- SIN: SIN(VO VA FREQ TD THETA PHASE) ----
     sin_vo: f32 = 0.0,
     sin_va: f32 = 0.0,
-    sin_freq: f32 = 0.0,
-    sin_td: f32 = 0.0,
-    sin_theta: f32 = 0.0,
-    sin_phase: f32 = 0.0,
+    sin_freq: f64 = 0.0,
+    sin_td: f64 = 0.0,
+    sin_theta: f64 = 0.0,
+    sin_phase: f64 = 0.0,
 
     // ---- EXP: EXP(V1 V2 TD1 TAU1 TD2 TAU2) ----
     exp_v1: f32 = 0.0,
     exp_v2: f32 = 0.0,
-    exp_td1: f32 = 0.0,
-    exp_tau1: f32 = 1.0e-9,
-    exp_td2: f32 = 0.0,
-    exp_tau2: f32 = 1.0e-9,
+    exp_td1: f64 = 0.0,
+    exp_tau1: f64 = 1.0e-9,
+    exp_td2: f64 = 0.0,
+    exp_tau2: f64 = 1.0e-9,
 
     // ---- PWL: PWL(T1 V1 T2 V2 ...) ----
-    pwl_times: [max_pwl]f32 = [_]f32{0.0} ** max_pwl,
-    pwl_values: [max_pwl]f32 = [_]f32{0.0} ** max_pwl,
+    pwl_times: [max_pwl]f64 = [_]f64{0.0} ** max_pwl,
+    pwl_values: [max_pwl]f64 = [_]f64{0.0} ** max_pwl,
     pwl_len: i32 = 0,
-    pwl_repeat: f32 = 0.0,
-    pwl_td: f32 = 0.0,
+    pwl_repeat: f64 = 0.0,
+    pwl_td: f64 = 0.0,
 
     // ---- SFFM: SFFM(VO VA FC MDI FS PHASEC PHASES) ----
     sffm_vo: f32 = 0.0,
     sffm_va: f32 = 0.0,
-    sffm_fc: f32 = 0.0,
+    sffm_fc: f64 = 0.0,
     sffm_mdi: f32 = 0.0,
-    sffm_fs: f32 = 0.0,
-    sffm_phasec: f32 = 0.0,
-    sffm_phases: f32 = 0.0,
+    sffm_fs: f64 = 0.0,
+    sffm_phasec: f64 = 0.0,
+    sffm_phases: f64 = 0.0,
 
     // ---- AM: AM(VA VO MF FC TD PHASEC PHASES) ----
     am_va: f32 = 0.0,
     am_vo: f32 = 0.0,
-    am_mf: f32 = 0.0,
-    am_fc: f32 = 0.0,
-    am_td: f32 = 0.0,
-    am_phasec: f32 = 0.0,
-    am_phases: f32 = 0.0,
+    am_mf: f64 = 0.0,
+    am_fc: f64 = 0.0,
+    am_td: f64 = 0.0,
+    am_phasec: f64 = 0.0,
+    am_phases: f64 = 0.0,
 };
 
 // ---------------------------------------------------------------------------
@@ -143,9 +146,11 @@ fn sourceVoltage(model: *const Model, t: f64) f64 {
     const p_v1: f64 = @as(f64, model.pulse_v1);
     const p_v2: f64 = @as(f64, model.pulse_v2);
     const p_td: f64 = @as(f64, model.pulse_td);
+    // Unresolved -1 sentinels (direct Model construction, no netlist pass):
+    // near-instant edges, never-falling pulse.
     const p_tr: f64 = @max(@as(f64, model.pulse_tr), 1.0e-12);
     const p_tf: f64 = @max(@as(f64, model.pulse_tf), 1.0e-12);
-    const p_pw: f64 = @as(f64, model.pulse_pw);
+    const p_pw: f64 = if (model.pulse_pw < 0) 1.0e30 else @as(f64, model.pulse_pw);
     const p_per: f64 = @max(@as(f64, model.pulse_per), p_tr + p_pw + p_tf + 1.0e-12);
     const p_phase: f64 = @as(f64, model.pulse_phase);
 
@@ -324,7 +329,7 @@ pub fn nextBreakpoint(model: *const Model, t: f64) ?f64 {
     if (wf == WF_PULSE) {
         const td: f64 = @floatCast(model.pulse_td);
         const tr: f64 = @max(@as(f64, @floatCast(model.pulse_tr)), 1e-12);
-        const pw: f64 = @floatCast(model.pulse_pw);
+        const pw: f64 = if (model.pulse_pw < 0) 1.0e30 else @as(f64, model.pulse_pw);
         const tf: f64 = @max(@as(f64, @floatCast(model.pulse_tf)), 1e-12);
         const per: f64 = @max(@as(f64, @floatCast(model.pulse_per)), tr + pw + tf + 1e-12);
         if (t < td) return td;
@@ -340,6 +345,24 @@ pub fn nextBreakpoint(model: *const Model, t: f64) ?f64 {
             const bp: f64 = @as(f64, pt) + td;
             if (bp > t + 1e-18) return bp;
         }
+        return null;
+    } else if (wf == WF_SIN) {
+        // Derivative discontinuity at the delay only — ngspice registers no
+        // periodic breakpoints for smooth sources.
+        const td: f64 = @floatCast(model.sin_td);
+        if (td > t + 1e-18) return td;
+        return null;
+    } else if (wf == WF_EXP) {
+        const td1: f64 = @floatCast(model.exp_td1);
+        const td2: f64 = @floatCast(model.exp_td2);
+        const lo = @min(td1, td2);
+        const hi = @max(td1, td2);
+        if (lo > t + 1e-18) return lo;
+        if (hi > t + 1e-18) return hi;
+        return null;
+    } else if (wf == WF_AM) {
+        const td: f64 = @floatCast(model.am_td);
+        if (td > t + 1e-18) return td;
         return null;
     }
     return null;

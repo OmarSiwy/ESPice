@@ -49,46 +49,48 @@ pub const Instance = struct {
     // ---- PULSE waveform ----
     pulse_i1: f32 = 0.0,
     pulse_i2: f32 = 0.0,
-    pulse_td: f32 = 0.0,
-    pulse_tr: f32 = 1.0e-9,
-    pulse_tf: f32 = 1.0e-9,
-    pulse_pw: f32 = 1.0e-9,
-    pulse_per: f32 = 2.0e-9,
-    pulse_phase: f32 = 0.0,
+    pulse_td: f64 = 0.0,
+    // ngspice defaults: TR = TF = TSTEP, PW = PER = TSTOP. netlist.zig
+    // resolves the -1 sentinels from the .tran directive.
+    pulse_tr: f64 = -1.0,
+    pulse_tf: f64 = -1.0,
+    pulse_pw: f64 = -1.0,
+    pulse_per: f64 = -1.0,
+    pulse_phase: f64 = 0.0,
 
     // ---- SIN waveform ----
     sin_ioff: f32 = 0.0,
     sin_iamp: f32 = 0.0,
-    sin_freq: f32 = 0.0,
-    sin_td: f32 = 0.0,
-    sin_theta: f32 = 0.0,
-    sin_phase: f32 = 0.0,
+    sin_freq: f64 = 0.0,
+    sin_td: f64 = 0.0,
+    sin_theta: f64 = 0.0,
+    sin_phase: f64 = 0.0,
 
     // ---- EXP waveform ----
     exp_i1: f32 = 0.0,
     exp_i2: f32 = 0.0,
-    exp_td1: f32 = 0.0,
-    exp_tau1: f32 = 1.0e-9,
-    exp_td2: f32 = 0.0,
-    exp_tau2: f32 = 1.0e-9,
+    exp_td1: f64 = 0.0,
+    exp_tau1: f64 = 1.0e-9,
+    exp_td2: f64 = 0.0,
+    exp_tau2: f64 = 1.0e-9,
 
     // ---- SFFM waveform ----
     sffm_ioff: f32 = 0.0,
     sffm_iamp: f32 = 0.0,
-    sffm_fc: f32 = 0.0,
+    sffm_fc: f64 = 0.0,
     sffm_mdi: f32 = 0.0,
-    sffm_fs: f32 = 0.0,
-    sffm_phasec: f32 = 0.0,
-    sffm_phases: f32 = 0.0,
+    sffm_fs: f64 = 0.0,
+    sffm_phasec: f64 = 0.0,
+    sffm_phases: f64 = 0.0,
 
     // ---- AM waveform ----
     am_ia: f32 = 0.0,
     am_io: f32 = 0.0,
-    am_mf: f32 = 0.0,
-    am_fc: f32 = 0.0,
-    am_td: f32 = 0.0,
-    am_phasec: f32 = 0.0,
-    am_phases: f32 = 0.0,
+    am_mf: f64 = 0.0,
+    am_fc: f64 = 0.0,
+    am_td: f64 = 0.0,
+    am_phasec: f64 = 0.0,
+    am_phases: f64 = 0.0,
 };
 
 // ---------------------------------------------------------------------------
@@ -117,10 +119,11 @@ fn waveformCurrent(instance: *const Instance, t: f64) f64 {
     const p_i1: f64 = @as(f64, instance.pulse_i1);
     const p_i2: f64 = @as(f64, instance.pulse_i2);
     const p_td: f64 = @as(f64, instance.pulse_td);
-    const p_tr: f64 = @as(f64, instance.pulse_tr);
-    const p_tf: f64 = @as(f64, instance.pulse_tf);
-    const p_pw: f64 = @as(f64, instance.pulse_pw);
-    const p_per: f64 = @as(f64, instance.pulse_per);
+    // Unresolved -1 sentinels: near-instant edges, never-falling pulse.
+    const p_tr: f64 = @max(@as(f64, instance.pulse_tr), 1.0e-12);
+    const p_tf: f64 = @max(@as(f64, instance.pulse_tf), 1.0e-12);
+    const p_pw: f64 = if (instance.pulse_pw < 0) 1.0e30 else @as(f64, instance.pulse_pw);
+    const p_per: f64 = if (instance.pulse_per < 0) 1.0e30 else @as(f64, instance.pulse_per);
     const p_phase: f64 = @as(f64, instance.pulse_phase);
 
     // Before delay: output is I1

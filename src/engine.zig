@@ -231,10 +231,20 @@ fn buildJob(dir: types.Directive, sim: *const Simulation) ?Job {
     return switch (id) {
         .op => .{ .op = .{} },
         .tran => blk: {
+            // .tran tstep tstop [tstart [tmax]] [uic]
             const a0 = directiveNumber(dir, 0);
             const a1 = directiveNumber(dir, 1);
             const t_stop = a1 orelse a0 orelse break :blk null;
-            break :blk .{ .tran = .{ .t_stop = t_stop, .dt_init = if (a1 != null) a0.? else t_stop / 100.0 } };
+            // arg 2 is tstart (output suppression before tstart) — not wired.
+            // TODO: uic (skip OP, start from initial conditions) — not wired.
+            const tstep = if (a1 != null) a0.? else t_stop / 100.0;
+            // ngspice default tmax = min(tstep, (tstop-tstart)/50); an
+            // explicit 4th arg replaces it.
+            break :blk .{ .tran = .{
+                .t_stop = t_stop,
+                .dt_init = tstep,
+                .dt_max = directiveNumber(dir, 3) orelse @min(tstep, t_stop / 50.0),
+            } };
         },
         .ac => .{ .ac = .{
             .f_start = directiveNumber(dir, dir.args.len -| 2) orelse return null,

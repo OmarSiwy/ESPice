@@ -199,6 +199,26 @@ pub const NetBuilder = struct {
         };
     }
 
+    /// ngspice TRANinit semantics: PULSE TR/TF default to TSTEP, PW/PER to
+    /// TSTOP — resolvable only once the .tran directive is known. Patches the
+    /// -1 sentinels left by the Model/Instance defaults.
+    fn resolvePulseDefaults(self: *const NetBuilder, target: anytype) void {
+        var tstep: f64 = 1e-9;
+        var tstop: f64 = 1e30;
+        for (self.nl.directives) |dir| {
+            if (!std.ascii.eqlIgnoreCase(dir.kind, "tran")) continue;
+            const a0 = directiveNumber(dir, 0);
+            const a1 = directiveNumber(dir, 1);
+            if (a1 orelse a0) |ts| tstop = ts;
+            tstep = if (a1 != null) a0.? else tstop / 100.0;
+            break;
+        }
+        if (target.pulse_tr < 0) target.pulse_tr = tstep;
+        if (target.pulse_tf < 0) target.pulse_tf = tstep;
+        if (target.pulse_pw < 0) target.pulse_pw = tstop;
+        if (target.pulse_per < 0) target.pulse_per = tstop;
+    }
+
     pub fn build(self: *NetBuilder) !void {
         const dl = self.nl.devices;
         try self.addBucket(dl.bucket('v'));
@@ -245,6 +265,7 @@ pub const NetBuilder = struct {
                 model.dc = @floatCast(sourceDc(dev));
                 applySourceWaveform(&model, dev);
                 try applyKv(&model, dev.kv);
+                self.resolvePulseDefaults(&model);
                 const nodes = try deviceNodes(self.b, devices.vsource, dev);
                 const br = self.b.n;
                 try self.b.addDevice(devices.vsource, model, .{}, nodes);
@@ -264,6 +285,7 @@ pub const NetBuilder = struct {
                 instance.dc = @floatCast(sourceDc(dev));
                 applySourceWaveform(&instance, dev);
                 try applyKv(&instance, dev.kv);
+                self.resolvePulseDefaults(&instance);
                 try self.b.addDevice(devices.isource, .{}, instance, try deviceNodes(self.b, devices.isource, dev));
                 self.i_names[self.n_i] = dev.name;
                 self.n_i += 1;

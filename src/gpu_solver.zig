@@ -256,9 +256,9 @@ pub const GpuSolver = struct {
         hdr.t_stop = options.t_stop;
         hdr.dt_init = options.dt_init;
         hdr.dt_min = options.dt_min;
-        // SPICE2 heuristic: never exceed 2% of the interval (no history
-        // devices on the GPU path, so no min-delay clamp).
-        hdr.dt_max = @min(options.dt_max, options.t_stop / 50.0);
+        // ngspice tmax default: (tstop-tstart)/50; explicit tmax replaces it
+        // (no history devices on the GPU path, so no min-delay clamp).
+        hdr.dt_max = options.dt_max orelse options.t_stop / 50.0;
         hdr.chgtol = options.tol.chgtol;
         hdr.trtol = options.tol.trtol;
 
