@@ -59,53 +59,56 @@ pub const Model = struct {
     // ---- PULSE: PULSE(V1 V2 TD TR TF PW PER PHASE) ----
     pulse_v1: f32 = 0.0,
     pulse_v2: f32 = 0.0,
-    pulse_td: f32 = 0.0,
-    pulse_tr: f32 = 1.0e-9,
-    pulse_tf: f32 = 1.0e-9,
-    pulse_pw: f32 = 1.0e-9,
-    pulse_per: f32 = 2.0e-9,
-    pulse_phase: f32 = 0.0,
+    pulse_td: f64 = 0.0,
+    // ngspice defaults: TR = TF = TSTEP, PW = PER = TSTOP. Unknown at struct
+    // init — netlist.zig resolves the -1 sentinels from the .tran directive
+    // (an unspecified PULSE is a step, not a 2ns square wave).
+    pulse_tr: f64 = -1.0,
+    pulse_tf: f64 = -1.0,
+    pulse_pw: f64 = -1.0,
+    pulse_per: f64 = -1.0,
+    pulse_phase: f64 = 0.0,
 
     // ---- SIN: SIN(VO VA FREQ TD THETA PHASE) ----
     sin_vo: f32 = 0.0,
     sin_va: f32 = 0.0,
-    sin_freq: f32 = 0.0,
-    sin_td: f32 = 0.0,
-    sin_theta: f32 = 0.0,
-    sin_phase: f32 = 0.0,
+    sin_freq: f64 = 0.0,
+    sin_td: f64 = 0.0,
+    sin_theta: f64 = 0.0,
+    sin_phase: f64 = 0.0,
 
     // ---- EXP: EXP(V1 V2 TD1 TAU1 TD2 TAU2) ----
     exp_v1: f32 = 0.0,
     exp_v2: f32 = 0.0,
-    exp_td1: f32 = 0.0,
-    exp_tau1: f32 = 1.0e-9,
-    exp_td2: f32 = 0.0,
-    exp_tau2: f32 = 1.0e-9,
+    exp_td1: f64 = 0.0,
+    exp_tau1: f64 = 1.0e-9,
+    exp_td2: f64 = 0.0,
+    exp_tau2: f64 = 1.0e-9,
 
     // ---- PWL: PWL(T1 V1 T2 V2 ...) ----
-    pwl_times: [max_pwl]f32 = [_]f32{0.0} ** max_pwl,
-    pwl_values: [max_pwl]f32 = [_]f32{0.0} ** max_pwl,
+    pwl_times: [max_pwl]f64 = [_]f64{0.0} ** max_pwl,
+    pwl_values: [max_pwl]f64 = [_]f64{0.0} ** max_pwl,
     pwl_len: i32 = 0,
-    pwl_repeat: f32 = 0.0,
-    pwl_td: f32 = 0.0,
+    pwl_repeat: f64 = 0.0,
+    pwl_td: f64 = 0.0,
 
     // ---- SFFM: SFFM(VO VA FC MDI FS PHASEC PHASES) ----
     sffm_vo: f32 = 0.0,
     sffm_va: f32 = 0.0,
-    sffm_fc: f32 = 0.0,
+    sffm_fc: f64 = 0.0,
     sffm_mdi: f32 = 0.0,
-    sffm_fs: f32 = 0.0,
-    sffm_phasec: f32 = 0.0,
-    sffm_phases: f32 = 0.0,
+    sffm_fs: f64 = 0.0,
+    sffm_phasec: f64 = 0.0,
+    sffm_phases: f64 = 0.0,
 
     // ---- AM: AM(VA VO MF FC TD PHASEC PHASES) ----
     am_va: f32 = 0.0,
     am_vo: f32 = 0.0,
-    am_mf: f32 = 0.0,
-    am_fc: f32 = 0.0,
-    am_td: f32 = 0.0,
-    am_phasec: f32 = 0.0,
-    am_phases: f32 = 0.0,
+    am_mf: f64 = 0.0,
+    am_fc: f64 = 0.0,
+    am_td: f64 = 0.0,
+    am_phasec: f64 = 0.0,
+    am_phases: f64 = 0.0,
 };
 
 // ---------------------------------------------------------------------------
@@ -143,9 +146,11 @@ fn sourceVoltage(model: *const Model, t: f64) f64 {
     const p_v1: f64 = @as(f64, model.pulse_v1);
     const p_v2: f64 = @as(f64, model.pulse_v2);
     const p_td: f64 = @as(f64, model.pulse_td);
+    // Unresolved -1 sentinels (direct Model construction, no netlist pass):
+    // near-instant edges, never-falling pulse.
     const p_tr: f64 = @max(@as(f64, model.pulse_tr), 1.0e-12);
     const p_tf: f64 = @max(@as(f64, model.pulse_tf), 1.0e-12);
-    const p_pw: f64 = @as(f64, model.pulse_pw);
+    const p_pw: f64 = if (model.pulse_pw < 0) 1.0e30 else @as(f64, model.pulse_pw);
     const p_per: f64 = @max(@as(f64, model.pulse_per), p_tr + p_pw + p_tf + 1.0e-12);
     const p_phase: f64 = @as(f64, model.pulse_phase);
 
@@ -185,9 +190,9 @@ fn sourceVoltage(model: *const Model, t: f64) f64 {
     const s_phase_rad: f64 = @as(f64, model.sin_phase) * deg2rad;
 
     const t_sin = t - s_td;
-    const v_sin_before = s_vo + s_va * @sin(s_phase_rad);
+    const v_sin_before = s_vo + s_va * contract.fmath.sin(s_phase_rad);
     const damp_arg = @min(-s_theta * t_sin, 80.0);
-    const v_sin_after = s_vo + s_va * @sin(two_pi * s_freq * t_sin + s_phase_rad) * @exp(damp_arg);
+    const v_sin_after = s_vo + s_va * contract.fmath.sin(two_pi * s_freq * t_sin + s_phase_rad) * contract.fmath.exp(damp_arg);
     const v_sin = if (t_sin < 0.0) v_sin_before else v_sin_after;
 
     // ================================================================
@@ -204,11 +209,11 @@ fn sourceVoltage(model: *const Model, t: f64) f64 {
     const t_e2 = t - e_td2;
 
     const rise_exp_arg = @min(-t_e1 / e_tau1, 80.0);
-    const rise_comp = (e_v2 - e_v1) * (1.0 - @exp(rise_exp_arg));
+    const rise_comp = (e_v2 - e_v1) * (1.0 - contract.fmath.exp(rise_exp_arg));
     const rise_val = if (t_e1 > 0.0) rise_comp else 0.0;
 
     const fall_exp_arg = @min(-t_e2 / e_tau2, 80.0);
-    const fall_comp = (e_v1 - e_v2) * (1.0 - @exp(fall_exp_arg));
+    const fall_comp = (e_v1 - e_v2) * (1.0 - contract.fmath.exp(fall_exp_arg));
     const fall_val = if (t_e2 > 0.0) fall_comp else 0.0;
 
     const v_exp = e_v1 + rise_val + fall_val;
@@ -277,8 +282,8 @@ fn sourceVoltage(model: *const Model, t: f64) f64 {
     const fm_phasec_rad: f64 = @as(f64, model.sffm_phasec) * deg2rad;
     const fm_phases_rad: f64 = @as(f64, model.sffm_phases) * deg2rad;
 
-    const fm_mod = fm_mdi * @sin(two_pi * fm_fs * t + fm_phases_rad);
-    const v_sffm = fm_vo + fm_va * @sin(two_pi * fm_fc * t + fm_phasec_rad + fm_mod);
+    const fm_mod = fm_mdi * contract.fmath.sin(two_pi * fm_fs * t + fm_phases_rad);
+    const v_sffm = fm_vo + fm_va * contract.fmath.sin(two_pi * fm_fc * t + fm_phasec_rad + fm_mod);
 
     // ================================================================
     // AM waveform (waveform == 6)
@@ -291,8 +296,8 @@ fn sourceVoltage(model: *const Model, t: f64) f64 {
     const am_phasec_rad: f64 = @as(f64, model.am_phasec) * deg2rad;
     const am_phases_rad: f64 = @as(f64, model.am_phases) * deg2rad;
 
-    const am_envelope = am_vo + @sin(two_pi * am_mf * t + am_phases_rad);
-    const am_carrier = @sin(two_pi * am_fc_v * t + am_phasec_rad);
+    const am_envelope = am_vo + contract.fmath.sin(two_pi * am_mf * t + am_phases_rad);
+    const am_carrier = contract.fmath.sin(two_pi * am_fc_v * t + am_phasec_rad);
     const am_active = am_va * am_envelope * am_carrier;
     const v_am = if (t < am_td) 0.0 else am_active;
 
@@ -313,6 +318,54 @@ fn sourceVoltage(model: *const Model, t: f64) f64 {
         v_am
     else
         v_dc;
+}
+
+// ---------------------------------------------------------------------------
+// Breakpoints: return next discontinuity time after t for PULSE/PWL.
+// ---------------------------------------------------------------------------
+
+pub fn nextBreakpoint(model: *const Model, t: f64) ?f64 {
+    const wf = model.waveform;
+    if (wf == WF_PULSE) {
+        const td: f64 = @floatCast(model.pulse_td);
+        const tr: f64 = @max(@as(f64, @floatCast(model.pulse_tr)), 1e-12);
+        const pw: f64 = if (model.pulse_pw < 0) 1.0e30 else @as(f64, model.pulse_pw);
+        const tf: f64 = @max(@as(f64, @floatCast(model.pulse_tf)), 1e-12);
+        const per: f64 = @max(@as(f64, @floatCast(model.pulse_per)), tr + pw + tf + 1e-12);
+        if (t < td) return td;
+        const t_rel = t - td;
+        const cycle = @floor(t_rel / per);
+        const edges = [_]f64{ cycle * per + td, cycle * per + td + tr, cycle * per + td + tr + pw, cycle * per + td + tr + pw + tf, (cycle + 1) * per + td };
+        for (edges) |e| if (e > t + 1e-18) return e;
+        return (cycle + 1) * per + td;
+    } else if (wf == WF_PWL) {
+        const len: usize = @intCast(@max(model.pwl_len, 0));
+        const td: f64 = @floatCast(model.pwl_td);
+        for (model.pwl_times[0..len]) |pt| {
+            const bp: f64 = @as(f64, pt) + td;
+            if (bp > t + 1e-18) return bp;
+        }
+        return null;
+    } else if (wf == WF_SIN) {
+        // Derivative discontinuity at the delay only — ngspice registers no
+        // periodic breakpoints for smooth sources.
+        const td: f64 = @floatCast(model.sin_td);
+        if (td > t + 1e-18) return td;
+        return null;
+    } else if (wf == WF_EXP) {
+        const td1: f64 = @floatCast(model.exp_td1);
+        const td2: f64 = @floatCast(model.exp_td2);
+        const lo = @min(td1, td2);
+        const hi = @max(td1, td2);
+        if (lo > t + 1e-18) return lo;
+        if (hi > t + 1e-18) return hi;
+        return null;
+    } else if (wf == WF_AM) {
+        const td: f64 = @floatCast(model.am_td);
+        if (td > t + 1e-18) return td;
+        return null;
+    }
+    return null;
 }
 
 // ---------------------------------------------------------------------------
