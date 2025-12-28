@@ -65,6 +65,11 @@ const Api = struct {
         ?[*]iface.Arg,
     ) callconv(.c) CUresult,
     cuMemcpyDtoD_v2: *const fn (CUdeviceptr, CUdeviceptr, usize) callconv(.c) CUresult,
+    // Cooperative launch: all blocks co-resident (required for the software
+    // grid barrier in the analysis megakernel). No `extra` param on this one.
+    cuLaunchCooperativeKernel: *const fn (CUfunction, c_uint, c_uint, c_uint, c_uint, c_uint, c_uint, c_uint, CUstream, ?[*]iface.Arg) callconv(.c) CUresult,
+    cuOccupancyMaxActiveBlocksPerMultiprocessor: *const fn (*c_int, CUfunction, c_int, usize) callconv(.c) CUresult,
+    cuDeviceGetAttribute: *const fn (*c_int, c_int, CUdevice) callconv(.c) CUresult,
     cuStreamCreate: *const fn (*CUstream, c_uint) callconv(.c) CUresult,
     cuStreamDestroy_v2: *const fn (CUstream) callconv(.c) CUresult,
     cuStreamSynchronize: *const fn (CUstream) callconv(.c) CUresult,
@@ -158,6 +163,27 @@ pub const Context = struct {
         try check(g.cuModuleLoadData(&m.module, image.ptr), error.ModuleLoadFailed);
         return m;
     }
+
+    /// CUdevice_attribute values (cuda.h).
+    pub const attr_multiprocessor_count: c_int = 16;
+    pub const attr_cooperative_launch: c_int = 95;
+
+    pub fn deviceAttribute(self: *Context, attrib: c_int) Error!c_int {
+        var v: c_int = 0;
+        try check(g.cuDeviceGetAttribute(&v, attrib, self.device), error.NoDevice);
+        return v;
+    }
+
+    /// Max co-resident grid for a cooperative launch of `k` at `block_dim`:
+    /// occupancy-per-SM × SM count. 0 ⇒ cooperative launch unsupported.
+    pub fn maxCoopBlocks(self: *Context, k: Kernel, block_dim: u32, shared_bytes: usize) Error!u32 {
+        const coop = self.deviceAttribute(attr_cooperative_launch) catch 0;
+        if (coop == 0) return 0;
+        var per_sm: c_int = 0;
+        try check(g.cuOccupancyMaxActiveBlocksPerMultiprocessor(&per_sm, k.func, @intCast(block_dim), shared_bytes), error.LaunchFailed);
+        const sms = try self.deviceAttribute(attr_multiprocessor_count);
+        return @intCast(per_sm * sms);
+    }
 };
 
 pub const Buffer = struct {
@@ -170,6 +196,14 @@ pub const Buffer = struct {
 
     pub fn download(self: *Buffer, host: *anyopaque, n: usize) Error!void {
         try check(g.cuMemcpyDtoH_v2(host, self.handle, n), error.CopyFailed);
+    }
+
+    pub fn downloadAt(self: *Buffer, host: *anyopaque, offset: usize, n: usize) Error!void {
+        try check(g.cuMemcpyDtoH_v2(host, self.handle + offset, n), error.CopyFailed);
+    }
+
+    pub fn uploadAt(self: *Buffer, host: *const anyopaque, offset: usize, n: usize) Error!void {
+        try check(g.cuMemcpyHtoD_v2(self.handle + offset, host, n), error.CopyFailed);
     }
 
     pub fn free(self: *Buffer) void {
@@ -221,6 +255,24 @@ pub const Kernel = struct {
             stream,
             @constCast(args.ptr),
             null,
+        ), error.LaunchFailed);
+    }
+
+    /// Cooperative launch: driver guarantees all blocks are co-resident, so
+    /// a software grid barrier inside the kernel cannot deadlock. Grid must
+    /// be ≤ Context.maxCoopBlocks().
+    pub fn launchCooperative(self: Kernel, grid: Dim3, block: Dim3, shared_bytes: u32, args: []const iface.Arg, stream: CUstream) Error!void {
+        try check(g.cuLaunchCooperativeKernel(
+            self.func,
+            grid.x,
+            grid.y,
+            grid.z,
+            block.x,
+            block.y,
+            block.z,
+            shared_bytes,
+            stream,
+            @constCast(args.ptr),
         ), error.LaunchFailed);
     }
 };

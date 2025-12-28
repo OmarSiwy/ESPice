@@ -296,7 +296,7 @@ pub fn limit(model: *const Model, _: *const Instance, x_new: [n_u]f64, x_old: [n
 
     // Critical voltage: Vcrit = VT * ln(VT / (sqrt(2) * IS))
     // (thermal voltage at 300.15 K, no emission coefficient for MESFET)
-    const v_crit = vt * @log(vt / (@sqrt(2.0) * is_val));
+    const v_crit = vt * contract.fmath.log(vt / (@sqrt(2.0) * is_val));
 
     var result = x_new;
 
@@ -310,17 +310,17 @@ pub fn limit(model: *const Model, _: *const Instance, x_new: [n_u]f64, x_old: [n
         var vgs_limited = vgs_new;
         if (vgs_new > v_crit and @abs(vgs_new - vgs_old) > 2.0 * vt) {
             if (vgs_old > 0.0) {
-                const arg = (vgs_new - vgs_old) / vt;
+                const arg = 1.0 + (vgs_new - vgs_old) / vt;
                 if (arg > 0.0) {
                     // Case 1: arg > 0 => logarithmic damping
-                    vgs_limited = vgs_old + vt * (2.0 + @log(arg - 2.0));
+                    vgs_limited = vgs_old + vt * (2.0 + contract.fmath.log(arg));
                 } else {
                     // Case 2: arg <= 0
                     vgs_limited = v_crit;
                 }
             } else {
                 // Case 3: V_old <= 0
-                vgs_limited = vt * @log(vgs_new / vt);
+                vgs_limited = vt * contract.fmath.log(vgs_new / vt);
             }
         }
 
@@ -340,14 +340,14 @@ pub fn limit(model: *const Model, _: *const Instance, x_new: [n_u]f64, x_old: [n
         var vgd_limited = vgd_new;
         if (vgd_new > v_crit and @abs(vgd_new - vgd_old) > 2.0 * vt) {
             if (vgd_old > 0.0) {
-                const arg = (vgd_new - vgd_old) / vt;
+                const arg = 1.0 + (vgd_new - vgd_old) / vt;
                 if (arg > 0.0) {
-                    vgd_limited = vgd_old + vt * (2.0 + @log(arg - 2.0));
+                    vgd_limited = vgd_old + vt * (2.0 + contract.fmath.log(arg));
                 } else {
                     vgd_limited = v_crit;
                 }
             } else {
-                vgd_limited = vt * @log(vgd_new / vt);
+                vgd_limited = vt * contract.fmath.log(vgd_new / vt);
             }
         }
 
@@ -432,7 +432,7 @@ test "mesfet: forward-biased gate-source junction (Vgs=0.5, Vds=0)" {
     const model: Model = .{};
     const inst: Instance = .{};
     const is_val: f64 = @as(f64, model.is);
-    const ij = is_val * (@exp(0.5 / vt) - 1.0) + 1.0e-12 * 0.5;
+    const ij = is_val * (contract.fmath.exp(0.5 / vt) - 1.0) + 1.0e-12 * 0.5;
     const out = contract.evalValues(Self, .{ 0.0, 0.5, 0.0 }, &model, &inst, 0);
     // out[d] = Id - Igd = -ij ; out[g] = Igs + Igd = 2*ij ; out[s] = -Id - Igs = -ij
     try testing.expectApproxEqAbs(-ij, out[0], 1e-18);

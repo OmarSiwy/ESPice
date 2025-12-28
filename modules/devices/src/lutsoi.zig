@@ -584,11 +584,11 @@ pub const noise_gens = [_]contract.NoiseGen(Self){
 // Branchless helpers
 // ============================================================================
 inline fn safe_exp(x: f64) f64 {
-    return @exp(@min(x, 80.0));
+    return contract.fmath.exp(@min(x, 80.0));
 }
 
 inline fn safe_log(x: f64) f64 {
-    return @log(@max(x, 1e-38));
+    return contract.fmath.log(@max(x, 1e-38));
 }
 
 /// Smooth minimum: 0.5*(x+y-sqrt((x-y)^2+a))
@@ -665,13 +665,13 @@ inline fn chargeDensity(
 // Value-form (S) helpers -- mirror the f64 branchless helpers above but keep
 // the derivative flowing. Used only on x-dependent chains.
 // ============================================================================
-/// safe_exp on S: @exp(@min(x, 80)). minC clamps the argument (derivative
+/// safe_exp on S: contract.fmath.exp(@min(x, 80)). minC clamps the argument (derivative
 /// goes flat past 80, matching the f64 saturation).
 inline fn sExp(comptime S: type, x: S) S {
     return x.minC(80.0).exp();
 }
 
-/// safe_log on S: @log(@max(x, 1e-38)).
+/// safe_log on S: contract.fmath.log(@max(x, 1e-38)).
 inline fn sLog(comptime S: type, x: S) S {
     return x.maxC(1e-38).log();
 }
@@ -861,8 +861,8 @@ fn dcPrep(model: *const Model, instance: *const Instance) DcPrep {
     const vfblexp: f64 = @as(f64, model.vfblexp);
     const vfbl2: f64 = @as(f64, model.vfbl2);
     const vfblexp2: f64 = @as(f64, model.vfblexp2);
-    const vfbl_term = vfbl * @exp(vfblexp * safe_log(le_ratio));
-    const vfbl2_denom = 1.0 + vfbl2 * @exp(vfblexp2 * safe_log(le_ratio));
+    const vfbl_term = vfbl * contract.fmath.exp(vfblexp * safe_log(le_ratio));
+    const vfbl2_denom = 1.0 + vfbl2 * contract.fmath.exp(vfblexp2 * safe_log(le_ratio));
     const vfb_val = @as(f64, model.vfbo) + vfbl_term / @max(vfbl2_denom, 1e-30) + @as(f64, model.vfbw) * we_ratio + @as(f64, model.vfblw) * le_ratio * we_ratio + @as(f64, instance.delvto);
 
     const vfbb_val = @as(f64, model.vfbbo) + @as(f64, model.vfblbo) * (tbox / toxe) * vfbl_term / @max(vfbl2_denom, 1e-30);
@@ -879,7 +879,7 @@ fn dcPrep(model: *const Model, instance: *const Instance) DcPrep {
     const pscel: f64 = @as(f64, model.pscel);
     const pscelexp: f64 = @as(f64, model.pscelexp);
     const pscew: f64 = @as(f64, model.pscew);
-    const psce = 2.0 * pscel * @exp(pscelexp * safe_log(lambda_2d / l_e)) * (1.0 + pscew * we_ratio);
+    const psce = 2.0 * pscel * contract.fmath.exp(pscelexp * safe_log(lambda_2d / l_e)) * (1.0 + pscew * we_ratio);
     const psceb: f64 = @as(f64, model.pscebo);
     const pscedlb: f64 = @as(f64, model.pscedlbo);
 
@@ -887,11 +887,11 @@ fn dcPrep(model: *const Model, instance: *const Instance) DcPrep {
     const cfl_val: f64 = @as(f64, model.cfl);
     const cflexp_val: f64 = @as(f64, model.cflexp);
     const cfw_val: f64 = @as(f64, model.cfw);
-    const cf_val = cfl_val * @exp(cflexp_val * safe_log(lambda_2d / l_e)) * (1.0 + cfw_val * we_ratio);
+    const cf_val = cfl_val * contract.fmath.exp(cflexp_val * safe_log(lambda_2d / l_e)) * (1.0 + cfw_val * we_ratio);
     const cfb_val: f64 = @as(f64, model.cfbo);
     const cfd_val: f64 = @as(f64, model.cfdo);
     const stcfl: f64 = @as(f64, model.stcfl);
-    const stcf_val = stcfl * @exp(cflexp_val * safe_log(lambda_2d / l_e)) * (1.0 + cfw_val * we_ratio);
+    const stcf_val = stcfl * contract.fmath.exp(cflexp_val * safe_log(lambda_2d / l_e)) * (1.0 + cfw_val * we_ratio);
     const cfdll: f64 = @as(f64, model.cfdll);
     const cfdlw: f64 = @as(f64, model.cfdlw);
     const cfdl_val = cfdll * le_ratio * (1.0 + cfdlw * we_ratio);
@@ -932,7 +932,7 @@ fn dcPrep(model: *const Model, instance: *const Instance) DcPrep {
     const thesatlexp: f64 = @as(f64, model.thesatlexp);
     const thesatw: f64 = @as(f64, model.thesatw);
     const thesatlw: f64 = @as(f64, model.thesatlw);
-    const thesat_val = ge_val * (thesato + thesatl * @exp(thesatlexp * safe_log(le_ratio))) * (1.0 + thesatw * we_ratio) * (1.0 + thesatlw * le_ratio * we_ratio);
+    const thesat_val = ge_val * (thesato + thesatl * contract.fmath.exp(thesatlexp * safe_log(le_ratio))) * (1.0 + thesatw * we_ratio) * (1.0 + thesatlw * le_ratio * we_ratio);
 
     const stthesato: f64 = @as(f64, model.stthesato);
     const stthesatl: f64 = @as(f64, model.stthesatl);
@@ -946,7 +946,7 @@ fn dcPrep(model: *const Model, instance: *const Instance) DcPrep {
     const axlexp: f64 = @as(f64, model.axlexp);
     const axl2: f64 = @as(f64, model.axl2);
     const axlexp2: f64 = @as(f64, model.axlexp2);
-    const ax_val = axo / ((1.0 + axl * @exp(axlexp * safe_log(le_ratio))) * (1.0 + axl2 * @exp(axlexp2 * safe_log(le_ratio))));
+    const ax_val = axo / ((1.0 + axl * contract.fmath.exp(axlexp * safe_log(le_ratio))) * (1.0 + axl2 * contract.fmath.exp(axlexp2 * safe_log(le_ratio))));
     const ax_clamped = @max(@min(ax_val, 16.0), 1.0);
 
     const alpl1: f64 = @as(f64, model.alpl1);
@@ -954,7 +954,7 @@ fn dcPrep(model: *const Model, instance: *const Instance) DcPrep {
     const alpl2: f64 = @as(f64, model.alpl2);
     const alplexp2: f64 = @as(f64, model.alplexp2);
     const alpw: f64 = @as(f64, model.alpw);
-    const alp_val = (alpl1 * @exp(alplexp * safe_log(le_ratio)) + alpl2 * @exp(alplexp2 * safe_log(le_ratio))) * (1.0 + alpw * we_ratio);
+    const alp_val = (alpl1 * contract.fmath.exp(alplexp * safe_log(le_ratio)) + alpl2 * contract.fmath.exp(alplexp2 * safe_log(le_ratio))) * (1.0 + alpw * we_ratio);
     const alp_clamped = @max(alp_val, 0.0);
 
     const alp1l1: f64 = @as(f64, model.alp1l1);
@@ -962,7 +962,7 @@ fn dcPrep(model: *const Model, instance: *const Instance) DcPrep {
     const alp1l2: f64 = @as(f64, model.alp1l2);
     const alp1lexp2: f64 = @as(f64, model.alp1lexp2);
     const alp1w: f64 = @as(f64, model.alp1w);
-    const alp1_val = @max((alp1l1 * @exp(alp1lexp * safe_log(le_ratio)) + alp1l2 * @exp(alp1lexp2 * safe_log(le_ratio))) * (1.0 + alp1w * we_ratio), 0.0);
+    const alp1_val = @max((alp1l1 * contract.fmath.exp(alp1lexp * safe_log(le_ratio)) + alp1l2 * contract.fmath.exp(alp1lexp2 * safe_log(le_ratio))) * (1.0 + alp1w * we_ratio), 0.0);
 
     const vp_val: f64 = @as(f64, model.vpo);
     const vpg_val: f64 = @as(f64, model.vpgo);
@@ -980,7 +980,7 @@ fn dcPrep(model: *const Model, instance: *const Instance) DcPrep {
     const cslexp: f64 = @as(f64, model.cslexp);
     const csw: f64 = @as(f64, model.csw);
     const cslw: f64 = @as(f64, model.cslw);
-    const cs_val = cso * (1.0 + csl * @exp(cslexp * safe_log(le_ratio))) * (1.0 + csw * we_ratio) * (1.0 + cslw * le_ratio * we_ratio);
+    const cs_val = cso * (1.0 + csl * contract.fmath.exp(cslexp * safe_log(le_ratio))) * (1.0 + csw * we_ratio) * (1.0 + cslw * le_ratio * we_ratio);
 
     const stcso: f64 = @as(f64, model.stcso);
     const stcsl: f64 = @as(f64, model.stcsl);
@@ -993,7 +993,7 @@ fn dcPrep(model: *const Model, instance: *const Instance) DcPrep {
     const xcorlexp: f64 = @as(f64, model.xcorlexp);
     const xcorw: f64 = @as(f64, model.xcorw);
     const xcorlw: f64 = @as(f64, model.xcorlw);
-    const xcor_val = xcoro * (1.0 + xcorl * @exp(xcorlexp * safe_log(le_ratio))) * (1.0 + xcorw * we_ratio) * (1.0 + xcorlw * le_ratio * we_ratio);
+    const xcor_val = xcoro * (1.0 + xcorl * contract.fmath.exp(xcorlexp * safe_log(le_ratio))) * (1.0 + xcorw * we_ratio) * (1.0 + xcorlw * le_ratio * we_ratio);
 
     const stxcor: f64 = @as(f64, model.stxcoro);
     const feta: f64 = @as(f64, model.fetao);
@@ -1011,7 +1011,7 @@ fn dcPrep(model: *const Model, instance: *const Instance) DcPrep {
 
     // CLM gamma
     const ax_eff = @max(ax_clamped, 1.001);
-    const gamma_ax_base = @exp(0.375 * safe_log(216.0 / ax_eff - 1.0));
+    const gamma_ax_base = contract.fmath.exp(0.375 * safe_log(216.0 / ax_eff - 1.0));
     const gamma_ax = gamma_ax_base - 1.0;
 
     // Gate current
@@ -1171,7 +1171,7 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     const eg = eg_si + delta_eg;
 
     // Intrinsic concentration (Eq 4.13)
-    const n_eff = NI_FACT_300 / @sqrt(1.0 + 10.0 * xge) * @exp(1.5 * safe_log(t_kc / 300.0));
+    const n_eff = NI_FACT_300 / @sqrt(1.0 + 10.0 * xge) * contract.fmath.exp(1.5 * safe_log(t_kc / 300.0));
     _ = n_eff;
 
     // ========================================================================
@@ -1193,7 +1193,7 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     // Apply CICF / CIC to k1, k2 with PNCE narrow channel correction
     const k1 = k1_1d * cicf * pnce_body_factor;
     const k2 = k2_1d * cic * pnce_body_factor;
-    const a0 = @exp(-eg / (2.0 * phi_t0));
+    const a0 = contract.fmath.exp(-eg / (2.0 * phi_t0));
 
     // ========================================================================
     // 4.1.4 DIBL Internal Parameters (Eqs 4.29-4.31)
@@ -1206,34 +1206,34 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     // 4.1.8 Mobility Internal Parameters (Eqs 4.47-4.49)
     // ========================================================================
     const t_ratio = t_kr / t_kc;
-    const beta_n1 = betn * @exp(stbet * safe_log(t_ratio));
-    const beta_n2 = betn * betnb * @exp(stbet * safe_log(t_ratio));
+    const beta_n1 = betn * contract.fmath.exp(stbet * safe_log(t_ratio));
+    const beta_n2 = betn * betnb * contract.fmath.exp(stbet * safe_log(t_ratio));
 
     // MUE temperature (Eq 4.49)
     const mue: f64 = @as(f64, model.mueo);
     const stmue: f64 = @as(f64, model.stmueo);
-    const mu_e = mue * @exp(stmue * safe_log(t_ratio));
+    const mu_e = mue * contract.fmath.exp(stmue * safe_log(t_ratio));
 
     // THEMU temperature
     const themu: f64 = @as(f64, model.themuo);
     const stthemu: f64 = @as(f64, model.stthemuo);
-    const the_mu = themu * @exp(stthemu * safe_log(t_ratio));
+    const the_mu = themu * contract.fmath.exp(stthemu * safe_log(t_ratio));
 
     // THECS temperature
     const thecs: f64 = @as(f64, model.thecso);
     const stthecs: f64 = @as(f64, model.stthecso);
-    const the_cs = thecs * @exp(stthecs * safe_log(t_ratio));
+    const the_cs = thecs * contract.fmath.exp(stthecs * safe_log(t_ratio));
 
     // CS temperature
-    const cs_temp = cs_val * @exp(stcs_val * safe_log(t_ratio));
+    const cs_temp = cs_val * contract.fmath.exp(stcs_val * safe_log(t_ratio));
 
     // XCOR temperature
-    const xcor_temp = xcor_val * @exp(stxcor * safe_log(t_ratio));
+    const xcor_temp = xcor_val * contract.fmath.exp(stxcor * safe_log(t_ratio));
 
     // ========================================================================
     // 4.1.10 Velocity Saturation Internal Parameters (Eqs 4.60-4.61)
     // ========================================================================
-    const theta_sat = factuo * thesat_val * @exp((stthesat + stbet) * safe_log(t_ratio));
+    const theta_sat = factuo * thesat_val * contract.fmath.exp((stthesat + stbet) * safe_log(t_ratio));
     const f_vsat = phi_t * theta_sat;
 
     // ========================================================================
@@ -1252,7 +1252,7 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     // ========================================================================
     // Series resistance temperature
     // ========================================================================
-    const rs_t = rs_val * @exp(strso * safe_log(t_ratio));
+    const rs_t = rs_val * contract.fmath.exp(strso * safe_log(t_ratio));
 
     // ========================================================================
     // Terminal voltages
@@ -1621,7 +1621,7 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     const stbetedge: f64 = @as(f64, model.stbetedgeo) * (1.0 + @as(f64, model.stbetedgel) * le_ratio) * (1.0 + @as(f64, model.stbetedgew) * we_ratio) * (1.0 + @as(f64, model.stbetedgelw) * le_ratio * we_ratio);
 
     // Edge VFB
-    const vfbedge = @as(f64, model.vfbedgeo) + @as(f64, model.vfbedgel) * @exp(@as(f64, model.vfbedgelexp) * safe_log(le_ratio)) + @as(f64, model.vfbedgew) * we_ratio + @as(f64, model.vfbedgelw) * le_ratio * we_ratio;
+    const vfbedge = @as(f64, model.vfbedgeo) + @as(f64, model.vfbedgel) * contract.fmath.exp(@as(f64, model.vfbedgelexp) * safe_log(le_ratio)) + @as(f64, model.vfbedgew) * we_ratio + @as(f64, model.vfbedgelw) * le_ratio * we_ratio;
     const stvfbedge = @as(f64, model.stvfbedgeo) * (1.0 + @as(f64, model.stvfbedgel) * le_ratio) * (1.0 + @as(f64, model.stvfbedgew) * we_ratio) * (1.0 + @as(f64, model.stvfbedgelw) * le_ratio * we_ratio);
     const vfb1_edge = vfbedge + stvfbedge * delta_t;
 
@@ -1633,11 +1633,11 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     const cic_edge: f64 = @as(f64, model.cicedgeo);
 
     // Edge SCE
-    const psce_edge = 2.0 * @as(f64, model.psceedgel) * @exp(@as(f64, model.psceedgelexp) * safe_log(lambda_2d / l_e)) * (1.0 + @as(f64, model.psceedgew) * we_ratio);
+    const psce_edge = 2.0 * @as(f64, model.psceedgel) * contract.fmath.exp(@as(f64, model.psceedgelexp) * safe_log(lambda_2d / l_e)) * (1.0 + @as(f64, model.psceedgew) * we_ratio);
     const psceb_edge: f64 = @as(f64, model.pscebedgeo);
 
     // Edge DIBL
-    const cf_edge = @as(f64, model.cfedgel) * @exp(@as(f64, model.cfedgelexp) * safe_log(lambda_2d / l_e)) * (1.0 + @as(f64, model.cfedgew) * we_ratio);
+    const cf_edge = @as(f64, model.cfedgel) * contract.fmath.exp(@as(f64, model.cfedgelexp) * safe_log(lambda_2d / l_e)) * (1.0 + @as(f64, model.cfedgew) * we_ratio);
     const cfb_edge: f64 = @as(f64, model.cfbedgeo);
     const cfd_edge: f64 = @as(f64, model.cfdedgeo);
 
@@ -1677,7 +1677,7 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     const qi_d_edge = q1d_edge.scale(k1_edge).add(q2d_edge.scale(k2_edge));
 
     // Edge current (Eq 4.487)
-    const beta_n_edge = betnedge * wedge / l_e * @exp(stbetedge * safe_log(t_ratio));
+    const beta_n_edge = betnedge * wedge / l_e * contract.fmath.exp(stbetedge * safe_log(t_ratio));
 
     const ct_edge: f64 = @as(f64, model.ctedgeo);
     const phi_t_edge = phi_t0 * (1.0 + ct_edge * t_kr / t_kc);
@@ -1754,7 +1754,7 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     const strlambda: f64 = @as(f64, model.strlambda);
     const stralpha: f64 = @as(f64, model.stralpha);
     const strain_factor = 1.0 - safe_exp(-l_e / strlambda);
-    const strain_asym = @exp(stralpha * safe_log(@max(strain_factor, 1e-30)));
+    const strain_asym = contract.fmath.exp(stralpha * safe_log(@max(strain_factor, 1e-30)));
 
     const str_vth_shift = @as(f64, model.strdvfbo) * (1.0 + @as(f64, model.strwdvfbo) * we_ratio) * strain_factor;
     // STRDCFL: strained-SOI DIBL variation
@@ -1833,7 +1833,7 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     const rthw: f64 = @as(f64, model.rthw);
     const rthlw: f64 = @as(f64, model.rthlw);
     const strth: f64 = @as(f64, model.strtho);
-    const rth_base = rtho_sc / (l_e * w_e) * @exp(rthl * safe_log(le_ratio)) * @exp(rthw * safe_log(we_ratio)) * @exp(rthlw * safe_log(le_ratio * we_ratio));
+    const rth_base = rtho_sc / (l_e * w_e) * contract.fmath.exp(rthl * safe_log(le_ratio)) * contract.fmath.exp(rthw * safe_log(we_ratio)) * contract.fmath.exp(rthlw * safe_log(le_ratio * we_ratio));
     const rth = rth_base * (1.0 + strth * delta_t) / multf;
 
     const g_th: f64 = if (rth > 0.0) 1.0 / rth else GSHORT;
@@ -1977,7 +1977,7 @@ pub fn qFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *cons
     // For charge model, use AC-specific parameters if SWQMOD=1
     const k1 = k1_1d * cicf;
     const k2 = k2_1d * cic;
-    const a0 = @exp(-eg / (2.0 * phi_t0));
+    const a0 = contract.fmath.exp(-eg / (2.0 * phi_t0));
 
     // ========================================================================
     // Terminal voltages
@@ -2003,8 +2003,8 @@ pub fn qFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *cons
     // ========================================================================
     // VFB for charge model
     // ========================================================================
-    const vfbl_term = @as(f64, model.vfbl) * @exp(@as(f64, model.vfblexp) * safe_log(le_ratio));
-    const vfbl2_denom = 1.0 + @as(f64, model.vfbl2) * @exp(@as(f64, model.vfblexp2) * safe_log(le_ratio));
+    const vfbl_term = @as(f64, model.vfbl) * contract.fmath.exp(@as(f64, model.vfblexp) * safe_log(le_ratio));
+    const vfbl2_denom = 1.0 + @as(f64, model.vfbl2) * contract.fmath.exp(@as(f64, model.vfblexp2) * safe_log(le_ratio));
     const vfb_val = @as(f64, model.vfbo) + vfbl_term / @max(vfbl2_denom, 1e-30) + @as(f64, model.vfbw) * we_ratio + @as(f64, model.vfblw) * le_ratio * we_ratio + @as(f64, instance.delvto);
     const delta_t = t_kc - t_kr;
     const stvfb_val = @as(f64, model.stvfbo) * (1.0 + @as(f64, model.stvfbl) * le_ratio) * (1.0 + @as(f64, model.stvfbw) * we_ratio) * (1.0 + @as(f64, model.stvfblw) * le_ratio * we_ratio);
@@ -2022,12 +2022,12 @@ pub fn qFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *cons
         const psceacl: f64 = @as(f64, model.psceacl);
         const psceaclexp: f64 = @as(f64, model.psceaclexp);
         const psceacw: f64 = @as(f64, model.psceacw);
-        break :blk 2.0 * psceacl * @exp(psceaclexp * safe_log(lambda_2d / l_ecv)) * (1.0 + psceacw * we_ratio);
+        break :blk 2.0 * psceacl * contract.fmath.exp(psceaclexp * safe_log(lambda_2d / l_ecv)) * (1.0 + psceacw * we_ratio);
     } else blk: {
         const pscel: f64 = @as(f64, model.pscel);
         const pscelexp: f64 = @as(f64, model.pscelexp);
         const pscew: f64 = @as(f64, model.pscew);
-        break :blk 2.0 * pscel * @exp(pscelexp * safe_log(lambda_2d / l_ecv)) * (1.0 + pscew * we_ratio);
+        break :blk 2.0 * pscel * contract.fmath.exp(pscelexp * safe_log(lambda_2d / l_ecv)) * (1.0 + pscew * we_ratio);
     };
 
     // PSCEB for AC
@@ -2052,7 +2052,7 @@ pub fn qFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *cons
     // DIBL for charge
     const cfl_val: f64 = @as(f64, model.cfl);
     const cflexp_val: f64 = @as(f64, model.cflexp);
-    const cf_val = cfl_val * @exp(cflexp_val * safe_log(lambda_2d / l_ecv));
+    const cf_val = cfl_val * contract.fmath.exp(cflexp_val * safe_log(lambda_2d / l_ecv));
     const cfb_ac: f64 = @as(f64, model.cfbo);
     const cfd_val: f64 = @as(f64, model.cfdo);
     const x_d0 = cfd_val / phi_t;
@@ -2202,7 +2202,7 @@ pub fn qFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *cons
     const rthl: f64 = @as(f64, model.rthl);
     const rthw: f64 = @as(f64, model.rthw);
     const rthlw: f64 = @as(f64, model.rthlw);
-    const cth = ctho / (l_e * w_e) * @exp(rthl * safe_log(le_ratio)) * @exp(rthw * safe_log(we_ratio)) * @exp(rthlw * safe_log(le_ratio * we_ratio));
+    const cth = ctho / (l_e * w_e) * contract.fmath.exp(rthl * safe_log(le_ratio)) * contract.fmath.exp(rthw * safe_log(we_ratio)) * contract.fmath.exp(rthlw * safe_log(le_ratio * we_ratio));
     const q_th = if (model.swshe == 1) cth * delta_tc else 0.0;
 
     // ========================================================================

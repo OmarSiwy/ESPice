@@ -260,7 +260,9 @@ fn dcParams(model: *const Model, instance: *const Instance) DcParams {
     return .{
         .type_f = type_f,
         .vt = vt,
-        .vto = vto,
+        // All eval voltages are type-corrected (positive = on); the
+        // threshold must be too: PMOS VTO=-0.7 → +0.7 in eval space.
+        .vto = type_f * vto,
         .gamma = gamma,
         .phi = phi,
         .sqrt_phi = sqrt_phi,
@@ -350,7 +352,8 @@ fn qParams(model: *const Model, instance: *const Instance) QParams {
     return .{
         .type_f = type_f,
         .m_mult = m_mult,
-        .vto = vto,
+        // Type-corrected, same as dcParams.
+        .vto = type_f * vto,
         .gamma = gamma,
         .phi = phi,
         .sqrt_phi = sqrt_phi,
@@ -498,8 +501,8 @@ fn junctionCharge(comptime S: type, v: S, c0: f64, pb: f64, mjc: f64, fc: f64) S
         return x_dep.log().scale(one_minus_m).exp().neg().addC(1.0).scale(c0 * pb / one_minus_m);
     } else {
         // Forward bias: quadratic extrapolation past FC*PB
-        const f1 = (c0 * pb / one_minus_m) * (1.0 - @exp(one_minus_m * @log(one_minus_fc)));
-        const f2 = @exp((1.0 + mjc) * @log(one_minus_fc));
+        const f1 = (c0 * pb / one_minus_m) * (1.0 - contract.fmath.exp(one_minus_m * contract.fmath.log(one_minus_fc)));
+        const f2 = contract.fmath.exp((1.0 + mjc) * contract.fmath.log(one_minus_fc));
         const f3 = 1.0 - fc * (1.0 + mjc);
         const quad = v.mul(v).addC(-fc_pb * fc_pb).scale(mjc / (2.0 * pb));
         return v.addC(-fc_pb).scale(f3).add(quad).scale(c0 / f2).addC(f1);
@@ -664,8 +667,9 @@ pub fn limit(model: *const Model, instance: *const Instance, x_new: [n_u]f64, x_
     const sp = @intFromEnum(U.s_prime);
 
     const is_val: f64 = @as(f64, model.is);
-    const vto: f64 = @as(f64, model.vto);
     const type_f: f64 = @floatFromInt(model.type_);
+    // fetlim compares type-corrected vgs; the threshold must be too.
+    const vto: f64 = type_f * @as(f64, model.vto);
 
     const temp: f64 = @as(f64, instance.temp);
     const dtemp: f64 = @as(f64, instance.dtemp);
@@ -673,7 +677,7 @@ pub fn limit(model: *const Model, instance: *const Instance, x_new: [n_u]f64, x_
     const vt: f64 = 8.617333262145e-5 * (temp + dtemp);
 
     // Critical voltage for pnjlim
-    const v_crit = vt * @log(vt / (@sqrt(2.0) * is_val));
+    const v_crit = vt * contract.fmath.log(vt / (@sqrt(2.0) * is_val));
 
     var result = x_new;
 
@@ -760,12 +764,12 @@ pub fn limit(model: *const Model, instance: *const Instance, x_new: [n_u]f64, x_
             if (vbs_old > 0.0) {
                 const arg = (vbs_new - vbs_old) / vt;
                 if (arg > 0.0) {
-                    vbs_limited = vbs_old + vt * (2.0 + @log(@max(arg - 2.0, 1e-30)));
+                    vbs_limited = vbs_old + vt * (2.0 + contract.fmath.log(@max(arg - 2.0, 1e-30)));
                 } else {
                     vbs_limited = v_crit;
                 }
             } else {
-                vbs_limited = vt * @log(@max(vbs_new / vt, 1e-30));
+                vbs_limited = vt * contract.fmath.log(@max(vbs_new / vt, 1e-30));
             }
         }
 
@@ -785,12 +789,12 @@ pub fn limit(model: *const Model, instance: *const Instance, x_new: [n_u]f64, x_
             if (vbd_old > 0.0) {
                 const arg = (vbd_new - vbd_old) / vt;
                 if (arg > 0.0) {
-                    vbd_limited = vbd_old + vt * (2.0 + @log(@max(arg - 2.0, 1e-30)));
+                    vbd_limited = vbd_old + vt * (2.0 + contract.fmath.log(@max(arg - 2.0, 1e-30)));
                 } else {
                     vbd_limited = v_crit;
                 }
             } else {
-                vbd_limited = vt * @log(@max(vbd_new / vt, 1e-30));
+                vbd_limited = vt * contract.fmath.log(@max(vbd_new / vt, 1e-30));
             }
         }
 
@@ -800,6 +804,38 @@ pub fn limit(model: *const Model, instance: *const Instance, x_new: [n_u]f64, x_
     }
 
     return result;
+}
+
+// ============================================================================
+// Node Collapse (ngspice MOS1setup: dNodePrime = dNode when RD+RSH·NRD = 0)
+// ============================================================================
+
+pub fn collapse(model: *const Model, instance: *const Instance) [n_u]?u8 {
+    const rsh: f64 = @as(f64, model.rsh);
+    const rd_eff: f64 = @as(f64, model.rd) + rsh * @as(f64, instance.nrd);
+    const rs_eff: f64 = @as(f64, model.rs) + rsh * @as(f64, instance.nrs);
+    var out: [n_u]?u8 = @splat(null);
+    if (rd_eff == 0) out[@intFromEnum(U.d_prime)] = @intFromEnum(U.drain);
+    if (rs_eff == 0) out[@intFromEnum(U.s_prime)] = @intFromEnum(U.source);
+    return out;
+}
+
+// ============================================================================
+// Cold-Start Seeding (SPICE MODEINITJCT)
+// ============================================================================
+// mos1load.c:397-411: at MODEINITJCT vgs = type·vto, vds = 0, vbs = -1.
+// Node-write equivalent on a zeroed x: gate = type·vto (s' = 0 ⇒ vgs = vto).
+// vds = 0 is already true; vbs = -1 is skipped — bulk is a shared/driven
+// rail and a blanket node write would fight other devices on the same well.
+// Driven gates snap back in iteration 1's linear solve, after fetlim has
+// used vto as its reference — which is the entire point of the seed.
+
+pub fn seed(model: *const Model, _: *const Instance) [n_u]?f64 {
+    const vto: f64 = @as(f64, model.vto);
+    const type_f: f64 = @floatFromInt(model.type_);
+    var out: [n_u]?f64 = @splat(null);
+    out[@intFromEnum(U.gate)] = type_f * vto;
+    return out;
 }
 
 // ============================================================================

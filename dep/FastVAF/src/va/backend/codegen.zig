@@ -169,7 +169,10 @@ const Codegen = struct {
         }
         try self.w().writeAll("};\n\n");
 
-        try self.w().writeAll("pub const Instance = struct {};\n\n");
+        // temp: analysis-owned device temperature in Kelvin (default 27°C).
+        // The batch setTemp hook keys on this field (K because default > 200);
+        // $temperature reads it — NOT the eval `t` param, which is time.
+        try self.w().writeAll("pub const Instance = struct { temp: f32 = 300.15 };\n\n");
 
         try self.w().writeAll("const n_u = contract.nU(Self);\n\n");
 
@@ -204,8 +207,13 @@ const Codegen = struct {
             try self.emitEvalFn("q", contribs, true);
         }
 
-        // Shared dyn ABI v3 + contract.validate footer.
-        try emit.emitDynAbi(self.w(), .{ .has_q = has_reactive });
+        try self.w().writeAll(
+            \\
+            \\comptime {
+            \\    contract.validate(Self);
+            \\}
+            \\
+        );
     }
 
     /// U-enum index of a node name: linear scan of node_order (≤256 entries,
@@ -279,8 +287,9 @@ const Codegen = struct {
         self.top_vals.clearRetainingCapacity();
 
         try self.w().print(
-            \\pub fn {s}(comptime S: type, x: [n_u]S, model: *const Model, _: *const Instance, t: f64) [n_u]S {{
+            \\pub fn {s}(comptime S: type, x: [n_u]S, model: *const Model, inst: *const Instance, t: f64) [n_u]S {{
             \\    _ = &t;
+            \\    _ = &inst;
             \\
         , .{fn_name});
 
@@ -842,7 +851,8 @@ const Codegen = struct {
             return;
         }
         if (std.mem.eql(u8, call_name, "$temperature")) {
-            try self.w().writeAll("S.con(t)");
+            // Device temperature (Kelvin) from the instance; `t` is TIME.
+            try self.w().writeAll("S.con(inst.temp)");
             return;
         }
         if (std.mem.eql(u8, call_name, "$abstime")) {
@@ -893,7 +903,7 @@ const Codegen = struct {
             .f_inf => try self.w().writeAll("S.con(inf_)"),
             _ => {
                 switch (self.mir.valueDef(resolved)) {
-                    .f_const => |c| try self.w().print("S.con({d})", .{c}),
+                    .f_const => |c| try self.w().print("S.con({e})", .{c}),
                     .i_const => |c| try self.w().print("S.con(@as(f64, {d}))", .{c}),
                     // Terminal read: index into node_order = the x[u] vector,
                     // already the incoming S.
@@ -939,7 +949,7 @@ const Codegen = struct {
             .true_ => try self.w().writeAll("1"),
             _ => {
                 switch (self.mir.valueDef(val)) {
-                    .f_const => |c| try self.w().print("{d}", .{c}),
+                    .f_const => |c| try self.w().print("{e}", .{c}),
                     .i_const => |c| try self.w().print("{d}", .{c}),
                     // A comptime context (loop bound / array size) can't read a
                     // runtime model field; fall back to the param's default.

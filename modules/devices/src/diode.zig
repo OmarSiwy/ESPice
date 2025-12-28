@@ -289,16 +289,16 @@ fn qPrepFn(model: *const Model, instance: *const Instance) QPrep {
     // Bottom junction constants
     const one_minus_m = 1.0 - m_grad;
     const fc_vj = fc * vj;
-    const f1_bot = (cjo * vj / one_minus_m) * (1.0 - @exp(one_minus_m * @log(one_minus_fc)));
-    const f2_bot = @exp((1.0 + m_grad) * @log(one_minus_fc));
+    const f1_bot = (cjo * vj / one_minus_m) * (1.0 - contract.fmath.exp(one_minus_m * contract.fmath.log(one_minus_fc)));
+    const f2_bot = contract.fmath.exp((1.0 + m_grad) * contract.fmath.log(one_minus_fc));
     const f3_bot = 1.0 - fc * (1.0 + m_grad);
 
     // Sidewall constants
     const one_minus_mjsw = 1.0 - mjsw;
     const fcs_php = fcs * php;
     const one_minus_fcs = 1.0 - fcs;
-    const f1_sw = (cjp * pj * php / one_minus_mjsw) * (1.0 - @exp(one_minus_mjsw * @log(one_minus_fcs)));
-    const f2_sw = @exp((1.0 + mjsw) * @log(one_minus_fcs));
+    const f1_sw = (cjp * pj * php / one_minus_mjsw) * (1.0 - contract.fmath.exp(one_minus_mjsw * contract.fmath.log(one_minus_fcs)));
+    const f2_sw = contract.fmath.exp((1.0 + mjsw) * contract.fmath.log(one_minus_fcs));
     const f3_sw = 1.0 - fcs * (1.0 + mjsw);
 
     return .{
@@ -409,11 +409,25 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     id_val = id_val.div(ik_denom);
 
     // --- Reverse breakdown current ---
-    // Use IBV (not IS) as pre-exponential so I=IBV at Vd=-BV, matching ngspice
+    // Use IBV (not IS) as pre-exponential so I=IBV at Vd=-BV, matching ngspice.
+    // Piecewise: only active near breakdown; linearize in deep breakdown to avoid inf.
     if (p.bv > 0.0) {
-        const arg_bd = vd.addC(p.bv).scale(-p.inv_nbv_vt).minC(80.0);
-        const i_bd = arg_bd.exp().scale(p.ibv_val).neg();
-        id_val = id_val.add(i_bd);
+        const nbv_vt = 1.0 / p.inv_nbv_vt;
+        const bd_thresh = -p.bv + 5.0 * nbv_vt;
+        if (vd.val() < bd_thresh) {
+            const arg_bd = vd.addC(p.bv).scale(-p.inv_nbv_vt).minC(40.0);
+            const i_bd = if (arg_bd.val() > 40.0 - 1e-10) blk: {
+                // Deep breakdown: linearize at arg=40 to prevent huge currents
+                const exp40 = contract.fmath.exp(@as(f64, 40.0));
+                const i_at_40 = p.ibv_val * exp40;
+                const g_at_40 = i_at_40 * p.inv_nbv_vt;
+                const dv = vd.addC(p.bv + 40.0 / p.inv_nbv_vt);
+                break :blk dv.scale(-g_at_40).addC(-i_at_40);
+            } else blk: {
+                break :blk arg_bd.exp().scale(p.ibv_val).neg();
+            };
+            id_val = id_val.add(i_bd);
+        }
     }
 
     // --- GMIN convergence conductance ---
@@ -528,7 +542,7 @@ pub fn limit(model: *const Model, _: *const Instance, x_new: [n_u]f64, x_old: [n
     const nvt = n_em * vt;
 
     // Critical voltage
-    const v_crit = nvt * @log(nvt / (@sqrt(2.0) * is_val));
+    const v_crit = nvt * contract.fmath.log(nvt / (@sqrt(2.0) * is_val));
 
     // Junction voltages
     const vd_new = x_new[pp] - x_new[n_];
@@ -536,20 +550,42 @@ pub fn limit(model: *const Model, _: *const Instance, x_new: [n_u]f64, x_old: [n
 
     var vd_limited = vd_new;
 
-    // Apply limiting when vd_new > v_crit and step is large
-    if (vd_new > v_crit and @abs(vd_new - vd_old) > 2.0 * nvt) {
+    // --- Reverse breakdown voltage limiting (DEVpnjlim) ---
+    const bv: f64 = @as(f64, model.bv);
+    const nbv: f64 = @as(f64, model.nbv);
+    if (bv > 0.0) {
+        const vte = nbv * vt;
+        if (vd_limited < @min(0.0, -bv + 10.0 * vte)) {
+            if (vd_old > 0.0) {
+                // Jumped from forward to deep reverse — clamp to -BV
+                vd_limited = -bv;
+            } else {
+                // Already in reverse — log-compress the step
+                const arg = -(vd_limited + bv) / vte;
+                if (arg > 0.0) {
+                    vd_limited = -(bv + vte * (2.0 + contract.fmath.log(arg - 2.0)));
+                } else {
+                    vd_limited = vd_old;
+                }
+            }
+        }
+    }
+
+    // --- Forward bias limiting ---
+    // Apply limiting when vd_limited > v_crit and step is large
+    if (vd_limited > v_crit and @abs(vd_limited - vd_old) > 2.0 * nvt) {
         if (vd_old > 0.0) {
-            const arg = (vd_new - vd_old) / nvt;
+            const arg = (vd_limited - vd_old) / nvt;
             if (arg > 0.0) {
                 // Case 1: positive old, positive step
-                vd_limited = vd_old + nvt * (2.0 + @log(arg - 2.0));
+                vd_limited = vd_old + nvt * (2.0 + contract.fmath.log(arg - 2.0));
             } else {
                 // Case 2: positive old, negative step
-                vd_limited = vd_old - nvt * (2.0 + @log(2.0 - arg));
+                vd_limited = vd_old - nvt * (2.0 + contract.fmath.log(2.0 - arg));
             }
         } else {
             // Case 3: old <= 0
-            vd_limited = nvt * @log(vd_new / nvt);
+            vd_limited = nvt * contract.fmath.log(vd_limited / nvt);
         }
     }
 
@@ -558,6 +594,36 @@ pub fn limit(model: *const Model, _: *const Instance, x_new: [n_u]f64, x_old: [n
     var result = x_new;
     result[pp] = x_new[pp] + delta;
     return result;
+}
+
+// ============================================================================
+// Node Collapse (ngspice DIOsetup: posPrimeNode = posNode when RS = 0)
+// ============================================================================
+
+pub fn collapse(model: *const Model, _: *const Instance) [n_u]?u8 {
+    var out: [n_u]?u8 = @splat(null);
+    if (model.rs == 0) out[@intFromEnum(U.p_prime)] = @intFromEnum(U.p);
+    return out;
+}
+
+// ============================================================================
+// Cold-Start Seeding (SPICE MODEINITJCT)
+// ============================================================================
+// dioload.c: at MODEINITJCT the diode evaluates at vd = vcrit, not the node
+// vector. Node-write equivalent on a zeroed x: p' = vcrit (n stays 0), so
+// iteration 1 linearizes on the exponential's shoulder and pnjlim limits
+// against vcrit instead of 0.
+
+pub fn seed(model: *const Model, _: *const Instance) [n_u]?f64 {
+    const is_val: f64 = @as(f64, model.is);
+    const n_em: f64 = @as(f64, model.n);
+    const tnom: f64 = @as(f64, model.tnom);
+    const vt: f64 = 8.617333e-5 * (tnom + 273.15);
+    const nvt = n_em * vt;
+    const v_crit = nvt * contract.fmath.log(nvt / (@sqrt(2.0) * is_val));
+    var out: [n_u]?f64 = @splat(null);
+    out[@intFromEnum(U.p_prime)] = v_crit;
+    return out;
 }
 
 // ============================================================================

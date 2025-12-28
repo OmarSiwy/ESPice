@@ -34,32 +34,64 @@
           sv2v
         ];
 
+        # CUDA toolkit (headers, nvcc, profiler, cuda-gdb, nvidia-smi stub)
+        cudaPkgs = with pkgs.cudaPackages; [
+          cudatoolkit # nvcc, headers, libs, nvidia-smi
+          cuda_cudart # runtime (libcudart)
+          cuda_nvcc # compiler driver
+        ];
+
+        # ROCm / HIP (compiler, runtime, monitoring)
+        rocmPkgs = with pkgs.rocmPackages; [
+          clr # HIP runtime (libamdhip64)
+          hipcc # HIP compiler
+          rocminfo # device query
+          rocm-smi # GPU monitoring
+          hip-common # headers
+        ];
+
+        # LD_LIBRARY_PATH: system driver + nix-packaged CUDA/ROCm runtime
+        gpuLibPath = pkgs.lib.makeLibraryPath ([
+          "/run/opengl-driver" # NixOS NVIDIA driver (libcuda.so.1)
+        ] ++ cudaPkgs ++ rocmPkgs);
+
+        # Simulator packages for benchmarking
+        openvafPkg = import ./nix/oepnvaf.nix { inherit pkgs; };
+        vacaskPkg = import ./nix/vacask.nix { inherit pkgs; openvafPkg = openvafPkg; };
+        xycePkg = import ./nix/xyce.nix { inherit pkgs; };
+
         commonEnv = {
           VERILATOR_ROOT = "${verilator}/share/verilator";
         };
       in
       {
-        # Default dev shell: everything the build needs, plus llc for the
-        # nvptx kernel pipeline (zig emits LLVM IR, llc lowers it to PTX).
+        # Default dev shell: build tools + llc + CUDA/ROCm toolchains.
         devShells.default = pkgs.mkShell (
           commonEnv
           // {
             packages = commonInputs ++ [
-              pkgs.llvmPackages_21.llvm
-            ];
+              pkgs.llvmPackages_21.llvm # llc for nvptx kernel pipeline
+            ] ++ cudaPkgs ++ rocmPkgs;
+            LD_LIBRARY_PATH = gpuLibPath;
           }
         );
 
-        # For !! benchmarking ONLY
+        # Benchmarking: adds ngspice + perf + flamegraph on top.
         devShells.benchmarking = pkgs.mkShell (
           commonEnv
           // {
             packages = commonInputs ++ [
               pkgs.ngspice
+              pkgs.gnucap
+              openvafPkg
+              vacaskPkg
+              xycePkg
               pkgs.perf
               pkgs.flamegraph
               pkgs.inferno
-            ];
+              pkgs.llvmPackages_21.llvm
+            ] ++ cudaPkgs ++ rocmPkgs;
+            LD_LIBRARY_PATH = gpuLibPath;
           }
         );
 

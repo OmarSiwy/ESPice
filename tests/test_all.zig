@@ -11,7 +11,7 @@ const builder = @import("builder");
 
 const Builder = builder.Builder;
 const GROUND = analysis.GROUND;
-const td = analysis.testdev;
+const td = @import("testdev.zig");
 
 const k_boltzmann = 1.380649e-23;
 
@@ -49,7 +49,7 @@ fn buildDivider(gpa: std.mem.Allocator, vdc: f32, r1: f32, r2: f32) !Divider {
 /// warm-starts every analysis through).
 fn solveOp(ckt: *analysis.Circuit, arena: std.mem.Allocator) ![]f64 {
     const x = try arena.alloc(f64, ckt.n);
-    const r = try analysis.op.solve(ckt, x, .{}, arena);
+    const r = try analysis.op.solve(ckt, x, .{});
     try testing.expect(r.converged);
     return x;
 }
@@ -539,7 +539,7 @@ test "run hb: resistive divider driven at f0 — fundamental = I*R" {
         .f0 = 500.0,
         .n_harmonics = 4,
         .max_iter = 100,
-        .tol = 1e-12,
+        .hb_tol = 1e-12,
     } });
 
     // rows: (frequency, |v(n1)|, |v(n2)|), one row per harmonic incl. DC.

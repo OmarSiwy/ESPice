@@ -85,7 +85,7 @@ const HYST_ON: u8 = 3;
 // otherwise => start in REALLY_OFF
 // ---------------------------------------------------------------------------
 
-pub fn initState(_: *const Model, instance: *const Instance) State {
+pub fn initState(_: *const Model, instance: *Instance) State {
     return .{
         .state = if (instance.ic_on) HYST_ON else REALLY_OFF,
     };

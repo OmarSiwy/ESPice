@@ -108,8 +108,8 @@ inline fn computeNumSections(model: *const Model, instance: *const Instance) usi
 
     if (arg <= 1.0) return 1;
 
-    const log_arg = @log(arg);
-    const log_k = @log(k_f);
+    const log_arg = contract.fmath.log(arg);
+    const log_k = contract.fmath.log(k_f);
 
     // ceil(log(arg) / log(K))
     const ratio = log_arg / log_k;
@@ -129,8 +129,8 @@ inline fn sectionWeight(sec_idx: usize, num_sections: usize, k_f: f64) f64 {
     }
     // Geometric: w_i = (K-1) * K^(i) / (K^N - 1)
     // (sec_idx is 0-indexed here, corresponding to 1-indexed section sec_idx+1)
-    const k_pow_i = @exp(@as(f64, @floatFromInt(sec_idx)) * @log(k_f));
-    const k_pow_n = @exp(@as(f64, @floatFromInt(num_sections)) * @log(k_f));
+    const k_pow_i = contract.fmath.exp(@as(f64, @floatFromInt(sec_idx)) * contract.fmath.log(k_f));
+    const k_pow_n = contract.fmath.exp(@as(f64, @floatFromInt(num_sections)) * contract.fmath.log(k_f));
     return (k_f - 1.0) * k_pow_i / (k_pow_n - 1.0);
 }
 

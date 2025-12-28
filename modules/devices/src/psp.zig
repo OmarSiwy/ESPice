@@ -1203,8 +1203,8 @@ inline fn juncapChargeS(comptime S: type, v_j: S, area: f64, cjo: f64, vbi: f64,
     const q_dep = ratio.log().scale(one_minus_p).exp().neg().addC(1.0).scale(vbi_safe * cjo * area / one_minus_p);
 
     // Forward beyond FC: quadratic extension (all coefficients x-independent)
-    const cap_at_fc: f64 = cjo * area / @exp(p * @log(@max(1.0 - fc, 1.0e-30)));
-    const q_at_fc: f64 = (vbi_safe * cjo * area / one_minus_p) * (1.0 - @exp(one_minus_p * @log(@max(1.0 - fc, 1.0e-30))));
+    const cap_at_fc: f64 = cjo * area / contract.fmath.exp(p * contract.fmath.log(@max(1.0 - fc, 1.0e-30)));
+    const q_at_fc: f64 = (vbi_safe * cjo * area / one_minus_p) * (1.0 - contract.fmath.exp(one_minus_p * contract.fmath.log(@max(1.0 - fc, 1.0e-30))));
     const dv = v_j.addC(-fc_vbi);
     // Q = Q(FC) + C(FC)*dV + 0.5*C(FC)/(vbi*(1-FC)) * dV^2
     const q_fwd = dv.mul(dv).scale(0.5 * cap_at_fc / (vbi_safe * (1.0 - fc))).add(dv.scale(cap_at_fc)).addC(q_at_fc);
@@ -1488,7 +1488,7 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
 
     // Quantum-mechanical corrections (x-independent)
     const qm_const = if (model.type_ == 1) QMN else QMP;
-    const q_q = 0.4 * p_qmc * qm_const * @exp((2.0 / 3.0) * @log(@max(c_ox, 1.0e-30))); // f64
+    const q_q = 0.4 * p_qmc * qm_const * contract.fmath.exp((2.0 / 3.0) * contract.fmath.log(@max(c_ox, 1.0e-30))); // f64
 
     // Approximate bulk charge at threshold for QM
     // q_b0 = sqrt(max(2*QE*EPS_SI*p_neff*phi_b_cl, 1e-30)) / c_ox
@@ -1527,7 +1527,7 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
 
     // Linear-saturation transition parameter (x-independent)
     const ax_safe = @max(p_ax, 2.01);
-    const two_pow = @exp((-2.0 / ax_safe + 1.0) * @log(2.0));
+    const two_pow = contract.fmath.exp((-2.0 / ax_safe + 1.0) * contract.fmath.log(2.0));
     const a_r = (two_pow - 2.0) / @max(4.0 * two_pow - 1.0, 1.0e-4);
 
     // Gate tunneling parameters (x-independent)
@@ -1594,7 +1594,7 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
 
     // Pocket doping effect (x-independent)
     const lpck_eff = @max(p_lpck, 1.0e-10);
-    const pocket_factor = 1.0 + p_npck / @max(p_neff, 1.0e20) * @exp(-l_e / (2.0 * lpck_eff));
+    const pocket_factor = 1.0 + p_npck / @max(p_neff, 1.0e20) * contract.fmath.exp(-l_e / (2.0 * lpck_eff));
 
     // Short channel body effect (x-independent)
     const fol_eff = 1.0 + p_fol1 * l_en / l_e + p_fol2 * l_en * l_en / (l_e * l_e);
@@ -2123,7 +2123,7 @@ pub fn qFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *cons
 
     // QM corrections
     const qm_const = if (model.type_ == 1) QMN else QMP;
-    const q_q = 0.4 * p_qmc * qm_const * @exp((2.0 / 3.0) * @log(@max(c_ox, 1.0e-30))); // f64
+    const q_q = 0.4 * p_qmc * qm_const * contract.fmath.exp((2.0 / 3.0) * contract.fmath.log(@max(c_ox, 1.0e-30))); // f64
     const q_b0 = phi_b_cl.scale(2.0 * QE * EPS_SI * p_neff).maxC(1.0e-30).sqrt().scale(1.0 / c_ox);
     const phi_b = q_b0.maxC(1.0e-30).log().scale(2.0 / 3.0).exp().scale(0.75 * q_q).add(phi_b_cl);
     const g_0_qm = g_0.mul(q_b0.maxC(1.0e-30).log().scale(-1.0 / 3.0).exp().scale(q_q).addC(1.0));
@@ -2176,7 +2176,7 @@ pub fn qFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *cons
     // Drain side (uses charge-model transition params AXAC)
     const p_ax_ac: f64 = @as(f64, model.axac);
     const ax_safe_ac = @max(p_ax_ac, 2.01);
-    const two_pow_ac = @exp((-2.0 / ax_safe_ac + 1.0) * @log(2.0));
+    const two_pow_ac = contract.fmath.exp((-2.0 / ax_safe_ac + 1.0) * contract.fmath.log(2.0));
     const a_r_ac = (two_pow_ac - 2.0) / @max(4.0 * two_pow_ac - 1.0, 1.0e-4);
 
     const v_dsat_q = phi_t_star.mul(q_is_q.div(phi_t_star.addC(1.0e-30)).maxC(1.0e-10)).maxC(0.001);
@@ -2358,7 +2358,7 @@ pub fn limit(model: *const Model, instance: *const Instance, x_new: [n_u]f64, x_
 
     // Critical voltage for PN junction limiting
     const is_jct = p_idsatrbot * @as(f64, instance.absource) + 1.0e-14;
-    const v_crit = vt * @log(vt / (@sqrt(2.0) * is_jct));
+    const v_crit = vt * contract.fmath.log(vt / (@sqrt(2.0) * is_jct));
 
     var result = x_new;
 
@@ -2444,12 +2444,12 @@ pub fn limit(model: *const Model, instance: *const Instance, x_new: [n_u]f64, x_
             if (vbs_old > 0.0) {
                 const arg = (vbs_new - vbs_old) / vt;
                 if (arg > 0.0) {
-                    vbs_limited = vbs_old + vt * (2.0 + @log(@max(arg - 2.0, 1.0e-30)));
+                    vbs_limited = vbs_old + vt * (2.0 + contract.fmath.log(@max(arg - 2.0, 1.0e-30)));
                 } else {
-                    vbs_limited = vbs_old - vt * (2.0 + @log(@max(2.0 - arg, 1.0e-30)));
+                    vbs_limited = vbs_old - vt * (2.0 + contract.fmath.log(@max(2.0 - arg, 1.0e-30)));
                 }
             } else {
-                vbs_limited = vt * @log(@max(vbs_new / vt, 1.0e-30));
+                vbs_limited = vt * contract.fmath.log(@max(vbs_new / vt, 1.0e-30));
             }
         }
 
@@ -2469,12 +2469,12 @@ pub fn limit(model: *const Model, instance: *const Instance, x_new: [n_u]f64, x_
             if (vbd_old > 0.0) {
                 const arg = (vbd_new - vbd_old) / vt;
                 if (arg > 0.0) {
-                    vbd_limited = vbd_old + vt * (2.0 + @log(@max(arg - 2.0, 1.0e-30)));
+                    vbd_limited = vbd_old + vt * (2.0 + contract.fmath.log(@max(arg - 2.0, 1.0e-30)));
                 } else {
-                    vbd_limited = vbd_old - vt * (2.0 + @log(@max(2.0 - arg, 1.0e-30)));
+                    vbd_limited = vbd_old - vt * (2.0 + contract.fmath.log(@max(2.0 - arg, 1.0e-30)));
                 }
             } else {
-                vbd_limited = vt * @log(@max(vbd_new / vt, 1.0e-30));
+                vbd_limited = vt * contract.fmath.log(@max(vbd_new / vt, 1.0e-30));
             }
         }
 

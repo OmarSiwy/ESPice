@@ -672,16 +672,16 @@ fn prep(model: *const Model, instance: *const Instance) Prep {
 
     // --- Basic semiconductor quantities ---
     const nch_cm3 = @max(nch_b, 1.0e10);
-    const phi_s = 2.0 * vt_nom * @log(@max(nch_cm3 / ni, 1.0));
+    const phi_s = 2.0 * vt_nom * contract.fmath.log(@max(nch_cm3 / ni, 1.0));
     const sqrt_phis = @sqrt(@max(phi_s, 0.1));
     const xdep0 = @sqrt(2.0 * eps_si / (q_e * nch_cm3 * 1.0e6)) * sqrt_phis;
-    const vbi = vt_nom * @log(1.0e20 * nch_cm3 / (ni * ni));
+    const vbi = vt_nom * contract.fmath.log(1.0e20 * nch_cm3 / (ni * ni));
 
     // --- Flatband voltage ---
     const vfbb = if (nsub_b > 0.0)
-        -vt_nom * @log(nch_cm3 / nsub_b)
+        -vt_nom * contract.fmath.log(nch_cm3 / nsub_b)
     else
-        -vt_nom * @log(-nch_cm3 * nsub_b / (ni * ni));
+        -vt_nom * contract.fmath.log(-nch_cm3 * nsub_b / (ni * ni));
 
     // --- SOI charge ---
     const qsi = q_e * nch_cm3 * 1.0e6 * tsi_v;
@@ -690,7 +690,7 @@ fn prep(model: *const Model, instance: *const Instance) Prep {
     const lt1 = @sqrt(eps_si / (q_e * nch_cm3 * 1.0e6));
     const dvbd1_arg1 = @max(@min(-dvbd1_b * leff / (4.0 * lt1), 80.0), -80.0);
     const dvbd1_arg2 = @max(@min(-dvbd1_b * leff / (2.0 * lt1), 80.0), -80.0);
-    const t1_vbs0t = dvbd0_b * (@exp(dvbd1_arg1) + 2.0 * @exp(dvbd1_arg2));
+    const t1_vbs0t = dvbd0_b * (contract.fmath.exp(dvbd1_arg1) + 2.0 * contract.fmath.exp(dvbd1_arg2));
     const t2_vbs0t = t1_vbs0t * (vbi - phi_s);
     const t3_vbs0t = qsi / (2.0 * c_si);
     const vbs0t = phi_s - t3_vbs0t + vbsa_b + t2_vbs0t;
@@ -705,7 +705,7 @@ fn prep(model: *const Model, instance: *const Instance) Prep {
     // SCE
     const lt_sce = @sqrt(eps_si * tox_v / (eps_ox * nch_cm3 * 1.0e6 * q_e));
     const arg_sce = @min(dvt1_b * leff / (2.0 * lt_sce), 80.0);
-    const edvt1 = @exp(-arg_sce);
+    const edvt1 = contract.fmath.exp(-arg_sce);
     const dvth_sce = dvt0_b * (1.0 - edvt1) * (1.0 + 2.0 * edvt1) * (vbi - phi_s);
 
     // --- Subthreshold feedback factor Nfb (x-independent) ---
@@ -728,7 +728,7 @@ fn prep(model: *const Model, instance: *const Instance) Prep {
     const litl = @sqrt(eps_si * tox_v / eps_ox);
     const lt_dibl = @sqrt(eps_si * tox_v / (eps_ox * nch_cm3 * 1.0e6 * q_e));
     const theta_rout_arg = @min(drout_b * leff / (2.0 * lt_dibl), 80.0);
-    const theta_rout = pdiblc1_b * @exp(-theta_rout_arg) + pdiblc2_b;
+    const theta_rout = pdiblc1_b * contract.fmath.exp(-theta_rout_arg) + pdiblc2_b;
 
     return .{
         .type_f = type_f,

@@ -303,7 +303,7 @@ fn prep(model: *const Model, instance: *const Instance) Prep {
 
     // --- Temperature-adjusted parameters ---
     // Mobility: mu_T = mu * (Ts / Tmu)^xtm0
-    const mu_t: f64 = if (xtm0 == 0.0) mu else mu * @exp(xtm0 * @log(t_s / tmu));
+    const mu_t: f64 = if (xtm0 == 0.0) mu else mu * contract.fmath.exp(xtm0 * contract.fmath.log(t_s / tmu));
 
     // Threshold voltage: Vto_T = Vto - tvto * (Ts - 300.15)
     const vto_t = vto - tvto * (t_s - 300.15);
@@ -327,8 +327,8 @@ fn prep(model: *const Model, instance: *const Instance) Prep {
 
     // --- Schottky Gate Diode saturation / recombination scales ---
     // Saturation currents: Isat = 0.5 * A* * T^2 * exp(-phib*q / (kB*T)) * W * L
-    const isat_fs = 0.5 * astar * t_s * t_s * @exp(@min(-phib * Q_CHARGE / (K_BOLTZ * t_s), 80.0)) * w * l;
-    const isat_fd = 0.5 * astar * t_d * t_d * @exp(@min(-phib * Q_CHARGE / (K_BOLTZ * t_d), 80.0)) * w * l;
+    const isat_fs = 0.5 * astar * t_s * t_s * contract.fmath.exp(@min(-phib * Q_CHARGE / (K_BOLTZ * t_s), 80.0)) * w * l;
+    const isat_fd = 0.5 * astar * t_d * t_d * contract.fmath.exp(@min(-phib * Q_CHARGE / (K_BOLTZ * t_d), 80.0)) * w * l;
     const ggr_wl = ggr * w * l;
 
     return .{
@@ -958,10 +958,10 @@ pub fn limit(model: *const Model, instance: *const Instance, x_new: [n_u]f64, x_
     // Saturation current for critical voltage computation
     const w: f64 = @as(f64, instance.w);
     const l: f64 = @as(f64, instance.l);
-    const isat = 0.5 * astar * t_s * t_s * @exp(@min(-phib * Q_CHARGE / (K_BOLTZ * t_s), 80.0)) * w * l;
+    const isat = 0.5 * astar * t_s * t_s * contract.fmath.exp(@min(-phib * Q_CHARGE / (K_BOLTZ * t_s), 80.0)) * w * l;
 
     // Critical voltage for pnjlim: Vcrit = n*Vt * ln(n*Vt / (sqrt(2) * Isat))
-    const v_crit = nvt * @log(nvt / (@sqrt(2.0) * isat));
+    const v_crit = nvt * contract.fmath.log(nvt / (@sqrt(2.0) * isat));
 
     var result = x_new;
 
@@ -977,12 +977,12 @@ pub fn limit(model: *const Model, instance: *const Instance, x_new: [n_u]f64, x_
             if (vgs_old > 0.0) {
                 const arg = (vgs_new - vgs_old) / nvt;
                 if (arg > 2.0) {
-                    vgs_limited = vgs_old + nvt * (2.0 + @log(arg - 2.0));
+                    vgs_limited = vgs_old + nvt * (2.0 + contract.fmath.log(arg - 2.0));
                 } else {
                     vgs_limited = vgs_old + 2.0 * nvt;
                 }
             } else if (vgs_new > 0.0) {
-                vgs_limited = nvt * @log(vgs_new / nvt);
+                vgs_limited = nvt * contract.fmath.log(vgs_new / nvt);
             } else {
                 vgs_limited = v_crit;
             }
@@ -1004,12 +1004,12 @@ pub fn limit(model: *const Model, instance: *const Instance, x_new: [n_u]f64, x_
             if (vgd_old > 0.0) {
                 const arg = (vgd_new - vgd_old) / nvt;
                 if (arg > 2.0) {
-                    vgd_limited = vgd_old + nvt * (2.0 + @log(arg - 2.0));
+                    vgd_limited = vgd_old + nvt * (2.0 + contract.fmath.log(arg - 2.0));
                 } else {
                     vgd_limited = vgd_old + 2.0 * nvt;
                 }
             } else if (vgd_new > 0.0) {
-                vgd_limited = nvt * @log(vgd_new / nvt);
+                vgd_limited = nvt * contract.fmath.log(vgd_new / nvt);
             } else {
                 vgd_limited = v_crit;
             }

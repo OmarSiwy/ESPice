@@ -29,6 +29,124 @@
 
 const std = @import("std");
 
+// ponytail: @exp/@log unavailable on nvptx64 (LLVM #141364, no fix in sight).
+// @sqrt/@sin/@cos are fine (Legal in LLVM NVPTX). Hand-roll only exp/log.
+const builtin = @import("builtin");
+const is_gpu = builtin.cpu.arch == .nvptx64 or builtin.cpu.arch == .amdgcn;
+
+pub const fmath = struct {
+    pub inline fn exp(x: f64) f64 {
+        if (comptime !is_gpu) return @exp(x);
+        // Saturate like libm: also keeps k in i64 range when a device's
+        // comptime validation instantiates eval with sentinel extremes.
+        if (x < -745.2) return 0.0;
+        if (x > 709.8) return std.math.inf(f64);
+        // Range reduction: e^x = 2^(x/ln2) = 2^k * 2^f, f in [0,1)
+        const log2e = 1.4426950408889634;
+        const t = x * log2e;
+        const k = @floor(t);
+        const f = t - k;
+        // Minimax degree-6 polynomial for 2^f on [0,1), ~1 ulp
+        var p: f64 = 1.5417544459590958e-5;
+        p = p * f + 1.5252732999903985e-4;
+        p = p * f + 1.3333558178101622e-3;
+        p = p * f + 9.6181291052364266e-3;
+        p = p * f + 5.5504108663561613e-2;
+        p = p * f + 2.4022650695909071e-1;
+        p = p * f + 6.9314718055994531e-1;
+        p = p * f + 1.0;
+        // Scale by 2^k via bit manipulation
+        const ki: i64 = @intFromFloat(k);
+        const bits: u64 = @bitCast(p);
+        return @bitCast(bits +% (@as(u64, @bitCast(ki)) << 52));
+    }
+
+    pub inline fn sin(x: f64) f64 {
+        return if (comptime !is_gpu) @sin(x) else sinCos(x)[0];
+    }
+
+    pub inline fn cos(x: f64) f64 {
+        return if (comptime !is_gpu) @cos(x) else sinCos(x)[1];
+    }
+
+    /// f64 sin/cos for nvptx (no fsin/fcos lowering, no libcalls). musl-style:
+    /// 3-part Cody-Waite reduction by π/2 + minimax kernels on [-π/4, π/4].
+    /// ponytail: ~1 ulp for |x| < ~2^26·π/2 — SPICE source phases ωt+φ stay
+    /// far below that; add Payne-Hanek if a fixture ever proves otherwise.
+    pub fn sinCos(x: f64) [2]f64 {
+        const two_over_pi = 0.63661977236758134308;
+        const kd = @floor(x * two_over_pi + 0.5);
+        const p1 = 1.57079632673412561417e+00;
+        const p2 = 6.07710050650619224932e-11;
+        const p3 = 2.02226624879595063154e-21;
+        var r = x - kd * p1;
+        r -= kd * p2;
+        r -= kd * p3;
+        const q: u2 = @truncate(@as(u64, @bitCast(@as(i64, @intFromFloat(kd)))));
+        const r2 = r * r;
+        const s = r + r * r2 * (-1.66666666666666324348e-01 + r2 * (8.33333333332248946124e-03 +
+            r2 * (-1.98412698298579493134e-04 + r2 * (2.75573137070700676789e-06 +
+                r2 * (-2.50507602534068634195e-08 + r2 * 1.58969099521155010221e-10)))));
+        const c = 1.0 + r2 * (-0.5 + r2 * (4.16666666666666019037e-02 + r2 * (-1.38888888888741095749e-03 +
+            r2 * (2.48015872894767294178e-05 + r2 * (-2.75573143513906633035e-07 +
+                r2 * 2.08757232129817482790e-09)))));
+        return switch (q) {
+            0 => .{ s, c },
+            1 => .{ c, -s },
+            2 => .{ -s, -c },
+            3 => .{ -c, s },
+        };
+    }
+
+    /// S contract: a > 0, constant exponent (see module doc).
+    pub inline fn pow(a: f64, c: f64) f64 {
+        if (comptime !is_gpu) return std.math.pow(f64, a, c);
+        if (!(a > 0)) return 0;
+        return exp(c * log(a));
+    }
+
+    pub inline fn tanh(x: f64) f64 {
+        if (comptime !is_gpu) return std.math.tanh(x);
+        if (x > 20.0) return 1.0;
+        if (x < -20.0) return -1.0;
+        const e2 = exp(2.0 * x);
+        return (e2 - 1.0) / (e2 + 1.0);
+    }
+
+    pub inline fn sinh(x: f64) f64 {
+        if (comptime !is_gpu) return std.math.sinh(x);
+        const e = exp(x);
+        return 0.5 * (e - 1.0 / e);
+    }
+
+    pub inline fn cosh(x: f64) f64 {
+        if (comptime !is_gpu) return std.math.cosh(x);
+        const e = exp(x);
+        return 0.5 * (e + 1.0 / e);
+    }
+
+    pub inline fn log(x: f64) f64 {
+        if (comptime !is_gpu) return @log(x);
+        // Decompose: x = 2^e * m, m in [1,2); log(x) = e*ln2 + log(m)
+        const ln2 = 0.6931471805599453;
+        const bits: u64 = @bitCast(x);
+        const e_biased: i64 = @intCast((bits >> 52) & 0x7FF);
+        const e: f64 = @floatFromInt(e_biased - 1023);
+        // Normalize mantissa to [1,2)
+        const m_bits = (bits & 0x000FFFFFFFFFFFFF) | 0x3FF0000000000000;
+        const m: f64 = @bitCast(m_bits);
+        // 2*atanh((m-1)/(m+1)) series, ~2 ulp on [1,2)
+        const s = (m - 1.0) / (m + 1.0);
+        const s2 = s * s;
+        var q: f64 = 1.0 / 9.0;
+        q = q * s2 + 1.0 / 7.0;
+        q = q * s2 + 1.0 / 5.0;
+        q = q * s2 + 1.0 / 3.0;
+        q = q * s2 + 1.0;
+        return e * ln2 + 2.0 * s * q;
+    }
+};
+
 pub const UpdateResult = union(enum) {
     ok,
     request_reject_at: f64,
@@ -106,22 +224,22 @@ pub const Value = struct {
         return .{ .v = a.v + c };
     }
     pub fn exp(a: Self) Self {
-        return .{ .v = @exp(a.v) };
+        return .{ .v = fmath.exp(a.v) };
     }
     pub fn log(a: Self) Self {
-        return .{ .v = @log(a.v) };
+        return .{ .v = fmath.log(a.v) };
     }
     pub fn sqrt(a: Self) Self {
         return .{ .v = @sqrt(a.v) };
     }
     pub fn sin(a: Self) Self {
-        return .{ .v = @sin(a.v) };
+        return .{ .v = fmath.sin(a.v) };
     }
     pub fn cos(a: Self) Self {
-        return .{ .v = @cos(a.v) };
+        return .{ .v = fmath.cos(a.v) };
     }
     pub fn tanh(a: Self) Self {
-        return .{ .v = std.math.tanh(a.v) };
+        return .{ .v = fmath.tanh(a.v) };
     }
     pub fn abs(a: Self) Self {
         return .{ .v = @abs(a.v) };
@@ -133,16 +251,16 @@ pub const Value = struct {
         return .{ .v = @max(a.v, c) };
     }
     pub fn pow(a: Self, c: f64) Self {
-        return .{ .v = std.math.pow(f64, a.v, c) };
+        return .{ .v = fmath.pow(a.v, c) };
     }
     pub fn atan(a: Self) Self {
         return .{ .v = std.math.atan(a.v) };
     }
     pub fn sinh(a: Self) Self {
-        return .{ .v = std.math.sinh(a.v) };
+        return .{ .v = fmath.sinh(a.v) };
     }
     pub fn cosh(a: Self) Self {
-        return .{ .v = std.math.cosh(a.v) };
+        return .{ .v = fmath.cosh(a.v) };
     }
     pub fn max(a: Self, b: Self) Self {
         return .{ .v = @max(a.v, b.v) };
@@ -208,24 +326,26 @@ pub fn Dual(comptime N: usize) type {
             return .{ .v = a.v + c, .d = a.d };
         }
         pub fn exp(a: Self) Self {
-            const e = @exp(a.v);
+            const e = fmath.exp(a.v); // nvptx-safe (raw @exp has no libcall there)
             return .{ .v = e, .d = a.d * splat(e) };
         }
         pub fn log(a: Self) Self {
-            return .{ .v = @log(a.v), .d = a.d * splat(1.0 / a.v) };
+            return .{ .v = fmath.log(a.v), .d = a.d * splat(1.0 / a.v) };
         }
         pub fn sqrt(a: Self) Self {
             const s = @sqrt(a.v);
             return .{ .v = s, .d = a.d * splat(0.5 / s) };
         }
         pub fn sin(a: Self) Self {
-            return .{ .v = @sin(a.v), .d = a.d * splat(@cos(a.v)) };
+            const sc = if (comptime !is_gpu) [2]f64{ @sin(a.v), @cos(a.v) } else fmath.sinCos(a.v);
+            return .{ .v = sc[0], .d = a.d * splat(sc[1]) };
         }
         pub fn cos(a: Self) Self {
-            return .{ .v = @cos(a.v), .d = a.d * splat(-@sin(a.v)) };
+            const sc = if (comptime !is_gpu) [2]f64{ @sin(a.v), @cos(a.v) } else fmath.sinCos(a.v);
+            return .{ .v = sc[1], .d = a.d * splat(-sc[0]) };
         }
         pub fn tanh(a: Self) Self {
-            const th = std.math.tanh(a.v);
+            const th = fmath.tanh(a.v);
             return .{ .v = th, .d = a.d * splat(1.0 - th * th) };
         }
         pub fn abs(a: Self) Self {
@@ -238,17 +358,17 @@ pub fn Dual(comptime N: usize) type {
             return if (a.v < c) con(c) else a;
         }
         pub fn pow(a: Self, c: f64) Self {
-            const p = std.math.pow(f64, a.v, c);
+            const p = fmath.pow(a.v, c);
             return .{ .v = p, .d = a.d * splat(c * p / a.v) };
         }
         pub fn atan(a: Self) Self {
             return .{ .v = std.math.atan(a.v), .d = a.d * splat(1.0 / (1.0 + a.v * a.v)) };
         }
         pub fn sinh(a: Self) Self {
-            return .{ .v = std.math.sinh(a.v), .d = a.d * splat(std.math.cosh(a.v)) };
+            return .{ .v = fmath.sinh(a.v), .d = a.d * splat(fmath.cosh(a.v)) };
         }
         pub fn cosh(a: Self) Self {
-            return .{ .v = std.math.cosh(a.v), .d = a.d * splat(std.math.sinh(a.v)) };
+            return .{ .v = fmath.cosh(a.v), .d = a.d * splat(fmath.sinh(a.v)) };
         }
         pub fn max(a: Self, b: Self) Self {
             return if (a.v >= b.v) a else b;
@@ -287,6 +407,7 @@ pub fn qValues(comptime D: type, x: [nU(D)]f64, m: *const D.Model, inst: *const 
 // ============================================================================
 
 pub fn validate(comptime D: type) void {
+    @setEvalBranchQuota(1_000_000);
     const name = @typeName(D);
 
     // Required decls first, so a missing one reads as a contract violation
@@ -312,12 +433,35 @@ pub fn validate(comptime D: type) void {
     validatePhysicsFn(D, "eval");
     if (@hasDecl(D, "q")) validatePhysicsFn(D, "q");
 
+    // Voltage limiting (pnjlim/fetlim) and cold-start seeding (SPICE
+    // MODEINITJCT). seed returns absolute local voltages written into a
+    // zeroed x before Newton iteration 1; null leaves an unknown untouched
+    // (externally driven terminals). Any device with junction limiting
+    // should also declare seed — limiting from x_old = 0 is what pins
+    // cold-start Newton in the wrong basin.
+    // NOTE: limit corrections are only APPLIED to internal unknowns
+    // (u >= num_ports) — the batch masks external writes, since a limiter
+    // writing a driven/shared node fights sources and other devices.
+    // seed writes are unmasked: they happen once, pre-solve, and the first
+    // linear solve re-imposes every source constraint.
+    if (@hasDecl(D, "limit"))
+        expectFn(D, "limit", fn (*const D.Model, *const D.Instance, [n]f64, [n]f64) [n]f64);
+    if (@hasDecl(D, "seed"))
+        expectFn(D, "seed", fn (*const D.Model, *const D.Instance) [n]?f64);
+    // Node collapse (ngspice setup): for each internal unknown, return the
+    // port index it collapses onto when its separating parasitic R is 0, or
+    // null to keep a private node. Consulted once at build time.
+    if (@hasDecl(D, "collapse"))
+        expectFn(D, "collapse", fn (*const D.Model, *const D.Instance) [n]?u8);
+
     // State machine: eval reads Instance, so updateState gets a MUTABLE
     // Instance — switch position etc. must live in Instance fields.
     if (@hasDecl(D, "initState") or @hasDecl(D, "updateState")) {
         if (!@hasDecl(D, "State"))
             @compileError(name ++ ": initState/updateState require pub const State");
-        expectFn(D, "initState", fn (*const D.Model, *const D.Instance) D.State);
+        // initState also mutable: generated digital devices push initial
+        // logic outputs into Instance drive targets at init.
+        expectFn(D, "initState", fn (*const D.Model, *D.Instance) D.State);
         expectFn(D, "updateState", fn (*const D.Model, *D.Instance, [n]f64, *D.State) UpdateResult);
     }
 
@@ -360,10 +504,92 @@ pub fn validate(comptime D: type) void {
     if (@hasDecl(D, "PrepCache")) {
         if (!@hasDecl(D, "computePrep"))
             @compileError(name ++ ": PrepCache requires pub fn computePrep");
+        expectFn(D, "computePrep", fn (*const D.Model, *const D.Instance) D.PrepCache);
         if (!@hasDecl(D, "evalFromPrep"))
             @compileError(name ++ ": PrepCache requires pub fn evalFromPrep");
+        validatePrepPhysicsFn(D, "evalFromPrep");
         if (@hasDecl(D, "q") and !@hasDecl(D, "qFromPrep"))
             @compileError(name ++ ": PrepCache + q requires pub fn qFromPrep");
+        if (@hasDecl(D, "qFromPrep")) validatePrepPhysicsFn(D, "qFromPrep");
+    }
+
+    // precompute: instance-mutating parameter prep before solve.
+    if (@hasDecl(D, "precompute"))
+        expectFn(D, "precompute", fn (*D.Instance, *const D.Model) void);
+
+    // Constant-Jacobian flags: must be bool when present.
+    if (@hasDecl(D, "constant_g") and @TypeOf(D.constant_g) != bool)
+        @compileError(name ++ ".constant_g must be bool");
+    if (@hasDecl(D, "constant_c") and @TypeOf(D.constant_c) != bool)
+        @compileError(name ++ ".constant_c must be bool");
+
+    // Breakpoint scheduling for piecewise sources.
+    if (@hasDecl(D, "nextBreakpoint"))
+        expectFn(D, "nextBreakpoint", fn (*const D.Model, f64) ?f64);
+
+    // Smoke test: instantiate eval(Value) at comptime to catch type errors
+    // in the physics body, not just shape mismatches.
+    _ = validateEvalInstantiation(D);
+
+    // Pub-decl allowlist: only contract-recognized names may be pub.
+    // zpicey_* are the dynamic plugin ABI (validated by dyn.zig loader).
+    rejectStrayPubDecls(D);
+}
+
+fn validateEvalInstantiation(comptime D: type) [nU(D)]f64 {
+    @setEvalBranchQuota(1_000_000);
+    const n = nU(D);
+    const m: D.Model = .{};
+    const inst: D.Instance = .{};
+    var xs: [n]Value = undefined;
+    inline for (0..n) |u| xs[u] = Value.con(0);
+    const out = D.eval(Value, xs, &m, &inst, 0);
+    var res: [n]f64 = undefined;
+    inline for (0..n) |u| res[u] = out[u].val();
+    return res;
+}
+
+const allowed_pub_decls = std.StaticStringMap(void).initComptime(.{
+    .{ "U", {} },
+    .{ "num_ports", {} },
+    .{ "Model", {} },
+    .{ "Instance", {} },
+    .{ "eval", {} },
+    .{ "q", {} },
+    .{ "limit", {} },
+    .{ "seed", {} },
+    .{ "collapse", {} },
+    .{ "initState", {} },
+    .{ "updateState", {} },
+    .{ "State", {} },
+    .{ "histInject", {} },
+    .{ "n_hist_signals", {} },
+    .{ "gatherHistSignals", {} },
+    .{ "delays", {} },
+    .{ "attempt", {} },
+    .{ "u_kinds", {} },
+    .{ "g_pattern_override", {} },
+    .{ "c_pattern_override", {} },
+    .{ "noise_gens", {} },
+    .{ "mc_param", {} },
+    .{ "PrepCache", {} },
+    .{ "computePrep", {} },
+    .{ "evalFromPrep", {} },
+    .{ "qFromPrep", {} },
+    .{ "precompute", {} },
+    .{ "constant_g", {} },
+    .{ "constant_c", {} },
+    .{ "nextBreakpoint", {} },
+});
+
+fn rejectStrayPubDecls(comptime D: type) void {
+    const decls = @typeInfo(D).@"struct".decls;
+    for (decls) |d| {
+        if (allowed_pub_decls.has(d.name)) continue;
+        // zpicey_* are dynamic plugin ABI exports (validated by dyn.zig loader).
+        if (d.name.len >= 7 and std.mem.eql(u8, d.name[0..7], "zpicey_")) continue;
+        @compileError(@typeName(D) ++ ": stray pub decl `" ++ d.name ++
+            "` — only contract-recognized names may be pub");
     }
 }
 
@@ -375,6 +601,14 @@ fn validatePhysicsFn(comptime D: type, comptime fn_name: []const u8) void {
     if (info != .@"fn" or info.@"fn".params.len != 5 or info.@"fn".params[0].type != type)
         @compileError(@typeName(D) ++ "." ++ fn_name ++
             ": expected fn (comptime S: type, [n_u]S, *const Model, *const Instance, f64) [n_u]S");
+}
+
+/// evalFromPrep/qFromPrep: fn (comptime S, [n]S, *const PrepCache, *const Model, *const Instance, f64) [n]S.
+fn validatePrepPhysicsFn(comptime D: type, comptime fn_name: []const u8) void {
+    const info = @typeInfo(@TypeOf(@field(D, fn_name)));
+    if (info != .@"fn" or info.@"fn".params.len != 6 or info.@"fn".params[0].type != type)
+        @compileError(@typeName(D) ++ "." ++ fn_name ++
+            ": expected fn (comptime S: type, [n_u]S, *const PrepCache, *const Model, *const Instance, f64) [n_u]S");
 }
 
 fn expectFn(comptime D: type, comptime fn_name: []const u8, comptime Expected: type) void {
@@ -391,7 +625,18 @@ fn validateDefaultedStruct(comptime D: type, comptime decl: []const u8) void {
     for (@typeInfo(T).@"struct".fields) |f| {
         if (f.default_value_ptr == null)
             @compileError(@typeName(D) ++ "." ++ decl ++ "." ++ f.name ++ " must have a default value");
+        if (!isValueType(f.type))
+            @compileError(@typeName(D) ++ "." ++ decl ++ "." ++ f.name ++
+                ": field type must be f32, f64, i32, bool, or a fixed-size array of these (no pointers/slices)");
     }
+}
+
+fn isValueType(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .float, .int, .bool => true,
+        .array => |a| isValueType(a.child),
+        else => false,
+    };
 }
 
 fn validateDelaysFn(comptime D: type) void {
@@ -483,7 +728,7 @@ const MockSw = struct {
         return .{ ir, ir.neg() };
     }
 
-    pub fn initState(_: *const Model, _: *const Instance) State {
+    pub fn initState(_: *const Model, _: *Instance) State {
         return .{};
     }
 

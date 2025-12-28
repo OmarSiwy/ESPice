@@ -179,11 +179,11 @@ fn waveformCurrent(instance: *const Instance, t: f64) f64 {
     const t_sin = t - s_td;
 
     // For t <= TD: I_OFF + I_AMP * sin(phase)
-    const i_sin_before = s_ioff + s_iamp * @sin(s_phase_rad);
+    const i_sin_before = s_ioff + s_iamp * contract.fmath.sin(s_phase_rad);
 
     // For t > TD: I_OFF + I_AMP * exp(-(t-TD)*theta) * sin(2*pi*f*(t-TD) + phase)
     const damp_arg = @min(-(t_sin) * s_theta, 80.0);
-    const i_sin_after = s_ioff + s_iamp * @exp(damp_arg) * @sin(2.0 * pi * s_freq * t_sin + s_phase_rad);
+    const i_sin_after = s_ioff + s_iamp * contract.fmath.exp(damp_arg) * contract.fmath.sin(2.0 * pi * s_freq * t_sin + s_phase_rad);
 
     const i_sin = if (t_sin <= 0.0) i_sin_before else i_sin_after;
 
@@ -205,12 +205,12 @@ fn waveformCurrent(instance: *const Instance, t: f64) f64 {
 
     // Rising component: active when t > TD1
     const rise_exp_arg = @min(-t_e1 / tau1_safe, 80.0);
-    const rise_comp = (e_i2 - e_i1) * (1.0 - @exp(rise_exp_arg));
+    const rise_comp = (e_i2 - e_i1) * (1.0 - contract.fmath.exp(rise_exp_arg));
     const rise_val = if (t_e1 > 0.0) rise_comp else 0.0;
 
     // Falling component: active when t > TD2
     const fall_exp_arg = @min(-t_e2 / tau2_safe, 80.0);
-    const fall_comp = (e_i1 - e_i2) * (1.0 - @exp(fall_exp_arg));
+    const fall_comp = (e_i1 - e_i2) * (1.0 - contract.fmath.exp(fall_exp_arg));
     const fall_val = if (t_e2 > 0.0) fall_comp else 0.0;
 
     const i_exp = e_i1 + rise_val + fall_val;
@@ -230,8 +230,8 @@ fn waveformCurrent(instance: *const Instance, t: f64) f64 {
     const fm_phases_rad = fm_phases * deg2rad;
 
     // I_OFF + I_AMP * sin(2*pi*fc*t + phaseC + MDI * sin(2*pi*fs*t + phaseS))
-    const fm_mod = fm_mdi * @sin(2.0 * pi * fm_fs * t + fm_phases_rad);
-    const i_sffm = fm_ioff + fm_iamp * @sin(2.0 * pi * fm_fc * t + fm_phasec_rad + fm_mod);
+    const fm_mod = fm_mdi * contract.fmath.sin(2.0 * pi * fm_fs * t + fm_phases_rad);
+    const i_sffm = fm_ioff + fm_iamp * contract.fmath.sin(2.0 * pi * fm_fc * t + fm_phasec_rad + fm_mod);
 
     // ================================================================
     // AM waveform (waveform == 5)
@@ -249,8 +249,8 @@ fn waveformCurrent(instance: *const Instance, t: f64) f64 {
 
     // For t < TD: I = 0
     // For t >= TD: I_A * (I_O + sin(2*pi*fm*t + phaseS)) * sin(2*pi*fc*t + phaseC)
-    const am_envelope = am_io + @sin(2.0 * pi * am_mf * t + am_phases_rad);
-    const am_carrier = @sin(2.0 * pi * am_fc_v * t + am_phasec_rad);
+    const am_envelope = am_io + contract.fmath.sin(2.0 * pi * am_mf * t + am_phases_rad);
+    const am_carrier = contract.fmath.sin(2.0 * pi * am_fc_v * t + am_phasec_rad);
     const am_active = am_ia * am_envelope * am_carrier;
     const i_am = if (t < am_td) 0.0 else am_active;
 

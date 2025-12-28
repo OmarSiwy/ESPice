@@ -420,7 +420,6 @@ fn tempParams(model: *const Model, instance: *const Instance, dt_sh: f64) TempPa
     const ZETARE: f64 = @as(f64, model.zetare);
     const ALFAV: f64 = @as(f64, model.alfav);
     const ALQAV: f64 = @as(f64, model.alqav);
-    const ZETACX: f64 = @as(f64, model.zetacx);
     const ZETARTH: f64 = @as(f64, model.zetarth);
     const ALRTH: f64 = @as(f64, model.alrth);
     const VGS: f64 = @as(f64, model.vgs);
@@ -432,91 +431,91 @@ fn tempParams(model: *const Model, instance: *const Instance, dt_sh: f64) TempPa
     const vt = k_b * t_dev;
     const r_t = t_dev / t_nom_k;
     const delta_t = t_dev - t_nom_k;
-    const ln_rt = @log(@max(r_t, 1.0e-30));
+    const ln_rt = contract.fmath.log(@max(r_t, 1.0e-30));
 
     // -- Bandgap voltage (Eq 2-165 to 2-167) --
     const k1 = F1VG * t_nom_k;
-    const k2 = F2VG * t_nom_k + k1 * @log(@max(t_nom_k, 1.0e-30));
+    const k2 = F2VG * t_nom_k + k1 * contract.fmath.log(@max(t_nom_k, 1.0e-30));
+    // Corrected bandgap voltages for built-in voltage T-scaling (Eq 2-165 to 2-167)
     const vgb_0 = VGB - k2;
     const vge_0 = VGE - k2;
     const vgc_0 = VGC - k2;
-    const vgs_0 = VGS - k2;
     const vg_be_0 = (vgb_0 + vge_0) / 2.0;
     const vg_bc_0 = (vgb_0 + vgc_0) / 2.0;
 
     // -- Built-in voltages (Eq 2-195 to 2-198) --
-    const vdei_j0 = 2.0 * vt_nom * @log(@max(@exp(@min(VDEI / (2.0 * vt_nom), 80.0)) - @exp(@min(-VDEI / (2.0 * vt_nom), 80.0)), 1.0e-30));
+    const vdei_j0 = 2.0 * vt_nom * contract.fmath.log(@max(contract.fmath.exp(@min(VDEI / (2.0 * vt_nom), 80.0)) - contract.fmath.exp(@min(-VDEI / (2.0 * vt_nom), 80.0)), 1.0e-30));
     const vdei_jt = vdei_j0 * r_t - mg * vt * ln_rt - vg_be_0 * (r_t - 1.0);
-    const vdei_t = vdei_jt + 2.0 * vt * @log(@max(0.5 * (1.0 + @sqrt(@max(1.0 + 4.0 * @exp(@min(-vdei_jt / vt, 80.0)), 1.0e-30))), 1.0e-30));
+    const vdei_t = vdei_jt + 2.0 * vt * contract.fmath.log(@max(0.5 * (1.0 + @sqrt(@max(1.0 + 4.0 * contract.fmath.exp(@min(-vdei_jt / vt, 80.0)), 1.0e-30))), 1.0e-30));
 
-    const vdci_j0 = 2.0 * vt_nom * @log(@max(@exp(@min(VDCI / (2.0 * vt_nom), 80.0)) - @exp(@min(-VDCI / (2.0 * vt_nom), 80.0)), 1.0e-30));
+    const vdci_j0 = 2.0 * vt_nom * contract.fmath.log(@max(contract.fmath.exp(@min(VDCI / (2.0 * vt_nom), 80.0)) - contract.fmath.exp(@min(-VDCI / (2.0 * vt_nom), 80.0)), 1.0e-30));
     const vdci_jt = vdci_j0 * r_t - mg * vt * ln_rt - vg_bc_0 * (r_t - 1.0);
-    const vdci_t = vdci_jt + 2.0 * vt * @log(@max(0.5 * (1.0 + @sqrt(@max(1.0 + 4.0 * @exp(@min(-vdci_jt / vt, 80.0)), 1.0e-30))), 1.0e-30));
+    const vdci_t = vdci_jt + 2.0 * vt * contract.fmath.log(@max(0.5 * (1.0 + @sqrt(@max(1.0 + 4.0 * contract.fmath.exp(@min(-vdci_jt / vt, 80.0)), 1.0e-30))), 1.0e-30));
 
     // -- T-scaled capacitances (Eq 2-202, 2-203) --
-    const cjei0_t = CJEI0 * @exp(ZEI * @log(@max(VDEI / vdei_t, 1.0e-30)));
-    const cjci0_t = CJCI0 * @exp(ZCI * @log(@max(VDCI / vdci_t, 1.0e-30)));
+    const cjei0_t = CJEI0 * contract.fmath.exp(ZEI * contract.fmath.log(@max(VDEI / vdei_t, 1.0e-30)));
+    const cjci0_t = CJCI0 * contract.fmath.exp(ZCI * contract.fmath.log(@max(VDCI / vdci_t, 1.0e-30)));
     const ajei_t = AJEI * vdei_t / VDEI;
     const ajci_t = AJCI * vdci_t / VDCI;
 
     // -- T-scaled saturation currents --
-    const c10_t = C10 * @exp(ZETACT * ln_rt + vgb_0 / vt * (r_t - 1.0));
-    const qp0_t = QP0 * (2.0 - @exp(ZEI * @log(@max(vdei_t / VDEI, 1.0e-30))));
+    const c10_t = C10 * contract.fmath.exp(ZETACT * ln_rt + VGB / vt * (r_t - 1.0));
+    const qp0_t = QP0 * (2.0 - contract.fmath.exp(ZEI * contract.fmath.log(@max(vdei_t / VDEI, 1.0e-30))));
 
-    const ibeis_t = IBEIS * @exp(ZETABET * ln_rt + vge_0 / vt * (r_t - 1.0));
-    const ireis_t = IREIS * @exp(ZETABET / MREI * ln_rt + vge_0 / (MREI * vt) * (r_t - 1.0));
-    const ibeps_t = IBEPS * @exp(ZETABET * ln_rt + vge_0 / vt * (r_t - 1.0));
-    const ireps_t = IREPS * @exp(ZETABET / MREP * ln_rt + vge_0 / (MREP * vt) * (r_t - 1.0));
+    const ibeis_t = IBEIS * contract.fmath.exp(ZETABET * ln_rt + VGE / vt * (r_t - 1.0));
+    const ireis_t = IREIS * contract.fmath.exp(ZETABET / MREI * ln_rt + VGE / (MREI * vt) * (r_t - 1.0));
+    const ibeps_t = IBEPS * contract.fmath.exp(ZETABET * ln_rt + VGE / vt * (r_t - 1.0));
+    const ireps_t = IREPS * contract.fmath.exp(ZETABET / MREP * ln_rt + VGE / (MREP * vt) * (r_t - 1.0));
 
     const zeta_bcit = mg + 1.0 - ZETACI;
-    const ibcis_t = IBCIS * @exp(zeta_bcit * ln_rt + vgc_0 / vt * (r_t - 1.0));
-    const ibcxs_t = IBCXS * @exp(zeta_bcit * ln_rt + vgc_0 / vt * (r_t - 1.0));
+    const ibcis_t = IBCIS * contract.fmath.exp(zeta_bcit * ln_rt + VGC / vt * (r_t - 1.0));
+    const ibcxs_t = IBCXS * contract.fmath.exp(zeta_bcit * ln_rt + VGC / vt * (r_t - 1.0));
 
-    const zeta_bcxt = mg + 1.0 - ZETACX;
-    const itss_t = ITSS * @exp(zeta_bcxt * ln_rt + vgc_0 / vt * (r_t - 1.0));
-    const iscs_t = ISCS * @exp(zeta_bcxt * ln_rt + vgs_0 / vt * (r_t - 1.0));
+    const zeta_sct = mg - 1.5;
+    const itss_t = ITSS * contract.fmath.exp(zeta_sct * ln_rt + VGC / vt * (r_t - 1.0));
+    const iscs_t = ISCS * contract.fmath.exp(zeta_sct * ln_rt + VGS / vt * (r_t - 1.0));
 
     // -- Series resistances (Eq 2-204) --
-    const rbi0_t = RBI0 * @exp(ZETARBI * ln_rt);
-    const rbx_t = RBX * @exp(ZETARBX * ln_rt);
-    const rcx_t = RCX * @exp(ZETARCX * ln_rt);
-    const re_t = RE * @exp(ZETARE * ln_rt);
-    const rci0_t = RCI0 * @exp(ZETACI * ln_rt);
+    const rbi0_t = RBI0 * contract.fmath.exp(ZETARBI * ln_rt);
+    const rbx_t = RBX * contract.fmath.exp(ZETARBX * ln_rt);
+    const rcx_t = RCX * contract.fmath.exp(ZETARCX * ln_rt);
+    const re_t = RE * contract.fmath.exp(ZETARE * ln_rt);
+    const rci0_t = RCI0 * contract.fmath.exp(ZETACI * ln_rt);
 
     // -- Vlim/Vces/Vdck (Eq 2-190 to 2-192) --
     const a_vs = ALVS * t_nom_k;
-    const vlim_t = VLIM * @exp((ZETACI - a_vs) * ln_rt);
+    const vlim_t = VLIM * contract.fmath.exp((ZETACI - a_vs) * ln_rt);
     const vces_t = VCES * (1.0 + ALCES * delta_t);
     const vdck_t = if (VDCK > 0.0) VDCK * (1.0 - ALDCK * delta_t) else 0.0;
 
     // -- Transit times (Eq 2-193, 2-194) --
     const t0_t = T0 * (1.0 + ALT0 * delta_t + KT0 * delta_t * delta_t);
-    const thcs_t = THCS * @exp((ZETACI - 1.0) * ln_rt);
+    const thcs_t = THCS * contract.fmath.exp((ZETACI - 1.0) * ln_rt);
     const tef0_t = TEF0;
 
     // -- Avalanche (Eq 2-207) --
-    const favl_t = FAVL * @exp(ALFAV * delta_t);
-    const qavl_t = QAVL * @exp(ALQAV * delta_t);
+    const favl_t = FAVL * contract.fmath.exp(ALFAV * delta_t);
+    const qavl_t = QAVL * contract.fmath.exp(ALQAV * delta_t);
 
     // -- Weight factors (Eq 2-173 to 2-175) --
-    const hf0_t = HF0 * @exp(DVGBE / vt * (r_t - 1.0));
-    const hjei0_t = HJEI0 * @exp(DVGBE / vt * (@exp(ZETAVGBE * ln_rt) - 1.0));
-    const ahjei_t = AHJEI * @exp(ZETAHJEI * ln_rt);
+    const hf0_t = HF0 * contract.fmath.exp(DVGBE / vt * (r_t - 1.0));
+    const hjei0_t = HJEI0 * contract.fmath.exp(DVGBE / vt * (contract.fmath.exp(ZETAVGBE * ln_rt) - 1.0));
+    const ahjei_t = AHJEI * contract.fmath.exp(ZETAHJEI * ln_rt);
 
     // -- Tunnelling (Eq 2-209 to 2-215) --
     const vg_be_t0 = (VGB + VGE) / 2.0;
     const vg_be_t = vg_be_t0;
     const ibets_t = if (IBETS > 0.0) IBETS * (vg_be_t0 / vg_be_t) * (vdei_t / VDEI) * (vdei_t / VDEI) * (cjei0_t / CJEI0) else 0.0;
-    const abet_t = if (IBETS > 0.0) ABET * @exp(1.5 * @log(@max(vg_be_t / vg_be_t0, 1.0e-30))) * (VDEI / vdei_t) * (CJEI0 / cjei0_t) else ABET;
-    const ibetat0_t = if (IBETAT0 > 0.0) IBETAT0 * @exp((VDEI - vdei_t) / VBETAT) else 0.0;
+    const abet_t = if (IBETS > 0.0) ABET * contract.fmath.exp(1.5 * contract.fmath.log(@max(vg_be_t / vg_be_t0, 1.0e-30))) * (VDEI / vdei_t) * (CJEI0 / cjei0_t) else ABET;
+    const ibetat0_t = if (IBETAT0 > 0.0) IBETAT0 * contract.fmath.exp((VDEI - vdei_t) / VBETAT) else 0.0;
 
     const vg_bc_t0 = (VGB + VGC) / 2.0;
     const vg_bc_t = vg_bc_t0;
     const ibcts_t = if (IBCTS > 0.0) IBCTS * (vg_bc_t0 / vg_bc_t) * (vdci_t / VDCI) * (vdci_t / VDCI) * (cjci0_t / CJCI0) else 0.0;
-    const abct_t = if (IBCTS > 0.0) ABCT * @exp(1.5 * @log(@max(vg_bc_t / vg_bc_t0, 1.0e-30))) * (VDCI / vdci_t) * (CJCI0 / cjci0_t) else ABCT;
+    const abct_t = if (IBCTS > 0.0) ABCT * contract.fmath.exp(1.5 * contract.fmath.log(@max(vg_bc_t / vg_bc_t0, 1.0e-30))) * (VDCI / vdci_t) * (CJCI0 / cjci0_t) else ABCT;
 
     // -- Thermal / substrate resistance (Eq 2-218) --
-    const rth_t = if (RTH > 0.0) RTH * (1.0 + ALRTH * delta_t) * @exp(ZETARTH * ln_rt) else 0.0;
+    const rth_t = if (RTH > 0.0) RTH * (1.0 + ALRTH * delta_t) * contract.fmath.exp(ZETARTH * ln_rt) else 0.0;
     const rsu_t = RSU;
 
     return .{
@@ -690,7 +689,7 @@ pub fn eval(comptime S: type, x: [n_u]S, model: *const Model, instance: *const I
     // ========================================================================
     // Internal BE Depletion Charge (Eq 2-70 to 2-76)
     // ========================================================================
-    const vf_ei = vdei_t * (1.0 - @exp((-1.0 / ZEI) * @log(@max(ajei_t, 1.0e-30))));
+    const vf_ei = vdei_t * (1.0 - contract.fmath.exp((-1.0 / ZEI) * contract.fmath.log(@max(ajei_t, 1.0e-30))));
     // x_ei = (vf_ei - v_biei)/vt
     const x_ei = v_biei.neg().addC(vf_ei).scale(1.0 / vt);
     // vj_ei = vf_ei - vt*(x_ei + sqrt(x_ei^2 + a_fj))/2
@@ -709,7 +708,7 @@ pub fn eval(comptime S: type, x: [n_u]S, model: *const Model, instance: *const I
     // ========================================================================
     const vptci_eff = VPTCI - VDCI;
     const vptci_t_eff = vptci_eff;
-    const vfci = vdci_t * (1.0 - @exp((-1.0 / ZCI) * @log(@max(ajci_t, 1.0e-30))));
+    const vfci = vdci_t * (1.0 - contract.fmath.exp((-1.0 / ZCI) * contract.fmath.log(@max(ajci_t, 1.0e-30))));
     const vr_ci = 0.1 * vptci_t_eff + 4.0 * vt;
 
     // vjr = vfci - vt*log(1 + exp(min((vfci - v_bici)/vt, 80)))
@@ -718,11 +717,11 @@ pub fn eval(comptime S: type, x: [n_u]S, model: *const Model, instance: *const I
 
     // vjm = -vptci + vr_ci*log(1 + exp(min((vptci + vjr)/vr_ci, 80))) - exp(min(-(vptci+vfci)/vr_ci,80))
     const ejm = vjr.addC(vptci_t_eff).scale(1.0 / vr_ci).minC(80.0).exp();
-    const vjm_const = -@as(f64, @exp(@min(-(vptci_t_eff + vfci) / vr_ci, 80.0)));
+    const vjm_const = -@as(f64, contract.fmath.exp(@min(-(vptci_t_eff + vfci) / vr_ci, 80.0)));
     const vjm = ejm.addC(1.0).maxC(1.0e-30).log().scale(vr_ci).addC(-vptci_t_eff + vjm_const);
 
     const zcir = ZCI / 4.0;
-    const cjci0r = cjci0_t * @exp((ZCI - zcir) * @log(@max(vdci_t / (vptci_eff + VDCI), 1.0e-30)));
+    const cjci0r = cjci0_t * contract.fmath.exp((ZCI - zcir) * contract.fmath.log(@max(vdci_t / (vptci_eff + VDCI), 1.0e-30)));
 
     const one_m_vjm = vjm.scale(-1.0 / vdci_t).addC(1.0).maxC(1.0e-30);
     const one_m_vjr = vjr.scale(-1.0 / vdci_t).addC(1.0).maxC(1.0e-30);
@@ -893,7 +892,7 @@ pub fn eval(comptime S: type, x: [n_u]S, model: *const Model, instance: *const I
             if (zeta_l > 0.0 and zeta_b != zeta_l) {
                 // kappa = ((1+zeta_b)/(1+zeta_l))^(i_ck_2d - 1)  [variable exponent]
                 const base_k = @max((1.0 + zeta_b) / (1.0 + zeta_l), 1.0e-30);
-                const kappa = i_ck_2d.addC(-1.0).scale(@log(base_k)).exp();
+                const kappa = i_ck_2d.addC(-1.0).scale(contract.fmath.log(base_k)).exp();
                 // w_lat = (kappa - 1)/(zeta_l - kappa*zeta_b)
                 const w_lat = kappa.addC(-1.0).div(kappa.scale(-zeta_b).addC(zeta_l).maxC(1.0e-30));
                 break :blk w_lat.minC(1.0).maxC(0.0);
@@ -951,7 +950,8 @@ pub fn eval(comptime S: type, x: [n_u]S, model: *const Model, instance: *const I
     else
         S.con(0.0);
 
-    const ibe_tun_i = ibeti.add(ibetat);
+    // TAT flows bi->ei (positive convention), BtBT flows ei->bi (negative convention)
+    const ibe_tun_i = ibetat.sub(ibeti);
 
     // ========================================================================
     // BC Junction Currents (Eq 2-106, 2-107)
@@ -1182,11 +1182,11 @@ pub fn eval(comptime S: type, x: [n_u]S, model: *const Model, instance: *const I
     // Intrinsic collector (ci)
     out[ci_n] = it_val.add(iavl_m).sub(ijbci_m).sub(ibct_m).sub(i_rcx).sub(its_m).sub(ijsc_m).scale(type_f);
     // Intrinsic base (bi)
-    out[bi_n] = ijbei_m.add(ijbci_m).add(ibhrec_m).add(ibe_tun_bi).sub(it_val).sub(iavl_m).sub(i_rbi).scale(type_f);
+    out[bi_n] = ijbei_m.add(ijbci_m).add(ibhrec_m).add(ibe_tun_bi).sub(iavl_m).sub(i_rbi).scale(type_f);
     // Perimeter base (bx)
     out[bx_n] = ijbep_m.add(ijbcx_m).add(ibe_tun_bx).add(i_rbi).sub(i_rbx).add(its_m).scale(type_f);
     // Intrinsic emitter (ei)
-    out[ei_n] = ijbei_m.neg().sub(ijbep_m).sub(ibe_tun_bi).sub(ibe_tun_bx).add(it_val).sub(i_re).scale(type_f);
+    out[ei_n] = ijbei_m.neg().sub(ijbep_m).sub(ibhrec_m).sub(ibe_tun_bi).sub(ibe_tun_bx).sub(it_val).sub(i_re).scale(type_f);
     // Intrinsic substrate (si)
     out[si_n] = ijsc_m.sub(i_rsu).scale(type_f);
     // NQS nodes
@@ -1258,6 +1258,7 @@ pub fn q(comptime S: type, x: [n_u]S, model: *const Model, instance: *const Inst
     const ACBAR: f64 = @as(f64, model.acbar);
     const AVCSM: f64 = @as(f64, model.avcsm);
     const FQI: f64 = @as(f64, model.fqi);
+    _ = FQI; // FQI is for base resistance only, not charge partitioning
     const FCRBI: f64 = @as(f64, model.fcrbi);
     const CBEPAR: f64 = @as(f64, model.cbepar);
     const FBEPAR: f64 = @as(f64, model.fbepar);
@@ -1300,7 +1301,7 @@ pub fn q(comptime S: type, x: [n_u]S, model: *const Model, instance: *const Inst
     const VGS: f64 = @as(f64, model.vgs);
     const t_nom_k = 273.15 + @as(f64, model.tnom);
     const k1 = F1VG * t_nom_k;
-    const k2 = F2VG * t_nom_k + k1 * @log(@max(t_nom_k, 1.0e-30));
+    const k2 = F2VG * t_nom_k + k1 * contract.fmath.log(@max(t_nom_k, 1.0e-30));
     const vgb_0 = VGB - k2;
     const vge_0 = VGE - k2;
     const vgc_0 = VGC - k2;
@@ -1322,34 +1323,34 @@ pub fn q(comptime S: type, x: [n_u]S, model: *const Model, instance: *const Inst
     const CJS0: f64 = @as(f64, model.cjs0);
     const CSCP0: f64 = @as(f64, model.cscp0);
 
-    const vdep_j0 = 2.0 * vt_nom * @log(@max(@exp(@min(VDEP / (2.0 * vt_nom), 80.0)) - @exp(@min(-VDEP / (2.0 * vt_nom), 80.0)), 1.0e-30));
+    const vdep_j0 = 2.0 * vt_nom * contract.fmath.log(@max(contract.fmath.exp(@min(VDEP / (2.0 * vt_nom), 80.0)) - contract.fmath.exp(@min(-VDEP / (2.0 * vt_nom), 80.0)), 1.0e-30));
     const vdep_jt = vdep_j0 * r_t - mg * vt * ln_rt - ((vgb_0 + vge_0) / 2.0) * (r_t - 1.0);
-    const vdep_t = vdep_jt + 2.0 * vt * @log(@max(0.5 * (1.0 + @sqrt(@max(1.0 + 4.0 * @exp(@min(-vdep_jt / vt, 80.0)), 1.0e-30))), 1.0e-30));
+    const vdep_t = vdep_jt + 2.0 * vt * contract.fmath.log(@max(0.5 * (1.0 + @sqrt(@max(1.0 + 4.0 * contract.fmath.exp(@min(-vdep_jt / vt, 80.0)), 1.0e-30))), 1.0e-30));
 
-    const vdcx_j0 = 2.0 * vt_nom * @log(@max(@exp(@min(VDCX / (2.0 * vt_nom), 80.0)) - @exp(@min(-VDCX / (2.0 * vt_nom), 80.0)), 1.0e-30));
+    const vdcx_j0 = 2.0 * vt_nom * contract.fmath.log(@max(contract.fmath.exp(@min(VDCX / (2.0 * vt_nom), 80.0)) - contract.fmath.exp(@min(-VDCX / (2.0 * vt_nom), 80.0)), 1.0e-30));
     const vdcx_jt = vdcx_j0 * r_t - mg * vt * ln_rt - ((vgb_0 + vgc_0) / 2.0) * (r_t - 1.0);
-    const vdcx_t = vdcx_jt + 2.0 * vt * @log(@max(0.5 * (1.0 + @sqrt(@max(1.0 + 4.0 * @exp(@min(-vdcx_jt / vt, 80.0)), 1.0e-30))), 1.0e-30));
+    const vdcx_t = vdcx_jt + 2.0 * vt * contract.fmath.log(@max(0.5 * (1.0 + @sqrt(@max(1.0 + 4.0 * contract.fmath.exp(@min(-vdcx_jt / vt, 80.0)), 1.0e-30))), 1.0e-30));
 
-    const vds_j0 = 2.0 * vt_nom * @log(@max(@exp(@min(VDS / (2.0 * vt_nom), 80.0)) - @exp(@min(-VDS / (2.0 * vt_nom), 80.0)), 1.0e-30));
+    const vds_j0 = 2.0 * vt_nom * contract.fmath.log(@max(contract.fmath.exp(@min(VDS / (2.0 * vt_nom), 80.0)) - contract.fmath.exp(@min(-VDS / (2.0 * vt_nom), 80.0)), 1.0e-30));
     const vds_jt = vds_j0 * r_t - mg * vt * ln_rt - vg_cs_0 * (r_t - 1.0);
-    const vds_t = vds_jt + 2.0 * vt * @log(@max(0.5 * (1.0 + @sqrt(@max(1.0 + 4.0 * @exp(@min(-vds_jt / vt, 80.0)), 1.0e-30))), 1.0e-30));
+    const vds_t = vds_jt + 2.0 * vt * contract.fmath.log(@max(0.5 * (1.0 + @sqrt(@max(1.0 + 4.0 * contract.fmath.exp(@min(-vds_jt / vt, 80.0)), 1.0e-30))), 1.0e-30));
 
-    const vdsp_j0 = 2.0 * vt_nom * @log(@max(@exp(@min(VDSP / (2.0 * vt_nom), 80.0)) - @exp(@min(-VDSP / (2.0 * vt_nom), 80.0)), 1.0e-30));
+    const vdsp_j0 = 2.0 * vt_nom * contract.fmath.log(@max(contract.fmath.exp(@min(VDSP / (2.0 * vt_nom), 80.0)) - contract.fmath.exp(@min(-VDSP / (2.0 * vt_nom), 80.0)), 1.0e-30));
     const vdsp_jt = vdsp_j0 * r_t - mg * vt * ln_rt - vg_cs_0 * (r_t - 1.0);
-    const vdsp_t = vdsp_jt + 2.0 * vt * @log(@max(0.5 * (1.0 + @sqrt(@max(1.0 + 4.0 * @exp(@min(-vdsp_jt / vt, 80.0)), 1.0e-30))), 1.0e-30));
+    const vdsp_t = vdsp_jt + 2.0 * vt * contract.fmath.log(@max(0.5 * (1.0 + @sqrt(@max(1.0 + 4.0 * contract.fmath.exp(@min(-vdsp_jt / vt, 80.0)), 1.0e-30))), 1.0e-30));
 
-    const cjep0_t = CJEP0 * @exp(ZEP * @log(@max(VDEP / vdep_t, 1.0e-30)));
-    const cjcx0_t = CJCX0 * @exp(ZCX * @log(@max(VDCX / vdcx_t, 1.0e-30)));
-    const cjs0_t = CJS0 * @exp(ZS * @log(@max(VDS / vds_t, 1.0e-30)));
-    const cscp0_t = CSCP0 * @exp(ZSP * @log(@max(VDSP / vdsp_t, 1.0e-30)));
+    const cjep0_t = CJEP0 * contract.fmath.exp(ZEP * contract.fmath.log(@max(VDEP / vdep_t, 1.0e-30)));
+    const cjcx0_t = CJCX0 * contract.fmath.exp(ZCX * contract.fmath.log(@max(VDCX / vdcx_t, 1.0e-30)));
+    const cjs0_t = CJS0 * contract.fmath.exp(ZS * contract.fmath.log(@max(VDS / vds_t, 1.0e-30)));
+    const cscp0_t = CSCP0 * contract.fmath.exp(ZSP * contract.fmath.log(@max(VDSP / vdsp_t, 1.0e-30)));
 
     const ajep_t = AJEP_p * vdep_t / VDEP_p;
     const ajcx_t = AJCX * vdcx_t / VDCX;
     const ajs_t = AJS * vds_t / VDS;
     const ajsp_t = AJS * vdsp_t / VDSP;
 
-    const tsf_t = TSF * @exp((ZETACX - 1.0) * ln_rt);
-    const itss_t = ITSS_p * @exp((mg + 1.0 - ZETACX) * ln_rt + vgc_0 / vt * (r_t - 1.0));
+    const tsf_t = TSF * contract.fmath.exp((ZETACX - 1.0) * ln_rt);
+    const itss_t = ITSS_p * contract.fmath.exp((mg - 1.5) * ln_rt + VGC / vt * (r_t - 1.0));
 
     const rci0_safe = @max(P.rci0_t, 1.0e-30);
 
@@ -1374,7 +1375,7 @@ pub fn q(comptime S: type, x: [n_u]S, model: *const Model, instance: *const Inst
     // ========================================================================
     // Internal BE Depletion Charge Q_jEi (Eq 2-70)
     // ========================================================================
-    const vf_ei = vdei_t * (1.0 - @exp((-1.0 / ZEI) * @log(@max(ajei_t, 1.0e-30))));
+    const vf_ei = vdei_t * (1.0 - contract.fmath.exp((-1.0 / ZEI) * contract.fmath.log(@max(ajei_t, 1.0e-30))));
     const x_ei = v_biei.neg().addC(vf_ei).scale(1.0 / vt);
     const vj_ei = x_ei.add(x_ei.mul(x_ei).addC(a_fj).sqrt()).scale(vt / 2.0).neg().addC(vf_ei);
     const one_m_vjei = vj_ei.scale(-1.0 / vdei_t).addC(1.0).maxC(1.0e-30);
@@ -1384,7 +1385,7 @@ pub fn q(comptime S: type, x: [n_u]S, model: *const Model, instance: *const Inst
     // ========================================================================
     // Peripheral BE Depletion Charge Q_jEp (B*E' voltage)
     // ========================================================================
-    const vf_ep = vdep_t * (1.0 - @exp((-1.0 / ZEP) * @log(@max(ajep_t, 1.0e-30))));
+    const vf_ep = vdep_t * (1.0 - contract.fmath.exp((-1.0 / ZEP) * contract.fmath.log(@max(ajep_t, 1.0e-30))));
     const x_ep = v_bxei.neg().addC(vf_ep).scale(1.0 / vt);
     const vj_ep = x_ep.add(x_ep.mul(x_ep).addC(a_fj).sqrt()).scale(vt / 2.0).neg().addC(vf_ep);
     const one_m_vjep = vj_ep.scale(-1.0 / vdep_t).addC(1.0).maxC(1.0e-30);
@@ -1395,15 +1396,15 @@ pub fn q(comptime S: type, x: [n_u]S, model: *const Model, instance: *const Inst
     // Internal BC Depletion Charge Q_jCi (with punch-through)
     // ========================================================================
     const vptci_eff = VPTCI - VDCI;
-    const vfci = vdci_t * (1.0 - @exp((-1.0 / ZCI) * @log(@max(ajci_t, 1.0e-30))));
+    const vfci = vdci_t * (1.0 - contract.fmath.exp((-1.0 / ZCI) * contract.fmath.log(@max(ajci_t, 1.0e-30))));
     const vr_ci = 0.1 * vptci_eff + 4.0 * vt;
     const ejr = v_bici.neg().addC(vfci).scale(1.0 / vt).minC(80.0).exp();
     const vjr = ejr.addC(1.0).maxC(1.0e-30).log().scale(vt).neg().addC(vfci);
     const ejm = vjr.addC(vptci_eff).scale(1.0 / vr_ci).minC(80.0).exp();
-    const vjm_const = -@as(f64, @exp(@min(-(vptci_eff + vfci) / vr_ci, 80.0)));
+    const vjm_const = -@as(f64, contract.fmath.exp(@min(-(vptci_eff + vfci) / vr_ci, 80.0)));
     const vjm = ejm.addC(1.0).maxC(1.0e-30).log().scale(vr_ci).addC(-vptci_eff + vjm_const);
     const zcir = ZCI / 4.0;
-    const cjci0r = cjci0_t * @exp((ZCI - zcir) * @log(@max(vdci_t / (vptci_eff + VDCI), 1.0e-30)));
+    const cjci0r = cjci0_t * contract.fmath.exp((ZCI - zcir) * contract.fmath.log(@max(vdci_t / (vptci_eff + VDCI), 1.0e-30)));
     const one_m_vjm = vjm.scale(-1.0 / vdci_t).addC(1.0).maxC(1.0e-30);
     const one_m_vjr = vjr.scale(-1.0 / vdci_t).addC(1.0).maxC(1.0e-30);
     const qjci_med = one_m_vjm.log().scale(1.0 - ZCI).exp().neg().addC(1.0).scale(cjci0_t * vdci_t / (1.0 - ZCI));
@@ -1415,15 +1416,15 @@ pub fn q(comptime S: type, x: [n_u]S, model: *const Model, instance: *const Inst
     // External BC Depletion Charge Q_jCx (B*C' voltage)
     // ========================================================================
     const vptcx_eff = VPTCX - VDCX;
-    const vfcx = vdcx_t * (1.0 - @exp((-1.0 / ZCX) * @log(@max(ajcx_t, 1.0e-30))));
+    const vfcx = vdcx_t * (1.0 - contract.fmath.exp((-1.0 / ZCX) * contract.fmath.log(@max(ajcx_t, 1.0e-30))));
     const vr_cx = 0.1 * vptcx_eff + 4.0 * vt;
     const ejr_cx = v_bxci.neg().addC(vfcx).scale(1.0 / vt).minC(80.0).exp();
     const vjr_cx = ejr_cx.addC(1.0).maxC(1.0e-30).log().scale(vt).neg().addC(vfcx);
     const ejm_cx = vjr_cx.addC(vptcx_eff).scale(1.0 / vr_cx).minC(80.0).exp();
-    const vjm_cx_const = -@as(f64, @exp(@min(-(vptcx_eff + vfcx) / vr_cx, 80.0)));
+    const vjm_cx_const = -@as(f64, contract.fmath.exp(@min(-(vptcx_eff + vfcx) / vr_cx, 80.0)));
     const vjm_cx = ejm_cx.addC(1.0).maxC(1.0e-30).log().scale(vr_cx).addC(-vptcx_eff + vjm_cx_const);
     const zcxr = ZCX / 4.0;
-    const cjcx0r = cjcx0_t * @exp((ZCX - zcxr) * @log(@max(vdcx_t / (vptcx_eff + VDCX), 1.0e-30)));
+    const cjcx0r = cjcx0_t * contract.fmath.exp((ZCX - zcxr) * contract.fmath.log(@max(vdcx_t / (vptcx_eff + VDCX), 1.0e-30)));
     const one_m_vjmcx = vjm_cx.scale(-1.0 / vdcx_t).addC(1.0).maxC(1.0e-30);
     const one_m_vjrcx = vjr_cx.scale(-1.0 / vdcx_t).addC(1.0).maxC(1.0e-30);
     const qjcx_med = one_m_vjmcx.log().scale(1.0 - ZCX).exp().neg().addC(1.0).scale(cjcx0_t * vdcx_t / (1.0 - ZCX));
@@ -1435,15 +1436,15 @@ pub fn q(comptime S: type, x: [n_u]S, model: *const Model, instance: *const Inst
     // C-S Bottom Depletion Charge Q_jS (S'C' voltage)
     // ========================================================================
     const vpts_eff = VPTS - VDS;
-    const vfs = vds_t * (1.0 - @exp((-1.0 / ZS) * @log(@max(ajs_t, 1.0e-30))));
+    const vfs = vds_t * (1.0 - contract.fmath.exp((-1.0 / ZS) * contract.fmath.log(@max(ajs_t, 1.0e-30))));
     const vr_s = 0.1 * vpts_eff + 4.0 * vt;
     const ejr_s = v_sici.neg().addC(vfs).scale(1.0 / vt).minC(80.0).exp();
     const vjr_s = ejr_s.addC(1.0).maxC(1.0e-30).log().scale(vt).neg().addC(vfs);
     const ejm_s = vjr_s.addC(vpts_eff).scale(1.0 / vr_s).minC(80.0).exp();
-    const vjm_s_const = -@as(f64, @exp(@min(-(vpts_eff + vfs) / vr_s, 80.0)));
+    const vjm_s_const = -@as(f64, contract.fmath.exp(@min(-(vpts_eff + vfs) / vr_s, 80.0)));
     const vjm_s = ejm_s.addC(1.0).maxC(1.0e-30).log().scale(vr_s).addC(-vpts_eff + vjm_s_const);
     const zsr = ZS / 4.0;
-    const cjs0r = cjs0_t * @exp((ZS - zsr) * @log(@max(vds_t / (vpts_eff + VDS), 1.0e-30)));
+    const cjs0r = cjs0_t * contract.fmath.exp((ZS - zsr) * contract.fmath.log(@max(vds_t / (vpts_eff + VDS), 1.0e-30)));
     const one_m_vjms = vjm_s.scale(-1.0 / vds_t).addC(1.0).maxC(1.0e-30);
     const one_m_vjrs = vjr_s.scale(-1.0 / vds_t).addC(1.0).maxC(1.0e-30);
     const qjs_med = one_m_vjms.log().scale(1.0 - ZS).exp().neg().addC(1.0).scale(cjs0_t * vds_t / (1.0 - ZS));
@@ -1455,15 +1456,15 @@ pub fn q(comptime S: type, x: [n_u]S, model: *const Model, instance: *const Inst
     // Peripheral C-S Depletion Charge Q_SCp (S-C ext voltage)
     // ========================================================================
     const vptsp_eff = VPTSP - VDSP;
-    const vfsp = vdsp_t * (1.0 - @exp((-1.0 / ZSP) * @log(@max(ajsp_t, 1.0e-30))));
+    const vfsp = vdsp_t * (1.0 - contract.fmath.exp((-1.0 / ZSP) * contract.fmath.log(@max(ajsp_t, 1.0e-30))));
     const vr_sp = 0.1 * vptsp_eff + 4.0 * vt;
     const ejr_sp = v_sc.neg().addC(vfsp).scale(1.0 / vt).minC(80.0).exp();
     const vjr_sp = ejr_sp.addC(1.0).maxC(1.0e-30).log().scale(vt).neg().addC(vfsp);
     const ejm_sp = vjr_sp.addC(vptsp_eff).scale(1.0 / vr_sp).minC(80.0).exp();
-    const vjm_sp_const = -@as(f64, @exp(@min(-(vptsp_eff + vfsp) / vr_sp, 80.0)));
+    const vjm_sp_const = -@as(f64, contract.fmath.exp(@min(-(vptsp_eff + vfsp) / vr_sp, 80.0)));
     const vjm_sp = ejm_sp.addC(1.0).maxC(1.0e-30).log().scale(vr_sp).addC(-vptsp_eff + vjm_sp_const);
     const zspr = ZSP / 4.0;
-    const cscp0r = cscp0_t * @exp((ZSP - zspr) * @log(@max(vdsp_t / (vptsp_eff + VDSP), 1.0e-30)));
+    const cscp0r = cscp0_t * contract.fmath.exp((ZSP - zspr) * contract.fmath.log(@max(vdsp_t / (vptsp_eff + VDSP), 1.0e-30)));
     const one_m_vjmsp = vjm_sp.scale(-1.0 / vdsp_t).addC(1.0).maxC(1.0e-30);
     const one_m_vjrsp = vjr_sp.scale(-1.0 / vdsp_t).addC(1.0).maxC(1.0e-30);
     const qscp_med = one_m_vjmsp.log().scale(1.0 - ZSP).exp().neg().addC(1.0).scale(cscp0_t * vdsp_t / (1.0 - ZSP));
@@ -1597,10 +1598,9 @@ pub fn q(comptime S: type, x: [n_u]S, model: *const Model, instance: *const Inst
     const q_cth = x[tn].scale(CTH);
 
     // ========================================================================
-    // Charge partitioning (internal vs peripheral)
+    // Minority charges (no FQI partitioning -- Qf all on bi-ei, Qr all on bi-ci)
     // ========================================================================
-    const qf_int = qf.scale(FQI);
-    const qf_per = qf.scale(1.0 - FQI);
+    const qf_total = qf;
 
     // ========================================================================
     // NQS charges (Eq 2-146)
@@ -1626,8 +1626,7 @@ pub fn q(comptime S: type, x: [n_u]S, model: *const Model, instance: *const Inst
     const qjcx_m = qjcx.scale(m_mult);
     const qjs_m = qjs.scale(m_mult);
     const qscp_m = qscp.scale(m_mult);
-    const qf_int_m = qf_int.scale(m_mult);
-    const qf_per_m = qf_per.scale(m_mult);
+    const qf_m = qf_total.scale(m_mult);
     const qr_m = qr.scale(m_mult);
     const qds_m = qds.scale(m_mult);
     const q_bepar1_m = q_bepar1.scale(m_mult);
@@ -1651,13 +1650,13 @@ pub fn q(comptime S: type, x: [n_u]S, model: *const Model, instance: *const Inst
     // Thermal node
     out[tn] = q_cth;
     // Intrinsic collector (ci)
-    out[ci_n] = qjci_m.neg().add(qr_m.scale(FTHC)).sub(qjcx_m).sub(qjs_m).sub(qscp_m).sub(q_bcpar1_m).sub(q_csu_m).sub(qds_m).scale(type_f);
+    out[ci_n] = qr_m.neg().sub(qjci_m).sub(qjcx_m).sub(qjs_m).sub(qscp_m).sub(q_bcpar1_m).sub(q_csu_m).sub(qds_m).scale(type_f);
     // Intrinsic base (bi)
-    out[bi_n] = qjei_m.add(qjci_m).add(qf_int_m).add(q_bepar1_m).add(q_bcpar1_m).scale(type_f);
+    out[bi_n] = qf_m.add(qjei_m).add(qr_m).add(qjci_m).add(q_bepar1_m).add(q_bcpar1_m).scale(type_f);
     // Perimeter base (bx)
-    out[bx_n] = qjep_m.add(qjcx_m).add(qf_per_m).add(q_crbi_m).add(qds_m).scale(type_f);
+    out[bx_n] = qjep_m.add(qjcx_m).add(q_crbi_m).add(qds_m).scale(type_f);
     // Intrinsic emitter (ei)
-    out[ei_n] = qjei_m.neg().sub(qjep_m).sub(qf_int_m).sub(qf_per_m).sub(qr_m).scale(type_f);
+    out[ei_n] = qf_m.neg().sub(qjei_m).sub(qjep_m).scale(type_f);
     // Intrinsic substrate (si)
     out[si_n] = qjs_m.add(qscp_m).add(q_csu_m).scale(type_f);
     // NQS nodes
@@ -1692,9 +1691,9 @@ pub fn limit(model: *const Model, _: *const Instance, x_new: [n_u]f64, x_old: [n
     const is_bc: f64 = @as(f64, model.ibcis);
     const is_sc: f64 = @max(@as(f64, model.iscs), 1.0e-30);
 
-    const vcrit_be = vt * @log(vt / (1.4142135 * @max(is_be, 1.0e-30)));
-    const vcrit_bc = vt * @log(vt / (1.4142135 * @max(is_bc, 1.0e-30)));
-    const vcrit_sc = vt * @log(vt / (1.4142135 * is_sc));
+    const vcrit_be = vt * contract.fmath.log(vt / (1.4142135 * @max(is_be, 1.0e-30)));
+    const vcrit_bc = vt * contract.fmath.log(vt / (1.4142135 * @max(is_bc, 1.0e-30)));
+    const vcrit_sc = vt * contract.fmath.log(vt / (1.4142135 * is_sc));
 
     // BE junction limiting
     const vbe_new = (x_new[bi] - x_new[ei]) * type_f;
@@ -1741,12 +1740,12 @@ fn pnjlim(v_new: f64, v_old: f64, vt: f64, vcrit: f64) f64 {
         if (v_old > 0.0) {
             const arg = 1.0 + (v_new - v_old) / vt;
             if (arg > 0.0) {
-                return v_old + vt * @log(arg);
+                return v_old + vt * contract.fmath.log(arg);
             } else {
                 return vcrit;
             }
         } else {
-            return vt * @log(v_new / vt);
+            return vt * contract.fmath.log(v_new / vt);
         }
     }
     return v_new;
@@ -1821,7 +1820,7 @@ test "hicum_l2: forward-active internal BE junction current" {
 
     // vt and ibeis_t computed exactly as the model does:
     const vt = 8.617333e-5 * 300.15;
-    const ijbei = 1.0e-18 * (@exp(0.8 / (1.0 * vt)) - 1.0) + 1.0e-12 * 0.8;
+    const ijbei = 1.0e-18 * (contract.fmath.exp(0.8 / (1.0 * vt)) - 1.0) + 1.0e-12 * 0.8;
     // Emitter node residual = (-ijbei_m - ... + it_val - i_re)*type_f. With
     // all externals grounded and rE=0 -> GSHORT short: e-node current i_re =
     // (v_e - v_ei)*g_re = 0 since both are 0. it_val at v_bici=0 is set by
@@ -1858,19 +1857,19 @@ test "hicum_l2: internal BE depletion charge at zero bias" {
     // For a self-check we recompute vdei_t exactly:
     const vt_nom = vt; // r_t=1 so vt==vt_nom
     const vdei: f64 = 0.9;
-    const vdei_j0 = 2.0 * vt_nom * @log(@exp(vdei / (2.0 * vt_nom)) - @exp(-vdei / (2.0 * vt_nom)));
+    const vdei_j0 = 2.0 * vt_nom * contract.fmath.log(contract.fmath.exp(vdei / (2.0 * vt_nom)) - contract.fmath.exp(-vdei / (2.0 * vt_nom)));
     const vdei_jt = vdei_j0; // r_t=1: -mg*vt*0 - vg*(0)
-    const vdei_t = vdei_jt + 2.0 * vt * @log(0.5 * (1.0 + @sqrt(1.0 + 4.0 * @exp(-vdei_jt / vt))));
+    const vdei_t = vdei_jt + 2.0 * vt * contract.fmath.log(0.5 * (1.0 + @sqrt(1.0 + 4.0 * contract.fmath.exp(-vdei_jt / vt))));
     const zei: f64 = 0.5;
     const ajei: f64 = 2.5;
     const cjei0: f64 = 1.0e-20;
-    const cjei0_t = cjei0 * @exp(zei * @log(vdei / vdei_t));
+    const cjei0_t = cjei0 * contract.fmath.exp(zei * contract.fmath.log(vdei / vdei_t));
     const ajei_t = ajei * vdei_t / vdei;
     const a_fj_l: f64 = 1.921812;
-    const vf_ei = vdei_t * (1.0 - @exp((-1.0 / zei) * @log(ajei_t)));
+    const vf_ei = vdei_t * (1.0 - contract.fmath.exp((-1.0 / zei) * contract.fmath.log(ajei_t)));
     const x_ei = vf_ei / vt;
     const vj_ei = vf_ei - vt * (x_ei + @sqrt(x_ei * x_ei + a_fj_l)) / 2.0;
-    const qjei = cjei0_t * vdei_t / (1.0 - zei) * (1.0 - @exp((1.0 - zei) * @log(1.0 - vj_ei / vdei_t))) + ajei_t * cjei0_t * (0.0 - vj_ei);
+    const qjei = cjei0_t * vdei_t / (1.0 - zei) * (1.0 - contract.fmath.exp((1.0 - zei) * contract.fmath.log(1.0 - vj_ei / vdei_t))) + ajei_t * cjei0_t * (0.0 - vj_ei);
 
     // bi node charge = (qjei + qjci + qf_int + q_bepar1 + q_bcpar1)*type_f.
     // At zero bias with defaults: qjci is the BC depletion charge at v=0

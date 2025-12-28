@@ -501,7 +501,7 @@ fn prep(model: *const Model, instance: *const Instance) Prep {
     const l_eff_um_nom = @max(l_um + xl_eff, 1.0e-6);
 
     // Effective width (eq 5)
-    const fd_width_corr = fdxwinf * (1.0 - @exp(-w_um / @max(fdrw, 1.0e-30)));
+    const fd_width_corr = fdxwinf * (1.0 - contract.fmath.exp(-w_um / @max(fdrw, 1.0e-30)));
     const w_eff_num = w_um + xw + (nwxw / @max(w_um, 1.0e-30)) + fd_width_corr;
     const web_denom = 1.0 - wexw * wd_um / @max(l_um * w_um, 1.0e-30);
     const w_eff_um_nom = @max(w_eff_num / @max(web_denom, 1.0e-6), 1.0e-6);
@@ -513,12 +513,12 @@ fn prep(model: *const Model, instance: *const Instance) Prep {
     const w_eff_mm1 = w_eff_um_nom + nsig_w * sig_w + nsmm_w * smm_w / @sqrt(@max(m_mult * L_mm, 1.0e-30));
     const l_eff_mm1 = l_eff_um_nom + nsig_l * sig_l + nsmm_l * smm_l / @sqrt(@max(m_mult * W_mm, 1.0e-30));
     const rsh_mm1_exp = 0.01 * (nsig_rsh * sig_rsh + nsmm_rsh * smm_rsh / @sqrt(@max(m_mult * W_mm * L_mm, 1.0e-30)));
-    const rsh_mm1 = rsh * @exp(@min(rsh_mm1_exp, 80.0));
+    const rsh_mm1 = rsh * contract.fmath.exp(@min(rsh_mm1_exp, 80.0));
 
     const w_eff_mm0 = w_eff_um_nom + nsig_w * @sqrt(sig_w * sig_w + smm_w * smm_w / @max(m_mult * L_mm, 1.0e-30));
     const l_eff_mm0 = l_eff_um_nom + nsig_l * @sqrt(sig_l * sig_l + smm_l * smm_l / @max(m_mult * W_mm, 1.0e-30));
     const rsh_mm0_exp = 0.01 * nsig_rsh * @sqrt(sig_rsh * sig_rsh + smm_rsh * smm_rsh / @max(m_mult * W_mm * L_mm, 1.0e-30));
-    const rsh_mm0 = rsh * @exp(@min(rsh_mm0_exp, 80.0));
+    const rsh_mm0 = rsh * contract.fmath.exp(@min(rsh_mm0_exp, 80.0));
 
     const has_stat = (nsig_rsh != 0.0 or nsig_w != 0.0 or nsig_l != 0.0 or nsmm_rsh != 0.0 or nsmm_w != 0.0 or nsmm_l != 0.0);
     const w_eff_um = if (has_stat) (if (sw_mman > 0.5) w_eff_mm1 else w_eff_mm0) else w_eff_um_nom;
@@ -533,8 +533,8 @@ fn prep(model: *const Model, instance: *const Instance) Prep {
     // ---- Depletion potential geometry dependence (eq 8) ----
     const W_dp = w_eff_um;
     const L_dp = l_eff_um;
-    const w_dpwe = @exp(dpwe * @log(@max(W_dp, 1.0e-30)));
-    const l_dple = @exp(dple * @log(@max(L_dp, 1.0e-30)));
+    const w_dpwe = contract.fmath.exp(dpwe * contract.fmath.log(@max(W_dp, 1.0e-30)));
+    const l_dple = contract.fmath.exp(dple * contract.fmath.log(@max(L_dp, 1.0e-30)));
     const dp_i = dp_param * (1.0 + dpw / @max(w_dpwe, 1.0e-30)) * (1.0 + dpl / @max(l_dple, 1.0e-30)) * (1.0 + dpwl / @max(w_dpwe * l_dple, 1.0e-30));
 
     // ---- Zero-bias resistance (eq 9) ----
@@ -834,7 +834,7 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, _: *const
     // bkd offset = exp(min(-vbv_T/nbv_phi, 80))
     const bkd_offset = vbv_T.neg().div(nbv_phi_safe).minC(80.0).exp();
     // v_bkd_max = -(vbv_T + nbv_phi*ln(max(imax/ibv,1)))
-    const ln_imax_ibv = @log(@max(p.imax / @max(p.ibv, 1.0e-30), 1.0));
+    const ln_imax_ibv = contract.fmath.log(@max(p.imax / @max(p.ibv, 1.0e-30), 1.0));
     const v_bkd_max = vbv_T.add(nbv_phi.scale(ln_imax_ibv)).neg();
 
     const i_b1 = breakdownBranch(S, v_c1, vbv_T, nbv_phi_safe, bkd_offset, v_bkd_max, p.ibv, p.has_bkd);
@@ -1096,9 +1096,9 @@ inline fn junctionChargeS(comptime S: type, v: S, cj0: S, pb: S, mj: f64, fc_par
     // Region 2: V >= fc*Pb (linear extension)
     const arg_fc = @max(1.0 - fc_param, 1.0e-30);
     // c_fc = cj0 / (1-fc)^mj
-    const c_fc = cj0.scale(1.0 / @exp(mj * @log(arg_fc)));
+    const c_fc = cj0.scale(1.0 / contract.fmath.exp(mj * contract.fmath.log(arg_fc)));
     // q_fc = pb*cj0/(1-mj) * (1 - (1-fc)^(1-mj))
-    const q_fc = pb.mul(cj0).scale((1.0 / one_minus_mj_safe) * (1.0 - @exp(one_minus_mj * @log(arg_fc))));
+    const q_fc = pb.mul(cj0).scale((1.0 / one_minus_mj_safe) * (1.0 - contract.fmath.exp(one_minus_mj * contract.fmath.log(arg_fc))));
     // dc_dv_fc = mj * c_fc / (pb*(1-fc))
     const dc_dv_fc = c_fc.scale(mj).div(pb.scale(arg_fc).maxC(1.0e-30));
     const dv = v.sub(v_fc);
@@ -1188,19 +1188,19 @@ pub fn limit(model: *const Model, instance: *const Instance, x_new: [n_u]f64, x_
 /// DEVpnjlim: PN junction voltage limiting
 /// Logarithmic damping of Newton steps for forward-biased junctions
 fn pnjlim(v_new: f64, v_old: f64, phi_t: f64, n_factor: f64) f64 {
-    const v_crit = n_factor * phi_t * @log(n_factor * phi_t / (1.4142135623730951 * 1.0e-14));
+    const v_crit = n_factor * phi_t * contract.fmath.log(n_factor * phi_t / (1.4142135623730951 * 1.0e-14));
     const nv_t = n_factor * phi_t;
 
     if (v_new > v_crit and @abs(v_new - v_old) > 2.0 * nv_t) {
         if (v_old > 0.0) {
             const arg = (v_new - v_old) / nv_t;
             if (arg > 0.0) {
-                return v_old + nv_t * (2.0 + @log(@max(arg - 2.0, 1.0e-30)));
+                return v_old + nv_t * (2.0 + contract.fmath.log(@max(arg - 2.0, 1.0e-30)));
             } else {
-                return v_old - nv_t * (2.0 + @log(@max(2.0 - arg, 1.0e-30)));
+                return v_old - nv_t * (2.0 + contract.fmath.log(@max(2.0 - arg, 1.0e-30)));
             }
         } else {
-            return nv_t * @log(@max(v_new / nv_t, 1.0e-30));
+            return nv_t * contract.fmath.log(@max(v_new / nv_t, 1.0e-30));
         }
     }
     return v_new;
@@ -1302,7 +1302,7 @@ test "r3_cmc: forward-biased parasitic diode current" {
     const a1_um2: f64 = 1e-12 * 1e6 * 1e6; // = 1.0
     const isa: f64 = 1e-9;
     const v_c1: f64 = 0.5;
-    const i_area: f64 = a1_um2 * isa * (@exp(v_c1 / (1.0 * phi_t)) - 1.0);
+    const i_area: f64 = a1_um2 * isa * (contract.fmath.exp(v_c1 / (1.0 * phi_t)) - 1.0);
     const i_diode1: f64 = (i_area + 1.0e-12 * v_c1) * 1.0; // type_=+1
     // out[nc] = i_diode1 + i_diode2 ; diode2 has a2=0,p2=0 -> only GMIN*v_c2.
     // v_c2 = (0.5 - 0)*1 = 0.5 -> i_diode2 = GMIN*0.5.
@@ -1332,7 +1332,7 @@ test "r3_cmc: junction charge value" {
     const v_c1: f64 = -0.3;
     const one_minus_mj: f64 = 1.0 - ma;
     const arg_dep: f64 = 1.0 - v_c1 / pa; // = 1.4
-    const q_dep: f64 = pa * cja / one_minus_mj * (1.0 - @exp(one_minus_mj * @log(arg_dep)));
+    const q_dep: f64 = pa * cja / one_minus_mj * (1.0 - contract.fmath.exp(one_minus_mj * contract.fmath.log(arg_dep)));
     const a1_um2: f64 = 1.0;
     const expected_int1: f64 = -(a1_um2 * q_dep); // out[int1] = -q_p1
     try testing.expectApproxEqAbs(expected_int1, out[@intFromEnum(U.int1)], @abs(expected_int1) * 1e-6 + 1e-15);

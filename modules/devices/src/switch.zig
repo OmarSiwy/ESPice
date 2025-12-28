@@ -88,7 +88,7 @@ const HYST_ON: u8 = 3;
 // IC=OFF => HYST_OFF, g_eff = G_off
 // default => REALLY_OFF, g_eff = G_off
 
-pub fn initState(model: *const Model, instance: *const Instance) State {
+pub fn initState(model: *const Model, instance: *Instance) State {
     const g_on: f64 = 1.0 / @as(f64, model.ron);
     const g_off: f64 = 1.0 / @as(f64, model.roff);
 

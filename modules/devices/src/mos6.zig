@@ -521,7 +521,7 @@ pub fn limit(model: *const Model, _: *const Instance, x_new: [n_u]f64, x_old: [n
     const vt: f64 = 8.617333262145e-5 * tnom;
 
     // Critical voltage for PN junction limiting
-    const v_crit = vt * @log(vt / (@sqrt(2.0) * is_val));
+    const v_crit = vt * contract.fmath.log(vt / (@sqrt(2.0) * is_val));
 
     var result = x_new;
 
@@ -537,12 +537,12 @@ pub fn limit(model: *const Model, _: *const Instance, x_new: [n_u]f64, x_old: [n
             if (vbs_old > 0.0) {
                 const arg = 1.0 + (vbs_new - vbs_old) / vt;
                 if (arg > 0.0) {
-                    vbs_limited = vbs_old + vt * @log(arg);
+                    vbs_limited = vbs_old + vt * contract.fmath.log(arg);
                 } else {
                     vbs_limited = v_crit;
                 }
             } else {
-                vbs_limited = vt * @log(vbs_new / vt);
+                vbs_limited = vt * contract.fmath.log(vbs_new / vt);
             }
         }
 
@@ -563,12 +563,12 @@ pub fn limit(model: *const Model, _: *const Instance, x_new: [n_u]f64, x_old: [n
             if (vbd_old > 0.0) {
                 const arg = 1.0 + (vbd_new - vbd_old) / vt;
                 if (arg > 0.0) {
-                    vbd_limited = vbd_old + vt * @log(arg);
+                    vbd_limited = vbd_old + vt * contract.fmath.log(arg);
                 } else {
                     vbd_limited = v_crit;
                 }
             } else {
-                vbd_limited = vt * @log(vbd_new / vt);
+                vbd_limited = vt * contract.fmath.log(vbd_new / vt);
             }
         }
 

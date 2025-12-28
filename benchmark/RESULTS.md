@@ -1,262 +1,270 @@
-# Benchmark results — zpicey vs ngspice
+# Benchmark results — zpicey vs ngspice vs xyce
 
 Pass: per-variable RMS ≤ 1e-3, max ≤ 1e-2
 
-| fixture | zp-cpu | zp-gpu | ngspice | cpu/ng | gpu/ng | cpu-max | cpu-rms | cpu | gpu-max | gpu-rms | gpu |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| ac/rc_lowpass | 3.09ms | skip | 9.34ms | 3.0x | - | - | - | - | - | - | SKIP |
-| adversarial/extreme_values | 2.35ms | skip | 8.50ms | 3.6x | - | - | - | - | - | - | SKIP |
-| adversarial/near_singular | 2.44ms | skip | 8.83ms | 3.6x | - | 1.67e-1 | 1.67e-1 | FAIL | - | - | SKIP |
-| adversarial/tiny_resistor | 2.70ms | skip | 8.67ms | 3.2x | - | 9.99e-7 | 9.99e-7 | PASS | - | - | SKIP |
-| analog/current_mirror | 3.89ms | skip | 7.75ms | 2.0x | - | 4.99e-3 | 4.99e-3 | FAIL | - | - | SKIP |
-| analog/diff_pair | 3.57ms | skip | 9.24ms | 2.6x | - | 1.32e-7 | 1.32e-7 | PASS | - | - | SKIP |
-| analog/opamp_inverting | 2.56ms | skip | 7.56ms | 3.0x | - | 8.77e-8 | 8.77e-8 | PASS | - | - | SKIP |
-| basic/rc_transient | 2.44ms | skip | 10.37ms | 4.2x | - | 9.49e-10 | 9.49e-10 | PASS | - | - | SKIP |
-| basic/voltage_divider | 2.81ms | skip | 7.62ms | 2.7x | - | 2.50e-9 | 2.50e-9 | PASS | - | - | SKIP |
-| bjt/cascode | 2.93ms | skip | 8.24ms | 2.8x | - | 1.60e-5 | 1.60e-5 | PASS | - | - | SKIP |
-| bjt/common_emitter | 2.96ms | skip | 7.61ms | 2.6x | - | - | - | - | - | - | SKIP |
-| bjt/diff_amp | 3.11ms | skip | 9.11ms | 2.9x | - | 1.62e-1 | 2.53e-2 | FAIL | - | - | SKIP |
-| bypass/burst_clock | 2.50ms | skip | 13.47ms | 5.4x | - | 1.00e0 | 2.07e-1 | FAIL | - | - | SKIP |
-| bypass/gated_branch | skip | skip | 14.33ms | - | - | - | - | SKIP | - | - | SKIP |
-| bypass/idle_ladder | 2.83ms | skip | 15.18ms | 5.4x | - | 1.00e0 | 2.28e-1 | FAIL | - | - | SKIP |
-| convergence/diode_bridge | skip | skip | 11.17ms | - | - | - | - | SKIP | - | - | SKIP |
-| convergence/high_gain_fb | 2.79ms | skip | 6.72ms | 2.4x | - | 1.11e-15 | 1.11e-15 | PASS | - | - | SKIP |
-| convergence/schmitt | 2.39ms | skip | 8.89ms | 3.7x | - | 5.00e-9 | 5.00e-9 | PASS | - | - | SKIP |
-| dc_sweep/nested_sweep | 2.46ms | skip | 7.96ms | 3.2x | - | 0.00e0 | 0.00e0 | PASS | - | - | SKIP |
-| dc_sweep/param_sweep | 2.43ms | skip | 7.63ms | 3.1x | - | 5.22e-29 | 7.31e-30 | PASS | - | - | SKIP |
-| dc_sweep/vin_sweep | 2.48ms | skip | 7.99ms | 3.2x | - | 0.00e0 | 0.00e0 | PASS | - | - | SKIP |
-| devices/b3soidd | 2.77ms | skip | skip | - | - | - | - | - | - | - | SKIP |
-| devices/b3soidd_output | 2.31ms | skip | skip | - | - | - | - | - | - | - | SKIP |
-| devices/b3soifd | 2.75ms | skip | skip | - | - | - | - | - | - | - | SKIP |
-| devices/b3soifd_output | 2.77ms | skip | skip | - | - | - | - | - | - | - | SKIP |
-| devices/b3soipd | 3.05ms | skip | 9.70ms | 3.2x | - | 1.10e-1 | 1.10e-1 | FAIL | - | - | SKIP |
-| devices/b3soipd_output | 2.28ms | skip | 37.68ms | 16.5x | - | 0.00e0 | 0.00e0 | PASS | - | - | SKIP |
-| devices/b4soi | 2.31ms | skip | 7.85ms | 3.4x | - | 3.31e-1 | 3.31e-1 | FAIL | - | - | SKIP |
-| devices/b4soi_output | 1.98ms | skip | 20.12ms | 10.2x | - | 0.00e0 | 0.00e0 | PASS | - | - | SKIP |
-| devices/bjt_npn | 2.01ms | skip | 8.65ms | 4.3x | - | 1.23e-2 | 1.23e-2 | FAIL | - | - | SKIP |
-| devices/bjt_npn_early | 2.26ms | skip | 11.57ms | 5.1x | - | 5.00e-2 | 1.29e-3 | FAIL | - | - | SKIP |
-| devices/bjt_npn_gummel | 2.79ms | skip | 8.38ms | 3.0x | - | 2.00e-1 | 1.68e-2 | FAIL | - | - | SKIP |
-| devices/bjt_npn_high_injection | 2.79ms | skip | 10.07ms | 3.6x | - | 5.00e-1 | 3.33e-2 | FAIL | - | - | SKIP |
-| devices/bjt_npn_output | 2.84ms | skip | 14.63ms | 5.2x | - | 1.00e-1 | 2.35e-3 | FAIL | - | - | SKIP |
-| devices/bjt_npn_saturation | 3.33ms | skip | 12.25ms | 3.7x | - | 1.00e-1 | 3.16e-3 | FAIL | - | - | SKIP |
-| devices/bjt_npn_temp | 2.83ms | skip | 8.20ms | 2.9x | - | 3.00e-1 | 1.42e-2 | FAIL | - | - | SKIP |
-| devices/bjt_pnp | skip | skip | 7.34ms | - | - | - | - | SKIP | - | - | SKIP |
-| devices/bjt_pnp_output | 3.01ms | skip | 12.20ms | 4.1x | - | 1.00e-1 | 2.35e-3 | FAIL | - | - | SKIP |
-| devices/bsim1 | 3.24ms | skip | 11.20ms | 3.5x | - | 0.00e0 | 0.00e0 | PASS | - | - | SKIP |
-| devices/bsim2 | 4.62ms | skip | 13.81ms | 3.0x | - | 0.00e0 | 0.00e0 | PASS | - | - | SKIP |
-| devices/bsim2_ngspice | skip | skip | 12.34ms | - | - | - | - | SKIP | - | - | SKIP |
-| devices/bsim3 | 2.42ms | skip | 8.88ms | 3.7x | - | 9.99e-1 | 9.99e-1 | FAIL | - | - | SKIP |
-| devices/bsim3_body_effect | 2.38ms | skip | 44.21ms | 18.5x | - | 1.00e0 | 2.63e-2 | FAIL | - | - | SKIP |
-| devices/bsim3_output | 2.34ms | skip | 37.45ms | 16.0x | - | 0.00e0 | 0.00e0 | PASS | - | - | SKIP |
-| devices/bsim3_pmos | 2.35ms | skip | 36.38ms | 15.5x | - | 0.00e0 | 0.00e0 | PASS | - | - | SKIP |
-| devices/bsim3_temp | 2.47ms | skip | 40.85ms | 16.5x | - | 2.38e-8 | 6.27e-10 | PASS | - | - | SKIP |
-| devices/bsim3_transfer | 2.54ms | skip | 15.58ms | 6.1x | - | 2.38e-8 | 1.25e-9 | PASS | - | - | SKIP |
-| devices/bsim4 | skip | skip | 6.83ms | - | - | - | - | SKIP | - | - | SKIP |
-| devices/bsim4_output | 2.68ms | skip | 26.42ms | 9.9x | - | 6.29e-37 | 2.44e-38 | PASS | - | - | SKIP |
-| devices/bsim4_pmos | 2.54ms | skip | 26.07ms | 10.2x | - | 9.32e-38 | 3.61e-39 | PASS | - | - | SKIP |
-| devices/bsim4_transfer | skip | skip | 15.68ms | - | - | - | - | SKIP | - | - | SKIP |
-| devices/bsource | 2.37ms | skip | 8.10ms | 3.4x | - | 3.33e-1 | 5.99e-2 | FAIL | - | - | SKIP |
-| devices/capacitor | 2.49ms | skip | 9.27ms | 3.7x | - | 1.00e-9 | 1.00e-9 | PASS | - | - | SKIP |
-| devices/capacitor_ac | 2.51ms | skip | 12.81ms | 5.1x | - | - | - | - | - | - | SKIP |
-| devices/cccs | 5.00ms | skip | 8.57ms | 1.7x | - | 5.00e-10 | 5.00e-10 | PASS | - | - | SKIP |
-| devices/ccvs | 2.66ms | skip | 9.83ms | 3.7x | - | 4.75e-8 | 4.75e-8 | PASS | - | - | SKIP |
-| devices/coupled_tlines | skip | skip | 15.90ms | - | - | - | - | SKIP | - | - | SKIP |
-| devices/cswitch | skip | skip | 10.29ms | - | - | - | - | SKIP | - | - | SKIP |
-| devices/diode | 2.84ms | skip | 7.67ms | 2.7x | - | 1.34e-7 | 1.34e-7 | PASS | - | - | SKIP |
-| devices/diode_breakdown | 2.67ms | skip | 14.35ms | 5.4x | - | 1.00e0 | 4.99e-2 | FAIL | - | - | SKIP |
-| devices/diode_capacitance | 3.07ms | skip | 8.16ms | 2.7x | - | - | - | - | - | - | SKIP |
-| devices/diode_high_injection | 2.59ms | skip | 8.57ms | 3.3x | - | 0.00e0 | 0.00e0 | PASS | - | - | SKIP |
-| devices/diode_iv_sweep | 2.83ms | skip | 9.27ms | 3.3x | - | 8.33e-1 | 2.40e-2 | FAIL | - | - | SKIP |
-| devices/diode_recombination | 2.76ms | skip | 12.46ms | 4.5x | - | 0.00e0 | 0.00e0 | PASS | - | - | SKIP |
-| devices/diode_temp | 5.09ms | skip | 11.65ms | 2.3x | - | 0.00e0 | 0.00e0 | PASS | - | - | SKIP |
-| devices/hfet1 | 2.50ms | skip | 9.52ms | 3.8x | - | 5.00e-10 | 5.00e-10 | PASS | - | - | SKIP |
-| devices/hfet1_output | 4.45ms | skip | 9.49ms | 2.1x | - | 5.00e-1 | 1.23e-2 | FAIL | - | - | SKIP |
-| devices/hfet2 | 4.71ms | skip | 13.24ms | 2.8x | - | 1.04e-3 | 1.04e-3 | FAIL | - | - | SKIP |
-| devices/hfet2_output | 3.66ms | skip | 16.08ms | 4.4x | - | 5.00e-1 | 1.23e-2 | FAIL | - | - | SKIP |
-| devices/hfet_id_vgs | 2.67ms | skip | 7.40ms | 2.8x | - | 1.00e0 | 9.95e-2 | FAIL | - | - | SKIP |
-| devices/hfet_inverter | 2.69ms | skip | 16.13ms | 6.0x | - | 1.00e0 | 8.06e-1 | FAIL | - | - | SKIP |
-| devices/hicum2 | 2.86ms | skip | 8.04ms | 2.8x | - | 9.91e-1 | 9.91e-1 | FAIL | - | - | SKIP |
-| devices/hicum2_gummel | 4.20ms | skip | 15.50ms | 3.7x | - | 3.00e-1 | 2.62e-2 | FAIL | - | - | SKIP |
-| devices/hicum2_output | 4.55ms | skip | 21.66ms | 4.8x | - | 1.00e-1 | 2.35e-3 | FAIL | - | - | SKIP |
-| devices/hisim2 | 2.52ms | skip | 28.81ms | 11.4x | - | 0.00e0 | 0.00e0 | PASS | - | - | SKIP |
-| devices/hisimhv | 2.37ms | skip | skip | - | - | - | - | - | - | - | SKIP |
-| devices/inductor | 2.58ms | skip | 13.58ms | 5.3x | - | 1.01e-13 | 1.01e-13 | PASS | - | - | SKIP |
-| devices/inductor_ac | 2.73ms | skip | 11.52ms | 4.2x | - | - | - | - | - | - | SKIP |
-| devices/isource | 4.53ms | skip | 8.98ms | 2.0x | - | 2.50e-10 | 2.50e-10 | PASS | - | - | SKIP |
-| devices/jfet | 4.20ms | skip | 10.52ms | 2.5x | - | 1.02e-1 | 1.02e-1 | FAIL | - | - | SKIP |
-| devices/jfet2 | 3.15ms | skip | 17.24ms | 5.5x | - | 1.00e0 | 2.35e-2 | FAIL | - | - | SKIP |
-| devices/jfet_output | 2.63ms | skip | 16.26ms | 6.2x | - | 1.00e0 | 2.35e-2 | FAIL | - | - | SKIP |
-| devices/jfet_transfer | 4.03ms | skip | 10.02ms | 2.5x | - | 8.57e-1 | 4.58e-2 | FAIL | - | - | SKIP |
-| devices/jfet_vds_vgs | 4.95ms | skip | 17.76ms | 3.6x | - | 1.00e0 | 9.81e-2 | FAIL | - | - | SKIP |
-| devices/kinduc | 4.89ms | skip | 11.07ms | 2.3x | - | 5.07e-1 | 3.49e-1 | FAIL | - | - | SKIP |
-| devices/lossy_tline | 2.47ms | skip | 17.30ms | 7.0x | - | 1.00e0 | 5.97e-1 | FAIL | - | - | SKIP |
-| devices/mesa | 2.59ms | skip | 9.10ms | 3.5x | - | 1.28e-2 | 1.28e-2 | FAIL | - | - | SKIP |
-| devices/mesa_inverter | 2.63ms | skip | 10.66ms | 4.0x | - | 7.79e-1 | 7.75e-2 | FAIL | - | - | SKIP |
-| devices/mesa_oscillator | 2.94ms | skip | 24.17ms | 8.2x | - | 1.05e0 | 8.63e-1 | FAIL | - | - | SKIP |
-| devices/mesa_output | 2.80ms | skip | 15.08ms | 5.4x | - | 7.50e-1 | 1.76e-2 | FAIL | - | - | SKIP |
-| devices/mesfet | 2.63ms | skip | 11.27ms | 4.3x | - | 3.32e-9 | 3.32e-9 | PASS | - | - | SKIP |
-| devices/mesfet_output | 2.75ms | skip | 15.55ms | 5.6x | - | 7.50e-1 | 1.76e-2 | FAIL | - | - | SKIP |
-| devices/mesfet_subthreshold | 2.91ms | skip | 9.29ms | 3.2x | - | 1.00e0 | 1.28e-1 | FAIL | - | - | SKIP |
-| devices/mesfet_transfer | 2.91ms | skip | 10.72ms | 3.7x | - | 8.00e-1 | 5.05e-2 | FAIL | - | - | SKIP |
-| devices/mos1_body_effect | 2.56ms | skip | 13.95ms | 5.5x | - | 1.00e0 | 2.23e-2 | FAIL | - | - | SKIP |
-| devices/mos1_large_signal | skip | skip | 12.17ms | - | - | - | - | SKIP | - | - | SKIP |
-| devices/mos1_output | 2.56ms | skip | 14.48ms | 5.6x | - | 0.00e0 | 0.00e0 | PASS | - | - | SKIP |
-| devices/mos1_pmos | 3.11ms | skip | 12.42ms | 4.0x | - | 0.00e0 | 0.00e0 | PASS | - | - | SKIP |
-| devices/mos1_subthreshold | 3.10ms | skip | 10.01ms | 3.2x | - | 0.00e0 | 0.00e0 | PASS | - | - | SKIP |
-| devices/mos1_temp | 3.77ms | skip | 13.03ms | 3.5x | - | 0.00e0 | 0.00e0 | PASS | - | - | SKIP |
-| devices/mos1_transfer | 2.87ms | skip | 9.79ms | 3.4x | - | 0.00e0 | 0.00e0 | PASS | - | - | SKIP |
-| devices/mos2 | 2.60ms | skip | 11.27ms | 4.3x | - | 0.00e0 | 0.00e0 | PASS | - | - | SKIP |
-| devices/mos2_transfer | 2.60ms | skip | 16.78ms | 6.5x | - | 0.00e0 | 0.00e0 | PASS | - | - | SKIP |
-| devices/mos3 | 3.64ms | skip | 11.45ms | 3.1x | - | 0.00e0 | 0.00e0 | PASS | - | - | SKIP |
-| devices/mos3_transfer | 5.60ms | skip | 19.23ms | 3.4x | - | 0.00e0 | 0.00e0 | PASS | - | - | SKIP |
-| devices/mos6 | 6.10ms | skip | 12.99ms | 2.1x | - | 5.00e-55 | 1.06e-56 | PASS | - | - | SKIP |
-| devices/mos6_inverter | skip | skip | 24.00ms | - | - | - | - | SKIP | - | - | SKIP |
-| devices/mos6_simpleinv | skip | skip | 10.34ms | - | - | - | - | SKIP | - | - | SKIP |
-| devices/mos9 | 4.90ms | skip | 16.26ms | 3.3x | - | 0.00e0 | 0.00e0 | PASS | - | - | SKIP |
-| devices/mosfet_l1 | 4.54ms | skip | 9.90ms | 2.2x | - | 1.76e-8 | 1.76e-8 | PASS | - | - | SKIP |
-| devices/resistor | 4.44ms | skip | 10.15ms | 2.3x | - | 5.33e-16 | 5.33e-16 | PASS | - | - | SKIP |
-| devices/resistor_sweep | 3.02ms | skip | 7.33ms | 2.4x | - | 5.00e-1 | 3.53e-2 | FAIL | - | - | SKIP |
-| devices/resistor_temp | 2.18ms | skip | skip | - | - | - | - | - | - | - | SKIP |
-| devices/switch | 2.42ms | skip | 8.49ms | 3.5x | - | 1.00e0 | 6.98e-1 | FAIL | - | - | SKIP |
-| devices/switch_hysteresis | 2.55ms | skip | 9.90ms | 3.9x | - | 1.00e0 | 7.02e-1 | FAIL | - | - | SKIP |
-| devices/tline | 2.55ms | skip | 8.81ms | 3.5x | - | 1.00e0 | 5.97e-1 | FAIL | - | - | SKIP |
-| devices/urc | 2.70ms | skip | 12.52ms | 4.6x | - | 1.00e0 | 7.03e-1 | FAIL | - | - | SKIP |
-| devices/urc_ac | 5.35ms | skip | 14.55ms | 2.7x | - | - | - | - | - | - | SKIP |
-| devices/vbic | 4.28ms | skip | 10.13ms | 2.4x | - | 2.36e0 | 2.36e0 | FAIL | - | - | SKIP |
-| devices/vbic_ce_amp | skip | skip | 9.09ms | - | - | - | - | SKIP | - | - | SKIP |
-| devices/vbic_diffamp | skip | skip | skip | - | - | - | - | SKIP | - | - | SKIP |
-| devices/vbic_forced_output | 4.30ms | skip | 12.21ms | 2.8x | - | 2.00e-1 | 7.52e-3 | FAIL | - | - | SKIP |
-| devices/vbic_forward_gummel | skip | skip | skip | - | - | - | - | SKIP | - | - | SKIP |
-| devices/vbic_gummel | 8.58ms | skip | 10.41ms | 1.2x | - | 2.00e-1 | 1.68e-2 | FAIL | - | - | SKIP |
-| devices/vbic_noise_scale | skip | skip | 7.69ms | - | - | - | - | SKIP | - | - | SKIP |
-| devices/vbic_output | 2.51ms | skip | 21.38ms | 8.5x | - | 1.00e-1 | 2.35e-3 | FAIL | - | - | SKIP |
-| devices/vbic_temp | skip | skip | 9.45ms | - | - | - | - | SKIP | - | - | SKIP |
-| devices/vccs | 3.84ms | skip | 9.14ms | 2.4x | - | 2.50e-9 | 2.50e-9 | PASS | - | - | SKIP |
-| devices/vcvs | 3.03ms | skip | 7.55ms | 2.5x | - | 6.67e-10 | 6.67e-10 | PASS | - | - | SKIP |
-| devices/vdmos | 2.85ms | skip | skip | - | - | - | - | - | - | - | SKIP |
-| devices/vdmos_output | 2.78ms | skip | skip | - | - | - | - | - | - | - | SKIP |
-| devices/vsource | 2.73ms | skip | 8.47ms | 3.1x | - | 1.00e0 | 7.14e-1 | FAIL | - | - | SKIP |
-| digital/buffer_rc | 2.67ms | skip | 9.84ms | 3.7x | - | 1.00e0 | 7.05e-1 | FAIL | - | - | SKIP |
-| digital/clamp | 2.69ms | skip | 8.12ms | 3.0x | - | 1.00e0 | 6.97e-1 | FAIL | - | - | SKIP |
-| digital/rc_filter_chain | 2.57ms | skip | 11.02ms | 4.3x | - | 1.00e0 | 7.03e-1 | FAIL | - | - | SKIP |
-| disto/bjt_ce | skip | skip | 7.49ms | - | - | - | - | SKIP | - | - | SKIP |
-| disto/diode_clipper | 2.91ms | skip | 7.47ms | 2.6x | - | - | - | - | - | - | SKIP |
-| disto/mos_cs | 2.86ms | skip | 7.08ms | 2.5x | - | - | - | - | - | - | SKIP |
-| ensemble/corner_pathological | 2.95ms | skip | 7.63ms | 2.6x | - | 2.46e-7 | 2.46e-7 | PASS | - | - | SKIP |
-| ensemble/opamp_mc | skip | skip | 13.04ms | - | - | - | - | SKIP | - | - | SKIP |
-| ensemble/pvt_corners | 6.70ms | skip | 21.94ms | 3.3x | - | 9.06e0 | 8.57e0 | FAIL | - | - | SKIP |
-| ensemble/sweep_lanes | 3.75ms | skip | 13.98ms | 3.7x | - | 1.65e-29 | 2.05e-30 | PASS | - | - | SKIP |
-| fourier/clipped_sine | 6.25ms | skip | 16.74ms | 2.7x | - | 5.00e-1 | 3.91e-1 | FAIL | - | - | SKIP |
-| fourier/sine_1k | 3.69ms | skip | 11.85ms | 3.2x | - | 5.00e-1 | 3.51e-1 | FAIL | - | - | SKIP |
-| fourier/square_harmonics | 2.83ms | skip | 13.59ms | 4.8x | - | 1.00e0 | 7.03e-1 | FAIL | - | - | SKIP |
-| golden/ac | 5.21ms | skip | 10.13ms | 1.9x | - | - | - | - | - | - | SKIP |
-| golden/dc | 4.90ms | skip | 9.96ms | 2.0x | - | 0.00e0 | 0.00e0 | PASS | - | - | SKIP |
-| golden/disto | 2.71ms | skip | 9.21ms | 3.4x | - | - | - | - | - | - | SKIP |
-| golden/four | 3.02ms | skip | 11.14ms | 3.7x | - | 7.51e-1 | 4.05e-1 | FAIL | - | - | SKIP |
-| golden/hb | 2.66ms | skip | skip | - | - | - | - | - | - | - | SKIP |
-| golden/noise | 2.38ms | skip | 14.03ms | 5.9x | - | - | - | - | - | - | SKIP |
-| golden/op | 3.22ms | skip | 9.11ms | 2.8x | - | 1.38e-8 | 1.38e-8 | PASS | - | - | SKIP |
-| golden/pss | 2.62ms | skip | skip | - | - | - | - | - | - | - | SKIP |
-| golden/pz | 3.47ms | skip | 9.60ms | 2.8x | - | - | - | - | - | - | SKIP |
-| golden/sens | 2.96ms | skip | 7.45ms | 2.5x | - | - | - | - | - | - | SKIP |
-| golden/sp | 2.86ms | skip | 9.41ms | 3.3x | - | - | - | - | - | - | SKIP |
-| golden/stb | 2.75ms | skip | skip | - | - | - | - | - | - | - | SKIP |
-| golden/tf | 3.80ms | skip | 9.41ms | 2.5x | - | - | - | - | - | - | SKIP |
-| golden/tran | 2.96ms | skip | 6.95ms | 2.3x | - | 1.00e0 | 9.10e-1 | FAIL | - | - | SKIP |
-| hb/diode_clipper | 2.69ms | skip | skip | - | - | - | - | - | - | - | SKIP |
-| hb/rc_single_tone | 2.64ms | skip | skip | - | - | - | - | - | - | - | SKIP |
-| hb/tline_guard | 2.72ms | skip | skip | - | - | - | - | - | - | - | SKIP |
-| medium/ladder_filter | 3.29ms | skip | 9.01ms | 2.7x | - | - | - | - | - | - | SKIP |
-| medium/rc_ladder_50 | 3.00ms | skip | 12.78ms | 4.3x | - | 1.00e0 | 8.10e-1 | FAIL | - | - | SKIP |
-| medium/resistor_mesh | 4.68ms | skip | 8.76ms | 1.9x | - | 4.24e-9 | 4.24e-9 | PASS | - | - | SKIP |
-| mosfet/cmos_inverter | skip | skip | 7.89ms | - | - | - | - | SKIP | - | - | SKIP |
-| mosfet/nand2 | skip | skip | 11.95ms | - | - | - | - | SKIP | - | - | SKIP |
-| mosfet/nmos_cs | 3.08ms | skip | 10.16ms | 3.3x | - | 5.44e-1 | 3.68e-1 | FAIL | - | - | SKIP |
-| ngspice/behavioral_bsrc | 2.82ms | skip | 9.20ms | 3.3x | - | 6.67e-1 | 1.20e-1 | FAIL | - | - | SKIP |
-| ngspice/diffpair | skip | skip | 9.76ms | - | - | - | - | SKIP | - | - | SKIP |
-| ngspice/fourbitadder | skip | skip | 23.66ms | - | - | - | - | SKIP | - | - | SKIP |
-| ngspice/lowpass_filter | 3.81ms | skip | 17.12ms | 4.5x | - | - | - | - | - | - | SKIP |
-| ngspice/mosamp | skip | skip | 445.01ms | - | - | - | - | SKIP | - | - | SKIP |
-| ngspice/mosmem | skip | skip | 10.81ms | - | - | - | - | SKIP | - | - | SKIP |
-| ngspice/rc | 2.95ms | skip | 10.43ms | 3.5x | - | 1.00e0 | 9.31e-1 | FAIL | - | - | SKIP |
-| ngspice/rca3040 | skip | skip | 10.72ms | - | - | - | - | SKIP | - | - | SKIP |
-| ngspice/res_array | 3.27ms | skip | 11.12ms | 3.4x | - | - | - | - | - | - | SKIP |
-| ngspice/res_partition | 3.33ms | skip | 8.98ms | 2.7x | - | - | - | - | - | - | SKIP |
-| ngspice/res_simple | 3.40ms | skip | 8.45ms | 2.5x | - | 0.00e0 | 0.00e0 | PASS | - | - | SKIP |
-| ngspice/rtlinv | skip | skip | 8.28ms | - | - | - | - | SKIP | - | - | SKIP |
-| ngspice/schmitt | skip | skip | 11.29ms | - | - | - | - | SKIP | - | - | SKIP |
-| ngspice/sin_source | 2.64ms | skip | 10.72ms | 4.1x | - | 5.35e-1 | 3.51e-1 | FAIL | - | - | SKIP |
-| ngspice/tran_pulse | 2.76ms | skip | 9.84ms | 3.6x | - | 1.00e0 | 6.42e-1 | FAIL | - | - | SKIP |
-| noise/amp_noise | 3.06ms | skip | 9.42ms | 3.1x | - | - | - | - | - | - | SKIP |
-| noise/rc_noise | 2.76ms | skip | 8.01ms | 2.9x | - | - | - | - | - | - | SKIP |
-| noise/resistor_noise | 2.72ms | skip | 7.82ms | 2.9x | - | - | - | - | - | - | SKIP |
-| op/voltage_divider | 2.75ms | skip | 9.78ms | 3.6x | - | 2.50e-9 | 2.50e-9 | PASS | - | - | SKIP |
-| parser/hspice_suffix | 2.82ms | skip | 9.43ms | 3.3x | - | 2.00e-3 | 2.00e-3 | FAIL | - | - | SKIP |
-| parser/ngspice_syntax | 3.03ms | skip | 9.26ms | 3.1x | - | - | - | - | - | - | SKIP |
-| parser/subckt_params | 3.32ms | skip | 10.96ms | 3.3x | - | 1.00e0 | 6.95e-1 | FAIL | - | - | SKIP |
-| power/buck_open | 2.57ms | skip | 20.00ms | 7.8x | - | 1.00e0 | 6.38e-1 | FAIL | - | - | SKIP |
-| power/rectifier | 2.58ms | skip | 10.69ms | 4.1x | - | 1.00e0 | 9.64e-1 | FAIL | - | - | SKIP |
-| power/zener_reg | 2.71ms | skip | 9.06ms | 3.3x | - | 3.33e-1 | 6.67e-2 | FAIL | - | - | SKIP |
-| promote/dense_sweep | 2.95ms | skip | 10.90ms | 3.7x | - | 7.32e-29 | 1.64e-30 | PASS | - | - | SKIP |
-| promote/long_tran | 3.11ms | skip | 45.65ms | 14.7x | - | 5.05e-1 | 3.53e-1 | FAIL | - | - | SKIP |
-| promote/mc_small | 3.07ms | skip | 9.42ms | 3.1x | - | 2.97e-7 | 2.97e-7 | PASS | - | - | SKIP |
-| pss/diode_rect_driven | 2.76ms | skip | skip | - | - | - | - | - | - | - | SKIP |
-| pss/rc_driven | 3.10ms | skip | skip | - | - | - | - | - | - | - | SKIP |
-| pss/rlc_driven | 3.84ms | skip | skip | - | - | - | - | - | - | - | SKIP |
-| pz/filt_bridge_t | 2.97ms | skip | 10.40ms | 3.5x | - | 1.00e-9 | 1.00e-9 | PASS | - | - | SKIP |
-| pz/filt_multistage | 4.61ms | skip | 11.22ms | 2.4x | - | - | - | - | - | - | SKIP |
-| pz/filt_rc | 3.15ms | skip | 11.24ms | 3.6x | - | - | - | - | - | - | SKIP |
-| pz/pz2 | 3.27ms | skip | 11.88ms | 3.6x | - | - | - | - | - | - | SKIP |
-| pz/pzt | 4.02ms | skip | 10.58ms | 2.6x | - | - | - | - | - | - | SKIP |
-| pz/rc_lowpass | 5.23ms | skip | skip | - | - | - | - | - | - | - | SKIP |
-| pz/rlc_series | 4.13ms | skip | 10.43ms | 2.5x | - | - | - | - | - | - | SKIP |
-| pz/simplepz | 5.60ms | skip | 10.57ms | 1.9x | - | - | - | - | - | - | SKIP |
-| pz/two_pole | 3.15ms | skip | 10.06ms | 3.2x | - | - | - | - | - | - | SKIP |
-| scaling/divider_chain | 6.07ms | skip | 9.55ms | 1.6x | - | 6.00e-5 | 6.00e-5 | PASS | - | - | SKIP |
-| scaling/inverter_chain_1k | skip | skip | skip | - | - | - | - | SKIP | - | - | SKIP |
-| scaling/inverter_chain_256 | skip | skip | skip | - | - | - | - | SKIP | - | - | SKIP |
-| scaling/inverter_chain_4k | skip | skip | skip | - | - | - | - | SKIP | - | - | SKIP |
-| scaling/parallel_inverters_100 | 12.41ms | skip | 55.28ms | 4.5x | - | 1.00e0 | 7.08e-1 | FAIL | - | - | SKIP |
-| scaling/parallel_inverters_2000 | skip | skip | 1.015s | - | - | - | - | SKIP | - | - | SKIP |
-| scaling/parallel_inverters_500 | 40.75ms | skip | 262.52ms | 6.4x | - | 1.00e0 | 7.08e-1 | FAIL | - | - | SKIP |
-| scaling/rc_chain_500 | 5.27ms | skip | 28.18ms | 5.4x | - | 1.00e0 | 7.16e-1 | FAIL | - | - | SKIP |
-| scaling/rc_ladder_100k | 434.41ms | skip | 6.421s | 14.8x | - | 1.00e0 | 6.97e-1 | FAIL | - | - | SKIP |
-| scaling/rc_ladder_10k | 77.87ms | skip | 548.63ms | 7.0x | - | 1.00e0 | 6.97e-1 | FAIL | - | - | SKIP |
-| scaling/rc_ladder_1k | 29.83ms | skip | 79.82ms | 2.7x | - | 1.00e0 | 6.97e-1 | FAIL | - | - | SKIP |
-| scaling/resistor_grid | 30.08ms | skip | 40.64ms | 1.4x | - | 3.28e-8 | 3.28e-8 | PASS | - | - | SKIP |
-| scaling/resistor_grid_100x100 | 133.34ms | skip | 2.337s | 17.5x | - | 1.45e-5 | 1.45e-5 | PASS | - | - | SKIP |
-| scaling/resistor_grid_32x32 | 33.55ms | skip | 56.11ms | 1.7x | - | 1.11e-6 | 1.11e-6 | PASS | - | - | SKIP |
-| sens/bridge | 27.57ms | skip | 31.26ms | 1.1x | - | - | - | - | - | - | SKIP |
-| sens/diffpair | skip | skip | 34.78ms | - | - | - | - | SKIP | - | - | SKIP |
-| sens/rc_lowpass | 26.71ms | skip | 31.18ms | 1.2x | - | - | - | - | - | - | SKIP |
-| sens/voltage_divider | 30.15ms | skip | 30.28ms | 1.0x | - | - | - | - | - | - | SKIP |
-| sp/lc_lowpass | 24.72ms | skip | 37.08ms | 1.5x | - | - | - | - | - | - | SKIP |
-| sp/pi_attenuator | 31.35ms | skip | 34.30ms | 1.1x | - | - | - | - | - | - | SKIP |
-| sp/rc_twoport | 28.65ms | skip | 35.98ms | 1.3x | - | - | - | - | - | - | SKIP |
-| stb/bjt_shunt_fb | skip | skip | skip | - | - | - | - | SKIP | - | - | SKIP |
-| stb/vcvs_onepole | 25.15ms | skip | skip | - | - | - | - | - | - | - | SKIP |
-| stb/vcvs_twopole | 31.33ms | skip | skip | - | - | - | - | - | - | - | SKIP |
-| sweep/amp_bias_sweep | 27.96ms | skip | 38.38ms | 1.4x | - | 3.03e-1 | 1.67e-2 | FAIL | - | - | SKIP |
-| sweep/cmos_inv_sizing | 28.06ms | skip | 37.76ms | 1.3x | - | 5.00e-1 | 2.63e-2 | FAIL | - | - | SKIP |
-| sweep/nmos_wl_opt | skip | skip | 48.10ms | - | - | - | - | SKIP | - | - | SKIP |
-| sweep/opamp_wl_1000 | skip | skip | 270.52ms | - | - | - | - | SKIP | - | - | SKIP |
-| sweep/opamp_wl_200 | skip | skip | 54.52ms | - | - | - | - | SKIP | - | - | SKIP |
-| sweep/opamp_wl_5000 | skip | skip | 4.560s | - | - | - | - | SKIP | - | - | SKIP |
-| sweep/pmos_wl_opt | skip | skip | 36.06ms | - | - | - | - | SKIP | - | - | SKIP |
-| tf/diode_bias | 26.28ms | skip | 30.49ms | 1.2x | - | - | - | - | - | - | SKIP |
-| tf/r_ladder | 27.25ms | skip | 32.34ms | 1.2x | - | - | - | - | - | - | SKIP |
-| tf/voltage_divider | 24.47ms | skip | 33.91ms | 1.4x | - | - | - | - | - | - | SKIP |
-| tline/cpl3_4_line | skip | skip | 53.74ms | - | - | - | - | SKIP | - | - | SKIP |
-| tline/cpl_ibm2 | skip | skip | 38.15ms | - | - | - | - | SKIP | - | - | SKIP |
-| tline/delay_line | 31.79ms | skip | 50.92ms | 1.6x | - | 1.00e0 | 7.10e-1 | FAIL | - | - | SKIP |
-| tline/ideal_tline | 28.20ms | skip | 46.00ms | 1.6x | - | 1.00e0 | 7.87e-1 | FAIL | - | - | SKIP |
-| tline/ltra1_1_line | skip | skip | 43.27ms | - | - | - | - | SKIP | - | - | SKIP |
-| tline/ltra2_2_line | skip | skip | 60.28ms | - | - | - | - | SKIP | - | - | SKIP |
-| tline/terminated | 25.89ms | skip | 34.80ms | 1.3x | - | 1.00e0 | 7.06e-1 | FAIL | - | - | SKIP |
-| tline/txl1_1_line | skip | skip | 43.46ms | - | - | - | - | SKIP | - | - | SKIP |
-| tline/txl2_3_line | skip | skip | 49.37ms | - | - | - | - | SKIP | - | - | SKIP |
-| topology/current_cutset | skip | skip | 36.75ms | - | - | - | - | SKIP | - | - | SKIP |
-| topology/floating_node | 30.80ms | skip | 30.95ms | 1.0x | - | 1.00e0 | 1.00e0 | FAIL | - | - | SKIP |
-| topology/voltage_loop | skip | skip | skip | - | - | - | - | SKIP | - | - | SKIP |
-| tran/fourbitadder | skip | skip | 42.34ms | - | - | - | - | SKIP | - | - | SKIP |
-| tran/rc_pulse | 28.38ms | skip | 36.86ms | 1.3x | - | 1.00e0 | 6.42e-1 | FAIL | - | - | SKIP |
+| fixture | zp-cpu | zp-gpu | ngspice | xyce | cpu/ng | gpu/ng | zp-MB | ng-MB | xy-MB | cpu-max | cpu-rms | cpu | gpu-max | gpu-rms | gpu |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| ac/rc_lowpass | 4.47ms | 248.14ms | 9.91ms | skip | 2.2x | 0.0x | 7.4 | 11.7 | - | - | - | - | - | - | - |
+| adversarial/extreme_values | 3.88ms | 230.47ms | 8.87ms | skip | 2.3x | 0.0x | 7.4 | 12.1 | - | - | - | - | - | - | - |
+| adversarial/near_singular | 3.54ms | 237.67ms | 8.90ms | skip | 2.5x | 0.0x | 7.3 | 12.1 | - | 1.67e-1 | 1.67e-1 | FAIL | 1.67e-1 | 1.67e-1 | FAIL |
+| adversarial/tiny_resistor | 4.12ms | 214.85ms | 8.90ms | skip | 2.2x | 0.0x | 7.3 | 11.7 | - | 9.99e-7 | 9.99e-7 | PASS | 9.99e-7 | 9.99e-7 | PASS |
+| analog/current_mirror | 3.86ms | 221.92ms | 8.19ms | skip | 2.1x | 0.0x | 8.8 | 12.2 | - | 2.08e-6 | 2.08e-6 | PASS | 2.63e-7 | 2.63e-7 | PASS |
+| analog/diff_pair | 4.89ms | 229.97ms | 8.64ms | skip | 1.8x | 0.0x | 8.9 | 11.9 | - | 3.50e-5 | 3.50e-5 | PASS | 1.38e-7 | 1.38e-7 | PASS |
+| analog/opamp_inverting | 3.88ms | 209.38ms | 9.26ms | skip | 2.4x | 0.0x | 7.8 | 12.1 | - | 8.77e-8 | 8.77e-8 | PASS | 8.77e-8 | 8.77e-8 | PASS |
+| basic/rc_transient | 3.92ms | 219.63ms | 7.50ms | skip | 1.9x | 0.0x | 7.6 | 12.0 | - | 9.49e-10 | 9.49e-10 | PASS | 9.49e-10 | 9.49e-10 | PASS |
+| basic/voltage_divider | 3.84ms | 211.17ms | 9.31ms | skip | 2.4x | 0.0x | 7.2 | 12.1 | - | 2.50e-9 | 2.50e-9 | PASS | 2.50e-9 | 2.50e-9 | PASS |
+| bjt/cascode | 8.31ms | 258.10ms | 8.59ms | skip | 1.0x | 0.0x | 8.6 | 12.0 | - | 1.60e-5 | 1.60e-5 | PASS | 1.60e-5 | 1.60e-5 | PASS |
+| bjt/common_emitter | 5.37ms | 239.20ms | 9.72ms | skip | 1.8x | 0.0x | 8.5 | 12.3 | - | - | - | - | - | - | - |
+| bjt/diff_amp | 7.06ms | 258.88ms | 8.53ms | skip | 1.2x | 0.0x | 8.5 | 12.3 | - | 1.19e-4 | 2.82e-5 | PASS | 1.10e-6 | 6.45e-7 | PASS |
+| bypass/burst_clock | 4.99ms | 222.48ms | 11.55ms | skip | 2.3x | 0.1x | 8.6 | 12.3 | - | 1.85e-2 | 3.03e-3 | FAIL | 1.85e-2 | 3.03e-3 | FAIL |
+| bypass/gated_branch | skip | 584.52ms | 12.86ms | skip | - | 0.0x | - | 12.3 | - | - | - | SKIP | 7.31e-2 | 2.71e-2 | FAIL |
+| bypass/idle_ladder | skip | 202.73ms | 11.25ms | skip | - | 0.1x | - | 12.1 | - | - | - | SKIP | 7.89e-3 | 7.15e-4 | PASS |
+| convergence/diode_bridge | 3.87ms | 141.72ms | 9.54ms | skip | 2.5x | 0.1x | 8.3 | 11.8 | - | 5.89e0 | 5.89e0 | FAIL | 8.32e-1 | 8.32e-1 | FAIL |
+| convergence/high_gain_fb | 3.44ms | 156.27ms | 10.00ms | skip | 2.9x | 0.1x | 7.9 | 12.3 | - | 1.11e-15 | 1.11e-15 | PASS | 8.88e-16 | 8.88e-16 | PASS |
+| convergence/schmitt | 4.01ms | 152.08ms | 8.91ms | skip | 2.2x | 0.1x | 8.1 | 11.7 | - | 5.00e-9 | 5.00e-9 | PASS | 5.00e-9 | 5.00e-9 | PASS |
+| dc_sweep/nested_sweep | 4.20ms | 186.58ms | 9.26ms | skip | 2.2x | 0.0x | 8.4 | 12.1 | - | - | - | - | - | - | - |
+| dc_sweep/param_sweep | 4.65ms | 140.09ms | 7.99ms | skip | 1.7x | 0.1x | 8.0 | 12.3 | - | 3.28e-5 | 6.25e-6 | PASS | 3.28e-5 | 6.25e-6 | PASS |
+| dc_sweep/vin_sweep | 4.26ms | 172.69ms | 6.54ms | skip | 1.5x | 0.0x | 7.2 | 12.0 | - | 1.38e-8 | 8.07e-9 | PASS | 1.38e-8 | 8.07e-9 | PASS |
+| devices/b3soidd | 3.49ms | 146.94ms | skip | skip | - | - | 9.1 | - | - | - | - | - | - | - | - |
+| devices/b3soidd_output | 5.84ms | 144.27ms | skip | skip | - | - | 8.5 | - | - | - | - | - | - | - | - |
+| devices/b3soifd | 4.51ms | 148.27ms | skip | skip | - | - | 9.1 | - | - | - | - | - | - | - | - |
+| devices/b3soifd_output | 7.75ms | 155.63ms | skip | skip | - | - | 8.5 | - | - | - | - | - | - | - | - |
+| devices/b3soipd | 5.95ms | 144.37ms | 7.78ms | skip | 1.3x | 0.1x | 9.5 | 12.4 | - | 1.75e0 | 1.75e0 | FAIL | 1.75e0 | 1.75e0 | FAIL |
+| devices/b3soipd_output | 11.80ms | 153.50ms | 33.47ms | skip | 2.8x | 0.2x | 8.9 | 11.9 | - | - | - | - | - | - | - |
+| devices/b4soi | 3.76ms | 139.35ms | 8.45ms | skip | 2.2x | 0.1x | 9.1 | 12.4 | - | 3.31e-1 | 3.31e-1 | FAIL | 3.31e-1 | 3.31e-1 | FAIL |
+| devices/b4soi_output | 4.26ms | 143.00ms | 24.04ms | skip | 5.6x | 0.2x | 8.5 | 12.3 | - | - | - | - | - | - | - |
+| devices/bjt_npn | 3.86ms | 144.56ms | 6.58ms | skip | 1.7x | 0.0x | 8.6 | 12.0 | - | 5.00e-8 | 5.00e-8 | PASS | 7.98e-8 | 7.98e-8 | PASS |
+| devices/bjt_npn_early | 12.50ms | 154.24ms | 10.00ms | skip | 0.8x | 0.1x | 7.6 | 11.7 | - | - | - | - | - | - | - |
+| devices/bjt_npn_gummel | 6.76ms | 143.75ms | 10.19ms | skip | 1.5x | 0.1x | 7.6 | 12.0 | - | 2.86e-8 | 1.39e-8 | PASS | 2.86e-8 | 1.39e-8 | PASS |
+| devices/bjt_npn_high_injection | 8.82ms | 154.85ms | 9.35ms | skip | 1.1x | 0.1x | 7.7 | 12.1 | - | - | - | - | - | - | - |
+| devices/bjt_npn_output | 6.15ms | 145.67ms | 13.74ms | skip | 2.2x | 0.1x | 7.6 | 12.0 | - | - | - | - | - | - | - |
+| devices/bjt_npn_saturation | 7.10ms | 145.94ms | 9.03ms | skip | 1.3x | 0.1x | 7.7 | 12.0 | - | - | - | - | - | - | - |
+| devices/bjt_npn_temp | 6.57ms | 147.17ms | 8.32ms | skip | 1.3x | 0.1x | 7.6 | 12.3 | - | - | - | - | - | - | - |
+| devices/bjt_pnp | 3.86ms | 145.72ms | 9.00ms | skip | 2.3x | 0.1x | 8.6 | 12.1 | - | 7.59e-8 | 7.59e-8 | PASS | 7.59e-8 | 7.59e-8 | PASS |
+| devices/bjt_pnp_output | 7.87ms | 180.07ms | 10.34ms | skip | 1.3x | 0.1x | 7.7 | 12.2 | - | - | - | - | - | - | - |
+| devices/bsim1 | 8.10ms | 152.93ms | 12.52ms | skip | 1.5x | 0.1x | 8.1 | 11.9 | - | - | - | - | - | - | - |
+| devices/bsim2 | 7.94ms | 164.66ms | 10.81ms | skip | 1.4x | 0.1x | 8.3 | 12.0 | - | - | - | - | - | - | - |
+| devices/bsim2_ngspice | skip | skip | 12.21ms | skip | - | - | - | 12.0 | - | - | - | SKIP | - | - | SKIP |
+| devices/bsim3 | 4.23ms | 147.81ms | 9.81ms | skip | 2.3x | 0.1x | 9.1 | 12.2 | - | 8.67e-1 | 8.67e-1 | FAIL | 8.67e-1 | 8.67e-1 | FAIL |
+| devices/bsim3_body_effect | 11.13ms | 149.33ms | 41.88ms | skip | 3.8x | 0.3x | 8.2 | 12.2 | - | - | - | - | - | - | - |
+| devices/bsim3_output | 8.63ms | 149.32ms | 36.30ms | skip | 4.2x | 0.2x | 8.5 | 12.4 | - | - | - | - | - | - | - |
+| devices/bsim3_pmos | 9.35ms | 148.27ms | 33.72ms | skip | 3.6x | 0.2x | 8.5 | 12.1 | - | - | - | - | - | - | - |
+| devices/bsim3_temp | 11.15ms | 154.63ms | 43.67ms | skip | 3.9x | 0.3x | 8.2 | 12.1 | - | - | - | - | - | - | - |
+| devices/bsim3_transfer | 9.99ms | 153.31ms | 16.68ms | skip | 1.7x | 0.1x | 8.5 | 12.3 | - | 3.18e-8 | 2.38e-8 | PASS | 3.18e-8 | 2.38e-8 | PASS |
+| devices/bsim4 | skip | 145.57ms | 7.83ms | skip | - | 0.1x | - | 12.6 | - | - | - | SKIP | inf | inf | FAIL |
+| devices/bsim4_output | 9.77ms | 154.06ms | 20.45ms | skip | 2.1x | 0.1x | 9.0 | 12.4 | - | - | - | - | - | - | - |
+| devices/bsim4_pmos | 9.29ms | 154.60ms | 23.43ms | skip | 2.5x | 0.2x | 8.9 | 12.3 | - | - | - | - | - | - | - |
+| devices/bsim4_transfer | skip | 158.05ms | 11.97ms | skip | - | 0.1x | - | 12.4 | - | - | - | SKIP | 5.20e-8 | 1.53e-8 | PASS |
+| devices/bsource | 3.26ms | 147.38ms | 10.03ms | skip | 3.1x | 0.1x | 7.6 | 11.7 | - | 5.82e-8 | 2.12e-8 | PASS | 5.82e-8 | 2.12e-8 | PASS |
+| devices/capacitor | 4.46ms | 148.84ms | 8.70ms | skip | 2.0x | 0.1x | 7.6 | 12.1 | - | 1.00e-9 | 1.00e-9 | PASS | 1.00e-9 | 1.00e-9 | PASS |
+| devices/capacitor_ac | 4.37ms | 148.75ms | 8.85ms | skip | 2.0x | 0.1x | 7.2 | 12.3 | - | - | - | - | - | - | - |
+| devices/cccs | 4.27ms | 146.99ms | 9.55ms | skip | 2.2x | 0.1x | 7.9 | 12.1 | - | 5.00e-10 | 5.00e-10 | PASS | 5.00e-10 | 5.00e-10 | PASS |
+| devices/ccvs | 4.08ms | 142.54ms | 9.12ms | skip | 2.2x | 0.1x | 8.2 | 12.1 | - | 4.75e-8 | 4.75e-8 | PASS | 4.75e-8 | 4.75e-8 | PASS |
+| devices/coupled_tlines | skip | skip | 13.07ms | skip | - | - | - | 12.2 | - | - | - | SKIP | - | - | SKIP |
+| devices/cswitch | skip | skip | 7.60ms | skip | - | - | - | 12.0 | - | - | - | SKIP | - | - | SKIP |
+| devices/diode | 4.27ms | 137.82ms | 8.36ms | skip | 2.0x | 0.1x | 8.3 | 12.3 | - | 1.34e-7 | 1.34e-7 | PASS | 1.34e-7 | 1.34e-7 | PASS |
+| devices/diode_breakdown | skip | 145.01ms | 10.88ms | skip | - | 0.1x | - | 12.1 | - | - | - | SKIP | 1.98e-5 | 1.38e-6 | PASS |
+| devices/diode_capacitance | 4.72ms | 140.74ms | 9.12ms | skip | 1.9x | 0.1x | 7.8 | 11.6 | - | - | - | - | - | - | - |
+| devices/diode_high_injection | 6.78ms | 149.26ms | 9.49ms | skip | 1.4x | 0.1x | 7.8 | 11.8 | - | 2.86e-8 | 1.30e-8 | PASS | 2.86e-8 | 1.30e-8 | PASS |
+| devices/diode_iv_sweep | 10.40ms | 156.67ms | 10.32ms | skip | 1.0x | 0.1x | 7.8 | 12.1 | - | 3.81e-8 | 1.18e-8 | PASS | 3.81e-8 | 1.18e-8 | PASS |
+| devices/diode_recombination | 7.10ms | 149.54ms | 7.34ms | skip | 1.0x | 0.0x | 7.4 | 11.8 | - | 2.96e-8 | 1.17e-8 | PASS | 2.96e-8 | 1.17e-8 | PASS |
+| devices/diode_temp | 5.45ms | 148.88ms | 7.82ms | skip | 1.4x | 0.1x | 7.5 | 12.0 | - | - | - | - | - | - | - |
+| devices/hfet1 | 3.60ms | 137.70ms | 9.88ms | skip | 2.7x | 0.1x | 7.7 | 12.3 | - | 5.00e-10 | 5.00e-10 | PASS | 5.00e-10 | 5.00e-10 | PASS |
+| devices/hfet1_output | 5.14ms | 145.62ms | 9.80ms | skip | 1.9x | 0.1x | 7.1 | 12.2 | - | - | - | - | - | - | - |
+| devices/hfet2 | 3.81ms | 138.59ms | 9.34ms | skip | 2.4x | 0.1x | 7.8 | 11.8 | - | 1.04e-3 | 1.04e-3 | FAIL | 1.04e-3 | 1.04e-3 | FAIL |
+| devices/hfet2_output | 4.86ms | 137.26ms | 11.32ms | skip | 2.3x | 0.1x | 7.4 | 12.1 | - | - | - | - | - | - | - |
+| devices/hfet_id_vgs | 5.00ms | 145.72ms | 7.91ms | skip | 1.6x | 0.1x | 7.4 | 12.0 | - | 2.86e-8 | 1.29e-8 | PASS | 2.86e-8 | 1.29e-8 | PASS |
+| devices/hfet_inverter | 12.66ms | 155.79ms | 15.04ms | skip | 1.2x | 0.1x | 7.3 | 12.0 | - | 9.47e-1 | 8.79e-1 | FAIL | 9.47e-1 | 8.79e-1 | FAIL |
+| devices/hicum2 | skip | 149.80ms | 9.17ms | skip | - | 0.1x | - | 12.4 | - | - | - | SKIP | 9.91e-1 | 9.91e-1 | FAIL |
+| devices/hicum2_gummel | 6.85ms | 146.03ms | 9.85ms | skip | 1.4x | 0.1x | 7.4 | 12.4 | - | - | - | - | - | - | - |
+| devices/hicum2_output | 7.71ms | 151.28ms | 21.28ms | skip | 2.8x | 0.1x | 7.7 | 12.1 | - | - | - | - | - | - | - |
+| devices/hisim2 | 5.57ms | 146.04ms | 29.22ms | skip | 5.2x | 0.2x | 8.4 | 12.3 | - | - | - | - | - | - | - |
+| devices/hisimhv | 6.33ms | 144.93ms | skip | skip | - | - | 8.2 | - | - | - | - | - | - | - | - |
+| devices/inductor | 4.17ms | 135.55ms | 11.67ms | skip | 2.8x | 0.1x | 7.8 | 12.0 | - | 1.01e-13 | 1.01e-13 | PASS | 1.01e-13 | 1.01e-13 | PASS |
+| devices/inductor_ac | 4.69ms | 145.98ms | 9.29ms | skip | 2.0x | 0.1x | 7.8 | 12.0 | - | - | - | - | - | - | - |
+| devices/isource | 4.40ms | 141.88ms | 9.71ms | skip | 2.2x | 0.1x | 7.2 | 12.0 | - | 2.50e-10 | 2.50e-10 | PASS | 2.50e-10 | 2.50e-10 | PASS |
+| devices/jfet | 3.85ms | 172.07ms | 10.00ms | skip | 2.6x | 0.1x | 8.1 | 11.7 | - | 1.02e-1 | 1.02e-1 | FAIL | 1.02e-1 | 1.02e-1 | FAIL |
+| devices/jfet2 | 6.70ms | 154.94ms | 10.94ms | skip | 1.6x | 0.1x | 8.2 | 12.1 | - | - | - | - | - | - | - |
+| devices/jfet_output | 6.26ms | 143.22ms | 11.09ms | skip | 1.8x | 0.1x | 7.9 | 11.9 | - | - | - | - | - | - | - |
+| devices/jfet_transfer | 7.50ms | 150.19ms | 9.50ms | skip | 1.3x | 0.1x | 7.7 | 12.1 | - | 3.27e-8 | 1.19e-8 | PASS | 3.27e-8 | 1.19e-8 | PASS |
+| devices/jfet_vds_vgs | 4.02ms | 142.32ms | 9.17ms | skip | 2.3x | 0.1x | 7.6 | 12.0 | - | - | - | - | - | - | - |
+| devices/kinduc | 4.06ms | 139.64ms | 12.02ms | skip | 3.0x | 0.1x | 8.1 | 11.8 | - | 5.24e-1 | 3.42e-1 | FAIL | 5.24e-1 | 3.42e-1 | FAIL |
+| devices/lossy_tline | 4.21ms | 143.94ms | 15.81ms | skip | 3.8x | 0.1x | 8.3 | 12.0 | - | 4.55e0 | 1.63e0 | FAIL | 4.55e0 | 1.63e0 | FAIL |
+| devices/mesa | 4.69ms | 154.84ms | 8.08ms | skip | 1.7x | 0.1x | 7.8 | 11.9 | - | 1.28e-2 | 1.28e-2 | FAIL | 1.28e-2 | 1.28e-2 | FAIL |
+| devices/mesa_inverter | 9.11ms | 153.71ms | 8.86ms | skip | 1.0x | 0.1x | 8.3 | 11.5 | - | 8.97e-1 | 6.93e-1 | FAIL | 8.97e-1 | 6.93e-1 | FAIL |
+| devices/mesa_oscillator | 13.01ms | 151.42ms | 24.64ms | skip | 1.9x | 0.2x | 8.7 | 12.3 | - | 1.05e0 | 8.63e-1 | FAIL | 1.05e0 | 8.63e-1 | FAIL |
+| devices/mesa_output | 5.10ms | 146.80ms | 15.75ms | skip | 3.1x | 0.1x | 7.1 | 11.7 | - | - | - | - | - | - | - |
+| devices/mesfet | 3.88ms | 142.72ms | 9.39ms | skip | 2.4x | 0.1x | 7.8 | 12.2 | - | 3.32e-9 | 3.32e-9 | PASS | 3.32e-9 | 3.32e-9 | PASS |
+| devices/mesfet_output | 5.07ms | 145.29ms | 10.57ms | skip | 2.1x | 0.1x | 7.3 | 12.1 | - | - | - | - | - | - | - |
+| devices/mesfet_subthreshold | 4.86ms | 144.50ms | 8.97ms | skip | 1.8x | 0.1x | 7.1 | 12.2 | - | 3.18e-8 | 1.46e-8 | PASS | 3.18e-8 | 1.46e-8 | PASS |
+| devices/mesfet_transfer | 6.00ms | 145.74ms | 8.17ms | skip | 1.4x | 0.1x | 7.3 | 11.7 | - | 2.29e-8 | 9.35e-9 | PASS | 2.29e-8 | 9.35e-9 | PASS |
+| devices/mos1_body_effect | 10.23ms | 188.93ms | 11.72ms | skip | 1.1x | 0.1x | 8.2 | 11.9 | - | - | - | - | - | - | - |
+| devices/mos1_large_signal | 8.71ms | 261.66ms | 13.52ms | skip | 1.6x | 0.1x | 8.5 | 12.1 | - | 3.16e-2 | 5.36e-3 | FAIL | 3.15e-2 | 5.35e-3 | FAIL |
+| devices/mos1_output | 6.79ms | 244.32ms | 14.86ms | skip | 2.2x | 0.1x | 8.5 | 12.1 | - | - | - | - | - | - | - |
+| devices/mos1_pmos | 7.06ms | 222.87ms | 15.88ms | skip | 2.2x | 0.1x | 8.4 | 12.0 | - | - | - | - | - | - | - |
+| devices/mos1_subthreshold | 14.80ms | 231.60ms | 11.33ms | skip | 0.8x | 0.0x | 8.1 | 12.1 | - | 3.94e-8 | 1.50e-8 | PASS | 3.94e-8 | 1.50e-8 | PASS |
+| devices/mos1_temp | 11.40ms | 251.44ms | 14.46ms | skip | 1.3x | 0.1x | 8.5 | 12.0 | - | - | - | - | - | - | - |
+| devices/mos1_transfer | 11.02ms | 231.85ms | 11.69ms | skip | 1.1x | 0.1x | 8.2 | 11.9 | - | 4.58e-8 | 1.54e-8 | PASS | 4.58e-8 | 1.54e-8 | PASS |
+| devices/mos2 | 6.93ms | 231.80ms | 11.21ms | skip | 1.6x | 0.0x | 8.3 | 11.9 | - | - | - | - | - | - | - |
+| devices/mos2_transfer | 13.74ms | 240.37ms | 11.66ms | skip | 0.8x | 0.0x | 8.3 | 11.9 | - | 4.58e-8 | 1.54e-8 | PASS | 4.58e-8 | 1.54e-8 | PASS |
+| devices/mos3 | 8.35ms | 245.90ms | 11.16ms | skip | 1.3x | 0.0x | 8.4 | 11.8 | - | - | - | - | - | - | - |
+| devices/mos3_transfer | 14.42ms | 257.99ms | 11.83ms | skip | 0.8x | 0.0x | 8.0 | 12.1 | - | 4.58e-8 | 1.54e-8 | PASS | 4.58e-8 | 1.54e-8 | PASS |
+| devices/mos6 | 7.07ms | 271.06ms | 10.82ms | skip | 1.5x | 0.0x | 8.2 | 12.1 | - | - | - | - | - | - | - |
+| devices/mos6_inverter | skip | skip | 21.72ms | skip | - | - | - | 12.0 | - | - | - | SKIP | - | - | SKIP |
+| devices/mos6_simpleinv | 26.97ms | 259.01ms | 10.23ms | skip | 0.4x | 0.0x | 8.1 | 11.8 | - | 4.59e-1 | 9.45e-2 | FAIL | 4.58e-1 | 9.44e-2 | FAIL |
+| devices/mos9 | 8.30ms | 261.08ms | 12.72ms | skip | 1.5x | 0.0x | 8.2 | 12.1 | - | - | - | - | - | - | - |
+| devices/mosfet_l1 | 4.31ms | 230.32ms | 8.87ms | skip | 2.1x | 0.0x | 8.7 | 12.1 | - | 1.63e-6 | 1.63e-6 | PASS | 1.86e-8 | 1.86e-8 | PASS |
+| devices/resistor | 4.53ms | 276.25ms | 9.22ms | skip | 2.0x | 0.0x | 7.4 | 11.8 | - | 5.33e-16 | 5.33e-16 | PASS | 5.33e-16 | 5.33e-16 | PASS |
+| devices/resistor_sweep | 4.90ms | 238.56ms | 10.19ms | skip | 2.1x | 0.0x | 7.3 | 12.1 | - | 1.91e-8 | 7.54e-9 | PASS | 1.91e-8 | 7.54e-9 | PASS |
+| devices/resistor_temp | 4.19ms | 229.36ms | skip | skip | - | - | 7.4 | - | - | - | - | - | - | - | - |
+| devices/switch | 5.26ms | 226.30ms | 11.08ms | skip | 2.1x | 0.0x | 8.2 | 12.0 | - | 9.99e-1 | 1.15e-1 | FAIL | 9.99e-1 | 1.15e-1 | FAIL |
+| devices/switch_hysteresis | 4.91ms | 255.05ms | 10.97ms | skip | 2.2x | 0.0x | 8.2 | 12.1 | - | 9.99e-1 | 1.32e-1 | FAIL | 9.99e-1 | 1.32e-1 | FAIL |
+| devices/tline | 6.51ms | 242.47ms | 12.09ms | skip | 1.9x | 0.0x | 8.3 | 12.3 | - | 4.97e-1 | 1.98e-1 | FAIL | 4.97e-1 | 1.98e-1 | FAIL |
+| devices/urc | 7.50ms | 240.11ms | 13.46ms | skip | 1.8x | 0.1x | 8.6 | 12.1 | - | 1.69e-6 | 2.25e-7 | PASS | 1.69e-6 | 2.25e-7 | PASS |
+| devices/urc_ac | 10.20ms | 273.89ms | 9.55ms | skip | 0.9x | 0.0x | 8.6 | 12.0 | - | - | - | - | - | - | - |
+| devices/vbic | 5.97ms | 243.87ms | 9.15ms | skip | 1.5x | 0.0x | 9.5 | 12.1 | - | 2.36e0 | 2.36e0 | FAIL | 2.36e0 | 2.36e0 | FAIL |
+| devices/vbic_ce_amp | skip | 320.15ms | 12.12ms | skip | - | 0.0x | - | 12.1 | - | - | - | SKIP | - | - | - |
+| devices/vbic_diffamp | skip | 387.87ms | skip | skip | - | - | - | - | - | - | - | SKIP | - | - | - |
+| devices/vbic_forced_output | 16.46ms | 275.62ms | 15.45ms | skip | 0.9x | 0.1x | 8.9 | 12.3 | - | - | - | - | - | - | - |
+| devices/vbic_forward_gummel | skip | 265.67ms | skip | skip | - | - | - | - | - | - | - | SKIP | - | - | - |
+| devices/vbic_gummel | 6.61ms | 231.18ms | 8.73ms | skip | 1.3x | 0.0x | 7.7 | 12.0 | - | 2.86e-8 | 1.39e-8 | PASS | 2.86e-8 | 1.39e-8 | PASS |
+| devices/vbic_noise_scale | 42.82ms | 303.39ms | 9.16ms | skip | 0.2x | 0.0x | 10.2 | 12.4 | - | - | - | - | - | - | - |
+| devices/vbic_output | 6.55ms | 266.90ms | 16.23ms | skip | 2.5x | 0.1x | 7.6 | 12.2 | - | - | - | - | - | - | - |
+| devices/vbic_temp | skip | 283.96ms | 8.21ms | skip | - | 0.0x | - | 12.4 | - | - | - | SKIP | 4.77e-8 | 1.73e-8 | PASS |
+| devices/vccs | 4.03ms | 261.08ms | 8.05ms | skip | 2.0x | 0.0x | 8.1 | 12.3 | - | 2.50e-9 | 2.50e-9 | PASS | 2.50e-9 | 2.50e-9 | PASS |
+| devices/vcvs | 3.84ms | 158.76ms | 8.52ms | skip | 2.2x | 0.1x | 7.8 | 12.1 | - | 6.67e-10 | 6.67e-10 | PASS | 6.67e-10 | 6.67e-10 | PASS |
+| devices/vdmos | 3.60ms | 159.12ms | skip | skip | - | - | 9.0 | - | - | - | - | - | - | - | - |
+| devices/vdmos_output | 6.61ms | 142.74ms | skip | skip | - | - | 8.2 | - | - | - | - | - | - | - | - |
+| devices/vsource | 4.81ms | 134.20ms | 9.05ms | skip | 1.9x | 0.1x | 7.3 | 12.1 | - | 8.46e-7 | 1.96e-7 | PASS | 8.46e-7 | 1.96e-7 | PASS |
+| digital/buffer_rc | 4.88ms | 134.86ms | 11.05ms | skip | 2.3x | 0.1x | 7.6 | 12.3 | - | 6.71e-3 | 2.53e-3 | FAIL | 6.71e-3 | 2.53e-3 | FAIL |
+| digital/clamp | 6.05ms | 142.51ms | 10.76ms | skip | 1.8x | 0.1x | 8.2 | 12.4 | - | 1.24e-1 | 2.20e-2 | FAIL | 1.24e-1 | 2.20e-2 | FAIL |
+| digital/rc_filter_chain | 5.25ms | 144.99ms | 11.58ms | skip | 2.2x | 0.1x | 7.6 | 12.1 | - | 4.37e-2 | 8.11e-3 | FAIL | 4.37e-2 | 8.11e-3 | FAIL |
+| disto/bjt_ce | 4.63ms | 143.89ms | 9.85ms | skip | 2.1x | 0.1x | 8.3 | 12.1 | - | - | - | - | - | - | - |
+| disto/diode_clipper | 4.75ms | 145.07ms | 8.42ms | skip | 1.8x | 0.1x | 8.2 | 12.0 | - | - | - | - | - | - | - |
+| disto/mos_cs | 4.99ms | 144.21ms | 10.28ms | skip | 2.1x | 0.1x | 9.1 | 11.9 | - | - | - | - | - | - | - |
+| ensemble/corner_pathological | 4.44ms | 142.39ms | 7.76ms | skip | 1.7x | 0.1x | 8.3 | 12.3 | - | 2.79e-7 | 2.79e-7 | PASS | 2.46e-7 | 2.46e-7 | PASS |
+| ensemble/opamp_mc | 13.09ms | 281.50ms | 12.97ms | skip | 1.0x | 0.0x | 8.3 | 12.2 | - | 1.62e-5 | 1.00e-6 | PASS | 1.62e-5 | 9.99e-7 | PASS |
+| ensemble/pvt_corners | 15.92ms | 315.06ms | 27.42ms | skip | 1.7x | 0.1x | 9.0 | 11.8 | - | 9.97e-1 | 7.07e-1 | FAIL | 7.96e-1 | 2.45e-2 | FAIL |
+| ensemble/sweep_lanes | 5.26ms | 252.37ms | 9.21ms | skip | 1.8x | 0.0x | 8.0 | 12.3 | - | 4.66e-5 | 7.78e-6 | PASS | 4.66e-5 | 7.78e-6 | PASS |
+| fourier/clipped_sine | 7.23ms | 256.16ms | 16.81ms | skip | 2.3x | 0.1x | 8.2 | 12.1 | - | 2.69e-2 | 1.25e-2 | FAIL | 5.29e-2 | 1.96e-2 | FAIL |
+| fourier/sine_1k | 8.94ms | 264.90ms | 16.97ms | skip | 1.9x | 0.1x | 6.9 | 12.3 | - | 2.42e-2 | 1.24e-2 | FAIL | 2.42e-2 | 1.24e-2 | FAIL |
+| fourier/square_harmonics | 10.54ms | 280.97ms | 25.45ms | skip | 2.4x | 0.1x | 7.2 | 11.9 | - | 1.00e0 | 9.16e-2 | FAIL | 1.00e0 | 9.16e-2 | FAIL |
+| golden/ac | 7.43ms | 301.51ms | 9.26ms | skip | 1.2x | 0.0x | 7.4 | 11.8 | - | - | - | - | - | - | - |
+| golden/dc | 3.88ms | 238.03ms | 15.69ms | skip | 4.0x | 0.1x | 7.3 | 12.3 | - | 1.38e-8 | 8.17e-9 | PASS | 1.38e-8 | 8.17e-9 | PASS |
+| golden/disto | 8.60ms | 291.13ms | 10.36ms | skip | 1.2x | 0.0x | 8.2 | 12.3 | - | - | - | - | - | - | - |
+| golden/four | 5.59ms | 265.89ms | 9.98ms | skip | 1.8x | 0.0x | 8.2 | 12.3 | - | 3.49e-2 | 1.45e-2 | FAIL | 6.11e-2 | 1.86e-2 | FAIL |
+| golden/hb | 9.49ms | 252.81ms | skip | skip | - | - | 7.9 | - | - | - | - | - | - | - | - |
+| golden/noise | 7.89ms | 252.79ms | 15.97ms | skip | 2.0x | 0.1x | 7.5 | 11.9 | - | - | - | - | - | - | - |
+| golden/op | 8.98ms | 244.07ms | 14.15ms | skip | 1.6x | 0.1x | 7.3 | 12.2 | - | 1.38e-8 | 1.38e-8 | PASS | 1.38e-8 | 1.38e-8 | PASS |
+| golden/pss | 18.95ms | 291.78ms | skip | skip | - | - | 7.3 | - | - | - | - | - | - | - | - |
+| golden/pz | 7.25ms | 262.00ms | 11.30ms | skip | 1.6x | 0.0x | 7.6 | 11.8 | - | - | - | - | - | - | - |
+| golden/sens | 7.14ms | 267.43ms | 14.53ms | skip | 2.0x | 0.1x | 7.3 | 12.3 | - | - | - | - | - | - | - |
+| golden/sp | 7.10ms | 263.59ms | 14.67ms | skip | 2.1x | 0.1x | 7.4 | 11.6 | - | - | - | - | - | - | - |
+| golden/stb | 7.64ms | 233.31ms | skip | skip | - | - | 7.8 | - | - | - | - | - | - | - | - |
+| golden/tf | 6.77ms | 261.23ms | 14.64ms | skip | 2.2x | 0.1x | 7.3 | 12.3 | - | - | - | - | - | - | - |
+| golden/tran | 8.17ms | 227.07ms | 14.63ms | skip | 1.8x | 0.1x | 7.6 | 11.9 | - | 3.96e-3 | 6.52e-4 | PASS | 3.96e-3 | 6.52e-4 | PASS |
+| hb/diode_clipper | 9.71ms | 217.73ms | skip | skip | - | - | 8.6 | - | - | - | - | - | - | - | - |
+| hb/rc_single_tone | 9.00ms | 232.07ms | skip | skip | - | - | 7.9 | - | - | - | - | - | - | - | - |
+| hb/tline_guard | 14.93ms | 249.24ms | skip | skip | - | - | 8.2 | - | - | - | - | - | - | - | - |
+| medium/ladder_filter | 109.94ms | 367.28ms | 18.08ms | skip | 0.2x | 0.0x | 7.8 | 12.2 | - | - | - | - | - | - | - |
+| medium/rc_ladder_50 | 16.15ms | 258.81ms | 21.84ms | skip | 1.4x | 0.1x | 8.1 | 12.0 | - | 9.99e-1 | 2.03e-1 | FAIL | 9.99e-1 | 2.03e-1 | FAIL |
+| medium/resistor_mesh | 12.76ms | 288.06ms | 10.67ms | skip | 0.8x | 0.0x | 7.8 | 12.3 | - | 4.24e-9 | 4.24e-9 | PASS | 4.24e-9 | 4.24e-9 | PASS |
+| mosfet/cmos_inverter | 10.52ms | 274.77ms | 15.21ms | skip | 1.4x | 0.1x | 8.2 | 11.8 | - | inf | inf | FAIL | 9.97e-4 | 1.13e-4 | PASS |
+| mosfet/nand2 | 5.58ms | 270.27ms | 14.47ms | skip | 2.6x | 0.1x | 8.3 | 12.2 | - | 1.27e-9 | 1.27e-9 | PASS | 1.74e-16 | 1.74e-16 | PASS |
+| mosfet/nmos_cs | 8.41ms | 229.76ms | 16.53ms | skip | 2.0x | 0.1x | 8.5 | 12.3 | - | 1.11e-2 | 2.69e-3 | FAIL | 1.11e-2 | 2.69e-3 | FAIL |
+| ngspice/behavioral_bsrc | 7.23ms | 223.24ms | 13.21ms | skip | 1.8x | 0.1x | 7.6 | 12.0 | - | 1.00e0 | 4.59e-1 | FAIL | 1.00e0 | 4.59e-1 | FAIL |
+| ngspice/diffpair | skip | 241.11ms | 17.74ms | skip | - | 0.1x | - | 12.1 | - | - | - | SKIP | - | - | - |
+| ngspice/fourbitadder | skip | skip | 24.15ms | skip | - | - | - | 13.0 | - | - | - | SKIP | - | - | SKIP |
+| ngspice/lowpass_filter | 7.54ms | 240.54ms | 8.79ms | skip | 1.2x | 0.0x | 7.6 | 12.1 | - | - | - | - | - | - | - |
+| ngspice/mosamp | skip | skip | 441.59ms | skip | - | - | - | 12.4 | - | - | - | SKIP | - | - | SKIP |
+| ngspice/mosmem | skip | 336.35ms | 14.59ms | skip | - | 0.0x | - | 12.0 | - | - | - | SKIP | 9.54e-3 | 1.17e-3 | FAIL |
+| ngspice/rc | 2.541s | 5.220s | 12.58ms | skip | 0.0x | 0.0x | 79.3 | 12.3 | - | 9.63e-1 | 7.74e-1 | FAIL | 9.62e-1 | 7.73e-1 | FAIL |
+| ngspice/rca3040 | skip | 480.60ms | 22.12ms | skip | - | 0.0x | - | 11.7 | - | - | - | SKIP | - | - | - |
+| ngspice/res_array | 26.22ms | 254.65ms | 20.44ms | skip | 0.8x | 0.1x | 7.6 | 12.1 | - | - | - | - | - | - | - |
+| ngspice/res_partition | 10.96ms | 267.27ms | 18.50ms | skip | 1.7x | 0.1x | 7.3 | 12.1 | - | - | - | - | - | - | - |
+| ngspice/res_simple | 10.47ms | 306.94ms | 18.51ms | skip | 1.8x | 0.1x | 7.0 | 12.1 | - | 0.00e0 | 0.00e0 | PASS | 0.00e0 | 0.00e0 | PASS |
+| ngspice/rtlinv | 22.86ms | 249.77ms | 16.39ms | skip | 0.7x | 0.1x | 8.0 | 11.7 | - | 1.00e0 | 7.13e-1 | FAIL | 1.00e0 | 7.13e-1 | FAIL |
+| ngspice/schmitt | 31.75ms | 275.43ms | 20.23ms | skip | 0.6x | 0.1x | 8.5 | 12.0 | - | 5.20e-1 | 5.33e-2 | FAIL | 4.83e-1 | 4.60e-2 | FAIL |
+| ngspice/sin_source | 14.21ms | 242.73ms | 22.52ms | skip | 1.6x | 0.1x | 7.6 | 12.3 | - | 3.20e-2 | 1.88e-2 | FAIL | 3.20e-2 | 1.88e-2 | FAIL |
+| ngspice/tran_pulse | 13.31ms | 251.27ms | 15.39ms | skip | 1.2x | 0.1x | 7.4 | 12.1 | - | 1.22e-2 | 3.01e-3 | FAIL | 1.22e-2 | 3.01e-3 | FAIL |
+| noise/amp_noise | 13.89ms | 242.37ms | 21.64ms | skip | 1.6x | 0.1x | 8.6 | 11.8 | - | - | - | - | - | - | - |
+| noise/rc_noise | 14.34ms | 240.54ms | 21.93ms | skip | 1.5x | 0.1x | 7.5 | 12.3 | - | - | - | - | - | - | - |
+| noise/resistor_noise | 10.77ms | 244.00ms | 16.83ms | skip | 1.6x | 0.1x | 7.5 | 12.3 | - | - | - | - | - | - | - |
+| op/voltage_divider | 10.84ms | 260.94ms | 19.97ms | skip | 1.8x | 0.1x | 7.4 | 12.1 | - | 2.50e-9 | 2.50e-9 | PASS | 2.50e-9 | 2.50e-9 | PASS |
+| parser/hspice_suffix | 13.69ms | 220.56ms | 18.71ms | skip | 1.4x | 0.1x | 7.6 | 12.3 | - | 2.00e-3 | 2.00e-3 | FAIL | 2.00e-3 | 2.00e-3 | FAIL |
+| parser/ngspice_syntax | 11.19ms | 217.49ms | 18.18ms | skip | 1.6x | 0.1x | 7.4 | 12.0 | - | - | - | - | - | - | - |
+| parser/subckt_params | 8.41ms | 254.44ms | 22.58ms | skip | 2.7x | 0.1x | 7.2 | 11.9 | - | 9.99e-1 | 6.52e-1 | FAIL | 9.99e-1 | 6.52e-1 | FAIL |
+| power/buck_open | 15.24ms | 248.06ms | 28.81ms | skip | 1.9x | 0.1x | 8.6 | 12.0 | - | 5.19e0 | 2.19e0 | FAIL | 5.19e0 | 2.19e0 | FAIL |
+| power/rectifier | 14.44ms | 268.43ms | 22.36ms | skip | 1.5x | 0.1x | 8.2 | 12.4 | - | 4.69e-2 | 2.37e-2 | FAIL | 3.46e-2 | 1.24e-2 | FAIL |
+| power/zener_reg | 11.16ms | 259.40ms | 13.69ms | skip | 1.2x | 0.1x | 8.3 | 11.8 | - | 9.94e-5 | 2.16e-5 | PASS | 9.93e-5 | 2.18e-5 | PASS |
+| promote/dense_sweep | 35.50ms | 254.84ms | 24.98ms | skip | 0.7x | 0.1x | 8.3 | 12.3 | - | 6.50e-7 | 1.61e-7 | PASS | 2.04e-7 | 1.57e-7 | PASS |
+| promote/long_tran | 8.90ms | 244.31ms | 59.87ms | skip | 6.7x | 0.2x | 7.6 | 12.0 | - | 6.76e-2 | 2.89e-2 | FAIL | 6.84e-2 | 2.89e-2 | FAIL |
+| promote/mc_small | 11.01ms | 223.22ms | 19.39ms | skip | 1.8x | 0.1x | 8.5 | 12.3 | - | 3.17e-7 | 3.17e-7 | PASS | 3.06e-7 | 3.06e-7 | PASS |
+| pss/diode_rect_driven | 7.13ms | 360.26ms | skip | skip | - | - | 8.5 | - | - | - | - | - | - | - | - |
+| pss/rc_driven | 21.29ms | 250.15ms | skip | skip | - | - | 7.3 | - | - | - | - | - | - | - | - |
+| pss/rlc_driven | 13.40ms | 228.05ms | skip | skip | - | - | 8.1 | - | - | - | - | - | - | - | - |
+| pz/filt_bridge_t | 11.80ms | 254.90ms | 20.21ms | skip | 1.7x | 0.1x | 7.6 | 12.0 | - | 1.00e-9 | 1.00e-9 | PASS | 1.00e-9 | 1.00e-9 | PASS |
+| pz/filt_multistage | 13.93ms | 233.92ms | 17.97ms | skip | 1.3x | 0.1x | 8.1 | 12.3 | - | - | - | - | - | - | - |
+| pz/filt_rc | 8.03ms | 242.37ms | 18.92ms | skip | 2.4x | 0.1x | 7.6 | 12.1 | - | - | - | - | - | - | - |
+| pz/pz2 | 12.14ms | 233.73ms | 14.72ms | skip | 1.2x | 0.1x | 8.5 | 12.0 | - | - | - | - | - | - | - |
+| pz/pzt | 13.50ms | 247.61ms | 19.75ms | skip | 1.5x | 0.1x | 8.5 | 12.1 | - | - | - | - | - | - | - |
+| pz/rc_lowpass | 12.06ms | 233.17ms | skip | skip | - | - | 7.6 | - | - | - | - | - | - | - | - |
+| pz/rlc_series | 10.89ms | 270.83ms | 12.91ms | skip | 1.2x | 0.0x | 7.8 | 12.0 | - | - | - | - | - | - | - |
+| pz/simplepz | 9.54ms | 228.24ms | 18.67ms | skip | 2.0x | 0.1x | 7.1 | 12.3 | - | - | - | - | - | - | - |
+| pz/two_pole | 10.19ms | 223.38ms | 19.06ms | skip | 1.9x | 0.1x | 7.6 | 12.2 | - | - | - | - | - | - | - |
+| scaling/divider_chain | 25.71ms | 287.57ms | 21.00ms | skip | 0.8x | 0.1x | 8.3 | 13.0 | - | 6.00e-5 | 6.00e-5 | PASS | 6.00e-5 | 6.00e-5 | PASS |
+| scaling/inverter_chain_1k | skip | 12.271s | skip | skip | - | - | - | - | - | - | - | SKIP | - | - | - |
+| scaling/inverter_chain_256 | skip | skip | skip | skip | - | - | - | - | - | - | - | SKIP | - | - | SKIP |
+| scaling/inverter_chain_4k | 2.178s | skip | skip | skip | - | - | 279.6 | - | - | - | - | - | - | - | SKIP |
+| scaling/parallel_inverters_100 | 255.01ms | 698.03ms | 49.75ms | skip | 0.2x | 0.1x | 20.2 | 12.5 | - | 4.65e-1 | 4.02e-2 | FAIL | 4.65e-1 | 4.15e-2 | FAIL |
+| scaling/parallel_inverters_2000 | 4.905s | 10.874s | 807.35ms | skip | 0.2x | 0.1x | 150.4 | 24.2 | - | 4.65e-1 | 4.56e-2 | FAIL | 4.65e-1 | 4.05e-2 | FAIL |
+| scaling/parallel_inverters_500 | 1.179s | 2.501s | 216.94ms | skip | 0.2x | 0.1x | 47.5 | 15.1 | - | 4.65e-1 | 3.95e-2 | FAIL | 4.65e-1 | 4.09e-2 | FAIL |
+| scaling/rc_chain_500 | 75.74ms | 342.44ms | 37.72ms | skip | 0.5x | 0.1x | 25.7 | 13.1 | - | 1.00e0 | 3.09e-1 | FAIL | 1.00e0 | 3.09e-1 | FAIL |
+| scaling/rc_ladder_100k | 25.449s | 25.451s | 5.357s | skip | 0.2x | 0.2x | 2754.9 | 220.1 | - | 1.01e-1 | 1.44e-2 | FAIL | 1.01e-1 | 1.44e-2 | FAIL |
+| scaling/rc_ladder_10k | 2.458s | 2.698s | 492.59ms | skip | 0.2x | 0.2x | 287.6 | 32.5 | - | 1.01e-1 | 1.44e-2 | FAIL | 1.01e-1 | 1.44e-2 | FAIL |
+| scaling/rc_ladder_1k | 172.19ms | 486.31ms | 99.54ms | skip | 0.6x | 0.2x | 39.7 | 14.0 | - | 1.01e-1 | 1.44e-2 | FAIL | 1.01e-1 | 1.44e-2 | FAIL |
+| scaling/resistor_grid | 82.58ms | 328.94ms | 79.69ms | skip | 1.0x | 0.2x | 13.0 | 13.5 | - | 3.28e-8 | 3.28e-8 | PASS | 3.28e-8 | 3.28e-8 | PASS |
+| scaling/resistor_grid_100x100 | 430.74ms | 644.14ms | 1.793s | skip | 4.2x | 2.8x | 49.0 | 48.7 | - | 1.45e-5 | 1.45e-5 | PASS | 1.45e-5 | 1.45e-5 | PASS |
+| scaling/resistor_grid_32x32 | 93.78ms | 368.02ms | 102.46ms | skip | 1.1x | 0.3x | 14.5 | 14.7 | - | 1.11e-6 | 1.11e-6 | PASS | 1.11e-6 | 1.11e-6 | PASS |
+| sens/bridge | 75.25ms | 314.84ms | 85.75ms | skip | 1.1x | 0.3x | 11.9 | 12.1 | - | - | - | - | - | - | - |
+| sens/diffpair | skip | 310.12ms | 63.50ms | skip | - | 0.2x | - | 12.1 | - | - | - | SKIP | - | - | - |
+| sens/rc_lowpass | 92.58ms | 350.18ms | 67.95ms | skip | 0.7x | 0.2x | 12.2 | 12.4 | - | - | - | - | - | - | - |
+| sens/voltage_divider | 77.90ms | 321.42ms | 65.05ms | skip | 0.8x | 0.2x | 12.0 | 12.1 | - | - | - | - | - | - | - |
+| sp/lc_lowpass | 72.83ms | 285.23ms | 74.73ms | skip | 1.0x | 0.3x | 12.6 | 12.2 | - | - | - | - | - | - | - |
+| sp/pi_attenuator | 85.40ms | 351.93ms | 63.85ms | skip | 0.7x | 0.2x | 11.9 | 12.0 | - | - | - | - | - | - | - |
+| sp/rc_twoport | 80.42ms | 289.54ms | 73.61ms | skip | 0.9x | 0.3x | 12.2 | 12.1 | - | - | - | - | - | - | - |
+| stb/bjt_shunt_fb | 73.69ms | 310.14ms | skip | skip | - | - | 13.1 | - | - | - | - | - | - | - | - |
+| stb/vcvs_onepole | 82.39ms | 312.68ms | skip | skip | - | - | 12.6 | - | - | - | - | - | - | - | - |
+| stb/vcvs_twopole | 84.87ms | 321.03ms | skip | skip | - | - | 12.6 | - | - | - | - | - | - | - | - |
+| sweep/amp_bias_sweep | 80.53ms | 354.95ms | 75.48ms | skip | 0.9x | 0.2x | 13.4 | 12.1 | - | 5.52e-5 | 1.37e-5 | PASS | 2.08e-5 | 1.67e-6 | PASS |
+| sweep/cmos_inv_sizing | skip | 354.17ms | 68.44ms | skip | - | 0.2x | - | 12.1 | - | - | - | SKIP | 5.09e-4 | 2.75e-5 | PASS |
+| sweep/nmos_wl_opt | skip | 354.91ms | 68.01ms | skip | - | 0.2x | - | 12.4 | - | - | - | SKIP | inf | inf | FAIL |
+| sweep/opamp_wl_1000 | skip | skip | 305.75ms | skip | - | - | - | 24.4 | - | - | - | SKIP | - | - | SKIP |
+| sweep/opamp_wl_200 | skip | skip | 89.52ms | skip | - | - | - | 14.5 | - | - | - | SKIP | - | - | SKIP |
+| sweep/opamp_wl_5000 | skip | skip | 4.103s | skip | - | - | - | 76.7 | - | - | - | SKIP | - | - | SKIP |
+| sweep/pmos_wl_opt | skip | 364.48ms | 74.39ms | skip | - | 0.2x | - | 12.2 | - | - | - | SKIP | inf | inf | FAIL |
+| tf/diode_bias | 74.97ms | 298.22ms | 66.07ms | skip | 0.9x | 0.2x | 12.9 | 12.3 | - | - | - | - | - | - | - |
+| tf/r_ladder | 79.75ms | 344.95ms | 67.23ms | skip | 0.8x | 0.2x | 12.1 | 12.3 | - | - | - | - | - | - | - |
+| tf/voltage_divider | 75.68ms | 342.79ms | 66.66ms | skip | 0.9x | 0.2x | 12.0 | 12.0 | - | - | - | - | - | - | - |
+| tline/cpl3_4_line | skip | skip | 86.58ms | skip | - | - | - | 12.3 | - | - | - | SKIP | - | - | SKIP |
+| tline/cpl_ibm2 | skip | skip | 64.11ms | skip | - | - | - | 12.3 | - | - | - | SKIP | - | - | SKIP |
+| tline/delay_line | 80.44ms | 312.48ms | 75.64ms | skip | 0.9x | 0.2x | 12.8 | 11.9 | - | 1.06e0 | 6.07e-1 | FAIL | 1.06e0 | 6.07e-1 | FAIL |
+| tline/ideal_tline | 85.23ms | 349.19ms | 69.10ms | skip | 0.8x | 0.2x | 13.1 | 12.1 | - | 4.80e-1 | 1.97e-1 | FAIL | 4.80e-1 | 1.97e-1 | FAIL |
+| tline/ltra1_1_line | 96.18ms | 379.16ms | 72.54ms | skip | 0.8x | 0.2x | 14.1 | 12.3 | - | 1.42e6 | 1.10e6 | FAIL | 2.65e4 | 2.38e4 | FAIL |
+| tline/ltra2_2_line | 87.67ms | 389.84ms | 81.14ms | skip | 0.9x | 0.2x | 14.0 | 12.3 | - | 5.32e5 | 4.50e5 | FAIL | 1.42e4 | 1.04e4 | FAIL |
+| tline/terminated | 80.73ms | 343.86ms | 77.85ms | skip | 1.0x | 0.2x | 13.2 | 12.0 | - | 6.47e-1 | 3.39e-1 | FAIL | 6.47e-1 | 3.39e-1 | FAIL |
+| tline/txl1_1_line | skip | skip | 78.20ms | skip | - | - | - | 12.1 | - | - | - | SKIP | - | - | SKIP |
+| tline/txl2_3_line | skip | skip | 66.51ms | skip | - | - | - | 12.2 | - | - | - | SKIP | - | - | SKIP |
+| topology/current_cutset | skip | skip | 68.32ms | skip | - | - | - | 12.1 | - | - | - | SKIP | - | - | SKIP |
+| topology/floating_node | 77.58ms | 321.72ms | 63.17ms | skip | 0.8x | 0.2x | 12.1 | 12.0 | - | 1.00e0 | 1.00e0 | FAIL | 1.00e0 | 1.00e0 | FAIL |
+| topology/voltage_loop | skip | skip | skip | skip | - | - | - | - | - | - | - | SKIP | - | - | SKIP |
+| tran/fourbitadder | skip | skip | 82.79ms | skip | - | - | - | 13.3 | - | - | - | SKIP | - | - | SKIP |
+| tran/rc_pulse | 84.08ms | 337.64ms | 67.84ms | skip | 0.8x | 0.2x | 11.9 | 11.8 | - | 1.22e-2 | 3.01e-3 | FAIL | 1.22e-2 | 3.01e-3 | FAIL |
+| vacask/c6288 | skip | skip | skip | skip | - | - | - | - | - | - | - | SKIP | - | - | SKIP |
+| vacask/graetz | 164.14ms | 430.28ms | 2.835s | skip | 17.3x | 6.6x | 173.2 | 12.0 | - | 1.00e0 | 8.06e-1 | FAIL | 1.00e0 | 8.06e-1 | FAIL |
+| vacask/mul | 177.23ms | 419.34ms | 1.535s | skip | 8.7x | 3.7x | 237.1 | 12.2 | - | 1.00e0 | 9.92e-1 | FAIL | 1.00e0 | 9.92e-1 | FAIL |
+| vacask/rc | 127.54ms | 398.35ms | 1.559s | skip | 12.2x | 3.9x | 107.4 | 12.0 | - | 1.00e0 | 7.07e-1 | FAIL | 1.00e0 | 7.07e-1 | FAIL |
+| vacask/ring | skip | skip | 246.39ms | skip | - | - | - | 12.6 | - | - | - | SKIP | - | - | SKIP |
+| verilog/inverter | skip | skip | skip | skip | - | - | - | - | - | - | - | SKIP | - | - | SKIP |
+| verilogA/diode_clamp | skip | skip | skip | skip | - | - | - | - | - | - | - | SKIP | - | - | SKIP |
+| verilogA/res_divider | skip | skip | skip | skip | - | - | - | - | - | - | - | SKIP | - | - | SKIP |

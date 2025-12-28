@@ -338,14 +338,14 @@ inline fn min_logexp_f(x: f64, x0: f64, a: f64) f64 {
     const d = (x - x0) / a;
     const d_safe = if (x < x0) d else -d;
     const base = if (x < x0) x else x0;
-    return base - a * @log(1.0 + @exp(@min(d_safe, 80.0)));
+    return base - a * contract.fmath.log(1.0 + contract.fmath.exp(@min(d_safe, 80.0)));
 }
 
 inline fn max_logexp_f(x: f64, x0: f64, a: f64) f64 {
     const d = (x - x0) / a;
     const d_safe = if (x < x0) d else -(d);
     const base = if (x < x0) x0 else x;
-    return base + a * @log(1.0 + @exp(@min(d_safe, 80.0)));
+    return base + a * contract.fmath.log(1.0 + contract.fmath.exp(@min(d_safe, 80.0)));
 }
 
 // ============================================================================
@@ -881,12 +881,12 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, _: *const
         .mul(expC(S, NzCBT.neg().addC(P.NzCB), 80.0)).scale(P.IzCB);
 
     // Self-heating thermal resistance (Eq 4.74) — Tamb is x-free
-    const Rth_Tamb = P.Rth * @exp(P.Ath * @log(@max(Tamb / TRK, 1.0e-30)));
+    const Rth_Tamb = P.Rth * contract.fmath.exp(P.Ath * contract.fmath.log(@max(Tamb / TRK, 1.0e-30)));
 
     // ================================================================
     // Emitter Depletion Charge voltages (Eqs 4.173-4.175)
     // ================================================================
-    const VFE = VdET.scale(1.0 - @exp(-1.0 / P.pE * @log(alpha_jE)));
+    const VFE = VdET.scale(1.0 - contract.fmath.exp(-1.0 / P.pE * contract.fmath.log(alpha_jE)));
     const vjE_arg = V_B2E1.sub(VFE).div(VdET.scale(0.1)).minC(80.0);
     const VjE = V_B2E1.sub(VdET.scale(0.1).mul(vjE_arg.exp().addC(1.0).log()));
     const E0EB = logC(S, VjE.div(VdET).neg().addC(1.0), 1.0e-30).scale(1.0 - P.pE).exp();
@@ -927,7 +927,7 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, _: *const
     // alpha (Eq 4.154)
     const alpha_arg = IC1C2.div(Iqs.maxC(1.0e-30)).addC(-1.0).scale(1.0 / P.axi).minC(80.0);
     const alpha_num = alpha_arg.exp().addC(1.0).log().scale(P.axi).addC(1.0);
-    const alpha_den = 1.0 + P.axi * @log(1.0 + @exp(@min(-1.0 / P.axi, 80.0)));
+    const alpha_den = 1.0 + P.axi * contract.fmath.log(1.0 + contract.fmath.exp(@min(-1.0 / P.axi, 80.0)));
     const alpha = if (ic1c2_pos) alpha_num.scale(1.0 / @max(alpha_den, 1.0e-30)) else S.con(1.0);
 
     // yi (Eq 4.157)
@@ -964,7 +964,7 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, _: *const
     // Small signal reverse mode xi/Wepi (Eq 4.164)
     const Ec_abs = Ec.abs();
     const vc1c2_abs = V_C1C2.abs();
-    const small_signal_rev = (vc1c2_abs.val() < 1.0e-5 * VT.val()) or (Ec_abs.val() < @exp(-40.0) * VT.val() * (K0.val() + KW.val()));
+    const small_signal_rev = (vc1c2_abs.val() < 1.0e-5 * VT.val()) or (Ec_abs.val() < contract.fmath.exp(-40.0) * VT.val() * (K0.val() + KW.val()));
     const pav = p0star_rev.add(pW).scale(0.5);
     const xi_Wepi_rev_normal = Ec.div(Ec.add(V_B2C2).sub(V_B2C1).maxC(1.0e-30));
     const xi_Wepi_rev_small = pav.div(pav.addC(1.0));
@@ -1130,8 +1130,8 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, _: *const
     const eps_brcb: f64 = 1.0e-6;
     const Vcbeff = V_C1B1.mul(V_C1B1).addC(eps_brcb * eps_brcb).sqrt().add(V_C1B1).scale(0.5);
     const alpha_brcb = 1.0 - 1.0 / P.Frevcb;
-    const f_stop = @exp(P.Pbrcb * @log(1.0 / (1.0 - alpha_brcb)));
-    const df_brcb = f_stop * f_stop * @exp((P.Pbrcb - 1.0) * @log(@max(alpha_brcb, 1.0e-30))) * P.Pbrcb / P.Vbrcb;
+    const f_stop = contract.fmath.exp(P.Pbrcb * contract.fmath.log(1.0 / (1.0 - alpha_brcb)));
+    const df_brcb = f_stop * f_stop * contract.fmath.exp((P.Pbrcb - 1.0) * contract.fmath.log(@max(alpha_brcb, 1.0e-30))) * P.Pbrcb / P.Vbrcb;
 
     const fbrcb = if (P.SWJBRCB == 1) blk: {
         const v_ratio = Vcbeff.scale(1.0 / P.Vbrcb);
@@ -1240,12 +1240,12 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, _: *const
             .addC(2.0)
             .scale(P.pE * (1.0 - P.pE));
         const E0EB_z = e0_num.div(neg_xz_2ppE.scale(6.0).maxC(1.0e-30));
-        const twopmpE = @exp((2.0 - P.pE) * @log(2.0));
+        const twopmpE = contract.fmath.exp((2.0 - P.pE) * contract.fmath.log(2.0));
         // DzEB_arg = twopmpE*NzEBT * V_zeb / max(VgZEBT*E0EB_z, 1e-30)
         const DzEB_arg = NzEBT.scale(twopmpE).mul(V_zeb).div(VgZEBT.mul(E0EB_z).maxC(1.0e-30));
         // DzEB = -V_zeb - VgZEBT/max(twopmpE*NzEBT,1e-30) * E0EB_z * (1 - exp(min(DzEB_arg,80)))
         const DzEB = V_zeb.neg().sub(VgZEBT.div(NzEBT.scale(twopmpE).maxC(1.0e-30)).mul(E0EB_z).mul(expC(S, DzEB_arg, 80.0).neg().addC(1.0)));
-        const twopm1 = @exp((1.0 - P.pE) * @log(2.0));
+        const twopm1 = contract.fmath.exp((1.0 - P.pE) * contract.fmath.log(2.0));
         // izt_raw = IzEBT/max(twopm1*VdET,1e-30)*DzEB*E0EB_z*exp(min(NzEBT*(1 - twopm1/max(E0EB_z,1e-30)),80))
         // exp arg = NzEBT * (1 - twopm1/max(E0EB_z, 1e-30))
         const zeb_exp_arg = S.con(twopm1).div(E0EB_z.maxC(1.0e-30)).neg().addC(1.0).mul(NzEBT);
@@ -1268,10 +1268,10 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, _: *const
             .addC(2.0)
             .scale(P.pC * (1.0 - P.pC));
         const E0CB_z = e0c_num.div(neg_xz_2ppC.scale(6.0).maxC(1.0e-30));
-        const twopmpC = @exp((2.0 - P.pC) * @log(2.0));
+        const twopmpC = contract.fmath.exp((2.0 - P.pC) * contract.fmath.log(2.0));
         const DzCB_arg = NzCBT.scale(twopmpC).mul(V_zcb).div(VgZCBT.mul(E0CB_z).maxC(1.0e-30));
         const DzCB = V_zcb.neg().sub(VgZCBT.div(NzCBT.scale(twopmpC).maxC(1.0e-30)).mul(E0CB_z).mul(expC(S, DzCB_arg, 80.0).neg().addC(1.0)));
-        const twopm1_cb = @exp((1.0 - P.pC) * @log(2.0));
+        const twopm1_cb = contract.fmath.exp((1.0 - P.pC) * contract.fmath.log(2.0));
         const zcb_exp_arg = S.con(twopm1_cb).div(E0CB_z.maxC(1.0e-30)).neg().addC(1.0).mul(NzCBT);
         const izt_raw_cb = IzCBT.div(VdCctcT.scale(twopm1_cb).maxC(1.0e-30)).mul(DzCB).mul(E0CB_z)
             .mul(expC(S, zcb_exp_arg, 80.0));
@@ -1729,7 +1729,7 @@ pub fn qFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *cons
     // ================================================================
     // Emitter depletion charge VtE
     // ================================================================
-    const VFE = VdET.scale(1.0 - @exp(-1.0 / pE * @log(alpha_jE)));
+    const VFE = VdET.scale(1.0 - contract.fmath.exp(-1.0 / pE * contract.fmath.log(alpha_jE)));
     const vjE_arg = V_B2E1.sub(VFE).div(VdET.scale(0.1)).minC(80.0);
     const VjE = V_B2E1.sub(VdET.scale(0.1).mul(vjE_arg.exp().addC(1.0).log()));
     const E0EB = logC(S, VjE.div(VdET).neg().addC(1.0), 1.0e-30).scale(1.0 - pE).exp();
@@ -1767,7 +1767,7 @@ pub fn qFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *cons
 
     const alpha_arg = IC1C2.div(Iqs.maxC(1.0e-30)).addC(-1.0).scale(1.0 / axi).minC(80.0);
     const alpha_num = alpha_arg.exp().addC(1.0).log().scale(axi).addC(1.0);
-    const alpha_den = 1.0 + axi * @log(1.0 + @exp(@min(-1.0 / axi, 80.0)));
+    const alpha_den = 1.0 + axi * contract.fmath.log(1.0 + contract.fmath.exp(@min(-1.0 / axi, 80.0)));
     const alpha = if (ic1c2_pos) alpha_num.scale(1.0 / @max(alpha_den, 1.0e-30)) else S.con(1.0);
 
     const v_qs = Vqs.scale(1.0 / @max(Ihc * SCRCv, 1.0e-30));
@@ -1788,7 +1788,7 @@ pub fn qFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *cons
 
     const vc1c2_abs = V_C1C2.abs();
     const Ec_abs = Ec.abs();
-    const small_signal_rev = (vc1c2_abs.val() < 1.0e-5 * VT.val()) or (Ec_abs.val() < @exp(-40.0) * VT.val() * (K0.val() + KW.val()));
+    const small_signal_rev = (vc1c2_abs.val() < 1.0e-5 * VT.val()) or (Ec_abs.val() < contract.fmath.exp(-40.0) * VT.val() * (K0.val() + KW.val()));
     const pav = p0star_rev.add(pW).scale(0.5);
     const xi_Wepi_rev = if (small_signal_rev) pav.div(pav.addC(1.0)) else Ec.div(Ec.add(V_B2C2).sub(V_B2C1).maxC(1.0e-30));
 
@@ -1849,7 +1849,7 @@ pub fn qFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *cons
     // ================================================================
     // Substrate depletion charge (Eqs 4.200-4.202)
     // ================================================================
-    const VFS = VdST.scale(1.0 - @exp(-1.0 / pS * @log(alpha_jS)));
+    const VFS = VdST.scale(1.0 - contract.fmath.exp(-1.0 / pS * contract.fmath.log(alpha_jS)));
     const vjs_arg = V_SC1.sub(VFS).div(VdST.scale(0.1)).minC(80.0);
     const VjS = V_SC1.sub(VdST.scale(0.1).mul(vjs_arg.exp().addC(1.0).log()));
     const QtS = CjST.mul(
@@ -2151,17 +2151,17 @@ pub fn limit(model: *const Model, _: *const Instance, x_new: [n_u]f64, x_old: [n
 
 // DEVpnjlim: PN junction voltage limiting
 fn pnjlim(v_new: f64, v_old: f64, vt: f64, is_val: f64) f64 {
-    const v_crit = vt * @log(vt / (1.4142135623731 * @max(is_val, 1.0e-300)));
+    const v_crit = vt * contract.fmath.log(vt / (1.4142135623731 * @max(is_val, 1.0e-300)));
 
     if (v_new > v_crit and @abs(v_new - v_old) > 2.0 * vt) {
         if (v_old > 0.0) {
             const arg = 1.0 + (v_new - v_old) / vt;
             return if (arg > 0.0)
-                v_old + vt * @log(arg)
+                v_old + vt * contract.fmath.log(arg)
             else
                 v_crit;
         } else {
-            return vt * @log(v_new / vt);
+            return vt * contract.fmath.log(v_new / vt);
         }
     }
     return v_new;

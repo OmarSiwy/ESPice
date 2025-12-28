@@ -150,7 +150,7 @@ pub const Model = struct {
     u0: f32 = 0.067,
     ua: f32 = 1.0e-9,
     ub: f32 = 1.0e-19,
-    uc: f32 = -0.0465e-9,
+    uc: f32 = -0.0465,
     ud: f32 = 0.0,
     ucs: f32 = 1.67,
     up: f32 = 0.0,
@@ -421,7 +421,7 @@ pub const Model = struct {
     kt2: f32 = 0.022,
     ua1: f32 = 1.0e-9,
     ub1: f32 = -1.0e-18,
-    uc1: f32 = -0.056e-9,
+    uc1: f32 = 0.056,
     ud1: f32 = 0.0,
     at: f32 = 3.3e4,
     prt: f32 = 0.0,
@@ -642,11 +642,11 @@ pub const noise_gens = [_]contract.NoiseGen(Self){
 // ============================================================================
 
 inline fn safe_exp(x: f64) f64 {
-    return @exp(@min(x, 80.0));
+    return contract.fmath.exp(@min(x, 80.0));
 }
 
 inline fn safe_log(x: f64) f64 {
-    return @log(@max(x, 1e-38));
+    return contract.fmath.log(@max(x, 1e-38));
 }
 
 inline fn hypot2(a: f64, b: f64) f64 {
@@ -658,8 +658,8 @@ inline fn cosh_approx(x: f64) f64 {
     // For large x, cosh(x) ~ exp(|x|)/2
     const ax = @abs(x);
     const clamped = @min(ax, 80.0);
-    const ep = @exp(clamped);
-    const em = @exp(-clamped);
+    const ep = contract.fmath.exp(clamped);
+    const em = contract.fmath.exp(-clamped);
     return 0.5 * (ep + em);
 }
 
@@ -667,7 +667,7 @@ inline fn tanh_approx(x: f64) f64 {
     // Compute tanh(x) = (exp(2x)-1)/(exp(2x)+1) branchlessly
     // Clamp to avoid overflow; for |x|>40, tanh ~ +/-1
     const clamped = @max(@min(x, 40.0), -40.0);
-    const e2x = @exp(2.0 * clamped);
+    const e2x = contract.fmath.exp(2.0 * clamped);
     return (e2x - 1.0) / (e2x + 1.0);
 }
 
@@ -763,7 +763,7 @@ const DcPrep = struct {
     // --- Subthreshold ---
     m_val: f64,
     // --- Mobility helpers ---
-    sqrt_2qneps: f64,
+    cdep0: f64,
     f_leff: f64,
     // --- Early voltage helpers ---
     litl: f64,
@@ -900,11 +900,11 @@ fn dcPrep(model: *const Model, instance: *const Instance) DcPrep {
     // Built-in / depletion
     const vbi = vt_nom * safe_log(ndep_m3 * nsd_m3 / (ni_m3 * ni_m3));
     const xdep0 = @sqrt(2.0 * EPS_SI * phi_s / (Q_ELECTRON * ndep_m3));
-    const lt_factor_dc = @sqrt(EPS_SI * toxe / epsrox);
+    const lt_factor_dc = @sqrt(11.7 / epsrox * toxe);
     const lt0 = lt_factor_dc * @sqrt(xdep0);
 
     // Mobility temperature (tempMod=0)
-    const mu0_t = mu0_param * @exp(ute * safe_log(t_ratio));
+    const mu0_t = mu0_param * contract.fmath.exp(ute * safe_log(t_ratio));
     const ua_t = ua_param + ua1 * t_ratio_m1;
     const ub_t = ub_param + ub1 * t_ratio_m1;
     const uc_t = uc_param + uc1 * t_ratio_m1;
@@ -938,29 +938,29 @@ fn dcPrep(model: *const Model, instance: *const Instance) DcPrep {
     const m_val = 0.5 + atan_minv / 3.14159265;
 
     // Mobility helpers
-    const sqrt_2qneps = @sqrt(2.0 * Q_ELECTRON * ndep_m3 * EPS_SI);
+    const cdep0 = @sqrt(Q_ELECTRON * EPS_SI * ndep_m3 / (2.0 * phi_s));
     const f_leff = 1.0 - up_param * safe_exp(-leff / @max(lp_param, 1e-20));
 
     // Early voltage helpers
-    const litl = @sqrt(@max(EPS_SI * toxe * xj / epsrox, 1e-30));
+    const litl = @sqrt(@max(3.0 * 3.9 / epsrox * xj * toxe, 1e-30));
     const rout_val = pdiblc1 / @max(2.0 * cosh_approx(drout * leff / @max(lt0, 1e-20)) - 2.0, 1e-10) + pdiblc2;
 
     // Gate tunneling
-    const tox_rat = @exp(ntox * safe_log(toxref / toxe)) / (toxe * toxe);
-    const tox_rat_edge = @exp(ntox * safe_log(toxref / @max(toxe * poxedge, 1e-20))) / @max((toxe * poxedge) * (toxe * poxedge), 1e-30);
+    const tox_rat = contract.fmath.exp(ntox * safe_log(toxref / toxe)) / (toxe * toxe);
+    const tox_rat_edge = contract.fmath.exp(ntox * safe_log(toxref / @max(toxe * poxedge, 1e-20))) / @max((toxe * poxedge) * (toxe * poxedge), 1e-30);
     const vfbsd_val = if (ngate_cm3 > 0.0) vt_nom * safe_log(ngate_cm3 * 1e6 / nsd_m3) + vfbsdoff_t else 0.0;
 
     // Junction diode temperature
     const arrhenius_s = eg_tnom * (1.0 - 1.0 / t_ratio) / vt_nom;
-    const jss_t = jss * @exp(xtis_param * safe_log(t_ratio) + arrhenius_s);
-    const jsd_t = jsd * @exp(xtid_param * safe_log(t_ratio) + arrhenius_s);
-    const jsws_t = jsws * @exp(xtis_param * safe_log(t_ratio) + arrhenius_s);
-    const jswd_t = jswd * @exp(xtid_param * safe_log(t_ratio) + arrhenius_s);
-    const jswgs_t = jswgs * @exp(xtis_param * safe_log(t_ratio) + arrhenius_s);
-    const jswgd_t = jswgd * @exp(xtid_param * safe_log(t_ratio) + arrhenius_s);
+    const jss_t = jss * contract.fmath.exp(xtis_param * safe_log(t_ratio) + arrhenius_s);
+    const jsd_t = jsd * contract.fmath.exp(xtid_param * safe_log(t_ratio) + arrhenius_s);
+    const jsws_t = jsws * contract.fmath.exp(xtis_param * safe_log(t_ratio) + arrhenius_s);
+    const jswd_t = jswd * contract.fmath.exp(xtid_param * safe_log(t_ratio) + arrhenius_s);
+    const jswgs_t = jswgs * contract.fmath.exp(xtis_param * safe_log(t_ratio) + arrhenius_s);
+    const jswgd_t = jswgd * contract.fmath.exp(xtid_param * safe_log(t_ratio) + arrhenius_s);
 
     // Weffcj helper
-    const weffcj_wr = @exp(wr * safe_log(@max(weffcj * 1.0e6, 1e-10)));
+    const weffcj_wr = contract.fmath.exp(wr * safe_log(@max(weffcj * 1.0e6, 1e-10)));
 
     // Parasitic resistances
     const g_rd = if (rsh > 0.0 and nrd > 0.0) 1.0 / (nrd * rsh) else GSHORT;
@@ -989,7 +989,7 @@ fn dcPrep(model: *const Model, instance: *const Instance) DcPrep {
         .k1ox = k1ox, .k2ox = k2ox,
         .lpe0_factor = lpe0_factor, .lpeb_factor = lpeb_factor,
         .theta_dibl = theta_dibl, .m_val = m_val,
-        .sqrt_2qneps = sqrt_2qneps, .f_leff = f_leff,
+        .cdep0 = cdep0, .f_leff = f_leff,
         .litl = litl, .rout = rout_val,
         .tox_rat = tox_rat, .tox_rat_edge = tox_rat_edge, .vfbsd_val = vfbsd_val,
         .jss_t = jss_t, .jsd_t = jsd_t, .jsws_t = jsws_t, .jswd_t = jswd_t,
@@ -1075,14 +1075,14 @@ fn qPrep(model: *const Model, instance: *const Instance) QPrep {
     const sqrt_phi_s = @sqrt(phi_s);
 
     const xdep = @sqrt(@max(2.0 * EPS_SI * phi_s / (Q_ELECTRON * ndep_m3), 1e-30));
-    const lt_factor_q = @sqrt(EPS_SI * toxe / epsrox);
+    const lt_factor_q = @sqrt(11.7 / epsrox * toxe);
     const lt = lt_factor_q * @sqrt(xdep);
     const cdep = EPS_SI / xdep;
 
     const vfbzb = vth0_param - phi_s - k1_param * sqrt_phi_s;
     const ldebye = @sqrt(EPS_SI * vt / (Q_ELECTRON * ndep_m3));
     const voffcv_prime = voffcv + voffcvl / leff;
-    const clc_lact = @exp(cle * safe_log(@max(clc / lactive, 1e-20)));
+    const clc_lact = contract.fmath.exp(cle * safe_log(@max(clc / lactive, 1e-20)));
     const k1ox = k1_param * toxe / @as(f64, model.toxm);
 
     return .{
@@ -1166,7 +1166,7 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     const lpeb_factor = p.lpeb_factor;
     const theta_dibl = p.theta_dibl;
     const m_val = p.m_val;
-    const sqrt_2qneps = p.sqrt_2qneps;
+    const cdep0 = p.cdep0;
     const f_leff = p.f_leff;
     const litl = p.litl;
     const rout = p.rout;
@@ -1363,7 +1363,7 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     const dv_dibl = vbseff.scale(etab).addC(eta0_t).mul(vds).scale(-theta_dibl);
 
     // Narrow width (Eqs 2.37--2.39)
-    const dv_nw1 = vbseff.scale(k3b).addC(k3).scale(toxe / (weff_prime + w0) * sqrt_phi_s);
+    const dv_nw1 = vbseff.scale(k3b).addC(k3).scale(toxe / (weff_prime + w0) * phi_s);
     const cosh_nw = sCosh(S, ltw.maxC(1e-20).pow(-1.0).scale(dvt1w * @sqrt(leff * weff_prime)));
     const dv_nw2 = cosh_nw.addC(-1.0).maxC(1e-10).pow(-1.0).mul(S.con(-(vbi - phi_s))).scale(0.5 * dvt0w);
 
@@ -1375,13 +1375,13 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     } else S.con(0.0);
 
     const dv_dits_tanh = if (dvtp2 != 0.0 or dvtp5 != 0.0)
-        sTanh(S, vds.scale(dvtp4)).scale(-(dvtp5 + dvtp2 * @exp(-dvtp3 * safe_log(@max(leff, 1e-20)))))
+        sTanh(S, vds.scale(dvtp4)).scale(-(dvtp5 + dvtp2 * contract.fmath.exp(-dvtp3 * safe_log(@max(leff, 1e-20)))))
     else
         S.con(0.0);
 
     // Complete Vth (Eq 2.40 + delvto + temperature) -- S
     const vth = vth_temp_adj
-        .add(vbseff.neg().addC(phi_s).maxC(1e-30).sqrt().addC(-k1_param * sqrt_phi_s).scale(k1ox * lpeb_factor))
+        .add(vbseff.neg().addC(phi_s).maxC(1e-30).sqrt().scale(k1ox).addC(-k1_param * sqrt_phi_s).scale(lpeb_factor))
         .add(vbseff.scale(-k2ox))
         .add(dv_nw1)
         .add(dv_nw2)
@@ -1412,7 +1412,7 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
 
     // Denominator
     const denom_exp_arg = vgse.sub(vth).scale(1.0 - m_val).addC(-voff_prime).neg().div(nvt).minC(80.0);
-    const denom = n.scale(coxe / sqrt_2qneps).mul(sExp(S, denom_exp_arg)).addC(m_val);
+    const denom = n.scale(coxe / cdep0).mul(sExp(S, denom_exp_arg)).addC(m_val);
 
     const vgsteff = ln1pe.div(denom).maxC(1.0e-10);
 
@@ -1430,7 +1430,7 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     // ========================================================================
     const sqrt_xj_xdep = xdep.scale(xj).maxC(1e-30).sqrt();
     const f_doping = vbseff.neg().addC(phi_s).maxC(1e-30).sqrt().scale(2.0).pow(-1.0).scale(lpeb_factor * k1ox)
-        .addC(k2ox - k3b * toxe / (weff_prime + w0) * sqrt_phi_s);
+        .addC(k2ox - k3b * toxe / (weff_prime + w0) * phi_s);
     const denom_abt1 = sqrt_xj_xdep.scale(2.0).addC(leff);
     const abulk_term1 = denom_abt1.pow(-1.0).scale(a0 * leff).mul(vgsteff.scale(ags * leff).div(denom_abt1).neg().addC(1.0));
     const abulk_term2 = b0_param / (weff_prime + b1_param);
@@ -1448,9 +1448,11 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     const eeff_arg = vgsteff.add(vth.scale(2.0)).scale(1.0 / toxe);
     _ = eu_param;
 
-    // ud_term = ud_t*(vth*toxe)^2 / (vgsteff^2 + 2*vth^2 + 1e-4)
-    const ud_term_sq = vgsteff.mul(vgsteff).add(vth.mul(vth).scale(2.0)).addC(0.0001);
-    const ud_term = vth.scale(toxe).mul(vth.scale(toxe)).scale(ud_t).div(ud_term_sq);
+    // ud_term = ud_t*(vth*toxe)^2 / (vgsteff + 2*sqrt(vth^2+0.0001))^2
+    const t12 = vth.mul(vth).addC(0.0001).sqrt();
+    const t9_denom = vgsteff.add(t12.scale(2.0)).maxC(1e-20);
+    const t10 = S.con(toxe).div(t9_denom);
+    const ud_term = t10.mul(t10).mul(vth).mul(vth).scale(ud_t);
 
     const mob_denom = eeff_arg.mul(vbseff.scale(uc_t).addC(ua_t)).add(eeff_arg.mul(eeff_arg).scale(ub_t)).add(ud_term).addC(1.0);
     const mu_eff = mob_denom.maxC(0.001).pow(-1.0).scale(mu0_t * f_leff);
@@ -1916,7 +1918,7 @@ pub fn qFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *cons
     // ========================================================================
     const ndep_cm3 = pq.ndep_cm3;
     const ldebye = pq.ldebye;
-    const xdc_acc_arg = vgse.sub(vbs).addC(-phi_s).scale(-acde * @exp(-0.25 * safe_log(@max(ndep_cm3 / 2.0e16, 1e-10))) / toxp);
+    const xdc_acc_arg = vgse.sub(vbs).addC(-phi_s).scale(-acde * contract.fmath.exp(-0.25 * safe_log(@max(ndep_cm3 / 2.0e16, 1e-10))) / toxp);
     const xdc_acc = sExp(S, xdc_acc_arg).scale(ldebye / 3.0);
     const xdc_max = ldebye / 3.0;
     const delta_x = 1.0e-3 * toxe;
@@ -2078,7 +2080,7 @@ pub fn limit(model: *const Model, _: *const Instance, x_new: [n_u]f64, x_old: [n
 
     // Junction limiting (DEVpnjlim) for Vbs and Vbd
     const vt: f64 = K_BOLTZ * 300.15 / Q_ELECTRON;
-    const vcrit = vt * @log(vt / (1.41421356 * @as(f64, model.jss) * 1e-8));
+    const vcrit = vt * contract.fmath.log(vt / (1.41421356 * @as(f64, model.jss) * 1e-8));
 
     // Limit bp-sp (source junction)
     {
@@ -2171,7 +2173,7 @@ fn pnjlim(vnew: f64, vold: f64, vt_val: f64, vcrit: f64) f64 {
     // Forward bias
     const result_fwd = if (vnew > vcrit and abs_delta > 2.0 * vt_val)
         if (vold > 0.0)
-            vt_val * @log(vnew / vold) + vold
+            vt_val * contract.fmath.log(vnew / vold) + vold
         else
             vcrit
     else

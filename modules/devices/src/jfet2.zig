@@ -238,7 +238,7 @@ fn dcParams(model: *const Model, instance: *const Instance) DcParams {
     const woo = phi_b - vto;
     const xi_woo = xi * woo;
     const za = @sqrt(1.0 + z_param) / 2.0;
-    const d3 = p_exp / (q_exp * @exp((p_exp - q_exp) * @log(@max(woo, 1e-30))));
+    const d3 = p_exp / (q_exp * contract.fmath.exp((p_exp - q_exp) * contract.fmath.log(@max(woo, 1e-30))));
 
     return .{
         .a_eff = a_eff,
@@ -633,7 +633,7 @@ pub fn limit(model: *const Model, instance: *const Instance, x_new: [n_u]f64, x_
     const nvt = n_em * vt;
 
     // Critical voltage for PN junction limiting
-    const v_crit = nvt * @log(nvt / (@sqrt(2.0) * is_val));
+    const v_crit = nvt * contract.fmath.log(nvt / (@sqrt(2.0) * is_val));
 
     var result = x_new;
 
@@ -682,13 +682,13 @@ fn pnjlim(v_new: f64, v_old: f64, nvt: f64, v_crit: f64) f64 {
         if (v_old > 0.0) {
             const arg = (v_new - v_old) / nvt;
             if (arg > 2.0) {
-                return v_old + nvt * (2.0 + @log(arg - 2.0));
+                return v_old + nvt * (2.0 + contract.fmath.log(arg - 2.0));
             } else {
                 return v_old + 2.0 * nvt;
             }
         } else {
             if (v_new > 0.0) {
-                return nvt * @log(v_new / nvt);
+                return nvt * contract.fmath.log(v_new / nvt);
             } else {
                 return v_crit;
             }
