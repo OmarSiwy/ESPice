@@ -5,7 +5,7 @@ const std = @import("std");
 const root = @import("../root.zig");
 const converger = @import("../helper/converger.zig");
 
-pub const Method = enum { plain, gmin, source };
+pub const Method = enum { plain, gmin, source, jfnk };
 
 pub const Options = struct {
     tol: converger.Tolerances = .{},
@@ -153,15 +153,35 @@ pub fn solveLadder(
 
     // Final solve at true parameters
     const final = newtonRun(ckt, ws, x, options.tol, options.tol.gmin) catch |e| switch (e) {
-        error.SingularMatrix => return .{ .converged = false, .iterations = total_iter, .max_dx = 0, .method_used = .source },
+        error.SingularMatrix => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 },
         else => return e,
     };
     total_iter +|= final.iterations;
+    if (final.converged)
+        return .{
+            .converged = true,
+            .iterations = total_iter,
+            .max_dx = final.max_dx,
+            .method_used = .source,
+        };
+
+    // Strategy 4: JFNK guarantee rung — the same algorithm the GPU kernel
+    // runs, so CPU convergence is a superset of GPU convergence by
+    // construction. Damping + residual backtracking globalize differently
+    // than direct Newton and catch circuits where the factored step wedges.
+    coldStart(ckt, x);
+    var copts = options.tol.newtonOpts(null);
+    copts.gmin = options.tol.gmin;
+    // converger.run clears device limiting state on exit; a direct jfnk
+    // call must do the same so post-solve evals see clean state.
+    defer ckt.clearLimits();
+    const jr = try converger.jfnk(ckt, ws, x, 0, copts, converger.EvalHook{});
+    total_iter +|= jr.iterations;
     return .{
-        .converged = final.converged,
+        .converged = jr.converged,
         .iterations = total_iter,
-        .max_dx = final.max_dx,
-        .method_used = .source,
+        .max_dx = jr.max_dx,
+        .method_used = if (jr.converged) .jfnk else .source,
     };
 }
 
