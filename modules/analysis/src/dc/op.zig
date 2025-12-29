@@ -60,47 +60,92 @@ pub fn solveLadder(
             return .{ .converged = true, .iterations = p.iterations, .max_dx = p.max_dx, .method_used = .plain };
     }
 
-    // Strategy 2: gmin stepping, warm-started at each halving
-    coldStart(ckt, x);
+    // Last-converged solution for continuation restarts (both rungs).
+    const gpa = ws.slv.gpa;
+    const x_good = try gpa.alloc(f64, ckt.n);
+    defer gpa.free(x_good);
     var total_iter: u16 = 0;
-    var gmin_val = options.tol.gmin_start;
-    // SingularMatrix on the first rung must not skip source stepping —
-    // treat it as a failed rung and fall through.
-    var result = newtonRun(ckt, ws, x, options.tol, gmin_val) catch |e| switch (e) {
-        error.SingularMatrix => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 },
-        else => return e,
-    };
-    total_iter +|= result.iterations;
-    while (result.converged and gmin_val > options.tol.gmin) {
-        gmin_val = @max(gmin_val * 0.5, options.tol.gmin);
-        result = newtonRun(ckt, ws, x, options.tol, gmin_val) catch |e| switch (e) {
-            error.SingularMatrix => break,
-            else => return e,
-        };
-        total_iter +|= result.iterations;
-    }
-    if (result.converged)
-        return .{ .converged = true, .iterations = total_iter, .max_dx = result.max_dx, .method_used = .gmin };
 
-    // Strategy 3: source stepping via device attempt(lambda)
+    // Strategy 2: dynamic gmin stepping (ngspice op.c dynamic_gmin).
+    // Descend gmin by `factor`; on a failed rung back gmin up toward the
+    // last good value with a gentler factor (4th root) and retry from the
+    // last converged x; give up when factor ≈ 1. A failed rung is a plain
+    // failure, not an abort — SingularMatrix (NaN stamps) included.
+    {
+        coldStart(ckt, x);
+        const gtarget = options.tol.gmin;
+        var factor: f64 = 10.0;
+        var good_gmin = options.tol.gmin_start; // upper bound to back up toward
+        var gmin_val = good_gmin / factor;
+        var have_good = false;
+        var solves: u32 = 0;
+        while (solves < 100) : (solves += 1) {
+            const r = newtonRun(ckt, ws, x, options.tol, gmin_val) catch |e| switch (e) {
+                error.SingularMatrix => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 },
+                else => return e,
+            };
+            total_iter +|= r.iterations;
+            if (r.converged) {
+                if (gmin_val <= gtarget)
+                    return .{ .converged = true, .iterations = total_iter, .max_dx = r.max_dx, .method_used = .gmin };
+                @memcpy(x_good, x);
+                have_good = true;
+                good_gmin = gmin_val;
+                // Easy rung → accelerate the descent (capped at the start factor).
+                if (r.iterations <= options.tol.itl1 / 4)
+                    factor = @min(factor * @sqrt(factor), 10.0);
+                gmin_val = if (gmin_val < factor * gtarget) gtarget else gmin_val / factor;
+            } else {
+                if (factor < 1.00005) break; // wedged against the last good rung
+                factor = @sqrt(@sqrt(factor));
+                gmin_val = good_gmin / factor;
+                if (have_good) @memcpy(x, x_good) else coldStart(ckt, x);
+            }
+        }
+    }
+
+    // Strategy 3: source stepping via device attempt(lambda), adaptive
+    // delta: grow 1.5× on success, halve on failure and retry from the
+    // last good lambda/x (ngspice src stepping flavor).
     coldStart(ckt, x);
     total_iter = 0;
-    const steps = [_]f64{ 0.0, 0.25, 0.5, 0.75, 0.9, 0.95, 1.0 };
-    for (steps) |lambda| {
-        ckt.applyAttempt(lambda);
-        ckt.has_baseline = false;
-        try ckt.computeBaseline();
-        const sr = newtonRun(ckt, ws, x, options.tol, options.tol.gmin) catch |e| switch (e) {
-            error.SingularMatrix => break,
-            else => {
-                ckt.restoreModels();
-                ckt.has_baseline = false;
-                try ckt.computeBaseline();
-                return e;
-            },
-        };
-        total_iter +|= sr.iterations;
-        if (!sr.converged) break;
+    {
+        var lambda: f64 = 0.0;
+        var lambda_good: f64 = -1.0; // none converged yet
+        var delta: f64 = 0.25;
+        var solves: u32 = 0;
+        while (solves < 100) : (solves += 1) {
+            ckt.applyAttempt(lambda);
+            ckt.has_baseline = false;
+            try ckt.computeBaseline();
+            const sr = newtonRun(ckt, ws, x, options.tol, options.tol.gmin) catch |e| switch (e) {
+                error.SingularMatrix => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 },
+                else => {
+                    ckt.restoreModels();
+                    ckt.has_baseline = false;
+                    try ckt.computeBaseline();
+                    return e;
+                },
+            };
+            total_iter +|= sr.iterations;
+            if (sr.converged) {
+                if (lambda >= 1.0) break; // full sources reached
+                lambda_good = lambda;
+                @memcpy(x_good, x);
+                delta *= 1.5;
+                lambda = @min(lambda + delta, 1.0);
+            } else {
+                delta *= 0.5;
+                if (delta < 1e-4) break;
+                if (lambda_good >= 0.0) {
+                    @memcpy(x, x_good);
+                    lambda = @min(lambda_good + delta, 1.0);
+                } else {
+                    coldStart(ckt, x);
+                    lambda = 0.0;
+                }
+            }
+        }
     }
     ckt.restoreModels();
     ckt.has_baseline = false;
