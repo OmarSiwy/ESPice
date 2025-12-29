@@ -64,8 +64,10 @@ pub fn solveLadder(
     coldStart(ckt, x);
     var total_iter: u16 = 0;
     var gmin_val = options.tol.gmin_start;
+    // SingularMatrix on the first rung must not skip source stepping —
+    // treat it as a failed rung and fall through.
     var result = newtonRun(ckt, ws, x, options.tol, gmin_val) catch |e| switch (e) {
-        error.SingularMatrix => return .{ .converged = false, .iterations = 0, .max_dx = 0, .method_used = .gmin },
+        error.SingularMatrix => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 },
         else => return e,
     };
     total_iter +|= result.iterations;

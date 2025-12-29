@@ -83,8 +83,15 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         ckt.recompute();
         var converged = false;
         if (!cold) {
-            const r = try converger.run(ckt, ws, x, 0, opts.tol.newtonOpts(opts.tol.itl2), converger.EvalHook{});
-            converged = r.converged;
+            // SingularMatrix on a warm-started point (e.g. NaN stamps from a
+            // bad extrapolated guess) must not abort the sweep — fall into
+            // the ladder below like any non-converged point.
+            if (converger.run(ckt, ws, x, 0, opts.tol.newtonOpts(opts.tol.itl2), converger.EvalHook{})) |r| {
+                converged = r.converged;
+            } else |e| switch (e) {
+                error.SingularMatrix => {},
+                else => return e,
+            }
         }
         if (!converged) {
             op.coldStart(ckt, x);
