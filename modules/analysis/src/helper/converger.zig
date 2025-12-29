@@ -467,11 +467,14 @@ pub fn run(
             } else |_| {}
         }
     }
-    const use_gpu = ckt.gpu_active;
-    if (use_gpu or ckt.n > 5000)
-        return jfnk(ckt, ws, x, t, opts, hook)
-    else
-        return newton(ckt, ws, x, t, opts, hook);
+    if (ckt.gpu_active or ckt.n > 5000) {
+        const r = try jfnk(ckt, ws, x, t, opts, hook);
+        // GPU-mode fallback: after kernel + JFNK both fail, direct Newton is
+        // still the strongest strategy for factorable systems — don't leave
+        // it unreachable just because --gpu was requested.
+        if (r.converged or ckt.n > 5000) return r;
+    }
+    return newton(ckt, ws, x, t, opts, hook);
 }
 
 
