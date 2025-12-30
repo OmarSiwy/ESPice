@@ -40,7 +40,11 @@ pub const GpuProblem = struct {
         var p: usize = self.off_dirty;
         for (ckt.batches, 0..) |b, i| {
             const sz = b.hooks.gpu_pack_size.?(b.ctx);
+            // off_lim points into the device-only region — assigned by the
+            // packer, not by gpu_pack; preserve it across the payload refresh.
+            const off_lim = table[i].off_lim;
             table[i] = b.hooks.gpu_pack.?(b.ctx, self.stage[p..][0..sz], @intCast(p), ckt.n);
+            table[i].off_lim = off_lim;
             p += sz;
         }
     }
@@ -124,10 +128,19 @@ pub fn packGpuProblem(gpa: std.mem.Allocator, ckt: *const Circuit, tol: gpu_abi.
 
     const table: [*]gpu_abi.BatchDesc = @ptrCast(@alignCast(stage.ptr + off_table));
     var p: usize = off_dirty;
+    var lim_cursor: usize = total;
     for (ckt.batches, 0..) |b, i| {
         table[i] = b.hooks.gpu_pack.?(b.ctx, stage[p..][0..payload_sizes[i]], @intCast(p), ckt.n);
         p += payload_sizes[i];
+        // Device-private limited eval points (pnjlim state): count*n_u f64
+        // per limited batch, appended after the workspace. Device-only —
+        // zeroed at init, initialized on-device from the first limit pass.
+        if (b.hooks.apply_limits != null) {
+            table[i].off_lim = @intCast(lim_cursor);
+            lim_cursor += @as(usize, table[i].count) * table[i].n_u * 8;
+        }
     }
+    hdr.total_bytes = @intCast(lim_cursor);
     for (0..n) |i| stage[off_current_row + i] = @intFromBool(ckt.current_row[i]);
     if (tp.probes.len > 0)
         @memcpy(stage[off_probes..][0 .. tp.probes.len * 4], std.mem.sliceAsBytes(tp.probes));

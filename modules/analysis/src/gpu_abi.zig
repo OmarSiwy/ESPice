@@ -31,6 +31,9 @@ pub const BatchDesc = extern struct {
     off_instances: u32,
     off_prep_cache: u32, // 0 = none
     off_prep_group: u32,
+    /// count*n_u f64 device-private limited eval points (pnjlim/fetlim
+    /// state, device-only region). 0 = device type has no limit fn.
+    off_lim: u32 = 0,
 };
 
 pub const Header = extern struct {
@@ -91,17 +94,19 @@ pub const max_blocks = 1024;
 
 /// Device workspace layout (f64 slots from off_ws), n = unknowns, m = gmres_m:
 ///   v_basis (m+1)*n | h (m+1)*m | cs m | sn m | g m+1 | y m
-///   r n | w n | x_pert n | f0 n | diag n | x_old n | rhs n+1
+///   r n | w n | x_pert n | f0 n | f0_shift n | diag n | x_old n | rhs n+1
 ///   -- transient state (persists across chunk launches; solve ignores) --
 ///   x_try n | i_prev n | cvec n | q_hist 4*(n+1) | tstate 16
 ///   -- control tail (must stay last; host zeroes ws once at init) --
-///   scalars 8 (reduction results + control flags, thread-0 owned)
+///   scalars 16 (reduction results + control flags, thread-0 owned)
 ///   partials max_blocks (per-block reduction slots)
 ///   barrier 1 (count/generation u32 pair)
+/// Per-batch lim_x sections (BatchDesc.off_lim) follow the workspace; they
+/// are sized by the packer (count*n_u per limited batch), not here.
 pub fn wsF64Count(n: usize, m: usize) usize {
-    return (m + 1) * n + (m + 1) * m + m + m + (m + 1) + m + 6 * n + (n + 1) +
+    return (m + 1) * n + (m + 1) * m + m + m + (m + 1) + m + 7 * n + (n + 1) +
         3 * n + 4 * (n + 1) + 16 +
-        8 + max_blocks + 1;
+        16 + max_blocks + 1;
 }
 
 pub fn fnv1a32(comptime s: []const u8) u32 {
