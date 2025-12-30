@@ -58,6 +58,7 @@ const G = struct {
     w: [*]addrspace(.global) f64,
     x_pert: [*]addrspace(.global) f64,
     f0: [*]addrspace(.global) f64,
+    f0_shift: [*]addrspace(.global) f64, // FD baseline (uncorrected when limiting)
     diag: [*]addrspace(.global) f64, // Jacobian diag -> inverted in place
     x_old: [*]addrspace(.global) f64,
     rhs: [*]addrspace(.global) f64, // n+1 (trash row)
@@ -163,6 +164,14 @@ fn isDevice(comptime D: type) bool {
 /// warps convergent inside a device type. When env.active, the companion
 /// charge terms are stamped too: rhs += alpha*q(x), diag += alpha*dQ/dx,
 /// raw q(x) accumulated into env.snap (charge history snapshot).
+///
+/// Device limiting (`limiting` + desc.off_lim): mirrors batch.zig evalInner.
+///   with_diag (outer): eval at the private limited point lx, stamp the
+///     linearization extended to the node point — i(lx) + J(lx)·(x − lx)
+///     (SPICE companion correction, dioload.c `cdeq = cd − gd·vd`).
+///   residual-only (J·v FD): eval at lx + (local(x) − local(x_base)) so the
+///     finite difference against the same-shifted baseline yields J(lx)·v,
+///     consistent with the outer linearization.
 fn evalBatch(
     comptime D: type,
     comptime with_diag: bool,
@@ -172,25 +181,45 @@ fn evalBatch(
     x: [*]addrspace(.global) const f64,
     t: f64,
     env: TranEnv,
+    limiting: bool,
+    x_base: [*]addrspace(.global) const f64,
 ) void {
     @setEvalBranchQuota(1_000_000);
     const n_u = comptime contract.nU(D);
+    const has_limit = comptime @hasDecl(D, "limit");
     const S = if (with_diag) contract.Dual(n_u) else Value;
     const gath: [*]addrspace(.global) const u32 = @ptrCast(@alignCast(blob + desc.off_gath));
     const rhs_idx: [*]addrspace(.global) const u32 = @ptrCast(@alignCast(blob + desc.off_rhs_idx));
     const models: [*]addrspace(.global) const D.Model = @ptrCast(@alignCast(blob + desc.off_models));
     const instances: [*]addrspace(.global) const D.Instance = @ptrCast(@alignCast(blob + desc.off_instances));
+    const lim: [*]addrspace(.global) const f64 = if (comptime has_limit)
+        @ptrCast(@alignCast(blob + desc.off_lim))
+    else
+        undefined;
+    const use_lim = if (comptime has_limit) limiting and desc.off_lim != 0 else false;
 
     var id: u32 = g.tid;
     while (id < desc.count) : (id += g.stride) {
         var xv: [n_u]S = undefined;
+        // Companion-correction term local(x) − lx (zero when not limiting).
+        var corr: @Vector(n_u, f64) = @splat(0);
         inline for (0..n_u) |u| {
+            const xg = x[gath[id * n_u + u]];
             if (comptime with_diag) {
                 var d: @Vector(n_u, f64) = @splat(0);
                 d[u] = 1;
-                xv[u] = .{ .v = x[gath[id * n_u + u]], .d = d };
+                var v = xg;
+                if (use_lim) {
+                    const lx = lim[id * n_u + u];
+                    v = lx;
+                    corr[u] = xg - lx;
+                }
+                xv[u] = .{ .v = v, .d = d };
             } else {
-                xv[u] = Value.con(x[gath[id * n_u + u]]);
+                var v = xg;
+                if (use_lim)
+                    v = lim[id * n_u + u] + (xg - x_base[gath[id * n_u + u]]);
+                xv[u] = Value.con(v);
             }
         }
         const has_prep = comptime @hasDecl(D, "evalFromPrep");
@@ -202,7 +231,11 @@ fn evalBatch(
 
         inline for (0..n_u) |ru| {
             const row = rhs_idx[id * n_u + ru];
-            _ = @atomicRmw(f64, &g.rhs[row], .Add, out[ru].v, .monotonic);
+            var val = out[ru].v;
+            if (comptime with_diag and has_limit) {
+                if (use_lim) val += @reduce(.Add, out[ru].d * corr);
+            }
+            _ = @atomicRmw(f64, &g.rhs[row], .Add, val, .monotonic);
             if (comptime with_diag) {
                 // Diagonal Jacobian contribution: residual row == unknown col.
                 inline for (0..n_u) |cu| {
@@ -222,9 +255,13 @@ fn evalBatch(
 
                 inline for (0..n_u) |ru| {
                     const row = rhs_idx[id * n_u + ru];
-                    _ = @atomicRmw(f64, &g.rhs[row], .Add, env.alpha * qo[ru].v, .monotonic);
+                    var qv = qo[ru].v;
+                    if (comptime with_diag and has_limit) {
+                        if (use_lim) qv += @reduce(.Add, qo[ru].d * corr);
+                    }
+                    _ = @atomicRmw(f64, &g.rhs[row], .Add, env.alpha * qv, .monotonic);
                     if (env.snap) |sp|
-                        _ = @atomicRmw(f64, &sp[row], .Add, qo[ru].v, .monotonic);
+                        _ = @atomicRmw(f64, &sp[row], .Add, qv, .monotonic);
                     if (comptime with_diag) {
                         inline for (0..n_u) |cu| {
                             if (row == gath[id * n_u + cu] and row < g.n)
@@ -242,7 +279,7 @@ fn evalBatch(
 /// the caller. With env.active the residual is the transient companion
 /// F(x) = I(x) + alpha*q(x) + cvec (cvec carries the -alpha*q_prev / -i_prev
 /// / gear history terms — constant within a timestep).
-fn assemble(comptime with_diag: bool, g: *const G, hdr: *addrspace(.global) const abi.Header, blob: [*]addrspace(.global) u8, x: [*]addrspace(.global) const f64, t: f64, env: TranEnv) void {
+fn assemble(comptime with_diag: bool, g: *const G, hdr: *addrspace(.global) const abi.Header, blob: [*]addrspace(.global) u8, x: [*]addrspace(.global) const f64, t: f64, env: TranEnv, limiting: bool, x_base: [*]addrspace(.global) const f64) void {
     var i: u32 = g.tid;
     while (i < g.n + 1) : (i += g.stride) {
         g.rhs[i] = 0;
@@ -263,7 +300,7 @@ fn assemble(comptime with_diag: bool, g: *const G, hdr: *addrspace(.global) cons
                     const D = @field(M, decl.name);
                     if (comptime isDevice(D)) {
                         if (desc.kind_id == comptime abi.kindId(D))
-                            @call(.never_inline, evalBatch, .{ D, with_diag, g, desc, blob, x, t, env });
+                            @call(.never_inline, evalBatch, .{ D, with_diag, g, desc, blob, x, t, env, limiting, x_base });
                     }
                 }
             }
@@ -281,6 +318,73 @@ fn assemble(comptime with_diag: bool, g: *const G, hdr: *addrspace(.global) cons
         if (comptime with_diag) g.diag[0] += 1.0;
     }
     g.sync();
+}
+
+/// Device limiting pass for one batch — the GPU port of batch.zig
+/// applyLimits: cur = local(x); old = lim_x (once engaged) else local(x_old);
+/// lim_x = D.limit(cur, old). Returns 1.0 if any component was limited
+/// (thread-local partial; caller reduces grid-wide).
+fn limitBatch(
+    comptime D: type,
+    g: *const G,
+    desc: *addrspace(.global) const abi.BatchDesc,
+    blob: [*]addrspace(.global) u8,
+    x: [*]addrspace(.global) const f64,
+    x_old: [*]addrspace(.global) const f64,
+    lim_active: bool,
+) f64 {
+    const n_u = comptime contract.nU(D);
+    const gath: [*]addrspace(.global) const u32 = @ptrCast(@alignCast(blob + desc.off_gath));
+    const models: [*]addrspace(.global) const D.Model = @ptrCast(@alignCast(blob + desc.off_models));
+    const instances: [*]addrspace(.global) const D.Instance = @ptrCast(@alignCast(blob + desc.off_instances));
+    const lim: [*]addrspace(.global) f64 = @ptrCast(@alignCast(blob + desc.off_lim));
+
+    var flag: f64 = 0;
+    var id: u32 = g.tid;
+    while (id < desc.count) : (id += g.stride) {
+        var cur: [n_u]f64 = undefined;
+        var old: [n_u]f64 = undefined;
+        inline for (0..n_u) |u| {
+            cur[u] = x[gath[id * n_u + u]];
+            old[u] = if (lim_active) lim[id * n_u + u] else x_old[gath[id * n_u + u]];
+        }
+        const lm = D.limit(@addrSpaceCast(&models[id]), @addrSpaceCast(&instances[id]), cur, old);
+        inline for (0..n_u) |u| {
+            if (lm[u] != cur[u]) flag = 1;
+            lim[id * n_u + u] = lm[u];
+        }
+    }
+    return flag;
+}
+
+/// Run the limiting pass over every limited batch. Same comptime dispatch
+/// as assemble(). Caller syncs + reduces the returned partial.
+fn limitPass(
+    g: *const G,
+    hdr: *addrspace(.global) const abi.Header,
+    blob: [*]addrspace(.global) u8,
+    x: [*]addrspace(.global) const f64,
+    x_old: [*]addrspace(.global) const f64,
+    lim_active: bool,
+) f64 {
+    var flag: f64 = 0;
+    const table: [*]addrspace(.global) const abi.BatchDesc = @ptrCast(@alignCast(blob + hdr.off_batch_table));
+    for (0..hdr.n_batches) |bi| {
+        const desc = &table[bi];
+        if (desc.off_lim == 0) continue;
+        inline for (.{ devices, va_devices }) |M| {
+            inline for (@typeInfo(M).@"struct".decls) |decl| {
+                if (comptime @TypeOf(@field(M, decl.name)) == type) {
+                    const D = @field(M, decl.name);
+                    if (comptime isDevice(D) and @hasDecl(D, "limit")) {
+                        if (desc.kind_id == comptime abi.kindId(D))
+                            flag = @max(flag, @call(.never_inline, limitBatch, .{ D, g, desc, blob, x, x_old, lim_active }));
+                    }
+                }
+            }
+        }
+    }
+    return flag;
 }
 
 // ---------------------------------------------------------------------------
@@ -324,6 +428,8 @@ fn setupG(hdr: *addrspace(.global) const abi.Header, blob: [*]addrspace(.global)
     o += n;
     g.f0 = ws + o;
     o += n;
+    g.f0_shift = ws + o;
+    o += n;
     g.diag = ws + o;
     o += n;
     g.x_old = ws + o;
@@ -341,7 +447,7 @@ fn setupG(hdr: *addrspace(.global) const abi.Header, blob: [*]addrspace(.global)
     g.tstate = ws + o;
     o += 16;
     g.scal = ws + o;
-    o += 8;
+    o += 16;
     g.partials = ws + o;
     o += abi.max_blocks;
     g.barrier_cg = @ptrCast(@alignCast(ws + o));
@@ -350,7 +456,7 @@ fn setupG(hdr: *addrspace(.global) const abi.Header, blob: [*]addrspace(.global)
 
 // scal slot map (thread-0 owned): 0 reduce result | 1 eps | 2 control flag
 // (0 none, 1 backtrack, 2 gmres-break, 3 done) | 3 beta/scale | 4 prev_norm
-// | 5 jj | 6 gate violations | 7 spare
+// | 5 jj | 6 gate violations | 7 backtrack count | 8 lim_active | 9..15 spare
 
 /// One whole JFNK Newton solve on x (in place). Mirrors converger.jfnk()
 /// gate-for-gate; with env.active the residual is the transient companion.
@@ -381,6 +487,13 @@ fn newtonSolve(
         g.scal[2] = 0;
         g.scal[4] = 1e308; // prev_norm = "inf"
         g.scal[7] = 0; // backtrack count
+        g.scal[8] = 0; // lim_active
+    }
+    // Any batch with device limiting? Uniform scan — same table every thread.
+    const table_lim: [*]addrspace(.global) const abi.BatchDesc = @ptrCast(@alignCast(blob + hdr.off_batch_table));
+    var has_lim = false;
+    for (0..hdr.n_batches) |bi| {
+        if (table_lim[bi].off_lim != 0) has_lim = true;
     }
     var i: u32 = g.tid;
     while (i < n) : (i += g.stride) g.x_old[i] = x[i];
@@ -388,9 +501,12 @@ fn newtonSolve(
 
     var iter: u32 = 0;
     outer: while (iter < tol.max_iter) : (iter += 1) {
+        // Device limiting engaged? (set by the limit pass of the previous
+        // iteration; stable within one iteration.)
+        const limiting = has_lim and g.scal[8] != 0;
         // F(x) + Jacobian diag, then gmin regularization (matches CPU: rhs
         // gets gmin·x; the preconditioner/gate diag gets +gmin).
-        assemble(true, g, hdr, blob, x, t, env);
+        assemble(true, g, hdr, blob, x, t, env, limiting, x);
         var norm_partial: f64 = 0;
         i = g.tid;
         while (i < n) : (i += g.stride) {
@@ -419,6 +535,13 @@ fn newtonSolve(
             i = g.tid;
             while (i < n) : (i += g.stride) x[i] = 0.5 * (x[i] + g.x_old[i]);
             g.sync();
+            // Keep lim_x tracking the retreated x — mirrors the CPU
+            // backtrack's applyLimits call.
+            if (has_lim) {
+                _ = limitPass(g, hdr, blob, x, g.x_old, limiting);
+                if (g.tid == 0) g.scal[8] = 1;
+                g.sync();
+            }
             continue :outer;
         }
 
@@ -428,6 +551,22 @@ fn newtonSolve(
             g.f0[i] = g.rhs[i];
             const d = g.diag[i];
             g.diag[i] = if (@abs(d) > 1e-30) 1.0 / d else 1.0;
+        }
+        g.sync();
+
+        // FD baseline: with limiting engaged, f0 carries the companion
+        // correction J(lx)·(x−lx); differencing shifted perturbed evals
+        // against it would leave an O(corr/ε) ghost. Difference against the
+        // UNCORRECTED shifted residual at x itself (= i(lx) for limited
+        // devices, i(x) for the rest). One extra residual-only eval per
+        // outer iteration; a plain copy when limiting is off.
+        if (limiting) {
+            assemble(false, g, hdr, blob, x, t, env_pert, true, x);
+            i = g.tid;
+            while (i < n) : (i += g.stride) g.f0_shift[i] = g.rhs[i] + tol.gmin * x[i];
+        } else {
+            i = g.tid;
+            while (i < n) : (i += g.stride) g.f0_shift[i] = g.f0[i];
         }
         g.sync();
 
@@ -489,12 +628,13 @@ fn newtonSolve(
             while (i < n) : (i += g.stride) g.x_pert[i] = x[i] + eps * vj[i];
             g.sync();
 
-            // w = M⁻¹ (F(x+εv)+gmin·x_pert − f0)/ε  (residual-only eval).
-            assemble(false, g, hdr, blob, g.x_pert, t, env_pert);
+            // w = M⁻¹ (F(x+εv)+gmin·x_pert − f0_shift)/ε (residual-only,
+            // shifted through lx when limiting so FD = J(lx)·v).
+            assemble(false, g, hdr, blob, g.x_pert, t, env_pert, limiting, x);
             const inv_eps = 1.0 / eps;
             i = g.tid;
             while (i < n) : (i += g.stride)
-                g.w[i] = ((g.rhs[i] + tol.gmin * g.x_pert[i]) - g.f0[i]) * inv_eps * g.diag[i];
+                g.w[i] = ((g.rhs[i] + tol.gmin * g.x_pert[i]) - g.f0_shift[i]) * inv_eps * g.diag[i];
             g.sync();
 
             // Modified Gram-Schmidt (sequential dots — exactness over speed).
@@ -586,9 +726,10 @@ fn newtonSolve(
             g.sync();
         }
 
-        // finalizeStep (JFNK flavor: no limits, no state flips):
-        //   x_old = x; x += dx; per-row delta-x criterion; iter-0 reject;
-        //   row-scaled residual gate on f0 with the (pre-inversion) diag.
+        // finalizeStep (mirrors converger.finalizeStep, no state flips):
+        //   x_old = x; x += dx; device limiting pass; per-row delta-x
+        //   criterion; iter-0 reject; limited-step reject; row-scaled
+        //   residual gate on f0 with the (pre-inversion) diag.
         var scaled_p: f64 = 0;
         var viol_p: f64 = 0;
         i = g.tid;
@@ -610,8 +751,19 @@ fn newtonSolve(
         const scaled = g.reduceMax(scaled_p);
         const viol = g.reduceMax(viol_p);
 
+        // Device limiting (pnjlim/fetlim): recompute lim_x at the updated x;
+        // a limited step forces another iteration (same gate as the CPU).
+        var limited: f64 = 0;
+        if (has_lim) {
+            // reduceMax above synced, so the x writes are grid-visible.
+            const lf = limitPass(g, hdr, blob, x, g.x_old, limiting);
+            limited = g.reduceMax(lf);
+            if (g.tid == 0) g.scal[8] = 1;
+            g.sync();
+        }
+
         if (g.tid == 0) {
-            const converged = iter > 0 and scaled < 1.0 and viol == 0;
+            const converged = iter > 0 and scaled < 1.0 and viol == 0 and limited == 0;
             g.scal[2] = if (converged) 3 else 0;
             if (converged) {
                 res.status = 1;
@@ -756,7 +908,7 @@ fn arpTran(blob: [*]addrspace(.global) u8) callconv(.kernel) void {
             // q(x, 0) into q_hist[1] (rot 0 ⇒ physical slot 1) — mirrors the
             // CPU's ckt.eval(x, 0) + q_prev seed. alpha = 0 keeps rhs inert.
             const env0: TranEnv = .{ .active = true, .alpha = 0, .cvec = null, .snap = g.q_hist + np1 };
-            assemble(false, &g, hdr, blob, x, 0, env0);
+            assemble(false, &g, hdr, blob, x, 0, env0, false, x);
         }
     }
     g.sync();
