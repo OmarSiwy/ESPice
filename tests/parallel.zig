@@ -54,6 +54,7 @@ fn fillX(x: []f64) void {
 /// Adjacent cells share nodes ⇒ scatter conflicts across lane boundaries.
 fn buildLadder(gpa: std.mem.Allocator, cells: u32) !analysis.Circuit {
     var b = Builder.init(gpa);
+    errdefer b.deinit();
     var prev = b.addNode();
     try b.addDevice(td.V, .{ .dc = 1.0 }, .{}, .{ prev, GROUND });
     for (0..cells) |_| {
@@ -136,6 +137,7 @@ test "par: baseline (const-Jacobian) evalNewton path" {
 
     // Rc declares constant_g ⇒ computeBaseline engages the baseline path.
     var b = Builder.init(testing.allocator);
+    errdefer b.deinit();
     var prev = b.addNode();
     try b.addDevice(td.V, .{ .dc = 1.0 }, .{}, .{ prev, GROUND });
     for (0..2000) |_| {
@@ -160,6 +162,7 @@ test "par: dedup cache (PrepCache device, one prep group) MT == serial" {
     // 5000 byte-identical Dp diodes fanned out from one rail: single prep
     // group, per-lane caches must not corrupt each other.
     var b = Builder.init(testing.allocator);
+    errdefer b.deinit();
     const rail = b.addNode();
     try b.addDevice(td.V, .{ .dc = 0.6 }, .{}, .{ rail, GROUND });
     for (0..5000) |_| {

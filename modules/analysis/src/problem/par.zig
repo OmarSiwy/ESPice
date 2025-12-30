@@ -189,6 +189,12 @@ pub const ParEval = struct {
             if (b.hooks.set_lanes) |f| try f(b.ctx, gpa, n_lanes);
         }
 
+        // Hoisted above the return literal: toOwnedSlice below must be the
+        // last fallible op (its errdefer at `tasks` covers its own failure);
+        // a threads-alloc failure after it would orphan the owned slice.
+        const threads = try gpa.alloc(std.Thread, extra);
+        errdefer gpa.free(threads);
+
         return .{
             .io = io,
             .gpa = gpa,
@@ -203,7 +209,7 @@ pub const ParEval = struct {
             .nnz1 = nnz1,
             .n1 = n1,
             .has_charge = ckt.has_charge,
-            .threads = try gpa.alloc(std.Thread, extra),
+            .threads = threads,
             .started = false,
             .quit = .init(false),
             .epoch = .init(0),

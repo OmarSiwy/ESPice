@@ -70,6 +70,9 @@ pub const GpuSolver = struct {
         }
         const want = (ckt.n + block_dim - 1) / block_dim;
         const n_blocks: u32 = @max(1, @min(@min(max_blocks, abi.max_blocks), want));
+        // Loud accept, mirroring the loud decline above: fallback must never
+        // masquerade as a GPU run.
+        std.debug.print("GPU: megakernel loaded ({d} blocks, tran {s})\n", .{ n_blocks, if (k_tran != null) "yes" else "no" });
 
         // gmres_m/max_iter placeholders — patched per solve from Options.
         const tol: abi.Tol = .{

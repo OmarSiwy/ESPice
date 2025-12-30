@@ -90,6 +90,11 @@ pub const Options = struct {
     residual_tol: f64 = 1e-9,
     gmin: f64 = 1e-12,
     dx_clamp: f64 = 10.0,
+    /// Non-zero = the assembled matrix is identical for equal sig values
+    /// (all-const-Jacobian circuit at fixed alpha+gmin); newton() then skips
+    /// re-factoring when ws.factored_sig matches. 0 = factor every iteration.
+    /// Caller owns invalidation: pass a fresh sig after any model mutation.
+    matrix_sig: u64 = 0,
 };
 
 pub const Result = struct {
@@ -155,7 +160,14 @@ pub fn newton(
         }
         backtracks = 0;
         prev_norm = norm_f;
-        try slv.factor(v);
+        if (std.c.getenv("ZP_NEWTON_DEBUG") != null)
+            std.debug.print("  it={d} |F|={e} x={any}\n", .{ iter, norm_f, x[0..@min(ckt.n, 8)] });
+        // E2 factor-once: linear circuit at fixed alpha/gmin assembles the
+        // SAME matrix every iteration and every timestep — reuse the LU.
+        if (opts.matrix_sig == 0 or ws.factored_sig != opts.matrix_sig) {
+            try slv.factor(v);
+            ws.factored_sig = opts.matrix_sig;
+        }
         slv.solveNeg(ckt.rhs, dx);
         dampStep(dx[0..ckt.n], opts.dx_clamp);
         // ckt.rhs still holds F(x) + gmin·x — solveNeg takes rhs as const;
@@ -594,6 +606,7 @@ pub const Workspace = struct {
     dx: []f64,
     x_old: []f64,
     gmres: []f64 = &.{}, // lazily grown — only jfnk pays
+    factored_sig: u64 = 0, // last Options.matrix_sig factored into slv
 
     pub fn init(gpa: std.mem.Allocator, ckt: *const root.Circuit) !Workspace {
         const dx = try gpa.alloc(f64, ckt.n);
@@ -613,6 +626,7 @@ pub const Workspace = struct {
         const total = (m + 1) * n + (m + 1) * m + m + m + (m + 1) + m + 6 * n;
         if (self.gmres.len < total) {
             self.slv.gpa.free(self.gmres);
+            self.gmres = &.{}; // failed alloc below must not leave a dangling slice for deinit
             self.gmres = try self.slv.gpa.alloc(f64, total);
         }
         return self.gmres[0..total];

@@ -29,8 +29,10 @@ pub const SolveResult = struct {
     phase_margin_deg: f64,
 
     pub fn init(allocator: std.mem.Allocator, n_points: u32) !SolveResult {
+        const freqs = try allocator.alloc(f64, n_points);
+        errdefer allocator.free(freqs);
         return .{
-            .freqs = try allocator.alloc(f64, n_points),
+            .freqs = freqs,
             .loop_gain = try allocator.alloc(Complex, n_points),
             .n_points = n_points,
             .gain_margin_db = std.math.nan(f64),
@@ -132,6 +134,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     defer res.deinit(a);
 
     const names = try a.dupe([]const u8, &.{ "frequency", "loop_gain" });
+    errdefer a.free(names); // entries are literals
     const data = try a.alloc(f64, res.n_points * 4);
     for (0..res.n_points) |i| {
         data[i * 4] = res.freqs[i];

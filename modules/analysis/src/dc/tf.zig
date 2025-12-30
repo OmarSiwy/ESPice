@@ -88,6 +88,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const res = try solve(ctx.circuit, x_op, input_branch, output_node, a);
 
     const names = try a.dupe([]const u8, &.{ "transfer_function", "input_resistance", "output_resistance" });
+    errdefer a.free(names); // entries are literals
     const data = try a.dupe(f64, &.{ res.gain, res.input_resistance, res.output_resistance });
     return .{
         .plotname = "Transfer Function",

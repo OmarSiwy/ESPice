@@ -16,6 +16,16 @@ const n_u = contract.nU(Self);
 // Four external voltage ports, two internal branch-current unknowns.
 // Branch1 enforces current conservation (I1 + I2 = 0).
 // Branch2 enforces KVL around the series path (V1 - V2 - R_eff * I_br1 = 0).
+//
+// KNOWN APPROXIMATION vs ngspice (TRIAGE C4): ngspice's LTRA model solves
+// the lossy line by convolving the port histories with the line's impulse
+// response (ltra/ltraload.c). This model is a single lumped pi-section:
+// correct at DC and for electrically short lines (length << wavelength),
+// but it has no propagation delay and understates dispersion, so
+// devices/lossy_tline diverges from ngspice on fast transients (~4.5e0
+// max rel err). Full fix = LTRA convolution against the history buffer
+// (same infrastructure tline.zig uses); deliberately not done — cost is
+// high and no current fixture depends on lossy-line delay fidelity.
 // ============================================================================
 
 pub const U = enum(u8) {

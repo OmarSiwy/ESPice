@@ -196,6 +196,10 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     };
     defer if (ctx.x_op == null) ctx.allocator.free(x);
     const names = try root.probeNames(ctx, null);
+    errdefer {
+        for (names) |s| ctx.allocator.free(s); // no scale literal: all allocated
+        ctx.allocator.free(names);
+    }
     const data = try ctx.allocator.alloc(f64, names.len);
     for (ctx.probes, data) |node, *out| out.* = x[node];
     return .{

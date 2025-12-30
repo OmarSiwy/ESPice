@@ -120,9 +120,11 @@ pub const n_hist_signals: u32 = 4;
 /// Gather the signals to record into the history buffer.
 pub fn gatherHistSignals(x: [n_u]f64) [n_hist_signals]f64 {
     return .{
-        x[@intFromEnum(U.int1)] - x[@intFromEnum(U.neg1)], // v_port1
+        // ngspice tranload: the recorded wave voltage is the EXTERNAL port
+        // voltage V(pos)-V(neg), not the internal node behind Z0.
+        x[@intFromEnum(U.pos1)] - x[@intFromEnum(U.neg1)], // v_port1
         x[@intFromEnum(U.ibr1)], // i_br1
-        x[@intFromEnum(U.int2)] - x[@intFromEnum(U.neg2)], // v_port2
+        x[@intFromEnum(U.pos2)] - x[@intFromEnum(U.neg2)], // v_port2
         x[@intFromEnum(U.ibr2)], // i_br2
     };
 }
@@ -333,9 +335,9 @@ test "tline: delays from td, and from nl/f when td==0" {
 test "tline: gatherHistSignals layout" {
     const x = [n_u]f64{ 1.0, 0.1, 2.0, 0.2, 1.5, 2.5, 0.01, 0.02 };
     const sig = gatherHistSignals(x);
-    try testing.expectApproxEqAbs(@as(f64, 1.4), sig[0], 1e-12); // int1 - neg1
+    try testing.expectApproxEqAbs(@as(f64, 0.9), sig[0], 1e-12); // pos1 - neg1
     try testing.expectApproxEqAbs(@as(f64, 0.01), sig[1], 1e-12); // ibr1
-    try testing.expectApproxEqAbs(@as(f64, 2.3), sig[2], 1e-12); // int2 - neg2
+    try testing.expectApproxEqAbs(@as(f64, 1.8), sig[2], 1e-12); // pos2 - neg2
     try testing.expectApproxEqAbs(@as(f64, 0.02), sig[3], 1e-12); // ibr2
 }
 

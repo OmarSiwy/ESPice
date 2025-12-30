@@ -402,9 +402,11 @@ pub fn Parser(comptime Tok: type) type {
         };
 
         const element_shapes = [_]ElementShape{
-            .{ .letters = "rclvidbfh", .nodes = 2 },
+            // w (current-controlled switch): W n+ n- Vctrl model — 2 nodes,
+            // Vctrl/model are positional words, not nodes (ngspice INP2W).
+            .{ .letters = "rclvidbfhw", .nodes = 2 },
             .{ .letters = "qzj", .nodes = 3 },
-            .{ .letters = "egsmtow", .nodes = 4 },
+            .{ .letters = "egsmto", .nodes = 4 },
             .{ .letters = "k", .nodes = 0 },
             .{ .letters = "px", .nodes = null },
         };

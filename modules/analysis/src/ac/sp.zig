@@ -55,10 +55,11 @@ pub fn sweep(
     // initDense takes ownership of both.
     ckt.eval(x_op, 0);
     const g = try allocator.alloc(f64, n * n);
-    errdefer allocator.free(g);
     ckt.denseG(g);
-    const c = try allocator.alloc(f64, n * n);
-    errdefer allocator.free(c);
+    const c = allocator.alloc(f64, n * n) catch |err| {
+        allocator.free(g);
+        return err;
+    };
     ckt.denseC(c);
 
     // Series z0 inside each port source: branch row gains −z0·i_br.

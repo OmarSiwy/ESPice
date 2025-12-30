@@ -121,6 +121,7 @@ pub const Builder = struct {
 
         // Build permutation: internal nodes grouped by instance, then coupling.
         const perm = try gpa.alloc(u32, n);
+        errdefer gpa.free(perm);
         perm[0] = 0; // ground stays at 0
         var pos: u32 = 1;
 
@@ -262,7 +263,9 @@ pub const Builder = struct {
 
         // BBD permutation: reorder nodes so subcircuit-internal nodes are
         // contiguous per instance, coupling nodes at the end.
-        const bbd = try self.computeBbd();
+        var bbd = try self.computeBbd();
+        errdefer if (bbd.perm) |p| gpa.free(p);
+        errdefer if (bbd.info) |inf| gpa.free(inf.blocks);
         if (bbd.perm) |perm| {
             for (self.protos.items) |p| p.apply_perm(p.ctx, perm);
             // Remap node_names
@@ -280,9 +283,11 @@ pub const Builder = struct {
                 self.node_labels.items[new_i] = label;
             }
             gpa.free(perm);
+            bbd.perm = null; // freed; disarm the errdefer
         }
 
         const labels = try self.node_labels.toOwnedSlice(gpa);
+        errdefer gpa.free(labels);
         const ckt = try batch.freeze(gpa, self.n, self.node_names, labels, self.protos.items, bbd.info);
 
         // Protos consumed by freeze(); free the Builder shell.

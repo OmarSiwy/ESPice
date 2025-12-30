@@ -407,14 +407,16 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, _: *const
     const vds_raw = x[dp].sub(x[sp]).scale(p.type_f);
     const vbs_raw = x[b].sub(x[sp]).scale(p.type_f);
 
-    // --- Source-drain reversal (branchless) ---
-    const vds_eff = vds_raw.abs();
-    const vds_neg = vds_raw.minC(0.0);
-    const vgs_eff = vgs_raw.sub(vds_neg);
-    const vbs_eff = vbs_raw.sub(vds_neg);
+    // --- Source-drain reversal (branch on value, like ngspice) ---
+    // NOTE: the branchless mode = vds/|vds| form kills the Jacobian at
+    // vds = 0 (mode.val() == 0 zeroes the channel conductance stamp).
+    const reversed = vds_raw.val() < 0.0;
+    const vds_eff = if (reversed) vds_raw.neg() else vds_raw;
+    const vgs_eff = if (reversed) vgs_raw.sub(vds_raw) else vgs_raw;
+    const vbs_eff = if (reversed) vbs_raw.sub(vds_raw) else vbs_raw;
 
     // Mode indicator for current direction reconstruction
-    const mode = vds_raw.div(vds_eff.addC(1e-30));
+    const mode_f: f64 = if (reversed) -1.0 else 1.0;
 
     // --- Body effect and threshold voltage ---
     // Region branch on vbs_eff mirrors the original piecewise selection;
@@ -459,9 +461,9 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, _: *const
     // i_gate = 0
     // i_source_int = sigma * (-mode * I_D_scaled - I_BS_s)
     // i_bulk = sigma * (I_BD_s + I_BS_s)
-    const i_dp_val = mode.mul(id_scaled).sub(i_bd_s).scale(p.type_f);
+    const i_dp_val = id_scaled.scale(mode_f).sub(i_bd_s).scale(p.type_f);
     const i_gate = S.con(0.0);
-    const i_sp_val = mode.mul(id_scaled).neg().sub(i_bs_s).scale(p.type_f);
+    const i_sp_val = id_scaled.scale(-mode_f).sub(i_bs_s).scale(p.type_f);
     const i_bulk = i_bd_s.add(i_bs_s).scale(p.type_f);
 
     // --- Series resistances ---

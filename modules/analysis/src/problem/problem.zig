@@ -89,22 +89,33 @@ pub fn freeze(
     ckt.gpu_hook = null;
 
     ckt.nnz = try pb.toCsc(gpa, n, &ckt.col_ptr, &ckt.row_idx);
+    errdefer gpa.free(ckt.col_ptr);
+    errdefer gpa.free(ckt.row_idx);
     ckt.trash_slot = ckt.nnz;
     ckt.g_vals = try gpa.alloc(f64, ckt.nnz + 1);
+    errdefer gpa.free(ckt.g_vals);
     ckt.c_vals = try gpa.alloc(f64, ckt.nnz + 1);
+    errdefer gpa.free(ckt.c_vals);
     ckt.rhs = try gpa.alloc(f64, @as(usize, n) + 1);
+    errdefer gpa.free(ckt.rhs);
     ckt.q_vec = try gpa.alloc(f64, @as(usize, n) + 1);
+    errdefer gpa.free(ckt.q_vec);
     // eval() only re-zeroes c_vals/q_vec when has_charge; chargeless
     // circuits must still expose an exact C = 0 plane (pz/stb/ac read it).
     @memset(ckt.c_vals, 0);
     @memset(ckt.q_vec, 0);
 
     ckt.diag_slots = try gpa.alloc(u32, n);
+    errdefer gpa.free(ckt.diag_slots);
     for (0..n) |i| ckt.diag_slots[i] = ckt.findSlot(@intCast(i), @intCast(i)).?;
 
     const batches = try gpa.alloc(Batch, protos.len);
+    errdefer gpa.free(batches);
+    var n_final: usize = 0;
+    errdefer for (batches[0..n_final]) |b| b.hooks.deinit(b.ctx, gpa);
     for (protos, 0..) |p, bi| {
         batches[bi] = try p.finalize(p.ctx, gpa, &ckt);
+        n_final = bi + 1;
         if (batches[bi].has_charge) ckt.has_charge = true;
         if (batches[bi].hooks.inject_history != null) ckt.has_history = true;
     }

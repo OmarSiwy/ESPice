@@ -246,6 +246,13 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     const st = try simulate(ctx.circuit, x, ctx.probes, srcs, opts, a);
 
+    // shrink to exact size: freeable Result.data, doubling slack returned
+    const ncols = ctx.probes.len + 1;
+    const data = a.realloc(st.rows, @as(usize, st.npoints) * ncols) catch |err| {
+        a.free(st.rows);
+        return err;
+    };
+    errdefer a.free(data);
     const names = try root.probeNames(ctx, "time");
     return .{
         // Early stop surfaced in the plotname — run() stays pure.
@@ -253,8 +260,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         .varnames = names,
         .is_complex = false,
         .npoints = st.npoints,
-        // shrink to exact size: freeable Result.data, doubling slack returned
-        .data = try a.realloc(st.rows, @as(usize, st.npoints) * names.len),
+        .data = data,
     };
 }
 

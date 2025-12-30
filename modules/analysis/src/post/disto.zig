@@ -196,6 +196,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     try sweep(ctx.circuit, x_op, freqs, hd2, v1_mag, v2_mag, o, a);
 
     const names = try a.dupe([]const u8, &.{ "frequency", "hd2", "v1_mag", "v2_mag" });
+    errdefer a.free(names); // entries are literals
     const ncols = names.len;
     const data = try a.alloc(f64, n_points * ncols);
     for (0..n_points) |i| {

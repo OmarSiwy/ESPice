@@ -79,6 +79,7 @@ fn openFirst(names: []const []const u8) ?std.DynLib {
 fn loadApi() Error!void {
     if (loaded) return;
     var lib = openFirst(lib_names) orelse return error.InitFailed;
+    errdefer lib.close();
     inline for (@typeInfo(Api).@"struct".fields) |field| {
         if (comptime std.mem.eql(u8, field.name, "lib")) continue;
         @field(g, field.name) = lib.lookup(@TypeOf(@field(g, field.name)), field.name) orelse return error.InitFailed;

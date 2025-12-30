@@ -158,6 +158,7 @@ pub const NetBuilder = struct {
     // Pre-allocated to bucket('l').size()
     l_names: [][]const u8,
     l_branches: []u32,
+    l_values: []f64, // inductance, for K-element M = k*sqrt(L1*L2)
     n_l: u32,
 
     // Pre-allocated to sum of f/h/w/k bucket sizes
@@ -190,6 +191,7 @@ pub const NetBuilder = struct {
             .n_i = 0,
             .l_names = try arena.alloc([]const u8, nl_),
             .l_branches = try arena.alloc(u32, nl_),
+            .l_values = try arena.alloc(f64, nl_),
             .n_l = 0,
             .deferred = try arena.alloc(Deferred, n_def),
             .n_deferred = 0,
@@ -257,6 +259,8 @@ pub const NetBuilder = struct {
                 const br = try self.addPassive(devices.inductor, dev, "inductance", "l");
                 self.l_names[self.n_l] = dev.name;
                 self.l_branches[self.n_l] = br;
+                self.l_values[self.n_l] = positionalNumber(dev, 0) orelse
+                    kvNumber(dev.kv, "inductance") orelse kvNumber(dev.kv, "l") orelse 0;
                 self.n_l += 1;
             },
             'v' => {
@@ -295,6 +299,7 @@ pub const NetBuilder = struct {
                 self.n_deferred += 1;
             },
             'b' => try addBsource(self.b, dev, self.nl.models),
+            'p' => try self.addCpl(dev),
             else => try self.addByLetter(letter, dev),
         }
     }
@@ -349,9 +354,23 @@ pub const NetBuilder = struct {
         return null;
     }
 
-    fn findLBranch(self: *const NetBuilder, name: []const u8) ?u32 {
-        for (self.l_names[0..self.n_l], self.l_branches[0..self.n_l]) |n, br| {
-            if (std.mem.eql(u8, n, name)) return br;
+    /// CPL coupled lines: `P a1 a2 0 b1 b2 0 model` with vector model params
+    /// `R=r11 r12 r22` — the parser stores the first number under the key and
+    /// the rest ""-keyed. Two-conductor symmetric: self = [0], mutual = [1].
+    fn addCpl(self: *NetBuilder, dev: types.Device) !void {
+        const D = devices.coupled_tlines;
+        if (comptime !isValueForm(D)) return error.UnsupportedDevice;
+        var model: D.Model = .{};
+        if (modelName(dev)) |name| {
+            if (findModel(self.nl.models, name)) |m| applyCplKv(&model, m.kv);
+        }
+        applyCplKv(&model, dev.kv);
+        try self.b.addDevice(D, model, .{}, try deviceNodes(self.b, D, dev));
+    }
+
+    fn findLIndex(self: *const NetBuilder, name: []const u8) ?usize {
+        for (self.l_names[0..self.n_l], 0..) |n, i| {
+            if (std.mem.eql(u8, n, name)) return i;
         }
         return null;
     }
@@ -362,7 +381,10 @@ pub const NetBuilder = struct {
         const ctrl_br = self.findVBranch(ctrl_name) orelse return error.UnknownControlSource;
 
         var model: D.Model = .{};
-        if (modelName(dev)) |name| {
+        // W card: `W n+ n- Vctrl model` — model is positional[1] (positional[0]
+        // is the control source). F/H put a number there, so the orelse falls
+        // back to the plain model-name slot.
+        if (positionalName(dev, 1) orelse modelName(dev)) |name| {
             if (findModel(self.nl.models, name)) |m| try applyKv(&model, m.kv);
         }
         var instance: D.Instance = .{};
@@ -382,14 +404,20 @@ pub const NetBuilder = struct {
         if (comptime !isValueForm(devices.kinduc)) return error.UnsupportedDevice;
         const l1_name = positionalName(dev, 0) orelse return error.KinducMissingInductor;
         const l2_name = positionalName(dev, 1) orelse return error.KinducMissingInductor;
-        const ibr1 = self.findLBranch(l1_name) orelse return error.KinducUnknownInductor;
-        const ibr2 = self.findLBranch(l2_name) orelse return error.KinducUnknownInductor;
+        const li1 = self.findLIndex(l1_name) orelse return error.KinducUnknownInductor;
+        const li2 = self.findLIndex(l2_name) orelse return error.KinducUnknownInductor;
+        const ibr1 = self.l_branches[li1];
+        const ibr2 = self.l_branches[li2];
         var model: devices.kinduc.Model = .{};
         if (positionalNumber(dev, 2)) |k| model.k = castField(f32, k);
         if (modelName(dev)) |name| {
             if (findModel(self.nl.models, name)) |m| try applyKv(&model, m.kv);
         }
         try applyKv(&model, dev.kv);
+        // K card carries the coupling coefficient k; the device stamps mutual
+        // inductance M = k*sqrt(L1*L2) (ngspice INDsetup).
+        model.k = castField(f32, @as(f64, model.k) *
+            @sqrt(self.l_values[li1] * self.l_values[li2]));
         try self.b.addDevice(devices.kinduc, model, .{}, [2]u32{ ibr1, ibr2 });
     }
 };
@@ -752,6 +780,30 @@ fn modelName(dev: types.Device) ?[]const u8 {
 fn findModel(spice_models: []const types.Model, name: []const u8) ?types.Model {
     for (spice_models) |model| if (std.mem.eql(u8, model.name, name)) return model;
     return null;
+}
+
+fn applyCplKv(model: *devices.coupled_tlines.Model, kv: []const types.Kv) void {
+    var i: usize = 0;
+    while (i < kv.len) : (i += 1) {
+        const key = kv[i].key;
+        const v0 = valueNumber(kv[i].value) orelse continue;
+        // Gather the ""-keyed tail: [self, mutual, self2, ...]
+        var mutual: ?f64 = null;
+        var tail: usize = 0;
+        while (i + 1 < kv.len and kv[i + 1].key.len == 0) : (i += 1) {
+            if (valueNumber(kv[i + 1].value)) |v| {
+                if (tail == 0) mutual = v;
+                tail += 1;
+            }
+        }
+        inline for (.{ "r", "l", "c", "g" }, .{ "rm", "lm", "cm", "gm" }) |sf, mf| {
+            if (std.mem.eql(u8, key, sf)) {
+                @field(model, sf) = @floatCast(v0);
+                if (mutual) |mv| @field(model, mf) = @floatCast(mv);
+            }
+        }
+        if (std.mem.eql(u8, key, "length")) model.length = @floatCast(v0);
+    }
 }
 
 pub fn valueNumber(value: types.Value) ?f64 {

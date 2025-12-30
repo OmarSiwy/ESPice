@@ -357,6 +357,10 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         std.debug.print("Warning: hb: did not converge (residual {e})\n", .{st.residual_norm});
 
     const names = try root.probeNames(ctx, "frequency");
+    errdefer {
+        for (names[1..]) |s| a.free(s); // names[0] is the "frequency" literal
+        a.free(names);
+    }
     const ncols = names.len;
     const n_rows: usize = @as(usize, opts.n_harmonics) + 1;
     const data = try a.alloc(f64, n_rows * ncols);

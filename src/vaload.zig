@@ -61,7 +61,7 @@ pub fn ensureLoaded(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !void 
     const work_dir = try std.fmt.allocPrint(gpa, "{s}/{s}-{x}", .{ cache_root, name_buf, key });
     defer gpa.free(work_dir);
     const so_path = try std.fmt.allocPrint(gpa, "{s}/zig-out/lib/lib{s}.so", .{ work_dir, name_buf });
-    errdefer gpa.free(so_path);
+    defer gpa.free(so_path); // unused after LoadedDevice.open — one free on every path
 
     const cached = if (std.Io.Dir.cwd().access(io, so_path, .{})) |_| true else |_| false;
     if (!cached) {
@@ -94,10 +94,10 @@ pub fn ensureLoaded(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !void 
     }
 
     const loaded = try dyn.LoadedDevice.open(so_path);
-    gpa.free(so_path);
 
     // Key string owned by the registry (process lifetime).
     const owned_name = try gpa.dupe(u8, name_buf);
+    errdefer gpa.free(owned_name);
     try registry.put(gpa, owned_name, loaded);
 }
 
