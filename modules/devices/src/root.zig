@@ -124,9 +124,9 @@ pub fn bjtDeviceId(level: u16) DeviceId {
     return switch (level) {
         1 => .bjt,
         4 => .vbic,
-        8 => .hicum_l0,
+        7 => .hicum_l0,
+        8, 10 => .hicum_l2, // ngspice: level 8 = HICUM/L2
         9 => .mextram,
-        10 => .hicum_l2,
         else => .bjt,
     };
 }
