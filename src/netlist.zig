@@ -319,7 +319,12 @@ pub const NetBuilder = struct {
         return br;
     }
 
-    fn addByLetter(self: *NetBuilder, letter: u8, dev: types.Device) !void {
+    fn addByLetter(self: *NetBuilder, letter: u8, dev_in: types.Device) !void {
+        // BJT lines have 3-5 nodes: Qname c b e [s] [dt] model [area]. The
+        // parser fixes Q at 3 nodes, so extra nodes spill into positional and
+        // hide the model name. Rebuild nodes/positionals using the model table.
+        var norm: BjtNormBufs = undefined;
+        const dev = if (letter == 'q') normalizeBjt(dev_in, self.nl.models, &norm) else dev_in;
         switch (resolveDeviceId(letter, dev, self.nl.models)) {
             inline else => |comptime_id| {
                 const D = devices.DeviceId.Type(comptime_id);
@@ -726,15 +731,26 @@ fn kvNumber(kv: []const types.Kv, key: []const u8) ?f64 {
 
 fn sourceDc(dev: types.Device) f64 {
     if (kvNumber(dev.kv, "dc")) |dc| return dc;
+    var skip: usize = 0; // numbers owed to a preceding AC keyword (mag [phase])
     for (dev.positional, 0..) |pos, idx| switch (pos) {
-        .num => |n| return n,
+        .num => |n| {
+            if (skip > 0) {
+                skip -= 1;
+                continue;
+            }
+            return n;
+        },
         .group => |group| {
             if (std.mem.eql(u8, group.name, "dc") and group.args.len > 0)
                 return valueNumber(group.args[0]) orelse 0;
         },
         .name => |name| {
-            if (std.mem.eql(u8, name, "dc"))
+            if (std.mem.eql(u8, name, "dc")) {
                 if (positionalNumber(dev, idx + 1)) |dc| return dc;
+            } else if (std.mem.eql(u8, name, "ac")) {
+                // "AC mag [phase]": those numbers are not the DC value.
+                skip = 2;
+            }
         },
         else => {},
     };
@@ -752,6 +768,59 @@ fn modelName(dev: types.Device) ?[]const u8 {
 fn findModel(spice_models: []const types.Model, name: []const u8) ?types.Model {
     for (spice_models) |model| if (std.mem.eql(u8, model.name, name)) return model;
     return null;
+}
+
+/// Backing storage for normalizeBjt; must outlive the returned Device
+/// (internNode/applyKv copy what they need, so a caller-frame buffer is fine).
+const BjtNormBufs = struct {
+    nodes: [8][]const u8,
+    num_text: [4][24]u8,
+    pos: [4]types.Value,
+};
+
+/// Rebuild a Q device so positional[0] is the model name and all preceding
+/// words (4th/5th nodes that the 3-node parser shape pushed into positional)
+/// become nodes. The model name is the last positional matching a .model card;
+/// numeric positionals before it are node names (e.g. substrate "0").
+fn normalizeBjt(dev: types.Device, spice_models: []const types.Model, bufs: *BjtNormBufs) types.Device {
+    // Locate the model name among the positionals.
+    var model_idx: ?usize = null;
+    for (dev.positional, 0..) |p, i| switch (p) {
+        .name => |n| if (findModel(spice_models, n) != null) {
+            model_idx = i;
+        },
+        else => {},
+    };
+    const mi = model_idx orelse return dev; // no match: keep old behavior
+    if (mi == 0) return dev; // already normalized (3-node form)
+
+    // nodes = dev.nodes ++ positional[0..mi]
+    var n_nodes: usize = 0;
+    for (dev.nodes) |n| {
+        if (n_nodes >= bufs.nodes.len) return dev;
+        bufs.nodes[n_nodes] = n;
+        n_nodes += 1;
+    }
+    for (dev.positional[0..mi], 0..) |p, i| {
+        if (n_nodes >= bufs.nodes.len) return dev;
+        bufs.nodes[n_nodes] = switch (p) {
+            .name => |n| n,
+            // Numeric node name (e.g. ground "0"): recover its text.
+            .num => |v| std.fmt.bufPrint(&bufs.num_text[i], "{d}", .{v}) catch return dev,
+            else => return dev,
+        };
+        n_nodes += 1;
+    }
+
+    // positional = positional[mi..] (model name first, then e.g. area)
+    const tail = dev.positional[mi..];
+    if (tail.len > bufs.pos.len) return dev;
+    @memcpy(bufs.pos[0..tail.len], tail);
+
+    var out = dev;
+    out.nodes = bufs.nodes[0..n_nodes];
+    out.positional = bufs.pos[0..tail.len];
+    return out;
 }
 
 pub fn valueNumber(value: types.Value) ?f64 {
