@@ -13,11 +13,9 @@ const Builder = @import("builder.zig").Builder;
 const GROUND = analysis.GROUND;
 
 // ---------------------------------------------------------------------------
-// Verilog-A / Verilog devices — baked in at build time (-Dva-models), added
-// through the same comptime addDevice path as builtin models. A netlist
-// instance whose model name matches a va_devices decl gets that device; a
-// name matching nothing is a build-time gap (rebuild with the model in
-// -Dva-models), not a silent fallback.
+// Verilog-A / Verilog devices — loaded at runtime via `.hdl` cards (vaload).
+// The va_devices module is a permanently-empty stub kept so the comptime
+// dispatch below stays valid; its decl loops compile to nothing.
 // ---------------------------------------------------------------------------
 
 /// First positional token names a baked va_devices decl?
@@ -453,6 +451,11 @@ fn addSingleDevice(b: *Builder, comptime D: type, dev: types.Device, spice_model
     if (modelName(dev)) |name| {
         if (findModel(spice_models, name)) |m| {
             try applyKv(&model, m.kv);
+            // TXL (y-card) model cards spell the line length `length=`;
+            // the lossy_tline field is `len`.
+            if (comptime D == devices.lossy_tline) {
+                if (kvNumber(m.kv, "length")) |length| model.len = @floatCast(length);
+            }
             // Polarity comes from the model KIND (pmos/pnp/pjf/pmf), not a
             // model card parameter — applyKv never sees it. Without this,
             // every P-type device runs with N-type polarity.

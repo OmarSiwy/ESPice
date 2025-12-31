@@ -28,36 +28,15 @@ pub fn build(b: *std.Build) void {
     });
 
     // -----------------------------------------------------------------------
-    // Verilog-A / Verilog device models, baked in at BUILD time. The model
-    // list lives with the app source: benchmark/va_models.zon (a zon list of .va/
-    // .v/.sv paths). vagen runs fastvaf codegen over each and emits one
-    // contract-shaped module per device plus va_root.zig re-exporting them.
-    // The engine registry and the GPU megakernel both dispatch over this
-    // module, so VA devices ride the same comptime path as builtin ones.
-    // Editing a model or the list reruns only vagen + this module + link —
-    // everything else stays cached. Empty list ⇒ both loops compile to nothing.
+    // va_devices: permanently-empty stub. HDL models are declared per-netlist
+    // with the `.hdl "path"` directive (compiled + dlopen'd at runtime, see
+    // src/vaload.zig). The module stays so netlist.zig's inline-for over its
+    // decls and the GPU megakernel builds keep compiling — both loops compile
+    // to nothing.
     // -----------------------------------------------------------------------
-    const va_files = listVaModels(b);
     const va_root: std.Build.LazyPath = blk: {
-        if (va_files.len > 0) {
-            const vagen_exe = b.addExecutable(.{
-                .name = "vagen",
-                .root_module = b.createModule(.{
-                    .root_source_file = b.path("tools/vagen.zig"),
-                    .target = b.graph.host,
-                    .optimize = .Debug,
-                    .imports = &.{
-                        .{ .name = "fastvaf", .module = fastvaf_dep.module("fastvaf") },
-                    },
-                }),
-            });
-            const run = b.addRunArtifact(vagen_exe);
-            const out = run.addOutputDirectoryArg("va");
-            for (va_files) |file_path| run.addFileArg(file_path);
-            break :blk out.path(b, "va_root.zig");
-        }
         const wf = b.addWriteFiles();
-        break :blk wf.add("va_root.zig", "//! no VA models baked in (benchmark/va_models.zon empty)\n");
+        break :blk wf.add("va_root.zig", "//! no baked VA models; use per-netlist .hdl cards\n");
     };
     const va_mod = b.createModule(.{
         .root_source_file = va_root,
@@ -287,20 +266,4 @@ fn buildMegaKernelAmd(b: *std.Build, amd_arch: []const u8, dev_dep: *std.Build.D
     return obj.getEmittedBin();
 }
 
-/// Baked va/v model paths from benchmark/va_models.zon (repo-relative or absolute).
-/// Missing manifest == empty list.
-fn listVaModels(b: *std.Build) []const std.Build.LazyPath {
-    const io = b.graph.io;
-    const data = b.build_root.handle.readFileAlloc(io, "benchmark/va_models.zon", b.allocator, .unlimited) catch
-        return &.{};
-    const src = b.allocator.dupeZ(u8, data) catch @panic("OOM");
-    const files = std.zon.parse.fromSliceAlloc([]const []const u8, b.allocator, src, null, .{}) catch
-        std.debug.panic("benchmark/va_models.zon: expected a zon list of .va/.v/.sv paths", .{});
-    var paths: std.ArrayList(std.Build.LazyPath) = .empty;
-    for (files) |p| {
-        const lp: std.Build.LazyPath = if (std.fs.path.isAbsolute(p)) .{ .cwd_relative = p } else b.path(p);
-        paths.append(b.allocator, lp) catch @panic("OOM");
-    }
-    return paths.items;
-}
 
