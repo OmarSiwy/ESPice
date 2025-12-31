@@ -80,9 +80,8 @@ pub const Simulation = struct {
 
         try netlist.tagSubcircuitNodes(&b, nl.devices);
 
-        // Verilog-A / Verilog devices baked in at build time (-Dva-models):
-        // same comptime addDevice path as builtin models. Must happen before
-        // compile() freezes the pattern.
+        // Baked va_devices decls (permanently-empty stub — compiles to
+        // nothing). Must happen before compile() freezes the pattern.
         try netlist.addVaDevices(&b, arena, nl);
         // Runtime-loaded (.hdl card, dlopen'd) VA/V devices: same erased
         // Proto path, batch machinery lives inside the model's .so.

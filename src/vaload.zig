@@ -3,7 +3,7 @@
 //!
 //! The app never rebuilds: a `.hdl` card compiles ONLY the model into a
 //! shared object (once per source × compiler version, then cached) and the
-//! netlist binds instances to it exactly like baked -Dva-models devices.
+//! netlist binds instances to it like any builtin device.
 //! Mechanism split: dyn ABI in analysis.problem.dyn, build tree in
 //! fastvaf.compileGenerated, cache/registry policy here.
 

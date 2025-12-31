@@ -1,0 +1,14 @@
+// Verilog-A junction diode. IS=1e-12 puts the clamp at v(out) ~ 0.574 V
+// for a 5 V source behind 1k (I ~ 4.43 mA): v = vt*ln(I/IS), vt = 0.02585.
+`include "disciplines.vams"
+module va_diode(a, c);
+    inout a, c;
+    electrical a, c;
+
+    parameter real IS = 1.0e-12 from (0:inf);
+    parameter real VT = 0.02585 from (0:inf);
+
+    analog begin
+        I(a, c) <+ IS * (limexp(V(a, c) / VT) - 1.0);
+    end
+endmodule
