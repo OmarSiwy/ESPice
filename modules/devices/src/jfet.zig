@@ -139,6 +139,7 @@ const DcParams = struct {
     beta_m: f64,
     lambda: f64,
     b_param: f64,
+    b_fac: f64,
     is_val: f64,
     nvt: f64,
     gmin: f64,
@@ -175,14 +176,21 @@ fn dcPrep(model: *const Model, instance: *const Instance) DcParams {
     const scale = area * m_mult;
 
     // --- Series resistance conductances ---
-    const g_rd: f64 = if (rd != 0.0) scale / rd else 1.0e12;
-    const g_rs: f64 = if (rs != 0.0) scale / rs else 1.0e12;
+    // Zero resistance ⇒ prime node collapsed onto its port (collapse()
+    // below); g must be 0, not a 1e12 short — see mos1.zig dcParams.
+    const g_rd: f64 = if (rd != 0.0) scale / rd else 0.0;
+    const g_rs: f64 = if (rs != 0.0) scale / rs else 0.0;
+
+    // Sydney University model doping-tail factor (ngspice jfettemp.c)
+    const pb: f64 = @as(f64, model.pb);
+    const b_fac: f64 = (1.0 - b_param) / (pb - vto);
 
     return .{
         .vto = vto,
         .beta_m = beta_m,
         .lambda = lambda,
         .b_param = b_param,
+        .b_fac = b_fac,
         .is_val = is_val,
         .nvt = nvt,
         .gmin = 1.0e-12,
@@ -238,20 +246,27 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, _: *const
     const arg_gd = vgd_raw.scale(1.0 / p.nvt).minC(80.0);
     const igd_raw = arg_gd.exp().addC(-1.0).scale(p.is_val).add(vgd_raw.scale(p.gmin));
 
-    // --- Shichman-Hodges channel current ---
+    // --- Channel current (ngspice jfetload.c, Sydney University model) ---
+    // bfac = (1-B)/(PB-VTO); B=1 (default) reduces to classic Shichman-Hodges
+    // JFET convention: Id_sat = betap·vgst² (NO factor 1/2 — JFET beta
+    // convention differs from MOS).
     const vgst = vgs_eff.addC(-p.vto);
     const vgst_pos = vgst.maxC(0.0);
-    const vdsat = vgst_pos.scale(1.0 / p.b_param);
     const beta_prime = vds_eff.scale(p.lambda).addC(1.0).scale(p.beta_m);
 
-    // Saturation: V_DS >= V_DSAT
-    const id_sat = beta_prime.mul(vgst_pos.mul(vgst_pos)).scale(1.0 / (2.0 * p.b_param));
+    // Saturation (vds >= vgst): cdrain = betap·vgst²·(B + vgst·bfac)
+    const id_sat = beta_prime.mul(vgst_pos.mul(vgst_pos))
+        .mul(vgst_pos.scale(p.b_fac).addC(p.b_param));
 
-    // Linear: V_DS < V_DSAT
-    const id_lin = beta_prime.mul(vds_eff).mul(vgst_pos.sub(vds_eff.scale(p.b_param / 2.0)));
+    // Linear (vds < vgst):
+    //   apart = 2B + 3·bfac·(vgst - vds)
+    //   cdrain = betap·vds·(vds·(bfac·vds - B) + vgst·apart)
+    const apart = vgst_pos.sub(vds_eff).scale(3.0 * p.b_fac).addC(2.0 * p.b_param);
+    const id_lin = beta_prime.mul(vds_eff)
+        .mul(vds_eff.scale(p.b_fac).addC(-p.b_param).mul(vds_eff).add(vgst_pos.mul(apart)));
 
     // Select region (cutoff when vgst_pos == 0 gives id = 0 from either formula)
-    const id_ch_raw = if (vds_eff.val() >= vdsat.val()) id_sat else id_lin;
+    const id_ch_raw = if (vds_eff.val() >= vgst_pos.val()) id_sat else id_lin;
 
     // --- Area and multiplier scaling ---
     const id_ch = id_ch_raw.scale(p.scale);
@@ -529,6 +544,17 @@ pub fn limit(model: *const Model, _: *const Instance, x_new: [n_u]f64, x_old: [n
 // Gmin stepping: ramp IS from 1e-12 (easy) to model value (real).
 // At lambda=0: IS = 1e-12; at lambda=1: IS = model.is
 
+// ============================================================================
+// Node Collapse (ngspice JFETsetup: dNodePrime = dNode when RD = 0)
+// ============================================================================
+
+pub fn collapse(model: *const Model, _: *const Instance) [n_u]?u8 {
+    var out: [n_u]?u8 = @splat(null);
+    if (model.rd == 0) out[@intFromEnum(U.d_prime)] = @intFromEnum(U.drain);
+    if (model.rs == 0) out[@intFromEnum(U.s_prime)] = @intFromEnum(U.source);
+    return out;
+}
+
 pub fn attempt(model: Model, lambda: f64) Model {
     var m = model;
     const gmin_is: f64 = 1.0e-12;
@@ -556,61 +582,62 @@ test "jfet: linear region residual (default model, vds=1 < vdsat=2)" {
     // Node order: { drain, gate, source, d_prime, s_prime }.
     // x = { 1, 0, 0, 1, 0 }: d==dp and s==sp so series-R currents are 0.
     //   vgs = 0, vgd = -1, vds = 1 (not reversed)
-    //   vgst = 0 - (-2) = 2, vgst_pos = 2, vdsat = 2/1 = 2
-    //   vds = 1 < vdsat -> linear:
-    //   id_lin = 1e-4 * (1+0) * 1 * (2 - 1*1/2) = 1e-4 * 1.5 = 1.5e-4
+    //   vgst = 0 - (-2) = 2, region: vds = 1 < vgst -> linear
+    //   (ngspice jfetload Sydney model, B=1 => bfac=0):
+    //   apart = 2B = 2; cpart = vds*(vds*(-B) + vgst*apart) = 1*(-1+4) = 3
+    //   id_lin = 1e-4 * 3 = 3e-4
     //   igs = 1e-14*(exp(0)-1) + 1e-12*0 = 0
     //   igd = 1e-14*(exp(-1/0.025864925)-1) + 1e-12*(-1)
     //       = 1e-14*(1.6e-17 - 1) - 1e-12 ~= -1.01e-12
     //   out[drain]  = 0
     //   out[gate]   = igs + igd            ~= -1.01e-12
     //   out[source] = 0
-    //   out[dp]     = id - igd             ~= 1.5e-4 + 1.01e-12
-    //   out[sp]     = -id - igs            = -1.5e-4
+    //   out[dp]     = id - igd             ~= 3e-4 + 1.01e-12
+    //   out[sp]     = -id - igs            = -3e-4
     const model: Model = .{};
     const inst: Instance = .{};
     const out = contract.evalValues(Self, .{ 1.0, 0.0, 0.0, 1.0, 0.0 }, &model, &inst, 0);
     try testing.expectApproxEqAbs(@as(f64, 0.0), out[0], 1e-15);
     try testing.expectApproxEqAbs(@as(f64, -1.01e-12), out[1], 1e-15);
     try testing.expectApproxEqAbs(@as(f64, 0.0), out[2], 1e-15);
-    try testing.expectApproxEqAbs(@as(f64, 1.5e-4), out[3], 1e-9);
-    try testing.expectApproxEqAbs(@as(f64, -1.5e-4), out[4], 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 3e-4), out[3], 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, -3e-4), out[4], 1e-9);
 }
 
 test "jfet: saturation region residual (vds=3 >= vdsat=2)" {
     // x = { 3, 0, 0, 3, 0 }:
-    //   vgs = 0, vgd = -3, vds = 3 >= vdsat = 2 -> saturation:
-    //   id_sat = 1e-4 * (1+0) * 2^2 / (2*1) = 2e-4
+    //   vgs = 0, vgd = -3, vds = 3 >= vgst = 2 -> saturation:
+    //   id_sat = betap*vgst^2*(B + vgst*bfac) = 1e-4 * 4 = 4e-4 (no 1/2!)
     //   igs = 0
     //   igd = 1e-14*(exp(-3/nvt)-1) + 1e-12*(-3) ~= -1e-14 - 3e-12 = -3.01e-12
     //   out[gate] = -3.01e-12
-    //   out[dp]   = 2e-4 + 3.01e-12
-    //   out[sp]   = -2e-4
+    //   out[dp]   = 4e-4 + 3.01e-12
+    //   out[sp]   = -4e-4
     const model: Model = .{};
     const inst: Instance = .{};
     const out = contract.evalValues(Self, .{ 3.0, 0.0, 0.0, 3.0, 0.0 }, &model, &inst, 0);
     try testing.expectApproxEqAbs(@as(f64, 0.0), out[0], 1e-15);
     try testing.expectApproxEqAbs(@as(f64, -3.01e-12), out[1], 1e-15);
     try testing.expectApproxEqAbs(@as(f64, 0.0), out[2], 1e-15);
-    try testing.expectApproxEqAbs(@as(f64, 2e-4), out[3], 1e-9);
-    try testing.expectApproxEqAbs(@as(f64, -2e-4), out[4], 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 4e-4), out[3], 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, -4e-4), out[4], 1e-9);
 }
 
 test "jfet: reversed channel (vds < 0) swaps drain/source roles" {
     // x = { 0, 0, 1, 0, 1 }: dp=0, sp=1 -> vgs_raw = -1, vgd_raw = 0,
     // vds_raw = -1 < 0 -> reversed. Effective vgs = 0, vgd = -1, vds = 1.
-    // Same channel magnitude as the linear test (id = 1.5e-4) but sign flips:
-    //   id_sign = -1.5e-4
+    // Same channel magnitude as the linear test (id = 3e-4) but sign flips:
+    //   id_sign = -3e-4
     //   igs (on vgs_eff=0) = 0, igd (on vgd_eff=-1) ~= -1.01e-12
-    //   out[dp] = id_sign - igd = -1.5e-4 + 1.01e-12
-    //   out[sp] = -id_sign - igs = 1.5e-4
+    //   out[dp] = id_sign - igd = -3e-4 + 1.01e-12
+    //   out[sp] = -id_sign - igs = 3e-4
     //   out[gate] ~= -1.01e-12
     const model: Model = .{};
     const inst: Instance = .{};
     const out = contract.evalValues(Self, .{ 0.0, 0.0, 1.0, 0.0, 1.0 }, &model, &inst, 0);
     try testing.expectApproxEqAbs(@as(f64, -1.01e-12), out[1], 1e-15);
-    try testing.expectApproxEqAbs(@as(f64, -1.5e-4), out[3], 1e-9);
-    try testing.expectApproxEqAbs(@as(f64, 1.5e-4), out[4], 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, -3e-4), out[3], 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 3e-4), out[4], 1e-9);
 }
 
 test "jfet: reverse-bias depletion charge" {

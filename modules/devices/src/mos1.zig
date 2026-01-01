@@ -165,6 +165,9 @@ pub const c_pattern_override = [_]contract.Entry(n_u){
     // Junction Q_BS: bulk -- s_prime
     .{ .row = @intFromEnum(U.bulk), .col = @intFromEnum(U.s_prime) },
     .{ .row = @intFromEnum(U.s_prime), .col = @intFromEnum(U.bulk) },
+    // Meyer channel charges couple d_prime and s_prime (mode-swapped vgd/vgs)
+    .{ .row = @intFromEnum(U.d_prime), .col = @intFromEnum(U.s_prime) },
+    .{ .row = @intFromEnum(U.s_prime), .col = @intFromEnum(U.d_prime) },
 };
 
 // ============================================================================
@@ -252,10 +255,15 @@ fn dcParams(model: *const Model, instance: *const Instance) DcParams {
     // --- Series resistances ---
     // Effective RD = model.rd + rsh * nrd
     // Effective RS = model.rs + rsh * nrs
+    // Zero resistance ⇒ the prime node is COLLAPSED onto its port (see
+    // collapse() below), so the branch sees v=0 and carries no current.
+    // g must be 0, not a 1e12 short: a 1e12 Jacobian entry has ULP 1.2e-4,
+    // which absorbs any channel conductance stamped on the same collapsed
+    // slot (gds < 1.2e-4 rounds away → Newton loses the linear region).
     const rd_eff = rd + rsh * nrd;
     const rs_eff = rs + rsh * nrs;
-    const g_rd: f64 = if (rd_eff != 0.0) m_mult / rd_eff else 1.0e12;
-    const g_rs: f64 = if (rs_eff != 0.0) m_mult / rs_eff else 1.0e12;
+    const g_rd: f64 = if (rd_eff != 0.0) m_mult / rd_eff else 0.0;
+    const g_rs: f64 = if (rs_eff != 0.0) m_mult / rs_eff else 0.0;
 
     return .{
         .type_f = type_f,
@@ -637,13 +645,18 @@ pub fn qFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, _: *const Mo
     const q_meyer_dp = if (normal_mode) q_gd_meyer.neg() else q_gs_meyer.neg();
     const q_meyer_sp = if (normal_mode) q_gs_meyer.neg() else q_gd_meyer.neg();
 
-    const q_gate = q_gs_meyer.add(q_gd_meyer).add(q_gb_meyer).scale(p.m_mult)
+    // Meyer + junction charges are computed in type-flipped space; the
+    // physical charge flips sign for PMOS (ngspice stamps ceqgs/ceqgd/
+    // ceqgb/ceqbd/ceqbs with MOS1type). Overlap charges use RAW terminal
+    // voltages and need no flip.
+    const tm = p.type_f * p.m_mult;
+    const q_gate = q_gs_meyer.add(q_gd_meyer).add(q_gb_meyer).scale(tm)
         .add(q_gs_ov.add(q_gd_ov).add(q_gb_ov).scale(p.m_mult));
-    const q_drain = q_gd_ov.neg().sub(q_bd_junc).scale(p.m_mult);
-    const q_source = q_gs_ov.neg().sub(q_bs_junc).scale(p.m_mult);
-    const q_bulk = q_gb_meyer.neg().sub(q_gb_ov).add(q_bs_junc).add(q_bd_junc).scale(p.m_mult);
-    const q_dp = q_meyer_dp.scale(p.m_mult);
-    const q_sp = q_meyer_sp.scale(p.m_mult);
+    const q_drain = q_gd_ov.neg().scale(p.m_mult).sub(q_bd_junc.scale(tm));
+    const q_source = q_gs_ov.neg().scale(p.m_mult).sub(q_bs_junc.scale(tm));
+    const q_bulk = q_gb_meyer.neg().add(q_bs_junc).add(q_bd_junc).scale(tm).sub(q_gb_ov.scale(p.m_mult));
+    const q_dp = q_meyer_dp.scale(tm);
+    const q_sp = q_meyer_sp.scale(tm);
 
     // --- Charge node stamps ---
     var out: [n_u]S = undefined;
@@ -918,8 +931,9 @@ test "mos1: PMOS saturation region residual" {
     // type=-1 flips all terminal voltages: with x[g]=x[dp]=-2, x[sp]=0,
     // vgs_raw = 2, vds_raw = 2, vbs_raw = 0 -> same flipped-space physics as
     // the NMOS saturation test (vgst = 1, id = 1e-5, i_bd = -2.01e-12), then
-    // terminal currents flip sign via type_f.
-    const model: Model = .{ .type_ = -1, .vto = 1.0 };
+    // terminal currents flip sign via type_f. A PMOS enhancement device has
+    // NEGATIVE model VTO (flipped-space threshold = type*vto = +1).
+    const model: Model = .{ .type_ = -1, .vto = -1.0 };
     const inst: Instance = .{};
     const out = contract.evalValues(Self, .{ -2.0, -2.0, 0.0, 0.0, -2.0, 0.0 }, &model, &inst, 0);
     try testing.expectApproxEqAbs(@as(f64, 2.01e-12), out[3], 1e-18);
