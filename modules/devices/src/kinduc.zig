@@ -5,9 +5,9 @@
 // unknowns (ibr1, ibr2) are the branch currents of the coupled inductors.
 //
 // DC contribution: zero (purely reactive).
-// Mutual flux (q function): q_ibr1 = k * I_br2, q_ibr2 = k * I_br1.
-// The solver time-differentiates these to produce k * dI_br2/dt and
-// k * dI_br1/dt voltage terms in each inductor's KVL equation.
+// Mutual flux (q function): q_ibr1 = -M * I_br2, q_ibr2 = -M * I_br1.
+// The solver time-differentiates these to produce the -M * dI/dt mutual
+// voltage terms in each inductor's KVL equation.
 //
 // Model.k holds the PHYSICAL mutual inductance M = k*sqrt(L1*L2); the netlist
 // layer resolves the card's coupling coefficient at build time (netlist.zig
@@ -51,11 +51,12 @@ pub fn eval(comptime S: type, x: [n_u]S, model: *const Model, instance: *const I
 
 /// Mutual flux contribution (charge function).
 ///
-/// q_ibr1 = k * I_br2   (cross-coupling: inductor 1's flux from inductor 2's current)
-/// q_ibr2 = k * I_br1   (cross-coupling: inductor 2's flux from inductor 1's current)
+/// q_ibr1 = -M * I_br2   (cross-coupling: inductor 1's flux from inductor 2's current)
+/// q_ibr2 = -M * I_br1   (cross-coupling: inductor 2's flux from inductor 1's current)
 ///
-/// The solver time-differentiates these to produce k * dI_br2/dt and
-/// k * dI_br1/dt mutual voltage terms.
+/// Sign matches the inductor's own q_br = -L * I_br: the solver forms
+/// F = eval + dq/dt, so the branch KVL row V - L*dI1/dt - M*dI2/dt = 0
+/// needs negative flux (ngspice MUTload stamps M into the same companion).
 pub fn q(comptime S: type, x: [n_u]S, model: *const Model, instance: *const Instance, t: f64) [n_u]S {
     @setFloatMode(.optimized);
     _ = instance;
@@ -68,7 +69,7 @@ pub fn q(comptime S: type, x: [n_u]S, model: *const Model, instance: *const Inst
 
     // Cross-coupling flux: each inductor's charge contribution is proportional
     // to the OTHER inductor's branch current.
-    return .{ i_br2.scale(k), i_br1.scale(k) };
+    return .{ i_br2.scale(-k), i_br1.scale(-k) };
 }
 
 /// Sparse conductance stamp pattern.
@@ -102,25 +103,25 @@ test "kinduc: DC residual is zero" {
 }
 
 test "kinduc: mutual flux cross-coupling" {
-    // Old formula: q_ibr1 = k * i_br2, q_ibr2 = k * i_br1.
-    // k = 0.5, i_br1 = 2 A, i_br2 = 3 A:
-    //   q_ibr1 = 0.5 * 3 = 1.5
-    //   q_ibr2 = 0.5 * 2 = 1.0
+    // q_ibr1 = -M * i_br2, q_ibr2 = -M * i_br1.
+    // M = 0.5, i_br1 = 2 A, i_br2 = 3 A:
+    //   q_ibr1 = -0.5 * 3 = -1.5
+    //   q_ibr2 = -0.5 * 2 = -1.0
     const model: Model = .{ .k = 0.5 };
     const inst: Instance = .{};
     const out = contract.qValues(Self, .{ 2.0, 3.0 }, &model, &inst, 0);
-    try testing.expectApproxEqAbs(@as(f64, 1.5), out[0], 1e-12);
-    try testing.expectApproxEqAbs(@as(f64, 1.0), out[1], 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, -1.5), out[0], 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, -1.0), out[1], 1e-12);
 }
 
 test "kinduc: default coupling coefficient" {
     // Default k = 0.00099 (stored as f32). i_br1 = 1, i_br2 = -1:
-    //   q_ibr1 = 0.00099 * -1 = -0.00099
-    //   q_ibr2 = 0.00099 *  1 =  0.00099
+    //   q_ibr1 = -0.00099 * -1 =  0.00099
+    //   q_ibr2 = -0.00099 *  1 = -0.00099
     // (tolerance accounts for f32 param storage)
     const model: Model = .{};
     const inst: Instance = .{};
     const out = contract.qValues(Self, .{ 1.0, -1.0 }, &model, &inst, 0);
-    try testing.expectApproxEqAbs(@as(f64, -0.00099), out[0], 1e-9);
-    try testing.expectApproxEqAbs(@as(f64, 0.00099), out[1], 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 0.00099), out[0], 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, -0.00099), out[1], 1e-9);
 }

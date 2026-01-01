@@ -372,6 +372,32 @@ pub fn simulate(
     // (or to each other) are merged/skipped.
     const min_break = 5e-5 * effective_dt_max;
 
+    // Delayed breakpoint echoes: ngspice traload registers a breakpoint at
+    // t + td whenever a transmission-line input has a sharp edge, so the
+    // integrator lands exactly on the arriving wavefront. Approximation:
+    // every LANDED breakpoint re-emits one echo at t + td; echo landings
+    // re-emit in turn, so reflections cascade (t + 2td, 3td, ...).
+    // ponytail: one td (circuit min delay) for all history devices; enumerate
+    // per-device delays if mixed-td circuits still show edge smear.
+    var echo_bps: [256]f64 = undefined;
+    var n_echo: usize = 0;
+    const echo_td: ?f64 = if (ckt.has_history) ckt.minDelay() else null;
+    if (echo_td) |td_| {
+        // t = 0 is itself a breakpoint (source edges often start there).
+        echo_bps[0] = td_;
+        n_echo = 1;
+    }
+    const nextBp = struct {
+        fn call(c: *root.Circuit, echo: []const f64, after: f64) ?f64 {
+            var best = std.math.inf(f64);
+            if (c.nextBreakpoint(after)) |bp| best = bp;
+            for (echo) |e| {
+                if (e >= after and e < best) best = e;
+            }
+            return if (best == std.math.inf(f64)) null else best;
+        }
+    }.call;
+
     try waveform.record(0, x, probes);
 
     var cur: []f64 = x;
@@ -380,7 +406,7 @@ pub fn simulate(
     // spice3 dctran first step: min(tstep, tmax)/10, and never past the
     // first breakpoint — a 1ns pulse edge at t~0 must not be skipped.
     var dt: f64 = @min(options.dt_init, effective_dt_max) / 10.0;
-    if (ckt.nextBreakpoint(min_break)) |bp0| {
+    if (nextBp(ckt, echo_bps[0..n_echo], min_break)) |bp0| {
         if (bp0 < dt) dt = bp0 / 10.0;
     }
     var dt_prev: f64 = dt;
@@ -420,6 +446,8 @@ pub fn simulate(
         const nr = converger.run(ckt, ws, trial, t + dt, nr_opts, hook) catch converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 };
 
         if (!nr.converged) {
+            // Rejected point: restore FSM devices to the last accepted state.
+            _ = ckt.stateCtl(.revert);
             // Order drop first: a discontinuity rejects trap long before dt
             // is the problem. Retry at order 1 at the SAME dt; only halve
             // when the retry already ran order 1 (ngspice-style).
@@ -429,6 +457,18 @@ pub fn simulate(
             }
             dt *= 0.5;
             if (dt < options.dt_min) return .{ .completed = false, .steps = steps, .t_final = t };
+            continue;
+        }
+
+        // Device state flip (switch crossed its threshold inside this step):
+        // reject and shrink so the conductance discontinuity lands sharp at
+        // the crossing (within min_break) instead of smeared across dt.
+        // ngspice's raw output samples always straddle the true crossing, so
+        // a sharp edge interpolates correctly onto its grid.
+        if (dt > min_break and ckt.stateCtl(.query)) {
+            _ = ckt.stateCtl(.revert);
+            use_be = true;
+            dt = @max(0.25 * dt, min_break);
             continue;
         }
 
@@ -445,6 +485,7 @@ pub fn simulate(
                     options.tol.reltol, options.tol.abstol, options.tol.chgtol, options.tol.trtol,
                 );
                 if (del < 0.9 * dt) {
+                    _ = ckt.stateCtl(.revert);
                     if (!use_be and (trap or gear)) {
                         use_be = true;
                         continue;
@@ -506,6 +547,7 @@ pub fn simulate(
         trial = tmp;
         t += dt;
         steps += 1;
+        _ = ckt.stateCtl(.commit);
 
         // If we just landed on a breakpoint, drop to BE + resume with
         // 0.1*min(saveDelta, gap to next break) — spice3 dctran's resume
@@ -515,8 +557,26 @@ pub fn simulate(
         if (bp_target) |bp| {
             if (@abs(t - bp) <= min_break) {
                 use_be = true;
+                // Re-emit the landed breakpoint one line-delay later (see
+                // echo_bps above). Dedupe within min_break; drop when full.
+                if (echo_td) |td_| {
+                    const e = t + td_;
+                    if (e < options.t_stop and n_echo < echo_bps.len) {
+                        var dup = false;
+                        for (echo_bps[0..n_echo]) |old| {
+                            if (@abs(old - e) <= min_break) {
+                                dup = true;
+                                break;
+                            }
+                        }
+                        if (!dup) {
+                            echo_bps[n_echo] = e;
+                            n_echo += 1;
+                        }
+                    }
+                }
                 var shrink = bp_save_dt;
-                if (ckt.nextBreakpoint(t + min_break)) |nb| shrink = @min(shrink, nb - t);
+                if (nextBp(ckt, echo_bps[0..n_echo], t + min_break)) |nb| shrink = @min(shrink, nb - t);
                 dt_next = @min(dt_next, 0.1 * shrink);
             }
             bp_target = null;
@@ -530,7 +590,7 @@ pub fn simulate(
         // Breakpoint handling: clamp dt to land on the next breakpoint,
         // skipping breaks within min_break of the current time (ngspice
         // CKTminBreak merge of near-coincident breakpoints).
-        if (ckt.nextBreakpoint(t + min_break)) |bp| {
+        if (nextBp(ckt, echo_bps[0..n_echo], t + min_break)) |bp| {
             const dt_to_bp = bp - t;
             if (dt_to_bp < dt_next) {
                 bp_save_dt = dt_next;

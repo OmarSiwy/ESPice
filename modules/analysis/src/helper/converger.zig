@@ -175,6 +175,7 @@ pub fn newton(
         const st = finalizeStep(ckt, x, dx, x_old, ckt.rhs, v, iter, opts);
         if (st.converged)
             return .{ .converged = true, .iterations = iter + 1, .max_dx = st.scaled };
+        if (st.flipped) prev_norm = std.math.inf(f64);
     }
     return .{ .converged = false, .iterations = opts.max_iter, .max_dx = 0 };
 }
@@ -184,7 +185,7 @@ pub fn newton(
 // newton() and jfnk() so the two paths cannot drift.
 // ----------------------------------------------------------------------------
 
-const Step = struct { converged: bool, scaled: f64 };
+const Step = struct { converged: bool, scaled: f64, flipped: bool = false };
 
 /// Direction-preserving Newton damping: if max|dx_i| exceeds `clamp`, scale
 /// the WHOLE step by clamp/max|dx|. Component-wise clamping decouples the
@@ -231,7 +232,11 @@ fn finalizeStep(
     // batch.zig corrDot), so F is piecewise LINEAR in x through limited
     // devices — finite-difference J·v is exact, not merely approximate.
     const limited = ckt.applyLimits(x, x_old);
-    if (ckt.updateStates(x)) |_| return .{ .converged = false, .scaled = scaled };
+    // A device state flip (switch) is a legitimate conductance discontinuity:
+    // flag it so newton() resets its monotone-residual baseline instead of
+    // treating the post-flip residual jump as divergence and backtracking
+    // the whole remaining iteration budget away.
+    if (ckt.updateStates(x)) |_| return .{ .converged = false, .scaled = scaled, .flipped = true };
     if (limited) return .{ .converged = false, .scaled = scaled };
     if (iter == 0) return .{ .converged = false, .scaled = scaled };
     if (scaled >= 1.0) return .{ .converged = false, .scaled = scaled };

@@ -41,8 +41,11 @@ pub const HistoryBuffer = struct {
         if (self.len < self.capacity) self.len += 1;
     }
 
-    /// Look up signal `sig` at time `t_query` using linear interpolation.
-    /// Clamps to oldest/newest value if t_query is out of range.
+    /// Look up signal `sig` at time `t_query`. Quadratic (3-point Lagrange)
+    /// interpolation through the two samples at/before the query and the one
+    /// after — same scheme as ngspice traload.c's default (f1/f2/f3 through
+    /// t(i-2), t(i-1), t(i)); falls back to linear when only two points
+    /// bracket the query. Clamps to oldest/newest value out of range.
     /// Binary search — times are monotonic along the ring.
     pub fn lookup(self: *const HistoryBuffer, t_query: f64, sig: u32) f64 {
         if (self.len == 0) return 0.0;
@@ -59,14 +62,30 @@ pub const HistoryBuffer = struct {
         if (lo == 0) return self.valueAt(oldest, sig);
         if (lo == self.len) return self.valueAt((oldest + self.len - 1) % self.capacity, sig);
 
-        const s0 = (oldest + lo - 1) % self.capacity;
-        const s1 = (oldest + lo) % self.capacity;
-        const t0 = self.times[s0];
+        const s1 = (oldest + lo - 1) % self.capacity;
+        const s2 = (oldest + lo) % self.capacity;
         const t1 = self.times[s1];
-        const alpha = (t_query - t0) / (t1 - t0);
-        const v0 = self.valueAt(s0, sig);
+        const t2 = self.times[s2];
         const v1 = self.valueAt(s1, sig);
-        return v0 + alpha * (v1 - v0);
+        const v2 = self.valueAt(s2, sig);
+
+        if (lo >= 2) {
+            const s0 = (oldest + lo - 2) % self.capacity;
+            const t0 = self.times[s0];
+            const d01 = t0 - t1;
+            const d02 = t0 - t2;
+            const d12 = t1 - t2;
+            // Degenerate spacing → linear.
+            if (d01 != 0.0 and d02 != 0.0 and d12 != 0.0) {
+                const f0 = (t_query - t1) * (t_query - t2) / (d01 * d02);
+                const f1 = (t_query - t0) * (t_query - t2) / (-d01 * d12);
+                const f2 = (t_query - t0) * (t_query - t1) / (d02 * d12);
+                return f0 * self.valueAt(s0, sig) + f1 * v1 + f2 * v2;
+            }
+        }
+
+        const alpha = (t_query - t1) / (t2 - t1);
+        return v1 + alpha * (v2 - v1);
     }
 
     inline fn valueAt(self: *const HistoryBuffer, slot: u32, sig: u32) f64 {
