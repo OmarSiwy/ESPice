@@ -334,7 +334,9 @@ pub fn Dual(comptime N: usize) type {
         }
         pub fn sqrt(a: Self) Self {
             const s = @sqrt(a.v);
-            return .{ .v = s, .d = a.d * splat(0.5 / s) };
+            // s==0: slope is +inf; 0*inf from a clamped-constant input would
+            // poison the whole Jacobian with NaN. Flat derivative instead.
+            return .{ .v = s, .d = a.d * splat(if (s > 0.0) 0.5 / s else 0.0) };
         }
         pub fn sin(a: Self) Self {
             const sc = if (comptime !is_gpu) [2]f64{ @sin(a.v), @cos(a.v) } else fmath.sinCos(a.v);
@@ -359,7 +361,9 @@ pub fn Dual(comptime N: usize) type {
         }
         pub fn pow(a: Self, c: f64) Self {
             const p = fmath.pow(a.v, c);
-            return .{ .v = p, .d = a.d * splat(c * p / a.v) };
+            // a.v==0: c*p/0 is inf/NaN; keep the Jacobian finite (see sqrt).
+            const slope = c * p / a.v;
+            return .{ .v = p, .d = a.d * splat(if (std.math.isFinite(slope)) slope else 0.0) };
         }
         pub fn atan(a: Self) Self {
             return .{ .v = std.math.atan(a.v), .d = a.d * splat(1.0 / (1.0 + a.v * a.v)) };
