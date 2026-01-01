@@ -225,6 +225,8 @@ pub const NoiseSource = struct {
     conductance: f64,
 };
 
+pub const StateCtlOp = enum(u8) { query, commit, revert };
+
 pub const UpdateResult = union(enum) {
     ok,
     request_reject_at: f64,
@@ -293,6 +295,10 @@ pub const Hooks = struct {
     /// converger can apply abstol vs vntol per row (ngspice NIconvTest).
     mark_current_rows: ?*const fn (*anyopaque, []bool) void = null,
     update_state: ?*const fn (*anyopaque, []const f64) ?f64 = null,
+    /// FSM accepted-state bookkeeping (switch devices): query returns true if
+    /// any working state differs from the last accepted one; commit/revert
+    /// sync the two on step accept/reject. See devices contract.StateCtlOp.
+    state_ctl: ?*const fn (*anyopaque, StateCtlOp) bool = null,
     set_temp: ?*const fn (*anyopaque, f32) void = null,
     record_history: ?*const fn (*anyopaque, []const f64, f64) void = null,
     inject_history: ?*const fn (*anyopaque, f64, []f64) void = null,
@@ -592,6 +598,16 @@ pub const Circuit = struct {
             };
         }
         return min_reject;
+    }
+
+    /// FSM accepted-state sync (switches). Returns true (for .query) when
+    /// any device's working state differs from its last accepted state.
+    pub fn stateCtl(self: *const Circuit, sop: StateCtlOp) bool {
+        var dirty = false;
+        for (self.batches) |b| if (b.hooks.state_ctl) |f| {
+            if (f(b.ctx, sop)) dirty = true;
+        };
+        return dirty;
     }
 
     pub fn recordHistory(self: *Circuit, x: []const f64, t: f64) void {

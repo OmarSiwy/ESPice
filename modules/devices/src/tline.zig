@@ -118,11 +118,13 @@ pub fn delays(model: *const Model) [1]f64 {
 pub const n_hist_signals: u32 = 4;
 
 /// Gather the signals to record into the history buffer.
+/// ngspice traload.c: TRAinput1 = (V(pos2) - V(neg2)) + Z0 * I(brEq2) — the
+/// recorded voltage is the PORT TERMINAL voltage, not the internal EMF node.
 pub fn gatherHistSignals(x: [n_u]f64) [n_hist_signals]f64 {
     return .{
-        x[@intFromEnum(U.int1)] - x[@intFromEnum(U.neg1)], // v_port1
+        x[@intFromEnum(U.pos1)] - x[@intFromEnum(U.neg1)], // v_port1
         x[@intFromEnum(U.ibr1)], // i_br1
-        x[@intFromEnum(U.int2)] - x[@intFromEnum(U.neg2)], // v_port2
+        x[@intFromEnum(U.pos2)] - x[@intFromEnum(U.neg2)], // v_port2
         x[@intFromEnum(U.ibr2)], // i_br2
     };
 }
@@ -195,31 +197,40 @@ pub const g_pattern_override = [_]contract.Entry(n_u){
     // Bergeron branch equation 2 (local terms only)
     .{ .row = @intFromEnum(U.ibr2), .col = @intFromEnum(U.int2) },
     .{ .row = @intFromEnum(U.ibr2), .col = @intFromEnum(U.neg2) },
+    // DC (t == 0) far-port coupling — ngspice traload MODEDC stamps: the
+    // branch equations become V1 - V2 - Z0*(I1 + I2) = 0, making the line a
+    // transparent connection at the operating point instead of Z0-to-ground.
+    .{ .row = @intFromEnum(U.ibr1), .col = @intFromEnum(U.pos2) },
+    .{ .row = @intFromEnum(U.ibr1), .col = @intFromEnum(U.neg2) },
+    .{ .row = @intFromEnum(U.ibr1), .col = @intFromEnum(U.ibr2) },
+    .{ .row = @intFromEnum(U.ibr2), .col = @intFromEnum(U.pos1) },
+    .{ .row = @intFromEnum(U.ibr2), .col = @intFromEnum(U.neg1) },
+    .{ .row = @intFromEnum(U.ibr2), .col = @intFromEnum(U.ibr1) },
 };
 
 // ---------------------------------------------------------------------------
 // PrepCache: hot eval data in contiguous array (SoA over devices)
 // ---------------------------------------------------------------------------
 
-pub const PrepCache = struct { g0m: f64, m: f64 };
+pub const PrepCache = struct { g0m: f64, m: f64, z0: f64 };
 
 pub fn computePrep(model: *const Model, instance: *const Instance) PrepCache {
-    const g0: f64 = 1.0 / @as(f64, model.z0);
+    const z0: f64 = @as(f64, model.z0);
     const m: f64 = @as(f64, instance.m);
-    return .{ .g0m = g0 * m, .m = m };
+    return .{ .g0m = m / z0, .m = m, .z0 = z0 };
 }
 
 // ---------------------------------------------------------------------------
-// Constant-Jacobian flag: G stamp is independent of x.
-// ---------------------------------------------------------------------------
-
-pub const constant_g = true;
-
-// ---------------------------------------------------------------------------
 // Physics: current contributions (MNA formulation, Bergeron companion)
+//
+// t == 0 selects the DC operating-point form (ngspice traload MODEDC): the
+// delayed sources have no history yet, so the branch equations couple the
+// two ports directly:  V(int1)-V(neg1) - (V(pos2)-V(neg2)) - Z0*I(br2) = 0
+// (and symmetrically), which yields V1 = V2, I1 = -I2 at DC. For t > 0 the
+// far-port terms come from histInject as delayed RHS sources instead.
 // ---------------------------------------------------------------------------
 
-fn evalInner(comptime S: type, x: [n_u]S, g0m: f64, m: f64) [n_u]S {
+fn evalInner(comptime S: type, x: [n_u]S, g0m: f64, m: f64, z0: f64, dc: bool) [n_u]S {
     const pos1 = @intFromEnum(U.pos1);
     const neg1 = @intFromEnum(U.neg1);
     const pos2 = @intFromEnum(U.pos2);
@@ -238,20 +249,24 @@ fn evalInner(comptime S: type, x: [n_u]S, g0m: f64, m: f64) [n_u]S {
     out[int2] = x[int2].sub(x[pos2]).scale(g0m).add(x[ibr2].scale(m));
     out[ibr1] = x[int1].sub(x[neg1]);
     out[ibr2] = x[int2].sub(x[neg2]);
+    if (dc) {
+        out[ibr1] = out[ibr1].sub(x[pos2].sub(x[neg2])).sub(x[ibr2].scale(z0));
+        out[ibr2] = out[ibr2].sub(x[pos1].sub(x[neg1])).sub(x[ibr1].scale(z0));
+    }
     return out;
 }
 
 pub fn eval(comptime S: type, x: [n_u]S, model: *const Model, instance: *const Instance, t: f64) [n_u]S {
     @setFloatMode(.optimized);
-    _ = t;
-    const g0: f64 = 1.0 / @as(f64, model.z0);
+    const z0: f64 = @as(f64, model.z0);
+    const g0: f64 = 1.0 / z0;
     const m: f64 = @as(f64, instance.m);
-    return evalInner(S, x, g0 * m, m);
+    return evalInner(S, x, g0 * m, m, z0, t == 0);
 }
 
-pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, _: *const Model, _: *const Instance, _: f64) [n_u]S {
+pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, _: *const Model, _: *const Instance, t: f64) [n_u]S {
     @setFloatMode(.optimized);
-    return evalInner(S, x, pc.g0m, pc.m);
+    return evalInner(S, x, pc.g0m, pc.m, pc.z0, t == 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -333,9 +348,9 @@ test "tline: delays from td, and from nl/f when td==0" {
 test "tline: gatherHistSignals layout" {
     const x = [n_u]f64{ 1.0, 0.1, 2.0, 0.2, 1.5, 2.5, 0.01, 0.02 };
     const sig = gatherHistSignals(x);
-    try testing.expectApproxEqAbs(@as(f64, 1.4), sig[0], 1e-12); // int1 - neg1
+    try testing.expectApproxEqAbs(@as(f64, 0.9), sig[0], 1e-12); // pos1 - neg1
     try testing.expectApproxEqAbs(@as(f64, 0.01), sig[1], 1e-12); // ibr1
-    try testing.expectApproxEqAbs(@as(f64, 2.3), sig[2], 1e-12); // int2 - neg2
+    try testing.expectApproxEqAbs(@as(f64, 1.8), sig[2], 1e-12); // pos2 - neg2
     try testing.expectApproxEqAbs(@as(f64, 0.02), sig[3], 1e-12); // ibr2
 }
 

@@ -123,7 +123,7 @@ pub const g_pattern_override = [_]contract.Entry(n_u){
 //
 // From the spec's C-matrix table, 9 non-zero entries:
 //
-// branch2 row: L_total * I_br1 => (branch2, branch1)
+// branch2 row: -L_total * I_br1 => (branch2, branch1)
 // pos1 row:    C_sh * (V_pos1 - V_neg1) => (pos1, pos1), (pos1, neg1)
 // neg1 row:   -C_sh * (V_pos1 - V_neg1) => (neg1, pos1), (neg1, neg1)
 // pos2 row:    C_sh * (V_pos2 - V_neg2) => (pos2, pos2), (pos2, neg2)
@@ -261,7 +261,8 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
 //   dq/dt at branch equation => inductive voltage (L dI/dt)
 //
 // Series inductance (flux linkage in branch2 KVL equation):
-//   q_branch2 = L_total * I_br1  (if L_total > 0, else 0)
+//   q_branch2 = -L_total * I_br1  (if L_total > 0, else 0; negative — the
+//   solver forms F = eval + dq/dt and the row is V1 - V2 - R*I - L*dI/dt)
 //
 // Shunt capacitance (pi-network charge at each port):
 //   C_shunt = C_total / 2 * m
@@ -302,7 +303,10 @@ pub fn qFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *cons
         q2, // pos2
         q2.neg(), // neg2
         S.con(0.0), // branch1
-        i_br1.scale(p.l_eff), // branch2: flux linkage L_total * I_br1
+        // branch2 KVL row is V1 - V2 - R*I - L*dI/dt = 0 and the solver forms
+        // F = eval + dq/dt, so the flux linkage enters with a NEGATIVE sign
+        // (same convention as inductor.zig).
+        i_br1.scale(-p.l_eff), // branch2: flux linkage -L_total * I_br1
     };
 }
 
@@ -362,7 +366,7 @@ test "lossy tline: charge/flux (LC pi-network)" {
     //   q_pos1 = 0.25*1   = 0.25    q_neg1 = -0.25
     //   q_pos2 = 0.25*0.5 = 0.125   q_neg2 = -0.125
     //   q_br1  = 0
-    //   q_br2  = 1*0.01   = 0.01
+    //   q_br2  = -1*0.01  = -0.01
     const model: Model = .{ .l = 0.5, .c = 0.25, .len = 2 };
     const inst: Instance = .{};
     const out = contract.qValues(Self, .{ 1.0, 0.0, 0.5, 0.0, 0.01, -0.01 }, &model, &inst, 0);
@@ -371,7 +375,7 @@ test "lossy tline: charge/flux (LC pi-network)" {
     try testing.expectApproxEqAbs(@as(f64, 0.125), out[@intFromEnum(U.pos2)], 1e-12);
     try testing.expectApproxEqAbs(@as(f64, -0.125), out[@intFromEnum(U.neg2)], 1e-12);
     try testing.expectApproxEqAbs(@as(f64, 0.0), out[@intFromEnum(U.branch1)], 1e-12);
-    try testing.expectApproxEqAbs(@as(f64, 0.01), out[@intFromEnum(U.branch2)], 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, -0.01), out[@intFromEnum(U.branch2)], 1e-12);
 }
 
 test "lossy tline: zero L and C give zero charge" {

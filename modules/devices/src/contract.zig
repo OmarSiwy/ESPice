@@ -152,6 +152,14 @@ pub const UpdateResult = union(enum) {
     request_reject_at: f64,
 };
 
+/// Accepted-state bookkeeping for FSM devices (switches). The transient
+/// loop uses this to reject/retry a timestep whose converged solution flipped
+/// a device state, so the discontinuity lands sharp at the crossing:
+///   query  — does the working state differ from the last accepted state?
+///   commit — step accepted: accepted := working
+///   revert — step rejected: working := accepted
+pub const StateCtlOp = enum(u8) { query, commit, revert };
+
 pub const UnknownKind = enum {
     voltage,
     current,
@@ -463,6 +471,8 @@ pub fn validate(comptime D: type) void {
         // logic outputs into Instance drive targets at init.
         expectFn(D, "initState", fn (*const D.Model, *D.Instance) D.State);
         expectFn(D, "updateState", fn (*const D.Model, *D.Instance, [n]f64, *D.State) UpdateResult);
+        if (@hasDecl(D, "stateCtl"))
+            expectFn(D, "stateCtl", fn (*const D.Model, *D.Instance, *D.State, StateCtlOp) bool);
     }
 
     // History (delay-line devices): histInject is generic over the lookup
@@ -561,6 +571,7 @@ const allowed_pub_decls = std.StaticStringMap(void).initComptime(.{
     .{ "collapse", {} },
     .{ "initState", {} },
     .{ "updateState", {} },
+    .{ "stateCtl", {} },
     .{ "State", {} },
     .{ "histInject", {} },
     .{ "n_hist_signals", {} },

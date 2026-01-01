@@ -74,6 +74,10 @@ pub const State = struct {
     // 0 = REALLY_OFF, 1 = REALLY_ON, 2 = HYST_OFF, 3 = HYST_ON
     current_state: u8 = 0,
     g_eff: f64 = 0.0,
+    // Last ACCEPTED timepoint's state (ngspice CKTstate1); stateCtl keeps it
+    // in sync so a rejected timestep can restore the FSM.
+    accepted_state: u8 = 0,
+    accepted_on: bool = false,
 };
 
 const REALLY_OFF: u8 = 0;
@@ -93,12 +97,32 @@ pub fn initState(model: *const Model, instance: *Instance) State {
     const g_off: f64 = 1.0 / @as(f64, model.roff);
 
     if (instance.init_on) {
-        return .{ .current_state = HYST_ON, .g_eff = g_on };
+        return .{ .current_state = HYST_ON, .g_eff = g_on, .accepted_state = HYST_ON, .accepted_on = true };
     } else if (instance.init_off) {
-        return .{ .current_state = HYST_OFF, .g_eff = g_off };
+        return .{ .current_state = HYST_OFF, .g_eff = g_off, .accepted_state = HYST_OFF, .accepted_on = false };
     } else {
-        return .{ .current_state = REALLY_OFF, .g_eff = g_off };
+        return .{ .current_state = REALLY_OFF, .g_eff = g_off, .accepted_state = REALLY_OFF, .accepted_on = false };
     }
+}
+
+/// Accepted-state bookkeeping (see contract.StateCtlOp). Lets the transient
+/// loop reject a step whose converged solution flipped the switch and retry
+/// with a smaller dt, so the edge lands sharp at the threshold crossing
+/// instead of smeared across a full step.
+pub fn stateCtl(model: *const Model, instance: *Instance, state: *State, op: contract.StateCtlOp) bool {
+    switch (op) {
+        .query => return state.current_state != state.accepted_state or instance.sw_on != state.accepted_on,
+        .commit => {
+            state.accepted_state = state.current_state;
+            state.accepted_on = instance.sw_on;
+        },
+        .revert => {
+            state.current_state = state.accepted_state;
+            instance.sw_on = state.accepted_on;
+            state.g_eff = if (instance.sw_on) 1.0 / @as(f64, model.ron) else 1.0 / @as(f64, model.roff);
+        },
+    }
+    return false;
 }
 
 // ============================================================================
