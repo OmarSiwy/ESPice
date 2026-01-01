@@ -77,7 +77,7 @@ pub const Model = struct {
     dvt2w: f32 = -0.032, // Narrow width effect coeff. 2 (1/V)
     drout: f32 = 0.56, // DIBL coefficient of output resistance
     dsub: f32 = 0.56, // DIBL coefficient in subthreshold region
-    vth0: f32 = 0.7, // Threshold voltage (V)
+    vth0: f32 = std.math.nan(f32), // Threshold voltage (V); NaN = not given -> derived from vfb+phi+k1*sqrt(phi) (b3temp.c)
     ua: f32 = 2.25e-9, // Linear gate dependence of mobility (m/V)
     ua1: f32 = 4.31e-9, // Temperature coefficient of ua (m/V)
     ub: f32 = 5.87e-19, // Quadratic gate dependence of mobility ((m/V)^2)
@@ -87,7 +87,7 @@ pub const Model = struct {
     u0: f32 = 0.067, // Low-field mobility at Tnom (m^2/Vs)
     ute: f32 = -1.5, // Temperature coefficient of mobility
     voff: f32 = -0.08, // Threshold voltage offset (V)
-    tnom: f32 = 298.15, // Parameter measurement temperature (K)
+    tnom: f32 = 27.0, // Parameter measurement temperature (deg C, ngspice semantics)
     cgso: f32 = 2.07188e-10, // Gate-source overlap cap per width (F/m)
     cgdo: f32 = 2.07188e-10, // Gate-drain overlap cap per width (F/m)
     cgbo: f32 = 0, // Gate-bulk overlap cap per length (F/m)
@@ -122,7 +122,7 @@ pub const Model = struct {
     mjswg: f32 = 0.33, // Source/drain (gate side) sidewall junction cap grading coefficient
     cj: f32 = 5e-4, // Source/drain bottom junction cap per unit area (F/m^2)
     vfbcv: f32 = -1, // Flat band voltage parameter for capmod=0
-    vfb: f32 = 0, // Flat band voltage (V)
+    vfb: f32 = std.math.nan(f32), // Flat band voltage (V); NaN = not given -> -1.0 (b3temp.c)
     cjsw: f32 = 5e-10, // Source/drain sidewall junction cap per unit periphery (F/m)
     cjswg: f32 = 5e-10, // Source/drain (gate side) sidewall junction cap per unit width (F/m)
     tpb: f32 = 0, // Temperature coefficient of pb (V/K)
@@ -535,6 +535,9 @@ const IPrep = struct {
     nv_tm: f64,
     is_src: f64,
     is_drn: f64,
+    p_ijth: f64,
+    vjsm: f64,
+    vjdm: f64,
     // surface potential
     phi: f64,
     sqrt_phi: f64,
@@ -607,17 +610,71 @@ const IPrep = struct {
     p_b1: f64,
 };
 
+/// ngspice b3temp.c parameter derivation for values not on the model card.
+/// Sentinels: k1==0 && k2==0 = not given (derive from gamma1/gamma2/vbx/vbm/
+/// xt/nch/nsub); vth0/vfb NaN = not given.
+const DerivedVth = struct { k1: f64, k2: f64, vth0: f64, vbsc: f64 };
+
+fn vthDefaults(model: *const Model) DerivedVth {
+    const tox: f64 = @as(f64, model.tox);
+    const p_tnom: f64 = @as(f64, model.tnom) + 273.15; // card TNOM is Celsius
+    const p_nch: f64 = @as(f64, model.nch);
+    const vtm0 = KB_OVER_Q * p_tnom;
+    const eg0 = 1.16 - 7.02e-4 * p_tnom * p_tnom / (p_tnom + 1108.0);
+    const ni = 1.45e10 * (p_tnom / 300.15) * @sqrt(p_tnom / 300.15) * contract.fmath.exp(21.5565981 - eg0 / (2.0 * vtm0));
+    const phi = 2.0 * vtm0 * contract.fmath.log(p_nch / ni);
+    const sqrt_phi = @sqrt(@max(phi, 1.0e-30));
+
+    var vbm: f64 = @as(f64, model.vbm);
+    if (vbm > 0.0) vbm = -vbm;
+
+    var k1: f64 = @as(f64, model.k1);
+    var k2: f64 = @as(f64, model.k2);
+    if (k1 == 0.0 and k2 == 0.0) {
+        const c_ox = EPS_OX / tox;
+        var vbx: f64 = @as(f64, model.vbx);
+        if (vbx == 0.0) vbx = phi - 7.7348e-4 * p_nch * @as(f64, model.xt) * @as(f64, model.xt);
+        if (vbx > 0.0) vbx = -vbx;
+        var gamma1: f64 = @as(f64, model.gamma1);
+        if (gamma1 == 0.0) gamma1 = 5.753e-12 * @sqrt(p_nch) / c_ox;
+        var gamma2: f64 = @as(f64, model.gamma2);
+        if (gamma2 == 0.0) gamma2 = 5.753e-12 * @sqrt(@as(f64, model.nsub)) / c_ox;
+        const t1 = @sqrt(phi - vbx) - sqrt_phi;
+        const t2 = @sqrt(phi * (phi - vbm)) - phi;
+        k2 = (gamma1 - gamma2) * t1 / (2.0 * t2 + vbm);
+        k1 = gamma2 - 2.0 * k2 * @sqrt(phi - vbm);
+    }
+
+    var vth0: f64 = @as(f64, model.vth0);
+    if (vth0 != vth0) { // NaN sentinel
+        const vfb_raw: f64 = @as(f64, model.vfb);
+        const vfb: f64 = if (vfb_raw != vfb_raw) -1.0 else vfb_raw;
+        vth0 = vfb + phi + k1 * sqrt_phi;
+    }
+
+    var vbsc: f64 = -30.0;
+    if (k2 < 0.0) {
+        const t0 = 0.5 * k1 / k2;
+        vbsc = 0.9 * (phi - t0 * t0);
+        if (vbsc > -3.0) {
+            vbsc = -3.0;
+        } else if (vbsc < -30.0) {
+            vbsc = -30.0;
+        }
+    }
+    if (vbsc > vbm) vbsc = vbm;
+
+    return .{ .k1 = k1, .k2 = k2, .vth0 = vth0, .vbsc = vbsc };
+}
+
 fn iPrep(model: *const Model, instance: *const Instance) IPrep {
     const tox: f64 = @as(f64, model.tox);
     const toxm: f64 = @as(f64, model.toxm);
     const p_nch: f64 = @as(f64, model.nch);
-    // ponytail: auto-derive k1 from channel doping when k1==0 (sentinel), matches ngspice b3set.c
-    const p_k1: f64 = if (@as(f64, model.k1) == 0.0)
-        @sqrt(2.0 * EPS_SI * Q_ELEC * @as(f64, model.nch) * 1.0e6) / (EPS_OX / @as(f64, model.tox))
-    else
-        @as(f64, model.k1);
-    const p_k2: f64 = @as(f64, model.k2);
-    const p_tnom: f64 = @as(f64, model.tnom);
+    const dv = vthDefaults(model);
+    const p_k1: f64 = dv.k1;
+    const p_k2: f64 = dv.k2;
+    const p_tnom: f64 = @as(f64, model.tnom) + 273.15; // card TNOM is Celsius
     const p_js: f64 = @as(f64, model.js);
     const p_nj: f64 = @as(f64, model.nj);
     const p_dvt1: f64 = @as(f64, model.dvt1);
@@ -651,12 +708,17 @@ fn iPrep(model: *const Model, instance: *const Instance) IPrep {
     const is_src = p_js * a_jct + 1.0e-14;
     const is_drn = p_js * a_jct + 1.0e-14;
 
+    // ngspice b3temp.c ijth junction limiting knee (vjsm/vjdm)
+    const p_ijth = @as(f64, model.ijth);
+    const vjsm = if (p_ijth > 0.0) nv_tm * contract.fmath.log(p_ijth / is_src + 1.0) else 0.0;
+    const vjdm = if (p_ijth > 0.0) nv_tm * contract.fmath.log(p_ijth / is_drn + 1.0) else 0.0;
+
     const vtm0 = KB_OVER_Q * p_tnom;
     const eg0 = 1.16 - 7.02e-4 * p_tnom * p_tnom / (p_tnom + 1108.0);
     const ni = 1.45e10 * (p_tnom / 300.15) * @sqrt(p_tnom / 300.15) * contract.fmath.exp(21.5565981 - eg0 / (2.0 * vtm0));
     const phi = 2.0 * vtm0 * contract.fmath.log(p_nch / ni);
     const sqrt_phi = @sqrt(@max(phi, 1.0e-30));
-    const vbsc = -0.9 * phi;
+    const vbsc = dv.vbsc;
 
     const xdep0_bare = @sqrt(2.0 * EPS_SI / (Q_ELEC * p_nch * 1.0e6));
     const xdep0 = xdep0_bare * sqrt_phi;
@@ -684,7 +746,10 @@ fn iPrep(model: *const Model, instance: *const Instance) IPrep {
     const p_ua_t = @as(f64, model.ua) + @as(f64, model.ua1) * t_ratio;
     const p_ub_t = @as(f64, model.ub) + @as(f64, model.ub1) * t_ratio;
     const p_uc_t = @as(f64, model.uc) + @as(f64, model.uc1) * t_ratio;
-    const p_u0_t = @as(f64, model.u0) * contract.fmath.pow(t_ratio_abs, @as(f64, model.ute));
+    // b3temp.c: u0 > 1 is in cm^2/(V*s) -> convert to m^2/(V*s)
+    const p_u0_raw: f64 = @as(f64, model.u0);
+    const p_u0_conv: f64 = if (p_u0_raw > 1.0) p_u0_raw / 1.0e4 else p_u0_raw;
+    const p_u0_t = p_u0_conv * contract.fmath.pow(t_ratio_abs, @as(f64, model.ute));
     const p_vsat_t = @as(f64, model.vsat) - @as(f64, model.at) * t_ratio;
 
     const tmp2_w = tox * phi / (w_eff + @as(f64, model.w0));
@@ -711,6 +776,9 @@ fn iPrep(model: *const Model, instance: *const Instance) IPrep {
         .nv_tm = nv_tm,
         .is_src = is_src,
         .is_drn = is_drn,
+        .p_ijth = p_ijth,
+        .vjsm = vjsm,
+        .vjdm = vjdm,
         .phi = phi,
         .sqrt_phi = sqrt_phi,
         .vbsc = vbsc,
@@ -733,7 +801,7 @@ fn iPrep(model: *const Model, instance: *const Instance) IPrep {
         .p_k2 = p_k2,
         .p_k3 = @as(f64, model.k3),
         .p_k3b = @as(f64, model.k3b),
-        .p_vth0 = @as(f64, model.vth0),
+        .p_vth0 = dv.vth0,
         .p_nch = p_nch,
         .p_xj = p_xj,
         .p_vsat = p_vsat_t,
@@ -818,10 +886,17 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     const vbd = vbs.sub(vds);
 
     // ---- Junction diode currents ----
-    const arg_bs = vbs.scale(1.0 / P.nv_tm).minC(80.0);
-    const i_bs = arg_bs.exp().addC(-1.0).scale(P.is_src);
-    const arg_bd = vbd.scale(1.0 / P.nv_tm).minC(80.0);
-    const i_bd = arg_bd.exp().addC(-1.0).scale(P.is_drn);
+    // ngspice b3ld.c ijth limiting: beyond vjsm/vjdm the diode continues
+    // linearly (slope (ijth+Is)/Nvtm) instead of exponentially. Without it
+    // the flat exp clamp leaves Newton a zero-gradient dead zone.
+    const i_bs = if (P.p_ijth > 0.0 and vbs.val() >= P.vjsm)
+        vbs.addC(-P.vjsm).scale((P.p_ijth + P.is_src) / P.nv_tm).addC(P.p_ijth)
+    else
+        vbs.scale(1.0 / P.nv_tm).minC(80.0).exp().addC(-1.0).scale(P.is_src);
+    const i_bd = if (P.p_ijth > 0.0 and vbd.val() >= P.vjdm)
+        vbd.addC(-P.vjdm).scale((P.p_ijth + P.is_drn) / P.nv_tm).addC(P.p_ijth)
+    else
+        vbd.scale(1.0 / P.nv_tm).minC(80.0).exp().addC(-1.0).scale(P.is_drn);
 
     // ---- Effective body voltage Vbs_eff (region branch on vbs sign, as original) ----
     // Reverse: vbsc + 0.5*(t0 + sqrt(t0^2 - 0.004*vbsc)), t0 = vbs - vbsc - 0.001
@@ -1041,11 +1116,8 @@ const QPrep = struct {
 fn qPrep(model: *const Model, instance: *const Instance) QPrep {
     const tox: f64 = @as(f64, model.tox);
     const p_nch: f64 = @as(f64, model.nch);
-    const p_tnom: f64 = @as(f64, model.tnom);
-    const p_k1: f64 = if (@as(f64, model.k1) == 0.0)
-        @sqrt(2.0 * EPS_SI * Q_ELEC * @as(f64, model.nch) * 1.0e6) / (EPS_OX / tox)
-    else
-        @as(f64, model.k1);
+    const p_tnom: f64 = @as(f64, model.tnom) + 273.15; // card TNOM is Celsius
+    const p_k1: f64 = vthDefaults(model).k1;
     const p_lint: f64 = @as(f64, model.lint);
     const p_wint: f64 = @as(f64, model.wint);
 
@@ -1233,7 +1305,7 @@ pub fn limit(model: *const Model, instance: *const Instance, x_new: [n_u]f64, x_
     const s = @intFromEnum(U.source);
     const b = @intFromEnum(U.bulk);
 
-    const p_vth0: f64 = @as(f64, model.vth0);
+    const p_vth0: f64 = vthDefaults(model).vth0;
     const p_js: f64 = @as(f64, model.js);
     const type_f: f64 = @floatFromInt(model.type_);
 

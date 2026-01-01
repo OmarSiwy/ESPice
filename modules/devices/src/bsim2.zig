@@ -454,10 +454,11 @@ fn currentParams(model: *const Model, instance: *const Instance) CurrentParams {
     const lbib: f64 = @as(f64, model.lbib);
     const wbib: f64 = @as(f64, model.wbib);
 
-    // Operating point clamps
-    const v_dd: f64 = @as(f64, model.vdd);
-    const v_gg: f64 = @as(f64, model.vgg);
-    const v_bb: f64 = @as(f64, model.vbb);
+    // Operating point clamps. Cards follow ngspice sign convention (vbb is
+    // typically given negative, e.g. vbb=-3); these are magnitude limits.
+    const v_dd: f64 = @abs(@as(f64, model.vdd));
+    const v_gg: f64 = @abs(@as(f64, model.vgg));
+    const v_bb: f64 = @abs(@as(f64, model.vbb));
 
     // Junction params
     const js_param: f64 = @as(f64, model.js);

@@ -111,8 +111,8 @@ pub const Model = struct {
     xt: f32 = 1.55e-7,
 
     // --- A.3 Basic Model Parameters ---
-    vth0: f32 = 0.7,
-    vfb: f32 = -1.0,
+    vth0: f32 = std.math.nan(f32), // NaN = not given -> derived vfb+phi+k1*sqrt(phi) (b4temp.c)
+    vfb: f32 = std.math.nan(f32), // NaN = not given -> vth0-phi-k1*sqrt(phi), or -1.0 (b4temp.c)
     vddeot: f32 = 1.5,
     leffeot: f32 = 1e-6,
     weffeot: f32 = 10e-6,
@@ -127,7 +127,7 @@ pub const Model = struct {
     tbgbsub: f32 = 1108.0,
     ados: f32 = 1.0,
     bdos: f32 = 1.0,
-    k1: f32 = 0.5,
+    k1: f32 = 0.0, // 0 together with k2==0 = not given -> derived from gamma1/gamma2 (b4temp.c)
     k2: f32 = 0.0,
     k3: f32 = 80.0,
     k3b: f32 = 0.0,
@@ -193,7 +193,7 @@ pub const Model = struct {
     pditsl: f32 = 0.0,
     pditsd: f32 = 0.0,
     lambda_: f32 = 0.0,
-    vtl: f32 = 2.05e5,
+    vtl: f32 = 0.0, // 0 = not given; ngspice applies the source-end velocity limit only when VTL is on the card
     lc: f32 = 0.0,
     xn: f32 = 3.0,
 
@@ -792,7 +792,48 @@ const DcPrep = struct {
     g_rbsb: f64,
 };
 
+/// ngspice b4temp.c parameter derivation for values not on the model card.
+/// Sentinels: k1==0 && k2==0 = not given (derive from gamma1/gamma2 built
+/// from ndep/nsub, vbx from xt, vbm); vth0/vfb NaN = not given.
+const DerivedVth = struct { k1: f64, k2: f64, vth0: f64, vfb: f64 };
+
+fn vthDefaults(model: *const Model) DerivedVth {
+    const tnom_k = @as(f64, model.tnom) + 273.15;
+    const vt_nom = K_BOLTZ * tnom_k / Q_ELECTRON;
+    const ndep_cm3: f64 = @as(f64, model.ndep);
+    const ni_m3: f64 = 1.45e16;
+    const phi_s = @max(0.4 + vt_nom * safe_log(ndep_cm3 * 1.0e6 / ni_m3) + @as(f64, model.phin), 0.1);
+    const sqrt_phi_s = @sqrt(phi_s);
+
+    var vbm: f64 = @as(f64, model.vbm);
+    if (vbm > 0.0) vbm = -vbm;
+
+    var k1: f64 = @as(f64, model.k1);
+    var k2: f64 = @as(f64, model.k2);
+    if (k1 == 0.0 and k2 == 0.0) {
+        const coxe = @as(f64, model.epsrox) * EPS_0 / @as(f64, model.toxe);
+        var vbx = phi_s - 7.7348e-4 * ndep_cm3 * @as(f64, model.xt) * @as(f64, model.xt);
+        if (vbx > 0.0) vbx = -vbx;
+        const gamma1 = 5.753e-12 * @sqrt(ndep_cm3) / coxe;
+        const gamma2 = 5.753e-12 * @sqrt(@as(f64, model.nsub)) / coxe;
+        const t1 = @sqrt(phi_s - vbx) - sqrt_phi_s;
+        const t2 = @sqrt(phi_s * (phi_s - vbm)) - phi_s;
+        k2 = (gamma1 - gamma2) * t1 / (2.0 * t2 + vbm);
+        k1 = gamma2 - 2.0 * k2 * @sqrt(phi_s - vbm);
+    }
+
+    var vth0: f64 = @as(f64, model.vth0);
+    var vfb: f64 = @as(f64, model.vfb);
+    const vth0_given = vth0 == vth0; // NaN sentinel
+    const vfb_given = vfb == vfb;
+    if (!vfb_given) vfb = if (vth0_given) vth0 - phi_s - k1 * sqrt_phi_s else -1.0;
+    if (!vth0_given) vth0 = vfb + phi_s + k1 * sqrt_phi_s;
+
+    return .{ .k1 = k1, .k2 = k2, .vth0 = vth0, .vfb = vfb };
+}
+
 fn dcPrep(model: *const Model, instance: *const Instance) DcPrep {
+    const dv = vthDefaults(model);
     const type_f: f64 = @floatFromInt(model.type_);
     const toxe: f64 = @as(f64, model.toxe);
     const toxm: f64 = @as(f64, model.toxm);
@@ -800,12 +841,14 @@ fn dcPrep(model: *const Model, instance: *const Instance) DcPrep {
     const ndep_cm3: f64 = @as(f64, model.ndep);
     const ngate_cm3: f64 = @as(f64, model.ngate);
     const nsd_cm3: f64 = @as(f64, model.nsd);
-    const k1_param: f64 = @as(f64, model.k1);
-    const k2_param: f64 = @as(f64, model.k2);
+    const k1_param: f64 = dv.k1;
+    const k2_param: f64 = dv.k2;
     const lpe0: f64 = @as(f64, model.lpe0);
     const lpeb: f64 = @as(f64, model.lpeb);
     const dsub: f64 = @as(f64, model.dsub);
-    const mu0_param: f64 = @as(f64, model.u0);
+    // b4temp.c: u0 > 1 is in cm^2/(V*s) -> convert to m^2/(V*s)
+    const mu0_raw: f64 = @as(f64, model.u0);
+    const mu0_param: f64 = if (mu0_raw > 1.0) mu0_raw / 1.0e4 else mu0_raw;
     const ua_param: f64 = @as(f64, model.ua);
     const ub_param: f64 = @as(f64, model.ub);
     const uc_param: f64 = @as(f64, model.uc);
@@ -1029,12 +1072,13 @@ const QPrep = struct {
 };
 
 fn qPrep(model: *const Model, instance: *const Instance) QPrep {
+    const dv = vthDefaults(model);
     const type_f: f64 = @floatFromInt(model.type_);
     const toxe: f64 = @as(f64, model.toxe);
     const toxp: f64 = @as(f64, model.toxp);
     const epsrox: f64 = @as(f64, model.epsrox);
     const ndep_cm3: f64 = @as(f64, model.ndep);
-    const k1_param: f64 = @as(f64, model.k1);
+    const k1_param: f64 = dv.k1;
     const phin: f64 = @as(f64, model.phin);
     const lint: f64 = @as(f64, model.lint);
     const wint: f64 = @as(f64, model.wint);
@@ -1047,7 +1091,7 @@ fn qPrep(model: *const Model, instance: *const Instance) QPrep {
     const tnom_c: f64 = @as(f64, model.tnom);
     const xl: f64 = @as(f64, model.xl);
     const xw: f64 = @as(f64, model.xw);
-    const vth0_param: f64 = @as(f64, model.vth0);
+    const vth0_param: f64 = dv.vth0;
 
     const nf: f64 = @as(f64, instance.nf);
     const m_mult: f64 = @as(f64, instance.m);
@@ -1194,9 +1238,10 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     const toxp: f64 = @as(f64, model.toxp);
     const epsrox: f64 = @as(f64, model.epsrox);
     const ngate_cm3: f64 = @as(f64, model.ngate);
-    const vth0_param: f64 = @as(f64, model.vth0);
-    const k1_param: f64 = @as(f64, model.k1);
-    const k2_param: f64 = @as(f64, model.k2);
+    const dv = vthDefaults(model);
+    const vth0_param: f64 = dv.vth0;
+    const k1_param: f64 = dv.k1;
+    const k2_param: f64 = dv.k2;
     const k3: f64 = @as(f64, model.k3);
     const k3b: f64 = @as(f64, model.k3b);
     const w0: f64 = @as(f64, model.w0);
@@ -1320,7 +1365,12 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     // ========================================================================
     // Vbseff clamping (Eq 2.43--2.45)
     // ========================================================================
-    const vbc = 0.9 * (phi_s - k1_param * k1_param / (4.0 * @max(@abs(k2_param), 1e-12)));
+    // b4temp.c: vbc = 0.9*(phi - (0.5*k1/k2)^2), clamped to [-30, -3]; -30 when k2 >= 0
+    const vbc = blk: {
+        if (k2_param >= 0.0) break :blk -30.0;
+        const t0_bc = 0.5 * k1_param / k2_param;
+        break :blk @max(@min(0.9 * (phi_s - t0_bc * t0_bc), -3.0), -30.0);
+    };
     const t0_vbs = vbs.addC(-vbc - DELTA1);
     const vbseff_lower = t0_vbs.add(t0_vbs.mul(t0_vbs).addC(-4.0 * DELTA1 * vbc).sqrt()).scale(0.5).addC(vbc);
 
@@ -1347,7 +1397,7 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     // Poly gate depletion (Eq 1.7)
     // ========================================================================
     const vgse = if (ngate_cm3 > 1.0e18)
-        computePolyDepletion(S, vgs, model.vfb, phi_s, ngate_cm3 * 1.0e6, toxe, epsrox)
+        computePolyDepletion(S, vgs, dv.vfb, phi_s, ngate_cm3 * 1.0e6, toxe, epsrox)
     else
         vgs;
 
@@ -1419,11 +1469,14 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     // ========================================================================
     // Charge centroid Xdc, Coxeff (Eqs 3.5--3.6)
     // ========================================================================
-    const vfb_param: f64 = @as(f64, model.vfb);
-    const xdc_arg = vgsteff.addC(4.0 * (vth0_param - vfb_param - phi_s)).scale(1.0 / (2.0 * toxp)).addC(1.0);
-    const xdc = sLog(S, xdc_arg.maxC(0.01)).scale(0.7 * bdos).exp().pow(-1.0).scale(ados * 1.9e-9);
-    const ccen = xdc.maxC(1e-20).pow(-1.0).scale(EPS_SI);
-    const coxeff = ccen.scale(coxe).div(ccen.addC(coxe));
+    // b4ld.c: T0 = (Vgsteff + vtfbphi2)/(2e8*toxp); Tcen = ados*1.9e-9/(1 + T0^(0.7*bdos));
+    // Coxeff = epssub*coxp/(epssub + coxp*Tcen)
+    const vfb_param: f64 = dv.vfb;
+    const vtfbphi2 = @max(4.0 * (vth0_param - vfb_param - phi_s), 0.0);
+    const coxp = epsrox * EPS_0 / toxp;
+    const xdc_arg = vgsteff.addC(vtfbphi2).scale(1.0 / (2.0e8 * toxp));
+    const tcen = sLog(S, xdc_arg.maxC(1e-12)).scale(0.7 * bdos).exp().addC(1.0).pow(-1.0).scale(ados * 1.9e-9);
+    const coxeff = tcen.scale(coxp).addC(EPS_SI).pow(-1.0).scale(EPS_SI * coxp);
 
     // ========================================================================
     // Bulk charge effect Abulk (Eq 5.1--5.2)
@@ -1484,7 +1537,8 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     const wr_coxe_vsat = weff.mul(rds).scale(vsat_t * coxe);
 
     const aa = abulk.mul(abulk).mul(wr_coxe_vsat).add(abulk.mul(inv_lambda.addC(-1.0)));
-    const bb = vgst_2vt.mul(inv_lambda.addC(-1.0).add(abulk.mul(esat_l)))
+    // b4ld.c: T1 = Vgst2Vtm*(2/lambda - 1) + Abulk*EsatL + 3*Abulk*Vgst2Vtm*WVCoxRds; bb = -T1
+    const bb = vgst_2vt.mul(inv_lambda.scale(2.0).addC(-1.0)).add(abulk.mul(esat_l))
         .add(abulk.mul(vgst_2vt).mul(wr_coxe_vsat).scale(3.0)).neg();
     const cc = vgst_2vt.mul(esat_l).add(vgst_2vt.mul(vgst_2vt).mul(wr_coxe_vsat).scale(2.0));
 
@@ -1584,14 +1638,14 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     // Source-end velocity limit (Eqs 5.55--5.58)
     // ========================================================================
     const ids_final_ch = if (vtl_param > 0.0) blk: {
-        const r_bt = leff / @max(xn_param * leff + lc_param, 1e-20);
-        const v_sbt = (1.0 - r_bt) / (1.0 + r_bt) * vtl_param;
-        const qs = qch0.mul(abulk.mul(vdseff_clamped).div(vgst_2vt.maxC(1e-10).scale(2.0)).neg().addC(1.0)).maxC(1e-30);
-        const v_shd = ids_hd.abs().div(weff.mul(qs).scale(Q_ELECTRON).maxC(1e-30));
-        const ratio4 = v_shd.scale(1.0 / @max(v_sbt, 1e-10));
-        const ratio4_sq = ratio4.mul(ratio4);
-        const ratio4_4 = ratio4_sq.mul(ratio4_sq);
-        break :blk ids_hd.div(ratio4_4.addC(1.0).sqrt().sqrt());
+        // b4ld.c: vs = Ids/(Coxeff*Weff*Vgsteff); Fsevl = (1 + (vs/(vtl*tfactor))^(2*MM))^(-1/(2*MM)), MM=3
+        const t0_bt = leff / (xn_param * leff + @max(lc_param, 0.0));
+        const tfactor = (1.0 - t0_bt) / (1.0 + t0_bt);
+        const vs = ids_hd.abs().div(coxeff.mul(weff).mul(vgsteff.maxC(1e-20)).maxC(1e-30));
+        const t1_vs = vs.scale(1.0 / @max(vtl_param * tfactor, 1e-20));
+        const t1_sq = t1_vs.mul(t1_vs);
+        const t2_vs = t1_sq.mul(t1_sq).mul(t1_sq).addC(1.0);
+        break :blk ids_hd.mul(t2_vs.maxC(1e-30).pow(-1.0 / 6.0));
     } else ids_hd;
 
     // ========================================================================
@@ -1763,8 +1817,6 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     // sb node
     out[sb] = i_rbps.neg().add(i_rbsb).scale(m);
 
-
-
     return out;
 }
 
@@ -1781,6 +1833,7 @@ pub fn qFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *cons
     @setFloatMode(.optimized);
 
     const pq = &pc.q;
+    const dv = vthDefaults(model);
 
     const dp = @intFromEnum(U.drain_prime);
     const sp = @intFromEnum(U.source_prime);
@@ -1875,7 +1928,7 @@ pub fn qFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *cons
 
     // Poly gate depletion for CV
     const vgse = if (ngate_cm3 > 1.0e18)
-        computePolyDepletion(S, vgs_eff, model.vfb, phi_s, ngate_cm3 * 1.0e6, toxe, epsrox)
+        computePolyDepletion(S, vgs_eff, dv.vfb, phi_s, ngate_cm3 * 1.0e6, toxe, epsrox)
     else
         vgs_eff;
 
@@ -1926,7 +1979,7 @@ pub fn qFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *cons
     const xdc_acc_clamped = xdc_acc_x0.add(xdc_acc_x0.mul(xdc_acc_x0).addC(4.0 * delta_x * xdc_max).sqrt()).scale(-0.5).addC(xdc_max);
 
     // Inversion Xdc (Eq 7.28)
-    const xdc_inv_arg = vgsteff_cv_clamped.addC(4.0 * (vth0_param - @as(f64, model.vfb) - phi_s)).scale(1.0 / (2.0 * toxp)).addC(1.0);
+    const xdc_inv_arg = vgsteff_cv_clamped.addC(4.0 * (vth0_param - dv.vfb - phi_s)).scale(1.0 / (2.0 * toxp)).addC(1.0);
     const xdc_inv = sLog(S, xdc_inv_arg.maxC(0.01)).scale(0.7 * bdos).exp().pow(-1.0).scale(ados * 1.9e-9);
 
     // Blend (region branch on vgsteff_cv_clamped)
@@ -2106,7 +2159,7 @@ pub fn limit(model: *const Model, _: *const Instance, x_new: [n_u]f64, x_old: [n
     {
         const vgs_new = (x_new[gp] - x_new[sp]) * type_f;
         const vgs_old = (x_old[gp] - x_old[sp]) * type_f;
-        const vth: f64 = @as(f64, model.vth0);
+        const vth: f64 = vthDefaults(model).vth0;
         const vgs_lim = fetlim(vgs_new, vgs_old, vth);
         const delta_v = (vgs_lim - vgs_new) * type_f;
         result[gp] = result[gp] + delta_v;
@@ -2149,8 +2202,7 @@ pub fn attempt(model: Model, lambda: f64) Model {
 // Helper: Poly gate depletion (Eq 1.7) -- value-form (S)
 // ============================================================================
 
-fn computePolyDepletion(comptime S: type, vgs: S, vfb_f32: f32, phi_s: f64, ngate_m3: f64, toxe_val: f64, epsrox_val: f64) S {
-    const vfb: f64 = @as(f64, vfb_f32);
+fn computePolyDepletion(comptime S: type, vgs: S, vfb: f64, phi_s: f64, ngate_m3: f64, toxe_val: f64, epsrox_val: f64) S {
     const arg = vgs.addC(-vfb - phi_s);
     // a_poly, x-independent
     const a_poly = epsrox_val * epsrox_val * EPS_0 * EPS_0 / (2.0 * Q_ELECTRON * EPS_SI * ngate_m3 * toxe_val * toxe_val);
