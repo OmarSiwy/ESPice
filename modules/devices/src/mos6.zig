@@ -151,6 +151,9 @@ pub const c_pattern_override = [_]contract.Entry(n_u){
     // Q_BD: bulk -- d_prime
     .{ .row = @intFromEnum(U.bulk), .col = @intFromEnum(U.d_prime) },
     .{ .row = @intFromEnum(U.d_prime), .col = @intFromEnum(U.bulk) },
+    // Meyer channel charges couple d_prime and s_prime (mode-swapped vgd/vgs)
+    .{ .row = @intFromEnum(U.d_prime), .col = @intFromEnum(U.s_prime) },
+    .{ .row = @intFromEnum(U.s_prime), .col = @intFromEnum(U.d_prime) },
 };
 
 // ============================================================================
@@ -213,7 +216,9 @@ fn dcParams(model: *const Model, instance: *const Instance) DcParams {
     const w_eff = @max(w_inst, 1.0e-9);
 
     return .{
-        .vto = @as(f64, model.vto),
+        // Type-corrected: eval space is flipped for PMOS, so the threshold
+        // must be too (PMOS VTO=-0.6 → +0.6), as mos1 does.
+        .vto = @as(f64, @floatFromInt(model.type_)) * @as(f64, model.vto),
         .kv = @as(f64, model.kv),
         .nv = @as(f64, model.nv),
         .kc_wl = kc * w_eff / l_eff,
@@ -225,10 +230,13 @@ fn dcParams(model: *const Model, instance: *const Instance) DcParams {
         .phi = phi,
         .sqrt_phi = @sqrt(@max(phi, 1.0e-30)),
         .lam = @as(f64, model.lambda),
-        .lam0 = @as(f64, model.lambda0),
+        // ngspice mos6set.c: lamda0 defaults to LAMBDA when LAMBDA0 not given.
+        .lam0 = if (model.lambda0 != 0.0) @as(f64, model.lambda0) else @as(f64, model.lambda),
         .lam1 = @as(f64, model.lambda1),
-        .g_rd = if (rd != 0.0) 1.0 / rd else 1.0e12,
-        .g_rs = if (rs != 0.0) 1.0 / rs else 1.0e12,
+        // Zero resistance ⇒ prime node collapsed (collapse() below); g must
+        // be 0, not a 1e12 short — see mos1.zig dcParams.
+        .g_rd = if (rd != 0.0) 1.0 / rd else 0.0,
+        .g_rs = if (rs != 0.0) 1.0 / rs else 0.0,
         .is_val = @as(f64, model.is),
         // --- Thermal voltage ---
         .vt = 8.617333262145e-5 * tnom,
@@ -277,96 +285,70 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     const vgs_use = alpha_fwd.mul(v_gs_raw).add(one_minus_alpha.mul(v_gs_raw.sub(v_ds_raw)));
     const vbs_use = alpha_fwd.mul(v_bs_raw).add(one_minus_alpha.mul(v_bs_raw.sub(v_ds_raw)));
     const vds_eff = vds_abs;
-    const v_bd = vbs_use.sub(vds_eff);
 
-    // --- Threshold voltage ---
-    // Base threshold with body effect
-    const sarg = vbs_use.neg().addC(p.phi).maxC(1.0e-30).sqrt();
-    var vth = sarg.addC(-p.sqrt_phi).scale(p.gamma).addC(p.vto);
-
-    // Secondary body effect
-    vth = vth.add(vbs_use.scale(p.gamma1));
-
-    // DIBL / static feedback
-    vth = vth.add(vds_eff.scale(p.sigma));
-
-    // Threshold voltage Vds dependence
-    const nvth_factor = vds_eff.scale(p.nvth).addC(1.0);
-    vth = vth.mul(nvth_factor);
+    // --- Threshold voltage (ngspice mos6load.c) ---
+    // von = vbi + gamma·sarg − gamma1·vbs − sigma·vds, vbi = vto − gamma·√phi.
+    // vbs > 0 uses the linearized sarg (sqrt of negative is meaningless).
+    const sarg = if (vbs_use.val() <= 0.0)
+        vbs_use.neg().addC(p.phi).maxC(1.0e-30).sqrt()
+    else
+        vbs_use.scale(-1.0 / (2.0 * p.sqrt_phi)).addC(p.sqrt_phi).maxC(0.0);
+    const vth = sarg.addC(-p.sqrt_phi).scale(p.gamma).addC(p.vto)
+        .sub(vbs_use.scale(p.gamma1))
+        .sub(vds_eff.scale(p.sigma));
 
     // --- Gate overdrive ---
     const vgst = vgs_use.sub(vth);
     // Clamped positive overdrive (branchless half-wave rectifier)
     const vgst_pos = vgst.add(vgst.abs()).scale(0.5).addC(1.0e-30);
 
-    // --- Saturation voltage (Sakurai-Newton) ---
+    // --- Saturation voltage / current (Sakurai-Newton power laws) ---
     const v_dsat = vgst_pos.log().scale(p.nv).exp().scale(p.kv);
-
-    // --- Drain current (Sakurai-Newton) ---
-    // Saturation current
     const i_sat = vgst_pos.log().scale(p.nc).exp().scale(p.kc_wl);
 
-    // Smooth linear/saturation transition
+    // Smooth linear/saturation transition: f_lin = (2−r)·r, r = min(vds/vdsat, 1)
     const eps_s: f64 = 1.0e-4;
     const r_ratio = vds_eff.div(v_dsat.addC(1.0e-20));
     const r_minus_1 = r_ratio.addC(-1.0);
     const r_clamped = r_ratio.addC(1.0).sub(r_minus_1.mul(r_minus_1).addC(eps_s * eps_s).sqrt()).scale(0.5);
     const f_lin = r_clamped.scale(2.0).sub(r_clamped.mul(r_clamped));
 
-    var ids = i_sat.mul(f_lin);
-
-    // --- Channel-length modulation ---
-    const vds_minus_vdsat = vds_eff.sub(v_dsat).maxC(0.0);
-
-    // lam0 != 0: use lam0 + lam1 * vbs_use
-    // lam0 == 0 but lam != 0: use lam
-    // Both zero: factor = 1.0
-    const lam_eff_0 = vbs_use.scale(p.lam1).addC(p.lam0);
-    const lam_factor = if (p.lam0 != 0.0)
-        lam_eff_0.mul(vds_minus_vdsat).addC(1.0)
-    else
-        vds_minus_vdsat.scale(p.lam).addC(1.0);
-    ids = ids.mul(lam_factor);
+    // --- Channel-length modulation (mos6load: cdrain = idsat·(1+λ·vds)·f_lin,
+    // λ = lamda0 − lamda1·vbs, full vds — NOT vds−vdsat) ---
+    const lam_eff = vbs_use.scale(-p.lam1).addC(p.lam0);
+    var ids = i_sat.mul(lam_eff.mul(vds_eff).addC(1.0)).mul(f_lin);
 
     // --- Current sign and polarity ---
     const mode = alpha_fwd.scale(2.0).addC(-1.0);
     ids = ids.mul(mode);
 
-    // --- Bulk junction diode currents ---
-    const arg_bs = vbs_use.div(S.con(p.vt)).minC(80.0);
-    const i_bs = arg_bs.exp().addC(-1.0).scale(p.is_val);
+    // --- Bulk junction diode currents (gmin folded in, as mos1/ngspice) ---
+    // Junction voltages use raw (non-mode-swapped) values relative to bulk.
+    const vbd_raw = v_bs_raw.sub(v_ds_raw);
+    const arg_bs = v_bs_raw.div(S.con(p.vt)).minC(80.0);
+    const i_bs = arg_bs.exp().addC(-1.0).scale(p.is_val).add(v_bs_raw.scale(gmin));
 
-    const arg_bd = v_bd.div(S.con(p.vt)).minC(80.0);
-    const i_bd = arg_bd.exp().addC(-1.0).scale(p.is_val);
+    const arg_bd = vbd_raw.div(S.con(p.vt)).minC(80.0);
+    const i_bd = arg_bd.exp().addC(-1.0).scale(p.is_val).add(vbd_raw.scale(gmin));
 
     // --- Parasitic resistance currents ---
     const i_rd = x[d].sub(x[dp]).scale(p.g_rd);
     const i_rs = x[s].sub(x[sp]).scale(p.g_rs);
 
-    // --- GMIN stabilization currents ---
-    const i_gmin_ds = x[dp].sub(x[sp]).scale(gmin);
-    const i_gmin_gs = x[g].sub(x[sp]).scale(gmin);
-    const i_gmin_gd = x[g].sub(x[dp]).scale(gmin);
-
     // --- Apply type factor to junction and channel currents ---
+    // i_bs/i_bd flow bulk → s'/d'; ids flows d' → s' (mode-signed above).
     const ids_out = ids.scale(p.type_f);
     const i_bs_out = i_bs.scale(p.type_f);
     const i_bd_out = i_bd.scale(p.type_f);
 
-    // --- KCL node stamps ---
+    // --- KCL node stamps (current leaving node, mos1/jfet convention) ---
     var out: [n_u]S = undefined;
-    // D (ext): -I_RD
-    out[d] = i_rd.neg();
-    // G: -I_GMIN_GS - I_GMIN_GD
-    out[g] = i_gmin_gs.neg().sub(i_gmin_gd);
-    // S (ext): -I_RS
-    out[s] = i_rs.neg();
-    // B: -I_BS - I_BD
-    out[b] = i_bs_out.neg().sub(i_bd_out);
-    // D' (int): I_RD + I_DS + I_BD + I_GMIN_GD - I_GMIN_DS
-    out[dp] = i_rd.add(ids_out).add(i_bd_out).add(i_gmin_gd).sub(i_gmin_ds);
-    // S' (int): I_RS - I_DS + I_BS + I_GMIN_GS + I_GMIN_DS
-    out[sp] = i_rs.sub(ids_out).add(i_bs_out).add(i_gmin_gs).add(i_gmin_ds);
+    out[d] = i_rd;
+    out[g] = S.con(0.0);
+    out[s] = i_rs;
+    out[b] = i_bs_out.add(i_bd_out);
+    out[dp] = ids_out.sub(i_bd_out).sub(i_rd);
+    out[sp] = ids_out.neg().sub(i_bs_out).sub(i_rs);
     return out;
 }
 
@@ -388,6 +370,14 @@ const QParams = struct {
     pb: f64,
     one_minus_mj: f64,
     type_f: f64,
+    // Meyer intrinsic gate capacitance (ngspice mos6load: DEVqmeyer)
+    c_ox: f64,
+    vto: f64,
+    gamma: f64,
+    phi: f64,
+    sqrt_phi: f64,
+    kv: f64,
+    nv: f64,
 };
 
 fn qParams(model: *const Model, instance: *const Instance) QParams {
@@ -421,6 +411,17 @@ fn qParams(model: *const Model, instance: *const Instance) QParams {
         .one_minus_mj = one_minus_mj,
         // --- Type factor for NMOS/PMOS ---
         .type_f = @floatFromInt(model.type_),
+        // --- Meyer intrinsic gate capacitance ---
+        .c_ox = if (model.tox != 0.0)
+            (3.9 * 8.854e-12 / @as(f64, model.tox)) * w_eff * l_eff
+        else
+            0.0,
+        .vto = @as(f64, @floatFromInt(model.type_)) * @as(f64, model.vto),
+        .gamma = @as(f64, model.gamma),
+        .phi = @as(f64, model.phi),
+        .sqrt_phi = @sqrt(@max(@as(f64, model.phi), 1.0e-30)),
+        .kv = @as(f64, model.kv),
+        .nv = @as(f64, model.nv),
     };
 }
 
@@ -465,6 +466,87 @@ pub fn qFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *cons
     const v_bd = x[b].sub(x[dp]).scale(p.type_f);
 
     // ========================================================================
+    // Meyer Intrinsic Gate Capacitance (ngspice mos6load: DEVqmeyer)
+    // ========================================================================
+    // Mode-swapped voltages, as mos1. vdsat uses the Sakurai power law.
+    const vds_raw = x[dp].sub(x[sp]).scale(p.type_f);
+    const vds_eff = vds_raw.abs();
+    const vds_neg = vds_raw.minC(0.0);
+    const vgs_eff = v_gs.sub(vds_neg);
+    const vbs_eff = v_bs.sub(vds_neg);
+
+    const sarg = if (vbs_eff.val() <= 0.0)
+        vbs_eff.neg().addC(p.phi).maxC(1e-30).sqrt()
+    else
+        vbs_eff.scale(-1.0 / (2.0 * p.sqrt_phi)).addC(p.sqrt_phi).maxC(0.0);
+    const vth = sarg.addC(-p.sqrt_phi).scale(p.gamma).addC(p.vto);
+    const vgst = vgs_eff.sub(vth);
+    const vgst_pos = vgst.maxC(0.0).addC(1e-30);
+    // ngspice devsup.c DEVqmeyer: vdsat floored at MAGIC_VDS = 25 mV.
+    const vdsat_prime = vgst_pos.log().scale(p.nv).exp().scale(p.kv).maxC(0.025);
+
+    // Modern DEVqmeyer regions (values here are the steady-state totals,
+    // i.e. 2x the per-half values ngspice integrates).
+    // ponytail: Q = C(x)·V charge form — carries a V·dC/dt term ngspice's
+    // capacitance-based Meyer doesn't have; small mid-transition delta,
+    // but smooth in x (a frozen-C variant trips LTE / TimestepTooSmall).
+    const c_ox = p.c_ox;
+    var c_gs_meyer: S = undefined;
+    var c_gd_meyer: S = undefined;
+    var c_gb_meyer: S = undefined;
+    if (vgst.val() <= -p.phi) {
+        // Accumulation
+        c_gs_meyer = S.con(0.0);
+        c_gd_meyer = S.con(0.0);
+        c_gb_meyer = S.con(c_ox);
+    } else if (vgst.val() <= -p.phi / 2.0) {
+        // Depletion
+        c_gs_meyer = S.con(0.0);
+        c_gd_meyer = S.con(0.0);
+        c_gb_meyer = vgst.scale(-c_ox / p.phi);
+    } else if (vgst.val() <= 0.0) {
+        // Weak inversion: cgs ramps toward 2/3·cox, with the linear-region
+        // vds partition applied (removes the old vgst=0 discontinuity).
+        c_gb_meyer = vgst.scale(-c_ox / p.phi);
+        const base = vgst.scale(2.0 * c_ox / (1.5 * p.phi)).addC(2.0 * c_ox / 3.0);
+        if (vds_eff.val() >= vdsat_prime.val()) {
+            c_gs_meyer = base;
+            c_gd_meyer = S.con(0.0);
+        } else {
+            const vddif = vdsat_prime.scale(2.0).sub(vds_eff).maxC(1e-30);
+            const vddif1 = vdsat_prime.sub(vds_eff);
+            const vddif_sq = vddif.mul(vddif);
+            c_gd_meyer = base.mul(vdsat_prime.mul(vdsat_prime).div(vddif_sq).neg().addC(1.0));
+            c_gs_meyer = base.mul(vddif1.mul(vddif1).div(vddif_sq).neg().addC(1.0));
+        }
+    } else if (vds_eff.val() >= vdsat_prime.val()) {
+        // Strong inversion, saturation region
+        c_gs_meyer = S.con((2.0 / 3.0) * c_ox);
+        c_gd_meyer = S.con(0.0);
+        c_gb_meyer = S.con(0.0);
+    } else {
+        // Strong inversion, linear region
+        const vddif = vdsat_prime.scale(2.0).sub(vds_eff).maxC(1e-30);
+        const vddif1 = vdsat_prime.sub(vds_eff);
+        const vddif_sq = vddif.mul(vddif);
+        c_gs_meyer = vddif1.mul(vddif1).div(vddif_sq).neg().addC(1.0).scale((2.0 / 3.0) * c_ox);
+        c_gd_meyer = vdsat_prime.mul(vdsat_prime).div(vddif_sq).neg().addC(1.0).scale((2.0 / 3.0) * c_ox);
+        c_gb_meyer = S.con(0.0);
+    }
+
+    const vgd_eff = vgs_eff.sub(vds_eff);
+    const vgb_eff = vgs_eff.sub(vbs_eff);
+    const q_gs_meyer = c_gs_meyer.mul(vgs_eff);
+    const q_gd_meyer = c_gd_meyer.mul(vgd_eff);
+    const q_gb_meyer = c_gb_meyer.mul(vgb_eff);
+
+    // Map Meyer channel-side charges back to physical terminals (swap on
+    // reversed mode, as mos1).
+    const normal_mode = vds_raw.val() >= 0.0;
+    const q_meyer_dp = if (normal_mode) q_gd_meyer.neg() else q_gs_meyer.neg();
+    const q_meyer_sp = if (normal_mode) q_gs_meyer.neg() else q_gd_meyer.neg();
+
+    // ========================================================================
     // Gate Overlap Charges (Meyer Model -- linear overlap only)
     // ========================================================================
     // Overlap caps are scaled by width (length for cgbo) in qParams
@@ -496,11 +578,12 @@ pub fn qFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *cons
     var out: [n_u]S = undefined;
     // External drain and source have no charge (resistors are memoryless)
     out[@intFromEnum(U.drain)] = S.con(0.0);
-    out[g] = q_gs_ovl.add(q_gd_ovl).add(q_gb_ovl).scale(p.type_f);
+    out[g] = q_gs_ovl.add(q_gd_ovl).add(q_gb_ovl)
+        .add(q_gs_meyer).add(q_gd_meyer).add(q_gb_meyer).scale(p.type_f);
     out[@intFromEnum(U.source)] = S.con(0.0);
-    out[b] = q_gb_ovl.neg().add(q_bs_dep).add(q_bd_dep).scale(p.type_f);
-    out[dp] = q_gd_ovl.neg().sub(q_bd_dep).scale(p.type_f);
-    out[sp] = q_gs_ovl.neg().sub(q_bs_dep).scale(p.type_f);
+    out[b] = q_gb_ovl.neg().sub(q_gb_meyer).add(q_bs_dep).add(q_bd_dep).scale(p.type_f);
+    out[dp] = q_gd_ovl.neg().sub(q_bd_dep).add(q_meyer_dp).scale(p.type_f);
+    out[sp] = q_gs_ovl.neg().sub(q_bs_dep).add(q_meyer_sp).scale(p.type_f);
     return out;
 }
 
@@ -578,39 +661,66 @@ pub fn limit(model: *const Model, _: *const Instance, x_new: [n_u]f64, x_old: [n
     }
 
     // ========================================================================
-    // MOS Gate Voltage Limiting on V_GS (gate -- s_prime)
+    // DEVfetlim -- Gate-Source Voltage Limiting (ngspice mos6load.c)
     // ========================================================================
     {
+        const vto: f64 = type_f * @as(f64, model.vto);
         const vgs_new = (result[g] - result[sp]) * type_f;
         const vgs_old = (x_old[g] - x_old[sp]) * type_f;
 
-        var vgs_limited = vgs_new;
-        if (vgs_new - vgs_old > 2.0 * vt) {
-            vgs_limited = vgs_old + 2.0 * vt;
-        } else if (vgs_old - vgs_new > 2.0 * vt) {
-            vgs_limited = vgs_old - 2.0 * vt;
+        const vtox = vto + 3.5;
+        const vtsthi = @abs(2.0 * (vgs_old - vto)) + 2.0;
+        const vtstlo = vtsthi / 2.0 + 2.0;
+        const delta_v = vgs_new - vgs_old;
+
+        var vgs_lim = vgs_new;
+        if (vgs_old >= vto) {
+            if (vgs_old >= vtox) {
+                if (delta_v <= 0.0) {
+                    vgs_lim = @max(vgs_new, vgs_old - vtstlo);
+                } else {
+                    vgs_lim = @min(vgs_new, vgs_old + vtsthi);
+                }
+            } else {
+                if (delta_v <= 0.0) {
+                    vgs_lim = @max(vgs_new, vto - 0.5);
+                } else {
+                    vgs_lim = @min(vgs_new, vgs_old + vtsthi);
+                }
+            }
+        } else {
+            if (delta_v <= 0.0) {
+                vgs_lim = @max(vgs_new, vgs_old - vtstlo);
+            } else {
+                vgs_lim = @min(vgs_new, vto + 0.5);
+            }
         }
 
-        const delta_gs = (vgs_limited - vgs_new) * type_f;
-        result[g] += delta_gs;
+        result[g] += (vgs_lim - vgs_new) * type_f;
     }
 
     // ========================================================================
-    // MOS Drain-Source Voltage Limiting on V_DS (d_prime -- s_prime)
+    // DEVlimvds -- Drain-Source Voltage Limiting
     // ========================================================================
     {
         const vds_new = (result[dp] - result[sp]) * type_f;
         const vds_old = (x_old[dp] - x_old[sp]) * type_f;
+        const delta_vds = vds_new - vds_old;
 
-        var vds_limited = vds_new;
-        if (vds_new - vds_old > 2.0 * vt) {
-            vds_limited = vds_old + 2.0 * vt;
-        } else if (vds_old - vds_new > 2.0 * vt) {
-            vds_limited = vds_old - 2.0 * vt;
+        var vds_lim = vds_new;
+        if (vds_old >= 3.5) {
+            if (delta_vds <= 0.0) {
+                vds_lim = @max(vds_new, -0.5 * vds_old);
+            } else {
+                vds_lim = @min(vds_new, 2.0 * vds_old);
+            }
+        } else {
+            if (vds_new > 4.0) {
+                vds_lim = @min(vds_new, 4.0);
+            }
         }
 
-        const delta_ds = (vds_limited - vds_new) * type_f;
-        result[dp] += delta_ds;
+        result[dp] += (vds_lim - vds_new) * type_f;
     }
 
     return result;
@@ -619,6 +729,17 @@ pub fn limit(model: *const Model, _: *const Instance, x_new: [n_u]f64, x_old: [n
 // ============================================================================
 // Parameter Stepping (Convergence Aid)
 // ============================================================================
+
+// ============================================================================
+// Node Collapse (ngspice MOS6setup: dNodePrime = dNode when RD = 0)
+// ============================================================================
+
+pub fn collapse(model: *const Model, _: *const Instance) [n_u]?u8 {
+    var out: [n_u]?u8 = @splat(null);
+    if (model.rd == 0) out[@intFromEnum(U.d_prime)] = @intFromEnum(U.drain);
+    if (model.rs == 0) out[@intFromEnum(U.s_prime)] = @intFromEnum(U.source);
+    return out;
+}
 
 pub fn attempt(model: Model, lambda: f64) Model {
     var m = model;
@@ -636,33 +757,31 @@ comptime {
 // ============================================================================
 // Tests
 // ============================================================================
-// Expected values below are computed from the OLD pointer-form i()/q()
-// implementation (verbatim f64 arithmetic, f32 parameter storage) and serve
-// as the physics regression for the value-form migration.
+// Expected values below are computed from the ngspice-aligned mos6load.c
+// formulas (verbatim f64 arithmetic, f32 parameter storage).
 
 const testing = std.testing;
 
 test "mos6: on-state forward, linear region (defaults, vgs=2 vds=1)" {
     // Defaults: vto=0, kv=2, nv=0.5, kc=5e-5, nc=1, nvth=0.5, type=1, w=l=1u.
     // x = {d=1, g=2, s=0, b=0, dp=1, sp=0}: alpha_fwd=1, vgs_use=2, vds_eff=1.
-    //   vth  = 0 * (1 + 0.5*1) = 0; vgst_pos = 2
+    //   vth  = 0; vgst_pos = 2
     //   vdsat = 2*2^0.5 = 2.8284271; i_sat = 5e-5(f32)*(1e-6/1e-6)*2 ~ 1e-4
     //   r_ratio = 1/2.8284271 = 0.35355339; smooth clamp r_c ~ 0.35355339
     //   f_lin = 2*r_c - r_c^2 ~ 0.58210676 -> ids ~ 5.8210676e-5
-    //   v_bd = -1 -> i_bd = 1e-14*(exp(-1/vt)-1) ~ -1e-14
-    //   out[b]  = -(i_bs + i_bd) = ~ +1e-14
-    //   out[dp] = ids + i_bd + gmin*(2-1) - gmin*(1-0) ~ 5.82106761e-5
-    //   out[sp] = -ids + i_bs + gmin*2 + gmin*1 ~ -5.82106731e-5
-    //   out[g]  = -gmin*(2-0) - gmin*(2-1) = -3e-12
+    //   vbd_raw = -1 -> i_bd = 1e-14*(exp(-1/vt)-1) - gmin ~ -1.01e-12
+    //   out[b]  = i_bs + i_bd ~ -1.01e-12
+    //   out[dp] = ids - i_bd ~ 5.8210677e-5
+    //   out[sp] = -ids - i_bs ~ -5.8210676e-5
     const model: Model = .{};
     const inst: Instance = .{};
     const out = contract.evalValues(Self, .{ 1.0, 2.0, 0.0, 0.0, 1.0, 0.0 }, &model, &inst, 0);
     try testing.expectApproxEqAbs(@as(f64, 0.0), out[0], 1e-30);
-    try testing.expectApproxEqRel(@as(f64, -3.0e-12), out[1], 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 0.0), out[1], 1e-30);
     try testing.expectApproxEqAbs(@as(f64, 0.0), out[2], 1e-30);
-    try testing.expectApproxEqRel(@as(f64, 9.9999998245167e-15), out[3], 1e-12);
-    try testing.expectApproxEqRel(@as(f64, 5.8210676138129345e-5), out[4], 1e-12);
-    try testing.expectApproxEqRel(@as(f64, -5.821067314812934e-5), out[5], 1e-12);
+    try testing.expectApproxEqRel(@as(f64, -1.0099999998245167e-12), out[3], 1e-12);
+    try testing.expectApproxEqRel(@as(f64, 5.821067715812934e-5), out[4], 1e-12);
+    try testing.expectApproxEqRel(@as(f64, -5.821067614812934e-5), out[5], 1e-12);
 }
 
 test "mos6: reversed vds (source/drain swap path)" {
@@ -673,38 +792,38 @@ test "mos6: reversed vds (source/drain swap path)" {
     const inst: Instance = .{};
     const out = contract.evalValues(Self, .{ -1.0, 2.0, 0.0, 0.0, -1.0, 0.0 }, &model, &inst, 0);
     try testing.expectApproxEqAbs(@as(f64, 0.0), out[0], 1e-30);
-    try testing.expectApproxEqRel(@as(f64, -5.000000000000005e-12), out[1], 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 0.0), out[1], 1e-30);
     try testing.expectApproxEqAbs(@as(f64, 0.0), out[2], 1e-30);
-    try testing.expectApproxEqRel(@as(f64, -6.178250585647664e2), out[3], 1e-12);
-    try testing.expectApproxEqRel(@as(f64, -7.410253375645625e-5), out[4], 1e-12);
-    try testing.expectApproxEqRel(@as(f64, 6.178251326673052e2), out[5], 1e-12);
+    try testing.expectApproxEqRel(@as(f64, 6.178250585647675e2), out[3], 1e-12);
+    try testing.expectApproxEqRel(@as(f64, -6.178251326673052e2), out[4], 1e-12);
+    try testing.expectApproxEqRel(@as(f64, 7.410253775645624e-5), out[5], 1e-12);
 }
 
 test "mos6: forward-biased bulk junctions (vbs=vbd=0.6)" {
     // x = {0,0,0, b=0.6, 0,0}: vbs_use = v_bd = 0.6.
     //   i_bs = i_bd = 1e-14*(exp(0.6/vt)-1), vt = 8.617333262145e-5*tnom(f32)
     //        ~ 1e-14*(exp(23.196)-1) ~ 1.1871875e-4
-    //   out[b] = -2*i_bs, out[dp] = out[sp] = +i_bs (ids=0: vgst<0).
+    //   out[b] = +2*i_bs (leaves bulk), out[dp] = out[sp] = -i_bs.
     const model: Model = .{};
     const inst: Instance = .{};
     const out = contract.evalValues(Self, .{ 0.0, 0.0, 0.0, 0.6, 0.0, 0.0 }, &model, &inst, 0);
-    try testing.expectApproxEqRel(@as(f64, -2.3743749622067648e-4), out[3], 1e-12);
-    try testing.expectApproxEqRel(@as(f64, 1.1871874811033824e-4), out[4], 1e-12);
-    try testing.expectApproxEqRel(@as(f64, 1.1871874811033824e-4), out[5], 1e-12);
+    try testing.expectApproxEqRel(@as(f64, 2.374374974206765e-4), out[3], 1e-12);
+    try testing.expectApproxEqRel(@as(f64, -1.1871874871033825e-4), out[4], 1e-12);
+    try testing.expectApproxEqRel(@as(f64, -1.1871874871033825e-4), out[5], 1e-12);
 }
 
 test "mos6: body effect + channel-length modulation, saturation" {
     // gamma=0.5, lambda=0.02, vto=0.7, nvth=0; x = {3, 2, 0, -0.5, 3, 0}.
     //   vth = 0.7 + 0.5*(sqrt(0.6+0.5)-sqrt(0.6)) ~ 0.83714; vgst ~ 1.16286
     //   vdsat = 2*sqrt(1.16286) ~ 2.15672; vds=3 > vdsat (saturation)
-    //   ids ~ kc*vgst*f_lin*(1 + 0.02*(3-vdsat)) ~ 5.9125e-5
+    //   CLM uses full vds (mos6load): ids ~ kc*vgst*(1 + 0.02*3) ~ 6.1633e-5
     const model: Model = .{ .gamma = 0.5, .lambda = 0.02, .vto = 0.7, .nvth = 0 };
     const inst: Instance = .{};
     const out = contract.evalValues(Self, .{ 3.0, 2.0, 0.0, -0.5, 3.0, 0.0 }, &model, &inst, 0);
-    try testing.expectApproxEqRel(@as(f64, -1.0e-12), out[1], 1e-12);
-    try testing.expectApproxEqRel(@as(f64, 1.999999960880181e-14), out[3], 1e-12);
-    try testing.expectApproxEqRel(@as(f64, 5.9125299615215105e-5), out[4], 1e-12);
-    try testing.expectApproxEqRel(@as(f64, -5.912529863521511e-5), out[5], 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 0.0), out[1], 1e-30);
+    try testing.expectApproxEqRel(@as(f64, -4.019999999608802e-12), out[3], 1e-12);
+    try testing.expectApproxEqRel(@as(f64, 6.16333798718592e-5), out[4], 1e-12);
+    try testing.expectApproxEqRel(@as(f64, -6.16333758518592e-5), out[5], 1e-12);
 }
 
 test "mos6: overlap + junction depletion charges" {
