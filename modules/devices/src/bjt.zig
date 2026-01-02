@@ -366,7 +366,6 @@ fn evalPrep(model: *const Model, instance: *const Instance) EvalPrep {
     const area: f64 = @as(f64, instance.area);
     const m_mult: f64 = @as(f64, instance.m);
     const vt = thermalVoltage(model, instance);
-    const g_short: f64 = 1.0e12;
     const area_m = area * m_mult;
     const rbm_eff: f64 = if (rbm == 0.0) rb_val else rbm;
 
@@ -400,8 +399,10 @@ fn evalPrep(model: *const Model, instance: *const Instance) EvalPrep {
         .inv_nc_vt = 1.0 / (nc * vt),
         .inv_ns_vt = 1.0 / (ns * vt),
         .area_m = area_m,
-        .g_c = if (rc_val != 0.0) area_m / rc_val else g_short,
-        .g_e = if (re_val != 0.0) area_m / re_val else g_short,
+        // Collapsed prime nodes (rc/re = 0, see collapse()) carry no tie
+        // conductance — a 1e12 short loses real conductances to its ulp.
+        .g_c = if (rc_val != 0.0) area_m / rc_val else 0.0,
+        .g_e = if (re_val != 0.0) area_m / re_val else 0.0,
         .rb_is_zero = rb_val == 0.0,
         .rb_eq_rbm = @abs(rb_val - rbm_eff) < 1.0e-30,
         .is_half = @abs(nkf - 0.5) < 1.0e-9,
@@ -584,7 +585,6 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
 
     // --- Constants ---
     const gmin: f64 = 1.0e-12;
-    const g_short: f64 = 1.0e12;
 
     // --- Junction voltages (NPN convention) ---
     const v_be = x[bp].sub(x[ep]).scale(p.type_f);
@@ -677,7 +677,8 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
 
     var i_rb: S = undefined;
     if (p.rb_is_zero) {
-        i_rb = v_bb.scale(g_short);
+        // b_prime collapsed onto b: no tie current (1e12 ulp poison).
+        i_rb = S.con(0.0);
     } else if (p.irb_val > 0.0) {
         // Case 4: R_B_eff = RBM/AREA + (RB - RBM) / (AREA * (1 + sqrt(|IB|*AREA*M/IRB + 1e-9)))
         const abs_ib = i_b_int.abs().scale(p.area_m);
@@ -847,6 +848,9 @@ pub fn qFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *cons
 // ============================================================================
 // Voltage Limiting (DEVpnjlim for B-E and B-C junctions)
 // ============================================================================
+
+/// pnjlim writes its junction correction to b_prime (ngspice icheck source).
+pub const limit_flag_unknowns = [_]U{.b_prime};
 
 pub fn limit(model: *const Model, instance: *const Instance, x_new: [n_u]f64, x_old: [n_u]f64) [n_u]f64 {
     const cp = @intFromEnum(U.c_prime);

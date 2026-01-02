@@ -24,6 +24,11 @@ const direct = root.solvers.direct;
 
 pub const Strategy = enum { newton, jfnk };
 
+/// ZP_OPDBG=1 traces Newton iterations + ladder rungs to stderr.
+pub fn opdbg() bool {
+    return std.c.getenv("ZP_OPDBG") != null;
+}
+
 // ---------------------------------------------------------------------------
 // Tolerances — user-facing accuracy profile. One struct, set once at the
 // engine level, propagated into every analysis via Options.tol. Named
@@ -38,7 +43,7 @@ pub const Tolerances = struct {
     vntol: f64 = 1e-6,
     gmin: f64 = 1e-12,
     residual_tol: f64 = 1e-9,
-    dx_clamp: f64 = 10.0,
+    dx_clamp: f64 = std.math.inf(f64),
 
     // DC continuation
     gmin_start: f64 = 1e-2,
@@ -89,7 +94,7 @@ pub const Options = struct {
     vntol: f64 = 1e-6,
     residual_tol: f64 = 1e-9,
     gmin: f64 = 1e-12,
-    dx_clamp: f64 = 10.0,
+    dx_clamp: f64 = std.math.inf(f64),
 };
 
 pub const Result = struct {
@@ -126,8 +131,7 @@ pub fn newton(
     const dx = ws.dx;
     const x_old = ws.x_old;
     var iter: u16 = 0;
-    var prev_norm = std.math.inf(f64);
-    var backtracks: u8 = 0;
+
     while (iter < opts.max_iter) : (iter += 1) {
         hook.assemble(ckt, x, t);
         const v = hook.vals(ckt);
@@ -145,22 +149,38 @@ pub fn newton(
         // node to limit (collapsed primes, shared nets).
         var norm_f: f64 = 0;
         for (0..ckt.n) |i| norm_f = @max(norm_f, @abs(ckt.rhs[i]));
-        if (norm_f > 10.0 * prev_norm and backtracks < 16) {
-            for (0..ckt.n) |i| x[i] = 0.5 * (x[i] + x_old[i]);
-            // Keep device-private limiting state tracking the retreated x —
-            // a stale lim point makes the re-assembled F meaningless.
-            _ = ckt.applyLimits(x, x_old);
-            backtracks += 1;
-            continue;
-        }
-        backtracks = 0;
-        prev_norm = norm_f;
-        try slv.factor(v);
+        // No system-level residual backtracking: ngspice has none — device
+        // limiting (pnjlim/fetlim/limvds, now ngspice-exact) IS the
+        // globalization. A monotone-||F|| safeguard here double-limits and
+        // starves recovery: junction settling legitimately flares ||F|| by
+        // 10-100x for an iteration, and retreating turns a 3-iteration
+        // settle into 50 (measured on fourbitadder/mos6_inverter).
+        slv.factor(v) catch |e| {
+            if (opdbg()) {
+                var nan_cnt: usize = 0;
+                var max_x: f64 = 0;
+                for (v[0..ckt.nnz]) |vi| {
+                    if (!std.math.isFinite(vi)) nan_cnt += 1;
+                }
+                for (0..ckt.n) |i| max_x = @max(max_x, @abs(x[i]));
+                std.debug.print("  newton it={d} FACTOR FAIL {} nan_vals={d} max|x|={e:.3} |F|={e:.3}\n", .{ iter, e, nan_cnt, max_x, norm_f });
+            }
+            return e;
+        };
         slv.solveNeg(ckt.rhs, dx);
         dampStep(dx[0..ckt.n], opts.dx_clamp);
         // ckt.rhs still holds F(x) + gmin·x — solveNeg takes rhs as const;
         // v still holds the assembled matrix (factor copies internally).
         const st = finalizeStep(ckt, x, dx, x_old, ckt.rhs, v, iter, opts);
+        if (opdbg()) {
+            var fi: usize = 0;
+            var di: usize = 0;
+            for (0..ckt.n) |i| {
+                if (@abs(ckt.rhs[i]) > @abs(ckt.rhs[fi])) fi = i;
+                if (@abs(dx[i]) > @abs(dx[di])) di = i;
+            }
+            std.debug.print("  newton it={d} |F|={e:.3}@{d}({s}) dx={e:.3}@{d}({s}) x={e:.3} scaled={e:.3} conv={}\n", .{ iter, norm_f, fi, ckt.nodeName(@intCast(fi)), dx[di], di, ckt.nodeName(@intCast(di)), x[di], st.scaled, st.converged });
+        }
         if (st.converged)
             return .{ .converged = true, .iterations = iter + 1, .max_dx = st.scaled };
     }
@@ -284,8 +304,7 @@ pub fn jfnk(
     const diag_prec = buf[off..][0..n];
 
     var iter: u16 = 0;
-    var prev_norm = std.math.inf(f64);
-    var backtracks: u8 = 0;
+
     while (iter < opts.max_iter) : (iter += 1) {
         // Evaluate F(x) = residual at current x
         assembleResidual(ckt, x, t, hook);
@@ -297,16 +316,7 @@ pub fn jfnk(
         // Monotone residual safeguard — same as the newton path.
         var norm_f: f64 = 0;
         for (0..n) |i| norm_f = @max(norm_f, @abs(ckt.rhs[i]));
-        if (norm_f > 10.0 * prev_norm and backtracks < 16) {
-            for (0..n) |i| x[i] = 0.5 * (x[i] + x_old[i]);
-            // Keep device-private limiting state tracking the retreated x —
-            // same as the newton path.
-            _ = ckt.applyLimits(x, x_old);
-            backtracks += 1;
-            continue;
-        }
-        backtracks = 0;
-        prev_norm = norm_f;
+        // No residual backtracking — same rationale as the newton path.
         // f0 = F(x) = rhs (note: Newton solves J*dx = -F)
         @memcpy(f0, ckt.rhs[0..n]);
 

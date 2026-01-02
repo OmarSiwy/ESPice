@@ -254,8 +254,12 @@ fn dcParams(model: *const Model, instance: *const Instance) DcParams {
     // Effective RS = model.rs + rsh * nrs
     const rd_eff = rd + rsh * nrd;
     const rs_eff = rs + rsh * nrs;
-    const g_rd: f64 = if (rd_eff != 0.0) m_mult / rd_eff else 1.0e12;
-    const g_rs: f64 = if (rs_eff != 0.0) m_mult / rs_eff else 1.0e12;
+    // Collapsed prime nodes (rd/rs = 0, see collapse()) must carry NO tie
+    // conductance: a 1e12 short computed in the dual absorbs the real gds
+    // into the ulp of 1e12 (1.22e-4) and the Newton matrix loses the
+    // channel conductance entirely.
+    const g_rd: f64 = if (rd_eff != 0.0) m_mult / rd_eff else 0.0;
+    const g_rs: f64 = if (rs_eff != 0.0) m_mult / rs_eff else 0.0;
 
     return .{
         .type_f = type_f,
@@ -660,6 +664,10 @@ pub fn qFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, _: *const Mo
 // Voltage Limiting (DEVfetlim + DEVlimvds + DEVpnjlim)
 // ============================================================================
 
+/// Only pnjlim (bulk junctions) forces another Newton iteration — ngspice
+/// sets icheck from DEVpnjlim only; fetlim/limvds adjust the eval point.
+pub const limit_flag_unknowns = [_]U{.bulk};
+
 pub fn limit(model: *const Model, instance: *const Instance, x_new: [n_u]f64, x_old: [n_u]f64) [n_u]f64 {
     const g = @intFromEnum(U.gate);
     const b = @intFromEnum(U.bulk);
@@ -673,136 +681,51 @@ pub fn limit(model: *const Model, instance: *const Instance, x_new: [n_u]f64, x_
 
     const temp: f64 = @as(f64, instance.temp);
     const dtemp: f64 = @as(f64, instance.dtemp);
-
     const vt: f64 = 8.617333262145e-5 * (temp + dtemp);
-
-    // Critical voltage for pnjlim
     const v_crit = vt * contract.fmath.log(vt / (@sqrt(2.0) * is_val));
 
+    // Type-corrected junction voltages (ngspice MOS1load layout).
+    const vgs_new = (x_new[g] - x_new[sp]) * type_f;
+    const vds_new = (x_new[dp] - x_new[sp]) * type_f;
+    const vbs_new = (x_new[b] - x_new[sp]) * type_f;
+    const vgs_old = (x_old[g] - x_old[sp]) * type_f;
+    const vds_old = (x_old[dp] - x_old[sp]) * type_f;
+    const vbs_old = (x_old[b] - x_old[sp]) * type_f;
+    const vgd_new = vgs_new - vds_new;
+    const vgd_old = vgs_old - vds_old;
+    const vbd_new = vbs_new - vds_new;
+    const vbd_old = vbs_old - vds_old;
+
+    // ngspice MOS1load limiting sequence: normal mode limits vgs and vds;
+    // inverted mode (previous vds < 0) limits vgd and -vds — limiting vgs
+    // against vto when the effective source is the drain terminal lets the
+    // real controlling junction run away unlimited.
+    var vgs = vgs_new;
+    var vds = vds_new;
+    if (vds_old >= 0) {
+        vgs = contract.limits.fetlim(vgs_new, vgs_old, vto);
+        vds = vgs - vgd_new;
+        vds = contract.limits.limvds(vds, vds_old);
+    } else {
+        const vgd = contract.limits.fetlim(vgd_new, vgd_old, vto);
+        vds = vgs_new - vgd;
+        vds = -contract.limits.limvds(-vds, -vds_old);
+        vgs = vgd + vds;
+    }
+    var vbs = vbs_new;
+    if (vds >= 0) {
+        vbs = contract.limits.pnjlim(vbs_new, vbs_old, vt, v_crit);
+    } else {
+        const vbd = contract.limits.pnjlim(vbd_new, vbd_old, vt, v_crit);
+        vbs = vbd + vds;
+    }
+
+    // Reconstruct the local eval point anchored at s_prime (node voltages
+    // are never written back — lim_x is device-private state).
     var result = x_new;
-
-    // ========================================================================
-    // DEVfetlim -- Gate-Source Voltage Limiting
-    // ========================================================================
-    {
-        const vgs_new = (x_new[g] - x_new[sp]) * type_f;
-        const vgs_old = (x_old[g] - x_old[sp]) * type_f;
-
-        const vtox = vto + 3.5;
-        const vtsthi = @abs(2.0 * (vgs_old - vto)) + 2.0;
-        const vtstlo = vtsthi / 2.0 + 2.0;
-        const delta_v = vgs_new - vgs_old;
-
-        var vgs_lim = vgs_new;
-
-        if (vgs_old >= vto) {
-            if (vgs_old >= vtox) {
-                // Case 1: vgs_old >= vto and vgs_old >= vtox
-                if (delta_v <= 0.0) {
-                    vgs_lim = @max(vgs_new, vgs_old - vtstlo);
-                } else {
-                    vgs_lim = @min(vgs_new, vgs_old + vtsthi);
-                }
-            } else {
-                // Case 2: vgs_old >= vto and vgs_old < vtox
-                if (delta_v <= 0.0) {
-                    vgs_lim = @max(vgs_new, vto - 0.5);
-                } else {
-                    vgs_lim = @min(vgs_new, vgs_old + vtsthi);
-                }
-            }
-        } else {
-            // Case 3: vgs_old < vto
-            if (delta_v <= 0.0) {
-                vgs_lim = @max(vgs_new, vgs_old - vtstlo);
-            } else {
-                vgs_lim = @min(vgs_new, vto + 0.5);
-            }
-        }
-
-        // Apply correction to gate node
-        const delta_gs = (vgs_lim - vgs_new) * type_f;
-        result[g] += delta_gs;
-    }
-
-    // ========================================================================
-    // DEVlimvds -- Drain-Source Voltage Limiting
-    // ========================================================================
-    {
-        const vds_new = (result[dp] - result[sp]) * type_f;
-        const vds_old = (x_old[dp] - x_old[sp]) * type_f;
-        const delta_vds = vds_new - vds_old;
-
-        var vds_lim = vds_new;
-
-        if (vds_old >= 3.5) {
-            if (delta_vds <= 0.0) {
-                vds_lim = @max(vds_new, -0.5 * vds_old);
-            } else {
-                vds_lim = @min(vds_new, 2.0 * vds_old);
-            }
-        } else {
-            if (vds_new > 4.0) {
-                vds_lim = @min(vds_new, 4.0);
-            }
-        }
-
-        // Apply correction to d_prime node
-        const delta_ds = (vds_lim - vds_new) * type_f;
-        result[dp] += delta_ds;
-    }
-
-    // ========================================================================
-    // DEVpnjlim -- Bulk-Source Junction Voltage Limiting
-    // ========================================================================
-    {
-        const vbs_new = (x_new[b] - result[sp]) * type_f;
-        const vbs_old = (x_old[b] - x_old[sp]) * type_f;
-
-        var vbs_limited = vbs_new;
-        if (vbs_new > v_crit and @abs(vbs_new - vbs_old) > 2.0 * vt) {
-            if (vbs_old > 0.0) {
-                const arg = (vbs_new - vbs_old) / vt;
-                if (arg > 0.0) {
-                    vbs_limited = vbs_old + vt * (2.0 + contract.fmath.log(@max(arg - 2.0, 1e-30)));
-                } else {
-                    vbs_limited = v_crit;
-                }
-            } else {
-                vbs_limited = vt * contract.fmath.log(@max(vbs_new / vt, 1e-30));
-            }
-        }
-
-        const delta_bs = (vbs_limited - vbs_new) * type_f;
-        result[b] += delta_bs;
-    }
-
-    // ========================================================================
-    // DEVpnjlim -- Bulk-Drain Junction Voltage Limiting
-    // ========================================================================
-    {
-        const vbd_new = (result[b] - result[dp]) * type_f;
-        const vbd_old = (x_old[b] - x_old[dp]) * type_f;
-
-        var vbd_limited = vbd_new;
-        if (vbd_new > v_crit and @abs(vbd_new - vbd_old) > 2.0 * vt) {
-            if (vbd_old > 0.0) {
-                const arg = (vbd_new - vbd_old) / vt;
-                if (arg > 0.0) {
-                    vbd_limited = vbd_old + vt * (2.0 + contract.fmath.log(@max(arg - 2.0, 1e-30)));
-                } else {
-                    vbd_limited = v_crit;
-                }
-            } else {
-                vbd_limited = vt * contract.fmath.log(@max(vbd_new / vt, 1e-30));
-            }
-        }
-
-        const delta_bd = (vbd_limited - vbd_new) * type_f;
-        // Adjust d_prime (bulk was already adjusted for BS)
-        result[dp] -= delta_bd;
-    }
-
+    result[g] = x_new[sp] + type_f * vgs;
+    result[dp] = x_new[sp] + type_f * vds;
+    result[b] = x_new[sp] + type_f * vbs;
     return result;
 }
 

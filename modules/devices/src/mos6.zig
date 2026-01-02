@@ -227,8 +227,8 @@ fn dcParams(model: *const Model, instance: *const Instance) DcParams {
         .lam = @as(f64, model.lambda),
         .lam0 = @as(f64, model.lambda0),
         .lam1 = @as(f64, model.lambda1),
-        .g_rd = if (rd != 0.0) 1.0 / rd else 1.0e12,
-        .g_rs = if (rs != 0.0) 1.0 / rs else 1.0e12,
+        .g_rd = if (rd != 0.0) 1.0 / rd else 0.0,
+        .g_rs = if (rs != 0.0) 1.0 / rs else 0.0,
         .is_val = @as(f64, model.is),
         // --- Thermal voltage ---
         .vt = 8.617333262145e-5 * tnom,
@@ -627,6 +627,14 @@ pub fn attempt(model: Model, lambda: f64) Model {
     const is_stepped = is_orig + gmin * (1.0 - lambda);
     m.is = @floatCast(is_stepped);
     return m;
+}
+
+/// ngspice MOS6setup: prime nodes collapse onto ports when parasitic R = 0.
+pub fn collapse(model: *const Model, _: *const Instance) [n_u]?u8 {
+    var out: [n_u]?u8 = @splat(null);
+    if (@as(f64, model.rd) == 0.0) out[@intFromEnum(U.d_prime)] = @intFromEnum(U.drain);
+    if (@as(f64, model.rs) == 0.0) out[@intFromEnum(U.s_prime)] = @intFromEnum(U.source);
+    return out;
 }
 
 comptime {

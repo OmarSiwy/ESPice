@@ -257,8 +257,10 @@ fn dcParams(model: *const Model, instance: *const Instance) DcParams {
     const xn_const = 1.0 + q_charge * nfs * 1.0e4 / cox;
 
     // --- Parasitic conductances ---
-    const g_d_ext: f64 = if (rd > 0.0) 1.0 / rd else 1.0e12;
-    const g_s_ext: f64 = if (rs > 0.0) 1.0 / rs else 1.0e12;
+    // Collapsed prime nodes (see collapse()) carry no tie conductance:
+    // a 1e12 short absorbs real conductances into its ulp (1.22e-4).
+    const g_d_ext: f64 = if (rd > 0.0) 1.0 / rd else 0.0;
+    const g_s_ext: f64 = if (rs > 0.0) 1.0 / rs else 0.0;
 
     return .{
         .type_f = type_f,
@@ -541,6 +543,8 @@ pub fn qFromPrep(comptime S: type, x: [n_u]S, _: *const PrepCache, model: *const
 // Voltage Limiting
 // ============================================================================
 
+pub const limit_flag_unknowns = [_]U{.bulk};
+
 pub fn limit(model: *const Model, _: *const Instance, x_new: [n_u]f64, x_old: [n_u]f64) [n_u]f64 {
     const g = @intFromEnum(U.gate);
     const b = @intFromEnum(U.bulk);
@@ -548,125 +552,52 @@ pub fn limit(model: *const Model, _: *const Instance, x_new: [n_u]f64, x_old: [n
     const sp = @intFromEnum(U.source_prime);
 
     const is_val: f64 = @as(f64, model.is);
-    const vt0: f64 = @as(f64, model.vto);
+    const type_f: f64 = @floatFromInt(model.type_);
+    // fetlim compares type-corrected vgs; the threshold must be too.
+    const vto: f64 = type_f * @as(f64, model.vto);
     const tnom: f64 = @as(f64, model.tnom);
-    const vt: f64 = 8.617333e-5 * (tnom + 273.15);
+    const vt: f64 = 8.617333262145e-5 * (tnom + 273.15);
+    const v_crit = vt * contract.fmath.log(vt / (@sqrt(2.0) * is_val));
 
+    // Type-corrected junction voltages (ngspice MOSload layout).
+    const vgs_new = (x_new[g] - x_new[sp]) * type_f;
+    const vds_new = (x_new[dp] - x_new[sp]) * type_f;
+    const vbs_new = (x_new[b] - x_new[sp]) * type_f;
+    const vgs_old = (x_old[g] - x_old[sp]) * type_f;
+    const vds_old = (x_old[dp] - x_old[sp]) * type_f;
+    const vbs_old = (x_old[b] - x_old[sp]) * type_f;
+    const vgd_new = vgs_new - vds_new;
+    const vgd_old = vgs_old - vds_old;
+    const vbd_new = vbs_new - vds_new;
+    const vbd_old = vbs_old - vds_old;
+
+    // ngspice limiting sequence: normal mode limits vgs and vds; inverted
+    // mode (previous vds < 0) limits vgd and -vds.
+    var vgs = vgs_new;
+    var vds = vds_new;
+    if (vds_old >= 0) {
+        vgs = contract.limits.fetlim(vgs_new, vgs_old, vto);
+        vds = vgs - vgd_new;
+        vds = contract.limits.limvds(vds, vds_old);
+    } else {
+        const vgd = contract.limits.fetlim(vgd_new, vgd_old, vto);
+        vds = vgs_new - vgd;
+        vds = -contract.limits.limvds(-vds, -vds_old);
+        vgs = vgd + vds;
+    }
+    var vbs = vbs_new;
+    if (vds >= 0) {
+        vbs = contract.limits.pnjlim(vbs_new, vbs_old, vt, v_crit);
+    } else {
+        const vbd = contract.limits.pnjlim(vbd_new, vbd_old, vt, v_crit);
+        vbs = vbd + vds;
+    }
+
+    // Reconstruct the local eval point anchored at s_prime.
     var result = x_new;
-
-    // ========================================================================
-    // PN Junction Limiting (pnjlim) for V_BS
-    // ========================================================================
-    {
-        const v_crit = vt * contract.fmath.log(vt / (@sqrt(2.0) * is_val));
-        const vbs_new = x_new[b] - x_new[sp];
-        const vbs_old = x_old[b] - x_old[sp];
-        var vbs_limited = vbs_new;
-
-        if (vbs_new > v_crit and @abs(vbs_new - vbs_old) > 2.0 * vt) {
-            if (vbs_old > 0.0) {
-                const arg = (vbs_new - vbs_old) / vt;
-                if (vbs_new > vbs_old) {
-                    vbs_limited = vbs_old + vt * (2.0 + contract.fmath.log(arg - 2.0));
-                } else {
-                    vbs_limited = v_crit;
-                }
-            } else {
-                vbs_limited = vt * contract.fmath.log(vbs_new / vt);
-            }
-        }
-
-        const delta_bs = vbs_limited - vbs_new;
-        result[sp] = result[sp] - delta_bs;
-    }
-
-    // ========================================================================
-    // PN Junction Limiting (pnjlim) for V_BD
-    // ========================================================================
-    {
-        const v_crit = vt * contract.fmath.log(vt / (@sqrt(2.0) * is_val));
-        const vbd_new = x_new[b] - x_new[dp];
-        const vbd_old = x_old[b] - x_old[dp];
-        var vbd_limited = vbd_new;
-
-        if (vbd_new > v_crit and @abs(vbd_new - vbd_old) > 2.0 * vt) {
-            if (vbd_old > 0.0) {
-                const arg = (vbd_new - vbd_old) / vt;
-                if (vbd_new > vbd_old) {
-                    vbd_limited = vbd_old + vt * (2.0 + contract.fmath.log(arg - 2.0));
-                } else {
-                    vbd_limited = v_crit;
-                }
-            } else {
-                vbd_limited = vt * contract.fmath.log(vbd_new / vt);
-            }
-        }
-
-        const delta_bd = vbd_limited - vbd_new;
-        result[dp] = result[dp] - delta_bd;
-    }
-
-    // ========================================================================
-    // FET Gate Voltage Limiting (fetlim) for V_GS
-    // ========================================================================
-    {
-        const vgs_new = result[g] - result[sp];
-        const vgs_old = x_old[g] - x_old[sp];
-        const dv = vgs_new - vgs_old;
-        const vtox = vt0 + 3.5;
-        const vtsthi = @abs(2.0 * (vgs_old - vt0)) + 2.0;
-        const vtstlo = vtsthi * 0.5 + 2.0;
-        var vgs_limited = vgs_new;
-
-        if (vgs_old >= vtox) {
-            if (dv <= 0.0) {
-                vgs_limited = @max(vgs_new, vgs_old - vtstlo);
-            } else {
-                vgs_limited = @min(vgs_new, vgs_old + vtsthi);
-            }
-        } else if (vgs_old >= vt0) {
-            if (dv <= 0.0) {
-                vgs_limited = @max(vgs_new, vt0 - 0.5);
-            } else {
-                vgs_limited = @min(vgs_new, vgs_old + vtsthi);
-            }
-        } else {
-            if (dv <= 0.0) {
-                vgs_limited = @max(vgs_new, vgs_old - vtstlo);
-            } else {
-                vgs_limited = @min(vgs_new, vt0 + 0.5);
-            }
-        }
-
-        const delta_gs = vgs_limited - vgs_new;
-        result[g] = result[g] + delta_gs;
-    }
-
-    // ========================================================================
-    // Drain-Source Voltage Limiting (limvds)
-    // ========================================================================
-    {
-        const vds_new = result[dp] - result[sp];
-        const vds_old = x_old[dp] - x_old[sp];
-        const dv = vds_new - vds_old;
-        var vds_limited = vds_new;
-
-        if (vds_old >= 3.5) {
-            if (dv <= 0.0) {
-                vds_limited = @max(vds_new, -0.5 * vds_old);
-            } else {
-                vds_limited = @min(vds_new, 2.0 * vds_old);
-            }
-        } else {
-            if (vds_new > 4.0) {
-                vds_limited = @min(vds_new, 4.0);
-            }
-        }
-
-        const delta_ds = vds_limited - vds_new;
-        result[dp] = result[dp] + delta_ds;
-    }
-
+    result[g] = x_new[sp] + type_f * vgs;
+    result[dp] = x_new[sp] + type_f * vds;
+    result[b] = x_new[sp] + type_f * vbs;
     return result;
 }
 
@@ -681,6 +612,14 @@ pub fn attempt(model: Model, lambda: f64) Model {
     const is_stepped = is_orig + (gmin_step - is_orig) * (1.0 - lambda);
     m.is = @floatCast(is_stepped);
     return m;
+}
+
+/// ngspice MOS2setup: prime nodes collapse onto ports when parasitic R = 0.
+pub fn collapse(model: *const Model, _: *const Instance) [n_u]?u8 {
+    var out: [n_u]?u8 = @splat(null);
+    if (!(@as(f64, model.rd) > 0.0)) out[@intFromEnum(U.drain_prime)] = @intFromEnum(U.drain);
+    if (!(@as(f64, model.rs) > 0.0)) out[@intFromEnum(U.source_prime)] = @intFromEnum(U.source);
+    return out;
 }
 
 comptime {
