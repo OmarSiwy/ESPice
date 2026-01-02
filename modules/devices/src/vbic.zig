@@ -1277,20 +1277,7 @@ inline fn pnjlim(x_new: [n_u]f64, x_old: [n_u]f64, pos: usize, neg: usize, is_va
     const vd_new = (x_new[pos] - x_new[neg]) * type_f;
     const vd_old = (x_old[pos] - x_old[neg]) * type_f;
 
-    var vd_limited = vd_new;
-
-    if (vd_new > v_crit and @abs(vd_new - vd_old) > 2.0 * nvt) {
-        if (vd_old > 0.0) {
-            const arg = (vd_new - vd_old) / nvt;
-            if (arg > 0.0) {
-                vd_limited = vd_old + nvt * (2.0 + contract.fmath.log(@max(arg - 2.0, 1e-30)));
-            } else {
-                vd_limited = vd_old - nvt * (2.0 + contract.fmath.log(@max(2.0 - arg, 1e-30)));
-            }
-        } else {
-            vd_limited = nvt * contract.fmath.log(@max(vd_new / nvt, 1e-30));
-        }
-    }
+    const vd_limited = contract.limits.pnjlim(vd_new, vd_old, nvt, v_crit);
 
     const delta = (vd_limited - vd_new) * type_f;
     var result = x_new;

@@ -490,16 +490,23 @@ pub fn DeviceBatch(comptime D: type) type {
             return out;
         }
 
-        /// SPICE MODEINITJCT: scatter device junction seeds into a cold x.
-        /// Per-unknown ?f64 — null leaves externally driven terminals alone.
+        /// SPICE MODEINITJCT: seed each device's PRIVATE limited eval point
+        /// (lim_x) so iteration 1 linearizes every junction at vcrit/vto.
+        /// Seeds must NOT be written into the shared node vector — one
+        /// device's collector seed lands on another's emitter net and the
+        /// colliding junctions come up at 0 V, leaving a near-singular
+        /// first Jacobian (ngspice seeds CKTstate0 vbe/vbc, never CKTrhsOld).
+        /// Per-unknown ?f64 — null unknowns eval at the gathered node value.
         fn seedFn(ctx: *anyopaque, x: []f64) void {
             const self: *Self = @ptrCast(@alignCast(ctx));
-            for (0..self.count) |id| {
-                const sv = D.seed(&self.models[id], &self.instances[id]);
-                inline for (0..n_u) |u| if (sv[u]) |v| {
-                    const node = self.gath[id * n_u + u];
-                    if (node != GROUND) x[node] = v;
-                };
+            if (comptime has_limit) {
+                for (0..self.count) |id| {
+                    const sv = D.seed(&self.models[id], &self.instances[id]);
+                    const xn = self.localX(x, id);
+                    inline for (0..n_u) |u|
+                        self.lim_x[id * n_u + u] = sv[u] orelse xn[u];
+                }
+                self.lim_active = true;
             }
         }
 
@@ -534,7 +541,20 @@ pub fn DeviceBatch(comptime D: type) type {
                     self.localX(x_old, id);
                 const limited = D.limit(&self.models[id], &self.instances[id], cur, old);
                 inline for (0..n_u) |u| {
-                    if (limited[u] != cur[u]) any_limited = true;
+                    // ngspice: only pnjlim sets icheck (junction limiting
+                    // forces another Newton iteration); fetlim/limvds adjust
+                    // the eval point without vetoing convergence — counting
+                    // them here locks Newton in a 2-cycle whenever vds
+                    // straddles 0 and the mode branch alternates. Devices
+                    // declare which unknowns carry junction limiting.
+                    const flags: bool = comptime blk: {
+                        if (!@hasDecl(D, "limit_flag_unknowns")) break :blk true;
+                        for (D.limit_flag_unknowns) |fu| {
+                            if (@intFromEnum(fu) == u) break :blk true;
+                        }
+                        break :blk false;
+                    };
+                    if (flags and limited[u] != cur[u]) any_limited = true;
                     self.lim_x[id * n_u + u] = limited[u];
                 }
             }

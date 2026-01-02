@@ -59,6 +59,8 @@ pub fn solveLadder(
         error.SingularMatrix => null,
         else => return e,
     };
+    if (converger.opdbg())
+        std.debug.print("ladder: plain conv={?}\n", .{if (plain) |p| p.converged else null});
     if (plain) |p| {
         if (p.converged)
             return .{ .converged = true, .iterations = p.iterations, .max_dx = p.max_dx, .method_used = .plain };
@@ -89,15 +91,23 @@ pub fn solveLadder(
                 else => return e,
             };
             total_iter +|= r.iterations;
+            if (converger.opdbg())
+                std.debug.print("ladder: gmin={e:.3} conv={} it={d}\n", .{ gmin_val, r.converged, r.iterations });
             if (r.converged) {
                 if (gmin_val <= gtarget)
                     return .{ .converged = true, .iterations = total_iter, .max_dx = r.max_dx, .method_used = .gmin };
                 @memcpy(x_good, x);
                 have_good = true;
                 good_gmin = gmin_val;
-                // Easy rung → accelerate the descent (capped at the start factor).
-                if (r.iterations <= options.tol.itl1 / 4)
+                // Easy rung → accelerate the descent (capped at the start
+                // factor); hard rung (> 3/4 of the budget) → slow down BEFORE
+                // failing so folds are approached with shrinking steps
+                // (ngspice dynamic_gmin does both).
+                if (r.iterations <= options.tol.itl1 / 4) {
                     factor = @min(factor * @sqrt(factor), 10.0);
+                } else if (r.iterations > 3 * (options.tol.itl1 / 4)) {
+                    factor = @sqrt(factor);
+                }
                 gmin_val = if (gmin_val < factor * gtarget) gtarget else gmin_val / factor;
             } else {
                 if (factor < 1.00005) break; // wedged against the last good rung
@@ -132,6 +142,8 @@ pub fn solveLadder(
                 },
             };
             total_iter +|= sr.iterations;
+            if (converger.opdbg())
+                std.debug.print("ladder: src lambda={e:.3} conv={} it={d}\n", .{ lambda, sr.converged, sr.iterations });
             if (sr.converged) {
                 if (lambda >= 1.0) break; // full sources reached
                 lambda_good = lambda;

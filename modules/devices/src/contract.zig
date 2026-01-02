@@ -147,6 +147,94 @@ pub const fmath = struct {
     }
 };
 
+// ----------------------------------------------------------------------------
+// ngspice devsup.c limiting primitives — the reference algorithms, centralized.
+// Device `limit` implementations must route junction/FET limiting through
+// these: a dozen hand-rolled ports of the SPICE2 "2+log(arg-2)" form drifted
+// (floored logs yanking junctions 67·vt backward, missing reverse clamps,
+// missing vds decrease clamps) and cost .op convergence across the suite.
+// ----------------------------------------------------------------------------
+
+pub const limits = struct {
+    /// DEVpnjlim, with spice3f5's monotone log form for the forward branch.
+    /// ngspice's 2+log(arg-2) flavor is singular at |delta| = 2vt (log→-inf);
+    /// vold + vt·log(1 + delta/vt) limits identically for large steps without
+    /// the discontinuity. Reverse-bias clamp branch matches ngspice exactly.
+    pub fn pnjlim(vnew_in: f64, vold: f64, vt: f64, vcrit: f64) f64 {
+        var vnew = vnew_in;
+        if (vnew > vcrit and @abs(vnew - vold) > vt + vt) {
+            if (vold > 0) {
+                const arg = 1.0 + (vnew - vold) / vt;
+                vnew = if (arg > 0) vold + vt * fmath.log(arg) else vcrit;
+            } else {
+                vnew = vt * fmath.log(@max(vnew / vt, 1e-30));
+            }
+        } else if (vnew < 0) {
+            // Reverse bias: allow geometric growth only (ngspice else-branch).
+            const floor_v = if (vold > 0) -vold - 1 else 2 * vold - 1;
+            if (vnew < floor_v) vnew = floor_v;
+        }
+        return vnew;
+    }
+
+    /// DEVfetlim — exact ngspice.
+    pub fn fetlim(vnew_in: f64, vold: f64, vto: f64) f64 {
+        var vnew = vnew_in;
+        const vtsthi = @abs(2 * (vold - vto)) + 2;
+        const vtstlo = @abs(vold - vto) + 1;
+        const vtox = vto + 3.5;
+        const delv = vnew - vold;
+        if (vold >= vto) {
+            if (vold >= vtox) {
+                if (delv <= 0) {
+                    // going off
+                    if (vnew >= vtox) {
+                        if (-delv > vtstlo) vnew = vold - vtstlo;
+                    } else {
+                        vnew = @max(vnew, vto + 2);
+                    }
+                } else {
+                    // staying on
+                    if (delv >= vtsthi) vnew = vold + vtsthi;
+                }
+            } else {
+                // middle region
+                vnew = if (delv <= 0) @max(vnew, vto - 0.5) else @min(vnew, vto + 4);
+            }
+        } else {
+            // off
+            if (delv <= 0) {
+                if (-delv > vtsthi) vnew = vold - vtsthi;
+            } else {
+                const vtemp = vto + 0.5;
+                if (vnew <= vtemp) {
+                    if (delv > vtstlo) vnew = vold + vtstlo;
+                } else {
+                    vnew = vtemp;
+                }
+            }
+        }
+        return vnew;
+    }
+
+    /// DEVlimvds — exact ngspice (the decrease clamps matter: without
+    /// MAX(vnew, -0.5) a drain node kicked by a near-singular Newton step
+    /// walks to ±1e6 and the eval linearizes in nonsense territory).
+    pub fn limvds(vnew_in: f64, vold: f64) f64 {
+        var vnew = vnew_in;
+        if (vold >= 3.5) {
+            if (vnew > vold) {
+                vnew = @min(vnew, 3 * vold + 2);
+            } else if (vnew < 3.5) {
+                vnew = @max(vnew, 2);
+            }
+        } else {
+            vnew = if (vnew > vold) @min(vnew, 4) else @max(vnew, -0.5);
+        }
+        return vnew;
+    }
+};
+
 pub const UpdateResult = union(enum) {
     ok,
     request_reject_at: f64,
@@ -571,6 +659,7 @@ const allowed_pub_decls = std.StaticStringMap(void).initComptime(.{
     .{ "eval", {} },
     .{ "q", {} },
     .{ "limit", {} },
+    .{ "limit_flag_unknowns", {} },
     .{ "seed", {} },
     .{ "collapse", {} },
     .{ "initState", {} },
