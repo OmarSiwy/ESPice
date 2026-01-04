@@ -72,18 +72,6 @@ pub fn q(comptime S: type, x: [n_u]S, model: *const Model, instance: *const Inst
     return .{ i_br2.scale(-k), i_br1.scale(-k) };
 }
 
-/// Sparse conductance stamp pattern.
-/// The eval function returns all zeros -- no conductance entries needed.
-pub const g_pattern_override = [0]contract.Entry(n_u){};
-
-/// Sparse capacitance stamp pattern.
-/// The q function has only off-diagonal coupling: q_ibr1 depends on ibr2,
-/// q_ibr2 depends on ibr1.
-pub const c_pattern_override = [_]contract.Entry(n_u){
-    .{ .row = @intFromEnum(U.ibr1), .col = @intFromEnum(U.ibr2) },
-    .{ .row = @intFromEnum(U.ibr2), .col = @intFromEnum(U.ibr1) },
-};
-
 comptime {
     contract.validate(Self);
 }

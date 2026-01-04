@@ -33,13 +33,6 @@ pub const u_kinds = [n_u]contract.UnknownKind{
 // Newton iteration; only the state machine triggers re-iteration).
 // ---------------------------------------------------------------------------
 
-pub const g_pattern_override = [_]contract.Entry(n_u){
-    .{ .row = 0, .col = 0 }, // dI_p / dV_p  =  +G_eff
-    .{ .row = 0, .col = 1 }, // dI_p / dV_n  =  -G_eff
-    .{ .row = 1, .col = 0 }, // dI_n / dV_p  =  -G_eff
-    .{ .row = 1, .col = 1 }, // dI_n / dV_n  =  +G_eff
-};
-
 // ---------------------------------------------------------------------------
 // Model Parameters
 // ---------------------------------------------------------------------------

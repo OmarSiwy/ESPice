@@ -44,13 +44,6 @@ pub const Instance = struct {
 //   dI(n_out)/dV(n_ctrl)  = +g_eff
 // ============================================================================
 
-pub const g_pattern_override = [_]contract.Entry(n_u){
-    .{ .row = @intFromEnum(U.p_out), .col = @intFromEnum(U.p_ctrl) },
-    .{ .row = @intFromEnum(U.p_out), .col = @intFromEnum(U.n_ctrl) },
-    .{ .row = @intFromEnum(U.n_out), .col = @intFromEnum(U.p_ctrl) },
-    .{ .row = @intFromEnum(U.n_out), .col = @intFromEnum(U.n_ctrl) },
-};
-
 // ============================================================================
 // Physics function — linear voltage-controlled current source
 //

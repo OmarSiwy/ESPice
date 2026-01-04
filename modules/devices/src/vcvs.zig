@@ -51,15 +51,6 @@ pub const Instance = struct {
 //   dF(ibr)/d(n_ctrl)  = +E         row=ibr,    col=n_ctrl
 // ---------------------------------------------------------------------------
 
-pub const g_pattern_override = [_]contract.Entry(n_u){
-    .{ .row = @intFromEnum(U.p_out), .col = @intFromEnum(U.ibr) },
-    .{ .row = @intFromEnum(U.n_out), .col = @intFromEnum(U.ibr) },
-    .{ .row = @intFromEnum(U.ibr), .col = @intFromEnum(U.p_out) },
-    .{ .row = @intFromEnum(U.ibr), .col = @intFromEnum(U.n_out) },
-    .{ .row = @intFromEnum(U.ibr), .col = @intFromEnum(U.p_ctrl) },
-    .{ .row = @intFromEnum(U.ibr), .col = @intFromEnum(U.n_ctrl) },
-};
-
 // ---------------------------------------------------------------------------
 // PrepCache: hot eval data in contiguous array (SoA over devices)
 // ---------------------------------------------------------------------------

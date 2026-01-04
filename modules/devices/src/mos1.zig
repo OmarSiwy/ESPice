@@ -101,74 +101,12 @@ pub const Instance = struct {
 // Junction BS: bulk -- s_prime
 // Gate: no DC current, but stamps needed for limiting
 
-pub const g_pattern_override = [_]contract.Entry(n_u){
-    // RD branch: drain -- d_prime
-    .{ .row = @intFromEnum(U.drain), .col = @intFromEnum(U.drain) },
-    .{ .row = @intFromEnum(U.drain), .col = @intFromEnum(U.d_prime) },
-    .{ .row = @intFromEnum(U.d_prime), .col = @intFromEnum(U.drain) },
-    // RS branch: source -- s_prime
-    .{ .row = @intFromEnum(U.source), .col = @intFromEnum(U.source) },
-    .{ .row = @intFromEnum(U.source), .col = @intFromEnum(U.s_prime) },
-    .{ .row = @intFromEnum(U.s_prime), .col = @intFromEnum(U.source) },
-    // Channel + junction self-terms on d_prime and s_prime
-    .{ .row = @intFromEnum(U.d_prime), .col = @intFromEnum(U.d_prime) },
-    .{ .row = @intFromEnum(U.d_prime), .col = @intFromEnum(U.s_prime) },
-    .{ .row = @intFromEnum(U.s_prime), .col = @intFromEnum(U.d_prime) },
-    .{ .row = @intFromEnum(U.s_prime), .col = @intFromEnum(U.s_prime) },
-    // Channel dependence on gate
-    .{ .row = @intFromEnum(U.d_prime), .col = @intFromEnum(U.gate) },
-    .{ .row = @intFromEnum(U.s_prime), .col = @intFromEnum(U.gate) },
-    // Channel dependence on bulk (body effect)
-    .{ .row = @intFromEnum(U.d_prime), .col = @intFromEnum(U.bulk) },
-    .{ .row = @intFromEnum(U.s_prime), .col = @intFromEnum(U.bulk) },
-    // Junction BD: bulk -- d_prime
-    .{ .row = @intFromEnum(U.bulk), .col = @intFromEnum(U.bulk) },
-    .{ .row = @intFromEnum(U.bulk), .col = @intFromEnum(U.d_prime) },
-    // Junction BS: bulk -- s_prime (bulk row/col already present above)
-    .{ .row = @intFromEnum(U.bulk), .col = @intFromEnum(U.s_prime) },
-    // Gate row (zero current but needed for completeness)
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.gate) },
-};
-
 // ============================================================================
 // Sparse Capacitance Stamp Pattern
 // ============================================================================
 // Meyer charges: gate -- d_prime, gate -- s_prime, gate -- bulk
 // Overlap charges: gate -- drain, gate -- source, gate -- bulk
 // Junction depletion charges: bulk -- d_prime, bulk -- s_prime
-
-pub const c_pattern_override = [_]contract.Entry(n_u){
-    // Meyer Q_GD: gate -- d_prime
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.gate) },
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.d_prime) },
-    .{ .row = @intFromEnum(U.d_prime), .col = @intFromEnum(U.gate) },
-    .{ .row = @intFromEnum(U.d_prime), .col = @intFromEnum(U.d_prime) },
-    // Meyer Q_GS: gate -- s_prime
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.s_prime) },
-    .{ .row = @intFromEnum(U.s_prime), .col = @intFromEnum(U.gate) },
-    .{ .row = @intFromEnum(U.s_prime), .col = @intFromEnum(U.s_prime) },
-    // Meyer Q_GB: gate -- bulk
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.bulk) },
-    .{ .row = @intFromEnum(U.bulk), .col = @intFromEnum(U.gate) },
-    .{ .row = @intFromEnum(U.bulk), .col = @intFromEnum(U.bulk) },
-    // Overlap Q_GS_ov: gate -- source (external)
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.source) },
-    .{ .row = @intFromEnum(U.source), .col = @intFromEnum(U.gate) },
-    .{ .row = @intFromEnum(U.source), .col = @intFromEnum(U.source) },
-    // Overlap Q_GD_ov: gate -- drain (external)
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.drain) },
-    .{ .row = @intFromEnum(U.drain), .col = @intFromEnum(U.gate) },
-    .{ .row = @intFromEnum(U.drain), .col = @intFromEnum(U.drain) },
-    // Junction Q_BD: bulk -- d_prime
-    .{ .row = @intFromEnum(U.bulk), .col = @intFromEnum(U.d_prime) },
-    .{ .row = @intFromEnum(U.d_prime), .col = @intFromEnum(U.bulk) },
-    // Junction Q_BS: bulk -- s_prime
-    .{ .row = @intFromEnum(U.bulk), .col = @intFromEnum(U.s_prime) },
-    .{ .row = @intFromEnum(U.s_prime), .col = @intFromEnum(U.bulk) },
-    // Meyer channel charges couple d_prime and s_prime (mode-swapped vgd/vgs)
-    .{ .row = @intFromEnum(U.d_prime), .col = @intFromEnum(U.s_prime) },
-    .{ .row = @intFromEnum(U.s_prime), .col = @intFromEnum(U.d_prime) },
-};
 
 // ============================================================================
 // Noise Sources

@@ -62,18 +62,9 @@ const MU_0: f64 = 1.2566370614359e-6; // Permeability of free space (H/m)
 //   out[p]  += +I_br         => depends on br          => (p, br)
 //   out[n]  += -I_br         => depends on br          => (n, br)
 //   out[br] = V_p - V_n      => depends on p and n     => (br, p), (br, n)
-pub const g_pattern_override = [_]contract.Entry(n_u){
-    .{ .row = @intFromEnum(U.p), .col = @intFromEnum(U.br) },
-    .{ .row = @intFromEnum(U.n), .col = @intFromEnum(U.br) },
-    .{ .row = @intFromEnum(U.br), .col = @intFromEnum(U.p) },
-    .{ .row = @intFromEnum(U.br), .col = @intFromEnum(U.n) },
-};
 
 // The q function stamps:
 //   q[br] = L_final * I_br   => depends on br          => (br, br)
-pub const c_pattern_override = [_]contract.Entry(n_u){
-    .{ .row = @intFromEnum(U.br), .col = @intFromEnum(U.br) },
-};
 
 // ============================================================================
 // Effective inductance (pure f64 parameter prep — no x dependence)

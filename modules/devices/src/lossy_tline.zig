@@ -100,34 +100,6 @@ pub const Instance = struct {
 // neg2 row: depends on branch2 (-1), pos2 (-G_sh), neg2 (+G_sh)
 // ============================================================================
 
-pub const g_pattern_override = [_]contract.Entry(n_u){
-    // branch1 equation: I_br1 + I_br2 = 0
-    .{ .row = @intFromEnum(U.branch1), .col = @intFromEnum(U.branch1) },
-    .{ .row = @intFromEnum(U.branch1), .col = @intFromEnum(U.branch2) },
-    // branch2 equation: V1 - V2 - R_eff * I_br1 = 0
-    .{ .row = @intFromEnum(U.branch2), .col = @intFromEnum(U.pos1) },
-    .{ .row = @intFromEnum(U.branch2), .col = @intFromEnum(U.neg1) },
-    .{ .row = @intFromEnum(U.branch2), .col = @intFromEnum(U.pos2) },
-    .{ .row = @intFromEnum(U.branch2), .col = @intFromEnum(U.neg2) },
-    .{ .row = @intFromEnum(U.branch2), .col = @intFromEnum(U.branch1) },
-    // pos1 KCL: I_br1 + G_sh * V1
-    .{ .row = @intFromEnum(U.pos1), .col = @intFromEnum(U.branch1) },
-    .{ .row = @intFromEnum(U.pos1), .col = @intFromEnum(U.pos1) },
-    .{ .row = @intFromEnum(U.pos1), .col = @intFromEnum(U.neg1) },
-    // neg1 KCL: -I_br1 - G_sh * V1
-    .{ .row = @intFromEnum(U.neg1), .col = @intFromEnum(U.branch1) },
-    .{ .row = @intFromEnum(U.neg1), .col = @intFromEnum(U.pos1) },
-    .{ .row = @intFromEnum(U.neg1), .col = @intFromEnum(U.neg1) },
-    // pos2 KCL: I_br2 + G_sh * V2
-    .{ .row = @intFromEnum(U.pos2), .col = @intFromEnum(U.branch2) },
-    .{ .row = @intFromEnum(U.pos2), .col = @intFromEnum(U.pos2) },
-    .{ .row = @intFromEnum(U.pos2), .col = @intFromEnum(U.neg2) },
-    // neg2 KCL: -I_br2 - G_sh * V2
-    .{ .row = @intFromEnum(U.neg2), .col = @intFromEnum(U.branch2) },
-    .{ .row = @intFromEnum(U.neg2), .col = @intFromEnum(U.pos2) },
-    .{ .row = @intFromEnum(U.neg2), .col = @intFromEnum(U.neg2) },
-};
-
 // ============================================================================
 // Sparse capacitance stamp pattern (C-matrix / Jacobian of q())
 //
@@ -139,21 +111,6 @@ pub const g_pattern_override = [_]contract.Entry(n_u){
 // pos2 row:    C_sh * (V_pos2 - V_neg2) => (pos2, pos2), (pos2, neg2)
 // neg2 row:   -C_sh * (V_pos2 - V_neg2) => (neg2, pos2), (neg2, neg2)
 // ============================================================================
-
-pub const c_pattern_override = [_]contract.Entry(n_u){
-    // Series inductance flux: q_br2 = L_total * I_br1
-    .{ .row = @intFromEnum(U.branch2), .col = @intFromEnum(U.branch1) },
-    // Shunt capacitance at port 1
-    .{ .row = @intFromEnum(U.pos1), .col = @intFromEnum(U.pos1) },
-    .{ .row = @intFromEnum(U.pos1), .col = @intFromEnum(U.neg1) },
-    .{ .row = @intFromEnum(U.neg1), .col = @intFromEnum(U.pos1) },
-    .{ .row = @intFromEnum(U.neg1), .col = @intFromEnum(U.neg1) },
-    // Shunt capacitance at port 2
-    .{ .row = @intFromEnum(U.pos2), .col = @intFromEnum(U.pos2) },
-    .{ .row = @intFromEnum(U.pos2), .col = @intFromEnum(U.neg2) },
-    .{ .row = @intFromEnum(U.neg2), .col = @intFromEnum(U.pos2) },
-    .{ .row = @intFromEnum(U.neg2), .col = @intFromEnum(U.neg2) },
-};
 
 // ============================================================================
 // Parameter preparation (pure f64 -- no dependence on x)

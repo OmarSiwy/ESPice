@@ -2560,66 +2560,9 @@ inline fn noise_thermal_psd(
 // Sparse Conductance Pattern
 // ============================================================================
 
-pub const g_pattern_override = [_]contract.Entry(n_u){
-    // Gate resistance: G-GP
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.gate) },
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.gate_prime) },
-    .{ .row = @intFromEnum(U.gate_prime), .col = @intFromEnum(U.gate) },
-    .{ .row = @intFromEnum(U.gate_prime), .col = @intFromEnum(U.gate_prime) },
-    // Drain resistance: D-DP
-    .{ .row = @intFromEnum(U.drain), .col = @intFromEnum(U.drain) },
-    .{ .row = @intFromEnum(U.drain), .col = @intFromEnum(U.drain_prime) },
-    .{ .row = @intFromEnum(U.drain_prime), .col = @intFromEnum(U.drain) },
-    .{ .row = @intFromEnum(U.drain_prime), .col = @intFromEnum(U.drain_prime) },
-    // Source resistance: S-SP
-    .{ .row = @intFromEnum(U.source), .col = @intFromEnum(U.source) },
-    .{ .row = @intFromEnum(U.source), .col = @intFromEnum(U.source_prime) },
-    .{ .row = @intFromEnum(U.source_prime), .col = @intFromEnum(U.source) },
-    .{ .row = @intFromEnum(U.source_prime), .col = @intFromEnum(U.source_prime) },
-    // Channel: GP-DP-SP (transconductance and output conductance)
-    .{ .row = @intFromEnum(U.drain_prime), .col = @intFromEnum(U.gate_prime) },
-    .{ .row = @intFromEnum(U.drain_prime), .col = @intFromEnum(U.source_prime) },
-    .{ .row = @intFromEnum(U.source_prime), .col = @intFromEnum(U.gate_prime) },
-    .{ .row = @intFromEnum(U.source_prime), .col = @intFromEnum(U.source_prime) },
-    .{ .row = @intFromEnum(U.source_prime), .col = @intFromEnum(U.drain_prime) },
-    // Substrate coupling
-    .{ .row = @intFromEnum(U.sub), .col = @intFromEnum(U.sub) },
-    .{ .row = @intFromEnum(U.sub), .col = @intFromEnum(U.drain_prime) },
-    .{ .row = @intFromEnum(U.sub), .col = @intFromEnum(U.source_prime) },
-    .{ .row = @intFromEnum(U.sub), .col = @intFromEnum(U.gate_prime) },
-    .{ .row = @intFromEnum(U.drain_prime), .col = @intFromEnum(U.sub) },
-    .{ .row = @intFromEnum(U.source_prime), .col = @intFromEnum(U.sub) },
-    .{ .row = @intFromEnum(U.gate_prime), .col = @intFromEnum(U.sub) },
-    .{ .row = @intFromEnum(U.gate_prime), .col = @intFromEnum(U.drain_prime) },
-    .{ .row = @intFromEnum(U.gate_prime), .col = @intFromEnum(U.source_prime) },
-};
-
 // ============================================================================
 // Sparse Capacitance Pattern
 // ============================================================================
-
-pub const c_pattern_override = [_]contract.Entry(n_u){
-    // Gate charge derivatives
-    .{ .row = @intFromEnum(U.gate_prime), .col = @intFromEnum(U.gate_prime) },
-    .{ .row = @intFromEnum(U.gate_prime), .col = @intFromEnum(U.drain_prime) },
-    .{ .row = @intFromEnum(U.gate_prime), .col = @intFromEnum(U.source_prime) },
-    .{ .row = @intFromEnum(U.gate_prime), .col = @intFromEnum(U.sub) },
-    // Drain charge derivatives
-    .{ .row = @intFromEnum(U.drain_prime), .col = @intFromEnum(U.gate_prime) },
-    .{ .row = @intFromEnum(U.drain_prime), .col = @intFromEnum(U.drain_prime) },
-    .{ .row = @intFromEnum(U.drain_prime), .col = @intFromEnum(U.source_prime) },
-    .{ .row = @intFromEnum(U.drain_prime), .col = @intFromEnum(U.sub) },
-    // Source charge derivatives
-    .{ .row = @intFromEnum(U.source_prime), .col = @intFromEnum(U.gate_prime) },
-    .{ .row = @intFromEnum(U.source_prime), .col = @intFromEnum(U.drain_prime) },
-    .{ .row = @intFromEnum(U.source_prime), .col = @intFromEnum(U.source_prime) },
-    .{ .row = @intFromEnum(U.source_prime), .col = @intFromEnum(U.sub) },
-    // Substrate charge derivatives
-    .{ .row = @intFromEnum(U.sub), .col = @intFromEnum(U.gate_prime) },
-    .{ .row = @intFromEnum(U.sub), .col = @intFromEnum(U.drain_prime) },
-    .{ .row = @intFromEnum(U.sub), .col = @intFromEnum(U.source_prime) },
-    .{ .row = @intFromEnum(U.sub), .col = @intFromEnum(U.sub) },
-};
 
 // ============================================================================
 // Compile-time Validation

@@ -194,19 +194,6 @@ const Codegen = struct {
 
         try self.w().writeAll("const n_u = contract.nU(Self);\n\n");
 
-        try self.emitPattern("g_pattern_override", contribs, false);
-
-        var has_reactive = false;
-        for (contribs) |c| {
-            if (c.react_val != .f_zero and c.react_val != .undef) {
-                has_reactive = true;
-                break;
-            }
-        }
-        if (has_reactive) {
-            try self.emitPattern("c_pattern_override", contribs, true);
-        }
-
         // Noise generators (row/col from the contribution's node pair).
         try self.w().writeAll("pub const noise_gens = [_]contract.NoiseGen(Self){\n");
         for (contribs) |c| {
@@ -220,6 +207,13 @@ const Codegen = struct {
 
         try self.emitEvalFn("eval", contribs, false);
 
+        var has_reactive = false;
+        for (contribs) |c| {
+            if (c.react_val != .f_zero and c.react_val != .undef) {
+                has_reactive = true;
+                break;
+            }
+        }
         if (has_reactive) {
             try self.w().writeByte('\n');
             try self.emitEvalFn("q", contribs, true);
@@ -241,42 +235,6 @@ const Codegen = struct {
             if (std.mem.eql(u8, n, node_name)) return @intCast(i);
         }
         return null;
-    }
-
-    fn emitPattern(
-        self: *Codegen,
-        pattern_name: []const u8,
-        contribs: []const Lower.Contribution,
-        reactive: bool,
-    ) !void {
-        // Collect unique (row, col) entries
-        var seen: std.AutoHashMapUnmanaged(u16, void) = .empty;
-        defer seen.deinit(self.allocator);
-
-        try self.w().print("pub const {s} = [_]contract.Entry(n_u){{\n", .{pattern_name});
-        for (contribs) |c| {
-            const val = if (reactive) c.react_val else c.resist_val;
-            if (val == .f_zero or val == .undef or c.nodes.len == 0) continue;
-            const hi = self.nodeIndex(c.nodes[0]) orelse continue;
-            if (c.nodes.len >= 2) {
-                const lo = self.nodeIndex(c.nodes[1]) orelse continue;
-                const pairs = [_][2]u8{ .{ hi, hi }, .{ hi, lo }, .{ lo, hi }, .{ lo, lo } };
-                for (pairs) |p| {
-                    const key: u16 = @as(u16, p[0]) << 8 | p[1];
-                    const r = try seen.getOrPut(self.allocator, key);
-                    if (!r.found_existing) {
-                        try self.w().print("    .{{ .row = {d}, .col = {d} }},\n", .{ p[0], p[1] });
-                    }
-                }
-            } else {
-                const key: u16 = @as(u16, hi) << 8 | hi;
-                const r = try seen.getOrPut(self.allocator, key);
-                if (!r.found_existing) {
-                    try self.w().print("    .{{ .row = {d}, .col = {d} }},\n", .{ hi, hi });
-                }
-            }
-        }
-        try self.w().writeAll("};\n\n");
     }
 
     fn emitDefault(self: *Codegen, p: Lower.ParamInfo) !void {

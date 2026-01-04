@@ -580,82 +580,9 @@ fn lwpParam(base: f64, l_dep: f64, w_dep: f64, p_dep: f64, l_inv: f64, w_inv: f6
 // Sparse Conductance Stamp Pattern
 // ============================================================================
 
-pub const g_pattern_override = [_]contract.Entry(n_u){
-    // RD branch: D -- DP
-    .{ .row = @intFromEnum(U.drain), .col = @intFromEnum(U.drain) },
-    .{ .row = @intFromEnum(U.drain), .col = @intFromEnum(U.drain_prime) },
-    .{ .row = @intFromEnum(U.drain_prime), .col = @intFromEnum(U.drain) },
-    // RS branch: S -- SP
-    .{ .row = @intFromEnum(U.source), .col = @intFromEnum(U.source) },
-    .{ .row = @intFromEnum(U.source), .col = @intFromEnum(U.source_prime) },
-    .{ .row = @intFromEnum(U.source_prime), .col = @intFromEnum(U.source) },
-    // Channel DP -- SP (depends on G, B, E, TEMP)
-    .{ .row = @intFromEnum(U.drain_prime), .col = @intFromEnum(U.drain_prime) },
-    .{ .row = @intFromEnum(U.drain_prime), .col = @intFromEnum(U.source_prime) },
-    .{ .row = @intFromEnum(U.drain_prime), .col = @intFromEnum(U.gate) },
-    .{ .row = @intFromEnum(U.drain_prime), .col = @intFromEnum(U.body) },
-    .{ .row = @intFromEnum(U.source_prime), .col = @intFromEnum(U.drain_prime) },
-    .{ .row = @intFromEnum(U.source_prime), .col = @intFromEnum(U.source_prime) },
-    .{ .row = @intFromEnum(U.source_prime), .col = @intFromEnum(U.gate) },
-    .{ .row = @intFromEnum(U.source_prime), .col = @intFromEnum(U.body) },
-    // Body junctions: B -- DP, B -- SP
-    .{ .row = @intFromEnum(U.body), .col = @intFromEnum(U.body) },
-    .{ .row = @intFromEnum(U.body), .col = @intFromEnum(U.drain_prime) },
-    .{ .row = @intFromEnum(U.body), .col = @intFromEnum(U.source_prime) },
-    // Body resistance: B -- P
-    .{ .row = @intFromEnum(U.body), .col = @intFromEnum(U.body_contact) },
-    .{ .row = @intFromEnum(U.body_contact), .col = @intFromEnum(U.body) },
-    .{ .row = @intFromEnum(U.body_contact), .col = @intFromEnum(U.body_contact) },
-    // Gate row (gmin)
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.gate) },
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.source) },
-    // Substrate row (gmin)
-    .{ .row = @intFromEnum(U.substrate), .col = @intFromEnum(U.substrate) },
-    .{ .row = @intFromEnum(U.substrate), .col = @intFromEnum(U.body) },
-    .{ .row = @intFromEnum(U.substrate), .col = @intFromEnum(U.source) },
-    // Self-heating: TEMP node
-    .{ .row = @intFromEnum(U.temp), .col = @intFromEnum(U.temp) },
-    .{ .row = @intFromEnum(U.temp), .col = @intFromEnum(U.drain_prime) },
-    .{ .row = @intFromEnum(U.temp), .col = @intFromEnum(U.source_prime) },
-    // Source gmin entries
-    .{ .row = @intFromEnum(U.source), .col = @intFromEnum(U.gate) },
-    .{ .row = @intFromEnum(U.source), .col = @intFromEnum(U.substrate) },
-    .{ .row = @intFromEnum(U.source), .col = @intFromEnum(U.body_contact) },
-    // Body contact gmin: P -- S
-    .{ .row = @intFromEnum(U.body_contact), .col = @intFromEnum(U.source) },
-};
-
 // ============================================================================
 // Sparse Capacitance Stamp Pattern
 // ============================================================================
-
-pub const c_pattern_override = [_]contract.Entry(n_u){
-    // Gate charges: G -- SP, G -- DP, G -- B
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.gate) },
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.source_prime) },
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.drain_prime) },
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.body) },
-    // Body charges: B -- SP, B -- DP, B -- G, B -- E
-    .{ .row = @intFromEnum(U.body), .col = @intFromEnum(U.body) },
-    .{ .row = @intFromEnum(U.body), .col = @intFromEnum(U.source_prime) },
-    .{ .row = @intFromEnum(U.body), .col = @intFromEnum(U.drain_prime) },
-    .{ .row = @intFromEnum(U.body), .col = @intFromEnum(U.gate) },
-    .{ .row = @intFromEnum(U.body), .col = @intFromEnum(U.substrate) },
-    // DP charges
-    .{ .row = @intFromEnum(U.drain_prime), .col = @intFromEnum(U.drain_prime) },
-    .{ .row = @intFromEnum(U.drain_prime), .col = @intFromEnum(U.gate) },
-    .{ .row = @intFromEnum(U.drain_prime), .col = @intFromEnum(U.body) },
-    // SP charges
-    .{ .row = @intFromEnum(U.source_prime), .col = @intFromEnum(U.source_prime) },
-    .{ .row = @intFromEnum(U.source_prime), .col = @intFromEnum(U.gate) },
-    .{ .row = @intFromEnum(U.source_prime), .col = @intFromEnum(U.body) },
-    // Substrate charge: E -- SP, E -- B
-    .{ .row = @intFromEnum(U.substrate), .col = @intFromEnum(U.substrate) },
-    .{ .row = @intFromEnum(U.substrate), .col = @intFromEnum(U.source_prime) },
-    .{ .row = @intFromEnum(U.substrate), .col = @intFromEnum(U.body) },
-    // Thermal capacitance: TEMP -- TEMP
-    .{ .row = @intFromEnum(U.temp), .col = @intFromEnum(U.temp) },
-};
 
 // ============================================================================
 // Noise Sources

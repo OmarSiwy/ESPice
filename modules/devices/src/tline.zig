@@ -177,39 +177,6 @@ pub fn histInject(model: *const Model, lookup: anytype, t: f64) [n_u]f64 {
 //   ibr2-int2: +1     ibr2-neg2: -1
 // ---------------------------------------------------------------------------
 
-pub const g_pattern_override = [_]contract.Entry(n_u){
-    // G0 conductance block — port 1
-    .{ .row = @intFromEnum(U.pos1), .col = @intFromEnum(U.pos1) },
-    .{ .row = @intFromEnum(U.pos1), .col = @intFromEnum(U.int1) },
-    .{ .row = @intFromEnum(U.int1), .col = @intFromEnum(U.pos1) },
-    .{ .row = @intFromEnum(U.int1), .col = @intFromEnum(U.int1) },
-    // G0 conductance block — port 2
-    .{ .row = @intFromEnum(U.pos2), .col = @intFromEnum(U.pos2) },
-    .{ .row = @intFromEnum(U.pos2), .col = @intFromEnum(U.int2) },
-    .{ .row = @intFromEnum(U.int2), .col = @intFromEnum(U.pos2) },
-    .{ .row = @intFromEnum(U.int2), .col = @intFromEnum(U.int2) },
-    // Branch current stamps
-    .{ .row = @intFromEnum(U.neg1), .col = @intFromEnum(U.ibr1) },
-    .{ .row = @intFromEnum(U.int1), .col = @intFromEnum(U.ibr1) },
-    .{ .row = @intFromEnum(U.neg2), .col = @intFromEnum(U.ibr2) },
-    .{ .row = @intFromEnum(U.int2), .col = @intFromEnum(U.ibr2) },
-    // Bergeron branch equation 1 (local terms only)
-    .{ .row = @intFromEnum(U.ibr1), .col = @intFromEnum(U.int1) },
-    .{ .row = @intFromEnum(U.ibr1), .col = @intFromEnum(U.neg1) },
-    // Bergeron branch equation 2 (local terms only)
-    .{ .row = @intFromEnum(U.ibr2), .col = @intFromEnum(U.int2) },
-    .{ .row = @intFromEnum(U.ibr2), .col = @intFromEnum(U.neg2) },
-    // DC (t == 0) far-port coupling — ngspice traload MODEDC stamps: the
-    // branch equations become V1 - V2 - Z0*(I1 + I2) = 0, making the line a
-    // transparent connection at the operating point instead of Z0-to-ground.
-    .{ .row = @intFromEnum(U.ibr1), .col = @intFromEnum(U.pos2) },
-    .{ .row = @intFromEnum(U.ibr1), .col = @intFromEnum(U.neg2) },
-    .{ .row = @intFromEnum(U.ibr1), .col = @intFromEnum(U.ibr2) },
-    .{ .row = @intFromEnum(U.ibr2), .col = @intFromEnum(U.pos1) },
-    .{ .row = @intFromEnum(U.ibr2), .col = @intFromEnum(U.neg1) },
-    .{ .row = @intFromEnum(U.ibr2), .col = @intFromEnum(U.ibr1) },
-};
-
 // ---------------------------------------------------------------------------
 // PrepCache: hot eval data in contiguous array (SoA over devices)
 // ---------------------------------------------------------------------------

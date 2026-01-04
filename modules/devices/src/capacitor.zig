@@ -81,19 +81,6 @@ pub const Instance = struct {
 /// The capacitor contributes no resistive current so the conductance stamp
 /// is structurally empty.  However the solver still needs at least the
 /// diagonal for the MNA formulation, so we declare the standard 2x2 pattern.
-pub const g_pattern_override = [_]contract.Entry(n_u){
-    .{ .row = 0, .col = 0 },
-    .{ .row = 0, .col = 1 },
-    .{ .row = 1, .col = 0 },
-    .{ .row = 1, .col = 1 },
-};
-
-pub const c_pattern_override = [_]contract.Entry(n_u){
-    .{ .row = 0, .col = 0 },
-    .{ .row = 0, .col = 1 },
-    .{ .row = 1, .col = 0 },
-    .{ .row = 1, .col = 1 },
-};
 
 // ============================================================================
 // Constants

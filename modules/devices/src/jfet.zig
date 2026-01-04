@@ -73,45 +73,10 @@ pub const Instance = struct {
 // Junction GD: gate -- d_prime
 // Channel: d_prime -- s_prime
 
-pub const g_pattern_override = [_]contract.Entry(n_u){
-    // RD branch: drain -- d_prime
-    .{ .row = @intFromEnum(U.drain), .col = @intFromEnum(U.drain) },
-    .{ .row = @intFromEnum(U.drain), .col = @intFromEnum(U.d_prime) },
-    .{ .row = @intFromEnum(U.d_prime), .col = @intFromEnum(U.drain) },
-    // RS branch: source -- s_prime
-    .{ .row = @intFromEnum(U.source), .col = @intFromEnum(U.source) },
-    .{ .row = @intFromEnum(U.source), .col = @intFromEnum(U.s_prime) },
-    .{ .row = @intFromEnum(U.s_prime), .col = @intFromEnum(U.source) },
-    // Gate junction GD: gate -- d_prime
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.gate) },
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.d_prime) },
-    .{ .row = @intFromEnum(U.d_prime), .col = @intFromEnum(U.gate) },
-    // Gate junction GS: gate -- s_prime (gate row/col already present above)
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.s_prime) },
-    .{ .row = @intFromEnum(U.s_prime), .col = @intFromEnum(U.gate) },
-    // Channel + junction self-terms on d_prime and s_prime
-    .{ .row = @intFromEnum(U.d_prime), .col = @intFromEnum(U.d_prime) },
-    .{ .row = @intFromEnum(U.d_prime), .col = @intFromEnum(U.s_prime) },
-    .{ .row = @intFromEnum(U.s_prime), .col = @intFromEnum(U.d_prime) },
-    .{ .row = @intFromEnum(U.s_prime), .col = @intFromEnum(U.s_prime) },
-};
-
 // ============================================================================
 // Sparse Capacitance Stamp Pattern
 // ============================================================================
 // Charge Q_GS on gate -- s_prime, Q_GD on gate -- d_prime
-
-pub const c_pattern_override = [_]contract.Entry(n_u){
-    // Q_GD: gate -- d_prime
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.gate) },
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.d_prime) },
-    .{ .row = @intFromEnum(U.d_prime), .col = @intFromEnum(U.gate) },
-    .{ .row = @intFromEnum(U.d_prime), .col = @intFromEnum(U.d_prime) },
-    // Q_GS: gate -- s_prime
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.s_prime) },
-    .{ .row = @intFromEnum(U.s_prime), .col = @intFromEnum(U.gate) },
-    .{ .row = @intFromEnum(U.s_prime), .col = @intFromEnum(U.s_prime) },
-};
 
 // ============================================================================
 // Noise Sources

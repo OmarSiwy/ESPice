@@ -202,90 +202,9 @@ pub const Instance = struct {
 // Sparse Conductance Stamp Pattern
 // ============================================================================
 
-pub const g_pattern_override = [_]contract.Entry(n_u){
-    // RCx branch: C -- ci
-    .{ .row = @intFromEnum(U.c), .col = @intFromEnum(U.c) },
-    .{ .row = @intFromEnum(U.c), .col = @intFromEnum(U.ci) },
-    .{ .row = @intFromEnum(U.ci), .col = @intFromEnum(U.c) },
-    // RBx branch: B -- bx
-    .{ .row = @intFromEnum(U.b), .col = @intFromEnum(U.b) },
-    .{ .row = @intFromEnum(U.b), .col = @intFromEnum(U.bx) },
-    .{ .row = @intFromEnum(U.bx), .col = @intFromEnum(U.b) },
-    // RBi branch: bx -- bi
-    .{ .row = @intFromEnum(U.bx), .col = @intFromEnum(U.bx) },
-    .{ .row = @intFromEnum(U.bx), .col = @intFromEnum(U.bi) },
-    .{ .row = @intFromEnum(U.bi), .col = @intFromEnum(U.bx) },
-    // RE branch: E -- ei
-    .{ .row = @intFromEnum(U.e), .col = @intFromEnum(U.e) },
-    .{ .row = @intFromEnum(U.e), .col = @intFromEnum(U.ei) },
-    .{ .row = @intFromEnum(U.ei), .col = @intFromEnum(U.e) },
-    // Intrinsic transistor: bi -- ci, bi -- ei, ci -- ei (and diagonals)
-    .{ .row = @intFromEnum(U.bi), .col = @intFromEnum(U.bi) },
-    .{ .row = @intFromEnum(U.bi), .col = @intFromEnum(U.ci) },
-    .{ .row = @intFromEnum(U.bi), .col = @intFromEnum(U.ei) },
-    .{ .row = @intFromEnum(U.ci), .col = @intFromEnum(U.ci) },
-    .{ .row = @intFromEnum(U.ci), .col = @intFromEnum(U.bi) },
-    .{ .row = @intFromEnum(U.ci), .col = @intFromEnum(U.ei) },
-    .{ .row = @intFromEnum(U.ei), .col = @intFromEnum(U.ei) },
-    .{ .row = @intFromEnum(U.ei), .col = @intFromEnum(U.bi) },
-    .{ .row = @intFromEnum(U.ei), .col = @intFromEnum(U.ci) },
-    // Substrate: S -- si, si -- ci
-    .{ .row = @intFromEnum(U.s), .col = @intFromEnum(U.s) },
-    .{ .row = @intFromEnum(U.s), .col = @intFromEnum(U.si) },
-    .{ .row = @intFromEnum(U.si), .col = @intFromEnum(U.s) },
-    .{ .row = @intFromEnum(U.si), .col = @intFromEnum(U.si) },
-    .{ .row = @intFromEnum(U.si), .col = @intFromEnum(U.ci) },
-    .{ .row = @intFromEnum(U.ci), .col = @intFromEnum(U.si) },
-    // NQS nodes: xf, xq
-    .{ .row = @intFromEnum(U.xf), .col = @intFromEnum(U.xf) },
-    .{ .row = @intFromEnum(U.xf), .col = @intFromEnum(U.ci) },
-    .{ .row = @intFromEnum(U.xf), .col = @intFromEnum(U.ei) },
-    .{ .row = @intFromEnum(U.xf), .col = @intFromEnum(U.bi) },
-    .{ .row = @intFromEnum(U.xq), .col = @intFromEnum(U.xq) },
-    .{ .row = @intFromEnum(U.xq), .col = @intFromEnum(U.ci) },
-    .{ .row = @intFromEnum(U.xq), .col = @intFromEnum(U.ei) },
-    .{ .row = @intFromEnum(U.xq), .col = @intFromEnum(U.bi) },
-    // Thermal node: dt
-    .{ .row = @intFromEnum(U.dt), .col = @intFromEnum(U.dt) },
-    .{ .row = @intFromEnum(U.dt), .col = @intFromEnum(U.bi) },
-    .{ .row = @intFromEnum(U.dt), .col = @intFromEnum(U.ci) },
-    .{ .row = @intFromEnum(U.dt), .col = @intFromEnum(U.ei) },
-    // External BC cap (B -- ci via bx)
-    .{ .row = @intFromEnum(U.bx), .col = @intFromEnum(U.ci) },
-};
-
 // ============================================================================
 // Sparse Capacitance Stamp Pattern
 // ============================================================================
-
-pub const c_pattern_override = [_]contract.Entry(n_u){
-    // Q_jE: bi -- ei
-    .{ .row = @intFromEnum(U.bi), .col = @intFromEnum(U.bi) },
-    .{ .row = @intFromEnum(U.bi), .col = @intFromEnum(U.ei) },
-    .{ .row = @intFromEnum(U.ei), .col = @intFromEnum(U.bi) },
-    .{ .row = @intFromEnum(U.ei), .col = @intFromEnum(U.ei) },
-    // Q_jCi: bi -- ci
-    .{ .row = @intFromEnum(U.bi), .col = @intFromEnum(U.ci) },
-    .{ .row = @intFromEnum(U.ci), .col = @intFromEnum(U.bi) },
-    .{ .row = @intFromEnum(U.ci), .col = @intFromEnum(U.ci) },
-    // Q_jCx: bx -- ci (external BC depletion across rbx)
-    .{ .row = @intFromEnum(U.bx), .col = @intFromEnum(U.bx) },
-    .{ .row = @intFromEnum(U.bx), .col = @intFromEnum(U.ci) },
-    .{ .row = @intFromEnum(U.ci), .col = @intFromEnum(U.bx) },
-    // Q_jS: si -- ci
-    .{ .row = @intFromEnum(U.si), .col = @intFromEnum(U.si) },
-    .{ .row = @intFromEnum(U.si), .col = @intFromEnum(U.ci) },
-    .{ .row = @intFromEnum(U.ci), .col = @intFromEnum(U.si) },
-    // CBEpar: bx -- ei
-    .{ .row = @intFromEnum(U.bx), .col = @intFromEnum(U.ei) },
-    .{ .row = @intFromEnum(U.ei), .col = @intFromEnum(U.bx) },
-    // CBCpar: bx -- ci (already in Q_jCx entries)
-    // NQS nodes: xf, xq
-    .{ .row = @intFromEnum(U.xf), .col = @intFromEnum(U.xf) },
-    .{ .row = @intFromEnum(U.xq), .col = @intFromEnum(U.xq) },
-    // Thermal capacitance: dt
-    .{ .row = @intFromEnum(U.dt), .col = @intFromEnum(U.dt) },
-};
 
 // ============================================================================
 // Noise Sources

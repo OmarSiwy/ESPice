@@ -254,13 +254,6 @@ pub const UnknownKind = enum {
     flow,
 };
 
-pub fn Entry(comptime n: usize) type {
-    return struct {
-        row: std.math.IntFittingRange(0, n - 1),
-        col: std.math.IntFittingRange(0, n - 1),
-    };
-}
-
 pub fn NoiseGen(comptime D: type) type {
     const n = nU(D);
     return struct {
@@ -597,8 +590,6 @@ pub fn validate(comptime D: type) void {
     // Optional metadata.
     if (@hasDecl(D, "u_kinds") and @TypeOf(D.u_kinds) != [n]UnknownKind)
         @compileError(name ++ ".u_kinds must be [|U|]UnknownKind");
-    if (@hasDecl(D, "g_pattern_override")) validateEntryArray(D, "g_pattern_override", n);
-    if (@hasDecl(D, "c_pattern_override")) validateEntryArray(D, "c_pattern_override", n);
     if (@hasDecl(D, "noise_gens")) {
         const info = @typeInfo(@TypeOf(D.noise_gens));
         if (info != .array or info.array.child != NoiseGen(D))
@@ -691,8 +682,6 @@ const allowed_pub_decls = std.StaticStringMap(void).initComptime(.{
     .{ "delays", {} },
     .{ "attempt", {} },
     .{ "u_kinds", {} },
-    .{ "g_pattern_override", {} },
-    .{ "c_pattern_override", {} },
     .{ "noise_gens", {} },
     .{ "noisePsd", {} },
     .{ "mc_param", {} },
@@ -773,12 +762,6 @@ fn validateDelaysFn(comptime D: type) void {
     const ret = @typeInfo(info.@"fn".return_type.?);
     if (ret != .array or ret.array.child != f64 or ret.array.len == 0)
         @compileError(err);
-}
-
-fn validateEntryArray(comptime D: type, comptime decl: []const u8, comptime n: comptime_int) void {
-    const info = @typeInfo(@TypeOf(@field(D, decl)));
-    if (info != .array or info.array.child != Entry(n))
-        @compileError(@typeName(D) ++ "." ++ decl ++ " must be [k]Entry(n_u)");
 }
 
 fn isDenseEnum(comptime E: type) bool {
@@ -890,8 +873,6 @@ const MockTline = struct {
 
     pub const mc_param = "z0";
     pub const u_kinds = [n_u]UnknownKind{ .voltage, .voltage };
-    pub const g_pattern_override = [_]Entry(n_u){.{ .row = 0, .col = 0 }};
-    pub const c_pattern_override = [0]Entry(n_u){};
     pub const noise_gens = [_]NoiseGen(@This()){.{ .row = 0, .col = 1, .kind = .thermal }};
 
     pub const n_hist_signals: u32 = 2;

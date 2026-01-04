@@ -134,57 +134,9 @@ pub const Instance = struct {
 // Sparse Conductance Stamp Pattern
 // ============================================================================
 
-pub const g_pattern_override = [_]contract.Entry(n_u){
-    // RD branch: D -- D'
-    .{ .row = @intFromEnum(U.drain), .col = @intFromEnum(U.drain) },
-    .{ .row = @intFromEnum(U.drain), .col = @intFromEnum(U.drain_prime) },
-    .{ .row = @intFromEnum(U.drain_prime), .col = @intFromEnum(U.drain) },
-    // RS branch: S -- S'
-    .{ .row = @intFromEnum(U.source), .col = @intFromEnum(U.source) },
-    .{ .row = @intFromEnum(U.source), .col = @intFromEnum(U.source_prime) },
-    .{ .row = @intFromEnum(U.source_prime), .col = @intFromEnum(U.source) },
-    // Channel D' -- S' (incl. gate and bulk dependencies)
-    .{ .row = @intFromEnum(U.drain_prime), .col = @intFromEnum(U.drain_prime) },
-    .{ .row = @intFromEnum(U.drain_prime), .col = @intFromEnum(U.source_prime) },
-    .{ .row = @intFromEnum(U.drain_prime), .col = @intFromEnum(U.gate) },
-    .{ .row = @intFromEnum(U.drain_prime), .col = @intFromEnum(U.bulk) },
-    .{ .row = @intFromEnum(U.source_prime), .col = @intFromEnum(U.drain_prime) },
-    .{ .row = @intFromEnum(U.source_prime), .col = @intFromEnum(U.source_prime) },
-    .{ .row = @intFromEnum(U.source_prime), .col = @intFromEnum(U.gate) },
-    .{ .row = @intFromEnum(U.source_prime), .col = @intFromEnum(U.bulk) },
-    // Bulk junctions: B -- D', B -- S'
-    .{ .row = @intFromEnum(U.bulk), .col = @intFromEnum(U.bulk) },
-    .{ .row = @intFromEnum(U.bulk), .col = @intFromEnum(U.drain_prime) },
-    .{ .row = @intFromEnum(U.bulk), .col = @intFromEnum(U.source_prime) },
-    // Gate row (no DC current but derivatives may exist)
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.gate) },
-};
-
 // ============================================================================
 // Sparse Capacitance Stamp Pattern
 // ============================================================================
-
-pub const c_pattern_override = [_]contract.Entry(n_u){
-    // Gate charges: G -- S', G -- D', G -- B
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.gate) },
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.source_prime) },
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.drain_prime) },
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.bulk) },
-    // Bulk charges: B -- S', B -- D', B -- G
-    .{ .row = @intFromEnum(U.bulk), .col = @intFromEnum(U.bulk) },
-    .{ .row = @intFromEnum(U.bulk), .col = @intFromEnum(U.source_prime) },
-    .{ .row = @intFromEnum(U.bulk), .col = @intFromEnum(U.drain_prime) },
-    .{ .row = @intFromEnum(U.bulk), .col = @intFromEnum(U.gate) },
-    // D' charges: D' -- D', D' -- G, D' -- B
-    .{ .row = @intFromEnum(U.drain_prime), .col = @intFromEnum(U.drain_prime) },
-    .{ .row = @intFromEnum(U.drain_prime), .col = @intFromEnum(U.gate) },
-    .{ .row = @intFromEnum(U.drain_prime), .col = @intFromEnum(U.bulk) },
-    // S' charges: S' -- S', S' -- G, S' -- B, S' -- D'
-    .{ .row = @intFromEnum(U.source_prime), .col = @intFromEnum(U.source_prime) },
-    .{ .row = @intFromEnum(U.source_prime), .col = @intFromEnum(U.gate) },
-    .{ .row = @intFromEnum(U.source_prime), .col = @intFromEnum(U.bulk) },
-    .{ .row = @intFromEnum(U.source_prime), .col = @intFromEnum(U.drain_prime) },
-};
 
 // ============================================================================
 // Noise Sources

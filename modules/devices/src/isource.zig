@@ -16,8 +16,6 @@ pub const num_ports: usize = 2;
 // Empty pattern tells the solver this device touches zero G-matrix entries.
 // ---------------------------------------------------------------------------
 
-pub const g_pattern_override = [0]contract.Entry(n_u){};
-
 // ---------------------------------------------------------------------------
 // Model -- shared across instances (empty for ideal source)
 // ---------------------------------------------------------------------------

@@ -135,60 +135,12 @@ pub const Instance = struct {
 // Body diode: s' -- b'
 // GMIN:       d' -- s'
 
-pub const g_pattern_override = [_]contract.Entry(n_u){
-    // RD: drain -- d'
-    .{ .row = @intFromEnum(U.drain), .col = @intFromEnum(U.drain) },
-    .{ .row = @intFromEnum(U.drain), .col = @intFromEnum(U.d_prime) },
-    .{ .row = @intFromEnum(U.d_prime), .col = @intFromEnum(U.drain) },
-    // RG: gate -- g'
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.gate) },
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.g_prime) },
-    .{ .row = @intFromEnum(U.g_prime), .col = @intFromEnum(U.gate) },
-    // RS: source -- s'
-    .{ .row = @intFromEnum(U.source), .col = @intFromEnum(U.source) },
-    .{ .row = @intFromEnum(U.source), .col = @intFromEnum(U.s_prime) },
-    .{ .row = @intFromEnum(U.s_prime), .col = @intFromEnum(U.source) },
-    // RB: b' -- d'
-    .{ .row = @intFromEnum(U.b_prime), .col = @intFromEnum(U.b_prime) },
-    .{ .row = @intFromEnum(U.b_prime), .col = @intFromEnum(U.d_prime) },
-    .{ .row = @intFromEnum(U.d_prime), .col = @intFromEnum(U.b_prime) },
-    // Channel + RDS + GMIN: d' -- s'
-    .{ .row = @intFromEnum(U.d_prime), .col = @intFromEnum(U.d_prime) },
-    .{ .row = @intFromEnum(U.d_prime), .col = @intFromEnum(U.s_prime) },
-    .{ .row = @intFromEnum(U.s_prime), .col = @intFromEnum(U.d_prime) },
-    .{ .row = @intFromEnum(U.s_prime), .col = @intFromEnum(U.s_prime) },
-    // Channel depends on g': d' -- g', s' -- g'
-    .{ .row = @intFromEnum(U.d_prime), .col = @intFromEnum(U.g_prime) },
-    .{ .row = @intFromEnum(U.s_prime), .col = @intFromEnum(U.g_prime) },
-    // g' self (RG)
-    .{ .row = @intFromEnum(U.g_prime), .col = @intFromEnum(U.g_prime) },
-    // Body diode: s' -- b'
-    .{ .row = @intFromEnum(U.s_prime), .col = @intFromEnum(U.b_prime) },
-    .{ .row = @intFromEnum(U.b_prime), .col = @intFromEnum(U.s_prime) },
-};
-
 // ============================================================================
 // Sparse Capacitance Stamp Pattern
 // ============================================================================
 // Qgs: g' -- s'
 // Qgd: g' -- d'
 // Qsd (body diode): s' -- b'
-
-pub const c_pattern_override = [_]contract.Entry(n_u){
-    // Qgs: g' -- s'
-    .{ .row = @intFromEnum(U.g_prime), .col = @intFromEnum(U.g_prime) },
-    .{ .row = @intFromEnum(U.g_prime), .col = @intFromEnum(U.s_prime) },
-    .{ .row = @intFromEnum(U.s_prime), .col = @intFromEnum(U.g_prime) },
-    .{ .row = @intFromEnum(U.s_prime), .col = @intFromEnum(U.s_prime) },
-    // Qgd: g' -- d'
-    .{ .row = @intFromEnum(U.g_prime), .col = @intFromEnum(U.d_prime) },
-    .{ .row = @intFromEnum(U.d_prime), .col = @intFromEnum(U.g_prime) },
-    .{ .row = @intFromEnum(U.d_prime), .col = @intFromEnum(U.d_prime) },
-    // Qsd (body diode junction): s' -- b'
-    .{ .row = @intFromEnum(U.s_prime), .col = @intFromEnum(U.b_prime) },
-    .{ .row = @intFromEnum(U.b_prime), .col = @intFromEnum(U.s_prime) },
-    .{ .row = @intFromEnum(U.b_prime), .col = @intFromEnum(U.b_prime) },
-};
 
 // ============================================================================
 // Noise Sources

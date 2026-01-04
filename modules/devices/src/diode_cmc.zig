@@ -207,41 +207,6 @@ pub const Instance = struct {
 // ============================================================================
 // Sparse stamp patterns
 // ============================================================================
-pub const g_pattern_override = [_]contract.Entry(n_u){
-    // junction branch (a <-> aik)
-    .{ .row = @intFromEnum(U.a), .col = @intFromEnum(U.a) },
-    .{ .row = @intFromEnum(U.a), .col = @intFromEnum(U.aik) },
-    .{ .row = @intFromEnum(U.aik), .col = @intFromEnum(U.a) },
-    .{ .row = @intFromEnum(U.aik), .col = @intFromEnum(U.aik) },
-    // resistor branch (aik <-> k)
-    .{ .row = @intFromEnum(U.aik), .col = @intFromEnum(U.k) },
-    .{ .row = @intFromEnum(U.k), .col = @intFromEnum(U.aik) },
-    .{ .row = @intFromEnum(U.k), .col = @intFromEnum(U.k) },
-    // NQS: charge_a depends on V_AK (a, aik) and itself
-    .{ .row = @intFromEnum(U.charge_a), .col = @intFromEnum(U.charge_a) },
-    .{ .row = @intFromEnum(U.charge_a), .col = @intFromEnum(U.a) },
-    .{ .row = @intFromEnum(U.charge_a), .col = @intFromEnum(U.aik) },
-    // NQS: charge_k depends on V_AK (a, aik) and itself
-    .{ .row = @intFromEnum(U.charge_k), .col = @intFromEnum(U.charge_k) },
-    .{ .row = @intFromEnum(U.charge_k), .col = @intFromEnum(U.a) },
-    .{ .row = @intFromEnum(U.charge_k), .col = @intFromEnum(U.aik) },
-    // NQS: depl_a depends on V_AK (a, aik) and itself
-    .{ .row = @intFromEnum(U.depl_a), .col = @intFromEnum(U.depl_a) },
-    .{ .row = @intFromEnum(U.depl_a), .col = @intFromEnum(U.a) },
-    .{ .row = @intFromEnum(U.depl_a), .col = @intFromEnum(U.aik) },
-};
-
-pub const c_pattern_override = [_]contract.Entry(n_u){
-    // junction charge (a <-> aik)
-    .{ .row = @intFromEnum(U.a), .col = @intFromEnum(U.a) },
-    .{ .row = @intFromEnum(U.a), .col = @intFromEnum(U.aik) },
-    .{ .row = @intFromEnum(U.aik), .col = @intFromEnum(U.a) },
-    .{ .row = @intFromEnum(U.aik), .col = @intFromEnum(U.aik) },
-    // NQS capacitance (self)
-    .{ .row = @intFromEnum(U.charge_a), .col = @intFromEnum(U.charge_a) },
-    .{ .row = @intFromEnum(U.charge_k), .col = @intFromEnum(U.charge_k) },
-    .{ .row = @intFromEnum(U.depl_a), .col = @intFromEnum(U.depl_a) },
-};
 
 // ============================================================================
 // Noise generators

@@ -41,10 +41,6 @@ pub const Instance = struct {
 /// The CCCS only stamps two entries in the conductance matrix:
 ///   dI_p   / dI_ctrl = +G*M  -> (p, ctrl_br)
 ///   dI_n   / dI_ctrl = -G*M  -> (n, ctrl_br)
-pub const g_pattern_override = [_]contract.Entry(n_u){
-    .{ .row = @intFromEnum(U.p), .col = @intFromEnum(U.ctrl_br) },
-    .{ .row = @intFromEnum(U.n), .col = @intFromEnum(U.ctrl_br) },
-};
 
 /// Effective gain = G * M from instance params. Pure f64 — no x.
 fn effectiveGain(instance: *const Instance) f64 {
