@@ -13,10 +13,52 @@ matrix reflects the model *body*, not the include gap.
 Compiling models were then sanity-checked with a real `.op`
 (instantiation + bias point).
 
-## Matrix
+## Matrix (updated 2026-07-12 — after the P0–P9 fix pass)
+
+All P0–P9 blockers below were fixed (preprocessor rewrite, named-branch
+semantics, loop/conditional codegen, default folding, engine param binding).
+Re-run of the same harness; **2026-07-11** column kept for history.
 
 Result key: **loads** = compiles to .so and dlopens; **op-ok** = .op result
-physically plausible; **dead** = loads but contributes nothing (see class).
+physically plausible; **live** = loads and stamps real currents (electrically
+present), numerics not independently verified.
+
+| Model | 2026-07-11 | 2026-07-12 | .op evidence |
+|---|---|---|---|
+| RESISTOR | loads, params unbindable | **op-ok** | divider with card `r=2000` + 2k load → v(out)=0.500 |
+| VCCS | loads, dead | **op-ok** | Vin=1, G=10 into 1 Ω → v(out)=−10.000 |
+| CCCS | loads, dead | **op-ok** | I(br) probe drives gain: v(out)=−10.000 (branch-current unknown) |
+| DIODE | loads, dead | **op-ok** | 1 V, 1 kΩ → v(out)=0.371 (0.63 V forward drop); switch branch `V(br)<+0` collapses rs=0 |
+| EKV 2.6 | parse error (P4) | **live** | loads + stamps, but .op diverges to ~1.4e7 V — numerics wrong, needs its own pass |
+| VBIC 1.2 (4T et cf) | loads, dead | **op-ok** | forward active (Vb=0.9, Rc=1k, nonzero R's) → v(c)=0.116, Ic≈2.9 mA |
+| HICUML2 | parse errors (P3) | **loads, live** | 89 KCL stamps; no reference bias point run |
+| MEXTRAM 505 | loads, op-ok | **op-ok** | unchanged: Vb=0.9/Rc=1k → v(c)=0.096, saturated |
+| PSP103.7 | empty eval (P1) | **op-ok** | defaults: Id=0.52 mA @Vg=3; vacask model card: Id=0.24 mA @Vg=1.2 — real NMOS behavior |
+| BSIMSOI 4.6.1 | codegen error (P6) | **loads, live** | 135 KCL stamps |
+| BSIM4 | 212 parse errors (P2) | **loads, live** | 118 KCL stamps |
+| BSIMBULK | parse errors (P3) | **loads, live** | 139 KCL stamps |
+| BSIMCMG 110 | 92 unused-const (P5) | **loads, live** | 99 KCL stamps |
+| HiSIM2 2.8 | parse errors (P1) | **loads, live** | 65 KCL stamps (needed the loop-codegen chain rewrite) |
+| ASMHEMT 101.1 | loads, dead (P8) | **op-ok** | voff=−2.0/ute=−0.5 preserved; normally-on at Vg=0: v(d)≈6 mV (Id≈5 mA) |
+| MVSG_CMC 1.2 | empty eval (P1) | **loads, live** | 259 KCL stamps |
+| DIODE_CMC 2.0 | parse errors (P3) | **loads, live** | 25 KCL stamps |
+
+Also: local `` `include `` now resolves against the .va file's dir (no
+pre-flattening needed), and unresolvable includes are a loud error.
+Big models (PSP103: ~24k dual-number locals per eval) need the fat-stack
+threads added to `src/main.zig` / `problem/par.zig`.
+
+Known remaining gaps after the pass:
+- EKV: live but diverges (bias-independent ~1e7 A in the Id chain at any
+  bias) — first candidate for a numerics-debug pass with reference data.
+- The bias-point sanity for the `loads, live` rows still needs golden
+  references (vacask/ngspice comparisons); "live" only asserts real stamps.
+- Switch-branch mode uses a runtime select; `$param_given` still always 1.0.
+- Loops inside select-lowered conditionals now force block lowering; loops
+  reached through *inlined user functions inside conditionals* would still
+  mis-lower (loudly, as a Zig compile error — none in this corpus).
+
+## Historical matrix (2026-07-11, pre-fix)
 
 | Model | VA lines (flat) | Result | First hard blocker | Class |
 |---|---|---|---|---|
@@ -38,12 +80,27 @@ physically plausible; **dead** = loads but contributes nothing (see class).
 | MVSG_CMC 1.2 | 1348 | empty eval → zig error | P1: `` `MPIsw(noisemod …"…0=off, 1=on")`` splits, eats to EOF | preprocessor |
 | DIODE_CMC 2.0 | 2352 | parse errors → zig error | P3: unit-conversion macros with trailing `//` comments (`NDIBOT_i = NDIBOT * (1.0e6) // [cm-3]…` eats `;`) | preprocessor |
 
+(Historical notes below reflect the 2026-07-11 state.)
+
 Positive control: the in-tree fixtures (`benchmark/fixtures/verilogA/*`) and
 simple node-pair models (`I(a,c) <+ …`) compile, load, and give correct .op.
 MEXTRAM proves the full pipeline works end-to-end on a real 2 kline
 production BJT when the source dodges every bug below.
 
-## Blocker catalog
+## Blocker catalog (ALL FIXED 2026-07-12)
+
+Fix locations: P0–P3 `dep/FastVAF/src/va/frontend/Preprocessor.zig` (comment
+pre-strip, string-aware multi-line arg scan, two-phase substitution, real
+include resolution via `compileSourceOpts`); P4 `frontend/Parser.zig`
+(optional header semicolon); P5+P6 `backend/codegen.zig` (per-scope discards,
+aliased-phi skip, loop-chain emission with join-once + entry phi init) and
+`ir/Lower.zig` (select-based case, loop-depth counter, stale-cache fallback,
+block lowering for loop-containing conditionals); P7 `ir/Lower.zig`
+(named/implicit branches, branch-current unknowns, switch-branch mode
+select); P8 `backend/codegen.zig` (constFold for defaults); P9
+`src/netlist.zig` + `modules/analysis/src/problem/dyn.zig` + `src/vaload.zig`
+(card-kv into model blob, case-insensitive params and registry, `.model`
+kind indirection).
 
 All reproduced with minimal cases (scratch harness was under /tmp/vah, not
 committed).

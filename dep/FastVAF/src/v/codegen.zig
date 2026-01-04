@@ -551,7 +551,7 @@ test "generateDevice multi-bit adder" {
     try std.testing.expect(std.mem.indexOf(u8, source, "y_4_branch,") != null);
     try std.testing.expect(std.mem.indexOf(u8, source, "num_ports: usize = 13") != null);
     try std.testing.expect(std.mem.indexOf(u8, source, "pub fn eval(comptime S: type") != null);
-    try std.testing.expect(std.mem.indexOf(u8, source, "zpicey_eval_ad") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "contract.validate(@This())") != null);
 }
 
 test "generateDevice scalar ports" {
