@@ -40,6 +40,30 @@ pub const ParamInfo = struct {
     default: ?Value,
 };
 
+/// A named `branch (a[,b]) name;` declaration. Contributions to it
+/// accumulate here (flow and potential separately); placement is decided at
+/// finalize: plain flow branches stamp their node pair directly, while
+/// probed branches / potential (switch) branches get a branch-current
+/// unknown with a constraint row.
+pub const BranchInfo = struct {
+    name: []const u8,
+    nodes: [2]?[]const u8, // [hi, lo]; lo == null → ground branch
+    flow_resist: Place,
+    flow_react: Place,
+    pot_resist: Place,
+    pot_react: Place,
+    /// Runtime mode indicator: 1.0 when the last executed contribution was a
+    /// potential one (switch branches flip this per LRM "last wins").
+    vmode: Place,
+    cur_place: ?Place = null, // branch-current unknown (x[] slot)
+    cur_name: ?[]const u8 = null,
+    has_flow: bool = false,
+    has_pot: bool = false,
+    probed: bool = false,
+    noise_kind: ?NoiseKind = null,
+    noise_args: [2]?Value = .{ null, null },
+};
+
 const Scope = std.AutoHashMapUnmanaged(Place, Value);
 
 builder: SsaBuilder,
@@ -58,6 +82,7 @@ var_map: std.StringHashMapUnmanaged(Place) = .empty,
 params: Buf(ParamInfo) = .{},
 contributions: Buf(Contribution) = .{},
 node_voltages: std.StringHashMapUnmanaged(Place) = .empty,
+branches: std.StringHashMapUnmanaged(BranchInfo) = .empty,
 builtin_funcs: std.StringHashMapUnmanaged(Mir.FuncRef) = .empty,
 user_funcs: std.StringHashMapUnmanaged(Ast.FuncDecl) = .empty,
 
@@ -70,7 +95,10 @@ node_order: Buf([]const u8) = .{},
 /// loops. Invalidated wholesale at loop boundaries.
 val_arr: Buf(Value) = .{},
 if_scopes: Buf(Scope) = .{},
-in_loop: bool = false,
+/// Loop nesting depth. A COUNTER, not a bool: a nested loop ending must not
+/// re-enable the straight-line val_arr cache while an outer loop is open
+/// (cached reads would leak loop-body values across block boundaries).
+loop_depth: u32 = 0,
 
 pub fn init(
     allocator: Allocator,
@@ -111,6 +139,7 @@ pub fn deinit(self: *Lower) void {
     self.params.deinit(self.allocator);
     self.contributions.deinit(self.allocator);
     self.node_voltages.deinit(self.allocator);
+    self.branches.deinit(self.allocator);
     self.builtin_funcs.deinit(self.allocator);
     self.user_funcs.deinit(self.allocator);
     self.node_order.deinit(self.allocator);
@@ -125,16 +154,28 @@ fn allocPlace(self: *Lower) !Place {
     return p;
 }
 
+/// Current value of a place: the straight-line cache when fresh, else the
+/// SSA builder. A loop wipes the cache wholesale (stale-undef), so an undef
+/// cache entry must NOT be taken as "the variable has no value".
+fn currentVal(self: *Lower, place: Place) !Value {
+    const pid = @intFromEnum(place);
+    if (pid < self.val_arr.len) {
+        const v = self.val_arr.slice()[pid];
+        if (v != .undef) return v;
+    }
+    return self.builder.useVar(place);
+}
+
 fn writeVar(self: *Lower, place: Place, val: Value) !void {
     const pid = @intFromEnum(place);
     if (self.if_scopes.len > 0) {
         const scope = &self.if_scopes.slice()[self.if_scopes.len - 1];
         const r = try scope.getOrPut(self.allocator, place);
         if (!r.found_existing) {
-            r.value_ptr.* = if (pid < self.val_arr.len) self.val_arr.slice()[pid] else .undef;
+            r.value_ptr.* = try self.currentVal(place);
         }
     }
-    if (!self.in_loop) {
+    if (self.loop_depth == 0) {
         if (pid < self.val_arr.len) {
             self.val_arr.slice()[pid] = val;
         }
@@ -143,7 +184,7 @@ fn writeVar(self: *Lower, place: Place, val: Value) !void {
 }
 
 fn readVar(self: *Lower, place: Place) !Value {
-    if (!self.in_loop) {
+    if (self.loop_depth == 0) {
         const pid = @intFromEnum(place);
         if (pid < self.val_arr.len) {
             const v = self.val_arr.slice()[pid];
@@ -231,7 +272,7 @@ pub fn lowerModule(self: *Lower, module: *const Ast.ModuleDecl) !void {
                     .default = null,
                 });
             },
-            .branch_decl => {},
+            .branch_decl => |bd| try self.registerBranch(&bd),
             .func_decl => |fd| try self.user_funcs.put(self.allocator, fd.name, fd),
         }
     }
@@ -242,6 +283,8 @@ pub fn lowerModule(self: *Lower, module: *const Ast.ModuleDecl) !void {
     try self.builder.addPredecessor(exit, pre_exit);
     self.builder.switchToBlock(exit);
     try self.builder.sealBlock(exit);
+
+    try self.finalizeBranches();
 
     for (self.contributions.slice()) |*c| {
         c.resist_val = try self.readVar(c.resist_place);
@@ -349,6 +392,205 @@ fn lowerStmt(self: *Lower, id: Ast.StmtId) LowerError!void {
     }
 }
 
+fn registerBranch(self: *Lower, bd: *const Ast.BranchDecl) !void {
+    if (self.branches.contains(bd.name)) return;
+    try self.registerNodeVoltage(bd.node_a);
+    if (bd.node_b) |b| try self.registerNodeVoltage(b);
+    const info: BranchInfo = .{
+        .name = bd.name,
+        .nodes = .{ bd.node_a, bd.node_b },
+        .flow_resist = try self.allocPlace(),
+        .flow_react = try self.allocPlace(),
+        .pot_resist = try self.allocPlace(),
+        .pot_react = try self.allocPlace(),
+        .vmode = try self.allocPlace(),
+    };
+    try self.writeVar(info.flow_resist, .f_zero);
+    try self.writeVar(info.flow_react, .f_zero);
+    try self.writeVar(info.pot_resist, .f_zero);
+    try self.writeVar(info.pot_react, .f_zero);
+    try self.writeVar(info.vmode, .f_zero);
+    try self.branches.put(self.allocator, bd.name, info);
+}
+
+/// Get-or-create the implicit branch for a plain node pair (potential
+/// contributions only; flow contributions on pairs stamp directly).
+fn implicitBranch(self: *Lower, nodes: []const []const u8) !*BranchInfo {
+    const name = if (nodes.len > 1)
+        try std.fmt.allocPrint(self.allocator, "{s}_{s}", .{ nodes[0], nodes[1] })
+    else
+        try self.allocator.dupe(u8, nodes[0]);
+    // '#' keeps implicit keys out of the named-branch namespace.
+    const key = try std.fmt.allocPrint(self.allocator, "{s}#v", .{name});
+    const gop = try self.branches.getOrPut(self.allocator, key);
+    if (!gop.found_existing) {
+        gop.value_ptr.* = .{
+            .name = name,
+            .nodes = .{ nodes[0], if (nodes.len > 1) nodes[1] else null },
+            .flow_resist = try self.allocPlace(),
+            .flow_react = try self.allocPlace(),
+            .pot_resist = try self.allocPlace(),
+            .pot_react = try self.allocPlace(),
+            .vmode = try self.allocPlace(),
+        };
+        try self.writeVar(gop.value_ptr.flow_resist, .f_zero);
+        try self.writeVar(gop.value_ptr.flow_react, .f_zero);
+        try self.writeVar(gop.value_ptr.pot_resist, .f_zero);
+        try self.writeVar(gop.value_ptr.pot_react, .f_zero);
+        try self.writeVar(gop.value_ptr.vmode, .f_zero);
+    }
+    return gop.value_ptr;
+}
+
+/// Value of node `name` (registering it on first sight, like resolveNodeArg).
+fn nodeValue(self: *Lower, name: []const u8) !Value {
+    if (self.node_voltages.get(name)) |place| return self.readVar(place);
+    try self.registerNodeVoltage(name);
+    return self.readVar(self.node_voltages.get(name).?);
+}
+
+/// Give a branch its own current unknown (an extra internal x[] slot).
+fn ensureBranchCurrent(self: *Lower, bi: *BranchInfo) !void {
+    if (bi.cur_place != null) return;
+    const uname = try std.fmt.allocPrint(self.allocator, "{s}_ibr", .{bi.name});
+    try self.registerNodeVoltage(uname);
+    bi.cur_place = self.node_voltages.get(uname).?;
+    bi.cur_name = uname;
+}
+
+/// Access-function read of a named branch: V(br)/Temp(br) is the potential
+/// across its node pair; I(br)/Pwr(br) is the branch current, which forces
+/// the branch-current unknown into existence.
+fn branchProbe(self: *Lower, nature: []const u8, bi: *BranchInfo) !Value {
+    const is_flow = std.mem.eql(u8, nature, "I") or
+        std.mem.eql(u8, nature, "Ip") or std.mem.eql(u8, nature, "Pwr");
+    if (is_flow) {
+        try self.ensureBranchCurrent(bi);
+        bi.probed = true;
+        return self.readVar(bi.cur_place.?);
+    }
+    const hi = try self.nodeValue(bi.nodes[0].?);
+    if (bi.nodes[1]) |lo_name| {
+        const lo = try self.nodeValue(lo_name);
+        return self.builder.buildBinary(.fsub, hi, lo);
+    }
+    return hi;
+}
+
+/// Contribution to a named branch: accumulate into the branch's flow or
+/// potential places; stamping is deferred to finalizeBranches.
+fn lowerBranchContribute(self: *Lower, bi: *BranchInfo, nature: []const u8, kind: Ast.ContributeKind, rhs_id: Ast.ExprId) !void {
+    const is_pot = kind == .potential or std.mem.eql(u8, nature, "Temp");
+    if (is_pot) {
+        bi.has_pot = true;
+        try self.writeVar(bi.vmode, .f_one);
+        try self.splitContribution(rhs_id, bi.pot_resist, bi.pot_react, false);
+    } else {
+        bi.has_flow = true;
+        try self.writeVar(bi.vmode, .f_zero);
+        if (self.detectNoiseKind(rhs_id)) |nk| {
+            bi.noise_kind = nk;
+            bi.noise_args = self.extractNoiseArgs(rhs_id);
+        }
+        try self.splitContribution(rhs_id, bi.flow_resist, bi.flow_react, false);
+    }
+}
+
+/// Turn every used branch into contributions (runs in the exit block):
+///  - plain flow branch: stamp the accumulated flow on its node pair;
+///  - probed / potential / switch branch: KCL rows carry the branch-current
+///    unknown j, and j's own row carries the constraint
+///    flow mode:      flow_acc - j            (+ d/dt of flow reactive)
+///    potential mode: pot_acc  - (V(hi)-V(lo)) (+ d/dt of pot reactive)
+///    switch branch:  select on the runtime mode indicator.
+fn finalizeBranches(self: *Lower) !void {
+    var it = self.branches.valueIterator();
+    while (it.next()) |bi| {
+        if (!bi.has_flow and !bi.has_pot and bi.cur_place == null) continue;
+
+        var nodes_buf: [2][]const u8 = undefined;
+        nodes_buf[0] = bi.nodes[0].?;
+        var n_nodes: usize = 1;
+        if (bi.nodes[1]) |lo| {
+            nodes_buf[1] = lo;
+            n_nodes = 2;
+        }
+
+        const needs_unknown = bi.probed or bi.has_pot or bi.cur_place != null;
+        if (!needs_unknown) {
+            try self.contributions.append(self.allocator, .{
+                .kind = .flow,
+                .nature = "I",
+                .nodes = try self.allocator.dupe([]const u8, nodes_buf[0..n_nodes]),
+                .resist_place = bi.flow_resist,
+                .react_place = bi.flow_react,
+                .noise_kind = bi.noise_kind,
+                .noise_args = bi.noise_args,
+            });
+            continue;
+        }
+
+        try self.ensureBranchCurrent(bi);
+        const j = try self.readVar(bi.cur_place.?);
+
+        // KCL rows: j flows hi -> lo.
+        const kcl_r = try self.allocPlace();
+        try self.writeVar(kcl_r, j);
+        const kcl_q = try self.allocPlace();
+        try self.writeVar(kcl_q, .f_zero);
+        try self.contributions.append(self.allocator, .{
+            .kind = .flow,
+            .nature = "I",
+            .nodes = try self.allocator.dupe([]const u8, nodes_buf[0..n_nodes]),
+            .resist_place = kcl_r,
+            .react_place = kcl_q,
+            .noise_kind = bi.noise_kind,
+            .noise_args = bi.noise_args,
+        });
+
+        // Constraint row.
+        const hi = try self.nodeValue(nodes_buf[0]);
+        const vdiff = if (n_nodes == 2)
+            try self.builder.buildBinary(.fsub, hi, try self.nodeValue(nodes_buf[1]))
+        else
+            hi;
+        const flow_r = try self.readVar(bi.flow_resist);
+        const flow_q = try self.readVar(bi.flow_react);
+        const pot_r = try self.readVar(bi.pot_resist);
+        const pot_q = try self.readVar(bi.pot_react);
+        const flow_c = try self.builder.buildBinary(.fsub, flow_r, j);
+        const pot_c = try self.builder.buildBinary(.fsub, pot_r, vdiff);
+
+        var res_c: Value = undefined;
+        var q_c: Value = undefined;
+        if (bi.has_pot) {
+            // The potential contribution may be conditional (switch branch,
+            // CollapsableR): decide the mode at runtime. vmode is 1.0 iff a
+            // potential contribution executed last; unconditional V folds to
+            // the potential arm, and when nothing executed the branch is an
+            // open flow branch with j = 0.
+            const vm = try self.readVar(bi.vmode);
+            res_c = try self.builder.buildSelect(vm, pot_c, flow_c);
+            q_c = try self.builder.buildSelect(vm, pot_q, flow_q);
+        } else {
+            res_c = flow_c;
+            q_c = flow_q;
+        }
+
+        const con_r = try self.allocPlace();
+        try self.writeVar(con_r, res_c);
+        const con_q = try self.allocPlace();
+        try self.writeVar(con_q, q_c);
+        try self.contributions.append(self.allocator, .{
+            .kind = .flow,
+            .nature = "I",
+            .nodes = try self.allocator.dupe([]const u8, &.{bi.cur_name.?}),
+            .resist_place = con_r,
+            .react_place = con_q,
+        });
+    }
+}
+
 fn lowerContribute(self: *Lower, kind: Ast.ContributeKind, branch_id: Ast.ExprId, rhs_id: Ast.ExprId) !void {
     var nature_name: []const u8 = "I";
     var node_names_buf: [4][]const u8 = undefined;
@@ -368,6 +610,22 @@ fn lowerContribute(self: *Lower, kind: Ast.ContributeKind, branch_id: Ast.ExprId
                 }
             }
         }
+    }
+
+    // Named-branch target: `I(br) <+ …` / `V(br) <+ …`.
+    if (node_count == 1) {
+        if (self.branches.getPtr(node_names_buf[0])) |bi| {
+            return self.lowerBranchContribute(bi, nature_name, kind, rhs_id);
+        }
+    }
+
+    // Potential contribution to a plain node pair (`V(N1,N2) <+ 0.0`):
+    // an implicit switch branch — PSP103's CollapsableR collapses zero-ohm
+    // internal nodes this way. Stamping a potential as a current silently
+    // leaves the pair floating.
+    if ((kind == .potential or std.mem.eql(u8, nature_name, "Temp")) and node_count >= 1) {
+        const bi = try self.implicitBranch(node_names_buf[0..node_count]);
+        return self.lowerBranchContribute(bi, nature_name, kind, rhs_id);
     }
 
     const node_names = node_names_buf[0..node_count];
@@ -582,15 +840,61 @@ fn accumulate(self: *Lower, place: Place, val: Value, negate: bool) !void {
     try self.writeVar(place, result);
 }
 
+/// Does this statement subtree contain a loop? Loop-containing conditionals
+/// must lower to real SSA blocks: the select-based path snapshots values in
+/// the straight-line cache, which loops invalidate wholesale.
+fn stmtHasLoop(self: *const Lower, id: Ast.StmtId) bool {
+    if (!id.valid()) return false;
+    return switch (self.getStmt(id)) {
+        .while_stmt, .for_stmt => true,
+        .block => |b| {
+            for (b.stmts) |sid| {
+                if (self.stmtHasLoop(sid)) return true;
+            }
+            return false;
+        },
+        .if_stmt => |i| self.stmtHasLoop(i.then_branch) or self.stmtHasLoop(i.else_branch),
+        .case_stmt => |cs| {
+            for (cs.arms) |arm| {
+                if (self.stmtHasLoop(arm.body)) return true;
+            }
+            return false;
+        },
+        .event_control => |ec| self.stmtHasLoop(ec.body),
+        else => false,
+    };
+}
+
 fn lowerIf(self: *Lower, cond_id: Ast.ExprId, then_id: Ast.StmtId, else_id: Ast.StmtId) !void {
-    if (self.in_loop) return self.lowerIfWithBlocks(cond_id, then_id, else_id);
+    if (self.loop_depth > 0 or self.stmtHasLoop(then_id) or self.stmtHasLoop(else_id)) {
+        self.loop_depth += 1;
+        defer {
+            self.loop_depth -= 1;
+            if (self.loop_depth == 0) @memset(self.val_arr.slice(), .undef);
+        }
+        return self.lowerIfWithBlocks(cond_id, then_id, else_id);
+    }
 
     const cond = try self.lowerExpr(cond_id);
+    const Body = struct {
+        id: Ast.StmtId,
+        pub fn run(b: @This(), l: *Lower) LowerError!void {
+            try l.lowerStmt(b.id);
+        }
+    };
+    try self.lowerGuarded(cond, Body{ .id = then_id }, Body{ .id = else_id });
+}
+
+/// Straight-line conditional lowering shared by if and case (outside loops):
+/// run both bodies with modification tracking, restore between them, merge
+/// every modified place with a select on `cond`. Bodies are any type with
+/// `run(self, *Lower) LowerError!void`.
+fn lowerGuarded(self: *Lower, cond: Value, then_body: anytype, else_body: anytype) LowerError!void {
     const block = self.builder.currentBlock();
 
     // Lower then branch with modification tracking
     try self.if_scopes.append(self.allocator, .empty);
-    try self.lowerStmt(then_id);
+    try then_body.run(self);
     var then_scope = self.if_scopes.pop().?;
     defer then_scope.deinit(self.allocator);
 
@@ -604,7 +908,7 @@ fn lowerIf(self: *Lower, cond_id: Ast.ExprId, then_id: Ast.StmtId, else_id: Ast.
         const place = entry.key_ptr.*;
         const pid = @intFromEnum(place);
         const pre_val = entry.value_ptr.*;
-        const then_val = if (pid < self.val_arr.len) self.val_arr.slice()[pid] else .undef;
+        const then_val = try self.currentVal(place);
         try then_info.append(self.allocator, .{ .place = place, .then_val = then_val, .pre_val = pre_val });
         if (pid < self.val_arr.len) self.val_arr.slice()[pid] = pre_val;
         try self.builder.defVar(place, pre_val, block);
@@ -612,14 +916,16 @@ fn lowerIf(self: *Lower, cond_id: Ast.ExprId, then_id: Ast.StmtId, else_id: Ast.
 
     // Lower else branch with modification tracking
     try self.if_scopes.append(self.allocator, .empty);
-    if (else_id.valid()) try self.lowerStmt(else_id);
+    try else_body.run(self);
     var else_scope = self.if_scopes.pop().?;
     defer else_scope.deinit(self.allocator);
 
     // Merge: emit select for places modified in then branch
     for (then_info.slice()) |info| {
-        const epid = @intFromEnum(info.place);
-        const else_val = if (epid < self.val_arr.len) self.val_arr.slice()[epid] else info.pre_val;
+        const else_val = blk: {
+            const v = try self.currentVal(info.place);
+            break :blk if (v == .undef) info.pre_val else v;
+        };
         if (info.then_val == else_val) {
             try self.writeVar(info.place, info.then_val);
         } else {
@@ -634,8 +940,10 @@ fn lowerIf(self: *Lower, cond_id: Ast.ExprId, then_id: Ast.StmtId, else_id: Ast.
         const place = entry.key_ptr.*;
         if (then_scope.contains(place)) continue;
         const pre_val = entry.value_ptr.*;
-        const epid2 = @intFromEnum(place);
-        const else_val = if (epid2 < self.val_arr.len) self.val_arr.slice()[epid2] else pre_val;
+        const else_val = blk: {
+            const v = try self.currentVal(place);
+            break :blk if (v == .undef) pre_val else v;
+        };
         if (pre_val == else_val) continue;
         const sel = try self.builder.buildSelect(cond, pre_val, else_val);
         try self.writeVar(place, sel);
@@ -673,10 +981,10 @@ fn lowerIfWithBlocks(self: *Lower, cond_id: Ast.ExprId, then_id: Ast.StmtId, els
 }
 
 fn lowerWhile(self: *Lower, cond_id: Ast.ExprId, body_id: Ast.StmtId) !void {
-    self.in_loop = true;
+    self.loop_depth += 1;
     defer {
-        self.in_loop = false;
-        @memset(self.val_arr.slice(), .undef);
+        self.loop_depth -= 1;
+        if (self.loop_depth == 0) @memset(self.val_arr.slice(), .undef);
     }
 
     const header = try self.builder.createBlock();
@@ -718,10 +1026,10 @@ fn lowerFor(self: *Lower, f: *const Ast.ForStmt) !void {
         }
     }
 
-    self.in_loop = true;
+    self.loop_depth += 1;
     defer {
-        self.in_loop = false;
-        @memset(self.val_arr.slice(), .undef);
+        self.loop_depth -= 1;
+        if (self.loop_depth == 0) @memset(self.val_arr.slice(), .undef);
     }
 
     const header = try self.builder.createBlock();
@@ -766,6 +1074,72 @@ fn lowerFor(self: *Lower, f: *const Ast.ForStmt) !void {
 
 fn lowerCase(self: *Lower, discr_id: Ast.ExprId, arms: []const Ast.CaseArm) !void {
     const discr = try self.lowerExpr(discr_id);
+    var has_loop = false;
+    for (arms) |arm| has_loop = has_loop or self.stmtHasLoop(arm.body);
+    if (self.loop_depth == 0 and !has_loop) {
+        // Straight-line lowering: a case is an if/else-if chain. The block
+        // form below is only safe when the val_arr cache is off and reads
+        // resolve through SSA phis; with the cache on it lets later arms
+        // observe sibling-arm values.
+        var default_arm: Ast.StmtId = .none;
+        for (arms) |arm| {
+            if (arm.values.len == 0) {
+                default_arm = arm.body;
+                break;
+            }
+        }
+        return self.lowerCaseChain(discr, arms, default_arm);
+    }
+    self.loop_depth += 1;
+    defer {
+        self.loop_depth -= 1;
+        if (self.loop_depth == 0) @memset(self.val_arr.slice(), .undef);
+    }
+    try self.lowerCaseWithBlocks(discr, arms);
+}
+
+fn lowerCaseChain(self: *Lower, discr: Value, arms: []const Ast.CaseArm, default_arm: Ast.StmtId) LowerError!void {
+    var idx: usize = 0;
+    while (idx < arms.len and arms[idx].values.len == 0) idx += 1;
+    if (idx == arms.len) return self.lowerStmt(default_arm);
+
+    const arm = arms[idx];
+    var cond: Value = .false_;
+    for (arm.values) |val_id| {
+        const val = try self.lowerExpr(val_id);
+        const eq_val = try self.builder.buildBinary(.feq, discr, val);
+        if (cond == .false_) {
+            cond = eq_val;
+        } else {
+            const prev_b = try self.builder.buildUnary(.bi_cast, cond);
+            const eq_b = try self.builder.buildUnary(.bi_cast, eq_val);
+            const or_val = try self.builder.buildBinary(.ior, prev_b, eq_b);
+            cond = try self.builder.buildUnary(.ib_cast, or_val);
+        }
+    }
+
+    const Then = struct {
+        id: Ast.StmtId,
+        pub fn run(b: @This(), l: *Lower) LowerError!void {
+            try l.lowerStmt(b.id);
+        }
+    };
+    const Rest = struct {
+        discr: Value,
+        arms: []const Ast.CaseArm,
+        default_arm: Ast.StmtId,
+        pub fn run(b: @This(), l: *Lower) LowerError!void {
+            try l.lowerCaseChain(b.discr, b.arms, b.default_arm);
+        }
+    };
+    try self.lowerGuarded(cond, Then{ .id = arm.body }, Rest{
+        .discr = discr,
+        .arms = arms[idx + 1 ..],
+        .default_arm = default_arm,
+    });
+}
+
+fn lowerCaseWithBlocks(self: *Lower, discr: Value, arms: []const Ast.CaseArm) !void {
     const merge_block = try self.builder.createBlock();
 
     for (arms) |arm| {
@@ -1120,6 +1494,11 @@ fn emitGenericCall(self: *Lower, name: []const u8, args: []const Ast.ExprId) !Va
 }
 
 fn lowerNatureAccess(self: *Lower, nature: []const u8, args: []const Ast.ExprId) !Value {
+    if (args.len == 1) {
+        if (self.resolveIdentName(args[0])) |nm| {
+            if (self.branches.getPtr(nm)) |bi| return self.branchProbe(nature, bi);
+        }
+    }
     if (std.mem.eql(u8, nature, "V") or std.mem.eql(u8, nature, "Vp")) {
         if (args.len >= 1) {
             const hi = try self.resolveNodeArg(args[0]);

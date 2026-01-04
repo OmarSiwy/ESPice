@@ -19,22 +19,10 @@ test "generate device in devices contract shape" {
     try std.testing.expect(std.mem.indexOf(u8, source, "pub fn updateState(") != null);
     try std.testing.expect(std.mem.indexOf(u8, source, "pub fn eval(comptime S: type") != null);
     try std.testing.expect(std.mem.indexOf(u8, source, "pub fn initState(") != null);
-    // dyn ABI v3 (analysis/compiled.zig DynDevice)
-    try std.testing.expect(std.mem.indexOf(u8, source, "zpicey_abi_version") != null);
-    try std.testing.expect(std.mem.indexOf(u8, source, "zpicey_eval_ad") != null);
-    try std.testing.expect(std.mem.indexOf(u8, source, "zpicey_n_u") != null);
-    try std.testing.expect(std.mem.indexOf(u8, source, "zpicey_num_ports") != null);
-    try std.testing.expect(std.mem.indexOf(u8, source, "zpicey_set_model_param") != null);
-    try std.testing.expect(std.mem.indexOf(u8, source, "zpicey_set_instance_param") != null);
-    try std.testing.expect(std.mem.indexOf(u8, source, "zpicey_init_model") != null);
-    try std.testing.expect(std.mem.indexOf(u8, source, "zpicey_init_instance") != null);
-    try std.testing.expect(std.mem.indexOf(u8, source, "zpicey_model_size") != null);
-    try std.testing.expect(std.mem.indexOf(u8, source, "zpicey_instance_size") != null);
-    // state machine hooks
-    try std.testing.expect(std.mem.indexOf(u8, source, "zpicey_state_size") != null);
-    try std.testing.expect(std.mem.indexOf(u8, source, "zpicey_init_state") != null);
-    try std.testing.expect(std.mem.indexOf(u8, source, "zpicey_update_state") != null);
-    // hasParamSupport() requires instance_size > 0
+    // Contract-shaped device (batch dyn ABI wraps it .so-side); the old
+    // per-instance zpicey_* export surface must be gone.
+    try std.testing.expect(std.mem.indexOf(u8, source, "contract.validate(@This())") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "zpicey_") == null);
     try std.testing.expect(std.mem.indexOf(u8, source, "strength: f32 = 1.0") != null);
 }
 

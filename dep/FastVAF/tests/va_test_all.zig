@@ -271,25 +271,88 @@ test "codegen while loop" {
     try std.testing.expect(std.mem.indexOf(u8, zig_src, "@compileError") == null);
 }
 
+test "named branch: contributions stamp node KCL rows (P7)" {
+    const source =
+        \\`include "disciplines.vams"
+        \\module nbres(a, b);
+        \\    inout a, b;
+        \\    electrical a, b;
+        \\    branch (a, b) br;
+        \\    parameter real R = 100.0;
+        \\    analog I(br) <+ V(br) / R;
+        \\endmodule
+    ;
+    var result = try zvaf.compileSource(std.testing.allocator, source, null);
+    defer result.deinit();
+    const zig_src = try zvaf.codegen.generate(std.testing.allocator, &result.mir, &result.lower);
+    defer std.testing.allocator.free(zig_src);
+    // Plain flow branch: NO extra unknown, direct node-pair stamps.
+    try std.testing.expect(std.mem.indexOf(u8, zig_src, "_ibr") == null);
+    try std.testing.expect(std.mem.indexOf(u8, zig_src, "res[0] = res[0].add(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, zig_src, "res[1] = res[1].sub(") != null);
+}
+
+test "named branch: I() probe creates a branch-current unknown (P7)" {
+    const source =
+        \\`include "disciplines.vams"
+        \\module nbcccs(inp, inm, outp, outm);
+        \\    inout inp, inm, outp, outm;
+        \\    electrical inp, inm, outp, outm;
+        \\    branch (inp, inm) brin;
+        \\    branch (outp, outm) brout;
+        \\    parameter real G = 10.0;
+        \\    analog begin
+        \\        I(brout) <+ G * I(brin);
+        \\        I(brin)  <+ V(brin) / 1.0;
+        \\    end
+        \\endmodule
+    ;
+    var result = try zvaf.compileSource(std.testing.allocator, source, null);
+    defer result.deinit();
+    const zig_src = try zvaf.codegen.generate(std.testing.allocator, &result.mir, &result.lower);
+    defer std.testing.allocator.free(zig_src);
+    // Probed branch gets its own row; ports stay the only num_ports entries.
+    try std.testing.expect(std.mem.indexOf(u8, zig_src, "brin_ibr") != null);
+    try std.testing.expect(std.mem.indexOf(u8, zig_src, "num_ports: usize = 4") != null);
+}
+
+test "switch branch: V() contribution on a node pair collapses it (P7)" {
+    const source =
+        \\`include "disciplines.vams"
+        \\module colr(a, b);
+        \\    inout a, b;
+        \\    electrical a, b, m;
+        \\    parameter real R = 0.0;
+        \\    analog begin
+        \\        if (R > 0.0) I(a, m) <+ V(a, m) / R;
+        \\        else V(a, m) <+ 0.0;
+        \\        I(m, b) <+ V(m, b) / 100.0;
+        \\    end
+        \\endmodule
+    ;
+    var result = try zvaf.compileSource(std.testing.allocator, source, null);
+    defer result.deinit();
+    const zig_src = try zvaf.codegen.generate(std.testing.allocator, &result.mir, &result.lower);
+    defer std.testing.allocator.free(zig_src);
+    // Implicit switch branch: an extra unknown for the a-m pair.
+    try std.testing.expect(std.mem.indexOf(u8, zig_src, "a_m_ibr") != null);
+}
+
 test "codegen ABI v3 exports" {
     const source = @embedFile("fixtures/resistor.va");
     var result = try zvaf.compileSource(std.testing.allocator, source, null);
     defer result.deinit();
     const zig_src = try zvaf.codegen.generate(std.testing.allocator, &result.mir, &result.lower);
     defer std.testing.allocator.free(zig_src);
-    try std.testing.expect(std.mem.indexOf(u8, zig_src, "zpicey_abi_version") != null);
-    try std.testing.expect(std.mem.indexOf(u8, zig_src, "return 3;") != null);
-    try std.testing.expect(std.mem.indexOf(u8, zig_src, "zpicey_n_u") != null);
-    try std.testing.expect(std.mem.indexOf(u8, zig_src, "zpicey_num_ports") != null);
-    try std.testing.expect(std.mem.indexOf(u8, zig_src, "zpicey_model_size") != null);
-    try std.testing.expect(std.mem.indexOf(u8, zig_src, "zpicey_instance_size") != null);
-    try std.testing.expect(std.mem.indexOf(u8, zig_src, "zpicey_init_model") != null);
-    try std.testing.expect(std.mem.indexOf(u8, zig_src, "zpicey_init_instance") != null);
-    try std.testing.expect(std.mem.indexOf(u8, zig_src, "zpicey_set_model_param") != null);
-    try std.testing.expect(std.mem.indexOf(u8, zig_src, "zpicey_set_instance_param") != null);
-    try std.testing.expect(std.mem.indexOf(u8, zig_src, "zpicey_eval_ad") != null);
-    // Old GPU kernel surface must be gone.
-    try std.testing.expect(std.mem.indexOf(u8, zig_src, "zpicey_gpu_eval") == null);
+    // Contract-shaped device surface (batch dyn ABI wraps it .so-side).
+    try std.testing.expect(std.mem.indexOf(u8, zig_src, "pub const U = enum(u8)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, zig_src, "pub const num_ports") != null);
+    try std.testing.expect(std.mem.indexOf(u8, zig_src, "pub const Model = struct") != null);
+    try std.testing.expect(std.mem.indexOf(u8, zig_src, "pub const Instance = struct") != null);
+    try std.testing.expect(std.mem.indexOf(u8, zig_src, "pub fn eval(comptime S: type") != null);
+    try std.testing.expect(std.mem.indexOf(u8, zig_src, "contract.validate(Self)") != null);
+    // Old per-instance ABI surface must be gone.
+    try std.testing.expect(std.mem.indexOf(u8, zig_src, "zpicey_") == null);
 }
 
 test "codegen reactive emits q_ad" {
@@ -307,7 +370,7 @@ test "codegen reactive emits q_ad" {
     defer result.deinit();
     const zig_src = try zvaf.codegen.generate(std.testing.allocator, &result.mir, &result.lower);
     defer std.testing.allocator.free(zig_src);
-    try std.testing.expect(std.mem.indexOf(u8, zig_src, "zpicey_q_ad") != null);
+    try std.testing.expect(std.mem.indexOf(u8, zig_src, "pub fn q(comptime S: type") != null);
 }
 
 test "codegen function inlining" {
