@@ -84,52 +84,6 @@ fn assemble(comptime with_diag: bool, g: *const G, hdr: *addrspace(.global) cons
     g.sync();
 }
 
-/// Device limiting pass for one batch — the GPU port of batch.zig
-/// applyLimits: cur = local(x); old = lim_x (once engaged) else local(x_old);
-/// lim_x = D.limit(cur, old). Returns 1.0 if any component was limited
-/// (thread-local partial; caller reduces grid-wide).
-fn limitBatch(
-    comptime D: type,
-    g: *const G,
-    desc: *addrspace(.global) const abi.BatchDesc,
-    blob: [*]addrspace(.global) u8,
-    x: [*]addrspace(.global) const f64,
-    x_old: [*]addrspace(.global) const f64,
-    lim_active: bool,
-) f64 {
-    const n_u = comptime contract.nU(D);
-    const gath: [*]addrspace(.global) const u32 = @ptrCast(@alignCast(blob + desc.off_gath));
-    const models: [*]addrspace(.global) const D.Model = @ptrCast(@alignCast(blob + desc.off_models));
-    const instances: [*]addrspace(.global) const D.Instance = @ptrCast(@alignCast(blob + desc.off_instances));
-    const lim: [*]addrspace(.global) f64 = @ptrCast(@alignCast(blob + desc.off_lim));
-
-    var flag: f64 = 0;
-    var id: u32 = g.tid;
-    while (id < desc.count) : (id += g.stride) {
-        var cur: [n_u]f64 = undefined;
-        var old: [n_u]f64 = undefined;
-        inline for (0..n_u) |u| {
-            cur[u] = x[gath[id * n_u + u]];
-            old[u] = if (lim_active) lim[id * n_u + u] else x_old[gath[id * n_u + u]];
-        }
-        const lm = D.limit(@addrSpaceCast(&models[id]), @addrSpaceCast(&instances[id]), cur, old);
-        inline for (0..n_u) |u| {
-            // Mirror batch.zig: only junction-limited unknowns
-            // (limit_flag_unknowns) force another Newton iteration.
-            const flags: bool = comptime blk: {
-                if (!@hasDecl(D, "limit_flag_unknowns")) break :blk true;
-                for (D.limit_flag_unknowns) |fu| {
-                    if (@intFromEnum(fu) == u) break :blk true;
-                }
-                break :blk false;
-            };
-            if (flags and lm[u] != cur[u]) flag = 1;
-            lim[id * n_u + u] = lm[u];
-        }
-    }
-    return flag;
-}
-
 /// Run the limiting pass over every limited batch. Same comptime dispatch
 /// as assemble(). Caller syncs + reduces the returned partial.
 fn limitPass(
@@ -862,7 +816,117 @@ fn arpTran(blob: [*]addrspace(.global) u8) callconv(.kernel) void {
     }
 }
 
+// ---------------------------------------------------------------------------
+// arp_solve_batch — N independent Newton lanes in one cooperative launch.
+// Each lane gets blocks_per_lane blocks with lane-local barriers. Lanes
+// share the blob's immutable prefix (batch table, payloads, current_row)
+// but have private x, result, and workspace regions.
+// ---------------------------------------------------------------------------
+
+/// Carve workspace for a specific lane. Same layout as setupG but:
+///   - ws_base points into the lane's private region
+///   - n_blocks = blocks_per_lane (lane-local barrier)
+///   - bid/tid/stride computed from lane-local block ID
+fn setupGLane(
+    hdr: *addrspace(.global) const abi.Header,
+    ws: [*]addrspace(.global) f64,
+    blocks_per_lane: u32,
+    lane_bid: u32,
+) G {
+    const n: u32 = hdr.n;
+    const m: u32 = @min(hdr.tol.gmres_m, n);
+    var g: G = undefined;
+    g.n = n;
+    g.m = m;
+    g.n_blocks = blocks_per_lane;
+    g.ltid = @workItemId(0);
+    g.bid = lane_bid;
+    g.tid = lane_bid * @workGroupSize(0) + g.ltid;
+    g.stride = @workGroupSize(0) * blocks_per_lane;
+
+    var o: usize = 0;
+    g.v_basis = ws + o;
+    o += @as(usize, m + 1) * n;
+    g.h = ws + o;
+    o += @as(usize, m + 1) * m;
+    g.cs = ws + o;
+    o += m;
+    g.sn = ws + o;
+    o += m;
+    g.g_vec = ws + o;
+    o += m + 1;
+    g.y_vec = ws + o;
+    o += m;
+    g.r = ws + o;
+    o += n;
+    g.w = ws + o;
+    o += n;
+    g.x_pert = ws + o;
+    o += n;
+    g.f0 = ws + o;
+    o += n;
+    g.f0_shift = ws + o;
+    o += n;
+    g.diag = ws + o;
+    o += n;
+    g.x_old = ws + o;
+    o += n;
+    g.rhs = ws + o;
+    o += n + 1;
+    g.x_try = ws + o;
+    o += n;
+    g.i_prev = ws + o;
+    o += n;
+    g.cvec = ws + o;
+    o += n;
+    g.q_hist = ws + o;
+    o += 4 * (@as(usize, n) + 1);
+    g.tstate = ws + o;
+    o += 16;
+    g.scal = ws + o;
+    o += 16;
+    g.partials = ws + o;
+    o += blocks_per_lane;
+    g.barrier_cg = @ptrCast(@alignCast(ws + o));
+    return g;
+}
+
+fn arpSolveBatch(
+    blob: [*]addrspace(.global) u8,
+    batch_hdr: *addrspace(.global) const abi.BatchLaunchHeader,
+) callconv(.kernel) void {
+    @setFloatMode(.optimized);
+    const hdr: *addrspace(.global) const abi.Header = @ptrCast(@alignCast(blob));
+    if (hdr.magic != abi.magic) return;
+
+    const bpl = batch_hdr.blocks_per_lane;
+    if (bpl == 0) return;
+    const lane_id = @workGroupId(0) / bpl;
+    if (lane_id >= batch_hdr.n_lanes) return;
+    const lane_bid = @workGroupId(0) % bpl;
+
+    // Lane's private region: x | result | workspace
+    const lane_base = @as(usize, batch_hdr.shared_size) + @as(usize, lane_id) * batch_hdr.lane_stride;
+    const n: usize = hdr.n;
+    const x: [*]addrspace(.global) f64 = @ptrCast(@alignCast(blob + lane_base));
+    const res_off = lane_base + n * 8;
+    const res: *addrspace(.global) abi.ResultHeader = @ptrCast(@alignCast(blob + abi.alignUp(res_off, 8)));
+    const ws_off = abi.alignUp(res_off + @sizeOf(abi.ResultHeader), 8);
+    const ws: [*]addrspace(.global) f64 = @ptrCast(@alignCast(blob + ws_off));
+
+    const g = setupGLane(hdr, ws, bpl, lane_bid);
+    const current_row: [*]addrspace(.global) const u8 = @ptrCast(blob + hdr.off_current_row);
+
+    if (g.tid == 0) {
+        res.status = 2;
+        res.iterations = 0;
+        res.max_dx = 0;
+    }
+    _ = newtonSolve(&g, hdr, blob, x, current_row, res, hdr.t, no_tran);
+}
+
 comptime {
     @export(&arpSolve, .{ .name = "arp_solve" });
     @export(&arpTran, .{ .name = "arp_tran" });
+    @export(&arpSolveBatch, .{ .name = "arp_solve_batch" });
 }
