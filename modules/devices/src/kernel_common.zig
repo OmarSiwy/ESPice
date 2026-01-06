@@ -8,8 +8,9 @@
 const devices = @import("dev_models");
 const contract = devices.contract;
 const abi = @import("gpu_abi");
-
-const Value = contract.Value;
+// Via dev_models (not a file import): eval_core.zig must belong to exactly
+// one module per compilation, and batch.zig already owns it.
+const eval_core = devices.batch.eval_core;
 
 pub const inf_f64: f64 = @bitCast(@as(u64, 0x7ff0000000000000));
 
@@ -170,19 +171,122 @@ pub const LbFn = *const fn (
     lim_active: bool,
 ) callconv(.c) f64;
 
+/// GPU sink for eval_core: owns the addrspace(.global) workspace/tape
+/// pointers; scatter is atomicAdd into g.rhs and (diag-only) g.diag; the
+/// companion charge terms fold through env (rhs += alpha*q, diag += alpha*dQ,
+/// raw q into env.snap). No dedup — it compiles out (zero ptxas cost).
+fn GpuSink(comptime D: type) type {
+    const n_u = contract.nU(D);
+    const has_limit = @hasDecl(D, "limit");
+    const has_prep = @hasDecl(D, "PrepCache");
+    return struct {
+        g: *const G,
+        env: TranEnv,
+        has_q: bool, // desc.has_q != 0
+        xs: [*]addrspace(.global) const f64,
+        xb: [*]addrspace(.global) const f64, // x_base (residual-only limiting)
+        xo: [*]addrspace(.global) const f64, // x_old (limit pass)
+        gt: [*]addrspace(.global) const u32,
+        ri: [*]addrspace(.global) const u32,
+        mods: [*]addrspace(.global) const D.Model,
+        insts: [*]addrspace(.global) const D.Instance,
+        lims: if (has_limit) [*]addrspace(.global) f64 else void,
+        preps: if (has_prep) [*]addrspace(.global) const D.PrepCache else void,
+        pgroup: if (has_prep) [*]addrspace(.global) const u32 else void,
+
+        pub const dedup = false;
+        pub const skip_g = false;
+        pub const skip_c = false;
+        pub const optimized_float = false;
+
+        const Self = @This();
+
+        inline fn ix(id: u32, u: usize) usize {
+            return @as(usize, id) * n_u + u;
+        }
+        pub inline fn x(s: *const Self, gi: u32) f64 {
+            return s.xs[gi];
+        }
+        pub inline fn xBase(s: *const Self, gi: u32) f64 {
+            return s.xb[gi];
+        }
+        pub inline fn xOld(s: *const Self, gi: u32) f64 {
+            return s.xo[gi];
+        }
+        pub inline fn gath(s: *const Self, id: u32, u: usize) u32 {
+            return s.gt[ix(id, u)];
+        }
+        pub inline fn rhsRow(s: *const Self, id: u32, ru: usize) u32 {
+            return s.ri[ix(id, ru)];
+        }
+        pub inline fn lim(s: *const Self, id: u32, u: usize) f64 {
+            return s.lims[ix(id, u)];
+        }
+        pub inline fn setLim(s: *const Self, id: u32, u: usize, v: f64) void {
+            s.lims[ix(id, u)] = v;
+        }
+        pub inline fn model(s: *const Self, id: u32) *const D.Model {
+            return @addrSpaceCast(&s.mods[id]);
+        }
+        pub inline fn inst(s: *const Self, id: u32) *const D.Instance {
+            return @addrSpaceCast(&s.insts[id]);
+        }
+        pub inline fn prep(s: *const Self, id: u32) *const D.PrepCache {
+            return @addrSpaceCast(&s.preps[s.pgroup[id]]);
+        }
+        pub inline fn scatterRes(s: *const Self, row: u32, val: f64) void {
+            _ = @atomicRmw(f64, &s.g.rhs[row], .Add, val, .monotonic);
+        }
+        /// Diagonal Jacobian contribution only: residual row == unknown col.
+        pub inline fn scatterJac(s: *const Self, id: u32, ru: usize, cu: usize, row: u32, val: f64) void {
+            _ = ru;
+            if (row == s.gt[ix(id, cu)] and row < s.g.n)
+                _ = @atomicRmw(f64, &s.g.diag[row], .Add, val, .monotonic);
+        }
+        pub inline fn qActive(s: *const Self) bool {
+            return s.env.active and s.has_q;
+        }
+        pub inline fn scatterQ(s: *const Self, row: u32, qv: f64) void {
+            _ = @atomicRmw(f64, &s.g.rhs[row], .Add, s.env.alpha * qv, .monotonic);
+            if (s.env.snap) |sp|
+                _ = @atomicRmw(f64, &sp[row], .Add, qv, .monotonic);
+        }
+        pub inline fn scatterQJac(s: *const Self, id: u32, ru: usize, cu: usize, row: u32, val: f64) void {
+            s.scatterJac(id, ru, cu, row, s.env.alpha * val);
+        }
+    };
+}
+
+fn makeSink(
+    comptime D: type,
+    g: *const G,
+    desc: *addrspace(.global) const abi.BatchDesc,
+    blob: [*]addrspace(.global) u8,
+    env: TranEnv,
+) GpuSink(D) {
+    return .{
+        .g = g,
+        .env = env,
+        .has_q = desc.has_q != 0,
+        .xs = undefined,
+        .xb = undefined,
+        .xo = undefined,
+        .gt = @ptrCast(@alignCast(blob + desc.off_gath)),
+        .ri = @ptrCast(@alignCast(blob + desc.off_rhs_idx)),
+        .mods = @ptrCast(@alignCast(blob + desc.off_models)),
+        .insts = @ptrCast(@alignCast(blob + desc.off_instances)),
+        .lims = if (comptime @hasDecl(D, "limit")) @ptrCast(@alignCast(blob + desc.off_lim)) else {},
+        .preps = if (comptime @hasDecl(D, "PrepCache")) @ptrCast(@alignCast(blob + desc.off_prep_cache)) else {},
+        .pgroup = if (comptime @hasDecl(D, "PrepCache")) @ptrCast(@alignCast(blob + desc.off_prep_group)) else {},
+    };
+}
+
 /// Evaluate one batch: gather x, run physics, atomicAdd residual (and the
 /// Jacobian diagonal when `with_diag`). One grid-stride loop per batch keeps
 /// warps convergent inside a device type. When env.active, the companion
 /// charge terms are stamped too: rhs += alpha*q(x), diag += alpha*dQ/dx,
 /// raw q(x) accumulated into env.snap (charge history snapshot).
-///
-/// Device limiting (`limiting` + desc.off_lim): mirrors batch.zig evalInner.
-///   with_diag (outer): eval at the private limited point lx, stamp the
-///     linearization extended to the node point — i(lx) + J(lx)·(x − lx)
-///     (SPICE companion correction, dioload.c `cdeq = cd − gd·vd`).
-///   residual-only (J·v FD): eval at lx + (local(x) − local(x_base)) so the
-///     finite difference against the same-shifted baseline yields J(lx)·v,
-///     consistent with the outer linearization.
+/// Body lives in eval_core.evalRange (single source with batch.zig).
 pub fn evalBatch(
     comptime D: type,
     comptime with_diag: bool,
@@ -195,98 +299,15 @@ pub fn evalBatch(
     limiting: bool,
     x_base: [*]addrspace(.global) const f64,
 ) void {
-    @setEvalBranchQuota(1_000_000);
-    const n_u = comptime contract.nU(D);
-    const has_limit = comptime @hasDecl(D, "limit");
-    const S = if (with_diag) contract.Dual(n_u) else Value;
-    const gath: [*]addrspace(.global) const u32 = @ptrCast(@alignCast(blob + desc.off_gath));
-    const rhs_idx: [*]addrspace(.global) const u32 = @ptrCast(@alignCast(blob + desc.off_rhs_idx));
-    const models: [*]addrspace(.global) const D.Model = @ptrCast(@alignCast(blob + desc.off_models));
-    const instances: [*]addrspace(.global) const D.Instance = @ptrCast(@alignCast(blob + desc.off_instances));
-    const lim: [*]addrspace(.global) const f64 = if (comptime has_limit)
-        @ptrCast(@alignCast(blob + desc.off_lim))
-    else
-        undefined;
-    const use_lim = if (comptime has_limit) limiting and desc.off_lim != 0 else false;
-
-    var id: u32 = g.tid;
-    while (id < desc.count) : (id += g.stride) {
-        var xv: [n_u]S = undefined;
-        // Companion-correction term local(x) − lx (zero when not limiting).
-        var corr: @Vector(n_u, f64) = @splat(0);
-        inline for (0..n_u) |u| {
-            const xg = x[gath[id * n_u + u]];
-            if (comptime with_diag) {
-                var d: @Vector(n_u, f64) = @splat(0);
-                d[u] = 1;
-                var v = xg;
-                if (use_lim) {
-                    const lx = lim[id * n_u + u];
-                    v = lx;
-                    corr[u] = xg - lx;
-                }
-                xv[u] = .{ .v = v, .d = d };
-            } else {
-                var v = xg;
-                if (use_lim)
-                    v = lim[id * n_u + u] + (xg - x_base[gath[id * n_u + u]]);
-                xv[u] = Value.con(v);
-            }
-        }
-        const has_prep = comptime @hasDecl(D, "evalFromPrep");
-        const out = if (comptime has_prep) blk: {
-            const prep: [*]addrspace(.global) const D.PrepCache = @ptrCast(@alignCast(blob + desc.off_prep_cache));
-            const group: [*]addrspace(.global) const u32 = @ptrCast(@alignCast(blob + desc.off_prep_group));
-            break :blk D.evalFromPrep(S, xv, @addrSpaceCast(&prep[group[id]]), @addrSpaceCast(&models[id]), @addrSpaceCast(&instances[id]), t);
-        } else D.eval(S, xv, @addrSpaceCast(&models[id]), @addrSpaceCast(&instances[id]), t);
-
-        inline for (0..n_u) |ru| {
-            const row = rhs_idx[id * n_u + ru];
-            var val = out[ru].v;
-            if (comptime with_diag and has_limit) {
-                if (use_lim) val += @reduce(.Add, out[ru].d * corr);
-            }
-            _ = @atomicRmw(f64, &g.rhs[row], .Add, val, .monotonic);
-            if (comptime with_diag) {
-                // Diagonal Jacobian contribution: residual row == unknown col.
-                inline for (0..n_u) |cu| {
-                    if (row == gath[id * n_u + cu] and row < g.n)
-                        _ = @atomicRmw(f64, &g.diag[row], .Add, out[ru].d[cu], .monotonic);
-                }
-            }
-        }
-
-        if (comptime @hasDecl(D, "q")) {
-            if (env.active and desc.has_q != 0) {
-                const qo = if (comptime @hasDecl(D, "qFromPrep")) blk: {
-                    const prep: [*]addrspace(.global) const D.PrepCache = @ptrCast(@alignCast(blob + desc.off_prep_cache));
-                    const group: [*]addrspace(.global) const u32 = @ptrCast(@alignCast(blob + desc.off_prep_group));
-                    break :blk D.qFromPrep(S, xv, @addrSpaceCast(&prep[group[id]]), @addrSpaceCast(&models[id]), @addrSpaceCast(&instances[id]), t);
-                } else D.q(S, xv, @addrSpaceCast(&models[id]), @addrSpaceCast(&instances[id]), t);
-
-                inline for (0..n_u) |ru| {
-                    const row = rhs_idx[id * n_u + ru];
-                    var qv = qo[ru].v;
-                    if (comptime with_diag and has_limit) {
-                        if (use_lim) qv += @reduce(.Add, qo[ru].d * corr);
-                    }
-                    _ = @atomicRmw(f64, &g.rhs[row], .Add, env.alpha * qv, .monotonic);
-                    if (env.snap) |sp|
-                        _ = @atomicRmw(f64, &sp[row], .Add, qv, .monotonic);
-                    if (comptime with_diag) {
-                        inline for (0..n_u) |cu| {
-                            if (row == gath[id * n_u + cu] and row < g.n)
-                                _ = @atomicRmw(f64, &g.diag[row], .Add, env.alpha * qo[ru].d[cu], .monotonic);
-                        }
-                    }
-                }
-            }
-        }
-    }
+    var sink = makeSink(D, g, desc, blob, env);
+    sink.xs = x;
+    sink.xb = x_base;
+    const use_lim = if (comptime @hasDecl(D, "limit")) limiting and desc.off_lim != 0 else false;
+    eval_core.evalRange(D, with_diag, &sink, g.tid, desc.count, g.stride, t, use_lim);
 }
 
-/// Device limiting pass for one batch — the GPU port of batch.zig
-/// applyLimits: cur = local(x); old = lim_x (once engaged) else local(x_old);
+/// Device limiting pass for one batch (single source: eval_core.limitRange):
+/// cur = local(x); old = lim_x (once engaged) else local(x_old);
 /// lim_x = D.limit(cur, old). Returns 1.0 if any component was limited
 /// (thread-local partial; caller reduces grid-wide).
 pub fn limitBatch(
@@ -298,35 +319,8 @@ pub fn limitBatch(
     x_old: [*]addrspace(.global) const f64,
     lim_active: bool,
 ) f64 {
-    const n_u = comptime contract.nU(D);
-    const gath: [*]addrspace(.global) const u32 = @ptrCast(@alignCast(blob + desc.off_gath));
-    const models: [*]addrspace(.global) const D.Model = @ptrCast(@alignCast(blob + desc.off_models));
-    const instances: [*]addrspace(.global) const D.Instance = @ptrCast(@alignCast(blob + desc.off_instances));
-    const lim: [*]addrspace(.global) f64 = @ptrCast(@alignCast(blob + desc.off_lim));
-
-    var flag: f64 = 0;
-    var id: u32 = g.tid;
-    while (id < desc.count) : (id += g.stride) {
-        var cur: [n_u]f64 = undefined;
-        var old: [n_u]f64 = undefined;
-        inline for (0..n_u) |u| {
-            cur[u] = x[gath[id * n_u + u]];
-            old[u] = if (lim_active) lim[id * n_u + u] else x_old[gath[id * n_u + u]];
-        }
-        const lm = D.limit(@addrSpaceCast(&models[id]), @addrSpaceCast(&instances[id]), cur, old);
-        inline for (0..n_u) |u| {
-            // Mirror batch.zig: only junction-limited unknowns
-            // (limit_flag_unknowns) force another Newton iteration.
-            const flags: bool = comptime blk: {
-                if (!@hasDecl(D, "limit_flag_unknowns")) break :blk true;
-                for (D.limit_flag_unknowns) |fu| {
-                    if (@intFromEnum(fu) == u) break :blk true;
-                }
-                break :blk false;
-            };
-            if (flags and lm[u] != cur[u]) flag = 1;
-            lim[id * n_u + u] = lm[u];
-        }
-    }
-    return flag;
+    var sink = makeSink(D, g, desc, blob, no_tran);
+    sink.xs = x;
+    sink.xo = x_old;
+    return eval_core.limitRange(D, &sink, g.tid, desc.count, g.stride, lim_active);
 }

@@ -6,6 +6,10 @@
 const std = @import("std");
 const contract = @import("contract");
 const gpu_abi = @import("gpu_abi");
+/// pub: the GPU TUs (kernel_common.zig) reach the shared eval body through
+/// dev_models.batch.eval_core — a direct file import there would put
+/// eval_core.zig in two modules of one compilation (a compile error).
+pub const eval_core = @import("eval_core.zig");
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -718,16 +722,6 @@ pub fn DeviceBatch(comptime D: type) type {
             return h | 1; // ensure non-zero so 0 = empty
         }
 
-        /// The local x a device evaluates at: the private limited state
-        /// while a Newton solve is limiting, the gathered node vector
-        /// otherwise. `limiting` is the loop-invariant lim_active snapshot.
-        inline fn evalX(self: *Self, x: []const f64, id: usize, limiting: bool) [n_u]f64 {
-            if (comptime has_limit) {
-                if (limiting) return self.lim_x[id * n_u ..][0..n_u].*;
-            }
-            return self.localX(x, id);
-        }
-
         /// Companion-correction term J·(x_node − lx) for one residual row.
         /// Comptime-zero for devices without limiting — their scatter is a
         /// plain add, no vector multiply.
@@ -735,18 +729,146 @@ pub fn DeviceBatch(comptime D: type) type {
             return if (comptime has_limit) @reduce(.Add, jrow * corr) else 0.0;
         }
 
-        fn evalInner(ctx: *anyopaque, pl: *const Planes, lane: u32, first: u32, last: u32, x: []const f64, t: f64, comptime skip_const: bool) void {
-            @setFloatMode(.optimized);
-            @setEvalBranchQuota(10_000);
-            const self: *Self = @ptrCast(@alignCast(ctx));
+        /// Host sink for eval_core: slot-tape scatter into the full G/C
+        /// planes (plain +=) and the per-lane prep-cache dedup. skip_const
+        /// freezes constant-Jacobian stamps out of Newton re-evals.
+        fn HostSink(comptime skip_const: bool) type {
+            return struct {
+                b: *Self,
+                pl: *const Planes,
+                xs: []const f64,
+                xo: []const f64, // x_old (limit pass only)
+                /// Dedup engaged for this pass (dedup_worth && range >= 4).
+                dedup_on: bool,
+                /// Lane's cache segment base: [lane*ng + group].
+                lane_off: usize,
+                // group/hash of the current instance — computed by tryCached,
+                // reused by the miss-path store/storeQ.
+                cur_group: usize = 0,
+                cur_hash: u64 = 0,
 
-            const skip_g = comptime (skip_const and const_g);
-            const skip_c = comptime (skip_const and const_c);
+                pub const dedup = can_dedup;
+                pub const skip_g = skip_const and const_g;
+                pub const skip_c = skip_const and const_c;
+                pub const optimized_float = true;
+
+                const Sk = @This();
+
+                pub inline fn x(s: *const Sk, gi: u32) f64 {
+                    return s.xs[gi];
+                }
+                pub inline fn xOld(s: *const Sk, gi: u32) f64 {
+                    return s.xo[gi];
+                }
+                pub inline fn gath(s: *const Sk, id: u32, u: usize) u32 {
+                    return s.b.gath[@as(usize, id) * n_u + u];
+                }
+                pub inline fn rhsRow(s: *const Sk, id: u32, ru: usize) u32 {
+                    return s.b.rhs_idx[@as(usize, id) * n_u + ru];
+                }
+                pub inline fn lim(s: *const Sk, id: u32, u: usize) f64 {
+                    return s.b.lim_x[@as(usize, id) * n_u + u];
+                }
+                pub inline fn setLim(s: *const Sk, id: u32, u: usize, v: f64) void {
+                    s.b.lim_x[@as(usize, id) * n_u + u] = v;
+                }
+                pub inline fn model(s: *const Sk, id: u32) *const D.Model {
+                    return &s.b.models[id];
+                }
+                pub inline fn inst(s: *const Sk, id: u32) *const D.Instance {
+                    return &s.b.instances[id];
+                }
+                pub inline fn prep(s: *const Sk, id: u32) *const D.PrepCache {
+                    return &s.b.prep_cache[s.b.prep_group[id]];
+                }
+                inline fn slot(s: *const Sk, id: u32, ru: usize, cu: usize) u32 {
+                    return s.b.slots[(@as(usize, id) * n_u + ru) * n_u + cu];
+                }
+                pub inline fn scatterRes(s: *const Sk, row: u32, val: f64) void {
+                    s.pl.rhs[row] += val;
+                }
+                pub inline fn scatterJac(s: *const Sk, id: u32, ru: usize, cu: usize, row: u32, val: f64) void {
+                    _ = row;
+                    s.pl.g_vals[s.slot(id, ru, cu)] += val;
+                }
+                pub inline fn qActive(s: *const Sk) bool {
+                    _ = s;
+                    return true;
+                }
+                pub inline fn scatterQ(s: *const Sk, row: u32, qv: f64) void {
+                    s.pl.q_vec[row] += qv;
+                }
+                pub inline fn scatterQJac(s: *const Sk, id: u32, ru: usize, cu: usize, row: u32, val: f64) void {
+                    _ = row;
+                    s.pl.c_vals[s.slot(id, ru, cu)] += val;
+                }
+
+                /// Eval dedup: check if this prep group already has a cached
+                /// result for the same terminal voltages (the ACTUAL eval
+                /// input — limited state included, so instances with equal
+                /// node voltages but different limiting histories never
+                /// alias). group/h computed once, reused by store/storeQ.
+                /// Hit ⇒ scatter cached result (+ per-instance companion
+                /// correction) and return true.
+                pub inline fn tryCached(s: *Sk, id: u32, lx: *const [n_u]f64, corr: @Vector(n_u, f64)) bool {
+                    s.cur_group = s.lane_off + s.b.prep_group[id];
+                    s.cur_hash = if (s.dedup_on) hashVoltages(lx) else 0;
+                    if (comptime skip_g or skip_c) return false;
+                    if (!s.dedup_on) return false;
+                    if (s.b.eval_cache_hash[s.cur_group] != s.cur_hash) return false;
+                    const cr = &s.b.eval_cache_rhs[s.cur_group];
+                    const cj = &s.b.eval_cache_jac[s.cur_group];
+                    inline for (0..n_u) |ru| {
+                        const cjv: @Vector(n_u, f64) = cj[ru];
+                        s.pl.rhs[s.rhsRow(id, ru)] += cr[ru] + corrDot(cjv, corr);
+                        inline for (0..n_u) |cu|
+                            s.pl.g_vals[s.slot(id, ru, cu)] += cj[ru][cu];
+                    }
+                    if (comptime can_dedup_q) {
+                        const cqr = &s.b.eval_cache_q_rhs[s.cur_group];
+                        const cqj = &s.b.eval_cache_q_jac[s.cur_group];
+                        inline for (0..n_u) |ru| {
+                            const cqjv: @Vector(n_u, f64) = cqj[ru];
+                            s.pl.q_vec[s.rhsRow(id, ru)] += cqr[ru] + corrDot(cqjv, corr);
+                            inline for (0..n_u) |cu|
+                                s.pl.c_vals[s.slot(id, ru, cu)] += cqj[ru][cu];
+                        }
+                    }
+                    return true;
+                }
+
+                /// Cache the miss-path result (raw, at lx — the companion
+                /// correction is per-instance, applied at scatter time).
+                pub inline fn store(s: *Sk, id: u32, out: anytype) void {
+                    _ = id;
+                    if (comptime skip_g) return;
+                    if (!s.dedup_on) return;
+                    s.b.eval_cache_hash[s.cur_group] = s.cur_hash;
+                    inline for (0..n_u) |ru| {
+                        s.b.eval_cache_rhs[s.cur_group][ru] = out[ru].v;
+                        inline for (0..n_u) |cu|
+                            s.b.eval_cache_jac[s.cur_group][ru][cu] = out[ru].d[cu];
+                    }
+                }
+                pub inline fn storeQ(s: *Sk, id: u32, qo: anytype) void {
+                    _ = id;
+                    if (comptime !(can_dedup_q and !skip_c)) return;
+                    if (!s.dedup_on) return;
+                    inline for (0..n_u) |ru| {
+                        s.b.eval_cache_q_rhs[s.cur_group][ru] = qo[ru].v;
+                        inline for (0..n_u) |cu|
+                            s.b.eval_cache_q_jac[s.cur_group][ru][cu] = qo[ru].d[cu];
+                    }
+                }
+            };
+        }
+
+        fn evalInner(ctx: *anyopaque, pl: *const Planes, lane: u32, first: u32, last: u32, x: []const f64, t: f64, comptime skip_const: bool) void {
+            const self: *Self = @ptrCast(@alignCast(ctx));
 
             // Dedup engages on ranges of >= 4 instances, and only when
             // finalize found real prep sharing (dedup_worth).
             const dedup_on = if (comptime can_dedup) self.dedup_worth and last - first >= 4 else false;
-            // Lane's cache segment: [lane*ng + group].
             const lane_off: usize = if (comptime can_dedup) @as(usize, lane) * self.prep_cache.len else 0;
 
             // Reset this lane's cache at start of each full-eval pass.
@@ -758,115 +880,15 @@ pub fn DeviceBatch(comptime D: type) type {
             // instance. Comptime-false for devices without a limit decl.
             const limiting = if (comptime has_limit) self.lim_active else false;
 
-            for (first..last) |id| {
-                const lx = self.evalX(x, id, limiting);
-                // SPICE companion correction: the device is EVALUATED at its
-                // limited state lx, but Newton applies dx to the node vector.
-                // The stamped residual must be the linearization extended to
-                // the node point: i(lx) + J·(x_node − lx) — dioload.c's
-                // `cdeq = cd − gd·vd` in local form. corr = 0 when limiting
-                // is inactive (lx == gathered x).
-                var corr: @Vector(n_u, f64) = @splat(0);
-                if (comptime has_limit) {
-                    if (limiting) {
-                        const xn = self.localX(x, id);
-                        inline for (0..n_u) |u| corr[u] = xn[u] - lx[u];
-                    }
-                }
-                // Eval dedup: check if this prep group already has a cached result
-                // for the same terminal voltages (the ACTUAL eval input —
-                // limited state included, so instances with equal node
-                // voltages but different limiting histories never alias).
-                // group/h computed once, reused by the miss-path store below.
-                const group: usize = if (comptime can_dedup) lane_off + self.prep_group[id] else 0;
-                const h: u64 = if (comptime can_dedup) (if (dedup_on) hashVoltages(&lx) else 0) else 0;
-                if (comptime can_dedup and !skip_g and !skip_c) {
-                    if (dedup_on) {
-                        if (self.eval_cache_hash[group] == h) {
-                            // Cache hit — scatter from cached result
-                            // (+ per-instance companion correction).
-                            const cr = &self.eval_cache_rhs[group];
-                            const cj = &self.eval_cache_jac[group];
-                            inline for (0..n_u) |ru| {
-                                const cjv: @Vector(n_u, f64) = cj[ru];
-                                pl.rhs[self.rhs_idx[id * n_u + ru]] += cr[ru] + corrDot(cjv, corr);
-                                inline for (0..n_u) |cu|
-                                    pl.g_vals[self.slots[(id * n_u + ru) * n_u + cu]] += cj[ru][cu];
-                            }
-                            if (comptime can_dedup_q) {
-                                const cqr = &self.eval_cache_q_rhs[group];
-                                const cqj = &self.eval_cache_q_jac[group];
-                                inline for (0..n_u) |ru| {
-                                    const cqjv: @Vector(n_u, f64) = cqj[ru];
-                                    pl.q_vec[self.rhs_idx[id * n_u + ru]] += cqr[ru] + corrDot(cqjv, corr);
-                                    inline for (0..n_u) |cu|
-                                        pl.c_vals[self.slots[(id * n_u + ru) * n_u + cu]] += cqj[ru][cu];
-                                }
-                            }
-                            continue;
-                        }
-                    }
-                }
-
-                var xd: [n_u]S = undefined;
-                inline for (0..n_u) |u| {
-                    var d: @Vector(n_u, f64) = @splat(0);
-                    d[u] = 1;
-                    xd[u] = .{ .v = lx[u], .d = d };
-                }
-
-                const pc_ptr = if (comptime has_prep_cache) &self.prep_cache[self.prep_group[id]] else undefined;
-
-                // Residual always stamps; the Jacobian only when it is not
-                // already frozen in the baseline (skip_const + constant_*).
-                const out = if (comptime @hasDecl(D, "evalFromPrep"))
-                    D.evalFromPrep(S, xd, pc_ptr, &self.models[id], &self.instances[id], t)
-                else
-                    D.eval(S, xd, &self.models[id], &self.instances[id], t);
-                inline for (0..n_u) |ru| {
-                    pl.rhs[self.rhs_idx[id * n_u + ru]] += out[ru].v + corrDot(out[ru].d, corr);
-                    if (comptime !skip_g) {
-                        inline for (0..n_u) |cu|
-                            pl.g_vals[self.slots[(id * n_u + ru) * n_u + cu]] += out[ru].d[cu];
-                    }
-                }
-                // Cache the result for this prep group (raw, at lx — the
-                // companion correction is per-instance and applied at
-                // scatter time on both hit and miss paths).
-                if (comptime can_dedup and !skip_g) {
-                    if (dedup_on) {
-                        self.eval_cache_hash[group] = h;
-                        inline for (0..n_u) |ru| {
-                            self.eval_cache_rhs[group][ru] = out[ru].v;
-                            inline for (0..n_u) |cu|
-                                self.eval_cache_jac[group][ru][cu] = out[ru].d[cu];
-                        }
-                    }
-                }
-
-                if (comptime has_q) {
-                    const qo = if (comptime @hasDecl(D, "qFromPrep"))
-                        D.qFromPrep(S, xd, pc_ptr, &self.models[id], &self.instances[id], t)
-                    else
-                        D.q(S, xd, &self.models[id], &self.instances[id], t);
-                    inline for (0..n_u) |ru| {
-                        pl.q_vec[self.rhs_idx[id * n_u + ru]] += qo[ru].v + corrDot(qo[ru].d, corr);
-                        if (comptime !skip_c) {
-                            inline for (0..n_u) |cu|
-                                pl.c_vals[self.slots[(id * n_u + ru) * n_u + cu]] += qo[ru].d[cu];
-                        }
-                    }
-                    if (comptime can_dedup_q and !skip_c) {
-                        if (dedup_on) {
-                            inline for (0..n_u) |ru| {
-                                self.eval_cache_q_rhs[group][ru] = qo[ru].v;
-                                inline for (0..n_u) |cu|
-                                    self.eval_cache_q_jac[group][ru][cu] = qo[ru].d[cu];
-                            }
-                        }
-                    }
-                }
-            }
+            var sink: HostSink(skip_const) = .{
+                .b = self,
+                .pl = pl,
+                .xs = x,
+                .xo = undefined,
+                .dedup_on = dedup_on,
+                .lane_off = lane_off,
+            };
+            eval_core.evalRange(D, true, &sink, first, last, 1, t, limiting);
         }
 
         fn localX(self: *Self, x: []const f64, id: usize) [n_u]f64 {
@@ -917,34 +939,17 @@ pub fn DeviceBatch(comptime D: type) type {
         /// in CKTstate0 for exactly this).
         fn applyLimits(ctx: *anyopaque, x: []f64, x_old: []const f64) bool {
             const self: *Self = @ptrCast(@alignCast(ctx));
-            var any_limited = false;
-            for (0..self.count) |id| {
-                const cur = self.localX(x, id);
-                const old: [n_u]f64 = if (self.lim_active)
-                    self.lim_x[id * n_u ..][0..n_u].*
-                else
-                    self.localX(x_old, id);
-                const limited = D.limit(&self.models[id], &self.instances[id], cur, old);
-                inline for (0..n_u) |u| {
-                    // ngspice: only pnjlim sets icheck (junction limiting
-                    // forces another Newton iteration); fetlim/limvds adjust
-                    // the eval point without vetoing convergence — counting
-                    // them here locks Newton in a 2-cycle whenever vds
-                    // straddles 0 and the mode branch alternates. Devices
-                    // declare which unknowns carry junction limiting.
-                    const flags: bool = comptime blk: {
-                        if (!@hasDecl(D, "limit_flag_unknowns")) break :blk true;
-                        for (D.limit_flag_unknowns) |fu| {
-                            if (@intFromEnum(fu) == u) break :blk true;
-                        }
-                        break :blk false;
-                    };
-                    if (flags and limited[u] != cur[u]) any_limited = true;
-                    self.lim_x[id * n_u + u] = limited[u];
-                }
-            }
+            var sink: HostSink(false) = .{
+                .b = self,
+                .pl = undefined,
+                .xs = x,
+                .xo = x_old,
+                .dedup_on = false,
+                .lane_off = 0,
+            };
+            const any = eval_core.limitRange(D, &sink, 0, @intCast(self.count), 1, self.lim_active);
             self.lim_active = true;
-            return any_limited;
+            return any != 0;
         }
 
         /// End-of-solve: evals go back to reading the node vector.
