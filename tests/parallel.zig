@@ -106,7 +106,7 @@ fn serialVsParallel(ckt: *analysis.Circuit, arena: std.mem.Allocator, comptime n
     const want = try Snapshot.take(arena, ckt);
 
     // Parallel, twice: close to serial, bit-identical to itself.
-    var par = try analysis.problem.ParEval.init(testing.allocator, io, ckt.batches, ckt.nnz, ckt.n, ckt.has_charge, ckt.trash_slot, N_LANES);
+    var par = try analysis.devices.par.ParEval.init(testing.allocator, io, ckt.batches, ckt.nnz, ckt.n, ckt.has_charge, ckt.trash_slot, N_LANES);
     defer par.deinit();
     ckt.par_eval = &par;
     defer ckt.par_eval = null;
@@ -192,7 +192,7 @@ test "par: lane count 1 falls through cleanly" {
     ckt.eval(x, 0.0);
     const want = try Snapshot.take(arena, &ckt);
 
-    var par = try analysis.problem.ParEval.init(testing.allocator, threaded.io(), ckt.batches, ckt.nnz, ckt.n, ckt.has_charge, ckt.trash_slot, 1);
+    var par = try analysis.devices.par.ParEval.init(testing.allocator, threaded.io(), ckt.batches, ckt.nnz, ckt.n, ckt.has_charge, ckt.trash_slot, 1);
     defer par.deinit();
     ckt.par_eval = &par;
     defer ckt.par_eval = null;

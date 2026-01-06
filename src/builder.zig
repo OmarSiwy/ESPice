@@ -2,16 +2,15 @@
 //!
 //! Construction policy lives here with the app: node interning, subcircuit
 //! tagging + BBD permutation, device accumulation. The batch mechanism
-//! (ProtoStore/DeviceBatch, pattern freeze) is analysis-owned — see
-//! modules/analysis/src/problem.zig.
+//! (ProtoStore/DeviceBatch) lives in devices/batch.zig; the pattern freeze
+//! (analysis.freeze) in analysis/Circuit.zig.
 
 const std = @import("std");
 const analysis = @import("analysis");
 const devices = @import("devices");
 const types = @import("frontend/types.zig");
-const va_devices = @import("va_devices");
 const vaload = @import("devices").vaload;
-const batch = analysis.problem;
+const batch = devices.batch;
 
 const GROUND = analysis.GROUND;
 const Circuit = analysis.Circuit;
@@ -230,7 +229,7 @@ pub const Builder = struct {
     /// Find-or-create the type-erased proto for a runtime (dlopen'd) device.
     /// Identity: the vtable's static name pointer — same trick as
     /// protoStore's @typeName pointer identity for comptime devices.
-    pub fn dynProto(self: *Builder, vt: *const batch.dyn.DeviceVtable) !Proto {
+    pub fn dynProto(self: *Builder, vt: *const devices.dyn.DeviceVtable) !Proto {
         for (self.protos.items) |p| {
             if (p.type_name.ptr == vt.name.ptr) return p;
         }
@@ -258,7 +257,7 @@ pub const Builder = struct {
     }
 
     /// Freeze: apply the BBD permutation, then hand the accumulated protos
-    /// to analysis.problem.freeze() which builds the union sparsity pattern,
+    /// to analysis.freeze() which builds the union sparsity pattern,
     /// allocates planes and precomputes every slot tape. The Builder is
     /// consumed.
     pub fn compile(self: *Builder) !Circuit {
@@ -292,7 +291,7 @@ pub const Builder = struct {
 
         const labels = try self.node_labels.toOwnedSlice(gpa);
         errdefer gpa.free(labels);
-        const ckt = try batch.freeze(gpa, self.n, self.node_names, labels, self.protos.items, bbd.info);
+        const ckt = try analysis.freeze(gpa, self.n, self.node_names, labels, self.protos.items, bbd.info);
 
         // Protos consumed by freeze(); free the Builder shell.
         self.protos.deinit(gpa);
@@ -311,48 +310,25 @@ pub const Builder = struct {
 
 // ---------------------------------------------------------------------------
 // Verilog-A / Verilog devices — loaded at runtime via `.hdl` cards (vaload).
-// The va_devices module is a permanently-empty stub kept so the comptime
-// dispatch below stays valid; its decl loops compile to nothing.
 // ---------------------------------------------------------------------------
 
-/// First positional token names a baked va_devices decl?
-fn isVaDevice(dev: types.Device) bool {
-    if (dev.positional.len == 0) return false;
-    const model_name = switch (dev.positional[0]) {
-        .name => |nm| nm,
-        else => return false,
-    };
-    inline for (@typeInfo(va_devices).@"struct".decls) |decl| {
-        if (std.mem.eql(u8, model_name, decl.name)) return true;
-    }
-    return false;
-}
-
 /// First positional token names a runtime-loaded (.hdl card) device?
-/// Baked decls win when both exist. A .model card whose kind is a loaded
-/// module counts too (`.model psp103n psp103va ...`).
+/// A .model card whose kind is a loaded module counts too
+/// (`.model psp103n psp103va ...`).
 fn isDynDevice(dev: types.Device, models: []const types.Model) bool {
     if (vaload.isEmpty() or dev.positional.len == 0) return false;
     const model_name = switch (dev.positional[0]) {
         .name => |nm| nm,
         else => return false,
     };
-    if (isBakedVaName(model_name)) return false;
     if (vaload.get(model_name) != null) return true;
     if (findModel(models, model_name)) |m| return vaload.get(m.kind) != null;
     return false;
 }
 
-fn isBakedVaName(name: []const u8) bool {
-    inline for (@typeInfo(va_devices).@"struct".decls) |decl| {
-        if (std.mem.eql(u8, name, decl.name)) return true;
-    }
-    return false;
-}
-
-/// Runtime (dlopen'd) VA/V devices — same card shape as baked ones
-/// (`<name> node... <model>`), bound through the dyn vtable instead of a
-/// comptime decl. Param blobs live on the arena until proto_add copies them.
+/// Runtime (dlopen'd) VA/V devices — card shape `<name> node... <model>`,
+/// bound through the dyn vtable. Param blobs live on the arena until
+/// proto_add copies them.
 pub fn addDynDevices(b: *Builder, arena: std.mem.Allocator, nl: types.Netlist) !void {
     if (vaload.isEmpty()) return;
     const dl = nl.devices;
@@ -363,7 +339,6 @@ pub fn addDynDevices(b: *Builder, arena: std.mem.Allocator, nl: types.Netlist) !
             .name => |nm| nm,
             else => continue,
         };
-        if (isBakedVaName(model_name)) continue;
         // Either the card names the VA module directly, or it names a .model
         // card whose kind is the VA module (`.model psp103n psp103va ...`).
         const model_card = findModel(nl.models, model_name);
@@ -404,38 +379,6 @@ pub fn addDynDevices(b: *Builder, arena: std.mem.Allocator, nl: types.Netlist) !
 fn applyKvDyn(set: *const fn ([*]u8, []const u8, f64) bool, dest: [*]u8, kv: []const types.Kv) void {
     for (kv) |item| {
         if (valueNumber(item.value)) |num| _ = set(dest, item.key, num);
-    }
-}
-
-pub fn addVaDevices(b: *Builder, arena: std.mem.Allocator, nl: types.Netlist) !void {
-    _ = arena;
-    const dl = nl.devices;
-    inline for (@typeInfo(va_devices).@"struct".decls) |decl| {
-        const D = @field(va_devices, decl.name);
-        const model_kv: []const types.Kv = if (findModel(nl.models, decl.name)) |m| m.kv else &.{};
-        for (0..dl.len()) |di| {
-            const pos = dl.positional[di];
-            if (pos.len == 0) continue;
-            const model_name = switch (pos[0]) {
-                .name => |nm| nm,
-                else => continue,
-            };
-            if (!std.mem.eql(u8, model_name, decl.name)) continue;
-
-            var model: D.Model = .{};
-            try applyKv(&model, model_kv);
-            var instance: D.Instance = .{};
-            try applyKv(&instance, dl.kv[di]);
-
-            // Card shape: `<name> node... <model>` — parser puts the node
-            // words in nodes[] and the trailing model name in positional[0].
-            const dev_nodes = dl.nodes[di];
-            var ports: [D.num_ports]u32 = undefined;
-            inline for (0..D.num_ports) |p| {
-                ports[p] = if (p < dev_nodes.len) try b.internNode(dev_nodes[p]) else GROUND;
-            }
-            try b.addDevice(D, model, instance, ports);
-        }
     }
 }
 
@@ -549,10 +492,9 @@ pub const NetBuilder = struct {
     }
 
     fn addDevice(self: *NetBuilder, dev: types.Device) !void {
-        // Baked or runtime-loaded Verilog-A/Verilog device instance: handled
-        // by addVaDevices/addDynDevices after NetBuilder runs, regardless of
-        // card letter.
-        if (isVaDevice(dev) or isDynDevice(dev, self.nl.models)) return;
+        // Runtime-loaded Verilog-A/Verilog device instance: handled
+        // by addDynDevices after NetBuilder runs, regardless of card letter.
+        if (isDynDevice(dev, self.nl.models)) return;
         const letter = dev.letter();
         if (devices.letter_map.get(&.{letter}) == null) {
             if (inferDeviceFromModel(dev, self.nl.models) == null)

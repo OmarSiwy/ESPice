@@ -26,38 +26,17 @@ pub fn probeNames(ctx: *const RunCtx, first: ?[]const u8) ![]const []const u8 {
     return circuit_mod.probeNames(ctx.circuit, ctx.probes, ctx.allocator, first);
 }
 
-// ---------------------------------------------------------------------------
-// Re-exports from devices — backward compat for analysis modules + src/
-// ---------------------------------------------------------------------------
-
-pub const Batch = devices.batch.Batch;
-pub const Hooks = devices.batch.Hooks;
-pub const Planes = devices.batch.Planes;
+// -- Re-exports for analysis modules + src/ consumers --
 pub const ParamRef = devices.batch.ParamRef;
 pub const NoiseSource = devices.batch.NoiseSource;
 pub const NoiseGenKind = devices.batch.NoiseGenKind;
 pub const NoiseGen = devices.batch.NoiseGen;
-pub const StateCtlOp = devices.batch.StateCtlOp;
-pub const UpdateResult = devices.batch.UpdateResult;
-
-// ---------------------------------------------------------------------------
-// Backward-compat: analysis.problem.* namespace for src/ consumers
-// ---------------------------------------------------------------------------
-
-pub const problem = struct {
-    pub const Proto = devices.batch.Proto;
-    pub const ProtoStore = devices.batch.ProtoStore;
-    pub const PatternView = devices.batch.PatternView;
-    pub const dyn = devices.dyn;
-    pub const ParEval = devices.par.ParEval;
-    pub const EvalTask = devices.par.EvalTask;
-    pub const default_min_instances = devices.par.default_min_instances;
-    pub const GpuProblem = circuit_mod.GpuProblem;
-    pub const TranPack = circuit_mod.TranPack;
-    pub const packGpuProblem = circuit_mod.packForGpu;
-    pub const gpuEligible = circuit_mod.gpuEligible;
-    pub const freeze = circuit_mod.init;
-};
+pub const GpuProblem = circuit_mod.GpuProblem;
+pub const TranPack = circuit_mod.TranPack;
+pub const packForGpu = circuit_mod.packForGpu;
+pub const gpuEligible = circuit_mod.gpuEligible;
+/// Builder freeze: protos -> analysis.Circuit (union pattern + planes + tapes).
+pub const freeze = circuit_mod.init;
 
 // -- DC / Operating Point --
 pub const op = @import("dc/op.zig");

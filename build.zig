@@ -9,7 +9,6 @@ pub fn build(b: *std.Build) void {
 
     const devices_dep = b.dependency("devices", .{ .target = target, .optimize = optimize });
     const analysis_dep = b.dependency("analysis", .{ .target = target, .optimize = optimize });
-    const solvers_dep = b.dependency("solvers", .{ .target = target, .optimize = optimize });
     const fastvaf_dep = b.dependency("fastvaf", .{ .target = target, .optimize = optimize });
     const compute_dep = b.dependency("compute", .{ .target = target, .optimize = optimize });
 
@@ -27,20 +26,6 @@ pub fn build(b: *std.Build) void {
         am.addImport("devices", dm);
     }
 
-    // ponytail: empty stub — VA models are dlopen'd per-netlist at runtime (.hdl cards)
-    const va_root: std.Build.LazyPath = blk: {
-        const wf = b.addWriteFiles();
-        break :blk wf.add("va_root.zig", "//! no baked VA models; use per-netlist .hdl cards\n");
-    };
-    const va_mod = b.createModule(.{
-        .root_source_file = va_root,
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "contract", .module = devices_dep.module("contract") },
-        },
-    });
-
     const exe = b.addExecutable(.{
         .name = "zpicey",
         .root_module = b.createModule(.{
@@ -50,10 +35,8 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "devices", .module = devices_dep.module("devices") },
                 .{ .name = "analysis", .module = analysis_dep.module("analysis") },
-                .{ .name = "solvers", .module = solvers_dep.module("solvers") },
                 .{ .name = "compute", .module = compute_dep.module("compute") },
                 .{ .name = "fastvaf", .module = fastvaf_dep.module("fastvaf") },
-                .{ .name = "va_devices", .module = va_mod },
             },
         }),
     });
@@ -83,7 +66,6 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "analysis", .module = analysis_dep.module("analysis") },
                 .{ .name = "devices", .module = devices_dep.module("devices") },
-                .{ .name = "solvers", .module = solvers_dep.module("solvers") },
                 .{ .name = "builder", .module = builder_mod },
             },
         }),
@@ -123,7 +105,6 @@ pub fn build(b: *std.Build) void {
     const gpu_inp: devices_build.GpuKernelInputs = .{
         .b = b,
         .devices_dep = devices_dep,
-        .va_mod = va_mod,
         .ptx_rewrite_path = b.path("modules/compute/tools/ptx_rewrite.zig"),
         .optimize = optimize,
     };

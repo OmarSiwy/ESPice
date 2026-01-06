@@ -1,26 +1,18 @@
 //! Per-model megakernel stub TU. Instantiated once per builtin device model
-//! (stub_options.model_name = decl name in devices/root.zig) plus once with
-//! model_name = "" covering ALL baked VA models. Exports the concrete
-//! evalBatch/limitBatch wrappers the driver TU (kernel.zig) resolves by name
-//! at nvlink time — ptxas compiles each model's physics in isolation instead
-//! of one 37 MB megablob.
+//! (stub_options.model_name = decl name in devices/root.zig). Exports the
+//! concrete evalBatch/limitBatch wrappers the driver TU (kernel.zig)
+//! resolves by name at nvlink time — ptxas compiles each model's physics in
+//! isolation instead of one 37 MB megablob.
 
 const common = @import("kernel_common.zig");
 const devices = @import("dev_models");
-const va_devices = @import("va_devices");
 const abi = @import("gpu_abi");
 
 const model_name = @import("stub_options").model_name;
 
 comptime {
     @setEvalBranchQuota(100_000);
-    if (model_name.len == 0) {
-        // VA stub: every baked Verilog-A/Verilog model in one TU (few, and
-        // their decl names aren't known to build.zig at configure time).
-        for (@typeInfo(va_devices).@"struct".decls) |decl| exportModel(va_devices, decl.name);
-    } else {
-        exportModel(devices, model_name);
-    }
+    exportModel(devices, model_name);
 }
 
 fn exportModel(comptime M: type, comptime name: []const u8) void {

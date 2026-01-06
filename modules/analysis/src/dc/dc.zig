@@ -5,7 +5,6 @@ const root = @import("../root.zig");
 const converger = @import("solvers").converger;
 const op = @import("op.zig");
 
-const W = std.simd.suggestVectorLength(f64) orelse 8;
 
 pub const Options = struct {
     tol: converger.Tolerances = .{},

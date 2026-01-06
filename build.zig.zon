@@ -6,7 +6,6 @@
     .dependencies = .{
         .devices = .{ .path = "modules/devices" },
         .analysis = .{ .path = "modules/analysis" },
-        .solvers = .{ .path = "modules/solvers" },
         .compute = .{ .path = "modules/compute" },
         .fastvaf = .{ .path = "modules/FastVAF" },
         .benchmark = .{ .path = "benchmark" },

@@ -84,6 +84,13 @@ const AnalogOpInfo = struct {
     index: u32,
     args_start: u32,
     args_len: u16,
+    // Filter coefficients extracted at scan time (laplace/zi ops only).
+    // Layout: num[0..num_len], den[0..den_len], sample_period (zi only).
+    num_coeffs: [8]f64 = .{0} ** 8,
+    den_coeffs: [8]f64 = .{0} ** 8,
+    num_len: u8 = 0,
+    den_len: u8 = 0,
+    sample_period: f64 = 0,
 };
 
 const Codegen = struct {
@@ -158,18 +165,75 @@ const Codegen = struct {
                             const ki = @intFromEnum(kind);
                             const idx = self.op_kind_counts[ki];
                             self.op_kind_counts[ki] += 1;
-                            try self.analog_ops.append(self.allocator, .{
+                            var info = AnalogOpInfo{
                                 .kind = kind,
                                 .inst = inst,
                                 .index = idx,
                                 .args_start = c.args_start,
                                 .args_len = c.args_len,
-                            });
+                            };
+                            // Extract filter coefficients from flattened MIR args.
+                            if (isFilterKind(kind)) {
+                                self.extractFilterCoeffs(&info, c.args_start, c.args_len);
+                            }
+                            try self.analog_ops.append(self.allocator, info);
                         }
                     },
                     else => {},
                 }
             }
+        }
+    }
+
+    fn isFilterKind(kind: AnalogOpKind) bool {
+        return switch (kind) {
+            .laplace_nd, .laplace_np, .laplace_zd, .laplace_zp,
+            .zi_nd, .zi_np, .zi_zd, .zi_zp,
+            => true,
+            else => false,
+        };
+    }
+
+    /// Extract numerator/denominator coefficients from the flattened MIR args
+    /// produced by Lower.emitFilterCall. Format:
+    ///   [input, n_len, n0, n1, ..., d_len, d0, d1, ..., (T for zi)]
+    fn extractFilterCoeffs(self: *const Codegen, info: *AnalogOpInfo, args_start: u32, args_len: u16) void {
+        const args = self.mir.getExtraValues(args_start, args_len);
+        if (args.len < 2) return;
+
+        var pos: usize = 1; // skip args[0] = input
+
+        // Numerator: args[1] = n_len, followed by n_len coefficients
+        if (pos < args.len) {
+            const n_len_f = self.constFold(args[pos], 0) orelse return;
+            const n_len: usize = @intFromFloat(@max(0, @min(8, n_len_f)));
+            info.num_len = @intCast(n_len);
+            pos += 1;
+            for (0..n_len) |i| {
+                if (pos < args.len) {
+                    info.num_coeffs[i] = self.constFold(args[pos], 0) orelse 0;
+                    pos += 1;
+                }
+            }
+        }
+
+        // Denominator: args[pos] = d_len, followed by d_len coefficients
+        if (pos < args.len) {
+            const d_len_f = self.constFold(args[pos], 0) orelse return;
+            const d_len: usize = @intFromFloat(@max(0, @min(8, d_len_f)));
+            info.den_len = @intCast(d_len);
+            pos += 1;
+            for (0..d_len) |i| {
+                if (pos < args.len) {
+                    info.den_coeffs[i] = self.constFold(args[pos], 0) orelse 0;
+                    pos += 1;
+                }
+            }
+        }
+
+        // Sample period T (zi_* only)
+        if (pos < args.len) {
+            info.sample_period = self.constFold(args[pos], 0) orelse 0;
         }
     }
 
@@ -182,14 +246,26 @@ const Codegen = struct {
 
     fn opNeedsInstance(kind: AnalogOpKind) bool {
         return switch (kind) {
-            .transition, .slew, .last_crossing, .idtmod,
+            .transition, .slew, .last_crossing, .idtmod, .absdelay,
             .laplace_nd, .laplace_np, .laplace_zd, .laplace_zp,
             .zi_nd, .zi_np, .zi_zd, .zi_zp,
             => true,
             // Events: need Instance fields for firing detection + input tracking
             .cross, .above, .timer => true,
-            // absdelay uses hist injection, not instance state
-            .absdelay => false,
+        };
+    }
+
+    fn opMaxArgs(kind: AnalogOpKind) u8 {
+        return switch (kind) {
+            .transition => 4, // expr, td, tr, tf
+            .slew => 3, // expr, max_pos_rate, max_neg_rate
+            .idtmod => 4, // expr, ic, modulus, offset
+            .absdelay => 2, // expr, td
+            .last_crossing => 2, // expr, dir
+            .timer => 2, // start, period
+            .cross, .above => 3, // expr, dir, timestep
+            .laplace_nd, .laplace_np, .laplace_zd, .laplace_zp => 3, // expr, num/zeros, den/poles
+            .zi_nd, .zi_np, .zi_zd, .zi_zp => 4, // expr, num/zeros, den/poles, T
         };
     }
 
@@ -300,14 +376,21 @@ const Codegen = struct {
         // Instance: temp + per-operator state fields.
         try self.w().writeAll("pub const Instance = struct {\n");
         try self.w().writeAll("    temp: f32 = 300.15,\n");
+        if (self.hasAnyStatefulOps()) {
+            try self.w().writeAll("    _sim_t: f64 = 0,\n");
+            try self.w().writeAll("    _sim_t_prev: f64 = 0,\n");
+        }
         for (self.analog_ops.slice()) |op| {
             if (!opNeedsInstance(op.kind)) continue;
             const tag = @tagName(op.kind);
-            // _input: eval stashes the operator's first argument here each iteration
-            try self.w().print("    _{s}_{d}_input: f64 = 0,\n", .{ tag, op.index });
+            const nargs = opMaxArgs(op.kind);
+            // _args: eval stashes all operator arguments here each iteration
+            try self.w().print("    _{s}_{d}_args: [{d}]f64 = .{{0}} ** {d},\n", .{ tag, op.index, nargs, nargs });
             switch (op.kind) {
                 .transition => {
                     try self.w().print("    _{s}_{d}_val: f64 = 0,\n", .{ tag, op.index });
+                    try self.w().print("    _{s}_{d}_origin: f64 = 0,\n", .{ tag, op.index });
+                    try self.w().print("    _{s}_{d}_target_prev: f64 = 0,\n", .{ tag, op.index });
                 },
                 .slew => {
                     try self.w().print("    _{s}_{d}_val: f64 = 0,\n", .{ tag, op.index });
@@ -319,10 +402,16 @@ const Codegen = struct {
                 .idtmod => {
                     try self.w().print("    _{s}_{d}_val: f64 = 0,\n", .{ tag, op.index });
                 },
+                .absdelay => {
+                    try self.w().print("    _{s}_{d}_val: f64 = 0,\n", .{ tag, op.index });
+                    try self.w().print("    _{s}_{d}_buf: [64]f64 = .{{0}} ** 64,\n", .{ tag, op.index });
+                    try self.w().print("    _{s}_{d}_buf_idx: u32 = 0,\n", .{ tag, op.index });
+                },
                 .laplace_nd, .laplace_np, .laplace_zd, .laplace_zp,
                 .zi_nd, .zi_np, .zi_zd, .zi_zp,
                 => {
                     try self.w().print("    _{s}_{d}_val: f64 = 0,\n", .{ tag, op.index });
+                    try self.w().print("    _{s}_{d}_x: [4]f64 = .{{0}} ** 4,\n", .{ tag, op.index });
                 },
                 .cross => {
                     try self.w().print("    _{s}_{d}_prev: f64 = 0,\n", .{ tag, op.index });
@@ -336,7 +425,6 @@ const Codegen = struct {
                     try self.w().print("    _{s}_{d}_next: f64 = 0,\n", .{ tag, op.index });
                     try self.w().print("    _{s}_{d}_fired: f64 = 0,\n", .{ tag, op.index });
                 },
-                else => {},
             }
         }
         try self.w().writeAll("};\n\n");
@@ -524,12 +612,18 @@ const Codegen = struct {
 
         try self.w().print(
             \\pub fn {s}(comptime S: type, x: [n_u]S, model: *const Model, inst: *const Instance, t: f64) [n_u]S {{
-            \\    _ = &t;
-            \\    _ = &inst;
             \\
         , .{fn_name});
 
         self.indent = 1;
+
+        // Stash simulation time into Instance for updateState's dt computation.
+        if (self.hasAnyStatefulOps()) {
+            try self.w().writeAll("    @constCast(inst)._sim_t = t;\n");
+        } else {
+            try self.w().writeAll("    _ = &t;\n");
+        }
+        try self.w().writeAll("    _ = &inst;\n");
 
         // Parameter reads lower to `model.<name>` (see emitValueRef .param_ref),
         // so physics honors the .model card. `_ = &model;` keeps the parameter
@@ -1168,20 +1262,28 @@ const Codegen = struct {
             if (self.findAnalogOp(self.current_emit_inst)) |op| {
                 if (opNeedsInstance(op.kind)) {
                     const tag = @tagName(op.kind);
-                    // Stash the first argument into inst._input for updateState.
+                    const nargs = opMaxArgs(op.kind);
+                    // For filter ops, only stash args[0] (input signal); coefficients
+                    // are const-folded at scan time and stored in AnalogOpInfo.
+                    const stash_count: usize = if (isFilterKind(op.kind)) 1 else @min(args.len, nargs);
+                    // Stash arguments into inst._args for updateState.
                     // blk: pattern avoids polluting the S expression namespace.
                     try self.w().writeAll("blk_op: {\n");
                     self.indent += 1;
-                    try self.writeIndent();
-                    if (args.len >= 1) {
-                        try self.w().print("@constCast(inst)._{s}_{d}_input = (", .{ tag, op.index });
-                        try self.emitValueRef(args[0]);
+                    for (0..stash_count) |ai| {
+                        try self.writeIndent();
+                        try self.w().print("@constCast(inst)._{s}_{d}_args[{d}] = (", .{ tag, op.index, ai });
+                        try self.emitValueRef(args[ai]);
                         try self.w().writeAll(").val();\n");
                     }
                     try self.writeIndent();
                     switch (op.kind) {
                         .last_crossing => try self.w().print(
                             "break :blk_op S.con(inst._{s}_{d}_time);\n", .{ tag, op.index }),
+                        .cross, .above => try self.w().print(
+                            "break :blk_op S.con(inst._{s}_{d}_fired);\n", .{ tag, op.index }),
+                        .timer => try self.w().print(
+                            "break :blk_op S.con(inst._{s}_{d}_fired);\n", .{ tag, op.index }),
                         else => try self.w().print(
                             "break :blk_op S.con(inst._{s}_{d}_val);\n", .{ tag, op.index }),
                     }
@@ -1189,18 +1291,6 @@ const Codegen = struct {
                     try self.writeIndent();
                     try self.w().writeByte('}');
                     return;
-                }
-                // Non-instance ops: absdelay passes through at DC, events return 0.
-                switch (op.kind) {
-                    .absdelay => if (args.len >= 1) {
-                        try self.emitValueRef(args[0]);
-                        return;
-                    },
-                    .cross, .above, .timer => {
-                        try self.w().writeAll("S.con(0.0)");
-                        return;
-                    },
-                    else => {},
                 }
             }
             // Fallback: DC passthrough for filter ops, 0 for events.
@@ -1242,14 +1332,14 @@ const Codegen = struct {
             const tag = @tagName(op.kind);
             switch (op.kind) {
                 // DC passthrough: output = input at init
-                .transition, .slew,
+                .transition, .slew, .absdelay,
                 .laplace_nd, .laplace_np, .laplace_zd, .laplace_zp,
                 .zi_nd, .zi_np, .zi_zd, .zi_zp,
                 => try self.w().print(
-                    "    inst._{s}_{d}_val = inst._{s}_{d}_input;\n", .{ tag, op.index, tag, op.index }),
+                    "    inst._{s}_{d}_val = inst._{s}_{d}_args[0];\n", .{ tag, op.index, tag, op.index }),
                 .last_crossing => {},
                 .idtmod => {},
-                else => {},
+                .cross, .above, .timer => {},
             }
         }
         try self.w().writeAll(
@@ -1257,7 +1347,9 @@ const Codegen = struct {
             \\}
             \\
             \\pub fn updateState(_: *const Model, inst: *Instance, _: [n_u]f64, state: *State) contract.UpdateResult {
-            \\    _ = state;
+            \\    state.step += 1;
+            \\    const _dt = inst._sim_t - inst._sim_t_prev;
+            \\    inst._sim_t_prev = inst._sim_t;
             \\
         );
         for (self.analog_ops.slice()) |op| {
@@ -1265,49 +1357,167 @@ const Codegen = struct {
             const tag = @tagName(op.kind);
             switch (op.kind) {
                 .transition => {
-                    // Piecewise-linear ramp toward input value.
-                    // ponytail: instantaneous snap — real rise/fall timing needs dt from solver.
-                    // The solver calls updateState each Newton step; without a dt parameter,
-                    // we snap to the target. When the solver passes time deltas, replace
-                    // with: val += clamp(target - val, -fall_rate*dt, rise_rate*dt).
-                    try self.w().print(
-                        "    inst._{s}_{d}_val = inst._{s}_{d}_input;\n", .{ tag, op.index, tag, op.index });
-                },
-                .slew => {
-                    // Rate-limited tracking of input.
-                    // ponytail: same snap behavior — needs dt for real rate limiting.
-                    try self.w().print(
-                        "    inst._{s}_{d}_val = inst._{s}_{d}_input;\n", .{ tag, op.index, tag, op.index });
-                },
-                .last_crossing => {
-                    // Track sign changes in the expression.
+                    // Piecewise-linear ramp: tracks origin/target_prev to compute
+                    // constant slope = |target - origin| / rise_or_fall_time.
                     try self.w().print(
                         \\    {{
-                        \\        const _cur = inst._{s}_{d}_input;
+                        \\        const _target = inst._{s}_{d}_args[0];
+                        \\        const _tr = @max(inst._{s}_{d}_args[2], 1e-15);
+                        \\        const _tf = @max(inst._{s}_{d}_args[3], 1e-15);
+                        \\        const _cur = inst._{s}_{d}_val;
+                        \\        if (_target != inst._{s}_{d}_target_prev) {{
+                        \\            inst._{s}_{d}_origin = _cur;
+                        \\            inst._{s}_{d}_target_prev = _target;
+                        \\        }}
+                        \\        const _amp = _target - inst._{s}_{d}_origin;
+                        \\        const _delta = _target - _cur;
+                        \\        if (_delta > 0.0) {{
+                        \\            const _rate = @abs(_amp) / _tr;
+                        \\            inst._{s}_{d}_val = @min(_cur + _rate * _dt, _target);
+                        \\        }} else if (_delta < 0.0) {{
+                        \\            const _rate = @abs(_amp) / _tf;
+                        \\            inst._{s}_{d}_val = @max(_cur - _rate * _dt, _target);
+                        \\        }}
+                        \\    }}
+                        \\
+                    , .{
+                        // 10 pairs for transition template
+                        tag, op.index, tag, op.index, tag, op.index,
+                        tag, op.index, tag, op.index, tag, op.index,
+                        tag, op.index, tag, op.index, tag, op.index,
+                        tag, op.index,
+                    });
+                },
+                .slew => {
+                    // Rate-limited tracking: clamp rate of change to pos/neg limits.
+                    try self.w().print(
+                        \\    {{
+                        \\        const _input = inst._{s}_{d}_args[0];
+                        \\        const _pos_rate = inst._{s}_{d}_args[1];
+                        \\        const _neg_rate = inst._{s}_{d}_args[2];
+                        \\        const _delta = _input - inst._{s}_{d}_val;
+                        \\        const _max_up = _pos_rate * _dt;
+                        \\        const _max_dn = _neg_rate * _dt;
+                        \\        inst._{s}_{d}_val += @min(@max(_delta, _max_dn), _max_up);
+                        \\    }}
+                        \\
+                    , .{
+                        // 5 pairs for slew template
+                        tag, op.index, tag, op.index, tag, op.index,
+                        tag, op.index, tag, op.index,
+                    });
+                },
+                .last_crossing => {
+                    // Linear interpolation for zero-crossing time.
+                    try self.w().print(
+                        \\    {{
+                        \\        const _cur = inst._{s}_{d}_args[0];
                         \\        const _prev = inst._{s}_{d}_prev;
-                        \\        if (_prev * _cur < 0.0) inst._{s}_{d}_time = 0;
+                        \\        if (_prev * _cur < 0.0) {{
+                        \\            const _frac = _prev / (_prev - _cur);
+                        \\            inst._{s}_{d}_time = inst._sim_t_prev + _frac * _dt;
+                        \\        }}
+                        \\        inst._{s}_{d}_prev = _cur;
+                        \\    }}
+                        \\
+                    , .{
+                        tag, op.index, tag, op.index,
+                        tag, op.index, tag, op.index,
+                    });
+                },
+                .idtmod => {
+                    // Circular integrator: integrate input * dt, wrap by modulus.
+                    try self.w().print(
+                        \\    {{
+                        \\        const _input = inst._{s}_{d}_args[0];
+                        \\        const _modulus = inst._{s}_{d}_args[2];
+                        \\        const _offset = inst._{s}_{d}_args[3];
+                        \\        inst._{s}_{d}_val += _input * _dt;
+                        \\        if (_modulus > 0.0) {{
+                        \\            inst._{s}_{d}_val = @mod(inst._{s}_{d}_val - _offset, _modulus) + _offset;
+                        \\        }}
+                        \\    }}
+                        \\
+                    , .{
+                        tag, op.index, tag, op.index, tag, op.index,
+                        tag, op.index, tag, op.index, tag, op.index,
+                    });
+                },
+                .absdelay => {
+                    // Ring-buffer delay line: write input, read delayed sample.
+                    try self.w().print(
+                        \\    {{
+                        \\        const _td = inst._{s}_{d}_args[1];
+                        \\        const _widx = inst._{s}_{d}_buf_idx % 64;
+                        \\        inst._{s}_{d}_buf[_widx] = inst._{s}_{d}_args[0];
+                        \\        inst._{s}_{d}_buf_idx +%= 1;
+                        \\        const _delay_samples: u32 = @intFromFloat(@max(1.0, @min(63.0, _td / @max(_dt, 1e-30))));
+                        \\        const _ridx = (inst._{s}_{d}_buf_idx -% _delay_samples) % 64;
+                        \\        inst._{s}_{d}_val = inst._{s}_{d}_buf[_ridx];
+                        \\    }}
+                        \\
+                    , .{
+                        // 8 pairs for absdelay template
+                        tag, op.index, tag, op.index, tag, op.index,
+                        tag, op.index, tag, op.index, tag, op.index,
+                        tag, op.index, tag, op.index,
+                    });
+                },
+                .laplace_nd, .laplace_np, .laplace_zd, .laplace_zp,
+                .zi_nd, .zi_np, .zi_zd, .zi_zp,
+                => {
+                    try self.emitFilterUpdateState(op);
+                },
+                .cross => {
+                    // Detect zero crossing by sign change.
+                    try self.w().print(
+                        \\    {{
+                        \\        const _cur = inst._{s}_{d}_args[0];
+                        \\        const _prev = inst._{s}_{d}_prev;
+                        \\        inst._{s}_{d}_fired = if (_prev * _cur < 0.0 or (_prev == 0.0 and _cur != 0.0)) 1.0 else 0.0;
                         \\        inst._{s}_{d}_prev = _cur;
                         \\    }}
                         \\
                     , .{ tag, op.index, tag, op.index, tag, op.index, tag, op.index });
                 },
-                .idtmod => {
-                    // Circular integrator: accumulate input, wrap by modulus.
-                    // ponytail: needs dt for real integration. Currently accumulates
-                    // the raw input value (correct at DC where idt=0).
+                .above => {
+                    // Fire when expression crosses zero from below, or is positive at init.
                     try self.w().print(
-                        "    inst._{s}_{d}_val = inst._{s}_{d}_input;\n", .{ tag, op.index, tag, op.index });
+                        \\    {{
+                        \\        const _cur = inst._{s}_{d}_args[0];
+                        \\        const _prev = inst._{s}_{d}_prev;
+                        \\        inst._{s}_{d}_fired = if ((_prev <= 0.0 and _cur > 0.0) or (state.step == 0 and _cur > 0.0)) 1.0 else 0.0;
+                        \\        inst._{s}_{d}_prev = _cur;
+                        \\    }}
+                        \\
+                    , .{ tag, op.index, tag, op.index, tag, op.index, tag, op.index });
                 },
-                .laplace_nd, .laplace_np, .laplace_zd, .laplace_zp,
-                .zi_nd, .zi_np, .zi_zd, .zi_zp,
-                => {
-                    // Transfer function filter: DC passthrough (H(0) * input).
-                    // ponytail: state-space equations need dt. DC gain is assumed unity;
-                    // real H(0) computation from coefficients requires array access.
+                .timer => {
+                    // Fire at start_time and every period thereafter using sim time.
                     try self.w().print(
-                        "    inst._{s}_{d}_val = inst._{s}_{d}_input;\n", .{ tag, op.index, tag, op.index });
+                        \\    {{
+                        \\        const _t_now = inst._sim_t;
+                        \\        const _start = inst._{s}_{d}_args[0];
+                        \\        const _period = inst._{s}_{d}_args[1];
+                        \\        if (_period > 0.0 and inst._{s}_{d}_next > 0.0 and _t_now >= inst._{s}_{d}_next) {{
+                        \\            inst._{s}_{d}_fired = 1.0;
+                        \\            inst._{s}_{d}_next = inst._{s}_{d}_next + _period;
+                        \\        }} else if (_t_now >= _start and inst._{s}_{d}_next == 0.0) {{
+                        \\            inst._{s}_{d}_fired = 1.0;
+                        \\            inst._{s}_{d}_next = _start + _period;
+                        \\        }} else {{
+                        \\            inst._{s}_{d}_fired = 0.0;
+                        \\        }}
+                        \\    }}
+                        \\
+                    , .{
+                        // 11 pairs for timer template
+                        tag, op.index, tag, op.index, tag, op.index,
+                        tag, op.index, tag, op.index, tag, op.index,
+                        tag, op.index, tag, op.index, tag, op.index,
+                        tag, op.index, tag, op.index,
+                    });
                 },
-                else => {},
             }
         }
         try self.w().writeAll(
@@ -1319,6 +1529,103 @@ const Codegen = struct {
             \\}
             \\
         );
+    }
+
+    /// Emit state-space update equations for Laplace/Z-transform filter operators.
+    /// Uses coefficients extracted at scan time from AnalogOpInfo.
+    fn emitFilterUpdateState(self: *Codegen, op: AnalogOpInfo) !void {
+        const tag = @tagName(op.kind);
+        const is_zi = switch (op.kind) {
+            .zi_nd, .zi_np, .zi_zd, .zi_zp => true,
+            else => false,
+        };
+
+        // If no coefficients were extracted (non-constant arrays), DC passthrough.
+        if (op.den_len == 0) {
+            try self.w().print(
+                "    inst._{s}_{d}_val = inst._{s}_{d}_args[0];\n",
+                .{ tag, op.index, tag, op.index },
+            );
+            return;
+        }
+
+        try self.w().print("    {{\n", .{});
+        try self.w().print("        const _u = inst._{s}_{d}_args[0];\n", .{ tag, op.index });
+
+        if (is_zi) {
+            // Z-transform: direct difference equation
+            // H(z) = N(z)/D(z) = (n0 + n1*z^-1 + ...) / (d0 + d1*z^-1 + ...)
+            // d0*y[k] = n0*u[k] + n1*u[k-1] + ... - d1*y[k-1] - d2*y[k-2] - ...
+            // State _x stores past values: x[0]=u[k-1], x[1]=u[k-2], x[2]=y[k-1], x[3]=y[k-2]
+            const d0 = op.den_coeffs[0];
+            if (d0 == 0) {
+                try self.w().print("        inst._{s}_{d}_val = _u;\n", .{ tag, op.index });
+            } else {
+                try self.w().writeAll("        var _acc: f64 = ");
+                // Numerator terms
+                if (op.num_len > 0) {
+                    try self.w().print("{e} * _u", .{op.num_coeffs[0]});
+                } else {
+                    try self.w().writeAll("_u");
+                }
+                if (op.num_len > 1) {
+                    try self.w().print(" + {e} * inst._{s}_{d}_x[0]", .{ op.num_coeffs[1], tag, op.index });
+                }
+                if (op.num_len > 2) {
+                    try self.w().print(" + {e} * inst._{s}_{d}_x[1]", .{ op.num_coeffs[2], tag, op.index });
+                }
+                // Denominator feedback terms
+                if (op.den_len > 1) {
+                    try self.w().print(" - {e} * inst._{s}_{d}_x[2]", .{ op.den_coeffs[1], tag, op.index });
+                }
+                if (op.den_len > 2) {
+                    try self.w().print(" - {e} * inst._{s}_{d}_x[3]", .{ op.den_coeffs[2], tag, op.index });
+                }
+                try self.w().writeAll(";\n");
+                try self.w().print("        _acc /= {e};\n", .{d0});
+                // Shift state: x[1]=x[0], x[0]=u, x[3]=x[2], x[2]=y
+                try self.w().print("        inst._{s}_{d}_x[1] = inst._{s}_{d}_x[0];\n", .{ tag, op.index, tag, op.index });
+                try self.w().print("        inst._{s}_{d}_x[0] = _u;\n", .{ tag, op.index });
+                try self.w().print("        inst._{s}_{d}_x[3] = inst._{s}_{d}_x[2];\n", .{ tag, op.index, tag, op.index });
+                try self.w().print("        inst._{s}_{d}_x[2] = _acc;\n", .{ tag, op.index });
+                try self.w().print("        inst._{s}_{d}_val = _acc;\n", .{ tag, op.index });
+            }
+        } else {
+            // Laplace s-domain: backward Euler discretization
+            // H(s) = N(s)/D(s)
+            // First-order: H(s) = (n0 + n1*s) / (d0 + d1*s)
+            //   Backward Euler s ≈ (1 - z^-1)/dt:
+            //   y[k] = (n0*dt*u[k] + n1*u[k] + (d1 - n1)*y[k-1] / dt) / (d0*dt + d1) ... nah
+            // Simpler: state-space x' = A*x + B*u, y = C*x + D*u
+            //   1st order: A=-d0/d1, B=1/d1, C=n0-n1*d0/d1, D=n1/d1
+            //   Backward Euler: x[k] = (x[k-1] + dt*B*u) / (1 - dt*A)
+            if (op.den_len == 1) {
+                // Zero-order: H(s) = n0/d0, pure gain
+                const gain = if (op.num_len > 0) op.num_coeffs[0] / op.den_coeffs[0] else 1.0;
+                try self.w().print("        inst._{s}_{d}_val = {e} * _u;\n", .{ tag, op.index, gain });
+            } else if (op.den_len >= 2) {
+                // First-order (or higher — approximate as first-order using d0, d1 only)
+                const d0 = op.den_coeffs[0];
+                const d1 = op.den_coeffs[1];
+                const n0 = if (op.num_len > 0) op.num_coeffs[0] else 1.0;
+                const n1 = if (op.num_len > 1) op.num_coeffs[1] else 0.0;
+                // State-space: A = -d0/d1, B = 1/d1
+                // C = n0 - n1*d0/d1, D = n1/d1
+                const A = -d0 / d1;
+                const B = 1.0 / d1;
+                const C = n0 - n1 * d0 / d1;
+                const D = n1 / d1;
+                // Backward Euler: x[k] = (x[k-1] + dt*B*u) / (1 - dt*A)
+                // y[k] = C*x[k] + D*u
+                try self.w().print("        const _x_prev = inst._{s}_{d}_x[0];\n", .{ tag, op.index });
+                try self.w().print("        const _x_new = (_x_prev + _dt * {e} * _u) / (1.0 - _dt * {e});\n", .{ B, A });
+                try self.w().print("        inst._{s}_{d}_x[0] = _x_new;\n", .{ tag, op.index });
+                try self.w().print("        inst._{s}_{d}_val = {e} * _x_new + {e} * _u;\n", .{ tag, op.index, C, D });
+            } else {
+                try self.w().print("        inst._{s}_{d}_val = _u;\n", .{ tag, op.index });
+            }
+        }
+        try self.w().print("    }}\n", .{});
     }
 
     fn emitValueRef(self: *Codegen, val: Value) !void {

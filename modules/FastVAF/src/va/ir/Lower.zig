@@ -1468,6 +1468,10 @@ fn lowerFuncCall(self: *Lower, name: []const u8, args: []const Ast.ExprId) !Valu
         return self.inlineUserFunc(fd, args);
     }
 
+    // Laplace/Z-transform filters: flatten array args into individual MIR
+    // constants so codegen can extract coefficients for state-space equations.
+    if (isFilterCall(name)) return self.emitFilterCall(name, args);
+
     return self.emitGenericCall(name, args);
 }
 
@@ -1553,6 +1557,65 @@ fn emitGenericCall(self: *Lower, name: []const u8, args: []const Ast.ExprId) !Va
     for (args, 0..) |aid, i| vals[i] = try self.lowerExpr(aid);
     const func_ref = try self.getOrCreateFuncRef(name);
     return self.builder.buildCall(func_ref, vals);
+}
+
+fn isFilterCall(name: []const u8) bool {
+    const filter_names = [_][]const u8{
+        "laplace_nd", "laplace_np", "laplace_zd", "laplace_zp",
+        "zi_nd", "zi_np", "zi_zd", "zi_zp",
+    };
+    for (filter_names) |f| {
+        if (std.mem.eql(u8, name, f)) return true;
+    }
+    return false;
+}
+
+/// Flatten a Laplace/Z-transform filter call: lower the input expr normally,
+/// then extract constant elements from each array arg and emit them as
+/// individual f64 constants. MIR call args become:
+///   [input, n_len, n0, n1, ..., d_len, d0, d1, ..., (T for zi_*)]
+/// Codegen reads n_len/d_len to find the coefficient boundaries.
+fn emitFilterCall(self: *Lower, name: []const u8, args: []const Ast.ExprId) !Value {
+    // Max: input + 2*(1+8) + T = 20 values (8 coefficients per array max)
+    var vals_buf: [24]Value = undefined;
+    var vi: usize = 0;
+
+    // args[0] = input expression
+    if (args.len >= 1) {
+        vals_buf[vi] = try self.lowerExpr(args[0]);
+        vi += 1;
+    }
+
+    // args[1] = numerator/zeros array, args[2] = denominator/poles array
+    for (1..@min(args.len, 3)) |ai| {
+        const aeid = args[ai];
+        if (aeid.valid() and self.exprTag(aeid) == .array) {
+            const arr_extra = self.exprLhs(aeid);
+            const arr_count = self.exprRhs(aeid);
+            // Emit element count as f64 constant
+            vals_buf[vi] = try self.builder.fconst(@floatFromInt(arr_count));
+            vi += 1;
+            // Emit each element
+            for (0..arr_count) |ei| {
+                const elem_id: Ast.ExprId = @enumFromInt(self.extra_data[arr_extra + ei]);
+                vals_buf[vi] = try self.lowerExpr(elem_id);
+                vi += 1;
+            }
+        } else {
+            // Non-array arg (shouldn't happen per LRM, but be safe)
+            vals_buf[vi] = try self.lowerExpr(aeid);
+            vi += 1;
+        }
+    }
+
+    // args[3] = T (sample period, for zi_* only)
+    if (args.len >= 4) {
+        vals_buf[vi] = try self.lowerExpr(args[3]);
+        vi += 1;
+    }
+
+    const func_ref = try self.getOrCreateFuncRef(name);
+    return self.builder.buildCall(func_ref, vals_buf[0..vi]);
 }
 
 fn lowerNatureAccess(self: *Lower, nature: []const u8, args: []const Ast.ExprId) !Value {

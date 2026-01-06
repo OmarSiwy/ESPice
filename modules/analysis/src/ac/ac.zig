@@ -9,7 +9,6 @@ const FreqSolver = root.solvers.freq_solve.FreqSolver;
 
 pub const Complex = types.Complex;
 
-const W = std.simd.suggestVectorLength(f64) orelse 8;
 
 pub const Options = struct {
     tol: converger.Tolerances = .{},

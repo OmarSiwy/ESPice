@@ -39,7 +39,6 @@ pub fn build(b: *std.Build) void {
 pub const GpuKernelInputs = struct {
     b: *std.Build,
     devices_dep: *std.Build.Dependency,
-    va_mod: *std.Build.Module,
     ptx_rewrite_path: std.Build.LazyPath,
     optimize: std.builtin.OptimizeMode,
 };
@@ -72,16 +71,12 @@ pub fn buildMegaKernelNvidia(inp: GpuKernelInputs) std.Build.LazyPath {
         .optimize = gpu_opt,
         .imports = &.{
             .{ .name = "dev_models", .module = inp.devices_dep.module("devices") },
-            .{ .name = "va_devices", .module = inp.va_mod },
             .{ .name = "gpu_abi", .module = abi_mod },
         },
     });
     nvlink.addFileArg(ctx.add("megakernel", kernel_mod));
 
-    var stub_names: std.ArrayList([]const u8) = .empty;
-    stub_names.appendSlice(b.allocator, listDeviceModels(inp.devices_dep)) catch @panic("OOM");
-    stub_names.append(b.allocator, "") catch @panic("OOM");
-    for (stub_names.items) |name| {
+    for (listDeviceModels(inp.devices_dep)) |name| {
         const sopts = b.addOptions();
         sopts.addOption([]const u8, "model_name", name);
         const stub_mod = b.createModule(.{
@@ -90,12 +85,11 @@ pub fn buildMegaKernelNvidia(inp: GpuKernelInputs) std.Build.LazyPath {
             .optimize = gpu_opt,
             .imports = &.{
                 .{ .name = "dev_models", .module = inp.devices_dep.module("devices") },
-                .{ .name = "va_devices", .module = inp.va_mod },
                 .{ .name = "gpu_abi", .module = abi_mod },
                 .{ .name = "stub_options", .module = sopts.createModule() },
             },
         });
-        nvlink.addFileArg(ctx.add(if (name.len == 0) "arpk_va" else b.fmt("arpk_{s}", .{name}), stub_mod));
+        nvlink.addFileArg(ctx.add(b.fmt("arpk_{s}", .{name}), stub_mod));
     }
     nvlink.addArg("-o");
     return nvlink.addOutputFileArg("megakernel.cubin");
@@ -114,7 +108,6 @@ pub fn buildMegaKernelAmd(inp: GpuKernelInputs) std.Build.LazyPath {
             .optimize = gpu_opt,
             .imports = &.{
                 .{ .name = "dev_models", .module = inp.devices_dep.module("devices") },
-                .{ .name = "va_devices", .module = inp.va_mod },
                 .{ .name = "gpu_abi", .module = abi_mod },
             },
         }),
