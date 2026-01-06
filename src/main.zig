@@ -1,6 +1,6 @@
 const std = @import("std");
 const engine = @import("engine.zig");
-const vaload = @import("vaload.zig");
+const vaload = @import("devices").vaload;
 const rawfile = @import("output/rawfile.zig");
 const ascii_raw = @import("output/ascii_raw.zig");
 const csv = @import("output/csv.zig");
@@ -154,19 +154,25 @@ pub fn main(init: std.process.Init) !u8 {
         // Foreign HDL (.hdl cards): compile + dlopen at runtime (cached by
         // content hash — first load pays a model compile, never again).
         // Relative paths resolve against the netlist file's dir (HSPICE).
-        for (nl.foreign) |f| switch (f.kind) {
-            .verilog_a, .verilog => {
-                const hdl_path = if (std.fs.path.isAbsolute(f.path))
-                    f.path
-                else
-                    try std.fs.path.join(arena, &.{ std.fs.path.dirname(path) orelse ".", f.path });
-                vaload.ensureLoaded(arena, io, hdl_path) catch |e| {
-                    std.debug.print("Error: '{s}': runtime HDL load failed: {s}\n", .{ hdl_path, @errorName(e) });
-                    return skip(io, "hdl load error");
-                };
-            },
-            else => {},
-        };
+        // Multiple files load in parallel (codegen + zig-build concurrent).
+        {
+            var hdl_paths: std.ArrayList([]const u8) = .empty;
+            defer hdl_paths.deinit(arena);
+            for (nl.foreign) |f| switch (f.kind) {
+                .verilog_a, .verilog => {
+                    const hdl_path = if (std.fs.path.isAbsolute(f.path))
+                        f.path
+                    else
+                        try std.fs.path.join(arena, &.{ std.fs.path.dirname(path) orelse ".", f.path });
+                    try hdl_paths.append(arena, hdl_path);
+                },
+                else => {},
+            };
+            vaload.ensureAllLoaded(arena, io, hdl_paths.items) catch |e| {
+                std.debug.print("Error: runtime HDL load failed: {s}\n", .{@errorName(e)});
+                return skip(io, "hdl load error");
+            };
+        }
 
         if (opts.mode == .batch) {
             var sim = engine.Simulation.fromNetlist(arena, nl, io, .{ .gpu = opts.gpu }) catch |e| {

@@ -125,3 +125,34 @@ pub fn kindId(comptime D: type) u32 {
 pub fn alignUp(x: usize, comptime a: usize) usize {
     return (x + a - 1) & ~@as(usize, a - 1);
 }
+
+// ---------------------------------------------------------------------------
+// Batch dispatch — N independent Newton lanes in one cooperative launch
+// ---------------------------------------------------------------------------
+
+/// Uploaded once per batch dispatch (small args buffer, NOT in the main blob).
+/// The kernel reads this to determine lane geometry.
+pub const BatchLaunchHeader = extern struct {
+    n_lanes: u32,
+    blocks_per_lane: u32,
+    /// Byte offset where the shared prefix ends and per-lane regions start.
+    shared_size: u32,
+    /// Byte stride between consecutive lanes' regions.
+    lane_stride: u32,
+};
+
+/// Per-lane workspace size in f64 slots — uses blocks_per_lane for the
+/// reduction partials instead of max_blocks, saving ~8 KB/lane.
+pub fn wsF64CountLane(n: usize, m: usize, bpl: usize) usize {
+    return (m + 1) * n + (m + 1) * m + m + m + (m + 1) + m + 7 * n + (n + 1) +
+        3 * n + 4 * (n + 1) + 16 +
+        16 + bpl + 1;
+}
+
+/// Per-lane region size in bytes: x + result + workspace + (lim_x appended by packer).
+pub fn laneBaseBytes(n: usize, m: usize, bpl: usize) usize {
+    const x_bytes = n * 8;
+    const result_bytes = alignUp(@sizeOf(ResultHeader), 8);
+    const ws_bytes = wsF64CountLane(n, m, bpl) * 8;
+    return alignUp(x_bytes + result_bytes + ws_bytes, 8);
+}

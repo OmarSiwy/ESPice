@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chapter 11: Compiler Directives - Verilog-A LRM 2.4.0 Reference</title>
+<style>
+body { font-family: 'Segoe UI', system-ui, sans-serif; max-width: 900px; margin: 0 auto; padding: 2rem; background: #fafafa; color: #1a1a1a; line-height: 1.6; }
+h1 { border-bottom: 3px solid #2563eb; padding-bottom: 0.5rem; }
+h2 { color: #1e40af; margin-top: 2rem; border-bottom: 1px solid #ddd; padding-bottom: 0.3rem; }
+h3 { color: #374151; }
+code { background: #e5e7eb; padding: 0.15rem 0.4rem; border-radius: 3px; font-size: 0.9em; }
+pre { background: #1e293b; color: #e2e8f0; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; }
+pre code { background: none; padding: 0; color: inherit; }
+table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+th, td { border: 1px solid #d1d5db; padding: 0.5rem 0.75rem; text-align: left; }
+th { background: #2563eb; color: white; }
+tr:nth-child(even) { background: #f3f4f6; }
+.syntax { background: #fffbeb; border-left: 4px solid #f59e0b; padding: 1rem; margin: 1rem 0; font-family: monospace; white-space: pre-wrap; }
+.note { background: #eff6ff; border-left: 4px solid #2563eb; padding: 0.75rem 1rem; margin: 1rem 0; }
+nav { background: #1e293b; padding: 1rem; border-radius: 6px; margin-bottom: 2rem; }
+nav a { color: #93c5fd; text-decoration: none; margin-right: 1rem; }
+nav a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+
+<nav>
+<a href="index.html">Index</a>
+<a href="ch2-lexical.html">Ch2 Lexical</a>
+<a href="ch3-datatypes.html">Ch3 Data Types</a>
+<a href="ch4-expressions.html">Ch4 Expressions</a>
+<a href="ch5-analog.html">Ch5 Analog</a>
+<a href="ch6-hierarchy.html">Ch6 Hierarchy</a>
+<a href="ch7-mixed-signal.html">Ch7 Mixed-Signal</a>
+<a href="ch8-scheduling.html">Ch8 Scheduling</a>
+<a href="ch9-system.html">Ch9 System</a>
+<a href="ch10-connectmodules.html">Ch10 Directives</a>
+<a href="ch11-directives.html">Ch11 Directives Ext</a>
+</nav>
+
+<h1>Chapter 11: Compiler Directives</h1>
+
+<p>Compiler directives control the behavior of the compiler through the source text. All compiler directives are prefixed with the grave accent character (<code>`</code>). A compiler directive takes effect from the point where it appears in the source text until another directive overrides it, or until the end of all source files, unless it is a point directive (such as <code>`include</code>).</p>
+
+<p>Compiler directives are not scoped by modules or other design elements. They apply globally from the point of occurrence through all subsequent source text in compilation order.</p>
+
+<h2>11.1 <code>`define</code> and <code>`undef</code></h2>
+
+<h3>11.1.1 <code>`define</code></h3>
+
+<p>The <code>`define</code> directive creates a text macro. Once defined, the macro name can be used anywhere in the source text and shall be replaced by the macro text.</p>
+
+<pre class="syntax">compiler_directive ::=
+    `define text_macro_definition
+
+text_macro_definition ::=
+    text_macro_name macro_text
+
+text_macro_name ::=
+    text_macro_identifier [ ( list_of_formal_arguments ) ]
+
+list_of_formal_arguments ::=
+    formal_argument_identifier { , formal_argument_identifier }
+
+text_macro_identifier ::=
+    identifier</pre>
+
+<p>The macro text starts after the first whitespace following the macro name (or the closing parenthesis for macros with arguments) and continues to the end of the line. A backslash (<code>\</code>) at the end of a line indicates that the macro text continues on the next line.</p>
+
+<pre><code>`define SIZE 8
+`define BYTE_RANGE [`SIZE-1:0]
+</code></pre>
+
+<h4>Multi-line Macros</h4>
+
+<p>A macro definition may span multiple lines by escaping the newline with a backslash (<code>\</code>). The backslash-newline pair is replaced by nothing (the lines are concatenated).</p>
+
+<pre><code>`define RESISTOR(name, p, n, r) \
+    analog begin \
+        I(p, n) &lt;+ V(p, n) / r; \
+    end
+</code></pre>
+
+<h4>Macros with Arguments</h4>
+
+<p>A text macro may be defined with formal arguments. The number of formal arguments and actual arguments shall be the same. Actual arguments are substituted for formal arguments during macro expansion.</p>
+
+<pre class="syntax">text_macro_usage ::=
+    `text_macro_identifier [ ( list_of_actual_arguments ) ]
+
+list_of_actual_arguments ::=
+    actual_argument { , actual_argument }
+
+actual_argument ::=
+    expression</pre>
+
+<pre><code>`define MAX(a, b) ((a) &gt; (b) ? (a) : (b))
+`define CLAMP(val, lo, hi) `MAX(lo, ((val) &lt; (hi) ? (val) : (hi)))
+
+y = `MAX(x, threshold);
+</code></pre>
+
+<p>The left parenthesis of the formal argument list shall follow the macro name with no intervening whitespace. If whitespace separates the macro name from a left parenthesis, the parenthesis is treated as part of the macro text, not as a formal argument list.</p>
+
+<div class="note">
+<p>A text macro name can be used to represent any part of the source description, but a macro definition shall not split a lexical token across the boundary of the definition. Once defined, a text macro can be used anywhere in the source text, including in other macro definitions.</p>
+</div>
+
+<h4>Predefined Macros</h4>
+
+<table>
+<tr><th>Macro</th><th>Description</th></tr>
+<tr><td><code>`__LINE__</code></td><td>Integer: current source line number.</td></tr>
+<tr><td><code>`__FILE__</code></td><td>String: current source file name.</td></tr>
+</table>
+
+<h3>11.1.2 <code>`undef</code></h3>
+
+<p>The <code>`undef</code> directive undefines a previously defined text macro. After <code>`undef</code>, the macro name is no longer recognized as a macro and any attempt to use it shall be treated as an error (unless it is subsequently redefined).</p>
+
+<pre class="syntax">compiler_directive ::=
+    `undef text_macro_identifier</pre>
+
+<pre><code>`define VERBOSE
+// ... code using `VERBOSE ...
+`undef VERBOSE
+</code></pre>
+
+<p>It is not an error to <code>`undef</code> a macro that has not been defined.</p>
+
+<h2>11.2 Conditional Compilation: <code>`ifdef</code>, <code>`ifndef</code>, <code>`else</code>, <code>`elsif</code>, <code>`endif</code></h2>
+
+<p>Conditional compilation directives control which portions of source text are compiled. The source text within a false branch is not compiled and has no effect on the simulation.</p>
+
+<pre class="syntax">ifdef_directive ::=
+    `ifdef text_macro_identifier
+        ifdef_group_of_lines
+    { `elsif text_macro_identifier
+        elsif_group_of_lines }
+    [ `else
+        else_group_of_lines ]
+    `endif
+
+ifndef_directive ::=
+    `ifndef text_macro_identifier
+        ifdef_group_of_lines
+    { `elsif text_macro_identifier
+        elsif_group_of_lines }
+    [ `else
+        else_group_of_lines ]
+    `endif</pre>
+
+<p><code>`ifdef</code> tests whether a macro has been defined (by <code>`define</code> and not subsequently <code>`undef</code>'d). <code>`ifndef</code> tests whether a macro has <em>not</em> been defined. The branches are mutually exclusive.</p>
+
+<pre><code>`ifdef DETAILED_MODEL
+    // Detailed model equations
+    I(p, n) &lt;+ is * (limexp(V(p, n) / ($vt * n)) - 1.0);
+`elsif SIMPLE_MODEL
+    // Simplified model
+    I(p, n) &lt;+ V(p, n) / R;
+`else
+    // Default model
+    I(p, n) &lt;+ gm * V(p, n);
+`endif
+</code></pre>
+
+<p>Conditional compilation directives may be nested. Each <code>`ifdef</code> or <code>`ifndef</code> shall be matched with a corresponding <code>`endif</code>. An <code>`elsif</code> or <code>`else</code> always belongs to the nearest preceding unmatched <code>`ifdef</code> or <code>`ifndef</code>.</p>
+
+<pre><code>`ifndef OVERRIDE_TEMP
+    `define TEMP 300.15
+`endif
+
+`ifdef HIGH_VOLTAGE
+    `ifdef THERMAL
+        // High-voltage thermal model
+    `else
+        // High-voltage isothermal model
+    `endif
+`else
+    // Standard model
+`endif
+</code></pre>
+
+<h2>11.3 <code>`include</code></h2>
+
+<p>The <code>`include</code> directive inserts the entire contents of another source file at the point of the directive. The included file is processed as if its contents replaced the <code>`include</code> directive.</p>
+
+<pre class="syntax">include_directive ::=
+    `include "filename"</pre>
+
+<p>The filename is specified as a string enclosed in double quotes. The mechanism for locating the file is implementation-defined, but typically includes searching the current directory and any directories specified by tool-specific options.</p>
+
+<pre><code>`include "disciplines.vams"
+`include "constants.vams"
+
+module resistor(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real r = 1.0;
+    analog
+        I(p, n) &lt;+ V(p, n) / r;
+endmodule
+</code></pre>
+
+<p><code>`include</code> directives may be nested: an included file may itself contain <code>`include</code> directives. Recursive inclusion (a file including itself, directly or indirectly) results in undefined behavior.</p>
+
+<div class="note">
+<p>The files <code>disciplines.vams</code> and <code>constants.vams</code> are standard include files defined by the Verilog-AMS LRM. <code>disciplines.vams</code> defines commonly used natures and disciplines. <code>constants.vams</code> defines physical and mathematical constants as macros.</p>
+</div>
+
+<h2>11.4 <code>`resetall</code></h2>
+
+<p>The <code>`resetall</code> directive resets all compiler directives to their default values. It causes all compiler directives, including text macros and the default discipline, to be reset.</p>
+
+<pre class="syntax">resetall_directive ::=
+    `resetall</pre>
+
+<pre><code>`resetall
+
+module mymod(p, n);
+    // All directives now at defaults
+endmodule
+</code></pre>
+
+<p>The <code>`resetall</code> directive shall be specified outside any design element (module, nature, discipline, etc.). It is recommended to place <code>`resetall</code> at the beginning of each source file so that the compilation of each file is independent of the compilation order and other source files.</p>
+
+<h2>11.5 <code>`default_discipline</code></h2>
+
+<p>The <code>`default_discipline</code> directive sets the default discipline for all undeclared nets in modules that follow the directive.</p>
+
+<pre class="syntax">default_discipline_directive ::=
+    `default_discipline discipline_identifier</pre>
+
+<p>When a net is implicitly declared (by appearing in a port list or connection without an explicit type declaration), the discipline assigned to that net is determined by <code>`default_discipline</code>. If no <code>`default_discipline</code> is in effect, the default net type (from <code>`default_nettype</code> or the default <code>wire</code>) is used for implicit net declarations.</p>
+
+<pre><code>`include "disciplines.vams"
+`default_discipline electrical
+
+module resistor(p, n);
+    inout p, n;
+    // p and n are implicitly 'electrical' discipline
+    parameter real r = 1.0;
+    analog
+        I(p, n) &lt;+ V(p, n) / r;
+endmodule
+</code></pre>
+
+<p>The scope of <code>`default_discipline</code> extends from the point of the directive until another <code>`default_discipline</code> directive, a <code>`resetall</code> directive, or the end of all source text.</p>
+
+<h2>11.6 <code>`default_transition</code></h2>
+
+<p>The <code>`default_transition</code> directive sets a default transition time for analog signals. When specified, analog operators that produce discontinuous output (such as direct contribution statements that change abruptly) shall apply a transition with the specified time.</p>
+
+<pre class="syntax">default_transition_directive ::=
+    `default_transition transition_time</pre>
+
+<p>The <code>transition_time</code> shall be a non-negative real number specifying the default transition time in seconds.</p>
+
+<pre><code>`default_transition 10n
+
+module dac_1bit(out, in);
+    output out;
+    input in;
+    electrical out, in;
+    parameter real vhi = 1.0;
+    parameter real vlo = 0.0;
+    analog begin
+        // The transition filter will use 10ns as default rise/fall time
+        V(out) &lt;+ transition(V(in) &gt; 0.5 ? vhi : vlo);
+    end
+endmodule
+</code></pre>
+
+<p>If a <code>transition</code> filter call explicitly specifies its own transition times, those explicit values override the default. If no <code>`default_transition</code> is in effect and no transition time is specified in the filter call, the transition time is 0 (i.e., an ideal step).</p>
+
+<p>The scope of <code>`default_transition</code> extends from the point of the directive until another <code>`default_transition</code> directive, a <code>`resetall</code> directive, or the end of all source text.</p>
+
+<h2>11.7 <code>`default_nettype</code></h2>
+
+<p>The <code>`default_nettype</code> directive specifies the net type for implicitly declared nets.</p>
+
+<pre class="syntax">default_nettype_directive ::=
+    `default_nettype net_type_or_none
+
+net_type_or_none ::=
+    wire | tri | tri0 | tri1 | wand | triand | wor | trior | trireg | none</pre>
+
+<p>When <code>`default_nettype none</code> is specified, all nets must be explicitly declared. Any implicit net declaration is an error.</p>
+
+<pre><code>`default_nettype none
+</code></pre>
+
+<p>The default net type before any <code>`default_nettype</code> directive is <code>wire</code>. The scope of this directive extends until another <code>`default_nettype</code> directive, a <code>`resetall</code> directive, or the end of all source text.</p>
+
+<h2>11.8 <code>`begin_keywords</code> and <code>`end_keywords</code></h2>
+
+<p>The <code>`begin_keywords</code> directive specifies which set of keywords to recognize. This provides a mechanism for backward compatibility and forward compatibility of source files.</p>
+
+<pre class="syntax">begin_keywords_directive ::=
+    `begin_keywords "version_specifier"
+
+end_keywords_directive ::=
+    `end_keywords</pre>
+
+<p>The <code>version_specifier</code> is a string that identifies the set of keywords. Valid version specifiers include:</p>
+
+<table>
+<tr><th>Version Specifier</th><th>Description</th></tr>
+<tr><td><code>"1364-1995"</code></td><td>Verilog IEEE Std 1364-1995 keywords</td></tr>
+<tr><td><code>"1364-2001"</code></td><td>Verilog IEEE Std 1364-2001 keywords</td></tr>
+<tr><td><code>"1364-2001-noconfig"</code></td><td>Verilog IEEE Std 1364-2001 keywords without configuration keywords</td></tr>
+<tr><td><code>"1364-2005"</code></td><td>Verilog IEEE Std 1364-2005 keywords</td></tr>
+<tr><td><code>"VAMS-2.4"</code></td><td>Verilog-AMS LRM 2.4 keywords</td></tr>
+</table>
+
+<pre><code>`begin_keywords "1364-2005"
+
+module mymod(input wire a, output wire b);
+    // Uses 1364-2005 keyword set
+endmodule
+
+`end_keywords
+</code></pre>
+
+<p>The <code>`begin_keywords</code> / <code>`end_keywords</code> directives shall be paired and shall not be nested. They shall appear outside any design element. Words that are keywords in the specified version set are reserved; words that are not keywords in that set are available as identifiers.</p>
+
+<h2>11.9 <code>`timescale</code></h2>
+
+<p>The <code>`timescale</code> directive specifies the time unit and time precision for the modules that follow it.</p>
+
+<pre class="syntax">timescale_directive ::=
+    `timescale time_unit / time_precision
+
+time_unit ::=
+    magnitude unit
+
+time_precision ::=
+    magnitude unit
+
+magnitude ::=
+    1 | 10 | 100
+
+unit ::=
+    s | ms | us | ns | ps | fs</pre>
+
+<p>The <code>time_unit</code> specifies the unit of measurement for time values and delays. The <code>time_precision</code> specifies the precision to which time values are rounded. The time precision shall be at least as precise as the time unit (i.e., the precision value shall be less than or equal to the unit value).</p>
+
+<pre><code>`timescale 1ns / 1ps
+</code></pre>
+
+<table>
+<tr><th>Unit</th><th>Value</th></tr>
+<tr><td><code>s</code></td><td>1 second</td></tr>
+<tr><td><code>ms</code></td><td>10<sup>-3</sup> seconds</td></tr>
+<tr><td><code>us</code></td><td>10<sup>-6</sup> seconds</td></tr>
+<tr><td><code>ns</code></td><td>10<sup>-9</sup> seconds</td></tr>
+<tr><td><code>ps</code></td><td>10<sup>-12</sup> seconds</td></tr>
+<tr><td><code>fs</code></td><td>10<sup>-15</sup> seconds</td></tr>
+</table>
+
+<div class="note">
+<p>In Verilog-A, the <code>`timescale</code> directive primarily affects the interpretation of delay values and the <code>$realtime</code> system function. Analog modules typically use SI units for time via access functions and analysis functions, independent of <code>`timescale</code>.</p>
+</div>
+
+<h2>11.10 <code>`pragma</code></h2>
+
+<p>The <code>`pragma</code> directive passes implementation-specific information to the compiler. Pragmas that are not recognized by a compiler shall be ignored.</p>
+
+<pre class="syntax">pragma_directive ::=
+    `pragma pragma_name [ pragma_expression { , pragma_expression } ]
+
+pragma_expression ::=
+    pragma_value
+    | pragma_name = pragma_value
+
+pragma_value ::=
+    ( pragma_expression { , pragma_expression } )
+    | number
+    | string_literal
+    | identifier</pre>
+
+<pre><code>`pragma protect begin_protected
+`pragma protect end_protected
+`pragma reset
+</code></pre>
+
+<p>The interpretation of pragmas is entirely implementation-defined. A compiler that does not understand a particular pragma shall ignore it without issuing an error.</p>
+
+<h2>11.11 <code>`line</code></h2>
+
+<p>The <code>`line</code> directive specifies the original source file line number and file name, used by preprocessors and code generators to maintain traceability back to the original source.</p>
+
+<pre class="syntax">line_directive ::=
+    `line number "filename" level</pre>
+
+<p>The <code>number</code> is the line number for the next line. The <code>filename</code> is the source file name. The <code>level</code> is 0, 1, or 2: 0 indicates neither entering nor leaving an included file; 1 indicates entering an included file; 2 indicates leaving an included file.</p>
+
+<pre><code>`line 55 "originalfile.va" 0
+</code></pre>
+
+<h2>11.12 <code>`unconnected_drive</code> and <code>`nounconnected_drive</code></h2>
+
+<p>The <code>`unconnected_drive</code> directive specifies the default value for unconnected input ports.</p>
+
+<pre class="syntax">unconnected_drive_directive ::=
+    `unconnected_drive pull1
+    | `unconnected_drive pull0
+
+nounconnected_drive_directive ::=
+    `nounconnected_drive</pre>
+
+<p><code>`unconnected_drive pull1</code> causes unconnected input ports to be pulled up. <code>`unconnected_drive pull0</code> causes unconnected input ports to be pulled down. <code>`nounconnected_drive</code> cancels the effect of <code>`unconnected_drive</code>.</p>
+
+<div class="note">
+<p>These directives primarily apply to digital net types. In pure Verilog-A analog modules, unconnected ports behave according to the discipline's default (e.g., floating nodes in the electrical discipline).</p>
+</div>
+
+<h2>11.13 <code>`celldefine</code> and <code>`endcelldefine</code></h2>
+
+<p>The <code>`celldefine</code> directive tags module definitions as cell modules. Cell modules may receive special treatment from certain tools (e.g., for delay calculation or timing analysis).</p>
+
+<pre class="syntax">celldefine_directive ::=
+    `celldefine
+
+endcelldefine_directive ::=
+    `endcelldefine</pre>
+
+<pre><code>`celldefine
+module AND2(out, a, b);
+    output out;
+    input a, b;
+    // ...
+endmodule
+`endcelldefine
+</code></pre>
+
+<p>The <code>`celldefine</code> and <code>`endcelldefine</code> directives shall bracket module definitions. They shall appear outside module definitions.</p>
+
+<h2>11.14 Summary of All Compiler Directives</h2>
+
+<table>
+<tr><th>Directive</th><th>Section</th><th>Description</th></tr>
+<tr><td><code>`define</code></td><td>11.1</td><td>Define a text macro (with optional arguments and multi-line support)</td></tr>
+<tr><td><code>`undef</code></td><td>11.1</td><td>Undefine a text macro</td></tr>
+<tr><td><code>`ifdef</code></td><td>11.2</td><td>Conditional compilation: test if macro is defined</td></tr>
+<tr><td><code>`ifndef</code></td><td>11.2</td><td>Conditional compilation: test if macro is not defined</td></tr>
+<tr><td><code>`elsif</code></td><td>11.2</td><td>Conditional compilation: else-if branch</td></tr>
+<tr><td><code>`else</code></td><td>11.2</td><td>Conditional compilation: else branch</td></tr>
+<tr><td><code>`endif</code></td><td>11.2</td><td>Conditional compilation: end of conditional block</td></tr>
+<tr><td><code>`include</code></td><td>11.3</td><td>Include another source file</td></tr>
+<tr><td><code>`resetall</code></td><td>11.4</td><td>Reset all directives to defaults</td></tr>
+<tr><td><code>`default_discipline</code></td><td>11.5</td><td>Set default discipline for undeclared nets</td></tr>
+<tr><td><code>`default_transition</code></td><td>11.6</td><td>Set default transition time for analog signals</td></tr>
+<tr><td><code>`default_nettype</code></td><td>11.7</td><td>Set default net type for implicit nets</td></tr>
+<tr><td><code>`begin_keywords</code></td><td>11.8</td><td>Specify keyword version set</td></tr>
+<tr><td><code>`end_keywords</code></td><td>11.8</td><td>End keyword version specification</td></tr>
+<tr><td><code>`timescale</code></td><td>11.9</td><td>Set time unit and precision</td></tr>
+<tr><td><code>`pragma</code></td><td>11.10</td><td>Implementation-specific directives</td></tr>
+<tr><td><code>`line</code></td><td>11.11</td><td>Source file and line number control</td></tr>
+<tr><td><code>`unconnected_drive</code></td><td>11.12</td><td>Set default for unconnected input ports</td></tr>
+<tr><td><code>`nounconnected_drive</code></td><td>11.12</td><td>Cancel <code>`unconnected_drive</code></td></tr>
+<tr><td><code>`celldefine</code></td><td>11.13</td><td>Mark module definitions as cell modules</td></tr>
+<tr><td><code>`endcelldefine</code></td><td>11.13</td><td>End cell module marking</td></tr>
+</table>
+
+</body>
+</html>

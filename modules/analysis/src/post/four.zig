@@ -3,11 +3,14 @@
 //! a power of 2, FFT, and read off harmonic magnitudes, phases, and THD.
 const std = @import("std");
 const root = @import("../root.zig");
-const converger = @import("../helper/converger.zig");
+const converger = @import("solvers").converger;
+const types = @import("solvers").types;
+const solvers = @import("solvers");
 const fft_mod = root.solvers.fft;
 const tran = @import("../tran/tran.zig");
 
 const math = std.math;
+const W = std.simd.suggestVectorLength(f64) orelse 8;
 
 pub const Harmonic = struct {
     mag: f64,
@@ -46,14 +49,8 @@ pub fn analyze(waveform: *const tran.Waveform, probe_idx: u32, f_fund: f64, allo
 
     if (t_start < times[0]) return error.InsufficientData;
 
-    // Find the first sample index at or after t_start
-    var start_idx: usize = 0;
-    for (times, 0..) |t, idx| {
-        if (t >= t_start) {
-            start_idx = idx;
-            break;
-        }
-    }
+    // Binary search for the first sample index at or after t_start
+    const start_idx = bsearchGe(times, t_start);
 
     const raw_count = times.len - start_idx;
     if (raw_count < 2) return error.InsufficientData;
@@ -68,11 +65,15 @@ pub fn analyze(waveform: *const tran.Waveform, probe_idx: u32, f_fund: f64, allo
     defer allocator.free(im);
 
     // Linearly interpolate raw_count samples onto n_fft uniform points in [t_start, t_end)
+    const win_times = times[start_idx..];
+    const win_vals = values[start_idx..];
     for (0..n_fft) |k| {
         const t_target = t_start + period * @as(f64, @floatFromInt(k)) / n_fft_f;
-        re[k] = interpolate(times[start_idx..], values[start_idx..], t_target);
-        im[k] = 0;
+        re[k] = interpolate(win_times, win_vals, t_target);
     }
+
+    // Zero imaginary part (SIMD)
+    root.zeroSimd(im);
 
     fft_mod.fft(re, im);
 
@@ -100,8 +101,10 @@ pub fn analyzeBuffer(samples: []const f64, allocator: std.mem.Allocator) !Spectr
         const idx_hi = if (idx_lo + 1 < samples.len) idx_lo + 1 else idx_lo;
         const alpha = frac - @as(f64, @floatFromInt(idx_lo));
         re[k] = samples[idx_lo] * (1.0 - alpha) + samples[idx_hi] * alpha;
-        im[k] = 0;
     }
+
+    // Zero imaginary part (SIMD)
+    root.zeroSimd(im);
 
     fft_mod.fft(re, im);
 
@@ -133,8 +136,16 @@ pub fn solve(
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
     const x_op = ctx.x_op orelse return error.NoOperatingPoint;
-    const x = try a.dupe(f64, x_op);
+    const n = x_op.len;
+
+    const x = try a.alloc(f64, n);
     defer a.free(x);
+    // SIMD copy of operating point
+    const V = @Vector(W, f64);
+    _ = V;
+    var si: usize = 0;
+    while (si + W <= n) : (si += W) x[si..][0..W].* = x_op[si..][0..W].*;
+    while (si < n) : (si += 1) x[si] = x_op[si];
 
     const tran_opts = opts.tran_opts orelse tran.Options{
         .t_stop = 5.0 / opts.f_fundamental,
@@ -173,6 +184,21 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 // Internals
 // ============================================================================
 
+/// Binary search: return index of first element >= target.
+fn bsearchGe(times: []const f64, target: f64) usize {
+    var lo: usize = 0;
+    var hi: usize = times.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        if (times[mid] < target) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo;
+}
+
 fn extractSpectrum(re: []const f64, im: []const f64, n_fft: usize) Spectrum {
     const n_f: f64 = @floatFromInt(n_fft);
     const scale = 2.0 / n_f;
@@ -185,7 +211,7 @@ fn extractSpectrum(re: []const f64, im: []const f64, n_fft: usize) Spectrum {
 
     var harmonics: [9]Harmonic = undefined;
     // Harmonic 1 = fundamental
-    // fft convention: X[1] = (N·A/2)·e^{+jφ} for A·cos(2πf₀t + φ), so the
+    // fft convention: X[1] = (N*A/2)*e^{+j*phi} for A*cos(2*pi*f0*t + phi), so the
     // phase is +atan2 — no negation.
     harmonics[0] = .{
         .mag = fund_mag,
@@ -216,12 +242,13 @@ fn extractSpectrum(re: []const f64, im: []const f64, n_fft: usize) Spectrum {
     };
 }
 
+/// Binary-search + linear interpolation on sorted time/value arrays.
 fn interpolate(times: []const f64, values: []const f64, t: f64) f64 {
-    // Binary search for the interval containing t
     if (times.len == 0) return 0;
     if (t <= times[0]) return values[0];
     if (t >= times[times.len - 1]) return values[values.len - 1];
 
+    // Binary search for the bracketing interval
     var lo: usize = 0;
     var hi: usize = times.len - 1;
     while (hi - lo > 1) {

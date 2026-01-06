@@ -1,10 +1,24 @@
 //! Harmonic Balance: Newton on the spectral residual. Time-domain device
 //! evals (IDFT samples) meet frequency-domain charge terms (j*omega*h*C);
 //! one dense frequency-domain Jacobian per iteration.
+//!
+//! Algorithm (from pss-shooting-harmonic-balance.md §3):
+//!   X = 0  (Fourier coefficients: [dc, cos_1, sin_1, ..., cos_K, sin_K] per node)
+//!   for iter:
+//!     x_td = IDFT(X)                    — 2K+1 time samples per node
+//!     for each sample k: eval(x_td[:,k])  — fills F and analytic G
+//!                         (k==0: capture C)
+//!     f_td += source excitation
+//!     F = DFT(f_td) + spectral charge terms (w_h C X_h)
+//!     if max|F| < hb_tol: return X
+//!     J = spectral(G(t)) blocks + (+-w_h C) skew blocks
+//!     solve dense J dX = -F;  X += dX
 const std = @import("std");
 const root = @import("../root.zig");
-const converger = @import("../helper/converger.zig");
-const dense_lu = root.solvers.dense_lu;
+const converger = @import("solvers").converger;
+const types = @import("solvers").types;
+const solvers = @import("solvers");
+const dense_lu = solvers.dense_lu;
 
 const W = std.simd.suggestVectorLength(f64) orelse 8;
 const V = @Vector(W, f64);
@@ -30,6 +44,14 @@ pub fn magnitude(spectrum: []const f64, k: u16) f64 {
     const c = spectrum[2 * @as(usize, k) - 1];
     const s = spectrum[2 * @as(usize, k)];
     return @sqrt(c * c + s * s);
+}
+
+/// SIMD copy: dst[0..n] = src[0..n]
+inline fn simdCopy(dst: []f64, src: []const f64) void {
+    const n = dst.len;
+    var i: usize = 0;
+    while (i + W <= n) : (i += W) dst[i..][0..W].* = src[i..][0..W].*;
+    while (i < n) : (i += 1) dst[i] = src[i];
 }
 
 /// Harmonic Balance solve. Excitation is a cosine current source of
@@ -98,7 +120,19 @@ pub fn solve(
     off += n * n;
     std.debug.assert(off == total_f64);
 
-    @memset(x_hat, 0);
+    root.zeroSimd(x_hat);
+
+    // DC seed: solve the DC operating point via converger.run + EvalHook,
+    // which routes through gpu_hook.solve_newton when GPU is active.
+    // Seeding x_hat[dc] from the true DC op dramatically reduces HB iterations
+    // for circuits with a nontrivial bias point.
+    {
+        const ws = try ckt.workspace();
+        for (0..n) |i| x_sample[i] = 0;
+        _ = converger.run(ckt, ws, x_sample, 0, options.tol.newtonOpts(null), root.EvalHook{}) catch {};
+        // Seed DC component of each node's spectrum from the converged operating point
+        for (0..n) |node| x_hat[node * nf] = x_sample[node];
+    }
 
     // Basis: harmonic-major layout — basis_cos[hi * nf + k], basis_sin[hi * nf + k]
     for (0..nh) |hi| {
@@ -111,9 +145,17 @@ pub fn solve(
         }
     }
 
+    // ponytail: GPU status for HB —
+    //   DC seed above uses converger.run + EvalHook → gpu_hook.solve_newton when GPU active.
+    //   HB inner loop (DFT sandwich: IDFT → device eval → DFT) stays CPU.
+    //   GPU upgrade path: batched device eval kernel over nf time samples (each independent),
+    //   plus cuSOLVER dense LU for the total_unknowns×total_unknowns spectral Jacobian.
+    //   IDFT/DFT are also trivially parallel per (node, harmonic) element.
+
     var iter: u16 = 0;
     while (iter < options.max_iter) : (iter += 1) {
         // IDFT: Fourier coefficients -> time-domain samples (node-major: x_td[node * nf + k])
+        // ponytail: IDFT is trivially parallel per (node, k) — one GPU thread per element
         for (0..n) |node| {
             const dc = x_hat[node * nf];
             const cos_base = node * nf + 1;
@@ -143,6 +185,8 @@ pub fn solve(
 
         // Evaluate F(x(t_k)) at each time sample: one eval fills residual +
         // analytic G plane; k=0 also serves as the DC sample for the C plane.
+        // ponytail: nf evals are independent — GPU batch kernel dispatches all
+        // samples in one launch, upgrade path from serial ckt.eval loop
         for (0..nf) |k| {
             for (0..n) |node| x_sample[node] = x_td[node * nf + k];
             ckt.eval(x_sample, 0);
@@ -155,7 +199,7 @@ pub fn solve(
             }
             if (k == 0) {
                 // dQ/dx at the DC sample, straight off the analytic C plane
-                if (ckt.has_charge) ckt.denseC(c_mat) else @memset(c_mat, 0);
+                if (ckt.has_charge) ckt.denseC(c_mat) else root.zeroSimd(c_mat);
             }
         }
 
@@ -208,6 +252,9 @@ pub fn solve(
         }
 
         // Add frequency-domain charge terms: j*omega*h * C * X_hat[h]
+        // j*omega_h * (C_cos + j*C_sin) applied to (X_cos + j*X_sin):
+        //   real part: -omega_h * C * X_sin
+        //   imag part:  omega_h * C * X_cos
         for (0..nh) |hi| {
             const h = hi + 1;
             const omega_h = @as(f64, @floatFromInt(h)) * omega0;
@@ -229,8 +276,16 @@ pub fn solve(
 
         // Check convergence
         var max_residual: f64 = 0;
-        for (f_hat[0..total_unknowns]) |v| {
-            max_residual = @max(max_residual, @abs(v));
+        {
+            var ri: usize = 0;
+            while (ri + W <= total_unknowns) : (ri += W) {
+                const fv: V = f_hat[ri..][0..W].*;
+                const av = @abs(fv);
+                max_residual = @max(max_residual, @reduce(.Max, av));
+            }
+            while (ri < total_unknowns) : (ri += 1) {
+                max_residual = @max(max_residual, @abs(f_hat[ri]));
+            }
         }
         if (max_residual < options.hb_tol) {
             extractSpectra(x_hat, probes, spectra, nf);
@@ -238,12 +293,15 @@ pub fn solve(
         }
 
         // Build frequency-domain Jacobian
-        @memset(jac, 0);
+        // ponytail: DC + first-order cos/sin cross-blocks kept;
+        // higher-order intermodulation blocks truncated (doc §2 design choice)
+        root.zeroSimd(jac);
 
         for (0..n) |row| {
             for (0..n) |col| {
                 const g_slice = g_td[(row * n + col) * nf ..][0..nf];
 
+                // G_0 (DC component of G(t)): mean over all samples
                 var g_dc_acc: V = @splat(0.0);
                 var k2: usize = 0;
                 while (k2 + W <= nf) : (k2 += W) {
@@ -256,12 +314,15 @@ pub fn solve(
 
                 const row_dc = row * nf;
                 const col_dc = col * nf;
+                // DC-DC block
                 jac[row_dc * total_unknowns + col_dc] = g_dc;
 
                 for (0..nh) |hi| {
                     const h = hi + 1;
                     const bc_slice = basis_cos[hi * nf ..][0..nf];
                     const bs_slice = basis_sin[hi * nf ..][0..nf];
+
+                    // G_h: h-th Fourier coefficient of G(t)
                     var g_cos_acc: V = @splat(0.0);
                     var g_sin_acc: V = @splat(0.0);
                     var k3: usize = 0;
@@ -286,9 +347,11 @@ pub fn solve(
                     const col_cos = col * nf + 2 * h - 1;
                     const col_sin = col * nf + 2 * h;
 
+                    // Diagonal blocks (G_0 on harmonic-h diagonal)
                     jac[row_cos * total_unknowns + col_cos] = g_dc;
                     jac[row_sin * total_unknowns + col_sin] = g_dc;
 
+                    // Cross-blocks: DC ↔ harmonic h (first-order intermodulation)
                     if (@abs(g_cos_h) > 1e-30 or @abs(g_sin_h) > 1e-30) {
                         jac[row_dc * total_unknowns + col_cos] += g_cos_h * 0.5;
                         jac[row_dc * total_unknowns + col_sin] += g_sin_h * 0.5;
@@ -299,7 +362,7 @@ pub fn solve(
             }
         }
 
-        // Add charge Jacobian contribution
+        // Add charge Jacobian contribution: ±omega_h * C skew blocks
         for (0..nh) |hi| {
             const h = hi + 1;
             const omega_h = @as(f64, @floatFromInt(h)) * omega0;
@@ -313,24 +376,44 @@ pub fn solve(
                     const col_cos = col * nf + 2 * h - 1;
                     const col_sin = col * nf + 2 * h;
 
+                    // d/d(X_sin)[j*omega_h * C * (X_cos + j*X_sin)]_real = -omega_h*C
                     jac[row_cos * total_unknowns + col_sin] += -omega_h * c_val;
+                    // d/d(X_cos)[j*omega_h * C * (X_cos + j*X_sin)]_imag = omega_h*C
                     jac[row_sin * total_unknowns + col_cos] += omega_h * c_val;
                 }
             }
         }
 
         // Solve J_hb * dX = -F_hat
+        // ponytail: single dense system of size total_unknowns = n*(2K+1); cuSOLVER
+        // dgetrf+dgetrs replaces this when total_unknowns > ~256, add when GPU HB kernel lands
         try dense_lu.factorizeSolveNeg(total_unknowns, jac, f_hat[0..total_unknowns], dx_hat);
 
-        // Update X_hat
-        for (0..total_unknowns) |j| {
-            x_hat[j] += dx_hat[j];
+        // Update X_hat (SIMD)
+        {
+            var ui: usize = 0;
+            while (ui + W <= total_unknowns) : (ui += W) {
+                const xv: V = x_hat[ui..][0..W].*;
+                const dv: V = dx_hat[ui..][0..W].*;
+                x_hat[ui..][0..W].* = xv + dv;
+            }
+            while (ui < total_unknowns) : (ui += 1) {
+                x_hat[ui] += dx_hat[ui];
+            }
         }
     }
 
+    // Did not converge — extract spectra anyway with a warning
     var final_norm: f64 = 0;
-    for (f_hat[0..total_unknowns]) |v| {
-        final_norm = @max(final_norm, @abs(v));
+    {
+        var ri: usize = 0;
+        while (ri + W <= total_unknowns) : (ri += W) {
+            const fv: V = f_hat[ri..][0..W].*;
+            final_norm = @max(final_norm, @reduce(.Max, @abs(fv)));
+        }
+        while (ri < total_unknowns) : (ri += 1) {
+            final_norm = @max(final_norm, @abs(f_hat[ri]));
+        }
     }
     extractSpectra(x_hat, probes, spectra, nf);
     return .{ .converged = false, .iterations = options.max_iter, .residual_norm = final_norm };
@@ -340,7 +423,7 @@ pub fn solve(
 /// spectra shares x_hat's per-node layout exactly.
 fn extractSpectra(x_hat: []const f64, probes: []const u32, spectra: []f64, nf: usize) void {
     for (probes, 0..) |node, p|
-        @memcpy(spectra[p * nf ..][0..nf], x_hat[node * nf ..][0..nf]);
+        simdCopy(spectra[p * nf ..][0..nf], x_hat[node * nf ..][0..nf]);
 }
 
 /// Contract entry: unit cosine current excitation on ctx.source_node,
@@ -358,7 +441,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     const names = try root.probeNames(ctx, "frequency");
     errdefer {
-        for (names[1..]) |s| a.free(s); // names[0] is the "frequency" literal
+        for (names[1..]) |s| a.free(s);
         a.free(names);
     }
     const ncols = names.len;

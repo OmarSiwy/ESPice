@@ -1,13 +1,25 @@
 //! S-parameter sweep: one eval() linearizes (the planes are G and C), the
 //! port z0 terminations are stamped into a dense G copy, then every
 //! frequency point is one FreqSolver factor + one solve per port.
+//!
+//! Wave variables (Kurokawa power waves):
+//!   a_k = (V_k + z0_k·I_k) / (2√z0_k)
+//!   b_k = (V_k - z0_k·I_k) / (2√z0_k)
+//! where I_k = −i_br_k (branch stamps F_p = +i_br, DUT current is negated).
+//!
+//! Driving port p with unit source voltage (rhs[b_p] = 1) gives a_p = 1/(2√z0_p),
+//! all other a_j = 0. Column p of S(ω) follows from S_jk = b_j / a_k.
 const std = @import("std");
 const root = @import("../root.zig");
-const converger = @import("../helper/converger.zig");
-const FreqSolver = root.solvers.freq_solve.FreqSolver;
-const freq = @import("../helper/freq.zig");
+const converger = @import("solvers").converger;
+const types = @import("solvers").types;
+const solvers = @import("solvers");
+const FreqSolver = solvers.freq_solve.FreqSolver;
 
-pub const Complex = freq.Complex;
+pub const Complex = types.Complex;
+
+const W = std.simd.suggestVectorLength(f64) orelse 8;
+const V = @Vector(W, f64);
 
 /// A port is a netlist vsource: `node` its + terminal, `branch` its MNA
 /// branch-current unknown. The sweep turns each into a Thevenin source with
@@ -47,12 +59,81 @@ pub fn sweep(
 ) !void {
     const n: usize = ckt.n;
     const n_ports: usize = ports.len;
-    std.debug.assert(freqs.len == options.n_points);
-    std.debug.assert(s.len == freqs.len * n_ports * n_ports);
+    const n_points: usize = options.n_points;
+    std.debug.assert(freqs.len == n_points);
+    std.debug.assert(s.len == n_points * n_ports * n_ports);
 
-    // Linearize: one eval, dense copies of the planes. The port termination
-    // is an analysis-side modification of G, so it goes on the copy —
-    // initDense takes ownership of both.
+    // Fill frequency array up front — both paths need it.
+    for (0..n_points) |fi| freqs[fi] = genFreq(options, fi);
+
+    // -- GPU batch path: one batch call per driven port ----------------------
+    // ponytail: P batch calls of N_freq each; packing all P*N into one call
+    // would need per-solve RHS, add when freq_solve_batch gains rhs-per-lane.
+    if (ckt.gpu_hook) |gh| if (gh.freq_solve_batch) |fsb| gpu: {
+        ckt.eval(x_op, 0);
+
+        // Stamp port z0 onto the sparse G diagonal (analysis-side mod).
+        // Save originals so we can restore after the batch calls.
+        const saved = allocator.alloc(f64, n_ports) catch break :gpu;
+        defer allocator.free(saved);
+        for (ports, 0..) |port, idx| {
+            const slot = ckt.diag_slots[port.branch];
+            saved[idx] = ckt.g_vals[slot];
+            ckt.g_vals[slot] -= port.z0;
+        }
+        defer for (ports, 0..) |_, idx| {
+            const slot = ckt.diag_slots[ports[idx].branch];
+            ckt.g_vals[slot] = saved[idx];
+        };
+
+        // Build omega array.
+        const omegas = allocator.alloc(f64, n_points) catch break :gpu;
+        defer allocator.free(omegas);
+        for (freqs, 0..) |f, i| omegas[i] = 2.0 * std.math.pi * f;
+
+        // Per-frequency output buffer: x_out[k] is 2*n (real‖imag expansion).
+        const nn = 2 * n;
+        const x_flat = allocator.alloc(f64, n_points * nn) catch break :gpu;
+        defer allocator.free(x_flat);
+        const x_out = allocator.alloc([]f64, n_points) catch break :gpu;
+        defer allocator.free(x_out);
+        for (0..n_points) |k| x_out[k] = x_flat[k * nn ..][0..nn];
+
+        const rhs = allocator.alloc(f64, nn) catch break :gpu;
+        defer allocator.free(rhs);
+
+        for (0..n_ports) |p| {
+            root.zeroSimd(rhs);
+            rhs[ports[p].branch] = 1.0;
+            // rhs imag part is zero (already zeroed).
+
+            fsb(gh.ctx, ckt.g_vals, ckt.c_vals, omegas, rhs, x_out, @intCast(n)) catch break :gpu;
+
+            const a_p = 1.0 / (2.0 * @sqrt(ports[p].z0));
+
+            for (0..n_points) |fi| {
+                const x_work = x_out[fi];
+                const s_mat = s[fi * n_ports * n_ports ..][0 .. n_ports * n_ports];
+                for (0..n_ports) |k| {
+                    const node_k: usize = ports[k].node;
+                    const br_k: usize = ports[k].branch;
+                    const z0_k = ports[k].z0;
+
+                    const v_k = if (node_k == root.GROUND) Complex.zero else Complex{
+                        .re = x_work[node_k],
+                        .im = x_work[n + node_k],
+                    };
+                    const i_k = Complex{ .re = -x_work[br_k], .im = -x_work[n + br_k] };
+                    const b_k = v_k.sub(i_k.scale(z0_k)).scale(1.0 / (2.0 * @sqrt(z0_k)));
+
+                    s_mat[k * n_ports + p] = b_k.scale(1.0 / a_p);
+                }
+            }
+        }
+        return; // GPU path done — skip CPU fallback.
+    };
+
+    // -- CPU serial path (existing) ------------------------------------------
     ckt.eval(x_op, 0);
     const g = try allocator.alloc(f64, n * n);
     ckt.denseG(g);
@@ -77,15 +158,15 @@ pub fn sweep(
     const x_work = try allocator.alloc(f64, nn);
     defer allocator.free(x_work);
 
-    for (0..options.n_points) |fi| {
-        const f = genFreq(options, fi);
+    for (0..n_points) |fi| {
+        const f = freqs[fi];
         try fs.setOmega(2.0 * std.math.pi * f);
 
         const s_mat = s[fi * n_ports * n_ports ..][0 .. n_ports * n_ports];
 
         for (0..n_ports) |p| {
             // Unit source voltage on port p only: a_p = 1/(2√z0_p), a_k = 0 (k≠p).
-            @memset(rhs, 0);
+            root.zeroSimd(rhs);
             rhs[ports[p].branch] = 1.0;
             try fs.solveRhs(rhs, x_work);
 
@@ -107,14 +188,12 @@ pub fn sweep(
                 s_mat[k * n_ports + p] = b_k.scale(1.0 / a_p);
             }
         }
-
-        freqs[fi] = f;
     }
 }
 
 fn genFreq(options: Options, k: usize) f64 {
     return switch (options.sweep_type) {
-        .log => freq.logSweepFreq(options.f_start, options.f_stop, options.n_points, @intCast(k)),
+        .log => types.logSweepFreq(options.f_start, options.f_stop, options.n_points, @intCast(k)),
         .linear => blk: {
             const frac = if (options.n_points > 1) @as(f64, @floatFromInt(k)) / @as(f64, @floatFromInt(options.n_points - 1)) else 0;
             break :blk options.f_start + frac * (options.f_stop - options.f_start);

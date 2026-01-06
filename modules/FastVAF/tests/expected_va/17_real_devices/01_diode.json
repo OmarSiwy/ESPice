@@ -1,0 +1,11 @@
+{
+    "status": "compile_ok",
+    "openvaf_validated": false,
+    "module_name": "diode",
+    "param_count": 15,
+    "contrib_count": 4,
+    "has_ddt": true,
+    "has_idt": false,
+    "has_ddx": false,
+    "has_noise": true
+}

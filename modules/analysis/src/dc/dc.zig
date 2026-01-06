@@ -2,8 +2,10 @@
 //! run() sweeps the primary source through its ParamRef and records probes.
 const std = @import("std");
 const root = @import("../root.zig");
-const converger = @import("../helper/converger.zig");
+const converger = @import("solvers").converger;
 const op = @import("op.zig");
+
+const W = std.simd.suggestVectorLength(f64) orelse 8;
 
 pub const Options = struct {
     tol: converger.Tolerances = .{},
@@ -37,7 +39,7 @@ pub fn solveWarm(
     const ws = try ckt.workspace();
     var copts = options.tol.newtonOpts(options.tol.itl2);
     copts.gmin = @max(gmin_extra, options.tol.gmin);
-    return converger.run(ckt, ws, x, 0, copts, converger.EvalHook{});
+    return converger.run(ckt, ws, x, 0, copts, root.EvalHook{});
 }
 
 /// Contract entry: sweep the primary source dc value, one warm-started
@@ -47,7 +49,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const ckt = ctx.circuit;
     const a = ctx.allocator;
 
-    // Find the DC param pointer for the source at opts.source_index.
+    // Locate the DC param pointer for the source at opts.source_index.
     const refs = try ckt.collectParams();
     var target: ?*f32 = null;
     for (refs) |ref| {
@@ -67,27 +69,126 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const ncols = ctx.probes.len + 1;
     const data = try a.alloc(f64, npoints * ncols);
     errdefer a.free(data);
+
+    // -----------------------------------------------------------------------
+    // GPU batch path: cold-start every point, solve all N simultaneously.
+    // ponytail: cold-start-only batch; chunked warm-start is future work —
+    // add when profiling shows serial warm-march dominates a large sweep.
+    // -----------------------------------------------------------------------
+    if (ckt.gpu_hook) |gh| if (gh.solve_batch) |sb| {
+        return runBatchGpu(ctx, ckt, a, t, gh, sb, opts, npoints, ncols, data) catch |e| switch (e) {
+            // GPU errors fall through to serial path.
+            error.OutOfMemory => return e,
+            else => runSerial(ctx, ckt, a, t, opts, npoints, ncols, data),
+        };
+    };
+
+    return runSerial(ctx, ckt, a, t, opts, npoints, ncols, data);
+}
+
+/// GPU batch: cold-start every sweep point, launch one batched Newton.
+fn runBatchGpu(
+    ctx: *const root.RunCtx,
+    ckt: *root.Circuit,
+    a: std.mem.Allocator,
+    t: *f32,
+    gh: root.GpuHook,
+    sb: *const fn (*anyopaque, [][]f64, f64, converger.Options, []converger.Result) anyerror!void,
+    opts: Options,
+    npoints: usize,
+    ncols: usize,
+    data: []f64,
+) !root.Result {
+    // Allocate per-lane x-vectors and result slots.
+    const x_lanes = try a.alloc([]f64, npoints);
+    defer {
+        for (x_lanes) |lane| a.free(lane);
+        a.free(x_lanes);
+    }
+    const results = try a.alloc(converger.Result, npoints);
+    defer a.free(results);
+
+    // For each sweep point: set the source value, repack GPU device state,
+    // and prepare a cold-started x-vector.
+    for (0..npoints) |pt| {
+        const v = opts.start + @as(f64, @floatFromInt(pt)) * opts.step;
+        t.* = @floatCast(v);
+        ckt.has_baseline = false;
+        ckt.recompute();
+        try ckt.computeBaseline();
+
+        // Repack GPU payloads so the device sees the new swept param.
+        if (gh.repack) |rp| try rp(gh.ctx);
+
+        const lane = try a.alloc(f64, ckt.n);
+        op.coldStart(ckt, lane);
+        x_lanes[pt] = lane;
+    }
+
+    var copts = opts.tol.newtonOpts(opts.tol.itl1);
+    copts.gmin = opts.tol.gmin;
+    try sb(gh.ctx, x_lanes, 0, copts, results);
+
+    // Collect results into the output data table.
+    for (0..npoints) |pt| {
+        const v = opts.start + @as(f64, @floatFromInt(pt)) * opts.step;
+        const row = data[pt * ncols ..][0..ncols];
+        row[0] = v;
+        if (results[pt].converged) {
+            for (ctx.probes, row[1..]) |node, *out| out.* = x_lanes[pt][node];
+        } else {
+            for (row[1..]) |*out| out.* = std.math.nan(f64);
+        }
+    }
+
+    return .{
+        .plotname = "DC transfer characteristic",
+        .varnames = try root.probeNames(ctx, "v-sweep"),
+        .is_complex = false,
+        .npoints = npoints,
+        .data = data,
+    };
+}
+
+/// Serial sweep: warm-start from previous point, cold-restart on failure.
+fn runSerial(
+    ctx: *const root.RunCtx,
+    ckt: *root.Circuit,
+    a: std.mem.Allocator,
+    t: *f32,
+    opts: Options,
+    npoints: usize,
+    ncols: usize,
+    data: []f64,
+) !root.Result {
     const x = try a.alloc(f64, ckt.n);
     defer a.free(x);
-    @memset(x, 0);
+    root.zeroSimd(x);
 
-    try ckt.computeBaseline();
+    // One workspace serves every point — sparsity pattern is frozen, so
+    // symbolic ordering/factorization happens exactly once for the sweep.
     const ws = try ckt.workspace();
 
     // First point (and any point whose warm-started Newton fails) goes
-    // through the full op ladder: seeded Newton → gmin stepping → source
-    // stepping. Interior points warm-start from the previous solution.
+    // through the full OP ladder: seeded Newton -> gmin stepping -> source
+    // stepping -> JFNK. Interior points warm-start from the previous solution
+    // with a plain Newton at ITL2.
     var cold = true;
     for (0..npoints) |pt| {
         const v = opts.start + @as(f64, @floatFromInt(pt)) * opts.step;
         t.* = @floatCast(v);
+        // Per-point: invalidate baseline and recompute device params so
+        // constant-Jacobian stamps reflect the new swept value.
+        ckt.has_baseline = false;
         ckt.recompute();
+        try ckt.computeBaseline();
+
         var converged = false;
         if (!cold) {
-            // SingularMatrix on a warm-started point (e.g. NaN stamps from a
-            // bad extrapolated guess) must not abort the sweep — fall into
-            // the ladder below like any non-converged point.
-            if (converger.run(ckt, ws, x, 0, opts.tol.newtonOpts(opts.tol.itl2), converger.EvalHook{})) |r| {
+            // Warm start from previous x. SingularMatrix on a warm-started
+            // point (NaN stamps from a bad extrapolated guess) must not abort
+            // the sweep — demote to the ladder like any non-converged point.
+            if (converger.run(ckt, ws, x, 0, opts.tol.newtonOpts(opts.tol.itl2), root.EvalHook{})) |r| {
                 converged = r.converged;
             } else |e| switch (e) {
                 error.SingularMatrix => {},
@@ -95,10 +196,13 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
             }
         }
         if (!converged) {
+            // Cold restart: zero x, seed junctions, run full OP ladder.
             op.coldStart(ckt, x);
             const lr = try op.solveLadder(ckt, ws, x, .{ .tol = opts.tol });
             converged = lr.converged;
         }
+
+        // Record sweep point: v-sweep value + probe values (or NaN on failure).
         const row = data[pt * ncols ..][0..ncols];
         row[0] = v;
         if (converged) {

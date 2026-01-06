@@ -2,11 +2,17 @@
 //! operating point yields the analytic G and C planes; the second-order
 //! kernel is finite differences OF the analytic Jacobian (d2F = dG/dx),
 //! one eval per unknown. Per-frequency solves are dense.
+//!
+//! ponytail: O(n^3) tensor + O(n^2) dense solves; device-side analytic F''
+//! stamps are the scalable upgrade for large n.
 const std = @import("std");
 const root = @import("../root.zig");
-const converger = @import("../helper/converger.zig");
-const dense_lu = root.solvers.dense_lu;
-const freq = @import("../helper/freq.zig");
+const converger = @import("solvers").converger;
+const types = @import("solvers").types;
+const solvers = @import("solvers");
+const dense_lu = solvers.dense_lu;
+
+const W = std.simd.suggestVectorLength(f64) orelse 8;
 
 pub const Options = struct {
     tol: converger.Tolerances = .{},
@@ -21,6 +27,21 @@ pub const Options = struct {
     output_node: u32 = root.GROUND,
     fd_eps: f64 = 1e-6,
 };
+
+// -------------------------------------------------------------------------
+// SIMD helpers (mandatory convention: no @memset, no @memcpy, no std.mem.*)
+// -------------------------------------------------------------------------
+
+inline fn simdZero(buf: []f64) void {
+    root.zeroSimd(buf);
+}
+
+inline fn simdCopy(dst: []f64, src: []const f64) void {
+    const n = @min(dst.len, src.len);
+    var i: usize = 0;
+    while (i + W <= n) : (i += W) dst[i..][0..W].* = src[i..][0..W].*;
+    while (i < n) : (i += 1) dst[i] = src[i];
+}
 
 /// Distortion analysis via simplified Volterra series.
 ///
@@ -73,8 +94,10 @@ pub fn sweep(
     const x_pert = try allocator.alloc(f64, n);
     defer allocator.free(x_pert);
 
+    // ponytail: strided tensor layout d2[row*n*n + a*n + b] prevents contiguous
+    // SIMD on the inner (a) loop; scalar per element, n evals dominate cost anyway
     for (0..n) |b| {
-        @memcpy(x_pert, x_op);
+        simdCopy(x_pert, x_op[0..n]);
         x_pert[b] += eps;
         ckt.eval(x_pert, 0);
         ckt.denseG(g_pert);
@@ -85,11 +108,11 @@ pub fn sweep(
             }
         }
     }
-    // leave the planes consistent with the operating point
+
+    // Leave the planes consistent with the operating point
     ckt.eval(x_op, 0);
 
     // -- Step 3: Frequency sweep --
-
     const nn = 2 * n;
     const a_work = try allocator.alloc(f64, nn * nn);
     defer allocator.free(a_work);
@@ -110,33 +133,39 @@ pub fn sweep(
     const v1_im = try allocator.alloc(f64, n);
     defer allocator.free(v1_im);
 
-    var sw = freq.logSweep(options.f_start, options.f_stop, options.points_per_decade);
+    var sw = types.logSweep(options.f_start, options.f_stop, options.points_per_decade);
     var k: usize = 0;
     while (sw.next()) |f| : (k += 1) {
         const omega = 2.0 * std.math.pi * f;
 
-        // -- 3a: First-order solve: (G + jwC) * V1 = excitation --
+        // -- 3a: First-order solve: (G + jwC) * V1 = mag * e[src] --
         dense_lu.buildComplexAdmittance(n, nn, g_dense, c_mat, omega, a_work);
 
-        @memset(rhs_work, 0);
+        simdZero(rhs_work);
         rhs_work[options.ac_source_node] = options.ac_magnitude;
 
         try dense_lu.factorizeSolve(nn, a_work, rhs_work, x_work);
 
-        @memcpy(v1_re, x_work[0..n]);
-        @memcpy(v1_im, x_work[n..nn]);
+        simdCopy(v1_re, x_work[0..n]);
+        simdCopy(v1_im, x_work[n..nn]);
 
-        // -- 3b: Build second-order RHS: -D2(V1, V1) --
-        @memset(rhs_work2, 0);
+        // -- 3b: Build second-order RHS: -½ F''[V1, V1] --
+        // D2[row] = sum_ab d2[row,a,b] * V1[a] * V1[b]  (complex product)
+        // RHS = -D2  (the ½ is absorbed into the Volterra convention;
+        // the doc's pseudo-code omits the ½ in the contraction and puts it
+        // in the equation — we follow the pseudo-code directly: no ½ here,
+        // matching the existing implementation for compatibility)
+        simdZero(rhs_work2);
         for (0..n) |row| {
             var d2_re: f64 = 0;
             var d2_im: f64 = 0;
             for (0..n) |a| {
-                for (0..n) |b| {
-                    const coeff = d2[row * n * n + a * n + b];
+                for (0..n) |b_idx| {
+                    const coeff = d2[row * n * n + a * n + b_idx];
                     if (coeff == 0) continue;
-                    const prod_re = v1_re[a] * v1_re[b] - v1_im[a] * v1_im[b];
-                    const prod_im = v1_re[a] * v1_im[b] + v1_im[a] * v1_re[b];
+                    // Complex product: V1[a] * V1[b]
+                    const prod_re = v1_re[a] * v1_re[b_idx] - v1_im[a] * v1_im[b_idx];
+                    const prod_im = v1_re[a] * v1_im[b_idx] + v1_im[a] * v1_re[b_idx];
                     d2_re += coeff * prod_re;
                     d2_im += coeff * prod_im;
                 }
@@ -184,16 +213,16 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         o.output_node = ctx.probes[ctx.probes.len - 1];
     }
 
-    const n_points: usize = freq.logSweepCount(o.f_start, o.f_stop, o.points_per_decade);
-    // one flat block, four columns
+    const n_points: usize = types.logSweepCount(o.f_start, o.f_stop, o.points_per_decade);
+    // One flat block, four columns
     const cols = try a.alloc(f64, n_points * 4);
     defer a.free(cols);
     const freqs = cols[0..n_points];
-    const hd2 = cols[n_points .. 2 * n_points];
-    const v1_mag = cols[2 * n_points .. 3 * n_points];
-    const v2_mag = cols[3 * n_points ..];
+    const hd2_buf = cols[n_points .. 2 * n_points];
+    const v1_buf = cols[2 * n_points .. 3 * n_points];
+    const v2_buf = cols[3 * n_points ..];
 
-    try sweep(ctx.circuit, x_op, freqs, hd2, v1_mag, v2_mag, o, a);
+    try sweep(ctx.circuit, x_op, freqs, hd2_buf, v1_buf, v2_buf, o, a);
 
     const names = try a.dupe([]const u8, &.{ "frequency", "hd2", "v1_mag", "v2_mag" });
     errdefer a.free(names); // entries are literals
@@ -202,9 +231,9 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     for (0..n_points) |i| {
         const row = data[i * ncols ..][0..ncols];
         row[0] = freqs[i];
-        row[1] = hd2[i];
-        row[2] = v1_mag[i];
-        row[3] = v2_mag[i];
+        row[1] = hd2_buf[i];
+        row[2] = v1_buf[i];
+        row[3] = v2_buf[i];
     }
 
     return .{

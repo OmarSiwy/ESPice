@@ -1,0 +1,12 @@
+{
+    "status": "compile_ok",
+    "openvaf_validated": false,
+    "openvaf_unsupported": true,
+    "module_name": "conf_op_zi",
+    "param_count": 1,
+    "contrib_count": 2,
+    "has_ddt": false,
+    "has_idt": false,
+    "has_ddx": false,
+    "has_noise": false
+}

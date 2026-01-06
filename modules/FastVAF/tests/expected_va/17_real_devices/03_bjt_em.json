@@ -1,0 +1,11 @@
+{
+    "status": "compile_ok",
+    "openvaf_validated": false,
+    "module_name": "bjt_em",
+    "param_count": 18,
+    "contrib_count": 6,
+    "has_ddt": true,
+    "has_idt": false,
+    "has_ddx": false,
+    "has_noise": true
+}

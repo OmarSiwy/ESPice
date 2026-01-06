@@ -5,7 +5,9 @@
 const std = @import("std");
 const root = @import("../root.zig");
 const dc = @import("../dc/dc.zig");
-const converger = @import("../helper/converger.zig");
+const converger = @import("solvers").converger;
+
+const W = std.simd.suggestVectorLength(f64) orelse 8;
 
 // ============================================================================
 // Parameter variation specification
@@ -71,6 +73,20 @@ pub const YieldSpec = struct {
 };
 
 // ============================================================================
+// SIMD helpers (no @memset/@memcpy)
+// ============================================================================
+
+/// SIMD zero: buf[0..n] = 0.
+inline fn zeroSlice(buf: anytype) void {
+    root.zeroSimd(buf);
+}
+
+/// Zero a u32 slice (scalar — u32 is cold path).
+inline fn zeroU32(buf: []u32) void {
+    for (buf) |*v| v.* = 0;
+}
+
+// ============================================================================
 // Monte Carlo analysis entry point
 // ============================================================================
 
@@ -105,16 +121,19 @@ pub fn analyze(
     // Track yield counts per spec
     const yield_counts = try allocator.alloc(u32, yield_specs.len);
     defer allocator.free(yield_counts);
-    @memset(yield_counts, 0);
+    zeroU32(yield_counts);
 
-    @memset(stats, .{
-        .mean = 0,
-        .std_dev = 0,
-        .min = std.math.inf(f64),
-        .max = -std.math.inf(f64),
-        .yield_pct = 0,
-        .n_converged = 0,
-    });
+    // Initialize stats
+    for (stats) |*st| {
+        st.* = .{
+            .mean = 0,
+            .std_dev = 0,
+            .min = std.math.inf(f64),
+            .max = -std.math.inf(f64),
+            .yield_pct = 0,
+            .n_converged = 0,
+        };
+    }
 
     var n_conv: u32 = 0;
     for (0..options.n_trials) |_| {
@@ -132,19 +151,19 @@ pub fn analyze(
         }
         ckt.recompute();
 
-        // Re-solve the DC operating point for this trial
-        @memset(x, 0);
-        const converged = if (converger.run(ckt, ws, x, 0, nopts, converger.EvalHook{})) |r|
+        // Cold DC solve per trial (ITL2 iterations); any error => non-convergence
+        root.zeroSimd(x);
+        ckt.seedJunctions(x);
+        const converged = if (converger.run(ckt, ws, x, 0, nopts, root.EvalHook{})) |r|
             r.converged
         else |_|
             false;
 
         if (converged) {
+            // Pack converged samples contiguously, update running min/max
             for (probes, 0..) |node, p| {
                 const val = x[node];
                 samples[p * stride + n_conv] = val;
-
-                // Running min/max
                 stats[p].min = @min(stats[p].min, val);
                 stats[p].max = @max(stats[p].max, val);
             }
@@ -178,18 +197,41 @@ pub fn analyze(
         }
 
         const vals = samples[p * stride ..][0..n_conv];
+        const nc_f: f64 = @floatFromInt(n_conv);
 
-        // Mean
+        // Mean — SIMD accumulate
         var sum: f64 = 0;
-        for (vals) |v| sum += v;
-        const mean = sum / @as(f64, @floatFromInt(n_conv));
+        {
+            const V = @Vector(W, f64);
+            var acc: V = @splat(0.0);
+            var i: usize = 0;
+            while (i + W <= n_conv) : (i += W) {
+                const v: V = vals[i..][0..W].*;
+                acc += v;
+            }
+            sum = @reduce(.Add, acc);
+            while (i < n_conv) : (i += 1) sum += vals[i];
+        }
+        const mean = sum / nc_f;
         st.mean = mean;
 
-        // Standard deviation
+        // Bessel-corrected standard deviation — SIMD accumulate
         var sum_sq: f64 = 0;
-        for (vals) |v| {
-            const d = v - mean;
-            sum_sq += d * d;
+        {
+            const V = @Vector(W, f64);
+            var acc: V = @splat(0.0);
+            const mv: V = @splat(mean);
+            var i: usize = 0;
+            while (i + W <= n_conv) : (i += W) {
+                const v: V = vals[i..][0..W].*;
+                const d = v - mv;
+                acc += d * d;
+            }
+            sum_sq = @reduce(.Add, acc);
+            while (i < n_conv) : (i += 1) {
+                const d = vals[i] - mean;
+                sum_sq += d * d;
+            }
         }
         st.std_dev = if (n_conv > 1)
             @sqrt(sum_sq / @as(f64, @floatFromInt(n_conv - 1)))
@@ -197,7 +239,7 @@ pub fn analyze(
             0;
     }
 
-    // Yield percentage
+    // Yield percentage (conditional on convergence)
     for (yield_specs, yield_counts) |ys, count| {
         if (n_conv > 0) {
             stats[ys.probe_idx].yield_pct =
@@ -237,18 +279,122 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         ckt.recompute();
     }
 
+    // ========================================================================
+    // GPU batch path: all N trials as one batched Newton solve
+    // ponytail: GPU batch MC — serial fallback below covers non-batch hooks
+    // ========================================================================
+    if (ckt.gpu_hook) |gh| if (gh.solve_batch) |_| gpu_batch: {
+        const nt: usize = opts.n_trials;
+        const n: usize = ckt.n;
+        const nopts = opts.dc_options.tol.newtonOpts(opts.dc_options.tol.itl2);
+
+        // Deterministic RNG matching serial path
+        var prng = std.Random.DefaultPrng.init(opts.seed);
+        const rng = prng.random();
+
+        // Allocate N x-vectors + results
+        const x_lanes = a.alloc([]f64, nt) catch break :gpu_batch;
+        defer a.free(x_lanes);
+        for (x_lanes, 0..) |*lane, li| {
+            lane.* = a.alloc(f64, n) catch {
+                for (x_lanes[0..li]) |prev| a.free(prev);
+                break :gpu_batch;
+            };
+        }
+        defer for (x_lanes) |lane| a.free(lane);
+
+        const results = a.alloc(converger.Result, nt) catch break :gpu_batch;
+        defer a.free(results);
+
+        // Per-trial: perturb → repack → seed → solve (GPU single) → collect.
+        // ponytail: solve_batch with per-lane payloads will replace this loop
+        // when the cooperative arpSolveBatch kernel lands with per-lane blob
+        // copies. Until then, each trial is a separate GPU Newton solve (still
+        // faster than CPU Newton for large circuits).
+        for (0..nt) |t| {
+            for (param_vars) |pv| {
+                const varied = switch (pv.dist) {
+                    .uniform => blk: {
+                        const lo = pv.nominal * (1.0 - pv.rel_tol);
+                        const hi = pv.nominal * (1.0 + pv.rel_tol);
+                        break :blk lo + (hi - lo) * rng.float(f64);
+                    },
+                    .gaussian => pv.nominal + pv.nominal * pv.rel_tol * rng.floatNorm(f64),
+                };
+                pv.param_ptr.* = @floatCast(varied);
+            }
+            ckt.recompute();
+
+            root.zeroSimd(x_lanes[t]);
+            ckt.seedJunctions(x_lanes[t]);
+
+            // GPU single solve per trial (repack happens inside solveNewton)
+            results[t] = gh.solve_newton(gh.ctx, x_lanes[t], 0, nopts) catch
+                converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 };
+        }
+
+        // Restore nominal params
+        for (param_vars) |pv| pv.param_ptr.* = @floatCast(pv.nominal);
+        ckt.recompute();
+
+        // Collect converged results
+        const stride: usize = nt;
+        const samples = a.alloc(f64, ctx.probes.len * stride) catch break :gpu_batch;
+        defer a.free(samples);
+
+        var n_conv: u32 = 0;
+        for (results, 0..) |r, t| {
+            if (!r.converged) continue;
+            for (ctx.probes, 0..) |node, p| {
+                samples[p * stride + n_conv] = x_lanes[t][node];
+            }
+            n_conv += 1;
+        }
+
+        // Format output (same layout as serial path)
+        const npoints: usize = if (ctx.probes.len > 0) n_conv else 0;
+        const names = root.probeNames(ctx, "run") catch break :gpu_batch;
+        errdefer {
+            for (names[1..]) |s| a.free(s);
+            a.free(names);
+        }
+        const ncols = names.len;
+        const data = a.alloc(f64, npoints * ncols) catch {
+            for (names[1..]) |s| a.free(s);
+            a.free(names);
+            break :gpu_batch;
+        };
+        for (0..npoints) |k| {
+            const row = data[k * ncols ..][0..ncols];
+            row[0] = @floatFromInt(k);
+            for (0..ctx.probes.len) |p| row[1 + p] = samples[p * stride + k];
+        }
+
+        return .{
+            .plotname = "Monte Carlo",
+            .varnames = names,
+            .is_complex = false,
+            .npoints = npoints,
+            .data = data,
+        };
+    };
+
+    // ========================================================================
+    // Serial fallback (existing CPU path)
+    // ========================================================================
+
     const stride: usize = opts.n_trials;
     const samples = try a.alloc(f64, ctx.probes.len * stride);
     defer a.free(samples);
-    const stats = try a.alloc(Stats, ctx.probes.len);
-    defer a.free(stats);
+    const stats_buf = try a.alloc(Stats, ctx.probes.len);
+    defer a.free(stats_buf);
 
-    const n_conv = try analyze(ckt, param_vars, ctx.probes, samples, stats, &.{}, opts, a);
+    const n_conv = try analyze(ckt, param_vars, ctx.probes, samples, stats_buf, &.{}, opts, a);
 
     const npoints: usize = if (ctx.probes.len > 0) n_conv else 0;
     const names = try root.probeNames(ctx, "run");
     errdefer {
-        for (names[1..]) |s| a.free(s); // names[0] is the "run" literal
+        for (names[1..]) |s| a.free(s);
         a.free(names);
     }
     const ncols = names.len;

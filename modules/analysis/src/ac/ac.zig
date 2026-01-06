@@ -3,11 +3,13 @@
 //! contact inside the sweep.
 const std = @import("std");
 const root = @import("../root.zig");
-const converger = @import("../helper/converger.zig");
+const converger = @import("solvers").converger;
+const types = @import("solvers").types;
 const FreqSolver = root.solvers.freq_solve.FreqSolver;
-const freq = @import("../helper/freq.zig");
 
-pub const Complex = freq.Complex;
+pub const Complex = types.Complex;
+
+const W = std.simd.suggestVectorLength(f64) orelse 8;
 
 pub const Options = struct {
     tol: converger.Tolerances = .{},
@@ -17,8 +19,8 @@ pub const Options = struct {
 };
 
 /// AC small-signal sweep. Excitation goes on the source vsource's BRANCH row
-/// (its branch equation is v_p − v_n − V = 0, so rhs[branch] = V_ac); driving
-/// the clamped + node instead yields identically zero response.
+/// (its branch equation is v_p - v_n - V = 0, so rhs[branch] = V_ac); driving
+/// the clamped node row instead yields identically zero response.
 ///
 /// Caller owns the output: freqs[n_points], resp[probes.len * n_points]
 /// flat, probe-major (resp[p * n_points + k]). No per-point allocation.
@@ -47,12 +49,53 @@ pub fn sweep(
     const x_work = try allocator.alloc(f64, nn);
     defer allocator.free(x_work);
 
-    @memset(rhs, 0);
+    root.zeroSimd(rhs);
     const phase_rad = ac_phase_deg * (std.math.pi / 180.0);
     rhs[ac_branch] = ac_mag * @cos(phase_rad);
     rhs[n + ac_branch] = ac_mag * @sin(phase_rad);
 
-    var sw = freq.logSweep(options.f_start, options.f_stop, options.points_per_decade);
+    // ponytail: GPU batch path — all freq points are independent (G+jωC) solves.
+    // Falls through to serial on error or when hook is absent.
+    if (ckt.gpu_hook) |gh| if (gh.freq_solve_batch) |fsb| gpu: {
+        const omegas = allocator.alloc(f64, n_points) catch break :gpu;
+        defer allocator.free(omegas);
+
+        var sw_gpu = types.logSweep(options.f_start, options.f_stop, options.points_per_decade);
+        for (0..n_points) |i| {
+            freqs[i] = sw_gpu.next().?;
+            omegas[i] = 2.0 * std.math.pi * freqs[i];
+        }
+
+        const x_out = allocator.alloc([]f64, n_points) catch break :gpu;
+        var n_alloc: usize = 0;
+        for (x_out) |*slot| {
+            slot.* = allocator.alloc(f64, nn) catch {
+                for (x_out[0..n_alloc]) |buf| allocator.free(buf);
+                allocator.free(x_out);
+                break :gpu;
+            };
+            n_alloc += 1;
+        }
+        defer {
+            for (x_out) |buf| allocator.free(buf);
+            allocator.free(x_out);
+        }
+
+        fsb(gh.ctx, ckt.g_vals, ckt.c_vals, omegas, rhs, x_out, @intCast(n)) catch break :gpu;
+
+        for (0..n_points) |k| {
+            for (probes, 0..) |node, p| {
+                resp[p * n_points + k] = .{
+                    .re = x_out[k][node],
+                    .im = x_out[k][n + node],
+                };
+            }
+        }
+        return;
+    };
+
+    // Serial fallback
+    var sw = types.logSweep(options.f_start, options.f_stop, options.points_per_decade);
     var k: usize = 0;
     while (sw.next()) |f| : (k += 1) {
         try fs.solve(2.0 * std.math.pi * f, rhs, x_work);
@@ -73,7 +116,7 @@ pub fn sweep(
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
     const x_op = ctx.x_op orelse return error.NoOperatingPoint;
-    const n_points = freq.logSweepCount(opts.f_start, opts.f_stop, opts.points_per_decade);
+    const n_points = types.logSweepCount(opts.f_start, opts.f_stop, opts.points_per_decade);
 
     const freqs = try a.alloc(f64, n_points);
     defer a.free(freqs);

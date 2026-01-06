@@ -1,9 +1,21 @@
+// Solver module exports — all sub-modules exposed for analysis consumers.
 pub const direct = @import("direct.zig");
+pub const sparse_lu = @import("sparse_lu.zig");
+pub const tridiag = @import("tridiag.zig");
 pub const dense_lu = @import("dense_lu.zig");
 pub const bbd = @import("bbd.zig");
 pub const freq_solve = @import("freq_solve.zig");
 pub const fft = @import("fft.zig");
+pub const gmres = @import("gmres.zig");
+pub const gpu_lu = @import("gpu_lu.zig");
+pub const preconditioner = @import("preconditioner.zig");
+pub const monodromy = @import("monodromy.zig");
+pub const lptv = @import("lptv.zig");
+pub const order = @import("order.zig");
+pub const converger = @import("converger.zig");
+pub const types = @import("types.zig");
 
+// Types re-exported for analysis consumers (BbdBlock/BbdInfo used by analysis/root.zig).
 pub const BbdBlock = struct {
     start: u32,
     size: u32,
@@ -18,7 +30,5 @@ pub const BbdInfo = struct {
 };
 
 test {
-    // Pull in the per-file test blocks (zig only collects tests from
-    // files referenced by the test root).
     @import("std").testing.refAllDecls(@This());
 }

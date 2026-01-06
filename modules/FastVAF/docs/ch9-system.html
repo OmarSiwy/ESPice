@@ -1,0 +1,1404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chapter 9 &mdash; System Tasks &amp; Functions (Verilog-AMS LRM 2.4.0)</title>
+<style>
+body { font-family: 'Segoe UI', system-ui, sans-serif; max-width: 900px; margin: 0 auto; padding: 2rem; background: #fafafa; color: #1a1a1a; line-height: 1.6; }
+h1 { border-bottom: 3px solid #2563eb; padding-bottom: 0.5rem; }
+h2 { color: #1e40af; margin-top: 2rem; border-bottom: 1px solid #ddd; padding-bottom: 0.3rem; }
+h3 { color: #374151; }
+h4 { color: #4b5563; }
+code { background: #e5e7eb; padding: 0.15rem 0.4rem; border-radius: 3px; font-size: 0.9em; }
+pre { background: #1e293b; color: #e2e8f0; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; }
+pre code { background: none; padding: 0; color: inherit; }
+table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+th, td { border: 1px solid #d1d5db; padding: 0.5rem 0.75rem; text-align: left; }
+th { background: #2563eb; color: white; }
+tr:nth-child(even) { background: #f3f4f6; }
+.syntax { background: #fffbeb; border-left: 4px solid #f59e0b; padding: 1rem; margin: 1rem 0; font-family: monospace; white-space: pre-wrap; }
+.note { background: #eff6ff; border-left: 4px solid #2563eb; padding: 0.75rem 1rem; margin: 1rem 0; }
+nav { background: #1e293b; padding: 1rem; border-radius: 6px; margin-bottom: 2rem; }
+nav a { color: #93c5fd; text-decoration: none; margin-right: 1rem; }
+nav a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+
+<nav>
+<a href="index.html">Index</a>
+<a href="ch2-lexical.html">Ch2 Lexical</a>
+<a href="ch3-datatypes.html">Ch3 Data Types</a>
+<a href="ch4-expressions.html">Ch4 Expressions</a>
+<a href="ch5-analog.html">Ch5 Analog</a>
+<a href="ch6-hierarchy.html">Ch6 Hierarchy</a>
+<a href="ch7-mixed-signal.html">Ch7 Mixed-Signal</a>
+<a href="ch8-scheduling.html">Ch8 Scheduling</a>
+<a href="ch9-system.html">Ch9 System</a>
+<a href="ch10-connectmodules.html">Ch10 Directives</a>
+<a href="ch11-directives.html">Ch11 Directives Ext</a>
+</nav>
+
+<h1>Chapter 9 &mdash; System Tasks &amp; Functions</h1>
+
+<!-- 9.1 Overview -->
+<h2 id="s9.1">9.1 Overview</h2>
+<p>Verilog-AMS HDL is a superset of IEEE Std 1364-2005 Verilog HDL and hence all the system tasks in IEEE Std 1364-2005 are supported. Verilog-AMS adds several system tasks and system functions. In addition, Verilog-AMS HDL extends the behavior of several Verilog system tasks and functions including allowing some of them to be used in an analog context.</p>
+
+<!-- 9.2 Categories -->
+<h2 id="s9.2">9.2 Categories of System Tasks and Functions</h2>
+
+<h3>Table 9-1 &mdash; Display System Tasks</h3>
+<table>
+<tr><th>Task Name</th><th>Digital Context</th><th>Analog Context</th></tr>
+<tr><td><code>$display</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$displayb</code>, <code>$displayh</code>, <code>$displayo</code></td><td>Yes</td><td>No</td></tr>
+<tr><td><code>$strobe</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$strobeb</code>, <code>$strobeh</code>, <code>$strobeo</code></td><td>Yes</td><td>No</td></tr>
+<tr><td><code>$write</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$writeb</code>, <code>$writeh</code>, <code>$writeo</code></td><td>Yes</td><td>No</td></tr>
+<tr><td><code>$monitor</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$monitorb</code>, <code>$monitorh</code>, <code>$monitoro</code></td><td>Yes</td><td>No</td></tr>
+<tr><td><code>$monitoron</code>, <code>$monitoroff</code></td><td>Yes</td><td>No</td></tr>
+<tr><td><code>$debug</code></td><td>No</td><td>Yes</td></tr>
+</table>
+
+<h3>Table 9-2 &mdash; File Input-Output System Tasks and Functions</h3>
+<table>
+<tr><th>Task/Function Name(s)</th><th>Digital Context</th><th>Analog Context</th></tr>
+<tr><td><code>$fclose</code>, <code>$fopen</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$fdisplay</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$fdisplayb</code>, <code>$fdisplayh</code>, <code>$fdisplayo</code></td><td>Yes</td><td>No</td></tr>
+<tr><td><code>$fwrite</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$fwriteb</code>, <code>$fwriteh</code>, <code>$fwriteo</code></td><td>Yes</td><td>No</td></tr>
+<tr><td><code>$fstrobe</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$fstrobeb</code>, <code>$fstrobeh</code>, <code>$fstrobeo</code></td><td>Yes</td><td>No</td></tr>
+<tr><td><code>$fmonitor</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$fmonitorb</code>, <code>$fmonitorh</code>, <code>$fmonitoro</code></td><td>Yes</td><td>No</td></tr>
+<tr><td><code>$fgetc</code>, <code>$ungetc</code></td><td>Yes</td><td>No</td></tr>
+<tr><td><code>$fgets</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$fscanf</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$swrite</code>, <code>$sformat</code>, <code>$sscanf</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$swriteb</code>, <code>$swriteh</code>, <code>$swriteo</code></td><td>Yes</td><td>No</td></tr>
+<tr><td><code>$fread</code></td><td>Yes</td><td>No</td></tr>
+<tr><td><code>$rewind</code>, <code>$fseek</code>, <code>$ftell</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$fflush</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$ferror</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$feof</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$readmemb</code>, <code>$readmemh</code></td><td>Yes</td><td>No</td></tr>
+<tr><td><code>$sdf_annotate</code></td><td>Yes</td><td>No</td></tr>
+<tr><td><code>$fdebug</code></td><td>No</td><td>Yes</td></tr>
+</table>
+
+<h3>Table 9-3 &mdash; Timescale System Tasks</h3>
+<table>
+<tr><th>Task/Function Name(s)</th><th>Digital Context</th><th>Analog Context</th></tr>
+<tr><td><code>$printtimescale</code></td><td>Yes</td><td>No</td></tr>
+<tr><td><code>$timeformat</code></td><td>Yes</td><td>No</td></tr>
+</table>
+
+<h3>Table 9-4 &mdash; Simulation Control System Tasks</h3>
+<table>
+<tr><th>Task Name</th><th>Digital Context</th><th>Analog Context</th></tr>
+<tr><td><code>$finish</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$stop</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$fatal</code></td><td>No</td><td>Yes</td></tr>
+<tr><td><code>$warning</code></td><td>No</td><td>Yes</td></tr>
+<tr><td><code>$error</code></td><td>No</td><td>Yes</td></tr>
+<tr><td><code>$info</code></td><td>No</td><td>Yes</td></tr>
+</table>
+
+<h3>Table 9-5 &mdash; PLA Modeling System Tasks</h3>
+<p>Digital context only. Not extended by Verilog-AMS HDL. Includes <code>$async$and$array</code>, <code>$async$nand$array</code>, <code>$async$or$array</code>, <code>$async$nor$array</code>, <code>$sync$and$array</code>, <code>$sync$nand$array</code>, <code>$sync$or$array</code>, <code>$sync$nor$array</code>, and the <code>$plane</code> variants.</p>
+
+<h3>Table 9-6 &mdash; Stochastic Analysis System Tasks</h3>
+<p>Digital context only. Not extended by Verilog-AMS HDL. Includes <code>$q_initialize</code>, <code>$q_remove</code>, <code>$q_exam</code>, <code>$q_add</code>, <code>$q_full</code>.</p>
+
+<h3>Table 9-7 &mdash; Simulation Time System Functions</h3>
+<table>
+<tr><th>Function Name</th><th>Digital Context</th><th>Analog Context</th></tr>
+<tr><td><code>$realtime</code></td><td>Yes</td><td>No</td></tr>
+<tr><td><code>$time</code></td><td>Yes</td><td>No</td></tr>
+<tr><td><code>$stime</code></td><td>Yes</td><td>No</td></tr>
+<tr><td><code>$abstime</code></td><td>Yes</td><td>Yes</td></tr>
+</table>
+
+<h3>Table 9-8 &mdash; Conversion System Functions</h3>
+<table>
+<tr><th>Function Name</th><th>Digital Context</th><th>Analog Context</th></tr>
+<tr><td><code>$bitstoreal</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$itor</code></td><td>Yes</td><td>No</td></tr>
+<tr><td><code>$signed</code></td><td>Yes</td><td>No</td></tr>
+<tr><td><code>$realtobits</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$rtoi</code></td><td>Yes</td><td>No</td></tr>
+<tr><td><code>$unsigned</code></td><td>Yes</td><td>No</td></tr>
+</table>
+
+<h3>Table 9-9 &mdash; Command Line Input System Functions</h3>
+<table>
+<tr><th>Function Name</th><th>Digital Context</th><th>Analog Context</th></tr>
+<tr><td><code>$test$plusargs</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$value$plusargs</code></td><td>Yes</td><td>Yes</td></tr>
+</table>
+
+<h3>Table 9-10 &mdash; Probabilistic Distribution System Functions</h3>
+<table>
+<tr><th>Function Name</th><th>Digital Context</th><th>Analog Context</th></tr>
+<tr><td><code>$dist_chi_square</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$dist_exponential</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$dist_poisson</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$dist_uniform</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$dist_erlang</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$dist_normal</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$dist_t</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$random</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$arandom</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$rdist_chi_square</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$rdist_exponential</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$rdist_poisson</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$rdist_uniform</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$rdist_erlang</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$rdist_normal</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$rdist_t</code></td><td>Yes</td><td>Yes</td></tr>
+</table>
+
+<h3>Table 9-11 &mdash; Math System Functions</h3>
+<table>
+<tr><th>Function Name</th><th>Digital Context</th><th>Analog Context</th></tr>
+<tr><td><code>$clog2</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$ln</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$log10</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$exp</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$sqrt</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$pow</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$floor</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$ceil</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$sin</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$cos</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$tan</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$asin</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$acos</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$atan</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$atan2</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$hypot</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$sinh</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$cosh</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$tanh</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$asinh</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$acosh</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$atanh</code></td><td>Yes</td><td>Yes</td></tr>
+</table>
+
+<h3>Table 9-12 &mdash; Analog Kernel Parameter System Functions</h3>
+<table>
+<tr><th>Function Name</th><th>Digital Context</th><th>Analog Context</th></tr>
+<tr><td><code>$temperature</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$vt</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$simparam</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$simparam$str</code></td><td>Yes</td><td>Yes</td></tr>
+</table>
+
+<h3>Table 9-13 &mdash; Dynamic Simulation Probe System Function</h3>
+<table>
+<tr><th>Function Name</th><th>Digital Context</th><th>Analog Context</th></tr>
+<tr><td><code>$simprobe</code></td><td>No</td><td>Yes</td></tr>
+</table>
+
+<h3>Table 9-14 &mdash; Analog Kernel Control System Tasks and Functions</h3>
+<table>
+<tr><th>Task/Function Name</th><th>Digital Context</th><th>Analog Context</th></tr>
+<tr><td><code>$discontinuity</code></td><td>No</td><td>Yes</td></tr>
+<tr><td><code>$limit</code></td><td>No</td><td>Yes</td></tr>
+<tr><td><code>$bound_step</code></td><td>No</td><td>Yes</td></tr>
+</table>
+
+<h3>Table 9-15 &mdash; Hierarchical Parameter System Functions</h3>
+<table>
+<tr><th>Function Name</th><th>Digital Context</th><th>Analog Context</th></tr>
+<tr><td><code>$mfactor</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$xposition</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$yposition</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$angle</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$hflip</code></td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>$vflip</code></td><td>Yes</td><td>Yes</td></tr>
+</table>
+
+<h3>Table 9-16 &mdash; Explicit Binding Detection System Functions</h3>
+<table>
+<tr><th>Function Name</th><th>Digital Context</th><th>Analog Context</th></tr>
+<tr><td><code>$param_given</code></td><td>No</td><td>Yes</td></tr>
+<tr><td><code>$port_connected</code></td><td>No</td><td>Yes</td></tr>
+</table>
+
+<h3>Table 9-17 &mdash; Analog Node Alias System Functions</h3>
+<table>
+<tr><th>Function Name</th><th>Digital Context</th><th>Analog Context</th></tr>
+<tr><td><code>$analog_node_alias</code></td><td>No</td><td>Yes</td></tr>
+<tr><td><code>$analog_port_alias</code></td><td>No</td><td>Yes</td></tr>
+</table>
+
+<h3>Table 9-18 &mdash; Table Based Interpolation and Lookup</h3>
+<table>
+<tr><th>Function Name</th><th>Digital Context</th><th>Analog Context</th></tr>
+<tr><td><code>$table_model</code></td><td>Yes</td><td>Yes</td></tr>
+</table>
+
+<h3>Table 9-19 &mdash; Connectmodule Driver Access (AMS Only)</h3>
+<p>The functions <code>$driver_count</code>, <code>$driver_state</code>, <code>$driver_strength</code>, and the <code>@(driver_update)</code> operator are supported in the digital context of connect modules only. See <a href="#s9.22">9.22</a>.</p>
+
+<h3>Table 9-20 &mdash; Supplementary Connectmodule Driver Access (AMS Only)</h3>
+<p>The functions <code>$driver_delay</code>, <code>$driver_next_state</code>, <code>$driver_next_strength</code>, and <code>$driver_type</code> are supported in the digital context of connect modules only. See <a href="#s9.23">9.23</a>.</p>
+
+
+<!-- 9.3 -->
+<h2 id="s9.3">9.3 System Tasks/Functions in the Analog Simulation Cycle</h2>
+
+<p>The analog simulation cycle iteratively evaluates the analog blocks in an analog macro process until convergence. The behavior of a system task or function during the iterative evaluation process is stated in the relevant section, if required. A call to a system task or function in an analog block during an iteration that is rejected shall cause no side-effects on the next iteration.</p>
+
+<p>The analog engine supports additional analyses beyond a single transient analysis, including multiple transient analyses within a single simulation process. Behavior during different analysis types is stated in the relevant section where required.</p>
+
+
+<!-- 9.4 Display System Tasks -->
+<h2 id="s9.4">9.4 Display System Tasks</h2>
+
+<h3 id="s9.4.1">9.4.1 Behavior of the Display Tasks in the Analog Context</h3>
+
+<pre class="syntax">display_tasks_in_analog_block ::=
+    $strobe ( list_of_arguments ) ;
+  | $display ( list_of_arguments ) ;
+  | $monitor ( list_of_arguments ) ;
+  | $write ( list_of_arguments ) ;
+  | $debug ( list_of_arguments ) ;</pre>
+
+<p>Rules:</p>
+<ul>
+<li><code>$strobe</code> displays simulation data when the simulator has converged on a solution for all nodes. Arguments are displayed in the order they appear. Each argument can be a quoted string, an expression returning a value, or a null argument.</li>
+<li>String contents are output literally, except when escape sequences are used to display special characters or specify a format for a subsequent expression.</li>
+<li>A null argument (two adjacent commas <code>,,</code>) produces a single space.</li>
+<li><code>$strobe</code> invoked without arguments prints a newline character.</li>
+<li><code>$display</code> provides the same capabilities as <code>$strobe</code>.</li>
+<li><code>$write</code> provides the same capabilities as <code>$strobe</code>, but with no trailing newline.</li>
+<li><code>$debug</code> displays its arguments for each iteration of the analog solver (including rejected iterations).</li>
+<li><code>$monitor</code> monitors and displays values of variables or expressions. For each accepted step, if a variable or expression in the argument list changes value compared with the last accepted step (except <code>$abstime</code> or <code>$realtime</code>), the entire argument list is displayed at the end of the time step as if reported by <code>$strobe</code>.</li>
+</ul>
+
+<h3 id="s9.4.2">9.4.2 Escape Sequences for Special Characters</h3>
+
+<table>
+<tr><th>Escape Sequence</th><th>Description</th></tr>
+<tr><td><code>\n</code></td><td>Newline character</td></tr>
+<tr><td><code>\t</code></td><td>Tab character</td></tr>
+<tr><td><code>\\</code></td><td>The <code>\</code> character</td></tr>
+<tr><td><code>\"</code></td><td>The <code>"</code> character</td></tr>
+<tr><td><code>\ddd</code></td><td>A character specified by 1 to 3 octal digits</td></tr>
+<tr><td><code>%%</code></td><td>The <code>%</code> character</td></tr>
+</table>
+
+<h3 id="s9.4.3">9.4.3 Format Specifications</h3>
+
+<p>The <code>%</code> character indicates the next character is a format specification. For each <code>%</code> (except <code>%m</code>, <code>%%</code>, and <code>%l</code>), a corresponding expression argument shall be supplied.</p>
+
+<table>
+<tr><th>Format</th><th>Description</th></tr>
+<tr><td><code>%h</code> or <code>%H</code></td><td>Display in hexadecimal format</td></tr>
+<tr><td><code>%d</code> or <code>%D</code></td><td>Display in decimal format</td></tr>
+<tr><td><code>%o</code> or <code>%O</code></td><td>Display in octal format</td></tr>
+<tr><td><code>%b</code> or <code>%B</code></td><td>Display in binary format</td></tr>
+<tr><td><code>%c</code> or <code>%C</code></td><td>Display in ASCII character format</td></tr>
+<tr><td><code>%l</code> or <code>%L</code></td><td>Display library binding information (displayed as "library.cell")</td></tr>
+<tr><td><code>%m</code> or <code>%M</code></td><td>Display hierarchical name (no argument consumed)</td></tr>
+<tr><td><code>%s</code> or <code>%S</code></td><td>Display as a string</td></tr>
+</table>
+
+<p>Any expression argument with no corresponding format specification is displayed using the default decimal format in <code>$strobe</code>.</p>
+
+<h4>Format Specifications for Real Numbers</h4>
+<table>
+<tr><th>Format</th><th>Description</th></tr>
+<tr><td><code>%e</code> or <code>%E</code></td><td>Display real in exponential format</td></tr>
+<tr><td><code>%f</code> or <code>%F</code></td><td>Display real in decimal format</td></tr>
+<tr><td><code>%g</code> or <code>%G</code></td><td>Display real in exponential or decimal format, whichever is shorter</td></tr>
+<tr><td><code>%r</code> or <code>%R</code></td><td>Display real in engineering notation using scale factors (see <a href="ch2-lexical.html#s2.6.2">2.6.2</a>)</td></tr>
+</table>
+
+<p>These have the full formatting capabilities available in the C language. For example, <code>%10.3g</code> sets a minimum field width of 10 with 3 fractional digits.</p>
+
+<h3 id="s9.4.4">9.4.4 Hierarchical Name Format</h3>
+<p>The <code>%m</code> format specifier does not accept an argument. It causes the display task to print the hierarchical name of the module, task, function, or named block which invokes the system task containing the format specifier.</p>
+
+<h3 id="s9.4.5">9.4.5 String Format</h3>
+<p>The <code>%s</code> format specifier is used to print ASCII codes as characters. The associated argument is interpreted as a sequence of 8-bit hexadecimal ASCII codes. The value is right-justified so the right-most bit of the value is the least-significant bit of the last character. Leading zeros are never printed.</p>
+
+<h3 id="s9.4.6">9.4.6 Behavior During Iterative Solving</h3>
+<p>All display tasks, except <code>$debug</code>, shall not display output unless an iteration has been accepted.</p>
+
+<h3 id="s9.4.7">9.4.7 Extensions to the Display Tasks in the Digital Context</h3>
+<p>For <code>$strobe</code>, <code>$display</code>, <code>$write</code>, and <code>$monitor</code>: the <code>%r</code> (or <code>%R</code>) format specifier may be used on real expressions in the digital context.</p>
+
+
+<!-- 9.5 File I/O -->
+<h2 id="s9.5">9.5 File Input-Output System Tasks and Functions</h2>
+
+<h3 id="s9.5.1">9.5.1 Opening and Closing Files</h3>
+
+<pre class="syntax">file_open_function ::=
+    mcd = $fopen ( filename ) ;
+  | fd = $fopen ( filename , type ) ;
+
+file_close_task ::=
+    $fclose ( multi_channel_descriptor ) ;
+  | $fclose ( fd ) ;</pre>
+
+<p><code>$fopen</code> opens the file specified by <code>filename</code> and returns either a 32-bit multichannel descriptor or a 32-bit file descriptor, determined by the absence or presence of the <code>type</code> argument.</p>
+
+<p><code>filename</code> is an expression that is a string literal, string data type, or an integral data type containing a character string.</p>
+
+<p><code>type</code> is a string expression of one of the forms in the table below. If <code>type</code> is omitted, the file is opened for writing and a multichannel descriptor <code>mcd</code> is returned. If <code>type</code> is supplied, the file is opened as specified and a file descriptor <code>fd</code> is returned.</p>
+
+<p>The multichannel descriptor <code>mcd</code> is a 32-bit integer where a single bit is set indicating which file is opened. Bit 0 always refers to standard output. Output can be directed to multiple files by bitwise OR-ing multichannel descriptors. Bit 31 is reserved and shall always be cleared, limiting an implementation to at most 31 files via multichannel descriptors.</p>
+
+<p>The file descriptor <code>fd</code> is a 32-bit value with bit 31 always set. Three file descriptors are pre-opened:</p>
+<ul>
+<li><code>STDIN</code> = <code>32'h8000_0000</code> (pre-opened for reading)</li>
+<li><code>STDOUT</code> = <code>32'h8000_0001</code> (pre-opened for append)</li>
+<li><code>STDERR</code> = <code>32'h8000_0002</code> (pre-opened for append)</li>
+</ul>
+
+<p>File descriptors cannot be combined via bitwise OR.</p>
+
+<h4>Table 9-24 &mdash; Types for File Descriptors</h4>
+<table>
+<tr><th>Argument</th><th>Description</th></tr>
+<tr><td><code>"r"</code> or <code>"rb"</code></td><td>Open for reading</td></tr>
+<tr><td><code>"w"</code> or <code>"wb"</code></td><td>Truncate to zero length or create for writing</td></tr>
+<tr><td><code>"a"</code> or <code>"ab"</code></td><td>Append; open for writing at end of file, or create for writing</td></tr>
+<tr><td><code>"r+"</code>, <code>"r+b"</code>, or <code>"rb+"</code></td><td>Open for update (reading and writing)</td></tr>
+<tr><td><code>"w+"</code>, <code>"w+b"</code>, or <code>"wb+"</code></td><td>Truncate or create for update</td></tr>
+<tr><td><code>"a+"</code>, <code>"a+b"</code>, or <code>"ab+"</code></td><td>Append; open or create for update at end-of-file</td></tr>
+</table>
+
+<p>If a file cannot be opened, a zero is returned for <code>mcd</code> or <code>fd</code>. Applications can call <code>$ferror</code> to determine the cause.</p>
+
+<p><code>$fclose</code> closes the file(s) specified by <code>fd</code> or <code>mcd</code>. No further I/O on closed file descriptors is allowed. <code>$fopen</code> shall reuse channels that have been closed.</p>
+
+<h4 id="s9.5.1.1">9.5.1.1 Opening and Closing Files During Multiple Analyses</h4>
+<p>If a file is opened in a write mode in the first analysis and reopened in that write mode in a following analysis, content written from the following analyses shall be appended to content written during previous analyses.</p>
+
+<h4 id="s9.5.1.2">9.5.1.2 Sharing of File Descriptors Between Analog and Digital Contexts</h4>
+<p>File I/O system functions and tasks in both contexts can use file descriptors opened in either context, if the file descriptors are opened for writing or appending.</p>
+
+<h3 id="s9.5.2">9.5.2 File Output System Tasks</h3>
+
+<pre class="syntax">file_output_task ::=
+    file_output_task_name ( fd [, list_of_arguments] ) ;
+
+file_output_task_name ::=
+    $fdisplay | $fwrite | $fstrobe | $fmonitor | $fdebug</pre>
+
+<p>Each formatted display task (<code>$display</code>, <code>$write</code>, <code>$monitor</code>, <code>$strobe</code>) has a file counterpart (<code>$fdisplay</code>, <code>$fwrite</code>, <code>$fmonitor</code>, <code>$fstrobe</code>, <code>$fdebug</code>). These accept the same arguments, except the first argument shall be either a multichannel descriptor or a file descriptor.</p>
+
+<p><code>$fstrobe</code> and <code>$fmonitor</code> work like their counterparts <code>$strobe</code> and <code>$monitor</code>, except they write to files using the file descriptor.</p>
+
+<h3 id="s9.5.3">9.5.3 Formatting Data to a String</h3>
+
+<pre class="syntax">string_output_task ::=
+    $swrite ( string_variable , list_of_arguments ) ;
+
+variable-format_string_output_task ::=
+    $sformat ( string_variable , format_string , list_of_arguments ) ;</pre>
+
+<p><code>$swrite</code> is based on <code>$fwrite</code> and accepts the same arguments, except the first argument shall be a string variable to which the resulting string is written.</p>
+
+<p><code>$sformat</code> always interprets its second argument, and only its second argument, as a format string. This format argument can be a static string or a string variable. No other arguments are interpreted as format strings. <code>$sformat</code> supports all format specifiers supported by <code>$display</code>.</p>
+
+<p>If not enough arguments are supplied for the format specifiers or too many are supplied, a warning is issued.</p>
+
+<h3 id="s9.5.4">9.5.4 Reading Data from a File</h3>
+<p>Files opened with file descriptors can be read from only if they were opened with <code>r</code> or <code>r+</code> type values.</p>
+
+<h4>9.5.4.1 Reading a Line at a Time</h4>
+<pre><code>integer code;
+code = $fgets( str, fd );</code></pre>
+<p>Reads characters from the file specified by <code>fd</code> into string variable <code>str</code> until a newline character is read and transferred to <code>str</code>, or an EOF condition is encountered. Returns the number of characters read in <code>code</code>, or zero on error.</p>
+
+<h4>9.5.4.2 Reading Formatted Data</h4>
+<pre><code>integer code;
+code = $fscanf( fd, format, args );
+code = $sscanf( str, format, args );</code></pre>
+
+<p><code>$fscanf</code> reads from the file specified by <code>fd</code>. <code>$sscanf</code> reads from the string <code>str</code> (which shall be a string variable, string parameter, or string literal).</p>
+
+<p>Both functions read characters, interpret them according to a format, and store the results. The format string can contain:</p>
+<ul>
+<li>White space characters (blanks, tabs, newlines, formfeeds) that cause input to be read up to the next non-white-space character.</li>
+<li>An ordinary character (not <code>%</code>) that must match the next character of the input stream.</li>
+<li>Conversion specifications: <code>%</code>, optional <code>*</code> (assignment suppression), optional decimal digit string (maximum field width), and a conversion code.</li>
+</ul>
+
+<table>
+<tr><th>Code</th><th>Description</th></tr>
+<tr><td><code>%</code></td><td>A single <code>%</code> is expected in the input; no assignment is done</td></tr>
+<tr><td><code>d</code></td><td>Matches an optionally signed decimal number</td></tr>
+<tr><td><code>f</code>, <code>e</code>, or <code>g</code></td><td>Matches a floating point number</td></tr>
+<tr><td><code>r</code></td><td>Matches a real number in engineering notation using scale factors (see <a href="ch2-lexical.html#s2.6.2">2.6.2</a>)</td></tr>
+<tr><td><code>s</code></td><td>Matches a string (sequence of non-white-space characters)</td></tr>
+<tr><td><code>m</code></td><td>Returns the current hierarchical path as a string; does not read data</td></tr>
+</table>
+
+<p>The number of successfully matched and assigned input items is returned in <code>code</code>; 0 on early matching failure, EOF if the input ends before the first matching failure or conversion.</p>
+
+<h3 id="s9.5.5">9.5.5 File Positioning</h3>
+
+<pre><code>integer pos;
+pos = $ftell( fd );</code></pre>
+<p>Returns the offset from the beginning of the file of the current byte. Returns EOF on error.</p>
+
+<pre><code>code = $fseek( fd, offset, operation );
+code = $rewind( fd );</code></pre>
+
+<p>Sets the position of the next I/O operation on <code>fd</code>:</p>
+<ul>
+<li><code>operation = 0</code> &mdash; sets position equal to <code>offset</code> bytes</li>
+<li><code>operation = 1</code> &mdash; sets position to current location plus <code>offset</code></li>
+<li><code>operation = 2</code> &mdash; sets position to EOF plus <code>offset</code></li>
+</ul>
+
+<p><code>$rewind(fd)</code> is equivalent to <code>$fseek(fd, 0, 0)</code>.</p>
+
+<p>Repositioning cancels any <code>$ungetc</code> operations. Returns -1 on error, 0 on success.</p>
+
+<h3 id="s9.5.6">9.5.6 Flushing Output</h3>
+<pre><code>$fflush( mcd );
+$fflush( fd );
+$fflush( );</code></pre>
+<p>Writes any buffered output to the file(s) specified by <code>mcd</code>, to the file specified by <code>fd</code>, or if invoked with no arguments, to all open files.</p>
+
+<h3 id="s9.5.7">9.5.7 I/O Error Status</h3>
+<pre><code>integer errno;
+errno = $ferror( fd, str );</code></pre>
+<p>A string description of the most recent error is written into <code>str</code> (which should be at least 640 bits wide). The integral error code is returned in <code>errno</code>. If the most recent operation did not result in an error, the return value is zero and <code>str</code> is empty.</p>
+
+<h3 id="s9.5.8">9.5.8 Detecting EOF</h3>
+<pre><code>integer code;
+code = $feof( fd );</code></pre>
+<p>Returns a nonzero value when EOF has previously been detected reading <code>fd</code>; returns zero otherwise.</p>
+
+<h3 id="s9.5.9">9.5.9 Behavior of File I/O Tasks During Iterative Solving</h3>
+<ul>
+<li>If a file is being read during an iterative solve and the iteration is rejected, the file pointer is reset to its position before the iterative solve started.</li>
+<li>File write operations shall not be performed unless the iteration is accepted.</li>
+<li>Exception: <code>$fdebug</code> write operations occur even during rejected iterations.</li>
+<li>If the host system prevents the file position from being reset after a rejected iteration, a fatal error is reported.</li>
+</ul>
+
+
+<!-- 9.6 Timescale -->
+<h2 id="s9.6">9.6 Timescale System Tasks</h2>
+<p>Verilog-AMS HDL does not extend the timescale tasks defined in IEEE Std 1364-2005 Verilog HDL. <code>$printtimescale</code> and <code>$timeformat</code> are digital-context only.</p>
+
+
+<!-- 9.7 Simulation Control -->
+<h2 id="s9.7">9.7 Simulation Control System Tasks</h2>
+
+<h3 id="s9.7.1">9.7.1 $finish</h3>
+
+<pre class="syntax">finish_task ::=
+    $finish [ ( n ) ] ;</pre>
+
+<p>If <code>$finish</code> is called during an accepted iteration, the simulator shall exit after the current solution is complete. Called during a rejected iteration, it has no effect. All appropriate <code>final_step</code> blocks are triggered.</p>
+
+<p>If called from an <code>analog initial</code> block, the simulator shall exit without performing the simulation.</p>
+
+<p>The optional expression <code>n</code> controls diagnostic messages (default is 1):</p>
+<table>
+<tr><th>Parameter</th><th>Message</th></tr>
+<tr><td>0</td><td>Prints nothing</td></tr>
+<tr><td>1</td><td>Prints simulation time and location</td></tr>
+<tr><td>2</td><td>Prints simulation time, location, and statistics about memory and CPU time</td></tr>
+</table>
+
+<p>If called from an <code>analog initial</code> block, the simulator reports that the call was made during initialization in place of the simulation time. If called from the analog context during a dc sweep, the current value of the swept variable is reported in place of the simulation time.</p>
+
+<h3 id="s9.7.2">9.7.2 $stop</h3>
+
+<pre class="syntax">stop_task ::=
+    $stop [ ( n ) ] ;</pre>
+
+<p>A call to <code>$stop</code> during an accepted iteration causes simulation to be suspended at a converged timepoint. Takes an optional expression argument (0, 1, or 2) as in the table above. <code>$stop</code> shall not be used within an <code>analog initial</code> block. The mechanism for resuming simulation is implementation-defined.</p>
+
+<h3 id="s9.7.3">9.7.3 $fatal, $error, $warning, and $info</h3>
+
+<pre class="syntax">assert_severity_task ::=
+    fatal_message_task
+  | nonfatal_message_task
+
+fatal_message_task ::=
+    $fatal [ ( finish_number [ , message_argument { , message_argument } ] ) ] ;
+
+nonfatal_message_task ::=
+    severity_task [ ( [ message_argument { , message_argument } ] ) ] ;
+
+severity_task ::= $error | $warning | $info
+
+finish_number ::= 0 | 1 | 2</pre>
+
+<ul>
+<li><code>$fatal</code> generates a run-time fatal assertion error, terminating the simulation. The first argument sets the diagnostic level as in <code>$finish</code>. Calling <code>$fatal</code> results in an implicit call to <code>$finish</code>. <code>$fatal</code> terminates the simulation without checking whether the iteration would be rejected.</li>
+<li><code>$error</code> generates a run-time error.</li>
+<li><code>$warning</code> generates a run-time warning, which can be suppressed in a tool-specific manner.</li>
+<li><code>$info</code> indicates that the assertion failure carries no specific severity.</li>
+</ul>
+
+<p>Non-fatal severity tasks (<code>$error</code>, <code>$warning</code>, <code>$info</code>) called during a rejected iteration shall have no effect.</p>
+
+<p>If <code>$fatal</code> is executed within an <code>analog initial</code> block, initialization may be aborted, and simulation shall not proceed past initialization. If <code>$error</code> is executed within an <code>analog initial</code> block, the message is issued and initialization continues, but simulation shall not proceed past initialization. <code>$warning</code> and <code>$info</code> only output their text message and do not affect initialization or simulation.</p>
+
+<p>These tasks report the simulation run time. If called during a dc sweep, the current swept variable value is reported. If called from an <code>analog initial</code> block, the task reports that the call was made during initialization.</p>
+
+<p>Each task can include additional user-specified information using the same format as <code>$display</code>.</p>
+
+
+<!-- 9.8 PLA -->
+<h2 id="s9.8">9.8 PLA Modeling System Tasks</h2>
+<p>Verilog-AMS HDL does not extend the PLA modeling tasks defined in IEEE Std 1364-2005 Verilog HDL. Digital context only.</p>
+
+
+<!-- 9.9 Stochastic -->
+<h2 id="s9.9">9.9 Stochastic Analysis System Tasks</h2>
+<p>Verilog-AMS HDL does not extend the stochastic analysis tasks defined in IEEE Std 1364-2005 Verilog HDL. Digital context only.</p>
+
+
+<!-- 9.10 Simulator Time -->
+<h2 id="s9.10">9.10 Simulator Time System Functions</h2>
+
+<p><code>$abstime</code> is a new function that can be used from both analog and digital contexts. It returns the absolute time as a real value in seconds.</p>
+
+<div class="note"><code>$realtime</code> in the analog context is deprecated as of this version of the LRM.</div>
+
+
+<!-- 9.11 Conversion -->
+<h2 id="s9.11">9.11 Conversion System Functions</h2>
+<p><code>$bitstoreal</code> and <code>$realtobits</code> can be used in the analog context. Other conversion functions (<code>$itor</code>, <code>$rtoi</code>, <code>$signed</code>, <code>$unsigned</code>) remain digital-only.</p>
+
+
+<!-- 9.12 Command Line Input -->
+<h2 id="s9.12">9.12 Command Line Input</h2>
+<p><code>$test$plusargs</code> and <code>$value$plusargs</code> are extended to be usable in the analog context.</p>
+
+
+<!-- 9.13 Probabilistic Distribution -->
+<h2 id="s9.13">9.13 Probabilistic Distribution System Functions</h2>
+
+<h3 id="s9.13.1">9.13.1 $random and $arandom</h3>
+
+<pre class="syntax">random_function ::=
+    $random [ ( random_seed ) ]
+
+random_seed ::=
+    integer_variable_identifier
+  | reg_variable_identifier
+  | time_variable_identifier
+
+analog_random_function ::=
+    $arandom [ ( analog_random_seed [, type_string] ) ]
+
+analog_random_seed ::=
+    integer_variable_identifier
+  | reg_variable_identifier
+  | time_variable_identifier
+  | integer_parameter_identifier
+  | [ sign ] decimal_number
+
+type_string ::=
+    "global"
+  | "instance"</pre>
+
+<p><code>$random</code> and <code>$arandom</code> return a 32-bit signed integer. <code>$arandom</code> is upwardly compatible with <code>$random</code>.</p>
+
+<p>The <code>random_seed</code> argument may be omitted (simulator picks a seed). Within the analog context, it may be an analog integer variable. It is an inout argument: a value is passed in and a different value is returned. The variable should be initialized by the user and only updated by the system function.</p>
+
+<p><code>$random</code> shall always return the same stream of values given the same initial seed.</p>
+
+<p><code>$arandom</code> additionally supports <code>analog_random_seed</code>, which can be a parameter or constant. In that case, the parameter value is not updated; an internal seed is created and updated on each call. This allows <code>$arandom</code> to be used for parameter initialization. To get different random values when <code>analog_random_seed</code> is a parameter, override the parameter (see <a href="ch6-hierarchy.html#s6.3">6.3</a>).</p>
+
+<p>The <code>type_string</code> argument provides Monte-Carlo support and shall only be used within a paramset. If <code>"global"</code> (or not specified), one value is generated per Monte-Carlo trial. If <code>"instance"</code>, one value is generated for each instance that references this value, with new values for each trial.</p>
+
+<p>Example: where <code>b &gt; 0</code>, the expression <code>($random % b)</code> gives a number in the range [(-b+1):(b-1)].</p>
+<pre><code>integer rand;
+rand = $random % 60;    // random number between -59 and 59</code></pre>
+
+<h3 id="s9.13.2">9.13.2 Distribution Functions</h3>
+
+<pre class="syntax">distribution_functions ::=
+    $digital_dist_functions ( args )
+  | $rdist_uniform ( seed , start_expression , end_expression [, type_string] )
+  | $rdist_normal ( seed , mean_expression , standard_deviation_expression [, type_string] )
+  | $rdist_exponential ( seed , mean_expression [, type_string] )
+  | $rdist_poisson ( seed , mean_expression [, type_string] )
+  | $rdist_chi_square ( seed , degree_of_freedom_expression [, type_string] )
+  | $rdist_t ( seed , degree_of_freedom_expression [, type_string] )
+  | $rdist_erlang ( seed , k_stage_expression , mean_expression [, type_string] )
+
+seed ::=
+    integer_variable_identifier
+  | integer_parameter_identifier
+  | [ sign ] decimal_number
+
+type_string ::=
+    "global"
+  | "instance"</pre>
+
+<p>Rules:</p>
+<ul>
+<li>All arguments are real values, except <code>seed</code>. For <code>$rdist_exponential</code>, <code>$rdist_poisson</code>, <code>$rdist_chi_square</code>, <code>$rdist_t</code>, and <code>$rdist_erlang</code>, the arguments mean, degree_of_freedom, and k_stage shall be greater than zero.</li>
+<li>Each function returns a pseudo-random number whose characteristics are described by the function name.</li>
+<li>The <code>seed</code> argument shall be an integer. If it is an integer variable, it is an inout argument. If a parameter or constant, an internal seed is created and updated on each call.</li>
+<li>The functions shall always return the same value given the same seed.</li>
+<li>All functions return a real value.</li>
+<li>For <code>$rdist_uniform</code>, <code>start</code> shall be smaller than <code>end</code>.</li>
+<li>For <code>$rdist_normal</code>: <code>mean = 0</code> and <code>standard_deviation = 1</code> generates Gaussian distribution.</li>
+<li>The <code>type_string</code> provides Monte-Carlo support and shall only be used within a paramset (same semantics as for <code>$arandom</code>).</li>
+</ul>
+
+<h3 id="s9.13.3">9.13.3 Algorithm for Probabilistic Distribution</h3>
+
+<p>17.9.3 of IEEE Std 1364-2005 Verilog HDL contains the C-code describing the algorithm. The Verilog-AMS real distribution functions map to the C functions as follows:</p>
+
+<table>
+<tr><th>Verilog-AMS Function</th><th>C Function (IEEE 1364-2005, 17.9.3)</th></tr>
+<tr><td><code>$rdist_uniform</code></td><td><code>uniform</code></td></tr>
+<tr><td><code>$rdist_normal</code></td><td><code>normal</code></td></tr>
+<tr><td><code>$rdist_exponential</code></td><td><code>exponential</code></td></tr>
+<tr><td><code>$rdist_poisson</code></td><td><code>poisson</code></td></tr>
+<tr><td><code>$rdist_chi_square</code></td><td><code>chi_square</code></td></tr>
+<tr><td><code>$rdist_t</code></td><td><code>t</code></td></tr>
+<tr><td><code>$rdist_erlang</code></td><td><code>erlang</code></td></tr>
+</table>
+
+
+<!-- 9.14 Math -->
+<h2 id="s9.14">9.14 Math System Functions</h2>
+
+<p>All math functions except <code>$clog2</code> are aliases of the analog math operators described in <a href="ch4-expressions.html#s4.3.1">4.3.1</a> (see Table 4-14 for the mapping). They are usable from both the analog and digital contexts.</p>
+
+<table>
+<tr><th>Function</th><th>Signature</th><th>Description</th></tr>
+<tr><td><code>$ln</code></td><td><code>$ln(x)</code></td><td>Natural logarithm</td></tr>
+<tr><td><code>$log10</code></td><td><code>$log10(x)</code></td><td>Base-10 logarithm</td></tr>
+<tr><td><code>$exp</code></td><td><code>$exp(x)</code></td><td>Exponential (e^x)</td></tr>
+<tr><td><code>$sqrt</code></td><td><code>$sqrt(x)</code></td><td>Square root</td></tr>
+<tr><td><code>$pow</code></td><td><code>$pow(x, y)</code></td><td>Power (x^y)</td></tr>
+<tr><td><code>$floor</code></td><td><code>$floor(x)</code></td><td>Floor</td></tr>
+<tr><td><code>$ceil</code></td><td><code>$ceil(x)</code></td><td>Ceiling</td></tr>
+<tr><td><code>$sin</code></td><td><code>$sin(x)</code></td><td>Sine</td></tr>
+<tr><td><code>$cos</code></td><td><code>$cos(x)</code></td><td>Cosine</td></tr>
+<tr><td><code>$tan</code></td><td><code>$tan(x)</code></td><td>Tangent</td></tr>
+<tr><td><code>$asin</code></td><td><code>$asin(x)</code></td><td>Arc sine</td></tr>
+<tr><td><code>$acos</code></td><td><code>$acos(x)</code></td><td>Arc cosine</td></tr>
+<tr><td><code>$atan</code></td><td><code>$atan(x)</code></td><td>Arc tangent</td></tr>
+<tr><td><code>$atan2</code></td><td><code>$atan2(y, x)</code></td><td>Arc tangent of y/x</td></tr>
+<tr><td><code>$hypot</code></td><td><code>$hypot(x, y)</code></td><td>Hypotenuse: sqrt(x^2 + y^2)</td></tr>
+<tr><td><code>$sinh</code></td><td><code>$sinh(x)</code></td><td>Hyperbolic sine</td></tr>
+<tr><td><code>$cosh</code></td><td><code>$cosh(x)</code></td><td>Hyperbolic cosine</td></tr>
+<tr><td><code>$tanh</code></td><td><code>$tanh(x)</code></td><td>Hyperbolic tangent</td></tr>
+<tr><td><code>$asinh</code></td><td><code>$asinh(x)</code></td><td>Inverse hyperbolic sine</td></tr>
+<tr><td><code>$acosh</code></td><td><code>$acosh(x)</code></td><td>Inverse hyperbolic cosine</td></tr>
+<tr><td><code>$atanh</code></td><td><code>$atanh(x)</code></td><td>Inverse hyperbolic tangent</td></tr>
+<tr><td><code>$clog2</code></td><td><code>$clog2(x)</code></td><td>Ceiling of log base 2 (returns integer)</td></tr>
+</table>
+
+<p>Users are encouraged to use the system function version of the math operation instead of the operator for better compatibility with IEEE Std 1364-2005.</p>
+
+
+<!-- 9.15 Analog Kernel Parameters -->
+<h2 id="s9.15">9.15 Analog Kernel Parameter System Functions</h2>
+
+<pre class="syntax">environment_parameter_functions ::=
+    $temperature
+  | $vt [ ( temperature_expression ) ]
+  | $simparam ( param_name [, expression] )
+  | $simparam$str ( param_name )</pre>
+
+<p>These functions return information about the current environment parameters as a real value.</p>
+
+<h3>$temperature</h3>
+<p>Takes no arguments. Returns the circuit's ambient temperature in Kelvin.</p>
+
+<h3>$vt</h3>
+<p>Optionally takes temperature (in Kelvin) as input. Returns the thermal voltage (kT/q) at the given temperature. Without the optional argument, returns the thermal voltage using <code>$temperature</code>.</p>
+
+<h3>$simparam</h3>
+<p><code>$simparam(param_name [, expression])</code> queries the simulator for a real-valued simulation parameter. <code>param_name</code> is a string value (string literal, string parameter, or string variable). If known, its value is returned. If not known and the optional expression is not supplied, an error is generated. If the optional expression is supplied, its value is returned when <code>param_name</code> is not known. Always returns a real value; integer parameters are coerced to real.</p>
+
+<h4>Table 9-27 &mdash; Simulation Real and Integer Parameter Names</h4>
+<table>
+<tr><th>String</th><th>Units</th><th>Description</th></tr>
+<tr><td><code>"gdev"</code></td><td>1/Ohms</td><td>Additional conductance for conductance homotopy convergence algorithm</td></tr>
+<tr><td><code>"gmin"</code></td><td>1/Ohms</td><td>Minimum conductance placed in parallel with nonlinear branches</td></tr>
+<tr><td><code>"imax"</code></td><td>Amps</td><td>Branch current threshold above which constitutive relation should be linearized</td></tr>
+<tr><td><code>"imelt"</code></td><td>Amps</td><td>Branch current threshold indicating device failure</td></tr>
+<tr><td><code>"iteration"</code></td><td></td><td>Iteration number of the analog solver</td></tr>
+<tr><td><code>"scale"</code></td><td></td><td>Scale factor for device instance geometry parameters</td></tr>
+<tr><td><code>"shrink"</code></td><td></td><td>Optical linear shrink factor</td></tr>
+<tr><td><code>"simulatorSubversion"</code></td><td></td><td>The simulator sub-version</td></tr>
+<tr><td><code>"simulatorVersion"</code></td><td></td><td>The simulator version</td></tr>
+<tr><td><code>"sourceScaleFactor"</code></td><td></td><td>Multiplicative factor for independent sources for source stepping homotopy</td></tr>
+<tr><td><code>"tnom"</code></td><td>Celsius</td><td>Default temperature at which model parameters were extracted</td></tr>
+<tr><td><code>"timeUnit"</code></td><td>s</td><td>Time unit as specified in <code>`timescale</code>, in seconds</td></tr>
+<tr><td><code>"timePrecision"</code></td><td>s</td><td>Time precision as specified in <code>`timescale</code>, in seconds</td></tr>
+</table>
+
+<p>The values of <code>"simulatorVersion"</code> and <code>"simulatorSubversion"</code> shall be monotonically increasing for new versions.</p>
+
+<p>Examples:</p>
+<pre><code>// Error if "gmin" is not known:
+gmin = $simparam("gmin");
+
+// Returns 1.0 if "sourceScaleFactor" is not known:
+sourcescale = $simparam("sourceScaleFactor", 1.0);</code></pre>
+
+<h3>$simparam$str</h3>
+<p><code>$simparam$str(param_name)</code> is similar to <code>$simparam</code> but returns string-valued simulation parameters.</p>
+
+<h4>Table 9-28 &mdash; Simulation String Parameter Names</h4>
+<table>
+<tr><th>String</th><th>Description</th></tr>
+<tr><td><code>"analysis_name"</code></td><td>The name of the current analysis (e.g., tran1, mydc)</td></tr>
+<tr><td><code>"analysis_type"</code></td><td>The type of the current analysis (e.g., dc, tran, ac)</td></tr>
+<tr><td><code>"cwd"</code></td><td>The current working directory in which the simulator was started</td></tr>
+<tr><td><code>"module"</code></td><td>The name of the module from which <code>$simparam$str</code> is called</td></tr>
+<tr><td><code>"instance"</code></td><td>The hierarchical name of the instance from which <code>$simparam$str</code> is called</td></tr>
+<tr><td><code>"path"</code></td><td>The hierarchical path to the <code>$simparam$str</code> function</td></tr>
+</table>
+
+<p>Example:</p>
+<pre><code>module testbench;
+    dut dut1;
+endmodule
+
+module dut;
+    task mytask;
+        $display( "%s\n%s\n%s\n", $simparam$str( "module"),
+                                   $simparam$str( "instance"),
+                                   $simparam$str( "path"));
+    endtask
+endmodule
+
+// produces:
+// dut
+// testbench.dut1
+// testbench.dut1.mytask</code></pre>
+
+
+<!-- 9.16 Dynamic Simulation Probe -->
+<h2 id="s9.16">9.16 Dynamic Simulation Probe Function</h2>
+
+<pre class="syntax">dynamic_monitor_function ::=
+    $simprobe ( inst_name , param_name [, expression] )</pre>
+
+<p><code>$simprobe()</code> queries the simulator for an output variable named <code>param_name</code> in a sibling instance called <code>inst_name</code>. Both arguments are string values (string literal, string parameter, or string variable). The simulator looks for <code>inst_name</code> in the parent of the current instance (a sibling). If either cannot be resolved and the optional expression is not supplied, an error is generated. If the optional expression is supplied, its value is returned instead of raising an error.</p>
+
+<p>Example:</p>
+<pre><code>module monitor;
+    parameter string inst = "default";
+    parameter string quant = "default";
+    parameter real threshold = 0.0;
+    real probe;
+    analog begin
+        probe = $simprobe(inst, quant);
+        if (probe > threshold) begin
+            $strobe("ERROR: Time %e: %s#%s (%g) > threshold (%e)",
+                $abstime, inst, quant, probe, threshold);
+            $finish;
+        end
+    end
+endmodule</code></pre>
+
+<pre><code>module top(d, g, s);
+    electrical d, g, s;
+    inout d, g, s;
+    electrical gnd; ground gnd;
+    SPICE_pmos #(.w(4u),.l(0.1u),.ad(4p),.as(4p),.pd(10u),.ps(10u))
+        mp(d, g, s, s);
+    SPICE_nmos #(.w(2u),.l(0.1u),.ad(2p),.as(2p),.pd(6u),.ps(6u))
+        mn(d, g, gnd, gnd);
+    monitor #(.inst("mn"),.quant("id"),.threshold(4.0e-3))
+        amonitor();
+endmodule</code></pre>
+
+
+<!-- 9.17 Analog Kernel Control -->
+<h2 id="s9.17">9.17 Analog Kernel Control System Tasks and Functions</h2>
+
+<h3 id="s9.17.1">9.17.1 $discontinuity</h3>
+
+<pre class="syntax">$discontinuity [ ( constant_expression ) ] ;</pre>
+
+<p><code>$discontinuity</code> gives hints to the simulator about discontinuous behavior. It does not directly specify behavior. It shall be executed whenever the analog behavior changes discontinuously.</p>
+
+<p><code>constant_expression</code> indicates the degree of the discontinuity (non-negative): <code>$discontinuity(i)</code> implies a discontinuity in the i-th derivative of the constitutive equation with respect to either a signal value or time, where <code>i</code> must be a non-negative integer.</p>
+
+<ul>
+<li><code>$discontinuity(0)</code> &mdash; discontinuity in the equation</li>
+<li><code>$discontinuity(1)</code> &mdash; discontinuity in slope</li>
+<li><code>$discontinuity(-1)</code> &mdash; special form used with the <code>$limit()</code> function</li>
+</ul>
+
+<p>Filter functions (<code>transition()</code>, <code>slew()</code>, <code>laplace()</code>, etc.) can smooth discontinuous behavior. Discontinuity created by switch branches and filters does not need to be announced.</p>
+
+<p>Example (relay model):</p>
+<pre><code>module relay(c1, c2, pin, nin);
+    inout c1, c2;
+    input pin, nin;
+    electrical c1, c2, pin, nin;
+    parameter real r = 1;
+    analog begin
+        @(cross(V(pin,nin))) $discontinuity;
+        if (V(pin,nin) >= 0)
+            I(c1,c2) <+ V(c1,c2) / r;
+        else
+            I(c1,c2) <+ 0;
+    end
+endmodule</code></pre>
+
+<p>Example (triangle wave):</p>
+<pre><code>module triangle(out);
+    output out;
+    voltage out;
+    parameter real period = 10.0, amplitude = 1.0;
+    integer slope;
+    real offset;
+    analog begin
+        @(timer(0, period)) begin
+            slope = +1;
+            offset = $abstime;
+            $discontinuity;
+        end
+        @(timer(period/2, period)) begin
+            slope = -1;
+            offset = $abstime;
+            $discontinuity;
+        end
+        V(out) <+ amplitude * slope *
+            (4 * ($abstime - offset) / period - 1);
+    end
+endmodule</code></pre>
+
+<h3 id="s9.17.2">9.17.2 $bound_step</h3>
+
+<pre class="syntax">$bound_step ( expression ) ;</pre>
+
+<p><code>$bound_step()</code> puts a bound on the next time step. It does not specify what the next time step is, but bounds how far the next time point can be from the present time point. The argument is the maximum time step (shall be non-negative). It does not return a value.</p>
+
+<p>If the value is less than the simulator's minimum allowable time step, the simulator's minimum time step is used instead. The simulator shall ensure the next time step is no larger than the smallest <code>$bound_step()</code> argument currently active. The statement is ignored during non time-domain analyses.</p>
+
+<p>Example (sinusoidal voltage source with 20 points per cycle):</p>
+<pre><code>module vsine(out);
+    output out;
+    voltage out;
+    parameter real freq = 1.0, ampl = 1.0, offset = 0.0;
+    analog begin
+        V(out) <+ ampl * sin(2.0 * `M_PI * freq * $abstime) + offset;
+        $bound_step(0.05 / freq);
+    end
+endmodule</code></pre>
+
+<h3 id="s9.17.3">9.17.3 $limit</h3>
+
+<pre class="syntax">limit_call ::=
+    $limit ( access_function_reference )
+  | $limit ( access_function_reference , string , arg_list )
+  | $limit ( access_function_reference , analog_function_identifier , arg_list )</pre>
+
+<p>When the simulator has converged, the return value of <code>$limit()</code> is the value of the access function reference, within appropriate tolerances. For some analysis types or solution methods (e.g., damped Newton-Raphson), the return value may depend on the value of the access function and internal state. The simulator determines whether limiting should be applied and what the return value is on a given iteration.</p>
+
+<p>When more than one argument is supplied, the second argument recommends a function to compute the return value. When the second argument is a string, it refers to a built-in function of the simulator.</p>
+
+<h4>Built-in Limit Functions</h4>
+
+<p><strong>pnjlim</strong> &mdash; Intended for limiting arguments to exponentials. <code>limexp()</code> may be implemented through a function derived from pnjlim. Requires two additional arguments:</p>
+<ul>
+<li>Third argument: step size <code>vte</code> (usually thermal voltage times emission coefficient)</li>
+<li>Fourth argument: critical voltage <code>vcrit</code> (generally <code>vte * ln(vte / (2 * Is))</code>)</li>
+</ul>
+
+<p><strong>fetlim</strong> &mdash; Intended for limiting the potential across a MOS transistor oxide. Requires one additional argument:</p>
+<ul>
+<li>Third argument: generally the threshold voltage of the MOS transistor</li>
+</ul>
+
+<p>If the string refers to an unknown or unsupported function, the simulator determines the appropriate limiting algorithm as if no string had been supplied.</p>
+
+<h4>User-Defined Limit Functions</h4>
+<p>The second argument may be an identifier referring to a user-defined analog function. If limiting is needed, the simulator passes:</p>
+<ul>
+<li>First argument: value of the access function reference for the current iteration</li>
+<li>Second argument: the internal state (generally the return value from the previous iteration)</li>
+<li>Third and subsequent arguments: passed through from <code>$limit()</code></li>
+</ul>
+
+<p>All arguments of the user-defined function shall be declared <code>input</code>. The user-defined function shall call <code>$discontinuity(-1)</code> when its return value is not sufficiently close to the value of its first argument.</p>
+
+<p>Example (diode with user-defined pnjlim):</p>
+<pre><code>module diode(a, c);
+    inout a, c;
+    electrical a, c;
+    parameter real IS = 1.0e-14;
+    parameter real CJO = 0.0;
+
+    analog function real spicepnjlim;
+        input vnew, vold, vt, vcrit;
+        real vnew, vold, vt, vcrit, vlimit, arg;
+        begin
+            vlimit = vnew;
+            if ((vnew > vcrit) && (abs(vnew - vold) > (vt + vt))) begin
+                if (vold > 0) begin
+                    arg = 1 + (vnew - vold) / vt;
+                    if (arg > 0)
+                        vlimit = vold + vt * ln(arg);
+                    else
+                        vlimit = vcrit;
+                end else
+                    vlimit = vt * ln(vnew / vt);
+                $discontinuity(-1);
+            end
+            spicepnjlim = vlimit;
+        end
+    endfunction
+
+    real vdio, idio, qdio, vcrit;
+    analog begin
+        vcrit = 0.7;
+        vdio = $limit(V(a,c), spicepnjlim, $vt, vcrit);
+        idio = IS * (exp(vdio / $vt) - 1);
+        I(a,c) <+ idio;
+        if (vdio < 0.5) begin
+            qdio = 0.5 * CJO * (1 - sqrt(1 - V(a,c)));
+        end else begin
+            qdio = CJO * (2.0 * (1.0 - sqrt(0.5))
+                + sqrt(2.0) / 2.0 * (vdio * vdio + vdio - 3.0/4.0));
+        end
+        I(a,c) <+ ddt(qdio);
+    end
+endmodule</code></pre>
+
+
+<!-- 9.18 Hierarchical Parameter System Functions -->
+<h2 id="s9.18">9.18 Hierarchical Parameter System Functions</h2>
+
+<pre class="syntax">hierarchical_parameter_system_functions ::=
+    $mfactor
+  | $xposition
+  | $yposition
+  | $angle
+  | $hflip
+  | $vflip</pre>
+
+<p>These functions return hierarchical information about the instance of a module or paramset. See <a href="ch6-hierarchy.html#s6.3.6">6.3.6</a> for how these parameters are specified and the automatic rules for instances with non-unity <code>$mfactor</code>.</p>
+
+<ul>
+<li><code>$mfactor</code> &mdash; the shunt multiplicity factor (number of identical devices combined in parallel)</li>
+<li><code>$xposition</code>, <code>$yposition</code> &mdash; offsets in meters of the location of the center of the instance</li>
+<li><code>$hflip</code>, <code>$vflip</code> &mdash; indicate the instance has been mirrored about its center</li>
+<li><code>$angle</code> &mdash; rotation in degrees counter-clockwise</li>
+</ul>
+
+<p>These functions can also be used as targets in parameter alias declarations (see <a href="ch3-datatypes.html#s3.4.7">3.4.7</a>).</p>
+
+<p>The returned value is computed by combining values from the top of the hierarchy down to the instance making the call:</p>
+
+<h4>Table 9-29 &mdash; Hierarchical Parameter Values</h4>
+<table>
+<tr><th>System Parameter</th><th>Top-Level Value</th><th>Resolved Value for Instance</th><th>Allowed Values</th></tr>
+<tr><td><code>$angle</code></td><td>0 degrees</td><td>($angle<sub>specified</sub> + $angle<sub>hier</sub>) mod 360</td><td>0 &le; $angle &lt; 360</td></tr>
+<tr><td><code>$hflip</code></td><td>+1</td><td>$hflip<sub>specified</sub> * $hflip<sub>hier</sub></td><td>+1 or -1</td></tr>
+<tr><td><code>$mfactor</code></td><td>1.0</td><td>$mfactor<sub>specified</sub> * $mfactor<sub>hier</sub></td><td>&gt; 0</td></tr>
+<tr><td><code>$vflip</code></td><td>+1</td><td>$vflip<sub>specified</sub> * $vflip<sub>hier</sub></td><td>+1 or -1</td></tr>
+<tr><td><code>$xposition</code></td><td>0.0 m</td><td>$xposition<sub>specified</sub> + $xposition<sub>hier</sub></td><td>Any</td></tr>
+<tr><td><code>$yposition</code></td><td>0.0 m</td><td>$yposition<sub>specified</sub> + $yposition<sub>hier</sub></td><td>Any</td></tr>
+</table>
+
+<div class="note"><code>$angle</code> is specified and returned in degrees, but trigonometric functions (see <a href="ch4-expressions.html#s4.3.2">4.3.2</a>) operate in radians.</div>
+
+<p>Example ($mfactor):</p>
+<pre><code>module test_module(p, n);
+    inout p, n;
+    electrical p, n;
+    module_a A1(p, n);
+endmodule
+
+module module_a(p, n);
+    inout p, n;
+    electrical p, n;
+    module_b #(.$mfactor(2)) B1(p, n);   // mfactor = 3 * 2
+endmodule
+
+module module_b(p, n);
+    inout p, n;
+    electrical p, n;
+    module_c #(.$mfactor(7)) C1(p, n);   // mfactor = 3 * 2 * 7 = 42
+endmodule
+
+// linear resistor
+module module_c(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter r = 1.0;
+    (* desc = "effective resistance" *) real reff;
+    analog begin
+        I(p,n) <+ V(p,n) / r;   // mfactor scaling handled automatically
+        reff = r / $mfactor;     // the effective resistance = 1/42
+    end
+endmodule</code></pre>
+
+<p>Example ($xposition):</p>
+<pre><code>module test_module(p, n);
+    inout p, n;
+    electrical p, n;
+    module_a A1(p, n);
+endmodule
+
+module module_a(p, n);
+    inout p, n;
+    electrical p, n;
+    module_b #(.$xposition(1u)) B1(p, n);   // xposition = 1.1u + 1u
+endmodule
+
+module module_b(p, n);
+    inout p, n;
+    electrical p, n;
+    module_c #(.$xposition(2u)) C1(p, n);   // xposition = 1.1u + 1u + 2u = 4.1u
+endmodule
+
+module module_c(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter r = 1.0;
+    analog begin
+        if ($xposition == 4.1u)
+            I(p,n) <+ V(p,n) / 1.0;
+        else
+            I(p,n) <+ V(p,n) / 2.0;
+    end
+endmodule</code></pre>
+
+
+<!-- 9.19 Explicit Binding Detection -->
+<h2 id="s9.19">9.19 Explicit Binding Detection System Functions</h2>
+
+<pre class="syntax">genvar_system_function ::=
+    $param_given ( module_parameter_identifier )
+  | $port_connected ( port_scalar_expression )</pre>
+
+<p>The return values of these functions are constant during a simulation; the value is fixed during elaboration. They can be used in genvar expressions controlling conditional or looping behavior of analog operators (see <a href="ch4-expressions.html#s4.5">4.5</a>).</p>
+
+<h3>$param_given</h3>
+<p><code>$param_given(param_id)</code> takes a single argument which must be a parameter identifier. Returns 1 if the parameter was overridden (by a <code>defparam</code> statement or by a module instance parameter value assignment), and 0 otherwise.</p>
+
+<pre><code>if ($param_given(tdevice))
+    temp = tdevice + `P_CELSIUS0;
+else
+    temp = $temperature;</code></pre>
+
+<h3>$port_connected</h3>
+<p><code>$port_connected(port_id)</code> takes one argument which must be a port identifier. Returns 1 if the port was connected to a net (by order or by name) when the module was instantiated, and 0 otherwise. The port may be connected to a net with no other connections, but <code>$port_connected</code> shall still return 1.</p>
+
+<pre><code>module myclk(vout_q, vout_qbar);
+    output vout_q, vout_qbar;
+    electrical vout_q, vout_qbar;
+    parameter real tdel = 3u from [0:inf);
+    parameter real trise = 1u from (0:inf);
+    parameter real tfall = 1u from (0:inf);
+    parameter real period = 20u from (0:inf);
+    integer q;
+    analog begin
+        @(timer(0, period))
+            q = 0;
+        @(timer(period/2, period))
+            q = 1;
+        if ($port_connected(vout_q))
+            V(vout_q) <+ transition(q, tdel, trise, tfall);
+        else
+            V(vout_q) <+ 0.0;
+        if ($port_connected(vout_qbar))
+            V(vout_qbar) <+ transition(!q, tdel, trise, tfall);
+        else
+            V(vout_qbar) <+ 0.0;
+    end
+endmodule
+
+module twoclk(vout_q1, vout_q2);
+    output vout_q1, vout_q2;
+    electrical vout_q1, vout_q1b;
+    myclk clk1(.vout_q(vout_q1));
+    myclk clk2(.vout_q(vout_q2));
+endmodule
+
+module top(clk_out);
+    output clk_out;
+    electrical clk_out;
+    twoclk topclk1(.vout_q1(clk_out));
+endmodule</code></pre>
+
+
+<!-- 9.20 Analog Node Alias -->
+<h2 id="s9.20">9.20 Analog Node Alias System Functions</h2>
+
+<pre class="syntax">analog_node_alias_system_function ::=
+    $analog_node_alias ( analog_net_reference , hierarchical_reference_string )
+  | $analog_port_alias ( analog_net_reference , hierarchical_reference_string )</pre>
+
+<p>Both functions take two arguments. The <code>analog_net_reference</code> shall be a scalar or vector continuous node declared in the module containing the call. If it is a vector node, it shall reference the full vector node; bit select or part select is an error. The <code>analog_net_reference</code> shall not be a port or involved in port connections.</p>
+
+<p>The <code>hierarchical_reference_string</code> shall be a constant string value (string literal or string parameter) containing a hierarchical reference to a continuous node. It shall not reference a node that is used as an <code>analog_net_reference</code> in another alias call. The reference follows the resolution rules in 6.7.</p>
+
+<p>These functions shall only be used inside the <code>analog initial</code> block. They are re-evaluated each sweep point of a dc sweep as needed. They shall not be used inside conditional statements unless the conditional expression consists of terms that cannot change during simulation.</p>
+
+<p>Return value: 1 if the <code>hierarchical_reference_string</code> points to a valid continuous node, 0 otherwise. If valid, the <code>analog_net_reference</code> is aliased to that hierarchical node and refers to the same circuit matrix position. If 0, the node is treated as a normal local continuous node.</p>
+
+<p>A node aliased via <code>$analog_port_alias()</code> may be used as input to the port access function (see <a href="ch5-analog.html#s5.4.3">5.4.3</a>) and shall measure the flow through the port of the referenced instance.</p>
+
+<p>If a node is involved in multiple calls, the last evaluated call takes precedence.</p>
+
+<p>Validity rules for the hierarchical reference:</p>
+<ul>
+<li>Shall refer to a scalar continuous node or scalar element of a continuous vector node</li>
+<li>The discipline of the <code>analog_net_reference</code> and the resolved reference shall be compatible (see <a href="ch3-datatypes.html#s3.11">3.11</a>)</li>
+<li>For <code>$analog_port_alias()</code>, the resolved reference shall be a port</li>
+</ul>
+
+<p>Example:</p>
+<pre><code>module top;
+    electrical a, b, c, gnd;
+    ground gnd;
+    resistor #(.r(1k)) r1(.p(a), .n(gnd));
+    checker #(.n1_str("top.a")) ch1();
+    analog V(a,gnd) <+ 5;
+endmodule
+
+module checker;
+    electrical n1, n2;
+    parameter string n1_str = "(not_given)";
+    integer status;
+    real iprobe, vprobe;
+    analog initial begin
+        // node n1 will be aliased to top.gnd
+        status = $analog_node_alias(n1, "top.gnd");
+        // Invalid: top.a is not a port. status = 0.
+        status = $analog_port_alias(n2, "$root.top.a");
+        // Overrides previous alias on n1: now aliased to top.a
+        status = $analog_node_alias(n1, n1_str);
+        // n2 is now aliased to port p of instance r1
+        status = $analog_port_alias(n2, "top.r1.p");
+    end
+    analog begin
+        // port current through top.r1.p: returns 5mA
+        iprobe = I(<n2>);
+        // potential of top.a: returns 5V
+        vprobe = V(n1);
+    end
+endmodule</code></pre>
+
+
+<!-- 9.21 Table Model -->
+<h2 id="s9.21">9.21 Table Based Interpolation and Lookup ($table_model)</h2>
+
+<p><code>$table_model</code> provides multidimensional interpolation and lookup on data sampled on isolines. Data is generated via parametric sweeping schemes. Dimensionality increases with nested parameter sweeps.</p>
+
+<p>The interpolation process is recursive: for a lookup pair (x1, y1), the set of isolines in the outer dimension is searched to find the bracketing pair, then each isoline is interpolated in the inner dimension, and the resulting intermediate points are interpolated in the outer dimension. If the lookup point falls off the end of an isoline, its value is extrapolated.</p>
+
+<p>Interpolation and extrapolation schemes operate in a single dimension at a time, so they may be specified per dimension.</p>
+
+<p>Minimum data requirement: at least 2<sup>N</sup> points for N dimensions. Within the data set, each point shall be distinct in terms of its independent variable values. Duplicate points with the same dependent values are ignored (warning may be issued). Duplicate independent values with different dependent values cause an error.</p>
+
+<pre class="syntax">table_model_function ::=
+    $table_model ( table_inputs , table_data_source [, table_control_string] )
+
+table_inputs ::=
+    expression [, 2nd_dim_expression [, nth_dim_expression]]
+
+table_data_source ::=
+    file_name | table_model_array
+
+file_name ::=
+    string_literal | string_parameter
+
+table_model_array ::=
+    1st_dim_array_identifier [, 2nd_dim_array_identifier [, nth_dim_array_identifier]],
+    output_array_identifier
+
+table_control_string ::=
+    "[interp_control[;dependent_selector]]"
+
+interp_control ::=
+    1st_dim_table_ctrl_substr_or_null [, 2nd_dim_table_ctrl_substr_or_null
+        [, nth_dim_table_ctrl_substr_or_null]]
+
+dependent_selector ::=
+    integer
+
+table_ctrl_substr ::=
+    [table_interp_char][table_extrap_char [higher_table_extrap_char]]
+
+table_interp_char ::=
+    I | D | 1 | 2 | 3
+
+table_extrap_char ::=
+    C | L | E</pre>
+
+<h3 id="s9.21.1">9.21.1 Table Data Source</h3>
+<p>Data is specified as columns in a text file or as a set of arrays. A table of M dependent variables of dimension N is laid out in N+M columns, with independent variables in the first N columns (outermost to innermost) followed by dependent variables in the remaining M columns. Isoline ordinates are repeated for each point on the isoline.</p>
+
+<p>File format: each sample point is separated by a newline, each column separated by spaces or tabs. Comments begin with <code>#</code> and continue to end of line. Blank lines are ignored. Numbers shall be real or integer.</p>
+
+<p>When arrays are the data source, they are laid out conceptually the same way. Arrays may be specified via the concatenation operator or via array variable names. The state of the data source is captured on the first call; changes afterward are ignored.</p>
+
+<p>Data may be provided in any order; the system will sort into isolines.</p>
+
+<h3 id="s9.21.2">9.21.2 Control String</h3>
+<p>A set of comma-separated sub-strings followed by a semicolon and the dependent selector. The first group provides control over each independent variable (first sub-string = outermost dimension). The dependent selector is a column number (1 through M).</p>
+
+<p>Each interpolation control sub-string has at most 3 characters.</p>
+
+<h4>Table 9-30 &mdash; Interpolation Control Character</h4>
+<table>
+<tr><th>Character</th><th>Description</th></tr>
+<tr><td><code>I</code></td><td>Ignore this input column</td></tr>
+<tr><td><code>D</code></td><td>Closest point (discrete) lookup</td></tr>
+<tr><td><code>1</code></td><td>Linear interpolation (default)</td></tr>
+<tr><td><code>2</code></td><td>Quadratic spline interpolation</td></tr>
+<tr><td><code>3</code></td><td>Cubic spline interpolation</td></tr>
+</table>
+
+<h4>Table 9-31 &mdash; Extrapolation Control Character</h4>
+<table>
+<tr><th>Character</th><th>Description</th></tr>
+<tr><td><code>C</code></td><td>Constant extrapolation (returns endpoint value)</td></tr>
+<tr><td><code>L</code></td><td>Linear extrapolation (default)</td></tr>
+<tr><td><code>E</code></td><td>Error on extrapolation request (fatal error)</td></tr>
+</table>
+
+<p>Users may use up to 2 extrapolation characters per dimension. With no extrapolation character, linear is default for both ends. One character applies to both ends. Two characters: the first applies to the lower coordinate end, the second to the higher coordinate end.</p>
+
+<h3 id="s9.21.3">9.21.3 Example Control Strings</h3>
+<table>
+<tr><th>Control String</th><th>Description</th></tr>
+<tr><td><code>""</code> or omitted</td><td>Default: linear interpolation and extrapolation. Dimensionality assumed N, column N+1 is the dependent.</td></tr>
+<tr><td><code>"1L,1L"</code></td><td>2-D, linear interpolation and extrapolation in both dimensions</td></tr>
+<tr><td><code>"1LL,1LL"</code></td><td>Same, extrapolation specified for both ends in each dimension</td></tr>
+<tr><td><code>"1LL,1LL;1"</code></td><td>Same, dependent variable 1 specified explicitly (default when unspecified)</td></tr>
+<tr><td><code>"D,1,3"</code></td><td>Closest point outer, linear middle, cubic spline inner</td></tr>
+<tr><td><code>"I,1CC,1CC;3"</code></td><td>Ignore column 1, linear interpolation + constant extrapolation, dependent variable 3</td></tr>
+<tr><td><code>"3,D,I,1;3"</code></td><td>Cubic spline dim 3, closest dim 2, ignore column 3, linear innermost, dependent variable 3</td></tr>
+<tr><td><code>"C,,3"</code></td><td>3-D, equivalent to <code>"1CC,1LL,3LL"</code></td></tr>
+</table>
+
+<h3 id="s9.21.4">9.21.4 Interpolation Algorithms</h3>
+<ul>
+<li><strong>Closest point lookup</strong> &mdash; returns the closest point; when equidistant from two bracketing samples, snaps away from zero.</li>
+<li><strong>Linear interpolation</strong> &mdash; simple linear interpolation between closest sample points on a given isoline.</li>
+<li><strong>Cubic spline interpolation</strong> &mdash; generates a spline for each isoline; extrapolation options are used for end-point derivatives. Linear extrapolation leads to a natural spline. Constant extrapolation sets end-point derivative to zero.</li>
+<li><strong>Quadratic splines</strong> &mdash; similar to cubic splines, more efficient evaluation with generally less favorable results.</li>
+</ul>
+<p>Cubic splines are best for smoothly varying data (e.g., DC I-V characteristics). Linear interpolation is better for data with abrupt transitions (e.g., transient pulsed waveforms).</p>
+
+<h3 id="s9.21.5">9.21.5 Example</h3>
+<p>Using file-based data source:</p>
+<pre><code>module example_tb(a, b);
+    electrical a, b;
+    inout a, b;
+    analog begin
+        I(a, b) <+ $table_model(0.0, V(a,b), "sample.dat");
+    end
+endmodule</code></pre>
+
+<p>With control string:</p>
+<pre><code>I(a, b) <+ $table_model(0.0, V(a,b), "sample.dat", "1LL,3LL");</code></pre>
+
+<p>Using array-based data source:</p>
+<pre><code>module example_tb(a, b);
+    electrical a, b;
+    inout a, b;
+    real y[0:11], x[0:11], f_xy[0:11];
+    analog begin
+        @(initial_step) begin
+            // y=0.0 isoline
+            y[0] =0.0; x[0] =1.0; f_xy[0] =0.5;
+            y[1] =0.0; x[1] =2.0; f_xy[1] =1.0;
+            y[2] =0.0; x[2] =3.0; f_xy[2] =1.5;
+            y[3] =0.0; x[3] =4.0; f_xy[3] =2.0;
+            y[4] =0.0; x[4] =5.0; f_xy[4] =2.5;
+            y[5] =0.0; x[5] =6.0; f_xy[5] =3.0;
+            // y=0.5 isoline
+            y[6] =0.5; x[6] =1.0; f_xy[6] =1.0;
+            y[7] =0.5; x[7] =3.0; f_xy[7] =2.0;
+            y[8] =0.5; x[8] =5.0; f_xy[8] =3.0;
+            // y=1.0 isoline
+            y[9] =1.0; x[9] =1.0; f_xy[9] =1.5;
+            y[10]=1.0; x[10]=2.0; f_xy[10]=2.0;
+            y[11]=1.0; x[11]=4.0; f_xy[11]=3.0;
+        end
+        I(a, b) <+ $table_model(0, V(a,b), y, x, f_xy);
+    end
+endmodule</code></pre>
+
+
+<!-- 9.22 Connectmodule Driver Access -->
+<h2 id="s9.22">9.22 Connectmodule Driver Access System Functions and Operator</h2>
+
+<p>These functions are for Verilog-AMS mixed-signal connect modules only. They access drivers found in ordinary modules (not connect modules) and can only be called from connect modules.</p>
+
+<h3>9.22.1 $driver_count</h3>
+<pre class="syntax">driver_count_function ::=
+    $driver_count ( signal_name )</pre>
+<p>Returns the number of drivers associated with the signal. Drivers are numbered 0 to N-1.</p>
+
+<h3>9.22.2 $driver_state</h3>
+<pre class="syntax">driver_state_function ::=
+    $driver_state ( signal_name , driver_index )</pre>
+<p>Returns the current value contribution of a specific driver (0, 1, x, or z).</p>
+
+<h3>9.22.3 $driver_strength</h3>
+<pre class="syntax">driver_strength_function ::=
+    $driver_strength ( signal_name , driver_index )</pre>
+<p>Returns the current strength contribution. Bits 5-3 for strength0, bits 2-0 for strength1.</p>
+
+<h3>9.22.4 driver_update</h3>
+<p>Event detection keyword used with <code>@</code> to detect updates to any driver of a signal:</p>
+<pre><code>always @(driver_update clock)
+    statement;</code></pre>
+<p>An update is the addition of a new pending value to the driver, regardless of whether the resolved signal value changes.</p>
+
+<h3>9.22.5 Receiver Net Resolution</h3>
+<p>Due to driver-receiver segregation, the value driving digital receivers must be specified. Default behavior (no explicit assignment) is equivalent to <code>assign d_receivers = d_drivers;</code>. Explicit specification:</p>
+<pre><code>reg out;
+assign d = out;</code></pre>
+
+<!-- 9.23 Supplementary Connectmodule Driver Access -->
+<h2 id="s9.23">9.23 Supplementary Connectmodule Driver Access System Functions</h2>
+
+<p>These AMS-only functions access digital events scheduled onto a driver but not yet matured. They can create analog waveforms crossing a threshold at the same time the digital event matures. Only usable in the digital context of connect modules.</p>
+
+<h3>9.23.1 $driver_delay</h3>
+<pre class="syntax">driver_delay_function ::=
+    $driver_delay ( signal_name , driver_index )</pre>
+<p>Returns the delay from current simulation time until the pending state or strength becomes active. Returns -1.0 if no pending value. The returned delay is defined by the <code>`timescale</code> for the module.</p>
+
+<h3>9.23.2 $driver_next_state</h3>
+<pre class="syntax">driver_next_state_function ::=
+    $driver_next_state ( signal_name , driver_index )</pre>
+<p>Returns the pending state (1'b0, 1'b1, 1'bx, or 1'bz). If no pending state, returns the current state.</p>
+
+<h3>9.23.3 $driver_next_strength</h3>
+<pre class="syntax">driver_next_strength_function ::=
+    $driver_next_strength ( signal_name , driver_index )</pre>
+<p>Returns the strength associated with the pending state (integer 0-7). If no pending state, returns the current strength.</p>
+
+<h3>9.23.4 $driver_type</h3>
+<pre class="syntax">driver_type_function ::=
+    $driver_type ( signal_name , driver_index )</pre>
+<p>Returns an integer with bits set according to the system header file <code>"driver_access.vams"</code> (Annex D). 0 (<code>'DRIVER_UNKNOWN</code>) is returned if the simulator cannot provide proper information. All drivers on <code>wor</code> and <code>wand</code> nets have a bit indicating such; extra drivers added by the kernel for pull-up or pull-down are marked as belonging to the kernel.</p>
+
+</body>
+</html>
