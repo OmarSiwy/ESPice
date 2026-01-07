@@ -69,7 +69,7 @@ pub fn sweep(
     // -- GPU batch path: one batch call per driven port ----------------------
     // ponytail: P batch calls of N_freq each; packing all P*N into one call
     // would need per-solve RHS, add when freq_solve_batch gains rhs-per-lane.
-    if (ckt.gpu_hook) |gh| if (gh.freq_solve_batch) |fsb| gpu: {
+    if (ckt.gpu_hook != null) gpu: {
         ckt.eval(x_op, 0);
 
         // Stamp port z0 onto the sparse G diagonal (analysis-side mod).
@@ -91,15 +91,7 @@ pub fn sweep(
         defer allocator.free(omegas);
         for (freqs, 0..) |f, i| omegas[i] = 2.0 * std.math.pi * f;
 
-        // Per-frequency output buffer: x_out[k] is 2*n (real‖imag expansion).
-        const nn = 2 * n;
-        const x_flat = allocator.alloc(f64, n_points * nn) catch break :gpu;
-        defer allocator.free(x_flat);
-        const x_out = allocator.alloc([]f64, n_points) catch break :gpu;
-        defer allocator.free(x_out);
-        for (0..n_points) |k| x_out[k] = x_flat[k * nn ..][0..nn];
-
-        const rhs = allocator.alloc(f64, nn) catch break :gpu;
+        const rhs = allocator.alloc(f64, 2 * n) catch break :gpu;
         defer allocator.free(rhs);
 
         for (0..n_ports) |p| {
@@ -107,7 +99,9 @@ pub fn sweep(
             rhs[ports[p].branch] = 1.0;
             // rhs imag part is zero (already zeroed).
 
-            fsb(gh.ctx, ckt.g_vals, ckt.c_vals, omegas, rhs, x_out, @intCast(n)) catch break :gpu;
+            // Per-frequency output: x_out[k] is 2*n (real‖imag expansion).
+            const x_out = ckt.gpuFreqBatch(allocator, ckt.g_vals, ckt.c_vals, omegas, rhs, @intCast(n), false) orelse break :gpu;
+            defer root.freeFreqLanes(allocator, x_out);
 
             const a_p = 1.0 / (2.0 * @sqrt(ports[p].z0));
 
@@ -131,7 +125,7 @@ pub fn sweep(
             }
         }
         return; // GPU path done — skip CPU fallback.
-    };
+    }
 
     // -- CPU serial path (existing) ------------------------------------------
     ckt.eval(x_op, 0);

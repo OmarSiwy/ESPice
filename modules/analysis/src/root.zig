@@ -22,6 +22,8 @@ pub const BbdBlock = circuit_mod.BbdBlock;
 pub const BbdInfo = circuit_mod.BbdInfo;
 pub const GROUND = circuit_mod.GROUND;
 pub const zeroSimd = circuit_mod.zeroSimd;
+pub const copySimd = circuit_mod.copySimd;
+pub const freeFreqLanes = circuit_mod.freeFreqLanes;
 pub fn probeNames(ctx: *const RunCtx, first: ?[]const u8) ![]const []const u8 {
     return circuit_mod.probeNames(ctx.circuit, ctx.probes, ctx.allocator, first);
 }

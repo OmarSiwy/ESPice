@@ -455,6 +455,28 @@ pub const Circuit = struct {
         return try list.toOwnedSlice(gpa);
     }
 
+    /// Freq-sweep GPU dispatch: one lane of 2n f64 per point (flat backing +
+    /// slice table, so it's one alloc + table), solved via the gpu_hook's
+    /// freq_solve_batch (or adjoint) in a single launch. Returns null on ANY
+    /// failure (missing hook, alloc, kernel error) so callers `orelse` into
+    /// their serial path. Free the result with freeFreqLanes.
+    pub fn gpuFreqBatch(self: *Circuit, a: std.mem.Allocator, g: []const f64, c: []const f64, omegas: []const f64, rhs: []const f64, n: u32, adjoint: bool) ?[][]f64 {
+        const gh = self.gpu_hook orelse return null;
+        const f = (if (adjoint) gh.freq_solve_adjoint_batch else gh.freq_solve_batch) orelse return null;
+        const nn = 2 * @as(usize, n);
+        const backing = a.alloc(f64, omegas.len * nn) catch return null;
+        const lanes = a.alloc([]f64, omegas.len) catch {
+            a.free(backing);
+            return null;
+        };
+        for (lanes, 0..) |*lane, k| lane.* = backing[k * nn ..][0..nn];
+        f(gh.ctx, g, c, omegas, rhs, lanes, n) catch {
+            freeFreqLanes(a, lanes);
+            return null;
+        };
+        return lanes;
+    }
+
     pub fn nodeName(self: *const Circuit, node: u32) []const u8 {
         if (node < self.node_labels.len and self.node_labels[node].len != 0)
             return self.node_labels[node];
@@ -465,6 +487,12 @@ pub const Circuit = struct {
         return @intCast(self.node_labels.len);
     }
 };
+
+/// Free a lane table from Circuit.gpuFreqBatch (flat backing + slice table).
+pub fn freeFreqLanes(a: std.mem.Allocator, lanes: [][]f64) void {
+    if (lanes.len != 0) a.free(lanes[0].ptr[0 .. lanes.len * lanes[0].len]);
+    a.free(lanes);
+}
 
 // ---------------------------------------------------------------------------
 // init (freeze): build union sparsity pattern, allocate planes, precompute
@@ -719,7 +747,7 @@ pub fn probeNames(circuit: *const Circuit, probes: []const u32, allocator: std.m
 }
 
 // ---------------------------------------------------------------------------
-// zeroSimd: SIMD-width zero fill
+// zeroSimd / copySimd: SIMD-width fill and copy
 // ---------------------------------------------------------------------------
 
 pub fn zeroSimd(buf: []f64) void {
@@ -729,4 +757,13 @@ pub fn zeroSimd(buf: []f64) void {
     var i: usize = 0;
     while (i + W <= buf.len) : (i += W) buf[i..][0..W].* = zero;
     for (buf[i..]) |*v| v.* = 0;
+}
+
+/// SIMD copy: dst[0..n] = src[0..n].
+pub fn copySimd(dst: []f64, src: []const f64) void {
+    const W = vec_width;
+    const n = @min(dst.len, src.len);
+    var i: usize = 0;
+    while (i + W <= n) : (i += W) dst[i..][0..W].* = src[i..][0..W].*;
+    while (i < n) : (i += 1) dst[i] = src[i];
 }

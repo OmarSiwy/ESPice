@@ -121,50 +121,39 @@ pub fn solve(
     // --- GPU batch path: all freq points in one launch ----------------------
     // ponytail: augmented dense G/C passed as flat arrays; GPU kernel treats
     // them as n_aug×n_aug dense. Falls through to CPU on error or if absent.
-    if (ckt.gpu_hook) |gh| if (gh.freq_solve_batch) |fsb| {
-        const nn_aug = 2 * n_aug;
-        const rhs_gpu = try allocator.alloc(f64, nn_aug);
+    if (ckt.gpu_hook != null) gpu: {
+        const rhs_gpu = try allocator.alloc(f64, 2 * n_aug);
         defer allocator.free(rhs_gpu);
         root.zeroSimd(rhs_gpu);
         rhs_gpu[branch_idx] = 1.0; // unit voltage on probe branch
 
         const omegas = try allocator.alloc(f64, n_points);
         defer allocator.free(omegas);
-        {
-            var sw = types.logSweep(options.f_start, options.f_stop, options.points_per_decade);
-            var ki: usize = 0;
-            while (sw.next()) |f| : (ki += 1) omegas[ki] = 2.0 * std.math.pi * f;
+        types.fillLogSweep(options.f_start, options.f_stop, options.points_per_decade, null, omegas);
+
+        const x_out = ckt.gpuFreqBatch(allocator, g_aug, c_aug, omegas, rhs_gpu, @intCast(n_aug), false) orelse break :gpu;
+        defer root.freeFreqLanes(allocator, x_out);
+
+        // GPU owns nothing — free the augmented matrices ourselves.
+        allocator.free(g_aug);
+        allocator.free(c_aug);
+
+        var result = try SolveResult.init(allocator, n_points);
+        errdefer result.deinit(allocator);
+
+        var sw = types.logSweep(options.f_start, options.f_stop, options.points_per_decade);
+        var k: usize = 0;
+        while (sw.next()) |f| : (k += 1) {
+            result.freqs[k] = f;
+            result.loop_gain[k] = .{
+                .re = -x_out[k][branch_idx],
+                .im = -x_out[k][n_aug + branch_idx],
+            };
         }
 
-        // Allocate per-point solution vectors (contiguous backing + slice array).
-        const x_backing = try allocator.alloc(f64, n_points * nn_aug);
-        defer allocator.free(x_backing);
-        const x_out = try allocator.alloc([]f64, n_points);
-        defer allocator.free(x_out);
-        for (x_out, 0..) |*slot, idx| slot.* = x_backing[idx * nn_aug ..][0..nn_aug];
-
-        if (fsb(gh.ctx, g_aug, c_aug, omegas, rhs_gpu, x_out, @intCast(n_aug))) {
-            // GPU owns nothing — free the augmented matrices ourselves.
-            allocator.free(g_aug);
-            allocator.free(c_aug);
-
-            var result = try SolveResult.init(allocator, n_points);
-            errdefer result.deinit(allocator);
-
-            var sw = types.logSweep(options.f_start, options.f_stop, options.points_per_decade);
-            var k: usize = 0;
-            while (sw.next()) |f| : (k += 1) {
-                result.freqs[k] = f;
-                result.loop_gain[k] = .{
-                    .re = -x_out[k][branch_idx],
-                    .im = -x_out[k][n_aug + branch_idx],
-                };
-            }
-
-            computeMargins(&result);
-            return result;
-        } else |_| {} // GPU failed — fall through to CPU
-    };
+        computeMargins(&result);
+        return result;
+    }
 
     // --- CPU fallback: FreqSolver on the augmented system --------------------
     // initDense takes ownership of g_aug, c_aug.

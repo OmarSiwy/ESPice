@@ -89,9 +89,10 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .@"no-llvm" = no_llvm,
     });
-    b.installArtifact(bench_dep.artifact("bench-runner"));
     const run_bench = b.addRunArtifact(bench_dep.artifact("bench-runner"));
     run_bench.step.dependOn(b.getInstallStep());
+    // Install lazily — only the bench step pays for the bench-runner build.
+    run_bench.step.dependOn(&b.addInstallArtifact(bench_dep.artifact("bench-runner"), .{}).step);
     run_bench.stdio = .inherit;
     run_bench.setCwd(b.path("."));
     run_bench.addArgs(&.{ "zig-out/bin/zpicey", "benchmark/fixtures" });

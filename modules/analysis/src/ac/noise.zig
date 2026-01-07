@@ -61,21 +61,14 @@ pub fn sweep(
 
     // ponytail: GPU batch adjoint path — all freq solves in one dispatch,
     // PSD accumulation stays CPU (cheap). Falls through on error or absence.
-    if (ckt.gpu_hook) |gh| if (gh.freq_solve_adjoint_batch) |fsab| gpu: {
+    if (ckt.gpu_hook != null) gpu: {
         // Fill G/C planes at operating point (same eval fromCircuit does).
         ckt.eval(x_op, 0);
 
         // Build omega + freq arrays.
         const omegas = allocator.alloc(f64, n_points) catch break :gpu;
         defer allocator.free(omegas);
-        {
-            var sw = types.logSweep(options.f_start, options.f_stop, options.points_per_decade);
-            var i: usize = 0;
-            while (sw.next()) |f| : (i += 1) {
-                freqs[i] = f;
-                omegas[i] = 2.0 * std.math.pi * f;
-            }
-        }
+        types.fillLogSweep(options.f_start, options.f_stop, options.points_per_decade, freqs, omegas);
 
         // RHS: unit excitation at out_node (stacked-real, length 2n).
         const e_out = allocator.alloc(f64, nn) catch break :gpu;
@@ -83,21 +76,9 @@ pub fn sweep(
         root.zeroSimd(e_out);
         e_out[options.out_node] = 1.0;
 
-        // Allocate per-point solution vectors.
-        const y_lanes = allocator.alloc([]f64, n_points) catch break :gpu;
-        defer allocator.free(y_lanes);
-        var alloc_ok: usize = 0;
-        for (y_lanes) |*lane| {
-            lane.* = allocator.alloc(f64, nn) catch {
-                for (y_lanes[0..alloc_ok]) |prev| allocator.free(prev);
-                break :gpu;
-            };
-            alloc_ok += 1;
-        }
-        defer for (y_lanes) |lane| allocator.free(lane);
-
-        // Batch dispatch — single GPU launch for all frequency points.
-        fsab(gh.ctx, ckt.g_vals, ckt.c_vals, omegas, e_out, y_lanes, @intCast(n)) catch break :gpu;
+        // Batch adjoint dispatch — single GPU launch for all frequency points.
+        const y_lanes = ckt.gpuFreqBatch(allocator, ckt.g_vals, ckt.c_vals, omegas, e_out, @intCast(n), true) orelse break :gpu;
+        defer root.freeFreqLanes(allocator, y_lanes);
 
         // CPU-side PSD accumulation + trapezoidal integration.
         var integrated_noise: f64 = 0;
@@ -126,7 +107,7 @@ pub fn sweep(
         }
 
         return @sqrt(integrated_noise);
-    };
+    }
 
     // ── Serial CPU fallback ──────────────────────────────────────────────
     var fs = try FreqSolver.fromCircuit(allocator, ckt, x_op);
