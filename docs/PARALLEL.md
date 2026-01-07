@@ -118,16 +118,24 @@ JFNK is the default on all paths — GPU or not. It's faster for large
 sparse systems where LU fill-in dominates, and it's the same algorithm
 the megakernel runs, so CPU/GPU convergence is a superset.
 
-### 3.2 GPU sparse LU infrastructure (`gpu_lu.zig`)
+### 3.2 Single-source CPU/GPU numerical core
 
-Level-scheduled factorization DAG ready for GPU kernel:
-- Dependency detection from filled L/U patterns (look-up + look-left)
-- Fixed-point iteration computes levels; within each level, columns are
-  independent
-- Per-level kernel mode classification: small_block (>16 cols),
-  large_block (5-16), stream (<=4)
-- Numeric factorization: left-looking hybrid with SIMD helpers
-- **Status**: CPU simulation of the GPU flow; actual device kernel TBD
+The eval loop, limiting pass, and Newton/JFNK/GMRES solver each have ONE
+body, instantiated per target through comptime policies (no fn pointers,
+`anytype` + inline fns — nvptx keeps direct calls, host fully inlines):
+
+- `devices/src/eval_core.zig` — `evalRange`/`limitRange` generic over a
+  **Sink** (scatter policy). HostSink (batch.zig): slot-tape full-Jacobian
+  scatter into ParEval lane planes + prep-cache dedup. GpuSink
+  (kernel_common.zig): grid-stride atomicAdd into rhs/diag + TranEnv
+  charge fold; dedup compiles out.
+- `solvers/src/newton_core.zig` — `newtonSolve` generic over an **Env**
+  (lane geometry, barrier, reductions, assemble, precond, post-step).
+  GpuEnv (kernel.zig): grid barrier, thread-0 publish slots,
+  backtrack=true, f0_shift FD baseline, Jacobi precond. CpuEnv
+  (converger.zig): serial, backtrack=false, exact duals, LU-else-Jacobi.
+  Convergence gates are shared code — CPU and GPU accept the same
+  iterates by construction, not by mirrored maintenance.
 
 ### 3.3 Build configuration
 
@@ -304,8 +312,10 @@ This is enough for most analyses but constrains very large MC batches.
 
 **Monotonic scheduling**: sync-free row-to-warp GPU LU depends on
 hardware behavior (monotonic thread block scheduling) NOT guaranteed by
-the CUDA spec.  Our `gpu_lu.zig` level-set approach is the safe path —
-explicit dependency levels, no reliance on scheduling order.
+the CUDA spec.  If a GPU sparse-LU kernel is ever built, use explicit
+level-set dependencies, not scheduling order.  (A CPU-side simulation of
+that flow, gpu_lu.zig, was deleted 2026-07-12 — dead code; JFNK is the
+GPU path.)
 
 **Zig+NVPTX**: all GPU primitives (cooperative launch, grid barriers,
 atomics, shared memory) are PTX-level instructions accessible from Zig's
