@@ -15,6 +15,7 @@
 
 const std = @import("std");
 const direct = @import("direct.zig");
+const newton_core = @import("newton_core.zig");
 const BbdInfo = @import("root.zig").BbdInfo;
 
 pub const Strategy = enum { newton, jfnk };
@@ -226,6 +227,102 @@ fn finalizeStep(
 
 const gmres_restart = 30;
 
+/// Serial Env for newton_core: tid=0/stride=1 makes every core loop the
+/// plain 0..n loop, reduce = identity, publish = local scalar array — the
+/// iterate trajectory is bit-identical to the historical serial jfnk.
+fn CpuEnv(comptime SysT: type, comptime HookT: type) type {
+    return struct {
+        const Self = @This();
+        sys: SysT,
+        hook: HookT,
+        opts: Options,
+        slv: ?*direct.Solver,
+        n: usize,
+        diag: []f64,
+        scal: [16]f64 = @splat(0),
+
+        pub const F64 = [*]f64;
+        pub const backtrack = false; // GPU-only monotone-residual retreat
+        pub const exact_jv = true; // FD against f0 directly (no f0_shift)
+
+        pub inline fn tid(_: *Self) u32 {
+            return 0;
+        }
+        pub inline fn stride(_: *Self) u32 {
+            return 1;
+        }
+        pub inline fn isLead(_: *Self) bool {
+            return true;
+        }
+        pub inline fn sync(_: *Self) void {}
+        pub inline fn reduceAdd(_: *Self, partial: f64) f64 {
+            return partial;
+        }
+        pub inline fn reduceMax(_: *Self, partial: f64) f64 {
+            return partial;
+        }
+        pub inline fn publish(self: *Self, slot: usize, val: f64) void {
+            self.scal[slot] = val;
+        }
+        pub inline fn read(self: *Self, slot: usize) f64 {
+            return self.scal[slot];
+        }
+        pub inline fn limiting(_: *Self) bool {
+            return false; // CPU limiting lives in applyLimits/postStep
+        }
+
+        pub fn assemble(self: *Self, comptime with_diag: bool, x_eval: [*]f64, x_base: [*]f64, t: f64, lim: bool) void {
+            _ = with_diag; // CPU eval always fills what the hook fills
+            _ = x_base;
+            _ = lim;
+            assembleResidual(self.sys, x_eval[0..self.n], t, self.hook);
+            if (self.opts.gmin > 0) {
+                for (0..self.n) |i| self.sys.rhs[i] += self.opts.gmin * x_eval[i];
+            }
+        }
+
+        pub fn precondBuild(self: *Self) void {
+            buildDiagPreconditioner(self.sys, self.hook, self.opts, self.diag);
+            if (self.slv) |s| {
+                const v = self.hook.vals(self.sys);
+                if (self.opts.gmin > 0) {
+                    for (0..self.n) |i| {
+                        v[self.sys.diag_slots[i]] += self.opts.gmin;
+                    }
+                }
+                s.factor(v) catch {};
+            }
+        }
+
+        pub fn precondApply(self: *Self, r: [*]f64) void {
+            applyPreconditioner(r[0..self.n], self.diag, self.slv, self.n);
+        }
+
+        pub fn postStep(self: *Self, x: [*]f64, x_old: [*]f64, lim: bool) newton_core.PostStep {
+            _ = lim;
+            const S = Deref(SysT);
+            const xs = x[0..self.n];
+            const limited = if (comptime @hasDecl(S, "applyLimits"))
+                self.sys.applyLimits(xs, x_old[0..self.n])
+            else
+                false;
+            var flipped = false;
+            if (comptime @hasDecl(S, "updateStates")) {
+                if (self.sys.updateStates(xs)) |_| flipped = true;
+            }
+            return .{ .limited = limited, .flipped = flipped };
+        }
+
+        pub fn gateScale(self: *Self, i: u32) f64 {
+            return @abs(self.hook.vals(self.sys)[self.sys.diag_slots[i]]);
+        }
+
+        pub fn currentRow(self: *Self, i: u32) bool {
+            return self.sys.current_row[i];
+        }
+    };
+}
+
 pub fn jfnk(
     sys: anytype,
     ws: *Workspace,
@@ -234,144 +331,59 @@ pub fn jfnk(
     opts: Options,
     hook: anytype,
 ) !Result {
-    const slv: ?*direct.Solver = &ws.slv;
-    const dx = ws.dx;
-    const x_old = ws.x_old;
     const n: usize = sys.n;
     const m: usize = @min(gmres_restart, n);
-
-    const sz_vbasis = (m + 1) * n;
-    const sz_hmat = (m + 1) * m;
     const buf = try ws.ensureGmres(n);
 
     var off: usize = 0;
-    const v_basis = buf[off..][0..sz_vbasis]; off += sz_vbasis;
-    const h_mat = buf[off..][0..sz_hmat]; off += sz_hmat;
-    const cs = buf[off..][0..m]; off += m;
-    const sn = buf[off..][0..m]; off += m;
-    const g_vec = buf[off..][0..m + 1]; off += m + 1;
-    const y_vec = buf[off..][0..m]; off += m;
-    const r_vec = buf[off..][0..n]; off += n;
-    const w_vec = buf[off..][0..n]; off += n;
-    const x_pert = buf[off..][0..n]; off += n;
-    const f0 = buf[off..][0..n]; off += n;
-    const f_pert = buf[off..][0..n]; off += n;
+    const v_basis = buf[off..].ptr; off += (m + 1) * n;
+    const h_mat = buf[off..].ptr; off += (m + 1) * m;
+    const cs = buf[off..].ptr; off += m;
+    const sn = buf[off..].ptr; off += m;
+    const g_vec = buf[off..].ptr; off += m + 1;
+    const y_vec = buf[off..].ptr; off += m;
+    const w_vec = buf[off..].ptr; off += n;
+    const x_pert = buf[off..].ptr; off += n;
+    const f0 = buf[off..].ptr; off += n;
     const diag_prec = buf[off..][0..n];
 
-    var iter: u16 = 0;
-
-    while (iter < opts.max_iter) : (iter += 1) {
-        assembleResidual(sys, x, t, hook);
-        if (opts.gmin > 0) {
-            for (0..n) |i| {
-                sys.rhs[i] += opts.gmin * x[i];
-            }
-        }
-        var norm_f: f64 = 0;
-        for (0..n) |i| norm_f = @max(norm_f, @abs(sys.rhs[i]));
-        @memcpy(f0, sys.rhs[0..n]);
-
-        buildDiagPreconditioner(sys, hook, opts, diag_prec);
-
-        if (slv) |s| {
-            const v = hook.vals(sys);
-            if (opts.gmin > 0) {
-                for (0..n) |i| {
-                    v[sys.diag_slots[i]] += opts.gmin;
-                }
-            }
-            s.factor(v) catch {};
-        }
-
-        for (0..n) |i| r_vec[i] = -f0[i];
-        applyPreconditioner(r_vec, diag_prec, slv, n);
-
-        const beta = vecNorm(r_vec[0..n]);
-        if (beta < opts.abstol) {
-            @memset(dx[0..n], 0);
-            if (iter > 0)
-                return .{ .converged = true, .iterations = iter + 1, .max_dx = 0 };
-            continue;
-        }
-
-        const v0 = v_basis[0..n];
-        for (0..n) |i| v0[i] = r_vec[i] / beta;
-        g_vec[0] = beta;
-        @memset(g_vec[1..], 0);
-        @memset(h_mat, 0);
-
-        var j: usize = 0;
-        while (j < m) : (j += 1) {
-            const vj = v_basis[j * n ..][0..n];
-            jvProduct(sys, x, t, f0, vj, w_vec[0..n], x_pert[0..n], f_pert[0..n], n, hook, opts);
-
-            applyPreconditioner(w_vec[0..n], diag_prec, slv, n);
-
-            for (0..j + 1) |i| {
-                const vi = v_basis[i * n ..][0..n];
-                const hij = dot(vi, w_vec[0..n]);
-                h_mat[i * m + j] = hij;
-                for (0..n) |k| w_vec[k] -= hij * vi[k];
-            }
-
-            const h_jp1_j = vecNorm(w_vec[0..n]);
-            h_mat[(j + 1) * m + j] = h_jp1_j;
-
-            if (h_jp1_j > 1e-30) {
-                const vjp1 = v_basis[(j + 1) * n ..][0..n];
-                for (0..n) |k| vjp1[k] = w_vec[k] / h_jp1_j;
-            }
-
-            for (0..j) |i| {
-                const h_i = h_mat[i * m + j];
-                const h_i1 = h_mat[(i + 1) * m + j];
-                h_mat[i * m + j] = cs[i] * h_i + sn[i] * h_i1;
-                h_mat[(i + 1) * m + j] = -sn[i] * h_i + cs[i] * h_i1;
-            }
-
-            const a_val = h_mat[j * m + j];
-            const b_val = h_mat[(j + 1) * m + j];
-            const r_val = @sqrt(a_val * a_val + b_val * b_val);
-            if (r_val > 1e-30) {
-                cs[j] = a_val / r_val;
-                sn[j] = b_val / r_val;
-            } else {
-                cs[j] = 1.0;
-                sn[j] = 0.0;
-            }
-            h_mat[j * m + j] = r_val;
-            h_mat[(j + 1) * m + j] = 0;
-
-            const g_j = g_vec[j];
-            const g_j1 = g_vec[j + 1];
-            g_vec[j] = cs[j] * g_j + sn[j] * g_j1;
-            g_vec[j + 1] = -sn[j] * g_j + cs[j] * g_j1;
-
-            if (@abs(g_vec[j + 1]) < opts.abstol * 0.1) {
-                j += 1;
-                break;
-            }
-        }
-
-        const jj = j;
-        if (jj > 0) {
-            backSolveUpperTriangular(h_mat, g_vec, y_vec, jj, m);
-
-            @memset(dx[0..n], 0);
-            for (0..jj) |k| {
-                const vk = v_basis[k * n ..][0..n];
-                for (0..n) |i| dx[i] += y_vec[k] * vk[i];
-            }
-        } else {
-            @memset(dx[0..n], 0);
-        }
-
-        dampStep(dx[0..n], opts.dx_clamp);
-
-        const st = finalizeStep(sys, x, dx, x_old, f0, hook.vals(sys), iter, opts);
-        if (st.converged)
-            return .{ .converged = true, .iterations = iter + 1, .max_dx = st.scaled };
-    }
+    var env: CpuEnv(@TypeOf(sys), @TypeOf(hook)) = .{
+        .sys = sys,
+        .hook = hook,
+        .opts = opts,
+        .slv = &ws.slv,
+        .n = n,
+        .diag = diag_prec,
+    };
+    const vecs: newton_core.Vecs([*]f64) = .{
+        .v_basis = v_basis,
+        .h = h_mat,
+        .cs = cs,
+        .sn = sn,
+        .g_vec = g_vec,
+        .y_vec = y_vec,
+        .r = ws.dx.ptr, // dx lives in ws.dx, exactly as before
+        .w = w_vec,
+        .x_pert = x_pert,
+        .f0 = f0,
+        .f0_shift = f0, // unused with exact_jv
+        .diag = diag_prec.ptr,
+        .x_old = ws.x_old.ptr,
+        .rhs = sys.rhs.ptr,
+    };
+    const tol: newton_core.Tol = .{
+        .reltol = opts.reltol,
+        .abstol = opts.abstol,
+        .vntol = opts.vntol,
+        .residual_tol = opts.residual_tol,
+        .gmin = opts.gmin,
+        .dx_clamp = opts.dx_clamp,
+        .max_iter = opts.max_iter,
+        .gmres_m = @intCast(m),
+    };
+    const r = newton_core.newtonSolve(&env, vecs, x.ptr, t, tol, @intCast(n), @intCast(m));
+    if (r.converged)
+        return .{ .converged = true, .iterations = @intCast(r.iterations), .max_dx = r.max_dx };
     return .{ .converged = false, .iterations = opts.max_iter, .max_dx = 0 };
 }
 
@@ -431,39 +443,6 @@ fn assembleResidual(sys: anytype, x: []const f64, t: f64, hook: anytype) void {
         hook.assemble(sys, x, t);
 }
 
-fn jvProduct(
-    sys: anytype,
-    x: []const f64,
-    t: f64,
-    f0: []const f64,
-    v: []const f64,
-    out: []f64,
-    x_pert: []f64,
-    f_pert: []f64,
-    n: usize,
-    hook: anytype,
-    opts: Options,
-) void {
-    const eps_mach = std.math.floatEps(f64);
-    const sqrt_eps = @sqrt(eps_mach);
-    const x_norm = @max(vecNorm(x[0..n]), 1.0);
-    const v_norm = vecNorm(v[0..n]);
-    const eps = if (v_norm > 1e-30) sqrt_eps * x_norm / v_norm else sqrt_eps;
-
-    for (0..n) |i| x_pert[i] = x[i] + eps * v[i];
-
-    assembleResidual(sys, x_pert, t, hook);
-    if (opts.gmin > 0) {
-        for (0..n) |i| {
-            sys.rhs[i] += opts.gmin * x_pert[i];
-        }
-    }
-    @memcpy(f_pert[0..n], sys.rhs[0..n]);
-
-    const inv_eps = 1.0 / eps;
-    for (0..n) |i| out[i] = (f_pert[i] - f0[i]) * inv_eps;
-}
-
 fn buildDiagPreconditioner(sys: anytype, hook: anytype, opts: Options, diag: []f64) void {
     const v = hook.vals(sys);
     for (0..sys.n) |i| {
@@ -493,17 +472,6 @@ fn dot(a: []const f64, b: []const f64) f64 {
     var s: f64 = 0;
     for (a, b) |ai, bi| s += ai * bi;
     return s;
-}
-
-fn backSolveUpperTriangular(h: []const f64, g: []const f64, y: []f64, j: usize, m: usize) void {
-    var k: usize = j;
-    while (k > 0) {
-        k -= 1;
-        var s = g[k];
-        for (k + 1..j) |i| s -= h[k * m + i] * y[i];
-        const d = h[k * m + k];
-        y[k] = if (@abs(d) > 1e-30) s / d else 0;
-    }
 }
 
 fn updateAndNorm(x: []f64, dx: []const f64, x_old: []const f64, current_row: []const bool, reltol: f64, abstol: f64, vntol: f64) f64 {
@@ -542,7 +510,7 @@ pub const Workspace = struct {
 
     fn ensureGmres(self: *Workspace, n: usize) ![]f64 {
         const m: usize = @min(gmres_restart, n);
-        const total = (m + 1) * n + (m + 1) * m + m + m + (m + 1) + m + 6 * n;
+        const total = (m + 1) * n + (m + 1) * m + m + m + (m + 1) + m + 4 * n;
         if (self.gmres.len < total) {
             self.slv.gpa.free(self.gmres);
             self.gmres = &.{};
@@ -577,12 +545,3 @@ test "dot: inner product" {
     try testing.expectApproxEqAbs(@as(f64, 32.0), dot(&a, &b), 1e-15);
 }
 
-test "backSolveUpperTriangular: 2x2 system" {
-    const m: usize = 2;
-    const h = [_]f64{ 2, 1, 0, 3 };
-    const g = [_]f64{ 5, 6 };
-    var y: [2]f64 = undefined;
-    backSolveUpperTriangular(&h, &g, &y, 2, m);
-    try testing.expectApproxEqAbs(@as(f64, 1.5), y[0], 1e-15);
-    try testing.expectApproxEqAbs(@as(f64, 2.0), y[1], 1e-15);
-}

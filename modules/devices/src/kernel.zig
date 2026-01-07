@@ -1,7 +1,9 @@
 //! Analysis megakernel: ONE cooperative launch runs a whole Newton/JFNK
 //! solve on-device — outer Newton loop, inner GMRES(m), device residual
-//! evals, convergence gates — mirroring converger.jfnk() gate-for-gate so
-//! CPU and GPU accept the same iterates. Host uploads the problem blob once
+//! evals, convergence gates — the solver body is single-sourced with
+//! converger.jfnk() (modules/solvers/src/newton_core.zig, imported as the
+//! `newton_core` module) so CPU and GPU accept the same iterates by
+//! construction. Host uploads the problem blob once
 //! and reads back one contiguous window (x + ResultHeader). See gpu_abi.zig
 //! for the blob layout.
 //!
@@ -18,6 +20,7 @@
 
 const devices = @import("dev_models");
 const abi = @import("gpu_abi");
+const newton_core = @import("newton_core");
 
 // Driver TU imports the models ONLY for decl names + kindId hashes; the
 // physics lives in per-model stub TUs (kernel_stub.zig) resolved by symbol
@@ -38,7 +41,7 @@ const inf_f64 = common.inf_f64;
 /// the caller. With env.active the residual is the transient companion
 /// F(x) = I(x) + alpha*q(x) + cvec (cvec carries the -alpha*q_prev / -i_prev
 /// / gear history terms — constant within a timestep).
-fn assemble(comptime with_diag: bool, g: *const G, hdr: *addrspace(.global) const abi.Header, blob: [*]addrspace(.global) u8, x: [*]addrspace(.global) const f64, t: f64, env: TranEnv, limiting: bool, x_base: [*]addrspace(.global) const f64) void {
+fn assembleEval(comptime with_diag: bool, g: *const G, hdr: *addrspace(.global) const abi.Header, blob: [*]addrspace(.global) u8, x: [*]addrspace(.global) const f64, t: f64, env: TranEnv, limiting: bool, x_base: [*]addrspace(.global) const f64) void {
     var i: u32 = g.tid;
     while (i < g.n + 1) : (i += g.stride) {
         g.rhs[i] = 0;
@@ -177,13 +180,119 @@ fn setupG(hdr: *addrspace(.global) const abi.Header, blob: [*]addrspace(.global)
 }
 
 // scal slot map (thread-0 owned): 0 reduce result | 1 eps | 2 control flag
-// (0 none, 1 backtrack, 2 gmres-break, 3 done) | 3 beta/scale | 4 prev_norm
-// | 5 jj | 6 gate violations | 7 backtrack count | 8 lim_active | 9..15 spare
+// (0 none, 1 backtrack, 2 gmres-break, 3 done) | 3 spare | 4 prev_norm
+// | 5 jj | 6 spare | 7 backtrack count | 8 lim_active | 9..15 spare
+// (slots 1/2/4/5/7/8 are owned by newton_core via publish/read)
 
-/// One whole JFNK Newton solve on x (in place). Mirrors converger.jfnk()
-/// gate-for-gate; with env.active the residual is the transient companion.
-/// Writes iterations/max_dx (+ status on convergence) into res. Returns
-/// converged — identical on every thread (all decisions flow through scal).
+/// Cooperative-grid Env for newton_core.newtonSolve: grid-stride tid/stride,
+/// software grid barrier + atomic reductions from common.G, thread-0 publish
+/// slots through g.scal. backtrack=true (monotone-residual retreat),
+/// exact_jv=false (f0_shift FD baseline; J·v via residual-only shifted
+/// evals), Jacobi preconditioner from the assembled diag.
+const GpuEnv = struct {
+    g: *const G,
+    hdr: *addrspace(.global) const abi.Header,
+    blob: [*]addrspace(.global) u8,
+    tran: TranEnv,
+    // Perturbed (J·v) evals share the companion residual but must not
+    // clobber the outer charge snapshot.
+    tran_pert: TranEnv,
+    has_lim: bool,
+    current_row: [*]addrspace(.global) const u8,
+
+    pub const F64 = [*]addrspace(.global) f64;
+    pub const backtrack = true;
+    pub const exact_jv = false;
+
+    pub inline fn tid(e: *const GpuEnv) u32 {
+        return e.g.tid;
+    }
+    pub inline fn stride(e: *const GpuEnv) u32 {
+        return e.g.stride;
+    }
+    pub inline fn isLead(e: *const GpuEnv) bool {
+        return e.g.tid == 0;
+    }
+    pub inline fn sync(e: *const GpuEnv) void {
+        e.g.sync();
+    }
+    pub inline fn reduceAdd(e: *const GpuEnv, partial: f64) f64 {
+        return e.g.reduceAdd(partial);
+    }
+    pub inline fn reduceMax(e: *const GpuEnv, partial: f64) f64 {
+        return e.g.reduceMax(partial);
+    }
+    pub inline fn publish(e: *const GpuEnv, slot: usize, val: f64) void {
+        e.g.scal[slot] = val;
+    }
+    pub inline fn read(e: *const GpuEnv, slot: usize) f64 {
+        return e.g.scal[slot];
+    }
+    /// Device limiting engaged? (set by the limit pass of the previous
+    /// iteration; stable within one iteration.)
+    pub inline fn limiting(e: *const GpuEnv) bool {
+        return e.has_lim and e.g.scal[8] != 0;
+    }
+
+    /// F(x) (+ Jacobian diag when with_diag) + gmin regularization into
+    /// g.rhs. Residual-only evals use the snap-less companion env.
+    pub fn assemble(e: *const GpuEnv, comptime with_diag: bool, x_eval: F64, x_base: F64, t: f64, lim: bool) void {
+        assembleEval(with_diag, e.g, e.hdr, e.blob, x_eval, t, if (with_diag) e.tran else e.tran_pert, lim, x_base);
+        const gmin = e.hdr.tol.gmin;
+        var i: u32 = e.g.tid;
+        while (i < e.g.n) : (i += e.g.stride) e.g.rhs[i] += gmin * x_eval[i];
+        // No sync: rhs is consumed own-index only (assembleEval synced the
+        // atomic scatter already).
+    }
+
+    /// Jacobi preconditioner: diag = 1/(J_diag + gmin), in place.
+    pub fn precondBuild(e: *const GpuEnv) void {
+        const gmin = e.hdr.tol.gmin;
+        var i: u32 = e.g.tid;
+        while (i < e.g.n) : (i += e.g.stride) {
+            const d = e.g.diag[i] + gmin;
+            e.g.diag[i] = if (@abs(d) > 1e-30) 1.0 / d else 1.0;
+        }
+    }
+
+    pub fn precondApply(e: *const GpuEnv, r: F64) void {
+        var i: u32 = e.g.tid;
+        while (i < e.g.n) : (i += e.g.stride) r[i] *= e.g.diag[i];
+    }
+
+    /// Device limiting (pnjlim/fetlim): recompute lim_x at the updated x;
+    /// a limited step forces another iteration (same gate as the CPU).
+    pub fn postStep(e: *const GpuEnv, x: F64, x_old: F64, lim: bool) newton_core.PostStep {
+        var limited: f64 = 0;
+        if (e.has_lim) {
+            // Core reduced/synced before calling, so x writes are visible.
+            const lf = limitPass(e.g, e.hdr, e.blob, x, x_old, lim);
+            limited = e.g.reduceMax(lf);
+            if (e.g.tid == 0) e.g.scal[8] = 1;
+            e.g.sync();
+        }
+        return .{ .limited = limited != 0, .flipped = false };
+    }
+
+    /// Residual gate scale — g.diag holds 1/diag; |diag| = 1/|inv|.
+    pub fn gateScale(e: *const GpuEnv, i: u32) f64 {
+        const inv = e.g.diag[i];
+        return if (@abs(inv) > 1e-30) 1.0 / @abs(inv) else 0.0;
+    }
+
+    pub fn currentRow(e: *const GpuEnv, i: u32) bool {
+        return e.current_row[i] != 0;
+    }
+};
+
+/// One whole JFNK Newton solve on x (in place) — newton_core.newtonSolve
+/// with the cooperative-grid env; with env.active the residual is the
+/// transient companion. Writes iterations/max_dx (+ status on convergence)
+/// into res. Returns converged — identical on every thread (all decisions
+/// flow through scal). Barrier counters are HOST-zeroed once (blocks reach
+/// the first barrier before any thread could init them; the sense-reversing
+/// barrier self-restores count=0 / monotonic gen, so relaunches need no
+/// re-zeroing).
 fn newtonSolve(
     g: *const G,
     hdr: *addrspace(.global) const abi.Header,
@@ -194,312 +303,55 @@ fn newtonSolve(
     t: f64,
     env: TranEnv,
 ) bool {
-    const n: u32 = g.n;
-    const m: u32 = g.m;
-    const tol = hdr.tol;
-    // Perturbed (J·v) evals share the companion residual but must not
-    // clobber the outer charge snapshot.
-    const env_pert: TranEnv = .{ .active = env.active, .alpha = env.alpha, .cvec = env.cvec, .snap = null };
-
-    // Init control state + x_old = x. Barrier counters are HOST-zeroed once
-    // (blocks reach the first barrier before any thread could init them;
-    // the sense-reversing barrier self-restores count=0 / monotonic gen, so
-    // relaunches need no re-zeroing).
-    if (g.tid == 0) {
-        g.scal[2] = 0;
-        g.scal[4] = 1e308; // prev_norm = "inf"
-        g.scal[7] = 0; // backtrack count
-        g.scal[8] = 0; // lim_active
-    }
     // Any batch with device limiting? Uniform scan — same table every thread.
     const table_lim: [*]addrspace(.global) const abi.BatchDesc = @ptrCast(@alignCast(blob + hdr.off_batch_table));
     var has_lim = false;
     for (0..hdr.n_batches) |bi| {
         if (table_lim[bi].off_lim != 0) has_lim = true;
     }
-    var i: u32 = g.tid;
-    while (i < n) : (i += g.stride) g.x_old[i] = x[i];
-    g.sync();
-
-    var iter: u32 = 0;
-    outer: while (iter < tol.max_iter) : (iter += 1) {
-        // Device limiting engaged? (set by the limit pass of the previous
-        // iteration; stable within one iteration.)
-        const limiting = has_lim and g.scal[8] != 0;
-        // F(x) + Jacobian diag, then gmin regularization (matches CPU: rhs
-        // gets gmin·x; the preconditioner/gate diag gets +gmin).
-        assemble(true, g, hdr, blob, x, t, env, limiting, x);
-        var norm_partial: f64 = 0;
-        i = g.tid;
-        while (i < n) : (i += g.stride) {
-            g.rhs[i] += tol.gmin * x[i];
-            g.diag[i] += tol.gmin;
-            norm_partial = @max(norm_partial, @abs(g.rhs[i]));
-        }
-        const norm_f = g.reduceMax(norm_partial);
-
-        // Monotone residual safeguard (backtracking) — thread 0 decides.
-        if (g.tid == 0) {
-            const prev_norm = g.scal[4];
-            var backtracks = g.scal[7];
-            if (norm_f > 10.0 * prev_norm and backtracks < 16.0) {
-                g.scal[2] = 1; // backtrack
-                g.scal[7] = backtracks + 1;
-            } else {
-                g.scal[2] = 0;
-                g.scal[7] = 0;
-                g.scal[4] = norm_f;
-            }
-            backtracks = g.scal[7];
-        }
-        g.sync();
-        if (g.scal[2] == 1) {
-            i = g.tid;
-            while (i < n) : (i += g.stride) x[i] = 0.5 * (x[i] + g.x_old[i]);
-            g.sync();
-            // Keep lim_x tracking the retreated x — mirrors the CPU
-            // backtrack's applyLimits call.
-            if (has_lim) {
-                _ = limitPass(g, hdr, blob, x, g.x_old, limiting);
-                if (g.tid == 0) g.scal[8] = 1;
-                g.sync();
-            }
-            continue :outer;
-        }
-
-        // f0 = F(x)+gmin·x; Jacobi preconditioner = 1/diag.
-        i = g.tid;
-        while (i < n) : (i += g.stride) {
-            g.f0[i] = g.rhs[i];
-            const d = g.diag[i];
-            g.diag[i] = if (@abs(d) > 1e-30) 1.0 / d else 1.0;
-        }
-        g.sync();
-
-        // FD baseline: with limiting engaged, f0 carries the companion
-        // correction J(lx)·(x−lx); differencing shifted perturbed evals
-        // against it would leave an O(corr/ε) ghost. Difference against the
-        // UNCORRECTED shifted residual at x itself (= i(lx) for limited
-        // devices, i(x) for the rest). One extra residual-only eval per
-        // outer iteration; a plain copy when limiting is off.
-        if (limiting) {
-            assemble(false, g, hdr, blob, x, t, env_pert, true, x);
-            i = g.tid;
-            while (i < n) : (i += g.stride) g.f0_shift[i] = g.rhs[i] + tol.gmin * x[i];
-        } else {
-            i = g.tid;
-            while (i < n) : (i += g.stride) g.f0_shift[i] = g.f0[i];
-        }
-        g.sync();
-
-        // r = -M⁻¹ f0; beta = ||r||.
-        var acc: f64 = 0;
-        i = g.tid;
-        while (i < n) : (i += g.stride) {
-            const ri = -g.f0[i] * g.diag[i];
-            g.r[i] = ri;
-            acc += ri * ri;
-        }
-        const beta = @sqrt(g.reduceAdd(acc));
-
-        if (beta < tol.abstol) {
-            if (iter > 0) {
-                if (g.tid == 0) {
-                    res.status = 1;
-                    res.iterations = iter + 1;
-                    res.max_dx = 0;
-                }
-                g.sync();
-                return true;
-            }
-            continue :outer;
-        }
-
-        // v0 = r/beta; scalar GMRES state.
-        i = g.tid;
-        while (i < n) : (i += g.stride) g.v_basis[i] = g.r[i] / beta;
-        if (g.tid == 0) {
-            g.g_vec[0] = beta;
-            for (1..m + 1) |k| g.g_vec[k] = 0;
-            for (0..@as(usize, m + 1) * m) |k| g.h[k] = 0;
-            g.scal[5] = 0; // jj
-        }
-        g.sync();
-
-        var j: u32 = 0;
-        gmres: while (j < m) : (j += 1) {
-            const vj = g.v_basis + @as(usize, j) * n;
-
-            // eps = sqrt(eps_mach)·max(||x||,1)/||v|| — two norms.
-            acc = 0;
-            i = g.tid;
-            while (i < n) : (i += g.stride) acc += x[i] * x[i];
-            const x_norm = @max(@sqrt(g.reduceAdd(acc)), 1.0);
-            acc = 0;
-            i = g.tid;
-            while (i < n) : (i += g.stride) acc += vj[i] * vj[i];
-            const v_norm = @sqrt(g.reduceAdd(acc));
-            if (g.tid == 0) {
-                const sqrt_eps = 1.4901161193847656e-8; // sqrt(f64 eps)
-                g.scal[1] = if (v_norm > 1e-30) sqrt_eps * x_norm / v_norm else sqrt_eps;
-            }
-            g.sync();
-            const eps = g.scal[1];
-
-            i = g.tid;
-            while (i < n) : (i += g.stride) g.x_pert[i] = x[i] + eps * vj[i];
-            g.sync();
-
-            // w = M⁻¹ (F(x+εv)+gmin·x_pert − f0_shift)/ε (residual-only,
-            // shifted through lx when limiting so FD = J(lx)·v).
-            assemble(false, g, hdr, blob, g.x_pert, t, env_pert, limiting, x);
-            const inv_eps = 1.0 / eps;
-            i = g.tid;
-            while (i < n) : (i += g.stride)
-                g.w[i] = ((g.rhs[i] + tol.gmin * g.x_pert[i]) - g.f0_shift[i]) * inv_eps * g.diag[i];
-            g.sync();
-
-            // Modified Gram-Schmidt (sequential dots — exactness over speed).
-            var mi: u32 = 0;
-            while (mi <= j) : (mi += 1) {
-                const vi = g.v_basis + @as(usize, mi) * n;
-                acc = 0;
-                i = g.tid;
-                while (i < n) : (i += g.stride) acc += vi[i] * g.w[i];
-                const hij = g.reduceAdd(acc);
-                if (g.tid == 0) g.h[@as(usize, mi) * m + j] = hij;
-                i = g.tid;
-                while (i < n) : (i += g.stride) g.w[i] -= hij * vi[i];
-                g.sync();
-            }
-            acc = 0;
-            i = g.tid;
-            while (i < n) : (i += g.stride) acc += g.w[i] * g.w[i];
-            const h_jp1 = @sqrt(g.reduceAdd(acc));
-            if (g.tid == 0) g.h[@as(usize, j + 1) * m + j] = h_jp1;
-            if (h_jp1 > 1e-30) {
-                const vjp1 = g.v_basis + @as(usize, j + 1) * n;
-                i = g.tid;
-                while (i < n) : (i += g.stride) vjp1[i] = g.w[i] / h_jp1;
-            }
-
-            // Givens rotations + early-exit test — thread 0.
-            if (g.tid == 0) {
-                for (0..j) |k| {
-                    const h_k = g.h[k * m + j];
-                    const h_k1 = g.h[(k + 1) * m + j];
-                    g.h[k * m + j] = g.cs[k] * h_k + g.sn[k] * h_k1;
-                    g.h[(k + 1) * m + j] = -g.sn[k] * h_k + g.cs[k] * h_k1;
-                }
-                const a_val = g.h[@as(usize, j) * m + j];
-                const b_val = g.h[@as(usize, j + 1) * m + j];
-                const r_val = @sqrt(a_val * a_val + b_val * b_val);
-                if (r_val > 1e-30) {
-                    g.cs[j] = a_val / r_val;
-                    g.sn[j] = b_val / r_val;
-                } else {
-                    g.cs[j] = 1.0;
-                    g.sn[j] = 0.0;
-                }
-                g.h[@as(usize, j) * m + j] = r_val;
-                g.h[@as(usize, j + 1) * m + j] = 0;
-                const g_j = g.g_vec[j];
-                const g_j1 = g.g_vec[j + 1];
-                g.g_vec[j] = g.cs[j] * g_j + g.sn[j] * g_j1;
-                g.g_vec[j + 1] = -g.sn[j] * g_j + g.cs[j] * g_j1;
-                g.scal[5] = @floatFromInt(j + 1); // jj so far
-                g.scal[2] = if (@abs(g.g_vec[j + 1]) < tol.abstol * 0.1) 2 else 0;
-            }
-            g.sync();
-            if (g.scal[2] == 2) break :gmres;
-        }
-
-        // Back-substitution (thread 0), then dx = V·y into g.r.
-        const jj: u32 = @intFromFloat(g.scal[5]);
-        if (g.tid == 0 and jj > 0) {
-            var k: u32 = jj;
-            while (k > 0) {
-                k -= 1;
-                var s = g.g_vec[k];
-                for (k + 1..jj) |kk| s -= g.h[@as(usize, k) * m + kk] * g.y_vec[kk];
-                const d = g.h[@as(usize, k) * m + k];
-                g.y_vec[k] = if (@abs(d) > 1e-30) s / d else 0;
-            }
-        }
-        g.sync();
-        i = g.tid;
-        while (i < n) : (i += g.stride) {
-            var dxi: f64 = 0;
-            var k: u32 = 0;
-            while (k < jj) : (k += 1) dxi += g.y_vec[k] * g.v_basis[@as(usize, k) * n + i];
-            g.r[i] = dxi;
-        }
-        g.sync();
-
-        // Direction-preserving damping.
-        var mdx_p: f64 = 0;
-        i = g.tid;
-        while (i < n) : (i += g.stride) mdx_p = @max(mdx_p, @abs(g.r[i]));
-        const mdx = g.reduceMax(mdx_p);
-        if (mdx > tol.dx_clamp) {
-            const s = tol.dx_clamp / mdx;
-            i = g.tid;
-            while (i < n) : (i += g.stride) g.r[i] *= s;
-            g.sync();
-        }
-
-        // finalizeStep (mirrors converger.finalizeStep, no state flips):
-        //   x_old = x; x += dx; device limiting pass; per-row delta-x
-        //   criterion; iter-0 reject; limited-step reject; row-scaled
-        //   residual gate on f0 with the (pre-inversion) diag.
-        var scaled_p: f64 = 0;
-        var viol_p: f64 = 0;
-        i = g.tid;
-        while (i < n) : (i += g.stride) {
-            const dxi = g.r[i];
-            const xo = x[i];
-            const xn = xo + dxi;
-            g.x_old[i] = xo;
-            x[i] = xn;
-            const atol = if (current_row[i] != 0) tol.abstol else tol.vntol;
-            const tcrit = tol.reltol * @max(@abs(xn), @abs(xo)) + atol;
-            scaled_p = @max(scaled_p, @abs(dxi) / tcrit);
-            // residual gate — g.diag holds 1/diag; |diag| = 1/|inv|.
-            const inv = g.diag[i];
-            const scale = if (@abs(inv) > 1e-30) 1.0 / @abs(inv) else 0.0;
-            const rtol = @max(tol.residual_tol, 10.0 * scale * (tol.reltol * @abs(xn) + tol.vntol));
-            if (@abs(g.f0[i]) > rtol) viol_p = 1;
-        }
-        const scaled = g.reduceMax(scaled_p);
-        const viol = g.reduceMax(viol_p);
-
-        // Device limiting (pnjlim/fetlim): recompute lim_x at the updated x;
-        // a limited step forces another iteration (same gate as the CPU).
-        var limited: f64 = 0;
-        if (has_lim) {
-            // reduceMax above synced, so the x writes are grid-visible.
-            const lf = limitPass(g, hdr, blob, x, g.x_old, limiting);
-            limited = g.reduceMax(lf);
-            if (g.tid == 0) g.scal[8] = 1;
-            g.sync();
-        }
-
-        if (g.tid == 0) {
-            const converged = iter > 0 and scaled < 1.0 and viol == 0 and limited == 0;
-            g.scal[2] = if (converged) 3 else 0;
-            if (converged) {
-                res.status = 1;
-                res.iterations = iter + 1;
-                res.max_dx = scaled;
-            } else {
-                res.iterations = iter + 1;
-                res.max_dx = scaled;
-            }
-        }
-        g.sync();
-        if (g.scal[2] == 3) return true;
+    var genv: GpuEnv = .{
+        .g = g,
+        .hdr = hdr,
+        .blob = blob,
+        .tran = env,
+        .tran_pert = .{ .active = env.active, .alpha = env.alpha, .cvec = env.cvec, .snap = null },
+        .has_lim = has_lim,
+        .current_row = current_row,
+    };
+    const vecs: newton_core.Vecs([*]addrspace(.global) f64) = .{
+        .v_basis = g.v_basis,
+        .h = g.h,
+        .cs = g.cs,
+        .sn = g.sn,
+        .g_vec = g.g_vec,
+        .y_vec = g.y_vec,
+        .r = g.r,
+        .w = g.w,
+        .x_pert = g.x_pert,
+        .f0 = g.f0,
+        .f0_shift = g.f0_shift,
+        .diag = g.diag,
+        .x_old = g.x_old,
+        .rhs = g.rhs,
+    };
+    const tol: newton_core.Tol = .{
+        .reltol = hdr.tol.reltol,
+        .abstol = hdr.tol.abstol,
+        .vntol = hdr.tol.vntol,
+        .residual_tol = hdr.tol.residual_tol,
+        .gmin = hdr.tol.gmin,
+        .dx_clamp = hdr.tol.dx_clamp,
+        .max_iter = hdr.tol.max_iter,
+        .gmres_m = hdr.tol.gmres_m,
+    };
+    const r = newton_core.newtonSolve(&genv, vecs, x, t, tol, g.n, g.m);
+    if (g.tid == 0) {
+        res.iterations = r.iterations;
+        res.max_dx = r.max_dx;
+        if (r.converged) res.status = 1;
     }
-    return false;
+    g.sync();
+    return r.converged;
 }
 
 // ---------------------------------------------------------------------------
@@ -630,7 +482,7 @@ fn arpTran(blob: [*]addrspace(.global) u8) callconv(.kernel) void {
             // q(x, 0) into q_hist[1] (rot 0 ⇒ physical slot 1) — mirrors the
             // CPU's ckt.eval(x, 0) + q_prev seed. alpha = 0 keeps rhs inert.
             const env0: TranEnv = .{ .active = true, .alpha = 0, .cvec = null, .snap = g.q_hist + np1 };
-            assemble(false, &g, hdr, blob, x, 0, env0, false, x);
+            assembleEval(false, &g, hdr, blob, x, 0, env0, false, x);
         }
     }
     g.sync();

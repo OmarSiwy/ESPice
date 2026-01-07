@@ -107,6 +107,7 @@ pub fn build(b: *std.Build) void {
         .b = b,
         .devices_dep = devices_dep,
         .ptx_rewrite_path = b.path("modules/compute/tools/ptx_rewrite.zig"),
+        .newton_core_path = b.path("modules/solvers/src/newton_core.zig"),
         .optimize = optimize,
     };
 
