@@ -1,0 +1,6 @@
+// EXPECT: error -- an analog-event-owned variable may drive a continuous assign.
+module ch7_continuous_assign(p, out);
+  inout p; electrical p; output out; wreal out; real analog_value;
+  analog @(cross(V(p), 0)) analog_value = V(p);
+  assign out = analog_value;
+endmodule

@@ -1,0 +1,9 @@
+`include "constants.vams"
+module ch09_bound_step(p, n);
+  inout p, n; electrical p, n;
+  parameter real freq = 1k from (0:inf);
+  analog begin
+    $bound_step(0.05/freq);
+    I(p,n) <+ sin(2.0*`M_PI*freq*$abstime) + 0.0*V(p,n);
+  end
+endmodule

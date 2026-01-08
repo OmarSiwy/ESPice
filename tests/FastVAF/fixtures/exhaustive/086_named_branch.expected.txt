@@ -1,0 +1,23 @@
+=== 086_named_branch ===
+--- point 0 ---
+  x[a] = 0.000000e0
+  x[b] = 2.500000e-1
+branch probe equals the node pair got=-0.25 want=-0.25 ok=1
+branch current got=-0.001 want=-0.001 ok=1
+  res[a] = -1.000000e-3
+    d res[a]/d x[a] = 4.000000e-3
+    d res[a]/d x[b] = -4.000000e-3
+  res[b] = 1.000000e-3
+    d res[b]/d x[a] = -4.000000e-3
+    d res[b]/d x[b] = 4.000000e-3
+--- point 1 ---
+  x[a] = 1.000000e0
+  x[b] = 2.500000e-1
+branch probe equals the node pair got=0.75 want=0.75 ok=1
+branch current got=0.003 want=0.003 ok=1
+  res[a] = 3.000000e-3
+    d res[a]/d x[a] = 4.000000e-3
+    d res[a]/d x[b] = -4.000000e-3
+  res[b] = -3.000000e-3
+    d res[b]/d x[a] = -4.000000e-3
+    d res[b]/d x[b] = 4.000000e-3

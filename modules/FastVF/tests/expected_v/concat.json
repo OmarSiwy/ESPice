@@ -1,0 +1,51 @@
+{
+  "status": "compile_ok",
+  "module_name": "concat_test",
+  "input_count": 8,
+  "output_count": 8,
+  "is_sequential": false,
+  "ports": [
+    {
+      "name": "hi",
+      "dir": "in",
+      "width": 4
+    },
+    {
+      "name": "lo",
+      "dir": "in",
+      "width": 4
+    },
+    {
+      "name": "y",
+      "dir": "out",
+      "width": 8
+    }
+  ],
+  "vectors": [
+    {
+      "hi": 0,
+      "lo": 0,
+      "y": 0
+    },
+    {
+      "hi": 10,
+      "lo": 5,
+      "y": 165
+    },
+    {
+      "hi": 15,
+      "lo": 0,
+      "y": 240
+    },
+    {
+      "hi": 0,
+      "lo": 15,
+      "y": 15
+    },
+    {
+      "hi": 3,
+      "lo": 12,
+      "y": 60
+    }
+  ]
+}

@@ -1,0 +1,3 @@
+modulech2_form_feed(p);inout p; electrical p; analog I(p) <+ V(p); endmodule
+// LRM 2.2: white space is blanks, tabs, newlines and FORMFEEDS, so the form
+// feeds above are ordinary separators and this must COMPILE.

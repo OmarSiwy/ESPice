@@ -1,0 +1,5 @@
+// EXPECT: error -- an omitted named port is unconnected and requires hierarchy.
+module ch6_omitted_named_parent(p);
+  inout p; electrical p;
+  ch6_child u(.input_port(p), .output_port(p));
+endmodule

@@ -1,0 +1,3 @@
+nature ch3_right_n; units="V"; access=RightAccess; abstol=1u; endnature
+discipline ch3_right_d; potential ch3_right_n; enddiscipline
+module ch3_wrong_access(p); inout p; ch3_right_d p; analog V(p)<+0.0; endmodule

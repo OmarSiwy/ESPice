@@ -1,5 +1,0 @@
-B4SOIV3 Parameter Check
-Model = nb4soi
-W = 1e-06, L = 1e-07
-Warning: Pd = 0 is less than W.
-Warning: Ps = 0 is less than W.

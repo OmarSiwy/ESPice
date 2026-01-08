@@ -1,0 +1,5 @@
+// EXPECT: error
+module ch09_simprobe_unsupported(p, n);
+  inout p, n; electrical p, n;
+  analog I(p,n) <+ $simprobe("sibling", "quantity", 0.0);
+endmodule

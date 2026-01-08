@@ -1,0 +1,1 @@
+module annex_c_case_inequality(p); inout p; electrical p; integer state; analog I(p)<+(state !== 1)+0.0*V(p); endmodule

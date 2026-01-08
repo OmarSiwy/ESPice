@@ -1,0 +1,6 @@
+module ch6_ansi(input electrical sense, inout electrical p, output electrical out);
+  analog begin
+    I(p) <+ V(sense);
+    V(out) <+ V(p);
+  end
+endmodule

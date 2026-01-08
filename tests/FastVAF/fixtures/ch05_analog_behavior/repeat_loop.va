@@ -1,0 +1,8 @@
+module ch5_repeat(p);
+  inout p; electrical p; real x;
+  analog begin
+    x = 0.0;
+    repeat (3) x = x + V(p);
+    I(p) <+ x;
+  end
+endmodule

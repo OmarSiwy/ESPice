@@ -1,0 +1,51 @@
+{
+  "status": "compile_ok",
+  "module_name": "register8",
+  "input_count": 9,
+  "output_count": 8,
+  "is_sequential": true,
+  "ports": [
+    {
+      "name": "clk",
+      "dir": "in",
+      "width": 1
+    },
+    {
+      "name": "d",
+      "dir": "in",
+      "width": 8
+    },
+    {
+      "name": "q",
+      "dir": "out",
+      "width": 8
+    }
+  ],
+  "vectors": [
+    {
+      "clk": 0,
+      "d": 165,
+      "q": 0
+    },
+    {
+      "clk": 1,
+      "d": 165,
+      "q": 165
+    },
+    {
+      "clk": 1,
+      "d": 60,
+      "q": 165
+    },
+    {
+      "clk": 0,
+      "d": 60,
+      "q": 165
+    },
+    {
+      "clk": 1,
+      "d": 60,
+      "q": 60
+    }
+  ]
+}

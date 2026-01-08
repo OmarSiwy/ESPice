@@ -1,0 +1,7 @@
+module ch5_cross(p, c);
+  inout p, c; electrical p, c; real held;
+  analog begin
+    @(cross(V(c), +1, 1p)) held = V(p);
+    I(p) <+ held;
+  end
+endmodule

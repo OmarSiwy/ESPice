@@ -1,0 +1,21 @@
+// §4.2.10 the conditional operator. It is an EXPRESSION, so unlike an `if`
+// statement it survives into a display task's operand list — which is exactly
+// how a testbench states a verdict without a branch (see check.vh).
+//
+//! print none
+`include "check.vh"
+module ex024_conditional_operator(p, n);
+  inout p, n;
+  electrical p, n;
+  parameter real a = 3.0;
+  parameter real b = 4.0;
+  analog begin
+    `CHECKX("true arm", (1 < 2) ? 10.0 : 20.0, 10.0);
+    `CHECKX("false arm", (2 < 1) ? 10.0 : 20.0, 20.0);
+    `CHECKX("nested", (a > b) ? a : ((b > 3.5) ? b : 0.0), 4.0);
+    `CHECKX("condition is a real", (0.5) ? 1.0 : 2.0, 1.0);
+    `CHECKX("zero real condition", (0.0) ? 1.0 : 2.0, 2.0);
+    `CHECKI("integer result", (a < b) ? 7 : 9, 7);
+    I(p, n) <+ 0.0;
+  end
+endmodule

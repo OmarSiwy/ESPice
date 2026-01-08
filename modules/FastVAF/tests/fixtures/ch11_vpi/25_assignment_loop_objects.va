@@ -1,0 +1,9 @@
+module ch11_assignment_loop_objects(p, n);
+  inout p, n; electrical p, n;
+  integer k; real total;
+  analog begin
+    total = 0.0;
+    for (k = 0; k < 3; k = k + 1) total = total + V(p,n);
+    I(p,n) <+ total;
+  end
+endmodule

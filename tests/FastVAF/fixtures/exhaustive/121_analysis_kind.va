@@ -1,0 +1,20 @@
+// §4.6.1 analysis() and §5.10.2 the global events. The runner sets the analysis
+// kind from `//! analysis`, so this pins which spellings answer true — including
+// §4.6.1's rule that "static" covers every pass computing a DC operating point.
+//
+//! analysis dc
+//! print none
+`include "check.vh"
+module ex121_analysis_kind(p, n);
+  inout p, n;
+  electrical p, n;
+  analog begin
+    `CHECKI("analysis(\"dc\")", analysis("dc"), 1);
+    `CHECKI("analysis(\"static\") covers dc", analysis("static"), 1);
+    `CHECKI("analysis(\"tran\")", analysis("tran"), 0);
+    `CHECKI("analysis(\"ac\")", analysis("ac"), 0);
+    `CHECKI("analysis(\"noise\")", analysis("noise"), 0);
+    `CHECKI("a multi-name analysis() is an OR", analysis("ac", "dc"), 1);
+    I(p, n) <+ 0.0;
+  end
+endmodule

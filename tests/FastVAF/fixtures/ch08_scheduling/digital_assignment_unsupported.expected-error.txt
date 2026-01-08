@@ -1,0 +1,3 @@
+# annex C: the digital continuous `assign` is outside Verilog-A.
+E0205
+assign

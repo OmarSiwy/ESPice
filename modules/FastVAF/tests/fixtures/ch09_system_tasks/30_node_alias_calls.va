@@ -1,0 +1,10 @@
+module ch09_node_alias_calls(p, n);
+  inout p, n; electrical p, n;
+  electrical local_node;
+  integer status;
+  analog initial begin
+    status = $analog_node_alias(local_node, "$root.top.n");
+    status = $analog_port_alias(local_node, "$root.top.dev.p");
+  end
+  analog I(p,n) <+ V(local_node);
+endmodule

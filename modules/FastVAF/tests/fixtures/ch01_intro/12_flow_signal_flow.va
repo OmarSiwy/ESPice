@@ -1,0 +1,4 @@
+nature ch1_sf_current_n; units="A"; access=SI; abstol=1p; endnature
+discipline ch1_current_sf; flow ch1_sf_current_n; enddiscipline
+module ch1_flow_sf(input ch1_current_sf inp, output ch1_current_sf outp); analog SI(outp) <+ -SI(inp); endmodule
+// EXPECT: error -- normative syntax/restriction snapshot for this rule family.

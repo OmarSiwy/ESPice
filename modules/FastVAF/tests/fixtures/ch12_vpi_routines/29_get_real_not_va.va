@@ -1,0 +1,6 @@
+// EXPECT: error
+module ch12_atomic_get_real(p, n);
+  inout p, n; electrical p, n;
+  analog I(p,n) <+ vpi_get_real(0);
+endmodule
+

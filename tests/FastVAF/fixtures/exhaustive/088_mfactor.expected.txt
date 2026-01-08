@@ -1,0 +1,12 @@
+=== 088_mfactor ===
+--- point 0 ---
+  x[p] = 1.000000e0
+  x[n] = 0.000000e0
+$mfactor default got=1 want=1 ok=1
+current per device got=0.001 want=0.001 ok=1
+  res[p] = 1.000000e-3
+    d res[p]/d x[p] = 1.000000e-3
+    d res[p]/d x[n] = -1.000000e-3
+  res[n] = -1.000000e-3
+    d res[n]/d x[p] = -1.000000e-3
+    d res[n]/d x[n] = 1.000000e-3

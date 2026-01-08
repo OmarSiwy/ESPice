@@ -1,0 +1,8 @@
+module ch02_whitespace_comments(p, n); // a one-line comment
+	/* The // token is ordinary text inside a block comment. */
+	inout p, n;
+	electrical p, n;
+	analog begin
+		I(p, n) <+ V(p, n) / 1_000.0;
+	end
+endmodule

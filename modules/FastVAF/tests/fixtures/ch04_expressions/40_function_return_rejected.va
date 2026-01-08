@@ -1,0 +1,13 @@
+module ch04_function_return_rejected(p, n);
+    inout p, n;
+    electrical p, n;
+
+    analog function real choose;
+        input real first, second;
+        begin
+            return first > second ? first : second;
+        end
+    endfunction
+
+    analog I(p, n) <+ choose(V(p, n), 0.0);
+endmodule

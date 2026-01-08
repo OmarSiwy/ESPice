@@ -1,0 +1,8 @@
+// EXPECT: error
+module ch10_line_macro_unsupported(p, n);
+  inout p, n; electrical p, n;
+  analog begin
+    $display("line=%d", `__LINE__);
+    I(p,n) <+ V(p,n);
+  end
+endmodule

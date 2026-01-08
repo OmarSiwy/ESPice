@@ -1,0 +1,5 @@
+// EXPECT: error -- mixed signals require a complete elaborated hierarchy.
+module ch7_mixed_parent(p);
+  inout p; electrical p;
+  digital_child u(p);
+endmodule

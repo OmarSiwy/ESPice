@@ -1,0 +1,6 @@
+// EXPECT: error
+module ch12_atomic_register_cb(p, n);
+  inout p, n; electrical p, n;
+  analog I(p,n) <+ vpi_register_cb(0);
+endmodule
+

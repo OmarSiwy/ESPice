@@ -1,0 +1,1 @@
+module ch5_initial_real(p); inout p; electrical p; real bias; analog initial bias = 0.25; analog V(p) <+ bias; endmodule

@@ -1,0 +1,6 @@
+// EXPECT: error
+module ch09_dist_exponential_unsupported(p, n);
+  inout p, n; electrical p, n;
+  integer seed;
+  analog I(p,n) <+ $dist_exponential(seed, 3);
+endmodule

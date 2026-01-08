@@ -1,0 +1,7 @@
+module ch11_callback_call_site(p, n);
+  inout p, n; electrical p, n;
+  analog begin
+    $fixture_value_change_callback(V(p,n));
+    I(p,n) <+ V(p,n);
+  end
+endmodule

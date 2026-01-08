@@ -1,0 +1,9 @@
+module ch09_string_formatting(p, n);
+  inout p, n; electrical p, n;
+  string text;
+  analog begin
+    $swrite(text, "value=%g", V(p,n));
+    $sformat(text, "value=%10.4e", V(p,n));
+    I(p,n) <+ V(p,n);
+  end
+endmodule

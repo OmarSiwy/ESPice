@@ -1,0 +1,1 @@
+module annex_a_primaries(p,n); inout p,n; electrical p,n; branch(p,n) path; real array[0:1]; real result; analog function real identity; input x; real x; identity=x; endfunction analog begin array[0]=V(path); array[1]=I(path); result=identity(array[0])+$pow(array[1],2.0)+I(<p>); I(p,n)<+result; end endmodule

@@ -1,0 +1,8 @@
+module ch09_conversion_functions(p, n);
+  inout p, n; electrical p, n;
+  real x;
+  analog begin
+    x = $itor($rtoi(V(p,n))) + $bitstoreal($realtobits(V(p,n)));
+    I(p,n) <+ x;
+  end
+endmodule

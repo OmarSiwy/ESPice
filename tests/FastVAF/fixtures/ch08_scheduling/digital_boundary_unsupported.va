@@ -1,0 +1,5 @@
+// EXPECT: error -- an A2D/D2A boundary needs a digital process.
+module ch8_boundary(p);
+  inout p; electrical p; integer d;
+  always @(cross(V(p) - 0.5, +1)) d = 1;
+endmodule

@@ -1,0 +1,11 @@
+module annex_a_event_control(p, n);
+    inout p, n;
+    electrical p, n;
+    integer active;
+
+    analog begin
+        @(initial_step) active = 0;
+        @(cross(V(p, n), 1) or above(V(p, n) - 1.0)) active = 1;
+        I(p, n) <+ active;
+    end
+endmodule

@@ -1,0 +1,15 @@
+=== 041_rounding_selection ===
+--- point 0 ---
+  x[p] = 0.000000e0
+  x[n] = 0.000000e0
+floor positive got=2 want=2 ok=1
+floor negative rounds down got=-3 want=-3 ok=1
+floor of an integer value got=3 want=3 ok=1
+ceil positive got=3 want=3 ok=1
+ceil negative rounds up got=-2 want=-2 ok=1
+abs positive got=2.5 want=2.5 ok=1
+abs negative got=2.5 want=2.5 ok=1
+abs zero got=0 want=0 ok=1
+min got=-1 want=-1 ok=1
+max got=2.5 want=2.5 ok=1
+min of equals got=2.5 want=2.5 ok=1

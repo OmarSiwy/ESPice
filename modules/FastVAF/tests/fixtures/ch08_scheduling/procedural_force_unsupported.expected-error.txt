@@ -1,0 +1,5 @@
+# annex C: `reg`, the digital `initial` block and procedural force/release
+# are outside Verilog-A.
+E0205
+reg
+initial

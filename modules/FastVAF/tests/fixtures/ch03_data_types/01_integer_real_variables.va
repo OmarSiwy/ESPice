@@ -1,0 +1,8 @@
+module ch03_integer_real_variables(p, n);
+    inout p, n;
+    electrical p, n;
+    integer count = 3;
+    real gain = 2.5;
+
+    analog I(p, n) <+ count * gain * V(p, n);
+endmodule

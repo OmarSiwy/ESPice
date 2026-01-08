@@ -1,7 +1,0 @@
-// Conformance: 6.5.2 — Typed port declarations
-// EXPECT: compile_ok
-`include "disciplines.vams"
-module conf_mod_typed(inout electrical a, inout electrical b);
-    analog
-        I(a, b) <+ V(a, b);
-endmodule

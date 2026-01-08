@@ -1,0 +1,26 @@
+// §5.6 with §4.5.13 limexp: the exponential I-V that every compact model is
+// built on, and the first fixture whose residual spans decades.
+//
+// The wants are computed from the LRM's own definitions:
+//   $vt      = k*T/q = 8.617333262145179e-5 * 300.15 = 0.025864925786328753
+//   I(0.6)   = 1e-14 * (exp(0.6/$vt) - 1)            = 1.1871869419193088e-4
+//   dI/dV    = 1e-14/$vt * exp(0.6/$vt)              = 4.5899491528671316e-3
+// The Jacobian line in the transcript is the third of those.
+//
+//! param is = 1e-14
+//! bias V(c) = 0
+//! sweep V(a) = 0, 0.6
+`include "check.vh"
+module ex081_diode(a, c);
+  inout a, c;
+  electrical a, c;
+  parameter real is = 1e-15 from (0:inf);
+  real vt;
+  analog begin
+    vt = $vt;
+    `CHECKR("$vt at 300.15 K", vt, 0.025864925786328753, 1e-15);
+    `CHECKR("I at this bias", is * (limexp(V(a, c) / vt) - 1.0),
+            1e-14 * (exp(V(a, c) / 0.025864925786328753) - 1.0), 1e-12);
+    I(a, c) <+ is * (limexp(V(a, c) / vt) - 1.0);
+  end
+endmodule

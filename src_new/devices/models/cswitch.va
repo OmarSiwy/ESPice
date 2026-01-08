@@ -1,0 +1,62 @@
+// Current-controlled switch — ngspice `W` element, `.model ... csw`.
+// docs/tline-and-switch.md §1.2 (FSM) and §3 (`sw_update_state`/`sw_eval`).
+//
+// A W card names a voltage source (`W1 p n vnam csw1`) and switches on the
+// current through it, so the control value is the current in the (cp,cn)
+// branch: u = I(ctl). The named source's own value is carried by `vsense`
+// (0 for the usual dedicated sense source) so binding a real `vnam` here does
+// not silently drop it.
+//
+// Identical FSM to the sibling vswitch.va — see its header for why the state is
+// split into a memoryless part (outside the hysteresis band) and a held part
+// (inside it). Only the control quantity differs: a branch current here, a port
+// voltage there. This replaces the earlier internal-node `st` encoding, which
+// was singular exactly where it mattered: inside the band the FSM target IS
+// V(st), so `I(st) <+ V(st) - tgt` had residual and d/dV(st) both identically
+// zero — an all-zero row in the one case the hysteresis exists for.
+module cswitch(p, n, cp, cn);
+    inout p, n, cp, cn;
+    electrical p, n, cp, cn;
+
+    // `V(ctl) <+ vsense` makes I(ctl) a real branch-current unknown, which is
+    // what the W element reads out of `vnam`.
+    branch (cp, cn) ctl;
+
+    parameter real it   = 0.0;                  // A   threshold current
+    parameter real ih   = 0.0;                  // A   hysteresis half-width
+    parameter real ron  = 1.0    from (0:inf);  // ohm on resistance
+    parameter real roff = 1.0e12 from (0:inf);  // ohm off resistance (1/gmin)
+    parameter real vsense = 0.0;                // V   value of the sensed source
+    parameter integer ic = 0;                   // >0 = start ON
+
+    integer latched;   // held across evaluations: the in-band memory
+    integer on;
+    real u, hi, lo, gon, goff;
+
+    analog begin
+        gon  = 1.0 / ron;
+        goff = 1.0 / roff;
+
+        // Both signs of ih share the same rails (see vswitch.va).
+        hi = it + abs(ih);
+        lo = it - abs(ih);
+
+        V(ctl) <+ vsense;
+        u = I(ctl);
+
+        @(initial_step) latched = (ic > 0) ? 3 : 2;
+
+        @(cross(u - hi, +1)) latched = 3;                    // -> HYST_ON
+        @(cross(u - lo, -1)) latched = 2;                    // -> HYST_OFF
+        @(cross(u - hi, -1)) latched = (ih < 0.0) ? 2 : 3;   // ON rail -> band
+        @(cross(u - lo, +1)) latched = (ih < 0.0) ? 3 : 2;   // OFF rail -> band
+
+        // Outside the band: memoryless. Inside: the latch.
+        if (u > hi) on = 1;
+        else if (u < lo) on = 0;
+        else on = (latched > 2.5) ? 1 : 0;
+
+        // §3 sw_eval: piecewise-constant stamp, dG/du deliberately 0.
+        I(p, n) <+ (on ? gon : goff) * V(p, n);
+    end
+endmodule

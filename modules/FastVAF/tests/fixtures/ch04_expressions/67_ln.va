@@ -1,0 +1,1 @@
+module ch04_ln(p, n); inout p, n; electrical p, n; analog I(p, n) <+ ln(abs(V(p, n)) + 1.0); endmodule

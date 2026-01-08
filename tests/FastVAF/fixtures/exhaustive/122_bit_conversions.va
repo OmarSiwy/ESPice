@@ -1,0 +1,27 @@
+// §9.11 Table 9-8 conversions. $realtobits/$bitstoreal are the IEEE-754 bit
+// pattern verbatim, so the round trip must be EXACT — a value that survives it
+// only approximately means the pattern was routed through a float somewhere.
+//
+//! print none
+`include "check.vh"
+module ex122_bit_conversions(p, n);
+  inout p, n;
+  electrical p, n;
+  integer bits;
+  analog begin
+    `CHECKI("$rtoi truncates, not rounds", $rtoi(1.9), 1);
+    `CHECKX("$itor", $itor(-5), -5.0);
+    // 1.0 is 0x3FF0000000000000 = 4607182418800017408.
+    `CHECKI("$realtobits(1.0)", $realtobits(1.0), 4607182418800017408);
+    `CHECKX("$bitstoreal round trip", $bitstoreal($realtobits(0.1)), 0.1);
+    bits = $realtobits(-2.5);
+    `CHECKX("round trip of a negative", $bitstoreal(bits), -2.5);
+    // §9.14 $clog2 is the ceiling of the base-2 log: the bits needed for N values.
+    `CHECKI("$clog2(1)", $clog2(1), 0);
+    `CHECKI("$clog2(2)", $clog2(2), 1);
+    `CHECKI("$clog2(5)", $clog2(5), 3);
+    `CHECKI("$clog2(8)", $clog2(8), 3);
+    `CHECKI("$clog2(9)", $clog2(9), 4);
+    I(p, n) <+ 0.0;
+  end
+endmodule

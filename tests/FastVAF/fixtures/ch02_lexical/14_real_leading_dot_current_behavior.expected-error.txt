@@ -1,0 +1,3 @@
+# LRM 2.6: a real number must have at least one digit on each side of the
+# decimal point, so `.12` is not a legal real number.
+E0209

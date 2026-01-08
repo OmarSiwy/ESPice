@@ -1,0 +1,4 @@
+module ch8_static(p, n);
+  inout p, n; electrical p, n;
+  analog I(p, n) <+ 2m * V(p, n);
+endmodule

@@ -1,0 +1,2 @@
+module ch4_op_initial(p); inout p; electrical p; real x; initial x=ddt(V(p)); analog I(p)<+x; endmodule
+// EXPECT: error -- normative syntax/restriction snapshot for this rule family.

@@ -1,7 +1,0 @@
-module trivial(a, b);
-    inout a, b;
-    electrical a, b;
-    analog begin
-        I(a, b) <+ 1.0;
-    end
-endmodule

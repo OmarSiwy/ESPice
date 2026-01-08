@@ -1,0 +1,8 @@
+module ch5_proc_assign(p);
+  inout p; electrical p; real x; integer select;
+  analog begin
+    x = V(p) * 2.0;
+    select = x > 0.0;
+    I(p) <+ select ? x : 0.0;
+  end
+endmodule

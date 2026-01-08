@@ -1,0 +1,6 @@
+module ch01_flow_probe(p, n);
+    inout p, n;
+    electrical p, n;
+    branch (p, n) measured;
+    analog I(measured) <+ 2.0 * I(measured);
+endmodule

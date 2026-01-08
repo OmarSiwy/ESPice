@@ -1,0 +1,7 @@
+module ch8_guard(p, clock);
+  inout p, clock; electrical p, clock; real latched;
+  analog begin
+    @(cross(V(clock) - 0.5, +1)) latched = V(p);
+    I(p) <+ latched;
+  end
+endmodule

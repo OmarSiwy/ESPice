@@ -1,0 +1,30 @@
+// §4.5.11 laplace_nd — a rational transfer function as a bilinear cascade.
+// Pointwise values depend on the discretization, so what is pinned here are the
+// two things the LRM fixes and a solver depends on:
+//
+//   * the DC gain is b0/a0 exactly, at dt = 0 (`zLaplace` short-circuits to it);
+//   * the step response is monotone and settles to that same DC gain.
+//
+// H(s) = 2 / (1 + 1e-9 s): DC gain 2, time constant 1 ns.
+//
+//! bias V(n) = 0
+//! wave V(in) = 0, 1
+//! time 0, 1n, 2n, 4n, 8n, 16n, 32n, 64n
+//! analysis tran
+//! print none
+`include "check.vh"
+module ex066_laplace(in, n);
+  inout in, n;
+  electrical in, n;
+  real y;
+  analog begin
+    y = laplace_nd(V(in, n), {2.0}, {1.0, 1n});
+    $strobe("t=%g in=%g y=%g", $abstime / 1n, V(in, n), y);
+    // §4.5.11 at DC the cascade is b0/a0 per section — here 2/1 — so the t=0
+    // point checks the gain exactly against the input it is given.
+    `CHECKI("DC gain is b0/a0", ($abstime > 0.0) || (abs(y - 2.0 * V(in, n)) < 1e-15), 1);
+    `CHECKI("never overshoots the DC gain", y <= 2.0 + 1e-12, 1);
+    `CHECKI("settles to the DC gain", ($abstime < 32n) || (abs(y - 2.0) < 1e-6), 1);
+    I(in, n) <+ 0.0;
+  end
+endmodule

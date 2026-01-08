@@ -27,11 +27,16 @@
         zig = zig-overlay.packages.${system}."0.16.0";
         verilator = pkgs.verilator;
         sv2v = pkgs.haskellPackages.sv2v;
+        # VHDL front-end: `ghdl synth --out=verilog` lowers VHDL to Verilog,
+        # which then takes the same verilator path as every other HDL input.
+        ghdl = pkgs.ghdl;
+        mineruPython = pkgs.python313;
 
         commonInputs = [
           zig
           verilator
           sv2v
+          ghdl
         ];
 
         # CUDA toolkit (headers, nvcc, profiler, cuda-gdb, nvidia-smi stub)
@@ -94,6 +99,35 @@
             LD_LIBRARY_PATH = gpuLibPath;
           }
         );
+
+        # PDF-to-Markdown extraction for the Verilog-AMS LRM documentation.
+        devShells.mineru = pkgs.mkShell {
+          packages = [
+            mineruPython
+            pkgs.python313Packages.virtualenv
+          ];
+          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
+            pkgs.stdenv.cc.cc.lib
+            pkgs.glib
+            pkgs.libGL
+            pkgs.libx11
+            pkgs.libxext
+            pkgs.libxrender
+            pkgs.libxcb
+          ];
+          # MinerU otherwise assumes 1 GiB on CPU and processes VLM regions one at a time.
+          MINERU_VIRTUAL_VRAM_SIZE = "8";
+          shellHook = ''
+            if [ ! -x .venv-mineru/bin/python ]; then
+              virtualenv --python ${mineruPython}/bin/python .venv-mineru
+            fi
+            source .venv-mineru/bin/activate
+            pip install -U mineru
+            pip install -U 'mineru[pipeline]'
+            pip install -U six
+            pip install -U accelerate
+          '';
+        };
 
         packages.default = pkgs.stdenv.mkDerivation {
           pname = "zpicey";

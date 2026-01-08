@@ -1,0 +1,5 @@
+// EXPECT: error
+module ch02_system_whitespace_rejected;
+    real value;
+    analog value = $ vt;
+endmodule

@@ -1,0 +1,15 @@
+// Literal standard electrical conservative and signal-flow discipline names.
+discipline electrical;
+  potential Voltage;
+  flow Current;
+enddiscipline
+discipline voltage;
+  potential Voltage;
+enddiscipline
+discipline current;
+  flow Current;
+enddiscipline
+module annex_d_literal_electrical(p);
+  inout p; electrical p;
+  analog I(p) <+ V(p);
+endmodule

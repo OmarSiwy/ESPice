@@ -1,0 +1,6 @@
+// LRM 2.6: the base may carry an `s`/`S` signed prefix, so `4'shf` is a legal
+// signed based literal and this must COMPILE (file name is historical).
+module ch02_signed_based_rejected;
+    integer value;
+    analog value = 4'shf;
+endmodule

@@ -390,6 +390,27 @@ fn isValueForm(comptime D: type) bool {
     return @hasDecl(D, "eval");
 }
 
+/// Write a POSITIONAL card value (`R1 a b 1k`, `F1 … 2.0`) to the named
+/// parameter on whichever of Model/Instance declares it. `applyKv` covers the
+/// `name=value` spellings; this covers the ones that arrive by position and so
+/// have to be named in Zig.
+///
+/// The Model/Instance resolution is not decoration: FastVAF puts every
+/// Verilog-A `parameter` on **Model**, while the hand-written Zig devices these
+/// replaced put per-device values on Instance. Naming one struct means every
+/// call site breaks (loudly, or — worse — silently under a `@hasField` guard)
+/// the day a model moves a parameter across that line. Returns false when
+/// neither declares it, so a caller that must not silently drop the value can
+/// say so; the ones here are all @compileError-guarded or optional.
+fn setParam(comptime D: type, model: *D.Model, instance: *D.Instance, comptime field: []const u8, value: f64) bool {
+    if (comptime @hasField(D.Model, field)) {
+        @field(model.*, field) = castField(@TypeOf(@field(model.*, field)), value);
+    } else if (comptime @hasField(D.Instance, field)) {
+        @field(instance.*, field) = castField(@TypeOf(@field(instance.*, field)), value);
+    } else return false;
+    return true;
+}
+
 pub const NetBuilder = struct {
     arena: std.mem.Allocator,
     b: *Builder,
@@ -398,6 +419,11 @@ pub const NetBuilder = struct {
     // Pre-allocated to bucket('v').size()
     v_names: [][]const u8,
     v_ports: []u32,
+    /// Negative node of each V card. F/H/W name a source and control on the
+    /// current through it; the 4-port `(p, n, cp, cn)` models take that
+    /// source's NODE PAIR and derive the branch current themselves, so the
+    /// binder has to carry both ends, not just the branch index.
+    v_nports: []u32,
     v_branches: []u32,
     n_v: u32,
 
@@ -435,6 +461,7 @@ pub const NetBuilder = struct {
             .nl = nl,
             .v_names = try arena.alloc([]const u8, nv),
             .v_ports = try arena.alloc(u32, nv),
+            .v_nports = try arena.alloc(u32, nv),
             .v_branches = try arena.alloc(u32, nv),
             .n_v = 0,
             .i_names = try arena.alloc([]const u8, ni),
@@ -454,7 +481,12 @@ pub const NetBuilder = struct {
     /// ngspice TRANinit semantics: PULSE TR/TF default to TSTEP, PW/PER to
     /// TSTOP — resolvable only once the .tran directive is known. Patches the
     /// -1 sentinels left by the Model/Instance defaults.
+    ///
+    /// Guarded by @hasField so it can be run over BOTH Model and Instance and
+    /// no-op on the one that does not declare the PULSE block — see
+    /// `bindSource`.
     fn resolvePulseDefaults(self: *const NetBuilder, target: anytype) void {
+        if (comptime !@hasField(@TypeOf(target.*), "pulse_tr")) return;
         var tstep: f64 = 1e-9;
         var tstop: f64 = 1e30;
         for (self.nl.directives) |dir| {
@@ -502,10 +534,10 @@ pub const NetBuilder = struct {
         }
 
         switch (letter) {
-            'r' => _ = try self.addPassive(devices.resistor, dev, "resist", "r"),
-            'c' => _ = try self.addPassive(devices.capacitor, dev, "cap", "c"),
+            'r' => _ = try self.addPassive(devices.resistor, dev, "r", "resist"),
+            'c' => _ = try self.addPassive(devices.capacitor, dev, "c", "cap"),
             'l' => {
-                const br = try self.addPassive(devices.inductor, dev, "inductance", "l");
+                const br = try self.addPassive(devices.inductor, dev, "l", "inductance");
                 self.l_names[self.n_l] = dev.name;
                 self.l_branches[self.n_l] = br;
                 self.l_values[self.n_l] = positionalNumber(dev, 0) orelse
@@ -514,16 +546,13 @@ pub const NetBuilder = struct {
             },
             'v' => {
                 if (comptime !isValueForm(devices.vsource)) return error.UnsupportedDevice;
-                var model: devices.vsource.Model = .{};
-                model.dc = @floatCast(sourceDc(dev));
-                applySourceWaveform(&model, dev);
-                try applyKv(&model, dev.kv);
-                self.resolvePulseDefaults(&model);
+                const bound = try self.bindSource(devices.vsource, dev);
                 const nodes = try deviceNodes(self.b, devices.vsource, dev);
                 const br = self.b.n;
-                try self.b.addDevice(devices.vsource, model, .{}, nodes);
+                try self.b.addDevice(devices.vsource, bound[0], bound[1], nodes);
                 self.v_names[self.n_v] = dev.name;
                 self.v_ports[self.n_v] = nodes[0];
+                self.v_nports[self.n_v] = if (nodes.len > 1) nodes[1] else 0;
                 self.v_branches[self.n_v] = br;
                 self.n_v += 1;
                 if (!self.have_source) {
@@ -534,12 +563,8 @@ pub const NetBuilder = struct {
             },
             'i' => {
                 if (comptime !isValueForm(devices.isource)) return error.UnsupportedDevice;
-                var instance: devices.isource.Instance = .{};
-                instance.dc = @floatCast(sourceDc(dev));
-                applySourceWaveform(&instance, dev);
-                try applyKv(&instance, dev.kv);
-                self.resolvePulseDefaults(&instance);
-                try self.b.addDevice(devices.isource, .{}, instance, try deviceNodes(self.b, devices.isource, dev));
+                const bound = try self.bindSource(devices.isource, dev);
+                try self.b.addDevice(devices.isource, bound[0], bound[1], try deviceNodes(self.b, devices.isource, dev));
                 self.i_names[self.n_i] = dev.name;
                 self.n_i += 1;
             },
@@ -597,7 +622,7 @@ pub const NetBuilder = struct {
             // Series R/2N lump on the near side (skip for lossless lines).
             const t_in = if (r_half > 0) blk: {
                 const nn = self.b.addNode();
-                try self.b.addDevice(devices.resistor, .{}, .{ .resist = @floatCast(r_half) }, [2]u32{ prev, nn });
+                try self.b.addDevice(devices.resistor, .{ .r = @floatCast(r_half) }, .{}, [2]u32{ prev, nn });
                 break :blk nn;
             } else prev;
             const t_out = if (r_half > 0 or !last) self.b.addNode() else pos2;
@@ -606,7 +631,7 @@ pub const NetBuilder = struct {
             try self.b.addDevice(devices.tline, t_model, .{}, [4]u32{ t_in, neg1, t_out, if (last) neg2 else neg1 });
             if (r_half > 0) {
                 const nxt = if (last) pos2 else self.b.addNode();
-                try self.b.addDevice(devices.resistor, .{}, .{ .resist = @floatCast(r_half) }, [2]u32{ t_out, nxt });
+                try self.b.addDevice(devices.resistor, .{ .r = @floatCast(r_half) }, .{}, [2]u32{ t_out, nxt });
                 prev = nxt;
             } else {
                 prev = t_out;
@@ -614,24 +639,65 @@ pub const NetBuilder = struct {
         }
     }
 
+    /// `R1 a b 1k` — the principal value arrives POSITIONALLY, so it cannot go
+    /// through `applyKv`; it has to be written to a named field directly.
+    ///
+    /// `value_field` is the Verilog-A parameter name (`r`, `c`, `l`), and the
+    /// generated devices put `parameter real r` on **Model**, not Instance —
+    /// this used to name hand-written Zig fields (`Instance.resist`) that the
+    /// VA models replaced. Resolved against whichever struct declares it so a
+    /// model that makes its value an instance parameter still binds.
+    ///
+    /// `alias` is netlist spelling only (`R1 a b resist=1k`), never a field.
     fn addPassive(
         self: *NetBuilder,
         comptime D: type,
         dev: types.Device,
-        comptime instance_field: []const u8,
-        comptime short_field: []const u8,
+        comptime value_field: []const u8,
+        comptime alias: []const u8,
     ) !u32 {
         if (comptime !isValueForm(D)) return error.UnsupportedDevice;
+        if (comptime !@hasField(D.Model, value_field) and !@hasField(D.Instance, value_field))
+            @compileError(@typeName(D) ++ ": no parameter `" ++ value_field ++ "` on Model or Instance");
         var model: D.Model = .{};
         var instance: D.Instance = .{};
-        const value = positionalNumber(dev, 0) orelse kvNumber(dev.kv, instance_field) orelse kvNumber(dev.kv, short_field) orelse 0;
-        @field(instance, instance_field) = castField(@TypeOf(@field(instance, instance_field)), value);
+        const value = positionalNumber(dev, 0) orelse kvNumber(dev.kv, value_field) orelse kvNumber(dev.kv, alias) orelse 0;
+        _ = setParam(D, &model, &instance, value_field, value);
         try applyKv(&model, dev.kv);
         try applyKv(&instance, dev.kv);
         const nodes = try deviceNodes(self.b, D, dev);
         const br = self.b.n;
         try self.b.addDevice(D, model, instance, nodes);
         return br;
+    }
+
+    /// `V1 a b DC 5 PULSE(0 5 1n 1n 1n 1u 2u)` / the `I` card equivalent —
+    /// everything except the nodes. `V` and `I` differ only in what the caller
+    /// records afterwards, so the binding itself is one function.
+    ///
+    /// Every step runs over BOTH Model and Instance and is @hasField-guarded
+    /// (`setParam`, and the guards inside `applySourceWaveform` /
+    /// `resolvePulseDefaults`), so a model that moves a parameter across the
+    /// Model/Instance line keeps binding. vsource.va / isource.va declare the
+    /// whole waveform set on Model; the hand-written Zig sources they replaced
+    /// had it on Instance.
+    ///
+    /// ORDER MATTERS. Positional `DC <v>` first, then the waveform group (a
+    /// `PULSE(...)` may not carry a DC value), then card `kv` so an explicit
+    /// `pulse_tr=2n` overrides the group, and only then `resolvePulseDefaults`
+    /// — the -1 sentinels must survive everything that could legitimately set
+    /// them before the `.tran` card gets to fill them in.
+    fn bindSource(self: *const NetBuilder, comptime D: type, dev: types.Device) !struct { D.Model, D.Instance } {
+        var model: D.Model = .{};
+        var instance: D.Instance = .{};
+        _ = setParam(D, &model, &instance, "dc", sourceDc(dev));
+        applySourceWaveform(&model, dev);
+        applySourceWaveform(&instance, dev);
+        try applyKv(&model, dev.kv);
+        try applyKv(&instance, dev.kv);
+        self.resolvePulseDefaults(&model);
+        self.resolvePulseDefaults(&instance);
+        return .{ model, instance };
     }
 
     fn addByLetter(self: *NetBuilder, letter: u8, dev_in: types.Device) !void {
@@ -669,6 +735,14 @@ pub const NetBuilder = struct {
         return null;
     }
 
+    /// Node pair of a named V card — what a 4-port F/H/W control port binds to.
+    fn findVNodes(self: *const NetBuilder, name: []const u8) ?[2]u32 {
+        for (self.v_names[0..self.n_v], self.v_ports[0..self.n_v], self.v_nports[0..self.n_v]) |n, p, m| {
+            if (std.mem.eql(u8, n, name)) return .{ p, m };
+        }
+        return null;
+    }
+
     /// CPL coupled lines: `P a1 a2 0 b1 b2 0 model` with vector model params
     /// `R=r11 r12 r22` — the parser stores the first number under the key and
     /// the rest ""-keyed. Two-conductor symmetric: self = [0], mutual = [1].
@@ -693,7 +767,7 @@ pub const NetBuilder = struct {
     fn addBranchRef(self: *NetBuilder, comptime D: type, dev: types.Device, comptime default_gain: ?f64) !void {
         if (comptime !isValueForm(D)) return error.UnsupportedDevice;
         const ctrl_name = positionalName(dev, 0) orelse return error.MissingControlSource;
-        const ctrl_br = self.findVBranch(ctrl_name) orelse return error.UnknownControlSource;
+        const ctrl_nodes = self.findVNodes(ctrl_name) orelse return error.UnknownControlSource;
 
         var model: D.Model = .{};
         // W card: `W n+ n- Vctrl model` — model is positional[1] (positional[0]
@@ -704,13 +778,17 @@ pub const NetBuilder = struct {
         }
         var instance: D.Instance = .{};
         if (comptime default_gain) |dflt|
-            instance.gain = castField(@TypeOf(instance.gain), positionalNumber(dev, 1) orelse kvNumber(dev.kv, "gain") orelse dflt);
+            _ = setParam(D, &model, &instance, "gain", positionalNumber(dev, 1) orelse kvNumber(dev.kv, "gain") orelse dflt);
         try applyKv(&instance, dev.kv);
 
-        const nodes = [3]u32{
+        // (p, n, cp, cn): the control port is the sensed source's own node
+        // pair. The model puts a `branch (cp, cn) ctl` across it and reads
+        // I(ctl), which IS the current through that source.
+        const nodes = [4]u32{
             if (dev.nodes.len > 0) try self.b.internNode(dev.nodes[0]) else GROUND,
             if (dev.nodes.len > 1) try self.b.internNode(dev.nodes[1]) else GROUND,
-            ctrl_br,
+            ctrl_nodes[0],
+            ctrl_nodes[1],
         };
         try self.b.addDevice(D, model, instance, nodes);
     }
@@ -813,8 +891,7 @@ fn addSingleDevice(b: *Builder, comptime D: type, dev: types.Device, spice_model
             }
         }
     }
-    if (comptime @hasField(D.Instance, "gain"))
-        instance.gain = castField(@TypeOf(instance.gain), positionalNumber(dev, 0) orelse 0);
+    _ = setParam(D, &model, &instance, "gain", positionalNumber(dev, 0) orelse 0);
     // Model-less cards (T line: "T1 a 0 b 0 Z0=50 TD=2n") carry their model
     // parameters inline on the device card — route kv to the model too.
     if (modelName(dev) == null) try applyKv(&model, dev.kv);
@@ -952,8 +1029,31 @@ const wave_map = std.StaticStringMap(Wave).initComptime(.{
     .{ "pwl", .pwl },     .{ "sffm", .sffm }, .{ "am", .am },
 });
 
+/// FastVAF flattens `parameter real pwl_times[0:63]` into 63+1 SCALAR Model
+/// fields — there is no array to index — each named with the `naming.sanitize`
+/// escape of its subscript: `[` is `Z5b`, `]` is `Z5d` (`Z` is the escape
+/// marker precisely so a sanitized leaf can never collide, see
+/// modules/FastVAF/src/naming.zig). So the slot has to be picked at comptime.
+fn pwlSlot(comptime base: []const u8, comptime k: usize) []const u8 {
+    // 2 arrays x 64 slots, each a comptime std.fmt run — well past the default
+    // 12000 backwards branches on its own.
+    @setEvalBranchQuota(200_000);
+    return std.fmt.comptimePrint("{s}Z5b{d}Z5d", .{ base, k });
+}
+
+/// Table capacity read off the struct, not hardcoded: `max_pwl` lives in the
+/// .va and this follows it.
+fn pwlCapacity(comptime T: type) usize {
+    comptime var n: usize = 0;
+    inline while (@hasField(T, pwlSlot("pwl_times", n))) : (n += 1) {}
+    return n;
+}
+
 fn applySourceWaveform(target: anytype, dev: types.Device) void {
     const T = @TypeOf(target.*);
+    // Runs over both Model and Instance (see bindSource); the one that does not
+    // declare the waveform set has nothing to do.
+    if (comptime !@hasField(T, "waveform")) return;
     for (dev.positional) |pos| {
         const group = switch (pos) {
             .group => |g| g,
@@ -964,17 +1064,21 @@ fn applySourceWaveform(target: anytype, dev: types.Device) void {
         const kind = wave_map.get(std.ascii.lowerString(&buf, group.name)) orelse continue;
         target.waveform = @intFromEnum(kind);
         switch (kind) {
-            .pwl => if (comptime @hasField(T, "pwl_times")) {
-                var k: usize = 0;
-                var i: usize = 0;
-                while (i + 1 < group.args.len and k < target.pwl_times.len) : ({
-                    i += 2;
-                    k += 1;
-                }) {
-                    if (valueNumber(group.args[i])) |t| target.pwl_times[k] = @floatCast(t);
-                    if (valueNumber(group.args[i + 1])) |v| target.pwl_values[k] = @floatCast(v);
+            // `PWL(T1 V1 T2 V2 ...)`: (time, value) pairs into the flattened
+            // table. Non-numeric args (ngspice's `r=` / `td=` suffixes) leave
+            // their slot at the default; those two are card kv and land through
+            // applyKv on `pwl_repeat` / `pwl_td`.
+            .pwl => if (comptime @hasField(T, pwlSlot("pwl_times", 0))) {
+                const n_pts = @min(group.args.len / 2, comptime pwlCapacity(T));
+                inline for (0..comptime pwlCapacity(T)) |k| {
+                    if (k < n_pts) {
+                        if (valueNumber(group.args[2 * k])) |t|
+                            @field(target.*, pwlSlot("pwl_times", k)) = @floatCast(t);
+                        if (valueNumber(group.args[2 * k + 1])) |v|
+                            @field(target.*, pwlSlot("pwl_values", k)) = @floatCast(v);
+                    }
                 }
-                target.pwl_len = @intCast(k);
+                target.pwl_len = @intCast(n_pts);
             },
             inline else => |cw| applyGroupArgs(T, target, group.args, comptime fieldPairs(cw)),
         }
@@ -1030,7 +1134,6 @@ pub fn findNameIndex(names: []const []const u8, target: []const u8) ?usize {
     for (names, 0..) |n, i| if (std.mem.eql(u8, n, target)) return i;
     return null;
 }
-
 
 fn positionalNumber(dev: types.Device, index: usize) ?f64 {
     if (index >= dev.positional.len) return null;
@@ -1236,4 +1339,66 @@ fn castField(comptime T: type, value: f64) T {
         .bool => value != 0,
         else => @compileError("unsupported numeric field type"),
     };
+}
+
+// ---------------------------------------------------------------------------
+// Source binding regression check
+//
+// The two things that break silently when the .va and the binder drift apart:
+// the flattened PWL table (`applySourceWaveform` writes mangled field names
+// that no compiler will catch a typo in — @hasField just skips) and the -1
+// PULSE sentinels (an unspecified PULSE has to stay a step; if a default ever
+// stops being -1 the .tran resolution turns into a 2 ns square wave).
+// ---------------------------------------------------------------------------
+
+test "V card: PWL table lands in the flattened Model slots" {
+    const args = [_]types.Value{
+        .{ .num = 0.0 },   .{ .num = 0.0 },
+        .{ .num = 10e-3 }, .{ .num = 5.0 },
+        .{ .num = 20e-3 }, .{ .num = 0.0 },
+    };
+    const positional = [_]types.Value{.{ .group = .{ .name = "PWL", .args = &args } }};
+    const dev: types.Device = .{
+        .name = "Vc",
+        .nodes = &.{ "ctl", "0" },
+        .positional = &positional,
+        .kv = &.{},
+    };
+
+    var model: devices.vsource.Model = .{};
+    applySourceWaveform(&model, dev);
+
+    try std.testing.expectEqual(@as(i64, @intFromEnum(Wave.pwl)), @as(i64, model.waveform));
+    try std.testing.expectEqual(@as(i64, 3), @as(i64, model.pwl_len));
+    try std.testing.expectEqual(@as(f64, 0.0), @field(model, pwlSlot("pwl_times", 0)));
+    try std.testing.expectEqual(@as(f64, 10e-3), @field(model, pwlSlot("pwl_times", 1)));
+    try std.testing.expectEqual(@as(f64, 5.0), @field(model, pwlSlot("pwl_values", 1)));
+    try std.testing.expectEqual(@as(f64, 20e-3), @field(model, pwlSlot("pwl_times", 2)));
+    // Slot 3 is past the table and must stay at its default, or the model's
+    // `pwl_len`-bounded loops would walk into stale data.
+    try std.testing.expectEqual(@as(f64, 0.0), @field(model, pwlSlot("pwl_times", 3)));
+    try std.testing.expect(pwlCapacity(devices.vsource.Model) >= 3);
+}
+
+test "V/I cards: unspecified PULSE edges stay at the -1 sentinel" {
+    // PULSE(0 5) — no TR/TF/PW/PER. resolvePulseDefaults fills these from the
+    // .tran card; until it runs they must still read as "unset".
+    const args = [_]types.Value{ .{ .num = 0.0 }, .{ .num = 5.0 } };
+    const positional = [_]types.Value{.{ .group = .{ .name = "PULSE", .args = &args } }};
+    const dev: types.Device = .{
+        .name = "V1",
+        .nodes = &.{ "a", "0" },
+        .positional = &positional,
+        .kv = &.{},
+    };
+
+    inline for (.{ devices.vsource, devices.isource }) |D| {
+        var model: D.Model = .{};
+        applySourceWaveform(&model, dev);
+        try std.testing.expectEqual(@as(f64, 5.0), model.pulse_v2);
+        try std.testing.expect(model.pulse_tr < 0);
+        try std.testing.expect(model.pulse_tf < 0);
+        try std.testing.expect(model.pulse_pw < 0);
+        try std.testing.expect(model.pulse_per < 0);
+    }
 }

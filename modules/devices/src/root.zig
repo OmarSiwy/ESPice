@@ -1,309 +1,294 @@
+//! devices — Verilog-A models compiled to Zig at build time, plus the SPICE
+//! dispatch policy over them.
+//!
+//! The generated devices arrive as the `models` aggregate (build.zig runs
+//! tools/compile_va.zig once per models/NAME.va); the device `catalog` and
+//! dispatch tables are FORMED FROM IT by reflection — there is no
+//! hand-maintained per-device import/enum/switch list.
+
 const std = @import("std");
 
-pub const contract = @import("contract");
-pub const batch = @import("batch.zig");
-pub const par = @import("par.zig");
-pub const dyn = @import("dyn.zig");
-pub const vaload = @import("load.zig");
+// ===========================================================================
+// Device catalog, auto-formed from the generated models.
+// ===========================================================================
 
-// ---------------------------------------------------------------------------
-// Devices that follow the contract above
-// ---------------------------------------------------------------------------
+/// The device engine (batching, sink-eval, threading, runtime .so ABI + loader)
+/// — one file. The `batch`/`par`/`dyn`/`vaload` names below are back-compat
+/// namespaces onto it, so existing consumers (`devices.batch.Batch`,
+/// `devices.par.ParEval`, `devices.dyn.DeviceVtable`, `devices.vaload.get`)
+/// resolve unchanged.
+pub const engine = @import("engine.zig");
+pub const batch = engine;
+pub const par = engine;
+pub const dyn = engine;
+/// Runtime HDL loader — app-only (FastVAF-dependent), kept out of the shared
+/// engine core so the `.so` can compile engine.zig without FastVAF.
+pub const vaload = @import("loader.zig");
 
-// -- MOS --
-pub const mos1 = @import("mos/mos1.zig");
-pub const mos2 = @import("mos/mos2.zig");
-pub const mos3 = @import("mos/mos3.zig");
-pub const mos6 = @import("mos/mos6.zig");
-pub const mos9 = @import("mos/mos9.zig");
-pub const bsim1 = @import("mos/bsim1.zig");
-pub const bsim2 = @import("mos/bsim2.zig");
-pub const bsim3 = @import("mos/bsim3.zig");
-pub const bsim4 = @import("mos/bsim4.zig");
-pub const bsim_bulk = @import("mos/bsim_bulk.zig");
-pub const bsim_cmg = @import("mos/bsim_cmg.zig");
-pub const bsim_img = @import("mos/bsim_img.zig");
-pub const bsim_soi = @import("mos/bsim_soi.zig");
-pub const b3soidd = @import("mos/b3soidd.zig");
-pub const b3soifd = @import("mos/b3soifd.zig");
-pub const b3soipd = @import("mos/b3soipd.zig");
-pub const hisim2 = @import("mos/hisim2.zig");
-pub const hisim_hv = @import("mos/hisim_hv.zig");
-pub const hisim_soi = @import("mos/hisim_soi.zig");
-pub const hisim_sotb = @import("mos/hisim_sotb.zig");
-pub const lutsoi = @import("mos/lutsoi.zig");
-pub const psp = @import("mos/psp.zig");
-pub const ekv = @import("mos/ekv.zig");
-pub const vdmos = @import("mos/vdmos.zig");
-pub const mvsg = @import("mos/mvsg.zig");
-pub const mosvar = @import("mos/mosvar.zig");
+/// gompute GPU kernel registration for builtin devices (comptime catalog loop).
+/// The top-level build feeds this to gompute's `emitKernels`.
+pub const kernels = @import("kernels.zig");
 
-// -- BJT --
-pub const bjt = @import("bjt/bjt.zig");
-pub const vbic = @import("bjt/vbic.zig");
-pub const hicum_l0 = @import("bjt/hicum_l0.zig");
-pub const hicum_l2 = @import("bjt/hicum_l2.zig");
-pub const mextram = @import("bjt/mextram.zig");
+/// Every build-time-generated device, keyed by module name. `models.NAME` is
+/// the contract-shaped device type.
+pub const models = @import("models");
 
-// -- Diode --
-pub const diode = @import("diode/diode.zig");
-pub const diode_cmc = @import("diode/diode_cmc.zig");
-pub const juncap = @import("diode/juncap.zig");
-pub const asm_esd = @import("diode/asm_esd.zig");
+pub const Entry = struct { name: []const u8, type: type };
 
-// -- JFET / MESFET / HEMT --
-pub const jfet = @import("jfet/jfet.zig");
-pub const jfet2 = @import("jfet/jfet2.zig");
-pub const mesfet = @import("jfet/mesfet.zig");
-pub const mesa = @import("jfet/mesa.zig");
-pub const hfet1 = @import("jfet/hfet1.zig");
-pub const hfet2 = @import("jfet/hfet2.zig");
-pub const asm_hemt = @import("jfet/asm_hemt.zig");
+/// The full device set, reflected from `models` — no hand list. Adding a
+/// models/NAME.va makes `catalog` grow automatically.
+pub const catalog: []const Entry = blk: {
+    const decls = @typeInfo(models).@"struct".decls;
+    var list: [decls.len]Entry = undefined;
+    for (decls, 0..) |d, i| list[i] = .{ .name = d.name, .type = @field(models, d.name) };
+    const frozen = list;
+    break :blk &frozen;
+};
 
-// -- Passive --
-pub const resistor = @import("passive/resistor.zig");
-pub const capacitor = @import("passive/capacitor.zig");
-pub const inductor = @import("passive/inductor.zig");
-pub const kinduc = @import("passive/kinduc.zig");
-pub const tline = @import("passive/tline.zig");
-pub const lossy_tline = @import("passive/lossy_tline.zig");
-pub const coupled_tlines = @import("passive/coupled_tlines.zig");
-pub const urc = @import("passive/urc.zig");
-pub const r3_cmc = @import("passive/r3_cmc.zig");
-
-// -- Source --
-pub const vsource = @import("source/vsource.zig");
-pub const isource = @import("source/isource.zig");
-pub const bsource = @import("source/bsource.zig");
-pub const cccs = @import("source/cccs.zig");
-pub const ccvs = @import("source/ccvs.zig");
-pub const vccs = @import("source/vccs.zig");
-pub const vcvs = @import("source/vcvs.zig");
-
-// -- Switch --
-pub const @"switch" = @import("switch/switch.zig");
-pub const cswitch = @import("switch/cswitch.zig");
-
-// ---------------------------------------------------------------------------
-// SPICE letter → device dispatch
-// ---------------------------------------------------------------------------
-
-pub const letter_map = std.StaticStringMap(DeviceId).initComptime(.{
-    .{ "r", .resistor },
-    .{ "c", .capacitor },
-    .{ "l", .inductor },
-    .{ "v", .vsource },
-    .{ "i", .isource },
-    .{ "d", .diode },
-    .{ "q", .bjt },
-    .{ "m", .mos1 },
-    .{ "j", .jfet },
-    .{ "e", .vcvs },
-    .{ "f", .cccs },
-    .{ "g", .vccs },
-    .{ "h", .ccvs },
-    .{ "k", .kinduc },
-    .{ "s", .@"switch" },
-    .{ "w", .cswitch },
-    .{ "t", .tline },
-    .{ "o", .lossy_tline },
-    // ngspice TXL (Pade RLGC line) lowers onto the same lumped RLGC device;
-    // the txl model card's `length=` is aliased to `len` in netlist.zig.
-    .{ "y", .lossy_tline },
-    .{ "b", .bsource },
-    .{ "z", .mesfet },
-    .{ "u", .urc },
-    .{ "p", .coupled_tlines },
-});
-
-pub fn mosfetDeviceId(level: u16) DeviceId {
-    return switch (level) {
-        1 => .mos1,
-        2 => .mos2,
-        3 => .mos3,
-        4 => .bsim1,
-        5 => .bsim2,
-        6 => .mos6,
-        8, 49 => .bsim3,
-        9 => .mos9,
-        // ponytail: 58 is ngspice B4SOI 4.4; b3soipd (BSIMPD 2.x) is the closest
-        // cognate we have (floating-body PD SOI). Upgrade path: dedicated b4soi.
-        10, 57, 58 => .b3soipd,
-        11, 55 => .b3soifd,
-        12, 56 => .b3soidd,
-        14, 54 => .bsim4,
-        44 => .ekv,
-        72, 107 => .bsim_cmg,
-        103 => .bsim_bulk,
-        110 => .bsim_img,
-        1020, 1021, 1040 => .psp,
-        else => .mos1,
-    };
+/// Resolve a device type by model name (comptime — `catalog` carries `type`).
+pub fn byName(comptime name: []const u8) type {
+    // Consumers resolve every DeviceId tag in one comptime frame (an
+    // `inline else` switch), so the quota has to cover catalog.len squared-ish.
+    @setEvalBranchQuota(100_000);
+    inline for (catalog) |e| {
+        if (comptime std.mem.eql(u8, e.name, name)) return e.type;
+    }
+    @compileError("devices: no model named '" ++ name ++ "'");
 }
 
-pub fn bjtDeviceId(level: u16) DeviceId {
-    return switch (level) {
-        1 => .bjt,
-        4 => .vbic,
-        7 => .hicum_l0,
-        8, 10 => .hicum_l2, // ngspice: level 8 = HICUM/L2
-        9 => .mextram,
-        else => .bjt,
-    };
+/// True at comptime if a model of this name was generated.
+pub fn has(comptime name: []const u8) bool {
+    // Consumers resolve every DeviceId tag in one comptime frame (an
+    // `inline else` switch), so the quota has to cover catalog.len squared-ish.
+    @setEvalBranchQuota(100_000);
+    inline for (catalog) |e| {
+        if (comptime std.mem.eql(u8, e.name, name)) return true;
+    }
+    return false;
 }
 
-pub fn diodeDeviceId(level: u16) DeviceId {
-    return switch (level) {
-        1 => .diode,
-        3 => .diode_cmc,
-        else => .diode,
-    };
-}
+// ===========================================================================
+// SPICE dispatch policy — semantic (netlist letter / model LEVEL -> model
+// name). Kept explicit because it encodes SPICE conventions, not code shape;
+// resolved back to a device type through the auto catalog. Extend as models
+// are authored.
+// ===========================================================================
 
-pub fn jfetDeviceId(level: u16) DeviceId {
-    return switch (level) {
-        1 => .jfet,
-        2 => .jfet2,
-        else => .jfet,
-    };
-}
-
-/// ngspice inpdomod.c: nmf/pmf/nhfet/phfet models dispatch on LEVEL only —
-/// 0,1 → MES (Statz), 2-4 → MESA (Ytterdal), 5 → HFET1, 6 → HFET2.
-pub fn mesDeviceId(level: u16) DeviceId {
-    return switch (level) {
-        0, 1 => .mesfet,
-        2, 3, 4 => .mesa,
-        5 => .hfet1,
-        6 => .hfet2,
-        else => .mesfet,
-    };
-}
-
+/// Every model name the dispatch policy can name. This is a NAME list, not a
+/// type list: the type behind a tag always comes from the auto catalog, via
+/// `Type`. Names with no generated model (BSIM3, the B3SOI family, SOI3) are
+/// tags anyway so the level tables can report them by name.
+///
+/// Written out rather than reflected from `catalog` because `@Enum` cannot
+/// attach declarations and `DeviceId.Type` has to live on the enum.
 pub const DeviceId = enum {
-    asm_esd,
-    asm_hemt,
-    b3soidd,
-    b3soifd,
-    b3soipd,
-    bjt,
-    bsim1,
-    bsim2,
-    bsim3,
-    bsim4,
-    bsim_bulk,
-    bsim_cmg,
-    bsim_img,
-    bsim_soi,
-    bsource,
+    // Netlist letters.
+    resistor,
     capacitor,
+    inductor,
+    kinduc,
+    vsource,
+    isource,
+    vcvs,
+    vccs,
     cccs,
     ccvs,
-    coupled_tlines,
+    bsource,
+    vswitch,
     cswitch,
-    diode,
-    diode_cmc,
-    ekv,
-    hfet1,
-    hfet2,
-    hicum_l0,
-    hicum_l2,
-    hisim2,
-    hisim_hv,
-    hisim_soi,
-    hisim_sotb,
-    inductor,
-    isource,
-    jfet,
-    jfet2,
-    juncap,
-    kinduc,
+    tline,
     lossy_tline,
-    lutsoi,
-    mesa,
-    mesfet,
-    mextram,
+    coupled_tlines,
+    diode,
+    // M card levels.
     mos1,
     mos2,
     mos3,
     mos6,
     mos9,
-    mosvar,
-    mvsg,
-    psp,
-    r3_cmc,
-    resistor,
-    @"switch",
-    tline,
-    urc,
-    vbic,
-    vccs,
-    vcvs,
+    bsim1,
+    bsim2,
+    bsim3,
+    bsim4va,
+    bsimsoi_va,
+    b3soifd,
+    b3soidd,
+    b3soipd,
+    soi3,
+    hisim2_va,
+    hisimhv_va,
     vdmos,
-    vsource,
+    // Q card levels.
+    bjt,
+    vbic13_4t,
+    hicumL2_va,
+    // J / Z card levels.
+    jfet,
+    jfet2,
+    mes,
+    mesa,
+    hfet1,
+    hfet2,
 
+    /// The catalog device type behind a tag. A tag whose model is not in the
+    /// catalog resolves to `Absent`, so the build still compiles (consumers
+    /// switch `inline else` over every tag) and the instance is rejected
+    /// instead of silently running some other device.
     pub fn Type(comptime id: DeviceId) type {
-        return switch (id) {
-            .asm_esd => asm_esd,
-            .asm_hemt => asm_hemt,
-            .b3soidd => b3soidd,
-            .b3soifd => b3soifd,
-            .b3soipd => b3soipd,
-            .bjt => bjt,
-            .bsim1 => bsim1,
-            .bsim2 => bsim2,
-            .bsim3 => bsim3,
-            .bsim4 => bsim4,
-            .bsim_bulk => bsim_bulk,
-            .bsim_cmg => bsim_cmg,
-            .bsim_img => bsim_img,
-            .bsim_soi => bsim_soi,
-            .bsource => bsource,
-            .capacitor => capacitor,
-            .cccs => cccs,
-            .ccvs => ccvs,
-            .coupled_tlines => coupled_tlines,
-            .cswitch => cswitch,
-            .diode => diode,
-            .diode_cmc => diode_cmc,
-            .ekv => ekv,
-            .hfet1 => hfet1,
-            .hfet2 => hfet2,
-            .hicum_l0 => hicum_l0,
-            .hicum_l2 => hicum_l2,
-            .hisim2 => hisim2,
-            .hisim_hv => hisim_hv,
-            .hisim_soi => hisim_soi,
-            .hisim_sotb => hisim_sotb,
-            .inductor => inductor,
-            .isource => isource,
-            .jfet => jfet,
-            .jfet2 => jfet2,
-            .juncap => juncap,
-            .kinduc => kinduc,
-            .lossy_tline => lossy_tline,
-            .lutsoi => lutsoi,
-            .mesa => mesa,
-            .mesfet => mesfet,
-            .mextram => mextram,
-            .mos1 => mos1,
-            .mos2 => mos2,
-            .mos3 => mos3,
-            .mos6 => mos6,
-            .mos9 => mos9,
-            .mosvar => mosvar,
-            .mvsg => mvsg,
-            .psp => psp,
-            .r3_cmc => r3_cmc,
-            .resistor => resistor,
-            .@"switch" => @"switch",
-            .tline => tline,
-            .urc => urc,
-            .vbic => vbic,
-            .vccs => vccs,
-            .vcvs => vcvs,
-            .vdmos => vdmos,
-            .vsource => vsource,
-        };
+        const name = @tagName(id);
+        if (comptime has(name)) return byName(name);
+        return Absent(name);
     }
 };
+
+/// Stand-in for a policy name with no generated model. Deliberately NOT
+/// value-form (no `eval`), which is what every consumer gates on.
+fn Absent(comptime name: []const u8) type {
+    return struct {
+        pub const absent_model = name;
+    };
+}
+
+/// Netlist first-letter -> device. Letters with a LEVEL table (m q j z) are
+/// resolved by the *DeviceId functions below, not here; 'd' is listed only so
+/// diode cards pass the "known letter" gate. Unknown letters fall through to
+/// runtime VA/Verilog loading.
+pub const letter_map = std.StaticStringMap(DeviceId).initComptime(.{
+    .{ "r", DeviceId.resistor },
+    .{ "c", DeviceId.capacitor },
+    .{ "l", DeviceId.inductor },
+    .{ "k", DeviceId.kinduc },
+    .{ "v", DeviceId.vsource },
+    .{ "i", DeviceId.isource },
+    .{ "e", DeviceId.vcvs },
+    .{ "g", DeviceId.vccs },
+    .{ "f", DeviceId.cccs },
+    .{ "h", DeviceId.ccvs },
+    .{ "b", DeviceId.bsource },
+    .{ "s", DeviceId.vswitch },
+    .{ "w", DeviceId.cswitch },
+    .{ "t", DeviceId.tline },
+    .{ "o", DeviceId.lossy_tline },
+    .{ "p", DeviceId.coupled_tlines },
+    .{ "d", DeviceId.diode },
+});
+
+/// Flat aliases, for the devices a consumer names directly
+/// (`devices.resistor`) because it wires their ports/branches by hand instead
+/// of dispatching through `DeviceId`. Types still come from the catalog.
+/// ponytail: only the names consumers actually use — everything else reaches
+/// its type via `DeviceId.Type`.
+pub const resistor = DeviceId.Type(.resistor);
+pub const capacitor = DeviceId.Type(.capacitor);
+pub const inductor = DeviceId.Type(.inductor);
+pub const kinduc = DeviceId.Type(.kinduc);
+pub const vsource = DeviceId.Type(.vsource);
+pub const isource = DeviceId.Type(.isource);
+pub const cccs = DeviceId.Type(.cccs);
+pub const ccvs = DeviceId.Type(.ccvs);
+pub const bsource = DeviceId.Type(.bsource);
+pub const cswitch = DeviceId.Type(.cswitch);
+pub const tline = DeviceId.Type(.tline);
+pub const lossy_tline = DeviceId.Type(.lossy_tline);
+pub const coupled_tlines = DeviceId.Type(.coupled_tlines);
+
+/// `.model` LEVEL tables, per ngspice src/spicelib/parser/inpdomod.c.
+const Level = struct { level: u16, model: DeviceId };
+
+const mos_levels = [_]Level{
+    .{ .level = 1, .model = .mos1 },
+    .{ .level = 2, .model = .mos2 },
+    .{ .level = 3, .model = .mos3 },
+    .{ .level = 4, .model = .bsim1 },
+    .{ .level = 5, .model = .bsim2 },
+    .{ .level = 6, .model = .mos6 },
+    .{ .level = 8, .model = .bsim3 },
+    .{ .level = 49, .model = .bsim3 },
+    .{ .level = 9, .model = .mos9 },
+    .{ .level = 10, .model = .bsimsoi_va },
+    .{ .level = 58, .model = .bsimsoi_va },
+    .{ .level = 14, .model = .bsim4va },
+    .{ .level = 54, .model = .bsim4va },
+    .{ .level = 55, .model = .b3soifd },
+    .{ .level = 56, .model = .b3soidd },
+    .{ .level = 57, .model = .b3soipd },
+    .{ .level = 60, .model = .soi3 },
+    .{ .level = 68, .model = .hisim2_va },
+    .{ .level = 73, .model = .hisimhv_va },
+};
+
+const bjt_levels = [_]Level{
+    .{ .level = 1, .model = .bjt },
+    .{ .level = 2, .model = .bjt },
+    .{ .level = 4, .model = .vbic13_4t },
+    .{ .level = 9, .model = .vbic13_4t },
+    .{ .level = 8, .model = .hicumL2_va },
+};
+
+const diode_levels = [_]Level{
+    .{ .level = 1, .model = .diode },
+    .{ .level = 3, .model = .diode },
+};
+
+const jfet_levels = [_]Level{
+    .{ .level = 1, .model = .jfet },
+    .{ .level = 2, .model = .jfet2 },
+};
+
+const mes_levels = [_]Level{
+    .{ .level = 1, .model = .mes },
+    .{ .level = 2, .model = .mesa },
+    .{ .level = 3, .model = .mesa },
+    .{ .level = 4, .model = .mesa },
+    .{ .level = 5, .model = .hfet1 },
+    .{ .level = 6, .model = .hfet2 },
+};
+
+/// LEVEL -> device. An unknown level, or a level whose model is not in the
+/// catalog, panics naming it — never a fall back to a different device.
+/// (Callers take a plain `DeviceId`, so there is no error channel to use.)
+fn levelId(comptime kind: []const u8, comptime table: []const Level, level: u16) DeviceId {
+    inline for (table) |e| {
+        if (e.level == level) {
+            if (comptime !has(@tagName(e.model)))
+                std.debug.panic("devices: " ++ kind ++ " LEVEL {d} needs model '" ++
+                    @tagName(e.model) ++ "', which is not in the device catalog", .{level});
+            return e.model;
+        }
+    }
+    std.debug.panic("devices: unsupported " ++ kind ++ " LEVEL {d}", .{level});
+}
+
+pub fn mosfetDeviceId(level: u16) DeviceId {
+    return levelId("MOSFET", &mos_levels, level);
+}
+pub fn bjtDeviceId(level: u16) DeviceId {
+    return levelId("BJT", &bjt_levels, level);
+}
+pub fn diodeDeviceId(level: u16) DeviceId {
+    return levelId("diode", &diode_levels, level);
+}
+pub fn jfetDeviceId(level: u16) DeviceId {
+    return levelId("JFET", &jfet_levels, level);
+}
+pub fn mesDeviceId(level: u16) DeviceId {
+    return levelId("MESFET", &mes_levels, level);
+}
+
+test "catalog reflects the generated model set" {
+    // Compiles only inside the devices module (models import present).
+    try std.testing.expect(has("resistor"));
+    try std.testing.expect(!has("does_not_exist"));
+}
+
+test "dispatch policy resolves letters and levels" {
+    try std.testing.expectEqual(DeviceId.lossy_tline, letter_map.get("o").?);
+    try std.testing.expectEqual(DeviceId.mos1, mosfetDeviceId(1));
+    try std.testing.expectEqual(DeviceId.bsim4va, mosfetDeviceId(54));
+    try std.testing.expectEqual(DeviceId.hicumL2_va, bjtDeviceId(8));
+    try std.testing.expectEqual(DeviceId.jfet2, jfetDeviceId(2));
+    try std.testing.expectEqual(DeviceId.mesa, mesDeviceId(3));
+    // Every tag must resolve to a type — consumers switch `inline else` over
+    // the whole enum, so a tag that fails to resolve breaks their build.
+    inline for (@typeInfo(DeviceId).@"enum".fields) |f| _ = DeviceId.Type(@field(DeviceId, f.name));
+}

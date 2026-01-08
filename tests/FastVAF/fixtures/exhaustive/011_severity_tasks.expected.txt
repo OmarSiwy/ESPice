@@ -1,0 +1,8 @@
+=== 011_severity_tasks ===
+--- point 0 ---
+  x[p] = 0.000000e0
+  x[n] = 0.000000e0
+INFO: informational, value=1.25
+WARNING: something is unusual: 7
+ERROR: a diagnosed condition: bad bias
+FATAL: a fatal condition: 0.5

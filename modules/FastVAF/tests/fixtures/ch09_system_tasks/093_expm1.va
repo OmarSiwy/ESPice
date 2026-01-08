@@ -1,0 +1,5 @@
+module ch09_atomic_expm1(p, n);
+  inout p, n; electrical p, n;
+  analog I(p,n) <+ V(p,n) + $expm1(V(p,n));
+endmodule
+

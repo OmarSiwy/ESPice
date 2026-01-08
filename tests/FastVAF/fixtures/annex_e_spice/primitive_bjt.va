@@ -1,0 +1,2 @@
+// EXPECT: error -- Table E.1 primitive needs SPICE elaboration.
+module annex_e_primitive_bjt(c,b,e,s); inout c,b,e,s; electrical c,b,e,s; bjt #(.area(1.0)) x(.c(c),.b(b),.e(e),.s(s)); endmodule

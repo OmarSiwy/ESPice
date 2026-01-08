@@ -1,0 +1,5 @@
+module ch09_atomic_log10(p, n);
+  inout p, n; electrical p, n;
+  analog I(p,n) <+ V(p,n) + $log10(10.0);
+endmodule
+

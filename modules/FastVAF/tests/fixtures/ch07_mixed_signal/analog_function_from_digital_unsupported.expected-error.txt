@@ -1,0 +1,3 @@
+# annex C: the digital `initial` block is outside Verilog-A.
+E0205
+initial

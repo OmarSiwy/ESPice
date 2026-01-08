@@ -1,0 +1,7 @@
+// EXPECT: error -- SPICE objects require hierarchy/SPICE elaboration.
+module annex_e_unsupported_current_controlled(p, n);
+  inout p, n; electrical p, n;
+  // The controlling name denotes the concrete voltage-source instance below.
+  ccvs h1(p, n, sense, 2.0);
+  vsine #(.dc(0.0)) sense(.p(p), .n(n));
+endmodule

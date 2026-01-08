@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Annex E (normative) SPICE compatibility — Verilog-AMS LRM 2023</title>
+<style>
+body { font-family: 'Segoe UI', system-ui, sans-serif; max-width: 900px; margin: 0 auto; padding: 2rem; background: #fafafa; color: #1a1a1a; line-height: 1.6; }
+h1 { border-bottom: 3px solid #2563eb; padding-bottom: 0.5rem; }
+h2 { color: #1e40af; margin-top: 2rem; border-bottom: 1px solid #ddd; padding-bottom: 0.3rem; }
+h3 { color: #374151; }
+h4 { color: #4b5563; }
+code { background: #e5e7eb; padding: 0.15rem 0.4rem; border-radius: 3px; font-size: 0.9em; }
+pre { background: #1e293b; color: #e2e8f0; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; }
+pre code { background: none; padding: 0; color: inherit; }
+table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+th, td { border: 1px solid #d1d5db; padding: 0.5rem 0.75rem; text-align: left; }
+th { background: #2563eb; color: white; }
+tr:nth-child(even) { background: #f3f4f6; }
+.syntax { background: #fffbeb; border-left: 4px solid #f59e0b; padding: 1rem; margin: 1rem 0; font-family: monospace; white-space: pre-wrap; }
+.note { background: #eff6ff; border-left: 4px solid #2563eb; padding: 0.75rem 1rem; margin: 1rem 0; }
+nav { background: #1e293b; padding: 1rem; border-radius: 6px; margin-bottom: 2rem; }
+nav a { color: #93c5fd; text-decoration: none; margin-right: 1rem; }
+nav a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<nav><a href="index.html">Index</a> <a href="annex-d-stddefs.html">&larr; Prev</a> <a href="annex-f-resolution.html">Next &rarr;</a> </nav>
+<h1>Annex E (normative) SPICE compatibility</h1>
+
+<div class="note"><strong>Source:</strong> This transcription was checked against <a href="../../../docs/VAMS-LRM-2023.pdf#page=414">Annex E in the published VAMS-2023 PDF</a>, physical PDF pages 414&ndash;422 (printed pages 401&ndash;409).</div>
+
+<h2 id="sE-1">E.1 Introduction</h2>
+
+<p>Analog simulation has long been performed with SPICE and SPICE-like simulators. As such, there is a huge legacy of SPICE netlists. In addition, SPICE provides a rich set of predefined models and it is considered neither practical nor desirable to convert these models into a Verilog-AMS HDL behavioral description. In order for Verilog-AMS HDL to be embraced by the analog design community, it is important Verilog-AMS HDL provide an appropriate degree of SPICE compatibility. This annex describes the degree of compatibility which Verilog-AMS HDL provides and the approach taken to provide that compatibility.</p>
+
+<h3 id="sE-1-1">E.1.1 Scope of compatibility</h3>
+
+<p>SPICE is not a single language, but rather is a family of related languages. The first widely used version of SPICE was SPICE2g6 from the University of California at Berkeley. However, SPICE has been enhanced and distributed by many different companies, each of which has added their own extensions to the language and models. As a result, there is a great deal of incompatibility even among the SPICE languages themselves.</p>
+
+<p>Verilog-AMS HDL makes no judgment as to which of the various SPICE languages should be supported. Instead, it states if a simulator which supports Verilog-AMS HDL is also able to read SPICE netlists of a particular flavor, then certain objects defined in that flavor of SPICE netlist can be referenced from within a Verilog-AMS HDL structural description. In particular, SPICE models and subcircuits can be instantiated within a Verilog-AMS HDL module. This is also true for any SPICE primitives which are built into the simulator. In general, anything that can be instantiated in the particular flavor of SPICE can also be instantiated within a Verilog-AMS HDL module.</p>
+
+<h3 id="sE-1-2">E.1.2 Degree of incompatibility</h3>
+
+<p>There are four primary areas of incompatibility between versions of SPICE simulators.</p>
+
+<ol>
+<li>The version of the SPICE language accepted by various simulators is different and to some degree proprietary. This issue is not addressed by Verilog-AMS HDL. So whether a particular Verilog-AMS simulator is SPICE compatible, and with which particular variant of SPICE it is compatible, is solely determined by the authors of the simulator.</li>
+<li>Not all SPICE simulators support the same set of component primitives. Thus, a particular SPICE netlist can reference a primitive which is unsupported. Verilog-AMS HDL offers no alternative in this case other than the possibility that if the model equations are known, the primitive can be rewritten as a module.</li>
+<li>The names of the built-in SPICE primitives, their parameters, or their ports can differ from simulator to simulator. This is particularly true because many primitives, parameters, and ports are unnamed in SPICE. When instantiating SPICE primitives in Verilog-AMS HDL, the primitives shall, and parameters and ports can, be named. Since there are no established standard names, there is a high likelihood of incompatibility cropping up in these names. To reduce this, a list of what names shall be used for the more common components is shown in <a href="#table-e-1">Table E.1</a>. However, it is not possible to anticipate all SPICE primitives and parameters which could be supported; so different implementations can end up using different names. This level of incompatibility can be overcome by using wrapper modules to map names.</li>
+<li>The mathematical description of the built-in primitives can differ. As with the netlist syntax, incompatible enhancements of the models have crept in through the years. Again, Verilog-AMS HDL offers no solution in this case other than the possibility that if the model equations are known, the primitive can be rewritten as a module.</li>
+</ol>
+
+<h2 id="sE-2">E.2 Accessing SPICE objects from Verilog-AMS HDL</h2>
+
+<p>If an implementation of a Verilog-AMS tool supports SPICE compatibility, it is expected to provide the basic set of SPICE primitives (see <a href="#sE-3">Annex E.3</a>) and be able to read SPICE netlists which contain models and subcircuit statements.</p>
+
+<p>SPICE primitives built into the simulator shall be treated in the same manner in Verilog-AMS HDL as built-in primitives of gate- and switch-level modeling. However, while the Verilog-AMS HDL built-in primitives are standardized, the SPICE primitives are not. All aspects of SPICE primitives are implementation dependent.</p>
+
+<p>In addition to SPICE primitives, it shall also be possible to access subcircuits and models defined within SPICE netlists. The subcircuits and models contained within the SPICE netlist are treated as module definitions.</p>
+
+<h3 id="sE-2-1">E.2.1 Case sensitivity</h3>
+
+<p>Some SPICE netlists are case insensitive, whereas Verilog-AMS HDL descriptions are case-sensitive. From within Verilog-AMS HDL, a mixed-case name matches the same name with an identical case (if one is defined in a Verilog-AMS HDL description). However, if no exact match is found, the mixed-case name shall match the same name defined within SPICE regardless of the case.</p>
+
+<h3 id="sE-2-2">E.2.2 Examples</h3>
+
+<p>This subsection shows some examples.</p>
+
+<h4 id="sE-2-2-1">E.2.2.1 Accessing SPICE models</h4>
+
+<p>Consider the following SPICE model file being read by a Verilog-AMS HDL simulator.</p>
+
+<pre><code>.MODEL VERTNPN NPN BF=80 IS=1E-18 RB=100 VAF=50
++ CJE=3PF CJC=2PF CJS=2PF TF=0.3NS TR=6NS</code></pre>
+
+<p>This model can be instantiated in a Verilog-AMS HDL module as shown in Figure E.1.</p>
+
+<div class="note"><strong>Figure E.1&mdash;Instantiated module.</strong> The normative schematic is not redrawn here; see <a href="../../../docs/VAMS-LRM-2023.pdf#page=415">physical PDF page 415</a>.</div>
+
+<pre><code>module diffPair (c1, b1, e, b2, c2);
+   electrical c1, b1, e, b2, c2;
+
+   vertNPN Q1 (c1, b1, e);
+   vertNPN Q2 (.c(c2), .b(b2), .e(e));
+endmodule</code></pre>
+
+<p>Unlike with SPICE, the first letter of the instance name, in this case <code>Q1</code> and <code>Q2</code>, is not constrained by the primitive type. For example, they can just as easily be <code>T1</code> and <code>T2</code>.</p>
+
+<p>The ports and parameters of the <code>bjt</code> are determined by the <code>bjt</code> primitive itself and not by the model statement for the <code>bjt</code>. See <a href="#sE-3">E.3</a> for more details. This <code>bjt</code> primitive has 3 mandatory ports (<em>c</em>, <em>b</em>, and <em>e</em>) and one optional port (<em>s</em>). In the instantiation of <code>Q1</code>, the ports are passed by order. With <code>Q2</code>, the ports are passed by name. In both cases, the optional substrate port <em>s</em> is defaulted by simply not giving it.</p>
+
+<h4 id="sE-2-2-2">E.2.2.2 Accessing SPICE subcircuits</h4>
+
+<p>As an example of how a SPICE subcircuit is referenced from Verilog-AMS HDL, consider the following SPICE subcircuit definition of an oscillator.</p>
+
+<pre><code>.SUBCKT ECPOSC (OUT GND)
+   VA VCC GND 5
+   IEE E GND 1MA
+   Q1 VCC B1 E VCC VERTNPN
+   Q2 OUT B2 E OUT VERTNPN
+   L1 VCC OUT 1UH
+   C1 VCC OUT 1P IC=1
+   C2 OUT B1 272.7PF
+   C3 B1 GND 3NF
+   R1 B1 GND 10K
+   C4 B2 GND 3NF
+   R2 B2 GND 10K
+.ENDS ECPOSC</code></pre>
+
+<p>This oscillator can be referenced from Verilog-AMS HDL as:</p>
+
+<pre><code>module osc (out, gnd);
+   electrical out, gnd;
+   ecpOsc Osc1 (out, gnd);
+endmodule</code></pre>
+
+<div class="note">NOTE&mdash;In Verilog-AMS HDL the name of the subcircuit instance is not constrained to start with <code>X</code> as it is in SPICE.</div>
+
+<h4 id="sE-2-2-3">E.2.2.3 Accessing SPICE primitives</h4>
+
+<p>To show how various SPICE primitives can be accessed from Verilog-AMS HDL, the subcircuit in <a href="#sE-2-2-2">E.2.2.2</a> is translated to native Verilog-AMS HDL.</p>
+
+<pre><code>module ecpOsc (out, gnd);
+   electrical out, gnd;
+
+   vsine #(.dc(5)) Vcc (vcc, gnd);
+   isine #(.dc(1m)) Iee (e, gnd);
+   vertNPN Q1 (vcc, b1, e, vcc);
+   vertNPN Q2 (out, b2, e, out);
+   inductor #(.l(1u)) L1 (vcc, out);
+   capacitor #(.c(1p), .ic(1)) C1 (vcc, out);
+   capacitor #(.c(272.7p)) C2 (out, b1);
+   capacitor #(.c(3n)) C3 (b1, gnd);
+   resistor #(.r(10k)) R1 (b1, gnd);
+   capacitor #(.c(3n)) C4 (b2, gnd);
+   resistor #(.r(10k)) R2 (b2, gnd);
+endmodule</code></pre>
+
+<h2 id="sE-3">E.3 Preferred primitive, parameter, and port names</h2>
+
+<p><a href="#table-e-1">Table E.1</a> shows the required names for primitives, parameters, and ports which are otherwise unnamed in SPICE. For connection by order instead of by name, the ports and parameters shall be given in the order listed. The default discipline of the ports for these primitives shall be <code>electrical</code> and their descriptions shall be <strong>inout</strong>.</p>
+
+<p id="table-e-1"><strong>Table E.1&mdash;Names for primitives, parameters, and ports in SPICE</strong></p>
+
+<table>
+<tr><th>Primitive</th><th>Port name</th><th>Parameter name</th><th>Behavior</th></tr>
+<tr>
+<td><code>resistor</code></td>
+<td><code>p, n</code></td>
+<td><code>r, tc1, tc2</code></td>
+<td>V = I &middot; <em>r</em> &middot; (1 + <em>tc1</em> &middot; T + <em>tc2</em> &middot; T<sup>2</sup>)</td>
+</tr>
+<tr>
+<td><code>capacitor</code></td>
+<td><code>p, n</code></td>
+<td><code>c, ic</code></td>
+<td>V = (1/<em>c</em>) &middot; &int;<sub>0</sub><sup>t</sup> I d&tau; + <em>ic</em></td>
+</tr>
+<tr>
+<td><code>inductor</code></td>
+<td><code>p, n</code></td>
+<td><code>l, ic</code></td>
+<td>I = <em>l</em> &middot; &int;<sub>0</sub><sup>t</sup> V d&tau; + <em>ic</em></td>
+</tr>
+<tr>
+<td><code>iexp</code></td>
+<td><code>p, n</code></td>
+<td><code>dc, mag, phase, val0, val1, td0, tau0, td1, tau1</code></td>
+<td>I =<br>
+&nbsp;&nbsp;<em>val0</em> &nbsp;&nbsp;&nbsp;for <em>t</em> &le; <em>td0</em><br>
+&nbsp;&nbsp;<em>val1</em> &minus; (<em>val1</em> &minus; <em>dc</em>) &middot; e<sup>(<em>td0</em> &minus; <em>t</em>)/<em>tau0</em></sup> &nbsp;&nbsp;&nbsp;for <em>td0</em> &lt; <em>t</em> &le; <em>td1</em><br>
+&nbsp;&nbsp;<em>val0</em> &minus; (<em>val0</em> &minus; I<sub>td1</sub>) &middot; e<sup>(<em>td1</em> &minus; <em>t</em>)/<em>tau1</em></sup> &nbsp;&nbsp;&nbsp;for <em>td1</em> &lt; <em>t</em><br>
+with I<sub>td1</sub> the value of I at time <em>t</em> = <em>td1</em>.</td>
+</tr>
+<tr>
+<td><code>ipulse</code></td>
+<td><code>p, n</code></td>
+<td><code>dc, mag, phase, val0, val1, td, rise, fall, width, period</code></td>
+<td>I =<br>
+&nbsp;&nbsp;<em>val0</em> &nbsp;&nbsp;&nbsp;for <em>t</em> &le; <em>t0</em><br>
+&nbsp;&nbsp;<em>val0</em> + (<em>val1</em> &minus; <em>val0</em>) &middot; (<em>t</em> &minus; <em>t0</em>)/<em>rise</em> &nbsp;&nbsp;&nbsp;for <em>t0</em> &lt; <em>t</em> &le; <em>t1</em><br>
+&nbsp;&nbsp;<em>val1</em> &nbsp;&nbsp;&nbsp;for <em>t1</em> &lt; <em>t</em> &le; <em>t2</em><br>
+&nbsp;&nbsp;<em>val1</em> + (<em>val0</em> &minus; <em>val1</em>) &middot; (<em>t</em> &minus; <em>t2</em>)/<em>fall</em> &nbsp;&nbsp;&nbsp;for <em>t2</em> &lt; <em>t</em> &le; <em>t3</em><br>
+&nbsp;&nbsp;<em>val0</em> &nbsp;&nbsp;&nbsp;for <em>t3</em> &lt; <em>t</em> &le; <em>t4</em><br>
+with the following definitions (<em>n</em> is a non-negative integer):<br>
+<em>t0</em> = <em>td</em> + <em>n</em> &middot; <em>period</em><br>
+<em>t1</em> = <em>rise</em> + <em>td</em> + <em>n</em> &middot; <em>period</em><br>
+<em>t2</em> = <em>width</em> + <em>rise</em> + <em>td</em> + <em>n</em> &middot; <em>period</em><br>
+<em>t3</em> = <em>fall</em> + <em>width</em> + <em>rise</em> + <em>td</em> + <em>n</em> &middot; <em>period</em><br>
+<em>t4</em> = <em>td</em> + (<em>n</em> + 1) &middot; <em>period</em></td>
+</tr>
+<tr>
+<td><code>ipwl</code></td>
+<td><code>p, n</code></td>
+<td><code>dc, mag, phase, wave</code></td>
+<td>I = <em>wave</em>[<em>i</em>+1] + (<em>wave</em>[<em>i</em>+3] &minus; <em>wave</em>[<em>i</em>+1]) &middot; (<em>t</em> &minus; <em>wave</em>[<em>i</em>]) / (<em>wave</em>[<em>i</em>+2] &minus; <em>wave</em>[<em>i</em>])<br>
+for <em>wave</em>[<em>i</em>] &le; <em>t</em> &lt; <em>wave</em>[<em>i</em>+2] and 0 &le; <em>i</em> &lt; <em>n</em>, <em>n</em> = <em>len</em>(<em>wave</em>)<br>
+I = <em>wave</em>[<em>n</em>&minus;1]<br>
+for <em>wave</em>[<em>n</em>&minus;2] &lt; <em>t</em></td>
+</tr>
+<tr>
+<td><code>isine</code></td>
+<td><code>p, n</code></td>
+<td><code>dc, mag, phase, offset, ampl, freq, td, damp, sinephase, ammodindex, ammodfreq, ammodphase, fmmodindex, fmmodfreq</code></td>
+<td>I = <em>offset</em> + <em>ampl</em> &middot;<br>
+&nbsp;&nbsp;(1 &minus; F<sub>AM</sub> &middot; cos(2&pi; &middot; f<sub>AM</sub> &middot; (<em>t</em> &minus; <em>td</em>) &minus; &phi;<sub>AM</sub>)) &middot;<br>
+&nbsp;&nbsp;(1 &minus; <em>damp</em> &middot; (<em>t</em> &minus; <em>td</em>)) &middot;<br>
+&nbsp;&nbsp;cos(2&pi; &middot; <em>freq</em> &middot; (1 &minus; F<sub>FM</sub> &middot; cos(2&pi; &middot; f<sub>FM</sub> &middot; (<em>t</em> &minus; <em>td</em>))) &middot; (<em>t</em> &minus; <em>td</em>) &minus; &phi;<sub>SIN</sub>)<br>
+with F<sub>AM</sub> = ammodindex, f<sub>AM</sub> = ammodfreq, &phi;<sub>AM</sub> = ammodphase, F<sub>FM</sub> = fmmodindex, f<sub>AM</sub> = fmmodfreq, and &phi;<sub>SIN</sub> = sinephase.</td>
+</tr>
+<tr>
+<td><code>vexp</code></td>
+<td><code>p, n</code></td>
+<td><code>dc, mag, phase, val0, val1, td0, tau0, td1, tau1</code></td>
+<td>V =<br>
+&nbsp;&nbsp;<em>dc</em> &nbsp;&nbsp;&nbsp;for <em>t</em> &le; <em>td0</em><br>
+&nbsp;&nbsp;<em>val1</em> &minus; (<em>val1</em> &minus; <em>dc</em>) &middot; e<sup>(<em>td0</em> &minus; <em>t</em>)/<em>tau0</em></sup> &nbsp;&nbsp;&nbsp;for <em>td0</em> &lt; <em>t</em> &le; <em>td1</em><br>
+&nbsp;&nbsp;<em>val0</em> &minus; (<em>val0</em> &minus; V<sub>td1</sub>) &middot; e<sup>(<em>td1</em> &minus; <em>t</em>)/<em>tau1</em></sup> &nbsp;&nbsp;&nbsp;for <em>td1</em> &lt; <em>t</em><br>
+with V<sub>td1</sub> the value of V at time <em>t</em> = <em>td1</em>.</td>
+</tr>
+<tr>
+<td><code>vpulse</code></td>
+<td><code>p, n</code></td>
+<td><code>dc, mag, phase, val0, val1, td, rise, fall, width, period</code></td>
+<td>V =<br>
+&nbsp;&nbsp;<em>val0</em> &nbsp;&nbsp;&nbsp;for <em>t</em> &le; <em>t0</em><br>
+&nbsp;&nbsp;<em>val0</em> + (<em>val1</em> &minus; <em>val0</em>) &middot; (<em>t</em> &minus; <em>t0</em>)/<em>rise</em> &nbsp;&nbsp;&nbsp;for <em>t0</em> &lt; <em>t</em> &le; <em>t1</em><br>
+&nbsp;&nbsp;<em>val1</em> &nbsp;&nbsp;&nbsp;for <em>t1</em> &lt; <em>t</em> &le; <em>t2</em><br>
+&nbsp;&nbsp;<em>val1</em> + (<em>val0</em> &minus; <em>val1</em>) &middot; (<em>t</em> &minus; <em>t2</em>)/<em>fall</em> &nbsp;&nbsp;&nbsp;for <em>t2</em> &lt; <em>t</em> &le; <em>t3</em><br>
+&nbsp;&nbsp;<em>val0</em> &nbsp;&nbsp;&nbsp;for <em>t3</em> &lt; <em>t</em> &le; <em>t4</em><br>
+with the following definitions (<em>n</em> is a non-negative integer):<br>
+<em>t0</em> = <em>td</em> + <em>n</em> &middot; <em>period</em><br>
+<em>t1</em> = <em>rise</em> + <em>td</em> + <em>n</em> &middot; <em>period</em><br>
+<em>t2</em> = <em>width</em> + <em>rise</em> + <em>td</em> + <em>n</em> &middot; <em>period</em><br>
+<em>t3</em> = <em>fall</em> + <em>width</em> + <em>rise</em> + <em>td</em> + <em>n</em> &middot; <em>period</em><br>
+<em>t4</em> = <em>td</em> + (<em>n</em> + 1) &middot; <em>period</em></td>
+</tr>
+<tr>
+<td><code>vpwl</code></td>
+<td><code>p, n</code></td>
+<td><code>dc, mag, phase, wave</code></td>
+<td>V = <em>wave</em>[<em>i</em>+1] + (<em>wave</em>[<em>i</em>+3] &minus; <em>wave</em>[<em>i</em>+1]) &middot; (<em>t</em> &minus; <em>wave</em>[<em>i</em>]) / (<em>wave</em>[<em>i</em>+2] &minus; <em>wave</em>[<em>i</em>])<br>
+for <em>wave</em>[<em>i</em>] &le; <em>t</em> &lt; <em>wave</em>[<em>i</em>+2] and 0 &le; <em>i</em> &lt; <em>n</em>, <em>n</em> = <em>len</em>(<em>wave</em>)<br>
+I = <em>wave</em>[<em>n</em>&minus;1]<br>
+for <em>wave</em>[<em>n</em>&minus;2] &lt; <em>t</em>.</td>
+</tr>
+<tr>
+<td><code>vsine</code></td>
+<td><code>p, n</code></td>
+<td><code>dc, mag, phase, offset, ampl, freq, td, damp, sinephase, ammodindex, ammodfreq, ammodphase, fmmodindex, fmmodfreq</code></td>
+<td>V = <em>offset</em> + <em>ampl</em> &middot;<br>
+&nbsp;&nbsp;(1 &minus; F<sub>AM</sub> &middot; cos(2&pi; &middot; f<sub>AM</sub> &middot; (<em>t</em> &minus; <em>td</em>) &minus; &phi;<sub>AM</sub>)) &middot;<br>
+&nbsp;&nbsp;(1 &minus; <em>damp</em> &middot; (<em>t</em> &minus; <em>td</em>)) &middot;<br>
+&nbsp;&nbsp;cos(2&pi; &middot; <em>freq</em> &middot; (1 &minus; F<sub>FM</sub> &middot; cos(2&pi; &middot; f<sub>FM</sub> &middot; (<em>t</em> &minus; <em>td</em>))) &middot; (<em>t</em> &minus; <em>td</em>) &minus; &phi;<sub>SIN</sub>)<br>
+with F<sub>AM</sub> = ammodindex, f<sub>AM</sub> = ammodfreq, &phi;<sub>AM</sub> = ammodphase, F<sub>FM</sub> = fmmodindex, f<sub>AM</sub> = fmmodfreq, and &phi;<sub>SIN</sub> = sinephase.</td>
+</tr>
+<tr>
+<td><code>tline</code></td>
+<td><code>t1, b1, t2, b2</code></td>
+<td><code>z0, td, f, nl</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>vccs</code></td>
+<td><code>sink, src, ps, ns</code></td>
+<td><code>gm</code></td>
+<td>I(sink, src) = <em>gm</em> &middot; V(<em>ps</em>, <em>ns</em>)</td>
+</tr>
+<tr>
+<td><code>vcvs</code></td>
+<td><code>p, n, ps, ns</code></td>
+<td><code>gain</code></td>
+<td>V(p, n) = <em>gain</em> &middot; V(<em>ps</em>, <em>ns</em>)</td>
+</tr>
+<tr>
+<td><code>diode</code></td>
+<td><code>a, c</code></td>
+<td><code>area</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>bjt</code></td>
+<td><code>c, b, e, s</code></td>
+<td><code>area</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>mosfet</code></td>
+<td><code>d, g, s, b</code></td>
+<td><code>w, l, ad, as, pd, ps, nrd, nrs</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>jfet</code></td>
+<td><code>d, g, s</code></td>
+<td><code>area</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>mesfet</code></td>
+<td><code>d, g, s</code></td>
+<td><code>area</code></td>
+<td></td>
+</tr>
+</table>
+
+<div class="note"><strong>Source fidelity for Table E.1:</strong> The table above preserves several apparent defects in the published text: the <code>inductor</code> behavior multiplies by <em>l</em> rather than by 1/<em>l</em>; both sine-source definition lines label <code>fmmodfreq</code> as f<sub>AM</sub> rather than f<sub>FM</sub>; and the final <code>vpwl</code> expression begins with I rather than V. The following paragraph also preserves the published cross-reference to 7.5, even though paramsets are specified in 6.4.</div>
+
+<p>Although in a SPICE context the primitives for <code>diode</code>, <code>bjt</code>, <code>mosfet</code>, <code>jfet</code>, and <code>mesfet</code> can be used only in a model definition, in Verilog-AMS they may be used directly in a paramset statement as described in 7.5.</p>
+
+<h3 id="sE-3-1">E.3.1 Unsupported primitives</h3>
+
+<p>Verilog-AMS HDL does not support the concept of passing an instance name as a parameter. As such, the following primitives are not supported: <code>ccvs</code>, <code>cccs</code>, and mutual inductors; however, these primitives can be instantiated inside a SPICE subcircuit that itself is instantiated in Verilog-AMS.</p>
+
+<h3 id="sE-3-2">E.3.2 Discipline of primitives</h3>
+
+<p>To afford the ability to use analog primitive in any design, including mixed disciplines, the default discipline override is provided. The discipline of analog primitives will be resolved based on instance specific attributes, the disciplines of other instances on the same net, or default to electrical if it cannot be determined.</p>
+
+<p>The precedence for the discipline of analog primitives is as follows:</p>
+
+<ol>
+<li>A port_discipline attribute on the analog primitive;</li>
+<li>The resolution of the discipline;</li>
+<li>The default analog primitive of electrical.</li>
+</ol>
+
+<h4 id="sE-3-2-1">E.3.2.1 Setting the discipline of analog primitives</h4>
+
+<p>A new optional attribute shall be provided called <em>port_discipline</em>, which shall have as a value the desired discipline for the port of the analog primitive. It shall only apply to either the analog primitive itself or the port to which it is attached. The value shall be of type string and the value must be a valid discipline of domain continuous. This attribute shall only apply to analog primitives or the ports of analog primitives; for other modules as well as the ports of all other modules it shall be ignored.</p>
+
+<p>The following provides an example of this attribute applied to an analog primitive.</p>
+
+<pre><code>(* port_discipline="electrical" *) resistor #(.r(1k))
+   r1 (node1, node2); // not needed as default
+(* port_discipline="rotational" *) resistor #(.r(1k))
+   r2 (node1, node2);</code></pre>
+
+<p>The following provides an example of this attribute applied to the ports of an analog primitive.</p>
+
+<pre><code>resistor #(.r(1k)) r3
+   ((* port_discipline="rotational" *) node1,
+    (* port_discipline="rotational" *) node2);</code></pre>
+
+<p>The use of these attributes can be combined to change the basic discipline of all ports for the analog primitive, but overriding the discipline for specific ports. The following provides an example of this use</p>
+
+<pre><code>(* port_discipline="electrical" *) vcvs #(.gain(1.45e-3))
+   motor1 (n1, gnd_e,
+      (* port_discipline="rotational_omega" *) shaft1,
+      (* port_discipline="rotational_omega" *) gnd_rot);</code></pre>
+
+<p>The above model uses a voltage-controlled voltage source to model a motor as a converter from electrical potential to rotational velocity.</p>
+
+<p>Attributes are described in 2.9 of this document.</p>
+
+<h4 id="sE-3-2-2">E.3.2.2 Resolving the disciplines of analog primitives</h4>
+
+<p>If no attribute exists on the instance of an analog primitive, then the discipline may be determined by the disciplines of other instances connected to the same net segment. The disciplines of the vpiLoConn of all other instances on the net segment shall be evaluated to determine if they are of domain continuous and compatible with each other. If they are, then the discipline of the analog primitive shall be set to the same discipline. If they are not compatible, then an error will occur as defined in 3.11. If there are no continuous disciplines defined on the net segment, then the discipline shall default to electrical.</p>
+
+<h3 id="sE-3-3">E.3.3 Name scoping of SPICE primitives</h3>
+
+<p>In the resolution hierarchy of names during elaboration a module or paramset defined in the Verilog-AMS will always be selected in favor of a SPICE primitive, model, or subcircuit using exactly the same name.</p>
+
+<p>In case of a name match with differences in case, the module or paramset does not interfere with the SPICE primitive, model, or subcircuit, but the resolution method described in <a href="#sE-2-1">E.2.1</a> shall apply.</p>
+
+<p>In case of a SPICE primitive which is always available in the Verilog-AMS simulator, a Verilog-AMS module or paramset whose name exactly matches that of the primitive will be used in module instantiations. The Verilog-AMS simulator may issue a warning stating that the Verilog-AMS module or paramset is used instead of the SPICE primitive. In case of a Verilog-AMS module or paramset whose name exactly matches that of a SPICE model or subcircuit, the Verilog-AMS simulator shall issue an warning message stating that the Verilog-AMS module or paramset is used instead of the SPICE model or subcircuit.</p>
+
+<div class="note"><strong>Source fidelity:</strong> The phrase &ldquo;shall issue an warning message&rdquo; is the wording printed in the published LRM and is retained here.</div>
+
+<h3 id="sE-3-4">E.3.4 Limiting algorithms</h3>
+
+<p>Many SPICE simulators use limiting algorithms to improve convergence in Newton-Raphson iterations. <a href="#table-e-2">Table E.2</a> lists the preferred names for three functions that may be available in a simulator, their arguments, and their intended uses. The function name, enclosed in quotation marks, can be used in the <code>$limit()</code> function of 9.17.3. This allows a Verilog-AMS module to use the same limiting algorithms available to built-in SPICE primitives. The arguments are described in 9.17.3.</p>
+
+<p id="table-e-2"><strong>Table E.2&mdash;SPICE limiting functions</strong></p>
+
+<table>
+<tr><th>Function name</th><th>Arguments</th><th>Meant for limiting:</th></tr>
+<tr><td>fetlim</td><td>vth</td><td>gate-to-source voltage of field-effect transistors</td></tr>
+<tr><td>pnjlim</td><td>vte, vcrit</td><td>voltage across diodes and pn junctions in other devices</td></tr>
+<tr><td>vdslim</td><td>(none)</td><td>drain-to-source voltage of field-effect transistors</td></tr>
+</table>
+
+<h2 id="sE-4">E.4 Other issues</h2>
+
+<p>This section highlights some other issues</p>
+
+<h3 id="sE-4-1">E.4.1 Multiplicity factor on subcircuits</h3>
+
+<p>Some SPICE simulators support a multiplicity factor (<code>M</code>) parameter on subcircuits without the parameter being explicitly being declared. This factor is typically used to indicate the subcircuit should be modeled as if there are a specified number of copies in parallel. In previous versions of Verilog-AMS HDL, subcircuits defined as modules could not support automatic <code>M</code> factors.</p>
+
+<p>Starting with LRM Version 2.2, the multiplicity factor is supported for subcircuits defined as modules in Verilog-AMS using the hierarchical system parameter <code>$mfactor</code>, as described in 6.3.6.</p>
+
+<h3 id="sE-4-2">E.4.2 Binning and libraries</h3>
+
+<p>Some SPICE netlists provide mechanisms for mapping an instance to a group of models, with the final determination of which model to use being based on rules encapsulated in the SPICE netlist. Examples include model binning or corners support. From within an instance statement, it appears as if the instance is referencing a simple SPICE model; supporting these additional capabilities in Verilog-AMS HDL is supported via the instance line by default. Support of SPICE model cards is implementation specific (including those using these mechanisms).</p>
+
+<p>Similar functionality for Verilog-AMS is supported through use of the paramset, as described in 6.4. Instead of referencing a specific module, and instance may refer to a paramset identifier, and there may be several paramsets with the same identifier (name). The final determination of which paramset to use is made according to rules specified in 6.4.2.</p>
+
+<div class="note"><strong>Source fidelity:</strong> The phrase &ldquo;and instance may refer&rdquo; is the wording printed in the published LRM and is retained here.</div>
+
+</body>
+</html>

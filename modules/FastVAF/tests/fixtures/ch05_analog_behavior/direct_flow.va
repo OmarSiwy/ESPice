@@ -1,0 +1,4 @@
+module ch5_direct_flow(p, n);
+  inout p, n; electrical p, n; parameter real g = 1m;
+  analog I(p, n) <+ g * V(p, n);
+endmodule

@@ -1,0 +1,5 @@
+module ch09_atomic_yposition(p, n);
+  inout p, n; electrical p, n;
+  analog I(p,n) <+ V(p,n) + $yposition;
+endmodule
+

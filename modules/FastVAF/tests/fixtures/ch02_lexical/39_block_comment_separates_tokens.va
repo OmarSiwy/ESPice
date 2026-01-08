@@ -1,0 +1,17 @@
+// §2.2: "Verilog-AMS HDL source text files shall be a stream of lexical
+// tokens", and the list that follows names `comment` as one of the seven token
+// types — so a comment SEPARATES the two tokens around it.
+//
+// The regression this pins: the preprocessor used to re-emit only the NEWLINES
+// a block comment contained, which is enough for a multi-line comment and
+// welds a single-line one. `1/*c*/2` reached the lexer as the single integer
+// literal 12 and compiled silently into the device. `</*c*/=` welded into the
+// operator `<=` the same way.
+//
+// Correct behaviour is a syntax error here: `1` and `2` are two adjacent
+// primaries, which no A.8.3 production derives.
+module ch2_comment_separator(p, n);
+  inout p, n;
+  electrical p, n;
+  analog I(p, n) <+ (1/*c*/2) * V(p, n);
+endmodule

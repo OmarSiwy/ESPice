@@ -1,0 +1,5 @@
+// EXPECT: error
+module ch04_reduction_xor_rejected;
+    integer bits, parity;
+    analog parity = ^bits;
+endmodule

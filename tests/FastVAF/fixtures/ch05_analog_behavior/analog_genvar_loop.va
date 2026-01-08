@@ -1,0 +1,4 @@
+module ch5_genvar(p);
+  inout [0:2] p; electrical [0:2] p; genvar i;
+  analog for (i = 0; i < 3; i = i + 1) I(p[i]) <+ V(p[i]);
+endmodule

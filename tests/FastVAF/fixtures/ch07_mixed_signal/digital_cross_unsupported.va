@@ -1,0 +1,5 @@
+// EXPECT: error -- analog cross inside always requires both engines.
+module ch7_digital_cross(p);
+  inout p; electrical p; integer d;
+  always @(cross(V(p), +1)) d = 1;
+endmodule

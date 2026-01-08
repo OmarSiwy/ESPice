@@ -1,0 +1,10 @@
+module annex_b_escaped_keyword(p, n);
+    inout p, n;
+    electrical p, n;
+    real \if ;
+
+    analog begin
+        \if  = 1.0;
+        I(p, n) <+ \if ;
+    end
+endmodule

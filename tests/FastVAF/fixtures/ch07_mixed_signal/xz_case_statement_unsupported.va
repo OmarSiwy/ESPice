@@ -1,0 +1,12 @@
+// EXPECT: error -- ordinary case can translate explicit X/Z alternatives.
+module ch7_xz_case_statement(p, d);
+  inout p; electrical p; input d; wire d; real result;
+  analog begin
+    case (d)
+      1'bx: result = 1.0;
+      1'bz: result = 2.0;
+      default: result = 0.0;
+    endcase
+    I(p) <+ result;
+  end
+endmodule

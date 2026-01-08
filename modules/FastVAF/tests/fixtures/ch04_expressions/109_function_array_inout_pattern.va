@@ -1,0 +1,2 @@
+module ch4_fn_array_inout(p); inout p; electrical p; real a,b,dummy; analog function real bump; inout [0:1] values; real values[0:1]; begin values[0]=values[0]+1.0; values[1]=values[1]+2.0; bump=values[0]; end endfunction analog begin a=V(p); b=0.0; dummy=bump('{a,b}); I(p)<+dummy+a+b; end endmodule
+// EXPECT: error -- normative syntax/restriction snapshot for this rule family.

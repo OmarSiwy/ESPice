@@ -1,0 +1,1 @@
+module ch5_initial_integer(p); inout p; electrical p; integer mode; analog initial mode = 1; analog I(p) <+ mode + 0.0*V(p); endmodule

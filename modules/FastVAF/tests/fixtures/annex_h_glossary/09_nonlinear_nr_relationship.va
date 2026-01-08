@@ -1,0 +1,5 @@
+module glossary_nonlinear_nr_relationship(p, n);
+  inout p, n; electrical p, n;
+  parameter real saturation = 1e-14;
+  analog I(p,n) <+ saturation*(limexp(V(p,n)/$vt) - 1.0);
+endmodule

@@ -1,0 +1,8 @@
+module ch04_filter_parameter_arrays(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real numerator[0:1] = '{1.0, 0.0};
+    parameter real denominator[0:1] = '{1.0, 1.0};
+
+    analog I(p, n) <+ laplace_nd(V(p, n), numerator, denominator);
+endmodule

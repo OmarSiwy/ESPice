@@ -1,0 +1,3 @@
+# annex C: digital (non-analog) function declarations are outside Verilog-A.
+E0205
+function

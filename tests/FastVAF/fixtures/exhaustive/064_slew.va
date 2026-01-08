@@ -1,0 +1,24 @@
+// §4.5.9 slew — a rate limiter, and the one §4.5 operator whose kernel IS the
+// LRM's definition rather than an approximation: the output moves at most
+// `rise*dt` up or `fall*dt` down per accepted step.
+//
+// rise = 2e8 V/s with dt = 1n gives 0.2 per step, so a unit step at t = 1n
+// takes exactly five steps to arrive: 0, 0.2, 0.4, 0.6, 0.8, 1.0 — and then
+// stops, because the limiter never overshoots its input.
+//
+//! bias V(n) = 0
+//! wave V(in) = 0, 1
+//! time 0, 1n, 2n, 3n, 4n, 5n, 6n
+//! analysis tran
+//! print none
+`include "check.vh"
+module ex064_slew(in, n);
+  inout in, n;
+  electrical in, n;
+  analog begin
+    `CHECK("slew ramps at the rate limit, then holds", slew(V(in, n), 2e8, 2e8),
+           min(1.0, 0.2 * ($abstime / 1n)), 1e-15);
+    `CHECKI("never exceeds the input", slew(V(in, n), 2e8, 2e8) <= V(in, n), 1);
+    I(in, n) <+ 0.0;
+  end
+endmodule

@@ -1,0 +1,26 @@
+module annex_a_behavioral_statements(p, n);
+    inout p, n;
+    electrical p, n;
+    integer index;
+    real result;
+
+    analog begin : behavior
+        result = 0.0;
+        if (V(p, n) > 0.0)
+            result = 1.0;
+        else
+            result = -1.0;
+        case (index)
+            0: result = result + 1.0;
+            1, 2: result = result + 2.0;
+            default: result = result + 3.0;
+        endcase
+        for (index = 0; index < 2; index = index + 1)
+            result = result + index;
+        while (index < 3)
+            index = index + 1;
+        repeat (2)
+            result = result + 1.0;
+        I(p, n) <+ result;
+    end
+endmodule

@@ -1,0 +1,9 @@
+// Linear inductor. V(p,n) = l * d/dt i(branch).
+module inductor(p, n);
+    inout p, n;
+    electrical p, n;
+    branch (p, n) br;
+    parameter real l = 1e-9 from (0:inf);
+
+    analog V(br) <+ l * ddt(I(br));
+endmodule

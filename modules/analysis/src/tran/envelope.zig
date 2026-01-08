@@ -69,6 +69,11 @@ fn newtonAt(
     t: f64,
     options: Options,
 ) bool {
+    // §9.10 `$abstime`: a generated device reads Instance.abstime, not the `t`
+    // argument, so the envelope's quasi-static probes have to publish it too —
+    // otherwise every source in the envelope sees t = 0. dt stays 0: this rung
+    // IS quasi-static, so `ddt` should return 0 (see the generated zDdt guard).
+    ckt.setSimState(.{ .t = t, .kind = .tran });
     const nr = converger.run(ckt, ws, x, t, options.tol.newtonOpts(options.tol.itl4), root.EvalHook{}) catch return false;
     return nr.converged;
 }

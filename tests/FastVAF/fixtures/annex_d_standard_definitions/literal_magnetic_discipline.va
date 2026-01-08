@@ -1,0 +1,8 @@
+discipline magnetic;
+  potential Magneto_Motive_Force;
+  flow Flux;
+enddiscipline
+module annex_d_literal_magnetic;
+  electrical p;
+  analog I(p) <+ V(p);
+endmodule

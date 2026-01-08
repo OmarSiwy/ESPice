@@ -1,0 +1,3 @@
+module annex_a_null_attr(p); inout p; electrical p; analog begin (* explicit_null *) ; if(V(p)>0.0) (* conditional_null *) ; else (* contribution_attr *) I(p)<+V(p); end endmodule
+// Attribute instances may precede a null statement and a statement (LRM 2.9.1,
+// Annex A.9.x); they are parsed and skipped, so this must COMPILE.

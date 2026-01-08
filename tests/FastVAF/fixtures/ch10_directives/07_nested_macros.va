@@ -1,0 +1,6 @@
+`define INNER(x) ((x)*(x))
+`define OUTER(x) (`INNER(x) + (x))
+module ch10_nested_macros(p, n);
+  inout p, n; electrical p, n;
+  analog I(p,n) <+ `OUTER(V(p,n));
+endmodule

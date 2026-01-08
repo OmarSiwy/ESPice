@@ -1,0 +1,5 @@
+// EXPECT: error
+module ch02_xz_integer_rejected;
+    integer value;
+    analog value = 4'b01xz;
+endmodule

@@ -1,0 +1,7 @@
+module annex_b_nets;
+  tri (strong1, pull0) t; tri0 t0; tri1 t1; triand ta; trior to; wand wa; wor wo; uwire uw;
+  trireg (large) rl; trireg (medium) rm; trireg (small) rs;
+  wire (supply1, highz0) s1; wire (supply0, highz1) s0; wire (strong1, strong0) st; wire (weak1, weak0) w; wire (pull1, pull0) p;
+  wire signed [3:0] ss; wire unsigned [3:0] uu; wire scalared [3:0] sc; wire vectored [3:0] ve;
+endmodule
+// EXPECT: error -- normative syntax/restriction snapshot for this rule family.

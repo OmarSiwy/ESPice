@@ -1,0 +1,16 @@
+module ch04_transcendental_math(p, n);
+    inout p, n;
+    electrical p, n;
+    real x, value;
+
+    analog begin
+        // tanh maps the unbounded probe into [-1,1] (LRM 4.3.2), and the 0.5
+        // scale puts x strictly inside every domain used below: tan's
+        // pole-free central branch, asin/acos' [-1,1], atanh's (-1,1).
+        x = 0.5 * tanh(V(p, n));
+        value = sin(x) + cos(x) + tan(x) + asin(x) + acos(x) + atan(x) +
+                atan2(x, 1.0) + hypot(x, 1.0) + sinh(x) + cosh(x) + tanh(x) +
+                asinh(x) + acosh(abs(x) + 1.0) + atanh(x);
+        I(p, n) <+ value;
+    end
+endmodule

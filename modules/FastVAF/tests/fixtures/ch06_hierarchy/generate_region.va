@@ -1,0 +1,8 @@
+module ch6_generate_region(p);
+  inout p; electrical p;
+  generate
+    begin : generated
+      analog I(p) <+ V(p);
+    end
+  endgenerate
+endmodule

@@ -1,0 +1,5 @@
+// EXPECT: error -- SPICE objects require hierarchy/SPICE elaboration.
+module annex_e_spice_model_unsupported(p, n);
+  inout p, n; electrical p, n;
+  vertNPN q1(p, p, n);
+endmodule

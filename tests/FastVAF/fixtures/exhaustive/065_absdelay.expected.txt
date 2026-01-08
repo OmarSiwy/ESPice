@@ -1,0 +1,42 @@
+=== 065_absdelay ===
+--- point 0 ---
+  x[in] = 0.000000e0
+  x[n] = 0.000000e0
+t=0 in=0 delayed=0
+delayed by exactly td got=0 want=0 ok=1
+--- point 1 ---
+  x[in] = 1.000000e0
+  x[n] = 0.000000e0
+  t = 1.000000e-9  dt = 1.000000e-9
+t=1 in=1 delayed=0
+delayed by exactly td got=0 want=0 ok=1
+--- point 2 ---
+  x[in] = 2.000000e0
+  x[n] = 0.000000e0
+  t = 2.000000e-9  dt = 1.000000e-9
+t=2 in=2 delayed=0
+delayed by exactly td got=0 want=0 ok=1
+--- point 3 ---
+  x[in] = 3.000000e0
+  x[n] = 0.000000e0
+  t = 3.000000e-9  dt = 1.000000e-9
+t=3 in=3 delayed=1.0000000000000002
+delayed by exactly td got=1.0000000000000002 want=1 ok=1
+--- point 4 ---
+  x[in] = 4.000000e0
+  x[n] = 0.000000e0
+  t = 4.000000e-9  dt = 1.000000e-9
+t=4 in=4 delayed=2
+delayed by exactly td got=2 want=2 ok=1
+--- point 5 ---
+  x[in] = 5.000000e0
+  x[n] = 0.000000e0
+  t = 5.000000e-9  dt = 1.000000e-9
+t=5 in=5 delayed=2.9999999999999996
+delayed by exactly td got=2.9999999999999996 want=3 ok=1
+--- point 6 ---
+  x[in] = 6.000000e0
+  x[n] = 0.000000e0
+  t = 6.000000e-9  dt = 1.000000e-9
+t=6 in=6 delayed=4.000000000000001
+delayed by exactly td got=4.000000000000001 want=4 ok=1

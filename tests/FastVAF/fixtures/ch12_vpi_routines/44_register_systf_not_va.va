@@ -1,0 +1,6 @@
+// EXPECT: error
+module ch12_atomic_register_systf(p, n);
+  inout p, n; electrical p, n;
+  analog I(p,n) <+ vpi_register_systf(0);
+endmodule
+

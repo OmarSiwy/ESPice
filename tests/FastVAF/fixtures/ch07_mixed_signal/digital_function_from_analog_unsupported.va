@@ -1,0 +1,9 @@
+// LRM 7.3.7 forbids this; the snapshot exposes the missing domain diagnostic.
+module ch7_digital_function_from_analog(p);
+  inout p; electrical p;
+  function real digital_scale;
+    input real value;
+    digital_scale = 2.0 * value;
+  endfunction
+  analog I(p) <+ digital_scale(V(p));
+endmodule

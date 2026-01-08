@@ -1,0 +1,15 @@
+// §5.8.1: the conditional expression governing a statement that contains an
+// analog operator shall be an analysis_or_constant_expression. `V(p,n) > 0.0`
+// is neither, so `transition` here is fed 0 on every step its arm was off and
+// its history is wrong from then on. Rejected as E0514.
+module ch04_operator_in_conditional(p, n);
+    inout p, n;
+    electrical p, n;
+
+    analog begin
+        if (V(p, n) > 0.0)
+            I(p, n) <+ transition(1.0, 0.0, 1n);
+        else
+            I(p, n) <+ transition(0.0, 0.0, 1n);
+    end
+endmodule

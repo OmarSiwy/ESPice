@@ -1,0 +1,5 @@
+module ch6_param_given(p);
+  inout p; electrical p;
+  parameter real gain = 1.0;
+  analog I(p) <+ $param_given(gain) ? gain * V(p) : V(p);
+endmodule

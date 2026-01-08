@@ -1,0 +1,3 @@
+nature ch3_dup_a; units="V"; access=DuplicateAccess; abstol=1u; endnature
+nature ch3_dup_b; units="A"; access=DuplicateAccess; abstol=1p; endnature
+module ch3_duplicate_access; endmodule

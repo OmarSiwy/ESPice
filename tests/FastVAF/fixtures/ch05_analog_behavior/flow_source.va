@@ -1,0 +1,4 @@
+module ch5_flow_source(p, n);
+  inout p, n; electrical p, n;
+  analog I(p, n) <+ 2m + 0.0*V(p, n);
+endmodule

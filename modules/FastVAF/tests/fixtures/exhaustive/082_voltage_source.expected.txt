@@ -1,0 +1,25 @@
+=== 082_voltage_source ===
+--- point 0 ---
+  x[p] = 0.000000e0
+  x[n] = 0.000000e0
+  x[flowZ28pZ2cnZ29] = 0.000000e0
+source value got=1.5 want=1.5 ok=1
+  res[p] = 0.000000e0
+    d res[p]/d x[flowZ28pZ2cnZ29] = 1.000000e0
+  res[n] = 0.000000e0
+    d res[n]/d x[flowZ28pZ2cnZ29] = -1.000000e0
+  res[flowZ28pZ2cnZ29] = -1.500000e0
+    d res[flowZ28pZ2cnZ29]/d x[p] = 1.000000e0
+    d res[flowZ28pZ2cnZ29]/d x[n] = -1.000000e0
+--- point 1 ---
+  x[p] = 1.500000e0
+  x[n] = 0.000000e0
+  x[flowZ28pZ2cnZ29] = 0.000000e0
+source value got=1.5 want=1.5 ok=1
+  res[p] = 0.000000e0
+    d res[p]/d x[flowZ28pZ2cnZ29] = 1.000000e0
+  res[n] = 0.000000e0
+    d res[n]/d x[flowZ28pZ2cnZ29] = -1.000000e0
+  res[flowZ28pZ2cnZ29] = 0.000000e0
+    d res[flowZ28pZ2cnZ29]/d x[p] = 1.000000e0
+    d res[flowZ28pZ2cnZ29]/d x[n] = -1.000000e0

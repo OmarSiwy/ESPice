@@ -1,0 +1,9 @@
+module glossary_block_control_flow(p, n);
+  inout p, n; electrical p, n;
+  real result;
+  analog begin : constitutive_block
+    if (V(p,n) > 0.0) result = V(p,n);
+    else result = -V(p,n);
+    I(p,n) <+ result;
+  end
+endmodule

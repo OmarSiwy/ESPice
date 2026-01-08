@@ -1,0 +1,2 @@
+// EXPECT: error -- Table E.1 primitive needs SPICE elaboration.
+module annex_e_primitive_inductor(p,n); inout p,n; electrical p,n; inductor #(.l(1n),.ic(0.0)) x(.p(p),.n(n)); endmodule

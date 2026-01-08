@@ -1,0 +1,78 @@
+{
+  "status": "compile_ok",
+  "module_name": "arith",
+  "input_count": 16,
+  "output_count": 24,
+  "is_sequential": false,
+  "ports": [
+    {
+      "name": "a",
+      "dir": "in",
+      "width": 8
+    },
+    {
+      "name": "b",
+      "dir": "in",
+      "width": 8
+    },
+    {
+      "name": "sum",
+      "dir": "out",
+      "width": 8
+    },
+    {
+      "name": "diff",
+      "dir": "out",
+      "width": 8
+    },
+    {
+      "name": "prod",
+      "dir": "out",
+      "width": 8
+    }
+  ],
+  "vectors": [
+    {
+      "a": 0,
+      "b": 0,
+      "sum": 0,
+      "diff": 0,
+      "prod": 0
+    },
+    {
+      "a": 1,
+      "b": 1,
+      "sum": 2,
+      "diff": 0,
+      "prod": 1
+    },
+    {
+      "a": 200,
+      "b": 100,
+      "sum": 44,
+      "diff": 100,
+      "prod": 32
+    },
+    {
+      "a": 255,
+      "b": 255,
+      "sum": 254,
+      "diff": 0,
+      "prod": 1
+    },
+    {
+      "a": 17,
+      "b": 15,
+      "sum": 32,
+      "diff": 2,
+      "prod": 255
+    },
+    {
+      "a": 3,
+      "b": 0,
+      "sum": 3,
+      "diff": 3,
+      "prod": 0
+    }
+  ]
+}

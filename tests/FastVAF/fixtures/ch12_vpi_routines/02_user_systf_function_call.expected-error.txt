@@ -1,0 +1,3 @@
+# ch12 VPI routines are outside the Verilog-A subset: a user systf has no
+# compile-time definition, so it must be refused rather than faked.
+$fixture_vpi_gain

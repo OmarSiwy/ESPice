@@ -1,0 +1,3 @@
+# annex C: wreal is a discrete-real (digital) net type, outside Verilog-A.
+E0205
+wreal

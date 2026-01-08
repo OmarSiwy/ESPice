@@ -1,0 +1,11 @@
+=== 100_parameters ===
+--- point 0 ---
+  x[p] = 0.000000e0
+  x[n] = 0.000000e0
+overridden parameter got=0.007 want=0.007 ok=1
+default parameter got=2.5 want=2.5 ok=1
+integer parameter got=3 want=3 ok=1
+localparam folds at compile time got=5 want=5 ok=1
+aliasparam names the same storage got=0.007 want=0.007 ok=1
+$param_given on an override got=1 want=1 ok=1
+$param_given on a default got=0 want=0 ok=1

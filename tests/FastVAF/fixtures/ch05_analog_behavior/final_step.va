@@ -1,0 +1,7 @@
+module ch5_final_step(p);
+  inout p; electrical p; real x;
+  analog begin
+    @(final_step) x = 0.0;
+    I(p) <+ x + V(p);
+  end
+endmodule

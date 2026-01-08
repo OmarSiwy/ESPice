@@ -1,0 +1,4 @@
+module ch5_implicit_zero(p, n, c);
+  inout p, n, c; electrical p, n, c;
+  analog if (V(c) > 0.5) V(p, n) <+ 0.0;
+endmodule

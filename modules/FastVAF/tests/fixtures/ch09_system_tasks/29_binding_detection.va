@@ -1,0 +1,8 @@
+module ch09_binding_detection(p, n);
+  inout p, n; electrical p, n;
+  parameter real gain = 1.0;
+  analog begin
+    if ($param_given(gain) && $port_connected(p)) I(p,n) <+ gain*V(p,n);
+    else I(p,n) <+ V(p,n);
+  end
+endmodule

@@ -1,0 +1,5 @@
+module ch09_atomic_pow(p, n);
+  inout p, n; electrical p, n;
+  analog I(p,n) <+ V(p,n) + $pow(V(p,n), 2.0);
+endmodule
+

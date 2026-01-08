@@ -1,0 +1,6 @@
+// No selector is defined: the normative nested chain falls back to NIST1998.
+`include "physical_constants_select.vh"
+module annex_d_nist1998(p);
+  inout p; electrical p;
+  analog I(p) <+ `P_Q + `P_K + `P_H + `P_EPS0 + `P_U0 + 0.0*V(p);
+endmodule

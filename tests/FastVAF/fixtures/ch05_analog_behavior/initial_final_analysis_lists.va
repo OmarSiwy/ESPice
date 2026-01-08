@@ -1,0 +1,8 @@
+module ch5_initial_final_analysis_lists(p);
+  inout p; electrical p; real state;
+  analog begin
+    @(initial_step("dc", "tran")) state = 1.0;
+    @(final_step("tran", "noise")) state = 0.0;
+    I(p) <+ state + 0.0 * V(p);
+  end
+endmodule

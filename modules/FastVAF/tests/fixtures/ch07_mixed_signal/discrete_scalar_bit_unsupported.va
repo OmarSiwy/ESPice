@@ -1,0 +1,5 @@
+// A scalar discrete bit is promoted to an analog integer; this snapshots current lowering.
+module ch7_discrete_scalar_bit(p, d);
+  inout p; electrical p; input d; wire d;
+  analog I(p) <+ d;
+endmodule

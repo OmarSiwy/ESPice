@@ -5,6 +5,7 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .solvers = .{ .path = "../solvers" },
+        .devices = .{ .path = "../devices" },
     },
     .paths = .{
         "build.zig",

@@ -1,0 +1,4 @@
+module ch5_analog_block(p, n);
+  inout p, n; electrical p, n;
+  analog I(p, n) <+ V(p, n);
+endmodule

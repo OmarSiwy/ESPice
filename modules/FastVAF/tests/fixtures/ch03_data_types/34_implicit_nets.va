@@ -1,0 +1,2 @@
+module ch3_implicit_top(p); inout p; electrical p; child u(p, implicit_link); endmodule
+// EXPECT: error -- normative syntax/restriction snapshot for this rule family.

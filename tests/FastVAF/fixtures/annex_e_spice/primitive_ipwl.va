@@ -1,0 +1,2 @@
+// EXPECT: error -- Table E.1 primitive needs SPICE elaboration.
+module annex_e_primitive_ipwl(p,n); inout p,n; electrical p,n; ipwl #(.dc(0.0),.mag(1.0),.phase(0.0),.wave('{0.0,0.0,1n,1m})) x(.p(p),.n(n)); endmodule

@@ -1,0 +1,4 @@
+// EXPECT: error -- the type string is only valid in a paramset, which FastVAF rejects.
+paramset ch09_arandom_type_string parameters;
+  .gain = $arandom(7, "instance");
+endparamset

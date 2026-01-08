@@ -1,0 +1,7 @@
+module annex_c_parameter_range(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real gain = 1.0 from [0:inf);
+
+    analog I(p, n) <+ gain * V(p, n);
+endmodule

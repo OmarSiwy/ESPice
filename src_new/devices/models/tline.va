@@ -1,0 +1,75 @@
+// Ideal lossless transmission line (ngspice T element, Bergeron / method of
+// characteristics).  docs/tline-and-switch.md §1.1, §3.
+//
+// Each port is a Thevenin branch: Z0 in series with a source carrying the
+// delayed reflected wave from the far port,
+//
+//   v1 - Z0*i1 = E1 = v2(t-Td) + Z0*i2(t-Td)
+//   v2 - Z0*i2 = E2 = v1(t-Td) + Z0*i1(t-Td)
+//
+// Topology matches traload.c: internal nodes int1/int2 hold the Thevenin
+// source, G0 = 1/Z0 sits between pos and int, and I(br) is the port current.
+// DC/OP does NOT come out of the delay operator (its history is empty at t=0,
+// which would leave the two ports uncoupled and start transient from a wrong
+// operating point), so the zero-frequency transparency rows of §1.1 are
+// contributed explicitly under analysis("static") -- legal because §5.8.1
+// allows an analysis_or_constant_expression to guard a filter function.
+module tline(p1, n1, p2, n2);
+    inout p1, n1, p2, n2;
+    electrical p1, n1, p2, n2;
+    electrical int1, int2;
+    branch (int1, n1) br1;
+    branch (int2, n2) br2;
+
+    parameter real z0 = 50.0 from (0:inf);   // characteristic impedance [ohm]
+    // Delay: TD if given, else NL/F (ngspice's T card).  Verilog-A evaluates a
+    // parameter default AFTER overrides, so this *is* the "given" test -- and
+    // §4.5.7 needs the delay argument to be a plain parameter, so the choice
+    // cannot live in the analog block.  F has a default, hence no error case.
+    parameter real f  = 1e9  from (0:inf);   // frequency at which nl is measured [Hz]
+    parameter real nl = 0.25 from (0:inf);   // line length in wavelengths at f
+    parameter real td = nl / f from (0:inf); // delay [s]
+
+    // UIC seed of the delay history at t in {-2Td, -Td, 0} (§1.1 "History"),
+    // i.e. ngspice's IC=V1,I1,V2,I2.  The history ring belongs to the delay
+    // operator, so the host consumes these at MODEINITTRAN; there is no
+    // Verilog-A spelling for pre-loading a filter's past.
+    parameter real ic_v1 = 0.0;              // V(p1,n1) at t <= 0 [V]
+    parameter real ic_i1 = 0.0;              // I(br1)   at t <= 0 [A]
+    parameter real ic_v2 = 0.0;              // V(p2,n2) at t <= 0 [V]
+    parameter real ic_i2 = 0.0;              // I(br2)   at t <= 0 [A]
+
+    // Slope-change tolerance for the t+Td breakpoints (ngspice REL/ABS).
+    // Breakpoint registration is engine-side; the .va only carries the knobs.
+    parameter real rel_slope = 1.0 from (0:inf);  // ngspice REL
+    parameter real abs_slope = 1.0 from (0:inf);  // ngspice ABS
+
+    real g0, zg;
+    analog begin
+        g0 = 1.0 / z0;
+        // §1.1: the far-port current term is scaled by (1-gmin) in the DC rows,
+        // which is what keeps the matrix nonsingular for pathological
+        // connections (a line with nothing else pinning i_br1 - i_br2).
+        zg = z0 * (1.0 - $simparam("gmin", 1e-12));
+
+        // §1.1 timestep control: an edge launched at t must be resolvable when
+        // it lands at t+Td, so bound the step to a fraction of the delay.
+        $bound_step(0.25 * td);
+
+        // Thevenin series conductance, pos_k -- int_k.
+        I(p1, int1) <+ g0 * V(p1, int1);
+        I(p2, int2) <+ g0 * V(p2, int2);
+
+        if (analysis("static")) begin
+            // Zero-frequency limit: the line is transparent (§3 "# DC mode").
+            V(br1) <+ V(p2, n2) + zg * I(br2);
+            V(br2) <+ V(p1, n1) + zg * I(br1);
+        end else begin
+            // Delayed reflected wave from the far port.  I(br) is the current
+            // entering the near port, so V(p,n) + z0*I(br) is that port's
+            // outgoing wave.
+            V(br1) <+ absdelay(V(p2, n2) + z0 * I(br2), td);
+            V(br2) <+ absdelay(V(p1, n1) + z0 * I(br1), td);
+        end
+    end
+endmodule

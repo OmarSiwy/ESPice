@@ -1,0 +1,1 @@
+module ch5_two_branches(p,n); inout p,n; electrical p,n; branch(p,n) a; branch(p,n) b; analog begin I(a)<+V(a); V(b)<+I(b); end endmodule

@@ -1,0 +1,78 @@
+{
+  "status": "compile_ok",
+  "module_name": "comparator",
+  "input_count": 8,
+  "output_count": 3,
+  "is_sequential": false,
+  "ports": [
+    {
+      "name": "a",
+      "dir": "in",
+      "width": 4
+    },
+    {
+      "name": "b",
+      "dir": "in",
+      "width": 4
+    },
+    {
+      "name": "eq",
+      "dir": "out",
+      "width": 1
+    },
+    {
+      "name": "gt",
+      "dir": "out",
+      "width": 1
+    },
+    {
+      "name": "lt",
+      "dir": "out",
+      "width": 1
+    }
+  ],
+  "vectors": [
+    {
+      "a": 0,
+      "b": 0,
+      "eq": 1,
+      "gt": 0,
+      "lt": 0
+    },
+    {
+      "a": 5,
+      "b": 5,
+      "eq": 1,
+      "gt": 0,
+      "lt": 0
+    },
+    {
+      "a": 9,
+      "b": 2,
+      "eq": 0,
+      "gt": 1,
+      "lt": 0
+    },
+    {
+      "a": 2,
+      "b": 9,
+      "eq": 0,
+      "gt": 0,
+      "lt": 1
+    },
+    {
+      "a": 15,
+      "b": 0,
+      "eq": 0,
+      "gt": 1,
+      "lt": 0
+    },
+    {
+      "a": 0,
+      "b": 15,
+      "eq": 0,
+      "gt": 0,
+      "lt": 1
+    }
+  ]
+}

@@ -1,0 +1,1 @@
+module ch04_shift_right(p, n); inout p, n; electrical p, n; integer a; analog begin a = 8 >> 2; I(p, n) <+ a; end endmodule

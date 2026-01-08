@@ -1,0 +1,4 @@
+// EXPECT: error -- tran switch networks need the digital switch solver.
+module ch8_switch(a, b);
+  tran (a, b);
+endmodule

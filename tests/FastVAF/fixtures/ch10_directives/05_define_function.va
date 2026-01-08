@@ -1,0 +1,5 @@
+`define SQUARE(x) ((x)*(x))
+module ch10_define_function(p, n);
+  inout p, n; electrical p, n;
+  analog I(p,n) <+ `SQUARE(V(p,n));
+endmodule

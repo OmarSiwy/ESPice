@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>1. Verilog-AMS introduction — Verilog-AMS LRM 2023</title>
+<style>
+body { font-family: 'Segoe UI', system-ui, sans-serif; max-width: 900px; margin: 0 auto; padding: 2rem; background: #fafafa; color: #1a1a1a; line-height: 1.6; }
+h1 { border-bottom: 3px solid #2563eb; padding-bottom: 0.5rem; }
+h2 { color: #1e40af; margin-top: 2rem; border-bottom: 1px solid #ddd; padding-bottom: 0.3rem; }
+h3 { color: #374151; }
+h4 { color: #4b5563; }
+code { background: #e5e7eb; padding: 0.15rem 0.4rem; border-radius: 3px; font-size: 0.9em; }
+pre { background: #1e293b; color: #e2e8f0; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; }
+pre code { background: none; padding: 0; color: inherit; }
+table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+th, td { border: 1px solid #d1d5db; padding: 0.5rem 0.75rem; text-align: left; }
+th { background: #2563eb; color: white; }
+tr:nth-child(even) { background: #f3f4f6; }
+.syntax { background: #fffbeb; border-left: 4px solid #f59e0b; padding: 1rem; margin: 1rem 0; font-family: monospace; white-space: pre-wrap; }
+.note { background: #eff6ff; border-left: 4px solid #2563eb; padding: 0.75rem 1rem; margin: 1rem 0; }
+nav { background: #1e293b; padding: 1rem; border-radius: 6px; margin-bottom: 2rem; }
+nav a { color: #93c5fd; text-decoration: none; margin-right: 1rem; }
+nav a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<nav><a href="index.html">Index</a> <a href="ch2-lexical.html">Next &rarr;</a> </nav>
+<h1>1. Verilog-AMS introduction</h1>
+
+<h2 id="s1-1">1.1 Overview</h2>
+
+<p>This Verilog-AMS Hardware Description Language (HDL) language reference manual defines a behavioral language for analog and mixed-signal systems. Verilog-AMS HDL is derived from IEEE Std 1364-2005 Verilog HDL (referred to as IEEE Std 1364 Verilog from this point forward). This document is intended to cover the definition and semantics of Verilog-AMS HDL as proposed by Accellera.</p>
+
+<p>Verilog-AMS HDL consists of the complete IEEE Std 1364 Verilog specification, an analog equivalent for describing analog systems (also referred to as Verilog-A as described in Annex C), and extensions to both for specifying the full Verilog-AMS HDL.</p>
+
+<p>Verilog-AMS HDL lets designers of analog and mixed-signal systems and integrated circuits create and use modules which encapsulate high-level behavioral descriptions as well as structural descriptions of systems and components. The behavior of each module can be described mathematically in terms of its ports and external parameters applied to the module. The structure of each component can be described in terms of interconnected sub-components. These descriptions can be used in many disciplines such as electrical, mechanical, fluid dynamics, and thermodynamics.</p>
+
+<p>For continuous systems, Verilog-AMS HDL is defined to be applicable to both electrical and non-electrical systems description. It supports <em>conservative</em> and <em>signal-flow</em> descriptions by using the concepts of <em>nets</em>, <em>nodes</em>, <em>branches</em>, and <em>ports</em> as terminology for these descriptions. The solution of analog behaviors which obey the laws of conservation fall within the generalized form of Kirchhoff&rsquo;s Potential and Flow Laws (KPL and KFL). Both of these are defined in terms of the quantities (e.g., voltage and current) associated with the analog behaviors.</p>
+
+<p>Verilog-AMS HDL can also be used to describe discrete (digital) systems (per IEEE Std 1364 Verilog) and mixed-signal systems using both discrete and continuous descriptions as defined in this LRM.</p>
+
+<h2 id="s1-2">1.2 Mixed-signal language features</h2>
+
+<p>Verilog-AMS HDL extends the features of the digital modeling language (IEEE Std 1364 Verilog) to provide a single unified language with both analog and digital semantics with backward compatibility. Below is a list of salient features of the resulting language:</p>
+<ul>
+<li>signals of both analog and digital types can be declared in the same module</li>
+<li><code>initial</code>, <code>always</code>, and <code>analog</code> procedural blocks can appear in the same module</li>
+<li>both analog and digital signal values can be accessed (read operations) from any context (analog or digital) in the same module</li>
+<li>digital signal values can be set (write operations) from any context outside of an <code>analog</code> procedural block</li>
+<li>analog potentials and flows can only receive contributions (write operations) from inside an <code>analog</code> procedural block</li>
+<li>the semantics of the <code>initial</code> and <code>always</code> blocks remain the same as in IEEE Std 1364 Verilog; the semantics for the <code>analog</code> block are described in this manual</li>
+<li>the <code>discipline</code> declaration is extended to digital signals</li>
+<li>a new construct, <code>connect</code> statement, is added to facilitate auto-insertion of user-defined connection modules between the analog and digital domains</li>
+<li>when hierarchical connections are of mixed type (i.e., analog signal connected to digital port or digital signal connected to analog port), user-defined connection modules are automatically inserted to perform signal value conversion</li>
+</ul>
+
+<h2 id="s1-3">1.3 Systems</h2>
+
+<p>A <em>system</em> is considered to be a collection of interconnected <em>components</em> which are acted upon by a stimulus and produce a response. The components themselves can also be systems, in which case a <em>hierarchical system</em> is defined. If a component does not have any subcomponents, it is considered to be a <em>primitive component</em>. Each primitive component connects to zero or more <em>nets</em>. Each net connects to a <em>signal</em> which can traverse multiple levels of the hierarchy. The behavior of each component is defined in terms of values at each net.</p>
+
+<p>A <em>signal</em> is a hierarchical collection of nets which, because of port connections, are contiguous. If all the nets which make up a signal are in the discrete domain, the signal is a <em>digital signal</em>. If, on the other hand, all the nets which make up a signal are in the continuous domain, the signal is an <em>analog signal</em>. A signal which consists of nets from both domains is called a <em>mixed signal</em>.</p>
+
+<p>Similarly, a <em>port</em> whose connections are both analog is an <em>analog port</em>, a port whose connections are both digital is a <em>digital port</em>, and a port whose connections are both analog and digital is a <em>mixed port</em>. The components connect to <em>nodes</em> through ports and nets to build a hierarchy, as shown in Figure 1-1.</p>
+
+<div class="note">Figure 1-1: Components connect to nodes through ports &mdash; The figure shows three "Module" boxes whose ports (indicated by arrows labeled "Ports") all connect to a single common point labeled "Node", illustrating that components connect to a shared node through their ports.</div>
+
+<p>If a signal is analog or mixed, it is associated with a node (see 3.6), while a purely digital signal is not associated with a node. Regardless of the number of analog nets in an analog or mixed signal or how the analog nets in a mixed signal are interspersed with digital nets, the analog portion of an analog or mixed signal is represented by only a single node. This guarantees a mixed or analog signal has only one value which represents its potential with respect to the global reference voltage (<em>ground</em>).</p>
+
+<p>In order to simulate systems, it is necessary to have a complete description of the system and all of its components. Descriptions of systems are usually given structurally. That is, the description of a system contains instances of components and how they are interconnected. Descriptions of components are given using behavior and/or structure. A behavior is a mathematical description which relates the signals at the ports of the components.</p>
+
+<h3 id="s1-3-1">1.3.1 Conservative systems</h3>
+
+<p>An important characteristic of conservative systems is that there are two values associated with every node, the <em>potential</em> (also known as the <em>across value</em> or <em>voltage</em> in electrical systems) and the <em>flow</em> (the <em>through value</em> or <em>current</em> in electrical systems). The potential of the node is shared with all continuous ports and nets connected to the node so all continuous ports and nets see the same potential. The flow is shared so flow from all continuous ports and nets at a node shall sum to zero (<code>0</code>). In this way, the node acts as an infinitesimal point of interconnection in which the potential is the same everywhere on the node and on which no flow can accumulate. Thus, the node embodies Kirchhoff's Potential and Flow Laws (KPL and KFL). When a component connects to a node through a conservative port or net, it can either affect, or be affected by, either the potential at the node, and/or the flow onto the node through the port or net.</p>
+
+<p>With conservative systems it is also useful to define the concept of a branch. A branch is a path of flow between two nodes through a component. Every branch has an associated potential (the potential difference between the two nodes) and flow.</p>
+
+<p>A behavioral description of a conservative component is constructed as a collection of interconnected branches. The constitutive equations of the component are formulated so as to relate the branch potentials and flows. Refer to 5.4.2 for further details on the probe/source approach.</p>
+
+<h4 id="s1-3-1-1">1.3.1.1 Reference nodes</h4>
+
+<p>The potential of a single node is given with respect to a reference node. The potential of the reference node, which is called <code>ground</code> in electrical systems, is always zero (<code>0</code>). Any net of continuous discipline can be declared to be <code>ground</code>. In this case, the node associated with the net shall be the global reference node in the circuit. This is compatible with all analog disciplines and can be used to bind a port of an instantiated module to the reference node.</p>
+
+<h4 id="s1-3-1-2">1.3.1.2 Reference directions</h4>
+
+<p>The reference directions for a generic branch are shown in Figure 1-2.</p>
+
+<div class="note">Figure 1-2: Reference directions &mdash; The figure shows a generic branch as a rectangle between two terminals A (left) and B (right). An arrow labeled <em>flow</em> points from terminal A into the branch, and the branch is annotated with a plus sign on the A side and a minus sign on the B side of a label <em>potential</em>, indicating the reference polarity of the branch potential and the reference direction of the flow.</div>
+
+<p>The <em>reference direction</em> for a potential is indicated by the plus and minus symbols near each port. Given the chosen reference direction, the branch potential is positive whenever the potential of the port marked with a plus sign (<code>A</code>) is larger than the potential of the port marked with a minus sign (<code>B</code>). Similarly, the flow is positive whenever it moves in the direction of the arrow (in this case from <code>+</code> to <code>-</code>).</p>
+
+<p>Verilog-AMS HDL uses associated reference directions. A positive flow enters a branch through the port marked with the plus sign and exits the branch through the port marked with the minus sign.</p>
+
+<h3 id="s1-3-2">1.3.2 Kirchhoff&rsquo;s Laws</h3>
+
+<p>In formulating continuous system equations, Verilog-AMS HDL uses two sets of relationships. The first are the constitutive relationships which describe the behavior of each component. Constitutive relationships can be kept inside the simulator as built-in primitives or they can be provided by Verilog-AMS HDL module definitions.</p>
+
+<p>The second set of relationships, interconnection relationships, describe the structure of the network. Interconnection relationships, which contain information on how the components are connected to each other, are only a function of the system topology. They are independent of the nature of the components.</p>
+
+<p>A Verilog-AMS HDL simulator uses Kirchhoff&rsquo;s Laws to define the relationships between the nodes and the branches. Kirchhoff&rsquo;s Laws are typically associated with electrical circuits that relate voltages and currents. However, by generalizing the concepts of voltages and currents to potentials and flows, Kirchhoff&rsquo;s Laws can be used to formulate interconnection relationships for any type of system.</p>
+
+<p>Kirchhoff&rsquo;s Laws provide the following properties relating the quantities present on nodes and branches, as shown in Figure 1-3.</p>
+<ul>
+<li>Kirchhoff&rsquo;s Flow Law (KFL)<br>The algebraic sum of all flows out of a node at any instant is zero (<code>0</code>).</li>
+<li>Kirchhoff&rsquo;s Potential Law (KPL)<br>The algebraic sum of all the branch potentials around a loop at any instant is zero (<code>0</code>).</li>
+</ul>
+
+<p>These laws imply a node is infinitely small; so there is negligible difference in potential between any two points on the node and a negligible accumulation of flow.</p>
+
+<div class="note">Figure 1-3: Kirchhoff&rsquo;s Flow Law (KFL) and Potential Law (KPL) &mdash; The left half (KFL) shows three branches meeting at a single node, with flows <em>flow<sub>1</sub></em>, <em>flow<sub>2</sub></em>, and <em>flow<sub>3</sub></em> directed out of the node and each branch annotated with its potential polarity; the equation <em>flow<sub>1</sub> + flow<sub>2</sub> + flow<sub>3</sub> = 0</em> is given. The right half (KPL) shows four branches connected in a loop with potentials <em>potential<sub>1</sub></em> through <em>potential<sub>4</sub></em> and their polarity markings; the equation <em>-potential<sub>1</sub> - potential<sub>2</sub> + potential<sub>3</sub> + potential<sub>4</sub> = 0</em> is given.</div>
+
+<h3 id="s1-3-3">1.3.3 Natures, disciplines, and nets</h3>
+
+<p>Verilog-AMS HDL allows definition of nets based on disciplines. The disciplines associate potential and flow natures for conservative systems or either only potential or only flow nature for signal-flow systems. The natures are a collection of attributes, including user-defined attributes, which describes the units (meter, gram, newton, etc.), absolute tolerance for convergence, and the names of potential and flow access functions.</p>
+
+<p>The disciplines and natures can be shared by many nets. The compatibility rules help enforce the legal operations between nets of different disciplines.</p>
+
+<h3 id="s1-3-4">1.3.4 Signal-flow systems</h3>
+
+<p>A discipline may specify two nature bindings, <code>potential</code> and <code>flow</code>, or it may specify only a single binding, either <code>potential</code> or <code>flow</code>. Disciplines with two natures are know as <em>conservative disciplines</em> because nodes which are bound to them exhibit Kirchhoff&rsquo;s Flow Law, and thus, conserve charge (in the electrical case). A discipline with only a potential nature or only a flow nature is known as a <em>signal flow discipline</em>.</p>
+
+<p>As a result of port connections of analog nets, a single node may be bound to a number of nets of different disciplines. If a node is bound only to disciplines which have potential nature only, current contributions to that node are not legal. Flow for such a node is not defined. Conversely, if a node is bound only to disciplines which have flow nature only, potential contributions to that node are not legal. Potential for such a node is not defined.</p>
+
+<h4 id="s1-3-4-1">1.3.4.1 Potential signal-flow systems</h4>
+
+<p>Potential signal flow models may be written so potentials of module outputs are purely functions of potentials at the inputs without taking flow into account.</p>
+
+<p>The following example is a level shifting voltage follower:</p>
+
+<pre><code>module shiftPlus5(in, out);
+input in;
+output out;
+voltage in, out;  //voltage is a signal flow
+                  //discipline compatible with
+                  //electrical, but having a
+                  //potential nature only
+analog begin
+   V(out) &lt;+ 5.0 + V(in);
+end
+endmodule</code></pre>
+
+<p>If a number of such modules were cascaded in series, it would not be necessary to conserve charge (i.e., sum the flows) at any intervening node.</p>
+
+<p>If, on the other hand, the output of this device were bound to a node of a conservative discipline (e.g., <code>electrical</code>), then the output of the device would appear to be a controlled voltage source to ground at that node. In that case, the flow (i.e., current) through the source would contribute to charge conservation at the node. If the input of this device were bound to a node of a conservative discipline then the input would act as a voltage probe to ground. Thus, when a net of signal flow discipline with potential nature only is bound to a conservative node, contributions made to that net behave as voltage sources to ground.</p>
+
+<p>Nets of potential signal flow disciplines in modules may only be bound to <code>input</code> or <code>output</code> ports of the module, not to <code>inout</code> ports. In that case, potential contributions may not be made to <code>input</code> ports.</p>
+
+<h4 id="s1-3-4-2">1.3.4.2 Flow signal-flow systems</h4>
+
+<p>Flow signal-flow models may be written so flows of module outputs are purely functions of flows at the inputs without taking potential into account.</p>
+
+<p>The following example is a current mirror:</p>
+
+<pre><code>module currmir(in, out);
+   input in;
+   output out;
+   current in, out;  // current is a signal flow
+                     // discipline compatible with
+                     // electrical, but having a
+                     // flow nature only
+
+   analog begin
+      I(out) &lt;+ -I(in);
+   end
+endmodule</code></pre>
+
+<p>If a number of such modules were cascaded in series, it would not be necessary to conserve charge (i.e., sum the potentials) at any loop of branches.</p>
+
+<p>However, if the output of this device were bound to a node of a conservative discipline (e.g., electrical), then the output of the device would appear to be a controlled current source flowing out of that node. In that case, the potential (i.e., voltage) across the source would contribute to charge conservation at the node. If the input of this device were bound to a node of a conservative discipline then the input would act as a current probe inbound from that node. Thus, when a net of signal flow discipline with flow nature only is bound to a conservative node, contributions made to that net behave as current sources.</p>
+
+<p>Nets of flow signal-flow disciplines in modules may only be bound to input or output ports of the module, not to inout ports. Flow contributions may not be made to input ports in this case.</p>
+
+<h3 id="s1-3-5">1.3.5 Mixed conservative/signal flow systems</h3>
+
+<p>When practicing the top-down design style, it is extremely useful to mix conservative and signal-flow components in the same system. Users typically use signal-flow models early in the design cycle when the system is described in abstract terms, and gradually convert component models to conservative form as the design progresses. Thus, it is important to be able to initially describe a component using a signal-flow model, and later convert it to a conservative model, with minimum changes. It is also important to allow conservative and signal-flow components to be arbitrarily mixed in the same system.</p>
+
+<p>The approach taken is to write component descriptions using conservative semantics, except port and net declarations only require types for those values which are actually used in the description. Thus, signal-flow ports only require the type of either potential or flow to be specified, whereas conservative ports require types for both values (the potential and flow).</p>
+
+<p>For example, consider a differential voltage amplifier, a differential current amplifier, and a resistor. The amplifiers are written using signal-flow ports and the resistor uses conservative ports.</p>
+
+<pre><code>module voltage_amplifier (out, in);
+   input in;
+   output out;
+   voltage  out,      // Discipline voltage defined elsewhere
+            in;       // with access function V()
+   parameter real GAIN_V = 10.0;
+
+   analog
+      V(out) &lt;+ GAIN_V * V(in);
+
+endmodule</code></pre>
+
+<p>In this case, only the voltage on the ports are declared because only voltage is used in the body of the model.</p>
+
+<pre><code>module current_amplifier (out, in);
+   input in;
+   output out;
+   current  out,      // Discipline current defined elsewhere
+            in;       // with access function I()
+   parameter real GAIN_I = 10.0;
+
+   analog
+      I(out) &lt;+ GAIN_I * I(in);
+
+endmodule</code></pre>
+
+<p>Here, only current is used in the body of the model, so only current need be declared at the ports.</p>
+
+<pre><code>module resistor (a, b);
+   inout a, b;
+   electrical a, b;        // access functions are V() and I()
+   parameter real R = 1.0;
+
+   analog
+      V(a,b) &lt;+ R * I(a,b);
+
+endmodule</code></pre>
+
+<p>The description of the resistor relates both the voltage and current on the ports. Both are defined in the conservative discipline <code>electrical</code>.</p>
+
+<p>In summary, only those signals types declared on the ports are accessible in the body of the model. Conversely, only those signals types used in the body need be declared.</p>
+
+<p>This approach provides all of the power of the conservative formulation for both signal-flow and conservative ports, without forcing types to be declared for unused signals on signal-flow nets and ports. In this way, the first benefit of the traditional signal-flow formulation is provided without the restrictions.</p>
+
+<p>The second benefit, that of a smaller, more efficient set of equations to solve, is provided in a manner which is hidden from the user. The simulator begins by treating all ports as being conservative, which allows the connection of signal-flow and conservative ports. This results in additional unnecessary equations for those nodes which only have signal-flow ports. This situation can be recognized by the simulator and those equations eliminated.</p>
+
+<p>Thus, this approach to allowing mixed conservative/signal-flow descriptions provides the following benefits:</p>
+<ul>
+<li>Conservative components and signal-flow components can be freely mixed. In addition, signal-flow components can be converted to conservative components, and vice versa, by modifying only the component behavioral description.</li>
+<li>Many of the capabilities of conservative ports, such as the ability to access flow and the ability to access floating potentials, are available with signal-flow ports.</li>
+<li>Natures only have to be given for potentials and flows if they are accessed in a behavioral description.</li>
+<li>If nets and ports are used only in a structural description (only in instance statements), then no natures need be specified.</li>
+</ul>
+
+<h2 id="s1-4">1.4 Conventions used in this document</h2>
+
+<p>This document is organized into sections, each of which focuses on some specific area of the language. There are subsections within each section to discuss individual constructs and concepts. The discussion begins with an introduction and an optional rationale for the construct or the concept, followed by syntax and semantic description, followed by some examples and notes.</p>
+
+<p>The formal syntax of Verilog-AMS HDL is described using Backus-Naur Form (BNF). The following conventions are used:</p>
+<ol>
+<li>Lower case words, some containing embedded underscores, are used to denote syntactic categories. For example:
+<div class="syntax">module_declaration</div></li>
+<li>Boldface red characters denote reserved keywords, operators and punctuation marks as required part of the syntax. For example:
+<div class="syntax"><b>module  =  ;</b></div></li>
+<li>Blue characters are used to denote syntax productions that are Verilog-AMS extensions to IEEE Std 1364 Verilog syntax. For example:
+<div class="syntax">connectrules_declaration ::=
+   <b>connectrules</b> connectrules_identifier <b>;</b>
+     { connectrules_item }
+   <b>endconnectrules</b></div></li>
+<li>A vertical bar ( | ) that is not in boldface-red separates alternative items. For example:
+<div class="syntax">parameter_type ::= <b>integer</b> | <b>real</b> | <b>realtime</b> | <b>time</b> | <b>string</b></div></li>
+<li>Square brackets ( [ ] ) that are not in boldface-red enclose optional items. For example:
+<div class="syntax">name_of_module_instance ::= module_instance_identifier [ range ]</div></li>
+<li>Braces ( { } ) that are not in boldface-red enclose a repeated item. The item may appear zero or more times; the repetitions occur from left to right as with an equivalent left-recursive rule. Thus, the following two rules are equivalent:
+<div class="syntax">list_of_param_assignments ::= param_assignment { <b>,</b> param_assignment }
+list_of_param_assignments ::=
+   param_assignment
+ | list_of_param_assignments <b>,</b> param_assignment</div></li>
+</ol>
+
+<p>The main text uses italicized font when a <em>term</em> is being defined, and constant-width font for <code>examples</code>, <code>file names</code>, and while referring to <code>constants</code>. Reserved keywords in the main text and in examples are in a <code><b>constant-width bold</b></code> font.</p>
+
+<h2 id="s1-5">1.5 Contents</h2>
+
+<p>This document contains the following clauses and annexes:</p>
+
+<p><strong>1. Verilog-AMS introduction</strong><br>
+This clause gives the overview of analog modeling, defines basic concepts, and describes Kirchhoff&rsquo;s Potential and Flow Laws.</p>
+
+<p><strong>2. Lexical conventions</strong><br>
+This clause defines the lexical tokens used in Verilog-AMS HDL.</p>
+
+<p><strong>3. Data types</strong><br>
+This clause describes the data types: integer, real, parameter, nature, discipline, and net, used in Verilog-AMS HDL.</p>
+
+<p><strong>4. Expressions</strong><br>
+This clause describes expressions, mathematical functions, and time domain functions used in Verilog-AMS HDL.</p>
+
+<p><strong>5. Analog behavior</strong><br>
+This clause describes the basic analog block and procedural language constructs available in Verilog-AMS HDL for behavioral modeling.</p>
+
+<p><strong>6. Hierarchical structures</strong><br>
+This clause describes how to build hierarchical descriptions using Verilog-AMS HDL.</p>
+
+<p><strong>7. Mixed signal</strong><br>
+This clause describes the mixed-signal aspects of the Verilog-AMS HDL language.</p>
+
+<p><strong>8. Scheduling semantics</strong><br>
+This clause describes the basic simulation cycle as applicable to Verilog-AMS HDL.</p>
+
+<p><strong>9. System tasks and functions</strong><br>
+This clause describes the system tasks and functions in Verilog-AMS HDL.</p>
+
+<p><strong>10. Compiler directives</strong><br>
+This clause describes the compiler directives in Verilog-AMS HDL.</p>
+
+<p><strong>11. Using VPI routines</strong><br>
+This clause describes how the VPI routines are used.</p>
+
+<p><strong>12. VPI routine definitions</strong><br>
+This clause defines each of the VPI routines in alphabetical order.</p>
+
+<p><strong>A. (normative) Formal syntax definition</strong><br>
+This annex describes formal syntax for all Verilog-AMS HDL constructs in Backus-Naur Form (BNF).</p>
+
+<p><strong>B. (normative) List of keywords</strong><br>
+This annex lists all the words which are recognized in Verilog-AMS HDL as keywords.</p>
+
+<p><strong>C. (normative) Analog language subset</strong><br>
+This annex describes the analog subset of Verilog-AMS HDL.</p>
+
+<p><strong>D. (normative) Standard definitions</strong><br>
+This annex provides the definitions of several natures, disciplines, and constants which are useful for writing models in Verilog-AMS HDL.</p>
+
+<p><strong>E. (normative) SPICE compatibility</strong><br>
+This annex describes the Spice compatibility with Verilog-AMS HDL.</p>
+
+<p><strong>F. (normative) Discipline resolution methods</strong><br>
+This annex provides the semantics for two methods of resolving the discipline of undeclared interconnect.</p>
+
+<p><strong>G. (informative) Change history</strong><br>
+This annex provides a list of changes between various versions of the Verilog-AMS Language Reference Manual.</p>
+
+<p><strong>H. (informative) Glossary</strong><br>
+This annex describes various terms used in this document.</p>
+
+</body></html>

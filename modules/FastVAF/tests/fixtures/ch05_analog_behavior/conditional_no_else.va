@@ -1,0 +1,1 @@
+module ch5_if_no_else(p,c); inout p,c; electrical p,c; analog if(V(c)>0.0) I(p)<+1m; endmodule

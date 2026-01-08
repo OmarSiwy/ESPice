@@ -1,0 +1,56 @@
+{
+  "status": "compile_ok",
+  "module_name": "latch_en",
+  "input_count": 2,
+  "output_count": 1,
+  "is_sequential": false,
+  "ports": [
+    {
+      "name": "en",
+      "dir": "in",
+      "width": 1
+    },
+    {
+      "name": "d",
+      "dir": "in",
+      "width": 1
+    },
+    {
+      "name": "q",
+      "dir": "out",
+      "width": 1
+    }
+  ],
+  "vectors": [
+    {
+      "en": 0,
+      "d": 1,
+      "q": 0
+    },
+    {
+      "en": 1,
+      "d": 1,
+      "q": 1
+    },
+    {
+      "en": 0,
+      "d": 0,
+      "q": 1
+    },
+    {
+      "en": 0,
+      "d": 1,
+      "q": 1
+    },
+    {
+      "en": 1,
+      "d": 0,
+      "q": 0
+    },
+    {
+      "en": 0,
+      "d": 1,
+      "q": 0
+    }
+  ]
+}

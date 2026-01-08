@@ -1,0 +1,5 @@
+// NONCONFORMING ACCEPTANCE SNAPSHOT: $driver_state is connectmodule-only.
+module ch09_atomic_driver_state(p, n);
+  inout p, n; electrical p, n;
+  analog I(p,n) <+ V(p,n) + $driver_state(p,0);
+endmodule

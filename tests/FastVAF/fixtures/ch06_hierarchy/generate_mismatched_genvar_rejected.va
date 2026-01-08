@@ -1,0 +1,8 @@
+// EXPECT: error -- LRM 6.6.1 requires the same genvar in the loop init,
+// condition and step; this uses `i` in the init and `j` in the step.
+module ch6_generate_mismatched_genvar(p);
+  inout p; electrical p; genvar i, j;
+  generate
+    for (i = 0; i < 2; j = j + 1) I(p) <+ i * V(p);
+  endgenerate
+endmodule

@@ -1,0 +1,36 @@
+// §5.7 the case statement, including `default`. Like `if` it becomes a select
+// over places, so what is checked is that exactly one arm's effect survives.
+//
+//! print none
+`include "check.vh"
+module ex103_case(p, n);
+  inout p, n;
+  electrical p, n;
+  parameter integer mode = 2 from [0:3];
+  real y;
+  integer j;
+  analog begin
+    case (mode)
+      0: y = 10.0;
+      1: y = 20.0;
+      2: y = 30.0;
+      default: y = -1.0;
+    endcase
+    `CHECKX("case picks the matching arm", y, 30.0);
+
+    j = 7;
+    case (j)
+      0, 1, 2: y = 1.0;
+      default: y = 2.0;
+    endcase
+    `CHECKX("case falls to default", y, 2.0);
+
+    j = 1;
+    case (j)
+      0, 1, 2: y = 1.0;
+      default: y = 2.0;
+    endcase
+    `CHECKX("a multi-label arm matches any of its labels", y, 1.0);
+    I(p, n) <+ 0.0;
+  end
+endmodule

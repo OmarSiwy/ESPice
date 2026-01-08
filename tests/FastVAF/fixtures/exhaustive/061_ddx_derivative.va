@@ -1,0 +1,23 @@
+// §4.5.14 ddx(f, V(node)) — the symbolic partial derivative of an expression
+// with respect to an unknown, available to the MODEL rather than only to the
+// solver. Checked against the derivative worked out by hand.
+//
+//! bias V(n) = 0
+//! sweep V(p) = 0.5, 2
+`include "check.vh"
+module ex061_ddx(p, n);
+  inout p, n;
+  electrical p, n;
+  parameter real g = 3.0;
+  analog begin
+    // d/dV(p) of g*V(p,n) is g.
+    `CHECK("ddx of a linear term", ddx(g * V(p, n), V(p)), 3.0, 1e-15);
+    // d/dV(p) of V(p,n)^2 is 2*V(p,n).
+    `CHECK("ddx of a square", ddx(V(p, n) * V(p, n), V(p)), 2.0 * V(p, n), 1e-15);
+    // d/dV(n) of the same is -2*V(p,n): the branch is p MINUS n.
+    `CHECK("ddx wrt the other node", ddx(V(p, n) * V(p, n), V(n)), -2.0 * V(p, n), 1e-15);
+    // A term that does not depend on the node has zero partial.
+    `CHECK("ddx of a constant", ddx(g, V(p)), 0.0, 0.0);
+    I(p, n) <+ g * V(p, n);
+  end
+endmodule

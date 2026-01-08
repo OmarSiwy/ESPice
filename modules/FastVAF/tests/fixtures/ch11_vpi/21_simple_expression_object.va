@@ -1,0 +1,5 @@
+module ch11_simple_expression_object(p, n);
+  inout p, n; electrical p, n;
+  parameter real gain = 2.0;
+  analog I(p,n) <+ (gain + 1.0) * V(p,n);
+endmodule

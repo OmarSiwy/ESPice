@@ -1,0 +1,19 @@
+// §3.12 a named branch. `branch (a,b) br;` gives the (a,b) node pair a name;
+// contributing through it must produce the same topology as contributing to the
+// pair directly, which the residual and its Jacobian show.
+//
+//! param g = 4m
+//! bias V(b) = 0.25
+//! sweep V(a) = 0, 1
+`include "check.vh"
+module ex086_named_branch(a, b);
+  inout a, b;
+  electrical a, b;
+  parameter real g = 1m;
+  branch (a, b) br;
+  analog begin
+    `CHECK("branch probe equals the node pair", V(br), V(a, b), 0.0);
+    `CHECK("branch current", g * V(br), 4e-3 * V(a, b), 1e-18);
+    I(br) <+ g * V(br);
+  end
+endmodule

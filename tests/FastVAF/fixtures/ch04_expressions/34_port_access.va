@@ -1,0 +1,6 @@
+module ch04_port_access(p);
+    inout p;
+    electrical p;
+
+    analog I(p) <+ I(<p>);
+endmodule

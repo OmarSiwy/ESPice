@@ -1,0 +1,41 @@
+=== 085_conditional_contribution ===
+--- point 0 ---
+  x[p] = 0.000000e0
+  x[n] = 0.000000e0
+above threshold? got=0 want=0 ok=1
+  res[p] = 0.000000e0
+    d res[p]/d x[p] = 1.000000e-9
+    d res[p]/d x[n] = -1.000000e-9
+  res[n] = 0.000000e0
+    d res[n]/d x[p] = -1.000000e-9
+    d res[n]/d x[n] = 1.000000e-9
+--- point 1 ---
+  x[p] = 4.000000e-1
+  x[n] = 0.000000e0
+above threshold? got=0 want=0 ok=1
+  res[p] = 4.000000e-10
+    d res[p]/d x[p] = 1.000000e-9
+    d res[p]/d x[n] = -1.000000e-9
+  res[n] = -4.000000e-10
+    d res[n]/d x[p] = -1.000000e-9
+    d res[n]/d x[n] = 1.000000e-9
+--- point 2 ---
+  x[p] = 6.000000e-1
+  x[n] = 0.000000e0
+above threshold? got=1 want=1 ok=1
+  res[p] = 6.000000e-4
+    d res[p]/d x[p] = 1.000000e-3
+    d res[p]/d x[n] = -1.000000e-3
+  res[n] = -6.000000e-4
+    d res[n]/d x[p] = -1.000000e-3
+    d res[n]/d x[n] = 1.000000e-3
+--- point 3 ---
+  x[p] = 1.000000e0
+  x[n] = 0.000000e0
+above threshold? got=1 want=1 ok=1
+  res[p] = 1.000000e-3
+    d res[p]/d x[p] = 1.000000e-3
+    d res[p]/d x[n] = -1.000000e-3
+  res[n] = -1.000000e-3
+    d res[n]/d x[p] = -1.000000e-3
+    d res[n]/d x[n] = 1.000000e-3

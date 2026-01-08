@@ -1,0 +1,10 @@
+module ch03_genvar(p, n);
+    inout p, n;
+    electrical p, n;
+    genvar index;
+
+    analog begin
+        for (index = 0; index < 3; index = index + 1)
+            I(p, n) <+ index * V(p, n);
+    end
+endmodule

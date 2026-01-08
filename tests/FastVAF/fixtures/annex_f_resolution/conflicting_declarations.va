@@ -1,0 +1,9 @@
+// Conflicting in-context declarations are forbidden; this snapshot exposes
+// FastVAF's missing conflict diagnostic without relying on malformed syntax.
+discipline annex_f_a; domain continuous; enddiscipline
+discipline annex_f_b; domain continuous; enddiscipline
+module annex_f_conflict(sig);
+  inout sig;
+  annex_f_a sig;
+  annex_f_b sig;
+endmodule

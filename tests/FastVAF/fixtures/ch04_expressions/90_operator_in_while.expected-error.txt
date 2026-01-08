@@ -1,0 +1,7 @@
+# §5.9 "The following restrictions are applied to looping statements (repeat,
+# while and for) except for analog_for statements: - Analog filter functions are
+# not allowed". No analysis_or_constant carve-out here, unlike §5.8.1 — and an
+# event body is conditionally executed by definition.
+#
+# This fixture used to assert the opposite — that the illegal form COMPILES.
+E0514

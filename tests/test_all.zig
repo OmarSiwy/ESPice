@@ -16,10 +16,22 @@ const td = @import("testdev.zig");
 const k_boltzmann = 1.380649e-23;
 
 test {
+    _ = @import("builder"); // src_new/builder.zig's own netlist-binding tests
     _ = @import("builder.zig");
     _ = @import("analyses.zig");
     _ = @import("parallel.zig");
     _ = @import("leak.zig");
+
+    // Verilog conformance: generated devices compiled against the real contract
+    // and driven with golden vectors. Skips itself when verilator is off PATH.
+    _ = @import("FastVF/test_all.zig");
+
+    // The module suites (analysis, devices, solvers, fastvaf, fastvf) are NOT
+    // reachable from here. `zig test` collects tests only from the root module's
+    // own file set — `_ = @import("analysis")` crosses a MODULE boundary, so its
+    // tests are silently dropped. Measured: importing all five added ZERO tests,
+    // which is exactly how a green suite hides a whole engine going untested.
+    // Each module gets its own addTest root in build.zig instead.
 }
 
 // ---------------------------------------------------------------------------

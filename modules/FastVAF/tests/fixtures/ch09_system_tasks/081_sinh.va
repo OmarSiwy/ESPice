@@ -1,0 +1,5 @@
+module ch09_atomic_sinh(p, n);
+  inout p, n; electrical p, n;
+  analog I(p,n) <+ V(p,n) + $sinh(V(p,n));
+endmodule
+

@@ -2,7 +2,6 @@ const std = @import("std");
 
 const contract = @import("contract.zig");
 const circuit_mod = @import("Circuit.zig");
-pub const gpu_abi = @import("gpu_abi");
 
 // -- Crate imports --
 pub const solvers = @import("solvers");
@@ -33,10 +32,6 @@ pub const ParamRef = devices.batch.ParamRef;
 pub const NoiseSource = devices.batch.NoiseSource;
 pub const NoiseGenKind = devices.batch.NoiseGenKind;
 pub const NoiseGen = devices.batch.NoiseGen;
-pub const GpuProblem = circuit_mod.GpuProblem;
-pub const TranPack = circuit_mod.TranPack;
-pub const packForGpu = circuit_mod.packForGpu;
-pub const gpuEligible = circuit_mod.gpuEligible;
 /// Builder freeze: protos -> analysis.Circuit (union pattern + planes + tapes).
 pub const freeze = circuit_mod.init;
 

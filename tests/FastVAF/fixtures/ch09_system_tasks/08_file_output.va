@@ -1,0 +1,13 @@
+module ch09_file_output(p, n);
+  inout p, n; electrical p, n;
+  integer fd;
+  analog begin
+    fd = $fopen("fixture.log", "a");
+    $fdisplay(fd, "display %g", V(p,n));
+    $fwrite(fd, "write %g", V(p,n));
+    $fstrobe(fd, "strobe %g", V(p,n));
+    $fmonitor(fd, "monitor %g", V(p,n));
+    $fdebug(fd, "debug %g", V(p,n));
+    I(p,n) <+ V(p,n);
+  end
+endmodule

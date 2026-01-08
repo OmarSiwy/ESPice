@@ -1,6 +1,7 @@
 const std = @import("std");
 const engine = @import("engine.zig");
 const vaload = @import("devices").vaload;
+const build_options = @import("build_options");
 const rawfile = @import("output/rawfile.zig");
 const ascii_raw = @import("output/ascii_raw.zig");
 const csv = @import("output/csv.zig");
@@ -168,7 +169,17 @@ pub fn main(init: std.process.Init) !u8 {
                 },
                 else => {},
             };
-            vaload.ensureAllLoaded(arena, io, hdl_paths.items) catch |e| {
+            // Source-tree paths for the runtime .so build. The devices package
+            // has no `build_options`, and these must be the SAME roots the
+            // builtins were compiled against — the orchestrator hashes them into
+            // `layout_hash`, which is what rejects a stale cached .so.
+            const src_root = build_options.src_root;
+            const hdl_build_paths: vaload.BuildPaths = .{
+                .work_dir = try std.fs.path.join(arena, &.{ src_root, ".zig-cache", "zpicey-hdl" }),
+                .contract = try std.fs.path.join(arena, &.{ src_root, "modules", "devices", "src", "contract.zig" }),
+                .dyn = try std.fs.path.join(arena, &.{ src_root, "modules", "devices", "src", "engine.zig" }),
+            };
+            vaload.ensureAllLoaded(arena, io, hdl_paths.items, hdl_build_paths) catch |e| {
                 std.debug.print("Error: runtime HDL load failed: {s}\n", .{@errorName(e)});
                 return skip(io, "hdl load error");
             };

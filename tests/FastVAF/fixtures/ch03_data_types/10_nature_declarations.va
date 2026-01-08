@@ -1,0 +1,16 @@
+nature ch03_voltage;
+    units = "V";
+    access = V;
+    abstol = 1u;
+endnature
+
+nature ch03_high_voltage : ch03_voltage;
+    abstol = 1m;
+    maxval = 12.3;
+endnature
+
+module ch03_nature_declarations(p, n);
+    inout p, n;
+    electrical p, n;
+    analog I(p, n) <+ V(p, n);
+endmodule

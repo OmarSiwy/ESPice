@@ -1,0 +1,5 @@
+// EXPECT: error -- nonblocking updates need region 3.
+module ch8_nonblocking;
+  integer source, target;
+  always @(source) target <= source;
+endmodule

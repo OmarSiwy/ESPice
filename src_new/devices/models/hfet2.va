@@ -1,0 +1,312 @@
+// ngspice Z element, LEVEL=6 — HFET2, the "simplified" heterostructure FET
+// (Berkeley SPICE3f5 / ngspice `hfeta2`, hfet2/hfet2load.c).  inpdomod.c maps
+// nhfet/phfet LEVEL 1 -> MES, 2/3/4 -> MESA, 5 -> HFET1, 6 -> HFET2, so this
+// device is LEVEL=6; LEVEL=2 on a .model card selects MESA instead.
+//
+// Spec: docs/jfet-mesfet-hfet.md §1.4 (structural: "HEMT-class charge-control
+// channel, DIBL, velocity saturation, two Schottky diodes, W-D gate charge")
+// and §3 (the fet_eval chain: bias -> gate diodes -> mode select -> channel ->
+// gate charges -> stamps).  §1.4 leaves the algebra un-transcribed, so the
+// normative equations here are the in-tree line-audit of hfet2load.c that the
+// doc names as the next step; same source and same order as the sibling
+// models/hfet1.va, which shares this skeleton with fewer fitting parameters.
+//
+// HFET2 vs HFET1 (the "simplified variant, same skeleton" of §1.4):
+//   * gate leakage is ONE exponential + GGR term per side (js/n/del) instead of
+//     HFET1's dual exponential (js1s/js2s/m1s/m2s),
+//   * sheet density is the log charge-control form nsn = 2*N0*ln(1+b/2), with
+//     an OPTIONAL second (delta-doped) layer harmonically combined,
+//     ns = nsn*nsc/(nsn+nsc).  hfeta2() takes that branch only when the card
+//     gives BOTH eta2 and d2 (`if(HFET2eta2Given && HFET2d2Given)`), and
+//     hfet2temp.c computes N02 only `if(HFET2eta2Given)`; the setup defaults
+//     D2=0.2e-6/ETA2=2 are fallbacks that do NOT enable the layer.  Both
+//     default to 0 here so "given" == "> 0" and the layer is off by default.
+//   * subthreshold smoothing is the Vt-scaled hyperbola Vgte = Vt(2+u+t),
+//   * RD/RS are real series parasitics on internal nodes dp/sp (RDI/RSI stay
+//     folded into the channel conductance as in HFET1).
+//
+// Topology (hfet2load.c): D--RD--dp, S--RS--sp, Schottky diodes g--dp and
+// g--sp, channel dp--sp with the inverse-mode sign flip + cap swap on
+// sign(vds).  Newton limiting is the solver's job, but HFET2 does NOT use the
+// family-common order of doc §1.5: hfet2load.c runs DEVpnjlim(vgs)/DEVpnjlim(vgd)
+// with vt0 = CONSTvt0 and VCRIT = vt*log(vt/(sqrt2*1e-11)) FIRST, then
+// DEVfetlim(vgs,TVTO)/DEVfetlim(vgd,TVTO), and has NO limvds; MODEINITJCT
+// seeds vgs = vgd = -1 when off == 0, else 0.  The pnjlim leg is declared
+// below with $limit; the fetlim(TVTO) leg that follows it is recorded here
+// because $limit's first argument must be an access function, so the two
+// cannot be chained in one expression.
+module hfet2(d, g, s);
+    inout d, g, s;
+    electrical d, g, s;
+    electrical dp, sp;                            // channel ends, behind RD/RS
+    branch (d, dp) brd;
+    branch (s, sp) brs;
+
+    // +1 = NHFET, -1 = PHFET.  ngspice carries the polarity in the .model
+    // *name* (nhfet/phfet), not as a card parameter; a VA module needs a knob.
+    parameter integer type_nfet = 1 from [-1:1] exclude 0;
+
+    // --- geometry / ambient ---
+    parameter real w     = 20e-6  from (0:inf);   // gate width [m]
+    parameter real l     = 1e-6   from (0:inf);   // gate length [m]
+    parameter real temp  = 300.15 from (0:inf);   // instance temperature [K]
+    parameter real dtemp = 0.0;                   // temperature offset [K]
+    parameter real tnom  = 300.15 from (0:inf);   // nominal temperature [K]
+
+    // --- DC channel.  vto/eta/mu/vs defaults are per-polarity in
+    // hfet2setup.c (NHFET / PHFET); the signed vto_t = type_nfet*vto below is
+    // ngspice's TVTO = TYPE*VTO, so the PHFET default must itself be negative.
+    parameter real vto     = (type_nfet > 0) ?  0.15 : -0.15; // threshold [V]
+    parameter real lambda  = 0.15;                // output conductance (CLM) [1/V]
+    parameter real mu      = ((type_nfet > 0) ? 0.4 : 0.03) from (0:inf); // low-field mobility [m^2/Vs]
+    parameter real nmax    = 2e16   from (0:inf); // max sheet charge density [1/m^2]
+    parameter real eta     = ((type_nfet > 0) ? 1.28 : 1.4) from (0:inf); // subthreshold ideality
+    parameter real vs      = ((type_nfet > 0) ? 1.5e5 : 0.8e5) from (0:inf); // saturation velocity [m/s]
+    parameter real sigma0  = 0.057;               // DIBL coefficient
+    parameter real vsigma  = 0.1    from (0:inf); // DIBL transition width [V]
+    parameter real vsigmat = 0.3;                 // DIBL transition centre [V]
+    parameter real gamma   = 3.0    from (0:inf); // charge-saturation exponent
+    parameter real m       = 3.0    from (0:inf); // drain knee shape
+    parameter real mc      = 3.0    from (0:inf); // capacitance knee shape
+    parameter real delta   = 3.0;                 // subthreshold smoothing width
+    parameter real n       = 5.0    from (0:inf); // gate diode ideality
+    parameter real p       = 1.0;                 // Cgs/Cgd partition exponent
+    parameter real del     = 0.04;                // gate reverse-bias decay
+
+    // --- parasitics & junction ---
+    parameter real rd  = 0.0 from [0:inf);        // drain ohmic resistance [ohm]
+    parameter real rs  = 0.0 from [0:inf);        // source ohmic resistance [ohm]
+    parameter real rdi = 0.0 from [0:inf);        // internal drain resistance [ohm]
+    parameter real rsi = 0.0 from [0:inf);        // internal source resistance [ohm]
+    parameter real js  = 0.0 from [0:inf);        // gate sat current density [A/m^2]
+    parameter real ggr = 0.0 from [0:inf);        // gate reverse conductance [S/m^2]
+
+    // --- capacitance ---
+    parameter real cf     = 0.0       from [0:inf); // fringing capacitance [F]
+    parameter real d1     = 3e-8      from (0:inf); // first cap layer thickness [m]
+    parameter real d2     = 0.0       from [0:inf); // second layer thickness, 0 = off [m]
+    parameter real di     = 4e-8      from (0:inf); // intrinsic channel depth [m]
+    parameter real deltad = 4.5e-9    from [0:inf); // correction to di [m]
+    parameter real epsi   = 12.244 * 8.85418e-12 from (0:inf); // insulator permittivity [F/m]
+    parameter real eta1   = 2.0       from (0:inf); // first-layer cap ideality
+    parameter real eta2   = 0.0       from [0:inf); // second-layer cap ideality, 0 = off
+    // hfet2temp.c derived defaults: VT1 = VTO + q*NMAX*DI/EPSI (raw signed
+    // VTO, untempered NMAX), VT2 = VTO.  Both stay overridable; the all-default
+    // NHFET card reproduces the old hardcoded 1.3323 / 0.15.
+    parameter real vt1 = vto + 1.602176634e-19 * nmax * di / epsi; // Cg1 transition [V]
+    parameter real vt2 = vto;                       // second-layer threshold [V]
+
+    // --- temperature coefficients ---
+    parameter real kvto    = 0.0;                 // dVto/dT   [V/K]
+    parameter real klambda = 0.0;                 // dlambda/dT [1/VK]
+    parameter real kmu     = 0.0;                 // dmu/dT    [m^2/VsK]
+    parameter real knmax   = 0.0;                 // dNmax/dT  [1/m^2K]
+
+    parameter real gmin = 1e-12 from [0:inf);     // dp--sp convergence shunt
+
+    // ngspice instance parameter M (hfet2defs.h HFET2m, default 1): multiplies
+    // every RHS entry and Y stamp in HFET2load.  hfet2 has no AREA.
+    parameter real mult = 1.0 from (0:inf);       // device multiplicity
+
+    // bias-independent prep
+    real tdev, dtn, vth, vto_t, lambda_t, mu_t, nmax_t;
+    real n0, n02, gchi0, imax, jslw, ggrlw, vl, vtn, wl, rt, vcrit;
+    integer two_layer;
+    real eta_vth, eta2_vth, eta1_vth, d1_epsi, delta2, invgamma, invm, invmc;
+    // bias-dependent
+    real vgsr, vgdr, vdsr, vds, vgs, mode;
+    real igs, igd;
+    real sigma, vgt0, vgt, uu, tt, vgte, xb, bb, nsn, nsc, nsm, nsms;
+    real cc, ns, gchi, gch, gchim, hh, pv, isatm, gclamp, isat, vsate;
+    real dd, ee, idrain, ids;
+    real dns_dnsm, dnsm_base, dnsm_dvgt, sexp, dvgt_dvgs;
+    real cg1, cgc, vdse, tv, alpha_gs, alpha_gd, pcap, cgsc, cgdc;
+    real cgse, cgde;
+
+    analog begin
+        // ---- bias-independent prep: temperature, geometry, junction area
+        // scaling.  No V() below this line, so none of it enters the
+        // derivative chains (doc §2 spine; hfet2temp.c does it once per temp).
+        tdev     = temp + dtemp;
+        dtn      = tdev - tnom;
+        vth      = 1.380649e-23 * tdev / 1.602176634e-19;
+        vto_t    = type_nfet * vto - kvto * dtn;
+        lambda_t = lambda + klambda * dtn;
+        mu_t     = mu - kmu * dtn;
+        nmax_t   = nmax - knmax * dtn;
+
+        eta_vth  = eta * vth;
+        eta2_vth = eta2 * vth;
+        eta1_vth = eta1 * vth;
+        d1_epsi  = d1 / epsi;
+        delta2   = delta * delta;
+        invgamma = 1.0 / gamma;
+        invm     = 1.0 / m;
+        invmc    = 1.0 / mc;
+
+        wl    = w * l;
+        rt    = rsi + rdi;
+        // 2DEG charge-control constants: N0 from the intrinsic depth, N02 from
+        // the delta-doped second layer.  That layer is enabled only when the
+        // card gives BOTH d2 and eta2, mirroring hfeta2()'s
+        // `if(eta2Given && d2Given)`; the same flag gates n02, nsm and
+        // dnsm_dvgt so the three sites cannot disagree.
+        two_layer = (d2 > 0.0) && (eta2 > 0.0);
+        n0    = epsi * eta_vth / (2.0 * 1.602176634e-19 * (di + deltad));
+        if (two_layer)
+            n02 = epsi * eta2_vth / (2.0 * 1.602176634e-19 * d2);
+        else
+            n02 = 0.0;
+        gchi0 = 1.602176634e-19 * w * mu_t / l;
+        imax  = 1.602176634e-19 * w * vs * nmax_t;
+        jslw  = js  * wl / 2.0;
+        ggrlw = ggr * wl / 2.0;
+        vl    = (vs / mu_t) * l;
+        vtn   = n * vth;
+
+        // ---- bias, polarity-normalised so all the math below is NHFET.  The
+        // gate probes carry HFET2's own pnjlim leg (hfet2temp.c VCRIT), applied
+        // to the forward-conducting orientation of each Schottky diode; the
+        // fetlim(TVTO) pass that follows it in hfet2load.c is documented in the
+        // header (no limvds for this device).
+        vcrit = vth * ln(vth / (1.4142135623730951 * 1e-11));
+        if (type_nfet > 0) begin
+            vgsr = $limit(V(g, sp), "pnjlim", vth, vcrit);
+            vgdr = $limit(V(g, dp), "pnjlim", vth, vcrit);
+        end else begin
+            vgsr = $limit(V(sp, g), "pnjlim", vth, vcrit);
+            vgdr = $limit(V(dp, g), "pnjlim", vth, vcrit);
+        end
+        vdsr = vgsr - vgdr;
+        vds  = max(abs(vdsr), 1e-30);
+
+        // ---- Schottky gate diodes, both sides, on the *raw* (pre-swap)
+        // biases: forward exponential + GGR reverse-leakage term.  hfeta2()
+        // leaves these exps unguarded (it relies on pnjlim/fetlim); the min at
+        // 80 here is only an overflow ceiling of ours, well past the bias range
+        // the limiter admits.
+        igs = jslw * (exp(min(vgsr / vtn, 80.0)) - 1.0)
+            + ggrlw * vgsr * exp(min(-vgsr * del / vth, 80.0));
+        igd = jslw * (exp(min(vgdr / vtn, 80.0)) - 1.0)
+            + ggrlw * vgdr * exp(min(-vgdr * del / vth, 80.0));
+
+        // ---- mode select on sign(vds).  hfet2load.c negates vds BEFORE the
+        // ternary (`if(vds<0){vds=-vds;inverse=1;} ... hfeta2(...,vds>0?vgs:vgd,...)`),
+        // so the argument is always vgs: HFET2 evaluates the channel and both
+        // caps with vgs even in inverse mode and only flips cdrain's sign and
+        // swaps capgs/capgd.  Doc §3's generic `vx = m>0 ? vgs : vgd` swap is
+        // the family default, not this device (§1.4 defers to the line audit).
+        mode = (vdsr < 0.0) ? -1.0 : 1.0;
+        vgs  = vgsr;
+
+        // ---- DIBL-shifted overdrive ----
+        sigma = sigma0 / (1.0 + exp(min((vgs - vto_t - vsigmat) / vsigma, 80.0)));
+        vgt0  = vgs - vto_t;
+        vgt   = vgt0 + sigma * vds;
+
+        // ---- subthreshold smoothing (soft turn-on), Vt-scaled hyperbola ----
+        uu   = vgt / (2.0 * vth) - 1.0;
+        tt   = sqrt(delta2 + uu * uu);
+        vgte = vth * (2.0 + uu + tt);
+
+        // ---- two-layer sheet charge density.  nsn is the log charge-control
+        // form, nsc the second (delta-doped) layer; the harmonic combination
+        // degenerates to nsn when the second layer is disabled.
+        // bb itself is only ever used as 1/bb below, so the overflow ceiling is
+        // harmless there; nsn must NOT freeze at the ceiling (that would be a
+        // false hard saturation with gm -> 0 above vgt = 80*eta*vth), so past
+        // the ceiling it takes the exact asymptote ln(1+e^x/2) -> x - ln2.
+        xb  = vgt / eta_vth;
+        bb  = exp(min(xb, 80.0));
+        if (xb > 80.0)
+            nsn = 2.0 * n0 * (xb - 0.6931471805599453);
+        else
+            nsn = 2.0 * n0 * ln(1.0 + 0.5 * bb);
+        if (two_layer) begin
+            nsc = n02 * exp(min((vgt + vto_t - vt2) / eta2_vth, 80.0));
+            nsm = nsn * nsc / (nsn + nsc);
+        end else begin
+            nsc = 0.0;
+            nsm = nsn;
+        end
+        nsms = sqrt(nsm * nsm + 1e-76);           // safe floor, keeps d/dv finite
+
+        // ---- charge saturation: soft clamp of nsm at Nmax ----
+        cc = pow(nsms / nmax_t, gamma);
+        ns = nsms / pow(1.0 + cc, invgamma);
+
+        // ---- channel conductance, internal access resistances folded in ----
+        gchi  = gchi0 * ns;
+        gch   = gchi / (1.0 + gchi * rt);
+        gchim = gchi0 * nsms;
+
+        // ---- velocity-saturation-limited current, soft-clamped at Imax ----
+        hh     = sqrt(1.0 + 2.0 * gchim * rsi + vgte * vgte / (vl * vl));
+        pv     = 1.0 + gchim * rsi + hh;
+        isatm  = gchim * vgte / pv;
+        gclamp = pow(isatm / imax, gamma);
+        isat   = isatm / pow(1.0 + gclamp, invgamma);
+        vsate  = isat / max(gch, 1e-38);
+
+        // ---- drain current: knee smoothing + CLM ----
+        dd     = pow(vds / max(vsate, 1e-30), m);
+        ee     = pow(1.0 + dd, invm);
+        idrain = gch * vds * (1.0 + lambda_t * vds) / ee;
+        ids    = type_nfet * mode * idrain;
+
+        // ---- gate charge.  Cgc is the intrinsic channel capacitance built
+        // from the analytic chain dns/dnsm * dnsm/dvgt * dvgt/dvgs plus the
+        // first-layer barrier cap Cg1; the two alphas are the Ward-Dutton
+        // partition on the knee-shaped Vds.
+        dns_dnsm  = (ns / nsms) * (1.0 - cc / (1.0 + cc));
+        dnsm_base = (n0 / eta_vth) / (1.0 / bb + 0.5);
+        if (two_layer)
+            dnsm_dvgt = nsc * (nsc * dnsm_base + nsn * nsn / eta2_vth)
+                      / ((nsc + nsn) * (nsc + nsn));
+        else
+            dnsm_dvgt = dnsm_base;
+
+        sexp      = exp(min((vgt0 - vsigmat) / vsigma, 80.0));
+        dvgt_dvgs = 1.0 - vds * (sigma0 / vsigma) * sexp / ((1.0 + sexp) * (1.0 + sexp));
+
+        cg1 = 1.0 / (d1_epsi + eta1_vth * exp(min(-(vgs - vt1) / eta1_vth, 80.0)));
+        cgc = wl * (1.602176634e-19 * dns_dnsm * dnsm_dvgt * dvgt_dvgs + cg1);
+
+        vdse     = vds / pow(1.0 + pow(vds / max(vsate, 1e-30), mc), invmc);
+        tv       = 2.0 * vsate - vdse + 1e-30;
+        alpha_gs = ((vsate - vdse) / tv) * ((vsate - vdse) / tv);
+        alpha_gd = (vsate / tv) * (vsate / tv);
+        pcap     = p + (1.0 - p) * exp(min(-vds / max(vsate, 1e-30), 80.0));
+        cgsc     = cf + (4.0 / 3.0) * cgc * (1.0 - alpha_gs) / (1.0 + pcap);
+        cgdc     = cf + (4.0 / 3.0) * pcap * cgc * (1.0 - alpha_gd) / (1.0 + pcap);
+
+        // capacitances follow the same source/drain reversal as the current
+        if (vdsr < 0.0) begin
+            cgse = cgdc;
+            cgde = cgsc;
+        end else begin
+            cgse = cgsc;
+            cgde = cgdc;
+        end
+
+        // ---- stamps, all scaled by mult (HFET2load applies `m *` to every RHS
+        // entry and Y stamp).  Gate diodes + gate charges on g--sp / g--dp
+        // (charges on the *unsigned* terminal voltages, per the charge-stamp
+        // section), the channel plus the gmin shunt on dp--sp.
+        //
+        // cgse/cgde sit OUTSIDE ddt: hfet2load.c integrates the capacitance
+        // incrementally, qgs = qgs_prev + capgs*(vgs-vgs1), and stores capgs/capgd
+        // as the small-signal caps, so the effective capacitance is exactly
+        // capgs/capgd.  ddt(cgse*V()) would add a spurious V*dC/dV term, and
+        // these caps are strongly bias-dependent (cgc, cg1, vsate, vdse, pcap).
+        I(g, sp)  <+ mult * (type_nfet * igs) + mult * cgse * ddt(V(g, sp));
+        I(g, dp)  <+ mult * (type_nfet * igd) + mult * cgde * ddt(V(g, dp));
+        I(dp, sp) <+ mult * (ids + gmin * V(dp, sp));
+
+        // ---- series RD/RS.  rd = 0 is ngspice's node collapse (HFETAsetup
+        // uses a 1e12 S conductance); the VA equivalent is a switch branch,
+        // which the frontend lowers to a real short.
+        if (rd > 0.0) I(brd) <+ mult * V(brd) / rd; else V(brd) <+ 0.0;
+        if (rs > 0.0) I(brs) <+ mult * V(brs) / rs; else V(brs) <+ 0.0;
+    end
+endmodule

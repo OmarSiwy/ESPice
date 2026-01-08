@@ -1,0 +1,10 @@
+module ch11_variable_objects(p, n);
+  inout p, n; electrical p, n;
+  integer count;
+  real value;
+  analog begin
+    count = 2;
+    value = count * V(p,n);
+    I(p,n) <+ value;
+  end
+endmodule

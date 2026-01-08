@@ -1,0 +1,8 @@
+module ch03_local_parameter(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real base_gain = 2.0;
+    localparam real doubled_gain = 2.0 * base_gain;
+
+    analog I(p, n) <+ doubled_gain * V(p, n);
+endmodule

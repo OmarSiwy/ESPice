@@ -1,0 +1,4 @@
+module ch6_definition;
+  electrical p;
+  analog I(p) <+ V(p);
+endmodule

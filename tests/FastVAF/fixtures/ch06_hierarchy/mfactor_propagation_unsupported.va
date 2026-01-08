@@ -1,0 +1,5 @@
+// EXPECT: error -- inherited $mfactor propagation requires module elaboration.
+module ch6_mfactor_propagation_parent(p);
+  inout p; electrical p;
+  ch6_child u(p);
+endmodule

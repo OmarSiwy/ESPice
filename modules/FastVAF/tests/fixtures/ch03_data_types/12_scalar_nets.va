@@ -1,0 +1,11 @@
+module ch03_scalar_nets(p, n);
+    inout p, n;
+    electrical p, n;
+    electrical internal_a, internal_b;
+
+    analog begin
+        I(p, internal_a) <+ V(p, internal_a);
+        I(internal_a, internal_b) <+ 2.0 * V(internal_a, internal_b);
+        I(internal_b, n) <+ 3.0 * V(internal_b, n);
+    end
+endmodule

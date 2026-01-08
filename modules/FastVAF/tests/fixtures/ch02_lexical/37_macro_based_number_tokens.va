@@ -1,0 +1,4 @@
+`define BASE 'h
+`define DIGITS A5
+module ch2_macro_based(p); inout p; electrical p; integer x; analog begin x=8 `BASE `DIGITS; I(p)<+x+0.0*V(p); end endmodule
+// EXPECT: error -- normative syntax/restriction snapshot for this rule family.

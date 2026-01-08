@@ -1,0 +1,5 @@
+// EXPECT: error -- merged/split connect mode needs signal segmentation.
+connectrules ch7_mode;
+  connect ch7_a2d merged input electrical, output logic;
+  connect ch7_d2a split input logic, output electrical;
+endconnectrules

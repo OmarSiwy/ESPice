@@ -1,0 +1,11 @@
+module ch04_z_transform_filters(p, n);
+    inout p, n;
+    electrical p, n;
+
+    analog begin
+        I(p, n) <+ zi_zp(V(p, n), '{0.0, 0.0}, '{0.5, 0.0}, 1u);
+        I(p, n) <+ zi_zd(V(p, n), '{0.0, 0.0}, '{1.0, -0.5}, 1u);
+        I(p, n) <+ zi_np(V(p, n), '{1.0, 0.0}, '{0.5, 0.0}, 1u);
+        I(p, n) <+ zi_nd(V(p, n), '{1.0, 0.0}, '{1.0, -0.5}, 1u);
+    end
+endmodule

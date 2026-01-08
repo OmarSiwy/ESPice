@@ -1,0 +1,14 @@
+`ifdef DRIVER_ACCESS_VAMS
+`else
+`define DRIVER_ACCESS_VAMS 1
+`define DRIVER_UNKNOWN 32'b00000000000
+`define DRIVER_DELAYED 32'b00000000001
+`define DRIVER_GATE 32'b00000000010
+`define DRIVER_UDP 32'b00000000100
+`define DRIVER_ASSIGN 32'b00000001000
+`define DRIVER_BEHAVIORAL 32'b00000010000
+module annex_d_driver_low(p);
+  inout p; electrical p; integer flags;
+  analog begin flags = `DRIVER_UNKNOWN | `DRIVER_DELAYED | `DRIVER_GATE | `DRIVER_UDP | `DRIVER_ASSIGN | `DRIVER_BEHAVIORAL; I(p) <+ flags + 0.0*V(p); end
+endmodule
+`endif

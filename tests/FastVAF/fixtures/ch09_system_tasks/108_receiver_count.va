@@ -1,0 +1,5 @@
+// NONCONFORMING ACCEPTANCE SNAPSHOT: $receiver_count is connectmodule-only.
+module ch09_atomic_receiver_count(p, n);
+  inout p, n; electrical p, n;
+  analog I(p,n) <+ V(p,n) + $receiver_count(p);
+endmodule

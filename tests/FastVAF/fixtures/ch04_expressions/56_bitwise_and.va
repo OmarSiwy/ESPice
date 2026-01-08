@@ -1,0 +1,1 @@
+module ch04_bitwise_and(p, n); inout p, n; electrical p, n; integer a; analog begin a = 5 & 3; I(p, n) <+ a; end endmodule

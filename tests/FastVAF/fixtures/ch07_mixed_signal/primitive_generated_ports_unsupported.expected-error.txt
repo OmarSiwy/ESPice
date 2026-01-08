@@ -1,0 +1,4 @@
+# annex C: gate primitives and `defparam` are outside Verilog-A.
+E0205
+and
+defparam

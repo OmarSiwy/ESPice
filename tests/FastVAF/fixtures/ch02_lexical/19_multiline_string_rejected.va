@@ -1,0 +1,4 @@
+module ch02_multiline_string_rejected;
+    string value = "first
+second";
+endmodule

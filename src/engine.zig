@@ -8,13 +8,9 @@
 
 const std = @import("std");
 const analysis = @import("analysis");
-const compute = @import("compute");
 const devices = @import("devices");
 const types = @import("frontend/types.zig");
-const kernels = @import("kernels");
 const netlist = @import("builder.zig");
-
-const GpuContext = @import("gpu.zig").GpuContext;
 
 const Circuit = analysis.Circuit;
 const Job = analysis.Job;
@@ -62,12 +58,13 @@ pub const Simulation = struct {
     n_results: u32,
     /// Parallel eval context (policy: created here, referenced by Circuit).
     par_eval: ?devices.par.ParEval,
-    /// GPU compute handle (non-null when GPU active).
-    gpu_compute: ?compute.Compute = null,
-    /// Whole-solve megakernel driver (attached in run(); see par_eval note).
-    gpu_ctx: ?*GpuContext = null,
 
     pub fn fromNetlist(arena: std.mem.Allocator, nl: types.Netlist, io: ?std.Io, config: SimConfig) !Simulation {
+        // Kept in the signature, unused for now: `config.gpu` drove the
+        // megakernel probe that used to live below. See the note at the
+        // `errdefer` further down — GPU moved to per-device kernels in
+        // modules/devices, which have not been wired to a launcher yet.
+        _ = config;
         var b = Builder.init(arena);
         var compiled_ok = false;
         errdefer if (!compiled_ok) b.deinit();
@@ -88,21 +85,16 @@ pub const Simulation = struct {
 
         var sim: Simulation = undefined;
         sim.arena = arena;
-        sim.gpu_compute = null;
-        sim.gpu_ctx = null;
         sim.circuit = try b.compile();
         compiled_ok = true;
 
-        // GPU: probe for CUDA/HIP when --gpu requested.
-        if (config.gpu) gpu_init: {
-            var gpu_ctx = compute.Compute.init(null) catch break :gpu_init;
-            if (gpu_ctx.backend == .cpu) { gpu_ctx.deinit(); break :gpu_init; }
-            sim.gpu_compute = gpu_ctx;
-            sim.circuit.gpu_active = true;
-        }
+        // ponytail: `--gpu` is accepted but inert. The megakernel driver it
+        // used to start (src/gpu.zig + the `compute` module + a baked
+        // `arp_solve` image) is gone; GPU now means the per-device
+        // `arp_eval_<name>` kernels in modules/devices, which own their own
+        // launch. Until that launcher lands, `circuit.gpu_hook` stays null and
+        // every analysis takes its existing CPU path.
         errdefer sim.circuit.deinit();
-        // Function scope, not inside gpu_init: must fire on any later failure.
-        errdefer if (sim.gpu_compute) |*gc| gc.deinit();
 
         // Sources: convert builder arrays to frozen slices
         sim.source_node = nb.source_node;
@@ -164,8 +156,6 @@ pub const Simulation = struct {
     pub fn deinit(self: *Simulation) void {
         self.circuit.par_eval = null;
         if (self.par_eval) |*p| p.deinit();
-        if (self.gpu_ctx) |gs| gs.deinit();
-        if (self.gpu_compute) |*g| g.deinit();
         self.circuit.deinit();
     }
 
@@ -173,14 +163,6 @@ pub const Simulation = struct {
         // Attach here, not in fromNetlist: sim is returned by value there, so
         // a &self.par_eval taken earlier would dangle. `self` is stable now.
         if (self.par_eval) |*p| self.circuit.par_eval = p;
-        // Same stability rule as par_eval: &self.gpu_compute is only valid
-        // once `self` stopped moving. One packed blob + module per circuit.
-        if (self.gpu_compute) |*g| {
-            if (self.gpu_ctx == null) {
-                self.gpu_ctx = GpuContext.init(self.arena, g, &self.circuit, kernels.megakernel);
-                if (self.gpu_ctx) |gs| self.circuit.gpu_hook = gs.hook();
-            }
-        }
         var ctx = RunCtx{
             .circuit = &self.circuit,
             .x_op = null,

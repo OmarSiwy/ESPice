@@ -1,239 +1,26 @@
-//! Device contract: the comptime interface every device (hand-written or
-//! VAF/VF-generated) must satisfy. `validate(D)` checks the full surface the
-//! solver (analysis/compiled.zig) actually calls, so a mismatch fails at the
-//! device definition with a readable error instead of deep in a solver loop.
+//! Device contract: the comptime interface every device (VA-generated or
+//! hand-written) must satisfy. `validate(D)` structurally checks the surface
+//! the engine calls — decls present, enum dense, param types, function arity —
+//! so a mismatch fails at the device definition with a readable error.
 //!
-//! Physics is VALUE-FORM: written once, generic over an opaque scalar S.
-//! The analysis crate instantiates it with a derivative-carrying scalar, so
-//! one pass yields residual + all analytic partials — no finite differences.
+//! This file only CHECKS the contract; it provides no scalar implementation.
+//! Physics is written generic over an opaque scalar S:
 //!
 //!   pub fn eval(comptime S: type, x: [n_u]S, m: *const Model, i: *const Instance, t: f64) [n_u]S;
 //!   pub fn q   (comptime S: type, x, m, i, t) [n_u]S;   // optional: charges
 //!
-//! The scalar interface S provides (see `Value` below for the plain-f64
-//! reference implementation — the analysis side must mirror this list):
-//!
-//!   con addC scale            — constants in / scaling
-//!   add sub neg mul div       — arithmetic
-//!   exp log sqrt pow          — pow(a, c): constant exponent
-//!   sin cos tanh sinh cosh atan
-//!   abs minC maxC min max     — piecewise; derivative flat past clamp
-//!   val                       — read the value (branching, debugging)
+//! The engine instantiates S — a plain-f64 value form for residuals, a
+//! derivative-carrying dual for the Jacobian. The S primitive set devices may
+//! use: con addC scale · add sub neg mul div · exp log sqrt pow(a,c) · sin cos
+//! tanh sinh cosh atan · abs minC maxC min max · val.
 //!
 //! RULES for physics code:
 //!   - Everything not depending on x (param prep, temperature, geometry)
 //!     stays plain f64. Only x-dependent chains use S ops.
 //!   - Never branch on an S with `if` directly; use .val() for topology-level
-//!     decisions and minC/maxC/min/max for clamps (they keep the derivative
-//!     consistent with the picked branch).
+//!     decisions and minC/maxC/min/max for clamps.
 
 const std = @import("std");
-
-// ponytail: @exp/@log unavailable on nvptx64 (LLVM #141364, no fix in sight).
-// @sqrt/@sin/@cos are fine (Legal in LLVM NVPTX). Hand-roll only exp/log.
-const builtin = @import("builtin");
-const is_gpu = builtin.cpu.arch == .nvptx64 or builtin.cpu.arch == .amdgcn;
-
-pub const fmath = struct {
-    pub inline fn exp(x: f64) f64 {
-        if (comptime !is_gpu) return @exp(x);
-        // Saturate like libm: also keeps k in i64 range when a device's
-        // comptime validation instantiates eval with sentinel extremes.
-        if (x < -745.2) return 0.0;
-        if (x > 709.8) return std.math.inf(f64);
-        // Range reduction: e^x = 2^(x/ln2) = 2^k * 2^f, f in [0,1)
-        const log2e = 1.4426950408889634;
-        const t = x * log2e;
-        const k = @floor(t);
-        const f = t - k;
-        // Minimax degree-6 polynomial for 2^f on [0,1), ~1 ulp
-        var p: f64 = 1.5417544459590958e-5;
-        p = p * f + 1.5252732999903985e-4;
-        p = p * f + 1.3333558178101622e-3;
-        p = p * f + 9.6181291052364266e-3;
-        p = p * f + 5.5504108663561613e-2;
-        p = p * f + 2.4022650695909071e-1;
-        p = p * f + 6.9314718055994531e-1;
-        p = p * f + 1.0;
-        // Scale by 2^k via bit manipulation
-        const ki: i64 = @intFromFloat(k);
-        const bits: u64 = @bitCast(p);
-        return @bitCast(bits +% (@as(u64, @bitCast(ki)) << 52));
-    }
-
-    pub inline fn sin(x: f64) f64 {
-        return if (comptime !is_gpu) @sin(x) else sinCos(x)[0];
-    }
-
-    pub inline fn cos(x: f64) f64 {
-        return if (comptime !is_gpu) @cos(x) else sinCos(x)[1];
-    }
-
-    /// f64 sin/cos for nvptx (no fsin/fcos lowering, no libcalls). musl-style:
-    /// 3-part Cody-Waite reduction by π/2 + minimax kernels on [-π/4, π/4].
-    /// ponytail: ~1 ulp for |x| < ~2^26·π/2 — SPICE source phases ωt+φ stay
-    /// far below that; add Payne-Hanek if a fixture ever proves otherwise.
-    pub fn sinCos(x: f64) [2]f64 {
-        const two_over_pi = 0.63661977236758134308;
-        const kd = @floor(x * two_over_pi + 0.5);
-        const p1 = 1.57079632673412561417e+00;
-        const p2 = 6.07710050650619224932e-11;
-        const p3 = 2.02226624879595063154e-21;
-        var r = x - kd * p1;
-        r -= kd * p2;
-        r -= kd * p3;
-        const q: u2 = @truncate(@as(u64, @bitCast(@as(i64, @intFromFloat(kd)))));
-        const r2 = r * r;
-        const s = r + r * r2 * (-1.66666666666666324348e-01 + r2 * (8.33333333332248946124e-03 +
-            r2 * (-1.98412698298579493134e-04 + r2 * (2.75573137070700676789e-06 +
-                r2 * (-2.50507602534068634195e-08 + r2 * 1.58969099521155010221e-10)))));
-        const c = 1.0 + r2 * (-0.5 + r2 * (4.16666666666666019037e-02 + r2 * (-1.38888888888741095749e-03 +
-            r2 * (2.48015872894767294178e-05 + r2 * (-2.75573143513906633035e-07 +
-                r2 * 2.08757232129817482790e-09)))));
-        return switch (q) {
-            0 => .{ s, c },
-            1 => .{ c, -s },
-            2 => .{ -s, -c },
-            3 => .{ -c, s },
-        };
-    }
-
-    /// S contract: a > 0, constant exponent (see module doc).
-    pub inline fn pow(a: f64, c: f64) f64 {
-        if (comptime !is_gpu) return std.math.pow(f64, a, c);
-        if (!(a > 0)) return 0;
-        return exp(c * log(a));
-    }
-
-    pub inline fn tanh(x: f64) f64 {
-        if (comptime !is_gpu) return std.math.tanh(x);
-        if (x > 20.0) return 1.0;
-        if (x < -20.0) return -1.0;
-        const e2 = exp(2.0 * x);
-        return (e2 - 1.0) / (e2 + 1.0);
-    }
-
-    pub inline fn sinh(x: f64) f64 {
-        if (comptime !is_gpu) return std.math.sinh(x);
-        const e = exp(x);
-        return 0.5 * (e - 1.0 / e);
-    }
-
-    pub inline fn cosh(x: f64) f64 {
-        if (comptime !is_gpu) return std.math.cosh(x);
-        const e = exp(x);
-        return 0.5 * (e + 1.0 / e);
-    }
-
-    pub inline fn log(x: f64) f64 {
-        if (comptime !is_gpu) return @log(x);
-        // Decompose: x = 2^e * m, m in [1,2); log(x) = e*ln2 + log(m)
-        const ln2 = 0.6931471805599453;
-        const bits: u64 = @bitCast(x);
-        const e_biased: i64 = @intCast((bits >> 52) & 0x7FF);
-        const e: f64 = @floatFromInt(e_biased - 1023);
-        // Normalize mantissa to [1,2)
-        const m_bits = (bits & 0x000FFFFFFFFFFFFF) | 0x3FF0000000000000;
-        const m: f64 = @bitCast(m_bits);
-        // 2*atanh((m-1)/(m+1)) series, ~2 ulp on [1,2)
-        const s = (m - 1.0) / (m + 1.0);
-        const s2 = s * s;
-        var q: f64 = 1.0 / 9.0;
-        q = q * s2 + 1.0 / 7.0;
-        q = q * s2 + 1.0 / 5.0;
-        q = q * s2 + 1.0 / 3.0;
-        q = q * s2 + 1.0;
-        return e * ln2 + 2.0 * s * q;
-    }
-};
-
-// ----------------------------------------------------------------------------
-// ngspice devsup.c limiting primitives — the reference algorithms, centralized.
-// Device `limit` implementations must route junction/FET limiting through
-// these: a dozen hand-rolled ports of the SPICE2 "2+log(arg-2)" form drifted
-// (floored logs yanking junctions 67·vt backward, missing reverse clamps,
-// missing vds decrease clamps) and cost .op convergence across the suite.
-// ----------------------------------------------------------------------------
-
-pub const limits = struct {
-    /// DEVpnjlim, with spice3f5's monotone log form for the forward branch.
-    /// ngspice's 2+log(arg-2) flavor is singular at |delta| = 2vt (log→-inf);
-    /// vold + vt·log(1 + delta/vt) limits identically for large steps without
-    /// the discontinuity. Reverse-bias clamp branch matches ngspice exactly.
-    pub fn pnjlim(vnew_in: f64, vold: f64, vt: f64, vcrit: f64) f64 {
-        var vnew = vnew_in;
-        if (vnew > vcrit and @abs(vnew - vold) > vt + vt) {
-            if (vold > 0) {
-                const arg = 1.0 + (vnew - vold) / vt;
-                vnew = if (arg > 0) vold + vt * fmath.log(arg) else vcrit;
-            } else {
-                vnew = vt * fmath.log(@max(vnew / vt, 1e-30));
-            }
-        } else if (vnew < 0) {
-            // Reverse bias: allow geometric growth only (ngspice else-branch).
-            const floor_v = if (vold > 0) -vold - 1 else 2 * vold - 1;
-            if (vnew < floor_v) vnew = floor_v;
-        }
-        return vnew;
-    }
-
-    /// DEVfetlim — exact ngspice.
-    pub fn fetlim(vnew_in: f64, vold: f64, vto: f64) f64 {
-        var vnew = vnew_in;
-        const vtsthi = @abs(2 * (vold - vto)) + 2;
-        const vtstlo = @abs(vold - vto) + 1;
-        const vtox = vto + 3.5;
-        const delv = vnew - vold;
-        if (vold >= vto) {
-            if (vold >= vtox) {
-                if (delv <= 0) {
-                    // going off
-                    if (vnew >= vtox) {
-                        if (-delv > vtstlo) vnew = vold - vtstlo;
-                    } else {
-                        vnew = @max(vnew, vto + 2);
-                    }
-                } else {
-                    // staying on
-                    if (delv >= vtsthi) vnew = vold + vtsthi;
-                }
-            } else {
-                // middle region
-                vnew = if (delv <= 0) @max(vnew, vto - 0.5) else @min(vnew, vto + 4);
-            }
-        } else {
-            // off
-            if (delv <= 0) {
-                if (-delv > vtsthi) vnew = vold - vtsthi;
-            } else {
-                const vtemp = vto + 0.5;
-                if (vnew <= vtemp) {
-                    if (delv > vtstlo) vnew = vold + vtstlo;
-                } else {
-                    vnew = vtemp;
-                }
-            }
-        }
-        return vnew;
-    }
-
-    /// DEVlimvds — exact ngspice (the decrease clamps matter: without
-    /// MAX(vnew, -0.5) a drain node kicked by a near-singular Newton step
-    /// walks to ±1e6 and the eval linearizes in nonsense territory).
-    pub fn limvds(vnew_in: f64, vold: f64) f64 {
-        var vnew = vnew_in;
-        if (vold >= 3.5) {
-            if (vnew > vold) {
-                vnew = @min(vnew, 3 * vold + 2);
-            } else if (vnew < 3.5) {
-                vnew = @max(vnew, 2);
-            }
-        } else {
-            vnew = if (vnew > vold) @min(vnew, 4) else @max(vnew, -0.5);
-        }
-        return vnew;
-    }
-};
 
 pub const UpdateResult = union(enum) {
     ok,
@@ -247,6 +34,28 @@ pub const UpdateResult = union(enum) {
 ///   commit — step accepted: accepted := working
 ///   revert — step rejected: working := accepted
 pub const StateCtlOp = enum(u8) { query, commit, revert };
+
+/// §4.6.1 `analysis()`. Host mirror of the `AnalysisKind` every generated
+/// device declares for itself — the engine converts by ordinal
+/// (`@enumFromInt(@intFromEnum(..))`), same trick as StateCtlOp, so the tag
+/// ORDER here is load-bearing and must match FastVAF's emission.
+pub const AnalysisKind = enum(u8) { static, ic, nodeset, dc, tran, ac, noise };
+
+/// Host-owned per-pass simulation state (see `Hooks.set_sim_state`).
+/// Everything here is a property of the ANALYSIS, not of the device, so the
+/// host is the only writer:
+///   t     — §9.10 `$abstime`, the time the solve is targeting
+///   dt    — §9.10 timestep feeding `ddt`/`idt`; 0 in a static analysis, which
+///           is what the generated zDdt/zIdt helpers test for
+///   kind  — §4.6.1 `analysis()`
+///   initial_step / final_step — §5.10.2 global events
+pub const SimState = struct {
+    t: f64 = 0,
+    dt: f64 = 0,
+    kind: AnalysisKind = .dc,
+    initial_step: bool = false,
+    final_step: bool = false,
+};
 
 pub const UnknownKind = enum {
     voltage,
@@ -277,6 +86,17 @@ pub const PsdTerm = struct {
     corr: f64 = 0,
 };
 
+/// Operating-point output variable metadata. Mirrors `noise_gens`: an optional
+/// comptime table a device may declare, describing internal quantities (gm,
+/// gds, vth, currents, ...) it exposes for post-solve inspection. Position k
+/// in `op_vars` corresponds to element k of the `opValues(...)` result. A
+/// Verilog-A `(* desc=... *) real x;` module variable becomes one entry.
+pub const OpVar = struct {
+    name: []const u8,
+    units: []const u8 = "",
+    desc: []const u8 = "",
+};
+
 pub fn nU(comptime D: type) comptime_int {
     return @typeInfo(D.U).@"enum".fields.len;
 }
@@ -284,224 +104,6 @@ pub fn nU(comptime D: type) comptime_int {
 pub fn uKinds(comptime D: type) [nU(D)]UnknownKind {
     if (@hasDecl(D, "u_kinds")) return D.u_kinds;
     return [_]UnknownKind{.voltage} ** nU(D);
-}
-
-// ============================================================================
-// Value: plain-f64 scalar satisfying the S interface. Reference
-// implementation of the op list; used by device unit tests (and any consumer
-// that wants residuals without derivatives).
-// ============================================================================
-
-pub const Value = struct {
-    v: f64,
-
-    const Self = @This();
-
-    pub fn con(c: f64) Self {
-        return .{ .v = c };
-    }
-    pub fn add(a: Self, b: Self) Self {
-        return .{ .v = a.v + b.v };
-    }
-    pub fn sub(a: Self, b: Self) Self {
-        return .{ .v = a.v - b.v };
-    }
-    pub fn neg(a: Self) Self {
-        return .{ .v = -a.v };
-    }
-    pub fn mul(a: Self, b: Self) Self {
-        return .{ .v = a.v * b.v };
-    }
-    pub fn div(a: Self, b: Self) Self {
-        return .{ .v = a.v / b.v };
-    }
-    pub fn scale(a: Self, c: f64) Self {
-        return .{ .v = a.v * c };
-    }
-    pub fn addC(a: Self, c: f64) Self {
-        return .{ .v = a.v + c };
-    }
-    pub fn exp(a: Self) Self {
-        return .{ .v = fmath.exp(a.v) };
-    }
-    pub fn log(a: Self) Self {
-        return .{ .v = fmath.log(a.v) };
-    }
-    pub fn sqrt(a: Self) Self {
-        return .{ .v = @sqrt(a.v) };
-    }
-    pub fn sin(a: Self) Self {
-        return .{ .v = fmath.sin(a.v) };
-    }
-    pub fn cos(a: Self) Self {
-        return .{ .v = fmath.cos(a.v) };
-    }
-    pub fn tanh(a: Self) Self {
-        return .{ .v = fmath.tanh(a.v) };
-    }
-    pub fn abs(a: Self) Self {
-        return .{ .v = @abs(a.v) };
-    }
-    pub fn minC(a: Self, c: f64) Self {
-        return .{ .v = @min(a.v, c) };
-    }
-    pub fn maxC(a: Self, c: f64) Self {
-        return .{ .v = @max(a.v, c) };
-    }
-    pub fn pow(a: Self, c: f64) Self {
-        return .{ .v = fmath.pow(a.v, c) };
-    }
-    pub fn atan(a: Self) Self {
-        return .{ .v = std.math.atan(a.v) };
-    }
-    pub fn sinh(a: Self) Self {
-        return .{ .v = fmath.sinh(a.v) };
-    }
-    pub fn cosh(a: Self) Self {
-        return .{ .v = fmath.cosh(a.v) };
-    }
-    pub fn max(a: Self, b: Self) Self {
-        return .{ .v = @max(a.v, b.v) };
-    }
-    pub fn min(a: Self, b: Self) Self {
-        return .{ .v = @min(a.v, b.v) };
-    }
-    pub fn val(a: Self) f64 {
-        return a.v;
-    }
-};
-
-// ============================================================================
-// Dual: forward-mode derivative-carrying scalar satisfying the S interface.
-// Used by GENERATED (VAF/VF) devices to export analytic residual+Jacobian
-// across the .so ABI (zpicey_eval_ad). Hand-written devices never name it —
-// the analysis crate instantiates their physics with its own scalar.
-// ============================================================================
-
-pub fn Dual(comptime N: usize) type {
-    return struct {
-        v: f64,
-        d: V,
-
-        const V = @Vector(N, f64);
-        const Self = @This();
-
-        inline fn splat(c: f64) V {
-            return @splat(c);
-        }
-        /// Seed unknown `u` (derivative 1 w.r.t. itself). `u` is comptime —
-        /// a runtime-indexed vector write does not compile; every caller seeds
-        /// inside an `inline for`, so the index is comptime anyway.
-        pub fn seed(value: f64, comptime u: usize) Self {
-            var d: V = @splat(0);
-            d[u] = 1;
-            return .{ .v = value, .d = d };
-        }
-        pub fn con(c: f64) Self {
-            return .{ .v = c, .d = splat(0) };
-        }
-        pub fn add(a: Self, b: Self) Self {
-            return .{ .v = a.v + b.v, .d = a.d + b.d };
-        }
-        pub fn sub(a: Self, b: Self) Self {
-            return .{ .v = a.v - b.v, .d = a.d - b.d };
-        }
-        pub fn neg(a: Self) Self {
-            return .{ .v = -a.v, .d = -a.d };
-        }
-        pub fn mul(a: Self, b: Self) Self {
-            return .{ .v = a.v * b.v, .d = a.d * splat(b.v) + b.d * splat(a.v) };
-        }
-        pub fn div(a: Self, b: Self) Self {
-            const inv_b = 1.0 / b.v;
-            const quot = a.v * inv_b;
-            return .{ .v = quot, .d = (a.d - b.d * splat(quot)) * splat(inv_b) };
-        }
-        pub fn scale(a: Self, c: f64) Self {
-            return .{ .v = a.v * c, .d = a.d * splat(c) };
-        }
-        pub fn addC(a: Self, c: f64) Self {
-            return .{ .v = a.v + c, .d = a.d };
-        }
-        pub fn exp(a: Self) Self {
-            const e = fmath.exp(a.v); // nvptx-safe (raw @exp has no libcall there)
-            return .{ .v = e, .d = a.d * splat(e) };
-        }
-        pub fn log(a: Self) Self {
-            return .{ .v = fmath.log(a.v), .d = a.d * splat(1.0 / a.v) };
-        }
-        pub fn sqrt(a: Self) Self {
-            const s = @sqrt(a.v);
-            // s==0: slope is +inf; 0*inf from a clamped-constant input would
-            // poison the whole Jacobian with NaN. Flat derivative instead.
-            return .{ .v = s, .d = a.d * splat(if (s > 0.0) 0.5 / s else 0.0) };
-        }
-        pub fn sin(a: Self) Self {
-            const sc = if (comptime !is_gpu) [2]f64{ @sin(a.v), @cos(a.v) } else fmath.sinCos(a.v);
-            return .{ .v = sc[0], .d = a.d * splat(sc[1]) };
-        }
-        pub fn cos(a: Self) Self {
-            const sc = if (comptime !is_gpu) [2]f64{ @sin(a.v), @cos(a.v) } else fmath.sinCos(a.v);
-            return .{ .v = sc[1], .d = a.d * splat(-sc[0]) };
-        }
-        pub fn tanh(a: Self) Self {
-            const th = fmath.tanh(a.v);
-            return .{ .v = th, .d = a.d * splat(1.0 - th * th) };
-        }
-        pub fn abs(a: Self) Self {
-            return if (a.v < 0) a.neg() else a;
-        }
-        pub fn minC(a: Self, c: f64) Self {
-            return if (a.v > c) con(c) else a;
-        }
-        pub fn maxC(a: Self, c: f64) Self {
-            return if (a.v < c) con(c) else a;
-        }
-        pub fn pow(a: Self, c: f64) Self {
-            const p = fmath.pow(a.v, c);
-            // a.v==0: c*p/0 is inf/NaN; keep the Jacobian finite (see sqrt).
-            const slope = c * p / a.v;
-            return .{ .v = p, .d = a.d * splat(if (std.math.isFinite(slope)) slope else 0.0) };
-        }
-        pub fn atan(a: Self) Self {
-            return .{ .v = std.math.atan(a.v), .d = a.d * splat(1.0 / (1.0 + a.v * a.v)) };
-        }
-        pub fn sinh(a: Self) Self {
-            return .{ .v = fmath.sinh(a.v), .d = a.d * splat(fmath.cosh(a.v)) };
-        }
-        pub fn cosh(a: Self) Self {
-            return .{ .v = fmath.cosh(a.v), .d = a.d * splat(fmath.sinh(a.v)) };
-        }
-        pub fn max(a: Self, b: Self) Self {
-            return if (a.v >= b.v) a else b;
-        }
-        pub fn min(a: Self, b: Self) Self {
-            return if (a.v <= b.v) a else b;
-        }
-        pub fn val(a: Self) f64 {
-            return a.v;
-        }
-    };
-}
-
-/// Evaluate D's residual at plain-f64 terminal values. Test helper.
-pub fn evalValues(comptime D: type, x: [nU(D)]f64, m: *const D.Model, inst: *const D.Instance, t: f64) [nU(D)]f64 {
-    var xs: [nU(D)]Value = undefined;
-    inline for (0..nU(D)) |u| xs[u] = Value.con(x[u]);
-    const out = D.eval(Value, xs, m, inst, t);
-    var res: [nU(D)]f64 = undefined;
-    inline for (0..nU(D)) |u| res[u] = out[u].val();
-    return res;
-}
-
-/// Same for the charge function.
-pub fn qValues(comptime D: type, x: [nU(D)]f64, m: *const D.Model, inst: *const D.Instance, t: f64) [nU(D)]f64 {
-    var xs: [nU(D)]Value = undefined;
-    inline for (0..nU(D)) |u| xs[u] = Value.con(x[u]);
-    const out = D.q(Value, xs, m, inst, t);
-    var res: [nU(D)]f64 = undefined;
-    inline for (0..nU(D)) |u| res[u] = out[u].val();
-    return res;
 }
 
 // ============================================================================
@@ -609,6 +211,16 @@ pub fn validate(comptime D: type) void {
         if (info != .array or info.array.child != D.U)
             @compileError(name ++ ".limit_flag_unknowns must be [k]U");
     }
+    // Operating-point output variables: optional metadata + a matching
+    // opValues hook (same comptime-S shape as eval). Position k in op_vars
+    // describes element k of opValues's result.
+    if (@hasDecl(D, "op_vars")) {
+        const info = @typeInfo(@TypeOf(D.op_vars));
+        if (info != .array or info.array.child != OpVar)
+            @compileError(name ++ ".op_vars must be [k]OpVar");
+        if (!@hasDecl(D, "opValues"))
+            @compileError(name ++ ": op_vars requires pub fn opValues");
+    }
     validateMcParam(D);
 
     // PrepCache: if declared, device must also export computePrep and evalFromPrep.
@@ -639,26 +251,9 @@ pub fn validate(comptime D: type) void {
     if (@hasDecl(D, "nextBreakpoint"))
         expectFn(D, "nextBreakpoint", fn (*const D.Model, f64) ?f64);
 
-    // Smoke test: instantiate eval(Value) at comptime to catch type errors
-    // in the physics body, not just shape mismatches.
-    _ = validateEvalInstantiation(D);
-
     // Pub-decl allowlist: only contract-recognized names may be pub.
     // zpicey_* are the dynamic plugin ABI (validated by dyn.zig loader).
     rejectStrayPubDecls(D);
-}
-
-fn validateEvalInstantiation(comptime D: type) [nU(D)]f64 {
-    @setEvalBranchQuota(1_000_000);
-    const n = nU(D);
-    const m: D.Model = .{};
-    const inst: D.Instance = .{};
-    var xs: [n]Value = undefined;
-    inline for (0..n) |u| xs[u] = Value.con(0);
-    const out = D.eval(Value, xs, &m, &inst, 0);
-    var res: [n]f64 = undefined;
-    inline for (0..n) |u| res[u] = out[u].val();
-    return res;
 }
 
 const allowed_pub_decls = std.StaticStringMap(void).initComptime(.{
@@ -676,6 +271,13 @@ const allowed_pub_decls = std.StaticStringMap(void).initComptime(.{
     .{ "updateState", {} },
     .{ "stateCtl", {} },
     .{ "State", {} },
+    // Runtime analysis kind exported by generated devices for the analysis()
+    // builtin; the host engine sets Instance.analysis_kind per pass.
+    .{ "AnalysisKind", {} },
+    // LRM 9.4 display tasks. Present ONLY in a device built with
+    // `--display=emit` (FastVAF's testbench artifact); the engine never calls
+    // it, and a device compiled for the solver does not have it at all.
+    .{ "display", {} },
     .{ "histInject", {} },
     .{ "n_hist_signals", {} },
     .{ "gatherHistSignals", {} },
@@ -684,6 +286,8 @@ const allowed_pub_decls = std.StaticStringMap(void).initComptime(.{
     .{ "u_kinds", {} },
     .{ "noise_gens", {} },
     .{ "noisePsd", {} },
+    .{ "op_vars", {} },
+    .{ "opValues", {} },
     .{ "mc_param", {} },
     .{ "PrepCache", {} },
     .{ "computePrep", {} },
@@ -701,6 +305,12 @@ fn rejectStrayPubDecls(comptime D: type) void {
         if (allowed_pub_decls.has(d.name)) continue;
         // zpicey_* are dynamic plugin ABI exports (validated by dyn.zig loader).
         if (d.name.len >= 7 and std.mem.eql(u8, d.name[0..7], "zpicey_")) continue;
+        // <module>__analog_op__{laplace,zi}_*__sec — the cascade coefficients of
+        // an LRM 4.5.11/4.5.12 filter. Public on purpose: they ARE the transfer
+        // function, and a host running .ac/.noise builds H(jw) from them because
+        // the real-valued residual cannot carry it. The name embeds the module,
+        // so it cannot be in the list above.
+        if (d.name.len >= 5 and std.mem.eql(u8, d.name[d.name.len - 5 ..], "__sec")) continue;
         @compileError(@typeName(D) ++ ": stray pub decl `" ++ d.name ++
             "` — only contract-recognized names may be pub");
     }
@@ -740,13 +350,20 @@ fn validateDefaultedStruct(comptime D: type, comptime decl: []const u8) void {
             @compileError(@typeName(D) ++ "." ++ decl ++ "." ++ f.name ++ " must have a default value");
         if (!isValueType(f.type))
             @compileError(@typeName(D) ++ "." ++ decl ++ "." ++ f.name ++
-                ": field type must be f32, f64, i32, bool, or a fixed-size array of these (no pointers/slices)");
+                ": field type must be numeric/bool/enum, []const u8, or a fixed-size array of these");
     }
 }
 
 fn isValueType(comptime T: type) bool {
+    // Generated string parameters point at immutable literals in the device
+    // image. The loader keeps that .so open for the lifetime of every opaque
+    // Model blob, so copying the slice through init_model/ProtoStore is safe;
+    // numeric setParam/collectParams intentionally ignore it.
+    if (T == []const u8) return true;
     return switch (@typeInfo(T)) {
         .float, .int, .bool => true,
+        // Integer-backed enums are fixed-size POD (e.g. Instance.analysis_kind).
+        .@"enum" => |e| isValueType(e.tag_type),
         .array => |a| isValueType(a.child),
         else => false,
     };
@@ -907,13 +524,6 @@ test "validate: switch (state in Instance + attempt + limit)" {
 
 test "validate: tline (histInject + metadata)" {
     comptime validate(MockTline);
-}
-
-test "evalValues: MockR residual" {
-    const m: MockR.Model = .{ .g = 2e-3 };
-    const out = evalValues(MockR, .{ 1.0, 0.0 }, &m, &.{}, 0);
-    try testing.expectApproxEqAbs(@as(f64, 2e-3), out[0], 1e-15);
-    try testing.expectApproxEqAbs(@as(f64, -2e-3), out[1], 1e-15);
 }
 
 test "updateState mutates Instance" {

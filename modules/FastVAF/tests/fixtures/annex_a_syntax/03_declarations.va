@@ -1,0 +1,13 @@
+module annex_a_declarations(p, n);
+    inout p, n;
+    electrical p, n, internal;
+    branch (p, n) path;
+    parameter real gain = 2.0 from (0:inf);
+    localparam real offset = 1.0;
+    aliasparam amplification = gain;
+    integer index;
+    real value;
+    string label = "declarations";
+
+    analog I(path) <+ gain * V(path) + offset;
+endmodule

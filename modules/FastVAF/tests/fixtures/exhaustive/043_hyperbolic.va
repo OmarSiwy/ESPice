@@ -1,0 +1,21 @@
+// §4.3.2 hyperbolic functions and their inverses. As with §4.3.2's inverse
+// trig, asinh/acosh/atanh are composed from log and a radical.
+//
+//! print none
+`include "check.vh"
+module ex043_hyperbolic(p, n);
+  inout p, n;
+  electrical p, n;
+  analog begin
+    `CHECKR("sinh(1)", sinh(1.0), 1.1752011936438014, 1e-15);
+    `CHECKX("sinh(0)", sinh(0.0), 0.0);
+    `CHECKR("cosh(1)", cosh(1.0), 1.5430806348152437, 1e-15);
+    `CHECKX("cosh(0)", cosh(0.0), 1.0);
+    `CHECKR("tanh(0.5)", tanh(0.5), 0.46211715726000974, 1e-15);
+    `CHECKX("tanh(0)", tanh(0.0), 0.0);
+    `CHECKR("asinh(1)", asinh(1.0), 0.881373587019543, 1e-15);
+    `CHECKR("acosh(2)", acosh(2.0), 1.3169578969248166, 1e-15);
+    `CHECKR("atanh(0.5)", atanh(0.5), 0.5493061443340548, 1e-15);
+    I(p, n) <+ 0.0;
+  end
+endmodule

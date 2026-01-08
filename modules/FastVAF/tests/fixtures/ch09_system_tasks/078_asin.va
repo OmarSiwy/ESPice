@@ -1,0 +1,5 @@
+module ch09_atomic_asin(p, n);
+  inout p, n; electrical p, n;
+  analog I(p,n) <+ V(p,n) + $asin(0.5);
+endmodule
+

@@ -1,0 +1,4 @@
+// EXPECT: error -- supply-sensitive insertion is mixed-signal elaboration.
+connectrules ch7_supply;
+  connect ch7_a2d #(.vddname("$root.supply.vdd"));
+endconnectrules

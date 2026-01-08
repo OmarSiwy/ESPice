@@ -1,0 +1,35 @@
+// §4.5.8 transition — and the first fixture that needs `//! wave`, because an
+// operator with memory shown a CONSTANT input says nothing: the DC point
+// (dt = 0) puts its state straight onto that constant and every later step
+// agrees with it.
+//
+// FastVAF implements the smoothing as a first-order lag rather than §4.5.8's
+// piecewise-linear ramp (see `zTransition`: "same endpoints, same monotonicity,
+// smooth Jacobian"). The lag constant is tau = (tr + tf)/2 / 2.2, so tr = tf =
+// 2.2n gives tau = 1n; with dt = 1n the per-step factor is
+//
+//   K = dt/(tau + dt) = 0.5      and      out(k) = 1 - (1-K)^k
+//
+// which is exact in binary: 0, 0.5, 0.75, 0.875, 0.9375. This fixture pins THAT
+// — the implemented kernel — not the LRM's ramp, and the difference is the
+// documented ceiling rather than a hidden one.
+//
+//! bias V(n) = 0
+//! wave V(in) = 0, 1
+//! time 0, 1n, 2n, 3n, 4n
+//! analysis tran
+//! print none
+`include "check.vh"
+module ex063_transition(in, n);
+  inout in, n;
+  electrical in, n;
+  analog begin
+    `CHECK("transition step response", transition(V(in, n), 0, 2.2n, 2.2n),
+           1.0 - pow(0.5, $abstime / 1n), 1e-15);
+    // The endpoints the LRM DOES fix: it starts at the old value and ends at
+    // the new one, and never overshoots either.
+    `CHECKI("never exceeds the target", transition(V(in, n), 0, 2.2n, 2.2n) <= 1.0, 1);
+    `CHECKI("never below the start", transition(V(in, n), 0, 2.2n, 2.2n) >= 0.0, 1);
+    I(in, n) <+ 0.0;
+  end
+endmodule

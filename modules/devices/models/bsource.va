@@ -1,0 +1,77 @@
+// Arbitrary behavioral source (ngspice netlist letter B / ASRC), polynomial
+// subset over one control pair — docs/passives-and-sources.md §1.6, §3:
+//
+//     f = c0 + c1*vc + c2*vc^2,   vc = V(cp,cn)
+//     V mode (v={...}):  V(p,n) <+ factor*f   (branch-current unknown)
+//     I mode (i={...}):  I(p,n) <+ factor*f
+//
+// `factor` is ngspice's ASRC temperature multiplier, computed below from
+// tc1/tc2/temp/dtemp/reciproctc — it is not a card parameter.
+//
+// ponytail: the poly subset IS the documented ceiling, not a shortcut of mine.
+// Full ngspice expression trees need the netlist expression compiled into VA
+// (or an expression-VM device); the upgrade path is codegen, not more params.
+module bsource(p, n, cp, cn);
+    inout p, n, cp, cn;
+    electrical p, n, cp, cn;
+
+    parameter real c0 = 0.0;
+    parameter real c1 = 0.0;
+    parameter real c2 = 0.0;
+    // ngspice's ASRC temperature multiplier is computed, not a card constant
+    // (asrcload.c): factor = 1 + tc1*dT + tc2*dT^2 with
+    // dT = (temp_inst + dtemp) - 300.15 K, and factor := 1/factor when
+    // reciproctc != 0.  The reference is the hardcoded 300.15, NOT tnom.
+    // These are exactly ngspice's ASRC instance params (asrc.c ASRCpTable),
+    // so tc1=/tc2=/dtemp= on a behavioral-resistor B card now bind.
+    parameter real tc1 = 0.0;                 // 1/K
+    parameter real tc2 = 0.0;                 // 1/K^2
+    parameter real dtemp = 0.0;               // K, offset from circuit temp
+    // Instance temperature in K (repo convention, cf. hfet2.va); the sentinel
+    // means "not given" -> use the circuit temperature ($param_given is not
+    // usable here, see docs/fastvaf-va-coverage.md).
+    parameter real temp = -1.0e3;
+    parameter integer reciproctc = 0 from [0:1];
+    // 0 = voltage output (v={...}), 1 = current output (i={...}).
+    parameter integer imode = 0 from [0:1];
+
+    real tdev, dt, factor;
+    real k0, k1, k2;
+    real vc, f;
+
+    analog begin
+        // Bias-independent: temperature factor and its fold into the
+        // coefficients, both outside the V()-dependent chain (doc §2).
+        tdev = temp;
+        if (temp <= 0.0)
+            tdev = $temperature;
+        dt = (tdev + dtemp) - 300.15;
+        factor = 1.0 + tc1 * dt + tc2 * dt * dt;
+        if (reciproctc != 0)
+            factor = 1.0 / factor;
+
+        k0 = factor * c0;
+        k1 = factor * c1;
+        k2 = factor * c2;
+
+        vc = V(cp, cn);
+        f = k0 + vc * (k1 + k2 * vc);
+
+        if (imode != 0)
+            I(p, n) <+ f;
+        else if (c0 == 0.0 && c1 == 0.0 && c2 == 0.0)
+            // All-zero V mode is unreachable from a real v={...} card except
+            // literally `v=0`: the netlist layer leaves the coefficients at 0
+            // when the expression is outside the poly subset (§1.6 ceiling).
+            // Fall back to the open circuit, never a hard short across p-n
+            // (cf. §1.1 "never a hard short") — a floating node is a loud
+            // singular-matrix failure, a 0 V source is silently wrong.
+            // ponytail: the real fix is one line in the consumer —
+            // src/builder.zig extractPolyCoeffs must return
+            // error.UnsupportedDevice when collectTerms() fails; this branch
+            // is only the model-side backstop (and it costs `v=0` its short).
+            I(p, n) <+ 0.0;
+        else
+            V(p, n) <+ f;
+    end
+endmodule

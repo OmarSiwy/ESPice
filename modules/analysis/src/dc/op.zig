@@ -35,6 +35,12 @@ pub fn solve(
     x: []f64,
     options: Options,
 ) !SolveResult {
+    // §4.6.1: the operating point is a static solve — `analysis("dc")` and
+    // `$abstime` = 0. §5.10.2 `initial_step` is the first step of the analysis,
+    // and the OP is it: this is where a switch latches its power-on state from
+    // `ic`, before any @(cross) can move it. computeBaseline() evaluates
+    // const-Jacobian batches, so the state has to be in place first.
+    ckt.setSimState(.{ .kind = .dc, .initial_step = true });
     if (!options.warm_start) coldStart(ckt, x);
     try ckt.computeBaseline();
 
@@ -44,6 +50,9 @@ pub fn solve(
     // Operating point accepted: sync FSM devices (switches) so a following
     // transient starts from a committed state.
     if (r.converged) _ = ckt.stateCtl(.commit);
+    // The latch is committed; every later eval at this OP (ac, tf, noise,
+    // post-processing) is NOT an initial step and must not re-latch.
+    ckt.setSimState(.{ .kind = .dc });
     return r;
 }
 

@@ -1,0 +1,13 @@
+`define SECOND_CHOICE
+module ch10_elsif(p, n);
+  inout p, n; electrical p, n;
+  analog begin
+`ifdef FIRST_CHOICE
+    I(p,n) <+ V(p,n);
+`elsif SECOND_CHOICE
+    I(p,n) <+ 2.0*V(p,n);
+`else
+    I(p,n) <+ 3.0*V(p,n);
+`endif
+  end
+endmodule

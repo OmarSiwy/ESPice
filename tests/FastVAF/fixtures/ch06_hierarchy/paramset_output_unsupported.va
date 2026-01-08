@@ -1,0 +1,6 @@
+// EXPECT: error -- paramset output variables are not implemented.
+paramset ch6_output base;
+  output real selected;
+endparamset
+module ch6_output_user;
+endmodule

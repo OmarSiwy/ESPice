@@ -1,0 +1,73 @@
+{
+  "status": "compile_ok",
+  "module_name": "reduction",
+  "input_count": 4,
+  "output_count": 3,
+  "is_sequential": false,
+  "ports": [
+    {
+      "name": "a",
+      "dir": "in",
+      "width": 4
+    },
+    {
+      "name": "y_or",
+      "dir": "out",
+      "width": 1
+    },
+    {
+      "name": "y_and",
+      "dir": "out",
+      "width": 1
+    },
+    {
+      "name": "y_xor",
+      "dir": "out",
+      "width": 1
+    }
+  ],
+  "vectors": [
+    {
+      "a": 0,
+      "y_or": 0,
+      "y_and": 0,
+      "y_xor": 0
+    },
+    {
+      "a": 1,
+      "y_or": 1,
+      "y_and": 0,
+      "y_xor": 1
+    },
+    {
+      "a": 3,
+      "y_or": 1,
+      "y_and": 0,
+      "y_xor": 0
+    },
+    {
+      "a": 7,
+      "y_or": 1,
+      "y_and": 0,
+      "y_xor": 1
+    },
+    {
+      "a": 15,
+      "y_or": 1,
+      "y_and": 1,
+      "y_xor": 0
+    },
+    {
+      "a": 9,
+      "y_or": 1,
+      "y_and": 0,
+      "y_xor": 0
+    },
+    {
+      "a": 8,
+      "y_or": 1,
+      "y_and": 0,
+      "y_xor": 1
+    }
+  ]
+}

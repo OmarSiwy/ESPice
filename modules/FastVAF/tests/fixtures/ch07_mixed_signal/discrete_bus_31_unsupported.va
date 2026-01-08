@@ -1,0 +1,5 @@
+// EXPECT: error -- a 31-bit grouping is the largest legal analog integer access.
+module ch7_discrete_bus_31(p, d);
+  inout p; electrical p; input [0:30] d; wire [0:30] d;
+  analog I(p) <+ d;
+endmodule

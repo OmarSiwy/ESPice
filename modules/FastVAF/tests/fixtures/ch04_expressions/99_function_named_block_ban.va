@@ -1,0 +1,1 @@
+module ch4_fn_named(p); inout p; electrical p; analog function real named; input x; real x; begin : forbidden named=x; end endfunction analog I(p)<+named(V(p)); endmodule

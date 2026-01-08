@@ -1,0 +1,11 @@
+module Ch02_CaseSensitive(_port0, n$657);
+    inout _port0, n$657;
+    electrical _port0, n$657;
+    real gain_factor, Gain_Factor;
+
+    analog begin
+        gain_factor = 2.0;
+        Gain_Factor = 3.0;
+        I(_port0, n$657) <+ (gain_factor + Gain_Factor) * V(_port0, n$657);
+    end
+endmodule

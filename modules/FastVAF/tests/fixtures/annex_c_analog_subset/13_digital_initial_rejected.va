@@ -1,0 +1,5 @@
+// EXPECT: error
+module annex_c_digital_initial_rejected;
+    integer state;
+    initial state = 1;
+endmodule

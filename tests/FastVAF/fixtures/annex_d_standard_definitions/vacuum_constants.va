@@ -1,0 +1,4 @@
+`define P_C 2.99792458e8
+`define M_PI 3.14159265358979323846
+`define P_U0_OLD (4.0e-7 * `M_PI)
+module annex_d_vacuum(p); inout p; electrical p; analog I(p)<+`P_C+`P_U0_OLD+0.0*V(p); endmodule

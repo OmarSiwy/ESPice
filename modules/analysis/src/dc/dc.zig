@@ -34,6 +34,12 @@ pub fn solveWarm(
     options: Options,
     gmin_extra: f64,
 ) !SolveResult {
+    // §4.6.1 `analysis("dc")`, §9.10 `$abstime` = 0. Every DC point is a static
+    // solve; `initial_step` stays with op.solve, which is what actually runs
+    // first in a job. ponytail: a standalone `.dc` sweep with no preceding OP
+    // therefore never raises initial_step — plumb it in dc.run's point loop the
+    // day a model needs a power-on latch without an operating point.
+    ckt.setSimState(.{ .kind = .dc });
     try ckt.computeBaseline();
     const ws = try ckt.workspace();
     var copts = options.tol.newtonOpts(options.tol.itl2);

@@ -1,0 +1,43 @@
+nature Position;
+  units = "m";
+  access = Pos;
+  ddt_nature = Velocity;
+  abstol = 1e-6;
+endnature
+nature Velocity;
+  units = "m/s";
+  access = Vel;
+  ddt_nature = Acceleration;
+  idt_nature = Position;
+  abstol = 1e-6;
+endnature
+nature Acceleration;
+  units = "m/s^2";
+  access = Acc;
+  ddt_nature = Impulse;
+  idt_nature = Velocity;
+  abstol = 1e-6;
+endnature
+nature Impulse;
+  units = "m/s^3";
+  access = Imp;
+  idt_nature = Acceleration;
+  abstol = 1e-6;
+endnature
+nature Force;
+  units = "N";
+  access = F;
+  abstol = 1e-6;
+endnature
+discipline kinematic_d;
+  potential Position;
+  flow Force;
+enddiscipline
+discipline kinematic_v_d;
+  potential Velocity;
+  flow Force;
+enddiscipline
+module annex_d_kinematic;
+  electrical p;
+  analog I(p) <+ V(p);
+endmodule

@@ -1,0 +1,1 @@
+module ch5_ccvs(op,on,cp,cn); inout op,on,cp,cn; electrical op,on,cp,cn; branch(cp,cn) sense; analog begin V(sense)<+0.0; V(op,on)<+2.0*I(sense); end endmodule

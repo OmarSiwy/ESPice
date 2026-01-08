@@ -1,0 +1,15 @@
+module ch09_file_position_status(p, n);
+  inout p, n; electrical p, n;
+  integer fd, code, pos;
+  string message;
+  analog begin
+    fd = $fopen("fixture.dat", "r+");
+    pos = $ftell(fd);
+    code = $fseek(fd, 0, 0);
+    code = $rewind(fd);
+    $fflush(fd);
+    code = $ferror(fd, message);
+    code = $feof(fd);
+    I(p,n) <+ pos + code + 0.0*V(p,n);
+  end
+endmodule

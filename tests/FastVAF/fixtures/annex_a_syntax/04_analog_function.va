@@ -1,0 +1,13 @@
+module annex_a_analog_function(p, n);
+    inout p, n;
+    electrical p, n;
+
+    analog function real square;
+        input real value;
+        begin
+            square = value * value;
+        end
+    endfunction
+
+    analog I(p, n) <+ square(V(p, n));
+endmodule

@@ -1,0 +1,25 @@
+=== 084_indirect_contribution ===
+--- point 0 ---
+  x[out] = 0.000000e0
+  x[in] = 7.500000e-1
+  x[flowZ28outZ2cgndZ29] = 0.000000e0
+target value got=1.5 want=1.5 ok=1
+  res[out] = 0.000000e0
+    d res[out]/d x[flowZ28outZ2cgndZ29] = 1.000000e0
+  res[in] = 7.500000e-7
+    d res[in]/d x[in] = 1.000000e-6
+  res[flowZ28outZ2cgndZ29] = -1.500000e0
+    d res[flowZ28outZ2cgndZ29]/d x[out] = 1.000000e0
+    d res[flowZ28outZ2cgndZ29]/d x[in] = -2.000000e0
+--- point 1 ---
+  x[out] = 1.500000e0
+  x[in] = 7.500000e-1
+  x[flowZ28outZ2cgndZ29] = 0.000000e0
+target value got=1.5 want=1.5 ok=1
+  res[out] = 0.000000e0
+    d res[out]/d x[flowZ28outZ2cgndZ29] = 1.000000e0
+  res[in] = 7.500000e-7
+    d res[in]/d x[in] = 1.000000e-6
+  res[flowZ28outZ2cgndZ29] = 0.000000e0
+    d res[flowZ28outZ2cgndZ29]/d x[out] = 1.000000e0
+    d res[flowZ28outZ2cgndZ29]/d x[in] = -2.000000e0

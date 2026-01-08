@@ -1,0 +1,3 @@
+# annex C: posedge/negedge digital event controls are outside Verilog-A.
+E0209
+posedge

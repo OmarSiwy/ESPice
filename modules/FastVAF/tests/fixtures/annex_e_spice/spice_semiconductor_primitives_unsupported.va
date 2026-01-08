@@ -1,0 +1,6 @@
+// EXPECT: error -- SPICE objects require hierarchy/SPICE elaboration.
+module annex_e_spice_semiconductor_primitives_unsupported(d, g, s, b);
+  inout d, g, s, b; electrical d, g, s, b;
+  mosfet #(.w(1u), .l(100n), .ad(2p), .as(2p), .pd(3u), .ps(3u),
+      .nrd(1.0), .nrs(1.0)) m1(.d(d), .g(g), .s(s), .b(b));
+endmodule

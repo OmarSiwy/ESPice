@@ -1,0 +1,4 @@
+module annex_g_abstime(p, n);
+  inout p, n; electrical p, n;
+  analog I(p,n) <+ $abstime + 0.0 * V(p,n);
+endmodule

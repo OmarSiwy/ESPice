@@ -1,0 +1,5 @@
+`define __VAMS_USER_FORBIDDEN 7.0
+module ch10_reserved_vams_macro_prefix(p, n);
+  inout p, n; electrical p, n;
+  analog I(p,n) <+ `__VAMS_USER_FORBIDDEN*V(p,n);
+endmodule

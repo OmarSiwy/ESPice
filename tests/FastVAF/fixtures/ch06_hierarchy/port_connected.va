@@ -1,0 +1,4 @@
+module ch6_port_connected(p);
+  inout p; electrical p;
+  analog I(p) <+ $port_connected(p) ? V(p) : 0.0;
+endmodule

@@ -371,6 +371,10 @@ pub fn simulate(
         q_snap = try allocator.alloc(f64, n);
         simdZero(i_prev);
         for (&q_hist) |*q| q.* = try allocator.alloc(f64, n);
+        // Deliberately NOT preceded by setSimState: q_prev must be the charge
+        // the OPERATING POINT saw, so this seeding eval runs in the static
+        // state op.solve left behind (t = 0, dt = 0, analysis "dc"). The first
+        // loop iteration below is what switches the devices into "tran".
         ckt.eval(x, 0);
         // Seed the whole history with q(0): divided differences over the
         // flat history vanish, so LTE control runs from the first step.
@@ -441,6 +445,22 @@ pub fn simulate(
     var bp_save_dt: f64 = 0;
 
     while (t < options.t_stop and steps < options.max_steps) {
+        // Publish the point this attempt is aiming at BEFORE anything evaluates
+        // it: converger.run below drives eval (§9.10 `$abstime`, `ddt`) and
+        // updateStates, and a generated device reads Instance.abstime, not the
+        // `t` argument. Per ATTEMPT, not per accepted point — a rejected step
+        // `continue`s back to here with the shrunken dt, so the last write
+        // before an accept is always the dt that was actually accepted. Still
+        // O(instances) per timepoint: it is outside the Newton loop.
+        // §5.10.2 initial_step = the first step of the analysis; final_step =
+        // the step that lands on t_stop (dt is clamped to it at the bottom).
+        ckt.setSimState(.{
+            .t = t + dt,
+            .dt = dt,
+            .kind = .tran,
+            .initial_step = steps == 0,
+            .final_step = t + dt >= options.t_stop,
+        });
         const use_gear = gear and !use_be;
         const use_trap = trap and !use_be;
         const eff_method: Method = if (use_be) .backward_euler else options.method;
@@ -698,3 +718,107 @@ test "alpha: BE 1/dt, trap 2/dt" {
 
 // ponytail: estimateLTE/adaptTimestep tests removed — LTE control now
 // uses integrator.stepBound which has its own acceptance path in simulate().
+
+// The one property the `set_sim_state` plumbing exists for. A generated
+// device reads `Instance.abstime` (§9.10 `$abstime`), NOT the `t` argument of
+// eval — with the host never writing that field every SPICE waveform is
+// pinned at its t=0 value and a PULSE is a flat line at V1. Real generated
+// vsource + resistor, real Circuit, real integrator: nothing is mocked, so a
+// regression anywhere on the path (hook, vtable gate, call site, ordering)
+// fails here.
+test "transient: a PULSE vsource output actually moves with $abstime" {
+    const gpa = testing.allocator;
+    const dev = root.devices;
+    const Vsrc = dev.models.vsource;
+    const Res = dev.models.resistor;
+    const Proto = dev.batch.Proto;
+
+    // node 0 = ground, node 1 = out, node 2 = vsource branch current.
+    // PULSE(0 5 2ns 1ps 1ps 4ns 20ns): flat 0 up to 2 ns, 5 V over 2..6 ns.
+    const VStore = dev.batch.ProtoStore(Vsrc);
+    const vstore = try gpa.create(VStore);
+    vstore.* = .{};
+    try vstore.models.append(gpa, .{
+        .waveform = 1,
+        .pulse_v1 = 0.0,
+        .pulse_v2 = 5.0,
+        .pulse_td = 2e-9,
+        .pulse_tr = 1e-12,
+        .pulse_tf = 1e-12,
+        .pulse_pw = 4e-9,
+        .pulse_per = 20e-9,
+    });
+    try vstore.instances.append(gpa, .{});
+    try vstore.nodes.append(gpa, .{ 1, 0, 2 });
+
+    const RStore = dev.batch.ProtoStore(Res);
+    const rstore = try gpa.create(RStore);
+    rstore.* = .{};
+    try rstore.models.append(gpa, .{ .r = 1000.0 });
+    try rstore.instances.append(gpa, .{});
+    try rstore.nodes.append(gpa, .{ 1, 0 });
+
+    const protos = [_]Proto{
+        .{
+            .ctx = vstore,
+            .type_name = @typeName(Vsrc),
+            .pattern = VStore.addPattern,
+            .finalize = VStore.finalize,
+            .destroy = VStore.destroy,
+            .apply_perm = VStore.applyPerm,
+        },
+        .{
+            .ctx = rstore,
+            .type_name = @typeName(Res),
+            .pattern = RStore.addPattern,
+            .finalize = RStore.finalize,
+            .destroy = RStore.destroy,
+            .apply_perm = RStore.applyPerm,
+        },
+    };
+
+    // Circuit.deinit frees the label array and every label that is not the
+    // ground literal, so "0" everywhere keeps this leak-free.
+    const labels = try gpa.alloc([]const u8, 3);
+    for (labels) |*l| l.* = "0";
+    var ckt = try root.freeze(gpa, 3, .empty, labels, &protos, null);
+    defer ckt.deinit();
+
+    const x = try gpa.alloc(f64, 3);
+    defer gpa.free(x);
+    root.zeroSimd(x);
+
+    const probes = [_]u32{1};
+    var wf = try Waveform.init(gpa, 1, 512);
+    defer wf.deinit();
+
+    const sim = try simulate(&ckt, x, &probes, &wf, .{
+        .t_stop = 8e-9,
+        .dt_init = 1e-10,
+        .method = .backward_euler,
+    }, gpa);
+    try testing.expect(sim.completed);
+
+    // The waveform must reach BOTH pulse levels. Before the fix every sample
+    // read v1 (abstime stuck at 0), so `hi` was 0 and this failed.
+    const times = wf.timeSlice();
+    const vals = wf.probeValues(0);
+    var lo: f64 = std.math.inf(f64);
+    var hi: f64 = -std.math.inf(f64);
+    for (vals) |v| {
+        lo = @min(lo, v);
+        hi = @max(hi, v);
+    }
+    try testing.expectApproxEqAbs(@as(f64, 0.0), lo, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 5.0), hi, 1e-9);
+
+    // ...and reach them at the RIGHT times: a plumbing bug that fed a stale or
+    // off-by-one-step time would still swing 0..5.
+    for (times, vals) |tt, v| {
+        const want: f64 = if (tt < 2e-9 or tt > 6e-9) 0.0 else 5.0;
+        // Skip the 1 ps edges themselves — a sample can legitimately land
+        // mid-ramp there.
+        const on_edge = @abs(tt - 2e-9) < 2e-12 or @abs(tt - 6e-9) < 2e-12;
+        if (!on_edge) try testing.expectApproxEqAbs(want, v, 1e-6);
+    }
+}

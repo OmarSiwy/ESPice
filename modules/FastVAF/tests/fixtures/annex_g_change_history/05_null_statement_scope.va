@@ -1,0 +1,8 @@
+module annex_g_null_statement(p, n);
+  inout p, n; electrical p, n;
+  analog begin
+    ;
+    if (V(p,n) > 0.0) ;
+    else I(p,n) <+ V(p,n);
+  end
+endmodule

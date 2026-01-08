@@ -1,0 +1,2 @@
+# LRM 5.2.1/4.7.2: access functions are forbidden inside an analog function.
+E0421

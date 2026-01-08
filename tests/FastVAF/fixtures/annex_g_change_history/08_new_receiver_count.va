@@ -1,0 +1,5 @@
+// NONCONFORMING ACCEPTANCE SNAPSHOT: $receiver_count is connectmodule-only.
+module annex_g_receiver_count(p, n);
+  inout p, n; electrical p, n;
+  analog I(p,n) <+ $receiver_count(p) + 0.0 * V(p,n);
+endmodule

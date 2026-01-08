@@ -1,0 +1,1 @@
+module ch4_op_function(p); inout p; electrical p; analog function real stateful; input x; real x; stateful=ddt(x); endfunction analog I(p)<+stateful(V(p)); endmodule

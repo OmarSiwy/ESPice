@@ -1,0 +1,14 @@
+module combined_three_terminal_piecewise_device(a, b, c);
+  inout a, b, c; electrical a, b, c;
+  parameter real ghigh = 2m from [0:inf);
+  parameter real glow = 1u from [0:inf);
+  real selected;
+  analog begin
+    case (V(c,b) > 0.5)
+      1: selected = ghigh;
+      default: selected = glow;
+    endcase
+    I(a,b) <+ selected * V(a,b);
+    I(c,b) <+ V(c,b) / 1G;
+  end
+endmodule

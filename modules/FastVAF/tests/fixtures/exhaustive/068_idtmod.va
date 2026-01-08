@@ -1,0 +1,29 @@
+// §4.5.5 idtmod — the integral wrapped into a modulus. The integrand is
+// constant, so the unwrapped integral is exactly k*t and the wrapped one is
+// that value reduced modulo `m` — a phase accumulator, which is what this
+// operator exists for.
+//
+// k = 2, m = 3: the raw integral passes 3 between t = 1.5 s and t = 2 s, so the
+// transcript shows the wrap happen.
+//
+//! param k = 2.0
+//! bias V(n) = 0
+//! time 0, 0.5, 1.0, 1.5, 2.0, 2.5
+//! analysis tran
+//! print none
+`include "check.vh"
+module ex068_idtmod(p, n);
+  inout p, n;
+  electrical p, n;
+  parameter real k = 2.0;
+  real raw;
+  analog begin
+    raw = k * $abstime;
+    $strobe("t=%g raw=%g wrapped=%g", $abstime, raw, idtmod(k, 0.0, 3.0, 0.0));
+    `CHECK("idtmod == idt wrapped into [0,m)", idtmod(k, 0.0, 3.0, 0.0),
+           raw - 3.0 * floor(raw / 3.0), 1e-12);
+    `CHECKI("stays inside the modulus", (idtmod(k, 0.0, 3.0, 0.0) >= 0.0) &&
+            (idtmod(k, 0.0, 3.0, 0.0) < 3.0), 1);
+    I(p, n) <+ 0.0;
+  end
+endmodule

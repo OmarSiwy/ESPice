@@ -1,0 +1,5 @@
+// EXPECT: error -- FastVAF deliberately compiles one flattened device.
+module ch6_parent(p);
+  inout p; electrical p;
+  child u(p);
+endmodule

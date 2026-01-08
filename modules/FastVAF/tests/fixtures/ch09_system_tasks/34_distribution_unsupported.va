@@ -1,0 +1,6 @@
+// EXPECT: error
+module ch09_distribution_unsupported(p, n);
+  inout p, n; electrical p, n;
+  integer seed;
+  analog I(p,n) <+ $dist_normal(seed, 0, 1);
+endmodule

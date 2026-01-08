@@ -1,0 +1,8 @@
+// EXPECT: error -- SPICE objects require hierarchy/SPICE elaboration.
+module annex_e_spice_source_primitives_unsupported(p, n);
+  inout p, n; electrical p, n;
+  vsine #(.dc(0.0), .mag(1.0), .phase(0.0), .offset(0.0), .ampl(1.0),
+      .freq(1k), .td(1n), .damp(1k), .sinephase(0.0),
+      .ammodindex(0.1), .ammodfreq(10k), .ammodphase(0.0),
+      .fmmodindex(0.2), .fmmodfreq(20k)) v1(.p(p), .n(n));
+endmodule

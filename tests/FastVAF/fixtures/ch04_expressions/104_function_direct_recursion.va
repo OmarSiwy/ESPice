@@ -1,0 +1,1 @@
+module ch4_fn_direct(p); inout p; electrical p; analog function real recurse; input x; real x; recurse=(x>0.0)?recurse(x-1.0):0.0; endfunction analog I(p)<+V(p); endmodule

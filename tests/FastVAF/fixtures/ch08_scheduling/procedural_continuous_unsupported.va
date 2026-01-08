@@ -1,0 +1,5 @@
+// EXPECT: error -- force/assign processes need the digital scheduler.
+module ch8_proc_continuous;
+  integer source, target;
+  always begin force target = source; end
+endmodule

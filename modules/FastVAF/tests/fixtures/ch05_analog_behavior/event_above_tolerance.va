@@ -1,0 +1,1 @@
+module ch5_above_tol(p); inout p; electrical p; real x; analog begin @(above(V(p),1p,1u)) x=V(p); I(p)<+x; end endmodule

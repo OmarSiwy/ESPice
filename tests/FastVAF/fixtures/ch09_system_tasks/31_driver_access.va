@@ -1,0 +1,13 @@
+// NONCONFORMING ACCEPTANCE SNAPSHOT: these functions are connectmodule-only.
+// FastVAF currently accepts them in an ordinary module and lowers them to zero.
+module ch09_driver_access(p, n);
+  inout p, n; electrical p, n;
+  real info;
+  analog begin
+    info = $driver_count(p) + $receiver_count(p);
+    info = info + $driver_state(p,0) + $driver_strength(p,0);
+    info = info + $driver_delay(p,0) + $driver_next_state(p,0);
+    info = info + $driver_next_strength(p,0) + $driver_type(p,0);
+    I(p,n) <+ info + 0.0*V(p,n);
+  end
+endmodule

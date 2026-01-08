@@ -1,0 +1,37 @@
+// Mutual inductance (ngspice K element). Pure cross-flux, per
+// docs/passives-and-sources.md §1.3 / §3 `kinduc_q`:
+//
+//   q_br1 = -M * I_br2,   q_br2 = -M * I_br1,   zero eval, no self terms
+//
+// The two unknowns are the *coupled inductors'* branch currents, not this
+// device's own: L1 and L2 already own their self flux (-L*I_br, §1.2), so a
+// self term here would double-count the winding inductance. Getting either
+// sign positive flips the coupling polarity and breaks passivity.
+//
+// The netlist layer resolves the coefficient into M = k*sqrt(L1 L2) at build
+// time (only it knows L1/L2 — §1.3) and writes the result back into this same
+// field, so `k` HOLDS THE MUTUAL INDUCTANCE IN HENRIES here, not the
+// dimensionless coefficient. It is named `k` because src/builder.zig:727/734
+// assigns `model.k` directly; there is no l1/l2 and no sqrt in here. Defaults
+// to 0 (ngspice makes the K coefficient mandatory), so an unresolved coupling
+// is inert rather than perfectly coupled.
+//
+// ponytail: `br1`/`br2` are declared as terminals because that is the only
+// handle Verilog-A gives a module on an unknown it does not own — same trick
+// as cccs/ccvs, which expose a foreign V-source's branch as a terminal pair.
+// The netlist layer binds them to L1/L2's branch-current unknowns (builder
+// addKinduc passes exactly two), so here V(brX) *reads* that inductor's
+// branch current and I(brX) *writes* its KVL row: `I(br1) <+ -k*ddt(V(br2))`
+// is literally Q[br1] = -k*x.br2. Upgrade path: none needed — if VA ever
+// grows cross-instance branch access, swap in `V(br1) <+ k*ddt(I(br2))`.
+module kinduc(br1, br2);
+    inout br1, br2;
+    electrical br1, br2;
+
+    parameter real k = 0.0; // resolved mutual inductance M, henries (signed: polarity)
+
+    analog begin
+        I(br1) <+ -k * ddt(V(br2));
+        I(br2) <+ -k * ddt(V(br1));
+    end
+endmodule

@@ -1,0 +1,6 @@
+// EXPECT: error -- built-in primitive ports have specified auto-connector names.
+module ch7_primitive_generated_ports(a, b, y);
+  input a, b; output y; wire a, b, y;
+  and gate_instance(y, a, b);
+  defparam y__gate_instance__in1.threshold = 0.5;
+endmodule

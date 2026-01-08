@@ -1,0 +1,5 @@
+// EXPECT: error
+module ch02_question_digit_rejected;
+    integer value;
+    analog value = 4'b?;
+endmodule

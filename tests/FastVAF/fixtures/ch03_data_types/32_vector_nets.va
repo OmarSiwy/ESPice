@@ -1,0 +1,2 @@
+module ch3_vector_nets(p); inout p; electrical [3:0] p; analog begin I(p[0])<+V(p[1]); I(p[2])<+V(p[3]); end endmodule
+// EXPECT: error -- normative syntax/restriction snapshot for this rule family.

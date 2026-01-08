@@ -1,0 +1,150 @@
+`define CURRENT_ABSTOL 2e-12
+`define CHARGE_ABSTOL 2e-14
+`define VOLTAGE_ABSTOL 2e-6
+`define FLUX_ABSTOL 2e-9
+`define MAGNETO_MOTIVE_FORCE_ABSTOL 3e-12
+`define TEMPERATURE_ABSTOL 2e-4
+`define POWER_ABSTOL 2e-9
+`define POSITION_ABSTOL 2e-6
+`define VELOCITY_ABSTOL 3e-6
+`define ACCELERATION_ABSTOL 4e-6
+`define IMPULSE_ABSTOL 5e-6
+`define FORCE_ABSTOL 6e-6
+`define ANGLE_ABSTOL 7e-6
+`define ANGULAR_VELOCITY_ABSTOL 8e-6
+`define ANGULAR_ACCELERATION_ABSTOL 9e-6
+`define ANGULAR_FORCE_ABSTOL 10e-6
+
+nature annex_d_override_current;
+  units="A"; access=AnnexDOverrideI;
+`ifdef CURRENT_ABSTOL
+  abstol=`CURRENT_ABSTOL;
+`else
+  abstol=1e-12;
+`endif
+endnature
+nature annex_d_override_charge;
+  units="coul"; access=AnnexDOverrideQ;
+`ifdef CHARGE_ABSTOL
+  abstol=`CHARGE_ABSTOL;
+`else
+  abstol=1e-14;
+`endif
+endnature
+nature annex_d_override_voltage;
+  units="V"; access=AnnexDOverrideV;
+`ifdef VOLTAGE_ABSTOL
+  abstol=`VOLTAGE_ABSTOL;
+`else
+  abstol=1e-6;
+`endif
+endnature
+nature annex_d_override_flux;
+  units="Wb"; access=AnnexDOverridePhi;
+`ifdef FLUX_ABSTOL
+  abstol=`FLUX_ABSTOL;
+`else
+  abstol=1e-9;
+`endif
+endnature
+nature annex_d_override_mmf;
+  units="A*turn"; access=AnnexDOverrideMMF;
+`ifdef MAGNETO_MOTIVE_FORCE_ABSTOL
+  abstol=`MAGNETO_MOTIVE_FORCE_ABSTOL;
+`else
+  abstol=1e-12;
+`endif
+endnature
+nature annex_d_override_temperature;
+  units="K"; access=AnnexDOverrideTemp;
+`ifdef TEMPERATURE_ABSTOL
+  abstol=`TEMPERATURE_ABSTOL;
+`else
+  abstol=1e-4;
+`endif
+endnature
+nature annex_d_override_power;
+  units="W"; access=AnnexDOverridePwr;
+`ifdef POWER_ABSTOL
+  abstol=`POWER_ABSTOL;
+`else
+  abstol=1e-9;
+`endif
+endnature
+nature annex_d_override_position;
+  units="m"; access=AnnexDOverridePos;
+`ifdef POSITION_ABSTOL
+  abstol=`POSITION_ABSTOL;
+`else
+  abstol=1e-6;
+`endif
+endnature
+nature annex_d_override_velocity;
+  units="m/s"; access=AnnexDOverrideVel;
+`ifdef VELOCITY_ABSTOL
+  abstol=`VELOCITY_ABSTOL;
+`else
+  abstol=1e-6;
+`endif
+endnature
+nature annex_d_override_acceleration;
+  units="m/s^2"; access=AnnexDOverrideAcc;
+`ifdef ACCELERATION_ABSTOL
+  abstol=`ACCELERATION_ABSTOL;
+`else
+  abstol=1e-6;
+`endif
+endnature
+nature annex_d_override_impulse;
+  units="m/s^3"; access=AnnexDOverrideImp;
+`ifdef IMPULSE_ABSTOL
+  abstol=`IMPULSE_ABSTOL;
+`else
+  abstol=1e-6;
+`endif
+endnature
+nature annex_d_override_force;
+  units="N"; access=AnnexDOverrideF;
+`ifdef FORCE_ABSTOL
+  abstol=`FORCE_ABSTOL;
+`else
+  abstol=1e-6;
+`endif
+endnature
+nature annex_d_override_angle;
+  units="rads"; access=AnnexDOverrideTheta;
+`ifdef ANGLE_ABSTOL
+  abstol=`ANGLE_ABSTOL;
+`else
+  abstol=1e-6;
+`endif
+endnature
+nature annex_d_override_angular_velocity;
+  units="rads/s"; access=AnnexDOverrideOmega;
+`ifdef ANGULAR_VELOCITY_ABSTOL
+  abstol=`ANGULAR_VELOCITY_ABSTOL;
+`else
+  abstol=1e-6;
+`endif
+endnature
+nature annex_d_override_angular_acceleration;
+  units="rads/s^2"; access=AnnexDOverrideAlpha;
+`ifdef ANGULAR_ACCELERATION_ABSTOL
+  abstol=`ANGULAR_ACCELERATION_ABSTOL;
+`else
+  abstol=1e-6;
+`endif
+endnature
+nature annex_d_override_angular_force;
+  units="N*m"; access=AnnexDOverrideTau;
+`ifdef ANGULAR_FORCE_ABSTOL
+  abstol=`ANGULAR_FORCE_ABSTOL;
+`else
+  abstol=1e-6;
+`endif
+endnature
+
+module annex_d_abstol_overrides(p);
+  inout p; electrical p;
+  analog I(p) <+ V(p);
+endmodule

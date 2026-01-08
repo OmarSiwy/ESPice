@@ -1,0 +1,225 @@
+// JFET, ngspice netlist letter `J`, level 1: SPICE1 Shichman-Hodges quadratic
+// channel plus the Sydney/Macquarie "B-factor" doping tail.
+// docs/jfet-mesfet-hfet.md §1.1 (normative math, exact ngspice `apart`/`cpart`
+// forms), §1.5 (temperature + limiting), §3 (eval order), noise table.
+//
+// Topology (jfetload.c): D--RD--dp, S--RS--sp, two gate junction diodes
+// g--dp and g--sp, channel current dp--sp, normal/inverse mode swap on
+// sign(vds).  Everything below the "bias" comment is the §3 chain in order:
+// bias -> limit -> gate diodes -> mode select -> 3-region channel -> gate
+// charges -> stamps -> noise.
+module jfet(d, g, s);
+    inout d, g, s;
+    electrical d, g, s;
+    electrical dp, sp;                          // internal drain/source
+    branch (d, dp) brd;
+    branch (s, sp) brs;
+
+    // +1 = NJF, -1 = PJF.  ngspice carries this in the .model *name*
+    // (njf/pjf), not as a card parameter; a VA module needs a knob.
+    parameter integer jtype = 1 from [-1:1] exclude 0;
+
+    // --- DC channel ---
+    parameter real vto    = -2.0;                // V     threshold
+    parameter real beta   = 1.0e-4 from [0:inf); // A/V^2 transconductance
+    parameter real lambda = 0.0    from [0:inf); // 1/V   channel-length mod
+    parameter real b      = 1.0    from [0:inf); // -     Sydney doping profile
+    // --- Gate junctions ---
+    parameter real is     = 1.0e-14 from [0:inf); // A    gate sat current
+    parameter real n      = 1.0     from (0:inf); // -    emission coefficient
+    parameter real gmin   = 1.0e-12 from [0:inf); // S    junction shunt
+    // --- Parasitics ---
+    parameter real rd     = 0.0 from [0:inf);     // ohm
+    parameter real rs     = 0.0 from [0:inf);     // ohm
+    // --- Junction capacitance (grading is fixed at 1/2 in the JFET model) ---
+    parameter real cgs    = 0.0 from [0:inf);     // F
+    parameter real cgd    = 0.0 from [0:inf);     // F
+    parameter real pb     = 1.0 from (0:inf);     // V   gate junction potential
+    parameter real fc     = 0.5 from [0:1);       // -   forward-bias cap coeff
+    // --- Temperature (§1.5) ---
+    parameter real tnom    = 27.0;                // degC nominal
+    // ponytail: $param_given reads 1.0 in this frontend, so "instance TEMP not
+    // given" is spelled as an impossible sentinel; any real card value wins,
+    // everything else follows the simulator's circuit temperature (ngspice:
+    // JFETtemp = CKTtemp + dtemp, instance TEMP is an absolute override).
+    parameter real temp    = -273.15;             // degC absolute override
+    parameter real dtemp   = 0.0;                 // degC instance offset
+    parameter real eg      = 1.11 from (0:inf);   // eV  bandgap for IS(T)
+    parameter real xti     = 3.0  from [0:inf);   // -   IS(T) exponent
+    parameter real vtotc   = 0.0;                 // V/degC threshold drift
+    parameter real betatce = 0.0;                 // %/degC beta drift
+    // --- Noise (jfetnoi.c) ---
+    parameter real kf      = 0.0 from [0:inf);    // -   flicker coefficient
+    parameter real af      = 1.0 from (0:inf);    // -   flicker exponent
+    parameter integer nlev = 0   from [0:3];      // -   channel-thermal form
+    parameter real gdsnoi  = 1.0 from [0:inf);    // -   NLEV=3 channel factor
+    // --- Geometry ---
+    parameter real area = 1.0 from (0:inf);
+    parameter real m = 1.0 from (0:inf);          // -   multiplicity
+
+    real tj, tnk, vt, vtnom, fact1, fact2, egfet1, egfet, arg1, argt;
+    real pbfact1, pbfact, pbo, pbt, gmaold, gmanew, cjfact, cjfact1, cgs_t, cgd_t;
+    real ist, nvt, vcrit, vto_t, beta_t, bfac, scale, fcx, fcpb, f1c, f2, f3;
+    real vgs, vgd, vgsc, vgdc, vdsc, mode, vgse, vdse, vgst, betap, apart;
+    real ich, gm, id, igs, igd, qgs, qgd, pnch, alpha;
+
+    // Gate junction, §1.1: I = IS(T)(e^(v/NVt)-1) + gmin*v.  Above arg = 80 the
+    // exponential is continued by its own tangent (the §1.2 technique:
+    // I -> I_arg0*(arg-(arg0-1))), which keeps dI/dV finite *and non-zero* --
+    // a hard min(arg,80) clamp would leave a flat wall with no conductance for
+    // NR to climb back down.  Reverse is exact (e^-large -> 0), so jfetload.c's
+    // -5*N*Vt linearization is only a stamp-side trick and is not needed here.
+    analog function real gatei;
+        input v, isat, nvtx, gm0;
+        real v, isat, nvtx, gm0, arg;
+        begin
+            arg = v / nvtx;
+            if (arg < 80.0) gatei = isat * (exp(arg) - 1.0) + gm0 * v;
+            else gatei = isat * (exp(80.0) * (arg - 79.0) - 1.0) + gm0 * v;
+        end
+    endfunction
+
+    analog begin
+        // ---- Bias-independent prep: temperature, geometry, cap constants.
+        // None of this touches V(), so it stays out of the derivative chains
+        // (doc §2 "bias -> ..." spine; jfettemp.c does it once per temp).
+        tnk    = tnom + 273.15;
+        tj     = (temp > -273.0 ? temp + 273.15 : $temperature) + dtemp;
+        vt     = 1.380649e-23 * tj / 1.602176634e-19;
+        vtnom  = 1.380649e-23 * tnk / 1.602176634e-19;
+        ist    = is * exp((tj / tnk - 1.0) * eg / (n * vt) + (xti / n) * ln(tj / tnk));
+        vto_t  = vto + vtotc * (tj - tnk);
+        beta_t = beta * pow(1.01, betatce * (tj - tnk));
+        nvt    = n * vt;
+        // pnjlim knee (§1.5 "Vcrit per gate junction"); max() keeps IS = 0
+        // (gate diodes disabled) out of ln(0).
+        vcrit  = nvt * ln(nvt / (1.4142135623730951 * max(ist, 1.0e-30)));
+        // Sydney doping-tail factor, nominal potentials (jfettemp.c JFETbFac).
+        // b = 1 => bfac = 0 => classic quadratic Id = betap*vgst^2.
+        bfac   = (1.0 - b) / (pb - vto);
+        scale  = area * m;
+
+        // §1.5 junction-potential and zero-bias-cap temperature maps
+        // (jfettemp.c tGatePot / tCGS / tCGD; identical to mos1.va's pbt/cfb
+        // with the grading fixed at 1/2).
+        fact1   = tnk / 300.15;
+        fact2   = tj / 300.15;
+        egfet1  = 1.16 - (7.02e-4 * tnk * tnk) / (tnk + 1108.0);
+        egfet   = 1.16 - (7.02e-4 * tj * tj) / (tj + 1108.0);
+        arg1    = -egfet1 / (2.0 * 1.380649e-23 * tnk)
+                + 1.1150877 / (2.0 * 1.380649e-23 * 300.15);
+        argt    = -egfet / (2.0 * 1.380649e-23 * tj)
+                + 1.1150877 / (2.0 * 1.380649e-23 * 300.15);
+        pbfact1 = -2.0 * vtnom * (1.5 * ln(fact1) + 1.602176634e-19 * arg1);
+        pbfact  = -2.0 * vt * (1.5 * ln(fact2) + 1.602176634e-19 * argt);
+        pbo     = (pb - pbfact1) / fact1;
+        pbt     = fact2 * pbo + pbfact;
+        gmaold  = (pb - pbo) / pbo;
+        gmanew  = (pbt - pbo) / pbo;
+        cjfact  = 1.0 + 0.5 * (4.0e-4 * (tnk - 300.15) - gmaold);
+        cjfact1 = 1.0 + 0.5 * (4.0e-4 * (tj - 300.15) - gmanew);
+        cgs_t   = cgs * cjfact1 / cjfact;
+        cgd_t   = cgd * cjfact1 / cjfact;
+
+        // Depletion-cap forward extension, grading m = 1/2 fixed, on the
+        // temperature-shifted potential.  FC is clamped at 0.95 exactly as
+        // jfettemp.c does: above that f2 = (1-FC)^1.5 collapses.
+        fcx    = min(fc, 0.95);
+        fcpb   = fcx * pbt;
+        f1c    = 2.0 * pbt * (1.0 - sqrt(1.0 - fcx));
+        f2     = pow(1.0 - fcx, 1.5);
+        f3     = 1.0 - 1.5 * fcx;
+
+        // ---- Bias + limiting (§1.5 order: fetlim(vgs), fetlim(vgd), limvds,
+        // then pnjlim on both gate junctions).  $limit hands the algorithm to
+        // the host (contract `limit`) and returns the probe unchanged if the
+        // host declines, so the limited and unlimited values are identical
+        // here by construction -- V(dp,sp) == V(g,sp) - V(g,dp).
+        // ponytail: MODEINITJCT's vgs = -1 / OFF-flag seed has no Verilog-A
+        // spelling (no mode flag, and $param_given is unusable in this
+        // frontend); it belongs to the host's pnjlim, which is the only side
+        // that knows the iteration count. Nothing else to do here.
+        vgsc = jtype * $limit(V(g, sp), "fetlim", vto_t);
+        vgdc = jtype * $limit(V(g, dp), "fetlim", vto_t);
+        vdsc = jtype * $limit(V(dp, sp), "limvds");
+        vgdc = vgsc - vdsc;                     // limvds feeds back into vgd
+        vgs  = jtype * $limit(V(g, sp), "pnjlim", nvt, vcrit);
+        vgd  = jtype * $limit(V(g, dp), "pnjlim", nvt, vcrit);
+
+        // ---- Gate junctions, both sides.
+        igs = gatei(vgs, ist, nvt, gmin);
+        igd = gatei(vgd, ist, nvt, gmin);
+
+        // ---- Mode select on sign(vds): swap vgs <-> vgd, work with |vds|.
+        if (vdsc >= 0.0) begin
+            mode = 1.0;
+            vgse = vgsc;
+        end else begin
+            mode = -1.0;
+            vgse = vgdc;
+        end
+        vdse = mode * vdsc;
+
+        // ---- Channel, 3 regions (§1.1).  Clamping vgst at 0 makes cutoff
+        // fall out of either branch (both are 0 at vgst = 0).
+        vgst = vgse - vto_t;
+        if (vgst < 0.0) vgst = 0.0;
+        betap = beta_t * (1.0 + lambda * vdse);
+        if (vdse >= vgst) begin
+            // saturation: Id = betap*vgst^2*(B + vgst*Bfac)
+            ich = betap * vgst * vgst * (b + vgst * bfac);
+            gm  = betap * vgst * (2.0 * b + 3.0 * vgst * bfac);
+        end else begin
+            // linear: cpart = vds*(vds*(Bfac*vds - B) + vgst*apart)
+            apart = 2.0 * b + 3.0 * bfac * (vgst - vdse);
+            ich = betap * vdse * (vdse * (bfac * vdse - b) + vgst * apart);
+            gm  = betap * vdse * (2.0 * b + 3.0 * bfac * (2.0 * vgst - vdse));
+        end
+        // Per-device current (area-scaled); m multiplies at the stamp, so the
+        // noise PSDs can use the ngspice per-device I_D/g_m directly.
+        id = mode * ich * area;
+
+        // ---- Gate depletion charges on the *raw* (pnjlim) biases, no mode
+        // swap, FC quadratic extension above fc*pbt.
+        if (vgs < fcpb)
+            qgs = 2.0 * cgs_t * pbt * (1.0 - sqrt(1.0 - vgs / pbt));
+        else
+            qgs = cgs_t * (f1c + (f3 * (vgs - fcpb) + 0.25 * (vgs * vgs - fcpb * fcpb) / pbt) / f2);
+
+        if (vgd < fcpb)
+            qgd = 2.0 * cgd_t * pbt * (1.0 - sqrt(1.0 - vgd / pbt));
+        else
+            qgd = cgd_t * (f1c + (f3 * (vgd - fcpb) + 0.25 * (vgd * vgd - fcpb * fcpb) / pbt) / f2);
+
+        // ---- Stamps (jfetload.c: ggs/ggd on the junctions, gm/gds on the
+        // channel with the xnrm/xrev swap already folded into `mode`).
+        I(g, sp) <+ jtype * scale * igs + ddt(jtype * scale * qgs);
+        I(g, dp) <+ jtype * scale * igd + ddt(jtype * scale * qgd);
+        I(dp, sp) <+ jtype * m * id;
+
+        // ---- Series RD/RS.  rd = 0 is ngspice's node collapse (JFETsetup);
+        // the VA equivalent is a switch branch, which the frontend lowers to
+        // a real short instead of a 1e12 S resistor.  Thermal noise 4kT*g*A*m
+        // rides along on the conducting branch (jfetnoi.c RD/RS rows).
+        if (rd > 0.0)
+            I(brd) <+ scale * V(brd) / rd
+                    + white_noise(4.0 * 1.380649e-23 * tj * scale / rd, "rd");
+        else V(brd) <+ 0.0;
+        if (rs > 0.0)
+            I(brs) <+ scale * V(brs) / rs
+                    + white_noise(4.0 * 1.380649e-23 * tj * scale / rs, "rs");
+        else V(brs) <+ 0.0;
+
+        // ---- Channel noise (jfetnoi.c): NLEV<3 is 4kT*(2/3)|gm|, NLEV=3 the
+        // alpha-weighted form.  gm/vgst/vdse are the mode-frame values above.
+        if (nlev < 3) pnch = 2.0 / 3.0 * abs(gm) * area;
+        else if (vgst > 0.0) begin
+            alpha = max(0.0, 1.0 - vdse / vgst);
+            pnch = 2.0 / 3.0 * beta_t * area * vgst
+                 * (1.0 + alpha + alpha * alpha) / (1.0 + alpha) * gdsnoi;
+        end else pnch = 0.0;
+        I(dp, sp) <+ white_noise(4.0 * 1.380649e-23 * tj * pnch * m, "channel");
+        if (kf > 0.0)
+            I(dp, sp) <+ flicker_noise(m * kf * pow(abs(id), af), 1.0, "flicker");
+    end
+endmodule

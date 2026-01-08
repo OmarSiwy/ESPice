@@ -1,0 +1,39 @@
+=== 083_controlled_sources ===
+--- point 0 ---
+  x[op] = 0.000000e0
+  x[on] = 0.000000e0
+  x[cp] = 5.000000e-1
+  x[cn] = 0.000000e0
+control voltage got=0.5 want=0.5 ok=1
+vccs output current got=0.001 want=0.001 ok=1
+  res[op] = 1.000000e-3
+    d res[op]/d x[cp] = 2.000000e-3
+    d res[op]/d x[cn] = -2.000000e-3
+  res[on] = -1.000000e-3
+    d res[on]/d x[cp] = -2.000000e-3
+    d res[on]/d x[cn] = 2.000000e-3
+  res[cp] = 5.000000e-7
+    d res[cp]/d x[cp] = 1.000000e-6
+    d res[cp]/d x[cn] = -1.000000e-6
+  res[cn] = -5.000000e-7
+    d res[cn]/d x[cp] = -1.000000e-6
+    d res[cn]/d x[cn] = 1.000000e-6
+--- point 1 ---
+  x[op] = 1.000000e0
+  x[on] = 0.000000e0
+  x[cp] = 5.000000e-1
+  x[cn] = 0.000000e0
+control voltage got=0.5 want=0.5 ok=1
+vccs output current got=0.001 want=0.001 ok=1
+  res[op] = 1.000000e-3
+    d res[op]/d x[cp] = 2.000000e-3
+    d res[op]/d x[cn] = -2.000000e-3
+  res[on] = -1.000000e-3
+    d res[on]/d x[cp] = -2.000000e-3
+    d res[on]/d x[cn] = 2.000000e-3
+  res[cp] = 5.000000e-7
+    d res[cp]/d x[cp] = 1.000000e-6
+    d res[cp]/d x[cn] = -1.000000e-6
+  res[cn] = -5.000000e-7
+    d res[cn]/d x[cp] = -1.000000e-6
+    d res[cn]/d x[cn] = 1.000000e-6

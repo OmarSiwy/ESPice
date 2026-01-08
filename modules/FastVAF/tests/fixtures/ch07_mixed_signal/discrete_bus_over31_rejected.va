@@ -1,0 +1,5 @@
+// EXPECT: error -- LRM 7.3.1 forbids analog access to bit groupings wider than 31.
+module ch7_discrete_bus_over31(p, d);
+  inout p; electrical p; input [0:31] d; wire [0:31] d;
+  analog I(p) <+ d;
+endmodule

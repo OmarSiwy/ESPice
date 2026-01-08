@@ -1,0 +1,5 @@
+module ch09_atomic_min(p, n);
+  inout p, n; electrical p, n;
+  analog I(p,n) <+ V(p,n) + $min(V(p,n), 0.0);
+endmodule
+

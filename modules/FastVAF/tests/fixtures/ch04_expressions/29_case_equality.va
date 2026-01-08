@@ -1,0 +1,10 @@
+module ch04_case_equality(p, n);
+    inout p, n;
+    electrical p, n;
+    integer value;
+
+    analog begin
+        value = (V(p, n) === 0.0) + (V(p, n) !== 1.0);
+        I(p, n) <+ value;
+    end
+endmodule

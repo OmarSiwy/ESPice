@@ -1,0 +1,6 @@
+module ch11_port_node_objects(p, n, sense);
+  input sense;
+  inout p, n;
+  electrical p, n, sense;
+  analog I(p,n) <+ V(sense,n);
+endmodule

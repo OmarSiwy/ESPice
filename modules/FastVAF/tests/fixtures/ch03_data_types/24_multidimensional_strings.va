@@ -1,0 +1,2 @@
+module ch3_multistring(p); inout p; electrical p; string paths[0:1][0:1] = '{'{"a","b"},'{"c","d"}}; analog I(p)<+0.0*V(p); endmodule
+// EXPECT: error -- normative syntax/restriction snapshot for this rule family.

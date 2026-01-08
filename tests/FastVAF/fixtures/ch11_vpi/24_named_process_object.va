@@ -1,0 +1,8 @@
+module ch11_named_process_object(p, n);
+  inout p, n; electrical p, n;
+  real value;
+  analog begin : behavior
+    value = V(p,n);
+    I(p,n) <+ value;
+  end
+endmodule

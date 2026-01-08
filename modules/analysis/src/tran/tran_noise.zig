@@ -208,6 +208,10 @@ pub fn simulate(
             .noise_currents = noise_currents,
         };
 
+        // Same contract as tran.simulate: the devices' §9.10 `$abstime`/dt must
+        // describe the point this attempt targets, and a rejected step
+        // `continue`s back here with the halved dt.
+        ckt.setSimState(.{ .t = t + dt, .dt = dt, .kind = .tran, .initial_step = steps == 0 });
         simdCopy(x_try, x);
         var tn_nr_opts = options.tol.newtonOpts(options.tol.itl4);
         tn_nr_opts.dx_clamp = std.math.inf(f64);

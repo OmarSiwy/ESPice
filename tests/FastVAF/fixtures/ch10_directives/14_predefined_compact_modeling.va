@@ -1,0 +1,10 @@
+module ch10_predefined_compact_modeling(p, n);
+  inout p, n; electrical p, n;
+  analog begin
+`ifdef __VAMS_COMPACT_MODELING__
+    I(p,n) <+ ddx(V(p,n), V(p));
+`else
+    I(p,n) <+ V(p,n);
+`endif
+  end
+endmodule
