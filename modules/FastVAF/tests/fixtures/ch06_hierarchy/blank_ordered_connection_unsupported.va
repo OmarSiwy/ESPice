@@ -1,5 +1,0 @@
-// EXPECT: error -- blank ordered connections are legal source but require hierarchy.
-module ch6_blank_ordered_parent(p);
-  inout p; electrical p;
-  ch6_child u(p, , p);
-endmodule

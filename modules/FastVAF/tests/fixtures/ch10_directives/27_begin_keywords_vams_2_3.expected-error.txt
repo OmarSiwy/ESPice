@@ -1,4 +1,0 @@
-# LRM 10.6 worked example: under a VAMS keyword set sin is reserved (Annex B),
-# so using it as a port name "shall result in an error". Pinned on the identifier
-# only -- begin_keywords support is landing concurrently and will reword the message.
-sin

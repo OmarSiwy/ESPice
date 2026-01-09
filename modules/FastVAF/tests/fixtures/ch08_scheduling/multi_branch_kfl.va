@@ -1,8 +1,0 @@
-module ch8_kfl(p, n, c);
-  inout p, n, c; electrical p, n, c;
-  analog begin
-    I(p, n) <+ V(p, n) / 1k;
-    I(p, c) <+ V(p, c) / 2k;
-    I(n, c) <+ V(n, c) / 3k;
-  end
-endmodule

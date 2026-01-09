@@ -1,6 +1,0 @@
-module annex_c_analog_operators(p, n);
-    inout p, n;
-    electrical p, n;
-
-    analog I(p, n) <+ limexp(V(p, n)) + ddt(V(p, n));
-endmodule

@@ -1,5 +1,0 @@
-# Annex B: connect/endconnectrules/wreal/... are reserved AMS keywords and
-# cannot be used as identifiers, even though connect modules are outside
-# the Verilog-A subset.
-E0208
-connect

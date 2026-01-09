@@ -1,3 +1,0 @@
-# LRM 2.6: x/z (and their `?` alias) are 4-state digital values, outside the
-# Verilog-A subset.
-E0130

@@ -1,6 +1,0 @@
-module ch02_system_identifiers(p, n);
-    inout p, n;
-    electrical p, n;
-
-    analog I(p, n) <+ $vt + 1u * $temperature;
-endmodule

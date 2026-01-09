@@ -1,4 +1,0 @@
-module annex_g_system_math(p, n);
-  inout p, n; electrical p, n;
-  analog I(p,n) <+ $min($abs(V(p,n)), $max(1.0, V(p,n)));
-endmodule

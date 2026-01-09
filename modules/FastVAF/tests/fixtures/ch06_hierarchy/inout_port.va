@@ -1,1 +1,0 @@
-module ch6_inout(inout electrical p); analog I(p)<+V(p); endmodule

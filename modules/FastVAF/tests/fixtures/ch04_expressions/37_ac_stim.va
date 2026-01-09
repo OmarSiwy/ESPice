@@ -1,7 +1,0 @@
-// EXPECT: error
-module ch04_ac_stim(p, n);
-    inout p, n;
-    electrical p, n;
-
-    analog I(p, n) <+ ac_stim("ac", 1.0, 0.0);
-endmodule

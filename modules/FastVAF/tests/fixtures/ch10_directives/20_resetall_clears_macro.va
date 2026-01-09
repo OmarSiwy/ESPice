@@ -1,7 +1,0 @@
-// EXPECT: error
-`define VALUE 2.0
-`resetall
-module ch10_resetall_clears_macro(p, n);
-  inout p, n; electrical p, n;
-  analog I(p,n) <+ `VALUE*V(p,n);
-endmodule

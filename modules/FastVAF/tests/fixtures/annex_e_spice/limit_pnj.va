@@ -1,4 +1,0 @@
-module annex_e_pnjlim(p);
-  inout p; electrical p; real limited;
-  analog begin limited = $limit(V(p), "pnjlim", 0.026, 0.6); I(p) <+ limited; end
-endmodule

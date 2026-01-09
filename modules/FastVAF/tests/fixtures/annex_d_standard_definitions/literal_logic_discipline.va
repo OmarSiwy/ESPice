@@ -1,8 +1,0 @@
-// The escaped identifier is the literal standard discrete discipline name.
-discipline \logic ;
-  domain discrete;
-enddiscipline
-module annex_d_literal_logic;
-  electrical p;
-  analog I(p) <+ V(p);
-endmodule

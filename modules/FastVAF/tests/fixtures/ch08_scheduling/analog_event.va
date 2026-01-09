@@ -1,7 +1,0 @@
-module ch8_event(p, c);
-  inout p, c; electrical p, c; real sample;
-  analog begin
-    @(cross(V(c), +1)) sample = V(p);
-    I(p) <+ sample;
-  end
-endmodule

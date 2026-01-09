@@ -1,3 +1,0 @@
-# LRM 5.9: "The return statement can only be used from within an analog
-# user-defined function."
-E0403

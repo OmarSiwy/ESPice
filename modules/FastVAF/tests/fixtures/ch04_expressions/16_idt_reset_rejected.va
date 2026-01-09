@@ -1,8 +1,0 @@
-// EXPECT: success -- idt() with a reset argument is legal (LRM 4.5.4).
-// FastVAF does not implement it yet, so this fixture fails LOUDLY on purpose;
-// do NOT add an .expected-error.txt, that would cement the gap.
-module ch04_idt_reset_rejected(p, n);
-    inout p, n;
-    electrical p, n;
-    analog V(p, n) <+ idt(I(p, n), 0.0, 1.0);
-endmodule

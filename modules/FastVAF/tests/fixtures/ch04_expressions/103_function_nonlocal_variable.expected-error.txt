@@ -1,4 +1,0 @@
-# LRM 4.7.1: an analog function body may reference only its own arguments,
-# its locals and module-level parameters -- never a module-level variable.
-E0314
-outer

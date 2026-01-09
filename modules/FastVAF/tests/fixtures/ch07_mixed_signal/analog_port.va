@@ -1,3 +1,0 @@
-module ch7_analog_port(input electrical sense, output electrical driven);
-  analog V(driven) <+ V(sense);
-endmodule

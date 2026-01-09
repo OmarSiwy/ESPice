@@ -1,2 +1,0 @@
-module annex_a_parameter_header #(parameter real gain=2.0, parameter integer mode=1) (input electrical sense, inout electrical p); analog I(p)<+gain*(mode?V(sense):V(p)); endmodule
-// EXPECT: error -- normative syntax/restriction snapshot for this rule family.

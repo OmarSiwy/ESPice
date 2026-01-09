@@ -1,6 +1,0 @@
-// EXPECT: error
-module ch09_dist_uniform_unsupported(p, n);
-  inout p, n; electrical p, n;
-  integer seed;
-  analog I(p,n) <+ $dist_uniform(seed, 0, 10);
-endmodule

@@ -1,7 +1,0 @@
-module ch04_ddt(p, n);
-    inout p, n;
-    electrical p, n;
-    parameter real capacitance = 1p;
-
-    analog I(p, n) <+ capacitance * ddt(V(p, n));
-endmodule

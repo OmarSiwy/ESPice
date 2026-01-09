@@ -1,4 +1,0 @@
-// §5.9: "Analog filter functions are not allowed" in repeat/while/non-genvar
-// for. The `analog_for` (genvar) form IS allowed, because it unrolls onto the
-// spine — see 92_operator_in_genvar_for.va. Rejected as E0514.
-module ch4_op_repeat(p); inout p; electrical p; real x; analog begin repeat(2) x=ddt(V(p)); I(p)<+x; end endmodule

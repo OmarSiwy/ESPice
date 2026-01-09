@@ -1,3 +1,0 @@
-# LRM 4.2.9: "The arithmetic shift operators can not be used in an analog
-# block."
-E0324

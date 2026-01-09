@@ -1,6 +1,0 @@
-module ch02_string_line_continuation_rejected;
-    analog begin
-        $strobe("Temperature effect has caused pbs to be less than 0.01. \
-                 Pbs is clamped to 0.01.\n");
-    end
-endmodule

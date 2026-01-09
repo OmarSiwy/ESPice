@@ -1,2 +1,0 @@
-// EXPECT: error -- Table E.1 primitive needs SPICE elaboration.
-module annex_e_primitive_iexp(p,n); inout p,n; electrical p,n; iexp #(.dc(0.0),.mag(1.0),.phase(0.0),.val0(0.0),.val1(1m),.td0(1n),.tau0(1n),.td1(2n),.tau1(1n)) x(.p(p),.n(n)); endmodule

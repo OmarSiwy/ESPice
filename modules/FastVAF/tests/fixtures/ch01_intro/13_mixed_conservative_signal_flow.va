@@ -1,4 +1,0 @@
-nature ch1_mix_voltage_n; units="V"; access=MV; abstol=1u; endnature
-discipline ch1_mix_voltage; potential ch1_mix_voltage_n; enddiscipline
-module ch1_mixed(input ch1_mix_voltage sig, inout electrical p); analog begin MV(sig) <+ V(p); I(p) <+ MV(sig) / 1k; end endmodule
-// EXPECT: error -- normative syntax/restriction snapshot for this rule family.

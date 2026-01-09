@@ -1,9 +1,0 @@
-// The snapshot exposes the missing non-nesting semantic diagnostic.
-module ch6_generate_nested_region(p);
-  inout p; electrical p;
-  generate
-    generate
-      if (1) I(p) <+ V(p);
-    endgenerate
-  endgenerate
-endmodule

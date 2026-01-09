@@ -1,5 +1,0 @@
-// NONCONFORMING ACCEPTANCE SNAPSHOT: $driver_strength is connectmodule-only.
-module ch09_atomic_driver_strength(p, n);
-  inout p, n; electrical p, n;
-  analog I(p,n) <+ V(p,n) + $driver_strength(p,0);
-endmodule

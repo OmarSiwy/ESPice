@@ -1,8 +1,0 @@
-discipline annex_f_local;
-  domain continuous;
-enddiscipline
-module annex_f_in_context(sig);
-  inout sig;
-  annex_f_local sig;
-  analog I(sig) <+ V(sig);
-endmodule

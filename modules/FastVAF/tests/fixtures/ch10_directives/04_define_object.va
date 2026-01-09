@@ -1,5 +1,0 @@
-`define GAIN 3.0
-module ch10_define_object(p, n);
-  inout p, n; electrical p, n;
-  analog I(p,n) <+ `GAIN * V(p,n);
-endmodule

@@ -1,1 +1,0 @@
-module ch04_tanh(p, n); inout p, n; electrical p, n; analog I(p, n) <+ tanh(V(p, n)); endmodule

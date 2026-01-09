@@ -1,4 +1,0 @@
-// EXPECT: error
-module ch02_unclosed_comment;
-/* this block comment never terminates
-endmodule

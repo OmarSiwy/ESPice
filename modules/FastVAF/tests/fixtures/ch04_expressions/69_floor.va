@@ -1,1 +1,0 @@
-module ch04_floor(p, n); inout p, n; electrical p, n; analog I(p, n) <+ floor(V(p, n)); endmodule

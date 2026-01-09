@@ -1,5 +1,0 @@
-// EXPECT: error -- SPICE objects require hierarchy/SPICE elaboration.
-module annex_e_spice_passive_primitives_unsupported(p, n);
-  inout p, n; electrical p, n;
-  resistor #(.r(1k), .tc1(0.0), .tc2(0.0)) r1(p, n);
-endmodule

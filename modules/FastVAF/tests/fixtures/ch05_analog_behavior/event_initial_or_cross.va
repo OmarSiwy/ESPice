@@ -1,1 +1,0 @@
-module ch5_initial_or_cross(p); inout p; electrical p; real x; analog begin @(initial_step or cross(V(p),+1)) x=V(p); I(p)<+x; end endmodule

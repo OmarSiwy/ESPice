@@ -1,4 +1,0 @@
-module ch8_dynamic(p, n);
-  inout p, n; electrical p, n;
-  analog I(p, n) <+ 1p * ddt(V(p, n));
-endmodule

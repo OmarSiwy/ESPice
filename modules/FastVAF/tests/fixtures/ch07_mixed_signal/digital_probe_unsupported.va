@@ -1,5 +1,0 @@
-// EXPECT: error -- continuous probe in a digital process is not VA codegen.
-module ch7_digital_probe(p);
-  inout p; electrical p; real sampled;
-  always @(p) sampled = V(p);
-endmodule

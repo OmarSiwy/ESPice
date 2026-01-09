@@ -1,6 +1,0 @@
-// EXPECT: error -- hierarchy is outside FastVAF's compilation model.
-module ch5_hier_access(p);
-  inout p; electrical p;
-  analog I(p) <+ V(u.internal);
-  child u(p);
-endmodule

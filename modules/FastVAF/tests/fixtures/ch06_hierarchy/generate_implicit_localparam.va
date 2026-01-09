@@ -1,8 +1,0 @@
-module ch6_generate_implicit_localparam(p);
-  inout p; electrical p; genvar i;
-  generate
-    for (i = 0; i < 3; i = i + 1) begin : stage
-      I(p) <+ i * V(p);
-    end
-  endgenerate
-endmodule

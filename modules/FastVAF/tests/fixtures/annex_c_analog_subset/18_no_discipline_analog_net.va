@@ -1,1 +1,0 @@
-module annex_c_no_discipline(p); inout p; analog I(p)<+V(p); endmodule

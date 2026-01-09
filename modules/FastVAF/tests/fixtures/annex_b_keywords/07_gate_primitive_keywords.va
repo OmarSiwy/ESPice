@@ -1,5 +1,0 @@
-module annex_b_gates(a,b,c,d);
-  buf g0(a,b); bufif0 g1(a,b,c); bufif1 g2(a,b,c); cmos g3(a,b,c,d);
-  nand g4(a,b,c);
-endmodule
-// EXPECT: error -- normative syntax/restriction snapshot for this rule family.

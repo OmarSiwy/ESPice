@@ -1,9 +1,0 @@
-module ch09_hierarchical_parameters(p, n);
-  inout p, n; electrical p, n;
-  real info;
-  analog begin
-    info = $mfactor + $xposition + $yposition + $angle;
-    info = info + $hflip + $vflip;
-    I(p,n) <+ info + 0.0*V(p,n);
-  end
-endmodule

@@ -1,5 +1,0 @@
-// EXPECT: error -- continuous digital assignment uses the digital queue.
-module ch8_continuous_assignment;
-  integer source, target;
-  assign target = source;
-endmodule

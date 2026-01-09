@@ -1,1 +1,0 @@
-module ch5_single_branch(p); inout p; electrical p; branch (p) path; analog V(path) <+ 2.0*I(path); endmodule

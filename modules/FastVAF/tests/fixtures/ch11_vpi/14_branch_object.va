@@ -1,5 +1,0 @@
-module ch11_branch_object(p, n);
-  inout p, n; electrical p, n;
-  branch (p,n) path;
-  analog I(path) <+ V(path) / 1k;
-endmodule

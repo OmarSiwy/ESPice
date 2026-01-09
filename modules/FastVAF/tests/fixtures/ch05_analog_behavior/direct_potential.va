@@ -1,4 +1,0 @@
-module ch5_direct_potential(p, n);
-  inout p, n; electrical p, n;
-  analog V(p, n) <+ 0.75;
-endmodule

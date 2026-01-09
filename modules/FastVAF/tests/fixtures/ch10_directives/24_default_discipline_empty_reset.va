@@ -1,6 +1,0 @@
-`default_discipline electrical
-`default_discipline
-module ch10_default_discipline_empty_reset(p, n);
-  inout p, n; electrical p, n;
-  analog I(p,n) <+ V(p,n);
-endmodule

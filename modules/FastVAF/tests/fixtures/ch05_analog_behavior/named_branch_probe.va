@@ -1,4 +1,0 @@
-module ch5_named_probe(p, n);
-  inout p, n; electrical p, n; branch (p, n) path;
-  analog V(path) <+ 10.0 * I(path);
-endmodule

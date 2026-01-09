@@ -1,2 +1,0 @@
-# LRM 6.7.1: out-of-module references are not permitted in Verilog-A.
-E0214

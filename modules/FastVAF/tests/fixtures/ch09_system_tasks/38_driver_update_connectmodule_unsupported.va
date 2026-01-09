@@ -1,7 +1,0 @@
-// EXPECT: error
-// This reaches FastVAF's unsupported top-level connectmodule boundary first;
-// it does not isolate driver_update parsing.
-connectmodule ch09_driver_update_connectmodule(d, a);
-  input d; output a;
-  always @(driver_update(d)) $display("driver updated");
-endconnectmodule

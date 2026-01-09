@@ -1,1 +1,0 @@
-module ch4_same_flow(p); inout p; electrical p; analog I(p,p)<+1m; endmodule

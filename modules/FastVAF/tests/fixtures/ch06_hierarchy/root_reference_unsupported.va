@@ -1,5 +1,0 @@
-// EXPECT: error -- $root is an OOMR and requires an elaborated instance tree.
-module ch6_root_reference(p);
-  inout p; electrical p;
-  analog I(p) <+ V($root.ch6_top.supply);
-endmodule

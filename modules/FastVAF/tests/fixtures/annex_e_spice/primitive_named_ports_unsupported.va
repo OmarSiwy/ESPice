@@ -1,5 +1,0 @@
-// EXPECT: error -- Table E.1 names enable named primitive port association.
-module annex_e_primitive_named_ports(c, b, e, s);
-  inout c, b, e, s; electrical c, b, e, s;
-  bjt #(.area(2.0)) q1(.c(c), .b(b), .e(e), .s(s));
-endmodule

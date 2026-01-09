@@ -1,6 +1,6 @@
 const std = @import("std");
 
-/// Every source tree lives under `src_new/` and is built from THIS file — the
+/// Every source tree lives under `src/` and is built from THIS file — the
 /// per-directory `build.zig` / `build.zig.zon` pairs are gone. The import names
 /// (`devices`, `analysis`, `solvers`, `fastvaf`, `fastvf`, `contract`, `models`)
 /// are unchanged, so no source file knows the difference.
@@ -29,22 +29,22 @@ pub fn build(b: *std.Build) void {
     // =======================================================================
 
     const solvers_mod = b.createModule(.{
-        .root_source_file = b.path("src_new/solvers/root.zig"),
+        .root_source_file = b.path("src/solvers/root.zig"),
         .target = target,
         .optimize = optimize,
     });
     const contract_mod = b.createModule(.{
-        .root_source_file = b.path("src_new/devices/contract.zig"),
+        .root_source_file = b.path("src/devices/contract.zig"),
         .target = target,
         .optimize = optimize,
     });
     const fastvaf_mod = b.createModule(.{
-        .root_source_file = b.path("src_new/FastVAF/root.zig"),
+        .root_source_file = b.path("src/FastVAF/root.zig"),
         .target = target,
         .optimize = optimize,
     });
     const fastvf_mod = b.createModule(.{
-        .root_source_file = b.path("src_new/FastVF/root.zig"),
+        .root_source_file = b.path("src/FastVF/root.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -66,7 +66,7 @@ pub fn build(b: *std.Build) void {
     const va_exe = b.addExecutable(.{
         .name = "fastvaf",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src_new/FastVAF/main.zig"),
+            .root_source_file = b.path("src/FastVAF/main.zig"),
             .target = b.graph.host,
             .optimize = .ReleaseFast,
         }),
@@ -75,19 +75,19 @@ pub fn build(b: *std.Build) void {
     // The same contract at the other end of the HDL split: Verilog /
     // SystemVerilog / VHDL -> verilator (+ sv2v / ghdl) -> contract-shaped Zig.
     const vf_cli_mod = b.createModule(.{
-        .root_source_file = b.path("src_new/FastVF/main.zig"),
+        .root_source_file = b.path("src/FastVF/main.zig"),
         .target = b.graph.host,
         .optimize = .Debug,
     });
     vf_cli_mod.addImport("zvf", b.createModule(.{
-        .root_source_file = b.path("src_new/FastVF/root.zig"),
+        .root_source_file = b.path("src/FastVF/root.zig"),
         .target = b.graph.host,
         .optimize = .Debug,
     }));
     const vf_exe = b.addExecutable(.{ .name = "fastvf", .root_module = vf_cli_mod });
 
     // =======================================================================
-    // Devices: every src_new/devices/models/* compiled to Zig at build time
+    // Devices: every src/devices/models/* compiled to Zig at build time
     // =======================================================================
 
     // Auto-discover active models: every models/NAME.{va,v,sv,vhd,vhdl}
@@ -112,12 +112,12 @@ pub fn build(b: *std.Build) void {
             if (check_va) {
                 run.addArg("--check");
                 run.addArg("--contract");
-                run.addFileArg(b.path("src_new/devices/contract.zig"));
+                run.addFileArg(b.path("src/devices/contract.zig"));
             }
         }
         run.addArg("-o");
         const gen_zig = run.addOutputFileArg(b.fmt("{s}.zig", .{m.name}));
-        run.addFileArg(b.path(b.fmt("src_new/devices/models/{s}", .{m.file})));
+        run.addFileArg(b.path(b.fmt("src/devices/models/{s}", .{m.file})));
 
         const dev_mod = b.createModule(.{
             .root_source_file = gen_zig,
@@ -139,7 +139,7 @@ pub fn build(b: *std.Build) void {
     for (models, dev_mods) |m, dev_mod| models_mod.addImport(m.name, dev_mod);
 
     const devices_mod = b.createModule(.{
-        .root_source_file = b.path("src_new/devices/root.zig"),
+        .root_source_file = b.path("src/devices/root.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
@@ -162,7 +162,7 @@ pub fn build(b: *std.Build) void {
     // =======================================================================
 
     const analysis_mod = b.createModule(.{
-        .root_source_file = b.path("src_new/analysis/root.zig"),
+        .root_source_file = b.path("src/analysis/root.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
@@ -179,7 +179,7 @@ pub fn build(b: *std.Build) void {
     const exe = b.addExecutable(.{
         .name = "zpicey",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src_new/main.zig"),
+            .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -230,7 +230,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run every test suite");
 
     const builder_mod = b.createModule(.{
-        .root_source_file = b.path("src_new/builder.zig"),
+        .root_source_file = b.path("src/builder.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
@@ -241,7 +241,7 @@ pub fn build(b: *std.Build) void {
     // tests/FastVF/test_all.zig wants these two under their own names.
     const vf_conf_opts = b.addOptions();
     vf_conf_opts.addOption([]const u8, "zig_exe", b.graph.zig_exe);
-    vf_conf_opts.addOption([]const u8, "contract_path", b.pathFromRoot("src_new/devices/contract.zig"));
+    vf_conf_opts.addOption([]const u8, "contract_path", b.pathFromRoot("src/devices/contract.zig"));
 
     const app_test_mod = b.createModule(.{
         .root_source_file = b.path("tests/test_all.zig"),
@@ -325,7 +325,7 @@ pub fn build(b: *std.Build) void {
         []const u8,
         "contract",
         "Root of the `contract` module the generated devices import",
-    ) orelse b.pathFromRoot("src_new/devices/contract.zig");
+    ) orelse b.pathFromRoot("src/devices/contract.zig");
     const exh_opts = b.addOptions();
     exh_opts.addOption([]const u8, "fixture_root", b.pathFromRoot("tests/FastVAF/fixtures/exhaustive"));
     exh_opts.addOption([]const u8, "work_root", b.pathFromRoot(".zig-cache/fastvaf-tb"));
@@ -347,7 +347,7 @@ pub fn build(b: *std.Build) void {
 
     // =======================================================================
     // Benchmark (still its own package — it is fixtures and a runner, not a
-    // source tree that belongs under src_new/)
+    // source tree that belongs under src/)
     // =======================================================================
 
     const bench_dep = b.dependency("benchmark", .{
@@ -393,8 +393,8 @@ const hdl_by_ext = [_]struct { ext: []const u8, hdl: @FieldType(Model, "hdl") }{
 fn discoverModels(b: *std.Build) []const Model {
     const io = b.graph.io;
     var out: std.ArrayList(Model) = .empty;
-    var dir = b.build_root.handle.openDir(io, "src_new/devices/models", .{ .iterate = true }) catch
-        @panic("devices: src_new/devices/models/ missing");
+    var dir = b.build_root.handle.openDir(io, "src/devices/models", .{ .iterate = true }) catch
+        @panic("devices: src/devices/models/ missing");
     defer dir.close(io);
     var it = dir.iterate();
     while (it.next(io) catch @panic("devices: models/ iterate failed")) |e| {
@@ -552,7 +552,7 @@ fn deviceKernelsModule(
     optimize: std.builtin.OptimizeMode,
 ) *std.Build.Module {
     return b.createModule(.{
-        .root_source_file = b.path("src_new/devices/kernels.zig"),
+        .root_source_file = b.path("src/devices/kernels.zig"),
         .target = gpu_target,
         .optimize = optimize,
         // Debug info in device IR makes the PTX claim DWARF it lacks; the CUDA

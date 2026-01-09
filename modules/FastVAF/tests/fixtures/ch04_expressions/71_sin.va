@@ -1,1 +1,0 @@
-module ch04_sin(p, n); inout p, n; electrical p, n; analog I(p, n) <+ sin(V(p, n)); endmodule

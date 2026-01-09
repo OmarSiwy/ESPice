@@ -1,6 +1,0 @@
-// EXPECT: error -- overload selection cannot occur without paramsets.
-paramset ch6_overloaded base;
-  parameter real gain = 2.0;
-endparamset
-module ch6_overload_user;
-endmodule

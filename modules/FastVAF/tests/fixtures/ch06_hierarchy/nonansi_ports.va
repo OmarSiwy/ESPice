@@ -1,6 +1,0 @@
-module ch6_nonansi(p, n);
-  inout p;
-  output n;
-  electrical p, n;
-  analog V(n) <+ V(p);
-endmodule

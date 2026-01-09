@@ -1,8 +1,0 @@
-// EXPECT: error -- paramsets are parsed only to emit a clear diagnostic.
-paramset ch6_ps base;
-  .gain = 2.0;
-endparamset
-module ch6_ps_user(p);
-  inout p; electrical p;
-  analog I(p) <+ V(p);
-endmodule

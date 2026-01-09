@@ -1,1 +1,0 @@
-module ch5_cross_any(p); inout p; electrical p; real x; analog begin @(cross(V(p),0)) x=V(p); I(p)<+x; end endmodule

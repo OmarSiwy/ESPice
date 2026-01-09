@@ -1,5 +1,0 @@
-module ch09_atomic_hypot(p, n);
-  inout p, n; electrical p, n;
-  analog I(p,n) <+ V(p,n) + $hypot(V(p,n), 1.0);
-endmodule
-

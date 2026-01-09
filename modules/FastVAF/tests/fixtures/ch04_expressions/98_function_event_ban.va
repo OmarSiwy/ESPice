@@ -1,1 +1,0 @@
-module ch4_fn_event(p); inout p; electrical p; analog function real sampled; input x; real x; begin @(cross(x,1)) sampled=x; end endfunction analog I(p)<+sampled(V(p)); endmodule

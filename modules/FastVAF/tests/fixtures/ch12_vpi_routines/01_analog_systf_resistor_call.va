@@ -1,9 +1,0 @@
-module ch12_analog_systf_resistor_call(p, n);
-  inout p, n; electrical p, n;
-  parameter real r = 1k;
-  real current;
-  analog begin
-    $resistor(current, V(p,n), r);
-    I(p,n) <+ current;
-  end
-endmodule

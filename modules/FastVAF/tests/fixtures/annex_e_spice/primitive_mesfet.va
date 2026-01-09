@@ -1,2 +1,0 @@
-// EXPECT: error -- Table E.1 primitive needs SPICE elaboration.
-module annex_e_primitive_mesfet(d,g,s); inout d,g,s; electrical d,g,s; mesfet #(.area(1.0)) x(.d(d),.g(g),.s(s)); endmodule

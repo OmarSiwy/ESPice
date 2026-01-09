@@ -1,8 +1,0 @@
-module ch11_function_io_objects(p, n);
-  inout p, n; electrical p, n;
-  analog function real affine;
-    input x, gain; real x, gain;
-    affine = gain * x + 1.0;
-  endfunction
-  analog I(p,n) <+ affine(V(p,n), 2.0);
-endmodule

@@ -1,4 +1,0 @@
-// §5.9: "Analog filter functions are not allowed" in repeat/while/non-genvar
-// for — `integer i` makes this a procedural for, not a §5.9.3 analog_for.
-// Rejected as E0514.
-module ch4_op_for(p); inout p; electrical p; integer i; real x; analog begin for(i=0;i<2;i=i+1) x=ddt(V(p)); I(p)<+x; end endmodule

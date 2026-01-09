@@ -1,2 +1,0 @@
-module ch2_call_attr(p); inout p; electrical p; analog function real twice; input x; real x; twice=2.0*x; endfunction analog I(p)<+twice (* mode="fast" *) (V(p)); endmodule
-// EXPECT: error -- normative syntax/restriction snapshot for this rule family.

@@ -1,5 +1,0 @@
-`include "constants.vams"
-module ch10_include_constants(p, n);
-  inout p, n; electrical p, n;
-  analog I(p,n) <+ `P_K*`P_C*V(p,n);
-endmodule

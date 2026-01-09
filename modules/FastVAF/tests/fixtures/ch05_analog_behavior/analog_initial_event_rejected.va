@@ -1,5 +1,0 @@
-// EXPECT: error -- LRM 5.2.1 forbids this in an analog initial block.
-module ch5_initial_event_rejected;
-  real initialized;
-  analog initial @(initial_step) initialized = 1.0;
-endmodule

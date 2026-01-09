@@ -1,6 +1,0 @@
-module ch09_atomic_param_given(p, n);
-  inout p, n; electrical p, n;
-  parameter real gain = 1.0;
-  analog I(p,n) <+ ($param_given(gain) ? gain : 0.0) * V(p,n);
-endmodule
-

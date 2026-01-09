@@ -1,5 +1,0 @@
-module ch8_initial(p);
-  inout p; electrical p; real initialized;
-  analog initial initialized = 3.0;
-  analog I(p) <+ initialized * V(p);
-endmodule

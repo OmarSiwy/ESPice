@@ -1,5 +1,0 @@
-// EXPECT: error -- named instance parameter override needs hierarchy.
-module ch6_parent_named(p);
-  inout p; electrical p;
-  child #(.gain(2.0)) u(p);
-endmodule

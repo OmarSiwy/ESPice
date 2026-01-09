@@ -1,4 +1,0 @@
-module ch6_mfactor_flow_noise(p, n);
-  inout p, n; electrical p, n;
-  analog I(p, n) <+ white_noise(1e-18, "flow_noise");
-endmodule

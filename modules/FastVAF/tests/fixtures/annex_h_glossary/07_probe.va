@@ -1,9 +1,0 @@
-module glossary_probe(p, n);
-  inout p, n; electrical p, n;
-  branch (p,n) probe_branch;
-  real measured;
-  analog begin
-    measured = V(probe_branch);
-    I(p,n) <+ measured;
-  end
-endmodule

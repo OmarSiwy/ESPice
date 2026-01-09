@@ -1,6 +1,0 @@
-`default_discipline electrical
-module annex_c_default_discipline_current_behavior(p, n);
-    inout p, n;
-    electrical p, n;
-    analog I(p, n) <+ V(p, n);
-endmodule

@@ -1,4 +1,0 @@
-module ch6_top;
-  electrical p;
-  analog V(p) <+ 1.0;
-endmodule

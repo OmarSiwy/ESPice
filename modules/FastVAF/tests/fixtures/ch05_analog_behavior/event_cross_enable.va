@@ -1,7 +1,0 @@
-module ch5_cross_enable(p, c);
-  inout p, c; electrical p, c; real held; integer enabled;
-  analog begin
-    @(cross(V(c), +1, 1p, 1u, enabled)) held = V(p);
-    I(p) <+ held;
-  end
-endmodule

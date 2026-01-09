@@ -1,6 +1,0 @@
-module annex_b_task;
-  integer state; time ticks; realtime seconds;
-  task automatic worker; begin fork state=1; state=2; join wait(state) state=3; deassign state; release state; disable worker; end endtask
-  always @(negedge state) state=0;
-endmodule
-// EXPECT: error -- normative syntax/restriction snapshot for this rule family.
