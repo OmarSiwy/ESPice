@@ -412,6 +412,16 @@ const Gen = struct {
     /// only meaningful for the out-of-SSA path (`straight` declares everything
     /// at its definition by construction).
     place: std.ArrayList(Place) = .empty,
+    /// Index of a slot inside its type's hoist ARRAY, or `none_u32` for a slot
+    /// that keeps a name of its own. See `emitUnitBody`: the surviving hoists
+    /// are one `var h: [n]S` (plus `hi`/`hs` when those types occur) rather than
+    /// one `var tN` apiece, which is ~4 k declarations on `hisimhv_va`.
+    ///
+    /// All-`none_u32` while `probing`, so the dry run names every slot `tN`.
+    /// That is fine and deliberate: `probeBody` only compares offsets against
+    /// each other, so it needs its own text to be self-consistent, not to match
+    /// the final text byte for byte.
+    hoist_idx: std.ArrayList(u32) = .empty,
     /// Emitted lexical scopes, as half-open output offsets. `sc_open` is the
     /// stack of scopes still being written; `sc_end` their closing offset once
     /// written. Only live during `probing`.
@@ -1990,6 +2000,8 @@ const Gen = struct {
             self.reattribute(def.inst_result);
         }
 
+        self.fuseSingleUse();
+
         // Slots for everything that survives as a statement, in ascending value
         // order — a UNIT-LOCAL dense index, never a MIR value index.
         self.uses_cache = false;
@@ -2209,6 +2221,69 @@ const Gen = struct {
         self.addUses(inst, true);
     }
 
+    /// A value read EXACTLY ONCE, by the very next statement of its own block,
+    /// is rendered inside that statement instead of getting a `const` of its
+    /// own. `renderValueRef` already falls through to `renderInst` for anything
+    /// without a slot, so clearing the slot IS the fusion — no new rendering
+    /// path, and chains collapse transitively because the fallthrough recurses.
+    ///
+    /// Measured on the emitted text before writing this: 14,930 of 16,242 `const
+    /// tN` temps (92%) have exactly one use, and 11,366 of those are consumed on
+    /// the very next line. That adjacency is the whole safety argument and the
+    /// reason this is not the same pass as the lazy-arm inlining above:
+    ///
+    ///   - ONE use, so the expression is rendered once — no duplicated work.
+    ///     `eager_use == 1 and arm_use == 0` is exactly that, since an arm use
+    ///     is re-rendered per arm by design.
+    ///   - the use is the NEXT statement in `stmt_pool`, so the computation
+    ///     moves later by one statement, inside the same block. Nothing can be
+    ///     hoisted into a loop body or sunk past a side effect, which is what a
+    ///     general "def dominates use" rule would have to reason about.
+    ///
+    /// So this must NOT call `reattribute`: the operands stay eager because the
+    /// expression is still evaluated exactly once, eagerly, one statement later.
+    fn fuseSingleUse(self: *Gen) void {
+        for (0..self.nb) |bi| {
+            const stmts = self.stmt_pool[self.stmt_off[bi]..self.stmt_off[bi + 1]];
+            if (stmts.len < 2) continue;
+            for (stmts[0 .. stmts.len - 1], stmts[1..]) |inst, next| {
+                const v = @intFromEnum(self.rv(self.i_res[@intFromEnum(inst)]));
+                if (v < Mir.Value.first_dynamic) continue;
+                if (!self.needed[v] or self.inlined[v]) continue;
+                if (self.eager_use[v] != 1 or self.arm_use[v] != 0) continue;
+                // A live-out is a FIELD of the returned cache (same reason as
+                // the sweep above), and a cached value renders as `c.fN`
+                // wherever it appears, so neither is ours to fuse.
+                if (self.emitting_common and self.lo_idx[v] != none_u32) continue;
+                if (self.cached(@enumFromInt(v))) continue;
+                const op = self.mir.instOp(inst);
+                // `call` is an operator/function evaluated once per step (§4.5),
+                // `phi` is materialised as a `var` — neither is an expression.
+                if (op == .call or op == .phi) continue;
+                if (!self.eagerlyUses(next, @enumFromInt(v))) continue;
+                self.inlined[v] = true;
+            }
+        }
+    }
+
+    /// Does `inst` read `v` in an EAGER position? Mirrors `addUses`, including
+    /// its two exclusions — a folded constant exponent is never materialised,
+    /// and a non-value call argument is not an operand — so that the counts this
+    /// is checked against and the answer here cannot drift apart. A `ternary`'s
+    /// arms are lazy positions, which is `arm_use`, not this.
+    fn eagerlyUses(self: *const Gen, inst: Mir.Inst, v: Mir.Value) bool {
+        return switch (self.mir.instData(inst)) {
+            .unary => |d| self.rv(d.operand) == v,
+            .binary => |d| self.rv(d.lhs) == v or
+                (!self.foldedExponent(d) and self.rv(d.rhs) == v),
+            .ternary => |d| self.rv(d.cond) == v,
+            .call => |d| for (d.args, 0..) |a, i| {
+                if (callArgIsValue(d.name, i, self.display) and self.rv(a) == v) break true;
+            } else false,
+            else => false,
+        };
+    }
+
     /// §4.3.1 `pow(x, k)` with a constant exponent goes through the scalar's
     /// `pow(S, f64)`, so the exponent is never materialised as a value.
     fn foldedExponent(self: *const Gen, d: anytype) bool {
@@ -2228,6 +2303,25 @@ const Gen = struct {
     /// The identity a slot starts at when it must be defined on every path.
     /// Matches `renderVal`'s rendering of an `.undef` operand, so the two agree
     /// on what "no value here" looks like.
+    /// Name of the hoist array a slot of this type lives in — see `hoist_idx`.
+    fn hoistArray(t: VTy) []const u8 {
+        return switch (t) {
+            .real => "h",
+            .int => "hi",
+            .str => "hs",
+        };
+    }
+
+    /// Write the name a value's slot is read and written under: its own `tN`,
+    /// or an element of its type's hoist array. The ONE place that knows the
+    /// difference, so declaration and use can never drift apart.
+    fn writeSlotRef(self: *Gen, i: usize) Error!void {
+        const s = self.slot[i];
+        const h = if (s < self.hoist_idx.items.len) self.hoist_idx.items[s] else none_u32;
+        if (h == none_u32) return self.b("t{d}", .{s});
+        return self.b("{s}[{d}]", .{ hoistArray(self.vty[i]), h });
+    }
+
     fn zeroOf(t: VTy) []const u8 {
         return switch (t) {
             .real => "S.con(0.0)",
@@ -2352,6 +2446,15 @@ const Gen = struct {
     }
 
     fn emitUnitBody(self: *Gen, target: Mir.Value) Error!void {
+        // FIRST, before anything can emit a slot name: slot numbering is
+        // unit-local, so last unit's hoist indices would otherwise still be
+        // live here and rename this unit's slots into another unit's array.
+        // Both paths below can emit before the real assignment happens — the
+        // straight-line path returns early, and `probeBody` dry-runs the whole
+        // body — so clearing anywhere later is too late.
+        self.hoist_idx.clearRetainingCapacity();
+        try self.hoist_idx.appendNTimes(self.arena, none_u32, self.n_slots);
+
         // One call, at the top of the body, so the shared core is evaluated
         // exactly once per unit — the same number of times it is evaluated
         // today, when every unit inlines a copy of it.
@@ -2400,6 +2503,18 @@ const Gen = struct {
         // Pinned by tests/fixtures/exhaustive/069_conditional_operator_state.va.
         try self.probeBody(target);
         const ret = self.rv(target);
+
+        // One array per type instead of one `var` per slot. Two passes: assign
+        // every survivor its index first, so the array lengths are known before
+        // anything is written, then emit the declarations. `hoist_idx` was
+        // cleared at entry and `probeBody` has just run against those cleared
+        // names, so this is the first assignment either pass has seen.
+        var n_hoist = [_]u32{0} ** 3;
+        // A returned slot cannot be seeded `undefined` (see above), and an array
+        // is declared once for all of its elements — so those are seeded by an
+        // explicit store after the declaration instead.
+        var seeded: std.ArrayList(Mir.Value) = .empty;
+        defer seeded.deinit(self.arena);
         for (self.live.items) |lv| {
             const v = @intFromEnum(lv);
             if (self.slot[v] == none_u32) continue;
@@ -2409,13 +2524,23 @@ const Gen = struct {
             // the emitted tree reaches neither end of it. Declaring it would be
             // an unused local.
             if (p.defs == 0 and p.uses == 0) continue;
+            const ty = @intFromEnum(self.vty[v]);
+            self.hoist_idx.items[self.slot[v]] = n_hoist[ty];
+            n_hoist[ty] += 1;
             const returned = if (self.emitting_common) self.lo_idx[v] != none_u32 else lv == ret;
+            if (returned) try seeded.append(self.arena, lv);
+        }
+        for ([_]VTy{ .real, .int, .str }) |ty| {
+            const n = n_hoist[@intFromEnum(ty)];
+            if (n == 0) continue;
             try self.ind(1);
-            try self.b("var t{d}: {s} = {s};\n", .{
-                self.slot[v],
-                zigTy(self.vty[v]),
-                if (returned) zeroOf(self.vty[v]) else "undefined",
-            });
+            try self.b("var {s}: [{d}]{s} = undefined;\n", .{ hoistArray(ty), n, zigTy(ty) });
+        }
+        for (seeded.items) |lv| {
+            const v = @intFromEnum(lv);
+            try self.ind(1);
+            try self.writeSlotRef(v);
+            try self.b(" = {s};\n", .{zeroOf(self.vty[v])});
         }
         try self.emitTree(0, 1, target);
     }
@@ -2454,7 +2579,8 @@ const Gen = struct {
             if (at_def) {
                 try self.b("const t{d}: {s} = ", .{ self.slot[i], zigTy(self.vty[i]) });
             } else {
-                try self.b("t{d} = ", .{self.slot[i]});
+                try self.writeSlotRef(i);
+                try self.b(" = ", .{});
             }
             try self.renderInst(inst);
             try self.b(";\n", .{});
@@ -2617,7 +2743,8 @@ const Gen = struct {
                 try self.b("const c{d}: {s} = ", .{ k, zigTy(self.vty[i]) });
             } else {
                 self.probeDef(self.slot[i], false);
-                try self.b("t{d} = ", .{self.slot[i]});
+                try self.writeSlotRef(i);
+                try self.b(" = ", .{});
             }
             try self.renderVal(self.phiIn(inst, from), self.vty[i]);
             try self.b(";\n", .{});
@@ -2629,7 +2756,8 @@ const Gen = struct {
             if (!self.slotted(inst)) continue;
             try self.ind(d2);
             self.probeDef(self.slot[@intFromEnum(self.i_res[@intFromEnum(inst)])], false);
-            try self.b("t{d} = c{d};\n", .{ self.slot[@intFromEnum(self.i_res[@intFromEnum(inst)])], k });
+            try self.writeSlotRef(@intFromEnum(self.i_res[@intFromEnum(inst)]));
+            try self.b(" = c{d};\n", .{k});
             k += 1;
         }
         try self.ind(depth);
@@ -2743,7 +2871,7 @@ const Gen = struct {
         if (i < self.nv and self.cached(v)) return self.b("c.f{d}", .{self.lo_idx[i]});
         if (i < self.nv and self.slot[i] != none_u32) {
             self.probeUse(self.slot[i]);
-            try self.b("t{d}", .{self.slot[i]});
+            try self.writeSlotRef(i);
             return;
         }
         switch (self.mir.valueDef(v)) {
@@ -5837,19 +5965,22 @@ test "codegen: a unit whose target is defined in one arm returns a VALUE, not un
     // written into the signature, and it closes with `\n} {`.
     const end = std.mem.indexOfPos(u8, src, at, "\n}\n").?;
     const body = src[at..end];
-    // The operator input is a RETURNED field of the core, so its slot is
-    // zero-initialised exactly as the old per-unit return was.
-    try std.testing.expect(std.mem.indexOf(u8, body, "var t") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "= undefined;") == null);
-    // Targeted, not a blanket memset: the ONLY function-scope `var`s are the
-    // two returned fields (the operator input, defined on one arm only, and the
-    // contribution phi). Every other slot is a `const` at its definition, which
-    // is what `probeBody` is for — so counting the hoists is counting exactly
-    // the values that could reach the `return` without being written.
+    // Hoisted slots share one `var h: [n]S`, so the carve-out is no longer a
+    // property of each declaration — the array itself is declared `undefined`.
+    // It is now the pair of facts below: the array is EXACTLY as long as the
+    // number of zero-seeds, so no element of it can reach the `return`
+    // unwritten. Assert both or the guarantee is not being tested.
+    //
+    // Targeted, not a blanket memset: the only hoists are the two returned
+    // fields (the operator input, defined on one arm only, and the contribution
+    // phi). Every other slot is a `const` at its definition, which is what
+    // `probeBody` is for — so counting the hoists is counting exactly the values
+    // that could reach the `return` without being written.
+    try std.testing.expect(std.mem.indexOf(u8, body, "    var h: [2]S = undefined;") != null);
     var hoists: usize = 0;
     var it = std.mem.splitScalar(u8, body, '\n');
     while (it.next()) |line| {
-        if (!std.mem.startsWith(u8, line, "    var t")) continue;
+        if (!std.mem.startsWith(u8, line, "    h[")) continue;
         hoists += 1;
         try std.testing.expect(std.mem.endsWith(u8, line, "= S.con(0.0);"));
     }

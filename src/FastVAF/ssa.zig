@@ -47,16 +47,33 @@ const list_end: u32 = std.math.maxInt(u32);
 /// It CANNOT be `Mir.Value.undef`: that is a legitimate stored result (a phi
 /// over only self-references collapses to `undef`, see `tryRemoveTrivialPhi`),
 /// and conflating "never written" with "written as undefined" would re-run the
-/// recursive read on every access and re-create the collapsed phi. `Value` is a
-/// non-exhaustive `enum(u32)` allocated sequentially from 12, so the top of the
-/// range is unreachable without 4 G values — asserted in `writeVariable`.
-const absent: Mir.Value = @enumFromInt(std.math.maxInt(u32));
+/// recursive read on every access and re-create the collapsed phi. So cells hold
+/// `@intFromEnum(value) + 1` and ZERO means absent — the bias exists so that a
+/// freshly mapped, all-zero page already reads as an empty matrix and no
+/// `@memset` is needed. See `defsIndex`; `writeVariable` asserts no overflow.
+const absent: u32 = 0;
+
+/// `defs` ONLY: the matrix is mapped straight from the OS, which hands back
+/// zero-filled pages — `mmap(MAP_ANONYMOUS)` on POSIX, `NtAllocateVirtualMemory`
+/// on Windows. Those zeros ARE the `@memset(absent)` that used to run, which was
+/// 17.9% of frontend instructions (callgrind, `hisimhv_va`, all of it under
+/// `writeVariable` → `defsIndex`) because every stride doubling zeroed the whole
+/// new buffer before copying the old rows back over half of it. Lazy faulting is
+/// the second half of the win: untouched cells never become resident, which is
+/// what repaid the ~8% peak-RSS regression the dense matrix introduced.
+///
+/// `std.heap.page_allocator` will NOT do — the `Allocator` interface poisons
+/// fresh bytes with `undefined` (0xAA) under runtime safety, so the zeros only
+/// survive in ReleaseFast. `PageAllocator.map` is the same syscall without the
+/// wrapper. `mapZeroed` canary-checks the guarantee where safety is on.
+const PageAllocator = std.heap.PageAllocator;
 
 pub const SsaBuilder = struct {
     gpa: std.mem.Allocator,
     mir: *Mir,
     /// (place, block) → Value, as a DENSE PLACE-MAJOR matrix:
-    /// `defs[place * block_stride + block]`, `absent` where unwritten.
+    /// `defs[place * block_stride + block]`, `absent` (= 0) where unwritten and
+    /// `@intFromEnum(value) + 1` where written — see `absent` for the bias.
     ///
     /// DOD: this was a `HashMap<u64=(place<<32|block), Value>` justified as
     /// "sparse by construction". Measured, it is not sparse — on `hisimhv_va` it
@@ -66,11 +83,14 @@ pub const SsaBuilder = struct {
     /// rehashing were ~35% of frontend runtime, `grow` alone 9.2%; a matrix index
     /// is a multiply-add. Measured end to end: frontend 1.33–1.58× faster.
     ///
-    /// The cost is real and was measured too: both axes round up to a power of
-    /// two, so 1978 × 5646 live cells occupy 2048 × 8192 = 67 MB against the hash
-    /// map's 54 MB, and peak RSS is ~8% higher on three of four foundry models.
-    /// That trade was taken deliberately. Two alternatives were measured and are
-    /// WORSE, so do not "fix" this by reaching for either:
+    /// Both axes round up to a power of two, so 1978 × 5646 live cells span
+    /// 2048 × 8192 = 67 MB of ADDRESS SPACE against the hash map's 54 MB — but
+    /// only the touched pages are ever resident (see `PageAllocator`), so peak
+    /// RSS dropped 361 → 270 MB on hisimhv_va, 245 → 201, 156 → 113, 155 → 108 —
+    /// below the hash map's own 338 / 286 / 143 / 143 on all four foundry models,
+    /// not merely back to par. Two alternatives were measured back when
+    /// the matrix was eagerly zeroed and both were WORSE; the mapping change
+    /// removes their premise, so do not reach for either without re-measuring:
     ///   - growing the block axis to `mir.blockCount()` instead of doubling
     ///     re-strides more often, and a re-stride holds the old and new buffer at
     ///     once — peak RSS went UP (hisim2_va 155 → 194 MB).
@@ -80,7 +100,7 @@ pub const SsaBuilder = struct {
     /// PLACE-MAJOR is load-bearing: the hot recursion (`readVariableRecursive` →
     /// `addPhiOperands`) walks predecessor BLOCKS for ONE fixed place, so
     /// consecutive probes land in adjacent cells.
-    defs: []Mir.Value = &.{},
+    defs: []u32 = &.{},
     /// Row length of `defs` — capacity along the block axis, not the live count.
     block_stride: u32 = 0,
     /// Rows allocated in `defs` — capacity along the place axis.
@@ -128,7 +148,7 @@ pub const SsaBuilder = struct {
 
     /// Frees builder scratch only; the MIR it wrote into is untouched.
     pub fn deinit(self: *SsaBuilder) void {
-        self.gpa.free(self.defs);
+        unmapMatrix(self.defs);
         self.block_state.deinit(self.gpa);
         self.pred_pool.deinit(self.gpa);
         self.incomplete_pool.deinit(self.gpa);
@@ -189,9 +209,10 @@ pub const SsaBuilder = struct {
 
     /// Record `place := value` in `block`. LRM §5.7 assignment.
     pub fn writeVariable(self: *SsaBuilder, place: Place, block: Mir.Block, value: Mir.Value) Error!void {
-        assert(value != absent); // see `absent`: the Value space never reaches maxInt
+        // see `absent`: the +1 bias never overflows, the Value space never reaches maxInt
+        assert(@intFromEnum(value) != std.math.maxInt(u32));
         const i = try self.defsIndex(place, block);
-        self.defs[i] = value;
+        self.defs[i] = @intFromEnum(value) + 1;
     }
 
     /// Read `place` in `block`, inserting phis as needed. Braun §readVariable.
@@ -209,7 +230,24 @@ pub const SsaBuilder = struct {
         const b = @intFromEnum(block);
         if (p >= self.place_cap or b >= self.block_stride) return null;
         const v = self.defs[p * self.block_stride + b];
-        return if (v == absent) null else v;
+        return if (v == absent) null else @enumFromInt(v - 1);
+    }
+
+    /// `n` cells of `absent`, for free — see `PageAllocator`. The canary is the
+    /// whole test that the zero-page guarantee still holds; it is two loads, and
+    /// `assert` compiles out of ReleaseFast anyway.
+    fn mapZeroed(n: usize) Error![]u32 {
+        const bytes = std.math.mul(usize, n, @sizeOf(u32)) catch return error.OutOfMemory;
+        const p = PageAllocator.map(bytes, .of(u32)) orelse return error.OutOfMemory;
+        const buf = @as([*]u32, @ptrCast(@alignCast(p)))[0..n];
+        assert(buf[0] == absent and buf[n - 1] == absent);
+        return buf;
+    }
+
+    fn unmapMatrix(defs: []u32) void {
+        if (defs.len == 0) return;
+        const p: [*]align(std.heap.page_size_min) u8 = @ptrCast(@alignCast(defs.ptr));
+        PageAllocator.unmap(p[0 .. defs.len * @sizeOf(u32)]);
     }
 
     /// Index of (place, block), growing the matrix to cover it.
@@ -225,23 +263,26 @@ pub const SsaBuilder = struct {
         if (b >= self.block_stride) {
             const new_stride = @max(b + 1, @max(self.block_stride * 2, 16));
             const new_cap = @max(self.place_cap, 1);
-            const grown = try self.gpa.alloc(Mir.Value, @as(usize, new_cap) * new_stride);
-            @memset(grown, absent);
+            const grown = try mapZeroed(@as(usize, new_cap) * new_stride);
             // Re-stride: copy each old row to the front of its wider slot.
             var row: u32 = 0;
             while (row < self.place_cap) : (row += 1) {
                 const src = self.defs[row * self.block_stride ..][0..self.block_stride];
                 @memcpy(grown[row * new_stride ..][0..self.block_stride], src);
             }
-            self.gpa.free(self.defs);
+            unmapMatrix(self.defs);
             self.defs = grown;
             self.block_stride = new_stride;
             self.place_cap = new_cap;
         }
         if (p >= self.place_cap) {
             const new_cap = @max(p + 1, @max(self.place_cap * 2, 16));
-            const grown = try self.gpa.realloc(self.defs, @as(usize, new_cap) * self.block_stride);
-            @memset(grown[@as(usize, self.place_cap) * self.block_stride ..], absent);
+            // Appending rows moves nothing, so this is one flat copy. It is a
+            // fresh mapping rather than a `realloc` because an in-place resize
+            // would hand back tail bytes with no zero guarantee — see `absent`.
+            const grown = try mapZeroed(@as(usize, new_cap) * self.block_stride);
+            @memcpy(grown[0..self.defs.len], self.defs);
+            unmapMatrix(self.defs);
             self.defs = grown;
             self.place_cap = new_cap;
         }
