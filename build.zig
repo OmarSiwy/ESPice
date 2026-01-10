@@ -7,7 +7,6 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    // ponytail: default to Zig backend (17s vs 3m13s). -Dno-llvm=false for LLVM (bench/release).
     const no_llvm = b.option(bool, "no-llvm", "Use Zig's native backend instead of LLVM (default: true)") orelse true;
     // Escape hatch only. GPU kernels are ON by default and auto-detected — a
     // machine with no GPU emits nothing and stays green without this flag.
@@ -489,10 +488,9 @@ fn emitDeviceKernels(
 
         // `zig cc` assembles the PTX — no CUDA toolkit needed on the build host.
         const assemble = b.addSystemCommand(&.{
-            b.graph.zig_exe, "cc",
-            "-target",       "nvptx64-cuda",
-            b.fmt("-mcpu={s}", .{cpu}),
-            "-S",
+            b.graph.zig_exe,            "cc",
+            "-target",                  "nvptx64-cuda",
+            b.fmt("-mcpu={s}", .{cpu}), "-S",
             "-g0", // nvptx rejects DWARF; keeps stderr clean
             "-Wno-unused-command-line-argument",
         });
