@@ -352,6 +352,13 @@ pub fn addDynDevices(b: *Builder, arena: std.mem.Allocator, nl: types.Netlist) !
         // fields (the generated Instance holds only temp), so a card's
         // R=100 must land in the model blob to take effect.
         applyKvDyn(vt.set_model_param, mblob.ptr, dl.kv[di]);
+        // LRM 6.3.4 / 3.4.5, and it has to be HERE. Every write above lands in a
+        // flat Model field, so a parameter declared over another one — and every
+        // localparam — still holds the value it was built with. `derive` is the
+        // device's own pass over those, and it must run after the LAST param write
+        // and before anything reads the model: `collapse` below reads it, and
+        // `proto_add` copies the blob wholesale.
+        if (vt.derive) |df| df(mblob.ptr);
         const iblob = try arena.alignedAlloc(u8, .@"16", vt.instance_size);
         vt.init_instance(iblob.ptr);
         applyKvDyn(vt.set_instance_param, iblob.ptr, dl.kv[di]);
