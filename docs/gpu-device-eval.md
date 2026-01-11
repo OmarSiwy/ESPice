@@ -247,20 +247,183 @@ and `repack` overwrites the one device-resident parameter copy, so only the
 last lane's parameters survive. Per-lane parameter storage has to be part of
 the contract before that hook can be filled.
 
-### Mixed precision
+## 9. Mixed precision — f32 Jacobian, f64 residual
 
-The other open item, and the only route by which compact models beat the CPU.
-§1 gives the size of the prize: f32 is **69×** the f64 rate on this part, and
-10 477 GFLOP/s is 7× the *entire* CPU's f64 peak.
+The only route by which compact models beat the CPU. §1 gives the size of the
+prize: f32 is **69×** the f64 rate on this part, and 10 477 GFLOP/s is 7× the
+*entire* CPU's f64 peak.
 
 Newton is self-correcting — the converged answer depends only on the accuracy
 of the **residual**, while an approximate **Jacobian** costs iteration count,
-not correctness. So an f32 Jacobian with an f64 residual is a standard inexact
--Newton construction, and it needs VerA to emit a dual-precision eval.
+not correctness. An f32 Jacobian with an f64 residual is the standard inexact
+-Newton construction.
 
-One finding blocks a related cleanup: VerA emits `@setFloatMode(.strict)`
-deliberately, and says so (`W0650`: *"unit is not provably finite, so it
-compiles in strict float mode"*). That is why dead arithmetic survives into the
-PTX — the emitted resistor kernel contains a literal multiply-by-zero followed
-by `1.0 - that`, because `.rn` semantics forbid folding it. Reaching
-`.optimized` is a job for VerA's finiteness prover, not a compiler flag.
+Prototyped on the diode (VerA branch `mixed-precision-jacobian`, ARPice
+`-Djac-f32=`). What follows is measured.
+
+### 9.1 The split is one type, and it is on this side
+
+**VerA needs no dual-precision codegen, because the emitted device is already
+precision-agnostic.** `eval` is generic over a comptime `S` and reaches it only
+through the contract's primitive set — `con(f64)`, `scale(f64)`, `addC(f64)`,
+`val() f64`, `ddxAt(usize) f64` — every one of which is f64 at the boundary.
+Physics code may not open `S` up. So which floats `S` carries *inside* was
+always the host's choice, and nothing in the 25 models had to change.
+
+Pinned by a VerA test (`codegen: --jac-f32 adds a permission decl and changes
+not one other byte`): the flag's whole output diff is
+
+```zig
+pub const jac_f32 = true;
+```
+
+and the rest of the file is byte-identical. If that ever stops holding, the
+genericity has been broken somewhere and that test is where it surfaces.
+
+The split itself is `engine.Dual(N, F)`:
+
+```zig
+v: f64,               // residual — never narrows
+d: @Vector(N, F),     // Jacobian — F = f32 under jac_f32
+inline fn splat(c: f64) V { return @splat(@floatCast(c)); }
+```
+
+`engine.jacFloat(D)` reads the device's `jac_f32` and picks `F`. The permission
+is per **device**, not per host, because whether a model's unknowns fit in f32's
+~7 digits is a fact about its physics and only the physics knows it.
+
+### 9.2 What widens back, and where
+
+`ckt.g_vals` is `[]f64` and feeds the sparse LU, so the partials widen at
+exactly four points, all in `engine.zig`:
+
+| site | why |
+|---|---|
+| `evalRange` scatter — `out[ru].grad()` | into `g_vals`/`c_vals` (host `+=`, GPU `atom.global.add.f64`) |
+| `evalRange` limiting correction | `J·(x − x_lim)` lands on the **residual**, so it is widened before the dot product |
+| `HostSink.store`/`storeQ` | the dedup cache is `[n_u][n_u]f64` |
+| `collectNoise` | thermal conductance via `ddxAt` |
+
+`.d` is never read directly any more; `grad()` and `ddxAt()` are the only ways
+out, which is what keeps `F` private to the arithmetic.
+
+### 9.3 Measured: the op counts move, exactly as n_u predicts
+
+`grep -c '\.f64'` on the emitted kernel PTX. Note the count *includes* the
+`cvt.rn.f32.f64` narrowings the split introduces — on sm_89 a 64-bit type
+conversion has the same 2/SM/clock throughput as an f64 FMA, so it belongs in
+the f64 budget rather than being netted out:
+
+| model | n_u | f64 ops before | after | of which cvt | Δ | f32 ops after |
+|---|---|---|---|---|---|---|
+| diode | 2 | 80 | 66 | 14 | **−17 %** | 42 |
+| mos9 | 6 | 9 587 | 3 267 | 526 | **−66 %** | 7 275 |
+| bjt | 9 | 12 740 | 3 818 | 640 | **−70 %** | 10 157 |
+
+Total instruction count barely moves (bjt 22 934 → 23 217, +1.2 %), so this is
+a straight substitution and not extra work. The trend is the point: the value
+chain is O(1) per operation and the derivative chain is O(n_u), so the fraction
+that can go to f32 rises with the unknown count. **The diode is the worst case
+in the catalog**, which is why its 17 % is not the number to plan from.
+
+Virtual register pressure — §1's actual reason the compact models lose — moves
+further:
+
+| model | 64-bit vregs | 32-bit vregs | 32-bit-slot equivalent |
+|---|---|---|---|
+| mos9 f64 | 12 777 | 1 209 | 26 763 |
+| mos9 **f32 jac** | 5 948 | 10 587 | **22 483** (−16 %) |
+| bjt f64 | 15 602 | 1 107 | 32 311 |
+| bjt **f32 jac** | 4 879 | 12 361 | **22 119** (−32 %) |
+
+### 9.4 Measured: correct
+
+201-point DC sweep of a diode through a 100 Ω series R, f64 Jacobian vs f32,
+same binary otherwise:
+
+```
+max relative difference: 2.7e-13
+```
+
+Not bit-identical, and it should not be: Newton stops inside a tolerance ball
+and a different Jacobian lands on a different point inside it. 2.7e-13 is
+thirteen digits, against a `reltol` of 1e-3. Across the diode-carrying fixtures:
+
+| fixture | analysis | max rel diff |
+|---|---|---|
+| `convergence/diode_bridge` | `.op` | 0 |
+| `convergence/schmitt` | `.op` | 0 |
+| `disto/diode_clipper` | `.op` | 2.8e-14 |
+| `hb/diode_clipper` | `.hb` | 0 |
+| `power/zener_reg` | `.dc` | 4.7e-13 |
+| `power/rectifier` | `.tran` | 5.5e-6 |
+| `devices/mos9` | `.dc` | 0 |
+
+The transient outlier is §6's known effect, not a precision failure: a tiny
+numeric difference feeds the LTE controller and moves the time grid.
+
+### 9.5 Measured: no runtime change, and that is the real finding
+
+50 000 diodes + 50 000 resistors, 101-point DC sweep, `--gpu`, 5 interleaved
+runs each:
+
+```
+f64 jac   2.80  3.16  3.46  3.84  4.75
+f32 jac   2.99  3.13  3.20  4.41  4.63
+```
+
+40 000 level-9 NMOS, DC sweep, warm (the first two runs of each binary are cold
+`cuModuleLoadData` and were discarded):
+
+| | 101 points | 11 points |
+|---|---|---|
+| f64 jac | 13.39 13.41 13.43 13.53 | 3.26 3.20 |
+| **f32 jac** | 13.40 13.41 13.41 13.47 | 3.22 3.20 |
+
+**−66 % of mos9's f64 ops bought 0.0 %.**
+
+The two sweep lengths separate the fixed cost from the per-point cost: 1.95 s
+to parse and build a 12 MB netlist, then **0.113 s per sweep point**. The same
+netlist without `--gpu` takes 827–937 s over three runs, ~8.4 s per point — so
+the GPU is
+already **74× on the work being measured**, and device eval was ~99 % of the CPU
+run. Mixed precision is not being hidden by the sparse LU; it is being applied
+to a kernel that is not FP64-throughput bound.
+
+Two readings survive, and no profiler is installed here to choose between them:
+
+1. The kernel is already a small part of that 0.113 s, most of which is the host
+   LU, the per-iteration transfers and the launch chain of §3.
+2. The kernel is bound by spill traffic rather than arithmetic. Its
+   `__local_depot` is 5 120 B *per thread* (bjt's is 16 384 B) — this halves to
+   2 560 B under mixed precision, which is real and still far above the register
+   file, so the regime does not change.
+
+For the diode, §4 already gave the answer directly: for what `gpuEligible`
+admits today "the number of `atom.global.add.f64` a batch issues per iteration
+… *is* the kernel". Six f64 atomics per thread against fourteen f64 ops
+removed — there was never anything there to win.
+
+So the prize in §1 is real, the machinery to collect it now exists and is proven
+correct, and it is **gated behind the model size cap** (`gpu_max_model_bytes`,
+§4). The models this helps most — bsim4's 142 990 f64 ops, 7 104 virtual f64
+registers, 16 % occupancy — are precisely the ones excluded from GPU emission
+today. −70 % of those ops with −32 % of the register pressure is the argument
+for moving that cap; nothing measurable happens until it moves.
+
+### 9.6 The strict-float interaction
+
+VerA emits `@setFloatMode(.strict)` deliberately (`W0650`: *"unit is not
+provably finite, so it compiles in strict float mode"*), which is why dead
+arithmetic survives into the PTX — the emitted resistor kernel contains a
+literal multiply-by-zero followed by `1.0 - that`, because `.rn` semantics
+forbid folding it.
+
+Mixed precision does not fix this and is **taxed by it**. Every `S.con(k)`
+carries a derivative vector of literal zeros, and strict mode forbids folding
+the multiplies against them. Under f64 those are dead vector multiplies; under
+mixed precision they become cheap f32 multiplies that each still need their
+operand narrowed, and the narrowing runs at f64 rate. That is where mos9's 526
+and the diode's 14 conversions come from — the diode's are 21 % of its entire
+remaining f64 budget. Reaching `.optimized` is a job for VerA's finiteness
+prover, and it is worth more *after* this change than before it.
