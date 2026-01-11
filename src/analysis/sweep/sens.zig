@@ -23,7 +23,7 @@ const W = std.simd.suggestVectorLength(f64) orelse 8;
 // ---------------------------------------------------------------------------
 
 pub const SensParam = struct {
-    ptr: *f32,
+    ptr: root.ParamRef,
     device_name: []const u8,
     param_name: []const u8,
 };
@@ -137,19 +137,20 @@ pub fn solve(
     defer allocator.free(dfdp);
 
     for (params, entries) |p, *entry| {
-        const orig: f64 = p.ptr.*;
+        const orig: f64 = p.ptr.get();
         const delta_req = 1e-6 * @abs(orig) + 1e-12;
 
-        // Write perturbed value as f32, read back actual delta.
-        p.ptr.* = @floatCast(orig + delta_req);
+        // Write the perturbed value, then read it BACK: an f32-typed parameter
+        // rounds the step, and differencing against the requested delta instead
+        // of the stored one is a wrong derivative, not a small one.
+        p.ptr.set(orig + delta_req);
         defer {
-            p.ptr.* = @floatCast(orig);
+            p.ptr.set(orig);
             ckt.recompute();
         }
         ckt.recompute();
 
-        // FD against the step the f32 actually took, not the requested one.
-        const delta = @as(f64, p.ptr.*) - orig;
+        const delta = p.ptr.get() - orig;
         if (delta == 0) return error.ZeroDelta;
 
         // Evaluate F(x_op) with perturbed parameter (RHS only, no Newton).
@@ -205,7 +206,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     for (refs, params) |ref, *p| {
         p.* = .{
-            .ptr = ref.ptr,
+            .ptr = ref,
             .device_name = try std.fmt.allocPrint(a, "{s}#{d}", .{ ref.device_type, ref.index }),
             .param_name = ref.param_name,
         };

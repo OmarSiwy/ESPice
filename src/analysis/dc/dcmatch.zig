@@ -87,17 +87,17 @@ fn fdSensitivity(
     lambda: []const f64,
     rhs_nom: []const f64,
     rhs_work: []f64,
-    param_ptr: *f32,
+    param: root.ParamRef,
 ) f64 {
     const n: usize = ckt.n;
-    const orig: f64 = param_ptr.*;
+    const orig: f64 = param.get();
     const delta_req = 1e-6 * @abs(orig) + 1e-12;
 
-    param_ptr.* = @floatCast(orig + delta_req);
-    // Actual delta the f32 took
-    const delta = @as(f64, param_ptr.*) - orig;
+    param.set(orig + delta_req);
+    // The step the parameter ACTUALLY took — an f32-typed field rounds it.
+    const delta = param.get() - orig;
     defer {
-        param_ptr.* = @floatCast(orig);
+        param.set(orig);
         ckt.recompute();
     }
     ckt.recompute();
@@ -186,7 +186,7 @@ pub fn solve(
 
     var total_var: f64 = 0;
     for (refs, contributions) |ref, *contrib| {
-        const sens = fdSensitivity(ckt, x_op, lambda, rhs_nom, rhs_work, ref.ptr);
+        const sens = fdSensitivity(ckt, x_op, lambda, rhs_nom, rhs_work, ref);
 
         const sigma_p = pelgromSigma(ref);
         const var_contrib = sens * sens * sigma_p * sigma_p;

@@ -1,5 +1,0 @@
-module ch09_atomic_bitstoreal(p, n);
-  inout p, n; electrical p, n;
-  analog I(p,n) <+ $bitstoreal(1) + V(p,n);
-endmodule
-

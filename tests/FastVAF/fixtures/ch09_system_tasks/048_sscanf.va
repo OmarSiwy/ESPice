@@ -1,9 +1,0 @@
-module ch09_atomic_sscanf(p, n);
-  inout p, n; electrical p, n;
-  integer code, value;
-  analog begin
-    code = $sscanf("42", "%d", value);
-    I(p,n) <+ V(p,n) + code + value;
-  end
-endmodule
-

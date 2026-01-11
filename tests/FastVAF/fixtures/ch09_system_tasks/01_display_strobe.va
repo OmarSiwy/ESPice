@@ -1,7 +1,0 @@
-module ch09_display_strobe(p, n);
-  inout p, n; electrical p, n;
-  analog begin
-    $strobe("v=%g", V(p,n));
-    I(p,n) <+ V(p,n);
-  end
-endmodule

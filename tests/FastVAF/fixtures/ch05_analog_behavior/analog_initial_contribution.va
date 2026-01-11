@@ -1,5 +1,0 @@
-// EXPECT: error -- LRM 5.2.1 forbids this in an analog initial block.
-module ch5_bad_initial(p);
-  inout p; electrical p;
-  analog initial I(p) <+ 1m;
-endmodule

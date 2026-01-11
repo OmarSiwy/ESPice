@@ -1,7 +1,0 @@
-// EXPECT: error -- LRM 5.2.1 forbids reading a digital-owned value in analog initial.
-module ch5_initial_digital_access_rejected;
-  reg digital_value;
-  real initialized;
-  initial digital_value = 1'b1;
-  analog initial initialized = digital_value;
-endmodule

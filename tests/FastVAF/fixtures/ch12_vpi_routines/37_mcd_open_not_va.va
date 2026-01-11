@@ -1,6 +1,0 @@
-// EXPECT: error
-module ch12_atomic_mcd_open(p, n);
-  inout p, n; electrical p, n;
-  analog I(p,n) <+ vpi_mcd_open(0);
-endmodule
-

@@ -1,7 +1,0 @@
-module ch03_ground_declaration(p);
-    input p;
-    electrical p, local_reference;
-    ground local_reference;
-
-    analog V(p, local_reference) <+ 5.0;
-endmodule

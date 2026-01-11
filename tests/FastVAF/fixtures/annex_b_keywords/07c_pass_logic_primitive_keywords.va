@@ -1,5 +1,0 @@
-module annex_b_pass_logic(a,b,c);
-  rtran g15(a,b); rtranif0 g16(a,b,c); rtranif1 g17(a,b,c); tranif0 g18(a,b,c); tranif1 g19(a,b,c);
-  xnor g20(a,b,c); xor g21(a,b,c);
-endmodule
-// EXPECT: error -- normative syntax/restriction snapshot for this rule family.

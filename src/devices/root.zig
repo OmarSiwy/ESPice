@@ -45,6 +45,14 @@ pub const catalog: []const Entry = blk: {
     break :blk &frozen;
 };
 
+// CONSUMING §4.2 / checklist item 5, over every builtin. `catalog` is the only
+// place that names all of them unconditionally — `DeviceBatch(D)` is
+// instantiated lazily, per device type a netlist actually uses, so a check
+// there would pass a build that a netlist then fails.
+comptime {
+    for (catalog) |e| engine.checkHost(e.type);
+}
+
 /// Resolve a device type by model name (comptime — `catalog` carries `type`).
 pub fn byName(comptime name: []const u8) type {
     // Consumers resolve every DeviceId tag in one comptime frame (an

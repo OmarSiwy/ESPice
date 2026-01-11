@@ -1,2 +1,0 @@
-module annex_a_if_generate(p); inout p; electrical p; parameter integer enabled=1; generate if(enabled) begin : on analog I(p)<+V(p); end else begin : off analog I(p)<+0.0; end endgenerate endmodule
-// EXPECT: error -- normative syntax/restriction snapshot for this rule family.

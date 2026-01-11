@@ -1,6 +1,0 @@
-// EXPECT: error
-module ch12_atomic_sim_control(p, n);
-  inout p, n; electrical p, n;
-  analog I(p,n) <+ vpi_sim_control(0);
-endmodule
-

@@ -1,9 +1,0 @@
-`define CLAMP(x,lo,hi) ($min($max((x),(lo)),(hi)))
-module combined_macro_function_math(p, n);
-  inout p, n; electrical p, n;
-  analog function real transfer;
-    input x; real x;
-    begin transfer = $exp(`CLAMP(x,-2.0,2.0)); end
-  endfunction
-  analog I(p,n) <+ transfer(V(p,n));
-endmodule

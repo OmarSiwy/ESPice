@@ -169,15 +169,18 @@ pub fn main(init: std.process.Init) !u8 {
                 },
                 else => {},
             };
-            // Source-tree paths for the runtime .so build. The devices package
-            // has no `build_options`, and these must be the SAME roots the
-            // builtins were compiled against — the orchestrator hashes them into
-            // `layout_hash`, which is what rejects a stale cached .so.
-            const src_root = build_options.src_root;
+            // Module roots for the runtime .so build. These must be the SAME
+            // roots the builtins were compiled against — the orchestrator hashes
+            // them into `layout_hash`, which is what rejects a stale cached .so.
+            //
+            // The build hands them over whole rather than letting us join them
+            // onto `src_root`: `contract` lives in the vera package now, which
+            // has no path expressible from here. The joined form silently rotted
+            // once before, when the `modules/` tree it named was deleted.
             const hdl_build_paths: vaload.BuildPaths = .{
-                .work_dir = try std.fs.path.join(arena, &.{ src_root, ".zig-cache", "zpicey-hdl" }),
-                .contract = try std.fs.path.join(arena, &.{ src_root, "modules", "devices", "src", "contract.zig" }),
-                .dyn = try std.fs.path.join(arena, &.{ src_root, "modules", "devices", "src", "engine.zig" }),
+                .work_dir = try std.fs.path.join(arena, &.{ build_options.src_root, ".zig-cache", "zpicey-hdl" }),
+                .contract = build_options.contract_path,
+                .dyn = build_options.dyn_path,
             };
             vaload.ensureAllLoaded(arena, io, hdl_paths.items, hdl_build_paths) catch |e| {
                 std.debug.print("Error: runtime HDL load failed: {s}\n", .{@errorName(e)});

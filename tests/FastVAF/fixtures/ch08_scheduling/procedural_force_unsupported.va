@@ -1,5 +1,0 @@
-// EXPECT: error -- force updates are scheduled digital processes.
-module ch8_procedural_force;
-  reg source, target;
-  initial force target = source;
-endmodule

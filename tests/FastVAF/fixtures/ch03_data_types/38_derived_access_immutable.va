@@ -1,3 +1,0 @@
-nature ch3_access_parent; units="V"; access=AccessV; abstol=1u; endnature
-nature ch3_access_child:ch3_access_parent; access=ChangedV; endnature
-module ch3_bad_access; endmodule

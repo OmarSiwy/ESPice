@@ -3,6 +3,11 @@
 //! catalog at comptime. gompute's `emitKernels` (top-level build) recompiles
 //! this with the device flag to bake PTX (NVIDIA) and AMDGCN (AMD) into the app.
 //!
+//! The top-level build compiles this file ONCE PER DEVICE, each time against a
+//! `models` aggregate holding that one device — so a kernel root is one device,
+//! and the CUDA driver JITs only the devices a netlist instantiates. The loop
+//! below stays written for N because nothing here depends on N being 1.
+//!
 //! Dynamic `.so` devices are NOT here — they register their one device from the
 //! SAME `engine.DeviceKernel` template at `.so`-build-time, so the format is
 //! identical by construction.
@@ -17,19 +22,30 @@ const models = @import("models");
 /// Threads per block for device kernels. gompute launches ceil(count/block_size).
 pub const block_size: u32 = 256;
 
-/// Symbol prefix for a device's eval kernel — `arp_eval_<name>`. The host links
-/// each builtin batch to its kernel by this name; a dynamic `.so` exports the
-/// same-shaped symbol for its device.
-pub fn kernelName(comptime name: []const u8) [:0]const u8 {
-    return "arp_eval_" ++ name;
-}
+/// Stand-in entry point for a device with no GPU kernel.
+///
+/// gompute rejects a kernel root that produces no entry points, and roughly a
+/// third of the catalog is not `gpuEligible` (`vsource` declares `State`,
+/// `lossy_tline` carries history, and so on). Since a root is now one device,
+/// those roots would each be empty and fail the build. One no-op keeps the root
+/// legal; it is never looked up, because the host only asks for a kernel whose
+/// batch handed it a `gpu_payload`, and an ineligible device has none.
+fn placeholder(_: u64) callconv(gompute.kernel_callconv) void {}
 
 comptime {
     if (gompute.is_device) {
         for (@typeInfo(models).@"struct".decls) |d| {
             const D = @field(models, d.name);
+            // engine.kernelName, not a local one keyed on `d.name`: the HOST
+            // looks a kernel up from `Batch`, which carries the type and not
+            // the catalog key, so deriving both names from the type is what
+            // keeps export and lookup in step.
             if (engine.gpuEligible(D)) {
-                gompute.exportRaw(kernelName(d.name), &engine.DeviceKernel(D, block_size).run);
+                gompute.exportRaw(engine.kernelName(D), &engine.DeviceKernel(D, block_size).run);
+            } else {
+                // Per-device name: gompute requires kernel names to be unique
+                // across roots, so one shared "arp_nop" would collide.
+                gompute.exportRaw("arp_nop_" ++ d.name, &placeholder);
             }
         }
     }

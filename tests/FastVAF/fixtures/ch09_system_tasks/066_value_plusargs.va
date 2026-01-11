@@ -1,9 +1,0 @@
-module ch09_atomic_value_plusargs(p, n);
-  inout p, n; electrical p, n;
-  integer found, value;
-  analog begin
-    found = $value$plusargs("gain=%d", value);
-    I(p,n) <+ V(p,n) + found + value;
-  end
-endmodule
-

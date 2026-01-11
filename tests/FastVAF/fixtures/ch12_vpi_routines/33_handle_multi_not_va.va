@@ -1,6 +1,0 @@
-// EXPECT: error
-module ch12_atomic_handle_multi(p, n);
-  inout p, n; electrical p, n;
-  analog I(p,n) <+ vpi_handle_multi(0);
-endmodule
-

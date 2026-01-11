@@ -1,5 +1,0 @@
-// EXPECT: error
-module ch12_object_property_not_va(p, n);
-  inout p, n; electrical p, n;
-  analog I(p,n) <+ vpi_get_str(1, 0);
-endmodule

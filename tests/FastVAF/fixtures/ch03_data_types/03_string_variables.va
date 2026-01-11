@@ -1,5 +1,0 @@
-module ch03_string_variables;
-    parameter string default_name = "John Smith";
-    string empty_name;
-    string my_name = default_name;
-endmodule

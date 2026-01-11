@@ -1,5 +1,0 @@
-module ch01_current_source(p, n);
-    inout p, n;
-    electrical p, n;
-    analog I(p, n) <+ 1m;
-endmodule

@@ -1,2 +1,0 @@
-// EXPECT: error -- Table E.1 primitive needs SPICE elaboration.
-module annex_e_primitive_vccs(sink,src,ps,ns); inout sink,src,ps,ns; electrical sink,src,ps,ns; vccs #(.gm(1m)) x(.sink(sink),.src(src),.ps(ps),.ns(ns)); endmodule

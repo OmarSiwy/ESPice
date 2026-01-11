@@ -1,5 +1,0 @@
-module ch11_branch_quantity(p, n);
-  inout p, n; electrical p, n;
-  branch (p,n) measured;
-  analog I(measured) <+ V(measured)/1000.0;
-endmodule

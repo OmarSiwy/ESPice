@@ -1,1 +1,0 @@
-module ch04_cos(p, n); inout p, n; electrical p, n; analog I(p, n) <+ cos(V(p, n)); endmodule

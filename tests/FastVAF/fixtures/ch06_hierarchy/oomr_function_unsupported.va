@@ -1,5 +1,0 @@
-// EXPECT: error -- analog functions may be called hierarchically after elaboration.
-module ch6_oomr_function(p);
-  inout p; electrical p;
-  analog I(p) <+ device.limit_value(V(p));
-endmodule

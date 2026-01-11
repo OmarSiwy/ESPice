@@ -1,7 +1,0 @@
-module ch09_display_write(p, n);
-  inout p, n; electrical p, n;
-  analog begin
-    $write("no newline: %r", V(p,n));
-    I(p,n) <+ V(p,n);
-  end
-endmodule

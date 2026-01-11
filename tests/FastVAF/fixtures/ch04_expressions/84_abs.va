@@ -1,1 +1,0 @@
-module ch04_abs(p, n); inout p, n; electrical p, n; analog I(p, n) <+ abs(V(p, n)); endmodule

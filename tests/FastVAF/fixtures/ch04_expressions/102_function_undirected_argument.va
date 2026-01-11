@@ -1,1 +1,0 @@
-module ch4_fn_undirected(p); inout p; electrical p; analog function real undirected; real x; undirected=x; endfunction analog I(p)<+undirected(V(p)); endmodule

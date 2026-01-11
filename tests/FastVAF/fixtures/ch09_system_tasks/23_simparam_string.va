@@ -1,8 +1,0 @@
-module ch09_simparam_string(p, n);
-  inout p, n; electrical p, n;
-  string analysis_type;
-  analog begin
-    analysis_type = $simparam$str("analysis_type");
-    I(p,n) <+ 0.0*V(p,n);
-  end
-endmodule

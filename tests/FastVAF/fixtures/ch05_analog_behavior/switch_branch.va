@@ -1,7 +1,0 @@
-module ch5_switch(p, n, c);
-  inout p, n, c; electrical p, n, c;
-  analog begin
-    if (V(c) > 0.5) V(p, n) <+ 0.0;
-    else I(p, n) <+ 0.0;
-  end
-endmodule

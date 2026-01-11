@@ -1,7 +1,0 @@
-module ch5_initial_step(p);
-  inout p; electrical p; real x;
-  analog begin
-    @(initial_step) x = 1.0;
-    I(p) <+ x + 0.0*V(p);
-  end
-endmodule

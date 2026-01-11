@@ -1,5 +1,0 @@
-// NONCONFORMING ACCEPTANCE SNAPSHOT: $driver_type is valid only in the digital context of a connectmodule.
-module ch09_atomic_driver_type(p, n);
-  inout p, n; electrical p, n;
-  analog I(p,n) <+ V(p,n) + $driver_type(p,0);
-endmodule

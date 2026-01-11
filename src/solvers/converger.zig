@@ -20,6 +20,42 @@ const BbdInfo = @import("root.zig").BbdInfo;
 
 pub const Strategy = enum { newton, jfnk };
 
+/// `ZPICEY_SOLVER` — pin the strategy `run` would otherwise pick by itself.
+///
+/// Exists because the three regimes differ by MORE than speed and which one
+/// wins is a property of the circuit, not of the hardware:
+///
+///   auto       the ladder below: device Newton, then JFNK, then direct.
+///   direct     stamp + sparse LU + one solve per Newton step.
+///   jfnk       stamp + sparse LU (as the PRECONDITIONER) + k GMRES matvecs.
+///              Strictly more work per step than `direct`; it wins only by
+///              taking fewer steps, because the LU is still there.
+///   jfnk-nolu  stamp + k GMRES matvecs, Jacobi-preconditioned, NO
+///              factorization at all. The only regime that actually removes
+///              the CPU-serial LU, and so the only one whose cost falls as
+///              device eval gets faster — but Jacobi on a stiff circuit
+///              Jacobian stagnates readily, so it is opt-in and measured, not
+///              a default.
+pub const SolverPin = enum { auto, direct, jfnk, jfnk_nolu };
+
+/// Read once. `getenv` on every Newton step of every timestep is not free, and
+/// the value cannot change under a running process.
+var solver_pin_cache: ?SolverPin = null;
+
+pub fn solverPin() SolverPin {
+    if (solver_pin_cache) |p| return p;
+    const p: SolverPin = blk: {
+        const s = std.c.getenv("ZPICEY_SOLVER") orelse break :blk .auto;
+        const v = std.mem.span(s);
+        if (std.mem.eql(u8, v, "direct")) break :blk .direct;
+        if (std.mem.eql(u8, v, "jfnk")) break :blk .jfnk;
+        if (std.mem.eql(u8, v, "jfnk-nolu")) break :blk .jfnk_nolu;
+        break :blk .auto;
+    };
+    solver_pin_cache = p;
+    return p;
+}
+
 pub fn opdbg() bool {
     return std.c.getenv("ZP_OPDBG") != null;
 }
@@ -351,7 +387,11 @@ pub fn jfnk(
         .sys = sys,
         .hook = hook,
         .opts = opts,
-        .slv = &ws.slv,
+        // A null solver is what makes this matrix-free: `precondBuild` skips
+        // `s.factor` and `applyPreconditioner` falls back to the Jacobi diagonal
+        // it always builds. That is the ONLY configuration in which JFNK
+        // removes the factorization rather than merely wrapping it.
+        .slv = if (solverPin() == .jfnk_nolu) null else &ws.slv,
         .n = n,
         .diag = diag_prec,
     };
@@ -403,6 +443,17 @@ pub fn run(
         defer sys.clearLimits();
     }
 
+    const pin = solverPin();
+    if (pin == .direct) return newton(sys, ws, x, t, opts, hook);
+    if (pin == .jfnk or pin == .jfnk_nolu) {
+        if (jfnk(sys, ws, x, t, opts, hook)) |r| {
+            if (r.converged) return r;
+        } else |_| {}
+        // Still falls back: a pin is a preference, not a promise to return a
+        // wrong answer.
+        return newton(sys, ws, x, t, opts, hook);
+    }
+
     // GPU whole-Newton: only for hooks that declare gpu_eligible
     const hook_gpu = comptime @hasDecl(H, "gpu_eligible") and H.gpu_eligible;
     if (comptime @hasField(S, "gpu_hook") and hook_gpu) {
@@ -413,9 +464,12 @@ pub fn run(
         }
     }
 
-    // JFNK is the default strategy when GPU is active — matrix-free,
-    // no factorization, same algorithm the megakernel runs so CPU/GPU
-    // convergence is a superset. Direct Newton is the last resort.
+    // JFNK when the GPU is live. NOT because it is matrix-free — as configured
+    // here it is not; `CpuEnv.precondBuild` factors the Jacobian and uses that
+    // LU as the preconditioner, so a step costs a stamp, a factorization AND
+    // the GMRES matvecs. It earns its place by taking fewer steps, and its
+    // matvecs are residual evals, which is the part the device made cheap.
+    // `ZPICEY_SOLVER=jfnk-nolu` is the genuinely factorization-free variant.
     if (comptime @hasField(S, "gpu_active")) {
         if (sys.gpu_active) {
             const r = try jfnk(sys, ws, x, t, opts, hook);

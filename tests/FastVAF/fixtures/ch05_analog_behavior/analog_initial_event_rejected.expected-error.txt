@@ -1,2 +1,0 @@
-# LRM 5.2.1: event control statements are forbidden in an analog initial block.
-E0702

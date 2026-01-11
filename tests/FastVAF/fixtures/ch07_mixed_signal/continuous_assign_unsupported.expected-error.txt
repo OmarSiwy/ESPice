@@ -1,4 +1,0 @@
-# annex C: `wreal` and the digital continuous `assign` are outside Verilog-A.
-E0205
-wreal
-assign

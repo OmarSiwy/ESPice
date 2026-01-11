@@ -1,1 +1,0 @@
-module ch4_fn_filter(p); inout p; electrical p; analog function real filt; input x; real x; filt=laplace_nd(x,'{1.0},'{1.0,1.0}); endfunction analog I(p)<+filt(V(p)); endmodule

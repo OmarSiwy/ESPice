@@ -1,4 +1,0 @@
-module ch5_flow_probe(p, n);
-  inout p, n; electrical p, n; branch (p, n) sense;
-  analog V(sense) <+ 2.0 * I(sense);
-endmodule

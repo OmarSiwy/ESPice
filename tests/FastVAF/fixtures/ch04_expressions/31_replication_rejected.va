@@ -1,5 +1,0 @@
-// EXPECT: error
-module ch04_replication_rejected;
-    integer replicated;
-    analog replicated = {4{2'b10}};
-endmodule

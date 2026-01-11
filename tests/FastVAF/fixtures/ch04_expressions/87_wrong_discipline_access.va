@@ -1,4 +1,0 @@
-nature ch4_custom_p; units="V"; access=CustomV; abstol=1u; endnature
-nature ch4_custom_f; units="A"; access=CustomI; abstol=1p; endnature
-discipline ch4_custom_d; potential ch4_custom_p; flow ch4_custom_f; enddiscipline
-module ch4_wrong_discipline(p); inout p; ch4_custom_d p; analog V(p)<+0.0; endmodule

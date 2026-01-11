@@ -1,5 +1,0 @@
-module ch09_atomic_atan2(p, n);
-  inout p, n; electrical p, n;
-  analog I(p,n) <+ V(p,n) + $atan2(V(p,n), 1.0);
-endmodule
-

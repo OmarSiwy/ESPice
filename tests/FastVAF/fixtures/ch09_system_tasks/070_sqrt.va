@@ -1,5 +1,0 @@
-module ch09_atomic_sqrt(p, n);
-  inout p, n; electrical p, n;
-  analog I(p,n) <+ V(p,n) + $sqrt(4.0);
-endmodule
-

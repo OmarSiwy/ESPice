@@ -1,1 +1,0 @@
-module ch5_derivative(p,n); inout p,n; electrical p,n; analog I(p,n)<+2p*ddt(V(p,n)); endmodule

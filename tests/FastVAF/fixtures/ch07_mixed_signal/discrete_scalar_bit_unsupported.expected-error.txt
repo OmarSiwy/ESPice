@@ -1,3 +1,0 @@
-# LRM 4.4: a net may only be read through an access function; the rejection
-# lands at the ACCESS, which is the more useful diagnostic.
-E0315

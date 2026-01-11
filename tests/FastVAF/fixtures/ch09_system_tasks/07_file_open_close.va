@@ -1,9 +1,0 @@
-module ch09_file_open_close(p, n);
-  inout p, n; electrical p, n;
-  integer fd;
-  analog begin
-    fd = $fopen("fixture.log", "w");
-    $fclose(fd);
-    I(p,n) <+ V(p,n);
-  end
-endmodule

@@ -1,8 +1,0 @@
-// The snapshot records FastVAF's current acceptance without continue semantics.
-module ch5_jump_continue(p);
-  inout p; electrical p; integer i;
-  analog for (i = 0; i < 4; i = i + 1) begin
-    if (i == 2) continue;
-    I(p) <+ i;
-  end
-endmodule

@@ -1,1 +1,0 @@
-module ch04_sqrt(p, n); inout p, n; electrical p, n; analog I(p, n) <+ sqrt(abs(V(p, n))); endmodule

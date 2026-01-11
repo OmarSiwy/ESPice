@@ -1,4 +1,0 @@
-module ch09_math_2023(p, n);
-  inout p, n; electrical p, n;
-  analog I(p,n) <+ $ln1p(V(p,n)) + $expm1(V(p,n));
-endmodule

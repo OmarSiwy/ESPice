@@ -1,4 +1,0 @@
-# LRM 2.6: the value token of a based number is an UNSIGNED number, so the
-# sign in `8'd -6` is not part of the literal.
-ParseError
-E0209

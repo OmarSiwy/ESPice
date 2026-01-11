@@ -1,0 +1,266 @@
+# GPU Device Evaluation — What the Hardware Actually Allows
+
+## 1. The constraint nobody can optimize around
+
+Everything below follows from one measurement. On the development machine
+(RTX 4060 Laptop, sm_89, 24 SMs @ 1.89 GHz, against an i9-14900HX, 24C/32T):
+
+| | GPU | CPU |
+|---|---|---|
+| **f64 FMA** | **152.7 GFLOP/s** | **1449 GFLOP/s** (32 threads) · 90 (1 thread) |
+| f32 FMA | 10 477 GFLOP/s | — |
+| f64 : f32 | **1 : 69** | 1 : 2 |
+| f64 `rcp.rn` | 13.8 Gop/s | — |
+| memcpy bandwidth | ~250 GB/s (VRAM) | 47 GB/s |
+| host↔device | Gen4 x8, 12.6 GB/s, 4.31 µs round trip | — |
+
+Consumer Ada carries **2 FP64 cores per SM**. Every value in a device model is
+`f64`. So the GPU has **1/9.5 of this CPU's f64 throughput**, and measured f64
+FMA lands at 84 % of the 181 GFLOP/s the part is theoretically capable of —
+there is no tuning left on the table, the ceiling itself is low.
+
+The consequence is worth stating plainly, because it is the opposite of the
+usual intuition: **a straight f64 port of device evaluation cannot beat this
+CPU on arithmetic.** What the GPU still has is ~5× the memory bandwidth and
+tens of thousands of threads, and that is what the win below is actually made
+of — device evaluation is a bandwidth-and-parallelism problem, not a FLOP
+problem, right up until a compact model turns it into one.
+
+Where the GPU is flop-bound it loses badly. The emitted `bsim4va` kernel
+carries **142 990 f64 operations**, 739 f64 divides and 3 530 predicates in
+7 104+ virtual 64-bit registers against a 255-register file — it spills to
+local memory and runs at roughly 16 % occupancy. That is why those models are
+excluded from GPU emission entirely (§4).
+
+## 2. Where the GPU enters an analysis
+
+Exactly one place: `Circuit.eval` and `Circuit.evalNewton` consult
+`GpuHook.eval_planes` and, if set, hand the whole stamp to the device.
+
+This is deliberate and it is the difference between transient working and not.
+An earlier design put the GPU behind `solve_newton`, replacing the *solve*.
+`tran.TranHook.assemble` calls `evalNewton` and then does its own companion-RHS
+math on the planes:
+
+```
+rhs += alpha*(q - q_prev)          # backward Euler
+vals() -> combineGC(alpha, a_vals) # A = G + alpha*C
+```
+
+A GPU path that replaces the solve skips all of that. One that replaces only
+the *stamp* composes with it untouched — and equally with limiting, history
+injection, and every other host-side layer. `TranHook` never declared
+`gpu_eligible`, and `simulate_tran` was null, so before this change **`.tran`
+never touched the GPU at all**.
+
+Routing the stamp also picks up `hb`, `qpss`, `pnoise` and `tran_noise`, which
+call `ckt.eval` in a loop and were CPU-only for the same reason.
+
+### The baseline is deliberately given up
+
+The device path ignores `has_baseline`. `g_base` holds the constant Jacobian
+contribution of **every** batch, GPU-eligible ones included, and `GpuSink` has
+no `skip_g` — so starting from the baseline and letting kernels stamp on top
+would double-count. The GPU path zeroes and restamps instead. That costs the
+constant-Jacobian optimization and is a real loss on linear-heavy circuits.
+
+## 3. Per-iteration cost, and what was removed
+
+The device eval is a strict chain — upload `x`, zero the planes, launch, download
+the planes — and the chain used to be paid in full, synchronously, per Newton
+iteration. On a 100×100 resistor grid (`nnz` ≈ 50 000):
+
+| step | before | after |
+|---|---|---|
+| `x` upload, 80 KB | 13 µs (blocking, pageable) | ~2 µs memcpy + async |
+| zero `g`/`rhs` (+`c`/`q`) | 6–15 µs (D2D from a resident zero block) | `cuMemsetD8Async` |
+| launch | 1.3 µs | 1.3 µs |
+| sync | `cuCtxSynchronize` (whole device) | `cuStreamSynchronize` |
+| download `g`, 400 KB | 45 µs (blocking, pageable) | issued **before** host work |
+| download `rhs`, 80 KB | 13 µs (blocking, pageable) | issued **before** host work |
+
+Three changes, in order of value:
+
+1. **Pinned host buffers.** `cuMemcpy*Async` on *pageable* memory is
+   asynchronous in name only — the driver stages it through an internal pinned
+   buffer and blocks. Only `cuMemHostAlloc` memory actually overlaps.
+2. **Downloads issued before the host batches run.** The ineligible devices
+   (`vsource` declares `State`, so a mixed circuit is the normal case) stamp the
+   host planes while the D2H copies drain. ~58 µs leaves the critical path.
+3. **A dedicated stream.** The NULL stream implicitly synchronizes with every
+   other blocking stream, so copies and launches had to leave it together or
+   they would serialize anyway.
+
+## 4. Two gates
+
+**Work gate** (`gpu_context.zig`, `ZPICEY_GPU_MIN_WORK`, default 200 000).
+Scatter work is `count · n_u²` summed over eligible batches — the number of
+`atom.global.add.f64` a batch issues per iteration, which for the devices
+`gpuEligible` admits today *is* the kernel. Measured: 6 atomics × 20 K
+instances = 9.5 µs, × 200 K = 76 µs, against a ~100 µs round trip. Below the
+gate the GPU cannot win, so `init` declines **before the first driver call** —
+which is also what makes `cuInit` lazy. That matters: `cuInit` costs 113.7 ms
+and retaining the primary context another 80.7 ms, and a small netlist used to
+pay all 194 ms just for passing `--gpu`.
+
+**Model size cap** (`build.zig`, `gpu_max_model_bytes`, 80 KB of source).
+Above it a model gets no GPU kernel at all. The cost being avoided is not
+subtle:
+
+| model | source | PTX | cold `cuModuleLoadData` |
+|---|---|---|---|
+| mos9 | 20 KB | 731 KB | 11.4 ms |
+| bjt | 20 KB | 895 KB | 12.6 ms |
+| hicumL2_va | 90 KB | 9.7 MB | — |
+| bsim4va | 440 KB | 8.7 MB | 37.9 ms *(warm cache)* |
+| bsimsoi_va | 399 KB | 11.3 MB | **308 667 ms** |
+| hisimhv_va | 614 KB | 38.4 MB | **> 900 000 ms, killed** |
+
+The driver caches JIT output in `~/.nv/ComputeCache`, so that is paid once per
+(model, arch, driver) — but it *is* paid, the cache evicts (109 MB here), and
+it buys a kernel that loses anyway for the register-pressure reasons in §1.
+Emitting them also put 68 MB of PTX in `.data`. Dropping them took the binary
+from **549 MB to 307 MB**.
+
+Source bytes is a proxy: emitted PTX size is what actually predicts JIT cost,
+but it is only known after paying the build-time compile the cap exists to
+skip. The size clusters cleanly — `hicumL2_va` at 90 KB is the smallest model
+that explodes, `mos2` at 24 KB the largest that does not, and nothing lives in
+between.
+
+A batch whose model has no image **demotes to the CPU** rather than failing the
+context, so one BSIM4 in a netlist does not pull its ten thousand resistors
+back with it.
+
+## 5. Measured results
+
+Nonlinear DC sweep, 50 000 diodes + 50 000 resistors, 101 points:
+
+| | time | vs GPU |
+|---|---|---|
+| CPU, 1 thread | 26.06 s | 11.3× |
+| CPU, 8 threads *(best)* | 12.54 s | **5.4×** |
+| CPU, 16 threads | 15.87 s | 6.9× |
+| **GPU** | **2.31 s** | — |
+
+Transient, 60 000 devices — an analysis that previously never reached the GPU:
+
+| | time |
+|---|---|
+| CPU | 6.75 s |
+| **GPU** | **2.15 s** (3.1×) |
+
+Note the CPU column is `ZPICEY_THREADS`-dependent and peaks at 8; 16 threads is
+*slower* (15.87 s), because the per-eval handoff and window reduce stop paying
+for themselves.
+
+Full corpus against ngspice (264 fixtures, `rtol = 1e-3`): **80 PASS / 46 FAIL
+on both the CPU and the GPU path, identical**. One fixture differs —
+`sweep/opamp_wl_5000`, which the CPU path skips on timeout and the GPU path
+completes in 29.5 s. The GPU introduces no accuracy regression.
+
+The corpus itself shows only 0.68–1.48×, because every fixture in it runs in
+20–50 ms — far below the work gate, so the GPU correctly declines and that
+spread is process noise.
+
+## 6. Reproducibility — read this before trusting a diff
+
+**The GPU path is not bit-reproducible run to run.** `atom.global.add.f64`
+commits in scheduling order, so the summation order of each matrix slot varies
+between identical invocations. Measured on the 19 800-resistor grid: 750 of
+10 000 values differ between runs, by at most **1 ULP** (2.19e-16 against an
+f64 epsilon of 2.22e-16).
+
+The magnitude is benign. The consequence is not always:
+
+- For `.op`, `.dc` and `.ac`, results differ in the last bit and nothing else.
+- For **`.tran`, the time grid itself moves.** Adaptive timestepping feeds the
+  Newton iterate into the LTE controller, so a 1-ULP difference can change a
+  step-accept decision. Observed on a 2-branch fixture: both runs produced 88
+  points, identical through index 3, diverging at index 4
+  (`1.98992165056e-10` vs `1.9899216075e-10`). **A pointwise diff of two
+  transient runs is meaningless** unless you first confirm the grids match —
+  compare on matched times, or interpolate.
+
+This breaks a property the CPU side deliberately maintains: `ParEval` reduces
+lanes in fixed order and is bit-identical run-to-run at a given `n_lanes`
+(`devices/engine.zig`). Restoring it on the GPU means deterministic reduction
+instead of atomics — segmented reduction over a sorted scatter list — which
+costs a sort and a second pass.
+
+## 7. Solver choice
+
+`ZPICEY_SOLVER` = `auto` | `direct` | `jfnk` | `jfnk-nolu`.
+
+Matrix-free Newton-Krylov is the standard recommendation for GPU solvers, on
+the theory that it trades a factorization for residual evaluations — which is
+exactly the operation the device made cheap. **Measured, it is decisively wrong
+here.** 4 000 R-D-C branches, `.tran 2n 100n`:
+
+| strategy | time | vs direct |
+|---|---|---|
+| `direct` | **1.36 s** | — |
+| `jfnk` | 64.33 s | 47× worse |
+| `jfnk-nolu` | 49.17 s | 36× worse |
+
+At 20 000 branches `jfnk` was killed at 650 s against `direct`'s 6.75 s.
+
+Two reasons, both specific to this tree:
+
+1. **`jfnk` here is not matrix-free.** `CpuEnv.precondBuild` calls `s.factor(v)`
+   — a full sparse LU — and uses it as the preconditioner. A JFNK step costs a
+   stamp *plus* the same factorization `direct` does *plus* up to 30 GMRES
+   matvecs. It can only win by taking fewer Newton steps, and it does not.
+2. **Matrix-free does not rescue it.** `jfnk-nolu` removes the factorization
+   entirely (Jacobi diagonal only) and is still 36× worse. Circuit Jacobians
+   are stiff and badly scaled; Jacobi-preconditioned GMRES stagnates, burning
+   30 matvecs per step for little progress.
+
+The general argument assumes the Krylov solve converges in few iterations.
+Here each matvec is a residual eval, so 30 of them cost 30× more *device* work
+than the single eval `direct` needs — making device eval faster makes JFNK's
+cost structure worse relative to direct, not better.
+
+## 8. What is not done, and what it would take
+
+`solve_batch` (Monte Carlo, corners, temperature sweep) and `freq_solve_batch`
+(AC, noise, SP, PAC, QPSS) are still null. Their call sites are written and
+waiting (`mc.zig`, `temp_sweep.zig`, `dc.zig`, `ac.zig`, `noise.zig`, `sp.zig`,
+`qpss.zig`).
+
+Both are "N independent solves in one launch", and §7 rules out the cheap way
+to do that: the solves must be **direct**. So both reduce to one missing
+component — a batched direct sparse solver on the device: one symbolic
+factorization on the host (the sparsity pattern is identical across lanes),
+then batched numeric factorization and solve, one block per lane. That is a
+substantial piece of work with real risk (partial pivoting, fill-in,
+shared-memory blocking), and it is the single thing standing between this tree
+and the 10–50× that MC and frequency sweeps should give.
+
+A tractable subset exists for `freq_solve_batch`: batched **dense** complex LU,
+one block per frequency, for `n` below ~1000 with a CPU fallback above. It only
+helps circuits that are already fast, but AC sweeps run thousands of points.
+
+Note also that `runBatchGpu` in `dc.zig` is not implementable as written — it
+calls `repack` once per lane inside a loop before a single `solve_batch` call,
+and `repack` overwrites the one device-resident parameter copy, so only the
+last lane's parameters survive. Per-lane parameter storage has to be part of
+the contract before that hook can be filled.
+
+### Mixed precision
+
+The other open item, and the only route by which compact models beat the CPU.
+§1 gives the size of the prize: f32 is **69×** the f64 rate on this part, and
+10 477 GFLOP/s is 7× the *entire* CPU's f64 peak.
+
+Newton is self-correcting — the converged answer depends only on the accuracy
+of the **residual**, while an approximate **Jacobian** costs iteration count,
+not correctness. So an f32 Jacobian with an f64 residual is a standard inexact
+-Newton construction, and it needs VerA to emit a dual-precision eval.
+
+One finding blocks a related cleanup: VerA emits `@setFloatMode(.strict)`
+deliberately, and says so (`W0650`: *"unit is not provably finite, so it
+compiles in strict float mode"*). That is why dead arithmetic survives into the
+PTX — the emitted resistor kernel contains a literal multiply-by-zero followed
+by `1.0 - that`, because `.rn` semantics forbid folding it. Reaching
+`.optimized` is a job for VerA's finiteness prover, not a compiler flag.

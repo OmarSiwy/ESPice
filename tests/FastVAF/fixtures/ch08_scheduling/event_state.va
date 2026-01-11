@@ -1,7 +1,0 @@
-module ch8_event_state(p);
-  inout p; electrical p; real last;
-  analog begin
-    @(initial_step or timer(1n, 1n)) last = V(p);
-    I(p) <+ last;
-  end
-endmodule

@@ -22,11 +22,10 @@ test {
     _ = @import("parallel.zig");
     _ = @import("leak.zig");
 
-    // Verilog conformance: generated devices compiled against the real contract
-    // and driven with golden vectors. Skips itself when verilator is off PATH.
-    _ = @import("FastVF/test_all.zig");
+    // Verilog conformance moved to VerA with the fixtures it drives:
+    // `cd ../VerA && zig build conformance-vf`.
 
-    // The module suites (analysis, devices, solvers, fastvaf, fastvf) are NOT
+    // The module suites (analysis, devices, solvers) are NOT
     // reachable from here. `zig test` collects tests only from the root module's
     // own file set — `_ = @import("analysis")` crosses a MODULE boundary, so its
     // tests are silently dropped. Measured: importing all five added ZERO tests,

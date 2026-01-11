@@ -1,6 +1,0 @@
-// EXPECT: error -- paramset/model bin selection is not implemented.
-paramset annex_e_bin mosfet;
-  parameter real l = 100n;
-endparamset
-module annex_e_bin_user;
-endmodule

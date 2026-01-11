@@ -19,12 +19,12 @@ pub const Distribution = enum {
 };
 
 /// Describes how a single device parameter should be varied.
-/// `param_ptr` points to the f32 field in the device Model/Instance struct
+/// `param_ptr` refers to the numeric field in the device Model/Instance struct
 /// (take it from a root.ParamRef — batch arrays are stable after
 /// compile()). The nominal value is captured at setup; each MC run perturbs it.
 pub const ParamVar = struct {
     /// Pointer to the model parameter field to vary.
-    param_ptr: *f32,
+    param_ptr: root.ParamRef,
     /// Nominal (original) value of the parameter.
     nominal: f64,
     /// Relative tolerance (fraction of nominal). E.g. 0.05 for 5%.
@@ -133,7 +133,7 @@ pub fn analyze(
                 },
                 .gaussian => pv.nominal + pv.nominal * pv.rel_tol * rng.floatNorm(f64),
             };
-            pv.param_ptr.* = @floatCast(varied);
+            pv.param_ptr.set(varied);
         }
         ckt.recompute();
 
@@ -165,7 +165,7 @@ pub fn analyze(
 
         // Restore nominal parameters for next iteration's perturbation base
         for (param_vars) |pv| {
-            pv.param_ptr.* = @floatCast(pv.nominal);
+            pv.param_ptr.set(pv.nominal);
         }
     }
     ckt.recompute();
@@ -249,19 +249,19 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const refs = try ckt.collectParams();
     var n_vars: usize = 0;
     for (refs) |ref| {
-        if (ref.primary and ref.ptr.* != 0) n_vars += 1;
+        if (ref.primary and ref.get() != 0) n_vars += 1;
     }
     const param_vars = try a.alloc(ParamVar, n_vars);
     defer a.free(param_vars);
     var i: usize = 0;
     for (refs) |ref| {
-        if (!ref.primary or ref.ptr.* == 0) continue;
-        param_vars[i] = .{ .param_ptr = ref.ptr, .nominal = ref.ptr.*, .rel_tol = opts.variation, .dist = .gaussian };
+        if (!ref.primary or ref.get() == 0) continue;
+        param_vars[i] = .{ .param_ptr = ref, .nominal = ref.get(), .rel_tol = opts.variation, .dist = .gaussian };
         i += 1;
     }
     defer {
         // analyze() restores on success; this covers early-error paths too.
-        for (param_vars) |pv| pv.param_ptr.* = @floatCast(pv.nominal);
+        for (param_vars) |pv| pv.param_ptr.set(pv.nominal);
         ckt.recompute();
     }
 
@@ -314,7 +314,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
                         },
                         .gaussian => pv.nominal + pv.nominal * pv.rel_tol * rng.floatNorm(f64),
                     };
-                    pv.param_ptr.* = @floatCast(varied);
+                    pv.param_ptr.set(varied);
                 }
                 ckt.recompute();
 
@@ -327,7 +327,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
             }
 
             // Restore nominal params
-            for (param_vars) |pv| pv.param_ptr.* = @floatCast(pv.nominal);
+            for (param_vars) |pv| pv.param_ptr.set(pv.nominal);
             ckt.recompute();
 
             // Collect converged results

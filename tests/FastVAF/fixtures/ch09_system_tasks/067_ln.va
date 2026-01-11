@@ -1,5 +1,0 @@
-module ch09_atomic_ln(p, n);
-  inout p, n; electrical p, n;
-  analog I(p,n) <+ V(p,n) + $ln(2.0);
-endmodule
-

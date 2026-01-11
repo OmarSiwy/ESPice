@@ -1,4 +1,0 @@
-# §2.2 a comment is a token separator. If this fixture ever COMPILES again, the
-# preprocessor has gone back to welding `1` and `2` into the literal 12.
-E0207
-expected `)`

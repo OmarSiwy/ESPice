@@ -1,6 +1,0 @@
-// EXPECT: error
-module ch09_dist_chi_square_unsupported(p, n);
-  inout p, n; electrical p, n;
-  integer seed;
-  analog I(p,n) <+ $dist_chi_square(seed, 4);
-endmodule

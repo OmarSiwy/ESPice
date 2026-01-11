@@ -1,4 +1,0 @@
-module annex_c_unused_ams_words_current_behavior;
-    real connect, connectmodule, connectrules, driver_update;
-    real endconnectrules, merged, resolveto, split, wreal;
-endmodule

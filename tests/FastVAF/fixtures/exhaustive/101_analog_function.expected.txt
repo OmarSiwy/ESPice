@@ -1,9 +1,0 @@
-=== 101_analog_function ===
---- point 0 ---
-  x[p] = 0.000000e0
-  x[n] = 0.000000e0
-square(3) got=9 want=9 ok=1
-square(-4) got=16 want=16 ok=1
-two calls do not share state got=29 want=29 ok=1
-multi-argument function got=49 want=49 ok=1
-nested calls got=16 want=16 ok=1

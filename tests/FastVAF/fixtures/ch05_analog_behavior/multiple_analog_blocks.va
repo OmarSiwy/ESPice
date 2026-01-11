@@ -1,5 +1,0 @@
-module ch5_multiple_blocks(p, n);
-  inout p, n; electrical p, n;
-  analog I(p, n) <+ 1.0;
-  analog I(p, n) <+ V(p, n);
-endmodule

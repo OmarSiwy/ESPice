@@ -1,4 +1,0 @@
-module ch6_mfactor_flow_contribution(p, n);
-  inout p, n; electrical p, n;
-  analog I(p, n) <+ V(p, n) / 1k;
-endmodule

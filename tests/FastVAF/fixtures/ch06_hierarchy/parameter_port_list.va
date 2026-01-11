@@ -1,7 +1,0 @@
-module ch6_parameter_port_list #(
-  parameter real gain = 2.0,
-  parameter integer enabled = 1
-)(p, n);
-  inout p, n; electrical p, n;
-  analog I(p, n) <+ (enabled ? gain : 0.0) * V(p, n);
-endmodule

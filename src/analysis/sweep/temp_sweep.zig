@@ -27,7 +27,7 @@ pub const Status = struct {
 /// plus the tc1/tc2 coefficients. Take `param` from a root.ParamRef —
 /// batch arrays are stable after compile().
 pub const TempCoeff = struct {
-    param: *f32,
+    param: root.ParamRef,
     base_value: f64,
     tc1: f64,
     tc2: f64,
@@ -37,12 +37,12 @@ pub const TempCoeff = struct {
     ///   R(T) = R(Tnom) * (1 + tc1*(T - Tnom) + tc2*(T - Tnom)^2)
     pub fn apply(self: *const TempCoeff, temp: f64) void {
         const dt = temp - self.tnom;
-        self.param.* = @floatCast(self.base_value * (1.0 + self.tc1 * dt + self.tc2 * dt * dt));
+        self.param.set(self.base_value * (1.0 + self.tc1 * dt + self.tc2 * dt * dt));
     }
 
     /// Restore the parameter to its nominal (base) value.
     pub fn restore(self: *const TempCoeff) void {
-        self.param.* = @floatCast(self.base_value);
+        self.param.set(self.base_value);
     }
 };
 

@@ -1,6 +1,0 @@
-// EXPECT: error -- defparam is explicitly rejected.
-module ch6_defparam(p);
-  inout p; electrical p;
-  defparam u.gain = 2.0;
-  analog I(p) <+ V(p);
-endmodule

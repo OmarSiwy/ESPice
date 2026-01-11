@@ -1,5 +1,0 @@
-module glossary_branch_flow_potential(p, n);
-  inout p, n; electrical p, n;
-  branch (p,n) b;
-  analog I(b) <+ V(b)/1000.0;
-endmodule

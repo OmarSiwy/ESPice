@@ -1,5 +1,0 @@
-`define P_CELSIUS0 273.15
-module annex_d_celsius(p);
-  inout p; electrical p;
-  analog I(p) <+ V(p) - `P_CELSIUS0;
-endmodule

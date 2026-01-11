@@ -1,5 +1,0 @@
-// EXPECT: error -- LRM 5.2.1 forbids this in an analog initial block.
-module ch5_initial_operator_rejected;
-  real initialized;
-  analog initial initialized = transition(1.0, 0.0, 1n);
-endmodule

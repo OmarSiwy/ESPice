@@ -1,7 +1,0 @@
-// EXPECT: error
-// LRM 9.13.2: $rdist_chi_square draws a pseudo-random variate from a seed the call itself updates, so it differs on every Newton re-evaluation of one operating point -- a non-deterministic residual that never converges (determinism invariant); the whole 9.13 family is rejected.
-module ch09_rdist_chi_square_unsupported(p, n);
-  inout p, n; electrical p, n;
-  integer seed;
-  analog I(p,n) <+ $rdist_chi_square(seed, 4.0);
-endmodule

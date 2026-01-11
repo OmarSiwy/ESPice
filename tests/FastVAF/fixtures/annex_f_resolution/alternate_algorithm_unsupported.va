@@ -1,5 +1,0 @@
-// EXPECT: error -- expanded top-down pass requires hierarchy elaboration.
-module annex_f_expanded(sig);
-  electrical sig;
-  mixed_child u(sig);
-endmodule

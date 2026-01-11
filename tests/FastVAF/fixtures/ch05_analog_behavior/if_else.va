@@ -1,9 +1,0 @@
-module ch5_if_else(p, c);
-  inout p, c; electrical p, c; real x;
-  analog begin
-    if (V(c) > 1.0) x = 2.0;
-    else if (V(c) > 0.0) x = 1.0;
-    else x = 0.0;
-    I(p) <+ x;
-  end
-endmodule

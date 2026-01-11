@@ -1,6 +1,0 @@
-// EXPECT: error
-module ch09_table_model_array_control_unsupported(p, n);
-  inout p, n; electrical p, n;
-  real x[0:1], f_x[0:1];
-  analog I(p,n) <+ $table_model(V(p,n), x, f_x, "1LL;1");
-endmodule

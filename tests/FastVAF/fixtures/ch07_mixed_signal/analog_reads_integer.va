@@ -1,4 +1,0 @@
-module ch7_read_integer(p);
-  inout p; electrical p; integer digital_value;
-  analog I(p) <+ digital_value ? V(p) : 0.0;
-endmodule

@@ -1,5 +1,0 @@
-// EXPECT: error -- preferred p/n names support named passive connections.
-module annex_e_passive_named_ports(p, n);
-  inout p, n; electrical p, n;
-  resistor #(.r(1k), .tc1(1m), .tc2(1u)) r1(.p(p), .n(n));
-endmodule

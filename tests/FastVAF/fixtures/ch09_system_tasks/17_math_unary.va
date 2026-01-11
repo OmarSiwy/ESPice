@@ -1,9 +1,0 @@
-module ch09_math_unary(p, n);
-  inout p, n; electrical p, n;
-  real x;
-  analog begin
-    x = $ln(2.0) + $log10(10.0) + $exp(1.0) + $sqrt(4.0);
-    x = x + $floor(1.9) + $ceil(1.1) + $abs(-2.0) + $clog2(9);
-    I(p,n) <+ x + 0.0*V(p,n);
-  end
-endmodule

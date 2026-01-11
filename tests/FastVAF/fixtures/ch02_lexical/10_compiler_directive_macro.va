@@ -1,8 +1,0 @@
-`define CH02_GAIN(value) ((value) * 2.0)
-module ch02_compiler_directive_macro(p, n);
-    inout p, n;
-    electrical p, n;
-
-    analog I(p, n) <+ `CH02_GAIN(V(p, n));
-endmodule
-`undef CH02_GAIN

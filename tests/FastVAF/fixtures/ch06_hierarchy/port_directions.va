@@ -1,5 +1,0 @@
-module ch6_directions(i, o, io);
-  input i; output o; inout io;
-  electrical i, o, io;
-  analog begin V(o) <+ V(i); I(io) <+ V(io); end
-endmodule

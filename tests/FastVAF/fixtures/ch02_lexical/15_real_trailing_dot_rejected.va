@@ -1,5 +1,0 @@
-// EXPECT: error
-module ch02_real_trailing_dot_rejected;
-    real value;
-    analog value = 9.;
-endmodule

@@ -1,6 +1,0 @@
-module annex_g_obsolete_forever(p, n);
-  inout p, n; electrical p, n;
-  analog forever begin
-    I(p,n) <+ V(p,n);
-  end
-endmodule
