@@ -141,6 +141,14 @@ pub const Circuit = struct {
     par_eval: ?*ParEval = null,
     gpa: std.mem.Allocator,
 
+    // -- cold: linearization memo --
+    /// "The four planes currently hold the linearization at this x_op." Set by
+    /// `linearize` after it fills the planes; every writer of a plane or device
+    /// parameter clears `valid`. Pointer identity is sound: x_op is the single
+    /// arena slice engine.ensureOp builds, handed read-only to each analysis.
+    /// Read once per analysis start (cache-hit check) — cold, no hot-loop use.
+    lin: struct { x_ptr: [*]const f64 = undefined, len: u32 = 0, valid: bool = false } = .{},
+
     // -- cold: lazily-built shared solve state --
     /// One symbolic LU + Newton scratch per circuit; every analysis shares it.
     ws: ?converger.Workspace = null,
@@ -247,6 +255,17 @@ pub const Circuit = struct {
         self.evalCpu(x, t);
     }
 
+    /// Ensure the four planes hold the linearization at `x_op`, reusing them if
+    /// they already do. The AC-family analyses (freq_solve/noise/sp/pz/stb) each
+    /// linearize at the same engine op point; without this memo an op+ac+noise+pz
+    /// deck runs four identical full device evals. Cache-miss path is
+    /// `eval(x_op, 0)` — byte-identical to the direct call it replaces.
+    pub fn linearize(self: *Circuit, x_op: []const f64) void {
+        if (self.lin.valid and self.lin.x_ptr == x_op.ptr and self.lin.len == x_op.len) return;
+        self.eval(x_op, 0);
+        self.lin = .{ .x_ptr = x_op.ptr, .len = @intCast(x_op.len), .valid = true };
+    }
+
     pub fn evalCpu(self: *Circuit, x: []const f64, t: f64) void {
         if (self.par_eval) |p| {
             p.eval(self.batches, self.ownPlanes(), self.has_charge, x, t);
@@ -265,6 +284,9 @@ pub const Circuit = struct {
     }
 
     pub fn evalNewton(self: *Circuit, x: []const f64, t: f64) void {
+        // Newton stamps the planes for an in-flight iterate, not the op point —
+        // the linearization memo is now stale.
+        self.lin.valid = false;
         // The device path deliberately ignores `has_baseline`. `g_base` holds
         // the constant contribution of EVERY batch, GPU-eligible ones included,
         // so starting from it and then letting the kernels stamp on top would
@@ -467,6 +489,7 @@ pub const Circuit = struct {
     }
 
     pub fn setCircuitTemp(self: *const Circuit, temp_c: f32) void {
+        @constCast(self).lin.valid = false; // temp changes device physics
         for (self.batches) |b| if (b.hooks.set_temp) |f| f(b.ctx, temp_c);
     }
 
@@ -480,14 +503,17 @@ pub const Circuit = struct {
     }
 
     pub fn recompute(self: *const Circuit) void {
+        @constCast(self).lin.valid = false; // param re-derivation (sweeps, dc, mc)
         for (self.batches) |b| if (b.hooks.recompute) |f| f(b.ctx);
     }
 
     pub fn applyAttempt(self: *const Circuit, lambda: f64) void {
+        @constCast(self).lin.valid = false; // homotopy scales device params
         for (self.batches) |b| if (b.hooks.apply_attempt) |f| f(b.ctx, lambda);
     }
 
     pub fn restoreModels(self: *const Circuit) void {
+        @constCast(self).lin.valid = false; // undoes applyAttempt param scaling
         for (self.batches) |b| if (b.hooks.restore_models) |f| f(b.ctx);
     }
 
