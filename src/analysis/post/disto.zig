@@ -6,7 +6,7 @@
 //! ponytail: O(n^3) tensor + O(n^2) dense solves; device-side analytic F''
 //! stamps are the scalable upgrade for large n.
 const std = @import("std");
-const root = @import("../root.zig");
+const root = @import("../types.zig");
 const converger = @import("solvers").converger;
 const types = @import("solvers").types;
 const solvers = @import("solvers");

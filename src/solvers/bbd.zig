@@ -39,7 +39,7 @@
 //! indexed by cumulative offsets. Single arena[] for all dense data.
 
 const std = @import("std");
-const root = @import("root.zig");
+const root = @import("types.zig");
 const dense_lu = @import("dense_lu.zig");
 
 const Allocator = std.mem.Allocator;

@@ -3,7 +3,7 @@
 //! Two solves, one factorization — the dense_lu factorize/solveFactored/solveFactoredT
 //! API makes the explicit transpose unnecessary.
 const std = @import("std");
-const root = @import("../root.zig");
+const root = @import("../types.zig");
 const converger = @import("solvers").converger;
 const dense_lu = root.solvers.dense_lu;
 

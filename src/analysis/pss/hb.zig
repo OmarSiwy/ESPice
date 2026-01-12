@@ -14,7 +14,7 @@
 //!     J = spectral(G(t)) blocks + (+-w_h C) skew blocks
 //!     solve dense J dX = -F;  X += dX
 const std = @import("std");
-const root = @import("../root.zig");
+const root = @import("../types.zig");
 const converger = @import("solvers").converger;
 const types = @import("solvers").types;
 const solvers = @import("solvers");

@@ -26,8 +26,8 @@
 //! period integration dispatches to the GPU transient megakernel, bypassing
 //! per-step host round-trips. Falls back to CPU on any error.
 const std = @import("std");
-const root = @import("../root.zig");
-const tran = root.tran;
+const root = @import("../types.zig");
+const tran = @import("../tran/tran.zig");
 const converger = @import("solvers").converger;
 const dense_lu = root.solvers.dense_lu;
 const Gmres = @import("solvers").gmres.Gmres(f64);

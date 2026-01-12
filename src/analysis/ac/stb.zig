@@ -2,7 +2,7 @@
 //! probe source between probe_p and probe_n to form (n+1)², then sweep.
 //! T(ω) = −i_br(ω). Phase unwrap mandatory for gain-margin extraction.
 const std = @import("std");
-const root = @import("../root.zig");
+const root = @import("../types.zig");
 const converger = @import("solvers").converger;
 const types = @import("solvers").types;
 const solvers = @import("solvers");

@@ -13,7 +13,7 @@
 //!   5. Newton failure → restore snapshot, halve pps, retry.
 
 const std = @import("std");
-const root = @import("../root.zig");
+const root = @import("../types.zig");
 const converger = @import("solvers").converger;
 
 // ponytail: SIMD width for all vectorized loops

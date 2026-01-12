@@ -13,7 +13,9 @@
 const std = @import("std");
 const devices = @import("devices");
 const solvers = @import("solvers");
-const tran = @import("tran/tran.zig");
+// Leaf types only (Waveform/Options/SimResult) — importing the transient
+// driver here would close a cycle: tran.zig -> ../types.zig -> Circuit.zig.
+const tran = @import("tran/types.zig");
 
 const Batch = devices.batch.Batch;
 const Hooks = devices.batch.Hooks;

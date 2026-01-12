@@ -11,7 +11,7 @@
 //!
 //! Cost: O(nnz + N_params * n) vs old O(N_params * Newton_iters * nnz).
 const std = @import("std");
-const root = @import("../root.zig");
+const root = @import("../types.zig");
 const converger = @import("solvers").converger;
 const types = @import("solvers").types;
 const solvers = @import("solvers");

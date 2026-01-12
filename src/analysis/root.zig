@@ -1,39 +1,33 @@
 const std = @import("std");
 
 const contract = @import("contract.zig");
-const circuit_mod = @import("Circuit.zig");
 
-// -- Crate imports --
-pub const solvers = @import("solvers");
-pub const devices = @import("devices");
-pub const converger = solvers.converger;
-pub const types = solvers.types;
-pub const freq = types;
-
-// ---------------------------------------------------------------------------
-// Re-exports from Circuit.zig — backward compat for analysis modules
-// ---------------------------------------------------------------------------
-
-pub const Circuit = circuit_mod.Circuit;
-pub const EvalHook = circuit_mod.EvalHook;
-pub const GpuHook = circuit_mod.GpuHook;
-pub const BbdBlock = circuit_mod.BbdBlock;
-pub const BbdInfo = circuit_mod.BbdInfo;
-pub const GROUND = circuit_mod.GROUND;
-pub const zeroSimd = circuit_mod.zeroSimd;
-pub const copySimd = circuit_mod.copySimd;
-pub const freeFreqLanes = circuit_mod.freeFreqLanes;
-pub fn probeNames(ctx: *const RunCtx, first: ?[]const u8) ![]const []const u8 {
-    return circuit_mod.probeNames(ctx.circuit, ctx.probes, ctx.allocator, first);
-}
-
-// -- Re-exports for analysis modules + src/ consumers --
-pub const ParamRef = devices.batch.ParamRef;
-pub const NoiseSource = devices.batch.NoiseSource;
-pub const NoiseGenKind = devices.batch.NoiseGenKind;
-pub const NoiseGen = devices.batch.NoiseGen;
-/// Builder freeze: protos -> analysis.Circuit (union pattern + planes + tapes).
-pub const freeze = circuit_mod.init;
+// Shared context lives in types.zig so the leaves below never import this
+// file — root.zig is the TOP of the analysis DAG (aggregation + dispatch),
+// re-exporting everything for src/ consumers (engine, builder, gpu_context).
+const shared = @import("types.zig");
+pub const solvers = shared.solvers;
+pub const devices = shared.devices;
+pub const converger = shared.converger;
+pub const types = shared.types;
+pub const freq = shared.freq;
+pub const Circuit = shared.Circuit;
+pub const EvalHook = shared.EvalHook;
+pub const GpuHook = shared.GpuHook;
+pub const BbdBlock = shared.BbdBlock;
+pub const BbdInfo = shared.BbdInfo;
+pub const GROUND = shared.GROUND;
+pub const zeroSimd = shared.zeroSimd;
+pub const copySimd = shared.copySimd;
+pub const freeFreqLanes = shared.freeFreqLanes;
+pub const probeNames = shared.probeNames;
+pub const ParamRef = shared.ParamRef;
+pub const NoiseSource = shared.NoiseSource;
+pub const NoiseGenKind = shared.NoiseGenKind;
+pub const NoiseGen = shared.NoiseGen;
+pub const freeze = shared.freeze;
+pub const RunCtx = shared.RunCtx;
+pub const Result = shared.Result;
 
 // -- DC / Operating Point --
 pub const op = @import("dc/op.zig");
@@ -162,31 +156,6 @@ pub const Analysis = std.StaticStringMap(AnalysisId).initComptime(.{
     .{ "trannoise", .tran_noise },
     .{ "tran_noise", .tran_noise },
 });
-
-// ---------------------------------------------------------------------------
-// Run context — everything an analysis needs, resolved before dispatch
-// ---------------------------------------------------------------------------
-
-pub const RunCtx = struct {
-    circuit: *Circuit,
-    x_op: ?[]f64,
-    probes: []const u32,
-    source_node: u32,
-    source_branch: u32,
-    allocator: std.mem.Allocator,
-};
-
-// ---------------------------------------------------------------------------
-// Uniform result — every analysis produces this
-// ---------------------------------------------------------------------------
-
-pub const Result = struct {
-    plotname: []const u8,
-    varnames: []const []const u8,
-    is_complex: bool,
-    npoints: usize,
-    data: []const f64,
-};
 
 // ---------------------------------------------------------------------------
 // Job — tagged union, each variant is that module's Options

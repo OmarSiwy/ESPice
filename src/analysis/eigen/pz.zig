@@ -2,7 +2,7 @@
 //! constants; poles are s = 1/λ. Dense Hessenberg + Francis double-shift QR.
 //! The planes are the linearization — one eval() at the op.
 const std = @import("std");
-const root = @import("../root.zig");
+const root = @import("../types.zig");
 const converger = @import("solvers").converger;
 const types = @import("solvers").types;
 const solvers = @import("solvers");

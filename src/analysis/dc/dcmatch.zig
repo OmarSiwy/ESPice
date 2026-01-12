@@ -12,7 +12,7 @@
 //! pelgrom_ap and area_wl the real coefficient is used; otherwise falls back
 //! to unit variance.
 const std = @import("std");
-const root = @import("../root.zig");
+const root = @import("../types.zig");
 const converger = @import("solvers").converger;
 const types = @import("solvers").types;
 const solvers = @import("solvers");
@@ -233,7 +233,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const x_op = ctx.x_op orelse blk: {
         const x = try a.alloc(f64, ckt.n);
         errdefer a.free(x);
-        const r = try root.op.solve(ckt, x, .{ .tol = opts.tol });
+        const r = try @import("op.zig").solve(ckt, x, .{ .tol = opts.tol });
         if (!r.converged) return error.OpDidNotConverge;
         break :blk x;
     };

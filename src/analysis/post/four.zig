@@ -2,7 +2,7 @@
 //! one fundamental period from the end of a transient waveform, resample to
 //! a power of 2, FFT, and read off harmonic magnitudes, phases, and THD.
 const std = @import("std");
-const root = @import("../root.zig");
+const root = @import("../types.zig");
 const converger = @import("solvers").converger;
 const types = @import("solvers").types;
 const solvers = @import("solvers");

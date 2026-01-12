@@ -63,7 +63,7 @@
 //! non-DC, non-Nyquist terms) when interpreting one-sided magnitudes.
 
 const std = @import("std");
-const root = @import("../root.zig");
+const root = @import("../types.zig");
 const converger = @import("solvers").converger;
 const solvers = @import("solvers");
 const types = solvers.types;

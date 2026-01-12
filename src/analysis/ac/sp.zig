@@ -10,7 +10,7 @@
 //! Driving port p with unit source voltage (rhs[b_p] = 1) gives a_p = 1/(2√z0_p),
 //! all other a_j = 0. Column p of S(ω) follows from S_jk = b_j / a_k.
 const std = @import("std");
-const root = @import("../root.zig");
+const root = @import("../types.zig");
 const converger = @import("solvers").converger;
 const types = @import("solvers").types;
 const solvers = @import("solvers");
