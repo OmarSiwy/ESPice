@@ -51,24 +51,30 @@ pub const SolveResult = struct {
 };
 
 /// Low-level solve: DC bias → linearize → augment → sweep → margins.
+/// `x_op_in` reuses an operating point the engine already solved; pass null
+/// (standalone callers) to run the DC solve here.
 pub fn solve(
     ckt: *root.Circuit,
     probe_p: u32,
     probe_n: u32,
     options: Options,
+    x_op_in: ?[]const f64,
     allocator: std.mem.Allocator,
 ) !SolveResult {
     const n: usize = ckt.n;
     const n_aug = n + 1;
     const branch_idx = n;
 
-    // --- DC solve (own call — stability wants its exact bias) ----------------
-    const x_op = try allocator.alloc(f64, n);
-    defer allocator.free(x_op);
-    const dc_result = try dc.solve(ckt, x_op, .{
-        .tol = options.tol,
-    });
-    if (!dc_result.converged) return error.DcNotConverged;
+    // --- Bias point: reuse the engine's op if given, else DC solve here ------
+    var owned_x_op: ?[]f64 = null;
+    defer if (owned_x_op) |x| allocator.free(x);
+    const x_op = x_op_in orelse blk: {
+        const x = try allocator.alloc(f64, n);
+        owned_x_op = x;
+        const dc_result = try dc.solve(ckt, x, .{ .tol = options.tol });
+        if (!dc_result.converged) return error.DcNotConverged;
+        break :blk x;
+    };
 
     // --- Linearize at the operating point ------------------------------------
     ckt.eval(x_op, 0);
@@ -196,7 +202,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
     const probe_p = opts.probe_p orelse ctx.source_node;
 
-    var res = try solve(ctx.circuit, probe_p, opts.probe_n, opts, a);
+    var res = try solve(ctx.circuit, probe_p, opts.probe_n, opts, ctx.x_op, a);
     defer res.deinit(a);
 
     const names = try a.dupe([]const u8, &.{ "frequency", "loop_gain" });

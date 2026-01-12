@@ -683,7 +683,7 @@ test "STB: resistive voltage divider has flat loop gain of zero" {
     var ckt = try b.compile();
     defer ckt.deinit();
 
-    var stb_result = try analysis.stb.solve(&ckt, n1, n2, .{ .f_start = 1e3, .f_stop = 1e6, .points_per_decade = 5 }, allocator);
+    var stb_result = try analysis.stb.solve(&ckt, n1, n2, .{ .f_start = 1e3, .f_stop = 1e6, .points_per_decade = 5 }, null, allocator);
     defer stb_result.deinit(allocator);
 
     try testing.expect(stb_result.n_points > 0);
