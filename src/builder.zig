@@ -271,13 +271,8 @@ pub const Builder = struct {
         errdefer if (bbd.info) |inf| gpa.free(inf.blocks);
         if (bbd.perm) |perm| {
             for (self.protos.items) |p| p.apply_perm(p.ctx, perm);
-            // Remap node_names
-            var iter = self.node_names.iterator();
-            while (iter.next()) |entry| {
-                const old_id = entry.value_ptr.*;
-                if (old_id < perm.len) entry.value_ptr.* = perm[old_id];
-            }
-            // Remap node_labels
+            // Remap node_labels (node_names is not read past this point — the
+            // reverse lookup now lives on the frozen Circuit as a scan).
             const old_labels = try gpa.alloc([]const u8, n);
             defer gpa.free(old_labels);
             @memcpy(old_labels, self.node_labels.items);
@@ -289,15 +284,36 @@ pub const Builder = struct {
             bbd.perm = null; // freed; disarm the errdefer
         }
 
-        const labels = try self.node_labels.toOwnedSlice(gpa);
-        errdefer gpa.free(labels);
-        const ckt = try analysis.freeze(gpa, self.n, self.node_names, labels, self.protos.items, bbd.info);
+        // Flatten node_labels into the frozen intern table: one byte blob +
+        // n+1 offsets. Evicts the per-node dupe and the name→id hashmap from
+        // the Circuit — both stay Builder-local and die here.
+        const labels = self.node_labels.items;
+        var total: usize = 0;
+        for (labels) |label| total += label.len;
+        const intern_bytes = try gpa.alloc(u8, total);
+        errdefer gpa.free(intern_bytes);
+        const intern_offs = try gpa.alloc(u32, n + 1);
+        errdefer gpa.free(intern_offs);
+        var off: u32 = 0;
+        for (labels, 0..) |label, i| {
+            intern_offs[i] = off;
+            @memcpy(intern_bytes[off..][0..label.len], label);
+            off += @intCast(label.len);
+        }
+        intern_offs[n] = off;
 
-        // Protos consumed by freeze(); free the Builder shell.
+        const ckt = try analysis.freeze(gpa, self.n, intern_bytes, intern_offs, self.protos.items, bbd.info);
+
+        // Protos consumed by freeze(); free the Builder shell (labels + map).
         self.protos.deinit(gpa);
+        for (self.node_labels.items) |label| {
+            if (!std.mem.eql(u8, label, "0")) gpa.free(label);
+        }
+        self.node_labels.deinit(gpa);
+        self.node_names.deinit(gpa);
         self.node_instance.deinit(gpa);
         self.node_type.deinit(gpa);
-        self.* = undefined; // names/labels now owned by ckt
+        self.* = undefined;
         return ckt;
     }
 };

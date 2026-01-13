@@ -146,12 +146,27 @@ pub fn build(gpa: std.mem.Allocator, desc: Desc) !Circuit {
         });
     }
 
-    const node_names: std.StringHashMapUnmanaged(u32) = .empty;
+    // Flat intern table: node 0 = "0", node i = "n{i}". Build the labels,
+    // flatten into bytes+offs, free the temporaries (freeze owns the table).
     const labels = try gpa.alloc([]const u8, total_n);
-    labels[0] = "0";
+    defer gpa.free(labels);
+    labels[0] = try gpa.dupe(u8, "0");
     for (1..total_n) |i| labels[i] = try std.fmt.allocPrint(gpa, "n{d}", .{i});
+    defer for (labels) |l| gpa.free(l);
 
-    return batch.freeze(gpa, total_n, node_names, labels, protos.items, null);
+    var total: usize = 0;
+    for (labels) |l| total += l.len;
+    const intern_bytes = try gpa.alloc(u8, total);
+    const intern_offs = try gpa.alloc(u32, total_n + 1);
+    var off: u32 = 0;
+    for (labels, 0..) |l, i| {
+        intern_offs[i] = off;
+        @memcpy(intern_bytes[off..][0..l.len], l);
+        off += @intCast(l.len);
+    }
+    intern_offs[total_n] = off;
+
+    return batch.freeze(gpa, total_n, intern_bytes, intern_offs, protos.items, null);
 }
 
 // ============================================================================

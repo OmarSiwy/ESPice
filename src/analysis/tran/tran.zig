@@ -661,11 +661,11 @@ test "transient: a PULSE vsource output actually moves with $abstime" {
         },
     };
 
-    // Circuit.deinit frees the label array and every label that is not the
-    // ground literal, so "0" everywhere keeps this leak-free.
-    const labels = try gpa.alloc([]const u8, 3);
-    for (labels) |*l| l.* = "0";
-    var ckt = try root.freeze(gpa, 3, .empty, labels, &protos, null);
+    // Flat intern table: 3 nodes all labelled "0" → bytes "000", offs step 1.
+    const intern_bytes = try gpa.dupe(u8, "000");
+    const intern_offs = try gpa.alloc(u32, 4);
+    for (intern_offs, 0..) |*o, i| o.* = @intCast(i);
+    var ckt = try root.freeze(gpa, 3, intern_bytes, intern_offs, &protos, null);
     defer ckt.deinit();
 
     const x = try gpa.alloc(f64, 3);

@@ -131,8 +131,12 @@ pub const Circuit = struct {
     c_base: []f64,
 
     // -- cold: node metadata --
-    node_names: std.StringHashMapUnmanaged(u32),
-    node_labels: [][]const u8,
+    // Flat intern table: nodeName(i) = intern_bytes[intern_offs[i]..intern_offs[i+1]].
+    // intern_offs has n+1 entries; an empty slice (offs[i]==offs[i+1]) is a
+    // branch-unknown (no netlist label). Read-only after freeze, by output
+    // writers + error paths only. Replaces the per-node dupe + name→id hashmap.
+    intern_bytes: []u8,
+    intern_offs: []u32,
 
     // -- cold: structure --
     bbd: ?BbdInfo = null,
@@ -164,7 +168,7 @@ pub const Circuit = struct {
         planes_bytes: usize, // g_vals + c_vals + rhs + q_vec
         baseline_bytes: usize, // g_base + c_base (0 if no baseline)
         batch_bytes: usize, // Batch[] array
-        metadata_bytes: usize, // diag_slots + current_row + node_labels
+        metadata_bytes: usize, // diag_slots + current_row + intern table
         total_bytes: usize,
     };
 
@@ -175,7 +179,8 @@ pub const Circuit = struct {
         const planes = 4 * (nnz + 1) * @sizeOf(f64); // g, c, rhs(n+1), q(n+1) — rhs/q are n+1
         const baseline: usize = if (self.has_baseline) 2 * (nnz + 1) * @sizeOf(f64) else 0;
         const batch = self.batches.len * @sizeOf(Batch);
-        const meta = n * @sizeOf(u32) + n * @sizeOf(bool) + n * @sizeOf([]const u8);
+        const meta = n * @sizeOf(u32) + n * @sizeOf(bool) +
+            self.intern_bytes.len + self.intern_offs.len * @sizeOf(u32);
         const total = pattern + planes + baseline + batch + meta;
         return .{
             .pattern_bytes = pattern,
@@ -213,11 +218,8 @@ pub const Circuit = struct {
         gpa.free(self.diag_slots);
         gpa.free(self.current_row);
         if (self.bbd) |bbd| gpa.free(bbd.blocks);
-        for (self.node_labels) |label| {
-            if (!std.mem.eql(u8, label, "0")) gpa.free(label);
-        }
-        gpa.free(self.node_labels);
-        self.node_names.deinit(gpa);
+        gpa.free(self.intern_bytes);
+        gpa.free(self.intern_offs);
         self.* = undefined;
     }
 
@@ -559,13 +561,26 @@ pub const Circuit = struct {
     }
 
     pub fn nodeName(self: *const Circuit, node: u32) []const u8 {
-        if (node < self.node_labels.len and self.node_labels[node].len != 0)
-            return self.node_labels[node];
+        if (node + 1 < self.intern_offs.len)
+            return self.intern_bytes[self.intern_offs[node]..self.intern_offs[node + 1]];
         return "";
     }
 
+    /// Reverse map name→id. Cold: called at job-build time only (one lookup per
+    /// name-carrying directive), so a linear scan over the intern table beats
+    /// carrying a hashmap into the frozen struct. Empty slices (branch
+    /// unknowns) never match a non-empty query.
+    pub fn nodeIndex(self: *const Circuit, name: []const u8) ?u32 {
+        var i: u32 = 0;
+        while (i + 1 < self.intern_offs.len) : (i += 1) {
+            if (std.mem.eql(u8, self.intern_bytes[self.intern_offs[i]..self.intern_offs[i + 1]], name))
+                return i;
+        }
+        return null;
+    }
+
     pub fn voltageNodeCount(self: *const Circuit) u32 {
-        return @intCast(self.node_labels.len);
+        return self.n;
     }
 };
 
@@ -578,14 +593,14 @@ pub fn freeFreqLanes(a: std.mem.Allocator, lanes: [][]f64) void {
 // ---------------------------------------------------------------------------
 // init (freeze): build union sparsity pattern, allocate planes, precompute
 // slot tapes. Protos consumed (finalized into batches, shells freed).
-// Takes ownership of node_names and node_labels.
+// Takes ownership of the flat intern table (intern_bytes + intern_offs).
 // ---------------------------------------------------------------------------
 
 pub fn init(
     gpa: std.mem.Allocator,
     n: u32,
-    node_names: std.StringHashMapUnmanaged(u32),
-    node_labels: [][]const u8,
+    intern_bytes: []u8,
+    intern_offs: []u32,
     protos: []const Proto,
     bbd: ?BbdInfo,
 ) !Circuit {
@@ -598,8 +613,8 @@ pub fn init(
     var ckt: Circuit = undefined;
     ckt.gpa = gpa;
     ckt.n = n;
-    ckt.node_names = node_names;
-    ckt.node_labels = node_labels;
+    ckt.intern_bytes = intern_bytes;
+    ckt.intern_offs = intern_offs;
     ckt.has_charge = false;
     ckt.has_history = false;
     ckt.has_baseline = false;
