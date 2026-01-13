@@ -77,7 +77,7 @@ pub fn solve(
     };
 
     // --- Linearize at the operating point ------------------------------------
-    ckt.eval(x_op, 0);
+    ckt.linearize(x_op);
     const lin = try allocator.alloc(f64, 2 * n * n);
     defer allocator.free(lin);
     const g_lin = lin[0 .. n * n];
