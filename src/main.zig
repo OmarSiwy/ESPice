@@ -61,9 +61,16 @@ const Define = struct { name: []const u8, value: []const u8 };
 
 pub fn main(init: std.process.Init) !u8 {
     const io = init.io;
-    var arena_state = std.heap.ArenaAllocator.init(init.gpa);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
+    // Two lifetimes. parse_arena: source text, Netlist, wiring scratch — reset
+    // after each deck's fromNetlist returns. sim_arena: Circuit, Workspace,
+    // jobs, results — lives per-deck until the writers finish.
+    var parse_arena_state = std.heap.ArenaAllocator.init(init.gpa);
+    defer parse_arena_state.deinit();
+    const arena = parse_arena_state.allocator();
+
+    var sim_arena_state = std.heap.ArenaAllocator.init(init.gpa);
+    defer sim_arena_state.deinit();
+    const sim_arena = sim_arena_state.allocator();
 
     var it = init.minimal.args.iterate();
     _ = it.skip();
@@ -146,7 +153,7 @@ pub fn main(init: std.process.Init) !u8 {
             continue;
         };
 
-        var nl = switch (opts.tokenizer) {
+        const nl = switch (opts.tokenizer) {
             .ngspice => Parser(ngspice).parse(arena, src),
             .hspice => Parser(hspice).parse(arena, src),
             .spectre => Parser(spectre).parse(arena, src),
@@ -189,7 +196,7 @@ pub fn main(init: std.process.Init) !u8 {
         }
 
         if (opts.mode == .batch) {
-            var sim = engine.Simulation.fromNetlist(arena, nl, io, .{ .gpu = opts.gpu }) catch |e| {
+            var sim = engine.Simulation.fromNetlist(sim_arena, arena, nl, io, .{ .gpu = opts.gpu }) catch |e| {
                 std.debug.print("Engine error: {s}\n", .{@errorName(e)});
                 return skip(io, @errorName(e));
             };
@@ -225,7 +232,7 @@ pub fn main(init: std.process.Init) !u8 {
                     else
                         try std.fmt.allocPrint(arena, "{s}.{d}", .{ raw_path, ri + 1 });
                     writePlot(io, plot_path, opts.format, .{
-                        .title = nl.title,
+                        .title = sim.title,
                         .plotname = res.plotname,
                         .varnames = res.varnames,
                         .is_complex = res.is_complex,
@@ -236,9 +243,9 @@ pub fn main(init: std.process.Init) !u8 {
             }
 
             std.debug.print("\n--- Simulation Summary ---\n", .{});
-            std.debug.print("Title:      {s}\n", .{nl.title});
-            std.debug.print("Devices:    {d}\n", .{nl.devices.len()});
-            std.debug.print("Directives: {d}\n", .{nl.directives.len});
+            std.debug.print("Title:      {s}\n", .{sim.title});
+            std.debug.print("Devices:    {d}\n", .{sim.n_devices});
+            std.debug.print("Directives: {d}\n", .{sim.n_directives});
             for (results) |res| {
                 std.debug.print("Analysis:   {s} ({d} points, {d} variables)\n", .{
                     res.plotname, res.npoints, res.varnames.len,
@@ -248,6 +255,11 @@ pub fn main(init: std.process.Init) !u8 {
         }
 
         any_ran = true;
+
+        // Per-deck reset: both lifetimes end here. Retain the backing pages so
+        // the next deck reuses them instead of re-mmapping.
+        _ = parse_arena_state.reset(.retain_capacity);
+        _ = sim_arena_state.reset(.retain_capacity);
     }
 
     if (!any_ran) return 1;

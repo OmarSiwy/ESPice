@@ -26,13 +26,13 @@ const directiveNodeName = netlist.directiveNodeName;
 const findNameIndex = netlist.findNameIndex;
 
 // ---------------------------------------------------------------------------
-// Sweepable sources: parallel slices indexed by add order
+// Sweepable sources: parse-arena scratch, consumed only by buildJob during
+// fromNetlist. Never held on the run-time Simulation (would alias dev.name in
+// the parse arena). The .dc job resolves source name → index eagerly here.
 // ---------------------------------------------------------------------------
 
 const Sources = struct {
     v_names: []const []const u8,
-    v_ports: []const u32,
-    v_branches: []const u32,
     i_names: []const []const u8,
 };
 
@@ -50,7 +50,10 @@ pub const Simulation = struct {
     probes: []u32,
     source_node: u32,
     source_branch: u32,
-    sources: Sources,
+    /// Duped into sim_arena: read at output time, after the parse arena is gone.
+    title: []const u8,
+    n_devices: u32,
+    n_directives: u32,
     jobs: []Job,
     n_jobs: u32,
     results: []Result,
@@ -63,8 +66,14 @@ pub const Simulation = struct {
     gpu_requested: bool,
     gpu_ctx: ?*gpu_context.GpuContext,
 
-    pub fn fromNetlist(arena: std.mem.Allocator, nl: types.Netlist, io: ?std.Io, config: SimConfig) !Simulation {
-        var b = Builder.init(arena);
+    /// `sim_arena` owns everything that outlives fromNetlist: Circuit,
+    /// Workspace, jobs, probes, par_eval, the duped title. `parse_arena` owns
+    /// the transient wiring — NetBuilder scratch and the dyn-device blobs
+    /// (proto_add copies them into sim_arena storage) — and may be reset by the
+    /// caller the moment this returns. The Builder runs on sim_arena so the
+    /// frozen intern table is never a slice into parse memory.
+    pub fn fromNetlist(sim_arena: std.mem.Allocator, parse_arena: std.mem.Allocator, nl: types.Netlist, io: ?std.Io, config: SimConfig) !Simulation {
+        var b = Builder.init(sim_arena);
         var compiled_ok = false;
         errdefer if (!compiled_ok) b.deinit();
 
@@ -72,7 +81,7 @@ pub const Simulation = struct {
         // reserving here avoids incremental rehash during interning.
         try b.reserveNodes(@intCast(@min(nl.devices.len(), std.math.maxInt(u32))));
 
-        var nb = try netlist.NetBuilder.init(arena, &b, nl);
+        var nb = try netlist.NetBuilder.init(parse_arena, &b, nl);
         try nb.build();
 
         try netlist.tagSubcircuitNodes(&b, nl.devices);
@@ -80,10 +89,10 @@ pub const Simulation = struct {
         // Runtime-loaded (.hdl card, dlopen'd) VA/V devices: erased Proto
         // path, batch machinery lives inside the model's .so. Must happen
         // before compile() freezes the pattern.
-        try netlist.addDynDevices(&b, arena, nl);
+        try netlist.addDynDevices(&b, parse_arena, nl);
 
         var sim: Simulation = undefined;
-        sim.arena = arena;
+        sim.arena = sim_arena;
         sim.circuit = try b.compile();
         compiled_ok = true;
 
@@ -91,18 +100,24 @@ pub const Simulation = struct {
         sim.gpu_requested = config.gpu;
         sim.gpu_ctx = null;
 
-        // Sources: convert builder arrays to frozen slices
+        // Escapes into run-time lifetime: title read at output time, counts in
+        // the summary. Dupe/copy off the parse arena so it can be reset now.
+        sim.title = try sim_arena.dupe(u8, nl.title);
+        sim.n_devices = @intCast(nl.devices.len());
+        sim.n_directives = @intCast(nl.directives.len);
+
         sim.source_node = nb.source_node;
         sim.source_branch = nb.source_branch;
-        sim.sources = .{
+
+        // Sources are parse-arena scratch; resolved into job indices below and
+        // never stored on `sim`.
+        const sources: Sources = .{
             .v_names = nb.v_names[0..nb.n_v],
-            .v_ports = nb.v_ports[0..nb.n_v],
-            .v_branches = nb.v_branches[0..nb.n_v],
             .i_names = nb.i_names[0..nb.n_i],
         };
 
         // Probes: every named node (branch unknowns have no label)
-        const probe_buf = try arena.alloc(u32, sim.circuit.n);
+        const probe_buf = try sim_arena.alloc(u32, sim.circuit.n);
         var n_probes: u32 = 0;
         for (1..sim.circuit.n) |i| {
             if (sim.circuit.nodeName(@intCast(i)).len != 0) {
@@ -113,17 +128,17 @@ pub const Simulation = struct {
         sim.probes = probe_buf[0..n_probes];
 
         // Jobs from directives: pre-allocate to directive count
-        sim.jobs = try arena.alloc(Job, nl.directives.len);
+        sim.jobs = try sim_arena.alloc(Job, nl.directives.len);
         sim.n_jobs = 0;
         for (nl.directives) |dir| {
-            if (buildJob(dir, &sim)) |job| {
+            if (buildJob(dir, &sim, sources)) |job| {
                 sim.jobs[sim.n_jobs] = job;
                 sim.n_jobs += 1;
             }
         }
 
         // Results: one per job max
-        sim.results = try arena.alloc(Result, @max(sim.n_jobs, 1));
+        sim.results = try sim_arena.alloc(Result, @max(sim.n_jobs, 1));
         sim.n_results = 0;
 
         // Parallel device eval. ponytail: OPT-IN via ZPICEY_THREADS=N for
@@ -140,7 +155,7 @@ pub const Simulation = struct {
             for (sim.circuit.batches) |batch| total += batch.count;
             if (total < devices.par.default_min_instances) break :enable_par;
             const ckt = &sim.circuit;
-            sim.par_eval = devices.par.ParEval.init(arena, io_val, ckt.batches, ckt.nnz, ckt.n, ckt.has_charge, ckt.trash_slot, @min(lanes, 16)) catch break :enable_par;
+            sim.par_eval = devices.par.ParEval.init(sim_arena, io_val, ckt.batches, ckt.nnz, ckt.n, ckt.has_charge, ckt.trash_slot, @min(lanes, 16)) catch break :enable_par;
         }
 
         return sim;
@@ -232,7 +247,7 @@ pub const Simulation = struct {
 // Job builder — directive → analysis.Job (no ArrayList)
 // ---------------------------------------------------------------------------
 
-fn buildJob(dir: types.Directive, sim: *const Simulation) ?Job {
+fn buildJob(dir: types.Directive, sim: *const Simulation, sources: Sources) ?Job {
     const id = analysis.Analysis.get(dir.kind) orelse return null;
     return switch (id) {
         .op => .{ .op = .{} },
@@ -260,9 +275,9 @@ fn buildJob(dir: types.Directive, sim: *const Simulation) ?Job {
         .dc => blk: {
             const name1 = directiveName(dir, 0) orelse break :blk null;
             // Resolve source name → batch-local index (V sources first, then I).
-            const src_idx: u32 = if (findNameIndex(sim.sources.v_names, name1)) |i|
+            const src_idx: u32 = if (findNameIndex(sources.v_names, name1)) |i|
                 @intCast(i)
-            else if (findNameIndex(sim.sources.i_names, name1)) |i|
+            else if (findNameIndex(sources.i_names, name1)) |i|
                 @intCast(i)
             else
                 break :blk null;
