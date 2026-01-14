@@ -9,10 +9,11 @@
 //! is device-only, so device assembly (sparse gather → eval residual+Jacobian →
 //! scatter) cannot be a single "compile the CPU code for GPU" map. Instead the
 //! physics is written ONCE in `evalRange`, generic over a `sink`:
-//!   - CPU: `HostSink` scatters `+=` into the shared planes; par.zig runs lanes.
-//!   - GPU: a gompute `RawKernel` calls the same `evalRange` with an
-//!     atomic-scatter sink. gompute owns the GPU build/launch (was the
-//!     hand-rolled ptxas/nvlink megakernel).
+//! ONE `Sink(D, device, skip_const)` serves both: `device=false` scatters `+=`
+//! into the shared planes with per-lane dedup (par.zig runs the lanes);
+//! `device=true` is a gompute `RawKernel` that atomic-scatters and compiles the
+//! dedup out. gompute owns the GPU build/launch (was the hand-rolled
+//! ptxas/nvlink megakernel).
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -576,9 +577,9 @@ pub const HistLookup = struct {
 
 // ===========================================================================
 // Sink-parameterized eval — the ONE physics body. `sink` (comptime-known)
-// owns all memory access, so the same loop serves the CPU HostSink below and a
-// future GPU atomic-scatter sink driven by a gompute RawKernel. Always AD
-// (Dual): residual + Jacobian in one pass.
+// owns all memory access, so the same loop serves both instantiations of the
+// ONE `Sink` type (CPU `+=`, GPU atomic-scatter). Always AD (Dual): residual +
+// Jacobian in one pass.
 // ===========================================================================
 
 fn evalRange(comptime D: type, sink: anytype, first: u32, end: u32, t: f64, limiting: bool) void {
@@ -888,8 +889,6 @@ pub fn DeviceBatch(comptime D: type) type {
     const has_state = @hasDecl(D, "State");
     const has_hist = hasHistoryDecl(D);
     const has_prep_cache = @hasDecl(D, "PrepCache");
-    const const_g = @hasDecl(D, "constant") and D.constant.g;
-    const const_c = @hasDecl(D, "constant") and D.constant.c;
     const can_dedup = canDedup(D);
     const can_dedup_q = canDedupQ(D);
 
@@ -981,7 +980,7 @@ pub fn DeviceBatch(comptime D: type) type {
             self.n_lanes = n_lanes;
         }
 
-        fn hashVoltages(lx: *const [n_u]f64) u64 {
+        pub fn hashVoltages(lx: *const [n_u]f64) u64 {
             var h: u64 = 0x517cc1b727220a95;
             inline for (0..n_u) |u| {
                 h ^= @as(u64, @bitCast(lx[u]));
@@ -990,126 +989,8 @@ pub fn DeviceBatch(comptime D: type) type {
             return h | 1;
         }
 
-        inline fn corrDot(jrow: @Vector(n_u, f64), corr: @Vector(n_u, f64)) f64 {
+        pub inline fn corrDot(jrow: @Vector(n_u, f64), corr: @Vector(n_u, f64)) f64 {
             return if (comptime has_limit) @reduce(.Add, jrow * corr) else 0.0;
-        }
-
-        /// CPU host sink for evalRange: slot-tape scatter into the full G/C
-        /// planes (plain +=) and per-lane prep-cache dedup.
-        fn HostSink(comptime skip_const: bool) type {
-            return struct {
-                b: *Self,
-                pl: *const Planes,
-                xs: []const f64,
-                xo: []const f64, // x_old (limit pass only)
-                dedup_on: bool,
-                lane_off: usize,
-                cur_group: usize = 0,
-                cur_hash: u64 = 0,
-
-                pub const dedup = can_dedup;
-                pub const skip_g = skip_const and const_g;
-                pub const skip_c = skip_const and const_c;
-                pub const optimized_float = true;
-
-                const Sk = @This();
-
-                pub inline fn x(s: *const Sk, gi: u32) f64 {
-                    return s.xs[gi];
-                }
-                pub inline fn xOld(s: *const Sk, gi: u32) f64 {
-                    return s.xo[gi];
-                }
-                pub inline fn gath(s: *const Sk, id: u32, u: usize) u32 {
-                    return s.b.gath[@as(usize, id) * n_u + u];
-                }
-                pub inline fn rhsRow(s: *const Sk, id: u32, ru: usize) u32 {
-                    return s.b.rhs_idx[@as(usize, id) * n_u + ru];
-                }
-                pub inline fn lim(s: *const Sk, id: u32, u: usize) f64 {
-                    return s.b.lim_x[@as(usize, id) * n_u + u];
-                }
-                pub inline fn setLim(s: *const Sk, id: u32, u: usize, v: f64) void {
-                    s.b.lim_x[@as(usize, id) * n_u + u] = v;
-                }
-                pub inline fn model(s: *const Sk, id: u32) *const D.Model {
-                    return &s.b.models[id];
-                }
-                pub inline fn inst(s: *const Sk, id: u32) *const D.Instance {
-                    return &s.b.instances[id];
-                }
-                pub inline fn prep(s: *const Sk, id: u32) *const D.PrepCache {
-                    return &s.b.prep_cache[s.b.prep_group[id]];
-                }
-                inline fn slot(s: *const Sk, id: u32, ru: usize, cu: usize) u32 {
-                    return s.b.slots[(@as(usize, id) * n_u + ru) * n_u + cu];
-                }
-                pub inline fn scatterRes(s: *const Sk, row: u32, val: f64) void {
-                    s.pl.rhs[row] += val;
-                }
-                pub inline fn scatterJac(s: *const Sk, id: u32, ru: usize, cu: usize, row: u32, val: f64) void {
-                    _ = row;
-                    s.pl.g_vals[s.slot(id, ru, cu)] += val;
-                }
-                pub inline fn qActive(s: *const Sk) bool {
-                    _ = s;
-                    return true;
-                }
-                pub inline fn scatterQ(s: *const Sk, row: u32, qv: f64) void {
-                    s.pl.q_vec[row] += qv;
-                }
-                pub inline fn scatterQJac(s: *const Sk, id: u32, ru: usize, cu: usize, row: u32, val: f64) void {
-                    _ = row;
-                    s.pl.c_vals[s.slot(id, ru, cu)] += val;
-                }
-
-                pub inline fn tryCached(s: *Sk, id: u32, lx: *const [n_u]f64, corr: @Vector(n_u, f64)) bool {
-                    s.cur_group = s.lane_off + s.b.prep_group[id];
-                    s.cur_hash = if (s.dedup_on) hashVoltages(lx) else 0;
-                    if (comptime skip_g or skip_c) return false;
-                    if (!s.dedup_on) return false;
-                    if (s.b.eval_cache_hash[s.cur_group] != s.cur_hash) return false;
-                    const cr = &s.b.eval_cache_rhs[s.cur_group];
-                    const cj = &s.b.eval_cache_jac[s.cur_group];
-                    inline for (0..n_u) |ru| {
-                        const cjv: @Vector(n_u, f64) = cj[ru];
-                        s.pl.rhs[s.rhsRow(id, ru)] += cr[ru] + corrDot(cjv, corr);
-                        inline for (0..n_u) |cu|
-                            s.pl.g_vals[s.slot(id, ru, cu)] += cj[ru][cu];
-                    }
-                    if (comptime can_dedup_q) {
-                        const cqr = &s.b.eval_cache_q_rhs[s.cur_group];
-                        const cqj = &s.b.eval_cache_q_jac[s.cur_group];
-                        inline for (0..n_u) |ru| {
-                            const cqjv: @Vector(n_u, f64) = cqj[ru];
-                            s.pl.q_vec[s.rhsRow(id, ru)] += cqr[ru] + corrDot(cqjv, corr);
-                            inline for (0..n_u) |cu|
-                                s.pl.c_vals[s.slot(id, ru, cu)] += cqj[ru][cu];
-                        }
-                    }
-                    return true;
-                }
-
-                pub inline fn store(s: *Sk, id: u32, out: anytype) void {
-                    _ = id;
-                    if (comptime skip_g) return;
-                    if (!s.dedup_on) return;
-                    s.b.eval_cache_hash[s.cur_group] = s.cur_hash;
-                    inline for (0..n_u) |ru| {
-                        s.b.eval_cache_rhs[s.cur_group][ru] = out[ru].v;
-                        s.b.eval_cache_jac[s.cur_group][ru] = out[ru].grad();
-                    }
-                }
-                pub inline fn storeQ(s: *Sk, id: u32, qo: anytype) void {
-                    _ = id;
-                    if (comptime !(can_dedup_q and !skip_c)) return;
-                    if (!s.dedup_on) return;
-                    inline for (0..n_u) |ru| {
-                        s.b.eval_cache_q_rhs[s.cur_group][ru] = qo[ru].v;
-                        s.b.eval_cache_q_jac[s.cur_group][ru] = qo[ru].grad();
-                    }
-                }
-            };
         }
 
         fn evalInner(ctx: *anyopaque, pl: *const Planes, lane: u32, first: u32, last: u32, x: []const f64, t: f64, comptime skip_const: bool) void {
@@ -1124,14 +1005,7 @@ pub fn DeviceBatch(comptime D: type) type {
 
             const limiting = if (comptime has_limit) self.lim_active else false;
 
-            var sink: HostSink(skip_const) = .{
-                .b = self,
-                .pl = pl,
-                .xs = x,
-                .xo = undefined,
-                .dedup_on = dedup_on,
-                .lane_off = lane_off,
-            };
+            var sink = Sink(D, false, skip_const).host(self, pl, x, undefined, dedup_on, lane_off);
             evalRange(D, &sink, first, last, t, limiting);
         }
 
@@ -1168,14 +1042,10 @@ pub fn DeviceBatch(comptime D: type) type {
 
         fn applyLimits(ctx: *anyopaque, x: []f64, x_old: []const f64) bool {
             const self: *Self = @ptrCast(@alignCast(ctx));
-            var sink: HostSink(false) = .{
-                .b = self,
-                .pl = undefined,
-                .xs = x,
-                .xo = x_old,
-                .dedup_on = false,
-                .lane_off = 0,
-            };
+            // limitRange never scatters to the planes; an empty Planes keeps the
+            // sink's plane .ptr reads valid (undefined would trap in Debug).
+            const no_planes: Planes = .{ .g_vals = &.{}, .c_vals = &.{}, .rhs = &.{}, .q_vec = &.{} };
+            var sink = Sink(D, false, false).host(self, &no_planes, x, x_old, false, 0);
             const any = limitRange(D, &sink, 0, @intCast(self.count), self.lim_active);
             self.lim_active = true;
             return any != 0;
@@ -1484,17 +1354,27 @@ pub const GpuPayload = struct {
     slots: []const u32,
 };
 
-/// Atomic-scatter sink over flat device buffers — the GPU counterpart of
-/// HostSink. Same method surface `evalRange` consumes; scatter uses atomicRmw
-/// (many threads stamp the same matrix slot). dedup off (atomics handle it).
-pub fn GpuSink(comptime D: type) type {
+/// The ONE sink `evalRange`/`limitRange` consume. `device` picks the two axes
+/// that differ between CPU and GPU and NOTHING else — the gather/index/eval body
+/// is identical:
+///   - memory access: host reads plain slices (GlobalPtr(T) == [*]T), device
+///     casts the `.global` kernel params to generic addrspace (one cvta.global
+///     on NVPTX) so the contract's generic-addrspace `eval` can read them.
+///   - scatter: host `p[i] +=`; device `@atomicRmw(.Add)` (many threads stamp
+///     one matrix slot; the atomic lowers to a global-space reduction).
+///   - dedup: host-only prep-cache reuse; on device it compiles to always-miss
+///     (atomics make racing threads correct), so the whole cache is gone.
+/// The ABI-table fields are GlobalPtr both ways — one type, one body, two
+/// backends. Host-only dedup/limit state hangs off `b: *DeviceBatch(D)` and is
+/// `void` under `device`, so a device compilation never sees it.
+pub fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool) type {
     const n_u = comptime uCount(D);
+    const const_g = @hasDecl(D, "constant") and D.constant.g;
+    const const_c = @hasDecl(D, "constant") and D.constant.c;
+    const can_dedup = comptime canDedup(D);
+    const can_dedup_q = comptime canDedupQ(D);
+    const BatchT = DeviceBatch(D);
     return struct {
-        // gompute.GlobalPtr, not [*]T: in a device compilation the kernel
-        // parameters live in addrspace(.global), which cannot cast to a generic
-        // pointer. On the host GlobalPtr(T) IS [*]T, so one type serves both
-        // passes. Const is dropped because the kernel ABI carries none — the
-        // read-only fields below are still only ever read.
         xs: gompute.GlobalPtr(f64),
         gath_: gompute.GlobalPtr(u32),
         rhs_idx_: gompute.GlobalPtr(u32),
@@ -1506,9 +1386,18 @@ pub fn GpuSink(comptime D: type) type {
         rhs: gompute.GlobalPtr(f64),
         q_vec: gompute.GlobalPtr(f64),
 
-        pub const dedup = false;
-        pub const skip_g = false;
-        pub const skip_c = false;
+        // Host-only: the dedup caches / limit tables live on the batch. Device
+        // dedup is compiled out, so none of this exists in a GPU compilation.
+        b: if (device) void else *BatchT,
+        xo: if (device) void else []const f64, // x_old (limit pass only)
+        dedup_on: if (device) void else bool,
+        lane_off: if (device) void else usize,
+        cur_group: if (device) void else usize = if (device) {} else 0,
+        cur_hash: if (device) void else u64 = if (device) {} else 0,
+
+        pub const dedup = !device and can_dedup;
+        pub const skip_g = skip_const and const_g;
+        pub const skip_c = skip_const and const_c;
         pub const optimized_float = true;
 
         const Sk = @This();
@@ -1516,53 +1405,136 @@ pub fn GpuSink(comptime D: type) type {
         pub inline fn x(s: *const Sk, gi: u32) f64 {
             return s.xs[gi];
         }
+        pub inline fn xOld(s: *const Sk, gi: u32) f64 {
+            return s.xo[gi];
+        }
         pub inline fn gath(s: *const Sk, id: u32, u: usize) u32 {
             return s.gath_[@as(usize, id) * n_u + u];
         }
         pub inline fn rhsRow(s: *const Sk, id: u32, ru: usize) u32 {
             return s.rhs_idx_[@as(usize, id) * n_u + ru];
         }
-        // The contract's eval takes generic-addrspace pointers, so the global
-        // ones are cast here (one cvta.global on NVPTX) rather than copying the
-        // whole Model/Instance per thread — a compact model's Model is hundreds
-        // of params wide and would blow the register budget.
+        pub inline fn lim(s: *const Sk, id: u32, u: usize) f64 {
+            return s.b.lim_x[@as(usize, id) * n_u + u];
+        }
+        pub inline fn setLim(s: *const Sk, id: u32, u: usize, v: f64) void {
+            s.b.lim_x[@as(usize, id) * n_u + u] = v;
+        }
+        // The contract's eval takes generic-addrspace pointers; on device the
+        // `.global` param is cast here rather than copying the whole
+        // Model/Instance per thread (a compact model's Model is hundreds of
+        // params wide and would blow the register budget). On host the cast is
+        // a no-op.
         pub inline fn model(s: *const Sk, id: u32) *const D.Model {
             return @addrSpaceCast(&s.models_[id]);
         }
         pub inline fn inst(s: *const Sk, id: u32) *const D.Instance {
             return @addrSpaceCast(&s.instances_[id]);
         }
+        pub inline fn prep(s: *const Sk, id: u32) *const D.PrepCache {
+            return &s.b.prep_cache[s.b.prep_group[id]];
+        }
         inline fn slot(s: *const Sk, id: u32, ru: usize, cu: usize) u32 {
             return s.slots_[(@as(usize, id) * n_u + ru) * n_u + cu];
         }
-        // Stays in addrspace(.global): the atomic lowers to a global-space
-        // reduction, which is the whole point of the scatter.
-        inline fn atomAdd(p: gompute.GlobalPtr(f64), i: u32, v: f64) void {
-            _ = @atomicRmw(f64, &p[i], .Add, v, .monotonic);
+        inline fn add(p: gompute.GlobalPtr(f64), i: u32, v: f64) void {
+            if (comptime device) {
+                _ = @atomicRmw(f64, &p[i], .Add, v, .monotonic);
+            } else {
+                p[i] += v;
+            }
         }
         pub inline fn scatterRes(s: *const Sk, row: u32, val: f64) void {
-            atomAdd(s.rhs, row, val);
+            add(s.rhs, row, val);
         }
         pub inline fn scatterJac(s: *const Sk, id: u32, ru: usize, cu: usize, row: u32, val: f64) void {
             _ = row;
-            atomAdd(s.g_vals, s.slot(id, ru, cu), val);
+            add(s.g_vals, s.slot(id, ru, cu), val);
         }
         pub inline fn qActive(s: *const Sk) bool {
             _ = s;
             return true;
         }
         pub inline fn scatterQ(s: *const Sk, row: u32, qv: f64) void {
-            atomAdd(s.q_vec, row, qv);
+            add(s.q_vec, row, qv);
         }
         pub inline fn scatterQJac(s: *const Sk, id: u32, ru: usize, cu: usize, row: u32, val: f64) void {
             _ = row;
-            atomAdd(s.c_vals, s.slot(id, ru, cu), val);
+            add(s.c_vals, s.slot(id, ru, cu), val);
         }
-        pub inline fn tryCached(_: *Sk, _: u32, _: *const [n_u]f64, _: @Vector(n_u, f64)) bool {
-            return false;
+
+        // dedup: host-only (guarded by `dedup` == false on device, so never
+        // instantiated there). Reuses a prior eval when the gather point hashes
+        // equal within the same prep group.
+        pub inline fn tryCached(s: *Sk, id: u32, lx: *const [n_u]f64, corr: @Vector(n_u, f64)) bool {
+            s.cur_group = s.lane_off + s.b.prep_group[id];
+            s.cur_hash = if (s.dedup_on) BatchT.hashVoltages(lx) else 0;
+            if (comptime skip_g or skip_c) return false;
+            if (!s.dedup_on) return false;
+            if (s.b.eval_cache_hash[s.cur_group] != s.cur_hash) return false;
+            const cr = &s.b.eval_cache_rhs[s.cur_group];
+            const cj = &s.b.eval_cache_jac[s.cur_group];
+            inline for (0..n_u) |ru| {
+                const cjv: @Vector(n_u, f64) = cj[ru];
+                add(s.rhs, s.rhsRow(id, ru), cr[ru] + BatchT.corrDot(cjv, corr));
+                inline for (0..n_u) |cu|
+                    add(s.g_vals, s.slot(id, ru, cu), cj[ru][cu]);
+            }
+            if (comptime can_dedup_q) {
+                const cqr = &s.b.eval_cache_q_rhs[s.cur_group];
+                const cqj = &s.b.eval_cache_q_jac[s.cur_group];
+                inline for (0..n_u) |ru| {
+                    const cqjv: @Vector(n_u, f64) = cqj[ru];
+                    add(s.q_vec, s.rhsRow(id, ru), cqr[ru] + BatchT.corrDot(cqjv, corr));
+                    inline for (0..n_u) |cu|
+                        add(s.c_vals, s.slot(id, ru, cu), cqj[ru][cu]);
+                }
+            }
+            return true;
         }
-        pub inline fn store(_: *Sk, _: u32, _: anytype) void {}
-        pub inline fn storeQ(_: *Sk, _: u32, _: anytype) void {}
+
+        pub inline fn store(s: *Sk, id: u32, out: anytype) void {
+            _ = id;
+            if (comptime skip_g) return;
+            if (!s.dedup_on) return;
+            s.b.eval_cache_hash[s.cur_group] = s.cur_hash;
+            inline for (0..n_u) |ru| {
+                s.b.eval_cache_rhs[s.cur_group][ru] = out[ru].v;
+                s.b.eval_cache_jac[s.cur_group][ru] = out[ru].grad();
+            }
+        }
+        pub inline fn storeQ(s: *Sk, id: u32, qo: anytype) void {
+            _ = id;
+            if (comptime !(can_dedup_q and !skip_c)) return;
+            if (!s.dedup_on) return;
+            inline for (0..n_u) |ru| {
+                s.b.eval_cache_q_rhs[s.cur_group][ru] = qo[ru].v;
+                s.b.eval_cache_q_jac[s.cur_group][ru] = qo[ru].grad();
+            }
+        }
+
+        // Host constructor: flatten the batch's slices to the GlobalPtr fields
+        // (GlobalPtr(T) == [*]T here) so the shared body indexes them the same
+        // way the device does. `has_limit` guards `xo`/lim state, unused off the
+        // limit pass.
+        pub fn host(b: *BatchT, pl: *const Planes, xs: []const f64, xo: []const f64, dedup_on: bool, lane_off: usize) Sk {
+            return .{
+                .xs = @constCast(xs.ptr), // read-only here; GlobalPtr carries no const
+                .gath_ = b.gath.ptr,
+                .rhs_idx_ = b.rhs_idx.ptr,
+                .slots_ = b.slots.ptr,
+                .models_ = b.models.ptr,
+                .instances_ = b.instances.ptr,
+                .g_vals = pl.g_vals.ptr,
+                .c_vals = pl.c_vals.ptr,
+                .rhs = pl.rhs.ptr,
+                .q_vec = pl.q_vec.ptr,
+                .b = b,
+                .xo = xo,
+                .dedup_on = dedup_on,
+                .lane_off = lane_off,
+            };
+        }
     };
 }
 
@@ -1588,7 +1560,7 @@ pub fn DeviceKernel(comptime D: type, comptime block_size: u32) type {
         ) callconv(gompute.kernel_callconv) void {
             const tid = gompute.globalIdX(block_size);
             if (tid >= count) return;
-            var sink = GpuSink(D){
+            var sink = Sink(D, true, false){
                 .xs = xs,
                 .gath_ = gath,
                 .rhs_idx_ = rhs_idx,
@@ -1599,6 +1571,10 @@ pub fn DeviceKernel(comptime D: type, comptime block_size: u32) type {
                 .c_vals = c_vals,
                 .rhs = rhs,
                 .q_vec = q_vec,
+                .b = {},
+                .xo = {},
+                .dedup_on = {},
+                .lane_off = {},
             };
             const id: u32 = @intCast(tid);
             evalRange(D, &sink, id, id + 1, t, false);
