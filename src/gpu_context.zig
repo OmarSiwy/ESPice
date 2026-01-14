@@ -51,6 +51,33 @@ else if (artifacts.has_hip)
 else
     null;
 
+/// The GPU backend this binary carries images for, or null. Public so the CLI
+/// can name it when a `--backend cuda|hip` request cannot be honoured.
+pub const detected: ?gompute.Backend = backend;
+
+/// What `--backend` can ask for. `auto` is the opt-in that preserves the old
+/// `--gpu` semantics: try the device, fall back to the CPU. `cuda`/`hip` are
+/// strict — a request this binary cannot honour is a hard error, not a
+/// silent CPU run.
+pub const Request = enum { cpu, auto, cuda, hip };
+
+/// A one-word name for what this binary detected, for the mismatch message.
+pub fn detectedName() []const u8 {
+    return if (backend) |be| @tagName(be) else "none";
+}
+
+/// Reject a strict `--backend cuda|hip` that this binary cannot honour, BEFORE
+/// any simulation runs. `auto`/`cpu` always pass here — auto falls back at
+/// run time, cpu never touches the GPU. Returns false and prints the mismatch
+/// (naming what WAS detected) when a named backend is absent.
+pub fn requestSupported(req: Request) bool {
+    return switch (req) {
+        .cpu, .auto => true,
+        .cuda => backend == .cuda,
+        .hip => backend == .hip,
+    };
+}
+
 /// `void` in a build with no device images, so nothing below names a type that
 /// does not exist. Every use is behind `comptime backend != null`.
 const Raw = if (backend) |be| gompute.RawByName(be) else void;

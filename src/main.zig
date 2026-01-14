@@ -1,5 +1,6 @@
 const std = @import("std");
 const engine = @import("engine.zig");
+const gpu_context = @import("gpu_context.zig");
 const vaload = @import("devices").vaload;
 const build_options = @import("build_options");
 const rawfile = @import("output/rawfile.zig");
@@ -50,7 +51,7 @@ const Options = struct {
     log_path: ?[]const u8 = null,
     no_spiceinit: bool = false,
     autorun: bool = false,
-    gpu: bool = false,
+    backend: gpu_context.Request = .cpu,
     defines: [16]?Define = .{null} ** 16,
     n_defines: usize = 0,
     deck_paths: [16]?[]const u8 = .{null} ** 16,
@@ -86,7 +87,13 @@ pub fn main(init: std.process.Init) !u8 {
             } else if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--no-spiceinit")) {
                 opts.no_spiceinit = true;
             } else if (std.mem.eql(u8, arg, "--gpu")) {
-                opts.gpu = true;
+                opts.backend = .auto; // deprecated alias for --backend auto
+            } else if (optionValue(arg, "", "--backend", &it)) |oa| {
+                const val = valueOrUsage(oa, io) orelse return 2;
+                opts.backend = parseBackend(val) orelse {
+                    std.debug.print("Error: unknown backend '{s}' (want auto|cpu|cuda|hip)\n", .{val});
+                    return 2;
+                };
             } else if (optionValue(arg, "-r", "--rawfile", &it)) |oa| {
                 opts.raw_path = valueOrUsage(oa, io) orelse return 2;
             } else if (optionValue(arg, "-o", "--output", &it)) |oa| {
@@ -145,6 +152,13 @@ pub fn main(init: std.process.Init) !u8 {
         return 0;
     }
 
+    // Strict --backend cuda|hip: reject up front if this binary cannot honour
+    // it, naming what WAS detected. auto/cpu always pass (auto falls back).
+    if (!gpu_context.requestSupported(opts.backend)) {
+        std.debug.print("Error: requested {s}, found: {s}\n", .{ @tagName(opts.backend), gpu_context.detectedName() });
+        return 2;
+    }
+
     var any_ran = false;
     for (opts.deck_paths[0..opts.n_decks]) |maybe_path| {
         const path = maybe_path orelse continue;
@@ -196,7 +210,10 @@ pub fn main(init: std.process.Init) !u8 {
         }
 
         if (opts.mode == .batch) {
-            var sim = engine.Simulation.fromNetlist(sim_arena, arena, nl, io, .{ .gpu = opts.gpu }) catch |e| {
+            // Resolve the backend request to the engine's existing opt-in bool:
+            // .cpu never touches the GPU; .auto/.cuda/.hip engage it. Strict
+            // cuda/hip that this binary cannot honour was already rejected above.
+            var sim = engine.Simulation.fromNetlist(sim_arena, arena, nl, io, .{ .gpu = opts.backend != .cpu }) catch |e| {
                 std.debug.print("Engine error: {s}\n", .{@errorName(e)});
                 return skip(io, @errorName(e));
             };
@@ -279,6 +296,10 @@ fn parseTokenizer(s: []const u8) ?Tokenizer {
     };
     for (specs) |spec| if (matchesAny(s, spec.names)) return spec.value;
     return null;
+}
+
+fn parseBackend(s: []const u8) ?gpu_context.Request {
+    return std.meta.stringToEnum(gpu_context.Request, s);
 }
 
 fn parseMode(s: []const u8) ?Mode {
@@ -370,6 +391,7 @@ fn printHelp(io: std.Io) void {
         \\
         \\  -a, --autorun              Run the loaded netlist at once
         \\  -b, --batch                Process FILE in batch mode
+        \\      --backend=BE           Compute backend (auto|cpu|cuda|hip, default cpu; auto probes the GPU)
         \\  -D, --define=var[=val]     Define a variable
         \\      --format=FMT            Output format (binary|ascii|csv|touchstone|psf|fsdb|sst2|citi|print)
         \\  -h, --help                 Display this help and exit
