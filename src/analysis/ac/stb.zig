@@ -138,7 +138,8 @@ pub fn solve(
         types.fillLogSweep(options.f_start, options.f_stop, options.points_per_decade, null, omegas);
 
         const x_out = ckt.gpuFreqBatch(allocator, g_aug, c_aug, omegas, rhs_gpu, @intCast(n_aug), false) orelse break :gpu;
-        defer root.freeFreqLanes(allocator, x_out);
+        defer allocator.free(x_out);
+        const nn = 2 * n_aug;
 
         // GPU owns nothing — free the augmented matrices ourselves.
         allocator.free(g_aug);
@@ -152,8 +153,8 @@ pub fn solve(
         while (sw.next()) |f| : (k += 1) {
             result.freqs[k] = f;
             result.loop_gain[k] = .{
-                .re = -x_out[k][branch_idx],
-                .im = -x_out[k][n_aug + branch_idx],
+                .re = -x_out[k * nn + branch_idx],
+                .im = -x_out[k * nn + n_aug + branch_idx],
             };
         }
 

@@ -61,13 +61,14 @@ pub fn sweep(
         types.fillLogSweep(options.f_start, options.f_stop, options.points_per_decade, freqs, omegas);
 
         const x_out = ckt.gpuFreqBatch(allocator, ckt.g_vals, ckt.c_vals, omegas, rhs, @intCast(n), false) orelse break :gpu;
-        defer root.freeFreqLanes(allocator, x_out);
+        defer allocator.free(x_out);
 
         for (0..n_points) |k| {
+            const lane = x_out[k * nn ..][0..nn];
             for (probes, 0..) |node, p| {
                 resp[p * n_points + k] = .{
-                    .re = x_out[k][node],
-                    .im = x_out[k][n + node],
+                    .re = lane[node],
+                    .im = lane[n + node],
                 };
             }
         }

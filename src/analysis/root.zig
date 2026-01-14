@@ -19,7 +19,6 @@ pub const BbdInfo = shared.BbdInfo;
 pub const GROUND = shared.GROUND;
 pub const zeroSimd = shared.zeroSimd;
 pub const copySimd = shared.copySimd;
-pub const freeFreqLanes = shared.freeFreqLanes;
 pub const probeNames = shared.probeNames;
 pub const ParamRef = shared.ParamRef;
 pub const NoiseSource = shared.NoiseSource;

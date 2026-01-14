@@ -101,12 +101,13 @@ pub fn sweep(
 
             // Per-frequency output: x_out[k] is 2*n (real‖imag expansion).
             const x_out = ckt.gpuFreqBatch(allocator, ckt.g_vals, ckt.c_vals, omegas, rhs, @intCast(n), false) orelse break :gpu;
-            defer root.freeFreqLanes(allocator, x_out);
+            defer allocator.free(x_out);
 
             const a_p = 1.0 / (2.0 * @sqrt(ports[p].z0));
+            const nn = 2 * n;
 
             for (0..n_points) |fi| {
-                const x_work = x_out[fi];
+                const x_work = x_out[fi * nn ..][0..nn];
                 const s_mat = s[fi * n_ports * n_ports ..][0 .. n_ports * n_ports];
                 for (0..n_ports) |k| {
                     const node_k: usize = ports[k].node;
