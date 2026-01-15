@@ -319,6 +319,14 @@ pub fn main() void {
         }
     }
 
+    // Phase 4 LaneLu(W) — W sparse-LU factorizations replaying one SparseLu
+    // pivot tape, values as []@Vector(W,f64). Its differential case (vector lane
+    // l vs scalar SparseLu replay of lane l, on +/-5% perturbed matrices incl.
+    // an MNA zero-diagonal pattern and a singular-lane/mask case) lives IN
+    // src/solvers/lane_lu.zig test blocks, not here: this file runs standalone
+    // via `zig run` and cannot import the solvers module (SparseLu, the oracle).
+    // Run it under `zig build test-solvers`.
+
     std.debug.print("ok — zig {f}, ssse3={}, pclmul={}\n", .{
         builtin.zig_version, has_ssse3, has_pclmul,
     });

@@ -10,6 +10,7 @@
 const std = @import("std");
 const dense_lu = @import("dense_lu.zig");
 const direct = @import("direct.zig");
+const lane_lu = @import("lane_lu.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -238,6 +239,131 @@ pub fn FreqSolverT(comptime T: type) type {
         }
 
         // =================================================================
+        // Batch solve: W-chunked (G + jωC)x = rhs over many omegas.
+        // Lane axis = frequency point. Layout mirrors the GpuHook freq blob:
+        // omega k's rhs/solution lives at [k*2n..][0..2n] (real‖imag).
+        // =================================================================
+
+        /// Solve `omegas.len` frequency points. `rhs`/`x_out` are flat, lane k
+        /// at [k*2n..][0..2n]. `adjoint` selects A^T. Falls back to the
+        /// per-omega scalar path for the dense strategy, f32, tiny systems, or
+        /// any lane whose refactor failed (peeled to full re-factor).
+        pub fn solveBatch(self: *Self, gpa: Allocator, omegas: []const T, rhs: []const T, x_out: []T, adjoint: bool) !void {
+            const nn: usize = self.nn;
+            // Lane path is f64 + sparse only (LaneLu is f64; dense has no tape).
+            const use_lanes = comptime (T == f64);
+            const sp: *Sparse = switch (self.strategy) {
+                .sp => |*s| s,
+                .dense => return self.solveBatchSerial(omegas, rhs, x_out, adjoint),
+            };
+            if (!use_lanes) return self.solveBatchSerial(omegas, rhs, x_out, adjoint);
+
+            const LL = lane_lu.LaneLu(W);
+            const nnz2 = sp.vals.len; // structural entries in the 2n CSC
+            const vplane = try gpa.alloc(@Vector(W, T), nnz2);
+            defer gpa.free(vplane);
+            const b_plane = try gpa.alloc(@Vector(W, T), nn);
+            defer gpa.free(b_plane);
+            const x_plane = try gpa.alloc(@Vector(W, T), nn);
+            defer gpa.free(x_plane);
+
+            var base: usize = 0;
+            while (base < omegas.len) : (base += W) {
+                const cnt = @min(W, omegas.len - base);
+                // Ragged tail: pad by repeating the last real omega.
+                var ow: [W]T = undefined;
+                for (0..W) |l| ow[l] = omegas[base + @min(l, cnt - 1)];
+                const omega_vec: @Vector(W, T) = ow;
+
+                // Pivot refresh: scalar factor at the chunk-middle omega.
+                setOmegaSparse(self.n, sp, ow[cnt / 2]) catch {
+                    // Refresh factor failed at the middle omega: peel the whole
+                    // chunk to the serial path (each omega re-factors itself).
+                    try self.solveBatchSerial(omegas[base .. base + cnt], rhs[base * nn ..][0 .. cnt * nn], x_out[base * nn ..][0 .. cnt * nn], adjoint);
+                    continue;
+                };
+                // LaneLu needs a SparseLu-backed factorization. If direct
+                // dispatched to tridiag/BBD (no .lu), peel to serial.
+                const lu = if (sp.slv.lu) |*l| l else {
+                    try self.solveBatchSerial(omegas[base .. base + cnt], rhs[base * nn ..][0 .. cnt * nn], x_out[base * nn ..][0 .. cnt * nn], adjoint);
+                    continue;
+                };
+
+                var ll = try LL.init(gpa, lu);
+                defer ll.deinit(gpa);
+
+                fillLanePlane(self.n, sp, omega_vec, vplane);
+                const growth: T = @floatCast(sp.slv.params.refactor_growth_limit);
+                const bad = ll.refactor(sp.col_ptr, vplane, growth);
+
+                // Broadcast this chunk's rhs into the lane plane.
+                for (0..nn) |i| {
+                    var v: [W]T = undefined;
+                    for (0..W) |l| v[l] = rhs[(base + @min(l, cnt - 1)) * nn + i];
+                    b_plane[i] = v;
+                }
+
+                if (adjoint) ll.solveT(b_plane, x_plane) else ll.solve(b_plane, x_plane);
+
+                // Deinterleave good lanes into x_out; peel bad lanes to serial.
+                for (0..cnt) |l| {
+                    if ((bad & (@as(u64, 1) << @intCast(l))) != 0) {
+                        try self.solveBatchSerial(omegas[base + l ..][0..1], rhs[(base + l) * nn ..][0..nn], x_out[(base + l) * nn ..][0..nn], adjoint);
+                        continue;
+                    }
+                    const dst = x_out[(base + l) * nn ..][0..nn];
+                    for (0..nn) |i| {
+                        const row: [W]T = x_plane[i];
+                        dst[i] = row[l];
+                    }
+                }
+            }
+        }
+
+        /// Reference path: loop setOmega + solveRhs per omega. The lane path
+        /// must match this bit-for-bit when op orders agree (they do: LaneLu
+        /// lane l replays the same SparseLu numeric sequence as this scalar
+        /// factor of the same values).
+        fn solveBatchSerial(self: *Self, omegas: []const T, rhs: []const T, x_out: []T, adjoint: bool) !void {
+            const nn: usize = self.nn;
+            for (omegas, 0..) |omega, k| {
+                try self.setOmega(omega);
+                if (adjoint)
+                    try self.solveRhsT(rhs[k * nn ..][0..nn], x_out[k * nn ..][0..nn])
+                else
+                    try self.solveRhs(rhs[k * nn ..][0..nn], x_out[k * nn ..][0..nn]);
+            }
+        }
+
+        /// Lane twin of setOmegaSparse's value fill: writes the W-wide value
+        /// plane for W omegas at once, in the SAME structural order the scalar
+        /// path fills `s.vals` (so LaneLu, replaying the SparseLu built over
+        /// that CSC, is bit-identical to the scalar factor of each lane).
+        fn fillLanePlane(n: u32, s: *Sparse, omega: @Vector(W, T), out: []@Vector(W, T)) void {
+            const nu: usize = n;
+            const neg_omega = -omega;
+            var p: usize = 0;
+            // Left half: [G_rows | +ωC_rows]
+            for (0..nu) |j| {
+                const cs = s.src_col_ptr[j];
+                const len: usize = s.src_col_ptr[j + 1] - cs;
+                for (0..len) |q| out[p + q] = @splat(s.g_vals[cs + q]);
+                p += len;
+                for (0..len) |q| out[p + q] = omega * @as(@Vector(W, T), @splat(s.c_vals[cs + q]));
+                p += len;
+            }
+            // Right half: [-ωC_rows | G_rows]
+            for (0..nu) |j| {
+                const cs = s.src_col_ptr[j];
+                const len: usize = s.src_col_ptr[j + 1] - cs;
+                for (0..len) |q| out[p + q] = neg_omega * @as(@Vector(W, T), @splat(s.c_vals[cs + q]));
+                p += len;
+                for (0..len) |q| out[p + q] = @splat(s.g_vals[cs + q]);
+                p += len;
+            }
+        }
+
+        // =================================================================
         // Dense internals
         // =================================================================
 
@@ -459,6 +585,108 @@ test "FreqSolver: setOmega then solveRhs preserves factorization across calls" {
             for (0..4) |col| sum += a[row * 4 + col] * x[col];
             try testing.expectApproxEqAbs(rhs[row], sum, 1e-10);
         }
+    }
+}
+
+test "solveBatch equals looped solveRhs (dense fallback, fwd + adjoint)" {
+    const allocator = testing.allocator;
+    const g = try allocator.dupe(f64, &[_]f64{ 5, 1, 2, 4 });
+    const c = try allocator.dupe(f64, &[_]f64{ 0.3, 0.1, 0.0, 0.2 });
+    var fs = try FreqSolver.initDense(allocator, 2, g, c);
+    defer fs.deinit(allocator);
+
+    const omegas = [_]f64{ 1.0, 3.0, 7.0, 13.0, 21.0 };
+    const nn: usize = 4;
+    // rhs blob: lane k at [k*2n..][0..2n]
+    var rhs: [omegas.len * nn]f64 = undefined;
+    for (0..omegas.len) |k| for (0..nn) |i| {
+        rhs[k * nn + i] = @floatFromInt((k + 1) * (i + 1));
+    };
+
+    for ([_]bool{ false, true }) |adjoint| {
+        var x_batch: [omegas.len * nn]f64 = undefined;
+        try fs.solveBatch(allocator, &omegas, &rhs, &x_batch, adjoint);
+
+        var x_ref: [omegas.len * nn]f64 = undefined;
+        try fs.solveBatchSerial(&omegas, &rhs, &x_ref, adjoint);
+        for (x_batch, x_ref) |a, b| try testing.expectApproxEqRel(b, a, 1e-12);
+    }
+}
+
+test "solveBatch equals looped solveRhs (sparse lane path, fwd + adjoint)" {
+    const allocator = testing.allocator;
+    const n: u32 = 20; // > DENSE_THRESHOLD => sparse strategy => lane path
+    // Tridiagonal CSC pattern; diagonally dominant so factors stay well-cond.
+    var col_ptr = std.ArrayList(u32).empty;
+    defer col_ptr.deinit(allocator);
+    var row_idx = std.ArrayList(u32).empty;
+    defer row_idx.deinit(allocator);
+    var g_vals = std.ArrayList(f64).empty;
+    defer g_vals.deinit(allocator);
+    var c_vals = std.ArrayList(f64).empty;
+    defer c_vals.deinit(allocator);
+    try col_ptr.append(allocator, 0);
+    for (0..n) |j| {
+        // column j: rows j-1, j, j+1 (ascending)
+        if (j > 0) {
+            try row_idx.append(allocator, @intCast(j - 1));
+            try g_vals.append(allocator, -1);
+            try c_vals.append(allocator, 0.05);
+        }
+        try row_idx.append(allocator, @intCast(j));
+        try g_vals.append(allocator, 4 + @as(f64, @floatFromInt(j % 3)));
+        try c_vals.append(allocator, 0.2);
+        if (j + 1 < n) {
+            try row_idx.append(allocator, @intCast(j + 1));
+            try g_vals.append(allocator, -1);
+            try c_vals.append(allocator, 0.05);
+        }
+        try col_ptr.append(allocator, @intCast(row_idx.items.len));
+    }
+
+    const Ckt = struct {
+        n: usize,
+        nnz: usize,
+        col_ptr: []const u32,
+        row_idx: []const u32,
+        g_vals: []const f64,
+        c_vals: []const f64,
+        fn linearize(_: @This(), _: []const f64) void {}
+        // Never reached (n > DENSE_THRESHOLD) but must exist for fromCircuit's
+        // dense branch to type-check against `anytype`.
+        fn denseG(_: @This(), _: []f64) void {}
+        fn denseC(_: @This(), _: []f64) void {}
+    };
+    const ckt = Ckt{
+        .n = n,
+        .nnz = row_idx.items.len,
+        .col_ptr = col_ptr.items,
+        .row_idx = row_idx.items,
+        .g_vals = g_vals.items,
+        .c_vals = c_vals.items,
+    };
+    var fs = try FreqSolver.fromCircuit(allocator, ckt, &.{});
+    defer fs.deinit(allocator);
+
+    // Enough omegas to span more than one W-chunk plus a ragged tail.
+    const omegas = [_]f64{ 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000 };
+    const nn: usize = 2 * n;
+    const total = omegas.len * nn;
+    const rhs = try allocator.alloc(f64, total);
+    defer allocator.free(rhs);
+    for (0..omegas.len) |k| for (0..nn) |i| {
+        rhs[k * nn + i] = @sin(@as(f64, @floatFromInt(k * 7 + i)));
+    };
+
+    const x_batch = try allocator.alloc(f64, total);
+    defer allocator.free(x_batch);
+    const x_ref = try allocator.alloc(f64, total);
+    defer allocator.free(x_ref);
+
+    for ([_]bool{ false, true }) |adjoint| {
+        try fs.solveBatch(allocator, &omegas, rhs, x_batch, adjoint);
+        try fs.solveBatchSerial(&omegas, rhs, x_ref, adjoint);
+        for (x_batch, x_ref) |a, b| try testing.expectApproxEqRel(b, a, 1e-11);
     }
 }
 
