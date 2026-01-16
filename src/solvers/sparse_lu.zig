@@ -14,6 +14,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const order = @import("order.zig"); // test-only: order -> LU -> solve composition
 
 const NONE: u32 = std.math.maxInt(u32);
 
@@ -499,6 +500,40 @@ test "3x3: factor + solve verified against dense reference" {
     defer lu.deinit(gpa);
     try lu.factor(gpa, &csc.col_ptr, csc.row_idx[0..csc.nnz()], csc.vals[0..csc.nnz()], 1e-3);
     try checkSolve(3, a, b, &lu);
+}
+
+test "order -> factor + solve: AMD permutation is valid and the solve is correct" {
+    const gpa = testing.allocator;
+    // Arrowhead: dense first row/col (hub at node 0), diagonal elsewhere.
+    // AMD defers the hub, so q is a genuine non-identity permutation — this is
+    // the composition order.zig and the LU each test only in isolation.
+    const a = [4][4]f64{
+        .{ 5, 1, 1, 1 },
+        .{ 1, 2, 0, 0 },
+        .{ 1, 0, 3, 0 },
+        .{ 1, 0, 0, 4 },
+    };
+    const b = [4]f64{ 8, 3, 4, 5 };
+    const csc = DenseCsc(4).from(a);
+
+    var q: [4]u32 = undefined;
+    var buf: [order.wsSize(4, 10)]u32 = undefined; // arrowhead nnz = 10
+    var ws = order.Ws.init(&buf);
+    try order.order(4, &csc.col_ptr, csc.row_idx[0..csc.nnz()], &q, &ws);
+
+    // q must be a valid permutation of 0..4.
+    var seen = [_]bool{false} ** 4;
+    for (q) |c| {
+        try testing.expect(!seen[c]);
+        seen[c] = true;
+    }
+    // The hub (node 0) is deferred: not factored first.
+    try testing.expect(q[0] != 0);
+
+    var lu = try SparseLu(f64).init(gpa, 4, &csc.col_ptr, csc.row_idx[0..csc.nnz()], &q);
+    defer lu.deinit(gpa);
+    try lu.factor(gpa, &csc.col_ptr, csc.row_idx[0..csc.nnz()], csc.vals[0..csc.nnz()], 1e-3);
+    try checkSolve(4, a, b, &lu);
 }
 
 test "MNA structural zero diagonal: off-diagonal pivoting" {
