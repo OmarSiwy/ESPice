@@ -244,12 +244,16 @@ pub fn FreqSolverT(comptime T: type) type {
         // omega k's rhs/solution lives at [k*2n..][0..2n] (real‖imag).
         // =================================================================
 
-        /// Solve `omegas.len` frequency points. `rhs`/`x_out` are flat, lane k
-        /// at [k*2n..][0..2n]. `adjoint` selects A^T. Falls back to the
-        /// per-omega scalar path for the dense strategy, f32, tiny systems, or
-        /// any lane whose refactor failed (peeled to full re-factor).
+        /// Solve `omegas.len` frequency points against ONE shared `rhs`
+        /// (length 2n — every caller today broadcasts an identical excitation;
+        /// a per-lane variant appears when a caller needs it). `x_out` is
+        /// flat, lane k at [k*2n..][0..2n]. `adjoint` selects A^T. Falls back
+        /// to the per-omega scalar path for the dense strategy, f32, tiny
+        /// systems, or any lane whose refactor failed (peeled to full
+        /// re-factor).
         pub fn solveBatch(self: *Self, gpa: Allocator, omegas: []const T, rhs: []const T, x_out: []T, adjoint: bool) !void {
             const nn: usize = self.nn;
+            std.debug.assert(rhs.len >= nn);
             // Lane path is f64 + sparse only (LaneLu is f64; dense has no tape).
             const use_lanes = comptime (T == f64);
             const sp: *Sparse = switch (self.strategy) {
@@ -267,6 +271,16 @@ pub fn FreqSolverT(comptime T: type) type {
             const x_plane = try gpa.alloc(@Vector(W, T), nn);
             defer gpa.free(x_plane);
 
+            // The shared rhs broadcasts once, not per chunk.
+            for (0..nn) |i| b_plane[i] = @splat(rhs[i]);
+
+            // One LaneLu for the whole sweep: its shape depends only on the
+            // base factorization's structure, which is constant across
+            // chunks. Lazy because the first chunks may peel to serial
+            // before any lane work exists.
+            var ll: ?LL = null;
+            defer if (ll) |*l| l.deinit(gpa);
+
             var base: usize = 0;
             while (base < omegas.len) : (base += W) {
                 const cnt = @min(W, omegas.len - base);
@@ -279,36 +293,28 @@ pub fn FreqSolverT(comptime T: type) type {
                 setOmegaSparse(self.n, sp, ow[cnt / 2]) catch {
                     // Refresh factor failed at the middle omega: peel the whole
                     // chunk to the serial path (each omega re-factors itself).
-                    try self.solveBatchSerial(omegas[base .. base + cnt], rhs[base * nn ..][0 .. cnt * nn], x_out[base * nn ..][0 .. cnt * nn], adjoint);
+                    try self.solveBatchSerial(omegas[base .. base + cnt], rhs, x_out[base * nn ..][0 .. cnt * nn], adjoint);
                     continue;
                 };
                 // LaneLu needs a SparseLu-backed factorization. If direct
                 // dispatched to tridiag/BBD (no .lu), peel to serial.
                 const lu = if (sp.slv.lu) |*l| l else {
-                    try self.solveBatchSerial(omegas[base .. base + cnt], rhs[base * nn ..][0 .. cnt * nn], x_out[base * nn ..][0 .. cnt * nn], adjoint);
+                    try self.solveBatchSerial(omegas[base .. base + cnt], rhs, x_out[base * nn ..][0 .. cnt * nn], adjoint);
                     continue;
                 };
 
-                var ll = try LL.init(gpa, lu);
-                defer ll.deinit(gpa);
+                if (ll == null) ll = try LL.init(gpa, lu);
 
                 fillLanePlane(self.n, sp, omega_vec, vplane);
                 const growth: T = @floatCast(sp.slv.params.refactor_growth_limit);
-                const bad = ll.refactor(sp.col_ptr, vplane, growth);
+                const bad = ll.?.refactor(sp.col_ptr, vplane, growth);
 
-                // Broadcast this chunk's rhs into the lane plane.
-                for (0..nn) |i| {
-                    var v: [W]T = undefined;
-                    for (0..W) |l| v[l] = rhs[(base + @min(l, cnt - 1)) * nn + i];
-                    b_plane[i] = v;
-                }
-
-                if (adjoint) ll.solveT(b_plane, x_plane) else ll.solve(b_plane, x_plane);
+                if (adjoint) ll.?.solveT(b_plane, x_plane) else ll.?.solve(b_plane, x_plane);
 
                 // Deinterleave good lanes into x_out; peel bad lanes to serial.
                 for (0..cnt) |l| {
                     if ((bad & (@as(u64, 1) << @intCast(l))) != 0) {
-                        try self.solveBatchSerial(omegas[base + l ..][0..1], rhs[(base + l) * nn ..][0..nn], x_out[(base + l) * nn ..][0..nn], adjoint);
+                        try self.solveBatchSerial(omegas[base + l ..][0..1], rhs, x_out[(base + l) * nn ..][0..nn], adjoint);
                         continue;
                     }
                     const dst = x_out[(base + l) * nn ..][0..nn];
@@ -320,18 +326,18 @@ pub fn FreqSolverT(comptime T: type) type {
             }
         }
 
-        /// Reference path: loop setOmega + solveRhs per omega. The lane path
-        /// must match this bit-for-bit when op orders agree (they do: LaneLu
-        /// lane l replays the same SparseLu numeric sequence as this scalar
-        /// factor of the same values).
+        /// Reference path: loop setOmega + solveRhs per omega against the one
+        /// shared rhs. The lane path must match this bit-for-bit when op
+        /// orders agree (they do: LaneLu lane l replays the same SparseLu
+        /// numeric sequence as this scalar factor of the same values).
         fn solveBatchSerial(self: *Self, omegas: []const T, rhs: []const T, x_out: []T, adjoint: bool) !void {
             const nn: usize = self.nn;
             for (omegas, 0..) |omega, k| {
                 try self.setOmega(omega);
                 if (adjoint)
-                    try self.solveRhsT(rhs[k * nn ..][0..nn], x_out[k * nn ..][0..nn])
+                    try self.solveRhsT(rhs[0..nn], x_out[k * nn ..][0..nn])
                 else
-                    try self.solveRhs(rhs[k * nn ..][0..nn], x_out[k * nn ..][0..nn]);
+                    try self.solveRhs(rhs[0..nn], x_out[k * nn ..][0..nn]);
             }
         }
 
@@ -597,11 +603,9 @@ test "solveBatch equals looped solveRhs (dense fallback, fwd + adjoint)" {
 
     const omegas = [_]f64{ 1.0, 3.0, 7.0, 13.0, 21.0 };
     const nn: usize = 4;
-    // rhs blob: lane k at [k*2n..][0..2n]
-    var rhs: [omegas.len * nn]f64 = undefined;
-    for (0..omegas.len) |k| for (0..nn) |i| {
-        rhs[k * nn + i] = @floatFromInt((k + 1) * (i + 1));
-    };
+    // One shared rhs across all lanes (solveBatch's contract).
+    var rhs: [nn]f64 = undefined;
+    for (0..nn) |i| rhs[i] = @floatFromInt(i + 1);
 
     for ([_]bool{ false, true }) |adjoint| {
         var x_batch: [omegas.len * nn]f64 = undefined;
@@ -672,11 +676,10 @@ test "solveBatch equals looped solveRhs (sparse lane path, fwd + adjoint)" {
     const omegas = [_]f64{ 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000 };
     const nn: usize = 2 * n;
     const total = omegas.len * nn;
-    const rhs = try allocator.alloc(f64, total);
+    // One shared rhs across all lanes (solveBatch's contract).
+    const rhs = try allocator.alloc(f64, nn);
     defer allocator.free(rhs);
-    for (0..omegas.len) |k| for (0..nn) |i| {
-        rhs[k * nn + i] = @sin(@as(f64, @floatFromInt(k * 7 + i)));
-    };
+    for (0..nn) |i| rhs[i] = @sin(@as(f64, @floatFromInt(i)));
 
     const x_batch = try allocator.alloc(f64, total);
     defer allocator.free(x_batch);

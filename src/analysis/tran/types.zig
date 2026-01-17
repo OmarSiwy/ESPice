@@ -35,13 +35,8 @@ pub fn initialCapacity(options: Options) u32 {
     return @intFromFloat(@min(@max(1024.0, est), @as(f64, 1 << 22)));
 }
 
-/// SIMD copy: dst[0..n] = src[0..n] (no @memcpy per convention)
-pub inline fn simdCopy(dst: []f64, src: []const f64) void {
-    const n = @min(dst.len, src.len);
-    var i: usize = 0;
-    while (i + W <= n) : (i += W) dst[i..][0..W].* = src[i..][0..W].*;
-    while (i < n) : (i += 1) dst[i] = src[i];
-}
+/// SIMD copy — the shared pair lives on the solvers leaf (one copy per repo).
+pub const simdCopy = @import("solvers").types.copySimd;
 
 /// Recorded transient waveform. Flat preallocated storage, probe-major:
 /// values[k * capacity + i] is probe k at point i — probeValues(k) is one

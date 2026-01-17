@@ -130,10 +130,7 @@ const integrator = struct {
     }
 };
 
-/// SIMD zero: buf[0..] = 0
-inline fn simdZero(buf: []f64) void {
-    root.zeroSimd(buf);
-}
+
 
 /// Newton hook: companion RHS from the q plane, matrix = G + alpha*C.
 const TranHook = struct {
@@ -253,7 +250,7 @@ pub fn simulate(
         a_vals = try ws.ensureAVals(ckt.nnz);
         i_prev = try allocator.alloc(f64, n);
         q_snap = try allocator.alloc(f64, n);
-        simdZero(i_prev);
+        root.zeroSimd(i_prev);
         for (&q_hist) |*q| q.* = try allocator.alloc(f64, n);
         // Deliberately NOT preceded by setSimState: q_prev must be the charge
         // the OPERATING POINT saw, so this seeding eval runs in the static
@@ -612,7 +609,7 @@ test "alpha: BE 1/dt, trap 2/dt" {
 // fails here.
 test "transient: a PULSE vsource output actually moves with $abstime" {
     const gpa = testing.allocator;
-    const dev = root.devices;
+    const dev = @import("devices");
     const Vsrc = dev.models.vsource;
     const Res = dev.models.resistor;
     const Proto = dev.batch.Proto;

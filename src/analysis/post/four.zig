@@ -6,7 +6,7 @@ const root = @import("../types.zig");
 const converger = @import("solvers").converger;
 const types = @import("solvers").types;
 const solvers = @import("solvers");
-const fft_mod = root.solvers.fft;
+const fft_mod = @import("solvers").fft;
 const tran = @import("../tran/tran.zig");
 
 const math = std.math;

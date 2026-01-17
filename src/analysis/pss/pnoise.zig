@@ -15,7 +15,7 @@
 const std = @import("std");
 const root = @import("../types.zig");
 const converger = @import("solvers").converger;
-const dense_lu = root.solvers.dense_lu;
+const dense_lu = @import("solvers").dense_lu;
 const types = @import("solvers").types;
 
 const k_boltzmann = 1.380649e-23; // J/K

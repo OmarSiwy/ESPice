@@ -9,7 +9,7 @@ const std = @import("std");
 const root = @import("../types.zig");
 const converger = @import("solvers").converger;
 const types = @import("solvers").types;
-const FreqSolver = root.solvers.freq_solve.FreqSolver;
+const FreqSolver = @import("solvers").freq_solve.FreqSolver;
 
 const k_boltzmann = 1.380649e-23;
 const q_electron = 1.602176634e-19;
@@ -76,16 +76,9 @@ pub fn sweep(
     root.zeroSimd(e_out);
     e_out[options.out_node] = 1.0;
 
-    // solveBatch takes a per-lane rhs blob; broadcast the one shared rhs.
-    const rhs_blob = try allocator.alloc(f64, n_points * nn);
-    defer allocator.free(rhs_blob);
-    for (0..n_points) |k| for (0..nn) |i| {
-        rhs_blob[k * nn + i] = e_out[i];
-    };
-
     const y_lanes = ckt.gpuFreqBatch(allocator, ckt.g_vals, ckt.c_vals, omegas, e_out, @intCast(n), true) orelse blk: {
         const cpu = try allocator.alloc(f64, n_points * nn);
-        try fs.solveBatch(allocator, omegas, rhs_blob, cpu, true);
+        try fs.solveBatch(allocator, omegas, e_out, cpu, true);
         break :blk cpu;
     };
     defer allocator.free(y_lanes);

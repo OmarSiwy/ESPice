@@ -68,6 +68,8 @@ pub fn solve(
     // --- Bias point: reuse the engine's op if given, else DC solve here ------
     var owned_x_op: ?[]f64 = null;
     defer if (owned_x_op) |x| allocator.free(x);
+    // run() always passes ctx.x_op (engine.ensureOp guarantees it); this
+    // fallback fires only for standalone/direct solve() callers.
     const x_op = x_op_in orelse blk: {
         const x = try allocator.alloc(f64, n);
         owned_x_op = x;
@@ -138,15 +140,15 @@ pub fn solve(
     defer allocator.free(omegas);
     types.fillLogSweep(options.f_start, options.f_stop, options.points_per_decade, null, omegas);
 
-    // One shared rhs broadcast into the per-lane blob solveBatch expects.
-    const rhs_blob = try allocator.alloc(f64, n_points * nn);
-    defer allocator.free(rhs_blob);
-    root.zeroSimd(rhs_blob);
-    for (0..n_points) |k| rhs_blob[k * nn + branch_idx] = 1.0;
+    // One shared rhs: unit excitation on the probe branch (stacked-real 2n).
+    const rhs = try allocator.alloc(f64, nn);
+    defer allocator.free(rhs);
+    root.zeroSimd(rhs);
+    rhs[branch_idx] = 1.0;
 
-    const x_out = ckt.gpuFreqBatch(allocator, g_aug, c_aug, omegas, rhs_blob[0..nn], @intCast(n_aug), false) orelse blk: {
+    const x_out = ckt.gpuFreqBatch(allocator, g_aug, c_aug, omegas, rhs, @intCast(n_aug), false) orelse blk: {
         const cpu = try allocator.alloc(f64, n_points * nn);
-        try fs.solveBatch(allocator, omegas, rhs_blob, cpu, false);
+        try fs.solveBatch(allocator, omegas, rhs, cpu, false);
         break :blk cpu;
     };
     defer allocator.free(x_out);

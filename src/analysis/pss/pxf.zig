@@ -15,8 +15,8 @@ const std = @import("std");
 const root = @import("../types.zig");
 const converger = @import("solvers").converger;
 const types = @import("solvers").types;
-const fft_mod = root.solvers.fft;
-const dense_lu = root.solvers.dense_lu;
+const fft_mod = @import("solvers").fft;
+const dense_lu = @import("solvers").dense_lu;
 
 pub const Complex = types.Complex;
 

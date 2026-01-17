@@ -580,6 +580,8 @@ pub const Workspace = struct {
     pub fn ensureAVals(self: *Workspace, nnz: u32) ![]f64 {
         if (self.a_vals.len < nnz) {
             self.slv.gpa.free(self.a_vals);
+            // Empty between free and alloc: if alloc errors, deinit must not
+            // double-free the stale slice.
             self.a_vals = &.{};
             self.a_vals = try self.slv.gpa.alloc(f64, nnz);
         }

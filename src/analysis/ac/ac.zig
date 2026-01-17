@@ -5,7 +5,7 @@ const std = @import("std");
 const root = @import("../types.zig");
 const converger = @import("solvers").converger;
 const types = @import("solvers").types;
-const FreqSolver = root.solvers.freq_solve.FreqSolver;
+const FreqSolver = @import("solvers").freq_solve.FreqSolver;
 
 pub const Complex = types.Complex;
 
@@ -57,16 +57,9 @@ pub fn sweep(
     defer allocator.free(omegas);
     types.fillLogSweep(options.f_start, options.f_stop, options.points_per_decade, freqs, omegas);
 
-    // solveBatch takes a per-lane rhs blob; broadcast the one shared rhs.
-    const rhs_blob = try allocator.alloc(f64, n_points * nn);
-    defer allocator.free(rhs_blob);
-    for (0..n_points) |k| for (0..nn) |i| {
-        rhs_blob[k * nn + i] = rhs[i];
-    };
-
     const x_out = ckt.gpuFreqBatch(allocator, ckt.g_vals, ckt.c_vals, omegas, rhs, @intCast(n), false) orelse blk: {
         const cpu = try allocator.alloc(f64, n_points * nn);
-        try fs.solveBatch(allocator, omegas, rhs_blob, cpu, false);
+        try fs.solveBatch(allocator, omegas, rhs, cpu, false);
         break :blk cpu;
     };
     defer allocator.free(x_out);
