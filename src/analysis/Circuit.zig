@@ -376,14 +376,17 @@ pub const Circuit = struct {
     }
 
     pub fn combineGC(self: *const Circuit, alpha: f64, out: []f64) void {
-        @constCast(self).combineGCInner(alpha, out, false);
+        self.combineGCInner(alpha, out, false);
     }
 
     pub fn combineGCAndClear(self: *Circuit, alpha: f64, out: []f64) void {
         self.combineGCInner(alpha, out, true);
     }
 
-    fn combineGCInner(self: *Circuit, alpha: f64, out: []f64, comptime clear: bool) void {
+    // *const is honest for both paths: the clear branch writes plane
+    // CONTENTS through the g/c slices (separately-owned storage), never the
+    // struct itself.
+    fn combineGCInner(self: *const Circuit, alpha: f64, out: []f64, comptime clear: bool) void {
         std.debug.assert(out.len >= self.nnz);
         const W = vec_width;
         const V = @Vector(W, f64);
@@ -504,8 +507,8 @@ pub const Circuit = struct {
         return if (best == std.math.inf(f64)) null else best;
     }
 
-    pub fn setCircuitTemp(self: *const Circuit, temp_c: f32) void {
-        @constCast(self).lin.valid = false; // temp changes device physics
+    pub fn setCircuitTemp(self: *Circuit, temp_c: f32) void {
+        self.lin.valid = false; // temp changes device physics
         for (self.batches) |b| if (b.hooks.set_temp) |f| f(b.ctx, temp_c);
     }
 
@@ -518,18 +521,18 @@ pub const Circuit = struct {
         for (self.batches) |b| if (b.hooks.set_sim_state) |f| f(b.ctx, st);
     }
 
-    pub fn recompute(self: *const Circuit) void {
-        @constCast(self).lin.valid = false; // param re-derivation (sweeps, dc, mc)
+    pub fn recompute(self: *Circuit) void {
+        self.lin.valid = false; // param re-derivation (sweeps, dc, mc)
         for (self.batches) |b| if (b.hooks.recompute) |f| f(b.ctx);
     }
 
-    pub fn applyAttempt(self: *const Circuit, lambda: f64) void {
-        @constCast(self).lin.valid = false; // homotopy scales device params
+    pub fn applyAttempt(self: *Circuit, lambda: f64) void {
+        self.lin.valid = false; // homotopy scales device params
         for (self.batches) |b| if (b.hooks.apply_attempt) |f| f(b.ctx, lambda);
     }
 
-    pub fn restoreModels(self: *const Circuit) void {
-        @constCast(self).lin.valid = false; // undoes applyAttempt param scaling
+    pub fn restoreModels(self: *Circuit) void {
+        self.lin.valid = false; // undoes applyAttempt param scaling
         for (self.batches) |b| if (b.hooks.restore_models) |f| f(b.ctx);
     }
 
