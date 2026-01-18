@@ -14,7 +14,7 @@ Why the naming? The pyramids were built long ago from scratch, and were ahead of
 The project structure is purposely kept separated for flexibility in developing & addition of new devices, solvers, and analysis engines.
 
 ```
-├── lib/                # The core library of ZPicey, containing all devices, solvers, and analysis engines.
+├── lib/                # The core library of ESPice, containing all devices, solvers, and analysis engines.
 ├── frontend/            # The frontend module responsible for parsing Verilog-A files and generating Zig code.
 ├── tools/               # Utility tools, including the fastEval library for device evaluation.
 ```

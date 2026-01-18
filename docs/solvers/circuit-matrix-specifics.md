@@ -79,7 +79,7 @@ Dispatch precedence in our `Solver` (init-time, pattern-only decisions):
    diagonally-dominant MNA + gmin; the fixture set keeps it honest).
 2. **BBD** — bordered block diagonal engine when the compiler hands a
    partition (`root.BbdInfo`): per-block dense refactor + Schur border,
-   falls back permanently to flat on singularity (`ZPICEY_NO_BBD` forces
+   falls back permanently to flat on singularity (`ESPICE_NO_BBD` forces
    flat — A/B switch).
 3. **flat KLU-style LU** — everything else (see `gilbert-peierls-lu.md`,
    `klu-pipeline.md`).

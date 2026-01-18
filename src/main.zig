@@ -199,7 +199,7 @@ pub fn main(init: std.process.Init) !u8 {
             // has no path expressible from here. The joined form silently rotted
             // once before, when the `modules/` tree it named was deleted.
             const hdl_build_paths: vaload.BuildPaths = .{
-                .work_dir = try std.fs.path.join(arena, &.{ build_options.src_root, ".zig-cache", "zpicey-hdl" }),
+                .work_dir = try std.fs.path.join(arena, &.{ build_options.src_root, ".zig-cache", "espice-hdl" }),
                 .contract = build_options.contract_path,
                 .dyn = build_options.dyn_path,
             };
@@ -364,7 +364,7 @@ fn skip(io: std.Io, reason: []const u8) u8 {
 
 fn usageFail(io: std.Io) u8 {
     _ = io;
-    std.debug.print("Usage: zpicey [OPTION]... [FILE]...\nTry 'zpicey -h' for more information.\n", .{});
+    std.debug.print("Usage: espice [OPTION]... [FILE]...\nTry 'espice -h' for more information.\n", .{});
     return 2;
 }
 
@@ -372,7 +372,7 @@ fn printBanner(io: std.Io) void {
     _ = io;
     std.debug.print(
         \\
-        \\  zpicey 0.1.0
+        \\  espice 0.1.0
         \\  Circuit level simulation program
         \\
         \\
@@ -381,13 +381,13 @@ fn printBanner(io: std.Io) void {
 
 fn printVersion(io: std.Io) void {
     _ = io;
-    std.debug.print("zpicey 0.1.0\nCircuit level simulation program.\nBuilt with Zig.\n", .{});
+    std.debug.print("espice 0.1.0\nCircuit level simulation program.\nBuilt with Zig.\n", .{});
 }
 
 fn printHelp(io: std.Io) void {
     _ = io;
     std.debug.print(
-        \\Usage: zpicey [OPTION]... [FILE]...
+        \\Usage: espice [OPTION]... [FILE]...
         \\
         \\  -a, --autorun              Run the loaded netlist at once
         \\  -b, --batch                Process FILE in batch mode

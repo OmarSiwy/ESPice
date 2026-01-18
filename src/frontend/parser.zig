@@ -328,7 +328,7 @@ pub fn Parser(comptime Tok: type) type {
             }
             // Generic directive
             // ponytail: skip `=` like comma — .OPTIONS/.opt/.width use key=value
-            // syntax that zpicey doesn't consume. Parse key and value as separate args.
+            // syntax that espice doesn't consume. Parse key and value as separate args.
             var args: std.ArrayList(ir.Value) = .empty;
             while (true) {
                 var peek = t.*;

@@ -264,6 +264,12 @@ pub const Circuit = struct {
     /// no device with a `limit` decl, so `eval` and `eval_newton` agree — hence
     /// one hook for both.
     pub fn eval(self: *Circuit, x: []const f64, t: f64) void {
+        // The memo names an x, and x_op is one stable arena slice — so a
+        // direct eval at a DIFFERENT x (disto, matex, qpss, pss, pnoise,
+        // pac, pxf, tran_noise all do this) would otherwise leave `valid`
+        // true with planes that no longer hold the op linearization, and the
+        // next `linearize(x_op)` would false-hit. `linearize` re-sets it.
+        self.lin.valid = false;
         if (self.gpu_hook) |gh| if (gh.eval_planes) |ev| {
             ev(gh.ctx, x, t);
             return;
@@ -365,6 +371,7 @@ pub const Circuit = struct {
         defer self.gpa.free(x_zero);
         @memset(x_zero, 0);
 
+        self.lin.valid = false; // stamps rhs/q_vec at x = 0
         @memset(self.rhs, 0);
         if (self.has_charge) @memset(self.q_vec, 0);
         const pl: Planes = .{ .g_vals = self.g_base, .c_vals = self.c_base, .rhs = self.rhs, .q_vec = self.q_vec };

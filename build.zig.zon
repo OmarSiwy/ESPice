@@ -1,7 +1,7 @@
 .{
-    .name = .arpice,
+    .name = .espice,
     .version = "0.1.0",
-    .fingerprint = 0xae493373f3b93a69,
+    .fingerprint = 0x8b858d53fd1540a,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         // Was a dependency of the devices package; that package is now just

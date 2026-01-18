@@ -95,7 +95,7 @@ pub fn SolverT(comptime T: type) type {
             }
             if (bbd) |info| no_bbd: {
                 if (comptime @import("builtin").link_libc) {
-                    if (std.c.getenv("ZPICEY_NO_BBD") != null) break :no_bbd;
+                    if (std.c.getenv("ESPICE_NO_BBD") != null) break :no_bbd;
                 }
                 const eng = BbdEng.init(gpa, n, col_ptr, row_idx, info, .{}) catch |err| switch (err) {
                     error.NotApplicable => break :no_bbd,

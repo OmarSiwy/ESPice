@@ -2042,7 +2042,7 @@ fn hashType(h0: u64, comptime T: type) u64 {
 /// This simulator's VPI application, and it deliberately has no `systf`.
 ///
 /// §2.8.3 lets a `.va` call a `$name` no compiler defines, to be supplied
-/// through §12.32 `vpi_register_analog_systf`. ARPice registers none, so the
+/// through §12.32 `vpi_register_analog_systf`. ESPice registers none, so the
 /// right answer is to say so ONCE, in a type, and let `validateHost` turn a
 /// model that needs one into a build error naming the function — instead of a
 /// null `Instance.systf` reached at the first Newton step, or worse a value

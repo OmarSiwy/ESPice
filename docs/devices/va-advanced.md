@@ -102,5 +102,5 @@ eval). That is the actual implementation plan for this whole family.
 
 ## Our implementation
 
-- `modules/devices/src/{ekv,hisim2,hisim_hv,hisim_soi,hisim_sotb,bsim_bulk,bsim_cmg,bsim_img,lutsoi}.zig`; runtime VA route per `arpice-runtime-va-loading` memory.
+- `modules/devices/src/{ekv,hisim2,hisim_hv,hisim_soi,hisim_sotb,bsim_bulk,bsim_cmg,bsim_img,lutsoi}.zig`; runtime VA route per `espice-runtime-va-loading` memory.
 - Bench fixtures: `devices/ekv`? (none today), `hisim2`, `hisimhv`; CMG/IMG/BULK/LUTSOI currently fixture-less (coverage gap — add fixtures before trusting the ports).

@@ -93,7 +93,7 @@ Three changes, in order of value:
 
 ## 4. Two gates
 
-**Work gate** (`gpu_context.zig`, `ZPICEY_GPU_MIN_WORK`, default 200 000).
+**Work gate** (`gpu_context.zig`, `ESPICE_GPU_MIN_WORK`, default 200 000).
 Scatter work is `count · n_u²` summed over eligible batches — the number of
 `atom.global.add.f64` a batch issues per iteration, which for the devices
 `gpuEligible` admits today *is* the kernel. Measured: 6 atomics × 20 K
@@ -150,7 +150,7 @@ Transient, 60 000 devices — an analysis that previously never reached the GPU:
 | CPU | 6.75 s |
 | **GPU** | **2.15 s** (3.1×) |
 
-Note the CPU column is `ZPICEY_THREADS`-dependent and peaks at 8; 16 threads is
+Note the CPU column is `ESPICE_THREADS`-dependent and peaks at 8; 16 threads is
 *slower* (15.87 s), because the per-eval handoff and window reduce stop paying
 for themselves.
 
@@ -190,7 +190,7 @@ costs a sort and a second pass.
 
 ## 7. Solver choice
 
-`ZPICEY_SOLVER` = `auto` | `direct` | `jfnk` | `jfnk-nolu`.
+`ESPICE_SOLVER` = `auto` | `direct` | `jfnk` | `jfnk-nolu`.
 
 Matrix-free Newton-Krylov is the standard recommendation for GPU solvers, on
 the theory that it trades a factorization for residual evaluations — which is
@@ -236,7 +236,7 @@ return newton(sys, ws, x, t, opts, hook);
 A failed attempt is not free. It costs the *full* JFNK price — up to 30 GMRES
 matvecs per Newton step, each a device eval, plus `CpuEnv.precondBuild` doing a
 complete sparse `s.factor` — and then direct Newton runs anyway. Measured with
-`ZPICEY_SOLVER` flipping only that choice:
+`ESPICE_SOLVER` flipping only that choice:
 
 | fixture | `auto` | `direct` | |
 |---|---|---|---|
@@ -279,7 +279,7 @@ shared-memory blocking).
 **Do not build it yet.** The workloads it targets are the worst in the corpus,
 and that is an argument *against* starting here, not for it:
 
-| fixture | zpicey | ngspice | |
+| fixture | espice | ngspice | |
 |---|---|---|---|
 | `ensemble/pvt_corners` | 13.862 s | 22.75 ms | 609× slower |
 | `ensemble/opamp_mc` | 2.407 s | 11.74 ms | 205× slower |
@@ -325,7 +325,7 @@ of the **residual**, while an approximate **Jacobian** costs iteration count,
 not correctness. An f32 Jacobian with an f64 residual is the standard inexact
 -Newton construction.
 
-Prototyped on the diode (VerA branch `mixed-precision-jacobian`, ARPice
+Prototyped on the diode (VerA branch `mixed-precision-jacobian`, ESPice
 `-Djac-f32=`). What follows is measured.
 
 ### 9.1 The split is one type, and it is on this side
