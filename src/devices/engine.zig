@@ -182,6 +182,28 @@ pub fn Dual(comptime N: usize, comptime F: type) type {
         pub fn val(a: Self) f64 {
             return a.v;
         }
+
+        // Relational + select, required by VerA's contract decl set
+        // (../VerA/tools/contract.zig: "max","lt","le","eq","sel","val",
+        // "ddxAt"). A comparison is an indicator: value 0 or 1, derivative
+        // zero almost everywhere, so `con` is the right constructor — the
+        // branch carries no sensitivity of its own. Semantics match VerA's
+        // reference lowering (../VerA/src/backend/tb.zig).
+        pub fn lt(a: Self, b: Self) Self {
+            return con(@floatFromInt(@intFromBool(a.v < b.v)));
+        }
+        pub fn le(a: Self, b: Self) Self {
+            return con(@floatFromInt(@intFromBool(a.v <= b.v)));
+        }
+        pub fn eq(a: Self, b: Self) Self {
+            return con(@floatFromInt(@intFromBool(a.v == b.v)));
+        }
+        /// `c` is such an indicator (or any 0/1-valued expression): picks `a`
+        /// when nonzero. Derivatives ride with the taken branch, which is
+        /// what keeps a lowered ternary differentiable.
+        pub fn sel(c: Self, a: Self, b: Self) Self {
+            return if (c.v != 0.0) a else b;
+        }
     };
 }
 
