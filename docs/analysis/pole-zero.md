@@ -74,7 +74,7 @@ dense cost.
 
 ## 2. Flow explanation
 
-`modules/analysis/src/eigen/pz.zig`:
+`src/analysis/eigen/pz.zig`:
 
 1. One `eval()` at $x_{op}$ — the analytic planes are the linearization.
    Dense copies of $G$ and $C$.
@@ -138,8 +138,8 @@ host pz_gpu(lanes = MC trials or corners):
 
 | Phase | Solver doc | Impl |
 |---|---|---|
-| Dense LU of $G$ + per-column solves | none (dense path) | `modules/solvers/src/dense_lu.zig` `factorize`/`solveFactored` |
-| Eigen solver (Hessenberg + Francis double-shift QR) | none (analysis-local) | `modules/analysis/src/eigen/pz.zig eigenvaluesQR` |
+| Dense LU of $G$ + per-column solves | none (dense path) | `src/solvers/dense_lu.zig` `factorize`/`solveFactored` |
+| Eigen solver (Hessenberg + Francis double-shift QR) | none (analysis-local) | `src/analysis/eigen/pz.zig eigenvaluesQR` |
 | Sparse alternative for large n (factor $G$ sparsely, shift-invert Arnoldi for the few dominant poles) | [klu-pipeline.md](../solvers/klu-pipeline.md), [gilbert-peierls-lu.md](../solvers/gilbert-peierls-lu.md) | upgrade path — reuses `direct.zig` factors as the Arnoldi operator (same pattern as [matex-exponential-integrators.md](matex-exponential-integrators.md) rational Krylov) |
 | Upstream OP | [homotopy-continuation.md](../solvers/homotopy-continuation.md) | `dc/op.zig` |
 
@@ -161,5 +161,5 @@ host pz_gpu(lanes = MC trials or corners):
 
 **Our implementation**
 
-- `modules/analysis/src/eigen/pz.zig` — poles via $-G^{-1}C$ eigenvalues.
+- `src/analysis/eigen/pz.zig` — poles via $-G^{-1}C$ eigenvalues.
 - Bench fixtures: `benchmark/fixtures/pz/*`.

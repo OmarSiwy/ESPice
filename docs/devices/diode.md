@@ -332,5 +332,5 @@ ngspice vs modern: identical -- nothing more exists for a diode.
 
 ## Our implementation
 
-- `modules/devices/src/diode.zig` (eval/q/limit/collapse/seed; note: our eval uses the clamped Shockley + constant $-I_S$ deep-reverse instead of ngspice's smooth cubic reverse branch, and uses IBV directly as breakdown pre-exponential — see comments there).
+- `src/devices/models/diode.va` (eval/q/limit/collapse/seed; note: our eval uses the clamped Shockley + constant $-I_S$ deep-reverse instead of ngspice's smooth cubic reverse branch, and uses IBV directly as breakdown pre-exponential — see comments there).
 - Bench fixtures: `benchmark/fixtures/devices/diode`, `diode_breakdown`, `diode_capacitance`, `diode_high_injection`, `diode_iv_sweep`, `diode_recombination`, `diode_temp`.

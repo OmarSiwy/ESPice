@@ -2,7 +2,7 @@
 
 Reference: ngspice `res/`, `cap/`, `ind/` (indload.c), `vsrc/`
 (vsrcload.c), `urc/urcsetup.c`, `res/resnoise.c`; our implementations in
-`modules/devices/src/{resistor,capacitor,inductor,kinduc,vsource,
+`src/devices/{resistor,capacitor,inductor,kinduc,vsource,
 isource,vcvs,vccs,cccs,ccvs,bsource,urc}.zig`.
 
 ## 1. Mathematical specification
@@ -200,5 +200,5 @@ modern: identical; there is no more physics to add for ideal passives.
 
 ## Our implementation
 
-- `modules/devices/src/{resistor,capacitor,inductor,kinduc,vsource,isource,vcvs,vccs,cccs,ccvs,bsource,urc}.zig`.
+- `src/devices/{resistor,capacitor,inductor,kinduc,vsource,isource,vcvs,vccs,cccs,ccvs,bsource,urc}.zig`.
 - Bench fixtures: `devices/resistor*`, `capacitor*`, `inductor*`, `kinduc`, `vsource`, `isource`, `vcvs`, `vccs`, `cccs`, `ccvs`, `bsource`, `urc`, `urc_ac`; `basic/*`, `ac/*`.

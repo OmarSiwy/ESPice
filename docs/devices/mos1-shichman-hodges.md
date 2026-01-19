@@ -324,5 +324,5 @@ in every SPICE MOS level.
 
 ## Our implementation
 
-- `modules/devices/src/mos1.zig`.
+- `src/devices/models/mos1.va`.
 - Bench fixtures: `benchmark/fixtures/devices/mos1_transfer`, `mos1_output`, `mos1_body_effect`, `mos1_subthreshold`, `mos1_temp`, `mos1_pmos`, `mos1_large_signal`, `mosfet_l1`; `benchmark/fixtures/mosfet/{cmos_inverter,nand2,nmos_cs}`.

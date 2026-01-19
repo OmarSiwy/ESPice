@@ -203,11 +203,11 @@ kernel precond_apply(v):                       # inside per-lane GMRES
 
 **Our implementation**
 
-- Exists (the slot + ingredients): `modules/analysis/src/helper/converger.zig`
+- Exists (the slot + ingredients): `src/solvers/converger.zig`
   (`applyPreconditioner`, GMRES core),
-  `modules/solvers/src/freq_solve.zig` (per-$\omega$ refill/refactor
-  pattern to copy), `modules/solvers/src/direct.zig`,
-  `modules/solvers/src/fft.zig`.
+  `src/solvers/freq_solve.zig` (per-$\omega$ refill/refactor
+  pattern to copy), `src/solvers/direct.zig`,
+  `src/solvers/fft.zig`.
 - Consumers: Krylov-HB in
   [pss-shooting-harmonic-balance](../analysis/pss-shooting-harmonic-balance.md),
   [pac](../analysis/pac.md)/[pxf](../analysis/pxf.md) matrix-free path,

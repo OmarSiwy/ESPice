@@ -219,9 +219,9 @@ kernel monodromy_block_apply(tape, V[m]):      # all Krylov vectors at once
 
 **Our implementation**
 
-- Exists: `modules/analysis/src/pss/pss.zig` (FD-dense shooting — the
-  oracle), `modules/analysis/src/helper/converger.zig` (GMRES core to
-  reuse), `modules/solvers/src/direct.zig` (`solve`/`solveT` on frozen
+- Exists: `src/analysis/pss/pss.zig` (FD-dense shooting — the
+  oracle), `src/solvers/converger.zig` (GMRES core to
+  reuse), `src/solvers/direct.zig` (`solve`/`solveT` on frozen
   factors).
 - Consumers: [pss-shooting-harmonic-balance](../analysis/pss-shooting-harmonic-balance.md)
   Krylov upgrade, [qpss](../analysis/qpss.md) MFT (future),

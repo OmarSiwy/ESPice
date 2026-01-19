@@ -34,7 +34,7 @@ averaging): sideband coupling is exact within the harmonic truncation.
 
 ## 2. Flow explanation
 
-`modules/analysis/src/pss/pac.zig analyze()`:
+`src/analysis/pss/pac.zig analyze()`:
 
 1. **PSS (simplified)**: brute-force settling — `pss_periods − 1` periods
    of frozen-time quasi-static Newton solves at `n_time_samples` per
@@ -81,8 +81,8 @@ matrix-free block apply — same kernel shape as HB.
 | Phase | Solver doc | Impl |
 |---|---|---|
 | PSS settle solves | [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md), [klu-pipeline.md](../solvers/klu-pipeline.md) | `converger.run` per sample |
-| Harmonic decomposition | none (support kernel) | `modules/solvers/src/fft.zig` |
-| Conversion-matrix solve | none (dense path today); Krylov upgrade per above | `modules/solvers/src/dense_lu.zig factorizeSolve` |
+| Harmonic decomposition | none (support kernel) | `src/solvers/fft.zig` |
+| Conversion-matrix solve | none (dense path today); Krylov upgrade per above | `src/solvers/dense_lu.zig factorizeSolve` |
 
 ---
 
@@ -95,6 +95,6 @@ matrix result; matches the implemented code).
 verified against `pac.zig` source (which implements exactly this); PSS
 front-end simplification honestly flagged. §2/§3: direct transcription.
 
-**Our implementation**: `modules/analysis/src/pss/pac.zig`. Bench
+**Our implementation**: `src/analysis/pss/pac.zig`. Bench
 fixtures: none dedicated; `benchmark/fixtures/pss/*` covers the orbit,
 LTI reduction checks fall back to `ac/*`.

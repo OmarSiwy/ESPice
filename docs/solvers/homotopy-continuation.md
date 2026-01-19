@@ -232,12 +232,12 @@ controller — derived, not source-verified (Kelley & Keyes paywalled; the
 form given is their published controller as commonly cited). §2 — verified
 against `converger.zig` (`Tolerances.gmin_start/source_steps`, gmin
 residual-consistent loading in `newton()`); the dc/op ladder drivers live in
-`modules/analysis/src/dc/`. §4 — our design, not from a source.
+`src/analysis/dc/`. §4 — our design, not from a source.
 
-**Our implementation:** `modules/analysis/src/helper/converger.zig`
+**Our implementation:** `src/solvers/converger.zig`
 (`Tolerances.{gmin_start, source_steps}`, `Options.gmin`, gmin loading in
-`newton()`/`jfnk()`); ladder drivers `modules/analysis/src/dc/{op,dc}.zig`;
-GPU header patching `src/gpu_solver.zig` (`solveNewton` writes `Tol.gmin`
+`newton()`/`jfnk()`); ladder drivers `src/analysis/dc/{op,dc}.zig`;
+GPU header patching `src/gpu_context.zig` (`solveNewton` writes `Tol.gmin`
 per solve — the rung-as-header-patch mechanism exists today). PTC: not
 implemented as a DC fallback (transient exists; wiring it as an OP rung is
 an open item — see README). Fixtures:

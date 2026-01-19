@@ -1,10 +1,10 @@
 # Device contract requirements — derived from every analysis's actual needs
 
-What `modules/devices/src/contract.zig` must be: every member justified by a
+What `../VerA/tools/contract.zig` must be: every member justified by a
 named consumer at a performant call pattern; no extras. Ground truth =
-grep of `modules/analysis/src/` (batch.zig hook table, converger.zig,
-per-analysis files), `src/builder.zig`, `modules/devices/src/kernel*.zig`,
-`modules/analysis/src/problem/dyn.zig`, plus all 23 `docs/analysis/*.md`
+grep of `src/analysis/` (batch.zig hook table, converger.zig,
+per-analysis files), `src/builder.zig`, `src/devices/kernel*.zig`,
+`src/devices/engine.zig`, plus all 23 `docs/analysis/*.md`
 (future analyses marked **future**). Requirements doc — no code changes.
 
 Consumption is mediated: analyses never touch `D` directly. They call
@@ -58,7 +58,7 @@ timestep/sample; **iter** = per Newton iteration (hot).
 | `histInject`/`gatherHistSignals`/`delays`/`n_hist_signals` | **keep** | batch.zig:655,665,674; tran.zig:291,365,370,585; pss.zig:83,120,160 |
 | `attempt` | **keep, change**: the 3-arg `fn (Model, Instance, f64) Model` alternative (contract.zig:586) is **unusable** — batch.zig:616 calls `D.attempt(s, lambda)` (2-arg) unconditionally, no device declares 3-arg. Delete the alternative from `validate()` | batch.zig:616 via op.zig:132 homotopy |
 | `u_kinds` | **keep** | batch.zig:275/518 (`markCurrentRows` — current-row tolerance marking, problem.zig:128; seeding mask) |
-| `g_pattern_override` / `c_pattern_override` | **dead — delete or wire in.** Grep: zero consumers outside `modules/devices/` and FastVAF codegen. `addPattern` (batch.zig:35–44) stamps dense n_u×n_u regardless. ~60 devices + the VA generator emit them for nothing. Either make `addPattern`/GPU pack consume them (real sparsity win for big MOSFETs: bsim4 is 9×9 dense today) or drop the decls + allowlist entries. Do not keep a validated-but-unread decl | none |
+| `g_pattern_override` / `c_pattern_override` | **dead — delete or wire in.** Grep: zero consumers outside `src/devices/` and FastVAF codegen. `addPattern` (batch.zig:35–44) stamps dense n_u×n_u regardless. ~60 devices + the VA generator emit them for nothing. Either make `addPattern`/GPU pack consume them (real sparsity win for big MOSFETs: bsim4 is 9×9 dense today) or drop the decls + allowlist entries. Do not keep a validated-but-unread decl | none |
 | `noise_gens` | **keep** | batch.zig:284/746 `collectNoise`; ac/noise.zig:94, pnoise.zig:190, tran_noise.zig:244 |
 | `mc_param` | **keep** | batch.zig:706 (`collectParams` primary), mc.zig:221 |
 | `PrepCache`/`computePrep`/`evalFromPrep`/`qFromPrep` | **keep** | batch.zig:124–145,437,463,645 (hot loop + dedup), kernel_common.zig:236,261 |
@@ -266,9 +266,9 @@ Impact of the additions:
 
 ## Sources
 
-All in-tree, read at HEAD: `modules/devices/src/contract.zig`,
+All in-tree, read at HEAD: `../VerA/tools/contract.zig`,
 `kernel.zig`, `kernel_common.zig`, `kernel_stub.zig`;
-`modules/analysis/src/problem/{batch,dyn,problem}.zig`, `root.zig`,
+`src/analysis/problem/{batch,dyn,problem}.zig`, `root.zig`,
 `helper/converger.zig`, `dc/{op,dc,tf}.zig`, `ac/{noise,sp,stb}.zig`,
 `pss/{pss,hb,pac,pnoise}.zig`, `tran/{tran,tran_noise,envelope}.zig`,
 `sweep/{mc,sens,temp_sweep}.zig`, `post/disto.zig`, `eigen/pz.zig`;

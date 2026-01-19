@@ -58,7 +58,7 @@ etc.); the analysis outputs $S$ directly.
 
 ## 2. Flow explanation
 
-`modules/analysis/src/ac/sp.zig`:
+`src/analysis/ac/sp.zig`:
 
 1. One `eval()` at $x_{op}$; dense copies of the analytic $G$/$C$ planes.
    The port termination is an *analysis-side* modification, so it is
@@ -120,8 +120,8 @@ kernel sp(lanes = freq points):
 
 | Phase | Solver doc | Impl |
 |---|---|---|
-| Stacked-real frequency solves | [klu-pipeline.md](../solvers/klu-pipeline.md) (sparse path), dense below threshold | `modules/solvers/src/freq_solve.zig` (`initDense` here; `DENSE_THRESHOLD = 16` governs the `fromCircuit` route) |
-| Dense factorization per point | none (dense path) | `modules/solvers/src/dense_lu.zig` |
+| Stacked-real frequency solves | [klu-pipeline.md](../solvers/klu-pipeline.md) (sparse path), dense below threshold | `src/solvers/freq_solve.zig` (`initDense` here; `DENSE_THRESHOLD = 16` governs the `fromCircuit` route) |
+| Dense factorization per point | none (dense path) | `src/solvers/dense_lu.zig` |
 | Upstream OP | [homotopy-continuation.md](../solvers/homotopy-continuation.md) | `dc/op.zig` |
 
 Note: the termination stamp densifies only port branch diagonals — a
@@ -147,5 +147,5 @@ pipeline; documented upgrade for many-node DUTs.
 
 **Our implementation**
 
-- `modules/analysis/src/ac/sp.zig`.
+- `src/analysis/ac/sp.zig`.
 - Bench fixtures: `benchmark/fixtures/sp/*`.

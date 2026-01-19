@@ -1076,6 +1076,12 @@ test "disto: HD2 scales linearly with amplitude (Volterra property)" {
 // mc
 // ============================================================================
 
+// mc.analyze is the shipped numeric route: mc.run is analyze() with the
+// param_vars collected off the netlist, and analyze's trials are
+// sweep/lanes.solveLanes lanes drawn by LaneCtx.apply. So these assertions
+// cover what production runs. (Driving mc.run directly here would vary
+// nothing — it collects `primary` params, which are instance-field-0, and
+// testdev's r/dc are Model fields.)
 test "mc: same seed reproduces identical samples" {
     const allocator = testing.allocator;
 
@@ -1107,9 +1113,13 @@ test "mc: same seed reproduces identical samples" {
     const n2c = try analysis.mc.analyze(&ckt, &param_vars, &probes, samples2, &stats2, &.{}, opts, allocator);
 
     try testing.expectEqual(n1c, n2c);
-    for (samples1[0..n1c], samples2[0..n2c]) |v1, v2| {
-        try testing.expectEqual(v1, v2);
-    }
+    try testing.expectEqual(@as(u32, opts.n_trials), n1c);
+    try testing.expectEqualSlices(f64, samples1[0..n1c], samples2[0..n2c]);
+
+    // ...and the draws are live: a lane-apply that stopped perturbing would
+    // still pass the equality above.
+    try testing.expect(samples1[0] != samples1[1]);
+    try testing.expect(stats1[0].std_dev > 0);
 }
 
 test "mc: voltage divider with 5% R tolerance" {

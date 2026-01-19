@@ -316,5 +316,5 @@ every input; tnoiMod is warp-uniform.
 
 ## Our implementation
 
-- `modules/devices/src/bsim4.zig`.
+- `src/devices/models/bsim4va.va`.
 - Bench fixtures: `benchmark/fixtures/devices/bsim4`, `bsim4_transfer`, `bsim4_output`, `bsim4_pmos`.

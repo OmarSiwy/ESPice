@@ -49,7 +49,7 @@ the factorization; no iteration.
 
 ## 2. Flow explanation
 
-`modules/analysis/src/dc/tf.zig`: one `eval()` at $x_{op}$ fills the
+`src/analysis/dc/tf.zig`: one `eval()` at $x_{op}$ fills the
 analytic $G$ plane; the analysis is then two dense LU solves ($n$ here is
 small enough that dense beats sparse — one bulk arena, no per-solve
 allocation). Forward solve with $e_{br}$ on the input source's branch row →
@@ -93,8 +93,8 @@ kernel tf_batched(lanes):
 
 | Phase | Solver doc | Impl |
 |---|---|---|
-| Dense LU forward + transpose solve | none (dense path is below the sparse pipeline's scope) | `modules/solvers/src/dense_lu.zig` `factorizeSolve` |
-| The sparse alternative (reuse Newton factors: solve/solveT) | [klu-pipeline.md](../solvers/klu-pipeline.md) | `modules/solvers/src/direct.zig` — upgrade path when n grows |
+| Dense LU forward + transpose solve | none (dense path is below the sparse pipeline's scope) | `src/solvers/dense_lu.zig` `factorizeSolve` |
+| The sparse alternative (reuse Newton factors: solve/solveT) | [klu-pipeline.md](../solvers/klu-pipeline.md) | `src/solvers/direct.zig` — upgrade path when n grows |
 | Upstream OP | [homotopy-continuation.md](../solvers/homotopy-continuation.md), [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `dc/op.zig`, `helper/converger.zig` |
 
 ---
@@ -114,5 +114,5 @@ kernel tf_batched(lanes):
 
 **Our implementation**
 
-- `modules/analysis/src/dc/tf.zig`.
+- `src/analysis/dc/tf.zig`.
 - Bench fixtures: `benchmark/fixtures/tf/*`.

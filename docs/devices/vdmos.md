@@ -114,7 +114,7 @@ derived from the MOS1 template + model params, flagged):
 
 ## Sources
 
-- `modules/devices/src/vdmos.zig` (in-tree port of ngspice vdmosload.c; topology/params verified against it above)
+- `src/devices/models/vdmos.va` (in-tree port of ngspice vdmosload.c; topology/params verified against it above)
 - ngspice vdmos directory: **not fetchable from the GitHub mirror used** (predates it) — fetch from git.code.sf.net/p/ngspice/ngspice when bit-exactness work starts.
 
 ## Verification status
@@ -125,5 +125,5 @@ derived from the MOS1 template + model params, flagged):
 
 ## Our implementation
 
-- `modules/devices/src/vdmos.zig`.
+- `src/devices/models/vdmos.va`.
 - Bench fixtures: `devices/vdmos`, `vdmos_output`.

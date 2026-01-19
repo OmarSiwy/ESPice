@@ -213,5 +213,5 @@ and flicker rows are the gap the hook closes.
 
 ## Our implementation
 
-- `modules/devices/src/bjt.zig`.
+- `src/devices/models/bjt.va`.
 - Bench fixtures: `benchmark/fixtures/devices/bjt_npn`, `bjt_npn_gummel`, `bjt_npn_output`, `bjt_npn_early`, `bjt_npn_high_injection`, `bjt_npn_saturation`, `bjt_npn_temp`, `bjt_pnp`, `bjt_pnp_output`; `bjt/*`.
