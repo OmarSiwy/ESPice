@@ -4,6 +4,7 @@ const std = @import("std");
 const root = @import("../types.zig");
 const converger = @import("solvers").converger;
 const op = @import("op.zig");
+const lanes = @import("../sweep/lanes.zig");
 
 
 pub const Options = struct {
@@ -76,16 +77,35 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     errdefer a.free(data);
 
     // -----------------------------------------------------------------------
-    // GPU batch path: cold-start every point, solve all N simultaneously.
+    // GPU batch path: lane pt is sweep value start + pt*step, cold-started and
+    // solved in one launch by sweep/lanes.zig. Only the GPU half is shared —
+    // lanes' serial route is cold-start-only, and dc's is warm-started by
+    // design (that is the point of a sweep), so runSerial below stays dc's own.
     // ponytail: cold-start-only batch; chunked warm-start is future work —
     // add when profiling shows serial warm-march dominates a large sweep.
     // -----------------------------------------------------------------------
     fill: {
-        if (ckt.gpu_hook) |gh| if (gh.solve_batch) |sb| {
-            if (runBatchGpu(ctx, ckt, a, t, gh, sb, opts, npoints, ncols, data)) |_|
-                break :fill
-            else |e| if (e == error.OutOfMemory) return e;
-            // Other GPU errors fall through to the serial path.
+        if (ckt.gpu_hook) |gh| if (gh.solve_batch != null) {
+            const n: usize = ckt.n;
+            const x_lanes = try a.alloc(f64, npoints * n);
+            defer a.free(x_lanes);
+            const results = try a.alloc(converger.Result, npoints);
+            defer a.free(results);
+
+            var lane_ctx: LaneCtx = .{ .source = t, .start = opts.start, .step = opts.step };
+            const setup: lanes.LaneSetup = .{ .ctx = &lane_ctx, .apply = LaneCtx.apply, .restore = LaneCtx.restore };
+            var copts = opts.tol.newtonOpts(opts.tol.itl1);
+            copts.gmin = opts.tol.gmin;
+            if (lanes.solveLanesGpu(ckt, setup, x_lanes, results, copts)) {
+                for (0..npoints) |pt| {
+                    const row = data[pt * ncols ..][0..ncols];
+                    row[0] = opts.start + @as(f64, @floatFromInt(pt)) * opts.step;
+                    const lane = x_lanes[pt * n ..][0..n];
+                    for (ctx.probes, row[1..]) |node, *out|
+                        out.* = if (results[pt].converged) lane[node] else std.math.nan(f64);
+                }
+                break :fill;
+            }
         };
         try runSerial(ctx, ckt, a, t, opts, npoints, ncols, data);
     }
@@ -99,58 +119,23 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     };
 }
 
-/// GPU batch: cold-start every sweep point, launch one batched Newton.
-fn runBatchGpu(
-    ctx: *const root.RunCtx,
-    ckt: *root.Circuit,
-    a: std.mem.Allocator,
-    t: root.ParamRef,
-    gh: root.GpuHook,
-    sb: *const fn (*anyopaque, []f64, u32, f64, converger.Options, []converger.Result) anyerror!void,
-    opts: Options,
-    npoints: usize,
-    ncols: usize,
-    data: []f64,
-) !void {
-    // Flat lane blob: lane pt is x_lanes[pt*n..][0..n]. One alloc, no table.
-    const n: usize = ckt.n;
-    const x_lanes = try a.alloc(f64, npoints * n);
-    defer a.free(x_lanes);
-    const results = try a.alloc(converger.Result, npoints);
-    defer a.free(results);
+/// solveLanesGpu apply/restore state: lane k installs sweep value
+/// start + k*step on the swept source. `apply` is stateless, so re-running it
+/// from k = 0 after a GPU fallthrough is a no-op difference; `restore` is
+/// empty because run()'s defer owns putting the nominal value back — it has to
+/// cover the serial route and the error paths anyway.
+const LaneCtx = struct {
+    source: root.ParamRef,
+    start: f64,
+    step: f64,
 
-    // For each sweep point: set the source value, repack GPU device state,
-    // and prepare a cold-started x-vector.
-    for (0..npoints) |pt| {
-        const v = opts.start + @as(f64, @floatFromInt(pt)) * opts.step;
-        t.set(v);
-        ckt.has_baseline = false;
-        ckt.recompute();
-        try ckt.computeBaseline();
-
-        // Repack GPU payloads so the device sees the new swept param.
-        if (gh.repack) |rp| try rp(gh.ctx);
-
-        op.coldStart(ckt, x_lanes[pt * n ..][0..n]);
+    fn apply(ptr: *anyopaque, k: usize) void {
+        const self: *LaneCtx = @ptrCast(@alignCast(ptr));
+        self.source.set(self.start + @as(f64, @floatFromInt(k)) * self.step);
     }
 
-    var copts = opts.tol.newtonOpts(opts.tol.itl1);
-    copts.gmin = opts.tol.gmin;
-    try sb(gh.ctx, x_lanes, @intCast(n), 0, copts, results);
-
-    // Collect results into the output data table.
-    for (0..npoints) |pt| {
-        const v = opts.start + @as(f64, @floatFromInt(pt)) * opts.step;
-        const row = data[pt * ncols ..][0..ncols];
-        row[0] = v;
-        if (results[pt].converged) {
-            const lane = x_lanes[pt * n ..][0..n];
-            for (ctx.probes, row[1..]) |node, *out| out.* = lane[node];
-        } else {
-            for (row[1..]) |*out| out.* = std.math.nan(f64);
-        }
-    }
-}
+    fn restore(_: *anyopaque) void {}
+};
 
 /// Serial sweep: warm-start from previous point, cold-restart on failure.
 fn runSerial(

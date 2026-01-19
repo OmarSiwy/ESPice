@@ -12,6 +12,11 @@
 //! apply(k) calls and then fall through to the serial route, which re-runs
 //! them from k=0. So `apply(0)` MUST reset any per-sweep state (reseed the
 //! RNG) — that makes the two routes bit-identical and the fallthrough safe.
+//!
+//! `solveLanesGpu` is that GPU route on its own, for the caller whose serial
+//! route is NOT cold-start: dc.zig's sweep warm-starts each point from the
+//! previous solution and falls back to op's ladder, so it takes the batched
+//! launch from here and keeps its own serial march.
 const std = @import("std");
 const root = @import("../types.zig");
 const converger = @import("solvers").converger;
@@ -36,27 +41,11 @@ pub fn solveLanes(
     results: []converger.Result,
     opts: converger.Options,
 ) !void {
-    const n: usize = ckt.n;
-    const n_lanes = results.len;
-    std.debug.assert(x_lanes.len == n_lanes * n);
-
-    // -- GPU batch route: install every lane's params, repack, seed, one launch.
-    if (ckt.gpu_hook) |gh| if (gh.solve_batch) |sb| gpu: {
-        const repack = gh.repack orelse break :gpu; // batch needs device repack
-        for (0..n_lanes) |k| {
-            setup.apply(setup.ctx, k);
-            ckt.recompute();
-            repack(gh.ctx) catch break :gpu;
-            const xl = x_lanes[k * n ..][0..n];
-            root.zeroSimd(xl);
-            ckt.seedJunctions(xl);
-        }
-        sb(gh.ctx, x_lanes, @intCast(n), 0, opts, results) catch break :gpu;
-        setup.restore(setup.ctx);
-        return;
-    };
+    if (solveLanesGpu(ckt, setup, x_lanes, results, opts)) return;
 
     // -- Serial route: apply -> recompute -> seed -> Newton per lane.
+    const n: usize = ckt.n;
+    const n_lanes = results.len;
     const ws = try ckt.workspace();
     for (0..n_lanes) |k| {
         setup.apply(setup.ctx, k);
@@ -68,4 +57,34 @@ pub fn solveLanes(
             converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 };
     }
     setup.restore(setup.ctx);
+}
+
+/// GPU batch route on its own: install every lane's params, repack the device
+/// payloads, cold-seed each lane, one batched launch. Returns false — with
+/// `restore` NOT called and x_lanes/results left unspecified — when the hook is
+/// absent or any step fails. The caller must then run a serial route that
+/// re-applies from k = 0 (the apply(0)-reset contract above).
+pub fn solveLanesGpu(
+    ckt: *root.Circuit,
+    setup: LaneSetup,
+    x_lanes: []f64,
+    results: []converger.Result,
+    opts: converger.Options,
+) bool {
+    const n: usize = ckt.n;
+    std.debug.assert(x_lanes.len == results.len * n);
+    const gh = ckt.gpu_hook orelse return false;
+    const sb = gh.solve_batch orelse return false;
+    const repack = gh.repack orelse return false; // batch needs device repack
+    for (0..results.len) |k| {
+        setup.apply(setup.ctx, k);
+        ckt.recompute();
+        repack(gh.ctx) catch return false;
+        const xl = x_lanes[k * n ..][0..n];
+        root.zeroSimd(xl);
+        ckt.seedJunctions(xl);
+    }
+    sb(gh.ctx, x_lanes, @intCast(n), 0, opts, results) catch return false;
+    setup.restore(setup.ctx);
+    return true;
 }
