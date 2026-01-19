@@ -89,8 +89,8 @@ const Buffer = if (backend != null) Raw.Buffer else void;
 const block_size: u32 = devices.kernels.block_size;
 
 pub const Error = error{
-    /// This binary carries no GPU images (no GPU on the build machine, or
-    /// `-Dno-gpu`).
+    /// This binary carries no GPU images — the arch probe found no device on
+    /// the build machine, so `emitKernels` emitted nothing.
     NoGpuArtifacts,
     /// NO device type in this circuit has a GPU kernel, so there is nothing to
     /// move. See `engine.gpuEligible`.

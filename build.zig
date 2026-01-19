@@ -4,51 +4,54 @@ const gompute_build = @import("gompute");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const no_llvm = b.option(bool, "no-llvm", "Use Zig's native backend instead of LLVM (default: true)") orelse true;
-    const no_gpu = b.option(bool, "no-gpu", "Skip GPU kernel compilation for the device models") orelse false;
-    const check_va = b.option(bool, "check-va", "Type-check each generated device at its .va (default: on)") orelse true;
-    const jac_f32_list = b.option([]const u8, "jac-f32", "Comma-separated model stems to build with an f32 Jacobian") orelse "";
-    const gpu_force_list = b.option([]const u8, "gpu-force", "Comma-separated model stems to emit GPU kernels for regardless of size") orelse "";
 
     const gompute = b.dependency("gompute", .{});
-
-    const bopts = b.addOptions();
-    bopts.addOption([]const u8, "src_root", b.build_root.path orelse ".");
-    const bopts_mod = bopts.createModule();
-
-    // =======================================================================
-    // Leaf modules
-    // =======================================================================
-
-    const solvers_mod = b.createModule(.{
-        .root_source_file = b.path("src/solvers/root.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
     const vera = b.dependency("vera", .{ .target = target, .optimize = optimize });
     const contract_mod = vera.module("contract");
-    const fastvaf_mod = vera.module("vera");
-
-    bopts.addOption([]const u8, "contract_path", vera.builder.pathFromRoot("tools/contract.zig"));
-    bopts.addOption([]const u8, "dyn_path", b.pathFromRoot("src/devices/engine.zig"));
-
     const vera_exe = b.dependency("vera", .{
         .target = b.graph.host,
         .optimize = .ReleaseFast,
     }).artifact("vera");
 
+    const bopts = b.addOptions();
+    bopts.addOption([]const u8, "src_root", b.build_root.path orelse ".");
+    bopts.addOption([]const u8, "contract_path", vera.builder.pathFromRoot("tools/contract.zig"));
+    bopts.addOption([]const u8, "dyn_path", b.pathFromRoot("src/devices/engine.zig"));
+
+    // Every module in this tree is (root file, target, optimize) plus imports.
+    const M = struct {
+        b: *std.Build,
+        target: std.Build.ResolvedTarget,
+        optimize: std.builtin.OptimizeMode,
+        fn make(
+            self: @This(),
+            root: std.Build.LazyPath,
+            imports: []const std.Build.Module.Import,
+        ) *std.Build.Module {
+            return self.b.createModule(.{
+                .root_source_file = root,
+                .target = self.target,
+                .optimize = self.optimize,
+                .imports = imports,
+            });
+        }
+    }{ .b = b, .target = target, .optimize = optimize };
+
+    const solvers_mod = M.make(b.path("src/solvers/root.zig"), &.{});
+
     // =======================================================================
     // Devices: every src/devices/models/* compiled to Zig at build time
+    //
+    // Auto-discovered — drop a source in and it is built, whichever HDL it is
+    // written in. `wf` collects every generated aggregate root: one models.zig
+    // re-exporting all devices (what devices/root.zig reflects over), plus a
+    // one-device models.zig per model, because a GPU kernel root must see
+    // exactly the device it compiles (see kernel_roots below).
     // =======================================================================
 
-    // Auto-discover active models: every models/NAME.{va,v,sv,vhd,vhdl}
-    // (vendor/ is staged and skipped — it is a subdir, not a file, so the file
-    // filter drops it). No hand-maintained list; drop a source in and it is
-    // built, whichever HDL it is written in.
     const models = discoverModels(b);
+    const wf = b.addWriteFiles();
 
-    // Aggregate `models` module: one codegen'd device module per import, plus a
-    // generated root that re-exports each. devices/root.zig reflects over it.
     var agg_src: std.ArrayList(u8) = .empty;
     agg_src.appendSlice(b.allocator, "//! Generated — build-time HDL device models.\n") catch @panic("OOM");
 
@@ -61,79 +64,41 @@ pub fn build(b: *std.Build) void {
         run.addArg(b.fmt("--expect-module={s}", .{m.name}));
         // Verilog-A only: the Verilog frontend is a translator with two flags
         // and rejects the rest rather than pretending to honour them.
+        //
+        // `--check` type-checks the generated device at its .va, so a bad
+        // lowering names the source instead of surfacing inside a cache file.
         if (m.hdl == .verilog_a) {
-            run.addArgs(&.{ "--emit-zig", "--color=never" });
-            if (inCsv(jac_f32_list, m.name)) run.addArg("--jac-f32");
-            if (check_va) {
-                run.addArg("--check");
-                run.addArg("--contract");
-                run.addFileArg(vera.path("tools/contract.zig"));
-            }
+            run.addArgs(&.{ "--emit-zig", "--color=never", "--check", "--contract" });
+            run.addFileArg(vera.path("tools/contract.zig"));
         }
         run.addArg("-o");
         const gen_zig = run.addOutputFileArg(b.fmt("{s}.zig", .{m.name}));
         run.addFileArg(b.path(b.fmt("src/devices/models/{s}", .{m.file})));
 
-        const dev_mod = b.createModule(.{
-            .root_source_file = gen_zig,
-            .target = target,
-            .optimize = optimize,
-        });
-        dev_mod.addImport("contract", contract_mod);
-        dev_mods[i] = dev_mod;
+        dev_mods[i] = M.make(gen_zig, &.{.{ .name = "contract", .module = contract_mod }});
 
-        agg_src.appendSlice(b.allocator, b.fmt("pub const {s} = @import(\"{s}\");\n", .{ m.name, m.name })) catch @panic("OOM");
+        const one_line = b.fmt("pub const {s} = @import(\"{s}\");\n", .{ m.name, m.name });
+        agg_src.appendSlice(b.allocator, one_line) catch @panic("OOM");
 
-        // A one-device `models` aggregate, so `devices/kernels.zig` compiled
-        // against it exports exactly that device's kernel. See the kernel_roots
-        // list below for why the GPU side is sliced this way.
-        const one_wf = b.addWriteFiles();
-        const one_mod = b.createModule(.{
-            .root_source_file = one_wf.add("models.zig", b.fmt("pub const {s} = @import(\"{s}\");\n", .{ m.name, m.name })),
-            .target = target,
-            .optimize = optimize,
-        });
-        one_mod.addImport(m.name, dev_mod);
-        one_models[i] = one_mod;
+        one_models[i] = M.make(wf.add(b.fmt("{s}/models.zig", .{m.name}), one_line), &.{});
+        one_models[i].addImport(m.name, dev_mods[i]);
     }
 
-    const agg_wf = b.addWriteFiles();
-    const models_mod = b.createModule(.{
-        .root_source_file = agg_wf.add("models.zig", agg_src.items),
-        .target = target,
-        .optimize = optimize,
-    });
+    const models_mod = M.make(wf.add("models.zig", agg_src.items), &.{});
     for (models, dev_mods) |m, dev_mod| models_mod.addImport(m.name, dev_mod);
 
-    const devices_mod = b.createModule(.{
-        .root_source_file = b.path("src/devices/root.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "contract", .module = contract_mod },
-            .{ .name = "models", .module = models_mod },
-            .{ .name = "fastvaf", .module = fastvaf_mod },
-            .{ .name = "gompute", .module = gompute.module("gompute") },
-        },
+    const devices_mod = M.make(b.path("src/devices/root.zig"), &.{
+        .{ .name = "contract", .module = contract_mod },
+        .{ .name = "models", .module = models_mod },
+        .{ .name = "fastvaf", .module = vera.module("vera") },
+        .{ .name = "gompute", .module = gompute.module("gompute") },
     });
     // DynDevice dlopens generated .so devices.
     devices_mod.linkSystemLibrary("c", .{});
 
-    // GPU emission moved below the executable: gompute's `emitKernels` takes the
-    // host artifact, which does not exist yet here.
-
-    // =======================================================================
-    // Analysis
-    // =======================================================================
-
-    const analysis_mod = b.createModule(.{
-        .root_source_file = b.path("src/analysis/root.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "solvers", .module = solvers_mod },
-            .{ .name = "devices", .module = devices_mod },
-        },
+    const analysis_mod = M.make(b.path("src/analysis/root.zig"), &.{
+        .{ .name = "solvers", .module = solvers_mod },
+        .{ .name = "devices", .module = devices_mod },
     });
     analysis_mod.linkSystemLibrary("c", .{});
 
@@ -143,56 +108,49 @@ pub fn build(b: *std.Build) void {
 
     const exe = b.addExecutable(.{
         .name = "espice",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "devices", .module = devices_mod },
-                .{ .name = "analysis", .module = analysis_mod },
-                .{ .name = "build_options", .module = bopts_mod },
-                // src/gpu_context.zig: the GPU launcher is APP policy (it owns
-                // when to go to the device), so it lives beside the engine
-                // rather than inside `devices`, and needs the driver handle and
-                // the CPU Newton it drives.
-                .{ .name = "gompute", .module = gompute.module("gompute") },
-                .{ .name = "solvers", .module = solvers_mod },
-            },
+        .root_module = M.make(b.path("src/main.zig"), &.{
+            .{ .name = "devices", .module = devices_mod },
+            .{ .name = "analysis", .module = analysis_mod },
+            .{ .name = "build_options", .module = bopts.createModule() },
+            // src/gpu_context.zig: the GPU launcher is APP policy (it owns when
+            // to go to the device), so it lives beside the engine rather than
+            // inside `devices`, and needs the driver handle and the CPU Newton
+            // it drives.
+            .{ .name = "gompute", .module = gompute.module("gompute") },
+            .{ .name = "solvers", .module = solvers_mod },
         }),
     });
     exe.root_module.link_libc = true;
-    if (no_llvm) {
-        exe.use_llvm = false;
-        exe.use_lld = false;
-    }
+    exe.use_llvm = false;
+    exe.use_lld = false;
     b.installArtifact(exe);
 
-    if (!no_gpu) {
-        const roots = b.allocator.alloc(gompute_build.KernelRoot, models.len) catch @panic("OOM");
-        var n_roots: usize = 0;
-        for (models, one_models) |m, one_mod| {
-            if (m.size >= gpu_max_model_bytes and !inCsv(gpu_force_list, m.name)) continue;
-            const dev_imports = b.allocator.create(DeviceImports) catch @panic("OOM");
-            dev_imports.* = .{ .models = one_mod, .contract = contract_mod };
-            roots[n_roots] = .{
-                .name = m.name,
-                .root = b.path("src/devices/kernels.zig"),
-                .imports = &deviceKernelImports,
-                .imports_ctx = dev_imports,
-                // The compact models are single enormous eval functions; letting
-                // them all compile at once is a memory problem, not a speedup.
-                .heavy = m.size >= heavy_model_bytes,
-            };
-            n_roots += 1;
-        }
-        gompute_build.emitKernels(b, gompute, exe, .{
-            .kernel_roots = roots[0..n_roots],
-            .heavy_lanes = 2,
-            .target = target,
-            // measured 443s vs 13.6s for hisimhv_va.
-            .optimize = if (optimize == .Debug) .ReleaseFast else optimize,
-        });
+    // GPU kernels, unconditionally: the arch probe inside `emitKernels` is what
+    // decides, and a machine with no device emits nothing and stays green. This
+    // is also what makes `gompute_kernels` always exist for gpu_context.zig.
+    // Emission sits below the executable because `emitKernels` takes it.
+    var roots: std.ArrayList(gompute_build.KernelRoot) = .empty;
+    for (models, one_models) |m, one_mod| {
+        if (m.size >= gpu_max_model_bytes) continue;
+        const dev_imports = b.allocator.create(DeviceImports) catch @panic("OOM");
+        dev_imports.* = .{ .models = one_mod, .contract = contract_mod };
+        roots.append(b.allocator, .{
+            .name = m.name,
+            .root = b.path("src/devices/kernels.zig"),
+            .imports = &deviceKernelImports,
+            .imports_ctx = dev_imports,
+            // The compact models are single enormous eval functions; letting
+            // them all compile at once is a memory problem, not a speedup.
+            .heavy = m.size >= heavy_model_bytes,
+        }) catch @panic("OOM");
     }
+    gompute_build.emitKernels(b, gompute, exe, .{
+        .kernel_roots = roots.items,
+        .heavy_lanes = 2,
+        .target = target,
+        // measured 443s vs 13.6s for hisimhv_va.
+        .optimize = if (optimize == .Debug) .ReleaseFast else optimize,
+    });
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
@@ -217,40 +175,27 @@ pub fn build(b: *std.Build) void {
     // `test { _ = <each sibling>; }` aggregator, so the module root pulls its
     // files in. That is what collapses FastVAF's 17 per-file test binaries into
     // one, and the tree from 22 test executables to 6.
+    //
+    // The Verilog-A conformance and exhaustive oracles live in VerA with the
+    // fixtures they read — they test the compiler, not the simulator:
+    //   cd ../VerA && zig build conformance
+    //   cd ../VerA && zig build exhaustive
     // =======================================================================
 
     const test_step = b.step("test", "Run every test suite");
 
-    const builder_mod = b.createModule(.{
-        .root_source_file = b.path("src/builder.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
+    const app_tests = b.addTest(.{ .root_module = M.make(b.path("tests/test_all.zig"), &.{
+        .{ .name = "analysis", .module = analysis_mod },
+        .{ .name = "devices", .module = devices_mod },
+        .{ .name = "builder", .module = M.make(b.path("src/builder.zig"), &.{
             .{ .name = "analysis", .module = analysis_mod },
             .{ .name = "devices", .module = devices_mod },
-        },
-    });
-    const app_test_mod = b.createModule(.{
-        .root_source_file = b.path("tests/test_all.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "analysis", .module = analysis_mod },
-            .{ .name = "devices", .module = devices_mod },
-            .{ .name = "builder", .module = builder_mod },
-        },
-    });
-
-    const app_tests = b.addTest(.{ .root_module = app_test_mod });
-    if (no_llvm) {
-        app_tests.use_llvm = false;
-        app_tests.use_lld = false;
-    }
+        }) },
+    }) });
+    app_tests.use_llvm = false;
+    app_tests.use_lld = false;
     test_step.dependOn(&b.addRunArtifact(app_tests).step);
 
-    // The three module suites, each as its own test root. The HDL frontends'
-    // own suites, and both Verilog-A oracles, live in VerA — `zig build test`
-    // over there, not here.
     for ([_]struct { name: []const u8, desc: []const u8, mod: *std.Build.Module }{
         .{ .name = "test-solvers", .desc = "Run solver tests", .mod = solvers_mod },
         .{ .name = "test-analysis", .desc = "Run analysis tests", .mod = analysis_mod },
@@ -262,30 +207,19 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run.step);
     }
 
-    // The Verilog-A conformance and exhaustive oracles moved to VerA with the
-    // fixtures they read. They test the compiler, not the simulator:
-    //
-    //   cd ../VerA && zig build conformance     # 856 fixtures vs .expected-error.txt
-    //   cd ../VerA && zig build exhaustive      # testbench transcripts
-    //
-    // What still guards the boundary from THIS side is `-Dcheck-va` above: every
-    // generated device is type-checked against the contract at the .va that
-    // produced it.
-
     // =======================================================================
     // Benchmark (still its own package — it is fixtures and a runner, not a
     // source tree that belongs under src/)
     // =======================================================================
 
-    const bench_dep = b.dependency("benchmark", .{
+    const bench_runner = b.dependency("benchmark", .{
         .target = target,
         .optimize = optimize,
-        .@"no-llvm" = no_llvm,
-    });
-    const run_bench = b.addRunArtifact(bench_dep.artifact("bench-runner"));
+    }).artifact("bench-runner");
+    const run_bench = b.addRunArtifact(bench_runner);
     run_bench.step.dependOn(b.getInstallStep());
     // Install lazily — only the bench step pays for the bench-runner build.
-    run_bench.step.dependOn(&b.addInstallArtifact(bench_dep.artifact("bench-runner"), .{}).step);
+    run_bench.step.dependOn(&b.addInstallArtifact(bench_runner, .{}).step);
     run_bench.stdio = .inherit;
     run_bench.setCwd(b.path("."));
     run_bench.addArgs(&.{ "zig-out/bin/espice", "benchmark/fixtures" });
@@ -303,28 +237,14 @@ const Model = struct {
     name: []const u8,
     file: []const u8,
     hdl: enum { verilog_a, digital },
-    /// Source bytes. Only used to decide `KernelRoot.heavy` — a stand-in for
-    /// "how big is this device's eval function", which is not knowable at
-    /// configure time and which source size tracks closely enough for a
-    /// scheduling hint.
+    /// Source bytes. Only used for the two GPU thresholds below — a stand-in
+    /// for "how big is this device's eval function", which is not knowable at
+    /// configure time and which source size tracks closely enough.
     size: u64,
 };
 
-/// Is `name` one of the comma-separated entries of `csv`? (`-Djac-f32=a,b`.)
-fn inCsv(csv: []const u8, name: []const u8) bool {
-    var it = std.mem.splitScalar(u8, csv, ',');
-    while (it.next()) |e| {
-        if (std.mem.eql(u8, std.mem.trim(u8, e, " "), name)) return true;
-    }
-    return false;
-}
-
 /// Source size past which a model's GPU compilation is `heavy` — chained into
 /// `heavy_lanes` rather than run alongside every other big one.
-///
-/// ponytail: a size threshold, not a hand-kept name list. The compact models
-/// (BSIM, HiSIM, HICUM) are the large sources by a wide margin, so the two
-/// agree, and a threshold does not go stale when a model is added.
 const heavy_model_bytes: u64 = 100 * 1024;
 
 /// Source size at or above which a model gets NO GPU kernel at all.
@@ -357,10 +277,6 @@ const heavy_model_bytes: u64 = 100 * 1024;
 /// actually predicts JIT cost, but it is only known AFTER paying the build-time
 /// compile this threshold exists to skip. Source size is the proxy available at
 /// configure time and the cluster gap is wide enough that it separates cleanly.
-///
-/// Revisit when P3 lands: with an f32 Jacobian these models get ~69x more
-/// throughput and a much smaller register footprint, which is the whole point of
-/// that phase — this cap is what should move first when it does.
 const gpu_max_model_bytes: u64 = 80 * 1024;
 
 /// Extension -> generator. Verilog-A goes to FastVAF; the digital HDLs all go
@@ -424,10 +340,7 @@ fn matchExt(file_name: []const u8) ?@TypeOf(hdl_by_ext[0]) {
 //
 // Only the IMPORTS are ours. `gompute_build.emitKernels` owns the arch probe,
 // the device compilation, the IR rewrite, PTX/HSACO assembly and the artifacts
-// module — a pipeline this file used to duplicate because gompute 0.1.0 gave a
-// kernels root no way to add imports. 1.0.0 has `.imports`, so the duplicate
-// went; it had already drifted to emitting an artifacts module the pinned host
-// loader cannot read.
+// module.
 // ===========================================================================
 
 /// What `deviceKernelImports` needs, passed through `emitKernels` untouched.
