@@ -102,6 +102,20 @@ pub const Simulation = struct {
         // between decks without tearing down the circuit. Only its .allocator()
         // is deferred to run() (captures &self); the value itself is stable.
         sim.results_arena = std.heap.ArenaAllocator.init(sim_arena);
+        // The ONE name->id lookup a directive can carry (.noise's out_node),
+        // resolved here because `b.node_names` is complete before compile()
+        // and dies inside it. A u32 per directive, parse-lifetime, written in
+        // directive order and read once by buildJob below: an O(1) hash hit
+        // now beats any lookup the frozen Circuit could offer later, and the
+        // frozen struct carries no name table at all.
+        const dir_nodes = try parse_arena.alloc(u32, nl.directives.len);
+        for (nl.directives, dir_nodes) |dir, *id| {
+            id.* = if (directiveNodeName(dir, 0)) |name|
+                b.node_names.get(name) orelse NO_NODE
+            else
+                NO_NODE;
+        }
+
         sim.circuit = try b.compile();
         compiled_ok = true;
 
@@ -139,8 +153,8 @@ pub const Simulation = struct {
         // Jobs from directives: pre-allocate to directive count
         sim.jobs = try sim_arena.alloc(Job, nl.directives.len);
         sim.n_jobs = 0;
-        for (nl.directives) |dir| {
-            if (buildJob(dir, &sim, sources)) |job| {
+        for (nl.directives, dir_nodes) |dir, node_id| {
+            if (buildJob(dir, node_id, sources)) |job| {
                 sim.jobs[sim.n_jobs] = job;
                 sim.n_jobs += 1;
             }
@@ -250,16 +264,18 @@ pub const Simulation = struct {
         return x;
     }
 
-    fn nodeIndex(self: *const Simulation, name: []const u8) !u32 {
-        return self.circuit.nodeIndex(name) orelse error.UnknownNode;
-    }
 };
 
 // ---------------------------------------------------------------------------
 // Job builder — directive → analysis.Job (no ArrayList)
 // ---------------------------------------------------------------------------
 
-fn buildJob(dir: types.Directive, sim: *const Simulation, sources: Sources) ?Job {
+/// No node named in the directive, or a name no node answers to.
+const NO_NODE: u32 = std.math.maxInt(u32);
+
+/// `node_id` is the directive's resolved node (NO_NODE when it names none),
+/// looked up in fromNetlist while the Builder's map was still alive.
+fn buildJob(dir: types.Directive, node_id: u32, sources: Sources) ?Job {
     const id = analysis.Analysis.get(dir.kind) orelse return null;
     return switch (id) {
         .op => .{ .op = .{} },
@@ -301,7 +317,7 @@ fn buildJob(dir: types.Directive, sim: *const Simulation, sources: Sources) ?Job
             } };
         },
         .noise => .{ .noise = .{
-            .out_node = sim.nodeIndex(directiveNodeName(dir, 0) orelse return null) catch return null,
+            .out_node = if (node_id != NO_NODE) node_id else return null,
             .f_start = directiveNumber(dir, dir.args.len -| 2) orelse return null,
             .f_stop = directiveNumber(dir, dir.args.len -| 1) orelse return null,
             .points_per_decade = @intFromFloat(directiveNumber(dir, dir.args.len -| 3) orelse 10),
@@ -314,8 +330,10 @@ fn buildJob(dir: types.Directive, sim: *const Simulation, sources: Sources) ?Job
             .f0 = directiveNumber(dir, 0) orelse return null,
             .n_harmonics = @intFromFloat(directiveNumber(dir, 1) orelse 8),
         } },
-        // ponytail: remaining analyses follow the same pattern —
-        // parse positional args from directive, resolve names via sim.nodeIndex.
+        // ponytail: remaining analyses follow the same pattern — parse
+        // positional args from the directive; a node name arrives pre-resolved
+        // as `node_id` (extend dir_nodes to a small column if one ever needs
+        // more than one name).
         // Expand as each analysis module lands.
         else => null,
     };
