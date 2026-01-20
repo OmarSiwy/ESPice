@@ -350,5 +350,7 @@ model-uniform, warp-uniform on GPU).
 
 ## Our implementation
 
-- `modules/devices/src/bsim3.zig`.
+- NOT IN THE TREE. The hand-written `bsim3.zig` went with the move to
+  build-time Verilog-A; `src/devices/models/` carries bsim1, bsim2, bsim4va and
+  bsimsoi_va, no bsim3. The fixtures below outlived it.
 - Bench fixtures: `benchmark/fixtures/devices/bsim3`, `bsim3_transfer`, `bsim3_output`, `bsim3_body_effect`, `bsim3_pmos`, `bsim3_temp`.

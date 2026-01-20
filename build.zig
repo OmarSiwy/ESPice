@@ -4,6 +4,12 @@ const gompute_build = @import("gompute");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    // Mixed precision (docs/gpu-device-eval.md). A listed model gets vera's
+    // `--jac-f32`, which emits `pub const jac_f32 = true`; `engine.jacFloat`
+    // reads it and gives that device a `Dual` whose DERIVATIVE half is f32.
+    // The residual stays f64 either way. Opt-in per model because only the
+    // physics knows whether its unknowns fit in f32's ~7 digits.
+    const jac_f32_list = b.option([]const u8, "jac-f32", "Comma-separated model stems to build with an f32 Jacobian") orelse "";
 
     const gompute = b.dependency("gompute", .{});
     const vera = b.dependency("vera", .{ .target = target, .optimize = optimize });
@@ -68,7 +74,9 @@ pub fn build(b: *std.Build) void {
         // `--check` type-checks the generated device at its .va, so a bad
         // lowering names the source instead of surfacing inside a cache file.
         if (m.hdl == .verilog_a) {
-            run.addArgs(&.{ "--emit-zig", "--color=never", "--check", "--contract" });
+            run.addArgs(&.{"--emit-zig"});
+            if (inCsv(jac_f32_list, m.name)) run.addArg("--jac-f32");
+            run.addArgs(&.{ "--color=never", "--check", "--contract" });
             run.addFileArg(vera.path("tools/contract.zig"));
         }
         run.addArg("-o");
@@ -148,6 +156,13 @@ pub fn build(b: *std.Build) void {
         .kernel_roots = roots.items,
         .heavy_lanes = 2,
         .target = target,
+        // HIP is PINNED, CUDA is probed. `.auto` asks the BUILD machine, so on
+        // a dev box with an NVIDIA card it found no AMD device and compiled the
+        // hip backend out — silently making `--backend hip` a hard error in
+        // every binary shipped from here, whatever the deploy machine has.
+        // gfx1100 (RDNA3) is the baseline we claim; a CUDA build still probes
+        // because the probe succeeds here and pinning would freeze sm_89 in.
+        .hip = .{ .gpu = .{ .name = "gfx1100" } },
         // measured 443s vs 13.6s for hisimhv_va.
         .optimize = if (optimize == .Debug) .ReleaseFast else optimize,
     });
@@ -242,6 +257,15 @@ const Model = struct {
     /// configure time and which source size tracks closely enough.
     size: u64,
 };
+
+/// Is `name` one of the comma-separated entries of `csv`? (`-Djac-f32=a,b`.)
+fn inCsv(csv: []const u8, name: []const u8) bool {
+    var it = std.mem.splitScalar(u8, csv, ',');
+    while (it.next()) |e| {
+        if (std.mem.eql(u8, std.mem.trim(u8, e, " "), name)) return true;
+    }
+    return false;
+}
 
 /// Source size past which a model's GPU compilation is `heavy` — chained into
 /// `heavy_lanes` rather than run alongside every other big one.

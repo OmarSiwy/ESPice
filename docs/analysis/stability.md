@@ -77,7 +77,7 @@ raw comparison; the phase sequence is unwrapped before the scan.
 
 ## 2. Flow explanation
 
-`modules/analysis/src/ac/stb.zig`:
+`src/analysis/ac/stb.zig`:
 
 1. DC solve (own call — stability wants its exact bias), one `eval()` at
    the op; dense $G$/$C$ copies.
@@ -129,7 +129,7 @@ host: unwrap + crossing scan -> PM, GM
 | Phase | Solver doc | Impl |
 |---|---|---|
 | Upstream DC | [homotopy-continuation.md](../solvers/homotopy-continuation.md), [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `dc/dc.zig solve` |
-| Augmented stacked-real sweep | [klu-pipeline.md](../solvers/klu-pipeline.md) (sparse path exists; dense used here) | `modules/solvers/src/freq_solve.zig initDense`, `modules/solvers/src/dense_lu.zig` |
+| Augmented stacked-real sweep | [klu-pipeline.md](../solvers/klu-pipeline.md) (sparse path exists; dense used here) | `src/solvers/freq_solve.zig initDense`, `src/solvers/dense_lu.zig` |
 
 The probe augmentation changes the pattern (one extra row/col) — a
 sparse-path variant needs the probe branch included in the symbolic
@@ -156,6 +156,6 @@ machinery already handles ([circuit-matrix-specifics.md](../solvers/circuit-matr
 
 **Our implementation**
 
-- `modules/analysis/src/ac/stb.zig` — probe, sweep, margins (+ unit tests
+- `src/analysis/ac/stb.zig` — probe, sweep, margins (+ unit tests
   for one/two/three-pole margin behavior).
 - Bench fixtures: `benchmark/fixtures/stb/*`.

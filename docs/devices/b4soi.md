@@ -275,6 +275,9 @@ the VA.
 
 ## Our implementation
 
-- Cognate today: `modules/devices/src/b3soipd.zig` (BSIMPD 2.x, floating body + self-heating + body contact), mapped from level-58 cards in `src/netlist.zig` (`ponytail:` comment there marks the upgrade path).
-- Related: `modules/devices/src/bsim_soi.zig` (BSIM-SOI 100.1.1 sibling), `b3soifd.zig`, `b3soidd.zig`.
+- Cognate today: `src/devices/models/bsimsoi_va.va` (BSIM-SOI 100.1.1). The
+  hand-written `b3soipd.zig`/`b3soifd.zig`/`b3soidd.zig` (BSIMPD 2.x, floating
+  body + self-heating + body contact) went with the move to build-time
+  Verilog-A and have no `.va` replacement, so the level-58 card mapping in
+  `src/frontend/parser.zig` is the thing to check first.
 - Bench fixtures: `benchmark/fixtures/devices/b4soi`, `b4soi_output` (FAIL, 3.2e-1 — the reason this doc exists), `b3soipd`, `b3soipd_output` (7.5e-3 generation skew).

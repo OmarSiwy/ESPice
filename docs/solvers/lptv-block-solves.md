@@ -200,10 +200,10 @@ kernel lptv_adjoint_apply: same, transposed scatter + conj twiddles
 
 **Our implementation**
 
-- Exists: `modules/analysis/src/pss/pac.zig` (dense conversion matrix),
-  `modules/solvers/src/freq_solve.zig` (stacked-real pattern trick, the
-  $2n$ special case), `modules/solvers/src/direct.zig solveT`,
-  `modules/solvers/src/fft.zig`.
+- Exists: `src/analysis/pss/pac.zig` (dense conversion matrix),
+  `src/solvers/freq_solve.zig` (stacked-real pattern trick, the
+  $2n$ special case), `src/solvers/direct.zig solveT`,
+  `src/solvers/fft.zig`.
 - Consumers: [pac](../analysis/pac.md) (today),
   [pxf](../analysis/pxf.md), [periodic-noise](../analysis/periodic-noise.md)
   true-LPTV upgrade, [qpss](../analysis/qpss.md) QPAC (future).

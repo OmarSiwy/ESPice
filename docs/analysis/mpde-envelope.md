@@ -108,7 +108,7 @@ adaptivity is driven by the envelope's relative change per step
 
 ## 2. Flow explanation
 
-`modules/analysis/src/tran/envelope.zig simulate()`:
+`src/analysis/tran/envelope.zig simulate()`:
 
 **Phases.** (1) Record the DC point as envelope sample 0. (2) Outer loop:
 choose the outer step $\Delta t = \texttt{periods\_per\_step} \cdot T_c$;
@@ -199,7 +199,7 @@ host:
 | Phase | Solver doc | Impl |
 |---|---|---|
 | Inner quasi-static Newton (coarse advance + fine period) | [klu-pipeline.md](../solvers/klu-pipeline.md), [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `converger.run` with `EvalHook` (matrix = $G$) |
-| Fourier-envelope upgrade: per-envelope-step block Newton | matrix-free GMRES per [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md); per-harmonic block factors per [klu-pipeline.md](../solvers/klu-pipeline.md) | target — HB machinery (`pss/hb.zig`) + `modules/solvers/src/fft.zig` |
+| Fourier-envelope upgrade: per-envelope-step block Newton | matrix-free GMRES per [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md); per-harmonic block factors per [klu-pipeline.md](../solvers/klu-pipeline.md) | target — HB machinery (`pss/hb.zig`) + `src/solvers/fft.zig` |
 
 ---
 
@@ -224,9 +224,9 @@ host:
 
 **Our implementation**
 
-- `modules/analysis/src/tran/envelope.zig` — sample-envelope variant
+- `src/analysis/tran/envelope.zig` — sample-envelope variant
   (quasi-static inner, adaptive periods-per-step).
-- `modules/analysis/src/pss/hb.zig` — the fast-axis solver a
+- `src/analysis/pss/hb.zig` — the fast-axis solver a
   Fourier-envelope upgrade would reuse.
 - Bench fixtures: none dedicated yet; nearest coverage
   `benchmark/fixtures/pss/*` (fast-axis correctness) and

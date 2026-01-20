@@ -182,5 +182,5 @@ x — the §3 channel function re-run; GPU straight-line.
 
 ## Our implementation
 
-- `modules/devices/src/{mos2,mos3,mos6,mos9,bsim1,bsim2,mosvar}.zig`.
+- `src/devices/{mos2,mos3,mos6,mos9,bsim1,bsim2,mosvar}.zig`.
 - Bench fixtures: `devices/mos2*`, `mos3*`, `mos6_inverter` (FAIL 1.09e-1), `mos6_simpleinv` (FAIL 1.13e-2), `mos6`, `mos9`, `bsim1`, `bsim2`, `bsim2_ngspice`.

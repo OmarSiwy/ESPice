@@ -65,7 +65,7 @@ up as `n_converged` in the stats.)
 
 ## 2. Flow explanation
 
-**Monte Carlo** (`modules/analysis/src/sweep/mc.zig`): collect primary
+**Monte Carlo** (`src/analysis/sweep/mc.zig`): collect primary
 instance parameters (`collectParams`, skipping unset zeros), wrap each in a
 `ParamVar` (raw f32 pointer + nominal + distribution). Per trial: perturb
 all parameters, `recompute()`, cold DC solve at ITL2 (any error counts as
@@ -151,11 +151,11 @@ compose: big circuits use the former, small circuits the latter.
 
 | Phase | Solver doc | Impl |
 |---|---|---|
-| Per-trial cold Newton (refactor per trial on frozen pattern) | [klu-pipeline.md](../solvers/klu-pipeline.md), [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `modules/solvers/src/direct.zig` via `converger.run` |
+| Per-trial cold Newton (refactor per trial on frozen pattern) | [klu-pipeline.md](../solvers/klu-pipeline.md), [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `src/solvers/direct.zig` via `converger.run` |
 | Workspace/pattern reuse; memcmp/sig refactor bypass for lanes where values repeat | [circuit-matrix-specifics.md](../solvers/circuit-matrix-specifics.md) | `ckt.workspace()`, `converger.Options.matrix_sig` |
 | Ladder fallback for hard corners | [homotopy-continuation.md](../solvers/homotopy-continuation.md) | `dc/op.zig solveLadder` (dc-sweep style demotion; MC currently records non-convergence instead — upgrade knob) |
-| Batched GPU solves | [gpu-sparse-lu.md](../solvers/gpu-sparse-lu.md) (batched-solve discussion) + megakernel JFNK | `modules/devices/src/kernel.zig` |
-| Within-solve lane-parallel eval | none (eval-side, not solver) | `modules/analysis/src/problem/par.zig` |
+| Batched GPU solves | [gpu-sparse-lu.md](../solvers/gpu-sparse-lu.md) (batched-solve discussion) + megakernel JFNK | `src/devices/engine.zig` |
+| Within-solve lane-parallel eval | none (eval-side, not solver) | `src/devices/engine.zig` |
 
 ---
 
@@ -178,7 +178,7 @@ compose: big circuits use the former, small circuits the latter.
 
 **Our implementation**
 
-- `modules/analysis/src/sweep/mc.zig`, `sweep/temp_sweep.zig`,
+- `src/analysis/sweep/mc.zig`, `sweep/temp_sweep.zig`,
   `problem/par.zig` (+ `problem/batch.zig` SoA batches).
 - Bench fixtures: `benchmark/fixtures/ensemble/{opamp_mc,pvt_corners,sweep_lanes,corner_pathological}`,
   `benchmark/fixtures/sweep/*`.

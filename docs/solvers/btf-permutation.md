@@ -193,9 +193,9 @@ uniqueness remark — derived, not source-verified (standard result, Davis
 our reading of our own code. §4 — derived, not source-verified (design
 reasoning; GLU papers do per-matrix, not per-block, GPU scheduling).
 
-**Our implementation:** `modules/solvers/src/order.zig` (`order()` = iterative
+**Our implementation:** `src/solvers/order.zig` (`order()` = iterative
 Tarjan + per-block AMD; workspace `Ws`), consumed by
-`modules/solvers/src/direct.zig` `Lu.init`. Scaling fixtures:
+`src/solvers/direct.zig` `Lu.init`. Scaling fixtures:
 `benchmark/fixtures/scaling/divider_chain` (deep condensation),
 `parallel_inverters_{100,500,2000}` (many independent blocks),
 `resistor_grid_32x32` vs `resistor_grid_100x100` (single irreducible block —

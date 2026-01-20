@@ -186,7 +186,7 @@ what fundamentally serializes:
     that later reach sets depend on -> symbolic+pivot stays on CPU, full stop
 ```
 
-Fit with our engine: `src/gpu_solver.zig` currently ships whole-Newton
+Fit with our engine: `src/gpu_context.zig` currently ships whole-Newton
 megakernel solves (JFNK/GMRES — no factorization on device, see
 `newton-raphson-convergence.md`); a device level-set refactor+solve is the
 alternative "direct Newton on GPU" path and reuses the exact arrays
@@ -211,10 +211,10 @@ reference). §2/§3 — verified against `direct.zig` (the growth monitor as a
 diagnostic; noted as such). §4 — derived, not source-verified (design
 aligned with GLU3.0's host-pivoting assumption).
 
-**Our implementation:** `modules/solvers/src/direct.zig` (`Params`
+**Our implementation:** `src/solvers/direct.zig` (`Params`
 {pivot_tol, refactor_growth_limit, iter_refine_steps}, `Solver.factor`
 bypass + fallback chain, `Lu.refactor`, `refine()`); Newton caller
-`modules/analysis/src/helper/converger.zig` (`newton()`, `matrix_sig`
+`src/solvers/converger.zig` (`newton()`, `matrix_sig`
 factor-once). Condition estimation: not implemented (documented here as the
 KLU reference design). Scaling fixtures:
 `benchmark/fixtures/scaling/inverter_chain_{256,1k,4k}` (refactor per Newton
