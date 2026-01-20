@@ -439,9 +439,14 @@ pub fn run(
     const S = Deref(@TypeOf(sys));
     const H = @TypeOf(hook);
 
-    if (comptime @hasDecl(S, "clearLimits")) {
-        defer sys.clearLimits();
-    }
+    // `defer` is scoped to its ENCLOSING BLOCK, so wrapping this in an
+    // `if { defer ... }` ran the cleanup at the closing brace — before the
+    // solve below, not after it. Device limiting therefore stayed armed for
+    // every caller, and any analysis that re-evaluates at a perturbed x got a
+    // Jacobian frozen at the last Newton iterate (disto's finite difference
+    // read G against itself and produced exactly zero HD2). The condition
+    // belongs INSIDE one function-scoped defer.
+    defer if (comptime @hasDecl(S, "clearLimits")) sys.clearLimits();
 
     const pin = solverPin();
     if (pin == .direct) return newton(sys, ws, x, t, opts, hook);
