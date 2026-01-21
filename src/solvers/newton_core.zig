@@ -351,7 +351,18 @@ pub fn newtonSolve(
             x[i] = xn;
             const atol = if (env.currentRow(i)) tol.abstol else tol.vntol;
             const tcrit = tol.reltol * @max(@abs(xn), @abs(xo)) + atol;
-            scaled_p = @max(scaled_p, @abs(dxi) / tcrit);
+            // A non-finite iterate must read as NOT converged, and it did not:
+            // `@max` lowers to `maxnum`, which returns the NON-NaN operand, so
+            // a NaN dx simply vanished out of `scaled` and `scaled < 1.0` then
+            // reported success on a diverged solve. (`xn == inf` slipped
+            // through the other way: `tcrit` is then inf and `|dx|/inf == 0`.)
+            // That is how a lone PMOS .op returned NaN with exit 0.
+            //
+            // `inf_f64` says "not converged" and, unlike NaN, survives
+            // `reduceMax` the same way on every Env — the GPU's atomic max has
+            // the same maxnum semantics as the CPU's identity reduce.
+            const finite = @abs(xn) < inf_f64 and @abs(dxi) < inf_f64;
+            scaled_p = @max(scaled_p, if (finite) @abs(dxi) / tcrit else inf_f64);
         }
         const scaled = env.reduceMax(scaled_p);
 
@@ -365,7 +376,10 @@ pub fn newtonSolve(
         while (i < n) : (i += stride) {
             const scale = env.gateScale(i);
             const rt = @max(tol.residual_tol, 10.0 * scale * (tol.reltol * @abs(x[i]) + tol.vntol));
-            if (@abs(v.f0[i]) > rt) viol_p = 1;
+            // Spelled `!(a <= b)` and not `a > b`: both are false for a finite
+            // in-tolerance residual, but only this one is TRUE for NaN. The
+            // `>` form let a NaN residual pass the gate as "no violation".
+            if (!(@abs(v.f0[i]) <= rt)) viol_p = 1;
         }
         const viol = env.reduceMax(viol_p);
 
