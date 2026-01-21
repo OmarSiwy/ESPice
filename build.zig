@@ -114,19 +114,19 @@ pub fn build(b: *std.Build) void {
     // The app
     // =======================================================================
 
+    const app_imports: []const std.Build.Module.Import = &.{
+        .{ .name = "devices", .module = devices_mod },
+        .{ .name = "analysis", .module = analysis_mod },
+        .{ .name = "build_options", .module = bopts.createModule() },
+        // src/gpu_context.zig: the GPU launcher is APP policy (it owns when to
+        // go to the device), so it lives beside the engine rather than inside
+        // `devices`, and needs the driver handle and the CPU Newton it drives.
+        .{ .name = "gompute", .module = gompute.module("gompute") },
+        .{ .name = "solvers", .module = solvers_mod },
+    };
     const exe = b.addExecutable(.{
         .name = "espice",
-        .root_module = M.make(b.path("src/main.zig"), &.{
-            .{ .name = "devices", .module = devices_mod },
-            .{ .name = "analysis", .module = analysis_mod },
-            .{ .name = "build_options", .module = bopts.createModule() },
-            // src/gpu_context.zig: the GPU launcher is APP policy (it owns when
-            // to go to the device), so it lives beside the engine rather than
-            // inside `devices`, and needs the driver handle and the CPU Newton
-            // it drives.
-            .{ .name = "gompute", .module = gompute.module("gompute") },
-            .{ .name = "solvers", .module = solvers_mod },
-        }),
+        .root_module = M.make(b.path("src/main.zig"), app_imports),
     });
     exe.root_module.link_libc = true;
     exe.use_llvm = false;
@@ -210,6 +210,27 @@ pub fn build(b: *std.Build) void {
     app_tests.use_llvm = false;
     app_tests.use_lld = false;
     test_step.dependOn(&b.addRunArtifact(app_tests).step);
+
+    // The app layer, as its own test root. tests/test_all.zig cannot reach it:
+    // main.zig, engine.zig, gpu_context.zig and frontend/ live in the
+    // executable's root module, and `zig test` only collects from the root
+    // module's file set. Without this the whole app layer — netlist -> jobs ->
+    // results, and the parser's own tests — never ran.
+    //
+    // A FRESH module, not `exe.root_module`: handing addTest a module that
+    // already backs an installed artifact silently produced a binary that ran
+    // zero tests (a deliberately-broken assertion still passed).
+    const exe_tests = b.addTest(.{ .root_module = M.make(b.path("src/main.zig"), app_imports) });
+    // `emitKernels` wires `gompute_kernels` into the HOST artifact's root module
+    // only, and gpu_context.zig imports it by name — so a second root module
+    // over the same files needs the same import or it will not compile.
+    if (exe.root_module.import_table.get("gompute_kernels")) |artifacts|
+        exe_tests.root_module.addImport("gompute_kernels", artifacts);
+    exe_tests.use_llvm = false;
+    exe_tests.use_lld = false;
+    const run_exe_tests = b.addRunArtifact(exe_tests);
+    b.step("test-app", "Run the executable's own tests").dependOn(&run_exe_tests.step);
+    test_step.dependOn(&run_exe_tests.step);
 
     for ([_]struct { name: []const u8, desc: []const u8, mod: *std.Build.Module }{
         .{ .name = "test-solvers", .desc = "Run solver tests", .mod = solvers_mod },

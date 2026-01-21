@@ -244,6 +244,16 @@ pub fn simulate(
         allocator.free(q_snap);
         for (q_hist) |q| allocator.free(q);
     };
+    // uic: op.solve never ran, so nothing has put the devices in a defined
+    // static state. It normally does three things this transient now owes:
+    // latch power-on FSM state under `initial_step` (§5.10.2 — the OP is the
+    // first step of the analysis; with uic the transient is), commit that
+    // latch, and leave `.kind = .dc` behind for the charge seeding below.
+    if (options.uic) {
+        ckt.setSimState(.{ .kind = .dc, .initial_step = true });
+        _ = ckt.stateCtl(.commit);
+        ckt.setSimState(.{ .kind = .dc });
+    }
     try ckt.computeBaseline();
 
     if (has_charge) {
