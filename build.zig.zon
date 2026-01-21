@@ -4,19 +4,17 @@
     .fingerprint = 0x8b858d53fd1540a,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
-        // Was a dependency of the devices package; that package is now just
-        // src/devices/, so its one external dep lives here.
-        // A path dep for the same reason `vera` below is one: the GPU runtime
-        // and this tree are moving together through the P1/P2 work (pinned host
-        // memory, streams, async copies, device memset — none of which the
-        // pinned 1.0.0 has). Swap back to a git+URL with a pinned hash once the
-        // runtime surface settles.
-        .gompute = .{ .path = "../gompute" },
         .benchmark = .{ .path = "benchmark" },
         // The Verilog-A / Verilog compiler, and the `contract` its generated
         // devices import. A path dep while both trees move together; swap to a
         // git+URL with a pinned hash once VerA stabilizes.
         .vera = .{ .path = "../VerA" },
+        // The GPU runtime. Pinned to a published commit: the stream, pinned-host
+        // and device-fill surface `src/gpu_context.zig` needs now lives upstream.
+        .gompute = .{
+            .url = "git+https://github.com/OmarSiwy/Gompute.git#e928f1c5fab955672426887076b9fa7b9547025a",
+            .hash = "gompute-1.0.0-YJVc1s0WBAB517olDJ-2u7sbXhSg6Y2Le7svV24bV5Bp",
+        },
     },
     .paths = .{
         "build.zig",
