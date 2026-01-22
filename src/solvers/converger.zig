@@ -473,25 +473,41 @@ pub fn run(
         }
     }
 
-    // JFNK when the GPU is live. NOT because it is matrix-free — as configured
-    // here it is not; `CpuEnv.precondBuild` factors the Jacobian and uses that
-    // LU as the preconditioner, so a step costs a stamp, a factorization AND
-    // the GMRES matvecs. It earns its place by taking fewer steps, and its
-    // matvecs are residual evals, which is the part the device made cheap.
-    // `ESPICE_SOLVER=jfnk-nolu` is the genuinely factorization-free variant.
-    if (comptime @hasField(S, "gpu_active")) {
-        if (sys.gpu_active) {
-            const r = try jfnk(sys, ws, x, t, opts, hook);
-            if (r.converged) return r;
-        }
-    }
-
-    // JFNK first even without GPU — faster for large sparse systems
-    // where LU fill-in dominates. Falls through to direct Newton only
-    // if JFNK fails to converge.
-    if (jfnk(sys, ws, x, t, opts, hook)) |r| {
-        if (r.converged) return r;
-    } else |_| {}
+    // Direct Newton. JFNK used to run FIRST here, on the reasoning that it
+    // wins "for large sparse systems where LU fill-in dominates" — measured,
+    // it does not, at any size this simulator has a fixture for.
+    //
+    // The cost model says why. As configured, JFNK is not matrix-free:
+    // `CpuEnv.precondBuild` factors the Jacobian and uses that LU as the
+    // preconditioner, so a step costs a stamp, a factorization AND the GMRES
+    // matvecs — and each matvec is a FULL device sweep, `assemble(false, ...)`
+    // at newton_core.zig:242. On a 31-unknown MOS transient that was 30
+    // matvecs per Newton iteration (`gmres_m = min(30, n)`, and the early-exit
+    // never fired), so 96.8% of all device evaluation was finite-difference
+    // Jacobian probing. Device evaluation is ~92% of a transient. Direct
+    // Newton pays one sweep and one solve.
+    //
+    // Best-of-2 wall clock, ReleaseFast, this machine (RTX 4060, GPU forced on
+    // for the cuda rows; it otherwise declines this much work):
+    //
+    //   fixture                unkn    backend  direct   jfnk    jfnk-nolu
+    //   resistor_grid_32x32    ~1k     cpu       0.01    0.02      0.16
+    //   resistor_grid_100x100  ~10k    cpu       0.19    0.21     10.76
+    //   rc_ladder_1k           ~1k     cpu       0.22    5.65      8.74
+    //   rc_ladder_10k          ~10k    cpu       2.19    4.76     39.40
+    //   rc_ladder_10k          ~10k    cuda      2.03    4.77     39.88
+    //
+    // Direct wins every row, on both backends, on .op and .tran alike, and
+    // the gap widens with n rather than closing. There is no crossover to
+    // find, so there is no size threshold to encode here.
+    //
+    // JFNK stays reachable via ESPICE_SOLVER=jfnk / jfnk-nolu: the regimes
+    // differ by more than speed, and a circuit whose LU genuinely blows up is
+    // the case the pin exists for. It is opt-in and measured, not a default.
+    //
+    // `gpu_active` no longer selects it either. The GPU makes device eval
+    // cheaper, which is JFNK's cost centre AND direct Newton's; it does not
+    // change which of the two does less work.
     return newton(sys, ws, x, t, opts, hook);
 }
 
