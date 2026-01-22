@@ -59,6 +59,9 @@ pub const EvalHook = struct {
     pub fn vals(_: EvalHook, ckt: *Circuit) []f64 {
         return ckt.g_vals;
     }
+    pub fn diagAt(_: EvalHook, ckt: *Circuit, slot: u32) f64 {
+        return ckt.g_vals[slot];
+    }
 };
 
 /// Engine-owned GPU solve surface — persistent context, batch-capable.
@@ -384,6 +387,18 @@ pub const Circuit = struct {
 
     pub fn combineGC(self: *const Circuit, alpha: f64, out: []f64) void {
         self.combineGCInner(alpha, out, false);
+    }
+
+    /// ONE combined `G + alpha*C` entry. Same expression as `combineGCInner`'s
+    /// scalar tail, so it agrees with the full pass entry-for-entry.
+    ///
+    /// Exists because the Newton residual gate reads a single diagonal per
+    /// unknown. Doing that through `combineGC` rebuilt the entire plane once
+    /// per unknown per iteration — O(n·nnz) where O(1) does — and on a linear
+    /// RC ladder that was 34% of total runtime (47,084 full passes for 736
+    /// Newton iterations, 62 unknowns).
+    pub fn gcAt(self: *const Circuit, alpha: f64, slot: u32) f64 {
+        return self.g_vals[slot] + alpha * self.c_vals[slot];
     }
 
     pub fn combineGCAndClear(self: *Circuit, alpha: f64, out: []f64) void {

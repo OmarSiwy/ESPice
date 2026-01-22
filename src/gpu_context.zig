@@ -518,6 +518,9 @@ pub const GpuContext = struct {
         pub fn vals(_: AssembleHook, ckt: *Circuit) []f64 {
             return ckt.g_vals;
         }
+        pub fn diagAt(_: AssembleHook, ckt: *Circuit, slot: u32) f64 {
+            return ckt.g_vals[slot];
+        }
     };
 
     fn solveNewton(ctx: *anyopaque, x: []f64, t: f64, opts: converger.Options) anyerror!converger.Result {

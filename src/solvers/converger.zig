@@ -349,8 +349,12 @@ fn CpuEnv(comptime SysT: type, comptime HookT: type) type {
             return .{ .limited = limited, .flipped = flipped };
         }
 
+        /// |J_ii| for the residual gate. `diagAt` and not `vals(...)[slot]`:
+        /// the latter rebuilt the ENTIRE combined plane to read one entry, so
+        /// the gate loop cost O(n·nnz) per Newton iteration instead of O(n).
+        /// On a linear RC ladder that was 34% of total instructions.
         pub fn gateScale(self: *Self, i: u32) f64 {
-            return @abs(self.hook.vals(self.sys)[self.sys.diag_slots[i]]);
+            return @abs(self.hook.diagAt(self.sys, self.sys.diag_slots[i]));
         }
 
         pub fn currentRow(self: *Self, i: u32) bool {

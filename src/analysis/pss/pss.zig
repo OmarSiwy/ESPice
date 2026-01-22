@@ -183,6 +183,11 @@ const PeriodHook = struct {
         ckt.combineGC(self.alpha, self.a_vals);
         return self.a_vals;
     }
+    /// One diagonal, without materializing the whole combined plane —
+    /// see `Circuit.gcAt`. The residual gate calls this per unknown.
+    pub fn diagAt(self: PeriodHook, ckt: *root.Circuit, slot: u32) f64 {
+        return if (self.has_charge) ckt.gcAt(self.alpha, slot) else ckt.g_vals[slot];
+    }
 };
 
 /// Integrate the circuit from x (in place) over one period [0, T] with
