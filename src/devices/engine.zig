@@ -325,6 +325,28 @@ pub const Hooks = struct {
     seed: ?*const fn (*anyopaque, []f64) void = null,
     mark_current_rows: ?*const fn (*anyopaque, []bool) void = null,
     update_state: ?*const fn (*anyopaque, []const f64) ?f64 = null,
+    /// `updateState` for a device that declares NO `stateCtl` — one whose
+    /// accepted-step state cannot be rolled back. Called once per ACCEPTED
+    /// step instead of once per Newton iteration.
+    ///
+    /// §4.5.2 calls this "accepted-step bookkeeping" and it has to be taken
+    /// literally. VerA lowers `absdelay` to a `zHistPush` into a fixed
+    /// 32-entry ring INSIDE `updateState`. Driven per Newton iteration —
+    /// rejected attempts included — a transmission line took ~10 pushes per
+    /// timestep, so the ring spanned a fraction of one timestep instead of
+    /// 32 of them; every delay lookup fell off the end, `zHistAt` returned
+    /// the NEWEST sample, and the line behaved as if it had no delay.
+    ///
+    /// That fed back into the solver: the bogus residual stopped Newton
+    /// converging, dt halved, and more attempts meant more pushes.
+    /// devices/lossy_tline ran 51,847 step attempts — 25,624 rejected, mean
+    /// 9.9 iterations against a cap of 10 — to emit 600 requested points.
+    ///
+    /// Only HISTORY devices defer. Everything else keeps the per-iteration
+    /// call: either `stateCtl` makes its updates undoable, or its
+    /// `request_reject_at` is a breakpoint that must be seen per attempt for
+    /// a source edge to land sharply.
+    commit_state: ?*const fn (*anyopaque, []const f64) ?f64 = null,
     state_ctl: ?*const fn (*anyopaque, StateCtlOp) bool = null,
     set_temp: ?*const fn (*anyopaque, f32) void = null,
     /// Host-owned Instance fields (`$abstime`, timestep, `analysis()`,
@@ -933,6 +955,29 @@ fn hasHistoryDecl(comptime D: type) bool {
     return @hasDecl(D, "histInject");
 }
 
+/// Does this device carry §4.5 `absdelay` state — a ring buffer its
+/// `updateState` pushes into and CANNOT take back?
+///
+/// Detected from the Instance field name because VerA's naming is a stable,
+/// injective encoding (naming.zig: role-tagged `<module>__analog_op__absdelay__*`,
+/// deliberately insert-tolerant so `zig -fincremental` can track it), so this
+/// is reading a documented ABI rather than guessing.
+///
+/// ponytail: the honest home for this is a VerA decl — something like
+/// `pub const unrevertible_state = true` beside `lane_clean`/`jac_f32` — so
+/// the host asks a question instead of pattern-matching an answer. Upgrade
+/// there; this predicate is the shim until then.
+fn hasAbsdelayState(comptime D: type) bool {
+    if (!@hasDecl(D, "Instance")) return false;
+    // hisim-class Instances carry hundreds of long field names; the substring
+    // scan is comptime O(fields × name len) and blows the default 1000 quota.
+    @setEvalBranchQuota(2_000_000);
+    for (@typeInfo(D.Instance).@"struct".fields) |f| {
+        if (std.mem.indexOf(u8, f.name, "__absdelay__") != null) return true;
+    }
+    return false;
+}
+
 fn canDedup(comptime D: type) bool {
     return @hasDecl(D, "PrepCache") and !@hasDecl(D, "State") and !hasHistoryDecl(D);
 }
@@ -993,7 +1038,13 @@ pub fn DeviceBatch(comptime D: type) type {
             .clear_limits = if (has_limit) clearLimits else null,
             .seed = if (@hasDecl(D, "seed")) seedFn else null,
             .mark_current_rows = if (@hasDecl(D, "u_kinds")) markCurrentRows else null,
-            .update_state = if (@hasDecl(D, "updateState")) updateState else null,
+            // Split on `absdelay` state — the one thing a speculative update
+            // cannot take back. Everything else keeps the per-iteration call:
+            // `stateCtl` reverts it, or its `request_reject_at` is a
+            // breakpoint that must be seen per attempt for a source edge to
+            // land sharply. See `Hooks.commit_state`.
+            .update_state = if (@hasDecl(D, "updateState") and !hasAbsdelayState(D)) updateState else null,
+            .commit_state = if (@hasDecl(D, "updateState") and hasAbsdelayState(D)) updateState else null,
             .state_ctl = if (@hasDecl(D, "stateCtl")) stateCtl else null,
             // Only devices with an accepted-step FSM can write it.
             .bound_step = if (@hasDecl(D, "updateState") and @hasField(D.Instance, "bound_step")) boundStep else null,
