@@ -177,6 +177,10 @@ pub const letter_map = std.StaticStringMap(DeviceId).initComptime(.{
     .{ "w", DeviceId.cswitch },
     .{ "t", DeviceId.tline },
     .{ "o", DeviceId.lossy_tline },
+    // TXL (y card): frequency-independent RLGC line — the same physics
+    // lossy_tline models; its card spells the length `length=`, which the
+    // builder already translates to `len` for this device.
+    .{ "y", DeviceId.lossy_tline },
     .{ "p", DeviceId.coupled_tlines },
     .{ "d", DeviceId.diode },
 });
@@ -253,33 +257,38 @@ const mes_levels = [_]Level{
 };
 
 /// LEVEL -> device. An unknown level, or a level whose model is not in the
-/// catalog, panics naming it — never a fall back to a different device.
-/// (Callers take a plain `DeviceId`, so there is no error channel to use.)
-fn levelId(comptime kind: []const u8, comptime table: []const Level, level: u16) DeviceId {
+/// catalog, is an unsupported NETLIST, not a programmer bug: it errors so the
+/// loader reports a clean `{"skip":...}` instead of a panic (a bsim3 card
+/// took the whole benchmark runner down with it). Never a silent fall back
+/// to a different device.
+fn levelId(comptime kind: []const u8, comptime table: []const Level, level: u16) error{UnsupportedDevice}!DeviceId {
     inline for (table) |e| {
         if (e.level == level) {
-            if (comptime !has(@tagName(e.model)))
-                std.debug.panic("devices: " ++ kind ++ " LEVEL {d} needs model '" ++
+            if (comptime !has(@tagName(e.model))) {
+                std.log.warn("devices: " ++ kind ++ " LEVEL {d} needs model '" ++
                     @tagName(e.model) ++ "', which is not in the device catalog", .{level});
+                return error.UnsupportedDevice;
+            }
             return e.model;
         }
     }
-    std.debug.panic("devices: unsupported " ++ kind ++ " LEVEL {d}", .{level});
+    std.log.warn("devices: unsupported " ++ kind ++ " LEVEL {d}", .{level});
+    return error.UnsupportedDevice;
 }
 
-pub fn mosfetDeviceId(level: u16) DeviceId {
+pub fn mosfetDeviceId(level: u16) !DeviceId {
     return levelId("MOSFET", &mos_levels, level);
 }
-pub fn bjtDeviceId(level: u16) DeviceId {
+pub fn bjtDeviceId(level: u16) !DeviceId {
     return levelId("BJT", &bjt_levels, level);
 }
-pub fn diodeDeviceId(level: u16) DeviceId {
+pub fn diodeDeviceId(level: u16) !DeviceId {
     return levelId("diode", &diode_levels, level);
 }
-pub fn jfetDeviceId(level: u16) DeviceId {
+pub fn jfetDeviceId(level: u16) !DeviceId {
     return levelId("JFET", &jfet_levels, level);
 }
-pub fn mesDeviceId(level: u16) DeviceId {
+pub fn mesDeviceId(level: u16) !DeviceId {
     return levelId("MESFET", &mes_levels, level);
 }
 
@@ -291,11 +300,16 @@ test "catalog reflects the generated model set" {
 
 test "dispatch policy resolves letters and levels" {
     try std.testing.expectEqual(DeviceId.lossy_tline, letter_map.get("o").?);
-    try std.testing.expectEqual(DeviceId.mos1, mosfetDeviceId(1));
-    try std.testing.expectEqual(DeviceId.bsim4va, mosfetDeviceId(54));
-    try std.testing.expectEqual(DeviceId.hicumL2_va, bjtDeviceId(8));
-    try std.testing.expectEqual(DeviceId.jfet2, jfetDeviceId(2));
-    try std.testing.expectEqual(DeviceId.mesa, mesDeviceId(3));
+    try std.testing.expectEqual(DeviceId.lossy_tline, letter_map.get("y").?);
+    try std.testing.expectEqual(DeviceId.mos1, try mosfetDeviceId(1));
+    try std.testing.expectEqual(DeviceId.bsim4va, try mosfetDeviceId(54));
+    try std.testing.expectEqual(DeviceId.hicumL2_va, try bjtDeviceId(8));
+    try std.testing.expectEqual(DeviceId.jfet2, try jfetDeviceId(2));
+    try std.testing.expectEqual(DeviceId.mesa, try mesDeviceId(3));
+    // Missing-from-catalog and unknown levels are unsupported netlists, not
+    // panics: the loader turns this into a clean skip.
+    try std.testing.expectError(error.UnsupportedDevice, mosfetDeviceId(49));
+    try std.testing.expectError(error.UnsupportedDevice, mosfetDeviceId(1040));
     // Every tag must resolve to a type — consumers switch `inline else` over
     // the whole enum, so a tag that fails to resolve breaks their build.
     inline for (@typeInfo(DeviceId).@"enum".fields) |f| _ = DeviceId.Type(@field(DeviceId, f.name));
