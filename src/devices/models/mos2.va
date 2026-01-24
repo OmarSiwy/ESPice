@@ -98,6 +98,7 @@ module mos2(d, g, s, b);
 
     // ---- bias-dependent -------------------------------------------------
     real vds_x, mode, vgs_f, vbs_f, vds_f, sarg, sarg3, phi_vbs;
+    real vgs_r, vgd_r, vcrits, vcritd;
     real bargv, dsrgdb, dbrgdb, dgddvb, argjs, argjd;
     real vbin, xws, xwd, argss, argsd, gamasd, vth, xn, von, vgsx;
     real udenom, ufact, ueff, gammad, argv, sargv, arg, vdsat, vdsat_gf;
@@ -229,14 +230,24 @@ module mos2(d, g, s, b);
         cgbo_t = cgbo*leff*m;
 
         // ==================================================================
-        // 2. Mode swap: work in the frame where the frame-drain is the more
-        //    positive of di/si (docs 1.5).
+        // 2. §1.7 limiting (mos1.va's ladder) + mode swap (docs 1.5).
+        //    fetlim on both gate legs, limvds on the channel, pnjlim on both
+        //    bulk junctions; trailing `type` = VerA frame sign (PMOS limits
+        //    type·v). Clamps land on the shared x in source order, so every
+        //    probe below — section 9's included — reads limited voltages.
         // ==================================================================
-        vds_x = type*V(di, si);
+        vcrits = vt*ln(vt/(1.4142135623730951*isat_s));
+        vcritd = vt*ln(vt/(1.4142135623730951*isat_d));
+        vgs_r = type*$limit(V(g, si), "fetlim", type*vtox, type);
+        vgd_r = type*$limit(V(g, di), "fetlim", type*vtox, type);
+        vds_x = type*$limit(V(di, si), "limvds", type);
+        vgd_r = vgs_r - vds_x;
+        vbs_j = type*$limit(V(b, si), "pnjlim", vt, vcrits, type);
+        vbd_j = type*$limit(V(b, di), "pnjlim", vt, vcritd, type);
         mode  = (vds_x >= 0.0) ? 1.0 : -1.0;
         vds_f = mode*vds_x;
-        vgs_f = (mode > 0.0) ? type*V(g, si) : type*V(g, di);
-        vbs_f = (mode > 0.0) ? type*V(b, si) : type*V(b, di);
+        vgs_f = (mode > 0.0) ? vgs_r : vgd_r;
+        vbs_f = (mode > 0.0) ? vbs_j : vbd_j;
 
         // ==================================================================
         // 3. Body terms (mos2load.c "compute some useful quantities").
@@ -398,10 +409,10 @@ module mos2(d, g, s, b);
             gm     = beta*vdson;            // strong inversion: d(cdrain)/dvgsx
 
         // ==================================================================
-        // 9. Bulk junction diodes (docs 1.4) and their depletion charges
+        // 9. Bulk junction diodes (docs 1.4) and their depletion charges.
+        //    vbs_j/vbd_j are the section-2 pnjlim'd probes; limexp is already
+        //    tangent-continued above 80, so no flat-clamp hazard here.
         // ==================================================================
-        vbs_j = type*V(b, si);
-        vbd_j = type*V(b, di);
         ibs = isat_s*(limexp(vbs_j/vt) - 1.0) + gmin*vbs_j;
         ibd = isat_d*(limexp(vbd_j/vt) - 1.0) + gmin*vbd_j;
         qbs = qdep(vbs_j, czbs, pb_t, mj, fc) + qdep(vbs_j, czbssw, pb_t, mjsw, fc);

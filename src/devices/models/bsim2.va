@@ -29,10 +29,10 @@
 // it is what makes the subthreshold current *additive-equivalent* (it enters
 // the same Ids expression) instead of a multiplicative fudge factor.
 //
-// ponytail: no $limit. FastVAF renders $limit as the identity (see
-// models/vdmos.va:21-26 and FastVAF/src/codegen.zig) so fetlim/limvds/pnjlim
-// stay solver-side, exactly as in models/mos1.va, models/mos2.va,
-// models/mos6.va and models/diode.va — the whole legacy-MOS family.
+// fetlim/limvds/pnjlim are spelled with $limit as in models/mos1.va and the
+// rest of the legacy-MOS family: $limit stays the identity inside eval, and
+// VerA's contract `limit`/`seed` hooks hand the host the clamps to run
+// between the linear solve and the next eval.
 module bsim2(d, g, s, b);
     inout d, g, s, b;
     electrical d, g, s, b;
@@ -227,7 +227,7 @@ module bsim2(d, g, s, b);
     // bias-independent prep
     real leff, weff, lum, wum, il, iw, tabs, vt, cox, coxwl, bfac;
     real adrn, asrc, pdrn, psrc, isd, iss, czbs, czbssw, czbd, czbdsw;
-    real gdp, gsp, vddc;
+    real gdp, gsp, vddc, tyf, vtx, vcrits, vcritd;
     real vfbe, phie, phis3, k1e, k2e, eta0e, etabe;
     real mu0be, mus0e, musbe;
     real mu20e, mu2be, mu2ge, mu30e, mu3be, mu3ge, mu40e, mu4be, mu4ge;
@@ -236,7 +236,7 @@ module bsim2(d, g, s, b);
     real ai0e, aibe, bi0e, bibe, vghe, vgle;
     real omj, omjsw;
     // bias-dependent
-    real vgsr, vdsr, vbsr, vdsn, vbs, vgs, vds, mode;
+    real vgsr, vgdr, vdsr, vbsr, vdsn, vbs, vgs, vds, mode, uj;
     real phisb, t1s, eta, vth, vth0, nsub, vof, gg, aa;
     real wds, wpre, vgwk, vglo, slo, hspan, tsp, h00, h10, h01, h11;
     real vgst, vgeff, dvgeff, ua, ub, uvert, u1s, u1, vc, kk, vdsat, vdsch, t4;
@@ -345,6 +345,10 @@ module bsim2(d, g, s, b);
         // Is = JS * A_{S/D} (mos1 §1.4); the 1e-15 floor is b2ld.c's.
         iss = max(asrc * js, 1.0e-15);
         isd = max(adrn * js, 1.0e-15);
+        vcrits = vt * ln(vt / (1.4142135623730951 * iss));
+        vcritd = vt * ln(vt / (1.4142135623730951 * isd));
+        tyf    = type_;                    // $limit args must be real-typed
+        vtx    = vfbe + phie + k1e * sqrt(phie) - k2e * phie;  // zero-bias vth
 
         // CJ is F/m^2 and CJSW F/m: scale to farads before any charge use.
         czbs   = cj   * asrc;
@@ -361,10 +365,16 @@ module bsim2(d, g, s, b);
 
         // ==================================================================
         // Terminal voltages, type folding and the source/drain swap.
+        // §1.7 limiting, mos1.va's ladder: fetlim on both gate legs, limvds
+        // on the channel, pnjlim on both bulk junctions (vbsr here, vbdj at
+        // the diode block). Trailing tyf = VerA frame sign (PMOS limits
+        // type_·v); tyf is type_ as a real — integer $limit args are declined.
         // ==================================================================
-        vgsr = type_ * V(g, sp);
-        vdsr = type_ * V(dp, sp);
-        vbsr = type_ * V(b, sp);
+        vgsr = tyf * $limit(V(g, sp), "fetlim", vtx, tyf);
+        vgdr = tyf * $limit(V(g, dp), "fetlim", vtx, tyf);
+        vdsr = tyf * $limit(V(dp, sp), "limvds", tyf);
+        vgdr = vgsr - vdsr;
+        vbsr = tyf * $limit(V(b, sp), "pnjlim", vt, vcrits, tyf);
 
         vdsn = min(vdsr, 0.0);                   // swap offset
         vbs  = vbsr - vdsn;
@@ -508,11 +518,16 @@ module bsim2(d, g, s, b);
         end
 
         // ==================================================================
-        // Bulk junction diodes, on the true junction voltages (mode-free).
+        // Bulk junction diodes, on the true junction voltages (mode-free),
+        // pnjlim'd (vbsr above, vbdj here). Exponent tangent-continued above
+        // 80: a flat clamp zeroes the restoring slope on evals at unlimited x
+        // (LTE probes, sweep warm starts; see bjt.va pnj).
         // ==================================================================
-        vbdj = type_ * V(b, dp);
-        ibs = iss * (exp(min(vbsr / vt, 80.0)) - 1.0) + 1.0e-12 * vbsr;
-        ibd = isd * (exp(min(vbdj / vt, 80.0)) - 1.0) + 1.0e-12 * vbdj;
+        vbdj = tyf * $limit(V(b, dp), "pnjlim", vt, vcritd, tyf);
+        uj  = min(vbsr / vt, 80.0);
+        ibs = iss * (exp(uj) * (1.0 + (vbsr / vt - uj)) - 1.0) + 1.0e-12 * vbsr;
+        uj  = min(vbdj / vt, 80.0);
+        ibd = isd * (exp(uj) * (1.0 + (vbdj / vt - uj)) - 1.0) + 1.0e-12 * vbdj;
         I(b, sp) <+ m * type_ * ibs;
         I(b, dp) <+ m * type_ * ibd;
 

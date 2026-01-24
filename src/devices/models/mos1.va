@@ -69,19 +69,25 @@ module mos1(d, g, s, b);
     real depcap, argf, sargb, sargs, f2d, f3d, f4d, f2s, f3s, f4s;
     real gdrain, gsource;
     // bias-dependent
-    real vgs, vds, vbs, vbd, vgd, mode, vdsx, vgsx, vbx;
+    real vgs, vds, vbs, vbd, vgd, mode, vdsx, vgsx, vbx, vcrits, vcritd;
     real sbody, von, vgst, vdsat, bp, id, ibs, ibd, qbs, qbd;
     real vdsp, vddif, vddif1, vddif2, cgsp, cgsh, cgdh, cgbh;
     real capgs, capgd, capgb;
     real tmp;
 
-    // Bulk junction diode, section 1.4 (both junctions, same law).
+    // Bulk junction diode, section 1.4 (both junctions, same law). Exponent
+    // tangent-continued above 80·vtx: pnjlim keeps Newton iterates below it,
+    // but LTE probes and sweep warm starts evaluate at unlimited x, and a
+    // flat clamp there zeroes the restoring slope (see bjt.va pnj).
     analog function real jcur;
         input v, isat, vtx, gm;
         real v, isat, vtx, gm;
+        real u;
         begin
-            if (v > -3.0 * vtx) jcur = isat * (exp(v / vtx) - 1.0) + gm * v;
-            else jcur = gm * v - isat;
+            if (v > -3.0 * vtx) begin
+                u = min(v / vtx, 80.0);
+                jcur = isat * (exp(u) * (1.0 + (v / vtx - u)) - 1.0) + gm * v;
+            end else jcur = gm * v - isat;
         end
     endfunction
 
@@ -234,11 +240,19 @@ module mos1(d, g, s, b);
         else gsource = 0.0;
 
         // ============ bias, section 3 order ===============================
-        vgs = type * V(g, si);
-        vds = type * V(di, si);
-        vbs = type * V(b, si);
-        vbd = vbs - vds;
+        // §1.7 limiting, mos1load.c's ladder via the jfet.va idiom: fetlim on
+        // both gate legs, limvds on the channel, pnjlim on both bulk
+        // junctions. Trailing `type` = VerA frame sign (PMOS limits type·v);
+        // clamps apply to the shared x in source order, so limvds reads the
+        // gate-adjusted nodes and vgd is recomputed from the limited pair.
+        vcrits = vt * ln(vt / (1.4142135623730951 * isats));
+        vcritd = vt * ln(vt / (1.4142135623730951 * isatd));
+        vgs = type * $limit(V(g, si), "fetlim", type * vtox, type);
+        vgd = type * $limit(V(g, di), "fetlim", type * vtox, type);
+        vds = type * $limit(V(di, si), "limvds", type);
         vgd = vgs - vds;
+        vbs = type * $limit(V(b, si), "pnjlim", vt, vcrits, type);
+        vbd = type * $limit(V(b, di), "pnjlim", vt, vcritd, type);
 
         // 1.4 bulk diodes
         ibs = jcur(vbs, isats, vt, gmin);

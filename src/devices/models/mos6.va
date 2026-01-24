@@ -7,12 +7,10 @@
 // Chassis: docs/mos1-shichman-hodges.md S1.2-1.8 -- d'/s' series nodes, bulk
 // junction diodes + depletion charge, Meyer gate caps, mode swap, SPICE
 // temperature maps.
-// Voltage limiting (S1.7 fetlim/limvds/pnjlim) is the solver's job, as in
-// diode.va and mos1.va: the doc puts all three in devsup.c, i.e. host side, and
-// this frontend's $limit is a no-op passthrough (codegen.zig S4.5.15 -> contract
-// `limit`), so spelling them here would buy nothing. This file is the pure
-// device law; von/vgon/vt above are exactly the quantities the host hook needs,
-// and tVto = vbit + ty*gammax*sqphi is one line of host arithmetic from them.
+// Voltage limiting (S1.7 fetlim/limvds/pnjlim) is spelled with $limit as in
+// diode.va and mos1.va: $limit stays the identity inside eval, and VerA's
+// contract `limit`/`seed` hooks hand the host the clamps to run between the
+// linear solve and the next eval (codegen.zig S4.5.15).
 module mos6(d, g, s, b);
     inout d, g, s, b;
     electrical d, g, s, b;
@@ -91,8 +89,10 @@ module mos6(d, g, s, b);
     real kcx, phix, gammax, vtox, fermis, fermig, wkfng, wkfngs, vfb;
     real pbfact1, pbfactt, phio, phit, sqphi, pbo, pbt, vbit, ist;
     real gmaold, gmanew, capf, capfsw, isats, isatd, czbs, czbd, czbssw, czbdsw;
+    real vcrits, vcritd;
     // bias-dependent
-    real vgs, vds, vbs, vbd, vgx, vb, vdse, mode, sarg, von, vgon, vgonp;
+    real vgs, vds, vbs, vbd, vgd, vgx, vb, vdse, mode, sarg, von, vgon, vgonp;
+    real ux;
     real vdsat, vdsatm, idsat, lam, u, fu, clm, idch, gmch, ibs, ibd;
     real cgsm, cgdm, cgbm, cbase, vdd, vdd1, cgsb, cgdb;
 
@@ -242,12 +242,19 @@ module mos6(d, g, s, b);
         else grs = 0.0;
 
         // ==================================================================
-        // Bias
+        // Bias — S1.7 limiting, mos1.va's ladder: fetlim on both gate legs,
+        // limvds on the channel, pnjlim on both bulk junctions. Trailing `ty`
+        // = VerA frame sign (PMOS limits ty·v); clamps land on the shared x
+        // in source order, and vgd is recomputed from the limited pair.
         // ==================================================================
-        vds = ty * V(di, si);
-        vgs = ty * V(g, si);
-        vbs = ty * V(b, si);
-        vbd = vbs - vds;
+        vcrits = vt * ln(vt / (1.4142135623730951 * isats));
+        vcritd = vt * ln(vt / (1.4142135623730951 * isatd));
+        vgs = ty * $limit(V(g, si), "fetlim", ty * vtox, ty);
+        vgd = ty * $limit(V(g, di), "fetlim", ty * vtox, ty);
+        vds = ty * $limit(V(di, si), "limvds", ty);
+        vgd = vgs - vds;
+        vbs = ty * $limit(V(b, si), "pnjlim", vt, vcrits, ty);
+        vbd = ty * $limit(V(b, di), "pnjlim", vt, vcritd, ty);
 
         // Mode swap: reversed drain/source roles for vds < 0 (mos1 S1.5).
         if (vds >= 0.0) begin
@@ -294,11 +301,18 @@ module mos6(d, g, s, b);
             gmch  = idsat * clm * (nc * fu - 2.0 * nv * u * (1.0 - u)) / vgon;
         end
 
-        // ---- bulk junction diodes (mos1 S1.4) ------------------------------
-        if (vbs > -3.0 * vt) ibs = isats * (exp(vbs / vt) - 1.0) + gmin * vbs;
-        else ibs = gmin * vbs - isats;
-        if (vbd > -3.0 * vt) ibd = isatd * (exp(vbd / vt) - 1.0) + gmin * vbd;
-        else ibd = gmin * vbd - isatd;
+        // ---- bulk junction diodes (mos1 S1.4). Exponent tangent-continued
+        // above 80·vt: pnjlim keeps Newton iterates below it, but LTE probes
+        // and sweep warm starts evaluate at unlimited x, and a flat clamp
+        // there zeroes the restoring slope (see bjt.va pnj).
+        if (vbs > -3.0 * vt) begin
+            ux  = min(vbs / vt, 80.0);
+            ibs = isats * (exp(ux) * (1.0 + (vbs / vt - ux)) - 1.0) + gmin * vbs;
+        end else ibs = gmin * vbs - isats;
+        if (vbd > -3.0 * vt) begin
+            ux  = min(vbd / vt, 80.0);
+            ibd = isatd * (exp(ux) * (1.0 + (vbd / vt - ux)) - 1.0) + gmin * vbd;
+        end else ibd = gmin * vbd - isatd;
 
         // ==================================================================
         // Meyer intrinsic gate capacitances (mos1 S1.6, DEVqmeyer).
