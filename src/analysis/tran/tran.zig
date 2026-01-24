@@ -329,6 +329,16 @@ pub fn simulate(
     var dt_prev: f64 = dt;
     var dt_prev2: f64 = dt;
     var steps: u32 = 0;
+    // ZP_TRAN_STATS: step-economics telemetry. Wall time in a slow transient
+    // is (attempts × Newton iters × eval cost); this says WHICH factor.
+    const stats_on = std.c.getenv("ZP_TRAN_STATS") != null;
+    var st_attempts: u64 = 0;
+    var st_nr_iters: u64 = 0;
+    var st_rej_newton: u64 = 0;
+    var st_rej_state: u64 = 0;
+    var st_rej_lte: u64 = 0;
+    var st_order_drops: u64 = 0;
+    var st_bp_landings: u64 = 0;
     // Order control (ngspice-style): start at BE, promote to configured
     // method when LTE says it's safe. Drop back to BE at breakpoints to
     // suppress trap companion ringing after source-edge discontinuities.
@@ -377,14 +387,18 @@ pub fn simulate(
         var nr_opts = options.tol.newtonOpts(options.tol.itl4);
         nr_opts.dx_clamp = std.math.inf(f64);
         const nr = converger.run(ckt, ws, trial, t + dt, nr_opts, hook) catch converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 };
+        st_attempts += 1;
+        st_nr_iters += nr.iterations;
 
         if (!nr.converged) {
+            st_rej_newton += 1;
             // Rejected point: restore FSM devices to the last accepted state.
             _ = ckt.stateCtl(.revert);
             // Order drop first: a discontinuity rejects trap long before dt
             // is the problem. Retry at order 1 at the SAME dt; only halve
             // when the retry already ran order 1 (ngspice-style).
             if (!use_be and (trap or gear)) {
+                st_order_drops += 1;
                 use_be = true;
                 continue;
             }
@@ -399,6 +413,7 @@ pub fn simulate(
         // ngspice's raw output samples always straddle the true crossing, so
         // a sharp edge interpolates correctly onto its grid.
         if (dt > min_break and ckt.stateCtl(.query)) {
+            st_rej_state += 1;
             _ = ckt.stateCtl(.revert);
             use_be = true;
             dt = @max(0.25 * dt, min_break);
@@ -431,8 +446,10 @@ pub fn simulate(
                     options.tol.reltol, options.tol.abstol, options.tol.chgtol, options.tol.trtol,
                 );
                 if (del < 0.9 * dt) {
+                    st_rej_lte += 1;
                     _ = ckt.stateCtl(.revert);
                     if (!use_be and (trap or gear)) {
+                        st_order_drops += 1;
                         use_be = true;
                         continue;
                     }
@@ -502,6 +519,7 @@ pub fn simulate(
         // promotion check above re-promotes to trap on the next accepted step.
         if (bp_target) |bp| {
             if (@abs(t - bp) <= min_break) {
+                st_bp_landings += 1;
                 use_be = true;
                 // Re-emit the landed breakpoint one line-delay later (see
                 // echo_bps above). Dedupe within min_break; drop when full.
@@ -552,6 +570,13 @@ pub fn simulate(
 
         dt = dt_next;
         if (t + dt > options.t_stop) dt = options.t_stop - t;
+    }
+
+    if (stats_on) {
+        std.debug.print(
+            "tran-stats: accepted={d} attempts={d} nr_iters={d} rej[newton={d} lte={d} state={d}] order_drops={d} bp_landings={d} avg_dt={e:.3}\n",
+            .{ steps, st_attempts, st_nr_iters, st_rej_newton, st_rej_lte, st_rej_state, st_order_drops, st_bp_landings, if (steps > 0) t / @as(f64, @floatFromInt(steps)) else 0 },
+        );
     }
 
     // Ensure caller's buffer has the final result
