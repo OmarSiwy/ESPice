@@ -104,7 +104,12 @@ pub const Tolerances = struct {
             .reltol = self.reltol,
             .vntol = self.vntol,
             .residual_tol = self.residual_tol,
-            .gmin = self.gmin,
+            // DIAGONAL gmin is opt-in (op's gmin-stepping rung), never a
+            // default: ngspice's NIiter loads none — junction gmin lives in
+            // the device models. The always-on 1e-12 shunt this used to
+            // carry pinned every solution a little off ngspice's answer
+            // (voltage_divider read a 2.5e-9 offset from it).
+            .gmin = 0,
             .dx_clamp = self.dx_clamp,
         };
     }

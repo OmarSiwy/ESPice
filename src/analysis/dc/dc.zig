@@ -44,7 +44,7 @@ pub fn solveWarm(
     try ckt.computeBaseline();
     const ws = try ckt.workspace();
     var copts = options.tol.newtonOpts(options.tol.itl2);
-    copts.gmin = @max(gmin_extra, options.tol.gmin);
+    copts.gmin = gmin_extra; // 0 in the normal sweep; op's ladder raises it
     return converger.run(ckt, ws, x, 0, copts, root.EvalHook{});
 }
 
@@ -94,8 +94,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
             var lane_ctx: LaneCtx = .{ .source = t, .start = opts.start, .step = opts.step };
             const setup: lanes.LaneSetup = .{ .ctx = &lane_ctx, .apply = LaneCtx.apply, .restore = LaneCtx.restore };
-            var copts = opts.tol.newtonOpts(opts.tol.itl1);
-            copts.gmin = opts.tol.gmin;
+            const copts = opts.tol.newtonOpts(opts.tol.itl1);
             if (lanes.solveLanesGpu(ckt, setup, x_lanes, results, copts)) {
                 for (0..npoints) |pt| {
                     const row = data[pt * ncols ..][0..ncols];
