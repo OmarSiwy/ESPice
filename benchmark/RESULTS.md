@@ -4,4 +4,4 @@ Pass: per-variable RMS ≤ 1e-3, max ≤ 1e-2
 
 | fixture | zp-cpu | zp-gpu | ngspice | xyce | cpu/ng | gpu/ng | zp-MB | ng-MB | xy-MB | cpu-max | cpu-rms | cpu | gpu-max | gpu-rms | gpu |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| devices/hfet_inverter | 119.61ms | 116.95ms | 19.42ms | skip | 0.2x | 0.2x | 15.5 | 12.3 | - | 2.33e0 | 1.78e0 | FAIL | 2.33e0 | 1.78e0 | FAIL |
+| bjt/diff_amp | 52.32ms | 50.00ms | 10.27ms | skip | 0.2x | 0.2x | 15.3 | 12.4 | - | 1.05e-6 | 6.37e-7 | PASS | 1.05e-6 | 6.37e-7 | PASS |

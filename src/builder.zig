@@ -399,6 +399,20 @@ pub fn addDynDevices(b: *Builder, arena: std.mem.Allocator, nl: types.Netlist) !
     }
 }
 
+/// ngspice IOPR alternate parameter spellings — card key accepted for a model
+/// field of the canonical name. Comptime: drives applyKv's fallback probe.
+fn aliasOf(comptime field: []const u8) ?[]const u8 {
+    const pairs = [_][2][]const u8{
+        .{ "vt0", "vto" }, .{ "vto", "vt0" },
+        .{ "vaf", "va" },  .{ "VAR", "vb" },
+        .{ "ikf", "ik" },  .{ "cjs", "ccs" },
+    };
+    inline for (pairs) |p| {
+        if (comptime std.mem.eql(u8, field, p[0])) return p[1];
+    }
+    return null;
+}
+
 fn applyKvDyn(set: *const fn ([*]u8, []const u8, f64) bool, dest: [*]u8, kv: []const types.Kv) void {
     for (kv) |item| {
         if (valueNumber(item.value)) |num| _ = set(dest, item.key, num);
@@ -750,13 +764,23 @@ pub const NetBuilder = struct {
     fn bindSource(self: *const NetBuilder, comptime D: type, dev: types.Device) !struct { D.Model, D.Instance } {
         var model: D.Model = .{};
         var instance: D.Instance = .{};
-        _ = setParam(D, &model, &instance, "dc", sourceDc(dev));
+        const dc = sourceDc(dev);
+        _ = setParam(D, &model, &instance, "dc", dc orelse 0);
         applySourceWaveform(&model, dev);
         applySourceWaveform(&instance, dev);
         try applyKv(&model, dev.kv);
         try applyKv(&instance, dev.kv);
         self.resolvePulseDefaults(&model);
         self.resolvePulseDefaults(&instance);
+        // ngspice: "the DC value of a source with a transient specification
+        // but no DC value is the transient value at t = 0" — resolved at BIND
+        // so the model's static branch reads `dc` unconditionally and a .dc
+        // sweep's override WINS (rtlinv sweeps a PULSE source with no DC
+        // card; the sweep used to be a no-op against the waveform).
+        if (dc == null) {
+            dcFromWaveform(&model);
+            dcFromWaveform(&instance);
+        }
         return .{ model, instance };
     }
 
@@ -1220,6 +1244,33 @@ fn applySourceWaveform(target: anytype, dev: types.Device) void {
     }
 }
 
+/// The waveform's t = 0 value, per shape (each pre-TD branch of
+/// vsource.va/isource.va): PULSE/EXP hold their first level, SIN emits
+/// VO + VA*sin(2*pi*phase/360), PWL holds its first point, SFFM its offset,
+/// AM starts at 0 (the `dc` default already).
+fn dcFromWaveform(target: anytype) void {
+    const T = @TypeOf(target.*);
+    if (comptime !@hasField(T, "waveform") or !@hasField(T, "dc")) return;
+    const rd = struct {
+        fn f(t: anytype, comptime a: []const u8, comptime b: []const u8) f64 {
+            if (comptime @hasField(T, a)) return @field(t, a);
+            if (comptime @hasField(T, b)) return @field(t, b);
+            return 0;
+        }
+    }.f;
+    const v: f64 = switch (target.waveform) {
+        1 => rd(target.*, "pulse_v1", "pulse_i1"),
+        2 => rd(target.*, "sin_vo", "sin_ioff") +
+            rd(target.*, "sin_va", "sin_iamp") *
+                @sin(2.0 * std.math.pi * rd(target.*, "sin_phase", "sin_phase") / 360.0),
+        3 => rd(target.*, "exp_v1", "exp_i1"),
+        4 => rd(target.*, pwlSlot("pwl_values", 0), pwlSlot("pwl_values", 0)),
+        5 => rd(target.*, "sffm_vo", "sffm_io"),
+        else => return,
+    };
+    target.dc = @floatCast(v);
+}
+
 fn applyGroupArgs(comptime T: type, target: anytype, args: []const types.Value, comptime field_pairs: []const []const u8) void {
     comptime var i: usize = 0;
     inline while (i < field_pairs.len) : (i += 2) {
@@ -1316,7 +1367,7 @@ fn kvNumber(kv: []const types.Kv, key: []const u8) ?f64 {
     return null;
 }
 
-fn sourceDc(dev: types.Device) f64 {
+fn sourceDc(dev: types.Device) ?f64 {
     if (kvNumber(dev.kv, "dc")) |dc| return dc;
     var skip: usize = 0; // numbers owed to a preceding AC keyword (mag [phase])
     for (dev.positional, 0..) |pos, idx| switch (pos) {
@@ -1341,7 +1392,7 @@ fn sourceDc(dev: types.Device) f64 {
         },
         else => {},
     };
-    return 0;
+    return null;
 }
 
 fn modelName(dev: types.Device) ?[]const u8 {
@@ -1467,12 +1518,10 @@ fn applyKv(target: anytype, kv: []const types.Kv) !void {
         if (comptime isScalarAssignable(field.type)) {
             if (kvNumber(kv, field.name)) |num|
                 @field(target.*, field.name) = castField(field.type, num)
-            else if (comptime std.mem.eql(u8, field.name, "vt0")) {
-                // ngspice accepts both "vt0" and "vto" spellings (IOPR).
-                if (kvNumber(kv, "vto")) |num|
-                    @field(target.*, field.name) = castField(field.type, num);
-            } else if (comptime std.mem.eql(u8, field.name, "vto")) {
-                if (kvNumber(kv, "vt0")) |num|
+            else if (comptime aliasOf(field.name)) |alias| {
+                // ngspice IOPR alternate spellings: vt0|vto, vaf|va, var|vb,
+                // ikf|ik, cjs|ccs (bjt.c iopr table).
+                if (kvNumber(kv, alias)) |num|
                     @field(target.*, field.name) = castField(field.type, num);
             }
         }
