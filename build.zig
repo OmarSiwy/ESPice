@@ -3,7 +3,13 @@ const gompute_build = @import("gompute");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
-    const optimize = b.standardOptimizeOption(.{});
+    // ReleaseFast by DEFAULT: this is a numerical simulator whose proof rule
+    // ships bench numbers in commit messages — an accidental Debug `zig build
+    // bench` benchmarked a Debug espice against -O2 ngspice and every CPU
+    // column in RESULTS.md was ~10-40x pessimistic. Debug stays one
+    // `-Doptimize=Debug` away. (Not `standardOptimizeOption`: in 0.16 its
+    // preferred mode only rides the `-Drelease` flag; the default stays Debug.)
+    const optimize = b.option(std.builtin.OptimizeMode, "optimize", "Prioritize performance, safety, or binary size") orelse .ReleaseFast;
     // Mixed precision (docs/gpu-device-eval.md). A listed model gets vera's
     // `--jac-f32`, which emits `pub const jac_f32 = true`; `engine.jacFloat`
     // reads it and gives that device a `Dual` whose DERIVATIVE half is f32.
@@ -137,8 +143,15 @@ pub fn build(b: *std.Build) void {
         .root_module = M.make(b.path("src/main.zig"), app_imports),
     });
     exe.root_module.link_libc = true;
-    exe.use_llvm = false;
-    exe.use_lld = false;
+    // Backend follows the optimize mode: the self-hosted x86 backend compiles
+    // fast but emits UNOPTIMIZED code whatever the mode says — a "ReleaseFast"
+    // espice off it benchmarked 10-40x behind ngspice while the profile showed
+    // plain scalar device eval. Debug keeps the fast-iterating self-hosted
+    // backend; any Release* goes through LLVM, which is the only backend with
+    // an optimizer. Tests stay self-hosted below — correctness needs no
+    // optimizer and the compile-time win is the whole point there.
+    exe.use_llvm = optimize != .Debug;
+    exe.use_lld = optimize != .Debug;
     b.installArtifact(exe);
 
     // GPU kernels, unconditionally: the arch probe inside `emitKernels` is what
