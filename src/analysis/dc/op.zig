@@ -11,6 +11,11 @@ pub const Method = enum { plain, gmin, source, jfnk, optran };
 pub const Options = struct {
     tol: converger.Tolerances = .{},
     warm_start: bool = false,
+    /// ngspice's TRANOP/DCOP split: the operating point that STARTS a
+    /// transient runs in the LRM "ic" phase (analysis("tran") also true),
+    /// so waveform sources evaluate at t = 0 instead of their DC value.
+    /// The engine sets this when the deck contains a transient-family job.
+    tran_op: bool = false,
 };
 
 pub const SolveResult = struct {
@@ -41,7 +46,7 @@ pub fn solve(
     // and the OP is it: this is where a switch latches its power-on state from
     // `ic`, before any @(cross) can move it. computeBaseline() evaluates
     // const-Jacobian batches, so the state has to be in place first.
-    ckt.setSimState(.{ .kind = .dc, .initial_step = true });
+    ckt.setSimState(.{ .kind = if (options.tran_op) .ic else .dc, .initial_step = true });
     if (!options.warm_start) coldStart(ckt, x);
     try ckt.computeBaseline();
 
@@ -53,7 +58,7 @@ pub fn solve(
     if (r.converged) _ = ckt.stateCtl(.commit);
     // The latch is committed; every later eval at this OP (ac, tf, noise,
     // post-processing) is NOT an initial step and must not re-latch.
-    ckt.setSimState(.{ .kind = .dc });
+    ckt.setSimState(.{ .kind = if (options.tran_op) .ic else .dc });
     return r;
 }
 
@@ -241,7 +246,7 @@ pub fn solveLadder(
         }, opa) catch null;
         // The transient left .tran device state behind; the op contract is
         // a static circuit whatever the outcome.
-        ckt.setSimState(.{ .kind = .dc });
+        ckt.setSimState(.{ .kind = if (options.tran_op) .ic else .dc });
         ckt.has_baseline = false;
         try ckt.computeBaseline();
         if (sim != null and sim.?.completed) {

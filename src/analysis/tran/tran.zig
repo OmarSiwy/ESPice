@@ -253,11 +253,13 @@ pub fn simulate(
     // static state. It normally does three things this transient now owes:
     // latch power-on FSM state under `initial_step` (§5.10.2 — the OP is the
     // first step of the analysis; with uic the transient is), commit that
-    // latch, and leave `.kind = .dc` behind for the charge seeding below.
+    // latch, and leave a static kind behind for the charge seeding below.
+    // .ic, not .dc: the uic start IS the transient's ic phase, so waveform
+    // sources evaluate at t = 0 (analysis("tran") also true there).
     if (options.uic) {
-        ckt.setSimState(.{ .kind = .dc, .initial_step = true });
+        ckt.setSimState(.{ .kind = .ic, .initial_step = true });
         _ = ckt.stateCtl(.commit);
-        ckt.setSimState(.{ .kind = .dc });
+        ckt.setSimState(.{ .kind = .ic });
     }
     try ckt.computeBaseline();
 

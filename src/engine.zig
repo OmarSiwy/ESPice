@@ -329,7 +329,17 @@ pub const Simulation = struct {
     fn ensureOp(self: *Simulation, current: ?[]f64) ![]f64 {
         if (current) |x| return x;
         const x = try self.arena.alloc(f64, self.circuit.n);
-        const result = try analysis.AnalysisId.Module(.op).solve(&self.circuit, x, .{});
+        // ngspice's TRANOP/DCOP split, at deck granularity (ONE memoized op
+        // serves every job): a deck with a transient-family job biases its
+        // waveform sources at t = 0, everything else at the DC value.
+        // ponytail: a deck mixing .op with .tran gets the tranop flavor for
+        // both; per-job op flavors the day a fixture measures the difference.
+        var tran_op = false;
+        for (self.jobs[0..self.n_jobs]) |job| switch (job) {
+            .tran, .four, .tran_noise, .envelope, .pss, .qpss, .pnoise, .pac, .pxf => tran_op = true,
+            else => {},
+        };
+        const result = try analysis.AnalysisId.Module(.op).solve(&self.circuit, x, .{ .tran_op = tran_op });
         if (!result.converged) return error.OpDidNotConverge;
         return x;
     }

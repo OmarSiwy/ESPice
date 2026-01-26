@@ -4,4 +4,4 @@ Pass: per-variable RMS ≤ 1e-3, max ≤ 1e-2
 
 | fixture | zp-cpu | zp-gpu | ngspice | xyce | cpu/ng | gpu/ng | zp-MB | ng-MB | xy-MB | cpu-max | cpu-rms | cpu | gpu-max | gpu-rms | gpu |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| bjt/diff_amp | 52.32ms | 50.00ms | 10.27ms | skip | 0.2x | 0.2x | 15.3 | 12.4 | - | 1.05e-6 | 6.37e-7 | PASS | 1.05e-6 | 6.37e-7 | PASS |
+| devices/mesa_inverter | 54.19ms | 66.46ms | 12.13ms | skip | 0.2x | 0.2x | 16.9 | 12.0 | - | 6.36e-4 | 1.55e-4 | PASS | 6.36e-4 | 1.55e-4 | PASS |
