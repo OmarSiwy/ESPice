@@ -746,6 +746,19 @@ pub fn Parser(comptime Tok: type) type {
                 return p.parseAtom();
             }
 
+            /// A probe argument: everything up to `,` / `)` / whitespace,
+            /// kept verbatim as an ident (node or device name).
+            fn parseNodeArg(p: *ExprP) Error!*const ir.Expr {
+                p.skipWs();
+                const start = p.pos;
+                while (p.pos < p.text.len) : (p.pos += 1) {
+                    const ch = p.text[p.pos];
+                    if (ch == ',' or ch == ')' or ch == ' ' or ch == '\t') break;
+                }
+                if (p.pos == start) return error.ParseError;
+                return p.mk(.{ .ident = p.text[start..p.pos] });
+            }
+
             fn parseAtom(p: *ExprP) Error!*const ir.Expr {
                 const c = p.peek() orelse return error.ParseError;
                 if (c == '(') {
@@ -784,9 +797,20 @@ pub fn Parser(comptime Tok: type) type {
                     if (p.peek() == '(') {
                         p.pos += 1;
                         var args: std.ArrayList(*const ir.Expr) = .empty;
+                        // v(a[,b]) / i(vname) name nodes and devices, not
+                        // sub-expressions: "10" is the node called 10, and a
+                        // node called 1n must not lex as 1e-9.  Keep the raw
+                        // token as an ident so probe extraction and subckt
+                        // node renaming both see the name.
+                        const is_probe = ident_name.len == 1 and
+                            (ident_name[0] == 'v' or ident_name[0] == 'V' or
+                                ident_name[0] == 'i' or ident_name[0] == 'I');
                         if (p.peek() != ')') {
                             while (true) {
-                                try args.append(p.arena, try p.parseBin(0));
+                                try args.append(p.arena, if (is_probe)
+                                    try p.parseNodeArg()
+                                else
+                                    try p.parseBin(0));
                                 const nx = p.peek() orelse return error.ParseError;
                                 if (nx == ',') {
                                     p.pos += 1;
@@ -827,6 +851,54 @@ pub fn Parser(comptime Tok: type) type {
                 if (std.mem.eql(u8, needle, p)) return m;
             }
             return null;
+        }
+
+        /// One subckt-expansion node rename: port -> parent node, ground
+        /// stays, anything else becomes `<instance>.<node>`.
+        fn mapNode(arena: std.mem.Allocator, ports: []const []const u8, mappings: []const []const u8, iname: []const u8, n: []const u8) Error![]const u8 {
+            // ponytail: linear scan beats HashMap for typical port counts (2-8)
+            if (portLookup(ports, mappings, n)) |mapped| return mapped;
+            if (n.len <= 3 and (std.mem.eql(u8, n, "0") or std.mem.eql(u8, n, "gnd"))) return n;
+            return concatDot(arena, iname, n);
+        }
+
+        /// Clone `e` with the args of every V() probe renamed via mapNode.
+        /// I() probe args name devices, whose rename (concatDot the other way
+        /// round) happens on the device card itself; leave them alone.
+        fn mapProbeNodes(arena: std.mem.Allocator, e: *const ir.Expr, ports: []const []const u8, mappings: []const []const u8, iname: []const u8) Error!*const ir.Expr {
+            switch (e.*) {
+                .num, .ident => return e,
+                .call => |c| {
+                    const is_v = c.name.len == 1 and (c.name[0] == 'v' or c.name[0] == 'V');
+                    const args = try arena.alloc(*const ir.Expr, c.args.len);
+                    for (c.args, args) |a, *o| {
+                        if (is_v and a.* == .ident) {
+                            const out = try arena.create(ir.Expr);
+                            out.* = .{ .ident = try mapNode(arena, ports, mappings, iname, a.ident) };
+                            o.* = out;
+                        } else {
+                            o.* = try mapProbeNodes(arena, a, ports, mappings, iname);
+                        }
+                    }
+                    const out = try arena.create(ir.Expr);
+                    out.* = .{ .call = .{ .name = c.name, .args = args } };
+                    return out;
+                },
+                .unop => |u| {
+                    const out = try arena.create(ir.Expr);
+                    out.* = .{ .unop = .{ .op = u.op, .a = try mapProbeNodes(arena, u.a, ports, mappings, iname) } };
+                    return out;
+                },
+                .binop => |b| {
+                    const out = try arena.create(ir.Expr);
+                    out.* = .{ .binop = .{
+                        .op = b.op,
+                        .a = try mapProbeNodes(arena, b.a, ports, mappings, iname),
+                        .b = try mapProbeNodes(arena, b.b, ports, mappings, iname),
+                    } };
+                    return out;
+                },
+            }
         }
 
         fn countExpanded(devices: []const ir.Device, subckts: *const std.StringHashMapUnmanaged(Subckt), depth: usize) usize {
@@ -893,16 +965,23 @@ pub fn Parser(comptime Tok: type) type {
                 nd.name = try concatDot(arena, sd.name, d.name);
                 const dev_nodes = try arena.alloc([]const u8, sd.nodes.len);
                 for (sd.nodes, dev_nodes) |n, *o| {
-                    // ponytail: linear scan beats HashMap for typical port counts (2-8)
-                    if (portLookup(sub.ports, d.nodes, n)) |mapped| {
-                        o.* = mapped;
-                    } else if (n.len <= 3 and (std.mem.eql(u8, n, "0") or std.mem.eql(u8, n, "gnd"))) {
-                        o.* = n;
-                    } else {
-                        o.* = try concatDot(arena, d.name, n);
-                    }
+                    o.* = try mapNode(arena, sub.ports, d.nodes, d.name, n);
                 }
                 nd.nodes = dev_nodes;
+                // V(node) probes inside behavioral expressions name subckt
+                // nodes too; rename them with the same map the device nodes
+                // just went through.
+                for (nd.kv) |kvp| {
+                    if (kvp.value != .expr) continue;
+                    const kv2 = try arena.alloc(ir.Kv, nd.kv.len);
+                    for (nd.kv, kv2) |src_kv, *o| {
+                        o.* = src_kv;
+                        if (src_kv.value == .expr)
+                            o.value = .{ .expr = try mapProbeNodes(arena, src_kv.value.expr, sub.ports, d.nodes, d.name) };
+                    }
+                    nd.kv = kv2;
+                    break;
+                }
                 try expandInto(arena, out, nd, subckts, depth + 1, this_type, this_instance, type_map, instance_counter, genv);
             }
         }
