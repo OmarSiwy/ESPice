@@ -264,6 +264,18 @@ pub fn SparseLu(comptime T: type) type {
             // Build refactor scatter tape: prow[p] = pinv[row_idx[p]]
             for (row_idx[0..self.prow.len], self.prow) |r, *pr| pr.* = self.pinv[r];
 
+            // ZP_LU_STATS: one line per full factor — n, input nnz, fill.
+            // link_libc guard: the solvers test module builds without libc,
+            // same idiom as direct.zig's ESPICE_NO_BBD.
+            if (comptime @import("builtin").link_libc) if (std.c.getenv("ZP_LU_STATS") != null) {
+                std.debug.print("lu-stats: n={d} nnz={d} L={d} U={d} fill={d:.1}x\n", .{
+                    n,                       col_ptr[n],
+                    self.li.items.len,       self.ui.items.len,
+                    @as(f64, @floatFromInt(self.li.items.len + self.ui.items.len)) /
+                        @as(f64, @floatFromInt(col_ptr[n])),
+                });
+            };
+
             self.factored = true;
         }
 
