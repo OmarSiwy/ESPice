@@ -409,6 +409,12 @@ fn aliasOf(comptime field: []const u8) ?[]const u8 {
         // mesa.va channel depth: ngspice's card key is `d`, which Verilog-A
         // cannot use as a parameter name (drain port).
         .{ "dch", "d" },
+        // `u0` is a Zig primitive type name, so VerA's naming.zig emits the
+        // Model field as `u0Z` (its escape marker) — the card key stays `u0`.
+        // Without this alias every U0= card silently kept the default
+        // mobility (bsim3 fixtures drew 2x current; mos1's U0 was equally
+        // dead when TOX was given).
+        .{ "u0Z", "u0" },
     };
     inline for (pairs) |p| {
         if (comptime std.mem.eql(u8, field, p[0])) return p[1];
@@ -445,8 +451,10 @@ fn isValueForm(comptime D: type) bool {
 fn setParam(comptime D: type, model: *D.Model, instance: *D.Instance, comptime field: []const u8, value: f64) bool {
     if (comptime @hasField(D.Model, field)) {
         @field(model.*, field) = castField(@TypeOf(@field(model.*, field)), value);
+        markGiven(model, field);
     } else if (comptime @hasField(D.Instance, field)) {
         @field(instance.*, field) = castField(@TypeOf(@field(instance.*, field)), value);
+        markGiven(instance, field);
     } else return false;
     return true;
 }
@@ -1124,10 +1132,13 @@ fn isPType(kind: []const u8) bool {
 fn setPolarity(comptime D: type, model: *D.Model) !void {
     if (comptime @hasField(D.Model, "typeZ")) {
         model.typeZ = -1; // i64 on most, f64 on mos1/mos2 — `-1` coerces to both
+        markGiven(model, "typeZ"); // bsim4va: `if (!$param_given(type)) type = NMOS`
     } else if (comptime @hasField(D.Model, "typeZ5f")) {
         model.typeZ5f = -1; // bsim2 declares `type_`
+        markGiven(model, "typeZ5f");
     } else if (comptime @hasField(D.Model, "dev_type")) {
         model.dev_type = -1; // mos3
+        markGiven(model, "dev_type");
     } else {
         // ponytail: mos6/mos9/jfet/jfet2/mes/mesa/vdmos/bsimsoi/hisim have no
         // polarity parameter at ALL, so a P-type card on them cannot be honoured.
@@ -1713,16 +1724,30 @@ fn applyKv(target: anytype, kv: []const types.Kv) !void {
     @setEvalBranchQuota(10_000);
     inline for (@typeInfo(T).@"struct".fields) |field| {
         if (comptime isScalarAssignable(field.type)) {
-            if (kvNumber(kv, field.name)) |num|
-                @field(target.*, field.name) = castField(field.type, num)
-            else if (comptime aliasOf(field.name)) |alias| {
+            if (kvNumber(kv, field.name)) |num| {
+                @field(target.*, field.name) = castField(field.type, num);
+                markGiven(target, field.name);
+            } else if (comptime aliasOf(field.name)) |alias| {
                 // ngspice IOPR alternate spellings: vt0|vto, vaf|va, var|vb,
                 // ikf|ik, cjs|ccs (bjt.c iopr table).
-                if (kvNumber(kv, alias)) |num|
+                if (kvNumber(kv, alias)) |num| {
                     @field(target.*, field.name) = castField(field.type, num);
+                    markGiven(target, field.name);
+                }
             }
         }
     }
+}
+
+/// §9.19 `$param_given`: VerA emits a `<name>__given: bool = false` companion
+/// for every parameter the model queries. Binding a card value without raising
+/// the flag leaves the model in its "defaulted" branch — bsim3's b3temp-style
+/// derived defaults (k1/k2/vth0/vfb interdependence) mis-fire, and mos1's
+/// NSUB-driven overrides never ran. No-op for fields without a companion.
+fn markGiven(target: anytype, comptime field: []const u8) void {
+    const T = @TypeOf(target.*);
+    if (comptime @hasField(T, field ++ "__given"))
+        @field(target.*, field ++ "__given") = true;
 }
 
 fn isScalarAssignable(comptime T: type) bool {
