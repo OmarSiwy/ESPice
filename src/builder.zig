@@ -598,7 +598,9 @@ pub const NetBuilder = struct {
         // and ate a 3-terminal VDMOS's model name as its bulk node.
         var norm: BjtNormBufs = undefined;
         const dev = if (letter == 'q' or letter == 'm') normalizeBjt(dev_in, self.nl.models, &norm) else dev_in;
-        if (devices.letter_map.get(&.{letter}) == null) {
+        // 'u' (URC) has no DeviceId behind it: the card expands into
+        // resistor/capacitor/diode lumps in addUrc, like ngspice's URCsetup.
+        if (letter != 'u' and devices.letter_map.get(&.{letter}) == null) {
             if (inferDeviceFromModel(dev, self.nl.models) == null)
                 return error.UnsupportedDevice;
         }
@@ -660,6 +662,7 @@ pub const NetBuilder = struct {
             // TXL (y) is the same RLGC physics as LTRA (o); both take the
             // Bergeron-section expansion when it applies.
             'o', 'y' => try self.addLossyLine(dev),
+            'u' => try self.addUrc(dev),
             else => try self.addByLetter(letter, dev),
         }
     }
@@ -726,6 +729,103 @@ pub const NetBuilder = struct {
             } else {
                 prev = t_out;
             }
+        }
+    }
+
+    /// URC (U card): `Uxxx n1 n2 ngnd model [l=len] [n=lumps]`. ngspice has no
+    /// URC kernel either — URCsetup expands the card at setup into a ladder of
+    /// ordinary R/C lumps (diodes when ISPERL is set), sized geometrically by
+    /// K from both ends toward the middle so the totals telescope to exactly
+    /// L*RPERL and L*CPERL. Same expansion here, at build time, into the
+    /// existing resistor/capacitor/diode batches.
+    fn addUrc(self: *NetBuilder, dev: types.Device) !void {
+        // URC model params + defaults (urcsetup.c). A missing .model card is
+        // legal in ngspice (default U model) — all defaults apply.
+        var k: f64 = 1.5;
+        var fmax: f64 = 1e9;
+        var rperl: f64 = 1000;
+        var cperl: f64 = 1e-12;
+        var isperl: f64 = 0;
+        var rsperl: f64 = 0;
+        if (modelName(dev)) |name| {
+            if (findModel(self.nl.models, name)) |m| {
+                k = kvNumber(m.kv, "k") orelse k;
+                fmax = kvNumber(m.kv, "fmax") orelse fmax;
+                rperl = kvNumber(m.kv, "rperl") orelse rperl;
+                cperl = kvNumber(m.kv, "cperl") orelse cperl;
+                isperl = kvNumber(m.kv, "isperl") orelse isperl;
+                rsperl = kvNumber(m.kv, "rsperl") orelse rsperl;
+            }
+        }
+        // ngspice's URClength default is a calloc'd 0.0, which degenerates to
+        // 0-ohm lumps; 1 m is the sane "unit line" a card without l= means.
+        const len = kvNumber(dev.kv, "l") orelse 1.0;
+        const p = k;
+        const r0 = len * rperl;
+        const c0 = len * cperl;
+        const is0 = len * isperl;
+
+        const lumps: u32 = if (kvNumber(dev.kv, "n")) |nv|
+            // clamp guards @intFromFloat UB on absurd cards; ngspice's own
+            // comment says "may want to limit lumps to <= 100 or so".
+            @intFromFloat(std.math.clamp(nv, 1, 1000))
+        else blk: {
+            // URCsetup: lump count from FMAX so the finest lump's pole clears
+            // the highest frequency of interest.
+            const wnorm = fmax * r0 * c0 * 2.0 * std.math.pi;
+            const est = @log(wnorm * ((p - 1) / p) * ((p - 1) / p)) / @log(p);
+            // `!(est > 3)` also catches the NaN/inf a K<=1 card produces
+            // (@intFromFloat on those is UB; ngspice leaves that hole open).
+            break :blk if (wnorm < 35 or !(est > 3)) 3 else @intFromFloat(@min(est, 1000));
+        };
+        const lumps_f: f64 = @floatFromInt(lumps);
+
+        // Geometric sizing (urcsetup.c): lump i carries r1*K^(i-1), c1*K^(i-1).
+        const r1 = r0 * (p - 1) / (2 * std.math.pow(f64, p, lumps_f) - 2);
+        const c1 = c0 * (p - 1) / (std.math.pow(f64, p, lumps_f - 1) * (p + 1) - 2);
+        const is1 = is0 * (p - 1) / (std.math.pow(f64, p, lumps_f - 1) * (p + 1) - 2);
+        const rd = len * lumps_f * rsperl;
+
+        const pos = if (dev.nodes.len > 0) try self.b.internNode(dev.nodes[0]) else GROUND;
+        const neg = if (dev.nodes.len > 1) try self.b.internNode(dev.nodes[1]) else GROUND;
+        const gnd = if (dev.nodes.len > 2) try self.b.internNode(dev.nodes[2]) else GROUND;
+
+        // ngspice keys the diode form off "ISPERL given" — even ISPERL=0 —
+        // turning every lump into an is=0 diode whose only effect is its
+        // depletion capacitance. ISPERL > 0 is the intended trigger; the
+        // linear capacitor IS the zero-current limit of that diode.
+        const use_diodes = isperl > 0;
+        var prop: f64 = 1; // K^(i-1)
+        var lowl = pos; // low-side chain head (walks pos -> middle)
+        var hir = neg; // high-side chain head (walks neg -> middle)
+        for (1..lumps + 1) |i| {
+            const last = i == lumps;
+            const hil = self.b.addNode();
+            // The chains meet at the last hi node.
+            const lowr = if (last) hil else self.b.addNode();
+            const r: f64 = prop * r1;
+            try self.b.addDevice(devices.resistor, .{ .r = @floatCast(r) }, .{}, [2]u32{ lowl, lowr });
+            try self.b.addDevice(devices.resistor, .{ .r = @floatCast(r) }, .{}, [2]u32{ hil, hir });
+            if (use_diodes) {
+                const Diode = devices.DeviceId.Type(.diode);
+                if (comptime !isValueForm(Diode)) return error.UnsupportedDevice;
+                // ngspice shares one diode model (is=i1, cjo=c1, rs=rd) and
+                // scales per lump with area=prop; diode.va has no area, so
+                // the area scaling is folded into per-lump model values.
+                var dm: Diode.Model = .{};
+                dm.is = @floatCast(is1 * prop);
+                dm.cjo = @floatCast(c1 * prop);
+                dm.rs = @floatCast(rd / prop);
+                try self.b.addDevice(Diode, dm, .{}, [2]u32{ lowr, gnd });
+                if (!last) try self.b.addDevice(Diode, dm, .{}, [2]u32{ hil, gnd });
+            } else {
+                const cm: devices.capacitor.Model = .{ .c = @floatCast(prop * c1) };
+                try self.b.addDevice(devices.capacitor, cm, .{}, [2]u32{ lowr, gnd });
+                if (!last) try self.b.addDevice(devices.capacitor, cm, .{}, [2]u32{ hil, gnd });
+            }
+            prop *= p;
+            lowl = lowr;
+            hir = hil;
         }
     }
 
