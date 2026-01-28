@@ -15,6 +15,12 @@ x1  1 2 3 inv
 x2  1 3 4 inv
 
 .options noacct
+* ngspice's unaided OP here is a false convergence (its own hfet equations
+* are violated by 0.55 mA at that point — hfetload.c picks the wrong
+* controlling voltage in reverse mode). Nodeset lands it on the true DC
+* solution, which espice reaches unaided; with it both engines agree to
+* 6 digits.
+.nodeset v(3)=1.955692 v(4)=0.206342
 .tran 0.01n 3n
 .print tran all
 .model adrv nhfet level=5 rd=60 rs=60 m=2.57 lambda=0.17
