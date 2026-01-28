@@ -1139,9 +1139,12 @@ fn setPolarity(comptime D: type, model: *D.Model) !void {
     } else if (comptime @hasField(D.Model, "dev_type")) {
         model.dev_type = -1; // mos3
         markGiven(model, "dev_type");
+    } else if (comptime @hasField(D.Model, "mtype")) {
+        model.mtype = -1; // mos6/mos9 spell polarity `mtype`
+        markGiven(model, "mtype");
     } else {
-        // ponytail: mos6/mos9/jfet/jfet2/mes/mesa/vdmos/bsimsoi/hisim have no
-        // polarity parameter at ALL, so a P-type card on them cannot be honoured.
+        // ponytail: jfet/jfet2/mes/mesa/vdmos/bsimsoi/hisim have no polarity
+        // parameter at ALL, so a P-type card on them cannot be honoured.
         // Refusing is the point: running it N-type is what produced silent NaN.
         // Upgrade path is model-side — give the .va a `type` parameter the way
         // mos1 has one — not another branch here.
