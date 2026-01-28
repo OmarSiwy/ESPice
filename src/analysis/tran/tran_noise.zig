@@ -21,7 +21,11 @@ pub const Options = struct {
     dt_init: f64 = 1e-9,
     dt_min: f64 = 1e-18,
     dt_max: f64 = 1e-3,
-    max_steps: u32 = 1_000_000,
+    // Runaway guard only — a healthy 1 us-grid second is 1e6 accepted points
+    // (vacask/rc hit the old 1e6 wall at t = 0.994 s and reported
+    // TimestepTooSmall on a perfectly marching transient). dt_min is the
+    // real brake; this only stops a stuck loop.
+    max_steps: u32 = 1_000_000_000,
     temp_k: f64 = 27.0 + 273.15,
     seed: u64 = 0xDEAD_BEEF_CAFE_1234,
 };
