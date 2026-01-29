@@ -981,7 +981,35 @@ pub const NetBuilder = struct {
             @compileError(@typeName(D) ++ ": no parameter `" ++ value_field ++ "` on Model or Instance");
         var model: D.Model = .{};
         var instance: D.Instance = .{};
-        const value = positionalNumber(dev, 0) orelse kvNumber(dev.kv, value_field) orelse kvNumber(dev.kv, alias) orelse 0;
+        var value = positionalNumber(dev, 0) orelse kvNumber(dev.kv, value_field) orelse kvNumber(dev.kv, alias) orelse blk: {
+            // Semiconductor resistor model card (ngspice restemp.c
+            // RESupdate_conduct): R = RSH·(L−2·SHORT)/(W−2·NARROW), W
+            // defaulting to the model's DEFW. A zero/negative effective
+            // width is ngspice's silent divide — the device reads as open.
+            if (comptime D == devices.resistor) {
+                if (modelName(dev)) |mn| if (findModel(self.nl.models, mn)) |m| {
+                    const rsh = kvNumber(m.kv, "rsh") orelse 0;
+                    const l = kvNumber(dev.kv, "l") orelse 0;
+                    const w = kvNumber(dev.kv, "w") orelse kvNumber(m.kv, "defw") orelse 10e-6;
+                    if (l * w * rsh > 0) {
+                        const narrow = kvNumber(m.kv, "narrow") orelse 0;
+                        const rshort = kvNumber(m.kv, "short") orelse 0;
+                        const rr = (l - 2 * rshort) / (w - 2 * narrow) * rsh;
+                        break :blk if (std.math.isFinite(rr) and rr > 0) rr else 1e30;
+                    }
+                    if (kvNumber(m.kv, "r")) |mr| break :blk mr;
+                };
+            }
+            break :blk 0;
+        };
+        // ngspice instance factors: conduct = m/(R·scale) — applies to the
+        // explicit-value spelling too (`R5 6 0 10 scale=1K`, `R4 ... m=2`).
+        if (comptime D == devices.resistor) {
+            value *= kvNumber(dev.kv, "scale") orelse 1;
+            value /= kvNumber(dev.kv, "m") orelse 1;
+            // ngspice restemp.c: "resistance too low or not given, set to 1 mOhm"
+            if (!(value > 0)) value = 1e-3;
+        }
         _ = setParam(D, &model, &instance, value_field, value);
         try applyKv(&model, dev.kv);
         try applyKv(&instance, dev.kv);

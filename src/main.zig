@@ -223,6 +223,7 @@ pub fn main(init: std.process.Init) !u8 {
                 .work_dir = try std.fs.path.join(arena, &.{ build_options.src_root, ".zig-cache", "espice-hdl" }),
                 .contract = build_options.contract_path,
                 .dyn = build_options.dyn_path,
+                .gompute = build_options.gompute_path,
             };
             vaload.ensureAllLoaded(arena, io, hdl_paths.items, hdl_build_paths) catch |e| {
                 std.debug.print("Error: runtime HDL load failed: {s}\n", .{@errorName(e)});

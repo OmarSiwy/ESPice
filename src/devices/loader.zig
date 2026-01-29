@@ -70,6 +70,9 @@ pub const BuildPaths = struct {
     /// orchestrator hashes this into `layout_hash`, which is exactly the check
     /// `DeviceAbiMismatch` below relies on.
     dyn: []const u8,
+    /// gompute's module root — engine.zig imports it (Sink shares the GPU
+    /// math core), so the .so's `dyn` module needs it as a dependency.
+    gompute: []const u8,
 };
 
 const PreparedDevice = struct { loaded: LoadedDevice, owned_name: []const u8 };
@@ -110,12 +113,22 @@ fn prepareOne(gpa: std.mem.Allocator, io: std.Io, path: []const u8, paths: Build
     // `layout_hash`, so it must match what the CLI's --emit-so passes.
     const modules = [_]fastvaf.orchestrator.Module{
         .{ .name = "contract", .root = paths.contract },
-        .{ .name = "dyn", .root = paths.dyn, .deps = &.{"contract"} },
+        .{ .name = "gompute", .root = paths.gompute },
+        .{ .name = "dyn", .root = paths.dyn, .deps = &.{ "contract", "gompute" } },
     };
+    // MATCH THE HOST. The vtable crosses the dlopen boundary with zig
+    // callconv and auto struct layout, neither guaranteed across
+    // backend/mode — engine.layoutHash() hashes both, so a hardcoded
+    // ReleaseFast+llvm .so under a self-hosted host failed
+    // DeviceAbiMismatch on every `.hdl` card since the self-hosted switch.
+    // The one-shot orchestrator only compiles via LLVM, so a self-hosted
+    // (Debug) host cannot load HDL at all — say so instead of tripping the
+    // orchestrator's assert. Release espice is LLVM and just works.
+    if (@import("builtin").zig_backend != .stage2_llvm) return error.HdlNeedsLlvmHost;
     var built = try fastvaf.buildArtifact(gpa, io, &result, .{
         .work_dir = paths.work_dir,
         .name = result.mir.name,
-        .optimize = .ReleaseFast,
+        .optimize = @import("builtin").mode,
         .backend = .llvm,
         .modules = &modules,
     }, generation, null);
@@ -123,13 +136,21 @@ fn prepareOne(gpa: std.mem.Allocator, io: std.Io, path: []const u8, paths: Build
     const art = switch (built) {
         .ok => |a| a,
         // The generated device failing to compile is an ENGINE bug, not a bad
-        // model — the model already type-checked upstream to get here.
-        .failed => return error.GeneratedDeviceDoesNotCompile,
+        // model — the model already type-checked upstream to get here. Render
+        // the compiler's own errors: a swallowed bundle turns a one-line type
+        // error into archaeology.
+        .failed => |bundle| {
+            bundle.renderToStderr(io, .{}, .off) catch {};
+            return error.GeneratedDeviceDoesNotCompile;
+        },
     };
-    // The .so bakes the engine's struct layouts in; a stale one is UB, not a bug
-    // report. Reject before dlopen.
-    if (art.layout_hash != engine.layoutHash()) return error.DeviceAbiMismatch;
-
+    // The real ABI gate lives in LoadedDevice.open: it reads the .so's own
+    // exported `arp_layout_hash` (engine.layoutHash compiled INTO the .so)
+    // and compares against ours. The old pre-dlopen check here compared
+    // `art.layout_hash` — the ORCHESTRATOR's cache key (compiler version +
+    // module list) — against the engine's TYPE-layout hash: two unrelated
+    // formulas that can never agree, which is why every `.hdl` card died
+    // with DeviceAbiMismatch.
     const loaded = try LoadedDevice.open(art.so_path);
     const owned_name = try gpa.dupe(u8, lower_name);
     return .{ .loaded = loaded, .owned_name = owned_name };
