@@ -506,6 +506,26 @@ pub const NetBuilder = struct {
     source_branch: u32,
     have_source: bool,
 
+    // -- Topology diagnosis (ngspice CKTsetup-class checks) --------------
+    // Per netlist-NAMED node: what touched it. Internal expansion nodes
+    // (URC lumps, device primes) never enter these — only nodes a card
+    // listed, so the post-build check cannot false-positive on machinery.
+    // `.seen` gates the check; `.dc` = any element that stamps a DC path
+    // (everything except capacitors and current sources); `.cur` = an I
+    // source touched it. V/L cards are DC SHORTS for loop detection: a
+    // union-find over their node pairs — closing a cycle of shorts is
+    // ngspice's "voltage source/inductor loop".
+    topo_seen: std.ArrayList(bool) = .empty,
+    topo_dc: std.ArrayList(bool) = .empty,
+    topo_cur: std.ArrayList(bool) = .empty,
+    /// Weighted union-find over V/L short edges: `topo_pot[x]` is v(x) minus
+    /// v(parent). A cycle of shorts is only an ERROR when its KVL sum is
+    /// inconsistent (V1=5 ∥ V2=3); a consistent cycle (two 0 V .sp ports
+    /// closed by an inductor, parallel equal sources) is legal — its loop
+    /// current is indeterminate at DC and the solver's regularization owns it.
+    topo_uf: std.ArrayList(u32) = .empty,
+    topo_pot: std.ArrayList(f64) = .empty,
+
     const Deferred = struct { dev: types.Device, letter: u8 };
 
     pub fn init(arena: std.mem.Allocator, b: *Builder, nl: types.Netlist) !NetBuilder {
@@ -593,16 +613,103 @@ pub const NetBuilder = struct {
                 try self.addBucket(dl.bucket(c));
         }
         try self.resolveDeferred();
+        try self.topoCheck();
     }
 
     fn addBucket(self: *NetBuilder, bkt: types.DeviceList.Bucket) !void {
         for (0..bkt.size()) |i| try self.addDevice(bkt.get(i));
     }
 
+    // -- Topology diagnosis helpers ---------------------------------------
+
+    fn topoEnsure(self: *NetBuilder, id: u32) !void {
+        while (self.topo_seen.items.len <= id) {
+            const next: u32 = @intCast(self.topo_uf.items.len);
+            try self.topo_seen.append(self.arena, false);
+            try self.topo_dc.append(self.arena, false);
+            try self.topo_cur.append(self.arena, false);
+            try self.topo_uf.append(self.arena, next);
+            try self.topo_pot.append(self.arena, 0);
+        }
+    }
+
+    /// Root and potential-to-root of `id0` in the weighted forest.
+    fn topoRoot(self: *NetBuilder, id0: u32) struct { root: u32, pot: f64 } {
+        var id = id0;
+        var pot: f64 = 0;
+        while (self.topo_uf.items[id] != id) {
+            pot += self.topo_pot.items[id];
+            id = self.topo_uf.items[id];
+        }
+        return .{ .root = id, .pot = pot };
+    }
+
+    /// Classify one card's nodes. `kind`: .dc marks a DC path, .cap marks
+    /// presence only, .cur marks a current source, .short additionally
+    /// unions the first two nodes as a DC short of value `vshort`
+    /// (v(node0) − v(node1) = vshort) and rejects an INCONSISTENT cycle.
+    fn topoMark(self: *NetBuilder, dev: types.Device, kind: enum { dc, cap, cur, short }, vshort: f64) !void {
+        var first_two: [2]u32 = .{ GROUND, GROUND };
+        for (dev.nodes, 0..) |name, i| {
+            const id = try self.b.internNode(name);
+            try self.topoEnsure(id);
+            self.topo_seen.items[id] = true;
+            switch (kind) {
+                .cap => {},
+                .cur => self.topo_cur.items[id] = true,
+                .dc, .short => self.topo_dc.items[id] = true,
+            }
+            if (i < 2) first_two[i] = id;
+        }
+        if (kind == .short and dev.nodes.len >= 2) {
+            const a = self.topoRoot(first_two[0]);
+            const b_ = self.topoRoot(first_two[1]);
+            if (a.root == b_.root) {
+                const gap = (a.pot - b_.pot) - vshort;
+                if (@abs(gap) > 1e-9 * @max(1.0, @abs(vshort))) {
+                    std.log.err(
+                        "topology: '{s}' closes an inconsistent voltage-source/inductor loop ({d} V of KVL violation)",
+                        .{ dev.name, gap },
+                    );
+                    return error.VoltageSourceLoop;
+                }
+            } else {
+                // Attach so every member's potential stays consistent:
+                // v(b) = pot_b + topo_pot[rb] must equal v(a) − vshort.
+                self.topo_uf.items[b_.root] = a.root;
+                self.topo_pot.items[b_.root] = a.pot - vshort - b_.pot;
+            }
+        }
+    }
+
+    /// Post-build check over netlist-named nodes: a node no DC-stamping
+    /// element ever touched is either a current-source cutset (I sources
+    /// meet with nowhere to send KCL) or a capacitor island (no DC path to
+    /// ground). ngspice fails both at setup; converging them anyway hands
+    /// back an arbitrary common mode.
+    fn topoCheck(self: *NetBuilder) !void {
+        for (self.topo_seen.items, 0..) |seen, id| {
+            if (!seen or id == GROUND) continue;
+            if (self.topo_dc.items[id]) continue;
+            const label = self.b.node_labels.items[id];
+            if (self.topo_cur.items[id]) {
+                std.log.err("topology: node '{s}' is a current-source cutset — KCL has no DC path to satisfy it", .{label});
+                return error.CurrentSourceCutset;
+            }
+            std.log.err("topology: node '{s}' has no DC path to ground (capacitor island)", .{label});
+            return error.NoDcPathToGround;
+        }
+    }
+
     fn addDevice(self: *NetBuilder, dev_in: types.Device) !void {
         // Runtime-loaded Verilog-A/Verilog device instance: handled
         // by addDynDevices after NetBuilder runs, regardless of card letter.
-        if (isDynDevice(dev_in, self.nl.models)) return;
+        // Its nodes still get a DC mark — a foreign model is opaque, and an
+        // unfounded topology error is worse than a missed one.
+        if (isDynDevice(dev_in, self.nl.models)) {
+            try self.topoMark(dev_in, .dc, 0);
+            return;
+        }
         const letter = dev_in.letter();
         // Q cards carry 3-5 nodes against the parser's fixed 3, M cards 3-7
         // against its fixed 4, so the model name lands on the wrong side of
@@ -617,6 +724,15 @@ pub const NetBuilder = struct {
         if (letter != 'u' and devices.letter_map.get(&.{letter}) == null) {
             if (inferDeviceFromModel(dev, self.nl.models) == null)
                 return error.UnsupportedDevice;
+        }
+
+        switch (letter) {
+            'c' => try self.topoMark(dev, .cap, 0),
+            'i' => try self.topoMark(dev, .cur, 0),
+            // A V source shorts its pair at its DC value; an inductor at 0 V.
+            'v' => try self.topoMark(dev, .short, sourceDc(dev) orelse 0),
+            'l' => try self.topoMark(dev, .short, 0),
+            else => try self.topoMark(dev, .dc, 0),
         }
 
         switch (letter) {
