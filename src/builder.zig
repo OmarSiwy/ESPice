@@ -415,12 +415,15 @@ fn aliasOf(comptime field: []const u8) ?[]const u8 {
         // mesa.va channel depth: ngspice's card key is `d`, which Verilog-A
         // cannot use as a parameter name (drain port).
         .{ "dch", "d" },
-        // `u0` is a Zig primitive type name, so VerA's naming.zig emits the
-        // Model field as `u0Z` (its escape marker) — the card key stays `u0`.
-        // Without this alias every U0= card silently kept the default
-        // mobility (bsim3 fixtures drew 2x current; mos1's U0 was equally
-        // dead when TOX was given).
+        // `u0`/`u1`/`u10` are Zig primitive type names, so VerA's naming.zig
+        // emits the Model fields as `u0Z`/`u1Z`/`u10Z` (its escape marker) —
+        // the card keys stay unescaped. Without these aliases every such card
+        // silently kept the default (bsim3 fixtures drew 2x current; mos1's
+        // U0 was equally dead when TOX was given; bsim1's U1 velocity
+        // saturation vanished, +8% at the bsim1_a probe).
         .{ "u0Z", "u0" },
+        .{ "u1Z", "u1" },
+        .{ "u10Z", "u10" },
     };
     inline for (pairs) |p| {
         if (comptime std.mem.eql(u8, field, p[0])) return p[1];
