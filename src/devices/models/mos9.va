@@ -27,9 +27,9 @@ module mos9(d, g, s, b);
     parameter real vto   = 0.0;              // V   zero-bias threshold (0: from wkfngs)
     parameter real delvto = 0.0;             // V   threshold shift
     parameter real nss   = 0.0 from [0:inf); // cm^-2 surface state density
-    parameter real kp    = 2.0e-5;           // A/V^2 transconductance (<=0: from uo)
+    parameter real kp    = 2.0e-5;           // A/V^2 transconductance (not given: from uo)
     parameter real gamma = 0.0 from [0:inf); // sqrt(V) body effect (0 + nsub: derived)
-    parameter real phi   = 0.6;              // V   surface potential (<=0: derived)
+    parameter real phi   = 0.6;              // V   surface potential (not given: from nsub)
     parameter real uo    = 600.0 from (0:inf); // cm^2/Vs surface mobility
     parameter real theta = 0.0 from [0:inf); // 1/V  mobility modulation
     parameter real eta   = 0.0 from [0:inf); // -    static feedback (DIBL)
@@ -153,12 +153,13 @@ module mos9(d, g, s, b);
         leff = max(l - 2.0 * ld + xl, 1.0e-9);
         weff = max(w - 2.0 * wd + xw, 1.0e-9);
         oxcap = coxp * leff * weff * m;
-        // ponytail: $param_given reads 1.0 in this frontend, so "not given"
-        // is spelled as the ngspice-default sentinel (<=0) — same behaviour
-        // for every real card, no extra machinery.
-        kpeff = (kp > 0.0) ? kp : uo * coxp * 1.0e-4;
-        phinom = (phi > 0.0) ? phi
-                 : ((nsub > 1.45e10) ? max(0.1, 2.0 * vtnom * ln(nsub * 1.0e6 / 1.45e16)) : 0.6);
+        // "Given" is $param_given, as in mos1.va: the KP/PHI defaults
+        // (2e-5, 0.6) are legal card values, so a value sentinel can never
+        // take mos9temp.c:66-68's UO derivation or the NSUB-derived PHI.
+        if ($param_given(kp)) kpeff = kp;
+        else kpeff = uo * coxp * 1.0e-4;
+        if ($param_given(phi) || nsub <= 1.45e10) phinom = phi;
+        else phinom = max(0.1, 2.0 * vtnom * ln(nsub * 1.0e6 / 1.45e16));
         gammaeff = ((gamma <= 0.0) && (nsub > 0.0))
                    ? sqrt(2.0 * 11.7 * 8.8541878128e-12 * 1.602176634e-19 * nsub * 1.0e6) / coxp
                    : gamma;
