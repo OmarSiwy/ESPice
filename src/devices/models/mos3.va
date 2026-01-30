@@ -402,7 +402,9 @@ module mos3(d, g, s, b);
                 end else begin
                     delxl = sqrt(kappa * alph * (vdse - vdsat + 0.125 * vdsat));
                 end
-            end else if (vdsat > 0.0) begin
+            end else if ((vmax <= 0.0) && (vdsat > 0.0)) begin
+                // Sub-vdsat ramp only without VMAX: mos3load.c:728-733 gotos
+                // past it when maxDriftVel > 0 (mos9.va has the same gate).
                 delxl = sqrt(0.125 * kappa * alph * vdsat)
                         * pow(vdse / vdsat, 4.0);
             end else begin
