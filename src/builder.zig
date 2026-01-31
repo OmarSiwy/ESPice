@@ -797,14 +797,12 @@ pub const NetBuilder = struct {
         }
     }
 
-    /// LTRA (O card). ngspice solves RLC lines by convolution with the exact
-    /// impulse response; our lossy_tline device is a single lumped pi that
-    /// cannot delay. For LC lines (G = 0) expand into N cascaded Bergeron
-    /// sections [R/2N — ideal T(z0, td/N) — R/2N]: delay is exact, and the
-    /// lumped-loss error falls as R_total/(2*Z0*N). N is picked for ~3e-4
-    /// rms vs ngspice, capped at 48 (beyond that the residual difference is
-    /// ngspice's own history compaction, not segmentation).
-    /// RC / degenerate lines keep the single-pi lossy_tline device.
+    /// LTRA (O card) / TXL (Y card). Routing per ngspice LTRAsetup §1.1:
+    ///   RLC (r,l,c > 0, g = 0) and RC (r,c > 0, l = g = 0) → the native
+    ///     recursive-convolution device (devices.ltra_native, ngspice's real
+    ///     h1'/h2/h3' method — history, coefficients, chop, step limit);
+    ///   LC (r = g = 0) → one exact Bergeron ideal line (tline.va);
+    ///   RG and rejects → lossy_tline.va (exact hyperbolic two-port / $error).
     fn addLossyLine(self: *NetBuilder, dev: types.Device) !void {
         var model: devices.lossy_tline.Model = .{};
         if (modelName(dev)) |name| {
@@ -823,43 +821,38 @@ pub const NetBuilder = struct {
         const c_t: f64 = @as(f64, model.c) * len;
         const g_t: f64 = @as(f64, model.g) * len;
 
-        if (l_t <= 0 or c_t <= 0 or g_t != 0) return self.addByLetter('o', dev);
+        const wave = l_t > 0 and c_t > 0 and g_t == 0 and len > 0;
+        const rc = r_t > 0 and c_t > 0 and l_t == 0 and g_t == 0 and len > 0;
 
-        const z0 = @sqrt(l_t / c_t);
-        const td = @sqrt(l_t * c_t);
-        const n_sec: u32 = @intFromFloat(std.math.clamp(@ceil(r_t / (z0 * 0.005)), 1, 48));
-        const r_half = r_t / (2.0 * @as(f64, @floatFromInt(n_sec)));
+        if (!wave and !rc) return self.addByLetter('o', dev);
 
         const pos1 = if (dev.nodes.len > 0) try self.b.internNode(dev.nodes[0]) else GROUND;
         const neg1 = if (dev.nodes.len > 1) try self.b.internNode(dev.nodes[1]) else GROUND;
         const pos2 = if (dev.nodes.len > 2) try self.b.internNode(dev.nodes[2]) else GROUND;
         const neg2 = if (dev.nodes.len > 3) try self.b.internNode(dev.nodes[3]) else GROUND;
 
-        const t_model: devices.tline.Model = .{
-            .z0 = @floatCast(z0),
-            .td = @floatCast(td / @as(f64, @floatFromInt(n_sec))),
-        };
-        var prev: u32 = pos1;
-        for (0..n_sec) |i| {
-            const last = i == n_sec - 1;
-            // Series R/2N lump on the near side (skip for lossless lines).
-            const t_in = if (r_half > 0) blk: {
-                const nn = self.b.addNode();
-                try self.b.addDevice(devices.resistor, .{ .r = @floatCast(r_half) }, .{}, [2]u32{ prev, nn });
-                break :blk nn;
-            } else prev;
-            const t_out = if (r_half > 0 or !last) self.b.addNode() else pos2;
-            // Intermediate sections reference neg1; only the last section's
-            // far port sits on neg2 (identical when both are ground).
-            try self.b.addDevice(devices.tline, t_model, .{}, [4]u32{ t_in, neg1, t_out, if (last) neg2 else neg1 });
-            if (r_half > 0) {
-                const nxt = if (last) pos2 else self.b.addNode();
-                try self.b.addDevice(devices.resistor, .{ .r = @floatCast(r_half) }, .{}, [2]u32{ t_out, nxt });
-                prev = nxt;
-            } else {
-                prev = t_out;
-            }
+        if (rc or r_t > 0) {
+            const nm: devices.ltra_native.Model = .{
+                .r = model.r,
+                .l = model.l,
+                .g = model.g,
+                .c = model.c,
+                .len = model.len,
+                .compactrel = model.compactrel,
+                .compactabs = model.compactabs,
+                .rel = model.rel,
+                .steplimit = if (model.nosteplimit != 0) 0 else 1,
+                .truncdontcut = @floatFromInt(model.truncdontcut),
+            };
+            return self.b.addDevice(devices.ltra_native, nm, .{}, [4]u32{ pos1, neg1, pos2, neg2 });
         }
+
+        // Lossless LC: one exact Bergeron ideal line.
+        const t_model: devices.tline.Model = .{
+            .z0 = @floatCast(@sqrt(l_t / c_t)),
+            .td = @floatCast(@sqrt(l_t * c_t)),
+        };
+        try self.b.addDevice(devices.tline, t_model, .{}, [4]u32{ pos1, neg1, pos2, neg2 });
     }
 
     /// URC (U card): `Uxxx n1 n2 ngnd model [l=len] [n=lumps]`. ngspice has no
