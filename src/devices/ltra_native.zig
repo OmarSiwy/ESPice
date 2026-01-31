@@ -384,7 +384,7 @@ pub fn nextBreakpoint(model: *const Model, t: f64) ?f64 {
 // Newton iterations replay the cached affine stamp.
 // ---------------------------------------------------------------------------
 
-const Hist = struct {
+pub const Hist = struct {
     t: []const f64,
     v1: []const f64,
     v2: []const f64,
@@ -392,7 +392,7 @@ const Hist = struct {
     i2: []const f64,
 };
 
-fn hist(inst: *const Instance) Hist {
+pub fn hist(inst: anytype) Hist {
     const n = inst.n_hist;
     return .{
         .t = inst.hist_t[0..n],
@@ -406,9 +406,9 @@ fn hist(inst: *const Instance) Hist {
 /// Delayed port values at t − td, quadratically interpolated over the accepted
 /// history (§1.6, default QUADINTERP: linear only at the first interval; an
 /// out-of-range quad value is kept, as ngspice does for pure quadinterp).
-const Delayed = struct { v1: f64, v2: f64, i1: f64, i2: f64 };
+pub const Delayed = struct { v1: f64, v2: f64, i1: f64, i2: f64 };
 
-fn interpDelayed(h: Hist, aux: usize, tq: f64) Delayed {
+pub fn interpDelayed(h: Hist, aux: usize, tq: f64) Delayed {
     const timeindex = h.t.len - 1;
     var i = aux;
     if (i == timeindex) i -= 1; // dt > td: extrapolate off the last interval
@@ -433,7 +433,7 @@ fn interpDelayed(h: Hist, aux: usize, tq: f64) Delayed {
     };
 }
 
-fn rebuildWave(model: *const Model, inst: *Instance, t: f64) void {
+pub fn rebuildWave(model: anytype, inst: anytype, t: f64) void {
     const h = hist(inst);
     const timeindex = h.t.len - 1;
     const T = model.td;
@@ -637,7 +637,7 @@ fn rebuildWave(model: *const Model, inst: *Instance, t: f64) void {
     inst.cache_t = t;
 }
 
-fn rebuildRc(model: *const Model, inst: *Instance, t: f64) void {
+pub fn rebuildRc(model: anytype, inst: anytype, t: f64) void {
     const h = hist(inst);
     const timeindex = h.t.len - 1;
 
@@ -785,6 +785,37 @@ pub fn eval(comptime S: type, x: [n_u]S, model: *const Model, inst: *const Insta
 // point — because a history push cannot be reverted.
 // ---------------------------------------------------------------------------
 
+/// Append one accepted sample to a line's history: first sample doubles as
+/// the initVolt/initCur snapshot, a same-time recommit overwrites, a full
+/// buffer compacts. Shared by the O-card device below and the coupled modal
+/// lines (coupled_ltra.zig).
+pub fn pushHistory(model: anytype, inst: anytype, t: f64, v1: f64, v2: f64, i1_: f64, i2_: f64) void {
+    if (t == 0) inst.n_hist = 0;
+    if (inst.n_hist == 0) {
+        inst.v10 = v1;
+        inst.v20 = v2;
+        inst.i10 = i1_;
+        inst.i20 = i2_;
+    }
+    if (inst.n_hist > 0 and t <= inst.hist_t[inst.n_hist - 1]) {
+        const j = inst.n_hist - 1;
+        inst.hist_v1[j] = v1;
+        inst.hist_v2[j] = v2;
+        inst.hist_i1[j] = i1_;
+        inst.hist_i2[j] = i2_;
+    } else {
+        if (inst.n_hist == inst.hist_t.len) compact(model, inst);
+        const j = inst.n_hist;
+        inst.hist_t[j] = t;
+        inst.hist_v1[j] = v1;
+        inst.hist_v2[j] = v2;
+        inst.hist_i1[j] = i1_;
+        inst.hist_i2[j] = i2_;
+        inst.n_hist += 1;
+    }
+    inst.cache_t = 1e31; // history changed: next eval rebuilds
+}
+
 pub const State = struct {};
 
 pub fn initState(_: *const Model, _: *Instance) State {
@@ -794,41 +825,15 @@ pub fn initState(_: *const Model, _: *Instance) State {
 pub fn updateState(model: *Model, inst: *Instance, x: [n_u]f64, _: *State) contract.UpdateResult {
     if (inst.analysis_kind != .tran) return .ok;
     const t = inst.abstime;
-    // The transient seeds histories with one commit at (t=0, dt=0, kind=tran)
-    // before stepping; a fresh t=0 commit is a fresh transient.
-    if (t == 0) inst.n_hist = 0;
+    // pushHistory resets on a t=0 commit: the transient seeds histories with
+    // one commit at (t=0, dt=0, kind=tran) before stepping, so a fresh t=0
+    // commit is a fresh transient.
 
     const v1 = x[@intFromEnum(U.p1)] - x[@intFromEnum(U.n1)];
     const v2 = x[@intFromEnum(U.p2)] - x[@intFromEnum(U.n2)];
     const ib1 = x[@intFromEnum(U.br1)];
     const ib2 = x[@intFromEnum(U.br2)];
-
-    if (inst.n_hist == 0) {
-        // §2 MODEINITTRAN initVolt/initCur snapshot = the operating point.
-        inst.v10 = v1;
-        inst.v20 = v2;
-        inst.i10 = ib1;
-        inst.i20 = ib2;
-    }
-
-    if (inst.n_hist > 0 and t <= inst.hist_t[inst.n_hist - 1]) {
-        // Same-time recommit (breakpoint landing duplicates): overwrite.
-        const j = inst.n_hist - 1;
-        inst.hist_v1[j] = v1;
-        inst.hist_v2[j] = v2;
-        inst.hist_i1[j] = ib1;
-        inst.hist_i2[j] = ib2;
-    } else {
-        if (inst.n_hist == CAP) compact(model, inst);
-        const j = inst.n_hist;
-        inst.hist_t[j] = t;
-        inst.hist_v1[j] = v1;
-        inst.hist_v2[j] = v2;
-        inst.hist_i1[j] = ib1;
-        inst.hist_i2[j] = ib2;
-        inst.n_hist += 1;
-    }
-    inst.cache_t = 1e31; // history changed: next eval rebuilds
+    pushHistory(model, inst, t, v1, v2, ib1, ib2);
 
     // ngspice LTRAaccept: when the total launched wave (v + Z0·i, attenuated)
     // changes derivative at this end, the image arrives one delay later —
@@ -890,7 +895,7 @@ pub fn updateState(model: *Model, inst: *Instance, x: [n_u]f64, _: *State) contr
 /// coefficients are the smallest, so the damage is bounded.
 /// ponytail: O(CAP) scan + memmove once per overflowing accept; fixtures top
 /// out well under CAP, so this is insurance, not a hot path.
-fn compact(model: *const Model, inst: *Instance) void {
+pub fn compact(model: anytype, inst: anytype) void {
     const n = inst.n_hist;
     var drop: u32 = 1;
     var j: u32 = 1;
@@ -909,7 +914,8 @@ fn compact(model: *const Model, inst: *Instance) void {
     }
     inline for (.{ "hist_t", "hist_v1", "hist_v2", "hist_i1", "hist_i2" }) |f| {
         const arr = &@field(inst, f);
-        std.mem.copyForwards(f64, arr[drop .. CAP - 1], arr[drop + 1 .. CAP]);
+        const cap = arr.len;
+        std.mem.copyForwards(f64, arr[drop .. cap - 1], arr[drop + 1 .. cap]);
     }
     inst.n_hist -= 1;
 }
