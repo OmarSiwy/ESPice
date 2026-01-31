@@ -632,7 +632,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     simdCopy(x, x_op);
 
     var wf = try Waveform.init(a, @intCast(ctx.probes.len), initialCapacity(opts));
-    defer wf.deinit();
+    errdefer wf.deinit();
     // ngspice treats a truncated transient as a hard failure ("timestep too
     // small") — never return a silently-truncated waveform.
     const sim = try simulate(ctx.circuit, x, ctx.probes, &wf, opts, a);
@@ -652,6 +652,9 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         row[0] = times[p];
         for (0..ctx.probes.len) |idx| row[idx + 1] = wf.probeValues(@intCast(idx))[p];
     }
+    // Free the probe-major copy BEFORE returning: waveform + point-major
+    // Result held together doubled the peak on wide circuits (100k probes).
+    wf.deinit();
 
     return .{
         .plotname = "Transient Analysis",

@@ -38,9 +38,13 @@ pub const Options = struct {
 };
 
 /// Waveform capacity heuristic: adaptive dt makes the point count unknown up
-/// front, so start generously from t_stop/dt_init and clamp to 4M points.
+/// front. dt_init is the PRINT step (ngspice tstep), and accepted points run
+/// a small factor above t_stop/tmax in practice — 2x covers the LTE-refined
+/// tail on the fixture corpus, and grow() doubles past it when a deck is
+/// edge-heavy. The old 16x prefactor put a 100k-node ladder's waveform at
+/// 16 buffers of slack: preallocation was most of the 2.8 GB peak.
 pub fn initialCapacity(options: Options) u32 {
-    const est = 16.0 * options.t_stop / options.dt_init;
+    const est = 2.0 * options.t_stop / options.dt_init;
     return @intFromFloat(@min(@max(1024.0, est), @as(f64, 1 << 22)));
 }
 
