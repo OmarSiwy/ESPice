@@ -35,8 +35,14 @@ pub const kernels = @import("kernels.zig");
 /// the builder routes RLC/RC O-cards here directly.
 pub const ltra_native = @import("ltra_native.zig");
 
+/// N-line coupled lossy lines (P card) by modal decomposition over the same
+/// convolution machinery — replaces the 2-line even/odd VA cognate for the
+/// cards it covers (see the module header for scope).
+pub const coupled_ltra = @import("coupled_ltra.zig");
+
 comptime {
-    _ = ltra_native; // pull its tests into the devices test root
+    _ = ltra_native; // pull tests into the devices test root
+    _ = coupled_ltra;
 }
 
 /// Every build-time-generated device, keyed by module name. `models.NAME` is
