@@ -35,6 +35,11 @@ pub const kernels = @import("kernels.zig");
 /// the builder routes RLC/RC O-cards here directly.
 pub const ltra_native = @import("ltra_native.zig");
 
+/// ngspice's TXL Padé device (Y card) — a deliberately different
+/// approximation family from LTRA: the golden decks were made with it, and
+/// exact physics measurably diverges from it (module header has numbers).
+pub const txl_native = @import("txl_native.zig");
+
 /// N-line coupled lossy lines (P card) by modal decomposition over the same
 /// convolution machinery — replaces the 2-line even/odd VA cognate for the
 /// cards it covers (see the module header for scope).
@@ -42,6 +47,7 @@ pub const coupled_ltra = @import("coupled_ltra.zig");
 
 comptime {
     _ = ltra_native; // pull tests into the devices test root
+    _ = txl_native;
     _ = coupled_ltra;
 }
 
