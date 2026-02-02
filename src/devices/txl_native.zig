@@ -524,7 +524,8 @@ pub fn rebuildLine(fit: *const LineFit, st: *LineState, h: f64, t2_ps: f64, hi: 
 /// DC seed at the start of a transient (txlload's TXLdcGiven block):
 /// h1/h3 states at their steady values, h2 at zero. Bug-compat: the complex
 /// h3 pair is seeded with the plain real −dc·c/x division, exactly as
-/// txlload.c:187-192 does even when ifImg (cplload seeds its pair complex).
+/// txlload.c:187-192 does even when ifImg. cplload seeds its pairs with the
+/// correct complex division — the coupled device uses seedLineCpl.
 pub fn seedLine(fit: *const LineFit, st: *LineState, v1: f64, v2: f64) void {
     st.dc1 = v1;
     st.dc2 = v2;
@@ -545,6 +546,18 @@ pub fn seedLine(fit: *const LineFit, st: *LineState, v1: f64, v2: f64) void {
     }
 }
 
+/// cplload's DC seed: identical except the complex h3 pair is seeded with
+/// the proper complex division −dc·(c/z) (cplload.c:244-254 divC).
+pub fn seedLineCpl(fit: *const LineFit, st: *LineState, v1: f64, v2: f64) void {
+    seedLine(fit, st, v1, v2);
+    if (fit.lsl or !fit.if_img) return;
+    const p = divC(fit.h3_c[4], fit.h3_c[5], fit.h3_x[4], fit.h3_x[5]);
+    st.cnv3_i[4] = -v1 * p[0];
+    st.cnv3_i[5] = -v1 * p[1];
+    st.cnv3_o[4] = -v2 * p[0];
+    st.cnv3_o[5] = -v2 * p[1];
+}
+
 /// Accept commit (first loop of TXLload): adopt the pending h2/h3 states,
 /// advance the h1 states over the just-accepted segment (update_cnv_txl's
 /// exact linear-segment integral, ps-slope units verbatim), refresh V/dv.
@@ -561,8 +574,8 @@ pub fn commitLine(fit: *const LineFit, st: *LineState, delta_ps: f64, v1: f64, v
     st.cnv2_o = st.p2_o;
     st.cnv3_i = st.p3_i;
     st.cnv3_o = st.p3_o;
-    const bi = (v1 - st.vprev_i) / delta_ps;
-    const bo = (v2 - st.vprev_o) / delta_ps;
+    var bi = (v1 - st.vprev_i) / delta_ps;
+    var bo = (v2 - st.vprev_o) / delta_ps;
     st.dv_i = bi;
     st.dv_o = bo;
     st.vprev_i = v1;
@@ -570,10 +583,14 @@ pub fn commitLine(fit: *const LineFit, st: *LineState, delta_ps: f64, v1: f64, v
     for (0..3) |i| {
         const e = st.h1e[i];
         const t = fit.h1_c[i] / fit.h1_x[i];
-        const bit = bi * t;
-        const bot = bo * t;
-        st.cnv1_i[i] = (st.cnv1_i[i] - bit * delta_ps) * e + (e - 1.0) * (v1 * t + 1.0e12 * bit / fit.h1_x[i]);
-        st.cnv1_o[i] = (st.cnv1_o[i] - bot * delta_ps) * e + (e - 1.0) * (v2 * t + 1.0e12 * bot / fit.h1_x[i]);
+        // Verbatim reference quirk (update_cnv_txl): the slope accumulates
+        // the c/x product ACROSS terms — bi is never reset, so terms 1 and 2
+        // see bi·t0·t1(·t2). Products of c/x are ~1e-3², i.e. the reference
+        // effectively drops the slope correction beyond term 0.
+        bi *= t;
+        bo *= t;
+        st.cnv1_i[i] = (st.cnv1_i[i] - bi * delta_ps) * e + (e - 1.0) * (v1 * t + 1.0e12 * bi / fit.h1_x[i]);
+        st.cnv1_o[i] = (st.cnv1_o[i] - bo * delta_ps) * e + (e - 1.0) * (v2 * t + 1.0e12 * bo / fit.h1_x[i]);
     }
 }
 
