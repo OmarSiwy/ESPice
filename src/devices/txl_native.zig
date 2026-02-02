@@ -383,11 +383,13 @@ pub fn getPvs(h: Hist, dc1: f64, dc2: f64, taul: f64, t1: f64, t2: f64) Delayed 
     var d: Delayed = .{ .v1_i = dc1, .v1_o = dc2, .i1_i = 0, .i1_o = 0, .v2_i = dc1, .v2_o = dc2, .i2_i = 0, .i2_o = 0 };
     const ta = t1 - taul;
     var tb = t2 - taul;
-    if (tb <= 0) return d;
     // ponytail: the reference's ext path (tb > t1, dt exceeding τ) is cut off
     // by updateState's 0.9τ bound_step; clamp keeps a stray oversized first
-    // step finite instead of reading future history.
+    // step finite instead of reading future history. Clamp BEFORE the dc
+    // early-out: with a single-point history t1 = 0 and the walk below would
+    // index past the slice.
     if (tb > t1) tb = t1;
+    if (tb <= 0) return d;
 
     var j: usize = 1; // walk index; history is short (τ window + slack)
     if (ta > 0) {
@@ -524,8 +526,8 @@ pub fn rebuildLine(fit: *const LineFit, st: *LineState, h: f64, t2_ps: f64, hi: 
 /// DC seed at the start of a transient (txlload's TXLdcGiven block):
 /// h1/h3 states at their steady values, h2 at zero. Bug-compat: the complex
 /// h3 pair is seeded with the plain real −dc·c/x division, exactly as
-/// txlload.c:187-192 does even when ifImg. cplload seeds its pairs with the
-/// correct complex division — the coupled device uses seedLineCpl.
+/// txlload.c:187-192 does even when ifImg (cplload seeds its pairs with the
+/// correct complex division; coupled_ltra does likewise on its own state).
 pub fn seedLine(fit: *const LineFit, st: *LineState, v1: f64, v2: f64) void {
     st.dc1 = v1;
     st.dc2 = v2;
@@ -544,18 +546,6 @@ pub fn seedLine(fit: *const LineFit, st: *LineState, v1: f64, v2: f64) void {
         st.cnv3_i[i] = -v1 * fit.h3_c[i] / fit.h3_x[i];
         st.cnv3_o[i] = -v2 * fit.h3_c[i] / fit.h3_x[i];
     }
-}
-
-/// cplload's DC seed: identical except the complex h3 pair is seeded with
-/// the proper complex division −dc·(c/z) (cplload.c:244-254 divC).
-pub fn seedLineCpl(fit: *const LineFit, st: *LineState, v1: f64, v2: f64) void {
-    seedLine(fit, st, v1, v2);
-    if (fit.lsl or !fit.if_img) return;
-    const p = divC(fit.h3_c[4], fit.h3_c[5], fit.h3_x[4], fit.h3_x[5]);
-    st.cnv3_i[4] = -v1 * p[0];
-    st.cnv3_i[5] = -v1 * p[1];
-    st.cnv3_o[4] = -v2 * p[0];
-    st.cnv3_o[5] = -v2 * p[1];
 }
 
 /// Accept commit (first loop of TXLload): adopt the pending h2/h3 states,

@@ -40,9 +40,9 @@ pub const ltra_native = @import("ltra_native.zig");
 /// exact physics measurably diverges from it (module header has numbers).
 pub const txl_native = @import("txl_native.zig");
 
-/// N-line coupled lossy lines (P card) by modal decomposition over the same
-/// convolution machinery — replaces the 2-line even/odd VA cognate for the
-/// cards it covers (see the module header for scope).
+/// N-line coupled lossy lines (P card) — faithful port of ngspice's CPL
+/// (cplsetup coupled() frequency-sampled fits + cplload convolutions);
+/// replaces the 2-line even/odd VA cognate for N in supported_n.
 pub const coupled_ltra = @import("coupled_ltra.zig");
 
 comptime {

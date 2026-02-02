@@ -855,6 +855,7 @@ pub fn CoupledLtra(comptime N: usize) type {
             for (0..N) |l| {
                 const ta = t1 - model.taul[l];
                 var tb = t2 - model.taul[l];
+                if (tb > t1) tb = t1; // ext cut off by the 0.9τ step bound
                 if (tb <= 0) {
                     for (0..N) |k| {
                         d.i1_i[l][k] = 0;
@@ -868,7 +869,6 @@ pub fn CoupledLtra(comptime N: usize) type {
                     }
                     continue;
                 }
-                if (tb > t1) tb = t1; // ext cut off by the 0.9τ step bound
                 var j: usize = 1;
                 if (ta <= 0) {
                     for (0..N) |k| {
