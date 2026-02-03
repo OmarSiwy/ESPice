@@ -13,7 +13,7 @@ const td = @import("testdev.zig");
 
 // Varname entries that are string literals (not allocated) in analysis code.
 const literal_names = [_][]const u8{
-    "time",     "frequency",         "v-sweep",          "run",
+    "time",     "frequency",         "v(v-sweep)",          "run",
     "temp",     "harmonic",          "magnitude",        "phase_deg",
     "hd2",      "v1_mag",            "v2_mag",           "index",
     "pole",     "transfer_function", "input_resistance", "output_resistance",
