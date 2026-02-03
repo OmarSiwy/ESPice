@@ -121,7 +121,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         }
         return .{
             .plotname = "DC transfer characteristic",
-            .varnames = try root.probeNames(ctx, "v-sweep"),
+            .varnames = try root.probeNames(ctx, "v(v-sweep)"),
             .is_complex = false,
             .npoints = npoints,
             .data = data,
@@ -163,7 +163,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     return .{
         .plotname = "DC transfer characteristic",
-        .varnames = try root.probeNames(ctx, "v-sweep"),
+        .varnames = try root.probeNames(ctx, "v(v-sweep)"),
         .is_complex = false,
         .npoints = npoints,
         .data = data,
