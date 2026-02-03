@@ -727,25 +727,6 @@ pub fn init(
 
 
 // ---------------------------------------------------------------------------
-// probeNames: optional scale var + "v(<label>)" per probe node
-// ---------------------------------------------------------------------------
-
-pub fn probeNames(circuit: *const Circuit, probes: []const u32, allocator: std.mem.Allocator, first: ?[]const u8) ![]const []const u8 {
-    const extra: usize = if (first == null) 0 else 1;
-    const names = try allocator.alloc([]const u8, probes.len + extra);
-    errdefer allocator.free(names);
-    if (first) |name| names[0] = name;
-    var done: usize = 0;
-    errdefer for (names[extra..][0..done]) |s| allocator.free(s);
-    for (probes, names[extra..]) |node, *out| {
-        const label = circuit.nodeName(node);
-        out.* = try std.fmt.allocPrint(allocator, "v({s})", .{if (label.len == 0) "?" else label});
-        done += 1;
-    }
-    return names;
-}
-
-// ---------------------------------------------------------------------------
 // zeroSimd / copySimd live in solvers/types.zig (the DAG leaf) so files
 // above and below Circuit share one copy. Re-exported for the 50+ callers.
 // ---------------------------------------------------------------------------

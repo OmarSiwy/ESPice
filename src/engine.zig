@@ -59,6 +59,10 @@ pub const Simulation = struct {
     arena: std.mem.Allocator,
     circuit: Circuit,
     probes: []u32,
+    /// Raw-file column label per probe ("i(v1)", "v(out)"), parallel to
+    /// `probes`. Sim-arena: card names die with the parse arena, so the
+    /// labels are formatted in fromNetlist.
+    probe_labels: []const []const u8,
     source_node: u32,
     source_branch: u32,
     /// Duped into sim_arena: read at output time, after the parse arena is gone.
@@ -184,16 +188,43 @@ pub const Simulation = struct {
             .i_names = nb.i_names[0..nb.n_i],
         };
 
-        // Probes: every named node (branch unknowns have no label)
+        // Probes: branch currents first, then every named node. ngspice raws
+        // carry i(<card>) for every V source and inductor (44.2 header:
+        // `i(v1)`, `i(l1)` — lowercase, which the parser's bulk lower already
+        // guarantees for card names). A sensed V card (F/H/W control) stamps
+        // nothing — its current flows in the controlling model's own branch —
+        // so its recorded row was never allocated and must be skipped.
+        //
+        // Branch-first, NOT ngspice's voltage-first: tf/sens/dcmatch/pxf/pac/
+        // disto default their output variable to probes[len-1], so the last
+        // probe must stay the last NAMED NODE. Raw readers key on column
+        // names, never position.
+        // Named nodes and branch rows are disjoint (branches carry no label),
+        // so circuit.n bounds the total.
         const probe_buf = try sim_arena.alloc(u32, sim.circuit.n);
+        const label_buf = try sim_arena.alloc([]const u8, sim.circuit.n);
         var n_probes: u32 = 0;
+        for (nb.v_names[0..nb.n_v], nb.v_branches[0..nb.n_v], nb.v_sensed[0..nb.n_v]) |name, br, sensed| {
+            if (sensed) continue;
+            probe_buf[n_probes] = br;
+            label_buf[n_probes] = try std.fmt.allocPrint(sim_arena, "i({s})", .{name});
+            n_probes += 1;
+        }
+        for (nb.l_names[0..nb.n_l], nb.l_branches[0..nb.n_l]) |name, br| {
+            probe_buf[n_probes] = br;
+            label_buf[n_probes] = try std.fmt.allocPrint(sim_arena, "i({s})", .{name});
+            n_probes += 1;
+        }
         for (1..sim.circuit.n) |i| {
-            if (sim.circuit.nodeName(@intCast(i)).len != 0) {
+            const label = sim.circuit.nodeName(@intCast(i));
+            if (label.len != 0) {
                 probe_buf[n_probes] = @intCast(i);
+                label_buf[n_probes] = try std.fmt.allocPrint(sim_arena, "v({s})", .{label});
                 n_probes += 1;
             }
         }
         sim.probes = probe_buf[0..n_probes];
+        sim.probe_labels = label_buf[0..n_probes];
 
         // Jobs from directives: pre-allocate to directive count. `.options`
         // overrides (tolerances, method, temp) apply to every job.
@@ -284,6 +315,7 @@ pub const Simulation = struct {
             .circuit = &self.circuit,
             .x_op = null,
             .probes = self.probes,
+            .probe_labels = self.probe_labels,
             .source_node = self.source_node,
             .source_branch = self.source_branch,
             // Results land in the output-lifetime arena. Stable now (self is
@@ -656,6 +688,34 @@ test "uic: keyword is positional-independent and .ic on an unknown node is dropp
     try std.testing.expectApproxEqAbs(@as(f64, 0.25), v2_first, 1e-9);
 }
 
+test "branch currents: op emits i(<card>) with ngspice's sign, last probe stays a node" {
+    var sa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer sa.deinit();
+    var pa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer pa.deinit();
+
+    // ngspice 44.2 on this deck: i(v1) = -1e-3 (current INTO the + terminal),
+    // i(l1) = +1e-3 (p->n through the inductor). Signs must match exactly.
+    var sim = try runDeck(sa.allocator(), pa.allocator(),
+        \\divider
+        \\v1 1 0 dc 1
+        \\r1 1 2 500
+        \\l1 2 0 1m
+        \\.op
+        \\.end
+    );
+    defer sim.deinit();
+
+    const res = sim.getResults()[0];
+    const iv = columnNamed(res, "i(v1)") orelse return error.NoBranchColumn;
+    const il = columnNamed(res, "i(l1)") orelse return error.NoBranchColumn;
+    try std.testing.expectApproxEqAbs(@as(f64, -2e-3), res.data[iv], 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 2e-3), res.data[il], 1e-9);
+    // Branch probes go FIRST: tf/sens/dcmatch/pxf/pac/disto default their
+    // output to probes[len-1], which must remain the last named node.
+    try std.testing.expect(std.mem.startsWith(u8, res.varnames[res.varnames.len - 1], "v("));
+}
+
 test "urc: U card expands into a lump ladder whose series R telescopes to L*RPERL" {
     var sa = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer sa.deinit();
@@ -680,15 +740,20 @@ test "urc: U card expands into a lump ladder whose series R telescopes to L*RPER
     try std.testing.expectApproxEqAbs(@as(f64, 0.5), vout, 1e-6);
 }
 
-/// Probe columns are named `v(<node>)` (Circuit.probeNames) and a transient's
-/// column 0 is "time". Result.data is ROW-major: data[point * ncols + col].
+/// Probe columns are named `v(<node>)`/`i(<card>)` (probeNames) and a
+/// transient's column 0 is "time". Result.data is ROW-major:
+/// data[point * ncols + col].
+fn columnNamed(r: Result, name: []const u8) ?usize {
+    for (r.varnames, 0..) |v, i| {
+        if (std.mem.eql(u8, v, name)) return i;
+    }
+    return null;
+}
+
 fn probeColumn(r: Result, node: []const u8) ?usize {
     var buf: [64]u8 = undefined;
     const want = std.fmt.bufPrint(&buf, "v({s})", .{node}) catch return null;
-    for (r.varnames, 0..) |v, i| {
-        if (std.mem.eql(u8, v, want)) return i;
-    }
-    return null;
+    return columnNamed(r, want);
 }
 
 fn probeAt(r: Result, node: []const u8, point: usize) ?f64 {
