@@ -509,9 +509,14 @@ pub fn simulate(
                 dt_next = @min(@max(del, options.dt_min), 2.0 * dt, effective_dt_max);
             }
 
-            // Promote BE → configured method when LTE-based dt is stable.
-            // ngspice promotes when trap dt_next > 1.05 * current dt (also
-            // skipped by the firsttime goto).
+            // Promote BE → configured method when LTE-based dt is stable
+            // (dctran.c:901-913): recompute the trunc at order 2 and ADOPT
+            // min(2·dt, del₂) as the next dt EITHER WAY — ngspice's
+            // `CKTdelta = newdelta` keeps the order-2 result even when the
+            // order drops back to 1. Keeping the order-1 del here instead
+            // left the post-breakpoint ramp a half-octave behind ngspice's
+            // (ltra1_1_line: 37 ps grid-phase offset by 32.3 ns, 1.02e-2 on
+            // the delayed wavefront at 33.04 ns).
             if (steps > 0 and use_be) {
                 const trial_order2 = options.method != .backward_euler;
                 const trial_del = integrator.stepBound(
@@ -519,7 +524,10 @@ pub fn simulate(
                     i_prev, alpha_val, use_trap, dt, dt_prev, dt_prev2,
                     options.tol.reltol, options.tol.abstol, options.tol.chgtol, options.tol.trtol,
                 );
-                if (trial_del > 1.05 * dt) use_be = false;
+                const nd2 = @min(2.0 * dt, trial_del);
+                if (nd2 > 1.05 * dt) use_be = false;
+                dt_next = @min(@max(nd2, options.dt_min), effective_dt_max);
+                if (ckt.boundStep()) |bs| dt_next = @min(dt_next, bs);
             }
 
             // Dynamic current update — must match the method actually used.

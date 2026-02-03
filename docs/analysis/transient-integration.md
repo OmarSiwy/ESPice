@@ -138,6 +138,21 @@ $\min(\delta,\,2h,\,h_{\max})$ as the next step (spice3 `dctran.c`).
 `trtol` (default 7) deflates the worst-case LTE bound to its empirically
 observed sharpness.
 
+**Known divergence — per-ROW, not per-state.** ngspice runs the formula
+above once per device charge *state*; espice runs it on the `q_vec` plane,
+i.e. the per-row (per-node) SUM of charges. Co-moving charges on one node
+add their divided differences: on `tline/txl2_3_line`, node 168 carries the
+7.398 fF load cap plus both MOS gate charges (Σcox = 0.100 fF) — espice's
+row slope 7.498 fF vs ngspice's binding state 7.398 fF, so the
+post-breakpoint step seed comes out 1.3 % short (6.124 ps vs 6.207 ps at
+the 15.9 ns landing, both engines otherwise formula-identical to 6 digits).
+Breakpoint-cut remainders amplify the relative difference (a ramp doubles
+FROM the tiny cut), so the tmax-capped step trains settle ~19 ps out of
+phase and steep delayed wavefronts photograph differently — the whole
+residual of that fixture (max 1.16e-2 vs the 1e-2 gate; rms passes). A
+per-state LTE needs per-contribution q snapshots, which the frozen GPU
+plane layout (one summed `[]f64` q plane) rules out for now.
+
 ### Breakpoints
 
 Sources with corners (PULSE/PWL edges) register breakpoint times. The step
@@ -166,12 +181,17 @@ acceptance test, then bookkeeping (dynamic-current update matching the
 method actually used, history rotation by pointer swap).
 
 **Order control.** Start at BE; promote to the configured method
-(trap/gear-2) when a trial LTE evaluation at the higher order says the step
-it would allow exceeds $1.05\times$ the current $h$ (ngspice promotion
-rule). Drop back to BE at every landed breakpoint (kills trap companion
-ringing at source-edge discontinuities) and on any rejection: **order drop
-first, halve $h$ only when the retry already ran order 1** — a discontinuity
-rejects trap long before $h$ is the problem.
+(trap/gear-2) when the order-2 trunc recompute allows
+$\min(2h, \delta_2) > 1.05\,h$ — and adopt that value as the next $h$
+**whether or not the promotion sticks** (dctran.c:901-913 assigns
+`CKTdelta = newdelta` from the order-2 recompute even when the order drops
+back to 1; keeping the order-1 $\delta$ instead left every post-breakpoint
+ramp a half-octave behind ngspice's — ltra1_1_line carried a 37 ps
+grid-phase offset into the 33 ns wavefront, 1.02e-2). Drop back to BE at
+every landed breakpoint (kills trap companion ringing at source-edge
+discontinuities) and on any rejection: **order drop first, halve $h$ only
+when the retry already ran order 1** — a discontinuity rejects trap long
+before $h$ is the problem.
 
 **Failure handling.** Newton non-convergence → revert device FSM state,
 order-drop/halve; $h < \texttt{dt\_min}$ → hard failure ("timestep too

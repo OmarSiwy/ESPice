@@ -623,6 +623,17 @@ pub fn precompute(_: *Instance, model: *Model) void {
     model.rtot = model.r * model.len;
 }
 
+// No `delays()` here either (see ltra_native's identical note). ngspice's
+// TXL sets no breakpoints (TXLaccept only records dv) — it photographs
+// wavefront arrivals with whatever grid phase its ramps produced. Retired
+// experiment: exporting delays() routes landed breakpoints through the tran
+// echo machinery (corner + τ landings, cascading). Measured on txl1_1 /
+// txl2_3: hard landings (BE + 0.1×saveDelta) 4.8e-3 → 8.8e-3 / 1.16e-2 →
+// 1.31e-2; soft landings (keep method + LTE dt) 4.8e-3 → 1.32e-2 /
+// 1.16e-2 → 1.10e-2. Either way the extra corner vertex perturbs the
+// following LTE ramp off ngspice's phase and nets worse. Fallback: the 0.9τ
+// bound_step below, ngspice's only TXL step control.
+
 fn hist(inst: anytype) Hist {
     const n = inst.n_hist;
     return .{
