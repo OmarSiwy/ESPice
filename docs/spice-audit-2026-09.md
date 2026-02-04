@@ -61,8 +61,23 @@ Reports: /tmp/audit-{mos-legacy,bjt-jfet-mes,llvm-time}.md.
   shortcut (#15).
 - mesa/mes/hfet C·ddt(V) lowered as ddt(C·V) → spurious V·dC/dv (Cgg up to
   2.17x): freeze-coefficient design specced, agent interrupted (#8).
-- b4soi/b3soipd/hisim: model-version deltas vs ngspice's C (bsimsoi VA port
-  vs B3SOI PD), not plumbing.
+- b4soi/b3soipd: WAS plumbing after all, not version skew — case-blind VA
+  param match + derive()-on-comptime-path + TYPE polarity (b28d237), then
+  Newton-path work (steplim $limit alg, body-side clamp writers, ngspice's
+  b4soild.c:4914 gmin body tie). Fixtures 8.14e-1/1.75e0 → 7.8e-4/3.3e-5.
+  The BSIMSOI-4.6.1 .va matches ngspice's 4.4 C to ≤1e-5 rel at every
+  swept bias once the floating-body row is numerically resolvable
+  (ISREC ≥ 1e-4 A/m²). REMAINING, named: at DEFAULT junction params the
+  body KCL row is atto-siemens flat; SparseLu threshold pivoting
+  (pivot_tol·colmax, with Gmbs ~1e-4 S in the same column) rejects its
+  diagonal and the elimination through a channel row turns dx_body into
+  volts of garbage (ZP_OPDBG: dx=-13.9 V in one iteration; .op/.dc-up at
+  mid-vds converge on a pseudo-branch, Id up to +110%; .dc-down and cold
+  .op at vds=1.1 land right). ngspice survives the same 1e-18-S row via
+  Sparse 1.3's diagonal-preferring Markowitz (its body walks to exactly
+  nrecf0·vt·ln2 = 35.26 mV). Fix belongs in the solver (row equilibration
+  or isolated-tiny-row diagonal preference), not the model.
+- hisim: model-version deltas vs ngspice's C, still open.
 - espice raws carry no branch currents → several gummel/transfer "passes"
   are vacuous; ngspice trap-ringing artifacts (pvt undershoot −0.165 V)
   count against us in the comparator.
