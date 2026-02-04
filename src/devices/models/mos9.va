@@ -129,7 +129,7 @@ module mos9(d, g, s, b);
     real arga, argb, argc, gammas, fbody, qbonco, vbix, vth, von, xn;
     real vgsx, vgst, onfg, us, vdsc, vdsat, vdse, cdo, fdrain, cdrain;
     real cdsat, gdsat, emax, delxl, clfact, id;
-    real vgstm, vdsatm, cgsh, cgdh, cgbh, capgs, capgd, capgb;
+    real vgstm, vdsatm, cgsh, cgdh, cgbh, chgs, chgd, capgs, capgd, capgb;
 
     analog begin
         // ---- §1.3 SPICE temperature maps -------------------------------
@@ -360,10 +360,11 @@ module mos9(d, g, s, b);
 
         // ---- §1.6 Meyer gate capacitances ------------------------------
         // DEVqmeyer returns half the non-constant part; the load routine sums
-        // the two timepoint halves, so the OP-consistent total is 2*half plus
-        // the constant overlaps.  Meyer caps are capacitance-based (q advanced
-        // as C*dv), which is exactly C(v)*ddt(V) here — not charge conserving,
-        // matching ngspice.
+        // the two timepoint halves — spelled below as half + $prev(half) +
+        // overlap, ngspice's exact MODETRAN averaging (OP/AC read 2*half +
+        // overlap via $prev's commit at OP exit).  Meyer caps are
+        // capacitance-based (q advanced as C*dv), which is exactly
+        // C(v)*ddt(V) here — not charge conserving, matching ngspice.
         vgstm = vgx - von;
         vdsatm = max(vdsat, 0.025);
         // DEVqmeyer picks the cgs base per vgst band, then the SAME vdsat/vds
@@ -394,9 +395,12 @@ module mos9(d, g, s, b);
             cgsh = cgsh * (1.0 - arga * arga / (argb * argb));
         end
         // inverted mode: qmeyer is called swapped, so swap its cgs/cgd back
-        capgs = 2.0 * ((mode > 0.0) ? cgsh : cgdh) + cgsov;
-        capgd = 2.0 * ((mode > 0.0) ? cgdh : cgsh) + cgdov;
-        capgb = 2.0 * cgbh + cgbov;
+        // BEFORE averaging (state slots are device-frame branches).
+        chgs = (mode > 0.0) ? cgsh : cgdh;
+        chgd = (mode > 0.0) ? cgdh : cgsh;
+        capgs = chgs + $prev(chgs) + cgsov;
+        capgd = chgd + $prev(chgd) + cgdov;
+        capgb = cgbh + $prev(cgbh) + cgbov;
 
         // ---- stamps (§1.8 topology, all signed by mtype) ----------------
         if (gdser > 0.0)
