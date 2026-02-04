@@ -242,15 +242,15 @@ module mos6(d, g, s, b);
         else grs = 0.0;
 
         // ==================================================================
-        // Bias — S1.7 limiting, mos1.va's ladder: fetlim on both gate legs,
-        // limvds on the channel, pnjlim on both bulk junctions. Trailing `ty`
-        // = VerA frame sign (PMOS limits ty·v); clamps land on the shared x
-        // in source order, and vgd is recomputed from the limited pair.
+        // Bias — S1.7 limiting, mos1.va's MODE ladder: "fetlimds" on both
+        // gate legs + "limvds" emits ngspice's old-vds swap (mos6load.c:
+        // 353-366); pnjlim stays on both bulk junctions (see mos1.va).
+        // Trailing `ty` = VerA frame sign (PMOS limits ty·v).
         // ==================================================================
         vcrits = vt * ln(vt / (1.4142135623730951 * isats));
         vcritd = vt * ln(vt / (1.4142135623730951 * isatd));
-        vgs = ty * $limit(V(g, si), "fetlim", ty * vtox, ty);
-        vgd = ty * $limit(V(g, di), "fetlim", ty * vtox, ty);
+        vgs = ty * $limit(V(g, si), "fetlimds", ty * vtox, ty);
+        vgd = ty * $limit(V(g, di), "fetlimds", ty * vtox, ty);
         vds = ty * $limit(V(di, si), "limvds", ty);
         vgd = vgs - vds;
         vbs = ty * $limit(V(b, si), "pnjlim", vt, vcrits, ty);
