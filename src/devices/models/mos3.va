@@ -300,15 +300,16 @@ module mos3(d, g, s, b);
             V(s, si) <+ 0.0;
 
         // ================= bias-dependent: channel ========================
-        // S1.7 limiting, mos1.va's ladder: fetlim on both gate legs, limvds
-        // on the channel, pnjlim on both bulk junctions (at their assignment
-        // below). Trailing tyf = VerA frame sign (PMOS limits dev_type·v);
+        // S1.7 limiting, mos1.va's MODE ladder ("fetlimds" on both gate legs
+        // + "limvds" emits ngspice's old-vds swap, mos3load.c:349-362; pnjlim
+        // stays on both bulk junctions at their assignment below — see
+        // mos1.va). Trailing tyf = VerA frame sign (PMOS limits dev_type·v);
         // tyf is dev_type as a real — integer $limit args are declined.
         tyf    = dev_type;
         vcrits = vt * ln(vt / (1.4142135623730951 * isats));
         vcritd = vt * ln(vt / (1.4142135623730951 * isatd));
-        vgsr = tyf * $limit(V(g, si), "fetlim", tyf * (vtox + delvto), tyf);
-        vgdr = tyf * $limit(V(g, di), "fetlim", tyf * (vtox + delvto), tyf);
+        vgsr = tyf * $limit(V(g, si), "fetlimds", tyf * (vtox + delvto), tyf);
+        vgdr = tyf * $limit(V(g, di), "fetlimds", tyf * (vtox + delvto), tyf);
         vdsr = tyf * $limit(V(di, si), "limvds", tyf);
         vgdr = vgsr - vdsr;
         vbsr = dev_type * V(b, si);
