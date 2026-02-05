@@ -494,3 +494,92 @@ operand narrowed, and the narrowing runs at f64 rate. That is where mos9's 526
 and the diode's 14 conversions come from — the diode's are 21 % of its entire
 remaining f64 budget. Reaching `.optimized` is a job for VerA's finiteness
 prover, and it is worth more *after* this change than before it.
+
+## 10. Addendum (2026-09): the limit class goes resident
+
+Everything above described a first cut whose `gpuEligible` excluded any
+device with `limit` or `State` — the whole diode/FET/BJT class, i.e. the
+models that carry the eval work. That exclusion is gone. Three per-instance
+kernels per admitted device now share one resident blob set:
+
+| kernel | GPU half of | launched |
+|---|---|---|
+| `arp_eval_<m>` | `Circuit.eval`/`evalNewton` | per Newton iteration |
+| `arp_lim_<m>` | `applyLimits` + `updateStates`, fused | per Newton iteration |
+| `arp_ctl_<m>` | `stateCtl` (path-latch commit/revert/query) | per accepted step |
+
+Two admission rules carry the correctness:
+
+- **`core_reads_simstate`** (VerA-emitted decl): a core that reads a
+  host-published sim-state Instance field (`analysis()`, `$abstime`, the
+  ddt-family `inst.dt`) evals stale device-resident, because the host
+  republishes those on the host blob only. jfet2 is the one such device in
+  the catalog; it stays CPU.
+- **`stateCtl` must run on the device.** The path-integration protocol
+  (ddt-capform upstream: `updateState` stages `wb__/wq__`, commit folds
+  them into the `pb__/pq__` latches eval reads) mutates the resident
+  Instance blob. Running the commit on the host's stale copy is not a
+  slow path, it is a wrong one: on a 400-MOS chain deck with CGSO/CJ set,
+  the missing device commit killed the transient outright
+  (`TimestepTooSmall` — the device latches never moved and LTE exploded).
+  With `arp_ctl` the same deck matches the CPU path to 4.7e-12 max rel.
+  A fixture without capacitance parameters cannot see this failure — the
+  staged values are all zero — which is why `parallel_inverters_2000`
+  passed while the protocol was broken.
+
+The work gate now counts only nonlinear (limit/State) batches, at a ×16
+eval-cost weight over the `count·n_u²` atomic proxy. Linear batches ride
+along once nonlinear work engages the context, but cannot engage it: on
+`rc_ladder_100k` (200 K linear devices, the largest all-linear fixture)
+the resident path measured 3.03 s against 2.55 s CPU — offloading a
+~10-f64-op stamp trades a vectorized host loop for the same atomics plus
+the bus, and bigger only makes the planes' D2H larger.
+
+Measured (5-run medians, ReleaseFast, RTX 4060 Laptop / i9-14900HX):
+
+| fixture | cpu (32T default) | cpu (best, 8T) | gpu | ngspice |
+|---|---|---|---|---|
+| `scaling/parallel_inverters_2000` | 3.33 s | 2.24 s | **1.51–1.66 s** | 0.86 s |
+| `sweep/opamp_wl_5000` | 1.14 s | — | **0.88 s** | 4.0 s |
+| `scaling/rc_ladder_100k` | 2.64 s | — | 2.62 s *(declines)* | 5.0 s |
+| `devices/hisim2` | 74 ms | — | 71 ms *(declines)* | 23 ms |
+
+Where the remaining `parallel_inverters_2000` gap to ngspice lives, from
+coarse differential timing (no profiler on this machine): the GPU loop
+runs ~670 µs per Newton iteration against the CPU path's ~1.7 ms —
+kernels, transfers and the two stream syncs account for only ~100–150 µs
+of that, so the loop is host-residue-bound (companion RHS math,
+convergence norms, waveform append), not device-bound. One-time GPU
+init/upload adds ~0.3 s (cuInit 114 ms + context + module loads). LU is
+exonerated: `ZP_LU_STATS` shows 2 full factors for the whole transient
+(n=2005, fill 1.2×); everything else replays the pivot tape. The
+`opamp_wl_5000` split: the 25 K-device `.op` is ~0.65 s CPU / ~0.55 s
+GPU of the ~1.1 s total; the 91-point `.ac` remainder is LaneLu on the
+CPU by design (`freq_solve_batch` stays null — §8's batched-LU verdict
+stands, and at n=15 007 the dense-complex subset does not apply).
+
+### Retired levers, with the measurements that retired them
+
+- **`--outline-chunk` for GPU kernel roots** (a second per-model vera
+  invocation feeding only the kernel roots): a no-op at the current 80 KB
+  model cap. Cold build 277.9 s → 278.9 s; at chunk=300 only bsim3 and
+  mos2 split at all (2 chunks each) — the monolithic cores the flag
+  targets are exactly the whale models the cap already excludes, and
+  mos9-class cores are shape-inhibited (multi-return) besides. The wiring
+  is one build.zig block (see gpu-layout history); revive it the day the
+  cap moves for §9's mixed-precision prize. Watch the kernel symbol if
+  you do: it derives from the generated file's basename, so the second
+  generation must emit `<name>.zig` into its own directory, not
+  `<name>.gpu.zig` (`arp_eval_gpu` collides across every root).
+- **PTX/HSACO runtime-load instead of embedding**: moot for the same
+  reason. With the cap in place the kernel compiles hide entirely inside
+  the host LLVM compile (cold build 278 s ≈ the espice exe compile; the
+  PTX steps run parallel to it) — the "minutes off cold builds" claim
+  predates the cap, when the whales were emitted.
+
+`--backend cuda|hip` by name is now strict end to end: artifacts missing
+in the binary reject at the CLI, and a machine-level init failure (absent
+device/driver) errors out of `run()` naming what was detected, instead of
+warning and silently running on the CPU. `--gpu`/`auto` keep the
+fall-back. `NotEnoughGpuWork` stays a decline on both — the gate is
+contract, `ESPICE_GPU_MIN_WORK` overrides it.
