@@ -38,6 +38,10 @@ const Sources = struct {
 
 pub const SimConfig = struct {
     gpu: bool = false,
+    /// A named `--backend cuda|hip` request: a GPU init failure is then a
+    /// hard error naming itself, never a silent CPU run. `--gpu`/`auto`
+    /// keeps the warn-and-fall-back behavior.
+    gpu_strict: bool = false,
 };
 
 /// One `.ic V(node)=value` card, resolved to a circuit index at build time.
@@ -86,6 +90,8 @@ pub const Simulation = struct {
     /// so a context holding `&sim.circuit` taken now would dangle — the same
     /// reason `par_eval` is attached late.
     gpu_requested: bool,
+    /// SimConfig.gpu_strict — a named backend request must not silently CPU.
+    gpu_strict: bool,
     gpu_ctx: ?*gpu_context.GpuContext,
 
     /// `sim_arena` owns everything that outlives fromNetlist: Circuit,
@@ -166,6 +172,7 @@ pub const Simulation = struct {
 
         errdefer sim.circuit.deinit();
         sim.gpu_requested = config.gpu;
+        sim.gpu_strict = config.gpu_strict;
         sim.gpu_ctx = null;
 
         // Escapes into run-time lifetime: title read at output time, counts in
@@ -266,12 +273,21 @@ pub const Simulation = struct {
                 // A DECISION, not a failure: the circuit has kernels, there is
                 // just not enough of it to beat the round trip. Worth saying
                 // out loud (and worth naming the override) so a small `--gpu`
-                // run does not look like a broken driver.
+                // run does not look like a broken driver. Even a strict
+                // request accepts this one — declining is the contract, and
+                // the deck can override the gate.
                 std.debug.print(
                     "note: --gpu declined; too little device work to beat the PCIe round trip " ++
                         "(override with ESPICE_GPU_MIN_WORK=<n>)\n",
                     .{},
                 );
+            } else if (self.gpu_strict) {
+                // `--backend cuda|hip` by name: this binary carries the
+                // artifacts (checked at the CLI), so the failure is the
+                // machine — absent device, driver, or exhausted memory. A
+                // named request must not silently become a CPU run.
+                std.debug.print("Error: --backend request failed ({s}); detected artifacts: {s}\n", .{ @errorName(e), gpu_context.detectedName() });
+                return e;
             } else {
                 std.debug.print("warning: --gpu unavailable ({s}); running on the CPU\n", .{@errorName(e)});
             }
