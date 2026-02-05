@@ -169,6 +169,23 @@ pub const Simulation = struct {
         compiled_ok = true;
 
         errdefer sim.circuit.deinit();
+
+        // compile() may have applied the BBD node permutation (subckt decks):
+        // every index recorded BEFORE it — source branches/ports, inductor
+        // branches, `.ic` nodes, directive nodes — is in old coordinates.
+        // Devices were permuted through applyPerm; these tables were not,
+        // which is how a branch probe on fourbitadder read ~5 V (its old
+        // index now names a voltage unknown).
+        for (nb.v_branches[0..nb.n_v]) |*v| v.* = b.mapNode(v.*);
+        for (nb.v_ports[0..nb.n_v]) |*v| v.* = b.mapNode(v.*);
+        for (nb.v_nports[0..nb.n_v]) |*v| v.* = b.mapNode(v.*);
+        for (nb.l_branches[0..nb.n_l]) |*v| v.* = b.mapNode(v.*);
+        nb.source_node = b.mapNode(nb.source_node);
+        nb.source_branch = b.mapNode(nb.source_branch);
+        for (dir_nodes) |*v| {
+            if (v.* != NO_NODE) v.* = b.mapNode(v.*);
+        }
+        for (ic_buf[0..n_ic_used]) |*e| e.node = b.mapNode(e.node);
         sim.gpu_requested = config.gpu;
         sim.gpu_ctx = null;
 
