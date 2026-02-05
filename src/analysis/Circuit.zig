@@ -89,8 +89,29 @@ pub const GpuHook = struct {
     /// The implementation falls back to the CPU stamp for the failing call and
     /// warns once, so a fault costs speed and not an answer.
     eval_planes: ?*const fn (*anyopaque, x: []const f64, t: f64) void = null,
+    /// The GPU halves of `applyLimits` / `updateStates` / `clearLimits` /
+    /// `seedJunctions` / `stateCtl` for resident limit/State batches (one
+    /// fused `StateKernel` launch plus a `CtlKernel` at accepted steps;
+    /// ineligible batches keep their host walk inside). All present or all
+    /// null — one device-resident lim/state blob backs them. `apply_limits`
+    /// also runs the state-latch half; the converger calls the two
+    /// back-to-back at the same x (`finalizeStep`), so `update_states` only
+    /// covers the CPU-side batches.
+    apply_limits: ?*const fn (*anyopaque, x: []f64, x_old: []const f64) bool = null,
+    update_states: ?*const fn (*anyopaque, x: []const f64) ?f64 = null,
+    clear_limits: ?*const fn (*anyopaque) void = null,
+    seed_junctions: ?*const fn (*anyopaque, x: []f64) void = null,
+    /// The GPU half of `stateCtl`: accepted-step latches (path-integration
+    /// commit) mutate the device-resident Instance blobs, so the host walk
+    /// cannot stand in for a resident batch.
+    state_ctl: ?*const fn (*anyopaque, op: StateCtlOp) bool = null,
     /// Repack device-resident payloads after parameter mutation (sweeps).
     repack: ?*const fn (*anyopaque) anyerror!void = null,
+    /// Cheap dirty mark: host models/instances mutated (temp, recompute,
+    /// homotopy attempt) — the context re-uploads lazily before its next
+    /// launch. Every Circuit-level param mutator calls it, so a resident
+    /// batch can never eval against stale physics.
+    mark_dirty: ?*const fn (*anyopaque) void = null,
 };
 
 // ---------------------------------------------------------------------------
@@ -470,6 +491,7 @@ pub const Circuit = struct {
     }
 
     pub fn applyLimits(self: *const Circuit, x: []f64, x_old: []const f64) bool {
+        if (self.gpu_hook) |gh| if (gh.apply_limits) |f| return f(gh.ctx, x, x_old);
         var any_limited = false;
         for (self.batches) |b| if (b.hooks.apply_limits) |f| {
             if (f(b.ctx, x, x_old)) any_limited = true;
@@ -481,16 +503,19 @@ pub const Circuit = struct {
     /// into a freshly zeroed x so iteration 1 linearizes at vcrit/vto instead
     /// of 0, and pnjlim/fetlim limit against the seed. Cold starts only.
     pub fn seedJunctions(self: *const Circuit, x: []f64) void {
+        if (self.gpu_hook) |gh| if (gh.seed_junctions) |f| return f(gh.ctx, x);
         for (self.batches) |b| if (b.hooks.seed) |f| f(b.ctx, x);
     }
 
     /// Reset device-private limiting state; called when a Newton solve
     /// finishes so later evals (waveform, AC, noise) see the node vector.
     pub fn clearLimits(self: *const Circuit) void {
+        if (self.gpu_hook) |gh| if (gh.clear_limits) |f| return f(gh.ctx);
         for (self.batches) |b| if (b.hooks.clear_limits) |f| f(b.ctx);
     }
 
     pub fn updateStates(self: *const Circuit, x: []const f64) ?f64 {
+        if (self.gpu_hook) |gh| if (gh.update_states) |f| return f(gh.ctx, x);
         var min_reject: ?f64 = null;
         for (self.batches) |b| {
             if (b.hooks.update_state) |f| if (f(b.ctx, x)) |tr| {
@@ -516,6 +541,7 @@ pub const Circuit = struct {
     /// FSM accepted-state sync (switches). Returns true (for .query) when
     /// any device's working state differs from its last accepted state.
     pub fn stateCtl(self: *const Circuit, sop: StateCtlOp) bool {
+        if (self.gpu_hook) |gh| if (gh.state_ctl) |f| return f(gh.ctx, sop);
         var dirty = false;
         for (self.batches) |b| if (b.hooks.state_ctl) |f| {
             if (f(b.ctx, sop)) dirty = true;
@@ -560,6 +586,12 @@ pub const Circuit = struct {
     pub fn setCircuitTemp(self: *Circuit, temp_c: f32) void {
         self.lin.valid = false; // temp changes device physics
         for (self.batches) |b| if (b.hooks.set_temp) |f| f(b.ctx, temp_c);
+        self.markGpuDirty();
+    }
+
+    /// Host device params changed — a resident GPU copy is now stale.
+    fn markGpuDirty(self: *Circuit) void {
+        if (self.gpu_hook) |gh| if (gh.mark_dirty) |f| f(gh.ctx);
     }
 
     /// Publish the host-owned simulation state (`$abstime`, timestep,
@@ -574,16 +606,19 @@ pub const Circuit = struct {
     pub fn recompute(self: *Circuit) void {
         self.lin.valid = false; // param re-derivation (sweeps, dc, mc)
         for (self.batches) |b| if (b.hooks.recompute) |f| f(b.ctx);
+        self.markGpuDirty();
     }
 
     pub fn applyAttempt(self: *Circuit, lambda: f64) void {
         self.lin.valid = false; // homotopy scales device params
         for (self.batches) |b| if (b.hooks.apply_attempt) |f| f(b.ctx, lambda);
+        self.markGpuDirty();
     }
 
     pub fn restoreModels(self: *Circuit) void {
         self.lin.valid = false; // undoes applyAttempt param scaling
         for (self.batches) |b| if (b.hooks.restore_models) |f| f(b.ctx);
+        self.markGpuDirty();
     }
 
     /// Memoized — built once on first call, freed by deinit. Refs point

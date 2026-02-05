@@ -42,6 +42,13 @@ comptime {
             // keeps export and lookup in step.
             if (engine.gpuEligible(D)) {
                 gompute.exportRaw(engine.kernelName(D), &engine.DeviceKernel(D, block_size).run);
+                // limit/State devices pair a second entry point that fuses the
+                // clamp pass and the state-latch refresh (engine.StateKernel).
+                if (engine.hasStateKernel(D))
+                    gompute.exportRaw(engine.stateKernelName(D), &engine.StateKernel(D, block_size).run);
+                // ... and a third for the accepted-step latch (Circuit.stateCtl).
+                if (engine.hasCtlKernel(D))
+                    gompute.exportRaw(engine.ctlKernelName(D), &engine.CtlKernel(D, block_size).run);
             } else {
                 // Per-device name: gompute requires kernel names to be unique
                 // across roots, so one shared "arp_nop" would collide.
