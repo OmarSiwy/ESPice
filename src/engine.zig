@@ -97,6 +97,9 @@ pub const Simulation = struct {
     /// SimConfig.gpu_strict — a named backend request must not silently CPU.
     gpu_strict: bool,
     gpu_ctx: ?*gpu_context.GpuContext,
+    /// Operating point memo, indexed by flavor: [0] DCOP, [1] TRANOP. Each
+    /// is solved once on first demand and shared across jobs of that flavor.
+    op_cache: [2]?[]f64,
 
     /// `sim_arena` owns everything that outlives fromNetlist: Circuit,
     /// Workspace, jobs, probes, par_eval, the duped title. `parse_arena` owns
@@ -204,6 +207,7 @@ pub const Simulation = struct {
         sim.gpu_requested = config.gpu;
         sim.gpu_strict = config.gpu_strict;
         sim.gpu_ctx = null;
+        sim.op_cache = .{ null, null };
 
         // Escapes into run-time lifetime: title read at output time, counts in
         // the summary. Dupe/copy off the parse arena so it can be reset now.
@@ -365,9 +369,9 @@ pub const Simulation = struct {
             .allocator = self.results_arena.allocator(),
         };
 
-        // If no jobs queued, run an implicit OP
+        // If no jobs queued, run an implicit OP (DC-flavored).
         if (self.n_jobs == 0) {
-            ctx.x_op = try self.ensureOp(ctx.x_op);
+            ctx.x_op = try self.ensureOp(false);
             self.results[0] = try analysis.run(&ctx, .{ .op = .{} });
             self.n_results = 1;
             return;
@@ -381,10 +385,8 @@ pub const Simulation = struct {
             // and a job AFTER a transient inherited t = t_stop, biasing the
             // next linearization at end-of-run waveform values. Transient-
             // family jobs re-establish their own state internally.
-            self.circuit.setSimState(.{ .kind = switch (job) {
-                .tran, .four, .tran_noise, .envelope, .pss, .qpss, .pnoise, .pac, .pxf => .ic,
-                else => .dc,
-            } });
+            const tf = isTranFlavor(job);
+            self.circuit.setSimState(.{ .kind = if (tf) .ic else .dc });
             const uic = switch (job) {
                 .tran => |o| o.uic,
                 else => false,
@@ -404,7 +406,7 @@ pub const Simulation = struct {
                 uic_ctx.x_op = try self.icVector();
                 self.results[self.n_results] = try analysis.run(&uic_ctx, job);
             } else {
-                ctx.x_op = try self.ensureOp(ctx.x_op);
+                ctx.x_op = try self.ensureOp(tf);
                 self.results[self.n_results] = try analysis.run(&ctx, job);
             }
             self.n_results += 1;
@@ -425,25 +427,32 @@ pub const Simulation = struct {
         return x;
     }
 
-    fn ensureOp(self: *Simulation, current: ?[]f64) ![]f64 {
-        if (current) |x| return x;
+    /// ngspice's TRANOP/DCOP split — now per FLAVOR, not per deck. A source
+    /// with both a DC value and a waveform (`Vin 1 0 DC 1 SIN(0 1 …)`) biases
+    /// at DC 1 for `.op`/`.ac`/`.dc`/`.noise` but at the waveform's t = 0 (0)
+    /// for the transient's starting point — two different operating points,
+    /// each memoized once and shared by every job of that flavor (res_array
+    /// read v(1)=0 instead of 1 when one deck-wide TRANOP op served its .op).
+    fn ensureOp(self: *Simulation, tran_flavor: bool) ![]f64 {
+        const slot = &self.op_cache[@intFromBool(tran_flavor)];
+        if (slot.*) |x| return x;
         const x = try self.arena.alloc(f64, self.circuit.n);
-        // ngspice's TRANOP/DCOP split, at deck granularity (ONE memoized op
-        // serves every job): a deck with a transient-family job biases its
-        // waveform sources at t = 0, everything else at the DC value.
-        // ponytail: a deck mixing .op with .tran gets the tranop flavor for
-        // both; per-job op flavors the day a fixture measures the difference.
-        var tran_op = false;
-        for (self.jobs[0..self.n_jobs]) |job| switch (job) {
-            .tran, .four, .tran_noise, .envelope, .pss, .qpss, .pnoise, .pac, .pxf => tran_op = true,
-            else => {},
-        };
-        const result = try analysis.AnalysisId.Module(.op).solve(&self.circuit, x, .{ .tol = self.deck_tol, .tran_op = tran_op });
+        const result = try analysis.AnalysisId.Module(.op).solve(&self.circuit, x, .{ .tol = self.deck_tol, .tran_op = tran_flavor });
         if (!result.converged) return error.OpDidNotConverge;
+        slot.* = x;
         return x;
     }
 
 };
+
+/// Analyses whose starting operating point biases waveform sources at t = 0
+/// (LRM "ic" phase) rather than at their DC value.
+fn isTranFlavor(job: Job) bool {
+    return switch (job) {
+        .tran, .four, .tran_noise, .envelope, .pss, .qpss, .pnoise, .pac, .pxf => true,
+        else => false,
+    };
+}
 
 // ---------------------------------------------------------------------------
 // Job builder — directive → analysis.Job (no ArrayList)
