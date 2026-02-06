@@ -1,6 +1,7 @@
 # Zig
 **/.zig-cache/
 **/zig-out/
+**/zig-out-di/
 **/zig-pkg/
 
 # Build artifacts

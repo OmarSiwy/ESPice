@@ -327,6 +327,16 @@ pub fn main() void {
     // via `zig run` and cannot import the solvers module (SparseLu, the oracle).
     // Run it under `zig build test-solvers`.
 
+    // SparseLu.refactor stays SCALAR — measured, not assumed. The active-set
+    // -local u16 replay tape (dense front, vector zero/normalize, run-split
+    // vector axpy variants) was bit-identical to the scalar oracle but lost
+    // 19% wall end-to-end: the per-flop tape streams with zero reuse (2.8x L2
+    // read traffic) while global-coordinate li/lx column reads stay
+    // D1-resident. Rerunnable rig: src/solvers/dev_harness.zig on a
+    // ZP_LU_DUMP capture (differential-checks every variant vs lu.refactor,
+    // bit-identical, before racing them). Full evidence:
+    // docs/solvers/refactor-tape-2026-09.md.
+
     std.debug.print("ok — zig {f}, ssse3={}, pclmul={}\n", .{
         builtin.zig_version, has_ssse3, has_pclmul,
     });
