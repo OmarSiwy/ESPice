@@ -82,6 +82,41 @@ Reports: /tmp/audit-{mos-legacy,bjt-jfet-mes,llvm-time}.md.
   are vacuous; ngspice trap-ringing artifacts (pvt undershoot −0.165 V)
   count against us in the comparator.
 
+## Final scoreboard (clean full bench, 2026-09-07)
+
+264 fixtures vs ngspice 44.2. **170 PASS / 15 FAIL** (rest: SKIP — see below).
+Speed: of 229 timed fixtures, espice is **faster-or-equal on 183 (80%),
+mean 1.79×**; GPU wins its lane (parallel_inverters_2000 2.07× vs CPU).
+
+Read the FAIL list against the START-of-session baseline (18 FAIL, several
+CATASTROPHIC): every catastrophe is gone — bsim4 3.5e3→1.7e-3, diode_bridge
+2.5e2→2.7e-7, mul 1.0→8e-5, mesa_oscillator 0.45→3.7e-5, the whole tline
+cluster, b4soi 0.81→7.8e-4, b3soipd 1.75→3.3e-5. NONE of the 15 remaining is
+a regression. They are three honest kinds:
+
+1. **Vacuous passes the session's own honesty exposed** — branch-current
+   columns are compared now (they never were) and `.dc … TEMP` actually
+   sweeps now (it was ignored). bsim1 (i(vds) 2.1e3), bsim2 (0.96),
+   diode_temp (2.3e-2), ngspice/mosmem (3.1e-2), power/rectifier (4.5e-2),
+   vbic_forced_output (4.8e-3), fourier/square_harmonics (0.10) were green
+   only because nobody looked at the wrong quantity. The bar rose; these are
+   the models that don't clear it. (#20 diode temp, #21 bsim1/2 currents.)
+2. **Edge-phase-only** — RMS passes, max fails on one sample straddling a
+   steep edge where ngspice's own coarse LTE grid disagrees with itself
+   below the comparator's window: pvt_corners (rms 3.9e-3), parallel_inv
+   (5.8e-4), mos6_inverter (2.2e-3), hfet_inverter (5.9e-3), vacask/mul
+   (8e-5), mosamp (grid slop — ngspice runs it 100× harder). Closing these
+   is tran-grid matching, a policy choice, not a model/solver bug.
+3. **Documented architectural** — txl2_3_line (per-row vs per-state LTE on
+   the shared q-plane, frozen at the GPU boundary); bsim4 1.69e-3 (just over
+   the 1e-3 rms line, BSIM4 version delta).
+
+SKIPs that are CORRECT: topology/{current_cutset,floating_node,voltage_loop}
+(their golden IS the named error espice now emits); scaling/inverter_chain_*
+(ngspice aborts them too — "timestep too small"). SKIPs still open:
+b3soifd/dd (levels 55/56 unported; 57 PD done), hisimhv, vacask/{c6288,ring}
+(psp103), verilog/inverter (FastVF not wired).
+
 ## Perf levers left (measured, ranked)
 
 1. VerA temp-expr hoisting: pow/log/exp ≈ 20% of BJT transients (#16).
