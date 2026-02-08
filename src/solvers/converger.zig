@@ -60,6 +60,21 @@ pub fn opdbg() bool {
     return std.c.getenv("ZP_OPDBG") != null;
 }
 
+/// Why an iterate was refused. `finalizeStep` has five independent gates and
+/// they cost very different things, so "did not converge" alone is not a
+/// diagnosis: a run that needs one extra iteration per timepoint everywhere is
+/// a 1.5x tax, and which gate is charging it decides whether the fix is in the
+/// solver, the device limiter or a device's state machine.
+///
+/// ngspice's own test is `NIconvTest` (maths/ni/niconv.c): the per-node
+/// solution-delta test and nothing else, plus `NIiter`'s iterno==1 floor and
+/// the device-set CKTnoncon (limiting) flag. `.residual` has no counterpart
+/// there — it is ours. MEASURED, and it is NOT the tax: gating it off across
+/// vacask/mul moved 1499519 Newton iterations to 1499341 (0.01%), against
+/// ngspice's 1018450 for the same 500k timepoints. Left in.
+pub const Reject = enum { converged, first_iter, delta, limited, flipped, residual };
+
+
 fn Deref(comptime P: type) type {
     return if (@typeInfo(P) == .pointer) @typeInfo(P).pointer.child else P;
 }
@@ -195,7 +210,7 @@ pub fn newton(
                 }
                 const name_fi = sysNodeName(sys, @intCast(fi));
                 const name_di = sysNodeName(sys, @intCast(di));
-                std.debug.print("  newton it={d} |F|={e:.3}@{d}({s}) dx={e:.3}@{d}({s}) x={e:.3} scaled={e:.3} conv={}\n", .{ iter, norm_f, fi, name_fi, dx[di], di, name_di, x[di], st.scaled, st.converged });
+                std.debug.print("  newton it={d} |F|={e:.3}@{d}({s}) dx={e:.3}@{d}({s}) x={e:.3} scaled={e:.3} conv={} why={s}\n", .{ iter, norm_f, fi, name_fi, dx[di], di, name_di, x[di], st.scaled, st.converged, @tagName(st.why) });
             }
         }
         if (st.converged)
@@ -219,7 +234,7 @@ fn sysNodeName(sys: anytype, idx: u32) []const u8 {
 // Shared step acceptance
 // ----------------------------------------------------------------------------
 
-const Step = struct { converged: bool, scaled: f64, flipped: bool = false };
+const Step = struct { converged: bool, scaled: f64, flipped: bool = false, why: Reject = .converged };
 
 fn dampStep(dx: []f64, clamp: f64) void {
     if (!std.math.isFinite(clamp)) return;
@@ -249,15 +264,15 @@ fn finalizeStep(
     const limited = if (comptime @hasDecl(S, "applyLimits")) sys.applyLimits(x, x_old) else false;
 
     if (comptime @hasDecl(S, "updateStates")) {
-        if (sys.updateStates(x)) |_| return .{ .converged = false, .scaled = scaled, .flipped = true };
+        if (sys.updateStates(x)) |_| return .{ .converged = false, .scaled = scaled, .flipped = true, .why = .flipped };
     }
-    if (limited) return .{ .converged = false, .scaled = scaled };
-    if (iter == 0) return .{ .converged = false, .scaled = scaled };
-    if (scaled >= 1.0) return .{ .converged = false, .scaled = scaled };
+    if (limited) return .{ .converged = false, .scaled = scaled, .why = .limited };
+    if (iter == 0) return .{ .converged = false, .scaled = scaled, .why = .first_iter };
+    if (scaled >= 1.0) return .{ .converged = false, .scaled = scaled, .why = .delta };
     for (0..n) |i| {
         const scale = @abs(vals[sys.diag_slots[i]]);
         const tol = @max(opts.residual_tol, 10.0 * scale * (opts.reltol * @abs(x[i]) + opts.vntol));
-        if (@abs(residual[i]) > tol) return .{ .converged = false, .scaled = scaled };
+        if (@abs(residual[i]) > tol) return .{ .converged = false, .scaled = scaled, .why = .residual };
     }
     return .{ .converged = true, .scaled = scaled };
 }
