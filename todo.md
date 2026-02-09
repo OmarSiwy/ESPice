@@ -194,10 +194,48 @@ mapped through `objdump`. Full derivation: `docs/device-eval-vs-ngspice-2026-09.
       architectural registers, so the frame spills (offsets to `0x7e0`,
       `vmovapd 0x4c0(%rsp)` on the scatter path). Scattering each row as it is
       produced fixes it and needs a different device entry point.
-- [ ] **Two device walks per Newton iterate.** `applyLimits` (`limitRange`,
-      re-gathers all `n_u` unknowns) then `evalRange`. ngspice limits inline in
-      `MOS1load` — one walk. ~312 Ir/instance, 8.4% of the run. Touches the
-      Newton contract in `solvers/converger.zig`, so it is not a local change.
+- [ ] **`zPnjlim` evaluates three `@log` libcalls unconditionally.** VerA
+      `src/backend/limit_kernels.zig`, branchless per simd-first T7 — but the
+      damping arm is dead on ~all iterates, and on the host each dead arm is a
+      **libcall**, not a select. mos1 calls it twice, so six `log`s per MOSFET
+      per Newton iterate. Ablation (`ZP_NO_LIMIT` / `ZP_LIM_NOCALL` gates,
+      2026-09-09): `log` is **56.58M Ir = 8.02%** of
+      `scaling/parallel_inverters_100` and **every one of those calls comes
+      from `zPnjlim`** — the symbol vanishes entirely under either gate while
+      the mos1 core keeps running. Guarding the arm with `if (comptime !k_dev)
+      if (!damp) return floored;` — the same host/device split `sel` already
+      uses — measured **704.92M -> 619.03M (-12.2%)** on
+      parallel_inverters_100 and **248.51M -> 224.79M (-9.5%)** on
+      devices/mos6_inverter, raw output BYTE-IDENTICAL on both, Newton
+      iterations unchanged (1352, 595 accepted). Bit-identity is structural
+      (the early return IS the `damp == false` arm of the final `sel`) and was
+      checked two ways: VerA's own oracle differential test passes, and a
+      4M-draw direct diff of both spellings hits the damping arm 617,209 times
+      with 0 bit mismatches. **The change is VerA's; espice needs no edit.**
+      Same lever exists for `zFetlim`/`zLimvds` (no libcalls, so smaller and
+      less clear-cut — the clamp fires often on a switching inverter).
+- [ ] **Two device walks per Newton iterate — priced, and the fusable half is
+      small.** `applyLimits` (`limitRange`, re-gathers all `n_u` unknowns) then
+      `evalRange`. ngspice limits inline in `MOS1load` — one walk. The 312
+      Ir/instance figure above conflated the walk with `D.limit` itself.
+      Ablation splits it: whole limiting machinery **612 Ir/MOS/iterate
+      (23.5%)**, of which `D.limit`'s BODY is 515 and the second gather +
+      `setLim` + `evalRange`'s `lim`/`corr` read is **97 Ir (3.7%)**. So fusing
+      the walks — which touches the Newton contract in `solvers/converger.zig`
+      and changes WHICH iterate gets clamped — buys 3.7%, while the `zPnjlim`
+      item above buys 12.2% for four lines. Do that one first; after it the
+      limit pass is 204 Ir/MOS/iterate against ngspice's 52.
+- [ ] **Post-accept `ckt.eval(cur, t)` is a full extra device pass per accepted
+      step** (`analysis/tran/tran.zig`, the `has_state_q` q-refresh). 595
+      re-evals against 1352 Newton evals = **+44% device passes, ~113M Ir =
+      16%** of parallel_inverters_100 (marginal cost measured at 952
+      Ir/instance/pass via a `ZP_NO_REEVAL` gate, which agrees with kernel 754
+      + stamp 195). Correctness-required and already gated off once — see the
+      comment at the call site. It reads only `q_vec`/`q_tape`, never the
+      Jacobian or residual, so the real fix is a q-only scalar pass (no
+      `Dual(8)`, no G/C scatter) rather than deleting it; bit-identity of the
+      value path between `Dual(n,f64).v` and a plain scalar `S` is the thing to
+      prove first.
 - [ ] **Parameter-only prologue runs per evaluation.** VerA's `pcClass` returns
       false for `.phi`/`.branch`, so an `if ($param_given(...))` ladder is not
       hoistable, and `pcConsider` requires a libm-class op, so `cox`/`beta`/
