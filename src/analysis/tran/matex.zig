@@ -8,6 +8,7 @@
 //! matrix_sig / const-Jacobian detection says linearization is needed.
 const std = @import("std");
 const root = @import("../types.zig");
+const simdCopy = root.copySimd;
 const converger = @import("solvers").converger;
 const solvers = @import("solvers");
 const types = @import("solvers").types;
@@ -210,13 +211,6 @@ fn denseMatMul(m: usize, A: []const f64, B: []const f64, C: []f64) void {
             C[i * m + j] = sum;
         }
     }
-}
-
-/// SIMD copy for dense buffers (no @memcpy per contract).
-fn simdCopy(dst: []f64, src: []const f64) void {
-    var i: usize = 0;
-    while (i + W <= dst.len) : (i += W) dst[i..][0..W].* = src[i..][0..W].*;
-    while (i < dst.len) : (i += 1) dst[i] = src[i];
 }
 
 /// SIMD axpy: y[i] += a * x[i]

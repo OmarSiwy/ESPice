@@ -146,7 +146,6 @@ pub fn analyze(
     const setup: lanes.LaneSetup = .{ .ctx = &lane_ctx, .apply = LaneCtx.apply, .restore = LaneCtx.restore };
     const nopts = options.dc_options.tol.newtonOpts(options.dc_options.tol.itl2);
     try lanes.solveLanes(ckt, setup, x_lanes, results, nopts);
-    ckt.recompute();
 
     // Track yield counts per spec
     const yield_counts = try allocator.alloc(u32, yield_specs.len);
@@ -275,7 +274,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     defer {
         // analyze() restores on success; this covers early-error paths too.
         for (param_vars) |pv| pv.param_ptr.set(pv.nominal);
-        ckt.recompute();
+        ckt.recompute() catch unreachable; // nominals were read from the checked circuit
     }
 
     const stride: usize = opts.n_trials;

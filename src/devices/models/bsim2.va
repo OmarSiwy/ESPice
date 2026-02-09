@@ -175,12 +175,13 @@ module bsim2(d, g, s, b);
 
     // --- extraction reference bias / nominal temperature ------------------
     // vdd is the Vds *reference point* of the mobility interpolation: the
-    // mu0 -> mus endpoint is defined at vds = vdd (b2eval.c Beta1). It is not
-    // a clamp. vgg/vbb are extraction-range markers only: b2eval.c reads
-    // neither (only B2vdd appears in the load), so they are carried for cards.
+    // mu0 -> mus endpoint is defined at vds = vdd (b2eval.c Beta1). All three
+    // are ALSO hard clamps on the bias triple: b2eval.c:57-59 limits its local
+    // Vbs/Vgs/Vds to 2*VBB / 2*VGG / 2*VDD before evaluating anything, and
+    // b2temp.c:135-137 uses VBB for the betasB endpoint clamp.
     parameter real vdd = 5.0;     // V
-    parameter real vgg = 5.0;     // V, card carry-through
-    parameter real vbb = 5.0;     // V, card carry-through (cards give it negative)
+    parameter real vgg = 5.0;     // V
+    parameter real vbb = 5.0;     // V (real cards give it negative)
     // b2temp.c: `B2Vtm = 8.625e-5 * (B2temp + 273.0)` — BSIM2 has *no*
     // temperature maps at all (verified: b2temp.c touches neither Eg, pb, js
     // nor the cap factors), and the thermal voltage comes from this model-card
@@ -227,7 +228,7 @@ module bsim2(d, g, s, b);
     // bias-independent prep
     real leff, weff, lum, wum, il, iw, tabs, vt, cox, coxwl, bfac;
     real adrn, asrc, pdrn, psrc, isd, iss, czbs, czbssw, czbd, czbdsw;
-    real gdp, gsp, vddc, tyf, vtx, vcrits, vcritd;
+    real gdp, gsp, vddc, vdd2, vgg2, vbb2, tyf, vtx, vcrits, vcritd;
     real vfbe, phie, phis3, k1e, k2e, eta0e, etabe;
     real mu0be, mus0e, musbe;
     real mu20e, mu2be, mu2ge, mu30e, mu3be, mu3ge, mu40e, mu4be, mu4ge;
@@ -283,7 +284,12 @@ module bsim2(d, g, s, b);
 
         tabs  = temp + 273.0;                           // b2temp.c, degC -> K
         vt    = 8.625e-5 * tabs;                        // kT/q [V], b2temp.c
-        cox   = 3.453e-11 / max(tox * 1.0e-6, 1.0e-12); // eps_ox/tox [F/m^2]
+        // b2temp.c:44 is `Cox = 3.453e-13 / (B2tox * 1.0e-4)` [F/cm^2] -- eps_ox
+        // over TOX read as MICRONS, with no floor. The 1e-12 m guard that used
+        // to sit here capped Cox at 1/25 of ngspice's for any card spelling TOX
+        // in metres-looking units (devices/bsim2 has TOX=40n -> 4e-14 m), and
+        // Ids is exactly linear in Cox. `from (0:inf)` already keeps tox > 0.
+        cox   = 3.453e-11 / (tox * 1.0e-6);            // eps_ox/tox [F/m^2]
         coxwl = cox * weff * leff;
         // Gate-drive-independent part of beta: 1e-4 converts cm^2/V/s -> m^2.
         bfac  = 1.0e-4 * cox * weff / leff;
@@ -300,6 +306,18 @@ module bsim2(d, g, s, b);
         mu0be = mu0b + lmu0b * il + wmu0b * iw;
         mus0e = mus0 + lmus0 * il + wmus0 * iw;
         musbe = musb + lmusb * il + wmusb * iw;
+        // b2temp.c:129-137, on the RAW mobilities and BEFORE the CoxW/L scaling
+        // at b2temp.c:168-171:
+        //   if (betas0 < 1.01*beta0) betas0 = 1.01*beta0;
+        //   tmp = betas0 - beta0 - beta0B*VBB;
+        //   if ((-betasB*VBB) > tmp) betasB = -tmp/VBB;
+        // beta0 there is the raw MU0 with no L/W siblings, beta0B is mu0be.
+        // devices/bsim2 leaves MUS0 at its 500 default under MU0=600, so ngspice
+        // actually runs 606 -- a 1.21x on the current all by itself.
+        mus0e = max(mus0e, 1.01 * mu0);
+        musbe = (vbb != 0.0 && (-musbe * vbb) > (mus0e - mu0 - mu0be * vbb))
+                ? -(mus0e - mu0 - mu0be * vbb) / vbb
+                : musbe;
         mu20e = mu20 + lmu20 * il + wmu20 * iw;
         mu2be = mu2b + lmu2b * il + wmu2b * iw;
         mu2ge = mu2g + lmu2g * il + wmu2g * iw;
@@ -333,6 +351,19 @@ module bsim2(d, g, s, b);
         vgle = vglow  + lvglow  * il + wvglow  * iw;
 
         vddc = abs(vdd);
+        // b2eval.c:57-59 clamps its LOCAL copies of the three bias arguments
+        // before anything else runs:
+        //     if (Vbs < B2vbb2) Vbs = B2vbb2;   /* B2vbb2 = 2*VBB, b2temp.c:47 */
+        //     if (Vgs > B2vgg2) Vgs = B2vgg2;
+        //     if (Vds > B2vdd2) Vds = B2vdd2;
+        // VBB is a FLOOR in the code even though b2.c:166 calls it "Maximum
+        // Vbs", and b2set.c:388 defaults it to +5 -- so a card that omits VBB is
+        // evaluated at Vbs = +10 whatever the real body bias is, which moves
+        // T1s/Aa/Vth wholesale (0.665x on devices/bsim2's current). Real cards
+        // give VBB negative (devices/bsim2_ngspice: vbb = -3), where it is inert.
+        vdd2 = 2.0 * vdd;
+        vgg2 = 2.0 * vgg;
+        vbb2 = 2.0 * vbb;
 
         // Diffusion geometry: instance AD/AS/PD/PS when given, else the
         // process defaults (wdf/dell are um, hence 1e-12 to m^2; perimeter
@@ -377,9 +408,13 @@ module bsim2(d, g, s, b);
         vbsr = tyf * $limit(V(b, sp), "pnjlim", vt, vcrits, tyf);
 
         vdsn = min(vdsr, 0.0);                   // swap offset
-        vbs  = vbsr - vdsn;
-        vgs  = vgsr - vdsn;
-        vds  = abs(vdsr);
+        // b2eval.c:57-59, applied to the swapped (post-mode) triple, which is
+        // what b2ld.c hands B2evaluate. The junction diodes and depletion
+        // charges below deliberately stay on the unclamped node voltages: they
+        // are computed in b2ld.c, outside B2evaluate, and never see the clamp.
+        vbs  = max(vbsr - vdsn, vbb2);
+        vgs  = min(vgsr - vdsn, vgg2);
+        vds  = min(abs(vdsr), vdd2);
         // Smooth mode sign: +1 forward, -1 reverse.
         mode = vdsr / (abs(vdsr) + 1.0e-30);
 
@@ -469,7 +504,14 @@ module bsim2(d, g, s, b);
         targ   = max(min(vds * beta2 / vdsat, 30.0), -30.0);
         beta   = max(beta0b + beta1 * tanh(targ) + vds * (beta3 - beta4 * vds),
                      1.0e-18);
-        betaeff = beta / (uvert * max(1.0 + u1 * vdsch, 0.1));
+        // b2eval.c:274-287: Utot is Uvert PLUS U1*Vds, not Uvert TIMES
+        // (1 + U1*Vds), and it floors at 0.5. (b2eval.c's saturation branch is
+        // Beta/Uvert with no U1 term at all; vdsch = min(vds, vdsat) reproduces
+        // it precisely because Uvert + U1*Vdsat = Uvert*(1 + Vc/sqrt(Kk)) is
+        // exactly the factor that cancels (2*sqrt(Kk) - 1) in the triode
+        // numerator -- the multiplicative spelling breaks that identity and was
+        // 1.13x high on devices/bsim2.)
+        betaeff = beta / max(uvert + u1 * vdsch, 0.5);
 
         // ==================================================================
         // Channel current; vdsch = min(vds, vdsat) unifies triode and

@@ -146,9 +146,9 @@ pub fn solve(
         p.ptr.set(orig + delta_req);
         defer {
             p.ptr.set(orig);
-            ckt.recompute();
+            ckt.recompute() catch unreachable; // restores the checked original parameter
         }
-        ckt.recompute();
+        try ckt.recompute();
 
         const delta = p.ptr.get() - orig;
         if (delta == 0) return error.ZeroDelta;

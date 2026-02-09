@@ -138,20 +138,83 @@ $\min(\delta,\,2h,\,h_{\max})$ as the next step (spice3 `dctran.c`).
 `trtol` (default 7) deflates the worst-case LTE bound to its empirically
 observed sharpness.
 
-**Known divergence — per-ROW, not per-state.** ngspice runs the formula
-above once per device charge *state*; espice runs it on the `q_vec` plane,
-i.e. the per-row (per-node) SUM of charges. Co-moving charges on one node
-add their divided differences: on `tline/txl2_3_line`, node 168 carries the
-7.398 fF load cap plus both MOS gate charges (Σcox = 0.100 fF) — espice's
-row slope 7.498 fF vs ngspice's binding state 7.398 fF, so the
-post-breakpoint step seed comes out 1.3 % short (6.124 ps vs 6.207 ps at
-the 15.9 ns landing, both engines otherwise formula-identical to 6 digits).
-Breakpoint-cut remainders amplify the relative difference (a ramp doubles
-FROM the tiny cut), so the tmax-capped step trains settle ~19 ps out of
-phase and steep delayed wavefronts photograph differently — the whole
-residual of that fixture (max 1.16e-2 vs the 1e-2 gate; rms passes). A
-per-state LTE needs per-contribution q snapshots, which the frozen GPU
-plane layout (one summed `[]f64` q plane) rules out for now.
+**Per-device-state LTE (landed 2026-09-07).** ngspice runs the formula above
+once per device charge *state* (`ckttrunc.c` → `DEVtrunc` → `cktterr.c`; see
+`captrunc.c`, `bjttrunc.c`, `mos1trun.c`) and mins over states, then over
+devices. espice used to run it on the `q_vec` plane, i.e. the per-row
+(per-node) SUM of charges, which adds co-moving contributions' divided
+differences together and loses the binding state.
+
+The fix needed no ABI change and nothing had to be unfrozen. The
+per-contribution index space was **already there**: `engine.buildTapes` writes
+`rhs_idx[id * n_u + ru]`, a dense `(instance, unknown)` array whose *value* is
+the row — many-to-one onto rows, which is precisely "which device state landed
+on which node". `Sink.scatterQ` now also stores its `qv` into a host-only
+`DeviceBatch.q_tape` on that same index, and `simulate` keeps a second history
+(`qt_hist[4]`, `qt_i_prev`) over it. `stepBound` is unchanged — it is handed
+different slices. Cost: one nullable fn pointer on the cold `Hooks` vtable
+(which moves `layoutHash()` and so re-keys the FastVAF `.so` cache once —
+that is the mechanism working, not a break). The four `[]f64` planes, the u32
+tapes, the CSC pattern, the Model/Instance PODs and `DeviceKernel.run`'s
+parameter list are byte-identical.
+
+Measured on the 264-fixture corpus: **151 PASS / 7 FAIL, unchanged**; 9
+fixtures better, 3 worse. `tline/txl2_3_line` 1.23e-2 → 5.40e-3 max (the case
+this was built for: node 168's 7.398 fF load cap is a state again instead of
+being merged into a 7.498 fF row slope), `ltra2_2_line` 1.13e-4 → 9.65e-6,
+`fourbitadder` 3.55e-4 → 3.37e-5, `mos1_large_signal` 8.58e-4 → 1.06e-4,
+`mosmem` 3.13e-3 → 8.89e-4. Step counts are unchanged on most of the corpus
+and move ±7 % where they move at all — the "more constraints ⇒ smaller steps"
+intuition is wrong, see the scale-invariance note below. `ZP_NO_QTAPE=1`
+forces the per-row path on a live binary and reproduces the pre-change numbers
+exactly; `ZP_TRAN_STATS=1` prints `n_qt`.
+
+**Divergence 1 — the partition is per-(instance, terminal), not per-`ddt`.**
+VerA emits `D.q` as one charge per device *unknown*, so a two-terminal cap,
+inductor or diode gets exactly ngspice's state set (`CAPqcap`, `INDflux`,
+`DIOqd`), but a MOSFET's `qgs + qgd + qgb` arrive already summed on the gate
+unknown where `MOS1trunc` terrs them separately. Neither partition is a
+superset of the other — `MOS1trunc` also omits `qbd`/`qbs` entirely. Going
+finer is a VerA change (emit per-`ddt` charges), which *is* a device-ABI event.
+
+**Divergence 2 — espice can have MORE states than ngspice, and that is what
+regressed `devices/kinduc`** (1.53e-8 → 2.75e-4 max; still PASS with 36×
+margin). espice lowers a `K` card to its own `kinduc` instance writing
+`q[br1] = −M·i2`, `q[br2] = −M·i1` onto the two inductors' branch rows, so
+each branch row carries two contributions (self flux + mutual). ngspice
+accumulates the mutual term **into the inductor's single `INDflux` state**
+(`indload.c:70-77`) and `MUT` has no `MUTtrunc` at all — so ngspice's
+truncation candidate for a coupled inductor is exactly espice's *row sum*.
+Splitting it is strictly finer than ngspice, not coarser.
+
+Why a *small* extra state still moves the grid: **`CKTterr` is homogeneous of
+degree zero in the charge.** `volttol` and `chargetol` both scale with `|q_j|`
+and so does `|dd_j|`, so `del_j` depends only on a contribution's *relative*
+curvature, not its size — away from the `abstol`/`chgtol` floors, scaling a
+state by 1000 leaves its bound put (pinned by an assert in
+`tran.zig`'s `stepBound` test). Measured on `kinduc` by sweeping the coupling:
+per-state / per-row max error is 2.75e-4 / 1.53e-8 at k = 0.99, 2.62e-4 /
+1.86e-8 at k = 0.5, 2.81e-4 / 3.80e-9 at k = 0.1 and 6.17e-5 / 2.02e-12 at
+k = 0.001. The gap does not scale with the coupling — a mutual flux 1000×
+smaller than the self flux is still a full-strength candidate once it is its
+own state. Fixing it means teaching the host that a `K` card's charge belongs
+to the inductor's state; not done, because the fixture passes and the
+machinery would be a device-type special case.
+
+**Divergence 3 — the GPU keeps per-row LTE.** `Circuit.qTapeLen()` returns 0
+when a `gpu_hook.eval_planes` stamp is installed, because `eval`/`evalNewton`
+then return before any host batch runs and the tapes would be stale. Closing
+that means adding the tape to `DeviceKernel.run`, which *is* a GPU ABI change.
+The whole-transient megakernel (`gpu_hook.simulate_tran`) is unaffected — it
+has its own LTE reduce.
+
+**Not a divergence: ground-side charge.** The old per-row path walked
+`q_hist[0..n]`, excluding the trash cell `q_vec[n]`, so every ground-terminal
+contribution was exempt from LTE; the tape has no such exemption. This looks
+like a behavioural change but is numerically inert: every `CKTterr` term is
+even in `q` (`|q|`, `|dd|`, `|i|`), so a grounded device's `−q` mirror scores
+identically to its `+q` partner and cannot move a min. Asserted in the same
+test. No trash-row mask is needed, which is why none was built.
 
 ### Breakpoints
 

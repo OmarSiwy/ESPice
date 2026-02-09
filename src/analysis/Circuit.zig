@@ -169,6 +169,9 @@ pub const Circuit = struct {
     g_base: []f64,
     c_base: []f64,
 
+    // Capacitor-only nodes have charge-defined startup, not a unique static OP.
+    needs_tran_op: bool = false,
+
     // -- cold: node metadata --
     // Flat intern table: nodeName(i) = intern_bytes[intern_offs[i]..intern_offs[i+1]].
     // intern_offs has n+1 entries; an empty slice (offs[i]==offs[i+1]) is a
@@ -179,6 +182,7 @@ pub const Circuit = struct {
 
     // -- cold: structure --
     bbd: ?BbdInfo = null,
+    solver_execution: @import("solvers").types.Execution = .{},
     /// Reference to the engine-owned parallel eval context (mechanism lives
     /// in par.zig, ownership in src/engine.zig). Null ⇒ serial eval.
     par_eval: ?*ParEval = null,
@@ -239,6 +243,7 @@ pub const Circuit = struct {
     /// so the symbolic LU stays valid for the circuit's lifetime.
     pub fn workspace(self: *Circuit) !*converger.Workspace {
         if (self.ws == null) self.ws = try converger.Workspace.init(self.gpa, self.n, self.col_ptr, self.row_idx, self.bbd);
+        self.ws.?.slv.params.execution = self.solver_execution;
         return &self.ws.?;
     }
 
@@ -269,6 +274,40 @@ pub const Circuit = struct {
     /// View of this circuit's own value planes (the lane-0 / serial target).
     pub fn ownPlanes(self: *Circuit) Planes {
         return .{ .g_vals = self.g_vals, .c_vals = self.c_vals, .rhs = self.rhs, .q_vec = self.q_vec };
+    }
+
+    /// Length of the per-device-STATE charge tape: one entry per
+    /// (instance, unknown) of every charge-carrying batch, laid out
+    /// batch-major and indexed exactly like each batch's `rhs_idx`.
+    ///
+    /// Zero when nothing carries charge, and zero when a GPU plane-stamp hook
+    /// is installed: `eval`/`evalNewton` then return before any host batch
+    /// runs, so the host tapes would be stale. The transient reads a 0 here as
+    /// "fall back to per-row LTE on the summed q plane" — the pre-existing
+    /// behaviour, unchanged.
+    pub fn qTapeLen(self: *const Circuit) u32 {
+        if (self.gpu_hook) |gh| {
+            if (gh.eval_planes != null) return 0;
+        }
+        var total: u32 = 0;
+        for (self.batches) |b| {
+            if (b.hooks.q_tape != null) total += b.count * b.n_u;
+        }
+        return total;
+    }
+
+    /// Copy the live per-state charges out of the batches into one flat buffer
+    /// of `qTapeLen()` entries. O(device types) memcpys — each batch's tape is
+    /// already contiguous, this only concatenates them.
+    pub fn snapshotQTape(self: *const Circuit, dst: []f64) void {
+        var off: usize = 0;
+        for (self.batches) |b| {
+            const f = b.hooks.q_tape orelse continue;
+            const src = f(b.ctx);
+            @memcpy(dst[off..][0..src.len], src);
+            off += src.len;
+        }
+        std.debug.assert(off == dst.len);
     }
 
     /// Ground pin: applied once, after all batch stamps (and any reduction).
@@ -583,6 +622,7 @@ pub const Circuit = struct {
         return if (best == std.math.inf(f64)) null else best;
     }
 
+    /// Install temperature; call recompute before solving to check frozen topology.
     pub fn setCircuitTemp(self: *Circuit, temp_c: f32) void {
         self.lin.valid = false; // temp changes device physics
         for (self.batches) |b| if (b.hooks.set_temp) |f| f(b.ctx, temp_c);
@@ -603,10 +643,13 @@ pub const Circuit = struct {
         for (self.batches) |b| if (b.hooks.set_sim_state) |f| f(b.ctx, st);
     }
 
-    pub fn recompute(self: *Circuit) void {
+    /// Refresh numeric parameters; changed internal wiring requires rebuilding the circuit.
+    /// On error, restore the parameters and recompute before reusing this circuit.
+    pub fn recompute(self: *Circuit) error{TopologyChanged}!void {
         self.lin.valid = false; // param re-derivation (sweeps, dc, mc)
-        for (self.batches) |b| if (b.hooks.recompute) |f| f(b.ctx);
+        self.has_baseline = false;
         self.markGpuDirty();
+        for (self.batches) |b| if (b.hooks.recompute) |f| try f(b.ctx);
     }
 
     pub fn applyAttempt(self: *Circuit, lambda: f64) void {
@@ -759,7 +802,6 @@ pub fn init(
     for (protos) |p| p.destroy(p.ctx, gpa);
     return ckt;
 }
-
 
 // ---------------------------------------------------------------------------
 // zeroSimd / copySimd live in solvers/types.zig (the DAG leaf) so files

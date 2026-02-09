@@ -94,6 +94,9 @@ Three changes, in order of value:
 ## 4. Two gates
 
 **Work gate** (`gpu_context.zig`, `ESPICE_GPU_MIN_WORK`, default 200 000).
+`--gpu` bypasses this gate, including for tiny or all-linear circuits. It still
+requires available hardware and eligible kernels. `--backend auto` retains the
+gate; the last `--gpu` or `--backend` option wins.
 Scatter work is `count · n_u²` summed over eligible batches — the number of
 `atom.global.add.f64` a batch issues per iteration, which for the devices
 `gpuEligible` admits today *is* the kernel. Measured: 6 atomics × 20 K
@@ -581,5 +584,13 @@ stands, and at n=15 007 the dense-complex subset does not apply).
 in the binary reject at the CLI, and a machine-level init failure (absent
 device/driver) errors out of `run()` naming what was detected, instead of
 warning and silently running on the CPU. `--gpu`/`auto` keep the
-fall-back. `NotEnoughGpuWork` stays a decline on both — the gate is
-contract, `ESPICE_GPU_MIN_WORK` overrides it.
+fall-back for unavailable hardware/kernels. `--gpu` overrides the work gate;
+`--backend auto|cuda|hip` still use it. `ESPICE_GPU_MIN_WORK` tunes the gate
+for those backend requests.
+
+Override validation: a three-device resistor divider and a single-diode circuit
+both ran with `--gpu` and `ESPICE_GPU_MIN_WORK=18446744073709551615`.
+Their values matched the CPU exactly. CUDA tracing recorded two kernel launches
+for the divider, versus zero with auto or CPU selection. Both option orders
+were checked. Full build and all 376 tests pass. Reproduction:
+`/tmp/espice-gpu-override-356hp9xj/validate.py`.

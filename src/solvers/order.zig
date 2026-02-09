@@ -22,27 +22,6 @@ pub const Error = error{OutOfWorkspace};
 
 const NONE: u32 = std.math.maxInt(u32);
 
-// ponytail: SIMD lane width for bulk u32 fill/copy — replaces @memset/@memcpy
-const W32 = std.simd.suggestVectorLength(u32) orelse 1;
-const V32 = @Vector(W32, u32);
-
-fn simdFillU32(buf: []u32, val: u32) void {
-    const fill: V32 = @splat(val);
-    var i: usize = 0;
-    while (i + W32 <= buf.len) : (i += W32) {
-        buf[i..][0..W32].* = fill;
-    }
-    for (buf[i..]) |*v| v.* = val;
-}
-
-fn simdCopyU32(dst: []u32, src: []const u32) void {
-    var i: usize = 0;
-    while (i + W32 <= dst.len) : (i += W32) {
-        dst[i..][0..W32].* = src[i..][0..W32].*;
-    }
-    for (dst[i..], src[i..]) |*d, s| d.* = s;
-}
-
 // ============================================================================
 // Ws — bump workspace
 // ============================================================================
@@ -66,7 +45,7 @@ pub const Ws = struct {
 
     pub fn allocSet(w: *Ws, m: usize, fill: u32) Error![]u32 {
         const s = try w.alloc(m);
-        simdFillU32(s, fill);
+        @memset(s, fill);
         return s;
     }
 
@@ -328,7 +307,7 @@ pub fn amd(n: u32, col_ptr: []const u32, row_idx: []const u32, q: []u32, ws: *Ws
 
     // ==== Phase 1: build symmetrized variable adjacency (contiguous in va[]) ====
     // Count degrees first (two passes: count then scatter)
-    simdFillU32(deg, 0);
+    @memset(deg, 0);
     for (0..n) |j| {
         for (col_ptr[j]..col_ptr[j + 1]) |pi| {
             const r = row_idx[pi];
@@ -344,7 +323,7 @@ pub fn amd(n: u32, col_ptr: []const u32, row_idx: []const u32, q: []u32, ws: *Ws
         va_free += deg[i];
     }
     // Scatter edges (both directions for symmetrization)
-    simdFillU32(deg, 0);
+    @memset(deg, 0);
     for (0..n) |j| {
         for (col_ptr[j]..col_ptr[j + 1]) |pi| {
             const r = row_idx[pi];
@@ -472,7 +451,7 @@ pub fn amd(n: u32, col_ptr: []const u32, row_idx: []const u32, q: []u32, ws: *Ws
         if (va_free + nlp > va.len) return error.OutOfWorkspace;
         va_pe[p] = @intCast(va_free);
         va_len[p] = nlp;
-        simdCopyU32(va[va_free..][0..nlp], lp_buf[0..nlp]);
+        @memcpy(va[va_free..][0..nlp], lp_buf[0..nlp]);
         va_free += nlp;
 
         // Weighted size of Lp
@@ -521,7 +500,7 @@ pub fn amd(n: u32, col_ptr: []const u32, row_idx: []const u32, q: []u32, ws: *Ws
             } else {
                 const nc: u32 = (ewp + 1) * 2;
                 if (ea_free + nc > ea.len) return error.OutOfWorkspace;
-                simdCopyU32(ea[ea_free..][0..ewp], ea[ea_pe[i]..][0..ewp]);
+                @memcpy(ea[ea_free..][0..ewp], ea[ea_pe[i]..][0..ewp]);
                 ea[ea_free + ewp] = p;
                 ea_pe[i] = @intCast(ea_free);
                 ea_lim[i] = nc;
@@ -603,7 +582,7 @@ pub fn amd(n: u32, col_ptr: []const u32, row_idx: []const u32, q: []u32, ws: *Ws
     }
 
     // ==== Phase 4: append deferred dense rows ====
-    simdCopyU32(q[k..][0..ndense], lp_buf[dense_start..][0..ndense]);
+    @memcpy(q[k..][0..ndense], lp_buf[dense_start..][0..ndense]);
 }
 
 /// Compare variable and element adjacency of two vertices for supervariable

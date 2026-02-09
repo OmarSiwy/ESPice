@@ -57,15 +57,22 @@ pub fn LaneLu(comptime W: usize) type {
         pub fn init(gpa: Allocator, base: *const Base) !Self {
             std.debug.assert(base.factored);
             const n = base.n;
-            return .{
+            var self: Self = .{
                 .base = base,
                 .n = n,
-                .lx = try gpa.alloc(V, base.lx.items.len),
-                .ux = try gpa.alloc(V, base.ux.items.len),
-                .udiag = try gpa.alloc(V, n),
-                .w = try gpa.alloc(V, n),
-                .y = try gpa.alloc(V, n),
+                .lx = &.{},
+                .ux = &.{},
+                .udiag = &.{},
+                .w = &.{},
+                .y = &.{},
             };
+            errdefer self.deinit(gpa);
+            self.lx = try gpa.alloc(V, base.lx.items.len);
+            self.ux = try gpa.alloc(V, base.ux.items.len);
+            self.udiag = try gpa.alloc(V, n);
+            self.w = try gpa.alloc(V, n);
+            self.y = try gpa.alloc(V, n);
+            return self;
         }
 
         pub fn deinit(self: *Self, gpa: Allocator) void {
@@ -118,7 +125,12 @@ pub fn LaneLu(comptime W: usize) type {
                 d = @select(f64, dead_diag, one, d);
                 self.udiag[k] = d;
 
-                if (growth_limit > 0) {
+                // `scaled_pivot` is a property of the SHARED base tape, so this
+                // is an outer-loop branch with no lane divergence — lane l stays
+                // bit-identical to a scalar SparseLu replay. Twin of
+                // sparse_lu.zig refactor: a pivot accepted by the row-scaled
+                // threshold test is legitimately far below its column max.
+                if (growth_limit > 0 and !b.scaled_pivot[k]) {
                     var cmax = @abs(d);
                     for (lp[k]..lp[k + 1]) |p| {
                         const v = self.w[li[p]];
@@ -272,6 +284,22 @@ fn identity(comptime n: usize) [n]u32 {
     return q;
 }
 
+test "LaneLu construction releases storage on every allocation failure" {
+    const gpa = testing.allocator;
+    const csc = DenseCsc(2).from(.{ .{ 4, 1 }, .{ 1, 3 } });
+    var q = identity(2);
+    var base = try sparse_lu.SparseLu(f64).init(gpa, 2, &csc.col_ptr, csc.row_idx[0..csc.nnz()], &q);
+    defer base.deinit(gpa);
+    try base.factor(gpa, &csc.col_ptr, csc.row_idx[0..csc.nnz()], csc.vals[0..csc.nnz()], 1e-3);
+
+    try testing.checkAllAllocationFailures(gpa, struct {
+        fn run(allocator: Allocator, factored: *const sparse_lu.SparseLu(f64)) !void {
+            var lanes = try LaneLu(4).init(allocator, factored);
+            defer lanes.deinit(allocator);
+        }
+    }.run, .{&base});
+}
+
 test "LaneLu(1) refactor+solve bit-identical to SparseLu on same values" {
     const gpa = testing.allocator;
     const a = [4][4]f64{
@@ -319,6 +347,9 @@ test "LaneLu(W) lane l bit-identical to scalar replay of lane l, perturbed" {
         .{ .{ 10, 2, 1, 0 }, .{ 2, 9, 0, 1 }, .{ 1, 0, 8, 2 }, .{ 0, 1, 2, 7 } },
         // MNA-style zero diagonal on the last node (needs off-diagonal pivot).
         .{ .{ 1e-3, 0, 1, 0 }, .{ 0, 2e-3, -1, 0 }, .{ 1, -1, 0, 1 }, .{ 0, 0, 1, 3 } },
+        // Atto-siemens row (BSIMSOI floating body): the base tape carries a
+        // scale-accepted pivot, so this exercises the growth-monitor skip.
+        .{ .{ 2.0e-20, -1.0e-20, -1.0e-20, 0.0 }, .{ -1.0e-6, 1.0e3, -9.0e-4, 1.0e-3 }, .{ 1.0e-6, -9.0e-4, 2.0e-3, -1.0e-3 }, .{ 0.0, 0.0, -1.0e-3, 1.0 } },
     };
 
     var prng = std.Random.DefaultPrng.init(0xABCDEF);

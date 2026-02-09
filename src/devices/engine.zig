@@ -34,6 +34,34 @@ const dmath = gompute.math;
 // that instantiates device physics with a concrete S).
 // ===========================================================================
 
+/// FMA contraction for the Dual derivative propagation, WITHOUT fast-math.
+///
+/// `@mulAdd` is the contraction `@setFloatMode(.optimized)` would license and
+/// nothing else: no `nnan`, no `ninf`. That matters because `Dual.div` divides
+/// by an unguarded `b.v`, and Verilog-A deliberately PERMITS that to be zero
+/// (VerA proof.zig:33 — "`/` by zero is not an error […] rejecting it would
+/// refuse `I <+ V/r`, the plain resistor"). A `ninf` assertion there would be
+/// silent Release-only UB in the one place SparseLu's isFinite check exists to
+/// catch (solvers/sparse_lu.zig:263,444).
+///
+/// A float mode on the CALLER cannot do this job: LLVM fast-math flags are
+/// per-instruction, emitted from the callee's lexical scope, and inlining
+/// copies them intact — measured, `evalRange`'s `@setFloatMode(.optimized)`
+/// yields 0 `vfmadd` for a `mul` inlined out of this type.
+///
+/// GATED because on a target without the feature `@mulAdd` lowers to a libm
+/// `fma()` CALL PER LANE — measured 14 calls for one `Dual(14).mul` on
+/// `-mcpu=baseline`, i.e. catastrophically slower than the two-rounding form
+/// it replaces.
+/// ponytail: arch switch, not a build option; every target this ships to is
+/// listed. Add a `-Dfma` knob only if a real target needs to override it.
+const fma_ok = switch (builtin.cpu.arch) {
+    .x86_64 => std.Target.x86.featureSetHas(builtin.cpu.features, .fma),
+    .aarch64, .aarch64_be => true,
+    .nvptx64, .amdgcn => true,
+    else => false,
+};
+
 /// Forward-mode dual satisfying the device scalar interface S: one eval pass
 /// yields residual + all analytic partials. Lane u carries ∂/∂x[u].
 ///
@@ -48,15 +76,25 @@ const dmath = gompute.math;
 /// device's `jac_f32`, because only the physics knows whether its unknowns fit
 /// in f32's ~7 digits.
 pub fn Dual(comptime N: usize, comptime F: type) type {
+    return DualFor(N, F, false);
+}
+
+fn DualFor(comptime N: usize, comptime F: type, comptime collapsed: bool) type {
     return struct {
         v: f64,
         d: V,
 
+        // Builders apply D.collapse before freezing the shared scatter tapes.
+        pub const collapse_applied = collapsed;
         const V = @Vector(N, F);
         const Self = @This();
 
         inline fn splat(c: f64) V {
             return @splat(@floatCast(c));
+        }
+        /// a*b + c on the derivative vector, fused where the hardware has it.
+        inline fn mulAddV(a: V, b: V, c: V) V {
+            return if (fma_ok) @mulAdd(V, a, b, c) else a * b + c;
         }
         pub fn seed(value: f64, comptime u: usize) Self {
             var d: V = @splat(0);
@@ -89,12 +127,12 @@ pub fn Dual(comptime N: usize, comptime F: type) type {
             return .{ .v = -a.v, .d = -a.d };
         }
         pub fn mul(a: Self, b: Self) Self {
-            return .{ .v = a.v * b.v, .d = a.d * splat(b.v) + b.d * splat(a.v) };
+            return .{ .v = a.v * b.v, .d = mulAddV(b.d, splat(a.v), a.d * splat(b.v)) };
         }
         pub fn div(a: Self, b: Self) Self {
             const inv_b = 1.0 / b.v;
             const quot = a.v * inv_b;
-            return .{ .v = quot, .d = (a.d - b.d * splat(quot)) * splat(inv_b) };
+            return .{ .v = quot, .d = mulAddV(b.d, splat(-quot), a.d) * splat(inv_b) };
         }
         pub fn scale(a: Self, c: f64) Self {
             return .{ .v = a.v * c, .d = a.d * splat(c) };
@@ -109,32 +147,13 @@ pub fn Dual(comptime N: usize, comptime F: type) type {
         pub fn log(a: Self) Self {
             return .{ .v = dmath.log(a.v), .d = a.d * splat(1.0 / a.v) };
         }
-        /// LRM 4.3.1 Table 4-14 names the C library forms, and `contract.zig`
-        /// requires them of the S protocol as PRIMITIVES rather than `exp(x)-1`
-        /// and `log(1+x)`, because those two compositions cancel: at x = 1e-17,
-        /// `1+x` rounds to 1 and `log(1+x)` answers 0 where the true value is
-        /// 1e-17. A VerA-generated device calls these directly (that is what
-        /// `no field or member function named 'log1p'` was), so their absence
-        /// here was a hole in this host's half of the contract, not a device bug.
-        ///
-        /// `gompute.math` has no `log1p`/`expm1` and this type also compiles for
-        /// nvptx, so `std.math` is out. These are the standard Kahan corrections,
-        /// which need only `exp`/`log` and are accurate to within an ulp or two
-        /// across the range where the naive form loses everything.
+        /// Pure Zig libm forms preserve tiny arguments and the full f64 range.
+        /// VerA's precompute scalar uses these same value operations.
         pub fn expm1(a: Self) Self {
-            const u = dmath.exp(a.v);
-            const v = if (u == 1.0) a.v // x so small that e^x rounded to 1
-            else if (u - 1.0 == -1.0) -1.0 // x so negative that e^x rounded to 0
-            else (u - 1.0) * a.v / dmath.log(u);
-            // d/dx (e^x - 1) = e^x, and `u` is that derivative already.
-            return .{ .v = v, .d = a.d * splat(u) };
+            return .{ .v = std.math.expm1(a.v), .d = a.d * splat(dmath.exp(a.v)) };
         }
         pub fn log1p(a: Self) Self {
-            const u = 1.0 + a.v;
-            // `a.v / (u - 1.0)` is the correction for the rounding of 1 + x: it
-            // is 1 when 1+x is exact and slightly off when it is not.
-            const v = if (u == 1.0) a.v else dmath.log(u) * (a.v / (u - 1.0));
-            return .{ .v = v, .d = a.d * splat(1.0 / u) };
+            return .{ .v = std.math.log1p(a.v), .d = a.d * splat(1.0 / (1.0 + a.v)) };
         }
         pub fn sqrt(a: Self) Self {
             const s = @sqrt(a.v);
@@ -159,9 +178,20 @@ pub fn Dual(comptime N: usize, comptime F: type) type {
         pub fn maxC(a: Self, c: f64) Self {
             return if (a.v < c) con(c) else a;
         }
+        /// c·x^(c−1) = c·p/x — one `pow`, and algebraically exact for x != 0
+        /// including §4.3.1's negative-base integral-c clause.
+        ///
+        /// x == 0 keeps the second `pow`, and is NOT a rounding nicety: at
+        /// c == 1 the true slope is 1, but c·p/x is 0/0 = NaN, the isFinite
+        /// gate below would drop it, and the Jacobian row goes flat. `mjs`
+        /// defaults to 0 in bjt.va, so `1 - mjs` is exactly that exponent and
+        /// the substrate base `1 - v/ps` reaches exactly 0 at v == ps. The
+        /// branch is never taken at a normal bias, so the hot path is still
+        /// one `pow`. Same rule VerA's `zPow` applies — codegen now routes a
+        /// solve-constant exponent here instead, so the two must agree.
         pub fn pow(a: Self, c: f64) Self {
             const p = dmath.pow(a.v, c);
-            const slope = c * p / a.v;
+            const slope = if (a.v != 0.0) c * p / a.v else c * dmath.pow(a.v, c - 1.0);
             return .{ .v = p, .d = a.d * splat(if (std.math.isFinite(slope)) slope else 0.0) };
         }
         pub fn atan(a: Self) Self {
@@ -265,6 +295,7 @@ pub const ParamRef = struct {
         };
     }
 
+    /// Low-level write; call Circuit.recompute before solving to validate topology and caches.
     pub fn set(self: ParamRef, v: f64) void {
         switch (self.ptr) {
             .f32 => |p| p.* = @floatCast(v),
@@ -374,9 +405,23 @@ pub const Hooks = struct {
     /// computed, stored, and read by nothing.
     bound_step: ?*const fn (*anyopaque) f64 = null,
     next_breakpoint: ?*const fn (*anyopaque, f64) ?f64 = null,
+    /// Per-device-STATE charge tape: `q_tape()[id * n_u + ru]` is the charge
+    /// THIS instance put on row `rhs_idx[id * n_u + ru]` at the last eval —
+    /// the same index space `gath`/`rhs_idx`/`slots` already use, so it adds
+    /// no new handle type. Null when the device declares no `q`.
+    ///
+    /// Exists because ngspice runs CKTterr once per device charge STATE and
+    /// mins over states, then over devices (ckttrunc.c -> DEVtrunc ->
+    /// cktterr.c), where this engine ran it once per matrix ROW off the summed
+    /// q plane. Summing co-moving charges first adds their divided differences
+    /// and loses the binding state (docs/analysis/transient-integration.md).
+    /// Host-only and additive: the four `[]f64` planes, the u32 tapes, the CSC
+    /// pattern, the Model/Instance PODs and `DeviceKernel.run`'s parameter
+    /// list are all unchanged.
+    q_tape: ?*const fn (*anyopaque) []const f64 = null,
     collect_params: *const fn (*anyopaque, std.mem.Allocator, *std.ArrayList(ParamRef)) anyerror!void,
     collect_noise: ?*const fn (*anyopaque, []const f64, std.mem.Allocator, *std.ArrayList(NoiseSource)) anyerror!void = null,
-    recompute: ?*const fn (*anyopaque) void = null,
+    recompute: ?*const fn (*anyopaque) error{TopologyChanged}!void = null,
     /// This batch's device-resident working set, or null when the device type
     /// is not `gpuEligible` — the launcher reads a null here as "this batch
     /// stays on the CPU" and declines the whole circuit rather than splitting a
@@ -524,8 +569,13 @@ pub fn tapeBounds(slots: []const u32, rhs_idx: []const u32, trash_slot: u32, tra
 }
 
 /// Precompute the gather/scatter tapes for one batch from its flat node
-/// list ([id * n_u + u] layout). Ground rows/cols land in the trash slot.
-pub fn buildTapes(nodes: []const u32, n_u: usize, pv: PatternView, gath: []u32, rhs_idx: []u32, slots: []u32) void {
+/// list ([id * n_u + u] layout). Ground rows/cols land in the trash slot, and
+/// so do the STRUCTURALLY zero (row, col) pairs `pat` clears — `addPattern`
+/// did not reserve a matrix entry for them and `evalRange` never reads them
+/// back, so the trash slot is the one answer that keeps the tape's frozen
+/// `[id][ru][cu]` shape while the matrix carries only the entries a device
+/// can actually fill.
+pub fn buildTapes(nodes: []const u32, n_u: usize, pat: []const u64, pv: PatternView, gath: []u32, rhs_idx: []u32, slots: []u32) void {
     const count = nodes.len / n_u;
     for (0..count) |id| {
         const nd = nodes[id * n_u ..][0..n_u];
@@ -534,10 +584,38 @@ pub fn buildTapes(nodes: []const u32, n_u: usize, pv: PatternView, gath: []u32, 
             rhs_idx[id * n_u + u] = if (node == GROUND) pv.n else node;
         }
         for (nd, 0..) |r, ru| for (nd, 0..) |c, cu| {
+            const live = (pat[ru] >> @intCast(cu)) & 1 != 0;
             slots[(id * n_u + ru) * n_u + cu] =
-                if (r == GROUND or c == GROUND) pv.trash_slot else pv.findSlot(r, c).?;
+                if (r == GROUND or c == GROUND or !live) pv.trash_slot else pv.findSlot(r, c).?;
         };
     }
+}
+
+/// D's structural Jacobian, resistive OR reactive: bit `cu` of row `ru` is set
+/// when this device can put anything at all in local matrix entry (ru, cu).
+///
+/// VerA emits `jac_pattern`/`q_pattern` (see its `emitPattern`); a device that
+/// declares neither gets all ones, which is the dense behaviour every host had
+/// before the declaration existed — runtime `.so` devices built by an older
+/// generator included.
+fn jacPattern(comptime D: type) [uCount(D)]u64 {
+    var out = rowPattern(D, "jac_pattern");
+    // A device with no reactive residual has no charge columns to reserve;
+    // asking `rowPattern` for the missing half would answer "dense" and undo
+    // the whole reservation.
+    if (@hasDecl(D, "q")) {
+        const q = rowPattern(D, "q_pattern");
+        for (&out, q) |*o, qm| o.* |= qm;
+    }
+    return out;
+}
+
+/// One half of it. An undeclared half is all ones — the dense behaviour every
+/// host had before the declaration existed, which is also what a runtime `.so`
+/// device from an older generator gets.
+fn rowPattern(comptime D: type, comptime name: []const u8) [uCount(D)]u64 {
+    if (!@hasDecl(D, name)) return @splat(std.math.maxInt(u64));
+    return @field(D, name);
 }
 
 // ---------------------------------------------------------------------------
@@ -640,19 +718,35 @@ pub const HistLookup = struct {
 fn evalRange(comptime D: type, sink: anytype, first: u32, end: u32, t: f64, limiting: bool) void {
     @setEvalBranchQuota(1_000_000);
     const SinkT = @typeInfo(@TypeOf(sink)).pointer.child;
-    @setFloatMode(if (SinkT.optimized_float) .optimized else .strict);
+    @setFloatMode(.optimized);
     const n_u = comptime contract.nU(D);
     const has_limit = comptime @hasDecl(D, "limit");
-    const S = Dual(n_u, jacFloat(D));
+    const S = DualFor(n_u, jacFloat(D), @hasDecl(D, "collapse"));
     const use_lim = if (comptime has_limit) limiting else false;
+    const jac_pat = comptime rowPattern(D, "jac_pattern");
+    const q_pat = comptime rowPattern(D, "q_pattern");
+    // BRANCHLESS GROUND on the host. A ground row/column already resolves to
+    // `trash_row`/`trash_slot` in the tape, so `+= v` there is architecturally
+    // a no-op — the predicate only saves one add on a line that is L1-resident
+    // by construction (every instance in the batch shares it), and costs a test
+    // per stamp plus the `active` array itself in the frame.
+    //
+    // NOT on the GPU, and that is measured: there the skipped add is a
+    // CONTENDED ATOMIC on one address across the whole grid, worth 2x on
+    // 40,000 instances (docs/device-evaluation-audit-2026-09.md, "Ground
+    // scatter"). Same body, opposite right answer, so it is a comptime split
+    // on the sink's own `device` flag.
+    const mask_ground = comptime SinkT.on_device;
 
     var id: u32 = first;
     while (id < end) : (id += 1) {
         // Gather the local eval point; corr = local(x) − lx (zero unless limiting).
         var lx: [n_u]f64 = undefined;
+        var active: [n_u]bool = undefined;
         var corr: @Vector(n_u, f64) = @splat(0);
         inline for (0..n_u) |u| {
             const gi = sink.gath(id, u);
+            active[u] = gi != GROUND;
             const xg = sink.x(gi);
             lx[u] = xg;
             if (use_lim) {
@@ -661,9 +755,14 @@ fn evalRange(comptime D: type, sink: anytype, first: u32, end: u32, t: f64, limi
                 corr[u] = xg - l;
             }
         }
+        // Limiting being ARMED is not the same as any unknown having moved:
+        // `lim_x` equals `x` on every instance the limiter left alone, which
+        // near convergence is nearly all of them. One vector compare replaces
+        // `2 * n_u` masked dot products of a zero vector.
+        const corr_live = use_lim and @reduce(.Or, corr != @as(@Vector(n_u, f64), @splat(0)));
 
         if (comptime SinkT.dedup) {
-            if (sink.tryCached(id, &lx, corr)) continue;
+            if (sink.tryCached(id, &lx, corr, active)) continue;
         }
 
         var xv: [n_u]S = undefined;
@@ -679,62 +778,76 @@ fn evalRange(comptime D: type, sink: anytype, first: u32, end: u32, t: f64, limi
         // Not used with the prep variants: those pass a precomputed row VerA's
         // fused entry point does not take.
         const has_q = comptime @hasDecl(D, "q");
-        const fuse = comptime @hasDecl(D, "evalQ") and !@hasDecl(D, "evalFromPrep") and !@hasDecl(D, "qFromPrep");
-        const want_q = if (comptime has_q) sink.qActive() else false;
+        const fuse = comptime has_q and @hasDecl(D, "evalQ") and !@hasDecl(D, "evalFromPrep") and !@hasDecl(D, "qFromPrep");
 
         var out: [n_u]S = undefined;
         var qo: if (has_q) [n_u]S else void = undefined;
         if (comptime fuse) {
-            if (want_q) {
-                const both = D.evalQ(S, xv, sink.model(id), sink.inst(id), t);
-                out = both.res;
-                qo = both.q;
-            } else out = D.eval(S, xv, sink.model(id), sink.inst(id), t);
+            const both = @call(.always_inline, D.evalQ, .{ S, xv, sink.model(id), sink.inst(id), t });
+            out = both.res;
+            qo = both.q;
         } else {
             out = if (comptime @hasDecl(D, "evalFromPrep"))
                 D.evalFromPrep(S, xv, sink.prep(id), sink.model(id), sink.inst(id), t)
             else
                 D.eval(S, xv, sink.model(id), sink.inst(id), t);
             if (comptime has_q) {
-                if (want_q) qo = if (comptime @hasDecl(D, "qFromPrep"))
+                qo = if (comptime @hasDecl(D, "qFromPrep"))
                     D.qFromPrep(S, xv, sink.prep(id), sink.model(id), sink.inst(id), t)
                 else
                     D.q(S, xv, sink.model(id), sink.inst(id), t);
             }
         }
 
-        inline for (0..n_u) |ru| {
+        // Ground matrix/residual stamps are discarded. Keep their AD lanes
+        // for limiting; charge rows still feed per-state tapes and conservation.
+        //
+        // `jac_pat`/`q_pat` are the DEVICE's structural Jacobian: a clear bit
+        // is an entry the physics can never fill, so the stamp goes away at
+        // comptime instead of adding 0.0 to a matrix slot once per instance per
+        // Newton iteration. mos1 keeps 21 of 64 resistive and 16 of 64 reactive
+        // columns; the cleared ones also never reached `addPattern`, so there
+        // is no matrix entry behind them to add to.
+        inline for (0..n_u) |ru| if (!mask_ground or active[ru]) {
             const row = sink.rhsRow(id, ru);
             var val = out[ru].v;
             if (comptime has_limit) {
                 // Widened FIRST: this term lands on the residual, which stays
-                // f64 whatever the Jacobian is carried in.
-                if (use_lim) val += @reduce(.Add, out[ru].grad() * corr);
+                // f64 whatever the Jacobian is carried in. An empty row has an
+                // identically zero gradient, so the correction is zero too.
+                if (corr_live and comptime jac_pat[ru] != 0) val += @reduce(.Add, out[ru].grad() * corr);
             }
             sink.scatterRes(row, val);
-            if (comptime !SinkT.skip_g) {
+            if (comptime !SinkT.skip_g and jac_pat[ru] != 0) {
                 const g = out[ru].grad();
-                inline for (0..n_u) |cu| sink.scatterJac(id, ru, cu, row, g[cu]);
+                inline for (0..n_u) |cu| if (comptime (jac_pat[ru] >> cu) & 1 != 0) if (!mask_ground or active[cu]) {
+                    sink.scatterJac(id, ru, cu, row, g[cu]);
+                };
             }
-        }
+        };
         if (comptime SinkT.dedup) sink.store(id, &out);
 
         if (comptime has_q) {
-            if (want_q) {
-                inline for (0..n_u) |ru| {
-                    const row = sink.rhsRow(id, ru);
-                    var qv = qo[ru].v;
-                    if (comptime has_limit) {
-                        if (use_lim) qv += @reduce(.Add, qo[ru].grad() * corr);
-                    }
-                    sink.scatterQ(row, qv);
-                    if (comptime !SinkT.skip_c) {
+            inline for (0..n_u) |ru| {
+                const row = sink.rhsRow(id, ru);
+                var qv = qo[ru].v;
+                if (comptime has_limit) {
+                    if (corr_live and comptime q_pat[ru] != 0) qv += @reduce(.Add, qo[ru].grad() * corr);
+                }
+                // EVERY charge row is written, cleared pattern included: the
+                // q plane is a conservation sum and `q_tape` is what CKTterr
+                // runs over. Only the JACOBIAN columns are structural.
+                sink.scatterQ(id, ru, row, qv);
+                if (comptime !SinkT.skip_c and q_pat[ru] != 0) {
+                    if (!mask_ground or active[ru]) {
                         const gq = qo[ru].grad();
-                        inline for (0..n_u) |cu| sink.scatterQJac(id, ru, cu, row, gq[cu]);
+                        inline for (0..n_u) |cu| if (comptime (q_pat[ru] >> cu) & 1 != 0) if (!mask_ground or active[cu]) {
+                            sink.scatterQJac(id, ru, cu, row, gq[cu]);
+                        };
                     }
                 }
-                if (comptime SinkT.dedup) sink.storeQ(id, &qo);
             }
+            if (comptime SinkT.dedup) sink.storeQ(id, &qo);
         }
     }
 }
@@ -785,9 +898,23 @@ pub fn ProtoStore(comptime D: type) type {
 
         pub fn addPattern(ctx: *anyopaque, gpa: std.mem.Allocator, pb: *PatternBuilder) anyerror!void {
             const self: *Self = @ptrCast(@alignCast(ctx));
-            try pb.reserve(gpa, self.nodes.items.len * n_u * n_u);
+            // The device's structural Jacobian, not n_u^2: an entry no device
+            // can fill is still a matrix nonzero once it is reserved, and it
+            // costs fill-in and float work in every factorization for the rest
+            // of the run. ngspice reserves exactly its 22 MOS1 stamps; this is
+            // how espice reserves 25 instead of 64.
+            const pat = comptime jacPattern(D);
+            const nnz = comptime blk: {
+                var k: usize = 0;
+                for (pat) |m| k += @popCount(m & (std.math.maxInt(u64) >> (63 - (n_u - 1))));
+                break :blk k;
+            };
+            try pb.reserve(gpa, self.nodes.items.len * nnz);
+            // Runtime loops: this runs ONCE per batch at setup, and unrolling
+            // n_u^2 for 38 devices is a comptime-quota problem, not a speedup.
             for (self.nodes.items) |nd| {
                 for (0..n_u) |ru| for (0..n_u) |cu| {
+                    if ((pat[ru] >> @intCast(cu)) & 1 == 0) continue;
                     if (nd[ru] != GROUND and nd[cu] != GROUND)
                         try pb.add(gpa, nd[ru], nd[cu]);
                 };
@@ -810,6 +937,7 @@ pub fn ProtoStore(comptime D: type) type {
             store.gath = &.{};
             store.rhs_idx = &.{};
             store.slots = &.{};
+            if (comptime has_q) store.q_tape = &.{};
             if (comptime has_attempt_decl) store.saved_models = &.{};
             if (comptime @hasDecl(D, "limit")) store.lim_x = &.{};
             if (comptime @hasDecl(D, "State")) store.states = &.{};
@@ -844,7 +972,13 @@ pub fn ProtoStore(comptime D: type) type {
             store.rhs_idx = try gpa.alloc(u32, count * n_u);
             store.slots = try gpa.alloc(u32, count * n_u * n_u);
             const flat_nodes = @as([*]const u32, @ptrCast(self.nodes.items.ptr))[0 .. count * n_u];
-            buildTapes(flat_nodes, n_u, pv, store.gath, store.rhs_idx, store.slots);
+            buildTapes(flat_nodes, n_u, &jacPattern(D), pv, store.gath, store.rhs_idx, store.slots);
+            // Fourth member of the tape family: same (id, ru) index space, one
+            // f64 per charge contribution. See Hooks.q_tape.
+            if (comptime has_q) {
+                store.q_tape = try gpa.alloc(f64, count * n_u);
+                @memset(store.q_tape, 0);
+            }
             self.nodes.deinit(gpa);
             self.nodes = .empty;
 
@@ -993,8 +1127,9 @@ fn canDedupQ(comptime D: type) bool {
 
 pub fn DeviceBatch(comptime D: type) type {
     const n_u = comptime uCount(D);
-    const S = Dual(n_u, jacFloat(D));
+    const S = DualFor(n_u, jacFloat(D), @hasDecl(D, "collapse"));
     const has_state = @hasDecl(D, "State");
+    const has_q = @hasDecl(D, "q");
     const has_hist = hasHistoryDecl(D);
     const has_prep_cache = @hasDecl(D, "PrepCache");
     const can_dedup = canDedup(D);
@@ -1023,6 +1158,11 @@ pub fn DeviceBatch(comptime D: type) type {
         gath: []u32,
         rhs_idx: []u32,
         slots: []u32,
+        /// Per-device-state charge, indexed `id * n_u + ru` — the fourth
+        /// member of the tape family above, written by `Sink.scatterQ` on the
+        /// host path only. The transient keeps its LTE history over this
+        /// instead of the summed q plane. See `Hooks.q_tape`.
+        q_tape: if (has_q) []f64 else void,
         prep_cache: if (has_prep_cache) []D.PrepCache else void,
         prep_group: if (has_prep_cache) []u32 else void,
 
@@ -1039,6 +1179,7 @@ pub fn DeviceBatch(comptime D: type) type {
         pub const hooks: Hooks = .{
             .set_lanes = if (can_dedup) setLanes else null,
             .scatter_bounds = scatterBounds,
+            .q_tape = if (has_q) qTape else null,
             .apply_limits = if (has_limit) applyLimits else null,
             .clear_limits = if (has_limit) clearLimits else null,
             .seed = if (@hasDecl(D, "seed")) seedFn else null,
@@ -1065,7 +1206,7 @@ pub fn DeviceBatch(comptime D: type) type {
             .next_breakpoint = if (@hasDecl(D, "nextBreakpoint")) nextBreakpointFn else null,
             .collect_params = collectParams,
             .collect_noise = if (@hasDecl(D, "noise_gens")) collectNoise else null,
-            .recompute = if (@hasDecl(D, "precompute") or has_prep_cache) recomputePrecomputed else null,
+            .recompute = if (@hasDecl(D, "collapse") or @hasDecl(D, "precompute") or has_prep_cache) recomputePrecomputed else null,
             .gpu_payload = if (gpuEligible(D)) gpuPayload else null,
             .apply_attempt = if (has_attempt) applyAttempt else null,
             .restore_models = if (has_attempt) restoreAttempt else null,
@@ -1083,6 +1224,11 @@ pub fn DeviceBatch(comptime D: type) type {
         fn scatterBounds(ctx: *anyopaque, first: u32, last: u32, trash_slot: u32, trash_row: u32) [4]u32 {
             const self: *Self = @ptrCast(@alignCast(ctx));
             return tapeBounds(self.slots[first * n_u * n_u .. last * n_u * n_u], self.rhs_idx[first * n_u .. last * n_u], trash_slot, trash_row);
+        }
+
+        fn qTape(ctx: *anyopaque) []const f64 {
+            const self: *Self = @ptrCast(@alignCast(ctx));
+            return self.q_tape;
         }
 
         fn setLanes(ctx: *anyopaque, gpa: std.mem.Allocator, n_lanes: u32) anyerror!void {
@@ -1154,7 +1300,14 @@ pub fn DeviceBatch(comptime D: type) type {
                 inline for (0..n_u) |u| {
                     if (comptime D.u_kinds[u] != .voltage) {
                         const node = self.gath[id * n_u + u];
-                        if (node != GROUND) mask[node] = true;
+                        const voltage_alias = blk: {
+                            inline for (0..n_u) |v| {
+                                if (comptime D.u_kinds[v] == .voltage)
+                                    if (self.gath[id * n_u + v] == node) break :blk true;
+                            }
+                            break :blk false;
+                        };
+                        if (node != GROUND and !voltage_alias) mask[node] = true;
                     }
                 }
             }
@@ -1279,9 +1432,23 @@ pub fn DeviceBatch(comptime D: type) type {
             };
         }
 
-        fn recomputePrecomputed(ctx: *anyopaque) void {
+        fn recomputePrecomputed(ctx: *anyopaque) error{TopologyChanged}!void {
             const self: *Self = @ptrCast(@alignCast(ctx));
             self.reprep();
+            if (comptime @hasDecl(D, "collapse")) {
+                for (self.models, self.instances, 0..) |*model, *inst, id| {
+                    const col = D.collapse(model, inst);
+                    const nd = self.gath[id * n_u ..][0..n_u];
+                    inline for (D.num_ports..n_u) |u| {
+                        if (col[u]) |target| {
+                            if (nd[u] != nd[target]) return error.TopologyChanged;
+                        } else if (std.mem.indexOfScalar(u32, nd[0..u], nd[u]) != null) {
+                            // Builder allocated a distinct node for every unaliased internal.
+                            return error.TopologyChanged;
+                        }
+                    }
+                }
+            }
         }
 
         fn reprep(self: *Self) void {
@@ -1351,6 +1518,8 @@ pub fn DeviceBatch(comptime D: type) type {
                 if (comptime paramField(T, field)) {
                     const primary = comptime if (@hasDecl(D, "mc_param"))
                         std.mem.eql(u8, field.name, D.mc_param)
+                    else if (@hasDecl(D, "AnalysisKind"))
+                        !is_instance and field_idx == 0
                     else
                         is_instance and field_idx == 0;
                     for (items, 0..) |*it, idx| {
@@ -1373,6 +1542,14 @@ pub fn DeviceBatch(comptime D: type) type {
 
         fn paramField(comptime T: type, comptime field: std.builtin.Type.StructField) bool {
             if (field.type != f32 and field.type != f64) return false;
+            if (@hasDecl(D, "AnalysisKind") and T == D.Instance) {
+                // VerA's emitModel owns VA parameters; Instance owns runtime
+                // state. Never perturb timers, timestep fields or prep caches.
+                const knobs = std.StaticStringMap(void).initComptime(.{
+                    .{ "temperature", {} }, .{ "mfactor", {} },
+                });
+                if (!knobs.has(field.name)) return false;
+            }
             const dflt = @field(T{}, field.name);
             return dflt > -1e30 and dflt < 1e30;
         }
@@ -1429,6 +1606,7 @@ pub fn DeviceBatch(comptime D: type) type {
             gpa.free(self.gath);
             gpa.free(self.rhs_idx);
             gpa.free(self.slots);
+            if (comptime has_q) gpa.free(self.q_tape);
             gpa.destroy(self);
         }
     };
@@ -1603,7 +1781,9 @@ pub fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool) 
         pub const dedup = !device and can_dedup;
         pub const skip_g = skip_const and const_g;
         pub const skip_c = skip_const and const_c;
-        pub const optimized_float = true;
+        /// Is this the atomic-scatter (GPU) sink? `evalRange` reads it to keep
+        /// the ground predicates there and drop them on the host.
+        pub const on_device = device;
 
         const Sk = @This();
 
@@ -1644,6 +1824,12 @@ pub fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool) 
         }
         inline fn add(p: gompute.GlobalPtr(f64), i: u32, v: f64) void {
             if (comptime device) {
+                // Avoid a contended atomic only when adding zero preserves bits.
+                // The strict sum retains signed zero and NaN quieting behavior.
+                if (v == 0) {
+                    const old = @atomicLoad(f64, &p[i], .monotonic);
+                    if (@as(u64, @bitCast(old + v)) == @as(u64, @bitCast(old))) return;
+                }
                 _ = @atomicRmw(f64, &p[i], .Add, v, .monotonic);
             } else {
                 p[i] += v;
@@ -1656,12 +1842,16 @@ pub fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool) 
             _ = row;
             add(s.g_vals, s.slot(id, ru, cu), val);
         }
-        pub inline fn qActive(s: *const Sk) bool {
-            _ = s;
-            return true;
-        }
-        pub inline fn scatterQ(s: *const Sk, row: u32, qv: f64) void {
+        /// Scatter one charge contribution. Two destinations, one value: the
+        /// summed q plane (what the companion residual integrates) and — on the
+        /// host only — the per-device-state tape (what CKTterr must run over).
+        /// `id`/`ru` mirror `scatterQJac`'s signature; on a device build the
+        /// tape write is comptime-dead and the extra params vanish, so
+        /// `DeviceKernel.run`'s ABI is untouched.
+        pub inline fn scatterQ(s: *const Sk, id: u32, ru: usize, row: u32, qv: f64) void {
             add(s.q_vec, row, qv);
+            if (comptime !device and @hasDecl(D, "q"))
+                s.b.q_tape[@as(usize, id) * n_u + ru] = qv;
         }
         pub inline fn scatterQJac(s: *const Sk, id: u32, ru: usize, cu: usize, row: u32, val: f64) void {
             _ = row;
@@ -1671,7 +1861,7 @@ pub fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool) 
         // dedup: host-only (guarded by `dedup` == false on device, so never
         // instantiated there). Reuses a prior eval when the gather point hashes
         // equal within the same prep group.
-        pub inline fn tryCached(s: *Sk, id: u32, lx: *const [n_u]f64, corr: @Vector(n_u, f64)) bool {
+        pub inline fn tryCached(s: *Sk, id: u32, lx: *const [n_u]f64, corr: @Vector(n_u, f64), active: [n_u]bool) bool {
             s.cur_group = s.lane_off + s.b.prep_group[id];
             s.cur_hash = if (s.dedup_on) BatchT.hashVoltages(lx) else 0;
             if (comptime skip_g or skip_c) return false;
@@ -1679,20 +1869,27 @@ pub fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool) 
             if (s.b.eval_cache_hash[s.cur_group] != s.cur_hash) return false;
             const cr = &s.b.eval_cache_rhs[s.cur_group];
             const cj = &s.b.eval_cache_jac[s.cur_group];
-            inline for (0..n_u) |ru| {
+            // Same structural mask as `evalRange`: a cleared column has no
+            // matrix entry behind its slot, so replaying it would add a cached
+            // zero into the trash.
+            const jac_pat = comptime rowPattern(D, "jac_pattern");
+            const q_pat = comptime rowPattern(D, "q_pattern");
+            inline for (0..n_u) |ru| if (active[ru]) {
                 const cjv: @Vector(n_u, f64) = cj[ru];
                 add(s.rhs, s.rhsRow(id, ru), cr[ru] + BatchT.corrDot(cjv, corr));
-                inline for (0..n_u) |cu|
+                inline for (0..n_u) |cu| if (comptime (jac_pat[ru] >> cu) & 1 != 0) if (active[cu]) {
                     add(s.g_vals, s.slot(id, ru, cu), cj[ru][cu]);
-            }
+                };
+            };
             if (comptime can_dedup_q) {
                 const cqr = &s.b.eval_cache_q_rhs[s.cur_group];
                 const cqj = &s.b.eval_cache_q_jac[s.cur_group];
                 inline for (0..n_u) |ru| {
                     const cqjv: @Vector(n_u, f64) = cqj[ru];
-                    add(s.q_vec, s.rhsRow(id, ru), cqr[ru] + BatchT.corrDot(cqjv, corr));
-                    inline for (0..n_u) |cu|
+                    s.scatterQ(id, ru, s.rhsRow(id, ru), cqr[ru] + BatchT.corrDot(cqjv, corr));
+                    inline for (0..n_u) |cu| if (comptime (q_pat[ru] >> cu) & 1 != 0) if (active[ru] and active[cu]) {
                         add(s.c_vals, s.slot(id, ru, cu), cqj[ru][cu]);
+                    };
                 }
             }
             return true;
@@ -2080,9 +2277,9 @@ pub const ParEval = struct {
     }
 
     pub fn eval(self: *ParEval, batches: []const Batch, own_planes: Planes, has_charge: bool, x: []const f64, t: f64) void {
-        zeroSimd(own_planes.g_vals);
+        @memset(own_planes.g_vals, 0);
         if (has_charge) {
-            zeroSimd(own_planes.c_vals);
+            @memset(own_planes.c_vals, 0);
             @memset(own_planes.q_vec, 0);
         }
         @memset(own_planes.rhs, 0);
@@ -2109,9 +2306,9 @@ pub const ParEval = struct {
             @memset(own_planes.rhs, 0);
             self.forkJoin(batches, own_planes, has_charge, x, t, .newton);
         } else {
-            zeroSimd(own_planes.g_vals);
+            @memset(own_planes.g_vals, 0);
             if (has_charge) {
-                zeroSimd(own_planes.c_vals);
+                @memset(own_planes.c_vals, 0);
                 @memset(own_planes.q_vec, 0);
             }
             @memset(own_planes.rhs, 0);
@@ -2185,13 +2382,13 @@ pub const ParEval = struct {
         const pl = self.lanePlanes(own_planes, lane);
         if (lane != 0) {
             const win = self.windows[lane - 1];
-            zeroSimd(pl.g_vals[win.slot_lo..win.slot_hi]);
-            zeroSimd(pl.rhs[win.row_lo..win.row_hi]);
+            @memset(pl.g_vals[win.slot_lo..win.slot_hi], 0);
+            @memset(pl.rhs[win.row_lo..win.row_hi], 0);
             pl.g_vals[self.nnz1 - 1] = 0;
             pl.rhs[self.n1 - 1] = 0;
             if (has_charge) {
-                zeroSimd(pl.c_vals[win.slot_lo..win.slot_hi]);
-                zeroSimd(pl.q_vec[win.row_lo..win.row_hi]);
+                @memset(pl.c_vals[win.slot_lo..win.slot_hi], 0);
+                @memset(pl.q_vec[win.row_lo..win.row_hi], 0);
                 pl.c_vals[self.nnz1 - 1] = 0;
                 pl.q_vec[self.n1 - 1] = 0;
             }
@@ -2234,15 +2431,6 @@ pub const ParEval = struct {
 
 const vec_width = std.simd.suggestVectorLength(f64) orelse 4;
 
-fn zeroSimd(buf: []f64) void {
-    const W = vec_width;
-    const Vv = @Vector(W, f64);
-    const zero: Vv = @splat(0.0);
-    var i: usize = 0;
-    while (i + W <= buf.len) : (i += W) buf[i..][0..W].* = zero;
-    for (buf[i..]) |*v| v.* = 0;
-}
-
 fn addSimd(dst: []f64, src: []const f64) void {
     const W = vec_width;
     const Vv = @Vector(W, f64);
@@ -2261,11 +2449,14 @@ fn addSimd(dst: []f64, src: []const f64) void {
 // type-erased Proto the builtin path uses. layoutHash() guards ABI drift.
 // ===========================================================================
 
-// Bumped 4 -> 5 for the `derive` slot below: `DeviceVtable` grew a field, and a
-// `.so` built against version 4 returns a pointer to its own shorter struct, so
-// reading the new field off it is UB. The check in `DynDevice.open` is what makes
-// the bump load-bearing rather than decorative.
-pub const abi_version: u32 = 5;
+// Version 6 makes Hooks.recompute return error{TopologyChanged}!void. Reject old
+// host callbacks before invocation; GPU PODs and layoutHash remain unchanged.
+//
+// Version 7: the slot tape's cleared entries are the DEVICE's structural
+// Jacobian zeros, not just ground — `addPattern` no longer reserves a matrix
+// entry for them and `evalRange` no longer writes one. Structs are unchanged,
+// so the guard is `layoutHash` mixing this number rather than a layout delta.
+pub const abi_version: u32 = 7;
 
 pub const DeviceVtable = struct {
     name: []const u8,
@@ -2314,6 +2505,11 @@ pub fn layoutHash() u64 {
             PatternBuilder, ParamRef,     NoiseSource,
             std.mem.Allocator,
         }) |T| h = hashType(h, T);
+        // Not a type: the SEMANTICS of the slot tape. A `.so` built before
+        // `jac_pattern` reserves every (ru, cu) in the matrix and fills every
+        // one; this host reserves only the device's structural pattern. Same
+        // struct layouts, incompatible tapes — so the hash has to move.
+        h = mix(h, abi_version);
         break :blk h;
     };
 }
@@ -2534,6 +2730,29 @@ pub const LoadedDevice = struct {
         self.* = undefined;
     }
 };
+
+test "Dual: expm1 and log1p retain finite range and IEEE endpoints" {
+    const S = Dual(1, f64);
+    for ([_]f64{ -740, -1, -1e-17, -0.0, 0, 1e-17, 0.5, 704, 709 }) |x| {
+        const y = S.seed(x, 0).expm1();
+        try std.testing.expect(std.math.isFinite(y.v));
+        try std.testing.expectApproxEqRel(std.math.expm1(x), y.v, 3e-15);
+        try std.testing.expectEqual(@exp(x), y.ddxAt(0));
+    }
+    for ([_]f64{ -1, -0.9999999999999999, -1e-17, -0.0, 0, 1e-17, 0.5, 1e308, std.math.inf(f64) }) |x| {
+        const y = S.seed(x, 0).log1p();
+        try std.testing.expectApproxEqRel(std.math.log1p(x), y.v, 3e-15);
+        try std.testing.expectEqual(1.0 / (1.0 + x), y.ddxAt(0));
+    }
+    try std.testing.expectEqual(std.math.inf(f64), S.seed(710, 0).expm1().v);
+    try std.testing.expectEqual(std.math.inf(f64), S.seed(std.math.inf(f64), 0).expm1().v);
+    try std.testing.expectEqual(@as(f64, -1), S.seed(-std.math.inf(f64), 0).expm1().v);
+    try std.testing.expect(std.math.isNan(S.seed(-2, 0).log1p().v));
+    try std.testing.expect(std.math.isNan(S.seed(std.math.nan(f64), 0).expm1().v));
+    try std.testing.expect(std.math.isNan(S.seed(std.math.nan(f64), 0).log1p().v));
+    try std.testing.expect(std.math.signbit(S.seed(-0.0, 0).expm1().v));
+    try std.testing.expect(std.math.signbit(S.seed(-0.0, 0).log1p().v));
+}
 
 test "Dual: an f32 Jacobian leaves the residual bit-identical" {
     // The one invariant the whole mixed-precision construction rests on

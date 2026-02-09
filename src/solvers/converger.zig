@@ -56,8 +56,26 @@ pub fn solverPin() SolverPin {
     return p;
 }
 
+/// Same one-shot rule as `solverPin`: both of these are read from inside the
+/// Newton loop (`newton` tests `ZP_NEWTON_DEBUG` per iterate and `opdbg` per
+/// iterate under `opdbgEnabled`), and glibc's `getenv` is a linear scan of
+/// `environ` — measured 1.58 M instructions, 0.35% of a devices/mos6_inverter
+/// run, spent deciding not to print.
+var opdbg_cache: ?bool = null;
+var newton_dbg_cache: ?bool = null;
+
 pub fn opdbg() bool {
-    return std.c.getenv("ZP_OPDBG") != null;
+    if (opdbg_cache) |v| return v;
+    const v = std.c.getenv("ZP_OPDBG") != null;
+    opdbg_cache = v;
+    return v;
+}
+
+pub fn newtonDbg() bool {
+    if (newton_dbg_cache) |v| return v;
+    const v = std.c.getenv("ZP_NEWTON_DEBUG") != null;
+    newton_dbg_cache = v;
+    return v;
 }
 
 /// Why an iterate was refused. `finalizeStep` has five independent gates and
@@ -180,7 +198,7 @@ pub fn newton(
         }
         var norm_f: f64 = 0;
         for (0..sys.n) |i| norm_f = @max(norm_f, @abs(sys.rhs[i]));
-        if (std.c.getenv("ZP_NEWTON_DEBUG") != null)
+        if (newtonDbg())
             std.debug.print("  it={d} |F|={e} x={any}\n", .{ iter, norm_f, x[0..@min(sys.n, 8)] });
         if (opts.matrix_sig == 0 or ws.factored_sig != opts.matrix_sig) {
             slv.factor(v) catch |e| {
@@ -263,9 +281,6 @@ fn finalizeStep(
 
     const limited = if (comptime @hasDecl(S, "applyLimits")) sys.applyLimits(x, x_old) else false;
 
-    if (comptime @hasDecl(S, "updateStates")) {
-        if (sys.updateStates(x)) |_| return .{ .converged = false, .scaled = scaled, .flipped = true, .why = .flipped };
-    }
     if (limited) return .{ .converged = false, .scaled = scaled, .why = .limited };
     if (iter == 0) return .{ .converged = false, .scaled = scaled, .why = .first_iter };
     if (scaled >= 1.0) return .{ .converged = false, .scaled = scaled, .why = .delta };
@@ -273,6 +288,41 @@ fn finalizeStep(
         const scale = @abs(vals[sys.diag_slots[i]]);
         const tol = @max(opts.residual_tol, 10.0 * scale * (opts.reltol * @abs(x[i]) + opts.vntol));
         if (@abs(residual[i]) > tol) return .{ .converged = false, .scaled = scaled, .why = .residual };
+    }
+    // LAST, not first. `updateState` stages `wb`/`wq` (read only by
+    // `stateCtl(.commit)`, once per ACCEPTED step) and `bound_step` (read only
+    // by `ckt.boundStep()`, after an accepted step) — nothing in the Newton
+    // loop reads either, and `state.t_prev` is written by every generated
+    // device and read by none. Running it per iterate re-entered the FULL
+    // model core once per instance per iteration: 348.9M instructions, 18.1%
+    // of scaling/parallel_inverters_100 (callgrind, 2026-09-07). Here it runs
+    // once per converged solve at exactly the x `commit` will use.
+    //
+    // Bit-identical for 36 of the 40 generated devices, by field-set argument:
+    // `updateState` writes {wb__, wq__, bound_step, discontinuity_order,
+    // t_prev} and `core` reads {pb__, pq__, pc__, temperature} — DISJOINT, so
+    // the staging cannot reach a later eval/limit/q of the same device. And
+    // `wq` is OVERWRITTEN, not accumulated (`inst.wq__0 = m.f23.v`); the
+    // accumulation is `pq += wq` in `stateCtl(.commit)`. That double-buffer is
+    // what made the per-iterate call safe, and it is also why moving it here
+    // stages the same bytes: under either placement the converged iterate is
+    // the last one before commit.
+    //
+    // For the other 4 it is a CORRECTNESS FIX, not just waste removal.
+    // cswitch/vswitch `core` READS `__held__latched` and `__cross__*__prev`,
+    // which `updateState` writes — per-iterate, the hysteresis latch advanced
+    // between Newton iterates, so F was not a fixed function of x during the
+    // solve. hisim2/hisimhv write a raw `$prev` ddt latch that their own
+    // `stateCtl` neither stages nor reverts; this reduces the damage from
+    // per-iterate to per-converged-attempt (the real fix is to route them to
+    // the `commit_state` hook — `hasAbsdelayState` is the wrong predicate).
+    //
+    // A device that flips at the converged point still forces another iterate —
+    // the only place a flip is worth acting on. All 27 generated devices return
+    // `.ok` unconditionally today, so that branch is dead; it stays for the
+    // first device that isn't.
+    if (comptime @hasDecl(S, "updateStates")) {
+        if (sys.updateStates(x)) |_| return .{ .converged = false, .scaled = scaled, .flipped = true, .why = .flipped };
     }
     return .{ .converged = true, .scaled = scaled };
 }
@@ -362,9 +412,16 @@ fn CpuEnv(comptime SysT: type, comptime HookT: type) type {
                 self.sys.applyLimits(xs, x_old[0..self.n])
             else
                 false;
+            // Skipped on a limited iterate, for the reason finalizeStep gives:
+            // the staging is only read after acceptance, and a limited step is
+            // never the accepted one. jfnk has no convergence verdict here, so
+            // this is the coarser half of the same gate. Off by default
+            // (ESPICE_SOLVER=auto picks direct), so this is correctness-only.
             var flipped = false;
-            if (comptime @hasDecl(S, "updateStates")) {
-                if (self.sys.updateStates(xs)) |_| flipped = true;
+            if (!limited) {
+                if (comptime @hasDecl(S, "updateStates")) {
+                    if (self.sys.updateStates(xs)) |_| flipped = true;
+                }
             }
             return .{ .limited = limited, .flipped = flipped };
         }

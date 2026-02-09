@@ -16,14 +16,6 @@ pub fn DenseLu(comptime T: type) type {
         /// (4.9e-32 for f64 — within a decade of the historical 1e-30).
         const singular_tol: T = std.math.floatEps(T) * std.math.floatEps(T);
 
-        inline fn simdCopy(dst: []T, src: []const T) void {
-            var i: usize = 0;
-            while (i + W <= dst.len) : (i += W) {
-                dst[i..][0..W].* = src[i..][0..W].*;
-            }
-            for (dst[i..], src[i..]) |*d, s| d.* = s;
-        }
-
         // ====================================================================
         // Public API
         // ====================================================================
@@ -67,7 +59,7 @@ pub fn DenseLu(comptime T: type) type {
         /// Forward substitution (apply P then L), then back substitution (U).
         /// `b` and `x` may alias.
         pub fn solveFactored(n: usize, lu: []const T, piv: []const u32, b: []const T, x: []T) void {
-            if (x.ptr != b.ptr) simdCopy(x[0..n], b[0..n]);
+            if (x.ptr != b.ptr) @memcpy(x[0..n], b[0..n]);
 
             // Apply row permutations (forward order, LAPACK convention).
             // All swaps first, then forward elimination — interleaving is wrong
@@ -92,7 +84,7 @@ pub fn DenseLu(comptime T: type) type {
         /// Forward-sub U^T (lower tri), back-sub L^T (unit upper), then P^{-1}.
         /// `b` and `x` may alias.
         pub fn solveFactoredT(n: usize, lu: []const T, piv: []const u32, b: []const T, x: []T) void {
-            if (x.ptr != b.ptr) simdCopy(x[0..n], b[0..n]);
+            if (x.ptr != b.ptr) @memcpy(x[0..n], b[0..n]);
 
             // Forward-sub U^T z = b: U^T[i][j] = lu[j*n+i] for j <= i
             for (0..n) |i| {
@@ -202,7 +194,7 @@ pub fn DenseLu(comptime T: type) type {
                 }
                 while (i < n) : (i += 1) x[i] = -b[i];
             } else {
-                simdCopy(x[0..n], b[0..n]);
+                @memcpy(x[0..n], b[0..n]);
             }
 
             for (0..n) |k| {

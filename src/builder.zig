@@ -41,6 +41,7 @@ pub const Builder = struct {
     // Populated by tagNodeInstance(); empty if no subcircuit structure.
     node_instance: std.ArrayList(u32) = .empty,
     node_type: std.ArrayList(u16) = .empty,
+    needs_tran_op: bool = false,
 
     pub fn init(gpa: std.mem.Allocator) Builder {
         var labels: std.ArrayList([]const u8) = .empty;
@@ -210,8 +211,8 @@ pub const Builder = struct {
         // DIOsetup: posPrimeNode = posNode when RS=0). Keeping them separate
         // behind a 1e12 short makes elimination cancel catastrophically
         // (1e12 − 1e12·(1−ε) = float noise) and the Newton dx explodes.
-        // The g_short stamps of a collapsed pair land on one slot and cancel
-        // exactly, so device evals need no change.
+        // Generated evaluation sees collapse_applied on the host scalar and
+        // omits short constraints; cancelling their stamps can erase weak G.
         if (comptime @hasDecl(D, "collapse")) {
             const col = D.collapse(&model, &instance);
             inline for (D.num_ports..n_u) |u|
@@ -322,7 +323,8 @@ pub const Builder = struct {
         }
         intern_offs[n] = off;
 
-        const ckt = try analysis.freeze(gpa, self.n, intern_bytes, intern_offs, self.protos.items, bbd.info);
+        var ckt = try analysis.freeze(gpa, self.n, intern_bytes, intern_offs, self.protos.items, bbd.info);
+        ckt.needs_tran_op = self.needs_tran_op;
 
         // Protos consumed by freeze(); free the Builder shell (labels + map).
         self.protos.deinit(gpa);
@@ -419,9 +421,17 @@ pub fn addDynDevices(b: *Builder, arena: std.mem.Allocator, nl: types.Netlist) !
     }
 }
 
-/// ngspice IOPR alternate parameter spellings — card key accepted for a model
+/// ngspice IOPR alternate parameter spellings — card keys accepted for a model
 /// field of the canonical name. Comptime: drives applyKv's fallback probe.
-fn aliasOf(comptime field: []const u8) ?[]const u8 {
+/// A field may carry SEVERAL keys (dio.c answers to `cjo`, `cj0` and `cj`), so
+/// this returns every match, not the first.
+///
+/// The table is GLOBAL across every comptime device, so a pair is only safe
+/// when no other model declares the alias as a parameter in its own right.
+/// That is why dio.c's `js`->`is` is NOT here: mos1/mos2/mos3/mos6/mos9 declare
+/// both `is` (bulk junction current) and `js` (its area density), and the pair
+/// would smear a MOS card's JS into IS as well.
+fn aliasesOf(comptime field: []const u8) []const []const u8 {
     const pairs = [_][2][]const u8{
         .{ "vt0", "vto" }, .{ "vto", "vt0" },
         .{ "vaf", "va" },  .{ "VAR", "vb" },
@@ -441,14 +451,32 @@ fn aliasOf(comptime field: []const u8) ?[]const u8 {
         // silently kept the default (bsim3 fixtures drew 2x current; mos1's
         // U0 was equally dead when TOX was given; bsim1's U1 velocity
         // saturation vanished, +8% at the bsim1_a probe).
-        .{ "u0Z", "u0" },
-        .{ "u1Z", "u1" },
-        .{ "u10Z", "u10" },
+          .{ "u0Z", "u0" },
+        .{ "u1Z", "u1" },  .{ "u10Z", "u10" },
+        .{ "pubZ", "pub" }, // BSIM mobility bin coefficient; pub is a Zig keyword.
+        // Diode alternates (dio.c IOPR). Only diode.va/vdmos.va declare `cjo`
+        // and `vj`, and nothing declares `trs`/`cta`/`tpb` but diode.va, so
+        // none of these can collide with another model's own parameter.
+        .{ "tnom", "tref" },
+        .{ "cjo", "cj0" },
+        .{ "cjo", "cj" },
+        .{ "vj", "pb" },
+        .{ "trs", "trs1" },
+        .{ "cta", "ctc" },
+        .{ "tpb", "tvj" },
     };
-    inline for (pairs) |p| {
-        if (comptime std.mem.eql(u8, field, p[0])) return p[1];
+    comptime {
+        var out: [pairs.len][]const u8 = undefined;
+        var n: usize = 0;
+        for (pairs) |p| {
+            if (std.mem.eql(u8, field, p[0])) {
+                out[n] = p[1];
+                n += 1;
+            }
+        }
+        const frozen = out;
+        return frozen[0..n];
     }
-    return null;
 }
 
 fn applyKvDyn(set: *const fn ([*]u8, []const u8, f64) bool, dest: [*]u8, kv: []const types.Kv) void {
@@ -705,11 +733,8 @@ pub const NetBuilder = struct {
         }
     }
 
-    /// Post-build check over netlist-named nodes: a node no DC-stamping
-    /// element ever touched is either a current-source cutset (I sources
-    /// meet with nowhere to send KCL) or a capacitor island (no DC path to
-    /// ground). ngspice fails both at setup; converging them anyway hands
-    /// back an arbitrary common mode.
+    /// Current-source cutsets cannot satisfy static KCL. Capacitor-only nodes
+    /// reach the operating-point transient fallback, as in ngspice OPtran.
     fn topoCheck(self: *NetBuilder) !void {
         for (self.topo_seen.items, 0..) |seen, id| {
             if (!seen or id == GROUND) continue;
@@ -719,8 +744,7 @@ pub const NetBuilder = struct {
                 std.log.err("topology: node '{s}' is a current-source cutset — KCL has no DC path to satisfy it", .{label});
                 return error.CurrentSourceCutset;
             }
-            std.log.err("topology: node '{s}' has no DC path to ground (capacitor island)", .{label});
-            return error.NoDcPathToGround;
+            self.b.needs_tran_op = true;
         }
     }
 
@@ -2018,10 +2042,20 @@ pub fn valueNumber(value: types.Value) ?f64 {
     };
 }
 
+/// A recognized numeric field cannot silently fall back to a model default.
+fn numericParameter(kv: []const types.Kv, key: []const u8) !?f64 {
+    for (kv) |item| if (std.mem.eql(u8, item.key, key)) {
+        const value = valueNumber(item.value) orelse return error.UnresolvedParameter;
+        if (!std.math.isFinite(value)) return error.NonFiniteParameter;
+        return value;
+    };
+    return null;
+}
+
 fn applyKv(target: anytype, kv: []const types.Kv) !void {
     const T = @TypeOf(target.*);
     // BSIMSOI's Model has ~1600 fields and each now runs a comptime
-    // char-lowering loop on top of the aliasOf scan.
+    // char-lowering loop on top of the aliasesOf scan.
     @setEvalBranchQuota(1_000_000);
     inline for (@typeInfo(T).@"struct".fields) |field| {
         if (comptime isScalarAssignable(field.type)) {
@@ -2036,15 +2070,17 @@ fn applyKv(target: anytype, kv: []const types.Kv) !void {
                 const frozen = buf;
                 break :blk frozen;
             };
-            if (kvNumber(kv, &key)) |num| {
+            if (try numericParameter(kv, &key)) |num| {
                 @field(target.*, field.name) = castField(field.type, num);
                 markGiven(target, field.name);
-            } else if (comptime aliasOf(field.name)) |alias| {
+            } else {
                 // ngspice IOPR alternate spellings: vt0|vto, vaf|va, var|vb,
-                // ikf|ik, cjs|ccs (bjt.c iopr table).
-                if (kvNumber(kv, alias)) |num| {
-                    @field(target.*, field.name) = castField(field.type, num);
-                    markGiven(target, field.name);
+                // ikf|ik, cjs|ccs (bjt.c iopr table), cjo|cj0|cj (dio.c).
+                inline for (comptime aliasesOf(field.name)) |alias| {
+                    if (try numericParameter(kv, alias)) |num| {
+                        @field(target.*, field.name) = castField(field.type, num);
+                        markGiven(target, field.name);
+                    }
                 }
             }
         }

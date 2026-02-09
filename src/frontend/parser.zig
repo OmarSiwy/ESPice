@@ -2,7 +2,7 @@ const std = @import("std");
 const ir = @import("types.zig");
 const Token = @import("tokenizer.zig").Token;
 
-pub const Error = error{ OutOfMemory, ParseError };
+pub const Error = error{ OutOfMemory, ParseError, ModelBinNotFound };
 
 fn simdLower(buf: []u8) void {
     const W = 32;
@@ -157,16 +157,21 @@ pub fn Parser(comptime Tok: type) type {
             const expanded_hint = countExpanded(devices.items, &subckts, 0);
             var flat: std.ArrayList(ir.Device) = .empty;
             try flat.ensureTotalCapacity(arena, expanded_hint);
-            // Global .param environment. ponytail: .param inside .subckt bodies
-            // also lands here (leaks to global) — benign, since instance kv and
-            // subckt defaults shadow globals during expansion.
+            // Global parameters are shared; subcircuit scopes hold only local overrides.
             var genv: Env = .empty;
             for (params.items) |kvp| try genv.put(arena, kvp.key, kvp.value);
+            for (models.items) |model| {
+                for (@constCast(model.kv)) |*kv| kv.value = try substValue(arena, kv.value, &.{genv}, true);
+            }
+            for (directives.items) |dir| for (@constCast(dir.args)) |*arg| {
+                if (arg.* == .expr) arg.* = try substValue(arena, arg.*, &.{genv}, false);
+            };
             var instance_counter: u32 = 1; // 0 = top-level
             for (devices.items) |d| {
-                const td = if (genv.size > 0) try substDevice(arena, d, &genv) else d;
-                try expandInto(arena, &flat, td, &subckts, 0, 0, 0, &subckt_type_map, &instance_counter, &genv);
+                const td = if (genv.size > 0) try substDevice(arena, d, &.{genv}) else d;
+                try expandInto(arena, &flat, td, &subckts, 0, 0, 0, &subckt_type_map, &instance_counter, &.{genv});
             }
+            try resolveModelBins(arena, flat.items, models.items, directives.items);
 
             var dl = try ir.DeviceList.fromUnsorted(arena, flat.items);
             dl.subckt_types = subckt_type_list.items;
@@ -225,11 +230,12 @@ pub fn Parser(comptime Tok: type) type {
                         while (t.next()) |tk| {
                             switch (tk) {
                                 .word => |w| {
+                                    if (std.mem.eql(u8, w, "params:")) continue;
                                     var peek = t.*;
                                     if (peek.next()) |nx| {
                                         if (nx == .eq) {
                                             t.* = peek;
-                                            const v = try parseValueToken(arena, t);
+                                            const v = try parseParamValue(arena, t);
                                             try defaults.append(arena, .{ .key = w, .value = v });
                                             continue;
                                         }
@@ -241,7 +247,7 @@ pub fn Parser(comptime Tok: type) type {
                             }
                         }
                         s.ports = ports.items;
-                        s.defaults = defaults.items;
+                        s.defaults = defaults;
                         const gop = try subckts.getOrPut(arena, s.name);
                         gop.value_ptr.* = s;
                         cur_subckt.* = gop.value_ptr;
@@ -256,8 +262,11 @@ pub fn Parser(comptime Tok: type) type {
                                 .word => |w| {
                                     const nx = t.next() orelse return error.ParseError;
                                     if (nx != .eq) return error.ParseError;
-                                    const v = try parseValueToken(arena, t);
-                                    try params.append(arena, .{ .key = w, .value = v });
+                                    const v = try parseParamValue(arena, t);
+                                    if (cur_subckt.*) |s|
+                                        try s.defaults.append(arena, .{ .key = w, .value = v })
+                                    else
+                                        try params.append(arena, .{ .key = w, .value = v });
                                 },
                                 else => return error.ParseError,
                             }
@@ -282,7 +291,7 @@ pub fn Parser(comptime Tok: type) type {
                                     if (peek.next()) |nx| {
                                         if (nx == .eq) {
                                             t.* = peek;
-                                            const v = try parseValueToken(arena, t);
+                                            const v = try parseParamValue(arena, t);
                                             try kv.append(arena, .{ .key = w, .value = v });
                                             continue;
                                         }
@@ -544,7 +553,7 @@ pub fn Parser(comptime Tok: type) type {
                         if (peek2.next()) |nx| {
                             if (nx == .eq) {
                                 t = peek2;
-                                const v = try parseValueToken(arena, &t);
+                                const v = try parseParamValue(arena, &t);
                                 if (kv_count < kv_buf.len) {
                                     kv_buf[kv_count] = .{ .key = w, .value = v };
                                     kv_count += 1;
@@ -596,6 +605,16 @@ pub fn Parser(comptime Tok: type) type {
             return .{ .name = name, .nodes = nodes_slice, .positional = pos_slice, .kv = kv_slice };
         }
 
+        fn parseParamValue(arena: std.mem.Allocator, t: *Tok.Tokens) Error!ir.Value {
+            const rest = t.rest();
+            if (rest.len == 0) return error.ParseError;
+            if (rest[0] == '{' or rest[0] == '\'') return parseValueToken(arena, t);
+            var p: ExprP = .{ .text = t.line, .pos = t.pos, .arena = arena };
+            const e = try p.parseBin(0);
+            t.pos = p.pos;
+            return if (foldExpr(e, false)) |n| .{ .num = n } else if (e.* == .ident) .{ .name = e.ident } else .{ .expr = e };
+        }
+
         fn parseValueToken(arena: std.mem.Allocator, t: *Tok.Tokens) Error!ir.Value {
             const tk = t.next() orelse return error.ParseError;
             switch (tk) {
@@ -628,8 +647,14 @@ pub fn Parser(comptime Tok: type) type {
                                     while (true) {
                                         var p3 = t.*;
                                         const a2 = p3.next() orelse return error.ParseError;
-                                        if (a2 == .rparen) { t.* = p3; break; }
-                                        if (a2 == .comma) { t.* = p3; continue; }
+                                        if (a2 == .rparen) {
+                                            t.* = p3;
+                                            break;
+                                        }
+                                        if (a2 == .comma) {
+                                            t.* = p3;
+                                            continue;
+                                        }
                                         try overflow.append(arena, try parseValueToken(arena, t));
                                     }
                                     return .{ .group = .{ .name = w, .args = overflow.items } };
@@ -646,7 +671,6 @@ pub fn Parser(comptime Tok: type) type {
                 else => return error.ParseError,
             }
         }
-
 
         fn parsePathToken(t: *Tok.Tokens) Error![]const u8 {
             return switch (t.next() orelse return error.ParseError) {
@@ -710,24 +734,48 @@ pub fn Parser(comptime Tok: type) type {
                 var lhs = try p.parseUnary();
                 while (true) {
                     const c = p.peek() orelse break;
+                    if (c == '?' and min_prec == 0) {
+                        p.pos += 1;
+                        const yes = try p.parseBin(0);
+                        if (p.peek() != ':') return error.ParseError;
+                        p.pos += 1;
+                        const no = try p.parseBin(0);
+                        const args = try p.arena.dupe(*const ir.Expr, &.{ lhs, yes, no });
+                        lhs = try p.mk(.{ .call = .{ .name = "ternary", .args = args } });
+                        continue;
+                    }
                     const prec: u8 = switch (c) {
-                        '+', '-' => 1,
-                        '*', '/' => 2,
-                        '^' => 3,
+                        '|' => 1,
+                        '&' => 2,
+                        '<', '>', '=', '!' => 3,
+                        '+', '-' => 4,
+                        '*', '/' => if (c == '*' and p.pos + 1 < p.text.len and p.text[p.pos + 1] == '*') 6 else 5,
+                        '^' => 6,
                         else => break,
                     };
                     if (prec < min_prec) break;
                     var op = c;
                     p.pos += 1;
-                    if (c == '*' and p.pos < p.text.len and p.text[p.pos] == '*') {
-                        p.pos += 1;
-                        op = '^';
-                        if (3 < min_prec) {}
-                        const rhs = try p.parseBin(3);
-                        lhs = try p.mk(.{ .binop = .{ .op = '^', .a = lhs, .b = rhs } });
-                        continue;
+                    if (p.pos < p.text.len) {
+                        const next = p.text[p.pos];
+                        if (c == '*' and next == '*') {
+                            op = '^';
+                            p.pos += 1;
+                        }
+                        if (next == '=' and (c == '<' or c == '>' or c == '=' or c == '!')) {
+                            op = switch (c) {
+                                '<' => 'L',
+                                '>' => 'G',
+                                else => c,
+                            };
+                            p.pos += 1;
+                        } else if (c == '=' or c == '!') return error.ParseError;
+                        if (c == '&' or c == '|') {
+                            if (next != c) return error.ParseError;
+                            p.pos += 1;
+                        }
                     }
-                    const rhs = try p.parseBin(if (op == '^') prec else prec + 1);
+                    const rhs = try p.parseBin(prec + 1);
                     lhs = try p.mk(.{ .binop = .{ .op = op, .a = lhs, .b = rhs } });
                 }
                 return lhs;
@@ -737,11 +785,15 @@ pub fn Parser(comptime Tok: type) type {
                 const c = p.peek() orelse return error.ParseError;
                 if (c == '-') {
                     p.pos += 1;
-                    return p.mk(.{ .unop = .{ .op = '-', .a = try p.parseUnary() } });
+                    return p.mk(.{ .unop = .{ .op = '-', .a = try p.parseBin(6) } });
                 }
                 if (c == '+') {
                     p.pos += 1;
-                    return p.parseUnary();
+                    return p.parseBin(6);
+                }
+                if (c == '!') {
+                    p.pos += 1;
+                    return p.mk(.{ .unop = .{ .op = '!', .a = try p.parseUnary() } });
                 }
                 return p.parseAtom();
             }
@@ -761,6 +813,13 @@ pub fn Parser(comptime Tok: type) type {
 
             fn parseAtom(p: *ExprP) Error!*const ir.Expr {
                 const c = p.peek() orelse return error.ParseError;
+                if (c == '"' or c == '\'') {
+                    p.pos += 1;
+                    const e = try p.parseBin(0);
+                    if (p.peek() != c) return error.ParseError;
+                    p.pos += 1;
+                    return e;
+                }
                 if (c == '(') {
                     p.pos += 1;
                     const e = try p.parseBin(0);
@@ -778,7 +837,8 @@ pub fn Parser(comptime Tok: type) type {
                                 ((p.text[p.pos + 1] == '-' or p.text[p.pos + 1] == '+') and
                                     p.pos + 2 < p.text.len and std.ascii.isDigit(p.text[p.pos + 2]))))
                         {
-                            p.pos += 2;
+                            p.pos += 1;
+                            if (p.text[p.pos] == '+' or p.text[p.pos] == '-') p.pos += 1;
                             continue;
                         }
                         break;
@@ -832,11 +892,93 @@ pub fn Parser(comptime Tok: type) type {
         const Subckt = struct {
             name: []const u8,
             ports: []const []const u8,
-            defaults: []const ir.Kv,
+            defaults: std.ArrayList(ir.Kv),
             devices: []const ir.Device,
         };
 
         const Env = std.StringHashMapUnmanaged(ir.Value);
+
+        fn number(kv: []const ir.Kv, key: []const u8) ?f64 {
+            for (kv) |item| if (std.mem.eql(u8, item.key, key)) return switch (item.value) {
+                .num => |n| n,
+                else => null,
+            };
+            return null;
+        }
+
+        fn resolveModelBins(arena: std.mem.Allocator, devs: []ir.Device, models: []const ir.Model, dirs: []const ir.Directive) Error!void {
+            var scale: f64 = 1;
+            var wnflag = Tok == @import("tokenizer.zig").hspice or Tok == @import("tokenizer.zig").spectre;
+            const option_names = std.StaticStringMap(void).initComptime(.{
+                .{ "option", {} }, .{ "options", {} }, .{ "opt", {} }, .{ "opts", {} },
+            });
+            for (dirs) |dir| {
+                if (!option_names.has(dir.kind)) continue;
+                for (dir.args, 0..) |arg, i| {
+                    if (arg != .name) continue;
+                    const is_scale = std.mem.eql(u8, arg.name, "scale");
+                    const is_wnflag = std.mem.eql(u8, arg.name, "wnflag");
+                    if (!is_scale and !is_wnflag) continue;
+                    if (i + 1 == dir.args.len or dir.args[i + 1] != .num) return error.ParseError;
+                    const value = dir.args[i + 1].num;
+                    if (is_scale) scale = value;
+                    if (is_wnflag) wnflag = value != 0;
+                }
+            }
+            if (!(scale > 0) or !std.math.isFinite(scale)) return error.ParseError;
+            var names: std.StringHashMapUnmanaged(u32) = .empty;
+            const none = std.math.maxInt(u32);
+            const next = try arena.alloc(u32, models.len);
+            @memset(next, none);
+            const bounds = try arena.alloc([4]f64, models.len);
+            // ngspice prepends model cards: the last matching bin wins at shared bounds.
+            for (models, 0..) |model, i| try names.put(arena, model.name, @intCast(i));
+            for (models, 0..) |model, mi| {
+                const dot = std.mem.lastIndexOfScalar(u8, model.name, '.') orelse continue;
+                _ = std.fmt.parseInt(u32, model.name[dot + 1 ..], 10) catch continue;
+                bounds[mi] = .{
+                    number(model.kv, "lmin") orelse continue, number(model.kv, "lmax") orelse continue,
+                    number(model.kv, "wmin") orelse continue, number(model.kv, "wmax") orelse continue,
+                };
+                const entry = try names.getOrPut(arena, model.name[0..dot]);
+                if (entry.found_existing) {
+                    if (std.mem.eql(u8, models[entry.value_ptr.*].name, model.name[0..dot])) continue;
+                    next[mi] = entry.value_ptr.*;
+                }
+                entry.value_ptr.* = @intCast(mi);
+            }
+            const lengths = std.StaticStringMap(u2).initComptime(.{
+                .{ "l", 1 },  .{ "w", 1 },  .{ "pd", 1 }, .{ "ps", 1 }, .{ "sa", 1 }, .{ "sb", 1 }, .{ "sd", 1 },
+                .{ "ad", 2 }, .{ "as", 2 },
+            });
+            for (devs) |dev| {
+                if (dev.letter() != 'm') continue;
+                for (@constCast(dev.kv)) |*kv| {
+                    const power = lengths.get(kv.key) orelse continue;
+                    if (kv.value != .num) return error.ParseError;
+                    kv.value.num *= if (power == 2) scale * scale else scale;
+                }
+                if (dev.positional.len == 0 or dev.positional[0] != .name) continue;
+                const name = dev.positional[0].name;
+                var bin = names.get(name) orelse continue;
+                if (std.mem.eql(u8, name, models[bin].name)) continue;
+                const l = number(dev.kv, "l") orelse return error.ParseError;
+                const use_nf = if (number(dev.kv, "wnflag")) |flag| flag != 0 else wnflag;
+                const nf = if (use_nf) number(dev.kv, "nf") orelse 1 else 1;
+                const w = (number(dev.kv, "w") orelse return error.ParseError) / nf;
+                while (bin != none) : (bin = next[bin]) {
+                    const b = bounds[bin];
+                    // ngspice INPgetModBin includes endpoints within 1 nm.
+                    if ((@abs(l - b[0]) < 1e-9 or @abs(l - b[1]) < 1e-9 or (l > b[0] and l < b[1])) and
+                        (@abs(w - b[2]) < 1e-9 or @abs(w - b[3]) < 1e-9 or (w > b[2] and w < b[3])))
+                    {
+                        @constCast(dev.positional)[0] = .{ .name = models[bin].name };
+                        break;
+                    }
+                }
+                if (bin == none) return error.ModelBinNotFound;
+            }
+        }
 
         fn concatDot(arena: std.mem.Allocator, a: []const u8, b: []const u8) Error![]const u8 {
             const buf = try arena.alloc(u8, a.len + 1 + b.len);
@@ -909,10 +1051,16 @@ pub fn Parser(comptime Tok: type) type {
                     count += 1;
                     continue;
                 }
-                if (d.positional.len < 1) { count += 1; continue; }
+                if (d.positional.len < 1) {
+                    count += 1;
+                    continue;
+                }
                 const sname = switch (d.positional[d.positional.len - 1]) {
                     .name => |nm| nm,
-                    else => { count += 1; continue; },
+                    else => {
+                        count += 1;
+                        continue;
+                    },
                 };
                 if (subckts.get(sname)) |sub| {
                     count += countExpanded(sub.devices, subckts, depth + 1);
@@ -933,7 +1081,7 @@ pub fn Parser(comptime Tok: type) type {
             instance_id: u32,
             type_map: *const std.StringHashMapUnmanaged(u16),
             instance_counter: *u32,
-            genv: *const Env,
+            genv: []const Env,
         ) Error!void {
             if (d.letter() != 'x') {
                 var tagged = d;
@@ -956,12 +1104,16 @@ pub fn Parser(comptime Tok: type) type {
             instance_counter.* += 1;
 
             // Shadow order: instance kv > subckt defaults > global .param.
-            var env: Env = try genv.clone(arena);
-            for (sub.defaults) |kvp| try env.put(arena, kvp.key, kvp.value);
+            var env: Env = .empty;
+            for (sub.defaults.items) |kvp| try env.put(arena, kvp.key, kvp.value);
             for (d.kv) |kvp| try env.put(arena, kvp.key, kvp.value);
 
+            var scopes: [34]Env = undefined;
+            @memcpy(scopes[0..genv.len], genv);
+            scopes[genv.len] = env;
+            const nested = scopes[0 .. genv.len + 1];
             for (sub.devices) |sd| {
-                var nd = try substDevice(arena, sd, &env);
+                var nd = try substDevice(arena, sd, nested);
                 nd.name = try concatDot(arena, sd.name, d.name);
                 const dev_nodes = try arena.alloc([]const u8, sd.nodes.len);
                 for (sd.nodes, dev_nodes) |n, *o| {
@@ -982,29 +1134,102 @@ pub fn Parser(comptime Tok: type) type {
                     nd.kv = kv2;
                     break;
                 }
-                try expandInto(arena, out, nd, subckts, depth + 1, this_type, this_instance, type_map, instance_counter, genv);
+                try expandInto(arena, out, nd, subckts, depth + 1, this_type, this_instance, type_map, instance_counter, nested);
             }
         }
 
-        /// Constant-fold a fully-substituted expression; null if any ident/call remains.
-        fn foldExpr(e: *const ir.Expr) ?f64 {
+        const math_calls = std.StaticStringMap(enum(u8) { sqrt, abs, min, max, pow, exp, ln, log, log10, sin, cos, tan, atan, floor, ceil, ternary }).initComptime(.{
+            .{ "sqrt", .sqrt },       .{ "abs", .abs }, .{ "min", .min },   .{ "max", .max },     .{ "pow", .pow },
+            .{ "exp", .exp },         .{ "ln", .ln },   .{ "log", .log },   .{ "log10", .log10 }, .{ "sin", .sin },
+            .{ "cos", .cos },         .{ "tan", .tan }, .{ "atan", .atan }, .{ "floor", .floor }, .{ "ceil", .ceil },
+            .{ "ternary", .ternary },
+        });
+
+        // Only declared model geometry and valid stochastic calls may disappear
+        // behind a zero nominal-corner switch. Unknown symbols remain errors downstream.
+        fn nominalFactor(e: *const ir.Expr, geometry: bool) bool {
+            if (foldExpr(e, false)) |n| return std.math.isFinite(n);
+            return switch (e.*) {
+                .num => false,
+                .ident => |name| geometry and std.StaticStringMap(void).initComptime(.{
+                    .{ "l", {} }, .{ "w", {} }, .{ "mult", {} },
+                }).has(name),
+                .call => |c| blk: {
+                    const random = std.mem.eql(u8, c.name, "agauss") or std.mem.eql(u8, c.name, "gauss");
+                    if (random) {
+                        if (c.args.len != 3) break :blk false;
+                        for (c.args) |arg| if (foldExpr(arg, false) == null) break :blk false;
+                    } else if (!math_calls.has(c.name)) break :blk false;
+                    for (c.args) |arg| if (!nominalFactor(arg, geometry)) break :blk false;
+                    break :blk true;
+                },
+                .unop => |u| nominalFactor(u.a, geometry),
+                .binop => |b| nominalFactor(b.a, geometry) and nominalFactor(b.b, geometry),
+            };
+        }
+
+        /// Constant expressions and disabled symbolic terms; unresolved probes remain expressions.
+        fn foldExpr(e: *const ir.Expr, model_geometry: bool) ?f64 {
             return switch (e.*) {
                 .num => |n| n,
-                .ident, .call => null,
+                .ident => null,
+                .call => |c| blk: {
+                    const kind = math_calls.get(c.name) orelse break :blk null;
+                    const arity: usize = switch (kind) {
+                        .ternary => 3,
+                        .pow, .min, .max => 2,
+                        else => 1,
+                    };
+                    if (c.args.len != arity) break :blk null;
+                    const a = foldExpr(c.args[0], model_geometry) orelse break :blk null;
+                    if (kind == .ternary) break :blk foldExpr(c.args[if (a != 0) @as(usize, 1) else 2], model_geometry);
+                    const b = if (arity == 2) foldExpr(c.args[1], model_geometry) orelse break :blk null else 0;
+                    break :blk switch (kind) {
+                        .sqrt => @sqrt(a),
+                        .abs => @abs(a),
+                        .min => @min(a, b),
+                        .max => @max(a, b),
+                        .pow => std.math.pow(f64, a, b),
+                        .exp => @exp(a),
+                        .ln, .log => @log(a),
+                        .log10 => @log10(a),
+                        .sin => @sin(a),
+                        .cos => @cos(a),
+                        .tan => @tan(a),
+                        .atan => std.math.atan(a),
+                        .floor => @floor(a),
+                        .ceil => @ceil(a),
+                        .ternary => unreachable,
+                    };
+                },
                 .unop => |u| switch (u.op) {
-                    '-' => if (foldExpr(u.a)) |a| -a else null,
-                    '+' => foldExpr(u.a),
+                    '-' => if (foldExpr(u.a, model_geometry)) |a| -a else null,
+                    '+' => foldExpr(u.a, model_geometry),
+                    '!' => if (foldExpr(u.a, model_geometry)) |a| @floatFromInt(@intFromBool(a == 0)) else null,
                     else => null,
                 },
                 .binop => |b| blk: {
-                    const a = foldExpr(b.a) orelse break :blk null;
-                    const c = foldExpr(b.b) orelse break :blk null;
+                    const lhs = foldExpr(b.a, model_geometry);
+                    const rhs = foldExpr(b.b, model_geometry);
+                    // Nominal PDK corners disable stochastic/geometry terms with a zero switch.
+                    if (b.op == '*' and ((lhs == 0 and rhs == null and nominalFactor(b.b, model_geometry)) or
+                        (rhs == 0 and lhs == null and nominalFactor(b.a, model_geometry)))) break :blk 0;
+                    const a = lhs orelse break :blk null;
+                    const c = rhs orelse break :blk null;
                     break :blk switch (b.op) {
                         '+' => a + c,
                         '-' => a - c,
                         '*' => a * c,
                         '/' => a / c,
                         '^' => std.math.pow(f64, a, c),
+                        '<' => @floatFromInt(@intFromBool(a < c)),
+                        '>' => @floatFromInt(@intFromBool(a > c)),
+                        'L' => @floatFromInt(@intFromBool(a <= c)),
+                        'G' => @floatFromInt(@intFromBool(a >= c)),
+                        '=' => @floatFromInt(@intFromBool(a == c)),
+                        '!' => @floatFromInt(@intFromBool(a != c)),
+                        '&' => @floatFromInt(@intFromBool(a != 0 and c != 0)),
+                        '|' => @floatFromInt(@intFromBool(a != 0 or c != 0)),
                         else => null,
                     };
                 },
@@ -1012,68 +1237,90 @@ pub fn Parser(comptime Tok: type) type {
         }
 
         /// Substitute env params into a device's positional and kv values.
-        fn substDevice(arena: std.mem.Allocator, d: ir.Device, env: *const Env) Error!ir.Device {
+        fn substDevice(arena: std.mem.Allocator, d: ir.Device, env: []const Env) Error!ir.Device {
             var nd = d;
             if (d.positional.len > 0) {
                 const pos = try arena.alloc(ir.Value, d.positional.len);
-                for (d.positional, pos) |v, *o| o.* = try substValue(arena, v, env);
+                for (d.positional, pos) |v, *o| o.* = try substValue(arena, v, env, false);
                 nd.positional = pos;
             }
             if (d.kv.len > 0) {
                 const kv = try arena.alloc(ir.Kv, d.kv.len);
-                for (d.kv, kv) |kvp, *o| o.* = .{ .key = kvp.key, .value = try substValue(arena, kvp.value, env) };
+                for (d.kv, kv) |kvp, *o| o.* = .{ .key = kvp.key, .value = try substValue(arena, kvp.value, env, false) };
                 nd.kv = kv;
             }
             return nd;
         }
 
-        fn substValue(arena: std.mem.Allocator, v: ir.Value, env: *const Env) Error!ir.Value {
+        fn substValue(arena: std.mem.Allocator, v: ir.Value, env: []const Env, model_geometry: bool) Error!ir.Value {
             return switch (v) {
                 .num => v,
-                .name => |nm| if (env.get(nm)) |sv| sv else v,
+                .name => |nm| blk: {
+                    if (findScope(env, nm) == null) break :blk v;
+                    const ident: ir.Expr = .{ .ident = nm };
+                    const se = try substExpr(arena, &ident, env);
+                    break :blk if (foldExpr(se, model_geometry)) |n| .{ .num = n } else .{ .expr = se };
+                },
                 .expr => |e| blk: {
                     const se = try substExpr(arena, e, env);
                     // Fold to a plain number when possible: downstream lowering
                     // (engine valueNumber) only understands .num.
-                    break :blk if (foldExpr(se)) |n| ir.Value{ .num = n } else ir.Value{ .expr = se };
+                    break :blk if (foldExpr(se, model_geometry)) |n| ir.Value{ .num = n } else ir.Value{ .expr = se };
                 },
                 .group => |g| blk: {
                     const args = try arena.alloc(ir.Value, g.args.len);
-                    for (g.args, args) |a, *o| o.* = try substValue(arena, a, env);
+                    for (g.args, args) |a, *o| o.* = try substValue(arena, a, env, model_geometry);
                     break :blk .{ .group = .{ .name = g.name, .args = args } };
                 },
             };
         }
 
-        fn substExpr(arena: std.mem.Allocator, e: *const ir.Expr, env: *const Env) Error!*const ir.Expr {
+        fn findScope(scopes: []const Env, name: []const u8) ?usize {
+            var i = scopes.len;
+            while (i > 0) {
+                i -= 1;
+                if (scopes[i].contains(name)) return i;
+            }
+            return null;
+        }
+
+        fn substExpr(arena: std.mem.Allocator, e: *const ir.Expr, env: []const Env) Error!*const ir.Expr {
+            return substExprDepth(arena, e, env, 0);
+        }
+
+        fn substExprDepth(arena: std.mem.Allocator, e: *const ir.Expr, env: []const Env, depth: u8) Error!*const ir.Expr {
+            if (depth == 64) return error.ParseError;
             switch (e.*) {
                 .num => return e,
                 .ident => |nm| {
-                    const sv = env.get(nm) orelse return e;
+                    const scope = findScope(env, nm) orelse return e;
+                    const sv = env[scope].get(nm).?;
+                    const defining = env[0 .. scope + 1];
                     const out = try arena.create(ir.Expr);
                     out.* = switch (sv) {
                         .num => |n| .{ .num = n },
                         .name => |n2| .{ .ident = n2 },
-                        .expr => |se| return se,
+                        .expr => |se| return substExprDepth(arena, se, defining, depth + 1),
                         .group => return error.ParseError,
                     };
-                    return out;
+                    return if (out.* == .ident) substExprDepth(arena, out, defining, depth + 1) else out;
                 },
                 .call => |c| {
+                    if (std.mem.eql(u8, c.name, "v") or std.mem.eql(u8, c.name, "i")) return e;
                     const args = try arena.alloc(*const ir.Expr, c.args.len);
-                    for (c.args, args) |a, *o| o.* = try substExpr(arena, a, env);
+                    for (c.args, args) |a, *o| o.* = try substExprDepth(arena, a, env, depth);
                     const out = try arena.create(ir.Expr);
                     out.* = .{ .call = .{ .name = c.name, .args = args } };
                     return out;
                 },
                 .unop => |u| {
                     const out = try arena.create(ir.Expr);
-                    out.* = .{ .unop = .{ .op = u.op, .a = try substExpr(arena, u.a, env) } };
+                    out.* = .{ .unop = .{ .op = u.op, .a = try substExprDepth(arena, u.a, env, depth) } };
                     return out;
                 },
                 .binop => |b| {
                     const out = try arena.create(ir.Expr);
-                    out.* = .{ .binop = .{ .op = b.op, .a = try substExpr(arena, b.a, env), .b = try substExpr(arena, b.b, env) } };
+                    out.* = .{ .binop = .{ .op = b.op, .a = try substExprDepth(arena, b.a, env, depth), .b = try substExprDepth(arena, b.b, env, depth) } };
                     return out;
                 },
             }

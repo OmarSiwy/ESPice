@@ -72,6 +72,8 @@ pub const RunCtx = struct {
     source_node: u32,
     source_branch: u32,
     allocator: std.mem.Allocator,
+    /// Reclaimable work storage when allocator retains the final results in an arena.
+    scratch_allocator: ?std.mem.Allocator = null,
 };
 
 // ---------------------------------------------------------------------------

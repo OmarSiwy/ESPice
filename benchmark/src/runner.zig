@@ -11,7 +11,7 @@
 //!   1. Preflight both simulators (untimed)
 //!   2. N timed iterations -> median wall-clock
 //!   3. Parse both ngspice-format raw files
-//!   4. Compare node voltages: max/RMS relative error
+//!   4. Compare voltages and currents: max/RMS normalized error
 //!   5. Combined timing + accuracy table on stdout + RESULTS.md
 
 const std = @import("std");
@@ -36,6 +36,8 @@ const Fixture = struct {
 };
 
 const Accuracy = struct {
+    // Per-fixture coverage state (two values), cold alongside report metrics.
+    complete: bool = true,
     max_rel: f64,
     rms_rel: f64,
     pass: bool,
@@ -130,10 +132,10 @@ pub fn main(init: std.process.Init) !void {
         var zp_cpu_raw_path: []const u8 = "";
         if (engine_ok) {
             zp_cpu_raw_path = try std.fmt.allocPrint(fxa, "{s}/{s}--{s}.zp-cpu.raw", .{ out_dir, fx.category, fx.name });
-            const zp_cpu_argv: []const []const u8 = &.{ cfg.engine_bin, "-b", "-r", zp_cpu_raw_path, netlist };
-            const cap = runCapture(io, fxa, zp_cpu_argv);
+            const zp_cpu_argv: []const []const u8 = &.{ cfg.engine_bin, "-b", "--backend", "cpu", "-r", zp_cpu_raw_path, netlist };
+            const cap = runCapture(io, fxa, zp_cpu_argv, cfg.timeout);
             if (cap.ok and !std.mem.startsWith(u8, cap.text, "{\"skip\"")) {
-                res.zp_cpu_median_ns = try timedMedian(io, fxa, zp_cpu_argv, cfg.timeout, 1);
+                res.zp_cpu_median_ns = try timedMedian(io, fxa, zp_cpu_argv, cfg.timeout, cfg.iters, .cpu);
             } else if (skipReason(cap.text)) |reason| {
                 res.zp_cpu_skip = reason;
             } else {
@@ -147,10 +149,18 @@ pub fn main(init: std.process.Init) !void {
         var zp_gpu_raw_path: []const u8 = "";
         if (engine_ok) {
             zp_gpu_raw_path = try std.fmt.allocPrint(fxa, "{s}/{s}--{s}.zp-gpu.raw", .{ out_dir, fx.category, fx.name });
-            const zp_gpu_argv: []const []const u8 = &.{ cfg.engine_bin, "-b", "--gpu", "-r", zp_gpu_raw_path, netlist };
-            const cap = runCapture(io, fxa, zp_gpu_argv);
-            if (cap.ok and !std.mem.startsWith(u8, cap.text, "{\"skip\"")) {
-                res.zp_gpu_median_ns = try timedMedian(io, fxa, zp_gpu_argv, cfg.timeout, 1);
+            const zp_gpu_argv: []const []const u8 = &.{ cfg.engine_bin, "-b", "--backend", "auto", "-r", zp_gpu_raw_path, netlist };
+            const cap = runCapture(io, fxa, zp_gpu_argv, cfg.timeout);
+            if (gpuSkipReason(cap.stderr)) |reason| {
+                res.zp_gpu_skip = reason;
+            } else if (cap.ok and !std.mem.startsWith(u8, cap.text, "{\"skip\"")) {
+                res.zp_gpu_median_ns = timedMedian(io, fxa, zp_gpu_argv, cfg.timeout, cfg.iters, .gpu) catch |err| switch (err) {
+                    error.GpuFallback => blk: {
+                        res.zp_gpu_skip = "GPU fell back during timing";
+                        break :blk null;
+                    },
+                    else => return err,
+                };
             } else if (skipReason(cap.text)) |reason| {
                 res.zp_gpu_skip = reason;
             } else {
@@ -165,8 +175,8 @@ pub fn main(init: std.process.Init) !void {
         if (ngspice_ok) {
             ng_raw_path = try std.fmt.allocPrint(fxa, "{s}/{s}--{s}.ng.raw", .{ out_dir, fx.category, fx.name });
             const ng_argv: []const []const u8 = &.{ "ngspice", "-b", "-r", ng_raw_path, netlist };
-            if (runOk(io, ng_argv)) {
-                res.ng_median_ns = try timedMedian(io, fxa, ng_argv, cfg.timeout, 1);
+            if (runOk(io, ng_argv, cfg.timeout)) {
+                res.ng_median_ns = try timedMedian(io, fxa, ng_argv, cfg.timeout, cfg.iters, .quiet);
             } else {
                 res.ng_skip = "preflight failed";
             }
@@ -175,8 +185,8 @@ pub fn main(init: std.process.Init) !void {
         // xyce
         if (xyce_ok) {
             const xyce_argv: []const []const u8 = &.{ "xyce", "-b", netlist };
-            if (runOk(io, xyce_argv)) {
-                res.xyce_median_ns = try timedMedian(io, fxa, xyce_argv, cfg.timeout, 1);
+            if (runOk(io, xyce_argv, cfg.timeout)) {
+                res.xyce_median_ns = try timedMedian(io, fxa, xyce_argv, cfg.timeout, cfg.iters, .quiet);
             } else {
                 res.xyce_skip = "preflight failed";
             }
@@ -184,7 +194,7 @@ pub fn main(init: std.process.Init) !void {
 
         // peak RSS (one extra run each, only for fixtures that succeeded)
         if (res.zp_cpu_median_ns != null) {
-            const zp_cpu_argv: []const []const u8 = &.{ cfg.engine_bin, "-b", "-r", zp_cpu_raw_path, netlist };
+            const zp_cpu_argv: []const []const u8 = &.{ cfg.engine_bin, "-b", "--backend", "cpu", "-r", zp_cpu_raw_path, netlist };
             res.zp_cpu_rss_kb = measurePeakRss(io, fxa, zp_cpu_argv, cfg.timeout);
         }
         if (res.ng_median_ns != null) {
@@ -233,6 +243,10 @@ const Plot = struct {
 
 fn parseRawFile(io: Io, gpa: std.mem.Allocator, path: []const u8) ?Plot {
     const blob = Io.Dir.cwd().readFileAlloc(io, path, gpa, .unlimited) catch return null;
+    return parseRawBlob(gpa, blob);
+}
+
+fn parseRawBlob(gpa: std.mem.Allocator, blob: []const u8) ?Plot {
     if (blob.len == 0) return null;
 
     var plotname: []const u8 = "";
@@ -279,13 +293,15 @@ fn parseRawFile(io: Io, gpa: std.mem.Allocator, path: []const u8) ?Plot {
         }
     }
 
-    if (binary_offset == null or nvars == 0 or npoints == 0) return null;
+    if (binary_offset == null or nvars == 0 or npoints == 0 or varnames.items.len != nvars) return null;
     const boff = binary_offset.?;
 
     const per: usize = if (is_complex) 2 else 1;
-    const count = nvars * npoints * per;
-    const need = count * 8;
-    if (boff + need > blob.len) return null;
+    const count = std.math.mul(usize, std.math.mul(usize, nvars, npoints) catch return null, per) catch return null;
+    const need = std.math.mul(usize, count, @sizeOf(f64)) catch return null;
+    if (need > blob.len - boff) return null;
+    // ponytail: one real plot only; add plot matching before validating multi-analysis decks.
+    if (std.mem.trim(u8, blob[boff + need ..], " \t\r\n").len != 0) return null;
 
     const data = gpa.alloc(f64, count) catch return null;
     @memcpy(std.mem.sliceAsBytes(data), blob[boff .. boff + need]);
@@ -307,44 +323,79 @@ fn parseRawFile(io: Io, gpa: std.mem.Allocator, path: []const u8) ?Plot {
 fn compareRawFiles(io: Io, gpa: std.mem.Allocator, ng_path: []const u8, zp_path: []const u8, rtol: f64) ?Accuracy {
     const ng = parseRawFile(io, gpa, ng_path) orelse return null;
     const zp = parseRawFile(io, gpa, zp_path) orelse return null;
-    if (ng.is_complex or zp.is_complex) return null;
+    return comparePlots(gpa, ng, zp, rtol);
+}
 
-    const interpolate = std.mem.indexOf(u8, std.ascii.allocLowerString(gpa, ng.plotname) catch return null, "transient") != null;
+fn comparePlots(gpa: std.mem.Allocator, ng: Plot, zp: Plot, rtol: f64) ?Accuracy {
+    if (ng.is_complex or zp.is_complex or !std.ascii.eqlIgnoreCase(ng.plotname, zp.plotname)) return null;
+    for (ng.data) |value| if (!std.math.isFinite(value)) return .{ .max_rel = std.math.inf(f64), .rms_rel = std.math.inf(f64), .pass = false };
+    for (zp.data) |value| if (!std.math.isFinite(value)) return .{ .max_rel = std.math.inf(f64), .rms_rel = std.math.inf(f64), .pass = false };
+
+    const plotname = std.ascii.allocLowerString(gpa, ng.plotname) catch return null;
+    defer gpa.free(plotname);
+    const interpolate = std.mem.indexOf(u8, plotname, "transient") != null;
+
+    var columns: std.StringHashMapUnmanaged(usize) = .empty;
+    defer columns.deinit(gpa);
+    columns.ensureTotalCapacity(gpa, std.math.cast(u32, zp.varnames.len) orelse return null) catch return null;
+    for (zp.varnames, 0..) |name, i| {
+        const entry = columns.getOrPutAssumeCapacity(name);
+        if (!entry.found_existing) entry.value_ptr.* = i;
+    }
+
+    const ng_columns = gpa.alloc(f64, 2 * ng.npoints) catch return null;
+    defer gpa.free(ng_columns);
+    const zp_columns = gpa.alloc(f64, 2 * zp.npoints) catch return null;
+    defer gpa.free(zp_columns);
+    const ng_scale = ng_columns[0..ng.npoints];
+    const zp_scale = zp_columns[0..zp.npoints];
+    const ng_var = ng_columns[ng.npoints..];
+    const zp_var = zp_columns[zp.npoints..];
+    extractCol(ng.data, ng.nvars, 0, ng_scale);
+    extractCol(zp.data, zp.nvars, 0, zp_scale);
+    if (interpolate) {
+        if (zp_scale[0] > ng_scale[0] or zp_scale[zp_scale.len - 1] < ng_scale[ng_scale.len - 1]) return null;
+    } else if (ng.npoints != zp.npoints) return null;
 
     var worst_max: f64 = 0;
     var worst_rms: f64 = 0;
     var any = false;
+    var complete = true;
 
     // Any column BOTH engines emit, keyed by name — v(node) and i(source)
     // alike. The old v( filter made every current-keyed fixture (gummel,
     // transfer) pass vacuously: espice raws had no i(...) columns to find,
     // so nothing was compared.
     for (ng.varnames, 0..) |ng_name, ni| {
-        const zi = findVar(zp.varnames, ng_name) orelse continue;
-
-        const ng_scale = extractCol(gpa, ng.data, ng.nvars, ng.npoints, 0) orelse continue;
-        const zp_scale = extractCol(gpa, zp.data, zp.nvars, zp.npoints, 0) orelse continue;
-        const ng_var = extractCol(gpa, ng.data, ng.nvars, ng.npoints, ni) orelse continue;
-        const zp_var = extractCol(gpa, zp.data, zp.nvars, zp.npoints, zi) orelse continue;
+        // Transient time grids differ; other scales still participate in error.
+        if (interpolate and scale_names.has(ng_name)) continue;
+        const zi = columns.get(ng_name) orelse {
+            // Internal device nodes differ across model implementations.
+            if (std.mem.indexOfScalar(u8, ng_name, '#') != null) continue;
+            complete = false;
+            continue;
+        };
+        extractCol(ng.data, ng.nvars, ni, ng_var);
+        extractCol(zp.data, zp.nvars, zi, zp_var);
 
         const peak = colPeak(ng_var);
         const ptp = colPtp(ng_var);
         const denom = @max(peak, ptp, 1.0);
+        if (!std.math.isFinite(denom)) return .{ .max_rel = std.math.inf(f64), .rms_rel = std.math.inf(f64), .pass = false };
 
         var sum_sq: f64 = 0;
         var max_err: f64 = 0;
         var count: usize = 0;
 
+        // Candidate-side bracket for the edge window below. Hoisted: x walks
+        // ng_scale in increasing order, so this only ever moves forward.
+        var j: usize = 0;
+
         for (ng_scale, ng_var, 0..) |x, ya, i| {
             var yb = if (interpolate) interp(zp_scale, zp_var, x) else blk: {
                 if (count < zp_var.len) break :blk zp_var[count] else return null;
             };
-            if (std.math.isNan(yb) or std.math.isNan(ya)) {
-                max_err = std.math.inf(f64);
-                sum_sq = std.math.inf(f64);
-                count += 1;
-                continue;
-            }
+            if (!std.math.isFinite(yb)) return .{ .max_rel = std.math.inf(f64), .rms_rel = std.math.inf(f64), .pass = false };
             // Edge-phase tolerance: a steep edge cannot be timed below the
             // REFERENCE's own local grid. If the pointwise error is large,
             // re-sample the candidate inside one reference-step window each
@@ -355,7 +406,14 @@ fn compareRawFiles(io: Io, gpa: std.mem.Allocator, ng_path: []const u8, zp_path:
             if (interpolate and @abs(ya - yb) / denom > 1e-3) {
                 const dt_lo = if (i > 0) x - ng_scale[i - 1] else 0;
                 const dt_hi = if (i + 1 < ng_scale.len) ng_scale[i + 1] - x else 0;
-                const w = @max(dt_lo, dt_hi);
+                // A steep edge also cannot be timed below the CANDIDATE's own
+                // local grid. Right after a source breakpoint ngspice emits a
+                // sub-picosecond sample; interpolating our (2 ps) step across a
+                // genuine time-discontinuity there reads as the full jump.
+                // ponytail: local bracket only, no bisect — the scan is monotone.
+                while (j + 1 < zp_scale.len and zp_scale[j + 1] < x) j += 1;
+                const dt_cand = zp_scale[@min(j + 1, zp_scale.len - 1)] - zp_scale[j];
+                const w = @max(dt_lo, dt_hi, dt_cand);
                 var best = @abs(ya - yb);
                 var k: usize = 0;
                 while (k <= 8) : (k += 1) {
@@ -375,29 +433,26 @@ fn compareRawFiles(io: Io, gpa: std.mem.Allocator, ng_path: []const u8, zp_path:
             const rms = @sqrt(sum_sq / @as(f64, @floatFromInt(count)));
             if (max_err > worst_max) worst_max = max_err;
             if (rms > worst_rms) worst_rms = rms;
-            any = true;
+            // Scale agreement alone proves nothing about circuit behavior.
+            any = any or !scale_names.has(ng_name);
         }
     }
 
     if (!any) return null;
     return .{
+        .complete = complete,
         .max_rel = worst_max,
         .rms_rel = worst_rms,
-        .pass = worst_rms <= rtol and worst_max <= 10.0 * rtol,
+        .pass = complete and worst_rms <= rtol and worst_max <= 10.0 * rtol,
     };
 }
 
-fn extractCol(gpa: std.mem.Allocator, data: []const f64, nvars: usize, npoints: usize, col: usize) ?[]const f64 {
-    const buf = gpa.alloc(f64, npoints) catch return null;
-    for (0..npoints) |p| buf[p] = data[p * nvars + col];
-    return buf;
-}
+const scale_names = std.StaticStringMap(void).initComptime(.{
+    .{ "time", {} }, .{ "frequency", {} }, .{ "v(v-sweep)", {} }, .{ "i(i-sweep)", {} }, .{ "temp-sweep", {} },
+});
 
-fn findVar(names: []const []const u8, target: []const u8) ?usize {
-    for (names, 0..) |n, i| {
-        if (std.mem.eql(u8, n, target)) return i;
-    }
-    return null;
+fn extractCol(data: []const f64, nvars: usize, col: usize, out: []f64) void {
+    for (out, 0..) |*value, p| value.* = data[p * nvars + col];
 }
 
 fn colPeak(col: []const f64) f64 {
@@ -502,18 +557,36 @@ fn waitOk(child: *std.process.Child, io: Io) bool {
     };
 }
 
-const Capture = struct { ok: bool, text: []const u8 };
+const Capture = struct { ok: bool, text: []const u8, stderr: []const u8 };
 
-fn runCapture(io: Io, gpa: std.mem.Allocator, argv: []const []const u8) Capture {
-    var child = spawnQuiet(io, argv, "30", .pipe) catch return .{ .ok = false, .text = "" };
-    var rbuf: [4096]u8 = undefined;
-    var fr = child.stdout.?.reader(io, &rbuf);
-    const text = fr.interface.allocRemaining(gpa, .limited(1 << 20)) catch {
-        _ = child.wait(io) catch {};
-        return .{ .ok = false, .text = "" };
+fn runCapture(io: Io, gpa: std.mem.Allocator, argv: []const []const u8, timeout: []const u8) Capture {
+    var buf: [64][]const u8 = undefined;
+    buf[0] = "timeout";
+    buf[1] = timeout;
+    @memcpy(buf[2..][0..argv.len], argv);
+    const result = std.process.run(gpa, io, .{
+        .argv = buf[0 .. argv.len + 2],
+        .stdout_limit = .limited(1 << 20),
+        .stderr_limit = .limited(1 << 20),
+    }) catch return .{ .ok = false, .text = "", .stderr = "capture failed" };
+    return .{
+        .ok = switch (result.term) {
+            .exited => |code| code == 0,
+            else => false,
+        },
+        .text = std.mem.trim(u8, result.stdout, " \t\r\n"),
+        .stderr = result.stderr,
     };
-    const ok = waitOk(&child, io);
-    return .{ .ok = ok, .text = std.mem.trim(u8, text, " \t\r\n") };
+}
+
+fn gpuSkipReason(stderr: []const u8) ?[]const u8 {
+    var lines = std.mem.splitScalar(u8, stderr, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.indexOf(u8, line, "--gpu declined") != null or
+            std.mem.indexOf(u8, line, "--gpu unavailable") != null or
+            std.mem.indexOf(u8, line, "falling back to the CPU") != null) return line;
+    }
+    return null;
 }
 
 fn skipReason(text: []const u8) ?[]const u8 {
@@ -524,25 +597,29 @@ fn skipReason(text: []const u8) ?[]const u8 {
     return rest[0..end];
 }
 
-fn runOk(io: Io, argv: []const []const u8) bool {
-    var child = spawnQuiet(io, argv, "30", .ignore) catch return false;
+fn runOk(io: Io, argv: []const []const u8, timeout: []const u8) bool {
+    var child = spawnQuiet(io, argv, timeout, .ignore) catch return false;
     return waitOk(&child, io);
 }
 
 fn probeNgspice(io: Io) bool {
-    return runOk(io, &.{ "ngspice", "--version" });
+    return runOk(io, &.{ "ngspice", "--version" }, "30");
 }
 
 fn probeXyce(io: Io) bool {
-    return runOk(io, &.{ "xyce", "--version" });
+    return runOk(io, &.{ "xyce", "--version" }, "30");
 }
 
-fn timedMedian(io: Io, gpa: std.mem.Allocator, argv: []const []const u8, timeout: []const u8, iters: u32) !u64 {
+fn timedMedian(io: Io, gpa: std.mem.Allocator, argv: []const []const u8, timeout: []const u8, iters: u32, mode: enum { quiet, cpu, gpu }) !u64 {
     const samples = try gpa.alloc(u64, iters);
     for (samples) |*s| {
         const t0 = Io.Timestamp.now(io, .awake);
-        var child = try spawnQuiet(io, argv, timeout, .ignore);
-        const ok = waitOk(&child, io);
+        // External simulators print large tables; their exit status is the gate.
+        const ok = if (mode == .quiet) runOk(io, argv, timeout) else blk: {
+            const cap = runCapture(io, gpa, argv, timeout);
+            if (mode == .gpu and gpuSkipReason(cap.stderr) != null) return error.GpuFallback;
+            break :blk cap.ok and skipReason(cap.text) == null;
+        };
         const t1 = Io.Timestamp.now(io, .awake);
         if (!ok) return error.BenchRunFailed;
         s.* = @intCast(t0.durationTo(t1).nanoseconds);
@@ -551,11 +628,11 @@ fn timedMedian(io: Io, gpa: std.mem.Allocator, argv: []const []const u8, timeout
     return samples[samples.len / 2];
 }
 
-// Peak RSS in KB from /proc/[pid]/status — returns 0 if unavailable
+// GNU time peak RSS in KiB — returns 0 if unavailable or the run failed.
 fn measurePeakRss(io: Io, gpa: std.mem.Allocator, argv: []const []const u8, timeout: []const u8) u64 {
-    // Use /usr/bin/time -v to capture peak RSS
+    // Resolve GNU time through PATH (Nix has no /usr/bin/time).
     var buf: [70][]const u8 = undefined;
-    buf[0] = "/usr/bin/time";
+    buf[0] = "time";
     buf[1] = "-v";
     buf[2] = "timeout";
     buf[3] = timeout;
@@ -572,7 +649,7 @@ fn measurePeakRss(io: Io, gpa: std.mem.Allocator, argv: []const []const u8, time
         _ = child.wait(io) catch {};
         return 0;
     };
-    _ = child.wait(io) catch {};
+    if (!waitOk(&child, io)) return 0;
     // Parse "Maximum resident set size (kbytes): NNN"
     const needle = "Maximum resident set size";
     if (std.mem.indexOf(u8, text, needle)) |pos| {
@@ -675,19 +752,19 @@ fn reportRow(out: *Io.Writer, r: Result, prev_cat: *[]const u8) !void {
 
     if (r.cpu_accuracy) |acc| {
         try out.print("{e:>10.2} {e:>10.2} {s:>5}", .{
-            acc.max_rel, acc.rms_rel, @as([]const u8, if (acc.pass) "PASS" else "FAIL"),
+            acc.max_rel, acc.rms_rel, accuracyStatus(acc),
         });
     } else {
-        try out.print("{s:>10} {s:>10} {s:>5}", .{ "-", "-", "-" });
+        try out.print("{s:>10} {s:>10} {s:>5}", .{ "-", "-", @as([]const u8, if (r.ng_median_ns != null and r.zp_cpu_median_ns != null) "N/A" else "-") });
     }
     try out.writeAll("  ");
 
     if (r.gpu_accuracy) |acc| {
         try out.print("{e:>10.2} {e:>10.2} {s:>5}", .{
-            acc.max_rel, acc.rms_rel, @as([]const u8, if (acc.pass) "PASS" else "FAIL"),
+            acc.max_rel, acc.rms_rel, accuracyStatus(acc),
         });
     } else {
-        try out.print("{s:>10} {s:>10} {s:>5}", .{ "-", "-", "-" });
+        try out.print("{s:>10} {s:>10} {s:>5}", .{ "-", "-", @as([]const u8, if (r.ng_median_ns != null and r.zp_gpu_median_ns != null) "N/A" else "-") });
     }
     try out.writeAll("\n");
 
@@ -697,11 +774,17 @@ fn reportRow(out: *Io.Writer, r: Result, prev_cat: *[]const u8) !void {
         try out.print("    zp-gpu: {s}\n", .{r.zp_gpu_skip});
 }
 
+fn accuracyStatus(acc: Accuracy) []const u8 {
+    return if (!acc.complete) "N/A" else if (acc.pass) "PASS" else "FAIL";
+}
+
 fn reportFooter(out: *Io.Writer) !void {
     try out.writeAll(
         \\
         \\ratio = ngspice / espice (higher = espice faster).
-        \\accuracy: per-variable RMS/max relative error against ngspice.
+        \\accuracy: per-variable RMS/max error normalized by max(peak, span, 1).
+        \\N/A = unvalidated (unsupported complex/multiple plots, missing signals, or incomplete samples).
+        \\GPU timings exclude reported CPU fallback, including work below the offload threshold.
         \\
     );
 }
@@ -722,7 +805,8 @@ fn writeResultsMd(io: Io, gpa: std.mem.Allocator, path: []const u8, results: []c
     const w = &aw.writer;
 
     w.print("# Benchmark results — espice vs ngspice vs xyce\n\n", .{}) catch return;
-    w.print("Pass: per-variable RMS ≤ {e:.0}, max ≤ {e:.0}\n\n", .{ rtol, 10 * rtol }) catch return;
+    w.print("Pass: per-variable RMS ≤ {e:.0}, max ≤ {e:.0}; error normalized by max(peak, span, 1).\n", .{ rtol, 10 * rtol }) catch return;
+    w.writeAll("N/A: unvalidated (unsupported complex/multiple plots, missing signals, or incomplete samples).\nGPU timings exclude reported CPU fallback.\n\n") catch return;
     w.print("| fixture | zp-cpu | zp-gpu | ngspice | xyce | cpu/ng | gpu/ng | zp-MB | ng-MB | xy-MB | cpu-max | cpu-rms | cpu | gpu-max | gpu-rms | gpu |\n", .{}) catch return;
     w.print("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n", .{}) catch return;
 
@@ -774,18 +858,18 @@ fn writeResultsMd(io: Io, gpa: std.mem.Allocator, path: []const u8, results: []c
         var cpu_rms_buf: [16]u8 = undefined;
         const cpu_mx_str = if (r.cpu_accuracy) |a| std.fmt.bufPrint(&cpu_mx_buf, "{e:.2}", .{a.max_rel}) catch "-" else "-";
         const cpu_rms_str = if (r.cpu_accuracy) |a| std.fmt.bufPrint(&cpu_rms_buf, "{e:.2}", .{a.rms_rel}) catch "-" else "-";
-        const cpu_status: []const u8 = if (r.cpu_accuracy) |a| (if (a.pass) "PASS" else "FAIL") else if (r.zp_cpu_skip.len > 0) "SKIP" else "-";
+        const cpu_status: []const u8 = if (r.cpu_accuracy) |a| accuracyStatus(a) else if (r.zp_cpu_skip.len > 0) "SKIP" else if (r.ng_median_ns != null and r.zp_cpu_median_ns != null) "N/A" else "-";
 
         var gpu_mx_buf: [16]u8 = undefined;
         var gpu_rms_buf: [16]u8 = undefined;
         const gpu_mx_str = if (r.gpu_accuracy) |a| std.fmt.bufPrint(&gpu_mx_buf, "{e:.2}", .{a.max_rel}) catch "-" else "-";
         const gpu_rms_str = if (r.gpu_accuracy) |a| std.fmt.bufPrint(&gpu_rms_buf, "{e:.2}", .{a.rms_rel}) catch "-" else "-";
-        const gpu_status: []const u8 = if (r.gpu_accuracy) |a| (if (a.pass) "PASS" else "FAIL") else if (r.zp_gpu_skip.len > 0) "SKIP" else "-";
+        const gpu_status: []const u8 = if (r.gpu_accuracy) |a| accuracyStatus(a) else if (r.zp_gpu_skip.len > 0) "SKIP" else if (r.ng_median_ns != null and r.zp_gpu_median_ns != null) "N/A" else "-";
 
         w.print("| {s} | {s} | {s} | {s} | {s} | {s} | {s} | {s} | {s} | {s} | {s} | {s} | {s} | {s} | {s} | {s} |\n", .{
-            label, zp_cpu_str, zp_gpu_str, ng_str, xyce_str, cpu_ratio_str, gpu_ratio_str,
-            zp_mb_str, ng_mb_str, xy_mb_str, cpu_mx_str, cpu_rms_str, cpu_status,
-            gpu_mx_str, gpu_rms_str, gpu_status,
+            label,       zp_cpu_str, zp_gpu_str, ng_str,     xyce_str,    cpu_ratio_str, gpu_ratio_str,
+            zp_mb_str,   ng_mb_str,  xy_mb_str,  cpu_mx_str, cpu_rms_str, cpu_status,    gpu_mx_str,
+            gpu_rms_str, gpu_status,
         }) catch return;
     }
 
@@ -862,4 +946,90 @@ fn matchesFilter(cfg: *const Config, category: []const u8, name: []const u8) boo
         if (std.mem.eql(u8, f, category) or std.mem.eql(u8, f, full)) return true;
     }
     return false;
+}
+
+// Run with: zig test benchmark/src/runner.zig
+test "accuracy requires signals and complete real samples" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const reference: Plot = .{
+        .plotname = "Transient Analysis",
+        .varnames = &.{ "time", "v(out)" },
+        .is_complex = false,
+        .npoints = 2,
+        .nvars = 2,
+        .data = &.{ 0, 1, 1, 2 },
+    };
+    try std.testing.expect(comparePlots(a, reference, reference, 1e-3).?.pass);
+    var with_current = reference;
+    with_current.varnames = &.{ "time", "v(out)", "i(v1)" };
+    with_current.nvars = 3;
+    with_current.data = &.{ 0, 1, 0.1, 1, 2, 0.2 };
+    const partial = comparePlots(a, with_current, reference, 1e-3).?;
+    try std.testing.expect(!partial.complete and !partial.pass);
+    try std.testing.expectEqual(@as(f64, 0), partial.max_rel);
+    try std.testing.expectEqualStrings("N/A", accuracyStatus(partial));
+    var candidate = reference;
+    candidate.varnames = &.{"time"};
+    candidate.nvars = 1;
+    candidate.data = &.{ 0, 1 };
+    try std.testing.expect(comparePlots(a, reference, candidate, 1e-3) == null);
+    try std.testing.expect(comparePlots(a, candidate, candidate, 1e-3) == null);
+    candidate = reference;
+    candidate.data = &.{ 0, 1, 0.5, 2 };
+    try std.testing.expect(comparePlots(a, reference, candidate, 1e-3) == null);
+    candidate = reference;
+    candidate.data = &.{ 0, 1, 1, std.math.inf(f64) };
+    try std.testing.expect(!comparePlots(a, reference, candidate, 1e-3).?.pass);
+    candidate.is_complex = true;
+    try std.testing.expect(comparePlots(a, reference, candidate, 1e-3) == null);
+}
+
+test "accuracy matches reordered signals and keeps the first duplicate" {
+    const reference: Plot = .{
+        .plotname = "Operating Point",
+        .varnames = &.{ "v(out)", "i(v1)", "v(in)" },
+        .is_complex = false,
+        .npoints = 1,
+        .nvars = 3,
+        .data = &.{ 1, -0.001, 2 },
+    };
+    var candidate = reference;
+    candidate.varnames = &.{ "v(in)", "v(out)", "i(v1)", "v(out)" };
+    candidate.nvars = 4;
+    candidate.data = &.{ 2, 1, -0.001, 9 };
+    try std.testing.expect(comparePlots(std.testing.allocator, reference, candidate, 1e-3).?.pass);
+    candidate.data = &.{ 2, 9, -0.001, 1 };
+    try std.testing.expect(!comparePlots(std.testing.allocator, reference, candidate, 1e-3).?.pass);
+}
+
+test "raw parser does not validate only the first plot" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const raw = "Plotname: Operating Point\nNo. Variables: 1\nNo. Points: 1\nVariables:\n\t0\tv(out)\tvoltage\nBinary:\n" ++ "\x00" ** 8;
+    try std.testing.expect(parseRawBlob(a, raw) != null);
+    try std.testing.expect(parseRawBlob(a, raw ++ raw) == null);
+    try std.testing.expect(parseRawBlob(a, raw[0 .. raw.len - 1]) == null);
+}
+
+test "GPU fallback diagnostics cannot become GPU timings" {
+    inline for (.{
+        "note: --gpu declined; too little device work to beat the PCIe round trip",
+        "warning: --gpu unavailable (NoGpuArtifacts); running on the CPU",
+        "warning: GPU device eval failed (LaunchFailed); falling back to the CPU stamp",
+        "warning: GPU limit/state pass failed; falling back to the CPU walk",
+    }) |diagnostic| try std.testing.expect(gpuSkipReason(diagnostic) != null);
+    try std.testing.expect(gpuSkipReason("--- Simulation Summary ---\nDevices: 4000\n") == null);
+}
+
+test "timing discards large external output and preserves espice diagnostics" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    _ = try timedMedian(io, a, &.{ "head", "-c", "2097152", "/dev/zero" }, "5", 1, .quiet);
+    try std.testing.expectError(error.BenchRunFailed, timedMedian(io, a, &.{ "sh", "-c", "printf '%s' '{\"skip\":\"test\"}'" }, "5", 1, .cpu));
+    try std.testing.expectError(error.GpuFallback, timedMedian(io, a, &.{ "sh", "-c", "printf '%s' 'warning: falling back to the CPU' >&2" }, "5", 1, .gpu));
 }

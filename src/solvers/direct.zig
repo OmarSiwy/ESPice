@@ -24,6 +24,7 @@ const NONE: u32 = std.math.maxInt(u32);
 /// Tuning knobs (KLU-style). Defaults reproduce the established behavior;
 /// accuracy <-> speed is traded here, not by editing the kernel.
 pub const Params = struct {
+    execution: root.Execution = .{},
     /// Threshold partial pivoting: keep the diagonal when
     /// |diag| >= pivot_tol * colmax (KLU default 0.001).
     pivot_tol: f64 = 1e-3,
@@ -73,6 +74,7 @@ pub fn SolverT(comptime T: type) type {
 
         pub fn initParams(gpa: Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32, bbd: ?root.BbdInfo, params: Params) !Self {
             var self = try initInner(gpa, n, col_ptr, row_idx, bbd, params);
+            errdefer self.deinit();
             self.params = params;
             if (params.iter_refine_steps > 0)
                 self.rbuf = try gpa.alloc(T, 2 * @as(usize, n));
@@ -144,7 +146,7 @@ pub fn SolverT(comptime T: type) type {
             const nnz = self.vcopy.len;
             if (self.factored and simdEql(T, self.vcopy, vals[0..nnz])) return;
             try self.factorInner(vals);
-            simdCopy(T, self.vcopy, vals[0..nnz]);
+            @memcpy(self.vcopy, vals[0..nnz]);
         }
 
         fn factorInner(self: *Self, vals: []const T) !void {
@@ -166,7 +168,7 @@ pub fn SolverT(comptime T: type) type {
                 }
             }
             if (self.bbd_eng) |*eng| {
-                if (eng.factor(vals)) |_| {
+                if (eng.factorWithExecution(vals, self.params.execution)) |_| {
                     self.factored = true;
                     return;
                 } else |_| {
@@ -211,7 +213,7 @@ pub fn SolverT(comptime T: type) type {
             const r = self.rbuf[0..n];
             var step: u2 = 0;
             while (step < self.params.iter_refine_steps) : (step += 1) {
-                simdCopy(T, r, b);
+                @memcpy(r, b);
                 for (0..n) |j| {
                     const xj = x[j];
                     if (xj == 0) continue;
@@ -237,26 +239,26 @@ pub fn SolverT(comptime T: type) type {
         pub fn solveNeg(self: *Self, rhs: []const T, x: []T) void {
             negateSimd(T, rhs[0..self.n], x[0..self.n]);
             const do_refine = self.params.iter_refine_steps > 0;
-            if (do_refine) simdCopy(T, self.rbuf[self.n..][0..self.n], x[0..self.n]);
+            if (do_refine) @memcpy(self.rbuf[self.n..][0..self.n], x[0..self.n]);
             self.rawSolve(x);
             if (do_refine) self.refine(x);
         }
 
         pub fn solve(self: *Self, rhs: []const T, x: []T) void {
-            if (rhs.ptr != x.ptr) simdCopy(T, x[0..self.n], rhs[0..self.n]);
+            if (rhs.ptr != x.ptr) @memcpy(x[0..self.n], rhs[0..self.n]);
             const do_refine = self.params.iter_refine_steps > 0;
-            if (do_refine) simdCopy(T, self.rbuf[self.n..][0..self.n], x[0..self.n]);
+            if (do_refine) @memcpy(self.rbuf[self.n..][0..self.n], x[0..self.n]);
             self.rawSolve(x);
             if (do_refine) self.refine(x);
         }
 
         pub fn solveT(self: *Self, rhs: []const T, x: []T) void {
             if (self.tri) |*tri| {
-                if (rhs.ptr != x.ptr) simdCopy(T, x[0..self.n], rhs[0..self.n]);
+                if (rhs.ptr != x.ptr) @memcpy(x[0..self.n], rhs[0..self.n]);
                 tri.solveT(x[0..self.n]);
                 return;
             }
-            if (rhs.ptr != x.ptr) simdCopy(T, x[0..self.n], rhs[0..self.n]);
+            if (rhs.ptr != x.ptr) @memcpy(x[0..self.n], rhs[0..self.n]);
             if (self.bbd_eng) |*eng| {
                 eng.solveTInPlace(x[0..self.n]);
                 return;
@@ -289,13 +291,13 @@ fn computeOrdering(gpa: Allocator, n: u32, col_ptr: []const u32, row_idx: []cons
 
 pub const Solver = SolverT(f64);
 
-fn simdCopy(comptime T: type, dst: []T, src: []const T) void {
-    const WW = std.simd.suggestVectorLength(T) orelse 1;
-    var i: usize = 0;
-    while (i + WW <= dst.len) : (i += WW) {
-        dst[i..][0..WW].* = src[i..][0..WW].*;
-    }
-    for (dst[i..], src[i..]) |*d, s| d.* = s;
+test "solver construction releases storage on every allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn run(gpa: Allocator) !void {
+            var solver = try Solver.initParams(gpa, 3, &.{ 0, 1, 2, 3 }, &.{ 0, 1, 2 }, null, .{ .iter_refine_steps = 1 });
+            defer solver.deinit();
+        }
+    }.run, .{});
 }
 
 fn simdEql(comptime T: type, a: []const T, b: []const T) bool {

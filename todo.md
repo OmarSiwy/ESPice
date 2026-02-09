@@ -1,17 +1,59 @@
-# ESPice — open work (2026-09-07)
+# ESPice — open work (2026-09-09)
 
 State after the SPICE audit: **170 PASS / 15 FAIL** vs ngspice 44.2 (264
-fixtures), espice faster-or-equal on **183/229 timed (80%)**, mean **1.79×**,
-GPU wins layout netlists (parallel_inverters_2000 2.07× vs CPU). Full
-mechanism log: `docs/spice-audit-2026-09.md`. Every item below is a NAMED,
-measured residual — no catastrophes, no known regressions.
+fixtures), espice faster-or-equal on **183/229 timed (80%)**, mean **1.79×**.
+Full mechanism log: `docs/spice-audit-2026-09.md`.
+
+**2026-09-09, device evaluation measured against ngspice rather than against
+its own past** (`docs/device-eval-vs-ngspice-2026-09.md`). ngspice 44.2 rebuilt
+from source with symbols so `MOS1load` is attributable. On
+`scaling/parallel_inverters_100`, same deck, callgrind: espice was **2,403 Ir
+per MOS1 instance evaluation against ngspice's 759**, at the SAME Newton
+iteration count (1352 vs 1319) — the deficit was never the solver, and RESULTS.md
+agreed (every MOSFET-dense fixture at 0.4-0.5x, every linear one winning).
+Three structural causes fixed; **-35.4% total instructions, output
+bit-identical**, `parallel_inverters_500` wall clock 0.45 s -> 0.29 s against
+ngspice's 0.24 s (0.53x -> 0.83x). Device MATH is now 634 Ir against ngspice's
+759 for its whole load; what remains is scatter bookkeeping, itemized in that
+doc.
 
 VerA lives on branch `ddt-capform`; espice on `spice-audit`. Gates: espice
-`zig build test` green (the `test-devices --listen` line is a pre-existing
-build-runner IPC flake — passes 9/9 standalone); VerA `zig build test`
-248/249 (§5.6.5 collapse-hook pre-exists) + `zig build torture` 1237/1237.
-Profiling builds: `-Doptimize=ReleaseFast -Ddebug-info=true` (Release strips
-DWARF by default).
+`zig build test` 398/400 (2 BJT failures pre-date this work — verified
+identical with the Jacobian pattern forced dense); VerA `zig build test`
+252/253 (§5.6.5 collapse-hook pre-exists) + `zig build torture` 1239/1242 (the
+3 are the untracked WIP `$limit` fixtures, which fail without the change too).
+Iteration builds: `-Dgpu=false` (4.5 min, one GPU model instead of 38; NOT a
+shipping or bench configuration). `-Ddebug-info=true` still SEGVs the Zig
+0.16.0 host `build-exe`; device modules no longer carry DWARF at all.
+
+---
+
+## REGRESSION — GPU wedges on the largest layout fixture
+
+`--gpu` on `scaling/parallel_inverters_2000`, `ZP_TRAN_STATS=1`, same binary:
+CPU is 595 accepted with `rej[newton=0]` on every run; GPU with the dense
+Jacobian was 593-597 / `newton=0-2` / 0 failures in 16 runs; GPU with the
+structural pattern is 599-622 / `newton=6-31` / **3 failures in 8**
+(`DT UNDERFLOW (newton) dt=5e-19` -> `TimestepTooSmall`).
+
+The defect underneath is older: the GPU accumulates the planes with
+`@atomicRmw(.Add)` in unspecified order, and the Vdd branch-current row is the
+sum of 2000 nearly-cancelling currents. `ZP_NEWTON_DEBUG=1` on a `.op` cut of
+the deck shows CPU `-7.275957614183426e-9` vs GPU `-7.225480658235028e-9` at
+iterate 2 — 0.7% relative — with every other unknown agreeing to ~10 digits.
+Stable at 100 and 500 instances; fan-in dependent. This pass only changed which
+way the chaos falls (comptime stamp count -> NVPTX regalloc/FMA contraction);
+CPU output is bit-identical and matrix nnz is unchanged at 10,011 both ways.
+
+- [ ] **Deterministic GPU scatter.** Replace atomic accumulation with a
+      fixed-order segmented reduction. The scatter tape is frozen at setup, so
+      its transpose is: build CSR `(destination -> contribution list)` once at
+      `finalize`, have the eval kernel write each contribution to its own slot
+      with no atomics, reduce each destination in index order, pairwise or
+      Neumaier-compensated on high-fan-in rows. Deterministic, removes the
+      atomic contention two previous audit passes spent effort mitigating, and
+      the compensation is the half that buys accuracy rather than only
+      reproducibility. Until it lands, `--gpu` is unsafe above ~1000 instances.
 
 ---
 
@@ -37,30 +79,79 @@ The models were always wrong on these quantities.
       each newly-compared on a current or harmonic column. Triage per fixture;
       some may be edge-phase (below) rather than model error.
 
-## Accuracy — edge-phase only (RMS passes, max fails on one edge sample)
+## Accuracy — edge-phase only (max fails on one edge sample)
 
 ngspice's own coarse LTE grid disagrees with itself below the comparator's
 edge window; espice resolves the edge, the max-sample lands mid-transition.
 Closing these is **tran-grid matching (a policy choice)**, not a model/solver
-bug. Confirm each stays RMS-passing before spending on it.
+bug. Meyer averaging is NOT the mechanism for any of them — see the closed
+item at the bottom of this section.
 
-- [ ] ensemble/pvt_corners (max 9.1e-2, rms 3.9e-3)
-- [ ] scaling/parallel_inverters_2000 (max 1.2e-2, rms 5.8e-4)
-- [ ] devices/mos6_inverter (1.5e-2 / 2.2e-3), devices/hfet_inverter (9.8e-2 / 5.9e-3)
+- [ ] ensemble/pvt_corners (max 9.1e-2, rms 3.9e-3 — note the rms is over the
+      1e-3 gate too, so this one is not purely edge-phase). Meyer caps are
+      *identically zero* here: the deck gives no TOX and no CGSO/CGDO/CGBO, so
+      ngspice's `MOS1oxideCapFactor` is 0 (`mos1temp.c:61`) and so is
+      `mos1.va`'s `coxp`. The only gate capacitance is `CL = 100f`. What is
+      left is `.tran 10n 20u` against a 10 ns PULSE edge — ~1 output point
+      spans the transition.
+- [ ] scaling/parallel_inverters_2000 (1.2e-2 / 5.8e-4)
+- [ ] devices/mos6_inverter (1.5e-2 / 2.2e-3), devices/hfet_inverter (9.8e-2 / 5.9e-3).
+      Measured directly (VerA 50a69da): at tmax=2ps BOTH engines converge to
+      the same v(4) edge, 1.0874 ns; espice's coarse grid is 0.7 ps off it,
+      ngspice's is 9.6 ps. The metric is scoring ngspice's own grid phase.
 - [ ] vacask/mul (1.5e-2 / 8e-5), ngspice/mosamp (5.6e-2 / 1.9e-2 — ngspice
       runs it ~100× harder; frame-following limiter already removed the wedge)
-- [ ] Underlying lever for the whole class: **per-device-state LTE** instead
-      of per-node summed-q-plane in `stepBound` (`src/analysis/tran/tran.zig`).
-      Same root as txl2 below.
+- [x] ~~Underlying lever for the whole class: **per-device-state LTE** instead
+      of per-node summed-q-plane in `stepBound`~~ — DONE 2026-09-07. It was a
+      lever for a NARROWER class than this line claimed: 151 PASS / 7 FAIL is
+      unchanged and pvt_corners, parallel_inverters_2000 and hfet_inverter are
+      **bit-identical** before and after, so the four fixtures above are NOT
+      this. 9 fixtures improved (txl2_3_line 2.3x, ltra2 12x, fourbitadder 10x,
+      mos1_large_signal 8x, mosmem 3.5x), 3 regressed (kinduc 1.5e-8 -> 2.8e-4
+      but still PASS at 36x margin, mos6_inverter 1.7e-2 -> 3.3e-2, txl1 +5%).
+      `ZP_NO_QTAPE=1` is the per-row oracle on a live binary; `ZP_TRAN_STATS=1`
+      prints `n_qt`. Mechanism and the three named divergences (per-terminal vs
+      per-`ddt`, kinduc's extra states, GPU keeps per-row) in
+      `docs/analysis/transient-integration.md`.
+- [x] ~~Meyer capacitance averaging in the MOS models~~ — DONE, `a7a3f70`
+      (espice) on VerA `6cfafc4` `$prev` / `50a69da` path-integration. mos1/2/3/6/9
+      now spell ngspice's `capgs = state0 + state1 + overlap` exactly
+      (`mos1.va:347-349`, `mos2.va:486-488`, `mos3.va:488-490`, `mos6.va:392-394`,
+      `mos9.va:402-404`), unswapping the mode before averaging as ngspice's
+      device-frame state slots do, with the OP-exit commit reproducing the
+      MODETRANOP `2*half + overlap` branch. hfet1/hfet2/mes/mesa correctly do
+      NOT average — `hfet2load.c:231` is plain `q += C*(v - v1)`, which is what
+      the bare `C*ddt(V)` path lowering already emits.
 
 ## Accuracy — documented architectural
 
-- [ ] **tline/txl2_3_line** (max 1.2e-2, rms 7.3e-4) — CKTterr runs per matrix
-      ROW (summed q-plane) where ngspice runs per device STATE; an 83 fs seed
-      difference on a shared node amplifies through the step ramp. Needs
-      per-contribution q snapshots — blocked by the frozen single-plane q
-      layout at the GPU boundary. Documented in
-      `docs/analysis/transient-integration.md`.
+- [x] ~~**tline/txl2_3_line** — CKTterr runs per matrix ROW where ngspice runs
+      per device STATE~~ — 1.23e-2 -> 5.40e-3 max, 7.30e-4 -> 3.54e-4 rms, and
+      2.3x faster. It was never blocked by "the frozen single-plane q layout at
+      the GPU boundary": that claim was wrong. Nothing needed unfreezing,
+      because the per-contribution index space ALREADY EXISTED and nobody had
+      noticed — `engine.buildTapes` writes `rhs_idx[id*n_u + ru]`, a dense
+      (instance, unknown) array whose VALUE is the row, i.e. exactly the
+      state->node map. The tape stores `qv` on that same index, host-side.
+      What it actually cost: one nullable fn pointer on the cold `Hooks`
+      vtable. Planes, u32 tapes, CSC pattern, Model/Instance PODs and
+      `DeviceKernel.run`'s signature are byte-identical; the `layoutHash()`
+      bump re-keys the FastVAF `.so` cache once, which is that hash's job.
+- [ ] **per-`ddt` LTE states** — the residual of the above. VerA emits `D.q`
+      per device UNKNOWN, so caps/inductors/diodes match ngspice's state set
+      exactly but a MOSFET's `qgs+qgd+qgb` arrive pre-summed on the gate where
+      `MOS1trunc` terrs them separately. Needs VerA to emit per-`ddt` charges —
+      that one IS a device-ABI event.
+- [ ] **devices/kinduc over-split** (1.53e-8 -> 2.75e-4, PASS, 36x margin) —
+      espice gives a `K` card its own charge states on the inductors' branch
+      rows; ngspice folds the mutual flux into the single `INDflux`
+      (`indload.c:70-77`, `MUT` has no `MUTtrunc`), so ngspice's candidate IS
+      espice's row sum. `CKTterr` is homogeneous of degree zero in q, so the
+      extra state binds at full strength however small it is — measured
+      per-state/per-row 2.75e-4/1.53e-8 at k=0.99 down to 6.17e-5/2.02e-12 at
+      k=0.001, gap independent of coupling. Fix = teach the host that a K
+      card's charge belongs to the inductor's state; deliberately NOT done, it
+      is a device-type special case for a passing fixture.
 - [ ] **devices/bsim4** (1.69e-3) — just over the 1e-3 rms line; BSIM4
       model-version delta vs ngspice's C.
 
@@ -85,6 +176,49 @@ bug. Confirm each stays RMS-passing before spending on it.
       temperature-only subtree out, but pow/log/exp on node-voltage remain the
       dominant eval cost (correctly — they ARE the per-iterate physics). Only
       lever left is fewer Newton iterates or GPU offload, not hoisting.
+      REVISED 2026-09-09: partly false for the MOS family. Four of mos1's six
+      `pow` were the junction depletion charge of a device with no junction
+      capacitance, which `mos1load.c:567,628` guards and `mos1.va` did not.
+      Guard added (also mos6/mos9); `evalQ` 1,249 -> 634 Ir. What is left after
+      that IS the per-iterate physics.
+
+### Device-eval bookkeeping — the remaining gap to ngspice
+
+espice is 1,547 Ir per MOS1 instance evaluation against ngspice's 759, and the
+device MATH is already cheaper (634 vs 759). Everything below is the difference,
+itemized from `callgrind --dump-instr=yes` over the eval symbol with the buckets
+mapped through `objdump`. Full derivation: `docs/device-eval-vs-ngspice-2026-09.md`.
+
+- [ ] **The 8x8 Jacobian is materialized before it is scattered.** `evalQ`
+      returns `[n_u]S` for both halves — 32 ymm of live derivative against 16
+      architectural registers, so the frame spills (offsets to `0x7e0`,
+      `vmovapd 0x4c0(%rsp)` on the scatter path). Scattering each row as it is
+      produced fixes it and needs a different device entry point.
+- [ ] **Two device walks per Newton iterate.** `applyLimits` (`limitRange`,
+      re-gathers all `n_u` unknowns) then `evalRange`. ngspice limits inline in
+      `MOS1load` — one walk. ~312 Ir/instance, 8.4% of the run. Touches the
+      Newton contract in `solvers/converger.zig`, so it is not a local change.
+- [ ] **Parameter-only prologue runs per evaluation.** VerA's `pcClass` returns
+      false for `.phi`/`.branch`, so an `if ($param_given(...))` ladder is not
+      hoistable, and `pcConsider` requires a libm-class op, so `cox`/`beta`/
+      `f2d..f4s` are recomputed every iterate. 141 Ir/eval (measured as the
+      LICM-allowed vs pointer-laundered delta in `/tmp/devbench`). ngspice does
+      all of it once in `MOS1temp` — called **1** time for the whole run.
+      Wants either a param-only REGION hoist (phi with param-only incoming and
+      param-only controlling conditions) or if-conversion before the hoist,
+      since `pcClass` already handles `.select`.
+- [ ] **`-Djac-f32` for the MOS family, unevaluated.** Halves the derivative
+      vector width and the spill traffic. Newton converges to the accuracy of
+      the RESIDUAL, which stays f64, so the cost is iteration count and not the
+      answer — but that has never been measured on CPU, only argued for the GPU
+      (`docs/gpu-device-eval.md` §1).
+- [ ] **`canDedup` is dead for every built-in.** It requires `PrepCache` and no
+      `State`; no generated built-in exposes `PrepCache` and mos1 has `State`
+      (the `$prev` Meyer average). Measured, not read: 100 identical instances
+      cost 2,589 Ir/instance and 100 deliberately varied ones 2,542 — a 2%
+      spread where a live cache would show ~99% hits. Either make it reachable
+      or delete `tryCached`/`store`/`storeQ`/`eval_cache_*` (~120 lines and
+      three allocations that never run).
 - [ ] **Small-circuit `--gpu` no-decline** — devices/fourbitadder under `--gpu`
       is 449 ms (CPU 130 ms): the nonlinear work-gate passes it but the
       resident path loses on a tiny circuit. Cosmetic (default CPU unaffected);

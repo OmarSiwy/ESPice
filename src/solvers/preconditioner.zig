@@ -31,27 +31,6 @@ const NONE: u32 = std.math.maxInt(u32);
 pub fn Preconditioner(comptime T: type) type {
     return struct {
         const Self = @This();
-        const W = std.simd.suggestVectorLength(T) orelse 1;
-        const V = @Vector(W, T);
-
-        /// SIMD zero-fill a contiguous T buffer.
-        inline fn simdZero(buf: []T) void {
-            const zero: V = @splat(0);
-            var i: usize = 0;
-            while (i + W <= buf.len) : (i += W) {
-                buf[i..][0..W].* = zero;
-            }
-            for (buf[i..]) |*v| v.* = 0;
-        }
-
-        /// SIMD copy a contiguous T buffer.
-        inline fn simdCopy(dst: []T, src: []const T) void {
-            var i: usize = 0;
-            while (i + W <= dst.len) : (i += W) {
-                dst[i..][0..W].* = src[i..][0..W].*;
-            }
-            for (dst[i..], src[i..]) |*d, s| d.* = s;
-        }
 
         pub const Kind = enum { dc_sample, averaged_circulant, block_banded };
 
@@ -126,8 +105,8 @@ pub fn Preconditioner(comptime T: type) type {
             switch (kind) {
                 .dc_sample => {
                     // Just use first sample
-                    simdCopy(g_bar, g_samples[0][0..nnz]);
-                    simdCopy(c_bar, c_samples[0][0..nnz]);
+                    @memcpy(g_bar, g_samples[0][0..nnz]);
+                    @memcpy(c_bar, c_samples[0][0..nnz]);
                 },
                 .averaged_circulant, .block_banded => {
                     // Period average: Ḡ = (1/N) Σ_k G(t_k)
@@ -149,12 +128,14 @@ pub fn Preconditioner(comptime T: type) type {
 
             // --- Allocate per-sideband solvers ---
             const solvers = try gpa.alloc(direct.SolverT(T), num_sidebands);
+            var initialized: usize = 0;
             errdefer {
-                for (solvers) |*s| s.deinit();
+                for (solvers[0..initialized]) |*s| s.deinit();
                 gpa.free(solvers);
             }
             for (solvers) |*s| {
                 s.* = try direct.SolverT(T).init(gpa, 2 * n, sr_col_ptr, sr_row_idx, null);
+                initialized += 1;
             }
 
             const sr_vals = try gpa.alloc(T, sr_nnz);
@@ -170,16 +151,15 @@ pub fn Preconditioner(comptime T: type) type {
             var c_plus1: ?[]T = null;
             var c_minus1: ?[]T = null;
             var banded_scratch: ?[]T = null;
+            errdefer inline for (.{ g_plus1, g_minus1, c_plus1, c_minus1, banded_scratch }) |buf| {
+                if (buf) |v| gpa.free(v);
+            };
 
             if (kind == .block_banded) {
                 g_plus1 = try gpa.alloc(T, nnz);
-                errdefer gpa.free(g_plus1.?);
                 g_minus1 = try gpa.alloc(T, nnz);
-                errdefer gpa.free(g_minus1.?);
                 c_plus1 = try gpa.alloc(T, nnz);
-                errdefer gpa.free(c_plus1.?);
                 c_minus1 = try gpa.alloc(T, nnz);
-                errdefer gpa.free(c_minus1.?);
 
                 // DFT coefficient G_{+1} = (1/N) Σ_k G(t_k) e^{-j2πk/N}
                 // We store real and imaginary parts interleaved:
@@ -310,8 +290,8 @@ pub fn Preconditioner(comptime T: type) type {
                 const im_off = ns * n + pi * n;
 
                 // Assemble stacked-real RHS: [re_p; im_p]
-                simdCopy(scratch[0..n], rhs[re_off..][0..n]);
-                simdCopy(scratch[n..][0..n], rhs[im_off..][0..n]);
+                @memcpy(scratch[0..n], rhs[re_off..][0..n]);
+                @memcpy(scratch[n..][0..n], rhs[im_off..][0..n]);
 
                 // Solve in-place
                 if (transpose) {
@@ -321,8 +301,8 @@ pub fn Preconditioner(comptime T: type) type {
                 }
 
                 // Write back
-                simdCopy(rhs[re_off..][0..n], scratch[0..n]);
-                simdCopy(rhs[im_off..][0..n], scratch[n..][0..n]);
+                @memcpy(rhs[re_off..][0..n], scratch[0..n]);
+                @memcpy(rhs[im_off..][0..n], scratch[n..][0..n]);
             }
         }
 
@@ -359,7 +339,7 @@ pub fn Preconditioner(comptime T: type) type {
             // Compute off-diagonal contributions and correct
             for (0..ns) |pi| {
                 const s_off = pi * nn;
-                simdZero(scratch[s_off..][0..nn]);
+                @memset(scratch[s_off..][0..nn], 0);
 
                 // Accumulate coupling from p-1 and p+1
                 if (pi > 0) {
@@ -426,31 +406,9 @@ pub fn Preconditioner(comptime T: type) type {
 // Standalone helpers (not methods — no hidden self / generic coupling)
 // ============================================================================
 
-/// Standalone SIMD zero for generic T (used by helpers outside the struct).
-inline fn standaloneSimdZero(comptime T: type, buf: []T) void {
-    const Ww = std.simd.suggestVectorLength(T) orelse 1;
-    const Vv = @Vector(Ww, T);
-    const zero: Vv = @splat(0);
-    var i: usize = 0;
-    while (i + Ww <= buf.len) : (i += Ww) {
-        buf[i..][0..Ww].* = zero;
-    }
-    for (buf[i..]) |*v| v.* = 0;
-}
-
-/// Standalone SIMD copy for generic T.
-inline fn standaloneSimdCopy(comptime T: type, dst: []T, src: []const T) void {
-    const Ww = std.simd.suggestVectorLength(T) orelse 1;
-    var i: usize = 0;
-    while (i + Ww <= dst.len) : (i += Ww) {
-        dst[i..][0..Ww].* = src[i..][0..Ww].*;
-    }
-    for (dst[i..], src[i..]) |*d, s| d.* = s;
-}
-
 /// Period-average: dst[i] = (1/N) Σ_k samples[k][i].
 fn averageSamples(comptime T: type, dst: []T, samples: []const []const T, num_samples: u32, nnz: u32) void {
-    standaloneSimdZero(T, dst[0..nnz]);
+    @memset(dst[0..nnz], 0);
     const inv_n: T = @floatCast(1.0 / @as(f64, @floatFromInt(num_samples)));
     for (0..num_samples) |k| {
         const src = samples[k];
@@ -473,8 +431,8 @@ fn computeFourierCoeff(
     nnz: u32,
     m: u32,
 ) void {
-    standaloneSimdZero(T, out_re[0..nnz]);
-    standaloneSimdZero(T, out_im[0..nnz]);
+    @memset(out_re[0..nnz], 0);
+    @memset(out_im[0..nnz], 0);
     const inv_n: T = @floatCast(1.0 / @as(f64, @floatFromInt(num_samples)));
     for (0..num_samples) |k| {
         const angle = -2.0 * std.math.pi * @as(f64, @floatFromInt(m * k)) / @as(f64, @floatFromInt(num_samples));
@@ -556,7 +514,7 @@ fn fillStackedReal(
     for (0..nu) |j| {
         const cs = col_ptr[j];
         const len = col_ptr[j + 1] - cs;
-        standaloneSimdCopy(T, sr_vals[p..][0..len], g_vals[cs..][0..len]);
+        @memcpy(sr_vals[p..][0..len], g_vals[cs..][0..len]);
         p += len;
         scaleCopy(T, sr_vals[p..][0..len], c_vals[cs..][0..len], omega);
         p += len;
@@ -568,7 +526,7 @@ fn fillStackedReal(
         const len = col_ptr[j + 1] - cs;
         scaleCopy(T, sr_vals[p..][0..len], c_vals[cs..][0..len], -omega);
         p += len;
-        standaloneSimdCopy(T, sr_vals[p..][0..len], g_vals[cs..][0..len]);
+        @memcpy(sr_vals[p..][0..len], g_vals[cs..][0..len]);
         p += len;
     }
 }
@@ -939,4 +897,19 @@ test "Preconditioner: fillStackedReal correctness" {
     // Col 3 (≥ n): [-ω*C[1], G[1]] = [-2.0, 3.0]
     try testing.expectApproxEqAbs(@as(f64, -2.0), vals[6], 1e-15);
     try testing.expectApproxEqAbs(@as(f64, 3.0), vals[7], 1e-15);
+}
+
+test "Preconditioner construction releases storage on every allocation failure" {
+    for (std.enums.values(Preconditioner(f64).Kind)) |kind| {
+        try testing.checkAllAllocationFailures(testing.allocator, struct {
+            fn run(gpa: Allocator, k: Preconditioner(f64).Kind) !void {
+                var prec = try Preconditioner(f64).init(gpa, 2, &.{ 0, 2, 4 }, &.{ 0, 1, 0, 1 }, 1, 1, &.{&.{ 2, -1, -1, 2 }}, &.{&.{ 0.1, 0, 0, 0.1 }}, 1, k);
+                defer prec.deinit(gpa);
+            }
+        }.run, .{kind});
+    }
+}
+
+test "Preconditioner releases banded storage when factorization fails" {
+    try testing.expectError(error.SingularMatrix, Preconditioner(f64).init(testing.allocator, 2, &.{ 0, 2, 4 }, &.{ 0, 1, 0, 1 }, 1, 1, &.{&.{ 1, 1, 1, 1 }}, &.{&.{ 0, 0, 0, 0 }}, 1, .block_banded));
 }

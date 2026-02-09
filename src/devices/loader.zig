@@ -103,10 +103,10 @@ fn prepareOne(gpa: std.mem.Allocator, io: std.Io, path: []const u8, paths: Build
     reg_mutex.unlock();
     if (already) return null;
 
-    // generation = generated-source hash XOR the host's dyn-ABI layout. Same
+    // generation = generated-source hash XOR the host's dyn-ABI layout/version. Same
     // device + same ABI ⇒ same generation, so FastVAF's per-generation build
     // tree IS the compile cache: first load pays, later loads hit it.
-    const generation: u32 = @truncate(std.hash.Fnv1a_64.hash(zig_source) ^ engine.layoutHash());
+    const generation: u32 = @truncate(std.hash.Fnv1a_64.hash(zig_source) ^ engine.layoutHash() ^ engine.abi_version);
 
     std.debug.print("loader: compiling '{s}' ({s}) — first load, cached afterwards\n", .{ result.mir.name, path });
     // Order is load-bearing: the orchestrator hashes this list into

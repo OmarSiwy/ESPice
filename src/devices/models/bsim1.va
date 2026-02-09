@@ -101,15 +101,15 @@ module bsim1(d, g, s, b);
     real vfbe, phie, k1e, k2e, etae, x2ee, x3ee;
     real x2mze, muse, x2mse, x3mse, u0e, x2u0e, u1e, x2u1e, x3u1e;
     real n0e, nbe, nde;
-    real bz0, bzb, bvd, bvdb, bvdd_d;
+    real bz0, bzb, bvd, bvdb, bvdd_d, bvds0, bvdd;
     real gdcond, gscond, adrain, asource, pdrain, psource, isd, iss, vtherm;
-    real pbc, pbswc, czbs, czbssw, czbd, czbdsw, vsat_on, vcrits, vcritd;
+    real pbc, pbswc, czbs, czbssw, czbd, czbdsw, vcrits, vcritd;
     real tyf, vtx;
     // bias
     real vdst, vgst, vgdt, vbst, vds, vdsneg, vgs, vbs, vbsj, vbdj, mode, uj;
     real ibs, ibd, ugse, udsr, udss, etac, vpb, sqvpb, von, vgov;
     real gfac, afac, arg, beta0, beta, c1, c2, vc, kfac, vdsat;
-    real vdse, argl1, argl2, idbase, vdsx, idmain, nsub, wds, wgs, iw0, ilim, isub, idchan;
+    real vdse, argl1, argl2, idmain, nsub, wds, wgs, iw0, ilim, isub, idchan;
     real gmnoi, gmsub;
     real vth0, vgst0, qgsat, qbsat, qdsat, qbs, qbd, qdi;
 
@@ -155,12 +155,9 @@ module bsim1(d, g, s, b);
         bzb    = x2mze * bfac;
         bvd    = muse  * bfac;      // beta at Vds=Vdd
         bvdb   = x2mse * bfac;
-        bvdd_d = x3mse * bfac;
-
-        // velocity-saturation CLM term is enabled only if U1 is really present.
-        // Tested on the raw card values by magnitude (port's has_uds): a negative
-        // X2U1/X3U1 must still enable it.
-        vsat_on = (abs(u1) > 1e-20 || abs(x2u1) > 1e-20 || abs(x3u1) > 1e-20) ? 1.0 : 0.0;
+        // b1temp.c:138 MAXes the scaled dBeta/dVds at zero (b1eval.c:219 MAXes
+        // it a second time): a negative X3MS must not tilt Beta0 downward.
+        bvdd_d = max(x3mse * bfac, 0.0);
 
         // G = 1/(RSH*NR), per side; zero means "collapse d'->d" below.
         gdcond  = (rsh > 0.0 && nrd > 0.0) ? m / (rsh * nrd) : 0.0;
@@ -238,12 +235,28 @@ module bsim1(d, g, s, b);
         afac = max(1.0 + gfac * k1e / (2.0 * sqvpb), 1.0);
         arg  = max(1.0 + ugse * vgov, 1.0);
 
-        // beta: quadratic interpolation in Vds between Vds=0 and Vds=Vdd
-        beta0 = bz0 + bzb * vbs;
-        if (vdd > 0.001) begin
-            c1    = (-(bvd + bvdb * vbs) + beta0 + bvdd_d * vdd) / (vdd * vdd);
-            c2    = 2.0 * ((bvd + bvdb * vbs) - beta0) / vdd - bvdd_d;
-            beta0 = (c1 * vds + c2) * vds + beta0;
+        // beta vs Vds, b1eval.c:217-235: quadratic interpolation between the
+        // Vds=0 endpoint (MUZ) and the Vds=VDD endpoint (MUS) below VDD, and a
+        // LINEAR EXTRAPOLATION OFF THE **MUS** ENDPOINT above it. The branch is
+        // on `vds > Vdd`, not on whether VDD was given -- with the ngspice
+        // default VDD = 0 (b1set.c:194) every vds > 0 takes the extrapolation
+        // branch, so a card that also leaves MUS at its 0 default (b1set.c:80)
+        // has NO strong-inversion current at all and the whole curve is the
+        // subthreshold limiter below. Guarding on `vdd > 0` instead kept the MUZ
+        // endpoint and overstated devices/bsim1's i(vds) by 2.1e3.
+        // vdd == 0 makes b1eval.c's else-branch divide by zero (Beta0 = NaN,
+        // then MAX(NaN,0) = 0); vds is 0 in that case too, so holding the Vds=0
+        // endpoint gives the same current without the NaN.
+        bvds0 = bz0 + bzb  * vbs;                // Beta_Vds_0
+        bvdd  = bvd + bvdb * vbs;                // BetaVdd
+        if (vds > vdd) begin
+            beta0 = bvdd + bvdd_d * (vds - vdd);
+        end else if (vdd > 0.0) begin
+            c1    = (-bvdd + bvds0 + bvdd_d * vdd) / (vdd * vdd);
+            c2    = 2.0 * (bvdd - bvds0) / vdd - bvdd_d;
+            beta0 = (c1 * vds + c2) * vds + bvds0;
+        end else begin
+            beta0 = bvds0;
         end
         beta = beta0 / arg;
 
@@ -252,13 +265,16 @@ module bsim1(d, g, s, b);
         kfac  = 0.5 * (1.0 + vc + sqrt(1.0 + 2.0 * vc));
         vdsat = max(vgov / (afac * sqrt(kfac)), 0.0);
 
-        // strong-inversion current, triode core clamped at Vdsat + CLM above it
+        // Strong-inversion current. b1eval.c has NO channel-length modulation:
+        // above Vdsat the current is flat at 0.5*Beta*Vgs_Vth^2/(A*K)
+        // (b1eval.c:276-278), and the triode expression evaluated at vds = Vdsat
+        // IS that value -- with s = sqrt(K) = (1 + sqrt(1+2*Vc))/2 one has
+        // s + Vc = s*(2s-1), so triode(Vdsat)/sat = (2s-1)/(1 + Vc/s) = 1. The
+        // `1 + Uds*(vds - Vdsat)` factor that used to sit here is not in the C.
         vdse   = min(vds, vdsat);
         argl1  = max(1.0 + udss * vdse, 1.0);
         argl2  = max(vgov, 0.0) - 0.5 * afac * vdse;
-        idbase = beta * argl2 * vdse / argl1;
-        vdsx   = max(vds - vdsat, 0.0);
-        idmain = idbase * (1.0 + vsat_on * udss * vdsx);
+        idmain = beta * argl2 * vdse / argl1;
 
         // subthreshold, parallel-limited to 4.5*Vt^2*beta0(0,0)
         isub  = 0.0;
@@ -279,8 +295,7 @@ module bsim1(d, g, s, b);
         // gm, for the channel/flicker noise PSDs only (the AD backend owns the
         // Jacobian). ponytail: d(Id)/d(Vgs) of the triode/CLM core, dropping the
         // weak beta(vgov) and Vdsat(vgov) terms; refine if noise fixtures care.
-        gmnoi = (vgov > 0.0 ? beta * vdse * (1.0 + vsat_on * udss * vdsx) / argl1
-                            : 0.0) + gmsub;
+        gmnoi = (vgov > 0.0 ? beta * vdse / argl1 : 0.0) + gmsub;
 
         // ================= charges =========================================
         // Intrinsic 40/60 (or 0/100) saturation charges, in the swapped frame

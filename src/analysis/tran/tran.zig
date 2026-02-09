@@ -35,6 +35,31 @@ const integrator = struct {
         };
     }
 
+    /// Dynamic-current recurrence, in place — ngspice `NIintegrate`
+    /// (maths/ni/niinteg.c) writing `CKTstate0[qcap+1]`:
+    ///   BE / gear : i_j <- alpha*(q0_j - q1_j)
+    ///   trap      : i_j <- alpha*(q0_j - q1_j) - i_j
+    /// One body for the summed row plane (companion residual, length n) and for
+    /// the per-device-state tape (LTE only, length n_qt). Expressions are
+    /// unchanged from the two loops this replaces, so the row plane — which
+    /// feeds the residual — stays bit-identical.
+    fn advanceCurrent(i_cur: []f64, q0: []const f64, q1: []const f64, alpha_used: f64, exec_trap: bool) void {
+        const V = @Vector(W, f64);
+        const av: V = @splat(alpha_used);
+        var j: usize = 0;
+        while (j + W <= i_cur.len) : (j += W) {
+            const a: V = q0[j..][0..W].*;
+            const b: V = q1[j..][0..W].*;
+            const ip: V = i_cur[j..][0..W].*;
+            const d = av * (a - b);
+            i_cur[j..][0..W].* = if (exec_trap) d - ip else d;
+        }
+        while (j < i_cur.len) : (j += 1) {
+            const d = alpha_used * (q0[j] - q1[j]);
+            i_cur[j] = if (exec_trap) d - i_cur[j] else d;
+        }
+    }
+
     /// ngspice CKTterr: per-state timestep bound, in seconds. For each
     /// charge state j (tolerance in CURRENT units, cktterr.c):
     ///   i_new_j     = α·(q0_j − q1_j) [− i_prev_j when the step ran trap]
@@ -130,8 +155,6 @@ const integrator = struct {
     }
 };
 
-
-
 /// Newton hook: companion RHS from the q plane, matrix = G + alpha*C.
 const TranHook = struct {
     alpha: f64,
@@ -141,12 +164,18 @@ const TranHook = struct {
     half_inv_dt: f64, // gear_2: 1/(2*dt)
     a_vals: []f64,
     q_snap: ?[]f64,
+    /// Per-device-state charge snapshot, same cadence as `q_snap` and for the
+    /// same reason: JFNK's matvec re-evals after the converged assemble, so the
+    /// last plane state is not necessarily the solution's. Null ⇒ per-row LTE
+    /// (nothing carries charge, or the GPU owns the stamp).
+    qt_snap: ?[]f64 = null,
     has_charge: bool,
     has_history: bool,
 
     pub fn assemble(self: TranHook, ckt: *root.Circuit, x: []const f64, t: f64) void {
         ckt.evalNewton(x, t);
         if (self.q_snap) |snap| simdCopy(snap, ckt.q_vec[0..ckt.n]);
+        if (self.qt_snap) |snap| ckt.snapshotQTape(snap);
         if (self.has_charge) {
             const n: usize = ckt.n;
             const V = @Vector(W, f64);
@@ -203,7 +232,6 @@ const TranHook = struct {
 };
 
 /// Fine-grained primitive: integrate into caller-owned x and waveform.
-/// four/pss/envelope/tran_noise all drive this.
 pub fn simulate(
     ckt: *root.Circuit,
     x: []f64,
@@ -212,11 +240,24 @@ pub fn simulate(
     options: Options,
     allocator: std.mem.Allocator,
 ) !SimResult {
+    return simulateInto(ckt, x, probes, waveform, options, allocator);
+}
+
+/// Same integrator, recording accepted samples through record(t, x, probes).
+pub fn simulateInto(
+    ckt: *root.Circuit,
+    x: []f64,
+    probes: []const u32,
+    waveform: anytype,
+    options: Options,
+    allocator: std.mem.Allocator,
+) !SimResult {
     // Whole-transient GPU path (engine-owned megakernel driver): chunked
     // cooperative launches integrate the full [0, t_stop] on-device. Only
     // when nothing needs per-step host callbacks or host-side state; any
     // error falls through to the CPU integrator with the waveform rewound.
-    if (ckt.gpu_hook) |gh| {
+    // A streamed recorder cannot rewind already-written samples on fallback.
+    if (comptime @TypeOf(waveform) == *Waveform) if (ckt.gpu_hook) |gh| {
         if (gh.simulate_tran) |gt| {
             if (options.step_fn == null and !ckt.has_history) gpu: {
                 const len0 = waveform.len;
@@ -227,7 +268,7 @@ pub fn simulate(
                 return r;
             }
         }
-    }
+    };
     const n: usize = ckt.n;
     const has_charge = ckt.has_charge;
     const has_history = ckt.has_history;
@@ -249,6 +290,36 @@ pub fn simulate(
         allocator.free(q_snap);
         for (q_hist) |q| allocator.free(q);
     };
+    // Per-device-STATE LTE. ngspice calls CKTterr once per device charge state
+    // and mins over states, then over devices (ckttrunc.c, captrunc.c,
+    // bjttrunc.c, mos1trun.c); this ran it once per matrix ROW off the summed q
+    // plane. Co-moving charges on one node add their divided differences, so
+    // the row slope is not any real state's: on tline/txl2_3_line node 168
+    // carries a 7.398 fF load cap plus two MOS gate charges, the row reads
+    // 7.498 fF, and the post-breakpoint step seed comes out 1.3% short.
+    //
+    // The device tape already carried the per-contribution identity —
+    // `buildTapes` writes rhs_idx[id*n_u + ru], a dense (instance, unknown)
+    // array whose VALUE is the row — so the host keeps a second history over
+    // that index space and reduces over it instead. Purely additive: the
+    // companion residual still integrates the summed plane, bit for bit.
+    //
+    // n_qt == 0 (nothing carries charge, or a GPU plane-stamp hook means the
+    // host batches never ran) falls back to the row plane — same kernel, same
+    // formula, and the scalar oracle the tape path is differenced against.
+    // ZP_NO_QTAPE forces the per-row fallback on a live binary. Not decoration:
+    // it is the A/B that says whether a fixture's grid moved because of THIS
+    // controller or because of something else, and `n_qt` in the stats line
+    // says whether the tape is live at all. Setup-path getenv, never hot.
+    const n_qt: usize = if (has_charge and std.c.getenv("ZP_NO_QTAPE") == null) ckt.qTapeLen() else 0;
+    var qt_snap: []f64 = &.{};
+    var qt_i_prev: []f64 = &.{};
+    var qt_hist: [4][]f64 = .{ &.{}, &.{}, &.{}, &.{} };
+    defer if (n_qt > 0) {
+        allocator.free(qt_snap);
+        allocator.free(qt_i_prev);
+        for (qt_hist) |q| allocator.free(q);
+    };
     // uic: op.solve never ran, so nothing has put the devices in a defined
     // static state. It normally does three things this transient now owes:
     // latch power-on FSM state under `initial_step` (§5.10.2 — the OP is the
@@ -269,6 +340,12 @@ pub fn simulate(
         q_snap = try allocator.alloc(f64, n);
         root.zeroSimd(i_prev);
         for (&q_hist) |*q| q.* = try allocator.alloc(f64, n);
+        if (n_qt > 0) {
+            qt_snap = try allocator.alloc(f64, n_qt);
+            qt_i_prev = try allocator.alloc(f64, n_qt);
+            root.zeroSimd(qt_i_prev);
+            for (&qt_hist) |*q| q.* = try allocator.alloc(f64, n_qt);
+        }
         // Deliberately NOT preceded by setSimState: q_prev must be the charge
         // the OPERATING POINT saw, so this seeding eval runs in the static
         // state op.solve left behind (t = 0, dt = 0, analysis "dc"). The first
@@ -279,6 +356,12 @@ pub fn simulate(
         simdCopy(q_hist[1], ckt.q_vec[0..n]);
         simdCopy(q_hist[2], ckt.q_vec[0..n]);
         simdCopy(q_hist[3], ckt.q_vec[0..n]);
+        // Same seeding on the per-state tape, off the same eval.
+        if (n_qt > 0) {
+            ckt.snapshotQTape(qt_hist[1]);
+            simdCopy(qt_hist[2], qt_hist[1]);
+            simdCopy(qt_hist[3], qt_hist[1]);
+        }
     }
 
     if (has_history) ckt.recordHistory(x, 0);
@@ -415,6 +498,7 @@ pub fn simulate(
             .half_inv_dt = if (use_gear) 1.0 / (2.0 * dt) else 0,
             .a_vals = a_vals,
             .q_snap = if (has_charge) q_snap else null,
+            .qt_snap = if (n_qt > 0) qt_snap else null,
             .has_charge = has_charge,
             .has_history = has_history,
         };
@@ -481,6 +565,18 @@ pub fn simulate(
 
         if (has_charge) {
             simdCopy(q_hist[0], q_snap);
+            if (n_qt > 0) simdCopy(qt_hist[0], qt_snap);
+
+            // Per-device-STATE index space when the tape is live, per-row when
+            // it is not. Same kernel, same formula, same acceptance test — only
+            // the length changes, which is why the n_qt == 0 path is a genuine
+            // scalar oracle and not a second implementation. Captured before
+            // the ring rotation at the bottom of this block.
+            const lq0 = if (n_qt > 0) qt_hist[0] else q_hist[0];
+            const lq1 = if (n_qt > 0) qt_hist[1] else q_hist[1];
+            const lq2 = if (n_qt > 0) qt_hist[2] else q_hist[2];
+            const lq3 = if (n_qt > 0) qt_hist[3] else q_hist[3];
+            const lip = if (n_qt > 0) qt_i_prev else i_prev;
 
             // dctran.c firsttime: the first accepted point skips CKTtrunc
             // entirely ("no check on first time point") — dt REPEATS, it
@@ -491,8 +587,8 @@ pub fn simulate(
             } else {
                 const order2 = eff_method != .backward_euler;
                 const del = integrator.stepBound(
-                    order2, q_hist[0], q_hist[1], q_hist[2], q_hist[3],
-                    i_prev, alpha_val, use_trap, dt, dt_prev, dt_prev2,
+                    order2, lq0, lq1, lq2, lq3,
+                    lip, alpha_val, use_trap, dt, dt_prev, dt_prev2,
                     options.tol.reltol, options.tol.abstol, options.tol.chgtol, options.tol.trtol,
                 );
                 if (del < 0.9 * dt) {
@@ -536,8 +632,8 @@ pub fn simulate(
             if (steps > 0 and use_be) {
                 const trial_order2 = options.method != .backward_euler;
                 const trial_del = integrator.stepBound(
-                    trial_order2, q_hist[0], q_hist[1], q_hist[2], q_hist[3],
-                    i_prev, alpha_val, use_trap, dt, dt_prev, dt_prev2,
+                    trial_order2, lq0, lq1, lq2, lq3,
+                    lip, alpha_val, use_trap, dt, dt_prev, dt_prev2,
                     options.tol.reltol, options.tol.abstol, options.tol.chgtol, options.tol.trtol,
                 );
                 const nd2 = @min(2.0 * dt, trial_del);
@@ -547,30 +643,25 @@ pub fn simulate(
             }
 
             // Dynamic current update — must match the method actually used.
-            const V = @Vector(W, f64);
-            const av: V = @splat(alpha_val);
-            var j: usize = 0;
-            if (use_trap) {
-                while (j + W <= n) : (j += W) {
-                    const q0: V = q_hist[0][j..][0..W].*;
-                    const q1: V = q_hist[1][j..][0..W].*;
-                    const ip: V = i_prev[j..][0..W].*;
-                    i_prev[j..][0..W].* = av * (q0 - q1) - ip;
-                }
-                while (j < n) : (j += 1) i_prev[j] = alpha_val * (q_hist[0][j] - q_hist[1][j]) - i_prev[j];
-            } else {
-                while (j + W <= n) : (j += W) {
-                    const q0: V = q_hist[0][j..][0..W].*;
-                    const q1: V = q_hist[1][j..][0..W].*;
-                    i_prev[j..][0..W].* = av * (q0 - q1);
-                }
-                while (j < n) : (j += 1) i_prev[j] = alpha_val * (q_hist[0][j] - q_hist[1][j]);
-            }
+            // Both index spaces run the SAME recurrence: ngspice keeps the
+            // dynamic current in CKTstates[0][qcap+1], i.e. per state, and
+            // CKTterr's volttol reads it there.
+            integrator.advanceCurrent(i_prev, q_hist[0], q_hist[1], alpha_val, use_trap);
+            if (n_qt > 0)
+                integrator.advanceCurrent(qt_i_prev, qt_hist[0], qt_hist[1], alpha_val, use_trap);
+
             const tail = q_hist[3];
             q_hist[3] = q_hist[2];
             q_hist[2] = q_hist[1];
             q_hist[1] = q_hist[0];
             q_hist[0] = tail;
+            if (n_qt > 0) {
+                const qt_tail = qt_hist[3];
+                qt_hist[3] = qt_hist[2];
+                qt_hist[2] = qt_hist[1];
+                qt_hist[1] = qt_hist[0];
+                qt_hist[0] = qt_tail;
+            }
             dt_prev2 = dt_prev;
             dt_prev = dt;
         }
@@ -632,20 +723,48 @@ pub fn simulate(
         // DOUBLES every dt halving (mesa_oscillator wedged at t≈350 ps this
         // way under the retired freeze_grad latch). VerA's path-integrated
         // latches commit value-continuously — pq+wq in stateCtl equals the
-        // assemble's fadd(pq, D) bit for bit — so dq measures 0 today; the
-        // block is the tripwire that keeps the invariant honest for the next
-        // stateful-charge device. The i_prev correction is the same α·Δq for
-        // both methods.
+        // assemble's fadd(pq, D) bit for bit. The i_prev correction is the same
+        // α·Δq for both methods.
+        //
+        // NOT diagnostic, and Δq is NOT a rounding floor — this was gated off
+        // once and had to come back (2026-09-07). `newton()` returns on the
+        // iterate it converged, WITHOUT reassembling: `ckt.q_vec` holds q(x_k)
+        // while `cur` is x_k+1. So Δq is the last Newton correction's charge,
+        // ~C·dx, and α·Δq is 1e-7…7.7e-5 A against abstol 1e-12 — five to eight
+        // decades above the floor. i_prev and q_hist[1] are not diagnostics
+        // either: both are read by the NEXT step's companion residual
+        // (`TranHook.assemble`, rhs += α(q − q_prev) − i_prev) and by
+        // `stepBound`. Skipping this integrates the next step from a point one
+        // Newton correction away from the one that was recorded.
+        // Measured cost of keeping it: +10% devices/mos6_inverter, +14%
+        // tran/fourbitadder, +17% scaling/parallel_inverters_100. Measured cost
+        // of dropping it: 151 -> 149 fixtures passing, parallel_inverters_100
+        // 8.98e-3 -> 1.49e-2 (PASS -> FAIL) while taking 3.4% MORE steps.
+        // The two writes are one correction — applying either alone is worse
+        // than applying neither (3.6e-2 on parallel_inverters_100).
+        // ponytail: a full Circuit.eval is the blunt way to re-read q. Upgrade
+        // path if the 10-17% matters: have the converger reassemble at the
+        // accepted x, or a `stateCtl(.commit)` that reports "pq moved" so the
+        // re-read is per-batch.
         if (has_charge and ckt.has_state_q) {
             ckt.eval(cur, t);
-            var dbg_dq: f64 = 0;
             for (0..n) |j2| {
                 const q_new = ckt.q_vec[j2];
-                if (stats_on) dbg_dq = @max(dbg_dq, @abs(q_new - q_hist[1][j2]));
                 i_prev[j2] += alpha_val * (q_new - q_hist[1][j2]);
                 q_hist[1][j2] = q_new;
             }
-            if (stats_on and dbg_dq > 1e-15) std.debug.print("resnap t={e:.4} max|dq|={e:.3}\n", .{ t, dbg_dq });
+            // The per-state tape is the SAME two writes on the same Δq, off the
+            // same re-read — `stepBound` now reduces over it, so leaving it
+            // uncorrected would reintroduce exactly the "one Newton correction
+            // away from the recorded point" error the row loop above exists to
+            // close, only on the LTE side instead of the residual side.
+            if (n_qt > 0) {
+                ckt.snapshotQTape(qt_snap);
+                for (0..n_qt) |j2| {
+                    qt_i_prev[j2] += alpha_val * (qt_snap[j2] - qt_hist[1][j2]);
+                    qt_hist[1][j2] = qt_snap[j2];
+                }
+            }
         }
 
         try waveform.record(t, cur, probes);
@@ -669,8 +788,8 @@ pub fn simulate(
 
     if (stats_on) {
         std.debug.print(
-            "tran-stats: accepted={d} attempts={d} nr_iters={d} rej[newton={d} lte={d} state={d}] order_drops={d} bp_landings={d} avg_dt={e:.3}\n",
-            .{ steps, st_attempts, st_nr_iters, st_rej_newton, st_rej_lte, st_rej_state, st_order_drops, st_bp_landings, if (steps > 0) t / @as(f64, @floatFromInt(steps)) else 0 },
+            "tran-stats: n_qt={d} accepted={d} attempts={d} nr_iters={d} rej[newton={d} lte={d} state={d}] order_drops={d} bp_landings={d} avg_dt={e:.3}\n",
+            .{ n_qt, steps, st_attempts, st_nr_iters, st_rej_newton, st_rej_lte, st_rej_state, st_order_drops, st_bp_landings, if (steps > 0) t / @as(f64, @floatFromInt(steps)) else 0 },
         );
     }
 
@@ -752,6 +871,169 @@ test "alpha: BE 1/dt, trap 2/dt" {
 
 // ponytail: estimateLTE/adaptTimestep tests removed — LTE control now
 // uses integrator.stepBound which has its own acceptance path in simulate().
+
+// The whole point of per-device-state LTE, as a pure function. Two charge
+// contributions that cancel EXACTLY on their shared row: each swings 2 pC over
+// the step, the row sums to a flat zero. ngspice's CKTterr sees each state and
+// binds; the summed q plane sees nothing and steps 14 decades too far. Fails
+// the moment stepBound is fed row-summed charge again.
+test "stepBound: per-state min survives what the summed row cancels" {
+    const dt: f64 = 1e-9;
+    const reltol: f64 = 1e-3;
+    const abstol: f64 = 1e-12;
+    const chgtol: f64 = 1e-14;
+    const trtol: f64 = 7.0;
+
+    // 2*W+1: W cancelling pairs through the vector body, one dead slot so the
+    // scalar tail runs too.
+    const len = 2 * W + 1;
+    var s_cur: [len]f64 = @splat(0);
+    var s_prev: [len]f64 = @splat(0);
+    const s_zero: [len]f64 = @splat(0);
+    var k: usize = 0;
+    while (k + 1 < len) : (k += 2) {
+        s_cur[k] = 3e-12;
+        s_cur[k + 1] = -3e-12;
+        s_prev[k] = 1e-12;
+        s_prev[k + 1] = -1e-12;
+    }
+    // Row view: every pair sums to zero, and so does its whole history.
+    const row: [W + 1]f64 = @splat(0);
+
+    const del_state = integrator.stepBound(
+        false, &s_cur, &s_prev, &s_zero, &s_zero, &s_zero,
+        1.0 / dt, false, dt, dt, dt, reltol, abstol, chgtol, trtol,
+    );
+    const del_row = integrator.stepBound(
+        false, &row, &row, &row, &row, &row,
+        1.0 / dt, false, dt, dt, dt, reltol, abstol, chgtol, trtol,
+    );
+
+    // Closed form, so the CKTterr formula is pinned and not just the inequality:
+    //   i_new     = (1/dt)*(3e-12 - 1e-12)            = 2e-3
+    //   volttol   = abstol + reltol*i_new             = 2.000001e-6
+    //   chargetol = reltol*3e-12/dt                   = 3e-6      <- binds
+    //   dd  = ((3e-12-1e-12)/dt - (1e-12-0)/dt)/(2*dt) = 5e5
+    //   del = trtol*3e-6 / (0.5*5e5)                  = 8.4e-11
+    try testing.expectApproxEqRel(@as(f64, trtol * 3e-6 / 2.5e5), del_state, 1e-12);
+    try testing.expect(del_state < dt);
+    // The summed row: dd == 0, so the bound collapses to trtol*tol/abstol.
+    try testing.expect(del_row > 1e6 * dt);
+
+    // The ground-mirror entries are INERT, which is why the tape needs no
+    // trash-row mask. ngspice terrs one state per instance (captrunc.c:
+    // `CKTterr(here->CAPqcap)`, capdefs.h: CAPnumStates = 2 for q AND its
+    // current, i.e. ONE charge); the tape carries q on one terminal and -q on
+    // the other, and the old per-row path never saw the ground side at all
+    // because stepBound walks q_hist[0..n], excluding the trash cell q_vec[n].
+    // Every CKTterr term is even in q — |q|, |dd|, |i| — so the mirror scores
+    // identically and cannot move the min. Masking it would be work for zero
+    // numerical effect; this assert is what says so.
+    const one_sided = [_]f64{ 3e-12, 0 };
+    const one_sided_p = [_]f64{ 1e-12, 0 };
+    const mirrored = [_]f64{ 3e-12, -3e-12 };
+    const mirrored_p = [_]f64{ 1e-12, -1e-12 };
+    const pair_zero = [_]f64{ 0, 0 };
+    const del_one = integrator.stepBound(
+        false, &one_sided, &one_sided_p, &pair_zero, &pair_zero, &pair_zero,
+        1.0 / dt, false, dt, dt, dt, reltol, abstol, chgtol, trtol,
+    );
+    const del_mirror = integrator.stepBound(
+        false, &mirrored, &mirrored_p, &pair_zero, &pair_zero, &pair_zero,
+        1.0 / dt, false, dt, dt, dt, reltol, abstol, chgtol, trtol,
+    );
+    try testing.expectEqual(del_one, del_mirror);
+
+    // CKTterr is HOMOGENEOUS OF DEGREE ZERO in the charge: tol scales with |q|
+    // (both volttol and chargetol) and so does |dd|, so `del` does not depend on
+    // how big the contribution is — only on its RELATIVE curvature. Away from
+    // the abstol/chgtol floors, scaling a state by 1000 leaves its bound put.
+    //
+    // This is the whole reason per-state LTE is not simply "more conservative":
+    // a contribution 1000x smaller than its row-mates is still a full-strength
+    // truncation candidate once it is its own state. It is what ngspice does
+    // too — and it is exactly why devices/kinduc regressed, since espice gives
+    // a K card its own charge states where ngspice folds the mutual flux into
+    // the inductor's single INDflux (indload.c:70-77, and MUT has no MUTtrunc).
+    const big: [2]f64 = .{ s_cur[0] * 1e3, 0 };
+    const big_p: [2]f64 = .{ s_prev[0] * 1e3, 0 };
+    const del_big = integrator.stepBound(
+        false, &big, &big_p, &pair_zero, &pair_zero, &pair_zero,
+        1.0 / dt, false, dt, dt, dt, reltol, abstol, chgtol, trtol,
+    );
+    try testing.expectApproxEqRel(del_one, del_big, 1e-9);
+}
+
+// The plumbing invariant: every charge the devices stamped is in the tape
+// exactly once, and it is stamped PER INSTANCE, not merged onto the node.
+// Catches a missing scatterQ write, a double write, a stale dedup replay and a
+// ParEval lane overlap — the failure modes that are otherwise silent.
+test "q tape: per-device-state charges, one entry each, summing to the q plane" {
+    const gpa = testing.allocator;
+    const dev = @import("devices");
+    const Cap = dev.models.capacitor;
+    const Proto = dev.batch.Proto;
+
+    // The txl2_3_line shape: a big load cap and a small parasitic sharing
+    // node 1. Per-row LTE differences their SUM; per-state keeps them apart.
+    const CStore = dev.batch.ProtoStore(Cap);
+    const cstore = try gpa.create(CStore);
+    cstore.* = .{};
+    try cstore.models.append(gpa, .{ .c = 7.398e-15 });
+    try cstore.instances.append(gpa, .{});
+    try cstore.nodes.append(gpa, .{ 1, 0 }); // load cap, node 1 -> ground
+    try cstore.models.append(gpa, .{ .c = 5.0e-17 });
+    try cstore.instances.append(gpa, .{});
+    try cstore.nodes.append(gpa, .{ 1, 2 }); // parasitic, node 1 -> node 2
+
+    const protos = [_]Proto{.{
+        .ctx = cstore,
+        .type_name = @typeName(Cap),
+        .pattern = CStore.addPattern,
+        .finalize = CStore.finalize,
+        .destroy = CStore.destroy,
+        .apply_perm = CStore.applyPerm,
+    }};
+
+    const intern_bytes = try gpa.dupe(u8, "000");
+    const intern_offs = try gpa.alloc(u32, 4);
+    for (intern_offs, 0..) |*o, i| o.* = @intCast(i);
+    var ckt = try root.freeze(gpa, 3, intern_bytes, intern_offs, &protos, null);
+    defer ckt.deinit();
+
+    // 2 instances * 2 unknowns. Per NODE there would be 3 rows; per STATE there
+    // are 4 contributions, and node 1 carries two of them.
+    try testing.expectEqual(@as(u32, 4), ckt.qTapeLen());
+
+    const x = [_]f64{ 0.0, 1.0, 0.25 };
+    ckt.eval(&x, 0);
+
+    const tape = try gpa.alloc(f64, ckt.qTapeLen());
+    defer gpa.free(tape);
+    ckt.snapshotQTape(tape);
+
+    // Indexed id*n_u + ru, exactly like rhs_idx.
+    try testing.expectApproxEqRel(@as(f64, 7.398e-15 * 1.00), tape[0], 1e-9);
+    try testing.expectApproxEqRel(@as(f64, -7.398e-15 * 1.00), tape[1], 1e-9);
+    try testing.expectApproxEqRel(@as(f64, 5.0e-17 * 0.75), tape[2], 1e-9);
+    try testing.expectApproxEqRel(@as(f64, -5.0e-17 * 0.75), tape[3], 1e-9);
+
+    // Every contribution lands in exactly one q_vec cell (the ground terminal
+    // in the trash row q_vec[n]), so the two totals are the same number.
+    var sum_tape: f64 = 0;
+    for (tape) |v| sum_tape += v;
+    var sum_plane: f64 = 0;
+    for (ckt.q_vec) |v| sum_plane += v;
+    try testing.expectApproxEqAbs(sum_plane, sum_tape, 1e-30);
+
+    // And the merge the old controller had to live with: node 1's row is the
+    // sum, whose slope is neither cap's.
+    try testing.expectApproxEqRel(
+        @as(f64, 7.398e-15 * 1.00 + 5.0e-17 * 0.75),
+        ckt.q_vec[1],
+        1e-9,
+    );
+}
 
 // The one property the `set_sim_state` plumbing exists for. A generated
 // device reads `Instance.abstime` (§9.10 `$abstime`), NOT the `t` argument of

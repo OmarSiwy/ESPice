@@ -42,13 +42,11 @@ pub fn FreqSolverT(comptime T: type) type {
         // -----------------------------------------------------------------
         // Dense path data (n <= DENSE_THRESHOLD)
         // -----------------------------------------------------------------
-        // SoA: G and C kept as flat row-major n×n; the 2n×2n work matrix and
-        // its LU copy are separate contiguous slabs (hot during factor/solve,
-        // cold between omegas).
+        // SoA: G/C are flat row-major n×n planes. Assemble each frequency
+        // directly into the reusable 2n×2n LU slab.
         const Dense = struct {
             g_dense: []T, // n×n row-major, owned
             c_mat: []T, // n×n row-major, owned
-            a_work: []T, // 2n×2n assembled admittance (unfactored copy)
             a_lu: []T, // 2n×2n factored LU
             piv: []u32, // 2n pivot indices
         };
@@ -69,14 +67,6 @@ pub fn FreqSolverT(comptime T: type) type {
             vals: []T,
             slv: direct.SolverT(T),
         };
-
-        inline fn simdCopy(dst: []T, src: []const T) void {
-            var i: usize = 0;
-            while (i + W <= dst.len) : (i += W) {
-                dst[i..][0..W].* = src[i..][0..W].*;
-            }
-            for (dst[i..], src[i..]) |*d, s| d.* = s;
-        }
 
         // =================================================================
         // Construction
@@ -160,23 +150,18 @@ pub fn FreqSolverT(comptime T: type) type {
         pub fn initDense(allocator: Allocator, n: u32, g: []T, c: []T) !Self {
             errdefer allocator.free(g);
             errdefer allocator.free(c);
-            const nu: usize = n;
             const nn: u32 = 2 * n;
             const nnu: usize = nn;
-            const a_work = try allocator.alloc(T, nnu * nnu);
-            errdefer allocator.free(a_work);
             const a_lu = try allocator.alloc(T, nnu * nnu);
             errdefer allocator.free(a_lu);
             const piv = try allocator.alloc(u32, nnu);
 
-            _ = nu;
             return .{
                 .n = n,
                 .nn = nn,
                 .strategy = .{ .dense = .{
                     .g_dense = g,
                     .c_mat = c,
-                    .a_work = a_work,
                     .a_lu = a_lu,
                     .piv = piv,
                 } },
@@ -188,7 +173,6 @@ pub fn FreqSolverT(comptime T: type) type {
                 .dense => |*d| {
                     allocator.free(d.g_dense);
                     allocator.free(d.c_mat);
-                    allocator.free(d.a_work);
                     allocator.free(d.a_lu);
                     allocator.free(d.piv);
                 },
@@ -384,8 +368,7 @@ pub fn FreqSolverT(comptime T: type) type {
         // =================================================================
 
         fn setOmegaDense(n: u32, nn: u32, d: *Dense, omega: T) !void {
-            DL.buildComplexAdmittance(n, nn, d.g_dense, d.c_mat, omega, d.a_work);
-            simdCopy(d.a_lu, d.a_work);
+            DL.buildComplexAdmittance(n, nn, d.g_dense, d.c_mat, omega, d.a_lu);
             try DL.factorize(nn, d.a_lu, d.piv);
         }
 
@@ -407,7 +390,7 @@ pub fn FreqSolverT(comptime T: type) type {
                 const cs = s.src_col_ptr[j];
                 const len = s.src_col_ptr[j + 1] - cs;
                 const lenu: usize = len;
-                simdCopy(s.vals[p..][0..lenu], s.g_vals[cs..][0..lenu]);
+                @memcpy(s.vals[p..][0..lenu], s.g_vals[cs..][0..lenu]);
                 p += lenu;
                 scaleCopy(T, s.vals[p..][0..lenu], s.c_vals[cs..][0..lenu], omega);
                 p += lenu;
@@ -419,7 +402,7 @@ pub fn FreqSolverT(comptime T: type) type {
                 const lenu: usize = len;
                 scaleCopy(T, s.vals[p..][0..lenu], s.c_vals[cs..][0..lenu], neg_omega);
                 p += lenu;
-                simdCopy(s.vals[p..][0..lenu], s.g_vals[cs..][0..lenu]);
+                @memcpy(s.vals[p..][0..lenu], s.g_vals[cs..][0..lenu]);
                 p += lenu;
             }
 

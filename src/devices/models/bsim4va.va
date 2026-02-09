@@ -5203,7 +5203,7 @@ module bsim4va(d, g, s, b);
                 //if (BSIM4sourceConductance == 0.0 ) begin /*TODO: always keeps internal nodes,we used all full static nodes at setup.*/
                 if (BSIM4sourceConductance == 0.0 && (BSIM4rsh > 0
                     && (!$param_given(nrs) && BSIM4rgeoMod != 0)
-                    || BSIM4rdsMod != 0) ) begin
+                    || BSIM4rdsMod != 0 || BSIM4tnoiMod == 1) ) begin
                     BSIM4sourceConductance = 1.0e3; /* mho */
                     $strobe ("Warning: (instance X*) Source diffusion conductance reset to 1.0e3 mho.\n");
                 end
@@ -5225,7 +5225,7 @@ module bsim4va(d, g, s, b);
                 //if (BSIM4drainConductance == 0.0 ) begin /*TODO: need to remove internal nodes? but we used all full static nodes at setup.*/
                 if (BSIM4drainConductance == 0.0 && (BSIM4rsh > 0
                     && (!$param_given(nrd) && BSIM4rgeoMod != 0)
-                    || BSIM4rdsMod != 0 ) ) begin
+                    || BSIM4rdsMod != 0 || BSIM4tnoiMod == 1 ) ) begin
                     BSIM4drainConductance = 1.0e3; /* mho */
                     $strobe ("Warning: (instance X*) Drain diffusion conductance reset to 1.0e3 mho.\n");
                 end

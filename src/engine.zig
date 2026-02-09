@@ -34,10 +34,13 @@ const findNameIndex = netlist.findNameIndex;
 const Sources = struct {
     v_names: []const []const u8,
     i_names: []const []const u8,
+    v_branches: []const u32,
 };
 
 pub const SimConfig = struct {
     gpu: bool = false,
+    /// Bypass the work gate; hardware and kernel eligibility still apply.
+    gpu_force: bool = false,
     /// A named `--backend cuda|hip` request: a GPU init failure is then a
     /// hard error naming itself, never a silent CPU run. `--gpu`/`auto`
     /// keeps the warn-and-fall-back behavior.
@@ -94,6 +97,7 @@ pub const Simulation = struct {
     /// so a context holding `&sim.circuit` taken now would dangle — the same
     /// reason `par_eval` is attached late.
     gpu_requested: bool,
+    gpu_force: bool,
     /// SimConfig.gpu_strict — a named backend request must not silently CPU.
     gpu_strict: bool,
     gpu_ctx: ?*gpu_context.GpuContext,
@@ -132,18 +136,17 @@ pub const Simulation = struct {
         // between decks without tearing down the circuit. Only its .allocator()
         // is deferred to run() (captures &self); the value itself is stable.
         sim.results_arena = std.heap.ArenaAllocator.init(sim_arena);
-        // The ONE name->id lookup a directive can carry (.noise's out_node),
-        // resolved here because `b.node_names` is complete before compile()
-        // and dies inside it. A u32 per directive, parse-lifetime, written in
-        // directive order and read once by buildJob below: an O(1) hash hit
-        // now beats any lookup the frozen Circuit could offer later, and the
-        // frozen struct carries no name table at all.
+        // Resolve the output node before compile() destroys the name table.
         const dir_nodes = try parse_arena.alloc(u32, nl.directives.len);
         for (nl.directives, dir_nodes) |dir, *id| {
-            id.* = if (directiveNodeName(dir, 0)) |name|
-                b.node_names.get(name) orelse NO_NODE
-            else
-                NO_NODE;
+            const arg: usize = if (std.ascii.eqlIgnoreCase(dir.kind, "four")) 1 else 0;
+            if (analysis.Analysis.get(dir.kind) != null and arg < dir.args.len) switch (dir.args[arg]) {
+                .group => |g| if (g.args.len != 1) return error.UnsupportedAnalysisOutput,
+                else => {},
+            };
+            const name = directiveNodeName(dir, arg) orelse
+                (if (arg < dir.args.len) icNodeName(parse_arena, dir.args[arg]) else null);
+            id.* = if (name) |n| b.node_names.get(n) orelse NO_NODE else NO_NODE;
         }
 
         // `.ic` cards, resolved here for the same reason as `dir_nodes`: this is
@@ -184,6 +187,13 @@ pub const Simulation = struct {
         // ~5 V). `mapNode` is the identity when perm is null (no BBD).
         var perm: ?[]const u32 = null;
         sim.circuit = try b.compilePerm(&perm);
+        // ponytail: opt-in until an end-to-end gate beats serial on sparse
+        // block interiors; dense flop estimates alone overpredict their work.
+        const solver_threads = if (std.c.getenv("ESPICE_SOLVER_THREADS")) |s|
+            std.fmt.parseInt(u32, std.mem.span(s), 10) catch 1
+        else
+            1;
+        sim.circuit.solver_execution = .{ .io = io, .threads = @intCast(@min(solver_threads, 16)) };
         compiled_ok = true;
 
         errdefer sim.circuit.deinit();
@@ -205,6 +215,7 @@ pub const Simulation = struct {
         }
         for (ic_buf[0..n_ic_used]) |*e| e.node = mapNode(perm, e.node);
         sim.gpu_requested = config.gpu;
+        sim.gpu_force = config.gpu_force;
         sim.gpu_strict = config.gpu_strict;
         sim.gpu_ctx = null;
         sim.op_cache = .{ null, null };
@@ -223,6 +234,7 @@ pub const Simulation = struct {
         const sources: Sources = .{
             .v_names = nb.v_names[0..nb.n_v],
             .i_names = nb.i_names[0..nb.n_i],
+            .v_branches = nb.v_branches[0..nb.n_v],
         };
 
         // Probes: branch currents first, then every named node. ngspice raws
@@ -271,7 +283,7 @@ pub const Simulation = struct {
         sim.jobs = try sim_arena.alloc(Job, nl.directives.len);
         sim.n_jobs = 0;
         for (nl.directives, dir_nodes) |dir, node_id| {
-            if (buildJob(dir, node_id, sources)) |job0| {
+            if (try buildJob(dir, node_id, sources)) |job0| {
                 var job = job0;
                 applyDeckOptions(&job, deck_opts);
                 sim.jobs[sim.n_jobs] = job;
@@ -312,7 +324,7 @@ pub const Simulation = struct {
         self.circuit.deinit();
     }
 
-    pub fn run(self: *Simulation) !void {
+    fn prepare(self: *Simulation) !RunCtx {
         // Attach here, not in fromNetlist: sim is returned by value there, so
         // a &self.par_eval taken earlier would dangle. `self` is stable now.
         if (self.par_eval) |*p| self.circuit.par_eval = p;
@@ -326,20 +338,15 @@ pub const Simulation = struct {
         // exactly how the benchmark came to report CPU timings in its GPU
         // column.
         if (self.gpu_requested) {
-            if (gpu_context.GpuContext.init(self.arena, &self.circuit)) |g| {
+            if (gpu_context.GpuContext.init(self.arena, &self.circuit, self.gpu_force)) |g| {
                 self.gpu_ctx = g;
                 self.circuit.gpu_hook = g.hook();
                 self.circuit.gpu_active = true;
             } else |e| if (e == gpu_context.Error.NotEnoughGpuWork) {
-                // A DECISION, not a failure: the circuit has kernels, there is
-                // just not enough of it to beat the round trip. Worth saying
-                // out loud (and worth naming the override) so a small `--gpu`
-                // run does not look like a broken driver. Even a strict
-                // request accepts this one — declining is the contract, and
-                // the deck can override the gate.
+                // Automatic work selection declined; --gpu bypasses this gate.
                 std.debug.print(
                     "note: --gpu declined; too little device work to beat the PCIe round trip " ++
-                        "(override with ESPICE_GPU_MIN_WORK=<n>)\n",
+                        "(override with --gpu)\n",
                     .{},
                 );
             } else if (self.gpu_strict) {
@@ -355,9 +362,12 @@ pub const Simulation = struct {
         }
         // `.options temp=<C>` — once, before any solve; device physics keys
         // off Instance.temperature, which setCircuitTemp republishes.
-        if (self.deck_temp) |t| self.circuit.setCircuitTemp(@floatCast(t));
+        if (self.deck_temp) |t| {
+            self.circuit.setCircuitTemp(@floatCast(t));
+            try self.circuit.recompute();
+        }
 
-        var ctx = RunCtx{
+        return .{
             .circuit = &self.circuit,
             .x_op = null,
             .probes = self.probes,
@@ -367,7 +377,12 @@ pub const Simulation = struct {
             // Results land in the output-lifetime arena. Stable now (self is
             // pinned), so taking .allocator() no longer dangles.
             .allocator = self.results_arena.allocator(),
+            .scratch_allocator = std.heap.smp_allocator,
         };
+    }
+
+    pub fn run(self: *Simulation) !void {
+        var ctx = try self.prepare();
 
         // If no jobs queued, run an implicit OP (DC-flavored).
         if (self.n_jobs == 0) {
@@ -417,6 +432,22 @@ pub const Simulation = struct {
         return self.results[0..self.n_results];
     }
 
+    /// Single-transient output without retaining a Waveform or Result buffer.
+    pub fn runTransient(self: *Simulation, recorder: anytype) !analysis.tran.SimResult {
+        if (self.n_jobs != 1 or std.meta.activeTag(self.jobs[0]) != .tran)
+            return error.ExpectedSingleTransient;
+        _ = try self.prepare();
+        const opts = self.jobs[0].tran;
+        self.circuit.setSimState(.{ .kind = .ic });
+        const initial = if (opts.uic) try self.icVector() else try self.ensureOp(true);
+        const a = std.heap.smp_allocator;
+        const x = try a.dupe(f64, initial);
+        defer a.free(x);
+        const result = try analysis.tran.simulateInto(&self.circuit, x, self.probes, recorder, opts, a);
+        if (!result.completed) return error.TimestepTooSmall;
+        return result;
+    }
+
     /// uic starting point: zero everywhere except the `.ic` nodes.
     fn icVector(self: *Simulation) ![]f64 {
         const x = try self.arena.alloc(f64, self.circuit.n);
@@ -442,7 +473,6 @@ pub const Simulation = struct {
         slot.* = x;
         return x;
     }
-
 };
 
 /// Analyses whose starting operating point biases waveform sources at t = 0
@@ -495,6 +525,10 @@ fn parseDeckOptions(directives: []const types.Directive) DeckOptions {
     var maxord: ?f64 = null;
     var gear = false;
     for (directives) |dir| {
+        if (std.ascii.eqlIgnoreCase(dir.kind, "temp") and dir.args.len == 1) {
+            o.temp_c = directiveNumber(dir, 0);
+            continue;
+        }
         if (!std.ascii.eqlIgnoreCase(dir.kind, "options") and
             !std.ascii.eqlIgnoreCase(dir.kind, "option") and
             !std.ascii.eqlIgnoreCase(dir.kind, "opt") and
@@ -554,96 +588,210 @@ fn applyDeckOptions(job: *Job, o: DeckOptions) void {
     switch (job.*) {
         inline else => |*opts| {
             if (comptime @hasField(@TypeOf(opts.*), "tol")) opts.tol = o.tol;
+            if (comptime @hasField(@TypeOf(opts.*), "dc_options")) opts.dc_options.tol = o.tol;
+            if (comptime @hasField(@TypeOf(opts.*), "temp_k")) {
+                if (o.temp_c) |temp| opts.temp_k = temp + 273.15;
+            }
         },
     }
+    if (job.* == .temp) job.temp.t_nom = o.temp_c orelse 27;
     if (o.method) |m| switch (job.*) {
         .tran => |*t| t.method = m,
         else => {},
     };
 }
 
-fn buildJob(dir: types.Directive, node_id: u32, sources: Sources) ?Job {
-    const id = analysis.Analysis.get(dir.kind) orelse return null;
-    return switch (id) {
-        .op => .{ .op = .{} },
-        .tran => blk: {
-            // .tran tstep tstop [tstart [tmax]] [uic]
-            const a0 = directiveNumber(dir, 0);
-            const a1 = directiveNumber(dir, 1);
-            const t_stop = a1 orelse a0 orelse break :blk null;
-            // arg 2 is tstart (output suppression before tstart) — not wired.
-            const tstep = if (a1 != null) a0.? else t_stop / 100.0;
-            // ngspice default tmax = min(tstep, (tstop-tstart)/50); an
-            // explicit 4th arg replaces it.
-            break :blk .{ .tran = .{
-                .t_stop = t_stop,
-                .dt_init = tstep,
-                .dt_max = directiveNumber(dir, 3) orelse @min(tstep, t_stop / 50.0),
-                .uic = hasUic(dir),
-            } };
-        },
-        .ac => .{ .ac = .{
-            .f_start = directiveNumber(dir, dir.args.len -| 2) orelse return null,
-            .f_stop = directiveNumber(dir, dir.args.len -| 1) orelse return null,
-            .points_per_decade = @intFromFloat(directiveNumber(dir, 1) orelse 10),
-        } },
-        .dc => blk: {
-            const name1 = directiveName(dir, 0) orelse break :blk null;
-            // Resolve source name → batch-local index (V sources first, then I).
-            const src_idx: u32 = if (findNameIndex(sources.v_names, name1)) |i|
-                @intCast(i)
-            else if (findNameIndex(sources.i_names, name1)) |i|
-                @intCast(i)
-            else
-                break :blk null;
-            var job: analysis.dc.Options = .{
-                .start = directiveNumber(dir, 1) orelse 0,
-                .stop = directiveNumber(dir, 2) orelse 0,
-                .step = directiveNumber(dir, 3) orelse 1,
-                .source_index = src_idx,
-            };
-            // Optional second variable = the OUTER loop
-            // (`.dc v1 0 1.8 0.05 v2 0 1.8 0.6`); ngspice also accepts TEMP.
-            if (directiveName(dir, 4)) |name2| {
-                if (std.ascii.eqlIgnoreCase(name2, "temp")) {
-                    job.source2_is_temp = true;
-                } else if (findNameIndex(sources.v_names, name2)) |i| {
-                    job.source2_index = @intCast(i);
-                } else if (findNameIndex(sources.i_names, name2)) |i| {
-                    job.source2_index = @intCast(i);
-                }
-                if (job.source2_index != null or job.source2_is_temp) {
-                    job.start2 = directiveNumber(dir, 5) orelse 0;
-                    job.stop2 = directiveNumber(dir, 6) orelse 0;
-                    job.step2 = directiveNumber(dir, 7) orelse 1;
-                }
-            }
-            break :blk .{ .dc = job };
-        },
-        .noise => .{ .noise = .{
-            .out_node = if (node_id != NO_NODE) node_id else return null,
-            .f_start = directiveNumber(dir, dir.args.len -| 2) orelse return null,
-            .f_stop = directiveNumber(dir, dir.args.len -| 1) orelse return null,
-            .points_per_decade = @intFromFloat(directiveNumber(dir, dir.args.len -| 3) orelse 10),
-        } },
-        .pz => .{ .pz = .{} },
-        .pss => .{ .pss = .{
-            .period = directiveNumber(dir, 0) orelse return null,
-        } },
-        .hb => .{ .hb = .{
-            .f0 = directiveNumber(dir, 0) orelse return null,
-            .n_harmonics = @intFromFloat(directiveNumber(dir, 1) orelse 8),
-        } },
-        // ponytail: remaining analyses follow the same pattern — parse
-        // positional args from the directive; a node name arrives pre-resolved
-        // as `node_id` (extend dir_nodes to a small column if one ever needs
-        // more than one name).
-        // Expand as each analysis module lands.
-        else => null,
-    };
+fn number(dir: types.Directive, i: usize) !f64 {
+    const n = directiveNumber(dir, i) orelse return error.InvalidAnalysisArguments;
+    if (!std.math.isFinite(n)) return error.InvalidAnalysisArguments;
+    return n;
 }
 
+fn positive(dir: types.Directive, i: usize) !f64 {
+    const n = try number(dir, i);
+    if (n <= 0) return error.InvalidAnalysisArguments;
+    return n;
+}
 
+fn count(comptime T: type, dir: types.Directive, i: usize, default: T) !T {
+    if (i >= dir.args.len) return default;
+    const n = try positive(dir, i);
+    if (n != @trunc(n) or n > std.math.maxInt(T)) return error.InvalidAnalysisArguments;
+    return @intFromFloat(n);
+}
+
+fn arity(dir: types.Directive, min: usize, max: usize) !void {
+    if (dir.args.len < min or dir.args.len > max) return error.InvalidAnalysisArguments;
+}
+
+fn outputNode(node: u32) !u32 {
+    if (node == NO_NODE or node == GROUND) return error.AnalysisNodeNotFound;
+    return node;
+}
+
+fn voltageSource(dir: types.Directive, i: usize, sources: Sources) !usize {
+    const name = directiveName(dir, i) orelse return error.InvalidAnalysisArguments;
+    return findNameIndex(sources.v_names, name) orelse error.AnalysisSourceNotFound;
+}
+
+fn dcSource(dir: types.Directive, i: usize, sources: Sources) !u32 {
+    const name = directiveName(dir, i) orelse return error.InvalidAnalysisArguments;
+    if (findNameIndex(sources.v_names, name)) |index| return @intCast(index);
+    if (findNameIndex(sources.i_names, name)) |index| {
+        // ponytail: DC Options has only a batch-local index; add source kind
+        // before permitting mixed V/I decks, where indices otherwise alias.
+        if (sources.v_names.len != 0) return error.UnsupportedMixedCurrentSweep;
+        return @intCast(index);
+    }
+    return error.AnalysisSourceNotFound;
+}
+
+fn checkStep(start: f64, stop: f64, step: f64) !void {
+    const intervals = (stop - start) / step;
+    if (step == 0 or !std.math.isFinite(intervals) or intervals < 0 or
+        intervals >= @as(f64, @floatFromInt(std.math.maxInt(usize)))) return error.InvalidAnalysisArguments;
+}
+
+/// Only DEC is supported by the shared frequency sweep. Reject LIN/OCT
+/// instead of silently executing a different frequency grid.
+fn frequencyOptions(comptime T: type, dir: types.Directive, offset: usize) !T {
+    const mode = directiveName(dir, offset) orelse return error.InvalidAnalysisArguments;
+    if (!std.ascii.eqlIgnoreCase(mode, "dec")) return error.UnsupportedFrequencySweep;
+    const first = try positive(dir, offset + 2);
+    const last = try positive(dir, offset + 3);
+    if (last < first) return error.InvalidAnalysisArguments;
+    return .{ .f_start = first, .f_stop = last, .points_per_decade = try count(u16, dir, offset + 1, 10) };
+}
+
+fn buildJob(dir: types.Directive, node_id: u32, sources: Sources) !?Job {
+    const id = analysis.Analysis.get(dir.kind) orelse return null;
+    switch (id) {
+        .op => {
+            try arity(dir, 0, 0);
+            return .{ .op = .{} };
+        },
+        .tran, .tran_noise, .matex => {
+            try arity(dir, 2, if (id == .tran) 5 else 2);
+            const step = try positive(dir, 0);
+            const stop = try positive(dir, 1);
+            if (id == .matex) return .{ .matex = .{ .t_stop = stop, .h_output_cap = step } };
+            if (id == .tran_noise) return .{ .tran_noise = .{ .t_stop = stop, .dt_init = step, .dt_max = step } };
+            var numeric_end = dir.args.len;
+            const uic = hasUic(dir);
+            if (uic) numeric_end -= 1;
+            if (numeric_end > 4) return error.InvalidAnalysisArguments;
+            // Output suppression is not implemented: never silently ignore it.
+            if (numeric_end > 2 and try number(dir, 2) != 0) return error.UnsupportedTransientStart;
+            return .{ .tran = .{ .t_stop = stop, .dt_init = step, .dt_max = if (numeric_end > 3) try positive(dir, 3) else @min(step, stop / 50), .uic = uic } };
+        },
+        .ac, .disto => {
+            try arity(dir, 4, 4);
+            if (id == .ac) return .{ .ac = try frequencyOptions(analysis.ac.Options, dir, 0) };
+            return .{ .disto = try frequencyOptions(analysis.disto.Options, dir, 0) };
+        },
+        .dc => {
+            if (dir.args.len != 4 and dir.args.len != 8) return error.InvalidAnalysisArguments;
+            var opts: analysis.dc.Options = .{ .source_index = try dcSource(dir, 0, sources), .start = try number(dir, 1), .stop = try number(dir, 2), .step = try number(dir, 3) };
+            try checkStep(opts.start, opts.stop, opts.step);
+            if (dir.args.len == 8) {
+                const name = directiveName(dir, 4) orelse return error.InvalidAnalysisArguments;
+                if (std.ascii.eqlIgnoreCase(name, "temp")) opts.source2_is_temp = true else opts.source2_index = try dcSource(dir, 4, sources);
+                opts.start2 = try number(dir, 5);
+                opts.stop2 = try number(dir, 6);
+                opts.step2 = try number(dir, 7);
+                try checkStep(opts.start2, opts.stop2, opts.step2);
+            }
+            return .{ .dc = opts };
+        },
+        .noise, .pnoise => {
+            try arity(dir, if (id == .noise) 6 else 7, if (id == .noise) 6 else 8);
+            _ = try voltageSource(dir, 1, sources);
+            const sweep = try frequencyOptions(analysis.ac.Options, dir, 2);
+            const node = try outputNode(node_id);
+            if (id == .noise) return .{ .noise = .{ .out_node = node, .f_start = sweep.f_start, .f_stop = sweep.f_stop, .points_per_decade = sweep.points_per_decade } };
+            const sidebands = if (dir.args.len == 8) try number(dir, 7) else 7;
+            if (sidebands < 0 or sidebands != @trunc(sidebands) or sidebands > 31) return error.InvalidAnalysisArguments;
+            return .{ .pnoise = .{ .out_node = node, .f_start = sweep.f_start, .f_stop = sweep.f_stop, .points_per_decade = sweep.points_per_decade, .f_fundamental = try positive(dir, 6), .n_sidebands = @intFromFloat(sidebands) } };
+        },
+        .tf => {
+            try arity(dir, 2, 2);
+            return .{ .tf = .{ .output_node = try outputNode(node_id), .input_branch = sources.v_branches[try voltageSource(dir, 1, sources)] } };
+        },
+        .sens, .dcmatch => {
+            try arity(dir, 1, 1);
+            const node = try outputNode(node_id);
+            if (id == .sens) return .{ .sens = .{ .output_node = node } };
+            return .{ .dcmatch = .{ .output_node = node } };
+        },
+        .four => {
+            try arity(dir, 2, 3);
+            return .{ .four = .{ .f_fundamental = try positive(dir, 0), .output_node = try outputNode(node_id), .n_harmonics = try count(u16, dir, 2, 9) } };
+        },
+        .pz => {
+            // The eigenvalue module computes poles, not transfer zeros.
+            if (dir.args.len != 0) return error.UnsupportedPoleZeroArguments;
+            return .{ .pz = .{} };
+        },
+        .pss => {
+            try arity(dir, 1, 2);
+            return .{ .pss = .{ .period = 1 / try positive(dir, 0), .n_samples = try count(u32, dir, 1, 256) } };
+        },
+        .hb => {
+            try arity(dir, 1, 2);
+            if (sources.v_names.len == 0) return error.AnalysisSourceNotFound;
+            return .{ .hb = .{ .f0 = try positive(dir, 0), .n_harmonics = try count(u16, dir, 1, 8) } };
+        },
+        .qpss => {
+            try arity(dir, 2, 4);
+            if (sources.v_names.len == 0) return error.AnalysisSourceNotFound;
+            return .{ .qpss = .{ .f1 = try positive(dir, 0), .f2 = try positive(dir, 1), .k1 = try count(u16, dir, 2, 5), .k2 = try count(u16, dir, 3, 5) } };
+        },
+        .pac, .pxf => {
+            try arity(dir, 5, 5);
+            const sweep = try frequencyOptions(analysis.ac.Options, dir, 1);
+            const lo = try positive(dir, 0);
+            if (id == .pac) return .{ .pac = .{ .f_lo = lo, .f_start = sweep.f_start, .f_stop = sweep.f_stop, .points_per_decade = sweep.points_per_decade } };
+            return .{ .pxf = .{ .f_lo = lo, .f_start = sweep.f_start, .f_stop = sweep.f_stop, .points_per_decade = sweep.points_per_decade } };
+        },
+        .sp => {
+            try arity(dir, 4, 4);
+            const mode = directiveName(dir, 0) orelse return error.InvalidAnalysisArguments;
+            const first = try positive(dir, 2);
+            const last = try positive(dir, 3);
+            if (last < first) return error.InvalidAnalysisArguments;
+            const n = try count(u16, dir, 1, 50);
+            const sweep = std.StaticStringMap(analysis.sp.SweepType).initComptime(.{ .{ "dec", .log }, .{ "lin", .linear } }).get(mode) orelse return error.UnsupportedFrequencySweep;
+            const npoints = if (sweep == .log) analysis.types.logSweepCount(first, last, n) else n;
+            if (npoints > std.math.maxInt(u16)) return error.InvalidAnalysisArguments;
+            return .{ .sp = .{ .f_start = first, .f_stop = last, .n_points = @intCast(npoints), .sweep_type = sweep } };
+        },
+        .stb => return error.UnsupportedStabilityAnalysis,
+        .envelope => {
+            try arity(dir, 2, 2);
+            return .{ .envelope = .{ .t_carrier = try positive(dir, 0), .t_stop = try positive(dir, 1) } };
+        },
+        .mc => {
+            try arity(dir, 1, 2);
+            var opts: analysis.mc.Options = .{ .n_trials = try count(u16, dir, 0, 100) };
+            if (dir.args.len == 2) opts.variation = try number(dir, 1);
+            if (opts.variation < 0) return error.InvalidAnalysisArguments;
+            return .{ .mc = opts };
+        },
+        .temp => {
+            // Standard single-temperature card is deck configuration.
+            if (dir.args.len == 1) {
+                if (try number(dir, 0) <= -273.15) return error.InvalidAnalysisArguments;
+                return null;
+            }
+            try arity(dir, 3, 3);
+            const opts: analysis.temp_sweep.Options = .{ .t_start = try number(dir, 0), .t_stop = try number(dir, 1), .t_step = try number(dir, 2) };
+            try checkStep(opts.t_start, opts.t_stop, opts.t_step);
+            if (opts.t_step <= 0 or (opts.t_stop - opts.t_start) / opts.t_step >= std.math.maxInt(u32) or
+                @min(opts.t_start, opts.t_stop) <= -273.15) return error.InvalidAnalysisArguments;
+            return .{ .temp = opts };
+        },
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -652,10 +800,11 @@ fn buildJob(dir: types.Directive, node_id: u32, sources: Sources) ?Job {
 const Parser = @import("frontend/parser.zig").Parser;
 const ngspice = @import("frontend/tokenizer.zig").ngspice;
 
-/// Parse `src`, build a Simulation, run it. Both arenas are the caller's.
-fn runDeck(sim_arena: std.mem.Allocator, parse_arena: std.mem.Allocator, src: []const u8) !Simulation {
-    const nl = try Parser(ngspice).parse(parse_arena, src);
-    var sim = try Simulation.fromNetlist(sim_arena, parse_arena, nl, null, .{});
+/// Release parse storage before running, as the CLI does.
+fn runDeck(sim_arena: std.mem.Allocator, parse_arena: *std.heap.ArenaAllocator, src: []const u8) !Simulation {
+    const nl = try Parser(ngspice).parse(parse_arena.allocator(), src);
+    var sim = try Simulation.fromNetlist(sim_arena, parse_arena.allocator(), nl, null, .{});
+    _ = parse_arena.reset(.free_all);
     try sim.run();
     return sim;
 }
@@ -669,7 +818,7 @@ test "uic: .ic seeds the transient and the OP is skipped" {
     // An RC with the source at 0 V: the operating point is v(2) = 0, so a
     // transient that ran the OP starts flat at zero. With `uic` the cap starts
     // charged at 1 V and decays — the two are unmistakable.
-    var sim = try runDeck(sa.allocator(), pa.allocator(),
+    var sim = try runDeck(sa.allocator(), &pa,
         \\uic rc
         \\v1 1 0 dc 0
         \\r1 1 2 1k
@@ -701,7 +850,7 @@ test "uic: without the keyword the transient starts from the operating point" {
     defer pa.deinit();
 
     // Same deck, same .ic card, no `uic`: the OP wins and v(2) starts at 0.
-    var sim = try runDeck(sa.allocator(), pa.allocator(),
+    var sim = try runDeck(sa.allocator(), &pa,
         \\op rc
         \\v1 1 0 dc 0
         \\r1 1 2 1k
@@ -722,7 +871,7 @@ test "uic: keyword is positional-independent and .ic on an unknown node is dropp
     var pa = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer pa.deinit();
 
-    var sim = try runDeck(sa.allocator(), pa.allocator(),
+    var sim = try runDeck(sa.allocator(), &pa,
         \\uic forms
         \\v1 1 0 dc 0
         \\r1 1 2 1k
@@ -747,7 +896,7 @@ test "branch currents: op emits i(<card>) with ngspice's sign, last probe stays 
 
     // ngspice 44.2 on this deck: i(v1) = -1e-3 (current INTO the + terminal),
     // i(l1) = +1e-3 (p->n through the inductor). Signs must match exactly.
-    var sim = try runDeck(sa.allocator(), pa.allocator(),
+    var sim = try runDeck(sa.allocator(), &pa,
         \\divider
         \\v1 1 0 dc 1
         \\r1 1 2 500
@@ -776,7 +925,7 @@ test "urc: U card expands into a lump ladder whose series R telescopes to L*RPER
     // r0 = L*RPERL = 1k against a 1k load: v(out) is 0.5 iff the geometric
     // lump sizing (r1*K^i from both ends) sums back to exactly r0 and the
     // two half-chains actually meet in the middle.
-    var sim = try runDeck(sa.allocator(), pa.allocator(),
+    var sim = try runDeck(sa.allocator(), &pa,
         \\urc ladder
         \\v1 in 0 dc 1
         \\u1 in out 0 umod l=1 n=4
@@ -820,4 +969,340 @@ fn probeFirst(r: Result, node: []const u8) ?f64 {
 fn probeLast(r: Result, node: []const u8) ?f64 {
     if (r.npoints == 0) return null;
     return probeAt(r, node, r.npoints - 1);
+}
+
+test "recorded transient matches retained RC samples with and without uic" {
+    inline for (.{ false, true }) |uic| {
+        const src =
+            "recorded rc\n" ++
+            "v1 in 0 pulse(0 1 0 1u 1u 100u 200u)\n" ++
+            "r1 in out 1k\n" ++
+            "c1 out 0 1n\n" ++
+            ".ic v(out)=0.75\n" ++
+            ".options temp=85\n" ++
+            (if (uic) ".tran 1u 20u uic\n" else ".tran 1u 20u\n") ++
+            ".end\n";
+        var retained_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer retained_arena.deinit();
+        var retained_parse = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer retained_parse.deinit();
+        var retained = try runDeck(retained_arena.allocator(), &retained_parse, src);
+        defer retained.deinit();
+
+        var streamed_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer streamed_arena.deinit();
+        var streamed_parse = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer streamed_parse.deinit();
+        const nl = try Parser(ngspice).parse(streamed_parse.allocator(), src);
+        var streamed = try Simulation.fromNetlist(streamed_arena.allocator(), streamed_parse.allocator(), nl, null, .{});
+        defer streamed.deinit();
+        _ = streamed_parse.reset(.free_all);
+
+        var waveform = try analysis.tran.Waveform.init(std.testing.allocator, @intCast(streamed.probes.len), 1);
+        defer waveform.deinit();
+        const completed = try streamed.runTransient(&waveform);
+        const expected = retained.getResults()[0];
+        try std.testing.expect(completed.completed);
+        try std.testing.expectEqual(@as(u32, 0), streamed.n_results);
+        try std.testing.expectEqual(expected.npoints, waveform.len);
+        try std.testing.expectEqual(completed.steps + 1, waveform.len);
+        try std.testing.expectEqual(@as(f64, 0), waveform.timeSlice()[0]);
+        try std.testing.expectApproxEqAbs(@as(f64, 20e-6), completed.t_final, 1e-18);
+        try std.testing.expectEqual(completed.t_final, waveform.timeSlice()[waveform.len - 1]);
+        const out_col = columnNamed(expected, "v(out)") orelse return error.NoProbe;
+        try std.testing.expectEqual(@as(f64, if (uic) 0.75 else 0), waveform.probeValues(@intCast(out_col - 1))[0]);
+        for (waveform.timeSlice(), 0..) |time, point| {
+            const row = expected.data[point * expected.varnames.len ..][0..expected.varnames.len];
+            try std.testing.expectEqual(@as(u64, @bitCast(row[0])), @as(u64, @bitCast(time)));
+            for (row[1..], 0..) |value, probe|
+                try std.testing.expectEqual(@as(u64, @bitCast(value)), @as(u64, @bitCast(waveform.probeValues(@intCast(probe))[point])));
+        }
+    }
+}
+
+test "recorded transient propagates output failure without a result" {
+    const FailingRecorder = struct {
+        pub fn record(_: @This(), t: f64, _: []const f64, _: []const u32) error{WriteFailed}!void {
+            if (t > 0) return error.WriteFailed;
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var parse_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer parse_arena.deinit();
+    const nl = try Parser(ngspice).parse(parse_arena.allocator(),
+        \\recording failure
+        \\v1 out 0 dc 1
+        \\.tran 1u 2u
+        \\.end
+    );
+    var sim = try Simulation.fromNetlist(arena.allocator(), parse_arena.allocator(), nl, null, .{});
+    defer sim.deinit();
+    _ = parse_arena.reset(.free_all);
+    try std.testing.expectError(error.WriteFailed, sim.runTransient(FailingRecorder{}));
+    try std.testing.expectEqual(@as(u32, 0), sim.n_results);
+}
+
+test "analysis directives dispatch every implemented capability and reject malformed requests" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const sources: Sources = .{ .v_names = &.{"vin"}, .i_names = &.{}, .v_branches = &.{2} };
+    const directives = [_][]const u8{
+        ".ac dec 2 10 100",                     ".dc vin 0 1 0.1",       ".dcmatch v(out)",
+        ".disto dec 2 10 100",                  ".envelope 1m 5m",       ".four 1k v(out)",
+        ".hb 1k",                               ".matex 1u 10u",         ".mc 4",
+        ".noise v(out) vin dec 2 10 100",       ".op",                   ".pac 1k dec 2 10 100",
+        ".pnoise v(out) vin dec 2 10 100 1k 0", ".pss 1k 128",           ".pxf 1k dec 2 10 100",
+        ".pz",                                  ".qpss 1k 1414 1 1",     ".sens v(out)",
+        ".sp dec 2 10 100",                     ".stb vin dec 2 10 100", ".temp -40 125 55",
+        ".tf v(out) vin",                       ".tran 1u 10u",          ".tran_noise 1u 10u",
+    };
+    try std.testing.expectEqual(std.meta.fields(analysis.AnalysisId).len, directives.len);
+    for (directives, 0..) |directive, index| {
+        const nl = try Parser(ngspice).parse(a, try std.fmt.allocPrint(a, "dispatch\n{s}\n.end\n", .{directive}));
+        const id: analysis.AnalysisId = @enumFromInt(index);
+        if (id == .stb) {
+            try std.testing.expectError(error.UnsupportedStabilityAnalysis, buildJob(nl.directives[0], 1, sources));
+            continue;
+        }
+        const job = (try buildJob(nl.directives[0], 1, sources)).?;
+        try std.testing.expectEqual(id, std.meta.activeTag(job));
+        if (job == .pss) try std.testing.expectEqual(@as(f64, 1e-3), job.pss.period);
+    }
+    const malformed = [_][]const u8{
+        ".ac dec 0 1 10",                ".ac dec -1 1 10",     ".ac dec 2.5 1 10",                      ".ac dec 2 10 1",
+        ".ac lin 2 1 10",                ".dc missing 0 1 0.1", ".dc vin 0 1 0",                         ".dc vin 0 1 -1",
+        ".dc vin 0 1 1 missing 0 1 1",   ".tran 0 1u",          ".tran 1u 2u 1u",                        ".pss 0",
+        ".pss 1k 2m v(out) 128 4 50 1m", ".mc 65536",           ".pnoise v(out) vin dec 2 10 100 1k -1", ".pz in 0 out 0 vol pz",
+        ".tf v(out) missing",            ".temp -300 125 55",
+    };
+    for (malformed) |directive| {
+        const nl = try Parser(ngspice).parse(a, try std.fmt.allocPrint(a, "invalid\n{s}\n.end\n", .{directive}));
+        if (buildJob(nl.directives[0], 1, sources)) |_| return error.AcceptedInvalidAnalysis else |_| {}
+    }
+    const unknown: types.Directive = .{ .kind = "options", .args = &.{} };
+    try std.testing.expectEqual(null, try buildJob(unknown, NO_NODE, sources));
+}
+
+test "tf resolves numeric output and named second input before parse arena dies" {
+    var sa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer sa.deinit();
+    var pa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer pa.deinit();
+    var sim = try runDeck(sa.allocator(), &pa,
+        \\two independent inputs
+        \\va ignored 0 dc 2
+        \\vb in 0 dc 10
+        \\r1 in 2 1k
+        \\r2 2 0 3k
+        \\.tf v(2) vb
+        \\.end
+    );
+    defer sim.deinit();
+    const result = sim.getResults()[0];
+    try std.testing.expectEqualStrings("Transfer Function", result.plotname);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.75), result.data[0], 1e-9);
+}
+
+test "deck temperature and tolerances reach statistical and noise jobs" {
+    const options: DeckOptions = .{ .temp_c = 85, .tol = .{ .reltol = 1e-5 } };
+    var noise_job: Job = .{ .noise = .{ .out_node = 0, .f_start = 1, .f_stop = 10 } };
+    applyDeckOptions(&noise_job, options);
+    try std.testing.expectEqual(@as(f64, 358.15), noise_job.noise.temp_k);
+    var temp_job: Job = .{ .temp = .{} };
+    applyDeckOptions(&temp_job, options);
+    try std.testing.expectEqual(@as(f64, 85), temp_job.temp.t_nom);
+    try std.testing.expectEqual(options.tol.reltol, temp_job.temp.dc_options.tol.reltol);
+}
+
+test "sensitivity and mismatch keep separate resistor parameters and analytical derivatives" {
+    var sa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer sa.deinit();
+    var pa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer pa.deinit();
+    var sim = try runDeck(sa.allocator(), &pa,
+        \\parameter derivatives
+        \\vin in 0 dc 10
+        \\r1 in out 1k
+        \\r2 out 0 3k
+        \\.sens v(out)
+        \\.dcmatch v(out)
+        \\.end
+    );
+    defer sim.deinit();
+    for (sim.getResults()) |result| {
+        for (result.varnames, 0..) |name, i| {
+            for (result.varnames[0..i]) |previous| try std.testing.expect(!std.mem.eql(u8, name, previous));
+        }
+        const r1 = columnNamed(result, "resistor#0.r") orelse return error.MissingSensitivity;
+        const r2 = columnNamed(result, "resistor#1.r") orelse return error.MissingSensitivity;
+        try std.testing.expectApproxEqAbs(@as(f64, -0.001875), result.data[r1], 1e-8);
+        try std.testing.expectApproxEqAbs(@as(f64, 0.000625), result.data[r2], 1e-8);
+    }
+}
+
+test "spectral analysis cannot publish an unconverged result" {
+    inline for (.{ ".hb 1k 1", ".qpss 1k 1414 1 1" }) |directive| {
+        var sa = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer sa.deinit();
+        var pa = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer pa.deinit();
+        const nl = try Parser(ngspice).parse(pa.allocator(), "unconverged spectrum\nvin in 0 dc 0\nr1 in out 1k\nc1 out 0 1u\n" ++ directive ++ "\n.end\n");
+        var sim = try Simulation.fromNetlist(sa.allocator(), pa.allocator(), nl, null, .{});
+        defer sim.deinit();
+        _ = pa.reset(.free_all);
+        if (sim.jobs[0] == .hb) {
+            sim.jobs[0].hb.max_iter = 0;
+            try std.testing.expectError(error.HbDidNotConverge, sim.run());
+        } else {
+            sim.jobs[0].qpss.max_newton = 0;
+            try std.testing.expectError(error.QpssDidNotConverge, sim.run());
+        }
+        try std.testing.expectEqual(@as(u32, 0), sim.n_results);
+    }
+}
+
+test "generated parameter collection excludes runtime state and Monte Carlo varies model values" {
+    var sa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer sa.deinit();
+    var pa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer pa.deinit();
+    var sim = try runDeck(sa.allocator(), &pa,
+        \\statistical model parameters
+        \\vin in 0 dc 10
+        \\r1 in out 1k
+        \\r2 out 0 3k
+        \\.mc 16 0.05
+        \\.end
+    );
+    defer sim.deinit();
+    var resistors: u32 = 0;
+    for (try sim.circuit.collectParams()) |ref| {
+        if (ref.is_instance) {
+            try std.testing.expect(std.mem.eql(u8, ref.param_name, "temperature") or std.mem.eql(u8, ref.param_name, "mfactor"));
+            try std.testing.expect(!ref.primary);
+        }
+        if (std.mem.eql(u8, ref.device_type, "resistor") and std.mem.eql(u8, ref.param_name, "r")) {
+            try std.testing.expect(ref.primary);
+            resistors += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(u32, 2), resistors);
+    const result = sim.getResults()[0];
+    try std.testing.expectEqual(@as(usize, 16), result.npoints);
+    const out = columnNamed(result, "v(out)") orelse return error.NoProbe;
+    var varied = false;
+    for (0..result.npoints) |i| {
+        const value = result.data[i * result.varnames.len + out];
+        try std.testing.expect(std.math.isFinite(value));
+        varied = varied or @abs(value - result.data[out]) > 1e-6;
+    }
+    try std.testing.expect(varied);
+}
+
+test "BSIM4 tnoimod1 retains DC conduction with zero source and drain squares" {
+    var currents: [2][2]f64 = undefined;
+    for (&currents, 0..) |*row, mode| {
+        var sa = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer sa.deinit();
+        var pa = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer pa.deinit();
+        const src = try std.fmt.allocPrint(pa.allocator(),
+            \\noise topology DC regression
+            \\vdn dn 0 1
+            \\vgn gn 0 1.2
+            \\vdp dp 0 -1
+            \\vgp gp 0 -1.2
+            \\mn dn gn 0 0 nm l=1u w=10u nrd=0 nrs=0
+            \\mp dp gp 0 0 pm l=1u w=10u nrd=0 nrs=0
+            \\.model nm nmos(level=54 tnoimod={d} rdsmod=0)
+            \\.model pm pmos(level=54 tnoimod={d} rdsmod=0)
+            \\.op
+            \\.end
+        , .{ mode, mode });
+        var sim = try runDeck(sa.allocator(), &pa, src);
+        defer sim.deinit();
+        const result = sim.getResults()[0];
+        for ([_][]const u8{ "i(vdn)", "i(vdp)" }, row) |name, *current| {
+            const col = columnNamed(result, name) orelse return error.NoProbe;
+            current.* = result.data[col];
+            try std.testing.expect(std.math.isFinite(current.*) and @abs(current.*) > 1e-6);
+        }
+    }
+    // Noise mode must preserve DC conduction. The regression fixture checks
+    // absolute ngspice accuracy separately; its existing model gap stays visible.
+    for (currents[0], currents[1]) |direct, internal| try std.testing.expectApproxEqRel(direct, internal, 1e-5);
+}
+
+test "selected numeric parameters fail closed while unused models remain inert" {
+    inline for (.{
+        ".model nm nmos(level=1 tox={missing})\nm1 out in 0 0 nm\n",
+        "r1 out 0 r=0*missing\n",
+        ".param mc=1\n.model nm nmos(level=1 tox={1e-7+mc*agauss(0,1e-9,1)})\nm1 out in 0 0 nm\n",
+    }) |body| {
+        var sa = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer sa.deinit();
+        var pa = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer pa.deinit();
+        const nl = try Parser(ngspice).parse(pa.allocator(), "unresolved numeric parameter\n.param dummy=1\nvin in 0 dc 1\nrload in out 1k\n" ++ body ++ ".op\n.end\n");
+        try std.testing.expectError(error.UnresolvedParameter, Simulation.fromNetlist(sa.allocator(), pa.allocator(), nl, null, .{}));
+    }
+    var sa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer sa.deinit();
+    var pa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer pa.deinit();
+    var sim = try runDeck(sa.allocator(), &pa,
+        \\unused model
+        \\.model unused nmos(level=1 tox={missing})
+        \\vin in 0 dc 1
+        \\r1 in out 1k
+        \\r2 out 0 1k
+        \\.op
+        \\.end
+    );
+    defer sim.deinit();
+    try std.testing.expectApproxEqAbs(@as(f64, 0.5), probeLast(sim.getResults()[0], "out").?, 1e-9);
+}
+
+test "nonfinite model parameter cannot become its default" {
+    var sa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer sa.deinit();
+    var pa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer pa.deinit();
+    const nl = try Parser(ngspice).parse(pa.allocator(),
+        \\invalid model value
+        \\.model nm nmos(level=1 tox={1/0})
+        \\vin in 0 1
+        \\r1 in out 1k
+        \\m1 out in 0 0 nm
+        \\.op
+        \\.end
+    );
+    try std.testing.expectError(error.NonFiniteParameter, Simulation.fromNetlist(sa.allocator(), pa.allocator(), nl, null, .{}));
+}
+
+test "BSIM4 pub model-card parameter reaches its escaped Zig field" {
+    var sa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer sa.deinit();
+    var pa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer pa.deinit();
+    const nl = try Parser(ngspice).parse(pa.allocator(),
+        \\escaped parameter name
+        \\.model nm nmos(level=54 pub=1.25e-18)
+        \\vd drain 0 1
+        \\vg gate 0 1.2
+        \\m1 drain gate 0 0 nm l=1u w=10u
+        \\.op
+        \\.end
+    );
+    var sim = try Simulation.fromNetlist(sa.allocator(), pa.allocator(), nl, null, .{});
+    defer sim.deinit();
+    for (try sim.circuit.collectParams()) |ref| {
+        if (std.mem.eql(u8, ref.param_name, "pubZ")) {
+            try std.testing.expectEqual(@as(f64, 1.25e-18), ref.get());
+            return;
+        }
+    }
+    return error.MissingModelParameter;
 }

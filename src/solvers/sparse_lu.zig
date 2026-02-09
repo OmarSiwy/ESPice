@@ -26,37 +26,8 @@ pub fn SparseLu(comptime T: type) type {
     return struct {
         const Self = @This();
 
-        // ponytail: SIMD lane widths for bulk fill/copy — replaces @memset/@memcpy
         const W = std.simd.suggestVectorLength(T) orelse 1;
         const V = @Vector(W, T);
-        const W32 = std.simd.suggestVectorLength(u32) orelse 1;
-        const V32 = @Vector(W32, u32);
-
-        inline fn simdZero(buf: []T) void {
-            const zero: V = @splat(0);
-            var i: usize = 0;
-            while (i + W <= buf.len) : (i += W) {
-                buf[i..][0..W].* = zero;
-            }
-            for (buf[i..]) |*v| v.* = 0;
-        }
-
-        inline fn simdCopy(dst: []T, src: []const T) void {
-            var i: usize = 0;
-            while (i + W <= dst.len) : (i += W) {
-                dst[i..][0..W].* = src[i..][0..W].*;
-            }
-            for (dst[i..], src[i..]) |*d, s| d.* = s;
-        }
-
-        inline fn simdFillU32(buf: []u32, val: u32) void {
-            const fill: V32 = @splat(val);
-            var i: usize = 0;
-            while (i + W32 <= buf.len) : (i += W32) {
-                buf[i..][0..W32].* = fill;
-            }
-            for (buf[i..]) |*v| v.* = val;
-        }
 
         pub const FactorError = error{ OutOfMemory, SingularMatrix };
 
@@ -88,10 +59,23 @@ pub fn SparseLu(comptime T: type) type {
         /// `voidUnknown`. `refactor` must replay the fabricated unit pivot
         /// instead of reading a zero out of `w` and reporting singularity.
         void_col: []bool,
+        // CSC entries touching a fabricated pivot's row or column. Reuse is
+        // valid only while these stay zero; parameter changes can activate them.
+        void_slots: std.ArrayList(u32) = .empty,
+
+        /// Pivot steps whose diagonal was accepted only by the ROW-SCALED
+        /// threshold test. Such a pivot is legitimately orders below its own
+        /// column max, so `refactor`'s raw growth monitor would reject every
+        /// replay of the tape — it is skipped for these steps.
+        scaled_pivot: []bool,
 
         // ---- hot workspace (length n each) ----
         w: []T, // dense accumulator (zero outside active column)
         y: []T, // solve workspace
+        /// Implicit row scaling for the pivot test: rscale[r] = 1/max_j|A[r][j]|
+        /// (1 for an all-zero or non-finite row). Indexed by ORIGINAL row,
+        /// recomputed once per full `factor`; `refactor` never reads it.
+        rscale: []T,
 
         // ---- cold workspace (length n each, used only in factor) ----
         flag: []u32, // epoch-based DFS visited marker
@@ -119,25 +103,42 @@ pub fn SparseLu(comptime T: type) type {
             var self = Self{
                 .n = n,
                 .q = q,
-                .pinv = try gpa.alloc(u32, n),
-                .lp = try gpa.alloc(u32, @as(usize, n) + 1),
-                .up = try gpa.alloc(u32, @as(usize, n) + 1),
-                .udiag = try gpa.alloc(T, n),
-                .prow = try gpa.alloc(u32, nnz),
-                .void_col = try gpa.alloc(bool, n),
-                .w = try gpa.alloc(T, n),
-                .y = try gpa.alloc(T, n),
-                .flag = try gpa.alloc(u32, n),
-                .topo = try gpa.alloc(u32, n),
-                .stack = try gpa.alloc(u32, n),
-                .pstack = try gpa.alloc(u32, n),
+                .pinv = &.{},
+                .lp = &.{},
+                .up = &.{},
+                .udiag = &.{},
+                .prow = &.{},
+                .void_col = &.{},
+                .scaled_pivot = &.{},
+                .w = &.{},
+                .y = &.{},
+                .rscale = &.{},
+                .flag = &.{},
+                .topo = &.{},
+                .stack = &.{},
+                .pstack = &.{},
             };
+            errdefer self.deinit(gpa);
+            self.pinv = try gpa.alloc(u32, n);
+            self.lp = try gpa.alloc(u32, @as(usize, n) + 1);
+            self.up = try gpa.alloc(u32, @as(usize, n) + 1);
+            self.udiag = try gpa.alloc(T, n);
+            self.prow = try gpa.alloc(u32, nnz);
+            self.void_col = try gpa.alloc(bool, n);
+            self.scaled_pivot = try gpa.alloc(bool, n);
+            self.w = try gpa.alloc(T, n);
+            self.y = try gpa.alloc(T, n);
+            self.rscale = try gpa.alloc(T, n);
+            self.flag = try gpa.alloc(u32, n);
+            self.topo = try gpa.alloc(u32, n);
+            self.stack = try gpa.alloc(u32, n);
+            self.pstack = try gpa.alloc(u32, n);
             try self.li.ensureTotalCapacity(gpa, est_lu);
             try self.lx.ensureTotalCapacity(gpa, est_lu);
             try self.ui.ensureTotalCapacity(gpa, est_lu);
             try self.ux.ensureTotalCapacity(gpa, est_lu);
-            simdZero(self.w);
-            simdFillU32(self.flag, 0);
+            @memset(self.w, 0);
+            @memset(self.flag, 0);
             return self;
         }
 
@@ -145,7 +146,9 @@ pub fn SparseLu(comptime T: type) type {
             inline for (.{ self.pinv, self.lp, self.up, self.prow, self.flag, self.topo, self.stack, self.pstack }) |s|
                 gpa.free(s);
             gpa.free(self.void_col);
-            inline for (.{ self.udiag, self.w, self.y }) |s|
+            gpa.free(self.scaled_pivot);
+            self.void_slots.deinit(gpa);
+            inline for (.{ self.udiag, self.w, self.y, self.rscale }) |s|
                 gpa.free(s);
             self.li.deinit(gpa);
             self.lx.deinit(gpa);
@@ -170,13 +173,30 @@ pub fn SparseLu(comptime T: type) type {
         ) FactorError!void {
             const n = self.n;
             self.factored = false;
-            simdFillU32(self.pinv, NONE);
-            simdFillU32(self.flag, 0);
+            @memset(self.pinv, NONE);
+            @memset(self.flag, 0);
             @memset(self.void_col, false);
+            @memset(self.scaled_pivot, false);
+            self.void_slots.clearRetainingCapacity();
+            var has_void = false;
             self.li.clearRetainingCapacity();
             self.lx.clearRetainingCapacity();
             self.ui.clearRetainingCapacity();
             self.ux.clearRetainingCapacity();
+
+            // ---- implicit row scaling for the pivot test ----
+            // Threshold PARTIAL pivoting compares candidates in whatever units
+            // each device wrote its KCL row in, so the choice is not invariant
+            // under row scaling. One O(nnz) pass records 1/max|A[r,:]| so the
+            // diagonal test below can be retried in the scale-free metric.
+            // Runs only on a FULL factor; `refactor` never pays for it.
+            @memset(self.rscale, 0); // running row max, inverted in place below
+            for (0..n) |j| {
+                for (col_ptr[j]..col_ptr[j + 1]) |p|
+                    self.rscale[row_idx[p]] = @max(self.rscale[row_idx[p]], @abs(vals[p]));
+            }
+            for (self.rscale) |*s|
+                s.* = if (s.* > 0 and std.math.isFinite(s.*)) 1 / s.* else 1;
 
             for (0..n) |k| {
                 const c = self.q[k];
@@ -237,7 +257,14 @@ pub fn SparseLu(comptime T: type) type {
                 }
 
                 // ---- threshold partial pivoting, diagonal preferred ----
+                // Two magnitudes per candidate. `amax` is the raw column max:
+                // it picks the off-diagonal fallback and gates singularity,
+                // exactly as before. `smax` is the same max taken in the
+                // implicit row scaling — that is what the diagonal test falls
+                // back to, so an equation living decades below the rest of the
+                // matrix is still allowed to own its own unknown.
                 var amax: T = 0;
+                var smax: T = 0;
                 var piv: u32 = NONE;
                 for (self.topo[0..nt]) |r| {
                     if (self.pinv[r] != NONE) continue;
@@ -246,6 +273,7 @@ pub fn SparseLu(comptime T: type) type {
                         amax = a;
                         piv = r;
                     }
+                    smax = @max(smax, a * self.rscale[r]);
                 }
                 if (piv == NONE or amax == 0 or !std.math.isFinite(amax)) {
                     // A column with no nonzero unpivoted candidate is normally
@@ -274,12 +302,37 @@ pub fn SparseLu(comptime T: type) type {
                     // 0.93 s against 0.02 s.
                     if (!self.voidUnknown(col_ptr, row_idx, vals, c)) return error.SingularMatrix;
                     self.void_col[k] = true;
+                    has_void = true;
                     self.udiag[k] = 1;
                     self.pinv[c] = @intCast(k);
                     for (self.topo[0..nt]) |r| self.w[r] = 0;
                     continue;
                 }
-                if (self.pinv[c] == NONE and @abs(self.w[c]) >= pivot_tol * amax) piv = c;
+                if (self.pinv[c] == NONE) {
+                    const dmag = @abs(self.w[c]);
+                    if (dmag >= pivot_tol * amax) {
+                        piv = c;
+                    } else if (dmag > 0 and dmag * self.rscale[c] >= pivot_tol * smax) {
+                        // The raw test rejected a diagonal that is the biggest
+                        // entry of the column MEASURED AGAINST ITS OWN EQUATION.
+                        // A BSIMSOI floating body at default junction params is
+                        // exactly this: every entry of the body KCL row is
+                        // ~1e-18 S while Gmbs ~1e-4 S sits in the same COLUMN on
+                        // the drain row. Eliminating the body column through the
+                        // drain row rebuilds the body equation out of numbers
+                        // 1e14 times its own size and dx_body becomes drain-row
+                        // rounding noise divided by Gmbs (observed: -13.9 V).
+                        // ngspice dodges this by DEFERRING the pair — Sparse 1.3
+                        // permutes rows and columns together (spfactor.c
+                        // ExchangeRowsAndCols), which a fixed BTF+AMD column
+                        // order cannot do. See docs/spice-audit-2026-09.md.
+                        // ponytail: implicit scaling of the CHOICE only; the
+                        // upgrade is full row equilibration (KLU Common->scale=2)
+                        // if a fixture ever needs the arithmetic scaled too.
+                        piv = c;
+                        self.scaled_pivot[k] = true;
+                    }
+                }
                 const d = self.w[piv];
                 self.udiag[k] = d;
                 self.pinv[piv] = @intCast(k);
@@ -302,13 +355,28 @@ pub fn SparseLu(comptime T: type) type {
             // Build refactor scatter tape: prow[p] = pinv[row_idx[p]]
             for (row_idx[0..self.prow.len], self.prow) |r, *pr| pr.* = self.pinv[r];
 
+            if (has_void) {
+                var count: usize = 0;
+                for (self.q, 0..) |c, k| {
+                    for (col_ptr[c]..col_ptr[c + 1]) |p|
+                        count += @intFromBool(self.void_col[k] or self.void_col[self.prow[p]]);
+                }
+                try self.void_slots.ensureTotalCapacityPrecise(gpa, count);
+                for (self.q, 0..) |c, k| {
+                    for (col_ptr[c]..col_ptr[c + 1]) |p| {
+                        if (self.void_col[k] or self.void_col[self.prow[p]])
+                            self.void_slots.appendAssumeCapacity(@intCast(p));
+                    }
+                }
+            }
+
             // ZP_LU_STATS: one line per full factor — n, input nnz, fill.
             // link_libc guard: the solvers test module builds without libc,
             // same idiom as direct.zig's ESPICE_NO_BBD.
             if (comptime @import("builtin").link_libc) if (std.c.getenv("ZP_LU_STATS") != null) {
                 std.debug.print("lu-stats: n={d} nnz={d} L={d} U={d} fill={d:.1}x\n", .{
-                    n,                       col_ptr[n],
-                    self.li.items.len,       self.ui.items.len,
+                    n,                 col_ptr[n],
+                    self.li.items.len, self.ui.items.len,
                     @as(f64, @floatFromInt(self.li.items.len + self.ui.items.len)) /
                         @as(f64, @floatFromInt(col_ptr[n])),
                 });
@@ -357,6 +425,9 @@ pub fn SparseLu(comptime T: type) type {
             growth_limit: T,
         ) error{SingularMatrix}!void {
             std.debug.assert(self.factored);
+            for (self.void_slots.items) |p| {
+                if (vals[p] != 0) return error.SingularMatrix;
+            }
             const li = self.li.items;
             const lx = self.lx.items;
             const ui = self.ui.items;
@@ -378,10 +449,7 @@ pub fn SparseLu(comptime T: type) type {
                     for (self.lp[i]..self.lp[i + 1]) |pl| self.w[li[pl]] -= lx[pl] * uki;
                 }
 
-                // Structurally void unknown: replay the unit pivot `factor`
-                // fabricated. The values that made it void are model structure
-                // (a disabled self-heating branch), not a bias-dependent
-                // quantity, so it cannot un-void between refactors.
+                // Void slots were checked above; the fabricated pivot is valid.
                 if (self.void_col[k]) {
                     self.udiag[k] = 1;
                     for (self.lp[k]..self.lp[k + 1]) |p| lx[p] = 0;
@@ -391,7 +459,15 @@ pub fn SparseLu(comptime T: type) type {
                 if (d == 0 or !std.math.isFinite(d)) return error.SingularMatrix;
                 self.udiag[k] = d;
 
-                if (growth_limit > 0) {
+                // The growth monitor compares |d| against the RAW column max,
+                // which is meaningless for a scale-accepted pivot: that pivot
+                // was chosen precisely because its equation lives decades below
+                // the column. Leaving it armed would reject every replay of a
+                // BSIMSOI tape (|d| ~ 1e-18 vs cmax ~ 1e-4) and force a full
+                // factor per Newton iterate.
+                // ponytail: those steps run unmonitored; the upgrade is a
+                // row-scaled cmax, which needs rscale in permuted coordinates.
+                if (growth_limit > 0 and !self.scaled_pivot[k]) {
                     var cmax: T = @abs(d);
                     for (self.lp[k]..self.lp[k + 1]) |p| {
                         const v = self.w[li[p]];
@@ -638,6 +714,54 @@ test "MNA structural zero diagonal: off-diagonal pivoting" {
     try checkSolve(3, a, b, &lu);
 }
 
+test "atto-siemens row keeps its own diagonal (BSIMSOI floating body)" {
+    const gpa = testing.allocator;
+    // Distilled BSIMSOI body block. Row/col 0 is the floating-body KCL row: at
+    // DEFAULT junction params every coefficient in it is atto-siemens. Rows 1/2
+    // are the drain/source nodes — 1 kS of contact conductance and Gmbs = 1 uS
+    // of body transconductance, and that Gmbs sits in the BODY COLUMN. So the
+    // body equation is 14 decades below the rest of the matrix while its column
+    // carries a 1e-6 entry: the raw threshold test (|a00| >= tol*colmax) rejects
+    // the body diagonal, the body column pivots on the drain row, and the body
+    // equation is then reconstructed out of numbers 1e14 times its own size.
+    const a = [4][4]f64{
+        .{ 2.0e-20, -1.0e-20, -1.0e-20, 0.0 },
+        .{ -1.0e-6, 1.0e3, -9.0e-4, 1.0e-3 },
+        .{ 1.0e-6, -9.0e-4, 2.0e-3, -1.0e-3 },
+        .{ 0.0, 0.0, -1.0e-3, 1.0 },
+    };
+    const x_true = [4]f64{ 0.03526, 0.9, 0.1, 1.1 };
+    var b: [4]f64 = .{ 0, 0, 0, 0 };
+    for (0..4) |i| for (0..4) |j| {
+        b[i] += a[i][j] * x_true[j];
+    };
+
+    const csc = DenseCsc(4).from(a);
+    var q = identity(4);
+    var lu = try SparseLu(f64).init(gpa, 4, &csc.col_ptr, csc.row_idx[0..csc.nnz()], &q);
+    defer lu.deinit(gpa);
+    try lu.factor(gpa, &csc.col_ptr, csc.row_idx[0..csc.nnz()], csc.vals[0..csc.nnz()], 1e-3);
+
+    // The body row must pivot its OWN column (step 0 factors column 0).
+    // Without the row-scaled fallback it is pivoted LAST: pinv[0] == 3.
+    try testing.expectEqual(@as(u32, 0), lu.pinv[0]);
+    try testing.expect(lu.scaled_pivot[0]);
+
+    var x: [4]f64 = undefined;
+    lu.solve(&b, &x);
+    // Measured: raw threshold gives x0 = 0.035260200093 (5.7e-6 relative) and
+    // x2 off by 1.3e-9; the row-scaled choice is exact to 2e-15 on every
+    // component. 1e-9 sits three orders clear of both.
+    for (x, x_true) |xi, ref| try testing.expectApproxEqRel(ref, xi, 1e-9);
+
+    // ...and the tape must be replayable: the raw growth monitor sees
+    // |d| = 2e-20 against a column max of 1e-6 and would reject every refactor,
+    // forcing a full factor per Newton iterate.
+    try lu.refactor(&csc.col_ptr, csc.vals[0..csc.nnz()], 1e-12);
+    lu.solve(&b, &x);
+    for (x, x_true) |xi, ref| try testing.expectApproxEqRel(ref, xi, 1e-9);
+}
+
 test "refactor: same pattern, new values" {
     const gpa = testing.allocator;
     var a = [4][4]f64{
@@ -710,6 +834,39 @@ test "structurally void unknown gets a unit pivot, not SingularMatrix" {
     try testing.expectApproxEqAbs(@as(f64, 0.0), x[1], 1e-12);
     try testing.expectApproxEqAbs(@as(f64, 23.0 / 19.0), x[2], 1e-12);
     _ = a;
+}
+
+test "refactor rejects activation of a fabricated pivot's row or column" {
+    const gpa = testing.allocator;
+    const col_ptr = [_]u32{ 0, 2, 4 };
+    const row_idx = [_]u32{ 0, 1, 0, 1 };
+    const updates = [_][4]f64{
+        .{ 2, 0, 0, 4 }, // diagonal activates: solution must use 4, not unit pivot
+        .{ 2, 1, 0, 0 }, // row alone activates: still singular
+        .{ 2, 0, 1, 0 }, // column alone activates: still singular
+        .{ 2, 1, 1, 0 }, // off-diagonal coupling activates: must re-pivot
+    };
+    for ([_][2]u32{ .{ 0, 1 }, .{ 1, 0 } }) |q| {
+        var lu = try SparseLu(f64).init(gpa, 2, &col_ptr, &row_idx, &q);
+        defer lu.deinit(gpa);
+        var fresh = try SparseLu(f64).init(gpa, 2, &col_ptr, &row_idx, &q);
+        defer fresh.deinit(gpa);
+        for (updates) |vals| {
+            try lu.factor(gpa, &col_ptr, &row_idx, &.{ 2, 0, 0, 0 }, 1e-3);
+            try testing.expectError(error.SingularMatrix, lu.refactor(&col_ptr, &vals, 1e-12));
+            fresh.factor(gpa, &col_ptr, &row_idx, &vals, 1e-3) catch |err| {
+                try testing.expectError(err, lu.factor(gpa, &col_ptr, &row_idx, &vals, 1e-3));
+                continue;
+            };
+            try lu.factor(gpa, &col_ptr, &row_idx, &vals, 1e-3);
+            try testing.expectEqual(@as(usize, 0), lu.void_slots.items.len);
+            var actual: [2]f64 = undefined;
+            var expected: [2]f64 = undefined;
+            lu.solve(&.{ 2, 4 }, &actual);
+            fresh.solve(&.{ 2, 4 }, &expected);
+            for (actual, expected) |v, ref| try testing.expectApproxEqAbs(ref, v, 1e-12);
+        }
+    }
 }
 
 test "a genuinely singular matrix is still rejected" {
@@ -865,4 +1022,13 @@ test "f32 instantiation compiles and solves" {
     // [4 1; 1 3]x = [9;7] → x = [20/11, 19/11]
     try testing.expectApproxEqAbs(@as(f32, 20.0 / 11.0), x[0], 1e-5);
     try testing.expectApproxEqAbs(@as(f32, 19.0 / 11.0), x[1], 1e-5);
+}
+
+test "SparseLu construction releases storage on every allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn run(gpa: Allocator) !void {
+            var lu = try SparseLu(f64).init(gpa, 3, &.{ 0, 3, 6, 9 }, &.{ 0, 1, 2, 0, 1, 2, 0, 1, 2 }, &.{ 0, 1, 2 });
+            defer lu.deinit(gpa);
+        }
+    }.run, .{});
 }

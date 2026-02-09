@@ -27,6 +27,8 @@
 //! per-step host round-trips. Falls back to CPU on any error.
 const std = @import("std");
 const root = @import("../types.zig");
+const simdZero = root.zeroSimd;
+const simdCopy = root.copySimd;
 const tran = @import("../tran/tran.zig");
 const converger = @import("solvers").converger;
 const dense_lu = @import("solvers").dense_lu;
@@ -64,19 +66,8 @@ pub const SolveResult = struct {
 };
 
 // ---------------------------------------------------------------------------
-// SIMD helpers — mandatory convention: no @memset, @memcpy, std.mem.*
+// SIMD arithmetic helpers
 // ---------------------------------------------------------------------------
-
-inline fn simdZero(buf: []f64) void {
-    root.zeroSimd(buf);
-}
-
-inline fn simdCopy(dst: []f64, src: []const f64) void {
-    const n = @min(dst.len, src.len);
-    var i: usize = 0;
-    while (i + W <= n) : (i += W) dst[i..][0..W].* = src[i..][0..W].*;
-    while (i < n) : (i += 1) dst[i] = src[i];
-}
 
 /// dst[i] = a[i] + b[i], SIMD.
 inline fn simdAdd(dst: []f64, a: []const f64, b: []const f64) void {

@@ -27,6 +27,7 @@ pub const Options = struct {
 
 pub const Contribution = struct {
     device_name: []const u8,
+    device_index: u32,
     param_name: []const u8,
     sensitivity: f64,
     sigma_param: f64,
@@ -88,7 +89,7 @@ fn fdSensitivity(
     rhs_nom: []const f64,
     rhs_work: []f64,
     param: root.ParamRef,
-) f64 {
+) !f64 {
     const n: usize = ckt.n;
     const orig: f64 = param.get();
     const delta_req = 1e-6 * @abs(orig) + 1e-12;
@@ -98,9 +99,9 @@ fn fdSensitivity(
     const delta = param.get() - orig;
     defer {
         param.set(orig);
-        ckt.recompute();
+        ckt.recompute() catch unreachable; // restores the checked original parameter
     }
-    ckt.recompute();
+    try ckt.recompute();
 
     // Eval at x_op with perturbed parameter — fills rhs
     ckt.eval(x_op, 0);
@@ -186,7 +187,7 @@ pub fn solve(
 
     var total_var: f64 = 0;
     for (refs, contributions) |ref, *contrib| {
-        const sens = fdSensitivity(ckt, x_op, lambda, rhs_nom, rhs_work, ref);
+        const sens = try fdSensitivity(ckt, x_op, lambda, rhs_nom, rhs_work, ref);
 
         const sigma_p = pelgromSigma(ref);
         const var_contrib = sens * sens * sigma_p * sigma_p;
@@ -194,6 +195,7 @@ pub fn solve(
 
         contrib.* = .{
             .device_name = ref.device_type,
+            .device_index = ref.index,
             .param_name = ref.param_name,
             .sensitivity = sens,
             .sigma_param = sigma_p,
@@ -261,7 +263,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     var done: usize = 0;
     errdefer for (names[1..][0..done]) |s| a.free(s);
     for (res.contributions, names[1..]) |c, *name| {
-        name.* = try std.fmt.allocPrint(a, "{s}.{s}", .{ c.device_name, c.param_name });
+        name.* = try std.fmt.allocPrint(a, "{s}#{d}.{s}", .{ c.device_name, c.device_index, c.param_name });
         done += 1;
     }
 
