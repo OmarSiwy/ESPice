@@ -91,7 +91,7 @@ module mos6(d, g, s, b);
     real gmaold, gmanew, capf, capfsw, isats, isatd, czbs, czbd, czbssw, czbdsw;
     real vcrits, vcritd;
     // bias-dependent
-    real vgs, vds, vbs, vbd, vgd, vgx, vb, vdse, mode, sarg, von, vgon, vgonp;
+    real vgs, vds, vbs, vbd, vgd, vgx, vb, vdse, mode, sarg, von, vgon;
     real ux;
     real vdsat, vdsatm, idsat, lam, u, fu, clm, idch, gmch, ibs, ibd;
     real cgsm, cgdm, cgbm, cbase, vdd, vdd1, cgsb, cgdb;
@@ -223,8 +223,17 @@ module mos6(d, g, s, b);
         else czbs = cj * as * m * capf;
         if (cbd > 0.0) czbd = cbd * m * capf;
         else czbd = cj * ad * m * capf;
-        czbssw = cjsw * ps * m * capfsw;
-        czbdsw = cjsw * pd * m * capfsw;
+        // Spelled as a phi, like czbs/czbd two lines up, and for a reason
+        // that is not cosmetic: jqdep's `cz == 0.0` guard is a BRANCH
+        // CONDITION, and VerA re-expands a straight-line parameter expression
+        // inline at a condition instead of reading the precomputed slot — so
+        // the whole capfsw temperature ratio was re-derived twice per
+        // instance-eval just to be compared against zero (34 Ir/eval measured
+        // on devices/mos6_inverter). A phi is materialised, so both arms
+        // hoist. CJSW is `from [0:inf)`, so the else arm is the value the
+        // product already had.
+        if (cjsw > 0.0) czbssw = cjsw * ps * m * capfsw; else czbssw = 0.0;
+        if (cjsw > 0.0) czbdsw = cjsw * pd * m * capfsw; else czbdsw = 0.0;
 
         // Channel prefactor: betac = KC * W * m / Leff, KC temperature-scaled
         // like MOS1's KP (mos1 S1.3: KP(T) = KP / (T/Tnom)^1.5).
@@ -283,10 +292,19 @@ module mos6(d, g, s, b);
         von  = ty * vbit + gammax * sarg - gamma1 * vb - sigma * vdse;
         vgon = vgx - von;
 
-        // Power-law Vdsat is also needed by the Meyer block below cutoff, so
-        // it is evaluated on the clamped overdrive unconditionally.
-        vgonp  = max(vgon, 0.0) + 1e-30;
-        vdsat  = max(kv * pow(vgonp, nv), 1e-30);
+        // Power-law Vdsat is also needed by the Meyer block below cutoff —
+        // but THERE the base is the 1e-30 floor, so vdsat is a
+        // parameter-only constant and vdsatm collapses onto the DEVqmeyer
+        // floor. Writing the two arms out keeps that `pow` off the hot path
+        // (the cutoff arm hoists to precompute) instead of paying it on the
+        // 49% of instance-evals that are in cutoff — 105 Ir/eval measured on
+        // devices/mos6_inverter, 7% of the kernel. Bit-identical:
+        // max(vgon,0) IS vgon on the taken arm, and the derivative the
+        // untaken one used to carry is discarded by max(vdsat, 0.025) for
+        // every parameter set where kv*1e-30^nv < 0.025.
+        // ngspice does not compute it in cutoff either (mos6load.c:493).
+        if (vgon > 0.0) vdsat = max(kv * pow(vgon + 1e-30, nv), 1e-30);
+        else            vdsat = max(kv * pow(1e-30, nv), 1e-30);
         vdsatm = max(vdsat, 0.025);          // DEVqmeyer MAGIC_VDS floor
 
         // ---- channel current ----------------------------------------------
