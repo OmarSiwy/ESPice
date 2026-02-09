@@ -82,7 +82,18 @@ pub fn Dual(comptime N: usize, comptime F: type) type {
 fn DualFor(comptime N: usize, comptime F: type, comptime collapsed: bool) type {
     return struct {
         v: f64,
-        d: V,
+        /// A vector's natural ABI alignment is its SIZE — 64 bytes at N=8,
+        /// F=f64 — which pads this struct to 128 bytes to carry 72 of payload
+        /// and makes every array of duals 44% padding. `evalQ`'s
+        /// `struct{res:[8]S, q:[8]S}` return is 2048 bytes for 1152 of payload,
+        /// of which only 384 can be nonzero. Nothing reads `d` through a raw
+        /// pointer (the dedup cache stores `.v` and `grad()` into separate
+        /// plain arrays), so the alignment buys nothing and costs at most a
+        /// `movaps`->`movups` swap, which is free on any AVX2 part.
+        /// Measured on generated mos1 evalQ: sizeOf 128 -> 72, return struct
+        /// 2048 -> 1152 B, 1727 -> 1631 static instructions (-95 of them moves,
+        /// +2 FP), 920 -> 900 callgrind Ir per instance-eval.
+        d: V align(@alignOf(F)),
 
         // Builders apply D.collapse before freezing the shared scatter tapes.
         pub const collapse_applied = collapsed;
@@ -808,6 +819,20 @@ fn evalRange(comptime D: type, sink: anytype, first: u32, end: u32, t: f64, limi
         // Newton iteration. mos1 keeps 21 of 64 resistive and 16 of 64 reactive
         // columns; the cleared ones also never reached `addPattern`, so there
         // is no matrix entry behind them to add to.
+        //
+        // TWO passes over the rows, and `rhs_idx[id * n_u + ru]` is read in
+        // each of them. That is not an oversight: fusing them into one pass is
+        // bit-identical (the four planes are disjoint arrays and the write
+        // order within each stays `ru`/`cu` ascending) and it does save the
+        // reload plus the `slots + (id*n_u+ru)*n_u` base the two halves share
+        // — 387 -> 360 Ir per instance on the standalone stamp rig at mos1
+        // geometry. It was built and measured on the real kernel and it does
+        // not pay: fusing keeps `out` live across the charge stamps as well,
+        // and inside a 1460-Ir body with 8 duals of each residual already in
+        // the frame the extra pressure costs more than the addressing saves.
+        // mos6_inverter 248.51M -> 246.67M Ir, but parallel_inverters_100
+        // 704.92M -> 706.92M with the whole delta inside the mos1 kernel
+        // (+2.39M). Device-dependent codegen, not a lever. Reverted.
         inline for (0..n_u) |ru| if (!mask_ground or active[ru]) {
             const row = sink.rhsRow(id, ru);
             var val = out[ru].v;
@@ -837,6 +862,30 @@ fn evalRange(comptime D: type, sink: anytype, first: u32, end: u32, t: f64, limi
                 // EVERY charge row is written, cleared pattern included: the
                 // q plane is a conservation sum and `q_tape` is what CKTterr
                 // runs over. Only the JACOBIAN columns are structural.
+                //
+                // A CLEAR PATTERN ROW IS NOT A LICENCE TO SKIP THE STAMP, here
+                // or on the resistive half, and the resistive version of that
+                // mistake is one you would never see in a diff. VerA builds
+                // these masks by ORing `unknownDeps(value)` into the row at
+                // every `res[...]` it emits (codegen.zig `patRow`), so a term
+                // whose value depends on no unknown leaves the row's mask CLEAR
+                // while writing the row. `isource` is exactly that —
+                // `jac_pattern = {0, 0}` with `eval` stamping the DC current
+                // into both rows — so gating `scatterRes` on `jac_pat[ru] != 0`
+                // deletes every independent current source in the netlist.
+                //
+                // No device in today's set does it on the REACTIVE half (all 39
+                // generated devices checked: every row `q` writes has a nonzero
+                // `q_pattern` row), but nothing in the generator prevents it,
+                // and the failure mode is worse: a `ddt()` of something that
+                // varies with `t` and not with `x` would leave `q_tape` holding
+                // a frozen 0 for a state that is actually moving, and
+                // `stepBound` would drop a real LTE bound and run the step
+                // long. Skipping the 4-of-8 dead mos1 charge rows is worth 14
+                // Ir per instance on the stamp rig; the predicate that would
+                // earn it safely is "row `ru` is ever written at all", which
+                // the generator knows and does not emit. That is a VerA
+                // declaration (`q_rows`/`jac_rows`), not a host inference.
                 sink.scatterQ(id, ru, row, qv);
                 if (comptime !SinkT.skip_c and q_pat[ru] != 0) {
                     if (!mask_ground or active[ru]) {
