@@ -51,15 +51,41 @@ else if (artifacts.has_hip)
 else
     null;
 
-/// The GPU backend this binary carries images for, or null. Public so the CLI
-/// can name it when a `--backend cuda|hip` request cannot be honoured.
-pub const detected: ?gompute.Backend = backend;
-
-/// What `--backend` can ask for. `auto` tries the device when work warrants it
-/// and falls back to the CPU. `--gpu` bypasses the work gate. `cuda`/`hip` are
-/// strict — a request this binary cannot honour is a hard error, not a
-/// silent CPU run.
+/// What `--backend` can ask for.
+///
+/// `auto` is the only heuristic mode: it may decline for any reason, including
+/// "this looks too small to pay for the bus", and falls back to the CPU. Every
+/// other GPU request is EXPLICIT — the user named the device — and an explicit
+/// request either runs there or says why not. See `Decline`.
 pub const Request = enum { cpu, auto, cuda, hip };
+
+/// Why `init` refused, in the only three flavours a caller can act on.
+///
+/// The split is the whole `--gpu` contract, so it lives next to the errors it
+/// classifies rather than in the engine's branch arms:
+///
+///   - `.policy`     a PERFORMANCE guess ("too little work to beat the round
+///                   trip"). An explicit request overrides it — that is what
+///                   makes `--gpu` an override instead of a suggestion. Only
+///                   `auto` can ever see one.
+///   - `.capability` nothing in THIS CIRCUIT can run on the device: no device
+///                   type has a kernel, or every model that does was excluded
+///                   from emission (`gpu_max_model_bytes`). No flag changes
+///                   that, so it stays a fallback — reported, never silent.
+///   - `.machine`    the driver, the hardware or this binary's artifacts said
+///                   no. An explicit request must not paper over that with a
+///                   CPU run; it errors naming what was detected.
+pub const Decline = enum { policy, capability, machine };
+
+pub fn declineKind(e: anyerror) Decline {
+    return switch (e) {
+        Error.NotEnoughGpuWork => .policy,
+        Error.CircuitNotEligible => .capability,
+        // `NoGpuArtifacts` included: a build that emitted no device images is
+        // this machine's answer, and `detectedName()` reports it as "none".
+        else => .machine,
+    };
+}
 
 /// A one-word name for what this binary detected, for the mismatch message.
 pub fn detectedName() []const u8 {
@@ -68,8 +94,7 @@ pub fn detectedName() []const u8 {
 
 /// Reject a strict `--backend cuda|hip` that this binary cannot honour, BEFORE
 /// any simulation runs. `auto`/`cpu` always pass here — auto falls back at
-/// run time, cpu never touches the GPU. Returns false and prints the mismatch
-/// (naming what WAS detected) when a named backend is absent.
+/// run time, cpu never touches the GPU.
 pub fn requestSupported(req: Request) bool {
     return switch (req) {
         .cpu, .auto => true,
@@ -119,11 +144,69 @@ pub const Error = error{
 ///
 /// Tunable because the break-even moves with the per-iteration overhead: P1
 /// (pinned async copies, device-side baseline) drops it by roughly 5x.
-const default_min_work: u64 = 200_000;
+///
+/// 2026-09 RETUNE, 200_000 -> 3_200_000. The threshold was measured against a
+/// RAW `count * n_u^2` atomic count. The nonlinear x16 eval-cost weight was
+/// added to `work` afterwards WITHOUT moving the threshold, so the gate has
+/// since been admitting circuits sixteen times smaller than the number it was
+/// derived from. This restores the original intent (200_000 x 16), and wall
+/// clock on this machine (RTX 4060 Laptop / i9-14900HX, ReleaseFast, 2-5 run
+/// medians, whole-process) says the old line was in the wrong place:
+///
+///   fixture                       work    cpu     gpu     auto should
+///   devices/mos6_inverter          82 K   0.02 s  0.38 s  decline (did)
+///   scaling/parallel_inverters_100 205 K  0.05 s  0.50 s  decline (ADMITTED)
+///   tran/fourbitadder             592 K   0.04 s  0.36 s  decline (ADMITTED)
+///   scaling/parallel_inverters_2000 4.1 M 0.55 s  0.66 s  marginal
+///   sweep/opamp_wl_5000            25.6 M 0.66 s  0.90 s  marginal
+///
+/// The two ADMITTED rows are the `todo.md` "small-circuit --gpu no-decline"
+/// symptom, and the cause is not the resident path: a whole GPU run of
+/// fourbitadder is 0.36 s against a 0.04 s circuit, i.e. essentially all of it
+/// is the one-time driver setup the doc measures at ~340 ms (cuInit 114 ms +
+/// primary-context retain 81 ms + per-model module JIT). No `work` proxy can
+/// see that, because it is fixed cost and `work` is per-iteration — a deck
+/// whose ENTIRE CPU run is under ~350 ms cannot win no matter how wide it is.
+///
+/// Note honestly: at the time of this retune NO fixture in the corpus is a GPU
+/// win, because the CPU path got ~3.5x faster (parallel_inverters_2000 was
+/// 3.33 s in the last GPU write-up and is 0.55 s now). 3.2 M is therefore a
+/// conservative "keep auto out of the decks measured to lose by ~10x" line and
+/// not a break-even; `--gpu` overrides it and `ESPICE_GPU_MIN_WORK` tunes it.
+const default_min_work: u64 = 3_200_000;
 
 fn minWork() u64 {
     const s = std.c.getenv("ESPICE_GPU_MIN_WORK") orelse return default_min_work;
     return std.fmt.parseInt(u64, std.mem.span(s), 10) catch default_min_work;
+}
+
+/// `ESPICE_GPU_STATS` — print the residency decision (which batches went to the
+/// device, which demoted and why, and the work the gate measured). Implied by
+/// an explicit `--gpu`/`--backend cuda|hip`, because a demotion under an
+/// explicit request is exactly the thing the user must not have to guess at.
+fn statsOn() bool {
+    return std.c.getenv("ESPICE_GPU_STATS") != null;
+}
+
+/// The model name inside an `arp_eval_<model>` kernel symbol, for the demotion
+/// report. Falls back to the whole symbol if it is not shaped that way.
+fn modelOf(kernel_symbol: []const u8) []const u8 {
+    const p = "arp_eval_";
+    return if (std.mem.startsWith(u8, kernel_symbol, p)) kernel_symbol[p.len..] else kernel_symbol;
+}
+
+/// A CAPABILITY demotion: this batch had a `gpu_payload` but the build emitted
+/// no image for its model, so it keeps stamping the host planes. Correct, and
+/// silently much slower — the host stamp is a scattered read-modify-write per
+/// Jacobian entry per instance and does not vectorize. Naming the model is the
+/// difference between "the GPU is slow here" and "bsim4 was never on it".
+fn reportDemote(on: bool, kernel_symbol: []const u8, which: []const u8, count: u32) void {
+    if (!on) return;
+    std.debug.print(
+        "note: GPU batch '{s}' ({d} instances) stays on the CPU: no {s} kernel image " ++
+            "in this build (model over gpu_max_model_bytes, or a stale image)\n",
+        .{ modelOf(kernel_symbol), count, which },
+    );
 }
 
 /// One batch's resident working set plus the kernel that consumes it.
@@ -150,10 +233,8 @@ const BatchGpu = struct {
     ctx: *anyopaque,
     payload: *const fn (*anyopaque) devices.batch.GpuPayload,
     count: u32,
-    n_u: u32,
     grid: gompute.Dim3,
     has_lim: bool,
-    has_state: bool,
     /// Device-era limiting flag: true once the device lim plane holds live
     /// clamp state (seed upload or first StateKernel launch). Cleared by
     /// `clearLimits`, mirroring the host batch's `lim_active`.
@@ -266,23 +347,47 @@ pub const GpuContext = struct {
     /// Checked after the loop so a driver fault falls back to the CPU instead
     /// of returning a converged-looking answer built on a failed launch.
     launch_err: ?anyerror = null,
-    /// One-shot latch for the `evalPlanes` CPU-fallback warning.
-    warned_fallback: bool = false,
+    /// One-shot latches for the CPU-fallback warnings. TWO, not one: an eval
+    /// fault and a limit/state fault are different failures with different
+    /// fixes, and a single latch let whichever fired first silence the other.
+    warned_eval: bool = false,
+    warned_state: bool = false,
+
+    /// `evalCheck` scratch (g ‖ rhs), empty unless `ESPICE_GPU_EVAL_CHECK` is
+    /// set. Non-empty is the flag — no second bool.
+    chk: []f64 = &.{},
+    /// Worst reproducibility gap seen so far, so the probe prints a new record
+    /// instead of every eval.
+    chk_worst: f64 = 0,
 
     has_charge: bool,
+    /// Whether any RESIDENT batch produces charge. Narrower than `has_charge`,
+    /// which covers the whole circuit: when every charge-producing device stayed
+    /// on the CPU there is nothing for the device C/Q planes to hold, so their
+    /// clears, downloads and merges are all moving zeros. The host planes still
+    /// follow `has_charge` — the CPU batches stamp them.
+    resident_charge: bool,
 
     const Self = @This();
 
     /// Upload every eligible batch and keep it resident. Fails (and the caller
-    /// falls back to the CPU) when NOTHING in the circuit has a kernel, or when
-    /// what does have one is too small to pay for the bus, unless forced.
+    /// classifies with `declineKind`) when NOTHING in the circuit has a kernel,
+    /// or — under `auto` only — when what does have one is too small to pay for
+    /// the bus.
     ///
-    /// Both refusals happen BEFORE the first `gompute` call, which is what makes
-    /// `cuInit` lazy: on this machine the driver charges 113.7 ms for `cuInit`
-    /// and 80.7 ms to retain the primary context, and a netlist that was never
-    /// going to the GPU used to pay all of it just for passing `--gpu`.
-    pub fn init(gpa: std.mem.Allocator, ckt: *Circuit, force: bool) !*Self {
+    /// `explicit` is "the user named the GPU". It does two things, and they are
+    /// the same promise: it BYPASSES the work gate (a performance guess must not
+    /// overrule a direct instruction), and it turns the residency decision
+    /// verbose, so a batch that demotes for want of a kernel image says so
+    /// instead of quietly costing 61 scattered read-modify-writes on the host.
+    ///
+    /// The work refusal happens BEFORE the first `gompute` call, which is what
+    /// makes `cuInit` lazy: on this machine the driver charges 113.7 ms for
+    /// `cuInit` and 80.7 ms to retain the primary context, and a netlist that was
+    /// never going to the GPU used to pay all of it just for passing `--gpu`.
+    pub fn init(gpa: std.mem.Allocator, ckt: *Circuit, explicit: bool) !*Self {
         if (comptime backend == null) return Error.NoGpuArtifacts;
+        const report = explicit or statsOn();
 
         var n_gpu: usize = 0;
         var work: u64 = 0;
@@ -308,7 +413,13 @@ pub const GpuContext = struct {
             work += @as(u64, p.count) * p.n_u * p.n_u * 16;
         }
         if (n_gpu == 0) return Error.CircuitNotEligible;
-        if (!force and work < minWork()) return Error.NotEnoughGpuWork;
+        // POLICY, and the ONLY policy decline there is. `explicit` skips it
+        // outright rather than tuning it: `--gpu` means run on the GPU.
+        if (!explicit and work < minWork()) return Error.NotEnoughGpuWork;
+        if (statsOn()) std.debug.print(
+            "gpu-stats: eligible batches={d} nonlinear work={d} (gate {d}{s})\n",
+            .{ n_gpu, work, minWork(), if (explicit) ", bypassed: explicit request" else "" },
+        );
 
         const self = try gpa.create(Self);
         errdefer gpa.destroy(self);
@@ -324,6 +435,7 @@ pub const GpuContext = struct {
 
         var n_up: usize = 0;
         var n_cpu: usize = 0;
+        var resident_charge = false;
         errdefer for (batches[0..n_up]) |*bg| bg.deinit();
 
         for (ckt.batches) |b| {
@@ -342,6 +454,7 @@ pub const GpuContext = struct {
             // a real fault, not a device the build chose to skip.
             var kernel = gompute.rawKernelByName(backend.?, p.kernel, 0) catch |e| switch (e) {
                 error.KernelNotFound => {
+                    reportDemote(report, p.kernel, "eval", p.count);
                     cpu_batches[n_cpu] = b;
                     n_cpu += 1;
                     continue;
@@ -357,6 +470,7 @@ pub const GpuContext = struct {
             if (p.lim_kernel.len > 0) {
                 lim_kernel = gompute.rawKernelByName(backend.?, p.lim_kernel, 0) catch |e| switch (e) {
                     error.KernelNotFound => {
+                        reportDemote(report, p.kernel, "limit/state", p.count);
                         kernel.deinit();
                         cpu_batches[n_cpu] = b;
                         n_cpu += 1;
@@ -371,6 +485,7 @@ pub const GpuContext = struct {
             if (p.ctl_kernel.len > 0) {
                 ctl_kernel = gompute.rawKernelByName(backend.?, p.ctl_kernel, 0) catch |e| switch (e) {
                     error.KernelNotFound => {
+                        reportDemote(report, p.kernel, "state-latch", p.count);
                         kernel.deinit();
                         if (lim_kernel) |*lk| lk.deinit();
                         cpu_batches[n_cpu] = b;
@@ -399,18 +514,24 @@ pub const GpuContext = struct {
                 .ctx = b.ctx,
                 .payload = get,
                 .count = p.count,
-                .n_u = p.n_u,
                 .grid = gompute.Dim3.linear(p.count, block_size),
                 .has_lim = p.lim_x.len > 0,
-                .has_state = p.states.len > 0,
             };
+            // Decided HERE, after the missing-kernel demotions above: a charge
+            // device that lost its image is a CPU batch and does not count.
+            resident_charge = resident_charge or b.has_charge;
             n_up += 1;
         }
 
         // Every eligible batch demoted for want of an image, so there is nothing
-        // left to launch. Ordered before `batches[0]` below, which would
+        // left to launch. CAPABILITY, not policy — `reportDemote` above already
+        // named each one. Ordered before `batches[0]` below, which would
         // otherwise index an empty array.
         if (n_up == 0) return Error.CircuitNotEligible;
+        if (statsOn()) std.debug.print(
+            "gpu-stats: resident batches={d} host batches={d} charge planes={s}\n",
+            .{ n_up, n_cpu, if (resident_charge) "device" else "host-only" },
+        );
 
         // Any handle allocates from the same primary context, so the planes may
         // hang off batch 0 and still be valid in every other batch's launch.
@@ -428,8 +549,8 @@ pub const GpuContext = struct {
             .cpu_owned = cpu_batches,
             .pin_g = try pinnedF64(k0, ckt.g_vals.len),
             .pin_rhs = try pinnedF64(k0, ckt.rhs.len),
-            .pin_c = if (ckt.has_charge) try pinnedF64(k0, ckt.c_vals.len) else &.{},
-            .pin_q = if (ckt.has_charge) try pinnedF64(k0, ckt.q_vec.len) else &.{},
+            .pin_c = if (resident_charge) try pinnedF64(k0, ckt.c_vals.len) else &.{},
+            .pin_q = if (resident_charge) try pinnedF64(k0, ckt.q_vec.len) else &.{},
             .pin_x = try pinnedF64(k0, ckt.n + 1),
             .pin_x2 = try pinnedF64(k0, ckt.n + 1),
             .pin_flags = try k0.allocPinned(4),
@@ -443,6 +564,11 @@ pub const GpuContext = struct {
             .stream = try k0.createStream(),
             .ws = try converger.Workspace.init(gpa, ckt.n, ckt.col_ptr, ckt.row_idx, ckt.bbd),
             .has_charge = ckt.has_charge,
+            .resident_charge = resident_charge,
+            .chk = if (std.c.getenv("ESPICE_GPU_EVAL_CHECK") != null)
+                try gpa.alloc(f64, ckt.g_vals.len + ckt.rhs.len)
+            else
+                &.{},
         };
         self.ws.slv.params.execution = ckt.solver_execution;
 
@@ -474,6 +600,7 @@ pub const GpuContext = struct {
         self.d_x2.free();
         self.d_flags.free();
         for (self.batches) |*bg| bg.deinit();
+        if (self.chk.len > 0) self.gpa.free(self.chk);
         self.gpa.free(self.batches_owned);
         self.gpa.free(self.cpu_owned);
         self.ws.deinit(self.gpa);
@@ -500,15 +627,53 @@ pub const GpuContext = struct {
     /// Newton solve this is the plain eval both ways.
     fn evalOnGpu(self: *Self, x: []const f64, t: f64) !void {
         if (self.poisoned) return error.GpuStateReject;
-        try self.flushDirtyParams();
+        if (self.params_dirty) try repack(self);
+        const ckt = self.ckt;
+
+        try self.enqueueEval(x, t);
+
+        // The ineligible devices stamp the host planes while the GPU is still
+        // working and the D2H copies are still in flight.
+        @memset(ckt.g_vals, 0);
+        @memset(ckt.rhs, 0);
+        if (self.has_charge) {
+            @memset(ckt.c_vals, 0);
+            @memset(ckt.q_vec, 0);
+        }
+        const pl = ckt.ownPlanes();
+        for (self.cpu_batches) |b| b.eval(b.ctx, &pl, 0, 0, b.count, x, t);
+
+        // One wait, and only on this stream — `cuCtxSynchronize` would stall on
+        // every context on the device, including work this process does not own.
+        try self.stream.synchronize();
+
+        if (self.chk.len > 0) try self.evalCheck(x, t);
+
+        addInto(ckt.g_vals, self.pin_g);
+        addInto(ckt.rhs, self.pin_rhs);
+        if (self.resident_charge) {
+            addInto(ckt.c_vals, self.pin_c);
+            addInto(ckt.q_vec, self.pin_q);
+        }
+
+        // The ground pin, which `Circuit.evalNewton` applies after every batch
+        // has stamped. It is not a device, so no kernel emits it.
+        ckt.g_vals[ckt.diag_slots[0]] += 1.0;
+        ckt.rhs[0] += x[0];
+    }
+
+    /// The device half alone: upload x, clear the planes, launch every resident
+    /// batch, queue the downloads. Enqueue-only — nothing is waited on, which is
+    /// what lets the caller run the host batches underneath it.
+    ///
+    /// Split out of `evalOnGpu` so `evalCheck` can replay the SAME pass at the
+    /// same x. Everything below is enqueued on one stream and the ORDER is the
+    /// whole optimization: the downloads are issued BEFORE the host does its own
+    /// work, so they drain during it instead of after it.
+    fn enqueueEval(self: *Self, x: []const f64, t: f64) !void {
         const ckt = self.ckt;
         const g_bytes = ckt.g_vals.len * @sizeOf(f64);
         const rhs_bytes = ckt.rhs.len * @sizeOf(f64);
-
-        // Everything below is enqueued on one stream and nothing is waited on
-        // until the single `synchronize` at the bottom. The ORDER of the calls
-        // is the whole optimization: the downloads are issued BEFORE the host
-        // does its own work, so they drain during it instead of after it.
 
         @memcpy(self.pin_x[0..x.len], x);
         try self.d_x.uploadAtAsync(self.pin_x.ptr, 0, x.len * @sizeOf(f64), &self.stream);
@@ -518,7 +683,7 @@ pub const GpuContext = struct {
         // for a 400 KB `g` plane, ~1.9 us for `rhs`) and blocked besides.
         try self.d_g.fillAsync(0, g_bytes, &self.stream);
         try self.d_rhs.fillAsync(0, rhs_bytes, &self.stream);
-        if (self.has_charge) {
+        if (self.resident_charge) {
             try self.d_c.fillAsync(0, g_bytes, &self.stream);
             try self.d_q.fillAsync(0, rhs_bytes, &self.stream);
         }
@@ -554,37 +719,61 @@ pub const GpuContext = struct {
         // those, and a download would overwrite them.
         try self.d_g.downloadAtAsync(self.pin_g.ptr, 0, g_bytes, &self.stream);
         try self.d_rhs.downloadAtAsync(self.pin_rhs.ptr, 0, rhs_bytes, &self.stream);
-        if (self.has_charge) {
+        if (self.resident_charge) {
             try self.d_c.downloadAtAsync(self.pin_c.ptr, 0, g_bytes, &self.stream);
             try self.d_q.downloadAtAsync(self.pin_q.ptr, 0, rhs_bytes, &self.stream);
         }
+    }
 
-        // The ineligible devices stamp the host planes while the GPU is still
-        // working and the D2H copies are still in flight.
-        @memset(ckt.g_vals, 0);
-        @memset(ckt.rhs, 0);
-        if (self.has_charge) {
-            @memset(ckt.c_vals, 0);
-            @memset(ckt.q_vec, 0);
-        }
-        const pl = ckt.ownPlanes();
-        for (self.cpu_batches) |b| b.eval(b.ctx, &pl, 0, 0, b.count, x, t);
+    /// `ESPICE_GPU_EVAL_CHECK=1` — is the device half a FUNCTION of x?
+    ///
+    /// Newton needs one. `converger.finalizeStep` accepts an iterate by
+    /// comparing it to the previous one, so a stamp that moves while x stands
+    /// still can never converge: dx floors at the wobble and the transient
+    /// halves dt until it underflows. The atomic scatter reduces in whatever
+    /// order the hardware schedules, which it does not promise to repeat, so
+    /// this replays the launches at the same x and reports the worst plane
+    /// entry that moved. The first pass's values are restored afterwards, so a
+    /// checked run stamps exactly what an unchecked one would.
+    fn evalCheck(self: *Self, x: []const f64, t: f64) !void {
+        const ng = self.pin_g.len;
+        const chk_g = self.chk[0..ng];
+        const chk_rhs = self.chk[ng..];
+        @memcpy(chk_g, self.pin_g);
+        @memcpy(chk_rhs, self.pin_rhs);
 
-        // One wait, and only on this stream — `cuCtxSynchronize` would stall on
-        // every context on the device, including work this process does not own.
+        try self.enqueueEval(x, t);
         try self.stream.synchronize();
 
-        addInto(ckt.g_vals, self.pin_g);
-        addInto(ckt.rhs, self.pin_rhs);
-        if (self.has_charge) {
-            addInto(ckt.c_vals, self.pin_c);
-            addInto(ckt.q_vec, self.pin_q);
+        var worst: f64 = 0;
+        var where: usize = 0;
+        var plane: []const u8 = "g";
+        for (chk_g, self.pin_g, 0..) |a, b, i| {
+            const d = @abs(a - b);
+            if (d > worst) {
+                worst = d;
+                where = i;
+                plane = "g";
+            }
+        }
+        for (chk_rhs, self.pin_rhs, 0..) |a, b, i| {
+            const d = @abs(a - b);
+            if (d > worst) {
+                worst = d;
+                where = i;
+                plane = "rhs";
+            }
+        }
+        if (worst > self.chk_worst) {
+            self.chk_worst = worst;
+            std.debug.print(
+                "gpu-check: eval is not reproducible at t={e:.6}: |Δ{s}[{d}]|={e:.3} (was {e:.16}, now {e:.16})\n",
+                .{ t, plane, where, worst, if (std.mem.eql(u8, plane, "g")) chk_g[where] else chk_rhs[where], if (std.mem.eql(u8, plane, "g")) self.pin_g[where] else self.pin_rhs[where] },
+            );
         }
 
-        // The ground pin, which `Circuit.evalNewton` applies after every batch
-        // has stamped. It is not a device, so no kernel emits it.
-        ckt.g_vals[ckt.diag_slots[0]] += 1.0;
-        ckt.rhs[0] += x[0];
+        @memcpy(self.pin_g, chk_g);
+        @memcpy(self.pin_rhs, chk_rhs);
     }
 
     inline fn addInto(dst: []f64, src: []const f64) void {
@@ -602,8 +791,8 @@ pub const GpuContext = struct {
     fn evalPlanes(ctx: *anyopaque, x: []const f64, t: f64) void {
         const self: *Self = @ptrCast(@alignCast(ctx));
         self.evalOnGpu(x, t) catch |e| {
-            if (!self.warned_fallback) {
-                self.warned_fallback = true;
+            if (!self.warned_eval) {
+                self.warned_eval = true;
                 std.debug.print(
                     "warning: GPU device eval failed ({s}); falling back to the CPU stamp\n",
                     .{@errorName(e)},
@@ -632,7 +821,7 @@ pub const GpuContext = struct {
     /// `limited` answer immediately.
     fn applyLimitsOnGpu(self: *Self, x: []f64, x_old: []const f64) !bool {
         if (self.poisoned) return error.GpuStateReject;
-        try self.flushDirtyParams();
+        if (self.params_dirty) try repack(self);
         const n = self.ckt.n;
 
         // x -> d_x2, x_old -> d_x. Explicit x_old upload rather than trusting
@@ -762,12 +951,19 @@ pub const GpuContext = struct {
             });
             launched = true;
         }
+        // Queued ahead of the host walk, like `evalOnGpu` and
+        // `applyLimitsOnGpu`: the flags drain while the CPU hooks run. It also
+        // keeps a failed enqueue on the near side of the host walk — the
+        // `stateCtlHook` fallback re-walks EVERY batch, and the accepted-step
+        // path commit (`pq += wq`) is not idempotent.
+        if (launched)
+            try self.d_flags.downloadAtAsync(self.pin_flags.ptr, 0, 4, &self.stream);
+
         var dirty = false;
         for (self.cpu_batches) |b| if (b.hooks.state_ctl) |f| {
             if (f(b.ctx, op)) dirty = true;
         };
         if (launched) {
-            try self.d_flags.downloadAtAsync(self.pin_flags.ptr, 0, 4, &self.stream);
             try self.stream.synchronize();
             if (std.mem.readInt(u32, self.pin_flags[0..4], .little) != 0) dirty = true;
         }
@@ -798,8 +994,8 @@ pub const GpuContext = struct {
     }
 
     fn warnStateFallback(self: *Self) void {
-        if (self.warned_fallback) return;
-        self.warned_fallback = true;
+        if (self.warned_state) return;
+        self.warned_state = true;
         std.debug.print(
             "warning: GPU limit/state pass failed; falling back to the CPU walk\n",
             .{},
@@ -854,11 +1050,6 @@ pub const GpuContext = struct {
     fn markDirty(ctx: *anyopaque) void {
         const self: *Self = @ptrCast(@alignCast(ctx));
         self.params_dirty = true;
-    }
-
-    fn flushDirtyParams(self: *Self) !void {
-        if (!self.params_dirty) return;
-        try repack(self);
     }
 
     /// What `Circuit.gpu_hook` gets.

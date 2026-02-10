@@ -13,8 +13,6 @@ const psf = @import("output/psf.zig");
 const sst2 = @import("output/sst2.zig");
 const fsdb = @import("output/fsdb.zig");
 
-pub const types = @import("frontend/types.zig");
-pub const Token = @import("frontend/tokenizer.zig").Token;
 pub const Parser = @import("frontend/parser.zig").Parser;
 pub const ngspice = @import("frontend/tokenizer.zig").ngspice;
 pub const hspice = @import("frontend/tokenizer.zig").hspice;
@@ -47,42 +45,20 @@ const Mode = enum { batch, interactive, server, pipe };
 const Tokenizer = enum { ngspice, hspice, spectre };
 const Format = enum { binary, ascii, csv, touchstone, psf, fsdb, sst2, citi, print };
 
-const FormatSpec = struct {
-    names: []const []const u8,
-    value: Format,
-    writer: *const fn (std.Io, []const u8, rawfile.Plot) anyerror!void,
-};
-
-const format_specs = [_]FormatSpec{
-    .{ .names = &.{ "binary", "raw" }, .value = .binary, .writer = rawfile.write },
-    .{ .names = &.{"ascii"}, .value = .ascii, .writer = ascii_raw.write },
-    .{ .names = &.{"csv"}, .value = .csv, .writer = csv.write },
-    .{ .names = &.{ "touchstone", "snp", "s2p" }, .value = .touchstone, .writer = touchstone.write },
-    .{ .names = &.{"psf"}, .value = .psf, .writer = psf.write },
-    .{ .names = &.{"fsdb"}, .value = .fsdb, .writer = fsdb.write },
-    .{ .names = &.{ "sst2", "hspice" }, .value = .sst2, .writer = sst2.write },
-    .{ .names = &.{ "citi", "citifile" }, .value = .citi, .writer = citifile.write },
-    .{ .names = &.{ "print", "text" }, .value = .print, .writer = spice_print.write },
-};
-
-// ponytail: fixed-size arrays, no ArrayList. 16 decks / 16 defines is generous.
+// ponytail: up to 16 decks; use an ArrayList if more are needed.
 const Options = struct {
     mode: Mode = .interactive,
     tokenizer: Tokenizer = .ngspice,
     raw_path: ?[]const u8 = null,
     format: Format = .binary,
-    log_path: ?[]const u8 = null,
-    no_spiceinit: bool = false,
-    autorun: bool = false,
     backend: gpu_context.Request = .cpu,
-    gpu_force: bool = false,
-    defines: [16]?Define = .{null} ** 16,
-    n_defines: usize = 0,
-    deck_paths: [16]?[]const u8 = .{null} ** 16,
+    /// The user NAMED the device. `--gpu` and `--backend cuda|hip` both do;
+    /// `--backend auto` does not, and that is the entire difference between
+    /// "use the GPU" and "use the GPU if you feel like it".
+    gpu_explicit: bool = false,
+    deck_paths: [16][]const u8 = undefined,
     n_decks: usize = 0,
 };
-
-const Define = struct { name: []const u8, value: []const u8 };
 
 pub fn main(init: std.process.Init) !u8 {
     const io = init.io;
@@ -107,42 +83,63 @@ pub fn main(init: std.process.Init) !u8 {
             if (parseMode(arg)) |mode| {
                 opts.mode = mode;
             } else if (std.mem.eql(u8, arg, "-a") or std.mem.eql(u8, arg, "--autorun")) {
-                opts.autorun = true;
             } else if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--no-spiceinit")) {
-                opts.no_spiceinit = true;
             } else if (std.mem.eql(u8, arg, "--gpu")) {
                 opts.backend = .auto;
-                opts.gpu_force = true;
+                opts.gpu_explicit = true;
             } else if (optionValue(arg, "", "--backend", &it)) |oa| {
-                const val = valueOrUsage(oa, io) orelse return 2;
-                opts.backend = parseBackend(val) orelse {
+                const val = valueOrUsage(oa) orelse return 2;
+                opts.backend = std.meta.stringToEnum(gpu_context.Request, val) orelse {
                     std.debug.print("Error: unknown backend '{s}' (want auto|cpu|cuda|hip)\n", .{val});
                     return 2;
                 };
-                opts.gpu_force = false;
+                // Naming a backend IS an explicit request, and `auto` is the
+                // only mode that keeps the work-gate heuristic. Sticky (`or`),
+                // never cleared: `--gpu --backend auto` in either order still
+                // asked for the GPU, so neither ordering silently runs on the
+                // CPU. `--backend cpu` needs no clearing — it turns the GPU off.
+                opts.gpu_explicit = opts.gpu_explicit or
+                    opts.backend == .cuda or opts.backend == .hip;
             } else if (optionValue(arg, "-r", "--rawfile", &it)) |oa| {
-                opts.raw_path = valueOrUsage(oa, io) orelse return 2;
+                opts.raw_path = valueOrUsage(oa) orelse return 2;
             } else if (optionValue(arg, "-o", "--output", &it)) |oa| {
-                opts.log_path = valueOrUsage(oa, io) orelse return 2;
+                _ = valueOrUsage(oa) orelse return 2;
             } else if (optionValue(arg, "-D", "--define", &it)) |oa| {
-                const val = valueOrUsage(oa, io) orelse return 2;
-                addDefine(&opts, val);
+                _ = valueOrUsage(oa) orelse return 2;
             } else if (std.mem.startsWith(u8, arg, "-D") and arg.len > 2) {
-                addDefine(&opts, arg[2..]);
             } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
-                printHelp(io);
+                std.debug.print(
+                    \\Usage: espice [OPTION]... [FILE]...
+                    \\
+                    \\  -a, --autorun              Run the loaded netlist at once
+                    \\  -b, --batch                Process FILE in batch mode
+                    \\      --backend=BE           Compute backend (auto|cpu|cuda|hip, default cpu; auto may decline)
+                    \\      --gpu                  Require the GPU: bypasses the work gate, errors if unavailable
+                    \\  -D, --define=var[=val]     Define a variable
+                    \\      --format=FMT            Output format (binary|ascii|csv|touchstone|psf|fsdb|sst2|citi|print)
+                    \\  -h, --help                 Display this help and exit
+                    \\  -i, --interactive          Run in interactive mode
+                    \\  -n, --no-spiceinit         Don't load .spiceinit
+                    \\  -o, --output=FILE          Set the output file for batch logs
+                    \\  -p, --pipe                 Run in I/O pipe mode
+                    \\  -r, --rawfile=FILE         Set the raw output file
+                    \\  -s, --server               Run in server mode
+                    \\  -tokenizer, --tokenizer=FMT  Input format (ngspice|hspice|spectre)
+                    \\  -v, --version              Output version information
+                    \\
+                , .{});
                 return 0;
             } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--version")) {
-                printVersion(io);
+                std.debug.print("espice 0.1.0\nCircuit level simulation program.\nBuilt with Zig.\n", .{});
                 return 0;
             } else if (optionValue(arg, "", "--format", &it)) |oa| {
-                const val = valueOrUsage(oa, io) orelse return 2;
+                const val = valueOrUsage(oa) orelse return 2;
                 opts.format = parseFormat(val) orelse {
                     std.debug.print("Error: unknown format '{s}'\n", .{val});
                     return 2;
                 };
             } else if (optionValue(arg, "-tokenizer", "--tokenizer", &it)) |oa| {
-                const val = valueOrUsage(oa, io) orelse return 2;
+                const val = valueOrUsage(oa) orelse return 2;
                 opts.tokenizer = parseTokenizer(val) orelse {
                     std.debug.print("Error: unknown tokenizer '{s}'\n", .{val});
                     return 2;
@@ -151,13 +148,12 @@ pub fn main(init: std.process.Init) !u8 {
                 std.mem.startsWith(u8, arg, "--soa-log"))
             {
                 // ignored
-            } else if (std.mem.eql(u8, arg, "-t") or std.mem.eql(u8, arg, "--term") or
-                std.mem.eql(u8, arg, "--soa-log"))
+            } else if (std.mem.eql(u8, arg, "-t") or std.mem.eql(u8, arg, "--term"))
             {
                 _ = it.skip();
             } else {
                 std.debug.print("Error: unknown option: {s}\n", .{arg});
-                return usageFail(io);
+                return usageFail();
             }
         } else {
             if (opts.n_decks < opts.deck_paths.len) {
@@ -169,11 +165,17 @@ pub fn main(init: std.process.Init) !u8 {
 
     if (opts.n_decks == 0 and opts.mode == .batch) {
         std.debug.print("Error: no input file specified for batch mode\n", .{});
-        return usageFail(io);
+        return usageFail();
     }
 
     if (opts.n_decks == 0) {
-        printBanner(io);
+        std.debug.print(
+            \\
+            \\  espice 0.1.0
+            \\  Circuit level simulation program
+            \\
+            \\
+        , .{});
         std.debug.print("Note: interactive mode not yet implemented\n", .{});
         return 0;
     }
@@ -186,8 +188,7 @@ pub fn main(init: std.process.Init) !u8 {
     }
 
     var any_ran = false;
-    for (opts.deck_paths[0..opts.n_decks]) |maybe_path| {
-        const path = maybe_path orelse continue;
+    for (opts.deck_paths[0..opts.n_decks]) |path| {
         const src = (if (opts.tokenizer == .spectre)
             std.Io.Dir.cwd().readFileAlloc(io, path, arena, .unlimited)
         else
@@ -242,14 +243,13 @@ pub fn main(init: std.process.Init) !u8 {
 
         if (opts.mode == .batch) {
             // Resolve the backend request to the engine's opt-in flags:
-            // .cpu never touches the GPU; .auto/.cuda/.hip engage it. Strict
-            // cuda/hip that this BINARY cannot honour was already rejected
-            // above; gpu_strict makes a MACHINE that cannot honour it (absent
-            // device/driver) a hard error in run() instead of a CPU fallback.
+            // .cpu never touches the GPU; .auto/.cuda/.hip engage it. A named
+            // cuda/hip this BINARY cannot honour was already rejected above;
+            // gpu_explicit makes a MACHINE that cannot honour it (absent
+            // device/driver) a hard error in run(), and turns the work gate off.
             var sim = engine.Simulation.fromNetlist(sim_arena, arena, nl, io, .{
                 .gpu = opts.backend != .cpu,
-                .gpu_force = opts.gpu_force,
-                .gpu_strict = opts.backend == .cuda or opts.backend == .hip,
+                .gpu_explicit = opts.gpu_explicit,
             }) catch |e| {
                 std.debug.print("Engine error: {s}\n", .{@errorName(e)});
                 return skip(io, @errorName(e));
@@ -310,6 +310,15 @@ pub fn main(init: std.process.Init) !u8 {
             const results = sim.getResults();
             if (opts.raw_path) |raw_path| {
                 for (results, 0..) |res, ri| {
+                    // ponytail: both raw output paths consume the same plot metadata.
+                    const plot: rawfile.Plot = .{
+                        .title = sim.title,
+                        .plotname = res.plotname,
+                        .varnames = res.varnames,
+                        .is_complex = res.is_complex,
+                        .npoints = res.npoints,
+                        .data = res.data,
+                    };
                     // ngspice appends every plot to ONE raw file; readers (the
                     // benchmark runner included) parse the concatenation. The
                     // old `{path}.{d}` side files left every analysis past the
@@ -317,28 +326,14 @@ pub fn main(init: std.process.Init) !u8 {
                     // compared at all. Non-raw formats keep the suffix: they
                     // have no multi-plot framing.
                     if (opts.format == .binary and ri > 0) {
-                        rawfile.writeAppend(io, raw_path, .{
-                            .title = sim.title,
-                            .plotname = res.plotname,
-                            .varnames = res.varnames,
-                            .is_complex = res.is_complex,
-                            .npoints = res.npoints,
-                            .data = res.data,
-                        }) catch return skip(io, "write error");
+                        rawfile.writeAppend(io, raw_path, plot) catch return skip(io, "write error");
                         continue;
                     }
                     const plot_path = if (ri == 0)
                         raw_path
                     else
                         try std.fmt.allocPrint(arena, "{s}.{d}", .{ raw_path, ri + 1 });
-                    writePlot(io, plot_path, opts.format, .{
-                        .title = sim.title,
-                        .plotname = res.plotname,
-                        .varnames = res.varnames,
-                        .is_complex = res.is_complex,
-                        .npoints = res.npoints,
-                        .data = res.data,
-                    }) catch return skip(io, "write error");
+                    writePlot(io, plot_path, opts.format, plot) catch return skip(io, "write error");
                 }
             }
 
@@ -369,39 +364,34 @@ pub fn main(init: std.process.Init) !u8 {
     return 0;
 }
 
+// ponytail: fixed CLI aliases use stdlib maps; writers dispatch on the resolved enum.
 fn parseFormat(s: []const u8) ?Format {
-    for (format_specs) |spec| if (matchesAny(s, spec.names)) return spec.value;
-    return null;
+    return std.StaticStringMap(Format).initComptime(.{
+        .{ "binary", .binary }, .{ "raw", .binary },
+        .{ "ascii", .ascii }, .{ "csv", .csv },
+        .{ "touchstone", .touchstone }, .{ "snp", .touchstone }, .{ "s2p", .touchstone },
+        .{ "psf", .psf }, .{ "fsdb", .fsdb },
+        .{ "sst2", .sst2 }, .{ "hspice", .sst2 },
+        .{ "citi", .citi }, .{ "citifile", .citi },
+        .{ "print", .print }, .{ "text", .print },
+    }).get(s);
 }
 
 fn parseTokenizer(s: []const u8) ?Tokenizer {
-    const specs = [_]struct { names: []const []const u8, value: Tokenizer }{
-        .{ .names = &.{ "ngspice", "ng" }, .value = .ngspice },
-        .{ .names = &.{ "hspice", "hs" }, .value = .hspice },
-        .{ .names = &.{ "spectre", "scs" }, .value = .spectre },
-    };
-    for (specs) |spec| if (matchesAny(s, spec.names)) return spec.value;
-    return null;
-}
-
-fn parseBackend(s: []const u8) ?gpu_context.Request {
-    return std.meta.stringToEnum(gpu_context.Request, s);
+    return std.StaticStringMap(Tokenizer).initComptime(.{
+        .{ "ngspice", .ngspice }, .{ "ng", .ngspice },
+        .{ "hspice", .hspice }, .{ "hs", .hspice },
+        .{ "spectre", .spectre }, .{ "scs", .spectre },
+    }).get(s);
 }
 
 fn parseMode(s: []const u8) ?Mode {
-    const specs = [_]struct { names: []const []const u8, value: Mode }{
-        .{ .names = &.{ "-b", "--batch" }, .value = .batch },
-        .{ .names = &.{ "-i", "--interactive" }, .value = .interactive },
-        .{ .names = &.{ "-s", "--server" }, .value = .server },
-        .{ .names = &.{ "-p", "--pipe" }, .value = .pipe },
-    };
-    for (specs) |spec| if (matchesAny(s, spec.names)) return spec.value;
-    return null;
-}
-
-fn matchesAny(s: []const u8, names: []const []const u8) bool {
-    for (names) |name| if (std.mem.eql(u8, s, name)) return true;
-    return false;
+    return std.StaticStringMap(Mode).initComptime(.{
+        .{ "-b", .batch }, .{ "--batch", .batch },
+        .{ "-i", .interactive }, .{ "--interactive", .interactive },
+        .{ "-s", .server }, .{ "--server", .server },
+        .{ "-p", .pipe }, .{ "--pipe", .pipe },
+    }).get(s);
 }
 
 const OptionArg = union(enum) { value: []const u8, missing };
@@ -416,28 +406,28 @@ fn optionValue(arg: []const u8, short: []const u8, long: []const u8, it: anytype
     return null;
 }
 
-fn valueOrUsage(oa: OptionArg, io: std.Io) ?[]const u8 {
+fn valueOrUsage(oa: OptionArg) ?[]const u8 {
     return switch (oa) {
         .value => |v| v,
         .missing => blk: {
-            _ = usageFail(io);
+            _ = usageFail();
             break :blk null;
         },
     };
 }
 
 fn writePlot(io: std.Io, path: []const u8, format: Format, plot: rawfile.Plot) !void {
-    for (format_specs) |spec| if (spec.value == format) return spec.writer(io, path, plot);
-    unreachable;
-}
-
-fn addDefine(opts: *Options, spec: []const u8) void {
-    if (opts.n_defines >= opts.defines.len) return;
-    if (std.mem.indexOfScalar(u8, spec, '=')) |eq|
-        opts.defines[opts.n_defines] = .{ .name = spec[0..eq], .value = spec[eq + 1 ..] }
-    else
-        opts.defines[opts.n_defines] = .{ .name = spec, .value = "true" };
-    opts.n_defines += 1;
+    return switch (format) {
+        .binary => rawfile.write(io, path, plot),
+        .ascii => ascii_raw.write(io, path, plot),
+        .csv => csv.write(io, path, plot),
+        .touchstone => touchstone.write(io, path, plot),
+        .psf => psf.write(io, path, plot),
+        .fsdb => fsdb.write(io, path, plot),
+        .sst2 => sst2.write(io, path, plot),
+        .citi => citifile.write(io, path, plot),
+        .print => spice_print.write(io, path, plot),
+    };
 }
 
 fn skip(io: std.Io, reason: []const u8) u8 {
@@ -448,48 +438,7 @@ fn skip(io: std.Io, reason: []const u8) u8 {
     return 1;
 }
 
-fn usageFail(io: std.Io) u8 {
-    _ = io;
+fn usageFail() u8 {
     std.debug.print("Usage: espice [OPTION]... [FILE]...\nTry 'espice -h' for more information.\n", .{});
     return 2;
-}
-
-fn printBanner(io: std.Io) void {
-    _ = io;
-    std.debug.print(
-        \\
-        \\  espice 0.1.0
-        \\  Circuit level simulation program
-        \\
-        \\
-    , .{});
-}
-
-fn printVersion(io: std.Io) void {
-    _ = io;
-    std.debug.print("espice 0.1.0\nCircuit level simulation program.\nBuilt with Zig.\n", .{});
-}
-
-fn printHelp(io: std.Io) void {
-    _ = io;
-    std.debug.print(
-        \\Usage: espice [OPTION]... [FILE]...
-        \\
-        \\  -a, --autorun              Run the loaded netlist at once
-        \\  -b, --batch                Process FILE in batch mode
-        \\      --backend=BE           Compute backend (auto|cpu|cuda|hip, default cpu; auto probes the GPU)
-        \\      --gpu                  Use GPU regardless of device count or work threshold
-        \\  -D, --define=var[=val]     Define a variable
-        \\      --format=FMT            Output format (binary|ascii|csv|touchstone|psf|fsdb|sst2|citi|print)
-        \\  -h, --help                 Display this help and exit
-        \\  -i, --interactive          Run in interactive mode
-        \\  -n, --no-spiceinit         Don't load .spiceinit
-        \\  -o, --output=FILE          Set the output file for batch logs
-        \\  -p, --pipe                 Run in I/O pipe mode
-        \\  -r, --rawfile=FILE         Set the raw output file
-        \\  -s, --server               Run in server mode
-        \\  -tokenizer, --tokenizer=FMT  Input format (ngspice|hspice|spectre)
-        \\  -v, --version              Output version information
-        \\
-    , .{});
 }

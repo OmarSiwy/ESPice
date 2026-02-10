@@ -3,7 +3,7 @@
 //! Data flow:  types.Netlist ──netlist.NetBuilder──▶ builder.Builder
 //!             ──compile()──▶ analysis.Circuit ──run()──▶ []Result
 //!
-//! Netlist→device wiring policy lives in netlist.zig; this file owns the
+//! Netlist→device wiring policy lives in builder.zig; this file owns the
 //! Simulation lifecycle: compile, job dispatch, result collection.
 
 const std = @import("std");
@@ -38,13 +38,14 @@ const Sources = struct {
 };
 
 pub const SimConfig = struct {
+    /// Engage the GPU at all. False for `--backend cpu` (the default).
     gpu: bool = false,
-    /// Bypass the work gate; hardware and kernel eligibility still apply.
-    gpu_force: bool = false,
-    /// A named `--backend cuda|hip` request: a GPU init failure is then a
-    /// hard error naming itself, never a silent CPU run. `--gpu`/`auto`
-    /// keeps the warn-and-fall-back behavior.
-    gpu_strict: bool = false,
+    /// The user NAMED the device (`--gpu`, `--backend cuda|hip`) rather than
+    /// asking for `auto`. One flag because it is one promise: the performance
+    /// work-gate is bypassed AND a decline it cannot override is a hard error
+    /// naming what was detected, never a silent CPU run. Correctness-driven
+    /// fallbacks survive it — see `gpu_context.Decline`.
+    gpu_explicit: bool = false,
 };
 
 /// One `.ic V(node)=value` card, resolved to a circuit index at build time.
@@ -97,9 +98,9 @@ pub const Simulation = struct {
     /// so a context holding `&sim.circuit` taken now would dangle — the same
     /// reason `par_eval` is attached late.
     gpu_requested: bool,
-    gpu_force: bool,
-    /// SimConfig.gpu_strict — a named backend request must not silently CPU.
-    gpu_strict: bool,
+    /// SimConfig.gpu_explicit — the user named the device, so the work gate is
+    /// off and a machine-level refusal is an error rather than a CPU run.
+    gpu_explicit: bool,
     gpu_ctx: ?*gpu_context.GpuContext,
     /// Operating point memo, indexed by flavor: [0] DCOP, [1] TRANOP. Each
     /// is solved once on first demand and shared across jobs of that flavor.
@@ -205,8 +206,6 @@ pub const Simulation = struct {
             }
         }.f;
         for (nb.v_branches[0..nb.n_v]) |*v| v.* = mapNode(perm, v.*);
-        for (nb.v_ports[0..nb.n_v]) |*v| v.* = mapNode(perm, v.*);
-        for (nb.v_nports[0..nb.n_v]) |*v| v.* = mapNode(perm, v.*);
         for (nb.l_branches[0..nb.n_l]) |*v| v.* = mapNode(perm, v.*);
         nb.source_node = mapNode(perm, nb.source_node);
         nb.source_branch = mapNode(perm, nb.source_branch);
@@ -215,8 +214,7 @@ pub const Simulation = struct {
         }
         for (ic_buf[0..n_ic_used]) |*e| e.node = mapNode(perm, e.node);
         sim.gpu_requested = config.gpu;
-        sim.gpu_force = config.gpu_force;
-        sim.gpu_strict = config.gpu_strict;
+        sim.gpu_explicit = config.gpu_explicit;
         sim.gpu_ctx = null;
         sim.op_cache = .{ null, null };
 
@@ -332,32 +330,44 @@ pub const Simulation = struct {
         // Same stability rule for the GPU context, which holds `&self.circuit`
         // and uploads the whole circuit to the device at init.
         //
-        // A failure here is NOT fatal — every analysis has a CPU path and
-        // `converger.run` falls back on its own. It is printed rather than
-        // swallowed so `--gpu` never silently means "ran on the CPU": that is
-        // exactly how the benchmark came to report CPU timings in its GPU
-        // column.
+        // Nothing here is EVER swallowed. `--gpu` silently meaning "ran on the
+        // CPU" is exactly how the benchmark came to report CPU timings in its
+        // GPU column, so every refusal either prints or returns.
         if (self.gpu_requested) {
-            if (gpu_context.GpuContext.init(self.arena, &self.circuit, self.gpu_force)) |g| {
+            if (gpu_context.GpuContext.init(self.arena, &self.circuit, self.gpu_explicit)) |g| {
                 self.gpu_ctx = g;
                 self.circuit.gpu_hook = g.hook();
                 self.circuit.gpu_active = true;
-            } else |e| if (e == gpu_context.Error.NotEnoughGpuWork) {
-                // Automatic work selection declined; --gpu bypasses this gate.
-                std.debug.print(
-                    "note: --gpu declined; too little device work to beat the PCIe round trip " ++
-                        "(override with --gpu)\n",
+            } else |e| switch (gpu_context.declineKind(e)) {
+                // POLICY. Only `auto` can reach this — an explicit request set
+                // `gpu_explicit`, which turns the work gate off entirely.
+                .policy => std.debug.print(
+                    "note: auto declined the GPU; too little device work to beat the PCIe " ++
+                        "round trip (override with --gpu, or tune ESPICE_GPU_MIN_WORK)\n",
                     .{},
-                );
-            } else if (self.gpu_strict) {
-                // `--backend cuda|hip` by name: this binary carries the
-                // artifacts (checked at the CLI), so the failure is the
-                // machine — absent device, driver, or exhausted memory. A
-                // named request must not silently become a CPU run.
-                std.debug.print("Error: --backend request failed ({s}); detected artifacts: {s}\n", .{ @errorName(e), gpu_context.detectedName() });
-                return e;
-            } else {
-                std.debug.print("warning: --gpu unavailable ({s}); running on the CPU\n", .{@errorName(e)});
+                ),
+                // CAPABILITY: no device type in this circuit has a kernel, or
+                // every model that does was excluded from emission. No flag
+                // changes that, so even an explicit request falls back — but
+                // `init` has already named each demoted batch.
+                .capability => std.debug.print(
+                    "warning: GPU declined ({s}); nothing in this circuit has a device " ++
+                        "kernel — running on the CPU\n",
+                    .{@errorName(e)},
+                ),
+                // MACHINE: absent device, dead driver, exhausted memory, or a
+                // build carrying no images at all. An explicit request names
+                // what was detected and stops; `auto` warns and falls back.
+                .machine => {
+                    if (self.gpu_explicit) {
+                        std.debug.print(
+                            "Error: GPU requested but unavailable ({s}); detected artifacts: {s}\n",
+                            .{ @errorName(e), gpu_context.detectedName() },
+                        );
+                        return e;
+                    }
+                    std.debug.print("warning: GPU unavailable ({s}); running on the CPU\n", .{@errorName(e)});
+                },
             }
         }
         // `.options temp=<C>` — once, before any solve; device physics keys
@@ -491,8 +501,6 @@ fn isTranFlavor(job: Job) bool {
 /// No node named in the directive, or a name no node answers to.
 const NO_NODE: u32 = std.math.maxInt(u32);
 
-/// `node_id` is the directive's resolved node (NO_NODE when it names none),
-/// looked up in fromNetlist while the Builder's map was still alive.
 /// The node inside an `.ic v(<node>)=<value>` group. `v(2)` tokenizes the node
 /// as a NUMBER while `node_names` is keyed by the string the device cards used,
 /// so an integral node has to be spelled back out before the lookup.
@@ -907,8 +915,8 @@ test "branch currents: op emits i(<card>) with ngspice's sign, last probe stays 
     defer sim.deinit();
 
     const res = sim.getResults()[0];
-    const iv = columnNamed(res, "i(v1)") orelse return error.NoBranchColumn;
-    const il = columnNamed(res, "i(l1)") orelse return error.NoBranchColumn;
+    const iv = findNameIndex(res.varnames, "i(v1)") orelse return error.NoBranchColumn;
+    const il = findNameIndex(res.varnames, "i(l1)") orelse return error.NoBranchColumn;
     try std.testing.expectApproxEqAbs(@as(f64, -2e-3), res.data[iv], 1e-9);
     try std.testing.expectApproxEqAbs(@as(f64, 2e-3), res.data[il], 1e-9);
     // Branch probes go FIRST: tf/sens/dcmatch/pxf/pac/disto default their
@@ -943,17 +951,11 @@ test "urc: U card expands into a lump ladder whose series R telescopes to L*RPER
 /// Probe columns are named `v(<node>)`/`i(<card>)` (probeNames) and a
 /// transient's column 0 is "time". Result.data is ROW-major:
 /// data[point * ncols + col].
-fn columnNamed(r: Result, name: []const u8) ?usize {
-    for (r.varnames, 0..) |v, i| {
-        if (std.mem.eql(u8, v, name)) return i;
-    }
-    return null;
-}
-
 fn probeColumn(r: Result, node: []const u8) ?usize {
     var buf: [64]u8 = undefined;
     const want = std.fmt.bufPrint(&buf, "v({s})", .{node}) catch return null;
-    return columnNamed(r, want);
+    // ponytail: reuse the exact, first-match lookup already used for source names.
+    return findNameIndex(r.varnames, want);
 }
 
 fn probeAt(r: Result, node: []const u8, point: usize) ?f64 {
@@ -1009,7 +1011,7 @@ test "recorded transient matches retained RC samples with and without uic" {
         try std.testing.expectEqual(@as(f64, 0), waveform.timeSlice()[0]);
         try std.testing.expectApproxEqAbs(@as(f64, 20e-6), completed.t_final, 1e-18);
         try std.testing.expectEqual(completed.t_final, waveform.timeSlice()[waveform.len - 1]);
-        const out_col = columnNamed(expected, "v(out)") orelse return error.NoProbe;
+        const out_col = findNameIndex(expected.varnames, "v(out)") orelse return error.NoProbe;
         try std.testing.expectEqual(@as(f64, if (uic) 0.75 else 0), waveform.probeValues(@intCast(out_col - 1))[0]);
         for (waveform.timeSlice(), 0..) |time, point| {
             const row = expected.data[point * expected.varnames.len ..][0..expected.varnames.len];
@@ -1135,8 +1137,8 @@ test "sensitivity and mismatch keep separate resistor parameters and analytical 
         for (result.varnames, 0..) |name, i| {
             for (result.varnames[0..i]) |previous| try std.testing.expect(!std.mem.eql(u8, name, previous));
         }
-        const r1 = columnNamed(result, "resistor#0.r") orelse return error.MissingSensitivity;
-        const r2 = columnNamed(result, "resistor#1.r") orelse return error.MissingSensitivity;
+        const r1 = findNameIndex(result.varnames, "resistor#0.r") orelse return error.MissingSensitivity;
+        const r2 = findNameIndex(result.varnames, "resistor#1.r") orelse return error.MissingSensitivity;
         try std.testing.expectApproxEqAbs(@as(f64, -0.001875), result.data[r1], 1e-8);
         try std.testing.expectApproxEqAbs(@as(f64, 0.000625), result.data[r2], 1e-8);
     }
@@ -1191,7 +1193,7 @@ test "generated parameter collection excludes runtime state and Monte Carlo vari
     try std.testing.expectEqual(@as(u32, 2), resistors);
     const result = sim.getResults()[0];
     try std.testing.expectEqual(@as(usize, 16), result.npoints);
-    const out = columnNamed(result, "v(out)") orelse return error.NoProbe;
+    const out = findNameIndex(result.varnames, "v(out)") orelse return error.NoProbe;
     var varied = false;
     for (0..result.npoints) |i| {
         const value = result.data[i * result.varnames.len + out];
@@ -1225,7 +1227,7 @@ test "BSIM4 tnoimod1 retains DC conduction with zero source and drain squares" {
         defer sim.deinit();
         const result = sim.getResults()[0];
         for ([_][]const u8{ "i(vdn)", "i(vdp)" }, row) |name, *current| {
-            const col = columnNamed(result, name) orelse return error.NoProbe;
+            const col = findNameIndex(result.varnames, name) orelse return error.NoProbe;
             current.* = result.data[col];
             try std.testing.expect(std.math.isFinite(current.*) and @abs(current.*) > 1e-6);
         }
