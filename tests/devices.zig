@@ -6,6 +6,32 @@ const Bjt = devices.byName("bjt");
 const n_u = @typeInfo(Bjt.U).@"enum".fields.len;
 const S = devices.engine.Dual(n_u, f64);
 
+// The two BJT collapse tests below assert VerA's `collapse_applied` contract
+// (VerA tools/contract.zig:75-79): "the host has applied this device's
+// collapse() aliases to its gather and scatter maps. Generated physics then
+// OMITS the short's cancelling stamps, preserving arbitrarily small
+// conductances already in the same matrix slot."
+//
+// They FAIL against the current VerA, which no longer emits that omission —
+// codegen.zig emitSwitchRow now states "the matrix STRUCTURE stays constant:
+// the branch always carries its flow unknown I_b", so every switch branch
+// keeps its flow unknown and its unconditional +-I_b KCL stamps, and
+// emitCollapse guards `out[flow] = root` behind the short's own flag.
+// A generated mos1.zig still in .zig-cache from 2026-09-07 emits the
+// contract-honouring form (the `if (comptime !(@hasDecl(S,
+// "collapse_applied") and S.collapse_applied))` split plus an unconditional
+// `out[flow] = root`); today's does not. Nothing on this side changed:
+// Builder.addDevice must allocate a matrix node for every unknown collapse()
+// did not alias, because the generated eval reads x[flow] and writes
+// res[flow] whenever the alias is absent.
+//
+// Consequences these two tests measure, in order:
+//   1. one extra unknown + row per retained (non-shorted) parasitic;
+//   2. when the short IS taken, res[hi] += ib and res[lo] -= ib both land on
+//      the collapsed root row with ib = x[root] (a VOLTAGE, ~1e-1), so a
+//      conductance already in that accumulator is rounded away before the
+//      cancellation completes: 3.5e-19 + (-0.2) + (-0.2) + 0.2 + 0.2 == 0.
+// Fix belongs in VerA codegen, not here. Do not weaken these to green.
 test "BJT: zero excess phase removes both filter nodes at setup" {
     for ([_]i32{ -1, 1 }) |polarity| for ([_]i32{ -1, 1 }) |subs| {
         for ([_]f64{ 0, 2e-9 }) |tf| for ([_]f64{ -30, 0, 30 }) |ptf| {
@@ -23,7 +49,11 @@ test "BJT: zero excess phase removes both filter nodes at setup" {
             const substrate = b.addNode();
             const before = b.n;
             try b.addDevice(Bjt, model, .{}, .{ c, base, e, substrate });
-            // RB keeps bi; only a live filter needs xf1/xf2.
+            // RB keeps bi; only a live filter needs xf1/xf2. The retained
+            // branch's flow unknown is NOT one of them: with the potential arm
+            // statically dead, `I(b,bi) <+ V(b,bi)/rbb` is a conductance and
+            // wants no current row. Current VerA yields 2 and 6 (one surplus
+            // flow unknown each) — see the note above this test.
             try testing.expectEqual(@as(u32, if (enabled) 3 else 1), b.n - before);
         };
     };
@@ -84,6 +114,9 @@ test "BJT: collapsed phase shorts preserve weak substrate stamps" {
             x[substrate] = sign * 0.2;
             ckt.eval(x, 0);
             const reference = if (subs > 0) c else base;
+            // Tolerance is relative to g, deliberately: the substrate leak is
+            // the ONLY thing this row should carry. Anything the collapsed
+            // shorts add and subtract on the way past must not cost it digits.
             const tol = g * 1e-12;
             try testing.expectApproxEqAbs(g * (x[substrate] - x[reference]), ckt.rhs[substrate], tol);
             for ([_]u32{ c, base, e, substrate }) |col| {
@@ -174,9 +207,15 @@ test "zero scatter preserves signed zero, subnormals and NaN quieting" {
             var actual = [_]f64{@bitCast(initial)};
             const v: f64 = @bitCast(stamp);
             var expected = actual;
-            if (comptime device) {
-                _ = @atomicRmw(f64, &expected[0], .Add, v, .monotonic);
-            } else expected[0] += v;
+            // Both instantiations round identically now, and the device arm no
+            // longer accumulates into the plane at all: the deterministic
+            // scatter writes ONE staging cell per contribution, touched by
+            // exactly one thread, and a separate ordered reduce sums them. The
+            // `@atomicRmw` this used to compare against was the oracle for a
+            // sink that no longer exists. The `inline for (.{false, true})`
+            // still earns its keep — it now pins that the two sinks agree
+            // bit-for-bit on signed zero, subnormals and NaN quieting.
+            expected[0] += v;
             var sink: Sk = undefined;
             sink.rhs = &actual;
             sink.scatterRes(0, v);
