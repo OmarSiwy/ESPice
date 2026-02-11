@@ -26,9 +26,6 @@ pub fn SparseLu(comptime T: type) type {
     return struct {
         const Self = @This();
 
-        const W = std.simd.suggestVectorLength(T) orelse 1;
-        const V = @Vector(W, T);
-
         pub const FactorError = error{ OutOfMemory, SingularMatrix };
 
         // ---- dimensions ----
@@ -138,7 +135,6 @@ pub fn SparseLu(comptime T: type) type {
             try self.ui.ensureTotalCapacity(gpa, est_lu);
             try self.ux.ensureTotalCapacity(gpa, est_lu);
             @memset(self.w, 0);
-            @memset(self.flag, 0);
             return self;
         }
 
@@ -249,8 +245,9 @@ pub fn SparseLu(comptime T: type) type {
                     const kc = self.pinv[r];
                     if (kc == NONE) continue;
                     const ukr = self.w[r];
-                    self.ui.append(gpa, kc) catch return error.OutOfMemory;
-                    self.ux.append(gpa, ukr) catch return error.OutOfMemory;
+                    // ponytail: ArrayList already returns only OutOfMemory.
+                    try self.ui.append(gpa, kc);
+                    try self.ux.append(gpa, ukr);
                     for (self.lp[kc]..self.lp[kc + 1]) |lp| {
                         self.w[self.li.items[lp]] -= self.lx.items[lp] * ukr;
                     }
@@ -340,8 +337,8 @@ pub fn SparseLu(comptime T: type) type {
                 // ---- store L[:,k] (scaled unpivoted candidates), clear w ----
                 for (self.topo[0..nt]) |r| {
                     if (self.pinv[r] == NONE) {
-                        self.li.append(gpa, r) catch return error.OutOfMemory;
-                        self.lx.append(gpa, self.w[r] / d) catch return error.OutOfMemory;
+                        try self.li.append(gpa, r);
+                        try self.lx.append(gpa, self.w[r] / d);
                     }
                     self.w[r] = 0;
                 }
@@ -432,32 +429,50 @@ pub fn SparseLu(comptime T: type) type {
             const lx = self.lx.items;
             const ui = self.ui.items;
             const ux = self.ux.items;
+            // Same hoist as the four above, for the fields the loop bodies
+            // index. Not style: `ux[p] = uki` is an f64 store that LLVM cannot
+            // prove disjoint from `self.w`, so every U-entry reloaded `self.w`
+            // and `self.lp` from the struct — two loads inside the 23-
+            // instruction preamble that already dominates this kernel (measured
+            // 35% of refactor on scaling/parallel_inverters_100, where U has
+            // 405 entries and the inner axpy averages under one iteration).
+            // A local slice is loop-invariant by construction, so the reloads
+            // go. Identical operations in identical order — no FP change.
+            const w = self.w;
+            const lp = self.lp;
+            const up = self.up;
+            const prow = self.prow;
+            const udiag = self.udiag;
 
             for (0..self.n) |k| {
                 const c = self.q[k];
+                const uk0 = up[k];
+                const uk1 = up[k + 1];
+                const lk0 = lp[k];
+                const lk1 = lp[k + 1];
                 // Zero the stored pattern, then scatter A[:,c] in permuted rows
-                for (ui[self.up[k]..self.up[k + 1]]) |i| self.w[i] = 0;
-                for (li[self.lp[k]..self.lp[k + 1]]) |i| self.w[i] = 0;
-                self.w[k] = 0;
-                for (col_ptr[c]..col_ptr[c + 1]) |p| self.w[self.prow[p]] = vals[p];
+                for (ui[uk0..uk1]) |i| w[i] = 0;
+                for (li[lk0..lk1]) |i| w[i] = 0;
+                w[k] = 0;
+                for (col_ptr[c]..col_ptr[c + 1]) |p| w[prow[p]] = vals[p];
 
                 // Replay the triangular solve in stored topological order
-                for (self.up[k]..self.up[k + 1]) |p| {
+                for (uk0..uk1) |p| {
                     const i = ui[p];
-                    const uki = self.w[i];
+                    const uki = w[i];
                     ux[p] = uki;
-                    for (self.lp[i]..self.lp[i + 1]) |pl| self.w[li[pl]] -= lx[pl] * uki;
+                    for (lp[i]..lp[i + 1]) |pl| w[li[pl]] -= lx[pl] * uki;
                 }
 
                 // Void slots were checked above; the fabricated pivot is valid.
                 if (self.void_col[k]) {
-                    self.udiag[k] = 1;
-                    for (self.lp[k]..self.lp[k + 1]) |p| lx[p] = 0;
+                    udiag[k] = 1;
+                    for (lk0..lk1) |p| lx[p] = 0;
                     continue;
                 }
-                const d = self.w[k];
+                const d = w[k];
                 if (d == 0 or !std.math.isFinite(d)) return error.SingularMatrix;
-                self.udiag[k] = d;
+                udiag[k] = d;
 
                 // The growth monitor compares |d| against the RAW column max,
                 // which is meaningless for a scale-accepted pivot: that pivot
@@ -469,14 +484,14 @@ pub fn SparseLu(comptime T: type) type {
                 // row-scaled cmax, which needs rscale in permuted coordinates.
                 if (growth_limit > 0 and !self.scaled_pivot[k]) {
                     var cmax: T = @abs(d);
-                    for (self.lp[k]..self.lp[k + 1]) |p| {
-                        const v = self.w[li[p]];
+                    for (lk0..lk1) |p| {
+                        const v = w[li[p]];
                         cmax = @max(cmax, @abs(v));
                         lx[p] = v / d;
                     }
                     if (@abs(d) < growth_limit * cmax) return error.SingularMatrix;
                 } else {
-                    for (self.lp[k]..self.lp[k + 1]) |p| lx[p] = self.w[li[p]] / d;
+                    for (lk0..lk1) |p| lx[p] = w[li[p]] / d;
                 }
             }
         }
@@ -491,29 +506,35 @@ pub fn SparseLu(comptime T: type) type {
             const lx = self.lx.items;
             const ui = self.ui.items;
             const ux = self.ux.items;
+            // Same reason as `refactor`: `y[...] -= ...` is an f64 store LLVM
+            // cannot prove disjoint from `self.lp`/`self.up`, so the column
+            // bounds were re-fetched through `self` on every substitution step.
+            const y = self.y;
+            const lp = self.lp;
+            const up = self.up;
 
             // 1. y = P b (permute rows by pinv)
-            for (b, 0..) |bi, r| self.y[self.pinv[r]] = bi;
+            for (b, 0..) |bi, r| y[self.pinv[r]] = bi;
 
             // 2. L y' = y (forward substitution, L is unit lower triangular)
             for (0..self.n) |k| {
-                const yk = self.y[k];
+                const yk = y[k];
                 if (yk == 0) continue;
-                for (self.lp[k]..self.lp[k + 1]) |p| self.y[li[p]] -= lx[p] * yk;
+                for (lp[k]..lp[k + 1]) |p| y[li[p]] -= lx[p] * yk;
             }
 
             // 3. U z = y' (back substitution)
             var k = self.n;
             while (k > 0) {
                 k -= 1;
-                const zk = self.y[k] / self.udiag[k];
-                self.y[k] = zk;
+                const zk = y[k] / self.udiag[k];
+                y[k] = zk;
                 if (zk == 0) continue;
-                for (self.up[k]..self.up[k + 1]) |p| self.y[ui[p]] -= ux[p] * zk;
+                for (up[k]..up[k + 1]) |p| y[ui[p]] -= ux[p] * zk;
             }
 
             // 4. x = Q^{-1} z (un-permute columns)
-            for (self.q, 0..) |c, j| x[c] = self.y[j];
+            for (self.q, 0..) |c, j| x[c] = y[j];
         }
 
         // ====================================================================
@@ -561,13 +582,13 @@ pub fn SparseLu(comptime T: type) type {
 const testing = std.testing;
 
 /// Dense-to-CSC converter for tests.
-fn DenseCsc(comptime n: usize) type {
+pub fn DenseCsc(comptime n: usize) type {
     return struct {
         col_ptr: [n + 1]u32,
         row_idx: [n * n]u32,
         vals: [n * n]f64,
 
-        fn from(a: [n][n]f64) @This() {
+        pub fn from(a: [n][n]f64) @This() {
             var s: @This() = undefined;
             var m: u32 = 0;
             s.col_ptr[0] = 0;
@@ -584,14 +605,14 @@ fn DenseCsc(comptime n: usize) type {
             return s;
         }
 
-        fn nnz(s: *const @This()) u32 {
+        pub fn nnz(s: *const @This()) u32 {
             return s.col_ptr[n];
         }
     };
 }
 
 /// Dense Gaussian elimination reference solver for verification.
-fn denseSolve(comptime n: usize, a_in: [n][n]f64, b_in: [n]f64) [n]f64 {
+pub fn denseSolve(comptime n: usize, a_in: [n][n]f64, b_in: [n]f64) [n]f64 {
     var a = a_in;
     var b = b_in;
     for (0..n) |k| {
@@ -618,13 +639,13 @@ fn denseSolve(comptime n: usize, a_in: [n][n]f64, b_in: [n]f64) [n]f64 {
     return x;
 }
 
-fn identity(comptime n: usize) [n]u32 {
+pub fn identity(comptime n: usize) [n]u32 {
     var q: [n]u32 = undefined;
     for (0..n) |i| q[i] = @intCast(i);
     return q;
 }
 
-fn checkSolve(comptime n: usize, a: [n][n]f64, b: [n]f64, lu: *SparseLu(f64)) !void {
+pub fn checkSolve(comptime n: usize, a: [n][n]f64, b: [n]f64, lu: *SparseLu(f64)) !void {
     var x: [n]f64 = undefined;
     lu.solve(&b, &x);
     const xref = denseSolve(n, a, b);
@@ -803,11 +824,6 @@ test "structurally void unknown gets a unit pivot, not SingularMatrix" {
     // Row/col 1 is entirely zero — a compact model's disabled branch-flow
     // unknown (HICUM `V(br_sht) <+ 0` at flsh = 0). The remaining 2x2 system
     // [[2,1],[1,3]] x = [5,7] has the solution (8/5, 9/5); x1 must come back 0.
-    const a = [3][3]f64{
-        .{ 2, 0, 1 },
-        .{ 0, 0, 0 },
-        .{ 1, 0, 3 },
-    };
     // DenseCsc drops exact zeros, so build the pattern by hand: the host always
     // forces the diagonal, and the per-device dense block leaves row/col 1
     // structurally present with zero values.
@@ -833,7 +849,6 @@ test "structurally void unknown gets a unit pivot, not SingularMatrix" {
     try testing.expectApproxEqAbs(@as(f64, 18.0 / 19.0), x[0], 1e-12);
     try testing.expectApproxEqAbs(@as(f64, 0.0), x[1], 1e-12);
     try testing.expectApproxEqAbs(@as(f64, 23.0 / 19.0), x[2], 1e-12);
-    _ = a;
 }
 
 test "refactor rejects activation of a fabricated pivot's row or column" {
