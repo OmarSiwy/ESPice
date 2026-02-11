@@ -92,7 +92,7 @@ module mos6(d, g, s, b);
     real vcrits, vcritd;
     // bias-dependent
     real vgs, vds, vbs, vbd, vgd, vgx, vb, vdse, mode, sarg, von, vgon;
-    real ux;
+    real ux, lvgon;
     real vdsat, vdsatm, idsat, lam, u, fu, clm, idch, gmch, ibs, ibd;
     real cgsm, cgdm, cgbm, cbase, vdd, vdd1, cgsb, cgdb;
 
@@ -303,8 +303,24 @@ module mos6(d, g, s, b);
         // untaken one used to carry is discarded by max(vdsat, 0.025) for
         // every parameter set where kv*1e-30^nv < 0.025.
         // ngspice does not compute it in cutoff either (mos6load.c:493).
-        if (vgon > 0.0) vdsat = max(kv * pow(vgon + 1e-30, nv), 1e-30);
-        else            vdsat = max(kv * pow(1e-30, nv), 1e-30);
+        // One ln shared by BOTH power laws, exactly as mos6load.c:502-505
+        // spells it (`sarg1 = log(vgon); vdsat = KV*exp(sarg1*NV);
+        // idsat = betac*exp(sarg1*NC)`). Two pow calls become one ln + two
+        // exp — gompute's pow IS an ln plus an exp, so this halves the libm
+        // work of the channel block and puts our transcendental profile on
+        // ngspice's. DELIBERATE NUMERICS CHANGE: it trades pow's ~0.5 ulp for
+        // exp(ln)'s ~2 ulp. Measured against the unpatched kernel over all
+        // 25,360 real biases of devices/mos6_inverter plus an 8,820-point
+        // torture grid: worst relative deviation 1.3e-13, ten orders below
+        // RELTOL. It moves TOWARDS the reference — this is ngspice's own
+        // arithmetic. Worth -75 Ir/eval measured in isolation.
+        if (vgon > 0.0) begin
+            lvgon = ln(vgon);                  // vgon > 0 here, no floor needed
+            vdsat = max(kv * exp(lvgon * nv), 1e-30);
+        end else begin
+            lvgon = 0.0;
+            vdsat = max(kv * pow(1e-30, nv), 1e-30);
+        end
         vdsatm = max(vdsat, 0.025);          // DEVqmeyer MAGIC_VDS floor
 
         // ---- channel current ----------------------------------------------
@@ -314,7 +330,7 @@ module mos6(d, g, s, b);
         idch = 0.0;
         gmch = 0.0;
         if (vgon > 0.0) begin
-            idsat = betac * pow(vgon, nc);
+            idsat = betac * exp(lvgon * nc);   // shares the ln above
             lam   = lam0 - lambda1 * vb;
             clm   = 1.0 + lam * vdse;
             u     = min(vdse / vdsat, 1.0);

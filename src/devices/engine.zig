@@ -995,6 +995,22 @@ fn limitRange(comptime D: type, sink: anytype, first: u32, end: u32, lim_active:
             cur[u] = sink.x(gi);
             old[u] = if (lim_active) sink.lim(id, u) else sink.xOld(gi);
         }
+        // NOT `@call(.always_inline, ...)`, and that is measured, not an
+        // oversight. `limit`'s contract signature is `[n_u]f64` BY VALUE twice
+        // in and a `LimitResult(n_u)` out, so a real call boundary here would
+        // cost 2*n_u stores plus n_u+1 loads of pure ABI per instance per
+        // Newton iterate — but there is no call boundary: one call site and a
+        // small leaf body mean LLVM already inlines it. Forcing the same
+        // decision explicitly only takes it away from the inliner's own
+        // ordering, and it is a LOSS: same tree, two builds, raw byte-identical,
+        // scaling/parallel_inverters_100 504.35M -> 505.78M Ir (+0.28%),
+        // devices/mos6_inverter 175.54M -> 175.89M (+0.20%).
+        //
+        // An env-gated A/B of the two call forms INSIDE one binary says the
+        // opposite (-3.9%/-3.0%) and is wrong: keeping a non-inlined arm alive
+        // forces `D.limit` to be emitted out of line, so that experiment prices
+        // the cost of DEFEATING the inliner, not the benefit of helping it.
+        // Inlining questions need two builds.
         const lm = D.limit(sink.model(id), sink.inst(id), cur, old);
         if (!lm.converged) flag = 1;
         inline for (0..n_u) |u| sink.setLim(id, u, lm.x[u]);
@@ -1423,6 +1439,35 @@ pub fn DeviceBatch(comptime D: type) type {
             self.lim_active = false;
         }
 
+        /// Re-enters the device's model core at `R` (value-only) to restage the
+        /// `ddt`/`idt` arguments at the accepted x. `converger.checkConverged`
+        /// runs it once per CONVERGED solve, not per Newton iterate, so the
+        /// denominator here is `attempts`, not `nr_iters`.
+        ///
+        /// WHY MOS6 COSTS 2.6x MOS1 PER INSTANCE. Not slot count and not the
+        /// model card. Ablated (double this loop, idempotent, raw unchanged):
+        /// mos1 ~200 Ir/instance/call on scaling/parallel_inverters_100 (22.3M
+        /// over 613 attempts x 200) AND on devices/mos6_inverter re-carded to
+        /// LEVEL 1 (5.56M over 323 x 80 = 215 Ir) — same circuit, same
+        /// CJ/CJSW/CGSO/CGDO/TOX — against 556 Ir for LEVEL 6 on that same
+        /// deck. Slots are 13 vs 9 (1.44x) and the cards are identical, so
+        /// neither explains it.
+        ///
+        /// What does: the staged set is the Meyer capacitances, and mos6's
+        /// Meyer partition needs the Sakurai-Newton saturation voltage. Its
+        /// core carries `KV*(Vgs-Vth)^NV` and `KC*(Vgs-Vth)^NC` with NV/NC
+        /// non-integer, so the DCE'd closure of the staged values contains TWO
+        /// `std.math.pow` calls; mos1's `Vdsat = Vgs - Vth` is a subtract and
+        /// its closure contains none. Standalone rig at this deck's parameters,
+        /// 100k calls each: exactly 2 pow per mos6 call and 0 per mos1, 593 of
+        /// mos6's 819 Ir. Generic `pow` is `exp(y*ln x)` + frexp/ldexp, ~300 Ir.
+        /// The junction charges are NOT it — these decks give no AD/AS/PD/PS,
+        /// so `czbd`/`czbs` are zero and those arms are already branch-dead.
+        ///
+        /// Nothing here can fix that: the two `pow`s are inside VerA's emitted
+        /// core. The host-side lever would be to stage the `ddt` arguments from
+        /// the eval pass that already computed them at the same x, which needs
+        /// the generator to expose them.
         fn updateState(ctx: *anyopaque, x: []const f64) ?f64 {
             const self: *Self = @ptrCast(@alignCast(ctx));
             var min_reject: ?f64 = null;
