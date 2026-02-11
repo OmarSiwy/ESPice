@@ -67,7 +67,12 @@ pub fn SparseLu(comptime T: type) type {
         scaled_pivot: []bool,
 
         // ---- hot workspace (length n each) ----
-        w: []T, // dense accumulator (zero outside active column)
+        /// Dense accumulator. INVARIANT: all-zero on entry to and exit from
+        /// every public entry point, error returns included. `factor` needs it
+        /// (a fill row it never scatters must read 0), and `refactor` needs it
+        /// because it dropped the per-column zero-the-pattern prologue: each
+        /// column zeroes its own slots as it consumes them instead.
+        w: []T,
         y: []T, // solve workspace
         /// Implicit row scaling for the pivot test: rscale[r] = 1/max_j|A[r][j]|
         /// (1 for an all-zero or non-finite row). Indexed by ORIGINAL row,
@@ -379,6 +384,21 @@ pub fn SparseLu(comptime T: type) type {
                 });
             };
 
+            if (comptime @import("builtin").link_libc) if (std.c.getenv("ZP_LU_HIST") != null) {
+                var h = [_]u64{0} ** 17;
+                var tot: u64 = 0;
+                for (self.ui.items) |i| {
+                    const len = self.lp[i + 1] - self.lp[i];
+                    tot += len;
+                    h[@min(len, 16)] += 1;
+                }
+                std.debug.print("lu-hist: n={d} U={d} axpy_elems={d} mean={d:.3} hist(0..15,16+)={any}\n", .{
+                    n, self.ui.items.len, tot,
+                    @as(f64, @floatFromInt(tot)) / @as(f64, @floatFromInt(@max(self.ui.items.len, 1))),
+                    h,
+                });
+            };
+
             self.factored = true;
         }
 
@@ -406,6 +426,31 @@ pub fn SparseLu(comptime T: type) type {
                 }
             }
             return true;
+        }
+
+        /// `dst[idx[p]] -= src[p] * f` for p in [p0, p1) — the one scatter-axpy
+        /// behind refactor's replay and both of `solve`'s substitutions.
+        ///
+        /// Stepped two at a time BY HAND because the trip count is a sparse
+        /// matrix column length, and circuit columns are tiny: measured over a
+        /// whole run, `scaling/parallel_inverters_100` is 205x length 1 and
+        /// 200x length 2, `devices/mos6_inverter` 47/32/72 at lengths 1/2/3 —
+        /// nothing longer, ever. LLVM runtime-unrolls the plain loop by 4, so
+        /// the 4-wide body it built never executes and every call still pays
+        /// the guard chain: 31 Ir per call for ~1.5 elements of work.
+        ///
+        /// Not vectorized: the scatter is a gather-modify-scatter, and without
+        /// AVX-512 there is nothing to widen (see refactor-tape-2026-09.md,
+        /// where a run-vectorized variant lost even in the hot microbench).
+        /// Pairing is bit-identical regardless: a column's row indices are
+        /// distinct, so the two updates hit different slots.
+        inline fn scatterAxpy(dst: []T, idx: []const u32, src: []const T, p0: u32, p1: u32, f: T) void {
+            var p = p0;
+            while (p + 1 < p1) : (p += 2) {
+                dst[idx[p]] -= src[p] * f;
+                dst[idx[p + 1]] -= src[p + 1] * f;
+            }
+            if (p < p1) dst[idx[p]] -= src[p] * f;
         }
 
         // ====================================================================
@@ -450,28 +495,40 @@ pub fn SparseLu(comptime T: type) type {
                 const uk1 = up[k + 1];
                 const lk0 = lp[k];
                 const lk1 = lp[k + 1];
-                // Zero the stored pattern, then scatter A[:,c] in permuted rows
-                for (ui[uk0..uk1]) |i| w[i] = 0;
-                for (li[lk0..lk1]) |i| w[i] = 0;
-                w[k] = 0;
+                // `w` is all-zero here (see the field doc), so the stored
+                // pattern needs no zero prologue — scatter A[:,c] straight in.
                 for (col_ptr[c]..col_ptr[c + 1]) |p| w[prow[p]] = vals[p];
 
-                // Replay the triangular solve in stored topological order
+                // Replay the triangular solve in stored topological order.
+                // `w[i] = 0` right after the read is safe and is what pays for
+                // dropping the prologue: a U row is written only by EARLIER
+                // entries of this column. An entry writes rows of L[:,i], and
+                // L[r][i] != 0 is the edge i -> r that put r after i in the
+                // topological order — so nothing later can touch w[i].
                 for (uk0..uk1) |p| {
                     const i = ui[p];
                     const uki = w[i];
+                    w[i] = 0;
                     ux[p] = uki;
-                    for (lp[i]..lp[i + 1]) |pl| w[li[pl]] -= lx[pl] * uki;
+                    scatterAxpy(w, li, lx, lp[i], lp[i + 1], uki);
                 }
 
                 // Void slots were checked above; the fabricated pivot is valid.
                 if (self.void_col[k]) {
                     udiag[k] = 1;
-                    for (lk0..lk1) |p| lx[p] = 0;
+                    for (lk0..lk1) |p| {
+                        lx[p] = 0;
+                        w[li[p]] = 0;
+                    }
+                    w[k] = 0;
                     continue;
                 }
                 const d = w[k];
-                if (d == 0 or !std.math.isFinite(d)) return error.SingularMatrix;
+                w[k] = 0;
+                if (d == 0 or !std.math.isFinite(d)) {
+                    for (lk0..lk1) |p| w[li[p]] = 0;
+                    return error.SingularMatrix;
+                }
                 udiag[k] = d;
 
                 // The growth monitor compares |d| against the RAW column max,
@@ -485,13 +542,19 @@ pub fn SparseLu(comptime T: type) type {
                 if (growth_limit > 0 and !self.scaled_pivot[k]) {
                     var cmax: T = @abs(d);
                     for (lk0..lk1) |p| {
-                        const v = w[li[p]];
+                        const r = li[p];
+                        const v = w[r];
+                        w[r] = 0;
                         cmax = @max(cmax, @abs(v));
                         lx[p] = v / d;
                     }
                     if (@abs(d) < growth_limit * cmax) return error.SingularMatrix;
                 } else {
-                    for (lk0..lk1) |p| lx[p] = w[li[p]] / d;
+                    for (lk0..lk1) |p| {
+                        const r = li[p];
+                        lx[p] = w[r] / d;
+                        w[r] = 0;
+                    }
                 }
             }
         }
@@ -520,7 +583,7 @@ pub fn SparseLu(comptime T: type) type {
             for (0..self.n) |k| {
                 const yk = y[k];
                 if (yk == 0) continue;
-                for (lp[k]..lp[k + 1]) |p| y[li[p]] -= lx[p] * yk;
+                scatterAxpy(y, li, lx, lp[k], lp[k + 1], yk);
             }
 
             // 3. U z = y' (back substitution)
@@ -530,7 +593,7 @@ pub fn SparseLu(comptime T: type) type {
                 const zk = y[k] / self.udiag[k];
                 y[k] = zk;
                 if (zk == 0) continue;
-                for (up[k]..up[k + 1]) |p| y[ui[p]] -= ux[p] * zk;
+                scatterAxpy(y, ui, ux, up[k], up[k + 1], zk);
             }
 
             // 4. x = Q^{-1} z (un-permute columns)
@@ -972,6 +1035,76 @@ test "pivot growth monitor detection" {
         error.SingularMatrix,
         lu.refactor(&csc.col_ptr, csc.vals[0..csc.nnz()], 1e-6),
     );
+}
+
+test "scatterAxpy: bit-identical to the one-at-a-time oracle at every length" {
+    // The pair-stepped kernel splits on length parity, so the oracle has to be
+    // walked over both sides of the split — 0 and 1 are the lengths that
+    // actually occur least in the wild and break first.
+    var rng = std.Random.DefaultPrng.init(0x5EED);
+    const r = rng.random();
+    for (0..9) |len| {
+        var idx: [9]u32 = undefined;
+        var src: [9]f64 = undefined;
+        for (0..len) |i| {
+            idx[i] = @intCast(2 * i + 1); // distinct rows, as a CSC column is
+            src[i] = r.float(f64) * 8 - 4;
+        }
+        var got = [_]f64{0} ** 20;
+        var want = [_]f64{0} ** 20;
+        for (&got, &want, 0..) |*g, *e, i| {
+            g.* = @floatFromInt(i);
+            e.* = g.*;
+        }
+        const f = r.float(f64) * 8 - 4;
+        SparseLu(f64).scatterAxpy(&got, &idx, &src, 0, @intCast(len), f);
+        for (0..len) |p| want[idx[p]] -= src[p] * f;
+        try testing.expectEqualSlices(f64, &want, &got);
+    }
+}
+
+test "w is all-zero after factor, after refactor, and after a failed refactor" {
+    // `factor` reads 0 out of every fill row it does not scatter, so whatever
+    // ran before it must hand `w` back clean — refactor's per-column zeroing
+    // moved to the consumption sites and this is what pins it there. The
+    // failure path matters most: it is the ONLY caller of `factor` after a
+    // `refactor`, via direct.zig's fall back to a full re-pivoting factor.
+    const gpa = testing.allocator;
+    var a = [3][3]f64{
+        .{ 10, 1, 0 },
+        .{ 1, 10, 1 },
+        .{ 0, 1, 10 },
+    };
+    var csc = DenseCsc(3).from(a);
+    var q = identity(3);
+    var lu = try SparseLu(f64).init(gpa, 3, &csc.col_ptr, csc.row_idx[0..csc.nnz()], &q);
+    defer lu.deinit(gpa);
+    try lu.factor(gpa, &csc.col_ptr, csc.row_idx[0..csc.nnz()], csc.vals[0..csc.nnz()], 1e-3);
+    for (lu.w) |v| try testing.expectEqual(@as(f64, 0), v);
+
+    try lu.refactor(&csc.col_ptr, csc.vals[0..csc.nnz()], 1e-12);
+    for (lu.w) |v| try testing.expectEqual(@as(f64, 0), v);
+
+    // Collapse every diagonal: the growth monitor rejects the replay mid-way.
+    a[0][0] = 1e-20;
+    a[1][1] = 1e-20;
+    a[2][2] = 1e-20;
+    csc = DenseCsc(3).from(a);
+    try testing.expectError(
+        error.SingularMatrix,
+        lu.refactor(&csc.col_ptr, csc.vals[0..csc.nnz()], 1e-6),
+    );
+    for (lu.w) |v| try testing.expectEqual(@as(f64, 0), v);
+
+    // ...and the full factor that direct.zig now runs must agree with a
+    // solver that never saw the failed replay.
+    var fresh = try SparseLu(f64).init(gpa, 3, &csc.col_ptr, csc.row_idx[0..csc.nnz()], &q);
+    defer fresh.deinit(gpa);
+    try lu.factor(gpa, &csc.col_ptr, csc.row_idx[0..csc.nnz()], csc.vals[0..csc.nnz()], 1e-3);
+    try fresh.factor(gpa, &csc.col_ptr, csc.row_idx[0..csc.nnz()], csc.vals[0..csc.nnz()], 1e-3);
+    try testing.expectEqualSlices(f64, fresh.lx.items, lu.lx.items);
+    try testing.expectEqualSlices(f64, fresh.ux.items, lu.ux.items);
+    try testing.expectEqualSlices(f64, fresh.udiag, lu.udiag);
 }
 
 test "solve and solveT in-place (b aliases x)" {
