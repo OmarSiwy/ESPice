@@ -1,10 +1,12 @@
 const std = @import("std");
 const ir = @import("types.zig");
-const Token = @import("tokenizer.zig").Token;
 
 pub const Error = error{ OutOfMemory, ParseError, ModelBinNotFound };
 
-fn simdLower(buf: []u8) void {
+/// Copy and lower in the same pass: `dst` is written once, not memcpy'd and
+/// then rewritten. std.ascii.allocLowerString is the stdlib equivalent but its
+/// scalar loop measured +7.6% parse Ir on a 4.2 MB deck, so the vector stays.
+fn simdLower(dst: []u8, src: []const u8) void {
     const W = 32;
     const V = @Vector(W, u8);
     const a_vec: V = @splat('A');
@@ -12,30 +14,12 @@ fn simdLower(buf: []u8) void {
     const bit: V = @splat(0x20);
     const zero: V = @splat(0);
     var i: usize = 0;
-    while (i + W <= buf.len) : (i += W) {
-        const v: V = buf[i..][0..W].*;
-        const is_upper = (v >= a_vec) & (v <= z_vec);
-        buf[i..][0..W].* = v | @select(u8, is_upper, bit, zero);
-    }
-    for (buf[i..]) |*c| c.* = std.ascii.toLower(c.*);
-}
-
-fn countNewlines(src: []const u8) usize {
-    const W = 32;
-    const V = @Vector(W, u8);
-    const nl: V = @splat('\n');
-    const ones: V = @splat(1);
-    const zeros: V = @splat(0);
-    var count: usize = 0;
-    var i: usize = 0;
     while (i + W <= src.len) : (i += W) {
         const v: V = src[i..][0..W].*;
-        count += @reduce(.Add, @select(u8, v == nl, ones, zeros));
+        const is_upper = (v >= a_vec) & (v <= z_vec);
+        dst[i..][0..W].* = v | @select(u8, is_upper, bit, zero);
     }
-    for (src[i..]) |c| {
-        if (c == '\n') count += 1;
-    }
-    return count;
+    for (src[i..], dst[i..]) |c, *o| o.* = std.ascii.toLower(c);
 }
 
 /// Bump-slab wrapper over the arena: per-device slice copies (nodes,
@@ -67,20 +51,21 @@ const SlicePool = struct {
 pub fn Parser(comptime Tok: type) type {
     return struct {
         pub fn parse(arena: std.mem.Allocator, src_in: anytype) Error!ir.Netlist {
-            // ponytail: always dupe before lowering (one bulk memcpy) so the
-            // original bytes survive — file paths (.hdl cards) are
-            // case-sensitive and must be recovered from `orig` by offset.
+            // ponytail: always lower into a fresh buffer so the original bytes
+            // survive — file paths (.hdl cards) are case-sensitive and must be
+            // recovered from `orig` by offset.
             const orig: []const u8 = src_in;
             const src: []const u8 = blk: {
                 if (Tok.case_normalize) {
-                    const buf: []u8 = try arena.dupe(u8, orig);
-                    simdLower(buf);
+                    const buf: []u8 = try arena.alloc(u8, orig.len);
+                    simdLower(buf, orig);
                     break :blk buf;
                 }
                 break :blk orig;
             };
 
-            const line_hint = countNewlines(src);
+            // ponytail: stdlib countScalar already supplies the vector scan and tail.
+            const line_hint = std.mem.countScalar(u8, src, '\n');
             var devices: std.ArrayList(ir.Device) = .empty;
             try devices.ensureTotalCapacity(arena, line_hint);
             var models: std.ArrayList(ir.Model) = .empty;
@@ -94,7 +79,7 @@ pub fn Parser(comptime Tok: type) type {
             const title: []const u8 = if (Tok.has_title_line) blk: {
                 const nl = std.mem.indexOfScalar(u8, src, '\n') orelse src.len;
                 const t = std.mem.trim(u8, src[0..nl], " \t\r");
-                lines.rest = if (std.mem.indexOfScalar(u8, src, '\n')) |i| src[i + 1 ..] else "";
+                lines.rest = if (nl < src.len) src[nl + 1 ..] else "";
                 break :blk t;
             } else "";
 
@@ -121,16 +106,13 @@ pub fn Parser(comptime Tok: type) type {
             }
             if (cur_subckt != null) return error.ParseError;
 
-            // Build subcircuit type registry before expansion.
-            var subckt_type_list: std.ArrayList(ir.SubcktType) = .empty;
-            // Type 0 is reserved for "top-level" (no subcircuit).
-            try subckt_type_list.append(arena, .{ .name = "", .n_ports = 0, .n_internal_nodes = 0, .device_count = 0 });
             var subckt_type_map: std.StringHashMapUnmanaged(u16) = .empty;
             var subckt_iter = subckts.iterator();
             while (subckt_iter.next()) |entry| {
                 const sname = entry.key_ptr.*;
                 const sub = entry.value_ptr.*;
-                const n_ports: u16 = @intCast(sub.ports.len);
+                // Preserve checked count limits formerly enforced by unused metadata.
+                _ = @as(u16, @intCast(sub.ports.len));
                 // Count unique internal node names (not ports, not ground).
                 var n_internal: u16 = 0;
                 var seen_nodes: std.StringHashMapUnmanaged(void) = .empty;
@@ -144,13 +126,8 @@ pub fn Parser(comptime Tok: type) type {
                         }
                     }
                 }
-                const type_id: u16 = @intCast(subckt_type_list.items.len);
-                try subckt_type_list.append(arena, .{
-                    .name = sname,
-                    .n_ports = n_ports,
-                    .n_internal_nodes = n_internal,
-                    .device_count = @intCast(countExpanded(sub.devices, &subckts, 1)),
-                });
+                const type_id: u16 = @intCast(subckt_type_map.size + 1); // 0 = top-level
+                _ = @as(u16, @intCast(countExpanded(sub.devices, &subckts, 1)));
                 try subckt_type_map.put(arena, sname, type_id);
             }
 
@@ -173,8 +150,7 @@ pub fn Parser(comptime Tok: type) type {
             }
             try resolveModelBins(arena, flat.items, models.items, directives.items);
 
-            var dl = try ir.DeviceList.fromUnsorted(arena, flat.items);
-            dl.subckt_types = subckt_type_list.items;
+            const dl = try ir.DeviceList.fromUnsorted(arena, flat.items);
 
             // Foreign (.hdl) paths are case-sensitive; token slices point into
             // the lowered buffer. Recover the original bytes by offset.
@@ -222,9 +198,8 @@ pub fn Parser(comptime Tok: type) type {
                 's' => {
                     if (std.mem.eql(u8, kind, "subckt")) {
                         if (cur_subckt.* != null) return error.ParseError;
-                        var s = Subckt{ .name = undefined, .ports = undefined, .defaults = undefined, .devices = &.{} };
+                        var s = Subckt{ .ports = undefined, .defaults = undefined, .devices = &.{} };
                         const namew = t.next() orelse return error.ParseError;
-                        s.name = namew.word;
                         var ports: std.ArrayList([]const u8) = .empty;
                         var defaults: std.ArrayList(ir.Kv) = .empty;
                         while (t.next()) |tk| {
@@ -248,7 +223,7 @@ pub fn Parser(comptime Tok: type) type {
                         }
                         s.ports = ports.items;
                         s.defaults = defaults;
-                        const gop = try subckts.getOrPut(arena, s.name);
+                        const gop = try subckts.getOrPut(arena, namew.word);
                         gop.value_ptr.* = s;
                         cur_subckt.* = gop.value_ptr;
                         sub_devices.* = .empty;
@@ -324,7 +299,7 @@ pub fn Parser(comptime Tok: type) type {
             if (std.mem.eql(u8, kind, "hdl") or std.mem.eql(u8, kind, "include")) {
                 var peek = t.*;
                 const path = try parsePathToken(&peek);
-                if (foreignKindForPath(path)) |foreign_kind| {
+                if (ir.foreignKindForPath(path)) |foreign_kind| {
                     t.* = peek;
                     try foreign.append(arena, .{ .kind = foreign_kind, .path = path });
                     return true;
@@ -335,7 +310,6 @@ pub fn Parser(comptime Tok: type) type {
                 try directives.append(arena, .{ .kind = kind, .args = args });
                 return true;
             }
-            // Generic directive
             // ponytail: skip `=` like comma — .OPTIONS/.opt/.width use key=value
             // syntax that espice doesn't consume. Parse key and value as separate args.
             var args: std.ArrayList(ir.Value) = .empty;
@@ -352,79 +326,15 @@ pub fn Parser(comptime Tok: type) type {
             return true;
         }
 
-        pub fn dump(gpa: std.mem.Allocator, nl: ir.Netlist) Error![]u8 {
-            var aw: std.Io.Writer.Allocating = .init(gpa);
-            const w = &aw.writer;
-
-            w.print("{s}\n", .{nl.title}) catch return error.OutOfMemory;
-            for (nl.params) |p| {
-                w.print(".param {s}=", .{p.key}) catch return error.OutOfMemory;
-                try dumpValue(w, p.value);
-                w.print("\n", .{}) catch return error.OutOfMemory;
-            }
-            for (0..nl.devices.len()) |di| {
-                w.print("{s}", .{nl.devices.names[di]}) catch return error.OutOfMemory;
-                for (nl.devices.nodes[di]) |n| w.print(" {s}", .{n}) catch return error.OutOfMemory;
-                for (nl.devices.positional[di]) |v| {
-                    w.print(" ", .{}) catch return error.OutOfMemory;
-                    try dumpValue(w, v);
-                }
-                for (nl.devices.kv[di]) |p| {
-                    w.print(" {s}=", .{p.key}) catch return error.OutOfMemory;
-                    try dumpValue(w, p.value);
-                }
-                w.print("\n", .{}) catch return error.OutOfMemory;
-            }
-            for (nl.models) |m| {
-                w.print(".model {s} {s}(", .{ m.name, m.kind }) catch return error.OutOfMemory;
-                for (m.kv, 0..) |p, i| {
-                    if (i > 0) w.print(" ", .{}) catch return error.OutOfMemory;
-                    if (p.key.len > 0) w.print("{s}=", .{p.key}) catch return error.OutOfMemory;
-                    try dumpValue(w, p.value);
-                }
-                w.print(")\n", .{}) catch return error.OutOfMemory;
-            }
-            for (nl.foreign) |f| {
-                const kind: []const u8 = switch (f.kind) {
-                    .osdi_include => "osdi_include",
-                    .pre_osdi => "pre_osdi",
-                    .verilog_a => "hdl",
-                    .verilog => "verilog",
-                };
-                w.print(".{s} {s}\n", .{ kind, f.path }) catch return error.OutOfMemory;
-            }
-            for (nl.directives) |dir| {
-                w.print(".{s}", .{dir.kind}) catch return error.OutOfMemory;
-                for (dir.args) |v| {
-                    w.print(" ", .{}) catch return error.OutOfMemory;
-                    try dumpValue(w, v);
-                }
-                w.print("\n", .{}) catch return error.OutOfMemory;
-            }
-            w.print(".end\n", .{}) catch return error.OutOfMemory;
-            return aw.toOwnedSlice() catch return error.OutOfMemory;
-        }
-
-        const ElementShape = struct {
-            letters: []const u8,
-            nodes: ?usize,
-        };
-
-        const element_shapes = [_]ElementShape{
-            // w (current-controlled switch): W n+ n- Vctrl model — 2 nodes,
-            // Vctrl/model are positional words, not nodes (ngspice INP2W).
-            .{ .letters = "rclvidbfhw", .nodes = 2 },
-            .{ .letters = "qzj", .nodes = 3 },
-            .{ .letters = "egsmto", .nodes = 4 },
-            .{ .letters = "k", .nodes = 0 },
-            .{ .letters = "px", .nodes = null },
-        };
-
         fn nodeCount(letter: u8) ?usize {
-            for (element_shapes) |shape| {
-                if (std.mem.indexOfScalar(u8, shape.letters, letter) != null) return shape.nodes;
-            }
-            return null;
+            return switch (letter) {
+                // W n+ n- Vctrl model: Vctrl/model are positional words (ngspice INP2W).
+                'r', 'c', 'l', 'v', 'i', 'd', 'b', 'f', 'h', 'w' => 2,
+                'q', 'z', 'j' => 3,
+                'e', 'g', 's', 'm', 't', 'o' => 4,
+                'k' => 0,
+                else => null,
+            };
         }
 
         fn parseElement(arena: std.mem.Allocator, pool: *SlicePool, line: []const u8) Error!ir.Device {
@@ -539,7 +449,6 @@ pub fn Parser(comptime Tok: type) type {
                 }
             }
 
-            // Parse trailing kv and positional values
             while (true) {
                 var peek = t;
                 const tk = peek.next() orelse break;
@@ -565,27 +474,17 @@ pub fn Parser(comptime Tok: type) type {
                                 continue;
                             }
                         }
-                        const v = try parseValueToken(arena, &t);
-                        if (pos_count < pos_buf.len) {
-                            pos_buf[pos_count] = v;
-                            pos_count += 1;
-                        } else {
-                            if (pos_overflow.items.len == 0)
-                                try pos_overflow.appendSlice(arena, pos_buf[0..pos_buf.len]);
-                            try pos_overflow.append(arena, v);
-                        }
                     },
-                    else => {
-                        const v = try parseValueToken(arena, &t);
-                        if (pos_count < pos_buf.len) {
-                            pos_buf[pos_count] = v;
-                            pos_count += 1;
-                        } else {
-                            if (pos_overflow.items.len == 0)
-                                try pos_overflow.appendSlice(arena, pos_buf[0..pos_buf.len]);
-                            try pos_overflow.append(arena, v);
-                        }
-                    },
+                    else => {},
+                }
+                const v = try parseValueToken(arena, &t);
+                if (pos_count < pos_buf.len) {
+                    pos_buf[pos_count] = v;
+                    pos_count += 1;
+                } else {
+                    if (pos_overflow.items.len == 0)
+                        try pos_overflow.appendSlice(arena, pos_buf[0..pos_buf.len]);
+                    try pos_overflow.append(arena, v);
                 }
             }
 
@@ -688,19 +587,6 @@ pub fn Parser(comptime Tok: type) type {
                 return path[1 .. path.len - 1];
             }
             return path;
-        }
-
-        fn foreignKindForPath(path: []const u8) ?ir.ForeignKind {
-            const ext = std.fs.path.extension(path);
-            if (std.ascii.eqlIgnoreCase(ext, ".va") or
-                std.ascii.eqlIgnoreCase(ext, ".vams") or
-                std.ascii.eqlIgnoreCase(ext, ".veriloga"))
-            {
-                return .verilog_a;
-            }
-            if (std.ascii.eqlIgnoreCase(ext, ".v") or std.ascii.eqlIgnoreCase(ext, ".sv"))
-                return .verilog;
-            return null;
         }
 
         fn parseExpr(arena: std.mem.Allocator, text: []const u8) Error!*const ir.Expr {
@@ -890,7 +776,6 @@ pub fn Parser(comptime Tok: type) type {
         };
 
         const Subckt = struct {
-            name: []const u8,
             ports: []const []const u8,
             defaults: std.ArrayList(ir.Kv),
             devices: []const ir.Device,
@@ -980,14 +865,6 @@ pub fn Parser(comptime Tok: type) type {
             }
         }
 
-        fn concatDot(arena: std.mem.Allocator, a: []const u8, b: []const u8) Error![]const u8 {
-            const buf = try arena.alloc(u8, a.len + 1 + b.len);
-            @memcpy(buf[0..a.len], a);
-            buf[a.len] = '.';
-            @memcpy(buf[a.len + 1 ..], b);
-            return buf;
-        }
-
         fn portLookup(ports: []const []const u8, mappings: []const []const u8, needle: []const u8) ?[]const u8 {
             for (ports, mappings) |p, m| {
                 if (std.mem.eql(u8, needle, p)) return m;
@@ -1001,12 +878,13 @@ pub fn Parser(comptime Tok: type) type {
             // ponytail: linear scan beats HashMap for typical port counts (2-8)
             if (portLookup(ports, mappings, n)) |mapped| return mapped;
             if (n.len <= 3 and (std.mem.eql(u8, n, "0") or std.mem.eql(u8, n, "gnd"))) return n;
-            return concatDot(arena, iname, n);
+            // ponytail: stdlib concatenation keeps one exact-size arena allocation.
+            return std.mem.concat(arena, u8, &.{ iname, ".", n });
         }
 
         /// Clone `e` with the args of every V() probe renamed via mapNode.
-        /// I() probe args name devices, whose rename (concatDot the other way
-        /// round) happens on the device card itself; leave them alone.
+        /// I() probe args name devices, whose <device>.<instance> rename
+        /// happens on the device card itself; leave them alone.
         fn mapProbeNodes(arena: std.mem.Allocator, e: *const ir.Expr, ports: []const []const u8, mappings: []const []const u8, iname: []const u8) Error!*const ir.Expr {
             switch (e.*) {
                 .num, .ident => return e,
@@ -1114,7 +992,7 @@ pub fn Parser(comptime Tok: type) type {
             const nested = scopes[0 .. genv.len + 1];
             for (sub.devices) |sd| {
                 var nd = try substDevice(arena, sd, nested);
-                nd.name = try concatDot(arena, sd.name, d.name);
+                nd.name = try std.mem.concat(arena, u8, &.{ sd.name, ".", d.name });
                 const dev_nodes = try arena.alloc([]const u8, sd.nodes.len);
                 for (sd.nodes, dev_nodes) |n, *o| {
                     o.* = try mapNode(arena, sub.ports, d.nodes, d.name, n);
@@ -1258,11 +1136,11 @@ pub fn Parser(comptime Tok: type) type {
                 .name => |nm| blk: {
                     if (findScope(env, nm) == null) break :blk v;
                     const ident: ir.Expr = .{ .ident = nm };
-                    const se = try substExpr(arena, &ident, env);
+                    const se = try substExprDepth(arena, &ident, env, 0);
                     break :blk if (foldExpr(se, model_geometry)) |n| .{ .num = n } else .{ .expr = se };
                 },
                 .expr => |e| blk: {
-                    const se = try substExpr(arena, e, env);
+                    const se = try substExprDepth(arena, e, env, 0);
                     // Fold to a plain number when possible: downstream lowering
                     // (engine valueNumber) only understands .num.
                     break :blk if (foldExpr(se, model_geometry)) |n| ir.Value{ .num = n } else ir.Value{ .expr = se };
@@ -1284,26 +1162,24 @@ pub fn Parser(comptime Tok: type) type {
             return null;
         }
 
-        fn substExpr(arena: std.mem.Allocator, e: *const ir.Expr, env: []const Env) Error!*const ir.Expr {
-            return substExprDepth(arena, e, env, 0);
-        }
-
         fn substExprDepth(arena: std.mem.Allocator, e: *const ir.Expr, env: []const Env, depth: u8) Error!*const ir.Expr {
             if (depth == 64) return error.ParseError;
             switch (e.*) {
                 .num => return e,
                 .ident => |nm| {
                     const scope = findScope(env, nm) orelse return e;
-                    const sv = env[scope].get(nm).?;
                     const defining = env[0 .. scope + 1];
-                    const out = try arena.create(ir.Expr);
-                    out.* = switch (sv) {
+                    // Allocate only for the arms that keep the node: an .expr
+                    // alias recurses into the definition and never uses one.
+                    const sub: ir.Expr = switch (env[scope].get(nm).?) {
                         .num => |n| .{ .num = n },
                         .name => |n2| .{ .ident = n2 },
                         .expr => |se| return substExprDepth(arena, se, defining, depth + 1),
                         .group => return error.ParseError,
                     };
-                    return if (out.* == .ident) substExprDepth(arena, out, defining, depth + 1) else out;
+                    const out = try arena.create(ir.Expr);
+                    out.* = sub;
+                    return if (sub == .ident) substExprDepth(arena, out, defining, depth + 1) else out;
                 },
                 .call => |c| {
                     if (std.mem.eql(u8, c.name, "v") or std.mem.eql(u8, c.name, "i")) return e;
@@ -1326,52 +1202,6 @@ pub fn Parser(comptime Tok: type) type {
             }
         }
 
-        fn dumpValue(w: *std.Io.Writer, v: ir.Value) Error!void {
-            switch (v) {
-                .num => |n| w.print("{d}", .{n}) catch return error.OutOfMemory,
-                .name => |s| w.print("{s}", .{s}) catch return error.OutOfMemory,
-                .expr => |e| {
-                    w.print("{{", .{}) catch return error.OutOfMemory;
-                    try dumpExpr(w, e);
-                    w.print("}}", .{}) catch return error.OutOfMemory;
-                },
-                .group => |g| {
-                    w.print("{s}(", .{g.name}) catch return error.OutOfMemory;
-                    for (g.args, 0..) |a, i| {
-                        if (i > 0) w.print(" ", .{}) catch return error.OutOfMemory;
-                        try dumpValue(w, a);
-                    }
-                    w.print(")", .{}) catch return error.OutOfMemory;
-                },
-            }
-        }
-
-        fn dumpExpr(w: *std.Io.Writer, e: *const ir.Expr) Error!void {
-            switch (e.*) {
-                .num => |n| w.print("{d}", .{n}) catch return error.OutOfMemory,
-                .ident => |s| w.print("{s}", .{s}) catch return error.OutOfMemory,
-                .call => |c| {
-                    w.print("{s}(", .{c.name}) catch return error.OutOfMemory;
-                    for (c.args, 0..) |a, i| {
-                        if (i > 0) w.print(",", .{}) catch return error.OutOfMemory;
-                        try dumpExpr(w, a);
-                    }
-                    w.print(")", .{}) catch return error.OutOfMemory;
-                },
-                .unop => |u| {
-                    w.print("(-", .{}) catch return error.OutOfMemory;
-                    try dumpExpr(w, u.a);
-                    w.print(")", .{}) catch return error.OutOfMemory;
-                },
-                .binop => |b| {
-                    w.print("(", .{}) catch return error.OutOfMemory;
-                    try dumpExpr(w, b.a);
-                    w.print("{c}", .{b.op}) catch return error.OutOfMemory;
-                    try dumpExpr(w, b.b);
-                    w.print(")", .{}) catch return error.OutOfMemory;
-                },
-            }
-        }
     };
 }
 
@@ -1394,8 +1224,6 @@ test "parser: non-standard instance name in subcircuit expands correctly" {
         \\
     ;
     const nl = try Parser(@import("tokenizer.zig").ngspice).parse(arena_state.allocator(), src);
-    // After subcircuit expansion, the 'nm' device should appear in the flat list.
-    // It should have 4 nodes and positional[0] = "mymod" (the model name).
     const dl = nl.devices;
     var found = false;
     for (0..dl.len()) |i| {

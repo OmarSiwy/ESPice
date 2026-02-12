@@ -119,7 +119,7 @@ inline fn simdScale(dst: []f64, scale: f64, src: []const f64) void {
 }
 
 /// ||v||_inf
-inline fn normInf(buf: []const f64) f64 {
+pub inline fn normInf(buf: []const f64) f64 {
     var mx: f64 = 0;
     for (buf) |v| mx = @max(mx, @abs(v));
     return mx;
@@ -243,7 +243,6 @@ fn integrateOnePeriod(
                 const q1: V = sc.q_prev[j..][0..W].*;
                 const ip: V = sc.i_prev[j..][0..W].*;
                 sc.i_prev[j..][0..W].* = av * (q0 - q1) - ip;
-                // Rotate: q_prev <- q_cur for next step.
                 sc.q_prev[j..][0..W].* = q0;
             }
             while (j < n) : (j += 1) {
@@ -283,8 +282,6 @@ fn gpuIntegrateOnePeriod(
     const gh = ckt.gpu_hook orelse return false;
     const gt = gh.simulate_tran orelse return false;
 
-    // Minimal waveform: 0 probes, capacity 1 — we discard the waveform,
-    // only care about the final x state.
     var wf = tran.Waveform.init(allocator, 0, 1) catch return false;
     defer wf.deinit();
 
@@ -298,6 +295,23 @@ fn gpuIntegrateOnePeriod(
 
     const result = gt(gh.ctx, x, &.{}, &wf, tran_opts) catch return false;
     return result.completed;
+}
+
+/// Integrate a shooting trial, restoring the IC before CPU fallback because a
+/// failed GPU attempt may already have changed x_end.
+inline fn integrateFrom(
+    ckt: *root.Circuit,
+    ws: *converger.Workspace,
+    sc: *Companion,
+    x0: []const f64,
+    x_end: []f64,
+    options: Options,
+    allocator: std.mem.Allocator,
+) bool {
+    simdCopy(x_end, x0);
+    if (gpuIntegrateOnePeriod(ckt, x_end, options, allocator)) return true;
+    simdCopy(x_end, x0);
+    return integrateOnePeriod(ckt, ws, sc, x_end, &.{}, &.{}, options);
 }
 
 // ---------------------------------------------------------------------------
@@ -316,7 +330,6 @@ const ShootingKrylovCtx = struct {
     x_end_pert: []f64, // scratch: perturbed endpoint (n)
     options: Options,
     n: usize,
-    eps: f64,
     allocator: std.mem.Allocator,
 };
 
@@ -329,29 +342,12 @@ const ShootingKrylovCtx = struct {
 fn shootingMatvec(v: []const f64, w: []f64, ctx_ptr: *anyopaque) void {
     const ctx: *ShootingKrylovCtx = @ptrCast(@alignCast(ctx_ptr));
     const n = ctx.n;
-    const inv_eps = 1.0 / ctx.eps;
+    const inv_eps = 1.0 / ctx.options.fd_epsilon;
 
-    // x_pert = x0 + eps * v
     simdCopy(ctx.x_pert[0..n], ctx.x0[0..n]);
-    simdAxpy(ctx.x_pert[0..n], ctx.eps, v[0..n]);
+    simdAxpy(ctx.x_pert[0..n], ctx.options.fd_epsilon, v[0..n]);
 
-    // Integrate perturbed IC over one period — try GPU first, fall back to CPU.
-    simdCopy(ctx.x_end_pert[0..n], ctx.x_pert[0..n]);
-    const ok = if (gpuIntegrateOnePeriod(ctx.ckt, ctx.x_end_pert[0..n], ctx.options, ctx.allocator))
-        true
-    else blk: {
-        // GPU unavailable or failed — restore x_end_pert and use CPU path.
-        simdCopy(ctx.x_end_pert[0..n], ctx.x_pert[0..n]);
-        break :blk integrateOnePeriod(
-            ctx.ckt,
-            ctx.ws,
-            ctx.sc,
-            ctx.x_end_pert,
-            &.{},
-            &.{},
-            ctx.options,
-        );
-    };
+    const ok = integrateFrom(ctx.ckt, ctx.ws, ctx.sc, ctx.x_pert, ctx.x_end_pert, ctx.options, ctx.allocator);
 
     if (!ok) {
         // ponytail: perturbed integration failed — return zero vector so
@@ -360,9 +356,6 @@ fn shootingMatvec(v: []const f64, w: []f64, ctx_ptr: *anyopaque) void {
         return;
     }
 
-    // w = ((x_end_pert - x_pert) - phi) / eps
-    // phi_pert_i = x_end_pert_i - x_pert_i
-    // w_i = (phi_pert_i - phi_i) / eps
     const inv_v: V = @splat(inv_eps);
     var i: usize = 0;
     while (i + W <= n) : (i += W) {
@@ -381,8 +374,7 @@ fn shootingMatvec(v: []const f64, w: []f64, ctx_ptr: *anyopaque) void {
 // Dense FD Jacobian path (n < krylov_threshold)
 // ---------------------------------------------------------------------------
 
-/// Build the dense FD Jacobian and solve with LU. Returns false if the
-/// linear solve fails.
+/// Build the dense FD Jacobian and solve with LU.
 fn denseFdSolve(
     ckt: *root.Circuit,
     ws: *converger.Workspace,
@@ -404,17 +396,7 @@ fn denseFdSolve(
         simdCopy(x0_pert[0..n], x0[0..n]);
         x0_pert[j] += eps;
 
-        simdCopy(x_end_pert[0..n], x0_pert[0..n]);
-
-        // ponytail: try GPU for each column integration — each is independent,
-        // still sequential but each one avoids per-step host round-trips.
-        const ok = if (gpuIntegrateOnePeriod(ckt, x_end_pert[0..n], options, allocator))
-            true
-        else blk: {
-            // GPU unavailable or failed — restore and use CPU path.
-            simdCopy(x_end_pert[0..n], x0_pert[0..n]);
-            break :blk integrateOnePeriod(ckt, ws, sc, x_end_pert, &.{}, &.{}, options);
-        };
+        const ok = integrateFrom(ckt, ws, sc, x0_pert, x_end_pert, options, allocator);
 
         if (!ok) {
             // If perturbed integration fails, use identity column as fallback
@@ -442,13 +424,8 @@ fn denseFdSolve(
         }
     }
 
-    // Solve J_phi * dx0 = -phi using dense LU
-    // phi is passed as the RHS (factorizeSolveNeg negates it internally).
-    var phi_copy: [1024]f64 = undefined;
-    // For n < krylov_threshold (50), stack copy is fine.
-    const rhs = phi_copy[0..n];
-    simdCopy(rhs, phi[0..n]);
-    try dense_lu.DenseLu(f64).factorizeSolveNeg(n, j_phi, rhs, dx0);
+    // ponytail: LU reads phi and writes the separate dx0 slab; no RHS copy needed.
+    try dense_lu.factorizeSolveNeg(n, j_phi, phi[0..n], dx0);
 }
 
 // ---------------------------------------------------------------------------
@@ -471,7 +448,6 @@ fn krylovSolve(
     options: Options,
     allocator: std.mem.Allocator,
 ) void {
-    // Build -phi as GMRES RHS
     simdScale(neg_phi[0..n], -1.0, phi[0..n]);
 
     var ctx = ShootingKrylovCtx{
@@ -484,11 +460,9 @@ fn krylovSolve(
         .x_end_pert = x_end_pert,
         .options = options,
         .n = n,
-        .eps = options.fd_epsilon,
         .allocator = allocator,
     };
 
-    // Zero initial guess for dx0
     simdZero(dx0[0..n]);
 
     _ = krylov.solve(
@@ -572,23 +546,13 @@ pub fn solve(
     try ckt.computeBaseline();
     const ws = try ckt.workspace();
 
-    // Initialize x0 from DC operating point
     simdCopy(x0, x_dc[0..n]);
 
     var iter: u16 = 0;
     var res_norm: f64 = std.math.inf(f64);
 
     while (iter < options.max_shooting_iter) : (iter += 1) {
-        // Integrate from x0 over [0, T] to get x(T).
-        // Try GPU first for the whole-period integration.
-        simdCopy(x_end, x0);
-        const period_ok = if (gpuIntegrateOnePeriod(ckt, x_end, options, allocator))
-            true
-        else blk: {
-            // GPU unavailable or failed — restore and use CPU path.
-            simdCopy(x_end, x0);
-            break :blk integrateOnePeriod(ckt, ws, &sc, x_end, &.{}, &.{}, options);
-        };
+        const period_ok = integrateFrom(ckt, ws, &sc, x0, x_end, options, allocator);
 
         if (!period_ok) {
             return .{
@@ -598,10 +562,8 @@ pub fn solve(
             };
         }
 
-        // Compute phi(x0) = x(T) - x0
         simdSub(phi, x_end, x0);
 
-        // Check convergence: ||phi||_inf
         res_norm = normInf(phi);
         if (res_norm < options.shooting_tol) break;
 
@@ -641,7 +603,6 @@ pub fn solve(
             );
         }
 
-        // Update x0 += dx0
         simdAdd(x0, x0, dx0);
     }
 
@@ -692,7 +653,6 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 const testing = std.testing;
 
 test "pss: krylov_threshold is reasonable" {
-    // Sanity: the threshold should be positive and not absurdly large.
     try testing.expect(krylov_threshold > 0);
     try testing.expect(krylov_threshold <= 200);
 }
@@ -771,7 +731,6 @@ test "pss: use_krylov gate" {
 }
 
 test "pss: GMRES init/deinit for Krylov path" {
-    // Verify GMRES can be instantiated with typical PSS dimensions.
     const gpa = testing.allocator;
     var krylov = try Gmres.init(gpa, 64, 30);
     defer krylov.deinit(gpa);

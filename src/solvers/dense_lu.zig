@@ -9,7 +9,6 @@ pub const Error = error{Singular};
 /// vector width, singular threshold, and all kernels specialize at comptime.
 pub fn DenseLu(comptime T: type) type {
     return struct {
-        const Self = @This();
         const W = std.simd.suggestVectorLength(T) orelse 1;
         const V = @Vector(W, T);
         /// Pivot magnitudes below eps²(T) are numerical noise
@@ -72,8 +71,7 @@ pub fn DenseLu(comptime T: type) type {
             for (0..n) |k| {
                 const xk = x[k];
                 if (xk == 0) continue; // ponytail: skip zero RHS — common in sparse-ish systems
-                const base = k + 1;
-                fmsSolveSimd(lu, x, n, k, xk, base);
+                fmsSolveSimd(lu, x, n, k, xk);
             }
 
             backSubstitute(n, lu, x);
@@ -88,39 +86,14 @@ pub fn DenseLu(comptime T: type) type {
 
             // Forward-sub U^T z = b: U^T[i][j] = lu[j*n+i] for j <= i
             for (0..n) |i| {
-                var acc: V = @splat(0.0);
-                var j: usize = 0;
-                while (j + W <= i) : (j += W) {
-                    // Gather U^T[i][j..j+W] = lu[j*n+i .. (j+W-1)*n+i], stride n
-                    var col_vals: [W]T = undefined;
-                    inline for (0..W) |w| col_vals[w] = lu[(j + w) * n + i];
-                    const cv: V = col_vals;
-                    const xv: V = x[j..][0..W].*;
-                    acc += cv * xv;
-                }
-                var sum = x[i] - @reduce(.Add, acc);
-                while (j < i) : (j += 1) sum -= lu[j * n + i] * x[j];
-                x[i] = sum / lu[i * n + i];
+                x[i] = subtractColumnDot(n, lu, x, i, 0, i) / lu[i * n + i];
             }
 
             // Back-sub L^T w = z: unit diagonal, L^T[i][j] = lu[j*n+i] for j > i
             var i = n;
             while (i > 0) {
                 i -= 1;
-                var acc: V = @splat(0.0);
-                var j = i + 1;
-                // ponytail: L^T column access is strided (lu[j*n+i]), no contiguous SIMD benefit
-                // gather into vector for moderate n; scalar fallback is fine for small n
-                while (j + W <= n) : (j += W) {
-                    var col_vals: [W]T = undefined;
-                    inline for (0..W) |w| col_vals[w] = lu[(j + w) * n + i];
-                    const cv: V = col_vals;
-                    const xv: V = x[j..][0..W].*;
-                    acc += cv * xv;
-                }
-                var sum = x[i] - @reduce(.Add, acc);
-                while (j < n) : (j += 1) sum -= lu[j * n + i] * x[j];
-                x[i] = sum;
+                x[i] = subtractColumnDot(n, lu, x, i, i + 1, n);
             }
 
             // Reverse permutation: undo swaps k = n-1 .. 0
@@ -180,6 +153,25 @@ pub fn DenseLu(comptime T: type) type {
         // ====================================================================
         // Internal kernels
         // ====================================================================
+
+        /// Subtract a strided column dot product, preserving vector reduction
+        /// followed by scalar subtraction for both transpose substitutions.
+        inline fn subtractColumnDot(n: usize, lu: []const T, x: []const T, i: usize, start: usize, end: usize) T {
+            var acc: V = @splat(0.0);
+            var j = start;
+            // ponytail: strided column access; gather for moderate n, scalar tail for small n.
+            // Upgrade to a transposed factor layout if column gathers become the bottleneck.
+            while (j + W <= end) : (j += W) {
+                var col_vals: [W]T = undefined;
+                inline for (0..W) |w| col_vals[w] = lu[(j + w) * n + i];
+                const cv: V = col_vals;
+                const xv: V = x[j..][0..W].*;
+                acc += cv * xv;
+            }
+            var sum = x[i] - @reduce(.Add, acc);
+            while (j < end) : (j += 1) sum -= lu[j * n + i] * x[j];
+            return sum;
+        }
 
         /// Fused factorize + solve: carries the RHS through elimination (no piv storage).
         fn factorizeSolveImpl(n: usize, a: []T, b: []const T, x: []T, comptime negate: bool) Error!void {
@@ -278,10 +270,11 @@ pub fn DenseLu(comptime T: type) type {
             while (j < n) : (j += 1) std.mem.swap(T, &a[r1 * n + j], &a[r2 * n + j]);
         }
 
-        /// Forward-sub helper for solveFactored: x[base..n] -= xk * lu[i*n+k] (contiguous row access).
-        fn fmsSolveSimd(lu: []const T, x: []T, n: usize, k: usize, xk: T, base: usize) void {
+        /// Forward-sub helper for solveFactored: x[k+1..n] -= xk * lu[i*n+k] (strided column access).
+        fn fmsSolveSimd(lu: []const T, x: []T, n: usize, k: usize, xk: T) void {
             const xkv: V = @splat(xk);
-            var ii = base;
+            // ponytail: the start is always k + 1; parameterize if another range is needed.
+            var ii = k + 1;
             while (ii + W <= n) : (ii += W) {
                 // lu[ii*n+k] .. lu[(ii+W-1)*n+k] — strided access (column k).
                 // x[ii..ii+W] — contiguous. Gather the column, fma into x.

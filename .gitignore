@@ -37,3 +37,8 @@ core
 result
 result-*
 .venv-mineru/
+
+# valgrind core dumps
+vgcore.*
+obj_dir/
+*.out

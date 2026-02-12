@@ -334,7 +334,8 @@ pub fn amd(n: u32, col_ptr: []const u32, row_idx: []const u32, q: []u32, ws: *Ws
             deg[r] += 1;
         }
     }
-    for (0..n) |i| va_len[i] = deg[i];
+    // ponytail: both workspace slices have length n; reuse the bulk copy primitive.
+    @memcpy(va_len, deg);
 
     // Dedup (epoch-mark each neighbor, compact in-place)
     for (0..n) |i| {
@@ -353,8 +354,8 @@ pub fn amd(n: u32, col_ptr: []const u32, row_idx: []const u32, q: []u32, ws: *Ws
     }
 
     // ==== Phase 2: dense-row deferral (threshold: max(16, 10·⌊√n⌋)) ====
-    var isq: u32 = 0;
-    while (@as(u64, isq + 1) * @as(u64, isq + 1) <= n) isq += 1;
+    // ponytail: stdlib integer sqrt preserves the exact floor without a counting loop.
+    const isq: u32 = std.math.sqrt(n);
     const dense_thresh: u32 = @max(@as(u32, 16), 10 * isq);
     var ndense: u32 = 0;
     for (0..n) |i| {
@@ -496,7 +497,6 @@ pub fn amd(n: u32, col_ptr: []const u32, row_idx: []const u32, q: []u32, ws: *Ws
             // Append p to element adjacency (relocate if full)
             if (ewp < ea_lim[i]) {
                 ea[ea_pe[i] + ewp] = p;
-                ea_len[i] = ewp + 1;
             } else {
                 const nc: u32 = (ewp + 1) * 2;
                 if (ea_free + nc > ea.len) return error.OutOfWorkspace;
@@ -504,9 +504,9 @@ pub fn amd(n: u32, col_ptr: []const u32, row_idx: []const u32, q: []u32, ws: *Ws
                 ea[ea_free + ewp] = p;
                 ea_pe[i] = @intCast(ea_free);
                 ea_lim[i] = nc;
-                ea_len[i] = ewp + 1;
                 ea_free += nc;
             }
+            ea_len[i] = ewp + 1;
 
             // A_i := A_i \ (Lp ∪ dead), with asum = Σ nv for degree bound
             var asum: u32 = 0;
@@ -603,19 +603,13 @@ fn sameAdj(
 ) bool {
     // Fast reject on size mismatch
     if (va_len[i] != va_len[j] or ea_len[i] != ea_len[j]) return false;
-    // Check VA sets: mark i's, verify j's match
-    era.* += 1;
-    const m = era.*;
-    for (va[va_pe[i]..][0..va_len[i]]) |v| mark_buf[v] = m;
-    for (va[va_pe[j]..][0..va_len[j]]) |v| {
-        if (mark_buf[v] != m) return false;
-    }
-    // Check EA sets: mark i's, verify j's match
-    era.* += 1;
-    const me = era.*;
-    for (ea[ea_pe[i]..][0..ea_len[i]]) |v| mark_buf[v] = me;
-    for (ea[ea_pe[j]..][0..ea_len[j]]) |v| {
-        if (mark_buf[v] != me) return false;
+    inline for (.{ va, ea }, .{ va_pe, ea_pe }, .{ va_len, ea_len }) |adj, pos, len| {
+        era.* += 1;
+        const m = era.*;
+        for (adj[pos[i]..][0..len[i]]) |v| mark_buf[v] = m;
+        for (adj[pos[j]..][0..len[j]]) |v| {
+            if (mark_buf[v] != m) return false;
+        }
     }
     return true;
 }

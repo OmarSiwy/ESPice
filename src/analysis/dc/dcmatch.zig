@@ -14,8 +14,6 @@
 const std = @import("std");
 const root = @import("../types.zig");
 const converger = @import("solvers").converger;
-const types = @import("solvers").types;
-const solvers = @import("solvers");
 
 const W = std.simd.suggestVectorLength(f64) orelse 8;
 
@@ -30,14 +28,12 @@ pub const Contribution = struct {
     device_index: u32,
     param_name: []const u8,
     sensitivity: f64,
-    sigma_param: f64,
     variance_contrib: f64,
 };
 
 pub const MismatchResult = struct {
     contributions: []Contribution,
     total_sigma: f64,
-    op_value: f64,
 };
 
 // -------------------------------------------------------------------------
@@ -56,27 +52,6 @@ inline fn pelgromSigma(ref: root.ParamRef) f64 {
 }
 
 // -------------------------------------------------------------------------
-// Adjoint solve: reuse the factored J from the OP Newton
-// -------------------------------------------------------------------------
-
-/// Solve J^T * lambda = e_out using the already-factored workspace.
-/// `e_out` is a unit vector with 1.0 at `output_node`.
-fn adjointSolve(
-    ws: *converger.Workspace,
-    n: usize,
-    output_node: u32,
-    lambda: []f64,
-    e_out: []f64,
-) void {
-    // Build e_out
-    root.zeroSimd(e_out[0..n]);
-    e_out[output_node] = 1.0;
-
-    // Transpose solve on the existing factors
-    ws.slv.solveT(e_out[0..n], lambda[0..n]);
-}
-
-// -------------------------------------------------------------------------
 // FD parameter-derivative stamps
 // -------------------------------------------------------------------------
 
@@ -87,7 +62,6 @@ fn fdSensitivity(
     x_op: []const f64,
     lambda: []const f64,
     rhs_nom: []const f64,
-    rhs_work: []f64,
     param: root.ParamRef,
 ) !f64 {
     const n: usize = ckt.n;
@@ -103,7 +77,6 @@ fn fdSensitivity(
     }
     try ckt.recompute();
 
-    // Eval at x_op with perturbed parameter — fills rhs
     ckt.eval(x_op, 0);
 
     // dF/dp = (rhs_pert - rhs_nom) / delta, then dot with -lambda
@@ -120,13 +93,10 @@ fn fdSensitivity(
         const rn: V = rhs_nom[i..][0..W].*;
         const lv: V = lambda[i..][0..W].*;
         const df: V = (rp - rn) * inv_v;
-        // Store dF/dp into rhs_work for potential later use
-        rhs_work[i..][0..W].* = df;
         dot += @reduce(.Add, lv * df);
     }
     while (i < n) : (i += 1) {
         const df = (ckt.rhs[i] - rhs_nom[i]) * inv_delta;
-        rhs_work[i] = df;
         dot += lambda[i] * df;
     }
 
@@ -153,33 +123,27 @@ pub fn solve(
     if (refs.len == 0) return .{
         .contributions = &.{},
         .total_sigma = 0,
-        .op_value = x_op[output_node],
     };
 
-    // ponytail: one bulk alloc for all work buffers (lambda + e_out + rhs_nom + rhs_work)
-    const arena = try allocator.alloc(f64, 4 * n);
+    // ponytail: retain only lambda, e_out and rhs_nom; store dF/dp if a caller needs it.
+    const arena = try allocator.alloc(f64, 3 * n);
     defer allocator.free(arena);
     const lambda = arena[0..n];
     const e_out = arena[n .. 2 * n];
     const rhs_nom = arena[2 * n .. 3 * n];
-    const rhs_work = arena[3 * n .. 4 * n];
 
-    // Evaluate at x_op to get the nominal Jacobian + rhs and factor it
     const ws = try ckt.workspace();
     ckt.eval(x_op, 0);
 
-    // Save nominal rhs before factoring (factor clobbers g_vals, not rhs)
-    {
-        var i: usize = 0;
-        while (i + W <= n) : (i += W) rhs_nom[i..][0..W].* = ckt.rhs[i..][0..W].*;
-        while (i < n) : (i += 1) rhs_nom[i] = ckt.rhs[i];
-    }
+    // ponytail: the nominal snapshot is a disjoint bulk copy.
+    @memcpy(rhs_nom, ckt.rhs[0..n]);
 
-    // Factor the Jacobian (G matrix)
     try ws.slv.factor(ckt.g_vals);
 
     // Adjoint solve: J^T * lambda = e_out
-    adjointSolve(ws, n, output_node, lambda, e_out);
+    root.zeroSimd(e_out[0..n]);
+    e_out[output_node] = 1.0;
+    ws.slv.solveT(e_out[0..n], lambda[0..n]);
 
     // Per-parameter FD sensitivity + mismatch accumulation
     const contributions = try allocator.alloc(Contribution, refs.len);
@@ -187,7 +151,7 @@ pub fn solve(
 
     var total_var: f64 = 0;
     for (refs, contributions) |ref, *contrib| {
-        const sens = try fdSensitivity(ckt, x_op, lambda, rhs_nom, rhs_work, ref);
+        const sens = try fdSensitivity(ckt, x_op, lambda, rhs_nom, ref);
 
         const sigma_p = pelgromSigma(ref);
         const var_contrib = sens * sens * sigma_p * sigma_p;
@@ -198,7 +162,6 @@ pub fn solve(
             .device_index = ref.index,
             .param_name = ref.param_name,
             .sensitivity = sens,
-            .sigma_param = sigma_p,
             .variance_contrib = var_contrib,
         };
     }
@@ -213,7 +176,6 @@ pub fn solve(
     return .{
         .contributions = contributions,
         .total_sigma = @sqrt(total_var),
-        .op_value = x_op[output_node],
     };
 }
 
@@ -225,13 +187,11 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
     const ckt = ctx.circuit;
 
-    // Resolve output node
     const output_node = opts.output_node orelse blk: {
         if (ctx.probes.len == 0) return error.NoOutputNode;
         break :blk ctx.probes[ctx.probes.len - 1];
     };
 
-    // Ensure we have an operating point
     const x_op = ctx.x_op orelse blk: {
         const x = try a.alloc(f64, ckt.n);
         errdefer a.free(x);
@@ -244,16 +204,6 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const res = try solve(ckt, x_op, output_node, a);
     defer a.free(res.contributions);
 
-    // Format output: one row per contribution + summary row
-    // Columns: "parameter", "sensitivity", "sigma_param", "variance_pct", "3sigma_contrib"
-    // npoints = contributions.len, each point has the sensitivity value
-    // Simple flat layout: first varname is "parameter" (dummy scale), then one
-    // value per contribution = its sensitivity.
-    //
-    // Actually, the Result contract is numeric. Pack as:
-    //   varnames = ["total_3sigma", "<dev>#<idx>.<param>", ...]
-    //   npoints = 1
-    //   data = [3*sigma_total, sens_0, sens_1, ...]
     const n_contribs = res.contributions.len;
     const ncols = 1 + n_contribs;
     const names = try a.alloc([]const u8, ncols);
@@ -268,7 +218,6 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     }
 
     const data = try a.alloc(f64, ncols);
-    errdefer a.free(data);
     data[0] = 3.0 * res.total_sigma;
     for (res.contributions, data[1..]) |c, *out| out.* = c.sensitivity;
 

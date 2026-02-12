@@ -11,8 +11,7 @@ fn detectPorts(varnames: []const []const u8) !u32 {
         const comma = std.mem.indexOfScalar(u8, inner, ',') orelse continue;
         const m = std.fmt.parseInt(u32, inner[0..comma], 10) catch continue;
         const n = std.fmt.parseInt(u32, inner[comma + 1 ..], 10) catch continue;
-        if (m > max_port) max_port = m;
-        if (n > max_port) max_port = n;
+        max_port = @max(max_port, m, n);
     }
     if (max_port == 0) return error.NotSParameterData;
     return max_port;
@@ -40,7 +39,6 @@ pub fn write(io: Io, path: []const u8, plot: Plot) !void {
         try w.print("{e}", .{plot.data[base]});
 
         if (n_ports <= 2) {
-            // 1- or 2-port: all on one line
             // 2-port spec order: S11, S21, S12, S22 (column-major)
             if (n_ports == 1) {
                 try w.print(" {e} {e}", .{ plot.data[base + 2], plot.data[base + 3] });
@@ -71,9 +69,7 @@ pub fn write(io: Io, path: []const u8, plot: Plot) !void {
 test "Touchstone 2-port write" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    // frequency + S(1,1) S(1,2) S(2,1) S(2,2) — 5 complex vars
     const varnames = [_][]const u8{ "frequency", "S(1,1)", "S(1,2)", "S(2,1)", "S(2,2)" };
-    // 1 point, 5 vars * 2 (complex) = 10 floats
     const data = [_]f64{
         1.0e9, 0.0, // frequency
         0.5,   -0.3, // S(1,1)

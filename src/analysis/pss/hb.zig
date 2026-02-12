@@ -17,7 +17,6 @@ const std = @import("std");
 const root = @import("../types.zig");
 const simdCopy = root.copySimd;
 const converger = @import("solvers").converger;
-const types = @import("solvers").types;
 const solvers = @import("solvers");
 const dense_lu = solvers.dense_lu;
 
@@ -32,11 +31,7 @@ pub const Options = struct {
     hb_tol: f64 = 1e-9,
 };
 
-pub const SolveResult = struct {
-    converged: bool,
-    iterations: u16,
-    residual_norm: f64,
-};
+pub const SolveResult = @import("pss.zig").SolveResult;
 
 /// Magnitude of the k-th harmonic (k=0 is DC) from one probe's spectrum
 /// slice [dc, cos_1, sin_1, ..., cos_N, sin_N] (length 2*n_harmonics+1).
@@ -121,9 +116,8 @@ pub fn solve(
     // for circuits with a nontrivial bias point.
     {
         const ws = try ckt.workspace();
-        for (0..n) |i| x_sample[i] = 0;
+        root.zeroSimd(x_sample);
         _ = converger.run(ckt, ws, x_sample, 0, options.tol.newtonOpts(null), root.EvalHook{}) catch {};
-        // Seed DC component of each node's spectrum from the converged operating point
         for (0..n) |node| x_hat[node * nf] = x_sample[node];
     }
 
@@ -196,7 +190,6 @@ pub fn solve(
             }
         }
 
-        // Add source excitation in time domain
         if (source_node != root.GROUND) {
             for (0..nf) |k| {
                 f_td[source_node * nf + k] += source_mag * basis_cos[k];
@@ -267,25 +260,12 @@ pub fn solve(
             }
         }
 
-        // Check convergence
-        var max_residual: f64 = 0;
-        {
-            var ri: usize = 0;
-            while (ri + W <= total_unknowns) : (ri += W) {
-                const fv: V = f_hat[ri..][0..W].*;
-                const av = @abs(fv);
-                max_residual = @max(max_residual, @reduce(.Max, av));
-            }
-            while (ri < total_unknowns) : (ri += 1) {
-                max_residual = @max(max_residual, @abs(f_hat[ri]));
-            }
-        }
+        const max_residual = normInf(f_hat);
         if (max_residual < options.hb_tol) {
             extractSpectra(x_hat, probes, spectra, nf);
             return .{ .converged = true, .iterations = iter + 1, .residual_norm = max_residual };
         }
 
-        // Build frequency-domain Jacobian
         // ponytail: DC + first-order cos/sin cross-blocks kept;
         // higher-order intermodulation blocks truncated (doc §2 design choice)
         root.zeroSimd(jac);
@@ -307,7 +287,6 @@ pub fn solve(
 
                 const row_dc = row * nf;
                 const col_dc = col * nf;
-                // DC-DC block
                 jac[row_dc * total_unknowns + col_dc] = g_dc;
 
                 for (0..nh) |hi| {
@@ -377,12 +356,10 @@ pub fn solve(
             }
         }
 
-        // Solve J_hb * dX = -F_hat
         // ponytail: single dense system of size total_unknowns = n*(2K+1); cuSOLVER
         // dgetrf+dgetrs replaces this when total_unknowns > ~256, add when GPU HB kernel lands
         try dense_lu.factorizeSolveNeg(total_unknowns, jac, f_hat[0..total_unknowns], dx_hat);
 
-        // Update X_hat (SIMD)
         {
             var ui: usize = 0;
             while (ui + W <= total_unknowns) : (ui += W) {
@@ -396,20 +373,22 @@ pub fn solve(
         }
     }
 
-    // Did not converge — extract spectra anyway with a warning
-    var final_norm: f64 = 0;
-    {
-        var ri: usize = 0;
-        while (ri + W <= total_unknowns) : (ri += W) {
-            const fv: V = f_hat[ri..][0..W].*;
-            final_norm = @max(final_norm, @reduce(.Max, @abs(fv)));
-        }
-        while (ri < total_unknowns) : (ri += 1) {
-            final_norm = @max(final_norm, @abs(f_hat[ri]));
-        }
-    }
+    const final_norm = normInf(f_hat);
     extractSpectra(x_hat, probes, spectra, nf);
     return .{ .converged = false, .iterations = options.max_iter, .residual_norm = final_norm };
+}
+
+inline fn normInf(buf: []const f64) f64 {
+    var mx: f64 = 0;
+    var ri: usize = 0;
+    while (ri + W <= buf.len) : (ri += W) {
+        const fv: V = buf[ri..][0..W].*;
+        mx = @max(mx, @reduce(.Max, @abs(fv)));
+    }
+    while (ri < buf.len) : (ri += 1) {
+        mx = @max(mx, @abs(buf[ri]));
+    }
+    return mx;
 }
 
 /// Copy each probed node's [dc, cos_1, sin_1, ...] block out of x_hat —

@@ -89,10 +89,8 @@ pub fn main(init: std.process.Init) !void {
     // ---- run-length structure, as-stored and sorted ----
     var flops_total: u64 = 0;
     var flops_in_runs_stored: u64 = 0; // flop-weighted elements covered by full W-runs
-    var flops_in_runs_sorted: u64 = 0;
     const W = 4;
     var col_len_hist = [_]u64{0} ** 9; // 0,1,2,3,4-7,8-15,16-31,32-63,64+
-    const tmp = try gpa.alloc(u32, n);
 
     for (0..n) |k| {
         const lo = lu.lp[k];
@@ -102,12 +100,7 @@ pub fn main(init: std.process.Init) !void {
         flops_total += uses * len;
         col_len_hist[lenBucket(len)] += 1;
 
-        flops_in_runs_stored += uses * runCovered(lu.li.items[lo..hi], W);
-
-        const sorted = tmp[0..len];
-        @memcpy(sorted, lu.li.items[lo..hi]);
-        std.mem.sort(u32, sorted, {}, std.sort.asc(u32));
-        flops_in_runs_sorted += uses * runCovered(sorted, W);
+        flops_in_runs_stored += uses * runCovered(u32, lu.li.items[lo..hi], W);
     }
 
     std.debug.print("L col len hist (0,1,2,3,4-7,8-15,16-31,32-63,64+): {any}\n", .{col_len_hist});
@@ -116,8 +109,8 @@ pub fn main(init: std.process.Init) !void {
         W,
         flops_in_runs_stored,
         pct(flops_in_runs_stored, flops_total),
-        flops_in_runs_sorted,
-        pct(flops_in_runs_sorted, flops_total),
+        flops_in_runs_stored,
+        pct(flops_in_runs_stored, flops_total),
     });
 
     // ---- LOCAL-coordinate run coverage: axpy targets ranked within the
@@ -160,9 +153,9 @@ pub fn main(init: std.process.Init) !void {
                 // plan sorts L columns ascending -> rank sequence ascending
                 std.mem.sort(u16, locs[0..len], {}, std.sort.asc(u16));
                 ax_total += len;
-                ax_run4 += runCovered16(locs[0..len], 4);
-                ax_run2 += runCovered16(locs[0..len], 2);
-                ax_run8 += runCovered16(locs[0..len], 8);
+                ax_run4 += runCovered(u16, locs[0..len], 4);
+                ax_run2 += runCovered(u16, locs[0..len], 2);
+                ax_run8 += runCovered(u16, locs[0..len], 8);
                 // greedy 8/4/2/1 decomposition op counts
                 var jj: usize = 0;
                 while (jj < len) {
@@ -188,15 +181,14 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // U-column length stats (axpy trip counts come from U entries too)
-    var u_entries: u64 = 0;
-    for (0..n) |k| u_entries += lu.up[k + 1] - lu.up[k];
+    const u_entries: u64 = lu.ui.items.len;
     std.debug.print("U entries={d} (axpy invocations/refactor), avg L col walked={d:.1}\n", .{
         u_entries,
         @as(f64, @floatFromInt(flops_total)) / @as(f64, @floatFromInt(u_entries + n)),
     });
 
     // ---- local-dense prototype: tape build + scalar + run-split variants ----
-    const tape = try buildTape(gpa, &lu, col_ptr, row_idx);
+    const tape = try buildTape(gpa, &lu, col_ptr);
     std.debug.print("tape: flop={d} u16 ({d} KB) + uloc {d} + aloc {d}\n", .{
         tape.loc.len, tape.loc.len * 2 / 1024, tape.uloc.len, tape.aloc.len,
     });
@@ -208,10 +200,10 @@ pub fn main(init: std.process.Init) !void {
     const ux_ref = try gpa.dupe(f64, lu.ux.items);
     const ud_ref = try gpa.dupe(f64, lu.udiag);
 
-    const rtape = try buildRTape(gpa, &lu, col_ptr);
+    const rtape = try buildRTape(gpa, &lu, tape);
     std.debug.print("rtape: ops={d} ({d} KB) cnts={d}\n", .{ rtape.ops.len, rtape.ops.len * 4 / 1024, rtape.cnts.len });
-    const mtape = try buildMTape(gpa, &lu, col_ptr);
-    const rtape2 = try buildRTape2(gpa, &lu, col_ptr);
+    const mtape = try buildMTape(gpa, &lu, tape);
+    const rtape2 = try buildRTape2(gpa, &lu, tape);
     // pad lx so uniform 4-wide op loads can over-read the last column tail
     try lu.lx.appendNTimes(gpa, 0, 3);
 
@@ -229,7 +221,7 @@ pub fn main(init: std.process.Init) !void {
     {
         @memset(lu.lx.items, 99.0);
         @memset(lu.ux.items, 99.0);
-        try refactorRTape(&lu, rtape, col_ptr, vals, 1e-12, wloc);
+        try refactorEncoded(&lu, rtape, col_ptr, vals, 1e-12, wloc);
         try expectBitEq(lu.lx.items[0..l_len], lx_ref);
         try expectBitEq(lu.ux.items, ux_ref);
         try expectBitEq(lu.udiag, ud_ref);
@@ -238,7 +230,7 @@ pub fn main(init: std.process.Init) !void {
     {
         @memset(lu.lx.items, 99.0);
         @memset(lu.ux.items, 99.0);
-        try refactorMTape(&lu, mtape, col_ptr, vals, 1e-12, wloc);
+        try refactorEncoded(&lu, mtape, col_ptr, vals, 1e-12, wloc);
         try expectBitEq(lu.lx.items[0..l_len], lx_ref);
         try expectBitEq(lu.ux.items, ux_ref);
         try expectBitEq(lu.udiag, ud_ref);
@@ -247,7 +239,7 @@ pub fn main(init: std.process.Init) !void {
     {
         @memset(lu.lx.items, 99.0);
         @memset(lu.ux.items, 99.0);
-        try refactorRTape2(&lu, rtape2, col_ptr, vals, 1e-12, wloc);
+        try refactorEncoded(&lu, rtape2, col_ptr, vals, 1e-12, wloc);
         try expectBitEq(lu.lx.items[0..l_len], lx_ref);
         try expectBitEq(lu.ux.items, ux_ref);
         try expectBitEq(lu.udiag, ud_ref);
@@ -274,19 +266,19 @@ pub fn main(init: std.process.Init) !void {
     }
     t0 = now();
     for (0..reps) |_| {
-        try refactorRTape(&lu, rtape, col_ptr, vals, 1e-12, wloc);
+        try refactorEncoded(&lu, rtape, col_ptr, vals, 1e-12, wloc);
         sink += lu.udiag[0];
     }
     std.debug.print("refactorRTape:       {d} reps, {d} ns/rep (sink {e})\n", .{ reps, (now() - t0) / reps, sink });
     t0 = now();
     for (0..reps) |_| {
-        try refactorMTape(&lu, mtape, col_ptr, vals, 1e-12, wloc);
+        try refactorEncoded(&lu, mtape, col_ptr, vals, 1e-12, wloc);
         sink += lu.udiag[0];
     }
     std.debug.print("refactorMTape:       {d} reps, {d} ns/rep (sink {e})\n", .{ reps, (now() - t0) / reps, sink });
     t0 = now();
     for (0..reps) |_| {
-        try refactorRTape2(&lu, rtape2, col_ptr, vals, 1e-12, wloc);
+        try refactorEncoded(&lu, rtape2, col_ptr, vals, 1e-12, wloc);
         sink += lu.udiag[0];
     }
     std.debug.print("refactorRTape2:      {d} reps, {d} ns/rep (sink {e})\n", .{ reps, (now() - t0) / reps, sink });
@@ -316,7 +308,8 @@ fn lenBucket(len: u32) usize {
 
 /// Elements covered by full W-length contiguous-ascending-index runs when the
 /// kernel greedily takes W-blocks (vector step iff idx[j+W-1]==idx[j]+W-1).
-fn runCovered(idx: []const u32, comptime W: u32) u64 {
+// ponytail: one coverage loop serves both global u32 indices and local u16 ranks.
+fn runCovered(comptime I: type, idx: []const I, comptime W: I) u64 {
     var covered: u64 = 0;
     var j: usize = 0;
     while (j + W <= idx.len) {
@@ -343,8 +336,7 @@ const Tape = struct {
     m_max: u32,
 };
 
-fn buildTape(gpa: std.mem.Allocator, lu: *Lu, col_ptr: []const u32, row_idx: []const u32) !Tape {
-    _ = row_idx;
+fn buildTape(gpa: std.mem.Allocator, lu: *Lu, col_ptr: []const u32) !Tape {
     const n = lu.n;
     var flops: usize = 0;
     for (lu.ui.items) |i| flops += lu.lp[i + 1] - lu.lp[i];
@@ -408,8 +400,6 @@ fn refactorLocal(
     growth_limit: f64,
     wloc: []f64,
 ) error{SingularMatrix}!void {
-    const li = lu.li.items;
-    _ = li;
     const lx = lu.lx.items;
     const ui = lu.ui.items;
     const ux = lu.ux.items;
@@ -484,6 +474,7 @@ fn refactorLocal(
 // targets -> bit-identical).
 // ============================================================================
 
+// Encoded tapes own their operation arrays and borrow uloc/aloc from Tape.
 const RTape = struct {
     ops: []u32,
     cnts: []u16, // 4 per walk: n8, n4, n2, n1
@@ -492,75 +483,44 @@ const RTape = struct {
     m_pad: u32, // m_max rounded up for the over-zeroing loop
 };
 
-fn buildRTape(gpa: std.mem.Allocator, lu: *Lu, col_ptr: []const u32) !RTape {
-    const n = lu.n;
+fn buildRTape(gpa: std.mem.Allocator, lu: *Lu, tape: Tape) !RTape {
     var ops: std.ArrayList(u32) = .empty;
     var cnts: std.ArrayList(u16) = .empty;
-    const uloc = try gpa.alloc(u16, lu.ui.items.len);
-    const aloc = try gpa.alloc(u16, col_ptr[n]);
-    const rankmap = try gpa.alloc(u16, n);
-    defer gpa.free(rankmap);
-    const active = try gpa.alloc(u32, n);
-    defer gpa.free(active);
-    const locs = try gpa.alloc(u16, n);
+    const locs = try gpa.alloc(u16, lu.n);
     defer gpa.free(locs);
-    var m_max: u32 = 0;
 
-    var ac: usize = 0;
-    for (0..n) |k| {
-        var m: u32 = 0;
-        for (lu.ui.items[lu.up[k]..lu.up[k + 1]]) |i| {
-            active[m] = i;
-            m += 1;
-        }
-        std.mem.sort(u32, active[0..m], {}, std.sort.asc(u32));
-        active[m] = @intCast(k);
-        m += 1;
-        for (lu.li.items[lu.lp[k]..lu.lp[k + 1]]) |r| {
-            active[m] = r;
-            m += 1;
-        }
-        m_max = @max(m_max, m);
-        if (m > 65535) return error.Overflow;
-        for (active[0..m], 0..) |x, rank| rankmap[x] = @intCast(rank);
-
-        for (lu.ui.items[lu.up[k]..lu.up[k + 1]], lu.up[k]..) |i, p| {
-            uloc[p] = rankmap[i];
-            const len = lu.lp[i + 1] - lu.lp[i];
-            for (lu.li.items[lu.lp[i]..][0..len], locs[0..len]) |r, *lc| lc.* = rankmap[r];
-            // greedy decomposition, emitted per class
-            var nc = [_]u16{0} ** 4;
-            inline for (.{ 8, 4, 2, 1 }, 0..) |RW, ci| {
-                var j: usize = 0;
-                while (j + RW <= len) {
-                    if (taken(locs[0..len], j)) {
-                        j += 1;
-                        continue;
-                    }
-                    if (RW == 1 or locs[j + RW - 1] == locs[j] + (RW - 1)) {
-                        // check none of the RW elements already taken (they
-                        // can't be: greedy left-to-right per class, marks below)
-                        try ops.append(gpa, @as(u32, locs[j]) | (@as(u32, @intCast(j)) << 16));
-                        nc[ci] += 1;
-                        mark(locs[0..len], j, RW);
-                        j += RW;
-                    } else j += 1;
+    var tc: usize = 0;
+    for (lu.ui.items) |i| {
+        const len = lu.lp[i + 1] - lu.lp[i];
+        @memcpy(locs[0..len], tape.loc[tc..][0..len]);
+        tc += len;
+        // greedy decomposition, emitted per class
+        var nc = [_]u16{0} ** 4;
+        inline for (.{ 8, 4, 2, 1 }, 0..) |RW, ci| {
+            var j: usize = 0;
+            while (j + RW <= len) {
+                if (taken(locs[0..len], j)) {
+                    j += 1;
+                    continue;
                 }
+                if (RW == 1 or locs[j + RW - 1] == locs[j] + (RW - 1)) {
+                    // check none of the RW elements already taken (they
+                    // can't be: greedy left-to-right per class, marks below)
+                    try ops.append(gpa, @as(u32, locs[j]) | (@as(u32, @intCast(j)) << 16));
+                    nc[ci] += 1;
+                    mark(locs[0..len], j, RW);
+                    j += RW;
+                } else j += 1;
             }
-            try cnts.appendSlice(gpa, &nc);
         }
-        const c = lu.q[k];
-        for (col_ptr[c]..col_ptr[c + 1]) |p| {
-            aloc[ac] = rankmap[lu.prow[p]];
-            ac += 1;
-        }
+        try cnts.appendSlice(gpa, &nc);
     }
     return .{
         .ops = ops.items,
         .cnts = cnts.items,
-        .uloc = uloc,
-        .aloc = aloc,
-        .m_pad = (m_max + 7) & ~@as(u32, 7),
+        .uloc = tape.uloc,
+        .aloc = tape.aloc,
+        .m_pad = (tape.m_max + 7) & ~@as(u32, 7),
     };
 }
 
@@ -574,9 +534,9 @@ fn mark(locs: []u16, j: usize, w: usize) void {
     for (locs[j..][0..w]) |*l| l.* |= 0x8000;
 }
 
-fn refactorRTape(
+fn refactorEncoded(
     lu: *Lu,
-    t: RTape,
+    t: anytype,
     col_ptr: []const u32,
     vals: []const f64,
     growth_limit: f64,
@@ -587,14 +547,14 @@ fn refactorRTape(
     const V4 = @Vector(4, f64);
 
     var oc: usize = 0;
-    var cc: usize = 0;
+    var cc: if (@TypeOf(t) == RTape) usize else void = if (@TypeOf(t) == RTape) 0 else {};
     var ac: usize = 0;
     for (0..lu.n) |k| {
         const c = lu.q[k];
         const nu = lu.up[k + 1] - lu.up[k];
         const nl = lu.lp[k + 1] - lu.lp[k];
         const m = nu + 1 + nl;
-        // inline over-zero into pad (wloc alloc'd m_pad + 8)
+        // Over-zeroing is safe: wloc includes m_pad + 8 entries.
         {
             const zed: V4 = zedV(4);
             var z: usize = 0;
@@ -610,48 +570,111 @@ fn refactorRTape(
             const uki = wloc[t.uloc[p]];
             ux[p] = uki;
             const xs = lx[lu.lp[i]..];
-            const n8 = t.cnts[cc];
-            const n4 = t.cnts[cc + 1];
-            const n2 = t.cnts[cc + 2];
-            const n1 = t.cnts[cc + 3];
-            cc += 4;
-            const fv4: V4 = @splat(uki);
-            for (0..n8) |_| {
-                const op = t.ops[oc];
-                oc += 1;
-                const loc = op & 0xFFFF;
-                const j = op >> 16;
-                const w0: V4 = wloc[loc..][0..4].*;
-                const w1: V4 = wloc[loc + 4 ..][0..4].*;
-                const x0: V4 = xs[j..][0..4].*;
-                const x1: V4 = xs[j + 4 ..][0..4].*;
-                wloc[loc..][0..4].* = w0 - x0 * fv4;
-                wloc[loc + 4 ..][0..4].* = w1 - x1 * fv4;
-            }
-            for (0..n4) |_| {
-                const op = t.ops[oc];
-                oc += 1;
-                const loc = op & 0xFFFF;
-                const j = op >> 16;
-                const wv: V4 = wloc[loc..][0..4].*;
-                const xv: V4 = xs[j..][0..4].*;
-                wloc[loc..][0..4].* = wv - xv * fv4;
-            }
-            for (0..n2) |_| {
-                const op = t.ops[oc];
-                oc += 1;
-                const loc = op & 0xFFFF;
-                const j = op >> 16;
-                const wv: @Vector(2, f64) = wloc[loc..][0..2].*;
-                const xv: @Vector(2, f64) = xs[j..][0..2].*;
-                wloc[loc..][0..2].* = wv - xv * @as(@Vector(2, f64), @splat(uki));
-            }
-            for (0..n1) |_| {
-                const op = t.ops[oc];
-                oc += 1;
-                const loc = op & 0xFFFF;
-                const j = op >> 16;
-                wloc[loc] -= xs[j] * uki;
+            if (comptime @TypeOf(t) == RTape) {
+                const n8 = t.cnts[cc];
+                const n4 = t.cnts[cc + 1];
+                const n2 = t.cnts[cc + 2];
+                const n1 = t.cnts[cc + 3];
+                cc += 4;
+                const fv4: V4 = @splat(uki);
+                for (0..n8) |_| {
+                    const op = t.ops[oc];
+                    oc += 1;
+                    const loc = op & 0xFFFF;
+                    const j = op >> 16;
+                    const w0: V4 = wloc[loc..][0..4].*;
+                    const w1: V4 = wloc[loc + 4 ..][0..4].*;
+                    const x0: V4 = xs[j..][0..4].*;
+                    const x1: V4 = xs[j + 4 ..][0..4].*;
+                    wloc[loc..][0..4].* = w0 - x0 * fv4;
+                    wloc[loc + 4 ..][0..4].* = w1 - x1 * fv4;
+                }
+                for (0..n4) |_| {
+                    const op = t.ops[oc];
+                    oc += 1;
+                    const loc = op & 0xFFFF;
+                    const j = op >> 16;
+                    const wv: V4 = wloc[loc..][0..4].*;
+                    const xv: V4 = xs[j..][0..4].*;
+                    wloc[loc..][0..4].* = wv - xv * fv4;
+                }
+                for (0..n2) |_| {
+                    const op = t.ops[oc];
+                    oc += 1;
+                    const loc = op & 0xFFFF;
+                    const j = op >> 16;
+                    const wv: @Vector(2, f64) = wloc[loc..][0..2].*;
+                    const xv: @Vector(2, f64) = xs[j..][0..2].*;
+                    wloc[loc..][0..2].* = wv - xv * @as(@Vector(2, f64), @splat(uki));
+                }
+                for (0..n1) |_| {
+                    const op = t.ops[oc];
+                    oc += 1;
+                    const loc = op & 0xFFFF;
+                    const j = op >> 16;
+                    wloc[loc] -= xs[j] * uki;
+                }
+            } else if (comptime @TypeOf(t) == RTape2) {
+                const V2 = @Vector(2, f64);
+                const cw = t.cnts[p];
+                const n4: usize = @intCast(cw & 0xFFFF);
+                const n2: usize = @intCast((cw >> 16) & 0xFFFF);
+                const n1: usize = @intCast(cw >> 32);
+                const fv4: V4 = @splat(uki);
+                for (0..n4) |_| {
+                    const op = t.ops[oc];
+                    oc += 1;
+                    const loc = op & 0xFFFF;
+                    const j = op >> 16;
+                    const wv: V4 = wloc[loc..][0..4].*;
+                    const xv: V4 = xs[j..][0..4].*;
+                    wloc[loc..][0..4].* = wv - xv * fv4;
+                }
+                const fv2: V2 = @splat(uki);
+                for (0..n2) |_| {
+                    const op = t.ops[oc];
+                    oc += 1;
+                    const loc = op & 0xFFFF;
+                    const j = op >> 16;
+                    const wv: V2 = wloc[loc..][0..2].*;
+                    const xv: V2 = xs[j..][0..2].*;
+                    wloc[loc..][0..2].* = wv - xv * fv2;
+                }
+                var s: usize = 0;
+                while (s + 2 <= n1) : (s += 2) {
+                    const opa = t.ops[oc];
+                    const opb = t.ops[oc + 1];
+                    oc += 2;
+                    const la = opa & 0xFFFF;
+                    const ja = opa >> 16;
+                    const lb = opb & 0xFFFF;
+                    const jb = opb >> 16;
+                    const va = wloc[la] - xs[ja] * uki;
+                    const vb = wloc[lb] - xs[jb] * uki;
+                    wloc[la] = va;
+                    wloc[lb] = vb;
+                }
+                if (s < n1) {
+                    const op = t.ops[oc];
+                    oc += 1;
+                    wloc[op & 0xFFFF] -= xs[op >> 16] * uki;
+                }
+            } else {
+                const iota: @Vector(4, u32) = .{ 0, 1, 2, 3 };
+                const nop = t.nops[p];
+                const fv4: V4 = @splat(uki);
+                for (0..nop) |_| {
+                    const op = t.ops[oc];
+                    oc += 1;
+                    const loc = op & 0xFFFF;
+                    const j = (op >> 16) & 0x3FFF;
+                    const len = (op >> 30) + 1;
+                    const wv: V4 = wloc[loc..][0..4].*;
+                    const xv: V4 = xs[j..][0..4].*;
+                    const upd = wv - xv * fv4;
+                    const mask = iota < @as(@Vector(4, u32), @splat(len));
+                    wloc[loc..][0..4].* = @select(f64, mask, upd, wv);
+                }
             }
         }
 
@@ -699,71 +722,36 @@ const MTape = struct {
     nops: []u16, // per walk
     uloc: []u16,
     aloc: []u16,
-    m_pad: u32,
 };
 
-fn buildMTape(gpa: std.mem.Allocator, lu: *Lu, col_ptr: []const u32) !MTape {
-    const n = lu.n;
+fn buildMTape(gpa: std.mem.Allocator, lu: *Lu, tape: Tape) !MTape {
     var ops: std.ArrayList(u32) = .empty;
     var nops: std.ArrayList(u16) = .empty;
-    const uloc = try gpa.alloc(u16, lu.ui.items.len);
-    const aloc = try gpa.alloc(u16, col_ptr[n]);
-    const rankmap = try gpa.alloc(u16, n);
-    defer gpa.free(rankmap);
-    const active = try gpa.alloc(u32, n);
-    defer gpa.free(active);
-    const locs = try gpa.alloc(u16, n);
-    defer gpa.free(locs);
-    var m_max: u32 = 0;
 
-    var ac: usize = 0;
-    for (0..n) |k| {
-        var m: u32 = 0;
-        for (lu.ui.items[lu.up[k]..lu.up[k + 1]]) |i| {
-            active[m] = i;
-            m += 1;
+    var tc: usize = 0;
+    for (lu.ui.items) |i| {
+        const len = lu.lp[i + 1] - lu.lp[i];
+        if (len > 16383) return error.Overflow;
+        const locs = tape.loc[tc..][0..len];
+        tc += len;
+        // greedy left-to-right <=4 runs
+        var cnt: u16 = 0;
+        var j: usize = 0;
+        while (j < len) {
+            var rl: u32 = 1;
+            while (rl < 4 and j + rl < len and locs[j + rl] == locs[j] + rl) rl += 1;
+            try ops.append(gpa, @as(u32, locs[j]) | (@as(u32, @intCast(j)) << 16) | ((rl - 1) << 30));
+            cnt += 1;
+            j += rl;
         }
-        std.mem.sort(u32, active[0..m], {}, std.sort.asc(u32));
-        active[m] = @intCast(k);
-        m += 1;
-        for (lu.li.items[lu.lp[k]..lu.lp[k + 1]]) |r| {
-            active[m] = r;
-            m += 1;
-        }
-        m_max = @max(m_max, m);
-        if (m > 65535) return error.Overflow;
-        for (active[0..m], 0..) |x, rank| rankmap[x] = @intCast(rank);
-
-        for (lu.ui.items[lu.up[k]..lu.up[k + 1]], lu.up[k]..) |i, p| {
-            uloc[p] = rankmap[i];
-            const len = lu.lp[i + 1] - lu.lp[i];
-            if (len > 16383) return error.Overflow;
-            for (lu.li.items[lu.lp[i]..][0..len], locs[0..len]) |r, *lc| lc.* = rankmap[r];
-            // greedy left-to-right <=4 runs
-            var cnt: u16 = 0;
-            var j: usize = 0;
-            while (j < len) {
-                var rl: u32 = 1;
-                while (rl < 4 and j + rl < len and locs[j + rl] == locs[j] + rl) rl += 1;
-                try ops.append(gpa, @as(u32, locs[j]) | (@as(u32, @intCast(j)) << 16) | ((rl - 1) << 30));
-                cnt += 1;
-                j += rl;
-            }
-            try nops.append(gpa, cnt);
-        }
-        const c = lu.q[k];
-        for (col_ptr[c]..col_ptr[c + 1]) |p| {
-            aloc[ac] = rankmap[lu.prow[p]];
-            ac += 1;
-        }
+        try nops.append(gpa, cnt);
     }
     std.debug.print("mtape: ops={d} ({d} KB)\n", .{ ops.items.len, ops.items.len * 4 / 1024 });
     return .{
         .ops = ops.items,
         .nops = nops.items,
-        .uloc = uloc,
-        .aloc = aloc,
-        .m_pad = (m_max + 7) & ~@as(u32, 7),
+        .uloc = tape.uloc,
+        .aloc = tape.aloc,
     };
 }
 
@@ -774,298 +762,62 @@ const RTape2 = struct {
     cnts: []u64, // per walk
     uloc: []u16,
     aloc: []u16,
-    m_pad: u32,
 };
 
-fn buildRTape2(gpa: std.mem.Allocator, lu: *Lu, col_ptr: []const u32) !RTape2 {
-    const n = lu.n;
+fn buildRTape2(gpa: std.mem.Allocator, lu: *Lu, tape: Tape) !RTape2 {
     var ops: std.ArrayList(u32) = .empty;
     var cnts: std.ArrayList(u64) = .empty;
-    const uloc = try gpa.alloc(u16, lu.ui.items.len);
-    const aloc = try gpa.alloc(u16, col_ptr[n]);
-    const rankmap = try gpa.alloc(u16, n);
-    defer gpa.free(rankmap);
-    const active = try gpa.alloc(u32, n);
-    defer gpa.free(active);
-    const locs = try gpa.alloc(u16, n);
-    defer gpa.free(locs);
-    var m_max: u32 = 0;
 
-    var ac: usize = 0;
-    for (0..n) |k| {
-        var m: u32 = 0;
-        for (lu.ui.items[lu.up[k]..lu.up[k + 1]]) |i| {
-            active[m] = i;
-            m += 1;
-        }
-        std.mem.sort(u32, active[0..m], {}, std.sort.asc(u32));
-        active[m] = @intCast(k);
-        m += 1;
-        for (lu.li.items[lu.lp[k]..lu.lp[k + 1]]) |r| {
-            active[m] = r;
-            m += 1;
-        }
-        m_max = @max(m_max, m);
-        if (m > 65535) return error.Overflow;
-        for (active[0..m], 0..) |x, rank| rankmap[x] = @intCast(rank);
-
-        for (lu.ui.items[lu.up[k]..lu.up[k + 1]], lu.up[k]..) |i, p| {
-            uloc[p] = rankmap[i];
-            const len = lu.lp[i + 1] - lu.lp[i];
-            for (lu.li.items[lu.lp[i]..][0..len], locs[0..len]) |r, *lc| lc.* = rankmap[r];
-            // greedy left-to-right maximal runs, capped at 4 (8-runs -> 2 ops)
-            var n4: u64 = 0;
-            var n2: u64 = 0;
-            var n1: u64 = 0;
-            var stash2: [64]u32 = undefined; // per-walk 2s then 1s, appended after 4s
-            var stash1: [64]u32 = undefined;
-            var s2: usize = 0;
-            var s1: usize = 0;
-            var j: usize = 0;
-            while (j < len) {
-                var rl: usize = 1;
-                while (rl < 4 and j + rl < len and locs[j + rl] == locs[j] + rl) rl += 1;
-                if (s1 >= 63 or s2 >= 63) return error.Overflow;
-                const op = @as(u32, locs[j]) | (@as(u32, @intCast(j)) << 16);
-                switch (rl) {
-                    4 => {
-                        try ops.append(gpa, op);
-                        n4 += 1;
-                    },
-                    3 => { // 3 = 2 + 1
-                        stash2[s2] = op;
-                        s2 += 1;
-                        stash1[s1] = @as(u32, locs[j] + 2) | (@as(u32, @intCast(j + 2)) << 16);
-                        s1 += 1;
-                        n2 += 1;
-                        n1 += 1;
-                    },
-                    2 => {
-                        stash2[s2] = op;
-                        s2 += 1;
-                        n2 += 1;
-                    },
-                    else => {
-                        stash1[s1] = op;
-                        s1 += 1;
-                        n1 += 1;
-                    },
-                }
-                j += rl;
+    var tc: usize = 0;
+    for (lu.ui.items) |i| {
+        const len = lu.lp[i + 1] - lu.lp[i];
+        const locs = tape.loc[tc..][0..len];
+        tc += len;
+        // greedy left-to-right maximal runs, capped at 4 (8-runs -> 2 ops)
+        var n4: u64 = 0;
+        var stash2: [64]u32 = undefined; // per-walk 2s then 1s, appended after 4s
+        var stash1: [64]u32 = undefined;
+        var s2: usize = 0;
+        var s1: usize = 0;
+        var j: usize = 0;
+        while (j < len) {
+            var rl: usize = 1;
+            while (rl < 4 and j + rl < len and locs[j + rl] == locs[j] + rl) rl += 1;
+            if (s1 >= 63 or s2 >= 63) return error.Overflow;
+            const op = @as(u32, locs[j]) | (@as(u32, @intCast(j)) << 16);
+            switch (rl) {
+                4 => {
+                    try ops.append(gpa, op);
+                    n4 += 1;
+                },
+                3 => { // 3 = 2 + 1
+                    stash2[s2] = op;
+                    s2 += 1;
+                    stash1[s1] = @as(u32, locs[j] + 2) | (@as(u32, @intCast(j + 2)) << 16);
+                    s1 += 1;
+                },
+                2 => {
+                    stash2[s2] = op;
+                    s2 += 1;
+                },
+                else => {
+                    stash1[s1] = op;
+                    s1 += 1;
+                },
             }
-            try ops.appendSlice(gpa, stash2[0..s2]);
-            try ops.appendSlice(gpa, stash1[0..s1]);
-            try cnts.append(gpa, n4 | (n2 << 16) | (n1 << 32));
+            j += rl;
         }
-        const c = lu.q[k];
-        for (col_ptr[c]..col_ptr[c + 1]) |p| {
-            aloc[ac] = rankmap[lu.prow[p]];
-            ac += 1;
-        }
+        try ops.appendSlice(gpa, stash2[0..s2]);
+        try ops.appendSlice(gpa, stash1[0..s1]);
+        try cnts.append(gpa, n4 | (@as(u64, s2) << 16) | (@as(u64, s1) << 32));
     }
     std.debug.print("rtape2: ops={d} ({d} KB)\n", .{ ops.items.len, ops.items.len * 4 / 1024 });
     return .{
         .ops = ops.items,
         .cnts = cnts.items,
-        .uloc = uloc,
-        .aloc = aloc,
-        .m_pad = (m_max + 7) & ~@as(u32, 7),
+        .uloc = tape.uloc,
+        .aloc = tape.aloc,
     };
-}
-
-fn refactorRTape2(
-    lu: *Lu,
-    t: RTape2,
-    col_ptr: []const u32,
-    vals: []const f64,
-    growth_limit: f64,
-    wloc: []f64,
-) error{SingularMatrix}!void {
-    const lx = lu.lx.items;
-    const ux = lu.ux.items;
-    const V4 = @Vector(4, f64);
-    const V2 = @Vector(2, f64);
-
-    var oc: usize = 0;
-    var ac: usize = 0;
-    for (0..lu.n) |k| {
-        const c = lu.q[k];
-        const nu = lu.up[k + 1] - lu.up[k];
-        const nl = lu.lp[k + 1] - lu.lp[k];
-        const m = nu + 1 + nl;
-        {
-            const zed: V4 = zedV(4);
-            var z: usize = 0;
-            while (z < m) : (z += 4) wloc[z..][0..4].* = zed;
-        }
-        for (col_ptr[c]..col_ptr[c + 1]) |p| {
-            wloc[t.aloc[ac]] = vals[p];
-            ac += 1;
-        }
-
-        for (lu.up[k]..lu.up[k + 1]) |p| {
-            const i = lu.ui.items[p];
-            const uki = wloc[t.uloc[p]];
-            ux[p] = uki;
-            const xs = lx[lu.lp[i]..];
-            const cw = t.cnts[p];
-            const n4: usize = @intCast(cw & 0xFFFF);
-            const n2: usize = @intCast((cw >> 16) & 0xFFFF);
-            const n1: usize = @intCast(cw >> 32);
-            const fv4: V4 = @splat(uki);
-            for (0..n4) |_| {
-                const op = t.ops[oc];
-                oc += 1;
-                const loc = op & 0xFFFF;
-                const j = op >> 16;
-                const wv: V4 = wloc[loc..][0..4].*;
-                const xv: V4 = xs[j..][0..4].*;
-                wloc[loc..][0..4].* = wv - xv * fv4;
-            }
-            const fv2: V2 = @splat(uki);
-            for (0..n2) |_| {
-                const op = t.ops[oc];
-                oc += 1;
-                const loc = op & 0xFFFF;
-                const j = op >> 16;
-                const wv: V2 = wloc[loc..][0..2].*;
-                const xv: V2 = xs[j..][0..2].*;
-                wloc[loc..][0..2].* = wv - xv * fv2;
-            }
-            var s: usize = 0;
-            while (s + 2 <= n1) : (s += 2) {
-                const opa = t.ops[oc];
-                const opb = t.ops[oc + 1];
-                oc += 2;
-                const la = opa & 0xFFFF;
-                const ja = opa >> 16;
-                const lb = opb & 0xFFFF;
-                const jb = opb >> 16;
-                const va = wloc[la] - xs[ja] * uki;
-                const vb = wloc[lb] - xs[jb] * uki;
-                wloc[la] = va;
-                wloc[lb] = vb;
-            }
-            if (s < n1) {
-                const op = t.ops[oc];
-                oc += 1;
-                wloc[op & 0xFFFF] -= xs[op >> 16] * uki;
-            }
-        }
-
-        const d = wloc[nu];
-        if (d == 0 or !std.math.isFinite(d)) return error.SingularMatrix;
-        lu.udiag[k] = d;
-
-        const src = wloc[nu + 1 ..][0..nl];
-        const dst = lx[lu.lp[k]..][0..nl];
-        if (growth_limit > 0) {
-            const dv: V4 = @splat(d);
-            var cmaxv: V4 = @splat(@abs(d));
-            var cmax: f64 = @abs(d);
-            var j: usize = 0;
-            while (j + 4 <= nl) : (j += 4) {
-                const wv: V4 = src[j..][0..4].*;
-                cmaxv = @max(cmaxv, @abs(wv));
-                dst[j..][0..4].* = wv / dv;
-            }
-            while (j < nl) : (j += 1) {
-                const v = src[j];
-                cmax = @max(cmax, @abs(v));
-                dst[j] = v / d;
-            }
-            cmax = @max(cmax, @reduce(.Max, cmaxv));
-            if (@abs(d) < growth_limit * cmax) return error.SingularMatrix;
-        } else {
-            var j: usize = 0;
-            const dv: V4 = @splat(d);
-            while (j + 4 <= nl) : (j += 4) dst[j..][0..4].* = @as(V4, src[j..][0..4].*) / dv;
-            while (j < nl) : (j += 1) dst[j] = src[j] / d;
-        }
-    }
-}
-
-fn refactorMTape(
-    lu: *Lu,
-    t: MTape,
-    col_ptr: []const u32,
-    vals: []const f64,
-    growth_limit: f64,
-    wloc: []f64,
-) error{SingularMatrix}!void {
-    const lx = lu.lx.items;
-    const ux = lu.ux.items;
-    const V4 = @Vector(4, f64);
-    const iota: @Vector(4, u32) = .{ 0, 1, 2, 3 };
-
-    var oc: usize = 0;
-    var ac: usize = 0;
-    for (0..lu.n) |k| {
-        const c = lu.q[k];
-        const nu = lu.up[k + 1] - lu.up[k];
-        const nl = lu.lp[k + 1] - lu.lp[k];
-        const m = nu + 1 + nl;
-        {
-            const zed: V4 = zedV(4);
-            var z: usize = 0;
-            while (z < m) : (z += 4) wloc[z..][0..4].* = zed;
-        }
-        for (col_ptr[c]..col_ptr[c + 1]) |p| {
-            wloc[t.aloc[ac]] = vals[p];
-            ac += 1;
-        }
-
-        for (lu.up[k]..lu.up[k + 1]) |p| {
-            const i = lu.ui.items[p];
-            const uki = wloc[t.uloc[p]];
-            ux[p] = uki;
-            const xs = lx[lu.lp[i]..];
-            const nop = t.nops[p];
-            const fv4: V4 = @splat(uki);
-            for (0..nop) |_| {
-                const op = t.ops[oc];
-                oc += 1;
-                const loc = op & 0xFFFF;
-                const j = (op >> 16) & 0x3FFF;
-                const len = (op >> 30) + 1;
-                const wv: V4 = wloc[loc..][0..4].*;
-                const xv: V4 = xs[j..][0..4].*;
-                const upd = wv - xv * fv4;
-                const mask = iota < @as(@Vector(4, u32), @splat(len));
-                wloc[loc..][0..4].* = @select(f64, mask, upd, wv);
-            }
-        }
-
-        const d = wloc[nu];
-        if (d == 0 or !std.math.isFinite(d)) return error.SingularMatrix;
-        lu.udiag[k] = d;
-
-        const src = wloc[nu + 1 ..][0..nl];
-        const dst = lx[lu.lp[k]..][0..nl];
-        if (growth_limit > 0) {
-            const dv: V4 = @splat(d);
-            var cmaxv: V4 = @splat(@abs(d));
-            var cmax: f64 = @abs(d);
-            var j: usize = 0;
-            while (j + 4 <= nl) : (j += 4) {
-                const wv: V4 = src[j..][0..4].*;
-                cmaxv = @max(cmaxv, @abs(wv));
-                dst[j..][0..4].* = wv / dv;
-            }
-            while (j < nl) : (j += 1) {
-                const v = src[j];
-                cmax = @max(cmax, @abs(v));
-                dst[j] = v / d;
-            }
-            cmax = @max(cmax, @reduce(.Max, cmaxv));
-            if (@abs(d) < growth_limit * cmax) return error.SingularMatrix;
-        } else {
-            var j: usize = 0;
-            const dv: V4 = @splat(d);
-            while (j + 4 <= nl) : (j += 4) dst[j..][0..4].* = @as(V4, src[j..][0..4].*) / dv;
-            while (j < nl) : (j += 1) dst[j] = src[j] / d;
-        }
-    }
 }
 
 fn expectBitEq(a: []const f64, b: []const f64) !void {
@@ -1076,18 +828,6 @@ fn expectBitEq(a: []const f64, b: []const f64) !void {
             return error.TestExpectedEqual;
         }
     }
-}
-
-fn runCovered16(idx: []const u16, comptime W: u16) u64 {
-    var covered: u64 = 0;
-    var j: usize = 0;
-    while (j + W <= idx.len) {
-        if (idx[j + W - 1] == idx[j] + (W - 1)) {
-            covered += W;
-            j += W;
-        } else j += 1;
-    }
-    return covered;
 }
 
 fn pct(a: u64, b: u64) f64 {

@@ -115,8 +115,7 @@ pub fn TriDiag(comptime T: type) type {
 
             self.bp[0] = triVal(T, self.b_pos[0], vals);
             if (self.bp[0] == 0 or !std.math.isFinite(self.bp[0])) return error.SingularMatrix;
-            self.mul[0] = 0;
-            if (n > 1) self.cv[0] = triVal(T, self.c_pos[0], vals);
+            self.cv[0] = triVal(T, self.c_pos[0], vals);
 
             for (1..n) |i| {
                 const a = triVal(T, self.a_pos[i], vals);
@@ -273,8 +272,7 @@ test "TriDiag: 4x4 factor + solve vs dense reference" {
     var td = try TriDiag(f64).init(gpa, 4, &csc.col_ptr, &csc.row_idx);
     defer td.deinit(gpa);
 
-    var vals = csc.vals;
-    try td.factor(&vals);
+    try td.factor(&csc.vals);
 
     const rhs = [4]f64{ 7, 13, 20, 23 };
     var x = rhs;
@@ -299,8 +297,7 @@ test "TriDiag: solveT matches dense A^T solve" {
     var td = try TriDiag(f64).init(gpa, 4, &csc.col_ptr, &csc.row_idx);
     defer td.deinit(gpa);
 
-    var vals = csc.vals;
-    try td.factor(&vals);
+    try td.factor(&csc.vals);
 
     const rhs = [4]f64{ 3, 9, 15, 21 };
     var x = rhs;
@@ -329,8 +326,7 @@ test "TriDiag: singular detection (zero pivot)" {
     var td = try TriDiag(f64).init(gpa, 3, &csc.col_ptr, &csc.row_idx);
     defer td.deinit(gpa);
 
-    var vals = csc.vals;
-    try testing.expectError(error.SingularMatrix, td.factor(&vals));
+    try testing.expectError(error.SingularMatrix, td.factor(&csc.vals));
 }
 
 test "isTridiag: tridiag detected" {

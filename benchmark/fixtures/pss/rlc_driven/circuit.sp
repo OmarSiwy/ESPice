@@ -3,5 +3,7 @@ Vin in 0 DC 0 SIN(0 1 10k)
 R1 in n1 50
 L1 n1 out 1m
 C1 out 0 100n
-.pss 10k 1m v(out) 256 4 50 1m
+* Card is ESPice's documented form (freq samples), not ngspice's
+* gfreq/tstab/oscnob/harms card: tstab and oscnob have no Options equivalent.
+.pss 10k 256
 .end

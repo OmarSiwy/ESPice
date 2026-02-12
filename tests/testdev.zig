@@ -70,17 +70,6 @@ pub const V = struct {
     }
 };
 
-/// Independent current source, p -> n.
-pub const I = struct {
-    pub const U = enum(u8) { p, n };
-    pub const num_ports: usize = 2;
-    pub const Model = struct { dc: f32 = 0 };
-    pub const Instance = struct {};
-    pub fn eval(comptime S: type, _: [2]S, m: *const Model, _: *const Instance, _: f64) [2]S {
-        return .{ S.con(@as(f64, m.dc)), S.con(-@as(f64, m.dc)) };
-    }
-};
-
 /// Linear capacitor: q = C*(vp-vn). No resistive current.
 pub const C = struct {
     pub const U = enum(u8) { p, n };
@@ -125,21 +114,5 @@ pub const D = struct {
         }
         // pnjlim clamped: the iterate was moved, so Newton must go round again.
         return .{ .x = .{ cur[1] + v, cur[1] }, .converged = v == v_in };
-    }
-};
-
-/// Linear inductor: branch unknown carries the current, q on the branch row
-/// is the flux L*i. v = L di/dt in MNA form.
-pub const L = struct {
-    pub const U = enum(u8) { p, n, branch };
-    pub const num_ports: usize = 2;
-    pub const Model = struct { l: f32 = 1e-3 };
-    pub const Instance = struct {};
-    pub fn eval(comptime S: type, x: [3]S, _: *const Model, _: *const Instance, _: f64) [3]S {
-        // KCL: branch current in/out; branch eq: -(vp-vn) + d(flux)/dt = 0
-        return .{ x[2], x[2].neg(), x[0].sub(x[1]).neg() };
-    }
-    pub fn q(comptime S: type, x: [3]S, m: *const Model, _: *const Instance, _: f64) [3]S {
-        return .{ S.con(0), S.con(0), x[2].scale(@as(f64, m.l)) };
     }
 };

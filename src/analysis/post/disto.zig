@@ -14,8 +14,6 @@ const types = @import("solvers").types;
 const solvers = @import("solvers");
 const dense_lu = solvers.dense_lu;
 
-const W = std.simd.suggestVectorLength(f64) orelse 8;
-
 pub const Options = struct {
     tol: converger.Tolerances = .{},
     f_start: f64,
@@ -29,10 +27,6 @@ pub const Options = struct {
     output_node: u32 = root.GROUND,
     fd_eps: f64 = 1e-6,
 };
-
-// -------------------------------------------------------------------------
-// SIMD arithmetic helpers
-// -------------------------------------------------------------------------
 
 /// Distortion analysis via simplified Volterra series.
 ///
@@ -112,17 +106,11 @@ pub fn sweep(
     const x_work = try allocator.alloc(f64, nn);
     defer allocator.free(x_work);
 
-    const a_work2 = try allocator.alloc(f64, nn * nn);
-    defer allocator.free(a_work2);
-    const rhs_work2 = try allocator.alloc(f64, nn);
-    defer allocator.free(rhs_work2);
     const x_work2 = try allocator.alloc(f64, nn);
     defer allocator.free(x_work2);
 
-    const v1_re = try allocator.alloc(f64, n);
-    defer allocator.free(v1_re);
-    const v1_im = try allocator.alloc(f64, n);
-    defer allocator.free(v1_im);
+    const v1_re = x_work[0..n];
+    const v1_im = x_work[n..nn];
 
     var sw = types.logSweep(options.f_start, options.f_stop, options.points_per_decade);
     var k: usize = 0;
@@ -137,16 +125,12 @@ pub fn sweep(
 
         try dense_lu.factorizeSolve(nn, a_work, rhs_work, x_work);
 
-        simdCopy(v1_re, x_work[0..n]);
-        simdCopy(v1_im, x_work[n..nn]);
-
         // -- 3b: Build second-order RHS: -½ F''[V1, V1] --
         // D2[row] = sum_ab d2[row,a,b] * V1[a] * V1[b]  (complex product)
         // RHS = -D2  (the ½ is absorbed into the Volterra convention;
         // the doc's pseudo-code omits the ½ in the contraction and puts it
         // in the equation — we follow the pseudo-code directly: no ½ here,
         // matching the existing implementation for compatibility)
-        simdZero(rhs_work2);
         for (0..n) |row| {
             var d2_re: f64 = 0;
             var d2_im: f64 = 0;
@@ -161,15 +145,15 @@ pub fn sweep(
                     d2_im += coeff * prod_im;
                 }
             }
-            rhs_work2[row] = -d2_re;
-            rhs_work2[n + row] = -d2_im;
+            rhs_work[row] = -d2_re;
+            rhs_work[n + row] = -d2_im;
         }
 
         // -- 3c: Solve second-order: (G + j*2w*C) * V2 = -D2(V1,V1) --
         const omega2 = 2.0 * omega;
-        dense_lu.buildComplexAdmittance(n, nn, g_dense, c_mat, omega2, a_work2);
+        dense_lu.buildComplexAdmittance(n, nn, g_dense, c_mat, omega2, a_work);
 
-        try dense_lu.factorizeSolve(nn, a_work2, rhs_work2, x_work2);
+        try dense_lu.factorizeSolve(nn, a_work, rhs_work, x_work2);
 
         // -- 3d: Compute HD2 = |V2[output]| / |V1[output]| --
         const out = options.output_node;

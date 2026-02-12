@@ -4,5 +4,7 @@ D1 in out dm
 .model dm D(is=1e-14)
 R1 out 0 10k
 C1 out 0 1u
-.pss 1k 5m v(out) 256 8 100 1m
+* Card is ESPice's documented form (freq samples), not ngspice's
+* gfreq/tstab/oscnob/harms card: tstab and oscnob have no Options equivalent.
+.pss 1k 256
 .end

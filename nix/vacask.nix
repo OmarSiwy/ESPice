@@ -48,13 +48,11 @@ pkgs.stdenv.mkDerivation rec {
     "-DSuiteSparse_DIR=${pkgs.suitesparse}"
   ];
 
-  installPhase = ''
-    runHook preInstall
-    mkdir -p $out/bin
-    # The simulator binary is built into the simulator/ subdirectory.
-    cp simulator/vacask $out/bin/vacask
-    runHook postInstall
-  '';
+  # Upstream's own install() rules stage the OSDI device models into
+  # lib/vacask/mod, which is the ONLY place `load "spice/resistor.osdi"`
+  # resolves from. A hand-rolled `cp simulator/vacask` installed a simulator
+  # that could not load a single device — every deck died at its first `load`.
+  # cmake's `install(TARGETS sim)` already lands $out/bin/vacask.
 
   meta = {
     description = "VACASK – Verilog-A Circuit Analysis Kernel";

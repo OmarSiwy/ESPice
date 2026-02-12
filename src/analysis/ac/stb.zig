@@ -12,9 +12,6 @@ const dc = @import("../dc/dc.zig");
 
 const Complex = types.Complex;
 
-const W = std.simd.suggestVectorLength(f64) orelse 8;
-const V = @Vector(W, f64);
-
 pub const Options = struct {
     tol: converger.Tolerances = .{},
     f_start: f64,
@@ -80,12 +77,6 @@ pub fn solve(
 
     // --- Linearize at the operating point ------------------------------------
     ckt.linearize(x_op);
-    const lin = try allocator.alloc(f64, 2 * n * n);
-    defer allocator.free(lin);
-    const g_lin = lin[0 .. n * n];
-    const c_lin = lin[n * n ..];
-    ckt.denseG(g_lin);
-    ckt.denseC(c_lin);
 
     // --- Augment to (n+1)² with probe branch ---------------------------------
     // FreqSolver.initDense takes ownership of both arrays.
@@ -97,19 +88,11 @@ pub fn solve(
     root.zeroSimd(g_aug);
     root.zeroSimd(c_aug);
 
-    // Copy original G/C into upper-left n×n block of augmented matrices.
-    for (0..n) |row| {
-        const src_off = row * n;
-        const dst_off = row * n_aug;
-        // SIMD copy of one row
-        var i: usize = 0;
-        while (i + W <= n) : (i += W) {
-            g_aug[dst_off + i ..][0..W].* = g_lin[src_off + i ..][0..W].*;
-            c_aug[dst_off + i ..][0..W].* = c_lin[src_off + i ..][0..W].*;
-        }
-        while (i < n) : (i += 1) {
-            g_aug[dst_off + i] = g_lin[src_off + i];
-            c_aug[dst_off + i] = c_lin[src_off + i];
+    for (0..n) |col| {
+        for (ckt.col_ptr[col]..ckt.col_ptr[col + 1]) |slot| {
+            const dst = @as(usize, ckt.row_idx[slot]) * n_aug + col;
+            g_aug[dst] = ckt.g_vals[slot];
+            c_aug[dst] = ckt.c_vals[slot];
         }
     }
 
@@ -136,9 +119,12 @@ pub fn solve(
     var fs = try FreqSolver.initDense(allocator, @intCast(n_aug), g_aug, c_aug);
     defer fs.deinit(allocator);
 
+    var result = try SolveResult.init(allocator, n_points);
+    errdefer result.deinit(allocator);
+
     const omegas = try allocator.alloc(f64, n_points);
     defer allocator.free(omegas);
-    types.fillLogSweep(options.f_start, options.f_stop, options.points_per_decade, null, omegas);
+    types.fillLogSweep(options.f_start, options.f_stop, options.points_per_decade, result.freqs, omegas);
 
     // One shared rhs: unit excitation on the probe branch (stacked-real 2n).
     const rhs = try allocator.alloc(f64, nn);
@@ -153,13 +139,7 @@ pub fn solve(
     };
     defer allocator.free(x_out);
 
-    var result = try SolveResult.init(allocator, n_points);
-    errdefer result.deinit(allocator);
-
-    var sw = types.logSweep(options.f_start, options.f_stop, options.points_per_decade);
-    var k: usize = 0;
-    while (sw.next()) |f| : (k += 1) {
-        result.freqs[k] = f;
+    for (0..n_points) |k| {
         // T(f) = −(x_re[branch] + j·x_im[branch])
         result.loop_gain[k] = .{
             .re = -x_out[k * nn + branch_idx],

@@ -4,13 +4,10 @@
 const std = @import("std");
 const root = @import("../types.zig");
 const converger = @import("solvers").converger;
-const types = @import("solvers").types;
-const solvers = @import("solvers");
 const fft_mod = @import("solvers").fft;
 const tran = @import("../tran/tran.zig");
 
 const math = std.math;
-const W = std.simd.suggestVectorLength(f64) orelse 8;
 
 pub const Harmonic = struct {
     mag: f64,
@@ -67,12 +64,14 @@ pub fn analyze(waveform: *const tran.Waveform, probe_idx: u32, f_fund: f64, allo
     // Linearly interpolate raw_count samples onto n_fft uniform points in [t_start, t_end)
     const win_times = times[start_idx..];
     const win_vals = values[start_idx..];
+    // Targets increase monotonically, so one cursor walks the window forward
+    // instead of restarting a binary search per sample: O(window + n_fft).
+    var cursor: usize = 0;
     for (0..n_fft) |k| {
         const t_target = t_start + period * @as(f64, @floatFromInt(k)) / n_fft_f;
-        re[k] = interpolate(win_times, win_vals, t_target);
+        re[k] = interpolateAt(win_times, win_vals, t_target, &cursor);
     }
 
-    // Zero imaginary part (SIMD)
     root.zeroSimd(im);
 
     fft_mod.fft(re, im);
@@ -103,31 +102,11 @@ pub fn analyzeBuffer(samples: []const f64, allocator: std.mem.Allocator) !Spectr
         re[k] = samples[idx_lo] * (1.0 - alpha) + samples[idx_hi] * alpha;
     }
 
-    // Zero imaginary part (SIMD)
     root.zeroSimd(im);
 
     fft_mod.fft(re, im);
 
     return extractSpectrum(re, im, n_fft);
-}
-
-/// Fine-grained primitive: run transient simulation then perform Fourier
-/// analysis on the result.
-pub fn solve(
-    ckt: *root.Circuit,
-    x: []f64,
-    options: Options,
-    tran_opts: tran.Options,
-    allocator: std.mem.Allocator,
-) !Spectrum {
-    const probes = [_]u32{options.output_node};
-    var waveform = try tran.Waveform.init(allocator, 1, tran.initialCapacity(tran_opts));
-    defer waveform.deinit();
-
-    const tran_result = try tran.simulate(ckt, x, &probes, &waveform, tran_opts, allocator);
-    if (!tran_result.completed) return error.TransientFailed;
-
-    return analyze(&waveform, 0, options.f_fundamental, allocator);
 }
 
 /// Contract entry: transient from the operating point, then the harmonic
@@ -136,16 +115,9 @@ pub fn solve(
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
     const x_op = ctx.x_op orelse return error.NoOperatingPoint;
-    const n = x_op.len;
 
-    const x = try a.alloc(f64, n);
+    const x = try a.dupe(f64, x_op);
     defer a.free(x);
-    // SIMD copy of operating point
-    const V = @Vector(W, f64);
-    _ = V;
-    var si: usize = 0;
-    while (si + W <= n) : (si += W) x[si..][0..W].* = x_op[si..][0..W].*;
-    while (si < n) : (si += 1) x[si] = x_op[si];
 
     const tran_opts = opts.tran_opts orelse tran.Options{
         .t_stop = 5.0 / opts.f_fundamental,
@@ -153,7 +125,16 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         .dt_max = 1.0 / (200.0 * opts.f_fundamental),
     };
 
-    const spec = try solve(ctx.circuit, x, opts, tran_opts, a);
+    const spec = blk: {
+        const probes = [_]u32{opts.output_node};
+        var waveform = try tran.Waveform.init(a, 1, tran.initialCapacity(tran_opts));
+        defer waveform.deinit();
+
+        const tran_result = try tran.simulate(ctx.circuit, x, &probes, &waveform, tran_opts, a);
+        if (!tran_result.completed) return error.TransientFailed;
+
+        break :blk try analyze(&waveform, 0, opts.f_fundamental, a);
+    };
 
     const n_harm: usize = @min(opts.n_harmonics, spec.harmonics.len);
     const npoints = 1 + n_harm;
@@ -242,6 +223,27 @@ fn extractSpectrum(re: []const f64, im: []const f64, n_fft: usize) Spectrum {
     };
 }
 
+/// Linear interpolation on sorted time/value arrays, advancing `cursor` to the
+/// bracketing index instead of searching for it. Callers must pass targets in
+/// non-decreasing order; `interpolate` below is the binary-search oracle this
+/// agrees with element for element (see the differential test).
+fn interpolateAt(times: []const f64, values: []const f64, t: f64, cursor: *usize) f64 {
+    if (times.len == 0) return 0;
+    if (t <= times[0]) return values[0];
+    if (t >= times[times.len - 1]) return values[values.len - 1];
+
+    // Both searches land on lo = max{i : times[i] <= t}, capped at len-2.
+    var lo = cursor.*;
+    while (lo + 2 < times.len and times[lo + 1] <= t) lo += 1;
+    cursor.* = lo;
+    const hi = lo + 1;
+
+    const dt = times[hi] - times[lo];
+    if (dt < 1e-30) return values[lo];
+    const alpha = (t - times[lo]) / dt;
+    return values[lo] * (1.0 - alpha) + values[hi] * alpha;
+}
+
 /// Binary-search + linear interpolation on sorted time/value arrays.
 fn interpolate(times: []const f64, values: []const f64, t: f64) f64 {
     if (times.len == 0) return 0;
@@ -271,6 +273,27 @@ fn interpolate(times: []const f64, values: []const f64, t: f64) f64 {
 // ============================================================================
 
 const testing = std.testing;
+
+test "four: cursor interpolation matches the binary-search oracle" {
+    var times: [64]f64 = undefined;
+    var vals: [64]f64 = undefined;
+    for (0..64) |i| {
+        const fi: f64 = @floatFromInt(i);
+        times[i] = fi * 0.1;
+        vals[i] = @sin(fi);
+    }
+    times[20] = times[19]; // duplicate timestamp: both must pick the same interval
+
+    var cursor: usize = 0;
+    var k: usize = 0;
+    while (k <= 700) : (k += 1) { // sweeps below t[0], through the window, past t[last]
+        const t = @as(f64, @floatFromInt(k)) * 0.01 - 0.05;
+        try testing.expectEqual(
+            interpolate(&times, &vals, t),
+            interpolateAt(&times, &vals, t, &cursor),
+        );
+    }
+}
 
 test "four: pure cosine has zero THD" {
     const allocator = testing.allocator;

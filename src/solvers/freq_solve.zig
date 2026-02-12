@@ -19,8 +19,6 @@ const Allocator = std.mem.Allocator;
 // omega). Dense only wins for tiny systems where SIMD row ops beat scatter.
 const DENSE_THRESHOLD: u32 = 16;
 
-pub const Error = error{Singular};
-
 /// Frequency-domain solver over element type T (f32 or f64). `FreqSolver`
 /// below is the f64 instantiation (existing callers).
 pub fn FreqSolverT(comptime T: type) type {
@@ -28,7 +26,6 @@ pub fn FreqSolverT(comptime T: type) type {
         const Self = @This();
         const DL = dense_lu.DenseLu(T);
         const W = std.simd.suggestVectorLength(T) orelse 1;
-        const VT = @Vector(W, T);
 
         n: u32,
         nn: u32,
@@ -96,7 +93,6 @@ pub fn FreqSolverT(comptime T: type) type {
         /// Column j (< n) has [G-block rows r | ωC-block rows r+n];
         /// column j+n mirrors with signs flipped.
         fn initSparse(allocator: Allocator, n: u32, ckt: anytype) !Self {
-            const nu: usize = n;
             const nn: u32 = 2 * n;
             const src_nnz: usize = ckt.nnz;
             const total_nnz: usize = 4 * src_nnz; // 2 halves × 2 sub-blocks each
@@ -108,25 +104,7 @@ pub fn FreqSolverT(comptime T: type) type {
             const vals = try allocator.alloc(T, total_nnz);
             errdefer allocator.free(vals);
 
-            // Build the row index pattern: each source column j contributes
-            // rows [r] then [r+n] in both halves.
-            var p: u32 = 0;
-            col_ptr[0] = 0;
-            for (0..2) |half| {
-                for (0..nu) |j| {
-                    const s = ckt.col_ptr[j];
-                    const e = ckt.col_ptr[j + 1];
-                    for (ckt.row_idx[s..e]) |r| {
-                        row_idx[p] = r;
-                        p += 1;
-                    }
-                    for (ckt.row_idx[s..e]) |r| {
-                        row_idx[p] = r + n;
-                        p += 1;
-                    }
-                    col_ptr[half * nu + j + 1] = p;
-                }
-            }
+            buildStackedRealPattern(n, ckt.col_ptr, ckt.row_idx, col_ptr, row_idx);
 
             var slv = try direct.SolverT(T).init(allocator, nn, col_ptr, row_idx, null);
             errdefer slv.deinit();
@@ -412,6 +390,38 @@ pub fn FreqSolverT(comptime T: type) type {
 }
 
 pub const FreqSolver = FreqSolverT(f64);
+
+/// Build the stacked-real 2n×2n CSC pattern from the n×n circuit pattern.
+/// Column j (j < n): G-rows then C-rows+n.
+/// Column j+n: -wC-rows then G-rows+n.
+pub inline fn buildStackedRealPattern(
+    n: u32,
+    col_ptr: []const u32,
+    row_idx: []const u32,
+    sr_col_ptr: []u32,
+    sr_row_idx: []u32,
+) void {
+    const nu: usize = n;
+    var p: u32 = 0;
+    sr_col_ptr[0] = 0;
+
+    // ponytail: both halves share the row pattern; only the value fill differs.
+    for (0..2) |half| {
+        for (0..nu) |j| {
+            const s = col_ptr[j];
+            const e = col_ptr[j + 1];
+            for (row_idx[s..e]) |r| {
+                sr_row_idx[p] = r;
+                p += 1;
+            }
+            for (row_idx[s..e]) |r| {
+                sr_row_idx[p] = r + n;
+                p += 1;
+            }
+            sr_col_ptr[half * nu + j + 1] = p;
+        }
+    }
+}
 
 /// SIMD-friendly scale-copy: dst[i] = s * src[i].
 fn scaleCopy(comptime T: type, dst: []T, src: []const T, s: T) void {
@@ -701,7 +711,3 @@ test "scaleCopy: empty slice" {
     const src: [0]f64 = .{};
     scaleCopy(f64, &dst, &src, 42.0);
 }
-
-// ponytail: sparse-path integration test deferred — needs circuit CSC
-// fixture (CompiledCircuit.Builder). Re-add when solvers has its own
-// standalone CSC test harness.

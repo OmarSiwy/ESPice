@@ -13,8 +13,6 @@
 const std = @import("std");
 const root = @import("../types.zig");
 const converger = @import("solvers").converger;
-const types = @import("solvers").types;
-const solvers = @import("solvers");
 
 const W = std.simd.suggestVectorLength(f64) orelse 8;
 
@@ -49,30 +47,31 @@ pub const SolveResult = struct {
     }
 };
 
-// ---------------------------------------------------------------------------
-// SIMD helpers (no @memset/@memcpy per convention)
-// ---------------------------------------------------------------------------
-
 const copySimd = root.copySimd;
 
-/// SIMD dot product: λ^T · v
-inline fn dotSimd(a: []const f64, b: []const f64) f64 {
-    const n = @min(a.len, b.len);
+/// λ^T · dF/dp with the difference fused in: dF/dp = (pert - nom) * inv_delta
+/// never leaves registers, so there is no n-element scratch and no reload.
+/// Grouping, lane width, the explicit left-to-right lane fold and the scalar
+/// tail are the ones the separate dot used. dcmatch's per-block `@reduce`
+/// reduction order is deliberately different and must not be substituted here.
+inline fn adjointFd(lambda: []const f64, pert: []const f64, nom: []const f64, inv_delta: f64) f64 {
+    const n = lambda.len;
     const V = @Vector(W, f64);
+    const id: V = @splat(inv_delta);
     var acc: V = @splat(0.0);
     var i: usize = 0;
     while (i + W <= n) : (i += W) {
-        const av: V = a[i..][0..W].*;
-        const bv: V = b[i..][0..W].*;
-        acc += av * bv;
+        const lv: V = lambda[i..][0..W].*;
+        const rp: V = pert[i..][0..W].*;
+        const rn: V = nom[i..][0..W].*;
+        acc += lv * ((rp - rn) * id);
     }
     // ponytail: reduce SIMD accumulator to scalar via array extract
     // (@reduce would work but this is explicit and portable)
     const arr: [W]f64 = acc;
     var s: f64 = 0;
     for (arr) |v| s += v;
-    // scalar tail
-    while (i < n) : (i += 1) s += a[i] * b[i];
+    while (i < n) : (i += 1) s += lambda[i] * ((pert[i] - nom[i]) * inv_delta);
     return s;
 }
 
@@ -123,7 +122,6 @@ pub fn solve(
     // -- 2. Adjoint solve: J^T · λ = e_out --
     const lambda = try allocator.alloc(f64, n);
     defer allocator.free(lambda);
-    // Build e_out: unit vector at output_node
     root.zeroSimd(lambda);
     lambda[output_node] = 1.0;
     ws.slv.solveT(lambda, lambda);
@@ -131,10 +129,6 @@ pub fn solve(
     // -- 3. Per-parameter: perturb, re-eval RHS, FD + adjoint dot --
     const entries = try allocator.alloc(SensEntry, params.len);
     errdefer allocator.free(entries);
-
-    // Scratch for dF/dp = (rhs_pert - rhs_nom) / delta
-    const dfdp = try allocator.alloc(f64, n);
-    defer allocator.free(dfdp);
 
     for (params, entries) |p, *entry| {
         const orig: f64 = p.ptr.get();
@@ -155,28 +149,12 @@ pub fn solve(
 
         // Evaluate F(x_op) with perturbed parameter (RHS only, no Newton).
         ckt.evalNewton(x_op, 0);
-        const inv_delta = 1.0 / delta;
 
-        // dF/dp = (rhs_pert - rhs_nom) / delta  (SIMD)
-        {
-            const V = @Vector(W, f64);
-            const id: V = @splat(inv_delta);
-            var i: usize = 0;
-            while (i + W <= n) : (i += W) {
-                const rp: V = ckt.rhs[i..][0..W].*;
-                const rn: V = rhs_nom[i..][0..W].*;
-                dfdp[i..][0..W].* = (rp - rn) * id;
-            }
-            while (i < n) : (i += 1) {
-                dfdp[i] = (ckt.rhs[i] - rhs_nom[i]) * inv_delta;
-            }
-        }
-
-        // dy/dp = -λ^T · dF/dp
+        // dy/dp = -λ^T · (rhs_pert - rhs_nom) / delta
         entry.* = .{
             .device_name = p.device_name,
             .param_name = p.param_name,
-            .sensitivity = -dotSimd(lambda[0..n], dfdp[0..n]),
+            .sensitivity = -adjointFd(lambda[0..n], ckt.rhs[0..n], rhs_nom, 1.0 / delta),
         };
     }
 
@@ -216,7 +194,6 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     var res = try solve(ctx.circuit, params, output_node, opts.tol, a);
     defer res.deinit(a);
 
-    // Build result arrays: one name and one sensitivity value per parameter.
     const names = try a.alloc([]const u8, res.entries.len);
     errdefer a.free(names);
     const data = try a.alloc(f64, res.entries.len);
@@ -245,28 +222,53 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
 const testing = std.testing;
 
-test "dotSimd: basic inner product" {
-    const a = [_]f64{ 1.0, 2.0, 3.0, 4.0 };
-    const b = [_]f64{ 5.0, 6.0, 7.0, 8.0 };
-    try testing.expectApproxEqAbs(@as(f64, 70.0), dotSimd(&a, &b), 1e-15);
+/// Scalar oracle for adjointFd: the materialize-then-dot form it replaced,
+/// with the same lane fold (W == 1 degenerates to this loop exactly).
+fn adjointFdOracle(lambda: []const f64, pert: []const f64, nom: []const f64, inv_delta: f64) f64 {
+    var dfdp: [64]f64 = undefined;
+    for (0..lambda.len) |i| dfdp[i] = (pert[i] - nom[i]) * inv_delta;
+    const V = @Vector(W, f64);
+    var acc: V = @splat(0.0);
+    var i: usize = 0;
+    while (i + W <= lambda.len) : (i += W) {
+        const av: V = lambda[i..][0..W].*;
+        const bv: V = dfdp[i..][0..W].*;
+        acc += av * bv;
+    }
+    const arr: [W]f64 = acc;
+    var s: f64 = 0;
+    for (arr) |v| s += v;
+    while (i < lambda.len) : (i += 1) s += lambda[i] * dfdp[i];
+    return s;
 }
 
-test "dotSimd: length not multiple of W" {
-    const a = [_]f64{ 1.0, 2.0, 3.0 };
-    const b = [_]f64{ 4.0, 5.0, 6.0 };
-    try testing.expectApproxEqAbs(@as(f64, 32.0), dotSimd(&a, &b), 1e-15);
+test "adjointFd: matches the materialize-then-dot oracle bit for bit" {
+    var prng = std.Random.DefaultPrng.init(0xfeed);
+    const rng = prng.random();
+    var lambda: [64]f64 = undefined;
+    var pert: [64]f64 = undefined;
+    var nom: [64]f64 = undefined;
+    for (0..64) |i| {
+        lambda[i] = rng.floatNorm(f64);
+        nom[i] = rng.floatNorm(f64);
+        pert[i] = nom[i] + 1e-7 * rng.floatNorm(f64);
+    }
+    // every length across the vector boundary, plus the empty and tail cases
+    for (0..65) |n| {
+        const inv_delta = 1.0 / 1e-7;
+        try testing.expectEqual(
+            adjointFdOracle(lambda[0..n], pert[0..n], nom[0..n], inv_delta),
+            adjointFd(lambda[0..n], pert[0..n], nom[0..n], inv_delta),
+        );
+    }
 }
 
-test "dotSimd: single element" {
-    const a = [_]f64{7.0};
-    const b = [_]f64{3.0};
-    try testing.expectApproxEqAbs(@as(f64, 21.0), dotSimd(&a, &b), 1e-15);
-}
-
-test "dotSimd: empty" {
-    const a = [_]f64{};
-    const b = [_]f64{};
-    try testing.expectApproxEqAbs(@as(f64, 0.0), dotSimd(&a, &b), 1e-15);
+test "adjointFd: known value" {
+    // dF/dp = (pert - nom) / delta = (2,4,6)/2 = (1,2,3); λ·dF/dp = 4+10+18 = 32
+    const lambda = [_]f64{ 4.0, 5.0, 6.0 };
+    const nom = [_]f64{ 0.0, 0.0, 0.0 };
+    const pert = [_]f64{ 2.0, 4.0, 6.0 };
+    try testing.expectApproxEqAbs(@as(f64, 32.0), adjointFd(&lambda, &pert, &nom, 0.5), 1e-15);
 }
 
 test "copySimd: round-trip" {

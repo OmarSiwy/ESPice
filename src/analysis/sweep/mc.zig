@@ -33,7 +33,6 @@ pub const ParamVar = struct {
     nominal: f64,
     /// Relative tolerance (fraction of nominal). E.g. 0.05 for 5%.
     rel_tol: f64,
-    /// Distribution to sample from.
     dist: Distribution,
 };
 
@@ -43,7 +42,6 @@ pub const ParamVar = struct {
 
 pub const Options = struct {
     tol: converger.Tolerances = .{},
-    /// Number of Monte Carlo trials.
     n_trials: u16 = 100,
     /// Seed for the PRNG (deterministic).
     seed: u64 = 42,
@@ -147,12 +145,11 @@ pub fn analyze(
     const nopts = options.dc_options.tol.newtonOpts(options.dc_options.tol.itl2);
     try lanes.solveLanes(ckt, setup, x_lanes, results, nopts);
 
-    // Track yield counts per spec
     const yield_counts = try allocator.alloc(u32, yield_specs.len);
     defer allocator.free(yield_counts);
-    for (yield_counts) |*v| v.* = 0;
+    // ponytail: integer counters need only a native bulk fill.
+    @memset(yield_counts, 0);
 
-    // Initialize stats
     for (stats) |*st| {
         st.* = .{
             .mean = 0,
@@ -182,13 +179,10 @@ pub fn analyze(
         n_conv += 1;
     }
 
-    // Compute final statistics
     for (stats, 0..) |*st, p| {
         st.n_converged = n_conv;
 
         if (n_conv == 0) {
-            st.mean = 0;
-            st.std_dev = 0;
             st.min = 0;
             st.max = 0;
             continue;
@@ -256,8 +250,6 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const ckt = ctx.circuit;
     const a = ctx.allocator;
 
-    // Monte Carlo variables: each device's principal instance value,
-    // skipping unset (0) ones.
     const refs = try ckt.collectParams();
     var n_vars: usize = 0;
     for (refs) |ref| {

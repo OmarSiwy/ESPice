@@ -199,14 +199,6 @@ fn rlcH2Func(time: f64, T: f64, alpha: f64, beta: f64) f64 {
     return alpha * alpha * T * @exp(barg - beta * time) * bessI1xOverXe(barg);
 }
 
-/// h3'(t) = α e^{-βt} [αt·I1(x)/x − I0(x)]; 0 for t < T.
-fn rlcH3dashFunc(time: f64, T: f64, alpha: f64, beta: f64) f64 {
-    if (alpha == 0.0 or time < T) return 0.0;
-    const barg = if (time != T) alpha * @sqrt(time * time - T * T) else 0.0;
-    const e = @exp(barg - beta * time);
-    return alpha * e * (alpha * time * bessI1xOverXe(barg) - bessI0e(barg));
-}
-
 /// ∫∫h1' = t e^{-βt}[I0(βt) + I1(βt)] − t (G = 0 closed form).
 fn rlcH1dashTwiceIntFunc(time: f64, beta: f64) f64 {
     if (beta == 0.0) return time;
@@ -215,12 +207,8 @@ fn rlcH1dashTwiceIntFunc(time: f64, beta: f64) f64 {
     return (bessI1e(arg) + bessI0e(arg)) * time - time;
 }
 
-/// ∫h3' = e^{-βt} I0(β√(t²−T²)) − e^{-βT} for t > T, else 0.
-fn rlcH3dashIntFunc(time: f64, T: f64, beta: f64) f64 {
-    if (time <= T or beta == 0.0) return 0.0;
-    const barg = beta * @sqrt(time * time - T * T);
-    return @exp(barg - beta * time) * bessI0e(barg) - @exp(-beta * T);
-}
+// ponytail: rebuildWave computes the h3 integral with its shared exponential;
+// extract a standalone helper only if another caller needs it.
 
 // RC-case twice-integrated closed forms (erfc kernels).
 fn rcH1dashTwiceIntFunc(time: f64, cbyr: f64) f64 {
@@ -326,8 +314,7 @@ pub fn precompute(_: *Instance, model: *Model) void {
                 // LTRAtemp bisection for the largest step over which the h2/h3
                 // kernels still look straight. Bug-compat: ngspice sums the
                 // SAME h2 check twice (y2 never enters `done`), so this does
-                // too — the h3 values are computed and discarded, exactly as
-                // the reference wastes them.
+                // too.
                 var xbig = model.td + 9.0 * model.td;
                 const xsmall = model.td;
                 var xmid = 0.5 * (xbig + xsmall);
@@ -337,8 +324,6 @@ pub fn precompute(_: *Instance, model: *Model) void {
                     iters += 1;
                     const y1big = rlcH2Func(xbig, model.td, model.alpha, model.beta);
                     const y1mid = rlcH2Func(xmid, model.td, model.alpha, model.beta);
-                    _ = rlcH3dashFunc(xbig, model.td, model.beta, model.beta);
-                    _ = rlcH3dashFunc(xmid, model.td, model.beta, model.beta);
                     const done: u32 =
                         @as(u32, @intFromBool(straightLineCheck(xbig, y1big, xmid, y1mid, xsmall, y1small, model.compactrel, model.compactabs))) +
                         @intFromBool(straightLineCheck(xbig, y1big, xmid, y1mid, xsmall, y1small, model.compactrel, model.compactabs));
@@ -929,9 +914,6 @@ pub fn compact(model: anytype, inst: anytype) void {
 const TestScalar = struct {
     v: f64,
     const T = @This();
-    pub fn con(c: f64) T {
-        return .{ .v = c };
-    }
     pub fn add(a: T, b: T) T {
         return .{ .v = a.v + b.v };
     }

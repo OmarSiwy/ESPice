@@ -27,7 +27,6 @@ pub const Options = struct {
     t_carrier: f64,
     /// Total simulation time (covers the full modulation envelope).
     t_stop: f64,
-    /// Fraction of T_carrier per inner tran timestep (smaller = more accurate carrier resolution).
     carrier_steps_per_period: u32 = 64,
     /// Number of carrier periods per outer envelope step. 1 = sample every period.
     periods_per_outer_step: u32 = 1,
@@ -80,23 +79,10 @@ fn newtonAt(
 }
 
 // ============================================================================
-// SIMD arithmetic helpers
-// ============================================================================
-
-// ============================================================================
 // Core simulation
 // ============================================================================
 
 /// Envelope-following transient analysis.
-///
-/// Runs a fast inner transient integration over one carrier period at each
-/// outer envelope step. Extracts peak and RMS values from the inner waveform
-/// to build the slowly-varying envelope. The outer step size adapts based on
-/// the rate of change of the envelope.
-///
-/// This is efficient when T_modulation >> T_carrier: instead of simulating
-/// every carrier cycle with tiny timesteps, we skip between carrier periods,
-/// only running a full-resolution inner sim for one period at each sample.
 ///
 /// Caller owns `rows`: point-major envelope samples with stride
 /// 1 + 2*probes.len, row = [t, peak_p0, rms_p0, peak_p1, rms_p1, ...];
@@ -117,22 +103,19 @@ pub fn simulate(
     try ckt.computeBaseline();
     const ws = try ckt.workspace();
 
-    // One scratch alloc: [x_save | x_outer_save | prev_peak | peak | sum_sq]
-    const scratch = try allocator.alloc(f64, 2 * n + 3 * probes.len);
+    // One scratch alloc: [x_outer_save | prev_peak | peak | sum_sq]
+    const scratch = try allocator.alloc(f64, n + 3 * probes.len);
     defer allocator.free(scratch);
-    const x_save = scratch[0..n];
-    const x_outer_save = scratch[n .. 2 * n];
+    const x_outer_save = scratch[0..n];
     // Previous envelope values for adaptive stepping (one per probe),
     // plus envelope extraction scratch.
-    const prev_peak = scratch[2 * n ..][0..probes.len];
-    const peak = scratch[2 * n + probes.len ..][0..probes.len];
-    const sum_sq = scratch[2 * n + 2 * probes.len ..][0..probes.len];
+    const prev_peak = scratch[n ..][0..probes.len];
+    const peak = scratch[n + probes.len ..][0..probes.len];
+    const sum_sq = scratch[n + 2 * probes.len ..][0..probes.len];
 
-    // Inner tran timestep
     const dt_inner: f64 = t_carrier / @as(f64, @floatFromInt(options.carrier_steps_per_period));
 
     // Record initial envelope point (DC operating point)
-    var n_pts: u32 = 1;
     {
         const row = rows[0..ncols];
         row[0] = 0;
@@ -154,7 +137,6 @@ pub fn simulate(
         // Snapshot state for rollback on Newton failure
         simdCopy(x_outer_save, x);
 
-        // Outer step size: advance by periods_per_step carrier periods
         const t_outer_step = @as(f64, @floatFromInt(periods_per_step)) * t_carrier;
         const t_target = @min(t + t_outer_step, options.t_stop);
         const actual_outer_dt = t_target - t;
@@ -185,8 +167,6 @@ pub fn simulate(
             }
         }
 
-        // Fine-resolution inner transient over one carrier period.
-        // Track peak and RMS for envelope extraction.
         for (probes, 0..) |node, p| {
             peak[p] = @abs(x[node]);
             sum_sq[p] = x[node] * x[node];
@@ -197,11 +177,8 @@ pub fn simulate(
         const fine_duration = t_target - t_fine_start;
         var inner_failed = false;
         while (t_inner < fine_duration) {
-            simdCopy(x_save, x);
-
             const inner_converged = newtonAt(ckt, ws, x, t_fine_start + t_inner + dt_inner, options);
             if (!inner_converged) {
-                simdCopy(x, x_save);
                 // Inner step fails → outer step too aggressive
                 periods_per_step = @max(periods_per_step / 2, options.min_periods_per_step);
                 inner_failed = true;
@@ -224,13 +201,11 @@ pub fn simulate(
             continue;
         }
 
-        // Record envelope metrics
         t = t_target;
         outer_steps += 1;
 
-        const row = rows[n_pts * ncols ..][0..ncols];
+        const row = rows[outer_steps * ncols ..][0..ncols];
         row[0] = t;
-        n_pts += 1;
 
         var max_rel_change: f64 = 0;
         for (0..probes.len) |p| {
@@ -239,7 +214,6 @@ pub fn simulate(
             row[1 + 2 * p] = peak[p];
             row[2 + 2 * p] = rms;
 
-            // Track envelope rate of change for adaptive stepping
             const denom = @max(prev_peak[p], 1e-15);
             const rel_change = @abs(peak[p] - prev_peak[p]) / denom;
             max_rel_change = @max(max_rel_change, rel_change);
@@ -261,7 +235,7 @@ pub fn simulate(
         .completed = t >= options.t_stop,
         .outer_steps = outer_steps,
         .t_final = t,
-        .n_points = n_pts,
+        .n_points = outer_steps + 1,
     };
 }
 
@@ -294,10 +268,8 @@ pub fn extractPeak(values: []const f64) f64 {
         const v: V = values[i..][0..W].*;
         peak_v = @max(peak_v, @abs(v));
     }
-    // Horizontal reduce
     var peak: f64 = 0;
     inline for (0..W) |lane| peak = @max(peak, peak_v[lane]);
-    // Scalar tail
     while (i < values.len) : (i += 1) peak = @max(peak, @abs(values[i]));
     return peak;
 }
@@ -311,10 +283,8 @@ pub fn extractRMS(values: []const f64) f64 {
         const v: V = values[i..][0..W].*;
         acc += v * v;
     }
-    // Horizontal reduce
     var sum_sq: f64 = 0;
     inline for (0..W) |lane| sum_sq += acc[lane];
-    // Scalar tail
     while (i < values.len) : (i += 1) sum_sq += values[i] * values[i];
     return @sqrt(sum_sq / @as(f64, @floatFromInt(values.len)));
 }
@@ -355,7 +325,6 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         .varnames = names,
         .is_complex = false,
         .npoints = npoints,
-        // shrink to exact size
         .data = try a.realloc(data, npoints * ncols),
     };
 }

@@ -37,7 +37,6 @@ pub const Options = struct {
     points_per_decade: u16 = 10,
     temp_k: f64 = 27.0 + 273.15,
     pss_n_samples: u32 = 64,
-    pss_stab_periods: u32 = 10,
     pss_shoot_tol: f64 = 1e-6,
     pss_shoot_max_iter: u16 = 50,
     pss_newton_max_iter: u16 = 50,
@@ -49,10 +48,6 @@ pub const SweepStatus = struct {
     total_noise: f64,
     pss_converged: bool,
 };
-
-// ---------------------------------------------------------------------------
-// SIMD arithmetic helpers
-// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // Per-source PSD computation
@@ -150,7 +145,6 @@ pub fn sweep(
         ckt.denseG(g_mats[k * n * n ..][0 .. n * n]);
         ckt.denseC(c_mats[k * n * n ..][0 .. n * n]);
 
-        // Collect noise sources at this PSS sample for cyclostationary modulation.
         const srcs_k = try ckt.collectNoiseSources(x_k, allocator);
         defer allocator.free(srcs_k);
 
@@ -199,7 +193,6 @@ pub fn sweep(
     while (sw.next()) |f_out| : (pt += 1) {
         var total_density: f64 = 0;
 
-        // For each sideband m
         var m: i32 = -m_max;
         while (m <= m_max) : (m += 1) {
             const f_sb = f_out + @as(f64, @floatFromInt(m)) * options.f_fundamental;
@@ -359,18 +352,12 @@ fn runPSS(
     defer allocator.free(x0);
     const x_end = try allocator.alloc(f64, n);
     defer allocator.free(x_end);
-    const x_scratch = try allocator.alloc(f64, n);
-    defer allocator.free(x_scratch);
 
-    // Initialize x0 from DC operating point
     simdCopy(x0, x_dc);
 
-    // Shooting fixed-point iterations
-    var converged = false;
     var shoot_iter: u16 = 0;
     while (shoot_iter < options.pss_shoot_max_iter) : (shoot_iter += 1) {
-        // Integrate one period from x0, storing trajectory
-        integrateOnePeriod(ckt, x0, x_end, pss_traj, n, n_samples, period, options, ws, x_scratch);
+        integrateOnePeriod(ckt, x0, x_end, pss_traj, n, n_samples, period, options, ws);
 
         // Shooting residual: phi = x_end - x0
         var max_residual: f64 = 0;
@@ -386,21 +373,15 @@ fn runPSS(
             max_residual = @max(max_residual, @abs(x_end[j] - x0[j]));
         }
 
-        if (max_residual < options.pss_shoot_tol) {
-            converged = true;
-            break;
-        }
+        if (max_residual < options.pss_shoot_tol) return true;
 
-        // Simple fixed-point update: x0 = x_end
         simdCopy(x0, x_end);
     }
 
     // If not converged, fill the trajectory with the last attempt anyway.
-    if (!converged) {
-        integrateOnePeriod(ckt, x0, x_end, pss_traj, n, n_samples, period, options, ws, x_scratch);
-    }
+    integrateOnePeriod(ckt, x0, x_end, pss_traj, n, n_samples, period, options, ws);
 
-    return converged;
+    return false;
 }
 
 /// Integrate the circuit over one period [0, T) using frozen-time Newton
@@ -415,7 +396,6 @@ fn integrateOnePeriod(
     period: f64,
     options: Options,
     ws: *converger.Workspace,
-    x_scratch: []f64,
 ) void {
     const dt = period / @as(f64, @floatFromInt(n_samples));
     const nr_opts = converger.Options{
@@ -424,22 +404,17 @@ fn integrateOnePeriod(
     };
 
     // Start from x0; store initial state as sample 0.
-    simdCopy(x_scratch, x0);
+    simdCopy(x_end, x0);
     simdCopy(pss_traj[0..n], x0);
 
     // Solve at each subsequent time sample (frozen-time quasi-static Newton).
     for (1..n_samples) |k| {
         const t_k = @as(f64, @floatFromInt(k)) * dt;
-        _ = converger.run(ckt, ws, x_scratch, t_k, nr_opts, root.EvalHook{}) catch
-            converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 };
+        _ = converger.run(ckt, ws, x_end, t_k, nr_opts, root.EvalHook{}) catch {};
 
-        // Store this time sample
         const offset = k * n;
-        simdCopy(pss_traj[offset .. offset + n], x_scratch);
+        simdCopy(pss_traj[offset .. offset + n], x_end);
     }
-
-    // x_end = state at end of period
-    simdCopy(x_end, x_scratch);
 }
 
 // ============================================================================
@@ -450,7 +425,6 @@ test "sourcePsd thermal" {
     const four_kt = 4.0 * k_boltzmann * 300.15;
     const g: f64 = 0.01; // 100 ohm
     const psd = sourcePsd(.thermal, g, 0, 0, 1, 1e6, four_kt);
-    // S = 4kTg
     const expected = four_kt * g;
     try std.testing.expectApproxEqRel(psd, expected, 1e-12);
 }
@@ -458,7 +432,6 @@ test "sourcePsd thermal" {
 test "sourcePsd shot" {
     const i_bias: f64 = 1e-3; // 1 mA
     const psd = sourcePsd(.shot, 0, i_bias, 0, 1, 1e6, 0);
-    // S = 2*q*|I|
     const expected = 2.0 * q_electron * i_bias;
     try std.testing.expectApproxEqRel(psd, expected, 1e-12);
 }
@@ -476,7 +449,6 @@ test "sourcePsd flicker" {
     const af: f64 = 1.0;
     const f_sb: f64 = 1e3;
     const psd = sourcePsd(.flicker, 0, i_bias, kf, af, f_sb, 0);
-    // S = kf * |I|^af / |f|
     const expected = kf * std.math.pow(f64, i_bias, af) / f_sb;
     try std.testing.expectApproxEqRel(psd, expected, 1e-12);
 }
@@ -488,7 +460,6 @@ test "sourcePsd flicker 1/f shape" {
     const af: f64 = 1.0;
     const psd_lo = sourcePsd(.flicker, 0, i_bias, kf, af, 100.0, 0);
     const psd_hi = sourcePsd(.flicker, 0, i_bias, kf, af, 1000.0, 0);
-    // ratio should be 10 (1/f shape)
     try std.testing.expectApproxEqRel(psd_lo / psd_hi, 10.0, 1e-12);
 }
 

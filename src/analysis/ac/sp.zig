@@ -18,9 +18,6 @@ const FreqSolver = solvers.freq_solve.FreqSolver;
 
 pub const Complex = types.Complex;
 
-const W = std.simd.suggestVectorLength(f64) orelse 8;
-const V = @Vector(W, f64);
-
 /// A port is a netlist vsource: `node` its + terminal, `branch` its MNA
 /// branch-current unknown. The sweep turns each into a Thevenin source with
 /// series z0 by adding −z0 to the branch row diagonal (branch equation becomes
@@ -63,7 +60,6 @@ pub fn sweep(
     std.debug.assert(freqs.len == n_points);
     std.debug.assert(s.len == n_points * n_ports * n_ports);
 
-    // Fill frequency array up front — both paths need it.
     for (0..n_points) |fi| freqs[fi] = genFreq(options, fi);
 
     // -- GPU batch path: one batch call per driven port ----------------------
@@ -86,7 +82,6 @@ pub fn sweep(
             ckt.g_vals[slot] = saved[idx];
         };
 
-        // Build omega array.
         const omegas = allocator.alloc(f64, n_points) catch break :gpu;
         defer allocator.free(omegas);
         for (freqs, 0..) |f, i| omegas[i] = 2.0 * std.math.pi * f;
@@ -97,7 +92,6 @@ pub fn sweep(
         for (0..n_ports) |p| {
             root.zeroSimd(rhs);
             rhs[ports[p].branch] = 1.0;
-            // rhs imag part is zero (already zeroed).
 
             // Per-frequency output: x_out[k] is 2*n (real‖imag expansion).
             const x_out = ckt.gpuFreqBatch(allocator, ckt.g_vals, ckt.c_vals, omegas, rhs, @intCast(n), false) orelse break :gpu;
@@ -109,26 +103,12 @@ pub fn sweep(
             for (0..n_points) |fi| {
                 const x_work = x_out[fi * nn ..][0..nn];
                 const s_mat = s[fi * n_ports * n_ports ..][0 .. n_ports * n_ports];
-                for (0..n_ports) |k| {
-                    const node_k: usize = ports[k].node;
-                    const br_k: usize = ports[k].branch;
-                    const z0_k = ports[k].z0;
-
-                    const v_k = if (node_k == root.GROUND) Complex.zero else Complex{
-                        .re = x_work[node_k],
-                        .im = x_work[n + node_k],
-                    };
-                    const i_k = Complex{ .re = -x_work[br_k], .im = -x_work[n + br_k] };
-                    const b_k = v_k.sub(i_k.scale(z0_k)).scale(1.0 / (2.0 * @sqrt(z0_k)));
-
-                    s_mat[k * n_ports + p] = b_k.scale(1.0 / a_p);
-                }
+                writeColumn(n, ports, x_work, a_p, s_mat, p);
             }
         }
         return; // GPU path done — skip CPU fallback.
     }
 
-    // -- CPU serial path (existing) ------------------------------------------
     ckt.linearize(x_op);
     const g = try allocator.alloc(f64, n * n);
     ckt.denseG(g);
@@ -167,22 +147,28 @@ pub fn sweep(
 
             const a_p = 1.0 / (2.0 * @sqrt(ports[p].z0));
 
-            for (0..n_ports) |k| {
-                const node_k: usize = ports[k].node;
-                const br_k: usize = ports[k].branch;
-                const z0_k = ports[k].z0;
-
-                const v_k = if (node_k == root.GROUND) Complex.zero else Complex{
-                    .re = x_work[node_k],
-                    .im = x_work[n + node_k],
-                };
-                // i into the DUT = −i_branch (branch stamps F_p = +i_br).
-                const i_k = Complex{ .re = -x_work[br_k], .im = -x_work[n + br_k] };
-                const b_k = v_k.sub(i_k.scale(z0_k)).scale(1.0 / (2.0 * @sqrt(z0_k)));
-
-                s_mat[k * n_ports + p] = b_k.scale(1.0 / a_p);
-            }
+            writeColumn(n, ports, x_work, a_p, s_mat, p);
         }
+    }
+}
+
+// ponytail: one wave conversion for CPU and GPU solve outputs.
+fn writeColumn(n: usize, ports: []const Port, x_work: []const f64, a_p: f64, s_mat: []Complex, p: usize) void {
+    const n_ports = ports.len;
+    for (0..n_ports) |k| {
+        const node_k: usize = ports[k].node;
+        const br_k: usize = ports[k].branch;
+        const z0_k = ports[k].z0;
+
+        const v_k = if (node_k == root.GROUND) Complex.zero else Complex{
+            .re = x_work[node_k],
+            .im = x_work[n + node_k],
+        };
+        // i into the DUT = −i_branch (branch stamps F_p = +i_br).
+        const i_k = Complex{ .re = -x_work[br_k], .im = -x_work[n + br_k] };
+        const b_k = v_k.sub(i_k.scale(z0_k)).scale(1.0 / (2.0 * @sqrt(z0_k)));
+
+        s_mat[k * n_ports + p] = b_k.scale(1.0 / a_p);
     }
 }
 

@@ -7,7 +7,7 @@ pub const Plot = struct {
     varnames: []const []const u8,
     is_complex: bool,
     npoints: usize,
-    /// Column-major: all vars for point 0, then all vars for point 1, ...
+    /// Point-major: all vars for point 0, then all vars for point 1, ...
     /// For real data: length = npoints * nvars
     /// For complex data: length = npoints * nvars * 2 (re,im pairs per variable)
     data: []const f64,
@@ -72,7 +72,7 @@ pub const Stream = struct {
             .is_complex = false,
             .npoints = 0,
             .data = &.{},
-        }, true);
+        }, true, true);
         return .{ .atomic = atomic, .writer = writer, .row = row, .count_offset = count_offset, .allocator = allocator };
     }
 
@@ -116,7 +116,7 @@ fn writeInner(io: Io, path: []const u8, plot: Plot, append: bool) !void {
     var fw = file.writer(io, &buf);
     fw.pos = start_pos; // append lands after the previous plot
     const w = &fw.interface;
-    _ = try writeHeader(&fw, plot, false);
+    _ = try writeHeader(&fw, plot, false, true);
 
     // Write f64 values as raw bytes in native endian (ngspice uses host endian).
     try w.flush();
@@ -124,7 +124,7 @@ fn writeInner(io: Io, path: []const u8, plot: Plot, append: bool) !void {
     try w.flush();
 }
 
-fn writeHeader(fw: *Io.File.Writer, plot: Plot, padded_count: bool) !u64 {
+pub inline fn writeHeader(fw: *Io.File.Writer, plot: Plot, comptime padded_count: bool, comptime binary: bool) !u64 {
     const w = &fw.interface;
     try w.print("Title: {s}\n", .{plot.title});
     try w.writeAll("Date: Thu Jan  1 00:00:00 1970\n");
@@ -135,7 +135,7 @@ fn writeHeader(fw: *Io.File.Writer, plot: Plot, padded_count: bool) !u64 {
         try w.writeAll("Flags: real\n");
     }
     try w.print("No. Variables: {d}\nNo. Points: ", .{plot.varnames.len});
-    const count_offset = fw.logicalPos();
+    const count_offset = if (padded_count) fw.logicalPos() else 0;
     if (padded_count) {
         try w.print("{d:>20}\n", .{plot.npoints});
     } else {
@@ -145,7 +145,7 @@ fn writeHeader(fw: *Io.File.Writer, plot: Plot, padded_count: bool) !u64 {
     for (plot.varnames, 0..) |name, i| {
         try w.print("\t{d}\t{s}\t{s}\n", .{ i, name, varType(name) });
     }
-    try w.writeAll("Binary:\n");
+    try w.writeAll(if (binary) "Binary:\n" else "Values:\n");
     return count_offset;
 }
 
@@ -257,23 +257,19 @@ test "write and read back real .op raw file" {
 
     const path = "zig-out/test_op.raw";
 
-    // Ensure the output directory exists.
     Io.Dir.cwd().createDirPath(io, "zig-out") catch {};
 
     try write(io, path, plot);
     defer Io.Dir.cwd().deleteFile(io, path) catch {};
 
-    // Read back and verify.
     const blob = try Io.Dir.cwd().readFileAlloc(io, path, allocator, .unlimited);
     defer allocator.free(blob);
 
-    // Find "Binary:\n" marker.
     const marker = "Binary:\n";
     const marker_pos = std.mem.indexOf(u8, blob, marker) orelse return error.MarkerNotFound;
     const header = blob[0..marker_pos];
     const bin_start = marker_pos + marker.len;
 
-    // Verify header fields.
     try std.testing.expect(std.mem.indexOf(u8, header, "Title: test op\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, header, "Plotname: Operating Point\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, header, "Flags: real\n") != null);
@@ -283,7 +279,6 @@ test "write and read back real .op raw file" {
     try std.testing.expect(std.mem.indexOf(u8, header, "\t1\tv(in)\tvoltage\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, header, "\t2\ti(v1)#branch\tcurrent\n") != null);
 
-    // Verify binary data.
     const nvars = 3;
     const npoints = 1;
     const expected_bytes = nvars * npoints * @sizeOf(f64);
@@ -300,10 +295,6 @@ test "write and read back real .tran raw file" {
     const allocator = std.testing.allocator;
 
     const varnames = [_][]const u8{ "time", "v(out)" };
-    // 3 points, 2 vars each, column-major:
-    //   point 0: time=0.0, v(out)=0.0
-    //   point 1: time=0.5, v(out)=1.0
-    //   point 2: time=1.0, v(out)=2.0
     const data = [_]f64{
         0.0, 0.0, // point 0
         0.5, 1.0, // point 1
@@ -344,15 +335,11 @@ test "write and read back real .tran raw file" {
     const expected_bytes = nvars * npoints * @sizeOf(f64);
     try std.testing.expectEqual(expected_bytes, blob.len - bin_start);
 
-    // Verify column-major layout: data[p * nvars + col]
     const read_data: [*]align(1) const f64 = @ptrCast(blob[bin_start..].ptr);
-    // point 0
     try std.testing.expectApproxEqAbs(0.0, read_data[0], 1e-15); // time
     try std.testing.expectApproxEqAbs(0.0, read_data[1], 1e-15); // v(out)
-    // point 1
     try std.testing.expectApproxEqAbs(0.5, read_data[2], 1e-15); // time
     try std.testing.expectApproxEqAbs(1.0, read_data[3], 1e-15); // v(out)
-    // point 2
     try std.testing.expectApproxEqAbs(1.0, read_data[4], 1e-15); // time
     try std.testing.expectApproxEqAbs(2.0, read_data[5], 1e-15); // v(out)
 }
@@ -362,15 +349,9 @@ test "write and read back complex .ac raw file" {
     const allocator = std.testing.allocator;
 
     const varnames = [_][]const u8{ "frequency", "v(out)" };
-    // 2 points, 2 vars, complex: each variable is (re, im) pair
-    // Column-major: for each point, iterate vars; for each var, write (re, im)
-    // point 0: freq=(1.0, 0.0), v(out)=(0.5, -0.5)
-    // point 1: freq=(10.0, 0.0), v(out)=(0.1, -0.9)
     const data = [_]f64{
-        // point 0
         1.0, 0.0, // frequency re, im
         0.5, -0.5, // v(out) re, im
-        // point 1
         10.0, 0.0, // frequency re, im
         0.1, -0.9, // v(out) re, im
     };
@@ -404,7 +385,6 @@ test "write and read back complex .ac raw file" {
     try std.testing.expect(std.mem.indexOf(u8, header, "\t0\tfrequency\tfrequency\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, header, "\t1\tv(out)\tvoltage\n") != null);
 
-    // Complex: 2 f64 per variable per point
     const nvars = 2;
     const npoints = 2;
     const expected_bytes = nvars * npoints * 2 * @sizeOf(f64);

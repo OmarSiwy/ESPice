@@ -1,14 +1,22 @@
-# Xyce parallel (MPI) build.
+# Xyce, the Sandia parallel SPICE simulator.
 #
-# Uses the nixpkgs xyce package with withMPI=true and trilinos-mpi.
-# This gives us Trilinos 16.1.0 with Zoltan, Isorropia, Amesos2/KLU2,
-# Belos, Kokkos, Stokhos — full parallel solver stack.
+# DEFAULT IS SERIAL, on purpose and measured. Plain `pkgs.xyce` is a pure
+# binary-cache hit (146 MiB fetched, ZERO derivations built); flipping
+# withMPI=true makes Xyce itself a local ~30 min compile, because the override
+# changes the Xyce derivation even though trilinos-mpi is itself cached.
 #
-# If nixpkgs xyce-parallel breaks on your machine, set `fromSource = true`
-# to build Xyce 7.10 from source against the same trilinos-mpi.
+# Serial is also the CORRECT build for this benchmark. The runner times one
+# process and counts its instructions; an MPI Xyce adds MPI_Init and
+# domain-decomposition setup to every one of those runs while the fixtures
+# (105x105 matrices, 280 small decks) have nothing to decompose. That would
+# make Xyce look slower for reasons that have nothing to do with its solver.
+#
+# Set `withMPI = true` for a genuinely large deck where partitioning pays, or
+# `fromSource = true` to build Xyce 7.10 against the same Trilinos by hand.
 {
   pkgs,
   fromSource ? false,
+  withMPI ? false,
 }:
 
 let
@@ -18,20 +26,21 @@ let
     inherit mpi;
   };
 
-  # --- nixpkgs path: override + add lowercase symlink ---
+  # --- nixpkgs path ---
+  # Untouched when serial: ANY override or overrideAttrs (even just adding a
+  # lowercase `xyce` symlink, even `enableDocs = false`) changes the derivation
+  # hash and turns a 146 MiB fetch into a local compile. The runner takes an
+  # explicit `--xyce PATH` and defaults to `.../bin/Xyce`, so the symlink that
+  # used to justify the rebuild is no longer needed by anything.
   xyceFromNixpkgs =
-    (pkgs.xyce.override {
-      withMPI = true;
-      trilinos = trilinosMpi;
-      inherit mpi;
-      enableDocs = false;
-      enableTests = false;
-    }).overrideAttrs
-      (old: {
-        postInstall = (old.postInstall or "") + ''
-          ln -sf $out/bin/Xyce $out/bin/xyce
-        '';
-      });
+    if withMPI then
+      pkgs.xyce.override {
+        withMPI = true;
+        trilinos = trilinosMpi;
+        inherit mpi;
+      }
+    else
+      pkgs.xyce;
 
   # --- from-source path: same Trilinos, manual Xyce build ---
   xyceFromSource = pkgs.stdenv.mkDerivation rec {

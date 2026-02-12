@@ -9,7 +9,6 @@ pub fn write(io: Io, path: []const u8, plot: Plot) !void {
     if (nvars < 2) return error.NotSParameterData;
     if (plot.data.len != plot.npoints * nvars * 2) return error.DataLengthMismatch;
 
-    // Verify we have S-parameter variables
     var has_sparam = false;
     for (plot.varnames) |name| {
         if (std.mem.startsWith(u8, name, "S(")) { has_sparam = true; break; }
@@ -26,7 +25,6 @@ pub fn write(io: Io, path: []const u8, plot: Plot) !void {
     try w.print("NAME {s}\n", .{plot.plotname});
     try w.print("VAR frequency MAG {d}\n", .{plot.npoints});
 
-    // Frequency list
     try w.writeAll("VAR_LIST_BEGIN\n");
     for (0..plot.npoints) |pt| {
         const freq = plot.data[pt * nvars * 2]; // real part of frequency
@@ -34,7 +32,6 @@ pub fn write(io: Io, path: []const u8, plot: Plot) !void {
     }
     try w.writeAll("VAR_LIST_END\n");
 
-    // One DATA section per S-parameter
     for (plot.varnames, 0..) |name, vi| {
         if (!std.mem.startsWith(u8, name, "S(")) continue;
         // Convert S(m,n) -> S[m,n] for CITIfile

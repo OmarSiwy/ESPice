@@ -19,7 +19,6 @@ const bbd_mod = @import("bbd.zig");
 const root = @import("types.zig");
 
 const Allocator = std.mem.Allocator;
-const NONE: u32 = std.math.maxInt(u32);
 
 /// Tuning knobs (KLU-style). Defaults reproduce the established behavior;
 /// accuracy <-> speed is traded here, not by editing the kernel.
@@ -57,7 +56,6 @@ pub fn SolverT(comptime T: type) type {
         bbd_eng: ?BbdEng = null,
         gpa: Allocator,
         factored: bool = false,
-        bbd: ?root.BbdInfo = null,
         params: Params = .{},
         q: []u32 = &.{}, // owned column ordering (passed to SparseLu)
         // iterative-refinement scratch ([r | saved b], 2n) + the values the
@@ -92,7 +90,6 @@ pub fn SolverT(comptime T: type) type {
                     .lu = null,
                     .tri = try TriDiag.init(gpa, n, col_ptr, row_idx),
                     .gpa = gpa,
-                    .bbd = bbd,
                 };
             }
             if (bbd) |info| no_bbd: {
@@ -111,7 +108,6 @@ pub fn SolverT(comptime T: type) type {
                     .tri = null,
                     .bbd_eng = eng,
                     .gpa = gpa,
-                    .bbd = bbd,
                 };
             }
             const q = try computeOrdering(gpa, n, col_ptr, row_idx, params);
@@ -123,7 +119,6 @@ pub fn SolverT(comptime T: type) type {
                 .lu = try SparseLu.init(gpa, n, col_ptr, row_idx, q),
                 .tri = null,
                 .gpa = gpa,
-                .bbd = bbd,
                 .q = q,
             };
         }
@@ -253,12 +248,12 @@ pub fn SolverT(comptime T: type) type {
         }
 
         pub fn solveT(self: *Self, rhs: []const T, x: []T) void {
+            // ponytail: every transpose engine consumes the same in-place RHS.
+            if (rhs.ptr != x.ptr) @memcpy(x[0..self.n], rhs[0..self.n]);
             if (self.tri) |*tri| {
-                if (rhs.ptr != x.ptr) @memcpy(x[0..self.n], rhs[0..self.n]);
                 tri.solveT(x[0..self.n]);
                 return;
             }
-            if (rhs.ptr != x.ptr) @memcpy(x[0..self.n], rhs[0..self.n]);
             if (self.bbd_eng) |*eng| {
                 eng.solveTInPlace(x[0..self.n]);
                 return;
@@ -334,103 +329,21 @@ fn negateSimd(comptime T: type, src: []const T, dst: []T) void {
 
 const testing = std.testing;
 
-fn cscFromDense(gpa: Allocator, n: usize, dense: []const f64, col_ptr: *[]u32, row_idx: *[]u32, vals: *[]f64) !void {
-    var nnz: usize = 0;
-    for (dense) |v| nnz += @intFromBool(v != 0);
-    col_ptr.* = try gpa.alloc(u32, n + 1);
-    row_idx.* = try gpa.alloc(u32, nnz);
-    vals.* = try gpa.alloc(f64, nnz);
-    var p: u32 = 0;
-    col_ptr.*[0] = 0;
-    for (0..n) |j| {
-        for (0..n) |i| {
-            const v = dense[i * n + j];
-            if (v != 0) {
-                row_idx.*[p] = @intCast(i);
-                vals.*[p] = v;
-                p += 1;
-            }
-        }
-        col_ptr.*[j + 1] = p;
-    }
-}
+const DenseCsc = sparse_lu.DenseCsc;
 
-fn DenseCsc(comptime n: usize) type {
-    return struct {
-        col_ptr: [n + 1]u32,
-        row_idx: [n * n]u32,
-        vals: [n * n]f64,
-        fn from(a: [n][n]f64) @This() {
-            var s: @This() = undefined;
-            var m: u32 = 0;
-            s.col_ptr[0] = 0;
-            for (0..n) |j| {
-                for (0..n) |i| {
-                    if (a[i][j] != 0) {
-                        s.row_idx[m] = @intCast(i);
-                        s.vals[m] = a[i][j];
-                        m += 1;
-                    }
-                }
-                s.col_ptr[j + 1] = m;
-            }
-            return s;
-        }
-        fn nnz(s: *const @This()) u32 {
-            return s.col_ptr[n];
-        }
-    };
-}
+const denseSolve = sparse_lu.denseSolve;
 
-fn denseSolve(comptime n: usize, a_in: [n][n]f64, b_in: [n]f64) [n]f64 {
-    var a = a_in;
-    var b = b_in;
-    for (0..n) |k| {
-        var piv = k;
-        for (k + 1..n) |i| {
-            if (@abs(a[i][k]) > @abs(a[piv][k])) piv = i;
-        }
-        std.mem.swap([n]f64, &a[k], &a[piv]);
-        std.mem.swap(f64, &b[k], &b[piv]);
-        for (k + 1..n) |i| {
-            const f = a[i][k] / a[k][k];
-            for (k..n) |j| a[i][j] -= f * a[k][j];
-            b[i] -= f * b[k];
-        }
-    }
-    var x: [n]f64 = undefined;
-    var k = n;
-    while (k > 0) {
-        k -= 1;
-        var s = b[k];
-        for (k + 1..n) |j| s -= a[k][j] * x[j];
-        x[k] = s / a[k][k];
-    }
-    return x;
-}
+const naturalOrder = sparse_lu.identity;
 
-fn naturalOrder(comptime n: usize) [n]u32 {
-    var q: [n]u32 = undefined;
-    for (0..n) |i| q[i] = @intCast(i);
-    return q;
-}
-
-fn checkSolve(comptime n: usize, a: [n][n]f64, b: [n]f64, lu: *sparse_lu.SparseLu(f64)) !void {
-    var x: [n]f64 = undefined;
-    lu.solve(&b, &x);
-    const xref = denseSolve(n, a, b);
-    for (x, xref) |xi, ri| try testing.expectApproxEqRel(ri, xi, 1e-11);
-}
+const checkSolve = sparse_lu.checkSolve;
 
 test "Solver: factor + solveNeg + refactor on fixed pattern" {
     const gpa = testing.allocator;
-    var col_ptr: []u32 = undefined;
-    var row_idx: []u32 = undefined;
-    var vals: []f64 = undefined;
-    try cscFromDense(gpa, 2, &.{ 2, 1, 1, 3 }, &col_ptr, &row_idx, &vals);
-    defer gpa.free(col_ptr);
-    defer gpa.free(row_idx);
-    defer gpa.free(vals);
+    // ponytail: reuse the fixed-size CSC fixture; allocate only for runtime-sized cases.
+    var csc = DenseCsc(2).from(.{ .{ 2, 1 }, .{ 1, 3 } });
+    const col_ptr = &csc.col_ptr;
+    const row_idx = csc.row_idx[0..csc.nnz()];
+    const vals = csc.vals[0..csc.nnz()];
 
     var s = try Solver.init(gpa, 2, col_ptr, row_idx, null);
     defer s.deinit();

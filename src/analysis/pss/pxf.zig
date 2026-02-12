@@ -6,39 +6,21 @@
 //!   A(f)^H · Y = e_(out, m=0)
 //!
 //! where A is the same conversion matrix used by PAC. The transfer from input
-//! node i at sideband m is conj(Y_(i,m)). One factorisation per frequency
-//! point serves both PAC and PXF (the transpose solve is free once factored).
+//! node i at sideband m is conj(Y_(i,m)).
 //!
 //! Uses: supply/LO feedthrough images, conversion gain from every port at
 //! once, spur tables.
 const std = @import("std");
 const root = @import("../types.zig");
-const converger = @import("solvers").converger;
+const pac = @import("pac.zig");
+const mapHarmonicToFftBin = pac.mapHarmonicToFftBin;
 const types = @import("solvers").types;
 const fft_mod = @import("solvers").fft;
 const dense_lu = @import("solvers").dense_lu;
 
 pub const Complex = types.Complex;
 
-const W = std.simd.suggestVectorLength(f64) orelse 8;
-
-pub const Options = struct {
-    tol: converger.Tolerances = .{},
-    /// LO (pump) frequency — the fundamental periodicity.
-    f_lo: f64,
-    /// Number of LO harmonics: sidebands span [-n_harmonics..+n_harmonics].
-    n_harmonics: u16 = 3,
-    /// Input frequency sweep range.
-    f_start: f64,
-    f_stop: f64,
-    points_per_decade: u16 = 10,
-    /// Time samples per LO period (must be power of 2, >= 2*(2*n_harmonics+1)).
-    n_time_samples: u16 = 64,
-    /// PSS shooting parameters.
-    pss_periods: u16 = 20,
-    pss_newton_tol: f64 = 1e-9,
-    pss_max_newton_iter: u16 = 50,
-};
+pub const Options = pac.Options;
 
 /// Run the adjoint LPTV analysis.
 ///
@@ -58,7 +40,6 @@ pub fn analyze(
     allocator: std.mem.Allocator,
 ) !void {
     const n: usize = ckt.n;
-    const n_samples: usize = options.n_time_samples;
     const n_harm: usize = options.n_harmonics;
     const n_sb: usize = 2 * n_harm + 1;
 
@@ -66,90 +47,9 @@ pub fn analyze(
     std.debug.assert(freqs.len == n_freqs);
     std.debug.assert(transfer.len == @as(usize, n_freqs) * n_sb * n);
 
-    const period = 1.0 / options.f_lo;
-    const dt = period / @as(f64, @floatFromInt(n_samples));
-
-    const nr_opts = converger.Options{
-        .max_iter = options.pss_max_newton_iter,
-        .abstol = options.pss_newton_tol,
-    };
-
-    // -- Step 1: PSS via brute-force settling --------------------------------
-    const x_cur = try allocator.alloc(f64, n);
-    defer allocator.free(x_cur);
-    {
-        var i: usize = 0;
-        while (i + W <= n) : (i += W) x_cur[i..][0..W].* = x_init[i..][0..W].*;
-        while (i < n) : (i += 1) x_cur[i] = x_init[i];
-    }
-
-    try ckt.computeBaseline();
-    const ws = try ckt.workspace();
-
-    const g_mats = try allocator.alloc(f64, n_samples * n * n);
-    defer allocator.free(g_mats);
-    const c_mats = try allocator.alloc(f64, n_samples * n * n);
-    defer allocator.free(c_mats);
-
-    var t: f64 = 0;
-    const settle_steps = (@as(usize, options.pss_periods) - 1) * n_samples;
-    for (0..settle_steps) |_| {
-        t += dt;
-        _ = converger.run(ckt, ws, x_cur, t, nr_opts, root.EvalHook{}) catch
-            converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 };
-    }
-
-    // -- Step 2: capture dense G(t_k), C(t_k) over the final period ---------
-    for (0..n_samples) |k| {
-        t += dt;
-        _ = converger.run(ckt, ws, x_cur, t, nr_opts, root.EvalHook{}) catch
-            converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 };
-        ckt.eval(x_cur, t);
-        ckt.denseG(g_mats[k * n * n ..][0 .. n * n]);
-        ckt.denseC(c_mats[k * n * n ..][0 .. n * n]);
-    }
-
-    // -- Step 3: FFT each matrix element across time samples -----------------
-    const g_hat = try allocator.alloc(Complex, n_samples * n * n);
-    defer allocator.free(g_hat);
-    const c_hat = try allocator.alloc(Complex, n_samples * n * n);
-    defer allocator.free(c_hat);
-
-    const fft_re = try allocator.alloc(f64, n_samples);
-    defer allocator.free(fft_re);
-    const fft_im = try allocator.alloc(f64, n_samples);
-    defer allocator.free(fft_im);
-
-    for (0..n) |row| {
-        for (0..n) |col| {
-            // G: extract time series, FFT.
-            for (0..n_samples) |k| {
-                fft_re[k] = g_mats[k * n * n + row * n + col];
-                fft_im[k] = 0;
-            }
-            fft_mod.fft(fft_re, fft_im);
-            const inv_n = 1.0 / @as(f64, @floatFromInt(n_samples));
-            for (0..n_samples) |m| {
-                g_hat[m * n * n + row * n + col] = .{
-                    .re = fft_re[m] * inv_n,
-                    .im = fft_im[m] * inv_n,
-                };
-            }
-
-            // C: same procedure.
-            for (0..n_samples) |k| {
-                fft_re[k] = c_mats[k * n * n + row * n + col];
-                fft_im[k] = 0;
-            }
-            fft_mod.fft(fft_re, fft_im);
-            for (0..n_samples) |m| {
-                c_hat[m * n * n + row * n + col] = .{
-                    .re = fft_re[m] * inv_n,
-                    .im = fft_im[m] * inv_n,
-                };
-            }
-        }
-    }
+    const linearization = try pac.linearize(ckt, x_init, options, allocator);
+    defer allocator.free(linearization.g_hat);
+    defer allocator.free(linearization.c_hat);
 
     // -- Step 4: Frequency sweep — build A, solve A^T y = e ------------------
     // The conversion matrix A (real-expanded 2nn × 2nn) is the same as PAC.
@@ -174,52 +74,14 @@ pub fn analyze(
     var sw = types.logSweep(options.f_start, options.f_stop, options.points_per_decade);
     var fi: usize = 0;
     while (sw.next()) |f_in| : (fi += 1) {
-        // ponytail: zero via SIMD, not @memset
         root.zeroSimd(a_work);
         root.zeroSimd(rhs_work);
 
-        // Build the conversion matrix A (same as PAC).
-        for (0..n_sb) |p| {
-            const m_p: i32 = @as(i32, @intCast(p)) - @as(i32, @intCast(n_harm));
-            const omega_p = 2.0 * std.math.pi * (f_in + @as(f64, @floatFromInt(m_p)) * options.f_lo);
+        pac.buildConversionMatrix(true, a_work, linearization.g_hat, linearization.c_hat, n, n_sb, nn, nn2, f_in, options);
 
-            for (0..n_sb) |q| {
-                const m_q: i32 = @as(i32, @intCast(q)) - @as(i32, @intCast(n_harm));
-                const m_diff = m_p - m_q;
-
-                const fft_idx = mapHarmonicToFftBin(m_diff, n_samples) orelse continue;
-
-                for (0..n) |row| {
-                    for (0..n) |col| {
-                        const g_coeff = g_hat[fft_idx * n * n + row * n + col];
-                        const c_coeff = c_hat[fft_idx * n * n + row * n + col];
-
-                        const z_re = g_coeff.re - omega_p * c_coeff.im;
-                        const z_im = g_coeff.im + omega_p * c_coeff.re;
-
-                        const gr = p * n + row;
-                        const gc = q * n + col;
-
-                        // Build A^T directly: swap row/col in the real expansion.
-                        // A^T[gc, gr] = A[gr, gc], etc.
-                        // Top-left: Re part
-                        a_work[gc * nn2 + gr] += z_re;
-                        // Top-right: Im part (A^T top-right = A bottom-left transposed)
-                        a_work[gc * nn2 + (nn + gr)] += z_im;
-                        // Bottom-left: -Im part (A^T bottom-left = A top-right transposed)
-                        a_work[(nn + gc) * nn2 + gr] += -z_im;
-                        // Bottom-right: Re part
-                        a_work[(nn + gc) * nn2 + (nn + gr)] += z_re;
-                    }
-                }
-            }
-        }
-
-        // RHS: unit selector at output node, sideband m=0.
         const exc_row = n_harm * n + probe_node;
         rhs_work[exc_row] = 1.0;
 
-        // Solve A^T Y = e (matrix already transposed in-place).
         try dense_lu.factorizeSolve(nn2, a_work, rhs_work, x_work);
 
         // Extract results: transfer from input node i at sideband m is conj(Y_(i,m)).
@@ -286,7 +148,6 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         }
     }
 
-    // Flatten to point-major complex data.
     const data = try a.alloc(f64, n_freqs * ncols * 2);
     for (0..n_freqs) |fi| {
         const row = data[fi * ncols * 2 ..][0 .. ncols * 2];
@@ -305,21 +166,6 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         .npoints = n_freqs,
         .data = data,
     };
-}
-
-// ============================================================================
-// Internal helpers
-// ============================================================================
-
-/// Map a signed harmonic index to an FFT bin. Returns null if out of range.
-fn mapHarmonicToFftBin(m: i32, n_samples: usize) ?usize {
-    const ns: i32 = @intCast(n_samples);
-    if (m >= 0 and m < ns) {
-        return @intCast(m);
-    } else if (m < 0 and m > -ns) {
-        return @intCast(ns + m);
-    }
-    return null;
 }
 
 // ============================================================================
@@ -358,7 +204,6 @@ test "PXF: adjoint resistive mixer — verify transpose duality with PAC" {
     const t_period = 1.0 / f_lo;
     const dt = t_period / @as(f64, @floatFromInt(n_samples));
 
-    // Build G(t_k) and FFT it.
     var g_time: [n_samples]f64 = undefined;
     for (0..n_samples) |k| {
         const tt = @as(f64, @floatFromInt(k)) * dt;
@@ -367,11 +212,7 @@ test "PXF: adjoint resistive mixer — verify transpose duality with PAC" {
 
     var fft_re: [n_samples]f64 = undefined;
     var fft_im: [n_samples]f64 = [_]f64{0} ** n_samples;
-    {
-        var i: usize = 0;
-        while (i + W <= n_samples) : (i += W) fft_re[i..][0..W].* = g_time[i..][0..W].*;
-        while (i < n_samples) : (i += 1) fft_re[i] = g_time[i];
-    }
+    root.copySimd(&fft_re, &g_time);
     fft_mod.fft(&fft_re, &fft_im);
     const inv_n = 1.0 / @as(f64, @floatFromInt(n_samples));
 

@@ -14,8 +14,6 @@ const FreqSolver = @import("solvers").freq_solve.FreqSolver;
 const k_boltzmann = 1.380649e-23;
 const q_electron = 1.602176634e-19;
 
-const W = std.simd.suggestVectorLength(f64) orelse 8;
-
 pub const NoiseSource = root.NoiseSource;
 
 pub const Options = struct {
@@ -156,7 +154,6 @@ test "sourcePsd thermal" {
         .conductance = 0.01, // 100 ohm resistor
     };
     const psd = sourcePsd(src, 1e6, 300.15);
-    // 4 * 1.380649e-23 * 300.15 * 0.01 = 1.6576e-25 (approx)
     const expected = 4.0 * k_boltzmann * 300.15 * 0.01;
     try std.testing.expectApproxEqRel(expected, psd, 1e-12);
     // White: same PSD at different frequency

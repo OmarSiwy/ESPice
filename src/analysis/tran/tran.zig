@@ -232,16 +232,7 @@ const TranHook = struct {
 };
 
 /// Fine-grained primitive: integrate into caller-owned x and waveform.
-pub fn simulate(
-    ckt: *root.Circuit,
-    x: []f64,
-    probes: []const u32,
-    waveform: *Waveform,
-    options: Options,
-    allocator: std.mem.Allocator,
-) !SimResult {
-    return simulateInto(ckt, x, probes, waveform, options, allocator);
-}
+pub const simulate = simulateInto;
 
 /// Same integrator, recording accepted samples through record(t, x, probes).
 pub fn simulateInto(
@@ -281,13 +272,12 @@ pub fn simulateInto(
 
     // Charge state: dynamic current i_prev and a charge-history ring
     // [cur, prev, prev2, prev3] for the companion residual + trap LTE.
+    // Slot 0 receives the Newton snapshot; the solve only reads slots 1..3.
     var a_vals: []f64 = &.{};
     var i_prev: []f64 = &.{};
-    var q_snap: []f64 = &.{};
     var q_hist: [4][]f64 = .{ &.{}, &.{}, &.{}, &.{} };
     defer if (has_charge) {
         allocator.free(i_prev);
-        allocator.free(q_snap);
         for (q_hist) |q| allocator.free(q);
     };
     // Per-device-STATE LTE. ngspice calls CKTterr once per device charge state
@@ -312,11 +302,9 @@ pub fn simulateInto(
     // controller or because of something else, and `n_qt` in the stats line
     // says whether the tape is live at all. Setup-path getenv, never hot.
     const n_qt: usize = if (has_charge and std.c.getenv("ZP_NO_QTAPE") == null) ckt.qTapeLen() else 0;
-    var qt_snap: []f64 = &.{};
     var qt_i_prev: []f64 = &.{};
     var qt_hist: [4][]f64 = .{ &.{}, &.{}, &.{}, &.{} };
     defer if (n_qt > 0) {
-        allocator.free(qt_snap);
         allocator.free(qt_i_prev);
         for (qt_hist) |q| allocator.free(q);
     };
@@ -337,11 +325,9 @@ pub fn simulateInto(
     if (has_charge) {
         a_vals = try ws.ensureAVals(ckt.nnz);
         i_prev = try allocator.alloc(f64, n);
-        q_snap = try allocator.alloc(f64, n);
         root.zeroSimd(i_prev);
         for (&q_hist) |*q| q.* = try allocator.alloc(f64, n);
         if (n_qt > 0) {
-            qt_snap = try allocator.alloc(f64, n_qt);
             qt_i_prev = try allocator.alloc(f64, n_qt);
             root.zeroSimd(qt_i_prev);
             for (&qt_hist) |*q| q.* = try allocator.alloc(f64, n_qt);
@@ -497,8 +483,8 @@ pub fn simulateInto(
             .q_prev2 = if (use_gear and has_charge) q_hist[2] else null,
             .half_inv_dt = if (use_gear) 1.0 / (2.0 * dt) else 0,
             .a_vals = a_vals,
-            .q_snap = if (has_charge) q_snap else null,
-            .qt_snap = if (n_qt > 0) qt_snap else null,
+            .q_snap = if (has_charge) q_hist[0] else null,
+            .qt_snap = if (n_qt > 0) qt_hist[0] else null,
             .has_charge = has_charge,
             .has_history = has_history,
         };
@@ -564,9 +550,6 @@ pub fn simulateInto(
         if (ckt.boundStep()) |bs| dt_next = @min(dt_next, bs);
 
         if (has_charge) {
-            simdCopy(q_hist[0], q_snap);
-            if (n_qt > 0) simdCopy(qt_hist[0], qt_snap);
-
             // Per-device-STATE index space when the tape is live, per-row when
             // it is not. Same kernel, same formula, same acceptance test — only
             // the length changes, which is why the n_qt == 0 path is a genuine
@@ -666,10 +649,8 @@ pub fn simulateInto(
             dt_prev = dt;
         }
 
-        // ponytail: pointer swap instead of memcpy on accept
-        const tmp = cur;
-        cur = trial;
-        trial = tmp;
+        // ponytail: stdlib swaps the slices; accepted states need no copy.
+        std.mem.swap([]f64, &cur, &trial);
         t += dt;
         steps += 1;
         _ = ckt.stateCtl(.commit);
@@ -742,12 +723,19 @@ pub fn simulateInto(
         // 8.98e-3 -> 1.49e-2 (PASS -> FAIL) while taking 3.4% MORE steps.
         // The two writes are one correction — applying either alone is worse
         // than applying neither (3.6e-2 on parallel_inverters_100).
-        // ponytail: a full Circuit.eval is the blunt way to re-read q. Upgrade
-        // path if the 10-17% matters: have the converger reassemble at the
-        // accepted x, or a `stateCtl(.commit)` that reports "pq moved" so the
-        // re-read is per-batch.
+        // Only the CHARGES are read here — g/c/rhs stay dead until the next
+        // step's first `TranHook.assemble` zeroes and restamps all three — so
+        // this is `evalQ`, the reactive half of the pass, not `eval`, run on a
+        // value-only `S` (`engine.RealFor`) whose arithmetic is `Dual`'s value
+        // half verbatim. Same `D.q`, same scatter, same bits, so `q_vec`/
+        // `q_tape` are what the full pass wrote; it just stops computing the two
+        // Jacobians and the resistive residual it was throwing away.
+        //
+        // It cannot be skipped, and not because of limiting: `newton()` returns
+        // the iterate AFTER the one it assembled, so the accepted `cur` is one
+        // Newton correction past the x the planes hold — always, limited or not.
         if (has_charge and ckt.has_state_q) {
-            ckt.eval(cur, t);
+            ckt.evalQ(cur, t);
             for (0..n) |j2| {
                 const q_new = ckt.q_vec[j2];
                 i_prev[j2] += alpha_val * (q_new - q_hist[1][j2]);
@@ -759,10 +747,10 @@ pub fn simulateInto(
             // away from the recorded point" error the row loop above exists to
             // close, only on the LTE side instead of the residual side.
             if (n_qt > 0) {
-                ckt.snapshotQTape(qt_snap);
+                ckt.snapshotQTape(qt_hist[0]);
                 for (0..n_qt) |j2| {
-                    qt_i_prev[j2] += alpha_val * (qt_snap[j2] - qt_hist[1][j2]);
-                    qt_hist[1][j2] = qt_snap[j2];
+                    qt_i_prev[j2] += alpha_val * (qt_hist[0][j2] - qt_hist[1][j2]);
+                    qt_hist[1][j2] = qt_hist[0][j2];
                 }
             }
         }
@@ -820,20 +808,12 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         for (names[1..]) |s| a.free(s); // names[0] is the "time" literal
         a.free(names);
     }
-    const ncols = names.len;
-    const npoints: usize = wf.len;
-    const data = try a.alloc(f64, npoints * ncols);
-    const times = wf.timeSlice();
-    for (0..npoints) |p| {
-        const row = data[p * ncols ..][0..ncols];
-        row[0] = times[p];
-        for (0..ctx.probes.len) |idx| row[idx + 1] = wf.probeValues(@intCast(idx))[p];
-    }
+    const data = try wf.toRows(a, names.len);
     return .{
         .plotname = "Transient Analysis",
         .varnames = names,
         .is_complex = false,
-        .npoints = npoints,
+        .npoints = wf.len,
         .data = data,
     };
 }
@@ -864,13 +844,39 @@ test "waveform: doubling fallback keeps probe-major data intact" {
     }
 }
 
+test "waveform: toRows tiling crosses tile boundaries exactly" {
+    // 70 points over a 32-point tile: two full tiles plus a 6-point remainder,
+    // with more probes than one tile of rows. Exact equality — the tiling only
+    // reorders the copy, never the values.
+    const allocator = testing.allocator;
+    const n_probes = 5;
+    var waveform = try Waveform.init(allocator, n_probes, 70);
+    defer waveform.deinit();
+
+    var xv: [n_probes]f64 = undefined;
+    const probes = [_]u32{ 0, 1, 2, 3, 4 };
+    for (0..70) |i| {
+        for (&xv, 0..) |*v, k| v.* = @as(f64, @floatFromInt(i)) * 10.0 + @as(f64, @floatFromInt(k));
+        try waveform.record(@as(f64, @floatFromInt(i)) * 1e-9, &xv, &probes);
+    }
+
+    const ncols = n_probes + 1;
+    const rows = try waveform.toRows(allocator, ncols);
+    defer allocator.free(rows);
+    try testing.expectEqual(@as(usize, 70 * ncols), rows.len);
+    for (0..70) |p| {
+        try testing.expectEqual(@as(f64, @floatFromInt(p)) * 1e-9, rows[p * ncols]);
+        for (0..n_probes) |k| {
+            const want = @as(f64, @floatFromInt(p)) * 10.0 + @as(f64, @floatFromInt(k));
+            try testing.expectEqual(want, rows[p * ncols + k + 1]);
+        }
+    }
+}
+
 test "alpha: BE 1/dt, trap 2/dt" {
     try std.testing.expectApproxEqRel(@as(f64, 1e9), integrator.alpha(.backward_euler, 1e-9), 1e-12);
     try std.testing.expectApproxEqRel(@as(f64, 2e9), integrator.alpha(.trapezoidal, 1e-9), 1e-12);
 }
-
-// ponytail: estimateLTE/adaptTimestep tests removed — LTE control now
-// uses integrator.stepBound which has its own acceptance path in simulate().
 
 // The whole point of per-device-state LTE, as a pure function. Two charge
 // contributions that cancel EXACTLY on their shared row: each swings 2 pC over

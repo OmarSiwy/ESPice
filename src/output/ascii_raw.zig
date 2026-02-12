@@ -15,17 +15,7 @@ pub fn write(io: Io, path: []const u8, plot: Plot) !void {
     var fw = file.writer(io, &buf);
     const w = &fw.interface;
 
-    try w.print("Title: {s}\n", .{plot.title});
-    try w.writeAll("Date: Thu Jan  1 00:00:00 1970\n");
-    try w.print("Plotname: {s}\n", .{plot.plotname});
-    try w.writeAll(if (plot.is_complex) "Flags: complex\n" else "Flags: real\n");
-    try w.print("No. Variables: {d}\n", .{nvars});
-    try w.print("No. Points: {d}\n", .{plot.npoints});
-    try w.writeAll("Variables:\n");
-    for (plot.varnames, 0..) |name, i| {
-        try w.print("\t{d}\t{s}\t{s}\n", .{ i, name, rawfile.varType(name) });
-    }
-    try w.writeAll("Values:\n");
+    _ = try rawfile.writeHeader(&fw, plot, false, false);
 
     for (0..plot.npoints) |pt| {
         for (0..nvars) |v| {

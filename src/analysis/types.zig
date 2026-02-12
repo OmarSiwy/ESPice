@@ -9,13 +9,7 @@ const std = @import("std");
 
 const circuit_mod = @import("Circuit.zig");
 
-// -- Crate imports (private: leaves import `solvers`/`devices` directly —
-// one honest path per module, not two spellings for the same crate) --
-const solvers = @import("solvers");
 const devices = @import("devices");
-pub const converger = solvers.converger;
-pub const types = solvers.types;
-pub const freq = types;
 
 // -- Re-exports from Circuit.zig --
 pub const Circuit = circuit_mod.Circuit;

@@ -72,7 +72,6 @@ pub fn Bbd(comptime T: type) type {
         blk_piv_off: []usize, // offset into piv slab, s entries
         blk_loc_off: []usize, // offset into loc slab, m entries
 
-        n: u32,
         b: u32, // border size (>= 1: ground)
         nb: u32, // number of blocks
         arena: []T, // [A_i|W_i|F_i]* ++ s_dense
@@ -245,7 +244,6 @@ pub fn Bbd(comptime T: type) type {
                 .blk_f_off = blk_f_off,
                 .blk_piv_off = blk_piv_off,
                 .blk_loc_off = blk_loc_off,
-                .n = n,
                 .b = b,
                 .nb = nb,
                 .arena = arena,
@@ -360,48 +358,7 @@ pub fn Bbd(comptime T: type) type {
         /// x := A^-1 x. Block back-solves touch disjoint x slices; the
         /// border gather/scatter is serial fixed-order.
         pub fn solveInPlace(self: *Self, x: []T) void {
-            const bsz: usize = self.b;
-            const sd = self.arena[self.s_off..][0 .. bsz * bsz];
-            const nblocks = self.nb;
-
-            // 1. y_i = A_i^-1 b_i
-            for (0..nblocks) |bi| {
-                const s: usize = self.blk_s[bi];
-                const xi = x[self.blk_start[bi]..][0..s];
-                const a = self.arena[self.blk_a_off[bi]..][0 .. s * s];
-                Dense.solveFactored(s, a, self.piv[self.blk_piv_off[bi]..][0..s], xi, xi);
-            }
-
-            // 2. bg = b_g - Σ F_i y_i
-            for (0..bsz) |j| self.bg[j] = x[self.border_node[j]];
-            for (0..nblocks) |bi| {
-                const s: usize = self.blk_s[bi];
-                const m: usize = self.blk_m[bi];
-                const f = self.arena[self.blk_f_off[bi]..][0 .. m * s];
-                const lo = self.loc[self.blk_loc_off[bi]..][0..m];
-                const xi = x[self.blk_start[bi]..][0..s];
-                for (lo, 0..) |g, j| {
-                    self.bg[g] -= dotSimd(f[j * s ..][0..s], xi);
-                }
-            }
-
-            // 3. xg = S^-1 bg, scatter
-            Dense.solveFactored(bsz, sd, self.s_piv, self.bg, self.bg);
-            for (0..bsz) |j| x[self.border_node[j]] = self.bg[j];
-
-            // 4. x_i = y_i - W_i xg_loc
-            for (0..nblocks) |bi| {
-                const s: usize = self.blk_s[bi];
-                const m: usize = self.blk_m[bi];
-                const w = self.arena[self.blk_w_off[bi]..][0 .. m * s];
-                const lo = self.loc[self.blk_loc_off[bi]..][0..m];
-                const xi = x[self.blk_start[bi]..][0..s];
-                for (lo, 0..) |g, j| {
-                    const xgj = self.bg[g];
-                    if (xgj == 0) continue;
-                    axpySimdNeg(xi, w[j * s ..][0..s], xgj);
-                }
-            }
+            self.solve(false, x);
         }
 
         /// x := A^-T x, via the stored factors. The transposed system's
@@ -410,41 +367,61 @@ pub fn Bbd(comptime T: type) type {
         /// versa. Border reduction happens BEFORE block solves (uses raw
         /// b_i, not A^-T b_i — W already contains A^-1 E).
         pub fn solveTInPlace(self: *Self, x: []T) void {
+            self.solve(true, x);
+        }
+
+        inline fn solve(self: *Self, comptime transpose: bool, x: []T) void {
             const bsz: usize = self.b;
             const sd = self.arena[self.s_off..][0 .. bsz * bsz];
             const nblocks = self.nb;
 
-            // 1. bg = b_g - Σ W_i^T b_i  (= b_g - Σ E_i^T A_i^-T b_i)
+            // Forward solve uses y_i = A_i^-1 b_i; transpose uses raw b_i.
+            if (!transpose) {
+                for (0..nblocks) |bi| {
+                    const s: usize = self.blk_s[bi];
+                    const xi = x[self.blk_start[bi]..][0..s];
+                    const a = self.arena[self.blk_a_off[bi]..][0 .. s * s];
+                    Dense.solveFactored(s, a, self.piv[self.blk_piv_off[bi]..][0..s], xi, xi);
+                }
+            }
+
+            // bg = b_g - Σ F_i y_i, or b_g - Σ W_i^T b_i for transpose.
+            const reduce_off = if (transpose) self.blk_w_off else self.blk_f_off;
             for (0..bsz) |j| self.bg[j] = x[self.border_node[j]];
             for (0..nblocks) |bi| {
                 const s: usize = self.blk_s[bi];
                 const m: usize = self.blk_m[bi];
-                const w = self.arena[self.blk_w_off[bi]..][0 .. m * s];
+                const coupling = self.arena[reduce_off[bi]..][0 .. m * s];
                 const lo = self.loc[self.blk_loc_off[bi]..][0..m];
                 const xi = x[self.blk_start[bi]..][0..s];
-                for (lo, 0..) |g, c| {
-                    self.bg[g] -= dotSimd(w[c * s ..][0..s], xi);
+                for (lo, 0..) |g, j| {
+                    self.bg[g] -= dotSimd(coupling[j * s ..][0..s], xi);
                 }
             }
 
-            // 2. xg = S^-T bg, scatter
-            Dense.solveFactoredT(bsz, sd, self.s_piv, self.bg, self.bg);
+            if (transpose)
+                Dense.solveFactoredT(bsz, sd, self.s_piv, self.bg, self.bg)
+            else
+                Dense.solveFactored(bsz, sd, self.s_piv, self.bg, self.bg);
             for (0..bsz) |j| x[self.border_node[j]] = self.bg[j];
 
-            // 3. x_i = A_i^-T (b_i - F_i^T xg_loc)
+            // x_i = y_i - W_i xg_loc, or A_i^-T (b_i - F_i^T xg_loc).
+            const subtract_off = if (transpose) self.blk_f_off else self.blk_w_off;
             for (0..nblocks) |bi| {
                 const s: usize = self.blk_s[bi];
                 const m: usize = self.blk_m[bi];
-                const f = self.arena[self.blk_f_off[bi]..][0 .. m * s];
+                const coupling = self.arena[subtract_off[bi]..][0 .. m * s];
                 const lo = self.loc[self.blk_loc_off[bi]..][0..m];
                 const xi = x[self.blk_start[bi]..][0..s];
                 for (lo, 0..) |g, j| {
                     const xgj = self.bg[g];
                     if (xgj == 0) continue;
-                    axpySimdNeg(xi, f[j * s ..][0..s], xgj);
+                    axpySimdNeg(xi, coupling[j * s ..][0..s], xgj);
                 }
-                const a = self.arena[self.blk_a_off[bi]..][0 .. s * s];
-                Dense.solveFactoredT(s, a, self.piv[self.blk_piv_off[bi]..][0..s], xi, xi);
+                if (transpose) {
+                    const a = self.arena[self.blk_a_off[bi]..][0 .. s * s];
+                    Dense.solveFactoredT(s, a, self.piv[self.blk_piv_off[bi]..][0..s], xi, xi);
+                }
             }
         }
 
@@ -493,9 +470,8 @@ pub fn Bbd(comptime T: type) type {
 /// Insert `v` into `s` if not already present (set semantics). Block
 /// border footprints are tiny (handful of entries), so linear scan is fine.
 fn addToSet(gpa: Allocator, s: *std.ArrayList(u32), v: u32) error{OutOfMemory}!void {
-    for (s.items) |e| {
-        if (e == v) return;
-    }
+    // ponytail: stdlib lookup suffices for tiny footprints; use a bitset if they grow.
+    if (std.mem.findScalar(u32, s.items, v) != null) return;
     try s.append(gpa, v);
 }
 
@@ -504,10 +480,7 @@ fn addToSet(gpa: Allocator, s: *std.ArrayList(u32), v: u32) error{OutOfMemory}!v
 fn localIdx(sorted: []const u32, v: u32) u32 {
     // ponytail: linear scan; m is tiny (handful of border nodes per block).
     // Upgrade path: binary search if max_border grows past ~64.
-    for (sorted, 0..) |e, i| {
-        if (e == v) return @intCast(i);
-    }
-    unreachable;
+    return @intCast(std.mem.findScalar(u32, sorted, v) orelse unreachable);
 }
 
 // ============================================================================

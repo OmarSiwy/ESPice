@@ -12,40 +12,38 @@ const GROUND = analysis.GROUND;
 const td = @import("testdev.zig");
 
 // Varname entries that are string literals (not allocated) in analysis code.
-const literal_names = [_][]const u8{
-    "time",     "frequency",         "v(v-sweep)",          "run",
-    "temp",     "harmonic",          "magnitude",        "phase_deg",
-    "hd2",      "v1_mag",            "v2_mag",           "index",
-    "pole",     "transfer_function", "input_resistance", "output_resistance",
-    "onoise_density", "loop_gain",   "pnoise_density",
-};
-
-fn isLiteral(n: []const u8) bool {
-    for (literal_names) |l| if (std.mem.eql(u8, n, l)) return true;
-    return false;
-}
+// ponytail: fixed borrowed names; use ownership metadata if these names become dynamic.
+const literal_names = std.StaticStringMap(void).initComptime(.{
+    .{ "time", {} },
+    .{ "frequency", {} },
+    .{ "v(v-sweep)", {} },
+    .{ "run", {} },
+    .{ "temp", {} },
+    .{ "harmonic", {} },
+    .{ "magnitude", {} },
+    .{ "phase_deg", {} },
+    .{ "hd2", {} },
+    .{ "v1_mag", {} },
+    .{ "v2_mag", {} },
+    .{ "index", {} },
+    .{ "pole", {} },
+    .{ "transfer_function", {} },
+    .{ "input_resistance", {} },
+    .{ "output_resistance", {} },
+    .{ "onoise_density", {} },
+    .{ "loop_gain", {} },
+    .{ "pnoise_density", {} },
+});
 
 fn freeResult(a: std.mem.Allocator, res: analysis.Result) void {
-    for (res.varnames) |n| if (!isLiteral(n)) a.free(n);
+    for (res.varnames) |n| if (!literal_names.has(n)) a.free(n);
     a.free(res.varnames);
     a.free(res.data);
 }
 
-const Divider = struct { ckt: analysis.Circuit, n1: u32, n2: u32, vbranch: u32 };
+const fixtures = @import("analyses.zig");
 
-fn buildDivider(gpa: std.mem.Allocator) !Divider {
-    var b = Builder.init(gpa);
-    const n1 = b.addNode();
-    const n2 = b.addNode();
-    const vbranch = b.n;
-    try b.addDevice(td.V, .{ .dc = 5 }, .{}, .{ n1, GROUND });
-    try b.addDevice(td.R, .{ .r = 1000 }, .{}, .{ n1, n2 });
-    try b.addDevice(td.R, .{ .r = 2000 }, .{}, .{ n2, GROUND });
-    const ckt = try b.compile();
-    return .{ .ckt = ckt, .n1 = n1, .n2 = n2, .vbranch = vbranch };
-}
-
-fn solveOp(ckt: *analysis.Circuit, a: std.mem.Allocator) ![]f64 {
+pub inline fn solveOp(ckt: *analysis.Circuit, a: std.mem.Allocator) ![]f64 {
     const x = try a.alloc(f64, ckt.n);
     const r = try analysis.op.solve(ckt, x, .{});
     try testing.expect(r.converged);
@@ -55,7 +53,7 @@ fn solveOp(ckt: *analysis.Circuit, a: std.mem.Allocator) ![]f64 {
 /// Run one job on the divider with testing.allocator, free the result.
 fn checkDivider(job: analysis.Job, need_op: bool) !void {
     const a = testing.allocator;
-    var d = try buildDivider(a);
+    var d = try fixtures.buildSeries(a, td.R, .{ .dc = 5 }, 1000, .{ .r = 2000 });
     defer d.ckt.deinit();
     const x: ?[]f64 = if (need_op) try solveOp(&d.ckt, a) else null;
     defer if (x) |xs| a.free(xs);
@@ -94,7 +92,7 @@ test "leak: temp" {
     try checkDivider(.{ .temp = .{ .t_start = 0, .t_stop = 50, .t_step = 25 } }, false);
 }
 test "leak: tf" {
-    var d = try buildDivider(testing.allocator);
+    var d = try fixtures.buildSeries(testing.allocator, td.R, .{ .dc = 5 }, 1000, .{ .r = 2000 });
     defer d.ckt.deinit();
     const a = testing.allocator;
     const x = try solveOp(&d.ckt, a);
@@ -137,19 +135,12 @@ test "leak: tran" {
 
 test "leak: pz" {
     const a = testing.allocator;
-    var b = Builder.init(a);
-    const n1 = b.addNode();
-    const n2 = b.addNode();
-    const vbranch = b.n;
-    try b.addDevice(td.V, .{ .dc = 5.0 }, .{}, .{ n1, GROUND });
-    try b.addDevice(td.R, .{ .r = 1000 }, .{}, .{ n1, n2 });
-    try b.addDevice(td.C, .{ .c = 1e-6 }, .{}, .{ n2, GROUND });
-    var ckt = try b.compile();
-    defer ckt.deinit();
-    const x = try solveOp(&ckt, a);
+    var setup = try fixtures.buildSeries(a, td.C, .{ .dc = 5.0 }, 1000, .{ .c = 1e-6 });
+    defer setup.ckt.deinit();
+    const x = try solveOp(&setup.ckt, a);
     defer a.free(x);
-    const probes = [_]u32{n2};
-    const ctx: analysis.RunCtx = .{ .circuit = &ckt, .x_op = x, .probes = &probes, .source_node = n1, .source_branch = vbranch, .allocator = a };
+    const probes = [_]u32{setup.n2};
+    const ctx: analysis.RunCtx = .{ .circuit = &setup.ckt, .x_op = x, .probes = &probes, .source_node = setup.n1, .source_branch = setup.vbranch, .allocator = a };
     const res = try analysis.run(&ctx, .{ .pz = .{} });
     freeResult(a, res);
 }
@@ -174,20 +165,13 @@ test "leak: sp" {
 
 test "leak: four" {
     const a = testing.allocator;
-    var b = Builder.init(a);
-    const n1 = b.addNode();
-    const n2 = b.addNode();
-    const vbranch = b.n;
-    try b.addDevice(td.V, .{ .dc = 0, .amp = 1.0, .freq = 1e3 }, .{}, .{ n1, GROUND });
-    try b.addDevice(td.R, .{ .r = 1000 }, .{}, .{ n1, n2 });
-    try b.addDevice(td.R, .{ .r = 2000 }, .{}, .{ n2, GROUND });
-    var ckt = try b.compile();
-    defer ckt.deinit();
-    const x = try solveOp(&ckt, a);
+    var setup = try fixtures.buildSeries(a, td.R, .{ .dc = 0, .amp = 1.0, .freq = 1e3 }, 1000, .{ .r = 2000 });
+    defer setup.ckt.deinit();
+    const x = try solveOp(&setup.ckt, a);
     defer a.free(x);
-    const probes = [_]u32{n2};
-    const ctx: analysis.RunCtx = .{ .circuit = &ckt, .x_op = x, .probes = &probes, .source_node = n1, .source_branch = vbranch, .allocator = a };
-    const res = try analysis.run(&ctx, .{ .four = .{ .f_fundamental = 1e3, .output_node = n2, .tran_opts = .{ .t_stop = 3e-3, .dt_init = 1e-7, .dt_max = 1e-5 } } });
+    const probes = [_]u32{setup.n2};
+    const ctx: analysis.RunCtx = .{ .circuit = &setup.ckt, .x_op = x, .probes = &probes, .source_node = setup.n1, .source_branch = setup.vbranch, .allocator = a };
+    const res = try analysis.run(&ctx, .{ .four = .{ .f_fundamental = 1e3, .output_node = setup.n2, .tran_opts = .{ .t_stop = 3e-3, .dt_init = 1e-7, .dt_max = 1e-5 } } });
     a.free(res.plotname); // four's plotname is allocPrint'd (embeds THD)
     freeResult(a, res);
 }
@@ -209,45 +193,31 @@ test "leak: hb" {
 
 test "leak: pss" {
     const a = testing.allocator;
-    var b = Builder.init(a);
-    const n1 = b.addNode();
-    const n2 = b.addNode();
-    const vbranch = b.n;
-    try b.addDevice(td.V, .{ .dc = 5.0 }, .{}, .{ n1, GROUND });
-    try b.addDevice(td.R, .{ .r = 1000 }, .{}, .{ n1, n2 });
-    try b.addDevice(td.C, .{ .c = 1e-7 }, .{}, .{ n2, GROUND });
-    var ckt = try b.compile();
-    defer ckt.deinit();
-    const x = try solveOp(&ckt, a);
+    var setup = try fixtures.buildSeries(a, td.C, .{ .dc = 5.0 }, 1000, .{ .c = 1e-7 });
+    defer setup.ckt.deinit();
+    const x = try solveOp(&setup.ckt, a);
     defer a.free(x);
-    const probes = [_]u32{ n1, n2 };
-    const ctx: analysis.RunCtx = .{ .circuit = &ckt, .x_op = x, .probes = &probes, .source_node = n1, .source_branch = vbranch, .allocator = a };
+    const probes = [_]u32{ setup.n1, setup.n2 };
+    const ctx: analysis.RunCtx = .{ .circuit = &setup.ckt, .x_op = x, .probes = &probes, .source_node = setup.n1, .source_branch = setup.vbranch, .allocator = a };
     const res = try analysis.run(&ctx, .{ .pss = .{ .period = 1e-3, .max_shooting_iter = 20, .shooting_tol = 1e-4, .fd_epsilon = 1e-6, .newton_tol = 1e-9, .max_newton_iter = 50, .n_samples = 200 } });
     freeResult(a, res);
 }
 
 test "leak: envelope" {
     const a = testing.allocator;
-    var b = Builder.init(a);
-    const n1 = b.addNode();
-    const n2 = b.addNode();
-    const vbranch = b.n;
-    try b.addDevice(td.V, .{ .dc = 0.0, .amp = 2.0, .freq = 1e6 }, .{}, .{ n1, GROUND });
-    try b.addDevice(td.R, .{ .r = 1000 }, .{}, .{ n1, n2 });
-    try b.addDevice(td.R, .{ .r = 1000 }, .{}, .{ n2, GROUND });
-    var ckt = try b.compile();
-    defer ckt.deinit();
-    const x = try solveOp(&ckt, a);
+    var setup = try fixtures.buildSeries(a, td.R, .{ .dc = 0.0, .amp = 2.0, .freq = 1e6 }, 1000, .{ .r = 1000 });
+    defer setup.ckt.deinit();
+    const x = try solveOp(&setup.ckt, a);
     defer a.free(x);
-    const probes = [_]u32{n2};
-    const ctx: analysis.RunCtx = .{ .circuit = &ckt, .x_op = x, .probes = &probes, .source_node = n1, .source_branch = vbranch, .allocator = a };
+    const probes = [_]u32{setup.n2};
+    const ctx: analysis.RunCtx = .{ .circuit = &setup.ckt, .x_op = x, .probes = &probes, .source_node = setup.n1, .source_branch = setup.vbranch, .allocator = a };
     const res = try analysis.run(&ctx, .{ .envelope = .{ .t_carrier = 1e-6, .t_stop = 8e-6, .carrier_steps_per_period = 64, .periods_per_outer_step = 1, .max_periods_per_step = 4 } });
     freeResult(a, res);
 }
 
 /// Injection target: run analyses through a failing allocator. Every alloc
 /// site fails once; any error path that leaks (or double-frees) fails the test.
-fn runInjected(a: std.mem.Allocator, d: *Divider, x: []f64) !void {
+fn runInjected(a: std.mem.Allocator, d: *fixtures.Series, x: []f64) !void {
     const probes = [_]u32{d.n2};
     const ctx: analysis.RunCtx = .{
         .circuit = &d.ckt,
@@ -278,7 +248,7 @@ fn runInjected(a: std.mem.Allocator, d: *Divider, x: []f64) !void {
 
 test "leak: alloc-failure injection over analysis error paths" {
     const a = testing.allocator;
-    var d = try buildDivider(a);
+    var d = try fixtures.buildSeries(a, td.R, .{ .dc = 5 }, 1000, .{ .r = 2000 });
     defer d.ckt.deinit();
     const x = try solveOp(&d.ckt, a);
     defer a.free(x);
@@ -287,20 +257,13 @@ test "leak: alloc-failure injection over analysis error paths" {
 
 test "leak: tran_noise" {
     const a = testing.allocator;
-    var b = Builder.init(a);
-    const n1 = b.addNode();
-    const n2 = b.addNode();
-    const vbranch = b.n;
-    try b.addDevice(td.V, .{ .dc = 0.0 }, .{}, .{ n1, GROUND });
-    try b.addDevice(td.R, .{ .r = 1000 }, .{}, .{ n1, n2 });
-    try b.addDevice(td.R, .{ .r = 1000 }, .{}, .{ n2, GROUND });
-    var ckt = try b.compile();
-    defer ckt.deinit();
-    const x = try solveOp(&ckt, a);
+    var setup = try fixtures.buildSeries(a, td.R, .{ .dc = 0.0 }, 1000, .{ .r = 1000 });
+    defer setup.ckt.deinit();
+    const x = try solveOp(&setup.ckt, a);
     defer a.free(x);
     const dt: f64 = 0x1p-30;
-    const probes = [_]u32{n2};
-    const ctx: analysis.RunCtx = .{ .circuit = &ckt, .x_op = x, .probes = &probes, .source_node = n1, .source_branch = vbranch, .allocator = a };
+    const probes = [_]u32{setup.n2};
+    const ctx: analysis.RunCtx = .{ .circuit = &setup.ckt, .x_op = x, .probes = &probes, .source_node = setup.n1, .source_branch = setup.vbranch, .allocator = a };
     const res = try analysis.run(&ctx, .{ .tran_noise = .{ .t_stop = dt * 100, .dt_init = dt, .dt_min = dt, .dt_max = dt, .max_steps = 110, .temp_k = 300.15, .seed = 12345 } });
     freeResult(a, res);
 }

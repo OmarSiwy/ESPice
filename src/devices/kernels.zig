@@ -49,6 +49,10 @@ comptime {
                 // ... and a third for the accepted-step latch (Circuit.stateCtl).
                 if (engine.hasCtlKernel(D))
                     gompute.exportRaw(engine.ctlKernelName(D), &engine.CtlKernel(D, block_size).run);
+                // The scatter's second half: eval writes one staging cell per
+                // contribution, this sums each plane cell's run in tape order.
+                // Same body in every root, per-root name (see reduceKernelName).
+                gompute.exportRaw(engine.reduceKernelName(D), &engine.ReduceKernel(D, block_size).run);
             } else {
                 // Per-device name: gompute requires kernel names to be unique
                 // across roots, so one shared "arp_nop" would collide.

@@ -24,7 +24,6 @@ pub fn write(io: Io, path: []const u8, plot: Plot) !void {
     try w.writeAll("\"real\" FLOAT DOUBLE\n");
     if (plot.is_complex) try w.writeAll("\"complex\" COMPLEX DOUBLE\n");
 
-    // Determine sweep variable (first var if multi-point)
     const has_sweep = plot.npoints > 1 and nvars > 0;
     const trace_start: usize = if (has_sweep) 1 else 0;
 
@@ -43,11 +42,8 @@ pub fn write(io: Io, path: []const u8, plot: Plot) !void {
         try w.writeAll("VALUE\n");
         if (has_sweep) {
             // Sweep variable always written as real
-            if (plot.is_complex) {
-                try w.print("\"{s}\" {e}\n", .{ plot.varnames[0], plot.data[pt * nvars * 2] });
-            } else {
-                try w.print("\"{s}\" {e}\n", .{ plot.varnames[0], plot.data[pt * nvars] });
-            }
+            // ponytail: the existing stride selects the real part in either layout.
+            try w.print("\"{s}\" {e}\n", .{ plot.varnames[0], plot.data[pt * nvars * per] });
         }
         for (trace_start..nvars) |v| {
             if (plot.is_complex) {
@@ -80,7 +76,6 @@ test "PSF real single-point (OP)" {
     try std.testing.expect(std.mem.indexOf(u8, blob, "TRACE\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, blob, "\"v(out)\" \"real\"\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, blob, "END\n") != null);
-    // No SWEEP for single-point
     try std.testing.expect(std.mem.indexOf(u8, blob, "SWEEP\n") == null);
 }
 
