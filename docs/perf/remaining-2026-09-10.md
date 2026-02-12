@@ -222,11 +222,25 @@ the GPU". One build flag: `-Djac-f32=mos1`.
   ngspice's 220 MB after the 16×→2× capacity fix. Full streaming (reserve
   header, patch npoints at the end) closes the last ~3×.
   `src/analysis/tran/{tran,types}.zig`, `src/output/rawfile.zig`.
-- **AC workspace**: `freq_solve.zig:98` sets `total_nnz = 4 * src_nnz`
-  unconditionally. On `sweep/opamp_wl_5000` that is n 15,009→30,018, nnz
-  115,017→460,068, L+U 750k, where the C matrix is essentially diagonal
-  (5,000 caps, no TOX/CGSO/CJ declared) — ~1.9× waste before fill. Build each
-  of the four blocks from its own structural pattern, or go complex-valued.
+- ~~**AC workspace**: `freq_solve.zig:98` sets `total_nnz = 4 * src_nnz`
+  unconditionally.~~ **Tried, measured, reverted — 2026-09-10.** The premise
+  above was wrong: "the C matrix is essentially diagonal (5,000 caps, no
+  TOX/CGSO/CJ declared)" confuses *numerically* zero with *structurally* zero.
+  mos1's `q_pattern` declares 16 charge entries per instance on rows
+  `{g,b,di,si}` whatever the card says, and after node mapping **115,004 of
+  `opamp_wl_5000`'s 115,017 circuit entries are charge-touched**. Building each
+  half from its own pattern took nnz 460,068 → **460,042** — twenty-six entries
+  — for ~330 lines, and peak RSS did not move (268.1 → 269.5 MB). Branch
+  `ac-blocknnz`, not merged.
+  The real split of that deck's 261.7 MB, by deck-variant differencing: `.op`
+  alone **148.5 MB**, AC solver workspace 57.3, results 62.8. And the workspace
+  is not the index arrays — it is `LaneLu`'s L+U planes at 27.0 MB
+  (750k entries × `@Vector(4,f64)`) plus the `×W` lane vals plane at 14.7. Fill
+  is healthy at 1.5–1.6×, so the ordering was never the problem. Aim at the
+  per-instance storage (§10 first bullet) instead; that is where the 148.5 is.
+  A numerically-aware pattern that drops entries whose parameters make them
+  zero would collapse them, but a sweep point that changes a parameter makes
+  them live again — do not do that without a re-pattern hook.
 
 ### 11. GPU — no fixture is a win today
 
