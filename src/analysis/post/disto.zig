@@ -189,15 +189,18 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     }
 
     const n_points: usize = types.logSweepCount(o.f_start, o.f_stop, o.points_per_decade);
+    // `defer`-freed == scratch; `a` is a results arena. See
+    // RunCtx.scratch_allocator.
+    const scratch = ctx.scratch_allocator orelse a;
     // One flat block, four columns
-    const cols = try a.alloc(f64, n_points * 4);
-    defer a.free(cols);
+    const cols = try scratch.alloc(f64, n_points * 4);
+    defer scratch.free(cols);
     const freqs = cols[0..n_points];
     const hd2_buf = cols[n_points .. 2 * n_points];
     const v1_buf = cols[2 * n_points .. 3 * n_points];
     const v2_buf = cols[3 * n_points ..];
 
-    try sweep(ctx.circuit, x_op, freqs, hd2_buf, v1_buf, v2_buf, o, a);
+    try sweep(ctx.circuit, x_op, freqs, hd2_buf, v1_buf, v2_buf, o, scratch);
 
     const names = try a.dupe([]const u8, &.{ "frequency", "hd2", "v1_mag", "v2_mag" });
     errdefer a.free(names); // entries are literals

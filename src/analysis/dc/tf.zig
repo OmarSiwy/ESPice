@@ -85,7 +85,9 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         break :blk ctx.probes[ctx.probes.len - 1];
     };
 
-    const res = try solve(ctx.circuit, x_op, input_branch, output_node, a);
+    // `solve` returns three scalars and frees its own workspace; `a` is a
+    // results arena that cannot reclaim it. See RunCtx.scratch_allocator.
+    const res = try solve(ctx.circuit, x_op, input_branch, output_node, ctx.scratch_allocator orelse a);
 
     const names = try a.dupe([]const u8, &.{ "transfer_function", "input_resistance", "output_resistance" });
     errdefer a.free(names); // entries are literals

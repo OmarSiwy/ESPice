@@ -405,9 +405,12 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
     const nf: usize = 2 * @as(usize, opts.n_harmonics) + 1;
 
-    const spectra = try a.alloc(f64, ctx.probes.len * nf);
-    defer a.free(spectra);
-    const st = try solve(ctx.circuit, ctx.source_node, 1.0, ctx.probes, spectra, opts, a);
+    // `defer`-freed == scratch; `a` is a results arena. See
+    // RunCtx.scratch_allocator.
+    const scratch = ctx.scratch_allocator orelse a;
+    const spectra = try scratch.alloc(f64, ctx.probes.len * nf);
+    defer scratch.free(spectra);
+    const st = try solve(ctx.circuit, ctx.source_node, 1.0, ctx.probes, spectra, opts, scratch);
     if (!st.converged) return error.HbDidNotConverge;
 
     const names = try root.probeNames(ctx, "frequency");

@@ -72,6 +72,12 @@ pub fn build(b: *std.Build) void {
     // NVPTX/AMDGCN kernel builds. See gpu_dev_mod below.
     const GPU = @TypeOf(M){ .b = b, .target = target, .optimize = optimize, .strip = true };
 
+    // ZP_MEM_STATS accounting. A leaf with no imports of its own, wired into
+    // every module that allocates, because the question it answers ("which
+    // table is the 148 MB?") crosses all of them. Zero cost when the
+    // environment variable is unset — see src/mem_stats.zig.
+    const memstats_mod = M.make(b.path("src/mem_stats.zig"), &.{});
+
     const solvers_mod = M.make(b.path("src/solvers/root.zig"), &.{});
 
     // =======================================================================
@@ -147,6 +153,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "models", .module = models_mod },
         .{ .name = "fastvaf", .module = vera.module("vera") },
         .{ .name = "gompute", .module = gompute.module("gompute") },
+        .{ .name = "memstats", .module = memstats_mod },
     });
     // DynDevice dlopens generated .so devices.
     devices_mod.linkSystemLibrary("c", .{});
@@ -154,6 +161,7 @@ pub fn build(b: *std.Build) void {
     const analysis_mod = M.make(b.path("src/analysis/root.zig"), &.{
         .{ .name = "solvers", .module = solvers_mod },
         .{ .name = "devices", .module = devices_mod },
+        .{ .name = "memstats", .module = memstats_mod },
     });
     analysis_mod.linkSystemLibrary("c", .{});
 
@@ -170,6 +178,7 @@ pub fn build(b: *std.Build) void {
         // `devices`, and needs the driver handle and the CPU Newton it drives.
         .{ .name = "gompute", .module = gompute.module("gompute") },
         .{ .name = "solvers", .module = solvers_mod },
+        .{ .name = "memstats", .module = memstats_mod },
     };
     const exe = b.addExecutable(.{
         .name = "espice",
@@ -302,6 +311,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_exe_tests.step);
 
     for ([_]struct { name: []const u8, desc: []const u8, mod: *std.Build.Module }{
+        .{ .name = "test-memstats", .desc = "Run ZP_MEM_STATS accounting tests", .mod = memstats_mod },
         .{ .name = "test-solvers", .desc = "Run solver tests", .mod = solvers_mod },
         .{ .name = "test-analysis", .desc = "Run analysis tests", .mod = analysis_mod },
         // Building this at all pulls every models/* through vera.

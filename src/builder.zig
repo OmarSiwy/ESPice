@@ -229,9 +229,7 @@ pub const Builder = struct {
         }
 
         const store = try self.protoStore(D);
-        try store.models.append(self.gpa, model);
-        try store.instances.append(self.gpa, instance);
-        try store.nodes.append(self.gpa, all);
+        try store.append(model, instance, all);
     }
 
     /// Find-or-create the type-erased proto for a runtime (dlopen'd) device.

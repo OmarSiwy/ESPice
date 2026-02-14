@@ -114,10 +114,14 @@ pub fn analyzeBuffer(samples: []const f64, allocator: std.mem.Allocator) !Spectr
 /// (harmonic, frequency, magnitude, phase_deg). THD lands in the plotname.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
+    // `defer`-freed == scratch, and `a` is a results arena that cannot reclaim
+    // it — the waveform below is a whole transient. `Spectrum` is a value
+    // type and `analyze` frees its own FFT buffers, so it is scratch too.
+    const scratch = ctx.scratch_allocator orelse a;
     const x_op = ctx.x_op orelse return error.NoOperatingPoint;
 
-    const x = try a.dupe(f64, x_op);
-    defer a.free(x);
+    const x = try scratch.dupe(f64, x_op);
+    defer scratch.free(x);
 
     const tran_opts = opts.tran_opts orelse tran.Options{
         .t_stop = 5.0 / opts.f_fundamental,
@@ -127,13 +131,13 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     const spec = blk: {
         const probes = [_]u32{opts.output_node};
-        var waveform = try tran.Waveform.init(a, 1, tran.initialCapacity(tran_opts));
+        var waveform = try tran.Waveform.init(scratch, 1, tran.initialCapacity(tran_opts));
         defer waveform.deinit();
 
-        const tran_result = try tran.simulate(ctx.circuit, x, &probes, &waveform, tran_opts, a);
+        const tran_result = try tran.simulate(ctx.circuit, x, &probes, &waveform, tran_opts, scratch);
         if (!tran_result.completed) return error.TransientFailed;
 
-        break :blk try analyze(&waveform, 0, opts.f_fundamental, a);
+        break :blk try analyze(&waveform, 0, opts.f_fundamental, scratch);
     };
 
     const n_harm: usize = @min(opts.n_harmonics, spec.harmonics.len);

@@ -80,15 +80,21 @@ pub fn sweep(
 /// (re, im) per variable.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
+    // Everything `defer`-freed here is scratch by construction, and
+    // `ctx.allocator` is a results arena whose free() is a no-op — so on `a`
+    // the probe-major `resp`, the sweep's whole lane workspace and the
+    // point-major `data` were three live copies of the same payload for the
+    // rest of the run. See RunCtx.scratch_allocator.
+    const scratch = ctx.scratch_allocator orelse a;
     const x_op = ctx.x_op orelse return error.NoOperatingPoint;
     const n_points = types.logSweepCount(opts.f_start, opts.f_stop, opts.points_per_decade);
 
-    const freqs = try a.alloc(f64, n_points);
-    defer a.free(freqs);
-    const resp = try a.alloc(Complex, ctx.probes.len * n_points);
-    defer a.free(resp);
+    const freqs = try scratch.alloc(f64, n_points);
+    defer scratch.free(freqs);
+    const resp = try scratch.alloc(Complex, ctx.probes.len * n_points);
+    defer scratch.free(resp);
 
-    try sweep(ctx.circuit, x_op, ctx.source_branch, 1.0, 0.0, ctx.probes, freqs, resp, opts, a);
+    try sweep(ctx.circuit, x_op, ctx.source_branch, 1.0, 0.0, ctx.probes, freqs, resp, opts, scratch);
 
     const names = try root.probeNames(ctx, "frequency");
     errdefer {

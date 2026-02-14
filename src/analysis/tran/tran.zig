@@ -985,12 +985,8 @@ test "q tape: per-device-state charges, one entry each, summing to the q plane" 
     const CStore = dev.batch.ProtoStore(Cap);
     const cstore = try gpa.create(CStore);
     cstore.* = .{};
-    try cstore.models.append(gpa, .{ .c = 7.398e-15 });
-    try cstore.instances.append(gpa, .{});
-    try cstore.nodes.append(gpa, .{ 1, 0 }); // load cap, node 1 -> ground
-    try cstore.models.append(gpa, .{ .c = 5.0e-17 });
-    try cstore.instances.append(gpa, .{});
-    try cstore.nodes.append(gpa, .{ 1, 2 }); // parasitic, node 1 -> node 2
+    try cstore.append(.{ .c = 7.398e-15 }, .{}, .{ 1, 0 }); // load cap, node 1 -> ground
+    try cstore.append(.{ .c = 5.0e-17 }, .{}, .{ 1, 2 }); // parasitic, node 1 -> node 2
 
     const protos = [_]Proto{.{
         .ctx = cstore,
@@ -1060,7 +1056,7 @@ test "transient: a PULSE vsource output actually moves with $abstime" {
     const VStore = dev.batch.ProtoStore(Vsrc);
     const vstore = try gpa.create(VStore);
     vstore.* = .{};
-    try vstore.models.append(gpa, .{
+    try vstore.append(.{
         .waveform = 1,
         .pulse_v1 = 0.0,
         .pulse_v2 = 5.0,
@@ -1069,16 +1065,12 @@ test "transient: a PULSE vsource output actually moves with $abstime" {
         .pulse_tf = 1e-12,
         .pulse_pw = 4e-9,
         .pulse_per = 20e-9,
-    });
-    try vstore.instances.append(gpa, .{});
-    try vstore.nodes.append(gpa, .{ 1, 0, 2 });
+    }, .{}, .{ 1, 0, 2 });
 
     const RStore = dev.batch.ProtoStore(Res);
     const rstore = try gpa.create(RStore);
     rstore.* = .{};
-    try rstore.models.append(gpa, .{ .r = 1000.0 });
-    try rstore.instances.append(gpa, .{});
-    try rstore.nodes.append(gpa, .{ 1, 0 });
+    try rstore.append(.{ .r = 1000.0 }, .{}, .{ 1, 0 });
 
     const protos = [_]Proto{
         .{

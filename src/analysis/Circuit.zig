@@ -10,6 +10,7 @@
 const std = @import("std");
 const devices = @import("devices");
 const solvers = @import("solvers");
+const memstats = @import("memstats");
 // Leaf types only (Waveform/Options/SimResult) — importing the transient
 // driver here would close a cycle: tran.zig -> ../types.zig -> Circuit.zig.
 const tran = @import("tran/types.zig");
@@ -680,11 +681,18 @@ pub fn init(
     protos: []const Proto,
     bbd: ?BbdInfo,
 ) !Circuit {
+    // The pre-dedup key array and the radix ping-pong are build scratch that
+    // dies with this frame, so they do NOT come from `gpa` — see
+    // PatternBuilder's header. Same reasoning as ProtoStore's `staging_gpa`.
+    const scratch = std.heap.smp_allocator;
+    const pat_row = memstats.enter("circuit: pattern build");
     var pb: PatternBuilder = .{};
-    defer pb.deinit(gpa);
-    try pb.reserve(gpa, n);
-    for (0..n) |i| try pb.add(gpa, @intCast(i), @intCast(i));
-    for (protos) |p| try p.pattern(p.ctx, gpa, &pb);
+    defer pb.deinit(scratch);
+    try pb.reserve(scratch, n);
+    for (0..n) |i| try pb.add(scratch, @intCast(i), @intCast(i));
+    for (protos) |p| try p.pattern(p.ctx, scratch, &pb);
+    memstats.scaleBy("circuit: pattern build", pb.keys.items.len);
+    memstats.leave(pat_row);
 
     var ckt: Circuit = undefined;
     ckt.gpa = gpa;
@@ -704,7 +712,9 @@ pub fn init(
     ckt.param_refs = null;
     ckt.gpu_hook = null;
 
-    ckt.nnz = try pb.toCsc(gpa, n, &ckt.col_ptr, &ckt.row_idx);
+    const csc_row = memstats.enter("circuit: CSC + planes");
+    defer memstats.leave(csc_row);
+    ckt.nnz = try pb.toCsc(gpa, scratch, n, &ckt.col_ptr, &ckt.row_idx);
     errdefer gpa.free(ckt.col_ptr);
     errdefer gpa.free(ckt.row_idx);
     ckt.trash_slot = ckt.nnz;
@@ -737,7 +747,12 @@ pub fn init(
     var n_final: usize = 0;
     errdefer for (batches[0..n_final]) |b| b.hooks.deinit(b.ctx, gpa);
     for (protos, 0..) |p, bi| {
+        // `p.type_name` is the device type's static name pointer — the same
+        // identity the Builder keys protos on, so the row interns for free.
+        const b_row = memstats.enter(p.type_name);
         batches[bi] = try p.finalize(p.ctx, gpa, pv);
+        memstats.scaleBy(p.type_name, batches[bi].count);
+        memstats.leave(b_row);
         n_final = bi + 1;
         if (batches[bi].has_charge) ckt.has_charge = true;
         if (batches[bi].hooks.inject_history != null) ckt.has_history = true;
