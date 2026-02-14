@@ -5,61 +5,234 @@ measured or explicitly marked as an estimate. Read "Measurement hazards" first �
 five separate wrong answers this session came from rig bugs, not from the code
 under test.
 
+**2026-09-10, second pass:** "Where the numbers stand", the per-pass budget,
+§1, §2, §6 and hazard 4 were re-measured at `446268a` and rewritten. The budget
+they replace was taken at pi100 = 507M / mos6 = 189M and was marked stale in
+this file; it is retired, with the old-vs-new deltas kept under "What moved".
+Everything else on this page is as first written.
+
 ## Where the numbers stand
 
-| deck | espice | ngspice 44.2 (PATH build) | ratio |
-|---|---:|---:|---:|
-| `scaling/parallel_inverters_100` | 465,576,835 | 557,174,981 | **0.836** |
-| `devices/mos6_inverter` | 153,490,575 | 166,331,933 | **0.923** |
-| `scaling/rc_chain_500` | 79,097,457 | 179,877,040 | **0.440** |
-| `scaling/rc_ladder_10k` | 1,178,022,498 | 2,918,358,824 | **0.404** |
+All re-measured 2026-09-10 at `446268a`, callgrind Ir, one command shape:
+`espice -b --backend cpu -r RAW DECK` and `ngspice -b -r RAW DECK`.
+**Both ngspice binaries are 44.2 and both report KLU available; neither deck
+sets `.options klu`, so both ran Sparse1.3.**
 
-Against a from-source ngspice (8.5% faster than the PATH build, see hazard 4):
-pi100 **0.907**, mos6 **1.031**. mos6 against ngspice's fastest build is the
-only remaining loss, and it is 3%.
+| deck | espice | ngspice PATH¹ | ratio | ngspice from source² | ratio |
+|---|---:|---:|---:|---:|---:|
+| `scaling/parallel_inverters_100` | 466,358,473 | 557,229,231 | 0.837 | 512,035,556 | **0.911** |
+| `devices/mos6_inverter` | 153,737,019 | 166,343,979 | 0.924 | 147,852,963 | **1.040** |
+| `scaling/rc_chain_500` | 80,589,126 | 179,875,209 | 0.448 | 154,776,748 | **0.521** |
+| `scaling/rc_ladder_10k` | 1,203,408,608 | 2,918,342,133 | 0.412 | 2,606,771,619 | **0.462** |
 
-Session arc on pi100: 754.9M → 465.6M (−38.3%).
+¹ `~/.nix-profile/bin/ngspice` →
+`/nix/store/bywwgg84ccx0544z9qrfm4zc4ls30ghd-ngspice-44.2`.
+² rebuilt from `/nix/store/3lzc9hcjbyr3sg0qvhcpi0jh8hsp0z61-ngspice-44.2.tar.gz`
+with `NIX_HARDENING_ENABLE="" ./configure --disable-debug --disable-openmp
+--with-readline=no CFLAGS="-O2 -fno-stack-protector"`. Reproduces the lost
+build to 0.2% (512.0M against the 513M on record).
 
-## THE BUDGET IS STALE
+**Quote the from-source column.** The PATH build is not 8.5% slower as
+previously recorded — it is slower by a deck-dependent **8.8% (pi100), 12.5%
+(mos6), 16.2% (rc_chain_500), 12.0% (rc_ladder_10k)**, so the PATH column
+flatters us by more on exactly the decks where the margin is thin. mos6 against
+ngspice's fastest build is the only remaining loss and it is **4.0%**.
 
-The per-pass budget below was taken at pi100 = 507M and mos6 = 189M. Since
-then the prefix-latch (−7.7%/−12.6%) and the LU reshape (−3.6%/−4.2%) landed,
-so every percentage is wrong and the ORDERING may be wrong too. **Re-measure
-before choosing a target.** It is included because it is the only map that
-exists and the mechanisms are still accurate.
+Session arc on pi100: 754.9M → 466.4M (−38.2%).
 
-pi100 @ 507M — 1352 NR iters, 613 attempts, 595 points; n=105, nnz=511:
+Two espice rows moved since these were last written and it is not measurement
+noise: pi100 and mos6 drifted +0.17%, but `rc_chain_500` went 79.10M → 80.59M
+(**+1.9%**) and `rc_ladder_10k` 1178.0M → 1203.4M (**+2.2%**). `446268a` touched
+60 files under `src/`; the linear decks paid for something in it. Not chased.
+
+## The per-pass budget — re-measured 2026-09-10 at `446268a`
+
+**Replaces the budget taken at pi100 = 507M / mos6 = 189M**, which predated the
+prefix-latch (−7.7%/−12.6%) and the LU reshape (−3.6%/−4.2%) and whose
+percentages were therefore all wrong. That table is gone; the deltas against it
+are in "What moved" below so nothing is lost.
+
+### Method, and what it is not
+
+`zig build -Ddebug-info=true` still SEGVs the Zig 0.16 compiler, so the binary
+is stripped (`nm`: no symbols) and callgrind prints entry addresses, not names.
+Attribution is therefore **not symbolic**. It is also **not ablation**: no pass
+was doubled and no second build was made. What callgrind still records exactly
+is call counts and caller/callee edges, and on these two decks the counts are
+identifying:
+
+| observed count (pi100 / mos6) | can only be |
+|---|---|
+| 1358 / 935 | once per Newton iterate (1352/884 transient + 6/51 OP) |
+| 614 / 319 | once per converged solve (`finalizeStep` tail) |
+| 595 / 316 | once per accepted point |
+| 271,600 = 200×1358 / 74,800 = 80×935 | once per MOSFET per Newton iterate |
+| 642 / 321 | `stepBound` (accepted−1 + LTE rejects + order-promotion trials) |
+
+Cross-checked on `scaling/parallel_inverters_500` — 5× the instances, same
+trajectory (1356 vs 1352 iterates), 2,306,885,506 Ir:
+
+| row | pi100 Ir/call | pi500 Ir/call | ratio | scales with |
+|---|---:|---:|---:|---|
+| kernel + stamp | 190,869 | 954,218 | **5.000** | instances |
+| limiting | 37,606 | 187,862 | 4.996 | instances |
+| post-accept `evalQ` | 40,389 | 201,801 | 4.997 | instances |
+| `updateStates` | 26,861 | 134,176 | 4.995 | instances |
+| LU refactor | 17,601 | 86,386 | 4.908 | n, nnz |
+| LU solve | 7,422 | 36,144 | 4.870 | n, L+U |
+| `stepBound` | 25,938 | 129,379 | 4.988 | q-tape (1800→9000) |
+| `snapshotQTape` | 4,638 | 23,038 | 4.967 | q-tape |
+
+Device rows scale exactly with instance count and matrix rows do not — that is
+what pins the identities, not a name. Leaves were read off `objdump`: the two
+transcendental helpers under mos6's `updateStates` are `exp` (81.2 Ir,
+`cmp $0x4086232a` overflow gate) and `log` (57.0 Ir, `add $0xc01200;
+and $0xffffff` prologue); the per-instance limiter leaf is branch-free FP with
+no calls at all (18.8 / 17.4 Ir).
+
+Rows below are whole-run inclusive and **sum to the deck total exactly**. Both
+decks' OP solve shares the same `assemble`/`finalizeStep`/`factor` functions as
+the transient, so it is a cross-cut, not a row: it is folded into the kernel,
+limiting and LU rows and is called out under each table.
+
+### pi100 — 466,358,473 Ir
+
+1358 NR iterates (1352 transient + 6 OP), 613 attempts, 595 accepted points;
+200 MOSFETs, 100 caps, 2 sources; n=105, nnz=511, L+U=608, q-tape 1800.
+Last column is Ir ÷ (200 × 1358).
 
 | pass | Ir | % | per MOSFET per NR iter |
 |---|---:|---:|---:|
-| MOS1 kernel + stamp | 277.4M | 54.7% | 1026 |
-| limiting (gather 54.9M + `D.limit` 17.9M) | 72.8M | 14.4% | 269 |
-| LU refactor | 38.8M | 7.65% | 143 |
-| post-accept `evalQ` (RealFor q-only) | 29.6M | 5.8% | 110 |
-| `updateStates` | 19.6M | 3.9% | 73 |
-| `stepBound` LTE (1800-entry q-tape) | 16.7M | 3.3% | 62 |
-| LU triangular solve | 14.9M | 2.9% | 55 |
-| tran-loop self | 11.2M | 2.2% | 41 |
-| parse + build + OP solve | 10.6M | 2.1% | — |
-| memcpy/memset helpers | 8.4M | 1.7% | — |
-| `finalizeStep` / `updateAndNorm` / `stateCtl` / `snapshotQTape` | 13.1M | 2.5% | 48 |
+| MOS1 kernel + stamp | 268,940,632 | 57.67% | 990 |
+| limiting (whole pass; the clamp leaf is 5.10M of it) | 56,167,552 | 12.04% | 207 |
+| LU refactor | 24,041,215 | 5.16% | 89 |
+| post-accept `evalQ` (RealFor q-only) | 24,031,420 | 5.15% | 89 |
+| `updateStates` (mos1 16.49M + capacitor 0.78M) | 17,269,545 | 3.70% | 64 |
+| `stepBound` LTE (1800-entry q-tape) | 16,652,376 | 3.57% | 61 |
+| tran-loop self | 11,164,534 | 2.39% | 41 |
+| LU triangular solve | 10,079,550 | 2.16% | 37 |
+| parse + build + raw write (main thread) | 8,103,744 | 1.74% | — |
+| step bookkeeping (`stateCtl`, `commitStates`, `boundStep`, ring rotate) | 6,801,487 | 1.46% | 25 |
+| memcpy/memset helpers | 6,570,325 | 1.41% | 24 |
+| `snapshotQTape`, per iterate | 6,303,042 | 1.35% | 23 |
+| `finalizeStep` self (`x_old` copy, `updateAndNorm`, residual gate) | 4,707,106 | 1.01% | 17 |
+| `TranHook.assemble` self (companion RHS) | 2,785,863 | 0.60% | 10 |
+| Newton self (`combineGC` + \|F\|) | 2,300,723 | 0.49% | 8 |
+| vsource batch | 439,359 | 0.09% | — |
 
-mos6 @ 189M — 884 NR iters, 320 attempts, 316 points; n=45, nnz=243:
-kernel+stamp 52.9%, limiting 10.6%, LU refactor 9.2%, parse+build+**OP solve**
-8.2% (that is the OP solve, not fixed overhead — process floor on a two-device
-deck is 0.83M), `updateStates` 7.5%, post-accept `evalQ` 4.9%, LU solve 2.4%.
+OP solve: **2,033,735 (0.44%)**, 6 Newton iterates, distributed across the
+kernel/limiting/LU rows above.
+
+### mos6 — 153,737,019 Ir
+
+935 NR iterates (884 transient + 51 OP), 320 attempts, 316 accepted points;
+80 MOSFETs, 16 caps, 2 sources; n=45, nnz=243, L+U=258, q-tape 672.
+Last column is Ir ÷ (80 × 935).
+
+| pass | Ir | % | per MOSFET per NR iter |
+|---|---:|---:|---:|
+| MOS6 kernel + stamp | 87,474,635 | 56.90% | 1169 |
+| limiting (whole pass; the clamp leaf is 1.30M of it) | 15,478,434 | 10.07% | 207 |
+| LU refactor | 11,106,132 | 7.22% | 148 |
+| post-accept `evalQ` (RealFor q-only) | 7,221,028 | 4.70% | 97 |
+| `updateStates` (mos6 6.60M + capacitor 0.47M) | 7,074,267 | 4.60% | 95 |
+| parse + build + raw write (main thread) | 7,004,679 | 4.56% | — |
+| LU triangular solve | 3,235,291 | 2.10% | 43 |
+| `stepBound` LTE (672-entry q-tape) | 3,144,126 | 2.05% | 42 |
+| tran-loop self | 2,424,227 | 1.58% | 32 |
+| step bookkeeping (`stateCtl`, `commitStates`, `boundStep`, ring rotate) | 1,888,313 | 1.23% | 25 |
+| memcpy/memset helpers | 1,887,764 | 1.23% | 25 |
+| vsource batch — VIN is PWL, averages 893 Ir per source per iterate against pi100's 77 | 1,830,032 | 1.19% | — |
+| `finalizeStep` self (`x_old` copy, `updateAndNorm`, residual gate) | 1,396,976 | 0.91% | 19 |
+| `TranHook.assemble` self (companion RHS) | 1,035,617 | 0.67% | 14 |
+| Newton self (`combineGC` + \|F\|) | 811,034 | 0.53% | 11 |
+| `snapshotQTape`, per iterate | 724,464 | 0.47% | 10 |
+
+OP solve: **6,988,149 (4.55%)**, 51 Newton iterates, distributed across the
+kernel/limiting/LU rows above. The old table's "parse+build+OP solve 8.2%"
+splits today into 4.56% parse/build and 4.55% OP; combined 9.11%, and it is
+still the OP solve rather than fixed overhead.
+
+### What moved, and whether the ORDERING moved
+
+**pi100: the ordering did not change through rank 6.** The only swap is at
+ranks 7/8, tran-loop self overtaking the LU triangular solve. Anything aimed at
+the old pi100 top six is still aimed correctly.
+
+| pi100 | old rank | new rank |
+|---|---:|---:|
+| MOS1 kernel + stamp | 1 | 1 |
+| limiting | 2 | 2 |
+| LU refactor | 3 | 3 |
+| post-accept `evalQ` | 4 | 4 |
+| `updateStates` | 5 | 5 |
+| `stepBound` | 6 | 6 |
+| LU triangular solve | 7 | **8** |
+| tran-loop self | 8 | **7** |
+
+**mos6: one swap, `updateStates` and post-accept `evalQ` trade places.**
+`updateStates` went 14.2M → 7.07M (−50%) against `evalQ`'s 9.26M → 7.22M
+(−22%), so `evalQ` is now the larger of the two — but by 2%, which is inside the
+distance anyone should read as an ordering. Treat them as tied. See §6.
+
+| mos6 | old rank | new rank |
+|---|---:|---:|
+| MOS6 kernel + stamp | 1 | 1 |
+| limiting | 2 | 2 |
+| LU refactor | 3 | 3 |
+| post-accept `evalQ` | 6 | **4** |
+| `updateStates` | 5 | **5** |
+| parse + build (was bundled with the OP solve at rank 4) | 4 | **6** |
+| LU triangular solve | 7 | 7 |
+
+The mos6 rank-4/6 move is partly accounting, not work: the old row bundled
+parse+build with the OP solve at 8.2%, and the OP solve is now attributed to the
+passes it actually runs. Parse+build alone is 4.56%, the OP solve 4.55%. Do not
+read "parse+build fell from rank 4 to rank 6" as a saving.
+
+Absolute deltas against the retired table:
+
+| pass | pi100 old → new | mos6 old → new |
+|---|---|---|
+| kernel + stamp | 277.4M → 268.9M (−3.1%), share 54.7% → **57.67%** | 100.0M → 87.5M (−12.5%), share 52.9% → **56.90%** |
+| limiting | 72.8M → 56.2M (−22.8%) | 20.0M → 15.5M (−22.7%) |
+| LU refactor | 38.8M → 24.0M (−38.0%) | 17.4M → 11.1M (−36.1%) |
+| post-accept `evalQ` | 29.6M → 24.0M (−18.8%) | 9.26M → 7.22M (−22.0%) |
+| `updateStates` | 19.6M → 17.3M (−11.9%) | 14.2M → 7.07M (**−50.1%**) |
+| `stepBound` | 16.7M → 16.65M (flat — nothing touched it) | — |
+| LU solve | 14.9M → 10.1M (−32.4%) | 4.54M → 3.24M (−28.7%) |
+
+The kernel's *share* rose on both decks while its absolute Ir fell. Everything
+around it got cheaper faster than it did. Nothing overtook anything in the top
+three: the kernel is more dominant than the stale map said, not less.
 
 ---
 
 ## Open opportunities, ranked by expected value
 
-### 1. The device kernel — still >50% of both decks
+### 1. The device kernel — 57.67% of pi100, 56.90% of mos6, and RISING
+
+Re-measured 2026-09-10: 990 Ir per MOSFET per Newton iterate on pi100, 1169 on
+mos6, kernel and stamp together. Its absolute cost fell this session (−3.1% /
+−12.5%) but its *share* went up on both decks, because every other pass fell
+faster. It is a larger fraction of the run than the retired budget said.
 
 mos1 `evalQ` was 754 Ir/eval before the prefix-latch; mos6 was 1224.6 → ~1164.
 ngspice: MOS1load self 759, whole per-instance MOS1 evaluation 1053; whole
 per-instance MOS6 evaluation 1138. Our figures contain **no stamping, no
 limiting and no integration**, so the kernel-to-kernel gap is wider than the
 raw comparison suggests.
+
+**The isolated-rig number and the in-deck number disagree on mos6, and the
+in-deck one is lower.** mos1: 990 in-deck minus the 195 stamp (§7) leaves 795
+against the rig's 754, +5%, fine. mos6: 1169 − 195 = 974 against the rig's
+~1164, **−16%**. Likely mechanism, and it is measurable: the rig prices one
+fixed bias point with every branch live, while the deck averages over states.
+In the real deck the mos6 kernel enters its transcendental leaves 178,521 +
+38,245 times across 935 × 80 = 74,800 instance-evals — **2.39 `exp`-family and
+0.51 `log` per instance-eval**, not the full ladder every time. Before spending
+a week on a rig-measured −N Ir, check what fraction of instances reach that
+block on the deck you are being judged on.
 
 Composition of the mos6 kernel at 1403 (before two fixes): Dual AD methods 583
 (41.6%), model expressions 264, transcendentals 309, rest 96. The AD layer is
@@ -81,16 +254,27 @@ Live sub-items:
   measured **−8.8 Ir**. That is the ceiling for mos6; other models may differ.
 - **`pcExpensive`'s libm-root filter** still blocks `grd`/`grs`/`czb*` from
   hoisting. Relaxed once already (`pcWorthAField`, 99bb324).
-- Block-by-block against `/tmp/ng/ngspice-44.2/src/spicelib/devices/mos6/mos6load.c`
-  found ngspice recomputes its own per-eval preamble with an apologetic
-  comment, so we are not behind everywhere. Find the blocks where we are.
+- Block-by-block against `src/spicelib/devices/mos6/mos6load.c` (the `/tmp/ng`
+  copy is gone; unpack the tarball named in "Where the numbers stand") found
+  ngspice recomputes its own per-eval preamble with an apologetic comment, so we
+  are not behind everywhere. Find the blocks where we are.
 
-### 2. Limiting — `D.limit`'s body is 291 Ir per instance per iterate
+### 2. Limiting — 207 Ir per instance per iterate, on both decks
 
-ngspice's whole limiter ladder is 52. Probe passes isolated it: an extra
-gather costs 2.13%, an extra `D.limit` costs **14.64%** — the body is ~79% of
-limiting, the gather is not the problem, and the second read in `evalRange` is
-under 1% because `corr_live` already needs those loads.
+ngspice's whole limiter ladder is 52. Re-measured 2026-09-10: the whole pass is
+56.17M / 12.04% on pi100 and 15.48M / 10.07% on mos6, and it costs the same 207
+Ir per MOSFET per Newton iterate on both — the pass is model-independent, which
+says the cost is scaffolding, not the clamp. The clamp leaf itself (branch-free
+FP, no calls, `zPnjlim`/`zFetlim`/`zLimvds` fast paths) is 18.8 Ir on pi100 and
+17.4 on mos6, i.e. **9% of the pass**; the other 188 Ir is the generated
+`limit()` scaffolding and the per-unknown gather/write.
+
+The old probe split below was taken when the whole pass was 269 Ir/instance/
+iterate, so its ratios no longer apply to today's 207 — the mechanism does.
+Probe passes isolated it then: an extra gather cost 2.13%, an extra `D.limit`
+cost **14.64%** — the body was ~79% of limiting, the gather was not the problem,
+and the second read in `evalRange` is under 1% because `corr_live` already needs
+those loads.
 
 `zPnjlim` (7dd74a0) and `zFetlim`/`zLimvds` (baccc5a) now have host fast paths.
 What remains is the generated `limit()` scaffolding and the per-unknown
@@ -133,7 +317,7 @@ The reactive failure is quieter: a `ddt()` of something varying in `t` and not
 would silently drop a real LTE bound. The safe predicate is "row `ru` is ever
 written", which the generator knows and does not emit.
 
-### 5. Post-accept charge re-evaluation — 5.8% / 4.9%
+### 5. Post-accept charge re-evaluation — 5.15% / 4.70%
 
 Already improved by the `RealFor` value-only scalar (mos6 −2.3%; mos1 is a
 wash because LLVM already dead-codes the gradient for a small core — the value
@@ -153,7 +337,7 @@ The idea deliberately not pursued: extrapolate `q(x_{k+1}) ≈ q(x_k) + C·dx`
 from the already-computed `c_vals`. Not byte-identical, and `c_vals` is summed
 per matrix entry so it cannot produce the per-state `q_tape` that LTE needs.
 
-### 6. `updateStates` — re-measure, it may already be fixed
+### 6. `updateStates` — re-measured 2026-09-10; the mos6 penalty is half gone
 
 Was 2.8× more per MOS6 instance than per MOS1 (556 vs 182 Ir **per converged
 solve**, not per iterate — `converger.zig:289` moved it). Mechanism: it
@@ -163,8 +347,34 @@ two non-integer `pow`. Isolated conclusively — the same circuit re-carded to
 LEVEL 1 costs 215 Ir where LEVEL 6 costs 556, and callgrind counted exactly
 200,000 `pow` entries from mos6 and 0 from mos1.
 
-**The shared-`ln` patch (542e9a0) removed those two `pow`.** Nobody has
-re-measured `updateStates` since. Do that before anything else here.
+The shared-`ln` patch (542e9a0) removed those two `pow`. **Re-measured, same
+accounting (whole-run pass Ir ÷ converged solves ÷ instances):**
+
+| | old | now | |
+|---|---:|---:|---|
+| MOS6, Ir per instance per converged solve | 556 | **259** | −53% |
+| MOS1, Ir per instance per converged solve | 182 | **134** | −26% |
+| ratio | 2.8× | **1.93×** | |
+| mos6 deck share | 7.5% | **4.60%** | 14.2M → 7.07M |
+
+The MOS6 column reproduces: 7.5% of 189M ÷ 318 converged solves ÷ 80 instances
+= 557, i.e. the old 556 came from this same accounting. **The MOS1 column does
+not** — 3.9% of 507M ÷ 613 ÷ 200 = 160, not 182, so the old MOS1 figure came
+from somewhere else and its −26% is soft. The MOS6 number and the ratio are the
+trustworthy lines here.
+
+`pow` is gone from `updateStates` and so is any 200,000-entry libm count. What
+remains in the mos6 pass is exactly the shape 542e9a0 aimed for: **one `exp`
+and one `log`, called 12,979 times each** over 319 converged solves × 80
+instances — 0.509 of each per instance per solve, i.e. the branch is live on
+about half the devices. Together 1,793,628 Ir, **27.2% of the whole pass**.
+MOS1's `updateStates` is a leaf with no calls at all (0 transcendentals),
+consistent with the original "0 `pow` from mos1".
+
+Consequence for ranking: `updateStates` no longer stands out on mos6. It is now
+within 2% of post-accept `evalQ` (7.07M vs 7.22M) — treat them as tied. The
+remaining 73% is the re-entry into the core at `R` itself, which is the same
+structural cost mos1 pays.
 
 Separately: only 3% of `updateStates` calls are discarded work (the 18
 LTE-rejected attempts), so it is real per-solve cost, not waste.
@@ -280,8 +490,9 @@ pair never straddles a lane) — 1.1e-16 to 4.4e-16 against a 1e-2 tolerance.
   `addObject` work but has diverged (36 files, 1896 lines, old base). This is
   the single biggest drag on iteration speed for kernel work.
 - **Pin the reference simulator.** The runner takes `ngspice` from PATH.
-  There are two 44.2 builds on this machine differing by 8.5%; RESULTS.md
-  ratios are computed against whichever one PATH supplies. Add explicit
+  There are two 44.2 builds on this machine differing by **8.8%–16.2% depending
+  on the deck** (re-measured 2026-09-10); RESULTS.md ratios are computed against
+  whichever one PATH supplies, which is the slower one. Add explicit
   `--ngspice PATH` and print the binary and version in the report.
 - **ngspice KLU is slower on every deck we have** — 1.080× pi100, 1.093× mos6,
   1.529× rc_ladder_10k. Enable with `.options klu`. Its default Sparse1.3 is
@@ -313,10 +524,14 @@ Five wrong answers this session came from the rig, not the code.
 3. **Consume every derivative lane in the rig.** Reading one lets LLVM
    scalarize the dual and dead-code the rest, which silently turns a width
    sweep into a no-op (633 vs 965 Ir/eval for the same kernel).
-4. **Two ngspice 44.2 builds exist** and differ 8.5%: `~/.nix-profile/bin/ngspice`
-   (PATH, slower — 557M on pi100) and a from-source build (513M). Using the
-   PATH one flatters every ratio. `/tmp` was wiped late in the session and took
-   the from-source build with it; rebuild it before quoting ratios.
+4. **Two ngspice 44.2 builds exist** and they differ by **8.8%–16.2% depending
+   on the deck**, not the flat 8.5% first recorded: `~/.nix-profile/bin/ngspice`
+   (PATH, slower — 557M on pi100) against a from-source build (512M). Using the
+   PATH one flatters every ratio, and it flatters most on rc_chain_500 (16.2%).
+   The from-source build was rebuilt 2026-09-10 after the `/tmp` wipe; the
+   configure line and the store path of the tarball are in "Where the numbers
+   stand". Rebuild it in a durable directory — `/tmp` will eat it again. The
+   runner still takes `ngspice` from PATH (item 13).
 5. **The "gate a pass to run twice and difference" ablation trick is sound for
    idempotent pass COSTS and invalid for codegen or inlining questions.** On an
    inlining question it gave the OPPOSITE SIGN and 14× the magnitude, because
@@ -324,9 +539,17 @@ Five wrong answers this session came from the rig, not the code.
    *defeating* the inliner. Those need two real builds.
 
 Also: `zig build -Ddebug-info=true` **SEGVs the Zig compiler**, so there are no
-symbols — attribution is by ablation only. And valgrind SIGILLs on this
-binary's GFNI instructions (`vgf2p8affineqb`) for decks that reach the
-BJT/VerA model path, so those decks' Ir is meaningless if they abort early.
+symbols. Attribution is NOT therefore limited to ablation — callgrind still
+emits per-function entry addresses, exact call counts and the full caller/callee
+edge list, and on a deck with a known instance count the counts identify the
+functions outright (200×1358 calls can only be one thing). The 2026-09-10 budget
+was taken that way, with `scaling/parallel_inverters_500` as the 5× scaling
+control and `objdump` on the leaves; no pass was doubled and no build was made.
+Prefer that to ablation: it costs one run instead of one build per row, and it
+cannot perturb the trajectory. And valgrind SIGILLs on this binary's GFNI
+instructions (`vgf2p8affineqb`) for decks that reach the BJT/VerA model path, so
+those decks' Ir is meaningless if they abort early — check the exit code and
+that the summary line is present, an early abort still writes a plausible total.
 
 ## Settled — do not re-open without new evidence
 
