@@ -162,10 +162,13 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     // on GPU or serial. No external coeffs on this path — device-internal temp
     // physics only, installed via setCircuitTemp.
     const n: usize = ckt.n;
-    const x_lanes = try a.alloc(f64, max_points * n);
-    defer a.free(x_lanes);
-    const results = try a.alloc(converger.Result, max_points);
-    defer a.free(results);
+    // `defer`-freed == scratch; `a` is a results arena. See
+    // RunCtx.scratch_allocator.
+    const scratch = ctx.scratch_allocator orelse a;
+    const x_lanes = try scratch.alloc(f64, max_points * n);
+    defer scratch.free(x_lanes);
+    const results = try scratch.alloc(converger.Result, max_points);
+    defer scratch.free(results);
 
     var lane_ctx: LaneCtx = .{ .ckt = ckt, .t_start = opts.t_start, .t_step = opts.t_step, .t_nom = opts.t_nom };
     const setup: lanes.LaneSetup = .{ .ctx = &lane_ctx, .apply = LaneCtx.apply, .restore = LaneCtx.restore };

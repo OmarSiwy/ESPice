@@ -114,18 +114,21 @@ pub fn sweep(
 /// noise density per point. Data layout: point-major (frequency, onoise_density).
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
+    // `defer`-freed below == scratch, and `a` is a results arena that cannot
+    // reclaim it. See RunCtx.scratch_allocator.
+    const scratch = ctx.scratch_allocator orelse a;
     const x_op = ctx.x_op orelse return error.NoOperatingPoint;
 
-    const srcs = try ctx.circuit.collectNoiseSources(x_op, a);
-    defer a.free(srcs);
+    const srcs = try ctx.circuit.collectNoiseSources(x_op, scratch);
+    defer scratch.free(srcs);
 
     const n_points = types.logSweepCount(opts.f_start, opts.f_stop, opts.points_per_decade);
-    const freqs = try a.alloc(f64, n_points);
-    defer a.free(freqs);
-    const density = try a.alloc(f64, n_points);
-    defer a.free(density);
+    const freqs = try scratch.alloc(f64, n_points);
+    defer scratch.free(freqs);
+    const density = try scratch.alloc(f64, n_points);
+    defer scratch.free(density);
 
-    _ = try sweep(ctx.circuit, x_op, srcs, freqs, density, opts, a);
+    _ = try sweep(ctx.circuit, x_op, srcs, freqs, density, opts, scratch);
 
     const names = try a.dupe([]const u8, &.{ "frequency", "onoise_density" });
     errdefer a.free(names); // entries are literals

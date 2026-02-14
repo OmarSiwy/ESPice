@@ -294,16 +294,19 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     // Upgrade path: a per-sample-batched variant that accepts N×(G,C,omega)
     // triples, or lifting the sample loop into the kernel.
 
-    const srcs = try ctx.circuit.collectNoiseSources(x_op, a);
-    defer a.free(srcs);
+    // `defer`-freed == scratch; `a` is a results arena. See
+    // RunCtx.scratch_allocator.
+    const scratch = ctx.scratch_allocator orelse a;
+    const srcs = try ctx.circuit.collectNoiseSources(x_op, scratch);
+    defer scratch.free(srcs);
 
     const n_points = types.logSweepCount(opts.f_start, opts.f_stop, opts.points_per_decade);
-    const freqs_buf = try a.alloc(f64, n_points);
-    defer a.free(freqs_buf);
-    const density_buf = try a.alloc(f64, n_points);
-    defer a.free(density_buf);
+    const freqs_buf = try scratch.alloc(f64, n_points);
+    defer scratch.free(freqs_buf);
+    const density_buf = try scratch.alloc(f64, n_points);
+    defer scratch.free(density_buf);
 
-    const st = try sweep(ctx.circuit, x_op, srcs, freqs_buf, density_buf, opts, a);
+    const st = try sweep(ctx.circuit, x_op, srcs, freqs_buf, density_buf, opts, scratch);
 
     const names = try a.dupe([]const u8, &.{ "frequency", "pnoise_density" });
     errdefer a.free(names); // entries are literals

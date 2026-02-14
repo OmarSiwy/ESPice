@@ -274,12 +274,15 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     const n_freqs: usize = types.logSweepCount(opts.f_start, opts.f_stop, opts.points_per_decade);
     const n_sb: usize = 2 * @as(usize, opts.n_harmonics) + 1;
-    const freqs = try a.alloc(f64, n_freqs);
-    defer a.free(freqs);
-    const transfer = try a.alloc(Complex, n_freqs * n_sb);
-    defer a.free(transfer);
+    // `defer`-freed == scratch; `a` is a results arena. See
+    // RunCtx.scratch_allocator.
+    const scratch = ctx.scratch_allocator orelse a;
+    const freqs = try scratch.alloc(f64, n_freqs);
+    defer scratch.free(freqs);
+    const transfer = try scratch.alloc(Complex, n_freqs * n_sb);
+    defer scratch.free(transfer);
 
-    try analyze(ctx.circuit, x_op, ctx.source_node, 1.0, probe, freqs, transfer, opts, a);
+    try analyze(ctx.circuit, x_op, ctx.source_node, 1.0, probe, freqs, transfer, opts, scratch);
 
     const names = try a.alloc([]const u8, 1 + n_sb);
     names[0] = "frequency";

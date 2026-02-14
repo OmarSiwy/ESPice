@@ -195,11 +195,14 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const n_s = n_ports * n_ports;
     const n_points: usize = opts.n_points;
 
-    const freqs = try a.alloc(f64, n_points);
-    defer a.free(freqs);
-    const s = try a.alloc(Complex, n_points * n_s);
-    defer a.free(s);
-    try sweep(ctx.circuit, x_op, ports, freqs, s, opts, a);
+    // `defer`-freed == scratch; `a` is a results arena. See
+    // RunCtx.scratch_allocator.
+    const scratch = ctx.scratch_allocator orelse a;
+    const freqs = try scratch.alloc(f64, n_points);
+    defer scratch.free(freqs);
+    const s = try scratch.alloc(Complex, n_points * n_s);
+    defer scratch.free(s);
+    try sweep(ctx.circuit, x_op, ports, freqs, s, opts, scratch);
 
     const names = try a.alloc([]const u8, 1 + n_s);
     names[0] = "frequency";
