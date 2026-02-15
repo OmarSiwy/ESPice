@@ -408,15 +408,36 @@ One caveat on the original no-go: part of its argument was that dedup already
 collapses `parallel_inverters_2000`. That was **wrong** (item 3). The other two
 killers stand.
 
-### 9. `jac_f32` — implemented end to end, never measured on CPU
+### 9. `jac_f32` — MEASURED 2026-09-10: `docs/perf/jac-f32-2026-09-10.md`
 
 `VerA/src/cli.zig:206` → `codegen.zig:1347` → `ARPice/build.zig:18,107` →
 `engine.jacFloat`. `@Vector(8,f32)` costs 10 instructions where
 `@Vector(8,f64)` costs 13 — ratio 0.77, which is exactly the 752/965 a forced
 4-lane experiment produced. Residual stays f64; `layoutHash`, scatter tapes and
-`jac_pattern` do not move. Cost is Newton iteration count, not accuracy.
-`todo.md:210` logs it as "unevaluated — never measured on CPU, only argued for
-the GPU". One build flag: `-Djac-f32=mos1`.
+`jac_pattern` do not move.
+
+Measured with two real builds (`-Dgpu=false` ± `-Djac-f32=…`), callgrind Ir,
+`ZP_TRAN_STATS`/`ZP_OPDBG` iteration counts:
+
+- **pi100 0.936** (466.4M → 436.6M) with the iteration count flat — 1352 → 1349
+  NR, 613 → 613 attempts, 595 → 595 points. pi500 reproduces at 0.935. mos1
+  `evalQ` 955 → 865 Ir per MOSFET per iterate; mos6 0.949 whole run,
+  1059 → 954 per eval.
+- "Cost is iteration count, not accuracy" **holds**: 60 fixtures pass the suite
+  rule, 22 bit-identical, and no PASS/FAIL verdict moves against ngspice on any
+  of 196.
+- The win is **`n_u`, not model size**. `n_u=8` (mos1/mos6) is the only width
+  that saves a register. `diode` (n_u=4) is 4–5% **slower** in the kernel;
+  `bsim4va` (n_u=18) is **0.0%**, so §11's claim that mixed precision is the
+  prerequisite for re-admitting bsim4-class models has no CPU half.
+- **Not a default yet**: `ngspice/mosmem` is **+13.7%** — the f32 Jacobian
+  makes plain Newton fail on that latch's OP, forcing the gmin ladder (50 → 144
+  iterates). The tree has no MOSFET deck under `convergence/` or `adversarial/`,
+  which is why that was the only counter-example and why a stiff-MOS corpus is
+  the prerequisite.
+- No interaction with `direct.zig`'s `iter_refine_steps`: the Jacobian widens
+  back to f64 before the scatter, `Solver` is `SolverT(f64)` everywhere, and
+  refinement is 0 outside one unit test.
 
 ### 10. Memory — two real items
 
@@ -464,7 +485,12 @@ cap defends against: bsim4's PTX is 142,990 f64 ops at ~16% occupancy on a part
 whose f64 rate is 1/64 of f32 (152.7 GFLOP/s against the CPU's 1449). Those
 kernels lose at RUN time however fast they compile. The prerequisite is mixed
 precision (item 9, which needs VerA to reach `.optimized` float mode) or an
-FP64 part.
+FP64 part. CAVEAT 2026-09-10: on the CPU, `-Djac-f32=bsim4va` measured
+**exactly 0.0%** (three decks; the kernel itself −0.04%), because bsim4's
+`n_u=18` derivative vector saves nothing at that width. That does not settle
+the GPU case — a 64:1 rate ratio is a different argument — but the mixed-
+precision prerequisite cannot be assumed to help bsim4 just because it helps
+mos1. See `docs/perf/jac-f32-2026-09-10.md`.
 
 Keep the zero-atomic guard: `v == 0` plus a bit-preservation check, exactly
 neutral numerically, −30%/−26.5% at 4,000/40,000 instances.
