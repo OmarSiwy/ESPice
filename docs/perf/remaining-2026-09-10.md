@@ -471,6 +471,13 @@ neutral numerically, −30%/−26.5% at 4,000/40,000 instances.
 
 ### 12. `ParEval` has never been benchmarked on real hardware
 
+**CLOSED — see `docs/perf/pareval-2026-09-10.md`.** It never wins: the best wall
+clock at any width on any deck is 1.07×, and 8/16/32 lanes are 0.6–0.9× on
+`parallel_inverters_2000`. The parallel fraction is 13–22% of wall clock, so the
+Amdahl ceiling is ~1.15–1.29× before any overhead. Stays opt-in and
+`default_min_instances` is unchanged, because instance count is not the variable
+that decides. Do not re-open without a deck whose parallel fraction exceeds ~0.6.
+
 Opt-in via `ESPICE_THREADS`, and `default_min_instances = 1024` so it does not
 engage on either gate deck. Under callgrind, 4 lanes on
 `parallel_inverters_500` measured +45% Ir — but callgrind serializes threads,
