@@ -248,16 +248,27 @@ mismatches at `rd=12, rs=9`. A contract `axpy` injector was added and reverted
 — measured 2.95 instructions per component, not the ~1 that would close the
 ledger.
 
+**ALL THREE live sub-items below are now CLOSED — see
+`docs/perf/dual-ad-2026-09-10.md`, which itemises the AD layer per method
+against an exact op census, does the ngspice block-by-block off a
+symbol-carrying 44.2 build, and returns a NO-GO. Read it before re-opening
+any of them.**
+
 Live sub-items:
-- **`sel` still evaluates both arms** where the arms are cheap. In mos6 only 6
-  `sel` sites exist and 4 are the Meyer ladder: converting them to branches
-  measured **−8.8 Ir**. That is the ceiling for mos6; other models may differ.
-- **`pcExpensive`'s libm-root filter** still blocks `grd`/`grs`/`czb*` from
-  hoisting. Relaxed once already (`pcWorthAField`, 99bb324).
-- Block-by-block against `src/spicelib/devices/mos6/mos6load.c` (the `/tmp/ng`
-  copy is gone; unpack the tarball named in "Where the numbers stand") found
-  ngspice recomputes its own per-eval preamble with an apologetic comment, so we
-  are not behind everywhere. Find the blocks where we are.
+- ~~**`sel` still evaluates both arms**~~ — priced: mos6 executes **2** `sel`
+  per instance-eval and mos1 **7**. −8.8 Ir is the mos6 ceiling, not a sample.
+  Site census for all 38 devices is in VerA `eagerCostly`'s comment (2fde21c).
+- ~~**`pcExpensive`'s libm-root filter**~~ — the filter no longer exists
+  (`codegen.zig:833 pcConsider` admits every non-folding instruction);
+  `grd`/`grs` are `hp[9]`/`hp[10]` and the four `czb*` are `hp[11..14]` in the
+  shipped mos6 artifact. All six hoist today.
+- ~~Block-by-block against ngspice~~ — done. We are AHEAD on the `<dev>temp`
+  preamble (0 vs ~15 Ir) and on the bypass/convergence-prediction ladder
+  (0 vs ~40, work ngspice does speculatively and we never do). We are BEHIND
+  on: the Jacobian (488 Ir of AD against ~20 hand-derived flops), limiting
+  (291 vs **56.3**, and ngspice's is inline), the stamp (195 vs ~78), and the
+  junction diode (~2x the flops, deliberately — the tangent continuation).
+  Transcendental count and cost are at parity.
 
 ### 2. Limiting — 207 Ir per instance per iterate, on both decks
 
@@ -375,6 +386,15 @@ Consequence for ranking: `updateStates` no longer stands out on mos6. It is now
 within 2% of post-accept `evalQ` (7.07M vs 7.22M) — treat them as tied. The
 remaining 73% is the re-entry into the core at `R` itself, which is the same
 structural cost mos1 pays.
+
+A second measurement of the same pass reports **330 Ir/call** for mos6
+`updateState` (`docs/perf/dual-ad-2026-09-10.md` §3), against the 259 above.
+The two do not disagree — the denominators differ. 259 is whole-pass Ir ÷
+converged solves ÷ instances, so it charges each instance its share of a
+pass that runs once per solve; 330 is Ir per invocation of the function.
+Quote 259 when comparing against the budget table, 330 when comparing
+against a per-call cost like ngspice's load routine. The `RealFor`
+charge-only pass measures 299 Ir/call on the same basis.
 
 Separately: only 3% of `updateStates` calls are discarded work (the 18
 LTE-rejected attempts), so it is real per-solve cost, not waste.
@@ -599,3 +619,7 @@ that the summary line is present, an early abort still writes a plausible total.
 | `@call(.always_inline, D.limit)` | +0.28% / +0.20%, two builds |
 | GMRES solution-update tiling | +0.069% |
 | noise-term hoisting | the `pow` it hoists is unreachable (`engine.zig:1651` emits only `.thermal`) |
+| fat in the `Dual` AD layer | every primitive is at or below its naive AVX2 lowering; 306 attributed Ir against 488 nominal, LLVM already deletes 37% |
+| gradient work on provably-zero derivatives | already gone — `con`/`lt` attribute **0 Ir** across 121 executed calls |
+| gradient lanes no consumer reads | mos6's `jac_pattern` ∪ `q_pattern` is `0xff`; there is no dead lane |
+| `vcrits`/`vcritd`'s two per-entry `ln` | dead-coded in all three callers: **−2 / 0 / 0 Ir** |
