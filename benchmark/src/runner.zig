@@ -881,11 +881,25 @@ fn runCapture(io: Io, gpa: std.mem.Allocator, job: Job, timeout: []const u8) Cap
     };
 }
 
+/// Did this run actually reach the device, or is its time a CPU time wearing a
+/// GPU label?
+///
+/// Matched on the STABLE tokens of `engine.zig`'s three whole-run refusals
+/// (`prepare`, ~line 345/354/369), not on their prose. The prose is what broke
+/// this: the needles used to be the literal strings `--gpu declined` and
+/// `--gpu unavailable`, the backend-policy revision reworded them to `auto
+/// declined the GPU` / `GPU declined (...)` / `GPU unavailable (...)`, and the
+/// matcher silently stopped firing. Every fixture the `min_work` gate declines
+/// has been reporting its CPU time in the `zp-gpu` column ever since — which is
+/// exactly the failure `engine.prepare`'s own comment says it exists to
+/// prevent, landing one file over. "GPU" plus a refusal verb survives rewording;
+/// four verbatim phrases and a "keep in sync" comment already did not.
 fn gpuSkipReason(stderr: []const u8) ?[]const u8 {
     var lines = std.mem.splitScalar(u8, stderr, '\n');
     while (lines.next()) |line| {
-        if (std.mem.indexOf(u8, line, "--gpu declined") != null or
-            std.mem.indexOf(u8, line, "--gpu unavailable") != null or
+        if (std.mem.indexOf(u8, line, "GPU") == null) continue;
+        if (std.mem.indexOf(u8, line, "declin") != null or
+            std.mem.indexOf(u8, line, "unavailable") != null or
             std.mem.indexOf(u8, line, "falling back to the CPU") != null) return line;
     }
     return null;
@@ -1506,12 +1520,26 @@ test "raw parser does not validate only the first plot" {
 }
 
 test "GPU fallback diagnostics cannot become GPU timings" {
+    // VERBATIM from src/engine.zig `prepare` and src/gpu_context.zig, because a
+    // paraphrase is what let this test stay green while the matcher was dead:
+    // the first two lines used to read `--gpu declined` / `--gpu unavailable`,
+    // the engine stopped printing that, and only this test still believed it.
     inline for (.{
-        "note: --gpu declined; too little device work to beat the PCIe round trip",
-        "warning: --gpu unavailable (NoGpuArtifacts); running on the CPU",
+        "note: auto declined the GPU; too little device work to beat the PCIe " ++
+            "round trip (override with --gpu, or tune ESPICE_GPU_MIN_WORK)",
+        "warning: GPU declined (CircuitNotEligible); nothing in this circuit has " ++
+            "a device kernel — running on the CPU",
+        "warning: GPU unavailable (NoGpuArtifacts); running on the CPU",
+        "Error: GPU requested but unavailable (NoGpuArtifacts); detected artifacts: none",
         "warning: GPU device eval failed (LaunchFailed); falling back to the CPU stamp",
         "warning: GPU limit/state pass failed; falling back to the CPU walk",
     }) |diagnostic| try std.testing.expect(gpuSkipReason(diagnostic) != null);
+    // A batch demotion is not a whole-run refusal: the rest of the circuit still
+    // runs on the device, so the timing stands.
+    try std.testing.expect(gpuSkipReason(
+        "note: GPU batch 'bsim4va' (12 instances) stays on the CPU: no cuda kernel image in this build\n",
+    ) == null);
+    try std.testing.expect(gpuSkipReason("gpu-stats: eligible batches=2 nonlinear work=4096000 (gate 3200000)\n") == null);
     try std.testing.expect(gpuSkipReason("--- Simulation Summary ---\nDevices: 4000\n") == null);
 }
 
@@ -1522,7 +1550,9 @@ test "timing discards large external output and preserves espice diagnostics" {
     const io = std.testing.io;
     _ = try timedMedian(io, a, .{ .argv = &.{ "head", "-c", "2097152", "/dev/zero" } }, "5", 1, .quiet);
     try std.testing.expectError(error.BenchRunFailed, timedMedian(io, a, .{ .argv = &.{ "sh", "-c", "printf '%s' '{\"skip\":\"test\"}'" } }, "5", 1, .cpu));
-    try std.testing.expectError(error.GpuFallback, timedMedian(io, a, .{ .argv = &.{ "sh", "-c", "printf '%s' 'warning: falling back to the CPU' >&2" } }, "5", 1, .gpu));
+    // Verbatim `gpu_context.evalPlanes`, for the same reason as the matcher's
+    // own test: a paraphrased fixture is what let the old needles rot unnoticed.
+    try std.testing.expectError(error.GpuFallback, timedMedian(io, a, .{ .argv = &.{ "sh", "-c", "printf '%s' 'warning: GPU device eval failed (LaunchFailed); falling back to the CPU stamp' >&2" } }, "5", 1, .gpu));
 }
 
 test "a repeat that fails only AFTER the preflight is BenchRunFailed, not a dead run" {
