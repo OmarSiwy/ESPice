@@ -10,9 +10,9 @@
 //! scatter) cannot be a single "compile the CPU code for GPU" map. Instead the
 //! physics is written ONCE in `evalRange`, generic over a `sink`:
 //! ONE `Sink(D, device, skip_const)` serves both: `device=false` scatters `+=`
-//! into the shared planes with per-lane dedup (par.zig runs the lanes);
-//! `device=true` is a gompute `RawKernel` that atomic-scatters and compiles the
-//! dedup out. gompute owns the GPU build/launch (was the hand-rolled
+//! into whichever planes the caller hands it (its own, or a ParEval lane's
+//! private slab); `device=true` is a gompute `RawKernel` that atomic-scatters
+//! into device buffers. gompute owns the GPU build/launch (was the hand-rolled
 //! ptxas/nvlink megakernel).
 
 const std = @import("std");
@@ -87,8 +87,8 @@ fn DualFor(comptime N: usize, comptime F: type, comptime collapsed: bool) type {
         /// and makes every array of duals 44% padding. `evalQ`'s
         /// `struct{res:[8]S, q:[8]S}` return is 2048 bytes for 1152 of payload,
         /// of which only 384 can be nonzero. Nothing reads `d` through a raw
-        /// pointer (the dedup cache stores `.v` and `grad()` into separate
-        /// plain arrays), so the alignment buys nothing and costs at most a
+        /// pointer — every consumer widens through `grad()`/`ddxAt()` into a
+        /// plain f64 — so the alignment buys nothing and costs at most a
         /// `movaps`->`movups` swap, which is free on any AVX2 part.
         /// Measured on generated mos1 evalQ: sizeOf 128 -> 72, return struct
         /// 2048 -> 1152 B, 1727 -> 1631 static instructions (-95 of them moves,
@@ -123,8 +123,8 @@ fn DualFor(comptime N: usize, comptime F: type, comptime collapsed: bool) type {
             return lanes[col];
         }
         /// The whole derivative, widened. Callers that need f64 partials (the
-        /// scatter, the limiting correction, the dedup cache, noise) go through
-        /// this rather than reading `.d`, so `F` stays private to the arithmetic.
+        /// scatter, the limiting correction, noise) go through this rather than
+        /// reading `.d`, so `F` stays private to the arithmetic.
         pub inline fn grad(a: Self) @Vector(N, f64) {
             return if (F == f64) a.d else @floatCast(a.d);
         }
@@ -463,13 +463,14 @@ pub const Planes = struct {
 };
 
 /// Per-type device batch vtable. One entry per device TYPE, created by
-/// ProtoStore(D).finalize(). eval/eval_newton stamp [first..last) into `pl`;
-/// `lane` selects the per-lane dedup cache (0 on the serial path).
+/// ProtoStore(D).finalize(). eval/eval_newton stamp [first..last) into `pl` —
+/// the caller picks the target planes, so the same entry point serves the
+/// serial path and a ParEval lane's private slab.
 pub const Batch = struct {
     // -- hot --
     ctx: *anyopaque,
-    eval: *const fn (*anyopaque, *const Planes, lane: u32, first: u32, last: u32, []const f64, f64) void,
-    eval_newton: *const fn (*anyopaque, *const Planes, lane: u32, first: u32, last: u32, []const f64, f64) void,
+    eval: *const fn (*anyopaque, *const Planes, first: u32, last: u32, []const f64, f64) void,
+    eval_newton: *const fn (*anyopaque, *const Planes, first: u32, last: u32, []const f64, f64) void,
     count: u32,
     n_u: u32,
     has_charge: bool,
@@ -485,7 +486,6 @@ pub const Batch = struct {
 
 /// Cold per-device-type vtable. Null entry ⇒ device type lacks the hook.
 pub const Hooks = struct {
-    set_lanes: ?*const fn (*anyopaque, std.mem.Allocator, u32) anyerror!void = null,
     scatter_bounds: *const fn (*anyopaque, first: u32, last: u32, trash_slot: u32, trash_row: u32) [4]u32,
     apply_limits: ?*const fn (*anyopaque, []f64, []const f64) bool = null,
     clear_limits: ?*const fn (*anyopaque) void = null,
@@ -807,10 +807,6 @@ fn evalRange(comptime D: type, sink: anytype, first: u32, end: u32, t: f64, limi
         // `2 * n_u` masked dot products of a zero vector.
         const corr_live = use_lim and @reduce(.Or, corr != @as(@Vector(n_u, f64), @splat(0)));
 
-        if (comptime SinkT.dedup) {
-            if (sink.tryCached(id, &lx, corr, active)) continue;
-        }
-
         var xv: [n_u]S = undefined;
         inline for (0..n_u) |u| xv[u] = S.seed(lx[u], u);
 
@@ -820,11 +816,8 @@ fn evalRange(comptime D: type, sink: anytype, first: u32, end: u32, t: f64, limi
         // transient), against device eval that is 92% of the run. `evalQ` is
         // the same physics off ONE core call; VerA's generated testbench gates
         // it against `eval`/`q` bit-for-bit, value and derivative.
-        //
-        // Not used with the prep variants: those pass a precomputed row VerA's
-        // fused entry point does not take.
         const has_q = comptime @hasDecl(D, "q");
-        const fuse = comptime has_q and @hasDecl(D, "evalQ") and !@hasDecl(D, "evalFromPrep") and !@hasDecl(D, "qFromPrep");
+        const fuse = comptime has_q and @hasDecl(D, "evalQ");
 
         var out: [n_u]S = undefined;
         var qo: if (has_q) [n_u]S else void = undefined;
@@ -833,16 +826,8 @@ fn evalRange(comptime D: type, sink: anytype, first: u32, end: u32, t: f64, limi
             out = both.res;
             qo = both.q;
         } else {
-            out = if (comptime @hasDecl(D, "evalFromPrep"))
-                D.evalFromPrep(S, xv, sink.prep(id), sink.model(id), sink.inst(id), t)
-            else
-                D.eval(S, xv, sink.model(id), sink.inst(id), t);
-            if (comptime has_q) {
-                qo = if (comptime @hasDecl(D, "qFromPrep"))
-                    D.qFromPrep(S, xv, sink.prep(id), sink.model(id), sink.inst(id), t)
-                else
-                    D.q(S, xv, sink.model(id), sink.inst(id), t);
-            }
+            out = D.eval(S, xv, sink.model(id), sink.inst(id), t);
+            if (comptime has_q) qo = D.q(S, xv, sink.model(id), sink.inst(id), t);
         }
 
         // Ground matrix/residual stamps are discarded. Keep their AD lanes
@@ -885,7 +870,6 @@ fn evalRange(comptime D: type, sink: anytype, first: u32, end: u32, t: f64, limi
                 };
             }
         };
-        if (comptime SinkT.dedup) sink.store(&out);
 
         if (comptime has_q) {
             inline for (0..n_u) |ru| {
@@ -931,7 +915,6 @@ fn evalRange(comptime D: type, sink: anytype, first: u32, end: u32, t: f64, limi
                     }
                 }
             }
-            if (comptime SinkT.dedup) sink.storeQ(&qo);
         }
     }
 }
@@ -955,10 +938,10 @@ fn evalRange(comptime D: type, sink: anytype, first: u32, end: u32, t: f64, limi
 /// since the next step's first assemble restamps all three.
 ///
 /// Everything `evalRange` does that this drops is dead at that call site:
-/// `D.eval`'s residual and both Jacobians (restamped), the limiting correction
-/// (`converger` clears limits before it returns, so `corr` is identically zero),
-/// and the dedup cache (it only ever replays values this recomputes, within one
-/// pass). What survives is the charge, which is exactly what the caller reads.
+/// `D.eval`'s residual and both Jacobians (restamped) and the limiting
+/// correction (`converger` clears limits before it returns, so `corr` is
+/// identically zero). What survives is the charge, which is exactly what the
+/// caller reads.
 fn evalQRange(comptime D: type, comptime S: type, sink: anytype, first: u32, end: u32, t: f64) void {
     @setEvalBranchQuota(1_000_000);
     @setFloatMode(.optimized);
@@ -967,10 +950,7 @@ fn evalQRange(comptime D: type, comptime S: type, sink: anytype, first: u32, end
     while (id < end) : (id += 1) {
         var xv: [n_u]S = undefined;
         inline for (0..n_u) |u| xv[u] = S.seed(sink.x(sink.gath(id, u)), u);
-        const qo = if (comptime @hasDecl(D, "qFromPrep"))
-            D.qFromPrep(S, xv, sink.prep(id), sink.model(id), sink.inst(id), t)
-        else
-            D.q(S, xv, sink.model(id), sink.inst(id), t);
+        const qo = D.q(S, xv, sink.model(id), sink.inst(id), t);
         // EVERY charge row, cleared pattern included — see `evalRange`'s note.
         inline for (0..n_u) |ru| sink.scatterQ(id, ru, sink.rhsRow(id, ru), qo[ru].v);
     }
@@ -1059,7 +1039,6 @@ pub fn ProtoStore(comptime D: type) type {
         }
 
         pub fn finalize(ctx: *anyopaque, gpa: std.mem.Allocator, pv: PatternView) anyerror!Batch {
-            const has_prep_cache = @hasDecl(D, "PrepCache");
             const has_q = @hasDecl(D, "q");
             const const_g = @hasDecl(D, "constant") and D.constant.g;
             const const_c = @hasDecl(D, "constant") and D.constant.c;
@@ -1078,19 +1057,6 @@ pub fn ProtoStore(comptime D: type) type {
             if (comptime has_attempt_decl) store.saved_models = &.{};
             if (comptime @hasDecl(D, "limit")) store.lim_x = &.{};
             if (comptime @hasDecl(D, "State")) store.states = &.{};
-            if (comptime has_prep_cache) {
-                store.prep_cache = &.{};
-                store.prep_group = &.{};
-            }
-            if (comptime canDedup(D)) {
-                store.eval_cache_hash = &.{};
-                store.eval_cache_rhs = &.{};
-                store.eval_cache_jac = &.{};
-                if (comptime canDedupQ(D)) {
-                    store.eval_cache_q_rhs = &.{};
-                    store.eval_cache_q_jac = &.{};
-                }
-            }
             errdefer DeviceBatch(D).hooks.deinit(store, gpa);
 
             store.models = try self.models.toOwnedSlice(gpa);
@@ -1124,43 +1090,6 @@ pub fn ProtoStore(comptime D: type) type {
             }
             if (comptime @hasDecl(D, "precompute")) {
                 for (0..count) |i| D.precompute(&store.instances[i], &store.models[i]);
-            }
-
-            if (comptime has_prep_cache) {
-                const all = try gpa.alloc(D.PrepCache, count);
-                defer gpa.free(all);
-                for (0..count) |i| all[i] = D.computePrep(&store.models[i], &store.instances[i]);
-
-                store.prep_group = try gpa.alloc(u32, count);
-                var seen: std.StringHashMapUnmanaged(u32) = .empty;
-                defer seen.deinit(gpa);
-                try seen.ensureTotalCapacity(gpa, @intCast(count));
-                var n_unique: u32 = 0;
-                for (0..count) |i| {
-                    all[n_unique] = all[i];
-                    const gop = seen.getOrPutAssumeCapacity(std.mem.asBytes(&all[n_unique]));
-                    if (!gop.found_existing) {
-                        gop.value_ptr.* = n_unique;
-                        n_unique += 1;
-                    }
-                    store.prep_group[i] = gop.value_ptr.*;
-                }
-                store.prep_cache = try gpa.alloc(D.PrepCache, n_unique);
-                @memcpy(store.prep_cache, all[0..n_unique]);
-            }
-
-            if (comptime canDedup(D)) {
-                const ng = store.prep_cache.len;
-                store.dedup_worth = ng * 2 <= count;
-                store.n_lanes = 1;
-                store.eval_cache_hash = try gpa.alloc(u64, ng);
-                @memset(store.eval_cache_hash, 0);
-                store.eval_cache_rhs = try gpa.alloc([n_u]f64, ng);
-                store.eval_cache_jac = try gpa.alloc([n_u][n_u]f64, ng);
-                if (comptime canDedupQ(D)) {
-                    store.eval_cache_q_rhs = try gpa.alloc([n_u]f64, ng);
-                    store.eval_cache_q_jac = try gpa.alloc([n_u][n_u]f64, ng);
-                }
             }
 
             return .{
@@ -1224,23 +1153,11 @@ fn hasAbsdelayState(comptime D: type) bool {
     return false;
 }
 
-fn canDedup(comptime D: type) bool {
-    return @hasDecl(D, "PrepCache") and !@hasDecl(D, "State") and !@hasDecl(D, "histInject");
-}
-
-fn canDedupQ(comptime D: type) bool {
-    return canDedup(D) and @hasDecl(D, "q");
-}
-
 pub fn DeviceBatch(comptime D: type) type {
     const n_u: usize = comptime contract.nU(D);
     const S = DualFor(n_u, jacFloat(D), @hasDecl(D, "collapse"));
     const has_state = @hasDecl(D, "State");
     const has_q = @hasDecl(D, "q");
-    const has_prep_cache = @hasDecl(D, "PrepCache");
-    const can_dedup = canDedup(D);
-    const can_dedup_q = canDedupQ(D);
-
     const has_attempt = @hasDecl(D, "attempt");
     const has_limit = @hasDecl(D, "limit");
     // A device that reads none of the host-owned fields gets a null hook, so
@@ -1268,21 +1185,10 @@ pub fn DeviceBatch(comptime D: type) type {
         /// host path only. The transient keeps its LTE history over this
         /// instead of the summed q plane. See `Hooks.q_tape`.
         q_tape: if (has_q) []f64 else void,
-        prep_cache: if (has_prep_cache) []D.PrepCache else void,
-        prep_group: if (has_prep_cache) []u32 else void,
-
-        dedup_worth: if (can_dedup) bool else void,
-        n_lanes: if (can_dedup) u32 else void,
-        eval_cache_hash: if (can_dedup) []u64 else void,
-        eval_cache_rhs: if (can_dedup) [][n_u]f64 else void,
-        eval_cache_jac: if (can_dedup) [][n_u][n_u]f64 else void,
-        eval_cache_q_rhs: if (can_dedup_q) [][n_u]f64 else void,
-        eval_cache_q_jac: if (can_dedup_q) [][n_u][n_u]f64 else void,
 
         const Self = @This();
 
         pub const hooks: Hooks = .{
-            .set_lanes = if (can_dedup) setLanes else null,
             .scatter_bounds = scatterBounds,
             .q_tape = if (has_q) qTape else null,
             .eval_q = if (has_q) evalQOnly else null,
@@ -1310,24 +1216,24 @@ pub fn DeviceBatch(comptime D: type) type {
             .next_breakpoint = if (@hasDecl(D, "nextBreakpoint")) nextBreakpointFn else null,
             .collect_params = collectParams,
             .collect_noise = if (@hasDecl(D, "noise_gens")) collectNoise else null,
-            .recompute = if (@hasDecl(D, "collapse") or @hasDecl(D, "precompute") or has_prep_cache) recomputePrecomputed else null,
+            .recompute = if (@hasDecl(D, "collapse") or @hasDecl(D, "precompute")) recomputePrecomputed else null,
             .gpu_payload = if (gpuEligible(D)) gpuPayload else null,
             .apply_attempt = if (has_attempt) applyAttempt else null,
             .restore_models = if (has_attempt) restoreAttempt else null,
             .deinit = destroy,
         };
 
-        fn eval(ctx: *anyopaque, pl: *const Planes, lane: u32, first: u32, last: u32, x: []const f64, t: f64) void {
-            evalInner(ctx, pl, lane, first, last, x, t, false);
+        fn eval(ctx: *anyopaque, pl: *const Planes, first: u32, last: u32, x: []const f64, t: f64) void {
+            evalInner(ctx, pl, first, last, x, t, false);
         }
 
-        fn evalNewton(ctx: *anyopaque, pl: *const Planes, lane: u32, first: u32, last: u32, x: []const f64, t: f64) void {
-            evalInner(ctx, pl, lane, first, last, x, t, true);
+        fn evalNewton(ctx: *anyopaque, pl: *const Planes, first: u32, last: u32, x: []const f64, t: f64) void {
+            evalInner(ctx, pl, first, last, x, t, true);
         }
 
         fn evalQOnly(ctx: *anyopaque, pl: *const Planes, x: []const f64, t: f64) void {
             const self: *Self = @ptrCast(@alignCast(ctx));
-            var sink = Sink(D, false, false).host(self, pl, x, undefined, false, 0);
+            var sink = Sink(D, false, false).host(self, pl, x, undefined);
             evalQRange(D, RealFor(@hasDecl(D, "collapse")), &sink, 0, @intCast(self.count), t);
         }
 
@@ -1341,47 +1247,10 @@ pub fn DeviceBatch(comptime D: type) type {
             return self.q_tape;
         }
 
-        fn setLanes(ctx: *anyopaque, gpa: std.mem.Allocator, n_lanes: u32) anyerror!void {
+        fn evalInner(ctx: *anyopaque, pl: *const Planes, first: u32, last: u32, x: []const f64, t: f64, comptime skip_const: bool) void {
             const self: *Self = @ptrCast(@alignCast(ctx));
-            if (n_lanes <= self.n_lanes) return;
-            const ng = self.prep_cache.len;
-            self.eval_cache_hash = try gpa.realloc(self.eval_cache_hash, ng * n_lanes);
-            self.eval_cache_rhs = try gpa.realloc(self.eval_cache_rhs, ng * n_lanes);
-            self.eval_cache_jac = try gpa.realloc(self.eval_cache_jac, ng * n_lanes);
-            if (comptime can_dedup_q) {
-                self.eval_cache_q_rhs = try gpa.realloc(self.eval_cache_q_rhs, ng * n_lanes);
-                self.eval_cache_q_jac = try gpa.realloc(self.eval_cache_q_jac, ng * n_lanes);
-            }
-            @memset(self.eval_cache_hash, 0);
-            self.n_lanes = n_lanes;
-        }
-
-        pub fn hashVoltages(lx: *const [n_u]f64) u64 {
-            var h: u64 = 0x517cc1b727220a95;
-            inline for (0..n_u) |u| {
-                h ^= @as(u64, @bitCast(lx[u]));
-                h *%= 0x9e3779b97f4a7c15;
-            }
-            return h | 1;
-        }
-
-        pub inline fn corrDot(jrow: @Vector(n_u, f64), corr: @Vector(n_u, f64)) f64 {
-            return if (comptime has_limit) @reduce(.Add, jrow * corr) else 0.0;
-        }
-
-        fn evalInner(ctx: *anyopaque, pl: *const Planes, lane: u32, first: u32, last: u32, x: []const f64, t: f64, comptime skip_const: bool) void {
-            const self: *Self = @ptrCast(@alignCast(ctx));
-
-            const dedup_on = if (comptime can_dedup) self.dedup_worth and last - first >= 4 else false;
-            const lane_off: usize = if (comptime can_dedup) @as(usize, lane) * self.prep_cache.len else 0;
-
-            if (comptime can_dedup) {
-                if (dedup_on) @memset(self.eval_cache_hash[lane_off..][0..self.prep_cache.len], 0);
-            }
-
             const limiting = if (comptime has_limit) self.lim_active else false;
-
-            var sink = Sink(D, false, skip_const).host(self, pl, x, undefined, dedup_on, lane_off);
+            var sink = Sink(D, false, skip_const).host(self, pl, x, undefined);
             evalRange(D, &sink, first, last, t, limiting);
         }
 
@@ -1428,7 +1297,7 @@ pub fn DeviceBatch(comptime D: type) type {
             // limitRange never scatters to the planes; an empty Planes keeps the
             // sink's plane .ptr reads valid (undefined would trap in Debug).
             const no_planes: Planes = .{ .g_vals = &.{}, .c_vals = &.{}, .rhs = &.{}, .q_vec = &.{} };
-            var sink = Sink(D, false, false).host(self, &no_planes, x, x_old.ptr, false, 0);
+            var sink = Sink(D, false, false).host(self, &no_planes, x, x_old.ptr);
             const any = limitRange(D, &sink, 0, @intCast(self.count), self.lim_active);
             self.lim_active = true;
             return any != 0;
@@ -1515,8 +1384,8 @@ pub fn DeviceBatch(comptime D: type) type {
         /// Write the host-owned Instance block. Field-by-field `@hasField` so a
         /// device that reads only `$abstime` pays for exactly that store.
         /// No `reprep()`: FastVAF hoists nothing time-dependent into
-        /// precompute/PrepCache (no generated device declares either), so
-        /// there is no derived state to invalidate.
+        /// `precompute` — it is derived from Model/Instance parameters, which
+        /// this does not touch — so there is no derived state to invalidate.
         fn setSimState(ctx: *anyopaque, st: SimState) void {
             const self: *Self = @ptrCast(@alignCast(ctx));
             for (self.instances) |*inst| {
@@ -1594,15 +1463,6 @@ pub fn DeviceBatch(comptime D: type) type {
         fn reprep(self: *Self) void {
             if (comptime @hasDecl(D, "precompute")) {
                 for (self.instances, self.models) |*inst, *mdl| D.precompute(inst, mdl);
-            }
-            if (comptime has_prep_cache) {
-                var next: u32 = 0;
-                for (self.prep_group, 0..) |g, i| {
-                    if (g == next) {
-                        self.prep_cache[next] = D.computePrep(&self.models[i], &self.instances[i]);
-                        next += 1;
-                    }
-                }
             }
         }
 
@@ -1706,20 +1566,7 @@ pub fn DeviceBatch(comptime D: type) type {
             if (comptime has_attempt) gpa.free(self.saved_models);
             if (comptime has_limit) gpa.free(self.lim_x);
             gpa.free(self.instances);
-            if (comptime has_prep_cache) {
-                gpa.free(self.prep_cache);
-                gpa.free(self.prep_group);
-            }
             if (comptime has_state) gpa.free(self.states);
-            if (comptime can_dedup) {
-                gpa.free(self.eval_cache_hash);
-                gpa.free(self.eval_cache_rhs);
-                gpa.free(self.eval_cache_jac);
-                if (comptime can_dedup_q) {
-                    gpa.free(self.eval_cache_q_rhs);
-                    gpa.free(self.eval_cache_q_jac);
-                }
-            }
             gpa.free(self.gath);
             gpa.free(self.rhs_idx);
             gpa.free(self.slots);
@@ -1734,12 +1581,12 @@ pub fn DeviceBatch(comptime D: type) type {
 // atomic-scatter sink. One kernel per device type; builtins register at comptime
 // (kernels.zig), a dynamic `.so` registers its one device from this same
 // template. Buffers are flat SoA uploaded before launch (host mirrors of the
-// batch tapes/planes). First cut targets simple devices (no prep-cache / state /
-// history / limiting); richer devices stay CPU until their GPU state is added.
+// batch tapes/planes). First cut targets simple devices (no state / history /
+// limiting); richer devices stay CPU until their GPU state is added.
 // ===========================================================================
 
-/// Devices eligible for a GPU kernel. PrepCache and history still need
-/// device-side state not yet wired; those run CPU-only.
+/// Devices eligible for a GPU kernel. History still needs device-side state
+/// not yet wired; those run CPU-only.
 ///
 /// `limit` devices (the diode/FET/BJT class — the models that actually carry
 /// eval work) run with a device-resident `lim_x` plane maintained by
@@ -1762,7 +1609,7 @@ pub fn DeviceBatch(comptime D: type) type {
 /// still flags a non-.ok updateState result so a future model that breaks
 /// the assumption degrades loudly into the CPU fallback.
 pub fn gpuEligible(comptime D: type) bool {
-    return !@hasDecl(D, "PrepCache") and !@hasDecl(D, "histInject") and
+    return !@hasDecl(D, "histInject") and
         !@hasDecl(D, "core_reads_simstate") and
         (@hasDecl(D, "limit") or !@hasDecl(D, "State"));
 }
@@ -1872,17 +1719,13 @@ pub const GpuPayload = struct {
 ///     on NVPTX) so the contract's generic-addrspace `eval` can read them.
 ///   - scatter: host `p[i] +=`; device `@atomicRmw(.Add)` (many threads stamp
 ///     one matrix slot; the atomic lowers to a global-space reduction).
-///   - dedup: host-only prep-cache reuse; on device it compiles to always-miss
-///     (atomics make racing threads correct), so the whole cache is gone.
 /// The ABI-table fields are GlobalPtr both ways — one type, one body, two
-/// backends. Host-only dedup/limit state hangs off `b: *DeviceBatch(D)` and is
-/// `void` under `device`, so a device compilation never sees it.
+/// backends. Host-only state hangs off `b: *DeviceBatch(D)` and is `void`
+/// under `device`, so a device compilation never sees it.
 pub fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool) type {
     const n_u: usize = comptime contract.nU(D);
     const const_g = @hasDecl(D, "constant") and D.constant.g;
     const const_c = @hasDecl(D, "constant") and D.constant.c;
-    const can_dedup = comptime canDedup(D);
-    const can_dedup_q = comptime canDedupQ(D);
     const BatchT = DeviceBatch(D);
     return struct {
         xs: gompute.GlobalPtr(f64),
@@ -1904,15 +1747,12 @@ pub fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool) 
         lim_: gompute.GlobalPtr(f64),
         xo: gompute.GlobalPtr(f64), // x_old (limit pass only)
 
-        // Host-only: the dedup caches live on the batch. Device dedup is
-        // compiled out, so none of this exists in a GPU compilation.
+        /// The owning batch, for the host-side tables that have no device
+        /// mirror — today just `q_tape`, which `scatterQ` writes per
+        /// (id, ru) and the transient's LTE reads. `void` under `device`, so
+        /// a GPU compilation never names a host slice.
         b: if (device) void else *BatchT,
-        dedup_on: if (device) void else bool,
-        lane_off: if (device) void else usize,
-        cur_group: if (device) void else usize = if (device) {} else 0,
-        cur_hash: if (device) void else u64 = if (device) {} else 0,
 
-        pub const dedup = !device and can_dedup;
         pub const skip_g = skip_const and const_g;
         pub const skip_c = skip_const and const_c;
         /// Is this the atomic-scatter (GPU) sink? `evalRange` reads it to keep
@@ -1949,9 +1789,6 @@ pub fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool) 
         }
         pub inline fn inst(s: *const Sk, id: u32) *const D.Instance {
             return @addrSpaceCast(&s.instances_[id]);
-        }
-        pub inline fn prep(s: *const Sk, id: u32) *const D.PrepCache {
-            return &s.b.prep_cache[s.b.prep_group[id]];
         }
         inline fn slot(s: *const Sk, id: u32, ru: usize, cu: usize) u32 {
             return s.slots_[(@as(usize, id) * n_u + ru) * n_u + cu];
@@ -1998,66 +1835,11 @@ pub fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool) 
             add(s.c_vals, s.slot(id, ru, cu), val);
         }
 
-        // dedup: host-only (guarded by `dedup` == false on device, so never
-        // instantiated there). Reuses a prior eval when the gather point hashes
-        // equal within the same prep group.
-        pub inline fn tryCached(s: *Sk, id: u32, lx: *const [n_u]f64, corr: @Vector(n_u, f64), active: [n_u]bool) bool {
-            s.cur_group = s.lane_off + s.b.prep_group[id];
-            s.cur_hash = if (s.dedup_on) BatchT.hashVoltages(lx) else 0;
-            if (comptime skip_g or skip_c) return false;
-            if (!s.dedup_on) return false;
-            if (s.b.eval_cache_hash[s.cur_group] != s.cur_hash) return false;
-            const cr = &s.b.eval_cache_rhs[s.cur_group];
-            const cj = &s.b.eval_cache_jac[s.cur_group];
-            // Same structural mask as `evalRange`: a cleared column has no
-            // matrix entry behind its slot, so replaying it would add a cached
-            // zero into the trash.
-            const jac_pat = comptime rowPattern(D, "jac_pattern");
-            const q_pat = comptime rowPattern(D, "q_pattern");
-            inline for (0..n_u) |ru| if (active[ru]) {
-                const cjv: @Vector(n_u, f64) = cj[ru];
-                add(s.rhs, s.rhsRow(id, ru), cr[ru] + BatchT.corrDot(cjv, corr));
-                inline for (0..n_u) |cu| if (comptime (jac_pat[ru] >> cu) & 1 != 0) if (active[cu]) {
-                    add(s.g_vals, s.slot(id, ru, cu), cj[ru][cu]);
-                };
-            };
-            if (comptime can_dedup_q) {
-                const cqr = &s.b.eval_cache_q_rhs[s.cur_group];
-                const cqj = &s.b.eval_cache_q_jac[s.cur_group];
-                inline for (0..n_u) |ru| {
-                    const cqjv: @Vector(n_u, f64) = cqj[ru];
-                    s.scatterQ(id, ru, s.rhsRow(id, ru), cqr[ru] + BatchT.corrDot(cqjv, corr));
-                    inline for (0..n_u) |cu| if (comptime (q_pat[ru] >> cu) & 1 != 0) if (active[ru] and active[cu]) {
-                        add(s.c_vals, s.slot(id, ru, cu), cqj[ru][cu]);
-                    };
-                }
-            }
-            return true;
-        }
-
-        pub inline fn store(s: *Sk, out: anytype) void {
-            if (comptime skip_g) return;
-            if (!s.dedup_on) return;
-            s.b.eval_cache_hash[s.cur_group] = s.cur_hash;
-            inline for (0..n_u) |ru| {
-                s.b.eval_cache_rhs[s.cur_group][ru] = out[ru].v;
-                s.b.eval_cache_jac[s.cur_group][ru] = out[ru].grad();
-            }
-        }
-        pub inline fn storeQ(s: *Sk, qo: anytype) void {
-            if (comptime !(can_dedup_q and !skip_c)) return;
-            if (!s.dedup_on) return;
-            inline for (0..n_u) |ru| {
-                s.b.eval_cache_q_rhs[s.cur_group][ru] = qo[ru].v;
-                s.b.eval_cache_q_jac[s.cur_group][ru] = qo[ru].grad();
-            }
-        }
-
         // Host constructor: flatten the batch's slices to the GlobalPtr fields
         // (GlobalPtr(T) == [*]T here) so the shared body indexes them the same
         // way the device does. `has_limit` guards `xo`/lim state, unused off the
         // limit pass.
-        pub fn host(b: *BatchT, pl: *const Planes, xs: []const f64, xo: [*]const f64, dedup_on: bool, lane_off: usize) Sk {
+        pub fn host(b: *BatchT, pl: *const Planes, xs: []const f64, xo: [*]const f64) Sk {
             return .{
                 .xs = @constCast(xs.ptr), // read-only here; GlobalPtr carries no const
                 .gath_ = b.gath.ptr,
@@ -2072,8 +1854,6 @@ pub fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool) 
                 .lim_ = if (comptime @hasDecl(D, "limit")) b.lim_x.ptr else undefined,
                 .xo = @constCast(xo),
                 .b = b,
-                .dedup_on = dedup_on,
-                .lane_off = lane_off,
             };
         }
     };
@@ -2117,8 +1897,6 @@ pub fn DeviceKernel(comptime D: type, comptime block_size: u32) type {
                 .lim_ = lim,
                 .xo = undefined, // limit pass only; never read in evalRange
                 .b = {},
-                .dedup_on = {},
-                .lane_off = {},
             };
             const id: u32 = @intCast(tid);
             evalRange(D, &sink, id, id + 1, t, limiting != 0);
@@ -2427,10 +2205,6 @@ pub const ParEval = struct {
         @memset(c_slab, 0);
         @memset(q_slab, 0);
 
-        for (batches) |b| {
-            if (b.hooks.set_lanes) |f| try f(b.ctx, gpa, n_lanes);
-        }
-
         const threads = try gpa.alloc(std.Thread, extra);
         errdefer gpa.free(threads);
 
@@ -2599,8 +2373,8 @@ pub const ParEval = struct {
         for (self.tasks[self.task_off[lane]..self.task_off[lane + 1]]) |task| {
             const b = &batches[task.batch];
             switch (mode) {
-                .full => b.eval(b.ctx, &pl, lane, task.first, task.last, x, t),
-                .newton => b.eval_newton(b.ctx, &pl, lane, task.first, task.last, x, t),
+                .full => b.eval(b.ctx, &pl, task.first, task.last, x, t),
+                .newton => b.eval_newton(b.ctx, &pl, task.first, task.last, x, t),
             }
         }
     }

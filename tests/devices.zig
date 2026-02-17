@@ -127,30 +127,25 @@ test "BJT: collapsed phase shorts preserve weak substrate stamps" {
     };
 }
 
-test "scatter: grounded limiting derivatives survive cached and uncached evaluation" {
+test "scatter: grounded limiting derivatives survive evaluation" {
     const td = @import("testdev.zig");
     // Same nonlinear function on current and charge: both limiting corrections
-    // must retain the grounded derivative, including on a cache hit.
+    // must retain the grounded derivative.
     const D = struct {
-        pub const U = td.Dp.U;
-        pub const num_ports = td.Dp.num_ports;
-        pub const Model = td.Dp.Model;
-        pub const Instance = td.Dp.Instance;
-        pub const PrepCache = td.Dp.PrepCache;
-        pub const computePrep = td.Dp.computePrep;
-        pub const evalFromPrep = td.Dp.evalFromPrep;
-        pub const qFromPrep = evalFromPrep;
-        pub const limit = td.Dp.limit;
-        pub const q = eval;
-        pub fn eval(comptime F: type, x: [2]F, m: *const Model, inst: *const Instance, t: f64) [2]F {
-            return evalFromPrep(F, x, &computePrep(m, inst), m, inst, t);
-        }
+        pub const U = td.D.U;
+        pub const num_ports = td.D.num_ports;
+        pub const Model = td.D.Model;
+        pub const Instance = td.D.Instance;
+        pub const limit = td.D.limit;
+        pub const eval = td.D.eval;
+        pub const q = td.D.eval;
     };
     for ([_]usize{ 1, 2 }) |copies| {
         var b = Builder.init(testing.allocator);
         const p = b.addNode();
         const n = b.addNode();
-        // Same local voltages, different ground maps. Four diodes enable dedup.
+        // Same local voltages, different ground maps: the grounded anode row is
+        // the one whose derivative the limiting correction must still carry.
         for (0..copies) |_| for ([_]u32{ 0, p }) |anode| {
             try b.addDevice(D, .{}, .{}, .{ anode, n });
         };
@@ -167,10 +162,11 @@ test "scatter: grounded limiting derivatives survive cached and uncached evaluat
 
         // pnjlim moves the local anode from 0 to -0.4, even when grounded.
         // Its derivative must still contribute +0.4*g to the active cathode.
-        const pc = td.Dp.computePrep(&.{}, &.{});
-        const exp = @exp(0.6 * pc.inv_vt);
-        const g = pc.is * exp * pc.inv_vt;
-        const current = pc.is * (exp - 1) + 0.4 * g;
+        const inv_vt = 1.0 / 0.02585;
+        const is: f64 = (D.Model{}).is;
+        const exp = @exp(0.6 * inv_vt);
+        const g = is * exp * inv_vt;
+        const current = is * (exp - 1) + 0.4 * g;
         const count: f64 = @floatFromInt(copies);
         for ([_][]const f64{ ckt.rhs, ckt.q_vec }) |plane| {
             try testing.expectApproxEqRel(count * current, plane[p], 1e-12);

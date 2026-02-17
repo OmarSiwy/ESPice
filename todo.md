@@ -276,13 +276,16 @@ mapped through `objdump`. Full derivation: `docs/device-eval-vs-ngspice-2026-09.
       the RESIDUAL, which stays f64, so the cost is iteration count and not the
       answer — but that has never been measured on CPU, only argued for the GPU
       (`docs/gpu-device-eval.md` §1).
-- [ ] **`canDedup` is dead for every built-in.** It requires `PrepCache` and no
-      `State`; no generated built-in exposes `PrepCache` and mos1 has `State`
-      (the `$prev` Meyer average). Measured, not read: 100 identical instances
-      cost 2,589 Ir/instance and 100 deliberately varied ones 2,542 — a 2%
-      spread where a live cache would show ~99% hits. Either make it reachable
-      or delete `tryCached`/`store`/`storeQ`/`eval_cache_*` (~120 lines and
-      three allocations that never run).
+- [x] **`canDedup` is dead for every built-in** — DELETED (2026-09). Not just
+      unreachable in practice, unreachable by contract: `canDedup` requires
+      `PrepCache`, which is absent from VerA's `allowed_pub_decls`, so
+      `rejectStrayPubDecls` refuses to compile a generated device that declares
+      it — and VerA's codegen never emits it anyway. Measured before the
+      decision: 100 identical instances cost 2,589 Ir/instance and 100
+      deliberately varied ones 2,542, a 2% spread where a live cache would show
+      ~99% hits. `PrepCache`/`computePrep`/`evalFromPrep`/`qFromPrep`,
+      `tryCached`/`store`/`storeQ`, `eval_cache_*` and the `set_lanes` hook are
+      gone; making it reachable would have to start in VerA.
 - [x] **Small-circuit `--gpu` no-decline** — DONE (2026-09). Cause was not the
       resident path: fourbitadder's whole GPU run is 0.36 s against a 0.04 s
       circuit, i.e. ~all of it is the fixed ~340 ms driver setup (cuInit +
