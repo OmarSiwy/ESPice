@@ -262,9 +262,10 @@ pub const GpuContext = struct {
     ckt: *Circuit,
     /// The eligible batches, resident on the device.
     batches: []BatchGpu,
-    /// The rest — anything with `limit`, `State`, history or a `PrepCache`,
-    /// plus anything eligible whose model the build declined to emit a kernel
-    /// for (`gpu_max_model_bytes`).
+    /// The rest — whatever `engine.gpuEligible` turns down (history, a core
+    /// that reads host-published sim state, `State` without `limit`), plus
+    /// anything eligible whose model the build declined to emit a kernel for
+    /// (`gpu_max_model_bytes`).
     /// They keep stamping the host planes, and the two sets are summed.
     ///
     /// A mixed circuit is the NORMAL case, not a corner: `vsource` declares
@@ -912,7 +913,7 @@ pub const GpuContext = struct {
             @memset(ckt.q_vec, 0);
         }
         const pl = ckt.ownPlanes();
-        for (self.cpu_batches) |b| b.eval(b.ctx, &pl, 0, 0, b.count, x, t);
+        for (self.cpu_batches) |b| b.eval(b.ctx, &pl, 0, b.count, x, t);
 
         // One wait, and only on this stream — `cuCtxSynchronize` would stall on
         // every context on the device, including work this process does not own.
