@@ -276,8 +276,18 @@ pub fn main(init: std.process.Init) !void {
                 run.skip = jobSkipReason(err);
                 continue;
             };
+            // The GATE stays on exit status with output discarded. ngspice
+            // prints 4.7 MB on scaling/rc_ladder_100k, past runCapture's 1 MiB
+            // cap, and gating on a capture turned a fixture it runs fine into a
+            // skip. Only a failure pays for a second, captured run — and it is
+            // worth paying for, because a `skip` that cannot say why is what
+            // this whole exercise exists to delete.
+            // ponytail: a reference that HANGS pays the timeout twice, since
+            // the recapture cannot know the first run was killed rather than
+            // rejected. Upgrade path if that tail ever matters: return the exit
+            // code instead of a bool and skip the recapture on `timeout`'s 124.
             if (!runOk(io, job, cfg.timeout)) {
-                run.skip = "preflight failed";
+                run.skip = refSkipReason(fxa, runCapture(io, fxa, job, cfg.timeout));
                 continue;
             }
             run.median_ns = timedMedian(io, fxa, job, cfg.timeout, cfg.iters, .quiet) catch |err| blk: {
@@ -287,6 +297,16 @@ pub fn main(init: std.process.Init) !void {
             if (run.median_ns == null) continue;
             run.rss_kb = measurePeakRss(io, fxa, job, cfg.timeout);
             run.raw = if (job.raw.len > 0) job.raw else findRaw(io, fxa, job.cwd);
+            // Exit 0 is not evidence that anything was WRITTEN. ngspice 44.2
+            // rejects `.temp -40 125 55`, finds no other analysis card, and
+            // exits 0 having produced no raw at all; a missing raw then fell
+            // through as a null Accuracy and printed N/A — "we could not
+            // compare these" — when the truth is "there was nothing to
+            // compare". Name it at the point where it is still knowable.
+            if (run.raw.len > 0) Io.Dir.cwd().access(io, run.raw, .{}) catch {
+                run.raw = "";
+                run.skip = "ran but wrote no raw";
+            };
         }
 
         // peak RSS (one extra run each, only for fixtures that succeeded)
@@ -419,6 +439,7 @@ fn parseRawBlob(gpa: std.mem.Allocator, blob: []const u8) ?Plot {
 /// N/A while looking like it validated something.
 fn normalizeVarName(gpa: std.mem.Allocator, lower: []const u8) []const u8 {
     if (scale_names.has(lower)) return lower;
+    if (scale_aliases.get(lower)) |canonical| return canonical;
     if (std.mem.startsWith(u8, lower, "v(") or std.mem.startsWith(u8, lower, "i(")) return lower;
     const branch = std.mem.indexOf(u8, lower, "#branch") orelse std.mem.indexOf(u8, lower, ":flow(");
     if (branch) |cut| return std.fmt.allocPrint(gpa, "i({s})", .{lower[0..cut]}) catch lower;
@@ -436,13 +457,16 @@ fn compareRawFiles(io: Io, gpa: std.mem.Allocator, ng_path: []const u8, zp_path:
 }
 
 fn comparePlots(gpa: std.mem.Allocator, ng: Plot, zp: Plot, rtol: f64) ?Accuracy {
-    if (ng.is_complex or zp.is_complex or !std.ascii.eqlIgnoreCase(ng.plotname, zp.plotname)) return null;
+    if (ng.is_complex or zp.is_complex) return null;
+    var ng_name_buf: [128]u8 = undefined;
+    var zp_name_buf: [128]u8 = undefined;
+    const ng_class = plotClass(&ng_name_buf, ng.plotname);
+    const zp_class = plotClass(&zp_name_buf, zp.plotname);
+    if (!std.mem.eql(u8, ng_class, zp_class)) return null;
     for (ng.data) |value| if (!std.math.isFinite(value)) return .{ .max_rel = std.math.inf(f64), .rms_rel = std.math.inf(f64), .pass = false };
     for (zp.data) |value| if (!std.math.isFinite(value)) return .{ .max_rel = std.math.inf(f64), .rms_rel = std.math.inf(f64), .pass = false };
 
-    const plotname = std.ascii.allocLowerString(gpa, ng.plotname) catch return null;
-    defer gpa.free(plotname);
-    const interpolate = std.mem.indexOf(u8, plotname, "transient") != null;
+    const interpolate = std.mem.indexOf(u8, ng_class, "transient") != null;
 
     var columns: std.StringHashMapUnmanaged(usize) = .empty;
     defer columns.deinit(gpa);
@@ -479,12 +503,14 @@ fn comparePlots(gpa: std.mem.Allocator, ng: Plot, zp: Plot, rtol: f64) ?Accuracy
         // Transient time grids differ; other scales still participate in error.
         if (interpolate and scale_names.has(ng_name)) continue;
         const zi = columns.get(ng_name) orelse {
-            // Internal device nodes differ across model implementations, and
-            // each simulator spells them differently: ngspice/Xyce use
-            // `m1#drain`, VACASK uses `d1:a_int`. Only `#` was exempt, so every
-            // VACASK deck with a non-ideal diode or MOSFET reported N/A on
-            // coverage grounds while its real nodes matched perfectly.
-            if (std.mem.indexOfAny(u8, ng_name, "#:") != null) continue;
+            if (isInternalNode(ng_name)) continue;
+            // A scale the candidate does not emit is not a missing SIGNAL.
+            // Xyce runs `.op` as a one-point DC sweep and therefore writes a
+            // sweep column that an operating point has no counterpart for;
+            // holding that against coverage marked every Xyce `.op` fixture
+            // N/A. `any` below still requires a real non-scale column to have
+            // matched, so a plot that agreed only on its scale is not a pass.
+            if (scale_names.has(ng_name)) continue;
             complete = false;
             continue;
         };
@@ -563,6 +589,73 @@ fn comparePlots(gpa: std.mem.Allocator, ng: Plot, zp: Plot, rtol: f64) ?Accuracy
 const scale_names = std.StaticStringMap(void).initComptime(.{
     .{ "time", {} }, .{ "frequency", {} }, .{ "v(v-sweep)", {} }, .{ "i(i-sweep)", {} }, .{ "temp-sweep", {} },
 });
+
+/// One simulator's spelling of a scale another simulator already names. Xyce
+/// calls the DC-sweep scale `sweep` whatever is being swept; ngspice and espice
+/// name it after the swept source. Without the alias the column normalizes to
+/// `v(sweep)`, matches nothing, and every DC fixture reports N/A on coverage
+/// grounds while its real signals agree to machine precision.
+///
+/// `vsweep` is OURS. A VACASK sweep is named by its deck and VACASK
+/// identifiers cannot contain `-`, so the decks under `fixtures/*/*/vacask`
+/// spell that same scale `vsweep`.
+const scale_aliases = std.StaticStringMap([]const u8).initComptime(.{
+    .{ "sweep", "v(v-sweep)" },
+    .{ "vsweep", "v(v-sweep)" },
+});
+
+/// Analysis class behind a plotname. Xyce runs `.op` as a one-point DC sweep
+/// and labels the plot "DC transfer characteristic" (or, when an `.ac` card
+/// follows, "DC operating point"); ngspice and espice label it "Operating
+/// Point". Same analysis, three spellings. An unlisted plotname is its own
+/// class, so the guard still rejects a transient-vs-DC mixup and a new analysis
+/// can never silently alias onto an existing one.
+const plot_classes = std.StaticStringMap([]const u8).initComptime(.{
+    .{ "operating point", "dc" },
+    .{ "dc operating point", "dc" },
+    .{ "dc transfer characteristic", "dc" },
+});
+
+/// `buf` must outlive the result. A plotname too long to lowercase in place
+/// falls back to itself, so an unusually long name degrades to the old
+/// exact-match rule rather than to a silent refusal to compare.
+fn plotClass(buf: []u8, plotname: []const u8) []const u8 {
+    if (plotname.len > buf.len) return plotname;
+    const lower = std.ascii.lowerString(buf[0..plotname.len], plotname);
+    return plot_classes.get(lower) orelse lower;
+}
+
+/// The tail Xyce gives a node its MODEL created rather than the deck. ngspice
+/// marks these with `#` and VACASK with `:`, so they were already exempt;
+/// Xyce spells them `q1_baseprime`, `d1_internal`, `t1_int1` — plain
+/// identifiers with no marker at all, which held 28 fixtures at N/A on
+/// coverage grounds while their deck nodes matched to 1e-12 or better.
+///
+/// Closed list on purpose. A Xyce device whose internal node is not named here
+/// makes its fixture read N/A, which is loud; a wildcard would make it read
+/// PASS, which is silent. If a new device appears, add it and say so.
+const xyce_internal_nodes = std.StaticStringMap(void).initComptime(.{
+    .{ "internal", {} }, // diode series resistance
+    .{ "baseprime", {} }, .{ "collectorprime", {} }, .{ "emitterprime", {} }, // BJT
+    .{ "drainprime", {} }, .{ "sourceprime", {} }, .{ "body", {} }, // MOSFET/JFET/MESFET
+    .{ "branch1", {} }, .{ "branch2", {} }, // lossy transmission line
+    .{ "i1", {} },       .{ "i2", {} },       .{ "int1", {} },      .{ "int2", {} }, // ideal transmission line
+});
+
+/// A node a MODEL created, not one the deck named. Which of these exist and
+/// what they are called is an implementation choice, so an absent counterpart
+/// is not a coverage gap. `!` is Xyce's marker for a device IT synthesised —
+/// a mutual inductor becomes `ymil!k1_l1` — and `normalizeVarName` has already
+/// eaten the `#branch` that would otherwise have flagged it.
+fn isInternalNode(name: []const u8) bool {
+    if (std.mem.indexOfAny(u8, name, "#:!") != null) return true;
+    // Unwrap the `v(...)`/`i(...)` normalizeVarName put on, so the instance
+    // name has to be there: `d1_internal` is a model node, `_body` is a deck
+    // node whose name happens to start with an underscore.
+    const inner = if (name.len > 3 and name[1] == '(' and name[name.len - 1] == ')') name[2 .. name.len - 1] else name;
+    const cut = std.mem.lastIndexOfScalar(u8, inner, '_') orelse return false;
+    return cut > 0 and xyce_internal_nodes.has(inner[cut + 1 ..]);
+}
 
 fn extractCol(data: []const f64, nvars: usize, col: usize, out: []f64) void {
     for (out, 0..) |*value, p| value.* = data[p * nvars + col];
@@ -744,6 +837,8 @@ fn buildJob(
             const raw = try std.fmt.allocPrint(gpa, "{s}/{s}--{s}.{s}.raw", .{ out_dir, fx.category, fx.name, @tagName(id) });
             const deck = if (id == .ngspice and cfg.ngspice_klu)
                 try kluDeck(io, gpa, out_dir, fx, netlist)
+            else if (id == .xyce)
+                try xyceDeck(io, gpa, out_dir, fx, netlist)
             else
                 netlist;
             return .{ .argv = try gpa.dupe([]const u8, &.{ ref.bin, "-b", "-r", raw, deck }), .raw = raw };
@@ -819,6 +914,76 @@ fn kluDeck(io: Io, gpa: std.mem.Allocator, out_dir: []const u8, fx: Fixture, net
     const body = try std.fmt.allocPrint(gpa, "{s}\n.options klu\n{s}", .{ text[0..nl], text[@min(nl + 1, text.len)..] });
     Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = body }) catch return error.DeckFailed;
     return path;
+}
+
+/// Cards Xyce reads but that only steer ITS OWN print files. We take the raw
+/// off `-r`, so dropping them costs nothing — and keeping them is not free:
+/// a `.print AC` card beside a `.tran` card is a hard Xyce error ("Analysis
+/// type TRAN and print type AC are inconsistent") even though nothing in this
+/// benchmark ever reads what it names, and `.print` lines naming an ngspice
+/// spelling Xyce has no symbol for ("undefined symbol VIDS#BRANCH") abort the
+/// run outright.
+const xyce_dropped_cards = std.StaticStringMap(void).initComptime(.{
+    .{ ".print", {} }, .{ ".plot", {} }, .{ ".width", {} },
+});
+
+/// Xyce is SPICE3-compatible on the CIRCUIT and diverges on ngspice's lexical
+/// and output-control extensions, so it reads a respelled copy of the deck.
+/// Three rules, all line-local:
+///   1. ` $ ...` — ngspice's inline comment. Xyce spells it `;` and parses the
+///      comment as extra device fields ("Unrecognized parameter AC Too Many
+///      Terms for device VIN").
+///   2. `.print`/`.plot`/`.width` — see xyce_dropped_cards.
+///   3. `dc=V` on a source card — ngspice accepts the `=` form, Xyce takes
+///      only the positional `DC V` ("Invalid DC value \"=\" for device VS").
+/// Topology, models, parameters and analysis cards are passed through byte for
+/// byte. This changes how the deck is SPELLED, never what it asks for — a
+/// rewrite that changed the circuit would make every Xyce column meaningless.
+fn xyceDeck(io: Io, gpa: std.mem.Allocator, out_dir: []const u8, fx: Fixture, netlist: []const u8) JobError![]const u8 {
+    const text = Io.Dir.cwd().readFileAlloc(io, netlist, gpa, .limited(1 << 26)) catch return error.DeckFailed;
+    var body: std.ArrayList(u8) = .empty;
+    try body.ensureTotalCapacity(gpa, text.len);
+
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw_line| {
+        const line = stripInlineComment(raw_line);
+        if (isDroppedCard(line)) continue;
+        var rest = line;
+        while (std.mem.indexOf(u8, rest, "dc=")) |cut| {
+            // Token boundary only: a bare `dc=` is a card field, `dc=` glued to
+            // a name (ngspice's `sinedc=`) is a different parameter.
+            const boundary = cut == 0 or rest[cut - 1] == ' ' or rest[cut - 1] == '\t';
+            try body.appendSlice(gpa, rest[0..cut]);
+            try body.appendSlice(gpa, if (boundary) "DC " else "dc=");
+            rest = rest[cut + 3 ..];
+        }
+        try body.appendSlice(gpa, rest);
+        try body.append(gpa, '\n');
+    }
+
+    const path = try std.fmt.allocPrint(gpa, "{s}/{s}--{s}.xyce.sp", .{ out_dir, fx.category, fx.name });
+    Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = body.items }) catch return error.DeckFailed;
+    return path;
+}
+
+/// ngspice ends a line at an unquoted `$` that follows whitespace (or opens the
+/// line). Anything else — a `$` glued to a token — is left alone.
+fn stripInlineComment(line: []const u8) []const u8 {
+    var i: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, line, i, '$')) |cut| {
+        if (cut == 0 or line[cut - 1] == ' ' or line[cut - 1] == '\t') return line[0..cut];
+        i = cut + 1;
+    }
+    return line;
+}
+
+fn isDroppedCard(line: []const u8) bool {
+    const start = std.mem.trimStart(u8, line, " \t");
+    if (start.len == 0 or start[0] != '.') return false;
+    const end = std.mem.indexOfAny(u8, start, " \t\r") orelse start.len;
+    var buf: [16]u8 = undefined;
+    if (end > buf.len) return false;
+    return xyce_dropped_cards.has(std.ascii.lowerString(&buf, start[0..end]));
 }
 
 fn deckHasKlu(text: []const u8) bool {
@@ -897,6 +1062,54 @@ fn skipReason(text: []const u8) ?[]const u8 {
     const rest = text[prefix.len..];
     const end = std.mem.indexOfScalar(u8, rest, '"') orelse return null;
     return rest[0..end];
+}
+
+/// Substrings each reference puts on the one line that says WHY it refused a
+/// deck. Ordered by how specific the line is, and scanned as substrings rather
+/// than keyed, so this is a list and not a StaticStringMap. "preflight failed"
+/// is the fallback and it is a bad answer — a bare skip is exactly what hid the
+/// fact that Xyce had never been run on this suite at all.
+const ref_failure_markers = [_][]const u8{
+    "Model is required", // Xyce: a model LEVEL it does not implement
+    "No model found",
+    "not formatted correctly", // Xyce: model parameter it does not know
+    "Unrecognized parameter",
+    "Unrecognized fields",
+    "undefined symbol",
+    "are inconsistent",
+    "Invalid DC value",
+    "Netlist error:", // Xyce: e.g. "No analysis specified."
+    "Time step too small",
+    "has failed",
+    "not supported",
+    "Error on line", // ngspice
+    "error:", // VACASK
+};
+
+/// BOTH streams: Xyce puts its netlist diagnostics on stdout, ngspice puts
+/// `Error on line 5 or its substitute:` on stderr and the offending card on the
+/// line after it. Scanning one stream, or one line, leaves 38 of the 40
+/// ngspice skips saying nothing.
+fn refSkipReason(gpa: std.mem.Allocator, cap: Capture) []const u8 {
+    for (ref_failure_markers) |needle| {
+        for ([_][]const u8{ cap.text, cap.stderr }) |haystack| {
+            var lines = std.mem.splitScalar(u8, haystack, '\n');
+            while (lines.next()) |raw| {
+                if (std.mem.indexOf(u8, raw, needle) == null) continue;
+                const line = std.mem.trim(u8, raw, " \t\r");
+                if (line.len == 0) continue;
+                if (line[line.len - 1] != ':') return line[0..@min(line.len, 90)];
+                while (lines.next()) |next_raw| {
+                    const next = std.mem.trim(u8, next_raw, " \t\r");
+                    if (next.len == 0) continue;
+                    const joined = std.fmt.allocPrint(gpa, "{s} {s}", .{ line, next }) catch line;
+                    return joined[0..@min(joined.len, 90)];
+                }
+                return line[0..@min(line.len, 90)];
+            }
+        }
+    }
+    return "preflight failed";
 }
 
 fn runOk(io: Io, job: Job, timeout: []const u8) bool {
@@ -1128,7 +1341,11 @@ fn accuracyStatus(acc: Accuracy) []const u8 {
 fn refAccuracyStatus(r: Result, id: RefId) []const u8 {
     if (r.cpu_accuracy.get(id)) |acc| return accuracyStatus(acc);
     if (r.zp_cpu_median_ns == null) return "-";
-    if (r.refs.get(id).median_ns == null) return if (r.refs.get(id).skip.len > 0) "SKIP" else "-";
+    // Skip first: a reference can TIME a fixture and still have nothing to
+    // compare (exit 0, no raw written), and that is a skip with a reason, not
+    // an unexplained N/A.
+    if (r.refs.get(id).skip.len > 0) return "SKIP";
+    if (r.refs.get(id).median_ns == null) return "-";
     return "N/A";
 }
 
@@ -1248,9 +1465,13 @@ fn writeResultsBody(
     try w.writeAll(" cpu/ng | gpu/ng | zp-MB |");
     for (std.enums.values(RefId)) |id| try w.print(" {s} |", .{ref_mb_label.get(id)});
     try w.writeAll(" cpu-max | cpu-rms | cpu | gpu-max | gpu-rms | gpu |");
+    // The non-primary references carry their max/RMS here and only a verdict on
+    // the terminal table. Adjudicating a disagreement needs the numbers: "espice
+    // FAILs ngspice at 4.8e-3 and matches Xyce at 2e-16" is a finding, "FAIL
+    // PASS" is a puzzle.
     for (std.enums.values(RefId)) |id| {
         if (id == primary_ref) continue;
-        try w.print(" {s} |", .{ref_acc_label.get(id)});
+        try w.print(" {s}-max | {s}-rms | {s} |", .{ ref_acc_label.get(id), ref_acc_label.get(id), ref_acc_label.get(id) });
     }
     try w.writeAll("\n|---|---|---|");
     for (std.enums.values(RefId)) |_| try w.writeAll("---|");
@@ -1259,7 +1480,7 @@ fn writeResultsBody(
     try w.writeAll("---|---|---|---|---|---|");
     for (std.enums.values(RefId)) |id| {
         if (id == primary_ref) continue;
-        try w.writeAll("---|");
+        try w.writeAll("---|---|---|");
     }
     try w.writeAll("\n");
 
@@ -1277,7 +1498,7 @@ fn writeResultsBody(
         try mdAccuracy(w, r.gpu_accuracy, gpu_status);
         for (std.enums.values(RefId)) |id| {
             if (id == primary_ref) continue;
-            try w.print(" {s} |", .{refAccuracyStatus(r, id)});
+            try mdAccuracy(w, r.cpu_accuracy.get(id), refAccuracyStatus(r, id));
         }
         try w.writeAll("\n");
     }
@@ -1440,9 +1661,75 @@ test "one signal spelling across four simulators" {
         .{ "frequency", "frequency" },
     }) |case| try std.testing.expectEqualStrings(case[1], normalizeVarName(a, case[0]));
 
-    // Xyce internal device nodes keep their '#'; comparePlots drops those by
-    // name, and wrapping them as currents would silently invent a signal.
+    // Internal device nodes keep their own spelling; comparePlots drops those
+    // by name, and wrapping them as currents would silently invent a signal.
     try std.testing.expectEqualStrings("v(m1#drain)", normalizeVarName(a, "m1#drain"));
+    inline for (.{
+        "v(m1#drain)", // ngspice
+        "v(d1:a_int)", // VACASK
+        "v(d1_internal)", "v(q1_baseprime)", "v(t1_int2)", "v(m1_body)", // Xyce
+        "i(ymil!k1_l1)", // Xyce's synthesised mutual-inductor device
+    }) |internal| try std.testing.expect(isInternalNode(internal));
+    // A deck node is not internal just because a model node could share a
+    // prefix or a suffix with it.
+    inline for (.{ "v(out)", "i(v1)", "v(internal)", "v(d1_internals)", "v(_body)", "v(i2)" }) |named|
+        try std.testing.expect(!isInternalNode(named));
+}
+
+test "Xyce spells `.op` as a one-point DC sweep" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Exactly what Xyce writes for `Vin in 0 DC 10 / R1 in out 5k / R2 out 0 5k`
+    // under `.op`: a plot it calls a DC transfer characteristic, carrying a
+    // `sweep` scale that an operating point has no counterpart for. Before the
+    // alias and the plot class this pair was N/A on both counts while agreeing
+    // to the last bit.
+    const xyce: Plot = .{
+        .plotname = "DC transfer characteristic",
+        .varnames = &.{ normalizeVarName(a, "sweep"), normalizeVarName(a, "in"), normalizeVarName(a, "out"), normalizeVarName(a, "vin#branch") },
+        .is_complex = false,
+        .npoints = 1,
+        .nvars = 4,
+        .data = &.{ 0, 10, 5, -1e-3 },
+    };
+    const espice: Plot = .{
+        .plotname = "Operating Point",
+        .varnames = &.{ "i(vin)", "v(in)", "v(out)" },
+        .is_complex = false,
+        .npoints = 1,
+        .nvars = 3,
+        .data = &.{ -1e-3, 10, 5 },
+    };
+    const acc = comparePlots(a, xyce, espice, 1e-3).?;
+    try std.testing.expect(acc.complete and acc.pass);
+    // A dropped scale cannot BE the match: same plot with only the scale in
+    // common has no signal to compare and must stay unvalidated.
+    var scale_only = espice;
+    scale_only.varnames = &.{"v(v-sweep)"};
+    scale_only.nvars = 1;
+    scale_only.data = &.{0};
+    try std.testing.expect(comparePlots(a, xyce, scale_only, 1e-3) == null);
+    // The class collapses `.op` spellings only. Transient vs DC is still a
+    // refusal, not a comparison.
+    var tran = espice;
+    tran.plotname = "Transient Analysis";
+    try std.testing.expect(comparePlots(a, xyce, tran, 1e-3) == null);
+}
+
+test "the Xyce deck rewrite respells, and leaves the circuit alone" {
+    // ngspice's ` $` comment, its `.print`/`.plot`/`.width` output control and
+    // its `dc=` source field are the three things Xyce will not read. Nothing
+    // else may move.
+    try std.testing.expectEqualStrings("Vin in 0 DC 0 AC 1 ", stripInlineComment("Vin in 0 DC 0 AC 1 $ small-signal stimulus"));
+    try std.testing.expectEqualStrings("", stripInlineComment("$ whole-line comment"));
+    try std.testing.expectEqualStrings("R1 n$1 0 1k", stripInlineComment("R1 n$1 0 1k"));
+    try std.testing.expect(isDroppedCard(".PRINT TRAN V(2)"));
+    try std.testing.expect(isDroppedCard("  .plot dc v(out)"));
+    try std.testing.expect(isDroppedCard(".width out=80"));
+    try std.testing.expect(!isDroppedCard(".tran 1n 10n"));
+    try std.testing.expect(!isDroppedCard("Rprint 1 0 1k"));
+    try std.testing.expect(!isDroppedCard(".averyverylongdotcardname 1"));
 }
 
 test "KLU is a deck rewrite, and an already-KLU deck is left alone" {
@@ -1475,6 +1762,34 @@ test "reference flags come off the enum, not a hand-written list" {
     );
     try std.testing.expectEqualStrings("Xyce Release 7.10.0-opensource", firstBannerLine("Xyce Release 7.10.0-opensource\n"));
     try std.testing.expectEqualStrings("", firstBannerLine(""));
+}
+
+test "a reference that refuses a deck says why" {
+    // Verbatim Xyce and ngspice output. The point of the whole exercise: a row
+    // that reads `skip` with no reason is indistinguishable from a row nobody
+    // ever tried, which is how Xyce stayed absent from this suite.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // ngspice writes the diagnostic to STDERR and the offending card to the
+    // line after it; either half alone names nothing useful.
+    try std.testing.expectEqualStrings(
+        "Error on line 5 or its substitute: .pz",
+        refSkipReason(a, .{ .ok = false, .text = "", .stderr = "\n\nError on line 5 or its substitute:\n  .pz\n" }),
+    );
+    try std.testing.expectEqualStrings(
+        "Netlist error: No analysis specified.",
+        refSkipReason(a, .{ .ok = false, .stderr = "", .text = "***** Reading and parsing netlist...\n Unrecognized dot line will be ignored\nNetlist error: No analysis specified.\n" }),
+    );
+    try std.testing.expectEqualStrings(
+        "Model is required for device Q1 and no valid model card found.",
+        refSkipReason(a, .{ .ok = false, .stderr = "", .text = "Netlist warning: No print specified\n Model is required for device Q1 and no valid model card found.\nNetlist error: bad\n" }),
+    );
+    try std.testing.expectEqualStrings(
+        "Time step too small near step number: 71  Exiting transient loop.",
+        refSkipReason(a, .{ .ok = false, .stderr = "", .text = "***** Beginning Transient Calculation...\nTime step too small near step number: 71  Exiting transient loop.\n" }),
+    );
+    try std.testing.expectEqualStrings("preflight failed", refSkipReason(a, .{ .ok = false, .stderr = "", .text = "***** Xyce ran fine\n" }));
 }
 
 test "an unrun reference reads as SKIP, never as blank" {
