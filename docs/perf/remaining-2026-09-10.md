@@ -20,6 +20,13 @@ only remaining loss, and it is 3%.
 
 Session arc on pi100: 754.9M → 465.6M (−38.3%).
 
+**Since**, on the `limit-body` branch (item 2 below): pi100 **433,940,840**
+(ratio 0.779 PATH / 0.846 from-source), mos6 **146,039,892** (0.878 / 0.981) —
+so mos6 is no longer a loss against ngspice's fastest build either. Both
+measured on 446268a + VerA a19b6fb as the baseline, which reads 466,358,459 /
+153,736,881 for the same decks (446268a adds a checkpoint commit over the
+6e55e74 the table above was taken on).
+
 ## THE BUDGET IS STALE
 
 The per-pass budget below was taken at pi100 = 507M and mos6 = 189M. Since
@@ -85,21 +92,29 @@ Live sub-items:
   found ngspice recomputes its own per-eval preamble with an apologetic
   comment, so we are not behind everywhere. Find the blocks where we are.
 
-### 2. Limiting — `D.limit`'s body is 291 Ir per instance per iterate
+### 2. Limiting — DONE. `docs/perf/limiting-2026-09-10.md`
 
-ngspice's whole limiter ladder is 52. Probe passes isolated it: an extra
-gather costs 2.13%, an extra `D.limit` costs **14.64%** — the body is ~79% of
-limiting, the gather is not the problem, and the second read in `evalRange` is
-under 1% because `corr_live` already needs those loads.
+Was 291 Ir per instance per iterate against ngspice's 52. Itemised there
+against ngspice's own `mos1load` ladder compiled in the same rig, and three
+fixes landed (ARPice `limit-body` + VerA `limit-body-vera` 248c0c6): the
+limiter kernels are now `inline` transparent-test wrappers over `noinline`
+clamp ladders (`zFetlim` had been too big for LLVM to inline AT ALL — a real
+`call` with six caller-saved spills), `cg_limit` hoists the frame sign, and
+VerA exports `limit_reads` / `limit_writes` so the host gathers and stores only
+the unknowns the device actually corrects (mos1: four of eight read, two of
+eight written). **pi100 466.4M → 433.9M (−6.95%), mos6 153.7M → 146.0M
+(−5.01%), NR iterations unchanged at 1352 / 884, 248 of 248 fixture raws
+byte-identical.**
 
-`zPnjlim` (7dd74a0) and `zFetlim`/`zLimvds` (baccc5a) now have host fast paths.
-What remains is the generated `limit()` scaffolding and the per-unknown
-gather/write around it.
+Left there deliberately: we run TWO `pnjlim` calls where ngspice runs one and
+derives the other by subtraction (≈22 Ir — but it changes which iterates Newton
+accepts, so it is a convergence change, not an optimisation), and `limit` still
+returns `[n_u]f64`.
 
+Retired experiments, still retired:
 **Fusing the two walks is worth 2.1% and is not separable from clamp ordering**
 — with `lim_active` true, `old` is read from `lim_x`, which the pass itself
 writes. Doubling the pass changes the raw output; that is the hazard, concretely.
-
 `@call(.always_inline, D.limit, ...)` is a **regression**: +0.28% pi100,
 +0.20% mos6, verified with two builds.
 
