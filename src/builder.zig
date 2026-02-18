@@ -535,6 +535,26 @@ pub const NetBuilder = struct {
     i_names: [][]const u8,
     n_i: u32,
 
+    // -- AC excitation table: one row per source carrying an `AC` spec -------
+    // ngspice `CKTacLoad` (analysis/acan.c:471-490) runs EVERY device's acLoad
+    // into ONE rhs, so an .ac run drives every V and I card that named `AC` at
+    // once, each at its own magnitude and phase. A card with no `AC` is simply
+    // ABSENT here (existence-based, no `has_ac` flag): vsrcacld.c:171 and
+    // isrcacld.c:36 load acReal = acImag = 0 for it, leaving a V source an AC
+    // short and an I source an AC open while both still stamp the matrix.
+    //
+    // `ac_pos`/`ac_neg` are the two rows an entry subtracts from / adds to
+    // under Circuit.rhs's residual sign (the AC solve's rhs is −F). An I card
+    // gives (n+, n−), matching isrcacld.c's two node stamps. A V card drives
+    // its BRANCH row only (vsrcacld.c:175 stamps rhs[branch]), so it lands as
+    // (GROUND, branch) and one untagged two-row loop covers both kinds. GROUND
+    // rows are skipped — row 0 is the ground clamp, not an unknown.
+    ac_pos: []u32,
+    ac_neg: []u32,
+    ac_re: []f64,
+    ac_im: []f64,
+    n_ac: u32,
+
     // Pre-allocated to bucket('l').size()
     l_names: [][]const u8,
     l_branches: []u32,
@@ -591,6 +611,11 @@ pub const NetBuilder = struct {
             .n_v = 0,
             .i_names = try arena.alloc([]const u8, ni),
             .n_i = 0,
+            .ac_pos = try arena.alloc(u32, nv + ni),
+            .ac_neg = try arena.alloc(u32, nv + ni),
+            .ac_re = try arena.alloc(f64, nv + ni),
+            .ac_im = try arena.alloc(f64, nv + ni),
+            .n_ac = 0,
             .l_names = try arena.alloc([]const u8, nl_),
             .l_branches = try arena.alloc(u32, nl_),
             .l_values = try arena.alloc(f64, nl_),
@@ -600,6 +625,40 @@ pub const NetBuilder = struct {
             .source_node = GROUND,
             .source_branch = GROUND,
         };
+    }
+
+    /// Record one AC-driving source. See the `ac_pos`/`ac_neg` note on the
+    /// struct for why a V card arrives as (GROUND, branch).
+    fn addAcDrive(self: *NetBuilder, pos: u32, neg: u32, re: f64, im: f64) void {
+        self.ac_pos[self.n_ac] = pos;
+        self.ac_neg[self.n_ac] = neg;
+        self.ac_re[self.n_ac] = re;
+        self.ac_im[self.n_ac] = im;
+        self.n_ac += 1;
+    }
+
+    /// Collapse the AC table into the composite excitation the frequency
+    /// solves take: one stacked-real vector `[re(0..n), im(0..n)]` over the
+    /// circuit unknowns, which is ngspice's post-`CKTacLoad` (CKTrhs, CKTirhs)
+    /// pair. Every source lands in the SAME vector, so a deck with two driven
+    /// V cards and an I card is one solve per frequency, not a special case.
+    /// All-zero when no card named `AC` — the correct zero response.
+    ///
+    /// Rows must already be in post-permutation coordinates (see engine.zig).
+    pub fn acExcitation(self: *const NetBuilder, gpa: std.mem.Allocator, n: usize) ![]f64 {
+        const exc = try gpa.alloc(f64, 2 * n);
+        @memset(exc, 0);
+        for (self.ac_pos[0..self.n_ac], self.ac_neg[0..self.n_ac], self.ac_re[0..self.n_ac], self.ac_im[0..self.n_ac]) |pos, neg, re, im| {
+            if (pos != GROUND) {
+                exc[pos] -= re;
+                exc[n + pos] -= im;
+            }
+            if (neg != GROUND) {
+                exc[neg] += re;
+                exc[n + neg] += im;
+            }
+        }
+        return exc;
     }
 
     /// ngspice TRANinit semantics: PULSE TR/TF default to TSTEP, PW/PER to
@@ -806,16 +865,22 @@ pub const NetBuilder = struct {
                 self.v_sensed[self.n_v] = sensed;
                 self.n_v += 1;
                 // A replaced source stamps nothing, so it cannot be the
-                // reference the .op ladder anchors on.
-                if (self.source_branch == GROUND and !sensed) {
-                    self.source_node = nodes[0];
-                    self.source_branch = br;
+                // reference the .op ladder anchors on — nor can it be driven:
+                // `br` is the row the NEXT card got, not one this source owns.
+                if (!sensed) {
+                    if (self.source_branch == GROUND) {
+                        self.source_node = nodes[0];
+                        self.source_branch = br;
+                    }
+                    if (sourceAc(dev)) |ac| self.addAcDrive(GROUND, br, ac.re, ac.im);
                 }
             },
             'i' => {
                 if (comptime !@hasDecl(devices.isource, "eval")) return error.UnsupportedDevice;
                 const bound = try self.bindSource(devices.isource, dev);
-                try self.b.addDevice(devices.isource, bound[0], bound[1], try deviceNodes(self.b, devices.isource, dev));
+                const nodes = try deviceNodes(self.b, devices.isource, dev);
+                try self.b.addDevice(devices.isource, bound[0], bound[1], nodes);
+                if (sourceAc(dev)) |ac| self.addAcDrive(nodes[0], nodes[1], ac.re, ac.im);
                 self.i_names[self.n_i] = dev.name;
                 self.n_i += 1;
             },
@@ -1848,6 +1913,44 @@ fn sourceDc(dev: types.Device) ?f64 {
         else => {},
     };
     return null;
+}
+
+/// The `AC` spec of a source card, as the complex excitation it becomes:
+/// `mag · e^{j·phase·π/180}`. Null when the card names no `AC` — that source
+/// is NOT driven by an .ac run (ngspice `vsrcacld.c:171` / `isrcacld.c:36`).
+///
+/// Defaults follow ngspice `vsrcpar.c:59-72` (which numbers were given) plus
+/// `vsrctemp.c:38-43` (what a missing one becomes): bare `AC` is mag 1 phase 0,
+/// `AC mag` is phase 0, `AC mag phase` is both. Phase is DEGREES —
+/// `vsrctemp.c:68` is `radians = acPhase * M_PI / 180.0`.
+fn sourceAc(dev: types.Device) ?struct { re: f64, im: f64 } {
+    var mag: f64 = 1;
+    var phase: f64 = 0;
+    var given = false;
+    for (dev.positional, 0..) |pos, idx| {
+        switch (pos) {
+            // `AC 1 SIN 0 1 1k`: positionalNumber returns null on the next
+            // keyword, so the trailing waveform never reads as a phase.
+            .name => |name| {
+                if (!std.mem.eql(u8, name, "ac")) continue;
+                if (positionalNumber(dev, idx + 1)) |m| {
+                    mag = m;
+                    if (positionalNumber(dev, idx + 2)) |p| phase = p;
+                }
+            },
+            .group => |group| {
+                if (!std.mem.eql(u8, group.name, "ac")) continue;
+                if (group.args.len > 0) mag = valueNumber(group.args[0]) orelse mag;
+                if (group.args.len > 1) phase = valueNumber(group.args[1]) orelse phase;
+            },
+            else => continue,
+        }
+        given = true;
+        break;
+    }
+    if (!given) return null;
+    const rad = phase * (std.math.pi / 180.0);
+    return .{ .re = mag * @cos(rad), .im = mag * @sin(rad) };
 }
 
 fn findModel(spice_models: []const types.Model, name: []const u8) ?types.Model {
