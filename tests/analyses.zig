@@ -96,6 +96,17 @@ test "op: diode bridge-ish network converges via gmin path or plain" {
 // ac
 // ============================================================================
 
+/// One V card's slice of the excitation vector src/builder.zig `acExcitation`
+/// builds for a whole deck: `mag·e^{jφ}` on that source's branch row.
+fn vExc(a: std.mem.Allocator, n: usize, branch: u32, mag: f64, phase_deg: f64) ![]f64 {
+    const exc = try a.alloc(f64, 2 * n);
+    @memset(exc, 0);
+    const rad = phase_deg * (std.math.pi / 180.0);
+    exc[branch] = mag * @cos(rad);
+    exc[n + branch] = mag * @sin(rad);
+    return exc;
+}
+
 test "AC: resistive divider has flat response of 2/3" {
     const allocator = testing.allocator;
 
@@ -112,7 +123,9 @@ test "AC: resistive divider has flat response of 2/3" {
     const resp = try allocator.alloc(analysis.ac.Complex, n_points);
     defer allocator.free(resp);
 
-    try analysis.ac.sweep(&setup.ckt, x, setup.vbranch, 1.0, 0.0, &probe_list, freqs, resp, .{
+    const exc = try vExc(allocator, setup.ckt.n, setup.vbranch, 1.0, 0.0);
+    defer allocator.free(exc);
+    try analysis.ac.sweep(&setup.ckt, x, exc, &probe_list, freqs, resp, .{
         .f_start = 1e3,
         .f_stop = 1e6,
         .points_per_decade = 5,
@@ -140,7 +153,9 @@ test "AC: RC lowpass — passband gain 1, -20 dB/dec rolloff" {
     const resp = try allocator.alloc(analysis.ac.Complex, n_points);
     defer allocator.free(resp);
 
-    try analysis.ac.sweep(&setup.ckt, x, setup.vbranch, 1.0, 0.0, &probe_list, freqs, resp, .{
+    const exc = try vExc(allocator, setup.ckt.n, setup.vbranch, 1.0, 0.0);
+    defer allocator.free(exc);
+    try analysis.ac.sweep(&setup.ckt, x, exc, &probe_list, freqs, resp, .{
         .f_start = 1e-1,
         .f_stop = 1e6,
         .points_per_decade = 5,
@@ -183,7 +198,9 @@ test "AC: excitation phase rotates the response" {
     var freqs = [_]f64{0};
     var resp = [_]analysis.ac.Complex{analysis.ac.Complex.zero};
 
-    try analysis.ac.sweep(&ckt, x, vbranch, 2.0, 90.0, &probe_list, &freqs, &resp, .{
+    const exc = try vExc(allocator, ckt.n, vbranch, 2.0, 90.0);
+    defer allocator.free(exc);
+    try analysis.ac.sweep(&ckt, x, exc, &probe_list, &freqs, &resp, .{
         .f_start = 1e3,
         .f_stop = 1e3,
         .points_per_decade = 1,

@@ -151,7 +151,13 @@ test "run ac: RC lowpass |H| = 1/sqrt(1+(wRC)^2) across the sweep" {
 
     const x = try solveOp(&setup.ckt, arena);
     const probes = [_]u32{setup.n2};
-    const ctx = runCtx(&setup.ckt, x, &probes, setup.n1, setup.vbranch, arena);
+    var ctx = runCtx(&setup.ckt, x, &probes, setup.n1, setup.vbranch, arena);
+    // A hand-built context carries no deck, so nothing filled `ac_drive`. This
+    // is the 1∠0° the V card would have contributed via builder.acExcitation.
+    const exc = try arena.alloc(f64, 2 * setup.ckt.n);
+    @memset(exc, 0);
+    exc[setup.vbranch] = 1.0;
+    ctx.ac_drive = exc;
     const res = try analysis.run(&ctx, .{ .ac = .{
         .f_start = 1e-1,
         .f_stop = 1e6,
