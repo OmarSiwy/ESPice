@@ -19,10 +19,20 @@ pub const Options = struct {
     f_start: f64,
     f_stop: f64,
     points_per_decade: u16 = 10,
-    /// AC drive node; GROUND means "the drive source node" (ctx.source_node)
-    /// when running via the contract.
+    /// MNA BRANCH row of the V card carrying `DISTOF1`. ngspice cktdisto.c:115
+    /// puts a voltage source's F1 drive there and nowhere else; a NODE row is
+    /// wrong, because that node is pinned by the source's own branch equation
+    /// and the first-order solve comes back with V1(out) = 0 — which is what
+    /// left hd2/v1_mag/v2_mag identically zero on every `.disto` deck.
+    /// GROUND selects the current-source form below.
+    drive_branch: u32 = root.GROUND,
+    /// Current-source form, ngspice cktdisto.c:151-158: the drive is a current
+    /// INTO `ac_source_node`, so that row takes −0.5·mag. GROUND means "the
+    /// drive source branch" (ctx.source_branch) when running via the contract.
     ac_source_node: u32 = root.GROUND,
+    /// `DISTOF1 <mag> [<phase deg>]` off the card (ngspice vsrcpar.c:180-193).
     ac_magnitude: f64 = 1.0,
+    ac_phase: f64 = 0.0,
     /// Output node; GROUND means "the last probe" when running via the contract.
     output_node: u32 = root.GROUND,
     fd_eps: f64 = 1e-6,
@@ -37,9 +47,16 @@ pub const Options = struct {
 ///      analytic; only the extra order is FD).
 ///   3. For each frequency f:
 ///      a. Solve first-order: (G + jwC) * V1 = excitation
-///      b. Second-order nonlinear current D2(V1, V1) from the kernel
-///      c. Solve second-order: (G + j*2w*C) * V2 = -D2(V1, V1)
+///      b. Second-order nonlinear current ½ F''(V1, V1) from the kernel
+///      c. Solve second-order: (G + j*2w*C) * V2 = -½ F''(V1, V1)
 ///      d. HD2 = |V2[output]| / |V1[output]|
+///
+/// PHASOR CONVENTION, ngspice's throughout: the drive is HALF the sinusoid
+/// amplitude (cktdisto.c:115) and every kernel is a one-sided phasor, so the
+/// 2f1 source term is ½·F''·V1² — ngspice spells the ½ into the device
+/// coefficient (`g2 = 0.5 * gd / vte`, diodset.c:78) and contributes
+/// `g2 * V1²` (dloadfns.c:545 D1n2F1). `v1_mag`/`v2_mag` are reported back as
+/// SINUSOID amplitudes, i.e. ×2, which is DkerProc (dkerproc.c:43-52).
 ///
 /// Caller owns the outputs, one value per frequency point:
 /// freqs / hd2 / v1_mag / v2_mag, all logSweepCount(...) long.
@@ -112,25 +129,40 @@ pub fn sweep(
     const v1_re = x_work[0..n];
     const v1_im = x_work[n..nn];
 
+    // ngspice cktdisto.c:115-116 — HALF amplitude: the F1 drive is the
+    // one-sided phasor of a cosine of amplitude `ac_magnitude`.
+    const phase_rad = options.ac_phase * std.math.pi / 180.0;
+    const drive_re = 0.5 * options.ac_magnitude * @cos(phase_rad);
+    const drive_im = 0.5 * options.ac_magnitude * @sin(phase_rad);
+
     var sw = types.logSweep(options.f_start, options.f_stop, options.points_per_decade);
     var k: usize = 0;
     while (sw.next()) |f| : (k += 1) {
         const omega = 2.0 * std.math.pi * f;
 
-        // -- 3a: First-order solve: (G + jwC) * V1 = mag * e[src] --
+        // -- 3a: First-order solve: (G + jwC) * V1 = ½ mag * e[drive row] --
         dense_lu.buildComplexAdmittance(n, nn, g_dense, c_mat, omega, a_work);
 
         simdZero(rhs_work);
-        rhs_work[options.ac_source_node] = options.ac_magnitude;
+        if (options.drive_branch != root.GROUND) {
+            // V card: its own branch row (cktdisto.c:115-116).
+            rhs_work[options.drive_branch] = drive_re;
+            rhs_work[n + options.drive_branch] = drive_im;
+        } else {
+            // I card: current INTO the node, so the row is negated
+            // (cktdisto.c:151-158, ISRCposNode gets −0.5·mag).
+            rhs_work[options.ac_source_node] = -drive_re;
+            rhs_work[n + options.ac_source_node] = -drive_im;
+        }
 
         try dense_lu.factorizeSolve(nn, a_work, rhs_work, x_work);
 
         // -- 3b: Build second-order RHS: -½ F''[V1, V1] --
-        // D2[row] = sum_ab d2[row,a,b] * V1[a] * V1[b]  (complex product)
-        // RHS = -D2  (the ½ is absorbed into the Volterra convention;
-        // the doc's pseudo-code omits the ½ in the contraction and puts it
-        // in the equation — we follow the pseudo-code directly: no ½ here,
-        // matching the existing implementation for compatibility)
+        // D2[row] = sum_ab d2[row,a,b] * V1[a] * V1[b]  (complex product).
+        // The ½ is ngspice's: `g2 = 0.5 * gd / vte` is exactly ½·d²I/dV²
+        // (diodset.c:78), and D1n2F1 contributes `g2 * V1²` (dloadfns.c:545).
+        // The full double sum already carries both (a,b) and (b,a), so the
+        // factor belongs here once.
         for (0..n) |row| {
             var d2_re: f64 = 0;
             var d2_im: f64 = 0;
@@ -145,8 +177,8 @@ pub fn sweep(
                     d2_im += coeff * prod_im;
                 }
             }
-            rhs_work[row] = -d2_re;
-            rhs_work[n + row] = -d2_im;
+            rhs_work[row] = -0.5 * d2_re;
+            rhs_work[n + row] = -0.5 * d2_im;
         }
 
         // -- 3c: Solve second-order: (G + j*2w*C) * V2 = -D2(V1,V1) --
@@ -169,20 +201,28 @@ pub fn sweep(
 
         freqs[k] = f;
         hd2[k] = hd2_val;
-        v1_mag[k] = v1_out_mag;
-        v2_mag[k] = v2_out_mag;
+        // DkerProc (dkerproc.c:43-52) scales each stored kernel back to
+        // sinusoid amplitude before it is written out: ×2 for f1 and 2f1.
+        // hd2 is a ratio and so is untouched by it.
+        v1_mag[k] = 2.0 * v1_out_mag;
+        v2_mag[k] = 2.0 * v2_out_mag;
     }
 }
 
-/// Contract entry: drive at opts.ac_source_node (or the drive source),
-/// measure at opts.output_node (or the last probe). Data layout: point-major
-/// (frequency, hd2, v1_mag, v2_mag).
+/// Contract entry: drive the branch of the `DISTOF1` card (opts.drive_branch,
+/// resolved from the deck by the engine), measure at opts.output_node (or the
+/// last probe). Data layout: point-major (frequency, hd2, v1_mag, v2_mag).
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
     const x_op = ctx.x_op orelse return error.NoOperatingPoint;
 
     var o = opts;
-    if (o.ac_source_node == root.GROUND) o.ac_source_node = ctx.source_node;
+    // No DISTOF1 anywhere in the deck: ngspice would solve an unexcited system
+    // and print zeros. ponytail: fall back to the deck's drive source instead,
+    // so a card-less `.disto` still reports something; drop the fallback the
+    // day a fixture wants ngspice's literal zeros.
+    if (o.drive_branch == root.GROUND and o.ac_source_node == root.GROUND)
+        o.drive_branch = ctx.source_branch;
     if (o.output_node == root.GROUND) {
         if (ctx.probes.len == 0) return error.NoProbes;
         o.output_node = ctx.probes[ctx.probes.len - 1];
