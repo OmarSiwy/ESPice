@@ -273,12 +273,14 @@ pub const Simulation = struct {
         sim.probes = probe_buf[0..n_probes];
         sim.probe_labels = label_buf[0..n_probes];
 
-        // Jobs from directives: pre-allocate to directive count. `.options`
-        // overrides (tolerances, method, temp) apply to every job.
+        // Jobs from directives. TWO per directive: a swept `.noise` card is
+        // two ngspice plots, the spectral density curves and the band
+        // integral (noisean.c:318-325 and :516-522), and one Result is one
+        // plot. Every other card takes one slot and leaves the other.
         const deck_opts = parseDeckOptions(nl.directives);
         sim.deck_tol = deck_opts.tol;
         sim.deck_temp = deck_opts.temp_c;
-        sim.jobs = try sim_arena.alloc(Job, nl.directives.len);
+        sim.jobs = try sim_arena.alloc(Job, nl.directives.len * 2);
         sim.n_jobs = 0;
         for (nl.directives, dir_nodes) |dir, node_id| {
             if (try buildJob(dir, node_id, sources)) |job0| {
@@ -286,6 +288,13 @@ pub const Simulation = struct {
                 applyDeckOptions(&job, deck_opts);
                 sim.jobs[sim.n_jobs] = job;
                 sim.n_jobs += 1;
+                // noisean.c:495 — no "Integrated Noise" plot for a degenerate
+                // band, because there is nothing to integrate over.
+                if (job == .noise and job.noise.f_start != job.noise.f_stop) {
+                    job.noise.integrated = true;
+                    sim.jobs[sim.n_jobs] = job;
+                    sim.n_jobs += 1;
+                }
             }
         }
 
@@ -713,10 +722,14 @@ fn buildJob(dir: types.Directive, node_id: u32, sources: Sources) !?Job {
         },
         .noise, .pnoise => {
             try arity(dir, if (id == .noise) 6 else 7, if (id == .noise) 6 else 8);
-            _ = try voltageSource(dir, 1, sources);
+            // The card's second argument names the INPUT source, and ngspice
+            // keys the input-referred spectrum on it (noisean.c:89, :416-430).
+            // Resolving it and dropping it is what left `inoise_spectrum`
+            // with nothing to divide by.
+            const in_branch = sources.v_branches[try voltageSource(dir, 1, sources)];
             const sweep = try frequencyOptions(analysis.ac.Options, dir, 2);
             const node = try outputNode(node_id);
-            if (id == .noise) return .{ .noise = .{ .out_node = node, .f_start = sweep.f_start, .f_stop = sweep.f_stop, .points_per_decade = sweep.points_per_decade } };
+            if (id == .noise) return .{ .noise = .{ .out_node = node, .in_branch = in_branch, .f_start = sweep.f_start, .f_stop = sweep.f_stop, .points_per_decade = sweep.points_per_decade } };
             const sidebands = if (dir.args.len == 8) try number(dir, 7) else 7;
             if (sidebands < 0 or sidebands != @trunc(sidebands) or sidebands > 31) return error.InvalidAnalysisArguments;
             return .{ .pnoise = .{ .out_node = node, .f_start = sweep.f_start, .f_stop = sweep.f_stop, .points_per_decade = sweep.points_per_decade, .f_fundamental = try positive(dir, 6), .n_sidebands = @intFromFloat(sidebands) } };
