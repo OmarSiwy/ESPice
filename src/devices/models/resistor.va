@@ -1,8 +1,31 @@
 // Linear resistor. i(p,n) = V(p,n) / r.
+//
+// §4.6.4.1 THERMAL NOISE, ngspice resnoise.c:97-99: the generator is
+// NevalSrcInstanceTemp(THERMNOISE, RESposNode, RESnegNode, RESconduct), i.e.
+// S_i = 4kT/R [A^2/Hz] across the card's own terminals. Without the
+// declaration below `noise_gens` is absent, devices/engine.zig:1312 never
+// installs `collect_noise`, and a `.noise` deck whose only sources are
+// resistors comes back EXACTLY ZERO at every frequency — which it did.
+//
+// The argument is topology and documentation, not the number that reaches the
+// analysis: the host derives the PSD from the Jacobian conductance of this
+// branch as 4kT*g (devices/engine.zig collectNoise), which for a LINEAR
+// resistor is exactly ngspice's 4*k*CKTtemp*RESconduct. Writing it out anyway
+// keeps the model readable and matches every other model in the tree
+// (bjt.va:351, mes.va:146).
+//
+// ponytail: ngspice's two other resistor knobs are absent because nothing
+// asks. Flicker (resnoise.c:101-112) is gated on the model's KF, which
+// defaults to 0 (ressetup.c:38) and which the host's Jacobian fallback could
+// not evaluate anyway; `noisy=0` (resnoise.c:57) needs one more parameter and
+// a `sel`. Add either when a deck names it.
 module resistor(p, n);
     inout p, n;
     electrical p, n;
     parameter real r = 1000.0 from (0:inf);
 
-    analog I(p, n) <+ V(p, n) / r;
+    analog begin
+        I(p, n) <+ V(p, n) / r;
+        I(p, n) <+ white_noise(4.0 * 1.380649e-23 * $temperature / r, "thermal");
+    end
 endmodule

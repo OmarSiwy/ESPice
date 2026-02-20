@@ -366,8 +366,10 @@ test "noise: thermal noise of resistor divider = 4kT*(R1||R2)" {
     defer allocator.free(freqs);
     const density = try allocator.alloc(f64, n_points);
     defer allocator.free(density);
+    const inoise = try allocator.alloc(f64, n_points);
+    defer allocator.free(inoise);
 
-    const total_noise = try analysis.noise.sweep(&setup.ckt, x, sources, freqs, density, .{
+    const totals = try analysis.noise.sweep(&setup.ckt, x, sources, freqs, density, inoise, .{
         .out_node = setup.n2,
         .f_start = 1.0,
         .f_stop = 1e6,
@@ -383,7 +385,15 @@ test "noise: thermal noise of resistor divider = 4kT*(R1||R2)" {
     const r_parallel = 1000.0 * 2000.0 / (1000.0 + 2000.0);
     const expected_density = 4.0 * k_boltzmann * temp_k * r_parallel;
     try testing.expectApproxEqRel(expected_density, first, 1e-3);
-    try testing.expect(total_noise > 0);
+    // `sweep` is squared throughout, like ngspice's Ndata; `run` takes the
+    // sqrt (cktnoise.c:110-113). No .noise input branch here, so inoise is
+    // onoise at unit gain.
+    try testing.expect(totals.onoise > 0);
+    try testing.expectApproxEqRel(totals.onoise, totals.inoise, 1e-12);
+    try testing.expectApproxEqRel(density[0], inoise[0], 1e-12);
+    // Flat band: the integral is exactly S * (f_stop - f_start) --
+    // Nintegrate's |slope| < N_INTFTHRESH branch (ninteg.c:33-34).
+    try testing.expectApproxEqRel(expected_density * (freqs[n_points - 1] - freqs[0]), totals.onoise, 1e-3);
 }
 
 test "noise: zero sources produce zero noise" {
@@ -404,15 +414,18 @@ test "noise: zero sources produce zero noise" {
     defer allocator.free(freqs);
     const density = try allocator.alloc(f64, n_points);
     defer allocator.free(density);
+    const inoise = try allocator.alloc(f64, n_points);
+    defer allocator.free(inoise);
 
-    const total_noise = try analysis.noise.sweep(&ckt, x, &sources, freqs, density, .{
+    const totals = try analysis.noise.sweep(&ckt, x, &sources, freqs, density, inoise, .{
         .out_node = n1,
         .f_start = 100.0,
         .f_stop = 1e6,
         .points_per_decade = 5,
     }, allocator);
 
-    try testing.expectApproxEqAbs(@as(f64, 0), total_noise, 1e-30);
+    try testing.expectApproxEqAbs(@as(f64, 0), totals.onoise, 1e-30);
+    try testing.expectApproxEqAbs(@as(f64, 0), totals.inoise, 1e-30);
     for (density[0..n_points]) |d| {
         try testing.expectApproxEqAbs(@as(f64, 0), d, 1e-30);
     }
