@@ -102,10 +102,20 @@ module vsource(p, n);
     parameter real exp_tau2 = 1.0e-9;   // s  fall time constant
 
     // ---- PWL(T1 V1 T2 V2 ... [R=<t>] [TD=<t>]) --------------------------------
-    // Flat arrays, not a table type: FastVAF flattens `real x[0:63]` into
-    // 64 scalar Model fields, and a RUNTIME index becomes a 64-deep select chain
-    // (short-circuiting, so slot k costs k+1 compares). Both loops below are
-    // bounded by `pwl_len`, not by 64, so a 3-point PWL costs 3 iterations.
+    // Flat arrays, not a table type: FastVAF flattens `real x[0:63]` into 64
+    // scalar Model fields, so there is no memory to index. VerA turns a RUNTIME
+    // index over them into ONE `switch` (see lower.zig lowerIndex), which is a
+    // constant number of instructions in the array's extent — so the bisection
+    // below costs ceil(log2(pwl_len)) reads and never touches an unfilled slot.
+    //
+    // ponytail: bisection, not ngspice's per-instance breakpoint cursor. A
+    // cursor is O(1) instead of O(log n), but the saving is ~3 switch
+    // dispatches on a 10-point table and it is STATE that has to rewind
+    // correctly when a rejected step moves `t` backwards. Bisection is
+    // stateless, so it is right across a reject by construction. Upgrade path
+    // if a deck ever ships a 1000-point table: an Instance cursor latched in
+    // updateState and reverted by stateCtl(.revert), with the bisection kept
+    // as the oracle it has to agree with.
     parameter real pwl_times[0:63]  = '{0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
     parameter real pwl_values[0:63] = '{0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
     parameter integer pwl_len = 0;      //     points actually filled
@@ -135,7 +145,7 @@ module vsource(p, n);
     real p_tr, p_tf, p_pw, p_per, t_rel, t_mod;
     real t_sin, t_e1, t_e2, fm_mod, am_env, am_car;
     real t_e, t_first, t_last, v_first, v_last, tp, vp, tk, vk, span, excess;
-    integer k;
+    integer k, klo, khi;
 
     analog begin
         // §5.10.5 corner-time events — see the BREAKPOINTS note in the header.
@@ -283,15 +293,8 @@ module vsource(p, n);
                 t_e = t - pwl_td;
                 t_first = pwl_times[0];
                 v_first = pwl_values[0];
-                // Last filled point. Walked rather than indexed at pwl_len-1
-                // because either way it is one select chain, and the walk also
-                // keeps the loop bound identical to the interpolation loop.
-                t_last = t_first;
-                v_last = v_first;
-                for (k = 1; k < pwl_len; k = k + 1) begin
-                    t_last = pwl_times[k];
-                    v_last = pwl_values[k];
-                end
+                t_last = pwl_times[pwl_len - 1];
+                v_last = pwl_values[pwl_len - 1];
 
                 // ngspice `r=<t>`: past the last point, jump back to time `r`
                 // and replay [r, t_last] forever.
@@ -306,21 +309,35 @@ module vsource(p, n);
                 if (t_e < 0.0 || t_e <= t_first)  out = v_first;
                 else if (t_e >= t_last)           out = v_last;
                 else begin
-                    // Linear interpolation inside the bracketing segment.
-                    // Carrying (tp, vp) forward halves the array reads.
-                    tp = t_first;
-                    vp = v_first;
-                    out = v_last;
-                    for (k = 1; k < pwl_len; k = k + 1) begin
-                        tk = pwl_times[k];
-                        vk = pwl_values[k];
-                        // Coincident times (a vertical step) would divide by
-                        // zero; 1 fs makes it the steepest ramp we can express.
-                        if (t_e >= tp && t_e < tk)
-                            out = vp + (vk - vp) * (t_e - tp) / max(tk - tp, 1.0e-15);
-                        tp = tk;
-                        vp = vk;
+                    // BISECTION, not a scan: a PWL table is sorted in t, so the
+                    // bracketing segment is found in ceil(log2(pwl_len)) reads
+                    // instead of pwl_len. Loop invariant, established by the two
+                    // guards above (t_first < t_e < t_last):
+                    //     pwl_times[klo] <= t_e < pwl_times[khi]
+                    // and each step halves khi-klo, so it exits at khi=klo+1 —
+                    // the smallest khi with pwl_times[khi] > t_e.
+                    //
+                    // It is the SAME segment the linear scan this replaced
+                    // picked. That scan took every k with t[k-1] <= t_e < t[k];
+                    // for non-decreasing t only ONE k satisfies both (t[k] > t_e
+                    // is upward-closed from khi, t[k-1] <= t_e downward-closed
+                    // to khi), so its last write was khi too — a repeated knot
+                    // included, where the zero-width segment satisfies neither
+                    // half. Same segment through the same expression below is
+                    // the same bits, which is the conformance claim.
+                    klo = 0;
+                    khi = pwl_len - 1;
+                    while (khi - klo > 1) begin
+                        k = (klo + khi) / 2;
+                        if (pwl_times[k] > t_e) khi = k; else klo = k;
                     end
+                    tp = pwl_times[klo];
+                    vp = pwl_values[klo];
+                    tk = pwl_times[khi];
+                    vk = pwl_values[khi];
+                    // Coincident times (a vertical step) would divide by
+                    // zero; 1 fs makes it the steepest ramp we can express.
+                    out = vp + (vk - vp) * (t_e - tp) / max(tk - tp, 1.0e-15);
                 end
             end
 
