@@ -23,15 +23,41 @@ const simdCopy = tran_types.simdCopy;
 // control. Internal to transient — only simulate() below drives these.
 // ---------------------------------------------------------------------------
 const integrator = struct {
-    /// Dynamic-residual coefficient. The residual stamped per node is
-    ///   BE:   F_dyn = (1/dt)*(q(x) - q_prev)
-    ///   trap: F_dyn = (2/dt)*(q(x) - q_prev) - i_prev
-    /// with i_prev the dynamic current of the previous accepted step.
-    fn alpha(method: Method, dt: f64) f64 {
+    /// Integration coefficients — ngspice's `CKTag[]` (`NIcomCof`,
+    /// maths/ni/nicomcof.c). `ag0` is the q(x) coefficient, i.e. the companion
+    /// conductance multiplier `geq = ag[0]*cap` (niinteg.c:77) and the Jacobian
+    /// axpy weight; `ag2` is the q_prev2 coefficient, gear-2 only.
+    ///
+    ///   BE:   F_dyn = (1/dt)*(q - q1)
+    ///   trap: F_dyn = (2/dt)*(q - q1) - i_prev
+    ///   gear: F_dyn = ag0*q + ag1*q1 + ag2*q2  ==  ag0*(q - q1) - ag2*(q1 - q2)
+    ///         since ag0 + ag1 + ag2 = 0 (the corrector is exact on constants).
+    ///
+    /// GEAR ON A NON-UNIFORM GRID. ngspice solves a Vandermonde system over the
+    /// ACTUAL step history `CKTdeltaOld[]` (nicomcof.c:60-136) — its gear-2 is
+    /// a variable-step BDF2. espice hardcoded the uniform-step coefficients
+    /// 3/(2dt), -2/dt, 1/(2dt), which are only consistent while dt == dt_prev.
+    /// At order 2 that Vandermonde solve has the closed form below, r = dt/dt1:
+    ///   ag0 = (1+2r)/((1+r)*dt)   ag1 = -(1+r)/dt   ag2 = r^2/((1+r)*dt)
+    /// r == 1 recovers the hardcoded triple exactly.
+    ///
+    /// The old constants survived only because every shipping gear deck is
+    /// tmax-locked at tstep, so dt never varied. Correcting the gear LTE
+    /// coefficient (previous commit) made dt vary and the inconsistency bit
+    /// immediately: mos6 at 373 steps was 8.2e-2 rms against its own converged
+    /// reference, worse than the 316-step trapezoidal run.
+    const Coeffs = struct { ag0: f64, ag2: f64 };
+    fn coeffs(method: Method, dt: f64, dt_prev: f64) Coeffs {
         return switch (method) {
-            .backward_euler => 1.0 / dt,
-            .trapezoidal => 2.0 / dt,
-            .gear_2 => 3.0 / (2.0 * dt),
+            .backward_euler => .{ .ag0 = 1.0 / dt, .ag2 = 0 },
+            .trapezoidal => .{ .ag0 = 2.0 / dt, .ag2 = 0 },
+            .gear_2 => blk: {
+                const r = dt / dt_prev;
+                break :blk .{
+                    .ag0 = (1.0 + 2.0 * r) / ((1.0 + r) * dt),
+                    .ag2 = r * r / ((1.0 + r) * dt),
+                };
+            },
         };
     }
 
@@ -55,32 +81,45 @@ const integrator = struct {
 
     /// Dynamic-current recurrence, in place — ngspice `NIintegrate`
     /// (maths/ni/niinteg.c) writing `CKTstate0[qcap+1]`:
-    ///   BE / gear : i_j <- alpha*(q0_j - q1_j)
-    ///   trap      : i_j <- alpha*(q0_j - q1_j) - i_j
+    ///   BE   : i_j <- ag0*(q0_j - q1_j)
+    ///   trap : i_j <- ag0*(q0_j - q1_j) - i_j
+    ///   gear : i_j <- ag0*(q0_j - q1_j) - ag2*(q1_j - q2_j)
+    /// i.e. `CKTstate0[qcap+1]` under each method's `CKTag[]`. The gear arm was
+    /// missing its ag2 term, so `i_prev` — which is what CKTterr's `volttol`
+    /// reads — was the BE current on every gear deck.
     /// One body for the summed row plane (companion residual, length n) and for
-    /// the per-device-state tape (LTE only, length n_qt). Expressions are
-    /// unchanged from the two loops this replaces, so the row plane — which
-    /// feeds the residual — stays bit-identical.
-    fn advanceCurrent(i_cur: []f64, q0: []const f64, q1: []const f64, alpha_used: f64, exec_trap: bool) void {
+    /// the per-device-state tape (LTE only, length n_qt). The BE and trap
+    /// expressions are untouched, so the row plane — which feeds the residual —
+    /// stays bit-identical on every non-gear deck.
+    fn advanceCurrent(method: Method, i_cur: []f64, q0: []const f64, q1: []const f64, q2: []const f64, c: Coeffs) void {
         const V = @Vector(W, f64);
-        const av: V = @splat(alpha_used);
+        const av: V = @splat(c.ag0);
+        const a2: V = @splat(c.ag2);
         var j: usize = 0;
         while (j + W <= i_cur.len) : (j += W) {
             const a: V = q0[j..][0..W].*;
             const b: V = q1[j..][0..W].*;
             const ip: V = i_cur[j..][0..W].*;
             const d = av * (a - b);
-            i_cur[j..][0..W].* = if (exec_trap) d - ip else d;
+            i_cur[j..][0..W].* = switch (method) {
+                .trapezoidal => d - ip,
+                .gear_2 => d - a2 * (b - @as(V, q2[j..][0..W].*)),
+                .backward_euler => d,
+            };
         }
         while (j < i_cur.len) : (j += 1) {
-            const d = alpha_used * (q0[j] - q1[j]);
-            i_cur[j] = if (exec_trap) d - i_cur[j] else d;
+            const d = c.ag0 * (q0[j] - q1[j]);
+            i_cur[j] = switch (method) {
+                .trapezoidal => d - i_cur[j],
+                .gear_2 => d - c.ag2 * (q1[j] - q2[j]),
+                .backward_euler => d,
+            };
         }
     }
 
     /// ngspice CKTterr: per-state timestep bound, in seconds. For each
     /// charge state j (tolerance in CURRENT units, cktterr.c):
-    ///   i_new_j     = α·(q0_j − q1_j) [− i_prev_j when the step ran trap]
+    ///   i_new_j     = what `advanceCurrent` will write for `cur_method`
     ///   volttol_j   = abstol + reltol·max(|i_new_j|, |i_prev_j|)
     ///   chargetol_j = reltol·max(|q0_j|, |q1_j|, chgtol) / dt
     ///   tol_j       = max(volttol_j, chargetol_j)
@@ -90,15 +129,19 @@ const integrator = struct {
     /// coeff = `lteCoeff(method)`; order = 2 for everything but BE.
     /// Returns min del over all states; the caller accepts the step iff
     /// del > 0.9·dt and uses del as the next dt (dctran.c:872-913).
+    /// `method` sets the coefficient and the order — at the BE->order-2
+    /// promotion probe (dctran.c:901-913) that is the method being PROBED.
+    /// `cur_method`/`c` are the ones the step actually integrated with, which
+    /// is what `CKTstate0[qcap+1]` holds when CKTterr reads it.
     fn stepBound(
         method: Method,
+        cur_method: Method,
         q_cur: []const f64,
         q_prev: []const f64,
         q_prev2: []const f64,
         q_prev3: []const f64,
         i_prev: []const f64,
-        alpha_used: f64,
-        exec_trap: bool,
+        c: Coeffs,
         dt: f64,
         dt1: f64,
         dt2: f64,
@@ -108,17 +151,18 @@ const integrator = struct {
         trtol: f64,
     ) f64 {
         const order2 = method != .backward_euler;
-        const c = lteCoeff(method);
+        const lc = lteCoeff(method);
         const V = @Vector(W, f64);
         const inv_dt: V = @splat(1.0 / dt);
         const inv_dt1: V = @splat(1.0 / dt1);
         const inv_sum01: V = @splat(1.0 / (dt + dt1));
-        const av: V = @splat(alpha_used);
+        const av: V = @splat(c.ag0);
+        const a2: V = @splat(c.ag2);
         const v_abstol: V = @splat(abstol);
         const v_reltol: V = @splat(reltol);
         const v_chgtol: V = @splat(chgtol);
         const v_trtol: V = @splat(trtol);
-        const coeff: V = @splat(c);
+        const coeff: V = @splat(lc);
         var vmin: V = @splat(std.math.inf(f64));
         var i: usize = 0;
 
@@ -126,12 +170,16 @@ const integrator = struct {
             const qc: V = q_cur[i..][0..W].*;
             const qp: V = q_prev[i..][0..W].*;
             const ip: V = i_prev[i..][0..W].*;
-            const i_new = if (exec_trap) av * (qc - qp) - ip else av * (qc - qp);
+            const qp2: V = q_prev2[i..][0..W].*;
+            const i_new = switch (cur_method) {
+                .trapezoidal => av * (qc - qp) - ip,
+                .gear_2 => av * (qc - qp) - a2 * (qp - qp2),
+                .backward_euler => av * (qc - qp),
+            };
             const volttol = v_abstol + v_reltol * @max(@abs(i_new), @abs(ip));
             const chargetol = v_reltol * @max(@max(@abs(qc), @abs(qp)), v_chgtol) * inv_dt;
             const tol = @max(volttol, chargetol);
 
-            const qp2: V = q_prev2[i..][0..W].*;
             const f01 = (qc - qp) * inv_dt;
             const f12 = (qp - qp2) * inv_dt1;
             const f012 = (f01 - f12) * inv_sum01;
@@ -148,10 +196,12 @@ const integrator = struct {
         var min_del = @reduce(.Min, vmin);
         // Scalar tail
         while (i < q_cur.len) : (i += 1) {
-            const i_new = if (exec_trap)
-                alpha_used * (q_cur[i] - q_prev[i]) - i_prev[i]
-            else
-                alpha_used * (q_cur[i] - q_prev[i]);
+            const d = c.ag0 * (q_cur[i] - q_prev[i]);
+            const i_new = switch (cur_method) {
+                .trapezoidal => d - i_prev[i],
+                .gear_2 => d - c.ag2 * (q_prev[i] - q_prev2[i]),
+                .backward_euler => d,
+            };
             const volttol = abstol + reltol * @max(@abs(i_new), @abs(i_prev[i]));
             const chargetol = reltol * @max(@max(@abs(q_cur[i]), @abs(q_prev[i])), chgtol) / dt;
             const tol = @max(volttol, chargetol);
@@ -164,7 +214,7 @@ const integrator = struct {
                 const f123 = (f12 - f23) / (dt1 + dt2);
                 dd = (f012 - f123) / (dt + dt1 + dt2);
             }
-            const del = trtol * tol / @max(abstol, c * @abs(dd));
+            const del = trtol * tol / @max(abstol, lc * @abs(dd));
             min_del = @min(min_del, del);
         }
         // sqrt is monotone — applying it to the reduced min is equivalent
@@ -179,7 +229,7 @@ const TranHook = struct {
     q_prev: []const f64,
     i_prev: ?[]const f64, // trap only
     q_prev2: ?[]const f64, // gear_2 only
-    half_inv_dt: f64, // gear_2: 1/(2*dt)
+    ag2: f64, // gear_2: the q_prev2 coefficient (integrator.Coeffs.ag2)
     a_vals: []f64,
     q_snap: ?[]f64,
     /// Per-device-state charge snapshot, same cadence as `q_snap` and for the
@@ -200,8 +250,8 @@ const TranHook = struct {
             const av: V = @splat(self.alpha);
             var i: usize = 0;
             if (self.q_prev2) |qp2| {
-                // Gear-2: rhs += alpha*(q - q_prev) - (1/(2*dt))*(q_prev - q_prev2)
-                const hv: V = @splat(self.half_inv_dt);
+                // Gear-2: rhs += ag0*(q - q_prev) - ag2*(q_prev - q_prev2)
+                const hv: V = @splat(self.ag2);
                 while (i + W <= n) : (i += W) {
                     const r: V = ckt.rhs[i..][0..W].*;
                     const qv: V = ckt.q_vec[i..][0..W].*;
@@ -210,7 +260,7 @@ const TranHook = struct {
                     ckt.rhs[i..][0..W].* = r + av * (qv - qp) - hv * (qp - qp2v);
                 }
                 while (i < n) : (i += 1)
-                    ckt.rhs[i] += self.alpha * (ckt.q_vec[i] - self.q_prev[i]) - self.half_inv_dt * (self.q_prev[i] - qp2[i]);
+                    ckt.rhs[i] += self.alpha * (ckt.q_vec[i] - self.q_prev[i]) - self.ag2 * (self.q_prev[i] - qp2[i]);
             } else if (self.i_prev) |ipv| {
                 // Trapezoidal
                 while (i + W <= n) : (i += W) {
@@ -493,13 +543,14 @@ pub fn simulateInto(
         const use_gear = gear and !use_be;
         const use_trap = trap and !use_be;
         const eff_method: Method = if (use_be) .backward_euler else options.method;
-        const alpha_val = integrator.alpha(eff_method, dt);
+        const cf = integrator.coeffs(eff_method, dt, dt_prev);
+        const alpha_val = cf.ag0;
         const hook = TranHook{
             .alpha = alpha_val,
             .q_prev = q_hist[1],
             .i_prev = if (use_trap and has_charge) i_prev else null,
             .q_prev2 = if (use_gear and has_charge) q_hist[2] else null,
-            .half_inv_dt = if (use_gear) 1.0 / (2.0 * dt) else 0,
+            .ag2 = cf.ag2,
             .a_vals = a_vals,
             .q_snap = if (has_charge) q_hist[0] else null,
             .qt_snap = if (n_qt > 0) qt_hist[0] else null,
@@ -587,8 +638,8 @@ pub fn simulateInto(
                 dt_next = dt;
             } else {
                 const del = integrator.stepBound(
-                    eff_method, lq0, lq1, lq2, lq3,
-                    lip, alpha_val, use_trap, dt, dt_prev, dt_prev2,
+                    eff_method, eff_method, lq0, lq1, lq2, lq3,
+                    lip, cf, dt, dt_prev, dt_prev2,
                     options.tol.reltol, options.tol.abstol, options.tol.chgtol, options.tol.trtol,
                 );
                 if (del < 0.9 * dt) {
@@ -631,8 +682,8 @@ pub fn simulateInto(
             // the delayed wavefront at 33.04 ns).
             if (steps > 0 and use_be) {
                 const trial_del = integrator.stepBound(
-                    options.method, lq0, lq1, lq2, lq3,
-                    lip, alpha_val, use_trap, dt, dt_prev, dt_prev2,
+                    options.method, eff_method, lq0, lq1, lq2, lq3,
+                    lip, cf, dt, dt_prev, dt_prev2,
                     options.tol.reltol, options.tol.abstol, options.tol.chgtol, options.tol.trtol,
                 );
                 const nd2 = @min(2.0 * dt, trial_del);
@@ -645,9 +696,9 @@ pub fn simulateInto(
             // Both index spaces run the SAME recurrence: ngspice keeps the
             // dynamic current in CKTstates[0][qcap+1], i.e. per state, and
             // CKTterr's volttol reads it there.
-            integrator.advanceCurrent(i_prev, q_hist[0], q_hist[1], alpha_val, use_trap);
+            integrator.advanceCurrent(eff_method, i_prev, q_hist[0], q_hist[1], q_hist[2], cf);
             if (n_qt > 0)
-                integrator.advanceCurrent(qt_i_prev, qt_hist[0], qt_hist[1], alpha_val, use_trap);
+                integrator.advanceCurrent(eff_method, qt_i_prev, qt_hist[0], qt_hist[1], qt_hist[2], cf);
 
             const tail = q_hist[3];
             q_hist[3] = q_hist[2];
@@ -889,9 +940,31 @@ test "waveform: toRows tiling crosses tile boundaries exactly" {
     }
 }
 
-test "alpha: BE 1/dt, trap 2/dt" {
-    try std.testing.expectApproxEqRel(@as(f64, 1e9), integrator.alpha(.backward_euler, 1e-9), 1e-12);
-    try std.testing.expectApproxEqRel(@as(f64, 2e9), integrator.alpha(.trapezoidal, 1e-9), 1e-12);
+test "coeffs: BE 1/dt, trap 2/dt, gear-2 variable-step BDF2" {
+    const dt: f64 = 1e-9;
+    try testing.expectApproxEqRel(@as(f64, 1e9), integrator.coeffs(.backward_euler, dt, dt).ag0, 1e-12);
+    try testing.expectApproxEqRel(@as(f64, 2e9), integrator.coeffs(.trapezoidal, dt, dt).ag0, 1e-12);
+    // r == 1 must reproduce the uniform-step triple that used to be hardcoded.
+    const u = integrator.coeffs(.gear_2, dt, dt);
+    try testing.expectApproxEqRel(@as(f64, 1.5e9), u.ag0, 1e-12);
+    try testing.expectApproxEqRel(@as(f64, 0.5e9), u.ag2, 1e-12);
+    // Consistency on a NON-uniform grid is the whole point: the corrector must
+    // be exact on constants (sum of coefficients zero, ag1 = -(ag0+ag2)) and on
+    // the linear ramp q(t) = t through the actual node spacing 0, dt1, dt1+dt.
+    for ([_]f64{ 0.25, 0.5, 1.0, 2.0, 4.0 }) |r| {
+        const dt1 = dt / r;
+        const c = integrator.coeffs(.gear_2, dt, dt1);
+        const ag1 = -(c.ag0 + c.ag2);
+        // q0 = 0, q1 = -dt, q2 = -(dt+dt1) as offsets from t_n: dq/dt == 1.
+        const dqdt = c.ag0 * 0.0 + ag1 * (-dt) + c.ag2 * (-(dt + dt1));
+        try testing.expectApproxEqRel(@as(f64, 1.0), dqdt, 1e-12);
+        // and exact on the quadratic too — BDF2 is a 3-point formula, exact
+        // through degree 2, so d/dt(t^2) at t_n must come out 0. The surviving
+        // terms are each O(dt) = 1e-9, so the tolerance below is rounding noise
+        // and not a free pass: 1e-6/dt would have accepted anything.
+        const sq = c.ag0 * 0.0 + ag1 * (dt * dt) + c.ag2 * ((dt + dt1) * (dt + dt1));
+        try testing.expectApproxEqAbs(@as(f64, 0.0), sq, 1e-22);
+    }
 }
 
 // cktterr.c:24-34 verbatim. gear_2 used to read trapCoeff[1] (1/12), which is
@@ -939,12 +1012,12 @@ test "stepBound: per-state min survives what the summed row cancels" {
     const row: [W + 1]f64 = @splat(0);
 
     const del_state = integrator.stepBound(
-        .backward_euler, &s_cur, &s_prev, &s_zero, &s_zero, &s_zero,
-        1.0 / dt, false, dt, dt, dt, reltol, abstol, chgtol, trtol,
+        .backward_euler, .backward_euler, &s_cur, &s_prev, &s_zero, &s_zero, &s_zero,
+        .{ .ag0 = 1.0 / dt, .ag2 = 0 }, dt, dt, dt, reltol, abstol, chgtol, trtol,
     );
     const del_row = integrator.stepBound(
-        .backward_euler, &row, &row, &row, &row, &row,
-        1.0 / dt, false, dt, dt, dt, reltol, abstol, chgtol, trtol,
+        .backward_euler, .backward_euler, &row, &row, &row, &row, &row,
+        .{ .ag0 = 1.0 / dt, .ag2 = 0 }, dt, dt, dt, reltol, abstol, chgtol, trtol,
     );
 
     // Closed form, so the CKTterr formula is pinned and not just the inequality:
@@ -973,12 +1046,12 @@ test "stepBound: per-state min survives what the summed row cancels" {
     const mirrored_p = [_]f64{ 1e-12, -1e-12 };
     const pair_zero = [_]f64{ 0, 0 };
     const del_one = integrator.stepBound(
-        .backward_euler, &one_sided, &one_sided_p, &pair_zero, &pair_zero, &pair_zero,
-        1.0 / dt, false, dt, dt, dt, reltol, abstol, chgtol, trtol,
+        .backward_euler, .backward_euler, &one_sided, &one_sided_p, &pair_zero, &pair_zero, &pair_zero,
+        .{ .ag0 = 1.0 / dt, .ag2 = 0 }, dt, dt, dt, reltol, abstol, chgtol, trtol,
     );
     const del_mirror = integrator.stepBound(
-        .backward_euler, &mirrored, &mirrored_p, &pair_zero, &pair_zero, &pair_zero,
-        1.0 / dt, false, dt, dt, dt, reltol, abstol, chgtol, trtol,
+        .backward_euler, .backward_euler, &mirrored, &mirrored_p, &pair_zero, &pair_zero, &pair_zero,
+        .{ .ag0 = 1.0 / dt, .ag2 = 0 }, dt, dt, dt, reltol, abstol, chgtol, trtol,
     );
     try testing.expectEqual(del_one, del_mirror);
 
@@ -996,8 +1069,8 @@ test "stepBound: per-state min survives what the summed row cancels" {
     const big: [2]f64 = .{ s_cur[0] * 1e3, 0 };
     const big_p: [2]f64 = .{ s_prev[0] * 1e3, 0 };
     const del_big = integrator.stepBound(
-        .backward_euler, &big, &big_p, &pair_zero, &pair_zero, &pair_zero,
-        1.0 / dt, false, dt, dt, dt, reltol, abstol, chgtol, trtol,
+        .backward_euler, .backward_euler, &big, &big_p, &pair_zero, &pair_zero, &pair_zero,
+        .{ .ag0 = 1.0 / dt, .ag2 = 0 }, dt, dt, dt, reltol, abstol, chgtol, trtol,
     );
     try testing.expectApproxEqRel(del_one, del_big, 1e-9);
 }
