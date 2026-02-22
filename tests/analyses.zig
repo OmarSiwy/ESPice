@@ -305,6 +305,80 @@ test "transient: step_fn hook fires per accepted step" {
 }
 
 // ============================================================================
+// written-row predicate — engine.zig `writtenRows` / VerA `jac_rows`/`q_rows`
+//
+// The engine deletes a residual row the device never writes. The ONE way that
+// can be wrong is inferring "never written" from `jac_pattern`/`q_pattern`,
+// which answer for the DERIVATIVE: a term depending on no unknown writes its
+// row with an empty column mask. Both devices below are exactly that shape and
+// both failures are silent — no error, no NaN, just a missing term.
+// ============================================================================
+
+test "written rows: an empty jac_pattern does not delete the current source" {
+    // td.I is `isource.va` in miniature: jac_pattern = {0,0}, both rows written.
+    const allocator = testing.allocator;
+    const i_dc: f32 = 1e-3;
+    var b = Builder.init(allocator);
+    const n1 = b.addNode();
+    try b.addDevice(td.I, .{ .dc = i_dc }, .{}, .{ GROUND, n1 });
+    try b.addDevice(td.R, .{ .r = 1000 }, .{}, .{ n1, GROUND });
+    var ckt = try b.compile();
+    defer ckt.deinit();
+
+    const x = try allocator.alloc(f64, ckt.n);
+    defer allocator.free(x);
+    @memset(x, 0);
+
+    // The stamp itself. At x = 0 the resistor contributes nothing, so row n1 is
+    // the source's alone — and a dropped row would still "converge" here, at 0 V.
+    ckt.eval(x, 0);
+    try testing.expectEqual(-@as(f64, i_dc), ckt.rhs[n1]);
+
+    const r = try dc.solve(&ckt, x, .{});
+    try testing.expect(r.converged);
+    try testing.expectApproxEqAbs(@as(f64, 1.0), x[n1], 1e-5);
+}
+
+test "written rows: a ddt of time alone keeps its charge row and its q_tape" {
+    // td.Qt is q(x, t) = k*t^2 with dq/dx == 0: q_pattern empty, both rows live.
+    const allocator = testing.allocator;
+    var b = Builder.init(allocator);
+    const n1 = b.addNode();
+    try b.addDevice(td.Qt, .{ .k = 1.0 }, .{}, .{ GROUND, n1 });
+    try b.addDevice(td.R, .{ .r = 1000 }, .{}, .{ n1, GROUND });
+    var ckt = try b.compile();
+    defer ckt.deinit();
+
+    const x = try allocator.alloc(f64, ckt.n);
+    defer allocator.free(x);
+    @memset(x, 0);
+
+    // Two consumers, both of which a dropped row silently starves: the summed q
+    // plane (the companion current) and the per-state tape stepBound reduces
+    // over. The tape is the quiet one — a frozen 0 there costs an LTE bound
+    // with no diagnostic at all.
+    ckt.eval(x, 2.0);
+    try testing.expectEqual(@as(f64, -4.0), ckt.q_vec[n1]);
+    const tape = try allocator.alloc(f64, ckt.qTapeLen());
+    defer allocator.free(tape);
+    ckt.snapshotQTape(tape);
+    try testing.expectEqualSlices(f64, &.{ 4.0, -4.0 }, tape);
+
+    // End to end: i = d/dt(k*t^2) = 2*k*t into n1, so v = 2*k*t*R — 2 V at
+    // t = 1 ms. Skip the row and it is 0 V for the whole run.
+    const probes = [_]u32{n1};
+    var waveform = try analysis.tran.Waveform.init(allocator, 1, 1024);
+    defer waveform.deinit();
+    const result = try analysis.tran.simulate(&ckt, x, &probes, &waveform, .{
+        .t_stop = 1e-3,
+        .dt_init = 1e-6,
+        .dt_max = 1e-5,
+    }, allocator);
+    try testing.expect(result.completed);
+    try testing.expectApproxEqRel(@as(f64, 2.0), x[n1], 1e-4);
+}
+
+// ============================================================================
 // four
 // ============================================================================
 

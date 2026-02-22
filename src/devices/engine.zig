@@ -767,6 +767,33 @@ fn rowPattern(comptime D: type, comptime name: []const u8) [contract.nU(D)]u64 {
     return @field(D, name);
 }
 
+/// Which residual rows D's `eval` (`jac_rows`) or `q` (`q_rows`) EVER WRITES.
+/// Everything else is `S.con(0.0)` at every bias, so the whole row — residual
+/// stamp, charge-plane add, `q_tape` slot, Jacobian columns — is deletable at
+/// comptime rather than being `+= 0.0`'d once per instance per Newton iterate.
+///
+/// THIS IS NOT `rowPattern(...)[ru] != 0` AND MUST NEVER BE DERIVED FROM IT.
+/// The patterns answer for the DERIVATIVE: VerA ORs `unknownDeps(value)` into
+/// the row at every `res[...]` it emits, so a term whose value depends on no
+/// unknown leaves the row's column mask CLEAR while writing the row. `isource`
+/// is exactly that — `jac_pattern = {0, 0}` with `eval` stamping the DC current
+/// into both rows — so inferring "row dead" from "columns dead" deletes every
+/// independent current source in the netlist. On the reactive half the same
+/// mistake is quieter: a `ddt()` of something varying in `t` and not in `x`
+/// would freeze that state's `q_tape` entry at zero and silently drop a real
+/// LTE bound. Only the generator knows which rows it wrote, and it now says so.
+///
+/// Undeclared is all-true — the dense behaviour every host had before the
+/// declaration existed, hand-written devices (tests/testdev.zig) and runtime
+/// `.so` devices from an older generator included.
+fn writtenRows(comptime D: type, comptime name: []const u8) [contract.nU(D)]bool {
+    if (!@hasDecl(D, name)) return @splat(true);
+    const mask: u64 = @field(D, name);
+    var out: [contract.nU(D)]bool = @splat(true);
+    for (&out, 0..) |*o, ru| o.* = (mask >> @intCast(ru)) & 1 != 0;
+    return out;
+}
+
 // ===========================================================================
 // Sink-parameterized eval — the ONE physics body. `sink` (comptime-known)
 // owns all memory access, so the same loop serves both instantiations of the
@@ -785,6 +812,8 @@ fn evalRange(comptime D: type, sink: anytype, first: u32, end: u32, t: f64, limi
     const lim_writes = comptime if (has_limit) contract.limitWrites(D) else 0;
     const jac_pat = comptime rowPattern(D, "jac_pattern");
     const q_pat = comptime rowPattern(D, "q_pattern");
+    const jac_row = comptime writtenRows(D, "jac_rows");
+    const q_row = comptime writtenRows(D, "q_rows");
     // BRANCHLESS GROUND on the host. A ground row/column already resolves to
     // `trash_row`/`trash_slot` in the tape, so `+= v` there is architecturally
     // a no-op — the predicate only saves one add on a line that is L1-resident
@@ -872,7 +901,15 @@ fn evalRange(comptime D: type, sink: anytype, first: u32, end: u32, t: f64, limi
         // mos6_inverter 248.51M -> 246.67M Ir, but parallel_inverters_100
         // 704.92M -> 706.92M with the whole delta inside the mos1 kernel
         // (+2.39M). Device-dependent codegen, not a lever. Reverted.
-        inline for (0..n_u) |ru| if (!mask_ground or active[ru]) {
+        //
+        // `jac_row`/`q_row` are the OTHER predicate, and the one that decides
+        // whether the row runs at all: "does this half ever write `res[ru]`".
+        // A row it clears is `S.con(0.0)` at every bias, so `+= 0.0` into the
+        // plane is a no-op — the accumulator started at a `+0.0` memset and
+        // only ever grew by addition, so it cannot be `-0.0` and the skipped
+        // add cannot even flip a sign bit. See `writtenRows` for why this is a
+        // DECLARATION and not `jac_pat[ru] != 0`.
+        inline for (0..n_u) |ru| if (comptime jac_row[ru]) if (!mask_ground or active[ru]) {
             const row = sink.rhsRow(id, ru);
             var val = out[ru].v;
             if (comptime has_limit) {
@@ -891,39 +928,35 @@ fn evalRange(comptime D: type, sink: anytype, first: u32, end: u32, t: f64, limi
         };
 
         if (comptime has_q) {
-            inline for (0..n_u) |ru| {
+            // A CLEAR PATTERN ROW IS STILL NOT A LICENCE TO SKIP THE STAMP —
+            // here or on the resistive half, and the resistive version of that
+            // mistake is one you would never see in a diff. VerA builds the
+            // pattern masks by ORing `unknownDeps(value)` into the row at every
+            // `res[...]` it emits (codegen.zig `patRow`), so a term whose value
+            // depends on no unknown leaves the row's mask CLEAR while writing
+            // the row. `isource` is exactly that — `jac_pattern = {0, 0}` with
+            // `eval` stamping the DC current into both rows — so gating
+            // `scatterRes` on `jac_pat[ru] != 0` deletes every independent
+            // current source in the netlist. On the reactive half the same
+            // mistake is quieter and worse: a `ddt()` of something varying in
+            // `t` and not in `x` would leave `q_tape` holding a frozen 0 for a
+            // state that is actually moving, and `stepBound` would drop a real
+            // LTE bound and run the step long.
+            //
+            // `q_row` is the declaration that earns the skip instead of
+            // guessing at it: the generator says which rows `q` writes.
+            // Skipping the 4-of-8 dead mos1 charge rows also leaves their
+            // `q_tape` slots untouched, which is correct BY CONSTRUCTION and
+            // not by luck — the tape is `@memset` to 0 once in
+            // `ProtoStore.finalize` and `scatterQ` is its only writer, so a row
+            // nothing writes reads 0 forever, which is exactly the value the
+            // skipped store would have put there.
+            inline for (0..n_u) |ru| if (comptime q_row[ru]) {
                 const row = sink.rhsRow(id, ru);
                 var qv = qo[ru].v;
                 if (comptime has_limit) {
                     if (corr_live and comptime q_pat[ru] != 0) qv += @reduce(.Add, qo[ru].grad() * corr);
                 }
-                // EVERY charge row is written, cleared pattern included: the
-                // q plane is a conservation sum and `q_tape` is what CKTterr
-                // runs over. Only the JACOBIAN columns are structural.
-                //
-                // A CLEAR PATTERN ROW IS NOT A LICENCE TO SKIP THE STAMP, here
-                // or on the resistive half, and the resistive version of that
-                // mistake is one you would never see in a diff. VerA builds
-                // these masks by ORing `unknownDeps(value)` into the row at
-                // every `res[...]` it emits (codegen.zig `patRow`), so a term
-                // whose value depends on no unknown leaves the row's mask CLEAR
-                // while writing the row. `isource` is exactly that —
-                // `jac_pattern = {0, 0}` with `eval` stamping the DC current
-                // into both rows — so gating `scatterRes` on `jac_pat[ru] != 0`
-                // deletes every independent current source in the netlist.
-                //
-                // No device in today's set does it on the REACTIVE half (all 39
-                // generated devices checked: every row `q` writes has a nonzero
-                // `q_pattern` row), but nothing in the generator prevents it,
-                // and the failure mode is worse: a `ddt()` of something that
-                // varies with `t` and not with `x` would leave `q_tape` holding
-                // a frozen 0 for a state that is actually moving, and
-                // `stepBound` would drop a real LTE bound and run the step
-                // long. Skipping the 4-of-8 dead mos1 charge rows is worth 14
-                // Ir per instance on the stamp rig; the predicate that would
-                // earn it safely is "row `ru` is ever written at all", which
-                // the generator knows and does not emit. That is a VerA
-                // declaration (`q_rows`/`jac_rows`), not a host inference.
                 sink.scatterQ(id, ru, row, qv);
                 if (comptime !SinkT.skip_c and q_pat[ru] != 0) {
                     if (!mask_ground or active[ru]) {
@@ -933,7 +966,7 @@ fn evalRange(comptime D: type, sink: anytype, first: u32, end: u32, t: f64, limi
                         };
                     }
                 }
-            }
+            };
         }
     }
 }
@@ -965,13 +998,16 @@ fn evalQRange(comptime D: type, comptime S: type, sink: anytype, first: u32, end
     @setEvalBranchQuota(1_000_000);
     @setFloatMode(.optimized);
     const n_u = comptime contract.nU(D);
+    const q_row = comptime writtenRows(D, "q_rows");
     var id: u32 = first;
     while (id < end) : (id += 1) {
         var xv: [n_u]S = undefined;
         inline for (0..n_u) |u| xv[u] = S.seed(sink.x(sink.gath(id, u)), u);
         const qo = D.q(S, xv, sink.model(id), sink.inst(id), t);
-        // EVERY charge row, cleared pattern included — see `evalRange`'s note.
-        inline for (0..n_u) |ru| sink.scatterQ(id, ru, sink.rhsRow(id, ru), qo[ru].v);
+        // Every charge row `q` WRITES, cleared pattern included — the same
+        // `q_row` gate `evalRange` uses, and it has to be the same one or this
+        // pass stops being bit-for-bit what a full eval leaves behind.
+        inline for (0..n_u) |ru| if (comptime q_row[ru]) sink.scatterQ(id, ru, sink.rhsRow(id, ru), qo[ru].v);
     }
 }
 
@@ -2583,9 +2619,9 @@ pub fn layoutHash() u64 {
         h = mix(h, @intFromEnum(builtin.zig_backend));
         h = mix(h, @intFromEnum(builtin.mode));
         for ([_]type{
-            DeviceVtable, Proto,          Batch,
-            Hooks,        Planes,         PatternView,
-            PatternBuilder, ParamRef,     NoiseSource,
+            DeviceVtable,      Proto,    Batch,
+            Hooks,             Planes,   PatternView,
+            PatternBuilder,    ParamRef, NoiseSource,
             std.mem.Allocator,
         }) |T| h = hashType(h, T);
         // Not a type: the SEMANTICS of the slot tape. A `.so` built before
