@@ -611,6 +611,50 @@ pub const Circuit = struct {
         for (self.batches) |b| if (b.hooks.recompute) |f| try f(b.ctx);
     }
 
+    /// `recompute` restricted to the one device type whose parameters moved.
+    ///
+    /// A `.dc` point writes exactly one `ParamRef`, but `recompute` re-runs
+    /// `D.precompute` and `D.collapse` for EVERY batch, and those hold the
+    /// compact models' temperature/parameter blocks. Measured per sweep point
+    /// on a `.dc` output characteristic: the BJT preamble ran 1,811 times on a
+    /// ONE-instance deck, against 180 for all 180 instances of `fourbitadder`
+    /// at setup.
+    ///
+    /// **Only sound while nothing global has moved.** A batch's `recompute`
+    /// output depends on its own parameters and on temperature; the first is
+    /// untouched by a sweep of a different device, and the second is the trap.
+    /// An earlier attempt narrowed unconditionally and turned a topology error
+    /// into a silent answer: `.dc` with an outer temperature loop sets the
+    /// circuit temperature, a BJT whose `RB(T)` reaches zero re-wires its base
+    /// node, and the narrow walk never visited the BJT batch to find out
+    /// (`tests/builder.zig` "DC outer temperature topology error"). So the
+    /// CALLER owns the distinction — `runSerial` takes the full walk on the
+    /// first point of every inner sweep, which is the point right after the
+    /// outer loop may have moved temperature, and narrows only thereafter.
+    ///
+    /// `Batch.type_name` is `@typeName(D)` (`vsource.Vsource`) while
+    /// `ParamRef.device_type` is its last component (`Vsource`), so the match
+    /// is on the tail. No match at all falls back to the full walk: a silently
+    /// skipped re-derivation is a wrong answer, not a slow one.
+    pub fn recomputeType(self: *Circuit, type_name: []const u8) error{TopologyChanged}!void {
+        self.lin.valid = false;
+        self.has_baseline = false;
+        self.markGpuDirty();
+        var hit = false;
+        for (self.batches) |b| {
+            const tail = if (std.mem.lastIndexOfScalar(u8, b.type_name, '.')) |d|
+                b.type_name[d + 1 ..]
+            else
+                b.type_name;
+            if (!std.mem.eql(u8, tail, type_name)) continue;
+            hit = true;
+            if (b.hooks.recompute) |f| try f(b.ctx);
+        }
+        if (!hit) for (self.batches) |b| {
+            if (b.hooks.recompute) |f| try f(b.ctx);
+        };
+    }
+
     pub fn applyAttempt(self: *Circuit, lambda: f64) void {
         self.lin.valid = false; // homotopy scales device params
         for (self.batches) |b| if (b.hooks.apply_attempt) |f| f(b.ctx, lambda);
@@ -664,7 +708,6 @@ pub const Circuit = struct {
             return self.intern_bytes[self.intern_offs[node]..self.intern_offs[node + 1]];
         return "";
     }
-
 };
 
 // ---------------------------------------------------------------------------
