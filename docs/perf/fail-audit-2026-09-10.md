@@ -50,7 +50,7 @@ Two premises in the brief are wrong and the audit turns on both:
 | 3 | `devices/mos6_inverter` | same mechanism, milder | ngspice, 1.8x |
 | 4 | `scaling/parallel_inverters_2000` | not a defect — tie | tie |
 | 5 | `vacask/mul` | not a defect — startup grid phase | n/a (both tmax-locked) |
-| 6 | `devices/hfet_inverter` | not a defect — **ngspice is worse** | espice, 13.7x on edge phase |
+| 6 | `devices/hfet_inverter` | not a defect — **ngspice is worse** | espice, 3.9x on edge phase (was quoted 13.7x; see §6 correction) |
 | 7 | `ensemble/pvt_corners` | not a defect — **ngspice is wrong** | espice, 3.5x; ngspice overshoots its own rail |
 
 ---
@@ -475,8 +475,22 @@ default grid:         ngspice 1.077768 ns   espice 1.086682 ns
                       ngspice is 9.61 ps early;  espice is 0.70 ps early
 ```
 
-**espice's default grid times this edge 13.7x better than ngspice's.** Scored
-against the converged reference:
+> **CORRECTION, 2026-09-10** (`docs/perf/pvt-arbitration-2026-09-10.md`). The
+> verdict below stands — ngspice is still the worse engine here, 5.2x further
+> from the limit on rms — but **the 13.7x ratio is wrong and must not be
+> quoted**. It is computed against the `tmax=2p` row above, which had not
+> itself converged. Richardson on 2p/0.2p/0.02p (the edge moves 2.203 ps then
+> 0.204 ps, ratio 10.8) puts the true limit at ~1.08980 ns, making espice
+> 3.12 ps early and ngspice 12.03 ps early — **3.9x, not 13.7x**. The verdict
+> survives for any limit above 1.08222 ns, so it is safe by a wide margin.
+>
+> Weakness worth stating: unlike `pvt_corners`, this limit rests on two
+> TRAPEZOIDAL engines, because no third simulator in this tree implements an
+> HFET. There is no independent integrator to check it against.
+
+**espice's default grid times this edge better than ngspice's — 3.9x on edge
+phase after the correction above, 5.2x on rms.** Scored against the converged
+reference:
 
 ```
 ngspice default vs converged:  max 8.73e-2  rms 3.03e-3
