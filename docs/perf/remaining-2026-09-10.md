@@ -71,6 +71,19 @@ noise: pi100 and mos6 drifted +0.17%, but `rc_chain_500` went 79.10M → 80.59M
 (**+1.9%**) and `rc_ladder_10k` 1178.0M → 1203.4M (**+2.2%**). `446268a` touched
 60 files under `src/`; the linear decks paid for something in it. Not chased.
 
+**Chased, 2026-09-13 — and the sentence above is wrong on both counts.** See
+`linear-bisect-2026-09-10.md`. It was not "the linear decks": all four decks
+paid the same **~5.5 Ir per matrix row per Newton iterate** (5.36 / 5.46 / 5.48 /
+5.86 across ladder / chain / pi100 / mos6), and the linear decks only show a
+bigger percentage because they have no MOSFET work to dilute it. And it was
+probably not `446268a`: 52 of its 60 `src/` files were reverse-applied at tip in
+two halves and recovered nothing (linear decks moved +0.38% and −0.05%). The
+`446268a` re-measurement was taken on **446268a + VerA a19b6fb**, and
+`a19b6fb` — VerA's own half of the same 18-way audit, committed six seconds
+later, 1063 lines of it in `src/ir/lower.zig` — is the one commit VerA moved by
+between the two measurements. The code generator is the only thing in the system
+that is uniform per row per iterate across all four decks.
+
 ## The per-pass budget — re-measured 2026-09-10 at `446268a`
 
 **Replaces the budget taken at pi100 = 507M / mos6 = 189M**, which predated the
