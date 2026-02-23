@@ -98,6 +98,13 @@ pub fn build(b: *std.Build) void {
 
     const dev_mods = b.allocator.alloc(*std.Build.Module, models.len) catch @panic("OOM");
     const one_models = b.allocator.alloc(*std.Build.Module, models.len) catch @panic("OOM");
+    // One HOST object per model, the CPU counterpart of the per-model GPU
+    // kernel roots below. Every `DeviceBatch(D)` used to be instantiated inside
+    // the single `zig build-exe` that also holds solvers/analysis/app, so Zig
+    // cached all 38 whale evals as ONE unit: a one-line solver edit recompiled
+    // the lot, single-threaded, on a 32-core box. See
+    // docs/perf/build-split-2026-09-10.md and src/devices/host_device.zig.
+    const host_objs = b.allocator.alloc(*std.Build.Step.Compile, models.len) catch @panic("OOM");
     for (models, 0..) |m, i| {
         const run = b.addRunArtifact(vera_exe);
         // The catalog keys devices by FILE stem while the generated type name
@@ -143,6 +150,22 @@ pub fn build(b: *std.Build) void {
         // profiling doc names was unusable.
         one_models[i] = GPU.make(wf.add(b.fmt("{s}/models.zig", .{m.name}), one_line), &.{});
         one_models[i].addImport(m.name, dev_mods[i]);
+
+        // The one-device object: `engine.deviceVtable(D)` and everything it
+        // pulls — ProtoStore, DeviceBatch, eval, hooks — under the runtime ABI
+        // symbol `arp_device_<stem>`. Same `one_models` aggregate the GPU
+        // kernel root gets, so host and device compile the SAME device type.
+        const host_mod = M.make(b.path("src/devices/host_device.zig"), &.{
+            .{ .name = "contract", .module = contract_mod },
+            .{ .name = "models", .module = one_models[i] },
+            .{ .name = "gompute", .module = gompute.module("gompute") },
+        });
+        // engine.zig's runtime-`.so` half dlopens; matches devices_mod.
+        host_mod.link_libc = true;
+        host_objs[i] = b.addObject(.{ .name = b.fmt("dev_{s}", .{m.name}), .root_module = host_mod });
+        // Same reason the executable does it: the self-hosted backend has no
+        // optimizer, whatever the optimize mode claims (see `exe.use_llvm`).
+        host_objs[i].use_llvm = optimize != .Debug;
     }
 
     const models_mod = M.make(wf.add("models.zig", agg_src.items), &.{});
@@ -194,6 +217,7 @@ pub fn build(b: *std.Build) void {
     // optimizer and the compile-time win is the whole point there.
     exe.use_llvm = optimize != .Debug;
     exe.use_lld = optimize != .Debug;
+    for (host_objs) |o| exe.root_module.addObject(o);
     b.installArtifact(exe);
 
     // GPU kernels, unconditionally: the arch probe inside `emitKernels` is what
@@ -287,6 +311,10 @@ pub fn build(b: *std.Build) void {
     // Match production: Zig 0.16's native backend miscompiles reused FP comparisons.
     app_tests.use_llvm = exe.use_llvm;
     app_tests.use_lld = exe.use_lld;
+    // builder.zig resolves generated devices through `arp_device_*`, so every
+    // binary that links it links the objects too. They are the same cached
+    // artifacts the executable uses, so this costs a link, not a compile.
+    for (host_objs) |o| app_tests.root_module.addObject(o);
     test_step.dependOn(&b.addRunArtifact(app_tests).step);
 
     // The app layer, as its own test root. tests/test_all.zig cannot reach it:
@@ -306,6 +334,7 @@ pub fn build(b: *std.Build) void {
         exe_tests.root_module.addImport("gompute_kernels", artifacts);
     exe_tests.use_llvm = exe.use_llvm;
     exe_tests.use_lld = exe.use_lld;
+    for (host_objs) |o| exe_tests.root_module.addObject(o);
     const run_exe_tests = b.addRunArtifact(exe_tests);
     b.step("test-app", "Run the executable's own tests").dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_exe_tests.step);
