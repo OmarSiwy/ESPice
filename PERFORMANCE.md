@@ -18,6 +18,14 @@ lives in `docs/perf/<area>.md`. This file is the index.
 The repo rule still applies: a performance claim ships with a
 `zig build bench` before/after in the commit message. Nothing below has one.
 
+**What the unmeasured cleanup pass actually cost:** the safe-cleanup half of
+this audit shipped as `446268a`, and `remaining-2026-09-10.md` charged it with
++1.9% / +2.2% on the linear decks. It is not guilty — 52 of its 60 `src/` files
+were reverse-applied at tip and recovered nothing. See
+[`docs/perf/linear-bisect-2026-09-10.md`](docs/perf/linear-bisect-2026-09-10.md)
+for the bisect and where the cost more likely came from (VerA `a19b6fb`, the
+same audit's code-generator half).
+
 ---
 
 ## Devices (device kernels, LTRA/TXL native, ParEval)
