@@ -219,3 +219,62 @@ test "zero scatter preserves signed zero, subnormals and NaN quieting" {
         };
     }
 }
+
+// The reduced derivative basis (docs/perf/rank4-2026-09-10.md). With
+// RD = RS = 0 mos1's node collapse makes `di ≡ d` and `si ≡ s`, so the true
+// rank is 4 and `evalRange` runs at `@Vector(4, f64)`. With RD/RS live it is
+// not, and `benchmark/fixtures/convergence/mos_series_r` is the deck-level
+// guard. This is the unit-level one, and it pins the part the deck cannot:
+// that a MIXED batch still sorts each instance under its own basis.
+test "collapse rank: a mixed batch narrows only the collapsed instances" {
+    const M = devices.byName("mos1");
+    const card: M.Model = .{ .vto = 0.7, .kp = 110e-6, .gamma = 0.4, .phi = 0.65, .w = 20e-6, .l = 1e-6 };
+    var live = card;
+    live.rd = 12;
+    live.rs = 9;
+    const inst: M.Instance = .{};
+
+    // Same device, same node numbers, same bias — once alone, once behind a
+    // collapsed instance that forces the batch through the partition. The
+    // stamps must be bit-for-bit equal: a partition that mis-sorts, or a
+    // narrow basis leaking onto a device whose internal nodes are live, moves
+    // them (the settled table measured 3150 bit mismatches at rd=12/rs=9).
+    var out: [2][4]f64 = undefined;
+    var n: [2]u32 = undefined;
+    for ([_]bool{ false, true }, 0..) |crowded, run| {
+        var b = Builder.init(testing.allocator);
+        // The collapsed instance goes FIRST in add order and on its own nodes,
+        // so it shares no matrix slot with the device under test.
+        if (crowded) {
+            const nodes = [_]u32{ b.addNode(), b.addNode(), b.addNode(), b.addNode() };
+            try b.addDevice(M, card, inst, nodes);
+        }
+        const d = b.addNode();
+        const g = b.addNode();
+        const s = b.addNode();
+        try b.addDevice(M, live, inst, [4]u32{ d, g, s, 0 });
+        var ckt = try b.compile();
+        defer ckt.deinit();
+
+        const x = try testing.allocator.alloc(f64, ckt.n);
+        defer testing.allocator.free(x);
+        @memset(x, 0);
+        x[d] = 3.0;
+        x[g] = 2.0;
+        ckt.evalNewton(x, 0);
+        out[run] = .{
+            ckt.rhs[d],
+            ckt.rhs[s],
+            ckt.g_vals[ckt.findSlot(d, d).?],
+            ckt.g_vals[ckt.findSlot(d, g).?],
+        };
+        n[run] = ckt.n;
+    }
+    // The collapsed instance really is collapsed: it added its four ports and
+    // NO internal node, which is the precondition for the narrow basis.
+    try testing.expectEqual(n[0] + 4, n[1]);
+    // Nonzero, so the comparison is not two zeros agreeing.
+    try testing.expect(out[0][2] != 0);
+    for (out[0], out[1]) |a, c|
+        try testing.expectEqual(@as(u64, @bitCast(a)), @as(u64, @bitCast(c)));
+}
