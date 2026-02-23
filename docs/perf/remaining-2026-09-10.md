@@ -245,15 +245,27 @@ Composition of the mos6 kernel at 1403 (before two fixes): Dual AD methods 583
 (41.6%), model expressions 264, transcendentals 309, rest 96. The AD layer is
 the biggest single line and nothing has touched it.
 
-**Do not re-attempt derivative narrowing.** Settled with measurements:
-on AVX2 every width ≤4 is ONE vector instruction, so narrowing popcount-2
-values from 4 lanes to 2 saves zero; mos1's smallest *correct* lane universe is
-**six** (the rd/rs series branches touch `{d,di}` and `{s,si}`), and
-`@Vector(6,f64)` lowers to ymm+xmm — same FP count as 8, +145 shuffles.
-Measured k=6: **1088 Ir, a 21% loss**. k=4 wins but is provably wrong: 3150 bit
-mismatches at `rd=12, rs=9`. A contract `axpy` injector was added and reverted
-— measured 2.95 instructions per component, not the ~1 that would close the
-ledger.
+**Do not re-attempt derivative narrowing on a device whose internal nodes are
+LIVE.** Settled with measurements: on AVX2 every width ≤4 is ONE vector
+instruction, so narrowing popcount-2 values from 4 lanes to 2 saves zero; mos1's
+smallest *correct* lane universe is **six** (the rd/rs series branches touch
+`{d,di}` and `{s,si}`), and `@Vector(6,f64)` lowers to ymm+xmm — same FP count
+as 8, +145 shuffles. Measured k=6: **1088 Ir, a 21% loss**. k=4 wins but is
+provably wrong there: 3150 bit mismatches at `rd=12, rs=9`. A contract `axpy`
+injector was added and reverted — measured 2.95 instructions per component, not
+the ~1 that would close the ledger.
+
+**The COLLAPSED case is a different device and it is DONE —
+`docs/perf/rank4-2026-09-10.md`.** With `rd = rs = 0` the host has already
+aliased `di` onto `d` and `si` onto `s` in the tapes, mos1's core reads `x[d]`,
+`x[s]` and both branch-flow unknowns nowhere, and rank 4 is the rank rather than
+an approximation of 8. VerA emits the maximal alias map at comptime
+(`collapse_full`), `ProtoStore.finalize` partitions instances by whether their
+own `collapse` reaches it, and `evalRange` takes a comptime `narrow` flag that
+picks the derivative basis and nothing else. **pi100 433.9M → 380.1M (−12.40%),
+mos6 146.6M → 130.6M (−10.95%), 198 / 215 Ir per evaluation, 256 of 256 fixture
+raws byte-identical (`convergence/mos_series_r` included), NR iterations
+unchanged at 1352 / 884.** GPU stays wide; `n_u > 8` (bsim4 and up) stays wide.
 
 **ALL THREE live sub-items below are now CLOSED — see
 `docs/perf/dual-ad-2026-09-10.md`, which itemises the AD layer per method
@@ -618,7 +630,8 @@ that the summary line is present, an early abort still writes a plausible total.
 
 | claim | the measurement that settled it |
 |---|---|
-| per-value derivative narrowing | k=6 (the smallest correct universe) is a **21% loss**; k=4 is unsound, 3150 bit mismatches at rd=12/rs=9 |
+| per-value derivative narrowing, internal nodes LIVE | k=6 (the smallest correct universe) is a **21% loss**; k=4 is unsound, 3150 bit mismatches at rd=12/rs=9 |
+| per-value derivative narrowing, nodes COLLAPSED | the opposite sign, and shipped: rank 4 is exact when `rd = rs = 0`, −12.40% / −10.95%, 256/256 byte-identical — `docs/perf/rank4-2026-09-10.md` |
 | global reduced tangent basis | rank-5 → 14 instructions vs 13 for width 8 on AVX2 |
 | instance-axis SIMD | 1.17× end-to-end; stamp 195→196 at W=4 |
 | out-params instead of the by-value `evalQ` return | **zero** — `@call(.always_inline)` means there is no ABI and no sret |
