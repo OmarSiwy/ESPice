@@ -555,10 +555,12 @@ pub const Hooks = struct {
     /// pattern, the Model/Instance PODs and `DeviceKernel.run`'s parameter
     /// list are all unchanged.
     q_tape: ?*const fn (*anyopaque) []const f64 = null,
-    /// Charges only, whole batch: restamp `q_vec` + `q_tape` at `x` and leave
-    /// g/c/rhs alone. Null when the device declares no `q`. See `evalQRange` —
-    /// this is the transient's post-accept re-read, not a second eval path.
-    eval_q: ?*const fn (*anyopaque, *const Planes, []const f64, f64) void = null,
+    /// Charges only, instances `[first, last)`: restamp `q_vec` + `q_tape` at
+    /// `x` and leave g/c/rhs alone. Null when the device declares no `q`. See
+    /// `evalQRange` — this is the transient's post-accept re-read, not a second
+    /// eval path. Ranged for the same reason `eval` is: ParEval's `.charge`
+    /// mode hands each lane the same instance range it gets in `.full`.
+    eval_q: ?*const fn (*anyopaque, *const Planes, u32, u32, []const f64, f64) void = null,
     collect_params: *const fn (*anyopaque, std.mem.Allocator, *std.ArrayList(ParamRef)) anyerror!void,
     collect_noise: ?*const fn (*anyopaque, []const f64, std.mem.Allocator, *std.ArrayList(NoiseSource)) anyerror!void = null,
     recompute: ?*const fn (*anyopaque) error{TopologyChanged}!void = null,
@@ -1576,10 +1578,17 @@ pub fn DeviceBatch(comptime D: type) type {
             evalInner(ctx, pl, first, last, x, t, true);
         }
 
-        fn evalQOnly(ctx: *anyopaque, pl: *const Planes, x: []const f64, t: f64) void {
+        fn evalQOnly(ctx: *anyopaque, pl: *const Planes, first: u32, last: u32, x: []const f64, t: f64) void {
             const self: *Self = @ptrCast(@alignCast(ctx));
             var sink = Sink(D, false, false).host(self, pl, x, undefined);
-            evalQRange(D, RealFor(@hasDecl(D, "collapse")), &sink, 0, @intCast(self.count), t);
+            // `always_inline` is not decoration. This used to pass the literal
+            // `0, self.count`, and LLVM inlined the loop here off the constant
+            // start; with `first` runtime it stopped, put mos6's charge core out
+            // of line and cost devices/mos6_inverter 145.34M -> 146.66M Ir
+            // (+0.91%) for the same work. Forcing the old shape gives 145.35M,
+            // +0.010% — noise. Device-dependent codegen, same class as the note
+            // in `evalRange`; the range itself costs nothing.
+            @call(.always_inline, evalQRange, .{ D, RealFor(@hasDecl(D, "collapse")), &sink, first, last, t });
         }
 
         fn scatterBounds(ctx: *anyopaque, first: u32, last: u32, trash_slot: u32, trash_row: u32) [4]u32 {
@@ -2423,11 +2432,18 @@ pub fn CtlKernel(comptime D: type, comptime block_size: u32) type {
 // not the GPU's unbounded one. `reduce` walks lanes 1..n in a fixed order, so
 // a cell's sum is `((S0 + S1) + S2) + ...` over CONSECUTIVE segments of the
 // serial sequence — `init` cuts the lane ranges at INSTANCE boundaries and
-// hands them out in ascending order, so no instance's contributions ever
-// straddle a lane. That is the property that matters: the cancelling pair that
-// makes a high-fan-in cell ill-conditioned (see `GpuContext.reduce`) stays
-// inside one lane, every lane partial is as well-conditioned as tape order,
-// and the fold adds n_lanes already-cancelled values. Measured serial vs
+// hands them out in ascending order, so no ONE INSTANCE's contributions ever
+// straddle a lane. That keeps the cancelling `+g/-g` pair that makes a
+// high-fan-in cell ill-conditioned (see `GpuContext.reduce`) inside one lane.
+//
+// It does NOT keep a NODE inside one lane. Two instances of the same batch that
+// share a node can land either side of a cut, and then that node's row sum is
+// split — measured on sweep/opamp_wl_5000 at 16 lanes, where the deviation set
+// is exactly the four nodes of OTA #888 (`tail_888` is driven by M1/M2/M5_888,
+// all nch, and the cut falls between them). Still 1 ulp, still deterministic at
+// a given n_lanes; the guarantee is per-instance, not per-node.
+//
+// Measured serial vs
 // n_lanes in {2,4,8,16}, same point count everywhere: parallel_inverters_500
 // and _2000 max 1.1e-16..1.9e-16, resistor_grid_100x100 4.4e-16, rc_ladder_10k
 // bit-identical. One ulp, against a benchmark tolerance of 1e-2.
@@ -2454,7 +2470,12 @@ const Window = struct {
 
 pub const default_min_instances: u32 = 1024;
 
-const Mode = enum(u8) { full, newton };
+/// `.charge` is the transient's post-accept re-read: `q_vec` and the per-batch
+/// `q_tape` only, g/c/rhs left alone. Same tasks, same lane cuts and the same
+/// `reduce` order as `.full`, so the q plane it leaves is bit-for-bit the one
+/// `.full` would have left at this width — which is the property the serial
+/// `Circuit.evalQ` promises against serial `eval`.
+const Mode = enum(u8) { full, newton, charge };
 
 pub const ParEval = struct {
     gpa: std.mem.Allocator,
@@ -2661,6 +2682,12 @@ pub const ParEval = struct {
         }
     }
 
+    /// Charges only — the threaded twin of `Circuit.evalQ`'s serial body.
+    pub fn evalQ(self: *ParEval, batches: []const Batch, own_planes: Planes, x: []const f64, t: f64) void {
+        @memset(own_planes.q_vec, 0);
+        self.forkJoin(batches, own_planes, true, x, t, .charge);
+    }
+
     fn forkJoin(self: *ParEval, batches: []const Batch, own_planes: Planes, has_charge: bool, x: []const f64, t: f64, mode: Mode) void {
         if (self.n_lanes == 1) {
             runLane(self, batches, own_planes, has_charge, 0, x, t, mode);
@@ -2685,7 +2712,7 @@ pub const ParEval = struct {
             spins +%= 1;
             if (spins > 4096) std.Thread.yield() catch {};
         }
-        self.reduce(own_planes, has_charge);
+        self.reduce(own_planes, has_charge, mode);
     }
 
     fn startWorkers(self: *ParEval) void {
@@ -2732,14 +2759,21 @@ pub const ParEval = struct {
         const pl = self.lanePlanes(own_planes, lane);
         if (lane != 0) {
             const win = self.windows[lane - 1];
-            @memset(pl.g_vals[win.slot_lo..win.slot_hi], 0);
-            @memset(pl.rhs[win.row_lo..win.row_hi], 0);
-            pl.g_vals[self.nnz1 - 1] = 0;
-            pl.rhs[self.n1 - 1] = 0;
+            // `.charge` writes q and nothing else, so it clears q and nothing
+            // else: the other three slabs keep whatever the last `.full` or
+            // `.newton` left, and `reduce` does not read them back.
+            if (mode != .charge) {
+                @memset(pl.g_vals[win.slot_lo..win.slot_hi], 0);
+                @memset(pl.rhs[win.row_lo..win.row_hi], 0);
+                pl.g_vals[self.nnz1 - 1] = 0;
+                pl.rhs[self.n1 - 1] = 0;
+            }
             if (has_charge) {
-                @memset(pl.c_vals[win.slot_lo..win.slot_hi], 0);
+                if (mode != .charge) {
+                    @memset(pl.c_vals[win.slot_lo..win.slot_hi], 0);
+                    pl.c_vals[self.nnz1 - 1] = 0;
+                }
                 @memset(pl.q_vec[win.row_lo..win.row_hi], 0);
-                pl.c_vals[self.nnz1 - 1] = 0;
                 pl.q_vec[self.n1 - 1] = 0;
             }
         }
@@ -2748,15 +2782,23 @@ pub const ParEval = struct {
             switch (mode) {
                 .full => b.eval(b.ctx, &pl, task.first, task.last, x, t),
                 .newton => b.eval_newton(b.ctx, &pl, task.first, task.last, x, t),
+                .charge => if (b.hooks.eval_q) |f| f(b.ctx, &pl, task.first, task.last, x, t),
             }
         }
     }
 
-    fn reduce(self: *ParEval, own_planes: Planes, has_charge: bool) void {
+    fn reduce(self: *ParEval, own_planes: Planes, has_charge: bool, mode: Mode) void {
         var l: u32 = 1;
         while (l < self.n_lanes) : (l += 1) {
             const e: usize = l - 1;
             const win = self.windows[e];
+            if (mode == .charge) {
+                addSimd(
+                    own_planes.q_vec[win.row_lo..win.row_hi],
+                    self.q_slab[e * self.n1 + win.row_lo .. e * self.n1 + win.row_hi],
+                );
+                continue;
+            }
             addSimd(
                 own_planes.g_vals[win.slot_lo..win.slot_hi],
                 self.g_slab[e * self.nnz1 + win.slot_lo .. e * self.nnz1 + win.slot_hi],
@@ -2806,7 +2848,10 @@ fn addSimd(dst: []f64, src: []const f64) void {
 // Jacobian zeros, not just ground — `addPattern` no longer reserves a matrix
 // entry for them and `evalRange` no longer writes one. Structs are unchanged,
 // so the guard is `layoutHash` mixing this number rather than a layout delta.
-pub const abi_version: u32 = 7;
+// Version 8: `Hooks.eval_q` takes an instance range. `hashType` only mixes
+// sizes/alignments/offsets, and a fn-pointer signature change moves none of
+// them, so the guard has to be this number.
+pub const abi_version: u32 = 8;
 
 pub const DeviceVtable = struct {
     name: []const u8,
