@@ -26,7 +26,7 @@ module bsim3(d, g, s, b);
     // ---- model parameters (b3.c spellings, b3set.c defaults) --------------
     parameter real type = 1.0;           // +1 NMOS, -1 PMOS (builder-set)
     parameter integer mobmod = 1 from [1:3];
-    parameter real tnom = 27.0;          // degC
+    parameter real tnom = $simparam("tnom");          // degC
     parameter real tox  = 150.0e-10;     // m
     parameter real toxm = 150.0e-10;     // m (default: tox)
     parameter real xj   = 0.15e-6;       // m

@@ -383,7 +383,7 @@ endfunction
 `MPRnb( UD             ,0.0            ,""                                 ,"Coulomb scattering factor of mobility" )
 `MPRnb( UD1            ,0.0            ,""                                 ,"Temperature coefficient of ud" )
 `MPRnb( VOFF           ,-0.08          ,"V"                                ,"Threshold voltage offset" )
-`MPRnb( TNOM           ,27.0           ,"Degree Celsius"                   ,"Parameter measurement temperature" )
+`MPRnb( TNOM           ,$simparam("tnom")           ,"Degree Celsius"                   ,"Parameter measurement temperature" )
 `MPRcz( CGSO           ,0.0            ,"F/m"                              ,"Gate-source overlap capacitance per width" )
 `MPRcz( CGDO           ,0.0            ,"F/m"                              ,"Gate-drain overlap capacitance per width" )
 `MPRnb( XPART          ,0.0            ,""                                 ,"Channel charge partitioning" )

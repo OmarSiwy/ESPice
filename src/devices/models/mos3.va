@@ -88,7 +88,7 @@ module mos3(d, g, s, b);
     parameter real af = 1.0 from (0:inf);   //     flicker exponent
 
     // --- temperature ---
-    parameter real tnom  = 27.0;            // degC parameter measurement temp
+    parameter real tnom  = $simparam("tnom");            // degC parameter measurement temp
     parameter real temp  = 27.0;            // degC explicit device temp override
     parameter real dtemp = 0.0;             // K    instance offset from $temperature
 

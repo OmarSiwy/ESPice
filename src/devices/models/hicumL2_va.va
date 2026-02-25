@@ -842,7 +842,7 @@ parameter real cth      = 0.0           from [0:inf)    `ATTR(info="Thermal capa
 parameter real flcomp = 0.0             from [0:inf)    `ATTR(info="Flag for compatibility with v2.1 model (0=v2.1)");
 
 //Circuit simulator specific parameters
-parameter real tnom     = 27.0                          `ATTR(info="Temperature at which parameters are specified" unit="C");
+parameter real tnom     = $simparam("tnom")                          `ATTR(info="Temperature at which parameters are specified" unit="C");
 parameter real dt       = 0.0                           `ATTR(info="Temperature change w.r.t. chip temperature for particular transistor" unit="K");
 parameter integer  type = 1      from [-1:1] exclude 0  `ATTR(info="For transistor type NPN(+1) or PNP (-1)");
 
