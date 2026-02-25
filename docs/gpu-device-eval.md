@@ -358,9 +358,12 @@ d: @Vector(N, F),     // Jacobian — F = f32 under jac_f32
 inline fn splat(c: f64) V { return @splat(@floatCast(c)); }
 ```
 
-`engine.jacFloat(D)` reads the device's `jac_f32` and picks `F`. The permission
-is per **device**, not per host, because whether a model's unknowns fit in f32's
-~7 digits is a fact about its physics and only the physics knows it.
+The permission is per **device**, because whether a model's unknowns fit in
+f32's ~7 digits is a fact about its physics and only the physics knows it.
+**Taking** it is per INSTANTIATION: `engine.gpuJacFloat(D)` takes it in
+`DeviceKernel.run`, `engine.jacFloat(D)` declines it on the host unless
+`jac_f32_host` (`-Djac-f32=<stems>`) orders otherwise. One binary, f32 in the
+GPU kernel and f64 on the CPU — `docs/perf/jac-width-2026-09-10.md`.
 
 ### 9.2 What widens back, and where
 
