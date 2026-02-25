@@ -41,12 +41,12 @@ Attribution-NonCommercial 4.0 International (CC-BY-NC 4.0)
 // [flatten] annex D `include "disciplines.vams" — supplied by FastVAF
 // [flatten] annex D `include "constants.vams" — supplied by FastVAF
 
-// SPICE's `.options tnom` default is 27 degC (ngspice b4set.c:1950 assigns
-// CKTnomTemp when the card omits TNOM), and every other model here already
-// spells 27. The upstream Cogenda file said 25, which put the whole BSIM4
+// `DEFAULT_TNOM was 25 upstream (Cogenda), which put the whole BSIM4
 // parameter set 2 K off nominal: phi/vth0 shifted +1.5 mV and u0 picked up a
-// (T/Tnom)^ute factor, costing ~4.9% of the subthreshold current.
-`define DEFAULT_TNOM 27
+// (T/Tnom)^ute factor, costing ~4.9% of the subthreshold current. It is gone
+// now rather than corrected to 27: nominal is the CIRCUIT's, read through
+// §9.15 `$simparam("tnom")` at the one place it is used, so a deck's
+// `.options tnom` reaches the model instead of being overruled by a literal.
 `define N_MINLOG 1.0e-38
 
     `define INITIAL_INSTANCE
@@ -3080,10 +3080,14 @@ module bsim4va(d, g, s, b);
             if (!$param_given(plpeb))
                 BSIM4plpeb = BSIM4plpe0;
 
-            /* NOTE: Verilog-A does not support access to the modelcard
-             * default Tnom value */
+            // b4set.c:1950 — `if (!BSIM4tnomGiven) BSIM4tnom = ckt->CKTnomTemp`,
+            // the CIRCUIT's `.options tnom` (degC, default 27), not this file's
+            // own idea of nominal. The NOTE that stood here said Verilog-A
+            // cannot reach the modelcard default; §9.15 Table 9-27 is how it
+            // can — VerA renders `$simparam("tnom")` from a Model field the
+            // host writes before derive().
             if (!$param_given(tnom))
-                BSIM4tnom = `DEFAULT_TNOM + `P_CELSIUS0;
+                BSIM4tnom = $simparam("tnom") + `P_CELSIUS0;
             else  // Shift from C to K:
                 BSIM4tnom = BSIM4tnom + `P_CELSIUS0;
 

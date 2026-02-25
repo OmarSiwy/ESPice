@@ -278,3 +278,51 @@ test "collapse rank: a mixed batch narrows only the collapsed instances" {
     for (out[0], out[1]) |a, c|
         try testing.expectEqual(@as(u64, @bitCast(a)), @as(u64, @bitCast(c)));
 }
+
+// ---------------------------------------------------------------------------
+// `.options tnom`
+// ---------------------------------------------------------------------------
+
+const Diode = devices.byName("diode");
+const d_n_u = @typeInfo(Diode.U).@"enum".fields.len;
+const DS = devices.engine.Dual(d_n_u, f64);
+
+/// Diode current at `v` volts, with the circuit's nominal temperature set the
+/// way `builder.deriveModel` sets it: write VerA's reserved field, then derive.
+fn diodeCurrent(model0: Diode.Model, nom_temp_c: f64, temp_k: f64, v: f64) f64 {
+    var model = model0;
+    @field(model, @import("builder").nom_temp_field) = nom_temp_c;
+    Diode.derive(&model);
+    var inst: Diode.Instance = .{ .temperature = temp_k };
+    Diode.precompute(&inst, &model);
+    var x = [_]DS{DS.con(0)} ** d_n_u;
+    x[@intFromEnum(Diode.U.a)] = DS.con(v);
+    x[@intFromEnum(Diode.U.ai)] = DS.con(v); // rs = 0: no access drop
+    return Diode.eval(DS, x, &model, &inst, 0)[@intFromEnum(Diode.U.ai)].v;
+}
+
+test "`.options tnom` reaches the model card default, and a card TNOM still wins" {
+    // ngspice 44.2, benchmark/fixtures/regression/options_tnom: `.options
+    // tnom=50` + `.temp 100`, `D1 d1 0 dm` / `.model dm d(is=1e-14 n=1 xti=3
+    // eg=1.11 rs=0)` at 0.6 V. Captured as i(vd1)/i(vd2) from that deck's raw.
+    //
+    // The defect this pins: every .va hardcoded 27 degC as nominal, so BOTH
+    // arms answered 1.08e-2 and `.options tnom` was a silent no-op — a 26x
+    // error on a deck that named the option explicitly. ngspice spends it in
+    // diosetup.c:219, `if (!DIOnomTempGiven) DIOnomTemp = ckt->CKTnomTemp`.
+    const card: Diode.Model = .{ .is = 1e-14, .n = 1.0, .xti = 3.0, .eg = 1.11, .rs = 0 };
+    const temp_k = 373.15; // .temp 100
+
+    // No card TNOM: the option is the extraction temperature.
+    try testing.expectApproxEqRel(@as(f64, 4.08022507e-04), diodeCurrent(card, 50, temp_k, 0.6), 1e-4);
+    // The 27 degC default — every deck in the corpus omits `.options tnom`,
+    // so this is the value that must not move.
+    try testing.expectApproxEqRel(@as(f64, 1.07999094e-02), diodeCurrent(card, 27, temp_k, 0.6), 1e-4);
+
+    // Card TNOM=27 against `.options tnom=50`: SPICE precedence is the card,
+    // which VerA spells as `if (!model.tnom__given) model.tnom = ...`.
+    var given = card;
+    given.tnom = 27;
+    given.tnom__given = true;
+    try testing.expectApproxEqRel(@as(f64, 1.07999094e-02), diodeCurrent(given, 50, temp_k, 0.6), 1e-4);
+}

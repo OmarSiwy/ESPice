@@ -118,9 +118,16 @@ pub const Simulation = struct {
     /// caller the moment this returns. The Builder runs on sim_arena so the
     /// frozen intern table is never a slice into parse memory.
     pub fn fromNetlist(sim_arena: std.mem.Allocator, parse_arena: std.mem.Allocator, nl: types.Netlist, io: ?std.Io, config: SimConfig) !Simulation {
+        const deck_opts = parseDeckOptions(nl.directives);
         var b = Builder.init(sim_arena);
         var compiled_ok = false;
         errdefer if (!compiled_ok) b.deinit();
+
+        // Before `nb.build()`, because `.options tnom` is a MODEL-CARD default
+        // (`b4set.c:1950`), not an analysis knob: every model is derived from
+        // it as it is created, so nothing downstream has to re-derive and
+        // `collapse` sees its final answer the first time.
+        b.nom_temp_c = deck_opts.tnom_c;
 
         // Node count is bounded by (and usually close to) device count;
         // reserving here avoids incremental rehash during interning.
@@ -289,7 +296,6 @@ pub const Simulation = struct {
         // two ngspice plots, the spectral density curves and the band
         // integral (noisean.c:318-325 and :516-522), and one Result is one
         // plot. Every other card takes one slot and leaves the other.
-        const deck_opts = parseDeckOptions(nl.directives);
         sim.deck_tol = deck_opts.tol;
         sim.deck_temp = deck_opts.temp_c;
         sim.jobs = try sim_arena.alloc(Job, nl.directives.len * 2);
@@ -557,6 +563,17 @@ const DeckOptions = struct {
     tol: analysis.converger.Tolerances = .{},
     method: ?analysis.tran.Method = null,
     temp_c: ?f64 = null,
+    /// `.options tnom=<degC>` — ngspice `cktsopt.c:71-73` stores it as
+    /// `TSKnomTemp = val + CONSTCtoK`, so the CARD is Celsius; the default is
+    /// `cktntask.c:127`'s 300.15 K = 27 degC. Independent of `.options temp`
+    /// (`OPT_TEMP`, the same file's next case): nominal is where the model card
+    /// was extracted, `temp` is where the circuit is being run.
+    ///
+    /// Not optional and not applied per job: unlike `temp`, this is not an
+    /// analysis knob — it reaches the devices at BUILD time, before the
+    /// pattern is frozen, so no sweep can move it and `recompute`'s
+    /// topology-change path is never involved.
+    tnom_c: f64 = 27.0,
 };
 
 fn parseDeckOptions(directives: []const types.Directive) DeckOptions {
@@ -606,6 +623,7 @@ fn parseDeckOptions(directives: []const types.Directive) DeckOptions {
             if (eq(key, "itl4")) o.tol.itl4 = @intFromFloat(v);
             if (eq(key, "maxord")) maxord = v;
             if (eq(key, "temp")) o.temp_c = v;
+            if (eq(key, "tnom")) o.tnom_c = v; // cktsopt.c:268 `{ "tnom", OPT_TNOM, ... }`
             i += 1;
         }
     }

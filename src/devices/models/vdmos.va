@@ -78,7 +78,7 @@ module vdmos(d, g, s);
     parameter real a      = 1.0 from (0:inf);  // Cgd transition steepness [1/V]
 
     // --- temperature (§1.5) ------------------------------------------------
-    parameter real tnom  = 27.0;               // [degC], ngspice TNOM
+    parameter real tnom  = $simparam("tnom");               // [degC], ngspice TNOM
     parameter real tcvth = 0.0;                // dVTO/dT [V/K]
     parameter real mu    = -1.5;               // KP ~ (T/Tnom)^MU
     parameter real texp0 = 0.0;                // RD(on) temperature exponent
