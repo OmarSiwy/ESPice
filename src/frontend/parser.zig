@@ -992,7 +992,22 @@ pub fn Parser(comptime Tok: type) type {
             const nested = scopes[0 .. genv.len + 1];
             for (sub.devices) |sd| {
                 var nd = try substDevice(arena, sd, nested);
-                nd.name = try std.mem.concat(arena, u8, &.{ sd.name, ".", d.name });
+                // SPICE names a flattened device OUTER-first. ngspice
+                // subckt.c:1159-1173 `translate_inst_name` writes
+                // `<letter>.<scname>.<name>` for a non-X card and
+                // `<scname>.<name>` for a nested X, with scname = the instance
+                // being expanded; each enclosing level prepends in turn, so a
+                // V inside x1 inside x2 comes out `v.x2.x1.v1` and the nested
+                // X as `x2.x1`. Nodes take the same path without the letter
+                // (subckt.c:1135-1155 `translate_node_name`) — mapNode below
+                // builds them off this very string. The leading letter is not
+                // decoration: `Device.letter()` reads name[0] to dispatch, so
+                // an outer-first path without it would type every flattened
+                // device as an X card.
+                nd.name = if (sd.letter() == 'x')
+                    try std.mem.concat(arena, u8, &.{ d.name, ".", sd.name })
+                else
+                    try std.mem.concat(arena, u8, &.{ &.{sd.letter()}, ".", d.name, ".", sd.name });
                 const dev_nodes = try arena.alloc([]const u8, sd.nodes.len);
                 for (sd.nodes, dev_nodes) |n, *o| {
                     o.* = try mapNode(arena, sub.ports, d.nodes, d.name, n);
