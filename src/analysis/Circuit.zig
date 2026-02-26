@@ -679,10 +679,14 @@ pub const Circuit = struct {
         return self.param_refs.?;
     }
 
-    pub fn collectNoiseSources(self: *const Circuit, x_op: []const f64, gpa: std.mem.Allocator) ![]NoiseSource {
+    /// Every device's noise generators at state vector `x`, PSDs included —
+    /// each device's own `noisePsd`, never re-derived here. No temperature
+    /// argument: the density a device returns already carries its instance's
+    /// `$temperature`. Pure in `x`, so `.pnoise` calls it per PSS sample.
+    pub fn collectNoiseSources(self: *const Circuit, x: []const f64, gpa: std.mem.Allocator) ![]NoiseSource {
         var list: std.ArrayList(NoiseSource) = .empty;
         errdefer list.deinit(gpa);
-        for (self.batches) |b| if (b.hooks.collect_noise) |f| try f(b.ctx, x_op, gpa, &list);
+        for (self.batches) |b| if (b.hooks.collect_noise) |f| try f(b.ctx, x, gpa, &list);
         return try list.toOwnedSlice(gpa);
     }
 

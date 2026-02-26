@@ -1,12 +1,17 @@
-# In-device noise contract — current state and target design
+# In-device noise contract
 
 Anchor for every per-device "Noise model (in-device)" section in this
 directory. Convention: **noise lives inside the device model** — each
-device declares its generators and (target) computes its own PSDs
-through the device contract; analyses (AC noise, pnoise, transient
-noise) only transport them. Design doc — no code changes here.
+device declares its generators AND computes its own PSDs through the device
+contract; analyses (AC noise, pnoise, transient noise) only transport them.
 
-## 1. What exists today (source-verified)
+**§3 LANDED 2026-09-10** (ARPice `noise-kinds` / VerA `noise-kinds-vera`).
+Every VerA-generated device now emits `noisePsd` beside `noise_gens`, and the
+Jacobian derivation §1 describes is DELETED — a `noise_gens` table without
+`noisePsd` is a `@compileError`. Measurements, ngspice citations per kind, and
+the before/after per fixture: [../perf/noise-kinds-2026-09-10.md](../perf/noise-kinds-2026-09-10.md).
+
+## 1. What the pre-2026-09-10 path did (historical)
 
 **Declaration** — `../VerA/tools/contract.zig:269`:
 
@@ -48,12 +53,16 @@ per source `psd = 4kT·conductance`, output density
 $\sum |H_{branch}|^2 \cdot 4kT g$. `pss/pnoise.zig:190` and
 `tran/tran_noise.zig` reuse the same collection.
 
-So today: **thermal-only, conductance-derived, bias-frozen at x_op.**
+So that path was **thermal-only, conductance-derived, bias-frozen at x_op** —
+and thermal-only is why it looked correct: for a linear resistor the device's
+own `4kT/r` and the Jacobian's `4kT·g` are the same number to the bit. The two
+pure-thermal `.noise` fixtures are byte-identical across the fix; `amp_noise`
+moved 19.46% and a flicker deck moved 100%.
 Docs: [../analysis/ac-small-signal-noise.md](../analysis/ac-small-signal-noise.md),
 [../analysis/periodic-noise.md](../analysis/periodic-noise.md),
 [../analysis/transient-noise.md](../analysis/transient-noise.md).
 
-## 2. The gaps
+## 2. The gaps §3 closed (a, b) and left open (c)
 
 (a) **Shot/flicker need device data the Jacobian can't give.** Shot is
 $2q|I_{branch}|$ — a *current*, and for a junction $g = dI/dV = I/(NV_t)$
@@ -72,13 +81,14 @@ pure function of an *arbitrary* state vector, same as `eval`.
 correlation: all need a pair (two branches + complex correlation
 coefficient), which `noise_gens` cannot express.
 
-## 3. Target hook design — **LANDED in contract.zig (2026-07-12)**
+## 3. The hook — **LANDED** (contract 2026-07-12, implementation 2026-09-10)
 
-`PsdTerm` + the `noisePsd` validation now live in
-`../VerA/tools/contract.zig` (optional decl, requires `noise_gens`;
-allowlisted). Landed form drops the draft's `gen: u8` field — return
-position k IS generator k. Device implementations + the collectNoise
-consumption path below are still pending.
+`PsdTerm` + the `noisePsd` validation live in `../VerA/tools/contract.zig`
+(optional decl, requires `noise_gens`; allowlisted). Landed form drops the
+draft's `gen: u8` field — return position k IS generator k. Codegen
+(`emitNoiseTable`) and the consumption path (`collectNoise`) both landed
+2026-09-10; the pseudocode below is what the real code does, minus the
+`else` fallback branch, which no longer exists.
 
 Landed shape (verbatim, contract.zig:279 + validation :611–614):
 
@@ -135,11 +145,15 @@ fn collectNoise(batch, x, list):
                               node_n: gath[id*n_u+g.col],
                               white: t.white, flicker: t.flicker, ef: t.ef,
                               corr_with/corr })
-        else:                       # legacy: thermal off AD Jacobian
-            out = D.eval(Dual, seed(xl), ...)
-            for g in noise_gens where g.kind == .thermal:
-                list.append({ ..., white: 4kT*|out[g.row].d[g.col]| })
+        else:                       # DELETED 2026-09-10: `@compileError`.
+            ...                     # 4kT off the Jacobian was the 2x bug.
 ```
+
+The device's PSD must be a **conditional** live-out of the core, never a
+precompute field: every series resistance spells
+`if (r > 0) I(a,b) <+ white_noise(4kT/r)`, and hoisting that power evaluates
+`4kT/0` at the default `r = 0`. See `codegen.zig planPrecompute`'s `$noise`
+exclusion and ../perf/noise-kinds-2026-09-10.md §4.
 
 (`NoiseSource` grows the same fields; ac/noise.zig's per-frequency loop
 becomes `psd = src.white + src.flicker/pow(f, src.ef)` plus a correlated
@@ -177,9 +191,14 @@ treatment (e.g. no induced gate noise in MOS1–9), the delta is noted.
 
 ## Verification status
 
-- §1: **source-verified** (file:line cited, this repo).
-- §2: source-verified gaps (ponytail marker at batch.zig:759; pnoise x_op at pnoise.zig:188–190).
-- §3: **contract surface landed** (PsdTerm + noisePsd validation in contract.zig); device impls + batch.zig/noise.zig consumption still pending.
+- §1: **historical**, describes the path deleted 2026-09-10. Line numbers are
+  as-of that date and will not resolve against current `engine.zig`.
+- §2: (a) and (b) **closed** 2026-09-10 — `noisePsd` is pure in the state
+  vector, so pnoise calls it per PSS sample. (c) correlation is **still open**:
+  `PsdTerm` carries `corr_with`/`corr` and `collectNoise` drops them, because
+  `NoiseSource` has no partner field.
+- §3: **landed end to end**, measured against ngspice 44.2 on every `.noise`
+  fixture — [../perf/noise-kinds-2026-09-10.md](../perf/noise-kinds-2026-09-10.md) §6.
 
 ## Cross-links
 

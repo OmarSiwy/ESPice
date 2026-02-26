@@ -18,6 +18,11 @@ pub const R = struct {
     pub const Instance = struct {};
     // dI_p/dV_n = -g: |.| = g, injected between nodes p and n.
     pub const noise_gens = [_]root.NoiseGen{.{ .row = 0, .col = 1, .kind = .thermal }};
+    /// The PSD is the DEVICE's, never the analysis's — 4kT/R at the 27 C every
+    /// `.va` in src/devices/models defaults `$temperature` to.
+    pub fn noisePsd(_: [2]f64, m: *const Model, _: *const Instance) [1]root.PsdTerm {
+        return .{.{ .white = 4.0 * 1.380649e-23 * 300.15 / @as(f64, m.r) }};
+    }
     pub fn eval(comptime S: type, x: [2]S, m: *const Model, _: *const Instance, _: f64) [2]S {
         const ir = x[0].sub(x[1]).scale(1.0 / @as(f64, m.r));
         return .{ ir, ir.neg() };

@@ -1,14 +1,18 @@
 //! Small-signal noise, adjoint method: one transpose solve per frequency
 //! (A^H y = e_out), then every source is a dot product -- O(solves) went from
-//! points*sources to points. Source conductances come off the analytic
-//! Jacobian (root.Circuit.collectNoiseSources), no perturbation -- devices
-//! carry builtin noise generators, analyses never re-derive them.
+//! points*sources to points. Source PSDs come from the DEVICE
+//! (root.Circuit.collectNoiseSources -> the model's own `noisePsd`), never
+//! re-derived here: a PSD is a model expression over the bias and the model
+//! card, and 4kT*|dI/dV| off the Jacobian is a different number.
 //!
-//! Supports thermal (4kTg), shot (2q|I|), and flicker (KF*|I|^AF/f) PSD.
+//! Each source is `S(f) = white + flicker/f^ef`, which covers thermal
+//! (white = 4kTg), shot (white = 2q|I|) and flicker (KF*|I|^AF, ef = EF).
 //!
 //! ngspice equivalence, src/spicelib/analysis/ (44.2):
-//!   * nevalsrc.c:100-119 -- one generator contributes
-//!     |Vadj(p) - Vadj(n)|^2 * PSD, PSD = 4kT*g (THERMNOISE) or 2q|I| (SHOT).
+//!   * nevalsrc.c:99-117 -- one generator contributes
+//!     |Vadj(p) - Vadj(n)|^2 * PSD, PSD = 4kT*g (THERMNOISE, :111) or 2q|I|
+//!     (SHOTNOISE, :106), or bare |H|^2 (N_GAIN, :116) for the 1/f sources the
+//!     device scales itself.
 //!   * noisean.c:423-430 -- the ORDINARY ac solve, driven by the `.noise`
 //!     input source, gives |H|^2; the input-referred spectrum is onoise/|H|^2,
 //!     floored at N_MINGAIN.
@@ -52,7 +56,6 @@ pub const Options = struct {
     f_start: f64,
     f_stop: f64,
     points_per_decade: u16 = 10,
-    temp_k: f64 = 27.0 + 273.15,
     /// Emit ngspice's SECOND plot -- "Integrated Noise", the band integrals
     /// (noisean.c:495-528) -- instead of the per-frequency spectrum. One `.noise`
     /// card queues one job of each; see engine.zig.
@@ -85,19 +88,20 @@ fn nintegrate(dens: f64, ln_dens: f64, ln_last_dens: f64, b: Band) f64 {
     return a * (limexp(e1 * b.ln_freq) - limexp(e1 * b.ln_last_freq)) / e1;
 }
 
-/// Compute PSD for a single noise source at frequency f.
-///   thermal: S(f) = 4 * k_B * T * g          (white)
-///   shot:    S(f) = 2 * q * |I|              (white)
-///   flicker: S(f) = KF * |I|^AF / f          (1/f)
-inline fn sourcePsd(src: NoiseSource, f: f64, temp_k: f64) f64 {
-    return switch (src.kind) {
-        .thermal => 4.0 * k_boltzmann * temp_k * src.conductance,
-        .shot => 2.0 * q_electron * @abs(src.current),
-        .flicker => if (f > 0)
-            src.kf * std.math.pow(f64, @abs(src.current), src.af) / f
-        else
-            0,
-    };
+/// One source's PSD at frequency `f`: `S(f) = white + flicker / f^ef`.
+///
+/// The DEVICE computed both halves (`noisePsd`); adding the 1/f shape is the
+/// only thing the analysis is entitled to do to them, and it is the same split
+/// ngspice makes. The white half is `NevalSrc`'s single multiply
+/// (nevalsrc.c:105-113 — SHOTNOISE `2q|I|` and THERMNOISE `4kTg` land in the
+/// same `*noise` and are indistinguishable downstream); the 1/f half is the
+/// `N_GAIN` call every device follows with its OWN coefficient —
+/// `KF·|I|^AF/f` (dionoise.c:99-104, bjtnoise.c:112-118, both EF = 1) or
+/// `…/f^EF` (mos1noi.c:175-181, nlev 2/3 — the ONLY ngspice branch where the
+/// frequency exponent is a parameter, and the reason `ef` is a field).
+inline fn sourcePsd(src: NoiseSource, f: f64) f64 {
+    if (src.flicker == 0 or f <= 0) return src.white;
+    return src.white + src.flicker / std.math.pow(f64, f, src.ef);
 }
 
 /// Fine-grained primitive: sweep into caller-owned freqs/onoise/inoise buffers
@@ -190,7 +194,7 @@ pub fn sweep(
 
         var total_density: f64 = 0;
         for (noise_sources, ln_last) |src, *last| {
-            const psd = sourcePsd(src, f, options.temp_k);
+            const psd = sourcePsd(src, f);
             const yp_re: f64 = if (src.node_p != root.GROUND) y[src.node_p] else 0;
             const yn_re: f64 = if (src.node_n != root.GROUND) y[src.node_n] else 0;
             const yp_im: f64 = if (src.node_p != root.GROUND) y[n + src.node_p] else 0;
@@ -284,98 +288,41 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
 // ── Tests ──────────────────────────────────────────────────────────────
 
-test "sourcePsd thermal" {
-    const src: NoiseSource = .{
-        .node_p = 0,
-        .node_n = 1,
-        .kind = .thermal,
-        .conductance = 0.01, // 100 ohm resistor
-    };
-    const psd = sourcePsd(src, 1e6, 300.15);
-    const expected = 4.0 * k_boltzmann * 300.15 * 0.01;
-    try std.testing.expectApproxEqRel(expected, psd, 1e-12);
-    // White: same PSD at different frequency
-    const psd2 = sourcePsd(src, 1e9, 300.15);
-    try std.testing.expectApproxEqRel(psd, psd2, 1e-12);
+test "sourcePsd white is flat" {
+    // Thermal, 100 ohm: the device would have handed us 4kT*g.
+    const src: NoiseSource = .{ .node_p = 0, .node_n = 1, .white = 4.0 * k_boltzmann * 300.15 * 0.01 };
+    try std.testing.expectApproxEqRel(src.white, sourcePsd(src, 1e6), 1e-12);
+    try std.testing.expectApproxEqRel(sourcePsd(src, 1e6), sourcePsd(src, 1e9), 1e-12);
 }
 
-test "sourcePsd shot" {
-    const src: NoiseSource = .{
-        .node_p = 0,
-        .node_n = 1,
-        .kind = .shot,
-        .conductance = 0,
-        .current = 1e-3,
-    };
-    const psd = sourcePsd(src, 1e6, 300.15);
-    const expected = 2.0 * q_electron * 1e-3;
-    try std.testing.expectApproxEqRel(expected, psd, 1e-12);
-    // White: frequency-independent
-    const psd2 = sourcePsd(src, 1e9, 300.15);
-    try std.testing.expectApproxEqRel(psd, psd2, 1e-12);
-    // Negative current → same magnitude
-    const src_neg: NoiseSource = .{
-        .node_p = 0,
-        .node_n = 1,
-        .kind = .shot,
-        .conductance = 0,
-        .current = -1e-3,
-    };
-    const psd_neg = sourcePsd(src_neg, 1e6, 300.15);
-    try std.testing.expectApproxEqRel(psd, psd_neg, 1e-12);
-}
-
-test "sourcePsd flicker" {
-    const kf = 1e-24;
-    const af = 1.0;
+test "sourcePsd shot is 2q|I|, not 4kT*g" {
+    // THE 2x THIS BRANCH EXISTS TO FIX. A junction at I has g = dI/dV = I/Vt,
+    // so the old Jacobian read gave 4kT*I/Vt = 4q*I -- exactly twice 2q*I.
     const i_bias = 1e-3;
-    const src: NoiseSource = .{
-        .node_p = 0,
-        .node_n = 1,
-        .kind = .flicker,
-        .conductance = 0,
-        .current = i_bias,
-        .kf = kf,
-        .af = af,
-    };
-    // At 1 kHz: KF * |I|^AF / f = 1e-24 * 1e-3 / 1e3 = 1e-30
-    const psd_1k = sourcePsd(src, 1e3, 300.15);
-    const expected_1k = kf * std.math.pow(f64, i_bias, af) / 1e3;
-    try std.testing.expectApproxEqRel(expected_1k, psd_1k, 1e-12);
-    // At 10 kHz: should be 10x smaller (1/f)
-    const psd_10k = sourcePsd(src, 1e4, 300.15);
-    try std.testing.expectApproxEqRel(psd_1k / 10.0, psd_10k, 1e-12);
-    // At f=0: returns 0 (guard against division by zero)
-    const psd_0 = sourcePsd(src, 0, 300.15);
-    try std.testing.expectEqual(@as(f64, 0), psd_0);
+    const vt = k_boltzmann * 300.15 / q_electron;
+    const src: NoiseSource = .{ .node_p = 0, .node_n = 1, .white = 2.0 * q_electron * i_bias };
+    try std.testing.expectApproxEqRel(2.0 * q_electron * i_bias, sourcePsd(src, 1e6), 1e-12);
+    try std.testing.expectApproxEqRel(2.0, (4.0 * k_boltzmann * 300.15 * (i_bias / vt)) / src.white, 1e-12);
 }
 
-test "sourcePsd flicker af exponent" {
-    const src: NoiseSource = .{
-        .node_p = 0,
-        .node_n = 1,
-        .kind = .flicker,
-        .conductance = 0,
-        .current = 2e-3,
-        .kf = 1e-24,
-        .af = 2.0,
-    };
-    const psd = sourcePsd(src, 1e3, 300.15);
-    // KF * |I|^AF / f = 1e-24 * (2e-3)^2 / 1e3 = 1e-24 * 4e-6 / 1e3 = 4e-33
-    const expected = 1e-24 * std.math.pow(f64, 2e-3, 2.0) / 1e3;
-    try std.testing.expectApproxEqRel(expected, psd, 1e-12);
+test "sourcePsd flicker rolls off as 1/f^ef" {
+    // ngspice dionoise.c:99-104: KF*|I|^AF / f, EF = 1.
+    const src: NoiseSource = .{ .node_p = 0, .node_n = 1, .flicker = 1e-24 * 1e-3 };
+    try std.testing.expectApproxEqRel(1e-27 / 1e3, sourcePsd(src, 1e3), 1e-12);
+    try std.testing.expectApproxEqRel(sourcePsd(src, 1e3) / 10.0, sourcePsd(src, 1e4), 1e-12);
+    // f = 0 cannot divide; the white half is still the answer.
+    try std.testing.expectEqual(@as(f64, 0), sourcePsd(src, 0));
+
+    // mos1noi.c:175-181 / BSIM4's `ef`: the exponent is not always 1.
+    const ef2: NoiseSource = .{ .node_p = 0, .node_n = 1, .flicker = 4e-30, .ef = 1.4 };
+    try std.testing.expectApproxEqRel(4e-30 / std.math.pow(f64, 1e3, 1.4), sourcePsd(ef2, 1e3), 1e-12);
 }
 
-test "sourcePsd defaults backward compatible" {
-    // Default-initialized NoiseSource should behave as thermal
-    const src: NoiseSource = .{
-        .node_p = 0,
-        .node_n = 1,
-        .conductance = 0.02,
-    };
-    const psd = sourcePsd(src, 1e6, 300.15);
-    const expected = 4.0 * k_boltzmann * 300.15 * 0.02;
-    try std.testing.expectApproxEqRel(expected, psd, 1e-12);
+test "sourcePsd sums both halves on one generator" {
+    // §4.6.4: two `<+` lines on one branch are two generators, but one device
+    // may also hand back a term with both halves set.
+    const src: NoiseSource = .{ .node_p = 0, .node_n = 1, .white = 3e-17, .flicker = 1e-14 };
+    try std.testing.expectApproxEqRel(3e-17 + 1e-14 / 1e3, sourcePsd(src, 1e3), 1e-12);
 }
 
 test "nintegrate reproduces ngspice's three branches analytically" {
