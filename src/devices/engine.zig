@@ -465,18 +465,35 @@ pub const ParamRef = struct {
     }
 };
 
+/// One generator's branch and its PSD, in the contributed nature's units² per
+/// Hz: `S(f) = white + flicker / f^ef`.
+///
+/// A DENSITY, NOT A KIND TAG, and the kind is not recoverable from one.
+/// Verilog-A §4.6.4.1 states the density outright as the call's argument, so
+/// `white_noise(2q|I|)` (shot) and `white_noise(4kT/R)` (thermal) are the same
+/// call. ngspice agrees at the analysis boundary: `NevalSrc`
+/// (nevalsrc.c:105-113) collapses SHOTNOISE and THERMNOISE into one
+/// `noise = gain * <density>` the instant it is called, and its THERMNOISE
+/// `param` is not even always a conductance (mos1noi.c:140-142 passes the
+/// channel's `Sid`). Every 1/f source is an `N_GAIN` call (nevalsrc.c:115-117)
+/// the device then multiplies by its OWN `KF·I^AF/f^EF` — dionoise.c:99-104
+/// and bjtnoise.c:112-118 at EF = 1, mos1noi.c:175-181 at `pow(freq, fNexp)`.
+/// Which physics produced the density is the device's business;
+/// `contract.PsdTerm` is the same shape on the device side and `collectNoise`
+/// copies it across.
 pub const NoiseSource = struct {
     node_p: u32,
     node_n: u32,
-    kind: NoiseGenKind = .thermal,
-    conductance: f64,
-    current: f64 = 0,
-    kf: f64 = 0,
-    af: f64 = 1,
+    white: f64 = 0,
+    flicker: f64 = 0,
+    ef: f64 = 1,
 };
 
 pub const NoiseGenKind = enum { thermal, shot, flicker };
 pub const NoiseGen = struct { row: usize, col: usize, kind: NoiseGenKind };
+/// What a device's `noisePsd` returns, one per `noise_gens` row. Same type the
+/// VerA-generated devices use; re-exported so a hand-written device can name it.
+pub const PsdTerm = contract.PsdTerm;
 
 /// Target value planes for one eval pass. Circuit.eval points this at its own
 /// slices; parallel eval points lanes 1.. at private slabs and reduces after.
@@ -587,6 +604,9 @@ pub const Hooks = struct {
     /// mode hands each lane the same instance range it gets in `.full`.
     eval_q: ?*const fn (*anyopaque, *const Planes, u32, u32, []const f64, f64) void = null,
     collect_params: *const fn (*anyopaque, std.mem.Allocator, *std.ArrayList(ParamRef)) anyerror!void,
+    /// Every generator this batch declares, with its PSD, at a state vector the
+    /// caller hands in. No temperature argument: `$temperature` is the
+    /// INSTANCE's, and the device already applied it inside `noisePsd`.
     collect_noise: ?*const fn (*anyopaque, []const f64, std.mem.Allocator, *std.ArrayList(NoiseSource)) anyerror!void = null,
     recompute: ?*const fn (*anyopaque) error{TopologyChanged}!void = null,
     /// This batch's device-resident working set, or null when the device type
@@ -1527,7 +1547,6 @@ fn hasAbsdelayState(comptime D: type) bool {
 
 pub fn DeviceBatch(comptime D: type) type {
     const n_u: usize = comptime contract.nU(D);
-    const S = DualFor(n_u, jacFloat(D), @hasDecl(D, "collapse"));
     const has_state = @hasDecl(D, "State");
     const has_q = @hasDecl(D, "q");
     const has_attempt = @hasDecl(D, "attempt");
@@ -1595,7 +1614,15 @@ pub fn DeviceBatch(comptime D: type) type {
             .min_delay = if (@hasDecl(D, "delays")) minDelay else null,
             .next_breakpoint = if (@hasDecl(D, "nextBreakpoint")) nextBreakpointFn else null,
             .collect_params = collectParams,
-            .collect_noise = if (@hasDecl(D, "noise_gens")) collectNoise else null,
+            // Both decls or neither: a `noise_gens` table without `noisePsd` is
+            // a branch nobody can price. It used to fall back to 4kT off the
+            // Jacobian, which is where the 2x on every shot generator came
+            // from; declining the declaration outright is the honest failure.
+            .collect_noise = if (@hasDecl(D, "noise_gens")) blk: {
+                if (!@hasDecl(D, "noisePsd")) @compileError(@typeName(D) ++
+                    " declares noise_gens without noisePsd; see docs/devices/noise-contract.md §3");
+                break :blk collectNoise;
+            } else null,
             .recompute = if (@hasDecl(D, "collapse") or @hasDecl(D, "precompute")) recomputePrecomputed else null,
             .gpu_payload = if (gpuEligible(D)) gpuPayload else null,
             .apply_attempt = if (has_attempt) applyAttempt else null,
@@ -1946,24 +1973,39 @@ pub fn DeviceBatch(comptime D: type) type {
             return dflt > -1e30 and dflt < 1e30;
         }
 
+        /// Every generator this batch declares, with its PSD, at state vector
+        /// `x`. Pure in `x`, so `.noise` calls it once at the operating point
+        /// and `.pnoise` once per PSS sample (cyclostationary for free).
+        ///
+        /// The device's `noisePsd` IS the PSD, and nothing outside the device
+        /// can be: §4.6.4's `white_noise(p)` says `S(f) = p`, where `p` is a
+        /// model expression over the bias AND the model card. Reading a
+        /// conductance off the Jacobian and calling it `4kT·g` — what this did
+        /// until `noisePsd` landed — is a different number on every generator
+        /// that is not literally a resistor, and exactly 2x on a junction
+        /// (g = I/(N·Vt) ⇒ 4kT·g = (2/N)·2q·I).
         fn collectNoise(ctx: *anyopaque, x: []const f64, gpa: std.mem.Allocator, list: *std.ArrayList(NoiseSource)) anyerror!void {
             const self: *Self = @ptrCast(@alignCast(ctx));
             for (0..self.count) |id| {
-                var xd: [n_u]S = undefined;
-                inline for (0..n_u) |u| xd[u] = S.seed(x[self.gath[id * n_u + u]], u);
-                const out = D.eval(S, xd, &self.models[id], &self.instances[id], 0);
-                inline for (D.noise_gens) |gen| {
-                    switch (gen.kind) {
-                        .thermal => {
-                            const g = @abs(out[gen.row].ddxAt(gen.col));
-                            if (g > 0) try list.append(gpa, .{
-                                .node_p = self.gath[id * n_u + gen.row],
-                                .node_n = self.gath[id * n_u + gen.col],
-                                .conductance = g,
-                            });
-                        },
-                        .shot, .flicker => {},
-                    }
+                var xl: [n_u]f64 = undefined;
+                inline for (0..n_u) |u| xl[u] = x[self.gath[id * n_u + u]];
+                const terms = D.noisePsd(xl, &self.models[id], &self.instances[id]);
+                inline for (D.noise_gens, 0..) |gen, k| {
+                    // Position k IS generator k (noise-contract.md §3). `@abs`
+                    // is ngspice's own read of a signed density argument
+                    // (nevalsrc.c:106 `fabs(param)`): a negative PSD would
+                    // subtract power from the sum and hand `run` a sqrt of a
+                    // negative. `corr_with`/`corr` are not transported yet —
+                    // NoiseSource has no partner field, so every generator is
+                    // independent here (noise-contract.md §2(c)).
+                    const t = terms[k];
+                    if (t.white != 0 or t.flicker != 0) try list.append(gpa, .{
+                        .node_p = self.gath[id * n_u + gen.row],
+                        .node_n = self.gath[id * n_u + gen.col],
+                        .white = @abs(t.white),
+                        .flicker = @abs(t.flicker),
+                        .ef = t.ef,
+                    });
                 }
             }
         }

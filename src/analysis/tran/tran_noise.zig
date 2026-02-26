@@ -1,16 +1,14 @@
-//! Transient noise: transient Newton per timestep with sampled thermal
-//! noise currents injected into the residual. Each step draws one Gaussian
-//! sample per source with sigma = sqrt(4kT*G*BW), BW = 1/(2*dt), so the
-//! discrete-time sequence carries the correct white PSD. Noise sources come
-//! off the analytic Jacobian (root.Circuit.collectNoiseSources) — devices
-//! carry builtin noise generators, this analysis never re-derives them.
+//! Transient noise: transient Newton per timestep with sampled noise currents
+//! injected into the residual. Each step draws one Gaussian sample per source
+//! with sigma = sqrt(S*BW), BW = 1/(2*dt), so the discrete-time sequence
+//! carries the correct white PSD. Source PSDs come from the DEVICE
+//! (root.Circuit.collectNoiseSources -> the model's own `noisePsd`) — this
+//! analysis never re-derives them.
 const std = @import("std");
 const root = @import("../types.zig");
 // ponytail: the shared copy owns SIMD setup; seeded noise sampling stays scalar.
 const simdCopy = root.copySimd;
 const converger = @import("solvers").converger;
-
-const k_boltzmann = 1.380649e-23; // J/K
 
 pub const NoiseSource = root.NoiseSource;
 
@@ -25,7 +23,6 @@ pub const Options = struct {
     // TimestepTooSmall on a perfectly marching transient). dt_min is the
     // real brake; this only stops a stuck loop.
     max_steps: u32 = 1_000_000_000,
-    temp_k: f64 = 27.0 + 273.15,
     seed: u64 = 0xDEAD_BEEF_CAFE_1234,
 };
 
@@ -154,17 +151,23 @@ pub fn simulate(
     defer allocator.free(noise_currents);
 
     // Simulation-lifetime split of the shared NoiseSource table: sampling
-    // streams only the thermal prefix, injection only the endpoints. The
-    // prefix is the invariant head of sigma = sqrt(4kT*G*BW) with the exact
-    // left-to-right grouping the per-step expression used, so the draws are
-    // bit-identical. Requires source data and temperature to be immutable
-    // over the run, which they are — collectNoiseSources runs once on x_op.
+    // streams only the white PSD, injection only the endpoints. The prefix is
+    // the invariant head of sigma = sqrt(S*BW). Requires the source data to be
+    // immutable over the run, which it is — collectNoiseSources runs once on
+    // x_op.
+    //
+    // ponytail: the WHITE half only. A `flicker` term is 1/f^ef, and a
+    // per-step iid draw cannot produce that shape — sampling it as if it were
+    // white would put the whole 1/f power at every frequency, which is worse
+    // than omitting it. Upgrade path is a shaping filter (the standard sum of
+    // first-order poles) driving the same draw; until then a 1/f generator
+    // contributes its white half here and its full PSD in `.noise`/`.pnoise`.
     const noise_prefix = try allocator.alloc(f64, noise_sources.len);
     defer allocator.free(noise_prefix);
     const inj_nodes = try allocator.alloc(u32, 2 * noise_sources.len);
     defer allocator.free(inj_nodes);
     for (noise_sources, 0..) |src, s| {
-        noise_prefix[s] = 4.0 * k_boltzmann * options.temp_k * src.conductance;
+        noise_prefix[s] = src.white;
         inj_nodes[2 * s] = src.node_p;
         inj_nodes[2 * s + 1] = src.node_n;
     }

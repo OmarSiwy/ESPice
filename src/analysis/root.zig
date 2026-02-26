@@ -21,6 +21,7 @@ pub const GROUND = shared.GROUND;
 pub const ParamRef = shared.ParamRef;
 pub const NoiseSource = shared.NoiseSource;
 pub const NoiseGen = shared.NoiseGen;
+pub const PsdTerm = shared.PsdTerm;
 pub const freeze = shared.freeze;
 pub const RunCtx = shared.RunCtx;
 pub const Result = shared.Result;

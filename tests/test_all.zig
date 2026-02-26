@@ -725,7 +725,6 @@ test "run trannoise: divider thermal noise power matches 4kT*(R||R)*BW" {
         .dt_min = dt,
         .dt_max = dt,
         .max_steps = n_steps + 10,
-        .temp_k = temp_k,
         .seed = 12345,
     } });
 
