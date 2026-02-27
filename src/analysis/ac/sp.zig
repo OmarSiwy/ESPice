@@ -207,7 +207,12 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const names = try a.alloc([]const u8, 1 + n_s);
     names[0] = "frequency";
     for (0..n_ports) |i| for (0..n_ports) |j| {
-        names[1 + i * n_ports + j] = try std.fmt.allocPrint(a, "S{d}{d}", .{ i + 1, j + 1 });
+        // ngspice span.c:544-551 names the S-matrix columns `S_<row>_<col>`
+        // (1-based) as UID_OTHER, and its raw writer types every non-current
+        // UID as a voltage — so the column lands in the file spelled
+        // `v(S_1_1)`. That spelling IS the addressable name; anything else is
+        // a column no reader of an ngspice .sp raw will find.
+        names[1 + i * n_ports + j] = try std.fmt.allocPrint(a, "v(S_{d}_{d})", .{ i + 1, j + 1 });
     };
     const ncols = names.len;
     const data = try a.alloc(f64, n_points * ncols * 2);
@@ -222,7 +227,9 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     }
 
     return .{
-        .plotname = "S-Parameter Analysis",
+        // ngspice span.c:599-601 opens the plot under the job name, which is
+        // "SP Analysis" in the raw.
+        .plotname = "SP Analysis",
         .varnames = names,
         .is_complex = true,
         .npoints = n_points,
