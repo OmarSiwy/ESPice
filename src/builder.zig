@@ -565,6 +565,16 @@ pub const NetBuilder = struct {
     v_z0: []f64,
     n_v: u32,
 
+    // -- Branch-current probes that are neither a V card nor an inductor -----
+    // ngspice gives EVERY MNA branch-current unknown a `CKTmkCur` row
+    // (vcvsset.c:41-46, ccvsset.c:41-46, asrcsetup.c:78-83 for a V-mode B),
+    // and `CKTnames` turns every such row into an `i(<card>)` column. E, H and
+    // a V-mode B therefore have currents in ngspice's raw exactly as V and L
+    // do; only F, G, S and an I-mode B do not, because they stamp no branch.
+    br_names: [][]const u8,
+    br_rows: []u32,
+    n_br: u32,
+
     // Pre-allocated to bucket('i').size()
     i_names: [][]const u8,
     n_i: u32,
@@ -631,6 +641,7 @@ pub const NetBuilder = struct {
         const nl_ = dl.bucket('l').size();
         const n_def = dl.bucket('f').size() + dl.bucket('h').size() +
             dl.bucket('w').size() + dl.bucket('k').size();
+        const n_br = dl.bucket('e').size() + dl.bucket('h').size() + dl.bucket('b').size();
 
         return .{
             .arena = arena,
@@ -646,6 +657,9 @@ pub const NetBuilder = struct {
             .v_portnum = try arena.alloc(u16, nv),
             .v_z0 = try arena.alloc(f64, nv),
             .n_v = 0,
+            .br_names = try arena.alloc([]const u8, n_br),
+            .br_rows = try arena.alloc(u32, n_br),
+            .n_br = 0,
             .i_names = try arena.alloc([]const u8, ni),
             .n_i = 0,
             .ac_pos = try arena.alloc(u32, nv + ni),
@@ -662,6 +676,12 @@ pub const NetBuilder = struct {
             .source_node = GROUND,
             .source_branch = GROUND,
         };
+    }
+
+    fn addBranchProbe(self: *NetBuilder, name: []const u8, row: u32) void {
+        self.br_names[self.n_br] = name;
+        self.br_rows[self.n_br] = row;
+        self.n_br += 1;
     }
 
     /// Record one AC-driving source. See the `ac_pos`/`ac_neg` note on the
@@ -950,11 +970,26 @@ pub const NetBuilder = struct {
                 self.deferred[self.n_deferred] = .{ .dev = dev, .letter = letter };
                 self.n_deferred += 1;
             },
-            'b' => try addBsource(self.b, dev, self.nl.models),
+            'b' => {
+                const first = self.b.n;
+                // Only the V-mode B gets a branch: ngspice guards its
+                // `CKTmkCur` on `ASRCtype == ASRC_VOLTAGE` (asrcset.c:81-88),
+                // so an `i=` B card has no branch unknown and no i() column.
+                // espice's 4-port bsource declares the unknown either way; the
+                // I-mode one is left unprobed rather than published as a
+                // permanent zero ngspice never writes.
+                if (try addBsource(self.b, dev, self.nl.models))
+                    self.addBranchProbe(dev.name, internalRow(devices.bsource, "flowZ28pZ2cnZ29", first));
+            },
             'p' => try self.addCpl(dev),
             'o' => try self.addLossyLine(dev),
             'y' => try self.addTxl(dev),
             'u' => try self.addUrc(dev),
+            'e' => {
+                const first = self.b.n;
+                try self.addByLetter(letter, dev);
+                self.addBranchProbe(dev.name, internalRow(devices.vcvs, "flowZ28pZ2cnZ29", first));
+            },
             else => try self.addByLetter(letter, dev),
         }
     }
@@ -1372,7 +1407,21 @@ pub const NetBuilder = struct {
             self.v_ports[ctrl],
             self.v_nports[ctrl],
         };
+        const first = self.b.n;
         try self.b.addDevice(D, model, instance, nodes);
+
+        // The sensed V card's branch row was recorded as `self.b.n` taken
+        // before an addDevice that never ran (see the 'v' case), so it pointed
+        // at whatever row the NEXT card got. Its current lives HERE, on this
+        // model's `ctrl`/`sense` branch — the one standing in for the source —
+        // which is why `i(vam)` came out missing while `i(vzero)` on the same
+        // unreferenced card came out fine. ngspice keeps the source's own
+        // CKTmkCur row and emits i(vam) either way (cccsset.c:47 looks the
+        // branch up rather than replacing it).
+        self.v_branches[ctrl] = internalRow(D, "flowZ28cpZ2ccnZ29", first);
+        // H also carries its own output branch, and ngspice names it i(h1).
+        if (comptime @hasDecl(D, "U") and D == devices.ccvs)
+            self.addBranchProbe(dev.name, internalRow(D, "flowZ28pZ2cnZ29", first));
     }
 
     fn addKinduc(self: *NetBuilder, dev: types.Device) !void {
@@ -1569,7 +1618,9 @@ fn addSingleDevice(b: *Builder, comptime D: type, dev: types.Device, spice_model
 // B-source expression extraction
 // ---------------------------------------------------------------------------
 
-fn addBsource(b: *Builder, dev: types.Device, spice_models: []const types.Model) !void {
+/// Returns true when the card is a VOLTAGE-mode B — the only kind that owns a
+/// branch-current unknown worth probing (ngspice asrcset.c:81-88).
+fn addBsource(b: *Builder, dev: types.Device, spice_models: []const types.Model) !bool {
     if (comptime !@hasDecl(devices.bsource, "eval")) return error.UnsupportedDevice;
     var model: devices.bsource.Model = .{};
     var instance: devices.bsource.Instance = .{};
@@ -1597,6 +1648,7 @@ fn addBsource(b: *Builder, dev: types.Device, spice_models: []const types.Model)
         if (ctrl_probe) |pr| (if (pr.n) |n| try b.internNode(n) else GROUND) else GROUND,
     };
     try b.addDevice(devices.bsource, model, instance, nodes);
+    return model.imode == 0;
 }
 
 /// The first V() probe in the expression: V(p) or differential V(p,n).
@@ -1920,6 +1972,28 @@ fn modelLevel(dev: types.Device, spice_models: []const types.Model) u16 {
         }
     }
     return 1;
+}
+
+/// Row `Builder.addDevice` allocated for D's internal unknown `tag`, given the
+/// first internal row (`b.n` sampled before the call — addDevice walks U past
+/// num_ports allocating one row each, in declaration order).
+///
+/// VerA mangles a Verilog-A `branch (a, b)` into the U member
+/// `flowZ28aZ2cbZ29` (`(` = Z28, `,` = Z2c, `)` = Z29). Naming the member here
+/// rather than hardcoding `first + 1` makes a wrong branch a COMPILE error
+/// instead of a silently mislabelled current column — ccvs declares two
+/// branches and the sense one comes first.
+fn internalRow(comptime D: type, comptime tag: []const u8, first: u32) u32 {
+    const off = comptime blk: {
+        for (@typeInfo(D.U).@"enum".fields, 0..) |f, i| {
+            if (std.mem.eql(u8, f.name, tag)) {
+                if (i < D.num_ports) @compileError(@typeName(D) ++ ": `" ++ tag ++ "` is a port, not an internal unknown");
+                break :blk i - D.num_ports;
+            }
+        }
+        @compileError(@typeName(D) ++ ": no unknown named `" ++ tag ++ "`");
+    };
+    return first + @as(u32, @intCast(off));
 }
 
 pub fn findNameIndex(names: []const []const u8, target: []const u8) ?usize {
