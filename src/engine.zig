@@ -41,6 +41,8 @@ const Sources = struct {
     /// `.sp` ports declared by `portnum`/`z0` on V cards, in port order.
     /// Empty = no port card, which leaves `.sp` on its one-port fallback.
     ports: []const analysis.sp.Port = &.{},
+    /// (device type, ordinal) -> card name, for `.sens` column naming.
+    cards: []const analysis.CardRef = &.{},
 };
 
 pub const SimConfig = struct {
@@ -202,6 +204,12 @@ pub const Simulation = struct {
         // how a subckt branch probe read a voltage (fourbitadder i(vin1a) at
         // ~5 V). `mapNode` is the identity when perm is null (no BBD).
         var perm: ?[]const u32 = null;
+        // compilePerm tears the Builder shell down; the card table is the one
+        // thing on it that outlives the freeze (`.sens` names columns with it).
+        // Rows are already on sim_arena — only the parse-arena name strings
+        // have to be copied.
+        const cards = try sim_arena.dupe(analysis.CardRef, b.cards.items);
+        for (cards) |*c| c.name = try sim_arena.dupe(u8, c.name);
         sim.circuit = try b.compilePerm(&perm);
         // ponytail: opt-in until an end-to-end gate beats serial on sparse
         // block interiors; dense flop estimates alone overpredict their work.
@@ -262,6 +270,7 @@ pub const Simulation = struct {
             // Ports outlive `sources` — `.sp` Options holds the slice — so it
             // lands on the sim arena, not the parse arena.
             .ports = try nb.portList(sim_arena),
+            .cards = cards,
         };
 
         // Probes: branch currents first, then every named node. The rule is
@@ -810,7 +819,7 @@ fn buildJob(dir: types.Directive, node_id: u32, sources: Sources) !?Job {
         .sens, .dcmatch => {
             try arity(dir, 1, 1);
             const node = try outputNode(node_id);
-            if (id == .sens) return .{ .sens = .{ .output_node = node } };
+            if (id == .sens) return .{ .sens = .{ .output_node = node, .cards = sources.cards } };
             return .{ .dcmatch = .{ .output_node = node } };
         },
         .four => {
@@ -1219,8 +1228,11 @@ test "sensitivity and mismatch keep separate resistor parameters and analytical 
         for (result.varnames, 0..) |name, i| {
             for (result.varnames[0..i]) |previous| try std.testing.expect(!std.mem.eql(u8, name, previous));
         }
-        const r1 = findNameIndex(result.varnames, "resistor#0.r") orelse return error.MissingSensitivity;
-        const r2 = findNameIndex(result.varnames, "resistor#1.r") orelse return error.MissingSensitivity;
+        // `.sens` names columns after the CARD, ngspice-style (v(r1));
+        // `.dcmatch` still keys by device-class ordinal.
+        const sens_cols = std.mem.eql(u8, result.plotname, "Sensitivity Analysis");
+        const r1 = findNameIndex(result.varnames, if (sens_cols) "v(r1)" else "resistor#0.r") orelse return error.MissingSensitivity;
+        const r2 = findNameIndex(result.varnames, if (sens_cols) "v(r2)" else "resistor#1.r") orelse return error.MissingSensitivity;
         try std.testing.expectApproxEqAbs(@as(f64, -0.001875), result.data[r1], 1e-8);
         try std.testing.expectApproxEqAbs(@as(f64, 0.000625), result.data[r2], 1e-8);
     }
