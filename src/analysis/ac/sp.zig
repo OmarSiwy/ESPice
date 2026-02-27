@@ -66,7 +66,7 @@ pub fn sweep(
     // ponytail: P batch calls of N_freq each; packing all P*N into one call
     // would need per-solve RHS, add when freq_solve_batch gains rhs-per-lane.
     if (ckt.gpu_hook != null) gpu: {
-        ckt.linearize(x_op);
+        try ckt.linearizeAc(x_op);
 
         // Stamp port z0 onto the sparse G diagonal (analysis-side mod).
         // Save originals so we can restore after the batch calls.
@@ -109,7 +109,7 @@ pub fn sweep(
         return; // GPU path done — skip CPU fallback.
     }
 
-    ckt.linearize(x_op);
+    try ckt.linearizeAc(x_op);
     const g = try allocator.alloc(f64, n * n);
     ckt.denseG(g);
     const c = allocator.alloc(f64, n * n) catch |err| {

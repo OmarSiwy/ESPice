@@ -68,6 +68,7 @@ pub const CardRef = struct {
 
 // -- Re-exports for analysis modules + src/ consumers --
 pub const ParamRef = devices.batch.ParamRef;
+pub const AcParam = circuit_mod.AcParam;
 pub const NoiseSource = devices.batch.NoiseSource;
 pub const NoiseGenKind = devices.batch.NoiseGenKind;
 pub const NoiseGen = devices.batch.NoiseGen;

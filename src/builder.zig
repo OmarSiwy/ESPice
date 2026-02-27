@@ -614,6 +614,16 @@ pub const NetBuilder = struct {
     br_rows: []u32,
     n_br: u32,
 
+    // -- Frequency-domain parameter overrides (`R2 2 0 5K ac=15k`) ----------
+    // ngspice res.c:16 declares `ac` as an IOPAA on the resistor; restemp.c
+    // :112-118 turns it into RESacConduct with the SAME m/scale/tempco factors
+    // as the DC conductance, and resload.c:60-62 stamps it in place of
+    // RESconduct for every AC load. Recorded by CARD here because instance
+    // ordinals (and the ParamRef pointers they key) only exist after freeze.
+    ac_res_names: [][]const u8,
+    ac_res_values: []f64,
+    n_ac_res: u32,
+
     // Pre-allocated to bucket('i').size()
     i_names: [][]const u8,
     n_i: u32,
@@ -681,6 +691,7 @@ pub const NetBuilder = struct {
         const n_def = dl.bucket('f').size() + dl.bucket('h').size() +
             dl.bucket('w').size() + dl.bucket('k').size();
         const n_br = dl.bucket('e').size() + dl.bucket('h').size() + dl.bucket('b').size();
+        const nr = dl.bucket('r').size();
 
         return .{
             .arena = arena,
@@ -699,6 +710,9 @@ pub const NetBuilder = struct {
             .br_names = try arena.alloc([]const u8, n_br),
             .br_rows = try arena.alloc(u32, n_br),
             .n_br = 0,
+            .ac_res_names = try arena.alloc([]const u8, nr),
+            .ac_res_values = try arena.alloc(f64, nr),
+            .n_ac_res = 0,
             .i_names = try arena.alloc([]const u8, ni),
             .n_i = 0,
             .ac_pos = try arena.alloc(u32, nv + ni),
@@ -1273,10 +1287,22 @@ pub const NetBuilder = struct {
         // ngspice instance factors: conduct = m/(R·scale) — applies to the
         // explicit-value spelling too (`R5 6 0 10 scale=1K`, `R4 ... m=2`).
         if (comptime D == devices.resistor) {
-            value *= kvNumber(dev.kv, "scale") orelse 1;
-            value /= kvNumber(dev.kv, "m") orelse 1;
+            const scale = kvNumber(dev.kv, "scale") orelse 1;
+            const mult = kvNumber(dev.kv, "m") orelse 1;
+            value *= scale;
+            value /= mult;
             // ngspice restemp.c: "resistance too low or not given, set to 1 mOhm"
             if (!(value > 0)) value = 1e-3;
+            // `ac=` is an AC-ONLY resistance (restemp.c:112-118) and takes the
+            // same instance factors as the DC one; the frequency-domain
+            // linearization swaps it in (Circuit.linearizeAc).
+            if (kvNumber(dev.kv, "ac")) |ac_r| {
+                var ac_value = ac_r * scale / mult;
+                if (!(ac_value > 0)) ac_value = 1e-3;
+                self.ac_res_names[self.n_ac_res] = dev.name;
+                self.ac_res_values[self.n_ac_res] = ac_value;
+                self.n_ac_res += 1;
+            }
         }
         _ = setParam(D, &model, &instance, value_field, value);
         try applyKv(&model, dev.kv);

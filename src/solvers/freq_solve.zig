@@ -71,7 +71,7 @@ pub fn FreqSolverT(comptime T: type) type {
 
         /// Linearize at x_op (one eval — the planes are G and C) and build.
         pub fn fromCircuit(allocator: Allocator, ckt: anytype, x_op: []const T) !Self {
-            ckt.linearize(x_op);
+            try ckt.linearizeAc(x_op);
             const n: u32 = @intCast(ckt.n);
 
             if (n <= DENSE_THRESHOLD) {
@@ -658,7 +658,7 @@ test "solveBatch equals looped solveRhs (sparse lane path, fwd + adjoint)" {
         row_idx: []const u32,
         g_vals: []const f64,
         c_vals: []const f64,
-        fn linearize(_: @This(), _: []const f64) void {}
+        fn linearizeAc(_: @This(), _: []const f64) !void {}
         // Never reached (n > DENSE_THRESHOLD) but must exist for fromCircuit's
         // dense branch to type-check against `anytype`.
         fn denseG(_: @This(), _: []f64) void {}
