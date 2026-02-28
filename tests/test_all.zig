@@ -257,9 +257,9 @@ test "run sens: divider dVout/dR1, dVout/dR2, dVout/dV analytic" {
     try testing.expectEqual(@as(usize, 1), res.npoints);
     // dVout/dR2 = V*R1/(R1+R2)^2, dVout/dR1 = -V*R2/(R1+R2)^2, dVout/dV = R2/(R1+R2)
     // ponytail: reuse the builder's exact-name lookup; missing columns still fail.
-    try testing.expectApproxEqAbs(5.0 * 1000.0 / 9e6, res.data[builder.findNameIndex(res.varnames, "R#1.r") orelse unreachable], 1e-6);
-    try testing.expectApproxEqAbs(-5.0 * 2000.0 / 9e6, res.data[builder.findNameIndex(res.varnames, "R#0.r") orelse unreachable], 1e-6);
-    try testing.expectApproxEqAbs(2.0 / 3.0, res.data[builder.findNameIndex(res.varnames, "V#0.dc") orelse unreachable], 1e-6);
+    try testing.expectApproxEqAbs(5.0 * 1000.0 / 9e6, res.data[builder.findNameIndex(res.varnames, "v(R#1:r)") orelse unreachable], 1e-6);
+    try testing.expectApproxEqAbs(-5.0 * 2000.0 / 9e6, res.data[builder.findNameIndex(res.varnames, "v(R#0:r)") orelse unreachable], 1e-6);
+    try testing.expectApproxEqAbs(2.0 / 3.0, res.data[builder.findNameIndex(res.varnames, "v(V#0:dc)") orelse unreachable], 1e-6);
 }
 
 // ---------------------------------------------------------------------------

@@ -30,12 +30,19 @@ pub const SensEntry = struct {
     device_name: []const u8,
     param_name: []const u8,
     sensitivity: f64,
+    /// ngspice's three column spellings hang off these two (cktsens.c:224-238).
+    is_instance: bool = true,
+    principal: bool = false,
 };
 
 pub const Options = struct {
     tol: converger.Tolerances = .{},
     /// null → the last probe node.
     output_node: ?u32 = null,
+    /// Instance-ordinal → card name, so a column can name the card ngspice
+    /// names. Empty falls back to `<type>#<ordinal>`, which is what every
+    /// column read like before this table existed.
+    cards: []const root.CardRef = &.{},
 };
 
 pub const SolveResult = struct {
@@ -155,6 +162,11 @@ pub fn solve(
             .device_name = p.device_name,
             .param_name = p.param_name,
             .sensitivity = -adjointFd(lambda[0..n], ckt.rhs[0..n], rhs_nom, 1.0 / delta),
+            .is_instance = p.ptr.is_instance,
+            // NOT gated on is_instance: ngspice's IF_PRINCIPAL flag lives on
+            // the instance parameter table, but VerA puts every Verilog-A
+            // `parameter` on Model, so `primary` is where that flag ended up.
+            .principal = p.ptr.primary,
         };
     }
 
@@ -165,8 +177,12 @@ pub fn solve(
 // Contract entry: run(*const RunCtx, Options) !Result
 // ---------------------------------------------------------------------------
 
-/// Every collected device parameter becomes one column ("<type>#<index>.<param>"),
-/// one row of dVout/dp. Name strings live on the run arena.
+/// Every collected device parameter becomes one column, one row of dVout/dp.
+/// Column naming is ngspice's, cktsens.c:224-238:
+///   model parameter                  -> `<card>:<param>`   (r1:tc1)
+///   principal instance parameter     -> `<card>`           (r1)
+///   any other instance parameter     -> `<card>_<param>`   (r1_scale)
+/// Name strings live on the run arena.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
     const output_node = opts.output_node orelse blk: {
@@ -189,7 +205,10 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     for (refs, params) |ref, *p| {
         p.* = .{
             .ptr = ref,
-            .device_name = try std.fmt.allocPrint(scratch, "{s}#{d}", .{ ref.device_type, ref.index }),
+            .device_name = if (root.CardRef.lookup(opts.cards, ref)) |card|
+                try scratch.dupe(u8, card)
+            else
+                try std.fmt.allocPrint(scratch, "{s}#{d}", .{ ref.device_type, ref.index }),
             .param_name = ref.param_name,
         };
         n_named += 1;
@@ -206,13 +225,21 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     var done: usize = 0;
     errdefer for (names[0..done]) |s| a.free(s);
     for (res.entries, names, data) |e, *name, *out| {
-        name.* = try std.fmt.allocPrint(a, "{s}.{s}", .{ e.device_name, e.param_name });
+        // The `v(...)` wrapper is ngspice's, not decoration: cktsens.c hands
+        // the raw writer a UID_OTHER name, which types as a voltage, so the
+        // file spells the column `v(r1)`. Without it nothing keyed off an
+        // ngspice sens raw finds the column.
+        name.* = if (e.principal)
+            try std.fmt.allocPrint(a, "v({s})", .{e.device_name})
+        else
+            try std.fmt.allocPrint(a, "v({s}{s}{s})", .{ e.device_name, if (e.is_instance) "_" else ":", e.param_name });
         done += 1;
         out.* = e.sensitivity;
     }
 
     return .{
-        .plotname = "DC Sensitivity",
+        // ngspice opens the plot as "Sensitivity Analysis".
+        .plotname = "Sensitivity Analysis",
         .varnames = names,
         .is_complex = false,
         .npoints = 1,

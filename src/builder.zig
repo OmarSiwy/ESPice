@@ -27,6 +27,13 @@ fn isGroundName(name: []const u8) bool {
 // ---------------------------------------------------------------------------
 const MULTI_INSTANCE: u32 = std.math.maxInt(u32);
 
+/// `ParamRef.device_type` is `@typeName(D)` past the last dot; match it.
+fn shortTypeName(comptime D: type) []const u8 {
+    const full = @typeName(D);
+    const dot = std.mem.lastIndexOfScalar(u8, full, '.') orelse return full;
+    return full[dot + 1 ..];
+}
+
 pub const Builder = struct {
     gpa: std.mem.Allocator,
     n: u32,
@@ -45,6 +52,22 @@ pub const Builder = struct {
     /// lives here rather than on every Model; `deriveModel` copies it into the
     /// models that declare they read it.
     nom_temp_c: f64 = 27.0,
+
+    /// Netlist card currently being expanded, "" outside one. Set once per
+    /// card by NetBuilder.addDevice — the single funnel every card goes
+    /// through — and read by addDevice below.
+    card: []const u8 = "",
+    /// (device type, instance ordinal) → card name. `ParamRef` identifies a
+    /// device only by its class ordinal (`resistor#0`), which is not resolvable
+    /// to anything in a raw file; `.sens` needs the card. Strings point into
+    /// the PARSE arena, like `NetBuilder.v_names` — copy before it dies.
+    cards: std.ArrayList(analysis.CardRef) = .empty,
+    /// Per-device-type instance counter — the ordinal `ParamRef.index` carries.
+    /// Kept here rather than read off a `ProtoStore` because a GENERATED device
+    /// is instantiated through `vt.proto_add` into the device object's own
+    /// store, which this compilation unit deliberately cannot name. Counted for
+    /// EVERY add, card or not, so the ordinal stays in lockstep with the store.
+    card_counts: std.StringHashMapUnmanaged(u32) = .empty,
 
     pub fn init(gpa: std.mem.Allocator) Builder {
         var labels: std.ArrayList([]const u8) = .empty;
@@ -67,6 +90,8 @@ pub const Builder = struct {
 
     inline fn deinitStorage(self: *Builder) void {
         self.protos.deinit(self.gpa);
+        self.cards.deinit(self.gpa);
+        self.card_counts.deinit(self.gpa);
         for (self.node_labels.items) |label| {
             if (!std.mem.eql(u8, label, "0")) self.gpa.free(label);
         }
@@ -221,6 +246,20 @@ pub const Builder = struct {
         const n_u = comptime std.meta.fields(D.U).len;
         var all: [n_u]u32 = undefined;
         inline for (0..D.num_ports) |p| all[p] = nodes[p];
+
+        // BEFORE the generated-device branch below, which returns. Every
+        // shipped device has a generated model, so a card table hung off the
+        // in-process `ProtoStore` path recorded nothing at all.
+        {
+            const gop = try self.card_counts.getOrPut(self.gpa, comptime shortTypeName(D));
+            if (!gop.found_existing) gop.value_ptr.* = 0;
+            if (self.card.len != 0) try self.cards.append(self.gpa, .{
+                .type_name = comptime shortTypeName(D),
+                .index = gop.value_ptr.*,
+                .name = self.card,
+            });
+            gop.value_ptr.* += 1;
+        }
 
         // A GENERATED device is reached through its own object's vtable: same
         // `collapse`, same `ProtoStore(D).append` behind `proto_add`, the only
@@ -558,7 +597,32 @@ pub const NetBuilder = struct {
     /// cktdisto.c:100-117). `{0, 0}` means the card never named it, which is
     /// also ngspice's no-op. Degrees, like the AC phase.
     v_distof1: [][2]f64,
+    /// `.sp` port index of each V card, 1-based; 0 = not a port. ngspice keeps
+    /// the same thing as `VSRCportNum`/`VSRCportZ0` on the source instance
+    /// (vsrcdefs.h:104-105) and sorts `CKTrfPorts` by it (vsrctemp.c:110-124).
+    v_portnum: []u16,
+    v_z0: []f64,
     n_v: u32,
+
+    // -- Branch-current probes that are neither a V card nor an inductor -----
+    // ngspice gives EVERY MNA branch-current unknown a `CKTmkCur` row
+    // (vcvsset.c:41-46, ccvsset.c:41-46, asrcsetup.c:78-83 for a V-mode B),
+    // and `CKTnames` turns every such row into an `i(<card>)` column. E, H and
+    // a V-mode B therefore have currents in ngspice's raw exactly as V and L
+    // do; only F, G, S and an I-mode B do not, because they stamp no branch.
+    br_names: [][]const u8,
+    br_rows: []u32,
+    n_br: u32,
+
+    // -- Frequency-domain parameter overrides (`R2 2 0 5K ac=15k`) ----------
+    // ngspice res.c:16 declares `ac` as an IOPAA on the resistor; restemp.c
+    // :112-118 turns it into RESacConduct with the SAME m/scale/tempco factors
+    // as the DC conductance, and resload.c:60-62 stamps it in place of
+    // RESconduct for every AC load. Recorded by CARD here because instance
+    // ordinals (and the ParamRef pointers they key) only exist after freeze.
+    ac_res_names: [][]const u8,
+    ac_res_values: []f64,
+    n_ac_res: u32,
 
     // Pre-allocated to bucket('i').size()
     i_names: [][]const u8,
@@ -626,6 +690,8 @@ pub const NetBuilder = struct {
         const nl_ = dl.bucket('l').size();
         const n_def = dl.bucket('f').size() + dl.bucket('h').size() +
             dl.bucket('w').size() + dl.bucket('k').size();
+        const n_br = dl.bucket('e').size() + dl.bucket('h').size() + dl.bucket('b').size();
+        const nr = dl.bucket('r').size();
 
         return .{
             .arena = arena,
@@ -638,7 +704,15 @@ pub const NetBuilder = struct {
             .v_dc = try arena.alloc(f64, nv),
             .v_sensed = try arena.alloc(bool, nv),
             .v_distof1 = try arena.alloc([2]f64, nv),
+            .v_portnum = try arena.alloc(u16, nv),
+            .v_z0 = try arena.alloc(f64, nv),
             .n_v = 0,
+            .br_names = try arena.alloc([]const u8, n_br),
+            .br_rows = try arena.alloc(u32, n_br),
+            .n_br = 0,
+            .ac_res_names = try arena.alloc([]const u8, nr),
+            .ac_res_values = try arena.alloc(f64, nr),
+            .n_ac_res = 0,
             .i_names = try arena.alloc([]const u8, ni),
             .n_i = 0,
             .ac_pos = try arena.alloc(u32, nv + ni),
@@ -655,6 +729,12 @@ pub const NetBuilder = struct {
             .source_node = GROUND,
             .source_branch = GROUND,
         };
+    }
+
+    fn addBranchProbe(self: *NetBuilder, name: []const u8, row: u32) void {
+        self.br_names[self.n_br] = name;
+        self.br_rows[self.n_br] = row;
+        self.n_br += 1;
     }
 
     /// Record one AC-driving source. See the `ac_pos`/`ac_neg` note on the
@@ -689,6 +769,27 @@ pub const NetBuilder = struct {
             }
         }
         return exc;
+    }
+
+    /// The deck's `.sp` ports, ordered by `portnum` — ngspice sorts
+    /// `CKTrfPorts` the same way (vsrctemp.c:110-124) and rejects a gapped or
+    /// duplicated numbering as "incorrect port ordering" (vsrctemp.c:143-160).
+    /// Empty when no V card carries `portnum`, which leaves `.sp` on its
+    /// one-port fallback.
+    pub fn portList(self: *const NetBuilder, gpa: std.mem.Allocator) ![]analysis.sp.Port {
+        var n_ports: usize = 0;
+        for (self.v_portnum[0..self.n_v]) |num| n_ports = @max(n_ports, num);
+        if (n_ports == 0) return &.{};
+        const ports = try gpa.alloc(analysis.sp.Port, n_ports);
+        for (ports) |*p| p.branch = std.math.maxInt(u32); // "unset" marker
+        for (self.v_portnum[0..self.n_v], self.v_ports[0..self.n_v], self.v_branches[0..self.n_v], self.v_z0[0..self.n_v]) |num, node, br, z0| {
+            if (num == 0) continue;
+            const slot = &ports[num - 1];
+            if (slot.branch != std.math.maxInt(u32)) return error.DuplicatePortNumber;
+            slot.* = .{ .node = node, .branch = br, .z0 = z0 };
+        }
+        for (ports) |p| if (p.branch == std.math.maxInt(u32)) return error.MissingPortNumber;
+        return ports;
     }
 
     /// ngspice TRANinit semantics: PULSE TR/TF default to TSTEP, PW/PER to
@@ -828,6 +929,11 @@ pub const NetBuilder = struct {
     }
 
     fn addDevice(self: *NetBuilder, dev_in: types.Device) !void {
+        // Every card routes through here, including the ones that expand into
+        // several instances (URC, CPL), so stamping the open card once is all
+        // it takes for Builder.addDevice to attribute every instance it makes.
+        self.b.card = dev_in.name;
+        defer self.b.card = "";
         // Runtime-loaded Verilog-A/Verilog device instance: handled
         // by addDynDevices after NetBuilder runs, regardless of card letter.
         // Its nodes still get a DC mark — a foreign model is opaque, and an
@@ -894,6 +1000,9 @@ pub const NetBuilder = struct {
                 self.v_dc[self.n_v] = bound[0].dc;
                 self.v_sensed[self.n_v] = sensed;
                 self.v_distof1[self.n_v] = sourceDistoF1(dev);
+                const port = if (sensed) null else sourcePort(dev);
+                self.v_portnum[self.n_v] = if (port) |p| p.num else 0;
+                self.v_z0[self.n_v] = if (port) |p| p.z0 else 0;
                 self.n_v += 1;
                 // A replaced source stamps nothing, so it cannot be the
                 // reference the .op ladder anchors on — nor can it be driven:
@@ -919,11 +1028,26 @@ pub const NetBuilder = struct {
                 self.deferred[self.n_deferred] = .{ .dev = dev, .letter = letter };
                 self.n_deferred += 1;
             },
-            'b' => try addBsource(self.b, dev, self.nl.models),
+            'b' => {
+                const first = self.b.n;
+                // Only the V-mode B gets a branch: ngspice guards its
+                // `CKTmkCur` on `ASRCtype == ASRC_VOLTAGE` (asrcset.c:81-88),
+                // so an `i=` B card has no branch unknown and no i() column.
+                // espice's 4-port bsource declares the unknown either way; the
+                // I-mode one is left unprobed rather than published as a
+                // permanent zero ngspice never writes.
+                if (try addBsource(self.b, dev, self.nl.models))
+                    self.addBranchProbe(dev.name, internalRow(devices.bsource, "flowZ28pZ2cnZ29", first));
+            },
             'p' => try self.addCpl(dev),
             'o' => try self.addLossyLine(dev),
             'y' => try self.addTxl(dev),
             'u' => try self.addUrc(dev),
+            'e' => {
+                const first = self.b.n;
+                try self.addByLetter(letter, dev);
+                self.addBranchProbe(dev.name, internalRow(devices.vcvs, "flowZ28pZ2cnZ29", first));
+            },
             else => try self.addByLetter(letter, dev),
         }
     }
@@ -1163,10 +1287,22 @@ pub const NetBuilder = struct {
         // ngspice instance factors: conduct = m/(R·scale) — applies to the
         // explicit-value spelling too (`R5 6 0 10 scale=1K`, `R4 ... m=2`).
         if (comptime D == devices.resistor) {
-            value *= kvNumber(dev.kv, "scale") orelse 1;
-            value /= kvNumber(dev.kv, "m") orelse 1;
+            const scale = kvNumber(dev.kv, "scale") orelse 1;
+            const mult = kvNumber(dev.kv, "m") orelse 1;
+            value *= scale;
+            value /= mult;
             // ngspice restemp.c: "resistance too low or not given, set to 1 mOhm"
             if (!(value > 0)) value = 1e-3;
+            // `ac=` is an AC-ONLY resistance (restemp.c:112-118) and takes the
+            // same instance factors as the DC one; the frequency-domain
+            // linearization swaps it in (Circuit.linearizeAc).
+            if (kvNumber(dev.kv, "ac")) |ac_r| {
+                var ac_value = ac_r * scale / mult;
+                if (!(ac_value > 0)) ac_value = 1e-3;
+                self.ac_res_names[self.n_ac_res] = dev.name;
+                self.ac_res_values[self.n_ac_res] = ac_value;
+                self.n_ac_res += 1;
+            }
         }
         _ = setParam(D, &model, &instance, value_field, value);
         try applyKv(&model, dev.kv);
@@ -1229,6 +1365,8 @@ pub const NetBuilder = struct {
 
     fn resolveDeferred(self: *NetBuilder) !void {
         for (self.deferred[0..self.n_deferred]) |def| {
+            self.b.card = def.dev.name;
+            defer self.b.card = "";
             switch (def.letter) {
                 'f' => try self.addBranchRef(devices.cccs, def.dev, 1.0),
                 'h' => try self.addBranchRef(devices.ccvs, def.dev, 0.0),
@@ -1341,7 +1479,21 @@ pub const NetBuilder = struct {
             self.v_ports[ctrl],
             self.v_nports[ctrl],
         };
+        const first = self.b.n;
         try self.b.addDevice(D, model, instance, nodes);
+
+        // The sensed V card's branch row was recorded as `self.b.n` taken
+        // before an addDevice that never ran (see the 'v' case), so it pointed
+        // at whatever row the NEXT card got. Its current lives HERE, on this
+        // model's `ctrl`/`sense` branch — the one standing in for the source —
+        // which is why `i(vam)` came out missing while `i(vzero)` on the same
+        // unreferenced card came out fine. ngspice keeps the source's own
+        // CKTmkCur row and emits i(vam) either way (cccsset.c:47 looks the
+        // branch up rather than replacing it).
+        self.v_branches[ctrl] = internalRow(D, "flowZ28cpZ2ccnZ29", first);
+        // H also carries its own output branch, and ngspice names it i(h1).
+        if (comptime @hasDecl(D, "U") and D == devices.ccvs)
+            self.addBranchProbe(dev.name, internalRow(D, "flowZ28pZ2cnZ29", first));
     }
 
     fn addKinduc(self: *NetBuilder, dev: types.Device) !void {
@@ -1538,7 +1690,9 @@ fn addSingleDevice(b: *Builder, comptime D: type, dev: types.Device, spice_model
 // B-source expression extraction
 // ---------------------------------------------------------------------------
 
-fn addBsource(b: *Builder, dev: types.Device, spice_models: []const types.Model) !void {
+/// Returns true when the card is a VOLTAGE-mode B — the only kind that owns a
+/// branch-current unknown worth probing (ngspice asrcset.c:81-88).
+fn addBsource(b: *Builder, dev: types.Device, spice_models: []const types.Model) !bool {
     if (comptime !@hasDecl(devices.bsource, "eval")) return error.UnsupportedDevice;
     var model: devices.bsource.Model = .{};
     var instance: devices.bsource.Instance = .{};
@@ -1566,6 +1720,7 @@ fn addBsource(b: *Builder, dev: types.Device, spice_models: []const types.Model)
         if (ctrl_probe) |pr| (if (pr.n) |n| try b.internNode(n) else GROUND) else GROUND,
     };
     try b.addDevice(devices.bsource, model, instance, nodes);
+    return model.imode == 0;
 }
 
 /// The first V() probe in the expression: V(p) or differential V(p,n).
@@ -1891,6 +2046,28 @@ fn modelLevel(dev: types.Device, spice_models: []const types.Model) u16 {
     return 1;
 }
 
+/// Row `Builder.addDevice` allocated for D's internal unknown `tag`, given the
+/// first internal row (`b.n` sampled before the call — addDevice walks U past
+/// num_ports allocating one row each, in declaration order).
+///
+/// VerA mangles a Verilog-A `branch (a, b)` into the U member
+/// `flowZ28aZ2cbZ29` (`(` = Z28, `,` = Z2c, `)` = Z29). Naming the member here
+/// rather than hardcoding `first + 1` makes a wrong branch a COMPILE error
+/// instead of a silently mislabelled current column — ccvs declares two
+/// branches and the sense one comes first.
+fn internalRow(comptime D: type, comptime tag: []const u8, first: u32) u32 {
+    const off = comptime blk: {
+        for (@typeInfo(D.U).@"enum".fields, 0..) |f, i| {
+            if (std.mem.eql(u8, f.name, tag)) {
+                if (i < D.num_ports) @compileError(@typeName(D) ++ ": `" ++ tag ++ "` is a port, not an internal unknown");
+                break :blk i - D.num_ports;
+            }
+        }
+        @compileError(@typeName(D) ++ ": no unknown named `" ++ tag ++ "`");
+    };
+    return first + @as(u32, @intCast(off));
+}
+
 pub fn findNameIndex(names: []const []const u8, target: []const u8) ?usize {
     for (names, 0..) |n, i| if (std.mem.eql(u8, n, target)) return i;
     return null;
@@ -1981,6 +2158,32 @@ fn sourceDc(dev: types.Device) ?f64 {
 /// `vsrctemp.c:38-43` (what a missing one becomes): bare `AC` is mag 1 phase 0,
 /// `AC mag` is phase 0, `AC mag phase` is both. Phase is DEGREES —
 /// `vsrctemp.c:68` is `radians = acPhase * M_PI / 180.0`.
+/// `VP1 in 0 DC 0 AC 1 portnum 1 z0 50` — the RF-port spelling of a V card.
+/// ngspice `vsrctemp.c:74-82`: a V source is a port when `portnum` is GIVEN;
+/// `z0` then defaults to 50, and the card counts as a port only while
+/// `z0 > 0 && portnum > 0`. Both spellings are accepted — `portnum 1` (the
+/// positional pair every ngspice IOP is written as on a card) and `portnum=1`.
+fn sourcePort(dev: types.Device) ?struct { num: u16, z0: f64 } {
+    const num_f = blk: {
+        if (kvNumber(dev.kv, "portnum")) |v| break :blk v;
+        for (dev.positional, 0..) |pos, idx| {
+            if (pos != .name or !std.mem.eql(u8, pos.name, "portnum")) continue;
+            break :blk positionalNumber(dev, idx + 1) orelse return null;
+        }
+        return null;
+    };
+    const z0 = blk: {
+        if (kvNumber(dev.kv, "z0")) |v| break :blk v;
+        for (dev.positional, 0..) |pos, idx| {
+            if (pos != .name or !std.mem.eql(u8, pos.name, "z0")) continue;
+            break :blk positionalNumber(dev, idx + 1) orelse 50.0;
+        }
+        break :blk 50.0;
+    };
+    if (!(num_f >= 1) or !(z0 > 0) or num_f > 1024) return null;
+    return .{ .num = @intFromFloat(num_f), .z0 = z0 };
+}
+
 fn sourceAc(dev: types.Device) ?struct { re: f64, im: f64 } {
     var mag: f64 = 1;
     var phase: f64 = 0;

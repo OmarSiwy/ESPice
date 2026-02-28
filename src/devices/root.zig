@@ -249,6 +249,7 @@ pub const vsource = DeviceId.Type(.vsource);
 pub const isource = DeviceId.Type(.isource);
 pub const cccs = DeviceId.Type(.cccs);
 pub const ccvs = DeviceId.Type(.ccvs);
+pub const vcvs = DeviceId.Type(.vcvs);
 pub const bsource = DeviceId.Type(.bsource);
 pub const cswitch = DeviceId.Type(.cswitch);
 pub const tline = DeviceId.Type(.tline);

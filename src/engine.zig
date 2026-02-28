@@ -38,6 +38,11 @@ const Sources = struct {
     /// `{mag, phase deg}` of each V card's `DISTOF1`; `{0, _}` = absent.
     /// `.disto` picks its drive by this, never by card order.
     v_distof1: []const [2]f64,
+    /// `.sp` ports declared by `portnum`/`z0` on V cards, in port order.
+    /// Empty = no port card, which leaves `.sp` on its one-port fallback.
+    ports: []const analysis.sp.Port = &.{},
+    /// (device type, ordinal) -> card name, for `.sens` column naming.
+    cards: []const analysis.CardRef = &.{},
 };
 
 pub const SimConfig = struct {
@@ -199,6 +204,12 @@ pub const Simulation = struct {
         // how a subckt branch probe read a voltage (fourbitadder i(vin1a) at
         // ~5 V). `mapNode` is the identity when perm is null (no BBD).
         var perm: ?[]const u32 = null;
+        // compilePerm tears the Builder shell down; the card table is the one
+        // thing on it that outlives the freeze (`.sens` names columns with it).
+        // Rows are already on sim_arena — only the parse-arena name strings
+        // have to be copied.
+        const cards = try sim_arena.dupe(analysis.CardRef, b.cards.items);
+        for (cards) |*c| c.name = try sim_arena.dupe(u8, c.name);
         sim.circuit = try b.compilePerm(&perm);
         // ponytail: opt-in until an end-to-end gate beats serial on sparse
         // block interiors; dense flop estimates alone overpredict their work.
@@ -218,6 +229,10 @@ pub const Simulation = struct {
             }
         }.f;
         for (nb.v_branches[0..nb.n_v]) |*v| v.* = mapNode(perm, v.*);
+        // `v_ports` is build-time scratch everywhere EXCEPT portList, which
+        // runs below and hands the row straight to the .sp solve.
+        for (nb.v_ports[0..nb.n_v]) |*v| v.* = mapNode(perm, v.*);
+        for (nb.br_rows[0..nb.n_br]) |*v| v.* = mapNode(perm, v.*);
         for (nb.l_branches[0..nb.n_l]) |*v| v.* = mapNode(perm, v.*);
         for (nb.ac_pos[0..nb.n_ac]) |*v| v.* = mapNode(perm, v.*);
         for (nb.ac_neg[0..nb.n_ac]) |*v| v.* = mapNode(perm, v.*);
@@ -252,14 +267,35 @@ pub const Simulation = struct {
             .i_names = nb.i_names[0..nb.n_i],
             .v_branches = nb.v_branches[0..nb.n_v],
             .v_distof1 = nb.v_distof1[0..nb.n_v],
+            // Ports outlive `sources` — `.sp` Options holds the slice — so it
+            // lands on the sim arena, not the parse arena.
+            .ports = try nb.portList(sim_arena),
+            .cards = cards,
         };
 
-        // Probes: branch currents first, then every named node. ngspice raws
-        // carry i(<card>) for every V source and inductor (44.2 header:
-        // `i(v1)`, `i(l1)` — lowercase, which the parser's bulk lower already
-        // guarantees for card names). A sensed V card (F/H/W control) stamps
-        // nothing — its current flows in the controlling model's own branch —
-        // so its recorded row was never allocated and must be skipped.
+        // `ac=` overrides, card name -> (type, ordinal) -> ParamRef. Resolvable
+        // only here: the ordinals come from the card table and the pointers
+        // from the frozen batch storage, so neither exists before this point.
+        if (nb.n_ac_res > 0) sim.circuit.ac_params = try acParams(
+            sim_arena,
+            &sim.circuit,
+            cards,
+            nb.ac_res_names[0..nb.n_ac_res],
+            nb.ac_res_values[0..nb.n_ac_res],
+        );
+
+        // Probes: branch currents first, then every named node. The rule is
+        // ngspice's and it is structural, not a list of letters: every MNA
+        // branch-current unknown gets a `CKTmkCur` row and `CKTnames` turns
+        // every such row into an `i(<card>)` column. That covers V and L, and
+        // equally E (vcvsset.c:41-46), H (ccvsset.c:41-46) and a V-mode B
+        // (asrcsetup.c:78-83) — `nb.br_*` carries those. F, G and S stamp no
+        // branch and correctly have no column.
+        //
+        // A V card sensed by F/H/W is NOT skipped: it keeps its current, which
+        // now lives on the controlling model's `ctrl` branch (builder
+        // addBranchRef rewrites `v_branches[ctrl]` to that row). ngspice emits
+        // i(vam) for it too.
         //
         // Branch-first, NOT ngspice's voltage-first: tf/sens/dcmatch/pxf/pac/
         // disto default their output variable to probes[len-1], so the last
@@ -270,16 +306,14 @@ pub const Simulation = struct {
         const probe_buf = try sim_arena.alloc(u32, sim.circuit.n);
         const label_buf = try sim_arena.alloc([]const u8, sim.circuit.n);
         var n_probes: u32 = 0;
-        for (nb.v_names[0..nb.n_v], nb.v_branches[0..nb.n_v], nb.v_sensed[0..nb.n_v]) |name, br, sensed| {
-            if (sensed) continue;
-            probe_buf[n_probes] = br;
-            label_buf[n_probes] = try std.fmt.allocPrint(sim_arena, "i({s})", .{name});
-            n_probes += 1;
-        }
-        for (nb.l_names[0..nb.n_l], nb.l_branches[0..nb.n_l]) |name, br| {
-            probe_buf[n_probes] = br;
-            label_buf[n_probes] = try std.fmt.allocPrint(sim_arena, "i({s})", .{name});
-            n_probes += 1;
+        for ([_][]const []const u8{ nb.v_names[0..nb.n_v], nb.l_names[0..nb.n_l], nb.br_names[0..nb.n_br] },
+            [_][]const u32{ nb.v_branches[0..nb.n_v], nb.l_branches[0..nb.n_l], nb.br_rows[0..nb.n_br] }) |names, rows|
+        {
+            for (names, rows) |name, br| {
+                probe_buf[n_probes] = br;
+                label_buf[n_probes] = try std.fmt.allocPrint(sim_arena, "i({s})", .{name});
+                n_probes += 1;
+            }
         }
         for (1..sim.circuit.n) |i| {
             const label = sim.circuit.nodeName(@intCast(i));
@@ -683,6 +717,29 @@ fn outputNode(node: u32) !u32 {
     return node;
 }
 
+/// Resolve `<card> ac=<value>` to the ParamRef of that card's resistance.
+/// One linear pass per override; decks spell a handful of these at most.
+fn acParams(
+    arena: std.mem.Allocator,
+    ckt: *analysis.Circuit,
+    cards: []const analysis.CardRef,
+    names: []const []const u8,
+    values: []const f64,
+) ![]analysis.AcParam {
+    const refs = try ckt.collectParams();
+    var out: std.ArrayList(analysis.AcParam) = .empty;
+    for (names, values) |name, value| {
+        for (refs) |ref| {
+            if (!std.mem.eql(u8, ref.param_name, "r")) continue;
+            const card = analysis.CardRef.lookup(cards, ref) orelse continue;
+            if (!std.mem.eql(u8, card, name)) continue;
+            try out.append(arena, .{ .ptr = ref, .ac_value = value });
+            break;
+        }
+    }
+    return out.toOwnedSlice(arena);
+}
+
 fn voltageSource(dir: types.Directive, i: usize, sources: Sources) !usize {
     const name = directiveName(dir, i) orelse return error.InvalidAnalysisArguments;
     return findNameIndex(sources.v_names, name) orelse error.AnalysisSourceNotFound;
@@ -793,7 +850,7 @@ fn buildJob(dir: types.Directive, node_id: u32, sources: Sources) !?Job {
         .sens, .dcmatch => {
             try arity(dir, 1, 1);
             const node = try outputNode(node_id);
-            if (id == .sens) return .{ .sens = .{ .output_node = node } };
+            if (id == .sens) return .{ .sens = .{ .output_node = node, .cards = sources.cards } };
             return .{ .dcmatch = .{ .output_node = node } };
         },
         .four => {
@@ -836,7 +893,7 @@ fn buildJob(dir: types.Directive, node_id: u32, sources: Sources) !?Job {
             const sweep = std.StaticStringMap(analysis.sp.SweepType).initComptime(.{ .{ "dec", .log }, .{ "lin", .linear } }).get(mode) orelse return error.UnsupportedFrequencySweep;
             const npoints = if (sweep == .log) analysis.types.logSweepCount(first, last, n) else n;
             if (npoints > std.math.maxInt(u16)) return error.InvalidAnalysisArguments;
-            return .{ .sp = .{ .f_start = first, .f_stop = last, .n_points = @intCast(npoints), .sweep_type = sweep } };
+            return .{ .sp = .{ .f_start = first, .f_stop = last, .n_points = @intCast(npoints), .sweep_type = sweep, .ports = sources.ports } };
         },
         .stb => return error.UnsupportedStabilityAnalysis,
         .envelope => {
@@ -1204,8 +1261,11 @@ test "sensitivity and mismatch keep separate resistor parameters and analytical 
         for (result.varnames, 0..) |name, i| {
             for (result.varnames[0..i]) |previous| try std.testing.expect(!std.mem.eql(u8, name, previous));
         }
-        const r1 = findNameIndex(result.varnames, "resistor#0.r") orelse return error.MissingSensitivity;
-        const r2 = findNameIndex(result.varnames, "resistor#1.r") orelse return error.MissingSensitivity;
+        // `.sens` names columns after the CARD, ngspice-style (v(r1));
+        // `.dcmatch` still keys by device-class ordinal.
+        const sens_cols = std.mem.eql(u8, result.plotname, "Sensitivity Analysis");
+        const r1 = findNameIndex(result.varnames, if (sens_cols) "v(r1)" else "resistor#0.r") orelse return error.MissingSensitivity;
+        const r2 = findNameIndex(result.varnames, if (sens_cols) "v(r2)" else "resistor#1.r") orelse return error.MissingSensitivity;
         try std.testing.expectApproxEqAbs(@as(f64, -0.001875), result.data[r1], 1e-8);
         try std.testing.expectApproxEqAbs(@as(f64, 0.000625), result.data[r2], 1e-8);
     }
