@@ -389,6 +389,19 @@ pub fn build(b: *std.Build) void {
     fixtures.addArtifactArg(exe);
     if (b.args) |args| fixtures.addArgs(args);
     b.step("test-fixtures", "Validate analysis or generated SKY130 fixtures").dependOn(&fixtures.step);
+
+    // valgrind SIGILLs on this binary's `vgf2p8affineqb`, so callgrind cannot
+    // profile any deck that reaches the BJT/VerA path. The script NOP-patches
+    // the six sites that are a provable no-op on their `vpacksswb` input and
+    // then PROVES the copy equivalent — byte-identical raws on 19 decks, plus
+    // the SIGILL itself appearing before the patch and not after. It refuses to
+    // leave a binary behind if either check fails. Profiling only: nothing in
+    // the shipped build or in `zig build bench` ever runs the patched copy.
+    const nogfni = b.addSystemCommand(&.{ "python3", "benchmark/nogfni.py", "--binary" });
+    nogfni.setCwd(b.path("."));
+    nogfni.addArtifactArg(exe);
+    if (b.args) |args| nogfni.addArgs(args);
+    b.step("nogfni", "Build+verify a GFNI-free espice copy for valgrind").dependOn(&nogfni.step);
 }
 
 // ===========================================================================
