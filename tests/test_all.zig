@@ -17,6 +17,10 @@ const k_boltzmann = 1.380649e-23;
 
 test {
     _ = @import("builder.zig");
+    // Was reachable from NOTHING — no root pulled it in, so its Circuit seam
+    // tests had never run once. The same failure the note below describes,
+    // found a third time.
+    _ = @import("test_circuit.zig");
     _ = @import("devices.zig");
     _ = @import("hfet2_temperature.zig");
     _ = @import("analyses.zig");
