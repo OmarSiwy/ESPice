@@ -4,20 +4,14 @@ const gpu_context = @import("gpu_context.zig");
 const vaload = @import("devices").vaload;
 const memstats = @import("memstats");
 const build_options = @import("build_options");
-const rawfile = @import("output/rawfile.zig");
-const ascii_raw = @import("output/ascii_raw.zig");
-const csv = @import("output/csv.zig");
-const spice_print = @import("output/spice_print.zig");
-const touchstone = @import("output/touchstone.zig");
-const citifile = @import("output/citifile.zig");
-const psf = @import("output/psf.zig");
-const sst2 = @import("output/sst2.zig");
-const fsdb = @import("output/fsdb.zig");
+const output = @import("output");
+const rawfile = output.rawfile;
 
-pub const Parser = @import("frontend/parser.zig").Parser;
-pub const ngspice = @import("frontend/tokenizer.zig").ngspice;
-pub const hspice = @import("frontend/tokenizer.zig").hspice;
-pub const spectre = @import("frontend/tokenizer.zig").spectre;
+const frontend = @import("frontend");
+pub const Parser = frontend.Parser;
+pub const ngspice = frontend.ngspice;
+pub const hspice = frontend.hspice;
+pub const spectre = frontend.spectre;
 
 // `zig test` collects tests only from files the ROOT pulls in explicitly — an
 // ordinary `@import` used by runtime code is not enough. Same aggregator idiom
@@ -26,25 +20,13 @@ pub const spectre = @import("frontend/tokenizer.zig").spectre;
 test {
     _ = @import("engine.zig");
     _ = @import("gpu_context.zig");
-    _ = @import("frontend/parser.zig");
-    _ = @import("frontend/parameter_tests.zig");
-    _ = @import("frontend/source.zig");
-    _ = @import("frontend/tokenizer.zig");
-    _ = @import("frontend/types.zig");
-    _ = @import("output/rawfile.zig");
-    _ = @import("output/ascii_raw.zig");
-    _ = @import("output/csv.zig");
-    _ = @import("output/spice_print.zig");
-    _ = @import("output/touchstone.zig");
-    _ = @import("output/citifile.zig");
-    _ = @import("output/psf.zig");
-    _ = @import("output/sst2.zig");
-    _ = @import("output/fsdb.zig");
+    // `frontend` and `output` are their own modules now: `zig build
+    // test-frontend` and `test-output` run their tests, without this binary.
 }
 
 const Mode = enum { batch, interactive, server, pipe };
 const Tokenizer = enum { ngspice, hspice, spectre };
-const Format = enum { binary, ascii, csv, touchstone, psf, fsdb, sst2, citi, print };
+const Format = output.Format;
 
 // ponytail: up to 16 decks; use an ArrayList if more are needed.
 const Options = struct {
@@ -199,7 +181,7 @@ pub fn main(init: std.process.Init) !u8 {
         const src = (if (opts.tokenizer == .spectre)
             std.Io.Dir.cwd().readFileAlloc(io, path, arena, .unlimited)
         else
-            @import("frontend/source.zig").load(io, arena, path)) catch |err| {
+            frontend.load(io, arena, path)) catch |err| {
             std.debug.print("Error: can't load input file '{s}': {s}\n", .{ path, @errorName(err) });
             continue;
         };
@@ -299,11 +281,11 @@ pub fn main(init: std.process.Init) !u8 {
                     defer a.free(names);
                     names[0] = "time";
                     @memcpy(names[1..], sm.probe_labels);
-                    var output = try rawfile.Stream.init(run_io, a, output_path, sm.title, names);
-                    defer output.deinit();
-                    _ = try sm.runTransient(&output);
-                    try output.finish();
-                    return output.npoints;
+                    var raw_stream = try rawfile.Stream.init(run_io, a, output_path, sm.title, names);
+                    defer raw_stream.deinit();
+                    _ = try sm.runTransient(&raw_stream);
+                    try raw_stream.finish();
+                    return raw_stream.npoints;
                 }
             };
             var run_err: ?anyerror = null;
@@ -378,18 +360,7 @@ pub fn main(init: std.process.Init) !u8 {
     return 0;
 }
 
-// ponytail: fixed CLI aliases use stdlib maps; writers dispatch on the resolved enum.
-fn parseFormat(s: []const u8) ?Format {
-    return std.StaticStringMap(Format).initComptime(.{
-        .{ "binary", .binary }, .{ "raw", .binary },
-        .{ "ascii", .ascii }, .{ "csv", .csv },
-        .{ "touchstone", .touchstone }, .{ "snp", .touchstone }, .{ "s2p", .touchstone },
-        .{ "psf", .psf }, .{ "fsdb", .fsdb },
-        .{ "sst2", .sst2 }, .{ "hspice", .sst2 },
-        .{ "citi", .citi }, .{ "citifile", .citi },
-        .{ "print", .print }, .{ "text", .print },
-    }).get(s);
-}
+const parseFormat = output.parseFormat;
 
 fn parseTokenizer(s: []const u8) ?Tokenizer {
     return std.StaticStringMap(Tokenizer).initComptime(.{
@@ -430,19 +401,7 @@ fn valueOrUsage(oa: OptionArg) ?[]const u8 {
     };
 }
 
-fn writePlot(io: std.Io, path: []const u8, format: Format, plot: rawfile.Plot) !void {
-    return switch (format) {
-        .binary => rawfile.write(io, path, plot),
-        .ascii => ascii_raw.write(io, path, plot),
-        .csv => csv.write(io, path, plot),
-        .touchstone => touchstone.write(io, path, plot),
-        .psf => psf.write(io, path, plot),
-        .fsdb => fsdb.write(io, path, plot),
-        .sst2 => sst2.write(io, path, plot),
-        .citi => citifile.write(io, path, plot),
-        .print => spice_print.write(io, path, plot),
-    };
-}
+const writePlot = output.write;
 
 fn skip(io: std.Io, reason: []const u8) u8 {
     var buf: [256]u8 = undefined;

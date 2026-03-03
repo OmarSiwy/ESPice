@@ -9,7 +9,8 @@
 const std = @import("std");
 const analysis = @import("analysis");
 const devices = @import("devices");
-const types = @import("frontend/types.zig");
+const frontend = @import("frontend");
+const types = frontend.types;
 const netlist = @import("builder.zig");
 const gpu_context = @import("gpu_context.zig");
 
@@ -927,8 +928,8 @@ fn buildJob(dir: types.Directive, node_id: u32, sources: Sources) !?Job {
 // Tests
 // ---------------------------------------------------------------------------
 
-const Parser = @import("frontend/parser.zig").Parser;
-const ngspice = @import("frontend/tokenizer.zig").ngspice;
+const Parser = frontend.Parser;
+const ngspice = frontend.ngspice;
 
 /// Release parse storage before running, as the CLI does.
 fn runDeck(sim_arena: std.mem.Allocator, parse_arena: *std.heap.ArenaAllocator, src: []const u8) !Simulation {

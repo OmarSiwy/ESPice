@@ -92,6 +92,15 @@ pub fn build(b: *std.Build) void {
 
     const solvers_mod = M.make(b.path("src/solvers/root.zig"), &.{});
 
+    // Waveform writers. A leaf like `solvers`: it imports nothing but std, so
+    // it is a module rather than a set of files in the app root, and
+    // `zig build test-output` runs it without building the simulator.
+    const output_mod = M.make(b.path("src/output/root.zig"), &.{});
+
+    // Netlist front end. Also a std-only leaf — `builder` consumes its
+    // `types.Netlist`, but nothing in it reaches back into the simulator.
+    const frontend_mod = M.make(b.path("src/frontend/root.zig"), &.{});
+
     // =======================================================================
     // Devices: every src/devices/models/* compiled to Zig at build time
     //
@@ -215,6 +224,8 @@ pub fn build(b: *std.Build) void {
         .{ .name = "gompute", .module = gompute.module("gompute") },
         .{ .name = "solvers", .module = solvers_mod },
         .{ .name = "memstats", .module = memstats_mod },
+        .{ .name = "output", .module = output_mod },
+        .{ .name = "frontend", .module = frontend_mod },
     };
     const exe = b.addExecutable(.{
         .name = "espice",
@@ -319,6 +330,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "builder", .module = M.make(b.path("src/builder.zig"), &.{
             .{ .name = "analysis", .module = analysis_mod },
             .{ .name = "devices", .module = devices_mod },
+            .{ .name = "frontend", .module = frontend_mod },
         }) },
     }) });
     // Match production: Zig 0.16's native backend miscompiles reused FP comparisons.
@@ -354,6 +366,8 @@ pub fn build(b: *std.Build) void {
 
     for ([_]struct { name: []const u8, desc: []const u8, mod: *std.Build.Module }{
         .{ .name = "test-memstats", .desc = "Run ZP_MEM_STATS accounting tests", .mod = memstats_mod },
+        .{ .name = "test-output", .desc = "Run waveform writer tests", .mod = output_mod },
+        .{ .name = "test-frontend", .desc = "Run netlist front-end tests", .mod = frontend_mod },
         .{ .name = "test-solvers", .desc = "Run solver tests", .mod = solvers_mod },
         .{ .name = "test-analysis", .desc = "Run analysis tests", .mod = analysis_mod },
         // Building this at all pulls every models/* through vera.
