@@ -210,6 +210,17 @@ pub fn build(b: *std.Build) void {
     });
     analysis_mod.linkSystemLibrary("c", .{});
 
+    // Netlist -> Circuit. A module rather than a file in the app root because
+    // it was being compiled TWICE: engine.zig reached it by relative import
+    // inside the exe's root module, and app_tests built a second, ad-hoc copy
+    // to get at its three tests. One module, one copy, and `zig build
+    // test-builder` reaches the tests without the engine around them.
+    const builder_mod = M.make(b.path("src/builder.zig"), &.{
+        .{ .name = "analysis", .module = analysis_mod },
+        .{ .name = "devices", .module = devices_mod },
+        .{ .name = "frontend", .module = frontend_mod },
+    });
+
     // =======================================================================
     // The app
     // =======================================================================
@@ -226,6 +237,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "memstats", .module = memstats_mod },
         .{ .name = "output", .module = output_mod },
         .{ .name = "frontend", .module = frontend_mod },
+        .{ .name = "builder", .module = builder_mod },
     };
     const exe = b.addExecutable(.{
         .name = "espice",
@@ -327,11 +339,7 @@ pub fn build(b: *std.Build) void {
     const app_tests = b.addTest(.{ .root_module = M.make(b.path("tests/test_all.zig"), &.{
         .{ .name = "analysis", .module = analysis_mod },
         .{ .name = "devices", .module = devices_mod },
-        .{ .name = "builder", .module = M.make(b.path("src/builder.zig"), &.{
-            .{ .name = "analysis", .module = analysis_mod },
-            .{ .name = "devices", .module = devices_mod },
-            .{ .name = "frontend", .module = frontend_mod },
-        }) },
+        .{ .name = "builder", .module = builder_mod },
     }) });
     // Match production: Zig 0.16's native backend miscompiles reused FP comparisons.
     app_tests.use_llvm = exe.use_llvm;
@@ -368,6 +376,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "test-memstats", .desc = "Run ZP_MEM_STATS accounting tests", .mod = memstats_mod },
         .{ .name = "test-output", .desc = "Run waveform writer tests", .mod = output_mod },
         .{ .name = "test-frontend", .desc = "Run netlist front-end tests", .mod = frontend_mod },
+        .{ .name = "test-builder", .desc = "Run netlist -> Circuit builder tests", .mod = builder_mod },
         .{ .name = "test-solvers", .desc = "Run solver tests", .mod = solvers_mod },
         .{ .name = "test-analysis", .desc = "Run analysis tests", .mod = analysis_mod },
         // Building this at all pulls every models/* through vera.

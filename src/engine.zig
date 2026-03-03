@@ -11,14 +11,14 @@ const analysis = @import("analysis");
 const devices = @import("devices");
 const frontend = @import("frontend");
 const types = frontend.types;
-const netlist = @import("builder.zig");
+const netlist = @import("builder");
 const gpu_context = @import("gpu_context.zig");
 
 const Circuit = analysis.Circuit;
 const Job = analysis.Job;
 const Result = analysis.Result;
 const RunCtx = analysis.RunCtx;
-const Builder = @import("builder.zig").Builder;
+const Builder = netlist.Builder;
 const GROUND = analysis.GROUND;
 
 const directiveName = netlist.directiveName;
