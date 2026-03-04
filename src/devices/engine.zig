@@ -22,6 +22,13 @@ const gompute = @import("gompute"); // GPU: RawKernel build/launch (shared core)
 // NVPTX/AMDGCN emit no libcalls, so `@exp`/`@log`/`@sin`/`@cos` and
 // std.math's sinh/cosh/pow are hard codegen errors in device compilation.
 // gompute.math is the drop-in that also forwards to libm on the host.
+//
+// `expm1` and `atan` are on it too, for a reason worth knowing before reaching
+// back to std here: they need no libcall, but std's ports raise the subnormal
+// underflow flag through `std.mem.doNotOptimizeAway` -- `asm volatile ("" ::
+// "rm" (v))` -- which AMDGCN cannot lower. They assemble to PTX cleanly, so an
+// NVIDIA-only check never sees it. `log1p` happens not to carry the idiom and
+// is still std's.
 const dmath = gompute.math;
 // engine.zig is the SHARED device core: the app compiles it at comptime for
 // builtins, and the FastVAF `.so` compiles this SAME source at runtime for
@@ -162,7 +169,7 @@ fn DualFor(comptime N: usize, comptime F: type, comptime collapsed: bool) type {
         /// Pure Zig libm forms preserve tiny arguments and the full f64 range.
         /// VerA's precompute scalar uses these same value operations.
         pub fn expm1(a: Self) Self {
-            return .{ .v = std.math.expm1(a.v), .d = a.d * splat(dmath.exp(a.v)) };
+            return .{ .v = dmath.expm1(a.v), .d = a.d * splat(dmath.exp(a.v)) };
         }
         pub fn log1p(a: Self) Self {
             return .{ .v = std.math.log1p(a.v), .d = a.d * splat(1.0 / (1.0 + a.v)) };
@@ -207,7 +214,7 @@ fn DualFor(comptime N: usize, comptime F: type, comptime collapsed: bool) type {
             return .{ .v = p, .d = a.d * splat(if (std.math.isFinite(slope)) slope else 0.0) };
         }
         pub fn atan(a: Self) Self {
-            return .{ .v = std.math.atan(a.v), .d = a.d * splat(1.0 / (1.0 + a.v * a.v)) };
+            return .{ .v = dmath.atan(a.v), .d = a.d * splat(1.0 / (1.0 + a.v * a.v)) };
         }
         pub fn sinh(a: Self) Self {
             return .{ .v = dmath.sinh(a.v), .d = a.d * splat(dmath.cosh(a.v)) };
@@ -316,7 +323,7 @@ fn RealFor(comptime collapsed: bool) type {
             return .{ .v = dmath.log(a.v) };
         }
         pub fn expm1(a: Self) Self {
-            return .{ .v = std.math.expm1(a.v) };
+            return .{ .v = dmath.expm1(a.v) };
         }
         pub fn log1p(a: Self) Self {
             return .{ .v = std.math.log1p(a.v) };
@@ -340,7 +347,7 @@ fn RealFor(comptime collapsed: bool) type {
             return .{ .v = dmath.cosh(a.v) };
         }
         pub fn atan(a: Self) Self {
-            return .{ .v = std.math.atan(a.v) };
+            return .{ .v = dmath.atan(a.v) };
         }
         /// NOT `@abs`: `Dual.abs` is a sign test, which returns -0 unchanged.
         pub fn abs(a: Self) Self {
