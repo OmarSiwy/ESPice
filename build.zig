@@ -221,6 +221,19 @@ pub fn build(b: *std.Build) void {
         .{ .name = "frontend", .module = frontend_mod },
     });
 
+    // Simulation driver + the GPU launcher, one module. gpu.zig is INTERNAL
+    // to it: the backend is a runtime choice, not a layer, so nothing outside
+    // names the launcher. `gompute_kernels` is wired in below, same as the exe.
+    const engine_imports: []const std.Build.Module.Import = &.{
+        .{ .name = "analysis", .module = analysis_mod },
+        .{ .name = "devices", .module = devices_mod },
+        .{ .name = "solvers", .module = solvers_mod },
+        .{ .name = "builder", .module = builder_mod },
+        .{ .name = "frontend", .module = frontend_mod },
+        .{ .name = "gompute", .module = gompute.module("gompute") },
+    };
+    const engine_mod = M.make(b.path("src/engine/root.zig"), engine_imports);
+
     // =======================================================================
     // The app
     // =======================================================================
@@ -229,7 +242,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "devices", .module = devices_mod },
         .{ .name = "analysis", .module = analysis_mod },
         .{ .name = "build_options", .module = bopts.createModule() },
-        // src/gpu_context.zig: the GPU launcher is APP policy (it owns when to
+        // src/engine/gpu.zig: the GPU launcher is ENGINE-internal (it owns when to
         // go to the device), so it lives beside the engine rather than inside
         // `devices`, and needs the driver handle and the CPU Newton it drives.
         .{ .name = "gompute", .module = gompute.module("gompute") },
@@ -238,6 +251,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "output", .module = output_mod },
         .{ .name = "frontend", .module = frontend_mod },
         .{ .name = "builder", .module = builder_mod },
+        .{ .name = "engine", .module = engine_mod },
     };
     const exe = b.addExecutable(.{
         .name = "espice",
@@ -258,7 +272,7 @@ pub fn build(b: *std.Build) void {
 
     // GPU kernels, unconditionally: the arch probe inside `emitKernels` is what
     // decides, and a machine with no device emits nothing and stays green. This
-    // is also what makes `gompute_kernels` always exist for gpu_context.zig.
+    // is also what makes `gompute_kernels` always exist for engine/gpu.zig.
     // Emission sits below the executable because `emitKernels` takes it.
     const smallest_model = blk: {
         var best = models[0];
@@ -271,7 +285,7 @@ pub fn build(b: *std.Build) void {
     for (models, one_models) |m, one_mod| {
         // `-Dgpu=false` compiles ONE model for the GPU instead of all 38, which
         // is the bulk of a full build. Not zero: gompute panics on an empty
-        // root list, and `gompute_kernels` has to exist for gpu_context.zig to
+        // root list, and `gompute_kernels` has to exist for engine/gpu.zig to
         // compile and for `--backend cuda` to keep erroring by name. This is
         // the CPU-iteration build — not a shipping one, and not what
         // `zig build bench` should run.
@@ -351,7 +365,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(app_tests).step);
 
     // The app layer, as its own test root. tests/test_all.zig cannot reach it:
-    // main.zig, engine.zig, gpu_context.zig and frontend/ live in the
+    // main.zig and frontend/ used to live in the
     // executable's root module, and `zig test` only collects from the root
     // module's file set. Without this the whole app layer — netlist -> jobs ->
     // results, and the parser's own tests — never ran.
@@ -361,16 +375,38 @@ pub fn build(b: *std.Build) void {
     // zero tests (a deliberately-broken assertion still passed).
     const exe_tests = b.addTest(.{ .root_module = M.make(b.path("src/main.zig"), app_imports) });
     // `emitKernels` wires `gompute_kernels` into the HOST artifact's root module
-    // only, and gpu_context.zig imports it by name — so a second root module
+    // only, and engine/gpu.zig imports it by name — so a second root module
     // over the same files needs the same import or it will not compile.
-    if (exe.root_module.import_table.get("gompute_kernels")) |artifacts|
+    // `engine_mod` is declared before emitKernels runs, so it is wired here
+    // too rather than at its declaration.
+    if (exe.root_module.import_table.get("gompute_kernels")) |artifacts| {
         exe_tests.root_module.addImport("gompute_kernels", artifacts);
+        engine_mod.addImport("gompute_kernels", artifacts);
+    }
     exe_tests.use_llvm = exe.use_llvm;
     exe_tests.use_lld = exe.use_lld;
     for (host_objs) |o| exe_tests.root_module.addObject(o);
     const run_exe_tests = b.addRunArtifact(exe_tests);
     b.step("test-app", "Run the executable's own tests").dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+
+    // The engine does NOT ride the generic suite loop: it drives real solves, so
+    // builder resolves generated devices through `arp_device_*` and the binary
+    // has to link the same host objects the exe does, on the same backend.
+    // A FRESH module, not `engine_mod`: `addObject` MUTATES the module it is
+    // called on, so adding the device objects to the shared one put them in the
+    // exe as well and every `arp_device_*` linked twice. Same reason exe_tests
+    // builds its own root.
+    const engine_test_mod = M.make(b.path("src/engine/root.zig"), engine_imports);
+    if (exe.root_module.import_table.get("gompute_kernels")) |artifacts|
+        engine_test_mod.addImport("gompute_kernels", artifacts);
+    const engine_tests = b.addTest(.{ .root_module = engine_test_mod });
+    engine_tests.use_llvm = exe.use_llvm;
+    engine_tests.use_lld = exe.use_lld;
+    for (host_objs) |o| engine_test_mod.addObject(o);
+    const run_engine_tests = b.addRunArtifact(engine_tests);
+    b.step("test-engine", "Run simulation-driver + GPU-launcher tests").dependOn(&run_engine_tests.step);
+    test_step.dependOn(&run_engine_tests.step);
 
     for ([_]struct { name: []const u8, desc: []const u8, mod: *std.Build.Module }{
         .{ .name = "test-memstats", .desc = "Run ZP_MEM_STATS accounting tests", .mod = memstats_mod },

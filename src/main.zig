@@ -1,6 +1,5 @@
 const std = @import("std");
-const engine = @import("engine.zig");
-const gpu_context = @import("gpu_context.zig");
+const engine = @import("engine");
 const vaload = @import("devices").vaload;
 const memstats = @import("memstats");
 const build_options = @import("build_options");
@@ -18,10 +17,10 @@ pub const spectre = frontend.spectre;
 // every root.zig in this tree uses; without it `zig build test-app` built a
 // binary that ran zero tests and reported success.
 test {
-    _ = @import("engine.zig");
-    _ = @import("gpu_context.zig");
-    // `frontend` and `output` are their own modules now: `zig build
-    // test-frontend` and `test-output` run their tests, without this binary.
+    // Nothing left to aggregate. `engine` (with the GPU launcher inside it),
+    // `frontend`, `output`, `builder`, `analysis`, `devices` and `solvers` are
+    // all modules, and a cross-module `_ = @import(...)` contributes zero.
+    // main.zig is a CLI entry with no tests of its own; every module has a step.
 }
 
 const Mode = enum { batch, interactive, server, pipe };
@@ -34,7 +33,7 @@ const Options = struct {
     tokenizer: Tokenizer = .ngspice,
     raw_path: ?[]const u8 = null,
     format: Format = .binary,
-    backend: gpu_context.Request = .cpu,
+    backend: engine.Request = .cpu,
     /// The user NAMED the device. `--gpu` and `--backend cuda|hip` both do;
     /// `--backend auto` does not, and that is the entire difference between
     /// "use the GPU" and "use the GPU if you feel like it".
@@ -75,7 +74,7 @@ pub fn main(init: std.process.Init) !u8 {
                 opts.gpu_explicit = true;
             } else if (optionValue(arg, "", "--backend", &it)) |oa| {
                 const val = valueOrUsage(oa) orelse return 2;
-                opts.backend = std.meta.stringToEnum(gpu_context.Request, val) orelse {
+                opts.backend = std.meta.stringToEnum(engine.Request, val) orelse {
                     std.debug.print("Error: unknown backend '{s}' (want auto|cpu|cuda|hip)\n", .{val});
                     return 2;
                 };
@@ -168,8 +167,8 @@ pub fn main(init: std.process.Init) !u8 {
 
     // Strict --backend cuda|hip: reject up front if this binary cannot honour
     // it, naming what WAS detected. auto/cpu always pass (auto falls back).
-    if (!gpu_context.requestSupported(opts.backend)) {
-        std.debug.print("Error: requested {s}, found: {s}\n", .{ @tagName(opts.backend), gpu_context.detectedName() });
+    if (!engine.requestSupported(opts.backend)) {
+        std.debug.print("Error: requested {s}, found: {s}\n", .{ @tagName(opts.backend), engine.detectedName() });
         return 2;
     }
 

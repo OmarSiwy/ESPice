@@ -1,4 +1,9 @@
-//! gpu_context.zig — device evaluation on the GPU, solver on the CPU.
+//! engine/gpu.zig — device evaluation on the GPU, solver on the CPU.
+//!
+//! ENGINE-INTERNAL. Nothing outside the engine module names this file: the
+//! backend is a runtime choice, not an architectural layer, so callers ask the
+//! engine and it decides. Kernel logic is not here — it lives once in
+//! devices/engine.zig and gompute compiles it for host, CUDA and HIP.
 //!
 //! The split is deliberate and it is the whole design:
 //!
