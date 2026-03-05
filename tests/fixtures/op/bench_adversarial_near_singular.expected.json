@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "Near-singular MNA: two huge resistors meeting at a weakly-grounded node.",
+  "oracle": {
+    "kind": "ngspice-44.2",
+    "derivation": "Independent ngspice-44.2 run of the preserved benchmark circuit. Stored binary raw doubles, selected by column name. Transient values retain reference accepted times. Large sweeps retain explicit row indices including outer-sweep boundaries.",
+    "command": "ngspice -n -b -r reference.raw circuit.sp",
+    "source_sha256": "bf4779d1a0e1abae8fe33da4bd8932dd684699a6ae33f81fc344bf91133c951b"
+  },
+  "origin": "benchmark/fixtures/adversarial/near_singular/circuit.sp",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(a)": {
+            "values": [
+              1.0
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(b)": {
+            "values": [
+              0.49975012493753
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "i(v1)": {
+            "values": [
+              -5.0024987506247e-13
+            ],
+            "unit": "A",
+            "rtol": 0.001,
+            "atol": 1e-11
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "76febadcdf9c21344b9569b1eecd04a1e7d3d792ba94ed352e612615bb17c395"
+}

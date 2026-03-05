@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "analysis": "tf",
+  "purpose": "TF source selection with an earlier bias supply",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Zero all independent sources except unit perturbation on Vin."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transfer Function",
+        "match": "exact",
+        "columns": {
+          "transfer_function": {
+            "unit": "V/V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              0.75
+            ]
+          },
+          "input_resistance": {
+            "unit": "ohm",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              4000
+            ]
+          },
+          "output_resistance": {
+            "unit": "ohm",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              750
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "79935b1561ee2492c0c33b1e00f1cd79444b791e6bd688dc19cc31928e3e43ae"
+}

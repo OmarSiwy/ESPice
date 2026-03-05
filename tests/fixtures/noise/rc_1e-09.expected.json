@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "analysis": "noise",
+  "purpose": "Frequency-shaped resistor noise and input referral",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Output PSD=4*kB*T*R/(1+(2*pi*f*R*C)^2); input-referred PSD=4*kB*T*R."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Noise Spectral Density Curves",
+        "match": "exact",
+        "columns": {
+          "onoise_spectrum": {
+            "unit": "V/sqrt(Hz)",
+            "rtol": 5e-05,
+            "atol": 1e-18,
+            "values": [
+              4.0713722291827e-09,
+              4.0713722118054e-09,
+              4.0713721568536e-09,
+              4.0713719830808e-09,
+              4.0713714335629e-09,
+              4.0713696958361e-09,
+              4.0713642006764e-09,
+              4.071346823602e-09,
+              4.071291873932e-09,
+              4.0711181224597e-09,
+              4.0705688184272e-09,
+              4.0688332287539e-09,
+              4.0633593878552e-09
+            ]
+          },
+          "inoise_spectrum": {
+            "unit": "V/sqrt(Hz)",
+            "rtol": 5e-05,
+            "atol": 1e-18,
+            "values": [
+              4.0713722372193e-09,
+              4.0713722372193e-09,
+              4.0713722372193e-09,
+              4.0713722372193e-09,
+              4.0713722372193e-09,
+              4.0713722372193e-09,
+              4.0713722372193e-09,
+              4.0713722372193e-09,
+              4.0713722372193e-09,
+              4.0713722372193e-09,
+              4.0713722372193e-09,
+              4.0713722372193e-09,
+              4.0713722372193e-09
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            10.0,
+            17.782794100389,
+            31.622776601684,
+            56.234132519035,
+            100.0,
+            177.82794100389,
+            316.22776601684,
+            562.34132519035,
+            1000.0,
+            1778.2794100389,
+            3162.2776601684,
+            5623.4132519035,
+            10000.0
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "row_count": 13
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "1555d9658acec7319141c7a793b4ae94f2bc87955e05dd85a95ebaab12720237"
+}

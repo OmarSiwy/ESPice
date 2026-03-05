@@ -1,6 +1,7 @@
 const std = @import("std");
 const Io = std.Io;
-const Plot = @import("rawfile.zig").Plot;
+const types = @import("output_types");
+const Plot = types.Plot;
 
 // ponytail: FSDB is proprietary (Synopsys). This implements a minimal analog FSDB
 // structure based on publicly documented format. Full vendor tool compatibility
@@ -12,8 +13,7 @@ const FSDB_VERSION: u32 = 0x0300; // v3.0
 /// Write FSDB (Fast Signal Database) format for analog simulation data.
 pub fn write(io: Io, path: []const u8, plot: Plot) !void {
     const nvars = plot.varnames.len;
-    const per: usize = if (plot.is_complex) 2 else 1;
-    if (plot.data.len != plot.npoints * nvars * per) return error.DataLengthMismatch;
+    try types.validatePlot(.fsdb, plot);
 
     const file = try Io.Dir.cwd().createFile(io, path, .{});
     defer file.close(io);

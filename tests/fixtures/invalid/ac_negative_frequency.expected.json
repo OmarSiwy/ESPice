@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "ac",
+  "purpose": "Logarithmic frequencies must be positive.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "Logarithmic frequencies must be positive."
+  },
+  "expect": {
+    "status": "error",
+    "category": "invalid_analysis_arguments",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "04b7b6c35bded8738cee7a7864ca0d22bbe07606c3569bc458e3f16d7a709628"
+}

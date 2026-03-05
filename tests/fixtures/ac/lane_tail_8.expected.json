@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "analysis": "ac",
+  "purpose": "8 independent frequency points, vector batch tails",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "H=1/(1+j*2*pi*f*.001); every requested lane must appear exactly once."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "AC Analysis",
+        "match": "exact",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              [
+                0.99606768240717,
+                -0.062584778270572
+              ],
+              [
+                0.012115643618961,
+                -0.10940226139646
+              ],
+              [
+                0.0030780010879992,
+                -0.055394286684653
+              ],
+              [
+                0.0013735344551065,
+                -0.037035764582457
+              ],
+              [
+                0.00077397850281905,
+                -0.027809700827161
+              ],
+              [
+                0.00049583088875808,
+                -0.022261739385947
+              ],
+              [
+                0.0003445398277438,
+                -0.018558586154416
+              ],
+              [
+                0.00025323881296516,
+                -0.015911463888303
+              ]
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            10.0,
+            1437.1428571429,
+            2864.2857142857,
+            4291.4285714286,
+            5718.5714285714,
+            7145.7142857143,
+            8572.8571428571,
+            10000.0
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "row_count": 8
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "6997a4018f2954e6135ce978daa03cf9e04573b41ee926de06307314ccd0085f",
+  "known_gaps": [
+    "non-DEC frequency sweeps are not yet supported by the shared analysis dispatcher"
+  ]
+}

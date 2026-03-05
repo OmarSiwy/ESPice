@@ -116,7 +116,7 @@ kernel four_batched(lanes = probes x trials):
 | Phase | Solver doc | Impl |
 |---|---|---|
 | Transient producer | [klu-pipeline.md](../solvers/klu-pipeline.md), [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) — via the transient stack | `src/analysis/tran/tran.zig` |
-| FFT | none (analysis-support kernel, not a linear solver) | `src/solvers/fft.zig` (radix-2, in-place) |
+| FFT | none (analysis-support kernel, not a linear solver) | `src/analysis/solvers/fft.zig` (radix-2, in-place) |
 
 ---
 
@@ -137,5 +137,5 @@ kernel four_batched(lanes = probes x trials):
 **Our implementation**
 
 - `src/analysis/post/four.zig` — extraction + THD;
-  `src/solvers/fft.zig`.
+  `src/analysis/solvers/fft.zig`.
 - Bench fixtures: `benchmark/fixtures/fourier/*`.

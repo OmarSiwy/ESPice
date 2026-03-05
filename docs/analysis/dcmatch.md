@@ -1,6 +1,11 @@
-# DC Mismatch (dcmatch) — future, not implemented
+# DC Mismatch (dcmatch)
 
 Random-mismatch-induced offset at the operating point (Spectre `dcmatch`).
+
+`src/analysis/dc/dcmatch.zig` implements the adjoint solve with
+finite-difference parameter stamps. It uses Pelgrom metadata when present
+and unit variance otherwise. Analytic parameter-derivative stamps and
+AC mismatch remain extensions.
 
 ## 1. Mathematical specification
 
@@ -38,7 +43,7 @@ Validity limit: first-order in $\delta p$ — breaks for comparators biased
 at metastability or any $y$ with vanishing gradient; Spectre documents the
 same caveat.
 
-## 2. Flow (target)
+## 2. Flow
 
 1. OP solve; keep the factored $J$.
 2. Adjoint solve $J^{\mathsf T}\lambda = e_{\text{out}}$ on the existing
@@ -48,32 +53,32 @@ same caveat.
    $\lambda$, accumulate variance; sort contributions.
 4. Report $3\sigma$ offset + contribution table.
 
-Needs from the device layer: per-model $\partial F/\partial p$ stamp
+An analytic-stamp upgrade needs per-model $\partial F/\partial p$ stamp
 derivatives for the mismatch parameters (VT0, beta/KP, R) — the
 [parameter-derivative-stamps](../solvers/parameter-derivative-stamps.md)
 hook, shared with the adjoint-sensitivity upgrade.
 
 **Mismatch sources are per-device**, consistent with the engine's
-in-device noise convention (see the "Noise model (in-device)" sections in
-[docs/devices/](../devices/README.md)): Pelgrom coefficients
+in-device noise convention (model sources are in
+[models/](../../models/)): Pelgrom coefficients
 ($A_{VT}, A_\beta$, area terms) live on the device model card next to its
 noise PSDs, the device geometry ($W, L$) that sets $\sigma(\delta p)$ is
 instance data, and the analysis only consumes the per-device
 $(\sigma^2(\delta p_d),\ \partial F/\partial p_d)$ pairs — it never owns a
 mismatch table of its own.
 
-## Solvers used (requirements — analysis not implemented)
+## Solvers used and extensions
 
 | Phase | Solver doc | Impl |
 |---|---|---|
 | Adjoint solve $J^{\mathsf T}\lambda = e_{\text{out}}$ on the OP factors | [klu-pipeline.md](../solvers/klu-pipeline.md) | `direct.zig solveT` (**exists**); one back-substitution total |
-| Per-device $\partial F/\partial p$ stamps + adjoint dot accumulation (SoA batch pass, GPU variant) | [parameter-derivative-stamps.md](../solvers/parameter-derivative-stamps.md) — **hard requirement** | `evalp` contract hook (future); FD-stamp fallback needs no contract change |
+| Per-device $\partial F/\partial p$ stamps + adjoint dot accumulation | [parameter-derivative-stamps.md](../solvers/parameter-derivative-stamps.md) | finite differences implemented; analytic `evalp` hook remains a target |
 | AC-swept variant (offset vs frequency) | frequency lanes as in [ac-small-signal-noise.md](ac-small-signal-noise.md) §4, complex adjoint via `freq_solve.solveRhsT` (exists) | requirement |
 
 ---
 
 **Sources fetched**: none free found for Spectre dcmatch specifics —
 **derived, not source-verified** (Pelgrom's paper is paywalled; the
-$A/\sqrt{WL}$ law and adjoint formulation are standard). **Status: future
-— not implemented**; prerequisite shared with the adjoint upgrade in
-[sensitivity.md](sensitivity.md).
+$A/\sqrt{WL}$ law and adjoint formulation are standard). **Implementation
+status:** adjoint DC mismatch with finite-difference stamps; analytic
+stamps remain an upgrade shared with [sensitivity.md](sensitivity.md).

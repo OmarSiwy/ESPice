@@ -6,6 +6,9 @@ const builtin = @import("builtin");
 const simd = std.simd;
 const assert = std.debug.assert;
 
+// Production normalization kernel: src/frontend/tests/syntax.zig tests
+// "normalization SIMD matches W=1 at every boundary".
+
 const V16 = @Vector(16, u8);
 
 extern fn @"llvm.x86.ssse3.pshuf.b.128"(V16, V16) V16;
@@ -128,6 +131,44 @@ fn transferOracle(dst: []u64, use: []const u64, out: []const u64, def: []const u
 }
 
 pub fn main() void {
+    {
+        var random = std.Random.DefaultPrng.init(0xa5c11);
+        var src: [257]u8 = undefined;
+        var expected: [257]u8 = undefined;
+        var actual: [257]u8 = undefined;
+        for (0..20) |_| {
+            random.random().bytes(&src);
+            inline for (.{ 1, 16, 32, 64 }) |width| for (0..src.len + 1) |n| {
+                const count = normalize(1, expected[0..n], src[0..n]);
+                assert(count == normalize(width, actual[0..n], src[0..n]));
+                assert(std.mem.eql(u8, expected[0..n], actual[0..n]));
+            };
+        }
+    }
+
+    // Mirror Circuit.combinePlanes; the same W=1 kernel is the oracle.
+    {
+        var random = std.Random.DefaultPrng.init(0x4321);
+        var g: [67]f64 = undefined;
+        var c: [67]f64 = undefined;
+        var actual: [67]f64 = undefined;
+        var expected: [67]f64 = undefined;
+        for (&g, &c) |*gv, *cv| {
+            gv.* = random.random().float(f64) - 0.5;
+            cv.* = random.random().float(f64) - 0.5;
+        }
+        inline for (.{ 1, 2, 4, 8 }) |width| for (0..g.len + 1) |n| {
+            for ([_]f64{ 0, -1, 0.125, 1e12 }) |alpha| {
+                combinePlanes(1, expected[0..n], g[0..n], c[0..n], alpha);
+                combinePlanes(width, actual[0..n], g[0..n], c[0..n], alpha);
+                assert(std.mem.eql(f64, expected[0..n], actual[0..n]));
+                @memcpy(actual[0..n], g[0..n]);
+                combinePlanes(width, actual[0..n], actual[0..n], c[0..n], alpha);
+                assert(std.mem.eql(f64, expected[0..n], actual[0..n]));
+            }
+        };
+    }
+
     // T1 — runtime 16-way table lookup, intrinsic vs scalar oracle, 50k pairs.
     var prng = std.Random.DefaultPrng.init(0xC0FFEE);
     const rand = prng.random();
@@ -323,7 +364,7 @@ pub fn main() void {
     // pivot tape, values as []@Vector(W,f64). Its differential case (vector lane
     // l vs scalar SparseLu replay of lane l, on +/-5% perturbed matrices incl.
     // an MNA zero-diagonal pattern and a singular-lane/mask case) lives IN
-    // src/solvers/lane_lu.zig test blocks, not here: this file runs standalone
+    // src/analysis/tests/solvers.zig (LaneLuTests), not here: this file runs standalone
     // via `zig run` and cannot import the solvers module (SparseLu, the oracle).
     // Run it under `zig build test-solvers`.
 
@@ -332,7 +373,7 @@ pub fn main() void {
     // vector axpy variants) was bit-identical to the scalar oracle but lost
     // 19% wall end-to-end: the per-flop tape streams with zero reuse (2.8x L2
     // read traffic) while global-coordinate li/lx column reads stay
-    // D1-resident. Rerunnable rig: src/solvers/dev_harness.zig on a
+    // D1-resident. Rerunnable rig: src/analysis/solvers/dev_harness.zig on a
     // ZP_LU_DUMP capture (differential-checks every variant vs lu.refactor,
     // bit-identical, before racing them). Full evidence:
     // docs/solvers/refactor-tape-2026-09.md.
@@ -344,7 +385,7 @@ pub fn main() void {
     // 47/32/72 at len 1/2/3 on devices/mos6_inverter. LLVM runtime-unrolls the
     // plain loop by 4, so the wide body it builds never runs and each call
     // still pays the guard chain. Differential case against the one-at-a-time
-    // oracle over lengths 0..8: src/solvers/sparse_lu.zig test blocks (same
+    // oracle over lengths 0..8: src/analysis/tests/solvers.zig (SparseTests) (same
     // standalone-import reason as LaneLu above).
 
     std.debug.print("ok — zig {f}, ssse3={}, pclmul={}\n", .{
@@ -430,4 +471,37 @@ fn boundsFirstBadVec(words: []const u32, ninsts: u32, arg_base: u32, none: u32) 
         if (words[i] != none and words[i] < arg_base and words[i] >= ninsts) return i;
     }
     return null;
+}
+
+// Self-contained mirror of src/analysis/Circuit.zig; no src imports here.
+/// Independent CSC entries: out = G + alpha*C. W=1 is also the tail and oracle.
+pub fn combinePlanes(comptime W: usize, out: []f64, g: []const f64, c: []const f64, alpha: f64) void {
+    std.debug.assert(out.len == g.len and out.len == c.len);
+    const V = @Vector(W, f64);
+    const scale: V = @splat(alpha);
+    var i: usize = 0;
+    while (i + W <= out.len) : (i += W) {
+        const gv: V = g[i..][0..W].*;
+        const cv: V = c[i..][0..W].*;
+        out[i..][0..W].* = gv + scale * cv;
+    }
+    if (comptime W > 1) combinePlanes(1, out[i..], g[i..], c[i..], alpha);
+}
+
+// Frontend parser.zig: normalization and line count; same W=1 oracle.
+/// Copy normalized bytes and count physical lines in one pass. W=1 is the
+/// scalar oracle and tail; byte lanes are independent.
+fn normalize(comptime W: comptime_int, dst: []u8, src: []const u8) usize {
+    const V = @Vector(W, u8);
+    var lines: usize = 0;
+    var i: usize = 0;
+    while (i + W <= src.len) : (i += W) {
+        const v: V = src[i..][0..W].*;
+        const upper = (v >= @as(V, @splat('A'))) & (v <= @as(V, @splat('Z')));
+        dst[i..][0..W].* = v | @select(u8, upper, @as(V, @splat(0x20)), @as(V, @splat(0)));
+        const newlines: std.meta.Int(.unsigned, W) = @bitCast(v == @as(V, @splat('\n')));
+        lines += @popCount(newlines);
+    }
+    if (W > 1) lines += normalize(1, dst[i..], src[i..]);
+    return lines;
 }

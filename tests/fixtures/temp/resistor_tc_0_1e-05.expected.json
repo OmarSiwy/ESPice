@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "analysis": "temp",
+  "purpose": "Linear and quadratic resistor temperature coefficients",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "R2(T)=3000*[1+tc1*(T-27)+tc2*(T-27)^2]; Vout=10*R2(T)/(1000+R2(T))."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Temperature Sweep",
+        "match": "exact",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              7.5814272964952,
+              7.513594422495,
+              7.5031647386937,
+              7.5515820452615,
+              7.6522900736477
+            ]
+          }
+        },
+        "axis": {
+          "name": "temp",
+          "values": [
+            -40,
+            0,
+            40,
+            80,
+            120
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "row_count": 5
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "e8a4e723e3402d8175789d98f7927a99df97dfdcd828357d08db0e424afb2fef",
+  "known_gaps": [
+    "resistor temperature coefficients are not implemented by the current resistor model"
+  ]
+}

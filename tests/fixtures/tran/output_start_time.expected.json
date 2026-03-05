@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "TSTART suppresses output without restarting circuit history",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Vout=.75*sin(2*pi*1000*t) for t>=1ms. No reported time may precede TSTART."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-05,
+            "values": [
+              0,
+              0.75,
+              0,
+              -0.75,
+              0,
+              0
+            ]
+          }
+        },
+        "axis": {
+          "name": "time",
+          "values": [
+            0.001,
+            0.00125,
+            0.0015,
+            0.00175,
+            0.002,
+            0.003
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        }
+      }
+    ],
+    "checks": [
+      {
+        "kind": "axis_bounds",
+        "plot": "Transient Analysis",
+        "axis": "time",
+        "minimum": 0.001,
+        "maximum": 0.003
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "2cb55e0c7340dbc6fd9d151587ed1aef70e239b62bf235adc631425084bc29af",
+  "known_gaps": [
+    "nonzero transient output-start time is rejected by the dispatcher"
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "pss",
+  "purpose": "Periodic steady state requires a positive fundamental frequency.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "Periodic steady state requires a positive fundamental frequency."
+  },
+  "expect": {
+    "status": "error",
+    "category": "invalid_analysis_arguments",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "faf07abe12693cadf682fe8cc1d2a6f9d77a9d7afb65034da3ad1d1e6573f84e"
+}

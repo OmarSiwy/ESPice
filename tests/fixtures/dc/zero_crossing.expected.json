@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "analysis": "dc",
+  "purpose": "DC zero_crossing",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Sweep includes start, steps toward stop without crossing it. Vout=.75*Vin."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "DC transfer characteristic",
+        "match": "exact",
+        "columns": {
+          "v(in)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              -0.2,
+              -0.1,
+              0.0,
+              0.1,
+              0.2
+            ]
+          },
+          "v(out)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              -0.15,
+              -0.075,
+              0.0,
+              0.075,
+              0.15
+            ]
+          },
+          "i(vin)": {
+            "unit": "A",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              5e-05,
+              2.5e-05,
+              -0.0,
+              -2.5e-05,
+              -5e-05
+            ]
+          }
+        },
+        "axis": {
+          "name": "v(v-sweep)",
+          "values": [
+            -0.2,
+            -0.1,
+            0.0,
+            0.1,
+            0.2
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "row_count": 5
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "84137881a118d1a0b1188630a7cc0192eab5cbc2fe13ec0bb5681f6016f8cc32"
+}

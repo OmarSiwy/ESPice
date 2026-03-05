@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "analysis": "pz",
+  "purpose": "test circuit #1 for pz analysis:high pass filter",
+  "oracle": {
+    "kind": "ngspice-44.2",
+    "derivation": "Independent ngspice-44.2 run of the preserved benchmark circuit. Stored binary raw doubles, selected by column name. Transient values retain reference accepted times. Large sweeps retain explicit row indices including outer-sweep boundaries.",
+    "command": "ngspice -n -b -r reference.raw circuit.sp",
+    "source_sha256": "23870ac940ee69a7cc220e2107ab3ccc903ce9f9c54e1089f06e2e4ab92a8531",
+    "warnings": [
+      ".print line ignored since rawfile was produced."
+    ]
+  },
+  "origin": "benchmark/fixtures/pz/simplepz/circuit.sp",
+  "expect": {
+    "status": "success",
+    "plots": [],
+    "checks": [
+      {
+        "kind": "pole_zero_sets",
+        "plot": "Pole-Zero Analysis",
+        "poles": [
+          [
+            -500000000.0,
+            0.0
+          ]
+        ],
+        "zeros": [
+          [
+            0.0,
+            0.0
+          ]
+        ],
+        "rtol": 0.001,
+        "atol": 1e-06,
+        "multiplicity": true
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "5fbbb2db6c97be5d90e3c210cd5681b60c2102f67bef46897d00b6d32c59ca52",
+  "known_gaps": [
+    "explicit PZ ports and transfer zeros are not yet exposed by the dispatcher"
+  ]
+}

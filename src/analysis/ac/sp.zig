@@ -23,24 +23,11 @@ pub const Complex = types.Complex;
 /// series z0 by adding −z0 to the branch row diagonal (branch equation becomes
 /// v_p − v_n − z0·i_br = V_s), so un-excited ports terminate in z0 instead of
 /// clamping their node.
-pub const Port = struct {
-    node: u32,
-    branch: u32,
-    z0: f64 = 50.0,
-};
+pub const Port = @import("requests").Port;
 
-pub const SweepType = enum { log, linear };
+pub const SweepType = @import("requests").SweepType;
 
-pub const Options = struct {
-    tol: converger.Tolerances = .{},
-    f_start: f64,
-    f_stop: f64,
-    n_points: u16 = 50,
-    sweep_type: SweepType = .log,
-    /// Explicit port list. Empty means one port at the drive source
-    /// (ctx.source_node / ctx.source_branch) when running via the contract.
-    ports: []const Port = &.{},
-};
+pub const Options = @import("requests").Sp;
 
 /// Caller owns the output: freqs[n_points] and the flat S-matrix stack
 /// s[n_points * n_ports²], point-major — S(row,col) at frequency point fi is
@@ -65,7 +52,7 @@ pub fn sweep(
     // -- GPU batch path: one batch call per driven port ----------------------
     // ponytail: P batch calls of N_freq each; packing all P*N into one call
     // would need per-solve RHS, add when freq_solve_batch gains rhs-per-lane.
-    if (ckt.gpu_hook != null) gpu: {
+    if (ckt.gpu_hook != null and ckt.progress == null) gpu: {
         try ckt.linearizeAc(x_op);
 
         // Stamp port z0 onto the sparse G diagonal (analysis-side mod).
@@ -89,13 +76,14 @@ pub fn sweep(
         const rhs = allocator.alloc(f64, 2 * n) catch break :gpu;
         defer allocator.free(rhs);
 
+        const x_out = allocator.alloc(f64, n_points * 2 * n) catch break :gpu;
+        defer allocator.free(x_out);
         for (0..n_ports) |p| {
             root.zeroSimd(rhs);
             rhs[ports[p].branch] = 1.0;
 
             // Per-frequency output: x_out[k] is 2*n (real‖imag expansion).
-            const x_out = ckt.gpuFreqBatch(allocator, ckt.g_vals, ckt.c_vals, omegas, rhs, @intCast(n), false) orelse break :gpu;
-            defer allocator.free(x_out);
+            ckt.gpuFreqBatch(ckt.g_vals, ckt.c_vals, omegas, rhs, @intCast(n), false, x_out) orelse break :gpu;
 
             const a_p = 1.0 / (2.0 * @sqrt(ports[p].z0));
             const nn = 2 * n;
@@ -134,6 +122,7 @@ pub fn sweep(
     defer allocator.free(x_work);
 
     for (0..n_points) |fi| {
+        if (fi != 0) try ckt.checkpoint(.{ .phase = .frequency, .completed = fi, .total = n_points });
         const f = freqs[fi];
         try fs.setOmega(2.0 * std.math.pi * f);
 

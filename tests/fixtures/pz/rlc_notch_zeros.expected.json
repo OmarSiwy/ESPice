@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "analysis": "pz",
+  "purpose": "Transfer poles and zeros with explicit input and output ports",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Compute numerator and denominator roots of the voltage transfer: highpass sRC/(1+sRC), lowpass 1/(1+sRC), notch (1+s^2LC)/(1+sRC+s^2LC). Roots are in rad/s."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [],
+    "checks": [
+      {
+        "kind": "pole_zero_sets",
+        "plot": "Pole-Zero Analysis",
+        "poles": [
+          [
+            -11270.166537926,
+            0.0
+          ],
+          [
+            -88729.833462074,
+            0.0
+          ]
+        ],
+        "zeros": [
+          [
+            0.0,
+            31622.776601684
+          ],
+          [
+            -0.0,
+            -31622.776601684
+          ]
+        ],
+        "rtol": 1e-05,
+        "atol": 1e-06,
+        "multiplicity": true
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "db80cde28b2b6c6174d3915f292ac8676a9d3d0636797ba3edcfc25bbcd4680a",
+  "known_gaps": [
+    "explicit PZ ports and transfer zeros are not yet exposed by the dispatcher"
+  ]
+}

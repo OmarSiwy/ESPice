@@ -197,21 +197,21 @@ kernel precond_apply(v):                       # inside per-lane GMRES
   so GMRES must converge in 1 iteration on any `ac/*`-class fixture — the
   natural unit test).
 - §1 degradation analysis: derived (perturbation bound is standard).
-- §2 plug-in point: verified against `converger.zig applyPreconditioner`
-  (the callback slot exists; only spectral implementations are missing).
-- §3/§4: design spec.
+- §2 plug-in point: callback-based GMRES supports these preconditioners.
+  Spectral primitives now exist in `src/analysis/solvers/preconditioner.zig`.
+- §3/§4: design spec; full multidimensional and GPU paths remain targets.
 
 **Our implementation**
 
-- Exists (the slot + ingredients): `src/solvers/converger.zig`
-  (`applyPreconditioner`, GMRES core),
-  `src/solvers/freq_solve.zig` (per-$\omega$ refill/refactor
-  pattern to copy), `src/solvers/direct.zig`,
-  `src/solvers/fft.zig`.
+- Exists: `src/analysis/solvers/preconditioner.zig` (DC-sample,
+  averaged-circulant, and block-banded variants),
+  `src/analysis/solvers/gmres.zig` (callback-based Krylov solve), and
+  `src/analysis/solvers/direct.zig` (per-sideband factors).
 - Consumers: Krylov-HB in
   [pss-shooting-harmonic-balance](../analysis/pss-shooting-harmonic-balance.md),
   [pac](../analysis/pac.md)/[pxf](../analysis/pxf.md) matrix-free path,
-  [qpss](../analysis/qpss.md) (future — hard requirement),
+  [qpss](../analysis/qpss.md) (implemented dominant-tone approximation;
+  full multidimensional preconditioning remains a target),
   [mpde-envelope](../analysis/mpde-envelope.md) Fourier-envelope steps.
 - Bench fixtures: `benchmark/fixtures/hb/*` (iteration-count acceptance),
   `benchmark/fixtures/ac/*` (LTI 1-iteration check).

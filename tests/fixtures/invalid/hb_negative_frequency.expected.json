@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "hb",
+  "purpose": "Harmonic balance fundamental must be positive.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "Harmonic balance fundamental must be positive."
+  },
+  "expect": {
+    "status": "error",
+    "category": "invalid_analysis_arguments",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "b2f9147643790252fbfb41f49a37a35013ad79ccfd1e768059368a4da7437fa2"
+}

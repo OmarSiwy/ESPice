@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "analysis": "tf",
+  "purpose": "Current-input DC transimpedance",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Vout=2000*Iin; transfer is 2000 ohm."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transfer Function",
+        "match": "exact",
+        "columns": {
+          "transfer_function": {
+            "unit": "V/V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              2000
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "1ace4bffa59f64536a02654f70c8d28e6025b8d1a57798e09517f1394ae9dcb3",
+  "known_gaps": [
+    "current-input/current-output or differential-output TF is not yet fully resolved"
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "qpss",
+  "purpose": "Both QPSS fundamental frequencies must be positive.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "Both QPSS fundamental frequencies must be positive."
+  },
+  "expect": {
+    "status": "error",
+    "category": "invalid_analysis_arguments",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "57a3465d15a7571455c2ecf26537f681bfe41100736eba01bc91124bb2193314"
+}

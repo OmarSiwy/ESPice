@@ -18,20 +18,7 @@ const Solver = solvers.direct.Solver;
 const W = std.simd.suggestVectorLength(f64) orelse 8;
 const V = @Vector(W, f64);
 
-pub const Options = struct {
-    tol: converger.Tolerances = .{},
-    t_stop: f64,
-    /// Krylov posterior tolerance (role of reltol on the exponential).
-    krylov_tol: f64 = 1e-10,
-    /// Maximum Krylov subspace dimension before declaring failure.
-    m_max: u32 = 80,
-    /// R-MATEX shift parameter γ — order of intended timestep, insensitive.
-    gamma: ?f64 = null,
-    /// Output resolution cap — maximum h between recorded points.
-    h_output_cap: ?f64 = null,
-    /// Maximum recorded points (controls initial waveform allocation).
-    max_points: u32 = 1 << 22,
-};
+pub const Options = @import("requests").Matex;
 
 // ---------------------------------------------------------------------------
 // Sparse CSC matrix-vector product: y = M * x (for n×n CSC M)
@@ -72,13 +59,13 @@ fn cscMulVec(
 fn expmSmall(m: usize, H: []f64, out: []f64, scratch: []f64) void {
     // Padé [6/6] coefficients: b_j = (12-j)! · 6! / (12! · j! · (6-j)!)
     const b = [_]f64{
-        1.0,                // b[0] = 1
-        0.5,                // b[1] = 1/2
-        5.0 / 44.0,        // b[2] = 5/44
-        1.0 / 66.0,        // b[3] = 1/66
-        1.0 / 792.0,       // b[4] = 1/792
-        1.0 / 15840.0,     // b[5] = 1/15840
-        1.0 / 665280.0,    // b[6] = 1/665280
+        1.0, // b[0] = 1
+        0.5, // b[1] = 1/2
+        5.0 / 44.0, // b[2] = 5/44
+        1.0 / 66.0, // b[3] = 1/66
+        1.0 / 792.0, // b[4] = 1/792
+        1.0 / 15840.0, // b[5] = 1/15840
+        1.0 / 665280.0, // b[6] = 1/665280
     };
 
     // Determine scaling factor s such that ||H/2^s|| < 0.5
@@ -692,6 +679,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     }
 
     while (t < opts.t_stop and steps < 10_000_000) {
+        if (steps != 0) try ckt.checkpoint(.{ .phase = .transient, .completed = steps });
         // Determine step size h: distance to next transition spot, capped
         var h = opts.t_stop - t;
         while (ts_idx < ts.items.len and ts.items[ts_idx] <= t + 1e-18) : (ts_idx += 1) {}
@@ -874,168 +862,12 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     };
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
-
-const testing = std.testing;
-
-test "expmSmall: identity" {
-    // expm(0) = I
-    var H = [_]f64{ 0, 0, 0, 0 };
-    var out: [4]f64 = undefined;
-    var scratch: [20]f64 = undefined; // 5*2*2 = 20
-    expmSmall(2, &H, &out, &scratch);
-    try testing.expectApproxEqAbs(@as(f64, 1.0), out[0], 1e-12);
-    try testing.expectApproxEqAbs(@as(f64, 0.0), out[1], 1e-12);
-    try testing.expectApproxEqAbs(@as(f64, 0.0), out[2], 1e-12);
-    try testing.expectApproxEqAbs(@as(f64, 1.0), out[3], 1e-12);
-}
-
-test "expmSmall: diagonal" {
-    // expm(diag(1,2)) = diag(e, e^2)
-    var H = [_]f64{ 1, 0, 0, 2 };
-    var out: [4]f64 = undefined;
-    var scratch: [20]f64 = undefined;
-    expmSmall(2, &H, &out, &scratch);
-    // Padé(6,6) + scaling-squaring: ~1e-10 on the small matrix
-    try testing.expectApproxEqRel(std.math.e, out[0], 1e-6);
-    try testing.expectApproxEqAbs(@as(f64, 0.0), out[1], 1e-10);
-    try testing.expectApproxEqAbs(@as(f64, 0.0), out[2], 1e-10);
-    try testing.expectApproxEqRel(std.math.e * std.math.e, out[3], 1e-6);
-}
-
-test "expmSmall: 1x1" {
-    var H = [_]f64{1.0};
-    var out: [1]f64 = undefined;
-    var scratch: [5]f64 = undefined; // 5*1*1
-    expmSmall(1, &H, &out, &scratch);
-    try testing.expectApproxEqRel(std.math.e, out[0], 1e-6);
-}
-
-test "expmSmall: 3x3 nilpotent" {
-    // H = [[0,1,0],[0,0,1],[0,0,0]] — nilpotent, expm = I + H + H²/2
-    // expm = [[1,1,0.5],[0,1,1],[0,0,1]]
-    var H = [_]f64{ 0, 1, 0, 0, 0, 1, 0, 0, 0 };
-    var out: [9]f64 = undefined;
-    var scratch: [45]f64 = undefined; // 5*3*3
-    expmSmall(3, &H, &out, &scratch);
-    try testing.expectApproxEqAbs(@as(f64, 1.0), out[0], 1e-12); // [0,0]
-    try testing.expectApproxEqAbs(@as(f64, 1.0), out[1], 1e-12); // [0,1]
-    try testing.expectApproxEqAbs(@as(f64, 0.5), out[2], 1e-12); // [0,2]
-    try testing.expectApproxEqAbs(@as(f64, 0.0), out[3], 1e-12); // [1,0]
-    try testing.expectApproxEqAbs(@as(f64, 1.0), out[4], 1e-12); // [1,1]
-    try testing.expectApproxEqAbs(@as(f64, 1.0), out[5], 1e-12); // [1,2]
-    try testing.expectApproxEqAbs(@as(f64, 0.0), out[6], 1e-12); // [2,0]
-    try testing.expectApproxEqAbs(@as(f64, 0.0), out[7], 1e-12); // [2,1]
-    try testing.expectApproxEqAbs(@as(f64, 1.0), out[8], 1e-12); // [2,2]
-}
-
-test "expmSmall: scaled diagonal needs squaring" {
-    // expm(diag(5,5)) = diag(e^5, e^5) — forces scaling-squaring
-    var H = [_]f64{ 5, 0, 0, 5 };
-    var out: [4]f64 = undefined;
-    var scratch: [20]f64 = undefined;
-    expmSmall(2, &H, &out, &scratch);
-    const e5 = @exp(@as(f64, 5.0));
-    try testing.expectApproxEqRel(e5, out[0], 1e-6);
-    try testing.expectApproxEqAbs(@as(f64, 0.0), out[1], 1e-6);
-    try testing.expectApproxEqAbs(@as(f64, 0.0), out[2], 1e-6);
-    try testing.expectApproxEqRel(e5, out[3], 1e-6);
-}
-
-test "expmSmall: antisymmetric (rotation)" {
-    // H = [[0, -pi/4], [pi/4, 0]] => expm is rotation by pi/4
-    // expm = [[cos(pi/4), -sin(pi/4)], [sin(pi/4), cos(pi/4)]]
-    const angle = std.math.pi / 4.0;
-    var H = [_]f64{ 0, -angle, angle, 0 };
-    var out: [4]f64 = undefined;
-    var scratch: [20]f64 = undefined;
-    expmSmall(2, &H, &out, &scratch);
-    const c = @cos(angle);
-    const s_val = @sin(angle);
-    try testing.expectApproxEqRel(c, out[0], 1e-6);
-    try testing.expectApproxEqRel(-s_val, out[1], 1e-6);
-    try testing.expectApproxEqRel(s_val, out[2], 1e-6);
-    try testing.expectApproxEqRel(c, out[3], 1e-6);
-}
-
-test "denseMatMul: identity times A" {
-    const A = [_]f64{ 1, 2, 3, 4 };
-    const I = [_]f64{ 1, 0, 0, 1 };
-    var C: [4]f64 = undefined;
-    denseMatMul(2, &I, &A, &C);
-    try testing.expectApproxEqAbs(@as(f64, 1.0), C[0], 1e-15);
-    try testing.expectApproxEqAbs(@as(f64, 2.0), C[1], 1e-15);
-    try testing.expectApproxEqAbs(@as(f64, 3.0), C[2], 1e-15);
-    try testing.expectApproxEqAbs(@as(f64, 4.0), C[3], 1e-15);
-}
-
-test "denseMatMul: vector path is bit-identical to the scalar oracle" {
-    // Covers m below W, at W, straddling W (vector body + scalar tail) and
-    // several full vectors. Exact equality, not approx: lanes accumulate the
-    // same k order the scalar loop does.
-    const a = testing.allocator;
-    for ([_]usize{ 1, 2, 3, 5, 8, 9, 16, 17, 31 }) |m| {
-        const A = try a.alloc(f64, m * m);
-        defer a.free(A);
-        const B = try a.alloc(f64, m * m);
-        defer a.free(B);
-        const C = try a.alloc(f64, m * m);
-        defer a.free(C);
-        const want = try a.alloc(f64, m * m);
-        defer a.free(want);
-
-        var seed: u64 = 0x9E3779B97F4A7C15;
-        for (A, 0..) |*v, i| {
-            seed = seed *% 6364136223846793005 +% 1442695040888963407;
-            v.* = @as(f64, @floatFromInt(@as(i32, @truncate(@as(i64, @bitCast(seed >> 20)))))) * 1e-7 + @as(f64, @floatFromInt(i));
-        }
-        for (B, 0..) |*v, i| {
-            seed = seed *% 6364136223846793005 +% 1442695040888963407;
-            v.* = @as(f64, @floatFromInt(@as(i32, @truncate(@as(i64, @bitCast(seed >> 20)))))) * 3e-7 - @as(f64, @floatFromInt(i));
-        }
-
-        for (0..m) |i| {
-            for (0..m) |j| {
-                var sum: f64 = 0;
-                for (0..m) |k| sum += A[i * m + k] * B[k * m + j];
-                want[i * m + j] = sum;
-            }
-        }
-
-        denseMatMul(m, A, B, C);
-        try testing.expectEqualSlices(f64, want, C);
-    }
-}
-
-test "simdDot: basic" {
-    const a_arr = [_]f64{ 1, 2, 3, 4 };
-    const b_arr = [_]f64{ 5, 6, 7, 8 };
-    const d = simdDot(&a_arr, &b_arr, 4);
-    try testing.expectApproxEqAbs(@as(f64, 70.0), d, 1e-12);
-}
-
-test "simdNorm: unit" {
-    const v_arr = [_]f64{ 3, 4 };
-    try testing.expectApproxEqAbs(@as(f64, 5.0), simdNorm(&v_arr, 2), 1e-12);
-}
-
-test "simdAxpy: basic" {
-    const x_arr = [_]f64{ 1, 2, 3 };
-    var y_arr = [_]f64{ 10, 20, 30 };
-    simdAxpy(2.0, &x_arr, &y_arr, 3);
-    try testing.expectApproxEqAbs(@as(f64, 12.0), y_arr[0], 1e-15);
-    try testing.expectApproxEqAbs(@as(f64, 24.0), y_arr[1], 1e-15);
-    try testing.expectApproxEqAbs(@as(f64, 36.0), y_arr[2], 1e-15);
-}
-
-test "buildCombinedVals: gamma=1 gives C+G" {
-    const g = [_]f64{ 1, 2, 3 };
-    const c = [_]f64{ 10, 20, 30 };
-    var out: [3]f64 = undefined;
-    buildCombinedVals(3, &g, &c, 1.0, &out);
-    try testing.expectApproxEqAbs(@as(f64, 11.0), out[0], 1e-15);
-    try testing.expectApproxEqAbs(@as(f64, 22.0), out[1], 1e-15);
-    try testing.expectApproxEqAbs(@as(f64, 33.0), out[2], 1e-15);
-}
+// Private implementation access for the analysis test suite.
+pub const test_access = if (@import("builtin").is_test) .{
+    .buildCombinedVals = buildCombinedVals,
+    .denseMatMul = denseMatMul,
+    .expmSmall = expmSmall,
+    .simdAxpy = simdAxpy,
+    .simdDot = simdDot,
+    .simdNorm = simdNorm,
+} else {};

@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "temp",
+  "purpose": "Device temperature must be greater than absolute zero.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "Device temperature must be greater than absolute zero."
+  },
+  "expect": {
+    "status": "error",
+    "category": "invalid_analysis_arguments",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "8a358b8a11b06ac190d51167efb1b1d674273bba6c8d215e0d025481a5d57ffa"
+}

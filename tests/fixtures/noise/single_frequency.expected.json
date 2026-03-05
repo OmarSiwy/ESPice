@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "analysis": "noise",
+  "purpose": "Single noise frequency has zero integration bandwidth",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Spectrum=sqrt(4*kB*T*750); integrated RMS is zero for a zero-width interval."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Noise Spectral Density Curves",
+        "match": "exact",
+        "columns": {
+          "onoise_spectrum": {
+            "unit": "V/sqrt(Hz)",
+            "rtol": 2e-05,
+            "atol": 1e-18,
+            "values": [
+              3.5259117856946e-09
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            100
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "row_count": 1
+      },
+      {
+        "name": "Integrated Noise",
+        "match": "exact",
+        "columns": {
+          "v(onoise_total)": {
+            "unit": "V_rms",
+            "rtol": 2e-05,
+            "atol": 1e-20,
+            "values": [
+              0
+            ]
+          },
+          "v(inoise_total)": {
+            "unit": "V_rms",
+            "rtol": 2e-05,
+            "atol": 1e-20,
+            "values": [
+              0
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "8dc31eac4a64be580f91ed67251c8e244db648b973ed29a4b3f0760ff4d59e7d"
+}

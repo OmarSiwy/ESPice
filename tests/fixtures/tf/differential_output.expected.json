@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "analysis": "tf",
+  "purpose": "Differential transfer function and differential output resistance",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Va=.75Vin, Vb=.25Vin. Rin=4k||4k=2k. With input killed, differential Rout=750+750=1500 ohm."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transfer Function",
+        "match": "exact",
+        "columns": {
+          "transfer_function": {
+            "unit": "V/V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              0.5
+            ]
+          },
+          "input_resistance": {
+            "unit": "ohm",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              2000
+            ]
+          },
+          "output_resistance": {
+            "unit": "ohm",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              1500
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "bd053f8cd63136b9553cd41781b0b399056bb4bf80474301ec9257c6d8d43752",
+  "known_gaps": [
+    "current-input/current-output or differential-output TF is not yet fully resolved"
+  ]
+}

@@ -1,5 +1,29 @@
 const std = @import("std");
 
+pub const Dialect = enum { ngspice, hspice, spectre };
+
+/// Parsed declarations. Expressions and subcircuit calls are unresolved.
+/// All slices borrow source bytes or storage in the parser's arena.
+pub const Ast = struct {
+    title: []const u8,
+    dialect: Dialect,
+    devices: []const Device,
+    subcircuits: []const Subcircuit,
+    models: []const Model,
+    directives: []const Directive,
+    params: []const Kv,
+    foreign: []const Foreign,
+};
+
+/// Cold declaration records: expansion reads the ports, defaults, and body together.
+pub const Subcircuit = struct {
+    name: []const u8,
+    ports: []const []const u8,
+    defaults: []const Kv,
+    devices: []const Device,
+};
+
+/// Builder scratch after parameter resolution, expansion, and model selection.
 pub const Netlist = struct {
     title: []const u8,
     devices: DeviceList,
@@ -195,4 +219,3 @@ pub inline fn foreignKindForPath(path: []const u8) ?ForeignKind {
         return .verilog;
     return null;
 }
-

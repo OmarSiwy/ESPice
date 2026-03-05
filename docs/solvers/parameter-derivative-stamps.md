@@ -199,8 +199,8 @@ kernel param_stamp_pass(blob, x, lambda):
   params-as-constants, `mc_param`, Model value-type enforcement, prep
   rules): **verified against source** — `../VerA/tools/contract.zig`
   (module doc RULES, `Dual`, `validateMcParam`,
-  `validateDefaultedStruct`), `src/devices/engine.zig`,
-  `src/devices/engine.zig` (seed loop `d[u] = 1`, `gath`
+  `validateDefaultedStruct`), `src/analysis/eval/engine.zig`,
+  `src/analysis/eval/engine.zig` (seed loop `d[u] = 1`, `gath`
   tables, `localX`, noise-collector shape).
 - §2–§4: design spec (nothing implemented); FD-fallback rung verified
   feasible against existing `evalValues` helper in `contract.zig`.
@@ -208,10 +208,10 @@ kernel param_stamp_pass(blob, x, lambda):
 **Our implementation**
 
 - Exists (ingredients): `../VerA/tools/contract.zig` (S contract,
-  `Dual`, `mc_param`, `evalValues`), `src/devices/engine.zig`
-  (`AdScalar`), `src/devices/engine.zig` (SoA layout,
-  gathers), `src/solvers/direct.zig solveT`,
-  `src/solvers/freq_solve.zig solveRhsT`.
+  `Dual`, `mc_param`, `evalValues`), `src/analysis/eval/engine.zig`
+  (`AdScalar`), `src/analysis/eval/engine.zig` (SoA layout,
+  gathers), `src/analysis/solvers/direct.zig solveT`,
+  `src/analysis/solvers/freq_solve.zig solveRhsT`.
 - Consumers: [dcmatch](../analysis/dcmatch.md) (future — hard
   requirement), [sensitivity](../analysis/sensitivity.md) adjoint + AC
   upgrade, later optimization/tuning loops.

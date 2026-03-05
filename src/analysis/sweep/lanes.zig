@@ -52,13 +52,16 @@ pub fn solveLanes(
     const n_lanes = results.len;
     const ws = try ckt.workspace();
     for (0..n_lanes) |k| {
+        if (k != 0) try ckt.checkpoint(.{ .phase = .sweep, .completed = k, .total = n_lanes });
         setup.apply(setup.ctx, k);
         try ckt.recompute();
         const xl = x_lanes[k * n ..][0..n];
         root.zeroSimd(xl);
         ckt.seedJunctions(xl);
-        results[k] = converger.run(ckt, ws, xl, 0, opts, root.EvalHook{}) catch
-            converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 };
+        results[k] = converger.run(ckt, ws, xl, 0, opts, root.EvalHook{}) catch |err| switch (err) {
+            error.QueryCancelled => return err,
+            else => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 },
+        };
     }
     setup.restore(setup.ctx);
     try ckt.recompute();
@@ -77,6 +80,9 @@ pub fn solveLanesGpu(
     results: []converger.Result,
     opts: converger.Options,
 ) !bool {
+    // Whole-sweep GPU callbacks cannot suspend with their private lane state.
+    // Device evaluation can still use the GPU in the resumable serial driver.
+    if (ckt.progress != null) return false;
     const n: usize = ckt.n;
     std.debug.assert(x_lanes.len == results.len * n);
     const gh = ckt.gpu_hook orelse return false;

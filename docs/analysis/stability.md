@@ -129,7 +129,7 @@ host: unwrap + crossing scan -> PM, GM
 | Phase | Solver doc | Impl |
 |---|---|---|
 | Upstream DC | [homotopy-continuation.md](../solvers/homotopy-continuation.md), [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `dc/dc.zig solve` |
-| Augmented stacked-real sweep | [klu-pipeline.md](../solvers/klu-pipeline.md) (sparse path exists; dense used here) | `src/solvers/freq_solve.zig initDense`, `src/solvers/dense_lu.zig` |
+| Augmented stacked-real sweep | [klu-pipeline.md](../solvers/klu-pipeline.md) (sparse path exists; dense used here) | `src/analysis/solvers/freq_solve.zig initDense`, `src/analysis/solvers/dense_lu.zig` |
 
 The probe augmentation changes the pattern (one extra row/col) — a
 sparse-path variant needs the probe branch included in the symbolic

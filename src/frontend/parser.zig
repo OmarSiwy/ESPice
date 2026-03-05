@@ -1,25 +1,23 @@
 const std = @import("std");
 const ir = @import("types.zig");
 
-pub const Error = error{ OutOfMemory, ParseError, ModelBinNotFound };
+pub const Error = error{ OutOfMemory, ParseError, CircuitTooLarge };
 
-/// Copy and lower in the same pass: `dst` is written once, not memcpy'd and
-/// then rewritten. std.ascii.allocLowerString is the stdlib equivalent but its
-/// scalar loop measured +7.6% parse Ir on a 4.2 MB deck, so the vector stays.
-fn simdLower(dst: []u8, src: []const u8) void {
-    const W = 32;
+/// Copy normalized bytes and count physical lines in one pass. W=1 is the
+/// scalar oracle and tail; byte lanes are independent.
+fn normalize(comptime W: comptime_int, dst: []u8, src: []const u8) usize {
     const V = @Vector(W, u8);
-    const a_vec: V = @splat('A');
-    const z_vec: V = @splat('Z');
-    const bit: V = @splat(0x20);
-    const zero: V = @splat(0);
+    var lines: usize = 0;
     var i: usize = 0;
     while (i + W <= src.len) : (i += W) {
         const v: V = src[i..][0..W].*;
-        const is_upper = (v >= a_vec) & (v <= z_vec);
-        dst[i..][0..W].* = v | @select(u8, is_upper, bit, zero);
+        const upper = (v >= @as(V, @splat('A'))) & (v <= @as(V, @splat('Z')));
+        dst[i..][0..W].* = v | @select(u8, upper, @as(V, @splat(0x20)), @as(V, @splat(0)));
+        const newlines: std.meta.Int(.unsigned, W) = @bitCast(v == @as(V, @splat('\n')));
+        lines += @popCount(newlines);
     }
-    for (src[i..], dst[i..]) |c, *o| o.* = std.ascii.toLower(c);
+    if (W > 1) lines += normalize(1, dst[i..], src[i..]);
+    return lines;
 }
 
 /// Bump-slab wrapper over the arena: per-device slice copies (nodes,
@@ -50,29 +48,39 @@ const SlicePool = struct {
 
 pub fn Parser(comptime Tok: type) type {
     return struct {
-        pub fn parse(arena: std.mem.Allocator, src_in: anytype) Error!ir.Netlist {
+        const Self = @This();
+        arena: std.mem.Allocator,
+        models: std.ArrayList(ir.Model) = .empty,
+        directives: std.ArrayList(ir.Directive) = .empty,
+        params: std.ArrayList(ir.Kv) = .empty,
+        foreign: std.ArrayList(ir.Foreign) = .empty,
+        subckts: std.ArrayList(ir.Subcircuit) = .empty,
+        cur_subckt: ?u16 = null,
+        sub_defaults: std.ArrayList(ir.Kv) = .empty,
+        sub_devices: std.ArrayList(ir.Device) = .empty,
+        nodes: std.ArrayList([]const u8) = .empty,
+        positional: std.ArrayList(ir.Value) = .empty,
+        kv: std.ArrayList(ir.Kv) = .empty,
+        pool: SlicePool,
+
+        pub fn parse(arena: std.mem.Allocator, src_in: []const u8) Error!ir.Ast {
             // ponytail: always lower into a fresh buffer so the original bytes
             // survive — file paths (.hdl cards) are case-sensitive and must be
             // recovered from `orig` by offset.
             const orig: []const u8 = src_in;
+            var line_hint: usize = undefined;
             const src: []const u8 = blk: {
                 if (Tok.case_normalize) {
                     const buf: []u8 = try arena.alloc(u8, orig.len);
-                    simdLower(buf, orig);
+                    line_hint = normalize(std.simd.suggestVectorLength(u8) orelse 1, buf, orig);
                     break :blk buf;
                 }
+                line_hint = std.mem.countScalar(u8, orig, '\n');
                 break :blk orig;
             };
 
-            // ponytail: stdlib countScalar already supplies the vector scan and tail.
-            const line_hint = std.mem.countScalar(u8, src, '\n');
             var devices: std.ArrayList(ir.Device) = .empty;
             try devices.ensureTotalCapacity(arena, line_hint);
-            var models: std.ArrayList(ir.Model) = .empty;
-            var directives: std.ArrayList(ir.Directive) = .empty;
-            var params: std.ArrayList(ir.Kv) = .empty;
-            var foreign: std.ArrayList(ir.Foreign) = .empty;
-            var subckts: std.StringHashMapUnmanaged(Subckt) = .empty;
 
             var lines = Tok.Lines.init(arena, src);
 
@@ -83,79 +91,31 @@ pub fn Parser(comptime Tok: type) type {
                 break :blk t;
             } else "";
 
-            var cur_subckt: ?*Subckt = null;
-            var sub_devices: std.ArrayList(ir.Device) = .empty;
-            var pool: SlicePool = .{ .arena = arena };
+            var parser: Self = .{ .arena = arena, .pool = .{ .arena = arena } };
 
             while (try lines.next()) |line| {
                 if (line[0] == '.') {
                     var t = Tok.Tokens.init(line);
                     const head = t.next().?.word;
                     const kind = head[1..];
-                    if (try parseDirective(arena, kind, &t, &models, &directives, &params, &foreign, &subckts, &cur_subckt, &sub_devices))
+                    if (try parser.parseDirective(kind, &t))
                         continue;
                     break; // .end
                 }
 
-                const dev = try parseElement(arena, &pool, line);
-                if (cur_subckt != null) {
-                    try sub_devices.append(arena, dev);
+                const dev = try parser.parseElement(line);
+                if (parser.cur_subckt != null) {
+                    try parser.sub_devices.append(arena, dev);
                 } else {
                     try devices.append(arena, dev);
                 }
             }
-            if (cur_subckt != null) return error.ParseError;
-
-            var subckt_type_map: std.StringHashMapUnmanaged(u16) = .empty;
-            var subckt_iter = subckts.iterator();
-            while (subckt_iter.next()) |entry| {
-                const sname = entry.key_ptr.*;
-                const sub = entry.value_ptr.*;
-                // Preserve checked count limits formerly enforced by unused metadata.
-                _ = @as(u16, @intCast(sub.ports.len));
-                // Count unique internal node names (not ports, not ground).
-                var n_internal: u16 = 0;
-                var seen_nodes: std.StringHashMapUnmanaged(void) = .empty;
-                for (sub.devices) |sd| {
-                    for (sd.nodes) |node| {
-                        if (portLookup(sub.ports, sub.ports, node) != null) continue;
-                        if (node.len <= 3 and (std.mem.eql(u8, node, "0") or std.mem.eql(u8, node, "gnd"))) continue;
-                        if (seen_nodes.get(node) == null) {
-                            try seen_nodes.put(arena, node, {});
-                            n_internal += 1;
-                        }
-                    }
-                }
-                const type_id: u16 = @intCast(subckt_type_map.size + 1); // 0 = top-level
-                _ = @as(u16, @intCast(countExpanded(sub.devices, &subckts, 1)));
-                try subckt_type_map.put(arena, sname, type_id);
-            }
-
-            const expanded_hint = countExpanded(devices.items, &subckts, 0);
-            var flat: std.ArrayList(ir.Device) = .empty;
-            try flat.ensureTotalCapacity(arena, expanded_hint);
-            // Global parameters are shared; subcircuit scopes hold only local overrides.
-            var genv: Env = .empty;
-            for (params.items) |kvp| try genv.put(arena, kvp.key, kvp.value);
-            for (models.items) |model| {
-                for (@constCast(model.kv)) |*kv| kv.value = try substValue(arena, kv.value, &.{genv}, true);
-            }
-            for (directives.items) |dir| for (@constCast(dir.args)) |*arg| {
-                if (arg.* == .expr) arg.* = try substValue(arena, arg.*, &.{genv}, false);
-            };
-            var instance_counter: u32 = 1; // 0 = top-level
-            for (devices.items) |d| {
-                const td = if (genv.size > 0) try substDevice(arena, d, &.{genv}) else d;
-                try expandInto(arena, &flat, td, &subckts, 0, 0, 0, &subckt_type_map, &instance_counter, &.{genv});
-            }
-            try resolveModelBins(arena, flat.items, models.items, directives.items);
-
-            const dl = try ir.DeviceList.fromUnsorted(arena, flat.items);
+            if (parser.cur_subckt != null) return error.ParseError;
 
             // Foreign (.hdl) paths are case-sensitive; token slices point into
             // the lowered buffer. Recover the original bytes by offset.
             if (Tok.case_normalize) {
-                for (foreign.items) |*f| {
+                for (parser.foreign.items) |*f| {
                     const off = @intFromPtr(f.path.ptr) - @intFromPtr(src.ptr);
                     if (off < orig.len) f.path = orig[off..][0..f.path.len];
                 }
@@ -163,153 +123,136 @@ pub fn Parser(comptime Tok: type) type {
 
             return .{
                 .title = title,
-                .devices = dl,
-                .models = models.items,
-                .directives = directives.items,
-                .params = params.items,
-                .foreign = foreign.items,
+                .dialect = if (Tok == @import("tokenizer.zig").hspice) .hspice else if (Tok == @import("tokenizer.zig").spectre) .spectre else .ngspice,
+                .devices = devices.items,
+                .subcircuits = parser.subckts.items,
+                .models = parser.models.items,
+                .directives = parser.directives.items,
+                .params = parser.params.items,
+                .foreign = parser.foreign.items,
             };
         }
 
         /// Returns true = continue parsing, false = hit .end
-        fn parseDirective(
-            arena: std.mem.Allocator,
-            kind: []const u8,
-            t: *Tok.Tokens,
-            models: *std.ArrayList(ir.Model),
-            directives: *std.ArrayList(ir.Directive),
-            params: *std.ArrayList(ir.Kv),
-            foreign: *std.ArrayList(ir.Foreign),
-            subckts: *std.StringHashMapUnmanaged(Subckt),
-            cur_subckt: *?*Subckt,
-            sub_devices: *std.ArrayList(ir.Device),
-        ) Error!bool {
+        fn parseDirective(self: *Self, kind: []const u8, t: *Tok.Tokens) Error!bool {
+            const arena = self.arena;
             if (kind.len == 0) return error.ParseError;
-            switch (kind[0]) {
-                'e' => {
-                    if (std.mem.eql(u8, kind, "end")) return false;
-                    if (std.mem.eql(u8, kind, "ends")) {
-                        const s = cur_subckt.* orelse return error.ParseError;
-                        s.devices = sub_devices.items;
-                        cur_subckt.* = null;
-                        return true;
-                    }
-                },
-                's' => {
-                    if (std.mem.eql(u8, kind, "subckt")) {
-                        if (cur_subckt.* != null) return error.ParseError;
-                        var s = Subckt{ .ports = undefined, .defaults = undefined, .devices = &.{} };
-                        const namew = t.next() orelse return error.ParseError;
-                        var ports: std.ArrayList([]const u8) = .empty;
-                        var defaults: std.ArrayList(ir.Kv) = .empty;
-                        while (t.next()) |tk| {
-                            switch (tk) {
-                                .word => |w| {
-                                    if (std.mem.eql(u8, w, "params:")) continue;
-                                    var peek = t.*;
-                                    if (peek.next()) |nx| {
-                                        if (nx == .eq) {
-                                            t.* = peek;
-                                            const v = try parseParamValue(arena, t);
-                                            try defaults.append(arena, .{ .key = w, .value = v });
-                                            continue;
-                                        }
-                                    }
-                                    try ports.append(arena, w);
-                                },
-                                .lparen, .rparen => {},
-                                else => return error.ParseError,
-                            }
-                        }
-                        s.ports = ports.items;
-                        s.defaults = defaults;
-                        const gop = try subckts.getOrPut(arena, namew.word);
-                        gop.value_ptr.* = s;
-                        cur_subckt.* = gop.value_ptr;
-                        sub_devices.* = .empty;
-                        return true;
-                    }
-                },
-                'p' => {
-                    if (std.mem.eql(u8, kind, "param")) {
-                        while (t.next()) |tk| {
-                            switch (tk) {
-                                .word => |w| {
-                                    const nx = t.next() orelse return error.ParseError;
-                                    if (nx != .eq) return error.ParseError;
-                                    const v = try parseParamValue(arena, t);
-                                    if (cur_subckt.*) |s|
-                                        try s.defaults.append(arena, .{ .key = w, .value = v })
-                                    else
-                                        try params.append(arena, .{ .key = w, .value = v });
-                                },
-                                else => return error.ParseError,
-                            }
-                        }
-                        return true;
-                    }
-                    if (std.mem.eql(u8, kind, "pre_osdi")) {
-                        try foreign.append(arena, .{ .kind = .pre_osdi, .path = try parsePathToken(t) });
-                        return true;
-                    }
-                },
-                'm' => {
-                    if (std.mem.eql(u8, kind, "model")) {
-                        const name = (t.next() orelse return error.ParseError).word;
-                        const mkind = (t.next() orelse return error.ParseError).word;
-                        var kv: std.ArrayList(ir.Kv) = .empty;
-                        while (t.next()) |tk| {
-                            switch (tk) {
-                                .lparen, .rparen, .comma => {},
-                                .word => |w| {
-                                    var peek = t.*;
-                                    if (peek.next()) |nx| {
-                                        if (nx == .eq) {
-                                            t.* = peek;
-                                            const v = try parseParamValue(arena, t);
-                                            try kv.append(arena, .{ .key = w, .value = v });
-                                            continue;
-                                        }
-                                    }
-                                    const v: ir.Value = if (Tok.parseNum(w)) |n| .{ .num = n } else .{ .name = w };
-                                    try kv.append(arena, .{ .key = "", .value = v });
-                                },
-                                else => return error.ParseError,
-                            }
-                        }
-                        try models.append(arena, .{ .name = name, .kind = mkind, .kv = kv.items });
-                        return true;
-                    }
-                },
-                'o' => {
-                    if (std.mem.eql(u8, kind, "osdi_include")) {
-                        try foreign.append(arena, .{ .kind = .osdi_include, .path = try parsePathToken(t) });
-                        return true;
-                    }
-                },
-                'v' => {
-                    if (std.mem.eql(u8, kind, "verilog")) {
-                        try foreign.append(arena, .{ .kind = .verilog, .path = try parsePathToken(t) });
-                        return true;
-                    }
-                },
-                else => {},
-            }
-            // .hdl / .include: check for foreign (VA/Verilog) or fall through to generic directive
-            if (std.mem.eql(u8, kind, "hdl") or std.mem.eql(u8, kind, "include")) {
-                var peek = t.*;
-                const path = try parsePathToken(&peek);
-                if (ir.foreignKindForPath(path)) |foreign_kind| {
-                    t.* = peek;
-                    try foreign.append(arena, .{ .kind = foreign_kind, .path = path });
+            const kinds = std.StaticStringMap(enum { end, ends, subckt, param, pre_osdi, model, osdi_include, verilog, hdl, include }).initComptime(.{
+                .{ "end", .end },           .{ "ends", .ends },       .{ "subckt", .subckt },             .{ "param", .param },
+                .{ "pre_osdi", .pre_osdi }, .{ "model", .model },     .{ "osdi_include", .osdi_include }, .{ "verilog", .verilog },
+                .{ "hdl", .hdl },           .{ "include", .include },
+            });
+            if (kinds.get(kind)) |directive| switch (directive) {
+                .end => return false,
+                .ends => {
+                    const id = self.cur_subckt orelse return error.ParseError;
+                    self.subckts.items[id].devices = self.sub_devices.items;
+                    self.subckts.items[id].defaults = self.sub_defaults.items;
+                    self.cur_subckt = null;
                     return true;
-                }
-                const args = try arena.alloc(ir.Value, 1);
-                args[0] = .{ .name = path };
-                t.* = peek;
-                try directives.append(arena, .{ .kind = kind, .args = args });
-                return true;
-            }
+                },
+                .subckt => {
+                    if (self.cur_subckt != null) return error.ParseError;
+                    const namew = t.next() orelse return error.ParseError;
+                    var ports: std.ArrayList([]const u8) = .empty;
+                    var defaults: std.ArrayList(ir.Kv) = .empty;
+                    while (t.next()) |tk| {
+                        switch (tk) {
+                            .word => |w| {
+                                if (std.mem.eql(u8, w, "params:")) continue;
+                                var peek = t.*;
+                                if (peek.next()) |nx| {
+                                    if (nx == .eq) {
+                                        t.* = peek;
+                                        const v = try parseParamValue(arena, t);
+                                        try defaults.append(arena, .{ .key = w, .value = v });
+                                        continue;
+                                    }
+                                }
+                                try ports.append(arena, w);
+                            },
+                            .lparen, .rparen => {},
+                            else => return error.ParseError,
+                        }
+                    }
+                    if (namew != .word) return error.ParseError;
+                    if (self.subckts.items.len == std.math.maxInt(u16)) return error.CircuitTooLarge;
+                    self.cur_subckt = @intCast(self.subckts.items.len);
+                    try self.subckts.append(arena, .{ .name = namew.word, .ports = ports.items, .defaults = &.{}, .devices = &.{} });
+                    self.sub_defaults = defaults;
+                    self.sub_devices = .empty;
+                    return true;
+                },
+                .param => {
+                    while (t.next()) |tk| {
+                        switch (tk) {
+                            .word => |w| {
+                                const nx = t.next() orelse return error.ParseError;
+                                if (nx != .eq) return error.ParseError;
+                                const v = try parseParamValue(arena, t);
+                                if (self.cur_subckt != null)
+                                    try self.sub_defaults.append(arena, .{ .key = w, .value = v })
+                                else
+                                    try self.params.append(arena, .{ .key = w, .value = v });
+                            },
+                            else => return error.ParseError,
+                        }
+                    }
+                    return true;
+                },
+                .pre_osdi => {
+                    try self.foreign.append(arena, .{ .kind = .pre_osdi, .path = try parsePathToken(t) });
+                    return true;
+                },
+                .model => {
+                    const name = (t.next() orelse return error.ParseError).word;
+                    const mkind = (t.next() orelse return error.ParseError).word;
+                    var kv: std.ArrayList(ir.Kv) = .empty;
+                    while (t.next()) |tk| {
+                        switch (tk) {
+                            .lparen, .rparen, .comma => {},
+                            .word => |w| {
+                                var peek = t.*;
+                                if (peek.next()) |nx| {
+                                    if (nx == .eq) {
+                                        t.* = peek;
+                                        const v = try parseParamValue(arena, t);
+                                        try kv.append(arena, .{ .key = w, .value = v });
+                                        continue;
+                                    }
+                                }
+                                const v: ir.Value = if (Tok.parseNum(w)) |n| .{ .num = n } else .{ .name = w };
+                                try kv.append(arena, .{ .key = "", .value = v });
+                            },
+                            else => return error.ParseError,
+                        }
+                    }
+                    try self.models.append(arena, .{ .name = name, .kind = mkind, .kv = kv.items });
+                    return true;
+                },
+                .osdi_include => {
+                    try self.foreign.append(arena, .{ .kind = .osdi_include, .path = try parsePathToken(t) });
+                    return true;
+                },
+                .verilog => {
+                    try self.foreign.append(arena, .{ .kind = .verilog, .path = try parsePathToken(t) });
+                    return true;
+                },
+                .hdl, .include => {
+                    var peek = t.*;
+                    const path = try parsePathToken(&peek);
+                    if (ir.foreignKindForPath(path)) |foreign_kind| {
+                        t.* = peek;
+                        try self.foreign.append(arena, .{ .kind = foreign_kind, .path = path });
+                        return true;
+                    }
+                    const args = try arena.alloc(ir.Value, 1);
+                    args[0] = .{ .name = path };
+                    t.* = peek;
+                    try self.directives.append(arena, .{ .kind = kind, .args = args });
+                    return true;
+                },
+            };
             // ponytail: skip `=` like comma — .OPTIONS/.opt/.width use key=value
             // syntax that espice doesn't consume. Parse key and value as separate args.
             var args: std.ArrayList(ir.Value) = .empty;
@@ -322,7 +265,7 @@ pub fn Parser(comptime Tok: type) type {
                 }
                 try args.append(arena, try parseValueToken(arena, t));
             }
-            try directives.append(arena, .{ .kind = kind, .args = args.items });
+            try self.directives.append(arena, .{ .kind = kind, .args = args.items });
             return true;
         }
 
@@ -337,171 +280,83 @@ pub fn Parser(comptime Tok: type) type {
             };
         }
 
-        fn parseElement(arena: std.mem.Allocator, pool: *SlicePool, line: []const u8) Error!ir.Device {
+        fn parseElement(self: *Self, line: []const u8) Error!ir.Device {
+            const arena = self.arena;
+            self.nodes.clearRetainingCapacity();
+            self.positional.clearRetainingCapacity();
+            self.kv.clearRetainingCapacity();
             var t = Tok.Tokens.init(line);
-            const name = (t.next() orelse return error.ParseError).word;
-            if (name.len == 0) return error.ParseError;
+            const head = t.next() orelse return error.ParseError;
+            if (head != .word or head.word.len == 0 or !std.ascii.isAlphabetic(head.word[0])) return error.ParseError;
+            const name = head.word;
             const letter = std.ascii.toLower(name[0]);
 
-            // Stack buffers for the common path (avoids per-device heap alloc)
-            var node_buf: [8][]const u8 = undefined;
-            var node_count: usize = 0;
-            var pos_buf: [4]ir.Value = undefined;
-            var pos_count: usize = 0;
-            var kv_buf: [16]ir.Kv = undefined;
-            var kv_count: usize = 0;
-            // Overflow lists for rare large devices
-            var nodes_overflow: std.ArrayList([]const u8) = .empty;
-            var pos_overflow: std.ArrayList(ir.Value) = .empty;
-            var kv_overflow: std.ArrayList(ir.Kv) = .empty;
-
-            // Spectre-style parenthesized nodes: R0 (a b) resistor r=1k
-            var peek_paren = t;
-            if ((peek_paren.next() orelse return error.ParseError) == .lparen) {
-                t = peek_paren;
-                while (true) {
-                    const tk = t.next() orelse return error.ParseError;
-                    switch (tk) {
-                        .rparen => break,
-                        .word => |w| {
-                            if (node_count < node_buf.len) {
-                                node_buf[node_count] = w;
-                                node_count += 1;
-                            } else {
-                                if (nodes_overflow.items.len == 0) {
-                                    try nodes_overflow.appendSlice(arena, node_buf[0..node_buf.len]);
-                                }
-                                try nodes_overflow.append(arena, w);
-                            }
-                        },
-                        .comma => {},
-                        else => return error.ParseError,
-                    }
+            var peek = t;
+            if ((peek.next() orelse return error.ParseError) == .lparen) {
+                t = peek;
+                while (true) switch (t.next() orelse return error.ParseError) {
+                    .rparen => break,
+                    .word => |w| try self.nodes.append(arena, w),
+                    .comma => {},
+                    else => return error.ParseError,
+                };
+                const model = t.next() orelse return error.ParseError;
+                if (model != .word) return error.ParseError;
+                try self.positional.append(arena, .{ .name = model.word });
+            } else if (nodeCount(letter)) |count| {
+                for (0..count) |_| {
+                    const token = t.next() orelse return error.ParseError;
+                    if (token != .word) return error.ParseError;
+                    try self.nodes.append(arena, token.word);
                 }
-                const dt = t.next() orelse return error.ParseError;
-                if (dt == .word) {
-                    pos_buf[0] = .{ .name = dt.word };
-                    pos_count = 1;
-                }
-            } else if (nodeCount(letter)) |nn| {
-                for (0..nn) |i| {
-                    const tk = t.next() orelse return error.ParseError;
-                    if (tk != .word) return error.ParseError;
-                    node_buf[i] = tk.word;
-                }
-                node_count = nn;
                 if (letter == 'b') {
-                    const out = (t.next() orelse return error.ParseError).word;
-                    const eq = t.next() orelse return error.ParseError;
-                    if (eq != .eq) return error.ParseError;
-                    var peek = t;
-                    const e = switch (peek.next() orelse return error.ParseError) {
-                        .braced => |b| try parseExpr(arena, b),
-                        .quoted => |q| try parseExpr(arena, q),
+                    const out = t.next() orelse return error.ParseError;
+                    if (out != .word or (t.next() orelse return error.ParseError) != .eq) return error.ParseError;
+                    peek = t;
+                    const expr = switch (peek.next() orelse return error.ParseError) {
+                        .braced, .quoted => |text| try parseExpr(arena, text),
                         else => try parseExpr(arena, t.rest()),
                     };
-                    kv_buf[0] = .{ .key = out, .value = .{ .expr = e } };
-                    kv_count = 1;
-                    return .{
-                        .name = name,
-                        .nodes = try pool.dupe([]const u8, node_buf[0..node_count]),
-                        .positional = try pool.dupe(ir.Value, pos_buf[0..pos_count]),
-                        .kv = try pool.dupe(ir.Kv, kv_buf[0..kv_count]),
-                    };
+                    try self.kv.append(arena, .{ .key = out.word, .value = .{ .expr = expr } });
+                    t.pos = t.line.len;
                 }
             } else {
-                // Unknown node count: collect words until we hit kv or end
-                var word_buf: [32][]const u8 = undefined;
-                var word_count: usize = 0;
+                // Variable-terminal cards end their word list with the model/subcircuit name.
                 while (true) {
-                    var peek = t;
-                    const tk = peek.next() orelse break;
-                    if (tk != .word) break;
-                    var peek2 = peek;
-                    if (peek2.next()) |nx| {
-                        if (nx == .eq) break;
-                    }
+                    peek = t;
+                    const token = peek.next() orelse break;
+                    if (token != .word) break;
+                    var after = peek;
+                    if (after.next()) |next| if (next == .eq) break;
                     t = peek;
-                    if (word_count < word_buf.len) {
-                        word_buf[word_count] = tk.word;
-                        word_count += 1;
-                    } else {
-                        if (nodes_overflow.items.len == 0) {
-                            try nodes_overflow.appendSlice(arena, word_buf[0..word_buf.len]);
-                        }
-                        try nodes_overflow.append(arena, tk.word);
-                    }
+                    try self.nodes.append(arena, token.word);
                 }
-                const total = if (nodes_overflow.items.len > 0) nodes_overflow.items.len else word_count;
-                if (total < 1) return error.ParseError;
-                // Last word is the device/subckt name; the rest are nodes.
-                const words = if (nodes_overflow.items.len > 0) nodes_overflow.items else word_buf[0..word_count];
-                pos_buf[0] = .{ .name = words[total - 1] };
-                pos_count = 1;
-                if (total - 1 <= node_buf.len) {
-                    @memcpy(node_buf[0 .. total - 1], words[0 .. total - 1]);
-                    node_count = total - 1;
-                    nodes_overflow.clearRetainingCapacity();
-                } else if (nodes_overflow.items.len > 0) {
-                    nodes_overflow.shrinkRetainingCapacity(total - 1);
-                } else {
-                    try nodes_overflow.appendSlice(arena, word_buf[0 .. total - 1]);
-                }
+                const model = self.nodes.pop() orelse return error.ParseError;
+                try self.positional.append(arena, .{ .name = model });
             }
 
             while (true) {
-                var peek = t;
-                const tk = peek.next() orelse break;
-                switch (tk) {
-                    .comma => {
+                peek = t;
+                const token = peek.next() orelse break;
+                if (token == .comma) {
+                    t = peek;
+                    continue;
+                }
+                if (token == .word) if (peek.next()) |next| {
+                    if (next == .eq) {
                         t = peek;
+                        try self.kv.append(arena, .{ .key = token.word, .value = try parseParamValue(arena, &t) });
                         continue;
-                    },
-                    .word => |w| {
-                        var peek2 = peek;
-                        if (peek2.next()) |nx| {
-                            if (nx == .eq) {
-                                t = peek2;
-                                const v = try parseParamValue(arena, &t);
-                                if (kv_count < kv_buf.len) {
-                                    kv_buf[kv_count] = .{ .key = w, .value = v };
-                                    kv_count += 1;
-                                } else {
-                                    if (kv_overflow.items.len == 0)
-                                        try kv_overflow.appendSlice(arena, kv_buf[0..kv_buf.len]);
-                                    try kv_overflow.append(arena, .{ .key = w, .value = v });
-                                }
-                                continue;
-                            }
-                        }
-                    },
-                    else => {},
-                }
-                const v = try parseValueToken(arena, &t);
-                if (pos_count < pos_buf.len) {
-                    pos_buf[pos_count] = v;
-                    pos_count += 1;
-                } else {
-                    if (pos_overflow.items.len == 0)
-                        try pos_overflow.appendSlice(arena, pos_buf[0..pos_buf.len]);
-                    try pos_overflow.append(arena, v);
-                }
+                    }
+                };
+                try self.positional.append(arena, try parseValueToken(arena, &t));
             }
-
-            const nodes_slice = if (nodes_overflow.items.len > 0)
-                nodes_overflow.items
-            else
-                try pool.dupe([]const u8, node_buf[0..node_count]);
-            const pos_slice = if (pos_overflow.items.len > 0)
-                pos_overflow.items
-            else
-                try pool.dupe(ir.Value, pos_buf[0..pos_count]);
-            const kv_slice = if (kv_overflow.items.len > 0)
-                kv_overflow.items
-            else
-                try pool.dupe(ir.Kv, kv_buf[0..kv_count]);
-
-            return .{ .name = name, .nodes = nodes_slice, .positional = pos_slice, .kv = kv_slice };
+            return .{
+                .name = name,
+                .nodes = try self.pool.dupe([]const u8, self.nodes.items),
+                .positional = try self.pool.dupe(ir.Value, self.positional.items),
+                .kv = try self.pool.dupe(ir.Kv, self.kv.items),
+            };
         }
 
         fn parseParamValue(arena: std.mem.Allocator, t: *Tok.Tokens) Error!ir.Value {
@@ -511,7 +366,11 @@ pub fn Parser(comptime Tok: type) type {
             var p: ExprP = .{ .text = t.line, .pos = t.pos, .arena = arena };
             const e = try p.parseBin(0);
             t.pos = p.pos;
-            return if (foldExpr(e, false)) |n| .{ .num = n } else if (e.* == .ident) .{ .name = e.ident } else .{ .expr = e };
+            return switch (e) {
+                .num => |n| .{ .num = n },
+                .ident => |name| .{ .name = name },
+                else => .{ .expr = try p.mk(e) },
+            };
         }
 
         fn parseValueToken(arena: std.mem.Allocator, t: *Tok.Tokens) Error!ir.Value {
@@ -593,7 +452,7 @@ pub fn Parser(comptime Tok: type) type {
             var p = ExprP{ .text = text, .arena = arena };
             const e = try p.parseBin(0);
             if (p.peek() != null) return error.ParseError;
-            return e;
+            return p.mk(e);
         }
 
         const ExprP = struct {
@@ -616,7 +475,7 @@ pub fn Parser(comptime Tok: type) type {
                 return out;
             }
 
-            fn parseBin(p: *ExprP, min_prec: u8) Error!*const ir.Expr {
+            fn parseBin(p: *ExprP, min_prec: u8) Error!ir.Expr {
                 var lhs = try p.parseUnary();
                 while (true) {
                     const c = p.peek() orelse break;
@@ -626,8 +485,8 @@ pub fn Parser(comptime Tok: type) type {
                         if (p.peek() != ':') return error.ParseError;
                         p.pos += 1;
                         const no = try p.parseBin(0);
-                        const args = try p.arena.dupe(*const ir.Expr, &.{ lhs, yes, no });
-                        lhs = try p.mk(.{ .call = .{ .name = "ternary", .args = args } });
+                        const args = try p.arena.dupe(*const ir.Expr, &.{ try p.mk(lhs), try p.mk(yes), try p.mk(no) });
+                        lhs = .{ .call = .{ .name = "ternary", .args = args } };
                         continue;
                     }
                     const prec: u8 = switch (c) {
@@ -662,16 +521,18 @@ pub fn Parser(comptime Tok: type) type {
                         }
                     }
                     const rhs = try p.parseBin(prec + 1);
-                    lhs = try p.mk(.{ .binop = .{ .op = op, .a = lhs, .b = rhs } });
+                    const left = try p.mk(lhs);
+                    const right = try p.mk(rhs);
+                    lhs = .{ .binop = .{ .op = op, .a = left, .b = right } };
                 }
                 return lhs;
             }
 
-            fn parseUnary(p: *ExprP) Error!*const ir.Expr {
+            fn parseUnary(p: *ExprP) Error!ir.Expr {
                 const c = p.peek() orelse return error.ParseError;
                 if (c == '-') {
                     p.pos += 1;
-                    return p.mk(.{ .unop = .{ .op = '-', .a = try p.parseBin(6) } });
+                    return .{ .unop = .{ .op = '-', .a = try p.mk(try p.parseBin(6)) } };
                 }
                 if (c == '+') {
                     p.pos += 1;
@@ -679,14 +540,14 @@ pub fn Parser(comptime Tok: type) type {
                 }
                 if (c == '!') {
                     p.pos += 1;
-                    return p.mk(.{ .unop = .{ .op = '!', .a = try p.parseUnary() } });
+                    return .{ .unop = .{ .op = '!', .a = try p.mk(try p.parseUnary()) } };
                 }
                 return p.parseAtom();
             }
 
             /// A probe argument: everything up to `,` / `)` / whitespace,
             /// kept verbatim as an ident (node or device name).
-            fn parseNodeArg(p: *ExprP) Error!*const ir.Expr {
+            fn parseNodeArg(p: *ExprP) Error!ir.Expr {
                 p.skipWs();
                 const start = p.pos;
                 while (p.pos < p.text.len) : (p.pos += 1) {
@@ -694,10 +555,10 @@ pub fn Parser(comptime Tok: type) type {
                     if (ch == ',' or ch == ')' or ch == ' ' or ch == '\t') break;
                 }
                 if (p.pos == start) return error.ParseError;
-                return p.mk(.{ .ident = p.text[start..p.pos] });
+                return .{ .ident = p.text[start..p.pos] };
             }
 
-            fn parseAtom(p: *ExprP) Error!*const ir.Expr {
+            fn parseAtom(p: *ExprP) Error!ir.Expr {
                 const c = p.peek() orelse return error.ParseError;
                 if (c == '"' or c == '\'') {
                     p.pos += 1;
@@ -731,7 +592,7 @@ pub fn Parser(comptime Tok: type) type {
                     }
                     while (p.pos < p.text.len and std.ascii.isAlphabetic(p.text[p.pos])) p.pos += 1;
                     const n = Tok.parseNum(p.text[start..p.pos]) orelse return error.ParseError;
-                    return p.mk(.{ .num = n });
+                    return .{ .num = n };
                 }
                 if (std.ascii.isAlphabetic(c) or c == '_') {
                     const start = p.pos;
@@ -753,10 +614,10 @@ pub fn Parser(comptime Tok: type) type {
                                 ident_name[0] == 'i' or ident_name[0] == 'I');
                         if (p.peek() != ')') {
                             while (true) {
-                                try args.append(p.arena, if (is_probe)
+                                try args.append(p.arena, try p.mk(if (is_probe)
                                     try p.parseNodeArg()
                                 else
-                                    try p.parseBin(0));
+                                    try p.parseBin(0)));
                                 const nx = p.peek() orelse return error.ParseError;
                                 if (nx == ',') {
                                     p.pos += 1;
@@ -767,524 +628,17 @@ pub fn Parser(comptime Tok: type) type {
                         }
                         if (p.peek() != ')') return error.ParseError;
                         p.pos += 1;
-                        return p.mk(.{ .call = .{ .name = ident_name, .args = args.items } });
+                        return .{ .call = .{ .name = ident_name, .args = args.items } };
                     }
-                    return p.mk(.{ .ident = ident_name });
+                    return .{ .ident = ident_name };
                 }
                 return error.ParseError;
             }
         };
-
-        const Subckt = struct {
-            ports: []const []const u8,
-            defaults: std.ArrayList(ir.Kv),
-            devices: []const ir.Device,
-        };
-
-        const Env = std.StringHashMapUnmanaged(ir.Value);
-
-        fn number(kv: []const ir.Kv, key: []const u8) ?f64 {
-            for (kv) |item| if (std.mem.eql(u8, item.key, key)) return switch (item.value) {
-                .num => |n| n,
-                else => null,
-            };
-            return null;
-        }
-
-        fn resolveModelBins(arena: std.mem.Allocator, devs: []ir.Device, models: []const ir.Model, dirs: []const ir.Directive) Error!void {
-            var scale: f64 = 1;
-            var wnflag = Tok == @import("tokenizer.zig").hspice or Tok == @import("tokenizer.zig").spectre;
-            const option_names = std.StaticStringMap(void).initComptime(.{
-                .{ "option", {} }, .{ "options", {} }, .{ "opt", {} }, .{ "opts", {} },
-            });
-            for (dirs) |dir| {
-                if (!option_names.has(dir.kind)) continue;
-                for (dir.args, 0..) |arg, i| {
-                    if (arg != .name) continue;
-                    const is_scale = std.mem.eql(u8, arg.name, "scale");
-                    const is_wnflag = std.mem.eql(u8, arg.name, "wnflag");
-                    if (!is_scale and !is_wnflag) continue;
-                    if (i + 1 == dir.args.len or dir.args[i + 1] != .num) return error.ParseError;
-                    const value = dir.args[i + 1].num;
-                    if (is_scale) scale = value;
-                    if (is_wnflag) wnflag = value != 0;
-                }
-            }
-            if (!(scale > 0) or !std.math.isFinite(scale)) return error.ParseError;
-            var names: std.StringHashMapUnmanaged(u32) = .empty;
-            const none = std.math.maxInt(u32);
-            const next = try arena.alloc(u32, models.len);
-            @memset(next, none);
-            const bounds = try arena.alloc([4]f64, models.len);
-            // ngspice prepends model cards: the last matching bin wins at shared bounds.
-            for (models, 0..) |model, i| try names.put(arena, model.name, @intCast(i));
-            for (models, 0..) |model, mi| {
-                const dot = std.mem.lastIndexOfScalar(u8, model.name, '.') orelse continue;
-                _ = std.fmt.parseInt(u32, model.name[dot + 1 ..], 10) catch continue;
-                bounds[mi] = .{
-                    number(model.kv, "lmin") orelse continue, number(model.kv, "lmax") orelse continue,
-                    number(model.kv, "wmin") orelse continue, number(model.kv, "wmax") orelse continue,
-                };
-                const entry = try names.getOrPut(arena, model.name[0..dot]);
-                if (entry.found_existing) {
-                    if (std.mem.eql(u8, models[entry.value_ptr.*].name, model.name[0..dot])) continue;
-                    next[mi] = entry.value_ptr.*;
-                }
-                entry.value_ptr.* = @intCast(mi);
-            }
-            const lengths = std.StaticStringMap(u2).initComptime(.{
-                .{ "l", 1 },  .{ "w", 1 },  .{ "pd", 1 }, .{ "ps", 1 }, .{ "sa", 1 }, .{ "sb", 1 }, .{ "sd", 1 },
-                .{ "ad", 2 }, .{ "as", 2 },
-            });
-            for (devs) |dev| {
-                if (dev.letter() != 'm') continue;
-                for (@constCast(dev.kv)) |*kv| {
-                    const power = lengths.get(kv.key) orelse continue;
-                    if (kv.value != .num) return error.ParseError;
-                    kv.value.num *= if (power == 2) scale * scale else scale;
-                }
-                if (dev.positional.len == 0 or dev.positional[0] != .name) continue;
-                const name = dev.positional[0].name;
-                var bin = names.get(name) orelse continue;
-                if (std.mem.eql(u8, name, models[bin].name)) continue;
-                const l = number(dev.kv, "l") orelse return error.ParseError;
-                const use_nf = if (number(dev.kv, "wnflag")) |flag| flag != 0 else wnflag;
-                const nf = if (use_nf) number(dev.kv, "nf") orelse 1 else 1;
-                const w = (number(dev.kv, "w") orelse return error.ParseError) / nf;
-                while (bin != none) : (bin = next[bin]) {
-                    const b = bounds[bin];
-                    // ngspice INPgetModBin includes endpoints within 1 nm.
-                    if ((@abs(l - b[0]) < 1e-9 or @abs(l - b[1]) < 1e-9 or (l > b[0] and l < b[1])) and
-                        (@abs(w - b[2]) < 1e-9 or @abs(w - b[3]) < 1e-9 or (w > b[2] and w < b[3])))
-                    {
-                        @constCast(dev.positional)[0] = .{ .name = models[bin].name };
-                        break;
-                    }
-                }
-                if (bin == none) return error.ModelBinNotFound;
-            }
-        }
-
-        fn portLookup(ports: []const []const u8, mappings: []const []const u8, needle: []const u8) ?[]const u8 {
-            for (ports, mappings) |p, m| {
-                if (std.mem.eql(u8, needle, p)) return m;
-            }
-            return null;
-        }
-
-        /// One subckt-expansion node rename: port -> parent node, ground
-        /// stays, anything else becomes `<instance>.<node>`.
-        fn mapNode(arena: std.mem.Allocator, ports: []const []const u8, mappings: []const []const u8, iname: []const u8, n: []const u8) Error![]const u8 {
-            // ponytail: linear scan beats HashMap for typical port counts (2-8)
-            if (portLookup(ports, mappings, n)) |mapped| return mapped;
-            if (n.len <= 3 and (std.mem.eql(u8, n, "0") or std.mem.eql(u8, n, "gnd"))) return n;
-            // ponytail: stdlib concatenation keeps one exact-size arena allocation.
-            return std.mem.concat(arena, u8, &.{ iname, ".", n });
-        }
-
-        /// Clone `e` with the args of every V() probe renamed via mapNode.
-        /// I() probe args name devices, whose <device>.<instance> rename
-        /// happens on the device card itself; leave them alone.
-        fn mapProbeNodes(arena: std.mem.Allocator, e: *const ir.Expr, ports: []const []const u8, mappings: []const []const u8, iname: []const u8) Error!*const ir.Expr {
-            switch (e.*) {
-                .num, .ident => return e,
-                .call => |c| {
-                    const is_v = c.name.len == 1 and (c.name[0] == 'v' or c.name[0] == 'V');
-                    const args = try arena.alloc(*const ir.Expr, c.args.len);
-                    for (c.args, args) |a, *o| {
-                        if (is_v and a.* == .ident) {
-                            const out = try arena.create(ir.Expr);
-                            out.* = .{ .ident = try mapNode(arena, ports, mappings, iname, a.ident) };
-                            o.* = out;
-                        } else {
-                            o.* = try mapProbeNodes(arena, a, ports, mappings, iname);
-                        }
-                    }
-                    const out = try arena.create(ir.Expr);
-                    out.* = .{ .call = .{ .name = c.name, .args = args } };
-                    return out;
-                },
-                .unop => |u| {
-                    const out = try arena.create(ir.Expr);
-                    out.* = .{ .unop = .{ .op = u.op, .a = try mapProbeNodes(arena, u.a, ports, mappings, iname) } };
-                    return out;
-                },
-                .binop => |b| {
-                    const out = try arena.create(ir.Expr);
-                    out.* = .{ .binop = .{
-                        .op = b.op,
-                        .a = try mapProbeNodes(arena, b.a, ports, mappings, iname),
-                        .b = try mapProbeNodes(arena, b.b, ports, mappings, iname),
-                    } };
-                    return out;
-                },
-            }
-        }
-
-        fn countExpanded(devices: []const ir.Device, subckts: *const std.StringHashMapUnmanaged(Subckt), depth: usize) usize {
-            if (depth > 32) return 0;
-            var count: usize = 0;
-            for (devices) |d| {
-                if (d.letter() != 'x') {
-                    count += 1;
-                    continue;
-                }
-                if (d.positional.len < 1) {
-                    count += 1;
-                    continue;
-                }
-                const sname = switch (d.positional[d.positional.len - 1]) {
-                    .name => |nm| nm,
-                    else => {
-                        count += 1;
-                        continue;
-                    },
-                };
-                if (subckts.get(sname)) |sub| {
-                    count += countExpanded(sub.devices, subckts, depth + 1);
-                } else {
-                    count += 1;
-                }
-            }
-            return count;
-        }
-
-        fn expandInto(
-            arena: std.mem.Allocator,
-            out: *std.ArrayList(ir.Device),
-            d: ir.Device,
-            subckts: *const std.StringHashMapUnmanaged(Subckt),
-            depth: usize,
-            subckt_type_id: u16,
-            instance_id: u32,
-            type_map: *const std.StringHashMapUnmanaged(u16),
-            instance_counter: *u32,
-            genv: []const Env,
-        ) Error!void {
-            if (d.letter() != 'x') {
-                var tagged = d;
-                tagged.subckt_type = subckt_type_id;
-                tagged.subckt_instance = instance_id;
-                try out.append(arena, tagged);
-                return;
-            }
-            if (depth > 32) return error.ParseError;
-            if (d.positional.len < 1) return error.ParseError;
-            const sname = switch (d.positional[d.positional.len - 1]) {
-                .name => |nm| nm,
-                else => return error.ParseError,
-            };
-            const sub = subckts.get(sname) orelse return error.ParseError;
-            if (d.nodes.len != sub.ports.len) return error.ParseError;
-
-            const this_type = type_map.get(sname) orelse 0;
-            const this_instance = instance_counter.*;
-            instance_counter.* += 1;
-
-            // Shadow order: instance kv > subckt defaults > global .param.
-            var env: Env = .empty;
-            for (sub.defaults.items) |kvp| try env.put(arena, kvp.key, kvp.value);
-            for (d.kv) |kvp| try env.put(arena, kvp.key, kvp.value);
-
-            var scopes: [34]Env = undefined;
-            @memcpy(scopes[0..genv.len], genv);
-            scopes[genv.len] = env;
-            const nested = scopes[0 .. genv.len + 1];
-            for (sub.devices) |sd| {
-                var nd = try substDevice(arena, sd, nested);
-                // SPICE names a flattened device OUTER-first. ngspice
-                // subckt.c:1159-1173 `translate_inst_name` writes
-                // `<letter>.<scname>.<name>` for a non-X card and
-                // `<scname>.<name>` for a nested X, with scname = the instance
-                // being expanded; each enclosing level prepends in turn, so a
-                // V inside x1 inside x2 comes out `v.x2.x1.v1` and the nested
-                // X as `x2.x1`. Nodes take the same path without the letter
-                // (subckt.c:1135-1155 `translate_node_name`) — mapNode below
-                // builds them off this very string. The leading letter is not
-                // decoration: `Device.letter()` reads name[0] to dispatch, so
-                // an outer-first path without it would type every flattened
-                // device as an X card.
-                nd.name = if (sd.letter() == 'x')
-                    try std.mem.concat(arena, u8, &.{ d.name, ".", sd.name })
-                else
-                    try std.mem.concat(arena, u8, &.{ &.{sd.letter()}, ".", d.name, ".", sd.name });
-                const dev_nodes = try arena.alloc([]const u8, sd.nodes.len);
-                for (sd.nodes, dev_nodes) |n, *o| {
-                    o.* = try mapNode(arena, sub.ports, d.nodes, d.name, n);
-                }
-                nd.nodes = dev_nodes;
-                // V(node) probes inside behavioral expressions name subckt
-                // nodes too; rename them with the same map the device nodes
-                // just went through.
-                for (nd.kv) |kvp| {
-                    if (kvp.value != .expr) continue;
-                    const kv2 = try arena.alloc(ir.Kv, nd.kv.len);
-                    for (nd.kv, kv2) |src_kv, *o| {
-                        o.* = src_kv;
-                        if (src_kv.value == .expr)
-                            o.value = .{ .expr = try mapProbeNodes(arena, src_kv.value.expr, sub.ports, d.nodes, d.name) };
-                    }
-                    nd.kv = kv2;
-                    break;
-                }
-                try expandInto(arena, out, nd, subckts, depth + 1, this_type, this_instance, type_map, instance_counter, nested);
-            }
-        }
-
-        const math_calls = std.StaticStringMap(enum(u8) { sqrt, abs, min, max, pow, exp, ln, log, log10, sin, cos, tan, atan, floor, ceil, ternary }).initComptime(.{
-            .{ "sqrt", .sqrt },       .{ "abs", .abs }, .{ "min", .min },   .{ "max", .max },     .{ "pow", .pow },
-            .{ "exp", .exp },         .{ "ln", .ln },   .{ "log", .log },   .{ "log10", .log10 }, .{ "sin", .sin },
-            .{ "cos", .cos },         .{ "tan", .tan }, .{ "atan", .atan }, .{ "floor", .floor }, .{ "ceil", .ceil },
-            .{ "ternary", .ternary },
-        });
-
-        // Only declared model geometry and valid stochastic calls may disappear
-        // behind a zero nominal-corner switch. Unknown symbols remain errors downstream.
-        fn nominalFactor(e: *const ir.Expr, geometry: bool) bool {
-            if (foldExpr(e, false)) |n| return std.math.isFinite(n);
-            return switch (e.*) {
-                .num => false,
-                .ident => |name| geometry and std.StaticStringMap(void).initComptime(.{
-                    .{ "l", {} }, .{ "w", {} }, .{ "mult", {} },
-                }).has(name),
-                .call => |c| blk: {
-                    const random = std.mem.eql(u8, c.name, "agauss") or std.mem.eql(u8, c.name, "gauss");
-                    if (random) {
-                        if (c.args.len != 3) break :blk false;
-                        for (c.args) |arg| if (foldExpr(arg, false) == null) break :blk false;
-                    } else if (!math_calls.has(c.name)) break :blk false;
-                    for (c.args) |arg| if (!nominalFactor(arg, geometry)) break :blk false;
-                    break :blk true;
-                },
-                .unop => |u| nominalFactor(u.a, geometry),
-                .binop => |b| nominalFactor(b.a, geometry) and nominalFactor(b.b, geometry),
-            };
-        }
-
-        /// Constant expressions and disabled symbolic terms; unresolved probes remain expressions.
-        fn foldExpr(e: *const ir.Expr, model_geometry: bool) ?f64 {
-            return switch (e.*) {
-                .num => |n| n,
-                .ident => null,
-                .call => |c| blk: {
-                    const kind = math_calls.get(c.name) orelse break :blk null;
-                    const arity: usize = switch (kind) {
-                        .ternary => 3,
-                        .pow, .min, .max => 2,
-                        else => 1,
-                    };
-                    if (c.args.len != arity) break :blk null;
-                    const a = foldExpr(c.args[0], model_geometry) orelse break :blk null;
-                    if (kind == .ternary) break :blk foldExpr(c.args[if (a != 0) @as(usize, 1) else 2], model_geometry);
-                    const b = if (arity == 2) foldExpr(c.args[1], model_geometry) orelse break :blk null else 0;
-                    break :blk switch (kind) {
-                        .sqrt => @sqrt(a),
-                        .abs => @abs(a),
-                        .min => @min(a, b),
-                        .max => @max(a, b),
-                        .pow => std.math.pow(f64, a, b),
-                        .exp => @exp(a),
-                        .ln, .log => @log(a),
-                        .log10 => @log10(a),
-                        .sin => @sin(a),
-                        .cos => @cos(a),
-                        .tan => @tan(a),
-                        .atan => std.math.atan(a),
-                        .floor => @floor(a),
-                        .ceil => @ceil(a),
-                        .ternary => unreachable,
-                    };
-                },
-                .unop => |u| switch (u.op) {
-                    '-' => if (foldExpr(u.a, model_geometry)) |a| -a else null,
-                    '+' => foldExpr(u.a, model_geometry),
-                    '!' => if (foldExpr(u.a, model_geometry)) |a| @floatFromInt(@intFromBool(a == 0)) else null,
-                    else => null,
-                },
-                .binop => |b| blk: {
-                    const lhs = foldExpr(b.a, model_geometry);
-                    const rhs = foldExpr(b.b, model_geometry);
-                    // Nominal PDK corners disable stochastic/geometry terms with a zero switch.
-                    if (b.op == '*' and ((lhs == 0 and rhs == null and nominalFactor(b.b, model_geometry)) or
-                        (rhs == 0 and lhs == null and nominalFactor(b.a, model_geometry)))) break :blk 0;
-                    const a = lhs orelse break :blk null;
-                    const c = rhs orelse break :blk null;
-                    break :blk switch (b.op) {
-                        '+' => a + c,
-                        '-' => a - c,
-                        '*' => a * c,
-                        '/' => a / c,
-                        '^' => std.math.pow(f64, a, c),
-                        '<' => @floatFromInt(@intFromBool(a < c)),
-                        '>' => @floatFromInt(@intFromBool(a > c)),
-                        'L' => @floatFromInt(@intFromBool(a <= c)),
-                        'G' => @floatFromInt(@intFromBool(a >= c)),
-                        '=' => @floatFromInt(@intFromBool(a == c)),
-                        '!' => @floatFromInt(@intFromBool(a != c)),
-                        '&' => @floatFromInt(@intFromBool(a != 0 and c != 0)),
-                        '|' => @floatFromInt(@intFromBool(a != 0 or c != 0)),
-                        else => null,
-                    };
-                },
-            };
-        }
-
-        /// Substitute env params into a device's positional and kv values.
-        fn substDevice(arena: std.mem.Allocator, d: ir.Device, env: []const Env) Error!ir.Device {
-            var nd = d;
-            if (d.positional.len > 0) {
-                const pos = try arena.alloc(ir.Value, d.positional.len);
-                for (d.positional, pos) |v, *o| o.* = try substValue(arena, v, env, false);
-                nd.positional = pos;
-            }
-            if (d.kv.len > 0) {
-                const kv = try arena.alloc(ir.Kv, d.kv.len);
-                for (d.kv, kv) |kvp, *o| o.* = .{ .key = kvp.key, .value = try substValue(arena, kvp.value, env, false) };
-                nd.kv = kv;
-            }
-            return nd;
-        }
-
-        fn substValue(arena: std.mem.Allocator, v: ir.Value, env: []const Env, model_geometry: bool) Error!ir.Value {
-            return switch (v) {
-                .num => v,
-                .name => |nm| blk: {
-                    if (findScope(env, nm) == null) break :blk v;
-                    const ident: ir.Expr = .{ .ident = nm };
-                    const se = try substExprDepth(arena, &ident, env, 0);
-                    break :blk if (foldExpr(se, model_geometry)) |n| .{ .num = n } else .{ .expr = se };
-                },
-                .expr => |e| blk: {
-                    const se = try substExprDepth(arena, e, env, 0);
-                    // Fold to a plain number when possible: downstream lowering
-                    // (engine valueNumber) only understands .num.
-                    break :blk if (foldExpr(se, model_geometry)) |n| ir.Value{ .num = n } else ir.Value{ .expr = se };
-                },
-                .group => |g| blk: {
-                    const args = try arena.alloc(ir.Value, g.args.len);
-                    for (g.args, args) |a, *o| o.* = try substValue(arena, a, env, model_geometry);
-                    break :blk .{ .group = .{ .name = g.name, .args = args } };
-                },
-            };
-        }
-
-        fn findScope(scopes: []const Env, name: []const u8) ?usize {
-            var i = scopes.len;
-            while (i > 0) {
-                i -= 1;
-                if (scopes[i].contains(name)) return i;
-            }
-            return null;
-        }
-
-        fn substExprDepth(arena: std.mem.Allocator, e: *const ir.Expr, env: []const Env, depth: u8) Error!*const ir.Expr {
-            if (depth == 64) return error.ParseError;
-            switch (e.*) {
-                .num => return e,
-                .ident => |nm| {
-                    const scope = findScope(env, nm) orelse return e;
-                    const defining = env[0 .. scope + 1];
-                    // Allocate only for the arms that keep the node: an .expr
-                    // alias recurses into the definition and never uses one.
-                    const sub: ir.Expr = switch (env[scope].get(nm).?) {
-                        .num => |n| .{ .num = n },
-                        .name => |n2| .{ .ident = n2 },
-                        .expr => |se| return substExprDepth(arena, se, defining, depth + 1),
-                        .group => return error.ParseError,
-                    };
-                    const out = try arena.create(ir.Expr);
-                    out.* = sub;
-                    return if (sub == .ident) substExprDepth(arena, out, defining, depth + 1) else out;
-                },
-                .call => |c| {
-                    if (std.mem.eql(u8, c.name, "v") or std.mem.eql(u8, c.name, "i")) return e;
-                    const args = try arena.alloc(*const ir.Expr, c.args.len);
-                    for (c.args, args) |a, *o| o.* = try substExprDepth(arena, a, env, depth);
-                    const out = try arena.create(ir.Expr);
-                    out.* = .{ .call = .{ .name = c.name, .args = args } };
-                    return out;
-                },
-                .unop => |u| {
-                    const out = try arena.create(ir.Expr);
-                    out.* = .{ .unop = .{ .op = u.op, .a = try substExprDepth(arena, u.a, env, depth) } };
-                    return out;
-                },
-                .binop => |b| {
-                    const out = try arena.create(ir.Expr);
-                    out.* = .{ .binop = .{ .op = b.op, .a = try substExprDepth(arena, b.a, env, depth), .b = try substExprDepth(arena, b.b, env, depth) } };
-                    return out;
-                },
-            }
-        }
-
     };
 }
 
-test "parser: non-standard instance name in subcircuit expands correctly" {
-    // OSDI-era netlists (e.g. VACASK) name MOSFET instances like 'nm' (letter 'n')
-    // inside subcircuits. After expansion, the device must still be usable:
-    // nodes and model name must be parsed correctly via variable-node-count path.
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const src =
-        \\wrapper
-        \\.model mymod NMOS(level=1 VTO=0.7)
-        \\.subckt wrap d g s b
-        \\  nm d g s b mymod w=1u l=0.2u
-        \\.ends
-        \\xm1 out in vdd 0 wrap
-        \\vdd vdd 0 1.0
-        \\.op
-        \\.end
-        \\
-    ;
-    const nl = try Parser(@import("tokenizer.zig").ngspice).parse(arena_state.allocator(), src);
-    const dl = nl.devices;
-    var found = false;
-    for (0..dl.len()) |i| {
-        const d = dl.get(i);
-        if (std.mem.indexOf(u8, d.name, "nm") != null) {
-            try std.testing.expectEqual(@as(usize, 4), d.nodes.len);
-            try std.testing.expectEqual(@as(usize, 1), d.positional.len);
-            switch (d.positional[0]) {
-                .name => |n| try std.testing.expectEqualStrings("mymod", n),
-                else => return error.TestUnexpectedResult,
-            }
-            found = true;
-        }
-    }
-    try std.testing.expect(found);
-}
-
-test "parser: recognizes Verilog-A HDL includes as foreign devices" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const src =
-        \\test
-        \\.hdl "models/resistor.va"
-        \\.include 'models/diode.vams'
-        \\.end
-        \\
-    ;
-    const nl = try Parser(@import("tokenizer.zig").ngspice).parse(arena_state.allocator(), src);
-    try std.testing.expectEqual(@as(usize, 2), nl.foreign.len);
-    try std.testing.expectEqual(ir.ForeignKind.verilog_a, nl.foreign[0].kind);
-    try std.testing.expectEqualStrings("models/resistor.va", nl.foreign[0].path);
-    try std.testing.expectEqual(ir.ForeignKind.verilog_a, nl.foreign[1].kind);
-    try std.testing.expectEqualStrings("models/diode.vams", nl.foreign[1].path);
-}
-
-test "parser: leaves ordinary includes as directives" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const src =
-        \\test
-        \\.include "models/common.inc"
-        \\.end
-        \\
-    ;
-    const nl = try Parser(@import("tokenizer.zig").ngspice).parse(arena_state.allocator(), src);
-    try std.testing.expectEqual(@as(usize, 0), nl.foreign.len);
-    try std.testing.expectEqual(@as(usize, 1), nl.directives.len);
-    try std.testing.expectEqualStrings("include", nl.directives[0].kind);
-}
+// Private implementation access for the frontend test suite.
+pub const test_access = if (@import("builtin").is_test) .{
+    .normalize = normalize,
+} else {};

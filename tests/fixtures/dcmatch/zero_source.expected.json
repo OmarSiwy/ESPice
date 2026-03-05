@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "analysis": "dcmatch",
+  "purpose": "Mismatch of an ideal-clamped node",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Under documented unit-variance fallback, dVout/dVin=1 and all load-parameter derivatives are zero. Total 3sigma=3V."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "DC Mismatch",
+        "match": "exact",
+        "columns": {
+          "total_3sigma": {
+            "unit": "V",
+            "rtol": 0.002,
+            "atol": 1e-06,
+            "values": [
+              3
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "notes": [
+    "Tests the local unit-variance fallback only; does not claim a physical Pelgrom process distribution."
+  ],
+  "netlist_sha256": "6baaad92cb6a372df8875f752423193db539cee02b1ec7304047c2f879df4a5c"
+}

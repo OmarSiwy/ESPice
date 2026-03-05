@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "UIC magnitude and polarity",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Vout(t)=Vinitial*exp(-t/.001), independent of source existence."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 4e-06,
+            "values": [
+              -2.0,
+              -1.8096748360719,
+              -0.73575888234288,
+              -0.27067056647323,
+              -0.013475893998171
+            ]
+          }
+        },
+        "axis": {
+          "name": "time",
+          "values": [
+            0,
+            0.0001,
+            0.001,
+            0.002,
+            0.005
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "f7ac5b55b67e61541ee26fdac23a16fa5e7aaccd4f1059786e3268ecd5b77fed"
+}

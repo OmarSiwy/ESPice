@@ -4,12 +4,12 @@
 //! back would close the cycle this file exists to break.
 //!
 //! File-level DAG inside src/analysis/:
-//!   tran/types.zig -> Circuit.zig -> types.zig -> contract.zig / leaves -> root.zig
+//!   tran/types.zig -> Circuit.zig -> types.zig -> leaves / executor.zig -> root.zig
 const std = @import("std");
 
 const circuit_mod = @import("Circuit.zig");
 
-const devices = @import("devices");
+const device_ir = @import("device_ir");
 
 // -- Re-exports from Circuit.zig --
 pub const Circuit = circuit_mod.Circuit;
@@ -50,30 +50,16 @@ pub fn probeNames(ctx: *const RunCtx, first: ?[]const u8) ![]const []const u8 {
 /// builder.zig, at the one place instance ordinals are handed out); `.sens` is
 /// the consumer, because ngspice names a sensitivity column after the CARD and
 /// `resistor#0` resolves to nothing a raw-file reader can use.
-pub const CardRef = struct {
-    type_name: []const u8,
-    index: u32,
-    name: []const u8,
-
-    /// ponytail: linear scan. Decks run tens of cards against tens of params;
-    /// sort by (type_name.ptr, index) and binary-search if a 10k-device .sens
-    /// ever shows up in a profile.
-    pub fn lookup(cards: []const CardRef, ref: ParamRef) ?[]const u8 {
-        for (cards) |c| {
-            if (c.index == ref.index and std.mem.eql(u8, c.type_name, ref.device_type)) return c.name;
-        }
-        return null;
-    }
-};
+pub const CardRef = @import("requests").CardRef;
 
 // -- Re-exports for analysis modules + src/ consumers --
-pub const ParamRef = devices.batch.ParamRef;
+pub const ParamRef = device_ir.ParamRef;
 pub const AcParam = circuit_mod.AcParam;
-pub const NoiseSource = devices.batch.NoiseSource;
-pub const NoiseGenKind = devices.batch.NoiseGenKind;
-pub const NoiseGen = devices.batch.NoiseGen;
-pub const PsdTerm = devices.batch.PsdTerm;
-/// Builder freeze: protos -> analysis.Circuit (union pattern + planes + tapes).
+pub const NoiseSource = device_ir.NoiseSource;
+pub const NoiseGenKind = device_ir.NoiseGenKind;
+pub const NoiseGen = device_ir.NoiseGen;
+pub const PsdTerm = device_ir.PsdTerm;
+/// Internal test construction: protos -> evaluated Circuit storage.
 pub const freeze = circuit_mod.init;
 
 // ---------------------------------------------------------------------------
@@ -105,10 +91,4 @@ pub const RunCtx = struct {
 // Uniform result — every analysis produces this
 // ---------------------------------------------------------------------------
 
-pub const Result = struct {
-    plotname: []const u8,
-    varnames: []const []const u8,
-    is_complex: bool,
-    npoints: usize,
-    data: []const f64,
-};
+pub const Result = @import("output_types").Result;

@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "dc",
+  "purpose": "Step direction must approach the requested stop.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "Step direction must approach the requested stop."
+  },
+  "expect": {
+    "status": "error",
+    "category": "invalid_analysis_arguments",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "85932d505f7effed6b76b5da42c0c3666c3a7b7a8ac65cdf6c9c2ad2cfc39fcc"
+}

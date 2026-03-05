@@ -5,34 +5,9 @@
 const std = @import("std");
 const converger = @import("solvers").converger;
 
-pub const Method = enum {
-    backward_euler,
-    trapezoidal,
-    gear_2,
-};
+pub const Method = @import("requests").Method;
 
-pub const Options = struct {
-    tol: converger.Tolerances = .{},
-    t_stop: f64,
-    dt_init: f64 = 1e-9,
-    dt_min: f64 = 1e-18,
-    /// ngspice tmax: default is t_stop/50; an explicit value replaces it.
-    dt_max: ?f64 = null,
-    method: Method = .trapezoidal,
-    // Runaway guard only — a healthy 1 us-grid second is 1e6 accepted points
-    // (vacask/rc hit the old 1e6 wall at t = 0.994 s and reported
-    // TimestepTooSmall on a perfectly marching transient). dt_min is the
-    // real brake; this only stops a stuck loop.
-    max_steps: u32 = 1_000_000_000,
-    /// `.tran ... uic`: no operating point ran, so the starting `x` came from
-    /// the `.ic` cards (zero elsewhere) rather than from `op.solve`. The
-    /// transient then owes the setup op.solve normally performs — the
-    /// `initial_step` latch and the static state the charge seeding reads.
-    uic: bool = false,
-    /// Invoked after each accepted step (envelope/pnoise/pac build on this).
-    step_fn: ?*const fn (ctx: ?*anyopaque, t: f64, x: []const f64) void = null,
-    step_ctx: ?*anyopaque = null,
-};
+pub const Options = @import("requests").Tran;
 
 /// Waveform capacity heuristic: adaptive dt makes the point count unknown up
 /// front. dt_init is the PRINT step (ngspice tstep), and accepted points run

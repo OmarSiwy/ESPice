@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "analysis": "ac",
+  "purpose": "RC lowpass on dec frequency grid",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "H(f)=1/(1+j*2*pi*f*R*C). LIN includes both endpoints; DEC/OCT are points per decade/octave."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "AC Analysis",
+        "match": "exact",
+        "columns": {
+          "v(in)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              [
+                1.0,
+                0.0
+              ]
+            ]
+          },
+          "v(out)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              [
+                0.7169568003249,
+                -0.45047724336839
+              ]
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            100.0
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "e00a96d74e18b442297832f31437b0dc3734a4ae1f57a9591425b78ba1d1fd85"
+}

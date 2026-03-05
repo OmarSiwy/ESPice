@@ -1,0 +1,200 @@
+{
+  "schema_version": 1,
+  "analysis": "pac",
+  "purpose": "LO multiplier conversion gain into both adjacent sidebands",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Linearized gain is pump*cos(wLO*t); Fourier coefficients at +/-LO are pump/2. Unit RF input produces pump/2 in h=+/-1 and zero otherwise."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Periodic AC Analysis",
+        "match": "exact",
+        "columns": {
+          "tf_h-3": {
+            "unit": "V/V",
+            "rtol": 0.003,
+            "atol": 1e-06,
+            "values": [
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ]
+            ]
+          },
+          "tf_h-2": {
+            "unit": "V/V",
+            "rtol": 0.003,
+            "atol": 1e-06,
+            "values": [
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ]
+            ]
+          },
+          "tf_h-1": {
+            "unit": "V/V",
+            "rtol": 0.003,
+            "atol": 1e-06,
+            "values": [
+              [
+                1.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0
+              ]
+            ]
+          },
+          "tf_h0": {
+            "unit": "V/V",
+            "rtol": 0.003,
+            "atol": 1e-06,
+            "values": [
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ]
+            ]
+          },
+          "tf_h1": {
+            "unit": "V/V",
+            "rtol": 0.003,
+            "atol": 1e-06,
+            "values": [
+              [
+                1.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0
+              ]
+            ]
+          },
+          "tf_h2": {
+            "unit": "V/V",
+            "rtol": 0.003,
+            "atol": 1e-06,
+            "values": [
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ]
+            ]
+          },
+          "tf_h3": {
+            "unit": "V/V",
+            "rtol": 0.003,
+            "atol": 1e-06,
+            "values": [
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ]
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            10.0,
+            21.544346900319,
+            46.415888336128,
+            100.0
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "row_count": 4
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "ed3039b796d9c52961a96759fbcad5909c8f794dde1ffd4b6f2bf95c6dbce20a",
+  "known_gaps": [
+    "PAC currently injects a node current instead of honoring the named voltage-source excitation",
+    "the behavioral-source compiler only supports a limited single-control polynomial subset"
+  ]
+}

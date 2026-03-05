@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "pac",
+  "purpose": "PAC pump frequency must be positive.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "PAC pump frequency must be positive."
+  },
+  "expect": {
+    "status": "error",
+    "category": "invalid_analysis_arguments",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "5fed686e19f982680f2248857cfff3278e28de8f45096262e66abf0e670daf9e"
+}

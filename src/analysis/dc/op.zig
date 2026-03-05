@@ -8,15 +8,7 @@ const tran = @import("../tran/tran.zig");
 
 pub const Method = enum { plain, gmin, source, jfnk, optran };
 
-pub const Options = struct {
-    tol: converger.Tolerances = .{},
-    warm_start: bool = false,
-    /// ngspice's TRANOP/DCOP split: the operating point that STARTS a
-    /// transient runs in the LRM "ic" phase (analysis("tran") also true),
-    /// so waveform sources evaluate at t = 0 instead of their DC value.
-    /// The engine sets this when the deck contains a transient-family job.
-    tran_op: bool = false,
-};
+pub const Options = @import("requests").Op;
 
 pub const SolveResult = struct {
     converged: bool,
@@ -118,8 +110,10 @@ pub fn solveLadder(
                 if (gmin_val <= gtarget) {
                     // ngspice dynamic_gmin ends by REMOVING diagGmin for the
                     // last solve — the answer must not carry the shunt.
-                    const clean = newtonRun(ckt, ws, x, options.tol, 0.0) catch
-                        converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 };
+                    const clean = newtonRun(ckt, ws, x, options.tol, 0.0) catch |err| switch (err) {
+                        error.QueryCancelled => return err,
+                        else => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 },
+                    };
                     total_iter +|= clean.iterations;
                     if (clean.converged)
                         return .{ .converged = true, .iterations = total_iter, .max_dx = clean.max_dx, .method_used = .gmin };
@@ -215,7 +209,7 @@ pub fn solveLadder(
     // than direct Newton and catch circuits where the factored step wedges.
     {
         coldStart(ckt, x);
-        const copts = options.tol.newtonOpts(null);
+        const copts = converger.optionsFromTolerances(options.tol, null);
         // converger.run clears device limiting state on exit; a direct jfnk
         // call must do the same so post-solve evals see clean state.
         defer ckt.clearLimits();
@@ -249,7 +243,10 @@ fn transientOp(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, options: 
             .dt_init = 1e-8,
             .dt_max = 1e-8,
             .uic = true,
-        }, opa) catch null;
+        }, opa) catch |err| switch (err) {
+            error.QueryCancelled => return err,
+            else => null,
+        };
         // The transient left .tran device state behind; the op contract is
         // a static circuit whatever the outcome.
         ckt.setSimState(.{ .kind = if (options.tran_op) .ic else .dc });
@@ -257,8 +254,10 @@ fn transientOp(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, options: 
         try ckt.computeBaseline();
         if (sim != null and sim.?.completed) {
             if (ckt.needs_tran_op) return .{ .converged = true, .iterations = 0, .max_dx = 0, .method_used = .optran };
-            const fin = newtonRun(ckt, ws, x, options.tol, 0.0) catch
-                converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 };
+            const fin = newtonRun(ckt, ws, x, options.tol, 0.0) catch |err| switch (err) {
+                error.QueryCancelled => return err,
+                else => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 },
+            };
             return .{ .converged = true, .iterations = fin.iterations, .max_dx = fin.max_dx, .method_used = .optran };
         }
     }
@@ -293,7 +292,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 }
 
 fn newtonRun(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, tol: converger.Tolerances, gmin: f64) !converger.Result {
-    var copts = tol.newtonOpts(null);
+    var copts = converger.optionsFromTolerances(tol, null);
     copts.gmin = gmin;
     return converger.run(ckt, ws, x, 0, copts, root.EvalHook{});
 }

@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "Lossless LC phase and energy conservation",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "With V(0)=1, IL(0)=0: V=cos(wt), IL=sin(wt)/(wL), w=1/sqrt(LC). Total energy remains C/2."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 0.003,
+            "atol": 0.0001,
+            "values": [
+              1.0,
+              -0.010342318905209,
+              -0.99978607287933,
+              0.99914438304693,
+              -0.99465639709396,
+              0.97868269655989
+            ]
+          },
+          "i(l1)": {
+            "unit": "A",
+            "rtol": 0.003,
+            "atol": 1e-06,
+            "values": [
+              0.0,
+              0.03162108531407,
+              -0.00065407069689387,
+              0.0013078615468659,
+              -0.0032647590600309,
+              0.0064946269680604
+            ]
+          }
+        },
+        "axis": {
+          "name": "time",
+          "values": [
+            0,
+            5e-05,
+            0.0001,
+            0.0002,
+            0.0005,
+            0.001
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "3cbf7d051b0c01cfe92219b802f2270b6192f4718b3888c2f512acf22a25335c"
+}

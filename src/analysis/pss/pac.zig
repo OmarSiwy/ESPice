@@ -24,23 +24,7 @@ const dense_lu = solvers.dense_lu;
 
 pub const Complex = types.Complex;
 
-pub const Options = struct {
-    tol: converger.Tolerances = .{},
-    /// LO (pump) frequency — the fundamental periodicity.
-    f_lo: f64,
-    /// Number of LO harmonics to include: sidebands span [-n_harmonics..+n_harmonics].
-    n_harmonics: u16 = 3,
-    /// Input frequency sweep range.
-    f_start: f64,
-    f_stop: f64,
-    points_per_decade: u16 = 10,
-    /// Number of time samples per LO period (must be power of 2, >= 2*(2*n_harmonics+1)).
-    n_time_samples: u16 = 64,
-    /// PSS shooting parameters.
-    pss_periods: u16 = 20,
-    pss_newton_tol: f64 = 1e-9,
-    pss_max_newton_iter: u16 = 50,
-};
+pub const Options = @import("requests").Pac;
 
 /// Run PAC analysis: find periodic steady state, linearise, sweep input frequency.
 ///
@@ -103,6 +87,7 @@ pub fn analyze(
     var sw = types.logSweep(options.f_start, options.f_stop, options.points_per_decade);
     var fi: usize = 0;
     while (sw.next()) |f_in| : (fi += 1) {
+        if (fi != 0) try ckt.checkpoint(.{ .phase = .frequency, .completed = fi, .total = freqs.len });
         root.zeroSimd(a_work);
         root.zeroSimd(rhs_work);
 
@@ -159,15 +144,23 @@ pub inline fn linearize(
 
     var t: f64 = 0;
     const settle_steps = (@as(usize, options.pss_periods) - 1) * n_samples;
-    for (0..settle_steps) |_| {
+    for (0..settle_steps) |k| {
+        if (k != 0 and k % n_samples == 0) try ckt.checkpoint(.{ .phase = .periodic, .completed = k / n_samples });
         t += dt;
-        _ = converger.run(ckt, ws, x_cur, t, nr_opts, root.EvalHook{}) catch {};
+        _ = converger.run(ckt, ws, x_cur, t, nr_opts, root.EvalHook{}) catch |err| switch (err) {
+            error.QueryCancelled => return err,
+            else => {},
+        };
     }
 
     // -- Step 2: capture dense G(t_k), C(t_k) over the final period ---------
     for (0..n_samples) |k| {
+        if (k != 0 and k % 64 == 0) try ckt.checkpoint(.{ .phase = .prepare, .completed = k, .total = n_samples });
         t += dt;
-        _ = converger.run(ckt, ws, x_cur, t, nr_opts, root.EvalHook{}) catch {};
+        _ = converger.run(ckt, ws, x_cur, t, nr_opts, root.EvalHook{}) catch |err| switch (err) {
+            error.QueryCancelled => return err,
+            else => {},
+        };
         ckt.eval(x_cur, t);
         ckt.denseG(g_mats[k * n * n ..][0 .. n * n]);
         ckt.denseC(c_mats[k * n * n ..][0 .. n * n]);
@@ -325,173 +318,4 @@ pub fn mapHarmonicToFftBin(m: i32, n_samples: usize) ?usize {
         return @intCast(ns + m);
     }
     return null;
-}
-
-// ============================================================================
-// Tests
-// ============================================================================
-
-const testing = std.testing;
-
-test "PAC: mapHarmonicToFftBin" {
-    try testing.expectEqual(@as(?usize, 0), mapHarmonicToFftBin(0, 8));
-    try testing.expectEqual(@as(?usize, 1), mapHarmonicToFftBin(1, 8));
-    try testing.expectEqual(@as(?usize, 7), mapHarmonicToFftBin(-1, 8));
-    try testing.expectEqual(@as(?usize, 5), mapHarmonicToFftBin(-3, 8));
-    try testing.expectEqual(@as(?usize, null), mapHarmonicToFftBin(8, 8));
-    try testing.expectEqual(@as(?usize, null), mapHarmonicToFftBin(-8, 8));
-}
-
-test "PAC: Complex arithmetic" {
-    const ca = Complex{ .re = 3.0, .im = 4.0 };
-    const b = Complex{ .re = 1.0, .im = -2.0 };
-
-    const sum = Complex.add(ca, b);
-    try testing.expectApproxEqAbs(@as(f64, 4.0), sum.re, 1e-15);
-    try testing.expectApproxEqAbs(@as(f64, 2.0), sum.im, 1e-15);
-
-    const prod = Complex.mul(ca, b);
-    // (3+4j)(1-2j) = 3 - 6j + 4j - 8j^2 = 11 - 2j
-    try testing.expectApproxEqAbs(@as(f64, 11.0), prod.re, 1e-15);
-    try testing.expectApproxEqAbs(@as(f64, -2.0), prod.im, 1e-15);
-
-    try testing.expectApproxEqAbs(@as(f64, 5.0), ca.mag(), 1e-15);
-}
-
-test "PAC: solveDense matches known solution" {
-    // 2x2 system: [2 1; 1 3] * x = [5; 7] => x = [1.6, 1.8]
-    var ma = [_]f64{ 2, 1, 1, 3 };
-    const b = [_]f64{ 5, 7 };
-    var x: [2]f64 = undefined;
-    try dense_lu.factorizeSolve(2, &ma, &b, &x);
-    try testing.expectApproxEqAbs(@as(f64, 1.6), x[0], 1e-12);
-    try testing.expectApproxEqAbs(@as(f64, 1.8), x[1], 1e-12);
-}
-
-test "PAC: RC mixer with single tone — verify frequency translation" {
-    // Simplified test: a time-varying conductance (mixer) modulated at f_LO
-    // driving an RC load. The "mixer" is modelled as a resistor whose
-    // conductance is modulated: G(t) = G0 * (1 + m * cos(2*pi*f_LO*t)).
-    //
-    // For a purely resistive circuit (no caps), the LPTV transfer matrix
-    // should show frequency translation: an input at f_in appears at
-    // f_in +/- f_LO with amplitude proportional to m/2.
-    //
-    // We build this manually rather than using the full circuit API to test
-    // the LPTV conversion-matrix solver in isolation.
-    const allocator = testing.allocator;
-
-    const f_lo: f64 = 1e6; // 1 MHz LO
-    const n_harm: usize = 2;
-    const n_sb: usize = 2 * n_harm + 1; // 5 sidebands
-    const n: usize = 1; // single node
-    const n_samples: usize = 64;
-    const g0: f64 = 1e-3; // 1 kohm base conductance
-    const mod_depth: f64 = 0.5; // modulation depth
-
-    // Build G(t_k) = G0 * (1 + m*cos(2*pi*f_LO*t_k)) at n_samples points.
-    const t_period = 1.0 / f_lo;
-    const dt = t_period / @as(f64, @floatFromInt(n_samples));
-
-    var g_time: [n_samples]f64 = undefined;
-    for (0..n_samples) |k| {
-        const tk = @as(f64, @floatFromInt(k)) * dt;
-        g_time[k] = g0 * (1.0 + mod_depth * @cos(2.0 * std.math.pi * f_lo * tk));
-    }
-
-    // FFT of G(t) to get G_hat[m].
-    var fft_re: [n_samples]f64 = undefined;
-    var fft_im: [n_samples]f64 = undefined;
-    root.copySimd(&fft_re, &g_time);
-    root.zeroSimd(&fft_im);
-    fft_mod.fft(&fft_re, &fft_im);
-    const inv_n = 1.0 / @as(f64, @floatFromInt(n_samples));
-
-    var g_hat: [n_samples]Complex = undefined;
-    for (0..n_samples) |m| {
-        g_hat[m] = .{ .re = fft_re[m] * inv_n, .im = fft_im[m] * inv_n };
-    }
-
-    // Verify Fourier decomposition: G_0 = g0, G_1 = g0*m/2, G_{-1} = g0*m/2.
-    try testing.expectApproxEqAbs(g0, g_hat[0].re, 1e-10);
-    try testing.expectApproxEqAbs(@as(f64, 0), g_hat[0].im, 1e-10);
-    try testing.expectApproxEqAbs(g0 * mod_depth / 2.0, g_hat[1].re, 1e-10);
-    try testing.expectApproxEqAbs(g0 * mod_depth / 2.0, g_hat[n_samples - 1].re, 1e-10);
-
-    // No capacitance: C_hat = 0 for all harmonics.
-    // Build and solve the conversion matrix for a single input frequency.
-    const nn = n_sb * n;
-    const nn2 = 2 * nn;
-    const a_work = try allocator.alloc(f64, nn2 * nn2);
-    defer allocator.free(a_work);
-    const rhs_buf = try allocator.alloc(f64, nn2);
-    defer allocator.free(rhs_buf);
-    const x_work = try allocator.alloc(f64, nn2);
-    defer allocator.free(x_work);
-
-    root.zeroSimd(a_work);
-    root.zeroSimd(rhs_buf);
-
-    for (0..n_sb) |p| {
-        for (0..n_sb) |q| {
-            const m_p: i32 = @as(i32, @intCast(p)) - @as(i32, @intCast(n_harm));
-            const m_q: i32 = @as(i32, @intCast(q)) - @as(i32, @intCast(n_harm));
-            const m_diff = m_p - m_q;
-
-            const fft_idx = mapHarmonicToFftBin(m_diff, n_samples) orelse continue;
-
-            // Pure conductance (no C): Z = G_hat[m_diff].
-            const z_re = g_hat[fft_idx].re;
-            const z_im = g_hat[fft_idx].im;
-
-            const gr = p * n; // + row, but n=1 so row=0
-            const gc = q * n;
-
-            a_work[gr * nn2 + gc] += z_re;
-            a_work[gr * nn2 + (nn + gc)] += -z_im;
-            a_work[(nn + gr) * nn2 + gc] += z_im;
-            a_work[(nn + gr) * nn2 + (nn + gc)] += z_re;
-        }
-    }
-
-    // Excitation at sideband 0 (m=0), node 0.
-    const exc_idx = n_harm * n;
-    rhs_buf[exc_idx] = 1.0;
-
-    try dense_lu.factorizeSolve(nn2, a_work, rhs_buf, x_work);
-
-    // For a purely resistive time-varying conductance G(t) = G0*(1 + m*cos),
-    // the response at sideband m=0 should be 1/G0 and the conversion to
-    // m = +/-1 should be related to the modulation depth.
-    const x0_re = x_work[n_harm * n]; // m=0 real part
-    const x0_im = x_work[nn + n_harm * n]; // m=0 imaginary part
-    const x0_mag = @sqrt(x0_re * x0_re + x0_im * x0_im);
-
-    // The m=0 (direct) response should be close to 1/G0 = 1000 ohms.
-    // Due to sideband coupling, it is perturbed slightly but should be
-    // in the right ballpark.
-    try testing.expect(x0_mag > 0.5 / g0);
-    try testing.expect(x0_mag < 2.0 / g0);
-
-    // m=+1 sideband (index n_harm+1): should have nonzero magnitude
-    // proportional to modulation depth.
-    const xp1_re = x_work[(n_harm + 1) * n];
-    const xp1_im = x_work[nn + (n_harm + 1) * n];
-    const xp1_mag = @sqrt(xp1_re * xp1_re + xp1_im * xp1_im);
-    try testing.expect(xp1_mag > 0);
-
-    // m=-1 sideband (index n_harm-1): should also be nonzero.
-    const xm1_re = x_work[(n_harm - 1) * n];
-    const xm1_im = x_work[nn + (n_harm - 1) * n];
-    const xm1_mag = @sqrt(xm1_re * xm1_re + xm1_im * xm1_im);
-    try testing.expect(xm1_mag > 0);
-
-    // Conversion gain ratio: sideband 1 amplitude / sideband 0 amplitude
-    // should be approximately m/2 = 0.25 for the dominant coupling.
-    const conversion_ratio = xp1_mag / x0_mag;
-    try testing.expect(conversion_ratio > 0.1);
-    try testing.expect(conversion_ratio < 0.5);
-
-    // Symmetry: m=+1 and m=-1 should have similar magnitudes.
-    try testing.expectApproxEqRel(xp1_mag, xm1_mag, 0.1);
 }

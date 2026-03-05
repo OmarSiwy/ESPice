@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "mc",
+  "purpose": "Monte Carlo trial count must be integral.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "Monte Carlo trial count must be integral."
+  },
+  "expect": {
+    "status": "error",
+    "category": "invalid_analysis_arguments",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "036dc4fd79a17cfd6a765fc489a6d22c4256c4b75ea09f65bca47fe8920df04b"
+}

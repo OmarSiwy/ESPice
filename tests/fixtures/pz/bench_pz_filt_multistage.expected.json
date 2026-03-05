@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "analysis": "pz",
+  "purpose": "Multistage filter",
+  "oracle": {
+    "kind": "ngspice-44.2",
+    "derivation": "Independent ngspice-44.2 run of the preserved benchmark circuit. Stored binary raw doubles, selected by column name. Transient values retain reference accepted times. Large sweeps retain explicit row indices including outer-sweep boundaries.",
+    "command": "ngspice -n -b -r reference.raw circuit.sp",
+    "source_sha256": "ae0c6547bf1f2b47b1e2b33cfde09c595166083cc275dd50a0b1f4e4f1b27da8",
+    "warnings": [
+      ".print line ignored since rawfile was produced."
+    ]
+  },
+  "origin": "benchmark/fixtures/pz/filt_multistage/circuit.sp",
+  "expect": {
+    "status": "success",
+    "plots": [],
+    "checks": [
+      {
+        "kind": "pole_zero_sets",
+        "plot": "Pole-Zero Analysis",
+        "poles": [
+          [
+            -50000000000.0,
+            0.0
+          ],
+          [
+            -800000000.0,
+            0.0
+          ],
+          [
+            -100000000.0,
+            0.0
+          ]
+        ],
+        "zeros": [],
+        "rtol": 0.001,
+        "atol": 1e-06,
+        "multiplicity": true
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "af8e357b866d5fa77e6e756bfb74b845ab65361e235e139538761655ac9d8a64",
+  "known_gaps": [
+    "explicit PZ ports and transfer zeros are not yet exposed by the dispatcher"
+  ]
+}

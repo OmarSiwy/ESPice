@@ -6,26 +6,7 @@ const converger = @import("solvers").converger;
 const op = @import("op.zig");
 const lanes = @import("../sweep/lanes.zig");
 
-pub const Options = struct {
-    tol: converger.Tolerances = .{},
-    start: f64 = 0,
-    stop: f64 = 0,
-    step: f64 = 1,
-    /// Batch-local index of the source to sweep (0 = first V or I source).
-    source_index: u32 = 0,
-    /// ngspice's optional second sweep variable — the OUTER loop
-    /// (`.dc src1 ... src2 start2 stop2 incr2`). null second index with
-    /// `source2_is_temp` set sweeps the circuit temperature (`.dc ... temp ...`).
-    source2_index: ?u32 = null,
-    source2_is_temp: bool = false,
-    start2: f64 = 0,
-    stop2: f64 = 0,
-    step2: f64 = 1,
-
-    fn hasOuter(self: Options) bool {
-        return self.source2_index != null or self.source2_is_temp;
-    }
-};
+pub const Options = @import("requests").Dc;
 
 pub const SolveResult = converger.Result;
 
@@ -43,7 +24,7 @@ pub fn solve(
     ckt.setSimState(.{ .kind = .dc });
     try ckt.computeBaseline();
     const ws = try ckt.workspace();
-    const copts = options.tol.newtonOpts(options.tol.itl2);
+    const copts = converger.optionsFromTolerances(options.tol, options.tol.itl2);
     return converger.run(ckt, ws, x, 0, copts, root.EvalHook{});
 }
 
@@ -141,7 +122,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
             var lane_ctx: LaneCtx = .{ .source = t, .start = opts.start, .step = opts.step };
             const setup: lanes.LaneSetup = .{ .ctx = &lane_ctx, .apply = LaneCtx.apply, .restore = LaneCtx.restore };
-            const copts = opts.tol.newtonOpts(opts.tol.itl1);
+            const copts = converger.optionsFromTolerances(opts.tol, opts.tol.itl1);
             if (try lanes.solveLanesGpu(ckt, setup, x_lanes, results, copts)) {
                 for (0..npoints) |pt| {
                     const row = data[pt * ncols ..][0..ncols];
@@ -207,6 +188,7 @@ fn runSerial(
     // with a plain Newton at ITL2.
     var cold = true;
     for (0..npoints) |pt| {
+        if (pt != 0) try ckt.checkpoint(.{ .phase = .dc, .completed = pt, .total = npoints });
         const v = opts.start + @as(f64, @floatFromInt(pt)) * opts.step;
         t.set(v);
         // Per-point: invalidate baseline and recompute device params so
@@ -227,7 +209,7 @@ fn runSerial(
             // Warm start from previous x. SingularMatrix on a warm-started
             // point (NaN stamps from a bad extrapolated guess) must not abort
             // the sweep — demote to the ladder like any non-converged point.
-            if (converger.run(ckt, ws, x, 0, opts.tol.newtonOpts(opts.tol.itl2), root.EvalHook{})) |r| {
+            if (converger.run(ckt, ws, x, 0, converger.optionsFromTolerances(opts.tol, opts.tol.itl2), root.EvalHook{})) |r| {
                 converged = r.converged;
             } else |e| switch (e) {
                 error.SingularMatrix => {},

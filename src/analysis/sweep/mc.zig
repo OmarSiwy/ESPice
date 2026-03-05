@@ -40,16 +40,7 @@ pub const ParamVar = struct {
 // Options
 // ============================================================================
 
-pub const Options = struct {
-    tol: converger.Tolerances = .{},
-    n_trials: u16 = 100,
-    /// Seed for the PRNG (deterministic).
-    seed: u64 = 42,
-    /// Relative tolerance applied to every primary instance value in run().
-    variation: f64 = 0.05,
-    /// DC solver options forwarded to each trial's solve.
-    dc_options: dc.Options = .{},
-};
+pub const Options = @import("requests").Mc;
 
 // ============================================================================
 // Statistics for a single probe
@@ -142,7 +133,7 @@ pub fn analyze(
 
     var lane_ctx: LaneCtx = .{ .param_vars = param_vars, .seed = options.seed, .prng = undefined };
     const setup: lanes.LaneSetup = .{ .ctx = &lane_ctx, .apply = LaneCtx.apply, .restore = LaneCtx.restore };
-    const nopts = options.dc_options.tol.newtonOpts(options.dc_options.tol.itl2);
+    const nopts = converger.optionsFromTolerances(options.dc_options.tol, options.dc_options.tol.itl2);
     try lanes.solveLanes(ckt, setup, x_lanes, results, nopts);
 
     const yield_counts = try allocator.alloc(u32, yield_specs.len);

@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "analysis": "envelope",
+  "purpose": "Envelope must account for RC startup history and carrier filtering",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Use exact RC sine-startup response [sin(wt)-w*tau*cos(wt)+w*tau*exp(-t/tau)]/[1+(w*tau)^2]. Peak and RMS of windows [0,1ms] and [4,5ms] use 16384-point maximum and composite Simpson quadrature."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Envelope Analysis",
+        "match": "samples",
+        "columns": {
+          "peak(v(out))": {
+            "unit": "V",
+            "rtol": 0.01,
+            "atol": 0.0001,
+            "values": [
+              0.9980318941783,
+              0.99803189417798
+            ]
+          },
+          "rms(v(out))": {
+            "unit": "V",
+            "rtol": 0.01,
+            "atol": 0.0001,
+            "values": [
+              0.70572900285871,
+              0.70571512751505
+            ]
+          }
+        },
+        "axis": {
+          "name": "time",
+          "values": [
+            0.001,
+            0.005
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "defdab6e8b3bdbc81cf950133f8334aed5d3d3ad175d0676b2709b7f318cfd83"
+}

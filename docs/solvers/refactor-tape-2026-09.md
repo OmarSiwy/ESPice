@@ -169,8 +169,8 @@ times a cold path.
 ZP_LU_DUMP=/tmp/zplu.bin zig-out/bin/espice -b -r /tmp/o.raw \
     benchmark/fixtures/tran/fourbitadder/circuit.sp
 # stats + differential checks + race (fixture copy lives in testdata/)
-zig run -OReleaseFast -fllvm -mcpu=native src/solvers/dev_harness.zig -- \
-    src/solvers/testdata/fourbitadder_lu.bin 2000
+zig run -OReleaseFast -fllvm -mcpu=native src/analysis/solvers/dev_harness.zig -- \
+    src/analysis/solvers/testdata/fourbitadder_lu.bin 2000
 # symbolized profile (Release strips DWARF; ~3x LLVM time)
 zig build -Ddebug-info=true -p zig-out-di
 valgrind --tool=callgrind --cache-sim=yes zig-out-di/bin/espice -b ...

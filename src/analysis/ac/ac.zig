@@ -2,6 +2,7 @@
 //! then every frequency point is a fill + factor + solve. No circuit
 //! contact inside the sweep.
 const std = @import("std");
+const batch = @import("batch.zig");
 const root = @import("../types.zig");
 const converger = @import("solvers").converger;
 const types = @import("solvers").types;
@@ -9,13 +10,7 @@ const FreqSolver = @import("solvers").freq_solve.FreqSolver;
 
 pub const Complex = types.Complex;
 
-
-pub const Options = struct {
-    tol: converger.Tolerances = .{},
-    f_start: f64,
-    f_stop: f64,
-    points_per_decade: u16 = 10,
-};
+pub const Options = @import("requests").Ac;
 
 /// AC small-signal sweep against `exc`, the whole deck's excitation: a
 /// stacked-real `[re(0..n), im(0..n)]` vector over the circuit unknowns, built
@@ -58,11 +53,7 @@ pub fn sweep(
     defer allocator.free(omegas);
     types.fillLogSweep(options.f_start, options.f_stop, options.points_per_decade, freqs, omegas);
 
-    const x_out = ckt.gpuFreqBatch(allocator, ckt.g_vals, ckt.c_vals, omegas, rhs, @intCast(n), false) orelse blk: {
-        const cpu = try allocator.alloc(f64, n_points * nn);
-        try fs.solveBatch(allocator, omegas, rhs, cpu, false);
-        break :blk cpu;
-    };
+    const x_out = try batch.solve(ckt, &fs, allocator, ckt.g_vals, ckt.c_vals, omegas, rhs, false);
     defer allocator.free(x_out);
 
     for (0..n_points) |k| {

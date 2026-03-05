@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "noise",
+  "purpose": "Noise input reference source must exist.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "Noise input reference source must exist."
+  },
+  "expect": {
+    "status": "error",
+    "category": "invalid_analysis_arguments",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "8f3a224b4ce53d8a79b2de65dc5eae78ea2bcb800d279728ce16a867d7b98596"
+}

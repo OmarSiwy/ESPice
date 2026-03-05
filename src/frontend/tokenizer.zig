@@ -458,18 +458,7 @@ pub const spectre = struct {
     }
 };
 
-test "spectre: block comments are stripped span-wise" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const a = arena_state.allocator();
-    const strip = spectre.Lines.stripBlockComments;
-    // No marker: the input slice is returned untouched.
-    try std.testing.expectEqualStrings("r1 a b 1k", try strip(a, "r1 a b 1k"));
-    // Only the ends are trimmed; the spaces that flanked a comment survive.
-    try std.testing.expectEqualStrings("r1  a b  1k", try strip(a, "r1 /*x*/ a b /*y*/ 1k"));
-    try std.testing.expectEqualStrings("ad", try strip(a, "a/**//*c*/d")); // adjacent markers
-    try std.testing.expectEqualStrings("", try strip(a, "/**/"));
-    // Unterminated: the rest of the line goes with the comment.
-    try std.testing.expectEqualStrings("a", try strip(a, "a /*b c"));
-    try std.testing.expectEqualStrings("", try strip(a, "/*"));
-}
+// Private implementation access for the frontend test suite.
+pub const test_access = if (@import("builtin").is_test) .{
+    .stripBlockComments = spectre.Lines.stripBlockComments,
+} else {};

@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "analysis": "ac",
+  "purpose": "Resonant amplification and conditioning near pole frequency",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "H=1/(1+sRC+s^2LC). At resonance H=-j/(2*zeta), so low damping must not be clipped."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "AC Analysis",
+        "match": "exact",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 0.0003,
+            "atol": 1e-07,
+            "values": [
+              [
+                5.0760075243605e-05,
+                -0.050504999488611
+              ],
+              [
+                2.7755575615629e-19,
+                -0.05
+              ],
+              [
+                -4.9259827709384e-05,
+                -0.049504901479082
+              ]
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            4982.5919983442,
+            5032.9212104487,
+            5083.2504225532
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "row_count": 3
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "b22f2bf7a354029dfcee3f8426e86f872172a053c2d8d2833ffc38d7fdecec65",
+  "known_gaps": [
+    "non-DEC frequency sweeps are not yet supported by the shared analysis dispatcher"
+  ]
+}

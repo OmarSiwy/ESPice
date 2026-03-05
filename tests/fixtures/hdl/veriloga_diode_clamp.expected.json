@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "Verilog-A diode clamp: va_diode under 1k -> v(out) ~ 0.57 V",
+  "origin": "benchmark/fixtures/verilogA/diode_clamp/circuit.sp",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "The attached VA model uses IS=1e-12 and fixed VT=.02585V. Independently bisect v+1000*IS*expm1(v/VT)=5."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "row_count": 1,
+        "columns": {
+          "v(out)": {
+            "values": [
+              0.57414733918991
+            ],
+            "unit": "V",
+            "rtol": 0.002,
+            "atol": 1e-06
+          },
+          "i(vin)": {
+            "values": [
+              -0.0044258526608101
+            ],
+            "unit": "A",
+            "rtol": 0.002,
+            "atol": 1e-11
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "2f7240132432ce4a5599e01117dba3dfaa00dea44c9efdaf948f2b34c72833d2"
+}

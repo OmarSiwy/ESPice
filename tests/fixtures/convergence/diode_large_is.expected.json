@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "diode large is",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Monotonic scalar KCL root: (Vin-v)/R=IS*expm1(v/(N*VT))+1e-12*v, VT=0.025864925786328753 V at 27 C. Solved by 160 bisections."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 0.0002,
+            "atol": 2e-06,
+            "values": [
+              0.23142020513535
+            ]
+          },
+          "i(vin)": {
+            "unit": "A",
+            "rtol": 0.0003,
+            "atol": 1e-12,
+            "values": [
+              -0.0076857979486465
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "b336624844779a77a7d6faef3cc0310ab00dfab67275a64b1ecd39d92cbaa4b9"
+}

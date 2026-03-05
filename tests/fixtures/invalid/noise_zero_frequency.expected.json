@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "noise",
+  "purpose": "Logarithmic noise sweep cannot include zero.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "Logarithmic noise sweep cannot include zero."
+  },
+  "expect": {
+    "status": "error",
+    "category": "invalid_analysis_arguments",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "f9b94286e2a123f23ac1cc2d8993d4291cc0b2e0d4fef55274c23b9a8a37f322"
+}

@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "ac",
+  "purpose": "A zero point density cannot define a sweep.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "A zero point density cannot define a sweep."
+  },
+  "expect": {
+    "status": "error",
+    "category": "invalid_analysis_arguments",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "e3969539a42a2a646ba02c7203fa2f36153323d1919d4d2094fc9767cfc6308f"
+}

@@ -1,0 +1,219 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "24x24 resistor grid (~576 nodes): large sparse linear DC solve.",
+  "oracle": {
+    "kind": "ngspice-44.2",
+    "derivation": "Independent ngspice-44.2 run of the preserved benchmark circuit. Stored binary raw doubles, selected by column name. Transient values retain reference accepted times. Large sweeps retain explicit row indices including outer-sweep boundaries.",
+    "command": "ngspice -n -b -r reference.raw circuit.sp",
+    "source_sha256": "7d0378176be7c92b6ed7a6cf945c6e5d943b46de377a304d4309dd7b009910b0"
+  },
+  "origin": "benchmark/fixtures/scaling/resistor_grid/circuit.sp",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(n_0_0)": {
+            "values": [
+              1.0
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(n_0_13)": {
+            "values": [
+              0.59997848199324
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(n_2_2)": {
+            "values": [
+              0.77970547985808
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(n_3_3)": {
+            "values": [
+              0.73367227693194
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(n_4_4)": {
+            "values": [
+              0.69910308081301
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(n_5_5)": {
+            "values": [
+              0.67131148368501
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(n_6_6)": {
+            "values": [
+              0.6479333963308
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(n_7_7)": {
+            "values": [
+              0.62758274895997
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(n_8_8)": {
+            "values": [
+              0.60935336966133
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(n_9_9)": {
+            "values": [
+              0.592597685363
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(n_10_10)": {
+            "values": [
+              0.57681475433629
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(n_11_11)": {
+            "values": [
+              0.56158696448946
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(n_12_13)": {
+            "values": [
+              0.53901618151154
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(n_13_14)": {
+            "values": [
+              0.52360779046982
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(n_14_15)": {
+            "values": [
+              0.50745031945812
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(n_15_16)": {
+            "values": [
+              0.49009642187314
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(n_16_17)": {
+            "values": [
+              0.47099156086085
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(n_17_18)": {
+            "values": [
+              0.44939512713146
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(n_18_19)": {
+            "values": [
+              0.42423538615241
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(n_19_20)": {
+            "values": [
+              0.39381193287543
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(n_20_21)": {
+            "values": [
+              0.35509699391452
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(n_21_22)": {
+            "values": [
+              0.30174552702311
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(n_22_23)": {
+            "values": [
+              0.2162534806536
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "i(v1)": {
+            "values": [
+              -0.002162534806535
+            ],
+            "unit": "A",
+            "rtol": 0.001,
+            "atol": 1e-11
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "603b11c9eecede0688ff13b657dece464b282f2e2be6436697f8dee72e1f121b"
+}

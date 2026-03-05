@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "Very small series resistor (1 micro-ohm) acting as a near-ideal short.",
+  "oracle": {
+    "kind": "ngspice-44.2",
+    "derivation": "Independent ngspice-44.2 run of the preserved benchmark circuit. Stored binary raw doubles, selected by column name. Transient values retain reference accepted times. Large sweeps retain explicit row indices including outer-sweep boundaries.",
+    "command": "ngspice -n -b -r reference.raw circuit.sp",
+    "source_sha256": "d50a5d8d68bd118d51a5ba2990d4b7764e804ca24cf3a2c53743fb62db1d0713"
+  },
+  "origin": "benchmark/fixtures/adversarial/tiny_resistor/circuit.sp",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(a)": {
+            "values": [
+              2.0
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(b)": {
+            "values": [
+              1.999999998
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "i(v1)": {
+            "values": [
+              -0.0019999998621643
+            ],
+            "unit": "A",
+            "rtol": 0.001,
+            "atol": 1e-11
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "8be035de22da5fbfc839353be20383fb95d07da0a19854091c45ad3151f64da7"
+}

@@ -19,7 +19,7 @@ design constraints first, code-minimization last.
    read the asm. Every kernel adds a differential case against its scalar
    oracle: in `ref/SIMD-Strategies/verify.zig` when the kernel is
    self-contained (that file runs standalone under `zig run`, so it can
-   import nothing from `src/`), otherwise in the kernel's own file with a
+   import nothing from `src/`), otherwise in the matching `src/analysis/tests/` suite with a
    pointer to it from verify.zig — LaneLu is the worked example.
 3. `/ponytail`. After the data layout and kernel strategy are fixed, write the
    least code that satisfies them. YAGNI applies to everything except
@@ -34,18 +34,27 @@ code we write, never what shape the data takes.
 
 ## The dependency DAG (enforced by convention, checked at review)
 
-Module graph (build.zig): `solvers → devices → analysis → builder → main`.
-`gpu_context.zig` sits beside the engine (app policy), importing analysis,
-devices, solvers, gompute.
+The public feature modules are `frontend`, `problem`, `analysis`, and `output`.
+Main and the C adapter call the owning Problem API. Problem coordinates frontend
+preparation, analysis execution, and output delivery.
 
-File-level rule inside each module: **leaves import `types.zig`, never a
-`root.zig`**. A module's `root.zig` is the TOP of its file DAG — aggregation,
-re-export, and dispatch only. Shared context lives in the module's
-`types.zig` (analysis: RunCtx/Result/Circuit re-exports; solvers:
-BbdInfo/BbdBlock and the freq/waveform types; tran: `tran/types.zig` holds
-Waveform/Options/SimResult so Circuit.zig can name hook signatures without
-importing the transient driver). Adding an import that points from a types
-file or a leaf back up to a root closes a cycle — don't.
+Shared leaf modules (`problem_types`, `requests`, `numerics`, `device_ir`,
+`output_types`) hold data contracts. Frontend produces a passive Prepared
+circuit; analysis consumes it without importing frontend or Problem's owning
+facade. Output consumes the shared result schema without importing analysis.
+Model sources live in `models/`; device construction and HDL loading live in
+`src/frontend/`; numerical evaluation and GPU policy live in `src/analysis/`.
+
+**Solvers are private to `src/analysis/solvers/`. No source outside
+`src/analysis/` may import solver modules or expose solver implementation types.**
+Cross-layer tests needing solvers belong inside analysis as well.
+
+File-level rule: **leaves import shared types/other leaves, never their module's
+`root.zig`**. Roots aggregate and re-export. Shared analysis RunCtx/Result and
+mutable Circuit aliases live in `analysis/types.zig`; passive construction
+contracts live in `problem/types.zig`. Solver-independent settings are in
+`problem/numerics.zig`; `tran/types.zig` owns transient shared types. Do not
+close a cycle through an aggregation root.
 
 ## Lane-axis doctrine (SIMD-first as architecture)
 
@@ -56,7 +65,7 @@ in, not retrofitted per-loop:
 |---|---|
 | Frequency points (ac/noise/sp/stb/pac/pnoise/pxf) | SIMD lanes: `LaneLu(W)` replay of one SparseLu pivot tape; `FreqSolver.solveBatch` |
 | Sweep points (mc/temp/sens/dcmatch) | Structural lanes: `sweep/lanes.zig solveLanes` (GPU `solve_batch` orelse serial) |
-| Device derivatives | `Dual(N, F)` forward AD (devices/engine.zig) |
+| Device derivatives | `Dual(N, F)` forward AD (analysis/eval.zig) |
 | Device instances | ParEval worker threads |
 
 NOT lanes (do not try): tran timesteps (sequential in t), Newton iterations,
@@ -64,14 +73,14 @@ HB harmonics (coupled through the nonlinearity), pss shooting.
 
 Scalar oracle = the `W == 1` instantiation of the same kernel, never a
 second code path. Lane kernels return per-lane failure masks; bad lanes are
-peeled to the scalar full-factor ladder (see solvers/direct.zig fallback).
+peeled to the scalar full-factor ladder (see analysis/solvers/direct.zig fallback).
 
 ## CPU/GPU sharing
 
 No GPU-only kernel logic. Kernel code lives once in the shared path
-(devices/engine.zig `evalRange` + `Sink(comptime device)`); gompute compiles
-it for host, CUDA and HIP. `devices/kernels.zig` is a pure export shim —
-gompute needs a root file per device; zero logic there. Backend is a runtime
+(analysis/eval.zig `evalRange` + `Sink(comptime device)`); gompute compiles
+it for host, CUDA and HIP. The same file serves as each device's build root
+and exports that device's entry points at comptime. Backend is a runtime
 choice (`--backend auto|cpu|cuda|hip`), gated by the hardware probe.
 Batch solve call sites are `gpu_hook.X(...) orelse cpu.solveBatch(...)` —
 one lane-shaped flat-blob signature both ways.
@@ -98,15 +107,16 @@ FROZEN at the GPU boundary (ABI + layout_hash): scatter tapes
 ## Zig idioms, mandatory
 
 - `std.StaticStringMap` for every fixed string set (analysis keyword map in
-  analysis/root.zig is the template).
+  problem/requests.zig is the template).
 - SoA with explicit hot/cold splits for hot tables (SparseLu, DeviceList are
   the templates). AoS only when all fields are read together per iteration
   (Batch is the documented exception).
 - `enum`-typed / u32 handles for every index space; narrowest integer the
   stated range allows.
-- Arenas by lifetime: parse arena (dies after fromNetlist), sim arena
-  (circuit + workspace), results arena (until writers finish).
-- Comptime existence (`if (has_X) T else void`, devices/engine.zig
+- Arenas by lifetime: parse scratch (dies after preparation), session arena
+  (prepared template/source), per-query work and result arenas. Completed
+  results and prerequisite products remain valid until Problem destruction.
+- Comptime existence (`if (has_X) T else void`, analysis/eval.zig
   DeviceBatch) over runtime optionals in per-element hot paths.
 
 ## The proof rule
@@ -118,14 +128,14 @@ shortcuts carry a `ponytail:` comment naming the ceiling and upgrade path.
 
 ## Verification
 
-- `zig build && zig build test` after every step. Known baseline: 305/307 —
+- `zig build && zig build test` after every step. Historical baseline: 305/307 —
   the 2 `disto` HD2 failures (tests/analyses.zig:972,1070) pre-date the
   refactor (verified on clean HEAD 285e7e7 in a worktree).
 - New SIMD kernels: differential test vs the scalar oracle in
   `ref/SIMD-Strategies/verify.zig`, plus an asm spot-check that the expected
   vector instruction is emitted. The build has no backend flag any more (the
   native backend is always on), so read the asm off a direct invocation:
-  `zig build-obj -OReleaseFast -fllvm -femit-asm=/tmp/k.s src/solvers/direct.zig`.
+  `zig build-obj -OReleaseFast -fllvm -femit-asm=/tmp/k.s --dep numerics -Mroot=src/analysis/solvers/direct.zig -Mnumerics=src/problem/numerics.zig`.
 - GPU: default build compiles device kernels; `--backend cuda` on absent
   hardware must error naming what was detected.
 

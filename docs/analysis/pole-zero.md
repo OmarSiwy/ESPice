@@ -138,7 +138,7 @@ host pz_gpu(lanes = MC trials or corners):
 
 | Phase | Solver doc | Impl |
 |---|---|---|
-| Dense LU of $G$ + per-column solves | none (dense path) | `src/solvers/dense_lu.zig` `factorize`/`solveFactored` |
+| Dense LU of $G$ + per-column solves | none (dense path) | `src/analysis/solvers/dense_lu.zig` `factorize`/`solveFactored` |
 | Eigen solver (Hessenberg + Francis double-shift QR) | none (analysis-local) | `src/analysis/eigen/pz.zig eigenvaluesQR` |
 | Sparse alternative for large n (factor $G$ sparsely, shift-invert Arnoldi for the few dominant poles) | [klu-pipeline.md](../solvers/klu-pipeline.md), [gilbert-peierls-lu.md](../solvers/gilbert-peierls-lu.md) | upgrade path — reuses `direct.zig` factors as the Arnoldi operator (same pattern as [matex-exponential-integrators.md](matex-exponential-integrators.md) rational Krylov) |
 | Upstream OP | [homotopy-continuation.md](../solvers/homotopy-continuation.md) | `dc/op.zig` |

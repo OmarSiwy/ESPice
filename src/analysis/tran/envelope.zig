@@ -21,26 +21,7 @@ const converger = @import("solvers").converger;
 const W = std.simd.suggestVectorLength(f64) orelse 8;
 const V = @Vector(W, f64);
 
-pub const Options = struct {
-    tol: converger.Tolerances = .{},
-    /// Carrier period (1 / f_carrier).
-    t_carrier: f64,
-    /// Total simulation time (covers the full modulation envelope).
-    t_stop: f64,
-    carrier_steps_per_period: u32 = 64,
-    /// Number of carrier periods per outer envelope step. 1 = sample every period.
-    periods_per_outer_step: u32 = 1,
-    /// Maximum total outer (envelope) steps before giving up.
-    max_outer_steps: u32 = 1_000_000,
-    /// Envelope rate-of-change tolerance for adaptive outer stepping.
-    /// If the relative change in envelope between two outer steps exceeds this,
-    /// the outer step is halved.
-    envelope_reltol: f64 = 0.05,
-    /// Minimum outer step expressed as a multiple of T_carrier.
-    min_periods_per_step: u32 = 1,
-    /// Maximum outer step expressed as a multiple of T_carrier.
-    max_periods_per_step: u32 = 16,
-};
+pub const Options = @import("requests").Envelope;
 
 pub const SimResult = struct {
     completed: bool,
@@ -68,13 +49,16 @@ fn newtonAt(
     x: []f64,
     t: f64,
     options: Options,
-) bool {
+) !bool {
     // §9.10 `$abstime`: a generated device reads Instance.abstime, not the `t`
     // argument, so the envelope's quasi-static probes have to publish it too —
     // otherwise every source in the envelope sees t = 0. dt stays 0: this rung
     // IS quasi-static, so `ddt` should return 0 (see the generated zDdt guard).
     ckt.setSimState(.{ .t = t, .kind = .tran });
-    const nr = converger.run(ckt, ws, x, t, options.tol.newtonOpts(options.tol.itl4), root.EvalHook{}) catch return false;
+    const nr = converger.run(ckt, ws, x, t, converger.optionsFromTolerances(options.tol, options.tol.itl4), root.EvalHook{}) catch |err| switch (err) {
+        error.QueryCancelled => return err,
+        else => return false,
+    };
     return nr.converged;
 }
 
@@ -109,7 +93,7 @@ pub fn simulate(
     const x_outer_save = scratch[0..n];
     // Previous envelope values for adaptive stepping (one per probe),
     // plus envelope extraction scratch.
-    const prev_peak = scratch[n ..][0..probes.len];
+    const prev_peak = scratch[n..][0..probes.len];
     const peak = scratch[n + probes.len ..][0..probes.len];
     const sum_sq = scratch[n + 2 * probes.len ..][0..probes.len];
 
@@ -133,7 +117,10 @@ pub fn simulate(
         prev_peak[p] = @abs(x[node]);
     }
 
+    var attempts: u64 = 0;
     while (t < options.t_stop and outer_steps < options.max_outer_steps) {
+        if (attempts != 0) try ckt.checkpoint(.{ .phase = .transient, .completed = attempts });
+        attempts += 1;
         // Snapshot state for rollback on Newton failure
         simdCopy(x_outer_save, x);
 
@@ -150,7 +137,7 @@ pub fn simulate(
 
         // Coarse advance: skip intermediate carrier periods (4× inner step)
         if (t_fine_start > t) {
-            const coarse_ok = coarseAdvance(
+            const coarse_ok = try coarseAdvance(
                 ckt,
                 ws,
                 x,
@@ -161,8 +148,9 @@ pub fn simulate(
             );
             if (!coarse_ok) {
                 // Coarse advance failed to converge; halve outer step, restore, retry
-                periods_per_step = @max(periods_per_step / 2, options.min_periods_per_step);
                 simdCopy(x, x_outer_save);
+                if (periods_per_step == options.min_periods_per_step) return error.EnvelopeDidNotConverge;
+                periods_per_step = @max(periods_per_step / 2, options.min_periods_per_step);
                 continue;
             }
         }
@@ -177,10 +165,9 @@ pub fn simulate(
         const fine_duration = t_target - t_fine_start;
         var inner_failed = false;
         while (t_inner < fine_duration) {
-            const inner_converged = newtonAt(ckt, ws, x, t_fine_start + t_inner + dt_inner, options);
+            const inner_converged = try newtonAt(ckt, ws, x, t_fine_start + t_inner + dt_inner, options);
             if (!inner_converged) {
                 // Inner step fails → outer step too aggressive
-                periods_per_step = @max(periods_per_step / 2, options.min_periods_per_step);
                 inner_failed = true;
                 break;
             }
@@ -198,6 +185,8 @@ pub fn simulate(
         if (inner_failed) {
             // Inner sim did not complete; retry with smaller outer step
             simdCopy(x, x_outer_save);
+            if (periods_per_step == options.min_periods_per_step) return error.EnvelopeDidNotConverge;
+            periods_per_step = @max(periods_per_step / 2, options.min_periods_per_step);
             continue;
         }
 
@@ -249,11 +238,11 @@ fn coarseAdvance(
     duration: f64,
     dt_coarse: f64,
     options: Options,
-) bool {
+) !bool {
     var t_elapsed: f64 = 0;
     while (t_elapsed < duration) {
         const dt = @min(dt_coarse, duration - t_elapsed);
-        if (!newtonAt(ckt, ws, x, t_start + t_elapsed + dt, options)) return false;
+        if (!try newtonAt(ckt, ws, x, t_start + t_elapsed + dt, options)) return false;
         t_elapsed += dt;
     }
     return true;
@@ -305,8 +294,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const data = try a.alloc(f64, @as(usize, maxPoints(opts)) * ncols);
     errdefer a.free(data);
     const st = try simulate(ctx.circuit, x, ctx.probes, data, opts, scratch);
-    if (!st.completed)
-        std.debug.print("Warning: envelope stopped early at t={e}\n", .{st.t_final});
+    if (!st.completed) return error.EnvelopeDidNotConverge;
 
     const names = try a.alloc([]const u8, ncols);
     errdefer a.free(names);
@@ -330,76 +318,4 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         .npoints = npoints,
         .data = try a.realloc(data, npoints * ncols),
     };
-}
-
-// ============================================================================
-// Tests
-// ============================================================================
-
-const testing = std.testing;
-
-test "envelope: extractPeak finds absolute maximum" {
-    const vals = [_]f64{ 1.0, -3.0, 2.0, -1.5, 0.5 };
-    const peak = extractPeak(&vals);
-    try testing.expectApproxEqAbs(@as(f64, 3.0), peak, 1e-15);
-}
-
-test "envelope: extractRMS of constant signal equals absolute value" {
-    const vals = [_]f64{ 2.0, 2.0, 2.0, 2.0 };
-    const rms = extractRMS(&vals);
-    try testing.expectApproxEqAbs(@as(f64, 2.0), rms, 1e-15);
-}
-
-test "envelope: extractRMS of sine wave is amplitude/sqrt(2)" {
-    // Generate one full period of sin
-    const n = 1024;
-    var vals: [n]f64 = undefined;
-    const amplitude = 3.0;
-    for (0..n) |k| {
-        const t = @as(f64, @floatFromInt(k)) / @as(f64, @floatFromInt(n));
-        vals[k] = amplitude * @sin(2.0 * std.math.pi * t);
-    }
-    const rms = extractRMS(&vals);
-    const expected_rms = amplitude / @sqrt(2.0);
-    try testing.expectApproxEqRel(expected_rms, rms, 1e-4);
-}
-
-test "envelope: extractRMS of empty slice returns zero" {
-    const empty: []const f64 = &.{};
-    try testing.expectEqual(@as(f64, 0), extractRMS(empty));
-}
-
-test "envelope: extractPeak of single element" {
-    const vals = [_]f64{-7.5};
-    try testing.expectApproxEqAbs(@as(f64, 7.5), extractPeak(&vals), 1e-15);
-}
-
-test "envelope: extractPeak of empty slice returns zero" {
-    const empty: []const f64 = &.{};
-    try testing.expectEqual(@as(f64, 0), extractPeak(empty));
-}
-
-test "envelope: maxPoints monotone in max_outer_steps" {
-    const base: Options = .{ .t_carrier = 1e-9, .t_stop = 1e-3 };
-    const mp1 = maxPoints(base);
-    var opts2 = base;
-    opts2.max_outer_steps = 100;
-    const mp2 = maxPoints(opts2);
-    // Fewer allowed steps → fewer max points
-    try testing.expect(mp2 <= mp1);
-}
-
-test "envelope: coarseAdvance duration tracking uses actual dt" {
-    // Regression: old code used t_elapsed += dt_coarse instead of dt,
-    // which could skip the final partial step. Verified by the fix in
-    // coarseAdvance using dt (the clamped value) for the accumulator.
-    // This test just validates the maxPoints helper doesn't overflow.
-    const opts: Options = .{
-        .t_carrier = 1e-6,
-        .t_stop = 1e-3,
-        .min_periods_per_step = 1,
-        .max_periods_per_step = 32,
-    };
-    const mp = maxPoints(opts);
-    try testing.expect(mp >= 3); // at least DC + one step + slack
 }

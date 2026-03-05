@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "analysis": "four",
+  "purpose": "Honor the requested Fourier harmonic count",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "There is one DC row plus exactly N harmonic rows; only the fundamental has unit magnitude."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Fourier Analysis",
+        "match": "exact",
+        "columns": {
+          "magnitude": {
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 0.0002,
+            "values": [
+              0,
+              1
+            ]
+          }
+        },
+        "axis": {
+          "name": "harmonic",
+          "values": [
+            0,
+            1
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "row_count": 2
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "d455d0548aa8a3c541699b84ae297219faf14e79d7d95d9c102bdb2e64a58806"
+}

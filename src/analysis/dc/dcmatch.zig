@@ -17,11 +17,7 @@ const converger = @import("solvers").converger;
 
 const W = std.simd.suggestVectorLength(f64) orelse 8;
 
-pub const Options = struct {
-    tol: converger.Tolerances = .{},
-    /// null -> the last probe node.
-    output_node: ?u32 = null,
-};
+pub const Options = @import("requests").Dcmatch;
 
 pub const Contribution = struct {
     device_name: []const u8,
@@ -150,7 +146,8 @@ pub fn solve(
     errdefer allocator.free(contributions);
 
     var total_var: f64 = 0;
-    for (refs, contributions) |ref, *contrib| {
+    for (refs, contributions, 0..) |ref, *contrib, index| {
+        if (index != 0) try ckt.checkpoint(.{ .phase = .sweep, .completed = index, .total = refs.len });
         const sens = try fdSensitivity(ckt, x_op, lambda, rhs_nom, ref);
 
         const sigma_p = pelgromSigma(ref);
@@ -233,62 +230,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     };
 }
 
-// -------------------------------------------------------------------------
-// Tests
-// -------------------------------------------------------------------------
-
-test "pelgromSigma — real coefficients" {
-    const ref = root.ParamRef{
-        .ptr = undefined,
-        .device_type = "nmos",
-        .param_name = "vth0",
-        .index = 0,
-        .is_instance = false,
-        .primary = false,
-        .pelgrom_ap = 4e-3, // 4 mV·um
-        .area_wl = 1e-12, // 1 um^2
-    };
-    const sigma = pelgromSigma(ref);
-    // sigma = 4e-3 / sqrt(1e-12) = 4e-3 / 1e-6 = 4000
-    try std.testing.expectApproxEqRel(sigma, 4e3, 1e-12);
-}
-
-test "pelgromSigma — unit fallback when pelgrom_ap is zero" {
-    const ref = root.ParamRef{
-        .ptr = undefined,
-        .device_type = "nmos",
-        .param_name = "vth0",
-        .index = 0,
-        .is_instance = false,
-        .primary = false,
-        .pelgrom_ap = 0,
-        .area_wl = 1e-12,
-    };
-    try std.testing.expectEqual(pelgromSigma(ref), 1.0);
-}
-
-test "pelgromSigma — unit fallback when area_wl is zero" {
-    const ref = root.ParamRef{
-        .ptr = undefined,
-        .device_type = "nmos",
-        .param_name = "vth0",
-        .index = 0,
-        .is_instance = false,
-        .primary = false,
-        .pelgrom_ap = 4e-3,
-        .area_wl = 0,
-    };
-    try std.testing.expectEqual(pelgromSigma(ref), 1.0);
-}
-
-test "pelgromSigma — both zero gives unit fallback" {
-    const ref = root.ParamRef{
-        .ptr = undefined,
-        .device_type = "nmos",
-        .param_name = "vth0",
-        .index = 0,
-        .is_instance = false,
-        .primary = false,
-    };
-    try std.testing.expectEqual(pelgromSigma(ref), 1.0);
-}
+// Private implementation access for the analysis test suite.
+pub const test_access = if (@import("builtin").is_test) .{
+    .pelgromSigma = pelgromSigma,
+} else {};

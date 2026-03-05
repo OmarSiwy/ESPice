@@ -1,7 +1,7 @@
 //! Waveform writers — the top of the `output` file DAG.
 //!
 //! Aggregation, re-export and dispatch only, per AGENTS.md: the leaves below
-//! import `rawfile.zig` for `Plot` and never import this file.
+//! import the `output_types` leaf for shared data and never import this file.
 //!
 //! Two tiers, so a caller never has to take the dispatch to reach a writer:
 //!
@@ -11,10 +11,18 @@
 //! - Diagonal: `Format` plus `write(io, path, format, plot)` for the common
 //!   case of "the user named a format on the command line".
 //!
-//! `Plot` is `rawfile.Plot` rather than a type of this module's own, because
-//! the binary raw file is the format every other writer was defined against.
+//! `Session` adds ordered, idempotent whole-plot publication with fixed output
+//! selection; the direct writers and transient `Stream` remain available.
 
 const std = @import("std");
+
+pub const types = @import("output_types");
+pub const Session = @import("session.zig").Session;
+pub const Schema = types.Schema;
+pub const Selection = types.Selection;
+pub const validateSchema = types.validateSchema;
+pub const validatePlot = types.validatePlot;
+pub const ValidationError = types.ValidationError;
 
 pub const rawfile = @import("rawfile.zig");
 pub const ascii_raw = @import("ascii_raw.zig");
@@ -27,7 +35,8 @@ pub const sst2 = @import("sst2.zig");
 pub const fsdb = @import("fsdb.zig");
 
 /// The one waveform payload every writer accepts.
-pub const Plot = rawfile.Plot;
+pub const Result = types.Result;
+pub const Plot = types.Plot;
 
 /// SPICE variable-class string (`voltage`, `current`, ...) for a signal name.
 pub const varType = rawfile.varType;
@@ -43,39 +52,28 @@ pub const canStream = rawfile.canStream;
 pub const Stream = rawfile.Stream;
 
 /// Output encodings `write` can dispatch to.
-pub const Format = enum { binary, ascii, csv, touchstone, psf, fsdb, sst2, citi, print };
+pub const Format = types.Format;
 
 /// Resolve a user-facing format name, including its aliases, to a `Format`.
 /// Returns null for an unknown name so the caller owns the diagnostic.
 // ponytail: fixed CLI aliases use stdlib maps; writers dispatch on the resolved enum.
 pub fn parseFormat(s: []const u8) ?Format {
     return std.StaticStringMap(Format).initComptime(.{
-        .{ "binary", .binary },      .{ "raw", .binary },
-        .{ "ascii", .ascii },        .{ "csv", .csv },
-        .{ "touchstone", .touchstone }, .{ "snp", .touchstone }, .{ "s2p", .touchstone },
-        .{ "psf", .psf },            .{ "fsdb", .fsdb },
-        .{ "sst2", .sst2 },          .{ "hspice", .sst2 },
-        .{ "citi", .citi },          .{ "citifile", .citi },
-        .{ "print", .print },        .{ "text", .print },
+        .{ "binary", .binary },         .{ "raw", .binary },
+        .{ "ascii", .ascii },           .{ "csv", .csv },
+        .{ "touchstone", .touchstone }, .{ "snp", .touchstone },
+        .{ "s2p", .touchstone },        .{ "psf", .psf },
+        .{ "fsdb", .fsdb },             .{ "sst2", .sst2 },
+        .{ "hspice", .sst2 },           .{ "citi", .citi },
+        .{ "citifile", .citi },         .{ "print", .print },
+        .{ "text", .print },
     }).get(s);
 }
 
 /// Write `plot` to `path` in `format`. The diagonal route; each arm is the
 /// corresponding writer's own `write`, reachable directly if a caller wants to
 /// skip the dispatch.
-pub fn write(io: std.Io, path: []const u8, format: Format, plot: Plot) !void {
-    return switch (format) {
-        .binary => rawfile.write(io, path, plot),
-        .ascii => ascii_raw.write(io, path, plot),
-        .csv => csv.write(io, path, plot),
-        .touchstone => touchstone.write(io, path, plot),
-        .psf => psf.write(io, path, plot),
-        .fsdb => fsdb.write(io, path, plot),
-        .sst2 => sst2.write(io, path, plot),
-        .citi => citifile.write(io, path, plot),
-        .print => spice_print.write(io, path, plot),
-    };
-}
+pub const write = @import("write.zig").write;
 
 test "every Format arm maps to the writer that names it" {
     // The dispatch and the alias table are the two places a new format gets
@@ -89,6 +87,8 @@ test "every Format arm maps to the writer that names it" {
 }
 
 test {
+    _ = types;
+    _ = @import("session.zig");
     _ = rawfile;
     _ = ascii_raw;
     _ = csv;

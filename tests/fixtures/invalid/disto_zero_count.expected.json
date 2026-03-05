@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "disto",
+  "purpose": "Distortion sweep point density must be positive.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "Distortion sweep point density must be positive."
+  },
+  "expect": {
+    "status": "error",
+    "category": "invalid_analysis_arguments",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "37c634ae73f0d893dfc334daac5d91a918f503c9146a8438f2ebee5c11a2e0f8"
+}

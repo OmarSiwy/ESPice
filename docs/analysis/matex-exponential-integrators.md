@@ -3,6 +3,11 @@
 Exponential time differencing with Krylov-subspace $e^{Ah}v$ — larger
 stable steps than BDF/trap for large linear(ized) networks.
 
+The explicit `.matex` query implements a fixed-matrix R-MATEX path in
+`src/analysis/tran/matex.zig`. The theory below also describes extensions;
+I-MATEX, nonlinear exponential Rosenbrock integration, automatic linearity
+detection, and GPU Arnoldi execution are not implemented here.
+
 ## 1. Mathematical specification
 
 ### Exact solution of the linear circuit DAE
@@ -101,35 +106,40 @@ yields $\varphi_1(A)v$ in its upper-right block). Device-limiting and the SPICE 
 transfer directly — error control is by embedded stages, which is the main
 open engineering question for a SPICE-grade nonlinear MATEX.
 
-**Implementation status: not implemented** in this repo (no
-matrix-exponential path exists). Candidate slot: the linear-circuit fast
-path — `direct.zig` already provides the once-factored solve R-MATEX needs,
-and the `matrix_sig` factor-once machinery in `converger.zig` is the same
-"linear circuit at fixed matrix" detection the method would key on.
+**Implementation status:** `src/analysis/tran/matex.zig` factors
+$(C + \gamma G)$ once, builds a rational Krylov basis per step, and evaluates
+the small matrix exponential with scaling and squaring. Source transition
+spots and the output step cap bound the march. This is a linear-circuit
+method selected explicitly; it does not verify linearity or switch a
+nonlinear circuit to a different integrator.
 
 ## 2. Flow explanation
 
-(Prospective flow — how it would sit in this engine.)
+(R-MATEX flow; reuse and adaptive recovery below are extensions.)
 
 **Eligibility.** MATEX applies when the dynamic part is linear (or per-step
 linearized): power grids, interconnect, RC/RLC reduction targets — the
-`rc_ladder`-class fixtures where device eval is ~50% of runtime and the
-matrix never changes. The engine's `matrix_sig`/`has_charge` flags already
-identify these circuits.
+`rc_ladder`-class fixtures where the matrix never changes. Automatic
+eligibility detection is a target; `has_charge` alone does not establish
+linearity.
 
 **Phases.** (1) Setup: assemble $G$, $C$ once; factor $(C + \gamma G)$
 (R-MATEX, $\gamma \approx$ intended $h$); collect all source transition
 spots (the existing breakpoint list *is* this set). (2) March: per step,
 choose $h$ = distance to next transition spot (cap: waveform output
-resolution); Arnoldi to tolerance $\epsilon$ (posterior estimate), reuse
-the subspace for every sub-step landing inside the current reuse window;
+resolution); Arnoldi to tolerance $\epsilon$ (posterior estimate), then
 advance by the closed-form PWL update. (3) Between transition spots there
-is no LTE loop, no Newton, no refactor.
+is no LTE loop, no Newton, no refactor. Reusing a subspace across output
+steps remains a target; the implementation rebuilds it per step.
 
-**Failure handling.** Arnoldi hitting $m_{\max}$ without meeting
+**Target failure handling.** Arnoldi hitting $m_{\max}$ without meeting
 $\epsilon$ → halve $h$ (shrinks $\|r_m\|$ superlinearly) or re-pick
 $\gamma$ and refactor (rare). Singular $C$: use R-MATEX only (I-/standard
 variants need invertibility or regularization).
+
+The implementation uses the retained basis at $m_{\max}$ and has a local
+forward-Euler fallback when the projected matrix is singular; it does not
+implement the adaptive recovery described above.
 
 **Knobs.** $\epsilon$ (Krylov posterior tolerance — plays the role of
 reltol on the exponential), $m_{\max}$, $\gamma$ (insensitive; order of
@@ -137,7 +147,7 @@ typical $h$), output resolution cap on $h$. Spectre-bundle mapping:
 $\epsilon$ scales with `reltol`; there is no `trtol` analogue because
 there is no LTE.
 
-## 3. Pseudo-code, CPU sequential
+## 3. Pseudo-code, CPU sequential (including target subspace reuse)
 
 ```
 matex_transient(G, C, sources, t_stop, eps, gamma):
@@ -201,13 +211,13 @@ kernel matex_lane:
 host: sum group results (superposition) at output grid
 ```
 
-## Solvers used (requirements — analysis not implemented)
+## Solvers used and extensions
 
 | Phase | Solver doc | Impl |
 |---|---|---|
-| One-time factorization of $(C + \gamma G)$ (R-MATEX) or $G$ (I-MATEX) | [klu-pipeline.md](../solvers/klu-pipeline.md), [gilbert-peierls-lu.md](../solvers/gilbert-peierls-lu.md), [btf-permutation.md](../solvers/btf-permutation.md), [amd-ordering.md](../solvers/amd-ordering.md) | `src/solvers/direct.zig` (once-factored solves are the whole per-step cost) |
+| One-time factorization of $(C + \gamma G)$ (R-MATEX) | [klu-pipeline.md](../solvers/klu-pipeline.md), [gilbert-peierls-lu.md](../solvers/gilbert-peierls-lu.md), [btf-permutation.md](../solvers/btf-permutation.md), [amd-ordering.md](../solvers/amd-ordering.md) | `src/analysis/solvers/direct.zig`; small projected solves use `dense_lu.zig` |
 | Arnoldi triangular solves on GPU (level-scheduled or GMRES-replaced) | [gpu-sparse-lu.md](../solvers/gpu-sparse-lu.md) | requirement |
-| Linear-circuit eligibility detection | [circuit-matrix-specifics.md](../solvers/circuit-matrix-specifics.md) (`matrix_sig`) | `converger.Options.matrix_sig` |
+| Automatic linear-circuit eligibility detection | [circuit-matrix-specifics.md](../solvers/circuit-matrix-specifics.md) (`matrix_sig`) | target; current `.matex` selection is explicit |
 
 ---
 
@@ -224,18 +234,16 @@ host: sum group results (superposition) at output grid
 - §1 exact update, PWL closed form, Arnoldi relation, posterior error,
   I-/R-MATEX: verified against fetched arXiv text (equation-level).
 - §1 nonlinear extension: derived, marked.
-- §2–§4: prospective design (analysis **not implemented** in this repo);
-  GPU section grounded in the existing `kernel.zig` primitives it would
-  reuse.
+- §2–§3: R-MATEX design, partly implemented as described above; subspace
+  reuse and adaptive recovery remain targets.
+- §4: prospective GPU design.
 
 **Our implementation**
 
-- Not implemented. Landing zone: linear-transient fast path beside
-  `src/analysis/tran/tran.zig`, reusing
-  `src/solvers/direct.zig` (once-factored solves),
-  the breakpoint list in `tran.zig` (= transition spots), and the
-  `matrix_sig` linear-circuit detection in
-  `src/solvers/converger.zig`.
+- `src/analysis/tran/matex.zig`: fixed-matrix R-MATEX, source transition
+  collection, rational Arnoldi, and the projected matrix exponential.
+- `src/analysis/solvers/direct.zig`: retained sparse factors;
+  `src/analysis/solvers/dense_lu.zig`: projected dense solves.
 - Bench fixtures that would judge it: `benchmark/fixtures/scaling/*`
   (rc_ladder class), `benchmark/fixtures/power/*`,
   `benchmark/fixtures/basic/*` linear RC/RLC.

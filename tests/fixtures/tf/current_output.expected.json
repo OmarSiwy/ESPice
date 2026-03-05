@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "analysis": "tf",
+  "purpose": "Current-output DC transconductance",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "dI(Vmeasure)/dVin=1/1000 A/V, with current positive from out to ground."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transfer Function",
+        "match": "exact",
+        "columns": {
+          "transfer_function": {
+            "unit": "V/V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              0.001
+            ]
+          },
+          "input_resistance": {
+            "unit": "ohm",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              1000
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "049e2271eb6a75a1b9c76b890eeff6fc51dbdf38feb1afdeff2cb819ab9531dc",
+  "known_gaps": [
+    "current-input/current-output or differential-output TF is not yet fully resolved"
+  ]
+}

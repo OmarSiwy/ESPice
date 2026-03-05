@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "ac",
+  "purpose": "Frequency point counts must be integers.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "Frequency point counts must be integers."
+  },
+  "expect": {
+    "status": "error",
+    "category": "invalid_analysis_arguments",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "68e4e4ce7efada04dbf2d2be7a471bb780f1ce1ea94ee9270bef920dbe5a4ef0"
+}

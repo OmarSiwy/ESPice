@@ -14,29 +14,7 @@ const types = @import("solvers").types;
 const solvers = @import("solvers");
 const dense_lu = solvers.dense_lu;
 
-pub const Options = struct {
-    tol: converger.Tolerances = .{},
-    f_start: f64,
-    f_stop: f64,
-    points_per_decade: u16 = 10,
-    /// MNA BRANCH row of the V card carrying `DISTOF1`. ngspice cktdisto.c:115
-    /// puts a voltage source's F1 drive there and nowhere else; a NODE row is
-    /// wrong, because that node is pinned by the source's own branch equation
-    /// and the first-order solve comes back with V1(out) = 0 — which is what
-    /// left hd2/v1_mag/v2_mag identically zero on every `.disto` deck.
-    /// GROUND selects the current-source form below.
-    drive_branch: u32 = root.GROUND,
-    /// Current-source form, ngspice cktdisto.c:151-158: the drive is a current
-    /// INTO `ac_source_node`, so that row takes −0.5·mag. GROUND means "the
-    /// drive source branch" (ctx.source_branch) when running via the contract.
-    ac_source_node: u32 = root.GROUND,
-    /// `DISTOF1 <mag> [<phase deg>]` off the card (ngspice vsrcpar.c:180-193).
-    ac_magnitude: f64 = 1.0,
-    ac_phase: f64 = 0.0,
-    /// Output node; GROUND means "the last probe" when running via the contract.
-    output_node: u32 = root.GROUND,
-    fd_eps: f64 = 1e-6,
-};
+pub const Options = @import("requests").Disto;
 
 /// Distortion analysis via simplified Volterra series.
 ///
@@ -99,6 +77,7 @@ pub fn sweep(
     // ponytail: strided tensor layout d2[row*n*n + a*n + b] prevents contiguous
     // SIMD on the inner (a) loop; scalar per element, n evals dominate cost anyway
     for (0..n) |b| {
+        if (b != 0) try ckt.checkpoint(.{ .phase = .prepare, .completed = b, .total = n });
         simdCopy(x_pert, x_op[0..n]);
         x_pert[b] += eps;
         ckt.eval(x_pert, 0);
@@ -138,6 +117,7 @@ pub fn sweep(
     var sw = types.logSweep(options.f_start, options.f_stop, options.points_per_decade);
     var k: usize = 0;
     while (sw.next()) |f| : (k += 1) {
+        if (k != 0) try ckt.checkpoint(.{ .phase = .frequency, .completed = k, .total = freqs.len });
         const omega = 2.0 * std.math.pi * f;
 
         // -- 3a: First-order solve: (G + jwC) * V1 = ½ mag * e[drive row] --
