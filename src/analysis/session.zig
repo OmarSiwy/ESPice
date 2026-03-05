@@ -546,7 +546,7 @@ pub fn validate(query: requests.Query, n: u32) !void {
         inline else => |o| {
             if (!finite(o)) return error.InvalidQueryOptions;
             try tolerance(o.tol);
-            inline for (.{ "out_node", "output_node", "source_node", "ac_source_node", "probe_p", "probe_n", "input_branch", "drive_branch" }) |field| {
+            inline for (.{ "out_node", "output_node", "source_node", "ac_source_node", "probe_p", "probe_n", "input_branch", "in_branch", "drive_branch" }) |field| {
                 if (@hasField(@TypeOf(o), field)) {
                     const node = @field(o, field);
                     if (@typeInfo(@TypeOf(node)) == .optional) {
@@ -554,18 +554,17 @@ pub fn validate(query: requests.Query, n: u32) !void {
                     } else if (node >= n) return error.InvalidQueryOptions;
                 }
             }
-            if (@hasField(@TypeOf(o), "f_start")) {
-                if (o.f_start <= 0 or o.f_stop < o.f_start) return error.InvalidQueryOptions;
-                try frequency(o.f_start);
-                try frequency(o.f_stop);
-                if (@hasField(@TypeOf(o), "points_per_decade")) {
-                    const count = @ceil((@log10(o.f_stop) - @log10(o.f_start)) * @as(f64, @floatFromInt(o.points_per_decade))) + 1;
-                    if (!std.math.isFinite(count) or count >= @as(f64, @floatFromInt(std.math.maxInt(u32))))
-                        return error.InvalidQueryOptions;
-                    _ = try elements(&.{ @intFromFloat(count), n, 2 });
-                }
+            if (@hasField(@TypeOf(o), "sweep")) {
+                // `.lin` is the one grid that may start at DC; every geometric
+                // grid needs a positive first point to step from.
+                if (o.sweep.f_start < 0 or o.sweep.f_stop < o.sweep.f_start) return error.InvalidQueryOptions;
+                if (o.sweep.kind != .lin and o.sweep.f_start <= 0) return error.InvalidQueryOptions;
+                if (o.sweep.points == 0) return error.InvalidQueryOptions;
+                if (o.sweep.f_start > 0) try frequency(o.sweep.f_start);
+                try frequency(o.sweep.f_stop);
+                _ = try elements(&.{ o.sweep.count(), n, 2 });
             }
-            inline for (.{ "points_per_decade", "n_points", "n_samples", "n_time_samples", "pss_n_samples", "n_trials", "max_steps", "max_iter", "max_newton", "max_shooting_iter", "carrier_steps_per_period", "periods_per_outer_step", "min_periods_per_step", "max_periods_per_step", "max_outer_steps", "max_points", "m_max", "gmres_restart", "gmres_max_restarts", "max_newton_iter", "pss_periods", "pss_max_newton_iter", "pss_shoot_max_iter", "pss_newton_max_iter", "qr_max_iter" }) |field| {
+            inline for (.{ "n_samples", "n_time_samples", "pss_n_samples", "n_trials", "max_steps", "max_iter", "max_newton", "max_shooting_iter", "carrier_steps_per_period", "periods_per_outer_step", "min_periods_per_step", "max_periods_per_step", "max_outer_steps", "max_points", "m_max", "gmres_restart", "gmres_max_restarts", "max_newton_iter", "pss_periods", "pss_max_newton_iter", "pss_shoot_max_iter", "pss_newton_max_iter", "qr_max_iter" }) |field| {
                 if (@hasField(@TypeOf(o), field)) if (@field(o, field) == 0) return error.InvalidQueryOptions;
             }
             inline for (.{ "f0", "f1", "f2", "f_lo", "f_fundamental", "period", "t_carrier", "dt_init", "dt_min", "t_stop" }) |field| {
@@ -588,7 +587,6 @@ pub fn validate(query: requests.Query, n: u32) !void {
         .dc => |o| {
             const inner = try sweep(o.start, o.stop, o.step);
             const outer = if (o.hasOuter()) try sweep(o.start2, o.stop2, o.step2) else 1;
-            if (o.source2_index != null and o.source2_is_temp) return error.InvalidQueryOptions;
             _ = try elements(&.{ inner, outer, @as(usize, n) + 1 });
         },
         .temp => |o| {
@@ -624,16 +622,17 @@ pub fn validate(query: requests.Query, n: u32) !void {
             const bands = 2 * @as(usize, o.n_harmonics) + 1;
             _ = try elements(&.{ bands, n, bands, n });
             _ = try elements(&.{ o.n_time_samples, n, n });
-            try frequency(o.f_stop + @as(f64, @floatFromInt(o.n_harmonics)) * o.f_lo);
+            try frequency(o.sweep.f_stop + @as(f64, @floatFromInt(o.n_harmonics)) * o.f_lo);
         },
         .sp => |o| {
             for (o.ports) |port| {
                 if (port.node >= n or port.branch >= n or port.z0 <= 0) return error.InvalidQueryOptions;
             }
             const ports = @max(o.ports.len, 1);
-            _ = try elements(&.{ o.n_points, ports, ports, 2 });
+            _ = try elements(&.{ o.sweep.count(), ports, ports, 2 });
         },
         .four => |o| {
+            if (o.n_harmonics == 0 or o.n_harmonics > requests.Four.max_harmonics) return error.InvalidQueryOptions;
             if (o.tran_opts) |tran| {
                 try validate(.{ .tran = tran }, n);
             } else {
@@ -649,7 +648,7 @@ pub fn validate(query: requests.Query, n: u32) !void {
         .pnoise => |o| {
             try timeStep((1 / o.f_fundamental) / @as(f64, @floatFromInt(o.pss_n_samples)));
             _ = try elements(&.{ o.pss_n_samples, n, n });
-            try frequency(o.f_stop + @as(f64, @floatFromInt(o.n_sidebands)) * o.f_fundamental);
+            try frequency(o.sweep.f_stop + @as(f64, @floatFromInt(o.n_sidebands)) * o.f_fundamental);
         },
         .hb => |o| {
             if (o.n_harmonics == 0) return error.InvalidQueryOptions;
@@ -669,7 +668,7 @@ pub fn validate(query: requests.Query, n: u32) !void {
         },
         .disto => {
             _ = try elements(&.{ n, n, n });
-            try frequency(query.disto.f_stop * 2);
+            try frequency(query.disto.sweep.f_stop * 2);
         },
         .envelope => |o| {
             if (o.min_periods_per_step > o.max_periods_per_step or o.periods_per_outer_step < o.min_periods_per_step or
@@ -696,12 +695,20 @@ pub fn validate(query: requests.Query, n: u32) !void {
 pub fn validatePrepared(query: requests.Query, prepared: *const Prepared) !void {
     try validate(query, prepared.circuit.n);
     if (query == .dc) {
-        // DC's current contract selects V sources when present, otherwise I.
-        // Frontend rejects mixed-current sweeps instead of aliasing ordinals.
-        const count = if (prepared.bindings.v_names.len != 0) prepared.bindings.v_names.len else prepared.bindings.i_names.len;
-        if (query.dc.source_index >= count) return error.DcSweepSourceNotFound;
-        if (query.dc.source2_index) |index| if (index >= count) return error.DcSweepSourceNotFound;
+        try dcTargetExists(query.dc.target, prepared);
+        if (query.dc.target2) |t2| try dcTargetExists(t2, prepared);
     }
+}
+
+/// The swept card has to be one the circuit actually built — the card table
+/// is keyed the same way `ParamRef` is, so this is the same lookup `dc.run`
+/// will do, just before anything is allocated for it.
+fn dcTargetExists(target: requests.Dc.SweepTarget, prepared: *const Prepared) !void {
+    if (target.is_temp) return;
+    for (prepared.cards) |card| {
+        if (card.index == target.index and std.mem.eql(u8, card.type_name, target.type_name)) return;
+    }
+    return error.DcSweepSourceNotFound;
 }
 
 const output = @import("output_types");
@@ -729,7 +736,7 @@ pub fn validateOutputSchema(allocator: std.mem.Allocator, prepared: *const Prepa
         .sens, .dcmatch => blk: {
             var refs: std.ArrayList(ir.ParamRef) = .empty;
             defer refs.deinit(allocator);
-            for (prepared.circuit.batches) |batch| try batch.hooks.collect_params(batch.ctx, allocator, &refs);
+            for (prepared.circuit.batches) |batch| try batch.hooks.collect_params(batch.ctx, allocator, &refs).unwrap();
             break :blk refs.items.len + @intFromBool(query == .dcmatch);
         },
         else => prepared.probes.len + 1,

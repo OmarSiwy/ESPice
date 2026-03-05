@@ -37,15 +37,6 @@ pub const SensEntry = struct {
 
 pub const Options = @import("requests").Sens;
 
-pub const SolveResult = struct {
-    entries: []SensEntry,
-    op_value: f64,
-
-    pub fn deinit(self: *SolveResult, allocator: std.mem.Allocator) void {
-        allocator.free(self.entries);
-    }
-};
-
 const copySimd = root.copySimd;
 
 /// λ^T · dF/dp with the difference fused in: dF/dp = (pert - nom) * inv_delta
@@ -92,9 +83,10 @@ pub fn solve(
     ckt: *root.Circuit,
     params: []const SensParam,
     output_node: u32,
+    output_neg: u32,
     tol: converger.Tolerances,
     allocator: std.mem.Allocator,
-) !SolveResult {
+) ![]SensEntry {
     const n: usize = ckt.n;
     const ws = try ckt.workspace();
     const nopts = converger.optionsFromTolerances(tol, tol.itl2);
@@ -109,8 +101,6 @@ pub fn solve(
     const dc_result = try converger.run(ckt, ws, x_op, 0, nopts, root.EvalHook{});
     if (!dc_result.converged) return error.DcNotConverged;
 
-    const v0 = x_op[output_node];
-
     // -- Capture nominal RHS at the operating point --
     // Re-eval at x_op to get the nominal F(x_op) residual in ckt.rhs.
     ckt.evalNewton(x_op, 0);
@@ -123,6 +113,8 @@ pub fn solve(
     defer allocator.free(lambda);
     root.zeroSimd(lambda);
     lambda[output_node] = 1.0;
+    // `v(a,b)`: the adjoint seed is the node DIFFERENCE.
+    if (output_neg != root.GROUND) lambda[output_neg] = -1.0;
     ws.slv.solveT(lambda, lambda);
 
     // -- 3. Per-parameter: perturb, re-eval RHS, FD + adjoint dot --
@@ -163,7 +155,7 @@ pub fn solve(
         };
     }
 
-    return .{ .entries = entries, .op_value = v0 };
+    return entries;
 }
 
 // ---------------------------------------------------------------------------
@@ -184,7 +176,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     };
 
     // `defer`-freed == scratch; `a` is a results arena. The per-column names
-    // built from `res` below stay on `a` — they ARE the Result. See
+    // built from `entries` below stay on `a` — they ARE the Result. See
     // RunCtx.scratch_allocator.
     const scratch = ctx.scratch_allocator orelse a;
     const refs = try ctx.circuit.collectParams();
@@ -207,17 +199,17 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         n_named += 1;
     }
 
-    var res = try solve(ctx.circuit, params, output_node, opts.tol, scratch);
-    defer res.deinit(scratch);
+    const entries = try solve(ctx.circuit, params, output_node, opts.output_neg, opts.tol, scratch);
+    defer scratch.free(entries);
 
-    const names = try a.alloc([]const u8, res.entries.len);
+    const names = try a.alloc([]const u8, entries.len);
     errdefer a.free(names);
-    const data = try a.alloc(f64, res.entries.len);
+    const data = try a.alloc(f64, entries.len);
     errdefer a.free(data);
 
     var done: usize = 0;
     errdefer for (names[0..done]) |s| a.free(s);
-    for (res.entries, names, data) |e, *name, *out| {
+    for (entries, names, data) |e, *name, *out| {
         // The `v(...)` wrapper is ngspice's, not decoration: cktsens.c hands
         // the raw writer a UID_OTHER name, which types as a voltage, so the
         // file spells the column `v(r1)`. Without it nothing keyed off an

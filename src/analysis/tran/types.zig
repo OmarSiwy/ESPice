@@ -3,7 +3,6 @@
 //! the analysis types that re-export Circuit — this file keeps the file-level
 //! import graph acyclic: types.zig -> Circuit.zig -> ../types.zig -> tran.zig).
 const std = @import("std");
-const converger = @import("solvers").converger;
 
 pub const Method = @import("requests").Method;
 
@@ -16,13 +15,13 @@ pub const Options = @import("requests").Tran;
 /// edge-heavy. The old 16x prefactor put a 100k-node ladder's waveform at
 /// 16 buffers of slack: preallocation was most of the 2.8 GB peak.
 pub fn initialCapacity(options: Options) u32 {
-    const est = 2.0 * options.t_stop / options.dt_init;
+    // Only the PRINTED window is stored: tstart suppresses output, so the
+    // points before it never reach the waveform.
+    const est = 2.0 * (options.t_stop - options.t_start) / options.dt_init;
     return @intFromFloat(@min(@max(64.0, est), @as(f64, 1 << 22)));
 }
 
-/// SIMD copy — the shared pair lives on the solvers leaf (one copy per repo).
-/// ponytail: the shared kernel owns the vector width; this leaf only records.
-pub const simdCopy = @import("solvers").types.copySimd;
+const simdCopy = @import("numerics").copySimd;
 
 /// Recorded transient waveform. Flat preallocated storage, probe-major:
 /// values[k * capacity + i] is probe k at point i — probeValues(k) is one

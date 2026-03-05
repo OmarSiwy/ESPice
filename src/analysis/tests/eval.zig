@@ -180,9 +180,9 @@ test "dyn vtable: blob init, param set by name, proto add" {
     const inst: *R.Instance = @ptrCast(@alignCast(&iblob));
     try testing.expectEqual(@as(f32, 300.15), inst.temp);
 
-    const proto = try vt.proto_create(testing.allocator);
+    const proto = try vt.proto_create(testing.allocator).unwrap();
     const nodes = [2]u32{ 1, 2 };
-    try vt.proto_add(proto.ctx, testing.allocator, &mblob, &iblob, &nodes);
+    try vt.proto_add(proto.ctx, testing.allocator, &mblob, &iblob, &nodes).unwrap();
     const store: *ProtoStore(R) = @ptrCast(@alignCast(proto.ctx));
     try testing.expectEqual(@as(usize, 1), store.models.items.len);
     try testing.expectEqual(@as(f32, 42), store.models.items[0].r);
@@ -224,22 +224,22 @@ test "prepared device instances share tapes and isolate parameters and accepted 
         .row_idx = &.{ 0, 1, 2, 0, 1, 2, 0, 1, 2 },
         .n = 3,
         .trash_slot = 9,
-    });
+    }).unwrap();
     defer batch.hooks.deinit(batch.ctx, a);
     var noise: std.ArrayList(NoiseSource) = .empty;
     defer noise.deinit(a);
     for ([_]f64{ 0, 3, 0 }) |bias| {
         noise.clearRetainingCapacity();
-        try batch.hooks.collect_noise.?(batch.ctx, &.{ 0, bias, 0 }, a, &noise);
+        try batch.hooks.collect_noise.?(batch.ctx, &.{ 0, bias, 0 }, a, &noise).unwrap();
         try std.testing.expectEqual(@as(usize, 2), noise.items.len);
         try std.testing.expectEqual(bias, noise.items[0].white);
         try std.testing.expectEqual(@as(f64, 7), noise.items[1].white);
         try std.testing.expectEqual(@as(u32, 1), noise.items[0].node_p);
         try std.testing.expectEqual(@as(u32, 2), noise.items[1].node_p);
     }
-    const first = try batch.hooks.instantiate(batch.ctx, a);
+    const first = try batch.hooks.instantiate(batch.ctx, a).unwrap();
     defer first.hooks.deinit(first.ctx, a);
-    const second = try batch.hooks.instantiate(batch.ctx, a);
+    const second = try batch.hooks.instantiate(batch.ctx, a).unwrap();
     defer second.hooks.deinit(second.ctx, a);
     const template: *DeviceBatch(D) = @ptrCast(@alignCast(batch.ctx));
     const one: *DeviceBatch(D) = @ptrCast(@alignCast(first.ctx));
@@ -255,7 +255,7 @@ test "prepared device instances share tapes and isolate parameters and accepted 
     try std.testing.expectEqual(@as(u8, 0), template.instances[0].accepted);
     try std.testing.expectEqual(template.slots.ptr, one.slots.ptr);
     try std.testing.expectEqual(template.gath.ptr, two.gath.ptr);
-    const accepted = try first.hooks.snapshot(first.ctx, a);
+    const accepted = try first.hooks.snapshot(first.ctx, a).unwrap();
     defer accepted.hooks.deinit(accepted.ctx, a);
     const captured: *DeviceBatch(D) = @ptrCast(@alignCast(accepted.ctx));
     try std.testing.expectEqual(@as(f64, 25), captured.models[0].r);
@@ -266,7 +266,7 @@ test "prepared device instances share tapes and isolate parameters and accepted 
     try std.testing.expectEqual(@as(f64, 2), captured.instances[0].history[0]);
     try std.testing.checkAllAllocationFailures(a, struct {
         fn run(allocator: std.mem.Allocator, prepared: Batch) !void {
-            const instance = try prepared.hooks.instantiate(prepared.ctx, allocator);
+            const instance = try prepared.hooks.instantiate(prepared.ctx, allocator).unwrap();
             defer instance.hooks.deinit(instance.ctx, allocator);
         }
     }.run, .{batch});
@@ -306,7 +306,7 @@ test "iteration hooks gather each instance and preserve accepted-time state" {
         .row_idx = &.{ 0, 1, 2, 0, 1, 2, 0, 1, 2 },
         .n = 3,
         .trash_slot = 9,
-    });
+    }).unwrap();
     defer batch.hooks.deinit(batch.ctx, a);
     const typed: *DeviceBatch(D) = @ptrCast(@alignCast(batch.ctx));
     try std.testing.expect(batch.hooks.gpu_payload == null);
@@ -356,7 +356,7 @@ test "mutable evaluation captures per-instance data without GPU residency" {
         .row_idx = &.{ 0, 1, 2, 0, 1, 2, 0, 1, 2 },
         .n = 3,
         .trash_slot = 9,
-    });
+    }).unwrap();
     defer batch.hooks.deinit(batch.ctx, a);
     const typed: *DeviceBatch(D) = @ptrCast(@alignCast(batch.ctx));
     try std.testing.expect(batch.hooks.gpu_payload == null);

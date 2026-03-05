@@ -41,7 +41,6 @@ pub fn elaborate(arena: std.mem.Allocator, ast: ir.Ast) Error!ir.Netlist {
         .models = models,
         .directives = directives,
         .params = ast.params,
-        .foreign = ast.foreign,
     };
 }
 

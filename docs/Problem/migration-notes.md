@@ -16,22 +16,29 @@ unchanged. Problem validates requested output once before committing an append.
 
 ### Allocation-error regression at the device boundary
 
-The allocation-failure tests expose an existing device ABI defect:
-separately compiled device objects return Zig `anyerror` values, whose numeric
-identities are local to each compilation. A forced allocation failure can arrive
-at Problem as `PermissionDenied` instead of `OutOfMemory`. A direct call to the
-built voltage-source vtable with a zero-capacity allocator reproduced device
-error code 1 versus caller `OutOfMemory` code 2 using matching ReleaseFast/LLVM
-settings. A dedicated test forces failure directly in each compiled device's
-instantiation callback, so detection does not depend on the constructor arena's
-current growth points. Successful construction does not expose the defect.
+CPU device ABI version 10 repairs a boundary defect exposed by allocation-failure
+tests. Zig error ordinals are local to each compilation: a device object's
+`OutOfMemory` could arrive at the host as `PermissionDenied`, even with matching
+compiler and optimization settings. Restricting a callback to a singleton Zig
+error set does not make its ordinal portable.
 
-The regression remains enabled. Do not treat the current constructor error name
-or C out-of-memory status as reliable for device allocation failures. A repair
-needs stable device-boundary error codes and conversion at the owning side,
-with a host ABI version change. Reinterpreting arbitrary errors in Problem would
-hide the defect. Until then, callers must treat any construction error as a
-failed creation; the compiled-device allocation test remains a failing conformance gate.
+Fallible neutral callbacks now return `DeviceResult(T)`, with explicit byte
+statuses `ok=0`, `out_of_memory=1`, and `too_many_instances=2`. The producer
+converts only its closed local error set; the consumer reconstructs its own Zig
+error. Successful payload ownership is unchanged. The recompute callback returns
+whether the frozen topology is still valid, and its owner raises a local
+`TopologyChanged` on false. No arbitrary error is reclassified as allocation
+failure.
+
+The ABI version and layout hash reject old shared-library callbacks and re-key
+compiled device caches. Model/Instance PODs, CSC, scatter tapes, and GPU planes
+retain their layouts. All device objects must be rebuilt with the host.
+
+`zig build test-device-errors` compiles a real evaluator into a separate object
+and injects failures through construction, pattern creation, finalization,
+instantiation, snapshots, parameter collection, and noise collection. It also
+checks the real `TooManyInstances` count guard. `zig build test-problem` retains
+the constructor allocation sweep and direct compiled-device allocation tests.
 
 The implementation starts from `fc7b115`. Existing benchmark edits and document
 deletions in the working tree are outside this migration.

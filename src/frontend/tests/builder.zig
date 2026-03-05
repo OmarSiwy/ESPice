@@ -1,7 +1,8 @@
 const std = @import("std");
 const netlist = @import("builder");
 const devices = @import("device_models");
-const types = @import("syntax").types;
+const syntax = @import("syntax");
+const types = syntax.types;
 const Builder = netlist.Builder;
 const applySourceWaveform = netlist.test_access.applySourceWaveform;
 const pwlSlot = netlist.test_access.pwlSlot;
@@ -121,4 +122,114 @@ test "numeric field binding rejects invalid native and dynamic parameter values"
     try std.testing.expectEqual(@as(i8, 7), field);
     try std.testing.expectError(error.InvalidParameterValue, applyKvDyn(integerParameterFixture, @ptrCast(&field), &.{.{ .key = "mode", .value = .{ .num = 128 } }}));
     try std.testing.expectError(error.InvalidParameterValue, applyKvDyn(integerParameterFixture, @ptrCast(&field), &.{.{ .key = "mode", .value = .{ .name = "unresolved" } }}));
+}
+
+test "control source sensing ignores case while binding rejects missing and inexact names" {
+    for ([_][]const u8{ "vcase", "missing", "" }) |control| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const source = try std.fmt.allocPrint(a, "VCase in 0 2\nRin in 0 1k\nF1 out 0 {s}\nRout out 0 1k\n", .{control});
+        const ast = try syntax.Parser(syntax.spectre).parse(a, source);
+        var builder = try Builder.init(a);
+        defer builder.deinit();
+        var nb = try netlist.NetBuilder.init(a, &builder, try syntax.elaborate(a, ast));
+        try std.testing.expectError(if (control.len == 0) error.MissingControlSource else error.UnknownControlSource, nb.build());
+        if (std.mem.eql(u8, control, "vcase"))
+            try std.testing.expect(!builder.card_counts.contains("vsource"));
+    }
+}
+
+test "transmission-line cards retain native numerical algorithms" {
+    const cases = .{
+        .{ "O1 a 0 b 0 line\n.model line LTRA r=0.5 l=250n c=100p len=2\n", "ltra_native" },
+        .{ "O1 a 0 b 0 line\n.model line LTRA r=1 c=100p len=2\n", "ltra_native" },
+        .{ "Y1 a 0 b 0 line\n.model line TXL r=12.45 l=8.972n c=0.468p length=16\n", "txl_native" },
+        .{ "P1 a b 0 c d 0 line\n.model line CPL r=0.2 0 0.2 l=9.13n 3.3n 9.13n c=0.365p -0.09p 0.365p length=10\n", "cpl_native_2" },
+        .{ "P1 a b c 0 d e f 0 line\n.model line CPL r=0.2 0 0 0.2 0 0.2 l=9n 3n 0 9n 3n 9n c=0.3p -0.03p 0 0.3p -0.03p 0.3p length=10\n", "cpl_native_3" },
+        .{ "P1 a b c d 0 e f g h 0 line\n.model line CPL r=0.2 0 0 0 0.2 0 0 0.2 0 0.2 l=9n 3n 0 0 9n 3n 0 9n 3n 9n c=0.3p -0.03p 0 0 0.3p -0.03p 0 0.3p -0.03p 0.3p length=10\n", "cpl_native_4" },
+    };
+    inline for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const ast = try syntax.Parser(syntax.ngspice).parse(a, "* native line routing\n" ++ case[0] ++ ".end\n");
+        var builder = try Builder.init(a);
+        var compiled = false;
+        defer if (!compiled) builder.deinit();
+        var nb = try netlist.NetBuilder.init(a, &builder, try syntax.elaborate(a, ast));
+        try nb.build();
+        try std.testing.expectEqual(@as(usize, 1), builder.protos.items.len);
+        try std.testing.expectEqualStrings(devices.vtable(case[1]).name, builder.protos.items[0].type_name);
+        if (case[0][0] == 'Y' or case[0][0] == 'P') {
+            try std.testing.expectEqual(@as(u32, 1), nb.n_br);
+            try std.testing.expectEqual(builder.n - 1, nb.br_rows[0]);
+        }
+        var circuit = try builder.compile();
+        compiled = true;
+        defer circuit.deinit();
+        try std.testing.expect(circuit.batches[0].hooks.commit_state != null);
+        try std.testing.expect(circuit.batches[0].hooks.update_state == null);
+        try std.testing.expect(circuit.batches[0].hooks.gpu_payload == null);
+    }
+}
+
+test "unsupported transmission-line cards never select approximate fallbacks" {
+    const cases = .{
+        .{ "P1 a b c d e 0 f g h i j 0 line\n.model line CPL length=1\n", error.UnsupportedCoupledLineDimension },
+        .{ "P1 a b 0 c d 0 line\n.model line CPL r=1 l=1n c=1p length=1\n", error.UnsupportedTransmissionLineParameters },
+        .{ "Y1 a 0 b 0 line\n.model line TXL r=1e6 l=1n c=1p length=1\n", error.UnsupportedTransmissionLineParameters },
+        .{ "Y1 a 0 b 0 line\n.model line TXL r=1 l=1u g=1u c=1p length=1\n", error.UnsupportedTransmissionLineParameters },
+        .{ "Y1 a 0 b 0 line\n.model line TXL r=1e200 l=1e200 c=1e-100 length=1e150\n", error.UnsupportedTransmissionLineParameters },
+        .{ "Y1 a 0 b 0 line\n.model line TXL r=1 l=1e200 c=1e-200 length=1\n", error.UnsupportedTransmissionLineParameters },
+        .{ "P1 a b 0 c d 0 line\n.model line CPL r=1 0 1 l=1u 2u 1u c=1p 0 1p length=1\n", error.UnsupportedTransmissionLineParameters },
+        .{ "P1 a b 0 c d 0 line\n.model line CPL r=1 0 1 l=0 0 0 c=1p 0 1p length=1\n", error.UnsupportedTransmissionLineParameters },
+        .{ "Y1 a 0 b 0 line\n.model line TXL r=12.45 l=8.972n g=unresolved c=0.468p length=16\n", error.UnresolvedParameter },
+        .{ "Y1 a 0 b 0 line len=unresolved\n.model line TXL r=12.45 l=8.972n c=0.468p length=16\n", error.UnresolvedParameter },
+        .{ "O1 a 0 b 0 line\n.model line LTRA r=0.5 l=250n c=100p length=unresolved\n", error.UnresolvedParameter },
+        .{ "P1 a b 0 c d 0 line length=unresolved\n.model line CPL r=0.2 0 0.2 l=9n 0 9n c=0.3p 0 0.3p length=10\n", error.UnresolvedParameter },
+        .{ "O1 a 0 b 0 line\n.model line LTRA r=1 l=1n len=1\n", error.UnsupportedTransmissionLineParameters },
+        .{ "O1 a 0 b 0 line\n.model line LTRA r=1 l=1u g=1e-320 c=1p len=1e-10\n", error.UnsupportedTransmissionLineParameters },
+        .{ "O1 a 0 b 0 line\n.model line LTRA r=1 l=1e-320 c=1p len=1e-10\n", error.UnsupportedTransmissionLineParameters },
+        .{ "O1 a 0 b 0 line\n.model line LTRA r=1e200 g=1e200 len=1\n", error.UnsupportedTransmissionLineParameters },
+        .{ "O1 a 0 b 0 line\n.model line LTRA r=1 g=1 len=1000\n", error.UnsupportedTransmissionLineParameters },
+        .{ "O1 a 0 b 0 line\n.model line LTRA r=1e-200 g=1e-200 len=1e200\n", error.UnsupportedTransmissionLineParameters },
+    };
+    inline for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const ast = try syntax.Parser(syntax.ngspice).parse(a, "* invalid line routing\n" ++ case[0] ++ ".end\n");
+        var builder = try Builder.init(a);
+        defer builder.deinit();
+        var nb = try netlist.NetBuilder.init(a, &builder, try syntax.elaborate(a, ast));
+        try std.testing.expectError(case[1], nb.build());
+        try std.testing.expectEqual(@as(usize, 0), builder.protos.items.len);
+    }
+}
+
+test "RG line retains the checked instance length alias" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ast = try syntax.Parser(syntax.ngspice).parse(a, "* static RG length override\nO1 a 0 b 0 line length=2\n.model line LTRA r=1 g=1 len=1\n.end\n");
+    var builder = try Builder.init(a);
+    var compiled = false;
+    defer if (!compiled) builder.deinit();
+    var nb = try netlist.NetBuilder.init(a, &builder, try syntax.elaborate(a, ast));
+    try nb.build();
+    var circuit = try builder.compile();
+    compiled = true;
+    defer circuit.deinit();
+    var params: std.ArrayList(devices.ir.ParamRef) = .empty;
+    defer params.deinit(a);
+    const batch = circuit.batches[0];
+    try batch.hooks.collect_params(batch.ctx, a, &params).unwrap();
+    for (params.items) |param| {
+        if (std.mem.eql(u8, param.param_name, "len")) {
+            try std.testing.expectEqual(@as(f64, 2), param.get());
+            return;
+        }
+    }
+    return error.MissingLineLength;
 }

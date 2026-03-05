@@ -16,7 +16,7 @@ test "generated limiter: failed trial rollback and retry match an untried circui
         const model: D.Model = .{};
         const instance: D.Instance = .{};
         const nodes = [_]u32{ out, analysis.GROUND };
-        try vt.proto_add(proto.ctx, t.allocator, @ptrCast(&model), @ptrCast(&instance), &nodes);
+        try vt.proto_add(proto.ctx, t.allocator, @ptrCast(&model), @ptrCast(&instance), &nodes).unwrap();
         var prepared = try b.compile();
         defer prepared.deinit();
         var tried = try analysis.Circuit.instantiate(&prepared, t.allocator);

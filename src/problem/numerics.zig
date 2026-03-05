@@ -108,46 +108,95 @@ pub const Complex = struct {
 };
 
 // ============================================================================
-// Log-frequency sweep
+// Frequency sweep
+//
+// ONE grid for every frequency-domain analysis (ac/noise/sp/stb/disto/
+// pac/pxf/pnoise). Each used to carry its own `f_start`/`f_stop`/
+// `points_per_decade` triple and call a dec-only helper, so `.ac lin` and
+// `.ac oct` had nowhere to land and were rejected at the dispatcher.
 // ============================================================================
 
-pub fn logSweepCount(f_start: f64, f_stop: f64, points_per_decade: u16) u32 {
-    const decades = @log10(f_stop) - @log10(f_start);
-    return @as(u32, @intFromFloat(@ceil(decades * @as(f64, @floatFromInt(points_per_decade))))) + 1;
-}
+/// SPICE's three `.ac`/`.noise`/`.sp` spellings. `points` means per decade,
+/// per octave, or in total, in that order.
+pub const SweepKind = enum { dec, oct, lin };
 
-pub fn logSweepFreq(f_start: f64, f_stop: f64, n_points: u32, k: u32) f64 {
-    const log_start = @log10(f_start);
-    const frac = if (n_points > 1) @as(f64, @floatFromInt(k)) / @as(f64, @floatFromInt(n_points - 1)) else 0;
-    return std.math.pow(f64, 10.0, log_start + frac * (@log10(f_stop) - log_start));
-}
-
-pub const LogSweep = struct {
+pub const FreqSweep = struct {
     f_start: f64,
     f_stop: f64,
-    n: u32,
-    k: u32 = 0,
+    /// `.dec`/`.oct`: points per decade/octave. `.lin`: total points.
+    points: u32 = 10,
+    kind: SweepKind = .dec,
 
-    pub fn next(self: *LogSweep) ?f64 {
-        if (self.k >= self.n) return null;
-        const f = logSweepFreq(self.f_start, self.f_stop, self.n, self.k);
-        self.k += 1;
-        return f;
+    /// ngspice ACan: the geometric grid steps by a FIXED ratio and stops at
+    /// the last point that still fits under `f_stop` — it does not stretch to
+    /// land on it. `.ac dec 3 10 730` is 6 points ending at 464.16, not 7
+    /// points ending at 730.
+    pub fn count(self: FreqSweep) u32 {
+        if (self.kind == .lin) return @max(self.points, 1);
+        if (!(self.f_start > 0) or !(self.f_stop >= self.f_start)) return 1;
+        const decades = @log(self.f_stop / self.f_start) / @log(self.base());
+        const steps = decades * @as(f64, @floatFromInt(self.points));
+        // +1e-9: an exact integral span (oct 2 10 1280 = exactly 14 steps)
+        // must not lose its last point to a 1-ulp shortfall.
+        if (!std.math.isFinite(steps) or steps < 0) return 1;
+        return @as(u32, @intFromFloat(@floor(steps + 1e-9))) + 1;
+    }
+
+    pub fn at(self: FreqSweep, k: u32) f64 {
+        const n = self.count();
+        if (self.kind == .lin) {
+            if (n <= 1) return self.f_start;
+            const frac = @as(f64, @floatFromInt(k)) / @as(f64, @floatFromInt(n - 1));
+            return self.f_start + frac * (self.f_stop - self.f_start);
+        }
+        // pow, not a running product: the accumulated multiply drifts off the
+        // decade boundaries the oracles are written on.
+        return self.f_start * std.math.pow(f64, self.base(), @as(f64, @floatFromInt(k)) / @as(f64, @floatFromInt(@max(self.points, 1))));
+    }
+
+    /// Fill omegas (and optionally freqs) — both `count()` long.
+    pub fn fill(self: FreqSweep, freqs: ?[]f64, omegas: []f64) void {
+        for (0..self.count()) |i| {
+            const f = self.at(@intCast(i));
+            if (freqs) |fr| fr[i] = f;
+            omegas[i] = 2.0 * std.math.pi * f;
+        }
+    }
+
+    pub fn iter(self: FreqSweep) Iter {
+        return .{ .sweep = self, .n = self.count() };
+    }
+
+    pub const Iter = struct {
+        sweep: FreqSweep,
+        n: u32,
+        k: u32 = 0,
+
+        pub fn next(self: *Iter) ?f64 {
+            if (self.k >= self.n) return null;
+            defer self.k += 1;
+            return self.sweep.at(self.k);
+        }
+    };
+
+    fn base(self: FreqSweep) f64 {
+        return if (self.kind == .oct) 2.0 else 10.0;
     }
 };
 
-pub fn logSweep(f_start: f64, f_stop: f64, points_per_decade: u16) LogSweep {
-    return .{ .f_start = f_start, .f_stop = f_stop, .n = logSweepCount(f_start, f_stop, points_per_decade) };
-}
-
-/// Fill omegas (and optionally freqs) for a log sweep — both logSweepCount long.
-pub fn fillLogSweep(f_start: f64, f_stop: f64, points_per_decade: u16, freqs: ?[]f64, omegas: []f64) void {
-    var sw = logSweep(f_start, f_stop, points_per_decade);
-    var i: usize = 0;
-    while (sw.next()) |f| : (i += 1) {
-        if (freqs) |fr| fr[i] = f;
-        omegas[i] = 2.0 * std.math.pi * f;
-    }
+test "FreqSweep matches the ngspice grids the oracles were taken on" {
+    const dec: FreqSweep = .{ .f_start = 10, .f_stop = 730, .points = 3, .kind = .dec };
+    try std.testing.expectEqual(@as(u32, 6), dec.count());
+    try std.testing.expectApproxEqRel(@as(f64, 464.15888336128), dec.at(5), 1e-12);
+    const oct: FreqSweep = .{ .f_start = 10, .f_stop = 1280, .points = 2, .kind = .oct };
+    try std.testing.expectEqual(@as(u32, 15), oct.count());
+    try std.testing.expectApproxEqRel(@as(f64, 1280), oct.at(14), 1e-12);
+    const lin: FreqSweep = .{ .f_start = 0, .f_stop = 1000, .points = 9, .kind = .lin };
+    try std.testing.expectEqual(@as(u32, 9), lin.count());
+    try std.testing.expectEqual(@as(f64, 125), lin.at(1));
+    const one: FreqSweep = .{ .f_start = 100, .f_stop = 100, .points = 1, .kind = .lin };
+    try std.testing.expectEqual(@as(u32, 1), one.count());
+    try std.testing.expectEqual(@as(f64, 100), one.at(0));
 }
 
 // ============================================================================

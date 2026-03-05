@@ -13,7 +13,7 @@
 const std = @import("std");
 const root = @import("../types.zig");
 const pac = @import("pac.zig");
-const types = @import("solvers").types;
+const types = @import("numerics");
 const dense_lu = @import("solvers").dense_lu;
 
 pub const Complex = types.Complex;
@@ -41,7 +41,7 @@ pub fn analyze(
     const n_harm: usize = options.n_harmonics;
     const n_sb: usize = 2 * n_harm + 1;
 
-    const n_freqs = types.logSweepCount(options.f_start, options.f_stop, options.points_per_decade);
+    const n_freqs = options.sweep.count();
     std.debug.assert(freqs.len == n_freqs);
     std.debug.assert(transfer.len == @as(usize, n_freqs) * n_sb * n);
 
@@ -69,7 +69,7 @@ pub fn analyze(
     const x_work = try allocator.alloc(f64, nn2);
     defer allocator.free(x_work);
 
-    var sw = types.logSweep(options.f_start, options.f_stop, options.points_per_decade);
+    var sw = options.sweep.iter();
     var fi: usize = 0;
     while (sw.next()) |f_in| : (fi += 1) {
         if (fi != 0) try ckt.checkpoint(.{ .phase = .frequency, .completed = fi, .total = freqs.len });
@@ -116,7 +116,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     // runtime on multi-harmonic mixer workloads.
 
     const n: usize = ctx.circuit.n;
-    const n_freqs: usize = types.logSweepCount(opts.f_start, opts.f_stop, opts.points_per_decade);
+    const n_freqs: usize = opts.sweep.count();
     const n_sb: usize = 2 * @as(usize, opts.n_harmonics) + 1;
     const n_transfers = n_sb * n; // per frequency point
 
@@ -144,8 +144,14 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         const harmonic = @as(i32, @intCast(sb)) - @as(i32, @intCast(n_harm));
         for (0..n) |node| {
             const label = ctx.circuit.nodeName(@intCast(node));
-            const node_str = if (label.len == 0) "?" else label;
-            names[1 + sb * n + node] = try std.fmt.allocPrint(a, "pxf_h{d}({s})", .{ harmonic, node_str });
+            // An unlabeled row is a branch/internal unknown, and a deck can
+            // have several — `pxf/two_poles` has two, so a shared "?" placed
+            // the SAME column name twice in one raw file. The row index is
+            // the name those rows actually have.
+            names[1 + sb * n + node] = if (label.len == 0)
+                try std.fmt.allocPrint(a, "pxf_h{d}({d})", .{ harmonic, node })
+            else
+                try std.fmt.allocPrint(a, "pxf_h{d}({s})", .{ harmonic, label });
             done += 1;
         }
     }

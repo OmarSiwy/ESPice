@@ -121,13 +121,42 @@ pub const Batch = struct {
     hooks: *const Hooks,
 };
 
+/// Stable CPU callback status. Zig error ordinals belong to one compilation
+/// unit and must never cross a separately compiled object or shared library.
+pub const DeviceStatus = enum(u8) { ok = 0, out_of_memory = 1, too_many_instances = 2 };
+
+/// By-value callback result; a successful payload retains its existing owner.
+/// The closed error set makes adding a producer error an explicit ABI decision.
+pub fn DeviceResult(comptime T: type) type {
+    return union(DeviceStatus) {
+        ok: T,
+        out_of_memory: void,
+        too_many_instances: void,
+
+        pub fn fromLocal(value: error{ OutOfMemory, TooManyInstances }!T) @This() {
+            return .{ .ok = value catch |err| return switch (err) {
+                error.OutOfMemory => .out_of_memory,
+                error.TooManyInstances => .too_many_instances,
+            } };
+        }
+
+        pub fn unwrap(self: @This()) error{ OutOfMemory, TooManyInstances }!T {
+            return switch (self) {
+                .ok => |value| value,
+                .out_of_memory => error.OutOfMemory,
+                .too_many_instances => error.TooManyInstances,
+            };
+        }
+    };
+}
+
 /// Cold per-device-type vtable. Null entry ⇒ device type lacks the hook.
 pub const Hooks = struct {
     /// Fresh mutable evaluator state from an unevaluated prepared template.
     /// The template and its frozen tapes must outlive every instance.
-    instantiate: *const fn (*const anyopaque, std.mem.Allocator) anyerror!Batch,
+    instantiate: *const fn (*const anyopaque, std.mem.Allocator) DeviceResult(Batch),
     /// Copy an accepted dependency state, preserving all mutable POD histories.
-    snapshot: *const fn (*const anyopaque, std.mem.Allocator) anyerror!Batch,
+    snapshot: *const fn (*const anyopaque, std.mem.Allocator) DeviceResult(Batch),
     /// Synchronize the host limiting flag after downloading GPU state.
     set_limit_active: ?*const fn (*anyopaque, bool) void = null,
     scatter_bounds: *const fn (*anyopaque, first: u32, last: u32, trash_slot: u32, trash_row: u32) [4]u32,
@@ -209,12 +238,13 @@ pub const Hooks = struct {
     /// eval path. Ranged for the same reason `eval` is: ParEval's `.charge`
     /// mode hands each lane the same instance range it gets in `.full`.
     eval_q: ?*const fn (*anyopaque, *const Planes, u32, u32, []const f64, f64) void = null,
-    collect_params: *const fn (*anyopaque, std.mem.Allocator, *std.ArrayList(ParamRef)) anyerror!void,
+    collect_params: *const fn (*anyopaque, std.mem.Allocator, *std.ArrayList(ParamRef)) DeviceResult(void),
     /// Every generator this batch declares, with its PSD, at a state vector the
     /// caller hands in. No temperature argument: `$temperature` is the
     /// INSTANCE's, and the device already applied it inside `noisePsd`.
-    collect_noise: ?*const fn (*anyopaque, []const f64, std.mem.Allocator, *std.ArrayList(NoiseSource)) anyerror!void = null,
-    recompute: ?*const fn (*anyopaque) error{TopologyChanged}!void = null,
+    collect_noise: ?*const fn (*anyopaque, []const f64, std.mem.Allocator, *std.ArrayList(NoiseSource)) DeviceResult(void) = null,
+    /// False means parameter changes invalidate the frozen topology.
+    recompute: ?*const fn (*anyopaque) bool = null,
     /// This batch's device-resident working set, or null when the device type
     /// is not `gpuEligible` — the launcher reads a null here as "this batch
     /// stays on the CPU" and declines the whole circuit rather than splitting a
@@ -229,8 +259,8 @@ pub const Hooks = struct {
 pub const Proto = struct {
     ctx: *anyopaque,
     type_name: []const u8,
-    pattern: *const fn (*anyopaque, std.mem.Allocator, *PatternBuilder) anyerror!void,
-    finalize: *const fn (*anyopaque, std.mem.Allocator, PatternView) anyerror!Batch,
+    pattern: *const fn (*anyopaque, std.mem.Allocator, *PatternBuilder) DeviceResult(void),
+    finalize: *const fn (*anyopaque, std.mem.Allocator, PatternView) DeviceResult(Batch),
     destroy: *const fn (*anyopaque, std.mem.Allocator) void,
     apply_perm: *const fn (*anyopaque, []const u32) void,
 };
@@ -285,8 +315,8 @@ pub const PatternBuilder = struct {
             std.mem.sortUnstable(u64, sort_keys, {}, std.sort.asc(u64));
             return;
         }
-        var max_key: u64 = 0;
-        for (sort_keys) |k| max_key = @max(max_key, k);
+        var used_bits: u64 = 0;
+        for (sort_keys) |k| used_bits |= k;
 
         const tmp = try gpa.alloc(u64, sort_keys.len);
         defer gpa.free(tmp);
@@ -297,23 +327,29 @@ pub const PatternBuilder = struct {
         var dst: []u64 = tmp;
         var shift: u6 = 0;
         while (true) {
-            @memset(counts, 0);
-            for (src) |k| counts[@as(u16, @truncate(k >> shift))] += 1;
-            var sum: u32 = 0;
-            for (counts) |*c| {
-                const c0 = c.*;
-                c.* = sum;
-                sum += c0;
+            const digit_bound: u16 = @truncate(used_bits >> shift);
+            // Packed u32 node ids leave zero digits between row and column
+            // when n < 65536. The OR also bounds every occupied bucket.
+            if (digit_bound != 0) {
+                const buckets = counts[0 .. @as(usize, digit_bound) + 1];
+                @memset(buckets, 0);
+                for (src) |k| buckets[@as(u16, @truncate(k >> shift))] += 1;
+                var sum: u32 = 0;
+                for (buckets) |*c| {
+                    const c0 = c.*;
+                    c.* = sum;
+                    sum += c0;
+                }
+                for (src) |k| {
+                    const d: u16 = @truncate(k >> shift);
+                    dst[buckets[d]] = k;
+                    buckets[d] += 1;
+                }
+                const t = src;
+                src = dst;
+                dst = t;
             }
-            for (src) |k| {
-                const d: u16 = @truncate(k >> shift);
-                dst[counts[d]] = k;
-                counts[d] += 1;
-            }
-            const t = src;
-            src = dst;
-            dst = t;
-            if (shift >= 48 or (max_key >> shift) >> 16 == 0) break;
+            if (shift >= 48 or (used_bits >> shift) >> 16 == 0) break;
             shift += 16;
         }
         if (src.ptr != sort_keys.ptr) @memcpy(sort_keys, src);
@@ -393,9 +429,10 @@ pub const GpuPayload = struct {
     lim_active: bool,
 };
 
-// Version 9 adds evaluator instantiation/snapshots and host state synchronization.
+// Version 10 replaces compilation-local Zig errors in CPU callbacks with
+// explicit statuses, including the topology check. Old callbacks are incompatible.
 // GPU planes, Model/Instance PODs and scatter tapes are unchanged.
-pub const abi_version: u32 = 9;
+pub const abi_version: u32 = 10;
 
 pub const DeviceVtable = struct {
     name: []const u8,
@@ -415,8 +452,8 @@ pub const DeviceVtable = struct {
     /// Null when the module has no such parameter, which is the common case.
     derive: ?*const fn (model: [*]u8) void,
     collapse: ?*const fn (model: [*]const u8, instance: [*]const u8, out: [*]i32) void,
-    proto_create: *const fn (std.mem.Allocator) anyerror!Proto,
-    proto_add: *const fn (ctx: *anyopaque, gpa: std.mem.Allocator, model: [*]const u8, instance: [*]const u8, nodes: [*]const u32) anyerror!void,
+    proto_create: *const fn (std.mem.Allocator) DeviceResult(Proto),
+    proto_add: *const fn (ctx: *anyopaque, gpa: std.mem.Allocator, model: [*]const u8, instance: [*]const u8, nodes: [*]const u32) DeviceResult(void),
 
     // GPU eval kernel this device emitted from `engine.DeviceKernel` at
     // `.so`-build-time (empty ⇒ CPU-only). The `.so` compiles the SAME template
@@ -439,10 +476,11 @@ pub fn layoutHash() u64 {
         h = mix(h, @intFromEnum(builtin.zig_backend));
         h = mix(h, @intFromEnum(builtin.mode));
         for ([_]type{
-            DeviceVtable,      Proto,    Batch,
-            Hooks,             Planes,   PatternView,
-            PatternBuilder,    ParamRef, NoiseSource,
-            std.mem.Allocator,
+            DeviceVtable,        Proto,               Batch,
+            Hooks,               Planes,              PatternView,
+            PatternBuilder,      ParamRef,            NoiseSource,
+            std.mem.Allocator,   DeviceStatus,        DeviceResult(void),
+            DeviceResult(Batch), DeviceResult(Proto),
         }) |T| h = hashType(h, T);
         // Not a type: the SEMANTICS of the slot tape. A `.so` built before
         // `jac_pattern` reserves every (ru, cu) in the matrix and fills every

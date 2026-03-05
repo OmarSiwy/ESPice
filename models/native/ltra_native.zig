@@ -1000,3 +1000,51 @@ test "matched RLC line: delayed attenuated replica, exact DC settle" {
     const dc = vs * rl / (rs + model.r * model.len + rl);
     try std.testing.expectApproxEqAbs(dc, v2_final, 2e-3 * vs);
 }
+
+// Independent ngspice accepted history, not a second implementation of LTRA.
+// AoS fixture rows are cold and read together; runtime histories stay SoA.
+// Provenance and exact extraction recipe: testdata/README.md.
+test "LTRA residual on the ngspice LTRA1 accepted grid" {
+    const bytes = @embedFile("testdata/ltra1_ngspice_44_2.bin");
+    const columns = 5;
+    const row_bytes = columns * @sizeOf(f64);
+    try std.testing.expectEqual(@as(usize, 498 * row_bytes), bytes.len);
+    var model: Model = .{
+        .r = 12.45,
+        .l = 8.972e-9,
+        .c = 0.468e-12,
+        .len = 16,
+        .compactrel = 1e-3,
+        .compactabs = 1e-14,
+        .rel = 1,
+    };
+    var inst: Instance = .{};
+    var state: State = .{};
+    precompute(&inst, &model);
+    var previous: f64 = 0;
+    for (0..bytes.len / row_bytes) |sample| {
+        var row: [columns]f64 = undefined;
+        for (&row, 0..) |*value, column| {
+            const offset = sample * row_bytes + column * @sizeOf(f64);
+            value.* = @bitCast(std.mem.readInt(u64, bytes[offset..][0..8], .little));
+        }
+        const x: [n_u]f64 = .{ row[1], 0, row[2], 0, row[3], row[4] };
+        var sx: [n_u]TestScalar = undefined;
+        for (x, &sx) |value, *scalar| scalar.* = .{ .v = value };
+        inst.abstime = row[0];
+        inst.dt = row[0] - previous;
+        inst.analysis_kind = .tran;
+        const residual = eval(TestScalar, sx, &model, &inst, row[0]);
+        if (sample > 0) {
+            errdefer std.debug.print("LTRA accepted-grid sample {d}, t={e}\n", .{ sample, row[0] });
+            try std.testing.expect(row[0] > previous);
+            // Branch equations are currents; use the device's declared
+            // current absolute tolerance, independently of waveform tolerances.
+            try std.testing.expectApproxEqAbs(@as(f64, 0), residual[@intFromEnum(U.br1)].v, u_abstol[@intFromEnum(U.br1)]);
+            try std.testing.expectApproxEqAbs(@as(f64, 0), residual[@intFromEnum(U.br2)].v, u_abstol[@intFromEnum(U.br2)]);
+        } else try std.testing.expectEqual(@as(f64, 0), row[0]);
+        _ = updateState(&model, &inst, x, &state);
+        previous = row[0];
+    }
+    try std.testing.expectEqual(@as(u32, 498), inst.n_hist);
+}

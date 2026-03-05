@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "Static RG classification recomputes dependent localparams and honors the instance length alias.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "For R=G=1 and length=2, the exact static two-port has A=cosh(2), B=sinh(2)*(1+gmin). With Vin=1 and RL=1, Vout=1/(A+B), Iin=(A-Vout)/B. gmin=1e-12 matches the documented host default."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "row_count": 1,
+        "columns": {
+          "v(in)": {
+            "values": [
+              1
+            ],
+            "rtol": 1e-09,
+            "atol": 1e-12
+          },
+          "v(out)": {
+            "values": [
+              0.13533528323654626
+            ],
+            "rtol": 1e-09,
+            "atol": 1e-12
+          },
+          "i(vin)": {
+            "values": [
+              -0.9999999999990181
+            ],
+            "rtol": 1e-09,
+            "atol": 1e-12
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "8f9de0fab5081b03d375a25457ead82f2797454bdf5d9a5a8b71dd4f15890768"
+}

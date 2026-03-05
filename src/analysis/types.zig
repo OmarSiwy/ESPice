@@ -38,7 +38,13 @@ pub fn probeNames(ctx: *const RunCtx, first: ?[]const u8) ![]const []const u8 {
             try a.dupe(u8, ctx.probe_labels[i])
         else blk: {
             const label = ctx.circuit.nodeName(row);
-            break :blk try std.fmt.allocPrint(a, "v({s})", .{if (label.len == 0) "?" else label});
+            // Unlabeled rows are branch/internal unknowns and a deck can have
+            // more than one; a shared "?" makes two columns with one name,
+            // which is an invalid raw file. Fall back to the row index.
+            break :blk if (label.len == 0)
+                try std.fmt.allocPrint(a, "v({d})", .{row})
+            else
+                try std.fmt.allocPrint(a, "v({s})", .{label});
         };
         done += 1;
     }

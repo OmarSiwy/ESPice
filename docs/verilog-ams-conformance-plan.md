@@ -46,10 +46,17 @@ concurrent edits to `lower.zig` and `codegen.zig` from overwriting one another.
 
 | Work item | Current assignment | Scope of the current patch |
 |---|---|---|
-| D01 | `ams_digital` | Four-state literal representation and frontend integration; digital execution remains open |
-| A05 | `ams_tables` | Per-instance, per-call-site first-call snapshots of mutable table arrays |
-| S01 | `ams_formatting` | Integer ASCII-string formatting with operand-width preservation |
-| H01, Q01 | Integrating agent | String parameter range validation, detailed inventory, integration and regression checks |
+| D01 | `ams_digital` | Frontend and packed four-state helpers integrated; initial-process source slice now preserves runtime X/Z |
+| A05 | `ams_tables` | First-call mutable-array snapshots integrated; compiler regression and direct/JFNK numeric circuit pass |
+| S01 | `ams_formatting` | Integer ASCII-string formatting implemented and reviewed. Unsupported operand widths diagnose explicitly |
+| H01 | `ams_dynamic_arrays` | Exact defaults, conditional/short-circuit derivation, logical shifts and real remainder integrated and reviewed; general context typing remains open |
+| A01 | `ams_dynamic_arrays` | Runtime multidimensional reads/writes, direction, scope and guarded reads integrated and reviewed |
+| D02 | Integrating agent and `ams_parameter_precision` | Recursive typing, integral power, casts and concatenation/replication integrated; packed read selects under implementation |
+| D04/D05 | `ams_parameter_precision` and `ams_standards_review` | Initial/always control flow and explicit `@` event control integrated; 44 scheduler/time/source tests and four CLI transcripts pass; implicit sensitivity, named events and mixed-signal re-entry remain open |
+| A07 | `ams_dynamic_arrays` and `ams_standards_review` | Reference algorithms, guarded errors and host overrides integrated; paramset skipped-arm folding under implementation; fractional counts and lifecycle open |
+| Q03 | Integrating agent | Loader isolation and CPU ABI 10 integrated; Problem allocation regressions and separate-object tests pass, combined verification continues |
+| X01 | Integrating agent | Native routes and setup guards restored; prescribed ngspice-grid replay passes, five of eleven full waveform comparisons remain open |
+| Q01–Q03 | Integrating agent and `ams_dynamic_arrays` | Compiler build, 370 units and 1,301 strict fixtures pass; host build and 295 units pass, circuit suite 494/616 with 122 failures |
 
 Subsequent work is queued, not already running. The main dependencies are:
 
@@ -76,10 +83,28 @@ arbitrary packed widths, and all signedness information.
   values crossing word boundaries, and malformed input. Exhaustively test scalar
   truth tables and selected multiword cases.
 
-The current agent patch covers the literal/frontend boundary only. Operators,
-runtime values, and legal analog case comparisons need D02 and M01.
+The frontend retains packed four-state values and supplies tested arithmetic, bitwise,
+logical, reduction, equality, conditional, shift, relational and resize helpers.
+The initial-process runner preserves packed runtime values. Complete expression
+sizing, additional storage kinds and legal analog case comparisons still need
+D02, D03 and M01.
 
 ### D02 — Digital expression semantics
+
+Packed value helpers implement addition, subtraction, multiplication, division,
+remainder, integral power and unary minus, including multiword wraparound and X/Z
+propagation. Twenty-two integer tests and the integrated compiler unit gate pass.
+The source evaluator now propagates context through nested supported operators,
+with separate sizing for comparison operands, shift counts, reductions/logicals
+and conditional tests. Assignment contributes width without imposing its sign.
+Independent review checked 61 value cases; permanent CLI fixtures include
+129-bit cases. Integral power preserves independent exponent typing and uses
+exact modular arithmetic; 112 independent Python-oracle cases pass in both
+optimization modes. Casts, concatenation and replication now preserve
+self-determined widths, X/Z and unsigned concatenation results. Independent
+review checked 28 manual cases, 30 multiword cases and 17 rejection cases;
+packed helpers have an independent bit oracle and allocation-failure tests.
+Selects, general functions and complete unsized rules remain open.
 
 - Implement expression and assignment sizing, signed/unsigned promotion, casts
   inherited from Verilog, arithmetic overflow, division, shifts, comparisons,
@@ -104,8 +129,24 @@ runtime values, and legal analog case comparisons need D02 and M01.
 
 ### D04 — Procedural execution
 
-Known gap: a restricted constant `initial` is folded; there is no general digital
-execution engine for `always` and suspended processes.
+The shared-frontend `.v --run` path executes initial and always processes with
+sequential blocks, whole-variable blocking/NBA assignments, integral delays,
+explicit `@` event control, if/case and
+while/repeat/for control, `%b` display and finish. CLI and unit tests distinguish inactive/NBA regions, captured RHS
+values, lexical NBA order, time advance and cancellation. Unsupported forms
+fail before execution. See [source execution scope](../../VerA/docs/digital-source-execution.md).
+
+`@(v)`, `@(posedge v)`, `@(negedge v)` and `or` lists of those terms suspend a
+process; both the active and NBA regions publish through one write path, so
+either resumes it. The §5.10.1 edge table is followed on the least significant
+bit, an unchanged write resumes nothing, and the terms of one event expression
+share a single resumption. An `always` body that completes an iteration without
+suspending is diagnosed rather than spinning the scheduler at one timestamp. An
+edge-triggered D flip-flop with a clock generator simulates with correct NBA
+sampling. Implicit sensitivity (`@*`), named events and intra-assignment event
+controls remain open, as does
+the general execution work below; analog device compilation still
+uses its restricted constant-initial path.
 
 - Execute `initial` and `always`, sequential/named blocks, conditionals, all
   inherited loops, blocking and nonblocking assignments.
@@ -120,6 +161,19 @@ execution engine for `always` and suspended processes.
 ### D05 — Event scheduler and time
 
 Reference: AMS §8.5 and inherited Verilog scheduling rules.
+
+The queue core and timescale utility pass 23 tests in Debug and ReleaseFast.
+The connected initial-process runner brings `test-sim` to 39 passing tests in
+Debug and ReleaseFast, plus scheduling, expression, control and concatenation
+CLI transcripts. It preserves integer timestamps,
+region promotion, NBA order, cancellation and analog request coalescing.
+The analog solver is not connected yet. The
+[scheduler notes](../../VerA/docs/simulator-scheduler.md) record the integration
+work and the conflict between §8.5.1's D2A ordering and §8.5.2's pseudocode.
+`src/sim/time.zig` validates decimal scales, preserves integral delay counts and
+rounds real delays locally before integer global scaling. The
+[time conversion notes](../../VerA/docs/digital-time.md) document real rounding,
+explicit limits and the remaining source-level integration.
 
 - Implement active, explicit D2A, inactive, nonblocking-update, analog
   macro-process, monitor, and future-event regions with the prescribed promotion
@@ -168,6 +222,33 @@ Reference: AMS §8.5 and inherited Verilog scheduling rules.
 - Audit the complete inherited system-task list rather than inferring it from
   today's analog allowlist. Test actual outputs, file effects and timing events.
 
+The inherited facility inventory below comes from IEEE 1364-2005 §§17–18,
+checked against AMS §9's context tables. Every row remains open. Existing analog
+implementations are reusable components, not evidence of digital execution.
+The standalone digital runner currently dispatches only `$display`, `$finish`,
+`$signed` and `$unsigned`, within its documented limits.
+
+| Inherited clause | Digital implementation and behavioral evidence still needed |
+|---|---|
+| 17.1 — output | Complete display/write radix families and formatting; strobe/monitor scheduling, argument sampling, activation and suppression. |
+| 17.2.1–17.2.8 — files/strings | Descriptor and multichannel handling; file display/write/strobe/monitor variants; string formatting/scanning; character, line and binary input; seek/tell/rewind, flush, EOF and errors. |
+| 17.2.9 — memory loading | `$readmemb`/`$readmemh`: comments, addresses, ranges, direction, X/Z and malformed or excess data. Requires memories from D03. |
+| 17.2.10 — annotation | `$sdf_annotate`: annotation targets, delays, timing checks and applicable SDF/version rules; coordinate with D07/D09. |
+| 17.3 and 17.7 — time | `$printtimescale`, `$timeformat`, `$time`, `$stime`, `$realtime`: scope, rounding, return width and formatted output. Queue ticks alone do not implement these calls. |
+| 17.4 — control | Complete `$finish` options and `$stop` host behavior; prove scheduler and resource cleanup. |
+| 17.5 — PLA | All sixteen combinations of `$async`/`$sync`, `$and`/`$nand`/`$or`/`$nor`, and `$array`/`$plane`; personality data, four-state logic and update timing. |
+| 17.6 — stochastic queues | `$q_initialize`, `$q_add`, `$q_remove`, `$q_full`, `$q_exam`: queue discipline, status codes, capacity and time statistics. |
+| 17.8 — conversions | Digital real/integer and bit-pattern conversions, argument/result typing, X/Z and overflow handling; casts alone do not close this row. |
+| 17.9 — distributions | Digital `$random` and `$dist_*`: typed inout seeds, exact reference sequence, default streams and call-order behavior. Analog kernel tests remain separate. |
+| 17.10–17.11 — inputs/math | Both plusarg functions; `$clog2` and real math functions with digital typing, argument conversion, domain behavior and actual host inputs. |
+| 18.1–18.2 — VCD | `$dumpfile`, `$dumpvars`, `$dumpoff`, `$dumpon`, `$dumpall`, `$dumplimit`, `$dumpflush`; scopes, identifiers, four-state values, timestamps and scheduling. |
+| 18.3–18.4 — extended VCD | `$dumpports`, `$dumpportsoff`, `$dumpportson`, `$dumpportsall`, `$dumpportslimit`, `$dumpportsflush`; port direction, strengths and extended file encoding. |
+
+IEEE 1364 Annex C is informative. Its additional utilities must be classified
+separately; their presence in other simulators does not by itself make them
+mandatory. AMS additions to digital system facilities still need their own
+audit. This inventory does not close the broader inherited clause audit.
+
 ### D10 — Compiler directive semantics
 
 Known gap: `default_nettype`, `celldefine`, `endcelldefine`,
@@ -187,6 +268,8 @@ Known gap: `default_nettype`, `celldefine`, `endcelldefine`,
   and derivative against the standard, including exceptional values.
 - Finish dynamic multidimensional reads/writes with independently changing
   subscripts, declared index directions, bounds, and parameterized dimensions.
+- Complete invalid-index value semantics, partial-slice assignment, dynamic
+  scalar output/inout writeback and independently overridden structural dimensions.
 - Complete `$discontinuity` argument conversion: the existing negative-integer
   diagnostic does not establish real/string/nonfinite/range behavior.
 - Test finite-difference derivatives where appropriate, branch-sensitive errors,
@@ -234,9 +317,11 @@ Existing linear and nearest-point modes do not close the whole operator.
   unexecuted conditional branch. This is the current table agent's task.
 - Implement quadratic/cubic spline modes with the specified boundary conditions;
   ignored columns, fatal extrapolation and all control-string combinations.
-- Audit file-backed tables at simulation lifetime instead of assuming a
+- Load file-backed tables at their first executed runtime call instead of assuming a
   compile-time read is equivalent; validate rows, duplicate coordinates,
   isolines, ordering, dimensional coverage and failure cases.
+- Independently validate whether calls through one analog-function body share
+  its syntactic table site and snapshot.
 - Test mixed interpolation dimensions, asymmetric grids, endpoints, ties,
   derivatives, file errors, multiple instances and repeated/rejected evaluations.
 
@@ -251,7 +336,13 @@ Existing linear and nearest-point modes do not close the whole operator.
 
 ### A07 — Random distributions
 
-- Remove the silent 4096-degree/stage substitution in the distribution kernels.
+The 4096-degree/stage substitution is removed. Supported integral counts follow
+the IEEE reference listing, with independent C value/seed checks. Runtime
+validation remains observable when outputs are unused and is skipped on untaken
+paths; thirty-four generated-device scenarios cover guards, loops, host overrides and error order
+in Debug/ReleaseFast. See [remaining distribution limits](../../VerA/docs/RNG-REFERENCE-LIMITS.md).
+
+- Implement legal fractional/out-of-range count semantics without substitution.
 - Validate dynamic argument domains, seed mutation and per-instance/per-analysis
   stream lifetimes; audit global/instance variation modes.
 - Preserve the required distribution beyond current caps without replacing it
@@ -292,9 +383,19 @@ Direct Newton/JFNK limiter hooks exist; this item is not a rewrite of those hook
 
 ### H01 — Parameters, paramsets and elaborated identity
 
-- Enforce string `from`/`exclude` sets; the current range checker skips strings.
+- Constant string overrides now honor `from`/`exclude` sets. Extend validation
+  to the remaining final-value paths below.
 - Validate final instance values, dependent ranges, arrays, host overrides and
   parameter sweeps without incorrectly rejecting an unused model default.
+- Include unoverridden final defaults and string-aware paramset selection.
+- Complete constant-function control flow, remaining host operators and string
+  derivation, selected zero-divisor semantics, host override width changes and
+  nonfinite/out-of-range real-to-integer conversion.
+- Exact integral defaults and supported dependent expressions now preserve the
+  bits of values such as `64'h4142434445464748` through Model initialization and
+  derivation. Complete context width/signedness propagation remains open:
+  known mixed-sign shift comparisons diagnose E0364, but compound expressions
+  can still produce incorrect results.
 - Preserve paramset output-variable and analog-function content, overload
   selection and observable instance behavior; the parser drops some content.
 - Resolve escaped scalar names separately from generated vector-element names.
@@ -452,7 +553,15 @@ Direct Newton/JFNK limiter hooks exist; this item is not a rewrite of those hook
 
 ### X01 — LTRA, TXL and coupled transmission lines
 
-The native Zig models remain in place until this work closes.
+The native source files remain under `models/native/`. The routing audit found
+that O/Y/P paths selected approximate generated models. Native LTRA/TXL/CPL
+registration and supported construction routes are restored through the neutral
+CPU interface, with explicit rejection of unsupported setups. The
+[migration audit](native-transmission-line-migration.md) records the algorithms,
+standard facilities, numerical evidence and remaining differences. A replacement
+may take over only after the comparisons below pass. The retained algorithms also have existing capacity,
+setup-domain and non-transient limitations; their presence alone proves no
+universal ngspice compatibility.
 
 - Inventory each native model's equations, interpolation, convolution, initial
   conditions, accepted-history updates, step limiting and error-control behavior.

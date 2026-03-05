@@ -17,7 +17,7 @@
 const std = @import("std");
 const root = @import("../types.zig");
 const converger = @import("solvers").converger;
-const types = @import("solvers").types;
+const types = @import("numerics");
 const solvers = @import("solvers");
 const fft_mod = solvers.fft;
 const dense_lu = solvers.dense_lu;
@@ -50,7 +50,7 @@ pub fn analyze(
     const n_harm: usize = options.n_harmonics;
     const n_sb: usize = 2 * n_harm + 1;
 
-    const n_freqs = types.logSweepCount(options.f_start, options.f_stop, options.points_per_decade);
+    const n_freqs = options.sweep.count();
     std.debug.assert(freqs.len == n_freqs);
     std.debug.assert(transfer.len == @as(usize, n_freqs) * n_sb);
 
@@ -84,7 +84,7 @@ pub fn analyze(
     const x_work = try allocator.alloc(f64, nn2);
     defer allocator.free(x_work);
 
-    var sw = types.logSweep(options.f_start, options.f_stop, options.points_per_decade);
+    var sw = options.sweep.iter();
     var fi: usize = 0;
     while (sw.next()) |f_in| : (fi += 1) {
         if (fi != 0) try ckt.checkpoint(.{ .phase = .frequency, .completed = fi, .total = freqs.len });
@@ -265,7 +265,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     if (ctx.probes.len == 0) return error.NoProbe;
     const probe = ctx.probes[ctx.probes.len - 1];
 
-    const n_freqs: usize = types.logSweepCount(opts.f_start, opts.f_stop, opts.points_per_decade);
+    const n_freqs: usize = opts.sweep.count();
     const n_sb: usize = 2 * @as(usize, opts.n_harmonics) + 1;
     // `defer`-freed == scratch; `a` is a results arena. See
     // RunCtx.scratch_allocator.

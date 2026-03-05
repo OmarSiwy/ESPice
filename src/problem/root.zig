@@ -9,6 +9,7 @@ pub const QueryId = requests.QueryId;
 pub const Query = requests.Query;
 pub const Source = frontend.Source;
 pub const Dialect = frontend.Dialect;
+pub const parseDialect = frontend.parseDialect;
 pub const Request = analysis.ExecutionConfig.Backend;
 pub const Status = analysis.session.Status;
 pub const Scope = analysis.session.Scope;

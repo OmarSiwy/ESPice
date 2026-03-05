@@ -9,6 +9,9 @@ Model PODs, scatter tapes, plane layout and the device ABI are unchanged.
 its embedded worker controller. `session.zig` owns query publication, request
 validation and output-schema validation. These replace separate forwarding
 files. The numerical leaves still import `types.zig`, never the public root.
+Solver-independent contracts come directly from `numerics`; the former
+`solvers/types.zig` forwarding file is removed. The solver root retains its
+`types` alias for existing callers.
 
 The controller is embedded in its pinned executor, eliminating a separate
 allocation. Suppressed inner Newton checkpoints poll an atomic cancellation
@@ -53,13 +56,29 @@ transient noise still samples only the white component at operating-point PSD.
 
 ## Retired paths
 
-Native TXL/LTRA/CPL registration and numerical history injection are removed.
-Their model source files remain under `models/native/` for reference. O/Y cards
-use the existing generated `lossy_tline.va`; P cards use `coupled_tlines.va`.
-That model supports two conductors per port: other dimensions fail explicitly.
-The limitations documented in those Verilog-A sources still apply; native
-recursive-convolution behavior is no longer a fallback. Legacy history hook
-slots remain in device_ir solely to preserve the frozen ABI.
+The unused serial temperature sweep and its external `TempCoeff` overrides
+are removed. Query execution already uses `temp_sweep.run`, with one
+`solveLanes` lane per temperature and device-native temperature coefficients.
+The lane driver's serial Newton solve remains the CPU fallback; nominal
+temperature is restored after the sweep. External coefficient overrides were
+never supplied by query preparation and are no longer a separate analysis API.
+
+Native TXL/LTRA/CPL registration is retained through the same neutral CPU
+vtable boundary as generated models. O cards use native LTRA convolution for
+RLC/RC, the ideal line for LC, and the static Verilog-A two-port for RG. Y
+cards use native TXL for its supported parameter range. P cards use native CPL
+for two, three, or four conductors. Unsupported parameter sets and dimensions
+fail explicitly at initial construction; the approximate RLC/RC and coupled Verilog-A models are not
+fallbacks. These native routes remain until equivalent AMS replacements pass
+the numerical oracles; restoration is not a completed migration or a claim of
+full ngspice compatibility.
+
+The native devices commit their own histories through `commit_state`, with
+step bounds and breakpoints using the existing hooks. Legacy `record_history`
+and `inject_history` slots remain ABI-only; these native models do not need
+them. Native history capacities, interpolation choices, fit limitations and
+non-transient behavior still need separate compatibility coverage. Runtime
+parameter-sweep recomputation also needs a failure path for newly invalid fits.
 
 The disabled OP-f64/transient-f32 experiment and its environment switch are
 removed. CPU derivative width follows `jac_f32_host`; GPU derivative width

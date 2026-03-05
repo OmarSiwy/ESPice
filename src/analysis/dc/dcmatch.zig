@@ -13,7 +13,6 @@
 //! to unit variance.
 const std = @import("std");
 const root = @import("../types.zig");
-const converger = @import("solvers").converger;
 
 const W = std.simd.suggestVectorLength(f64) orelse 8;
 

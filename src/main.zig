@@ -2,7 +2,6 @@
 const std = @import("std");
 const problem = @import("problem");
 const output = @import("output");
-const frontend = @import("frontend");
 
 pub fn main(init: std.process.Init) !u8 {
     var args = init.minimal.args.iterate();
@@ -61,7 +60,7 @@ pub fn main(init: std.process.Init) !u8 {
             max_parallel = std.fmt.parseInt(u16, value orelse return usageFail(), 10) catch return usageFail();
             if (max_parallel == 0) return usageFail();
         } else if (optionValue(arg, "-tokenizer", "--tokenizer", &args)) |value| {
-            dialect = frontend.parseDialect(value orelse return usageFail()) orelse return usageFail();
+            dialect = problem.parseDialect(value orelse return usageFail()) orelse return usageFail();
         } else if (arg.len > 0 and arg[0] == '-') {
             std.debug.print("Error: unsupported option '{s}'\n", .{arg});
             return usageFail();

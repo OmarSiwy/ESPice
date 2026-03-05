@@ -7,7 +7,7 @@ const validatePrepared = impl.validatePrepared;
 
 test "query boundary rejects nonfinite values and nonterminating sweeps" {
     const t = std.testing;
-    try t.expectError(error.InvalidQueryOptions, validate(.{ .ac = .{ .f_start = 0, .f_stop = 1 } }, 4));
+    try t.expectError(error.InvalidQueryOptions, validate(.{ .ac = .{ .sweep = .{ .f_start = 0, .f_stop = 1 } } }, 4));
     try t.expectError(error.InvalidQueryOptions, validate(.{ .dc = .{ .start = 0, .stop = 1, .step = -1 } }, 4));
     try t.expectError(error.InvalidQueryOptions, validate(.{ .tran = .{ .t_stop = std.math.inf(f64) } }, 4));
     try validate(.{ .tran = .{ .t_stop = 1e-6 } }, 4);
@@ -17,7 +17,7 @@ test "query boundary rejects nonfinite values and nonterminating sweeps" {
 test "query boundary checks derived frequencies, dimensions and nested controls" {
     const t = std.testing;
     const invalid = [_]requests.Query{
-        .{ .ac = .{ .f_start = 1, .f_stop = 1e308 } },
+        .{ .ac = .{ .sweep = .{ .f_start = 1, .f_stop = 1e308 } } },
         .{ .hb = .{ .f0 = 1e3, .n_harmonics = 0 } },
         .{ .qpss = .{ .f1 = 1e3, .f2 = 2e3, .k1 = 65535, .k2 = 65535 } },
         .{ .pss = .{ .period = 1e-308, .n_samples = 65536 } },
@@ -38,16 +38,20 @@ test "query boundary checks derived frequencies, dimensions and nested controls"
     try validate(.{ .qpss = .{ .f1 = 1e3, .f2 = 1414 } }, 4);
 }
 
-test "query source indexes resolve against the prepared source namespace" {
+test "a dc sweep target resolves against the prepared card table, type included" {
     var prepared: Prepared = undefined;
     prepared.circuit.n = 4;
-    prepared.bindings.v_names = &.{"v1"};
-    prepared.bindings.i_names = &.{ "i1", "i2" };
+    prepared.cards = &.{
+        .{ .type_name = "vsource", .index = 0, .name = "v1" },
+        .{ .type_name = "isource", .index = 0, .name = "i1" },
+        .{ .type_name = "resistor", .index = 1, .name = "r2" },
+    };
     try validatePrepared(.{ .dc = .{} }, &prepared);
-    try std.testing.expectError(error.DcSweepSourceNotFound, validatePrepared(.{ .dc = .{ .source_index = 1 } }, &prepared));
-    try std.testing.expectError(error.DcSweepSourceNotFound, validatePrepared(.{ .dc = .{ .source2_index = 1 } }, &prepared));
-    prepared.bindings.v_names = &.{};
-    try validatePrepared(.{ .dc = .{ .source_index = 1 } }, &prepared);
-    prepared.bindings.i_names = &.{};
-    try std.testing.expectError(error.DcSweepSourceNotFound, validatePrepared(.{ .dc = .{} }, &prepared));
+    // Same ordinal, different device type: the two no longer alias.
+    try validatePrepared(.{ .dc = .{ .target = .{ .type_name = "isource", .index = 0 } } }, &prepared);
+    try validatePrepared(.{ .dc = .{ .target = .{ .type_name = "resistor", .index = 1, .param_name = "r" } } }, &prepared);
+    try std.testing.expectError(error.DcSweepSourceNotFound, validatePrepared(.{ .dc = .{ .target = .{ .index = 1 } } }, &prepared));
+    try std.testing.expectError(error.DcSweepSourceNotFound, validatePrepared(.{ .dc = .{ .target2 = .{ .type_name = "resistor", .index = 0 } } }, &prepared));
+    // The temperature is not a card and is never looked up.
+    try validatePrepared(.{ .dc = .{ .target2 = .{ .is_temp = true } } }, &prepared);
 }

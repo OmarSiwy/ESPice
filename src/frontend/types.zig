@@ -30,7 +30,6 @@ pub const Netlist = struct {
     models: []const Model,
     directives: []const Directive,
     params: []const Kv,
-    foreign: []const Foreign,
 };
 
 pub const Device = struct {

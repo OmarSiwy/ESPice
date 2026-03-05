@@ -303,7 +303,10 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     errdefer for (names[1..][0..done]) |s| a.free(s);
     for (ctx.probes, 0..) |node, p| {
         const label = ctx.circuit.nodeName(node);
-        const l = if (label.len == 0) "?" else label;
+        // Row index when unlabeled: two unnamed rows sharing "?" would emit
+        // the same column name twice. See analysis/types.zig probeNames.
+        var idx_buf: [16]u8 = undefined;
+        const l = if (label.len == 0) std.fmt.bufPrint(&idx_buf, "{d}", .{node}) catch "?" else label;
         names[1 + p * 2] = try std.fmt.allocPrint(a, "peak(v({s}))", .{l});
         done += 1;
         names[2 + p * 2] = try std.fmt.allocPrint(a, "rms(v({s}))", .{l});

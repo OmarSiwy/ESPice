@@ -1,12 +1,13 @@
-// CPL coupled transmission lines (ngspice P element, `.model cpl`).
+// Approximate two-conductor model retained for comparison. P cards use the
+// native CPL implementation. See docs/native-transmission-line-migration.md.
 //
-// docs/coupled-tlines.md §1.5: N = 2 symmetric lines have bias-free
-// eigenvectors, so the modal decomposition of §1.2 (ZY samples, Jacobi
-// rotations, polynomial fits, 3-pole Pade, recursive convolution) collapses to
-// a closed form: even/odd modes with Sv = Si = [[1,1],[1,-1]], two decoupled
-// Bergeron lines plus lumped loss. That is the whole model here — no matrix
-// eigen-solve, no convolution state, both of which are outside the analog
-// subset (see constructs_avoided in the report).
+// N = 2 symmetric lines have fixed even/odd eigenvectors. This file uses
+// Sv = Si = [[1,1],[1,-1]] and two decoupled Bergeron lines with lumped loss.
+// It omits the native modal fitting and recursive convolution. Matrix
+// arithmetic and user interpolation are expressible with analog arrays,
+// loops and functions; their absence here is an implementation limitation.
+// Accepted-history ownership and callbacks need matching simulator support.
+// The simplification is not an exact translation, even for two conductors.
 //
 // Card order matches ngspice: conductors of port 1, its return, conductors of
 // port 2, its return  (`P1 a1 a2 0 b1 b2 0 pline`).
@@ -21,8 +22,8 @@
 //     §1.3 writes, mutual included, so v_p1 - v_n1 = length*(r*i1 + rm*i2).
 //     ngspice's cond1 row loop steps `resindex` over the packed upper triangle
 //     and picks only R_mm, dropping the mutual; that is a reference
-//     simplification (and physically wrong for a shared lossy return), the doc
-//     is the spec, and it is unobservable on every rm = 0 card.
+//     simplification. This file deliberately differs from that algorithm;
+//     the difference is unobservable on rm = 0 cards.
 //  2. Shunt loss G lives in the transient wave attenuation only (§1.2's
 //     attenuation entries, alpha = G*Z/2). A single-delay attenuated Bergeron
 //     line has no shunt path for the current the attenuation removes, so its
@@ -63,7 +64,7 @@ module coupled_tlines(p1, p2, pr, n1, n2, nr);
     // R, L, G, C or length is absent (cplsetup.c) and cpl.c defines no
     // defaults. Verilog-A has no "mandatory parameter", so l/c/length default
     // to a nominal 50 ohm, 1 m line and the mandatory-parameter check belongs
-    // in the P-card mapping (src/netlist.zig), not here.
+    // in the P-card mapping (src/frontend/builder.zig), not here.
     parameter real r      = 0.0     from [0:inf);  // ohm/m
     parameter real rm     = 0.0;                   // ohm/m
     parameter real l      = 250e-9  from (0:inf);  // H/m

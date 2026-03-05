@@ -1,0 +1,120 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "Voltage-source sensing and exact reference binding scale across 2048 independently solvable controlled sources.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Source j drives 0.5 + (j mod 11)/4 volts into 1 kohm, so I(Vj)=-Vj/1000. F i references j=(37*i) mod 2048 with gain 1+(i mod 5), and its 2 kohm output load gives V(out_i)=2*gain*Vj."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(out0000)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              1.0
+            ]
+          },
+          "i(v0000)": {
+            "unit": "A",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              -0.0005
+            ]
+          },
+          "v(out0001)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              6.0
+            ]
+          },
+          "i(v0037)": {
+            "unit": "A",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              -0.0015
+            ]
+          },
+          "v(out0511)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              4.0
+            ]
+          },
+          "i(v0475)": {
+            "unit": "A",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              -0.001
+            ]
+          },
+          "v(out1024)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              7.5
+            ]
+          },
+          "i(v1024)": {
+            "unit": "A",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              -0.00075
+            ]
+          },
+          "v(out1535)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              2.5
+            ]
+          },
+          "i(v1499)": {
+            "unit": "A",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              -0.00125
+            ]
+          },
+          "v(out2047)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              16.5
+            ]
+          },
+          "i(v2011)": {
+            "unit": "A",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              -0.00275
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "de46854ab5a4514213f0b92bd015ce9bf3e80096dd87b1831a944c8f887c5715"
+}

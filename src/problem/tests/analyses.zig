@@ -63,7 +63,7 @@ test "a failed query does not prevent an independent query from completing" {
     var ids: [2]api.QueryId = undefined;
     _ = try p.append_queries(&.{
         .{ .hb = .{ .f0 = 1e3, .n_harmonics = 1, .max_iter = 1 } },
-        .{ .ac = .{ .f_start = 1, .f_stop = 10, .points_per_decade = 2 } },
+        .{ .ac = .{ .sweep = .{ .f_start = 1, .f_stop = 10, .points = 2 } } },
     }, &ids);
     try std.testing.expectError(error.HbDidNotConverge, p.run_all());
     try std.testing.expectEqual(api.Status.failed, (try p.query_info(ids[0])).status);

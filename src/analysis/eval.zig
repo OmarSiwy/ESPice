@@ -1025,7 +1025,11 @@ pub fn ProtoStore(comptime D: type) type {
             try self.nodes.append(staging_gpa, nodes);
         }
 
-        pub fn addPattern(ctx: *anyopaque, gpa: std.mem.Allocator, pb: *PatternBuilder) anyerror!void {
+        pub fn addPattern(ctx: *anyopaque, gpa: std.mem.Allocator, pb: *PatternBuilder) ir.DeviceResult(void) {
+            return ir.DeviceResult(void).fromLocal(addPatternLocal(ctx, gpa, pb));
+        }
+
+        fn addPatternLocal(ctx: *anyopaque, gpa: std.mem.Allocator, pb: *PatternBuilder) error{OutOfMemory}!void {
             const self: *Self = @ptrCast(@alignCast(ctx));
             // The device's structural Jacobian, not n_u^2: an entry no device
             // can fill is still a matrix nonzero once it is reserved, and it
@@ -1050,7 +1054,11 @@ pub fn ProtoStore(comptime D: type) type {
             }
         }
 
-        pub fn finalize(ctx: *anyopaque, gpa: std.mem.Allocator, pv: PatternView) anyerror!Batch {
+        pub fn finalize(ctx: *anyopaque, gpa: std.mem.Allocator, pv: PatternView) ir.DeviceResult(Batch) {
+            return ir.DeviceResult(Batch).fromLocal(finalizeLocal(ctx, gpa, pv));
+        }
+
+        fn finalizeLocal(ctx: *anyopaque, gpa: std.mem.Allocator, pv: PatternView) error{ OutOfMemory, TooManyInstances }!Batch {
             const has_q = @hasDecl(D, "q");
             const has_attempt_decl = @hasDecl(D, "attempt");
             const self: *Self = @ptrCast(@alignCast(ctx));
@@ -1495,10 +1503,8 @@ pub fn DeviceBatch(comptime D: type) type {
         }
 
         /// §9.10 `$temperature` is KELVIN; the host speaks Celsius (the SPICE
-        /// `.temp` card), hence the conversion. The field was probed as "temp"
-        /// until now — a name no generated device has — so this hook was
-        /// silently null and `.temp`/`temp_sweep` moved only the explicit
-        /// TempCoeff parameters, never the device's own junction physics.
+        /// `.temp` card), hence the conversion. Recompute device-native
+        /// temperature physics after publishing the instance temperature.
         fn setTemp(ctx: *anyopaque, temp_c: f32) void {
             const self: *Self = @ptrCast(@alignCast(ctx));
             for (self.instances) |*inst| inst.temperature = @as(f64, temp_c) + 273.15;
@@ -1565,7 +1571,7 @@ pub fn DeviceBatch(comptime D: type) type {
             };
         }
 
-        fn recomputePrecomputed(ctx: *anyopaque) error{TopologyChanged}!void {
+        fn recomputePrecomputed(ctx: *anyopaque) bool {
             const self: *Self = @ptrCast(@alignCast(ctx));
             self.reprep();
             if (comptime @hasDecl(D, "collapse")) {
@@ -1574,14 +1580,15 @@ pub fn DeviceBatch(comptime D: type) type {
                     const nd = self.gath[id * n_u ..][0..n_u];
                     inline for (D.num_ports..n_u) |u| {
                         if (col[u]) |target| {
-                            if (nd[u] != nd[target]) return error.TopologyChanged;
+                            if (nd[u] != nd[target]) return false;
                         } else if (std.mem.indexOfScalar(u32, nd[0..u], nd[u]) != null) {
                             // Builder allocated a distinct node for every unaliased internal.
-                            return error.TopologyChanged;
+                            return false;
                         }
                     }
                 }
             }
+            return true;
         }
 
         fn reprep(self: *Self) void {
@@ -1608,14 +1615,18 @@ pub fn DeviceBatch(comptime D: type) type {
             return if (best == std.math.inf(f64)) null else best;
         }
 
-        fn collectParams(ctx: *anyopaque, gpa: std.mem.Allocator, list: *std.ArrayList(ParamRef)) anyerror!void {
+        fn collectParams(ctx: *anyopaque, gpa: std.mem.Allocator, list: *std.ArrayList(ParamRef)) ir.DeviceResult(void) {
+            return ir.DeviceResult(void).fromLocal(collectParamsLocal(ctx, gpa, list));
+        }
+
+        fn collectParamsLocal(ctx: *anyopaque, gpa: std.mem.Allocator, list: *std.ArrayList(ParamRef)) error{OutOfMemory}!void {
             @setEvalBranchQuota(100_000);
             const self: *Self = @ptrCast(@alignCast(ctx));
             try appendParams(D.Instance, self.instances, true, gpa, list);
             try appendParams(D.Model, self.models, false, gpa, list);
         }
 
-        fn appendParams(comptime T: type, items: anytype, comptime is_instance: bool, gpa: std.mem.Allocator, list: *std.ArrayList(ParamRef)) anyerror!void {
+        fn appendParams(comptime T: type, items: anytype, comptime is_instance: bool, gpa: std.mem.Allocator, list: *std.ArrayList(ParamRef)) error{OutOfMemory}!void {
             const type_name = comptime blk: {
                 const full = @typeName(D);
                 const dot = std.mem.lastIndexOfScalar(u8, full, '.') orelse break :blk full;
@@ -1680,7 +1691,11 @@ pub fn DeviceBatch(comptime D: type) type {
         /// until `noisePsd` landed — is a different number on every generator
         /// that is not literally a resistor, and exactly 2x on a junction
         /// (g = I/(N·Vt) ⇒ 4kT·g = (2/N)·2q·I).
-        fn collectNoise(ctx: *anyopaque, x: []const f64, gpa: std.mem.Allocator, list: *std.ArrayList(NoiseSource)) anyerror!void {
+        fn collectNoise(ctx: *anyopaque, x: []const f64, gpa: std.mem.Allocator, list: *std.ArrayList(NoiseSource)) ir.DeviceResult(void) {
+            return ir.DeviceResult(void).fromLocal(collectNoiseLocal(ctx, x, gpa, list));
+        }
+
+        fn collectNoiseLocal(ctx: *anyopaque, x: []const f64, gpa: std.mem.Allocator, list: *std.ArrayList(NoiseSource)) error{OutOfMemory}!void {
             const self: *Self = @ptrCast(@alignCast(ctx));
             for (0..self.count) |id| {
                 var xl: [n_u]f64 = undefined;
@@ -1724,12 +1739,12 @@ pub fn DeviceBatch(comptime D: type) type {
             };
         }
 
-        fn instantiate(ctx: *const anyopaque, gpa: std.mem.Allocator) anyerror!Batch {
-            return duplicate(ctx, gpa, false);
+        fn instantiate(ctx: *const anyopaque, gpa: std.mem.Allocator) ir.DeviceResult(Batch) {
+            return ir.DeviceResult(Batch).fromLocal(duplicate(ctx, gpa, false));
         }
 
-        fn snapshot(ctx: *const anyopaque, gpa: std.mem.Allocator) anyerror!Batch {
-            return duplicate(ctx, gpa, true);
+        fn snapshot(ctx: *const anyopaque, gpa: std.mem.Allocator) ir.DeviceResult(Batch) {
+            return ir.DeviceResult(Batch).fromLocal(duplicate(ctx, gpa, true));
         }
 
         fn setLimitActive(ctx: *anyopaque, active: bool) void {
@@ -1974,7 +1989,7 @@ pub fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool) 
         pub inline fn model(s: *const Sk, id: u32) *const D.Model {
             return @addrSpaceCast(&s.models_[id]);
         }
-        pub inline fn inst(s: *const Sk, id: u32) contract.InstancePtr(D) {
+        pub inline fn inst(s: *const Sk, id: u32) if (@hasDecl(D, "mutable_eval") and D.mutable_eval) *D.Instance else *const D.Instance {
             return @addrSpaceCast(&s.instances_[id]);
         }
         inline fn slot(s: *const Sk, id: u32, ru: usize, cu: usize) u32 {
@@ -2292,8 +2307,6 @@ const Window = struct {
     row_lo: u32,
     row_hi: u32, // exclusive
 };
-
-pub const default_min_instances: u32 = 1024;
 
 /// `.charge` is the transient's post-accept re-read: `q_vec` and the per-batch
 /// `q_tape` only, g/c/rhs left alone. Same tasks, same lane cuts and the same
@@ -2666,8 +2679,9 @@ fn addSimd(dst: []f64, src: []const f64) void {
 // type-erased Proto the builtin path uses. layoutHash() guards ABI drift.
 // ===========================================================================
 
-// Version 6 makes Hooks.recompute return error{TopologyChanged}!void. Reject old
-// host callbacks before invocation; GPU PODs and layoutHash remain unchanged.
+// Version 10 replaces Zig error unions in CPU callbacks with DeviceResult
+// and a boolean topology check. The host and separately compiled devices can
+// assign different numbers to the same Zig error. GPU PODs are unchanged.
 //
 // Version 7: the slot tape's cleared entries are the DEVICE's structural
 // Jacobian zeros, not just ground — `addPattern` no longer reserves a matrix
@@ -2844,20 +2858,20 @@ fn Impl(comptime D: type, comptime device_name: []const u8) type {
                 out[u] = if (col[u]) |p| @intCast(p) else -1;
         }
 
-        fn protoCreate(gpa: std.mem.Allocator) anyerror!Proto {
-            const store = try gpa.create(Store);
+        fn protoCreate(gpa: std.mem.Allocator) ir.DeviceResult(Proto) {
+            const store = gpa.create(Store) catch return .out_of_memory;
             store.* = .{};
-            return .{
+            return .{ .ok = .{
                 .ctx = store,
                 .type_name = device_name,
                 .pattern = Store.addPattern,
                 .finalize = Store.finalize,
                 .destroy = Store.destroy,
                 .apply_perm = Store.applyPerm,
-            };
+            } };
         }
 
-        fn protoAdd(ctx: *anyopaque, gpa: std.mem.Allocator, model: [*]const u8, instance: [*]const u8, nodes: [*]const u32) anyerror!void {
+        fn protoAdd(ctx: *anyopaque, gpa: std.mem.Allocator, model: [*]const u8, instance: [*]const u8, nodes: [*]const u32) ir.DeviceResult(void) {
             // `gpa` stays in the ABI signature (this is the dlopen'd device's
             // entry point) but the staged columns own their own allocator —
             // see `staging_gpa`.
@@ -2865,7 +2879,7 @@ fn Impl(comptime D: type, comptime device_name: []const u8) type {
             const store: *Store = @ptrCast(@alignCast(ctx));
             const m: *const D.Model = @ptrCast(@alignCast(model));
             const i: *const D.Instance = @ptrCast(@alignCast(instance));
-            try store.append(m.*, i.*, nodes[0..n_u].*);
+            return ir.DeviceResult(void).fromLocal(store.append(m.*, i.*, nodes[0..n_u].*));
         }
     };
 }

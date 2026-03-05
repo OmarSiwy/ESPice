@@ -8,7 +8,6 @@
 const std = @import("std");
 const root = @import("../types.zig");
 const simdCopy = root.copySimd;
-const converger = @import("solvers").converger;
 const solvers = @import("solvers");
 
 const DenseLu = solvers.dense_lu.DenseLu(f64);
@@ -475,6 +474,12 @@ fn evalSourceRhs(ckt: *root.Circuit, t: f64, b_out: []f64) void {
     // ponytail: reuse the rhs plane directly — eval at x=0 gives rhs = B*u(t)
     const x_zero = b_out; // we'll overwrite b_out anyway
     root.zeroSimd(x_zero[0..n]);
+    // A source waveform only exists in the TRANSIENT phase (§4.6.1
+    // `analysis("tran")`). Evaluated in whatever phase the shared op left
+    // behind, every SIN/PULSE/PWL card answers with its DC value instead —
+    // which is why `matex/sine` marched 5001 steps of an undriven circuit and
+    // printed a column of zeros.
+    ckt.setSimState(.{ .t = t, .kind = .tran });
     ckt.eval(x_zero, t);
     // After eval at x=0: rhs contains the source contributions
     simdCopy(b_out[0..n], ckt.rhs[0..n]);
@@ -562,7 +567,13 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     // --- Output resolution cap ---
     const h_cap = opts.h_output_cap orelse opts.t_stop / 200.0;
 
-    const m_max = opts.m_max;
+    // A Krylov subspace of R^n has at most n dimensions, so anything past
+    // `n` is round-off masquerading as a basis vector. The cap is also a
+    // memory-safety bound: the step update reuses `arnoldi_tmp1`, an
+    // n-long buffer, as the m-long dense RHS, so an m > n Arnoldi (matex/dc,
+    // whose constant source never triggered the breakdown test) wrote past
+    // the allocation and aborted glibc with "double free or corruption".
+    const m_max = @min(opts.m_max, nn);
     const m_max_usize: usize = m_max;
 
     // --- Evaluate circuit once to populate G, C planes ---
