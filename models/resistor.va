@@ -1,4 +1,17 @@
-// Linear resistor. i(p,n) = V(p,n) / r.
+// Linear resistor. i(p,n) = V(p,n) / R(T).
+//
+// TEMPERATURE, ngspice restemp.c `RESupdate_conduct`:
+//   difference = (REStemp + RESdtemp) - REStnom
+//   factor     = 1 + TC1*difference + TC2*difference^2
+//   factor     = 1.01^(TCE*difference)               when TCE is given
+// TCE REPLACES the polynomial, it does not multiply it, and instance TEMP is
+// an ABSOLUTE override of the circuit temperature with DTEMP added on top of
+// whichever wins (same shape as jfet.va). Tnom is the host's `.options tnom`.
+//
+// The geometry/model-card half (RSH, NARROW, SHORT, DEFW, plus the `scale` and
+// `m` instance factors) is resolved in Zig before the card value reaches `r` —
+// frontend/builder.zig `addPassive`. Declaring those here too would DOUBLE
+// APPLY `scale`/`m`, so they stay where they are.
 //
 // §4.6.4.1 THERMAL NOISE, ngspice resnoise.c:97-99: the generator is
 // NevalSrcInstanceTemp(THERMNOISE, RESposNode, RESnegNode, RESconduct), i.e.
@@ -22,10 +35,32 @@
 module resistor(p, n);
     inout p, n;
     electrical p, n;
+    // `r` MUST stay the first parameter: `.sens`/`.mc` call the first Model
+    // parameter the device's PRINCIPAL one (analysis/eval.zig appendParams),
+    // which is how ngspice spells the resistance column `v(r1)` and not
+    // `v(r1:r)`.
     parameter real r = 1000.0 from (0:inf);
+    parameter real tnom  = $simparam("tnom");  // degC  nominal temperature
+    parameter real temp  = 27.0;               // degC  absolute override
+    parameter real dtemp = 0.0;                // degC  offset on the above
+    parameter real tc1   = 0.0;                // 1/degC    linear tempco
+    parameter real tc2   = 0.0;                // 1/degC^2  quadratic tempco
+    parameter real tce   = 0.0;                // %/degC    exponential tempco
+
+    real tdev, dt, rt;
 
     analog begin
-        I(p, n) <+ V(p, n) / r;
-        I(p, n) <+ white_noise(4.0 * 1.380649e-23 * $temperature / r, "thermal");
+        tdev = $temperature - 273.15;
+        if ($param_given(temp)) tdev = temp;
+        tdev = tdev + dtemp;
+        dt = tdev - tnom;
+        if ($param_given(tce)) rt = r * pow(1.01, tce * dt);
+        else rt = r * (1.0 + dt * (tc1 + tc2 * dt));
+        // ponytail: no floor on `rt`. ngspice clamps the CARD value (1 mOhm,
+        // done in builder.zig) but not the temperature factor, so a tempco
+        // steep enough to zero the resistance is a NaN here exactly as it is
+        // there. Clamp the day a deck legitimately wants that.
+        I(p, n) <+ V(p, n) / rt;
+        I(p, n) <+ white_noise(4.0 * 1.380649e-23 * (tdev + 273.15) / rt, "thermal");
     end
 endmodule

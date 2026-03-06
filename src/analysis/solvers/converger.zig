@@ -265,6 +265,16 @@ fn finalizeStep(
     if (scaled >= 1.0) return .{ .converged = false, .scaled = scaled, .why = .delta };
     for (0..n) |i| {
         const scale = @abs(vals[sys.diag_slots[i]]);
+        // A structurally zero diagonal is an MNA voltage-DEFINED branch row
+        // (V/E/H source): the branch current never appears in its own KVL
+        // equation. Its row scale is the source GAIN, not any diagonal, so
+        // `scale == 0` collapses the gate to the bare `residual_tol` floor on
+        // a row whose entries are O(gain) — and the EXACT solution's roundoff
+        // residual there is O(gain * eps). convergence/negative_feedback_1e9
+        // solved v(out) to 14 digits and was refused on 2.7e-8 > 1e-9, purely
+        // because `Eamp` has gain 1e9. No scale, no gate: the per-node delta
+        // test still governs the row, which is all ngspice's NIconvTest has.
+        if (scale == 0) continue;
         const tol = @max(opts.residual_tol, 10.0 * scale * (opts.reltol * @abs(x[i]) + opts.vntol));
         if (@abs(residual[i]) > tol) return .{ .converged = false, .scaled = scaled, .why = .residual };
     }

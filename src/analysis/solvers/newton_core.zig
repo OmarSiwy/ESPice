@@ -406,7 +406,12 @@ fn residualConverged(env: anytype, x: PtrChild(@TypeOf(env)).F64, residual: PtrC
     var i = env.tid();
     while (i < n) : (i += env.stride()) {
         const scale = env.gateScale(i);
-        const rt = @max(tol.residual_tol, 10.0 * scale * (tol.reltol * @abs(x[i]) + tol.vntol));
+        // scale == 0 is an MNA voltage-defined branch row (V/E/H source): no
+        // diagonal, so no row scale, so the bare `residual_tol` floor would be
+        // an ABSOLUTE test on a row whose entries are the source gain. Gate off
+        // there, exactly as converger.finalizeStep does — but keep the NaN
+        // rejection, which is not scale-dependent.
+        const rt = if (scale == 0) inf_f64 else @max(tol.residual_tol, 10.0 * scale * (tol.reltol * @abs(x[i]) + tol.vntol));
         // Negated comparisons reject NaN as well as an out-of-tolerance residual.
         if (!(@abs(residual[i]) <= rt) or !(@abs(x[i]) < inf_f64)) violation = 1;
     }

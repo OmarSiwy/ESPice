@@ -312,6 +312,22 @@ pub const Pz = struct {
     tol: Tolerances = .{},
     qr_max_iter: u32 = 1000,
     qr_tol: f64 = 1e-12,
+    /// `.pz in+ in− out+ out− vol|cur pol|zer|pz`. The output side of the
+    /// transfer, as MNA rows. A bare `.pz` leaves both at GROUND and asks for
+    /// the circuit's own poles, which is all a deck written before the ports
+    /// existed ever meant.
+    out_pos: u32 = 0,
+    out_neg: u32 = 0,
+    /// Where the input drive enters the matrix. `vol` drives a voltage source,
+    /// so the column is that card's BRANCH row; GROUND selects the `cur` form
+    /// below, a current injected at the input node pair. Same convention as
+    /// `Disto.drive_branch`.
+    drive_branch: u32 = 0,
+    in_pos: u32 = 0,
+    in_neg: u32 = 0,
+    /// `pol` asks for poles, `zer` for zeros, `pz` for both.
+    want_poles: bool = true,
+    want_zeros: bool = false,
 };
 
 pub const Four = struct {
@@ -348,6 +364,13 @@ pub const Disto = struct {
     /// Output node; GROUND means "the last probe" when running via the contract.
     output_node: u32 = 0,
     fd_eps: f64 = 1e-6,
+    /// Which of the card's three plots this query publishes. ngspice prints
+    /// the two harmonic SOLUTION VECTORS; `summary` is espice's own 4-column
+    /// digest at one node. prepare.zig fans one `.disto` card out into all
+    /// three, the way it already fans `.noise` out into two.
+    plot: Plot = .summary,
+
+    pub const Plot = enum(u8) { summary, second, third };
 };
 pub const Kind = enum(u8) { ac, dc, dcmatch, disto, envelope, four, hb, matex, mc, noise, op, pac, pnoise, pss, pxf, pz, qpss, sens, sp, stb, temp, tf, tran, tran_noise };
 pub const Query = union(Kind) {

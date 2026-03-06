@@ -266,10 +266,24 @@ fn transientOp(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, options: 
         try ckt.computeBaseline();
         if (sim != null and sim.?.completed) {
             if (ckt.needs_tran_op) return .{ .converged = true, .iterations = 0, .max_dx = 0, .method_used = .optran };
+            // "Its failure is not a failure of the rung" only holds if the
+            // SETTLED STATE survives the attempt. A failed Newton leaves x
+            // wherever it wandered, and this rung runs precisely on circuits
+            // where it wanders far: stress/scaling_inverter_chain_4k is a
+            // 4000-deep feed-forward cascade, so one Newton step multiplies
+            // by (per-stage gain)^4000 and x came back at 5.9e7 V with a
+            // static residual of 8.4e23 A. That x was then handed to `.tran`
+            // as its initial condition and no timestep could open on it
+            // (TimestepTooSmall at t=0, dt down to 1e-18). Settled state
+            // kept; the confirming Newton may only IMPROVE it.
+            const x_settled = try opa.alloc(f64, ckt.n);
+            defer opa.free(x_settled);
+            copySimd(x_settled, x);
             const fin = newtonRun(ckt, ws, x, options.tol, 0.0) catch |err| switch (err) {
                 error.QueryCancelled => return err,
                 else => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 },
             };
+            if (!fin.converged) copySimd(x, x_settled);
             return .{ .converged = true, .iterations = fin.iterations, .max_dx = fin.max_dx, .method_used = .optran };
         }
     }

@@ -531,7 +531,9 @@ const QpssTests = struct {
     const impl = @import("../pss/qpss.zig");
     const MixGrid = impl.test_access.MixGrid;
     const Options = @import("requests").Qpss;
-    const buildBasis2D = impl.test_access.buildBasis2D;
+    const buildTransform = impl.test_access.buildTransform;
+    const buildSampleTimes = impl.test_access.buildSampleTimes;
+    const transformWork = impl.test_access.transformWork;
     const dft2D = impl.test_access.dft2D;
     const gvProduct = impl.test_access.gvProduct;
     const idft2D = impl.test_access.idft2D;
@@ -545,6 +547,30 @@ const QpssTests = struct {
     // ============================================================================
 
     const testing = std.testing;
+
+    // One fixed incommensurate pair for every basis test: the transform is built
+    // the way the solver builds it — APFT instants, then Γ and its inverse at
+    // those instants — so the tests exercise the shape that actually ships.
+    const tone1: f64 = 1000.0;
+    const tone2: f64 = 1414.213562373095;
+
+    fn makeTransform(
+        alloc: std.mem.Allocator,
+        grid: MixGrid,
+        times: []f64,
+        basis_cos: []f64,
+        basis_sin: []f64,
+        basis_cos_t: []f64,
+        basis_sin_t: []f64,
+    ) !void {
+        buildSampleTimes(times, grid, tone1, tone2);
+        const need = transformWork(grid.nf);
+        const work = try alloc.alloc(f64, need.f64s);
+        defer alloc.free(work);
+        const piv = try alloc.alloc(u32, need.u32s);
+        defer alloc.free(piv);
+        try buildTransform(grid, tone1, tone2, times, basis_cos, basis_sin, basis_cos_t, basis_sin_t, work, piv);
+    }
 
     test "QPSS: MixGrid flat ↔ signed roundtrip" {
         const grid = MixGrid.init(3, 2);
@@ -608,7 +634,9 @@ const QpssTests = struct {
         defer alloc.free(basis_cos_t);
         const basis_sin_t = try alloc.alloc(f64, nf * nf);
         defer alloc.free(basis_sin_t);
-        buildBasis2D(grid, basis_cos, basis_sin, basis_cos_t, basis_sin_t);
+        const times = try alloc.alloc(f64, nf);
+        defer alloc.free(times);
+        try makeTransform(alloc, grid, times, basis_cos, basis_sin, basis_cos_t, basis_sin_t);
 
         const x_re = try alloc.alloc(f64, sz);
         defer alloc.free(x_re);
@@ -662,7 +690,9 @@ const QpssTests = struct {
         defer alloc.free(basis_cos_t);
         const basis_sin_t = try alloc.alloc(f64, nf * nf);
         defer alloc.free(basis_sin_t);
-        buildBasis2D(grid, basis_cos, basis_sin, basis_cos_t, basis_sin_t);
+        const times = try alloc.alloc(f64, nf);
+        defer alloc.free(times);
+        try makeTransform(alloc, grid, times, basis_cos, basis_sin, basis_cos_t, basis_sin_t);
 
         // Spectrum: cos at k=1,l=0 (re=0.5) + sin at k=0,l=1 (im=-0.3)
         var x_re = [_]f64{0} ** 9;
@@ -695,12 +725,57 @@ const QpssTests = struct {
         try testing.expectApproxEqAbs(@as(f64, 0.0), out_im[dc_idx], 1e-12);
     }
 
-    test "QPSS: buildBasis2D orthogonality" {
-        // For a proper DFT basis, <cos_f, cos_g> = (nf/2) δ_{fg} for f,g ≠ 0.
-        // More precisely, Σ_s cos(2πf·s_vec) cos(2πg·s_vec) = nf * δ_{fg}
-        // when both f and g are zero, nf/2 for real-valued DFT.
-        // Our convention: (1/nf) * DFT gives coefficient, so the inner product
-        // of basis vectors should be nf for matching indices, 0 otherwise.
+    test "QPSS: sampled two-tone drive is a clean pair of spectral lines" {
+        // The defect this guards: every grid point used to be evaluated at
+        // t = 0, so a source could not vary across the grid. With the APFT
+        // instants, sampling A1*sin(w1 t) + A2*sin(w2 t) and taking the 2-D DFT
+        // has to land the whole signal on (±1,0) and (0,±1) — a wrong time grid
+        // smears it across every mix product instead.
+        const a1: f64 = 1.0;
+        const a2: f64 = 0.5;
+        const grid = MixGrid.init(2, 2);
+        const nf = grid.nf; // 5*5 = 25
+
+        const alloc = testing.allocator;
+        const buf = try alloc.alloc(f64, 6 * nf * nf + 3 * nf);
+        defer alloc.free(buf);
+        const basis_cos = buf[0 .. nf * nf];
+        const basis_sin = buf[nf * nf ..][0 .. nf * nf];
+        const basis_cos_t = buf[2 * nf * nf ..][0 .. nf * nf];
+        const basis_sin_t = buf[3 * nf * nf ..][0 .. nf * nf];
+        const times = buf[4 * nf * nf ..][0..nf];
+        const td = buf[4 * nf * nf + nf ..][0..nf];
+        const out_re = buf[4 * nf * nf + 2 * nf ..][0..nf];
+        const out_im = buf[4 * nf * nf + 3 * nf ..][0..nf];
+
+        try makeTransform(alloc, grid, times, basis_cos, basis_sin, basis_cos_t, basis_sin_t);
+
+        const tau = 2.0 * std.math.pi;
+        for (0..nf) |s| {
+            td[s] = a1 * @sin(tau * tone1 * times[s]) + a2 * @sin(tau * tone2 * times[s]);
+        }
+        dft2D(out_re, out_im, td, basis_cos, basis_sin, 1, nf);
+
+        // Two-sided coefficients: |X| = A/2 on each tone's own pair.
+        for (0..nf) |f_idx| {
+            const kl = grid.signedKL(f_idx);
+            const want: f64 = if (kl.l == 0 and (kl.k == 1 or kl.k == -1))
+                a1 / 2.0
+            else if (kl.k == 0 and (kl.l == 1 or kl.l == -1))
+                a2 / 2.0
+            else
+                0.0;
+            const got = @sqrt(out_re[f_idx] * out_re[f_idx] + out_im[f_idx] * out_im[f_idx]);
+            try testing.expectApproxEqAbs(want, got, 1e-9);
+        }
+    }
+
+    test "QPSS: the transform inverts its own forward basis" {
+        // Γ⁻¹Γ = I. Σ_s Γ⁻¹[f][s]·Γ[s][g] = δ_{fg}, and the stored arrays carry
+        // a factor nf and a negated imaginary part (dft2D applies both), so the
+        // real part of that sum reads as nf·δ_{fg} here. The ideal orthogonal
+        // DFT basis satisfied this by construction; at APFT instants it does not,
+        // which is exactly why the inverse is computed rather than assumed.
         const grid = MixGrid.init(1, 1);
         const nf = grid.nf;
 
@@ -713,16 +788,16 @@ const QpssTests = struct {
         defer alloc.free(basis_cos_t);
         const basis_sin_t = try alloc.alloc(f64, nf * nf);
         defer alloc.free(basis_sin_t);
-        buildBasis2D(grid, basis_cos, basis_sin, basis_cos_t, basis_sin_t);
+        const times = try alloc.alloc(f64, nf);
+        defer alloc.free(times);
+        try makeTransform(alloc, grid, times, basis_cos, basis_sin, basis_cos_t, basis_sin_t);
 
-        // Check: Σ_s cos[f,s]*cos[g,s] + sin[f,s]*sin[g,s] = nf * δ_{fg}
-        // (This is the full complex inner product mapped to real)
         for (0..nf) |f_idx| {
             for (0..nf) |g_idx| {
                 var dot: f64 = 0;
                 for (0..nf) |s| {
-                    dot += basis_cos[f_idx * nf + s] * basis_cos[g_idx * nf + s] +
-                        basis_sin[f_idx * nf + s] * basis_sin[g_idx * nf + s];
+                    dot += basis_cos[f_idx * nf + s] * basis_cos_t[s * nf + g_idx] +
+                        basis_sin[f_idx * nf + s] * basis_sin_t[s * nf + g_idx];
                 }
                 const expected: f64 = if (f_idx == g_idx) @as(f64, @floatFromInt(nf)) else 0;
                 try testing.expectApproxEqAbs(expected, dot, 1e-10);
@@ -790,7 +865,9 @@ const QpssTests = struct {
         defer alloc.free(basis_cos_t);
         const basis_sin_t = try alloc.alloc(f64, nf * nf);
         defer alloc.free(basis_sin_t);
-        buildBasis2D(grid, basis_cos, basis_sin, basis_cos_t, basis_sin_t);
+        const times = try alloc.alloc(f64, nf);
+        defer alloc.free(times);
+        try makeTransform(alloc, grid, times, basis_cos, basis_sin, basis_cos_t, basis_sin_t);
 
         const x_re = try alloc.alloc(f64, sz);
         defer alloc.free(x_re);
