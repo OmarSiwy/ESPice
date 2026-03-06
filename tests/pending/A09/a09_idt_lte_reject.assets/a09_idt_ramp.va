@@ -1,0 +1,18 @@
+`include "disciplines.vams"
+// VAMS-2023 4.5.4 Table 4-18: "idt(expr,ic) Returns [the integral from t0 to t
+// of] x(tau) d(tau) + c, where in this case c is the value of ic at t0."  With
+// expr == 1.0 and ic == 0 the closed form is exactly V(p,n) = t.
+//
+// VAMS-2023 4.5.15: "All analog operators are considered to have no state
+// history prior to time t == 0" and "all analog operators [shall be] evaluated
+// every iteration of a simulation to ensure that the internal state is
+// maintained".  The internal state is ACCEPTED-TIME state: it advances once per
+// accepted time point.  The sum of the accepted dt is t by construction, so
+// V(p,n) = t holds for every step sequence the controller happens to pick and
+// for every count of rejected attempts along the way.
+module a09_idt_ramp(p, n);
+    inout p, n;
+    electrical p, n;
+    analog
+        V(p, n) <+ idt(1.0, 0.0);
+endmodule

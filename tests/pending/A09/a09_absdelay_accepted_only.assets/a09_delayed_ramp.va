@@ -1,0 +1,21 @@
+`include "disciplines.vams"
+// VAMS-2023 4.5.7 absolute delay: "In time-domain analyses, absdelay()
+// introduces a transport delay equal to the instantaneous value of td based on
+// the following formula.  Output(t) = Input(max(t - td, 0))".  The max() is the
+// clause's own, so for t < td the output is Input(0), which is 0 here; VAMS-2023
+// 4.5.15 says the same thing from the other side, "All analog operators are
+// considered to have no state history prior to time t == 0".
+//
+// The delay line is the operator whose state CANNOT be rolled back -- a history
+// sample pushed on a rejected attempt is a sample at a time that never happened.
+// So the push belongs to the accepted-step boundary, and the resulting waveform
+// must be independent of how many attempts were rejected:
+//   V(p,n) = 0            for t <= td
+//   V(p,n) = t - td       for t >= td
+module a09_delayed_ramp(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real td = 0.1 from (0:inf);
+    analog
+        V(p, n) <+ absdelay($abstime, td);
+endmodule

@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "X01: CPL two-conductor odd mode matched to Zo=25 ohm, Td=8 ns.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Same matrices as cpl_tran_even_mode. Differential drive through 25 ohm into 25 ohm excites and matches the odd mode alone: v(a1)=+0.5, v(a2)=-0.5, and v(b1)=+0.5, v(b2)=-0.5 delayed by Td=8 ns. Together with the even-mode fixture this pins both eigenvalues of the 2x2 L and C matrices; a single-impedance model cannot match 100 ohm and 25 ohm terminations simultaneously.",
+    "cross_check": "Independent ngspice-44.2 run of this exact netlist agrees with every tabulated value; the per-fixture bound is stated in the .sp header.",
+    "command": "ngspice -n -b -r reference.raw <netlist>.sp"
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "columns": {
+          "v(a1)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-08,
+            "values": [
+              0.5,
+              0.5,
+              0.5,
+              0.5,
+              0.5
+            ]
+          },
+          "v(a2)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-08,
+            "values": [
+              -0.5,
+              -0.5,
+              -0.5,
+              -0.5,
+              -0.5
+            ]
+          },
+          "v(b1)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-08,
+            "values": [
+              0.0,
+              0.0,
+              0.5,
+              0.5,
+              0.5
+            ]
+          },
+          "v(b2)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-08,
+            "values": [
+              -0.0,
+              -0.0,
+              -0.5,
+              -0.5,
+              -0.5
+            ]
+          }
+        },
+        "axis": {
+          "name": "time",
+          "values": [
+            4e-09,
+            7.9e-09,
+            8.2e-09,
+            2e-08,
+            3.9e-08
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "176a9997ec37ea9dc1130b4f8d96d14010c9d53911f1ecd170802db602e4a490"
+}

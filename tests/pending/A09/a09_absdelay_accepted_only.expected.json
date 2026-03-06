@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "absdelay history is accepted-step state: the delayed ramp is exact across four rejection bursts.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "The input is $abstime (LRM 9.10), so absdelay(input, td) at time t is the input at t - td (LRM 4.5.7): v(dl) = t - 0.1 for t >= 0.1. For t < 0.1 LRM 4.5.15 gives the operator no state history prior to t == 0, so the output holds the t == 0 input value, 0. Samples: 0.05 -> 0; 0.2 -> 0.1; 0.4 -> 0.3; 0.6 -> 0.5; 0.8 -> 0.7; 1.0 -> 0.9, all clear of the t = 0.1 kink. The input is linear in t, so the history interpolation is exact. N2 forces rejected-and-retried steps at t = 0.125, 0.375, 0.625, 0.875; a history sample pushed on a rejected attempt records a time that never happened (LRM 8.4.7)."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "axis": {
+          "name": "time",
+          "values": [
+            0.05,
+            0.2,
+            0.4,
+            0.6,
+            0.8,
+            1.0
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-12
+        },
+        "columns": {
+          "v(dl)": {
+            "values": [
+              0.0,
+              0.1,
+              0.3,
+              0.5,
+              0.7,
+              0.9
+            ],
+            "unit": "V",
+            "rtol": 1e-09,
+            "atol": 1e-12
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "1fa3a0fa5388c386a84b397693d03698a4daea66f261cb0b8c0d42415e1ec4b9",
+  "row": "A09"
+}

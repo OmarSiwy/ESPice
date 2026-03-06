@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "X01: TXL matched step; the Pade fit must be a transparent 10 ns delay.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Z0=sqrt(L/C)=50, Td=length*sqrt(L*C)=10 ns, Rs=RL=Z0 so GammaS=GammaL=0. v(a)=0.5 after the 10 ps source edge; v(b)=v(a) delayed by Td. The 9.9 ns sample pins Td from below, 100 ps before arrival.",
+    "cross_check": "Independent ngspice-44.2 run of this exact netlist agrees with every tabulated value; the per-fixture bound is stated in the .sp header.",
+    "command": "ngspice -n -b -r reference.raw <netlist>.sp"
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "columns": {
+          "v(a)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 5e-07,
+            "values": [
+              0.5,
+              0.5,
+              0.5,
+              0.5,
+              0.5
+            ]
+          },
+          "v(b)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 5e-07,
+            "values": [
+              0.0,
+              0.0,
+              0.5,
+              0.5,
+              0.5
+            ]
+          }
+        },
+        "axis": {
+          "name": "time",
+          "values": [
+            5e-09,
+            9.9e-09,
+            1.2e-08,
+            2.5e-08,
+            4.4e-08
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "e4d03482630c29a38124d2013e28234b90ca67dc4c2890fdb764aa79867fbaea"
+}

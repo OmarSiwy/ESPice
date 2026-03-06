@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "X01: LTRA step into a near-short; reflection sign inverts the far end.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "GammaL=(0.05-50)/(0.05+50)=-0.998001998001998, GammaS=0, Vi=0.5. v(b)=Vi(1+GammaL)=0.000999000999001 for t>Td; v(a)=0.5 for t<2Td then 0.000999000999001. DC check 0.05/50.05 identical.",
+    "cross_check": "Independent ngspice-44.2 run of this exact netlist agrees with every tabulated value; the per-fixture bound is stated in the .sp header.",
+    "command": "ngspice -n -b -r reference.raw <netlist>.sp"
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "columns": {
+          "v(a)": {
+            "unit": "V",
+            "rtol": 0.0001,
+            "atol": 2e-07,
+            "values": [
+              0.5,
+              0.5,
+              0.0009990009990009652,
+              0.0009990009990009652
+            ]
+          },
+          "v(b)": {
+            "unit": "V",
+            "rtol": 0.0001,
+            "atol": 2e-07,
+            "values": [
+              0.0,
+              0.0009990009990009652,
+              0.0009990009990009652,
+              0.0009990009990009652
+            ]
+          }
+        },
+        "axis": {
+          "name": "time",
+          "values": [
+            5e-09,
+            1.5e-08,
+            2.5e-08,
+            4.4e-08
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "4a922eb0242a3e525f005e28880da682dc68c0c900e353da33981887354096b3"
+}

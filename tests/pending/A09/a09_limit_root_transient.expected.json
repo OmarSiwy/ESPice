@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "At a converged point the $limit() return value is the value of the access function reference: v(lim) = 1 + 0.5*t across a transient.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "KCL at the single node is exp(vlim) - exp(1 + 0.5*t) = 0 where vlim is the $limit() return value, so every converged point has vlim = 1 + 0.5*t exactly. The rawfile records V(p,n), not vlim, so the asserted equality IS LRM 9.17.3's sentence 'When the simulator has converged, the return value of the $limit() function is the value of the access function reference, within appropriate tolerances', enforced by 'On any iteration where the output value is not the same as the value of the access function (within appropriate tolerances), the simulator is prevented from terminating the iteration' and by the user function's obligation under 9.17.3 to call $discontinuity(-1) (9.17.1). Unique real root: 1.0, 1.25, 1.5, 1.75, 2.0 at t = 0, 0.5, 1.0, 1.5, 2.0; linear in t, so interpolation between accepted points is exact. NO DIGITS ARE WRITTEN for iteration count or step count: 9.17.3 leaves the simulator 'responsible for determining if limiting should be applied and what the return value is on a given iteration' and 8.3.2 leaves 'the interval between the time points' to the simulator, so both are implementation-defined and unassertable. The column band is rtol 1e-3 / atol 1e-6 rather than this row's usual 1e-9 because 'within appropriate tolerances' is also implementation-defined; 8.3.3 gives only the shape |v(j) - v(j-1)| < reltol*max(|v(j)|,|v(j-1)|) + abstol and calls reltol 'typically ... 0.001'. The band still has teeth: a solver that terminates the iteration while the limiter is clamping reports a V(p,n) off by the clamp, up to 0.5 V on a 1-2 V signal, 250x to 500x the band. CORRECTED after review: an earlier revision of this oracle asserted that the limiter 'may not move the root and may not cost the step' as if 9.17.3 said so. It does not; the claim is withdrawn and no row owns it. The same revision said the model 'produces exactly 1.0 at .op'; measured, the converged root at t = 0 is 1.0000000574268284."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "axis": {
+          "name": "time",
+          "values": [
+            0.0,
+            0.5,
+            1.0,
+            1.5,
+            2.0
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-12
+        },
+        "columns": {
+          "v(lim)": {
+            "values": [
+              1.0,
+              1.25,
+              1.5,
+              1.75,
+              2.0
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 1e-06
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "82c5e15e458108159f93ca1064cde5382f37155fca75a0c37d02dceb7e5702f0",
+  "row": "A09"
+}
