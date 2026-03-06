@@ -65,6 +65,7 @@ pub fn solverPin() SolverPin {
 // 0 = unread, 1 = false, 2 = true. Only the cached byte is published.
 var opdbg_cache: std.atomic.Value(u8) = .init(0);
 var newton_dbg_cache: std.atomic.Value(u8) = .init(0);
+var hb_trace_cache: std.atomic.Value(u8) = .init(0);
 
 pub fn opdbg() bool {
     return envFlag(&opdbg_cache, "ZP_OPDBG");
@@ -72,6 +73,14 @@ pub fn opdbg() bool {
 
 pub fn newtonDbg() bool {
     return envFlag(&newton_dbg_cache, "ZP_NEWTON_DEBUG");
+}
+
+/// Same rule, third flag: `pss/hb.zig` tested this once per harmonic-balance
+/// iterate, so the environment was rescanned every iteration to decide not to
+/// print. It also used `std.posix.getenv`, which Zig 0.16 removed — see the
+/// `std.c.getenv` note on `envFlag`.
+pub fn hbTrace() bool {
+    return envFlag(&hb_trace_cache, "ESPICE_HB_TRACE");
 }
 
 fn envFlag(cache: *std.atomic.Value(u8), name: [*:0]const u8) bool {
