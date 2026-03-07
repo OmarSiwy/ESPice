@@ -1,0 +1,26 @@
+`include "disciplines.vams"
+// One module that BOTH forces the rejection and owns the accepted-time state,
+// so the retry re-enters the same instance that triggered it.
+//
+// VAMS-2023 4.5.4: idt(1.0, 0.0) is the unit ramp, value t.
+// VAMS-2023 5.10.3: `cross` is a monitored event; resolving it costs the host a
+// rejected step (VAMS-2023 8.4.7: "Having calculated the solution for a given
+// time, the analog engine can either accept or reject that solution").
+// VAMS-2023 4.5.15: the operator's internal state is per ACCEPTED point, so a
+// rejected-and-retried attempt must leave the accumulator exactly where the
+// last ACCEPTED point left it.
+//
+// Rising zero crossings of sin(2*pi*(t - 0.125)/0.25) in (0, 1]:
+//   t = 0.125, 0.375, 0.625, 0.875.
+// So V(p,n) = t + 0.001 * (number of those crossings at or before t).
+module a09_idt_latched(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real period = 0.25;
+    real flips;
+    analog begin
+        @(cross(sin(6.283185307179586 * ($abstime - 0.125) / period), +1))
+            flips = flips + 1.0;
+        V(p, n) <+ idt(1.0, 0.0) + 1.0e-3 * flips;
+    end
+endmodule

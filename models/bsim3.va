@@ -1,0 +1,614 @@
+// BSIM3v3.3.0 MOSFET (ngspice netlist letter M, LEVEL 8/49) — DC core.
+//
+// Spec: docs/devices/bsim3v3-core.md (normative math, section 1) transcribed
+// value-for-value from ngspice b3temp.c/b3ld.c (BSIM3v3.3.0, released
+// 07/29/2005). Order follows the doc: temperature/geometry/derived-default
+// prep first (b3temp.c, bias independent), then the V()-dependent chain
+// (b3ld.c lines 499-1239). Physical constants are b3temp.c's own #defines
+// (KboQ 8.617087e-5, EPSSI 1.03594e-10, ...), not CODATA — bit-exactness
+// against the C is the point.
+//
+// Not here, on purpose:
+//   * Gm/Gds/Gmb, junction conductances, and every hand-chained d*/dV in the
+//     C: the AD backend differentiates the value chain below, which is the
+//     same formulas — a second copy would diverge.
+//   * Intrinsic/overlap/junction charges (capMod 0-3), NQS, noise: every
+//     bench fixture is .op/.dc where ddt() stamps nothing. First .tran user
+//     adds the b3ld.c capMod=3 charge section as its own block.
+//   * L/W/P binning families (l*/w*/p* card params) and binunit: fixtures
+//     bin nothing; pParam->X then equals model->X verbatim.
+//   * ACM > 0 junction geometry, version < 3.3 behavior switches.
+module bsim3(d, g, s, b);
+    inout d, g, s, b;
+    electrical d, g, s, b;
+    electrical di, si;              // behind RSH*NRD/NRS legs (collapse at 0)
+
+    // ---- model parameters (b3.c spellings, b3set.c defaults) --------------
+    parameter real type = 1.0;           // +1 NMOS, -1 PMOS (builder-set)
+    parameter integer mobmod = 1 from [1:3];
+    parameter real tnom = $simparam("tnom");          // degC
+    parameter real tox  = 150.0e-10;     // m
+    parameter real toxm = 150.0e-10;     // m (default: tox)
+    parameter real xj   = 0.15e-6;       // m
+    parameter real nch  = 1.7e17;        // cm^-3 (npeak; >1e20 read as m^-3)
+    parameter real nsub = 6.0e16;        // cm^-3
+    parameter real ngate = 0.0;          // cm^-3 (>1.000001e24 read as m^-3)
+    parameter real gamma1 = 0.0;         // V^0.5 (default: derived)
+    parameter real gamma2 = 0.0;         // V^0.5 (default: derived)
+    parameter real xt   = 1.55e-7;       // m
+    parameter real vbx  = 0.0;           // V (default: derived)
+    parameter real vbm  = -3.0;          // V
+    parameter real k1   = 0.53;          // (default: derived when neither k given)
+    parameter real k2   = -0.0186;       // (default: derived)
+    parameter real k3   = 80.0;
+    parameter real k3b  = 0.0;           // 1/V
+    parameter real w0   = 2.5e-6;        // m
+    parameter real nlx  = 1.74e-7;       // m
+    parameter real vth0 = 0.7;           // V, signed (default: type-dep/derived)
+    parameter real vfb  = -1.0;          // V (default: derived from vth0)
+    parameter real dvt0 = 2.2;
+    parameter real dvt1 = 0.53;
+    parameter real dvt2 = -0.032;        // 1/V
+    parameter real dvt0w = 0.0;
+    parameter real dvt1w = 5.3e6;
+    parameter real dvt2w = -0.032;
+    parameter real drout = 0.56;
+    parameter real dsub = 0.56;          // (default: drout)
+    parameter real nfactor = 1.0;
+    parameter real cdsc  = 2.4e-4;       // F/m^2
+    parameter real cdscb = 0.0;
+    parameter real cdscd = 0.0;
+    parameter real cit   = 0.0;
+    parameter real vsat  = 8.0e4;        // m/s
+    parameter real at    = 3.3e4;        // m/s
+    parameter real a0    = 1.0;
+    parameter real ags   = 0.0;
+    parameter real a1    = 0.0;
+    parameter real a2    = 1.0;
+    parameter real keta  = -0.047;       // 1/V
+    parameter real ua    = 2.25e-9;      // m/V
+    parameter real ua1   = 4.31e-9;
+    parameter real ub    = 5.87e-19;     // (m/V)^2
+    parameter real ub1   = -7.61e-18;
+    parameter real uc    = -4.65e-11;    // (default: mobmod-dependent)
+    parameter real uc1   = -5.6e-11;     // (default: mobmod-dependent)
+    parameter real u0    = 670.0;        // cm^2/Vs (default: type-dependent)
+    parameter real ute   = -1.5;
+    parameter real voff  = -0.08;        // V
+    parameter real delta = 0.01;         // V
+    parameter real rdsw  = 0.0;          // ohm*um^wr
+    parameter real prwg  = 0.0;          // 1/V
+    parameter real prwb  = 0.0;
+    parameter real prt   = 0.0;
+    parameter real wr    = 1.0;
+    parameter real eta0  = 0.08;
+    parameter real etab  = -0.07;        // 1/V
+    parameter real pclm  = 1.3;
+    parameter real pdiblc1 = 0.39;
+    parameter real pdiblc2 = 0.0086;
+    parameter real pdiblcb = 0.0;        // 1/V
+    parameter real pscbe1 = 4.24e8;      // V/m
+    parameter real pscbe2 = 1.0e-5;      // m/V
+    parameter real pvag  = 0.0;
+    parameter real dwg   = 0.0;          // m/V
+    parameter real dwb   = 0.0;          // m/V^0.5
+    parameter real b0    = 0.0;          // m
+    parameter real b1    = 0.0;          // m
+    parameter real alpha0 = 0.0;         // m/V
+    parameter real alpha1 = 0.0;         // 1/V
+    parameter real beta0  = 30.0;        // V
+    parameter real kt1   = -0.11;        // V
+    parameter real kt1l  = 0.0;          // V*m
+    parameter real kt2   = 0.022;
+    // geometry corrections
+    parameter real lint = 0.0;           // m
+    parameter real ll   = 0.0;
+    parameter real lln  = 1.0;
+    parameter real lw   = 0.0;
+    parameter real lwn  = 1.0;
+    parameter real lwl  = 0.0;
+    parameter real wint = 0.0;           // m
+    parameter real wl   = 0.0;
+    parameter real wln  = 1.0;
+    parameter real ww   = 0.0;
+    parameter real wwn  = 1.0;
+    parameter real wwl  = 0.0;
+    parameter real xl   = 0.0;           // m
+    parameter real xw   = 0.0;           // m
+    // source/drain junction + series resistance
+    parameter real js   = 1.0e-4;        // A/m^2
+    parameter real jsw  = 0.0;           // A/m
+    parameter real nj   = 1.0;
+    parameter real xti  = 3.0;
+    parameter real ijth = 0.1;           // A (0 disables linearization)
+    parameter real rsh  = 0.0;           // ohm/square
+
+    // ---- instance parameters ---------------------------------------------
+    parameter real l  = 5.0e-6 from (0:inf);
+    parameter real w  = 5.0e-6 from (0:inf);
+    parameter real ad = 0.0;             // m^2
+    parameter real as = 0.0;             // m^2
+    parameter real pd = 0.0;             // m
+    parameter real ps = 0.0;             // m
+    parameter real nrd = 1.0 from [0:inf);
+    parameter real nrs = 1.0 from [0:inf);
+    parameter real m  = 1.0 from (0:inf);
+    parameter real delvto = 0.0;         // V
+    parameter real mulu0  = 1.0;
+
+    // bias-independent prep (b3temp.c)
+    real tk, tnomk, tratio, vtm0, vtm, eg0, eg, ni, cox, factor1, vt0, vcrit;
+    real jst, jswt, jtmp;
+    real dl, dwx, leff, weff, uax, ubx, ucx, uc1x, u0x, u0temp, vsattemp, rds0;
+    real npeakx, ngatex, phi, sqrtphi, phis3, xdep0, litl, vbi, cdep0;
+    real k1x, k2x, vbxx, vbmx, g1, g2, vbsc, vfbx, vth0x, vth0i, vfbi;
+    real toxmx, k1ox, k2ox, dsubx, lt0, theta0vb0, thetarout;
+    real nvtmj, isbs, isbd, vjsm, vjdm, isevjsm, isevjdm, gdrain, gsource, gminx;
+    // bias-dependent (b3ld.c)
+    real vgs, vgd, vds, vbs, vbd, mode, vdsx, vgsx, vbsx;
+    real vbseff, phis, sqrtphis, xdep, lt1, ltw, theta0, deltvth, dvthw;
+    real tempratio, diblsft, vth, n, vgs_eff, vgst, vgsteff, expvgst;
+    real weffp, rds, abulk0, abulk, denomi, ueff, esat, esatl, lambda;
+    real wvcox, wvcoxrds, vgst2vtm, vdsat, vdseff, diffvds;
+    real vasat, vaclm, vadibl, va, vascbe;
+    real betax, fgche1, fgche2, gche, idl, idsa, ids, isubst;
+    real ibs, ibd;
+    real t0, t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11;
+    real tmp1, tmp2, tmp3, tmp4;
+
+    // Junction diode current, b3ld.c lines 427-481: raw exponential with
+    // gmin, linearized above vjm when ijth > 0 (v3.3 behavior). The ijth=0
+    // exponential is tangent-continued above 80*nvtm the way mos1.va's jcur
+    // is: pnjlim keeps Newton iterates below it, but sweep warm starts probe
+    // unlimited x, and a hard exp there overflows. With ijth > 0 (default
+    // 0.1) the ngspice linear branch takes over well below that.
+    analog function real jdio;
+        input v, isat, nvtmx, vjm, isevjm, ijthx, gminy;
+        real v, isat, nvtmx, vjm, isevjm, ijthx, gminy;
+        real u;
+        begin
+            if (isat <= 0.0) jdio = gminy * v;
+            else if ((ijthx > 0.0) && (v >= vjm))
+                jdio = isevjm - isat + (isevjm / nvtmx) * (v - vjm) + gminy * v;
+            else begin
+                u = min(v / nvtmx, 80.0);
+                jdio = isat * (exp(u) * (1.0 + (v / nvtmx - u)) - 1.0) + gminy * v;
+            end
+        end
+    endfunction
+
+    analog begin
+        // ============ b3temp.c: temperature-level constants ===============
+        tnomk = tnom + 273.15;
+        tk = $temperature;
+        tratio = tk / tnomk;
+        vtm0 = 8.617087e-5 * tnomk;
+        vtm = 8.617087e-5 * tk;
+        eg0 = 1.16 - 7.02e-4 * tnomk * tnomk / (tnomk + 1108.0);
+        eg = 1.16 - 7.02e-4 * tk * tk / (tk + 1108.0);
+        ni = 1.45e10 * (tnomk / 300.15) * sqrt(tnomk / 300.15)
+           * exp(21.5565981 - eg0 / (2.0 * vtm0));
+        cox = 3.453133e-11 / tox;
+        factor1 = sqrt(1.03594e-10 / 3.453133e-11 * tox);
+        // pnjlim constants: CONSTvt0/CONSTroot2 (devsup frame, ngspice const.h)
+        vt0 = 1.38064852e-23 * 300.15 / 1.6021766208e-19;
+        vcrit = vt0 * ln(vt0 / (1.4142135623730951 * 1.0e-14));
+        gminx = $simparam("gmin", 1.0e-12);
+
+        // junction saturation current density temperature mapping
+        if (tk != tnomk) begin
+            jtmp = exp((eg0 / vtm0 - eg / vtm + xti * ln(tratio)) / nj);
+            jst = js * jtmp;
+            jswt = jsw * jtmp;
+        end else begin
+            jst = js;
+            jswt = jsw;
+        end
+        if (jst < 0.0) jst = 0.0;
+        if (jswt < 0.0) jswt = 0.0;
+
+        // ============ b3temp.c: geometry ==================================
+        t0 = pow(l, lln);
+        t1 = pow(w, lwn);
+        dl = lint + ll / t0 + lw / t1 + lwl / (t0 * t1);
+        t2 = pow(l, wln);
+        t3 = pow(w, wwn);
+        dwx = wint + wl / t2 + ww / t3 + wwl / (t2 * t3);
+        leff = l + xl - 2.0 * dl;
+        weff = w + xw - 2.0 * dwx;
+        // ngspice E_BADPARMs on non-positive Leff/Weff; no diagnostics
+        // channel here, so clamp like mos1.va does for LD >= L/2.
+        // ponytail: silent 1e-9 floor; report the day a real deck trips it.
+        if (leff < 1.0e-9) leff = 1.0e-9;
+        if (weff < 1.0e-9) weff = 1.0e-9;
+
+        // ============ b3temp.c: mobility/velocity temperature =============
+        uax = ua + ua1 * (tratio - 1.0);
+        ubx = ub + ub1 * (tratio - 1.0);
+        if ($param_given(uc)) ucx = uc;
+        else if (mobmod == 3) ucx = -0.0465;
+        else ucx = -0.0465e-9;
+        if ($param_given(uc1)) uc1x = uc1;
+        else if (mobmod == 3) uc1x = -0.056;
+        else uc1x = -0.056e-9;
+        ucx = ucx + uc1x * (tratio - 1.0);
+        if ($param_given(u0)) u0x = u0;
+        else if (type > 0.0) u0x = 0.067;
+        else u0x = 0.025;
+        if (u0x > 1.0) u0x = u0x / 1.0e4;      // cm^2/Vs card value
+        u0temp = u0x * pow(tratio, ute) * mulu0;
+        vsattemp = vsat - at * (tratio - 1.0);
+        rds0 = (rdsw + prt * (tratio - 1.0)) / pow(weff * 1.0e6, wr);
+
+        // ============ b3temp.c: doping-derived quantities =================
+        if ($param_given(nch)) begin
+            npeakx = nch;
+            if (npeakx > 1.0e20) npeakx = npeakx * 1.0e-6;   // m^-3 card
+        end else if ($param_given(gamma1)) begin
+            t0 = gamma1 * cox;
+            npeakx = 3.021e22 * t0 * t0;
+        end else npeakx = 1.7e17;
+        ngatex = ngate;
+        if (ngatex > 1.000001e24) ngatex = ngatex * 1.0e-6;
+
+        phi = 2.0 * vtm0 * ln(npeakx / ni);
+        sqrtphi = sqrt(phi);
+        phis3 = sqrtphi * phi;
+        xdep0 = sqrt(2.0 * 1.03594e-10 / (1.60219e-19 * npeakx * 1.0e6)) * sqrtphi;
+        litl = sqrt(3.0 * xj * tox);
+        vbi = vtm0 * ln(1.0e20 * npeakx / (ni * ni));
+        cdep0 = sqrt(1.60219e-19 * 1.03594e-10 * npeakx * 1.0e6 / 2.0 / phi);
+
+        // k1/k2: given wins (missing one defaults); else derived from the
+        // gamma1/gamma2/vbx/vbm ladder — doc section 1.8, b3temp.c:652-706.
+        vbmx = vbm;
+        if ($param_given(k1) || $param_given(k2)) begin
+            if ($param_given(k1)) k1x = k1; else k1x = 0.53;
+            if ($param_given(k2)) k2x = k2; else k2x = -0.0186;
+        end else begin
+            if ($param_given(vbx)) vbxx = vbx;
+            else vbxx = phi - 7.7348e-4 * npeakx * xt * xt;
+            if (vbxx > 0.0) vbxx = -vbxx;
+            if (vbmx > 0.0) vbmx = -vbmx;
+            if ($param_given(gamma1)) g1 = gamma1;
+            else g1 = 5.753e-12 * sqrt(npeakx) / cox;
+            if ($param_given(gamma2)) g2 = gamma2;
+            else g2 = 5.753e-12 * sqrt(nsub) / cox;
+            t0 = g1 - g2;
+            t1 = sqrt(phi - vbxx) - sqrtphi;
+            t2 = sqrt(phi * (phi - vbmx)) - phi;
+            k2x = t0 * t1 / (2.0 * t2 + vbmx);
+            k1x = g2 - 2.0 * k2x * sqrt(phi - vbmx);
+        end
+
+        if (k2x < 0.0) begin
+            t0 = 0.5 * k1x / k2x;
+            vbsc = 0.9 * (phi - t0 * t0);
+            if (vbsc > -3.0) vbsc = -3.0;
+            else if (vbsc < -30.0) vbsc = -30.0;
+        end else vbsc = -30.0;
+        if (vbsc > vbmx) vbsc = vbmx;
+
+        // vfb/vth0 mutual defaults (signed vth0; type folds to NMOS frame)
+        if ($param_given(vfb)) vfbx = vfb;
+        else if ($param_given(vth0))
+            vfbx = type * vth0 - phi - k1x * sqrtphi;
+        else vfbx = -1.0;
+        if ($param_given(vth0)) vth0x = vth0;
+        else vth0x = type * (vfbx + phi + k1x * sqrtphi);
+        vth0i = vth0x + delvto;
+        vfbi = vfbx + type * delvto;
+
+        if ($param_given(toxm)) toxmx = toxm; else toxmx = tox;
+        k1ox = k1x * tox / toxmx;
+        k2ox = k2x * tox / toxmx;
+
+        if ($param_given(dsub)) dsubx = dsub; else dsubx = drout;
+        lt0 = factor1 * sqrt(xdep0);
+        t0 = exp(-0.5 * dsubx * leff / lt0);
+        theta0vb0 = t0 + 2.0 * t0 * t0;
+        t0 = exp(-0.5 * drout * leff / lt0);
+        thetarout = pdiblc1 * (t0 + 2.0 * t0 * t0) + pdiblc2;
+
+        // ============ b3temp.c: junction sat currents, series R ===========
+        nvtmj = vtm * nj;
+        if ((as <= 0.0) && (ps <= 0.0)) isbs = 1.0e-14;
+        else isbs = as * jst + ps * jswt;
+        if ((ad <= 0.0) && (pd <= 0.0)) isbd = 1.0e-14;
+        else isbd = ad * jst + pd * jswt;
+        vjsm = 0.0; isevjsm = 0.0;
+        vjdm = 0.0; isevjdm = 0.0;
+        if ((isbs > 0.0) && (ijth > 0.0)) begin
+            vjsm = nvtmj * ln(ijth / isbs + 1.0);
+            isevjsm = isbs * exp(vjsm / nvtmj);
+        end
+        if ((isbd > 0.0) && (ijth > 0.0)) begin
+            vjdm = nvtmj * ln(ijth / isbd + 1.0);
+            isevjdm = isbd * exp(vjdm / nvtmj);
+        end
+        if ((rsh > 0.0) && (nrd > 0.0)) gdrain = m / (rsh * nrd);
+        else gdrain = 0.0;
+        if ((rsh > 0.0) && (nrs > 0.0)) gsource = m / (rsh * nrs);
+        else gsource = 0.0;
+
+        // ============ limiting ladder (b3ld.c init, mos1.va idiom) ========
+        // ngspice fetlims against the per-iteration von; the clamp list here
+        // is stateless, so the zero-bias threshold stands in — limiting only
+        // shapes the Newton path, never the converged bias.
+        vgs = type * $limit(V(g, si), "fetlim", type * vth0i, type);
+        vgd = type * $limit(V(g, di), "fetlim", type * vth0i, type);
+        vds = type * $limit(V(di, si), "limvds", type);
+        vgd = vgs - vds;
+        vbs = type * $limit(V(b, si), "pnjlim", vt0, vcrit, type);
+        vbd = type * $limit(V(b, di), "pnjlim", vt0, vcrit, type);
+
+        // ============ b3ld.c: junction diodes =============================
+        ibs = jdio(vbs, isbs, nvtmj, vjsm, isevjsm, ijth, gminx);
+        ibd = jdio(vbd, isbd, nvtmj, vjdm, isevjdm, ijth, gminx);
+
+        // ============ b3ld.c: mode swap ===================================
+        if (vds >= 0.0) begin
+            mode = 1.0;
+            vdsx = vds;
+            vgsx = vgs;
+            vbsx = vbs;
+        end else begin
+            mode = -1.0;
+            vdsx = -vds;
+            vgsx = vgd;
+            vbsx = vbd;
+        end
+
+        // ============ b3ld.c: Vbseff, Phis, Xdep ==========================
+        t0 = vbsx - vbsc - 0.001;
+        t1 = sqrt(t0 * t0 - 0.004 * vbsc);
+        vbseff = vbsc + 0.5 * (t0 + t1);
+        if (vbseff < vbsx) vbseff = vbsx;
+
+        if (vbseff > 0.0) begin
+            t0 = phi / (phi + vbseff);
+            phis = phi * t0;
+            sqrtphis = phis3 / (phi + 0.5 * vbseff);
+        end else begin
+            phis = phi - vbseff;
+            sqrtphis = sqrt(phis);
+        end
+        xdep = xdep0 * sqrtphis / sqrtphi;
+
+        // ============ b3ld.c: Vth =========================================
+        t3 = sqrt(xdep);
+
+        t0 = dvt2 * vbseff;
+        if (t0 >= -0.5) t1 = 1.0 + t0;
+        else t1 = (1.0 + 3.0 * t0) / (3.0 + 8.0 * t0);
+        lt1 = factor1 * t3 * t1;
+
+        t0 = dvt2w * vbseff;
+        if (t0 >= -0.5) t1 = 1.0 + t0;
+        else t1 = (1.0 + 3.0 * t0) / (3.0 + 8.0 * t0);
+        ltw = factor1 * t3 * t1;
+
+        t0 = -0.5 * dvt1 * leff / lt1;
+        if (t0 > -34.0) t1 = exp(t0);
+        else t1 = 1.713908431e-15;
+        theta0 = t1 * (1.0 + 2.0 * t1);
+        deltvth = dvt0 * theta0 * (vbi - phi);
+
+        t0 = -0.5 * dvt1w * weff * leff / ltw;
+        if (t0 > -34.0) t1 = exp(t0);
+        else t1 = 1.713908431e-15;
+        dvthw = dvt0w * t1 * (1.0 + 2.0 * t1) * (vbi - phi);
+
+        tempratio = tk / tnomk - 1.0;
+        t0 = sqrt(1.0 + nlx / leff);
+        t5 = k1ox * (t0 - 1.0) * sqrtphi
+           + (kt1 + kt1l / leff + kt2 * vbseff) * tempratio;
+        tmp2 = tox * phi / (weff + w0);
+
+        t3 = eta0 + etab * vbseff;
+        if (t3 < 1.0e-4) t3 = (2.0e-4 - t3) / (3.0 - 2.0e4 * t3);
+        diblsft = t3 * theta0vb0 * vdsx;
+
+        vth = type * vth0i - k1x * sqrtphi + k1ox * sqrtphis
+            - k2ox * vbseff - deltvth - dvthw
+            + (k3 + k3b * vbseff) * tmp2 + t5 - diblsft;
+
+        // ============ b3ld.c: n (subthreshold swing) ======================
+        tmp2 = nfactor * 1.03594e-10 / xdep;
+        tmp3 = cdsc + cdscb * vbseff + cdscd * vdsx;
+        tmp4 = (tmp2 + tmp3 * theta0 + cit) / cox;
+        if (tmp4 >= -0.5) n = 1.0 + tmp4;
+        else n = (1.0 + 3.0 * tmp4) / (3.0 + 8.0 * tmp4);
+
+        // ============ b3ld.c: poly gate depletion, Vgsteff ================
+        t0 = vfbi + phi;
+        if ((ngatex > 1.0e18) && (ngatex < 1.0e25) && (vgsx > t0)) begin
+            t1 = 1.0e6 * 1.60219e-19 * 1.03594e-10 * ngatex / (cox * cox);
+            t4 = sqrt(1.0 + 2.0 * (vgsx - t0) / t1);
+            t2 = t1 * (t4 - 1.0);
+            t3 = 0.5 * t2 * t2 / t1;
+            t7 = 1.12 - t3 - 0.05;
+            t6 = sqrt(t7 * t7 + 0.224);
+            vgs_eff = vgsx - (1.12 - 0.5 * (t7 + t6));
+        end else vgs_eff = vgsx;
+        vgst = vgs_eff - vth;
+
+        t10 = 2.0 * n * vtm;
+        t11 = vgst / t10;                       // VgstNVt
+        t9 = (2.0 * voff - vgst) / t10;         // ExpArg
+        if (t11 > 34.0) vgsteff = vgst;
+        else if (t9 > 34.0) begin
+            t0 = (vgst - voff) / (n * vtm);
+            expvgst = exp(t0);
+            vgsteff = vtm * cdep0 / cox * expvgst;
+        end else begin
+            expvgst = exp(t11);
+            t1 = t10 * ln(1.0 + expvgst);
+            t2 = 1.0 + t10 * cox / (vtm * cdep0) * exp(t9);
+            vgsteff = t1 / t2;
+        end
+
+        // ============ b3ld.c: Weff', Rds, Abulk ===========================
+        t9 = sqrtphis - sqrtphi;
+        weffp = weff - 2.0 * (dwg * vgsteff + dwb * t9);
+        if (weffp < 2.0e-8)
+            weffp = 2.0e-8 * (4.0e-8 - weffp) / (6.0e-8 - 2.0 * weffp);
+
+        t0 = prwg * vgsteff + prwb * t9;
+        if (t0 >= -0.9) rds = rds0 * (1.0 + t0);
+        else rds = rds0 * (0.8 + t0) / (17.0 + 20.0 * t0);
+
+        t1 = 0.5 * k1ox / sqrtphis;
+        t9 = sqrt(xj * xdep);
+        tmp1 = leff + 2.0 * t9;
+        t5 = leff / tmp1;
+        tmp2 = a0 * t5;
+        tmp3 = weff + b1;
+        tmp4 = b0 / tmp3;
+        t2 = tmp2 + tmp4;
+        t6 = t5 * t5;
+        t7 = t5 * t6;
+        abulk0 = 1.0 + t1 * t2;
+        t8 = ags * a0 * t7;
+        abulk = abulk0 - t1 * t8 * vgsteff;
+        if (abulk0 < 0.1) abulk0 = (0.2 - abulk0) / (3.0 - 20.0 * abulk0);
+        if (abulk < 0.1) abulk = (0.2 - abulk) / (3.0 - 20.0 * abulk);
+
+        t2 = keta * vbseff;
+        if (t2 >= -0.9) t0 = 1.0 / (1.0 + t2);
+        else t0 = (17.0 + 20.0 * t2) / (0.8 + t2);
+        abulk = abulk * t0;
+        abulk0 = abulk0 * t0;
+
+        // ============ b3ld.c: mobility ====================================
+        if (mobmod == 1) begin
+            t0 = vgsteff + vth + vth;
+            t2 = uax + ucx * vbseff;
+            t3 = t0 / tox;
+            t5 = t3 * (t2 + ubx * t3);
+        end else if (mobmod == 2)
+            t5 = vgsteff / tox * (uax + ucx * vbseff + ubx * vgsteff / tox);
+        else begin
+            t0 = vgsteff + vth + vth;
+            t2 = 1.0 + ucx * vbseff;
+            t3 = t0 / tox;
+            t4 = t3 * (uax + ubx * t3);
+            t5 = t4 * t2;
+        end
+        if (t5 >= -0.8) denomi = 1.0 + t5;
+        else denomi = (0.6 + t5) / (7.0 + 10.0 * t5);
+        ueff = u0temp / denomi;
+
+        // ============ b3ld.c: Esat, Lambda, Vdsat =========================
+        wvcox = weffp * vsattemp * cox;
+        wvcoxrds = wvcox * rds;
+        esat = 2.0 * vsattemp / ueff;
+        esatl = esat * leff;
+
+        if (a1 == 0.0) lambda = a2;
+        else if (a1 > 0.0) begin
+            t0 = 1.0 - a2;
+            t1 = t0 - a1 * vgsteff - 0.0001;
+            t2 = sqrt(t1 * t1 + 0.0004 * t0);
+            lambda = a2 + t0 - 0.5 * (t1 + t2);
+        end else begin
+            t1 = a2 + a1 * vgsteff - 0.0001;
+            t2 = sqrt(t1 * t1 + 0.0004 * a2);
+            lambda = 0.5 * (t1 + t2);
+        end
+
+        vgst2vtm = vgsteff + 2.0 * vtm;
+        if ((rds == 0.0) && (lambda == 1.0)) begin
+            vdsat = esatl * vgst2vtm / (abulk * esatl + vgst2vtm);
+        end else begin
+            t9 = abulk * wvcoxrds;
+            t7 = vgst2vtm * t9;
+            t6 = vgst2vtm * wvcoxrds;
+            t0 = 2.0 * abulk * (t9 - 1.0 + 1.0 / lambda);
+            t1 = vgst2vtm * (2.0 / lambda - 1.0) + abulk * esatl + 3.0 * t7;
+            t2 = vgst2vtm * (esatl + 2.0 * t6);
+            t3 = sqrt(t1 * t1 - 2.0 * t0 * t2);
+            vdsat = (t1 - t3) / t0;
+        end
+
+        // ============ b3ld.c: Vdseff ======================================
+        t1 = vdsat - vdsx - delta;
+        t2 = sqrt(t1 * t1 + 4.0 * delta * vdsat);
+        vdseff = vdsat - 0.5 * (t1 + t2);
+        if (vdsx == 0.0) vdseff = 0.0;
+
+        // ============ b3ld.c: VAsat (uses Vdsat, pre-clamp Vdseff) ========
+        tmp4 = 1.0 - 0.5 * abulk * vdsat / vgst2vtm;
+        t9 = wvcoxrds * vgsteff;
+        t0 = esatl + vdsat + 2.0 * t9 * tmp4;
+        t9 = wvcoxrds * abulk;
+        t1 = 2.0 / lambda - 1.0 + t9;
+        vasat = t0 / t1;
+
+        if (vdseff > vdsx) vdseff = vdsx;
+        diffvds = vdsx - vdseff;
+
+        // ============ b3ld.c: VACLM, VADIBL, VA, VASCBE ===================
+        if ((pclm > 0.0) && (diffvds > 1.0e-10)) begin
+            t0 = 1.0 / (pclm * abulk * litl);
+            t2 = vgsteff / esatl;
+            t1 = leff * (abulk + t2);
+            vaclm = t0 * t1 * diffvds;
+        end else vaclm = 5.834617425e14;
+
+        if (thetarout > 0.0) begin
+            t8 = abulk * vdsat;
+            t0 = vgst2vtm * t8;
+            t1 = vgst2vtm + t8;
+            vadibl = (vgst2vtm - t0 / t1) / thetarout;
+            t7 = pdiblcb * vbseff;
+            if (t7 >= -0.9) vadibl = vadibl / (1.0 + t7);
+            else vadibl = vadibl * (17.0 + 20.0 * t7) / (0.8 + t7);
+        end else vadibl = 5.834617425e14;
+
+        t8 = pvag / esatl;
+        t9 = t8 * vgsteff;
+        if (t9 > -0.9) t0 = 1.0 + t9;
+        else t0 = (0.8 + t9) / (17.0 + 20.0 * t9);
+        t1 = vaclm * vadibl / (vaclm + vadibl);
+        va = vasat + t0 * t1;
+
+        if (pscbe2 > 0.0) begin
+            if (diffvds > pscbe1 * litl / 34.0)
+                vascbe = leff * exp(pscbe1 * litl / diffvds) / pscbe2;
+            else vascbe = 5.834617425e14 * leff / pscbe2;
+        end else vascbe = 5.834617425e14;
+
+        // ============ b3ld.c: Ids chain ===================================
+        betax = ueff * cox * weffp / leff;
+        fgche1 = vgsteff * (1.0 - 0.5 * abulk * vdseff / vgst2vtm);
+        fgche2 = 1.0 + vdseff / esatl;
+        gche = betax * fgche1 / fgche2;
+        idl = gche * vdseff / (1.0 + gche * rds);
+        idsa = idl * (1.0 + diffvds / va);
+        ids = idsa * (1.0 + diffvds / vascbe);
+
+        // ============ b3ld.c: substrate (impact ionization) current ======
+        tmp1 = alpha0 + alpha1 * leff;
+        if ((tmp1 <= 0.0) || (beta0 <= 0.0)) isubst = 0.0;
+        else begin
+            t2 = tmp1 / leff;
+            if (diffvds > beta0 / 34.0)
+                t1 = t2 * diffvds * exp(-beta0 / diffvds);
+            else t1 = t2 * 1.713908431e-15 * diffvds;
+            isubst = t1 * idsa;
+        end
+
+        // ============ contributions (b3ld.c line 2999 KCL, unswapped) =====
+        I(di, si) <+ type * mode * m * ids;
+        I(b, si) <+ type * m * ibs;
+        I(b, di) <+ type * m * ibd;
+        if (mode > 0.0) I(di, b) <+ type * m * isubst;
+        else I(si, b) <+ type * m * isubst;
+
+        if (gdrain > 0.0) I(d, di) <+ gdrain * V(d, di);
+        else V(d, di) <+ 0.0;
+        if (gsource > 0.0) I(s, si) <+ gsource * V(s, si);
+        else V(s, si) <+ 0.0;
+    end
+endmodule

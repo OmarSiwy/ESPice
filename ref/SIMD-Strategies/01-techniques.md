@@ -287,7 +287,7 @@ B          = backslash mask
 starts     = B & ~(B << 1)        // first backslash of each run
 odd_starts = starts & ODD_BITS    // runs beginning at odd positions
 carries    = B +% odd_starts      // ripples through the run
-ends       = carries ^ B          // isolate run ends
+ends       = carries & ~B         // ends of the seeded runs
 ```
 
 Predates simdjson by nearly a decade — from Cameron et al.'s Parabix work on XML

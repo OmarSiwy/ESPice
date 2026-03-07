@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "BSIM4SOI NMOS operating point.",
+  "oracle": {
+    "kind": "ngspice-44.2",
+    "derivation": "Independent ngspice-44.2 run of the preserved benchmark circuit. Stored binary raw doubles, selected by column name. Transient values retain reference accepted times. Large sweeps retain explicit row indices including outer-sweep boundaries.",
+    "command": "ngspice -n -b -r reference.raw circuit.sp",
+    "source_sha256": "717aec66e0898b768f3b20ff222cb5bbc711d122d37b90281bbb58bc3f642342"
+  },
+  "origin": "benchmark/fixtures/devices/b4soi/circuit.sp",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(vdd)": {
+            "values": [
+              1.1
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(g)": {
+            "values": [
+              0.7
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(body)": {
+            "values": [
+              0.0
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(d)": {
+            "values": [
+              0.28639256978384
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "i(vb)": {
+            "values": [
+              0.0
+            ],
+            "unit": "A",
+            "rtol": 0.001,
+            "atol": 1e-11
+          },
+          "i(vg)": {
+            "values": [
+              -4.1360743021616e-19
+            ],
+            "unit": "A",
+            "rtol": 0.001,
+            "atol": 1e-11
+          },
+          "i(vdd)": {
+            "values": [
+              -8.1360743021616e-05
+            ],
+            "unit": "A",
+            "rtol": 0.001,
+            "atol": 1e-11
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "notes": [
+    "Invalid/ignored legacy model parameters or model-level selectors were corrected during migration; see MIGRATION.json. Reference results use the corrected deck."
+  ],
+  "netlist_sha256": "052c9dc956181e730879fef4301f082b68e91c0eff9ba14e27fc5698bb3187c9"
+}

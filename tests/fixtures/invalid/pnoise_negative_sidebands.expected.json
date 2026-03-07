@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "pnoise",
+  "purpose": "Sideband truncation cannot be negative.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "Sideband truncation cannot be negative."
+  },
+  "expect": {
+    "status": "error",
+    "category": "invalid_analysis_arguments",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "881680c22ea1d2f0948e1db9f8237669b907148371fccae593b17265e3b01b8f"
+}

@@ -234,10 +234,10 @@ against `converger.zig` (`Tolerances.gmin_start/source_steps`, gmin
 residual-consistent loading in `newton()`); the dc/op ladder drivers live in
 `src/analysis/dc/`. §4 — our design, not from a source.
 
-**Our implementation:** `src/solvers/converger.zig`
+**Our implementation:** `src/analysis/solvers/converger.zig`
 (`Tolerances.{gmin_start, source_steps}`, `Options.gmin`, gmin loading in
 `newton()`/`jfnk()`); ladder drivers `src/analysis/dc/{op,dc}.zig`;
-GPU header patching `src/gpu_context.zig` (`solveNewton` writes `Tol.gmin`
+GPU header patching `src/analysis/gpu.zig` (`solveNewton` writes `Tol.gmin`
 per solve — the rung-as-header-patch mechanism exists today). PTC: not
 implemented as a DC fallback (transient exists; wiring it as an OP rung is
 an open item — see README). Fixtures:

@@ -1,63 +1,69 @@
-//! Small-signal noise, adjoint method: one transpose solve per frequency
-//! (A^H y = e_out), then every source is a dot product -- O(solves) went from
-//! points*sources to points. Source conductances come off the analytic
-//! Jacobian (root.Circuit.collectNoiseSources), no perturbation -- devices
-//! carry builtin noise generators, analyses never re-derive them.
-//!
-//! Supports thermal (4kTg), shot (2q|I|), and flicker (KF*|I|^AF/f) PSD.
+//! Device-generated small-signal noise measured at a circuit node.
+//! Each frequency uses one adjoint solve; source PSDs come from device noisePsd.
+//! Spectra are V^2/Hz and integrated results are V rms.
 const std = @import("std");
+const batch = @import("batch.zig");
 const root = @import("../types.zig");
-const converger = @import("solvers").converger;
-const types = @import("solvers").types;
+const types = @import("numerics");
 const FreqSolver = @import("solvers").freq_solve.FreqSolver;
 
-const k_boltzmann = 1.380649e-23;
-const q_electron = 1.602176634e-19;
-
-const W = std.simd.suggestVectorLength(f64) orelse 8;
+// ngspice include/ngspice/noisedef.h:105-113.
+const n_minlog = 1e-38;
+const n_intfthresh = 1e-10;
+const n_intuselog = 1e-10;
 
 pub const NoiseSource = root.NoiseSource;
 
-pub const Options = struct {
-    tol: converger.Tolerances = .{},
-    out_node: u32,
-    f_start: f64,
-    f_stop: f64,
-    points_per_decade: u16 = 10,
-    temp_k: f64 = 27.0 + 273.15,
-};
+pub const Options = @import("requests").Noise;
 
-/// Compute PSD for a single noise source at frequency f.
-///   thermal: S(f) = 4 * k_B * T * g          (white)
-///   shot:    S(f) = 2 * q * |I|              (white)
-///   flicker: S(f) = KF * |I|^AF / f          (1/f)
-inline fn sourcePsd(src: NoiseSource, f: f64, temp_k: f64) f64 {
-    return switch (src.kind) {
-        .thermal => 4.0 * k_boltzmann * temp_k * src.conductance,
-        .shot => 2.0 * q_electron * @abs(src.current),
-        .flicker => if (f > 0)
-            src.kf * std.math.pow(f64, @abs(src.current), src.af) / f
-        else
-            0,
-    };
+/// The per-interval geometry `nintegrate` needs, ngspice noisean.c:436-439.
+const Band = struct { del_freq: f64, del_ln_freq: f64, ln_freq: f64, ln_last_freq: f64 };
+
+/// ngspice ninteg.c:24 -- linear past 700 so a steep fit cannot overflow.
+inline fn limexp(x: f64) f64 {
+    return if (x > 700.0) @exp(@as(f64, 700.0)) * (1.0 + x - 700.0) else @exp(x);
 }
 
-/// Fine-grained primitive: sweep into caller-owned freqs/density buffers
-/// (both logSweepCount long). Returns the integrated total output noise
-/// (trapezoidal over the sweep band, sqrt at the end).
+/// ngspice ninteg.c:27-45 Nintegrate: the integral of `a * f^exponent` between
+/// two points of one source's log-log spectrum. A near-flat slope degenerates
+/// to the rectangle rule and a near -1 slope to the logarithmic one, which is
+/// why the fit has to be per source: the sum of two different power laws is
+/// not a power law.
+fn nintegrate(dens: f64, ln_dens: f64, ln_last_dens: f64, b: Band) f64 {
+    const exponent = (ln_dens - ln_last_dens) / b.del_ln_freq;
+    if (@abs(exponent) < n_intfthresh) return dens * b.del_freq;
+    const a = limexp(ln_dens - exponent * b.ln_freq);
+    const e1 = exponent + 1.0;
+    if (@abs(e1) < n_intuselog) return a * (b.ln_freq - b.ln_last_freq);
+    return a * (limexp(e1 * b.ln_freq) - limexp(e1 * b.ln_last_freq)) / e1;
+}
+
+/// Device PSD coefficients evaluated at frequency f.
+inline fn sourcePsd(src: NoiseSource, f: f64) f64 {
+    if (src.flicker == 0 or f <= 0) return src.white;
+    return src.white + src.flicker / std.math.pow(f64, f, src.ef);
+}
+
+/// Band integrals in V^2 — output-referred and, when the deck named an input
+/// source, referred back through the gain to that source's terminals.
+pub const Integrals = struct { onoise: f64, inoise: f64 };
+
+/// Fill the measured PSDs and return their band integrals in V^2.
+/// `in_density` is filled only when `options.in_branch` names a source.
 pub fn sweep(
     ckt: *root.Circuit,
     x_op: []const f64,
     noise_sources: []const NoiseSource,
     freqs: []f64,
     density: []f64,
+    in_density: []f64,
     options: Options,
     allocator: std.mem.Allocator,
-) !f64 {
+) !Integrals {
     const n: usize = ckt.n;
     const nn = 2 * n;
     const n_points = freqs.len;
-    std.debug.assert(freqs.len == density.len);
+    std.debug.assert(density.len == n_points);
 
     // Adjoint: A^H y = e_out per omega (conjugate drops out of |H|^2, so the
     // stacked-real transpose solve suffices). One shared rhs, lane = frequency:
@@ -68,77 +74,147 @@ pub fn sweep(
 
     const omegas = try allocator.alloc(f64, n_points);
     defer allocator.free(omegas);
-    types.fillLogSweep(options.f_start, options.f_stop, options.points_per_decade, freqs, omegas);
+    options.sweep.fill(freqs, omegas);
 
-    // RHS: unit excitation at out_node (stacked-real, length 2n).
-    const e_out = try allocator.alloc(f64, nn);
-    defer allocator.free(e_out);
-    root.zeroSimd(e_out);
-    e_out[options.out_node] = 1.0;
+    // RHS: unit excitation at the output (stacked-real, length 2n). A
+    // differential `v(a,b)` output measures the node DIFFERENCE, so its
+    // adjoint excitation is e_pos − e_neg; GROUND is never a matrix row.
+    const e = try allocator.alloc(f64, nn);
+    defer allocator.free(e);
+    root.zeroSimd(e);
+    e[options.out_node] = 1.0;
+    if (options.out_neg != root.GROUND) e[options.out_neg] = -1.0;
 
-    const y_lanes = ckt.gpuFreqBatch(allocator, ckt.g_vals, ckt.c_vals, omegas, e_out, @intCast(n), true) orelse blk: {
-        const cpu = try allocator.alloc(f64, n_points * nn);
-        try fs.solveBatch(allocator, omegas, e_out, cpu, true);
-        break :blk cpu;
-    };
+    const y_lanes = try batch.solve(ckt, &fs, allocator, ckt.g_vals, ckt.c_vals, omegas, e, true);
     defer allocator.free(y_lanes);
 
-    var integrated_noise: f64 = 0;
-    var prev_freq: f64 = 0;
-    var prev_density: f64 = 0;
+    // ln of each source's density at the previous point -- ngspice's
+    // `nVar[LNLSTDENS][i]`, the other half of the per-source fit. Two halves:
+    // output-referred first, then the same fit on the input-referred density,
+    // because dividing by a frequency-dependent gain is not a rescaling of
+    // the integral.
+    const ln_last = try allocator.alloc(f64, 2 * noise_sources.len);
+    defer allocator.free(ln_last);
+    const ln_last_in = ln_last[noise_sources.len..];
+
+    var integrated: f64 = 0;
+    var integrated_in: f64 = 0;
+    // noisean.c:376 `data->lstFreq = data->freq` BEFORE the loop: the first
+    // point has delFreq == 0 and contributes nothing but history.
+    var prev_freq: f64 = if (n_points != 0) freqs[0] else 0;
     for (0..n_points) |k| {
+        if (k != 0 and k % batch.quantum == 0) try ckt.checkpoint(.{ .phase = .postprocess, .completed = k, .total = n_points });
         const f = freqs[k];
         const y = y_lanes[k * nn ..][0..nn];
 
+        const ln_freq = @log(@max(f, n_minlog));
+        const ln_prev = @log(@max(prev_freq, n_minlog));
+        const band: Band = .{
+            .del_freq = f - prev_freq,
+            .ln_freq = ln_freq,
+            .ln_last_freq = ln_prev,
+            .del_ln_freq = ln_freq - ln_prev,
+        };
+
+        // Gain from the named input source to the output, for free: the
+        // adjoint y already IS the transfer row, so v_out for a unit drive on
+        // the input branch is y[in_branch] (x_out = e_out^T A^-1 e_in =
+        // (A^-T e_out)^T e_in). No second solve.
+        const gain_sq: f64 = if (options.in_branch) |br| blk: {
+            const g_re = y[br];
+            const g_im = y[n + br];
+            break :blk g_re * g_re + g_im * g_im;
+        } else 0;
+
         var total_density: f64 = 0;
-        for (noise_sources) |src| {
-            const psd = sourcePsd(src, f, options.temp_k);
+        var total_in_density: f64 = 0;
+        for (noise_sources, ln_last[0..noise_sources.len], ln_last_in) |src, *last, *last_in| {
+            const psd = sourcePsd(src, f);
             const yp_re: f64 = if (src.node_p != root.GROUND) y[src.node_p] else 0;
             const yn_re: f64 = if (src.node_n != root.GROUND) y[src.node_n] else 0;
             const yp_im: f64 = if (src.node_p != root.GROUND) y[n + src.node_p] else 0;
             const yn_im: f64 = if (src.node_n != root.GROUND) y[n + src.node_n] else 0;
             const h_re = yp_re - yn_re;
             const h_im = yp_im - yn_im;
-            total_density += (h_re * h_re + h_im * h_im) * psd;
+            const dens = (h_re * h_re + h_im * h_im) * psd;
+            total_density += dens;
+
+            const ln_dens = @log(@max(dens, n_minlog));
+            if (band.del_freq != 0) {
+                integrated += nintegrate(dens, ln_dens, last.*, band);
+            }
+            last.* = ln_dens;
+
+            if (options.in_branch != null) {
+                const dens_in = if (gain_sq > 0) dens / gain_sq else 0;
+                total_in_density += dens_in;
+                const ln_dens_in = @log(@max(dens_in, n_minlog));
+                if (band.del_freq != 0) {
+                    integrated_in += nintegrate(dens_in, ln_dens_in, last_in.*, band);
+                }
+                last_in.* = ln_dens_in;
+            }
         }
 
         density[k] = total_density;
-        if (k > 0) integrated_noise += 0.5 * (prev_density + total_density) * (f - prev_freq);
+        in_density[k] = total_in_density;
         prev_freq = f;
-        prev_density = total_density;
     }
 
-    return @sqrt(integrated_noise);
+    return .{ .onoise = integrated, .inoise = integrated_in };
 }
 
-/// Contract entry: sources off the analytic Jacobian (builtin device noise via
-/// collectNoiseSources -- never re-derived per resistor), adjoint sweep, output
-/// noise density per point. Data layout: point-major (frequency, onoise_density).
+/// Measure the device generators at opts.out_node, without a drive source.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
+    // `defer`-freed below == scratch, and `a` is a results arena that cannot
+    // reclaim it. See RunCtx.scratch_allocator.
+    const scratch = ctx.scratch_allocator orelse a;
     const x_op = ctx.x_op orelse return error.NoOperatingPoint;
 
-    const srcs = try ctx.circuit.collectNoiseSources(x_op, a);
-    defer a.free(srcs);
+    const srcs = try ctx.circuit.collectNoiseSources(x_op, scratch);
+    defer scratch.free(srcs);
 
-    const n_points = types.logSweepCount(opts.f_start, opts.f_stop, opts.points_per_decade);
-    const freqs = try a.alloc(f64, n_points);
-    defer a.free(freqs);
-    const density = try a.alloc(f64, n_points);
-    defer a.free(density);
+    const n_points = opts.sweep.count();
+    const work = try scratch.alloc(f64, @as(usize, n_points) * 3);
+    defer scratch.free(work);
+    const freqs = work[0..n_points];
+    const density = work[n_points..][0..n_points];
+    const in_density = work[2 * n_points ..][0..n_points];
 
-    _ = try sweep(ctx.circuit, x_op, srcs, freqs, density, opts, a);
+    const integrated = try sweep(ctx.circuit, x_op, srcs, freqs, density, in_density, opts, scratch);
 
-    const names = try a.dupe([]const u8, &.{ "frequency", "onoise_density" });
+    // ngspice's two noise plots, with ngspice's names and units: the curves
+    // are AMPLITUDE spectra (V/sqrt(Hz)) while the accumulator works in
+    // V^2/Hz, and the totals are V rms. `inoise` is the same noise referred
+    // to the named input source's terminals — which is the only thing that
+    // source is for, and why a name no card carries is a rejected deck.
+    if (opts.integrated) {
+        const names = try a.dupe([]const u8, &.{ "v(onoise_total)", "v(inoise_total)" });
+        errdefer a.free(names); // entries are literals
+        const data = try a.alloc(f64, 2);
+        data[0] = @sqrt(integrated.onoise);
+        data[1] = @sqrt(integrated.inoise);
+        return .{
+            .plotname = "Integrated Noise",
+            .varnames = names,
+            .is_complex = false,
+            .npoints = 1,
+            .data = data,
+        };
+    }
+
+    const names = try a.dupe([]const u8, &.{ "frequency", "onoise_spectrum", "inoise_spectrum" });
     errdefer a.free(names); // entries are literals
-    const data = try a.alloc(f64, @as(usize, n_points) * 2);
+    const data = try a.alloc(f64, @as(usize, n_points) * 3);
     for (0..n_points) |i| {
-        data[i * 2] = freqs[i];
-        data[i * 2 + 1] = density[i];
+        data[i * 3] = freqs[i];
+        data[i * 3 + 1] = @sqrt(density[i]);
+        data[i * 3 + 2] = @sqrt(in_density[i]);
     }
 
     return .{
-        .plotname = "Noise Analysis",
+        .plotname = "Noise Spectral Density Curves",
         .varnames = names,
         .is_complex = false,
         .npoints = n_points,
@@ -146,99 +222,9 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     };
 }
 
-// ── Tests ──────────────────────────────────────────────────────────────
-
-test "sourcePsd thermal" {
-    const src: NoiseSource = .{
-        .node_p = 0,
-        .node_n = 1,
-        .kind = .thermal,
-        .conductance = 0.01, // 100 ohm resistor
-    };
-    const psd = sourcePsd(src, 1e6, 300.15);
-    // 4 * 1.380649e-23 * 300.15 * 0.01 = 1.6576e-25 (approx)
-    const expected = 4.0 * k_boltzmann * 300.15 * 0.01;
-    try std.testing.expectApproxEqRel(expected, psd, 1e-12);
-    // White: same PSD at different frequency
-    const psd2 = sourcePsd(src, 1e9, 300.15);
-    try std.testing.expectApproxEqRel(psd, psd2, 1e-12);
-}
-
-test "sourcePsd shot" {
-    const src: NoiseSource = .{
-        .node_p = 0,
-        .node_n = 1,
-        .kind = .shot,
-        .conductance = 0,
-        .current = 1e-3,
-    };
-    const psd = sourcePsd(src, 1e6, 300.15);
-    const expected = 2.0 * q_electron * 1e-3;
-    try std.testing.expectApproxEqRel(expected, psd, 1e-12);
-    // White: frequency-independent
-    const psd2 = sourcePsd(src, 1e9, 300.15);
-    try std.testing.expectApproxEqRel(psd, psd2, 1e-12);
-    // Negative current → same magnitude
-    const src_neg: NoiseSource = .{
-        .node_p = 0,
-        .node_n = 1,
-        .kind = .shot,
-        .conductance = 0,
-        .current = -1e-3,
-    };
-    const psd_neg = sourcePsd(src_neg, 1e6, 300.15);
-    try std.testing.expectApproxEqRel(psd, psd_neg, 1e-12);
-}
-
-test "sourcePsd flicker" {
-    const kf = 1e-24;
-    const af = 1.0;
-    const i_bias = 1e-3;
-    const src: NoiseSource = .{
-        .node_p = 0,
-        .node_n = 1,
-        .kind = .flicker,
-        .conductance = 0,
-        .current = i_bias,
-        .kf = kf,
-        .af = af,
-    };
-    // At 1 kHz: KF * |I|^AF / f = 1e-24 * 1e-3 / 1e3 = 1e-30
-    const psd_1k = sourcePsd(src, 1e3, 300.15);
-    const expected_1k = kf * std.math.pow(f64, i_bias, af) / 1e3;
-    try std.testing.expectApproxEqRel(expected_1k, psd_1k, 1e-12);
-    // At 10 kHz: should be 10x smaller (1/f)
-    const psd_10k = sourcePsd(src, 1e4, 300.15);
-    try std.testing.expectApproxEqRel(psd_1k / 10.0, psd_10k, 1e-12);
-    // At f=0: returns 0 (guard against division by zero)
-    const psd_0 = sourcePsd(src, 0, 300.15);
-    try std.testing.expectEqual(@as(f64, 0), psd_0);
-}
-
-test "sourcePsd flicker af exponent" {
-    const src: NoiseSource = .{
-        .node_p = 0,
-        .node_n = 1,
-        .kind = .flicker,
-        .conductance = 0,
-        .current = 2e-3,
-        .kf = 1e-24,
-        .af = 2.0,
-    };
-    const psd = sourcePsd(src, 1e3, 300.15);
-    // KF * |I|^AF / f = 1e-24 * (2e-3)^2 / 1e3 = 1e-24 * 4e-6 / 1e3 = 4e-33
-    const expected = 1e-24 * std.math.pow(f64, 2e-3, 2.0) / 1e3;
-    try std.testing.expectApproxEqRel(expected, psd, 1e-12);
-}
-
-test "sourcePsd defaults backward compatible" {
-    // Default-initialized NoiseSource should behave as thermal
-    const src: NoiseSource = .{
-        .node_p = 0,
-        .node_n = 1,
-        .conductance = 0.02,
-    };
-    const psd = sourcePsd(src, 1e6, 300.15);
-    const expected = 4.0 * k_boltzmann * 300.15 * 0.02;
-    try std.testing.expectApproxEqRel(expected, psd, 1e-12);
-}
+// Private implementation access for the analysis test suite.
+pub const test_access = if (@import("builtin").is_test) .{
+    .Band = Band,
+    .nintegrate = nintegrate,
+    .sourcePsd = sourcePsd,
+} else {};

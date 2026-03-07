@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "four",
+  "purpose": "Fourier fundamental must be positive.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "Fourier fundamental must be positive."
+  },
+  "expect": {
+    "status": "error",
+    "category": "invalid_analysis_arguments",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "397e024cc53e6e09eff01ca15649ddc43c668366fa80fca6e93c1365f3ba79dd"
+}

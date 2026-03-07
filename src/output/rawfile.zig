@@ -1,17 +1,8 @@
 const std = @import("std");
 const Io = std.Io;
 
-pub const Plot = struct {
-    title: []const u8,
-    plotname: []const u8,
-    varnames: []const []const u8,
-    is_complex: bool,
-    npoints: usize,
-    /// Column-major: all vars for point 0, then all vars for point 1, ...
-    /// For real data: length = npoints * nvars
-    /// For complex data: length = npoints * nvars * 2 (re,im pairs per variable)
-    data: []const f64,
-};
+const types = @import("output_types");
+pub const Plot = types.Plot;
 
 /// Infer the ngspice type string for a variable name.
 /// "time" -> "time", "frequency" -> "frequency",
@@ -27,19 +18,102 @@ pub fn varType(name: []const u8) []const u8 {
 
 /// Write an ngspice-compatible binary raw file to `path`.
 pub fn write(io: Io, path: []const u8, plot: Plot) !void {
-    const nvars = plot.varnames.len;
-    const per: usize = if (plot.is_complex) 2 else 1;
-    const expected_len = plot.npoints * nvars * per;
-    if (plot.data.len != expected_len) return error.DataLengthMismatch;
+    return writeInner(io, path, plot, false);
+}
 
-    const file = try Io.Dir.cwd().createFile(io, path, .{});
+/// A multi-analysis deck produces one plot per directive; ngspice appends
+/// them all to ONE raw file, and consumers (the benchmark runner included)
+/// read the concatenation. Result 2+ goes through this.
+pub fn writeAppend(io: Io, path: []const u8, plot: Plot) !void {
+    return writeInner(io, path, plot, true);
+}
+
+/// Atomic replacement suits new files and regular files with no other links.
+pub fn canStream(io: Io, path: []const u8) Io.Dir.StatFileError!bool {
+    const stat = Io.Dir.cwd().statFile(io, path, .{ .follow_symlinks = false }) catch |err| switch (err) {
+        error.FileNotFound => return true,
+        else => return err,
+    };
+    return stat.kind == .file and stat.nlink == 1;
+}
+
+/// One real transient plot; finish publishes it, deinit discards unfinished output.
+/// varnames includes the time column. The destination path must outlive the stream.
+pub const Stream = struct {
+    atomic: Io.File.Atomic,
+    writer: Io.File.Writer,
+    row: []f64,
+    npoints: usize = 0,
+    count_offset: u64,
+    allocator: std.mem.Allocator,
+
+    pub fn init(io: Io, allocator: std.mem.Allocator, path: []const u8, title: []const u8, varnames: []const []const u8) !Stream {
+        if (varnames.len == 0) return error.DataLengthMismatch;
+        var atomic = try Io.Dir.cwd().createFileAtomic(io, path, .{ .replace = true });
+        errdefer atomic.deinit(io);
+        const row = try allocator.alloc(f64, varnames.len);
+        errdefer allocator.free(row);
+        const buffer = try allocator.alloc(u8, 4096);
+        errdefer allocator.free(buffer);
+        var writer = atomic.file.writer(io, buffer);
+        const count_offset = try writeHeader(&writer, .{
+            .title = title,
+            .plotname = "Transient Analysis",
+            .varnames = varnames,
+            .is_complex = false,
+            .npoints = 0,
+            .data = &.{},
+        }, true, true);
+        return .{ .atomic = atomic, .writer = writer, .row = row, .count_offset = count_offset, .allocator = allocator };
+    }
+
+    pub fn record(self: *Stream, t: f64, x: []const f64, probes: []const u32) !void {
+        if (!self.atomic.file_open) return error.StreamClosed;
+        if (probes.len != self.row.len - 1) return error.DataLengthMismatch;
+        self.row[0] = t;
+        for (probes, self.row[1..]) |node, *value| value.* = x[node];
+        try self.writer.interface.writeAll(std.mem.sliceAsBytes(self.row));
+        self.npoints += 1;
+    }
+
+    pub fn finish(self: *Stream) !void {
+        if (!self.atomic.file_open) return error.StreamClosed;
+        try self.writer.interface.flush();
+        var count: [20]u8 = undefined;
+        const text = try std.fmt.bufPrint(&count, "{d:>20}", .{self.npoints});
+        try self.atomic.file.writePositionalAll(self.writer.io, text, self.count_offset);
+        try self.atomic.replace(self.writer.io);
+    }
+
+    pub fn deinit(self: *Stream) void {
+        self.atomic.deinit(self.writer.io);
+        self.allocator.free(self.writer.interface.buffer);
+        self.allocator.free(self.row);
+        self.* = undefined;
+    }
+};
+
+fn writeInner(io: Io, path: []const u8, plot: Plot, append: bool) !void {
+    try types.validatePlot(.binary, plot);
+
+    const file = try Io.Dir.cwd().createFile(io, path, .{ .truncate = !append });
     defer file.close(io);
+    const start_pos: u64 = if (append) try file.length(io) else 0;
 
     var buf: [4096]u8 = undefined;
     var fw = file.writer(io, &buf);
+    fw.pos = start_pos; // append lands after the previous plot
     const w = &fw.interface;
+    _ = try writeHeader(&fw, plot, false, true);
 
-    // --- ASCII header ---
+    // Write f64 values as raw bytes in native endian (ngspice uses host endian).
+    try w.flush();
+    try w.writeAll(std.mem.sliceAsBytes(plot.data));
+    try w.flush();
+}
+
+pub inline fn writeHeader(fw: *Io.File.Writer, plot: Plot, comptime padded_count: bool, comptime binary: bool) !u64 {
+    const w = &fw.interface;
     try w.print("Title: {s}\n", .{plot.title});
     try w.writeAll("Date: Thu Jan  1 00:00:00 1970\n");
     try w.print("Plotname: {s}\n", .{plot.plotname});
@@ -48,27 +122,110 @@ pub fn write(io: Io, path: []const u8, plot: Plot) !void {
     } else {
         try w.writeAll("Flags: real\n");
     }
-    try w.print("No. Variables: {d}\n", .{nvars});
-    try w.print("No. Points: {d}\n", .{plot.npoints});
+    try w.print("No. Variables: {d}\nNo. Points: ", .{plot.varnames.len});
+    const count_offset = if (padded_count) fw.logicalPos() else 0;
+    if (padded_count) {
+        try w.print("{d:>20}\n", .{plot.npoints});
+    } else {
+        try w.print("{d}\n", .{plot.npoints});
+    }
     try w.writeAll("Variables:\n");
     for (plot.varnames, 0..) |name, i| {
         try w.print("\t{d}\t{s}\t{s}\n", .{ i, name, varType(name) });
     }
-    try w.writeAll("Binary:\n");
-
-    // Flush the text header before writing binary data.
-    try w.flush();
-
-    // --- Binary data ---
-    // Write f64 values as raw bytes in native endian (ngspice uses host endian).
-    const bytes = std.mem.sliceAsBytes(plot.data);
-    try w.writeAll(bytes);
-    try w.flush();
+    try w.writeAll(if (binary) "Binary:\n" else "Values:\n");
+    return count_offset;
 }
 
 // =============================================================================
 // Tests
 // =============================================================================
+
+test "stream eligibility preserves special files, symlinks and hard links" {
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/wave.raw", .{tmp.sub_path});
+    defer a.free(path);
+    try std.testing.expect(try canStream(io, path));
+    try tmp.dir.writeFile(io, .{ .sub_path = "wave.raw", .data = "existing" });
+    try std.testing.expect(try canStream(io, path));
+
+    try tmp.dir.symLink(io, "wave.raw", "link.raw", .{});
+    const linked = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/link.raw", .{tmp.sub_path});
+    defer a.free(linked);
+    try std.testing.expect(!try canStream(io, linked));
+    try tmp.dir.hardLink("wave.raw", tmp.dir, "hard.raw", io, .{});
+    try std.testing.expect(!try canStream(io, path));
+    if (@import("builtin").os.tag == .linux)
+        try std.testing.expect(!try canStream(io, "/dev/null"));
+
+    const invalid = try std.fmt.allocPrint(a, "{s}/child", .{path});
+    defer a.free(invalid);
+    try std.testing.expectError(error.NotDir, canStream(io, invalid));
+}
+
+test "stream: noncontiguous probes preserve column order and final point count" {
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/wave.raw", .{tmp.sub_path});
+    defer a.free(path);
+
+    var stream = try Stream.init(io, a, path, "stream test", &.{ "time", "v(c)", "i(a)" });
+    defer stream.deinit();
+    try stream.record(0, &.{ 0, 11, 22, 33 }, &.{ 3, 1 });
+    try stream.record(1, &.{ 0, 44, 55, 66 }, &.{ 3, 1 });
+    try stream.finish();
+
+    const blob = try tmp.dir.readFileAlloc(io, "wave.raw", a, .unlimited);
+    defer a.free(blob);
+    const marker = "Binary:\n";
+    const payload = (std.mem.indexOf(u8, blob, marker) orelse return error.MarkerNotFound) + marker.len;
+    try std.testing.expect(std.mem.indexOf(u8, blob[0..payload], "No. Points:                    2\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, blob[0..payload], "\t2\ti(a)\tcurrent\n") != null);
+    const expected = [_]f64{ 0, 33, 11, 1, 66, 44 };
+    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&expected), blob[payload..]);
+}
+
+test "stream: abort and write failure preserve target and remove temporary files" {
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/wave.raw", .{tmp.sub_path});
+    defer a.free(path);
+    try tmp.dir.writeFile(io, .{ .sub_path = "wave.raw", .data = "previous result" });
+
+    for ([_]bool{ false, true }) |fail_write| {
+        {
+            var stream = try Stream.init(io, a, path, "aborted", &.{ "time", "v(out)" });
+            defer stream.deinit();
+            try stream.record(0, &.{1}, &.{0});
+            if (fail_write) {
+                const padding = [_]u8{0} ** 4096;
+                try stream.writer.interface.writeAll(padding[0 .. 4096 - stream.writer.interface.end]);
+                stream.writer.interface.vtable = &.{ .drain = struct {
+                    fn fail(_: *Io.Writer, _: []const []const u8, _: usize) Io.Writer.Error!usize {
+                        return error.WriteFailed;
+                    }
+                }.fail };
+                try std.testing.expectError(error.WriteFailed, stream.record(1, &.{2}, &.{0}));
+                try std.testing.expectEqual(@as(usize, 1), stream.npoints);
+                try std.testing.expectError(error.WriteFailed, stream.finish());
+            }
+        }
+        const blob = try tmp.dir.readFileAlloc(io, "wave.raw", a, .unlimited);
+        defer a.free(blob);
+        try std.testing.expectEqualStrings("previous result", blob);
+        var entries = tmp.dir.iterate();
+        const entry = (try entries.next(io)) orelse return error.MissingTarget;
+        try std.testing.expectEqualStrings("wave.raw", entry.name);
+        try std.testing.expect((try entries.next(io)) == null);
+    }
+}
 
 test "write and read back real .op raw file" {
     const io = std.testing.io;
@@ -88,23 +245,19 @@ test "write and read back real .op raw file" {
 
     const path = "zig-out/test_op.raw";
 
-    // Ensure the output directory exists.
     Io.Dir.cwd().createDirPath(io, "zig-out") catch {};
 
     try write(io, path, plot);
     defer Io.Dir.cwd().deleteFile(io, path) catch {};
 
-    // Read back and verify.
     const blob = try Io.Dir.cwd().readFileAlloc(io, path, allocator, .unlimited);
     defer allocator.free(blob);
 
-    // Find "Binary:\n" marker.
     const marker = "Binary:\n";
     const marker_pos = std.mem.indexOf(u8, blob, marker) orelse return error.MarkerNotFound;
     const header = blob[0..marker_pos];
     const bin_start = marker_pos + marker.len;
 
-    // Verify header fields.
     try std.testing.expect(std.mem.indexOf(u8, header, "Title: test op\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, header, "Plotname: Operating Point\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, header, "Flags: real\n") != null);
@@ -114,7 +267,6 @@ test "write and read back real .op raw file" {
     try std.testing.expect(std.mem.indexOf(u8, header, "\t1\tv(in)\tvoltage\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, header, "\t2\ti(v1)#branch\tcurrent\n") != null);
 
-    // Verify binary data.
     const nvars = 3;
     const npoints = 1;
     const expected_bytes = nvars * npoints * @sizeOf(f64);
@@ -131,10 +283,6 @@ test "write and read back real .tran raw file" {
     const allocator = std.testing.allocator;
 
     const varnames = [_][]const u8{ "time", "v(out)" };
-    // 3 points, 2 vars each, column-major:
-    //   point 0: time=0.0, v(out)=0.0
-    //   point 1: time=0.5, v(out)=1.0
-    //   point 2: time=1.0, v(out)=2.0
     const data = [_]f64{
         0.0, 0.0, // point 0
         0.5, 1.0, // point 1
@@ -175,15 +323,11 @@ test "write and read back real .tran raw file" {
     const expected_bytes = nvars * npoints * @sizeOf(f64);
     try std.testing.expectEqual(expected_bytes, blob.len - bin_start);
 
-    // Verify column-major layout: data[p * nvars + col]
     const read_data: [*]align(1) const f64 = @ptrCast(blob[bin_start..].ptr);
-    // point 0
     try std.testing.expectApproxEqAbs(0.0, read_data[0], 1e-15); // time
     try std.testing.expectApproxEqAbs(0.0, read_data[1], 1e-15); // v(out)
-    // point 1
     try std.testing.expectApproxEqAbs(0.5, read_data[2], 1e-15); // time
     try std.testing.expectApproxEqAbs(1.0, read_data[3], 1e-15); // v(out)
-    // point 2
     try std.testing.expectApproxEqAbs(1.0, read_data[4], 1e-15); // time
     try std.testing.expectApproxEqAbs(2.0, read_data[5], 1e-15); // v(out)
 }
@@ -193,17 +337,11 @@ test "write and read back complex .ac raw file" {
     const allocator = std.testing.allocator;
 
     const varnames = [_][]const u8{ "frequency", "v(out)" };
-    // 2 points, 2 vars, complex: each variable is (re, im) pair
-    // Column-major: for each point, iterate vars; for each var, write (re, im)
-    // point 0: freq=(1.0, 0.0), v(out)=(0.5, -0.5)
-    // point 1: freq=(10.0, 0.0), v(out)=(0.1, -0.9)
     const data = [_]f64{
-        // point 0
-        1.0,  0.0,  // frequency re, im
-        0.5,  -0.5, // v(out) re, im
-        // point 1
-        10.0, 0.0,  // frequency re, im
-        0.1,  -0.9, // v(out) re, im
+        1.0, 0.0, // frequency re, im
+        0.5, -0.5, // v(out) re, im
+        10.0, 0.0, // frequency re, im
+        0.1, -0.9, // v(out) re, im
     };
 
     const plot: Plot = .{
@@ -235,7 +373,6 @@ test "write and read back complex .ac raw file" {
     try std.testing.expect(std.mem.indexOf(u8, header, "\t0\tfrequency\tfrequency\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, header, "\t1\tv(out)\tvoltage\n") != null);
 
-    // Complex: 2 f64 per variable per point
     const nvars = 2;
     const npoints = 2;
     const expected_bytes = nvars * npoints * 2 * @sizeOf(f64);

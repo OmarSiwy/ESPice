@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "pnoise",
+  "purpose": "Sideband truncation must be integral.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "Sideband truncation must be integral."
+  },
+  "expect": {
+    "status": "error",
+    "category": "invalid_analysis_arguments",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "d03385cc6e1159df7f78cef29a7c8c781667f50e31f1e89b0bad56cb52c3389c"
+}

@@ -7,7 +7,6 @@
 //! one numeric path.
 const std = @import("std");
 const root = @import("../types.zig");
-const dc = @import("../dc/dc.zig");
 const lanes = @import("lanes.zig");
 const converger = @import("solvers").converger;
 
@@ -33,7 +32,6 @@ pub const ParamVar = struct {
     nominal: f64,
     /// Relative tolerance (fraction of nominal). E.g. 0.05 for 5%.
     rel_tol: f64,
-    /// Distribution to sample from.
     dist: Distribution,
 };
 
@@ -41,17 +39,7 @@ pub const ParamVar = struct {
 // Options
 // ============================================================================
 
-pub const Options = struct {
-    tol: converger.Tolerances = .{},
-    /// Number of Monte Carlo trials.
-    n_trials: u16 = 100,
-    /// Seed for the PRNG (deterministic).
-    seed: u64 = 42,
-    /// Relative tolerance applied to every primary instance value in run().
-    variation: f64 = 0.05,
-    /// DC solver options forwarded to each trial's solve.
-    dc_options: dc.Options = .{},
-};
+pub const Options = @import("requests").Mc;
 
 // ============================================================================
 // Statistics for a single probe
@@ -144,16 +132,14 @@ pub fn analyze(
 
     var lane_ctx: LaneCtx = .{ .param_vars = param_vars, .seed = options.seed, .prng = undefined };
     const setup: lanes.LaneSetup = .{ .ctx = &lane_ctx, .apply = LaneCtx.apply, .restore = LaneCtx.restore };
-    const nopts = options.dc_options.tol.newtonOpts(options.dc_options.tol.itl2);
+    const nopts = converger.optionsFromTolerances(options.dc_options.tol, options.dc_options.tol.itl2);
     try lanes.solveLanes(ckt, setup, x_lanes, results, nopts);
-    ckt.recompute();
 
-    // Track yield counts per spec
     const yield_counts = try allocator.alloc(u32, yield_specs.len);
     defer allocator.free(yield_counts);
-    for (yield_counts) |*v| v.* = 0;
+    // ponytail: integer counters need only a native bulk fill.
+    @memset(yield_counts, 0);
 
-    // Initialize stats
     for (stats) |*st| {
         st.* = .{
             .mean = 0,
@@ -183,13 +169,10 @@ pub fn analyze(
         n_conv += 1;
     }
 
-    // Compute final statistics
     for (stats, 0..) |*st, p| {
         st.n_converged = n_conv;
 
         if (n_conv == 0) {
-            st.mean = 0;
-            st.std_dev = 0;
             st.min = 0;
             st.max = 0;
             continue;
@@ -257,15 +240,17 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const ckt = ctx.circuit;
     const a = ctx.allocator;
 
-    // Monte Carlo variables: each device's principal instance value,
-    // skipping unset (0) ones.
+    // `defer`-freed below == scratch; `a` is a results arena. See
+    // RunCtx.scratch_allocator.
+    const scratch = ctx.scratch_allocator orelse a;
+
     const refs = try ckt.collectParams();
     var n_vars: usize = 0;
     for (refs) |ref| {
         if (ref.primary and ref.get() != 0) n_vars += 1;
     }
-    const param_vars = try a.alloc(ParamVar, n_vars);
-    defer a.free(param_vars);
+    const param_vars = try scratch.alloc(ParamVar, n_vars);
+    defer scratch.free(param_vars);
     var i: usize = 0;
     for (refs) |ref| {
         if (!ref.primary or ref.get() == 0) continue;
@@ -275,15 +260,15 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     defer {
         // analyze() restores on success; this covers early-error paths too.
         for (param_vars) |pv| pv.param_ptr.set(pv.nominal);
-        ckt.recompute();
+        ckt.recompute() catch unreachable; // nominals were read from the checked circuit
     }
 
     const stride: usize = opts.n_trials;
-    const samples = try a.alloc(f64, ctx.probes.len * stride);
-    defer a.free(samples);
-    const stats = try a.alloc(Stats, ctx.probes.len);
-    defer a.free(stats);
-    const n_conv = try analyze(ckt, param_vars, ctx.probes, samples, stats, &.{}, opts, a);
+    const samples = try scratch.alloc(f64, ctx.probes.len * stride);
+    defer scratch.free(samples);
+    const stats = try scratch.alloc(Stats, ctx.probes.len);
+    defer scratch.free(stats);
+    const n_conv = try analyze(ckt, param_vars, ctx.probes, samples, stats, &.{}, opts, scratch);
 
     const npoints: usize = if (ctx.probes.len > 0) n_conv else 0;
     const names = try root.probeNames(ctx, "run");

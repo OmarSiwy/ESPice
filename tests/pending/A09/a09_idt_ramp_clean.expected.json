@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "idt(1.0, 0) integrates to the unit ramp: v(out) = t at every accepted point.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "LRM 4.5.4 Table 4-18: idt(expr, ic) = integral(t0..t) expr dtau + ic. With expr == 1 and ic == 0 the exact value is t - t0 = t. LRM 4.5.15 puts the operator's internal state on the accepted-time lifetime, and the accepted dt sum to t by construction, so the identity is independent of the step sequence and of the integration method. Linear in t, so linear interpolation between accepted points at the sample times is exact too."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "axis": {
+          "name": "time",
+          "values": [
+            0.0,
+            0.2,
+            0.4,
+            0.6,
+            0.8,
+            1.0
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-12
+        },
+        "columns": {
+          "v(out)": {
+            "values": [
+              0.0,
+              0.2,
+              0.4,
+              0.6,
+              0.8,
+              1.0
+            ],
+            "unit": "V",
+            "rtol": 1e-09,
+            "atol": 1e-12
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "25e3004905f79e7374c23b75d2236fe3956bca626a47f86e25155cf6e72609c4",
+  "row": "A09"
+}

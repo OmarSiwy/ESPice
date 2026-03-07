@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "pss",
+  "purpose": "Periodic sample count must be positive.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "Periodic sample count must be positive."
+  },
+  "expect": {
+    "status": "error",
+    "category": "invalid_analysis_arguments",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "113ba1d9424fabcb5412ef7f5dd0f07819f7d802e1d3b9cfb1d1939909d6ff4a"
+}

@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "BJT saturation",
+  "oracle": {
+    "kind": "ngspice-44.2",
+    "derivation": "Run the self-contained deck in ngspice-44.2 with the explicit tolerances in the netlist. Read binary raw doubles by variable name. Transient samples retain up to 101 original accepted times; no interpolation was used to create these expected values.",
+    "version": "ngspice-44.2 (SPARSE solver; 27 C)",
+    "command": "ngspice -n -b -r /tmp/bjt_saturation.raw reference/bjt_saturation.sp"
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(c)": {
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06,
+            "values": [
+              0.010568399637469
+            ]
+          },
+          "i(vb)": {
+            "unit": "A",
+            "rtol": 0.001,
+            "atol": 1e-09,
+            "values": [
+              -0.44276991422876
+            ]
+          },
+          "i(vc)": {
+            "unit": "A",
+            "rtol": 0.001,
+            "atol": 1e-09,
+            "values": [
+              -0.00018943160036253
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "f950ebceef2ec1209f4327fa88a98459bc4a0a2612ff25168725d44fe5476b7a"
+}

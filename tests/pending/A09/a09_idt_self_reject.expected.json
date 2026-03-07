@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "The instance that causes the rejection keeps its own accepted-time state: v(out) = t + 0.001*crossings(t).",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "v(out) = idt(1.0,0) + 1e-3*flips = t + 1e-3*flips(t) (LRM 4.5.4 + 5.10.3.1). Rising crossings of sin(2*pi*(t-0.125)/0.25) in (0,1] are 0.125, 0.375, 0.625, 0.875, so flips(t) = 0,1,2,3,4 at the plateau midpoints t = 0.05, 0.25, 0.5, 0.75, 0.95. Values: 0.05+0.000=0.05; 0.25+0.001=0.251; 0.5+0.002=0.502; 0.75+0.003=0.753; 0.95+0.004=0.954. Each crossing forces a rejected attempt on the SAME instance (LRM 8.4.7, 'Advance of time in an analog algorithm', third bullet), and LRM 4.5.15 keeps the accumulator on the accepted lifetime, so the retry must not re-integrate or reset it. The sample times are plateau midpoints: the harness interpolates linearly between the two bracketing accepted rows, and the earlier 0/0.2/0.4/0.6/0.8/1.0 grid placed two samples only 0.025 from a 1e-3 riser, which passes only because today's avg_dt happens to be 6.8e-3. The nearest riser is now 0.075 away."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "axis": {
+          "name": "time",
+          "values": [
+            0.05,
+            0.25,
+            0.5,
+            0.75,
+            0.95
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-12
+        },
+        "columns": {
+          "v(out)": {
+            "values": [
+              0.05,
+              0.251,
+              0.502,
+              0.753,
+              0.954
+            ],
+            "unit": "V",
+            "rtol": 1e-09,
+            "atol": 1e-12
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "c42e2fde2a6a8ebb981d750c2c83181f1678d7c4f9228f14ee2d1c7200431491",
+  "row": "A09"
+}

@@ -1,16 +1,14 @@
-//! Operating point: 4-rung Newton ladder (plain → gmin → source → JFNK).
-//! One Workspace for the whole continuation — the pattern is frozen, so
-//! ordering/symbolic work happens exactly once.
+//! Operating point: 5-rung Newton ladder (plain → gmin → source → JFNK →
+//! optran). One Workspace for the whole continuation — the pattern is
+//! frozen, so ordering/symbolic work happens exactly once.
 const std = @import("std");
 const root = @import("../types.zig");
 const converger = @import("solvers").converger;
+const tran = @import("../tran/tran.zig");
 
-pub const Method = enum { plain, gmin, source, jfnk };
+pub const Method = enum { plain, gmin, source, jfnk, optran };
 
-pub const Options = struct {
-    tol: converger.Tolerances = .{},
-    warm_start: bool = false,
-};
+pub const Options = @import("requests").Op;
 
 pub const SolveResult = struct {
     converged: bool,
@@ -40,7 +38,7 @@ pub fn solve(
     // and the OP is it: this is where a switch latches its power-on state from
     // `ic`, before any @(cross) can move it. computeBaseline() evaluates
     // const-Jacobian batches, so the state has to be in place first.
-    ckt.setSimState(.{ .kind = .dc, .initial_step = true });
+    ckt.setSimState(.{ .kind = if (options.tran_op) .ic else .dc, .initial_step = true });
     if (!options.warm_start) coldStart(ckt, x);
     try ckt.computeBaseline();
 
@@ -52,7 +50,7 @@ pub fn solve(
     if (r.converged) _ = ckt.stateCtl(.commit);
     // The latch is committed; every later eval at this OP (ac, tf, noise,
     // post-processing) is NOT an initial step and must not re-latch.
-    ckt.setSimState(.{ .kind = .dc });
+    ckt.setSimState(.{ .kind = if (options.tran_op) .ic else .dc });
     return r;
 }
 
@@ -65,8 +63,25 @@ pub fn solveLadder(
     x: []f64,
     options: Options,
 ) !SolveResult {
-    // Rung 1: plain Newton
-    const plain = newtonRun(ckt, ws, x, options.tol, options.tol.gmin) catch |e| switch (e) {
+    if (ckt.needs_tran_op) {
+        // A node with no DC path has an identically-zero G row, so the static
+        // operating point is not unique — the transient fallback only reports
+        // whichever value the from-zero settling happened to land on. ngspice
+        // accepts that under TRANOP, where the transient owns the initial
+        // condition; a standalone .op/.ac/.pz has no such owner and the deck
+        // is a floating-node deck, not a converged one.
+        if (!options.tran_op) {
+            std.log.err("topology: a node has no DC path to ground (capacitor-only island) — the operating point is not unique", .{});
+            return error.FloatingNode;
+        }
+        return transientOp(ckt, ws, x, options);
+    }
+    // Rung 1: plain Newton. NO diagonal gmin: ngspice's NIiter never loads
+    // one outside gmin stepping — junction gmin lives in the device models.
+    // The always-on 1e-12 shunt this used to carry pinned every solution a
+    // little differently from ngspice (voltage_divider read 2.5e-9 off), and
+    // "converged" a floating bridge to a common mode ngspice never picks.
+    const plain = newtonRun(ckt, ws, x, options.tol, 0.0) catch |e| switch (e) {
         error.SingularMatrix => null,
         else => return e,
     };
@@ -104,8 +119,18 @@ pub fn solveLadder(
             if (converger.opdbg())
                 std.debug.print("ladder: gmin={e:.3} conv={} it={d}\n", .{ gmin_val, r.converged, r.iterations });
             if (r.converged) {
-                if (gmin_val <= gtarget)
-                    return .{ .converged = true, .iterations = total_iter, .max_dx = r.max_dx, .method_used = .gmin };
+                if (gmin_val <= gtarget) {
+                    // ngspice dynamic_gmin ends by REMOVING diagGmin for the
+                    // last solve — the answer must not carry the shunt.
+                    const clean = newtonRun(ckt, ws, x, options.tol, 0.0) catch |err| switch (err) {
+                        error.QueryCancelled => return err,
+                        else => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 },
+                    };
+                    total_iter +|= clean.iterations;
+                    if (clean.converged)
+                        return .{ .converged = true, .iterations = total_iter, .max_dx = clean.max_dx, .method_used = .gmin };
+                    break; // clean solve failed: fall through the ladder
+                }
                 copySimd(x_good, x);
                 have_good = true;
                 good_gmin = gmin_val;
@@ -141,7 +166,7 @@ pub fn solveLadder(
             ckt.applyAttempt(lambda);
             ckt.has_baseline = false;
             try ckt.computeBaseline();
-            const sr = newtonRun(ckt, ws, x, options.tol, options.tol.gmin) catch |e| switch (e) {
+            const sr = newtonRun(ckt, ws, x, options.tol, 0.0) catch |e| switch (e) {
                 error.SingularMatrix => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 },
                 else => {
                     ckt.restoreModels();
@@ -177,7 +202,7 @@ pub fn solveLadder(
     try ckt.computeBaseline();
 
     // Final solve at true parameters after source stepping
-    const final = newtonRun(ckt, ws, x, options.tol, options.tol.gmin) catch |e| switch (e) {
+    const final = newtonRun(ckt, ws, x, options.tol, 0.0) catch |e| switch (e) {
         error.SingularMatrix => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 },
         else => return e,
     };
@@ -194,20 +219,76 @@ pub fn solveLadder(
     // runs, so CPU convergence is a superset of GPU convergence by
     // construction. Damping + residual backtracking globalize differently
     // than direct Newton and catch circuits where the factored step wedges.
-    coldStart(ckt, x);
-    var copts = options.tol.newtonOpts(null);
-    copts.gmin = options.tol.gmin;
-    // converger.run clears device limiting state on exit; a direct jfnk
-    // call must do the same so post-solve evals see clean state.
-    defer ckt.clearLimits();
-    const jr = try converger.jfnk(ckt, ws, x, 0, copts, root.EvalHook{});
-    total_iter +|= jr.iterations;
-    return .{
-        .converged = jr.converged,
-        .iterations = total_iter,
-        .max_dx = jr.max_dx,
-        .method_used = if (jr.converged) .jfnk else .source,
-    };
+    {
+        coldStart(ckt, x);
+        const copts = converger.optionsFromTolerances(options.tol, null);
+        // converger.run clears device limiting state on exit; a direct jfnk
+        // call must do the same so post-solve evals see clean state.
+        defer ckt.clearLimits();
+        const jr = try converger.jfnk(ckt, ws, x, 0, copts, root.EvalHook{});
+        total_iter +|= jr.iterations;
+        if (jr.converged)
+            return .{ .converged = true, .iterations = total_iter, .max_dx = jr.max_dx, .method_used = .jfnk };
+    }
+
+    var result = try transientOp(ckt, ws, x, options);
+    result.iterations +|= total_iter;
+    return result;
+}
+
+fn transientOp(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, options: Options) !SolveResult {
+    // Rung 5: ngspice OPtran (optran.c) — when every static strategy fails,
+    // the operating point is the SETTLED STATE of a real transient with full
+    // sources: dt 10 ns, run to 1 µs, no ramp, no extra regularization —
+    // device capacitances do the conditioning statics could not. ngspice
+    // takes the settled state directly; a clean confirming Newton upgrades
+    // it when the circuit allows one, and its failure is not a failure of
+    // the rung.
+    {
+        const opa = ws.slv.gpa;
+        root.zeroSimd(x);
+        var wf = try tran.Waveform.init(opa, 0, 16);
+        defer wf.deinit();
+        const sim = tran.simulate(ckt, x, &.{}, &wf, .{
+            .tol = options.tol,
+            .t_stop = 1e-6,
+            .dt_init = 1e-8,
+            .dt_max = 1e-8,
+            .uic = true,
+        }, opa) catch |err| switch (err) {
+            error.QueryCancelled => return err,
+            else => null,
+        };
+        // The transient left .tran device state behind; the op contract is
+        // a static circuit whatever the outcome.
+        ckt.setSimState(.{ .kind = if (options.tran_op) .ic else .dc });
+        ckt.has_baseline = false;
+        try ckt.computeBaseline();
+        if (sim != null and sim.?.completed) {
+            if (ckt.needs_tran_op) return .{ .converged = true, .iterations = 0, .max_dx = 0, .method_used = .optran };
+            // "Its failure is not a failure of the rung" only holds if the
+            // SETTLED STATE survives the attempt. A failed Newton leaves x
+            // wherever it wandered, and this rung runs precisely on circuits
+            // where it wanders far: stress/scaling_inverter_chain_4k is a
+            // 4000-deep feed-forward cascade, so one Newton step multiplies
+            // by (per-stage gain)^4000 and x came back at 5.9e7 V with a
+            // static residual of 8.4e23 A. That x was then handed to `.tran`
+            // as its initial condition and no timestep could open on it
+            // (TimestepTooSmall at t=0, dt down to 1e-18). Settled state
+            // kept; the confirming Newton may only IMPROVE it.
+            const x_settled = try opa.alloc(f64, ckt.n);
+            defer opa.free(x_settled);
+            copySimd(x_settled, x);
+            const fin = newtonRun(ckt, ws, x, options.tol, 0.0) catch |err| switch (err) {
+                error.QueryCancelled => return err,
+                else => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 },
+            };
+            if (!fin.converged) copySimd(x, x_settled);
+            return .{ .converged = true, .iterations = fin.iterations, .max_dx = fin.max_dx, .method_used = .optran };
+        }
+    }
+
+    return .{ .converged = false, .iterations = 0, .max_dx = 0, .method_used = .source };
 }
 
 /// Contract entry: solve (or reuse ctx.x_op) and format one point per probe.
@@ -237,7 +318,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 }
 
 fn newtonRun(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, tol: converger.Tolerances, gmin: f64) !converger.Result {
-    var copts = tol.newtonOpts(null);
+    var copts = converger.optionsFromTolerances(tol, null);
     copts.gmin = gmin;
     return converger.run(ckt, ws, x, 0, copts, root.EvalHook{});
 }

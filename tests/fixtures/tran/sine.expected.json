@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "Source waveform sine",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Purely resistive divider follows its source instantaneously: Vout=.75*Vin."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "columns": {
+          "v(in)": {
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-05,
+            "values": [
+              0.0,
+              1.4142135623731,
+              2.0,
+              2.4492935982947e-16,
+              -2.0,
+              -4.8985871965894e-16,
+              2.0,
+              -9.7971743931788e-16
+            ]
+          },
+          "v(out)": {
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-05,
+            "values": [
+              0.0,
+              1.0606601717798,
+              1.5,
+              1.836970198721e-16,
+              -1.5,
+              -3.6739403974421e-16,
+              1.5,
+              -7.3478807948841e-16
+            ]
+          }
+        },
+        "axis": {
+          "name": "time",
+          "values": [
+            0,
+            0.000125,
+            0.00025,
+            0.0005,
+            0.00075,
+            0.001,
+            0.00125,
+            0.002
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "ee5d326f356bca6a27bd4a42893f91588188b7355e6dfaff19f2863643b6b847"
+}

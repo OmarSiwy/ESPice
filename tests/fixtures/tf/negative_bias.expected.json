@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "analysis": "tf",
+  "purpose": "Transfer function negative_bias",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Gain=R2/(R1+R2); Rin=R1+R2; Rout=R1||R2 with the independent source zeroed."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transfer Function",
+        "match": "exact",
+        "columns": {
+          "transfer_function": {
+            "unit": "V/V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              0.68115942028986
+            ]
+          },
+          "input_resistance": {
+            "unit": "ohm",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              6900
+            ]
+          },
+          "output_resistance": {
+            "unit": "ohm",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              1498.5507246377
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "fab9b498e2ce0298000e2dc364e5c7d789a2067df61f6b651a4f128f84dc0f2d"
+}

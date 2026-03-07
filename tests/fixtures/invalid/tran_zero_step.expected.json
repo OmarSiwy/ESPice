@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "Transient output step must be positive.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "Transient output step must be positive."
+  },
+  "expect": {
+    "status": "error",
+    "category": "invalid_analysis_arguments",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "0dde94460bf762d409bc408b0e7b9a64dde5c9faf7283f619ee47ab75c2678bd"
+}

@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "current injection",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "I injected into the node produces I*R."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              2
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "ff593794dc6ae65340573089655b0e3334093e67f857716cc2eff2ada3b3a6c6"
+}

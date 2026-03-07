@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "analysis": "hb",
+  "purpose": "Nonlinear HB spectrum from an independent settled time-domain solution",
+  "oracle": {
+    "kind": "ngspice-44.2-settled-transient-dft",
+    "derivation": "Use the final period of the ngspice transient described in pss/diode_clipper.expected.json. Interpolate 8192 uniform phases and compute direct DFT: signed DC=mean, kth peak magnitude=2*abs(mean(v*exp(-j*2*pi*k*i/N)))."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Harmonic Balance",
+        "match": "exact",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 0.03,
+            "atol": 5e-05,
+            "values": [
+              -0.073372743932055,
+              0.86445507141002,
+              0.099339502457405,
+              0.056831441269338,
+              0.020075972334423,
+              0.0026499682258983,
+              0.0093662122661091,
+              0.006477230787925,
+              0.0011973154689704,
+              0.0027993218975756,
+              0.002778201002745,
+              0.0010208614396756,
+              0.001054361159607,
+              0.0013512508590129,
+              0.00072238942637701,
+              0.00048783647798977,
+              0.00070619552116927,
+              0.00048534287038759,
+              0.00028464094937105,
+              0.00038912820939144,
+              0.00031993418742994,
+              0.00019396842277916,
+              0.0002254732370087,
+              0.00020939112780588,
+              0.00013928279341876,
+              0.00013786641144949,
+              0.00013697638481648,
+              0.00010046602224019,
+              8.896801618516e-05,
+              9.0045968265853e-05,
+              7.184747649139e-05,
+              6.0075831516295e-05,
+              5.9772565000383e-05
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            0,
+            1000,
+            2000,
+            3000,
+            4000,
+            5000,
+            6000,
+            7000,
+            8000,
+            9000,
+            10000,
+            11000,
+            12000,
+            13000,
+            14000,
+            15000,
+            16000,
+            17000,
+            18000,
+            19000,
+            20000,
+            21000,
+            22000,
+            23000,
+            24000,
+            25000,
+            26000,
+            27000,
+            28000,
+            29000,
+            30000,
+            31000,
+            32000
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "row_count": 33
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "2f25ef982fa906768373b50d33944df38823ed1aedb1ec73f4d00eff89eba8e8",
+  "known_gaps": [
+    "HB does not yet drive the solve from the physical source waveforms and amplitudes"
+  ]
+}

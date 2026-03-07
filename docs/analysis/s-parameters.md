@@ -77,7 +77,7 @@ Defaults: with no explicit port list, the drive source becomes port 1 (a
 1-port $S_{11}$ measurement). Failure: singular factorization at a
 frequency point errors the sweep.
 
-Knobs: `f_start/f_stop/n_points/sweep_type`, per-port `z0`.
+Knobs: the shared `sweep` grid (`f_start`/`f_stop`/`points`/`kind`), per-port `z0`.
 
 ## 3. Pseudo-code, CPU sequential
 
@@ -120,8 +120,8 @@ kernel sp(lanes = freq points):
 
 | Phase | Solver doc | Impl |
 |---|---|---|
-| Stacked-real frequency solves | [klu-pipeline.md](../solvers/klu-pipeline.md) (sparse path), dense below threshold | `src/solvers/freq_solve.zig` (`initDense` here; `DENSE_THRESHOLD = 16` governs the `fromCircuit` route) |
-| Dense factorization per point | none (dense path) | `src/solvers/dense_lu.zig` |
+| Stacked-real frequency solves | [klu-pipeline.md](../solvers/klu-pipeline.md) (sparse path), dense below threshold | `src/analysis/solvers/freq_solve.zig` (`initDense` here; `DENSE_THRESHOLD = 16` governs the `fromCircuit` route) |
+| Dense factorization per point | none (dense path) | `src/analysis/solvers/dense_lu.zig` |
 | Upstream OP | [homotopy-continuation.md](../solvers/homotopy-continuation.md) | `dc/op.zig` |
 
 Note: the termination stamp densifies only port branch diagonals — a

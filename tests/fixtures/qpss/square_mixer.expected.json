@@ -1,0 +1,92 @@
+{
+  "schema_version": 1,
+  "analysis": "qpss",
+  "purpose": "Sum/difference mixing and DC generation",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "(sin(w1t)+.5*sin(w2t))^2 has DC .625; two-sided coefficients: .25 at +/-2f1, .0625 at +/-2f2, .25 at +/-f1+/-f2."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Quasi-Periodic Steady State",
+        "match": "exact",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 0.003,
+            "atol": 1e-07,
+            "values": [
+              0,
+              0,
+              0.0625,
+              0,
+              0,
+              0,
+              0.25,
+              0,
+              0.25,
+              0,
+              0.25,
+              0,
+              0.625,
+              0,
+              0.25,
+              0,
+              0.25,
+              0,
+              0.25,
+              0,
+              0,
+              0,
+              0.0625,
+              0,
+              0
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            -4828.4271247462,
+            -3828.4271247462,
+            -2828.4271247462,
+            -1828.4271247462,
+            -828.42712474619,
+            -3414.2135623731,
+            -2414.2135623731,
+            -1414.2135623731,
+            -414.2135623731,
+            585.7864376269,
+            -2000.0,
+            -1000.0,
+            0.0,
+            1000.0,
+            2000.0,
+            -585.7864376269,
+            414.2135623731,
+            1414.2135623731,
+            2414.2135623731,
+            3414.2135623731,
+            828.42712474619,
+            1828.4271247462,
+            2828.4271247462,
+            3828.4271247462,
+            4828.4271247462
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "row_count": 25
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "e5291fd73bf4c20f8e69abe2ba4e4d6c8d0693c5d4648e5a22b8a7151f7a99cd",
+  "known_gaps": [
+    "QPSS does not yet honor the physical two-tone source spectra",
+    "the behavioral-source compiler only supports a limited single-control polynomial subset"
+  ]
+}

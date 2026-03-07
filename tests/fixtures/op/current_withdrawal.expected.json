@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "current withdrawal",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Current from node to ground gives V=-I*R."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              -2
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "38c9fbcdcbb42e2cf4756e56672dfaa5bfae2b1803c943281c06bdae7c539086"
+}

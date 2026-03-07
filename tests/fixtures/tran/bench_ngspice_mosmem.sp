@@ -1,0 +1,35 @@
+mosmem - mos memory cell
+* KNOWN GAP: nonzero transient output-start time is rejected by the dispatcher.
+* This correctness test should currently fail; implement support to match the expected output.
+* Expected results: bench_ngspice_mosmem.expected.json
+* Origin: benchmark/fixtures/ngspice/mosmem/circuit.sp
+.width in=72
+.opt abstol=1u
+
+.opt list node noacct
+* The original line is below
+*.opt acct list node
+
+.tran 20ns 2us
+vdd 9 0 dc 5
+vs 7 0 pulse(2 0 520ns 20ns 20ns 500ns 2000ns)
+vw 1 0 pulse(0 2 20ns 20ns 500ns 200ns 2000ns)
+vwb 2 0 pulse(2 0 20ns 20ns 20ns 2000ns 2000ns)
+m1 3 1 0 0 mod w=250u l=5u
+m2 4 2 0 0 mod w=250u l=5u
+m3 9 9 3 0 mod w=5u   l=5u
+m4 9 9 4 0 mod w=5u   l=5u
+m5 5 7 3 0 mod w=50u  l=5u
+m6 6 7 4 0 mod w=50u  l=5u
+m7 5 6 0 0 mod w=250u  l=5u
+m8 6 5 0 0 mod w=250u  l=5u
+m9 9 9 5 0 mod w=5u   l=5u
+m10 9 9 6 0 mod w=5u  l=5u
+m11 8 4 0 0 mod w=250u l=5u
+m12 9 9 8 0 mod w=5u   l=5u
+.model mod nmos(vto=0.5 phi=0.7 kp=1.0e-6 gamma=1.83 lambda=0.115
++   level=1 cgso=1u cgdo=1u cbd=50p cbs=50p)
+.print dc v(5) v(6)
+.plot dc v(6)
+.plot tran v(6) v(5) v(7) v(1) v(2)
+.end

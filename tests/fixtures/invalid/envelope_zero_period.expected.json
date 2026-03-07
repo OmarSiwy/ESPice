@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "envelope",
+  "purpose": "Carrier period must be positive.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "Carrier period must be positive."
+  },
+  "expect": {
+    "status": "error",
+    "category": "invalid_analysis_arguments",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "31830c0964a6957ca68b2493af456c8fd70be8f45a452a8020e60975ad94544e"
+}

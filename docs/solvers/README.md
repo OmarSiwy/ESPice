@@ -1,7 +1,7 @@
 # docs/solvers — Solver Theory References
 
-Documentation of the algorithms behind `src/solvers/` and the nonlinear
-layer in `src/solvers/converger.zig`. Each file follows the
+Documentation of the algorithms behind `src/analysis/solvers/` and the nonlinear
+layer in `src/analysis/solvers/converger.zig`. Each file follows the
 same structure: **1.** mathematical specification, **2.** flow explanation,
 **3.** CPU-sequential pseudo-code, **4.** GPU-parallel pseudo-code — and
 ends with fetched sources, per-section verification status, and pointers to
@@ -20,10 +20,13 @@ our implementation + fixtures.
 | [gpu-sparse-lu.md](gpu-sparse-lu.md) | GLU 3.0 level sets, double-U relaxed dependency detection, three kernel modes; NICSLU cluster/pipeline modes; our refactor-replay port spec | GLU3.0 arXiv:1908.00204 (fetched), NICSLU README (fetched) |
 | [homotopy-continuation.md](homotopy-continuation.md) | gmin / source / pseudo-transient stepping as solver-level homotopy, Gillespie adaptive controllers, exact ngspice ladder | ngspice cktop.c (fetched), Kelley & Keyes (derived) |
 
-## Index — future solver machinery (spec'd, not implemented)
+## Index — structured solvers and extensions
 
-Required by the future/upgrade analyses in [docs/analysis/](../analysis/README.md)
-(pxf, qpss, dcmatch, Krylov-shooting PSS, Krylov-HB, true-LPTV pnoise).
+These pages combine implemented components and proposed extensions. Dense
+PAC/PXF conversion matrices, the QPSS GMRES operator, structured
+preconditioner primitives, and finite-difference DCMATCH stamps exist.
+Matrix-free PAC/PXF, MFT shooting, full multidimensional preconditioning,
+analytic parameter stamps, and true-LPTV pnoise remain targets.
 
 | File | Topic | Primary source |
 |---|---|---|
@@ -36,25 +39,25 @@ Required by the future/upgrade analyses in [docs/analysis/](../analysis/README.m
 
 Cross-reference to [docs/analysis/](../analysis/README.md); each analysis
 doc carries the reverse mapping in its "Solvers used" section. *(future)*
-= documented requirement of a not-yet-implemented analysis.
+= a proposed algorithm or extension, even when the analysis already exists.
 
 | Solver doc | Consuming analyses |
 |---|---|
-| [gilbert-peierls-lu.md](gilbert-peierls-lu.md), [btf-permutation.md](btf-permutation.md), [amd-ordering.md](amd-ordering.md) | every direct-Newton consumer via `direct.zig`: [operating-point-homotopy](../analysis/operating-point-homotopy.md), [dc-sweep](../analysis/dc-sweep.md), [transient-integration](../analysis/transient-integration.md), [transient-noise](../analysis/transient-noise.md), [sensitivity](../analysis/sensitivity.md), [ensemble-sweeps](../analysis/ensemble-sweeps.md), PSS/pnoise/PAC inner steps; [matex](../analysis/matex-exponential-integrators.md) *(future)* |
-| [klu-pipeline.md](klu-pipeline.md) (refactor-replay, pivoting, refinement) | same set as above, plus the sparse path of [ac-small-signal-noise](../analysis/ac-small-signal-noise.md) (`freq_solve` per-ω refill/refactor + `solveRhsT` adjoint); [pole-zero](../analysis/pole-zero.md) *(sparse/Arnoldi upgrade)*, [pnoise](../analysis/periodic-noise.md) + [pxf](../analysis/pxf.md) + [dcmatch](../analysis/dcmatch.md) *(future: `solveT` on factors)*, [qpss](../analysis/qpss.md) *(future: block preconditioner factors)* |
+| [gilbert-peierls-lu.md](gilbert-peierls-lu.md), [btf-permutation.md](btf-permutation.md), [amd-ordering.md](amd-ordering.md) | every direct-Newton consumer via `direct.zig`: [operating-point-homotopy](../analysis/operating-point-homotopy.md), [dc-sweep](../analysis/dc-sweep.md), [transient-integration](../analysis/transient-integration.md), [transient-noise](../analysis/transient-noise.md), [sensitivity](../analysis/sensitivity.md), [ensemble-sweeps](../analysis/ensemble-sweeps.md), PSS/pnoise/PAC inner steps; [matex](../analysis/matex-exponential-integrators.md) (R-MATEX retained factors) |
+| [klu-pipeline.md](klu-pipeline.md) (refactor-replay, pivoting, refinement) | same set as above, plus the sparse path of [ac-small-signal-noise](../analysis/ac-small-signal-noise.md) (`freq_solve` per-ω refill/refactor + `solveRhsT` adjoint); [pole-zero](../analysis/pole-zero.md) *(sparse/Arnoldi upgrade)*, [dcmatch](../analysis/dcmatch.md) (`solveT` on factors), [qpss](../analysis/qpss.md) (simplified preconditioner factors); [pnoise](../analysis/periodic-noise.md)/[pxf](../analysis/pxf.md) *(future: sparse adjoint factors)* |
 | [circuit-matrix-specifics.md](circuit-matrix-specifics.md) (`matrix_sig`/memcmp bypass, MNA pattern) | [dc-sweep](../analysis/dc-sweep.md), [transient-integration](../analysis/transient-integration.md) (E2 factor-once), [ensemble-sweeps](../analysis/ensemble-sweeps.md), [stability](../analysis/stability.md) (probe-branch pattern note), [matex](../analysis/matex-exponential-integrators.md) *(future: eligibility detection)* |
-| [newton-raphson-convergence.md](newton-raphson-convergence.md) (gates, limiting, JFNK/GMRES) | every analysis with a Newton loop: [operating-point-homotopy](../analysis/operating-point-homotopy.md), [tolerance-system](../analysis/tolerance-system.md) (the gates themselves), [dc-sweep](../analysis/dc-sweep.md), [transient-integration](../analysis/transient-integration.md), [transient-noise](../analysis/transient-noise.md), [sensitivity](../analysis/sensitivity.md), [ensemble-sweeps](../analysis/ensemble-sweeps.md), [pss-shooting-harmonic-balance](../analysis/pss-shooting-harmonic-balance.md), [periodic-noise](../analysis/periodic-noise.md), [pac](../analysis/pac.md), [mpde-envelope](../analysis/mpde-envelope.md); GMRES core also targeted by Krylov-shooting/Krylov-HB and [qpss](../analysis/qpss.md) *(future)* |
+| [newton-raphson-convergence.md](newton-raphson-convergence.md) (gates, limiting, JFNK/GMRES) | every analysis with a Newton loop: [operating-point-homotopy](../analysis/operating-point-homotopy.md), [tolerance-system](../analysis/tolerance-system.md) (the gates themselves), [dc-sweep](../analysis/dc-sweep.md), [transient-integration](../analysis/transient-integration.md), [transient-noise](../analysis/transient-noise.md), [sensitivity](../analysis/sensitivity.md), [ensemble-sweeps](../analysis/ensemble-sweeps.md), [pss-shooting-harmonic-balance](../analysis/pss-shooting-harmonic-balance.md), [periodic-noise](../analysis/periodic-noise.md), [pac](../analysis/pac.md), [mpde-envelope](../analysis/mpde-envelope.md); [qpss](../analysis/qpss.md) uses the separate `gmres.zig` core; Krylov-shooting/Krylov-HB remain extensions |
 | [homotopy-continuation.md](homotopy-continuation.md) | [operating-point-homotopy](../analysis/operating-point-homotopy.md) (the ladder), [dc-sweep](../analysis/dc-sweep.md) (per-point fallback), [ensemble-sweeps](../analysis/ensemble-sweeps.md) (hard-corner fallback, upgrade knob), gmin regularization in [tolerance-system](../analysis/tolerance-system.md) |
 | [gpu-sparse-lu.md](gpu-sparse-lu.md) | GPU §4 of [operating-point-homotopy](../analysis/operating-point-homotopy.md), [transient-integration](../analysis/transient-integration.md), [transient-noise](../analysis/transient-noise.md), [dc-sweep](../analysis/dc-sweep.md), [ensemble-sweeps](../analysis/ensemble-sweeps.md) (batched solves); [matex](../analysis/matex-exponential-integrators.md) *(future: level-scheduled Arnoldi solves)* |
 
-| [lptv-block-solves.md](lptv-block-solves.md) *(future)* | [pac](../analysis/pac.md) (dense impl exists; block/matrix-free path future), [pxf](../analysis/pxf.md) *(future: adjoint solves)*, [periodic-noise](../analysis/periodic-noise.md) *(future: true-LPTV upgrade)*, [qpss](../analysis/qpss.md) *(future: QPAC)* |
+| [lptv-block-solves.md](lptv-block-solves.md) | [pac](../analysis/pac.md) (dense impl exists; block/matrix-free path future), [pxf](../analysis/pxf.md) (dense adjoint exists; block/matrix-free path future), [periodic-noise](../analysis/periodic-noise.md) *(future: true-LPTV upgrade)*, [qpss](../analysis/qpss.md) *(future: QPAC)* |
 | [monodromy-krylov.md](monodromy-krylov.md) *(future)* | [pss-shooting-harmonic-balance](../analysis/pss-shooting-harmonic-balance.md) *(future: Krylov shooting)*, [qpss](../analysis/qpss.md) *(future: MFT cycles)*, [pxf](../analysis/pxf.md) *(future: time-domain adjoint)*, [periodic-noise](../analysis/periodic-noise.md) *(future: adjoint pnoise)* |
-| [structured-preconditioners.md](structured-preconditioners.md) *(future)* | Krylov-HB in [pss-shooting-harmonic-balance](../analysis/pss-shooting-harmonic-balance.md), [pac](../analysis/pac.md)/[pxf](../analysis/pxf.md) matrix-free path, [qpss](../analysis/qpss.md) *(hard requirement)*, [mpde-envelope](../analysis/mpde-envelope.md) Fourier-envelope steps |
-| [parameter-derivative-stamps.md](parameter-derivative-stamps.md) *(future)* | [dcmatch](../analysis/dcmatch.md) *(hard requirement)*, [sensitivity](../analysis/sensitivity.md) adjoint/AC upgrade |
+| [structured-preconditioners.md](structured-preconditioners.md) | Krylov-HB in [pss-shooting-harmonic-balance](../analysis/pss-shooting-harmonic-balance.md), [pac](../analysis/pac.md)/[pxf](../analysis/pxf.md) matrix-free path, [qpss](../analysis/qpss.md) (simplified dominant-tone implementation; full multidimensional extension pending), [mpde-envelope](../analysis/mpde-envelope.md) Fourier-envelope steps |
+| [parameter-derivative-stamps.md](parameter-derivative-stamps.md) *(future)* | [dcmatch](../analysis/dcmatch.md) (analytic upgrade; finite-difference stamps exist), [sensitivity](../analysis/sensitivity.md) adjoint/AC upgrade |
 
-Not covered by a solver doc (used directly): `src/solvers/dense_lu.zig`
-(tf, pz, sp, stb dense path, disto, pnoise, PAC, shooting/HB Jacobians) and
-`src/solvers/fft.zig` (fourier-thd, pac, HB/envelope upgrades) —
+Not covered by a solver doc (used directly): `src/analysis/solvers/dense_lu.zig`
+(tf, pz, sp, stb dense path, disto, pnoise, PAC/PXF, MATEX projected systems, shooting/HB Jacobians) and
+`src/analysis/solvers/fft.zig` (fourier-thd, pac, HB/envelope upgrades) —
 support kernels, not sparse-solver theory.
 
 ## Source status summary

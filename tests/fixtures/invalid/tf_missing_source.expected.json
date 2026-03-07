@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "tf",
+  "purpose": "Transfer input must identify an existing independent source.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "Transfer input must identify an existing independent source."
+  },
+  "expect": {
+    "status": "error",
+    "category": "invalid_analysis_arguments",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "833fa94cdc0f49d9b3e89bd921de70d61091e4fbe15b4aa11d70769266dfdca6"
+}

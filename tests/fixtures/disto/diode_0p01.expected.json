@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "analysis": "disto",
+  "purpose": "Volterra diode second harmonic and amplitude scaling",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "At independently solved bias, gd=IS*exp(v/VT)/VT+gmin, d2=IS*exp(v/VT)/VT^2. v1=A/[2*(1+R*gd)], |v2|=(d2/2)*v1^2/(1/R+gd), HD2=|v2/v1|."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Distortion Analysis",
+        "match": "exact",
+        "columns": {
+          "v1_mag": {
+            "unit": "V",
+            "rtol": 0.005,
+            "atol": 1e-09,
+            "values": [
+              0.00099939006154774,
+              0.00099939006154774,
+              0.00099939006154774,
+              0.00099939006154774,
+              0.00099939006154774,
+              0.00099939006154774,
+              0.00099939006154774
+            ]
+          },
+          "v2_mag": {
+            "unit": "V",
+            "rtol": 0.01,
+            "atol": 1e-11,
+            "values": [
+              1.5448454045922e-05,
+              1.5448454045922e-05,
+              1.5448454045922e-05,
+              1.5448454045922e-05,
+              1.5448454045922e-05,
+              1.5448454045922e-05,
+              1.5448454045922e-05
+            ]
+          },
+          "hd2": {
+            "unit": "ratio",
+            "rtol": 0.01,
+            "atol": 1e-08,
+            "values": [
+              0.01545788240279,
+              0.01545788240279,
+              0.01545788240279,
+              0.01545788240279,
+              0.01545788240279,
+              0.01545788240279,
+              0.01545788240279
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            100.0,
+            215.44346900319,
+            464.15888336128,
+            1000.0,
+            2154.4346900319,
+            4641.5888336128,
+            10000.0
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "row_count": 7
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "b3c9938f8a750319be937147d6cfbdda06bd98af9a7d4b2f6f05a4bb8645bf5b"
+}

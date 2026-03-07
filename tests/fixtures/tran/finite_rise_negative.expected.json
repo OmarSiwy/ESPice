@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "Delayed finite-rise RC step",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "For q=t-delay: during rise, V=A*(q-tau*(1-exp(-q/tau)))/tr; afterward V=A*(1-(tau/tr)*(1-exp(-tr/tau))*exp(-(q-tr)/tau))."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 0.002,
+            "atol": 2e-05,
+            "values": [
+              0,
+              0,
+              0,
+              -0.01229424500714,
+              -0.048374180359595,
+              -0.36210613676994,
+              -0.61309781430843,
+              -0.85766664013978,
+              -0.9807372744293,
+              -0.99904096536506
+            ]
+          }
+        },
+        "axis": {
+          "name": "time",
+          "values": [
+            0,
+            0.0005,
+            0.001,
+            0.00105,
+            0.0011,
+            0.0015,
+            0.002,
+            0.003,
+            0.005,
+            0.008
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "8f445885102249b98a6c6306a44dafa265f95cabe1564b65ef3564b92501a7a2"
+}

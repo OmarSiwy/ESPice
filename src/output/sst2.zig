@@ -1,6 +1,7 @@
 const std = @import("std");
 const Io = std.Io;
-const Plot = @import("rawfile.zig").Plot;
+const types = @import("output_types");
+const Plot = types.Plot;
 
 // ponytail: Fortran-style unformatted record writer — HSPICE TR0/SST2 uses this framing.
 fn writeRecord(w: anytype, data: []const u8) !void {
@@ -23,7 +24,7 @@ fn writeRecordI32(w: anytype, value: i32) !void {
 pub fn write(io: Io, path: []const u8, plot: Plot) !void {
     const nvars = plot.varnames.len;
     const per: usize = if (plot.is_complex) 2 else 1;
-    if (plot.data.len != plot.npoints * nvars * per) return error.DataLengthMismatch;
+    try types.validatePlot(.sst2, plot);
 
     const file = try Io.Dir.cwd().createFile(io, path, .{});
     defer file.close(io);
@@ -31,18 +32,13 @@ pub fn write(io: Io, path: []const u8, plot: Plot) !void {
     var fw = file.writer(io, &buf);
     const w = &fw.interface;
 
-    // Record 1: Header — magic + metadata
     var hdr_buf: [512]u8 = undefined;
-    const hdr_len = std.fmt.count("SST2 {s} {s} nvars={d} npoints={d}", .{
-        plot.title, plot.plotname, nvars, plot.npoints,
-    });
-    _ = hdr_len;
+    // ponytail: bufPrint supplies the record length; no separate counting pass.
     const hdr = std.fmt.bufPrint(&hdr_buf, "SST2 {s} {s} nvars={d} npoints={d}", .{
         plot.title, plot.plotname, nvars, plot.npoints,
     }) catch &hdr_buf;
     try writeRecord(w, hdr);
 
-    // Record 2: Number of variables
     try writeRecordI32(w, @intCast(nvars));
 
     // Record 3: Variable names — null-terminated, fixed 16-byte slots
@@ -54,7 +50,6 @@ pub fn write(io: Io, path: []const u8, plot: Plot) !void {
     }
     try writeRecord(w, name_block[0 .. nvars * 16]);
 
-    // Record 4: Complex flag
     try writeRecordI32(w, if (plot.is_complex) @as(i32, 1) else @as(i32, 0));
 
     // Data records: one per point, all variables as f64
@@ -84,9 +79,7 @@ test "SST2 write and structural verify" {
     // Verify Fortran record framing: first 4 bytes = length of header record
     const rec1_len = std.mem.readInt(i32, blob[0..4], .little);
     try std.testing.expect(rec1_len > 0);
-    // Header should start with "SST2"
     try std.testing.expect(std.mem.startsWith(u8, blob[4..], "SST2"));
-    // Closing length marker should match
     const rec1_end: usize = @intCast(4 + rec1_len);
     const rec1_close = std.mem.readInt(i32, blob[rec1_end..][0..4], .little);
     try std.testing.expectEqual(rec1_len, rec1_close);

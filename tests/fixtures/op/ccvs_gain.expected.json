@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "ccvs gain",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "H1 output is 500 ohm times the 2mA controlling current."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              1
+            ]
+          },
+          "i(vsense)": {
+            "unit": "A",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              0.002
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "64333d69921b07dffc68e328f7793a779afa7b2f0ad0b4f6bcbf2cc3b3f60281"
+}

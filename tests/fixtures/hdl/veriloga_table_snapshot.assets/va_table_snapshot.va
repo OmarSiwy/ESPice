@@ -1,0 +1,10 @@
+module va_table_snapshot(p,n);
+  inout p,n;
+  electrical p,n;
+  real xs[0:1], ys[0:1];
+  analog begin
+    xs[0]=0; xs[1]=1;
+    ys[0]=V(p,n); ys[1]=V(p,n)+2;
+    I(p,n) <+ V(p,n)-$table_model(0.5,xs,ys);
+  end
+endmodule

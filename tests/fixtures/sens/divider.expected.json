@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "analysis": "sens",
+  "purpose": "Analytic parameter derivatives divider",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "dVout/dR1=-Vin*R2/(R1+R2)^2; dVout/dR2=Vin*R1/(R1+R2)^2; dVout/dVin=R2/(R1+R2)."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Sensitivity Analysis",
+        "match": "exact",
+        "columns": {
+          "v(r1)": {
+            "unit": "V/ohm",
+            "rtol": 0.0003,
+            "atol": 1e-14,
+            "values": [
+              -0.001875
+            ]
+          },
+          "v(r2)": {
+            "unit": "V/ohm",
+            "rtol": 0.0003,
+            "atol": 1e-14,
+            "values": [
+              0.000625
+            ]
+          },
+          "v(vin)": {
+            "unit": "V/V",
+            "rtol": 0.0003,
+            "atol": 1e-09,
+            "values": [
+              0.75
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "953227523c0e55ba62ead4851c7e443f25c0c90bbfdc40c044e36793e5830b88"
+}

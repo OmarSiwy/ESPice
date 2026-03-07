@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "analysis": "pz",
+  "purpose": "Single RC pole",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Natural response exp(-t/RC) has pole -1/(RC), in rad/s."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Pole-Zero Analysis",
+        "match": "unordered",
+        "columns": {
+          "pole": {
+            "unit": "rad/s",
+            "rtol": 1e-05,
+            "atol": 1e-09,
+            "values": [
+              [
+                -1000000000.0,
+                0.0
+              ]
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "e1338c2c4f5795faeed83e4783b9a3230e4034ecffdaf160b095e59054cec758",
+  "known_gaps": [
+    "explicit PZ ports and transfer zeros are not yet exposed by the dispatcher"
+  ]
+}

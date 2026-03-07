@@ -1,0 +1,317 @@
+// JFET2 -- ngspice netlist letter J, LEVEL=2: Parker-Skellern (psmodel.c).
+//
+// Topology (docs/jfet-mesfet-hfet.md sec 1.2 / sec 3): D-RD-d', S-RS-s', two gate
+// junctions g-d' and g-s' with forward exponential + reverse breakdown, and the
+// PS dual-power-law channel between d' and s' with source-drain reversal,
+// subthreshold softplus, velocity saturation, CLM and self-heating.
+//
+// Rate dependence (sec 1.2 item 2/6): the discrete psmodel filters
+// (v_trap = h*v_trap_prev + (1-h)*v, h = (taug/(taug+dt/4))^4) have no
+// Verilog-A spelling; they are single-pole ddt lowpasses on internal nodes
+// ntgs/ntgd (gate traps, tau = taug) and ntp (dissipated power, tau = taud).
+// The ddt() term is gated by analysis("tran"): the reference linearizes with
+// h = 0 in DC *and* AC, so an ungated pole would make the HF feedback terms and
+// the self-heating divisor frequency-dependent in small-signal analysis, which
+// the reference load routine never does.
+module jfet2(d, g, s);
+    inout d, g, s;
+    electrical d, g, s;
+    electrical di, si;           // d', s' behind RD/RS
+    electrical ntgs, ntgd, ntp;  // filter states: vgs_trap, vgd_trap, Pavg
+    branch (d, di) brd;
+    branch (s, si) brs;
+
+    // +1 = NJF, -1 = PJF. ngspice carries this in the .model *name*, not as a
+    // card parameter; JFET2type multiplies vgs/vgd and every stamped
+    // current/charge, so a VA module needs the knob (jfet.va:19 pattern).
+    parameter integer jtype = 1 from [-1:1] exclude 0;
+
+    // ---- instance ----------------------------------------------------------
+    parameter real area  = 1.0  from (0:inf);
+    parameter real m     = 1.0  from (0:inf);
+    parameter real temp  = 27.0 from (-273.15:inf);  // degC
+    parameter real dtemp = 0.0;
+    parameter real tnom  = $simparam("tnom") from (-273.15:inf);
+
+    // ---- channel -----------------------------------------------------------
+    parameter real beta   = 1e-4 from (0:inf);   // A/V^Q
+    parameter real vto    = -2.0;                // V
+    parameter real lambda = 0.0;                 // 1/V (ngspice accepts < 0)
+    parameter real p      = 2.0  from (0:inf);   // triode-region power law
+    parameter real q      = 2.0  from [1:inf);   // saturated-region power law
+    parameter real z      = 1.0  from [0:inf);   // rate of velocity saturation
+    parameter real xi     = 1000.0 from (0:inf); // velocity saturation index
+    parameter real mxi    = 0.0;                 // knee potential modulation
+    parameter real delta  = 0.0  from [0:inf);   // thermal current reduction, 1/W
+    parameter real vst    = 0.0  from [0:inf);   // subthreshold potential
+    parameter real mvst   = 0.0;                 // subthreshold modulation
+    // PS version selector on the ngspice JFET2 card. psmodel.c only branches on
+    // it for pre-release equation variants we do not carry; declared so a model
+    // line naming it still parses. Deliberately unused.
+    parameter integer ver = 0 from [0:inf);
+
+    // ---- threshold feedback (trapping / self-heating memory) ---------------
+    parameter real lfgam = 0.0;
+    parameter real lfg1  = 0.0;
+    parameter real lfg2  = 0.0;
+    parameter real hfgam = 0.0;
+    parameter real hfg1  = 0.0;
+    parameter real hfg2  = 0.0;
+    parameter real hfeta = 0.0;
+    parameter real hfe1  = 0.0;
+    parameter real hfe2  = 0.0;
+    parameter real taug  = 0.0 from [0:inf);
+    parameter real taud  = 0.0 from [0:inf);
+
+    // ---- parasitics and gate junctions ------------------------------------
+    parameter real rd  = 0.0   from [0:inf);
+    parameter real rs  = 0.0   from [0:inf);
+    parameter real is  = 1e-14 from [0:inf);   // IS = 0 => no gate current
+    parameter real n   = 1.0   from (0:inf);
+    parameter real ibd = 0.0   from [0:inf);
+    parameter real vbd = 1.0   from [0:inf);   // VBD = 0 => no breakdown branch
+    parameter real pb  = 1.0   from (0:inf);
+    parameter real fc  = 0.5   from [0:1);
+    parameter real cgs = 0.0   from [0:inf);
+    parameter real cgd = 0.0   from [0:inf);
+    parameter real cds = 0.0   from [0:inf);
+    parameter real xc  = 0.0   from [0:1];     // XC = 1 => full cap reduction
+    parameter real acgam = 0.0;
+    parameter real gmin  = 1.0e-12 from [0:inf); // S, tracks .options gmin
+    parameter real kf    = 0.0 from [0:inf);     // flicker coefficient
+    parameter real af    = 1.0 from (0:inf);     // flicker exponent
+
+    // Gate junction: forward exponential with the -10/+40 exp-argument
+    // continuations plus the reverse breakdown branch. Both are exact-derivative
+    // at the joins, which is what keeps NR happy (sec 1.2 item 1).
+    analog function real gjunc;
+        input v, isat, nvt, ibrk, vbrk, gmn;
+        real v, isat, nvt, ibrk, vbrk, gmn;
+        real arg, ifwd, irev;
+        begin
+            arg = v / nvt;
+            if (arg <= -10.0)
+                ifwd = -isat;
+            else if (arg < 40.0)
+                ifwd = isat * (exp(arg) - 1.0);
+            else
+                ifwd = isat * 2.3538526683702e17 * (arg - 39.0) - isat;
+            // VBD = 0 is the "no breakdown" spelling; IBD = 0 kills the branch
+            // outright, so skip it rather than divide by zero.
+            irev = 0.0;
+            if (ibrk > 0.0 && vbrk > 0.0) begin
+                arg = -v / vbrk;
+                if (arg <= -10.0)
+                    irev = ibrk;
+                else if (arg < 40.0)
+                    irev = ibrk - ibrk * exp(arg);
+                else
+                    irev = ibrk - ibrk * 2.3538526683702e17 * (arg - 39.0);
+            end
+            gjunc = ifwd + irev + gmn * v;
+        end
+    endfunction
+
+    // bias-independent prep (sec 1.2: kept out of the V()-dependent chain)
+    real aeff, tdev, tnomk, vt, vtnom, nvt, fact1, fact2, egfet, egnom;
+    real argt, argn, pbfact, pbfactn, pbo, gmaold, gmanew, cjfact, cjfact1;
+    real pb_t, isat, ibrk, vcrit, grd, grs, fourkt, htr;
+    real woo, xiwoo, za, d3, czgs, czgd, alphac, vmax;
+    // V()-dependent chain
+    real vgs, vgd, vds, vgsf, vgdf, mode, vdse;
+    real vgsa, vgda, vgsat, vgdat, lfgt, hfgt, hfet, vgst, vgt, vstx, sarg;
+    real vgte, vdp, vsatf, vsat, aa, aaa, argz, vdt, vgm, idr, idclm, id, pbar;
+    real vert, veff, vnr, vnrt, vnew, qrt, vx, par, ext, qgg, cfac, cgso;
+    real cpm, cplus, cminus, ccgs, ccgd, ctot, qgs, qgd, gm;
+
+    analog begin
+        aeff = area * m;
+        // ---- temperature (sec 1.5): the SPICE junction map, jfet2temp.c /
+        // jfettemp.c. It is the hardwired 1.11 eV silicon map, not EG/XTI, so
+        // "jfet2 has no EG/XTI" is no excuse for leaving T/Tnom out. VTO/BETA
+        // have no tempco on the JFET2 card, so only the junction moves.
+        tnomk = tnom + 273.15;
+        tdev  = temp + 273.15 + dtemp;
+        vt    = 8.617333262145e-5 * tdev;      // k/q * T
+        vtnom = 8.617333262145e-5 * tnomk;
+        nvt   = vt * n;
+        fact1 = tnomk / 300.15;
+        fact2 = tdev / 300.15;
+        egfet = 1.16 - 7.02e-4 * tdev * tdev / (tdev + 1108.0);
+        egnom = 1.16 - 7.02e-4 * tnomk * tnomk / (tnomk + 1108.0);
+        // pbfact = -2*Vt*(1.5*ln(fact) + q*arg); with Vt = kT/q the charge
+        // cancels into egfet/(2*Vt), which is the form below.
+        argt    = -egfet / (2.0 * vt) + 1.1150877 / (2.0 * 300.15 * 8.617333262145e-5);
+        argn    = -egnom / (2.0 * vtnom) + 1.1150877 / (2.0 * 300.15 * 8.617333262145e-5);
+        pbfact  = -2.0 * vt * (1.5 * ln(fact2) + argt);
+        pbfactn = -2.0 * vtnom * (1.5 * ln(fact1) + argn);
+        pbo     = (pb - pbfactn) / fact1;
+        gmaold  = (pb - pbo) / pbo;
+        cjfact  = 1.0 / (1.0 + 0.5 * (4e-4 * (tnomk - 300.15) - gmaold));
+        pb_t    = fact2 * pbo + pbfact;
+        gmanew  = (pb_t - pbo) / pbo;
+        cjfact1 = 1.0 + 0.5 * (4e-4 * (tdev - 300.15) - gmanew);
+        isat = is * aeff * exp((tdev / tnomk - 1.0) * 1.11 / nvt);
+        ibrk = ibd * aeff;
+        // Vcrit per gate junction (sec 1.5). IS = 0 has no junction to limit.
+        if (isat > 0.0) vcrit = nvt * ln(nvt / (1.4142135623730951 * isat));
+        else            vcrit = 0.6;
+        fourkt = 4.0 * 1.380649e-23 * tdev;
+        // rd/rs = 0 is ngspice's node collapse (JFET2setup keeps
+        // drainPrimeNode == drainNode and drainConduct == 0); a 1e12 S branch is
+        // not the equivalent, so use a switch branch as in jfet.va:130.
+        grd = 0.0;
+        grs = 0.0;
+        if (rd > 0.0) grd = aeff / rd;
+        if (rs > 0.0) grs = aeff / rs;
+
+        woo   = pb - vto;
+        xiwoo = xi * woo;                       // channel: vsat -> vgt at XI >> 1
+        za    = sqrt(1.0 + z) / 2.0;
+        d3    = p / (q * pow(woo, p - q));
+        czgs  = cgs * aeff * cjfact * cjfact1;
+        czgd  = cgd * aeff * cjfact * cjfact1;
+        // Charge-model smoothing: O((woo/(xi+1))^2) so that vert -> |vds| and
+        // C(0) = CGS at zero bias. The channel's xi*woo above does NOT belong
+        // here -- with it, xi cancels and vert(0) = woo/2, which parks a default
+        // card in the FC forward-extension branch with qgg(0) != 0.
+        alphac = woo * woo / (4.0 * (xi + 1.0) * (xi + 1.0));
+        vmax   = fc * pb_t;
+
+        // ---- bias: polarity-normalized (all math below is NJF) and limited.
+        // FastVAF renders $limit as a pass-through, but the spelling is what
+        // carries the pnjlim request to a host that implements the contract.
+        // The sec 1.5 order fetlim -> limvds -> pnjlim cannot be spelled: $limit
+        // takes one probe and one algorithm, so the junction limiter (the one
+        // that actually bounds the exponential) is what we ask for. Likewise
+        // MODEINITJCT's vgs = -1 seed has no VA representation.
+        vgs = jtype * $limit(V(g, si), "pnjlim", nvt, vcrit);
+        vgd = jtype * $limit(V(g, di), "pnjlim", nvt, vcrit);
+        vds = vgs - vgd;
+
+        // Trap filters: tau*dV/dt = v - V, i.e. V -> v (h = 0) in DC and AC.
+        htr = analysis("tran") ? 1.0 : 0.0;
+        I(ntgs) <+ (V(ntgs) - vgs) * 1.0 + htr * ddt(taug * V(ntgs));
+        I(ntgd) <+ (V(ntgd) - vgd) * 1.0 + htr * ddt(taug * V(ntgd));
+        vgsf = V(ntgs);
+        vgdf = V(ntgd);
+
+        // Source-drain reversal: work with vdse >= 0, flip the channel current.
+        if (vds < 0.0) begin
+            mode = -1.0;
+            vgsa = vgd;  vgda = vgs;
+            vgsat = vgdf; vgdat = vgsf;
+        end else begin
+            mode = 1.0;
+            vgsa = vgs;  vgda = vgd;
+            vgsat = vgsf; vgdat = vgdf;
+        end
+        vdse = vgsa - vgda;
+
+        // Rate-dependent threshold: LF feedback on the trapped drain bias plus
+        // the HF terms, which vanish when the filters have settled.
+        lfgt = lfgam - lfg1 * vgsa + lfg2 * vgda;
+        hfgt = hfgam - hfg1 * vgsa + hfg2 * vgda;
+        hfet = hfeta - hfe1 * vgsa + hfe2 * vgda;
+        vgst = vgsa - vto - lfgt * vgdat
+             + hfet * (vgsat - vgsa) + hfgt * (vgdat - vgda);
+
+        // Subthreshold softplus vgt = vst*ln(1+exp(vgst/vst)) with the EXACT
+        // large-argument continuations (sec 1.2 item 3, "all continuations are
+        // exact-derivative"). Clamping the *argument* instead would freeze vgt
+        // at 40*vst and kill gm above vgst = 40*VST; flooring exp() would kill
+        // the exponential tail. ln(1+e^x) = x + ln(1+e^-x) -> x (slope 1);
+        // ln(1+e^x) -> e^x for x << 0.
+        if (vst > 0.0) begin
+            vstx = max(vst * (1.0 + mvst * vdse), 1e-12);
+            sarg = vgst / vstx;
+            if (sarg > 40.0)
+                vgt = vgst;
+            else if (sarg < -10.0)
+                vgt = vstx * exp(sarg);
+            else
+                vgt = vstx * ln(1.0 + exp(sarg));
+        end else begin
+            vgt = max(vgst, 0.0);
+        end
+
+        // Core PS chain: dual power law + two-sqrt early saturation + Q-law.
+        vgte  = max(vgt, 1e-12);
+        vdp   = vdse * d3 * pow(vgte, p - q);
+        vsatf = vgte / (mxi * vgte + xiwoo);
+        vsat  = vgte / (1.0 + vsatf);
+        aa    = za * vdp + vsat / 2.0;
+        aaa   = aa - vsat;
+        argz  = vsat * vsat * z / 4.0;
+        vdt   = sqrt(aa * aa + argz) - sqrt(aaa * aaa + argz);
+        vgm   = max(vgte - vdt, 0.0);
+        idr   = vdt * pow(vgm, q - 1.0)
+              + vgte * (pow(vgte, q - 1.0) - pow(vgm, q - 1.0));
+        idclm = idr * beta * aeff * (1.0 + lambda * vdse);
+        if (vgt <= 0.0) idclm = 0.0;
+
+        // Self-heating: filtered dissipation, then the thermal reduction.
+        I(ntp) <+ (V(ntp) - vdse * idclm) * 1.0 + htr * ddt(taud * V(ntp));
+        pbar = V(ntp);
+        id   = mode * idclm / (1.0 + pbar * delta / aeff);
+
+        // Statz gate charge (qgg) with the FC forward extension, partitioned
+        // between the two junctions by the smoothed vds ratio.
+        vert = sqrt(vds * vds + alphac);
+        veff = 0.5 * (vgs + vgd + vert) + acgam * vds;
+        vnr  = (1.0 - xc) * (veff - vto);
+        vnrt = sqrt(vnr * vnr + 0.04);
+        vnew = veff + 0.5 * (vnrt - vnr);
+        cfac = 0.5 * (1.0 + xc + (1.0 - xc) * vnr / vnrt);
+        if (vnew < vmax) begin
+            qrt  = sqrt(1.0 - vnew / pb_t);
+            qgg  = czgs * 2.0 * pb_t * (1.0 - qrt) + czgd * (veff - vert);
+            cgso = cfac / qrt;
+        end else begin
+            vx   = (vnew - vmax) / 2.0;
+            par  = 1.0 + vx / (pb_t - vmax);
+            qrt  = sqrt(1.0 - vmax / pb_t);
+            ext  = vx * (1.0 + par) / qrt;
+            qgg  = czgs * (2.0 * pb_t * (1.0 - qrt) + ext) + czgd * (veff - vert);
+            cgso = cfac * par / qrt;
+        end
+        cpm    = vds / vert;
+        cplus  = (1.0 + cpm) / 2.0;
+        cminus = (1.0 - cpm) / 2.0;
+        ccgs   = cgso * czgs * (cplus + acgam) + czgd * (cminus + acgam);
+        ccgd   = cgso * czgs * (cminus - acgam) + czgd * (cplus - acgam);
+        ctot   = ccgs + ccgd;
+        if (ctot > 0.0) begin
+            qgs = qgg * ccgs / ctot;
+            qgd = qgg * ccgd / ctot;
+        end else begin
+            qgs = 0.0;
+            qgd = 0.0;
+        end
+
+        // Stamps: the two gate junctions with their charges, then the channel.
+        // jtype on every terminal contribution (JFET2type in the reference).
+        I(g, si) <+ jtype * gjunc(vgs, isat, nvt, ibrk, vbd, gmin) + ddt(jtype * qgs);
+        I(g, di) <+ jtype * gjunc(vgd, isat, nvt, ibrk, vbd, gmin) + ddt(jtype * qgd);
+        I(di, si) <+ jtype * id + gmin * V(di, si) + ddt(cds * aeff * V(di, si));
+
+        // ---- noise (doc noise table, jfet2noi.c): RD/RS thermal, channel
+        // thermal 2/3|gm|, flicker KF|Id|^AF/f. Raising V(g) raises vgs and vgd
+        // together, so ddx(id, V(g)) is dId/dVgs at constant Vds -- the
+        // reference's gm, without transcribing the PS derivative chain.
+        gm = abs(ddx(id, V(g)));
+        I(di, si) <+ white_noise(fourkt * (2.0 / 3.0) * gm * m, "channel");
+        if (kf > 0.0)
+            I(di, si) <+ flicker_noise(m * kf * pow(abs(id), af), 1.0, "flicker");
+
+        // Series RD/RS: a zero one is an exact short, not a 1e12 S branch.
+        if (rd > 0.0) begin
+            I(brd) <+ grd * V(brd);
+            I(brd) <+ white_noise(fourkt * grd, "rd");
+        end else V(brd) <+ 0.0;
+        if (rs > 0.0) begin
+            I(brs) <+ grs * V(brs);
+            I(brs) <+ white_noise(fourkt * grs, "rs");
+        end else V(brs) <+ 0.0;
+    end
+endmodule

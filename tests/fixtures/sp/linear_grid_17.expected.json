@@ -1,0 +1,123 @@
+{
+  "schema_version": 1,
+  "analysis": "sp",
+  "purpose": "Linear SP grid and matched reflection",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Matched R=Z0 yields zero S11 at every frequency; LIN N is total point count."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "SP Analysis",
+        "match": "exact",
+        "columns": {
+          "v(S_1_1)": {
+            "unit": "dimensionless",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ]
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            1000.0,
+            63437.5,
+            125875.0,
+            188312.5,
+            250750.0,
+            313187.5,
+            375625.0,
+            438062.5,
+            500500.0,
+            562937.5,
+            625375.0,
+            687812.5,
+            750250.0,
+            812687.5,
+            875125.0,
+            937562.5,
+            1000000.0
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "row_count": 17
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "0b97d406840d5e6ee7a914dbb8c729b5bfd59dd4732ea03f3f068d01ff19268f"
+}

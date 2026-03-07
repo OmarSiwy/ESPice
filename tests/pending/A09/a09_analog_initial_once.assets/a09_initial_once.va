@@ -1,0 +1,21 @@
+`include "disciplines.vams"
+// VAMS-2023 5.2.1: "The analog initial block is executed once for each
+// analysis".  VAMS-2023 8.2 places it in system initialization: "module-level
+// variable declaration assignments are evaluated followed by the execution of
+// analog initial blocks", BEFORE the simulation cycle of 8.3 starts -- so the
+// DC solution that seeds a transient is not a second execution.
+//
+// `runs` is a real, default-initialized to 0.0, incremented once.  One execution
+// per analysis therefore pins V(p,n) = 1.0 for the whole transient: not 0 (block
+// skipped), not 2 (re-run for the transient's own initial DC solve), and not a
+// value that climbs with the Newton iterate, the solve attempt or the timepoint.
+module a09_initial_once(p, n);
+    inout p, n;
+    electrical p, n;
+    real runs;
+    analog initial begin
+        runs = runs + 1.0;
+    end
+    analog
+        V(p, n) <+ runs;
+endmodule

@@ -1,0 +1,110 @@
+`include "disciplines.vams"
+// VAMS-2023 9.17.3 ($limit).  The one normative sentence this deck asserts is
+//
+//   "When the simulator has converged, the return value of the $limit()
+//    function is the value of the access function reference, within
+//    appropriate tolerances."
+//
+// together with its enforcement mechanism, two paragraphs later,
+//
+//   "On any iteration where the output value is not the same as the value of
+//    the access function (within appropriate tolerances), the simulator is
+//    prevented from terminating the iteration."
+//
+// and the obligation 9.17.3 places on a user-defined limiting function,
+//
+//   "In order to prevent convergence when the output of the $limit() function
+//    is not sufficiently close to the value of the access function reference,
+//    the user-defined function shall call $discontinuity(-1) (see 9.17) when
+//    its return value is not sufficiently close to the value of its first
+//    argument."
+//
+// All three were read out of docs/ch9-system.html, 9.17.3, before being quoted.
+//
+// The constitutive equation contributes the LIMITED value, not V(p,n):
+//
+//   I(p,n) = exp(vlim) - exp(1 + 0.5*t)
+//
+// so every converged point satisfies exp(vlim) = exp(1 + 0.5*t), i.e.
+// vlim = 1 + 0.5*t exactly, for every t.  The rawfile records V(p,n), not vlim.
+// So "v(lim) == 1 + 0.5*t" IS the sentence above: a solver that lets the
+// iteration terminate while softclamp is still clamping reports a V(p,n) that
+// differs from vlim by the clamp -- up to 0.5 V on a 1..2 V signal -- and the
+// deck reds.  A solver that, as 9.17.3 expressly permits, "may simply choose to
+// have $limit() return the value of its first argument, if it has other methods
+// for ensuring convergence" passes, and must: the deck pins the identity, not a
+// limiting policy.
+//
+// softclamp is OUR limiter, not the LRM's.  9.17.3's only worked example is
+// spicepnjlim, inside module diode.  What softclamp borrows from it is the
+// property that matters here and nothing else: the function returns its first
+// argument unchanged whenever no limiting is needed (|value - previous| <= 0.5
+// leaves the min/max a no-op), and calls $discontinuity(-1) exactly on the
+// iterations where the returned value differs from the first argument.  The
+// second argument is used as 9.17.3 defines it -- "the appropriate internal
+// state; generally, this is the value that was returned by the $limit()
+// function on the previous iteration" -- and is never discarded.
+//
+// The min/max spelling rather than spicepnjlim's guarded if-block is forced by
+// an implementation defect that has nothing to do with clause 9.17.3: VerA's
+// codegen hoists a real assigned inside a branch into an array it names `h`,
+// which shadows the generated file's own `const h = @import("../h.zig")`, so
+// ANY model with a conditionally-assigned real fails to build with
+// GeneratedDeviceDoesNotCompile.  Reproduced today; see SPEC.md section 1,
+// "Found in passing".  min/max is branch-free, semantically identical here, and
+// is the same spelling the already-green
+// tests/fixtures/hdl/veriloga_limit.assets limiter uses.  Restore the guarded
+// form once codegen renames the hoist array.
+//
+// CORRECTED after review.  A previous revision of this file:
+//   (a) called its limiter "the half-volt-per-iteration limiter of the LRM's
+//       own $limit example pattern".  There is no half-volt limiter anywhere in
+//       the LRM; the only $limit example is spicepnjlim, which clamps by
+//       vt*ln(arg), not by a fixed 0.5 V, and which never discards the incoming
+//       value.  The phrase was not the LRM's at all -- it was copied from this
+//       repo's own comment on
+//       tests/fixtures/hdl/veriloga_limit.assets/va_limit.va.  The claim is
+//       WITHDRAWN, not relocated: no row owns it, because no clause contains
+//       it.  It could return only if a future revision of the standard ships
+//       such an example.
+//   (b) opened with `if ($simparam("iteration") == 1) limited = 0.0;`, which
+//       throws away the state 9.17.3 defines for the second argument and forced
+//       roughly twenty NR iterations per timepoint by construction.  Removed.
+//       With it gone the deck completes in 57 accepted steps at 2.00 NR
+//       iterations per attempt with zero rejections -- so the row's earlier
+//       "B2: $limit cannot get through a transient step" was an artifact of
+//       this line, not a host defect.  SPEC.md section 1 records the
+//       retraction.
+//   (c) asserted "it may defer convergence; it may not move the root and it may
+//       not cost the solver its step", presented between two genuine 9.17.3
+//       quotes.  Only the first clause is in 9.17.3.  9.17.3 says "the
+//       simulator is responsible for determining if limiting should be applied
+//       and what the return value is on a given iteration", and 8.3.2 leaves
+//       "the interval between the time points" to the simulator, so iteration
+//       count and step count are implementation-defined and no digits are
+//       written for them here.  What remains observable through a rawfile
+//       oracle is the converged-value identity, which is what is asserted.
+module a09_limit_ramp(p, n);
+    inout p, n;
+    electrical p, n;
+    real vlim;
+    // Clamps the per-iteration change to 0.5 V.  A no-op -- the incoming value
+    // is returned bit-for-bit -- whenever |value - previous| <= 0.5, which is
+    // what spicepnjlim's `vlimit = vnew` base case does.  $discontinuity(-1) is
+    // raised only when the return value differs from the first argument, the
+    // condition 9.17.3 attaches it to.
+    analog function real softclamp;
+        input value, previous;
+        real value, previous, limited;
+        begin
+            limited = min(max(value, previous - 0.5), previous + 0.5);
+            if (abs(limited - value) > 1e-12)
+                $discontinuity(-1);
+            softclamp = limited;
+        end
+    endfunction
+    analog begin
+        vlim = $limit(V(p, n), softclamp);
+        I(p, n) <+ exp(vlim) - exp(1.0 + 0.5 * $abstime);
+    end
+endmodule

@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "BJT cutoff",
+  "oracle": {
+    "kind": "ngspice-44.2",
+    "derivation": "Run the self-contained deck in ngspice-44.2 with the explicit tolerances in the netlist. Read binary raw doubles by variable name. Transient samples retain up to 101 original accepted times; no interpolation was used to create these expected values.",
+    "version": "ngspice-44.2 (SPARSE solver; 27 C)",
+    "command": "ngspice -n -b -r /tmp/bjt_cutoff.raw reference/bjt_cutoff.sp"
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(c)": {
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06,
+            "values": [
+              4.9999999899985
+            ]
+          },
+          "i(vb)": {
+            "unit": "A",
+            "rtol": 0.001,
+            "atol": 1e-09,
+            "values": [
+              5.0004999899054e-12
+            ]
+          },
+          "i(vc)": {
+            "unit": "A",
+            "rtol": 0.001,
+            "atol": 1e-09,
+            "values": [
+              -1.0001549935468e-11
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "2a1d72ff5bf174b7db6bf7a43699810d05069190ab299470905b0bce180f3998"
+}

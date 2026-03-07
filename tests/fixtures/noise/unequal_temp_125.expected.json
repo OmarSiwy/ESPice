@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "analysis": "noise",
+  "purpose": "Resistor thermal noise and exact white-noise integration",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Output PSD=4*kB*T*(R1||R2), spectrum=sqrt(PSD) V/sqrt(Hz). Input spectrum=output/gain. Integrated RMS=sqrt(PSD*(fstop-fstart))."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Noise Spectral Density Curves",
+        "match": "exact",
+        "columns": {
+          "onoise_spectrum": {
+            "unit": "V/sqrt(Hz)",
+            "rtol": 5e-05,
+            "atol": 1e-18,
+            "values": [
+              4.0609311716034e-09,
+              4.0609311716034e-09,
+              4.0609311716034e-09,
+              4.0609311716034e-09,
+              4.0609311716034e-09,
+              4.0609311716034e-09,
+              4.0609311716034e-09,
+              4.0609311716034e-09,
+              4.0609311716034e-09,
+              4.0609311716034e-09,
+              4.0609311716034e-09,
+              4.0609311716034e-09,
+              4.0609311716034e-09
+            ]
+          },
+          "inoise_spectrum": {
+            "unit": "V/sqrt(Hz)",
+            "rtol": 5e-05,
+            "atol": 1e-18,
+            "values": [
+              5.4145748954712e-09,
+              5.4145748954712e-09,
+              5.4145748954712e-09,
+              5.4145748954712e-09,
+              5.4145748954712e-09,
+              5.4145748954712e-09,
+              5.4145748954712e-09,
+              5.4145748954712e-09,
+              5.4145748954712e-09,
+              5.4145748954712e-09,
+              5.4145748954712e-09,
+              5.4145748954712e-09,
+              5.4145748954712e-09
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            10.0,
+            17.782794100389,
+            31.622776601684,
+            56.234132519035,
+            100.0,
+            177.82794100389,
+            316.22776601684,
+            562.34132519035,
+            1000.0,
+            1778.2794100389,
+            3162.2776601684,
+            5623.4132519035,
+            10000.0
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "row_count": 13
+      },
+      {
+        "name": "Integrated Noise",
+        "match": "exact",
+        "columns": {
+          "v(onoise_total)": {
+            "unit": "V_rms",
+            "rtol": 5e-05,
+            "atol": 1e-16,
+            "values": [
+              4.0589001981472e-07
+            ]
+          },
+          "v(inoise_total)": {
+            "unit": "V_rms",
+            "rtol": 5e-05,
+            "atol": 1e-16,
+            "values": [
+              5.411866930863e-07
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "2590e15611088b472903d83e3e1f0b7cceb2260317312b41b8882d1c2489112a"
+}

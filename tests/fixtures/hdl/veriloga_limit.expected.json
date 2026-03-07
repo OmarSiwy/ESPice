@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "User limiter history and convergence veto reach the unlimited equation root.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "exp(V)-exp(2)=0 has the unique root V=2; limiting only changes the Newton path. VAMS-2023 9.17.3."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "row_count": 1,
+        "columns": {
+          "v(out)": {
+            "values": [
+              2.0
+            ],
+            "unit": "V",
+            "rtol": 0,
+            "atol": 1e-08
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "c187bf49c5e1da1cfebb0470337f765b9fd6147b2599da9222085cad8af52f5d"
+}

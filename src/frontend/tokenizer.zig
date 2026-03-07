@@ -128,6 +128,40 @@ pub fn parseNumBase(text: []const u8) ?NumParts {
     return .{ .base = base, .suffix = text[end..] };
 }
 
+inline fn parseSpiceNum(text: []const u8, comptime hspice_suffix: bool) ?f64 {
+    const parsed = parseNumBase(text) orelse return null;
+    const s = parsed.suffix;
+    const scale: f64 = if (s.len == 0)
+        1
+    else if (std.mem.startsWith(u8, s, "meg"))
+        1e6
+    else if (std.mem.startsWith(u8, s, "mil"))
+        25.4e-6
+    else switch (s[0]) {
+        't' => 1e12,
+        'g' => 1e9,
+        'x' => if (hspice_suffix) 1e6 else 1,
+        'k' => 1e3,
+        'm' => 1e-3,
+        'u' => 1e-6,
+        'n' => 1e-9,
+        'p' => 1e-12,
+        'f' => 1e-15,
+        else => 1,
+    };
+    return parsed.base * scale;
+}
+
+// ponytail: all dialects share physical lines; comment and continuation rules stay local.
+fn nextPhysicalLine(rest: *[]const u8) ?[]const u8 {
+    const src = rest.*;
+    if (src.len == 0) return null;
+    const nl = std.mem.indexOfScalar(u8, src, '\n') orelse src.len;
+    const line = std.mem.trimEnd(u8, src[0..nl], "\r");
+    rest.* = if (nl == src.len) src[nl..] else src[nl + 1 ..];
+    return line;
+}
+
 // ============================================================================
 // ngspice tokenizer
 // ============================================================================
@@ -144,33 +178,19 @@ pub const ngspice = struct {
             return .{ .rest = src, .arena = arena };
         }
 
-        fn nextPhysical(self: *Lines) ?[]const u8 {
-            while (self.rest.len > 0) {
-                const nl = std.mem.indexOfScalar(u8, self.rest, '\n') orelse self.rest.len;
-                const line = std.mem.trimEnd(u8, self.rest[0..nl], "\r");
-                self.rest = if (nl == self.rest.len) self.rest[nl..] else self.rest[nl + 1 ..];
-                return line;
-            }
-            return null;
-        }
-
         fn stripComment(line: []const u8) []const u8 {
-            var cut = line.len;
-            if (std.mem.indexOfScalar(u8, line, '$')) |i| cut = @min(cut, i);
-            if (std.mem.indexOfScalar(u8, line, ';')) |i| cut = @min(cut, i);
+            // ponytail: reuse the first cutoff to bound the second stdlib vector scan.
+            const dollar = std.mem.indexOfScalar(u8, line, '$') orelse line.len;
+            const cut = std.mem.indexOfScalar(u8, line[0..dollar], ';') orelse dollar;
             return std.mem.trim(u8, line[0..cut], " \t");
-        }
-
-        fn isContent(line: []const u8) bool {
-            return line.len > 0 and line[0] != '*';
         }
 
         pub fn next(self: *Lines) !?[]const u8 {
             var head: []const u8 = undefined;
             while (true) {
-                const raw = self.nextPhysical() orelse return null;
+                const raw = nextPhysicalLine(&self.rest) orelse return null;
                 const t = std.mem.trim(u8, raw, " \t");
-                if (!isContent(t)) continue;
+                if (t.len == 0 or t[0] == '*') continue;
                 head = stripComment(t);
                 if (head.len == 0) continue;
                 break;
@@ -178,7 +198,7 @@ pub const ngspice = struct {
             var joined: ?std.ArrayList(u8) = null;
             while (true) {
                 const save = self.rest;
-                const raw = self.nextPhysical() orelse break;
+                const raw = nextPhysicalLine(&self.rest) orelse break;
                 const t = std.mem.trim(u8, raw, " \t");
                 if (t.len > 0 and t[0] == '+') {
                     const cont = stripComment(t[1..]);
@@ -204,26 +224,7 @@ pub const ngspice = struct {
     pub const Tokens = GenTokens(.{ .quotes = "'", .braces = true });
 
     pub fn parseNum(text: []const u8) ?f64 {
-        const parsed = parseNumBase(text) orelse return null;
-        const s = parsed.suffix;
-        const scale: f64 = if (s.len == 0)
-            1
-        else if (std.mem.startsWith(u8, s, "meg"))
-            1e6
-        else if (std.mem.startsWith(u8, s, "mil"))
-            25.4e-6
-        else switch (s[0]) {
-            't' => 1e12,
-            'g' => 1e9,
-            'k' => 1e3,
-            'm' => 1e-3,
-            'u' => 1e-6,
-            'n' => 1e-9,
-            'p' => 1e-12,
-            'f' => 1e-15,
-            else => 1,
-        };
-        return parsed.base * scale;
+        return parseSpiceNum(text, false);
     }
 };
 
@@ -241,16 +242,6 @@ pub const hspice = struct {
 
         pub fn init(arena: std.mem.Allocator, src: []const u8) Lines {
             return .{ .rest = src, .arena = arena };
-        }
-
-        fn nextPhysical(self: *Lines) ?[]const u8 {
-            while (self.rest.len > 0) {
-                const nl = std.mem.indexOfScalar(u8, self.rest, '\n') orelse self.rest.len;
-                const line = std.mem.trimEnd(u8, self.rest[0..nl], "\r");
-                self.rest = if (nl == self.rest.len) self.rest[nl..] else self.rest[nl + 1 ..];
-                return line;
-            }
-            return null;
         }
 
         fn stripComment(line: []const u8) []const u8 {
@@ -272,17 +263,13 @@ pub const hspice = struct {
             return .{ .text = line, .continues = false };
         }
 
-        fn isContent(line: []const u8) bool {
-            return line.len > 0 and line[0] != '*';
-        }
-
         pub fn next(self: *Lines) !?[]const u8 {
             var head: []const u8 = undefined;
             var trailing_cont = false;
             while (true) {
-                const raw = self.nextPhysical() orelse return null;
+                const raw = nextPhysicalLine(&self.rest) orelse return null;
                 const t = std.mem.trim(u8, raw, " \t");
-                if (!isContent(t)) continue;
+                if (t.len == 0 or t[0] == '*') continue;
                 const stripped = stripComment(t);
                 if (stripped.len == 0) continue;
                 const bs = stripTrailingBackslash(stripped);
@@ -294,7 +281,7 @@ pub const hspice = struct {
             while (true) {
                 if (!trailing_cont) {
                     const save = self.rest;
-                    const raw = self.nextPhysical() orelse break;
+                    const raw = nextPhysicalLine(&self.rest) orelse break;
                     const t = std.mem.trim(u8, raw, " \t");
                     if (t.len > 0 and t[0] == '+') {
                         const cont = stripComment(t[1..]);
@@ -304,7 +291,8 @@ pub const hspice = struct {
                         }
                         try joined.?.append(self.arena, ' ');
                         try joined.?.appendSlice(self.arena, cont);
-                        const bs = stripTrailingBackslash(if (joined) |j| j.items else cont);
+                        // ponytail: the appends above already require an initialized list.
+                        const bs = stripTrailingBackslash(joined.?.items);
                         trailing_cont = bs.continues;
                         if (trailing_cont) {
                             joined.?.shrinkRetainingCapacity(bs.text.len);
@@ -318,7 +306,7 @@ pub const hspice = struct {
                         break;
                     }
                 } else {
-                    const raw = self.nextPhysical() orelse break;
+                    const raw = nextPhysicalLine(&self.rest) orelse break;
                     const t = std.mem.trim(u8, raw, " \t");
                     if (joined == null) {
                         joined = .empty;
@@ -338,27 +326,7 @@ pub const hspice = struct {
     pub const Tokens = GenTokens(.{ .quotes = "'\"" });
 
     pub fn parseNum(text: []const u8) ?f64 {
-        const parsed = parseNumBase(text) orelse return null;
-        const s = parsed.suffix;
-        const scale: f64 = if (s.len == 0)
-            1
-        else if (std.mem.startsWith(u8, s, "meg"))
-            1e6
-        else if (std.mem.startsWith(u8, s, "mil"))
-            25.4e-6
-        else switch (s[0]) {
-            't' => 1e12,
-            'g' => 1e9,
-            'x' => 1e6,
-            'k' => 1e3,
-            'm' => 1e-3,
-            'u' => 1e-6,
-            'n' => 1e-9,
-            'p' => 1e-12,
-            'f' => 1e-15,
-            else => 1,
-        };
-        return parsed.base * scale;
+        return parseSpiceNum(text, true);
     }
 };
 
@@ -378,16 +346,6 @@ pub const spectre = struct {
             return .{ .rest = src, .arena = arena };
         }
 
-        fn nextPhysical(self: *Lines) ?[]const u8 {
-            while (self.rest.len > 0) {
-                const nl = std.mem.indexOfScalar(u8, self.rest, '\n') orelse self.rest.len;
-                const line = std.mem.trimEnd(u8, self.rest[0..nl], "\r");
-                self.rest = if (nl == self.rest.len) self.rest[nl..] else self.rest[nl + 1 ..];
-                return line;
-            }
-            return null;
-        }
-
         fn stripComment(line: []const u8) []const u8 {
             var i: usize = 0;
             while (i < line.len) : (i += 1) {
@@ -405,50 +363,41 @@ pub const spectre = struct {
             return std.mem.trim(u8, line, " \t");
         }
 
+        /// Copies the spans between comments, not byte by byte. An unterminated
+        /// `/*` still discards the rest of the line.
         fn stripBlockComments(arena: std.mem.Allocator, line: []const u8) ![]const u8 {
-            if (std.mem.indexOf(u8, line, "/*") == null) return line;
+            var open = std.mem.indexOf(u8, line, "/*") orelse return line;
             var buf: std.ArrayList(u8) = .empty;
-            var i: usize = 0;
-            while (i < line.len) {
-                if (i + 1 < line.len and line[i] == '/' and line[i + 1] == '*') {
-                    const end = std.mem.indexOfPos(u8, line, i + 2, "*/");
-                    if (end) |e| {
-                        i = e + 2;
-                        continue;
-                    }
-                    break;
-                }
-                try buf.append(arena, line[i]);
-                i += 1;
+            try buf.appendSlice(arena, line[0..open]);
+            while (std.mem.indexOfPos(u8, line, open + 2, "*/")) |close| {
+                const keep = close + 2;
+                open = std.mem.indexOfPos(u8, line, keep, "/*") orelse line.len;
+                try buf.appendSlice(arena, line[keep..open]);
+                if (open == line.len) break;
             }
             return std.mem.trim(u8, buf.items, " \t");
         }
 
+        // Both helpers receive trimmed output from stripBlockComments.
         fn hasContinuation(line: []const u8) bool {
-            const trimmed = std.mem.trimEnd(u8, line, " \t");
-            return trimmed.len > 0 and trimmed[trimmed.len - 1] == '\\';
+            return line.len > 0 and line[line.len - 1] == '\\';
         }
 
         fn trimContinuation(line: []const u8) []const u8 {
-            const trimmed = std.mem.trimEnd(u8, line, " \t");
-            if (trimmed.len > 0 and trimmed[trimmed.len - 1] == '\\') {
-                return std.mem.trimEnd(u8, trimmed[0 .. trimmed.len - 1], " \t");
+            if (line.len > 0 and line[line.len - 1] == '\\') {
+                return std.mem.trimEnd(u8, line[0 .. line.len - 1], " \t");
             }
-            return trimmed;
-        }
-
-        fn isContent(line: []const u8) bool {
-            return line.len > 0;
+            return line;
         }
 
         pub fn next(self: *Lines) !?[]const u8 {
             var head: []const u8 = undefined;
             var trailing_cont = false;
             while (true) {
-                const raw = self.nextPhysical() orelse return null;
+                const raw = nextPhysicalLine(&self.rest) orelse return null;
                 const stripped = stripComment(raw);
                 const clean = try stripBlockComments(self.arena, stripped);
-                if (!isContent(clean)) continue;
+                if (clean.len == 0) continue;
                 trailing_cont = hasContinuation(clean);
                 head = trimContinuation(clean);
                 if (head.len == 0) continue;
@@ -456,38 +405,30 @@ pub const spectre = struct {
             }
             var joined: ?std.ArrayList(u8) = null;
             while (true) {
-                if (trailing_cont) {
-                    const raw = self.nextPhysical() orelse break;
-                    const stripped = stripComment(raw);
-                    const clean = try stripBlockComments(self.arena, stripped);
-                    if (joined == null) {
-                        joined = .empty;
-                        try joined.?.appendSlice(self.arena, head);
-                    }
-                    try joined.?.append(self.arena, ' ');
-                    trailing_cont = hasContinuation(clean);
-                    try joined.?.appendSlice(self.arena, trimContinuation(clean));
-                } else {
+                const line = if (trailing_cont)
+                    nextPhysicalLine(&self.rest) orelse break
+                else blk: {
                     const save = self.rest;
-                    const raw = self.nextPhysical() orelse break;
+                    const raw = nextPhysicalLine(&self.rest) orelse break;
                     const t = std.mem.trim(u8, raw, " \t");
                     if (t.len > 0 and t[0] == '+') {
-                        const stripped = stripComment(t[1..]);
-                        const clean = try stripBlockComments(self.arena, stripped);
-                        if (joined == null) {
-                            joined = .empty;
-                            try joined.?.appendSlice(self.arena, head);
-                        }
-                        try joined.?.append(self.arena, ' ');
-                        trailing_cont = hasContinuation(clean);
-                        try joined.?.appendSlice(self.arena, trimContinuation(clean));
+                        break :blk t[1..];
                     } else if (t.len == 0 or (t.len > 0 and t[0] == '*')) {
                         continue;
                     } else {
                         self.rest = save;
                         break;
                     }
+                };
+                const stripped = stripComment(line);
+                const clean = try stripBlockComments(self.arena, stripped);
+                if (joined == null) {
+                    joined = .empty;
+                    try joined.?.appendSlice(self.arena, head);
                 }
+                try joined.?.append(self.arena, ' ');
+                trailing_cont = hasContinuation(clean);
+                try joined.?.appendSlice(self.arena, trimContinuation(clean));
             }
             return if (joined) |j| j.items else head;
         }
@@ -516,3 +457,8 @@ pub const spectre = struct {
         return parsed.base * scale;
     }
 };
+
+// Private implementation access for the frontend test suite.
+pub const test_access = if (@import("builtin").is_test) .{
+    .stripBlockComments = spectre.Lines.stripBlockComments,
+} else {};

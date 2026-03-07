@@ -74,10 +74,11 @@ running min-max / yield counters, restore nominals. One `Workspace` serves
 every trial (frozen pattern). Statistics finalized after the loop; nominals
 + `recompute()` restored on every exit path.
 
-**Temperature** (`sweep/temp_sweep.zig`): per point apply
-`setCircuitTemp` + explicit `TempCoeff` overrides, re-solve DC
-(cold, ITL2), record; failed points are counted (`failed_temps`) and
-skipped, sweep continues.
+**Temperature** (`sweep/temp_sweep.zig`): each `solveLanes` lane applies
+`setCircuitTemp` and recomputes device-native temperature coefficients before
+a cold DC solve at ITL2. Converged points are recorded; failed points are
+skipped. The lane driver restores `t_nom` and recomputes after the sweep.
+The unused serial sweep with external `TempCoeff` overrides is retired.
 
 **Corners** ride the same primitives — a corner is a deterministic
 `ParamVar` assignment; multi-lane machinery below executes them.
@@ -108,12 +109,12 @@ mc(ckt, param_vars, probes, N, seed):
         restore nominals
     stats: mean, bessel std, min, max, yield% over n_conv
 
-temp_sweep(ckt, coeffs, T0..T1 step dT):
+temp_sweep(ckt, T0..T1 step dT, t_nom):
     for T in range:
-        set_circuit_temp(T); for c in coeffs: c.apply(T)
+        set_circuit_temp(T); ckt.recompute()
         x = cold_dc(ckt)                        # fail -> count, skip point
-        record(T, x[probes])
-    restore coeffs
+        if converged: record(T, x[probes])
+    set_circuit_temp(t_nom); ckt.recompute()
 ```
 
 ## 4. Pseudo-code, GPU parallel
@@ -151,11 +152,11 @@ compose: big circuits use the former, small circuits the latter.
 
 | Phase | Solver doc | Impl |
 |---|---|---|
-| Per-trial cold Newton (refactor per trial on frozen pattern) | [klu-pipeline.md](../solvers/klu-pipeline.md), [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `src/solvers/direct.zig` via `converger.run` |
+| Per-trial cold Newton (refactor per trial on frozen pattern) | [klu-pipeline.md](../solvers/klu-pipeline.md), [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `src/analysis/solvers/direct.zig` via `converger.run` |
 | Workspace/pattern reuse; memcmp/sig refactor bypass for lanes where values repeat | [circuit-matrix-specifics.md](../solvers/circuit-matrix-specifics.md) | `ckt.workspace()`, `converger.Options.matrix_sig` |
 | Ladder fallback for hard corners | [homotopy-continuation.md](../solvers/homotopy-continuation.md) | `dc/op.zig solveLadder` (dc-sweep style demotion; MC currently records non-convergence instead — upgrade knob) |
-| Batched GPU solves | [gpu-sparse-lu.md](../solvers/gpu-sparse-lu.md) (batched-solve discussion) + megakernel JFNK | `src/devices/engine.zig` |
-| Within-solve lane-parallel eval | none (eval-side, not solver) | `src/devices/engine.zig` |
+| Batched GPU solves | [gpu-sparse-lu.md](../solvers/gpu-sparse-lu.md) (batched-solve discussion) + megakernel JFNK | `src/analysis/eval/engine.zig` |
+| Within-solve lane-parallel eval | none (eval-side, not solver) | `src/analysis/eval/engine.zig` |
 
 ---
 
@@ -163,7 +164,7 @@ compose: big circuits use the former, small circuits the latter.
 
 | Source | Status |
 |---|---|
-| SPICE temperature model ($tc_1/tc_2$) | verified against ngspice manual conventions + our `TempCoeff` |
+| SPICE temperature model ($tc_1/tc_2$) | implemented by generated device models; the sweep sets circuit temperature |
 | MC convergence ($1/\sqrt N$), Bessel correction | derived (standard statistics) |
 
 **Per-section verification**

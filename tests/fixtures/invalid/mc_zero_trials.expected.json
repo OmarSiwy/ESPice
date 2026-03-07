@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "mc",
+  "purpose": "Monte Carlo requires at least one trial.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "Monte Carlo requires at least one trial."
+  },
+  "expect": {
+    "status": "error",
+    "category": "invalid_analysis_arguments",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "0e4d575e357a2df09bf9d91d7d38ef78b6ea9ae4c6f2ad803e55b8e24e666c00"
+}

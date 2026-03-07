@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "X01: accepted LTRA history must be unchanged by rejected trial steps, observed on a curved waveform where every history entry is distinct.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Rs=Z0 so GammaS=0. SIN(0 1 62.5meg) into Z0=50, Td=10 ns, RL=150 with CL=1 pF: ZL=1/(1/RL+jwCL)=149.481332245-8.805177286j, GammaL=(ZL-Z0)/(ZL+Z0)=0.499674778-0.022084534j. v(b)=Im[0.5(1+GammaL)exp(-jwTd)exp(jwt)] for t>Td and 0 before; v(a)=0.5 sin(wt) for t<2Td (incident only) and Im[0.5(1+GammaL exp(-2jwTd))exp(jwt)] after. The load RC transient (tau=(RL||Z0)CL=37.5 ps) is dead by the first sample after Td. reltol=1e-8/vntol=1e-12/abstol=1e-15 with no user tmax forces the LTE controller to shrink, reject and retry: 2966 accepted points against 2258 with the .options line deleted, same values to 5.4e-6, both under the 8192 history bound. The 15 ns row (Td<t<2Td) is the one a plateau-driven deck cannot express: v(a) must still be the pure incident -0.191342 while v(b) is already +0.696985. The 5e-5 band is set by the runner's linear interpolation between 20 ps output points, (h^2/8)|v''|=3.9e-6; a trial value leaking into the accepted history moves v(b) by order 0.1-0.9 V.",
+    "cross_check": "Independent ngspice-44.2 run of this exact netlist agrees with all 18 hand values to 5.3e-6; the checkpoint binary to 5.4e-6 (this fixture passes today and is a regression gate).",
+    "command": "ngspice -n -b -r reference.raw <netlist>.sp"
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "columns": {
+          "v(a)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 5e-05,
+            "values": [
+              0.46193976625564337,
+              -0.3394003727664707,
+              -0.1913417161825452,
+              0.547346671383589,
+              0.04370362679965237,
+              -0.547346671383589,
+              -0.043703626799653394,
+              0.41793567386770125,
+              -0.48895773296898454
+            ]
+          },
+          "v(b)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 5e-05,
+            "values": [
+              0.0,
+              0.0,
+              0.696985109237841,
+              -0.6885337239407996,
+              -0.29715207031544805,
+              0.6885337239407995,
+              0.2971520703154494,
+              -0.6969851092378411,
+              0.5224070407899717
+            ]
+          }
+        },
+        "axis": {
+          "name": "time",
+          "values": [
+            5e-09,
+            9.9e-09,
+            1.5e-08,
+            2.1e-08,
+            2.5e-08,
+            2.9e-08,
+            3.3e-08,
+            3.9e-08,
+            4.4e-08
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true,
+    "checks": [
+      {
+        "kind": "repeatability"
+      }
+    ]
+  },
+  "netlist_sha256": "6fbbd1481cb2f13c6b9ed18142f22f46f9e069bd766bba0b7c9dacbba145e742"
+}

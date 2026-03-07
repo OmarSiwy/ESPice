@@ -1,4 +1,4 @@
-//! Structural sweep lanes: one driver for mc/temp/sens/dcmatch's "N
+//! Structural sweep lanes: one driver for "N
 //! independent cold DC solves, one param install per lane" shape. Route is
 //! GPU batch (`gpu_hook.solve_batch`, one launch) orelse a serial Newton loop
 //! — the same flat lane blob both ways (lane k at x_lanes[k*n..][0..n]),
@@ -41,36 +41,48 @@ pub fn solveLanes(
     results: []converger.Result,
     opts: converger.Options,
 ) !void {
-    if (solveLanesGpu(ckt, setup, x_lanes, results, opts)) return;
+    errdefer {
+        setup.restore(setup.ctx);
+        ckt.recompute() catch {}; // preserve the original failure; no further solve follows
+    }
+    if (try solveLanesGpu(ckt, setup, x_lanes, results, opts)) return;
 
     // -- Serial route: apply -> recompute -> seed -> Newton per lane.
     const n: usize = ckt.n;
     const n_lanes = results.len;
     const ws = try ckt.workspace();
     for (0..n_lanes) |k| {
+        if (k != 0) try ckt.checkpoint(.{ .phase = .sweep, .completed = k, .total = n_lanes });
         setup.apply(setup.ctx, k);
-        ckt.recompute();
+        try ckt.recompute();
         const xl = x_lanes[k * n ..][0..n];
         root.zeroSimd(xl);
         ckt.seedJunctions(xl);
-        results[k] = converger.run(ckt, ws, xl, 0, opts, root.EvalHook{}) catch
-            converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 };
+        results[k] = converger.run(ckt, ws, xl, 0, opts, root.EvalHook{}) catch |err| switch (err) {
+            error.QueryCancelled => return err,
+            else => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 },
+        };
     }
     setup.restore(setup.ctx);
+    try ckt.recompute();
 }
 
 /// GPU batch route on its own: install every lane's params, repack the device
 /// payloads, cold-seed each lane, one batched launch. Returns false — with
 /// `restore` NOT called and x_lanes/results left unspecified — when the hook is
-/// absent or any step fails. The caller must then run a serial route that
-/// re-applies from k = 0 (the apply(0)-reset contract above).
+/// absent or GPU execution fails. The caller must then run a serial route that
+/// re-applies from k = 0 (the apply(0)-reset contract above). Topology changes
+/// return an error; the caller must restore params before returning it.
 pub fn solveLanesGpu(
     ckt: *root.Circuit,
     setup: LaneSetup,
     x_lanes: []f64,
     results: []converger.Result,
     opts: converger.Options,
-) bool {
+) !bool {
+    // Whole-sweep GPU callbacks cannot suspend with their private lane state.
+    // Device evaluation can still use the GPU in the resumable serial driver.
+    if (ckt.progress != null) return false;
     const n: usize = ckt.n;
     std.debug.assert(x_lanes.len == results.len * n);
     const gh = ckt.gpu_hook orelse return false;
@@ -78,7 +90,7 @@ pub fn solveLanesGpu(
     const repack = gh.repack orelse return false; // batch needs device repack
     for (0..results.len) |k| {
         setup.apply(setup.ctx, k);
-        ckt.recompute();
+        try ckt.recompute();
         repack(gh.ctx) catch return false;
         const xl = x_lanes[k * n ..][0..n];
         root.zeroSimd(xl);
@@ -86,5 +98,6 @@ pub fn solveLanesGpu(
     }
     sb(gh.ctx, x_lanes, @intCast(n), 0, opts, results) catch return false;
     setup.restore(setup.ctx);
+    try ckt.recompute();
     return true;
 }

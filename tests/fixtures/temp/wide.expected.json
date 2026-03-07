@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "analysis": "temp",
+  "purpose": "Temperature-invariant ideal divider",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "With zero resistor temperature coefficients, Vout remains 7.5V at every temperature."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Temperature Sweep",
+        "match": "exact",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              7.5,
+              7.5,
+              7.5,
+              7.5
+            ]
+          },
+          "i(vin)": {
+            "unit": "A",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              -0.0025,
+              -0.0025,
+              -0.0025,
+              -0.0025
+            ]
+          }
+        },
+        "axis": {
+          "name": "temp",
+          "values": [
+            -40,
+            15,
+            70,
+            125
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "row_count": 4
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "a360ec0bac32eb4f786867ef3f8c97f531698572f63807d80c0e9b463fed0b17"
+}

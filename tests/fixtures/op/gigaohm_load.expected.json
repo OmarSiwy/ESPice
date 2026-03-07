@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "gigaohm load",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "KCL: V(out)=Vin*R2/(R1+R2); I(Vin)=-Vin/(R1+R2)."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(in)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              1
+            ]
+          },
+          "v(out)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-14,
+            "values": [
+              0.75
+            ]
+          },
+          "i(vin)": {
+            "unit": "A",
+            "rtol": 2e-05,
+            "atol": 1e-15,
+            "values": [
+              -2.5e-10
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "ac436b59692715cc44fc19282408800441846bc5bae4acb131fe4ca7d177ea33"
+}

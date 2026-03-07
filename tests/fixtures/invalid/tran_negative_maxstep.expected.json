@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "Maximum integration step must be positive.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "Maximum integration step must be positive."
+  },
+  "expect": {
+    "status": "error",
+    "category": "invalid_analysis_arguments",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "90238e117f3b55e1ad8f80dc5351fe9069e7e0fc2af0d7888f3409cf4b2c1a31"
+}

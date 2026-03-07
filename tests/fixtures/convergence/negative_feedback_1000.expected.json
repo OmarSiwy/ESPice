@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "Finite-gain voltage follower A=1000",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Vout=A*(Vin-Vout), hence Vout=Vin*A/(A+1)."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              0.999000999001
+            ]
+          },
+          "i(eamp)": {
+            "unit": "A",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              -0.000999000999001
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "3ab2ece179790bce7ca30cc1f5d28c7341601e919c748c1ebba0a754cc36cbfe"
+}

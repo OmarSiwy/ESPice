@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "analysis": "mc",
+  "purpose": "Gaussian Monte Carlo population statistics",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "The local MC contract varies all nonzero primary values independently with Gaussian relative sigma=.05. Ideal Vout=Vin gives population mean 1V and stddev .05V."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [],
+    "checks": [
+      {
+        "kind": "sample_moments",
+        "plot": "Monte Carlo",
+        "column": "v(out)",
+        "row_count": 4096,
+        "mean_min": 0.995,
+        "mean_max": 1.005,
+        "stddev_min": 0.045,
+        "stddev_max": 0.055
+      },
+      {
+        "kind": "repeatability",
+        "same_netlist": true,
+        "comparison": "bitwise_numeric_results"
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "notes": [
+    "Repeated runs use the default seed 42. Statistical limits are approximately six standard errors; they do not prescribe an RNG sequence."
+  ],
+  "netlist_sha256": "79b0229056788f6730d2006ce2f141f508402e21ca44b4d3dc64c86946fcddf2"
+}

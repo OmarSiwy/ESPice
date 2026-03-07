@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "analysis": "pss",
+  "purpose": "DC solution is a periodic fixed point for every period",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Vout=3V throughout the entire requested period."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Periodic Steady State",
+        "match": "samples",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              3,
+              3,
+              3,
+              3,
+              3
+            ]
+          }
+        },
+        "axis": {
+          "name": "time",
+          "values": [
+            0,
+            0.00025,
+            0.0005,
+            0.00075,
+            0.001
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "d298a932e9d0b7c900a47beb61a9e9879642fe7aa9af05de0ae34da9c0956898"
+}

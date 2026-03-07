@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "Concurrent generation and loading of two distinct models and a duplicate source preserve each device.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "The 1k/1k divider gives 0.5V and 0.5mA; the 1k/2k divider gives 2V and 1mA. The duplicate left source exercises same-tree exclusion before registry publication."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "row_count": 1,
+        "columns": {
+          "v(left)": {
+            "values": [
+              0.5
+            ],
+            "rtol": 1e-09,
+            "atol": 1e-12
+          },
+          "v(right)": {
+            "values": [
+              2.0
+            ],
+            "rtol": 1e-09,
+            "atol": 1e-12
+          },
+          "i(vleft)": {
+            "values": [
+              -0.0005
+            ],
+            "rtol": 1e-09,
+            "atol": 1e-12
+          },
+          "i(vright)": {
+            "values": [
+              -0.001
+            ],
+            "rtol": 1e-09,
+            "atol": 1e-12
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "a6fe9872fcca7d2c28e55b0fa02f72dfb1c99abc586d92dc466c1593ac9c6d28"
+}

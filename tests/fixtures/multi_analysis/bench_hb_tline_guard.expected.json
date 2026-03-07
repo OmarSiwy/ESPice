@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "analysis": [
+    "op",
+    "hb"
+  ],
+  "purpose": "Physical HB transfer through a matched transmission line",
+  "origin": "benchmark/fixtures/hb/tline_guard/circuit.sp",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Matched 50-ohm source and load give V(a)=V(b)=.5 peak; the lossless line only delays phase. Source peak current=.01A. DC and higher harmonics vanish."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "row_count": 1,
+        "columns": {
+          "v(b)": {
+            "values": [
+              0.0
+            ],
+            "unit": "V",
+            "rtol": 0.002,
+            "atol": 1e-06
+          }
+        }
+      },
+      {
+        "name": "Harmonic Balance",
+        "match": "exact",
+        "row_count": 9,
+        "axis": {
+          "name": "frequency",
+          "values": [
+            0,
+            1000,
+            2000,
+            3000,
+            4000,
+            5000,
+            6000,
+            7000,
+            8000
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "columns": {
+          "v(b)": {
+            "values": [
+              0.0,
+              0.5,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "unit": "V",
+            "rtol": 0.002,
+            "atol": 1e-06
+          },
+          "i(vin)": {
+            "values": [
+              0.0,
+              0.01,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "unit": "A",
+            "rtol": 0.002,
+            "atol": 1e-10
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "ff0f4fc42c58aba219805ac61c4949c5f540bbb8cc9f238c5d8b2c89cab8554e",
+  "known_gaps": [
+    "HB does not yet drive the solve from the physical source waveforms and amplitudes"
+  ]
+}

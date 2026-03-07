@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "PNP BJT operating point in active region.",
+  "oracle": {
+    "kind": "ngspice-44.2",
+    "derivation": "Independent ngspice-44.2 run of the preserved benchmark circuit. Stored binary raw doubles, selected by column name. Transient values retain reference accepted times. Large sweeps retain explicit row indices including outer-sweep boundaries.",
+    "command": "ngspice -n -b -r reference.raw circuit.sp",
+    "source_sha256": "03a7db1b1849f51cfcadc0c8ac98298bf7cdd52c1ae74c1247400f0aad75bc41"
+  },
+  "origin": "benchmark/fixtures/devices/bjt_pnp/circuit.sp",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(c)": {
+            "values": [
+              -5.0
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(b)": {
+            "values": [
+              -0.7
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(col)": {
+            "values": [
+              -4.9522287853859
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(base)": {
+            "values": [
+              -0.69433035855297
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "i(vbb)": {
+            "values": [
+              -5.6696414470293e-07
+            ],
+            "unit": "A",
+            "rtol": 0.001,
+            "atol": 1e-11
+          },
+          "i(vcc)": {
+            "values": [
+              -4.777121461413e-05
+            ],
+            "unit": "A",
+            "rtol": 0.001,
+            "atol": 1e-11
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "07130f4592939adcdbd52e57ffdac11a7cb4c61faa914f34d2a2f44872c230ad"
+}

@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "Diode series_resistance",
+  "oracle": {
+    "kind": "ngspice-44.2",
+    "derivation": "Run the self-contained deck in ngspice-44.2 with the explicit tolerances in the netlist. Read binary raw doubles by variable name. Transient samples retain up to 101 original accepted times; no interpolation was used to create these expected values.",
+    "version": "ngspice-44.2 (SPARSE solver; 27 C)",
+    "command": "ngspice -n -b -r /tmp/diode_series_resistance.raw reference/diode_series_resistance.sp"
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06,
+            "values": [
+              1.1360323049919
+            ]
+          },
+          "i(vin)": {
+            "unit": "A",
+            "rtol": 0.001,
+            "atol": 1e-09,
+            "values": [
+              -0.038639676950081
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "b4575a48f276a733f1e7868f15a9b80f95253c42fc4075fa96e28aaa6378fd11"
+}

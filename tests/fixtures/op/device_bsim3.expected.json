@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "Unit fixture: BSIM3v3 NMOS bias point (level 49, default params).",
+  "oracle": {
+    "kind": "ngspice-44.2",
+    "derivation": "Independent ngspice-44.2 run of the preserved benchmark circuit. Stored binary raw doubles, selected by column name. Transient values retain reference accepted times. Large sweeps retain explicit row indices including outer-sweep boundaries.",
+    "command": "ngspice -n -b -r reference.raw circuit.sp",
+    "source_sha256": "0758d040d8eaf75507a6ba2574ca527ca7307da52c346573fe100fd41d11c3d5"
+  },
+  "origin": "benchmark/fixtures/devices/bsim3/circuit.sp",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(vdd)": {
+            "values": [
+              1.8
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(g)": {
+            "values": [
+              1.0
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(d)": {
+            "values": [
+              1.799999981844
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "i(vg)": {
+            "values": [
+              0.0
+            ],
+            "unit": "A",
+            "rtol": 0.001,
+            "atol": 1e-11
+          },
+          "i(vdd)": {
+            "values": [
+              -1.8155991033525e-12
+            ],
+            "unit": "A",
+            "rtol": 0.001,
+            "atol": 1e-11
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "4f0dda81f75a8fb9e53f1ce063b4dbf6bca499a2825f2ef3ae1fd76efd8d5ae2"
+}

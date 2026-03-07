@@ -199,7 +199,7 @@ host:
 | Phase | Solver doc | Impl |
 |---|---|---|
 | Inner quasi-static Newton (coarse advance + fine period) | [klu-pipeline.md](../solvers/klu-pipeline.md), [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `converger.run` with `EvalHook` (matrix = $G$) |
-| Fourier-envelope upgrade: per-envelope-step block Newton | matrix-free GMRES per [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md); per-harmonic block factors per [klu-pipeline.md](../solvers/klu-pipeline.md) | target — HB machinery (`pss/hb.zig`) + `src/solvers/fft.zig` |
+| Fourier-envelope upgrade: per-envelope-step block Newton | matrix-free GMRES per [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md); per-harmonic block factors per [klu-pipeline.md](../solvers/klu-pipeline.md) | target — HB machinery (`pss/hb.zig`) + `src/analysis/solvers/fft.zig` |
 
 ---
 

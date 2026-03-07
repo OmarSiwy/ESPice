@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "A rejected/retried step raised by another instance leaves this instance's idt accumulator untouched: v(out) = t.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Same closed form as a09_idt_ramp_clean: v(out) = t (LRM 4.5.4). N2 resolves rising zero crossings of sin(2*pi*(t-0.125)/0.25), i.e. t = 0.125, 0.375, 0.625, 0.875 (LRM 5.10.3), each of which costs the host a rejected-and-retried step (LRM 8.4.7: a calculated solution may be accepted or rejected). N1 owns no event and no charge; per LRM 4.5.15 its accumulator advances once per ACCEPTED point, so the retries change the accepted grid and nothing else. Sample times are chosen clear of the four crossings."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "axis": {
+          "name": "time",
+          "values": [
+            0.0,
+            0.2,
+            0.4,
+            0.6,
+            0.8,
+            1.0
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-12
+        },
+        "columns": {
+          "v(out)": {
+            "values": [
+              0.0,
+              0.2,
+              0.4,
+              0.6,
+              0.8,
+              1.0
+            ],
+            "unit": "V",
+            "rtol": 1e-09,
+            "atol": 1e-12
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "03478fd238f44c7f7f3e467ddec004b5b8c17e3b8db4949713d5c4ff32e62496",
+  "row": "A09"
+}

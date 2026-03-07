@@ -1,12 +1,35 @@
 const std = @import("std");
 
+pub const Dialect = enum { ngspice, hspice, spectre };
+
+/// Parsed declarations. Expressions and subcircuit calls are unresolved.
+/// All slices borrow source bytes or storage in the parser's arena.
+pub const Ast = struct {
+    title: []const u8,
+    dialect: Dialect,
+    devices: []const Device,
+    subcircuits: []const Subcircuit,
+    models: []const Model,
+    directives: []const Directive,
+    params: []const Kv,
+    foreign: []const Foreign,
+};
+
+/// Cold declaration records: expansion reads the ports, defaults, and body together.
+pub const Subcircuit = struct {
+    name: []const u8,
+    ports: []const []const u8,
+    defaults: []const Kv,
+    devices: []const Device,
+};
+
+/// Builder scratch after parameter resolution, expansion, and model selection.
 pub const Netlist = struct {
     title: []const u8,
     devices: DeviceList,
     models: []const Model,
     directives: []const Directive,
     params: []const Kv,
-    foreign: []const Foreign,
 };
 
 pub const Device = struct {
@@ -22,19 +45,9 @@ pub const Device = struct {
     }
 };
 
-pub const SubcktType = struct {
-    name: []const u8,
-    n_ports: u16,
-    n_internal_nodes: u16,
-    device_count: u16,
-};
-
 /// Full SoA device storage: each field in its own contiguous column, sorted by
 /// letter with bucket offsets for zero-branch batch dispatch.
 pub const DeviceList = struct {
-    len_: usize = 0,
-    /// name[0] lowercased — hot discriminant column, SIMD-scannable
-    letters: []const u8 = &.{},
     names: []const []const u8 = &.{},
     nodes: []const []const []const u8 = &.{},
     positional: []const []const Value = &.{},
@@ -43,10 +56,9 @@ pub const DeviceList = struct {
     subckt_instances_col: []const u32 = &.{},
     /// bucket_starts[c - 'a'] = first index with letter c; [26] = len sentinel
     bucket_starts: [27]u32 = [_]u32{0} ** 27,
-    subckt_types: []const SubcktType = &.{},
 
     pub inline fn len(self: DeviceList) usize {
-        return self.len_;
+        return self.names.len;
     }
 
     pub inline fn get(self: DeviceList, i: usize) Device {
@@ -67,8 +79,6 @@ pub const DeviceList = struct {
         nodes: []const []const []const u8,
         positional: []const []const Value,
         kv: []const []const Kv,
-        subckt_types_col: []const u16,
-        subckt_instances_col: []const u32,
 
         pub inline fn size(self: Bucket) usize {
             return self.names.len;
@@ -80,15 +90,13 @@ pub const DeviceList = struct {
                 .nodes = self.nodes[i],
                 .positional = self.positional[i],
                 .kv = self.kv[i],
-                .subckt_type = if (self.subckt_types_col.len > i) self.subckt_types_col[i] else 0,
-                .subckt_instance = if (self.subckt_instances_col.len > i) self.subckt_instances_col[i] else 0,
             };
         }
     };
 
     pub inline fn bucket(self: DeviceList, c: u8) Bucket {
         const idx = c -% 'a';
-        if (idx >= 26) return .{ .names = &.{}, .nodes = &.{}, .positional = &.{}, .kv = &.{}, .subckt_types_col = &.{}, .subckt_instances_col = &.{} };
+        if (idx >= 26) return .{ .names = &.{}, .nodes = &.{}, .positional = &.{}, .kv = &.{} };
         const lo = self.bucket_starts[idx];
         const hi = self.bucket_starts[idx + 1];
         return .{
@@ -96,8 +104,6 @@ pub const DeviceList = struct {
             .nodes = self.nodes[lo..hi],
             .positional = self.positional[lo..hi],
             .kv = self.kv[lo..hi],
-            .subckt_types_col = if (self.subckt_types_col.len >= hi) self.subckt_types_col[lo..hi] else &.{},
-            .subckt_instances_col = if (self.subckt_instances_col.len >= hi) self.subckt_instances_col[lo..hi] else &.{},
         };
     }
 
@@ -119,7 +125,6 @@ pub const DeviceList = struct {
         for (0..26) |i| starts[i + 1] = starts[i] + counts[i];
 
         // Scatter into column arrays
-        const letters_col = try arena.alloc(u8, n);
         const names_col = try arena.alloc([]const u8, n);
         const nodes_col = try arena.alloc([]const []const u8, n);
         const pos_col = try arena.alloc([]const Value, n);
@@ -132,7 +137,6 @@ pub const DeviceList = struct {
             const idx = d.letter() -% 'a';
             if (idx < 26) {
                 const pos = write_pos[idx];
-                letters_col[pos] = idx + 'a';
                 names_col[pos] = d.name;
                 nodes_col[pos] = d.nodes;
                 pos_col[pos] = d.positional;
@@ -144,8 +148,6 @@ pub const DeviceList = struct {
         }
 
         return .{
-            .len_ = n,
-            .letters = letters_col,
             .names = names_col,
             .nodes = nodes_col,
             .positional = pos_col,
@@ -204,3 +206,15 @@ pub const Foreign = struct {
 
 pub const ForeignKind = enum { osdi_include, pre_osdi, verilog_a, verilog };
 
+pub inline fn foreignKindForPath(path: []const u8) ?ForeignKind {
+    const ext = std.fs.path.extension(path);
+    if (std.ascii.eqlIgnoreCase(ext, ".va") or
+        std.ascii.eqlIgnoreCase(ext, ".vams") or
+        std.ascii.eqlIgnoreCase(ext, ".veriloga"))
+    {
+        return .verilog_a;
+    }
+    if (std.ascii.eqlIgnoreCase(ext, ".v") or std.ascii.eqlIgnoreCase(ext, ".sv"))
+        return .verilog;
+    return null;
+}

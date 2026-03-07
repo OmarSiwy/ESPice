@@ -1,0 +1,122 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "X01: CPL DC operating point is R*length per conductor with no cross-conduction, on two coupled lines with the same R*length but halved modal impedances and 32x the delay.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "At DC the coupled line reduces to the lumped matrices R*length and G*length; L and C do not conduct. cmod (R11=2, length=3) and cmod2 (R11=0.5, length=12) both give 6 ohm per conductor. Conductor 1 loop 10+6+40=56 across 1 V: v(a1)=46/56, v(b1)=40/56, i(v1)=-1/56, identically on both cards even though Ze/Zo are 100/25 on the first and 50/12.5 on the second and Td is 12 ns against 384 ns. Conductor 2 is driven by a 0 V source and must stay exactly 0 despite L12=150n and C12=-60p.",
+    "cross_check": "Independent ngspice-44.2 run of this exact netlist agrees with every tabulated value; the per-fixture bound is stated in the .sp header.",
+    "command": "ngspice -n -b -r reference.raw <netlist>.sp"
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(a1)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              0.8214285714285714
+            ]
+          },
+          "v(b1)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              0.7142857142857143
+            ]
+          },
+          "i(v1)": {
+            "unit": "A",
+            "rtol": 2e-05,
+            "atol": 1e-12,
+            "values": [
+              -0.017857142857142856
+            ]
+          },
+          "v(a2)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              0.0
+            ]
+          },
+          "v(b2)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              0.0
+            ]
+          },
+          "i(v2)": {
+            "unit": "A",
+            "rtol": 2e-05,
+            "atol": 1e-12,
+            "values": [
+              0.0
+            ]
+          },
+          "v(a3)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              0.8214285714285714
+            ]
+          },
+          "v(b3)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              0.7142857142857143
+            ]
+          },
+          "i(v3)": {
+            "unit": "A",
+            "rtol": 2e-05,
+            "atol": 1e-12,
+            "values": [
+              -0.017857142857142856
+            ]
+          },
+          "v(a4)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              0.0
+            ]
+          },
+          "v(b4)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              0.0
+            ]
+          },
+          "i(v4)": {
+            "unit": "A",
+            "rtol": 2e-05,
+            "atol": 1e-12,
+            "values": [
+              0.0
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "360c21fcb59b47f88a250c77e304b3c18e6c6291039456abce39ac4494b81b2d"
+}

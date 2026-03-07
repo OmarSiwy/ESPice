@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "Capacitor is open at DC, so no finite DC operating point exists.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "Capacitor is open at DC, so no finite DC operating point exists."
+  },
+  "expect": {
+    "status": "error",
+    "category": "inconsistent_circuit",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "22479a1298b90443019126a1e676fa66a5c148a89efa0cf7284788a8b13cd30e"
+}

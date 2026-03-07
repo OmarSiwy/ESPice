@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "inductor short dc",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Inductor is short in DC; branch current follows card orientation."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              0
+            ]
+          },
+          "i(v1)": {
+            "unit": "A",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              -0.003
+            ]
+          },
+          "i(l1)": {
+            "unit": "A",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              0.003
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "c0028456fcf9b9ba66f8f260b657bc90f4f3c3ef4f0f73ac048712f4cddecc3f"
+}

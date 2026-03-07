@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "analysis": "sp",
+  "purpose": "Linear SP grid and matched reflection",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Matched R=Z0 yields zero S11 at every frequency; LIN N is total point count."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "SP Analysis",
+        "match": "exact",
+        "columns": {
+          "v(S_1_1)": {
+            "unit": "dimensionless",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ]
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            1000.0,
+            143714.28571429,
+            286428.57142857,
+            429142.85714286,
+            571857.14285714,
+            714571.42857143,
+            857285.71428571,
+            1000000.0
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "row_count": 8
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "db8403ef2ee2e4cac4f912aaca87c06bbcad8b10dee3a9e344c35ab2b3f61693"
+}

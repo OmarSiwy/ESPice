@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "matex",
+  "purpose": "Matrix-exponential output interval must be positive.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "Matrix-exponential output interval must be positive."
+  },
+  "expect": {
+    "status": "error",
+    "category": "invalid_analysis_arguments",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "f0f94a4f90e3316c394d3898a3a2ffc94a9d9490fc90707fc683caa6fde7ac63"
+}

@@ -81,8 +81,8 @@ matrix-free block apply — same kernel shape as HB.
 | Phase | Solver doc | Impl |
 |---|---|---|
 | PSS settle solves | [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md), [klu-pipeline.md](../solvers/klu-pipeline.md) | `converger.run` per sample |
-| Harmonic decomposition | none (support kernel) | `src/solvers/fft.zig` |
-| Conversion-matrix solve | none (dense path today); Krylov upgrade per above | `src/solvers/dense_lu.zig factorizeSolve` |
+| Harmonic decomposition | none (support kernel) | `src/analysis/solvers/fft.zig` |
+| Conversion-matrix solve | none (dense path today); Krylov upgrade per above | `src/analysis/solvers/dense_lu.zig factorizeSolve` |
 
 ---
 

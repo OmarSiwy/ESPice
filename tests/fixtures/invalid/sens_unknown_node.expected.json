@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "sens",
+  "purpose": "Sensitivity output node must exist.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "Sensitivity output node must exist."
+  },
+  "expect": {
+    "status": "error",
+    "category": "invalid_analysis_arguments",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "cdff9a08feb1e4bd30aeda3d15279f780fa35fcffc109d9a5a2f426ccd4a293c"
+}

@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "BSIM3SOI-FD (Full Depletion) NMOS operating point.",
+  "oracle": {
+    "kind": "ngspice-44.2",
+    "derivation": "Independent ngspice-44.2 run of the preserved benchmark circuit. Stored binary raw doubles, selected by column name. Transient values retain reference accepted times. Large sweeps retain explicit row indices including outer-sweep boundaries.",
+    "command": "ngspice -n -b -r reference.raw circuit.sp",
+    "source_sha256": "71946877803153353a745a0c7213d27de0a077463cc3682506f7a8d025b5fa6f"
+  },
+  "origin": "benchmark/fixtures/devices/b3soifd/circuit.sp",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(vdd)": {
+            "values": [
+              1.8
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(g)": {
+            "values": [
+              1.0
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(body)": {
+            "values": [
+              0.0
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(d)": {
+            "values": [
+              0.057386445960441
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "i(vb)": {
+            "values": [
+              0.0
+            ],
+            "unit": "A",
+            "rtol": 0.001,
+            "atol": 1e-11
+          },
+          "i(vg)": {
+            "values": [
+              -9.4261355403956e-13
+            ],
+            "unit": "A",
+            "rtol": 0.001,
+            "atol": 1e-11
+          },
+          "i(vdd)": {
+            "values": [
+              -0.00017426135540396
+            ],
+            "unit": "A",
+            "rtol": 0.001,
+            "atol": 1e-11
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "notes": [
+    "Invalid/ignored legacy model parameters or model-level selectors were corrected during migration; see MIGRATION.json. Reference results use the corrected deck."
+  ],
+  "netlist_sha256": "b5adf4f096ed9b06c35ecc7040f84ff28739160184fcb29d8060bf3c4aa77754",
+  "known_gaps": [
+    "the BSIM3SOI FD/DD model families are absent from the current device catalog"
+  ]
+}

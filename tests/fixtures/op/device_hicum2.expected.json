@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "HICUM/L2 NPN DC operating point.",
+  "oracle": {
+    "kind": "ngspice-44.2",
+    "derivation": "Independent ngspice-44.2 run of the preserved benchmark circuit. Stored binary raw doubles, selected by column name. Transient values retain reference accepted times. Large sweeps retain explicit row indices including outer-sweep boundaries.",
+    "command": "ngspice -n -b -r reference.raw circuit.sp",
+    "source_sha256": "16383e986cc5952e64b3e73d9a4213c1ebebc73c2733c2b2b3f43cd40f077923"
+  },
+  "origin": "benchmark/fixtures/devices/hicum2/circuit.sp",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(vcc)": {
+            "values": [
+              3.3
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(b)": {
+            "values": [
+              0.85
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(c)": {
+            "values": [
+              3.2999999952803
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "i(vb)": {
+            "values": [
+              3.1882829709673e-12
+            ],
+            "unit": "A",
+            "rtol": 0.001,
+            "atol": 1e-11
+          },
+          "i(vcc)": {
+            "values": [
+              -9.4393139138393e-12
+            ],
+            "unit": "A",
+            "rtol": 0.001,
+            "atol": 1e-11
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "c8d0ffe1678f398bd1128da0cc6b043c7e5c0881bb60a247005c0f0d3fc38dd8"
+}

@@ -187,9 +187,9 @@ has a related per-device "bypass" option but no matrix-level equivalent).
 §3 — verified against `direct.zig`/`converger.zig` directly. §4 — derived,
 not source-verified.
 
-**Our implementation:** `src/solvers/direct.zig` (`isTridiag`,
+**Our implementation:** `src/analysis/solvers/direct.zig` (`isTridiag`,
 `TriDiag`, `Solver.factor` vcopy bypass, BBD dispatch + demotion),
-`src/solvers/bbd.zig`, `src/solvers/converger.zig`
+`src/analysis/solvers/bbd.zig`, `src/analysis/solvers/converger.zig`
 (`Options.matrix_sig`, `Workspace.factored_sig`). Scaling fixtures:
 `benchmark/fixtures/scaling/rc_ladder_{1k,10k,100k}` + `rc_chain_500`
 (tridiag path), `parallel_inverters_{100,500,2000}` (BBD partitions),

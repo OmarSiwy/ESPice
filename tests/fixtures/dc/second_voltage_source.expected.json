@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "analysis": "dc",
+  "purpose": "Select the second voltage source by name",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Vout=(Vin+3)/2, and bias stays at 3V."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "DC transfer characteristic",
+        "match": "exact",
+        "columns": {
+          "v(bias)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              3,
+              3,
+              3,
+              3,
+              3
+            ]
+          },
+          "v(in)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              -1,
+              -0.5,
+              0,
+              0.5,
+              1
+            ]
+          },
+          "v(out)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              1,
+              1.25,
+              1.5,
+              1.75,
+              2
+            ]
+          }
+        },
+        "axis": {
+          "name": "v(v-sweep)",
+          "values": [
+            -1,
+            -0.5,
+            0,
+            0.5,
+            1
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "row_count": 5
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "3b11c009e21767b7f2a82db73ce751c8eff138dc585d3687ea179e53c66fbe85"
+}

@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "X01: TXL run whose live history depth exceeds the native capacity bound 2048 (txl_native).",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Matched near-lossless line, Z0=sqrt(l/c)=50, GammaS=GammaL=0, so v(b)(t)=v(a)(t-Td) exactly. The forced 1 ps step makes the far-end value depend on a history entry Td/1ps accepted points back, deeper than the 2048 (txl_native) bound, and compaction is disabled. Source step at 6 ns; v(a)=0.5 after it, v(b)=0.5 after it plus Td. The sample 100 ps before the far-end edge is the gate: a discarded still-live entry republishes the edge at the capacity horizon instead.",
+    "cross_check": "Independent ngspice-44.2 run of this exact netlist agrees with every tabulated value; the per-fixture bound is stated in the .sp header.",
+    "command": "ngspice -n -b -r reference.raw <netlist>.sp"
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "columns": {
+          "v(a)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 5e-07,
+            "values": [
+              0.0,
+              0.5,
+              0.5,
+              0.5,
+              0.5
+            ]
+          },
+          "v(b)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 5e-07,
+            "values": [
+              0.0,
+              0.0,
+              0.0,
+              0.5,
+              0.5
+            ]
+          }
+        },
+        "axis": {
+          "name": "time",
+          "values": [
+            3e-09,
+            8e-09,
+            1.09e-08,
+            1.2e-08,
+            1.29e-08
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "7148d6c939fcadadfc3009b43a3f1fd1f7bd374766a33f547b627ed2e9f21b62"
+}

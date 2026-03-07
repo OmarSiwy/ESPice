@@ -93,9 +93,9 @@ kernel tf_batched(lanes):
 
 | Phase | Solver doc | Impl |
 |---|---|---|
-| Dense LU forward + transpose solve | none (dense path is below the sparse pipeline's scope) | `src/solvers/dense_lu.zig` `factorizeSolve` |
-| The sparse alternative (reuse Newton factors: solve/solveT) | [klu-pipeline.md](../solvers/klu-pipeline.md) | `src/solvers/direct.zig` — upgrade path when n grows |
-| Upstream OP | [homotopy-continuation.md](../solvers/homotopy-continuation.md), [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `dc/op.zig`, `helper/converger.zig` |
+| Dense LU forward + transpose solve | none (dense path is below the sparse pipeline's scope) | `src/analysis/solvers/dense_lu.zig` `factorizeSolve` |
+| The sparse alternative (reuse Newton factors: solve/solveT) | [klu-pipeline.md](../solvers/klu-pipeline.md) | `src/analysis/solvers/direct.zig` — upgrade path when n grows |
+| Upstream OP | [homotopy-continuation.md](../solvers/homotopy-continuation.md), [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `dc/op.zig`, `src/analysis/solvers/converger.zig` |
 
 ---
 

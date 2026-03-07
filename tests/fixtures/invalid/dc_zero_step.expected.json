@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "dc",
+  "purpose": "Zero DC step cannot advance the sweep.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "Zero DC step cannot advance the sweep."
+  },
+  "expect": {
+    "status": "error",
+    "category": "invalid_analysis_arguments",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "9ebbeb2679e0d8ab6c28f21cf36ca03fb25a09e209a5a6a61cd1aa302bd49151"
+}

@@ -2,42 +2,22 @@
 //!
 //! R-MATEX variant: Arnoldi on (I - γA)⁻¹ via a once-factored (C + γG).
 //! No Newton, no LTE loop — only source transition spots bound the step.
-//! Krylov subspace reuse: one Arnoldi serves every h in the reuse window.
 //!
 //! ponytail: nonlinear EPIRK path documented but not implemented; add when
 //! matrix_sig / const-Jacobian detection says linearization is needed.
 const std = @import("std");
 const root = @import("../types.zig");
-const converger = @import("solvers").converger;
+const simdCopy = root.copySimd;
 const solvers = @import("solvers");
-const types = @import("solvers").types;
-const dense_lu = solvers.dense_lu;
 
-const DenseLu = dense_lu.DenseLu(f64);
+const DenseLu = solvers.dense_lu.DenseLu(f64);
 const Solver = solvers.direct.Solver;
 
 // ponytail: platform SIMD width — not hardcoded
 const W = std.simd.suggestVectorLength(f64) orelse 8;
 const V = @Vector(W, f64);
 
-// ---------------------------------------------------------------------------
-// Options
-// ---------------------------------------------------------------------------
-
-pub const Options = struct {
-    tol: converger.Tolerances = .{},
-    t_stop: f64,
-    /// Krylov posterior tolerance (role of reltol on the exponential).
-    krylov_tol: f64 = 1e-10,
-    /// Maximum Krylov subspace dimension before declaring failure.
-    m_max: u32 = 80,
-    /// R-MATEX shift parameter γ — order of intended timestep, insensitive.
-    gamma: ?f64 = null,
-    /// Output resolution cap — maximum h between recorded points.
-    h_output_cap: ?f64 = null,
-    /// Maximum recorded points (controls initial waveform allocation).
-    max_points: u32 = 1 << 22,
-};
+pub const Options = @import("requests").Matex;
 
 // ---------------------------------------------------------------------------
 // Sparse CSC matrix-vector product: y = M * x (for n×n CSC M)
@@ -64,9 +44,6 @@ fn cscMulVec(
 // ---------------------------------------------------------------------------
 // Dense small-matrix exponential: scaling & squaring with Padé(6,6)
 //
-// Padé(6,6) approximant with scaling-squaring. Coefficients:
-//   b = [1, 1/2, 1/12, 1/120, 1/1680, 1/30240, 1/720720]
-//
 // Needs H^2, H^4 = H^2·H^2, H^6 = H^4·H^2 (3 matmuls for powers).
 // U = H·(b[1]I + b[3]H^2 + b[5]H^4)    — odd part  (1 matmul)
 // V = b[0]I + b[2]H^2 + b[4]H^4 + b[6]H^6  — even part
@@ -81,13 +58,13 @@ fn cscMulVec(
 fn expmSmall(m: usize, H: []f64, out: []f64, scratch: []f64) void {
     // Padé [6/6] coefficients: b_j = (12-j)! · 6! / (12! · j! · (6-j)!)
     const b = [_]f64{
-        1.0,                // b[0] = 1
-        0.5,                // b[1] = 1/2
-        5.0 / 44.0,        // b[2] = 5/44
-        1.0 / 66.0,        // b[3] = 1/66
-        1.0 / 792.0,       // b[4] = 1/792
-        1.0 / 15840.0,     // b[5] = 1/15840
-        1.0 / 665280.0,    // b[6] = 1/665280
+        1.0, // b[0] = 1
+        0.5, // b[1] = 1/2
+        5.0 / 44.0, // b[2] = 5/44
+        1.0 / 66.0, // b[3] = 1/66
+        1.0 / 792.0, // b[4] = 1/792
+        1.0 / 15840.0, // b[5] = 1/15840
+        1.0 / 665280.0, // b[6] = 1/665280
     };
 
     // Determine scaling factor s such that ||H/2^s|| < 0.5
@@ -97,7 +74,6 @@ fn expmSmall(m: usize, H: []f64, out: []f64, scratch: []f64) void {
     var s: u32 = 0;
     while (norm_h > 0.5) : (s += 1) {
         norm_h *= 0.5;
-        // Scale H in-place
         for (0..m * m) |i| H[i] *= 0.5;
     }
 
@@ -109,14 +85,11 @@ fn expmSmall(m: usize, H: []f64, out: []f64, scratch: []f64) void {
     const U = scratch[3 * mm .. 4 * mm];
     const Vmat = scratch[4 * mm .. 5 * mm];
 
-    // H2 = H * H
     denseMatMul(m, H, H, H2);
-    // H4 = H2 * H2
     denseMatMul(m, H2, H2, H4);
 
     // --- Even part: V = b[0]I + b[2]H^2 + b[4]H^4 + b[6]H^6 ---
     // First compute H6 into T (temporary), then build V.
-    // H6 = H4 * H2
     denseMatMul(m, H4, H2, T); // T = H^6
 
     // Vmat = b[2]*H2 + b[4]*H4 + b[6]*H6 + b[0]*I
@@ -154,7 +127,6 @@ fn expmSmall(m: usize, H: []f64, out: []f64, scratch: []f64) void {
     }
     for (0..m) |i| T[i * m + i] += b[1]; // + b[1]*I
 
-    // U = H * T
     denseMatMul(m, H, T, U);
 
     // --- Build (V + U) into out, (V - U) into H (which we can destroy) ---
@@ -173,7 +145,6 @@ fn expmSmall(m: usize, H: []f64, out: []f64, scratch: []f64) void {
     }
 
     // Solve (V - U) * expm = (V + U) column by column using dense LU
-    // Factor V - U (in H)
     var piv_buf: [256]u32 = undefined;
     const piv = piv_buf[0..m];
     DenseLu.factorize(m, H, piv) catch {
@@ -202,21 +173,33 @@ fn expmSmall(m: usize, H: []f64, out: []f64, scratch: []f64) void {
 }
 
 /// Dense m×m matrix multiply: C = A * B (row-major).
+///
+/// Vectorized across W adjacent output columns: each lane keeps its own
+/// accumulator and walks k in the original 0..m order, so every C element
+/// sums exactly the terms the scalar loop summed, in the same order —
+/// bit-identical. The gain is on the B side: the scalar loop read B with an
+/// m-element stride, the vector loop reads W adjacent elements per k.
+/// C must not alias A or B (it never did).
 fn denseMatMul(m: usize, A: []const f64, B: []const f64, C: []f64) void {
     for (0..m) |i| {
-        for (0..m) |j| {
+        const a_row = A[i * m ..][0..m];
+        const c_row = C[i * m ..][0..m];
+        var j: usize = 0;
+        while (j + W <= m) : (j += W) {
+            var acc: V = @splat(@as(f64, 0));
+            for (0..m) |k| {
+                const av: V = @splat(a_row[k]);
+                const bv: V = B[k * m + j ..][0..W].*;
+                acc += av * bv;
+            }
+            c_row[j..][0..W].* = acc;
+        }
+        while (j < m) : (j += 1) {
             var sum: f64 = 0;
-            for (0..m) |k| sum += A[i * m + k] * B[k * m + j];
-            C[i * m + j] = sum;
+            for (0..m) |k| sum += a_row[k] * B[k * m + j];
+            c_row[j] = sum;
         }
     }
-}
-
-/// SIMD copy for dense buffers (no @memcpy per contract).
-fn simdCopy(dst: []f64, src: []const f64) void {
-    var i: usize = 0;
-    while (i + W <= dst.len) : (i += W) dst[i..][0..W].* = src[i..][0..W].*;
-    while (i < dst.len) : (i += 1) dst[i] = src[i];
 }
 
 /// SIMD axpy: y[i] += a * x[i]
@@ -270,8 +253,7 @@ fn arnoldi(
     n: u32,
     v: []const f64,
     slv: *Solver,
-    // Circuit CSC for C-matrix multiply
-    ckt_n: u32,
+    // ponytail: CSC matvec shares n with the basis; no second dimension.
     col_ptr: []const u32,
     row_idx: []const u32,
     c_vals: []const f64,
@@ -304,7 +286,6 @@ fn arnoldi(
         while (i < nn) : (i += 1) V_basis[i] = v[i] * inv_beta;
     }
 
-    // Zero H
     root.zeroSimd(H[0 .. @as(usize, m_max) * m_max]);
 
     var j: u32 = 0;
@@ -313,7 +294,7 @@ fn arnoldi(
         const vj = V_basis[jj * nn ..][0..nn];
 
         // tmp1 = C * v_j (sparse CSC matvec)
-        cscMulVec(ckt_n, col_ptr, row_idx, c_vals, vj, tmp1[0..nn]);
+        cscMulVec(n, col_ptr, row_idx, c_vals, vj, tmp1[0..nn]);
 
         // tmp2 = (C + γG)⁻¹ tmp1   (solve using pre-factored LU)
         slv.solve(tmp1[0..nn], tmp2[0..nn]);
@@ -402,14 +383,11 @@ fn posteriorOk(
     const expm_scratch = scratch[2 * msq .. 7 * msq];
 
     // Copy the m×m leading submatrix of H (which is m_max-strided) into
-    // contiguous m×m storage.
+    // contiguous m×m storage. ponytail: reuse the shared copy for each row.
     for (0..mm) |i| {
-        for (0..mm) |j| {
-            H_copy[i * mm + j] = H[i * @as(usize, m_max) + j];
-        }
+        simdCopy(H_copy[i * mm ..][0..mm], H[i * @as(usize, m_max) ..][0..mm]);
     }
 
-    // Scale H_copy by h_step (the time step)
     for (0..msq) |i| H_copy[i] *= h_step;
 
     expmSmall(mm, H_copy, expm_out, expm_scratch);
@@ -425,75 +403,45 @@ fn posteriorOk(
 // Collect transition spots (breakpoints) from circuit sources
 // ---------------------------------------------------------------------------
 
-const TransitionSpots = struct {
-    spots: []f64,
-    len: usize,
-    allocator: std.mem.Allocator,
+fn collectTransitionSpots(allocator: std.mem.Allocator, ckt: *root.Circuit, t_stop: f64) !std.ArrayList(f64) {
+    var spots_list: std.ArrayList(f64) = .empty;
+    defer spots_list.deinit(allocator);
 
-    fn init(allocator: std.mem.Allocator, ckt: *root.Circuit, t_stop: f64) !TransitionSpots {
-        // Collect breakpoints by scanning the circuit's source list
-        var spots_list: std.ArrayListUnmanaged(f64) = .empty;
-        defer spots_list.deinit(allocator);
-
-        // Walk through time collecting all breakpoints
-        var t: f64 = 0;
-        var iters: u32 = 0;
-        while (t < t_stop and iters < 100_000) : (iters += 1) {
-            if (ckt.nextBreakpoint(t)) |bp| {
-                if (bp <= t_stop) {
-                    try spots_list.append(allocator, bp);
-                    t = bp;
-                } else break;
+    var t: f64 = 0;
+    var iters: u32 = 0;
+    while (t < t_stop and iters < 100_000) : (iters += 1) {
+        if (ckt.nextBreakpoint(t)) |bp| {
+            if (bp <= t_stop) {
+                try spots_list.append(allocator, bp);
+                t = bp;
             } else break;
+        } else break;
+    }
+    try spots_list.append(allocator, t_stop);
+
+    const items = try spots_list.toOwnedSlice(allocator);
+    std.mem.sort(f64, items, {}, std.sort.asc(f64));
+
+    var write: usize = 0;
+    for (items, 0..) |v, i| {
+        if (i == 0 or v - items[write - 1] > 1e-18) {
+            items[write] = v;
+            write += 1;
         }
-        // Always include t_stop
-        try spots_list.append(allocator, t_stop);
-
-        // Sort and deduplicate
-        const items = try spots_list.toOwnedSlice(allocator);
-        std.mem.sort(f64, items, {}, std.sort.asc(f64));
-
-        // Dedup
-        var write: usize = 0;
-        for (items, 0..) |v, i| {
-            if (i == 0 or v - items[write - 1] > 1e-18) {
-                items[write] = v;
-                write += 1;
-            }
-        }
-
-        return .{
-            .spots = items,
-            .len = write,
-            .allocator = allocator,
-        };
     }
 
-    fn deinit(self: *TransitionSpots) void {
-        self.allocator.free(self.spots);
-        self.* = undefined;
-    }
-};
-
-// ---------------------------------------------------------------------------
-// Assemble dense G and C matrices from circuit
-// ---------------------------------------------------------------------------
-
-fn assembleDenseGC(ckt: *root.Circuit, x: []const f64, g_dense: []f64, c_dense: []f64) void {
-    const n: usize = ckt.n;
-    // Evaluate at the operating point to fill g_vals, c_vals
-    ckt.eval(x, 0);
-    ckt.denseG(g_dense);
-    if (ckt.has_charge) {
-        ckt.denseC(c_dense);
-    } else {
-        root.zeroSimd(c_dense[0 .. n * n]);
-    }
+    var spots = std.ArrayList(f64){
+        .items = items,
+        .capacity = items.len,
+    };
+    spots.items.len = write;
+    return spots;
 }
 
 // ---------------------------------------------------------------------------
 // Build and factor (C + γG) for R-MATEX. Uses the circuit's CSC pattern
 // to build combined values, then factors via the sparse direct solver.
+// ponytail: consume CSC planes directly; dense assembly already lives in Circuit.
 // ---------------------------------------------------------------------------
 
 fn buildCombinedVals(
@@ -503,7 +451,6 @@ fn buildCombinedVals(
     gamma: f64,
     out: []f64,
 ) void {
-    // out[i] = c_vals[i] + gamma * g_vals[i]
     const gv: V = @splat(gamma);
     var i: usize = 0;
     while (i + W <= nnz) : (i += W) {
@@ -527,6 +474,12 @@ fn evalSourceRhs(ckt: *root.Circuit, t: f64, b_out: []f64) void {
     // ponytail: reuse the rhs plane directly — eval at x=0 gives rhs = B*u(t)
     const x_zero = b_out; // we'll overwrite b_out anyway
     root.zeroSimd(x_zero[0..n]);
+    // A source waveform only exists in the TRANSIENT phase (§4.6.1
+    // `analysis("tran")`). Evaluated in whatever phase the shared op left
+    // behind, every SIN/PULSE/PWL card answers with its DC value instead —
+    // which is why `matex/sine` marched 5001 steps of an undriven circuit and
+    // printed a column of zeros.
+    ckt.setSimState(.{ .t = t, .kind = .tran });
     ckt.eval(x_zero, t);
     // After eval at x=0: rhs contains the source contributions
     simdCopy(b_out[0..n], ckt.rhs[0..n]);
@@ -592,6 +545,11 @@ fn approxAinvMul(
 
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
+    // Everything `defer`-freed below — the factorization, the Krylov basis,
+    // the recorded waveform — is scratch, and `a` is a results arena whose
+    // free() is a no-op. Only `names` and `data` at the bottom are the Result.
+    // See RunCtx.scratch_allocator.
+    const scratch = ctx.scratch_allocator orelse a;
     const ckt = ctx.circuit;
     const x_op = ctx.x_op orelse return error.NoOperatingPoint;
     const n: usize = ckt.n;
@@ -600,17 +558,22 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     if (n == 0) return error.EmptyCircuit;
 
     // --- DC operating point as initial condition ---
-    const x = try a.alloc(f64, n);
-    defer a.free(x);
+    const x = try scratch.alloc(f64, n);
+    defer scratch.free(x);
     simdCopy(x, x_op);
 
-    // --- Gamma: default to t_stop / 1000 if not specified ---
     const gamma = opts.gamma orelse opts.t_stop / 1000.0;
 
     // --- Output resolution cap ---
     const h_cap = opts.h_output_cap orelse opts.t_stop / 200.0;
 
-    const m_max = opts.m_max;
+    // A Krylov subspace of R^n has at most n dimensions, so anything past
+    // `n` is round-off masquerading as a basis vector. The cap is also a
+    // memory-safety bound: the step update reuses `arnoldi_tmp1`, an
+    // n-long buffer, as the m-long dense RHS, so an m > n Arnoldi (matex/dc,
+    // whose constant source never triggered the breakdown test) wrote past
+    // the allocation and aborted glibc with "double free or corruption".
+    const m_max = @min(opts.m_max, nn);
     const m_max_usize: usize = m_max;
 
     // --- Evaluate circuit once to populate G, C planes ---
@@ -618,8 +581,8 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     ckt.eval(x, 0);
 
     // --- Build (C + γG) combined values and factor ---
-    const combined_vals = try a.alloc(f64, ckt.nnz + 1);
-    defer a.free(combined_vals);
+    const combined_vals = try scratch.alloc(f64, ckt.nnz + 1);
+    defer scratch.free(combined_vals);
 
     if (ckt.has_charge) {
         buildCombinedVals(ckt.nnz, ckt.g_vals, ckt.c_vals, gamma, combined_vals);
@@ -637,67 +600,68 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     if (ckt.nnz < combined_vals.len) combined_vals[ckt.nnz] = 0;
 
     // Factor (C + γG) — ONE factorization for the entire simulation
-    var slv = try Solver.init(a, nn, ckt.col_ptr, ckt.row_idx, ckt.bbd);
+    var slv = try Solver.init(scratch, nn, ckt.col_ptr, ckt.row_idx, ckt.bbd);
     defer slv.deinit();
     try slv.factor(combined_vals);
 
     // --- Collect transition spots ---
-    var ts = try TransitionSpots.init(a, ckt, opts.t_stop);
-    defer ts.deinit();
+    var ts = try collectTransitionSpots(scratch, ckt, opts.t_stop);
+    defer ts.deinit(scratch);
 
     // --- Allocate Krylov workspace ---
     // V_basis: n * (m_max+1) column-major
     const v_basis_size = n * (m_max_usize + 1);
-    const V_basis = try a.alloc(f64, v_basis_size);
-    defer a.free(V_basis);
+    const V_basis = try scratch.alloc(f64, v_basis_size);
+    defer scratch.free(V_basis);
 
-    // H: m_max * m_max row-major
+    // H: m_max * m_max row-major, plus one subdiagonal row. The final
+    // non-breakdown Arnoldi iteration (j == m_max-1) writes the subdiagonal
+    // H[(j+1)*m_max + j] = H[m_max*m_max + m_max-1], which is past an
+    // m_max*m_max allocation; nothing reads it, but the store has to land
+    // somewhere we own.
     const h_size = m_max_usize * m_max_usize;
-    const H_mat = try a.alloc(f64, h_size);
-    defer a.free(H_mat);
+    const H_mat = try scratch.alloc(f64, h_size + m_max_usize);
+    defer scratch.free(H_mat);
 
     // Scratch for Arnoldi: 2*n
-    const arnoldi_tmp1 = try a.alloc(f64, n);
-    defer a.free(arnoldi_tmp1);
-    const arnoldi_tmp2 = try a.alloc(f64, n);
-    defer a.free(arnoldi_tmp2);
+    const arnoldi_tmp1 = try scratch.alloc(f64, n);
+    defer scratch.free(arnoldi_tmp1);
+    const arnoldi_tmp2 = try scratch.alloc(f64, n);
+    defer scratch.free(arnoldi_tmp2);
 
-    // Scratch for expm: 7*m_max^2 (Padé(6) needs 5*m*m, plus H_copy + expm_out)
-    const expm_scratch_size = 7 * h_size;
-    const expm_scratch = try a.alloc(f64, @max(expm_scratch_size, 1));
-    defer a.free(expm_scratch);
+    // Padé(6) needs 5*m*m scratch; H_copy and expm_out are separate below.
+    const expm_scratch = try scratch.alloc(f64, @max(5 * h_size, 1));
+    defer scratch.free(expm_scratch);
 
     // Small expm output: m_max * m_max
-    const expm_out = try a.alloc(f64, h_size);
-    defer a.free(expm_out);
+    const expm_out = try scratch.alloc(f64, h_size);
+    defer scratch.free(expm_out);
 
     // Small H copy for expm
-    const H_copy = try a.alloc(f64, h_size);
-    defer a.free(H_copy);
+    const H_copy = try scratch.alloc(f64, h_size);
+    defer scratch.free(H_copy);
 
     // Temporary vectors for the step update
-    const b_t = try a.alloc(f64, n); // b(t) = source RHS at time t
-    defer a.free(b_t);
-    const b_th = try a.alloc(f64, n); // b(t+h) = source RHS at time t+h
-    defer a.free(b_th);
-    const v_vec = try a.alloc(f64, n); // the vector to exponentiate
-    defer a.free(v_vec);
-    const y_vec = try a.alloc(f64, n); // result of V_m * expm * e1
-    defer a.free(y_vec);
-    const x_new = try a.alloc(f64, n); // next state
-    defer a.free(x_new);
+    const b_t = try scratch.alloc(f64, n); // b(t) = source RHS at time t
+    defer scratch.free(b_t);
+    const b_th = try scratch.alloc(f64, n); // b(t+h) = source RHS at time t+h
+    defer scratch.free(b_th);
+    const v_vec = try scratch.alloc(f64, n); // the vector to exponentiate
+    defer scratch.free(v_vec);
+    const x_new = try scratch.alloc(f64, n); // next state
+    defer scratch.free(x_new);
 
     // PWL integral scratch vectors
-    const ainv_bt = try a.alloc(f64, n); // A⁻¹·b(t)
-    defer a.free(ainv_bt);
-    const ainv_bth = try a.alloc(f64, n); // A⁻¹·b(t+h)
-    defer a.free(ainv_bth);
-    const ainv2_db = try a.alloc(f64, n); // A⁻²·(b(t+h)-b(t))/h
-    defer a.free(ainv2_db);
-    const db_vec = try a.alloc(f64, n); // (b(t+h)-b(t))/h
-    defer a.free(db_vec);
-    const pwl_tmp = try a.alloc(f64, n); // scratch for approxAinvMul
-    defer a.free(pwl_tmp);
+    const ainv_bt = try scratch.alloc(f64, n); // A⁻¹·b(t)
+    defer scratch.free(ainv_bt);
+    const ainv_bth = try scratch.alloc(f64, n); // A⁻¹·b(t+h)
+    defer scratch.free(ainv_bth);
+    const ainv2_db = try scratch.alloc(f64, n); // A⁻²·(b(t+h)-b(t))/h
+    defer scratch.free(ainv2_db);
+    const db_vec = try scratch.alloc(f64, n); // (b(t+h)-b(t))/h
+    defer scratch.free(db_vec);
+    const pwl_tmp = try scratch.alloc(f64, n); // scratch for approxAinvMul
+    defer scratch.free(pwl_tmp);
 
     // --- Waveform recording ---
     const n_probes: u32 = @intCast(ctx.probes.len);
@@ -705,10 +669,10 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         @max(@as(f64, 256), opts.t_stop / h_cap * 2.0),
         @as(f64, opts.max_points),
     ));
-    var wf = try @import("tran.zig").Waveform.init(a, n_probes, est_points);
+    // ponytail: waveform storage needs only the data leaf, not the tran driver.
+    var wf = try @import("types.zig").Waveform.init(scratch, n_probes, est_points);
     defer wf.deinit();
 
-    // Record initial point
     try wf.record(0, x, ctx.probes);
 
     // --- Time march ---
@@ -717,8 +681,8 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     var steps: u32 = 0;
 
     // Save C values for matvec in Arnoldi (they get overwritten by eval)
-    const c_vals_saved = try a.alloc(f64, ckt.nnz + 1);
-    defer a.free(c_vals_saved);
+    const c_vals_saved = try scratch.alloc(f64, ckt.nnz + 1);
+    defer scratch.free(c_vals_saved);
     if (ckt.has_charge) {
         simdCopy(c_vals_saved[0..ckt.nnz], ckt.c_vals[0..ckt.nnz]);
     } else {
@@ -726,11 +690,12 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     }
 
     while (t < opts.t_stop and steps < 10_000_000) {
+        if (steps != 0) try ckt.checkpoint(.{ .phase = .transient, .completed = steps });
         // Determine step size h: distance to next transition spot, capped
         var h = opts.t_stop - t;
-        while (ts_idx < ts.len and ts.spots[ts_idx] <= t + 1e-18) : (ts_idx += 1) {}
-        if (ts_idx < ts.len) {
-            h = @min(h, ts.spots[ts_idx] - t);
+        while (ts_idx < ts.items.len and ts.items[ts_idx] <= t + 1e-18) : (ts_idx += 1) {}
+        if (ts_idx < ts.items.len) {
+            h = @min(h, ts.items[ts_idx] - t);
         }
         h = @min(h, h_cap);
         if (h < 1e-30) break;
@@ -738,7 +703,6 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         // Clamp to t_stop
         if (t + h > opts.t_stop) h = opts.t_stop - t;
 
-        // Get source RHS at t and t+h
         evalSourceRhs(ckt, t, b_t);
         evalSourceRhs(ckt, t + h, b_th);
 
@@ -792,7 +756,6 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
             nn,
             v_vec[0..n],
             &slv,
-            nn,
             ckt.col_ptr,
             ckt.row_idx,
             c_vals_saved,
@@ -813,10 +776,9 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
             const msq = m * m;
 
             // Copy the m×m leading submatrix of H (m_max-strided → m-strided)
+            // ponytail: each row uses the shared copy, as in posteriorOk.
             for (0..m) |i| {
-                for (0..m) |j| {
-                    H_copy[i * m + j] = H_mat[i * m_max_usize + j];
-                }
+                simdCopy(H_copy[i * m ..][0..m], H_mat[i * m_max_usize ..][0..m]);
             }
 
             // For R-MATEX: the Hessenberg H represents (C+γG)⁻¹C.
@@ -829,21 +791,11 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
             // Step 1: Invert H_copy (m×m) using dense LU
             const H_inv = expm_out[0..msq]; // reuse buffer
-            root.zeroSimd(H_inv[0..msq]);
-            for (0..m) |i| H_inv[i * m + i] = 1.0;
 
-            // Factor H_copy
             var piv_buf: [256]u32 = undefined;
             const piv = piv_buf[0..m];
 
-            // We need a copy since factorize destroys the matrix
-            const H_factored = expm_scratch[0..msq];
-            simdCopy(H_factored[0..msq], H_copy[0..msq]);
-
-            const lu_ok = DenseLu.factorize(m, H_factored, piv);
-            if (lu_ok) |_| {
-                // This branch is never taken — factorize returns void or error
-            } else |_| {
+            DenseLu.factorize(m, H_copy[0..msq], piv) catch {
                 // Singular H — fall back to forward Euler
                 simdCopy(x_new[0..n], x[0..n]);
                 simdAxpy(h, b_t[0..n], x_new[0..n], n);
@@ -852,13 +804,13 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
                 steps += 1;
                 try wf.record(t, x, ctx.probes);
                 continue;
-            }
+            };
 
             // Solve H * H_inv[:,j] = I[:,j] for each column j
             for (0..m) |j| {
                 root.zeroSimd(arnoldi_tmp1[0..m]);
                 arnoldi_tmp1[j] = 1.0;
-                DenseLu.solveFactored(m, H_factored, piv, arnoldi_tmp1[0..m], arnoldi_tmp1[0..m]);
+                DenseLu.solveFactored(m, H_copy[0..msq], piv, arnoldi_tmp1[0..m], arnoldi_tmp1[0..m]);
                 for (0..m) |i| H_inv[i * m + j] = arnoldi_tmp1[i];
             }
 
@@ -868,8 +820,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
             for (0..m) |i| H_copy[i * m + i] += scale;
 
             // Step 3: expm(T) → expm_out
-            const expm_inner_scratch = expm_scratch[msq .. msq + 5 * msq];
-            expmSmall(m, H_copy, expm_out, expm_inner_scratch);
+            expmSmall(m, H_copy, expm_out, expm_scratch);
 
             // x_exp = beta * V_m * (expm_out * e1)
             // y_small = expm_out[:,0] (column 0 of m×m row-major)
@@ -911,149 +862,23 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         for (names[1..]) |s_val| a.free(s_val);
         a.free(names);
     }
-    const ncols = names.len;
-    const npoints: usize = wf.len;
-    const data = try a.alloc(f64, npoints * ncols);
-    const times = wf.timeSlice();
-    for (0..npoints) |p| {
-        const row = data[p * ncols ..][0..ncols];
-        row[0] = times[p];
-        for (0..ctx.probes.len) |idx| row[idx + 1] = wf.probeValues(@intCast(idx))[p];
-    }
+    const data = try wf.toRows(a, names.len);
 
     return .{
         .plotname = "MATEX Transient Analysis",
         .varnames = names,
         .is_complex = false,
-        .npoints = npoints,
+        .npoints = wf.len,
         .data = data,
     };
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
-
-const testing = std.testing;
-
-test "expmSmall: identity" {
-    // expm(0) = I
-    var H = [_]f64{ 0, 0, 0, 0 };
-    var out: [4]f64 = undefined;
-    var scratch: [20]f64 = undefined; // 5*2*2 = 20
-    expmSmall(2, &H, &out, &scratch);
-    try testing.expectApproxEqAbs(@as(f64, 1.0), out[0], 1e-12);
-    try testing.expectApproxEqAbs(@as(f64, 0.0), out[1], 1e-12);
-    try testing.expectApproxEqAbs(@as(f64, 0.0), out[2], 1e-12);
-    try testing.expectApproxEqAbs(@as(f64, 1.0), out[3], 1e-12);
-}
-
-test "expmSmall: diagonal" {
-    // expm(diag(1,2)) = diag(e, e^2)
-    var H = [_]f64{ 1, 0, 0, 2 };
-    var out: [4]f64 = undefined;
-    var scratch: [20]f64 = undefined;
-    expmSmall(2, &H, &out, &scratch);
-    // Padé(6,6) + scaling-squaring: ~1e-10 on the small matrix
-    try testing.expectApproxEqRel(std.math.e, out[0], 1e-6);
-    try testing.expectApproxEqAbs(@as(f64, 0.0), out[1], 1e-10);
-    try testing.expectApproxEqAbs(@as(f64, 0.0), out[2], 1e-10);
-    try testing.expectApproxEqRel(std.math.e * std.math.e, out[3], 1e-6);
-}
-
-test "expmSmall: 1x1" {
-    var H = [_]f64{1.0};
-    var out: [1]f64 = undefined;
-    var scratch: [5]f64 = undefined; // 5*1*1
-    expmSmall(1, &H, &out, &scratch);
-    try testing.expectApproxEqRel(std.math.e, out[0], 1e-6);
-}
-
-test "expmSmall: 3x3 nilpotent" {
-    // H = [[0,1,0],[0,0,1],[0,0,0]] — nilpotent, expm = I + H + H²/2
-    // expm = [[1,1,0.5],[0,1,1],[0,0,1]]
-    var H = [_]f64{ 0, 1, 0, 0, 0, 1, 0, 0, 0 };
-    var out: [9]f64 = undefined;
-    var scratch: [45]f64 = undefined; // 5*3*3
-    expmSmall(3, &H, &out, &scratch);
-    try testing.expectApproxEqAbs(@as(f64, 1.0), out[0], 1e-12); // [0,0]
-    try testing.expectApproxEqAbs(@as(f64, 1.0), out[1], 1e-12); // [0,1]
-    try testing.expectApproxEqAbs(@as(f64, 0.5), out[2], 1e-12); // [0,2]
-    try testing.expectApproxEqAbs(@as(f64, 0.0), out[3], 1e-12); // [1,0]
-    try testing.expectApproxEqAbs(@as(f64, 1.0), out[4], 1e-12); // [1,1]
-    try testing.expectApproxEqAbs(@as(f64, 1.0), out[5], 1e-12); // [1,2]
-    try testing.expectApproxEqAbs(@as(f64, 0.0), out[6], 1e-12); // [2,0]
-    try testing.expectApproxEqAbs(@as(f64, 0.0), out[7], 1e-12); // [2,1]
-    try testing.expectApproxEqAbs(@as(f64, 1.0), out[8], 1e-12); // [2,2]
-}
-
-test "expmSmall: scaled diagonal needs squaring" {
-    // expm(diag(5,5)) = diag(e^5, e^5) — forces scaling-squaring
-    var H = [_]f64{ 5, 0, 0, 5 };
-    var out: [4]f64 = undefined;
-    var scratch: [20]f64 = undefined;
-    expmSmall(2, &H, &out, &scratch);
-    const e5 = @exp(@as(f64, 5.0));
-    try testing.expectApproxEqRel(e5, out[0], 1e-6);
-    try testing.expectApproxEqAbs(@as(f64, 0.0), out[1], 1e-6);
-    try testing.expectApproxEqAbs(@as(f64, 0.0), out[2], 1e-6);
-    try testing.expectApproxEqRel(e5, out[3], 1e-6);
-}
-
-test "expmSmall: antisymmetric (rotation)" {
-    // H = [[0, -pi/4], [pi/4, 0]] => expm is rotation by pi/4
-    // expm = [[cos(pi/4), -sin(pi/4)], [sin(pi/4), cos(pi/4)]]
-    const angle = std.math.pi / 4.0;
-    var H = [_]f64{ 0, -angle, angle, 0 };
-    var out: [4]f64 = undefined;
-    var scratch: [20]f64 = undefined;
-    expmSmall(2, &H, &out, &scratch);
-    const c = @cos(angle);
-    const s_val = @sin(angle);
-    try testing.expectApproxEqRel(c, out[0], 1e-6);
-    try testing.expectApproxEqRel(-s_val, out[1], 1e-6);
-    try testing.expectApproxEqRel(s_val, out[2], 1e-6);
-    try testing.expectApproxEqRel(c, out[3], 1e-6);
-}
-
-test "denseMatMul: identity times A" {
-    const A = [_]f64{ 1, 2, 3, 4 };
-    const I = [_]f64{ 1, 0, 0, 1 };
-    var C: [4]f64 = undefined;
-    denseMatMul(2, &I, &A, &C);
-    try testing.expectApproxEqAbs(@as(f64, 1.0), C[0], 1e-15);
-    try testing.expectApproxEqAbs(@as(f64, 2.0), C[1], 1e-15);
-    try testing.expectApproxEqAbs(@as(f64, 3.0), C[2], 1e-15);
-    try testing.expectApproxEqAbs(@as(f64, 4.0), C[3], 1e-15);
-}
-
-test "simdDot: basic" {
-    const a_arr = [_]f64{ 1, 2, 3, 4 };
-    const b_arr = [_]f64{ 5, 6, 7, 8 };
-    const d = simdDot(&a_arr, &b_arr, 4);
-    try testing.expectApproxEqAbs(@as(f64, 70.0), d, 1e-12);
-}
-
-test "simdNorm: unit" {
-    const v_arr = [_]f64{ 3, 4 };
-    try testing.expectApproxEqAbs(@as(f64, 5.0), simdNorm(&v_arr, 2), 1e-12);
-}
-
-test "simdAxpy: basic" {
-    const x_arr = [_]f64{ 1, 2, 3 };
-    var y_arr = [_]f64{ 10, 20, 30 };
-    simdAxpy(2.0, &x_arr, &y_arr, 3);
-    try testing.expectApproxEqAbs(@as(f64, 12.0), y_arr[0], 1e-15);
-    try testing.expectApproxEqAbs(@as(f64, 24.0), y_arr[1], 1e-15);
-    try testing.expectApproxEqAbs(@as(f64, 36.0), y_arr[2], 1e-15);
-}
-
-test "buildCombinedVals: gamma=1 gives C+G" {
-    const g = [_]f64{ 1, 2, 3 };
-    const c = [_]f64{ 10, 20, 30 };
-    var out: [3]f64 = undefined;
-    buildCombinedVals(3, &g, &c, 1.0, &out);
-    try testing.expectApproxEqAbs(@as(f64, 11.0), out[0], 1e-15);
-    try testing.expectApproxEqAbs(@as(f64, 22.0), out[1], 1e-15);
-    try testing.expectApproxEqAbs(@as(f64, 33.0), out[2], 1e-15);
-}
+// Private implementation access for the analysis test suite.
+pub const test_access = if (@import("builtin").is_test) .{
+    .buildCombinedVals = buildCombinedVals,
+    .denseMatMul = denseMatMul,
+    .expmSmall = expmSmall,
+    .simdAxpy = simdAxpy,
+    .simdDot = simdDot,
+    .simdNorm = simdNorm,
+} else {};

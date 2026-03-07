@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "balanced bridge",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Equal ratios force zero bridge current."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(a)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              5
+            ]
+          },
+          "v(b)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              5
+            ]
+          },
+          "i(v1)": {
+            "unit": "A",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              -0.0075
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "ee0c42c064a281a2a53275f6b0059cbb9383019c3031bf422d3267c0bcf3c87c"
+}

@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "analysis": "pss",
+  "purpose": "Nonlinear memoryless periodic orbit",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Behavioral voltage enforces Vout=sin(wt)^3 exactly."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Periodic Steady State",
+        "match": "samples",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 0.003,
+            "atol": 0.0005,
+            "values": [
+              0.0,
+              0.35355339059327,
+              1.0,
+              0.35355339059327,
+              1.8366760173268e-48,
+              -0.35355339059327,
+              -1.0,
+              -0.35355339059327,
+              -1.4693408138614e-47
+            ]
+          }
+        },
+        "axis": {
+          "name": "time",
+          "values": [
+            0.0,
+            0.000125,
+            0.00025,
+            0.000375,
+            0.0005,
+            0.000625,
+            0.00075,
+            0.000875,
+            0.001
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "328be1e8b095821e0b2c86c48775a3ba36cb7b69e2a4f3a45af6f0211037e51b",
+  "known_gaps": [
+    "the behavioral-source compiler only supports a limited single-control polynomial subset"
+  ]
+}

@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "Full-wave diode bridge feeding a resistive load: four-junction convergence.",
+  "oracle": {
+    "kind": "ngspice-44.2",
+    "derivation": "Independent ngspice-44.2 run of the preserved benchmark circuit. Stored binary raw doubles, selected by column name. Transient values retain reference accepted times. Large sweeps retain explicit row indices including outer-sweep boundaries.",
+    "command": "ngspice -n -b -r reference.raw circuit.sp",
+    "source_sha256": "491cb97d45934a132be9aa54b8c2d436fa5b7121add9b02f879a9e9eba157d69"
+  },
+  "origin": "benchmark/fixtures/convergence/diode_bridge/circuit.sp",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(ap)": {
+            "values": [
+              5.0
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(p)": {
+            "values": [
+              4.1763083458057
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(n)": {
+            "values": [
+              0.82369165419432
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "i(vac)": {
+            "values": [
+              -0.0033526166999839
+            ],
+            "unit": "A",
+            "rtol": 0.001,
+            "atol": 1e-11
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "769abd87ae85ed1dddee50fb2f5278db2a887a89c2ca27863a06bef697716ec2"
+}

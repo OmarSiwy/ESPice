@@ -3,41 +3,37 @@
 //! a power of 2, FFT, and read off harmonic magnitudes, phases, and THD.
 const std = @import("std");
 const root = @import("../types.zig");
-const converger = @import("solvers").converger;
-const types = @import("solvers").types;
-const solvers = @import("solvers");
 const fft_mod = @import("solvers").fft;
 const tran = @import("../tran/tran.zig");
 
 const math = std.math;
-const W = std.simd.suggestVectorLength(f64) orelse 8;
 
 pub const Harmonic = struct {
     mag: f64,
     phase_deg: f64,
 };
 
-pub const Options = struct {
-    tol: converger.Tolerances = .{},
-    f_fundamental: f64,
-    n_harmonics: u16 = 9,
-    output_node: u32 = 0,
-    /// Transient window to analyze; defaults to 5 fundamental periods at
-    /// 200 points/period (the old engine reused a queued .tran here).
-    tran_opts: ?tran.Options = null,
-};
+pub const Options = @import("requests").Four;
+
+/// ngspice prints nine harmonics by default; a deck may ask for more
+/// (`.four 1k v(out) 16`). The table is fixed-size and `n_harmonics` says how
+/// much of it is live — a Spectrum is a value returned by copy, so a slice
+/// into scratch would dangle.
+pub const max_harmonics = Options.max_harmonics;
 
 pub const Spectrum = struct {
     dc: f64,
     fundamental: f64,
-    harmonics: [9]Harmonic,
+    harmonics: [max_harmonics]Harmonic,
+    /// Live prefix of `harmonics`, 1-based (index 0 IS the fundamental).
+    n_harmonics: usize,
     thd_percent: f64,
 };
 
 /// Run Fourier analysis on a transient waveform captured in a Waveform struct.
 /// Extracts one period from the end (steady-state), resamples to power-of-2,
 /// applies FFT, and computes harmonic magnitudes, phases, and THD.
-pub fn analyze(waveform: *const tran.Waveform, probe_idx: u32, f_fund: f64, allocator: std.mem.Allocator) !Spectrum {
+pub fn analyze(waveform: *const tran.Waveform, probe_idx: u32, f_fund: f64, n_harmonics: usize, allocator: std.mem.Allocator) !Spectrum {
     const times = waveform.timeSlice();
     const values = waveform.probeValues(probe_idx);
 
@@ -67,22 +63,24 @@ pub fn analyze(waveform: *const tran.Waveform, probe_idx: u32, f_fund: f64, allo
     // Linearly interpolate raw_count samples onto n_fft uniform points in [t_start, t_end)
     const win_times = times[start_idx..];
     const win_vals = values[start_idx..];
+    // Targets increase monotonically, so one cursor walks the window forward
+    // instead of restarting a binary search per sample: O(window + n_fft).
+    var cursor: usize = 0;
     for (0..n_fft) |k| {
         const t_target = t_start + period * @as(f64, @floatFromInt(k)) / n_fft_f;
-        re[k] = interpolate(win_times, win_vals, t_target);
+        re[k] = interpolateAt(win_times, win_vals, t_target, &cursor);
     }
 
-    // Zero imaginary part (SIMD)
     root.zeroSimd(im);
 
     fft_mod.fft(re, im);
 
-    return extractSpectrum(re, im, n_fft);
+    return extractSpectrum(re, im, n_fft, n_harmonics);
 }
 
 /// Fourier analysis from pre-computed uniform samples (no transient sim needed).
 /// `samples` are uniformly spaced over exactly one period of the fundamental.
-pub fn analyzeBuffer(samples: []const f64, allocator: std.mem.Allocator) !Spectrum {
+pub fn analyzeBuffer(samples: []const f64, n_harmonics: usize, allocator: std.mem.Allocator) !Spectrum {
     if (samples.len < 2) return error.InsufficientData;
 
     const n_fft = fft_mod.nextPow2(samples.len);
@@ -103,31 +101,11 @@ pub fn analyzeBuffer(samples: []const f64, allocator: std.mem.Allocator) !Spectr
         re[k] = samples[idx_lo] * (1.0 - alpha) + samples[idx_hi] * alpha;
     }
 
-    // Zero imaginary part (SIMD)
     root.zeroSimd(im);
 
     fft_mod.fft(re, im);
 
-    return extractSpectrum(re, im, n_fft);
-}
-
-/// Fine-grained primitive: run transient simulation then perform Fourier
-/// analysis on the result.
-pub fn solve(
-    ckt: *root.Circuit,
-    x: []f64,
-    options: Options,
-    tran_opts: tran.Options,
-    allocator: std.mem.Allocator,
-) !Spectrum {
-    const probes = [_]u32{options.output_node};
-    var waveform = try tran.Waveform.init(allocator, 1, tran.initialCapacity(tran_opts));
-    defer waveform.deinit();
-
-    const tran_result = try tran.simulate(ckt, x, &probes, &waveform, tran_opts, allocator);
-    if (!tran_result.completed) return error.TransientFailed;
-
-    return analyze(&waveform, 0, options.f_fundamental, allocator);
+    return extractSpectrum(re, im, n_fft, n_harmonics);
 }
 
 /// Contract entry: transient from the operating point, then the harmonic
@@ -135,17 +113,14 @@ pub fn solve(
 /// (harmonic, frequency, magnitude, phase_deg). THD lands in the plotname.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
+    // `defer`-freed == scratch, and `a` is a results arena that cannot reclaim
+    // it — the waveform below is a whole transient. `Spectrum` is a value
+    // type and `analyze` frees its own FFT buffers, so it is scratch too.
+    const scratch = ctx.scratch_allocator orelse a;
     const x_op = ctx.x_op orelse return error.NoOperatingPoint;
-    const n = x_op.len;
 
-    const x = try a.alloc(f64, n);
-    defer a.free(x);
-    // SIMD copy of operating point
-    const V = @Vector(W, f64);
-    _ = V;
-    var si: usize = 0;
-    while (si + W <= n) : (si += W) x[si..][0..W].* = x_op[si..][0..W].*;
-    while (si < n) : (si += 1) x[si] = x_op[si];
+    const x = try scratch.dupe(f64, x_op);
+    defer scratch.free(x);
 
     const tran_opts = opts.tran_opts orelse tran.Options{
         .t_stop = 5.0 / opts.f_fundamental,
@@ -153,9 +128,18 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         .dt_max = 1.0 / (200.0 * opts.f_fundamental),
     };
 
-    const spec = try solve(ctx.circuit, x, opts, tran_opts, a);
+    const spec = blk: {
+        const probes = [_]u32{opts.output_node};
+        var waveform = try tran.Waveform.init(scratch, 1, tran.initialCapacity(tran_opts));
+        defer waveform.deinit();
 
-    const n_harm: usize = @min(opts.n_harmonics, spec.harmonics.len);
+        const tran_result = try tran.simulate(ctx.circuit, x, &probes, &waveform, tran_opts, scratch);
+        if (!tran_result.completed) return error.TransientFailed;
+
+        break :blk try analyze(&waveform, 0, opts.f_fundamental, opts.n_harmonics, scratch);
+    };
+
+    const n_harm: usize = spec.n_harmonics;
     const npoints = 1 + n_harm;
     const names = try a.dupe([]const u8, &.{ "harmonic", "frequency", "magnitude", "phase_deg" });
     errdefer a.free(names); // entries are literals
@@ -199,7 +183,7 @@ fn bsearchGe(times: []const f64, target: f64) usize {
     return lo;
 }
 
-fn extractSpectrum(re: []const f64, im: []const f64, n_fft: usize) Spectrum {
+fn extractSpectrum(re: []const f64, im: []const f64, n_fft: usize, n_harmonics: usize) Spectrum {
     const n_f: f64 = @floatFromInt(n_fft);
     const scale = 2.0 / n_f;
 
@@ -209,7 +193,8 @@ fn extractSpectrum(re: []const f64, im: []const f64, n_fft: usize) Spectrum {
     // Fundamental (bin 1)
     const fund_mag = @sqrt(re[1] * re[1] + im[1] * im[1]) * scale;
 
-    var harmonics: [9]Harmonic = undefined;
+    const n_harm = std.math.clamp(n_harmonics, 1, max_harmonics);
+    var harmonics: [max_harmonics]Harmonic = undefined;
     // Harmonic 1 = fundamental
     // fft convention: X[1] = (N*A/2)*e^{+j*phi} for A*cos(2*pi*f0*t + phi), so the
     // phase is +atan2 — no negation.
@@ -218,9 +203,10 @@ fn extractSpectrum(re: []const f64, im: []const f64, n_fft: usize) Spectrum {
         .phase_deg = math.radiansToDegrees(math.atan2(im[1], re[1])),
     };
 
-    // Harmonics 2..9
+    // Harmonics 2..n_harm — the THD denominator is the fundamental and the
+    // numerator is every harmonic the deck asked to see, as ngspice's is.
     var thd_sum_sq: f64 = 0;
-    for (1..9) |h| {
+    for (1..n_harm) |h| {
         const bin = h + 1; // harmonic number = h+1, bin index = h+1
         if (bin >= n_fft / 2) {
             harmonics[h] = .{ .mag = 0, .phase_deg = 0 };
@@ -238,27 +224,25 @@ fn extractSpectrum(re: []const f64, im: []const f64, n_fft: usize) Spectrum {
         .dc = dc,
         .fundamental = fund_mag,
         .harmonics = harmonics,
+        .n_harmonics = n_harm,
         .thd_percent = thd_percent,
     };
 }
 
-/// Binary-search + linear interpolation on sorted time/value arrays.
-fn interpolate(times: []const f64, values: []const f64, t: f64) f64 {
+/// Linear interpolation on sorted time/value arrays, advancing `cursor` to the
+/// bracketing index instead of searching for it. Callers must pass targets in
+/// non-decreasing order; `interpolate` below is the binary-search oracle this
+/// agrees with element for element (see the differential test).
+fn interpolateAt(times: []const f64, values: []const f64, t: f64, cursor: *usize) f64 {
     if (times.len == 0) return 0;
     if (t <= times[0]) return values[0];
     if (t >= times[times.len - 1]) return values[values.len - 1];
 
-    // Binary search for the bracketing interval
-    var lo: usize = 0;
-    var hi: usize = times.len - 1;
-    while (hi - lo > 1) {
-        const mid = lo + (hi - lo) / 2;
-        if (times[mid] <= t) {
-            lo = mid;
-        } else {
-            hi = mid;
-        }
-    }
+    // Both searches land on lo = max{i : times[i] <= t}, capped at len-2.
+    var lo = cursor.*;
+    while (lo + 2 < times.len and times[lo + 1] <= t) lo += 1;
+    cursor.* = lo;
+    const hi = lo + 1;
 
     const dt = times[hi] - times[lo];
     if (dt < 1e-30) return values[lo];
@@ -266,142 +250,7 @@ fn interpolate(times: []const f64, values: []const f64, t: f64) f64 {
     return values[lo] * (1.0 - alpha) + values[hi] * alpha;
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
-
-const testing = std.testing;
-
-test "four: pure cosine has zero THD" {
-    const allocator = testing.allocator;
-    const n = 256;
-    var samples: [n]f64 = undefined;
-
-    // One period of cos(2*pi*t/T), sampled at n points
-    for (0..n) |k| {
-        const t = @as(f64, @floatFromInt(k)) / @as(f64, @floatFromInt(n));
-        samples[k] = @cos(2.0 * math.pi * t);
-    }
-
-    const result = try analyzeBuffer(&samples, allocator);
-
-    try testing.expectApproxEqAbs(@as(f64, 0.0), result.dc, 1e-10);
-    try testing.expectApproxEqAbs(@as(f64, 1.0), result.fundamental, 1e-10);
-    try testing.expectApproxEqAbs(@as(f64, 0.0), result.thd_percent, 1e-6);
-}
-
-test "four: DC offset is reported correctly" {
-    const allocator = testing.allocator;
-    const n = 128;
-    var samples: [n]f64 = undefined;
-
-    const dc_offset = 3.5;
-    for (0..n) |k| {
-        const t = @as(f64, @floatFromInt(k)) / @as(f64, @floatFromInt(n));
-        samples[k] = dc_offset + @cos(2.0 * math.pi * t);
-    }
-
-    const result = try analyzeBuffer(&samples, allocator);
-
-    try testing.expectApproxEqAbs(dc_offset, result.dc, 1e-10);
-    try testing.expectApproxEqAbs(@as(f64, 1.0), result.fundamental, 1e-10);
-}
-
-test "four: square wave THD ~ 48.3%" {
-    // A square wave with harmonics 1,3,5,7,... has
-    // THD = sqrt(1/9 + 1/25 + 1/49 + ...) / 1 * 100
-    // Analytically first 8 odd harmonics:
-    // THD = sqrt(sum(1/(2k+1)^2 for k=1..)) ~= 48.34%
-    // With 9 harmonics (2-9) we capture harmonics 3,5,7,9
-    const allocator = testing.allocator;
-    const n = 1024;
-    var samples: [n]f64 = undefined;
-
-    for (0..n) |k| {
-        const t = @as(f64, @floatFromInt(k)) / @as(f64, @floatFromInt(n));
-        // Build square wave from Fourier series up to 9th harmonic
-        // to avoid aliasing: sq(t) = (4/pi) * sum_{k=0}^{} sin(2pi(2k+1)t)/(2k+1)
-        var val: f64 = 0;
-        var harm: u32 = 1;
-        while (harm <= 9) : (harm += 2) {
-            val += @sin(2.0 * math.pi * @as(f64, @floatFromInt(harm)) * t) / @as(f64, @floatFromInt(harm));
-        }
-        samples[k] = val * 4.0 / math.pi;
-    }
-
-    const result = try analyzeBuffer(&samples, allocator);
-
-    // Fundamental magnitude: (4/pi) * 1 = 1.2732
-    try testing.expectApproxEqAbs(@as(f64, 4.0 / math.pi), result.fundamental, 1e-3);
-
-    // 3rd harmonic = (4/pi)/3 = 0.4244
-    try testing.expectApproxEqAbs(@as(f64, 4.0 / (3.0 * math.pi)), result.harmonics[2].mag, 1e-3);
-
-    // THD from harmonics 3,5,7,9 only:
-    // sqrt((1/3)^2 + (1/5)^2 + (1/7)^2 + (1/9)^2) * 100 = ~43.53%
-    const expected_thd = @sqrt(1.0 / 9.0 + 1.0 / 25.0 + 1.0 / 49.0 + 1.0 / 81.0) * 100.0;
-    try testing.expectApproxEqAbs(expected_thd, result.thd_percent, 1.0);
-}
-
-test "four: known amplitude and phase" {
-    const allocator = testing.allocator;
-    const n = 512;
-    var samples: [n]f64 = undefined;
-
-    // 2.0*cos(2*pi*t + pi/4) = fundamental with amplitude 2.0 and phase 45 deg
-    const amp = 2.0;
-    const phase_rad = math.pi / 4.0;
-    for (0..n) |k| {
-        const t = @as(f64, @floatFromInt(k)) / @as(f64, @floatFromInt(n));
-        samples[k] = amp * @cos(2.0 * math.pi * t + phase_rad);
-    }
-
-    const result = try analyzeBuffer(&samples, allocator);
-
-    try testing.expectApproxEqAbs(amp, result.fundamental, 1e-8);
-    try testing.expectApproxEqAbs(45.0, result.harmonics[0].phase_deg, 0.1);
-}
-
-test "four: analyzeBuffer with non-power-of-2 input" {
-    // Verify resampling works for arbitrary length input
-    const allocator = testing.allocator;
-    const n = 100; // not a power of 2
-    var samples: [n]f64 = undefined;
-
-    for (0..n) |k| {
-        const t = @as(f64, @floatFromInt(k)) / @as(f64, @floatFromInt(n));
-        samples[k] = 1.5 * @cos(2.0 * math.pi * t);
-    }
-
-    const result = try analyzeBuffer(&samples, allocator);
-
-    try testing.expectApproxEqAbs(@as(f64, 1.5), result.fundamental, 1e-2);
-    try testing.expectApproxEqAbs(@as(f64, 0.0), result.dc, 1e-2);
-}
-
-test "four: analyze waveform from tran data" {
-    const allocator = testing.allocator;
-
-    // Build a synthetic waveform as if from transient sim
-    const n_points: usize = 512;
-    var waveform = try tran.Waveform.init(allocator, 1, n_points);
-    defer waveform.deinit();
-
-    const f_fund = 1000.0; // 1 kHz
-    const period = 1.0 / f_fund;
-    // Simulate 3 periods worth of data so there is enough for one-period extraction
-    const t_total = 3.0 * period;
-
-    const probes = [_]u32{0};
-    for (0..n_points) |k| {
-        const t = t_total * @as(f64, @floatFromInt(k)) / @as(f64, @floatFromInt(n_points));
-        const v = [_]f64{2.5 * @cos(2.0 * math.pi * f_fund * t)};
-        try waveform.record(t, &v, &probes);
-    }
-
-    const result = try analyze(&waveform, 0, f_fund, allocator);
-
-    try testing.expectApproxEqAbs(@as(f64, 2.5), result.fundamental, 0.05);
-    try testing.expectApproxEqAbs(@as(f64, 0.0), result.dc, 0.05);
-    try testing.expectApproxEqAbs(@as(f64, 0.0), result.thd_percent, 1.0);
-}
+// Private implementation access for the analysis test suite.
+pub const test_access = if (@import("builtin").is_test) .{
+    .interpolateAt = interpolateAt,
+} else {};

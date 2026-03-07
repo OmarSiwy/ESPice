@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "BJT reverse_active",
+  "oracle": {
+    "kind": "ngspice-44.2",
+    "derivation": "Run the self-contained deck in ngspice-44.2 with the explicit tolerances in the netlist. Read binary raw doubles by variable name. Transient samples retain up to 101 original accepted times; no interpolation was used to create these expected values.",
+    "version": "ngspice-44.2 (SPARSE solver; 27 C)",
+    "command": "ngspice -n -b -r /tmp/bjt_reverse_active.raw reference/bjt_reverse_active.sp"
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(c)": {
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06,
+            "values": [
+              0.010545686519508
+            ]
+          },
+          "i(vb)": {
+            "unit": "A",
+            "rtol": 0.001,
+            "atol": 1e-09,
+            "values": [
+              -0.0092781470400959
+            ]
+          },
+          "i(vc)": {
+            "unit": "A",
+            "rtol": 0.001,
+            "atol": 1e-09,
+            "values": [
+              1.0545686519508e-05
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "0efdef0a4c12ed6d5d3fd79bd19b537b3b3c4c1d9eafc276ba560c412495a59b"
+}

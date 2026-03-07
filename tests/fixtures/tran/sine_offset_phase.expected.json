@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "Source waveform sine_offset_phase",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Purely resistive divider follows its source instantaneously: Vout=.75*Vin."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "columns": {
+          "v(in)": {
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-05,
+            "values": [
+              3.0,
+              1.0,
+              -1.0,
+              1.0,
+              3.0,
+              3.0
+            ]
+          },
+          "v(out)": {
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-05,
+            "values": [
+              2.25,
+              0.75,
+              -0.75,
+              0.75,
+              2.25,
+              2.25
+            ]
+          }
+        },
+        "axis": {
+          "name": "time",
+          "values": [
+            0,
+            0.00025,
+            0.0005,
+            0.00075,
+            0.001,
+            0.002
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "8bf3f13205291882cbc8578f057d80bc035eb94eee9c74a3dc01a5f803c19d3b"
+}

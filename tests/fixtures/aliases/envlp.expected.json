@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "analysis": "envelope",
+  "purpose": "Analysis directive alias envlp",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Alias must have exactly the same numerical semantics as its canonical analysis."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Envelope Analysis",
+        "match": "samples",
+        "columns": {
+          "peak(v(out))": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              2,
+              2,
+              2
+            ]
+          },
+          "rms(v(out))": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              2,
+              2,
+              2
+            ]
+          }
+        },
+        "axis": {
+          "name": "time",
+          "values": [
+            0.001,
+            0.002,
+            0.003
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "7a1fd58044c2d3056d846c64924da0a36e306786183a7508b8b31531b02b5e42"
+}
