@@ -13,37 +13,42 @@ it is built to last.
 #### Dependencies:
 
 - Zig 0.16
-- `../VerA`: the Verilog-A / Verilog frontends and the device contract
-- `../gompute`: GPU compute; compiles the shared device kernels for host, CUDA and HIP
+- [VerA](https://github.com/OmarSiwy/VerA): the Verilog-A / Verilog frontends and the device contract
+- [Gompute](https://github.com/OmarSiwy/Gompute): GPU compute; compiles the shared device kernels for host, CUDA and HIP
 - Verilator (only for the digital HDL models)
 
-Both sibling packages are path dependencies (`build.zig.zon`), so they must sit
-beside this checkout.
+Both are pinned git dependencies in `build.zig.zon`, so a fresh checkout builds
+on its own. Co-developing either one means pointing its entry back at a local
+`.path` and restoring the pin before you push; the pinned build resolves to the
+package cache and will not see your sibling checkout.
 
 #### Project structure:
 
 ```
 ├── src/
-│   ├── solvers/      # Sparse LU, Newton, the lane-parallel frequency solver
-│   ├── devices/      # Device engine: the derivative scalar, SoA batching, GPU kernels
-│   ├── analysis/     # DC/AC/tran/PSS/noise/sweep drivers
-│   ├── frontend/     # Netlist parsing (PSpice, Spectre, NGSpice/Xyce)
-│   ├── output/       # Result writers (PSF and friends)
+│   ├── frontend/     # Netlist parsing (PSpice, Spectre, NGSpice/Xyce) and circuit construction
+│   ├── analysis/     # DC/AC/tran/PSS/noise/sweep drivers; solvers/ is private to it
+│   ├── problem/      # The owning API, and the C ABI behind include/espice.h
+│   ├── output/       # Result writers (PSF, raw, CSV, Touchstone, FSDB)
 │   └── main.zig      # CLI
-├── benchmark/        # Fixtures and the bench-runner (its own package)
-├── tests/            # Cross-module suites
+├── models/           # Verilog-A device sources, compiled at build time
+├── tests/            # Fixtures, cross-module suites and the bench runner
 ├── docs/             # Design notes and measured evidence
-└── ref/              # SIMD strategy reference and differential oracles
+└── ref/              # SIMD strategy reference
 ```
 
-Module dependency order is `solvers → devices → analysis → builder → main`.
+`frontend` and `analysis` are siblings: neither imports the other. `problem`
+composes both plus `output`, and `main` sees only `problem` and `output`.
 
 #### Build:
 
 ```
+nix develop                    # the toolchain
+nix develop .#benchmarking     # adds ngspice and VACASK for the bench step
+
 zig build           # compiles the app, and device GPU kernels for the detected arch
 zig build test      # every suite
-zig build bench     # benchmarks
+zig build bench     # compare against ngspice and VACASK
 zig build run -- <netlist>
 ```
 
