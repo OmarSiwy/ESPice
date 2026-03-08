@@ -121,6 +121,9 @@ The large "could not run it" columns are mostly decks the other simulator has no
 counterpart for: `.ic`, `.trannoise`, `u`/`o`/`t`/`z` device cards, and PWL
 sources, which this VACASK build aborts on.
 
+Two independent runs of the whole suite returned all 1,848 verdicts identical
+(616 fixtures, three engine pairs each), with wall times within a few percent.
+
 ### Speed
 
 Of the 439 decks ESPice and ngspice both completed, ESPice was faster on 320,
@@ -178,12 +181,14 @@ are in
 
 ### What is not claimed
 
-The 379-of-405 agreement above is one run of a differential comparison, not a
-conformance score. The host fixture suite has separately scored 492, 494 and 518
-out of 616 on one unchanged tree while the emitted device code stayed
-byte-identical, so it still moves on its own and no pass rate is quoted as a
-release number. Per-area status labels live in `docs/`; a model appearing in a
-dispatch table does not establish complete SPICE conformance.
+The 379-of-405 agreement above is a differential comparison against two other
+simulators, not a conformance score, and it only covers the decks all engines
+can express. Separately, `zig build test` has scored 492, 494 and 518 out of 616
+on one unchanged tree while the emitted device code stayed byte-identical. That
+instability is in the host suite, not in the benchmark above, and until it is
+fixed no pass rate is quoted as a release number. Per-area status labels live in
+`docs/`; a model appearing in a dispatch table does not establish complete SPICE
+conformance.
 
 ## Project structure
 
