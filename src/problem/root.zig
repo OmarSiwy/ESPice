@@ -37,8 +37,6 @@ pub const Problem = struct {
     allocation_mutex: std.Io.Mutex = .init,
     arena: std.heap.ArenaAllocator,
     prepared: shared.Prepared,
-    source: []const u8,
-    origin: []const u8,
     session: analysis.session.Session,
     delivery: output.Session,
     limits: Limits,
@@ -62,11 +60,9 @@ pub const Problem = struct {
         var parse_arena = std.heap.ArenaAllocator.init(allocator);
         defer parse_arena.deinit();
         const scratch = parse_arena.allocator();
-        const input = try frontend.prepare(io, scratch, options.source, options.dialect);
+        const ast = try frontend.prepare(io, scratch, options.source, options.dialect);
         timingLap(io, &lap, "frontend (source, parsing, HDL)");
-        self.source = try a.dupe(u8, input.source);
-        self.origin = try a.dupe(u8, input.origin);
-        self.prepared = try frontend.build(a, scratch, input.ast);
+        self.prepared = try frontend.build(a, scratch, ast);
         timingLap(io, &lap, "Problem creation (expansion, binding, topology)");
         errdefer self.prepared.deinit();
         self.delivery = try output.Session.init(allocator, options.output);

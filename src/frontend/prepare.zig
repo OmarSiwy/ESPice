@@ -28,12 +28,6 @@ pub const Source = union(enum) {
     pub const Bytes = struct { data: []const u8, origin: []const u8 };
 };
 
-pub const PreparedInput = struct {
-    source: []const u8,
-    origin: []const u8,
-    ast: syntax.Ast,
-};
-
 pub fn parseDialect(name: []const u8) ?Dialect {
     return std.StaticStringMap(Dialect).initComptime(.{
         .{ "ngspice", .ngspice }, .{ "ng", .ngspice },
@@ -42,57 +36,34 @@ pub fn parseDialect(name: []const u8) ?Dialect {
     }).get(name);
 }
 
-/// Copies caller input into the supplied arena. The AST borrows its storage;
-/// the caller may release it once build has published the prepared circuit.
-pub fn prepare(io: std.Io, session: std.mem.Allocator, input: Source, dialect: Dialect) !PreparedInput {
-    const prepared = try parseSource(io, session, input, dialect);
-    try loadModels(io, session, prepared);
-    return prepared;
-}
-
-fn parseSource(io: std.Io, session: std.mem.Allocator, input: Source, dialect: Dialect) !PreparedInput {
-    const origin = try session.dupe(u8, switch (input) {
+/// Read, expand and parse `input` into `session`, then load its HDL models.
+/// The AST borrows `session`; release it once `build` has returned.
+pub fn prepare(io: std.Io, session: std.mem.Allocator, input: Source, dialect: Dialect) !syntax.Ast {
+    const origin = switch (input) {
         .file => |path| path,
         .bytes => |bytes| bytes.origin,
-    });
-    const source = switch (input) {
-        .file => if (dialect == .spectre)
-            try std.Io.Dir.cwd().readFileAlloc(io, origin, session, .unlimited)
-        else
-            try syntax.load(io, session, origin),
-        .bytes => |bytes| if (dialect == .spectre)
-            try session.dupe(u8, bytes.data)
-        else
-            try syntax.source.loadBytes(io, session, origin, bytes.data),
     };
+    const raw = switch (input) {
+        .file => |path| try std.Io.Dir.cwd().readFileAlloc(io, path, session, .unlimited),
+        .bytes => |bytes| try session.dupe(u8, bytes.data),
+    };
+    const source = if (dialect == .spectre) raw else try syntax.source.expand(io, session, origin, raw);
     const ast = switch (dialect) {
         .ngspice => try syntax.Parser(syntax.ngspice).parse(session, source),
         .hspice => try syntax.Parser(syntax.hspice).parse(session, source),
         .spectre => try syntax.Parser(syntax.spectre).parse(session, source),
     };
-    return .{ .source = source, .origin = origin, .ast = ast };
+    try loadModels(io, session, ast.foreign, origin);
+    return ast;
 }
 
-fn loadModels(io: std.Io, session: std.mem.Allocator, prepared: PreparedInput) !void {
-    var model_count: usize = 0;
-    for (prepared.ast.foreign) |foreign| switch (foreign.kind) {
-        .verilog_a, .verilog => model_count += 1,
-        else => {},
-    };
-    if (model_count == 0) return;
-
-    const paths = try session.alloc([]const u8, model_count);
-    var index: usize = 0;
-    for (prepared.ast.foreign) |foreign| switch (foreign.kind) {
-        .verilog_a, .verilog => {
-            paths[index] = if (std.fs.path.isAbsolute(foreign.path))
-                foreign.path
-            else
-                try std.fs.path.join(session, &.{ std.fs.path.dirname(prepared.origin) orelse ".", foreign.path });
-            index += 1;
-        },
-        else => {},
-    };
+fn loadModels(io: std.Io, session: std.mem.Allocator, foreign: []const types.Foreign, origin: []const u8) !void {
+    var paths: std.ArrayList([]const u8) = .empty;
+    for (foreign) |f| if (f.kind == .verilog_a or f.kind == .verilog) try paths.append(session, if (std.fs.path.isAbsolute(f.path))
+        f.path
+    else
+        try std.fs.path.join(session, &.{ std.fs.path.dirname(origin) orelse ".", f.path }));
+    if (paths.items.len == 0) return;
 
     const compiler_paths: models.vaload.BuildPaths = .{
         .work_dir = try std.fs.path.join(session, &.{ build_options.src_root, ".zig-cache", "espice-hdl" }),
@@ -102,7 +73,7 @@ fn loadModels(io: std.Io, session: std.mem.Allocator, prepared: PreparedInput) !
         .device_ir = build_options.device_ir_path,
     };
     // Registry keys and loaded code outlive this problem's session arena.
-    try models.vaload.ensureAllLoaded(std.heap.smp_allocator, io, paths, compiler_paths);
+    try models.vaload.ensureAllLoaded(std.heap.smp_allocator, io, paths.items, compiler_paths);
 }
 
 /// Build a passive circuit from syntax. Scratch owns semantic expansion and
