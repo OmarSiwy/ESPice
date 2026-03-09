@@ -26,10 +26,17 @@ pub const Subcircuit = struct {
 /// Builder scratch after parameter resolution, expansion, and model selection.
 pub const Netlist = struct {
     title: []const u8,
-    devices: DeviceList,
+    /// Flattened devices, stably sorted by card letter. AoS: every consumer
+    /// reads a device's name, nodes and values together.
+    devices: []const Device,
+    /// `bucket_starts[c - 'a']` is the first device with letter c; [26] is the length.
+    bucket_starts: [27]u32,
     models: []const Model,
     directives: []const Directive,
-    params: []const Kv,
+
+    pub fn bucket(self: Netlist, c: u8) []const Device {
+        return self.devices[self.bucket_starts[c - 'a']..self.bucket_starts[c - 'a' + 1]];
+    }
 };
 
 pub const Device = struct {
@@ -42,120 +49,6 @@ pub const Device = struct {
 
     pub fn letter(d: *const Device) u8 {
         return std.ascii.toLower(d.name[0]);
-    }
-};
-
-/// Full SoA device storage: each field in its own contiguous column, sorted by
-/// letter with bucket offsets for zero-branch batch dispatch.
-pub const DeviceList = struct {
-    names: []const []const u8 = &.{},
-    nodes: []const []const []const u8 = &.{},
-    positional: []const []const Value = &.{},
-    kv: []const []const Kv = &.{},
-    subckt_types_col: []const u16 = &.{},
-    subckt_instances_col: []const u32 = &.{},
-    /// bucket_starts[c - 'a'] = first index with letter c; [26] = len sentinel
-    bucket_starts: [27]u32 = [_]u32{0} ** 27,
-
-    pub inline fn len(self: DeviceList) usize {
-        return self.names.len;
-    }
-
-    pub inline fn get(self: DeviceList, i: usize) Device {
-        return .{
-            .name = self.names[i],
-            .nodes = self.nodes[i],
-            .positional = self.positional[i],
-            .kv = self.kv[i],
-            .subckt_type = if (self.subckt_types_col.len > i) self.subckt_types_col[i] else 0,
-            .subckt_instance = if (self.subckt_instances_col.len > i) self.subckt_instances_col[i] else 0,
-        };
-    }
-
-    /// Pre-sliced view of a single letter bucket — all columns narrowed to the
-    /// same range for sequential multi-stream iteration.
-    pub const Bucket = struct {
-        names: []const []const u8,
-        nodes: []const []const []const u8,
-        positional: []const []const Value,
-        kv: []const []const Kv,
-
-        pub inline fn size(self: Bucket) usize {
-            return self.names.len;
-        }
-
-        pub inline fn get(self: Bucket, i: usize) Device {
-            return .{
-                .name = self.names[i],
-                .nodes = self.nodes[i],
-                .positional = self.positional[i],
-                .kv = self.kv[i],
-            };
-        }
-    };
-
-    pub inline fn bucket(self: DeviceList, c: u8) Bucket {
-        const idx = c -% 'a';
-        if (idx >= 26) return .{ .names = &.{}, .nodes = &.{}, .positional = &.{}, .kv = &.{} };
-        const lo = self.bucket_starts[idx];
-        const hi = self.bucket_starts[idx + 1];
-        return .{
-            .names = self.names[lo..hi],
-            .nodes = self.nodes[lo..hi],
-            .positional = self.positional[lo..hi],
-            .kv = self.kv[lo..hi],
-        };
-    }
-
-    /// Build from an unsorted device slice: radix-sort by letter, O(N).
-    pub fn fromUnsorted(arena: std.mem.Allocator, src: []const Device) error{OutOfMemory}!DeviceList {
-        const n = src.len;
-        if (n == 0) return .{};
-
-        // Count per-letter
-        var counts: [26]u32 = [_]u32{0} ** 26;
-        for (src) |d| {
-            const idx = d.letter() -% 'a';
-            if (idx < 26) counts[idx] += 1;
-        }
-
-        // Prefix sum → bucket starts
-        var starts: [27]u32 = undefined;
-        starts[0] = 0;
-        for (0..26) |i| starts[i + 1] = starts[i] + counts[i];
-
-        // Scatter into column arrays
-        const names_col = try arena.alloc([]const u8, n);
-        const nodes_col = try arena.alloc([]const []const u8, n);
-        const pos_col = try arena.alloc([]const Value, n);
-        const kv_col = try arena.alloc([]const Kv, n);
-        const stype_col = try arena.alloc(u16, n);
-        const sinst_col = try arena.alloc(u32, n);
-
-        var write_pos: [26]u32 = starts[0..26].*;
-        for (src) |d| {
-            const idx = d.letter() -% 'a';
-            if (idx < 26) {
-                const pos = write_pos[idx];
-                names_col[pos] = d.name;
-                nodes_col[pos] = d.nodes;
-                pos_col[pos] = d.positional;
-                kv_col[pos] = d.kv;
-                stype_col[pos] = d.subckt_type;
-                sinst_col[pos] = d.subckt_instance;
-                write_pos[idx] += 1;
-            }
-        }
-
-        return .{
-            .names = names_col,
-            .nodes = nodes_col,
-            .positional = pos_col,
-            .kv = kv_col,
-            .subckt_types_col = stype_col,
-            .subckt_instances_col = sinst_col,
-            .bucket_starts = starts,
-        };
     }
 };
 

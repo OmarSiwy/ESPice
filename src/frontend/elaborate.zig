@@ -35,12 +35,23 @@ pub fn elaborate(arena: std.mem.Allocator, ast: ir.Ast) Error!ir.Netlist {
     }
     try resolveModelBins(arena, flat.items, models, directives, ast.dialect);
     if (flat.items.len > std.math.maxInt(u32)) return error.CircuitTooLarge;
+
+    // Stable counting sort by card letter; the parser admits only alphabetic names.
+    var starts: [27]u32 = @splat(0);
+    for (flat.items) |d| starts[d.letter() - 'a' + 1] += 1;
+    for (1..starts.len) |i| starts[i] += starts[i - 1];
+    const sorted = try arena.alloc(ir.Device, flat.items.len);
+    var next: [26]u32 = starts[0..26].*;
+    for (flat.items) |d| {
+        sorted[next[d.letter() - 'a']] = d;
+        next[d.letter() - 'a'] += 1;
+    }
     return .{
         .title = ast.title,
-        .devices = try ir.DeviceList.fromUnsorted(arena, flat.items),
+        .devices = sorted,
+        .bucket_starts = starts,
         .models = models,
         .directives = directives,
-        .params = ast.params,
     };
 }
 

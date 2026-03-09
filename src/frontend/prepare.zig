@@ -80,7 +80,7 @@ fn loadModels(io: std.Io, session: std.mem.Allocator, foreign: []const types.For
 /// wiring; the session arena owns every published slice.
 pub fn build(sim_arena: std.mem.Allocator, parse_arena: std.mem.Allocator, ast: types.Ast) !Prepared {
     const nl = try syntax.elaborate(parse_arena, ast);
-    if (nl.devices.len() > std.math.maxInt(u32) or nl.directives.len > (std.math.maxInt(u32) - 1) / 2)
+    if (nl.devices.len > std.math.maxInt(u32) or nl.directives.len > (std.math.maxInt(u32) - 1) / 2)
         return error.CircuitTooLarge;
     const deck_opts = try parseDeckOptions(nl.directives);
     var b = try Builder.init(sim_arena);
@@ -95,7 +95,7 @@ pub fn build(sim_arena: std.mem.Allocator, parse_arena: std.mem.Allocator, ast: 
 
     // Node count is bounded by (and usually close to) device count;
     // reserving here avoids incremental rehash during interning.
-    try b.reserveNodes(@intCast(@min(nl.devices.len(), std.math.maxInt(u32))));
+    try b.reserveNodes(@intCast(@min(nl.devices.len, std.math.maxInt(u32))));
 
     var nb = try netlist.NetBuilder.init(parse_arena, &b, nl);
     try nb.build();
@@ -224,7 +224,7 @@ pub fn build(sim_arena: std.mem.Allocator, parse_arena: std.mem.Allocator, ast: 
     // Escapes into run-time lifetime: title read at output time, counts in
     // the summary. Dupe/copy off the parse arena so it can be reset now.
     prepared.title = try sim_arena.dupe(u8, nl.title);
-    prepared.n_devices = @intCast(nl.devices.len());
+    prepared.n_devices = @intCast(nl.devices.len);
 
     prepared.source_node = nb.source_node;
     prepared.source_branch = nb.source_branch;
