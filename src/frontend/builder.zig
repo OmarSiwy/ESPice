@@ -248,9 +248,6 @@ pub const Builder = struct {
         var all: [n_u]u32 = undefined;
         inline for (0..D.num_ports) |p| all[p] = nodes[p];
 
-        // BEFORE the generated-device branch below, which returns. Every
-        // shipped device has a generated model, so a card table hung off the
-        // in-process `ProtoStore` path recorded nothing at all.
         {
             const gop = try self.card_counts.getOrPut(self.gpa, comptime shortTypeName(D));
             if (!gop.found_existing) gop.value_ptr.* = 0;
@@ -262,12 +259,9 @@ pub const Builder = struct {
             gop.value_ptr.* += 1;
         }
 
-        // A GENERATED device is reached through its own object's vtable: same
-        // `collapse`, same `ProtoStore(D).append` behind `proto_add`, the only
-        // difference being which compilation unit they were codegen'd in —
-        // which is the whole point (analysis/eval.zig). Naming
-        // `D.collapse` or `ProtoStore(D)` here instead drags the device body
-        // back into the executable's own compilation and undoes the split.
+        // Reach the device through its own object's vtable: naming
+        // `D.collapse` or `ProtoStore(D)` here would compile the device body
+        // into the executable a second time (analysis/eval.zig).
         const vt = if (comptime devices.modelName(D)) |name|
             devices.vtable(name)
         else if (@hasDecl(D, "deviceVtable"))
@@ -296,26 +290,16 @@ pub const Builder = struct {
         return proto;
     }
 
-    /// Freeze: apply the BBD permutation, then hand the accumulated protos
-    /// to problem.Circuit.init() which builds the union sparsity pattern,
-    /// precomputes every slot tape. The Builder is
-    /// consumed.
-    /// `perm_out` receives the BBD node permutation (old id -> frozen id) this
-    /// applied, or null when no subckt structure forced one. The caller MUST
-    /// read it to remap any pre-compile index it recorded (source branches,
-    /// .ic nodes, directive nodes) — compile() undefines `self` on return, so
-    /// the permutation cannot be fetched from the Builder afterward, and the
-    /// device protos were already permuted through applyPerm while these
-    /// caller-side tables were not (subckt branch probes read a voltage
-    /// otherwise — fourbitadder i(vin1a) carried ~5 V).
-    /// Bare form for callers that never recorded a pre-compile index (tests,
-    /// embeddings). Discards the permutation; a subckt-BBD deck driven through
-    /// this loses nothing because there is nothing caller-side to remap.
+    /// `compilePerm` for callers that recorded no node or branch row.
     pub fn compile(self: *Builder) !Circuit {
         var perm: ?[]const u32 = undefined;
         return self.compilePerm(&perm);
     }
 
+    /// Freeze into a Circuit, consuming the Builder. Protos and labels are
+    /// renumbered by the BBD permutation (old id -> frozen id), which goes to
+    /// `perm_out`, or null when there was none. Any row the caller recorded
+    /// before the call must be mapped through it.
     pub fn compilePerm(self: *Builder, perm_out: *?[]const u32) !Circuit {
         const gpa = self.gpa;
         perm_out.* = null;
@@ -328,8 +312,6 @@ pub const Builder = struct {
         errdefer if (bbd.info) |inf| gpa.free(inf.blocks);
         if (bbd.perm) |perm| {
             for (self.protos.items) |p| p.apply_perm(p.ctx, perm);
-            // Remap node_labels (node_names is not read past this point — the
-            // reverse lookup now lives on the frozen Circuit as a scan).
             const old_labels = try gpa.alloc([]const u8, n);
             defer gpa.free(old_labels);
             @memcpy(old_labels, self.node_labels.items);
@@ -337,16 +319,11 @@ pub const Builder = struct {
                 const new_i = if (i < perm.len) perm[i] else @as(u32, @intCast(i));
                 self.node_labels.items[new_i] = label;
             }
-            // Arena-owned, handed to the caller (not freed): it remaps the
-            // pre-compile indices compile() cannot reach after `self.* =
-            // undefined` below.
-            perm_out.* = perm;
+            perm_out.* = perm; // owned by the caller from here
             bbd.perm = null; // ownership moved; disarm the errdefer
         }
 
-        // Flatten node_labels into the frozen intern table: one byte blob +
-        // n+1 offsets. Evicts the per-node dupe and the name→id hashmap from
-        // the Circuit — both stay Builder-local and die here.
+        // Frozen intern table: one byte blob + n+1 offsets.
         const labels = self.node_labels.items;
         var total: usize = 0;
         for (labels) |label| total += label.len;
@@ -365,31 +342,22 @@ pub const Builder = struct {
         var ckt = try problem.Circuit.init(gpa, self.n, intern_bytes, intern_offs, self.protos.items, bbd.info);
         ckt.needs_tran_op = self.needs_tran_op;
 
-        // Protos consumed by freeze(); free the Builder shell (labels + map).
-        self.deinitStorage();
+        self.deinitStorage(); // Circuit.init consumed the protos
+
         return ckt;
     }
 };
 
-// ===========================================================================
-// netlist → Builder wiring policy: device resolution by card letter / model
-// kind, source waveforms, B-source expression extraction, Verilog-A instance
-// binding, kv/positional parsing.
-// ===========================================================================
-
 // ---------------------------------------------------------------------------
-// Verilog-A / Verilog devices — loaded at runtime via `.hdl` cards (vaload).
+// Netlist -> Builder: device selection, card values, waveforms, HDL devices.
 // ---------------------------------------------------------------------------
 
-/// First positional token names a runtime-loaded (.hdl card) device?
-/// A .model card whose kind is a loaded module counts too
-/// (`.model psp103n psp103va ...`).
-fn isDynDevice(dev: types.Device, models: []const types.Model) bool {
-    if (vaload.isEmpty()) return false;
-    const model_name = positionalName(dev, 0) orelse return false;
-    if (vaload.get(model_name) != null) return true;
-    if (findModel(models, model_name)) |m| return vaload.get(m.kind) != null;
-    return false;
+/// The runtime-loaded (.hdl) module a card's first positional names, directly
+/// or through its `.model` card's kind (`.model psp103n psp103va ...`).
+fn dynVtable(dev: types.Device, models: []const types.Model) ?*const batch.DeviceVtable {
+    if (vaload.isEmpty()) return null;
+    const name = positionalName(dev, 0) orelse return null;
+    return vaload.get(name) orelse if (findModel(models, name)) |m| vaload.get(m.kind) else null;
 }
 
 /// Runtime (dlopen'd) VA/V devices — card shape `<name> node... <model>`,
@@ -398,43 +366,26 @@ fn isDynDevice(dev: types.Device, models: []const types.Model) bool {
 pub fn addDynDevices(b: *Builder, arena: std.mem.Allocator, nl: types.Netlist) !void {
     if (vaload.isEmpty()) return;
     for (nl.devices) |dev| {
-        const pos = dev.positional;
-        if (pos.len == 0) continue;
-        const model_name = switch (pos[0]) {
-            .name => |nm| nm,
-            else => continue,
-        };
-        // Either the card names the VA module directly, or it names a .model
-        // card whose kind is the VA module (`.model psp103n psp103va ...`).
-        const model_card = findModel(nl.models, model_name);
-        const vt = vaload.get(model_name) orelse
-            (if (model_card) |m| vaload.get(m.kind) else null) orelse continue;
+        const vt = dynVtable(dev, nl.models) orelse continue;
+        const model_card = findModel(nl.models, positionalName(dev, 0).?);
 
         const mblob = try arena.alignedAlloc(u8, .@"16", vt.model_size);
         vt.init_model(mblob.ptr);
         if (model_card) |m| try applyKvDyn(vt.set_model_param, mblob.ptr, m.kv);
-        // Card kv overrides .model card: VA "instance" params are Model
-        // fields (the generated Instance holds only temp), so a card's
-        // R=100 must land in the model blob to take effect.
+        // Card kv overrides the .model card. VA parameters are Model fields,
+        // so card values go to the model blob too.
         try applyKvDyn(vt.set_model_param, mblob.ptr, dev.kv);
-        // LRM 6.3.4 / 3.4.5, and it has to be HERE. Every write above lands in a
-        // flat Model field, so a parameter declared over another one — and every
-        // localparam — still holds the value it was built with. `derive` is the
-        // device's own pass over those, and it must run after the LAST param write
-        // and before anything reads the model: `collapse` below reads it, and
-        // `proto_add` copies the blob wholesale.
+        // LRM 6.3.4/3.4.5: recompute dependent parameters and localparams after
+        // the last write and before `collapse`/`proto_add` read the blob.
         if (vt.derive) |df| df(mblob.ptr);
         const iblob = try arena.alignedAlloc(u8, .@"16", vt.instance_size);
         vt.init_instance(iblob.ptr);
         try applyKvDyn(vt.set_instance_param, iblob.ptr, dev.kv);
 
-        // Ports from the card, internal unknowns allocated here (node policy
-        // stays app-side); collapse folds zero-parasitic internals onto their
-        // port exactly like Builder.addDevice does for comptime devices.
+        // Same port/internal-node policy as Builder.addDevice.
         const nodes = try arena.alloc(u32, vt.n_u);
-        const dev_nodes = dev.nodes;
         for (0..vt.num_ports) |p|
-            nodes[p] = if (p < dev_nodes.len) try b.internNode(dev_nodes[p]) else GROUND;
+            nodes[p] = if (p < dev.nodes.len) try b.internNode(dev.nodes[p]) else GROUND;
         if (vt.n_u > vt.num_ports) {
             const col = try arena.alloc(i32, vt.n_u);
             @memset(col, -1);
@@ -463,22 +414,16 @@ fn aliasesOf(comptime field: []const u8) []const []const u8 {
         .{ "vt0", "vto" }, .{ "vto", "vt0" },
         .{ "vaf", "va" },  .{ "VAR", "vb" },
         .{ "ikf", "ik" },  .{ "cjs", "ccs" },
-        // BJT depletion-cap alternates (bjt.c IOPR): the schmitt canon deck
-        // spells cje/PE/ME, cjc/PC/MC — dropped aliases meant default
-        // junction potentials and wrong switching instants.
+        // BJT depletion-cap alternates (bjt.c IOPR).
         .{ "vje", "pe" },  .{ "mje", "me" },
         .{ "vjc", "pc" },  .{ "mjc", "mc" },
         .{ "vjs", "ps" },  .{ "mjs", "ms" },
         // mesa.va channel depth: ngspice's card key is `d`, which Verilog-A
         // cannot use as a parameter name (drain port).
         .{ "dch", "d" },
-        // `u0`/`u1`/`u10` are Zig primitive type names, so VerA's naming.zig
-        // emits the Model fields as `u0Z`/`u1Z`/`u10Z` (its escape marker) —
-        // the card keys stay unescaped. Without these aliases every such card
-        // silently kept the default (bsim3 fixtures drew 2x current; mos1's
-        // U0 was equally dead when TOX was given; bsim1's U1 velocity
-        // saturation vanished, +8% at the bsim1_a probe).
-          .{ "u0Z", "u0" },
+        // `u0`/`u1`/`u10` are Zig primitive type names, so VerA emits the
+        // Model fields with its `Z` escape; card keys stay unescaped.
+        .{ "u0Z", "u0" },
         .{ "u1Z", "u1" },  .{ "u10Z", "u10" },
         .{ "pubZ", "pub" }, // BSIM mobility bin coefficient; pub is a Zig keyword.
         // Diode alternates (dio.c IOPR). Only diode.va/vdmos.va declare `cjo`
@@ -519,22 +464,10 @@ fn applyKvDyn(set: *const fn ([*]u8, []const u8, f64) bool, dest: [*]u8, kv: []c
     }
 }
 
-// ---------------------------------------------------------------------------
-// NetBuilder — netlist → Builder wiring (no ArrayList, bucket-sized arrays)
-// ---------------------------------------------------------------------------
-
 /// Write a POSITIONAL card value (`R1 a b 1k`, `F1 … 2.0`) to the named
-/// parameter on whichever of Model/Instance declares it. `applyKv` covers the
-/// `name=value` spellings; this covers the ones that arrive by position and so
-/// have to be named in Zig.
-///
-/// The Model/Instance resolution is not decoration: FastVAF puts every
-/// Verilog-A `parameter` on **Model**, while the hand-written Zig devices these
-/// replaced put per-device values on Instance. Naming one struct means every
-/// call site breaks (loudly, or — worse — silently under a `@hasField` guard)
-/// the day a model moves a parameter across that line. Returns false when
-/// neither declares it, so a caller that must not silently drop the value can
-/// say so; the ones here are all @compileError-guarded or optional.
+/// parameter on whichever of Model/Instance declares it (`applyKv` covers
+/// `name=value`). VerA puts every Verilog-A `parameter` on Model; resolving
+/// both keeps binding if a model moves one. False when neither declares it.
 fn setParam(comptime D: type, model: *D.Model, instance: *D.Instance, comptime field: []const u8, value: f64) !bool {
     if (comptime @hasField(D.Model, field)) {
         @field(model.*, field) = try castField(@TypeOf(@field(model.*, field)), value);
@@ -556,17 +489,12 @@ pub const NetBuilder = struct {
     // Pre-allocated to bucket('v').size()
     v_names: [][]const u8,
     v_ports: []u32,
-    /// Negative node of each V card. F/H/W name a source and control on the
-    /// current through it; the 4-port `(p, n, cp, cn)` models take that
-    /// source's NODE PAIR and derive the branch current themselves, so the
-    /// binder has to carry both ends, not just the branch index.
+    /// Negative node of each V card: F/H/W models take the sensed source's
+    /// node pair `(cp, cn)` and derive its current themselves.
     v_nports: []u32,
     v_branches: []u32,
-    /// DC value of each V card. A source sensed by an F/H/W card
-    /// is NOT stamped: the 4-port model carries its own `branch (cp,cn)
-    /// ctrl` and drives `V(ctrl) <+ vsense`, so leaving the original in place
-    /// put two sources across one node pair and the control current split
-    /// between them (`I/(1+N)` for N consumers). `v_dc` is what `vsense` gets.
+    /// DC value of each V card. A source sensed by F/H/W is not stamped; the
+    /// sensing model's own `branch (cp,cn) ctrl` drives `vsense` = this value.
     v_dc: []f64,
     /// `DISTOF1 [mag [phase]]` off each V card — `.disto`'s F1 drive, and the
     /// ONLY thing that selects which source it lands on (ngspice
@@ -795,13 +723,9 @@ pub const NetBuilder = struct {
     /// `bindSource`.
     fn resolvePulseDefaults(self: *const NetBuilder, target: anytype) void {
         if (comptime !@hasField(@TypeOf(target.*), "pulse_tr")) return;
-        // Only a real PULSE waveform gets the TRANinit fill (ngspice runs it
-        // per PULSE function, not per source). Filling a DC/SIN/PWL source's
-        // sentinels minted a phantom breakpoint at t = TSTEP (default TR)
-        // whose landing cut dt to 0.1·saveDelta and desynced the step ladder
-        // from ngspice's (digital/clamp). Pushing TD past any tstop parks
-        // every timer corner where it can never fire — the pulse branch of
-        // the .va only reads these fields when waveform == pulse.
+        // Only a PULSE waveform gets the TRANinit fill (ngspice runs it per
+        // PULSE function). Any other waveform parks TD past every tstop so its
+        // unused pulse fields mint no breakpoint.
         if (comptime @hasField(@TypeOf(target.*), "waveform")) {
             if (target.waveform != @intFromEnum(Wave.pulse)) {
                 target.pulse_td = 1e30;
@@ -909,26 +833,19 @@ pub const NetBuilder = struct {
     }
 
     fn addDevice(self: *NetBuilder, dev_in: types.Device) !void {
-        // Every card routes through here, including the ones that expand into
-        // several instances (URC, CPL), so stamping the open card once is all
-        // it takes for Builder.addDevice to attribute every instance it makes.
+        // Attributes every instance this card expands into (URC, CPL) to it.
         self.b.card = dev_in.name;
         defer self.b.card = "";
-        // Runtime-loaded Verilog-A/Verilog device instance: handled
-        // by addDynDevices after NetBuilder runs, regardless of card letter.
-        // Its nodes still get a DC mark — a foreign model is opaque, and an
-        // unfounded topology error is worse than a missed one.
-        if (isDynDevice(dev_in, self.nl.models)) {
+        // HDL devices are added by addDynDevices after the freeze-order pass.
+        // An opaque model's nodes count as a DC path for the topology check.
+        if (dynVtable(dev_in, self.nl.models) != null) {
             try self.topoMark(dev_in, .dc, 0);
             return;
         }
         const letter = dev_in.letter();
         // Q cards carry 3-5 nodes against the parser's fixed 3, M cards 3-7
-        // against its fixed 4, so the model name lands on the wrong side of
-        // the node/positional split in both directions. Normalize BEFORE
-        // anything reads positionals — the guard below used to look up the
-        // substrate node as a model and reject every 4T vbic/hicum instance,
-        // and ate a 3-terminal VDMOS's model name as its bulk node.
+        // against its fixed 4, so the model name can land on either side of
+        // the node/positional split. Normalize before reading positionals.
         var norm: BjtNormBufs = undefined;
         const dev = if (letter == 'q' or letter == 'm') normalizeBjt(dev_in, self.nl.models, &norm) else dev_in;
         // 'u' (URC) has no DeviceId behind it: the card expands into
@@ -963,14 +880,9 @@ pub const NetBuilder = struct {
                 const bound = try self.bindSource(devices.vsource, dev);
                 const nodes = try deviceNodes(self.b, devices.vsource, dev);
                 const br = self.b.n;
-                // An F/H/W card SENSES this source's branch current, and the
-                // 4-port model does that by carrying its own `branch (cp,cn)
-                // ctrl` driven to `vsense`. Stamping the original alongside it
-                // put two voltage sources across one node pair, so the current
-                // divided between them — exactly `I/(1+N)` for N consumers,
-                // which is why cccs/ccvs read 0.5 and cswitch never tripped.
-                // The model header says it plainly: the netlist layer wires the
-                // sense branch IN PLACE OF that source.
+                // A source sensed by F/H/W is replaced by the sensing model's
+                // own `branch (cp,cn) ctrl`; stamping both would split the
+                // current between two sources across one node pair.
                 const sensed = std.sort.binarySearch([]const u8, self.sensed_sources, dev.name, std.ascii.orderIgnoreCase) != null;
                 if (!sensed) try self.b.addDevice(devices.vsource, bound[0], bound[1], nodes);
                 self.v_names[self.n_v] = dev.name;
@@ -1262,16 +1174,9 @@ pub const NetBuilder = struct {
         }
     }
 
-    /// `R1 a b 1k` — the principal value arrives POSITIONALLY, so it cannot go
-    /// through `applyKv`; it has to be written to a named field directly.
-    ///
-    /// `value_field` is the Verilog-A parameter name (`r`, `c`, `l`), and the
-    /// generated devices put `parameter real r` on **Model**, not Instance —
-    /// this used to name hand-written Zig fields (`Instance.resist`) that the
-    /// VA models replaced. Resolved against whichever struct declares it so a
-    /// model that makes its value an instance parameter still binds.
-    ///
-    /// `alias` is netlist spelling only (`R1 a b resist=1k`), never a field.
+    /// `R1 a b 1k`: the positional value goes to the Verilog-A parameter
+    /// `value_field` (`r`, `c`, `l`). `alias` is a card spelling only
+    /// (`R1 a b resist=1k`), never a field.
     fn addPassive(
         self: *NetBuilder,
         comptime D: type,
@@ -1362,10 +1267,8 @@ pub const NetBuilder = struct {
         self.resolvePulseDefaults(&model);
         self.resolvePulseDefaults(&instance);
         // ngspice: "the DC value of a source with a transient specification
-        // but no DC value is the transient value at t = 0" — resolved at BIND
-        // so the model's static branch reads `dc` unconditionally and a .dc
-        // sweep's override WINS (rtlinv sweeps a PULSE source with no DC
-        // card; the sweep used to be a no-op against the waveform).
+        // but no DC value is the transient value at t = 0". Resolved here so
+        // the model reads `dc` unconditionally and a .dc sweep can override it.
         if (dc == null) {
             dcFromWaveform(&model);
             dcFromWaveform(&instance);
@@ -1465,9 +1368,8 @@ pub const NetBuilder = struct {
         var instance: D.Instance = .{};
         if (comptime default_gain) |dflt|
             _ = try setParam(D, &model, &instance, "gain", positionalNumber(dev, 1) orelse kvNumber(dev.kv, "gain") orelse dflt);
-        // The sensed source is not stamped (see the 'v' case); this model's
-        // own `branch (cp,cn) ctrl` stands in for it, and `vsense` is what
-        // keeps its voltage. Without this the replaced source read as 0 V.
+        // The sensed source is not stamped (see the 'v' case); `vsense` keeps
+        // its voltage on this model's stand-in branch.
         _ = try setParam(D, &model, &instance, "vsense", self.v_dc[ctrl]);
         try applyKv(&instance, dev.kv);
 
@@ -1483,14 +1385,8 @@ pub const NetBuilder = struct {
         const first = self.b.n;
         try self.b.addDevice(D, model, instance, nodes);
 
-        // The sensed V card's branch row was recorded as `self.b.n` taken
-        // before an addDevice that never ran (see the 'v' case), so it pointed
-        // at whatever row the NEXT card got. Its current lives HERE, on this
-        // model's `ctrl`/`sense` branch — the one standing in for the source —
-        // which is why `i(vam)` came out missing while `i(vzero)` on the same
-        // unreferenced card came out fine. ngspice keeps the source's own
-        // CKTmkCur row and emits i(vam) either way (cccsset.c:47 looks the
-        // branch up rather than replacing it).
+        // The sensed source's current lives on this model's control branch;
+        // its `i(v...)` column reads that row (ngspice cccsset.c:47).
         self.v_branches[ctrl] = internalRow(D, "flowZ28cpZ2ccnZ29", first);
         // H also carries its own output branch, and ngspice names it i(h1).
         if (comptime @hasDecl(D, "U") and D == devices.ccvs)
@@ -1582,17 +1478,10 @@ fn eqlAny(a: []const u8, candidates: []const []const u8) bool {
     return false;
 }
 
-/// The polarity field, under each of the three names the models spell it.
-///
-/// This used to test `@hasField(D.Model, "type_")` — a name NO device has.
-/// Verilog-A `type` is a Zig primitive, so VerA's naming.zig marks it with a
-/// trailing `Z` (its escape marker, which keeps the encoding injective) and
-/// emits `typeZ`; a model that literally declares `type_` gets `typeZ5f`
-/// (`_` = 0x5f); mos3 calls its own parameter `dev_type`. `@hasField` on the
-/// wrong name is comptime-FALSE, which compiles clean and drops the branch —
-/// so every PMOS/PNP/PJF silently ran as its N-type twin, and a lone PMOS
-/// `.op` had no solution and returned NaN with exit 0. Do not "tidy" these
-/// names to something that reads better; they are codegen output.
+/// The polarity field, under each name the models spell it. These are VerA
+/// codegen output: Verilog-A `type` is a Zig primitive and becomes `typeZ`, a
+/// declared `type_` becomes `typeZ5f`. A misspelled `@hasField` is silently
+/// false and runs a P-type card as N-type, so do not rename them.
 fn setPolarity(comptime D: type, model: *D.Model) !void {
     if (comptime @hasField(D.Model, "typeZ")) {
         model.typeZ = -1; // i64 on most, f64 on mos1/mos2 — `-1` coerces to both
@@ -1660,28 +1549,13 @@ fn addSingleDevice(b: *Builder, comptime D: type, dev: types.Device, spice_model
         }
     }
     _ = try setParam(D, &model, &instance, "gain", positionalNumber(dev, 0) orelse 0);
-    // Device-card `name=value` goes to BOTH structs, because which one holds a
-    // given parameter is VerA's choice, not a semantic distinction: it puts
-    // every Verilog-A `parameter` on Model, and mos1's Instance has no user
-    // fields at all. Routing the card only to Instance therefore dropped
-    // per-instance geometry outright — `M1 d g s b NMOS W=10u L=1u` produced
-    // byte-identical output for W=1u, W=10u and W=100u.
-    //
-    // This was gated on `positionalName(dev, 0) == null` for the model-less form
-    // (`T1 a 0 b 0 Z0=50 TD=2n`); that case is now just the one where there
-    // was no model card to override in the first place.
-    //
-    // Overriding Model per card is not shared state: `model` is a fresh
-    // `D.Model` per device and `addDevice` appends its own copy, so one
-    // instance's W/L cannot reach another. Order is model card, then device
-    // card — SPICE precedence.
+    // Card `name=value` goes to both structs: VerA puts every Verilog-A
+    // `parameter` (W, L included) on Model. `model` is a per-device copy, so
+    // this overrides the model card for this instance only.
     try applyKv(&model, dev.kv);
     try applyKv(&instance, dev.kv);
-    // §6.3.4/§3.4.5: recompute parameters declared over other parameters
-    // (BSIMSOI `TOXM = TOX`, tline `td = nl/f`) and localparams, now that the
-    // last card value is written. Guarded per-field on `__given` inside, so an
-    // explicit card value always wins. The dlopen path (vt.derive) already
-    // did this; the comptime path silently never did.
+    // §6.3.4/§3.4.5: recompute dependent parameters and localparams after the
+    // last card write; explicit card values win through `__given`.
     deriveModel(D, &model, b.nom_temp_c);
     try b.addDevice(D, model, instance, try deviceNodes(b, D, dev));
 }
@@ -2377,11 +2251,8 @@ fn applyKv(target: anytype, kv: []const types.Kv) !void {
     @setEvalBranchQuota(1_000_000);
     inline for (@typeInfo(T).@"struct".fields) |field| {
         if (comptime isScalarAssignable(field.type)) {
-            // The whole netlist is lowercased at parse (parser.zig toLowerBuf),
-            // but VA models keep their spec spelling — BSIMSOI/HiSIM declare
-            // `VTH0`, `TOX`, `W` in caps. Exact-name lookup dropped EVERY such
-            // parameter silently (b4soi ran 100% baked defaults). Match on the
-            // comptime-lowercased field name instead; keys are already lower.
+            // Card keys are lowercased at parse; VA fields keep their spec
+            // spelling (BSIMSOI `VTH0`), so match the lowercased field name.
             const key = comptime blk: {
                 var buf: [field.name.len]u8 = undefined;
                 for (field.name, 0..) |c, i| buf[i] = std.ascii.toLower(c);
