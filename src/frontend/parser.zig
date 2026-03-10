@@ -386,44 +386,19 @@ pub fn Parser(comptime Tok: type) type {
                     if (peek.next()) |nx| {
                         if (nx == .lparen) {
                             t.* = peek;
-                            var buf: [8]ir.Value = undefined;
-                            var count: usize = 0;
+                            var args: std.ArrayList(ir.Value) = .empty;
                             while (true) {
                                 var peek2 = t.*;
-                                const a = peek2.next() orelse return error.ParseError;
-                                if (a == .rparen) {
-                                    t.* = peek2;
-                                    break;
-                                }
-                                if (a == .comma) {
-                                    t.* = peek2;
-                                    continue;
-                                }
-                                if (count < buf.len) {
-                                    buf[count] = try parseValueToken(arena, t);
-                                    count += 1;
-                                } else {
-                                    // Rare: >8 args in a group — fall back
-                                    var overflow: std.ArrayList(ir.Value) = .empty;
-                                    try overflow.appendSlice(arena, buf[0..buf.len]);
-                                    try overflow.append(arena, try parseValueToken(arena, t));
-                                    while (true) {
-                                        var p3 = t.*;
-                                        const a2 = p3.next() orelse return error.ParseError;
-                                        if (a2 == .rparen) {
-                                            t.* = p3;
-                                            break;
-                                        }
-                                        if (a2 == .comma) {
-                                            t.* = p3;
-                                            continue;
-                                        }
-                                        try overflow.append(arena, try parseValueToken(arena, t));
-                                    }
-                                    return .{ .group = .{ .name = w, .args = overflow.items } };
+                                switch (peek2.next() orelse return error.ParseError) {
+                                    .rparen => {
+                                        t.* = peek2;
+                                        break;
+                                    },
+                                    .comma => t.* = peek2,
+                                    else => try args.append(arena, try parseValueToken(arena, t)),
                                 }
                             }
-                            return .{ .group = .{ .name = w, .args = try arena.dupe(ir.Value, buf[0..count]) } };
+                            return .{ .group = .{ .name = w, .args = args.items } };
                         }
                     }
                     if (Tok.parseNum(w)) |n| return .{ .num = n };
