@@ -19,4 +19,3 @@ pub const load = source.load;
 pub const ngspice = tokenizer.ngspice;
 pub const hspice = tokenizer.hspice;
 pub const spectre = tokenizer.spectre;
-

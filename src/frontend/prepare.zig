@@ -112,10 +112,9 @@ pub fn build(sim_arena: std.mem.Allocator, parse_arena: std.mem.Allocator, ast: 
 
     // Rows the NetBuilder recorded before the freeze are in pre-BBD coordinates.
     if (perm) |p| for ([_][]u32{
-        nb.v_branches[0..nb.n_v],             nb.v_ports[0..nb.n_v],   nb.v_nports[0..nb.n_v],
-        nb.i_pos[0..nb.n_i],                  nb.i_neg[0..nb.n_i],     nb.br_rows[0..nb.n_br],
-        nb.l_branches[0..nb.n_l],             nb.ac_pos[0..nb.n_ac],   nb.ac_neg[0..nb.n_ac],
-        (&nb.source_node)[0..1],              (&nb.source_branch)[0..1],
+        nb.v.items(.branch),       nb.v.items(.pos),    nb.v.items(.neg),  nb.i.items(.pos),  nb.i.items(.neg),
+        nb.br.items(.row),         nb.l.items(.branch), nb.ac.items(.pos), nb.ac.items(.neg), (&nb.source_node)[0..1],
+        (&nb.source_branch)[0..1],
     }) |rows| for (rows) |*row| {
         if (row.* < p.len) row.* = p[row.*];
     };
@@ -137,14 +136,14 @@ pub fn build(sim_arena: std.mem.Allocator, parse_arena: std.mem.Allocator, ast: 
     }
 
     const bindings: problem.QueryBindings = .{
-        .v_names = try copyNames(sim_arena, nb.v_names[0..nb.n_v]),
-        .i_names = try copyNames(sim_arena, nb.i_names[0..nb.n_i]),
-        .v_branches = try sim_arena.dupe(u32, nb.v_branches[0..nb.n_v]),
-        .v_pos = try sim_arena.dupe(u32, nb.v_ports[0..nb.n_v]),
-        .v_neg = try sim_arena.dupe(u32, nb.v_nports[0..nb.n_v]),
-        .i_pos = try sim_arena.dupe(u32, nb.i_pos[0..nb.n_i]),
-        .i_neg = try sim_arena.dupe(u32, nb.i_neg[0..nb.n_i]),
-        .v_distof1 = try sim_arena.dupe([2]f64, nb.v_distof1[0..nb.n_v]),
+        .v_names = try copyNames(sim_arena, nb.v.items(.name)),
+        .i_names = try copyNames(sim_arena, nb.i.items(.name)),
+        .v_branches = try sim_arena.dupe(u32, nb.v.items(.branch)),
+        .v_pos = try sim_arena.dupe(u32, nb.v.items(.pos)),
+        .v_neg = try sim_arena.dupe(u32, nb.v.items(.neg)),
+        .i_pos = try sim_arena.dupe(u32, nb.i.items(.pos)),
+        .i_neg = try sim_arena.dupe(u32, nb.i.items(.neg)),
+        .v_distof1 = try sim_arena.dupe([2]f64, nb.v.items(.distof1)),
         .ports = try nb.portList(sim_arena),
     };
 
@@ -157,7 +156,7 @@ pub fn build(sim_arena: std.mem.Allocator, parse_arena: std.mem.Allocator, ast: 
     const probe_buf = try sim_arena.alloc(u32, circuit.n);
     const label_buf = try sim_arena.alloc([]const u8, circuit.n);
     var n_probes: u32 = 0;
-    for ([_][]const []const u8{ nb.v_names[0..nb.n_v], nb.l_names[0..nb.n_l], nb.br_names[0..nb.n_br] }, [_][]const u32{ nb.v_branches[0..nb.n_v], nb.l_branches[0..nb.n_l], nb.br_rows[0..nb.n_br] }) |names, rows| {
+    for ([_][]const []const u8{ nb.v.items(.name), nb.l.items(.name), nb.br.items(.name) }, [_][]const u32{ nb.v.items(.branch), nb.l.items(.branch), nb.br.items(.row) }) |names, rows| {
         for (names, rows) |name, br| {
             probe_buf[n_probes] = br;
             label_buf[n_probes] = try std.fmt.allocPrint(sim_arena, "i({s})", .{name});
@@ -190,7 +189,7 @@ pub fn build(sim_arena: std.mem.Allocator, parse_arena: std.mem.Allocator, ast: 
         .queries = try queriesFromDirectives(sim_arena, nl.directives, dir_nodes, bindings, cards, deck_opts),
         .bindings = bindings,
         .cards = cards,
-        .ac_overrides = try acOverrides(sim_arena, cards, nb.ac_res_names[0..nb.n_ac_res], nb.ac_res_values[0..nb.n_ac_res]),
+        .ac_overrides = try acOverrides(sim_arena, cards, nb.ac_res.items(.name), nb.ac_res.items(.value)),
     };
 }
 
