@@ -152,6 +152,16 @@ inline fn parseSpiceNum(text: []const u8, comptime hspice_suffix: bool) ?f64 {
     return parsed.base * scale;
 }
 
+/// Append a continuation piece to a logical line, copying `head` on first use.
+fn join(arena: std.mem.Allocator, joined: *?std.ArrayList(u8), head: []const u8, piece: []const u8) !void {
+    if (joined.* == null) {
+        joined.* = .empty;
+        try joined.*.?.appendSlice(arena, head);
+    }
+    try joined.*.?.append(arena, ' ');
+    try joined.*.?.appendSlice(arena, piece);
+}
+
 // ponytail: all dialects share physical lines; comment and continuation rules stay local.
 fn nextPhysicalLine(rest: *[]const u8) ?[]const u8 {
     const src = rest.*;
@@ -201,13 +211,7 @@ pub const ngspice = struct {
                 const raw = nextPhysicalLine(&self.rest) orelse break;
                 const t = std.mem.trim(u8, raw, " \t");
                 if (t.len > 0 and t[0] == '+') {
-                    const cont = stripComment(t[1..]);
-                    if (joined == null) {
-                        joined = .empty;
-                        try joined.?.appendSlice(self.arena, head);
-                    }
-                    try joined.?.append(self.arena, ' ');
-                    try joined.?.appendSlice(self.arena, cont);
+                    try join(self.arena, &joined, head, stripComment(t[1..]));
                 } else if (t.len > 0 and t[0] == '*') {
                     continue;
                 } else if (t.len == 0) {
@@ -284,14 +288,7 @@ pub const hspice = struct {
                     const raw = nextPhysicalLine(&self.rest) orelse break;
                     const t = std.mem.trim(u8, raw, " \t");
                     if (t.len > 0 and t[0] == '+') {
-                        const cont = stripComment(t[1..]);
-                        if (joined == null) {
-                            joined = .empty;
-                            try joined.?.appendSlice(self.arena, head);
-                        }
-                        try joined.?.append(self.arena, ' ');
-                        try joined.?.appendSlice(self.arena, cont);
-                        // ponytail: the appends above already require an initialized list.
+                        try join(self.arena, &joined, head, stripComment(t[1..]));
                         const bs = stripTrailingBackslash(joined.?.items);
                         trailing_cont = bs.continues;
                         if (trailing_cont) {
@@ -307,15 +304,8 @@ pub const hspice = struct {
                     }
                 } else {
                     const raw = nextPhysicalLine(&self.rest) orelse break;
-                    const t = std.mem.trim(u8, raw, " \t");
-                    if (joined == null) {
-                        joined = .empty;
-                        try joined.?.appendSlice(self.arena, head);
-                    }
-                    try joined.?.append(self.arena, ' ');
-                    const stripped = stripComment(t);
-                    const bs = stripTrailingBackslash(stripped);
-                    try joined.?.appendSlice(self.arena, bs.text);
+                    const bs = stripTrailingBackslash(stripComment(std.mem.trim(u8, raw, " \t")));
+                    try join(self.arena, &joined, head, bs.text);
                     trailing_cont = bs.continues;
                 }
             }
@@ -422,13 +412,8 @@ pub const spectre = struct {
                 };
                 const stripped = stripComment(line);
                 const clean = try stripBlockComments(self.arena, stripped);
-                if (joined == null) {
-                    joined = .empty;
-                    try joined.?.appendSlice(self.arena, head);
-                }
-                try joined.?.append(self.arena, ' ');
                 trailing_cont = hasContinuation(clean);
-                try joined.?.appendSlice(self.arena, trimContinuation(clean));
+                try join(self.arena, &joined, head, trimContinuation(clean));
             }
             return if (joined) |j| j.items else head;
         }

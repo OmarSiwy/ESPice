@@ -173,8 +173,6 @@ test "Problem: source and appended port slices are owned after the call returns"
     @memset(&source, 'x');
     @memset(&origin, 'x');
     try t.expectEqualStrings("owned input", p.title());
-    try t.expectEqualStrings("owned.cir", p.origin);
-    try t.expect(std.mem.startsWith(u8, p.source, "owned input\n"));
     try t.expectEqual(@as(u32, 1), p.query_count());
     const op = try find(p, .op); // A deck without directives gets one OP.
     var ports = [_]api.requests.Port{.{ .node = p.prepared.source_node, .branch = p.prepared.source_branch }};

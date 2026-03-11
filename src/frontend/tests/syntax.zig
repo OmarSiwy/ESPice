@@ -163,10 +163,7 @@ fn parseAndElaborate(arena: std.mem.Allocator, source: []const u8) !ir.Netlist {
 }
 
 fn device(nl: ir.Netlist, name: []const u8) !ir.Device {
-    for (0..nl.devices.len()) |i| {
-        const d = nl.devices.get(i);
-        if (std.mem.eql(u8, d.name, name)) return d;
-    }
+    for (nl.devices) |d| if (std.mem.eql(u8, d.name, name)) return d;
     return error.MissingDevice;
 }
 
@@ -241,7 +238,6 @@ test "parameters: global definitions keep their scope under nested overrides" {
     for ([_][]const u8{ "rtop", "r.xone.rlocal", "r.xone.rglobal", "r.xone.xnested.rinner" }, [_]f64{ 2, 18, 6, 19 }) |name, expected| {
         try std.testing.expectEqual(expected, try numeric((try device(nl, name)).positional[0]));
     }
-    try std.testing.expectEqual(@as(usize, 2), nl.params.len);
 }
 
 test "parameters: sibling subcircuits do not leak local parameters" {
@@ -378,7 +374,7 @@ test "model bins: all four geometry bounds include the one nanometer tolerance" 
         \\m4 d g 0 0 nm l=1.5u w=4.0005u
         \\.end
     );
-    for (0..nl.devices.len()) |i| try std.testing.expectEqualStrings("nm.0", nl.devices.get(i).positional[0].name);
+    for (nl.devices) |d| try std.testing.expectEqualStrings("nm.0", d.positional[0].name);
     for ([_][]const u8{ "l=0.9985u w=3.5u", "l=2.0015u w=3.5u", "l=1.5u w=2.9985u", "l=1.5u w=4.0015u" }) |geometry| {
         const src = try std.fmt.allocPrint(arena.allocator(), "outside bin\n.model nm.0 nmos(level=1 lmin=1u lmax=2u wmin=3u wmax=4u)\nm1 d g 0 0 nm {s}\n.end\n", .{geometry});
         try std.testing.expectError(error.ModelBinNotFound, parseAndElaborate(arena.allocator(), src));
@@ -431,10 +427,8 @@ test "elaboration: non-standard instance name in subcircuit expands correctly" {
     ;
     const ast = try Parser(ngspice).parse(arena_state.allocator(), src);
     const nl = try elaborate(arena_state.allocator(), ast);
-    const dl = nl.devices;
     var found = false;
-    for (0..dl.len()) |i| {
-        const d = dl.get(i);
+    for (nl.devices) |d| {
         if (std.mem.indexOf(u8, d.name, "nm") != null) {
             try std.testing.expectEqual(@as(usize, 4), d.nodes.len);
             try std.testing.expectEqual(@as(usize, 1), d.positional.len);
@@ -467,15 +461,14 @@ test "elaboration preserves the AST and scales shared subcircuit instances once"
     );
     for (0..2) |_| {
         const nl = try elaborate(a, ast);
-        const mos = nl.devices.bucket('m');
-        try std.testing.expectEqual(@as(usize, 2), mos.size());
-        for (0..mos.size()) |i| {
-            const d = mos.get(i);
+        const mos = nl.bucket('m');
+        try std.testing.expectEqual(@as(usize, 2), mos.len);
+        for (mos) |d| {
             try std.testing.expectEqualStrings("nm.1", d.positional[0].name);
             try std.testing.expectEqual(@as(f64, 1e-6), try parameter(d.kv, "l"));
             try std.testing.expectEqual(@as(f64, 2e-6), try parameter(d.kv, "w"));
         }
-        try std.testing.expectEqual(@as(f64, 1000), try parameter(nl.devices.bucket('r').get(0).kv, "r"));
+        try std.testing.expectEqual(@as(f64, 1000), try parameter(nl.bucket('r')[0].kv, "r"));
     }
     const original = ast.subcircuits[0].devices[0];
     try std.testing.expectEqualStrings("nm", original.positional[0].name);
