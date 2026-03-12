@@ -13,6 +13,21 @@ const gpuJacFloat = impl.gpuJacFloat;
 const jacFloat = impl.jacFloat;
 const std = @import("std");
 
+test "anyNonzero matches the float compare it replaces, ±0 and NaN included" {
+    const specials = [_]f64{ 0.0, -0.0, std.math.nan(f64), -std.math.nan(f64), std.math.inf(f64), -std.math.inf(f64), std.math.floatTrueMin(f64), -std.math.floatTrueMin(f64), 1.0 };
+    inline for (.{ 1, 2, 4, 8 }) |w| {
+        const V = @Vector(w, f64);
+        // Every lane drawn from the specials, lanes mostly ±0 so both answers occur.
+        var prng = std.Random.DefaultPrng.init(0xc0de + w);
+        for (0..4096) |_| {
+            var a: [w]f64 = undefined;
+            for (&a) |*x| x.* = if (prng.random().uintLessThan(u8, 4) != 0) specials[prng.random().uintLessThan(usize, 2)] else specials[prng.random().uintLessThan(usize, specials.len)];
+            const v: V = a;
+            try std.testing.expectEqual(@reduce(.Or, v != @as(V, @splat(0))), impl.test_access.anyNonzero(w, v));
+        }
+    }
+}
+
 test "Dual: expm1 and log1p retain finite range and IEEE endpoints" {
     const S = Dual(1, f64);
     for ([_]f64{ -740, -1, -1e-17, -0.0, 0, 1e-17, 0.5, 704, 709 }) |x| {

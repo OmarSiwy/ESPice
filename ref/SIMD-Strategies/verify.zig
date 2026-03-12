@@ -388,6 +388,12 @@ pub fn main() void {
     // oracle over lengths 0..8: src/analysis/tests/solvers.zig (SparseTests) (same
     // standalone-import reason as LaneLu above).
 
+    // evalRange's `corr_live` predicate (analysis/eval.zig anyNonzero): an
+    // integer shift-and-test standing in for `@reduce(.Or, v != 0)`. Its
+    // differential case against that float compare, ±0/NaN/inf/denormal lanes
+    // at w = 1..8, is in src/analysis/tests/eval.zig — same standalone-import
+    // reason as LaneLu above.
+
     // Mirror tran.zig integrator.rebaseCurrent; the same w=1 kernel is the
     // oracle. The real kernel has the same case in src/analysis/tests/transient.zig.
     {
