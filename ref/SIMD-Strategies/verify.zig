@@ -388,6 +388,27 @@ pub fn main() void {
     // oracle over lengths 0..8: src/analysis/tests/solvers.zig (SparseTests) (same
     // standalone-import reason as LaneLu above).
 
+    // Mirror tran.zig integrator.rebaseCurrent; the same w=1 kernel is the
+    // oracle. The real kernel has the same case in src/analysis/tests/transient.zig.
+    {
+        var random = std.Random.DefaultPrng.init(0x7e1a);
+        var qn: [67]f64 = undefined;
+        var qo: [67]f64 = undefined;
+        var ic: [67]f64 = undefined;
+        for (&qn, &qo, &ic) |*a, *b, *c| {
+            a.* = random.random().float(f64) - 0.5;
+            b.* = random.random().float(f64) - 0.5;
+            c.* = random.random().float(f64) - 0.5;
+        }
+        inline for (.{ 2, 4, 8 }) |width| for (0..qn.len + 1) |n| {
+            var expected = ic;
+            var actual = ic;
+            rebaseCurrent(1, expected[0..n], qn[0..n], qo[0..n], 2e9);
+            rebaseCurrent(width, actual[0..n], qn[0..n], qo[0..n], 2e9);
+            assert(std.mem.eql(f64, &expected, &actual));
+        };
+    }
+
     std.debug.print("ok — zig {f}, ssse3={}, pclmul={}\n", .{
         builtin.zig_version, has_ssse3, has_pclmul,
     });
@@ -486,6 +507,18 @@ pub fn combinePlanes(comptime W: usize, out: []f64, g: []const f64, c: []const f
         out[i..][0..W].* = gv + scale * cv;
     }
     if (comptime W > 1) combinePlanes(1, out[i..], g[i..], c[i..], alpha);
+}
+
+pub fn rebaseCurrent(comptime w: usize, i_cur: []f64, q_new: []const f64, q_old: []const f64, alpha: f64) void {
+    const V = @Vector(w, f64);
+    const av: V = @splat(alpha);
+    var j: usize = 0;
+    while (j + w <= i_cur.len) : (j += w) {
+        const a: V = q_new[j..][0..w].*;
+        const b: V = q_old[j..][0..w].*;
+        i_cur[j..][0..w].* = @as(V, i_cur[j..][0..w].*) + av * (a - b);
+    }
+    if (comptime w > 1) rebaseCurrent(1, i_cur[j..], q_new[j..], q_old[j..], alpha);
 }
 
 // Frontend parser.zig: normalization and line count; same W=1 oracle.
