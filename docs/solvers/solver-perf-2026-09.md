@@ -74,3 +74,23 @@ Ir another 22% (772M to 600M). Wall time moved only 3 to 7% at 91 omegas
 costs about 1.86 four-lane chunks, so short sweeps lose to ragged-tail
 waste (10 points: 3 chunks of 4 against 2 chunks of 8, about 3.7 chunk
 costs). Kept at the native width.
+
+## Full factor: SparseLu.factor
+
+The Gilbert-Peierls factor had the problem `refactor` had before its hoist:
+the numeric axpy indexed `self.w`, `self.li.items` and `self.lx.items`, so
+every element reloaded three slice pointers (about 12 Ir per element), and
+the DFS kept its resume cursor in `self.pstack[sp]`, a load and a store per
+edge. The column loop now works on local slices, keeps the cursor in a
+register, encodes an unpivoted row as the empty range [0, 0) instead of a
+NONE sentinel (one compare per edge), and reserves each column's U and L
+growth once (`nt` bounds both) instead of a capacity check per append. The
+reservation sits before the scatter, so an OutOfMemory leaves `w` zero.
+Same operations in the same order: the factors are bitwise identical.
+
+| measure | before | after |
+|---|---|---|
+| factor, 100x100 grid Laplacian (bench Ir per factor) | ~347M | ~210M |
+| factor, fourbitadder n=991 (bench min wall) | 647 us | 499 us |
+| `scaling_resistor_grid_100x100` whole run Ir | 484M | 357M |
+| `scaling_resistor_grid_100x100` wall, median of 11 | 308 ms | 218 ms |
