@@ -250,10 +250,12 @@ pub fn FreqSolverT(comptime T: type) type {
                 for (0..W) |l| ow[l] = omegas[base + @min(l, cnt - 1)];
                 const omega_vec: @Vector(W, T) = ow;
 
-                // Pivot refresh: scalar factor at the chunk-middle omega.
-                setOmegaSparse(self.n, sp, ow[cnt / 2]) catch {
-                    // Refresh factor failed at the middle omega: peel the whole
-                    // chunk to the serial path (each omega re-factors itself).
+                // The lanes replay the existing pivot tape; only the first chunk
+                // (or one after a failed factor) pays a scalar factor for it.
+                // A lane whose pivots decay fails the same growth monitor the
+                // scalar refactor would, peels below, and its serial full
+                // factor repivots the tape for the next chunk.
+                if (!sp.slv.factored) setOmegaSparse(self.n, sp, ow[cnt / 2]) catch {
                     try self.solveBatchSerial(omegas[base .. base + cnt], rhs, x_out[base * nn ..][0 .. cnt * nn], adjoint);
                     continue;
                 };

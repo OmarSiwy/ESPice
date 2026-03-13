@@ -1976,6 +1976,90 @@ const LaneLuTests = struct {
         }
     }
 
+    fn expectZero(comptime W: usize, w: []const @Vector(W, f64)) !void {
+        for (w) |v| try testing.expect(@reduce(.And, v == @as(@Vector(W, f64), @splat(0))));
+    }
+
+    test "LaneLu(W): refactor leaves w zero, so a second refactor still matches scalar" {
+        // Fill-in (the dense 5x5 below factors with L/U fill) is where a stale
+        // `w` slot would leak into the next refactor now that no pattern
+        // zeroing runs before each column.
+        const gpa = testing.allocator;
+        const W = std.simd.suggestVectorLength(f64) orelse 4;
+        const LW = LaneLu(W);
+        const a0 = [5][5]f64{
+            .{ 9, 1, 2, 0, 1 },
+            .{ 1, 8, 0, 3, 0 },
+            .{ 2, 0, 7, 1, 2 },
+            .{ 0, 3, 1, 9, 1 },
+            .{ 1, 0, 2, 1, 6 },
+        };
+        const csc = DenseCsc(5).from(a0);
+        const nnz = csc.nnz();
+        var q = identity(5);
+        var base = try sparse_lu.SparseLu(f64).init(gpa, 5, &csc.col_ptr, csc.row_idx[0..nnz], &q);
+        defer base.deinit(gpa);
+        try base.factor(gpa, &csc.col_ptr, csc.row_idx[0..nnz], csc.vals[0..nnz], 1e-3);
+
+        var ll = try LW.init(gpa, &base);
+        defer ll.deinit(gpa);
+        var prng = std.Random.DefaultPrng.init(0x5EED);
+        const rand = prng.random();
+        var lane_vals: [W][25]f64 = undefined;
+        var lvals: [25]LW.V = undefined;
+        for (0..3) |_| {
+            for (0..W) |l| for (0..nnz) |p| {
+                lane_vals[l][p] = csc.vals[p] * (1.0 + (rand.float(f64) - 0.5) * 0.2);
+            };
+            for (0..nnz) |p| {
+                var v: [W]f64 = undefined;
+                for (0..W) |l| v[l] = lane_vals[l][p];
+                lvals[p] = v;
+            }
+            try testing.expectEqual(@as(u64, 0), ll.refactor(&csc.col_ptr, lvals[0..nnz], 1e-12));
+            try expectZero(W, ll.w);
+
+            const b_scalar = [5]f64{ 1, -2, 3, -4, 5 };
+            var lb: [5]LW.V = undefined;
+            for (b_scalar, 0..) |v, i| lb[i] = @splat(v);
+            var lx: [5]LW.V = undefined;
+            ll.solve(&lb, &lx);
+            for (0..W) |l| {
+                try base.refactor(&csc.col_ptr, lane_vals[l][0..nnz], 1e-12);
+                var xr: [5]f64 = undefined;
+                base.solve(&b_scalar, &xr);
+                for (0..5) |i| {
+                    const row: [W]f64 = lx[i];
+                    try testing.expectEqual(xr[i], row[l]);
+                }
+            }
+        }
+    }
+
+    test "LaneLu(W): a void pivot fails every lane and leaves w zero" {
+        // Unknown 2 appears in no equation: its only structural entry is a
+        // zero-valued diagonal, so SparseLu fabricates a unit pivot for it.
+        const gpa = testing.allocator;
+        const W = std.simd.suggestVectorLength(f64) orelse 4;
+        const LW = LaneLu(W);
+        const col_ptr = [_]u32{ 0, 2, 4, 5 };
+        const row_idx = [_]u32{ 0, 1, 0, 1, 2 };
+        const vals = [_]f64{ 4, 1, 1, 3, 0 };
+        var q = identity(3);
+        var base = try sparse_lu.SparseLu(f64).init(gpa, 3, &col_ptr, &row_idx, &q);
+        defer base.deinit(gpa);
+        try base.factor(gpa, &col_ptr, &row_idx, &vals, 1e-3);
+        try testing.expect(base.void_col[2]);
+
+        var ll = try LW.init(gpa, &base);
+        defer ll.deinit(gpa);
+        var lvals: [5]LW.V = undefined;
+        broadcast(W, &vals, &lvals);
+        const all: u64 = std.math.maxInt(std.meta.Int(.unsigned, W));
+        try testing.expectEqual(all, ll.refactor(&col_ptr, &lvals, 1e-12));
+        try expectZero(W, ll.w);
+    }
+
     test "interleave/deinterleave/broadcast round-trip" {
         const W = 4;
         var l0 = [_]f64{ 1, 2, 3 };
