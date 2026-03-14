@@ -844,6 +844,30 @@ const DirectTests = struct {
         );
     }
 
+    test "a singular full factor leaves w zero and the next factor exact" {
+        // Column 1 is singular after eliminating column 0, while w[0] still
+        // holds that column's U value. A stale w[0] would enter the next
+        // factor as if it were part of the matrix.
+        const gpa = testing.allocator;
+        const SparseLu = sparse_lu.SparseLu(f64);
+        const col_ptr = [_]u32{ 0, 2, 4, 5 };
+        const row_idx = [_]u32{ 0, 1, 0, 1, 2 };
+        const singular = [_]f64{ 1, 1, 1, 1, 1 };
+        const good = [_]f64{ 4, 1, 1, 3, 2 };
+        const q3 = naturalOrder(3);
+        var lu = try SparseLu.init(gpa, 3, &col_ptr, &row_idx, &q3);
+        defer lu.deinit(gpa);
+        try testing.expectError(error.SingularMatrix, lu.factor(gpa, &col_ptr, &row_idx, &singular, 1e-3));
+        for (lu.w) |v| try testing.expectEqual(@as(f64, 0), v);
+
+        try lu.factor(gpa, &col_ptr, &row_idx, &good, 1e-3);
+        const b = [3]f64{ 5, 4, 2 };
+        var x: [3]f64 = undefined;
+        lu.solve(&b, &x);
+        // [4 1 0; 1 3 0; 0 0 2] x = b  =>  x = [1, 1, 1]
+        for (x) |xi| try testing.expectApproxEqAbs(@as(f64, 1), xi, 1e-14);
+    }
+
     test "solveT: transpose solve matches A^T dense solve" {
         const a = [3][3]f64{
             .{ 1e-3, 0, 1 },

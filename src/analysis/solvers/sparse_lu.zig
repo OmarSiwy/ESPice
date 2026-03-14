@@ -327,7 +327,13 @@ pub fn SparseLu(comptime T: type) type {
                     // the whole gmin + source-stepping continuation ladder for
                     // each: 68772 Newton iterations against ngspice's ~5000,
                     // 0.93 s against 0.02 s.
-                    if (!self.voidUnknown(col_ptr, row_idx, vals, c)) return error.SingularMatrix;
+                    if (!self.voidUnknown(col_ptr, row_idx, vals, c)) {
+                        // `w` still holds this column's U values (NaNs when the
+                        // column went non-finite), and the next factor reads
+                        // every fill row as zero.
+                        for (topo[0..nt]) |r| w[r] = 0;
+                        return error.SingularMatrix;
+                    }
                     self.void_col[k] = true;
                     has_void = true;
                     self.udiag[k] = 1;
