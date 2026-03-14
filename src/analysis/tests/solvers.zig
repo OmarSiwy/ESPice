@@ -372,6 +372,51 @@ const ConvergerTests = struct {
         try testing.expectApproxEqAbs(@as(f64, 32.0), dot(&a, &b), 1e-15);
     }
 
+    /// Scalar oracle for converger.updateAndNorm (the pre-vector loop).
+    fn updateAndNormOracle(x: []f64, dx: []const f64, x_old: []f64, cur: []const bool, reltol: f64, abstol: f64, vntol: f64) f64 {
+        var worst: f64 = 0;
+        for (x, dx, x_old, cur) |*xi, dxi, *xoi, is_cur| {
+            xoi.* = xi.*;
+            xi.* += dxi;
+            const atol = if (is_cur) abstol else vntol;
+            const tol = reltol * @max(@abs(xi.*), @abs(xoi.*)) + atol;
+            worst = @max(worst, @abs(dxi) / tol);
+        }
+        return worst;
+    }
+
+    test "updateAndNorm: vector body and tail match the scalar oracle bitwise" {
+        const kernel = impl.test_access.updateAndNorm;
+        var prng = std.Random.DefaultPrng.init(0xC0FFEE);
+        const rand = prng.random();
+        const specials = [_]f64{ 0, -0.0, std.math.nan(f64), std.math.inf(f64), 1e-300, -1e300 };
+        var xa: [64]f64 = undefined;
+        var xb: [64]f64 = undefined;
+        var dx: [64]f64 = undefined;
+        var oa: [64]f64 = undefined;
+        var ob: [64]f64 = undefined;
+        var cur: [64]bool = undefined;
+        // Every length through several vector widths plus a tail, so each
+        // boundary and the empty case run.
+        for (0..40) |len| for (0..50) |trial| {
+            for (0..len) |i| {
+                xa[i] = (rand.float(f64) - 0.5) * std.math.pow(f64, 10, @floatFromInt(rand.intRangeAtMost(i32, -9, 3)));
+                dx[i] = (rand.float(f64) - 0.5) * 1e-3;
+                cur[i] = rand.boolean();
+                if (trial % 7 == 0 and rand.boolean()) dx[i] = specials[rand.uintLessThan(usize, specials.len)];
+                if (trial % 11 == 0 and rand.boolean()) xa[i] = specials[rand.uintLessThan(usize, specials.len)];
+            }
+            @memcpy(xb[0..len], xa[0..len]);
+            const want = updateAndNormOracle(xa[0..len], dx[0..len], oa[0..len], cur[0..len], 1e-3, 1e-12, 1e-6);
+            const got = kernel(xb[0..len], dx[0..len], ob[0..len], cur[0..len], 1e-3, 1e-12, 1e-6);
+            try testing.expectEqual(@as(u64, @bitCast(want)), @as(u64, @bitCast(got)));
+            for (0..len) |i| {
+                try testing.expectEqual(@as(u64, @bitCast(xa[i])), @as(u64, @bitCast(xb[i])));
+                try testing.expectEqual(@as(u64, @bitCast(oa[i])), @as(u64, @bitCast(ob[i])));
+            }
+        };
+    }
+
     // One equation with a device veto through iteration two. This exercises both
     // nonzero Newton corrections and JFNK's zero-residual exit without model physics.
     const IterationSystem = struct {

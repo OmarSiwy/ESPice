@@ -94,3 +94,46 @@ Same operations in the same order: the factors are bitwise identical.
 | factor, fourbitadder n=991 (bench min wall) | 647 us | 499 us |
 | `scaling_resistor_grid_100x100` whole run Ir | 484M | 357M |
 | `scaling_resistor_grid_100x100` wall, median of 11 | 308 ms | 218 ms |
+
+## Converger: per-iterate O(n) passes
+
+`newton` computed `norm_f = max |rhs|` on every iterate, and nothing but the
+two debug prints read it; it now runs only when `ZP_NEWTON_DEBUG` or
+`ZP_OPDBG` is set. `finalizeStep` copied `x` into `x_old` and then made a
+second scalar pass for `x += dx` and the scaled-delta norm; `updateAndNorm`
+now does both in one W-wide pass (the current-row mask selects abstol or
+vntol per lane) with a scalar tail. Max is exact and order-independent, so
+the result is bitwise the scalar loop's; the differential case covers
+lengths 0 to 39 with NaN, inf and -0 inputs (ConvergerTests).
+
+## Retired experiments
+
+- **Dense LU for tiny systems.** The SIMD `DenseLu` (partial pivoting, the
+  BBD block kernel) against sparse refactor + solve per Newton step: grid
+  Laplacians n=9, 16, 25 cost 5101, 15047 and 37777 Ir per step dense
+  against 2540, 5295 and 9205 sparse. Loses 2x to 4x even at n=9.
+- **Level-scheduled parallel refactor.** Columns whose U pattern depends
+  only on finished columns can run on worker threads with no FP change.
+  Upper bound at 8 threads, ignoring barrier cost, from the real matrices:
+  fourbitadder 1.32x (292 levels), 100x100 grid 1.43x (551 levels),
+  `sweep_opamp_wl_5000` OP 1.81x and AC 2n 1.64x, `parallel_inverters_2000`
+  2.10x, `inverter_chain_256` none (259 levels for 261 columns). AMD's
+  elimination trees are deep, and on the replicated stress decks the shared
+  supply and bias columns land last and depend on every instance (4 serial
+  columns hold 49% of the opamp OP work). Solver threads are also opt-in
+  (`ESPICE_SOLVER_THREADS`, default 1). Not built.
+- **Hand-stepped loops in `refactor`** (scatter and L normalize, the
+  `scatterAxpy` treatment): 7 to 9% fewer Ir per refactor at n=9 to 16, no
+  change at n=991. Bitwise identical but under 2% of the n=12 vacask deck.
+  Parked.
+
+## Follow-ups outside `solvers/`
+
+- **Ordering computed per executor.** The OP and tran executors each build
+  a Circuit and a `converger.Workspace`, and each runs BTF + AMD on the same
+  frozen pattern: two `computeOrdering` calls, 95M Ir each on
+  `scaling_rc_ladder_100k` (1.5% of the run; about 2% on the 100x100 grid).
+  The ordering belongs with the prepared pattern; `direct.SolverT` would
+  take it as an input instead of computing it.
+- **`scaling_inverter_chain_4k`.** 321 of its 360 s are the OP falling
+  through to pseudo-transient continuation in `dc/op.zig`.
