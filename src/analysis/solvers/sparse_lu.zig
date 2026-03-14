@@ -198,63 +198,89 @@ pub fn SparseLu(comptime T: type) type {
             for (self.rscale) |*s|
                 s.* = if (s.* > 0 and std.math.isFinite(s.*)) 1 / s.* else 1;
 
+            // Locals for every slice the column loop indexes: a store through
+            // any of them may alias `self`, so field access reloaded the slice
+            // pointers per element (the same hoist `refactor` carries).
+            const pinv = self.pinv;
+            const flag = self.flag;
+            const stack = self.stack;
+            const pstack = self.pstack;
+            const topo = self.topo;
+            const lp = self.lp;
+            const w = self.w;
+            const rscale = self.rscale;
             for (0..n) |k| {
                 const c = self.q[k];
-                self.lp[k] = @intCast(self.li.items.len);
+                lp[k] = @intCast(self.li.items.len);
                 self.up[k] = @intCast(self.ui.items.len);
                 const mark: u32 = @intCast(k + 1);
+                // The DFS reads L's index array only; L grows (and may move)
+                // at the reservation below, so the solve re-takes both slices.
+                const li = self.li.items;
 
                 // ---- symbolic: DFS reach from pattern of A[:,c] through G(L) ----
                 var nt: u32 = 0;
                 for (col_ptr[c]..col_ptr[c + 1]) |p| {
                     var r = row_idx[p];
-                    if (self.flag[r] == mark) continue;
+                    if (flag[r] == mark) continue;
                     var sp: u32 = 0;
-                    self.stack[sp] = r;
-                    self.pstack[sp] = if (self.pinv[r] == NONE) NONE else self.lp[self.pinv[r]];
-                    self.flag[r] = mark;
+                    stack[sp] = r;
+                    // An unpivoted row has no L column: the empty range [0, 0).
+                    pstack[sp] = if (pinv[r] == NONE) 0 else lp[pinv[r]];
+                    flag[r] = mark;
                     while (true) {
-                        r = self.stack[sp];
-                        const kc = self.pinv[r];
-                        const end = if (kc == NONE) NONE else self.lp[kc + 1];
+                        r = stack[sp];
+                        const kc = pinv[r];
+                        const end = if (kc == NONE) 0 else lp[kc + 1];
+                        // Resume cursor lives in a register; memory sees it
+                        // only when the walk descends and must come back.
+                        var pos = pstack[sp];
                         var descended = false;
-                        while (self.pstack[sp] != NONE and self.pstack[sp] < end) {
-                            const child = self.li.items[self.pstack[sp]];
-                            self.pstack[sp] += 1;
-                            if (self.flag[child] != mark) {
-                                self.flag[child] = mark;
+                        while (pos < end) {
+                            const child = li[pos];
+                            pos += 1;
+                            if (flag[child] != mark) {
+                                pstack[sp] = pos;
+                                flag[child] = mark;
                                 sp += 1;
-                                self.stack[sp] = child;
-                                self.pstack[sp] = if (self.pinv[child] == NONE) NONE else self.lp[self.pinv[child]];
+                                stack[sp] = child;
+                                pstack[sp] = if (pinv[child] == NONE) 0 else lp[pinv[child]];
                                 descended = true;
                                 break;
                             }
                         }
                         if (descended) continue;
-                        self.topo[nt] = r;
+                        topo[nt] = r;
                         nt += 1;
                         if (sp == 0) break;
                         sp -= 1;
                     }
                 }
 
+                // The reach bounds both halves of this column: at most `nt` U
+                // entries and `nt` L entries. Reserved before the scatter, so
+                // an OutOfMemory leaves `w` zero.
+                try self.ui.ensureUnusedCapacity(gpa, nt);
+                try self.ux.ensureUnusedCapacity(gpa, nt);
+                try self.li.ensureUnusedCapacity(gpa, nt);
+                try self.lx.ensureUnusedCapacity(gpa, nt);
+                const lcol = self.li.items;
+                const lval = self.lx.items;
+
                 // ---- scatter A[:,c] into dense workspace ----
-                for (col_ptr[c]..col_ptr[c + 1]) |p| self.w[row_idx[p]] = vals[p];
+                for (col_ptr[c]..col_ptr[c + 1]) |p| w[row_idx[p]] = vals[p];
 
                 // ---- sparse triangular solve in reverse finish (topo) order ----
                 var idx: u32 = nt;
                 while (idx > 0) {
                     idx -= 1;
-                    const r = self.topo[idx];
-                    const kc = self.pinv[r];
+                    const r = topo[idx];
+                    const kc = pinv[r];
                     if (kc == NONE) continue;
-                    const ukr = self.w[r];
-                    // ponytail: ArrayList already returns only OutOfMemory.
-                    try self.ui.append(gpa, kc);
-                    try self.ux.append(gpa, ukr);
-                    for (self.lp[kc]..self.lp[kc + 1]) |lp| {
-                        self.w[self.li.items[lp]] -= self.lx.items[lp] * ukr;
-                    }
+                    const ukr = w[r];
+                    self.ui.appendAssumeCapacity(kc);
+                    self.ux.appendAssumeCapacity(ukr);
+                    scatterAxpy(w, lcol, lval, lp[kc], lp[kc + 1], ukr);
                 }
 
                 // ---- threshold partial pivoting, diagonal preferred ----
@@ -267,14 +293,14 @@ pub fn SparseLu(comptime T: type) type {
                 var amax: T = 0;
                 var smax: T = 0;
                 var piv: u32 = NONE;
-                for (self.topo[0..nt]) |r| {
-                    if (self.pinv[r] != NONE) continue;
-                    const a = @abs(self.w[r]);
+                for (topo[0..nt]) |r| {
+                    if (pinv[r] != NONE) continue;
+                    const a = @abs(w[r]);
                     if (a > amax) {
                         amax = a;
                         piv = r;
                     }
-                    smax = @max(smax, a * self.rscale[r]);
+                    smax = @max(smax, a * rscale[r]);
                 }
                 if (piv == NONE or amax == 0 or !std.math.isFinite(amax)) {
                     // A column with no nonzero unpivoted candidate is normally
@@ -301,19 +327,25 @@ pub fn SparseLu(comptime T: type) type {
                     // the whole gmin + source-stepping continuation ladder for
                     // each: 68772 Newton iterations against ngspice's ~5000,
                     // 0.93 s against 0.02 s.
-                    if (!self.voidUnknown(col_ptr, row_idx, vals, c)) return error.SingularMatrix;
+                    if (!self.voidUnknown(col_ptr, row_idx, vals, c)) {
+                        // `w` still holds this column's U values (NaNs when the
+                        // column went non-finite), and the next factor reads
+                        // every fill row as zero.
+                        for (topo[0..nt]) |r| w[r] = 0;
+                        return error.SingularMatrix;
+                    }
                     self.void_col[k] = true;
                     has_void = true;
                     self.udiag[k] = 1;
-                    self.pinv[c] = @intCast(k);
-                    for (self.topo[0..nt]) |r| self.w[r] = 0;
+                    pinv[c] = @intCast(k);
+                    for (topo[0..nt]) |r| w[r] = 0;
                     continue;
                 }
-                if (self.pinv[c] == NONE) {
-                    const dmag = @abs(self.w[c]);
+                if (pinv[c] == NONE) {
+                    const dmag = @abs(w[c]);
                     if (dmag >= pivot_tol * amax) {
                         piv = c;
-                    } else if (dmag > 0 and dmag * self.rscale[c] >= pivot_tol * smax) {
+                    } else if (dmag > 0 and dmag * rscale[c] >= pivot_tol * smax) {
                         // The raw test rejected a diagonal that is the biggest
                         // entry of the column MEASURED AGAINST ITS OWN EQUATION.
                         // A BSIMSOI floating body at default junction params is
@@ -334,17 +366,17 @@ pub fn SparseLu(comptime T: type) type {
                         self.scaled_pivot[k] = true;
                     }
                 }
-                const d = self.w[piv];
+                const d = w[piv];
                 self.udiag[k] = d;
-                self.pinv[piv] = @intCast(k);
+                pinv[piv] = @intCast(k);
 
                 // ---- store L[:,k] (scaled unpivoted candidates), clear w ----
-                for (self.topo[0..nt]) |r| {
-                    if (self.pinv[r] == NONE) {
-                        try self.li.append(gpa, r);
-                        try self.lx.append(gpa, self.w[r] / d);
+                for (topo[0..nt]) |r| {
+                    if (pinv[r] == NONE) {
+                        self.li.appendAssumeCapacity(r);
+                        self.lx.appendAssumeCapacity(w[r] / d);
                     }
-                    self.w[r] = 0;
+                    w[r] = 0;
                 }
             }
             self.lp[n] = @intCast(self.li.items.len);

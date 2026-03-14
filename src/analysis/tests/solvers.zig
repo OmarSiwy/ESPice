@@ -372,6 +372,51 @@ const ConvergerTests = struct {
         try testing.expectApproxEqAbs(@as(f64, 32.0), dot(&a, &b), 1e-15);
     }
 
+    /// Scalar oracle for converger.updateAndNorm (the pre-vector loop).
+    fn updateAndNormOracle(x: []f64, dx: []const f64, x_old: []f64, cur: []const bool, reltol: f64, abstol: f64, vntol: f64) f64 {
+        var worst: f64 = 0;
+        for (x, dx, x_old, cur) |*xi, dxi, *xoi, is_cur| {
+            xoi.* = xi.*;
+            xi.* += dxi;
+            const atol = if (is_cur) abstol else vntol;
+            const tol = reltol * @max(@abs(xi.*), @abs(xoi.*)) + atol;
+            worst = @max(worst, @abs(dxi) / tol);
+        }
+        return worst;
+    }
+
+    test "updateAndNorm: vector body and tail match the scalar oracle bitwise" {
+        const kernel = impl.test_access.updateAndNorm;
+        var prng = std.Random.DefaultPrng.init(0xC0FFEE);
+        const rand = prng.random();
+        const specials = [_]f64{ 0, -0.0, std.math.nan(f64), std.math.inf(f64), 1e-300, -1e300 };
+        var xa: [64]f64 = undefined;
+        var xb: [64]f64 = undefined;
+        var dx: [64]f64 = undefined;
+        var oa: [64]f64 = undefined;
+        var ob: [64]f64 = undefined;
+        var cur: [64]bool = undefined;
+        // Every length through several vector widths plus a tail, so each
+        // boundary and the empty case run.
+        for (0..40) |len| for (0..50) |trial| {
+            for (0..len) |i| {
+                xa[i] = (rand.float(f64) - 0.5) * std.math.pow(f64, 10, @floatFromInt(rand.intRangeAtMost(i32, -9, 3)));
+                dx[i] = (rand.float(f64) - 0.5) * 1e-3;
+                cur[i] = rand.boolean();
+                if (trial % 7 == 0 and rand.boolean()) dx[i] = specials[rand.uintLessThan(usize, specials.len)];
+                if (trial % 11 == 0 and rand.boolean()) xa[i] = specials[rand.uintLessThan(usize, specials.len)];
+            }
+            @memcpy(xb[0..len], xa[0..len]);
+            const want = updateAndNormOracle(xa[0..len], dx[0..len], oa[0..len], cur[0..len], 1e-3, 1e-12, 1e-6);
+            const got = kernel(xb[0..len], dx[0..len], ob[0..len], cur[0..len], 1e-3, 1e-12, 1e-6);
+            try testing.expectEqual(@as(u64, @bitCast(want)), @as(u64, @bitCast(got)));
+            for (0..len) |i| {
+                try testing.expectEqual(@as(u64, @bitCast(xa[i])), @as(u64, @bitCast(xb[i])));
+                try testing.expectEqual(@as(u64, @bitCast(oa[i])), @as(u64, @bitCast(ob[i])));
+            }
+        };
+    }
+
     // One equation with a device veto through iteration two. This exercises both
     // nonzero Newton corrections and JFNK's zero-residual exit without model physics.
     const IterationSystem = struct {
@@ -731,6 +776,102 @@ const DenseLuTests = struct {
         try factorizeSolve(n, &a, &b, &x);
         for (0..n) |i| try testing.expectApproxEqAbs(b[i], x[i], 1e-12);
     }
+
+    /// Scalar oracle: unblocked right-looking elimination in the order the
+    /// kernel promises (reciprocal-pivot multipliers, then `a -= l * u` per
+    /// entry in increasing k). `x`, when given, rides along as the fused
+    /// solve does. Returns false on a pivot below eps^2.
+    fn luOracle(n: usize, a: []f64, piv: []u32, x: ?[]f64) bool {
+        const tol = std.math.floatEps(f64) * std.math.floatEps(f64);
+        for (0..n) |k| {
+            var p = k;
+            for (k + 1..n) |i| {
+                if (@abs(a[i * n + k]) > @abs(a[p * n + k])) p = i;
+            }
+            piv[k] = @intCast(p);
+            if (@abs(a[p * n + k]) < tol) return false;
+            if (p != k) {
+                for (0..n) |j| std.mem.swap(f64, &a[k * n + j], &a[p * n + j]);
+                if (x) |xs| std.mem.swap(f64, &xs[k], &xs[p]);
+            }
+            const inv = 1.0 / a[k * n + k];
+            for (k + 1..n) |i| {
+                const f = a[i * n + k] * inv;
+                a[i * n + k] = f;
+                for (k + 1..n) |j| a[i * n + j] -= f * a[k * n + j];
+                if (x) |xs| xs[i] -= f * xs[k];
+            }
+        }
+        return true;
+    }
+
+    test "dense_lu: blocked elimination is bitwise the scalar oracle" {
+        const gpa = testing.allocator;
+        var prng = std.Random.DefaultPrng.init(0xB10C);
+        const rand = prng.random();
+        // Both sides of the blocked cut-in (40), ragged last panels, and a
+        // size past several panels.
+        for ([_]usize{ 39, 40, 41, 47, 48, 57, 64, 73, 130 }) |n| for (0..3) |trial| {
+            const a0 = try gpa.alloc(f64, n * n);
+            defer gpa.free(a0);
+            for (a0) |*v| v.* = rand.float(f64) - 0.5;
+            // trial 1: zero diagonal, every step must pivot off it;
+            // trial 2: duplicate rows, singular partway through.
+            if (trial == 1) for (0..n) |i| {
+                a0[i * n + i] = 0;
+            };
+            if (trial == 2) @memcpy(a0[(n - 3) * n ..][0..n], a0[5 * n ..][0..n]);
+            const b = try gpa.alloc(f64, n);
+            defer gpa.free(b);
+            for (b) |*v| v.* = rand.float(f64) - 0.5;
+
+            const ao = try gpa.dupe(f64, a0);
+            defer gpa.free(ao);
+            const po = try gpa.alloc(u32, n);
+            defer gpa.free(po);
+            const ok = luOracle(n, ao, po, null);
+            const ak = try gpa.dupe(f64, a0);
+            defer gpa.free(ak);
+            const pk = try gpa.alloc(u32, n);
+            defer gpa.free(pk);
+            if (DenseLu(f64).factorize(n, ak, pk)) |_| {
+                try testing.expect(ok);
+                try testing.expectEqualSlices(u32, po, pk);
+                try testing.expectEqualSlices(u64, @ptrCast(ao), @ptrCast(ak));
+            } else |_| try testing.expect(!ok);
+
+            // Fused solve: the oracle carries -b through, then back-substitutes.
+            const xo = try gpa.alloc(f64, n);
+            defer gpa.free(xo);
+            for (xo, b) |*o, v| o.* = -v;
+            @memcpy(ao, a0);
+            const ok2 = luOracle(n, ao, po, xo);
+            const xk = try gpa.alloc(f64, n);
+            defer gpa.free(xk);
+            @memcpy(ak, a0);
+            if (factorizeSolveNeg(n, ak, b, xk)) |_| {
+                try testing.expect(ok2);
+                var i = n;
+                while (i > 0) {
+                    i -= 1;
+                    var s = xo[i];
+                    // backSubstitute's order: vector partial sums, then the tail.
+                    const W = std.simd.suggestVectorLength(f64) orelse 1;
+                    var acc: @Vector(W, f64) = @splat(0);
+                    var j = i + 1;
+                    while (j + W <= n) : (j += W) {
+                        const av: @Vector(W, f64) = ao[i * n + j ..][0..W].*;
+                        const xv: @Vector(W, f64) = xo[j..][0..W].*;
+                        acc += av * xv;
+                    }
+                    s -= @reduce(.Add, acc);
+                    while (j < n) : (j += 1) s -= ao[i * n + j] * xo[j];
+                    xo[i] = s / ao[i * n + i];
+                }
+                try testing.expectEqualSlices(u64, @ptrCast(xo), @ptrCast(xk));
+            } else |_| try testing.expect(!ok2);
+        };
+    }
 };
 
 const DirectTests = struct {
@@ -842,6 +983,30 @@ const DirectTests = struct {
             error.SingularMatrix,
             lu.factor(gpa, &csc.col_ptr, csc.row_idx[0..csc.nnz()], csc.vals[0..csc.nnz()], 1e-3),
         );
+    }
+
+    test "a singular full factor leaves w zero and the next factor exact" {
+        // Column 1 is singular after eliminating column 0, while w[0] still
+        // holds that column's U value. A stale w[0] would enter the next
+        // factor as if it were part of the matrix.
+        const gpa = testing.allocator;
+        const SparseLu = sparse_lu.SparseLu(f64);
+        const col_ptr = [_]u32{ 0, 2, 4, 5 };
+        const row_idx = [_]u32{ 0, 1, 0, 1, 2 };
+        const singular = [_]f64{ 1, 1, 1, 1, 1 };
+        const good = [_]f64{ 4, 1, 1, 3, 2 };
+        const q3 = naturalOrder(3);
+        var lu = try SparseLu.init(gpa, 3, &col_ptr, &row_idx, &q3);
+        defer lu.deinit(gpa);
+        try testing.expectError(error.SingularMatrix, lu.factor(gpa, &col_ptr, &row_idx, &singular, 1e-3));
+        for (lu.w) |v| try testing.expectEqual(@as(f64, 0), v);
+
+        try lu.factor(gpa, &col_ptr, &row_idx, &good, 1e-3);
+        const b = [3]f64{ 5, 4, 2 };
+        var x: [3]f64 = undefined;
+        lu.solve(&b, &x);
+        // [4 1 0; 1 3 0; 0 0 2] x = b  =>  x = [1, 1, 1]
+        for (x) |xi| try testing.expectApproxEqAbs(@as(f64, 1), xi, 1e-14);
     }
 
     test "solveT: transpose solve matches A^T dense solve" {
@@ -1974,6 +2139,90 @@ const LaneLuTests = struct {
                 try testing.expectEqual(xr[i], row[l]);
             }
         }
+    }
+
+    fn expectZero(comptime W: usize, w: []const @Vector(W, f64)) !void {
+        for (w) |v| try testing.expect(@reduce(.And, v == @as(@Vector(W, f64), @splat(0))));
+    }
+
+    test "LaneLu(W): refactor leaves w zero, so a second refactor still matches scalar" {
+        // Fill-in (the dense 5x5 below factors with L/U fill) is where a stale
+        // `w` slot would leak into the next refactor now that no pattern
+        // zeroing runs before each column.
+        const gpa = testing.allocator;
+        const W = std.simd.suggestVectorLength(f64) orelse 4;
+        const LW = LaneLu(W);
+        const a0 = [5][5]f64{
+            .{ 9, 1, 2, 0, 1 },
+            .{ 1, 8, 0, 3, 0 },
+            .{ 2, 0, 7, 1, 2 },
+            .{ 0, 3, 1, 9, 1 },
+            .{ 1, 0, 2, 1, 6 },
+        };
+        const csc = DenseCsc(5).from(a0);
+        const nnz = csc.nnz();
+        var q = identity(5);
+        var base = try sparse_lu.SparseLu(f64).init(gpa, 5, &csc.col_ptr, csc.row_idx[0..nnz], &q);
+        defer base.deinit(gpa);
+        try base.factor(gpa, &csc.col_ptr, csc.row_idx[0..nnz], csc.vals[0..nnz], 1e-3);
+
+        var ll = try LW.init(gpa, &base);
+        defer ll.deinit(gpa);
+        var prng = std.Random.DefaultPrng.init(0x5EED);
+        const rand = prng.random();
+        var lane_vals: [W][25]f64 = undefined;
+        var lvals: [25]LW.V = undefined;
+        for (0..3) |_| {
+            for (0..W) |l| for (0..nnz) |p| {
+                lane_vals[l][p] = csc.vals[p] * (1.0 + (rand.float(f64) - 0.5) * 0.2);
+            };
+            for (0..nnz) |p| {
+                var v: [W]f64 = undefined;
+                for (0..W) |l| v[l] = lane_vals[l][p];
+                lvals[p] = v;
+            }
+            try testing.expectEqual(@as(u64, 0), ll.refactor(&csc.col_ptr, lvals[0..nnz], 1e-12));
+            try expectZero(W, ll.w);
+
+            const b_scalar = [5]f64{ 1, -2, 3, -4, 5 };
+            var lb: [5]LW.V = undefined;
+            for (b_scalar, 0..) |v, i| lb[i] = @splat(v);
+            var lx: [5]LW.V = undefined;
+            ll.solve(&lb, &lx);
+            for (0..W) |l| {
+                try base.refactor(&csc.col_ptr, lane_vals[l][0..nnz], 1e-12);
+                var xr: [5]f64 = undefined;
+                base.solve(&b_scalar, &xr);
+                for (0..5) |i| {
+                    const row: [W]f64 = lx[i];
+                    try testing.expectEqual(xr[i], row[l]);
+                }
+            }
+        }
+    }
+
+    test "LaneLu(W): a void pivot fails every lane and leaves w zero" {
+        // Unknown 2 appears in no equation: its only structural entry is a
+        // zero-valued diagonal, so SparseLu fabricates a unit pivot for it.
+        const gpa = testing.allocator;
+        const W = std.simd.suggestVectorLength(f64) orelse 4;
+        const LW = LaneLu(W);
+        const col_ptr = [_]u32{ 0, 2, 4, 5 };
+        const row_idx = [_]u32{ 0, 1, 0, 1, 2 };
+        const vals = [_]f64{ 4, 1, 1, 3, 0 };
+        var q = identity(3);
+        var base = try sparse_lu.SparseLu(f64).init(gpa, 3, &col_ptr, &row_idx, &q);
+        defer base.deinit(gpa);
+        try base.factor(gpa, &col_ptr, &row_idx, &vals, 1e-3);
+        try testing.expect(base.void_col[2]);
+
+        var ll = try LW.init(gpa, &base);
+        defer ll.deinit(gpa);
+        var lvals: [5]LW.V = undefined;
+        broadcast(W, &vals, &lvals);
+        const all: u64 = std.math.maxInt(std.meta.Int(.unsigned, W));
+        try testing.expectEqual(all, ll.refactor(&col_ptr, &lvals, 1e-12));
+        try expectZero(W, ll.w);
     }
 
     test "interleave/deinterleave/broadcast round-trip" {

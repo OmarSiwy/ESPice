@@ -1,7 +1,8 @@
 const std = @import("std");
 
-// ponytail: single SIMD-accelerated dense LU, replaces 7 copy-pasted solveDense functions
-// upgrade path: blocked LU (BLAS-3 style) if n > ~256
+// ponytail: single SIMD-accelerated dense LU, replaces 7 copy-pasted solveDense functions.
+// Rank-8 panel updates from n = 40 up; the next step would be 2-D register
+// tiling of the trailing update if dense solves dominate again.
 
 pub const Error = error{Singular};
 
@@ -36,6 +37,7 @@ pub fn DenseLu(comptime T: type) type {
         /// (upper, stored on and above diagonal). `piv[k]` records the row
         /// swapped with row k at step k.
         pub fn factorize(n: usize, a: []T, piv: []u32) Error!void {
+            if (n >= blocked_min) return eliminateBlocked(n, a, piv, &.{}, .factor);
             for (0..n) |k| {
                 const max_row = pivotRow(n, a, k);
                 piv[k] = @intCast(max_row);
@@ -188,6 +190,10 @@ pub fn DenseLu(comptime T: type) type {
             } else {
                 @memcpy(x[0..n], b[0..n]);
             }
+            if (n >= blocked_min) {
+                try eliminateBlocked(n, a, &.{}, x, .solve);
+                return backSubstitute(n, a, x);
+            }
 
             for (0..n) |k| {
                 const max_row = pivotRow(n, a, k);
@@ -208,6 +214,101 @@ pub fn DenseLu(comptime T: type) type {
             }
 
             backSubstitute(n, a, x);
+        }
+
+        /// Pivot columns per panel of `eliminateBlocked`.
+        const block = 8;
+        /// Below this order the unblocked loops above win: the panel
+        /// bookkeeping costs more than the row traffic it saves (Ir crossover
+        /// between n = 32 and 48).
+        const blocked_min = 5 * block;
+
+        const Mode = enum { factor, solve };
+
+        /// PA = LU with partial pivoting, blocked right-looking: a panel of
+        /// `block` columns is factored as in the unblocked loops, then each
+        /// trailing row takes the panel's updates in ONE pass instead of
+        /// `block`, so it streams through memory once per panel while the
+        /// panel's U rows stay in L1. Every entry still receives
+        /// `a -= l * u` in increasing k, as a separate multiply and subtract,
+        /// with the same reciprocal-pivot multipliers, so the factors, pivots
+        /// and fused solution are bitwise those of the unblocked loops (the
+        /// test oracle). `.factor` records swaps in `piv`; `.solve` carries
+        /// `x` through instead, as `factorizeSolveImpl` does.
+        fn eliminateBlocked(n: usize, a: []T, piv: []u32, x: []T, comptime mode: Mode) Error!void {
+            var k0: usize = 0;
+            while (k0 < n) : (k0 += block) {
+                const kb = @min(k0 + block, n);
+                for (k0..kb) |k| if (!panelStep(n, a, piv, x, k, kb, mode)) return error.Singular;
+                if (kb == n) break;
+                // The panel's own U rows, trailing columns: row k takes the
+                // updates of rows k0..k-1, which are final by then.
+                for (k0 + 1..kb) |k| {
+                    const row = a[k * n ..][0..n];
+                    for (k0..k) |kk| elimRowSimd(row, a[kk * n ..][0..n], row[kk], kb, n);
+                }
+                for (kb..n) |i| panelUpdate(a[i * n ..][0..n], a, n, k0, kb);
+            }
+        }
+
+        /// Pivot step k of `eliminateBlocked`: the unblocked loop body with
+        /// the row update stopped at the panel edge `kb`, and the multiplier
+        /// always stored because `panelUpdate` reads it. False on a singular
+        /// pivot.
+        inline fn panelStep(n: usize, a: []T, piv: []u32, x: []T, k: usize, kb: usize, comptime mode: Mode) bool {
+            const max_row = pivotRow(n, a, k);
+            if (mode == .factor) piv[k] = @intCast(max_row);
+            if (@abs(a[max_row * n + k]) < singular_tol) return false;
+            if (max_row != k) {
+                swapRowsSimd(a, n, k, max_row);
+                if (mode == .solve) std.mem.swap(T, &x[k], &x[max_row]);
+            }
+            const inv_pivot = @as(T, 1.0) / a[k * n + k];
+            const row_k = a[k * n ..][0..n];
+            for (k + 1..n) |ii| {
+                const factor = a[ii * n + k] * inv_pivot;
+                a[ii * n + k] = factor;
+                elimRowSimd(a[ii * n ..][0..n], row_k, factor, k + 1, kb);
+                if (mode == .solve) x[ii] -= factor * x[k];
+            }
+            return true;
+        }
+
+        /// row[kb..n] -= sum over kk in [k0, kb) of row[kk] * a[kk, kb..n],
+        /// term by term in increasing kk (the rounding of `kb - k0` separate
+        /// `elimRowSimd` calls). Four vectors are in flight per pass: each
+        /// one's subtracts form a dependent chain, and a single chain stalls
+        /// on the subtract latency.
+        inline fn panelUpdate(row: []T, a: []const T, n: usize, k0: usize, kb: usize) void {
+            var j = kb;
+            while (j + 4 * W <= n) : (j += 4 * W) {
+                var v0: V = row[j..][0..W].*;
+                var v1: V = row[j + W ..][0..W].*;
+                var v2: V = row[j + 2 * W ..][0..W].*;
+                var v3: V = row[j + 3 * W ..][0..W].*;
+                for (k0..kb) |kk| {
+                    const l: V = @splat(row[kk]);
+                    const u = a[kk * n + j ..];
+                    v0 = v0 - l * @as(V, u[0..W].*);
+                    v1 = v1 - l * @as(V, u[W..][0..W].*);
+                    v2 = v2 - l * @as(V, u[2 * W ..][0..W].*);
+                    v3 = v3 - l * @as(V, u[3 * W ..][0..W].*);
+                }
+                row[j..][0..W].* = v0;
+                row[j + W ..][0..W].* = v1;
+                row[j + 2 * W ..][0..W].* = v2;
+                row[j + 3 * W ..][0..W].* = v3;
+            }
+            while (j + W <= n) : (j += W) {
+                var v: V = row[j..][0..W].*;
+                for (k0..kb) |kk| v = v - @as(V, @splat(row[kk])) * @as(V, a[kk * n + j ..][0..W].*);
+                row[j..][0..W].* = v;
+            }
+            while (j < n) : (j += 1) {
+                var v = row[j];
+                for (k0..kb) |kk| v -= row[kk] * a[kk * n + j];
+                row[j] = v;
+            }
         }
 
         /// argmax |a[i*n+k]| over i in k..n (partial-pivot row for column k).
