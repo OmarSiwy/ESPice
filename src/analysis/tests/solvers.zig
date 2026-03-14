@@ -776,6 +776,102 @@ const DenseLuTests = struct {
         try factorizeSolve(n, &a, &b, &x);
         for (0..n) |i| try testing.expectApproxEqAbs(b[i], x[i], 1e-12);
     }
+
+    /// Scalar oracle: unblocked right-looking elimination in the order the
+    /// kernel promises (reciprocal-pivot multipliers, then `a -= l * u` per
+    /// entry in increasing k). `x`, when given, rides along as the fused
+    /// solve does. Returns false on a pivot below eps^2.
+    fn luOracle(n: usize, a: []f64, piv: []u32, x: ?[]f64) bool {
+        const tol = std.math.floatEps(f64) * std.math.floatEps(f64);
+        for (0..n) |k| {
+            var p = k;
+            for (k + 1..n) |i| {
+                if (@abs(a[i * n + k]) > @abs(a[p * n + k])) p = i;
+            }
+            piv[k] = @intCast(p);
+            if (@abs(a[p * n + k]) < tol) return false;
+            if (p != k) {
+                for (0..n) |j| std.mem.swap(f64, &a[k * n + j], &a[p * n + j]);
+                if (x) |xs| std.mem.swap(f64, &xs[k], &xs[p]);
+            }
+            const inv = 1.0 / a[k * n + k];
+            for (k + 1..n) |i| {
+                const f = a[i * n + k] * inv;
+                a[i * n + k] = f;
+                for (k + 1..n) |j| a[i * n + j] -= f * a[k * n + j];
+                if (x) |xs| xs[i] -= f * xs[k];
+            }
+        }
+        return true;
+    }
+
+    test "dense_lu: blocked elimination is bitwise the scalar oracle" {
+        const gpa = testing.allocator;
+        var prng = std.Random.DefaultPrng.init(0xB10C);
+        const rand = prng.random();
+        // Both sides of the blocked cut-in (40), ragged last panels, and a
+        // size past several panels.
+        for ([_]usize{ 39, 40, 41, 47, 48, 57, 64, 73, 130 }) |n| for (0..3) |trial| {
+            const a0 = try gpa.alloc(f64, n * n);
+            defer gpa.free(a0);
+            for (a0) |*v| v.* = rand.float(f64) - 0.5;
+            // trial 1: zero diagonal, every step must pivot off it;
+            // trial 2: duplicate rows, singular partway through.
+            if (trial == 1) for (0..n) |i| {
+                a0[i * n + i] = 0;
+            };
+            if (trial == 2) @memcpy(a0[(n - 3) * n ..][0..n], a0[5 * n ..][0..n]);
+            const b = try gpa.alloc(f64, n);
+            defer gpa.free(b);
+            for (b) |*v| v.* = rand.float(f64) - 0.5;
+
+            const ao = try gpa.dupe(f64, a0);
+            defer gpa.free(ao);
+            const po = try gpa.alloc(u32, n);
+            defer gpa.free(po);
+            const ok = luOracle(n, ao, po, null);
+            const ak = try gpa.dupe(f64, a0);
+            defer gpa.free(ak);
+            const pk = try gpa.alloc(u32, n);
+            defer gpa.free(pk);
+            if (DenseLu(f64).factorize(n, ak, pk)) |_| {
+                try testing.expect(ok);
+                try testing.expectEqualSlices(u32, po, pk);
+                try testing.expectEqualSlices(u64, @ptrCast(ao), @ptrCast(ak));
+            } else |_| try testing.expect(!ok);
+
+            // Fused solve: the oracle carries -b through, then back-substitutes.
+            const xo = try gpa.alloc(f64, n);
+            defer gpa.free(xo);
+            for (xo, b) |*o, v| o.* = -v;
+            @memcpy(ao, a0);
+            const ok2 = luOracle(n, ao, po, xo);
+            const xk = try gpa.alloc(f64, n);
+            defer gpa.free(xk);
+            @memcpy(ak, a0);
+            if (factorizeSolveNeg(n, ak, b, xk)) |_| {
+                try testing.expect(ok2);
+                var i = n;
+                while (i > 0) {
+                    i -= 1;
+                    var s = xo[i];
+                    // backSubstitute's order: vector partial sums, then the tail.
+                    const W = std.simd.suggestVectorLength(f64) orelse 1;
+                    var acc: @Vector(W, f64) = @splat(0);
+                    var j = i + 1;
+                    while (j + W <= n) : (j += W) {
+                        const av: @Vector(W, f64) = ao[i * n + j ..][0..W].*;
+                        const xv: @Vector(W, f64) = xo[j..][0..W].*;
+                        acc += av * xv;
+                    }
+                    s -= @reduce(.Add, acc);
+                    while (j < n) : (j += 1) s -= ao[i * n + j] * xo[j];
+                    xo[i] = s / ao[i * n + i];
+                }
+                try testing.expectEqualSlices(u64, @ptrCast(xo), @ptrCast(xk));
+            } else |_| try testing.expect(!ok2);
+        };
+    }
 };
 
 const DirectTests = struct {
