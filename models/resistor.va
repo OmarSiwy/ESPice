@@ -1,51 +1,40 @@
-// Linear resistor. i(p,n) = V(p,n) / R(T).
+// Resistor: linear, i(p,n) = V(p,n) / R(T), with thermal noise.
 //
-// TEMPERATURE, ngspice restemp.c `RESupdate_conduct`:
-//   difference = (REStemp + RESdtemp) - REStnom
-//   factor     = 1 + TC1*difference + TC2*difference^2
-//   factor     = 1.01^(TCE*difference)               when TCE is given
-// TCE REPLACES the polynomial, it does not multiply it, and instance TEMP is
-// an ABSOLUTE override of the circuit temperature with DTEMP added on top of
-// whichever wins (same shape as jfet.va). Tnom is the host's `.options tnom`.
+// Verilog-A implementation: Omar El-Sawy, University of Waterloo.
+// Based on: ngspice resistor (res/restemp.c RESupdate_conduct, resnoise.c).
+//   ngspice: Copyright Regents of the University of California and others,
+//   modified BSD license.
 //
-// The geometry/model-card half (RSH, NARROW, SHORT, DEFW, plus the `scale` and
-// `m` instance factors) is resolved in Zig before the card value reaches `r` —
-// frontend/builder.zig `addPassive`. Declaring those here too would DOUBLE
-// APPLY `scale`/`m`, so they stay where they are.
+// Temperature (restemp.c):
+//   dt     = (temp + dtemp) - tnom
+//   factor = 1 + tc1*dt + tc2*dt^2,  or 1.01^(tce*dt) when tce is given
+// tce REPLACES the polynomial. Instance `temp` is an absolute override of the
+// circuit temperature; `dtemp` is added to whichever wins. `tnom` is the host's
+// `.options tnom`.
 //
-// §4.6.4.1 THERMAL NOISE, ngspice resnoise.c:97-99: the generator is
-// NevalSrcInstanceTemp(THERMNOISE, RESposNode, RESnegNode, RESconduct), i.e.
-// S_i = 4kT/R [A^2/Hz] across the card's own terminals. Without the
-// declaration below `noise_gens` is absent, devices/engine.zig:1312 never
-// installs `collect_noise`, and a `.noise` deck whose only sources are
-// resistors comes back EXACTLY ZERO at every frequency — which it did.
+// Geometry (rsh, narrow, short, defw) and the `scale`/`m` factors are resolved
+// by the host (frontend builder addPassive) before the value reaches `r`;
+// declaring them here would apply `scale`/`m` twice.
 //
-// The argument is topology and documentation, not the number that reaches the
-// analysis: the host derives the PSD from the Jacobian conductance of this
-// branch as 4kT*g (devices/engine.zig collectNoise), which for a LINEAR
-// resistor is exactly ngspice's 4*k*CKTtemp*RESconduct. Writing it out anyway
-// keeps the model readable and matches every other model in the tree
-// (bjt.va:351, mes.va:146).
+// Noise (resnoise.c): thermal S_i = 4kT/R across the terminals. The host
+// derives the PSD from the branch conductance as 4kT*g, which for a linear
+// resistor is the same number; the declaration is what installs the generator.
 //
-// ponytail: ngspice's two other resistor knobs are absent because nothing
-// asks. Flicker (resnoise.c:101-112) is gated on the model's KF, which
-// defaults to 0 (ressetup.c:38) and which the host's Jacobian fallback could
-// not evaluate anyway; `noisy=0` (resnoise.c:57) needs one more parameter and
-// a `sel`. Add either when a deck names it.
+// ponytail: no flicker noise (resnoise.c, gated on KF, default 0) and no
+// `noisy=0`. Add either when a deck names it.
 module resistor(p, n);
     inout p, n;
     electrical p, n;
-    // `r` MUST stay the first parameter: `.sens`/`.mc` call the first Model
-    // parameter the device's PRINCIPAL one (analysis/eval.zig appendParams),
-    // which is how ngspice spells the resistance column `v(r1)` and not
-    // `v(r1:r)`.
-    parameter real r = 1000.0 from (0:inf);
-    parameter real tnom  = $simparam("tnom");  // degC  nominal temperature
-    parameter real temp  = 27.0;               // degC  absolute override
-    parameter real dtemp = 0.0;                // degC  offset on the above
-    parameter real tc1   = 0.0;                // 1/degC    linear tempco
-    parameter real tc2   = 0.0;                // 1/degC^2  quadratic tempco
-    parameter real tce   = 0.0;                // %/degC    exponential tempco
+    // `r` must stay the first parameter: `.sens`/`.mc` treat the first model
+    // parameter as the device's principal one (analysis/eval.zig appendParams),
+    // which names the column `v(r1)` as ngspice does.
+    parameter real r     = 1000.0 from (0:inf);  // ohm       resistance
+    parameter real tnom  = $simparam("tnom");    // degC      nominal temperature
+    parameter real temp  = 27.0;                 // degC      absolute override
+    parameter real dtemp = 0.0;                  // degC      offset on the above
+    parameter real tc1   = 0.0;                  // 1/degC    linear tempco
+    parameter real tc2   = 0.0;                  // 1/degC^2  quadratic tempco
+    parameter real tce   = 0.0;                  // %/degC    exponential tempco
 
     real tdev, dt, rt;
 
@@ -56,10 +45,9 @@ module resistor(p, n);
         dt = tdev - tnom;
         if ($param_given(tce)) rt = r * pow(1.01, tce * dt);
         else rt = r * (1.0 + dt * (tc1 + tc2 * dt));
-        // ponytail: no floor on `rt`. ngspice clamps the CARD value (1 mOhm,
-        // done in builder.zig) but not the temperature factor, so a tempco
-        // steep enough to zero the resistance is a NaN here exactly as it is
-        // there. Clamp the day a deck legitimately wants that.
+        // ponytail: no floor on rt. ngspice clamps the card value (1 mOhm, in
+        // the builder) but not the temperature factor, so a tempco that drives
+        // the resistance to zero is a NaN here as it is there.
         I(p, n) <+ V(p, n) / rt;
         I(p, n) <+ white_noise(4.0 * 1.380649e-23 * (tdev + 273.15) / rt, "thermal");
     end
