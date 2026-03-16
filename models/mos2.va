@@ -1,21 +1,26 @@
-// ---------------------------------------------------------------------------
-// MOS2 - Grove-Frohman analytic bulk-charge MOSFET (ngspice card letter M,
-// LEVEL=2).  Spec: modules/devices/docs/mos-legacy.md 1.1 / 3, on the MOS1
-// chassis of mos1-shichman-hodges.md (d'/s' series nodes, bulk diodes, Meyer
-// gate caps, mode swap, SPICE temperature maps).
+// MOS2: Grove-Frohman analytic bulk-charge MOSFET (netlist letter M, LEVEL=2).
 //
-// Channel core (1.1), all in the mode-swapped frame:
+// Verilog-A implementation: Omar El-Sawy, University of Waterloo.
+// Based on: ngspice mos2 (mos2set.c, mos2temp.c, mos2load.c, mos2noi.c), the
+// Berkeley SPICE2/SPICE3 level-2 MOSFET (Grove-Frohman bulk-charge model,
+// Baum-Beneking velocity saturation, Meyer gate capacitances).
+//   ngspice: Copyright Regents of the University of California and others,
+//   modified BSD license.
+//
+// Chassis shared with mos1.va: d'/s' series nodes, bulk diodes, Meyer gate
+// caps, mode swap, SPICE temperature maps.
+//
+// Channel core, all in the mode-swapped frame:
 //   Id = beta*[(vgsx - vbin - eta*vdson/2)*vdson - (2/3)*gamasd*(barg^3 - sarg^3)]
 // with gamasd the XJ junction-curvature-corrected body factor, UCRIT/UEXP
 // surface-mobility degradation, VMAX velocity-saturation Vdsat (Baum quartic,
 // Newton-refined from the Grove-Frohman root), NFS weak inversion and the
 // depletion-approximation channel-length modulation with punch-through clamp.
 //
-// Parameter names/defaults/units are ngspice's (mos2/mos2set.c, mos2temp.c).
-// ---------------------------------------------------------------------------
+// Parameter names/defaults/units are ngspice's (mos2set.c, mos2temp.c).
 
 // One damped-Newton step on the Baum quartic x^4+a1x^3+b1x^2+c1x+d1 = 0.
-// Bounded trip count (docs 4: "fixed small iteration, no divergence concern").
+// Fixed trip count (four steps from the Grove-Frohman root).
 `define BAUMSTEP \
     fx  = (((xr + a1)*xr + b1)*xr + c1)*xr + d1; \
     fpx = ((4.0*xr + 3.0*a1)*xr + 2.0*b1)*xr + c1; \
@@ -83,7 +88,7 @@ module mos2(d, g, s, b);
     // ---- noise / temperature ---------------------------------------------
     parameter real kf   = 0.0 from [0:inf);      // flicker coefficient
     parameter real af   = 1.0 from (0:inf);      // flicker exponent
-    parameter real tnom = $simparam("tnom");                  // parameter reference  [degC]
+    parameter real tnom = $simparam("tnom");     // parameter reference [degC]
     parameter real gmin = 1.0e-12 from [0:inf);  // junction shunt          [S]
 
     // ---- temperature / geometry prep (bias independent) ------------------
@@ -129,8 +134,8 @@ module mos2(d, g, s, b);
 
     analog begin
         // ==================================================================
-        // 1. Bias-independent prep (docs 1.2 / 1.3) - kept out of the V()
-        //    chains: temperature maps, geometry, oxide, junction constants.
+        // 1. Bias-independent prep, kept out of the V() chains: temperature
+        //    maps, geometry, oxide, junction constants (mos2temp.c).
         // ==================================================================
         tnomk = tnom + 273.15;
         tempk = $temperature;
@@ -145,18 +150,18 @@ module mos2(d, g, s, b);
         pbfact1 = -2.0*vtnom*(1.5*ln(fact1) + `P_Q*arg1);
         pbfact2 = -2.0*vt   *(1.5*ln(fact2) + `P_Q*arg2);
 
-        // oxide, doping-derived body factor (docs 1.2)
+        // oxide, doping-derived body factor
         coxp    = 3.453133e-11/tox;                     // eps_ox/tox   [F/m2]
         nsub_si = nsub*1.0e6;                           // cm^-3 -> m^-3
-        // KP(T) = KP/r^1.5, mu(T) = UO/r^1.5 (docs 1.3).  "Given" is
-        // $param_given, not a value heuristic: an explicit KP=0 / GAMMA=0 card
-        // must stay 0 instead of silently taking the doping default.
+        // KP(T) = KP/r^1.5, mu(T) = UO/r^1.5.  "Given" is $param_given, not a
+        // value heuristic: an explicit KP=0 / GAMMA=0 card must stay 0 instead
+        // of taking the doping default.
         ratio   = tempk/tnomk;
         kp_eff  = ($param_given(kp) ? kp : uo*coxp*1.0e-4)/pow(ratio, 1.5);
         uo_t    = uo/pow(ratio, 1.5);
         xd      = (nsub > 0.0) ? sqrt(2.0*1.03594e-10/(`P_Q*nsub_si)) : 0.0;
 
-        // NSUB-driven defaulting of PHI / GAMMA / VTO (docs 1.2, mos2temp.c
+        // NSUB-driven defaulting of PHI / GAMMA / VTO (mos2temp.c
         // substrateDopingGiven block): surface potential from the doping, then
         // the flat-band voltage from the gate work function (TPG) and the
         // surface-state charge (NSS).
@@ -180,7 +185,7 @@ module mos2(d, g, s, b);
             end
         end
 
-        // phi / pb / vbi / vto and the saturation currents at T (docs 1.3)
+        // phi / pb / vbi / vto and the saturation currents at T
         phio  = (phix - pbfact1)/fact1;
         pbo   = (pb   - pbfact1)/fact1;
         phi_t = max(0.1, fact2*phio + pbfact2);
@@ -191,7 +196,7 @@ module mos2(d, g, s, b);
         is_t  = is*exp(-eg/vt + egnom/vtnom);
         js_t  = js*exp(-eg/vt + egnom/vtnom);
 
-        // two-stage junction-cap temperature factor (docs 1.3)
+        // two-stage junction-cap temperature factor
         gmaold = (pb - pbo)/pbo;
         gmanew = (pb_t - pbo)/pbo;
         capfd  = (1.0 + mj  *(4.0e-4*(tnomk - 300.15) - gmaold));
@@ -210,14 +215,14 @@ module mos2(d, g, s, b);
         eta    = 1.0 + factor;
         ucrit_term = ucrit*1.0e2*1.03594e-10/coxp;      // UCRIT*eps_si/Cox'
 
-        // series conductances: RD/RS, else RSH*squares, else 0 = node collapse
-        // (docs 1.8), stamped as V(d,di) <+ 0 at the contribution site.
+        // series conductances: RD/RS, else RSH*squares, else 0 = node collapse,
+        // stamped as V(d,di) <+ 0 at the contribution site.
         gd_eff = (rd > 0.0) ? m/rd : ((rsh > 0.0 && nrd > 0.0) ? m/(rsh*nrd) : 0.0);
         gs_eff = (rs > 0.0) ? m/rs : ((rsh > 0.0 && nrs > 0.0) ? m/(rsh*nrs) : 0.0);
 
-        // junction saturation currents and zero-bias caps (docs 1.3 / 1.4).
-        // JS is temperature-scaled like IS, and wins only when both areas are
-        // given - mos2load.c decides once for the pair, not per junction.
+        // junction saturation currents and zero-bias caps.  JS is
+        // temperature-scaled like IS, and wins only when both areas are
+        // given: mos2load.c decides once for the pair, not per junction.
         isat_s = ((js > 0.0) && (as > 0.0) && (ad > 0.0)) ? js_t*as*m : is_t*m;
         isat_d = ((js > 0.0) && (as > 0.0) && (ad > 0.0)) ? js_t*ad*m : is_t*m;
         czbd   = ((cbd > 0.0) ? cbd : cj*ad)*m*capfd;
@@ -230,14 +235,13 @@ module mos2(d, g, s, b);
         cgbo_t = cgbo*leff*m;
 
         // ==================================================================
-        // 2. §1.7 limiting (mos1.va's MODE ladder) + mode swap (docs 1.5).
-        //    "fetlimds" on both gate legs + "limvds" emits ngspice's swap:
-        //    fetlim only the leg controlling the channel in the sign of the
-        //    OLD vds, limvds, derive the other (mos2load.c:338-351). pnjlim
-        //    stays on both bulk junctions (see mos1.va); trailing `type` =
-        //    VerA frame sign (PMOS limits type·v). Clamps land on the shared
-        //    x, so every probe below — section 9's included — reads limited
-        //    voltages.
+        // 2. Limiting and mode swap (mos2load.c:338-351, same scheme as
+        //    mos1.va). "fetlimds" on both gate legs + "limvds" emits ngspice's
+        //    swap: fetlim only the leg controlling the channel in the sign of
+        //    the OLD vds, limvds, derive the other. pnjlim stays on both bulk
+        //    junctions; the trailing `type` is VerA's frame sign (PMOS limits
+        //    type*v). Clamps land on the shared x, so every probe below,
+        //    section 9's included, reads limited voltages.
         // ==================================================================
         vcrits = vt*ln(vt/(1.4142135623730951*isat_s));
         vcritd = vt*ln(vt/(1.4142135623730951*isat_d));
@@ -280,7 +284,7 @@ module mos2(d, g, s, b);
 
         // ==================================================================
         // 4. Threshold: narrow-width vbin plus the XJ-corrected body factor
-        //    gamasd (short-channel junction-curvature correction, docs 1.1).
+        //    gamasd (short-channel junction-curvature correction).
         // ==================================================================
         vbin = vbi_t*type + factor*phi_vbs;
         if (xj > 0.0) begin
@@ -315,7 +319,7 @@ module mos2(d, g, s, b);
                                   // this clamp *is* the cutoff region
 
         // ==================================================================
-        // 5. Surface-mobility degradation (UCRIT / UEXP, docs 1.1):
+        // 5. Surface-mobility degradation (UCRIT / UEXP):
         //    mu_eff = mu0*(UCRIT*eps_si/(Cox'*(vgs - von)))^UEXP
         // ==================================================================
         udenom = vgs_f - von;
@@ -373,9 +377,7 @@ module mos2(d, g, s, b);
             xlv = vmax*xdv/(2.0*ueff);
             // Excess is the DRAIN excess above Vdsat (mos2load.c:866-868:
             // argv = lvds - vdsat, clamped at 0); the (vgsx-vbin)/eta - vdsat
-            // form at :852 feeds only vqchan/derivative bookkeeping. Gate
-            // overdrive here shortened the channel already in triode (+36%)
-            // and froze gds in saturation.
+            // form at :852 feeds only vqchan/derivative bookkeeping.
             xls = sqrt(xlv*xlv + max(vds_f - vdsat, 0.0));
             dl  = xdv*(xls - xlv);
         end else begin
@@ -395,7 +397,7 @@ module mos2(d, g, s, b);
         beta   = beta0*ufact/clfact;
 
         // ==================================================================
-        // 8. Drain current - the full bulk-charge expression (docs 1.1)
+        // 8. Drain current: the full bulk-charge expression
         // ==================================================================
         // barg at min(vds, vdsat) - mos2load.c's barg in the linear region and
         // bsarg in saturation - with the same forward-bias guard as sarg.
@@ -413,7 +415,7 @@ module mos2(d, g, s, b);
             gm     = beta*vdson;            // strong inversion: d(cdrain)/dvgsx
 
         // ==================================================================
-        // 9. Bulk junction diodes (docs 1.4) and their depletion charges.
+        // 9. Bulk junction diodes and their depletion charges.
         //    vbs_j/vbd_j are the section-2 pnjlim'd probes; limexp is already
         //    tangent-continued above 80, so no flat-clamp hazard here.
         // ==================================================================
@@ -423,7 +425,7 @@ module mos2(d, g, s, b);
         qbd = qdep(vbd_j, czbd, pb_t, mj, fc) + qdep(vbd_j, czbdsw, pb_t, mjsw, fc);
 
         // ==================================================================
-        // 10. Meyer gate capacitances (docs 1.6, DEVqmeyer).  DEVqmeyer
+        // 10. Meyer gate capacitances (DEVqmeyer).  DEVqmeyer
         //     returns half the non-constant part because ngspice averages two
         //     timepoints; coxm = 2*Cox feeds the same piecewise, so cg*_m are
         //     FULL values and the stamps average 0.5*(now + $prev(now)) —
@@ -467,7 +469,7 @@ module mos2(d, g, s, b);
         // ==================================================================
         // 11. Stamps
         // ==================================================================
-        // RD/RS = 0 collapses d' onto d and s' onto s (docs 1.8): the branch
+        // RD/RS = 0 collapses d' onto d and s' onto s: the branch
         // becomes a voltage source of 0 V, not a large stand-in conductance.
         // Its thermal noise goes with it - a short has none.
         if (gd_eff > 0.0) begin
@@ -487,7 +489,7 @@ module mos2(d, g, s, b);
         I(g, di) <+ (cgdo_t + 0.5*(cgd_m + $prev(cgd_m)))*ddt(V(g, di));
         I(g, b)  <+ (cgbo_t + 0.5*(cgb_m + $prev(cgb_m)))*ddt(V(g, b));
 
-        // ---- noise (docs "Noise model", mos1noi.c template) --------------
+        // ---- noise (mos2noi.c) --------------------------------------------
         // RD/RS thermal generators are stamped with their branches above.
         I(di, si) <+ white_noise(4.0*`P_K*tempk*(2.0/3.0)*abs(gm), "channel");
         I(di, si) <+ flicker_noise(kf*pow(abs(cdrain), af)
