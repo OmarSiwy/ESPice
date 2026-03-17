@@ -1,9 +1,14 @@
-// MOS level 3 -- semi-empirical short-channel MOSFET (ngspice letter M, LEVEL=3).
+// MOS3: semi-empirical short-channel MOSFET (netlist letter M, LEVEL=3).
 //
-// Spec: modules/devices/docs/mos-legacy.md S1.2 (channel block) + "Noise model"
-// on the MOS1 chassis (docs/mos1-shichman-hodges.md S1.2-S1.8: parameter
-// defaulting, temperature maps, series R, bulk junctions, Meyer gate caps,
-// mode swap).
+// Verilog-A implementation: Omar El-Sawy, University of Waterloo.
+// Based on: ngspice mos3 (mos3.c, mos3temp.c, mos3load.c, mos3noi.c), the
+// Berkeley SPICE2/SPICE3 level-3 semi-empirical MOSFET (Dang short-channel
+// depletion sharing, Meyer gate capacitances).
+//   ngspice: Copyright Regents of the University of California and others,
+//   modified BSD license.
+//
+// Channel block on the mos1.va chassis: parameter defaulting, temperature
+// maps, series R, bulk junctions, Meyer gate caps, mode swap.
 //
 // Topology:   d --RD-- di --channel-- si --RS-- s
 //             g --Meyer caps--> di, si, b        b --junction diodes--> di, si
@@ -14,7 +19,7 @@
 // gm/gds/gmbs and every cap conductance come from differentiating the value
 // chain (AD backend), so ngspice's d*/dv* bookkeeping is not transcribed; the
 // one exception is gdsat in the CLM block, which ngspice writes in closed form.
-// Limiting (fetlim/limvds/pnjlim, S1.7) is spelled with $limit as in mos1.va;
+// Limiting (fetlim/limvds/pnjlim) is spelled with $limit as in mos1.va;
 // the host applies the clamps between the linear solve and the next eval.
 module mos3(d, g, s, b);
     inout d, g, s, b;
@@ -22,75 +27,75 @@ module mos3(d, g, s, b);
     electrical di, si;
 
     // --- polarity / gate material ---
-    parameter integer dev_type = 1 from [-1:1] exclude 0;   // +1 NMOS, -1 PMOS
-    parameter integer tpg = 1 from [-1:1];  // gate: +1 opp, -1 same, 0 aluminium
+    parameter integer dev_type = 1 from [-1:1] exclude 0;  // +1 NMOS, -1 PMOS
+    parameter integer tpg      = 1 from [-1:1];            // gate: +1 opp, -1 same, 0 aluminium
 
     // --- DC model parameters (ngspice names/defaults) ---
-    parameter real vto    = 0.0;            // V      zero-bias threshold
-    parameter real kp     = 2.07189e-5 from (0:inf);// A/V^2 transconductance
-    parameter real gamma  = 0.0 from [0:inf);// sqrt(V) body effect
-    parameter real phi    = 0.6 from (0:inf);// V     surface potential
-    parameter real nsub   = 0.0 from [0:inf);// cm^-3 substrate doping
-    parameter real nss    = 0.0 from [0:inf);// cm^-2 surface state density
-    parameter real nfs    = 0.0 from [0:inf);// cm^-2 fast surface state density
-    parameter real eta    = 0.0;            //        static feedback (DIBL)
-    parameter real delta  = 0.0;            //        narrow-width factor
-    parameter real theta  = 0.0;            // 1/V    mobility degradation
-    parameter real kappa  = 0.2;            //        channel-length modulation
-    parameter real u0     = 600.0 from (0:inf);// cm^2/Vs low-field mobility
-    parameter real vmax   = 0.0 from [0:inf);// m/s   max drift velocity
-    parameter real xj     = 0.0 from [0:inf);// m     junction depth
-    parameter real xd     = 0.0 from [0:inf);// m/sqrt(V) depletion coeff (= sqrt(alpha))
-    parameter real alpha  = 0.0 from [0:inf);// m^2/V  2*eps_si/(q*Nsub)
-    parameter real delvto = 0.0;            // V      threshold adjust
+    parameter real    vto    = 0.0;                      // zero-bias threshold [V]
+    parameter real    kp     = 2.07189e-5 from (0:inf);  // transconductance [A/V^2]
+    parameter real    gamma  = 0.0 from [0:inf);         // body effect [sqrt(V)]
+    parameter real    phi    = 0.6 from (0:inf);         // surface potential [V]
+    parameter real    nsub   = 0.0 from [0:inf);         // substrate doping [cm^-3]
+    parameter real    nss    = 0.0 from [0:inf);         // surface state density [cm^-2]
+    parameter real    nfs    = 0.0 from [0:inf);         // fast surface state density [cm^-2]
+    parameter real    eta    = 0.0;                      // static feedback (DIBL)
+    parameter real    delta  = 0.0;                      // narrow-width factor
+    parameter real    theta  = 0.0;                      // mobility degradation [1/V]
+    parameter real    kappa  = 0.2;                      // channel-length modulation
+    parameter real    u0     = 600.0 from (0:inf);       // low-field mobility [cm^2/Vs]
+    parameter real    vmax   = 0.0 from [0:inf);         // max drift velocity [m/s]
+    parameter real    xj     = 0.0 from [0:inf);         // junction depth [m]
+    parameter real    xd     = 0.0 from [0:inf);         // depletion coeff (= sqrt(alpha)) [m/sqrt(V)]
+    parameter real    alpha  = 0.0 from [0:inf);         // 2*eps_si/(q*Nsub) [m^2/V]
+    parameter real    delvto = 0.0;                      // threshold adjust [V]
 
     // --- geometry (ngspice DEFL/DEFW = 1e-4 m) ---
-    parameter real l   = 1e-4 from (0:inf); // m  drawn length
-    parameter real w   = 1e-4 from (0:inf); // m  drawn width
-    parameter real ld  = 0.0;               // m  lateral diffusion
-    parameter real xl  = 0.0;               // m  length mask adjust
-    parameter real wd  = 0.0;               // m  width narrowing
-    parameter real xw  = 0.0;               // m  width mask adjust
-    parameter real tox = 1e-7 from (0:inf); // m  oxide thickness
-    parameter real ad  = 0.0 from [0:inf);  // m^2 drain area
-    parameter real as  = 0.0 from [0:inf);  // m^2 source area
-    parameter real pd  = 0.0 from [0:inf);  // m   drain perimeter
-    parameter real ps  = 0.0 from [0:inf);  // m   source perimeter
-    parameter real m   = 1.0 from (0:inf);  //     parallel multiplier
+    parameter real    l   = 1e-4 from (0:inf);  // drawn length [m]
+    parameter real    w   = 1e-4 from (0:inf);  // drawn width [m]
+    parameter real    ld  = 0.0;                // lateral diffusion [m]
+    parameter real    xl  = 0.0;                // length mask adjust [m]
+    parameter real    wd  = 0.0;                // width narrowing [m]
+    parameter real    xw  = 0.0;                // width mask adjust [m]
+    parameter real    tox = 1e-7 from (0:inf);  // oxide thickness [m]
+    parameter real    ad  = 0.0 from [0:inf);   // drain area [m^2]
+    parameter real    as  = 0.0 from [0:inf);   // source area [m^2]
+    parameter real    pd  = 0.0 from [0:inf);   // drain perimeter [m]
+    parameter real    ps  = 0.0 from [0:inf);   // source perimeter [m]
+    parameter real    m   = 1.0 from (0:inf);   // parallel multiplier
 
     // --- series resistance ---
-    parameter real rd  = 0.0 from [0:inf);  // Ohm
-    parameter real rs  = 0.0 from [0:inf);  // Ohm
-    parameter real rsh = 0.0 from [0:inf);  // Ohm/square
-    parameter real nrd = 1.0 from [0:inf);  // squares, drain
-    parameter real nrs = 1.0 from [0:inf);  // squares, source
+    parameter real    rd  = 0.0 from [0:inf);  // drain resistance [Ohm]
+    parameter real    rs  = 0.0 from [0:inf);  // source resistance [Ohm]
+    parameter real    rsh = 0.0 from [0:inf);  // sheet resistance [Ohm/square]
+    parameter real    nrd = 1.0 from [0:inf);  // squares, drain
+    parameter real    nrs = 1.0 from [0:inf);  // squares, source
 
     // --- bulk junctions ---
-    parameter real is   = 1e-14 from [0:inf);// A     saturation current
-    parameter real js   = 0.0 from [0:inf);  // A/m^2 saturation current density
-    parameter real pb   = 0.8 from (0:inf);  // V     junction potential
-    parameter real fc   = 0.5 from (0:1);    //       forward-bias cap factor
-    parameter real cbd  = 0.0 from [0:inf);  // F
-    parameter real cbs  = 0.0 from [0:inf);  // F
-    parameter real cj   = 0.0 from [0:inf);  // F/m^2 bottom cap
-    parameter real cjsw = 0.0 from [0:inf);  // F/m   sidewall cap
-    parameter real mj   = 0.5 from (0:1);    //       bottom grading
-    parameter real mjsw = 0.33 from (0:1);   //       sidewall grading
-    parameter real gmin = 1e-12 from [0:inf);//  S    junction conductance floor
+    parameter real    is   = 1e-14 from [0:inf);  // saturation current [A]
+    parameter real    js   = 0.0 from [0:inf);    // saturation current density [A/m^2]
+    parameter real    pb   = 0.8 from (0:inf);    // junction potential [V]
+    parameter real    fc   = 0.5 from (0:1);      // forward-bias cap factor
+    parameter real    cbd  = 0.0 from [0:inf);    // b-d zero-bias cap [F]
+    parameter real    cbs  = 0.0 from [0:inf);    // b-s zero-bias cap [F]
+    parameter real    cj   = 0.0 from [0:inf);    // bottom cap [F/m^2]
+    parameter real    cjsw = 0.0 from [0:inf);    // sidewall cap [F/m]
+    parameter real    mj   = 0.5 from (0:1);      // bottom grading
+    parameter real    mjsw = 0.33 from (0:1);     // sidewall grading
+    parameter real    gmin = 1e-12 from [0:inf);  // junction conductance floor [S]
 
     // --- gate overlap caps ---
-    parameter real cgso = 0.0 from [0:inf); // F/m
-    parameter real cgdo = 0.0 from [0:inf); // F/m
-    parameter real cgbo = 0.0 from [0:inf); // F/m
+    parameter real    cgso = 0.0 from [0:inf);  // gate-source overlap [F/m]
+    parameter real    cgdo = 0.0 from [0:inf);  // gate-drain overlap [F/m]
+    parameter real    cgbo = 0.0 from [0:inf);  // gate-bulk overlap [F/m]
 
     // --- noise ---
-    parameter real kf = 0.0 from [0:inf);   //     flicker coefficient
-    parameter real af = 1.0 from (0:inf);   //     flicker exponent
+    parameter real    kf = 0.0 from [0:inf);  // flicker coefficient
+    parameter real    af = 1.0 from (0:inf);  // flicker exponent
 
     // --- temperature ---
-    parameter real tnom  = $simparam("tnom");            // degC parameter measurement temp
-    parameter real temp  = 27.0;            // degC explicit device temp override
-    parameter real dtemp = 0.0;             // K    instance offset from $temperature
+    parameter real    tnom  = $simparam("tnom");  // parameter measurement temp [degC]
+    parameter real    temp  = 27.0;               // explicit device temp override [degC]
+    parameter real    dtemp = 0.0;                // instance offset from $temperature [K]
 
     // bias-independent prep
     real tk, tknom, vt, vtnom, vt300, ratio, eg, egnom, fact1, fact2;
@@ -109,9 +114,9 @@ module mos3(d, g, s, b);
     real vbs, vbd, vgstm, vdsatm, cgsh, cgdh, cgbh, chgs, chgd, capgs, capgd, capgb;
 
     // Bulk junction current: MOS3's reverse branch is the (3Vt/(v*e))^3 form
-    // (mos3load.c), not MOS1's flat -Isat; forward exp tangent-continued above
-    // 80·vtx — a flat clamp there zeroes the restoring slope on evals at
-    // unlimited x (LTE probes, sweep warm starts; see bjt.va pnj).
+    // (mos3load.c), not MOS1's flat -Isat. The forward exp is tangent-continued
+    // above 80*vtx: a flat clamp there would zero the restoring slope on evals
+    // at unlimited x (LTE probes, sweep warm starts).
     analog function real jcur;
         input v, isat, vtx, gm;
         real v, isat, vtx, gm;
@@ -177,7 +182,7 @@ module mos3(d, g, s, b);
         leff = max(l - 2.0 * ld + xl, 1e-9);
         weff = max(w - 2.0 * wd + xw, 1e-9);
 
-        // ---- S1.2 defaulting from NSUB (phi, gamma, then VTO via flat band).
+        // ---- defaulting from NSUB (phi, gamma, then VTO via flat band).
         // "Given" is $param_given: every default here is also a legal card value.
         phinom = phi;
         gammax = gamma;
@@ -213,7 +218,7 @@ module mos3(d, g, s, b);
         ist = is * exp(-eg / vt + egnom / vtnom);
         jst = js * exp(-eg / vt + egnom / vtnom);
 
-        // vbi(T) per mos1 chassis S1.3; DELVTO shifts VTO once, here.
+        // vbi(T) as in mos1.va; DELVTO shifts VTO once, here.
         vbi  = vtox + delvto - dev_type * gammax * sqrt(phinom)
                + 0.5 * (egnom - eg) + dev_type * 0.5 * (phit - phinom);
 
@@ -300,11 +305,12 @@ module mos3(d, g, s, b);
             V(s, si) <+ 0.0;
 
         // ================= bias-dependent: channel ========================
-        // S1.7 limiting, mos1.va's MODE ladder ("fetlimds" on both gate legs
-        // + "limvds" emits ngspice's old-vds swap, mos3load.c:349-362; pnjlim
-        // stays on both bulk junctions at their assignment below — see
-        // mos1.va). Trailing tyf = VerA frame sign (PMOS limits dev_type·v);
-        // tyf is dev_type as a real — integer $limit args are declined.
+        // Limiting as in mos1.va: "fetlimds" on both gate legs + "limvds"
+        // emits ngspice's old-vds swap (mos3load.c:349-362); pnjlim stays on
+        // both bulk junctions at their assignment below. vgdr's $limit result
+        // is overwritten but the call registers the gate-drain leg. The
+        // trailing tyf is VerA's frame sign (PMOS limits dev_type*v); it is
+        // dev_type as a real because integer $limit args are declined.
         tyf    = dev_type;
         vcrits = vt * ln(vt / (1.4142135623730951 * isats));
         vcritd = vt * ln(vt / (1.4142135623730951 * isatd));
@@ -437,11 +443,11 @@ module mos3(d, g, s, b);
         I(b, di) <+ dev_type * ddt(qjunc(vbd, cbde, tpb, mj, fc)
                                    + qjunc(vbd, cbdsw, tpb, mjsw, fc));
 
-        // Meyer caps, DEVqmeyer verbatim (mos1 doc S1.6) in the swapped frame
+        // Meyer caps, DEVqmeyer verbatim in the swapped frame
         // with the channel block's own von/vdsat -- not a private threshold --
         // and Vdsat' = max(Vdsat, MAGIC_VDS = 0.025), which is what bounds the
         // near-threshold split.  DEVqmeyer returns half the non-constant part
-        // and the load routine sums two timepoint halves — spelled below as
+        // and the load routine sums two timepoint halves, spelled below as
         // half + $prev(half) + overlap, ngspice's exact MODETRAN averaging
         // (the OP/AC value is 2*half + overlap, which $prev's commit at OP
         // exit reproduces).  Meyer caps are capacitance-based (q advanced as
@@ -476,7 +482,7 @@ module mos3(d, g, s, b);
                    * (1.0 - arga * arga / (argb * argb));
         end
         // Inverted mode: qmeyer ran swapped, so swap its cgs/cgd back BEFORE
-        // averaging — ngspice's state slots are device-frame branches, so a
+        // averaging: ngspice's state slots are device-frame branches, so a
         // mode flip between timepoints still averages gs with gs.
         if (mode > 0.0) begin
             chgs = cgsh;
@@ -493,7 +499,7 @@ module mos3(d, g, s, b);
         I(g, di) <+ capgd * ddt(V(g, di));
         I(g, b)  <+ capgb * ddt(V(g, b));
 
-        // ================= noise (mos-legacy.md noise table) ==============
+        // ================= noise (mos3noi.c) ===============================
         // gm comes from the same AD machinery as the Jacobian instead of a
         // hand-differentiated second copy of the channel chain.
         gmch = m * abs(ddx(ids, V(g)));
