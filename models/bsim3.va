@@ -1,22 +1,25 @@
-// BSIM3v3.3.0 MOSFET (ngspice netlist letter M, LEVEL 8/49) — DC core.
+// BSIM3v3.3.0 MOSFET (ngspice netlist letter M, LEVEL 8/49): DC core.
 //
-// Spec: docs/devices/bsim3v3-core.md (normative math, section 1) transcribed
-// value-for-value from ngspice b3temp.c/b3ld.c (BSIM3v3.3.0, released
-// 07/29/2005). Order follows the doc: temperature/geometry/derived-default
-// prep first (b3temp.c, bias independent), then the V()-dependent chain
-// (b3ld.c lines 499-1239). Physical constants are b3temp.c's own #defines
-// (KboQ 8.617087e-5, EPSSI 1.03594e-10, ...), not CODATA — bit-exactness
-// against the C is the point.
+// Verilog-A implementation: Omar El-Sawy, University of Waterloo.
+// Based on: ngspice bsim3 (b3temp.c, b3ld.c, b3set.c), BSIM3v3.3.0 (released
+//   07/29/2005) by the UC Berkeley BSIM group (C. Hu et al.).
+//   ngspice: Copyright Regents of the University of California and others,
+//   modified BSD license.
 //
-// Not here, on purpose:
-//   * Gm/Gds/Gmb, junction conductances, and every hand-chained d*/dV in the
-//     C: the AD backend differentiates the value chain below, which is the
-//     same formulas — a second copy would diverge.
-//   * Intrinsic/overlap/junction charges (capMod 0-3), NQS, noise: every
-//     bench fixture is .op/.dc where ddt() stamps nothing. First .tran user
-//     adds the b3ld.c capMod=3 charge section as its own block.
-//   * L/W/P binning families (l*/w*/p* card params) and binunit: fixtures
-//     bin nothing; pParam->X then equals model->X verbatim.
+// Spec: docs/devices/bsim3v3-core.md (normative math, section 1), transcribed
+// value-for-value from b3temp.c/b3ld.c. Order follows the doc: temperature,
+// geometry and derived-default prep first (b3temp.c, bias independent), then
+// the V()-dependent chain (b3ld.c lines 499-1239). Physical constants are
+// b3temp.c's own #defines (KboQ 8.617087e-5, EPSSI 1.03594e-10, ...), not
+// CODATA, so the values match the C bit for bit.
+//
+// Not implemented:
+//   * Gm/Gds/Gmb, junction conductances and the hand-chained d*/dV of the C:
+//     AD differentiates the value chain below.
+//   * Intrinsic/overlap/junction charges (capMod 0-3), NQS, noise. The
+//     b3ld.c capMod=3 charge section is the next block to add for .tran.
+//   * L/W/P binning families (l*/w*/p* card params) and binunit:
+//     pParam->X equals model->X.
 //   * ACM > 0 junction geometry, version < 3.3 behavior switches.
 module bsim3(d, g, s, b);
     inout d, g, s, b;
@@ -157,11 +160,9 @@ module bsim3(d, g, s, b);
     real tmp1, tmp2, tmp3, tmp4;
 
     // Junction diode current, b3ld.c lines 427-481: raw exponential with
-    // gmin, linearized above vjm when ijth > 0 (v3.3 behavior). The ijth=0
-    // exponential is tangent-continued above 80*nvtm the way mos1.va's jcur
-    // is: pnjlim keeps Newton iterates below it, but sweep warm starts probe
-    // unlimited x, and a hard exp there overflows. With ijth > 0 (default
-    // 0.1) the ngspice linear branch takes over well below that.
+    // gmin, linearized above vjm when ijth > 0 (v3.3 behavior). With ijth = 0
+    // the exponential is tangent-continued above 80*nvtm as in mos1.va's
+    // jcur: sweep warm starts probe unlimited x, where a hard exp overflows.
     analog function real jdio;
         input v, isat, nvtmx, vjm, isevjm, ijthx, gminy;
         real v, isat, nvtmx, vjm, isevjm, ijthx, gminy;
@@ -216,8 +217,8 @@ module bsim3(d, g, s, b);
         dwx = wint + wl / t2 + ww / t3 + wwl / (t2 * t3);
         leff = l + xl - 2.0 * dl;
         weff = w + xw - 2.0 * dwx;
-        // ngspice E_BADPARMs on non-positive Leff/Weff; no diagnostics
-        // channel here, so clamp like mos1.va does for LD >= L/2.
+        // ngspice E_BADPARMs on non-positive Leff/Weff; clamp instead, as
+        // mos1.va does for LD >= L/2.
         // ponytail: silent 1e-9 floor; report the day a real deck trips it.
         if (leff < 1.0e-9) leff = 1.0e-9;
         if (weff < 1.0e-9) weff = 1.0e-9;
@@ -332,9 +333,9 @@ module bsim3(d, g, s, b);
         else gsource = 0.0;
 
         // ============ limiting ladder (b3ld.c init, mos1.va idiom) ========
-        // ngspice fetlims against the per-iteration von; the clamp list here
-        // is stateless, so the zero-bias threshold stands in — limiting only
-        // shapes the Newton path, never the converged bias.
+        // ngspice fetlims against the per-iteration von; the clamp list is
+        // stateless, so the zero-bias threshold stands in. Limiting shapes
+        // only the Newton path, never the converged bias.
         vgs = type * $limit(V(g, si), "fetlim", type * vth0i, type);
         vgd = type * $limit(V(g, di), "fetlim", type * vth0i, type);
         vds = type * $limit(V(di, si), "limvds", type);
