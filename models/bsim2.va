@@ -1,38 +1,32 @@
-// BSIM2 — Berkeley Short-channel IGFET Model 2 (ngspice letter M, level 5).
-// docs/mos-legacy.md §1.5 (structure) + §3 (MOS1 chassis + level channel block).
+// BSIM2: Berkeley Short-channel IGFET Model 2 (ngspice netlist letter M, level 5).
 //
-// Reference: mos-legacy.md names our bsim2.zig port as operative, but that port
-// was deleted in the devices refactor (last seen at 9433f48) and, where the two
-// disagreed, it was the party in error — so this file is now the single source
-// and the equation chain below is transcribed from the real thing:
-// ngspice src/spicelib/devices/bsim2/{b2eval.c,b2temp.c,b2ld.c} (fetched
-// 2026-07-25). Every place this file departs from the old port is flagged
-// `// port:` inline.
+// Verilog-A implementation: Omar El-Sawy, University of Waterloo.
+// Based on: ngspice bsim2 (b2eval.c, b2temp.c, b2ld.c, b2set.c), BSIM2 by the
+//   UC Berkeley BSIM group (M.-C. Jeng, P. K. Ko, C. Hu).
+//   ngspice: Copyright Regents of the University of California and others,
+//   modified BSD license.
+//
+// Spec: docs/mos-legacy.md §1.5 (structure) + §3 (MOS1 chassis + channel
+// block); the equation chain is transcribed from b2eval.c/b2temp.c/b2ld.c.
 //
 // Topology (MOS1 chassis, mos1-shichman-hodges.md §1.8):
 //     d --[RD]-- dp --[channel]-- sp --[RS]-- s
-//     bulk diodes b-dp / b-sp, charge-based gate/channel charges (§2: "BSIM1/2
-//     replace Meyer caps with their own charge equations")
+//     bulk diodes b-dp / b-sp, charge-based gate/channel charges (no Meyer caps)
 //
-// BSIM2 is an extraction-era model: every coefficient comes from the card, and
-// each core coefficient carries L- and W-sensitivity siblings combined as
-// P_eff = P0 + PL/Leff_um + PW/Weff_um (the Berkeley "W/L decomposition",
-// b2temp.c). That decomposition, the oxide cap, the thermal voltage and the
-// effective geometry are all bias-independent, so they are computed once at the
-// top of the analog block, ahead of every V() read (§5 of the eval contract).
+// Every core coefficient carries L- and W-sensitivity siblings combined as
+// P_eff = P0 + PL/Leff_um + PW/Weff_um (b2temp.c). That decomposition, the
+// oxide cap, the thermal voltage and the effective geometry are
+// bias-independent and computed ahead of every V() read.
 //
-// Structure of the channel block (b2eval.c), which is *one* equation, not a
-// region ladder: the gate drive Vgst = Vgs - Vth is mapped through Vgeff, which
-// is Vgst in strong inversion, an exponential in weak inversion, and a
-// C1-continuous cubic between the VGLOW/VGHIGH knots — that Vgg/Vgt transition
-// is the refinement doc §1.5 names as BSIM2's defining feature over BSIM1, and
-// it is what makes the subthreshold current *additive-equivalent* (it enters
-// the same Ids expression) instead of a multiplicative fudge factor.
+// The channel block (b2eval.c) is one equation, not a region ladder: the gate
+// drive Vgst = Vgs - Vth is mapped through Vgeff, which is Vgst in strong
+// inversion, an exponential in weak inversion, and a C1 cubic between the
+// VGLOW/VGHIGH knots. Subthreshold current therefore enters the same Ids
+// expression rather than as a separate factor.
 //
-// fetlim/limvds/pnjlim are spelled with $limit as in models/mos1.va and the
-// rest of the legacy-MOS family: $limit stays the identity inside eval, and
-// VerA's contract `limit`/`seed` hooks hand the host the clamps to run
-// between the linear solve and the next eval.
+// fetlim/limvds/pnjlim are $limit calls as in mos1.va: $limit is the identity
+// inside eval, and the contract `limit`/`seed` hooks run the clamps between the
+// linear solve and the next eval.
 module bsim2(d, g, s, b);
     inout d, g, s, b;
     electrical d, g, s, b;
@@ -64,7 +58,7 @@ module bsim2(d, g, s, b);
     // --- geometry ---------------------------------------------------------
     parameter real dl  = 0.0;     // channel length reduction [um]
     parameter real dw  = 0.0;     // channel width reduction [um]
-    parameter real ld  = 0.0;     // lateral diffusion [m] (card carry-through)
+    parameter real ld  = 0.0;     // lateral diffusion [m] (accepted, unused)
     parameter real tox = 0.03 from (0:inf);  // gate oxide thickness [um]
 
     // --- mobility ---------------------------------------------------------
@@ -182,12 +176,10 @@ module bsim2(d, g, s, b);
     parameter real vdd = 5.0;     // V
     parameter real vgg = 5.0;     // V
     parameter real vbb = 5.0;     // V (real cards give it negative)
-    // b2temp.c: `B2Vtm = 8.625e-5 * (B2temp + 273.0)` — BSIM2 has *no*
-    // temperature maps at all (verified: b2temp.c touches neither Eg, pb, js
-    // nor the cap factors), and the thermal voltage comes from this model-card
-    // parameter, which ngspice spells `temp` in degC. Naming it `tnom` while
-    // also declaring a Kelvin instance `temp` (as the old port did) made the
-    // card's `temp = 27` bind to the Kelvin slot.
+    // b2temp.c: `B2Vtm = 8.625e-5 * (B2temp + 273.0)`. BSIM2 has no
+    // temperature maps (b2temp.c touches neither Eg, pb, js nor the cap
+    // factors); the thermal voltage comes from this model-card parameter,
+    // which ngspice spells `temp` in degC.
     parameter real temp = 27.0;   // degC, parameter measurement temperature
 
     // --- capacitances -----------------------------------------------------
@@ -210,7 +202,7 @@ module bsim2(d, g, s, b);
     parameter real wdf  = 10.0;   // default diffusion width [um]
     parameter real dell = 0.0;    // diffusion length reduction [um]
 
-    // --- noise (mos-legacy.md noise table, mos1noi.c template) ------------
+    // --- flicker noise (mos1noi.c form) -----------------------------------
     parameter real kf = 0.0;
     parameter real af = 1.0;
 
@@ -247,13 +239,11 @@ module bsim2(d, g, s, b);
     real qgch, qbch, qdch, qgso, qgdo, qgbo, qbs, qbd;
 
     // Junction depletion charge, forward/reverse blended by a steep sigmoid
-    // (one differentiable expression instead of a v<0 branch). Reverse branch
-    // is the integral of the cj/(1-v/pb)^mj law,
-    // q = pb*cj/(1-mj) * (1 - (1-v/pb)^(1-mj)), clamped at (1-v/pb) >= 0.01.
-    // port: bsim2.zig used (1-v/pb)^(2-mj); b2ld.c has `sarg = arg^(-mj)` and
-    // `q = pb*cj*(1 - arg*sarg)/(1-mj)` = the 1-mj exponent below, so the port
-    // was the party in error. cja/cjswa are absolute farads (already
-    // area/perimeter scaled by the caller).
+    // (one differentiable expression instead of a v<0 branch). The reverse
+    // branch is the integral of the cj/(1-v/pb)^mj law,
+    // q = pb*cj/(1-mj) * (1 - (1-v/pb)^(1-mj)), clamped at (1-v/pb) >= 0.01
+    // (b2ld.c: `sarg = arg^(-mj)`, `q = pb*cj*(1 - arg*sarg)/(1-mj)`).
+    // cja/cjswa are absolute farads (area/perimeter scaled by the caller).
     analog function real jcharge;
         input v, cja, cjswa, pba, pbswa, mja, mjswa, om, omsw;
         real v, cja, cjswa, pba, pbswa, mja, mjswa, om, omsw;
@@ -272,8 +262,8 @@ module bsim2(d, g, s, b);
 
     analog begin
         // ==================================================================
-        // Bias-independent prep — geometry, temperature, W/L decomposition.
-        // Nothing here reads V() (doc §2, eval contract §5).
+        // Bias-independent prep: geometry, temperature, W/L decomposition.
+        // Nothing here reads V().
         // ==================================================================
         leff = max(l - dl * 1.0e-6, 1.0e-9);
         weff = max(w - dw * 1.0e-6, 1.0e-9);
@@ -284,11 +274,8 @@ module bsim2(d, g, s, b);
 
         tabs  = temp + 273.0;                           // b2temp.c, degC -> K
         vt    = 8.625e-5 * tabs;                        // kT/q [V], b2temp.c
-        // b2temp.c:44 is `Cox = 3.453e-13 / (B2tox * 1.0e-4)` [F/cm^2] -- eps_ox
-        // over TOX read as MICRONS, with no floor. The 1e-12 m guard that used
-        // to sit here capped Cox at 1/25 of ngspice's for any card spelling TOX
-        // in metres-looking units (devices/bsim2 has TOX=40n -> 4e-14 m), and
-        // Ids is exactly linear in Cox. `from (0:inf)` already keeps tox > 0.
+        // b2temp.c:44: `Cox = 3.453e-13 / (B2tox * 1.0e-4)` [F/cm^2], eps_ox
+        // over TOX read as microns, with no floor (`from (0:inf)` keeps tox > 0).
         cox   = 3.453e-11 / (tox * 1.0e-6);            // eps_ox/tox [F/m^2]
         coxwl = cox * weff * leff;
         // Gate-drive-independent part of beta: 1e-4 converts cm^2/V/s -> m^2.
@@ -312,8 +299,6 @@ module bsim2(d, g, s, b);
         //   tmp = betas0 - beta0 - beta0B*VBB;
         //   if ((-betasB*VBB) > tmp) betasB = -tmp/VBB;
         // beta0 there is the raw MU0 with no L/W siblings, beta0B is mu0be.
-        // devices/bsim2 leaves MUS0 at its 500 default under MU0=600, so ngspice
-        // actually runs 606 -- a 1.21x on the current all by itself.
         mus0e = max(mus0e, 1.01 * mu0);
         musbe = (vbb != 0.0 && (-musbe * vbb) > (mus0e - mu0 - mu0be * vbb))
                 ? -(mus0e - mu0 - mu0be * vbb) / vbb
@@ -356,11 +341,10 @@ module bsim2(d, g, s, b);
         //     if (Vbs < B2vbb2) Vbs = B2vbb2;   /* B2vbb2 = 2*VBB, b2temp.c:47 */
         //     if (Vgs > B2vgg2) Vgs = B2vgg2;
         //     if (Vds > B2vdd2) Vds = B2vdd2;
-        // VBB is a FLOOR in the code even though b2.c:166 calls it "Maximum
-        // Vbs", and b2set.c:388 defaults it to +5 -- so a card that omits VBB is
-        // evaluated at Vbs = +10 whatever the real body bias is, which moves
-        // T1s/Aa/Vth wholesale (0.665x on devices/bsim2's current). Real cards
-        // give VBB negative (devices/bsim2_ngspice: vbb = -3), where it is inert.
+        // VBB is a floor in the code even though b2.c:166 calls it "Maximum
+        // Vbs", and b2set.c:388 defaults it to +5, so a card that omits VBB is
+        // evaluated at Vbs = +10 whatever the real body bias. Real cards give
+        // VBB negative, where it is inert.
         vdd2 = 2.0 * vdd;
         vgg2 = 2.0 * vgg;
         vbb2 = 2.0 * vbb;
@@ -396,15 +380,14 @@ module bsim2(d, g, s, b);
 
         // ==================================================================
         // Terminal voltages, type folding and the source/drain swap.
-        // §1.7 limiting, mos1.va's ladder: fetlim on both gate legs, limvds
-        // on the channel, pnjlim on both bulk junctions (vbsr here, vbdj at
-        // the diode block). Trailing tyf = VerA frame sign (PMOS limits
-        // type_·v); tyf is type_ as a real — integer $limit args are declined.
+        // §1.7 limiting as in mos1.va: fetlim on both gate legs, limvds on
+        // the channel, pnjlim on both bulk junctions (vbsr here, vbdj at the
+        // diode block). Trailing tyf = frame sign; it is type_ as a real
+        // because integer $limit args are declined.
         // ==================================================================
         vgsr = tyf * $limit(V(g, sp), "fetlim", vtx, tyf);
         vgdr = tyf * $limit(V(g, dp), "fetlim", vtx, tyf);
         vdsr = tyf * $limit(V(dp, sp), "limvds", tyf);
-        vgdr = vgsr - vdsr;
         vbsr = tyf * $limit(V(b, sp), "pnjlim", vt, vcrits, tyf);
 
         vdsn = min(vdsr, 0.0);                   // swap offset
@@ -504,13 +487,10 @@ module bsim2(d, g, s, b);
         targ   = max(min(vds * beta2 / vdsat, 30.0), -30.0);
         beta   = max(beta0b + beta1 * tanh(targ) + vds * (beta3 - beta4 * vds),
                      1.0e-18);
-        // b2eval.c:274-287: Utot is Uvert PLUS U1*Vds, not Uvert TIMES
-        // (1 + U1*Vds), and it floors at 0.5. (b2eval.c's saturation branch is
-        // Beta/Uvert with no U1 term at all; vdsch = min(vds, vdsat) reproduces
-        // it precisely because Uvert + U1*Vdsat = Uvert*(1 + Vc/sqrt(Kk)) is
-        // exactly the factor that cancels (2*sqrt(Kk) - 1) in the triode
-        // numerator -- the multiplicative spelling breaks that identity and was
-        // 1.13x high on devices/bsim2.)
+        // b2eval.c:274-287: Utot = Uvert + U1*Vds, floored at 0.5. The
+        // saturation branch is Beta/Uvert with no U1 term; vdsch = min(vds,
+        // vdsat) reproduces it because Uvert + U1*Vdsat = Uvert*(1 + Vc/sqrt(Kk))
+        // cancels (2*sqrt(Kk) - 1) in the triode numerator.
         betaeff = beta / max(uvert + u1 * vdsch, 0.5);
 
         // ==================================================================
@@ -521,9 +501,7 @@ module bsim2(d, g, s, b);
         // ==================================================================
         idscore = betaeff * (vgeff - 0.5 * aa * vdsch) * vdsch;
 
-        // Output-conductance / hot-electron term. ponytail: no has_clm flag —
-        // ai=0 makes fclm exactly 1, and clamping the exponent both ways is
-        // all the flag was guarding against.
+        // Output-conductance / hot-electron term; ai = 0 makes fclm exactly 1.
         ai   = ai0e + aibe * vbs;
         bi   = bi0e + bibe * vbs;
         dvds = max(vds - vdsat, 1.0e-20);
@@ -542,7 +520,7 @@ module bsim2(d, g, s, b);
 
         // ==================================================================
         // Parasitic series resistances (MOS1 chassis d-dp / s-sp) + their
-        // thermal noise (mos-legacy.md noise table).
+        // thermal noise (mos1noi.c).
         // ==================================================================
         I(d, dp) <+ gdp * V(d, dp)
                   + white_noise(4.0 * 1.380649e-23 * tabs * gdp, "rd");
@@ -550,7 +528,7 @@ module bsim2(d, g, s, b);
                   + white_noise(4.0 * 1.380649e-23 * tabs * gsp, "rs");
 
         // Channel thermal + flicker noise. The flicker denominator is
-        // W*m*Leff*Cox'^2 (mos1noi.c, per the doc's explicit note).
+        // W*m*Leff*Cox'^2 (mos1noi.c).
         I(dp, sp) <+ white_noise(4.0 * 1.380649e-23 * tabs * 2.0 / 3.0 * abs(gmch),
                                  "channel");
         if (kf > 0.0) begin
@@ -561,9 +539,9 @@ module bsim2(d, g, s, b);
 
         // ==================================================================
         // Bulk junction diodes, on the true junction voltages (mode-free),
-        // pnjlim'd (vbsr above, vbdj here). Exponent tangent-continued above
-        // 80: a flat clamp zeroes the restoring slope on evals at unlimited x
-        // (LTE probes, sweep warm starts; see bjt.va pnj).
+        // pnjlim'd (vbsr above, vbdj here). The exponent is tangent-continued
+        // above 80 so the restoring slope survives evals at unlimited x (see
+        // bjt.va pnj).
         // ==================================================================
         vbdj = tyf * $limit(V(b, dp), "pnjlim", vt, vcritd, tyf);
         uj  = min(vbsr / vt, 80.0);
@@ -576,7 +554,7 @@ module bsim2(d, g, s, b);
         // ==================================================================
         // Charges. Overlaps are linear; the intrinsic channel charge is split
         // gate / bulk / drain so that q(sp) = -(qg + qb + qd) by construction
-        // — charge-conserving, doc §2. XPART picks the drain partition:
+        // (charge-conserving). XPART picks the drain partition:
         // 0 = 40/60, 1 = 0/100. All carry m, as the resistances and the
         // channel current do.
         // ==================================================================
@@ -584,9 +562,8 @@ module bsim2(d, g, s, b);
         qgdo = cgdo * weff * m * V(g, dp);
         qgbo = cgbo * leff * m * V(g, b);
 
-        // port: bsim2.zig's q_g_intr had no outer type_ fold-back, so it
-        // disagreed in sign for PMOS. Charges built from the folded voltages
-        // are folded charges; type_ converts them back.
+        // Charges built from the folded voltages are folded charges; type_
+        // converts them back.
         qgch = type_ * m * coxwl * (vgs - vfbe - phie - vgeff / (3.0 * aa));
         qbch = type_ * m * coxwl * (vfbe + phie - vth0
                                     + (1.0 - aa) * vgeff / (3.0 * aa));
