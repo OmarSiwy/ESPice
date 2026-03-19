@@ -1,18 +1,22 @@
-// JFET2 -- ngspice netlist letter J, LEVEL=2: Parker-Skellern (psmodel.c).
+// JFET2: Parker-Skellern MESFET/JFET model (ngspice J, level 2).
 //
-// Topology (docs/jfet-mesfet-hfet.md sec 1.2 / sec 3): D-RD-d', S-RS-s', two gate
-// junctions g-d' and g-s' with forward exponential + reverse breakdown, and the
-// PS dual-power-law channel between d' and s' with source-drain reversal,
-// subthreshold softplus, velocity saturation, CLM and self-heating.
+// Verilog-A implementation: Omar El-Sawy, University of Waterloo.
+// Based on: ngspice J level 2 (jfet2/psmodel.c, jfet2load.c, jfet2temp.c,
+//   jfet2noi.c), the Parker-Skellern model (A. E. Parker and D. J. Skellern,
+//   Macquarie University).
+//   ngspice: Copyright Regents of the University of California and others,
+//   modified BSD license.
 //
-// Rate dependence (sec 1.2 item 2/6): the discrete psmodel filters
-// (v_trap = h*v_trap_prev + (1-h)*v, h = (taug/(taug+dt/4))^4) have no
-// Verilog-A spelling; they are single-pole ddt lowpasses on internal nodes
-// ntgs/ntgd (gate traps, tau = taug) and ntp (dissipated power, tau = taud).
-// The ddt() term is gated by analysis("tran"): the reference linearizes with
-// h = 0 in DC *and* AC, so an ungated pole would make the HF feedback terms and
-// the self-heating divisor frequency-dependent in small-signal analysis, which
-// the reference load routine never does.
+// Topology: D-RD-d', S-RS-s', gate junctions g-d' and g-s' with forward
+// exponential and reverse breakdown, and the PS dual-power-law channel between
+// d' and s' with source-drain reversal, subthreshold softplus, velocity
+// saturation, CLM and self-heating.
+//
+// Rate dependence: psmodel.c's discrete filters
+// (v_trap = h*v_trap_prev + (1-h)*v, h = (taug/(taug+dt/4))^4) are written as
+// single-pole ddt lowpasses on internal nodes ntgs/ntgd (gate traps,
+// tau = taug) and ntp (dissipated power, tau = taud). ddt() is gated by
+// analysis("tran") because the reference uses h = 0 in DC and AC.
 module jfet2(d, g, s);
     inout d, g, s;
     electrical d, g, s;
@@ -21,17 +25,16 @@ module jfet2(d, g, s);
     branch (d, di) brd;
     branch (s, si) brs;
 
-    // +1 = NJF, -1 = PJF. ngspice carries this in the .model *name*, not as a
-    // card parameter; JFET2type multiplies vgs/vgd and every stamped
-    // current/charge, so a VA module needs the knob (jfet.va:19 pattern).
+    // +1 = NJF, -1 = PJF. ngspice carries this in the .model name; JFET2type
+    // multiplies vgs/vgd and every stamped current/charge.
     parameter integer jtype = 1 from [-1:1] exclude 0;
 
     // ---- instance ----------------------------------------------------------
-    parameter real area  = 1.0  from (0:inf);
-    parameter real m     = 1.0  from (0:inf);
-    parameter real temp  = 27.0 from (-273.15:inf);  // degC
-    parameter real dtemp = 0.0;
-    parameter real tnom  = $simparam("tnom") from (-273.15:inf);
+    parameter real area  = 1.0  from (0:inf);            // area factor
+    parameter real m     = 1.0  from (0:inf);            // multiplicity
+    parameter real temp  = 27.0 from (-273.15:inf);      // degC
+    parameter real dtemp = 0.0;                          // degC offset
+    parameter real tnom  = $simparam("tnom") from (-273.15:inf);  // degC
 
     // ---- channel -----------------------------------------------------------
     parameter real beta   = 1e-4 from (0:inf);   // A/V^Q
@@ -45,9 +48,8 @@ module jfet2(d, g, s);
     parameter real delta  = 0.0  from [0:inf);   // thermal current reduction, 1/W
     parameter real vst    = 0.0  from [0:inf);   // subthreshold potential
     parameter real mvst   = 0.0;                 // subthreshold modulation
-    // PS version selector on the ngspice JFET2 card. psmodel.c only branches on
-    // it for pre-release equation variants we do not carry; declared so a model
-    // line naming it still parses. Deliberately unused.
+    // PS version selector. psmodel.c only branches on it for pre-release
+    // equation variants not carried here; declared so a card naming it parses.
     parameter integer ver = 0 from [0:inf);
 
     // ---- threshold feedback (trapping / self-heating memory) ---------------
@@ -82,8 +84,7 @@ module jfet2(d, g, s);
     parameter real af    = 1.0 from (0:inf);     // flicker exponent
 
     // Gate junction: forward exponential with the -10/+40 exp-argument
-    // continuations plus the reverse breakdown branch. Both are exact-derivative
-    // at the joins, which is what keeps NR happy (sec 1.2 item 1).
+    // continuations plus the reverse breakdown branch, both C1 at the joins.
     analog function real gjunc;
         input v, isat, nvt, ibrk, vbrk, gmn;
         real v, isat, nvt, ibrk, vbrk, gmn;
@@ -96,8 +97,7 @@ module jfet2(d, g, s);
                 ifwd = isat * (exp(arg) - 1.0);
             else
                 ifwd = isat * 2.3538526683702e17 * (arg - 39.0) - isat;
-            // VBD = 0 is the "no breakdown" spelling; IBD = 0 kills the branch
-            // outright, so skip it rather than divide by zero.
+            // VBD = 0 or IBD = 0 disables breakdown (no divide by zero).
             irev = 0.0;
             if (ibrk > 0.0 && vbrk > 0.0) begin
                 arg = -v / vbrk;
@@ -112,7 +112,7 @@ module jfet2(d, g, s);
         end
     endfunction
 
-    // bias-independent prep (sec 1.2: kept out of the V()-dependent chain)
+    // bias-independent prep
     real aeff, tdev, tnomk, vt, vtnom, nvt, fact1, fact2, egfet, egnom;
     real argt, argn, pbfact, pbfactn, pbo, gmaold, gmanew, cjfact, cjfact1;
     real pb_t, isat, ibrk, vcrit, grd, grs, fourkt, htr;
@@ -126,10 +126,9 @@ module jfet2(d, g, s);
 
     analog begin
         aeff = area * m;
-        // ---- temperature (sec 1.5): the SPICE junction map, jfet2temp.c /
-        // jfettemp.c. It is the hardwired 1.11 eV silicon map, not EG/XTI, so
-        // "jfet2 has no EG/XTI" is no excuse for leaving T/Tnom out. VTO/BETA
-        // have no tempco on the JFET2 card, so only the junction moves.
+        // ---- temperature: the SPICE junction map (jfet2temp.c), hardwired
+        // to 1.11 eV silicon. VTO/BETA have no tempco on the JFET2 card, so
+        // only the junction moves.
         tnomk = tnom + 273.15;
         tdev  = temp + 273.15 + dtemp;
         vt    = 8.617333262145e-5 * tdev;      // k/q * T
@@ -153,13 +152,12 @@ module jfet2(d, g, s);
         cjfact1 = 1.0 + 0.5 * (4e-4 * (tdev - 300.15) - gmanew);
         isat = is * aeff * exp((tdev / tnomk - 1.0) * 1.11 / nvt);
         ibrk = ibd * aeff;
-        // Vcrit per gate junction (sec 1.5). IS = 0 has no junction to limit.
+        // Vcrit per gate junction. IS = 0 has no junction to limit.
         if (isat > 0.0) vcrit = nvt * ln(nvt / (1.4142135623730951 * isat));
         else            vcrit = 0.6;
         fourkt = 4.0 * 1.380649e-23 * tdev;
-        // rd/rs = 0 is ngspice's node collapse (JFET2setup keeps
-        // drainPrimeNode == drainNode and drainConduct == 0); a 1e12 S branch is
-        // not the equivalent, so use a switch branch as in jfet.va:130.
+        // rd/rs = 0 is ngspice's node collapse (JFET2setup), written as a
+        // switch branch below.
         grd = 0.0;
         grs = 0.0;
         if (rd > 0.0) grd = aeff / rd;
@@ -172,19 +170,17 @@ module jfet2(d, g, s);
         czgs  = cgs * aeff * cjfact * cjfact1;
         czgd  = cgd * aeff * cjfact * cjfact1;
         // Charge-model smoothing: O((woo/(xi+1))^2) so that vert -> |vds| and
-        // C(0) = CGS at zero bias. The channel's xi*woo above does NOT belong
-        // here -- with it, xi cancels and vert(0) = woo/2, which parks a default
-        // card in the FC forward-extension branch with qgg(0) != 0.
+        // C(0) = CGS at zero bias. Not the channel's xi*woo: with it xi cancels
+        // and vert(0) = woo/2, which puts a default card in the FC
+        // forward-extension branch with qgg(0) != 0.
         alphac = woo * woo / (4.0 * (xi + 1.0) * (xi + 1.0));
         vmax   = fc * pb_t;
 
         // ---- bias: polarity-normalized (all math below is NJF) and limited.
-        // FastVAF renders $limit as a pass-through, but the spelling is what
-        // carries the pnjlim request to a host that implements the contract.
-        // The sec 1.5 order fetlim -> limvds -> pnjlim cannot be spelled: $limit
-        // takes one probe and one algorithm, so the junction limiter (the one
-        // that actually bounds the exponential) is what we ask for. Likewise
-        // MODEINITJCT's vgs = -1 seed has no VA representation.
+        // ngspice's fetlim -> limvds -> pnjlim chain cannot be spelled with one
+        // $limit per probe, so the junction limiter, which bounds the
+        // exponential, is requested. MODEINITJCT's vgs = -1 seed has no
+        // Verilog-A spelling.
         vgs = jtype * $limit(V(g, si), "pnjlim", nvt, vcrit);
         vgd = jtype * $limit(V(g, di), "pnjlim", nvt, vcrit);
         vds = vgs - vgd;
@@ -216,12 +212,10 @@ module jfet2(d, g, s);
         vgst = vgsa - vto - lfgt * vgdat
              + hfet * (vgsat - vgsa) + hfgt * (vgdat - vgda);
 
-        // Subthreshold softplus vgt = vst*ln(1+exp(vgst/vst)) with the EXACT
-        // large-argument continuations (sec 1.2 item 3, "all continuations are
-        // exact-derivative"). Clamping the *argument* instead would freeze vgt
-        // at 40*vst and kill gm above vgst = 40*VST; flooring exp() would kill
-        // the exponential tail. ln(1+e^x) = x + ln(1+e^-x) -> x (slope 1);
-        // ln(1+e^x) -> e^x for x << 0.
+        // Subthreshold softplus vgt = vst*ln(1+exp(vgst/vst)) with the
+        // large-argument continuations ln(1+e^x) -> x for x >> 0 and -> e^x
+        // for x << 0. Clamping the argument instead would freeze vgt at
+        // 40*vst and kill gm.
         if (vst > 0.0) begin
             vstx = max(vst * (1.0 + mvst * vdse), 1e-12);
             sarg = vgst / vstx;
@@ -295,16 +289,15 @@ module jfet2(d, g, s);
         I(g, di) <+ jtype * gjunc(vgd, isat, nvt, ibrk, vbd, gmin) + ddt(jtype * qgd);
         I(di, si) <+ jtype * id + gmin * V(di, si) + ddt(cds * aeff * V(di, si));
 
-        // ---- noise (doc noise table, jfet2noi.c): RD/RS thermal, channel
-        // thermal 2/3|gm|, flicker KF|Id|^AF/f. Raising V(g) raises vgs and vgd
-        // together, so ddx(id, V(g)) is dId/dVgs at constant Vds -- the
-        // reference's gm, without transcribing the PS derivative chain.
+        // ---- noise (jfet2noi.c): RD/RS thermal, channel thermal 2/3|gm|,
+        // flicker KF|Id|^AF/f. Raising V(g) raises vgs and vgd together, so
+        // ddx(id, V(g)) is dId/dVgs at constant Vds, the reference's gm.
         gm = abs(ddx(id, V(g)));
         I(di, si) <+ white_noise(fourkt * (2.0 / 3.0) * gm * m, "channel");
         if (kf > 0.0)
             I(di, si) <+ flicker_noise(m * kf * pow(abs(id), af), 1.0, "flicker");
 
-        // Series RD/RS: a zero one is an exact short, not a 1e12 S branch.
+        // Series RD/RS: zero is an exact short.
         if (rd > 0.0) begin
             I(brd) <+ grd * V(brd);
             I(brd) <+ white_noise(fourkt * grd, "rd");
