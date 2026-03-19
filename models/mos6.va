@@ -1,16 +1,19 @@
-// MOS level 6 -- Sakurai-Newton empirical MOSFET (ngspice netlist letter M,
-// LEVEL=6).
+// MOS6: Sakurai-Newton n-th power law MOSFET (netlist letter M, LEVEL=6).
 //
-// Channel block: docs/mos-legacy.md S1.3 / S3 `mos6_channel` (source-verified
-// against mos6load.c): power-law Vdsat/Idsat, the (2-u)u parabolic linear
-// blend, lambda = lamda0 - lamda1*vb.
-// Chassis: docs/mos1-shichman-hodges.md S1.2-1.8 -- d'/s' series nodes, bulk
-// junction diodes + depletion charge, Meyer gate caps, mode swap, SPICE
-// temperature maps.
-// Voltage limiting (S1.7 fetlim/limvds/pnjlim) is spelled with $limit as in
-// diode.va and mos1.va: $limit stays the identity inside eval, and VerA's
-// contract `limit`/`seed` hooks hand the host the clamps to run between the
-// linear solve and the next eval (codegen.zig S4.5.15).
+// Verilog-A implementation: Omar El-Sawy, University of Waterloo.
+// Based on: ngspice mos6 (mos6set.c, mos6temp.c, mos6load.c), the SPICE3
+// level-6 model after T. Sakurai and A. R. Newton's n-th power law MOSFET,
+// on the mos1 chassis (mos1temp.c, mos1noi.c).
+//   ngspice: Copyright Regents of the University of California and others,
+//   modified BSD license.
+//
+// Channel block (mos6load.c): power-law Vdsat/Idsat, the (2-u)u parabolic
+// linear blend, lambda = lamda0 - lamda1*vb.
+// Chassis shared with mos1.va: d'/s' series nodes, bulk junction diodes +
+// depletion charge, Meyer gate caps, mode swap, SPICE temperature maps.
+// Voltage limiting (fetlim/limvds/pnjlim) is spelled with $limit: it is the
+// identity inside eval, and VerA's contract `limit`/`seed` hooks hand the host
+// the clamps to run between the linear solve and the next eval.
 module mos6(d, g, s, b);
     inout d, g, s, b;
     electrical d, g, s, b;
@@ -20,68 +23,68 @@ module mos6(d, g, s, b);
 
     // ---- channel (Sakurai-Newton), ngspice MOS6 names/defaults -------------
     parameter integer mtype = 1 from [-1:1] exclude 0;  // +1 NMOS, -1 PMOS
-    parameter real vto     = 0.0;                       // V
+    parameter real    vto   = 0.0;                      // zero-bias threshold [V]
     // KV = 0 is legal in ngspice (vdsat collapses to 0 => always the saturation
     // expression); mos6set.c range-checks nothing but PHI > 0.
-    parameter real kv      = 2.0     from [0:inf);      // V^(1-nv)
-    parameter real nv      = 0.5;
-    parameter real kc      = 5e-5    from [0:inf);      // A/V^nc
-    parameter real nc      = 1.0;
-    parameter real u0      = 600.0;                     // cm^2/Vs (KC default)
-    parameter real nsub    = 0.0     from [0:inf);      // cm^-3 substrate doping
-    parameter real nss     = 0.0     from [0:inf);      // cm^-2 surface states
-    parameter real tpg     = 1.0     from [-1:1];       // gate: +1 opp, -1 same, 0 Al
-    parameter real gamma   = 0.0     from [0:inf);      // sqrt(V)
-    parameter real gamma1  = 0.0;                       // 1/V linear body term
-    parameter real sigma   = 0.0;                       // DIBL
-    parameter real phi     = 0.6     from (0:inf);      // V
-    parameter real lambda  = 0.0;                       // 1/V
-    parameter real lambda0 = 0.0;                       // 1/V (defaults to lambda)
-    parameter real lambda1 = 0.0;                       // 1/V^2
+    parameter real    kv      = 2.0 from [0:inf);   // Vdsat coefficient [V^(1-nv)]
+    parameter real    nv      = 0.5;                // Vdsat exponent
+    parameter real    kc      = 5e-5 from [0:inf);  // Idsat coefficient [A/V^nc]
+    parameter real    nc      = 1.0;                // Idsat exponent
+    parameter real    u0      = 600.0;              // mobility, for the KC default [cm^2/Vs]
+    parameter real    nsub    = 0.0 from [0:inf);   // substrate doping [cm^-3]
+    parameter real    nss     = 0.0 from [0:inf);   // surface states [cm^-2]
+    parameter real    tpg     = 1.0 from [-1:1];    // gate: +1 opp, -1 same, 0 Al
+    parameter real    gamma   = 0.0 from [0:inf);   // body effect [sqrt(V)]
+    parameter real    gamma1  = 0.0;                // linear body term [1/V]
+    parameter real    sigma   = 0.0;                // DIBL
+    parameter real    phi     = 0.6 from (0:inf);   // surface potential [V]
+    parameter real    lambda  = 0.0;                // channel-length modulation [1/V]
+    parameter real    lambda0 = 0.0;                // CLM, defaults to lambda [1/V]
+    parameter real    lambda1 = 0.0;                // CLM body coefficient [1/V^2]
 
     // ---- series resistance ------------------------------------------------
-    parameter real rd  = 0.0 from [0:inf);   // ohm (0 => d' collapses onto d)
-    parameter real rs  = 0.0 from [0:inf);   // ohm
-    parameter real rsh = 0.0 from [0:inf);   // ohm/square
-    parameter real nrd = 1.0 from [0:inf);   // squares (0/absent => 1 square)
-    parameter real nrs = 1.0 from [0:inf);
+    parameter real    rd  = 0.0 from [0:inf);  // drain resistance, 0 => d' collapses onto d [ohm]
+    parameter real    rs  = 0.0 from [0:inf);  // source resistance [ohm]
+    parameter real    rsh = 0.0 from [0:inf);  // sheet resistance [ohm/square]
+    parameter real    nrd = 1.0 from [0:inf);  // drain squares (0/absent => 1 square)
+    parameter real    nrs = 1.0 from [0:inf);  // source squares
 
     // ---- bulk junctions ---------------------------------------------------
-    parameter real is   = 1e-14 from [0:inf);  // A
-    parameter real js   = 0.0   from [0:inf);  // A/m^2
-    parameter real pb   = 0.8   from (0:inf);  // V
-    parameter real cbd  = 0.0   from [0:inf);  // F
-    parameter real cbs  = 0.0   from [0:inf);  // F
-    parameter real cj   = 0.0   from [0:inf);  // F/m^2
-    parameter real cjsw = 0.0   from [0:inf);  // F/m
+    parameter real    is   = 1e-14 from [0:inf);  // saturation current [A]
+    parameter real    js   = 0.0 from [0:inf);    // saturation current density [A/m^2]
+    parameter real    pb   = 0.8 from (0:inf);    // junction potential [V]
+    parameter real    cbd  = 0.0 from [0:inf);    // b-d zero-bias cap [F]
+    parameter real    cbs  = 0.0 from [0:inf);    // b-s zero-bias cap [F]
+    parameter real    cj   = 0.0 from [0:inf);    // bottom cap [F/m^2]
+    parameter real    cjsw = 0.0 from [0:inf);    // sidewall cap [F/m]
     // MJ/MJSW = 0 is legal (constant sarg); only 1.0 must go, jqdep / f4 divide
     // by (1 - m).
-    parameter real mj   = 0.5   from [0:1);
-    parameter real mjsw = 0.5   from [0:1);
-    parameter real fc   = 0.5   from (0:1);
-    parameter real gmin = 1e-12 from [0:inf);
+    parameter real    mj   = 0.5 from [0:1);      // bottom grading
+    parameter real    mjsw = 0.5 from [0:1);      // sidewall grading
+    parameter real    fc   = 0.5 from (0:1);      // forward-bias cap coefficient
+    parameter real    gmin = 1e-12 from [0:inf);  // junction conductance floor [S]
 
     // ---- oxide / overlap --------------------------------------------------
-    parameter real tox  = 0.0 from [0:inf);  // m
-    parameter real cgso = 0.0 from [0:inf);  // F/m
-    parameter real cgdo = 0.0 from [0:inf);  // F/m
-    parameter real cgbo = 0.0 from [0:inf);  // F/m
-    parameter real ld   = 0.0 from [0:inf);  // m lateral diffusion
-    parameter real tnom = $simparam("tnom") + 273.15 from (0:inf);
+    parameter real    tox  = 0.0 from [0:inf);                         // oxide thickness [m]
+    parameter real    cgso = 0.0 from [0:inf);                         // gate-source overlap [F/m]
+    parameter real    cgdo = 0.0 from [0:inf);                         // gate-drain overlap [F/m]
+    parameter real    cgbo = 0.0 from [0:inf);                         // gate-bulk overlap [F/m]
+    parameter real    ld   = 0.0 from [0:inf);                         // lateral diffusion [m]
+    parameter real    tnom = $simparam("tnom") + 273.15 from (0:inf);  // nominal temperature [K]
 
     // ---- flicker noise ----------------------------------------------------
-    parameter real kf = 0.0 from [0:inf);
-    parameter real af = 1.0 from (0:inf);
+    parameter real    kf = 0.0 from [0:inf);  // flicker coefficient
+    parameter real    af = 1.0 from (0:inf);  // flicker exponent
 
     // ---- geometry (instance) ----------------------------------------------
     // SPICE DEFW/DEFL (CKTdefaultMosW/L), not 1 um.
-    parameter real w  = 1e-4 from (0:inf);
-    parameter real l  = 1e-4 from (0:inf);
-    parameter real m  = 1.0  from (0:inf);
-    parameter real ad = 0.0  from [0:inf);   // m^2 drain area
-    parameter real as = 0.0  from [0:inf);   // m^2 source area
-    parameter real pd = 0.0  from [0:inf);   // m drain perimeter
-    parameter real ps = 0.0  from [0:inf);   // m source perimeter
+    parameter real    w  = 1e-4 from (0:inf);  // channel width [m]
+    parameter real    l  = 1e-4 from (0:inf);  // channel length [m]
+    parameter real    m  = 1.0 from (0:inf);   // parallel multiplier
+    parameter real    ad = 0.0 from [0:inf);   // drain area [m^2]
+    parameter real    as = 0.0 from [0:inf);   // source area [m^2]
+    parameter real    pd = 0.0 from [0:inf);   // drain perimeter [m]
+    parameter real    ps = 0.0 from [0:inf);   // source perimeter [m]
 
     // bias-independent prep
     real ty, leff, weff, coxp, coxn, cox, betac, lam0, grd, grs, sqd, sqs;
@@ -97,9 +100,8 @@ module mos6(d, g, s, b);
     real cgsm, cgdm, cgbm, cbase, vdd, vdd1, cgsb, cgdb;
 
     // Junction depletion charge for one plate: the reverse-bias closed form
-    // below fc*pj, and above it the C0-continuous linearization C = f2 + f3*v
-    // (docs/mos1-shichman-hodges.md S1.3) -- here derived from the same closed
-    // form, so C and Q match value and slope at v = fc*pj.
+    // below fc*pj, and above it the linearization C = f2 + f3*v, derived from
+    // the same closed form so C and Q match value and slope at v = fc*pj.
     analog function real jqdep;
         input v, cz, pj, mg, fcc;
         real v, cz, pj, mg, fcc;
@@ -107,11 +109,8 @@ module mos6(d, g, s, b);
         begin
             k1 = cz * pj / (1.0 - mg);
             v0 = fcc * pj;
-            // mos6load.c:581,640's own guard (`if (Cbs != 0 || Cbssw != 0)`).
-            // Every term below carries `cz`, so with no junction capacitance
-            // the charge is exactly zero — reached, without this, through two
-            // `pow` per junction per Newton iteration. Same guard mos2/mos3
-            // already carry.
+            // mos6load.c:581,640 guard: every term below carries `cz`, so zero
+            // capacitance means zero charge without two `pow` per junction.
             if (cz == 0.0) jqdep = 0.0;
             else if (v < v0) begin
                 jqdep = k1 * (1.0 - pow(1.0 - v / pj, 1.0 - mg));
@@ -151,8 +150,7 @@ module mos6(d, g, s, b);
         fact1   = tnom / 300.15;
         fact2   = temp / 300.15;
         // arg is ngspice's literal 1/Joule form; the q factor below converts it,
-        // so it must NOT already be divided by q (that would cancel the term and
-        // leave pbfact = -3*vt*ln(T/300.15)).
+        // so it must NOT already be divided by q.
         arg1    = -egnom / (2.0 * 1.380649e-23 * tnom)
                   + 1.1150877 / (2.0 * 1.380649e-23 * 300.15);
         argt    = -eg / (2.0 * 1.380649e-23 * temp)
@@ -205,7 +203,7 @@ module mos6(d, g, s, b);
         capfsw = (1.0 + mjsw * (4e-4 * (temp - 300.15) - gmanew))
                  / (1.0 + mjsw * (4e-4 * (tnom - 300.15) - gmaold));
 
-        // Saturation currents at T (mos1 S1.3).
+        // Saturation currents at T (mos1temp.c).
         ist = exp(-eg / vt + egnom / vtnom);
         // JS wins only when BOTH areas are given: ngspice decides once for the
         // pair (mos6load.c:127-138), never mixing IS on one junction with JS*A
@@ -223,20 +221,16 @@ module mos6(d, g, s, b);
         else czbs = cj * as * m * capf;
         if (cbd > 0.0) czbd = cbd * m * capf;
         else czbd = cj * ad * m * capf;
-        // Spelled as a phi, like czbs/czbd two lines up, and for a reason
-        // that is not cosmetic: jqdep's `cz == 0.0` guard is a BRANCH
-        // CONDITION, and VerA re-expands a straight-line parameter expression
-        // inline at a condition instead of reading the precomputed slot — so
-        // the whole capfsw temperature ratio was re-derived twice per
-        // instance-eval just to be compared against zero (34 Ir/eval measured
-        // on devices/mos6_inverter). A phi is materialised, so both arms
-        // hoist. CJSW is `from [0:inf)`, so the else arm is the value the
-        // product already had.
+        // Written as an if (a phi) rather than a plain product: jqdep's
+        // `cz == 0.0` guard is a branch condition, and VerA re-expands a
+        // straight-line parameter expression inline at a condition instead of
+        // reading the precomputed slot. A phi is materialised, so both arms
+        // hoist. CJSW is `from [0:inf)`, so the else arm equals the product.
         if (cjsw > 0.0) czbssw = cjsw * ps * m * capfsw; else czbssw = 0.0;
         if (cjsw > 0.0) czbdsw = cjsw * pd * m * capfsw; else czbdsw = 0.0;
 
         // Channel prefactor: betac = KC * W * m / Leff, KC temperature-scaled
-        // like MOS1's KP (mos1 S1.3: KP(T) = KP / (T/Tnom)^1.5).
+        // like MOS1's KP: KP(T) = KP / (T/Tnom)^1.5.
         betac = kcx * weff * m / (leff * pow(temp / tnom, 1.5));
 
         // lamda0 defaults to LAMBDA when not given (mos6set.c).
@@ -244,7 +238,7 @@ module mos6(d, g, s, b);
         else lam0 = lambda;
 
         // Series conductances. R = 0 and no sheet resistance => the prime node
-        // collapses onto the terminal (mos1 S1.8), a switch branch here.
+        // collapses onto the terminal, a switch branch here.
         // Squares default to 1 whenever RSH is given (mos6temp.c:294-327), so
         // `.model ... RSH=20` alone still produces the series resistance.
         if (nrd > 0.0) sqd = nrd; else sqd = 1.0;
@@ -257,10 +251,11 @@ module mos6(d, g, s, b);
         else grs = 0.0;
 
         // ==================================================================
-        // Bias — S1.7 limiting, mos1.va's MODE ladder: "fetlimds" on both
-        // gate legs + "limvds" emits ngspice's old-vds swap (mos6load.c:
-        // 353-366); pnjlim stays on both bulk junctions (see mos1.va).
-        // Trailing `ty` = VerA frame sign (PMOS limits ty·v).
+        // Bias and limiting, as in mos1.va: "fetlimds" on both gate legs +
+        // "limvds" emits ngspice's old-vds swap (mos6load.c:353-366); pnjlim
+        // stays on both bulk junctions. vgd's $limit result is overwritten but
+        // the call registers the gate-drain leg. Trailing `ty` = VerA frame
+        // sign (PMOS limits ty*v).
         // ==================================================================
         vcrits = vt * ln(vt / (1.4142135623730951 * isats));
         vcritd = vt * ln(vt / (1.4142135623730951 * isatd));
@@ -271,7 +266,7 @@ module mos6(d, g, s, b);
         vbs = ty * $limit(V(b, si), "pnjlim", vt, vcrits, ty);
         vbd = ty * $limit(V(b, di), "pnjlim", vt, vcritd, ty);
 
-        // Mode swap: reversed drain/source roles for vds < 0 (mos1 S1.5).
+        // Mode swap: reversed drain/source roles for vds < 0.
         if (vds >= 0.0) begin
             mode = 1.0;
             vgx  = vgs;
@@ -288,32 +283,17 @@ module mos6(d, g, s, b);
         if (vb <= 0.0) sarg = sqrt(max(phit - vb, 0.0));
         else sarg = max(0.0, sqphi - vb / (2.0 * sqphi));
 
-        // ---- MOS6 threshold and overdrive (mos-legacy S1.3) ---------------
+        // ---- MOS6 threshold and overdrive (mos6load.c) --------------------
         von  = ty * vbit + gammax * sarg - gamma1 * vb - sigma * vdse;
         vgon = vgx - von;
 
-        // Power-law Vdsat is also needed by the Meyer block below cutoff —
-        // but THERE the base is the 1e-30 floor, so vdsat is a
-        // parameter-only constant and vdsatm collapses onto the DEVqmeyer
-        // floor. Writing the two arms out keeps that `pow` off the hot path
-        // (the cutoff arm hoists to precompute) instead of paying it on the
-        // 49% of instance-evals that are in cutoff — 105 Ir/eval measured on
-        // devices/mos6_inverter, 7% of the kernel. Bit-identical:
-        // max(vgon,0) IS vgon on the taken arm, and the derivative the
-        // untaken one used to carry is discarded by max(vdsat, 0.025) for
-        // every parameter set where kv*1e-30^nv < 0.025.
-        // ngspice does not compute it in cutoff either (mos6load.c:493).
-        // One ln shared by BOTH power laws, exactly as mos6load.c:502-505
-        // spells it (`sarg1 = log(vgon); vdsat = KV*exp(sarg1*NV);
-        // idsat = betac*exp(sarg1*NC)`). Two pow calls become one ln + two
-        // exp — gompute's pow IS an ln plus an exp, so this halves the libm
-        // work of the channel block and puts our transcendental profile on
-        // ngspice's. DELIBERATE NUMERICS CHANGE: it trades pow's ~0.5 ulp for
-        // exp(ln)'s ~2 ulp. Measured against the unpatched kernel over all
-        // 25,360 real biases of devices/mos6_inverter plus an 8,820-point
-        // torture grid: worst relative deviation 1.3e-13, ten orders below
-        // RELTOL. It moves TOWARDS the reference — this is ngspice's own
-        // arithmetic. Worth -75 Ir/eval measured in isolation.
+        // Power-law Vdsat. In cutoff the base is the 1e-30 floor, so vdsat is
+        // a parameter-only constant that hoists to precompute; the Meyer block
+        // still reads it through max(vdsat, 0.025). ngspice skips it in cutoff
+        // too (mos6load.c:493).
+        // One ln is shared by both power laws, as mos6load.c:502-505 spells it
+        // (`sarg1 = log(vgon); vdsat = KV*exp(sarg1*NV);
+        // idsat = betac*exp(sarg1*NC)`): one ln + two exp instead of two pow.
         if (vgon > 0.0) begin
             lvgon = ln(vgon);                  // vgon > 0 here, no floor needed
             vdsat = max(kv * exp(lvgon * nv), 1e-30);
@@ -326,7 +306,7 @@ module mos6(d, g, s, b);
         // ---- channel current ----------------------------------------------
         // u = min(vds/vdsat, 1) folds saturation into the linear expression:
         // f(1) = 1, so id = idsat*(1+lam*vds) there. Only C0 in gds at the
-        // seam -- that is level 6's documented wart, not a smoothing bug.
+        // seam: that is level 6's own behaviour, not a smoothing bug.
         idch = 0.0;
         gmch = 0.0;
         if (vgon > 0.0) begin
@@ -337,14 +317,14 @@ module mos6(d, g, s, b);
             fu    = (2.0 - u) * u;
             idch  = idsat * clm * fu;
             // d(idch)/d(vgon), exact for the expression above: the nc*fu term
-            // is the doc's gm = id*nc/vgon, the second is the blend's du term.
+            // is gm = id*nc/vgon, the second is the blend's du term.
             gmch  = idsat * clm * (nc * fu - 2.0 * nv * u * (1.0 - u)) / vgon;
         end
 
-        // ---- bulk junction diodes (mos1 S1.4). Exponent tangent-continued
-        // above 80·vt: pnjlim keeps Newton iterates below it, but LTE probes
-        // and sweep warm starts evaluate at unlimited x, and a flat clamp
-        // there zeroes the restoring slope (see bjt.va pnj).
+        // ---- bulk junction diodes. The exponent is tangent-continued above
+        // 80*vt: pnjlim keeps Newton iterates below it, but LTE probes and
+        // sweep warm starts evaluate unlimited, and a flat clamp there would
+        // zero the restoring slope.
         if (vbs > -3.0 * vt) begin
             ux  = min(vbs / vt, 80.0);
             ibs = isats * (exp(ux) * (1.0 + (vbs / vt - ux)) - 1.0) + gmin * vbs;
@@ -355,9 +335,9 @@ module mos6(d, g, s, b);
         end else ibd = gmin * vbd - isatd;
 
         // ==================================================================
-        // Meyer intrinsic gate capacitances (mos1 S1.6, DEVqmeyer).
+        // Meyer intrinsic gate capacitances (DEVqmeyer).
         // Values are the steady-state totals (2x the half-caps ngspice
-        // stores); the stamps average 0.5*(now + $prev(now)) — identical to
+        // stores); the stamps average 0.5*(now + $prev(now)), identical to
         // ngspice's half_now + half_prev MODETRAN sum, with the steady-state
         // total at OP/AC via $prev's commit at OP exit.
         // ==================================================================
@@ -423,17 +403,15 @@ module mos6(d, g, s, b);
                              + jqdep(vbd, czbdsw, pbt, mjsw, fc));
 
         // Gate: constant overlap + Meyer intrinsic. Meyer caps are
-        // capacitance-based, not charge-conserving (mos1 S1.6: the reference
-        // advances q = q_prev + cap*(v - v_prev)), so the Jacobian entry is
-        // exactly cap. ddt(cap*v) would instead add a spurious v*dcap/dv --
-        // O(100%) of cap in the depletion/weak-inversion bands and across the
-        // whole vdsat split. Both plates are evaluated in the type-corrected
-        // frame, where the two ty factors cancel.
+        // capacitance-based, not charge-conserving (ngspice advances
+        // q = q_prev + cap*(v - v_prev)), so the Jacobian entry is exactly
+        // cap; ddt(cap*v) would add v*dcap/dv. Both plates are evaluated in
+        // the type-corrected frame, where the two ty factors cancel.
         I(g, si) <+ (cgso * weff * m + 0.5 * (cgsb + $prev(cgsb))) * ddt(V(g, si));
         I(g, di) <+ (cgdo * weff * m + 0.5 * (cgdb + $prev(cgdb))) * ddt(V(g, di));
         I(g, b)  <+ (cgbo * leff * m + 0.5 * (cgbm + $prev(cgbm))) * ddt(V(g, b));
 
-        // Channel noise (docs/mos-legacy.md noise table; mos1noi.c template).
+        // Channel noise (mos1noi.c template).
         I(di, si) <+ white_noise(4.0 * 1.380649e-23 * temp * 2.0 / 3.0 * abs(gmch), "channel");
         // mos1noi.c:319 substitutes a nominal TOX = 1e-7 when Cox' is zero
         // rather than dropping the flicker source.
