@@ -15,7 +15,7 @@
 // current, so the AD Jacobian is the stamp. pnjlim is applied through $limit
 // as in diode.va; the junction exponent is also clamped so a wild iterate
 // cannot return inf. Excess phase is the xf1/xf2 filter network.
-module bjt(c, b, e, s);
+module gummel_poon(c, b, e, s);
     inout c, b, e, s;
     electrical c, b, e, s;
     electrical ci, bi, ei;   // c', b', e' — collapsed when RC/RB/RE are 0
