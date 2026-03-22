@@ -1,67 +1,50 @@
-// Independent voltage source — ngspice `V` card (ngspice manual §4.1
-// "Independent Sources"). Ports the six SPICE transient shapes plus DC off the
-// hand-written `modules/devices/src/source/vsource.zig` this file replaced; the
-// semantics below are ngspice's `src/spicelib/devices/vsrc/vsrcload.c`, not
-// the idealised textbook ones, because the transient benchmark diffs against
-// ngspice waveform-for-waveform.
+// Independent voltage source (V element): DC, AC and the six SPICE transient shapes.
 //
-// Time source is LRM §9.10 `$abstime`. Every waveform is an explicit function
-// of it — no `ddt`/`idt`, no state — so the stamp stays a pure RHS injection
-// and the Jacobian is constant.
+// Verilog-A implementation: Omar El-Sawy, University of Waterloo.
+// Based on: ngspice V element (vsrc/vsrcload.c, vsrcacct.c; ngspice manual
+//   §4.1 "Independent Sources").
+//   ngspice: Copyright Regents of the University of California and others,
+//   modified BSD license.
 //
-// WAVEFORM SELECTION. `waveform` is an integer discriminant written by the
-// netlist binder (src/builder.zig `applySourceWaveform`, `Wave` enum):
+// isource.va is this file with I() in place of V(); keep the two in step.
+//
+// Every waveform is an explicit function of `$abstime` (LRM §9.10), with no
+// ddt/idt and no state, so the stamp is a pure RHS injection and the Jacobian
+// is constant.
+//
+// WAVEFORM. `waveform` is an integer discriminant set by the builder
+// (applySourceWaveform, `Wave` enum):
 //   0 = DC   1 = PULSE   2 = SIN   3 = EXP   4 = PWL   5 = SFFM   6 = AM
-// A `.va` cannot take a string parameter and switch on it, and one module per
-// shape would multiply the `V` card's binder by six, so the discriminant is
-// the encoding. Only the selected arm evaluates (`if`/`else if`, not a
-// branchless select chain), so an unused shape costs nothing at runtime.
+// Only the selected `if` arm evaluates, so an unused shape costs nothing.
 //
-// THE -1 SENTINELS ARE LOAD-BEARING. ngspice `TRANinit` defaults PULSE
-// TR = TF = TSTEP and PW = PER = TSTOP, which are properties of the `.tran`
-// card, not of the source — unknowable when this model elaborates. The
-// defaults below are therefore -1, and src/builder.zig `resolvePulseDefaults`
-// patches them from the `.tran` directive. If that pass does not run (a Model
-// built directly, e.g. a unit test), the guards here degenerate to
-// near-instant edges and a never-falling pulse, i.e. an unspecified PULSE is a
-// STEP — which is what ngspice gives you — and never a 2 ns square wave.
+// THE -1 SENTINELS ARE LOAD-BEARING. ngspice (TRANinit) defaults PULSE
+// TR = TF = TSTEP and PW = PER = TSTOP: properties of the `.tran` card, not of
+// the source. They default to -1 here and the builder (resolvePulseDefaults)
+// patches them from `.tran`. Unpatched (a Model built directly, e.g. a unit
+// test), the guards below give near-instant edges and a never-falling pulse:
+// an unspecified PULSE is a STEP, as in ngspice.
 //
-// BREAKPOINTS. PULSE and PWL have exact corner times; a timestep that steps
-// over one smears the edge across the step, which is precisely the transient
-// accuracy under benchmark. LRM §5.10.5 `@(timer(start, period))` declares
-// those instants, and FastVAF turns the declared set into the generated
-// `contract.nextBreakpoint` the engine already asks for. The timer set is:
-//   PULSE — 4 periodic timers, one per corner (delay, rise end, fall start,
-//           fall end), period = the effective PER. `timer` is a period-based
-//           event and a PULSE is a periodic waveform, so this is exact and it
-//           reproduces ngspice's PULSE breakpoint set exactly.
-//   PWL   — 64 one-shot timers, one per table slot. A PWL corner set is DATA,
-//           not a period, so it cannot be one `timer(start, period)`; unused
-//           slots read 0 and collapse onto the `pwl_td` breakpoint, which is a
-//           real corner anyway, so the extra timers are harmless.
-// The timers are UNCONDITIONAL — LRM §5.8 forbids an event control inside an
-// `if`, so a source announces the PULSE corners whatever its `waveform` is.
-// Sentinels resolved from a `.tran` card: one spurious interior breakpoint at
-// t = TD + TSTEP, every other corner at or past TSTOP. Sentinels unresolved
-// (P_PW blows P_PER up to ~1e30): breakpoints at TD and TD + 1 ps only. Either
-// way it is one extra forced timepoint near t = 0, which costs a step and
-// changes no answer.
-// ponytail: 64 declared timers is 64×2 f64/bool Instance fields and 64 update
-// blocks per timestep, paid by every source in the netlist. The upgrade path is
-// a FastVAF `nextBreakpoint` that walks `pwl_times[0:pwl_len-1]` directly;
-// delete the timer wall the day that lands.
-// LRM §4.5: an analog-operator control argument (here the `timer` corner times)
-// must be a CONSTANT OR PARAMETER expression — the host evaluates it outside
-// the solve, so a `real` variable is rejected (E0515). These four sentinel
-// resolutions are needed twice, once as timer arguments and once as ordinary
-// arithmetic in the body, so they live as text macros rather than being
-// spelled out twice and drifting apart.
+// BREAKPOINTS. PULSE and PWL corners are declared with `@(timer(start,
+// period))` (LRM §5.10.5); VerA turns the set into `contract.nextBreakpoint`.
+//   PULSE: 4 periodic timers, one per corner, period = effective PER; this is
+//          ngspice's PULSE breakpoint set.
+//   PWL:   64 one-shot timers, one per table slot. Unused slots read 0 and
+//          collapse onto the `pwl_td` breakpoint, a real corner anyway.
+// Event controls cannot sit inside an `if` (LRM §5.8), so every source declares
+// the PULSE corners whatever its waveform. With sentinels resolved that is one
+// extra interior breakpoint at TD + TSTEP; unresolved, breakpoints at TD and
+// TD + 1 ps. Either way: one extra timepoint near t = 0, no change in answer.
+// ponytail: 64 timers cost every source 64x2 Instance fields and 64 updates per
+// step. Upgrade: a VerA `nextBreakpoint` that walks pwl_times[0:pwl_len-1].
+//
+// Timer arguments must be constant or parameter expressions (LRM §4.5, E0515),
+// and the same sentinel resolutions are needed as ordinary arithmetic in the
+// body, so they are macros rather than variables.
 `define P_TR   max(pulse_tr, 1.0e-12)
 `define P_TF   max(pulse_tf, 1.0e-12)
-// The `-1` sentinel decoded WITHOUT a `?:`: FastVAF's codegen accepts a
-// ternary as a timer START but not as a timer PERIOD (E0515), and this
-// macro feeds both. The sentinel is exactly -1.0, so `max(-pulse_pw, 0)`
-// is exactly 1 when unresolved and exactly 0 for any real width.
+// VerA accepts `?:` as a timer start but not as a timer period, and this macro
+// feeds both. The sentinel is exactly -1.0, so `max(-pulse_pw, 0)` is exactly
+// 1 when unresolved and exactly 0 for any real width.
 `define P_PW   (max(pulse_pw, 0.0) + max(-pulse_pw, 0.0) * 1.0e30)
 `define P_PER  max(pulse_per, `P_TR + `P_PW + `P_TF + 1.0e-12)
 
@@ -69,86 +52,79 @@ module vsource(p, n);
     inout p, n;
     electrical p, n;
 
-    // ---- DC / AC -----------------------------------------------------------
-    parameter real dc      = 0.0;   // V   operating-point value
-    parameter real acmag   = 1.0;   // V   .AC magnitude
-    parameter real acphase = 0.0;   // deg .AC phase
-    parameter integer waveform = 0; //     shape discriminant, see header
+    // ---- DC / AC ------------------------------------------------------------
+    parameter real dc      = 0.0;    // V    operating-point value
+    parameter real acmag   = 1.0;    // V    .AC magnitude
+    parameter real acphase = 0.0;    // deg  .AC phase
+    parameter integer waveform = 0;  //      shape discriminant, see header
 
-    // ---- PULSE(V1 V2 TD TR TF PW PER PHASE) -----------------------------------
-    parameter real pulse_v1    =  0.0;  // V   initial value
-    parameter real pulse_v2    =  0.0;  // V   pulsed value
-    parameter real pulse_td    =  0.0;  // s   delay
-    parameter real pulse_tr    = -1.0;  // s   rise time   (-1 = TSTEP)
-    parameter real pulse_tf    = -1.0;  // s   fall time   (-1 = TSTEP)
-    parameter real pulse_pw    = -1.0;  // s   pulse width (-1 = TSTOP)
-    parameter real pulse_per   = -1.0;  // s   period      (-1 = TSTOP)
-    parameter real pulse_phase =  0.0;  // deg phase offset into the period
+    // ---- PULSE(V1 V2 TD TR TF PW PER PHASE) ---------------------------------
+    parameter real pulse_v1    =  0.0;  // V    initial value
+    parameter real pulse_v2    =  0.0;  // V    pulsed value
+    parameter real pulse_td    =  0.0;  // s    delay
+    parameter real pulse_tr    = -1.0;  // s    rise time   (-1 = TSTEP)
+    parameter real pulse_tf    = -1.0;  // s    fall time   (-1 = TSTEP)
+    parameter real pulse_pw    = -1.0;  // s    pulse width (-1 = TSTOP)
+    parameter real pulse_per   = -1.0;  // s    period      (-1 = TSTOP)
+    parameter real pulse_phase =  0.0;  // deg  phase offset into the period
 
-    // ---- SIN(VO VA FREQ TD THETA PHASE) ---------------------------------------
-    parameter real sin_vo    = 0.0;  // V     offset
-    parameter real sin_va    = 0.0;  // V     amplitude
-    parameter real sin_freq  = 0.0;  // Hz
-    parameter real sin_td    = 0.0;  // s      delay
-    parameter real sin_theta = 0.0;  // 1/s    damping factor
-    parameter real sin_phase = 0.0;  // deg
+    // ---- SIN(VO VA FREQ TD THETA PHASE) -------------------------------------
+    parameter real sin_vo    = 0.0;  // V    offset
+    parameter real sin_va    = 0.0;  // V    amplitude
+    parameter real sin_freq  = 0.0;  // Hz   frequency
+    parameter real sin_td    = 0.0;  // s    delay
+    parameter real sin_theta = 0.0;  // 1/s  damping factor
+    parameter real sin_phase = 0.0;  // deg  phase
 
-    // ---- EXP(V1 V2 TD1 TAU1 TD2 TAU2) -----------------------------------------
-    parameter real exp_v1   = 0.0;      // V
-    parameter real exp_v2   = 0.0;      // V
-    parameter real exp_td1  = 0.0;      // s  rise delay
-    parameter real exp_tau1 = 1.0e-9;   // s  rise time constant
-    parameter real exp_td2  = 0.0;      // s  fall delay
-    parameter real exp_tau2 = 1.0e-9;   // s  fall time constant
+    // ---- EXP(V1 V2 TD1 TAU1 TD2 TAU2) ---------------------------------------
+    parameter real exp_v1   = 0.0;     // V  initial value
+    parameter real exp_v2   = 0.0;     // V  pulsed value
+    parameter real exp_td1  = 0.0;     // s  rise delay
+    parameter real exp_tau1 = 1.0e-9;  // s  rise time constant
+    parameter real exp_td2  = 0.0;     // s  fall delay
+    parameter real exp_tau2 = 1.0e-9;  // s  fall time constant
 
-    // ---- PWL(T1 V1 T2 V2 ... [R=<t>] [TD=<t>]) --------------------------------
-    // Flat arrays, not a table type: FastVAF flattens `real x[0:63]` into 64
-    // scalar Model fields, so there is no memory to index. VerA turns a RUNTIME
-    // index over them into ONE `switch` (see lower.zig lowerIndex), which is a
-    // constant number of instructions in the array's extent — so the bisection
-    // below costs ceil(log2(pwl_len)) reads and never touches an unfilled slot.
-    //
-    // ponytail: bisection, not ngspice's per-instance breakpoint cursor. A
-    // cursor is O(1) instead of O(log n), but the saving is ~3 switch
-    // dispatches on a 10-point table and it is STATE that has to rewind
-    // correctly when a rejected step moves `t` backwards. Bisection is
-    // stateless, so it is right across a reject by construction. Upgrade path
-    // if a deck ever ships a 1000-point table: an Instance cursor latched in
-    // updateState and reverted by stateCtl(.revert), with the bisection kept
-    // as the oracle it has to agree with.
+    // ---- PWL(T1 V1 T2 V2 ... [R=<t>] [TD=<t>]) ------------------------------
+    // VerA flattens `real x[0:63]` into 64 scalar Model fields and lowers a
+    // runtime index over them to one `switch` (lower.zig lowerIndex), so the
+    // bisection below costs ceil(log2(pwl_len)) switch reads.
+    // ponytail: bisection, not ngspice's per-instance breakpoint cursor. The
+    // cursor saves ~3 reads on a 10-point table but is state that must rewind
+    // on a rejected step; bisection is stateless. Upgrade for 1000-point
+    // tables: an Instance cursor latched in updateState and reverted by
+    // stateCtl(.revert), with bisection as its oracle.
     parameter real pwl_times[0:63]  = '{0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
     parameter real pwl_values[0:63] = '{0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
-    parameter integer pwl_len = 0;      //     points actually filled
-    parameter real pwl_repeat = 0.0;    // s   ngspice `r=<t>`: replay [r, t_last]
-    parameter real pwl_td     = 0.0;    // s   ngspice `td=<t>`
+    parameter integer pwl_len = 0;    //    points filled
+    parameter real pwl_repeat = 0.0;  // s  `r=<t>`: replay [r, t_last]
+    parameter real pwl_td     = 0.0;  // s  `td=<t>`
 
-    // ---- SFFM(VO VA FC MDI FS PHASEC PHASES) ----------------------------------
-    parameter real sffm_vo     = 0.0;  // V
-    parameter real sffm_va     = 0.0;  // V
-    parameter real sffm_fc     = 0.0;  // Hz  carrier
-    parameter real sffm_mdi    = 0.0;  //     modulation index
-    parameter real sffm_fs     = 0.0;  // Hz  signal
-    parameter real sffm_phasec = 0.0;  // deg
-    parameter real sffm_phases = 0.0;  // deg
+    // ---- SFFM(VO VA FC MDI FS PHASEC PHASES) --------------------------------
+    parameter real sffm_vo     = 0.0;  // V    offset
+    parameter real sffm_va     = 0.0;  // V    amplitude
+    parameter real sffm_fc     = 0.0;  // Hz   carrier frequency
+    parameter real sffm_mdi    = 0.0;  //      modulation index
+    parameter real sffm_fs     = 0.0;  // Hz   signal frequency
+    parameter real sffm_phasec = 0.0;  // deg  carrier phase
+    parameter real sffm_phases = 0.0;  // deg  signal phase
 
-    // ---- AM(VA VO MF FC TD PHASEC PHASES) -------------------------------------
-    parameter real am_va     = 0.0;  // V   amplitude
-    parameter real am_vo     = 0.0;  //     modulation-envelope offset (unitless)
-    parameter real am_mf     = 0.0;  // Hz  modulating frequency
-    parameter real am_fc     = 0.0;  // Hz  carrier frequency
-    parameter real am_td     = 0.0;  // s   delay
-    parameter real am_phasec = 0.0;  // deg
-    parameter real am_phases = 0.0;  // deg
+    // ---- AM(VA VO MF FC TD PHASEC PHASES) -----------------------------------
+    parameter real am_va     = 0.0;  // V    amplitude
+    parameter real am_vo     = 0.0;  //      envelope offset (dimensionless)
+    parameter real am_mf     = 0.0;  // Hz   modulating frequency
+    parameter real am_fc     = 0.0;  // Hz   carrier frequency
+    parameter real am_td     = 0.0;  // s    delay
+    parameter real am_phasec = 0.0;  // deg  carrier phase
+    parameter real am_phases = 0.0;  // deg  modulation phase
 
     real t, out;
-    // PULSE, sentinel-resolved (see header) — also the timer arguments.
     real p_tr, p_tf, p_pw, p_per, t_rel, t_mod;
     real t_sin, t_e1, t_e2, fm_mod, am_env, am_car;
     real t_e, t_first, t_last, v_first, v_last, tp, vp, tk, vk, span, excess;
     integer k, klo, khi;
 
     analog begin
-        // §5.10.5 corner-time events — see the BREAKPOINTS note in the header.
+        // Corner-time events, see BREAKPOINTS in the header.
         @(timer(pulse_td, `P_PER)) ;
         @(timer(pulse_td + `P_TR, `P_PER)) ;
         @(timer(pulse_td + `P_TR + `P_PW, `P_PER)) ;
@@ -220,34 +196,26 @@ module vsource(p, n);
 
         t = $abstime;
 
-        // ngspice `vsrctemp`: a zero/absent TR or TF is an INSTANT edge, which
-        // as a divisor is a NaN — 1 ps is the smallest edge the engine can
-        // resolve and keeps the ramp arms finite (LRM §4.3 finiteness).
-        p_tr = `P_TR;
-        p_tf = `P_TF;
-        // Unresolved PW/PER sentinel: "high forever", i.e. a step.
-        p_pw = `P_PW;
-        // A PER shorter than one full cycle would alias the shape onto itself;
-        // ngspice clamps it up to TR+PW+TF. Also guards PER = 0 in the modulo.
+        // A zero TR/TF is an instant edge and, as a divisor, a NaN: 1 ps is the
+        // smallest edge the engine resolves. An unresolved PW/PER means "high
+        // forever". PER is clamped up to TR+PW+TF as in ngspice (vsrcload.c),
+        // which also guards PER = 0 in the modulo.
+        p_tr  = `P_TR;
+        p_tf  = `P_TF;
+        p_pw  = `P_PW;
         p_per = `P_PER;
 
         out = dc;
 
-        // ngspice's TRANOP/DCOP split, in LRM spelling: the transient's own
-        // operating point (the "ic" phase, where analysis("tran") is ALSO
-        // true) evaluates the waveform at t = 0, while .op/.dc/.ac bias at
-        // the DC value — which the netlist layer fills from waveform(0) when
-        // the card gives none, and a .dc sweep OVERRIDES. Evaluating the
-        // waveform in every static analysis made sweeping a PULSE source a
-        // no-op; evaluating dc in every static analysis started a transient
-        // whose card gives BOTH from the wrong point (fourier/
-        // square_harmonics: DC 0 vs PULSE v1 = -1).
+        // ngspice's TRANOP/DCOP split: the transient's own operating point
+        // (the ic phase, where analysis("tran") is also true) evaluates the
+        // waveform at t = 0; .op/.dc/.ac bias at `dc`, which the builder fills
+        // from waveform(0) when the card gives none and a .dc sweep overrides.
         if (analysis("static") && !analysis("tran")) begin
             out = dc;
         end else if (waveform == 1) begin
-            // ---- PULSE ----------------------------------------------------
-            // ngspice holds V1 until TD, then repeats the trapezoid with
-            // period PER. PHASE is a fraction of the period, not of 2*pi.
+            // ---- PULSE: V1 until TD, then the trapezoid with period PER.
+            // PHASE is a fraction of the period (degrees of 360), not of 2*pi.
             t_rel = t - pulse_td;
             t_mod = t_rel + (pulse_phase / 360.0) * p_per;
             t_mod = t_mod - floor(t_mod / p_per) * p_per;
@@ -259,26 +227,21 @@ module vsource(p, n);
             else                                 out = pulse_v1;
 
         end else if (waveform == 2) begin
-            // ---- SIN ------------------------------------------------------
-            // Before TD ngspice emits VO + VA*sin(PHASE) — the waveform's own
-            // t=0 value, NOT VO, so a phase-shifted SIN does not step at TD.
-            // The damping envelope exp(-THETA*(t-TD)) applies only after TD.
+            // ---- SIN: before TD the value is VO + VA*sin(PHASE), the
+            // waveform's own t = 0 value, so a phase-shifted SIN does not step
+            // at TD. The damping envelope applies only after TD; its exponent
+            // is clamped so the prover sees a finite product.
             t_sin = t - sin_td;
             if (t_sin < 0.0)
                 out = sin_vo + sin_va * sin(sin_phase * `M_PI / 180.0);
             else
-                // Clamp the exponent: THETA*t overflows to -inf long before it
-                // means anything, and exp(-inf) is a legal 0 but the prover
-                // cannot see that the product stays finite.
                 out = sin_vo + sin_va
                     * sin(`M_TWO_PI * sin_freq * t_sin + sin_phase * `M_PI / 180.0)
                     * exp(min(-sin_theta * t_sin, 80.0));
 
         end else if (waveform == 3) begin
-            // ---- EXP ------------------------------------------------------
-            // ngspice superposes two independent one-sided exponentials on V1;
-            // they are NOT exclusive, which is why TD2 < TD1 still produces a
-            // sensible (if odd) waveform instead of a discontinuity.
+            // ---- EXP: two independent one-sided exponentials superposed on
+            // V1 (not exclusive, so TD2 < TD1 stays continuous).
             t_e1 = t - exp_td1;
             t_e2 = t - exp_td2;
             out = exp_v1;
@@ -286,9 +249,7 @@ module vsource(p, n);
             if (t_e2 > 0.0) out = out + (exp_v1 - exp_v2) * (1.0 - exp(min(-t_e2 / max(exp_tau2, 1.0e-15), 80.0)));
 
         end else if (waveform == 4) begin
-            // ---- PWL ------------------------------------------------------
-            // An empty table is not an error in ngspice, it is just the DC
-            // value; `out` already holds it.
+            // ---- PWL: an empty table is the DC value (already in `out`).
             if (pwl_len > 0) begin
                 t_e = t - pwl_td;
                 t_first = pwl_times[0];
@@ -296,8 +257,8 @@ module vsource(p, n);
                 t_last = pwl_times[pwl_len - 1];
                 v_last = pwl_values[pwl_len - 1];
 
-                // ngspice `r=<t>`: past the last point, jump back to time `r`
-                // and replay [r, t_last] forever.
+                // `r=<t>`: past the last point, jump back to time r and replay
+                // [r, t_last] forever.
                 if (pwl_repeat > 0.0 && pwl_len > 1 && t_e > t_last && t_last > pwl_repeat) begin
                     span = t_last - pwl_repeat;
                     if (span > 0.0) begin
@@ -309,22 +270,12 @@ module vsource(p, n);
                 if (t_e < 0.0 || t_e <= t_first)  out = v_first;
                 else if (t_e >= t_last)           out = v_last;
                 else begin
-                    // BISECTION, not a scan: a PWL table is sorted in t, so the
-                    // bracketing segment is found in ceil(log2(pwl_len)) reads
-                    // instead of pwl_len. Loop invariant, established by the two
-                    // guards above (t_first < t_e < t_last):
+                    // Bisection over the sorted times. Invariant (from the
+                    // guards above, t_first < t_e < t_last):
                     //     pwl_times[klo] <= t_e < pwl_times[khi]
-                    // and each step halves khi-klo, so it exits at khi=klo+1 —
-                    // the smallest khi with pwl_times[khi] > t_e.
-                    //
-                    // It is the SAME segment the linear scan this replaced
-                    // picked. That scan took every k with t[k-1] <= t_e < t[k];
-                    // for non-decreasing t only ONE k satisfies both (t[k] > t_e
-                    // is upward-closed from khi, t[k-1] <= t_e downward-closed
-                    // to khi), so its last write was khi too — a repeated knot
-                    // included, where the zero-width segment satisfies neither
-                    // half. Same segment through the same expression below is
-                    // the same bits, which is the conformance claim.
+                    // It exits at khi = klo+1, the smallest khi with
+                    // pwl_times[khi] > t_e: the unique segment a linear scan
+                    // would pick, repeated knots included.
                     klo = 0;
                     khi = pwl_len - 1;
                     while (khi - klo > 1) begin
@@ -335,25 +286,21 @@ module vsource(p, n);
                     vp = pwl_values[klo];
                     tk = pwl_times[khi];
                     vk = pwl_values[khi];
-                    // Coincident times (a vertical step) would divide by
-                    // zero; 1 fs makes it the steepest ramp we can express.
+                    // Coincident times (a vertical step) would divide by zero;
+                    // 1 fs makes it the steepest expressible ramp.
                     out = vp + (vk - vp) * (t_e - tp) / max(tk - tp, 1.0e-15);
                 end
             end
 
         end else if (waveform == 5) begin
-            // ---- SFFM -----------------------------------------------------
-            // Single-frequency FM. ngspice applies no delay to SFFM and both
-            // phases are in degrees.
+            // ---- SFFM: no delay; both phases in degrees.
             fm_mod = sffm_mdi * sin(`M_TWO_PI * sffm_fs * t + sffm_phases * `M_PI / 180.0);
             out = sffm_vo + sffm_va * sin(`M_TWO_PI * sffm_fc * t + sffm_phasec * `M_PI / 180.0 + fm_mod);
 
         end else if (waveform == 6) begin
-            // ---- AM -------------------------------------------------------
-            // ngspice: out = VA * (VO + sin(2*pi*MF*t + PHASES))
-            //               * sin(2*pi*FC*t + PHASEC), and hard 0 before TD —
-            // the envelope offset VO is dimensionless, it is not an output
-            // offset, so before TD the source is 0 and not VA*VO.
+            // ---- AM: VA * (VO + sin(2*pi*MF*t + PHASES)) * sin(2*pi*FC*t + PHASEC),
+            // and 0 before TD (VO is a dimensionless envelope offset, not an
+            // output offset).
             if (t >= am_td) begin
                 am_env = am_vo + sin(`M_TWO_PI * am_mf * t + am_phases * `M_PI / 180.0);
                 am_car = sin(`M_TWO_PI * am_fc * t + am_phasec * `M_PI / 180.0);

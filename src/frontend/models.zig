@@ -119,7 +119,7 @@ pub const DeviceId = enum {
     hisimhv_va,
     vdmos,
     // Q card levels.
-    bjt,
+    gummel_poon,
     vbic13_4t,
     hicumL2_va,
     // J / Z card levels.
@@ -223,8 +223,8 @@ const mos_levels = [_]Level{
 };
 
 const bjt_levels = [_]Level{
-    .{ .level = 1, .model = .bjt },
-    .{ .level = 2, .model = .bjt },
+    .{ .level = 1, .model = .gummel_poon },
+    .{ .level = 2, .model = .gummel_poon },
     .{ .level = 4, .model = .vbic13_4t },
     .{ .level = 9, .model = .vbic13_4t },
     .{ .level = 8, .model = .hicumL2_va },

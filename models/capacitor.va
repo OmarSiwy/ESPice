@@ -1,8 +1,10 @@
-// Linear capacitor. i(p,n) = c * d/dt V(p,n).
+// Capacitor: linear, i(p,n) = c * d/dt V(p,n).
+//
+// Verilog-A implementation: Omar El-Sawy, University of Waterloo.
 module capacitor(p, n);
     inout p, n;
     electrical p, n;
-    parameter real c = 1e-12 from [0:inf);
+    parameter real c = 1e-12 from [0:inf);  // F  capacitance
 
     analog I(p, n) <+ c * ddt(V(p, n));
 endmodule

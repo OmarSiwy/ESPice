@@ -1,18 +1,23 @@
-// ngspice Z element, `.model <name> NHFET|PHFET LEVEL=5` — HFET1, analytic HEMT
-// (heterostructure FET).  LEVEL=1 selects MES (Statz) in the parser
-// (inpdomod.c:145-198), LEVEL=2..4 MESA, LEVEL=6 HFET2 — this file is LEVEL=5.
+// HFET1: analytic HEMT (ngspice netlist letter Z, `.model <name> NHFET|PHFET
+// LEVEL=5`). LEVEL=1 selects MES (Statz), LEVEL=2..4 MESA, LEVEL=6 HFET2
+// (inpdomod.c:145-198).
+//
+// Verilog-A implementation: Omar El-Sawy, University of Waterloo.
+// Based on: ngspice hfet1 (hfetload.c, hfettemp.c, hfetsetup.c: hfeta(),
+//   leak(), diode()), the Berkeley SPICE3 HFET model (T. Ytterdal).
+//   ngspice: Copyright Regents of the University of California and others,
+//   modified BSD license.
 //
 // Spec: docs/jfet-mesfet-hfet.md §1 (topology + normal/inverse swap), §1.4
 // (DIBL V_T,eff, exponential subthreshold with unified n_s, knee shaping,
 // dual-exponential gate leakage + GGR), §1.5 (temperature/limiting), §3
-// (fet_eval spine).  §1.4 leaves the HFET1 equations un-transcribed and defers
-// to the named normative source, so the algebra below is transcribed from
-// ngspice hfet1/{hfetload,hfettemp,hfetsetup}.c — hfeta(), leak(), diode().
+// (fet_eval spine). §1.4 defers the HFET1 equations to ngspice, so the algebra
+// below is transcribed from hfetload.c/hfettemp.c.
 //
 // Topology (hfetload.c:443-470 stamp rows): d--RD--di, s--RS--si, g--RG--gi;
-// gate leakage gi-si / gi-di, channel di-si.  RDI/RSI are *not* RD/RS: they are
-// folded into the channel conductance as `rt` (hfeta()).  ngspice's RI/RF gate
-// access nodes (s''/d'') are not modelled — with their default RI=RF=0 they
+// gate leakage gi-si / gi-di, channel di-si. RDI/RSI are not RD/RS: they are
+// folded into the channel conductance as `rt` (hfeta()). ngspice's RI/RF gate
+// access nodes (s''/d'') are not modelled; with their default RI=RF=0 they
 // collapse onto si/di, which is where the Meyer caps land here.
 module hfet1(d, g, s);
     inout d, g, s;
@@ -235,10 +240,10 @@ module hfet1(d, g, s);
                 * exp(-phib / (1.380649e-23 * tempk));
 
         // ==== §3 bias ====================================================
-        // §1.5 limiting order: fetlim on both gate branches (hfetload.c:268).
-        // §4.5.15 lets the host own the algorithm; FastVAF returns the probe
-        // unchanged, so this only advertises the intent.  The MODEINITJCT seed
-        // (vgs = vgd = -1) is a solver initial guess, not expressible here.
+        // §1.5 limiting: fetlim on both gate branches (hfetload.c:268). The
+        // host owns the algorithm ($limit is the identity inside eval). The
+        // MODEINITJCT seed (vgs = vgd = -1) is a solver initial guess, not
+        // expressible here.
         vgs = type * $limit(V(gi, si), "fetlim", vto_t);
         vgd = type * $limit(V(gi, di), "fetlim", vto_t);
         vds = vgs - vgd;

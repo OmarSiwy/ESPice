@@ -616,7 +616,7 @@ fn inCsv(csv: []const u8, name: []const u8) bool {
 /// 100 KB no admitted root could ever be heavy (everything ≥ 80 KB is
 /// excluded outright), so `heavy_lanes` and the memory-protection chaining
 /// silently never engaged. 20 KB puts the largest admitted kernels
-/// (mos9/bjt at 20 KB, mos2 at 24 KB) on the chained lanes.
+/// (mos9/gummel_poon at 20 KB, mos2 at 24 KB) on the chained lanes.
 const heavy_model_bytes: u64 = 20 * 1024;
 
 /// Source size at or above which a model gets NO GPU kernel at all.
@@ -626,7 +626,7 @@ const heavy_model_bytes: u64 = 20 * 1024;
 ///
 ///   model        source   PTX      cold cuModuleLoadData
 ///   mos9          20 KB   731 KB    11.4 ms
-///   bjt           20 KB   895 KB    12.6 ms
+///   gummel_poon   20 KB   895 KB    12.6 ms
 ///   hicumL2_va    90 KB   9.7 MB    (not measured; sized like bsim4)
 ///   bsim4va      440 KB   8.7 MB    37.9 ms WARM
 ///   bsimsoi_va   399 KB  11.3 MB   308_667 ms  <-- five minutes, cold

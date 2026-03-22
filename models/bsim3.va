@@ -1,27 +1,28 @@
-// BSIM3v3.3.0 MOSFET (ngspice netlist letter M, LEVEL 8/49) — DC core.
+// BSIM3v3.3.0 MOSFET (ngspice netlist letter M, LEVEL 8/49): DC core.
 //
-// Spec: docs/devices/bsim3v3-core.md (normative math, section 1) transcribed
-// value-for-value from ngspice b3temp.c/b3ld.c (BSIM3v3.3.0, released
-// 07/29/2005). Order follows the doc: temperature/geometry/derived-default
-// prep first (b3temp.c, bias independent), then the V()-dependent chain
-// (b3ld.c lines 499-1239). Physical constants are b3temp.c's own #defines
-// (KboQ 8.617087e-5, EPSSI 1.03594e-10, ...), not CODATA — bit-exactness
-// against the C is the point.
+// Verilog-A implementation: Omar El-Sawy, University of Waterloo.
+// Based on: ngspice bsim3 (b3temp.c, b3ld.c, b3set.c), BSIM3v3.3.0 (released
+//   07/29/2005) by the UC Berkeley BSIM group (C. Hu et al.).
+//   ngspice: Copyright Regents of the University of California and others,
+//   modified BSD license.
 //
-// Not here, on purpose:
-//   * Gm/Gds/Gmb, junction conductances, and every hand-chained d*/dV in the
-//     C: the AD backend differentiates the value chain below, which is the
-//     same formulas — a second copy would diverge.
-//   * Intrinsic/overlap/junction charges (capMod 0-3), NQS, noise: every
-//     bench fixture is .op/.dc where ddt() stamps nothing. First .tran user
-//     adds the b3ld.c capMod=3 charge section as its own block.
-//   * L/W/P binning families (l*/w*/p* card params) and binunit: fixtures
-//     bin nothing; pParam->X then equals model->X verbatim.
+// Laid out like models/mos1.va (same sections, same local names); the channel
+// core is b3ld.c's (lines 499-1239), the bias-independent prep b3temp.c's.
+// Physical constants are b3temp.c's own #defines (KboQ 8.617087e-5, EPSSI
+// 1.03594e-10, ...), not CODATA, so the values match the C bit for bit.
+//
+// Not implemented:
+//   * Gm/Gds/Gmb, junction conductances and the hand-chained d*/dV of the C:
+//     AD differentiates the value chain below.
+//   * Intrinsic/overlap/junction charges (capMod 0-3), NQS, noise. The
+//     b3ld.c capMod=3 charge section is the next block to add for .tran.
+//   * L/W/P binning families (l*/w*/p* card params) and binunit:
+//     pParam->X equals model->X.
 //   * ACM > 0 junction geometry, version < 3.3 behavior switches.
 module bsim3(d, g, s, b);
     inout d, g, s, b;
     electrical d, g, s, b;
-    electrical di, si;              // behind RSH*NRD/NRS legs (collapse at 0)
+    electrical di, si;              // internal drain/source behind RSH*NRD/NRS (collapse at 0)
 
     // ---- model parameters (b3.c spellings, b3set.c defaults) --------------
     parameter real type = 1.0;           // +1 NMOS, -1 PMOS (builder-set)
@@ -137,13 +138,13 @@ module bsim3(d, g, s, b);
     parameter real mulu0  = 1.0;
 
     // bias-independent prep (b3temp.c)
-    real tk, tnomk, tratio, vtm0, vtm, eg0, eg, ni, cox, factor1, vt0, vcrit;
+    real tk, tnomk, tratio, vtnom, vt, eg0, eg, ni, cox, factor1, vt0, vcrit;
     real jst, jswt, jtmp;
     real dl, dwx, leff, weff, uax, ubx, ucx, uc1x, u0x, u0temp, vsattemp, rds0;
     real npeakx, ngatex, phi, sqrtphi, phis3, xdep0, litl, vbi, cdep0;
     real k1x, k2x, vbxx, vbmx, g1, g2, vbsc, vfbx, vth0x, vth0i, vfbi;
     real toxmx, k1ox, k2ox, dsubx, lt0, theta0vb0, thetarout;
-    real nvtmj, isbs, isbd, vjsm, vjdm, isevjsm, isevjdm, gdrain, gsource, gminx;
+    real nvtmj, isats, isatd, vjsm, vjdm, isevjsm, isevjdm, gdrain, gsource, gminx;
     // bias-dependent (b3ld.c)
     real vgs, vgd, vds, vbs, vbd, mode, vdsx, vgsx, vbsx;
     real vbseff, phis, sqrtphis, xdep, lt1, ltw, theta0, deltvth, dvthw;
@@ -151,43 +152,41 @@ module bsim3(d, g, s, b);
     real weffp, rds, abulk0, abulk, denomi, ueff, esat, esatl, lambda;
     real wvcox, wvcoxrds, vgst2vtm, vdsat, vdseff, diffvds;
     real vasat, vaclm, vadibl, va, vascbe;
-    real betax, fgche1, fgche2, gche, idl, idsa, ids, isubst;
+    real betax, fgche1, fgche2, gche, idl, idsa, id, isubst;
     real ibs, ibd;
     real t0, t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11;
     real tmp1, tmp2, tmp3, tmp4;
 
     // Junction diode current, b3ld.c lines 427-481: raw exponential with
-    // gmin, linearized above vjm when ijth > 0 (v3.3 behavior). The ijth=0
-    // exponential is tangent-continued above 80*nvtm the way mos1.va's jcur
-    // is: pnjlim keeps Newton iterates below it, but sweep warm starts probe
-    // unlimited x, and a hard exp there overflows. With ijth > 0 (default
-    // 0.1) the ngspice linear branch takes over well below that.
-    analog function real jdio;
+    // gmin, linearized above vjm when ijth > 0 (v3.3 behavior). With ijth = 0
+    // the exponential is tangent-continued above 80*nvtm as in mos1.va's
+    // jcur: sweep warm starts probe unlimited x, where a hard exp overflows.
+    analog function real jcur;
         input v, isat, nvtmx, vjm, isevjm, ijthx, gminy;
         real v, isat, nvtmx, vjm, isevjm, ijthx, gminy;
         real u;
         begin
-            if (isat <= 0.0) jdio = gminy * v;
+            if (isat <= 0.0) jcur = gminy * v;
             else if ((ijthx > 0.0) && (v >= vjm))
-                jdio = isevjm - isat + (isevjm / nvtmx) * (v - vjm) + gminy * v;
+                jcur = isevjm - isat + (isevjm / nvtmx) * (v - vjm) + gminy * v;
             else begin
                 u = min(v / nvtmx, 80.0);
-                jdio = isat * (exp(u) * (1.0 + (v / nvtmx - u)) - 1.0) + gminy * v;
+                jcur = isat * (exp(u) * (1.0 + (v / nvtmx - u)) - 1.0) + gminy * v;
             end
         end
     endfunction
 
     analog begin
-        // ============ b3temp.c: temperature-level constants ===============
+        // ============ temperature scaling (b3temp.c) ======================
         tnomk = tnom + 273.15;
         tk = $temperature;
         tratio = tk / tnomk;
-        vtm0 = 8.617087e-5 * tnomk;
-        vtm = 8.617087e-5 * tk;
+        vtnom = 8.617087e-5 * tnomk;
+        vt = 8.617087e-5 * tk;
         eg0 = 1.16 - 7.02e-4 * tnomk * tnomk / (tnomk + 1108.0);
         eg = 1.16 - 7.02e-4 * tk * tk / (tk + 1108.0);
         ni = 1.45e10 * (tnomk / 300.15) * sqrt(tnomk / 300.15)
-           * exp(21.5565981 - eg0 / (2.0 * vtm0));
+           * exp(21.5565981 - eg0 / (2.0 * vtnom));
         cox = 3.453133e-11 / tox;
         factor1 = sqrt(1.03594e-10 / 3.453133e-11 * tox);
         // pnjlim constants: CONSTvt0/CONSTroot2 (devsup frame, ngspice const.h)
@@ -197,7 +196,7 @@ module bsim3(d, g, s, b);
 
         // junction saturation current density temperature mapping
         if (tk != tnomk) begin
-            jtmp = exp((eg0 / vtm0 - eg / vtm + xti * ln(tratio)) / nj);
+            jtmp = exp((eg0 / vtnom - eg / vt + xti * ln(tratio)) / nj);
             jst = js * jtmp;
             jswt = jsw * jtmp;
         end else begin
@@ -207,7 +206,7 @@ module bsim3(d, g, s, b);
         if (jst < 0.0) jst = 0.0;
         if (jswt < 0.0) jswt = 0.0;
 
-        // ============ b3temp.c: geometry ==================================
+        // ============ geometry (b3temp.c) =================================
         t0 = pow(l, lln);
         t1 = pow(w, lwn);
         dl = lint + ll / t0 + lw / t1 + lwl / (t0 * t1);
@@ -216,13 +215,14 @@ module bsim3(d, g, s, b);
         dwx = wint + wl / t2 + ww / t3 + wwl / (t2 * t3);
         leff = l + xl - 2.0 * dl;
         weff = w + xw - 2.0 * dwx;
-        // ngspice E_BADPARMs on non-positive Leff/Weff; no diagnostics
-        // channel here, so clamp like mos1.va does for LD >= L/2.
+        // ngspice E_BADPARMs on non-positive Leff/Weff; clamp instead, as
+        // mos1.va does for LD >= L/2.
         // ponytail: silent 1e-9 floor; report the day a real deck trips it.
         if (leff < 1.0e-9) leff = 1.0e-9;
         if (weff < 1.0e-9) weff = 1.0e-9;
 
-        // ============ b3temp.c: mobility/velocity temperature =============
+        // ============ parameter defaulting (b3temp.c) =====================
+        // ---- mobility / velocity temperature
         uax = ua + ua1 * (tratio - 1.0);
         ubx = ub + ub1 * (tratio - 1.0);
         if ($param_given(uc)) ucx = uc;
@@ -240,7 +240,7 @@ module bsim3(d, g, s, b);
         vsattemp = vsat - at * (tratio - 1.0);
         rds0 = (rdsw + prt * (tratio - 1.0)) / pow(weff * 1.0e6, wr);
 
-        // ============ b3temp.c: doping-derived quantities =================
+        // ---- doping-derived quantities
         if ($param_given(nch)) begin
             npeakx = nch;
             if (npeakx > 1.0e20) npeakx = npeakx * 1.0e-6;   // m^-3 card
@@ -251,16 +251,16 @@ module bsim3(d, g, s, b);
         ngatex = ngate;
         if (ngatex > 1.000001e24) ngatex = ngatex * 1.0e-6;
 
-        phi = 2.0 * vtm0 * ln(npeakx / ni);
+        phi = 2.0 * vtnom * ln(npeakx / ni);
         sqrtphi = sqrt(phi);
         phis3 = sqrtphi * phi;
         xdep0 = sqrt(2.0 * 1.03594e-10 / (1.60219e-19 * npeakx * 1.0e6)) * sqrtphi;
         litl = sqrt(3.0 * xj * tox);
-        vbi = vtm0 * ln(1.0e20 * npeakx / (ni * ni));
+        vbi = vtnom * ln(1.0e20 * npeakx / (ni * ni));
         cdep0 = sqrt(1.60219e-19 * 1.03594e-10 * npeakx * 1.0e6 / 2.0 / phi);
 
         // k1/k2: given wins (missing one defaults); else derived from the
-        // gamma1/gamma2/vbx/vbm ladder — doc section 1.8, b3temp.c:652-706.
+        // gamma1/gamma2/vbx/vbm ladder, b3temp.c:652-706.
         vbmx = vbm;
         if ($param_given(k1) || $param_given(k2)) begin
             if ($param_given(k1)) k1x = k1; else k1x = 0.53;
@@ -310,31 +310,33 @@ module bsim3(d, g, s, b);
         t0 = exp(-0.5 * drout * leff / lt0);
         thetarout = pdiblc1 * (t0 + 2.0 * t0 * t0) + pdiblc2;
 
-        // ============ b3temp.c: junction sat currents, series R ===========
-        nvtmj = vtm * nj;
-        if ((as <= 0.0) && (ps <= 0.0)) isbs = 1.0e-14;
-        else isbs = as * jst + ps * jswt;
-        if ((ad <= 0.0) && (pd <= 0.0)) isbd = 1.0e-14;
-        else isbd = ad * jst + pd * jswt;
+        // ============ junction sizing (b3temp.c) ==========================
+        nvtmj = vt * nj;
+        if ((as <= 0.0) && (ps <= 0.0)) isats = 1.0e-14;
+        else isats = as * jst + ps * jswt;
+        if ((ad <= 0.0) && (pd <= 0.0)) isatd = 1.0e-14;
+        else isatd = ad * jst + pd * jswt;
         vjsm = 0.0; isevjsm = 0.0;
         vjdm = 0.0; isevjdm = 0.0;
-        if ((isbs > 0.0) && (ijth > 0.0)) begin
-            vjsm = nvtmj * ln(ijth / isbs + 1.0);
-            isevjsm = isbs * exp(vjsm / nvtmj);
+        if ((isats > 0.0) && (ijth > 0.0)) begin
+            vjsm = nvtmj * ln(ijth / isats + 1.0);
+            isevjsm = isats * exp(vjsm / nvtmj);
         end
-        if ((isbd > 0.0) && (ijth > 0.0)) begin
-            vjdm = nvtmj * ln(ijth / isbd + 1.0);
-            isevjdm = isbd * exp(vjdm / nvtmj);
+        if ((isatd > 0.0) && (ijth > 0.0)) begin
+            vjdm = nvtmj * ln(ijth / isatd + 1.0);
+            isevjdm = isatd * exp(vjdm / nvtmj);
         end
+
+        // ============ series resistance ===================================
         if ((rsh > 0.0) && (nrd > 0.0)) gdrain = m / (rsh * nrd);
         else gdrain = 0.0;
         if ((rsh > 0.0) && (nrs > 0.0)) gsource = m / (rsh * nrs);
         else gsource = 0.0;
 
-        // ============ limiting ladder (b3ld.c init, mos1.va idiom) ========
-        // ngspice fetlims against the per-iteration von; the clamp list here
-        // is stateless, so the zero-bias threshold stands in — limiting only
-        // shapes the Newton path, never the converged bias.
+        // ============ bias and limiting (b3ld.c) ==========================
+        // ngspice fetlims against the per-iteration von; the clamp list is
+        // stateless, so the zero-bias threshold stands in. Limiting shapes
+        // only the Newton path, never the converged bias.
         vgs = type * $limit(V(g, si), "fetlim", type * vth0i, type);
         vgd = type * $limit(V(g, di), "fetlim", type * vth0i, type);
         vds = type * $limit(V(di, si), "limvds", type);
@@ -342,11 +344,11 @@ module bsim3(d, g, s, b);
         vbs = type * $limit(V(b, si), "pnjlim", vt0, vcrit, type);
         vbd = type * $limit(V(b, di), "pnjlim", vt0, vcrit, type);
 
-        // ============ b3ld.c: junction diodes =============================
-        ibs = jdio(vbs, isbs, nvtmj, vjsm, isevjsm, ijth, gminx);
-        ibd = jdio(vbd, isbd, nvtmj, vjdm, isevjdm, ijth, gminx);
+        // ============ bulk junctions (b3ld.c) =============================
+        ibs = jcur(vbs, isats, nvtmj, vjsm, isevjsm, ijth, gminx);
+        ibd = jcur(vbd, isatd, nvtmj, vjdm, isevjdm, ijth, gminx);
 
-        // ============ b3ld.c: mode swap ===================================
+        // ============ mode swap ===========================================
         if (vds >= 0.0) begin
             mode = 1.0;
             vdsx = vds;
@@ -359,7 +361,8 @@ module bsim3(d, g, s, b);
             vbsx = vbd;
         end
 
-        // ============ b3ld.c: Vbseff, Phis, Xdep ==========================
+        // ============ drain current (b3ld.c) ==============================
+        // ---- Vbseff, Phis, Xdep
         t0 = vbsx - vbsc - 0.001;
         t1 = sqrt(t0 * t0 - 0.004 * vbsc);
         vbseff = vbsc + 0.5 * (t0 + t1);
@@ -375,7 +378,7 @@ module bsim3(d, g, s, b);
         end
         xdep = xdep0 * sqrtphis / sqrtphi;
 
-        // ============ b3ld.c: Vth =========================================
+        // ---- Vth
         t3 = sqrt(xdep);
 
         t0 = dvt2 * vbseff;
@@ -413,14 +416,14 @@ module bsim3(d, g, s, b);
             - k2ox * vbseff - deltvth - dvthw
             + (k3 + k3b * vbseff) * tmp2 + t5 - diblsft;
 
-        // ============ b3ld.c: n (subthreshold swing) ======================
+        // ---- n (subthreshold swing)
         tmp2 = nfactor * 1.03594e-10 / xdep;
         tmp3 = cdsc + cdscb * vbseff + cdscd * vdsx;
         tmp4 = (tmp2 + tmp3 * theta0 + cit) / cox;
         if (tmp4 >= -0.5) n = 1.0 + tmp4;
         else n = (1.0 + 3.0 * tmp4) / (3.0 + 8.0 * tmp4);
 
-        // ============ b3ld.c: poly gate depletion, Vgsteff ================
+        // ---- poly gate depletion, Vgsteff
         t0 = vfbi + phi;
         if ((ngatex > 1.0e18) && (ngatex < 1.0e25) && (vgsx > t0)) begin
             t1 = 1.0e6 * 1.60219e-19 * 1.03594e-10 * ngatex / (cox * cox);
@@ -433,22 +436,22 @@ module bsim3(d, g, s, b);
         end else vgs_eff = vgsx;
         vgst = vgs_eff - vth;
 
-        t10 = 2.0 * n * vtm;
+        t10 = 2.0 * n * vt;
         t11 = vgst / t10;                       // VgstNVt
         t9 = (2.0 * voff - vgst) / t10;         // ExpArg
         if (t11 > 34.0) vgsteff = vgst;
         else if (t9 > 34.0) begin
-            t0 = (vgst - voff) / (n * vtm);
+            t0 = (vgst - voff) / (n * vt);
             expvgst = exp(t0);
-            vgsteff = vtm * cdep0 / cox * expvgst;
+            vgsteff = vt * cdep0 / cox * expvgst;
         end else begin
             expvgst = exp(t11);
             t1 = t10 * ln(1.0 + expvgst);
-            t2 = 1.0 + t10 * cox / (vtm * cdep0) * exp(t9);
+            t2 = 1.0 + t10 * cox / (vt * cdep0) * exp(t9);
             vgsteff = t1 / t2;
         end
 
-        // ============ b3ld.c: Weff', Rds, Abulk ===========================
+        // ---- Weff', Rds, Abulk
         t9 = sqrtphis - sqrtphi;
         weffp = weff - 2.0 * (dwg * vgsteff + dwb * t9);
         if (weffp < 2.0e-8)
@@ -480,7 +483,7 @@ module bsim3(d, g, s, b);
         abulk = abulk * t0;
         abulk0 = abulk0 * t0;
 
-        // ============ b3ld.c: mobility ====================================
+        // ---- mobility
         if (mobmod == 1) begin
             t0 = vgsteff + vth + vth;
             t2 = uax + ucx * vbseff;
@@ -499,7 +502,7 @@ module bsim3(d, g, s, b);
         else denomi = (0.6 + t5) / (7.0 + 10.0 * t5);
         ueff = u0temp / denomi;
 
-        // ============ b3ld.c: Esat, Lambda, Vdsat =========================
+        // ---- Esat, Lambda, Vdsat
         wvcox = weffp * vsattemp * cox;
         wvcoxrds = wvcox * rds;
         esat = 2.0 * vsattemp / ueff;
@@ -517,7 +520,7 @@ module bsim3(d, g, s, b);
             lambda = 0.5 * (t1 + t2);
         end
 
-        vgst2vtm = vgsteff + 2.0 * vtm;
+        vgst2vtm = vgsteff + 2.0 * vt;
         if ((rds == 0.0) && (lambda == 1.0)) begin
             vdsat = esatl * vgst2vtm / (abulk * esatl + vgst2vtm);
         end else begin
@@ -531,13 +534,13 @@ module bsim3(d, g, s, b);
             vdsat = (t1 - t3) / t0;
         end
 
-        // ============ b3ld.c: Vdseff ======================================
+        // ---- Vdseff
         t1 = vdsat - vdsx - delta;
         t2 = sqrt(t1 * t1 + 4.0 * delta * vdsat);
         vdseff = vdsat - 0.5 * (t1 + t2);
         if (vdsx == 0.0) vdseff = 0.0;
 
-        // ============ b3ld.c: VAsat (uses Vdsat, pre-clamp Vdseff) ========
+        // ---- VAsat (uses Vdsat, pre-clamp Vdseff)
         tmp4 = 1.0 - 0.5 * abulk * vdsat / vgst2vtm;
         t9 = wvcoxrds * vgsteff;
         t0 = esatl + vdsat + 2.0 * t9 * tmp4;
@@ -548,7 +551,7 @@ module bsim3(d, g, s, b);
         if (vdseff > vdsx) vdseff = vdsx;
         diffvds = vdsx - vdseff;
 
-        // ============ b3ld.c: VACLM, VADIBL, VA, VASCBE ===================
+        // ---- VACLM, VADIBL, VA, VASCBE
         if ((pclm > 0.0) && (diffvds > 1.0e-10)) begin
             t0 = 1.0 / (pclm * abulk * litl);
             t2 = vgsteff / esatl;
@@ -579,16 +582,16 @@ module bsim3(d, g, s, b);
             else vascbe = 5.834617425e14 * leff / pscbe2;
         end else vascbe = 5.834617425e14;
 
-        // ============ b3ld.c: Ids chain ===================================
+        // ---- Ids chain
         betax = ueff * cox * weffp / leff;
         fgche1 = vgsteff * (1.0 - 0.5 * abulk * vdseff / vgst2vtm);
         fgche2 = 1.0 + vdseff / esatl;
         gche = betax * fgche1 / fgche2;
         idl = gche * vdseff / (1.0 + gche * rds);
         idsa = idl * (1.0 + diffvds / va);
-        ids = idsa * (1.0 + diffvds / vascbe);
+        id = idsa * (1.0 + diffvds / vascbe);
 
-        // ============ b3ld.c: substrate (impact ionization) current ======
+        // ---- substrate (impact ionization) current
         tmp1 = alpha0 + alpha1 * leff;
         if ((tmp1 <= 0.0) || (beta0 <= 0.0)) isubst = 0.0;
         else begin
@@ -599,10 +602,11 @@ module bsim3(d, g, s, b);
             isubst = t1 * idsa;
         end
 
-        // ============ contributions (b3ld.c line 2999 KCL, unswapped) =====
-        I(di, si) <+ type * mode * m * ids;
-        I(b, si) <+ type * m * ibs;
+        // ============ contributions =======================================
+        // b3ld.c line 2999 KCL, unswapped.
+        I(di, si) <+ type * mode * m * id;
         I(b, di) <+ type * m * ibd;
+        I(b, si) <+ type * m * ibs;
         if (mode > 0.0) I(di, b) <+ type * m * isubst;
         else I(si, b) <+ type * m * isubst;
 

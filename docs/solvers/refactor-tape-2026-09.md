@@ -33,7 +33,7 @@ device eval, not the solver:
 
 | bucket | Ir (self) | share | note |
 |---|---|---|---|
-| `DeviceBatch(bjt).eval` (incl. pow/exp/log) | — | ~40% incl. | pow 132.9M, exp 104.3M, log 159.8M self still present — temp-hoist did **not** remove the per-bias exponentials |
+| `DeviceBatch(gummel_poon).eval` (incl. pow/exp/log) | — | ~40% incl. | pow 132.9M, exp 104.3M, log 159.8M self still present — temp-hoist did **not** remove the per-bias exponentials |
 | BBD dense-block factor (inlined; tagged `sparse_lu.zig:SolverT.factor`) | 337.0M | 21.83% | dense LU + Schur, D1-read-miss 20.2% — the arena scatter/block strides, NOT the sparse axpy |
 | `SolverT.rawSolve` | 49.5M | 3.21% | |
 | `SparseLu.refactor` | 0 | 0% | not dispatched on this fixture |
