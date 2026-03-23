@@ -1,9 +1,41 @@
 # Handoff: solver performance pass (2026-09)
 
-Branch `worktree-agent-ab9985e38396806c7`, based on main `bcc13b3`. Details,
-retired experiments and follow-ups are in `docs/solvers/solver-perf-2026-09.md`.
+Two passes. Details, retired experiments and follow-ups are in
+`docs/solvers/solver-perf-2026-09.md`.
 
-## Committed
+## Pass 2 (branch `worktree-agent-a2a7be1e9219c3d1d`, based on main `6bfb0c0`)
+
+All builds and tests in this pass are `-Dgpu=false` (coordinator
+instruction). The GPU-kernel build and its test run were not done here.
+
+### Verification of pass 1
+
+`a87cb8c` (pass 1 tip) against `bcc13b3` (its base), both `-Dgpu=false`,
+every one of the 616 fixture decks run with `--backend=cpu`: raw files,
+stdout, stderr and exit codes are byte-identical except
+`ac/bench_medium_ladder_filter` raw (1394 of 7128 values, max abs 5.1e-13,
+max rel 2.4e-6), as documented. `zig build test -Dgpu=false` at `a87cb8c`:
+unit tests 302/302, correctness 518/616 with the same failure list as main
+(`scaling_inverter_chain_4k` fails as Timeout or ValueMismatch depending on
+machine load).
+
+### Committed
+
+| change | numbers |
+|---|---|
+| `SparseLu.factor`: supernode panels + DFS scan end (`lend`), bitwise | grid factor 212.6M -> 123.3M Ir; `scaling_resistor_grid_100x100` 357.5M -> 272.4M Ir; circuit decks within 0.05% |
+
+### In progress
+
+- Small-matrix refactor tape (task b): flat `{dst, l, u}` slot triples,
+  one loop per column, used when the factor has at most 2048 flops.
+  Prototype (scratch tree) is bitwise the column refactor on every dump;
+  per Newton step (factor + solveNeg, bench Ir) vacask_mul 3223 -> 2790,
+  vacask_graetz 2900 -> 2568, inverter_chain_256 83.7k -> 70.1k.
+
+## Pass 1 (branch `worktree-agent-ab9985e38396806c7`, based on main `bcc13b3`)
+
+### Committed
 
 | commit | change | numbers |
 |---|---|---|
@@ -17,7 +49,7 @@ Every commit: `zig build -Dgpu=false` and `zig build test -Dgpu=false`
 green (unit tests 299 -> 302, correctness 518/616, the same pass set as main,
 diffed through `c74392b`).
 
-## Not done
+### Not done
 
 - No uncommitted work.
 - Final verification of `ef8d056` on the default build (`-Dgpu=true`), a
@@ -25,7 +57,7 @@ diffed through `c74392b`).
   end-to-end before/after were not run.
 - `zig build bench` (needs `nix develop .#benchmarking`) was not run.
 
-## Left, ranked by remaining solver share
+### Left, ranked by remaining solver share
 
 - Full factor on high-fill matrices (59% of `resistor_grid_100x100`): needs
   a supernodal numeric phase.
@@ -36,7 +68,7 @@ diffed through `c74392b`).
 - `scaling_inverter_chain_4k`: 321 of 360 s are the OP falling back to
   pseudo-transient continuation (`dc/op.zig`), not the solver.
 
-## Solver profile (self Ir share, after `c74392b`)
+### Solver profile (self Ir share, after `c74392b`)
 
 | deck | total Ir | refactor | full factor | solve | lanes | converger |
 |---|---|---|---|---|---|---|

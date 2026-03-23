@@ -95,6 +95,97 @@ Same operations in the same order: the factors are bitwise identical.
 | `scaling_resistor_grid_100x100` whole run Ir | 484M | 357M |
 | `scaling_resistor_grid_100x100` wall, median of 11 | 308 ms | 218 ms |
 
+### Supernode panels (second pass)
+
+After the hoist, the 100x100 grid factor was still 59% of its deck:
+about 80M Ir of DFS and 96M Ir of scatter-axpy per factor (12.4M axpy
+elements). The fill there is supernodal. Consecutive steps s, s+1 with
+L[:,s] = {row of s+1} ∪ L[:,s+1] hold 97% of the axpy elements in
+supernodes of width 2 or more, and 69% in width 16 or more. Circuit matrices
+have almost none (`parallel_inverters_2000`: 0%, `inverter_chain_256`:
+0.4%). The one other case is the AC real-equivalent 2n matrix, where each
+complex entry is a 2x2 block: `sweep_opamp_wl_5000` has 73% in supernodes
+of width 4 to 7 with short row lists.
+
+The data questions, answered before the code:
+
+1. In: the column being factored (dense `w`, its reach in topo order) and
+   the finished columns of L. Out: the same `w` updates, U entries and L
+   column as the column-at-a-time loop, bit for bit.
+2. How many: one panel per supernode, a few thousand per factor on the grid;
+   one full factor per deck on the linear decks this targets.
+3. Widths: steps, rows and slots are below n or |L|, so u32, matching every
+   other index in `SparseLu`.
+4. Access: a run of panel steps reads the panel column-major (contiguous per
+   member step) and gathers/scatters `w` once per row per run, not once per
+   (row, step). Block rows go through a dense scratch so the triangular part
+   is contiguous axpys.
+5. Lifetime: scratch of one `factor` call, capacity retained with the other
+   L/U lists. `refactor` never reads it.
+6. Parallel: rows of a run are independent lanes (4 f64 per ymm). Columns
+   are not (left-looking dependency).
+
+What it does, all inside `factor`:
+
+- `lend[s]`: the DFS scan of L[:,s] stops just after the row pivoted at
+  s+1 when every later entry of L[:,s] is in L[:,s+1]. Descending into that
+  child marks all of them, so the skipped checks could only have found
+  marked rows: the traversal, and so the topological order, is unchanged.
+- Panels: when step k joins step k-1's supernode (and the supernode started
+  on an L column of at least 32 rows), column k is copied into a dense
+  column-major panel whose first rows are the supernode's own pivot rows in
+  step order. When the reach walks a run of consecutive steps of one panel,
+  the run is applied as a dense triangular solve on those block rows plus a
+  4-wide update of the remaining rows. Per row the subtractions still happen
+  in step order, mul then sub (no FMA contraction), so the result is
+  bitwise the column loop's. The run is contiguous in the topological order
+  by construction, so no other column's update interleaves.
+- Two copies of the column loop (`inline for` over a comptime flag): the
+  plain loop runs until some L column reaches 32 rows, then the supernodal
+  loop takes over. Circuit matrices stay in the plain loop.
+
+Differential test: `SparseTests` "factor: supernode panels are bitwise the
+column-at-a-time refactor" (24x24 grid plus a void unknown, f64 and f32):
+`refactor` replays the stored U order one column at a time, and its L, U
+and diagonal must equal the panel factor's exactly. asm (`-mcpu=native`):
+the row kernel is `vbroadcastsd` + `vmulpd ymm` + `vsubpd ymm`, the block
+axpy `vmulpd`/`vsubpd ymm`; no `vfmadd`/`vfnmadd` anywhere in `factor`.
+
+| measure (callgrind Ir) | before | after |
+|---|---|---|
+| bench, one factor of the 100x100 grid Laplacian | 212.6M | 123.3M |
+| `scaling_resistor_grid_100x100` whole run | 357.5M | 272.4M |
+| `scaling_resistor_grid_32x32` whole run | 20.36M | 19.98M |
+| `scaling_parallel_inverters_100` whole run | 353.83M | 353.74M |
+| `sweep_opamp_wl_200` whole run | 279.20M | 279.31M |
+| `scaling_inverter_chain_256` whole run | 4,715.5M | 4,713.5M |
+
+All 616 corpus decks produce byte-identical raw files, stdout and exit
+codes (one stderr differs in the order of two parallel HDL loader lines).
+
+Tuning and dropped variants, bench Ir for three factors plus setup:
+
+- Always-on supernode bookkeeping (link scan per column, panel check per U
+  entry, no loop switch): grid 675M to 450M, but circuit matrices paid 8 to
+  12% more per factor (opamp AC 2n 453M to 495M, `parallel_inverters_2000`
+  46.6M to 50.7M). The comptime loop switch brought those to +0.7% and
+  +1.4%, and whole-deck Ir moves by under 0.05%.
+- Panels finalized only when a supernode ends: the columns of the supernode
+  still growing were applied one at a time, which on the grid is most of
+  the work (538M against 508M for incremental panels, before the other
+  changes).
+- `panel_min_rows` 8 and 16: grid 423M and 421M against 419M at 32; 8 opens
+  panels on the opamp's 2x2 complex blocks and costs 21% there.
+- The `lend` shortcut alone: grid 675M to 626M.
+
+Not done: the DFS is now the larger half of the grid factor. A supernodal
+DFS (one adjacency scan per supernode, as SuperLU does) changes the
+traversal order and with it the per-row summation order, so every full
+factor in the corpus would move by rounding. Sorting the reach by pivot
+step (a valid topological order) before the numeric phase would make the
+order independent of the DFS and allow pruning; that is a deliberate
+one-time FP change and was left for a separate decision.
+
 ## Converger: per-iterate O(n) passes
 
 `newton` computed `norm_f = max |rhs|` on every iterate, and nothing but the
