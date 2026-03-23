@@ -186,6 +186,67 @@ step (a valid topological order) before the numeric phase would make the
 order independent of the DFS and allow pruning; that is a deliberate
 one-time FP change and was left for a separate decision.
 
+## Small matrices: the refactor tape
+
+On the vacask decks (n = 10 and 12, nnz 36) a Newton step's factor plus
+solve cost about 3,200 Ir (bench: `direct.Solver.factor` on new values plus
+`solveNeg`, over 2,000 steps). The work is about 36 A entries, 36 flops and
+20 L entries; the rest is loop control on trip counts of 1 to 3. LLVM
+unrolls the A scatter by 8, so each column pays the unrolled loop's guard
+chain (12 Ir per A entry), and every U entry pays a `scatterAxpy` preamble
+(about 35 Ir per call). `refactor-tape-2026-09.md` recorded a flat tape
+losing on fourbitadder (110k flops, a 220KB tape streamed with no reuse) and
+listed "tiny n, the tape fits in L1" as the case that would reopen it.
+
+The data questions:
+
+1. In: A's values in CSC order. Out: lx, ux, udiag, the same bits as the
+   column replay.
+2. How many: one refactor per Newton iterate, about a million per vacask
+   run, each on the same pattern.
+3. Widths: slots and flops are below |L| + |U| + n + 1, u32 like the rest
+   of `SparseLu`. u16 would fit these matrices; not tried, the Ir is in
+   loop control, not bytes.
+4. Access: the tape streams in order, one {dst, l, u} triple per flop (read
+   together, so AoS). The slot values `tv` are ux ++ udiag ++ lx ++ one
+   discard slot, so an A entry, a U value, a pivot and an L value are all one
+   index space and nothing goes through the dense `w`.
+5. Lifetime: built at the end of each full factor with the pivot order;
+   valid until the next one.
+6. Parallel: no. Flops of a column depend on the previous columns' L.
+
+`refactorTape`: zero `tv`, scatter A through `amap` in one pass, then per
+column one flat loop `tv[dst] -= tv[l] * tv[u]` and the pivot check and L
+normalization on a contiguous slice, then copy out to ux, udiag and lx. A U
+value is read in place: its slot is final before any flop reads it (the
+same argument that lets the column loop zero `w[i]` as it consumes it). Same
+operations per slot in the same order, so bitwise the column loop. Built
+only when the factor has at most 2,048 flops (a 24KB tape). The zero fill
+and the copies are hand-laned: a compiler_rt `memset` call cost 760 Ir per
+refactor on vacask_mul's 100 slots, which cancelled the whole win in the
+first cut.
+
+`refactorColumns` (the previous loop) is still the path above 2,048 flops
+and is the oracle: SparseTests "refactor: the small-matrix tape is bitwise
+the column replay" runs eight value sets (f64 and f32) through both on a
+40-unknown matrix with a zero-diagonal branch row and a void unknown,
+including one set where the growth monitor fails in both.
+
+| measure | before | after |
+|---|---|---|
+| bench Ir per Newton step, vacask_mul (n=12) | 3,223 | 2,790 |
+| bench Ir per Newton step, vacask_graetz (n=10) | 2,900 | 2,568 |
+| bench Ir per Newton step, inverter_chain_256 (n=261) | 83,738 | 70,065 |
+| `vacask_mul` whole run Ir | 11,996.9M | 11,493.7M |
+| `vacask_graetz` whole run Ir | 18,029.0M | 17,472.7M |
+| `scaling_inverter_chain_256` whole run Ir | 4,713.5M | 4,616.5M |
+| `scaling_parallel_inverters_100` whole run Ir | 353.7M | 348.5M |
+| `scaling_resistor_grid_32x32` whole run Ir (no tape: 213k flops) | 19.98M | 20.03M |
+| `vacask_mul` wall, min of 7 (load 25 to 40) | 3243 ms | 2859 ms |
+| `scaling_inverter_chain_256` wall, min of 7 | 413.8 ms | 410.1 ms |
+
+All 616 decks byte-identical in raw, stdout and exit code.
+
 ## Converger: per-iterate O(n) passes
 
 `newton` computed `norm_f = max |rhs|` on every iterate, and nothing but the

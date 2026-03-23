@@ -396,6 +396,11 @@ pub fn main() void {
     // refactor" in src/analysis/tests/solvers.zig (SparseTests), same
     // standalone-import reason as LaneLu above.
     //
+    // SparseLu.refactorTape (small matrices) is scalar; only its zero fill
+    // and copy-out are laned. Oracle: refactorColumns, the column replay.
+    // Case: "refactor: the small-matrix tape is bitwise the column replay"
+    // in the same SparseTests.
+    //
     // converger.updateAndNorm (x_old = x; x += dx; max scaled |dx|) is
     // W-wide with a scalar tail. Max is exact, so the lane split cannot change
     // the result; its bitwise case against the scalar loop, lengths 0..39 with
