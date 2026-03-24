@@ -24,17 +24,18 @@ machine load).
 | commit | change | numbers |
 |---|---|---|
 | `5f0b644` | `SparseLu.factor`: supernode panels + DFS scan end (`lend`), bitwise | grid factor 212.6M -> 123.3M Ir; `scaling_resistor_grid_100x100` 357.5M -> 272.4M Ir; circuit decks within 0.05% |
-| next | `SparseLu.refactor`: flat slot tape for factors with <= 2048 flops, bitwise | vacask_mul 12.00G -> 11.49G Ir (-4.2%), graetz -3.1%, inverter_chain_256 -2.1% |
+| `4632ffe` | `SparseLu.refactor`: flat slot tape for factors with <= 2048 flops, bitwise | vacask_mul 12.00G -> 11.49G Ir (-4.2%), graetz -3.1%, inverter_chain_256 -2.1% |
+| next | `SparseLu.solve`: flat forward pass for tape matrices, bitwise | vacask_mul 11.49G -> 11.36G Ir (-1.2%), graetz -0.9%, inverter_chain_256 -0.4% |
 
 Each commit: 616 decks byte-identical to main (raw, stdout, exit code),
 `zig build test -Dgpu=false` unit tests green, correctness 518/616 with
 main's failure set.
 
-### Next candidates for small n (measured in the bench, not committed)
+### Next candidates for small n
 
-- Flat forward substitution for tape matrices (one pass over L in column
-  order with a per-entry zero-skip, bitwise): per-step bench Ir 2790 ->
-  2688 on vacask_mul, 70.1k -> 67.5k on inverter_chain_256.
+- Raise `tape_max_flops` past 2048: the hot bench shows -17% Ir per step at
+  n=2005 (12k flops, a 144KB tape), but that tape no longer fits L1; needs a
+  deck-level wall measurement (`parallel_inverters_2000`).
 
 ## Pass 1 (branch `worktree-agent-ab9985e38396806c7`, based on main `bcc13b3`)
 

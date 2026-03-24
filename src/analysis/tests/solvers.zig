@@ -3548,7 +3548,7 @@ const SparseTests = struct {
         }
     }
 
-    test "refactor: the small-matrix tape is bitwise the column replay" {
+    test "refactor and solve: the small-matrix tape is bitwise the column path" {
         // A random circuit-like matrix small enough for the tape: diagonal
         // entries, a few off-diagonals per column, a branch row with a
         // structural zero diagonal (off-diagonal pivot), and a void unknown.
@@ -3610,6 +3610,7 @@ const SparseTests = struct {
                     try b.factor(gpa, &col_ptr, row_idx.items, vals, 1e-3);
                     try testing.expect(a.tv.items.len != 0);
                     try testing.expect(std.mem.indexOfScalar(bool, a.void_col, true) != null);
+                    b.tv.clearRetainingCapacity(); // b solves column by column
                 }
                 const ra = a.refactor(&col_ptr, vals, 1e-12);
                 const rb = SparseLu(T).test_access.refactorColumns(&b, &col_ptr, vals, 1e-12);
@@ -3618,12 +3619,30 @@ const SparseTests = struct {
                     try testing.expectEqualSlices(T, b.lx.items, a.lx.items);
                     try testing.expectEqualSlices(T, b.ux.items, a.ux.items);
                     try testing.expectEqualSlices(T, b.udiag, a.udiag);
+                    // Solve: zeros and signed zeros exercise the skip.
+                    var rhs: [n]T = undefined;
+                    for (&rhs, 0..) |*x, i| x.* = switch (i % 5) {
+                        0 => 0,
+                        1 => -0.0,
+                        else => r.float(T) - 0.5,
+                    };
+                    var xa: [n]T = undefined;
+                    var xb: [n]T = undefined;
+                    a.solve(&rhs, &xa);
+                    b.solve(&rhs, &xb);
+                    try testing.expectEqualSlices(u8, std.mem.asBytes(&xb), std.mem.asBytes(&xa));
+                    // All -0: every entry skips; subtracting l * -0 would give +0.
+                    @memset(&rhs, -0.0);
+                    a.solve(&rhs, &xa);
+                    b.solve(&rhs, &xb);
+                    try testing.expectEqualSlices(u8, std.mem.asBytes(&xb), std.mem.asBytes(&xa));
                 } else |e| {
                     try testing.expectEqual(5, round);
                     failed += 1;
                     try testing.expectError(e, rb);
                     try a.factor(gpa, &col_ptr, row_idx.items, vals, 1e-3);
                     try b.factor(gpa, &col_ptr, row_idx.items, vals, 1e-3);
+                    b.tv.clearRetainingCapacity();
                 }
                 for (a.w) |wi| try testing.expectEqual(@as(T, 0), wi);
             }
