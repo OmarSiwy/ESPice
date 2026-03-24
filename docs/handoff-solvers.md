@@ -37,6 +37,22 @@ main's failure set.
   fourbitadder, no wall change (144KB tape, past L1).
 - Always-on supernode bookkeeping, `panel_min_rows` 8/16, panels finalized
   only at supernode end: each measured worse than what shipped.
+- 8-wide skip over marked children in the supernodal DFS: -2% Ir, no wall
+  change.
+- One flop loop across columns in `refactorTape`, and a laned copy for
+  `direct`'s value snapshot: both cost Ir per step.
+
+### Left
+
+- `Circuit.evalNewtonCpu` calls compiler_rt `memset` twice per Newton
+  iterate: 4.4% of vacask_mul (503M Ir). Outside `solvers/`
+  (analysis/Circuit.zig, problem/numerics.zig); an inline laned zero like
+  `SparseLu.fillZero` fixes it.
+- Grid factor: the DFS is now the larger half. A supernodal DFS or sorting
+  the reach by pivot step changes every full factor's summation order; it
+  needs a decision to accept a one-time FP change.
+- Refactor on vacask is ~1,630 Ir per call for 36 flops; what is left is
+  per-column loop setup (12 columns) and the copy-out of the values.
 
 ## Pass 1 (branch `worktree-agent-ab9985e38396806c7`, based on main `bcc13b3`)
 
