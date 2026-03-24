@@ -263,6 +263,16 @@ since each column divides by its pivot before its entries run.
 | `scaling_inverter_chain_256` whole run | 4,616.5M | 4,596.7M |
 | `scaling_parallel_inverters_100` whole run | 348.5M | 347.1M |
 
+Retired: raising `tape_max_flops` from 2,048 to 16,384. Four corpus decks
+have a factor in that band (`scaling_parallel_inverters_2000` at 12,005
+flops, `bench_tran_fourbitadder` 4,515, `bench_medium_resistor_mesh` 3,290,
+`bench_ngspice_rca3040` 2,113). Ir moved -2.0% on parallel_inverters_2000
+(6,965.8M to 6,825.9M), -2.0% on fourbitadder, +0.1% on rca3040, but wall
+time on parallel_inverters_2000 did not: min of 15, both run orders,
+804.6/828.9 ms before against 822.4/819.7 ms after. The 144KB tape is past
+L1; the earlier fourbitadder result (Ir down, wall up) is the same effect.
+Kept at 2,048.
+
 ## Converger: per-iterate O(n) passes
 
 `newton` computed `norm_f = max |rhs|` on every iterate, and nothing but the
