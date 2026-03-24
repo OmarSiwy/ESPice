@@ -411,9 +411,9 @@ pub const Circuit = struct {
         zeroSimd(self.g_vals);
         if (self.has_charge) {
             zeroSimd(self.c_vals);
-            @memset(self.q_vec, 0);
+            zeroSimd(self.q_vec);
         }
-        @memset(self.rhs, 0);
+        zeroSimd(self.rhs);
         const pl = self.ownPlanes();
         for (self.batches) |b| b.eval(b.ctx, &pl, 0, b.count, x, t);
         self.groundStamp(x);
@@ -438,7 +438,7 @@ pub const Circuit = struct {
         if (self.gpu_hook != null) return self.eval(x, t);
         self.lin.valid = false; // q_vec is one of the four memoized planes
         if (self.par_eval) |p| return p.evalQ(self.batches, self.ownPlanes(), x, t);
-        @memset(self.q_vec, 0);
+        zeroSimd(self.q_vec);
         const pl = self.ownPlanes();
         for (self.batches) |b| if (b.hooks.eval_q) |f| f(b.ctx, &pl, 0, b.count, x, t);
     }
@@ -507,17 +507,17 @@ pub const Circuit = struct {
             @memcpy(self.g_vals, self.g_base);
             if (self.has_charge) {
                 @memcpy(self.c_vals, self.c_base);
-                @memset(self.q_vec, 0);
+                zeroSimd(self.q_vec);
             }
-            @memset(self.rhs, 0);
+            zeroSimd(self.rhs);
             for (self.batches) |b| b.eval_newton(b.ctx, &pl, 0, b.count, x, t);
         } else {
             zeroSimd(self.g_vals);
             if (self.has_charge) {
                 zeroSimd(self.c_vals);
-                @memset(self.q_vec, 0);
+                zeroSimd(self.q_vec);
             }
-            @memset(self.rhs, 0);
+            zeroSimd(self.rhs);
             for (self.batches) |b| b.eval(b.ctx, &pl, 0, b.count, x, t);
         }
         self.groundStamp(x);
@@ -546,8 +546,8 @@ pub const Circuit = struct {
         @memset(x_zero, 0);
 
         self.lin.valid = false; // stamps rhs/q_vec at x = 0
-        @memset(self.rhs, 0);
-        if (self.has_charge) @memset(self.q_vec, 0);
+        zeroSimd(self.rhs);
+        if (self.has_charge) zeroSimd(self.q_vec);
         const pl: Planes = .{ .g_vals = self.g_base, .c_vals = self.c_base, .rhs = self.rhs, .q_vec = self.q_vec };
         for (self.batches) |b| {
             if (b.has_const_jacobian) b.eval(b.ctx, &pl, 0, b.count, x_zero, 0);

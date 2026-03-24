@@ -2497,12 +2497,12 @@ pub const ParEval = struct {
     }
 
     pub fn eval(self: *ParEval, batches: []const Batch, own_planes: Planes, has_charge: bool, x: []const f64, t: f64) void {
-        @memset(own_planes.g_vals, 0);
+        zeroSimd(own_planes.g_vals);
         if (has_charge) {
-            @memset(own_planes.c_vals, 0);
-            @memset(own_planes.q_vec, 0);
+            zeroSimd(own_planes.c_vals);
+            zeroSimd(own_planes.q_vec);
         }
-        @memset(own_planes.rhs, 0);
+        zeroSimd(own_planes.rhs);
         self.forkJoin(batches, own_planes, has_charge, x, t, .full);
     }
 
@@ -2521,9 +2521,9 @@ pub const ParEval = struct {
             @memcpy(own_planes.g_vals, g_base);
             if (has_charge) {
                 @memcpy(own_planes.c_vals, c_base);
-                @memset(own_planes.q_vec, 0);
+                zeroSimd(own_planes.q_vec);
             }
-            @memset(own_planes.rhs, 0);
+            zeroSimd(own_planes.rhs);
             self.forkJoin(batches, own_planes, has_charge, x, t, .newton);
         } else {
             // ponytail: full eval already owns plane clearing and worker dispatch.
@@ -2533,7 +2533,7 @@ pub const ParEval = struct {
 
     /// Charges only — the threaded twin of `Circuit.evalQ`'s serial body.
     pub fn evalQ(self: *ParEval, batches: []const Batch, own_planes: Planes, x: []const f64, t: f64) void {
-        @memset(own_planes.q_vec, 0);
+        zeroSimd(own_planes.q_vec);
         self.forkJoin(batches, own_planes, true, x, t, .charge);
     }
 
@@ -2612,17 +2612,17 @@ pub const ParEval = struct {
             // else: the other three slabs keep whatever the last `.full` or
             // `.newton` left, and `reduce` does not read them back.
             if (mode != .charge) {
-                @memset(pl.g_vals[win.slot_lo..win.slot_hi], 0);
-                @memset(pl.rhs[win.row_lo..win.row_hi], 0);
+                zeroSimd(pl.g_vals[win.slot_lo..win.slot_hi]);
+                zeroSimd(pl.rhs[win.row_lo..win.row_hi]);
                 pl.g_vals[self.nnz1 - 1] = 0;
                 pl.rhs[self.n1 - 1] = 0;
             }
             if (has_charge) {
                 if (mode != .charge) {
-                    @memset(pl.c_vals[win.slot_lo..win.slot_hi], 0);
+                    zeroSimd(pl.c_vals[win.slot_lo..win.slot_hi]);
                     pl.c_vals[self.nnz1 - 1] = 0;
                 }
-                @memset(pl.q_vec[win.row_lo..win.row_hi], 0);
+                zeroSimd(pl.q_vec[win.row_lo..win.row_hi]);
                 pl.q_vec[self.n1 - 1] = 0;
             }
         }
@@ -2671,6 +2671,17 @@ pub const ParEval = struct {
 };
 
 const vec_width = std.simd.suggestVectorLength(f64) orelse 4;
+
+// ponytail: same loop as numerics.zeroSimd; this module can't import numerics
+// (the GPU kernel build doesn't wire it). Merge when both move to core/.
+// compiler_rt's memset, which `@memset` lowers to here, stores one byte per
+// iteration.
+fn zeroSimd(buf: []f64) void {
+    const V = @Vector(vec_width, f64);
+    var i: usize = 0;
+    while (i + vec_width <= buf.len) : (i += vec_width) buf[i..][0..vec_width].* = @as(V, @splat(0));
+    for (buf[i..]) |*v| v.* = 0;
+}
 
 fn addSimd(dst: []f64, src: []const f64) void {
     const W = vec_width;
