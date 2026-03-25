@@ -1,6 +1,4 @@
 * Ensemble corners fixture: MOS inverter chain under PVT corner lanes.
-* KNOWN GAP: nonzero transient output-start time is rejected by the dispatcher.
-* This correctness test should currently fail; implement support to match the expected output.
 * Expected results: bench_ensemble_pvt_corners.expected.json
 * Origin: benchmark/fixtures/ensemble/pvt_corners/circuit.sp
 Vdd vdd 0 DC 3.3

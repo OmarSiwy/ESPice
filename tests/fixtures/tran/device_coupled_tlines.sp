@@ -1,6 +1,4 @@
 * Unit fixture: coupled transmission lines (CPL), two-conductor crosstalk.
-* KNOWN GAP: nonzero transient output-start time is rejected by the dispatcher.
-* This correctness test should currently fail; implement support to match the expected output.
 * Expected results: device_coupled_tlines.expected.json
 * Origin: benchmark/fixtures/devices/coupled_tlines/circuit.sp
 Vin in1 0 DC 0 PULSE(0 1 1n 0.5n 0.5n 5n 20n)

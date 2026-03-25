@@ -1,6 +1,4 @@
 * Bypass fixture: 3-edge burst then long idle — 95% of the run is latent.
-* KNOWN GAP: nonzero transient output-start time is rejected by the dispatcher.
-* This correctness test should currently fail; implement support to match the expected output.
 * Expected results: bench_bypass_burst_clock.expected.json
 * Origin: benchmark/fixtures/bypass/burst_clock/circuit.sp
 Vin in 0 DC 0 PWL(0 0 0.1u 5 1u 5 1.1u 0 2u 0 2.1u 5 3u 5 3.1u 0 100u 0)

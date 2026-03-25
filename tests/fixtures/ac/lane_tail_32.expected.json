@@ -194,8 +194,5 @@
     "finite_values_required": true,
     "all_requested_analyses_must_complete": true
   },
-  "netlist_sha256": "48977bdfa4787489c0350e710c8fb8e992854c119e4f689704eb98579387a2de",
-  "known_gaps": [
-    "non-DEC frequency sweeps are not yet supported by the shared analysis dispatcher"
-  ]
+  "netlist_sha256": "3a6782c09d4bc7d0de4f85099ee4552a51f799213f8f5f21611a955e5a98417a"
 }

@@ -1,6 +1,4 @@
 Synthetic reduction of grounded floating-metal capacitance from StrongARM PEX
-* KNOWN GAP: nonzero transient output-start time is rejected by the dispatcher.
-* This correctness test should currently fail; implement support to match the expected output.
 * Expected results: metal_island_tran.expected.json
 * Origin: benchmark/fixtures/layout/metal_island_tran/circuit.sp
 * Extracted metal connected only to ground capacitance must remain at zero.

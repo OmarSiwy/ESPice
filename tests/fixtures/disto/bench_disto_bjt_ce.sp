@@ -1,6 +1,4 @@
 * DISTO fixture: BJT common-emitter distortion.
-* KNOWN GAP: full complex second- and third-harmonic distortion output is not yet exposed.
-* This correctness test should currently fail; implement support to match the expected output.
 * Expected results: bench_disto_bjt_ce.expected.json
 * Origin: benchmark/fixtures/disto/bjt_ce/circuit.sp
 Vcc vcc 0 DC 12
