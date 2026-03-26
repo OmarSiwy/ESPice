@@ -1,6 +1,4 @@
 * RC ladder, 60 sections: ~60-node mid-scale transient test.
-* KNOWN GAP: nonzero transient output-start time is rejected by the dispatcher.
-* This correctness test should currently fail; implement support to match the expected output.
 * Expected results: bench_medium_rc_ladder_50.expected.json
 * Origin: benchmark/fixtures/medium/rc_ladder_50/circuit.sp
 Vin n0 0 DC 0 PULSE(0 1 0 1n 1n 100u 200u)

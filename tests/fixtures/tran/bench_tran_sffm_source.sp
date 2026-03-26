@@ -1,6 +1,4 @@
 * SFFM stimulus into an RC: single-frequency FM, the last independent-source
-* KNOWN GAP: nonzero transient output-start time is rejected by the dispatcher.
-* This correctness test should currently fail; implement support to match the expected output.
 * Expected results: bench_tran_sffm_source.expected.json
 * Origin: benchmark/fixtures/tran/sffm_source/circuit.sp
 * waveform nothing in the suite exercised. PULSE, SIN and PWL are each covered

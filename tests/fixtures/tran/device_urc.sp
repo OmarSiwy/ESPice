@@ -1,6 +1,4 @@
 * URC (Uniform distributed RC line) transient response.
-* KNOWN GAP: nonzero transient output-start time is rejected by the dispatcher.
-* This correctness test should currently fail; implement support to match the expected output.
 * Expected results: device_urc.expected.json
 * Origin: benchmark/fixtures/devices/urc/circuit.sp
 * ngspice: U device with URC model.

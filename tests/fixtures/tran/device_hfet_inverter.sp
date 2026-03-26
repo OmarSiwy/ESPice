@@ -1,6 +1,4 @@
 DCFL inverter circuit
-* KNOWN GAP: nonzero transient output-start time is rejected by the dispatcher.
-* This correctness test should currently fail; implement support to match the expected output.
 * Expected results: device_hfet_inverter.expected.json
 * Origin: benchmark/fixtures/devices/hfet_inverter/circuit.sp
 

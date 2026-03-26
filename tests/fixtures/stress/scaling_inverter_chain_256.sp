@@ -1,6 +1,4 @@
 * CMOS Inverter Chain: 256 stages — stress test
-* KNOWN GAP: nonzero transient output-start time is rejected by the dispatcher.
-* This correctness test should currently fail; implement support to match the expected output.
 * Expected results: scaling_inverter_chain_256.expected.json
 * Origin: benchmark/fixtures/scaling/inverter_chain_256/circuit.sp
 * Every stage carries a 10 fF load: the level-1 card declares no TOX/CGSO/CJ,

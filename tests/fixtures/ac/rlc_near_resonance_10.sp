@@ -1,6 +1,4 @@
 * Resonant amplification and conditioning near pole frequency
-* KNOWN GAP: non-DEC frequency sweeps are not yet supported by the shared analysis dispatcher.
-* This correctness test should currently fail; implement support to match the expected output.
 * Expected results: rlc_near_resonance_10.expected.json
 Vin in 0 AC 1
 R1 in a 632.4555320336759
