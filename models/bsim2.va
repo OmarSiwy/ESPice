@@ -476,8 +476,10 @@ module bsim2(d, g, s, b);
         uvert = max(1.0 + vgeff * (ua + vgeff * ub), 0.2);
 
         u1s   = u10e + u1be * vbx;
-        vc    = max(u1s * vgeff / (aa * uvert), 0.0);
-        kk    = 0.5 * (1.0 + vc + sqrt(1.0 + 2.0 * vc));
+        // b2eval.c leaves Vc unclamped (U1s goes negative at deep Vbs); the
+        // floor only keeps the sqrt argument positive.
+        vc    = u1s * vgeff / (aa * uvert);
+        kk    = 0.5 * (1.0 + vc + sqrt(max(1.0 + 2.0 * vc, 1.0e-18)));
         vdsat = max(vgeff / (aa * sqrt(kk)), 1.0e-18);
         vdsch = min(vdsx, vdsat);
         t4    = vdsch / vdsat - 1.0;             // 0 at vdsat, -1 at vdsx = 0
@@ -502,13 +504,23 @@ module bsim2(d, g, s, b);
         // saturation (the triode expression evaluated at vdsat is exactly
         // b2eval.c's saturation branch, 0.5*beta*vgeff^2/(Aa*Kk), since
         // sqrt(Kk) = (1 + sqrt(1+2*Vc))/2).
-        idscore = betaeff * (vgeff - 0.5 * aa * vdsch) * vdsch;
+        // b2eval.c:337-343: below vglow the current is the closed form
+        // Beta*Vt^2*exp(Vof + Vgst/(n*Vt))*(1 - exp(-Vds/Vt)), with no
+        // Uvert/U1/Kk/Aa in it (only Beta's tanh still sees Vdsat).
+        if (vgst < vghe && vgst <= vgle)
+            idscore = beta * vt * vt
+                      * exp(vof + max(vgst / (nsub * vt), -60.0))
+                      * (1.0 - exp(-min(vdsx / vt, 30.0)));
+        else
+            idscore = betaeff * (vgeff - 0.5 * aa * vdsch) * vdsch;
 
-        // Output-conductance / hot-electron term; ai = 0 makes fclm exactly 1.
+        // Output-conductance / hot-electron term, b2eval.c: only past Vdsat
+        // and only when AI0 != 0 (AIB alone does not switch it on).
         ai   = ai0e + aibe * vbx;
         bi   = bi0e + bibe * vbx;
         dvds = max(vdsx - vdsat, 1.0e-20);
-        fclm = 1.0 + ai * exp(-max(min(bi / dvds, 30.0), -30.0));
+        fclm = (ai0e != 0.0 && vdsx > vdsat)
+               ? 1.0 + ai * exp(-min(bi / dvds, 30.0)) : 1.0;
 
         id  = max(idscore * fclm, 0.0);
         idst = (id + 1.0e-12 * vdsx) * m * type * mode;
