@@ -133,8 +133,9 @@ module bsim1(d, g, s, b);
         // P_eff = P0 + LP/Leff_um + WP/Weff_um
         vfbe  = vfb  + lvfb  / lum + wvfb  / wum;
         phie  = max(phi + lphi / lum + wphi / wum, 0.1);
-        k1e   = k1   + lk1   / lum + wk1   / wum;
-        k2e   = k2   + lk2   / lum + wk2   / wum;
+        // b1temp.c:124-125 clamps both body-effect coefficients at 0.
+        k1e   = max(k1 + lk1 / lum + wk1 / wum, 0.0);
+        k2e   = max(k2 + lk2 / lum + wk2 / wum, 0.0);
         etae  = eta  + leta  / lum + weta  / wum;
         x2ee  = x2e  + lx2e  / lum + wx2e  / wum;
         x3ee  = x3e  + lx3e  / lum + wx3e  / wum;
