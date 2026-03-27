@@ -822,7 +822,7 @@ module hisim2_va(d, g, s, b);
     `MPRnb( VFBCL     , 0.0        , "-"                              , "Channel length dependence of flat-band voltage" )
     `MPRnb( VFBCLP    , 1.0        , "-"                              , "Channel length dependence of flat-band voltage" )
     `MPRoo( PARL2     , 10.0E-9    , "m"                 , -inf ,   L , "Under diffusion  ")
-    `MPRcc( LP        ,  0         , "m"                  ,   0 ,   L , "Length of pocket potential  ")
+    `MPRcc( LP        , (CODEP!=0 ? 0 : 15e-9) , "m"          ,   0 ,   L , "Length of pocket potential  ") // HiSIM 2.80 (ngspice hsm2set.c:236) defaults LP to 15 nm
     `MPRoo( NSUBP     , (CODEP!=0 ? 1e17 : 1e18) , "1/cm^3" , 0 , inf , "Maximum pocket concentration ")
     `MPRoo( NSUBPL    , 0.001      , "-"                    , 0 , inf , "Starting channel length of NSUBP reduction" )
     `MPRnb( NSUBPFAC  , 1.0        , "-"                              , "Minimum factor of reduction" )
