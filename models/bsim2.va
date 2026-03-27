@@ -237,15 +237,21 @@ module bsim2(d, g, s, b);
     // q = pb*cj/(1-mj) * (1 - (1-v/pb)^(1-mj)), clamped at (1-v/pb) >= 0.01
     // (b2ld.c: `sarg = arg^(-mj)`, `q = pb*cj*(1 - arg*sarg)/(1-mj)`).
     // cja/cjswa are absolute farads (area/perimeter scaled by the caller).
-    // Bulk junction current. The exponent is tangent-continued above 80*vtx
-    // so the restoring slope survives evaluations at unlimited v.
+    // Bulk junction current, b2ld.c: linear (isat/vt + gmin)*v in reverse,
+    // Shockley forward. b2ld.c's RHS is cbd - (gbd - gmin)*vbd, so the
+    // converged current carries gmin twice; hence 2*gm. The exponent is
+    // tangent-continued above 80*vtx so the restoring slope survives
+    // evaluations at unlimited v.
     analog function real jcur;
         input v, isat, vtx, gm;
         real v, isat, vtx, gm;
         real u;
         begin
             u = min(v / vtx, 80.0);
-            jcur = isat * (exp(u) * (1.0 + (v / vtx - u)) - 1.0) + gm * v;
+            if (v <= 0.0)
+                jcur = (isat / vtx + 2.0 * gm) * v;
+            else
+                jcur = isat * (exp(u) * (1.0 + (v / vtx - u)) - 1.0) + 2.0 * gm * v;
         end
     endfunction
 
