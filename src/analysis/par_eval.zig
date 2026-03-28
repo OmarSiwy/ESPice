@@ -58,7 +58,17 @@ const Window = struct {
 /// `reduce` order as `.full`, so the q plane it leaves is bit-for-bit the one
 /// `.full` would have left at this width — which is the property the serial
 /// `Circuit.evalQ` promises against serial `eval`.
-const Mode = enum(u8) { full, newton, charge };
+pub const Mode = enum(u8) { full, newton, charge };
+
+/// Stamp instances [first, last) of one batch. The one per-mode dispatch the
+/// serial path and every lane share.
+pub fn stampRange(b: Batch, pl: *const Planes, first: u32, last: u32, x: []const f64, t: f64, mode: Mode) void {
+    switch (mode) {
+        .full => b.eval(b.ctx, pl, first, last, x, t),
+        .newton => b.eval_newton(b.ctx, pl, first, last, x, t),
+        .charge => if (b.hooks.eval_q) |f| f(b.ctx, pl, first, last, x, t),
+    }
+}
 
 pub const ParEval = struct {
     gpa: std.mem.Allocator,
@@ -84,7 +94,6 @@ pub const ParEval = struct {
     done: std.atomic.Value(u32),
     job_batches: []const Batch,
     job_own_planes: Planes,
-    job_has_charge: bool,
     job_x: []const f64,
     job_t: f64,
     job_mode: Mode,
@@ -205,7 +214,6 @@ pub const ParEval = struct {
             .done = .init(0),
             .job_batches = batches,
             .job_own_planes = undefined,
-            .job_has_charge = has_charge,
             .job_x = &.{},
             .job_t = 0,
             .job_mode = .full,
@@ -230,62 +238,22 @@ pub const ParEval = struct {
         self.* = undefined;
     }
 
-    pub fn eval(self: *ParEval, batches: []const Batch, own_planes: Planes, has_charge: bool, x: []const f64, t: f64) void {
-        zeroSimd(own_planes.g_vals);
-        if (has_charge) {
-            zeroSimd(own_planes.c_vals);
-            zeroSimd(own_planes.q_vec);
-        }
-        zeroSimd(own_planes.rhs);
-        self.forkJoin(batches, own_planes, has_charge, x, t, .full);
-    }
-
-    pub fn evalNewton(
-        self: *ParEval,
-        batches: []const Batch,
-        own_planes: Planes,
-        has_charge: bool,
-        has_baseline: bool,
-        g_base: []const f64,
-        c_base: []const f64,
-        x: []const f64,
-        t: f64,
-    ) void {
-        if (has_baseline) {
-            @memcpy(own_planes.g_vals, g_base);
-            if (has_charge) {
-                @memcpy(own_planes.c_vals, c_base);
-                zeroSimd(own_planes.q_vec);
-            }
-            zeroSimd(own_planes.rhs);
-            self.forkJoin(batches, own_planes, has_charge, x, t, .newton);
-        } else {
-            // ponytail: full eval already owns plane clearing and worker dispatch.
-            self.eval(batches, own_planes, has_charge, x, t);
-        }
-    }
-
-    /// Charges only — the threaded twin of `Circuit.evalQ`'s serial body.
-    pub fn evalQ(self: *ParEval, batches: []const Batch, own_planes: Planes, x: []const f64, t: f64) void {
-        zeroSimd(own_planes.q_vec);
-        self.forkJoin(batches, own_planes, true, x, t, .charge);
-    }
-
-    fn forkJoin(self: *ParEval, batches: []const Batch, own_planes: Planes, has_charge: bool, x: []const f64, t: f64, mode: Mode) void {
+    /// Stamp every batch into `own_planes` across the lanes. The caller has
+    /// already cleared (or baseline-seeded) the planes `mode` writes.
+    pub fn run(self: *ParEval, batches: []const Batch, own_planes: Planes, x: []const f64, t: f64, mode: Mode) void {
         if (self.n_lanes == 1) {
-            runLane(self, batches, own_planes, has_charge, 0, x, t, mode);
+            runLane(self, batches, own_planes, 0, x, t, mode);
             return;
         }
         if (!self.started) self.startWorkers();
         self.job_batches = batches;
         self.job_own_planes = own_planes;
-        self.job_has_charge = has_charge;
         self.job_x = x;
         self.job_t = t;
         self.job_mode = mode;
         self.done.store(0, .monotonic);
         _ = self.epoch.fetchAdd(1, .release);
-        runLane(self, batches, own_planes, has_charge, 0, x, t, mode);
+        runLane(self, batches, own_planes, 0, x, t, mode);
         var spins: u32 = 0;
         while (self.done.load(.acquire) < self.n_lanes - 1) {
             // Same `pause` the loader's SpinLock uses. A busy waiter should not
@@ -295,7 +263,7 @@ pub const ParEval = struct {
             spins +%= 1;
             if (spins > 4096) std.Thread.yield() catch {};
         }
-        self.reduce(own_planes, has_charge, mode);
+        self.reduce(own_planes, mode);
     }
 
     fn startWorkers(self: *ParEval) void {
@@ -320,7 +288,7 @@ pub const ParEval = struct {
             }
             last = e;
             if (self.quit.load(.acquire)) return;
-            runLane(self, self.job_batches, self.job_own_planes, self.job_has_charge, lane, self.job_x, self.job_t, self.job_mode);
+            runLane(self, self.job_batches, self.job_own_planes, lane, self.job_x, self.job_t, self.job_mode);
             _ = self.done.fetchAdd(1, .release);
         }
     }
@@ -338,7 +306,7 @@ pub const ParEval = struct {
         };
     }
 
-    fn runLane(self: *ParEval, batches: []const Batch, own_planes: Planes, has_charge: bool, lane: u32, x: []const f64, t: f64, mode: Mode) void {
+    fn runLane(self: *ParEval, batches: []const Batch, own_planes: Planes, lane: u32, x: []const f64, t: f64, mode: Mode) void {
         const pl = self.lanePlanes(own_planes, lane);
         if (lane != 0) {
             const win = self.windows[lane - 1];
@@ -351,7 +319,7 @@ pub const ParEval = struct {
                 pl.g_vals[self.nnz1 - 1] = 0;
                 pl.rhs[self.n1 - 1] = 0;
             }
-            if (has_charge) {
+            if (self.has_charge) {
                 if (mode != .charge) {
                     zeroSimd(pl.c_vals[win.slot_lo..win.slot_hi]);
                     pl.c_vals[self.nnz1 - 1] = 0;
@@ -360,17 +328,11 @@ pub const ParEval = struct {
                 pl.q_vec[self.n1 - 1] = 0;
             }
         }
-        for (self.tasks[self.task_off[lane]..self.task_off[lane + 1]]) |task| {
-            const b = &batches[task.batch];
-            switch (mode) {
-                .full => b.eval(b.ctx, &pl, task.first, task.last, x, t),
-                .newton => b.eval_newton(b.ctx, &pl, task.first, task.last, x, t),
-                .charge => if (b.hooks.eval_q) |f| f(b.ctx, &pl, task.first, task.last, x, t),
-            }
-        }
+        for (self.tasks[self.task_off[lane]..self.task_off[lane + 1]]) |task|
+            stampRange(batches[task.batch], &pl, task.first, task.last, x, t, mode);
     }
 
-    fn reduce(self: *ParEval, own_planes: Planes, has_charge: bool, mode: Mode) void {
+    fn reduce(self: *ParEval, own_planes: Planes, mode: Mode) void {
         var l: u32 = 1;
         while (l < self.n_lanes) : (l += 1) {
             const e: usize = l - 1;
@@ -390,7 +352,7 @@ pub const ParEval = struct {
                 own_planes.rhs[win.row_lo..win.row_hi],
                 self.rhs_slab[e * self.n1 + win.row_lo .. e * self.n1 + win.row_hi],
             );
-            if (has_charge) {
+            if (self.has_charge) {
                 addSimd(
                     own_planes.c_vals[win.slot_lo..win.slot_hi],
                     self.c_slab[e * self.nnz1 + win.slot_lo .. e * self.nnz1 + win.slot_hi],
