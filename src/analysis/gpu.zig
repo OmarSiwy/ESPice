@@ -31,18 +31,15 @@
 //! enough eval work to hide the latency. `--gpu` on a small netlist is expected
 //! to LOSE to the CPU path, and the benchmark reports both rather than picking.
 //!
-//! Scope (this cut): whole-circuit device eval feeding a CPU Newton solve. The
-//! batch and frequency-domain hooks on `GpuHook` stay null — see `hook()`.
+//! Scope: whole-circuit device eval feeding a CPU Newton solve.
 
 const std = @import("std");
 const analysis = @import("types.zig");
 const device_ir = @import("device_ir");
-const solvers = @import("solvers");
 const gompute = @import("gompute");
 
 const Circuit = analysis.Circuit;
 const GpuHook = analysis.GpuHook;
-const converger = solvers.converger;
 
 /// Which backend this binary actually carries images for. Decided at COMPILE
 /// time because `gompute.RawByName(.cuda)` is a compile error in a build that
@@ -405,15 +402,6 @@ pub const GpuContext = struct {
     /// run alongside it is the HOST, which is not on a stream at all.
     stream: Stream,
 
-    /// The CPU half. Its own workspace because `solve_newton` is reached
-    /// through `GpuHook`, which carries no allocator and no analysis state —
-    /// the caller's own `Workspace` is not on the path.
-    ws: converger.Workspace,
-
-    /// Set by `assemble`, which cannot fail in the converger's hook shape.
-    /// Checked after the loop so a driver fault falls back to the CPU instead
-    /// of returning a converged-looking answer built on a failed launch.
-    launch_err: ?anyerror = null,
     /// One-shot latches for the CPU-fallback warnings. TWO, not one: an eval
     /// fault and a limit/state fault are different failures with different
     /// fixes, and a single latch let whichever fired first silence the other.
@@ -653,7 +641,6 @@ pub const GpuContext = struct {
             .n_vslot = order.n_vslot,
             .n_vrow = order.n_vrow,
             .stream = try k0.createStream(),
-            .ws = try converger.Workspace.init(gpa, ckt.n, ckt.col_ptr, ckt.row_idx, ckt.bbd),
             .has_charge = ckt.has_charge,
             .resident_charge = resident_charge,
             .chk = if (std.c.getenv("ESPICE_GPU_EVAL_CHECK") != null)
@@ -661,8 +648,6 @@ pub const GpuContext = struct {
             else
                 &.{},
         };
-        self.ws.slv.params.execution = ckt.solver_execution;
-
         return self;
     }
 
@@ -882,7 +867,6 @@ pub const GpuContext = struct {
         if (self.chk.len > 0) self.gpa.free(self.chk);
         self.gpa.free(self.batches_owned);
         self.gpa.free(self.cpu_owned);
-        self.ws.deinit(self.gpa);
         self.gpa.destroy(self);
     }
 
@@ -1333,44 +1317,12 @@ pub const GpuContext = struct {
         );
     }
 
-    /// The converger's hook shape, with the GPU pass in place of `ckt.eval`.
-    /// `assemble` cannot report failure, so a fault is parked on the context
-    /// and re-raised by `solveNewton` once the loop is done.
-    const AssembleHook = struct {
-        self: *Self,
-
-        pub fn assemble(h: AssembleHook, _: *Circuit, x: []const f64, t: f64) void {
-            if (h.self.launch_err != null) return; // already failed; stop touching the driver
-            h.self.evalOnGpu(x, t) catch |e| {
-                h.self.launch_err = e;
-            };
-        }
-        pub fn vals(_: AssembleHook, ckt: *Circuit) []f64 {
-            return ckt.g_vals;
-        }
-        pub fn diagAt(_: AssembleHook, ckt: *Circuit, slot: u32) f64 {
-            return ckt.g_vals[slot];
-        }
-    };
-
-    fn solveNewton(ctx: *anyopaque, x: []f64, t: f64, opts: converger.Options) anyerror!converger.Result {
-        const self: *Self = @ptrCast(@alignCast(ctx));
-        self.launch_err = null;
-        const r = try converger.newton(self.ckt, &self.ws, x, t, opts, AssembleHook{ .self = self });
-        // Ordered after the solve: a launch that failed mid-loop leaves `x`
-        // holding an update computed from a stale plane, so the result is not
-        // "unconverged", it is meaningless. Returning the error is what makes
-        // `converger.run` fall back to the CPU path.
-        if (self.launch_err) |e| return e;
-        return r;
-    }
-
     /// Publish authoritative resident device state before an OP dependency is copied.
     pub fn syncHostState(self: *Self) !void {
         if (comptime backend == null) return;
         // A fallback can leave resident and host-private history at different
         // accepted points. Never publish that uncertainty as a reusable OP.
-        if (self.poisoned or self.warned_eval or self.warned_state or self.launch_err != null)
+        if (self.poisoned or self.warned_eval or self.warned_state)
             return error.GpuStateUnavailable;
         try self.stream.synchronize();
         for (self.batches) |*batch| {
@@ -1407,16 +1359,9 @@ pub const GpuContext = struct {
     }
 
     /// What `Circuit.gpu_hook` gets.
-    ///
-    /// `solve_batch` / `freq_solve_batch` / `simulate_tran` stay null: each is a
-    /// SOLVER on the GPU, not a device eval, and this cut moved only the eval.
-    /// Their consumers (`dc.zig`, `ac.zig`, `mc.zig`, `temp_sweep.zig`) all
-    /// probe for null and take their CPU path, so declining is a supported
-    /// answer and not a hole.
     pub fn hook(self: *Self) GpuHook {
         return .{
             .ctx = self,
-            .solve_newton = solveNewton,
             .eval_planes = evalPlanes,
             .apply_limits = applyLimitsHook,
             .update_states = updateStatesHook,
