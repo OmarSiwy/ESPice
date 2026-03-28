@@ -6,7 +6,7 @@ const requests = @import("requests");
 const types = @import("types.zig");
 const op = @import("dc/op.zig");
 const gpu = @import("gpu.zig");
-const ParEval = @import("device_eval").ParEval;
+const ParEval = @import("par_eval.zig").ParEval;
 const Controller = @import("worker.zig").Worker(types.Result);
 
 // Inputs: a prepared circuit, query and optional accepted OP; output: progress
