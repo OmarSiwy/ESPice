@@ -127,14 +127,9 @@ pub const ParEval = struct {
         defer gpa.free(loads);
         @memset(loads, 0);
 
-        for (batches, 0..) |b, bi| {
-            if (b.thread_safe or b.count == 0) continue;
-            try lane_tasks[0].append(gpa, .{ .batch = @intCast(bi), .first = 0, .last = b.count });
-            loads[0] += @as(u64, b.count) * b.n_u * b.n_u;
-        }
         var cur: u32 = 0;
         for (batches, 0..) |b, bi| {
-            if (!b.thread_safe or b.count == 0) continue;
+            if (b.count == 0) continue;
             const w: u64 = @as(u64, b.n_u) * b.n_u;
             var pos: u32 = 0;
             while (pos < b.count) {

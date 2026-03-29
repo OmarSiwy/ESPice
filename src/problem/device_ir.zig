@@ -112,9 +112,6 @@ pub const Batch = struct {
     n_u: u32,
     has_charge: bool,
     has_const_jacobian: bool,
-    /// False when eval uses shared per-batch scratch — such a batch runs whole
-    /// on one lane.
-    thread_safe: bool,
 
     // -- cold --
     type_name: []const u8,
@@ -203,8 +200,6 @@ pub const Hooks = struct {
     /// eval/updateState run for that attempt), never per Newton iteration —
     /// it walks every instance, so it is O(count) per timepoint by design.
     set_sim_state: ?*const fn (*anyopaque, SimState) void = null,
-    record_history: ?*const fn (*anyopaque, []const f64, f64) void = null,
-    inject_history: ?*const fn (*anyopaque, f64, []f64) void = null,
     min_delay: ?*const fn (*anyopaque) f64 = null,
     /// §9.17.2 `$bound_step`: the tightest NEXT-step bound any instance of
     /// this device type asked for, or `inf`. Written by the device's
@@ -429,10 +424,20 @@ pub const GpuPayload = struct {
     lim_active: bool,
 };
 
-// Version 10 replaces compilation-local Zig errors in CPU callbacks with
-// explicit statuses, including the topology check. Old callbacks are incompatible.
-// GPU planes, Model/Instance PODs and scatter tapes are unchanged.
-pub const abi_version: u32 = 10;
+// Runtime device ABI version, mixed into `layoutHash`. `hashType` sees only
+// sizes, alignments and offsets, so a change that moves none of them (a tape
+// semantic, a fn-pointer signature) has to bump this number.
+//
+// 7: the slot tape's cleared entries are the device's structural Jacobian
+//    zeros, not just ground; `addPattern` no longer reserves them.
+// 8: `Hooks.eval_q` takes an instance range.
+// 10: CPU callbacks return `DeviceResult`/`DeviceStatus` instead of Zig error
+//    unions, whose ordinals differ between separately compiled objects.
+// 11: dead fields dropped: `Batch.thread_safe`, `Hooks.record_history` and
+//    `inject_history`, `DeviceVtable.gpu_kernel_name`/`gpu_ptx`/`gpu_amdgcn`;
+//    `Batch.type_name` is the short type name.
+// GPU planes, Model/Instance PODs and scatter tapes are unchanged by 10 and 11.
+pub const abi_version: u32 = 11;
 
 pub const DeviceVtable = struct {
     name: []const u8,
@@ -454,16 +459,6 @@ pub const DeviceVtable = struct {
     collapse: ?*const fn (model: [*]const u8, instance: [*]const u8, out: [*]i32) void,
     proto_create: *const fn (std.mem.Allocator) DeviceResult(Proto),
     proto_add: *const fn (ctx: *anyopaque, gpa: std.mem.Allocator, model: [*]const u8, instance: [*]const u8, nodes: [*]const u32) DeviceResult(void),
-
-    // GPU eval kernel this device emitted from `engine.DeviceKernel` at
-    // `.so`-build-time (empty ⇒ CPU-only). The `.so` compiles the SAME template
-    // the builtins use, so the format matches; the app links it into its gompute
-    // context by `gpu_kernel_name`. Populated by the compileGenerated shim
-    // (dynamic devices); empty for the in-process vtable (builtins bake their
-    // kernels via kernels.zig instead).
-    gpu_kernel_name: []const u8 = "",
-    gpu_ptx: []const u8 = "", // NVIDIA cubin/PTX image
-    gpu_amdgcn: []const u8 = "", // AMD code object
 };
 
 /// Layout guard over every type that crosses the boundary + the compiler

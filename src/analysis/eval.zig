@@ -1737,7 +1737,6 @@ pub fn DeviceBatch(comptime D: type) type {
                 .n_u = n_u,
                 .has_charge = has_q,
                 .has_const_jacobian = const_g and (!has_q or const_c),
-                .thread_safe = true,
                 .type_name = comptime baseName(D),
                 .hooks = &hooks,
             };
@@ -2274,20 +2273,8 @@ pub fn CtlKernel(comptime D: type, comptime block_size: u32) type {
 // ===========================================================================
 // Runtime device ABI (dlopen'd .so). Crosses the boundary PER BATCH: the .so
 // compiles this same ProtoStore(D)/DeviceBatch(D) and hands back the same
-// type-erased Proto the builtin path uses. layoutHash() guards ABI drift.
-// ===========================================================================
-
-// Version 10 replaces Zig error unions in CPU callbacks with DeviceResult
-// and a boolean topology check. The host and separately compiled devices can
-// assign different numbers to the same Zig error. GPU PODs are unchanged.
-//
-// Version 7: the slot tape's cleared entries are the DEVICE's structural
-// Jacobian zeros, not just ground — `addPattern` no longer reserves a matrix
-// entry for them and `evalRange` no longer writes one. Structs are unchanged,
-// so the guard is `layoutHash` mixing this number rather than a layout delta.
-// Version 8: `Hooks.eval_q` takes an instance range. `hashType` only mixes
-// sizes/alignments/offsets, and a fn-pointer signature change moves none of
-// them, so the guard has to be this number.
+// type-erased Proto the builtin path uses. layoutHash() guards ABI drift; the
+// version history sits beside `abi_version` in device_ir.zig.
 // ===========================================================================
 // The host half of the contract (CONSUMING §4.2)
 // ===========================================================================

@@ -74,9 +74,8 @@ the numerical oracles; restoration is not a completed migration or a claim of
 full ngspice compatibility.
 
 The native devices commit their own histories through `commit_state`, with
-step bounds and breakpoints using the existing hooks. Legacy `record_history`
-and `inject_history` slots remain ABI-only; these native models do not need
-them. Native history capacities, interpolation choices, fit limitations and
+step bounds and breakpoints using the existing hooks. The unused
+`record_history` and `inject_history` hook slots were removed in ABI 11. Native history capacities, interpolation choices, fit limitations and
 non-transient behavior still need separate compatibility coverage. Runtime
 parameter-sweep recomputation also needs a failure path for newly invalid fits.
 
