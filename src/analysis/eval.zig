@@ -1635,11 +1635,7 @@ pub fn DeviceBatch(comptime D: type) type {
         }
 
         fn appendParams(comptime T: type, items: anytype, comptime is_instance: bool, gpa: std.mem.Allocator, list: *std.ArrayList(ParamRef)) error{OutOfMemory}!void {
-            const type_name = comptime blk: {
-                const full = @typeName(D);
-                const dot = std.mem.lastIndexOfScalar(u8, full, '.') orelse break :blk full;
-                break :blk full[dot + 1 ..];
-            };
+            const type_name = comptime baseName(D);
             comptime var field_idx: usize = 0;
             inline for (@typeInfo(T).@"struct".fields) |field| {
                 if (comptime paramField(T, field)) {
@@ -1742,7 +1738,7 @@ pub fn DeviceBatch(comptime D: type) type {
                 .has_charge = has_q,
                 .has_const_jacobian = const_g and (!has_q or const_c),
                 .thread_safe = true,
-                .type_name = @typeName(D),
+                .type_name = comptime baseName(D),
                 .hooks = &hooks,
             };
         }
@@ -1881,6 +1877,15 @@ pub fn hasCtlKernel(comptime D: type) bool {
     return hasStateKernel(D) and @hasDecl(D, "stateCtl");
 }
 
+/// Device D's type name without its namespace (`vsource.Vsource` -> `Vsource`):
+/// the batch `type_name`, the `ParamRef.device_type` and every kernel symbol
+/// suffix.
+pub fn baseName(comptime D: type) []const u8 {
+    const full = @typeName(D);
+    const dot = std.mem.lastIndexOfScalar(u8, full, '.') orelse return full;
+    return full[dot + 1 ..];
+}
+
 /// The kernel symbol for device D — `arp_eval_<model>`.
 ///
 /// Derived from the TYPE, and called by both sides: `kernels.zig` to export the
@@ -1888,24 +1893,18 @@ pub fn hasCtlKernel(comptime D: type) bool {
 /// launcher looks up. One function so the two cannot drift into a green build
 /// that fails with `error.KernelNotFound` on a machine with a GPU.
 pub fn kernelName(comptime D: type) [:0]const u8 {
-    const full = @typeName(D);
-    const base = if (std.mem.lastIndexOfScalar(u8, full, '.')) |dot| full[dot + 1 ..] else full;
-    return "arp_eval_" ++ base;
+    return "arp_eval_" ++ comptime baseName(D);
 }
 
 /// The limit/state kernel symbol for device D — `arp_lim_<model>`. Same
 /// derive-from-the-type rule (and reason) as `kernelName`.
 pub fn stateKernelName(comptime D: type) [:0]const u8 {
-    const full = @typeName(D);
-    const base = if (std.mem.lastIndexOfScalar(u8, full, '.')) |dot| full[dot + 1 ..] else full;
-    return "arp_lim_" ++ base;
+    return "arp_lim_" ++ comptime baseName(D);
 }
 
 /// The accepted-step latch kernel symbol — `arp_ctl_<model>`.
 pub fn ctlKernelName(comptime D: type) [:0]const u8 {
-    const full = @typeName(D);
-    const base = if (std.mem.lastIndexOfScalar(u8, full, '.')) |dot| full[dot + 1 ..] else full;
-    return "arp_ctl_" ++ base;
+    return "arp_ctl_" ++ comptime baseName(D);
 }
 
 /// The segmented-reduction symbol — `arp_reduce_<model>`.
@@ -1916,9 +1915,7 @@ pub fn ctlKernelName(comptime D: type) [:0]const u8 {
 /// collide once per catalog entry. The launcher uses whichever resident batch's
 /// copy it finds first — they are the same code.
 pub fn reduceKernelName(comptime D: type) [:0]const u8 {
-    const full = @typeName(D);
-    const base = if (std.mem.lastIndexOfScalar(u8, full, '.')) |dot| full[dot + 1 ..] else full;
-    return "arp_reduce_" ++ base;
+    return "arp_reduce_" ++ comptime baseName(D);
 }
 
 /// The ONE sink `evalRange`/`limitRange` consume. `device` picks the two axes
