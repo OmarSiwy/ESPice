@@ -148,11 +148,7 @@ pub const Executor = struct {
             self.circuit.gpu_hook = null;
             if (gpu_context) |g| g.deinit();
         }
-        const transient = switch (self.job) {
-            .tran, .four, .tran_noise, .envelope, .pss, .qpss, .pnoise, .pac, .pxf => true,
-            .op => |opts| opts.tran_op,
-            else => false,
-        };
+        const transient = if (self.job == .op) self.job.op.tran_op else @as(requests.Kind, self.job).transient();
         self.circuit.setSimState(.{ .kind = if (transient) .ic else .dc });
         if (self.job == .op) {
             self.x = try self.work.allocator().alloc(f64, self.circuit.n);
