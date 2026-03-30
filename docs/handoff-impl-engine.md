@@ -28,6 +28,18 @@ a 900 s timeout.
 | 6 | 40c0074 | validate/validatePrepared -> analysis/validate.zig; requests.Kind.transient() replaces the two transient-kind lists | +281 / -249 |
 | 7 | 8aeeeb8 | ProtoStore stages one MultiArrayList | +35 / -53 |
 | 8 | 0b7e39f | Unused Io, limitRange bool, collectNoise localX, addInto -> addSimd, stale file-name comments | +29 / -32 |
+| 8b | 7da4c04 | limitRange keeps its f64 flag (bool cost +0.1% Ir on mos6) | +7 / -4 |
+| 3b | 199e9bf | Stamp mode comptime on the serial path (recovers most of 6ee1aec's Ir) | small |
+
+## Cost (callgrind Ir, -Dgpu=false)
+
+| deck | 4614f9a | branch tip |
+|------|---------|------------|
+| tran/device_mos6_inverter | 118,220,932 | 118,253,735 (+0.03%) |
+| stress/scaling_parallel_inverters_100 | 343,907,580 | 343,981,138 (+0.02%) |
+
+Per-commit numbers are in the 7da4c04 and 199e9bf messages. The series makes
+no speed claim.
 
 ## GPU-affecting commits (GPU builds are off; check these in the GPU pass)
 
