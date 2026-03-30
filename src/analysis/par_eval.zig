@@ -62,7 +62,7 @@ pub const Mode = enum(u8) { full, newton, charge };
 
 /// Stamp instances [first, last) of one batch. The one per-mode dispatch the
 /// serial path and every lane share.
-pub fn stampRange(b: Batch, pl: *const Planes, first: u32, last: u32, x: []const f64, t: f64, mode: Mode) void {
+pub fn stampRange(b: Batch, pl: *const Planes, first: u32, last: u32, x: []const f64, t: f64, comptime mode: Mode) void {
     switch (mode) {
         .full => b.eval(b.ctx, pl, first, last, x, t),
         .newton => b.eval_newton(b.ctx, pl, first, last, x, t),
@@ -323,7 +323,9 @@ pub const ParEval = struct {
             }
         }
         for (self.tasks[self.task_off[lane]..self.task_off[lane + 1]]) |task|
-            stampRange(batches[task.batch], &pl, task.first, task.last, x, t, mode);
+            switch (mode) {
+                inline else => |m| stampRange(batches[task.batch], &pl, task.first, task.last, x, t, m),
+            };
     }
 
     fn reduce(self: *ParEval, own_planes: Planes, mode: Mode) void {
