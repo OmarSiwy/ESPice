@@ -372,7 +372,41 @@ pub const Disto = struct {
 
     pub const Plot = enum(u8) { summary, second, third };
 };
-pub const Kind = enum(u8) { ac, dc, dcmatch, disto, envelope, four, hb, matex, mc, noise, op, pac, pnoise, pss, pxf, pz, qpss, sens, sp, stb, temp, tf, tran, tran_noise };
+pub const Kind = enum(u8) {
+    ac,
+    dc,
+    dcmatch,
+    disto,
+    envelope,
+    four,
+    hb,
+    matex,
+    mc,
+    noise,
+    op,
+    pac,
+    pnoise,
+    pss,
+    pxf,
+    pz,
+    qpss,
+    sens,
+    sp,
+    stb,
+    temp,
+    tf,
+    tran,
+    tran_noise,
+
+    /// Runs off a transient operating point (ngspice MODETRANOP) and starts
+    /// its devices in `.ic` rather than `.dc` state.
+    pub fn transient(kind: Kind) bool {
+        return switch (kind) {
+            .tran, .four, .tran_noise, .envelope, .pss, .qpss, .pnoise, .pac, .pxf => true,
+            else => false,
+        };
+    }
+};
 pub const Query = union(Kind) {
     ac: Ac,
     dc: Dc,

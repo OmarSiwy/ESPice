@@ -6,7 +6,7 @@ const requests = @import("requests");
 const types = @import("types.zig");
 const op = @import("dc/op.zig");
 const gpu = @import("gpu.zig");
-const ParEval = @import("device_eval").ParEval;
+const ParEval = @import("par_eval.zig").ParEval;
 const Controller = @import("worker.zig").Worker(types.Result);
 
 // Inputs: a prepared circuit, query and optional accepted OP; output: progress
@@ -136,7 +136,7 @@ pub const Executor = struct {
         const self: *Executor = @ptrCast(@alignCast(ctx));
         var par: ?ParEval = null;
         if (self.config.device_threads > 1) {
-            par = try ParEval.init(self.allocator, self.io, self.circuit.batches, self.circuit.nnz, self.circuit.n, self.circuit.has_charge, self.circuit.trash_slot, self.config.device_threads);
+            par = try ParEval.init(self.allocator, self.circuit.batches, self.circuit.nnz, self.circuit.n, self.circuit.has_charge, self.circuit.trash_slot, self.config.device_threads);
             self.circuit.par_eval = &par.?;
         }
         defer {
@@ -146,14 +146,9 @@ pub const Executor = struct {
         const gpu_context = try self.prepareGpu();
         defer {
             self.circuit.gpu_hook = null;
-            self.circuit.gpu_active = false;
             if (gpu_context) |g| g.deinit();
         }
-        const transient = switch (self.job) {
-            .tran, .four, .tran_noise, .envelope, .pss, .qpss, .pnoise, .pac, .pxf => true,
-            .op => |opts| opts.tran_op,
-            else => false,
-        };
+        const transient = if (self.job == .op) self.job.op.tran_op else @as(requests.Kind, self.job).transient();
         self.circuit.setSimState(.{ .kind = if (transient) .ic else .dc });
         if (self.job == .op) {
             self.x = try self.work.allocator().alloc(f64, self.circuit.n);
@@ -195,7 +190,6 @@ pub const Executor = struct {
             return null;
         };
         self.circuit.gpu_hook = context.hook();
-        self.circuit.gpu_active = true;
         return context;
     }
 };

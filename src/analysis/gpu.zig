@@ -31,18 +31,16 @@
 //! enough eval work to hide the latency. `--gpu` on a small netlist is expected
 //! to LOSE to the CPU path, and the benchmark reports both rather than picking.
 //!
-//! Scope (this cut): whole-circuit device eval feeding a CPU Newton solve. The
-//! batch and frequency-domain hooks on `GpuHook` stay null — see `hook()`.
+//! Scope: whole-circuit device eval feeding a CPU Newton solve.
 
 const std = @import("std");
 const analysis = @import("types.zig");
 const device_ir = @import("device_ir");
-const solvers = @import("solvers");
 const gompute = @import("gompute");
 
 const Circuit = analysis.Circuit;
 const GpuHook = analysis.GpuHook;
-const converger = solvers.converger;
+const addSimd = @import("par_eval.zig").addSimd;
 
 /// Which backend this binary actually carries images for. Decided at COMPILE
 /// time because `gompute.RawByName(.cuda)` is a compile error in a build that
@@ -113,7 +111,7 @@ const Raw = if (backend) |be| gompute.RawByName(be) else void;
 const Buffer = if (backend != null) Raw.Buffer else void;
 const Stream = if (backend != null) Raw.Stream else void;
 
-/// Must match `devices/kernels.zig`, which sized the launch when it exported
+/// Must match the eval.zig build root, which sized the launch when it exported
 /// the kernels: `DeviceKernel(D, block_size)` bakes the block width into
 /// `globalIdX`, so a host that launches a different one indexes wrong.
 const block_size: u32 = device_ir.gpu_block_size;
@@ -123,7 +121,7 @@ pub const Error = error{
     /// the build machine, so `emitKernels` emitted nothing.
     NoGpuArtifacts,
     /// NO device type in this circuit has a GPU kernel, so there is nothing to
-    /// move. See `engine.gpuEligible`.
+    /// move. See `eval.gpuEligible`.
     CircuitNotEligible,
     /// The circuit HAS eligible devices, but too few to pay for the round trip.
     /// See `min_work`.
@@ -193,24 +191,17 @@ fn statsOn() bool {
     return std.c.getenv("ESPICE_GPU_STATS") != null;
 }
 
-/// The model name inside an `arp_eval_<model>` kernel symbol, for the demotion
-/// report. Falls back to the whole symbol if it is not shaped that way.
-fn modelOf(kernel_symbol: []const u8) []const u8 {
-    const p = "arp_eval_";
-    return if (std.mem.startsWith(u8, kernel_symbol, p)) kernel_symbol[p.len..] else kernel_symbol;
-}
-
 /// A CAPABILITY demotion: this batch had a `gpu_payload` but the build emitted
 /// no image for its model, so it keeps stamping the host planes. Correct, and
 /// silently much slower — the host stamp is a scattered read-modify-write per
 /// Jacobian entry per instance and does not vectorize. Naming the model is the
 /// difference between "the GPU is slow here" and "bsim4 was never on it".
-fn reportDemote(on: bool, kernel_symbol: []const u8, which: []const u8, count: u32) void {
+fn reportDemote(on: bool, model: []const u8, which: []const u8, count: u32) void {
     if (!on) return;
     std.debug.print(
         "note: GPU batch '{s}' ({d} instances) stays on the CPU: no {s} kernel image " ++
             "in this build (model over gpu_max_model_bytes, or a stale image)\n",
-        .{ modelOf(kernel_symbol), count, which },
+        .{ model, count, which },
     );
 }
 
@@ -268,7 +259,7 @@ pub const GpuContext = struct {
     ckt: *Circuit,
     /// The eligible batches, resident on the device.
     batches: []BatchGpu,
-    /// The rest — whatever `engine.gpuEligible` turns down (history, a core
+    /// The rest — whatever `eval.gpuEligible` turns down (history, a core
     /// that reads host-published sim state, `State` without `limit`), plus
     /// anything eligible whose model the build declined to emit a kernel for
     /// (`gpu_max_model_bytes`).
@@ -405,15 +396,6 @@ pub const GpuContext = struct {
     /// run alongside it is the HOST, which is not on a stream at all.
     stream: Stream,
 
-    /// The CPU half. Its own workspace because `solve_newton` is reached
-    /// through `GpuHook`, which carries no allocator and no analysis state —
-    /// the caller's own `Workspace` is not on the path.
-    ws: converger.Workspace,
-
-    /// Set by `assemble`, which cannot fail in the converger's hook shape.
-    /// Checked after the loop so a driver fault falls back to the CPU instead
-    /// of returning a converged-looking answer built on a failed launch.
-    launch_err: ?anyerror = null,
     /// One-shot latches for the CPU-fallback warnings. TWO, not one: an eval
     /// fault and a limit/state fault are different failures with different
     /// fixes, and a single latch let whichever fired first silence the other.
@@ -427,12 +409,12 @@ pub const GpuContext = struct {
     /// instead of every eval.
     chk_worst: f64 = 0,
 
-    has_charge: bool,
-    /// Whether any RESIDENT batch produces charge. Narrower than `has_charge`,
-    /// which covers the whole circuit: when every charge-producing device stayed
-    /// on the CPU there is nothing for the device C/Q planes to hold, so their
-    /// clears, downloads and merges are all moving zeros. The host planes still
-    /// follow `has_charge` — the CPU batches stamp them.
+    /// Whether any RESIDENT batch produces charge. Narrower than
+    /// `Circuit.has_charge`, which covers the whole circuit: when every
+    /// charge-producing device stayed on the CPU there is nothing for the
+    /// device C/Q planes to hold, so their clears, downloads and merges are all
+    /// moving zeros. The host planes still follow `Circuit.has_charge`: the CPU
+    /// batches stamp them.
     resident_charge: bool,
 
     const Self = @This();
@@ -521,7 +503,7 @@ pub const GpuContext = struct {
             // a real fault, not a device the build chose to skip.
             var kernel = gompute.rawKernelByName(backend.?, p.kernel, 0) catch |e| switch (e) {
                 error.KernelNotFound => {
-                    reportDemote(report, p.kernel, "eval", p.count);
+                    reportDemote(report, b.type_name, "eval", p.count);
                     cpu_batches[n_cpu] = b;
                     n_cpu += 1;
                     continue;
@@ -537,7 +519,7 @@ pub const GpuContext = struct {
             if (p.lim_kernel.len > 0) {
                 lim_kernel = gompute.rawKernelByName(backend.?, p.lim_kernel, 0) catch |e| switch (e) {
                     error.KernelNotFound => {
-                        reportDemote(report, p.kernel, "limit/state", p.count);
+                        reportDemote(report, b.type_name, "limit/state", p.count);
                         kernel.deinit();
                         cpu_batches[n_cpu] = b;
                         n_cpu += 1;
@@ -552,7 +534,7 @@ pub const GpuContext = struct {
             if (p.ctl_kernel.len > 0) {
                 ctl_kernel = gompute.rawKernelByName(backend.?, p.ctl_kernel, 0) catch |e| switch (e) {
                     error.KernelNotFound => {
-                        reportDemote(report, p.kernel, "state-latch", p.count);
+                        reportDemote(report, b.type_name, "state-latch", p.count);
                         kernel.deinit();
                         if (lim_kernel) |*lk| lk.deinit();
                         cpu_batches[n_cpu] = b;
@@ -653,16 +635,12 @@ pub const GpuContext = struct {
             .n_vslot = order.n_vslot,
             .n_vrow = order.n_vrow,
             .stream = try k0.createStream(),
-            .ws = try converger.Workspace.init(gpa, ckt.n, ckt.col_ptr, ckt.row_idx, ckt.bbd),
-            .has_charge = ckt.has_charge,
             .resident_charge = resident_charge,
             .chk = if (std.c.getenv("ESPICE_GPU_EVAL_CHECK") != null)
                 try gpa.alloc(f64, ckt.g_vals.len + ckt.rhs.len)
             else
                 &.{},
         };
-        self.ws.slv.params.execution = ckt.solver_execution;
-
         return self;
     }
 
@@ -882,7 +860,6 @@ pub const GpuContext = struct {
         if (self.chk.len > 0) self.gpa.free(self.chk);
         self.gpa.free(self.batches_owned);
         self.gpa.free(self.cpu_owned);
-        self.ws.deinit(self.gpa);
         self.gpa.destroy(self);
     }
 
@@ -914,12 +891,7 @@ pub const GpuContext = struct {
 
         // The ineligible devices stamp the host planes while the GPU is still
         // working and the D2H copies are still in flight.
-        @memset(ckt.g_vals, 0);
-        @memset(ckt.rhs, 0);
-        if (self.has_charge) {
-            @memset(ckt.c_vals, 0);
-            @memset(ckt.q_vec, 0);
-        }
+        ckt.clearPlanes(.full);
         const pl = ckt.ownPlanes();
         for (self.cpu_batches) |b| b.eval(b.ctx, &pl, 0, b.count, x, t);
 
@@ -929,17 +901,15 @@ pub const GpuContext = struct {
 
         if (self.chk.len > 0) try self.evalCheck(x, t);
 
-        addInto(ckt.g_vals, self.pin_g);
-        addInto(ckt.rhs, self.pin_rhs);
+        addSimd(ckt.g_vals, self.pin_g);
+        addSimd(ckt.rhs, self.pin_rhs);
         if (self.resident_charge) {
-            addInto(ckt.c_vals, self.pin_c);
-            addInto(ckt.q_vec, self.pin_q);
+            addSimd(ckt.c_vals, self.pin_c);
+            addSimd(ckt.q_vec, self.pin_q);
         }
 
-        // The ground pin, which `Circuit.evalNewton` applies after every batch
-        // has stamped. It is not a device, so no kernel emits it.
-        ckt.g_vals[ckt.diag_slots[0]] += 1.0;
-        ckt.rhs[0] += x[0];
+        // The ground pin is not a device, so no kernel emits it.
+        ckt.groundStamp(x);
     }
 
     /// The device half alone: upload x, clear the staging, launch every resident
@@ -1105,10 +1075,6 @@ pub const GpuContext = struct {
         @memcpy(self.pin_rhs, chk_rhs);
     }
 
-    inline fn addInto(dst: []f64, src: []const f64) void {
-        for (dst, src) |*d, s| d.* += s;
-    }
-
     /// `Circuit.eval` / `Circuit.evalNewton` on the device — the `eval_planes`
     /// hook, and the single point at which any analysis reaches the GPU.
     ///
@@ -1188,10 +1154,7 @@ pub const GpuContext = struct {
             try self.d_flags.downloadAtAsync(self.pin_flags.ptr, 0, 4, &self.stream);
 
         // The CPU-side batches run their host walk while the device works.
-        var any = false;
-        for (self.cpu_batches) |b| if (b.hooks.apply_limits) |f| {
-            if (f(b.ctx, x, x_old)) any = true;
-        };
+        var any = Circuit.limitBatches(self.cpu_batches, x, x_old);
 
         if (launched) {
             try self.stream.synchronize();
@@ -1215,11 +1178,7 @@ pub const GpuContext = struct {
         const self: *Self = @ptrCast(@alignCast(ctx));
         return self.applyLimitsOnGpu(x, x_old) catch {
             self.warnStateFallback();
-            var any = false;
-            for (self.ckt.batches) |b| if (b.hooks.apply_limits) |f| {
-                if (f(b.ctx, x, x_old)) any = true;
-            };
-            return any;
+            return Circuit.limitBatches(self.ckt.batches, x, x_old);
         };
     }
 
@@ -1229,14 +1188,7 @@ pub const GpuContext = struct {
     /// `StateKernel`), so the GPU half contributes null by construction.
     fn updateStatesHook(ctx: *anyopaque, x: []const f64) ?f64 {
         const self: *Self = @ptrCast(@alignCast(ctx));
-        const walk = if (self.poisoned) self.ckt.batches else self.cpu_batches;
-        var min_reject: ?f64 = null;
-        for (walk) |b| {
-            if (b.hooks.update_state) |f| if (f(b.ctx, x)) |tr| {
-                min_reject = if (min_reject) |cur| @min(cur, tr) else tr;
-            };
-        }
-        return min_reject;
+        return Circuit.updateBatches(if (self.poisoned) self.ckt.batches else self.cpu_batches, x);
     }
 
     fn clearLimitsHook(ctx: *anyopaque) void {
@@ -1245,8 +1197,7 @@ pub const GpuContext = struct {
             bg.lim_active = false;
             bg.lim_dirty = false;
         }
-        const walk = if (self.poisoned) self.ckt.batches else self.cpu_batches;
-        for (walk) |b| if (b.hooks.clear_limits) |f| f(b.ctx);
+        Circuit.clearLimitBatches(if (self.poisoned) self.ckt.batches else self.cpu_batches);
     }
 
     /// The GPU half of `Circuit.stateCtl`: the accepted-step latch (path
@@ -1290,10 +1241,7 @@ pub const GpuContext = struct {
         if (launched)
             try self.d_flags.downloadAtAsync(self.pin_flags.ptr, 0, 4, &self.stream);
 
-        var dirty = false;
-        for (self.cpu_batches) |b| if (b.hooks.state_ctl) |f| {
-            if (f(b.ctx, op)) dirty = true;
-        };
+        var dirty = Circuit.stateCtlBatches(self.cpu_batches, op);
         if (launched) {
             try self.stream.synchronize();
             if (std.mem.readInt(u32, self.pin_flags[0..4], .little) != 0) dirty = true;
@@ -1305,11 +1253,7 @@ pub const GpuContext = struct {
         const self: *Self = @ptrCast(@alignCast(ctx));
         return self.stateCtlOnGpu(op) catch {
             self.warnStateFallback();
-            var dirty = false;
-            for (self.ckt.batches) |b| if (b.hooks.state_ctl) |f| {
-                if (f(b.ctx, op)) dirty = true;
-            };
-            return dirty;
+            return Circuit.stateCtlBatches(self.ckt.batches, op);
         };
     }
 
@@ -1318,7 +1262,7 @@ pub const GpuContext = struct {
     /// is marked for upload at its next launch.
     fn seedJunctionsHook(ctx: *anyopaque, x: []f64) void {
         const self: *Self = @ptrCast(@alignCast(ctx));
-        for (self.ckt.batches) |b| if (b.hooks.seed) |f| f(b.ctx, x);
+        Circuit.seedBatches(self.ckt.batches, x);
         for (self.batches) |*bg| {
             if (bg.has_lim) bg.lim_dirty = true;
         }
@@ -1333,44 +1277,12 @@ pub const GpuContext = struct {
         );
     }
 
-    /// The converger's hook shape, with the GPU pass in place of `ckt.eval`.
-    /// `assemble` cannot report failure, so a fault is parked on the context
-    /// and re-raised by `solveNewton` once the loop is done.
-    const AssembleHook = struct {
-        self: *Self,
-
-        pub fn assemble(h: AssembleHook, _: *Circuit, x: []const f64, t: f64) void {
-            if (h.self.launch_err != null) return; // already failed; stop touching the driver
-            h.self.evalOnGpu(x, t) catch |e| {
-                h.self.launch_err = e;
-            };
-        }
-        pub fn vals(_: AssembleHook, ckt: *Circuit) []f64 {
-            return ckt.g_vals;
-        }
-        pub fn diagAt(_: AssembleHook, ckt: *Circuit, slot: u32) f64 {
-            return ckt.g_vals[slot];
-        }
-    };
-
-    fn solveNewton(ctx: *anyopaque, x: []f64, t: f64, opts: converger.Options) anyerror!converger.Result {
-        const self: *Self = @ptrCast(@alignCast(ctx));
-        self.launch_err = null;
-        const r = try converger.newton(self.ckt, &self.ws, x, t, opts, AssembleHook{ .self = self });
-        // Ordered after the solve: a launch that failed mid-loop leaves `x`
-        // holding an update computed from a stale plane, so the result is not
-        // "unconverged", it is meaningless. Returning the error is what makes
-        // `converger.run` fall back to the CPU path.
-        if (self.launch_err) |e| return e;
-        return r;
-    }
-
     /// Publish authoritative resident device state before an OP dependency is copied.
     pub fn syncHostState(self: *Self) !void {
         if (comptime backend == null) return;
         // A fallback can leave resident and host-private history at different
         // accepted points. Never publish that uncertainty as a reusable OP.
-        if (self.poisoned or self.warned_eval or self.warned_state or self.launch_err != null)
+        if (self.poisoned or self.warned_eval or self.warned_state)
             return error.GpuStateUnavailable;
         try self.stream.synchronize();
         for (self.batches) |*batch| {
@@ -1407,16 +1319,9 @@ pub const GpuContext = struct {
     }
 
     /// What `Circuit.gpu_hook` gets.
-    ///
-    /// `solve_batch` / `freq_solve_batch` / `simulate_tran` stay null: each is a
-    /// SOLVER on the GPU, not a device eval, and this cut moved only the eval.
-    /// Their consumers (`dc.zig`, `ac.zig`, `mc.zig`, `temp_sweep.zig`) all
-    /// probe for null and take their CPU path, so declining is a supported
-    /// answer and not a hole.
     pub fn hook(self: *Self) GpuHook {
         return .{
             .ctx = self,
-            .solve_newton = solveNewton,
             .eval_planes = evalPlanes,
             .apply_limits = applyLimitsHook,
             .update_states = updateStatesHook,
