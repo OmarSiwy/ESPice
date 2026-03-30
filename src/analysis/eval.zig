@@ -933,7 +933,7 @@ fn evalQRange(comptime D: type, comptime S: type, sink: anytype, first: u32, end
 /// SECOND time against the same `x_old`, so there the two differ; it is
 /// `backtrack = true`, which both CPU envs set false (converger.zig:351,
 /// newton_core.zig:417) and only a GPU solve turns on.
-fn limitRange(comptime D: type, sink: anytype, first: u32, end: u32, lim_active: bool) bool {
+fn limitRange(comptime D: type, sink: anytype, first: u32, end: u32, lim_active: bool) f64 {
     const n_u = comptime contract.nU(D);
     // The device's own live sets. A MOS ladder reads four of eight unknowns
     // and writes two: `d`, `s` and the two branch-flow unknowns are gathered,
@@ -944,7 +944,10 @@ fn limitRange(comptime D: type, sink: anytype, first: u32, end: u32, lim_active:
     // hand-written device), both read as ALL and the walk is the old one.
     const reads = comptime contract.limitReads(D);
     const writes = comptime contract.limitWrites(D);
-    var flag = false;
+    // f64, not bool: the bool version measured +0.1% Ir on
+    // device_mos6_inverter (callgrind 118.29M -> 118.42M), from codegen in
+    // this inlined loop alone.
+    var flag: f64 = 0;
     var id: u32 = first;
     while (id < end) : (id += 1) {
         // Lanes outside `reads` stay undefined and that is sound, not sloppy:
@@ -984,7 +987,7 @@ fn limitRange(comptime D: type, sink: anytype, first: u32, end: u32, lim_active:
         // the cost of DEFEATING the inliner, not the benefit of helping it.
         // Inlining questions need two builds.
         const lm = D.limit(sink.model(id), sink.inst(id), cur, old);
-        if (!lm.converged) flag = true;
+        if (!lm.converged) flag = 1;
         inline for (0..n_u) |u| if (comptime (writes >> u) & 1 != 0) {
             sink.setLim(id, u, lm.x[u]);
         };
@@ -1422,7 +1425,7 @@ pub fn DeviceBatch(comptime D: type) type {
             var sink = Sink(D, false, false).host(self, &no_planes, x, x_old.ptr);
             const any = limitRange(D, &sink, 0, @intCast(self.count), self.lim_active);
             self.lim_active = true;
-            return any;
+            return any != 0;
         }
 
         fn clearLimits(ctx: *anyopaque) void {
@@ -1805,8 +1808,8 @@ pub fn DeviceBatch(comptime D: type) type {
 // GPU path — the SAME evalRange body, driven by a gompute RawKernel with an
 // atomic-scatter sink. One kernel per device type; builtins register at comptime
 // (this file's root `comptime` block), a dynamic `.so` registers its one
-// device from this same template. Buffers are flat SoA uploaded before launch (host mirrors of the
-// batch tapes/planes). First cut targets simple devices (no state / history /
+// device from this same template. Buffers are flat SoA uploaded before launch
+// (host mirrors of the batch tapes/planes). First cut targets simple devices (no state / history /
 // limiting); richer devices stay CPU until their GPU state is added.
 // ===========================================================================
 
