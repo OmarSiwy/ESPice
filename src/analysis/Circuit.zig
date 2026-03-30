@@ -380,9 +380,10 @@ pub const Circuit = struct {
     /// `combineGC`, limiting, history injection and every other host-side step
     /// layered on top of a stamp.
     ///
-    /// For the GPU the two functions are the same work — `gpuEligible` admits
-    /// no device with a `limit` decl, so `eval` and `eval_newton` agree — hence
-    /// one hook for both.
+    /// For the GPU the two functions are the same work: `eval` and
+    /// `eval_newton` differ only in skipping the constant-Jacobian baseline,
+    /// which the device path never uses (see `evalNewton`), hence one hook
+    /// for both.
     pub fn eval(self: *Circuit, x: []const f64, t: f64) void {
         // The memo names an x, and x_op is one stable arena slice — so a
         // direct eval at a DIFFERENT x (disto, matex, qpss, pss, pnoise,

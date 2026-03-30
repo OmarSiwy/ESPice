@@ -100,7 +100,6 @@ pub const ParEval = struct {
 
     pub fn init(
         gpa: std.mem.Allocator,
-        _: std.Io,
         batches: []const Batch,
         nnz: u32,
         n: u32,
@@ -363,7 +362,8 @@ pub const ParEval = struct {
 
 const vec_width = std.simd.suggestVectorLength(f64) orelse 4;
 
-fn addSimd(dst: []f64, src: []const f64) void {
+/// `dst += src`, elementwise.
+pub fn addSimd(dst: []f64, src: []const f64) void {
     const W = vec_width;
     const Vv = @Vector(W, f64);
     var i: usize = 0;
