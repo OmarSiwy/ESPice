@@ -103,7 +103,7 @@ pub fn solve(
     root.zeroSimd(rhs);
     rhs[options.probe_branch] = 1.0;
 
-    const x_out = try batch.solve(ckt, &fs, allocator, ckt.g_vals, ckt.c_vals, omegas, rhs, false);
+    const x_out = try batch.solve(ckt, &fs, allocator, omegas, rhs, false);
     defer allocator.free(x_out);
 
     for (0..n_points) |k| {

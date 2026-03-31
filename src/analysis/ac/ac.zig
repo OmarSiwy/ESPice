@@ -52,7 +52,7 @@ pub fn sweep(
     defer allocator.free(omegas);
     options.sweep.fill(freqs, omegas);
 
-    const x_out = try batch.solve(ckt, &fs, allocator, ckt.g_vals, ckt.c_vals, omegas, rhs, false);
+    const x_out = try batch.solve(ckt, &fs, allocator, omegas, rhs, false);
     defer allocator.free(x_out);
 
     for (0..n_points) |k| {
