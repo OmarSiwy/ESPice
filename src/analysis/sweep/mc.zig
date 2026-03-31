@@ -1,6 +1,6 @@
 //! Monte Carlo: perturb device parameters through raw ParamRef-style f32
-//! pointers, re-solve DC per trial, accumulate probe statistics. One trial
-//! per structural sweep lane (`lanes.solveLanes`, GPU batch orelse serial) —
+//! pointers, re-solve DC per trial, record the probes. One trial per
+//! structural sweep lane (`lanes.solveLanes`) —
 //! the pattern is frozen, so one Workspace serves every trial. The RNG is a
 //! deterministic std.Random.DefaultPrng seeded from Options.seed; `run` is
 //! `analyze` with param_vars collected from the netlist, so there is exactly
@@ -9,8 +9,6 @@ const std = @import("std");
 const root = @import("../types.zig");
 const lanes = @import("lanes.zig");
 const converger = @import("solvers").converger;
-
-const W = std.simd.suggestVectorLength(f64) orelse 8;
 
 // ============================================================================
 // Parameter variation specification
@@ -42,34 +40,11 @@ pub const ParamVar = struct {
 pub const Options = @import("requests").Mc;
 
 // ============================================================================
-// Statistics for a single probe
-// ============================================================================
-
-pub const Stats = struct {
-    mean: f64,
-    std_dev: f64,
-    min: f64,
-    max: f64,
-    yield_pct: f64,
-    n_converged: u32,
-};
-
-// ============================================================================
-// Yield specification (optional)
-// ============================================================================
-
-pub const YieldSpec = struct {
-    probe_idx: u32,
-    lo: f64,
-    hi: f64,
-};
-
-// ============================================================================
 // Per-lane parameter draw — the ONE place the distributions are sampled
 // ============================================================================
 
 /// solveLanes apply/restore state: the perturbable params, plus a PRNG that
-/// reseeds on lane 0 so a GPU→serial fallthrough resamples the same draws.
+/// reseeds on lane 0 so every sweep draws the same sequence.
 const LaneCtx = struct {
     param_vars: []const ParamVar,
     seed: u64,
@@ -102,28 +77,22 @@ const LaneCtx = struct {
 // Monte Carlo analysis entry point
 // ============================================================================
 
-/// Caller owns the outputs: samples[probes.len * n_trials], probe-major with
-/// stride n_trials — converged trials packed at the front of each probe row
-/// (samples[p * n_trials + k], k < n_converged) — and stats[probes.len].
-/// Returns the number of converged trials. Parameters are restored to their
-/// nominals afterwards.
+/// Caller owns `samples[probes.len * n_trials]`, probe-major with stride
+/// n_trials; converged trials are packed at the front of each probe row
+/// (samples[p * n_trials + k], k < the returned count). Parameters are
+/// restored to their nominals afterwards.
 pub fn analyze(
     ckt: *root.Circuit,
     param_vars: []const ParamVar,
     probes: []const u32,
     samples: []f64,
-    stats: []Stats,
-    yield_specs: []const YieldSpec,
     options: Options,
     allocator: std.mem.Allocator,
 ) !u32 {
     const stride: usize = options.n_trials;
     std.debug.assert(samples.len == probes.len * stride);
-    std.debug.assert(stats.len == probes.len);
 
-    // Structural sweep lanes: one trial per lane, batched on GPU or serial.
-    // The per-lane apply reseeds on lane 0 so a GPU→serial fallthrough resamples
-    // identically (see lanes.LaneSetup contract).
+    // Structural sweep lanes: one trial per lane.
     const n: usize = ckt.n;
     const x_lanes = try allocator.alloc(f64, stride * n);
     defer allocator.free(x_lanes);
@@ -135,100 +104,13 @@ pub fn analyze(
     const nopts = converger.optionsFromTolerances(options.dc_options.tol, options.dc_options.tol.itl2);
     try lanes.solveLanes(ckt, setup, x_lanes, results, nopts);
 
-    const yield_counts = try allocator.alloc(u32, yield_specs.len);
-    defer allocator.free(yield_counts);
-    // ponytail: integer counters need only a native bulk fill.
-    @memset(yield_counts, 0);
-
-    for (stats) |*st| {
-        st.* = .{
-            .mean = 0,
-            .std_dev = 0,
-            .min = std.math.inf(f64),
-            .max = -std.math.inf(f64),
-            .yield_pct = 0,
-            .n_converged = 0,
-        };
-    }
-
-    // Pack converged trials contiguously at the front of each probe row.
     var n_conv: u32 = 0;
     for (results, 0..) |r, t| {
         if (!r.converged) continue;
         const xl = x_lanes[t * n ..][0..n];
-        for (probes, 0..) |node, p| {
-            const val = xl[node];
-            samples[p * stride + n_conv] = val;
-            stats[p].min = @min(stats[p].min, val);
-            stats[p].max = @max(stats[p].max, val);
-        }
-        for (yield_specs, yield_counts) |ys, *count| {
-            const val = xl[probes[ys.probe_idx]];
-            if (val >= ys.lo and val <= ys.hi) count.* += 1;
-        }
+        for (probes, 0..) |node, p| samples[p * stride + n_conv] = xl[node];
         n_conv += 1;
     }
-
-    for (stats, 0..) |*st, p| {
-        st.n_converged = n_conv;
-
-        if (n_conv == 0) {
-            st.min = 0;
-            st.max = 0;
-            continue;
-        }
-
-        const vals = samples[p * stride ..][0..n_conv];
-        const nc_f: f64 = @floatFromInt(n_conv);
-
-        // Mean — SIMD accumulate
-        var sum: f64 = 0;
-        {
-            const V = @Vector(W, f64);
-            var acc: V = @splat(0.0);
-            var i: usize = 0;
-            while (i + W <= n_conv) : (i += W) {
-                const v: V = vals[i..][0..W].*;
-                acc += v;
-            }
-            sum = @reduce(.Add, acc);
-            while (i < n_conv) : (i += 1) sum += vals[i];
-        }
-        const mean = sum / nc_f;
-        st.mean = mean;
-
-        // Bessel-corrected standard deviation — SIMD accumulate
-        var sum_sq: f64 = 0;
-        {
-            const V = @Vector(W, f64);
-            var acc: V = @splat(0.0);
-            const mv: V = @splat(mean);
-            var i: usize = 0;
-            while (i + W <= n_conv) : (i += W) {
-                const v: V = vals[i..][0..W].*;
-                const d = v - mv;
-                acc += d * d;
-            }
-            sum_sq = @reduce(.Add, acc);
-            while (i < n_conv) : (i += 1) {
-                const d = vals[i] - mean;
-                sum_sq += d * d;
-            }
-        }
-        st.std_dev = if (n_conv > 1)
-            @sqrt(sum_sq / @as(f64, @floatFromInt(n_conv - 1)))
-        else
-            0;
-    }
-
-    // Yield percentage (conditional on convergence)
-    for (yield_specs, yield_counts) |ys, count| {
-        if (n_conv > 0) {
-            stats[ys.probe_idx].yield_pct =
-                @as(f64, @floatFromInt(count)) / @as(f64, @floatFromInt(n_conv)) * 100.0;
-        }
-    }
-
     return n_conv;
 }
 
@@ -266,9 +148,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const stride: usize = opts.n_trials;
     const samples = try scratch.alloc(f64, ctx.probes.len * stride);
     defer scratch.free(samples);
-    const stats = try scratch.alloc(Stats, ctx.probes.len);
-    defer scratch.free(stats);
-    const n_conv = try analyze(ckt, param_vars, ctx.probes, samples, stats, &.{}, opts, scratch);
+    const n_conv = try analyze(ckt, param_vars, ctx.probes, samples, opts, scratch);
 
     const npoints: usize = if (ctx.probes.len > 0) n_conv else 0;
     const names = try root.probeNames(ctx, "run");
