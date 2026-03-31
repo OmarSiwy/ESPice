@@ -111,10 +111,6 @@ pub fn solve(
     // `.pz` deck was validated against and it stays bit-for-bit that form.
     try shiftedFactor(&w, 0, 0);
     const den = buildA(&w, options);
-    if (true) {
-        std.debug.print("PZDBG n={d} count={d} conv={}\n", .{ n, den.count, den.converged });
-        for (eigs[0..den.count], 0..) |l, i| std.debug.print("  lam[{d}] = {e} {e}\n", .{ i, l.re, l.im });
-    }
 
     // λ → s = 1/λ = conj(λ)/|λ|²; drop |λ| ≈ 0 (no dynamics, not a pole at the
     // origin). The dropped eigenvalues are the rows with NO dynamics —
