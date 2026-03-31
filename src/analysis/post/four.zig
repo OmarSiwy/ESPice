@@ -78,36 +78,6 @@ pub fn analyze(waveform: *const tran.Waveform, probe_idx: u32, f_fund: f64, n_ha
     return extractSpectrum(re, im, n_fft, n_harmonics);
 }
 
-/// Fourier analysis from pre-computed uniform samples (no transient sim needed).
-/// `samples` are uniformly spaced over exactly one period of the fundamental.
-pub fn analyzeBuffer(samples: []const f64, n_harmonics: usize, allocator: std.mem.Allocator) !Spectrum {
-    if (samples.len < 2) return error.InsufficientData;
-
-    const n_fft = fft_mod.nextPow2(samples.len);
-    const n_fft_f: f64 = @floatFromInt(n_fft);
-    const n_in_f: f64 = @floatFromInt(samples.len);
-
-    const re = try allocator.alloc(f64, n_fft);
-    defer allocator.free(re);
-    const im = try allocator.alloc(f64, n_fft);
-    defer allocator.free(im);
-
-    // Resample input to n_fft points via linear interpolation
-    for (0..n_fft) |k| {
-        const frac = @as(f64, @floatFromInt(k)) / n_fft_f * n_in_f;
-        const idx_lo: usize = @intFromFloat(@floor(frac));
-        const idx_hi = if (idx_lo + 1 < samples.len) idx_lo + 1 else idx_lo;
-        const alpha = frac - @as(f64, @floatFromInt(idx_lo));
-        re[k] = samples[idx_lo] * (1.0 - alpha) + samples[idx_hi] * alpha;
-    }
-
-    root.zeroSimd(im);
-
-    fft_mod.fft(re, im);
-
-    return extractSpectrum(re, im, n_fft, n_harmonics);
-}
-
 /// Contract entry: transient from the operating point, then the harmonic
 /// table — one row per harmonic (row 0 is DC), columns
 /// (harmonic, frequency, magnitude, phase_deg). THD lands in the plotname.
@@ -252,5 +222,6 @@ fn interpolateAt(times: []const f64, values: []const f64, t: f64, cursor: *usize
 
 // Private implementation access for the analysis test suite.
 pub const test_access = if (@import("builtin").is_test) .{
+    .extractSpectrum = extractSpectrum,
     .interpolateAt = interpolateAt,
 } else {};
