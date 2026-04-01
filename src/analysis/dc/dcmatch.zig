@@ -63,17 +63,19 @@ fn fdSensitivity(
     const orig: f64 = param.get();
     const delta_req = 1e-6 * @abs(orig) + 1e-12;
 
+    // Only this parameter moves and temperature does not, so re-deriving
+    // its own device type is the whole recompute (Circuit.recomputeType).
     param.set(orig + delta_req);
     // The step the parameter ACTUALLY took — an f32-typed field rounds it.
     const delta = param.get() - orig;
     defer {
         param.set(orig);
-        ckt.recompute() catch unreachable; // restores the checked original parameter
+        ckt.recomputeType(param.device_type) catch unreachable; // restores the checked original parameter
     }
     // Same trap as sens.zig: the +1e-12 floor un-collapses an internal node
     // whose parasitic is nominally 0, and the frozen pattern has no row for
     // it. The derivative is unrepresentable, not small — report 0.
-    ckt.recompute() catch |e| switch (e) {
+    ckt.recomputeType(param.device_type) catch |e| switch (e) {
         error.TopologyChanged => return 0,
     };
 
