@@ -115,7 +115,7 @@ fn writeColumn(n: usize, ports: []const Port, x_work: []const f64, a_p: f64, s_m
 /// (frequency, S11, S12, ..., Snn) with (re, im) per variable.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
-    const x_op = ctx.x_op orelse return error.NoOperatingPoint;
+    const x_op = ctx.x_op;
 
     const one_port = [_]Port{.{ .node = ctx.source_node, .branch = ctx.source_branch }};
     const ports: []const Port = if (opts.ports.len > 0) opts.ports else &one_port;
@@ -125,7 +125,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     // `defer`-freed == scratch; `a` is a results arena. See
     // RunCtx.scratch_allocator.
-    const scratch = ctx.scratch_allocator orelse a;
+    const scratch = ctx.scratch_allocator;
     const freqs = try scratch.alloc(f64, n_points);
     defer scratch.free(freqs);
     const s = try scratch.alloc(Complex, n_points * n_s);

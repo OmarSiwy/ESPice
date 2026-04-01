@@ -785,7 +785,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     // `defer`-freed == scratch; `a` is a results arena. See
     // RunCtx.scratch_allocator.
-    const scratch = ctx.scratch_allocator orelse a;
+    const scratch = ctx.scratch_allocator;
     const spectra_re = try scratch.alloc(f64, ctx.probes.len * nf);
     defer scratch.free(spectra_re);
     const spectra_im = try scratch.alloc(f64, ctx.probes.len * nf);

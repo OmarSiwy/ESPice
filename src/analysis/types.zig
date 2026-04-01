@@ -74,7 +74,9 @@ pub const freeze = circuit_mod.init;
 
 pub const RunCtx = struct {
     circuit: *Circuit,
-    x_op: ?[]f64,
+    /// The operating point. Session.prerequisite solves one for every job but
+    /// `.op` (the executor solves it) and `.tran uic` (the executor seeds ICs).
+    x_op: []f64,
     probes: []const u32,
     /// Raw column label per probe, parallel to `probes` (see probeNames).
     probe_labels: []const []const u8 = &.{},
@@ -89,8 +91,8 @@ pub const RunCtx = struct {
     /// zero response — the same answer ngspice gives such a deck.
     ac_drive: []const f64 = &.{},
     allocator: std.mem.Allocator,
-    /// Reclaimable work storage when allocator retains the final results in an arena.
-    scratch_allocator: ?std.mem.Allocator = null,
+    /// Reclaimable work storage; `allocator` is the results arena.
+    scratch_allocator: std.mem.Allocator,
 };
 
 // ---------------------------------------------------------------------------

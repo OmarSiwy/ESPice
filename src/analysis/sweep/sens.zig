@@ -198,7 +198,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     // `defer`-freed == scratch; `a` is a results arena. The per-column names
     // built from `entries` below stay on `a` — they ARE the Result. See
     // RunCtx.scratch_allocator.
-    const scratch = ctx.scratch_allocator orelse a;
+    const scratch = ctx.scratch_allocator;
     const refs = try ctx.circuit.collectParams();
     const params = try scratch.alloc(SensParam, refs.len);
     defer scratch.free(params);

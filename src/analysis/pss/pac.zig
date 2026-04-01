@@ -261,7 +261,7 @@ pub inline fn buildConversionMatrix(
 /// (frequency, tf_h{-M}..tf_h{+M}) with (re, im) per variable.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
-    const x_op = ctx.x_op orelse return error.NoOperatingPoint;
+    const x_op = ctx.x_op;
     if (ctx.probes.len == 0) return error.NoProbe;
     const probe = ctx.probes[ctx.probes.len - 1];
 
@@ -269,7 +269,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const n_sb: usize = 2 * @as(usize, opts.n_harmonics) + 1;
     // `defer`-freed == scratch; `a` is a results arena. See
     // RunCtx.scratch_allocator.
-    const scratch = ctx.scratch_allocator orelse a;
+    const scratch = ctx.scratch_allocator;
     const freqs = try scratch.alloc(f64, n_freqs);
     defer scratch.free(freqs);
     const transfer = try scratch.alloc(Complex, n_freqs * n_sb);

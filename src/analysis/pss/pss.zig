@@ -604,7 +604,7 @@ pub fn solve(
 /// Data layout: point-major rows (time, probes...), n_samples+1 rows.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
-    const x_op = ctx.x_op orelse return error.NoOperatingPoint;
+    const x_op = ctx.x_op;
 
     const names = try root.probeNames(ctx, "time");
     errdefer {
@@ -619,7 +619,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     // `solve` writes the caller's `data` and frees everything else it takes;
     // `a` is a results arena that cannot reclaim it. See
     // RunCtx.scratch_allocator.
-    const res = try solve(ctx.circuit, x_op, ctx.probes, data, opts, ctx.scratch_allocator orelse a);
+    const res = try solve(ctx.circuit, x_op, ctx.probes, data, opts, ctx.scratch_allocator);
     if (!res.converged)
         std.debug.print("Warning: pss: shooting did not converge (residual {e})\n", .{res.residual_norm});
 
