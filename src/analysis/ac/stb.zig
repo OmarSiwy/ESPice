@@ -1,6 +1,5 @@
-//! Loop-gain stability (STB): augment the dense linearized G/C with a 0 V
-//! probe source between probe_p and probe_n to form (n+1)², then sweep.
-//! T(ω) = −i_br(ω). Phase unwrap mandatory for gain-margin extraction.
+//! Loop-gain stability (STB): drive the deck's own 0 V probe source with a
+//! unit injection on its branch row and sweep T(ω) = −V(+)/V(−).
 const std = @import("std");
 const batch = @import("batch.zig");
 const root = @import("../types.zig");
@@ -17,8 +16,6 @@ pub const SolveResult = struct {
     freqs: []f64,
     loop_gain: []Complex,
     n_points: u32,
-    gain_margin_db: f64,
-    phase_margin_deg: f64,
 
     pub fn init(allocator: std.mem.Allocator, n_points: u32) !SolveResult {
         const freqs = try allocator.alloc(f64, n_points);
@@ -27,8 +24,6 @@ pub const SolveResult = struct {
             .freqs = freqs,
             .loop_gain = try allocator.alloc(Complex, n_points),
             .n_points = n_points,
-            .gain_margin_db = std.math.nan(f64),
-            .phase_margin_deg = std.math.nan(f64),
         };
     }
 
@@ -38,7 +33,7 @@ pub const SolveResult = struct {
     }
 };
 
-/// Low-level solve: linearize at `x_op` → inject at the probe → margins.
+/// Low-level solve: linearize at `x_op`, inject at the probe, sweep T(ω).
 ///
 /// The probe is the deck's own 0 V source (`.stb Vprobe ...`), NOT a source
 /// this module adds: its branch equation is already `v_p - v_n - V = 0`, so
@@ -97,7 +92,6 @@ pub fn solve(
         result.loop_gain[k] = v_p.div(v_n).scale(-1);
     }
 
-    computeMargins(&result);
     return result;
 }
 
@@ -129,76 +123,3 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         .data = data,
     };
 }
-
-// ============================================================================
-// Margin extraction
-// ============================================================================
-
-/// Phase margin: interpolated phase at the first 0 dB down-crossing of |T|.
-/// Gain margin: interpolated magnitude at the −180° crossing of the unwrapped
-/// phase. NaN when the crossing doesn't exist in-band.
-fn computeMargins(result: *SolveResult) void {
-    const n: usize = result.n_points;
-    if (n < 2) return;
-
-    // --- Phase margin: find |T| = 0 dB crossing -----------------------------
-    // Prefer first strict down-crossing (gain going below 0 dB).
-    var pm_found = false;
-    for (1..n) |k| {
-        const db_prev = result.loop_gain[k - 1].magDb();
-        const db_curr = result.loop_gain[k].magDb();
-
-        if (db_prev >= 0 and db_curr < 0) {
-            const frac = db_prev / (db_prev - db_curr);
-            const phase_prev = result.loop_gain[k - 1].phaseDeg();
-            const phase_curr = result.loop_gain[k].phaseDeg();
-            result.phase_margin_deg = 180.0 + phase_prev + frac * (phase_curr - phase_prev);
-            pm_found = true;
-            break;
-        }
-    }
-
-    // Fallback: any crossing direction.
-    if (!pm_found) {
-        for (1..n) |k| {
-            const db_prev = result.loop_gain[k - 1].magDb();
-            const db_curr = result.loop_gain[k].magDb();
-
-            if ((db_prev >= 0 and db_curr < 0) or (db_prev < 0 and db_curr >= 0)) {
-                const frac = @abs(db_prev) / (@abs(db_prev) + @abs(db_curr));
-                const phase_prev = result.loop_gain[k - 1].phaseDeg();
-                const phase_curr = result.loop_gain[k].phaseDeg();
-                result.phase_margin_deg = 180.0 + phase_prev + frac * (phase_curr - phase_prev);
-                break;
-            }
-        }
-    }
-
-    // --- Gain margin: unwrapped phase, find −180° crossing -------------------
-    // atan2 wraps to (−180°, 180°] so a raw comparison misses the −180°
-    // crossing; unwrap the phase sequence first.
-    var phase_uw = result.loop_gain[0].phaseDeg();
-    for (1..n) |k| {
-        const phase_prev = phase_uw;
-        var delta = result.loop_gain[k].phaseDeg() - result.loop_gain[k - 1].phaseDeg();
-        if (delta > 180.0) delta -= 360.0;
-        if (delta < -180.0) delta += 360.0;
-        phase_uw += delta;
-        const phase_curr = phase_uw;
-
-        if ((phase_prev >= -180.0 and phase_curr < -180.0) or
-            (phase_prev < -180.0 and phase_curr >= -180.0))
-        {
-            const frac = @abs(phase_prev + 180.0) / (@abs(phase_prev + 180.0) + @abs(phase_curr + 180.0));
-            const db_prev = result.loop_gain[k - 1].magDb();
-            const db_curr = result.loop_gain[k].magDb();
-            result.gain_margin_db = -(db_prev + frac * (db_curr - db_prev));
-            break;
-        }
-    }
-}
-
-// Private implementation access for the analysis test suite.
-pub const test_access = if (@import("builtin").is_test) .{
-    .computeMargins = computeMargins,
-} else {};
