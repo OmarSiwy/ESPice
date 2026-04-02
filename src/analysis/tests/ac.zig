@@ -1,12 +1,11 @@
-const BatchTests = struct {
-    const impl = @import("../ac/batch.zig");
+const StreamTests = struct {
+    const freq = @import("../ac/freq.zig");
     const FreqSolver = @import("solvers").freq_solve.FreqSolver;
-    const quantum = impl.quantum;
+    const quantum = freq.quantum;
     const root = @import("../types.zig");
-    const solve = impl.solve;
     const std = @import("std");
 
-    test "frequency quanta preserve full-grid answers and unwind cancellation" {
+    test "frequency stream matches one whole-grid batch and unwinds cancellation" {
         const a = std.testing.allocator;
         const g = try a.dupe(f64, &.{ 2, 1, 0, 3 });
         const c = try a.dupe(f64, &.{ 0.1, 0, 0.02, 0.3 });
@@ -31,21 +30,30 @@ const BatchTests = struct {
             }
         };
         var probe: Probe = .{};
-        // solve reads only the checkpoint callback from Circuit.
+        // The stream reads only the checkpoint callback from Circuit.
         var ckt: root.Circuit = undefined;
+        ckt.progress = .{ .ctx = &probe, .yield_fn = Probe.checkpoint };
         for ([_]bool{ false, true }) |adjoint| {
-            ckt.progress = null;
-            const whole = try solve(&ckt, &fs, a, &frequencies, &rhs, adjoint);
+            const whole = try a.alloc(f64, frequencies.len * 4);
             defer a.free(whole);
+            try fs.solveBatch(&frequencies, &rhs, whole, adjoint);
+
             probe = .{};
-            ckt.progress = .{ .ctx = &probe, .yield_fn = Probe.checkpoint };
-            const stepped = try solve(&ckt, &fs, a, &frequencies, &rhs, adjoint);
-            defer a.free(stepped);
-            try std.testing.expectEqualSlices(f64, whole, stepped);
+            var stream = try freq.Stream.init(a, &fs, &frequencies, &rhs, adjoint);
+            defer stream.deinit(a);
+            var seen: usize = 0;
+            while (try stream.next(&ckt)) |pt| : (seen += 1) {
+                try std.testing.expectEqual(seen, pt.k);
+                try std.testing.expectEqualSlices(f64, whole[pt.k * 4 ..][0..4], pt.x);
+            }
+            try std.testing.expectEqual(frequencies.len, seen);
             try std.testing.expectEqual(@as(u16, 3), probe.calls);
             try std.testing.expectEqual(@as(u16, frequencies.len), probe.completed);
+
             probe = .{ .cancel = true };
-            try std.testing.expectError(error.QueryCancelled, solve(&ckt, &fs, a, &frequencies, &rhs, adjoint));
+            var cancelled = try freq.Stream.init(a, &fs, &frequencies, &rhs, adjoint);
+            defer cancelled.deinit(a);
+            try std.testing.expectError(error.QueryCancelled, cancelled.next(&ckt));
             try std.testing.expectEqual(@as(u16, quantum), probe.completed);
         }
     }
@@ -135,6 +143,6 @@ const NoiseTests = struct {
 };
 
 test {
-    _ = BatchTests;
+    _ = StreamTests;
     _ = NoiseTests;
 }

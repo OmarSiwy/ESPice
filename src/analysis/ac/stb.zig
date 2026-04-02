@@ -1,7 +1,7 @@
 //! Loop-gain stability (STB): drive the deck's own 0 V probe source with a
 //! unit injection on its branch row and sweep T(ω) = −V(+)/V(−).
 const std = @import("std");
-const batch = @import("batch.zig");
+const freq = @import("freq.zig");
 const root = @import("../types.zig");
 const types = @import("numerics");
 const solvers = @import("solvers");
@@ -61,8 +61,7 @@ pub fn solve(
     try ckt.linearizeAc(x_op);
 
     // --- Frequency sweep ------------------------------------------------------
-    // Independent (G+jωC)x = e_branch solves: lane axis = frequency. GPU batch
-    // dispatch orelse the CPU lane solveBatch.
+    // Independent (G+jωC)x = e_branch solves: lane axis = frequency.
     const nn = 2 * n;
     const n_points = options.sweep.count();
 
@@ -82,14 +81,12 @@ pub fn solve(
     root.zeroSimd(rhs);
     rhs[options.probe_branch] = 1.0;
 
-    const x_out = try batch.solve(ckt, &fs, allocator, omegas, rhs, false);
-    defer allocator.free(x_out);
-
-    for (0..n_points) |k| {
-        const lane = x_out[k * nn ..][0..nn];
-        const v_p: Complex = .{ .re = lane[options.probe_p], .im = lane[n + options.probe_p] };
-        const v_n: Complex = .{ .re = lane[options.probe_n], .im = lane[n + options.probe_n] };
-        result.loop_gain[k] = v_p.div(v_n).scale(-1);
+    var stream = try freq.Stream.init(allocator, &fs, omegas, rhs, false);
+    defer stream.deinit(allocator);
+    while (try stream.next(ckt)) |pt| {
+        const v_p: Complex = .{ .re = pt.x[options.probe_p], .im = pt.x[n + options.probe_p] };
+        const v_n: Complex = .{ .re = pt.x[options.probe_n], .im = pt.x[n + options.probe_n] };
+        result.loop_gain[pt.k] = v_p.div(v_n).scale(-1);
     }
 
     return result;
