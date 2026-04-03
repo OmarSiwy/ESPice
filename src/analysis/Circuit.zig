@@ -13,9 +13,6 @@ const device_eval = @import("device_eval");
 const Prepared = @import("problem_types").Circuit;
 const progress_api = @import("progress.zig");
 const solvers = @import("solvers");
-// Leaf types only (Waveform/Options/SimResult) — importing the transient
-// driver here would close a cycle: tran.zig -> ../types.zig -> Circuit.zig.
-const tran = @import("tran/types.zig");
 
 const Batch = device_ir.Batch;
 const Planes = device_ir.Planes;
@@ -77,7 +74,6 @@ pub const EvalHook = struct {
 pub const GpuHook = struct {
     ctx: *anyopaque,
     solve_newton: *const fn (*anyopaque, x: []f64, t: f64, opts: converger.Options) anyerror!converger.Result,
-    simulate_tran: ?*const fn (*anyopaque, x: []f64, probes: []const u32, waveform: *tran.Waveform, options: tran.Options) anyerror!tran.SimResult = null,
     /// Stamp the planes on the device — the GPU half of `Circuit.eval` /
     /// `Circuit.evalNewton`, ground pin included.
     ///

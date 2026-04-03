@@ -347,35 +347,15 @@ const TranHook = struct {
     }
 };
 
-/// Fine-grained primitive: integrate into caller-owned x and waveform.
-pub const simulate = simulateInto;
-
-/// Same integrator, recording accepted samples through record(t, x, probes).
-pub fn simulateInto(
+/// Integrate from caller-owned x, recording accepted samples into `waveform`.
+pub fn simulate(
     ckt: *root.Circuit,
     x: []f64,
     probes: []const u32,
-    waveform: anytype,
+    waveform: *Waveform,
     options: Options,
     allocator: std.mem.Allocator,
 ) !SimResult {
-    // Whole-transient GPU path (engine-owned megakernel driver): chunked
-    // cooperative launches integrate the full [0, t_stop] on-device. Only
-    // when nothing needs per-step host callbacks or host-side state; any
-    // error falls through to the CPU integrator with the waveform rewound.
-    // A streamed recorder cannot rewind already-written samples on fallback.
-    if (comptime @TypeOf(waveform) == *Waveform) if (ckt.gpu_hook) |gh| {
-        if (gh.simulate_tran) |gt| {
-            if (options.step_fn == null and ckt.progress == null) gpu: {
-                const len0 = waveform.len;
-                const r = gt(gh.ctx, x, probes, waveform, options) catch {
-                    waveform.len = len0;
-                    break :gpu;
-                };
-                return r;
-            }
-        }
-    };
     const n: usize = ckt.n;
     const has_charge = ckt.has_charge;
     const trap = options.method == .trapezoidal;

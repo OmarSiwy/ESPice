@@ -219,7 +219,6 @@ const PssTests = struct {
     const Gmres = @import("solvers").gmres.Gmres(f64);
     const Options = @import("requests").Pss;
     const SolveResult = impl.SolveResult;
-    const gpuIntegrateOnePeriod = impl.test_access.gpuIntegrateOnePeriod;
     const krylov_threshold = impl.test_access.krylov_threshold;
     const normInf = impl.normInf;
     const root = @import("../types.zig");
@@ -332,14 +331,6 @@ const PssTests = struct {
         };
         try testing.expect(r.converged);
         try testing.expectEqual(@as(u16, 5), r.iterations);
-    }
-
-    test "pss: gpuIntegrateOnePeriod returns false without gpu_hook" {
-        // Verify GPU fallback: when gpu_hook is null, returns false immediately.
-        // We can't construct a full Circuit, but the function signature and
-        // the null-check logic is the critical path.
-        const ptr: *const fn (*root.Circuit, []f64, Options, std.mem.Allocator) bool = &gpuIntegrateOnePeriod;
-        try testing.expect(@intFromPtr(ptr) != 0);
     }
 };
 
