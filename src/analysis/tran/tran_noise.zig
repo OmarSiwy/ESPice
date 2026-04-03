@@ -9,6 +9,7 @@ const root = @import("../types.zig");
 // ponytail: the shared copy owns SIMD setup; seeded noise sampling stays scalar.
 const simdCopy = root.copySimd;
 const converger = @import("solvers").converger;
+const integrator = @import("integrator.zig");
 
 pub const NoiseSource = root.NoiseSource;
 
@@ -96,8 +97,8 @@ const NoiseHook = struct {
     pub fn assemble(self: NoiseHook, ckt: *root.Circuit, x: []const f64, t: f64) void {
         ckt.eval(x, t);
         if (self.has_charge) {
-            for (0..ckt.n) |i|
-                ckt.rhs[i] += self.alpha * (ckt.q_vec[i] - self.q_prev[i]);
+            const n: usize = ckt.n;
+            integrator.companionAt(.backward_euler, true, ckt.rhs[0..n], ckt.q_vec[0..n], self.q_prev[0..n], &.{}, &.{}, .{ .ag0 = self.alpha, .ag2 = 0 });
         }
         for (self.noise_currents, 0..) |i_n, s| {
             const node_p = self.inj_nodes[2 * s];

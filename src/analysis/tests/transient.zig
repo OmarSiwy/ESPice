@@ -301,6 +301,39 @@ const TranTests = struct {
         }
     }
 
+    test "companionAt: every method, both modes, matches its per-element formula bit for bit" {
+        var prng = std.Random.DefaultPrng.init(0xc0a1);
+        const r = prng.random();
+        const cap = 3 * W + 2;
+        inline for ([_]impl.Method{ .backward_euler, .trapezoidal, .gear_2 }) |m| {
+            inline for (.{ false, true }) |acc| for (0..cap) |len| {
+                var q: [3][cap]f64 = undefined;
+                var ip: [cap]f64 = undefined;
+                var out: [cap]f64 = undefined;
+                for (0..len) |j| {
+                    for (&q) |*h| h[j] = (r.float(f64) - 0.5) * 1e-12;
+                    ip[j] = (r.float(f64) - 0.5) * 1e-3;
+                    out[j] = (r.float(f64) - 0.5) * 1e-3;
+                }
+                const c: integrator.Coeffs = .{ .ag0 = 2.0 / (r.float(f64) * 1e-9 + 1e-12), .ag2 = r.float(f64) * 1e9 };
+                var ora = out;
+                // The vector body sums (out + d) - h, the scalar tail out + (d - h).
+                const body = len - len % W;
+                for (0..len) |j| {
+                    const d = c.ag0 * (q[0][j] - q[1][j]);
+                    const h: f64 = switch (m) {
+                        .trapezoidal => ip[j],
+                        .gear_2 => c.ag2 * (q[1][j] - q[2][j]),
+                        else => 0,
+                    };
+                    ora[j] = if (!acc) d - h else if (j < body) (ora[j] + d) - h else ora[j] + (d - h);
+                }
+                integrator.companionAt(m, acc, out[0..len], q[0][0..len], q[1][0..len], q[2][0..len], ip[0..len], c);
+                try testing.expectEqualSlices(u64, @ptrCast(ora[0..len]), @ptrCast(out[0..len]));
+            };
+        }
+    }
+
     test "coeffs: BE 1/dt, trap 2/dt, gear-2 variable-step BDF2" {
         const dt: f64 = 1e-9;
         try testing.expectApproxEqRel(@as(f64, 1e9), integrator.coeffs(.backward_euler, dt, dt).ag0, 1e-12);
