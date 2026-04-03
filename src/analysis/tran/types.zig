@@ -1,7 +1,5 @@
-//! Transient data types, split from tran.zig so Circuit.zig can name them in
-//! its hook signatures without importing the transient driver (which imports
-//! the analysis types that re-export Circuit — this file keeps the file-level
-//! import graph acyclic: types.zig -> Circuit.zig -> ../types.zig -> tran.zig).
+//! Transient data types, a leaf under the transient driver: integrator.zig
+//! and matex.zig read them without importing tran.zig.
 const std = @import("std");
 
 pub const Method = @import("requests").Method;
