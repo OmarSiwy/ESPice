@@ -41,9 +41,6 @@ const MatexTests = struct {
     const buildCombinedVals = impl.test_access.buildCombinedVals;
     const denseMatMul = impl.test_access.denseMatMul;
     const expmSmall = impl.test_access.expmSmall;
-    const simdAxpy = impl.test_access.simdAxpy;
-    const simdDot = impl.test_access.simdDot;
-    const simdNorm = impl.test_access.simdNorm;
     const std = @import("std");
 
     // ============================================================================
@@ -179,27 +176,6 @@ const MatexTests = struct {
             denseMatMul(m, A, B, C);
             try testing.expectEqualSlices(f64, want, C);
         }
-    }
-
-    test "simdDot: basic" {
-        const a_arr = [_]f64{ 1, 2, 3, 4 };
-        const b_arr = [_]f64{ 5, 6, 7, 8 };
-        const d = simdDot(&a_arr, &b_arr, 4);
-        try testing.expectApproxEqAbs(@as(f64, 70.0), d, 1e-12);
-    }
-
-    test "simdNorm: unit" {
-        const v_arr = [_]f64{ 3, 4 };
-        try testing.expectApproxEqAbs(@as(f64, 5.0), simdNorm(&v_arr, 2), 1e-12);
-    }
-
-    test "simdAxpy: basic" {
-        const x_arr = [_]f64{ 1, 2, 3 };
-        var y_arr = [_]f64{ 10, 20, 30 };
-        simdAxpy(2.0, &x_arr, &y_arr, 3);
-        try testing.expectApproxEqAbs(@as(f64, 12.0), y_arr[0], 1e-15);
-        try testing.expectApproxEqAbs(@as(f64, 24.0), y_arr[1], 1e-15);
-        try testing.expectApproxEqAbs(@as(f64, 36.0), y_arr[2], 1e-15);
     }
 
     test "buildCombinedVals: gamma=1 gives C+G" {

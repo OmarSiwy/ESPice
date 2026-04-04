@@ -25,6 +25,7 @@ const std = @import("std");
 const root = @import("../types.zig");
 const simdZero = root.zeroSimd;
 const simdCopy = root.copySimd;
+const num = @import("numerics");
 const converger = @import("solvers").converger;
 const integrator = @import("../tran/integrator.zig");
 const dense_lu = @import("solvers").dense_lu;
@@ -44,66 +45,6 @@ pub const SolveResult = struct {
     iterations: u16,
     residual_norm: f64,
 };
-
-// ---------------------------------------------------------------------------
-// SIMD arithmetic helpers
-// ---------------------------------------------------------------------------
-
-/// dst[i] = a[i] + b[i], SIMD.
-inline fn simdAdd(dst: []f64, a: []const f64, b: []const f64) void {
-    const n = @min(dst.len, @min(a.len, b.len));
-    var i: usize = 0;
-    while (i + W <= n) : (i += W) {
-        const va: V = a[i..][0..W].*;
-        const vb: V = b[i..][0..W].*;
-        dst[i..][0..W].* = va + vb;
-    }
-    while (i < n) : (i += 1) dst[i] = a[i] + b[i];
-}
-
-/// dst[i] = a[i] - b[i], SIMD.
-inline fn simdSub(dst: []f64, a: []const f64, b: []const f64) void {
-    const n = @min(dst.len, @min(a.len, b.len));
-    var i: usize = 0;
-    while (i + W <= n) : (i += W) {
-        const va: V = a[i..][0..W].*;
-        const vb: V = b[i..][0..W].*;
-        dst[i..][0..W].* = va - vb;
-    }
-    while (i < n) : (i += 1) dst[i] = a[i] - b[i];
-}
-
-/// dst[i] += scale * src[i], SIMD.
-inline fn simdAxpy(dst: []f64, scale: f64, src: []const f64) void {
-    const n = @min(dst.len, src.len);
-    const sv: V = @splat(scale);
-    var i: usize = 0;
-    while (i + W <= n) : (i += W) {
-        const d: V = dst[i..][0..W].*;
-        const s: V = src[i..][0..W].*;
-        dst[i..][0..W].* = d + sv * s;
-    }
-    while (i < n) : (i += 1) dst[i] += scale * src[i];
-}
-
-/// dst[i] = scale * src[i], SIMD.
-inline fn simdScale(dst: []f64, scale: f64, src: []const f64) void {
-    const n = @min(dst.len, src.len);
-    const sv: V = @splat(scale);
-    var i: usize = 0;
-    while (i + W <= n) : (i += W) {
-        const s: V = src[i..][0..W].*;
-        dst[i..][0..W].* = sv * s;
-    }
-    while (i < n) : (i += 1) dst[i] = scale * src[i];
-}
-
-/// ||v||_inf
-pub inline fn normInf(buf: []const f64) f64 {
-    var mx: f64 = 0;
-    for (buf) |v| mx = @max(mx, @abs(v));
-    return mx;
-}
 
 // ---------------------------------------------------------------------------
 // Trapezoidal companion state, reused across every Newton/shooting pass
@@ -264,7 +205,7 @@ fn shootingMatvec(v: []const f64, w: []f64, ctx_ptr: *anyopaque) void {
     const inv_eps = 1.0 / ctx.options.fd_epsilon;
 
     simdCopy(ctx.x_pert[0..n], ctx.x0[0..n]);
-    simdAxpy(ctx.x_pert[0..n], ctx.options.fd_epsilon, v[0..n]);
+    num.axpy(ctx.x_pert[0..n], ctx.options.fd_epsilon, v[0..n]);
 
     const ok = integrateFrom(ctx.ckt, ctx.ws, ctx.sc, ctx.x_pert, ctx.x_end_pert, ctx.options);
 
@@ -365,7 +306,7 @@ fn krylovSolve(
     krylov: *Gmres,
     options: Options,
 ) void {
-    simdScale(neg_phi[0..n], -1.0, phi[0..n]);
+    num.scale(neg_phi[0..n], -1.0, phi[0..n]);
 
     var ctx = ShootingKrylovCtx{
         .ckt = ckt,
@@ -479,9 +420,11 @@ pub fn solve(
             };
         }
 
-        simdSub(phi, x_end, x0);
+        // x_end + (−1)·x0 is x_end − x0 exactly: IEEE defines a − b as a + (−b).
+        simdCopy(phi, x_end);
+        num.axpy(phi, -1.0, x0);
 
-        res_norm = normInf(phi);
+        res_norm = num.normInf(phi);
         if (res_norm < options.shooting_tol) break;
 
         // Solve (Phi - I) * dx0 = -phi
@@ -518,7 +461,7 @@ pub fn solve(
             );
         }
 
-        simdAdd(x0, x0, dx0);
+        num.axpy(x0, 1.0, dx0); // 1·dx0 is exact
     }
 
     // Record the final periodic waveform from the converged x0.
@@ -568,10 +511,6 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 pub const test_access = if (@import("builtin").is_test) .{
     .krylov_threshold = krylov_threshold,
     .shootingMatvec = shootingMatvec,
-    .simdAdd = simdAdd,
-    .simdAxpy = simdAxpy,
     .simdCopy = simdCopy,
-    .simdScale = simdScale,
-    .simdSub = simdSub,
     .simdZero = simdZero,
 } else {};

@@ -220,14 +220,9 @@ const PssTests = struct {
     const Options = @import("requests").Pss;
     const SolveResult = impl.SolveResult;
     const krylov_threshold = impl.test_access.krylov_threshold;
-    const normInf = impl.normInf;
     const root = @import("../types.zig");
     const shootingMatvec = impl.test_access.shootingMatvec;
-    const simdAdd = impl.test_access.simdAdd;
-    const simdAxpy = impl.test_access.simdAxpy;
     const simdCopy = impl.test_access.simdCopy;
-    const simdScale = impl.test_access.simdScale;
-    const simdSub = impl.test_access.simdSub;
     const simdZero = impl.test_access.simdZero;
     const std = @import("std");
 
@@ -248,47 +243,6 @@ const PssTests = struct {
         simdZero(&b);
         simdCopy(&b, &a);
         for (0..10) |i| try testing.expectEqual(a[i], b[i]);
-    }
-
-    test "pss: simdSub correctness" {
-        var a = [_]f64{ 10, 20, 30, 40, 50, 60, 70, 80, 90, 100 };
-        const b = [_]f64{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
-        var c: [10]f64 = undefined;
-        simdSub(&c, &a, &b);
-        for (0..10) |i| try testing.expectApproxEqAbs(a[i] - b[i], c[i], 1e-15);
-        _ = &a;
-    }
-
-    test "pss: simdAdd correctness" {
-        var a = [_]f64{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
-        const b = [_]f64{ 10, 20, 30, 40, 50, 60, 70, 80, 90, 100 };
-        var c: [10]f64 = undefined;
-        simdAdd(&c, &a, &b);
-        for (0..10) |i| try testing.expectApproxEqAbs(a[i] + b[i], c[i], 1e-15);
-        _ = &a;
-    }
-
-    test "pss: simdAxpy correctness" {
-        var dst = [_]f64{ 1, 2, 3, 4, 5 };
-        const src = [_]f64{ 10, 20, 30, 40, 50 };
-        simdAxpy(&dst, 0.5, &src);
-        try testing.expectApproxEqAbs(@as(f64, 6.0), dst[0], 1e-15);
-        try testing.expectApproxEqAbs(@as(f64, 12.0), dst[1], 1e-15);
-        try testing.expectApproxEqAbs(@as(f64, 18.0), dst[2], 1e-15);
-        try testing.expectApproxEqAbs(@as(f64, 24.0), dst[3], 1e-15);
-        try testing.expectApproxEqAbs(@as(f64, 30.0), dst[4], 1e-15);
-    }
-
-    test "pss: simdScale correctness" {
-        const src = [_]f64{ 2, 4, 6, 8, 10 };
-        var dst: [5]f64 = undefined;
-        simdScale(&dst, -1.0, &src);
-        for (0..5) |i| try testing.expectApproxEqAbs(-src[i], dst[i], 1e-15);
-    }
-
-    test "pss: normInf" {
-        const v = [_]f64{ -3, 1, 2, -5, 4 };
-        try testing.expectApproxEqAbs(@as(f64, 5.0), normInf(&v), 1e-15);
     }
 
     test "pss: shootingMatvec identity operator" {
