@@ -9,6 +9,7 @@ const std = @import("std");
 const root = @import("../types.zig");
 const simdCopy = root.copySimd;
 const num = @import("numerics");
+const combinePlanes = @import("../Circuit.zig").combinePlanes;
 const solvers = @import("solvers");
 
 const DenseLu = solvers.dense_lu.DenseLu(f64);
@@ -409,29 +410,6 @@ fn collectTransitionSpots(allocator: std.mem.Allocator, ckt: *root.Circuit, t_st
 }
 
 // ---------------------------------------------------------------------------
-// Build and factor (C + γG) for R-MATEX. Uses the circuit's CSC pattern
-// to build combined values, then factors via the sparse direct solver.
-// ponytail: consume CSC planes directly; dense assembly already lives in Circuit.
-// ---------------------------------------------------------------------------
-
-fn buildCombinedVals(
-    nnz: u32,
-    g_vals: []const f64,
-    c_vals: []const f64,
-    gamma: f64,
-    out: []f64,
-) void {
-    const gv: V = @splat(gamma);
-    var i: usize = 0;
-    while (i + W <= nnz) : (i += W) {
-        const cv: V = c_vals[i..][0..W].*;
-        const gvals: V = g_vals[i..][0..W].*;
-        out[i..][0..W].* = cv + gv * gvals;
-    }
-    while (i < nnz) : (i += 1) out[i] = c_vals[i] + gamma * g_vals[i];
-}
-
-// ---------------------------------------------------------------------------
 // Compute RHS vector b(t) = C⁻¹ B u(t) via: b = -A x_static + rhs_sources
 // For linear circuits with sources, the RHS comes from the circuit eval.
 // b(t) is obtained by evaluating the circuit at x=0 to get the source-only
@@ -515,11 +493,13 @@ fn approxAinvMul(
 
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
-    // Everything `defer`-freed below — the factorization, the Krylov basis,
-    // the recorded waveform — is scratch, and `a` is a results arena whose
-    // free() is a no-op. Only `names` and `data` at the bottom are the Result.
-    // See RunCtx.scratch_allocator.
-    const scratch = ctx.scratch_allocator;
+    // `a` is a results arena: only `names` and `data` at the bottom are the
+    // Result. The fixed-size work buffers share one lifetime, so they share
+    // one arena over scratch; the solver and the growing waveform keep
+    // scratch itself so their frees are real.
+    var work = std.heap.ArenaAllocator.init(ctx.scratch_allocator);
+    defer work.deinit();
+    const scratch = work.allocator();
     const ckt = ctx.circuit;
     const x_op = ctx.x_op;
     const n: usize = ckt.n;
@@ -529,7 +509,6 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     // --- DC operating point as initial condition ---
     const x = try scratch.alloc(f64, n);
-    defer scratch.free(x);
     simdCopy(x, x_op);
 
     const gamma = opts.gamma orelse opts.t_stop / 1000.0;
@@ -552,37 +531,26 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     // --- Build (C + γG) combined values and factor ---
     const combined_vals = try scratch.alloc(f64, ckt.nnz + 1);
-    defer scratch.free(combined_vals);
-
-    if (ckt.has_charge) {
-        buildCombinedVals(ckt.nnz, ckt.g_vals, ckt.c_vals, gamma, combined_vals);
-    } else {
-        // No charge elements — C = 0, combined = γG
-        const gv: V = @splat(gamma);
-        var i: usize = 0;
-        while (i + W <= ckt.nnz) : (i += W) {
-            const g: V = ckt.g_vals[i..][0..W].*;
-            combined_vals[i..][0..W].* = gv * g;
-        }
-        while (i < ckt.nnz) : (i += 1) combined_vals[i] = gamma * ckt.g_vals[i];
-    }
+    const nnz: usize = ckt.nnz;
+    if (ckt.has_charge)
+        combinePlanes(W, combined_vals[0..nnz], ckt.c_vals[0..nnz], ckt.g_vals[0..nnz], gamma)
+    else // No charge elements — C = 0, combined = γG
+        num.scale(combined_vals[0..nnz], gamma, ckt.g_vals[0..nnz]);
     // Handle trash slot (ground stamp area)
     if (ckt.nnz < combined_vals.len) combined_vals[ckt.nnz] = 0;
 
     // Factor (C + γG) — ONE factorization for the entire simulation
-    var slv = try Solver.init(scratch, nn, ckt.col_ptr, ckt.row_idx, ckt.bbd);
+    var slv = try Solver.init(ctx.scratch_allocator, nn, ckt.col_ptr, ckt.row_idx, ckt.bbd);
     defer slv.deinit();
     try slv.factor(combined_vals);
 
     // --- Collect transition spots ---
-    var ts = try collectTransitionSpots(scratch, ckt, opts.t_stop);
-    defer ts.deinit(scratch);
+    const ts = try collectTransitionSpots(scratch, ckt, opts.t_stop);
 
     // --- Allocate Krylov workspace ---
     // V_basis: n * (m_max+1) column-major
     const v_basis_size = n * (m_max_usize + 1);
     const V_basis = try scratch.alloc(f64, v_basis_size);
-    defer scratch.free(V_basis);
 
     // H: m_max * m_max row-major, plus one subdiagonal row. The final
     // non-breakdown Arnoldi iteration (j == m_max-1) writes the subdiagonal
@@ -591,47 +559,32 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     // somewhere we own.
     const h_size = m_max_usize * m_max_usize;
     const H_mat = try scratch.alloc(f64, h_size + m_max_usize);
-    defer scratch.free(H_mat);
 
     // Scratch for Arnoldi: 2*n
     const arnoldi_tmp1 = try scratch.alloc(f64, n);
-    defer scratch.free(arnoldi_tmp1);
     const arnoldi_tmp2 = try scratch.alloc(f64, n);
-    defer scratch.free(arnoldi_tmp2);
 
     // Padé(6) needs 5*m*m scratch; H_copy and expm_out are separate below.
     const expm_scratch = try scratch.alloc(f64, @max(5 * h_size, 1));
-    defer scratch.free(expm_scratch);
 
     // Small expm output: m_max * m_max
     const expm_out = try scratch.alloc(f64, h_size);
-    defer scratch.free(expm_out);
 
     // Small H copy for expm
     const H_copy = try scratch.alloc(f64, h_size);
-    defer scratch.free(H_copy);
 
     // Temporary vectors for the step update
-    const b_t = try scratch.alloc(f64, n); // b(t) = source RHS at time t
-    defer scratch.free(b_t);
-    const b_th = try scratch.alloc(f64, n); // b(t+h) = source RHS at time t+h
-    defer scratch.free(b_th);
+    var b_t = try scratch.alloc(f64, n); // b(t) = source RHS at time t
+    var b_th = try scratch.alloc(f64, n); // b(t+h) = source RHS at time t+h
     const v_vec = try scratch.alloc(f64, n); // the vector to exponentiate
-    defer scratch.free(v_vec);
     const x_new = try scratch.alloc(f64, n); // next state
-    defer scratch.free(x_new);
 
     // PWL integral scratch vectors
-    const ainv_bt = try scratch.alloc(f64, n); // A⁻¹·b(t)
-    defer scratch.free(ainv_bt);
-    const ainv_bth = try scratch.alloc(f64, n); // A⁻¹·b(t+h)
-    defer scratch.free(ainv_bth);
+    var ainv_bt = try scratch.alloc(f64, n); // A⁻¹·b(t)
+    var ainv_bth = try scratch.alloc(f64, n); // A⁻¹·b(t+h)
     const ainv2_db = try scratch.alloc(f64, n); // A⁻²·(b(t+h)-b(t))/h
-    defer scratch.free(ainv2_db);
     const db_vec = try scratch.alloc(f64, n); // (b(t+h)-b(t))/h
-    defer scratch.free(db_vec);
     const pwl_tmp = try scratch.alloc(f64, n); // scratch for approxAinvMul
-    defer scratch.free(pwl_tmp);
 
     // --- Waveform recording ---
     const n_probes: u32 = @intCast(ctx.probes.len);
@@ -640,7 +593,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         @as(f64, opts.max_points),
     ));
     // ponytail: waveform storage needs only the data leaf, not the tran driver.
-    var wf = try @import("types.zig").Waveform.init(scratch, n_probes, est_points);
+    var wf = try @import("types.zig").Waveform.init(ctx.scratch_allocator, n_probes, est_points);
     defer wf.deinit();
 
     try wf.record(0, x, ctx.probes);
@@ -652,7 +605,6 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     // Save C values for matvec in Arnoldi (they get overwritten by eval)
     const c_vals_saved = try scratch.alloc(f64, ckt.nnz + 1);
-    defer scratch.free(c_vals_saved);
     if (ckt.has_charge) {
         simdCopy(c_vals_saved[0..ckt.nnz], ckt.c_vals[0..ckt.nnz]);
     } else {
@@ -673,7 +625,13 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         // Clamp to t_stop
         if (t + h > opts.t_stop) h = opts.t_stop - t;
 
-        evalSourceRhs(ckt, t, b_t);
+        // b(t) and A⁻¹·b(t) are last step's b(t+h) and A⁻¹·b(t+h): `t` is
+        // exactly the `t + h` they were evaluated at, and evalSourceRhs is a
+        // pure function of t (x = 0, no state committed).
+        if (steps == 0) {
+            evalSourceRhs(ckt, t, b_t);
+            approxAinvMul(nn, ckt.col_ptr, ckt.row_idx, c_vals_saved, &slv, b_t[0..n], ainv_bt[0..n], pwl_tmp[0..n]);
+        }
         evalSourceRhs(ckt, t + h, b_th);
 
         // --- Full PWL source integral (MATEX eq. 5) ---
@@ -696,8 +654,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
             }
         }
 
-        // Step 2: Compute A⁻¹·b(t) and A⁻¹·b(t+h)
-        approxAinvMul(nn, ckt.col_ptr, ckt.row_idx, c_vals_saved, &slv, b_t[0..n], ainv_bt[0..n], pwl_tmp[0..n]);
+        // Step 2: Compute A⁻¹·b(t+h) (A⁻¹·b(t) carried over)
         approxAinvMul(nn, ckt.col_ptr, ckt.row_idx, c_vals_saved, &slv, b_th[0..n], ainv_bth[0..n], pwl_tmp[0..n]);
 
         // Step 3: Compute A⁻²·db = A⁻¹·(A⁻¹·db)
@@ -772,6 +729,8 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
                 simdCopy(x[0..n], x_new[0..n]);
                 t += h;
                 steps += 1;
+                std.mem.swap([]f64, &b_t, &b_th);
+                std.mem.swap([]f64, &ainv_bt, &ainv_bth);
                 try wf.record(t, x, ctx.probes);
                 continue;
             };
@@ -822,6 +781,8 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         simdCopy(x[0..n], x_new[0..n]);
         t += h;
         steps += 1;
+        std.mem.swap([]f64, &b_t, &b_th);
+        std.mem.swap([]f64, &ainv_bt, &ainv_bth);
 
         try wf.record(t, x, ctx.probes);
     }
@@ -845,7 +806,6 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
 // Private implementation access for the analysis test suite.
 pub const test_access = if (@import("builtin").is_test) .{
-    .buildCombinedVals = buildCombinedVals,
     .denseMatMul = denseMatMul,
     .expmSmall = expmSmall,
 } else {};

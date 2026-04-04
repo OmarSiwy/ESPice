@@ -38,7 +38,6 @@ const EnvelopeTests = struct {
 
 const MatexTests = struct {
     const impl = @import("../tran/matex.zig");
-    const buildCombinedVals = impl.test_access.buildCombinedVals;
     const denseMatMul = impl.test_access.denseMatMul;
     const expmSmall = impl.test_access.expmSmall;
     const std = @import("std");
@@ -176,16 +175,6 @@ const MatexTests = struct {
             denseMatMul(m, A, B, C);
             try testing.expectEqualSlices(f64, want, C);
         }
-    }
-
-    test "buildCombinedVals: gamma=1 gives C+G" {
-        const g = [_]f64{ 1, 2, 3 };
-        const c = [_]f64{ 10, 20, 30 };
-        var out: [3]f64 = undefined;
-        buildCombinedVals(3, &g, &c, 1.0, &out);
-        try testing.expectApproxEqAbs(@as(f64, 11.0), out[0], 1e-15);
-        try testing.expectApproxEqAbs(@as(f64, 22.0), out[1], 1e-15);
-        try testing.expectApproxEqAbs(@as(f64, 33.0), out[2], 1e-15);
     }
 };
 
