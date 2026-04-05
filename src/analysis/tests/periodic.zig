@@ -4,7 +4,6 @@ const PacTests = struct {
     const dense_lu = @import("solvers").dense_lu;
     const fft_mod = @import("solvers").fft;
     const mapHarmonicToFftBin = impl.mapHarmonicToFftBin;
-    const root = @import("../types.zig");
     const std = @import("std");
 
     // ============================================================================
@@ -38,142 +37,74 @@ const PacTests = struct {
         try testing.expectApproxEqAbs(@as(f64, 5.0), ca.mag(), 1e-15);
     }
 
-    test "PAC: solveDense matches known solution" {
-        // 2x2 system: [2 1; 1 3] * x = [5; 7] => x = [1.6, 1.8]
-        var ma = [_]f64{ 2, 1, 1, 3 };
-        const b = [_]f64{ 5, 7 };
-        var x: [2]f64 = undefined;
-        try dense_lu.factorizeSolve(2, &ma, &b, &x);
-        try testing.expectApproxEqAbs(@as(f64, 1.6), x[0], 1e-12);
-        try testing.expectApproxEqAbs(@as(f64, 1.8), x[1], 1e-12);
+    /// A 1-node resistive mixer, G(t) = G0·(1 + m·cos(2π f_LO t)), through
+    /// the real conversion-matrix builder: forward (PAC) or transposed (PXF),
+    /// unit drive on sideband 0. Returns the 2·n_sb real-expanded solution.
+    const mixer = struct {
+        const f_lo: f64 = 1e6;
+        const n_harm: usize = 2;
+        const n_sb: usize = 2 * n_harm + 1;
+        const n_samples: usize = 64;
+        const g0: f64 = 1e-3;
+        const mod_depth: f64 = 0.5;
+
+        fn gHat() [n_samples]Complex {
+            const dt = 1.0 / f_lo / @as(f64, @floatFromInt(n_samples));
+            var fft_re: [n_samples]f64 = undefined;
+            var fft_im: [n_samples]f64 = @splat(0);
+            for (&fft_re, 0..) |*g, k| g.* = g0 * (1.0 + mod_depth * @cos(2.0 * std.math.pi * f_lo * @as(f64, @floatFromInt(k)) * dt));
+            fft_mod.fft(&fft_re, &fft_im);
+            const inv_n = 1.0 / @as(f64, @floatFromInt(n_samples));
+            var g_hat: [n_samples]Complex = undefined;
+            for (&g_hat, fft_re, fft_im) |*g, re, im| g.* = .{ .re = re * inv_n, .im = im * inv_n };
+            return g_hat;
+        }
+
+        fn solve(comptime adjoint: bool) ![2 * n_sb]f64 {
+            const g_hat = gHat();
+            const c_hat: [n_samples]Complex = @splat(Complex.zero);
+            var a_work: [4 * n_sb * n_sb]f64 = @splat(0);
+            var rhs: [2 * n_sb]f64 = @splat(0);
+            var x: [2 * n_sb]f64 = undefined;
+            const opts: impl.Options = .{ .f_lo = f_lo, .n_harmonics = n_harm, .n_time_samples = n_samples, .sweep = .{ .f_start = 1, .f_stop = 1 } };
+            impl.buildConversionMatrix(adjoint, &a_work, &g_hat, &c_hat, 1, n_sb, n_sb, 2 * n_sb, 0, opts);
+            rhs[n_harm] = 1.0;
+            try dense_lu.factorizeSolve(2 * n_sb, &a_work, &rhs, &x);
+            return x;
+        }
+
+        fn mag(x: [2 * n_sb]f64, sb: usize) f64 {
+            return @sqrt(x[sb] * x[sb] + x[n_sb + sb] * x[n_sb + sb]);
+        }
+    };
+
+    test "PAC: resistive mixer translates f_in to f_in +/- f_LO" {
+        const m = mixer;
+        // G_0 = g0, G_{+-1} = g0*m/2.
+        const g_hat = m.gHat();
+        try testing.expectApproxEqAbs(m.g0, g_hat[0].re, 1e-10);
+        try testing.expectApproxEqAbs(@as(f64, 0), g_hat[0].im, 1e-10);
+        try testing.expectApproxEqAbs(m.g0 * m.mod_depth / 2.0, g_hat[1].re, 1e-10);
+        try testing.expectApproxEqAbs(m.g0 * m.mod_depth / 2.0, g_hat[m.n_samples - 1].re, 1e-10);
+
+        const x = try m.solve(false);
+        // Direct response near 1/G0, perturbed by the sideband coupling.
+        const x0 = m.mag(x, m.n_harm);
+        try testing.expect(x0 > 0.5 / m.g0 and x0 < 2.0 / m.g0);
+        // m = +-1 carry the translated tone, about mod_depth/2 of the direct
+        // one, and symmetric.
+        const xp1 = m.mag(x, m.n_harm + 1);
+        const xm1 = m.mag(x, m.n_harm - 1);
+        try testing.expect(xp1 / x0 > 0.1 and xp1 / x0 < 0.5);
+        try testing.expectApproxEqRel(xp1, xm1, 0.1);
     }
 
-    test "PAC: RC mixer with single tone — verify frequency translation" {
-        // Simplified test: a time-varying conductance (mixer) modulated at f_LO
-        // driving an RC load. The "mixer" is modelled as a resistor whose
-        // conductance is modulated: G(t) = G0 * (1 + m * cos(2*pi*f_LO*t)).
-        //
-        // For a purely resistive circuit (no caps), the LPTV transfer matrix
-        // should show frequency translation: an input at f_in appears at
-        // f_in +/- f_LO with amplitude proportional to m/2.
-        //
-        // We build this manually rather than using the full circuit API to test
-        // the LPTV conversion-matrix solver in isolation.
-        const allocator = testing.allocator;
-
-        const f_lo: f64 = 1e6; // 1 MHz LO
-        const n_harm: usize = 2;
-        const n_sb: usize = 2 * n_harm + 1; // 5 sidebands
-        const n: usize = 1; // single node
-        const n_samples: usize = 64;
-        const g0: f64 = 1e-3; // 1 kohm base conductance
-        const mod_depth: f64 = 0.5; // modulation depth
-
-        // Build G(t_k) = G0 * (1 + m*cos(2*pi*f_LO*t_k)) at n_samples points.
-        const t_period = 1.0 / f_lo;
-        const dt = t_period / @as(f64, @floatFromInt(n_samples));
-
-        var g_time: [n_samples]f64 = undefined;
-        for (0..n_samples) |k| {
-            const tk = @as(f64, @floatFromInt(k)) * dt;
-            g_time[k] = g0 * (1.0 + mod_depth * @cos(2.0 * std.math.pi * f_lo * tk));
-        }
-
-        // FFT of G(t) to get G_hat[m].
-        var fft_re: [n_samples]f64 = undefined;
-        var fft_im: [n_samples]f64 = undefined;
-        root.copySimd(&fft_re, &g_time);
-        root.zeroSimd(&fft_im);
-        fft_mod.fft(&fft_re, &fft_im);
-        const inv_n = 1.0 / @as(f64, @floatFromInt(n_samples));
-
-        var g_hat: [n_samples]Complex = undefined;
-        for (0..n_samples) |m| {
-            g_hat[m] = .{ .re = fft_re[m] * inv_n, .im = fft_im[m] * inv_n };
-        }
-
-        // Verify Fourier decomposition: G_0 = g0, G_1 = g0*m/2, G_{-1} = g0*m/2.
-        try testing.expectApproxEqAbs(g0, g_hat[0].re, 1e-10);
-        try testing.expectApproxEqAbs(@as(f64, 0), g_hat[0].im, 1e-10);
-        try testing.expectApproxEqAbs(g0 * mod_depth / 2.0, g_hat[1].re, 1e-10);
-        try testing.expectApproxEqAbs(g0 * mod_depth / 2.0, g_hat[n_samples - 1].re, 1e-10);
-
-        // No capacitance: C_hat = 0 for all harmonics.
-        // Build and solve the conversion matrix for a single input frequency.
-        const nn = n_sb * n;
-        const nn2 = 2 * nn;
-        const a_work = try allocator.alloc(f64, nn2 * nn2);
-        defer allocator.free(a_work);
-        const rhs_buf = try allocator.alloc(f64, nn2);
-        defer allocator.free(rhs_buf);
-        const x_work = try allocator.alloc(f64, nn2);
-        defer allocator.free(x_work);
-
-        root.zeroSimd(a_work);
-        root.zeroSimd(rhs_buf);
-
-        for (0..n_sb) |p| {
-            for (0..n_sb) |q| {
-                const m_p: i32 = @as(i32, @intCast(p)) - @as(i32, @intCast(n_harm));
-                const m_q: i32 = @as(i32, @intCast(q)) - @as(i32, @intCast(n_harm));
-                const m_diff = m_p - m_q;
-
-                const fft_idx = mapHarmonicToFftBin(m_diff, n_samples) orelse continue;
-
-                // Pure conductance (no C): Z = G_hat[m_diff].
-                const z_re = g_hat[fft_idx].re;
-                const z_im = g_hat[fft_idx].im;
-
-                const gr = p * n; // + row, but n=1 so row=0
-                const gc = q * n;
-
-                a_work[gr * nn2 + gc] += z_re;
-                a_work[gr * nn2 + (nn + gc)] += -z_im;
-                a_work[(nn + gr) * nn2 + gc] += z_im;
-                a_work[(nn + gr) * nn2 + (nn + gc)] += z_re;
-            }
-        }
-
-        // Excitation at sideband 0 (m=0), node 0.
-        const exc_idx = n_harm * n;
-        rhs_buf[exc_idx] = 1.0;
-
-        try dense_lu.factorizeSolve(nn2, a_work, rhs_buf, x_work);
-
-        // For a purely resistive time-varying conductance G(t) = G0*(1 + m*cos),
-        // the response at sideband m=0 should be 1/G0 and the conversion to
-        // m = +/-1 should be related to the modulation depth.
-        const x0_re = x_work[n_harm * n]; // m=0 real part
-        const x0_im = x_work[nn + n_harm * n]; // m=0 imaginary part
-        const x0_mag = @sqrt(x0_re * x0_re + x0_im * x0_im);
-
-        // The m=0 (direct) response should be close to 1/G0 = 1000 ohms.
-        // Due to sideband coupling, it is perturbed slightly but should be
-        // in the right ballpark.
-        try testing.expect(x0_mag > 0.5 / g0);
-        try testing.expect(x0_mag < 2.0 / g0);
-
-        // m=+1 sideband (index n_harm+1): should have nonzero magnitude
-        // proportional to modulation depth.
-        const xp1_re = x_work[(n_harm + 1) * n];
-        const xp1_im = x_work[nn + (n_harm + 1) * n];
-        const xp1_mag = @sqrt(xp1_re * xp1_re + xp1_im * xp1_im);
-        try testing.expect(xp1_mag > 0);
-
-        // m=-1 sideband (index n_harm-1): should also be nonzero.
-        const xm1_re = x_work[(n_harm - 1) * n];
-        const xm1_im = x_work[nn + (n_harm - 1) * n];
-        const xm1_mag = @sqrt(xm1_re * xm1_re + xm1_im * xm1_im);
-        try testing.expect(xm1_mag > 0);
-
-        // Conversion gain ratio: sideband 1 amplitude / sideband 0 amplitude
-        // should be approximately m/2 = 0.25 for the dominant coupling.
-        const conversion_ratio = xp1_mag / x0_mag;
-        try testing.expect(conversion_ratio > 0.1);
-        try testing.expect(conversion_ratio < 0.5);
-
-        // Symmetry: m=+1 and m=-1 should have similar magnitudes.
-        try testing.expectApproxEqRel(xp1_mag, xm1_mag, 0.1);
+    test "PXF: the transposed mixer has PAC's sideband magnitudes" {
+        // One node is both source and output, so |X_fwd[sb]| == |conj(Y_adj[sb])|.
+        const m = mixer;
+        const fwd = try m.solve(false);
+        const adj = try m.solve(true);
+        for (0..m.n_sb) |sb| try testing.expectApproxEqRel(m.mag(fwd, sb), m.mag(adj, sb), 1e-10);
     }
 };
 
@@ -285,190 +216,6 @@ const PssTests = struct {
         };
         try testing.expect(r.converged);
         try testing.expectEqual(@as(u16, 5), r.iterations);
-    }
-};
-
-const PxfTests = struct {
-    const impl = @import("../pss/pxf.zig");
-    const Complex = impl.Complex;
-    const dense_lu = @import("solvers").dense_lu;
-    const pac = @import("../pss/pac.zig");
-    const root = @import("../types.zig");
-    const std = @import("std");
-
-    const mapHarmonicToFftBin = pac.mapHarmonicToFftBin;
-
-    const fft_mod = @import("solvers").fft;
-
-    // ============================================================================
-    // Tests
-    // ============================================================================
-
-    const testing = std.testing;
-
-    test "PXF: mapHarmonicToFftBin" {
-        try testing.expectEqual(@as(?usize, 0), mapHarmonicToFftBin(0, 8));
-        try testing.expectEqual(@as(?usize, 1), mapHarmonicToFftBin(1, 8));
-        try testing.expectEqual(@as(?usize, 7), mapHarmonicToFftBin(-1, 8));
-        try testing.expectEqual(@as(?usize, 5), mapHarmonicToFftBin(-3, 8));
-        try testing.expectEqual(@as(?usize, null), mapHarmonicToFftBin(8, 8));
-        try testing.expectEqual(@as(?usize, null), mapHarmonicToFftBin(-8, 8));
-    }
-
-    test "PXF: adjoint resistive mixer — verify transpose duality with PAC" {
-        // For a purely resistive 1-node mixer (G(t) = G0*(1 + m*cos(2*pi*f_LO*t))),
-        // the PAC and PXF solutions should be transposes of each other. Since n=1,
-        // the conversion matrix is n_sb × n_sb and its transpose should give the
-        // same magnitude pattern when the same node is both source and output.
-        //
-        // We verify: PXF's adjoint solution at sideband m has the same magnitude
-        // as PAC's forward solution at sideband m (for a symmetric 1-node circuit).
-        const allocator = testing.allocator;
-
-        const f_lo: f64 = 1e6;
-        const n_harm: usize = 2;
-        const n_sb: usize = 2 * n_harm + 1;
-        const n: usize = 1;
-        const n_samples: usize = 64;
-        const g0: f64 = 1e-3;
-        const mod_depth: f64 = 0.5;
-
-        const t_period = 1.0 / f_lo;
-        const dt = t_period / @as(f64, @floatFromInt(n_samples));
-
-        var g_time: [n_samples]f64 = undefined;
-        for (0..n_samples) |k| {
-            const tt = @as(f64, @floatFromInt(k)) * dt;
-            g_time[k] = g0 * (1.0 + mod_depth * @cos(2.0 * std.math.pi * f_lo * tt));
-        }
-
-        var fft_re: [n_samples]f64 = undefined;
-        var fft_im: [n_samples]f64 = [_]f64{0} ** n_samples;
-        root.copySimd(&fft_re, &g_time);
-        fft_mod.fft(&fft_re, &fft_im);
-        const inv_n = 1.0 / @as(f64, @floatFromInt(n_samples));
-
-        var g_hat: [n_samples]Complex = undefined;
-        for (0..n_samples) |m| {
-            g_hat[m] = .{ .re = fft_re[m] * inv_n, .im = fft_im[m] * inv_n };
-        }
-
-        const nn = n_sb * n;
-        const nn2 = 2 * nn;
-
-        // --- Forward (PAC-style) solve: A * X = e_source ---
-        const a_fwd = try allocator.alloc(f64, nn2 * nn2);
-        defer allocator.free(a_fwd);
-        const rhs_fwd = try allocator.alloc(f64, nn2);
-        defer allocator.free(rhs_fwd);
-        const x_fwd = try allocator.alloc(f64, nn2);
-        defer allocator.free(x_fwd);
-
-        root.zeroSimd(a_fwd);
-        root.zeroSimd(rhs_fwd);
-
-        for (0..n_sb) |p| {
-            for (0..n_sb) |q| {
-                const m_p: i32 = @as(i32, @intCast(p)) - @as(i32, @intCast(n_harm));
-                const m_q: i32 = @as(i32, @intCast(q)) - @as(i32, @intCast(n_harm));
-                const m_diff = m_p - m_q;
-                const fft_idx = mapHarmonicToFftBin(m_diff, n_samples) orelse continue;
-
-                // No C, pure conductance.
-                const z_re = g_hat[fft_idx].re;
-                const z_im = g_hat[fft_idx].im;
-
-                const gr = p * n;
-                const gc = q * n;
-
-                a_fwd[gr * nn2 + gc] += z_re;
-                a_fwd[gr * nn2 + (nn + gc)] += -z_im;
-                a_fwd[(nn + gr) * nn2 + gc] += z_im;
-                a_fwd[(nn + gr) * nn2 + (nn + gc)] += z_re;
-            }
-        }
-        rhs_fwd[n_harm * n] = 1.0; // excitation at sideband m=0, node 0
-        try dense_lu.factorizeSolve(nn2, a_fwd, rhs_fwd, x_fwd);
-
-        // --- Adjoint (PXF-style) solve: A^T * Y = e_output ---
-        const a_adj = try allocator.alloc(f64, nn2 * nn2);
-        defer allocator.free(a_adj);
-        const rhs_adj = try allocator.alloc(f64, nn2);
-        defer allocator.free(rhs_adj);
-        const x_adj = try allocator.alloc(f64, nn2);
-        defer allocator.free(x_adj);
-
-        root.zeroSimd(a_adj);
-        root.zeroSimd(rhs_adj);
-
-        // Build A^T by transposing the assembly.
-        for (0..n_sb) |p| {
-            for (0..n_sb) |q| {
-                const m_p: i32 = @as(i32, @intCast(p)) - @as(i32, @intCast(n_harm));
-                const m_q: i32 = @as(i32, @intCast(q)) - @as(i32, @intCast(n_harm));
-                const m_diff = m_p - m_q;
-                const fft_idx = mapHarmonicToFftBin(m_diff, n_samples) orelse continue;
-
-                const z_re = g_hat[fft_idx].re;
-                const z_im = g_hat[fft_idx].im;
-
-                const gr = p * n;
-                const gc = q * n;
-
-                // Transposed: swap (gr, gc)
-                a_adj[gc * nn2 + gr] += z_re;
-                a_adj[gc * nn2 + (nn + gr)] += z_im;
-                a_adj[(nn + gc) * nn2 + gr] += -z_im;
-                a_adj[(nn + gc) * nn2 + (nn + gr)] += z_re;
-            }
-        }
-        rhs_adj[n_harm * n] = 1.0; // selector at output node 0, sideband m=0
-        try dense_lu.factorizeSolve(nn2, a_adj, rhs_adj, x_adj);
-
-        // For a 1-node symmetric circuit, |X_fwd[sb]| should equal |conj(Y_adj[sb])|
-        // at each sideband (same node for both source and output).
-        for (0..n_sb) |sb| {
-            const fwd_re = x_fwd[sb * n];
-            const fwd_im = x_fwd[nn + sb * n];
-            const fwd_mag = @sqrt(fwd_re * fwd_re + fwd_im * fwd_im);
-
-            const adj_re = x_adj[sb * n];
-            const adj_im = -x_adj[nn + sb * n]; // conj
-            const adj_mag = @sqrt(adj_re * adj_re + adj_im * adj_im);
-
-            try testing.expectApproxEqRel(fwd_mag, adj_mag, 1e-10);
-        }
-
-        // Sanity: m=0 response ~1/G0, m=+/-1 sidebands nonzero.
-        const x0_mag = @sqrt(x_adj[n_harm * n] * x_adj[n_harm * n] +
-            x_adj[nn + n_harm * n] * x_adj[nn + n_harm * n]);
-        try testing.expect(x0_mag > 0.5 / g0);
-        try testing.expect(x0_mag < 2.0 / g0);
-    }
-
-    test "PXF: Complex arithmetic" {
-        const a_c = Complex{ .re = 3.0, .im = 4.0 };
-        const b_c = Complex{ .re = 1.0, .im = -2.0 };
-
-        const sum = Complex.add(a_c, b_c);
-        try testing.expectApproxEqAbs(@as(f64, 4.0), sum.re, 1e-15);
-        try testing.expectApproxEqAbs(@as(f64, 2.0), sum.im, 1e-15);
-
-        try testing.expectApproxEqAbs(@as(f64, 5.0), a_c.mag(), 1e-15);
-
-        const conj = a_c.conj();
-        try testing.expectApproxEqAbs(@as(f64, 3.0), conj.re, 1e-15);
-        try testing.expectApproxEqAbs(@as(f64, -4.0), conj.im, 1e-15);
-    }
-
-    test "PXF: dense_lu solveT matches known solution" {
-        // 2x2 system: [2 1; 1 3] * x = [5; 7] => x = [1.6, 1.8]
-        var a_mat = [_]f64{ 2, 1, 1, 3 };
-        const b_vec = [_]f64{ 5, 7 };
-        var x_vec: [2]f64 = undefined;
-        try dense_lu.factorizeSolve(2, &a_mat, &b_vec, &x_vec);
-        try testing.expectApproxEqAbs(@as(f64, 1.6), x_vec[0], 1e-12);
-        try testing.expectApproxEqAbs(@as(f64, 1.8), x_vec[1], 1e-12);
     }
 };
 
@@ -853,6 +600,5 @@ test {
     _ = PacTests;
     _ = PnoiseTests;
     _ = PssTests;
-    _ = PxfTests;
     _ = QpssTests;
 }

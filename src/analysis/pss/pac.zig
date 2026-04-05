@@ -26,57 +26,52 @@ pub const Complex = types.Complex;
 
 pub const Options = @import("requests").Pac;
 
-/// Run PAC analysis: find periodic steady state, linearise, sweep input frequency.
-///
-/// `x_init` is the initial DC operating point (length ckt.n).
-/// `ac_source_node` is the node where the small-signal AC excitation is applied.
-/// `probe_node` is the output node to observe.
-///
-/// Caller owns the output: freqs[n_freqs] (n_freqs = types.logSweepCount of the
-/// sweep), transfer[n_freqs * n_sb] flat, point-major — transfer[fi*n_sb + p]
-/// is the sideband at harmonic m = p - n_harmonics (output f = f_in + m*f_LO).
-pub fn analyze(
+/// The LPTV sweep PAC and PXF share: find the periodic steady state,
+/// linearise, then per input frequency build the conversion matrix A(f)
+/// (Aᵀ when `adjoint`), drive unknown `exc_node` of sideband m = 0 with
+/// `exc_val`, and solve. Caller owns freqs[n_freqs] and `out`:
+///   PAC (adjoint = false): out[fi*n_sb + p] is `probe_node` at sideband
+///     m = p - n_harmonics (output f = f_in + m*f_LO).
+///   PXF (adjoint = true): out[fi*n_sb*n + sb*n + node] = conj(Y), the
+///     transfer from every node at every sideband to `exc_node`, the output;
+///     `probe_node` is unused.
+pub fn sweep(
+    comptime adjoint: bool,
     ckt: *root.Circuit,
     x_init: []const f64,
-    ac_source_node: u32,
-    ac_magnitude: f64,
+    exc_node: u32,
+    exc_val: f64,
     probe_node: u32,
     freqs: []f64,
-    transfer: []Complex,
+    out: []Complex,
     options: Options,
     allocator: std.mem.Allocator,
 ) !void {
     const n: usize = ckt.n;
     const n_harm: usize = options.n_harmonics;
     const n_sb: usize = 2 * n_harm + 1;
+    const nn = n_sb * n;
+    const nn2 = 2 * nn; // real expansion of the complex system
 
     const n_freqs = options.sweep.count();
     std.debug.assert(freqs.len == n_freqs);
-    std.debug.assert(transfer.len == @as(usize, n_freqs) * n_sb);
+    std.debug.assert(out.len == @as(usize, n_freqs) * (if (adjoint) nn else n_sb));
 
     const linearization = try linearize(ckt, x_init, options, allocator);
     defer allocator.free(linearization.g_hat);
     defer allocator.free(linearization.c_hat);
 
-    // -- Step 4: Frequency sweep — build and solve conversion matrix ---------
-    // The LPTV system couples n_sb sidebands, each of dimension n.
-    // For sideband p (harmonic m_p = p - n_harm), the governing equation at
-    // frequency omega_p = 2*pi*(f_in + m_p*f_LO) is:
+    // The LPTV system couples n_sb sidebands, each of dimension n. For
+    // sideband p (harmonic m_p = p - n_harm) at omega_p = 2*pi*(f_in + m_p*f_LO):
     //
     //   sum_{q} [G_{p-q} + j*omega_p * C_{p-q}] * X_q = B_p
     //
-    // where G_{m}, C_{m} are the m-th Fourier coefficients and X_q is the
-    // unknown complex amplitude at sideband q.
+    // where G_{m}, C_{m} are the m-th Fourier coefficients. The adjoint
+    // A^H Y = e is A^T Y = e here: the real expansion of A is real.
     //
-    // ponytail: GPU batch dispatch — Phase 4. The per-frequency solve here is a
-    // dense (2M+1)n × (2M+1)n real system (conversion matrix), not the sparse
-    // G+jωC that freq_solve_batch handles. A batched dense LU kernel
-    // (gh.dense_solve_batch) would cover this — pack all n_freqs matrices and
-    // RHS vectors, dispatch one call. Until that kernel exists, CPU-serial.
-
-    const nn = n_sb * n;
-    const nn2 = 2 * nn; // real expansion of the complex system
-
+    // ponytail: dense (2M+1)n x (2M+1)n real system per frequency, CPU-serial.
+    // A batched dense LU (all n_freqs matrices in one launch) is the upgrade
+    // when PAC/PXF sweeps dominate a multi-harmonic mixer run.
     const a_work = try allocator.alloc(f64, nn2 * nn2);
     defer allocator.free(a_work);
     const rhs_work = try allocator.alloc(f64, nn2);
@@ -91,21 +86,17 @@ pub fn analyze(
         root.zeroSimd(a_work);
         root.zeroSimd(rhs_work);
 
-        buildConversionMatrix(false, a_work, linearization.g_hat, linearization.c_hat, n, n_sb, nn, nn2, f_in, options);
-
-        // Excitation: unit AC source at ac_source_node, sideband 0 (m=0, index n_harm).
-        const exc_row = n_harm * n + ac_source_node;
-        rhs_work[exc_row] = ac_magnitude; // real part
+        buildConversionMatrix(adjoint, a_work, linearization.g_hat, linearization.c_hat, n, n_sb, nn, nn2, f_in, options);
+        rhs_work[n_harm * n + exc_node] = exc_val; // real part
 
         try dense_lu.factorizeSolve(nn2, a_work, rhs_work, x_work);
 
         freqs[fi] = f_in;
-        for (0..n_sb) |p| {
+        if (adjoint) {
+            for (out[fi * nn ..][0..nn], x_work[0..nn], x_work[nn..nn2]) |*t, re, im| t.* = .{ .re = re, .im = -im };
+        } else for (0..n_sb) |p| {
             const idx = p * n + probe_node;
-            transfer[fi * n_sb + p] = .{
-                .re = x_work[idx],
-                .im = x_work[nn + idx],
-            };
+            out[fi * n_sb + p] = .{ .re = x_work[idx], .im = x_work[nn + idx] };
         }
     }
 }
@@ -275,7 +266,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const transfer = try scratch.alloc(Complex, n_freqs * n_sb);
     defer scratch.free(transfer);
 
-    try analyze(ctx.circuit, x_op, ctx.source_node, 1.0, probe, freqs, transfer, opts, scratch);
+    try sweep(false, ctx.circuit, x_op, ctx.source_node, 1.0, probe, freqs, transfer, opts, scratch);
 
     const names = try a.alloc([]const u8, 1 + n_sb);
     names[0] = "frequency";
