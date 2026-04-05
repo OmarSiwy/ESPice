@@ -205,8 +205,6 @@ machinery would be a device-type special case.
 when a `gpu_hook.eval_planes` stamp is installed, because `eval`/`evalNewton`
 then return before any host batch runs and the tapes would be stale. Closing
 that means adding the tape to `DeviceKernel.run`, which *is* a GPU ABI change.
-The whole-transient megakernel (`gpu_hook.simulate_tran`) is unaffected — it
-has its own LTE reduce.
 
 **Not a divergence: ground-side charge.** The old per-row path walked
 `q_hist[0..n]`, excluding the trash cell `q_vec[n]`, so every ground-terminal
