@@ -66,7 +66,7 @@ const simdCopy = root.copySimd;
 const solvers = @import("solvers");
 const gmres_mod = solvers.gmres;
 const dense_lu = solvers.dense_lu;
-const infNorm = @import("pss.zig").normInf;
+const num = @import("numerics");
 
 const W = std.simd.suggestVectorLength(f64) orelse 8;
 const V = @Vector(W, f64);
@@ -161,31 +161,6 @@ const OperatorCtx = struct {
     // Scratch for dense G extraction (heap-allocated, size n*n)
     g_buf: []f64, // n * n
 };
-
-// ============================================================================
-// SIMD helpers
-// ============================================================================
-
-inline fn simdAxpy(out: []f64, a: f64, x: []const f64) void {
-    const av: V = @splat(a);
-    var i: usize = 0;
-    while (i + W <= out.len) : (i += W) {
-        const ov: V = out[i..][0..W].*;
-        const xv: V = x[i..][0..W].*;
-        out[i..][0..W].* = ov + av * xv;
-    }
-    while (i < out.len) : (i += 1) out[i] += a * x[i];
-}
-
-inline fn simdScale(dst: []f64, src: []const f64, s: f64) void {
-    const sv: V = @splat(s);
-    var i: usize = 0;
-    while (i + W <= dst.len) : (i += W) {
-        const xv: V = src[i..][0..W].*;
-        dst[i..][0..W].* = sv * xv;
-    }
-    while (i < dst.len) : (i += 1) dst[i] = s * src[i];
-}
 
 // ============================================================================
 // 2-D DFT / IDFT over the mix-product grid
@@ -723,7 +698,7 @@ pub fn solve(
         if (iter != 0) try ckt.checkpoint(.{ .phase = .harmonic, .completed = iter });
         computeResidual(&op_ctx, x_hat, residual);
 
-        const res_norm = infNorm(residual);
+        const res_norm = num.normInf(residual);
         if (res_norm < options.hb_tol) {
             extractSpectra2D(x_hat, probes, spectra_re, spectra_im, n, nf);
             return .{ .converged = true, .iterations = iter + 1, .residual_norm = res_norm };
@@ -731,7 +706,7 @@ pub fn solve(
 
         // Solve J * dx = -F via GMRES
         // Negate residual for the RHS (GMRES solves J*dx = b, we want dx = -J^{-1}F)
-        simdScale(residual, residual, -1.0);
+        num.scale(residual, -1.0, residual);
 
         simdZero(dx);
 
@@ -746,11 +721,11 @@ pub fn solve(
             options.gmres_max_restarts,
         );
 
-        simdAxpy(x_hat, 1.0, dx);
+        num.axpy(x_hat, 1.0, dx);
     }
 
     computeResidual(&op_ctx, x_hat, residual);
-    const final_norm = infNorm(residual);
+    const final_norm = num.normInf(residual);
 
     extractSpectra2D(x_hat, probes, spectra_re, spectra_im, n, nf);
     return .{ .converged = false, .iterations = options.max_newton, .residual_norm = final_norm };
@@ -785,7 +760,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     // `defer`-freed == scratch; `a` is a results arena. See
     // RunCtx.scratch_allocator.
-    const scratch = ctx.scratch_allocator orelse a;
+    const scratch = ctx.scratch_allocator;
     const spectra_re = try scratch.alloc(f64, ctx.probes.len * nf);
     defer scratch.free(spectra_re);
     const spectra_im = try scratch.alloc(f64, ctx.probes.len * nf);

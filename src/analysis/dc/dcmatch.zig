@@ -63,17 +63,19 @@ fn fdSensitivity(
     const orig: f64 = param.get();
     const delta_req = 1e-6 * @abs(orig) + 1e-12;
 
+    // Only this parameter moves and temperature does not, so re-deriving
+    // its own device type is the whole recompute (Circuit.recomputeType).
     param.set(orig + delta_req);
     // The step the parameter ACTUALLY took — an f32-typed field rounds it.
     const delta = param.get() - orig;
     defer {
         param.set(orig);
-        ckt.recompute() catch unreachable; // restores the checked original parameter
+        ckt.recomputeType(param.device_type) catch unreachable; // restores the checked original parameter
     }
     // Same trap as sens.zig: the +1e-12 floor un-collapses an internal node
     // whose parasitic is nominally 0, and the frozen pattern has no row for
     // it. The derivative is unrepresentable, not small — report 0.
-    ckt.recompute() catch |e| switch (e) {
+    ckt.recomputeType(param.device_type) catch |e| switch (e) {
         error.TopologyChanged => return 0,
     };
 
@@ -195,17 +197,8 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     // `defer`-freed == scratch; `a` is a results arena. See
     // RunCtx.scratch_allocator.
-    const scratch = ctx.scratch_allocator orelse a;
-    const x_op = ctx.x_op orelse blk: {
-        const x = try scratch.alloc(f64, ckt.n);
-        errdefer scratch.free(x);
-        const r = try @import("op.zig").solve(ckt, x, .{ .tol = opts.tol });
-        if (!r.converged) return error.OpDidNotConverge;
-        break :blk x;
-    };
-    defer if (ctx.x_op == null) scratch.free(x_op);
-
-    const res = try solve(ckt, x_op, output_node, scratch);
+    const scratch = ctx.scratch_allocator;
+    const res = try solve(ckt, ctx.x_op, output_node, scratch);
     defer scratch.free(res.contributions);
 
     const n_contribs = res.contributions.len;

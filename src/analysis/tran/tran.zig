@@ -8,8 +8,8 @@ const converger = @import("solvers").converger;
 // ponytail: platform SIMD width — not hardcoded
 const W = std.simd.suggestVectorLength(f64) orelse 8;
 
-// Data types live in types.zig (Circuit.zig names them in hook signatures);
-// re-exported here so consumers keep writing tran.Options / tran.Waveform.
+// Data types live in types.zig (integrator.zig and matex.zig read them without
+// the driver); re-exported so consumers write tran.Options / tran.Waveform.
 const tran_types = @import("types.zig");
 pub const Method = tran_types.Method;
 pub const Options = tran_types.Options;
@@ -18,268 +18,29 @@ pub const SimResult = tran_types.SimResult;
 pub const initialCapacity = tran_types.initialCapacity;
 const simdCopy = @import("numerics").copySimd;
 
-// ---------------------------------------------------------------------------
-// Integration methods: dynamic-residual coefficient, LTE estimate, timestep
-// control. Internal to transient — only simulate() below drives these.
-// ---------------------------------------------------------------------------
-const integrator = struct {
-    /// Integration coefficients — ngspice's `CKTag[]` (`NIcomCof`,
-    /// maths/ni/nicomcof.c). `ag0` is the q(x) coefficient, i.e. the companion
-    /// conductance multiplier `geq = ag[0]*cap` (niinteg.c:77) and the Jacobian
-    /// axpy weight; `ag2` is the q_prev2 coefficient, gear-2 only.
-    ///
-    ///   BE:   F_dyn = (1/dt)*(q - q1)
-    ///   trap: F_dyn = (2/dt)*(q - q1) - i_prev
-    ///   gear: F_dyn = ag0*q + ag1*q1 + ag2*q2  ==  ag0*(q - q1) - ag2*(q1 - q2)
-    ///         since ag0 + ag1 + ag2 = 0 (the corrector is exact on constants).
-    ///
-    /// GEAR ON A NON-UNIFORM GRID. ngspice solves a Vandermonde system over the
-    /// ACTUAL step history `CKTdeltaOld[]` (nicomcof.c:60-136) — its gear-2 is
-    /// a variable-step BDF2. espice hardcoded the uniform-step coefficients
-    /// 3/(2dt), -2/dt, 1/(2dt), which are only consistent while dt == dt_prev.
-    /// At order 2 that Vandermonde solve has the closed form below, r = dt/dt1:
-    ///   ag0 = (1+2r)/((1+r)*dt)   ag1 = -(1+r)/dt   ag2 = r^2/((1+r)*dt)
-    /// r == 1 recovers the hardcoded triple exactly.
-    ///
-    /// The old constants survived only because every shipping gear deck is
-    /// tmax-locked at tstep, so dt never varied. Correcting the gear LTE
-    /// coefficient (previous commit) made dt vary and the inconsistency bit
-    /// immediately: mos6 at 373 steps was 8.2e-2 rms against its own converged
-    /// reference, worse than the 316-step trapezoidal run.
-    const Coeffs = struct { ag0: f64, ag2: f64 };
-    pub fn coeffs(method: Method, dt: f64, dt_prev: f64) Coeffs {
-        return switch (method) {
-            .backward_euler => .{ .ag0 = 1.0 / dt, .ag2 = 0 },
-            .trapezoidal => .{ .ag0 = 2.0 / dt, .ag2 = 0 },
-            .gear_2 => blk: {
-                const r = dt / dt_prev;
-                break :blk .{
-                    .ag0 = (1.0 + 2.0 * r) / ((1.0 + r) * dt),
-                    .ag2 = r * r / ((1.0 + r) * dt),
-                };
-            },
-        };
-    }
+const integrator = @import("integrator.zig");
 
-    /// LTE divided-difference coefficient — ngspice `CKTterr`
-    /// (spicelib/analysis/cktterr.c:24-34, selected at :58-67 by
-    /// `CKTintegrateMethod`, indexed `[CKTorder-1]`):
-    ///   gearCoeff = {.5, .2222222222, .1363636364, .096, .0729927, .0583090}
-    ///   trapCoeff = {.5, .08333333333}
-    /// espice's order is fixed by the method (BE = 1, trap/gear_2 = 2), so the
-    /// coefficient is a function of the method alone. Order 1 is `.5` in both
-    /// tables, which is why BE reads the same either way — and why the order-2
-    /// GEAR entry (2/9) was the only one that could be, and was, wrong: it had
-    /// been sharing `trapCoeff[1]`, a 1.63x looser bound than GEAR asks for.
-    pub fn lteCoeff(method: Method) f64 {
-        return switch (method) {
-            .backward_euler => 0.5, // gearCoeff[0] == trapCoeff[0]
-            .trapezoidal => 1.0 / 12.0, // trapCoeff[1]
-            .gear_2 => 2.0 / 9.0, // gearCoeff[1]
-        };
-    }
-
-    /// Dynamic-current recurrence, in place — ngspice `NIintegrate`
-    /// (maths/ni/niinteg.c) writing `CKTstate0[qcap+1]`:
-    ///   BE   : i_j <- ag0*(q0_j - q1_j)
-    ///   trap : i_j <- ag0*(q0_j - q1_j) - i_j
-    ///   gear : i_j <- ag0*(q0_j - q1_j) - ag2*(q1_j - q2_j)
-    /// i.e. `CKTstate0[qcap+1]` under each method's `CKTag[]`. The gear arm was
-    /// missing its ag2 term, so `i_prev` — which is what CKTterr's `volttol`
-    /// reads — was the BE current on every gear deck.
-    /// One body for the summed row plane (companion residual, length n) and for
-    /// the per-device-state tape (LTE only, length n_qt). The BE and trap
-    /// expressions are untouched, so the row plane — which feeds the residual —
-    /// stays bit-identical on every non-gear deck.
-    fn advanceCurrent(method: Method, i_cur: []f64, q0: []const f64, q1: []const f64, q2: []const f64, c: Coeffs) void {
-        // Comptime method, for the reason `stepBound` gives.
-        switch (method) {
-            inline else => |m| advanceCurrentAt(m, i_cur, q0, q1, q2, c),
-        }
-    }
-
-    fn advanceCurrentAt(comptime method: Method, i_cur: []f64, q0: []const f64, q1: []const f64, q2: []const f64, c: Coeffs) void {
-        const V = @Vector(W, f64);
-        const av: V = @splat(c.ag0);
-        const a2: V = @splat(c.ag2);
-        var j: usize = 0;
-        while (j + W <= i_cur.len) : (j += W) {
-            const a: V = q0[j..][0..W].*;
-            const b: V = q1[j..][0..W].*;
-            const ip: V = i_cur[j..][0..W].*;
-            const d = av * (a - b);
-            i_cur[j..][0..W].* = switch (method) {
-                .trapezoidal => d - ip,
-                .gear_2 => d - a2 * (b - @as(V, q2[j..][0..W].*)),
-                .backward_euler => d,
-            };
-        }
-        while (j < i_cur.len) : (j += 1) {
-            const d = c.ag0 * (q0[j] - q1[j]);
-            i_cur[j] = switch (method) {
-                .trapezoidal => d - i_cur[j],
-                .gear_2 => d - c.ag2 * (q1[j] - q2[j]),
-                .backward_euler => d,
-            };
-        }
-    }
-
-    /// Accepted-point charge re-read: `i_cur += alpha·(q_new − q_old)`, per
-    /// element. Elementwise, so every `w` is bit-identical; `w == 1` is the
-    /// scalar oracle (tests/transient.zig). LLVM left the plain loop scalar —
-    /// it cannot prove the three history slices disjoint.
-    pub fn rebaseCurrent(comptime w: usize, i_cur: []f64, q_new: []const f64, q_old: []const f64, alpha: f64) void {
-        const V = @Vector(w, f64);
-        const av: V = @splat(alpha);
-        var j: usize = 0;
-        while (j + w <= i_cur.len) : (j += w) {
-            const qn: V = q_new[j..][0..w].*;
-            const qo: V = q_old[j..][0..w].*;
-            i_cur[j..][0..w].* = @as(V, i_cur[j..][0..w].*) + av * (qn - qo);
-        }
-        if (comptime w > 1) rebaseCurrent(1, i_cur[j..], q_new[j..], q_old[j..], alpha);
-    }
-
-    /// ngspice CKTterr: per-state timestep bound, in seconds. For each
-    /// charge state j (tolerance in CURRENT units, cktterr.c):
-    ///   i_new_j     = what `advanceCurrent` will write for `cur_method`
-    ///   volttol_j   = abstol + reltol·max(|i_new_j|, |i_prev_j|)
-    ///   chargetol_j = reltol·max(|q0_j|, |q1_j|, chgtol) / dt
-    ///   tol_j       = max(volttol_j, chargetol_j)
-    ///   dd_j        = divided difference over order+2 charge points
-    ///   del_j       = trtol·tol_j / max(abstol, coeff·|dd_j|)
-    ///   order 2:      del_j = sqrt(del_j)
-    /// coeff = `lteCoeff(method)`; order = 2 for everything but BE.
-    /// Returns min del over all states; the caller accepts the step iff
-    /// del > 0.9·dt and uses del as the next dt (dctran.c:872-913).
-    /// `method` sets the coefficient and the order — at the BE->order-2
-    /// promotion probe (dctran.c:901-913) that is the method being PROBED.
-    /// `cur_method`/`c` are the ones the step actually integrated with, which
-    /// is what `CKTstate0[qcap+1]` holds when CKTterr reads it.
-    pub fn stepBound(
-        method: Method,
-        cur_method: Method,
-        q_cur: []const f64,
-        q_prev: []const f64,
-        q_prev2: []const f64,
-        q_prev3: []const f64,
-        i_prev: []const f64,
-        c: Coeffs,
-        dt: f64,
-        dt1: f64,
-        dt2: f64,
-        reltol: f64,
-        abstol: f64,
-        chgtol: f64,
-        trtol: f64,
-    ) f64 {
-        // Both methods comptime: LLVM kept the `cur_method` switch and the
-        // `order2` test inside the vector loop (6 of ~60 instructions per
-        // 4 states). Same arithmetic per arm, so the result is bit-identical.
-        return switch (method) {
-            inline else => |m| switch (cur_method) {
-                inline else => |cm| stepBoundAt(m, cm, q_cur, q_prev, q_prev2, q_prev3, i_prev, c, dt, dt1, dt2, reltol, abstol, chgtol, trtol),
-            },
-        };
-    }
-
-    fn stepBoundAt(
-        comptime method: Method,
-        comptime cur_method: Method,
-        q_cur: []const f64,
-        q_prev: []const f64,
-        q_prev2: []const f64,
-        q_prev3: []const f64,
-        i_prev: []const f64,
-        c: Coeffs,
-        dt: f64,
-        dt1: f64,
-        dt2: f64,
-        reltol: f64,
-        abstol: f64,
-        chgtol: f64,
-        trtol: f64,
-    ) f64 {
-        const order2 = method != .backward_euler;
-        const lc = lteCoeff(method);
-        const V = @Vector(W, f64);
-        const inv_dt: V = @splat(1.0 / dt);
-        const inv_dt1: V = @splat(1.0 / dt1);
-        const inv_sum01: V = @splat(1.0 / (dt + dt1));
-        const av: V = @splat(c.ag0);
-        const a2: V = @splat(c.ag2);
-        const v_abstol: V = @splat(abstol);
-        const v_reltol: V = @splat(reltol);
-        const v_chgtol: V = @splat(chgtol);
-        const v_trtol: V = @splat(trtol);
-        const coeff: V = @splat(lc);
-        var vmin: V = @splat(std.math.inf(f64));
-        var i: usize = 0;
-
-        while (i + W <= q_cur.len) : (i += W) {
-            const qc: V = q_cur[i..][0..W].*;
-            const qp: V = q_prev[i..][0..W].*;
-            const ip: V = i_prev[i..][0..W].*;
-            const qp2: V = q_prev2[i..][0..W].*;
-            const i_new = switch (cur_method) {
-                .trapezoidal => av * (qc - qp) - ip,
-                .gear_2 => av * (qc - qp) - a2 * (qp - qp2),
-                .backward_euler => av * (qc - qp),
-            };
-            const volttol = v_abstol + v_reltol * @max(@abs(i_new), @abs(ip));
-            const chargetol = v_reltol * @max(@max(@abs(qc), @abs(qp)), v_chgtol) * inv_dt;
-            const tol = @max(volttol, chargetol);
-
-            const f01 = (qc - qp) * inv_dt;
-            const f12 = (qp - qp2) * inv_dt1;
-            const f012 = (f01 - f12) * inv_sum01;
-            var dd = f012;
-            if (order2) {
-                const qp3: V = q_prev3[i..][0..W].*;
-                const f23 = (qp2 - qp3) * @as(V, @splat(1.0 / dt2));
-                const f123 = (f12 - f23) * @as(V, @splat(1.0 / (dt1 + dt2)));
-                dd = (f012 - f123) * @as(V, @splat(1.0 / (dt + dt1 + dt2)));
-            }
-            const del = v_trtol * tol / @max(v_abstol, coeff * @abs(dd));
-            vmin = @min(vmin, del);
-        }
-        var min_del = @reduce(.Min, vmin);
-        // Scalar tail
-        while (i < q_cur.len) : (i += 1) {
-            const d = c.ag0 * (q_cur[i] - q_prev[i]);
-            const i_new = switch (cur_method) {
-                .trapezoidal => d - i_prev[i],
-                .gear_2 => d - c.ag2 * (q_prev[i] - q_prev2[i]),
-                .backward_euler => d,
-            };
-            const volttol = abstol + reltol * @max(@abs(i_new), @abs(i_prev[i]));
-            const chargetol = reltol * @max(@max(@abs(q_cur[i]), @abs(q_prev[i])), chgtol) / dt;
-            const tol = @max(volttol, chargetol);
-            const f01 = (q_cur[i] - q_prev[i]) / dt;
-            const f12 = (q_prev[i] - q_prev2[i]) / dt1;
-            const f012 = (f01 - f12) / (dt + dt1);
-            var dd = f012;
-            if (order2) {
-                const f23 = (q_prev2[i] - q_prev3[i]) / dt2;
-                const f123 = (f12 - f23) / (dt1 + dt2);
-                dd = (f012 - f123) / (dt + dt1 + dt2);
-            }
-            const del = trtol * tol / @max(abstol, lc * @abs(dd));
-            min_del = @min(min_del, del);
-        }
-        // sqrt is monotone — applying it to the reduced min is equivalent
-        // to per-lane sqrt, and cheaper.
-        return if (order2) @sqrt(min_del) else min_del;
-    }
+/// ZP_TRAN_STATS step-economics counters: wall time in a slow transient is
+/// attempts x Newton iterations x eval cost, and this says which factor.
+const Stats = struct {
+    attempts: u64 = 0,
+    nr_iters: u64 = 0,
+    rej_newton: u64 = 0,
+    rej_state: u64 = 0,
+    rej_lte: u64 = 0,
+    order_drops: u64 = 0,
+    bp_landings: u64 = 0,
 };
 
 /// Newton hook: companion RHS from the q plane, matrix = G + alpha*C.
 const TranHook = struct {
-    alpha: f64,
+    /// The method this attempt integrates with (BE while order-dropped).
+    method: Method,
+    /// ag0 is alpha, the q(x) coefficient; ag2 the gear q_prev2 coefficient.
+    c: integrator.Coeffs,
     q_prev: []const f64,
-    i_prev: ?[]const f64, // trap only
-    q_prev2: ?[]const f64, // gear_2 only
-    ag2: f64, // gear_2: the q_prev2 coefficient (integrator.Coeffs.ag2)
+    i_prev: []const f64, // read by trap only
+    q_prev2: []const f64, // read by gear_2 only
     a_vals: []f64,
     q_snap: ?[]f64,
     /// Per-device-state charge snapshot, same cadence as `q_snap` and for the
@@ -295,87 +56,33 @@ const TranHook = struct {
         if (self.qt_snap) |snap| ckt.snapshotQTape(snap);
         if (self.has_charge) {
             const n: usize = ckt.n;
-            const V = @Vector(W, f64);
-            const av: V = @splat(self.alpha);
-            var i: usize = 0;
-            if (self.q_prev2) |qp2| {
-                // Gear-2: rhs += ag0*(q - q_prev) - ag2*(q_prev - q_prev2)
-                const hv: V = @splat(self.ag2);
-                while (i + W <= n) : (i += W) {
-                    const r: V = ckt.rhs[i..][0..W].*;
-                    const qv: V = ckt.q_vec[i..][0..W].*;
-                    const qp: V = self.q_prev[i..][0..W].*;
-                    const qp2v: V = qp2[i..][0..W].*;
-                    ckt.rhs[i..][0..W].* = r + av * (qv - qp) - hv * (qp - qp2v);
-                }
-                while (i < n) : (i += 1)
-                    ckt.rhs[i] += self.alpha * (ckt.q_vec[i] - self.q_prev[i]) - self.ag2 * (self.q_prev[i] - qp2[i]);
-            } else if (self.i_prev) |ipv| {
-                // Trapezoidal
-                while (i + W <= n) : (i += W) {
-                    const r: V = ckt.rhs[i..][0..W].*;
-                    const qv: V = ckt.q_vec[i..][0..W].*;
-                    const qp: V = self.q_prev[i..][0..W].*;
-                    const ip: V = ipv[i..][0..W].*;
-                    ckt.rhs[i..][0..W].* = r + av * (qv - qp) - ip;
-                }
-                while (i < n) : (i += 1)
-                    ckt.rhs[i] += self.alpha * (ckt.q_vec[i] - self.q_prev[i]) - ipv[i];
-            } else {
-                // Backward Euler (or Gear-2 first-step fallback)
-                while (i + W <= n) : (i += W) {
-                    const r: V = ckt.rhs[i..][0..W].*;
-                    const qv: V = ckt.q_vec[i..][0..W].*;
-                    const qp: V = self.q_prev[i..][0..W].*;
-                    ckt.rhs[i..][0..W].* = r + av * (qv - qp);
-                }
-                while (i < n) : (i += 1)
-                    ckt.rhs[i] += self.alpha * (ckt.q_vec[i] - self.q_prev[i]);
+            switch (self.method) {
+                inline else => |m| integrator.companionAt(m, true, ckt.rhs[0..n], ckt.q_vec[0..n], self.q_prev, self.q_prev2, self.i_prev, self.c),
             }
         }
     }
 
     pub fn vals(self: TranHook, ckt: *root.Circuit) []f64 {
         if (!self.has_charge) return ckt.g_vals;
-        ckt.combineGC(self.alpha, self.a_vals);
+        ckt.combineGC(self.c.ag0, self.a_vals);
         return self.a_vals;
     }
     /// One diagonal, without materializing the whole combined plane —
     /// see `Circuit.gcAt`. The residual gate calls this per unknown.
     pub fn diagAt(self: TranHook, ckt: *root.Circuit, slot: u32) f64 {
-        return if (self.has_charge) ckt.gcAt(self.alpha, slot) else ckt.g_vals[slot];
+        return if (self.has_charge) ckt.gcAt(self.c.ag0, slot) else ckt.g_vals[slot];
     }
 };
 
-/// Fine-grained primitive: integrate into caller-owned x and waveform.
-pub const simulate = simulateInto;
-
-/// Same integrator, recording accepted samples through record(t, x, probes).
-pub fn simulateInto(
+/// Integrate from caller-owned x, recording accepted samples into `waveform`.
+pub fn simulate(
     ckt: *root.Circuit,
     x: []f64,
     probes: []const u32,
-    waveform: anytype,
+    waveform: *Waveform,
     options: Options,
     allocator: std.mem.Allocator,
 ) !SimResult {
-    // Whole-transient GPU path (engine-owned megakernel driver): chunked
-    // cooperative launches integrate the full [0, t_stop] on-device. Only
-    // when nothing needs per-step host callbacks or host-side state; any
-    // error falls through to the CPU integrator with the waveform rewound.
-    // A streamed recorder cannot rewind already-written samples on fallback.
-    if (comptime @TypeOf(waveform) == *Waveform) if (ckt.gpu_hook) |gh| {
-        if (gh.simulate_tran) |gt| {
-            if (options.step_fn == null and ckt.progress == null) gpu: {
-                const len0 = waveform.len;
-                const r = gt(gh.ctx, x, probes, waveform, options) catch {
-                    waveform.len = len0;
-                    break :gpu;
-                };
-                return r;
-            }
-        }
-    };
     const n: usize = ckt.n;
     const has_charge = ckt.has_charge;
     const trap = options.method == .trapezoidal;
@@ -464,6 +171,13 @@ pub fn simulateInto(
             simdCopy(qt_hist[3], qt_hist[1]);
         }
     }
+    // LTE reads the per-device-STATE history when the tape is live and the
+    // per-row one when it is not. Same kernel, same formula, same acceptance
+    // test, only the length changes, which is why the n_qt == 0 path is a
+    // genuine scalar oracle and not a second implementation. The pointer sees
+    // the ring rotation below.
+    const lte_hist: *[4][]f64 = if (n_qt > 0) &qt_hist else &q_hist;
+    const lte_ip: []const f64 = if (n_qt > 0) qt_i_prev else i_prev;
 
     // Seed absdelay rings with the operating point: commitStates drives the
     // §4.5.7 zHistPush, whose first push fills the WHOLE ring with (0, v_op).
@@ -549,16 +263,8 @@ pub fn simulateInto(
     var dt_prev: f64 = dt;
     var dt_prev2: f64 = dt;
     var steps: u32 = 0;
-    // ZP_TRAN_STATS: step-economics telemetry. Wall time in a slow transient
-    // is (attempts × Newton iters × eval cost); this says WHICH factor.
     const stats_on = std.c.getenv("ZP_TRAN_STATS") != null;
-    var st_attempts: u64 = 0;
-    var st_nr_iters: u64 = 0;
-    var st_rej_newton: u64 = 0;
-    var st_rej_state: u64 = 0;
-    var st_rej_lte: u64 = 0;
-    var st_order_drops: u64 = 0;
-    var st_bp_landings: u64 = 0;
+    var st: Stats = .{};
     // Order control (ngspice-style): start at BE, promote to configured
     // method when LTE says it's safe. Drop back to BE at breakpoints to
     // suppress trap companion ringing after source-edge discontinuities.
@@ -572,9 +278,9 @@ pub fn simulateInto(
     var attempted_dt = dt;
 
     while (t < options.t_stop and steps < options.max_steps) {
-        if (st_attempts != 0) try ckt.checkpoint(.{
+        if (st.attempts != 0) try ckt.checkpoint(.{
             .phase = .transient,
-            .completed = st_attempts,
+            .completed = st.attempts,
             .simulation_time = t,
             .step_size = attempted_dt,
             .next_step = dt,
@@ -597,17 +303,15 @@ pub fn simulateInto(
             .initial_step = steps == 0,
             .final_step = t + dt >= options.t_stop,
         });
-        const use_gear = gear and !use_be;
-        const use_trap = trap and !use_be;
         const eff_method: Method = if (use_be) .backward_euler else options.method;
         const cf = integrator.coeffs(eff_method, dt, dt_prev);
         const alpha_val = cf.ag0;
         const hook = TranHook{
-            .alpha = alpha_val,
+            .method = eff_method,
+            .c = cf,
             .q_prev = q_hist[1],
-            .i_prev = if (use_trap and has_charge) i_prev else null,
-            .q_prev2 = if (use_gear and has_charge) q_hist[2] else null,
-            .ag2 = cf.ag2,
+            .i_prev = i_prev,
+            .q_prev2 = q_hist[2],
             .a_vals = a_vals,
             .q_snap = if (has_charge) q_hist[0] else null,
             .qt_snap = if (n_qt > 0) qt_hist[0] else null,
@@ -621,18 +325,18 @@ pub fn simulateInto(
             error.QueryCancelled => return err,
             else => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 },
         };
-        st_attempts += 1;
-        st_nr_iters += nr.iterations;
+        st.attempts += 1;
+        st.nr_iters += nr.iterations;
 
         if (!nr.converged) {
-            st_rej_newton += 1;
+            st.rej_newton += 1;
             // Rejected point: restore FSM devices to the last accepted state.
             _ = ckt.stateCtl(.revert);
             // Order drop first: a discontinuity rejects trap long before dt
             // is the problem. Retry at order 1 at the SAME dt; only halve
             // when the retry already ran order 1 (ngspice-style).
             if (!use_be and (trap or gear)) {
-                st_order_drops += 1;
+                st.order_drops += 1;
                 use_be = true;
                 continue;
             }
@@ -642,7 +346,7 @@ pub fn simulateInto(
                 // block at the bottom is skipped by this return.)
                 if (stats_on) std.debug.print(
                     "tran-stats: DT UNDERFLOW (newton) at t={e:.6} dt={e:.3} accepted={d} attempts={d} nr_iters={d}\n",
-                    .{ t, dt, steps, st_attempts, st_nr_iters },
+                    .{ t, dt, steps, st.attempts, st.nr_iters },
                 );
                 return .{ .completed = false, .steps = steps, .t_final = t };
             }
@@ -655,7 +359,7 @@ pub fn simulateInto(
         // ngspice's raw output samples always straddle the true crossing, so
         // a sharp edge interpolates correctly onto its grid.
         if (dt > state_eps and ckt.stateCtl(.query)) {
-            st_rej_state += 1;
+            st.rej_state += 1;
             _ = ckt.stateCtl(.revert);
             use_be = true;
             dt = @max(0.25 * dt, state_eps);
@@ -678,16 +382,18 @@ pub fn simulateInto(
         if (ckt.boundStep()) |bs| dt_next = @min(dt_next, bs);
 
         if (has_charge) {
-            // Per-device-STATE index space when the tape is live, per-row when
-            // it is not. Same kernel, same formula, same acceptance test — only
-            // the length changes, which is why the n_qt == 0 path is a genuine
-            // scalar oracle and not a second implementation. Captured before
-            // the ring rotation at the bottom of this block.
-            const lq0 = if (n_qt > 0) qt_hist[0] else q_hist[0];
-            const lq1 = if (n_qt > 0) qt_hist[1] else q_hist[1];
-            const lq2 = if (n_qt > 0) qt_hist[2] else q_hist[2];
-            const lq3 = if (n_qt > 0) qt_hist[3] else q_hist[3];
-            const lip = if (n_qt > 0) qt_i_prev else i_prev;
+            // Captured before the ring rotation at the bottom of this block.
+            const lh = lte_hist.*;
+            const lq: [4][]const f64 = .{ lh[0], lh[1], lh[2], lh[3] };
+            const lte: integrator.LteIn = .{
+                .dt = dt,
+                .dt1 = dt_prev,
+                .dt2 = dt_prev2,
+                .reltol = options.tol.reltol,
+                .abstol = options.tol.abstol,
+                .chgtol = options.tol.chgtol,
+                .trtol = options.tol.trtol,
+            };
 
             // dctran.c firsttime: the first accepted point skips CKTtrunc
             // entirely ("no check on first time point") — dt REPEATS, it
@@ -696,28 +402,12 @@ pub fn simulateInto(
             if (steps == 0) {
                 dt_next = dt;
             } else {
-                const del = integrator.stepBound(
-                    eff_method,
-                    eff_method,
-                    lq0,
-                    lq1,
-                    lq2,
-                    lq3,
-                    lip,
-                    cf,
-                    dt,
-                    dt_prev,
-                    dt_prev2,
-                    options.tol.reltol,
-                    options.tol.abstol,
-                    options.tol.chgtol,
-                    options.tol.trtol,
-                );
+                const del = integrator.stepBound(eff_method, eff_method, lq, lte_ip, cf, lte);
                 if (del < 0.9 * dt) {
-                    st_rej_lte += 1;
+                    st.rej_lte += 1;
                     _ = ckt.stateCtl(.revert);
                     if (!use_be and (trap or gear)) {
-                        st_order_drops += 1;
+                        st.order_drops += 1;
                         use_be = true;
                         continue;
                     }
@@ -731,7 +421,7 @@ pub fn simulateInto(
                     if (dt < options.dt_min) {
                         if (stats_on) std.debug.print(
                             "tran-stats: DT UNDERFLOW (lte) at t={e:.6} dt={e:.3} accepted={d} attempts={d} nr_iters={d}\n",
-                            .{ t, dt, steps, st_attempts, st_nr_iters },
+                            .{ t, dt, steps, st.attempts, st.nr_iters },
                         );
                         return .{ .completed = false, .steps = steps, .t_final = t };
                     }
@@ -752,23 +442,7 @@ pub fn simulateInto(
             // (ltra1_1_line: 37 ps grid-phase offset by 32.3 ns, 1.02e-2 on
             // the delayed wavefront at 33.04 ns).
             if (steps > 0 and use_be) {
-                const trial_del = integrator.stepBound(
-                    options.method,
-                    eff_method,
-                    lq0,
-                    lq1,
-                    lq2,
-                    lq3,
-                    lip,
-                    cf,
-                    dt,
-                    dt_prev,
-                    dt_prev2,
-                    options.tol.reltol,
-                    options.tol.abstol,
-                    options.tol.chgtol,
-                    options.tol.trtol,
-                );
+                const trial_del = integrator.stepBound(options.method, eff_method, lq, lte_ip, cf, lte);
                 const nd2 = @min(2.0 * dt, trial_del);
                 if (nd2 > 1.05 * dt) use_be = false;
                 dt_next = @min(@max(nd2, options.dt_min), effective_dt_max);
@@ -812,7 +486,7 @@ pub fn simulateInto(
         // promotion check above re-promotes to trap on the next accepted step.
         if (bp_target) |bp| {
             if (@abs(t - bp) <= min_break) {
-                st_bp_landings += 1;
+                st.bp_landings += 1;
                 use_be = true;
                 // Re-emit the landed breakpoint one line-delay later (see
                 // echo_bps above). Dedupe within min_break; drop when full.
@@ -929,7 +603,7 @@ pub fn simulateInto(
 
     try ckt.checkpoint(.{
         .phase = .transient,
-        .completed = st_attempts,
+        .completed = st.attempts,
         .simulation_time = t,
         .step_size = attempted_dt,
         .next_step = if (t < options.t_stop) dt else 0,
@@ -938,7 +612,7 @@ pub fn simulateInto(
     if (stats_on) {
         std.debug.print(
             "tran-stats: n_qt={d} accepted={d} attempts={d} nr_iters={d} rej[newton={d} lte={d} state={d}] order_drops={d} bp_landings={d} avg_dt={e:.3}\n",
-            .{ n_qt, steps, st_attempts, st_nr_iters, st_rej_newton, st_rej_lte, st_rej_state, st_order_drops, st_bp_landings, if (steps > 0) t / @as(f64, @floatFromInt(steps)) else 0 },
+            .{ n_qt, steps, st.attempts, st.nr_iters, st.rej_newton, st.rej_lte, st.rej_state, st.order_drops, st.bp_landings, if (steps > 0) t / @as(f64, @floatFromInt(steps)) else 0 },
         );
     }
 
@@ -951,8 +625,8 @@ pub fn simulateInto(
 /// waveform point-major: (time, probes...) per row.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
-    const scratch = ctx.scratch_allocator orelse a;
-    const x_op = ctx.x_op orelse return error.NoOperatingPoint;
+    const scratch = ctx.scratch_allocator;
+    const x_op = ctx.x_op;
     const x = try scratch.alloc(f64, x_op.len);
     defer scratch.free(x);
     simdCopy(x, x_op);

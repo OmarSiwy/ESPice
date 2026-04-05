@@ -2,7 +2,7 @@
 //! Each frequency uses one adjoint solve; source PSDs come from device noisePsd.
 //! Spectra are V^2/Hz and integrated results are V rms.
 const std = @import("std");
-const batch = @import("batch.zig");
+const freq = @import("freq.zig");
 const root = @import("../types.zig");
 const types = @import("numerics");
 const FreqSolver = @import("solvers").freq_solve.FreqSolver;
@@ -85,8 +85,8 @@ pub fn sweep(
     e[options.out_node] = 1.0;
     if (options.out_neg != root.GROUND) e[options.out_neg] = -1.0;
 
-    const y_lanes = try batch.solve(ckt, &fs, allocator, ckt.g_vals, ckt.c_vals, omegas, e, true);
-    defer allocator.free(y_lanes);
+    var stream = try freq.Stream.init(allocator, &fs, omegas, e, true);
+    defer stream.deinit(allocator);
 
     // ln of each source's density at the previous point -- ngspice's
     // `nVar[LNLSTDENS][i]`, the other half of the per-source fit. Two halves:
@@ -102,10 +102,10 @@ pub fn sweep(
     // noisean.c:376 `data->lstFreq = data->freq` BEFORE the loop: the first
     // point has delFreq == 0 and contributes nothing but history.
     var prev_freq: f64 = if (n_points != 0) freqs[0] else 0;
-    for (0..n_points) |k| {
-        if (k != 0 and k % batch.quantum == 0) try ckt.checkpoint(.{ .phase = .postprocess, .completed = k, .total = n_points });
+    while (try stream.next(ckt)) |pt| {
+        const k = pt.k;
         const f = freqs[k];
-        const y = y_lanes[k * nn ..][0..nn];
+        const y = pt.x;
 
         const ln_freq = @log(@max(f, n_minlog));
         const ln_prev = @log(@max(prev_freq, n_minlog));
@@ -169,8 +169,8 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
     // `defer`-freed below == scratch, and `a` is a results arena that cannot
     // reclaim it. See RunCtx.scratch_allocator.
-    const scratch = ctx.scratch_allocator orelse a;
-    const x_op = ctx.x_op orelse return error.NoOperatingPoint;
+    const scratch = ctx.scratch_allocator;
+    const x_op = ctx.x_op;
 
     const srcs = try ctx.circuit.collectNoiseSources(x_op, scratch);
     defer scratch.free(srcs);
