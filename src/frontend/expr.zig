@@ -41,10 +41,10 @@ pub const Code = enum(u8) {
 pub const Fn = enum(u8) { sqrt, abs, min, max, pow, exp, ln, log, log10, sin, cos, tan, atan, floor, ceil, ternary, tanh, agauss, other };
 
 const fns = std.StaticStringMap(Fn).initComptime(.{
-    .{ "sqrt", .sqrt },   .{ "abs", .abs },     .{ "min", .min },     .{ "max", .max },
-    .{ "pow", .pow },     .{ "exp", .exp },     .{ "ln", .ln },       .{ "log", .log },
-    .{ "log10", .log10 }, .{ "sin", .sin },     .{ "cos", .cos },     .{ "tan", .tan },
-    .{ "atan", .atan },   .{ "floor", .floor }, .{ "ceil", .ceil },   .{ "ternary", .ternary },
+    .{ "sqrt", .sqrt },   .{ "abs", .abs },       .{ "min", .min },      .{ "max", .max },
+    .{ "pow", .pow },     .{ "exp", .exp },       .{ "ln", .ln },        .{ "log", .log },
+    .{ "log10", .log10 }, .{ "sin", .sin },       .{ "cos", .cos },      .{ "tan", .tan },
+    .{ "atan", .atan },   .{ "floor", .floor },   .{ "ceil", .ceil },    .{ "ternary", .ternary },
     .{ "tanh", .tanh },   .{ "agauss", .agauss }, .{ "gauss", .agauss },
 });
 

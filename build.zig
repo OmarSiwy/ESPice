@@ -112,9 +112,6 @@ pub fn build(b: *std.Build) void {
     const output_types_mod = M.make(b.path("src/output/types.zig"), &.{});
     const output_mod = M.make(b.path("src/output/root.zig"), &.{.{ .name = "output_types", .module = output_types_mod }});
 
-    // Netlist front end. Also a std-only leaf — `builder` consumes its
-    // `types.Netlist`, but nothing in it reaches back into the simulator.
-    const syntax_mod = M.make(b.path("src/frontend/syntax.zig"), &.{});
     // Netlist lines -> hypergraph + analysis cards. Imports only shared leaves.
     const netlist_imports: []const std.Build.Module.Import = &.{.{ .name = "requests", .module = requests_mod }};
     const netlist_mod = M.make(b.path("src/frontend/netlist.zig"), netlist_imports);
@@ -268,14 +265,14 @@ pub fn build(b: *std.Build) void {
         .{ .name = "numerics", .module = numerics_mod },
         .{ .name = "device_ir", .module = device_ir_mod },
         .{ .name = "devices", .module = devices_mod },
-        .{ .name = "syntax", .module = syntax_mod },
+        .{ .name = "netlist", .module = netlist_mod },
     });
     const frontend_mod = M.make(b.path("src/frontend/root.zig"), &.{
         .{ .name = "numerics", .module = numerics_mod },
         .{ .name = "device_ir", .module = device_ir_mod },
         .{ .name = "problem_types", .module = problem_types_mod },
         .{ .name = "requests", .module = requests_mod },
-        .{ .name = "syntax", .module = syntax_mod },
+        .{ .name = "netlist", .module = netlist_mod },
         .{ .name = "builder", .module = builder_mod },
         .{ .name = "device_models", .module = devices_mod },
         .{ .name = "build_options", .module = build_options_mod },
@@ -473,7 +470,7 @@ pub fn build(b: *std.Build) void {
     test_problem_step.dependOn(&run_numerical_tests.step);
 
     const prepared_test_mod = M.make(b.path("src/frontend/root.zig"), &.{
-        .{ .name = "syntax", .module = syntax_mod },
+        .{ .name = "netlist", .module = netlist_mod },
         .{ .name = "builder", .module = builder_mod },
         .{ .name = "device_models", .module = devices_mod },
         .{ .name = "problem_types", .module = problem_types_mod },
@@ -536,7 +533,7 @@ pub fn build(b: *std.Build) void {
 
     const frontend_netlist_tests = M.make(b.path("src/frontend/netlist.zig"), netlist_imports);
     const frontend_builder_tests = M.make(b.path("src/frontend/tests/builder.zig"), &.{
-        .{ .name = "syntax", .module = syntax_mod },
+        .{ .name = "netlist", .module = netlist_mod },
         .{ .name = "builder", .module = builder_mod },
         .{ .name = "device_models", .module = devices_mod },
     });
