@@ -105,7 +105,7 @@ test "control source sensing ignores case while binding rejects missing and inex
         const nl = try netlist.parse(a, source, .spectre);
         var b = try Builder.init(a);
         defer b.deinit();
-        var nb = try builder.NetBuilder.init(a, &b, &nl);
+        var nb = try builder.NetBuilder.init(a, &b, nl);
         try std.testing.expectError(if (control.len == 0) error.MissingControlSource else error.UnknownControlSource, nb.build());
         if (std.mem.eql(u8, control, "vcase"))
             try std.testing.expect(!b.card_counts.contains("vsource"));
@@ -129,7 +129,7 @@ test "transmission-line cards retain native numerical algorithms" {
         var b = try Builder.init(a);
         var compiled = false;
         defer if (!compiled) b.deinit();
-        var nb = try builder.NetBuilder.init(a, &b, &nl);
+        var nb = try builder.NetBuilder.init(a, &b, nl);
         try nb.build();
         try std.testing.expectEqual(@as(usize, 1), b.protos.items.len);
         try std.testing.expectEqualStrings(devices.vtable(case[1]).name, b.protos.items[0].type_name);
@@ -174,7 +174,7 @@ test "unsupported transmission-line cards never select approximate fallbacks" {
         const nl = try netlist.parse(a, "* invalid line routing\n" ++ case[0] ++ ".end\n", .ngspice);
         var b = try Builder.init(a);
         defer b.deinit();
-        var nb = try builder.NetBuilder.init(a, &b, &nl);
+        var nb = try builder.NetBuilder.init(a, &b, nl);
         try std.testing.expectError(case[1], nb.build());
         try std.testing.expectEqual(@as(usize, 0), b.protos.items.len);
     }
@@ -188,7 +188,7 @@ test "RG line retains the checked instance length alias" {
     var b = try Builder.init(a);
     var compiled = false;
     defer if (!compiled) b.deinit();
-    var nb = try builder.NetBuilder.init(a, &b, &nl);
+    var nb = try builder.NetBuilder.init(a, &b, nl);
     try nb.build();
     var circuit = try b.compile();
     compiled = true;

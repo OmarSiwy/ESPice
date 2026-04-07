@@ -9,7 +9,9 @@ const netlist = @import("netlist");
 const Value = netlist.Value;
 const Job = requests.Query;
 const GROUND = problem.GROUND;
-pub const NO_NODE: u32 = std.math.maxInt(u32);
+pub const NO_NODE = netlist.none;
+/// Nodes a deck's output `v(...)` may name; appended cards take one.
+pub const deck_output_nodes = 2;
 
 /// Queries for `cards`, whose nets are circuit rows here, in card order. `.noise` also publishes its
 /// integrated plot, `.disto` its two harmonic vectors. `max_group_args` is

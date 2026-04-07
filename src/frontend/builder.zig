@@ -423,7 +423,7 @@ fn setParam(comptime D: type, model: *D.Model, instance: *D.Instance, comptime f
 pub const NetBuilder = struct {
     arena: std.mem.Allocator,
     b: *Builder,
-    nl: *const Netlist,
+    nl: Netlist,
     /// Circuit row of each net, 0 until a device touches it (ground is 0
     /// anyway). Rows follow stamping order, not net order.
     rows: []u32,
@@ -482,7 +482,7 @@ pub const NetBuilder = struct {
         z0: f64,
     };
 
-    pub fn init(arena: std.mem.Allocator, b: *Builder, nl: *const Netlist) !NetBuilder {
+    pub fn init(arena: std.mem.Allocator, b: *Builder, nl: Netlist) !NetBuilder {
         var sensed: std.ArrayList([]const u8) = .empty;
         for ("fhw") |letter| for (nl.bucket(letter)) |e| {
             const d = nl.device(e);
@@ -520,7 +520,7 @@ pub const NetBuilder = struct {
     /// Tag every net a subcircuit device touches with its instance, for the
     /// BBD permutation.
     pub fn tagSubcircuitNodes(self: *NetBuilder) !void {
-        const nl = self.nl;
+        const nl = &self.nl;
         for (nl.order) |e| {
             const dev = nl.device(e);
             if (dev.subckt_instance == 0) continue;
@@ -846,13 +846,11 @@ pub const NetBuilder = struct {
             var c: f64 = 0;
             var len: f64 = 0;
             if (dev.model) |m| {
-                {
-                    r = try numericParameter(m.kv, "r") orelse 0;
-                    l = try numericParameter(m.kv, "l") orelse 0;
-                    g = try numericParameter(m.kv, "g") orelse 0;
-                    c = try numericParameter(m.kv, "c") orelse 0;
-                    len = try numericParameter(m.kv, "length") orelse 0;
-                }
+                r = try numericParameter(m.kv, "r") orelse 0;
+                l = try numericParameter(m.kv, "l") orelse 0;
+                g = try numericParameter(m.kv, "g") orelse 0;
+                c = try numericParameter(m.kv, "c") orelse 0;
+                len = try numericParameter(m.kv, "length") orelse 0;
             }
             if ((try numericParameter(dev.kv, "length")) orelse (try numericParameter(dev.kv, "len"))) |v| len = v;
             if (!std.math.isFinite(r) or !std.math.isFinite(l) or !std.math.isFinite(g) or !std.math.isFinite(c) or !std.math.isFinite(len) or g < 0) break :route;
@@ -883,12 +881,10 @@ pub const NetBuilder = struct {
         if (dev.pins.len != 4) return error.InvalidTransmissionLinePorts;
         var model: devices.lossy_tline.Model = .{};
         if (dev.model) |m| {
-            {
-                try applyKv(&model, m.kv);
-                // TXL model cards spell the line length `length=`; the
-                // lossy_tline field is `len` (same alias addSingleDevice has).
-                if (try numericParameter(m.kv, "length")) |length| model.len = @floatCast(length);
-            }
+            try applyKv(&model, m.kv);
+            // TXL model cards spell the line length `length=`; the
+            // lossy_tline field is `len` (same alias addSingleDevice has).
+            if (try numericParameter(m.kv, "length")) |length| model.len = @floatCast(length);
         }
         try applyKv(&model, dev.kv);
         if (try numericParameter(dev.kv, "length")) |length| model.len = @floatCast(length);
@@ -985,14 +981,12 @@ pub const NetBuilder = struct {
         var isperl: f64 = 0;
         var rsperl: f64 = 0;
         if (dev.model) |m| {
-            {
-                k = kvNumber(m.kv, "k") orelse k;
-                fmax = kvNumber(m.kv, "fmax") orelse fmax;
-                rperl = kvNumber(m.kv, "rperl") orelse rperl;
-                cperl = kvNumber(m.kv, "cperl") orelse cperl;
-                isperl = kvNumber(m.kv, "isperl") orelse isperl;
-                rsperl = kvNumber(m.kv, "rsperl") orelse rsperl;
-            }
+            k = kvNumber(m.kv, "k") orelse k;
+            fmax = kvNumber(m.kv, "fmax") orelse fmax;
+            rperl = kvNumber(m.kv, "rperl") orelse rperl;
+            cperl = kvNumber(m.kv, "cperl") orelse cperl;
+            isperl = kvNumber(m.kv, "isperl") orelse isperl;
+            rsperl = kvNumber(m.kv, "rsperl") orelse rsperl;
         }
         // ngspice's URClength default is a calloc'd 0.0, which degenerates to
         // 0-ohm lumps; 1 m is the sane "unit line" a card without l= means.
@@ -1411,16 +1405,14 @@ fn addSingleDevice(self: *NetBuilder, comptime D: type, dev: Device) !void {
     var model: D.Model = .{};
     var instance: D.Instance = .{};
     if (dev.model) |m| {
-        {
-            try applyKv(&model, m.kv);
-            // TXL (y-card) model cards spell the line length `length=`;
-            // the lossy_tline field is `len`.
-            if (comptime D == devices.lossy_tline) {
-                if (kvNumber(m.kv, "length")) |length| model.len = @floatCast(length);
-            }
-            // Polarity comes from the model card kind, outside applyKv.
-            if (eqlAny(m.kind, &.{ "pmos", "pnp", "pjf", "pmf", "phfet" })) try setPolarity(D, &model);
+        try applyKv(&model, m.kv);
+        // TXL (y-card) model cards spell the line length `length=`;
+        // the lossy_tline field is `len`.
+        if (comptime D == devices.lossy_tline) {
+            if (kvNumber(m.kv, "length")) |length| model.len = @floatCast(length);
         }
+        // Polarity comes from the model card kind, outside applyKv.
+        if (eqlAny(m.kind, &.{ "pmos", "pnp", "pjf", "pmf", "phfet" })) try setPolarity(D, &model);
     }
     _ = try setParam(D, &model, &instance, "gain", positionalNumber(dev, 0) orelse 0);
     // Card `name=value` goes to both structs: VerA puts every Verilog-A
