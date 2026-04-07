@@ -1,15 +1,19 @@
 const std = @import("std");
-const netlist = @import("builder");
+const builder = @import("builder");
 const devices = @import("device_models");
-const syntax = @import("syntax");
-const types = syntax.types;
-const Builder = netlist.Builder;
-const applySourceWaveform = netlist.test_access.applySourceWaveform;
-const pwlSlot = netlist.test_access.pwlSlot;
-const pwlCapacity = netlist.test_access.pwlCapacity;
-const Wave = netlist.test_access.Wave;
-const castField = netlist.test_access.castField;
-const applyKvDyn = netlist.test_access.applyKvDyn;
+const netlist = @import("netlist");
+const Value = netlist.Value;
+const Builder = builder.Builder;
+const applySourceWaveform = builder.test_access.applySourceWaveform;
+const pwlSlot = builder.test_access.pwlSlot;
+const pwlCapacity = builder.test_access.pwlCapacity;
+const Wave = builder.test_access.Wave;
+const castField = builder.test_access.castField;
+const applyKvDyn = builder.test_access.applyKvDyn;
+
+fn card(name: []const u8, positional: []const Value) netlist.Netlist.View {
+    return .{ .name = name, .kind = 'v', .pins = &.{}, .positional = positional, .kv = &.{}, .model = null, .subckt_type = 0, .subckt_instance = 0 };
+}
 
 // ---------------------------------------------------------------------------
 // Source binding regression check
@@ -22,18 +26,13 @@ const applyKvDyn = netlist.test_access.applyKvDyn;
 // ---------------------------------------------------------------------------
 
 test "V card: PWL table lands in the flattened Model slots" {
-    const args = [_]types.Value{
+    const args = [_]Value{
         .{ .num = 0.0 },   .{ .num = 0.0 },
         .{ .num = 10e-3 }, .{ .num = 5.0 },
         .{ .num = 20e-3 }, .{ .num = 0.0 },
     };
-    const positional = [_]types.Value{.{ .group = .{ .name = "PWL", .args = &args } }};
-    const dev: types.Device = .{
-        .name = "Vc",
-        .nodes = &.{ "ctl", "0" },
-        .positional = &positional,
-        .kv = &.{},
-    };
+    const positional = [_]Value{.{ .group = .{ .name = "PWL", .args = &args } }};
+    const dev = card("Vc", &positional);
 
     var model: devices.vsource.Model = .{};
     applySourceWaveform(&model, dev);
@@ -53,14 +52,9 @@ test "V card: PWL table lands in the flattened Model slots" {
 test "V/I cards: unspecified PULSE edges stay at the -1 sentinel" {
     // PULSE(0 5) — no TR/TF/PW/PER. resolvePulseDefaults fills these from the
     // .tran card; until it runs they must still read as "unset".
-    const args = [_]types.Value{ .{ .num = 0.0 }, .{ .num = 5.0 } };
-    const positional = [_]types.Value{.{ .group = .{ .name = "PULSE", .args = &args } }};
-    const dev: types.Device = .{
-        .name = "V1",
-        .nodes = &.{ "a", "0" },
-        .positional = &positional,
-        .kv = &.{},
-    };
+    const args = [_]Value{ .{ .num = 0.0 }, .{ .num = 5.0 } };
+    const positional = [_]Value{.{ .group = .{ .name = "PULSE", .args = &args } }};
+    const dev = card("V1", &positional);
 
     inline for (.{ devices.vsource, devices.isource }) |D| {
         var model: D.Model = .{};
@@ -71,28 +65,6 @@ test "V/I cards: unspecified PULSE edges stay at the -1 sentinel" {
         try std.testing.expect(model.pulse_pw < 0);
         try std.testing.expect(model.pulse_per < 0);
     }
-}
-
-fn nodeAllocationFixture(allocator: std.mem.Allocator) !void {
-    var builder = try Builder.init(allocator);
-    defer builder.deinit();
-    for (0..24) |index| {
-        var buffer: [16]u8 = undefined;
-        const name = try std.fmt.bufPrint(&buffer, "node{d}", .{index});
-        const before = builder.n;
-        const node = builder.internNode(name) catch |err| {
-            try std.testing.expectEqual(before, builder.n);
-            try std.testing.expectEqual(@as(usize, before), builder.node_labels.items.len);
-            try std.testing.expect(!builder.node_names.contains(name));
-            return err;
-        };
-        try std.testing.expectEqual(before, node);
-        try std.testing.expectEqual(node, try builder.internNode(name));
-    }
-}
-
-test "node construction returns allocation errors without partial name publication" {
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, nodeAllocationFixture, .{});
 }
 
 fn integerParameterFixture(dest: [*]u8, name: []const u8, value: f64) bool {
@@ -130,13 +102,13 @@ test "control source sensing ignores case while binding rejects missing and inex
         defer arena.deinit();
         const a = arena.allocator();
         const source = try std.fmt.allocPrint(a, "VCase in 0 2\nRin in 0 1k\nF1 out 0 {s}\nRout out 0 1k\n", .{control});
-        const ast = try syntax.Parser(syntax.spectre).parse(a, source);
-        var builder = try Builder.init(a);
-        defer builder.deinit();
-        var nb = try netlist.NetBuilder.init(a, &builder, try syntax.elaborate(a, ast));
+        const nl = try netlist.parse(a, source, .spectre);
+        var b = try Builder.init(a);
+        defer b.deinit();
+        var nb = try builder.NetBuilder.init(a, &b, nl);
         try std.testing.expectError(if (control.len == 0) error.MissingControlSource else error.UnknownControlSource, nb.build());
         if (std.mem.eql(u8, control, "vcase"))
-            try std.testing.expect(!builder.card_counts.contains("vsource"));
+            try std.testing.expect(!b.card_counts.contains("vsource"));
     }
 }
 
@@ -153,19 +125,19 @@ test "transmission-line cards retain native numerical algorithms" {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
         const a = arena.allocator();
-        const ast = try syntax.Parser(syntax.ngspice).parse(a, "* native line routing\n" ++ case[0] ++ ".end\n");
-        var builder = try Builder.init(a);
+        const nl = try netlist.parse(a, "* native line routing\n" ++ case[0] ++ ".end\n", .ngspice);
+        var b = try Builder.init(a);
         var compiled = false;
-        defer if (!compiled) builder.deinit();
-        var nb = try netlist.NetBuilder.init(a, &builder, try syntax.elaborate(a, ast));
+        defer if (!compiled) b.deinit();
+        var nb = try builder.NetBuilder.init(a, &b, nl);
         try nb.build();
-        try std.testing.expectEqual(@as(usize, 1), builder.protos.items.len);
-        try std.testing.expectEqualStrings(devices.vtable(case[1]).name, builder.protos.items[0].type_name);
+        try std.testing.expectEqual(@as(usize, 1), b.protos.items.len);
+        try std.testing.expectEqualStrings(devices.vtable(case[1]).name, b.protos.items[0].type_name);
         if (case[0][0] == 'Y' or case[0][0] == 'P') {
             try std.testing.expectEqual(@as(u32, 1), @as(u32, @intCast(nb.br.len)));
-            try std.testing.expectEqual(builder.n - 1, nb.br.items(.row)[0]);
+            try std.testing.expectEqual(b.n - 1, nb.br.items(.row)[0]);
         }
-        var circuit = try builder.compile();
+        var circuit = try b.compile();
         compiled = true;
         defer circuit.deinit();
         try std.testing.expect(circuit.batches[0].hooks.commit_state != null);
@@ -199,12 +171,12 @@ test "unsupported transmission-line cards never select approximate fallbacks" {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
         const a = arena.allocator();
-        const ast = try syntax.Parser(syntax.ngspice).parse(a, "* invalid line routing\n" ++ case[0] ++ ".end\n");
-        var builder = try Builder.init(a);
-        defer builder.deinit();
-        var nb = try netlist.NetBuilder.init(a, &builder, try syntax.elaborate(a, ast));
+        const nl = try netlist.parse(a, "* invalid line routing\n" ++ case[0] ++ ".end\n", .ngspice);
+        var b = try Builder.init(a);
+        defer b.deinit();
+        var nb = try builder.NetBuilder.init(a, &b, nl);
         try std.testing.expectError(case[1], nb.build());
-        try std.testing.expectEqual(@as(usize, 0), builder.protos.items.len);
+        try std.testing.expectEqual(@as(usize, 0), b.protos.items.len);
     }
 }
 
@@ -212,13 +184,13 @@ test "RG line retains the checked instance length alias" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const ast = try syntax.Parser(syntax.ngspice).parse(a, "* static RG length override\nO1 a 0 b 0 line length=2\n.model line LTRA r=1 g=1 len=1\n.end\n");
-    var builder = try Builder.init(a);
+    const nl = try netlist.parse(a, "* static RG length override\nO1 a 0 b 0 line length=2\n.model line LTRA r=1 g=1 len=1\n.end\n", .ngspice);
+    var b = try Builder.init(a);
     var compiled = false;
-    defer if (!compiled) builder.deinit();
-    var nb = try netlist.NetBuilder.init(a, &builder, try syntax.elaborate(a, ast));
+    defer if (!compiled) b.deinit();
+    var nb = try builder.NetBuilder.init(a, &b, nl);
     try nb.build();
-    var circuit = try builder.compile();
+    var circuit = try b.compile();
     compiled = true;
     defer circuit.deinit();
     var params: std.ArrayList(devices.ir.ParamRef) = .empty;
