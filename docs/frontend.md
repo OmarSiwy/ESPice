@@ -10,7 +10,7 @@ tokenizer/parser split and builds no syntax tree:
 | expand | `source.zig` | bytes + origin path | bytes (`.include`/`.lib` inlined; spectre skips) |
 | lines | `lines.zig` | bytes | lowercased copy, logical lines, field iterator, SPICE numbers |
 | netlist | `netlist.zig` + `expr.zig` | lines | `Netlist` (below) |
-| analyses | `analyses.zig` | `Netlist.analyses` + node rows | `[]Query`, deck options |
+| analyses | `analyses.zig` | `Netlist.deck.analyses` + node rows | `[]Query`, deck options |
 | build | `prepare.zig` + `builder.zig` | `Netlist` | `Prepared` (frozen `Circuit`, probes, bindings, queries) |
 
 The dialect picks the line splitter (comments, continuations), the quote
@@ -37,14 +37,19 @@ Output, all in the parse arena:
 
 | Table | Layout | Rows |
 |---|---|---|
+| `pool` | `InternPool` (`intern.zig`): name bytes, `u32` offsets, a map keyed by the dense `Name` id | every net and device name, once |
 | `graph` | `BipartiteHypergraph(Net, Device)` (`csr.zig`, from cktImg) | nets are vertices, ground is vertex 0; devices are hyperedges whose members are the pins in terminal order, repeats kept; CSR both ways |
-| `graph.edges` | `MultiArrayList`: `kind` (card letter), `name`, `model`, `positional`, `kv` (spans), `block` (subcircuit type/instance for BBD) | one per flattened device, file order |
+| `graph.edges` | `MultiArrayList`: `kind` (card letter), `name`, `model`, `positional`, `kv` (spans), `subckt_type`, `subckt_instance` (for BBD) | one per flattened device, file order |
 | `order` + `kind_starts` | `[]EdgeId` counting-sorted by card letter | the builder's stamping order |
 | `values`, `kvs` | flat `[]Value`, `[]Kv` | positional values and `key=value` pairs of devices, models and cards |
 | `ops`, `consts` | flat postfix `[]Op` + `[]f64` pool | expressions that do not fold to a number (behavioural sources, unresolved names) |
-| `models` | `MultiArrayList`: `name`, `kind`, `kv` span; name map | one per `.model` card |
-| `analyses` | `[]Analysis`: `kind`, `args` span, output nets, `.pz` ports | one per analysis card, file order |
-| `ic`, `options`, `foreign`, `title` | small | deck configuration |
+| `models` | `[]Model`: `name`, `kind`, `kv` (read together), plus a name map | one per `.model` card |
+| `deck.analyses` | `[]Analysis`: `kind`, `args`, output nets, `.pz` ports | one per analysis card, file order |
+| `deck.config`, `deck.ic`, `deck.foreign`, `deck.title` | small | deck configuration |
+
+Topology (`pool`, `graph`, the value and expression tables, `models`) and
+deck data (`deck`) are separate fields, so a consumer that only builds the
+circuit never touches the deck, and the reverse.
 
 Six questions for the new tables:
 
@@ -53,7 +58,7 @@ Six questions for the new tables:
 2. How many: devices and nets up to ~10^6 (the stress decks reach 2·10^5),
    2 to 10 params per device, models from a handful to a PDK's thousands,
    analyses under ten, expressions that survive folding: a few per deck.
-3. Width: every id (`VertexId`, `EdgeId`, model, span start/len) is `u32`,
+3. Width: every id (`VertexId`, `EdgeId`, `Name`, model, span start/len) is `u32`,
    the ceiling `Circuit` already has; `kind` is the card letter (`u8`);
    subcircuit type `u16` and instance `u32`, the old limits.
 4. Access: the builder visits devices by letter bucket and reads a device's

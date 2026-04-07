@@ -13,6 +13,8 @@ pub const lines = @import("lines.zig");
 pub const source = @import("source.zig");
 const csr = @import("csr.zig");
 pub const expr = @import("expr.zig");
+pub const Name = @import("intern.zig").Name;
+pub const InternPool = @import("intern.zig").InternPool;
 const requests = @import("requests");
 
 pub const Dialect = lines.Dialect;
@@ -41,12 +43,12 @@ pub const Group = struct { name: []const u8, args: []const Value };
 /// `key=value`; a positional model value has an empty key.
 pub const Kv = struct { key: []const u8, value: Value };
 
-pub const Net = struct { name: []const u8 };
+pub const Net = struct { name: Name };
 
 /// Hyperedge payload. `kind` is the lowercase card letter.
 pub const Device = struct {
     kind: u8,
-    name: []const u8,
+    name: Name,
     /// `.model` row the first positional names, `none` otherwise.
     model: u32,
     positional: Span,
@@ -76,9 +78,19 @@ pub const Ic = struct { net: VertexId, value: f64 };
 pub const ForeignKind = source.ForeignKind;
 pub const Foreign = struct { kind: ForeignKind, path: []const u8 };
 
-pub const Netlist = struct {
+/// Deck data: everything that is not circuit topology.
+pub const Deck = struct {
     title: []const u8,
     dialect: Dialect,
+    analyses: []const Analysis,
+    config: []const Config,
+    ic: []const Ic,
+    foreign: []const Foreign,
+};
+
+pub const Netlist = struct {
+    /// Net and device names.
+    pool: InternPool,
     graph: Hypergraph.Graph,
     /// Edges counting-sorted by card letter; `kind_starts[c - 'a']` opens
     /// letter c's run, [26] is the edge count.
@@ -90,10 +102,7 @@ pub const Netlist = struct {
     consts: []const f64,
     models: []const Model,
     model_ids: std.StringHashMapUnmanaged(u32),
-    analyses: []const Analysis,
-    config: []const Config,
-    ic: []const Ic,
-    foreign: []const Foreign,
+    deck: Deck,
 
     /// A card as the builder reads it.
     pub const View = struct {
@@ -115,7 +124,7 @@ pub const Netlist = struct {
         const i = e.index();
         const d = nl.graph.edges.get(i);
         return .{
-            .name = d.name,
+            .name = nl.pool.str(d.name),
             .kind = d.kind,
             .pins = nl.graph.members(e),
             .positional = nl.values[d.positional.start..][0..d.positional.len],
@@ -131,7 +140,7 @@ pub const Netlist = struct {
     }
 
     pub fn netName(nl: *const Netlist, v: VertexId) []const u8 {
-        return nl.graph.vertices.items(.name)[v.index()];
+        return nl.pool.str(nl.graph.vertices.items(.name)[v.index()]);
     }
 
     /// First `.model` card named `name`.
@@ -286,7 +295,11 @@ fn Reader(comptime S: type) type {
         text: []const u8,
         lines: std.ArrayList([]const u8) = .empty,
         hg: Hypergraph.Builder,
-        net_ids: std.StringHashMapUnmanaged(VertexId) = .empty,
+        pool: InternPool = .{},
+        /// The net of each name, `none` for a device name.
+        net_of: std.ArrayList(u32) = .empty,
+        /// A flattened name under construction.
+        name_buf: std.ArrayList(u8) = .empty,
         values: std.ArrayList(Value) = .empty,
         kvs: std.ArrayList(Kv) = .empty,
         ops: std.ArrayList(expr.Op) = .empty,
@@ -312,7 +325,9 @@ fn Reader(comptime S: type) type {
 
         fn init(arena: Allocator, orig: []const u8, text: []const u8, dialect: Dialect) Allocator.Error!R {
             var r: R = .{ .arena = arena, .dialect = dialect, .orig = orig, .text = text, .hg = try .init(arena) };
-            _ = r.hg.addVertex(arena, .{ .name = "0" }) catch return error.OutOfMemory;
+            const zero = try r.pool.intern(arena, "0");
+            _ = r.hg.addVertex(arena, .{ .name = zero }) catch return error.OutOfMemory;
+            try r.net_of.append(arena, 0);
             return r;
         }
 
@@ -338,7 +353,7 @@ fn Reader(comptime S: type) type {
             try r.lines.ensureTotalCapacity(arena, line_hint);
             while (try split.next()) |line| try r.lines.append(arena, line);
             try r.hg.ensureTotalCapacity(arena, line_hint + 1, line_hint, 3 * line_hint);
-            try r.net_ids.ensureTotalCapacity(arena, @intCast(@min(line_hint, none - 1)));
+            try r.pool.reserve(arena, @intCast(@min(2 * line_hint, none - 1)));
             try r.values.ensureTotalCapacity(arena, line_hint);
 
             var top_devices: std.ArrayList(u32) = .empty;
@@ -371,7 +386,7 @@ fn Reader(comptime S: type) type {
                 next[k - 'a'] += 1;
             }
 
-            const nets: NetLookup = .{ .ids = &r.net_ids };
+            const nets: NetLookup = .{ .pool = &r.pool, .net_of = r.net_of.items };
             for (r.analyses.items) |*a| resolve(a, nets);
             var ic: std.ArrayList(Ic) = .empty;
             for (r.ic_cards.items) |args| {
@@ -393,8 +408,7 @@ fn Reader(comptime S: type) type {
             }
 
             return .{
-                .title = title,
-                .dialect = dialect,
+                .pool = r.pool,
                 .graph = graph,
                 .order = order,
                 .kind_starts = starts,
@@ -404,18 +418,24 @@ fn Reader(comptime S: type) type {
                 .consts = r.consts.items,
                 .models = models,
                 .model_ids = r.model_ids,
-                .analyses = r.analyses.items,
-                .config = r.config.items,
-                .ic = ic.items,
-                .foreign = r.foreign.items,
+                .deck = .{
+                    .title = title,
+                    .dialect = dialect,
+                    .analyses = r.analyses.items,
+                    .config = r.config.items,
+                    .ic = ic.items,
+                    .foreign = r.foreign.items,
+                },
             };
         }
 
         const NetLookup = struct {
-            ids: *const std.StringHashMapUnmanaged(VertexId),
+            pool: *const InternPool,
+            net_of: []const u32,
             pub fn node(self: NetLookup, name: []const u8) u32 {
                 if (std.mem.eql(u8, name, "0")) return 0;
-                return if (self.ids.get(name)) |v| v.index() else none;
+                const n = self.pool.find(name) orelse return none;
+                return self.net_of[n.index()];
             }
         };
 
@@ -706,8 +726,8 @@ fn Reader(comptime S: type) type {
                     },
                     .vprobe => try r.ops.append(r.arena, .{
                         .code = .vprobe,
-                        .a = if (op.a == none) none else (try r.net(frame, r.scratch.names.items[op.a])).index(),
-                        .b = if (op.b == none) none else (try r.net(frame, r.scratch.names.items[op.b])).index(),
+                        .a = if (op.a == none) none else (try r.netOf(frame, r.scratch.names.items[op.a])).index(),
+                        .b = if (op.b == none) none else (try r.netOf(frame, r.scratch.names.items[op.b])).index(),
                     }),
                     else => try r.ops.append(r.arena, op),
                 }
@@ -721,25 +741,41 @@ fn Reader(comptime S: type) type {
 
         // -- walk 2: devices --------------------------------------------------------
 
-        fn intern(r: *R, name: []const u8) Error!VertexId {
-            if (isGroundName(name)) return ground;
-            const gop = try r.net_ids.getOrPut(r.arena, name);
-            if (!gop.found_existing) {
-                gop.value_ptr.* = r.hg.addVertex(r.arena, .{ .name = name }) catch |err| return switch (err) {
+        /// A name into the pool; a new one maps to no net yet.
+        fn internName(r: *R, s: []const u8) Error!Name {
+            const n = try r.pool.intern(r.arena, s);
+            if (n.index() == r.net_of.items.len) try r.net_of.append(r.arena, none);
+            return n;
+        }
+
+        fn intern(r: *R, s: []const u8) Error!VertexId {
+            if (isGroundName(s)) return ground;
+            const n = try r.internName(s);
+            const slot = &r.net_of.items[n.index()];
+            if (slot.* == none) {
+                const v = r.hg.addVertex(r.arena, .{ .name = n }) catch |err| return switch (err) {
                     error.OutOfMemory => error.OutOfMemory,
                     else => error.CircuitTooLarge,
                 };
+                slot.* = v.index();
             }
-            return gop.value_ptr.*;
+            return .from(slot.*);
+        }
+
+        /// `parts` joined, in reused scratch.
+        fn joined(r: *R, parts: []const []const u8) Error![]const u8 {
+            r.name_buf.clearRetainingCapacity();
+            for (parts) |part| try r.name_buf.appendSlice(r.arena, part);
+            return r.name_buf.items;
         }
 
         /// A node as the frame names it: a port maps to the caller's net,
         /// `0`/`gnd` stay global, anything else is `<path>.<node>`.
-        fn net(r: *R, frame: *const Frame, name: []const u8) Error!VertexId {
-            const path = frame.path orelse return r.intern(name);
-            for (frame.ports, frame.actuals) |p, a| if (std.mem.eql(u8, p, name)) return a;
-            if (std.mem.eql(u8, name, "0") or std.mem.eql(u8, name, "gnd")) return r.intern(name);
-            return r.intern(try std.mem.concat(r.arena, u8, &.{ path, ".", name }));
+        fn netOf(r: *R, frame: *const Frame, node: []const u8) Error!VertexId {
+            const path = frame.path orelse return r.intern(node);
+            for (frame.ports, frame.actuals) |p, a| if (std.mem.eql(u8, p, node)) return a;
+            if (std.mem.eql(u8, node, "0") or std.mem.eql(u8, node, "gnd")) return r.intern(node);
+            return r.intern(try r.joined(&.{ path, ".", node }));
         }
 
         fn fixedPins(letter: u8) ?usize {
@@ -870,13 +906,13 @@ fn Reader(comptime S: type) type {
 
         fn commit(r: *R, head: []const u8, letter: u8, frame: *const Frame) Error!void {
             const arena = r.arena;
-            const name = if (frame.path) |path| try std.mem.concat(arena, u8, &[_][]const u8{ &.{letter}, ".", path, ".", head }) else head;
             try r.pins.resize(arena, r.nodes.items.len);
-            for (r.nodes.items, r.pins.items) |n, *pin| pin.* = try r.net(frame, n);
+            for (r.nodes.items, r.pins.items) |n, *pin| pin.* = try r.netOf(frame, n);
             const model: u32 = if (r.positional.items.len > 0 and r.positional.items[0] == .name)
                 r.model_ids.get(r.positional.items[0].name) orelse none
             else
                 none;
+            const name = try r.internName(if (frame.path) |path| try r.joined(&[_][]const u8{ &.{letter}, ".", path, ".", head }) else head);
             _ = r.hg.addEdge(arena, .{
                 .kind = letter,
                 .name = name,
@@ -917,7 +953,7 @@ fn Reader(comptime S: type) type {
                 else => .{ .text = if (text.len > 0 and (text[0] == '{' or F.isQuote(text[0]))) F.body(text) else text },
             });
             const actuals = try arena.alloc(VertexId, r.nodes.items.len);
-            for (r.nodes.items, actuals) |n, *a| a.* = try r.net(frame, n);
+            for (r.nodes.items, actuals) |n, *a| a.* = try r.netOf(frame, n);
             const scopes = try std.mem.concat(arena, *const Scope, &.{ frame.scopes, &.{scope} });
             const child: Frame = .{
                 .path = if (frame.path) |p| try std.mem.concat(arena, u8, &.{ p, ".", head }) else head,
@@ -1030,5 +1066,6 @@ fn appendSpan(comptime T: type, arena: Allocator, list: *std.ArrayList(T), items
 
 test {
     _ = csr;
+    _ = @import("intern.zig");
     _ = @import("tests/netlist.zig");
 }

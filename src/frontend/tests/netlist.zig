@@ -45,11 +45,11 @@ test "HDL includes are foreign models; ordinary includes are inert" {
         \\.end
         \\
     );
-    try std.testing.expectEqual(@as(usize, 2), nl.foreign.len);
-    try std.testing.expectEqual(netlist.ForeignKind.verilog_a, nl.foreign[0].kind);
-    try std.testing.expectEqualStrings("Models/Resistor.va", nl.foreign[0].path);
-    try std.testing.expectEqualStrings("models/diode.vams", nl.foreign[1].path);
-    try std.testing.expectEqual(@as(usize, 0), nl.analyses.len);
+    try std.testing.expectEqual(@as(usize, 2), nl.deck.foreign.len);
+    try std.testing.expectEqual(netlist.ForeignKind.verilog_a, nl.deck.foreign[0].kind);
+    try std.testing.expectEqualStrings("Models/Resistor.va", nl.deck.foreign[0].path);
+    try std.testing.expectEqualStrings("models/diode.vams", nl.deck.foreign[1].path);
+    try std.testing.expectEqual(@as(usize, 0), nl.deck.analyses.len);
 }
 
 test "case folding SIMD matches W=1 at every boundary" {
@@ -453,14 +453,14 @@ test "analysis cards resolve output nets; a numeric reference is a net" {
         \\.temp 50
         \\.end
     );
-    try std.testing.expectEqual(@as(usize, 4), nl.analyses.len);
-    const in = nl.analyses[0].pos;
+    try std.testing.expectEqual(@as(usize, 4), nl.deck.analyses.len);
+    const in = nl.deck.analyses[0].pos;
     try std.testing.expectEqualStrings("in", nl.netName(.from(in)));
-    try std.testing.expectEqualStrings("2", nl.netName(.from(nl.analyses[0].neg)));
-    try std.testing.expectEqual(nl.analyses[0].neg, nl.analyses[1].pos);
-    try std.testing.expectEqual([4]u32{ in, 0, nl.analyses[0].neg, 0 }, nl.analyses[2].ports);
-    try std.testing.expectEqual(@as(usize, 1), nl.ic.len);
-    try std.testing.expectEqual(@as(f64, 0.25), nl.ic[0].value);
-    try std.testing.expectEqual(@as(usize, 2), nl.config.len);
-    try std.testing.expect(nl.config[1].temp);
+    try std.testing.expectEqualStrings("2", nl.netName(.from(nl.deck.analyses[0].neg)));
+    try std.testing.expectEqual(nl.deck.analyses[0].neg, nl.deck.analyses[1].pos);
+    try std.testing.expectEqual([4]u32{ in, 0, nl.deck.analyses[0].neg, 0 }, nl.deck.analyses[2].ports);
+    try std.testing.expectEqual(@as(usize, 1), nl.deck.ic.len);
+    try std.testing.expectEqual(@as(f64, 0.25), nl.deck.ic[0].value);
+    try std.testing.expectEqual(@as(usize, 2), nl.deck.config.len);
+    try std.testing.expect(nl.deck.config[1].temp);
 }

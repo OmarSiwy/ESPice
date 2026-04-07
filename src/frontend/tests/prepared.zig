@@ -16,7 +16,7 @@ fn parse(arena: std.mem.Allocator, src: []const u8) !netlist.Netlist {
 /// The only card of `src`, with output node row 1 and no reference.
 fn card(arena: std.mem.Allocator, src: []const u8) !netlist.Analysis {
     const nl = try parse(arena, try std.fmt.allocPrint(arena, "dispatch\n{s}\n.end\n", .{src}));
-    var a = nl.analyses[0];
+    var a = nl.deck.analyses[0];
     a.pos = 1;
     a.neg = NO_NODE;
     a.ports = @splat(NO_NODE);
@@ -82,10 +82,10 @@ test "deck options reject invalid numeric conversions before construction" {
     for ([_][]const u8{ "itl1=-1", "itl2=65536", "itl4=1.5", "temp=-300", "tnom=nan", "reltol=-1" }) |option| {
         const source = try std.fmt.allocPrint(arena.allocator(), "invalid options\n.options {s}\n.end\n", .{option});
         const nl = try parse(arena.allocator(), source);
-        try std.testing.expectError(error.InvalidAnalysisArguments, analyses.deckOptions(nl.config));
+        try std.testing.expectError(error.InvalidAnalysisArguments, analyses.deckOptions(nl.deck.config));
     }
     const nl = try parse(arena.allocator(), "later wins\n.temp 50\n.options temp=27 method=gear maxord=1\n.end\n");
-    const o = try analyses.deckOptions(nl.config);
+    const o = try analyses.deckOptions(nl.deck.config);
     try std.testing.expectEqual(@as(f64, 27), o.temp_c.?);
     try std.testing.expectEqual(requests.Method.backward_euler, o.method.?);
 }
@@ -321,7 +321,7 @@ test "input preparation retains bytes and origin after caller storage changes" {
     @memset(&source, 'x');
     @memset(&origin, 'x');
     try std.testing.expectEqual(@as(u32, 2), prepared.deviceCount());
-    try std.testing.expectEqualStrings("retained input", prepared.title);
+    try std.testing.expectEqualStrings("retained input", prepared.deck.title);
 }
 
 test "input preparation resolves file includes and selected dialect" {
