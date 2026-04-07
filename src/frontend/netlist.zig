@@ -617,6 +617,14 @@ fn Reader(comptime S: type) type {
             const rest = f.rest();
             if (rest.len == 0) return error.ParseError;
             if (rest[0] == '{' or rest[0] == '\'') return r.readValue(f, frame, true, geometry);
+            // A lone number literal (`w=0.5u`) needs no compile.
+            if (std.ascii.isDigit(rest[0]) or rest[0] == '.') {
+                const save = f.pos;
+                const w = f.next().?;
+                if (expr.numberLen(w) == w.len and !expr.isOperator(f.nextByte() orelse ' '))
+                    return .{ .num = S.parseNum(w) orelse return error.ParseError };
+                f.pos = save;
+            }
             const mark = r.scratch.mark();
             defer r.scratch.reset(mark);
             f.pos = try expr.compile(S.parseNum, r.arena, &r.scratch, f.line, f.pos);

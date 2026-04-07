@@ -4,7 +4,7 @@
 //! `Scratch.names`. The netlist splices parameters in and maps probe nets
 //! (netlist.zig `subst`), writing final ops whose `num` operand indexes the
 //! constant pool. A tree is never built; a consumer that needs structure
-//! walks subtrees backwards from their last op (`start`).
+//! walks subtrees backwards from their last op (`subtreeStart`).
 const std = @import("std");
 
 pub const Error = error{ OutOfMemory, ParseError };
@@ -209,21 +209,7 @@ fn Compiler(comptime parseNum: fn ([]const u8) ?f64) type {
             }
             if (std.ascii.isDigit(c) or c == '.') {
                 const start = p.pos;
-                while (p.pos < p.text.len) : (p.pos += 1) {
-                    const ch = p.text[p.pos];
-                    if (std.ascii.isDigit(ch) or ch == '.') continue;
-                    if (ch == 'e' and p.pos + 1 < p.text.len and
-                        (std.ascii.isDigit(p.text[p.pos + 1]) or
-                            ((p.text[p.pos + 1] == '-' or p.text[p.pos + 1] == '+') and
-                                p.pos + 2 < p.text.len and std.ascii.isDigit(p.text[p.pos + 2]))))
-                    {
-                        p.pos += 1;
-                        if (p.text[p.pos] == '+' or p.text[p.pos] == '-') p.pos += 1;
-                        continue;
-                    }
-                    break;
-                }
-                while (p.pos < p.text.len and std.ascii.isAlphabetic(p.text[p.pos])) p.pos += 1;
+                p.pos += numberLen(p.text[start..]);
                 const n = parseNum(p.text[start..p.pos]) orelse return error.ParseError;
                 try p.s.consts.append(p.gpa, n);
                 return p.emit(.{ .code = .num, .a = @intCast(p.s.consts.items.len - 1) });
@@ -258,6 +244,35 @@ fn Compiler(comptime parseNum: fn ([]const u8) ?f64) type {
             if (probe) |code| return p.emit(.{ .code = code, .a = args[0], .b = args[1] });
             try p.emit(.{ .code = .call, .a = @intFromEnum(fns.get(word) orelse .other), .b = argc });
         }
+    };
+}
+
+/// Length of the number literal `text` starts with: digits and dots, an
+/// exponent, then a letter suffix (`2.5e-3`, `10meg`).
+pub fn numberLen(text: []const u8) usize {
+    var i: usize = 0;
+    while (i < text.len) : (i += 1) {
+        const ch = text[i];
+        if (std.ascii.isDigit(ch) or ch == '.') continue;
+        if (ch == 'e' and i + 1 < text.len and
+            (std.ascii.isDigit(text[i + 1]) or
+                ((text[i + 1] == '-' or text[i + 1] == '+') and i + 2 < text.len and std.ascii.isDigit(text[i + 2]))))
+        {
+            i += 1;
+            if (text[i] == '+' or text[i] == '-') i += 1;
+            continue;
+        }
+        break;
+    }
+    while (i < text.len and std.ascii.isAlphabetic(text[i])) i += 1;
+    return i;
+}
+
+/// A byte that continues an expression after an operand.
+pub fn isOperator(c: u8) bool {
+    return switch (c) {
+        '|', '&', '<', '>', '=', '!', '+', '-', '*', '/', '^', '?' => true,
+        else => false,
     };
 }
 
