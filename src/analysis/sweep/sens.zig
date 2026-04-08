@@ -74,11 +74,6 @@ inline fn adjointFd(lambda: []const f64, pert: []const f64, nom: []const f64, in
 ///
 /// No `computeBaseline()`: the baseline would freeze const-Jacobian stamps
 /// (resistors) and mask the very perturbations being measured.
-///
-/// GPU batch note: solve_batch doesn't help here — the nominal OP is a single
-/// solve (already GPU-accelerated via converger.run), and the per-parameter
-/// perturbation loop is eval-only (ckt.evalNewton, no Newton iteration), so
-/// there are no N independent Newton solves to batch.
 pub fn solve(
     ckt: *root.Circuit,
     params: []const SensParam,
