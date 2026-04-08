@@ -1,6 +1,4 @@
 *** NDINV * 4
-* KNOWN GAP: nonzero transient output-start time is rejected by the dispatcher.
-* This correctness test should currently fail; implement support to match the expected output.
 * Expected results: device_mos6_inverter.expected.json
 * Origin: benchmark/fixtures/devices/mos6_inverter/circuit.sp
 XNDINV1 1 11 12 13 2 100 NDINV

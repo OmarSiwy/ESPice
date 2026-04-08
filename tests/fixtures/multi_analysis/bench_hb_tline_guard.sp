@@ -1,6 +1,4 @@
 * Matched transmission line in harmonic balance; physical source waveform.
-* KNOWN GAP: HB does not yet drive the solve from the physical source waveforms and amplitudes.
-* This correctness test should currently fail; implement support to match the expected output.
 * Expected results: bench_hb_tline_guard.expected.json
 * Origin: benchmark/fixtures/hb/tline_guard/circuit.sp
 Vin in 0 DC 0 SIN(0 1 1k)

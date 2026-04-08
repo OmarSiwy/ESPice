@@ -31,8 +31,5 @@
     "finite_values_required": true,
     "all_requested_analyses_must_complete": true
   },
-  "netlist_sha256": "e1338c2c4f5795faeed83e4783b9a3230e4034ecffdaf160b095e59054cec758",
-  "known_gaps": [
-    "explicit PZ ports and transfer zeros are not yet exposed by the dispatcher"
-  ]
+  "netlist_sha256": "f871393c15c2c7ad262f3f505176740db02d349ee0e5feb84cf7fc2d42685c76"
 }

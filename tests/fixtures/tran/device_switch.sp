@@ -1,6 +1,4 @@
 * Unit fixture: voltage-controlled switch with hysteresis, ramp control.
-* KNOWN GAP: nonzero transient output-start time is rejected by the dispatcher.
-* This correctness test should currently fail; implement support to match the expected output.
 * Expected results: device_switch.expected.json
 * Origin: benchmark/fixtures/devices/switch/circuit.sp
 Vc ctl 0 PWL(0 0 10m 5 20m 0)

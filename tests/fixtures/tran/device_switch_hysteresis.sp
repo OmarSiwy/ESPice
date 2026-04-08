@@ -1,6 +1,4 @@
 * Voltage-controlled switch: detailed hysteresis loop.
-* KNOWN GAP: nonzero transient output-start time is rejected by the dispatcher.
-* This correctness test should currently fail; implement support to match the expected output.
 * Expected results: device_switch_hysteresis.expected.json
 * Origin: benchmark/fixtures/devices/switch_hysteresis/circuit.sp
 * Slow ramp up then down to trace full hysteresis.

@@ -52,8 +52,5 @@
     "finite_values_required": true,
     "all_requested_analyses_must_complete": true
   },
-  "netlist_sha256": "b7b8c477ebff998d81c3b74fba069f7686d6f1c15e1d108275a3b2bc4b916f45",
-  "known_gaps": [
-    "QPSS does not yet honor the physical two-tone source spectra"
-  ]
+  "netlist_sha256": "c182a3994a935e170145a16e8f09fdefbdee04b6c66cb99588b27cb7278400bc"
 }

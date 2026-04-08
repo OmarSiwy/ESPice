@@ -1,6 +1,4 @@
 * RC Ladder: 1000 stages — stress test
-* KNOWN GAP: nonzero transient output-start time is rejected by the dispatcher.
-* This correctness test should currently fail; implement support to match the expected output.
 * Expected results: scaling_rc_ladder_1k.expected.json
 * Origin: benchmark/fixtures/scaling/rc_ladder_1k/circuit.sp
 Vin in 0 DC 0 PULSE(0 1 0 1n 1n 50n 100n)

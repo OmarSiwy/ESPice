@@ -1,8 +1,6 @@
 const EnvelopeTests = struct {
     const impl = @import("../tran/envelope.zig");
     const Options = @import("requests").Envelope;
-    const extractPeak = impl.extractPeak;
-    const extractRMS = impl.extractRMS;
     const maxPoints = impl.maxPoints;
     const std = @import("std");
 
@@ -11,47 +9,6 @@ const EnvelopeTests = struct {
     // ============================================================================
 
     const testing = std.testing;
-
-    test "envelope: extractPeak finds absolute maximum" {
-        const vals = [_]f64{ 1.0, -3.0, 2.0, -1.5, 0.5 };
-        const peak = extractPeak(&vals);
-        try testing.expectApproxEqAbs(@as(f64, 3.0), peak, 1e-15);
-    }
-
-    test "envelope: extractRMS of constant signal equals absolute value" {
-        const vals = [_]f64{ 2.0, 2.0, 2.0, 2.0 };
-        const rms = extractRMS(&vals);
-        try testing.expectApproxEqAbs(@as(f64, 2.0), rms, 1e-15);
-    }
-
-    test "envelope: extractRMS of sine wave is amplitude/sqrt(2)" {
-        // Generate one full period of sin
-        const n = 1024;
-        var vals: [n]f64 = undefined;
-        const amplitude = 3.0;
-        for (0..n) |k| {
-            const t = @as(f64, @floatFromInt(k)) / @as(f64, @floatFromInt(n));
-            vals[k] = amplitude * @sin(2.0 * std.math.pi * t);
-        }
-        const rms = extractRMS(&vals);
-        const expected_rms = amplitude / @sqrt(2.0);
-        try testing.expectApproxEqRel(expected_rms, rms, 1e-4);
-    }
-
-    test "envelope: extractRMS of empty slice returns zero" {
-        const empty: []const f64 = &.{};
-        try testing.expectEqual(@as(f64, 0), extractRMS(empty));
-    }
-
-    test "envelope: extractPeak of single element" {
-        const vals = [_]f64{-7.5};
-        try testing.expectApproxEqAbs(@as(f64, 7.5), extractPeak(&vals), 1e-15);
-    }
-
-    test "envelope: extractPeak of empty slice returns zero" {
-        const empty: []const f64 = &.{};
-        try testing.expectEqual(@as(f64, 0), extractPeak(empty));
-    }
 
     test "envelope: maxPoints monotone in max_outer_steps" {
         const base: Options = .{ .t_carrier = 1e-9, .t_stop = 1e-3 };
@@ -81,12 +38,8 @@ const EnvelopeTests = struct {
 
 const MatexTests = struct {
     const impl = @import("../tran/matex.zig");
-    const buildCombinedVals = impl.test_access.buildCombinedVals;
     const denseMatMul = impl.test_access.denseMatMul;
     const expmSmall = impl.test_access.expmSmall;
-    const simdAxpy = impl.test_access.simdAxpy;
-    const simdDot = impl.test_access.simdDot;
-    const simdNorm = impl.test_access.simdNorm;
     const std = @import("std");
 
     // ============================================================================
@@ -223,37 +176,6 @@ const MatexTests = struct {
             try testing.expectEqualSlices(f64, want, C);
         }
     }
-
-    test "simdDot: basic" {
-        const a_arr = [_]f64{ 1, 2, 3, 4 };
-        const b_arr = [_]f64{ 5, 6, 7, 8 };
-        const d = simdDot(&a_arr, &b_arr, 4);
-        try testing.expectApproxEqAbs(@as(f64, 70.0), d, 1e-12);
-    }
-
-    test "simdNorm: unit" {
-        const v_arr = [_]f64{ 3, 4 };
-        try testing.expectApproxEqAbs(@as(f64, 5.0), simdNorm(&v_arr, 2), 1e-12);
-    }
-
-    test "simdAxpy: basic" {
-        const x_arr = [_]f64{ 1, 2, 3 };
-        var y_arr = [_]f64{ 10, 20, 30 };
-        simdAxpy(2.0, &x_arr, &y_arr, 3);
-        try testing.expectApproxEqAbs(@as(f64, 12.0), y_arr[0], 1e-15);
-        try testing.expectApproxEqAbs(@as(f64, 24.0), y_arr[1], 1e-15);
-        try testing.expectApproxEqAbs(@as(f64, 36.0), y_arr[2], 1e-15);
-    }
-
-    test "buildCombinedVals: gamma=1 gives C+G" {
-        const g = [_]f64{ 1, 2, 3 };
-        const c = [_]f64{ 10, 20, 30 };
-        var out: [3]f64 = undefined;
-        buildCombinedVals(3, &g, &c, 1.0, &out);
-        try testing.expectApproxEqAbs(@as(f64, 11.0), out[0], 1e-15);
-        try testing.expectApproxEqAbs(@as(f64, 22.0), out[1], 1e-15);
-        try testing.expectApproxEqAbs(@as(f64, 33.0), out[2], 1e-15);
-    }
 };
 
 const TranTests = struct {
@@ -344,6 +266,39 @@ const TranTests = struct {
         }
     }
 
+    test "companionAt: every method, both modes, matches its per-element formula bit for bit" {
+        var prng = std.Random.DefaultPrng.init(0xc0a1);
+        const r = prng.random();
+        const cap = 3 * W + 2;
+        inline for ([_]impl.Method{ .backward_euler, .trapezoidal, .gear_2 }) |m| {
+            inline for (.{ false, true }) |acc| for (0..cap) |len| {
+                var q: [3][cap]f64 = undefined;
+                var ip: [cap]f64 = undefined;
+                var out: [cap]f64 = undefined;
+                for (0..len) |j| {
+                    for (&q) |*h| h[j] = (r.float(f64) - 0.5) * 1e-12;
+                    ip[j] = (r.float(f64) - 0.5) * 1e-3;
+                    out[j] = (r.float(f64) - 0.5) * 1e-3;
+                }
+                const c: integrator.Coeffs = .{ .ag0 = 2.0 / (r.float(f64) * 1e-9 + 1e-12), .ag2 = r.float(f64) * 1e9 };
+                var ora = out;
+                // The vector body sums (out + d) - h, the scalar tail out + (d - h).
+                const body = len - len % W;
+                for (0..len) |j| {
+                    const d = c.ag0 * (q[0][j] - q[1][j]);
+                    const h: f64 = switch (m) {
+                        .trapezoidal => ip[j],
+                        .gear_2 => c.ag2 * (q[1][j] - q[2][j]),
+                        else => 0,
+                    };
+                    ora[j] = if (!acc) d - h else if (j < body) (ora[j] + d) - h else ora[j] + (d - h);
+                }
+                integrator.companionAt(m, acc, out[0..len], q[0][0..len], q[1][0..len], q[2][0..len], ip[0..len], c);
+                try testing.expectEqualSlices(u64, @ptrCast(ora[0..len]), @ptrCast(out[0..len]));
+            };
+        }
+    }
+
     test "coeffs: BE 1/dt, trap 2/dt, gear-2 variable-step BDF2" {
         const dt: f64 = 1e-9;
         try testing.expectApproxEqRel(@as(f64, 1e9), integrator.coeffs(.backward_euler, dt, dt).ag0, 1e-12);
@@ -418,36 +373,18 @@ const TranTests = struct {
         const del_state = integrator.stepBound(
             .backward_euler,
             .backward_euler,
-            &s_cur,
-            &s_prev,
-            &s_zero,
-            &s_zero,
+            .{ &s_cur, &s_prev, &s_zero, &s_zero },
             &s_zero,
             .{ .ag0 = 1.0 / dt, .ag2 = 0 },
-            dt,
-            dt,
-            dt,
-            reltol,
-            abstol,
-            chgtol,
-            trtol,
+            .{ .dt = dt, .dt1 = dt, .dt2 = dt, .reltol = reltol, .abstol = abstol, .chgtol = chgtol, .trtol = trtol },
         );
         const del_row = integrator.stepBound(
             .backward_euler,
             .backward_euler,
-            &row,
-            &row,
-            &row,
-            &row,
+            .{ &row, &row, &row, &row },
             &row,
             .{ .ag0 = 1.0 / dt, .ag2 = 0 },
-            dt,
-            dt,
-            dt,
-            reltol,
-            abstol,
-            chgtol,
-            trtol,
+            .{ .dt = dt, .dt1 = dt, .dt2 = dt, .reltol = reltol, .abstol = abstol, .chgtol = chgtol, .trtol = trtol },
         );
 
         // Closed form, so the CKTterr formula is pinned and not just the inequality:
@@ -478,36 +415,18 @@ const TranTests = struct {
         const del_one = integrator.stepBound(
             .backward_euler,
             .backward_euler,
-            &one_sided,
-            &one_sided_p,
-            &pair_zero,
-            &pair_zero,
+            .{ &one_sided, &one_sided_p, &pair_zero, &pair_zero },
             &pair_zero,
             .{ .ag0 = 1.0 / dt, .ag2 = 0 },
-            dt,
-            dt,
-            dt,
-            reltol,
-            abstol,
-            chgtol,
-            trtol,
+            .{ .dt = dt, .dt1 = dt, .dt2 = dt, .reltol = reltol, .abstol = abstol, .chgtol = chgtol, .trtol = trtol },
         );
         const del_mirror = integrator.stepBound(
             .backward_euler,
             .backward_euler,
-            &mirrored,
-            &mirrored_p,
-            &pair_zero,
-            &pair_zero,
+            .{ &mirrored, &mirrored_p, &pair_zero, &pair_zero },
             &pair_zero,
             .{ .ag0 = 1.0 / dt, .ag2 = 0 },
-            dt,
-            dt,
-            dt,
-            reltol,
-            abstol,
-            chgtol,
-            trtol,
+            .{ .dt = dt, .dt1 = dt, .dt2 = dt, .reltol = reltol, .abstol = abstol, .chgtol = chgtol, .trtol = trtol },
         );
         try testing.expectEqual(del_one, del_mirror);
 
@@ -527,19 +446,10 @@ const TranTests = struct {
         const del_big = integrator.stepBound(
             .backward_euler,
             .backward_euler,
-            &big,
-            &big_p,
-            &pair_zero,
-            &pair_zero,
+            .{ &big, &big_p, &pair_zero, &pair_zero },
             &pair_zero,
             .{ .ag0 = 1.0 / dt, .ag2 = 0 },
-            dt,
-            dt,
-            dt,
-            reltol,
-            abstol,
-            chgtol,
-            trtol,
+            .{ .dt = dt, .dt1 = dt, .dt2 = dt, .reltol = reltol, .abstol = abstol, .chgtol = chgtol, .trtol = trtol },
         );
         try testing.expectApproxEqRel(del_one, del_big, 1e-9);
     }

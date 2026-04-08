@@ -1,6 +1,4 @@
 rca3040 ckt - rca 3040 wideband amplifier
-* KNOWN GAP: nonzero transient output-start time is rejected by the dispatcher.
-* This correctness test should currently fail; implement support to match the expected output.
 * Expected results: bench_ngspice_rca3040.expected.json
 * Origin: benchmark/fixtures/ngspice/rca3040/circuit.sp
 .options noacct

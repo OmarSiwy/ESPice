@@ -68,8 +68,5 @@
     "finite_values_required": true,
     "all_requested_analyses_must_complete": true
   },
-  "netlist_sha256": "f49ff0dbaeefd4cf3590b80895c640c57a34a6e9d10073fc94f73d307cea3d79",
-  "known_gaps": [
-    "Fourier extraction is currently capped at nine harmonics"
-  ]
+  "netlist_sha256": "832f7fe32ad58a16347a232901c7c00b8768fd905d13fba1cd376bcfdc36092f"
 }

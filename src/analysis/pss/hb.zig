@@ -16,6 +16,7 @@
 const std = @import("std");
 const root = @import("../types.zig");
 const simdCopy = root.copySimd;
+const num = @import("numerics");
 const converger = @import("solvers").converger;
 const solvers = @import("solvers");
 const dense_lu = solvers.dense_lu;
@@ -49,6 +50,7 @@ pub fn solve(
     allocator: std.mem.Allocator,
 ) !SolveResult {
     const n: usize = ckt.n;
+    const nnz: usize = ckt.nnz;
     const nh: usize = options.n_harmonics;
     const nf: usize = 2 * nh + 1;
     const total_unknowns = n * nf;
@@ -66,11 +68,10 @@ pub fn solve(
         n * n + // c_mat
         total_unknowns * total_unknowns + // jac
         total_unknowns + // dx_hat
-        nf * n * n + // g_td (element-major, samples contiguous)
+        nf * nnz + // g_td (slot-major, samples contiguous)
         nf * nh + // basis_cos (harmonic-major)
         nf * nh + // basis_sin
         n + // x_sample (gather buffer for device eval)
-        n * n + // g_sample (denseG scatter temp)
         total_unknowns + // x_prev (line-search rewind point)
         2 * (nh + 1); // gc / gs: one node pair's G(t) spectrum
 
@@ -92,16 +93,14 @@ pub fn solve(
     off += total_unknowns * total_unknowns;
     const dx_hat = arena[off..][0..total_unknowns];
     off += total_unknowns;
-    const g_td = arena[off..][0 .. nf * n * n];
-    off += nf * n * n;
+    const g_td = arena[off..][0 .. nf * nnz];
+    off += nf * nnz;
     const basis_cos = arena[off..][0 .. nf * nh];
     off += nf * nh;
     const basis_sin = arena[off..][0 .. nf * nh];
     off += nf * nh;
     const x_sample = arena[off..][0..n];
     off += n;
-    const g_sample = arena[off..][0 .. n * n];
-    off += n * n;
     const x_prev = arena[off..][0..total_unknowns];
     off += total_unknowns;
     const gc = arena[off..][0 .. nh + 1];
@@ -112,8 +111,7 @@ pub fn solve(
 
     root.zeroSimd(x_hat);
 
-    // DC seed: solve the DC operating point via converger.run + EvalHook,
-    // which routes through gpu_hook.solve_newton when GPU is active.
+    // DC seed: solve the DC operating point via converger.run + EvalHook.
     // Seeding x_hat[dc] from the true DC op dramatically reduces HB iterations
     // for circuits with a nontrivial bias point.
     {
@@ -136,7 +134,6 @@ pub fn solve(
     }
 
     // ponytail: GPU status for HB —
-    //   DC seed above uses converger.run + EvalHook → gpu_hook.solve_newton when GPU active.
     //   HB inner loop (DFT sandwich: IDFT → device eval → DFT) stays CPU.
     //   GPU upgrade path: batched device eval kernel over nf time samples (each independent),
     //   plus cuSOLVER dense LU for the total_unknowns×total_unknowns spectral Jacobian.
@@ -202,12 +199,7 @@ pub fn solve(
             ckt.setSimState(.{ .t = t_k, .dt = dt_sample, .kind = .tran });
             ckt.eval(x_sample, t_k);
             for (0..n) |node| f_td[node * nf + k] = ckt.rhs[node];
-            ckt.denseG(g_sample);
-            for (0..n) |row| {
-                for (0..n) |col| {
-                    g_td[(row * n + col) * nf + k] = g_sample[row * n + col];
-                }
-            }
+            for (ckt.g_vals[0..nnz], 0..) |g, slot| g_td[slot * nf + k] = g;
             if (k == 0) {
                 // dQ/dx at the DC sample, straight off the analytic C plane
                 if (ckt.has_charge) ckt.denseC(c_mat) else root.zeroSimd(c_mat);
@@ -282,8 +274,8 @@ pub fn solve(
             }
         }
 
-        const max_residual = normInf(f_hat);
-        if (converger.hbTrace()) std.debug.print("HB iter={d} res={e} step={e} normx={e}\n", .{ iter, max_residual, step, normInf(x_hat) });
+        const max_residual = num.normInf(f_hat);
+        if (converger.hbTrace()) std.debug.print("HB iter={d} res={e} step={e} normx={e}\n", .{ iter, max_residual, step, num.normInf(x_hat) });
         if (max_residual < options.hb_tol) {
             extractSpectra(x_hat, probes, spectra, nf);
             return .{ .converged = true, .iterations = iter + 1, .residual_norm = max_residual };
@@ -294,7 +286,7 @@ pub fn solve(
             // still holds that direction, so no Jacobian is rebuilt.
             step *= 0.5;
             simdCopy(x_hat, x_prev);
-            axpy(x_hat, step, dx_hat);
+            num.axpy(x_hat, step, dx_hat);
             retrying = true;
             continue;
         }
@@ -322,9 +314,13 @@ pub fn solve(
         // and `hb/diode_rectifier_rc` ran the iteration limit out instead.
         root.zeroSimd(jac);
 
-        for (0..n) |row| {
-            for (0..n) |col| {
-                const g_slice = g_td[(row * n + col) * nf ..][0..nf];
+        // Only the pattern's slots: a structurally zero (row, col) has an
+        // all-zero G(t), every projection of which is +0, which is exactly
+        // what zeroSimd left in its jac entries.
+        for (0..n) |col| {
+            for (ckt.col_ptr[col]..ckt.col_ptr[col + 1]) |slot| {
+                const row: usize = ckt.row_idx[slot];
+                const g_slice = g_td[slot * nf ..][0..nf];
 
                 // Gc[0] = 2·mean(G); Gc[k>0], Gs[k>0] = the 2/nf projections.
                 var g_dc_acc: V = @splat(0.0);
@@ -421,41 +417,16 @@ pub fn solve(
         try dense_lu.factorizeSolveNeg(total_unknowns, jac, f_hat[0..total_unknowns], dx_hat);
 
         simdCopy(x_prev, x_hat);
-        axpy(x_hat, step, dx_hat);
+        num.axpy(x_hat, step, dx_hat);
     }
 
-    const final_norm = normInf(f_hat);
+    const final_norm = num.normInf(f_hat);
     extractSpectra(x_hat, probes, spectra, nf);
     return .{ .converged = false, .iterations = options.max_iter, .residual_norm = final_norm };
 }
 
 /// The shortest step the line search will take before giving up on shortening.
 const min_step: f64 = 1.0 / 1024.0;
-
-/// dst += a * src, over the whole slice.
-inline fn axpy(dst: []f64, a: f64, src: []const f64) void {
-    const av: V = @splat(a);
-    var i: usize = 0;
-    while (i + W <= dst.len) : (i += W) {
-        const dv: V = dst[i..][0..W].*;
-        const sv: V = src[i..][0..W].*;
-        dst[i..][0..W].* = dv + av * sv;
-    }
-    while (i < dst.len) : (i += 1) dst[i] += a * src[i];
-}
-
-inline fn normInf(buf: []const f64) f64 {
-    var mx: f64 = 0;
-    var ri: usize = 0;
-    while (ri + W <= buf.len) : (ri += W) {
-        const fv: V = buf[ri..][0..W].*;
-        mx = @max(mx, @reduce(.Max, @abs(fv)));
-    }
-    while (ri < buf.len) : (ri += 1) {
-        mx = @max(mx, @abs(buf[ri]));
-    }
-    return mx;
-}
 
 /// Copy each probed node's [dc, cos_1, sin_1, ...] block out of x_hat —
 /// spectra shares x_hat's per-node layout exactly.
@@ -473,7 +444,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     // `defer`-freed == scratch; `a` is a results arena. See
     // RunCtx.scratch_allocator.
-    const scratch = ctx.scratch_allocator orelse a;
+    const scratch = ctx.scratch_allocator;
     const spectra = try scratch.alloc(f64, ctx.probes.len * nf);
     defer scratch.free(spectra);
     const st = try solve(ctx.circuit, ctx.probes, spectra, opts, scratch);

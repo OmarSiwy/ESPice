@@ -1,68 +1,63 @@
 # Frontend boundaries and measurements
 
-The frontend transforms source bytes into an unresolved AST, then builds a
-passive `Prepared` circuit. Parsing preserves card order, subcircuit calls and
-expressions. Construction resolves parameter scopes, expands instances,
-selects model bins, binds compiled devices and builds circuit connectivity.
-The same AST can be built repeatedly without scaling or rewriting its values.
+The frontend turns source bytes into a netlist hypergraph and analysis cards,
+then builds a passive `Prepared` circuit. There is no syntax tree: logical
+lines are split into fields and read straight into flat tables, subcircuits
+are flattened while reading, and expressions fold to numbers as they are read
+(see `docs/frontend.md`).
 
 | File | Responsibility |
 |---|---|
-| `tokenizer.zig` | Dialect line rules, tokens and numeric suffixes |
-| `parser.zig` | Tokens to declarations and expression ASTs |
-| `types.zig` | AST, expressions and construction scratch columns |
-| `elaborate.zig` | Parameter resolution, subcircuit expansion and model bins |
-| `builder.zig` | Device binding, node identities and circuit topology |
-| `prepare.zig` | Source/model preparation, Prepared construction and query binding |
 | `source.zig` | File reads, relative includes and library sections |
+| `lines.zig` | Dialect line rules, case folding, the field splitter and numeric suffixes |
+| `expr.zig` | Expressions as postfix: compile, fold, subtree walks |
+| `csr.zig` | The bipartite hypergraph (adapted from cktImg) |
+| `netlist.zig` | Lines to nets × devices, models, analysis cards; parameter scopes, subcircuit frames, model bins |
+| `analyses.zig` | Analysis cards and `.options` to queries |
+| `builder.zig` | Device binding, net-to-row mapping and circuit topology |
+| `prepare.zig` | Source/model preparation, Prepared construction and appended cards |
 | `models.zig` | Comptime device catalog and fixed dispatch maps |
 | `model_loader.zig` | Runtime HDL compilation, registration and library ABI |
-| `syntax.zig` | Dependency-free syntax module exports for construction and benchmarks |
 | `root.zig` | Public frontend exports and test registration |
 
-`prepare.zig` combines the former input/prepared orchestration files. File I/O
-remains separate from dialect tokenization, and runtime HDL loading remains
-separate from comptime device selection. The syntax module boundary lets tests
-and benchmarks parse decks without linking numerical device implementations.
+File I/O stays separate from dialect splitting, and runtime HDL loading stays
+separate from comptime device selection. The `netlist` module imports only
+the shared `requests` leaf, so tests and `bench-frontend` read decks without
+linking numerical device implementations.
 
-All frontend tests live in `src/frontend/tests/`: syntax, builder, prepared
-circuits, and models. `root.zig` registers each suite. Private helper access is
-available only in test builds. `test-frontend`, `test-builder`, `test-devices`
-and `test-prepared` preserve their existing build entry points.
+Frontend tests live in `src/frontend/tests/`: netlist (the `test-frontend`
+root is `netlist.zig`), builder, prepared circuits and models.
 
 ## Layout and SIMD
 
-AST declarations use source-order arrays; expansion consumes each declaration's
-fields together. Subcircuit lookup stores checked `u16` indices. Expanded
-instance IDs and builder device indices are checked `u32` values. Device
-construction uses the existing letter-bucketed SoA columns. Parse scratch dies
-when preparation completes; published metadata belongs to the session arena.
-GPU device layouts and scatter tapes are unchanged.
+Device payload is SoA in the hypergraph's edge table; positional values and
+`key=value` pairs are rows of two flat tables, addressed by `u32` spans. Net
+and model names are hashed once, in the frontend; the builder maps a net to
+its circuit row through a `u32` array. Subcircuit definitions are line ranges,
+re-read per instance. Parse scratch dies when preparation completes;
+published metadata belongs to the session arena. GPU device layouts and
+scatter tapes are unchanged.
 
-The parser reuses node/argument/parameter buffers and copies completed card
-slices into arena slabs. Literal expression parsing returns values directly;
-only expression edges allocate nodes. Semantic expansion copies values when
-substitution or geometry scaling requires it.
+ASCII normalization and newline counting share one streaming vector pass
+(`lines.zig normalize`). The newline predicate becomes a bit mask followed by
+`@popCount`; this avoids the incorrect line counts observed with vector
+boolean-to-integer reduction in the Debug backend. Width 1 is the scalar
+oracle and tail. Differential cases cover widths 1, 16, 32 and 64, every
+input length through 257 bytes, and random non-ASCII bytes. The standalone
+SIMD reference mirrors the kernel; the frontend test checks the production
+implementation. LLVM assembly contains `vpcmpeqb`, `vpmovmskb` and `popcnt`
+in the production normalization function.
 
-ASCII normalization and newline counting share one streaming vector pass.
-The newline predicate becomes a bit mask followed by `@popCount`; this avoids
-the incorrect line counts observed with vector boolean-to-integer reduction
-in the Debug backend. Width 1 is the scalar oracle and tail. Differential
-cases cover widths 1, 16, 32 and 64, every input length through 257 bytes, and
-random non-ASCII bytes. The standalone SIMD reference mirrors the kernel;
-the frontend test checks the production implementation. LLVM assembly contains
-`vpcmpeqb`, `vpmovmskb` and `popcnt` in the production normalization function.
-
-The per-word SIMD experiment was retired. It classified 16 bytes anew for each
-short token, then used a width-1 tail. Cachegrind on a 20,005-device RC prefix
+The field splitter is scalar, driven by a 256-entry break table. The per-word
+SIMD experiment was retired. It classified 16 bytes anew for each short
+token, then used a width-1 tail. Cachegrind on a 20,005-device RC prefix
 reported 86,436,501 instructions versus 81,433,895 with the retained scalar
 word scan (6.1% more), with identical 533,666 L1 data misses. These figures
 include one warmup and one measured parse/expansion. Both binaries used LLVM
 ReleaseFast and x86_64_v3, with simulated caches I1/D1=32KiB, 8-way, 64-byte
-lines and LL=8MiB, 16-way. Standard-library vector scans for physical newlines
-and quoted spans remain. Reconsider token SIMD only with measured gains across
-short-token and long-token decks; mask caching adds state that this result
-does not justify.
+lines and LL=8MiB, 16-way. Reconsider token SIMD only with measured gains
+across short-token and long-token decks; mask caching adds state that this
+result does not justify.
 
 ## Controlled-source preparation — 2026-09-16
 
@@ -115,7 +110,8 @@ as `.zig-cache/o/d079a8673824e0684f6bd976281d2e5f/espice`.
 ## Historical AST/build refactor measurements
 
 The measurements and checks below describe the earlier AST/build refactor,
-not the controlled-source preparation changes above. That refactor used the
+which the hypergraph frontend replaced, not the controlled-source
+preparation changes above. That refactor used the
 following frontend-specific benchmark commands:
 
 ```sh

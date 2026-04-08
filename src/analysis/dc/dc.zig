@@ -1,32 +1,11 @@
-//! DC: Newton on A = G. solve() is the point primitive;
-//! run() sweeps the primary source through its ParamRef and records probes.
+//! DC sweep: run() sweeps the primary source through its ParamRef, one
+//! warm-started Newton per point on A = G, and records the probes.
 const std = @import("std");
 const root = @import("../types.zig");
 const converger = @import("solvers").converger;
 const op = @import("op.zig");
-const lanes = @import("../sweep/lanes.zig");
 
 pub const Options = @import("requests").Dc;
-
-pub const SolveResult = converger.Result;
-
-pub fn solve(
-    ckt: *root.Circuit,
-    x: []f64,
-    options: Options,
-) !SolveResult {
-    op.coldStart(ckt, x);
-    // §4.6.1 `analysis("dc")`, §9.10 `$abstime` = 0. Every DC point is a static
-    // solve; `initial_step` stays with op.solve, which is what actually runs
-    // first in a job. ponytail: a standalone `.dc` sweep with no preceding OP
-    // therefore never raises initial_step — plumb it in dc.run's point loop the
-    // day a model needs a power-on latch without an operating point.
-    ckt.setSimState(.{ .kind = .dc });
-    try ckt.computeBaseline();
-    const ws = try ckt.workspace();
-    const copts = converger.optionsFromTolerances(options.tol, options.tol.itl2);
-    return converger.run(ckt, ws, x, 0, copts, root.EvalHook{});
-}
 
 /// Contract entry: sweep the primary source dc value, one warm-started
 /// solve per point. Swept value restored afterwards so the cached operating
@@ -36,13 +15,12 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
     // `defer`-freed below == scratch; `a` is a results arena that cannot
     // reclaim it. See RunCtx.scratch_allocator.
-    const scratch = ctx.scratch_allocator orelse a;
+    const scratch = ctx.scratch_allocator;
 
     // DCOP flavor for the whole sweep, whatever the deck's shared op left
     // behind: a deck with a .tran runs its op in the ic phase, where
     // analysis("tran") is true and sources bias at waveform(0) — which made
-    // this sweep's dc override a no-op again (rtlinv). runSerial/the GPU
-    // lane path both inherit this.
+    // this sweep's dc override a no-op again (rtlinv). runSerial inherits this.
     ckt.setSimState(.{ .kind = .dc });
 
     // Locate the swept parameter. Matching the DEVICE TYPE as well as the
@@ -78,10 +56,10 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
             r.set(saved2);
         };
         var temperatures: std.ArrayList(f64) = .empty;
-        defer temperatures.deinit(a);
+        defer temperatures.deinit(scratch);
         if (outer.is_temp) for (refs) |ref| {
             if (ref.is_instance and std.mem.eql(u8, ref.param_name, "temperature"))
-                try temperatures.append(a, ref.get());
+                try temperatures.append(scratch, ref.get());
         };
         defer if (outer.is_temp) {
             var i: usize = 0;
@@ -96,38 +74,9 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
             const v2 = opts.start2 + @as(f64, @floatFromInt(po)) * opts.step2;
             if (t2) |r| r.set(v2) else ckt.setCircuitTemp(@floatCast(v2));
             const block = data[po * n_inner * ncols ..][0 .. n_inner * ncols];
-            try runSerial(ctx, ckt, a, t, opts, n_inner, ncols, block);
+            try runSerial(ctx, ckt, scratch, t, opts, n_inner, ncols, block);
         }
-    } else fill: {
-        // -----------------------------------------------------------------------
-        // GPU batch path: lane pt is sweep value start + pt*step, cold-started and
-        // solved in one launch by sweep/lanes.zig. Only the GPU half is shared —
-        // lanes' serial route is cold-start-only, and dc's is warm-started by
-        // design (that is the point of a sweep), so runSerial below stays dc's own.
-        // ponytail: cold-start-only batch; chunked warm-start is future work —
-        // add when profiling shows serial warm-march dominates a large sweep.
-        // -----------------------------------------------------------------------
-        if (ckt.gpu_hook) |gh| if (gh.solve_batch != null) {
-            const n: usize = ckt.n;
-            const x_lanes = try scratch.alloc(f64, npoints * n);
-            defer scratch.free(x_lanes);
-            const results = try scratch.alloc(converger.Result, npoints);
-            defer scratch.free(results);
-
-            var lane_ctx: LaneCtx = .{ .source = t, .start = opts.start, .step = opts.step };
-            const setup: lanes.LaneSetup = .{ .ctx = &lane_ctx, .apply = LaneCtx.apply, .restore = LaneCtx.restore };
-            const copts = converger.optionsFromTolerances(opts.tol, opts.tol.itl1);
-            if (try lanes.solveLanesGpu(ckt, setup, x_lanes, results, copts)) {
-                for (0..npoints) |pt| {
-                    const row = data[pt * ncols ..][0..ncols];
-                    row[0] = opts.start + @as(f64, @floatFromInt(pt)) * opts.step;
-                    const lane = x_lanes[pt * n ..][0..n];
-                    for (ctx.probes, row[1..]) |node, *out|
-                        out.* = if (results[pt].converged) lane[node] else std.math.nan(f64);
-                }
-                break :fill;
-            }
-        };
+    } else {
         try runSerial(ctx, ckt, scratch, t, opts, npoints, ncols, data);
     }
 
@@ -162,24 +111,6 @@ fn findTarget(refs: []const root.ParamRef, want: Options.SweepTarget) ?root.Para
     }
     return null;
 }
-
-/// solveLanesGpu apply/restore state: lane k installs sweep value
-/// start + k*step on the swept source. `apply` is stateless, so re-running it
-/// from k = 0 after a GPU fallthrough is a no-op difference; `restore` is
-/// empty because run()'s defer owns putting the nominal value back — it has to
-/// cover the serial route and the error paths anyway.
-const LaneCtx = struct {
-    source: root.ParamRef,
-    start: f64,
-    step: f64,
-
-    fn apply(ptr: *anyopaque, k: usize) void {
-        const self: *LaneCtx = @ptrCast(@alignCast(ptr));
-        self.source.set(self.start + @as(f64, @floatFromInt(k)) * self.step);
-    }
-
-    fn restore(_: *anyopaque) void {}
-};
 
 /// Serial sweep: warm-start from previous point, cold-restart on failure.
 fn runSerial(

@@ -44,8 +44,5 @@
     "finite_values_required": true,
     "all_requested_analyses_must_complete": true
   },
-  "netlist_sha256": "e8a4e723e3402d8175789d98f7927a99df97dfdcd828357d08db0e424afb2fef",
-  "known_gaps": [
-    "resistor temperature coefficients are not implemented by the current resistor model"
-  ]
+  "netlist_sha256": "e38aef2dd5153f5020f4c8a8f08e132361269dea835a3b3dfbe076699e6c69ce"
 }

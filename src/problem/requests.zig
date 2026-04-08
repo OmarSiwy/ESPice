@@ -1,4 +1,5 @@
-//! Resolved query descriptions. No parser, driver, or solver imports.
+//! Resolved query descriptions: the analysis contract. Card keywords live in
+//! frontend/netlist.zig `cards`. No parser, driver, or solver imports.
 const std = @import("std");
 const Tolerances = @import("numerics").Tolerances;
 const ir = @import("device_ir");
@@ -372,7 +373,41 @@ pub const Disto = struct {
 
     pub const Plot = enum(u8) { summary, second, third };
 };
-pub const Kind = enum(u8) { ac, dc, dcmatch, disto, envelope, four, hb, matex, mc, noise, op, pac, pnoise, pss, pxf, pz, qpss, sens, sp, stb, temp, tf, tran, tran_noise };
+pub const Kind = enum(u8) {
+    ac,
+    dc,
+    dcmatch,
+    disto,
+    envelope,
+    four,
+    hb,
+    matex,
+    mc,
+    noise,
+    op,
+    pac,
+    pnoise,
+    pss,
+    pxf,
+    pz,
+    qpss,
+    sens,
+    sp,
+    stb,
+    temp,
+    tf,
+    tran,
+    tran_noise,
+
+    /// Runs off a transient operating point (ngspice MODETRANOP) and starts
+    /// its devices in `.ic` rather than `.dc` state.
+    pub fn transient(kind: Kind) bool {
+        return switch (kind) {
+            .tran, .four, .tran_noise, .envelope, .pss, .qpss, .pnoise, .pac, .pxf => true,
+            else => false,
+        };
+    }
+};
 pub const Query = union(Kind) {
     ac: Ac,
     dc: Dc,
@@ -399,33 +434,3 @@ pub const Query = union(Kind) {
     tran: Tran,
     tran_noise: TranNoise,
 };
-
-pub const Keywords = std.StaticStringMap(Kind).initComptime(.{
-    .{ "ac", .ac },
-    .{ "dc", .dc },
-    .{ "dcmatch", .dcmatch },
-    .{ "disto", .disto },
-    .{ "envelope", .envelope },
-    .{ "envlp", .envelope },
-    .{ "four", .four },
-    .{ "hb", .hb },
-    .{ "matex", .matex },
-    .{ "mc", .mc },
-    .{ "montecarlo", .mc },
-    .{ "noise", .noise },
-    .{ "op", .op },
-    .{ "pac", .pac },
-    .{ "pnoise", .pnoise },
-    .{ "pss", .pss },
-    .{ "pxf", .pxf },
-    .{ "pz", .pz },
-    .{ "qpss", .qpss },
-    .{ "sens", .sens },
-    .{ "sp", .sp },
-    .{ "stb", .stb },
-    .{ "temp", .temp },
-    .{ "tf", .tf },
-    .{ "tran", .tran },
-    .{ "trannoise", .tran_noise },
-    .{ "tran_noise", .tran_noise },
-});

@@ -199,8 +199,8 @@ test "dyn vtable: blob init, param set by name, proto add" {
     const nodes = [2]u32{ 1, 2 };
     try vt.proto_add(proto.ctx, testing.allocator, &mblob, &iblob, &nodes).unwrap();
     const store: *ProtoStore(R) = @ptrCast(@alignCast(proto.ctx));
-    try testing.expectEqual(@as(usize, 1), store.models.items.len);
-    try testing.expectEqual(@as(f32, 42), store.models.items[0].r);
+    try testing.expectEqual(@as(usize, 1), store.rows.len);
+    try testing.expectEqual(@as(f32, 42), store.rows.items(.model)[0].r);
     proto.destroy(proto.ctx, testing.allocator);
 }
 

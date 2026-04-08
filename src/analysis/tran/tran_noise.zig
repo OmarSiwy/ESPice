@@ -9,19 +9,12 @@ const root = @import("../types.zig");
 // ponytail: the shared copy owns SIMD setup; seeded noise sampling stays scalar.
 const simdCopy = root.copySimd;
 const converger = @import("solvers").converger;
+const integrator = @import("integrator.zig");
 
 pub const NoiseSource = root.NoiseSource;
 
 pub const Options = @import("requests").TranNoise;
-
-/// simulate() output. `rows` is the full allocation (caller frees); the
-/// recorded samples are rows[0 .. npoints * (probes.len + 1)], point-major:
-/// (time, v(probe0), v(probe1), ...) per row — already Result data layout.
-pub const SimResult = struct {
-    completed: bool,
-    npoints: u32,
-    rows: []f64,
-};
+const Waveform = @import("types.zig").Waveform;
 
 // ============================================================================
 // Xorshift64 PRNG
@@ -57,26 +50,6 @@ const Xorshift64 = struct {
 };
 
 // ============================================================================
-// Flat waveform recorder (no ArrayList): point-major rows, doubling fallback
-// ============================================================================
-
-const Recorder = struct {
-    rows: []f64,
-    ncols: usize,
-    n_rows: usize,
-
-    fn record(self: *Recorder, gpa: std.mem.Allocator, t: f64, x: []const f64, probes: []const u32) !void {
-        if ((self.n_rows + 1) * self.ncols > self.rows.len)
-            // ponytail: doubling fallback for walks past the size heuristic
-            self.rows = try gpa.realloc(self.rows, self.rows.len * 2);
-        const row = self.rows[self.n_rows * self.ncols ..][0..self.ncols];
-        row[0] = t;
-        for (probes, row[1..]) |node, *out| out.* = x[node];
-        self.n_rows += 1;
-    }
-};
-
-// ============================================================================
 // Transient noise simulation
 // ============================================================================
 
@@ -96,8 +69,8 @@ const NoiseHook = struct {
     pub fn assemble(self: NoiseHook, ckt: *root.Circuit, x: []const f64, t: f64) void {
         ckt.eval(x, t);
         if (self.has_charge) {
-            for (0..ckt.n) |i|
-                ckt.rhs[i] += self.alpha * (ckt.q_vec[i] - self.q_prev[i]);
+            const n: usize = ckt.n;
+            integrator.companionAt(.backward_euler, true, ckt.rhs[0..n], ckt.q_vec[0..n], self.q_prev[0..n], &.{}, &.{}, .{ .ag0 = self.alpha, .ag2 = 0 });
         }
         for (self.noise_currents, 0..) |i_n, s| {
             const node_p = self.inj_nodes[2 * s];
@@ -119,14 +92,17 @@ const NoiseHook = struct {
     }
 };
 
+/// Integrate from x, recording accepted points into `waveform`. Returns
+/// whether it reached t_stop (false: dt fell below dt_min).
 pub fn simulate(
     ckt: *root.Circuit,
     x: []f64,
     probes: []const u32,
     noise_sources: []const NoiseSource,
+    waveform: *Waveform,
     options: Options,
     allocator: std.mem.Allocator,
-) !SimResult {
+) !bool {
     const n: usize = ckt.n;
     const has_charge = ckt.has_charge;
 
@@ -164,12 +140,9 @@ pub fn simulate(
     // local error, so the step only shrinks on Newton failure).
     var a_vals: []f64 = &.{};
     var q_prev: []f64 = &.{};
-    defer if (has_charge) {
-        allocator.free(a_vals);
-        allocator.free(q_prev);
-    };
+    defer if (has_charge) allocator.free(q_prev);
     if (has_charge) {
-        a_vals = try allocator.alloc(f64, ckt.nnz);
+        a_vals = try ws.ensureAVals(ckt.nnz);
         q_prev = try allocator.alloc(f64, n);
         ckt.eval(x, 0);
         simdCopy(q_prev, ckt.q_vec[0..n]);
@@ -177,23 +150,7 @@ pub fn simulate(
 
     var rng = Xorshift64.init(options.seed);
 
-    // ponytail: waveform capacity heuristic. dt starts at dt_init and only
-    // grows (x1.5 up to dt_max) on an accepted step, so a run with no Newton
-    // failures records at most t_stop/dt_init + 1 rows — the old 16x
-    // prefactor reserved 16 buffers of slack (with many probes that is the
-    // peak). 2x keeps headroom for the dt_min tail; only repeated Newton
-    // failure drives dt below dt_init, and Recorder.record doubles for that.
-    const est_rows = 2.0 * options.t_stop / options.dt_init;
-    const cap_rows: usize = @intFromFloat(@min(@max(1024.0, est_rows), @as(f64, 1 << 22)));
-    const ncols = probes.len + 1;
-    var rec = Recorder{
-        .rows = try allocator.alloc(f64, cap_rows * ncols),
-        .ncols = ncols,
-        .n_rows = 0,
-    };
-    errdefer allocator.free(rec.rows);
-
-    try rec.record(allocator, 0, x, probes);
+    try waveform.record(0, x, probes);
 
     var t: f64 = 0;
     var dt: f64 = options.dt_init;
@@ -235,9 +192,7 @@ pub fn simulate(
 
         if (!nr.converged) {
             dt *= 0.5;
-            if (dt < options.dt_min) {
-                return .{ .completed = false, .npoints = @intCast(rec.n_rows), .rows = rec.rows };
-            }
+            if (dt < options.dt_min) return false;
             continue;
         }
 
@@ -251,27 +206,22 @@ pub fn simulate(
         t += dt;
         steps += 1;
 
-        try rec.record(allocator, t, x, probes);
+        try waveform.record(t, x, probes);
 
         dt = @min(dt * 1.5, options.dt_max);
         if (t + dt > options.t_stop) dt = options.t_stop - t;
     }
 
-    return .{
-        .completed = t >= options.t_stop,
-        .npoints = @intCast(rec.n_rows),
-        .rows = rec.rows,
-    };
+    return t >= options.t_stop;
 }
 
 /// Contract entry: device-generated sources from collectNoiseSources, BE transient with
 /// per-step noise injection. Data layout: point-major (time, probes...).
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
-    const x_op = ctx.x_op orelse return error.NoOperatingPoint;
-    // `defer`-freed == scratch; `a` is a results arena. `simulate` keeps `a`:
-    // its `st.rows` is realloc'd into Result.data below, so it is NOT scratch.
-    const scratch = ctx.scratch_allocator orelse a;
+    const x_op = ctx.x_op;
+    // `defer`-freed == scratch; `a` is a results arena.
+    const scratch = ctx.scratch_allocator;
     const x = try scratch.alloc(f64, x_op.len);
     defer scratch.free(x);
     simdCopy(x, x_op);
@@ -279,22 +229,25 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const srcs = try ctx.circuit.collectNoiseSources(x_op, scratch);
     defer scratch.free(srcs);
 
-    const st = try simulate(ctx.circuit, x, ctx.probes, srcs, opts, a);
+    // ponytail: waveform capacity heuristic. dt starts at dt_init and only
+    // grows (x1.5 up to dt_max) on an accepted step, so a run with no Newton
+    // failures records at most t_stop/dt_init + 1 rows. 2x keeps headroom for
+    // the dt_min tail; only repeated Newton failure drives dt below dt_init,
+    // and the waveform doubles for that.
+    const est_rows = 2.0 * opts.t_stop / opts.dt_init;
+    var wf = try Waveform.init(scratch, @intCast(ctx.probes.len), @intFromFloat(@min(@max(1024.0, est_rows), @as(f64, 1 << 22))));
+    defer wf.deinit();
+    const completed = try simulate(ctx.circuit, x, ctx.probes, srcs, &wf, opts, scratch);
 
-    // shrink to exact size: freeable Result.data, doubling slack returned
-    const ncols = ctx.probes.len + 1;
-    const data = a.realloc(st.rows, @as(usize, st.npoints) * ncols) catch |err| {
-        a.free(st.rows);
-        return err;
-    };
+    const data = try wf.toRows(a, ctx.probes.len + 1);
     errdefer a.free(data);
     const names = try root.probeNames(ctx, "time");
     return .{
         // Early stop surfaced in the plotname — run() stays pure.
-        .plotname = if (st.completed) "Transient Noise Analysis" else "Transient Noise Analysis (stopped early)",
+        .plotname = if (completed) "Transient Noise Analysis" else "Transient Noise Analysis (stopped early)",
         .varnames = names,
         .is_complex = false,
-        .npoints = st.npoints,
+        .npoints = wf.len,
         .data = data,
     };
 }

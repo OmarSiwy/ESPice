@@ -159,8 +159,5 @@
     "finite_values_required": true,
     "all_requested_analyses_must_complete": true
   },
-  "netlist_sha256": "4652e7ddb9015251b45fbaefc776235d2c2bfcf20da243c8fdf5f57ee41d7e78",
-  "known_gaps": [
-    "STB dispatch is rejected and does not yet implement the specified return-ratio measurement"
-  ]
+  "netlist_sha256": "6e9e95461e0d71f575bd076c81df94ca4786a68386d01997455887ef75c29bd9"
 }

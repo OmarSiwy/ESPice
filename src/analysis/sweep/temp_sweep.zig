@@ -21,13 +21,11 @@ const LaneCtx = struct {
     t_step: f64,
     t_nom: f64,
 
-    fn apply(ptr: *anyopaque, k: usize) void {
-        const self: *LaneCtx = @ptrCast(@alignCast(ptr));
+    pub fn apply(self: *LaneCtx, k: usize) void {
         self.ckt.setCircuitTemp(@floatCast(self.t_start + @as(f64, @floatFromInt(k)) * self.t_step));
     }
 
-    fn restore(ptr: *anyopaque) void {
-        const self: *LaneCtx = @ptrCast(@alignCast(ptr));
+    pub fn restore(self: *LaneCtx) void {
         self.ckt.setCircuitTemp(@floatCast(self.t_nom));
     }
 };
@@ -42,22 +40,21 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const max_points: usize = numPoints(opts);
     const ncols = ctx.probes.len + 1;
 
-    // Structural sweep lanes: lane k is temperature t_start + k*t_step, batched
-    // on GPU or serial. No external coeffs on this path — device-internal temp
-    // physics only, installed via setCircuitTemp.
+    // Structural sweep lanes: lane k is temperature t_start + k*t_step. No
+    // external coeffs on this path — device-internal temp physics only,
+    // installed via setCircuitTemp.
     const n: usize = ckt.n;
     // `defer`-freed == scratch; `a` is a results arena. See
     // RunCtx.scratch_allocator.
-    const scratch = ctx.scratch_allocator orelse a;
+    const scratch = ctx.scratch_allocator;
     const x_lanes = try scratch.alloc(f64, max_points * n);
     defer scratch.free(x_lanes);
     const results = try scratch.alloc(converger.Result, max_points);
     defer scratch.free(results);
 
     var lane_ctx: LaneCtx = .{ .ckt = ckt, .t_start = opts.t_start, .t_step = opts.t_step, .t_nom = opts.t_nom };
-    const setup: lanes.LaneSetup = .{ .ctx = &lane_ctx, .apply = LaneCtx.apply, .restore = LaneCtx.restore };
     const nopts = converger.optionsFromTolerances(opts.dc_options.tol, opts.dc_options.tol.itl2);
-    try lanes.solveLanes(ckt, setup, x_lanes, results, nopts);
+    try lanes.solveLanes(ckt, &lane_ctx, x_lanes, results, nopts);
 
     // Collect converged points, point-major (temp, probes...).
     var npoints: usize = 0;

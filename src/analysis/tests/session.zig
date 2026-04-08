@@ -1,9 +1,8 @@
-const impl = @import("../session.zig");
 const Prepared = @import("problem_types").Prepared;
 const requests = @import("requests");
 const std = @import("std");
-const validate = impl.validate;
-const validatePrepared = impl.validatePrepared;
+const validate = @import("../validate.zig").validate;
+const validatePrepared = @import("../validate.zig").validatePrepared;
 
 test "query boundary rejects nonfinite values and nonterminating sweeps" {
     const t = std.testing;

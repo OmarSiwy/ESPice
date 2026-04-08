@@ -36,8 +36,5 @@
     "finite_values_required": true,
     "all_requested_analyses_must_complete": true
   },
-  "netlist_sha256": "049e2271eb6a75a1b9c76b890eeff6fc51dbdf38feb1afdeff2cb819ab9531dc",
-  "known_gaps": [
-    "current-input/current-output or differential-output TF is not yet fully resolved"
-  ]
+  "netlist_sha256": "481c460185a84d72bce341fbdba0f83167cb8ecba020b676079cd727280a6e34"
 }

@@ -21,16 +21,13 @@
 //! The inner integration is fixed-step trapezoidal (n_samples steps per
 //! period), so every buffer size is known up front: one scratch arena for
 //! the whole shooting continuation, zero growth.
-//!
-//! GPU acceleration: when ckt.gpu_hook.simulate_tran is available, each
-//! period integration dispatches to the GPU transient megakernel, bypassing
-//! per-step host round-trips. Falls back to CPU on any error.
 const std = @import("std");
 const root = @import("../types.zig");
 const simdZero = root.zeroSimd;
 const simdCopy = root.copySimd;
-const tran = @import("../tran/tran.zig");
+const num = @import("numerics");
 const converger = @import("solvers").converger;
+const integrator = @import("../tran/integrator.zig");
 const dense_lu = @import("solvers").dense_lu;
 const Gmres = @import("solvers").gmres.Gmres(f64);
 
@@ -48,66 +45,6 @@ pub const SolveResult = struct {
     iterations: u16,
     residual_norm: f64,
 };
-
-// ---------------------------------------------------------------------------
-// SIMD arithmetic helpers
-// ---------------------------------------------------------------------------
-
-/// dst[i] = a[i] + b[i], SIMD.
-inline fn simdAdd(dst: []f64, a: []const f64, b: []const f64) void {
-    const n = @min(dst.len, @min(a.len, b.len));
-    var i: usize = 0;
-    while (i + W <= n) : (i += W) {
-        const va: V = a[i..][0..W].*;
-        const vb: V = b[i..][0..W].*;
-        dst[i..][0..W].* = va + vb;
-    }
-    while (i < n) : (i += 1) dst[i] = a[i] + b[i];
-}
-
-/// dst[i] = a[i] - b[i], SIMD.
-inline fn simdSub(dst: []f64, a: []const f64, b: []const f64) void {
-    const n = @min(dst.len, @min(a.len, b.len));
-    var i: usize = 0;
-    while (i + W <= n) : (i += W) {
-        const va: V = a[i..][0..W].*;
-        const vb: V = b[i..][0..W].*;
-        dst[i..][0..W].* = va - vb;
-    }
-    while (i < n) : (i += 1) dst[i] = a[i] - b[i];
-}
-
-/// dst[i] += scale * src[i], SIMD.
-inline fn simdAxpy(dst: []f64, scale: f64, src: []const f64) void {
-    const n = @min(dst.len, src.len);
-    const sv: V = @splat(scale);
-    var i: usize = 0;
-    while (i + W <= n) : (i += W) {
-        const d: V = dst[i..][0..W].*;
-        const s: V = src[i..][0..W].*;
-        dst[i..][0..W].* = d + sv * s;
-    }
-    while (i < n) : (i += 1) dst[i] += scale * src[i];
-}
-
-/// dst[i] = scale * src[i], SIMD.
-inline fn simdScale(dst: []f64, scale: f64, src: []const f64) void {
-    const n = @min(dst.len, src.len);
-    const sv: V = @splat(scale);
-    var i: usize = 0;
-    while (i + W <= n) : (i += W) {
-        const s: V = src[i..][0..W].*;
-        dst[i..][0..W].* = sv * s;
-    }
-    while (i < n) : (i += 1) dst[i] = scale * src[i];
-}
-
-/// ||v||_inf
-pub inline fn normInf(buf: []const f64) f64 {
-    var mx: f64 = 0;
-    for (buf) |v| mx = @max(mx, @abs(v));
-    return mx;
-}
 
 // ---------------------------------------------------------------------------
 // Trapezoidal companion state, reused across every Newton/shooting pass
@@ -137,17 +74,7 @@ const PeriodHook = struct {
             const n: usize = ckt.n;
             // q_vec now holds q(x) for this iteration — snapshot for accept.
             simdCopy(self.q_snap[0..n], ckt.q_vec[0..n]);
-            const av: V = @splat(self.alpha);
-            var i: usize = 0;
-            while (i + W <= n) : (i += W) {
-                const r: V = ckt.rhs[i..][0..W].*;
-                const qv: V = ckt.q_vec[i..][0..W].*;
-                const qp: V = self.q_prev[i..][0..W].*;
-                const ip: V = self.i_prev[i..][0..W].*;
-                ckt.rhs[i..][0..W].* = r + av * (qv - qp) - ip;
-            }
-            while (i < n) : (i += 1)
-                ckt.rhs[i] += self.alpha * (ckt.q_vec[i] - self.q_prev[i]) - self.i_prev[i];
+            integrator.companionAt(.trapezoidal, true, ckt.rhs[0..n], ckt.q_vec[0..n], self.q_prev[0..n], &.{}, self.i_prev[0..n], .{ .ag0 = self.alpha, .ag2 = 0 });
         }
     }
 
@@ -223,19 +150,8 @@ fn integrateOnePeriod(
         if (has_charge) {
             // Accept: trap dynamic current i = alpha*(q - q_prev) - i_prev,
             // then rotate the charge history via copy (no std.mem.swap).
-            const av: V = @splat(alpha);
-            var j: usize = 0;
-            while (j + W <= n) : (j += W) {
-                const q0: V = sc.q_cur[j..][0..W].*;
-                const q1: V = sc.q_prev[j..][0..W].*;
-                const ip: V = sc.i_prev[j..][0..W].*;
-                sc.i_prev[j..][0..W].* = av * (q0 - q1) - ip;
-                sc.q_prev[j..][0..W].* = q0;
-            }
-            while (j < n) : (j += 1) {
-                sc.i_prev[j] = alpha * (sc.q_cur[j] - sc.q_prev[j]) - sc.i_prev[j];
-                sc.q_prev[j] = sc.q_cur[j];
-            }
+            integrator.companionAt(.trapezoidal, false, sc.i_prev[0..n], sc.q_cur[0..n], sc.q_prev[0..n], &.{}, sc.i_prev[0..n], .{ .ag0 = alpha, .ag2 = 0 });
+            simdCopy(sc.q_prev[0..n], sc.q_cur[0..n]);
         }
         if (wave.len != 0) {
             const row = wave[(k + 1) * ncols ..][0..ncols];
@@ -246,41 +162,7 @@ fn integrateOnePeriod(
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// GPU period integration — uses simulate_tran for the whole period as one
-// chunked transient, bypassing per-step host round-trips.
-// ---------------------------------------------------------------------------
-
-/// Try to integrate one period on GPU via simulate_tran. Returns true if GPU
-/// succeeded and x now holds x(T). Returns false if GPU is unavailable or
-/// errored — caller should fall back to CPU integrateOnePeriod.
-/// ponytail: minimal waveform (capacity 1, 0 probes) — we only need x(T).
-fn gpuIntegrateOnePeriod(
-    ckt: *root.Circuit,
-    x: []f64,
-    options: Options,
-    allocator: std.mem.Allocator,
-) bool {
-    const gh = ckt.gpu_hook orelse return false;
-    const gt = gh.simulate_tran orelse return false;
-
-    var wf = tran.Waveform.init(allocator, 0, 1) catch return false;
-    defer wf.deinit();
-
-    const tran_opts = tran.Options{
-        .tol = options.tol,
-        .t_stop = options.period,
-        .dt_init = options.period / @as(f64, @floatFromInt(options.n_samples)),
-        .method = .trapezoidal,
-        .max_steps = @as(u32, options.n_samples) * 4, // ponytail: headroom for adaptive dt
-    };
-
-    const result = gt(gh.ctx, x, &.{}, &wf, tran_opts) catch return false;
-    return result.completed;
-}
-
-/// Integrate a shooting trial, restoring the IC before CPU fallback because a
-/// failed GPU attempt may already have changed x_end.
+/// Integrate one period from x0 into x_end (x0 is left untouched).
 inline fn integrateFrom(
     ckt: *root.Circuit,
     ws: *converger.Workspace,
@@ -288,10 +170,7 @@ inline fn integrateFrom(
     x0: []const f64,
     x_end: []f64,
     options: Options,
-    allocator: std.mem.Allocator,
 ) bool {
-    simdCopy(x_end, x0);
-    if (gpuIntegrateOnePeriod(ckt, x_end, options, allocator)) return true;
     simdCopy(x_end, x0);
     return integrateOnePeriod(ckt, ws, sc, x_end, &.{}, &.{}, options);
 }
@@ -312,7 +191,6 @@ const ShootingKrylovCtx = struct {
     x_end_pert: []f64, // scratch: perturbed endpoint (n)
     options: Options,
     n: usize,
-    allocator: std.mem.Allocator,
 };
 
 /// GMRES matvec: w = (Phi - I) * v via one FD period integration.
@@ -327,9 +205,9 @@ fn shootingMatvec(v: []const f64, w: []f64, ctx_ptr: *anyopaque) void {
     const inv_eps = 1.0 / ctx.options.fd_epsilon;
 
     simdCopy(ctx.x_pert[0..n], ctx.x0[0..n]);
-    simdAxpy(ctx.x_pert[0..n], ctx.options.fd_epsilon, v[0..n]);
+    num.axpy(ctx.x_pert[0..n], ctx.options.fd_epsilon, v[0..n]);
 
-    const ok = integrateFrom(ctx.ckt, ctx.ws, ctx.sc, ctx.x_pert, ctx.x_end_pert, ctx.options, ctx.allocator);
+    const ok = integrateFrom(ctx.ckt, ctx.ws, ctx.sc, ctx.x_pert, ctx.x_end_pert, ctx.options);
 
     if (!ok) {
         // ponytail: perturbed integration failed — return zero vector so
@@ -369,7 +247,6 @@ fn denseFdSolve(
     dx0: []f64,
     j_phi: []f64,
     options: Options,
-    allocator: std.mem.Allocator,
 ) !void {
     const eps = options.fd_epsilon;
     const inv_eps = 1.0 / eps;
@@ -378,7 +255,7 @@ fn denseFdSolve(
         simdCopy(x0_pert[0..n], x0[0..n]);
         x0_pert[j] += eps;
 
-        const ok = integrateFrom(ckt, ws, sc, x0_pert, x_end_pert, options, allocator);
+        const ok = integrateFrom(ckt, ws, sc, x0_pert, x_end_pert, options);
 
         if (!ok) {
             // If perturbed integration fails, use identity column as fallback
@@ -428,9 +305,8 @@ fn krylovSolve(
     neg_phi: []f64,
     krylov: *Gmres,
     options: Options,
-    allocator: std.mem.Allocator,
 ) void {
-    simdScale(neg_phi[0..n], -1.0, phi[0..n]);
+    num.scale(neg_phi[0..n], -1.0, phi[0..n]);
 
     var ctx = ShootingKrylovCtx{
         .ckt = ckt,
@@ -442,7 +318,6 @@ fn krylovSolve(
         .x_end_pert = x_end_pert,
         .options = options,
         .n = n,
-        .allocator = allocator,
     };
 
     simdZero(dx0[0..n]);
@@ -535,7 +410,7 @@ pub fn solve(
 
     while (iter < options.max_shooting_iter) : (iter += 1) {
         if (iter != 0) try ckt.checkpoint(.{ .phase = .periodic, .completed = iter });
-        const period_ok = integrateFrom(ckt, ws, &sc, x0, x_end, options, allocator);
+        const period_ok = integrateFrom(ckt, ws, &sc, x0, x_end, options);
 
         if (!period_ok) {
             return .{
@@ -545,9 +420,11 @@ pub fn solve(
             };
         }
 
-        simdSub(phi, x_end, x0);
+        // x_end + (−1)·x0 is x_end − x0 exactly: IEEE defines a − b as a + (−b).
+        simdCopy(phi, x_end);
+        num.axpy(phi, -1.0, x0);
 
-        res_norm = normInf(phi);
+        res_norm = num.normInf(phi);
         if (res_norm < options.shooting_tol) break;
 
         // Solve (Phi - I) * dx0 = -phi
@@ -567,7 +444,6 @@ pub fn solve(
                 neg_phi,
                 &krylov.?,
                 options,
-                allocator,
             );
         } else {
             try denseFdSolve(
@@ -582,11 +458,10 @@ pub fn solve(
                 dx0,
                 j_phi,
                 options,
-                allocator,
             );
         }
 
-        simdAdd(x0, x0, dx0);
+        num.axpy(x0, 1.0, dx0); // 1·dx0 is exact
     }
 
     // Record the final periodic waveform from the converged x0.
@@ -604,7 +479,7 @@ pub fn solve(
 /// Data layout: point-major rows (time, probes...), n_samples+1 rows.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
-    const x_op = ctx.x_op orelse return error.NoOperatingPoint;
+    const x_op = ctx.x_op;
 
     const names = try root.probeNames(ctx, "time");
     errdefer {
@@ -619,7 +494,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     // `solve` writes the caller's `data` and frees everything else it takes;
     // `a` is a results arena that cannot reclaim it. See
     // RunCtx.scratch_allocator.
-    const res = try solve(ctx.circuit, x_op, ctx.probes, data, opts, ctx.scratch_allocator orelse a);
+    const res = try solve(ctx.circuit, x_op, ctx.probes, data, opts, ctx.scratch_allocator);
     if (!res.converged)
         std.debug.print("Warning: pss: shooting did not converge (residual {e})\n", .{res.residual_norm});
 
@@ -634,13 +509,8 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
 // Private implementation access for the analysis test suite.
 pub const test_access = if (@import("builtin").is_test) .{
-    .gpuIntegrateOnePeriod = gpuIntegrateOnePeriod,
     .krylov_threshold = krylov_threshold,
     .shootingMatvec = shootingMatvec,
-    .simdAdd = simdAdd,
-    .simdAxpy = simdAxpy,
     .simdCopy = simdCopy,
-    .simdScale = simdScale,
-    .simdSub = simdSub,
     .simdZero = simdZero,
 } else {};

@@ -291,16 +291,9 @@ fn transientOp(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, options: 
     return .{ .converged = false, .iterations = 0, .max_dx = 0, .method_used = .source };
 }
 
-/// Contract entry: solve (or reuse ctx.x_op) and format one point per probe.
-pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
-    const x = ctx.x_op orelse blk: {
-        const x = try ctx.allocator.alloc(f64, ctx.circuit.n);
-        errdefer ctx.allocator.free(x);
-        const r = try solve(ctx.circuit, x, opts);
-        if (!r.converged) return error.OpDidNotConverge;
-        break :blk x;
-    };
-    defer if (ctx.x_op == null) ctx.allocator.free(x);
+/// Contract entry: format the executor's solved ctx.x_op, one point per probe.
+pub fn run(ctx: *const root.RunCtx, _: Options) !root.Result {
+    const x = ctx.x_op;
     const names = try root.probeNames(ctx, null);
     errdefer {
         for (names) |s| ctx.allocator.free(s); // no scale literal: all allocated

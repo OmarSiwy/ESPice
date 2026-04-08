@@ -1,6 +1,4 @@
 A paralled resistor array
-* KNOWN GAP: nonzero transient output-start time is rejected by the dispatcher.
-* This correctness test should currently fail; implement support to match the expected output.
 * Expected results: bench_ngspice_res_array.expected.json
 * Origin: benchmark/fixtures/ngspice/res_array/circuit.sp
 
