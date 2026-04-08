@@ -70,12 +70,19 @@ fails — but it means the plot schema was never anyone's deliberate choice.
 FIRST cause. Fix recipes for F1, F4, F5, F8, F10, F11 and E6 are in
 `docs/conformance-phase2.md`.
 
-- [ ] **F1 — first transient step differs from ngspice dctran.** 6 decks:
-  `tran/bench_medium_rc_ladder_50`, `tran/bench_ngspice_mosamp`,
-  `tran/bench_power_buck_open` (breakpoint clamp drops the `firsttime` /10),
-  `multi_analysis/bench_ngspice_res_array`, `tran/bench_tline_delay_line`,
-  `tran/bench_tline_cpl_ibm2` (charge-free circuits skip the first-step dt
-  repeat).
+- [~] **F1 — first transient step differs from ngspice dctran.** FIXED the
+  step (phase 2b), 3 of 6 decks pass. `tran.zig` keeps the `firsttime` /10
+  after the t = 0 breakpoint clamp (dctran.c:578-586), and every circuit,
+  charge or not, repeats the first accepted dt (no CKTtrunc on the first
+  point). First steps now equal ngspice's on all six decks.
+  Pass: `tran/bench_medium_rc_ladder_50`, `tran/bench_power_buck_open`,
+  `multi_analysis/bench_ngspice_res_array`. Still failing on a later cause:
+  `tran/bench_tline_cpl_ibm2` (8.2e3x -> 2.2e3x), `tran/bench_tline_delay_line`
+  (111x, unchanged), `tran/bench_ngspice_mosamp` (198 points against
+  ngspice's 2316; 2.9e4x -> 2.6e5x, the grid start is right and the gap is
+  the later LTE behaviour, group 14). The `four/*` decks move 0.33x -> 0.34x
+  of tolerance on a grid that is now ngspice's point for point; their
+  residual is the `.four` interpolation, not the grid.
 - [x] **F2 — DC sweep axis: ngspice accumulates the step.** FIXED (phase
   2b): `dc.zig` accumulates `v += step` at both sweep levels like
   dctrcurv.c:469, and `temp_sweep.numPoints` takes the same 1e-6-step
