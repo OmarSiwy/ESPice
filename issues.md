@@ -76,11 +76,14 @@ FIRST cause. Fix recipes for F1, F4, F5, F8, F10, F11 and E6 are in
   `multi_analysis/bench_ngspice_res_array`, `tran/bench_tline_delay_line`,
   `tran/bench_tline_cpl_ibm2` (charge-free circuits skip the first-step dt
   repeat).
-- [ ] **F2 — DC sweep axis: ngspice accumulates the step.** ngspice adds `step`
-  (`v += step`, row 400 = 1.4975e-13) where we compute `start + k*step`,
-  and the axis atol is 1e-15. 3 decks: `dc/device_mesfet_transfer`,
-  `dc/device_mesfet_subthreshold`, `dc/device_diode_breakdown`.
-  `dc.zig:123/178/209`.
+- [x] **F2 — DC sweep axis: ngspice accumulates the step.** FIXED (phase
+  2b): `dc.zig` accumulates `v += step` at both sweep levels like
+  dctrcurv.c:469, and `temp_sweep.numPoints` takes the same 1e-6-step
+  endpoint nudge as `sweepCount`. `dc/device_mesfet_transfer`,
+  `dc/device_mesfet_subthreshold`, `dc/device_diode_breakdown` pass. The
+  analytic-oracle axes (`dc/diode_reverse`, `diode_reverse_continuation`)
+  move by the accumulated roundoff (0.28x / 0.14x of the 1e-15 atol, still
+  passing): the axis now carries ngspice's bits, not start+k*step.
 - [ ] **F3 — B-source.** See C1. `four/polynomial_2`, `four/polynomial_3`,
   `convergence/monotonic_cubic_1`, `convergence/monotonic_cubic_1000`.
 - [ ] **F4 — VBIC.** 4 decks. `dc/device_vbic_temp`,
