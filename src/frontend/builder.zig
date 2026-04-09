@@ -1166,7 +1166,15 @@ pub const NetBuilder = struct {
         switch (try resolveDeviceId(letter, dev)) {
             inline else => |comptime_id| {
                 const D = devices.DeviceId.Type(comptime_id);
+                const first = self.b.n;
                 try addSingleDevice(self, D, dev);
+                // ngspice's VBIC `i(q1)` is its excess-phase branch, made only
+                // when TD > 0 (vbicsetup.c:510-525). Node xf2 carries only a
+                // 1 ohm load, so that current IS v(xf2): alias the column.
+                if (comptime_id == .vbic13_4t) {
+                    const td = kvNumber(dev.kv, "td") orelse if (dev.model) |m| kvNumber(m.kv, "td") orelse 0 else 0;
+                    if (td > 0) try self.addBranchProbe(dev.name, internalRow(D, "xf2", first));
+                }
             },
         }
     }
@@ -1404,6 +1412,13 @@ fn addSingleDevice(self: *NetBuilder, comptime D: type, dev: Device) !void {
     if (comptime !@hasDecl(D, "eval")) return error.UnsupportedDevice;
     var model: D.Model = .{};
     var instance: D.Instance = .{};
+    // VBIC: a card without the fifth (thermal) node has it tied to ground in
+    // ngspice (inp2q.c:85-87), so dT = 0 whatever RTH says. Our `dt` is an
+    // internal node, so self-heating is off unless the card names it; an
+    // explicit SW_ET on the card still wins through applyKv below.
+    if (comptime @hasField(D.Model, "sw_et")) {
+        if (dev.pins.len < 5) model.sw_et = 0;
+    }
     if (dev.model) |m| {
         try applyKv(&model, m.kv);
         // TXL (y-card) model cards spell the line length `length=`;
