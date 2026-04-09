@@ -151,11 +151,14 @@ pub fn simulate(
             }
         }
 
+        // RMS by trapezoid weights over the window: half weight on each
+        // endpoint. Counting both endpoints in full (65 samples over 64
+        // steps) read a sine sqrt(64/65) low.
         for (probes, 0..) |node, p| {
             peak[p] = @abs(x[node]);
-            sum_sq[p] = x[node] * x[node];
+            sum_sq[p] = 0.5 * x[node] * x[node];
         }
-        var n_samples: u32 = 1;
+        var n_steps: u32 = 0;
 
         var t_inner: f64 = 0;
         const fine_duration = t_target - t_fine_start;
@@ -169,7 +172,7 @@ pub fn simulate(
             }
 
             t_inner += dt_inner;
-            n_samples += 1;
+            n_steps += 1;
 
             for (probes, 0..) |node, p| {
                 const v = x[node];
@@ -193,8 +196,8 @@ pub fn simulate(
         row[0] = t;
 
         var max_rel_change: f64 = 0;
-        for (0..probes.len) |p| {
-            const rms = @sqrt(sum_sq[p] / @as(f64, @floatFromInt(n_samples)));
+        for (probes, 0..) |node, p| {
+            const rms = @sqrt(@max(sum_sq[p] - 0.5 * x[node] * x[node], 0) / @as(f64, @floatFromInt(n_steps)));
 
             row[1 + 2 * p] = peak[p];
             row[2 + 2 * p] = rms;
@@ -262,21 +265,14 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const st = try simulate(ctx.circuit, x, ctx.probes, data, opts, scratch);
     if (!st.completed) return error.EnvelopeDidNotConverge;
 
+    // probeNames prefers the deck's probe labels: a branch-current row has
+    // no node name, and naming by node published `i(vin)` as `v(2)`.
+    const labels = try root.probeNames(ctx, null);
     const names = try a.alloc([]const u8, ncols);
-    errdefer a.free(names);
     names[0] = "time";
-    var done: usize = 0; // allocated entries after the "time" literal
-    errdefer for (names[1..][0..done]) |s| a.free(s);
-    for (ctx.probes, 0..) |node, p| {
-        const label = ctx.circuit.nodeName(node);
-        // Row index when unlabeled: two unnamed rows sharing "?" would emit
-        // the same column name twice. See analysis/types.zig probeNames.
-        var idx_buf: [16]u8 = undefined;
-        const l = if (label.len == 0) std.fmt.bufPrint(&idx_buf, "{d}", .{node}) catch "?" else label;
-        names[1 + p * 2] = try std.fmt.allocPrint(a, "peak(v({s}))", .{l});
-        done += 1;
-        names[2 + p * 2] = try std.fmt.allocPrint(a, "rms(v({s}))", .{l});
-        done += 1;
+    for (labels, 0..) |l, p| {
+        names[1 + p * 2] = try std.fmt.allocPrint(a, "peak({s})", .{l});
+        names[2 + p * 2] = try std.fmt.allocPrint(a, "rms({s})", .{l});
     }
 
     const npoints: usize = st.n_points;
