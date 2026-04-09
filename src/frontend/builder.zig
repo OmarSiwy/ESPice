@@ -1449,7 +1449,13 @@ fn addBsource(self: *NetBuilder, dev: Device) !bool {
             .expr => |span| {
                 const ops = self.nl.exprOps(span);
                 ctrl_probe = extractVoltageProbe(ops);
-                extractPolyCoeffs(ops, self.nl.consts, &model);
+                // Trust boundary: an expression outside the subset used to
+                // compile to all-zero coefficients, a silent open circuit.
+                if (!extractPolyCoeffs(ops, self.nl.consts, &model)) {
+                    // (The test runner fails any test that logs an error.)
+                    if (!@import("builtin").is_test) std.log.err("B-source '{s}': the {s}= expression is outside the supported subset (a polynomial of degree <= 3 in one V(p[,n]) pair, integer powers via ^, ** or pow(), times at most one tanh(k*V) factor)", .{ dev.name, item.key });
+                    return error.UnsupportedBsourceExpression;
+                }
             },
             else => return error.UnresolvedParameter,
         }
@@ -1488,26 +1494,32 @@ fn operand(ops: []const Op, end: usize, i: usize) usize {
     return expr.operands(ops, end, &buf)[i];
 }
 
-fn extractPolyCoeffs(ops: []const Op, consts: []const f64, model: *devices.bsource.Model) void {
-    const root = ops.len - 1;
-    var c: [3]f64 = .{ 0, 0, 0 };
-    if (!collectTerms(ops, consts, root, 1.0, &c)) return;
+fn extractPolyCoeffs(ops: []const Op, consts: []const f64, model: *devices.bsource.Model) bool {
+    // Every V() probe must name the one control pair the model reads.
+    const pair = extractVoltageProbe(ops) orelse Probe{ .p = netlist.none, .n = netlist.none };
+    for (ops) |op| switch (op.code) {
+        .vprobe => if (op.a == netlist.none or op.a != pair.p or op.b != pair.n) return false,
+        .ident, .iprobe => return false,
+        else => {},
+    };
+    const c = poly(ops, consts, ops.len - 1) orelse return false;
     // A single multiplicative tanh(k*vc) factor rides along as model.th
     // (the MESFET "ungated load" idiom, Is*tanh(v/Is/R)*(1+lambda*v)).
-    // collectTerms treated it as the constant 1, so it must be a factor of
-    // the whole expression, exactly once, with a linear argument — anything
-    // else stays outside the subset (all-zero coeffs = open circuit).
+    // poly() treated it as the constant 1, so it must be a factor of the
+    // whole expression, exactly once, with a linear argument.
     var n_tanh: u32 = 0;
     for (ops) |op| n_tanh += @intFromBool(isCall(op, .tanh));
-    if (n_tanh > 1) return;
+    if (n_tanh > 1) return false;
     if (n_tanh == 1) {
-        const arg = tanhFactorArg(ops, root) orelse return;
-        if ((vDegree(ops, arg) orelse return) != 1) return;
+        const arg = tanhFactorArg(ops, ops.len - 1) orelse return false;
+        if ((vDegree(ops, arg) orelse return false) != 1) return false;
         model.th = @floatCast(numericCoeff(ops, consts, arg));
     }
     model.c0 = @floatCast(c[0]);
     model.c1 = @floatCast(c[1]);
     model.c2 = @floatCast(c[2]);
+    model.c3 = @floatCast(c[3]);
+    return true;
 }
 
 /// The argument of a tanh() that is a multiplicative factor of the whole
@@ -1524,53 +1536,66 @@ fn tanhFactorArg(ops: []const Op, end: usize) ?usize {
     };
 }
 
-fn collectTerms(ops: []const Op, consts: []const f64, end: usize, scale: f64, c: *[3]f64) bool {
+/// Coefficients of vc^0..vc^3; null outside the subset (degree > 3, a
+/// non-constant divisor or exponent, any other function).
+const Poly = [4]f64;
+
+fn poly(ops: []const Op, consts: []const f64, end: usize) ?Poly {
     const op = ops[end];
-    switch (op.code) {
-        .num => {
-            c[0] += scale * consts[op.a];
-            return true;
+    return switch (op.code) {
+        .num => .{ consts[op.a], 0, 0, 0 },
+        .vprobe => .{ 0, 1, 0, 0 },
+        // Placeholder constant 1; extractPolyCoeffs pulls the factor out into
+        // model.th and rejects a tanh that is not a multiplicative factor.
+        .call => if (isCall(op, .tanh) and op.b == 1)
+            .{ 1, 0, 0, 0 }
+        else if (isCall(op, .pow) and op.b == 2)
+            powPoly(ops, consts, operand(ops, end, 0), end - 1)
+        else
+            null,
+        .neg => blk: {
+            var r = poly(ops, consts, end - 1) orelse return null;
+            for (&r) |*v| v.* = -v.*;
+            break :blk r;
         },
-        .vprobe => {
-            if (op.a == netlist.none) return false;
-            c[1] += scale;
-            return true;
+        .add, .sub => blk: {
+            var r = poly(ops, consts, operand(ops, end, 0)) orelse return null;
+            const b = poly(ops, consts, end - 1) orelse return null;
+            for (&r, b) |*v, w| v.* = if (op.code == .sub) v.* - w else v.* + w;
+            break :blk r;
         },
-        .call => {
-            if (!isCall(op, .tanh)) return false;
-            // Placeholder constant 1; extractPolyCoeffs pulls the factor
-            // out into model.th and rejects non-multiplicative tanh.
-            c[0] += scale;
-            return true;
+        .mul => mulPoly(poly(ops, consts, operand(ops, end, 0)) orelse return null, poly(ops, consts, end - 1) orelse return null),
+        .div => blk: {
+            var r = poly(ops, consts, operand(ops, end, 0)) orelse return null;
+            const d = poly(ops, consts, end - 1) orelse return null;
+            if (d[1] != 0 or d[2] != 0 or d[3] != 0 or d[0] == 0) return null;
+            for (&r) |*v| v.* /= d[0];
+            break :blk r;
         },
-        .add, .sub => {
-            const rhs_scale = if (op.code == .sub) -scale else scale;
-            return collectTerms(ops, consts, operand(ops, end, 0), scale, c) and collectTerms(ops, consts, end - 1, rhs_scale, c);
-        },
-        .mul => {
-            const a = operand(ops, end, 0);
-            const b = end - 1;
-            if (vDegree(ops, a)) |da| {
-                if (vDegree(ops, b)) |db| {
-                    if (da + db > 2) return false;
-                    c[da + db] += scale * numericCoeff(ops, consts, a) * numericCoeff(ops, consts, b);
-                    return true;
-                }
-                // constant factor times a non-monomial: distribute
-                if (da == 0) return collectTerms(ops, consts, b, scale * numericCoeff(ops, consts, a), c);
-            } else if (vDegree(ops, b)) |db| {
-                if (db == 0) return collectTerms(ops, consts, a, scale * numericCoeff(ops, consts, b), c);
-            }
-            return false;
-        },
-        .div => {
-            const db = vDegree(ops, end - 1) orelse return false;
-            if (db != 0) return false;
-            return collectTerms(ops, consts, operand(ops, end, 0), scale / numericCoeff(ops, consts, end - 1), c);
-        },
-        .neg => return collectTerms(ops, consts, end - 1, -scale, c),
-        else => return false,
-    }
+        .pow => powPoly(ops, consts, operand(ops, end, 0), end - 1),
+        else => null,
+    };
+}
+
+fn mulPoly(a: Poly, b: Poly) ?Poly {
+    var r: Poly = .{ 0, 0, 0, 0 };
+    for (a, 0..) |x, i| for (b, 0..) |y, j| {
+        if (x == 0 or y == 0) continue;
+        if (i + j > 3) return null;
+        r[i + j] += x * y;
+    };
+    return r;
+}
+
+/// base^k for a constant integer k in [0, 3].
+fn powPoly(ops: []const Op, consts: []const f64, base: usize, exponent: usize) ?Poly {
+    const e = poly(ops, consts, exponent) orelse return null;
+    if (e[1] != 0 or e[2] != 0 or e[3] != 0) return null;
+    if (e[0] != @round(e[0]) or e[0] < 0 or e[0] > 3) return null;
+    const b = poly(ops, consts, base) orelse return null;
+    var r: Poly = .{ 1, 0, 0, 0 };
+    for (0..@as(usize, @intFromFloat(e[0]))) |_| r = mulPoly(r, b) orelse return null;
+    return r;
 }
 
 fn vDegree(ops: []const Op, end: usize) ?u8 {
