@@ -332,6 +332,9 @@ FIRST cause. Fix recipes for F1, F4, F5, F8, F10, F11 and E6 are in
 - [ ] **C2 — HB does not drive from the physical source spectra.** 12 decks
   (`hb/*`, `multi_analysis/bench_hb_tline_guard`). `hb/current_driven_rc`
   additionally fails at dispatch with `AnalysisSourceNotFound`.
+  Phase 2b: the HB and QPSS residuals take the charge term from q(t) at
+  every sample instead of C(t0)*X (the Jacobian keeps C(t0), a quasi-Newton
+  step for nonlinear charge); linear decks move by roundoff only.
 
 - [ ] **C3 — QPSS ignores the physical two-tone source spectra.** 4 decks
   (`qpss/linear_two_tone_*`, `qpss/square_mixer`); all four also fail to
