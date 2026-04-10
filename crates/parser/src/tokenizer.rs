@@ -1,17 +1,936 @@
+// tokenizer.rs — byte-slice Lexer, ExprParser, and SpiceParser.
+//
+// Consolidates: lexer.rs, expr.rs (logic), spice.rs
+
 use ahash::AHashMap;
-use pisim_core::{AcStimulus, BehavioralBinOp, BehavioralExpr, BsourceExpr, Circuit, DeviceId, DeviceInstance, DeviceKind, NodeId, SimError, Terminal};
-use pisim_core::units::Si;
+use bigospice_core::{
+    AcStimulus, BehavioralBinOp, BehavioralExpr, BsourceExpr, Circuit, DeviceId, DeviceInstance,
+    DeviceKind, NodeId, SimError, Terminal,
+};
+use bigospice_core::units::Si;
+use bigospice_utility::si_multiplier;
 use std::path::{Path, PathBuf};
 
-use crate::expr::{eval_expression, parse_brace_expression, parse_expression, Expression, Op};
-use crate::lexer::Lexer;
-use crate::netlist::{
+use crate::types::{
     AnalysisKind, AnalysisStatement, BinModel, BinModelEntry, ControlBlock, ControlStatement,
-    CustomDistribution, DistoStatement, DistKind, ElementStatement, FftStatement, FuncDef,
-    ModelStatement, NoiseStatement, ParsedNetlist, PendingSubcktInstance, PrintFormat,
-    SaveDirective, SaveSpec, StepDirective, StepKind, SubcircuitDef,
+    CustomDistribution, DataBlock, DistoStatement, DistKind, ElementStatement, Expression,
+    ExtractSpec, FftStatement, FuncDef, MeasureStatement, ModelStatement, NoiseStatement, Op,
+    OptimizeParam, ParsedNetlist, PendingSubcktInstance, PolySource, PrintFormat, SaveDirective,
+    SaveSpec, SensOutputSpec, SourceKind, StepDirective, StepKind, SubcircuitDef, Token,
 };
-use crate::token::Token;
+
+// ===========================================================================
+// Expression parser functions (moved from expr.rs)
+// ===========================================================================
+
+/// Recursive-descent expression parser operating on a slice of tokens.
+struct ExprParser<'a> {
+    tokens: &'a [Token],
+    pos: usize,
+}
+
+impl<'a> ExprParser<'a> {
+    fn new(tokens: &'a [Token]) -> Self {
+        Self { tokens, pos: 0 }
+    }
+
+    fn peek(&self) -> Option<&Token> {
+        self.tokens.get(self.pos)
+    }
+
+    fn advance(&mut self) -> Option<&Token> {
+        let tok = self.tokens.get(self.pos)?;
+        self.pos += 1;
+        Some(tok)
+    }
+
+    /// Parse an expression (entry point): handles addition and subtraction.
+    fn parse_expr(&mut self) -> Result<Expression, SimError> {
+        let mut left = self.parse_term()?;
+        loop {
+            match self.peek() {
+                Some(Token::Plus) => {
+                    self.advance();
+                    let right = self.parse_term()?;
+                    left = Expression::BinOp(Op::Add, Box::new(left), Box::new(right));
+                }
+                Some(Token::Minus) => {
+                    self.advance();
+                    let right = self.parse_term()?;
+                    left = Expression::BinOp(Op::Sub, Box::new(left), Box::new(right));
+                }
+                _ => break,
+            }
+        }
+        Ok(left)
+    }
+
+    /// Parse a term: handles multiplication and division.
+    fn parse_term(&mut self) -> Result<Expression, SimError> {
+        let mut left = self.parse_unary()?;
+        loop {
+            match self.peek() {
+                Some(Token::Star) => {
+                    self.advance();
+                    // Check for '**' (power) — two consecutive stars.
+                    if self.peek() == Some(&Token::Star) {
+                        self.advance();
+                        let right = self.parse_unary()?;
+                        left = Expression::BinOp(Op::Pow, Box::new(left), Box::new(right));
+                    } else {
+                        let right = self.parse_unary()?;
+                        left = Expression::BinOp(Op::Mul, Box::new(left), Box::new(right));
+                    }
+                }
+                Some(Token::Slash) => {
+                    self.advance();
+                    let right = self.parse_unary()?;
+                    left = Expression::BinOp(Op::Div, Box::new(left), Box::new(right));
+                }
+                _ => break,
+            }
+        }
+        Ok(left)
+    }
+
+    /// Parse unary minus.
+    fn parse_unary(&mut self) -> Result<Expression, SimError> {
+        if self.peek() == Some(&Token::Minus) {
+            self.advance();
+            let inner = self.parse_unary()?;
+            return Ok(Expression::UnaryMinus(Box::new(inner)));
+        }
+        if self.peek() == Some(&Token::Plus) {
+            self.advance();
+            return self.parse_unary();
+        }
+        self.parse_primary()
+    }
+
+    /// Parse primary: number, parameter, function call, or parenthesized expression.
+    fn parse_primary(&mut self) -> Result<Expression, SimError> {
+        match self.peek().cloned() {
+            Some(Token::Number(n)) => {
+                self.advance();
+                Ok(Expression::Literal(n))
+            }
+            Some(Token::Word(name)) => {
+                self.advance();
+                // Check if it's a function call.
+                if self.peek() == Some(&Token::LeftParen) {
+                    self.advance(); // consume '('
+
+                    // Special case: V(node) or V(n1,n2) → NodeVoltage
+                    if name == "v" {
+                        let node1 = match self.peek().cloned() {
+                            Some(Token::Word(n)) => { self.advance(); n }
+                            Some(Token::Number(n)) => {
+                                self.advance();
+                                // Integer node names like 0, 1, 2
+                                if n == (n as u64) as f64 && n >= 0.0 {
+                                    format!("{}", n as u64)
+                                } else {
+                                    format!("{n}")
+                                }
+                            }
+                            other => return Err(SimError::Parse(format!(
+                                "expected node name inside V(...), got {other:?}"
+                            ))),
+                        };
+                        if self.peek() == Some(&Token::Comma) {
+                            self.advance(); // consume ','
+                            let node2 = match self.peek().cloned() {
+                                Some(Token::Word(n)) => { self.advance(); n }
+                                Some(Token::Number(n)) => {
+                                    self.advance();
+                                    if n == (n as u64) as f64 && n >= 0.0 {
+                                        format!("{}", n as u64)
+                                    } else {
+                                        format!("{n}")
+                                    }
+                                }
+                                other => return Err(SimError::Parse(format!(
+                                    "expected second node name in V(n1,n2), got {other:?}"
+                                ))),
+                            };
+                            if self.peek() == Some(&Token::RightParen) {
+                                self.advance();
+                            } else {
+                                return Err(SimError::Parse("expected ')' after V(n1,n2)".into()));
+                            }
+                            // V(n1,n2) = V(n1) - V(n2)
+                            return Ok(Expression::BinOp(
+                                Op::Sub,
+                                Box::new(Expression::NodeVoltage(node1)),
+                                Box::new(Expression::NodeVoltage(node2)),
+                            ));
+                        } else {
+                            if self.peek() == Some(&Token::RightParen) {
+                                self.advance();
+                            } else {
+                                return Err(SimError::Parse("expected ')' after V(node)".into()));
+                            }
+                            return Ok(Expression::NodeVoltage(node1));
+                        }
+                    }
+
+                    let mut args = Vec::new();
+                    if self.peek() != Some(&Token::RightParen) {
+                        args.push(self.parse_expr()?);
+                        while self.peek() == Some(&Token::Comma) {
+                            self.advance();
+                            args.push(self.parse_expr()?);
+                        }
+                    }
+                    if self.peek() == Some(&Token::RightParen) {
+                        self.advance();
+                    } else {
+                        return Err(SimError::Parse(
+                            "expected ')' in function call".into(),
+                        ));
+                    }
+                    Ok(Expression::Func(name, args))
+                } else {
+                    Ok(Expression::Param(name))
+                }
+            }
+            Some(Token::LeftParen) => {
+                self.advance();
+                let inner = self.parse_expr()?;
+                if self.peek() == Some(&Token::RightParen) {
+                    self.advance();
+                } else {
+                    return Err(SimError::Parse("expected ')'".into()));
+                }
+                Ok(inner)
+            }
+            Some(other) => Err(SimError::Parse(format!(
+                "unexpected token in expression: {other}"
+            ))),
+            None => Err(SimError::Parse("unexpected end of expression".into())),
+        }
+    }
+}
+
+/// Parse a token slice into an expression tree.
+pub fn parse_expression(tokens: &[Token]) -> Result<Expression, SimError> {
+    let mut parser = ExprParser::new(tokens);
+    let expr = parser.parse_expr()?;
+    // Ensure all tokens were consumed (ignoring Eof/Newline/RightBrace).
+    while parser.pos < parser.tokens.len() {
+        match &parser.tokens[parser.pos] {
+            Token::Eof | Token::Newline | Token::RightBrace => {
+                parser.pos += 1;
+            }
+            other => {
+                return Err(SimError::Parse(format!(
+                    "unexpected token after expression: {other}"
+                )));
+            }
+        }
+    }
+    Ok(expr)
+}
+
+/// Parse a brace-enclosed behavioral expression `{expr}` from a token slice.
+///
+/// The slice must start with `LeftBrace`. Consumes tokens up to and including
+/// the matching `RightBrace` and returns `(expr, tokens_consumed)`.
+pub fn parse_brace_expression(tokens: &[Token]) -> Result<(Expression, usize), SimError> {
+    if tokens.is_empty() || tokens[0] != Token::LeftBrace {
+        return Err(SimError::Parse(
+            "expected '{' to start brace expression".into(),
+        ));
+    }
+
+    // Find the matching closing brace (depth-aware).
+    let mut depth = 0usize;
+    let mut end = 0;
+    for (i, tok) in tokens.iter().enumerate() {
+        match tok {
+            Token::LeftBrace => depth += 1,
+            Token::RightBrace => {
+                depth -= 1;
+                if depth == 0 {
+                    end = i;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    if depth != 0 {
+        return Err(SimError::Parse("unmatched '{' in brace expression".into()));
+    }
+
+    // Parse the tokens between the braces (exclusive).
+    let inner = &tokens[1..end];
+    let expr = parse_expression(inner)?;
+    Ok((expr, end + 1)) // +1 to include the closing '}'
+}
+
+/// Evaluate an expression tree given a parameter environment.
+///
+/// `params` may contain both named `.PARAM` values and node-voltage entries
+/// stored under the key used by `NodeVoltage` (e.g. `"2"` for `V(2)`).
+pub fn eval_expression(
+    expr: &Expression,
+    params: &AHashMap<String, f64>,
+) -> Result<f64, SimError> {
+    match expr {
+        Expression::Literal(v) => Ok(*v),
+        Expression::Param(name) => params.get(name.as_str()).copied().ok_or_else(|| {
+            SimError::Parse(format!("undefined parameter '{name}'"))
+        }),
+        Expression::NodeVoltage(node) => params.get(node.as_str()).copied().ok_or_else(|| {
+            SimError::Parse(format!("node voltage V({node}) not available in expression context"))
+        }),
+        Expression::UnaryMinus(inner) => {
+            let v = eval_expression(inner, params)?;
+            Ok(-v)
+        }
+        Expression::BinOp(op, lhs, rhs) => {
+            let l = eval_expression(lhs, params)?;
+            let r = eval_expression(rhs, params)?;
+            match op {
+                Op::Add => Ok(l + r),
+                Op::Sub => Ok(l - r),
+                Op::Mul => Ok(l * r),
+                Op::Div => {
+                    if r == 0.0 {
+                        Err(SimError::Parse("division by zero".into()))
+                    } else {
+                        Ok(l / r)
+                    }
+                }
+                Op::Pow => Ok(l.powf(r)),
+            }
+        }
+        Expression::Func(name, args) => {
+            let evaluated: Vec<f64> = args
+                .iter()
+                .map(|a| eval_expression(a, params))
+                .collect::<Result<_, _>>()?;
+            match name.as_str() {
+                "sqrt" => {
+                    check_arity(name, &evaluated, 1)?;
+                    Ok(evaluated[0].sqrt())
+                }
+                "abs" => {
+                    check_arity(name, &evaluated, 1)?;
+                    Ok(evaluated[0].abs())
+                }
+                "exp" => {
+                    check_arity(name, &evaluated, 1)?;
+                    Ok(evaluated[0].exp())
+                }
+                "log" | "ln" => {
+                    check_arity(name, &evaluated, 1)?;
+                    Ok(evaluated[0].ln())
+                }
+                "log10" => {
+                    check_arity(name, &evaluated, 1)?;
+                    Ok(evaluated[0].log10())
+                }
+                "sin" => {
+                    check_arity(name, &evaluated, 1)?;
+                    Ok(evaluated[0].sin())
+                }
+                "cos" => {
+                    check_arity(name, &evaluated, 1)?;
+                    Ok(evaluated[0].cos())
+                }
+                "pow" => {
+                    check_arity(name, &evaluated, 2)?;
+                    Ok(evaluated[0].powf(evaluated[1]))
+                }
+                "min" => {
+                    check_arity(name, &evaluated, 2)?;
+                    Ok(evaluated[0].min(evaluated[1]))
+                }
+                "max" => {
+                    check_arity(name, &evaluated, 2)?;
+                    Ok(evaluated[0].max(evaluated[1]))
+                }
+                "sign" => {
+                    check_arity(name, &evaluated, 1)?;
+                    Ok(evaluated[0].signum())
+                }
+                "tan" => {
+                    check_arity(name, &evaluated, 1)?;
+                    Ok(evaluated[0].tan())
+                }
+                "asin" => {
+                    check_arity(name, &evaluated, 1)?;
+                    Ok(evaluated[0].asin())
+                }
+                "acos" => {
+                    check_arity(name, &evaluated, 1)?;
+                    Ok(evaluated[0].acos())
+                }
+                "atan" => {
+                    check_arity(name, &evaluated, 1)?;
+                    Ok(evaluated[0].atan())
+                }
+                "atan2" => {
+                    check_arity(name, &evaluated, 2)?;
+                    Ok(evaluated[0].atan2(evaluated[1]))
+                }
+                "if" => {
+                    // if(cond, then_val, else_val)
+                    check_arity(name, &evaluated, 3)?;
+                    Ok(if evaluated[0] != 0.0 { evaluated[1] } else { evaluated[2] })
+                }
+                // --- Rounding / integer ---
+                "ceil" => {
+                    check_arity(name, &evaluated, 1)?;
+                    Ok(evaluated[0].ceil())
+                }
+                "floor" => {
+                    check_arity(name, &evaluated, 1)?;
+                    Ok(evaluated[0].floor())
+                }
+                "round" => {
+                    check_arity(name, &evaluated, 1)?;
+                    Ok(evaluated[0].round())
+                }
+                "int" => {
+                    check_arity(name, &evaluated, 1)?;
+                    Ok(evaluated[0].trunc())
+                }
+                "nint" => {
+                    // nearest integer — same as round
+                    check_arity(name, &evaluated, 1)?;
+                    Ok(evaluated[0].round())
+                }
+                // --- Decibel ---
+                "db" => {
+                    check_arity(name, &evaluated, 1)?;
+                    Ok(20.0 * evaluated[0].abs().log10())
+                }
+                // --- Step / ramp ---
+                "uramp" => {
+                    // unit ramp: max(x, 0)
+                    check_arity(name, &evaluated, 1)?;
+                    Ok(evaluated[0].max(0.0))
+                }
+                "u" => {
+                    // unit step: 1 if x >= 0, else 0
+                    check_arity(name, &evaluated, 1)?;
+                    Ok(if evaluated[0] >= 0.0 { 1.0 } else { 0.0 })
+                }
+                // --- Power (HSPICE B-source) ---
+                "pwr" => {
+                    // pwr(x, y) = abs(x)^y
+                    check_arity(name, &evaluated, 2)?;
+                    Ok(evaluated[0].abs().powf(evaluated[1]))
+                }
+                "pwrs" => {
+                    // pwrs(x, y) = sign(x) * abs(x)^y
+                    check_arity(name, &evaluated, 2)?;
+                    Ok(evaluated[0].signum() * evaluated[0].abs().powf(evaluated[1]))
+                }
+                // --- Hyperbolic ---
+                "cosh" => {
+                    check_arity(name, &evaluated, 1)?;
+                    Ok(evaluated[0].cosh())
+                }
+                "sinh" => {
+                    check_arity(name, &evaluated, 1)?;
+                    Ok(evaluated[0].sinh())
+                }
+                "tanh" => {
+                    check_arity(name, &evaluated, 1)?;
+                    Ok(evaluated[0].tanh())
+                }
+                "acosh" => {
+                    check_arity(name, &evaluated, 1)?;
+                    Ok(evaluated[0].acosh())
+                }
+                "asinh" => {
+                    check_arity(name, &evaluated, 1)?;
+                    Ok(evaluated[0].asinh())
+                }
+                "atanh" => {
+                    check_arity(name, &evaluated, 1)?;
+                    Ok(evaluated[0].atanh())
+                }
+                // --- Log ---
+                "log2" => {
+                    check_arity(name, &evaluated, 1)?;
+                    Ok(evaluated[0].log2())
+                }
+                // --- Geometry ---
+                "hypot" => {
+                    check_arity(name, &evaluated, 2)?;
+                    Ok(evaluated[0].hypot(evaluated[1]))
+                }
+                // --- Sign alias ---
+                "sgn" => {
+                    // alias for sign(x): +1, -1, or 0
+                    check_arity(name, &evaluated, 1)?;
+                    let x = evaluated[0];
+                    Ok(if x > 0.0 { 1.0 } else if x < 0.0 { -1.0 } else { 0.0 })
+                }
+                // --- Clamp ---
+                "limit" => {
+                    // limit(x, min, max) — deterministic clamp
+                    check_arity(name, &evaluated, 3)?;
+                    Ok(evaluated[0].clamp(evaluated[1], evaluated[2]))
+                }
+                // --- Statistical (stochastic; use thread-local PRNG) ---
+                "gauss" => {
+                    // gauss(sigma): Gaussian with mean=0, std=sigma
+                    check_arity(name, &evaluated, 1)?;
+                    Ok(evaluated[0] * sample_normal())
+                }
+                "agauss" => {
+                    // agauss(mu, sigma): Gaussian with given mean and std
+                    check_arity(name, &evaluated, 2)?;
+                    Ok(evaluated[0] + evaluated[1] * sample_normal())
+                }
+                "unif" => {
+                    // unif(range): uniform in [-range, range]
+                    check_arity(name, &evaluated, 1)?;
+                    Ok(evaluated[0] * sample_uniform_signed())
+                }
+                "aunif" => {
+                    // aunif(mu, range): uniform in [mu-range, mu+range]
+                    check_arity(name, &evaluated, 2)?;
+                    Ok(evaluated[0] + evaluated[1] * sample_uniform_signed())
+                }
+                "flat" => {
+                    // flat(range): alias for unif(range)
+                    check_arity(name, &evaluated, 1)?;
+                    Ok(evaluated[0] * sample_uniform_signed())
+                }
+                // HSPICE OPTVAL(init, lower, upper) — returns init for normal simulation;
+                // bounds are stored in ParsedNetlist.optimize_params by the parser.
+                "optval" => {
+                    if evaluated.is_empty() {
+                        return Err(SimError::Parse(
+                            "optval() requires at least 1 argument (init)".into(),
+                        ));
+                    }
+                    Ok(evaluated[0]) // use init value
+                }
+                _ => Err(SimError::Parse(format!(
+                    "unknown function '{name}'"
+                ))),
+            }
+        }
+    }
+}
+
+/// Sample a standard-normal value using Box-Muller transform with a thread-local xorshift PRNG.
+fn sample_normal() -> f64 {
+    use std::cell::Cell;
+    thread_local! {
+        static STATE: Cell<u64> = Cell::new(0x9E3779B97F4A7C15u64);
+    }
+    fn next_u64() -> u64 {
+        STATE.with(|s| {
+            let mut x = s.get();
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            s.set(x);
+            x.wrapping_mul(0x2545F4914F6CDD1D)
+        })
+    }
+    fn next_unit() -> f64 {
+        ((next_u64() >> 11) as f64) * (1.0 / ((1u64 << 53) as f64))
+    }
+    let mut u1 = next_unit();
+    if u1 < 1e-300 {
+        u1 = 1e-300;
+    }
+    let u2 = next_unit();
+    let r = (-2.0 * u1.ln()).sqrt();
+    let theta = 2.0 * std::f64::consts::PI * u2;
+    r * theta.cos()
+}
+
+/// Sample a uniform value in [-1, 1) using a thread-local xorshift PRNG.
+fn sample_uniform_signed() -> f64 {
+    use std::cell::Cell;
+    thread_local! {
+        static STATE: Cell<u64> = Cell::new(0xD1B54A32D192ED03u64);
+    }
+    fn next_u64() -> u64 {
+        STATE.with(|s| {
+            let mut x = s.get();
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            s.set(x);
+            x.wrapping_mul(0x2545F4914F6CDD1D)
+        })
+    }
+    let bits = next_u64() >> 11;
+    let unit = (bits as f64) * (1.0 / ((1u64 << 53) as f64));
+    2.0 * unit - 1.0
+}
+
+fn check_arity(name: &str, args: &[f64], expected: usize) -> Result<(), SimError> {
+    if args.len() != expected {
+        Err(SimError::Parse(format!(
+            "function '{name}' expects {expected} argument(s), got {}",
+            args.len()
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+// ===========================================================================
+// Byte-slice Lexer (formerly lexer.rs, Vec<char> → Vec<u8>)
+// ===========================================================================
+
+/// Tokenizes SPICE netlist text into a stream of [`Token`]s.
+///
+/// Handles SPICE conventions:
+/// - `*` at start of line = comment (skip entire line)
+/// - `+` at start of line = continuation of previous line
+/// - `;` = inline comment (skip to end of line)
+/// - Case insensitive (input pre-lowercased in `new`, so no per-token lowercasing needed)
+/// - SI suffixes on numbers: `1k` -> 1000.0, `100n` -> 1e-7, `2.2meg` -> 2.2e6
+/// - `.directive` tokens
+pub struct Lexer {
+    input: Vec<u8>,
+    pos: usize,
+    line: usize,
+    col: usize,
+    /// Whether we are at the start of a logical line (for comment/continuation detection).
+    at_line_start: bool,
+}
+
+impl Lexer {
+    /// Create a new lexer from input text.
+    /// Input is pre-lowercased so per-token `.to_lowercase()` calls are unnecessary.
+    pub fn new(input: &str) -> Self {
+        Self {
+            input: input.to_ascii_lowercase().into_bytes(),
+            pos: 0,
+            line: 1,
+            col: 1,
+            at_line_start: true,
+        }
+    }
+
+    /// Peek at the current byte without consuming it.
+    fn peek(&self) -> Option<u8> {
+        self.input.get(self.pos).copied()
+    }
+
+    /// Advance one byte and return it.
+    fn advance(&mut self) -> Option<u8> {
+        let ch = self.input.get(self.pos).copied()?;
+        self.pos += 1;
+        if ch == b'\n' {
+            self.line += 1;
+            self.col = 1;
+        } else {
+            self.col += 1;
+        }
+        Some(ch)
+    }
+
+    /// Skip whitespace (spaces and tabs) but NOT newlines.
+    fn skip_whitespace(&mut self) {
+        while let Some(ch) = self.peek() {
+            if ch == b' ' || ch == b'\t' {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Skip to end of line (for comments).
+    fn skip_to_eol(&mut self) {
+        while let Some(ch) = self.peek() {
+            if ch == b'\n' {
+                break;
+            }
+            self.advance();
+        }
+    }
+
+    /// Read a number token, including optional SI suffix.
+    ///
+    /// SPICE numbers can look like: `1.5`, `1e-3`, `1k`, `100n`, `2.2meg`, `1G`.
+    fn read_number(&mut self, first: u8) -> Result<Token, SimError> {
+        let mut buf = String::new();
+        buf.push(first as char);
+
+        // Read digits, decimal point, exponent.
+        while let Some(ch) = self.peek() {
+            if ch.is_ascii_digit() || ch == b'.' {
+                buf.push(ch as char);
+                self.advance();
+            } else if ch == b'e' || ch == b'E' {
+                // Could be exponent or start of SI suffix — peek ahead.
+                // If next char after 'e' is digit or +/-, it's an exponent.
+                let next = self.input.get(self.pos + 1).copied();
+                if next == Some(b'+') || next == Some(b'-') || next.is_some_and(|c| c.is_ascii_digit()) {
+                    buf.push(ch as char);
+                    self.advance();
+                    // Also consume the sign if present.
+                    if let Some(sign) = self.peek() {
+                        if sign == b'+' || sign == b'-' {
+                            buf.push(sign as char);
+                            self.advance();
+                        }
+                    }
+                } else {
+                    // Not an exponent — break and handle as suffix below.
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        // Now try to consume an SI suffix.
+        // SPICE suffixes: f, p, n, u, m, k, meg, g, t (case insensitive).
+        let suffix_start = self.pos;
+        let mut suffix_buf: Vec<u8> = Vec::new();
+        while let Some(ch) = self.peek() {
+            if ch.is_ascii_alphabetic() {
+                suffix_buf.push(ch);
+                self.advance();
+            } else {
+                break;
+            }
+        }
+
+        if suffix_buf.is_empty() {
+            // Plain number.
+            let val: f64 = buf.parse().map_err(|_| {
+                SimError::Parse(format!("invalid number '{}' at line {}", buf, self.line))
+            })?;
+            return Ok(Token::Number(val));
+        }
+
+        // Try SI suffix lookup using bigospice_utility::si_multiplier.
+        if let Some(multiplier) = si_multiplier(&suffix_buf) {
+            let val: f64 = buf.parse().map_err(|_| {
+                SimError::Parse(format!("invalid number '{}' at line {}", buf, self.line))
+            })?;
+            return Ok(Token::Number(val * multiplier));
+        }
+
+        // The suffix might not be an SI suffix — it could be a unit like "Hz" or "ohm".
+        // In that case, parse the numeric part alone and rewind the suffix.
+        let val: f64 = buf.parse().map_err(|_| {
+            SimError::Parse(format!("invalid number '{}' at line {}", buf, self.line))
+        })?;
+        // Rewind: put the suffix bytes back.
+        self.pos = suffix_start;
+        self.col -= suffix_buf.len();
+        Ok(Token::Number(val))
+    }
+
+    /// Read a word (identifier) token.
+    ///
+    /// If the word is immediately followed by `:` (e.g. `PARAMS:`), the colon
+    /// is consumed and discarded so `PARAMS:` tokenizes as `Word("params")`.
+    /// Input is pre-lowercased so no per-call lowercasing is needed.
+    fn read_word(&mut self, first: u8) -> Token {
+        let mut buf = String::new();
+        buf.push(first as char);
+
+        while let Some(ch) = self.peek() {
+            if ch.is_ascii_alphanumeric() || ch == b'_' || ch == b'#' {
+                buf.push(ch as char);
+                self.advance();
+            } else {
+                break;
+            }
+        }
+
+        // Consume a trailing colon (e.g. `PARAMS:`) so it is not seen as an
+        // unknown character error; the word itself is returned without the colon.
+        if self.peek() == Some(b':') {
+            self.advance();
+        }
+
+        Token::Word(buf)
+    }
+
+    /// Read a dot-directive token: `.PARAM`, `.MODEL`, etc.
+    /// Input is pre-lowercased so no per-call lowercasing is needed.
+    fn read_dot_directive(&mut self) -> Token {
+        let mut buf = String::new();
+        while let Some(ch) = self.peek() {
+            if ch.is_ascii_alphanumeric() || ch == b'_' {
+                buf.push(ch as char);
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        Token::Dot(buf)
+    }
+
+    /// Return the next token from the input.
+    pub fn next_token(&mut self) -> Result<Token, SimError> {
+        loop {
+            self.skip_whitespace();
+
+            let ch = match self.peek() {
+                Some(c) => c,
+                None => return Ok(Token::Eof),
+            };
+
+            // Handle newlines.
+            if ch == b'\n' {
+                self.advance();
+                self.at_line_start = true;
+
+                // Collapse: skip any following comment-only lines and blank lines,
+                // then check for continuation.
+                loop {
+                    self.skip_whitespace();
+                    match self.peek() {
+                        Some(b'\n') => {
+                            // Blank line — skip it.
+                            self.advance();
+                            continue;
+                        }
+                        Some(b'*') => {
+                            // Comment line — skip entire line.
+                            self.skip_to_eol();
+                            continue;
+                        }
+                        Some(b'+') => {
+                            // Continuation — consume '+' and merge with previous line.
+                            self.advance();
+                            self.at_line_start = false;
+                            // Break out of this inner loop and continue the outer
+                            // loop to tokenize more content on this logical line.
+                            break;
+                        }
+                        _ => {
+                            // Real content on a new line — emit the Newline.
+                            return Ok(Token::Newline);
+                        }
+                    }
+                }
+                // If we reach here, it was a continuation — keep tokenizing.
+                continue;
+            }
+
+            // Handle full-line comments: '*' at start of line.
+            if ch == b'*' && self.at_line_start {
+                self.skip_to_eol();
+                // Consume the trailing newline so we don't emit a stray Newline token.
+                if self.peek() == Some(b'\n') {
+                    self.advance();
+                }
+                // Stay at line start for the next line.
+                self.at_line_start = true;
+                continue;
+            }
+
+            // Handle inline comments: ';' or '$' anywhere.
+            if ch == b';' || ch == b'$' {
+                self.skip_to_eol();
+                continue;
+            }
+
+            // We are no longer at line start after reading a real token.
+            self.at_line_start = false;
+
+            // Dot directive.
+            if ch == b'.' {
+                self.advance();
+                return Ok(self.read_dot_directive());
+            }
+
+            // Number: starts with digit or '.' followed by digit.
+            if ch.is_ascii_digit() {
+                self.advance();
+                return self.read_number(ch);
+            }
+
+            // Single-character tokens.
+            match ch {
+                b'=' => { self.advance(); return Ok(Token::Equals); }
+                b'(' => { self.advance(); return Ok(Token::LeftParen); }
+                b')' => { self.advance(); return Ok(Token::RightParen); }
+                b',' => { self.advance(); return Ok(Token::Comma); }
+                b'+' => { self.advance(); return Ok(Token::Plus); }
+                b'-' => { self.advance(); return Ok(Token::Minus); }
+                b'*' => {
+                    self.advance();
+                    return Ok(Token::Star);
+                }
+                b'/' => { self.advance(); return Ok(Token::Slash); }
+                b'{' => { self.advance(); return Ok(Token::LeftBrace); }
+                b'}' => { self.advance(); return Ok(Token::RightBrace); }
+                _ => {}
+            }
+
+            // Word / identifier.
+            if ch.is_ascii_alphabetic() || ch == b'_' {
+                self.advance();
+                return Ok(self.read_word(ch));
+            }
+
+            // Quoted string: "..." (double-quoted → opaque QuotedString)
+            // Single-quoted: '...' (HSPICE arithmetic expression → SingleQuoteExpr)
+            if ch == b'"' || ch == b'\'' {
+                self.advance(); // consume opening quote
+                let mut buf = String::new();
+                let close = ch;
+                while let Some(c) = self.peek() {
+                    if c == close {
+                        self.advance(); // consume closing quote
+                        break;
+                    }
+                    if c == b'\n' {
+                        break; // unterminated string — stop at EOL
+                    }
+                    buf.push(c as char);
+                    self.advance();
+                }
+                if close == b'\'' {
+                    // Single-quoted content is an HSPICE arithmetic expression.
+                    // Input is already lowercased.
+                    return Ok(Token::SingleQuoteExpr(buf));
+                }
+                return Ok(Token::QuotedString(buf));
+            }
+
+            // Unknown character — skip it.
+            self.advance();
+            return Err(SimError::Parse(format!(
+                "unexpected character '{}' at line {}:{}",
+                ch as char, self.line, self.col
+            )));
+        }
+    }
+
+    /// Tokenize the entire input into a vector of tokens.
+    pub fn tokenize_all(&mut self) -> Result<Vec<Token>, SimError> {
+        let mut tokens = Vec::new();
+        loop {
+            let tok = self.next_token()?;
+            if tok == Token::Eof {
+                tokens.push(Token::Eof);
+                break;
+            }
+            tokens.push(tok);
+        }
+        Ok(tokens)
+    }
+}
+
+// ===========================================================================
+// SpiceParser (formerly spice.rs, imports updated to crate::types::*)
+// ===========================================================================
 
 /// Pending B-source record, stored before circuit construction.
 struct PendingBsource {
@@ -404,7 +1323,7 @@ impl SpiceParser {
     ///
     /// `.INCLUDE` and `.LIB` directives inside the file are resolved relative
     /// to the file's directory.  Include cycles are detected and return an error.
-    pub fn parse_file(path: &Path) -> Result<(Circuit, Vec<AnalysisStatement>, pisim_core::SimOptions), SimError> {
+    pub fn parse_file(path: &Path) -> Result<(Circuit, Vec<AnalysisStatement>, bigospice_core::SimOptions), SimError> {
         let canonical = path.canonicalize().map_err(SimError::Io)?;
         let content = std::fs::read_to_string(&canonical).map_err(SimError::Io)?;
         let base_dir: Option<PathBuf> = canonical.parent().map(Path::to_path_buf);
@@ -418,7 +1337,7 @@ impl SpiceParser {
     /// `.INCLUDE` directives in `input` are resolved relative to the process
     /// working directory.  Pass a file path to [`SpiceParser::parse_file`] for
     /// proper relative-path resolution.
-    pub fn parse(input: &str) -> Result<(Circuit, Vec<AnalysisStatement>, pisim_core::SimOptions), SimError> {
+    pub fn parse(input: &str) -> Result<(Circuit, Vec<AnalysisStatement>, bigospice_core::SimOptions), SimError> {
         // Run the pre-processor with CWD-relative includes.
         let mut include_stack: Vec<PathBuf> = Vec::new();
         let expanded = preprocess(input, None, &mut include_stack)?;
@@ -426,7 +1345,14 @@ impl SpiceParser {
     }
 
     /// Internal: tokenize and parse an already-expanded (includes resolved) netlist string.
-    fn parse_expanded(input: &str) -> Result<(Circuit, Vec<AnalysisStatement>, pisim_core::SimOptions), SimError> {
+    /// Returns `(circuit, analyses, options)` — extract specs are dropped.
+    fn parse_expanded(input: &str) -> Result<(Circuit, Vec<AnalysisStatement>, bigospice_core::SimOptions), SimError> {
+        let (c, a, o, _) = Self::parse_expanded_full(input)?;
+        Ok((c, a, o))
+    }
+
+    /// Internal: like `parse_expanded` but also returns `.EXTRACT` specs.
+    fn parse_expanded_full(input: &str) -> Result<(Circuit, Vec<AnalysisStatement>, bigospice_core::SimOptions, Vec<ExtractSpec>), SimError> {
         // In SPICE, the first line is always the title line (even if it starts with *).
         // Extract it from raw text before tokenizing so the lexer doesn't skip it.
         let (title, rest) = match input.find('\n') {
@@ -453,6 +1379,16 @@ impl SpiceParser {
         parser.netlist.title = title;
         parser.parse_body()?;
         parser.build_circuit()
+    }
+
+    /// Parse a SPICE netlist string, returning circuit, analyses, options, and any
+    /// `.EXTRACT` specifications (HSPICE W.5) for post-simulation evaluation.
+    ///
+    /// Use [`SpiceParser::parse`] when `.EXTRACT` specs are not needed.
+    pub fn parse_netlist(input: &str) -> Result<(Circuit, Vec<AnalysisStatement>, bigospice_core::SimOptions, Vec<ExtractSpec>), SimError> {
+        let mut include_stack: Vec<PathBuf> = Vec::new();
+        let expanded = preprocess(input, None, &mut include_stack)?;
+        Self::parse_expanded_full(&expanded)
     }
 
     // -----------------------------------------------------------------------
@@ -580,11 +1516,11 @@ impl SpiceParser {
             // Syntax: .LINSOL KLU  or  .LINSOL SPARSE
             "linsol" => {
                 let line = self.collect_line();
-                if let Some(Token::Word(ref s)) = line.first() {
+                if let Some(Token::Word(s)) = line.first() {
                     self.netlist.options.lin_solver =
                         match s.to_lowercase().as_str() {
-                            "klu" => pisim_core::LinSolverChoice::Klu,
-                            _ => pisim_core::LinSolverChoice::SparseLu,
+                            "klu" => bigospice_core::LinSolverChoice::Klu,
+                            _ => bigospice_core::LinSolverChoice::SparseLu,
                         };
                 }
             }
@@ -604,6 +1540,8 @@ impl SpiceParser {
             "connect" => self.parse_connect()?,
             // W.5: .EXTRACT [TRAN|AC|DC] label=expr — HSPICE measurement extraction.
             "extract" => self.parse_extract()?,
+            // W.4: .ROL LIFETIME=<t> [TEMP=<t>] [EM=<0|1>] [NBTI=<0|1>] [HCI=<0|1>]
+            "rol" => self.parse_rol()?,
             "end" | "ends" | "enddata" => {
                 // Consume rest of line.
                 self.collect_line();
@@ -766,7 +1704,7 @@ impl SpiceParser {
     /// Defines a named custom statistical distribution referenced by
     /// `DIST=name` on parameters in `.MODEL` blocks during Monte Carlo
     /// analysis.  The record is stored in `netlist.distributions` for
-    /// lookup by the MC driver in `pisim_analysis::mc`.
+    /// lookup by the MC driver in `bigospice_analysis::mc`.
     fn parse_distribution(&mut self) -> Result<(), SimError> {
         let line = self.collect_line();
         let mut idx = 0;
@@ -848,12 +1786,12 @@ impl SpiceParser {
                     self.netlist.params.insert(name.clone(), v);
                 }
                 // Detect OPTVAL(init, lower, upper) in brace expressions.
-                if let crate::expr::Expression::Func(ref fname, ref fargs) = expr {
+                if let Expression::Func(ref fname, ref fargs) = expr {
                     if fname.eq_ignore_ascii_case("optval") && fargs.len() >= 3 {
                         let init  = eval_expression(&fargs[0], &self.netlist.params).unwrap_or(0.0);
                         let lower = eval_expression(&fargs[1], &self.netlist.params).unwrap_or(0.0);
                         let upper = eval_expression(&fargs[2], &self.netlist.params).unwrap_or(0.0);
-                        self.netlist.optimize_params.push(crate::netlist::OptimizeParam {
+                        self.netlist.optimize_params.push(OptimizeParam {
                             name: name.clone(),
                             init,
                             lower,
@@ -896,12 +1834,12 @@ impl SpiceParser {
             }
             // If the expression is OPTVAL(init, lower, upper), extract bounds
             // and store in optimize_params in addition to the normal param value.
-            if let crate::expr::Expression::Func(ref fname, ref fargs) = expr {
+            if let Expression::Func(ref fname, ref fargs) = expr {
                 if fname.eq_ignore_ascii_case("optval") && fargs.len() >= 3 {
                     let init  = eval_expression(&fargs[0], &self.netlist.params).unwrap_or(0.0);
                     let lower = eval_expression(&fargs[1], &self.netlist.params).unwrap_or(0.0);
                     let upper = eval_expression(&fargs[2], &self.netlist.params).unwrap_or(0.0);
-                    self.netlist.optimize_params.push(crate::netlist::OptimizeParam {
+                    self.netlist.optimize_params.push(OptimizeParam {
                         name: name.clone(),
                         init,
                         lower,
@@ -2024,7 +2962,7 @@ impl SpiceParser {
     /// Unknown keys are silently ignored. Multiple `.OPTIONS` lines accumulate
     /// (later overrides earlier).
     fn parse_options(&mut self) -> Result<(), SimError> {
-        use pisim_core::IntegrationMethod;
+        use bigospice_core::IntegrationMethod;
         let line = self.collect_line();
         let mut i = 0;
 
@@ -2067,11 +3005,22 @@ impl SpiceParser {
                             // SOLVER — linear solver selection (KLU or default SparseLu)
                             "solver" => {
                                 if let Token::Word(ref s) = line[i] {
-                                    self.netlist.options.lin_solver =
-                                        match s.to_lowercase().as_str() {
-                                            "klu" => pisim_core::LinSolverChoice::Klu,
-                                            _ => pisim_core::LinSolverChoice::SparseLu,
-                                        };
+                                    let (choice, kind) = match s.to_lowercase().as_str() {
+                                        "klu" => (
+                                            bigospice_core::LinSolverChoice::Klu,
+                                            bigospice_core::LinSolverKind::Klu,
+                                        ),
+                                        "dense" => (
+                                            bigospice_core::LinSolverChoice::SparseLu,
+                                            bigospice_core::LinSolverKind::Dense,
+                                        ),
+                                        _ => (
+                                            bigospice_core::LinSolverChoice::SparseLu,
+                                            bigospice_core::LinSolverKind::Sparse,
+                                        ),
+                                    };
+                                    self.netlist.options.lin_solver = choice;
+                                    self.netlist.options.linsol_kind = kind;
                                 }
                                 i += 1;
                             }
@@ -2079,8 +3028,8 @@ impl SpiceParser {
                             "filetype" | "rawfmt" => {
                                 if let Token::Word(ref fmt_str) = line[i] {
                                     self.netlist.options.raw_fmt = match fmt_str.to_lowercase().as_str() {
-                                        "ascii" => pisim_core::RawFmt::Ascii,
-                                        _ => pisim_core::RawFmt::Binary,
+                                        "ascii" => bigospice_core::RawFmt::Ascii,
+                                        _ => bigospice_core::RawFmt::Binary,
                                     };
                                 }
                                 i += 1;
@@ -2092,7 +3041,7 @@ impl SpiceParser {
                                         "reltol" => self.netlist.options.reltol = val,
                                         "vntol" => self.netlist.options.vntol = val,
                                         "chgtol" => self.netlist.options.chgtol = val,
-                                        "pivtol" => self.netlist.options.pivtol = val,
+                                        "pivtol" | "pivot_tol" => self.netlist.options.pivtol = val,
                                         "pivrel" => self.netlist.options.pivrel = val,
                                         "gmin" => self.netlist.options.gmin = val,
                                         "itl1" => self.netlist.options.itl1 = val as usize,
@@ -2139,7 +3088,6 @@ impl SpiceParser {
     ///
     /// Stores a [`DataBlock`] in `netlist.data_blocks`.
     fn parse_data(&mut self) -> Result<(), SimError> {
-        use crate::netlist::DataBlock;
 
         // First token on the same line as `.DATA` is the block name.
         let name = match self.peek().clone() {
@@ -2379,7 +3327,6 @@ impl SpiceParser {
     /// malformed lines are silently skipped — the evaluator handles errors at
     /// runtime.
     fn parse_meas(&mut self) -> Result<(), SimError> {
-        use crate::netlist::MeasureStatement;
         let line = self.collect_line();
         // Convert each token back to a lowercase string representation.
         let tokens: Vec<String> = line
@@ -2413,8 +3360,14 @@ impl SpiceParser {
     ///
     /// Stores each `label=expression` pair as an `ExtractSpec` in
     /// `netlist.extract_specs`.  Malformed entries are silently skipped.
+    ///
+    /// The HSPICE syntax is:
+    /// ```text
+    /// .EXTRACT TRAN vmax=ymax(v(out)) vmin=ymin(v(out)) vswing=par('vmax-vmin')
+    /// ```
+    /// Each `label=expr` pair is parsed by scanning for `Word Equals` patterns.
+    /// Expression tokens are collected until the next `Word Equals` pair or EOL.
     fn parse_extract(&mut self) -> Result<(), SimError> {
-        use crate::netlist::ExtractSpec;
         let line = self.collect_line();
         if line.is_empty() {
             return Ok(());
@@ -2432,22 +3385,101 @@ impl SpiceParser {
         } else {
             "tran".to_string()
         };
-        // Remaining tokens: reconstruct strings and split on '='.
+        // Scan for label=expr pairs: Word(label) Equals <expr_tokens…>
+        // Expression tokens are collected until the next Word followed by Equals, or EOL.
         while idx < line.len() {
-            let tok_str = line[idx].to_string();
-            if let Some(eq_pos) = tok_str.find('=') {
-                let label = tok_str[..eq_pos].trim().to_string();
-                let expr = tok_str[eq_pos + 1..].trim().to_string();
-                if !label.is_empty() && !expr.is_empty() {
-                    self.netlist.extract_specs.push(ExtractSpec {
-                        analysis: analysis_type.clone(),
-                        label,
-                        expr,
-                    });
+            if let Token::Word(label) = &line[idx] {
+                if idx + 1 < line.len() && line[idx + 1] == Token::Equals {
+                    let label = label.clone();
+                    idx += 2; // consume label and '='
+                    let mut expr_parts: Vec<String> = Vec::new();
+                    while idx < line.len() {
+                        // Stop when we see the start of the next label=… pair.
+                        if matches!(&line[idx], Token::Word(_))
+                            && idx + 1 < line.len()
+                            && line[idx + 1] == Token::Equals
+                        {
+                            break;
+                        }
+                        expr_parts.push(line[idx].to_string());
+                        idx += 1;
+                    }
+                    let expr: String = expr_parts.join("");
+                    if !label.is_empty() && !expr.is_empty() {
+                        self.netlist.extract_specs.push(ExtractSpec {
+                            analysis: analysis_type.clone(),
+                            label,
+                            expr,
+                        });
+                    }
+                } else {
+                    idx += 1;
                 }
+            } else {
+                idx += 1;
             }
-            idx += 1;
         }
+        Ok(())
+    }
+
+    /// `.ROL LIFETIME=<t> [TEMP=<t>] [EM=<0|1>] [NBTI=<0|1>] [HCI=<0|1>]`
+    ///
+    /// Parses a reliability/aging analysis directive (W.4, Xyce-compatible).
+    /// Stores the result in `self.netlist.rol_config`; a second `.ROL` line
+    /// overwrites the first (last-write wins, matching `.OPTIONS` semantics).
+    fn parse_rol(&mut self) -> Result<(), SimError> {
+        let line = self.collect_line();
+        let mut cfg = bigospice_core::RolConfig::default();
+        let mut i = 0;
+        while i < line.len() {
+            if let Token::Word(ref key) = line[i] {
+                let key = key.to_lowercase();
+                i += 1;
+                if i < line.len() && line[i] == Token::Equals {
+                    i += 1;
+                    if i < line.len() {
+                        match key.as_str() {
+                            "lifetime" => {
+                                if let Some(v) = Self::token_to_number(&line[i]) {
+                                    cfg.lifetime = v;
+                                }
+                                i += 1;
+                            }
+                            "temp" => {
+                                if let Some(v) = Self::token_to_number(&line[i]) {
+                                    // Accept either Celsius (small values) or Kelvin.
+                                    // Treat values < 200 as Celsius and convert.
+                                    cfg.temp = if v < 200.0 { v + 273.15 } else { v };
+                                }
+                                i += 1;
+                            }
+                            "em" => {
+                                if let Some(v) = Self::token_to_number(&line[i]) {
+                                    cfg.em_enabled = v != 0.0;
+                                }
+                                i += 1;
+                            }
+                            "nbti" => {
+                                if let Some(v) = Self::token_to_number(&line[i]) {
+                                    cfg.nbti_enabled = v != 0.0;
+                                }
+                                i += 1;
+                            }
+                            "hci" => {
+                                if let Some(v) = Self::token_to_number(&line[i]) {
+                                    cfg.hci_enabled = v != 0.0;
+                                }
+                                i += 1;
+                            }
+                            _ => { i += 1; }
+                        }
+                    }
+                }
+            } else {
+                i += 1;
+            }
+        }
+        self.netlist.rol_config = Some(cfg);
         Ok(())
     }
 
@@ -2467,10 +3499,10 @@ impl SpiceParser {
             matches!(t, Token::Word(w) if w == "params")
         });
 
-        let (port_slice, kv_slice) = if let Some(idx) = params_keyword_idx {
+        let (port_slice, kv_slice): (&[Token], &[Token]) = if let Some(idx) = params_keyword_idx {
             (&port_tokens[..idx], &port_tokens[idx + 1..])
         } else {
-            (port_tokens.as_slice(), &[] as &[Token])
+            (port_tokens.as_slice(), &[])
         };
 
         let ports: Vec<String> = port_slice
@@ -2583,6 +3615,9 @@ impl SpiceParser {
             'z' => self.parse_mesfet(&name, &line),
             't' => self.parse_tline(&name, &line),
             'o' => self.parse_ltra(&name, &line),
+            'u' => self.parse_urc(&name, &line),
+            'w' => self.parse_w_element(&name, &line),
+            'p' if name.starts_with("port") => self.parse_port(&name, &line),
             'k' => {
                 // Mutual inductance: K<name> L1_name L2_name coupling
                 self.parse_k_element(&name, &line)?;
@@ -4533,6 +5568,152 @@ impl SpiceParser {
         }))
     }
 
+    /// `U<name> n+ n- n_ref <model_name> [L=<len>] [LUMPS=<n>]`
+    ///
+    /// Uniform RC transmission line.  Expanded at build_circuit time into
+    /// LUMPS series resistors and shunt capacitors.
+    fn parse_urc(
+        &self,
+        name: &str,
+        line: &[Token],
+    ) -> Result<Option<ElementStatement>, SimError> {
+        if line.len() < 4 {
+            return Err(SimError::Parse(format!(
+                "URC '{name}' needs n+, n-, n_ref, and a model name"
+            )));
+        }
+
+        let np = Self::token_to_node_name(&line[0])?;
+        let nn = Self::token_to_node_name(&line[1])?;
+        let nref = Self::token_to_node_name(&line[2])?;
+
+        let model_name = match &line[3] {
+            Token::Word(s) => s.clone(),
+            _ => {
+                return Err(SimError::Parse(format!(
+                    "expected model name for URC '{name}'"
+                )));
+            }
+        };
+
+        let mut params = Vec::new();
+        let mut idx = 4;
+        while idx < line.len() {
+            if let Some((k, v, consumed)) = Self::try_parse_kv_param(&line[idx..]) {
+                params.push((k.to_lowercase(), v));
+                idx += consumed;
+            } else {
+                idx += 1;
+            }
+        }
+
+        Ok(Some(ElementStatement {
+            name: name.to_string(),
+            kind: DeviceKind::Urc,
+            nodes: vec![np, nn, nref],
+            value: None,
+            model_name: Some(model_name),
+            params,
+        }))
+    }
+
+    /// `W<name> n+ n- <model> [RLGC_FILE=<path>] [L=<len>]`
+    ///
+    /// W-element (Xyce): frequency-domain lossy transmission line.
+    /// Falls back to LTRA stamp until tabulated interpolation is implemented.
+    fn parse_w_element(
+        &self,
+        name: &str,
+        line: &[Token],
+    ) -> Result<Option<ElementStatement>, SimError> {
+        if line.len() < 3 {
+            return Err(SimError::Parse(format!(
+                "W-element '{name}' needs n+, n-, and a model name"
+            )));
+        }
+
+        let np = Self::token_to_node_name(&line[0])?;
+        let nn = Self::token_to_node_name(&line[1])?;
+
+        let model_name = match &line[2] {
+            Token::Word(s) => s.clone(),
+            _ => {
+                return Err(SimError::Parse(format!(
+                    "expected model name for W-element '{name}'"
+                )));
+            }
+        };
+
+        let mut params = Vec::new();
+        let mut idx = 3;
+        while idx < line.len() {
+            if let Some((k, v, consumed)) = Self::try_parse_kv_param(&line[idx..]) {
+                params.push((k.to_lowercase(), v));
+                idx += consumed;
+            } else {
+                idx += 1;
+            }
+        }
+
+        Ok(Some(ElementStatement {
+            name: name.to_string(),
+            kind: DeviceKind::Wlossy,
+            nodes: vec![np, nn],
+            value: None,
+            model_name: Some(model_name),
+            params,
+        }))
+    }
+
+    /// `PORT<name> n+ n- [Z0=50] [DC=0] [PORT=<n>]`
+    ///
+    /// S-parameter excitation port (HSPICE).
+    /// Thevenin equivalent: voltage source in series with Z0 resistor.
+    fn parse_port(
+        &self,
+        name: &str,
+        line: &[Token],
+    ) -> Result<Option<ElementStatement>, SimError> {
+        if line.len() < 2 {
+            return Err(SimError::Parse(format!(
+                "PORT '{name}' needs at least n+ and n-"
+            )));
+        }
+
+        let np = Self::token_to_node_name(&line[0])?;
+        let nn = Self::token_to_node_name(&line[1])?;
+
+        let mut params = Vec::new();
+        // Defaults
+        params.push(("z0".to_string(), 50.0));
+        params.push(("dc".to_string(), 0.0));
+
+        let mut idx = 2;
+        while idx < line.len() {
+            if let Some((k, v, consumed)) = Self::try_parse_kv_param(&line[idx..]) {
+                let key = k.to_lowercase();
+                // Override default if key already present.
+                if let Some(existing) = params.iter_mut().find(|(ek, _)| *ek == key) {
+                    existing.1 = v;
+                } else {
+                    params.push((key, v));
+                }
+                idx += consumed;
+            } else {
+                idx += 1;
+            }
+        }
+
+        Ok(Some(ElementStatement {
+            name: name.to_string(),
+            kind: DeviceKind::Port,
+            nodes: vec![np, nn],
+            value: None,
+            model_name: None,
+            params,
+        }))
+    }
+
     /// `.FOUR f0 v(node1) [v(node2) ...]`
     ///
     /// `.HB f1 [f2] nharmonics`
@@ -4590,7 +5771,7 @@ impl SpiceParser {
     /// Parses the output variable (`V(node)` or bare name), number of FFT
     /// points, optional window name and optional [start, stop] time range.
     /// Stored in `ParsedNetlist.fft_statements` for dispatch by
-    /// `pisim_analysis::fft::run_fft` after transient results are available.
+    /// `bigospice_analysis::fft::run_fft` after transient results are available.
     fn parse_fft(&mut self) -> Result<(), SimError> {
         let line = self.collect_line();
         let mut idx = 0usize;
@@ -4811,7 +5992,6 @@ impl SpiceParser {
     ///   Word("v"), LeftParen, Word("2") | Number(2.0), RightParen
     /// so we handle both that multi-token form and the rare single-token form.
     fn parse_sens(&mut self) -> Result<(), SimError> {
-        use crate::netlist::SensOutputSpec;
 
         let line = self.collect_line();
         if line.is_empty() {
@@ -5143,7 +6323,7 @@ impl SpiceParser {
         Ok(())
     }
 
-    /// Convert a `pisim_parser::Expression` into a `pisim_core::BehavioralExpr`.
+    /// Convert a `bigospice_parser::Expression` into a `bigospice_core::BehavioralExpr`.
     ///
     /// Special-case the smuggled markers used by the device-side flat AST:
     /// - `time` / `temper` / `frequency` (as bare Param) → BehavioralExpr::Param
@@ -5380,7 +6560,7 @@ impl SpiceParser {
     // -----------------------------------------------------------------------
 
     /// Convert the parsed netlist into a `Circuit`, analysis statements, and sim options.
-    fn build_circuit(mut self) -> Result<(Circuit, Vec<AnalysisStatement>, pisim_core::SimOptions), SimError> {
+    fn build_circuit(mut self) -> Result<(Circuit, Vec<AnalysisStatement>, bigospice_core::SimOptions, Vec<ExtractSpec>), SimError> {
         // ── Subcircuit expansion ──────────────────────────────────────────
         // Build a case-insensitive lookup: lowercase name -> SubcircuitDef.
         let subckt_defs: AHashMap<String, &SubcircuitDef> = self
@@ -5684,1391 +6864,6 @@ impl SpiceParser {
         }
 
         circuit.build_topology();
-        Ok((circuit, self.netlist.analyses, self.netlist.options))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Approximate f64 comparison for SI-suffix values that may have float precision noise.
-    fn approx_eq(a: f64, b: f64) -> bool {
-        if a == b {
-            return true;
-        }
-        let diff = (a - b).abs();
-        let mag = a.abs().max(b.abs());
-        if mag == 0.0 {
-            diff < 1e-30
-        } else {
-            diff / mag < 1e-10
-        }
-    }
-
-    fn assert_param_approx(device: &DeviceInstance, key: &str, expected: f64) {
-        let val = device.params.get(key).unwrap_or_else(|| {
-            panic!("param '{key}' not found on device '{}'", device.name);
-        });
-        assert!(
-            approx_eq(val, expected),
-            "param '{key}' on '{}': expected {expected}, got {val}",
-            device.name,
-        );
-    }
-
-    #[test]
-    fn parse_voltage_divider() {
-        let netlist = "\
-* Simple voltage divider
-V1 1 0 DC 5
-R1 1 2 1k
-R2 2 0 1k
-.OP
-.END
-";
-        let (circuit, analyses, _opts) = SpiceParser::parse(netlist).unwrap();
-
-        // 3 devices: V1, R1, R2.
-        assert_eq!(circuit.devices().len(), 3);
-
-        // Nodes: GND(0), 1, 2.
-        assert_eq!(circuit.nodes().len(), 3);
-        assert_eq!(circuit.num_vars(), 2);
-
-        // V1 is a voltage source with branch.
-        let v1 = circuit.find_device("v1").unwrap();
-        assert_eq!(v1.kind, DeviceKind::VoltageSource);
-        assert_param_approx(v1, "dc", 5.0);
-        assert!(v1.needs_branch());
-
-        // R1 has resistance = 1000.
-        let r1 = circuit.find_device("r1").unwrap();
-        assert_eq!(r1.kind, DeviceKind::Resistor);
-        assert_param_approx(r1, "resistance", 1e3);
-
-        // R2 has resistance = 1000.
-        let r2 = circuit.find_device("r2").unwrap();
-        assert_eq!(r2.kind, DeviceKind::Resistor);
-        assert_param_approx(r2, "resistance", 1e3);
-
-        // One analysis: .OP.
-        assert_eq!(analyses.len(), 1);
-        assert_eq!(analyses[0].kind, AnalysisKind::DcOp);
-
-        // MNA dimension: 2 nodes + 1 branch = 3.
-        assert_eq!(circuit.mna_dimension(), 3);
-    }
-
-    #[test]
-    fn parse_rc_lowpass() {
-        let netlist = "\
-* RC lowpass
-V1 in 0 DC 1 AC 1
-R1 in out 1k
-C1 out 0 1n
-.AC DEC 10 1 1G
-.END
-";
-        let (circuit, analyses, _opts) = SpiceParser::parse(netlist).unwrap();
-
-        assert_eq!(circuit.devices().len(), 3);
-        // Nodes: GND, in, out.
-        assert_eq!(circuit.nodes().len(), 3);
-
-        let v1 = circuit.find_device("v1").unwrap();
-        assert_param_approx(v1, "dc", 1.0);
-        assert_param_approx(v1, "ac", 1.0);
-
-        let r1 = circuit.find_device("r1").unwrap();
-        assert_param_approx(r1, "resistance", 1e3);
-
-        let c1 = circuit.find_device("c1").unwrap();
-        assert_eq!(c1.kind, DeviceKind::Capacitor);
-        assert_param_approx(c1, "capacitance", 1e-9);
-
-        assert_eq!(analyses.len(), 1);
-        assert_eq!(analyses[0].kind, AnalysisKind::Ac);
-        // AC params: npoints=10, fstart=1, fstop=1G.
-        assert_eq!(analyses[0].params.len(), 3);
-    }
-
-    #[test]
-    fn parse_nmos_amplifier() {
-        let netlist = "\
-* NMOS amplifier
-VDD 1 0 DC 3.3
-VIN 2 0 DC 0.7
-M1 3 2 0 0 NMOD W=10u L=1u
-R1 1 3 10k
-.MODEL NMOD NMOS (VTH0=0.5 KP=120u)
-.OP
-.END
-";
-        let (circuit, analyses, _opts) = SpiceParser::parse(netlist).unwrap();
-
-        assert_eq!(circuit.devices().len(), 4); // VDD, VIN, M1, R1
-
-        // Check VDD.
-        let vdd = circuit.find_device("vdd").unwrap();
-        assert_eq!(vdd.kind, DeviceKind::VoltageSource);
-        assert_param_approx(vdd, "dc", 3.3);
-
-        // Check VIN.
-        let vin = circuit.find_device("vin").unwrap();
-        assert_param_approx(vin, "dc", 0.7);
-
-        // Check M1 — should be NMOS with model params applied.
-        let m1 = circuit.find_device("m1").unwrap();
-        assert_eq!(m1.kind, DeviceKind::MosfetN);
-        assert_eq!(m1.terminal_count(), 4);
-        assert_param_approx(m1, "w", 10e-6);
-        assert_param_approx(m1, "l", 1e-6);
-        // Model params: vth0 and kp should be inherited.
-        assert_param_approx(m1, "vth0", 0.5);
-        assert_param_approx(m1, "kp", 120e-6);
-
-        // Check R1.
-        let r1 = circuit.find_device("r1").unwrap();
-        assert_param_approx(r1, "resistance", 10e3);
-
-        // Nodes: GND(0), 1, 2, 3.
-        assert_eq!(circuit.nodes().len(), 4);
-
-        assert_eq!(analyses.len(), 1);
-        assert_eq!(analyses[0].kind, AnalysisKind::DcOp);
-    }
-
-    #[test]
-    fn parse_with_comments_and_continuations() {
-        let netlist = "\
-* Test circuit with comments
-* This is another comment
-V1 1 0
-+ DC 5
-R1 1 2 1k ; inline comment
-R2 2 0 2k
-.OP
-.END
-";
-        let (circuit, _analyses, _opts) = SpiceParser::parse(netlist).unwrap();
-
-        let v1 = circuit.find_device("v1").unwrap();
-        assert_param_approx(v1, "dc", 5.0);
-
-        let r1 = circuit.find_device("r1").unwrap();
-        assert_param_approx(r1, "resistance", 1e3);
-
-        let r2 = circuit.find_device("r2").unwrap();
-        assert_param_approx(r2, "resistance", 2e3);
-    }
-
-    #[test]
-    fn parse_tran_analysis() {
-        let netlist = "\
-* Transient test
-V1 1 0 DC 5
-R1 1 0 1k
-.TRAN 1n 100n
-.END
-";
-        let (_circuit, analyses, _opts) = SpiceParser::parse(netlist).unwrap();
-        assert_eq!(analyses.len(), 1);
-        assert_eq!(analyses[0].kind, AnalysisKind::Tran);
-        assert_eq!(analyses[0].params.len(), 2);
-        // tstep = 1n, tstop = 100n — use approximate comparison for SI values.
-        assert_eq!(analyses[0].params[0].0, "tstep");
-        assert!(approx_eq(analyses[0].params[0].1, 1e-9));
-        assert_eq!(analyses[0].params[1].0, "tstop");
-        assert!(approx_eq(analyses[0].params[1].1, 100e-9));
-    }
-
-    #[test]
-    fn parse_dc_sweep() {
-        let netlist = "\
-* DC sweep test
-V1 1 0 DC 0
-R1 1 0 1k
-.DC V1 0 5 0.1
-.END
-";
-        let (_circuit, analyses, _opts) = SpiceParser::parse(netlist).unwrap();
-        assert_eq!(analyses.len(), 1);
-        assert_eq!(analyses[0].kind, AnalysisKind::DcSweep);
-        assert_eq!(analyses[0].params.len(), 3);
-    }
-
-    #[test]
-    fn parse_diode_circuit() {
-        let netlist = "\
-* Diode test
-V1 1 0 DC 5
-R1 1 2 1k
-D1 2 0 DMOD
-.MODEL DMOD D (IS=1e-14 N=1)
-.OP
-.END
-";
-        let (circuit, _analyses, _opts) = SpiceParser::parse(netlist).unwrap();
-
-        let d1 = circuit.find_device("d1").unwrap();
-        assert_eq!(d1.kind, DeviceKind::Diode);
-        assert_eq!(d1.terminal_count(), 2);
-        assert_param_approx(d1, "is", 1e-14);
-        assert_param_approx(d1, "n", 1.0);
-    }
-
-    #[test]
-    fn parse_vcvs_circuit() {
-        let netlist = "\
-* VCVS test
-V1 1 0 DC 1
-R1 1 0 1k
-E1 3 0 1 0 10
-R2 3 0 1k
-.OP
-.END
-";
-        let (circuit, _analyses, _opts) = SpiceParser::parse(netlist).unwrap();
-
-        let e1 = circuit.find_device("e1").unwrap();
-        assert_eq!(e1.kind, DeviceKind::Vcvs);
-        assert_eq!(e1.terminal_count(), 4);
-        assert_param_approx(e1, "gain", 10.0);
-        assert!(e1.needs_branch());
-    }
-
-    #[test]
-    fn parse_pmos_circuit() {
-        let netlist = "\
-* PMOS test
-VDD 1 0 DC 3.3
-M1 2 3 1 1 PMOD W=20u L=0.5u
-R1 2 0 10k
-.MODEL PMOD PMOS (VTH0=-0.5 KP=60u)
-.OP
-.END
-";
-        let (circuit, _analyses, _opts) = SpiceParser::parse(netlist).unwrap();
-
-        let m1 = circuit.find_device("m1").unwrap();
-        assert_eq!(m1.kind, DeviceKind::MosfetP);
-        assert_param_approx(m1, "w", 20e-6);
-        assert_param_approx(m1, "l", 0.5e-6);
-        assert_param_approx(m1, "vth0", -0.5);
-    }
-
-    #[test]
-    fn parse_multiple_analyses() {
-        let netlist = "\
-* Multi-analysis
-V1 1 0 DC 1 AC 1
-R1 1 0 1k
-.OP
-.AC DEC 10 1 1G
-.END
-";
-        let (_circuit, analyses, _opts) = SpiceParser::parse(netlist).unwrap();
-        assert_eq!(analyses.len(), 2);
-        assert_eq!(analyses[0].kind, AnalysisKind::DcOp);
-        assert_eq!(analyses[1].kind, AnalysisKind::Ac);
-    }
-
-    #[test]
-    fn parse_param_directive() {
-        let netlist = "\
-* Param test
-.PARAM VDD=3.3
-V1 1 0 DC 3.3
-R1 1 0 1k
-.OP
-.END
-";
-        let (circuit, _analyses, _opts) = SpiceParser::parse(netlist).unwrap();
-        // Just verify it parses without error and devices are correct.
-        assert_eq!(circuit.devices().len(), 2);
-    }
-
-    #[test]
-    fn parse_inductor() {
-        let netlist = "\
-* Inductor test
-V1 1 0 DC 5
-L1 1 2 10u
-R1 2 0 100
-.OP
-.END
-";
-        let (circuit, _analyses, _opts) = SpiceParser::parse(netlist).unwrap();
-
-        let l1 = circuit.find_device("l1").unwrap();
-        assert_eq!(l1.kind, DeviceKind::Inductor);
-        assert_param_approx(l1, "inductance", 10e-6);
-        assert!(l1.needs_branch());
-    }
-
-    #[test]
-    fn parse_case_insensitive() {
-        let netlist = "\
-* Case test
-v1 1 0 dc 5
-r1 1 2 1K
-R2 2 0 1k
-.op
-.end
-";
-        let (circuit, analyses, _opts) = SpiceParser::parse(netlist).unwrap();
-        assert_eq!(circuit.devices().len(), 3);
-        assert_eq!(analyses.len(), 1);
-    }
-
-    #[test]
-    fn parse_topology_built() {
-        let netlist = "\
-* Topology test
-V1 1 0 DC 5
-R1 1 2 1k
-R2 2 0 1k
-.OP
-.END
-";
-        let (circuit, _analyses, _opts) = SpiceParser::parse(netlist).unwrap();
-        let topo = circuit.topology().unwrap();
-        assert!(topo.nnz() > 0);
-    }
-
-    #[test]
-    fn parse_node_name_aliases() {
-        let netlist = "\
-* Node alias test
-V1 vdd gnd DC 3.3
-R1 vdd out 1k
-R2 out 0 1k
-.OP
-.END
-";
-        let (circuit, _analyses, _opts) = SpiceParser::parse(netlist).unwrap();
-        // "0" is always ground (registered in Circuit::new).
-        assert_eq!(circuit.find_node("0"), Some(NodeId::GROUND));
-        // "vdd" and "out" are regular nodes.
-        assert!(circuit.find_node("vdd").is_some());
-        assert!(circuit.find_node("out").is_some());
-        assert_ne!(circuit.find_node("vdd"), Some(NodeId::GROUND));
-        assert_ne!(circuit.find_node("out"), Some(NodeId::GROUND));
-        // Verify the circuit has correct node count: GND + vdd + out = 3.
-        assert_eq!(circuit.nodes().len(), 3);
-        // Verify V1 connects vdd to ground.
-        let v1 = circuit.find_device("v1").unwrap();
-        assert!(v1.node(1).unwrap().is_ground());
-    }
-
-    #[test]
-    fn parse_empty_netlist() {
-        let netlist = "\
-* Empty circuit
-.END
-";
-        let (circuit, analyses, _opts) = SpiceParser::parse(netlist).unwrap();
-        assert_eq!(circuit.devices().len(), 0);
-        assert!(analyses.is_empty());
-    }
-
-    #[test]
-    fn parse_vccs_circuit() {
-        let netlist = "\
-* VCCS test
-V1 1 0 DC 1
-G1 2 0 1 0 0.001
-R1 2 0 1k
-.OP
-.END
-";
-        let (circuit, _analyses, _opts) = SpiceParser::parse(netlist).unwrap();
-
-        let g1 = circuit.find_device("g1").unwrap();
-        assert_eq!(g1.kind, DeviceKind::Vccs);
-        assert_eq!(g1.terminal_count(), 4);
-        assert_param_approx(g1, "gm", 0.001);
-    }
-
-    // -----------------------------------------------------------------------
-    // Waveform parsing tests
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn parse_pulse_waveform() {
-        let netlist = "\
-* PULSE waveform
-V1 1 0 PULSE(0 5 1u 1n 1n 10u 20u)
-R1 1 0 1k
-.TRAN 1n 100n
-.END
-";
-        let (circuit, _analyses, _opts) = SpiceParser::parse(netlist).unwrap();
-        let v1 = circuit.find_device("v1").unwrap();
-        // waveform_kind = 1 (PULSE)
-        assert_param_approx(v1, "waveform_kind", 1.0);
-        assert_param_approx(v1, "pulse_v1", 0.0);
-        assert_param_approx(v1, "pulse_v2", 5.0);
-        assert!(approx_eq(v1.params.get_or("pulse_td", -1.0), 1e-6));
-        assert!(approx_eq(v1.params.get_or("pulse_pw", -1.0), 10e-6));
-        assert!(approx_eq(v1.params.get_or("pulse_per", -1.0), 20e-6));
-    }
-
-    #[test]
-    fn parse_sin_waveform() {
-        let netlist = "\
-* SIN waveform
-V1 1 0 SIN(0 1 1k 0 0)
-R1 1 0 1k
-.TRAN 1u 1m
-.END
-";
-        let (circuit, _analyses, _opts) = SpiceParser::parse(netlist).unwrap();
-        let v1 = circuit.find_device("v1").unwrap();
-        assert_param_approx(v1, "waveform_kind", 2.0);
-        assert_param_approx(v1, "sin_vo", 0.0);
-        assert_param_approx(v1, "sin_va", 1.0);
-        assert!(approx_eq(v1.params.get_or("sin_freq", -1.0), 1e3));
-    }
-
-    #[test]
-    fn parse_pwl_waveform() {
-        let netlist = "\
-* PWL waveform
-V1 1 0 PWL(0 0 1u 5 2u 5 3u 0)
-R1 1 0 1k
-.TRAN 100n 4u
-.END
-";
-        let (circuit, _analyses, _opts) = SpiceParser::parse(netlist).unwrap();
-        let v1 = circuit.find_device("v1").unwrap();
-        assert_param_approx(v1, "waveform_kind", 3.0);
-        assert_param_approx(v1, "pwl_count", 4.0);
-        assert_param_approx(v1, "pwl_t0", 0.0);
-        assert_param_approx(v1, "pwl_v0", 0.0);
-        assert!(approx_eq(v1.params.get_or("pwl_t1", -1.0), 1e-6));
-        assert_param_approx(v1, "pwl_v1", 5.0);
-        assert!(approx_eq(v1.params.get_or("pwl_t3", -1.0), 3e-6));
-        assert_param_approx(v1, "pwl_v3", 0.0);
-    }
-
-    #[test]
-    fn parse_pulse_with_dc_prefix() {
-        // DC value + PULSE waveform on the same line — both should be captured.
-        let netlist = "\
-* DC + PULSE
-V1 1 0 DC 0 PULSE(0 5 0 1n 1n 5u 10u)
-R1 1 0 1k
-.TRAN 1n 50n
-.END
-";
-        let (circuit, _analyses, _opts) = SpiceParser::parse(netlist).unwrap();
-        let v1 = circuit.find_device("v1").unwrap();
-        assert_param_approx(v1, "dc", 0.0);
-        assert_param_approx(v1, "waveform_kind", 1.0);
-        assert_param_approx(v1, "pulse_v2", 5.0);
-    }
-
-    #[test]
-    fn parse_isource_sin_waveform() {
-        let netlist = "\
-* Current source with SIN
-I1 0 1 SIN(0 1m 1k)
-R1 1 0 1k
-.TRAN 10u 1m
-.END
-";
-        let (circuit, _analyses, _opts) = SpiceParser::parse(netlist).unwrap();
-        let i1 = circuit.find_device("i1").unwrap();
-        assert_param_approx(i1, "waveform_kind", 2.0);
-        assert_param_approx(i1, "sin_va", 1e-3);
-        assert!(approx_eq(i1.params.get_or("sin_freq", -1.0), 1e3));
-    }
-
-    #[test]
-    fn parse_sffm_waveform() {
-        let netlist = "\
-* SFFM waveform
-V1 1 0 SFFM(0 1 1k 5 100)
-R1 1 0 1k
-.TRAN 1u 10m
-.END
-";
-        let (circuit, _analyses, _opts) = SpiceParser::parse(netlist).unwrap();
-        let v1 = circuit.find_device("v1").unwrap();
-        assert_param_approx(v1, "waveform_kind", 5.0);
-        assert_param_approx(v1, "sffm_vo", 0.0);
-        assert_param_approx(v1, "sffm_va", 1.0);
-        assert!(approx_eq(v1.params.get_or("sffm_fc", -1.0), 1e3));
-        assert_param_approx(v1, "sffm_mdi", 5.0);
-        assert_param_approx(v1, "sffm_fs", 100.0);
-    }
-
-    #[test]
-    fn parse_am_waveform() {
-        let netlist = "\
-* AM waveform
-V1 1 0 AM(0.5 1 1k 100k 0)
-R1 1 0 1k
-.TRAN 1n 100u
-.END
-";
-        let (circuit, _analyses, _opts) = SpiceParser::parse(netlist).unwrap();
-        let v1 = circuit.find_device("v1").unwrap();
-        assert_param_approx(v1, "waveform_kind", 7.0);
-        assert_param_approx(v1, "am_vo", 0.5);
-        assert_param_approx(v1, "am_va", 1.0);
-        assert!(approx_eq(v1.params.get_or("am_fc", -1.0), 1e3));
-        assert!(approx_eq(v1.params.get_or("am_freq", -1.0), 100e3));
-        assert_param_approx(v1, "am_td", 0.0);
-    }
-
-    #[test]
-    fn parse_trnoise_waveform() {
-        let netlist = "\
-* TRNOISE waveform
-V1 1 0 TRNOISE(1m 10n 0 0 100n)
-R1 1 0 1k
-.TRAN 1n 1u
-.END
-";
-        let (circuit, _analyses, _opts) = SpiceParser::parse(netlist).unwrap();
-        let v1 = circuit.find_device("v1").unwrap();
-        assert_param_approx(v1, "waveform_kind", 8.0);
-        assert!(approx_eq(v1.params.get_or("trnoise_na", -1.0), 1e-3));
-        assert!(approx_eq(v1.params.get_or("trnoise_nt", -1.0), 10e-9));
-        assert_param_approx(v1, "trnoise_nalpha", 0.0);
-        assert_param_approx(v1, "trnoise_namp", 0.0);
-        assert!(approx_eq(v1.params.get_or("trnoise_td", -1.0), 100e-9));
-    }
-
-    #[test]
-    fn parse_trrandom_waveform() {
-        let netlist = "\
-* TRRANDOM waveform — uniform
-V1 1 0 TRRANDOM(1 1u 0 2 0)
-R1 1 0 1k
-.TRAN 100n 10u
-.END
-";
-        let (circuit, _analyses, _opts) = SpiceParser::parse(netlist).unwrap();
-        let v1 = circuit.find_device("v1").unwrap();
-        assert_param_approx(v1, "waveform_kind", 9.0);
-        assert_param_approx(v1, "trrandom_kind", 1.0);
-        assert!(approx_eq(v1.params.get_or("trrandom_tstep", -1.0), 1e-6));
-        assert_param_approx(v1, "trrandom_td", 0.0);
-        assert_param_approx(v1, "trrandom_param", 2.0);
-        assert_param_approx(v1, "trrandom_mean", 0.0);
-    }
-
-    #[test]
-    fn parse_pwl_repeat_waveform() {
-        let netlist = "\
-* PWL R= waveform
-V1 1 0 PWL(0 0 1u 5 2u 0) R=0
-R1 1 0 1k
-.TRAN 100n 10u
-.END
-";
-        let (circuit, _analyses, _opts) = SpiceParser::parse(netlist).unwrap();
-        let v1 = circuit.find_device("v1").unwrap();
-        assert_param_approx(v1, "waveform_kind", 10.0);
-        assert_param_approx(v1, "pwl_count", 3.0);
-        assert_param_approx(v1, "pwl_r", 0.0);
-        assert!(approx_eq(v1.params.get_or("pwl_t1", -1.0), 1e-6));
-        assert_param_approx(v1, "pwl_v1", 5.0);
-        assert!(approx_eq(v1.params.get_or("pwl_t2", -1.0), 2e-6));
-        assert_param_approx(v1, "pwl_v2", 0.0);
-    }
-
-    #[test]
-    fn parse_pwl_repeat_nonzero_offset() {
-        // R=1u means the repeating window starts at t=1u in the PWL table.
-        let netlist = "\
-* PWL R=1u
-V1 1 0 PWL(0 0 1u 5 3u 0) R=1u
-R1 1 0 1k
-.TRAN 100n 20u
-.END
-";
-        let (circuit, _analyses, _opts) = SpiceParser::parse(netlist).unwrap();
-        let v1 = circuit.find_device("v1").unwrap();
-        assert_param_approx(v1, "waveform_kind", 10.0);
-        assert!(approx_eq(v1.params.get_or("pwl_r", -1.0), 1e-6));
-    }
-
-    // -----------------------------------------------------------------------
-    // .INCLUDE and .LIB tests
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn parse_include_directive() {
-        // Write a child file containing R1.
-        let dir = tempfile::tempdir().unwrap();
-        let child_path = dir.path().join("child.sp");
-        std::fs::write(&child_path, "R1 1 0 1k\n").unwrap();
-
-        // Parent file .INCLUDEs the child.
-        let parent_path = dir.path().join("parent.sp");
-        let parent_content = format!(
-            "* Parent\n.INCLUDE \"{}\"\n.OP\n.END\n",
-            child_path.display()
-        );
-        std::fs::write(&parent_path, &parent_content).unwrap();
-
-        let (circuit, _, _opts) = SpiceParser::parse_file(&parent_path).unwrap();
-        let r1 = circuit.find_device("r1").expect("R1 should be present after .INCLUDE");
-        assert_param_approx(r1, "resistance", 1e3);
-    }
-
-    #[test]
-    fn parse_include_relative_path() {
-        // Child in a subdirectory; parent uses a relative path.
-        let dir = tempfile::tempdir().unwrap();
-        let sub = dir.path().join("sub");
-        std::fs::create_dir(&sub).unwrap();
-        let child_path = sub.join("child.sp");
-        std::fs::write(&child_path, "R2 2 0 2k\n").unwrap();
-
-        let parent_path = dir.path().join("top.sp");
-        std::fs::write(
-            &parent_path,
-            "* Top\n.INCLUDE \"sub/child.sp\"\n.OP\n.END\n",
-        )
-        .unwrap();
-
-        let (circuit, _, _opts) = SpiceParser::parse_file(&parent_path).unwrap();
-        let r2 = circuit.find_device("r2").expect("R2 should be present");
-        assert_param_approx(r2, "resistance", 2e3);
-    }
-
-    #[test]
-    fn parse_include_cycle_detected() {
-        // A.sp includes B.sp, B.sp includes A.sp → cycle error.
-        let dir = tempfile::tempdir().unwrap();
-        let a_path = dir.path().join("a.sp");
-        let b_path = dir.path().join("b.sp");
-
-        std::fs::write(
-            &a_path,
-            format!("* A\n.INCLUDE \"{}\"\n.END\n", b_path.display()),
-        )
-        .unwrap();
-        std::fs::write(
-            &b_path,
-            format!("* B\n.INCLUDE \"{}\"\n.END\n", a_path.display()),
-        )
-        .unwrap();
-
-        let err = SpiceParser::parse_file(&a_path).unwrap_err();
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("include cycle detected"),
-            "expected cycle error, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn parse_lib_directive() {
-        // Library file with two sections: TT and SS.
-        let dir = tempfile::tempdir().unwrap();
-        let lib_path = dir.path().join("models.lib");
-        std::fs::write(
-            &lib_path,
-            "\
-.LIB TT
-R_TT 1 0 1k
-.ENDL TT
-.LIB SS
-R_SS 1 0 500
-.ENDL SS
-",
-        )
-        .unwrap();
-
-        // Netlist that requests only the TT section.
-        let top_path = dir.path().join("top.sp");
-        std::fs::write(
-            &top_path,
-            format!(
-                "* Top\n.LIB \"{}\" TT\n.OP\n.END\n",
-                lib_path.display()
-            ),
-        )
-        .unwrap();
-
-        let (circuit, _, _opts) = SpiceParser::parse_file(&top_path).unwrap();
-        // R_TT from the TT section should be present.
-        assert!(
-            circuit.find_device("r_tt").is_some(),
-            "R_TT from TT section should be present"
-        );
-        // R_SS from the SS section should NOT be present.
-        assert!(
-            circuit.find_device("r_ss").is_none(),
-            "R_SS from SS section should not be present"
-        );
-    }
-
-    #[test]
-    fn parse_include_quoted_and_unquoted() {
-        // Both .INCLUDE "x.sp" and .INCLUDE x.sp should work.
-        let dir = tempfile::tempdir().unwrap();
-        let child_path = dir.path().join("x.sp");
-        std::fs::write(&child_path, "R3 3 0 3k\n").unwrap();
-
-        // Quoted form.
-        let quoted_path = dir.path().join("quoted.sp");
-        std::fs::write(
-            &quoted_path,
-            format!(
-                "* Quoted\n.INCLUDE \"{}\"\n.OP\n.END\n",
-                child_path.display()
-            ),
-        )
-        .unwrap();
-        let (circuit, _, _opts) = SpiceParser::parse_file(&quoted_path).unwrap();
-        assert!(circuit.find_device("r3").is_some(), "R3 via quoted include");
-
-        // Unquoted form (absolute path without quotes).
-        let unquoted_path = dir.path().join("unquoted.sp");
-        std::fs::write(
-            &unquoted_path,
-            format!(
-                "* Unquoted\n.INCLUDE {}\n.OP\n.END\n",
-                child_path.display()
-            ),
-        )
-        .unwrap();
-        let (circuit2, _, _opts2) = SpiceParser::parse_file(&unquoted_path).unwrap();
-        assert!(circuit2.find_device("r3").is_some(), "R3 via unquoted include");
-    }
-
-    // -----------------------------------------------------------------------
-    // .OPTIONS tests
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn parse_options_basic() {
-        let netlist = "\
-* Options test
-V1 1 0 DC 1
-R1 1 0 1k
-.OPTIONS abstol=1e-15 reltol=1e-4 gmin=1e-10
-.OP
-.END
-";
-        let (_, _, opts) = SpiceParser::parse(netlist).unwrap();
-        assert_eq!(opts.abstol, 1e-15);
-        assert_eq!(opts.reltol, 1e-4);
-        assert_eq!(opts.gmin, 1e-10);
-        // Unchanged defaults.
-        assert_eq!(opts.vntol, 1e-6);
-        assert_eq!(opts.itl1, 100);
-    }
-
-    #[test]
-    fn parse_options_method_gear() {
-        let netlist = "\
-* Method test
-V1 1 0 DC 1
-R1 1 0 1k
-.OPTIONS method=gear
-.TRAN 1n 1u
-.END
-";
-        let (_, _, opts) = SpiceParser::parse(netlist).unwrap();
-        assert_eq!(opts.method, pisim_core::IntegrationMethod::Gear);
-    }
-
-    #[test]
-    fn parse_options_multiple_directives_accumulate() {
-        let netlist = "\
-* Multiple .OPTIONS test
-V1 1 0 DC 1
-R1 1 0 1k
-.OPTIONS abstol=1e-15 reltol=1e-4
-.OPTIONS gmin=1e-10 reltol=1e-5
-.OP
-.END
-";
-        let (_, _, opts) = SpiceParser::parse(netlist).unwrap();
-        // Second .OPTIONS overrides reltol.
-        assert_eq!(opts.reltol, 1e-5);
-        // First .OPTIONS set abstol; second didn't touch it.
-        assert_eq!(opts.abstol, 1e-15);
-        // Second .OPTIONS set gmin.
-        assert_eq!(opts.gmin, 1e-10);
-    }
-
-    #[test]
-    fn parse_options_unknown_key_ignored() {
-        let netlist = "\
-* Unknown key test
-V1 1 0 DC 1
-R1 1 0 1k
-.OPTIONS abstol=1e-15 nonsense=42
-.OP
-.END
-";
-        let (_, _, opts) = SpiceParser::parse(netlist).unwrap();
-        assert_eq!(opts.abstol, 1e-15);
-        // Default is unchanged for everything else.
-        assert_eq!(opts.reltol, 1e-3);
-    }
-
-    #[test]
-    fn parse_options_case_insensitive() {
-        let netlist = "\
-* Case insensitive test
-V1 1 0 DC 1
-R1 1 0 1k
-.OPTIONS ABSTOL=1e-15 Method=Gear
-.OP
-.END
-";
-        let (_, _, opts) = SpiceParser::parse(netlist).unwrap();
-        assert_eq!(opts.abstol, 1e-15);
-        assert_eq!(opts.method, pisim_core::IntegrationMethod::Gear);
-    }
-
-    // -----------------------------------------------------------------------
-    // Task A — Subcircuit expansion tests
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn parse_subckt_instance_simple() {
-        // A 2-port "divider" subcircuit with two resistors.
-        let netlist = "\
-* Subcircuit expansion simple
-.SUBCKT divider a b
-R1 a mid 1k
-R2 mid b 1k
-.ENDS
-Xdiv top bot divider
-V1 top 0 DC 5
-.OP
-.END
-";
-        let (circuit, _analyses, _opts) = SpiceParser::parse(netlist).unwrap();
-
-        // Both resistors should appear with mangled names.
-        assert!(
-            circuit.find_device("xdiv.r1").is_some(),
-            "expected xdiv.r1 in circuit"
-        );
-        assert!(
-            circuit.find_device("xdiv.r2").is_some(),
-            "expected xdiv.r2 in circuit"
-        );
-
-        // xdiv.r1 connects top (port a) to the internal mangled node xdiv.mid.
-        let r1 = circuit.find_device("xdiv.r1").unwrap();
-        let top_id = circuit.find_node("top").unwrap();
-        let mid_id = circuit.find_node("xdiv.mid").unwrap();
-        assert_eq!(r1.terminals[0].node, top_id, "r1 positive node should be 'top'");
-        assert_eq!(r1.terminals[1].node, mid_id, "r1 negative node should be 'xdiv.mid'");
-    }
-
-    #[test]
-    fn parse_subckt_instance_node_mangling() {
-        // Internal node `mid` inside subckt body becomes `xfoo.mid` after instantiation.
-        let netlist = "\
-* Node mangling test
-.SUBCKT halfbridge p n
-R1 p mid 500
-R2 mid n 500
-.ENDS
-Xfoo vdd vss halfbridge
-V1 vdd 0 DC 3.3
-.OP
-.END
-";
-        let (circuit, _analyses, _opts) = SpiceParser::parse(netlist).unwrap();
-
-        // Internal node 'mid' should be mangled to 'xfoo.mid'.
-        assert!(
-            circuit.find_node("xfoo.mid").is_some(),
-            "internal node 'mid' should be mangled to 'xfoo.mid'"
-        );
-        // The port-connected node 'vdd' should NOT be mangled.
-        assert!(
-            circuit.find_node("vdd").is_some(),
-            "port node 'vdd' should remain as 'vdd'"
-        );
-        assert!(
-            circuit.find_node("xfoo.vdd").is_none(),
-            "port node should not be double-mangled to 'xfoo.vdd'"
-        );
-    }
-
-    #[test]
-    fn parse_subckt_instance_arity_mismatch() {
-        // Wrong number of connection nodes should return Err.
-        let netlist = "\
-* Arity mismatch test
-.SUBCKT inv in out vdd vss
-R1 in out 1k
-.ENDS
-Xinv1 a b inv
-.OP
-.END
-";
-        let result = SpiceParser::parse(netlist);
-        assert!(result.is_err(), "expected error for arity mismatch");
-        let msg = format!("{:?}", result.unwrap_err());
-        assert!(
-            msg.contains("ports") || msg.contains("port") || msg.contains("2") || msg.contains("4"),
-            "error message should mention port count mismatch: {msg}"
-        );
-    }
-
-    #[test]
-    fn parse_subckt_nested() {
-        // Subcircuit A contains `xb ... B`; subcircuit B has one resistor.
-        // Instantiating A yields the resistor with fully-mangled name xa.xb.<origname>.
-        let netlist = "\
-* Nested subcircuit test
-.SUBCKT B p n
-R1 p n 1k
-.ENDS
-.SUBCKT A p n
-Xb p n B
-.ENDS
-Xa top bot A
-V1 top 0 DC 5
-.OP
-.END
-";
-        let (circuit, _analyses, _opts) = SpiceParser::parse(netlist).unwrap();
-
-        // The resistor inside B, instantiated via xa.xb, should appear as xa.xb.r1.
-        assert!(
-            circuit.find_device("xa.xb.r1").is_some(),
-            "expected nested device 'xa.xb.r1' in circuit, devices: {:?}",
-            circuit.devices().iter().map(|d| &d.name).collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn parse_subckt_cycle_detected() {
-        // A instantiates B, B instantiates A — should return Err with "cycle".
-        let netlist = "\
-* Cycle detection test
-.SUBCKT A p n
-Xb p n B
-.ENDS
-.SUBCKT B p n
-Xa p n A
-.ENDS
-Xinst top bot A
-.OP
-.END
-";
-        let result = SpiceParser::parse(netlist);
-        assert!(result.is_err(), "expected error for subcircuit cycle");
-        let msg = format!("{:?}", result.unwrap_err());
-        assert!(
-            msg.to_lowercase().contains("cycle"),
-            "error should mention 'cycle': {msg}"
-        );
-    }
-
-    #[test]
-    fn parse_subckt_case_insensitive() {
-        // .SUBCKT INV defined in uppercase, instantiated as `xinv1 a b inv` (lowercase).
-        let netlist = "\
-* Case insensitive subcircuit lookup
-.SUBCKT INV in out
-R1 in out 1k
-.ENDS
-Xinv1 a b inv
-V1 a 0 DC 1
-.OP
-.END
-";
-        let (circuit, _analyses, _opts) = SpiceParser::parse(netlist).unwrap();
-        assert!(
-            circuit.find_device("xinv1.r1").is_some(),
-            "expected 'xinv1.r1' from case-insensitive lookup"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // Task B — .IC / .NODESET / .GLOBAL / .TEMP tests
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn parse_ic_directive() {
-        // .IC v(out)=2.5 v(in)=0
-        let netlist = "\
-* IC directive test
-V1 in 0 DC 5
-R1 in out 1k
-R2 out 0 1k
-.IC v(out)=2.5 v(in)=0
-.OP
-.END
-";
-        let (circuit, _analyses, _opts) = SpiceParser::parse(netlist).unwrap();
-        let ics = circuit.initial_conditions();
-        assert_eq!(ics.len(), 2, "expected 2 initial conditions, got {}", ics.len());
-
-        let out_id = circuit.find_node("out").unwrap();
-        let in_id = circuit.find_node("in").unwrap();
-
-        let out_ic = ics.iter().find(|(n, _)| *n == out_id);
-        let in_ic = ics.iter().find(|(n, _)| *n == in_id);
-
-        assert!(out_ic.is_some(), "expected IC for node 'out'");
-        assert!(in_ic.is_some(), "expected IC for node 'in'");
-        assert_eq!(out_ic.unwrap().1, 2.5);
-        assert_eq!(in_ic.unwrap().1, 0.0);
-    }
-
-    #[test]
-    fn parse_nodeset_directive() {
-        // .NODESET v(out)=1.0
-        let netlist = "\
-* NODESET directive test
-V1 in 0 DC 5
-R1 in out 1k
-R2 out 0 1k
-.NODESET v(out)=1.0
-.OP
-.END
-";
-        let (circuit, _analyses, _opts) = SpiceParser::parse(netlist).unwrap();
-        let ns = circuit.node_sets();
-        assert_eq!(ns.len(), 1, "expected 1 nodeset, got {}", ns.len());
-        let out_id = circuit.find_node("out").unwrap();
-        assert_eq!(ns[0].0, out_id);
-        assert_eq!(ns[0].1, 1.0);
-    }
-
-    #[test]
-    fn parse_global_directive() {
-        // .GLOBAL vdd vss — verify names land in circuit.globals() and subckt expansion works.
-        let netlist = "\
-* Global directive test
-.GLOBAL vdd vss
-.SUBCKT inv in out
-R1 in out 1k
-.ENDS
-Xinv1 a b inv
-V1 a 0 DC 1
-.OP
-.END
-";
-        let (circuit, _analyses, _opts) = SpiceParser::parse(netlist).unwrap();
-        // Subcircuit device should exist (expansion works).
-        assert!(circuit.find_device("xinv1.r1").is_some());
-        // Global names must be persisted in the circuit.
-        let globals = circuit.globals();
-        assert!(globals.contains(&"vdd".to_string()), "circuit.globals() missing 'vdd': {globals:?}");
-        assert!(globals.contains(&"vss".to_string()), "circuit.globals() missing 'vss': {globals:?}");
-    }
-
-    #[test]
-    fn parse_global_subckt_no_mangling() {
-        // .GLOBAL vdd — a device inside the subckt that connects to vdd should connect to
-        // the parent's vdd node (not xfoo.vdd) after expansion.
-        let netlist = "\
-* Global no-mangle test
-.GLOBAL vdd
-.SUBCKT buf in out
-R1 in out 1k
-R2 out vdd 500
-.ENDS
-Xfoo sig sigout buf
-Vdd vdd 0 DC 3.3
-.OP
-.END
-";
-        let (circuit, _analyses, _opts) = SpiceParser::parse(netlist).unwrap();
-
-        // 'vdd' should exist as the parent node, not 'xfoo.vdd'.
-        let vdd_id = circuit.find_node("vdd");
-        assert!(vdd_id.is_some(), "global node 'vdd' should exist in circuit");
-        assert!(
-            circuit.find_node("xfoo.vdd").is_none(),
-            "global node 'vdd' should not be mangled to 'xfoo.vdd'"
-        );
-
-        // xfoo.r2 should have vdd as its positive node.
-        let r2 = circuit.find_device("xfoo.r2").unwrap();
-        assert_eq!(
-            r2.terminals[1].node,
-            vdd_id.unwrap(),
-            "xfoo.r2 should connect to global vdd node"
-        );
-    }
-
-    #[test]
-    fn parse_temp_directive_single() {
-        // .TEMP 27 — should be stored as 300.15 K in circuit.temperatures().
-        let netlist = "\
-* TEMP directive single
-V1 1 0 DC 1
-R1 1 0 1k
-.TEMP 27
-.OP
-.END
-";
-        let (circuit, _analyses, _opts) = SpiceParser::parse(netlist).unwrap();
-        let temps = circuit.temperatures();
-        assert_eq!(temps.len(), 1);
-        let diff = (temps[0] - 300.15_f64).abs();
-        assert!(diff < 1e-9, "expected 300.15 K, got {}", temps[0]);
-    }
-
-    #[test]
-    fn parse_temp_directive_multiple() {
-        // .TEMP 0 27 100 — three Kelvin values.
-        let netlist = "\
-* TEMP directive multiple
-V1 1 0 DC 1
-R1 1 0 1k
-.TEMP 0 27 100
-.OP
-.END
-";
-        let (circuit, _analyses, _opts) = SpiceParser::parse(netlist).unwrap();
-        let temps = circuit.temperatures();
-        assert_eq!(temps.len(), 3, "expected 3 temperatures");
-        let expected = [273.15_f64, 300.15, 373.15];
-        for (got, exp) in temps.iter().zip(expected.iter()) {
-            let diff = (got - exp).abs();
-            assert!(diff < 1e-9, "expected {exp} K, got {got}");
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Feature 1 — PARAMS: keyword on X lines
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn parse_x_line_params_keyword() {
-        // XFOO a b inv PARAMS: W=1u L=100n should parse identically to
-        // XFOO a b inv W=1u L=100n (nodes a, b connect to subckt inv).
-        let netlist = "\
-* PARAMS: keyword test
-.SUBCKT inv in out
-R1 in out 1k
-.ENDS
-Xfoo a b inv PARAMS: W=1u L=100n
-V1 a 0 DC 1
-.OP
-.END
-";
-        let result = SpiceParser::parse(netlist);
-        assert!(result.is_ok(), "parse failed: {:?}", result.err());
-        let (circuit, _, _) = result.unwrap();
-        assert!(circuit.find_device("xfoo.r1").is_some(), "xfoo.r1 should exist");
-    }
-
-    #[test]
-    fn parse_x_line_params_without_colon() {
-        // Also test bare PARAMS (no colon) which arrives the same way after lexer strips ':'.
-        let netlist = "\
-* PARAMS without colon test
-.SUBCKT buf in out
-R1 in out 500
-.ENDS
-Xbuf1 net1 net2 buf PARAMS W=2u
-V1 net1 0 DC 3
-.OP
-.END
-";
-        // This should parse without error (W=2u is silently dropped but no crash).
-        let result = SpiceParser::parse(netlist);
-        assert!(result.is_ok(), "parse with PARAMS (no colon) failed: {:?}", result.err());
-    }
-
-    // -----------------------------------------------------------------------
-    // Feature 2 — .SUBCKT default params
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn parse_subckt_default_params_stored() {
-        let netlist = "\
-* Subckt default params
-.SUBCKT inv in out PARAMS: W=1u L=100n
-R1 in out 1k
-.ENDS
-Xinv1 a b inv
-V1 a 0 DC 1
-.OP
-.END
-";
-        let result = SpiceParser::parse(netlist);
-        assert!(result.is_ok(), "subckt default params parse failed: {:?}", result.err());
-        let (circuit, _, _) = result.unwrap();
-        assert!(circuit.find_device("xinv1.r1").is_some());
-    }
-
-    #[test]
-    fn parse_subckt_default_params_header() {
-        // Verify the default params are recorded on the SubcircuitDef.
-        let input = "\
-* Default params header
-.SUBCKT testbuf in out PARAMS: GAIN=2.0 OFFSET=0.5
-R1 in out 1k
-.ENDS
-Xbuf in out testbuf
-V1 in 0 DC 1
-.OP
-.END
-";
-        let result = SpiceParser::parse(input);
-        assert!(result.is_ok(), "parse failed: {:?}", result.err());
-    }
-
-    // -----------------------------------------------------------------------
-    // Feature 3 — .NODESET brace expressions
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn parse_nodeset_brace_expr() {
-        let netlist = "\
-* NODESET brace expr
-V1 1 0 DC 1
-R1 1 0 1k
-.NODESET v(1)={2+3}
-.OP
-.END
-";
-        let result = SpiceParser::parse(netlist);
-        assert!(result.is_ok(), "NODESET brace expr failed: {:?}", result.err());
-        // The value {2+3} = 5.0 — check via node_sets in circuit if accessible,
-        // or just verify no parse error.
-    }
-
-    #[test]
-    fn parse_ic_brace_expr() {
-        let netlist = "\
-* IC brace expr
-V1 1 0 DC 1
-R1 1 0 1k
-.IC v(1)={1.5*2}
-.TRAN 1n 10n
-.END
-";
-        let result = SpiceParser::parse(netlist);
-        assert!(result.is_ok(), "IC brace expr failed: {:?}", result.err());
-    }
-
-    // -----------------------------------------------------------------------
-    // Feature 5 — .DATA / .ENDDATA
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn parse_data_block_basic() {
-        let netlist = "\
-* DATA block test
-V1 1 0 DC 1
-R1 1 0 1k
-.DATA mydata vdd vss
-1.8 0
-3.3 0
-5.0 0
-.ENDDATA
-.OP
-.END
-";
-        let result = SpiceParser::parse(netlist);
-        assert!(result.is_ok(), "DATA block parse failed: {:?}", result.err());
-    }
-
-    #[test]
-    fn parse_data_block_two_params() {
-        let netlist = "\
-* DATA block two params
-V1 1 0 DC 1
-R1 1 0 1k
-.DATA sweep_data r_val c_val
-1000 1e-9
-2000 2e-9
-4000 4e-9
-.ENDDATA
-.OP
-.END
-";
-        let result = SpiceParser::parse(netlist);
-        assert!(result.is_ok(), "DATA block two params failed: {:?}", result.err());
-    }
-
-    // -----------------------------------------------------------------------
-    // Feature 6 — PWL FILE="..."
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn parse_pwl_file_source() {
-        // Verify PWL FILE= form parses without error (file need not exist for parse).
-        let netlist = "\
-* PWL FILE test
-V1 1 0 PWL FILE=\"/nonexistent/waveform.csv\"
-R1 1 0 1k
-.TRAN 1n 10n
-.END
-";
-        let result = SpiceParser::parse(netlist);
-        assert!(result.is_ok(), "PWL FILE parse failed: {:?}", result.err());
-    }
-
-    #[test]
-    fn parse_pwl_file_waveform_kind() {
-        // Verify the waveform_kind=6 param is encoded for PWL FILE= sources.
-        let netlist = "\
-* PWL FILE waveform_kind test
-V1 out 0 PWL FILE=\"test.csv\"
-R1 out 0 1k
-.TRAN 1n 10n
-.END
-";
-        let result = SpiceParser::parse(netlist);
-        assert!(result.is_ok(), "PWL FILE waveform_kind parse failed: {:?}", result.err());
-        let (circuit, _, _) = result.unwrap();
-        // The V1 device should exist in the circuit.
-        assert!(circuit.find_device("v1").is_some(), "V1 device should exist");
-    }
-
-    // -----------------------------------------------------------------------
-    // Feature 8 — POLY(n) parsing
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn parse_poly1_vcvs() {
-        // E n+ n- POLY(1) (v1+ v1-) c0 c1
-        let netlist = "\
-* POLY(1) VCVS test
-V1 vc 0 DC 1
-E1 out 0 POLY(1) (vc 0) 0 2.5
-R1 out 0 1k
-.OP
-.END
-";
-        let result = SpiceParser::parse(netlist);
-        assert!(result.is_ok(), "POLY(1) VCVS parse failed: {:?}", result.err());
-        let (circuit, _, _) = result.unwrap();
-        assert!(circuit.find_device("e1").is_some(), "E1 device should exist after POLY parse");
-    }
-
-    #[test]
-    fn parse_poly1_vccs() {
-        // G n+ n- POLY(1) (v1+ v1-) c0 c1
-        let netlist = "\
-* POLY(1) VCCS test
-V1 vc 0 DC 1
-G1 out 0 POLY(1) (vc 0) 0 0.001
-R1 out 0 1k
-.OP
-.END
-";
-        let result = SpiceParser::parse(netlist);
-        assert!(result.is_ok(), "POLY(1) VCCS parse failed: {:?}", result.err());
-        let (circuit, _, _) = result.unwrap();
-        assert!(circuit.find_device("g1").is_some(), "G1 device should exist after POLY parse");
+        Ok((circuit, self.netlist.analyses, self.netlist.options, self.netlist.extract_specs))
     }
 }

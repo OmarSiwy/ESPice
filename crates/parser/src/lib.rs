@@ -1,15 +1,15 @@
-pub mod token;
-pub mod lexer;
-pub mod spice;
-pub mod netlist;
-pub mod expr;
+pub mod types;
+pub mod tokenizer;
+#[cfg(test)]
+mod tests;
 
 // Re-exports for convenience.
-pub use lexer::Lexer;
-pub use spice::SpiceParser;
-pub use token::Token;
-pub use netlist::{
+pub use tokenizer::Lexer;
+pub use tokenizer::SpiceParser;
+pub use tokenizer::{eval_expression, parse_brace_expression, parse_expression};
+pub use types::Token;
+pub use types::{
     AnalysisKind, AnalysisStatement, ElementStatement, ExtractSpec, FuncDef, ModelStatement,
     ParsedNetlist, PrintFormat, SaveDirective, SaveSpec, StepDirective, StepKind, SubcircuitDef,
 };
-pub use expr::{Expression, Op, eval_expression, parse_expression, parse_brace_expression};
+pub use types::{Expression, Op};

@@ -23,3 +23,6 @@ pub use arena::Arena;
 pub use pool::{Pool, Handle};
 pub use index::TypedIndex;
 pub use bitset::BitSet;
+
+pub mod static_map;
+pub use static_map::{si_multiplier, SI_SUFFIX_MAP};

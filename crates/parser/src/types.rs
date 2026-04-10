@@ -1,7 +1,313 @@
-use ahash::AHashMap;
-use pisim_core::DeviceKind;
+// types.rs — all public type definitions for the parser crate.
+//
+// Consolidates: token.rs, netlist.rs, expr.rs
 
-use crate::expr::Expression;
+use std::fmt;
+use ahash::AHashMap;
+use bigospice_core::DeviceKind;
+
+// ===========================================================================
+// Token (formerly token.rs)
+// ===========================================================================
+
+/// A single token produced by the SPICE lexer.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Token {
+    /// Identifiers, node names, model names.
+    Word(String),
+    /// Numeric values (with SI suffix already resolved to f64).
+    Number(f64),
+    /// `=`
+    Equals,
+    /// `(`
+    LeftParen,
+    /// `)`
+    RightParen,
+    /// `,`
+    Comma,
+    /// `+` (not at start of line — that is a continuation)
+    Plus,
+    /// `-`
+    Minus,
+    /// `*` (not at start of line — that is a comment)
+    Star,
+    /// `/`
+    Slash,
+    /// Dot-directive: `.PARAM`, `.MODEL`, `.TRAN`, `.DC`, `.AC`, etc.
+    Dot(String),
+    /// End of statement (after continuation handling).
+    Newline,
+    /// `{`
+    LeftBrace,
+    /// `}`
+    RightBrace,
+    /// A quoted string literal, e.g. `"filename.csv"`.
+    /// The surrounding quotes are stripped; the inner text is lowercased.
+    QuotedString(String),
+    /// A single-quoted HSPICE arithmetic expression, e.g. `'R0*SCALE'`.
+    /// The surrounding quotes are stripped; the inner text is lowercased.
+    /// Distinct from `QuotedString` (double-quoted) — this is evaluated as
+    /// an arithmetic expression wherever a numeric value is expected.
+    SingleQuoteExpr(String),
+    /// End of file.
+    Eof,
+}
+
+impl fmt::Display for Token {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Token::Word(s) => write!(f, "{s}"),
+            Token::Number(n) => write!(f, "{n}"),
+            Token::Equals => write!(f, "="),
+            Token::LeftParen => write!(f, "("),
+            Token::RightParen => write!(f, ")"),
+            Token::Comma => write!(f, ","),
+            Token::Plus => write!(f, "+"),
+            Token::Minus => write!(f, "-"),
+            Token::Star => write!(f, "*"),
+            Token::Slash => write!(f, "/"),
+            Token::Dot(s) => write!(f, ".{s}"),
+            Token::LeftBrace => write!(f, "{{"),
+            Token::RightBrace => write!(f, "}}"),
+            Token::QuotedString(s) => write!(f, "\"{s}\""),
+            Token::SingleQuoteExpr(s) => write!(f, "'{s}'"),
+            Token::Newline => write!(f, "\\n"),
+            Token::Eof => write!(f, "EOF"),
+        }
+    }
+}
+
+// ===========================================================================
+// Expression AST (formerly expr.rs — types only)
+// ===========================================================================
+
+/// Binary operators supported in SPICE parameter expressions.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Op {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Pow,
+}
+
+/// An expression tree for `.PARAM` expressions and B-source behavioral expressions.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Expression {
+    /// A literal numeric value.
+    Literal(f64),
+    /// A reference to a named parameter.
+    Param(String),
+    /// A binary operation: `lhs op rhs`.
+    BinOp(Op, Box<Expression>, Box<Expression>),
+    /// Unary negation.
+    UnaryMinus(Box<Expression>),
+    /// A function call: `sqrt(x)`, `abs(x)`, etc.
+    Func(String, Vec<Expression>),
+    /// Node voltage reference `V(node)` or differential `V(n1,n2)`.
+    ///
+    /// Stored as a node-name string (or "n1,n2" for differential).
+    /// During B-source evaluation these are resolved to voltages from the
+    /// simulator state via the `refs` index table.
+    NodeVoltage(String),
+}
+
+impl Expression {
+    /// Symbolically differentiate `self` with respect to the node voltage
+    /// referenced by `var` (the node name string used in `NodeVoltage`).
+    ///
+    /// Returns a new `Expression` representing `d(self)/dV(var)`.
+    pub fn differentiate(&self, var: &str) -> Expression {
+        match self {
+            Expression::Literal(_) => Expression::Literal(0.0),
+            Expression::Param(_) => Expression::Literal(0.0),
+            Expression::NodeVoltage(node) => {
+                if node == var {
+                    Expression::Literal(1.0)
+                } else {
+                    Expression::Literal(0.0)
+                }
+            }
+            Expression::UnaryMinus(inner) => {
+                Expression::UnaryMinus(Box::new(inner.differentiate(var)))
+            }
+            Expression::BinOp(op, lhs, rhs) => {
+                let dl = lhs.differentiate(var);
+                let dr = rhs.differentiate(var);
+                match op {
+                    Op::Add => Expression::BinOp(Op::Add, Box::new(dl), Box::new(dr)),
+                    Op::Sub => Expression::BinOp(Op::Sub, Box::new(dl), Box::new(dr)),
+                    // Product rule: d(u*v) = du*v + u*dv
+                    Op::Mul => Expression::BinOp(
+                        Op::Add,
+                        Box::new(Expression::BinOp(Op::Mul, Box::new(dl), rhs.clone())),
+                        Box::new(Expression::BinOp(Op::Mul, lhs.clone(), Box::new(dr))),
+                    ),
+                    // Quotient rule: d(u/v) = (du*v - u*dv) / v^2
+                    Op::Div => Expression::BinOp(
+                        Op::Div,
+                        Box::new(Expression::BinOp(
+                            Op::Sub,
+                            Box::new(Expression::BinOp(Op::Mul, Box::new(dl), rhs.clone())),
+                            Box::new(Expression::BinOp(Op::Mul, lhs.clone(), Box::new(dr))),
+                        )),
+                        Box::new(Expression::BinOp(
+                            Op::Pow,
+                            rhs.clone(),
+                            Box::new(Expression::Literal(2.0)),
+                        )),
+                    ),
+                    // d(u^v) where v is constant wrt var: v * u^(v-1) * du/dvar
+                    // General case (both may depend on var) is complex; for now handle
+                    // the common case where exponent is constant.
+                    Op::Pow => {
+                        // d(u^n) = n * u^(n-1) * du
+                        Expression::BinOp(
+                            Op::Mul,
+                            Box::new(Expression::BinOp(
+                                Op::Mul,
+                                rhs.clone(),
+                                Box::new(Expression::BinOp(
+                                    Op::Pow,
+                                    lhs.clone(),
+                                    Box::new(Expression::BinOp(
+                                        Op::Sub,
+                                        rhs.clone(),
+                                        Box::new(Expression::Literal(1.0)),
+                                    )),
+                                )),
+                            )),
+                            Box::new(dl),
+                        )
+                    }
+                }
+            }
+            Expression::Func(name, args) => {
+                // Chain rule for known functions with one argument.
+                match (name.as_str(), args.as_slice()) {
+                    ("sqrt", [u]) => {
+                        // d(sqrt(u)) = du / (2 * sqrt(u))
+                        let du = u.differentiate(var);
+                        Expression::BinOp(
+                            Op::Div,
+                            Box::new(du),
+                            Box::new(Expression::BinOp(
+                                Op::Mul,
+                                Box::new(Expression::Literal(2.0)),
+                                Box::new(Expression::Func("sqrt".into(), vec![u.clone()])),
+                            )),
+                        )
+                    }
+                    ("abs", [u]) => {
+                        // d(abs(u)) = sign(u) * du  — approximate; zero at origin
+                        let du = u.differentiate(var);
+                        Expression::BinOp(
+                            Op::Mul,
+                            Box::new(Expression::Func("sign".into(), vec![u.clone()])),
+                            Box::new(du),
+                        )
+                    }
+                    ("exp", [u]) => {
+                        // d(exp(u)) = exp(u) * du
+                        let du = u.differentiate(var);
+                        Expression::BinOp(
+                            Op::Mul,
+                            Box::new(Expression::Func("exp".into(), vec![u.clone()])),
+                            Box::new(du),
+                        )
+                    }
+                    ("log" | "ln", [u]) => {
+                        // d(ln(u)) = du / u
+                        let du = u.differentiate(var);
+                        Expression::BinOp(Op::Div, Box::new(du), Box::new(u.clone()))
+                    }
+                    ("log10", [u]) => {
+                        // d(log10(u)) = du / (u * ln(10))
+                        let du = u.differentiate(var);
+                        Expression::BinOp(
+                            Op::Div,
+                            Box::new(du),
+                            Box::new(Expression::BinOp(
+                                Op::Mul,
+                                Box::new(u.clone()),
+                                Box::new(Expression::Literal(std::f64::consts::LN_10)),
+                            )),
+                        )
+                    }
+                    ("sin", [u]) => {
+                        // d(sin(u)) = cos(u) * du
+                        let du = u.differentiate(var);
+                        Expression::BinOp(
+                            Op::Mul,
+                            Box::new(Expression::Func("cos".into(), vec![u.clone()])),
+                            Box::new(du),
+                        )
+                    }
+                    ("cos", [u]) => {
+                        // d(cos(u)) = -sin(u) * du
+                        let du = u.differentiate(var);
+                        Expression::BinOp(
+                            Op::Mul,
+                            Box::new(Expression::UnaryMinus(Box::new(Expression::Func(
+                                "sin".into(),
+                                vec![u.clone()],
+                            )))),
+                            Box::new(du),
+                        )
+                    }
+                    ("pow", [u, n]) => {
+                        // d(u^n) = n * u^(n-1) * du  (n treated as potentially variable)
+                        let du = u.differentiate(var);
+                        Expression::BinOp(
+                            Op::Mul,
+                            Box::new(Expression::BinOp(
+                                Op::Mul,
+                                Box::new(n.clone()),
+                                Box::new(Expression::BinOp(
+                                    Op::Pow,
+                                    Box::new(u.clone()),
+                                    Box::new(Expression::BinOp(
+                                        Op::Sub,
+                                        Box::new(n.clone()),
+                                        Box::new(Expression::Literal(1.0)),
+                                    )),
+                                )),
+                            )),
+                            Box::new(du),
+                        )
+                    }
+                    ("min" | "max", _) => {
+                        // Not differentiable cleanly — return 0; caller can use FD instead.
+                        Expression::Literal(0.0)
+                    }
+                    _ => Expression::Literal(0.0),
+                }
+            }
+        }
+    }
+
+    /// Collect the names of all `NodeVoltage(name)` leaves in this expression.
+    pub fn collect_node_refs(&self, out: &mut Vec<String>) {
+        match self {
+            Expression::NodeVoltage(n) => {
+                if !out.contains(n) {
+                    out.push(n.clone());
+                }
+            }
+            Expression::BinOp(_, l, r) => {
+                l.collect_node_refs(out);
+                r.collect_node_refs(out);
+            }
+            Expression::UnaryMinus(inner) => inner.collect_node_refs(out),
+            Expression::Func(_, args) => args.iter().for_each(|a| a.collect_node_refs(out)),
+            _ => {}
+        }
+    }
+}
+
+// ===========================================================================
+// Netlist types (formerly netlist.rs)
+// ===========================================================================
 
 /// A parsed `.NOISE` statement, storing the string fields that cannot be
 /// represented in the numeric `AnalysisStatement.params` vec.
@@ -27,7 +333,7 @@ pub struct NoiseStatement {
 /// `.DISTO` in SPICE2/SPICE3 accepts:
 ///   `.DISTO f1 [numf2 [f2overf1 [fstart] [fstop]]]`
 ///
-/// For PiSIM we store the tones directly: `f1`, an optional `f2` (resolved
+/// For BigOSpice we store the tones directly: `f1`, an optional `f2` (resolved
 /// from `numf2 != 0` with `f2 = f1 * f2overf1`), an output node, and the
 /// analytic Volterra coefficients (`a2`, `a3`) supplied via `.OPTIONS`-style
 /// keys `a2=…`, `a3=…` on the same line.
@@ -70,7 +376,7 @@ pub struct FftStatement {
 
 /// A parsed `.MEAS` / `.MEASURE` statement, stored as raw string tokens for
 /// post-processing after simulation.  The actual evaluation happens in
-/// `pisim_analysis::measure`.
+/// `bigospice_analysis::measure`.
 #[derive(Debug, Clone)]
 pub struct MeasureStatement {
     /// The raw whitespace-split tokens from the directive line (including the
@@ -399,7 +705,7 @@ pub struct ParsedNetlist {
     /// `.TEMP t1 [t2 ...]` — operating temperatures in Celsius (accumulated across multiple directives).
     pub temperatures: Vec<f64>,
     /// Simulation options from `.OPTIONS` directives (accumulated, later overrides earlier).
-    pub options: pisim_core::SimOptions,
+    pub options: bigospice_core::SimOptions,
     /// `.MEAS` / `.MEASURE` statements (in declaration order).
     pub measures: Vec<MeasureStatement>,
     /// `.NOISE` statements (in declaration order).
@@ -438,6 +744,9 @@ pub struct ParsedNetlist {
     pub connect_directives: Vec<(String, String)>,
     /// `.EXTRACT [TRAN|AC|DC] label=expr` entries (HSPICE W.5).
     pub extract_specs: Vec<ExtractSpec>,
+    /// `.ROL` reliability/aging analysis configuration (W.4).
+    /// `None` when no `.ROL` directive was present in the netlist.
+    pub rol_config: Option<bigospice_core::RolConfig>,
 }
 
 impl ParsedNetlist {
@@ -454,7 +763,7 @@ impl ParsedNetlist {
             node_sets: Vec::new(),
             globals: Vec::new(),
             temperatures: Vec::new(),
-            options: pisim_core::SimOptions::default(),
+            options: bigospice_core::SimOptions::default(),
             measures: Vec::new(),
             noise_statements: Vec::new(),
             disto_statements: Vec::new(),
@@ -471,6 +780,7 @@ impl ParsedNetlist {
             optimize_params: Vec::new(),
             connect_directives: Vec::new(),
             extract_specs: Vec::new(),
+            rol_config: None,
         }
     }
 }
@@ -520,7 +830,7 @@ pub struct AnalysisStatement {
 
 /// Output specifier for a `.SENS` statement.
 ///
-/// Mirrors `pisim_analysis::SensOutput` but lives in the parser crate to
+/// Mirrors `bigospice_analysis::SensOutput` but lives in the parser crate to
 /// avoid a parser → analysis crate dependency.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SensOutputSpec {
@@ -589,7 +899,7 @@ pub struct SubcircuitDef {
 /// A single statement inside a `.control` / `.endc` block.
 ///
 /// Lines are stored as raw trimmed strings; the interpreter in
-/// `pisim_analysis::control` handles evaluation.
+/// `bigospice_analysis::control` handles evaluation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ControlStatement {
     /// The raw text of the statement (trimmed, original case preserved).
@@ -598,8 +908,8 @@ pub struct ControlStatement {
 
 /// A `.control` / `.endc` block captured verbatim from the netlist.
 ///
-/// PiSIM captures these blocks at parse time and defers execution to
-/// `pisim_analysis::control::ControlInterpreter`.
+/// BigOSpice captures these blocks at parse time and defers execution to
+/// `bigospice_analysis::control::ControlInterpreter`.
 #[derive(Debug, Clone, Default)]
 pub struct ControlBlock {
     /// Lines collected between `.control` and `.endc` (exclusive).
@@ -644,102 +954,4 @@ pub enum SourceKind {
     Linear(f64),
     /// POLY(n) polynomial form.
     Poly(PolySource),
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parsed_netlist_default() {
-        let nl = ParsedNetlist::new();
-        assert!(nl.title.is_empty());
-        assert!(nl.elements.is_empty());
-        assert!(nl.models.is_empty());
-        assert!(nl.analyses.is_empty());
-        assert!(nl.params.is_empty());
-        assert!(nl.subcircuits.is_empty());
-    }
-
-    #[test]
-    fn element_statement_construction() {
-        let elem = ElementStatement {
-            name: "r1".into(),
-            kind: DeviceKind::Resistor,
-            nodes: vec!["1".into(), "2".into()],
-            value: Some(1e3),
-            model_name: None,
-            params: vec![],
-        };
-        assert_eq!(elem.name, "r1");
-        assert_eq!(elem.kind, DeviceKind::Resistor);
-        assert_eq!(elem.nodes.len(), 2);
-        assert_eq!(elem.value, Some(1e3));
-    }
-
-    #[test]
-    fn model_statement_construction() {
-        let model = ModelStatement {
-            name: "nmod".into(),
-            kind: "nmos".into(),
-            params: vec![("vth0".into(), 0.5), ("kp".into(), 120e-6)],
-        };
-        assert_eq!(model.name, "nmod");
-        assert_eq!(model.kind, "nmos");
-        assert_eq!(model.params.len(), 2);
-    }
-
-    #[test]
-    fn analysis_statement_construction() {
-        let analysis = AnalysisStatement {
-            kind: AnalysisKind::Tran,
-            params: vec![("tstep".into(), 1e-9), ("tstop".into(), 1e-6)],
-        };
-        assert_eq!(analysis.kind, AnalysisKind::Tran);
-        assert_eq!(analysis.params.len(), 2);
-    }
-
-    #[test]
-    fn subcircuit_def_construction() {
-        let sub = SubcircuitDef {
-            name: "inv".into(),
-            ports: vec!["in".into(), "out".into(), "vdd".into(), "vss".into()],
-            default_params: vec![],
-            body: vec![],
-            nested_instances: vec![],
-        };
-        assert_eq!(sub.name, "inv");
-        assert_eq!(sub.ports.len(), 4);
-        assert!(sub.body.is_empty());
-    }
-
-    #[test]
-    fn analysis_kind_equality() {
-        assert_eq!(AnalysisKind::DcOp, AnalysisKind::DcOp);
-        assert_ne!(AnalysisKind::DcOp, AnalysisKind::Tran);
-        assert_ne!(AnalysisKind::Ac, AnalysisKind::DcSweep);
-    }
-
-    #[test]
-    fn parsed_netlist_with_data() {
-        let mut nl = ParsedNetlist::new();
-        nl.title = "Test circuit".into();
-        nl.params.insert("vdd".into(), 3.3);
-        nl.elements.push(ElementStatement {
-            name: "r1".into(),
-            kind: DeviceKind::Resistor,
-            nodes: vec!["1".into(), "0".into()],
-            value: Some(1e3),
-            model_name: None,
-            params: vec![],
-        });
-        nl.analyses.push(AnalysisStatement {
-            kind: AnalysisKind::DcOp,
-            params: vec![],
-        });
-        assert_eq!(nl.title, "Test circuit");
-        assert_eq!(nl.params.get("vdd"), Some(&3.3));
-        assert_eq!(nl.elements.len(), 1);
-        assert_eq!(nl.analyses.len(), 1);
-    }
 }

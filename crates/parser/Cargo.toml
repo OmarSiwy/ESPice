@@ -1,12 +1,13 @@
 [package]
-name = "pisim-parser"
+name = "bigospice-parser"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "SPICE/Spectre netlist parser for PiSIM"
+description = "SPICE/Spectre netlist parser for BigOSpice"
 
 [dependencies]
-pisim-core.workspace = true
+bigospice-core.workspace = true
+bigospice-utility.workspace = true
 thiserror.workspace = true
 ahash.workspace = true
 smallvec.workspace = true
