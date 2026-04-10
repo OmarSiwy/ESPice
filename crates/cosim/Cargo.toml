@@ -1,0 +1,16 @@
+[package]
+name = "pisim-cosim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Verilator/SystemVerilog co-simulation bridge for PiSIM (Phase 4.2)"
+
+[dependencies]
+pisim-core.workspace = true
+pisim-digital = { path = "../digital" }
+thiserror.workspace = true
+log.workspace = true
+ahash.workspace = true
+libloading = "0.8"
+
+[dev-dependencies]

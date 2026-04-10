@@ -1,0 +1,21 @@
+[package]
+name = "pisim-analysis"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Analysis engines (DC, AC, TRAN, etc.) for PiSIM"
+
+[dependencies]
+pisim-core.workspace = true
+pisim-linalg.workspace = true
+pisim-solver.workspace = true
+pisim-device.workspace = true
+pisim-cache.workspace = true
+pisim-compute.workspace = true
+thiserror.workspace = true
+log.workspace = true
+ahash.workspace = true
+smallvec.workspace = true
+rayon.workspace = true
+
+[dev-dependencies]

@@ -1,0 +1,12 @@
+[package]
+name = "pisim-io"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Simulator output formats (rawfile, HSPICE POST, Touchstone, CSV) for PiSIM"
+
+[dependencies]
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,10 @@
+[test]
+name = "dc_op_three_resistor_chain"
+type = "regression"
+tags = ["serial", "nightly", "dc"]
+netlist = "circuit.sp"
+golden = "golden.csv"
+
+[tolerance]
+voltage = 1e-9
+current = 1e-15

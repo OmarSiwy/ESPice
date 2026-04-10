@@ -1,0 +1,9 @@
+[test]
+name = "hspice_netlist_import"
+type = "regression"
+tags = ["nightly", "compat"]
+netlist = "hspice_example.sp"
+ignore = "requires HSPICE netlist format extensions"
+
+[tolerance]
+voltage = 1e-6

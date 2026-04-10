@@ -1,0 +1,42 @@
+name: Nightly Tests
+
+on:
+  schedule:
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  full-regression-cpu:
+    name: Full Regression (CPU)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+      - run: cargo test --test dc_op --test dc_sweep --test transient --test ac --test robustness --test incremental -- --include-ignored
+      - name: Install ngspice
+        run: sudo apt-get update && sudo apt-get install -y ngspice
+      - name: Live ngspice comparison
+        run: cargo test --test ngspice_live -- --include-ignored
+      - run: cargo bench --workspace -- --output-format bencher | tee benchmark-results.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: benchmark-results.txt
+
+  full-regression-gpu:
+    name: Full Regression (GPU)
+    runs-on: [self-hosted, gpu]
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+      - run: cargo test --test gpu_equivalence -- --include-ignored
+        env:
+          VOLTAIC_GPU: "1"

@@ -1,0 +1,16 @@
+[package]
+name = "pisim-parser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SPICE/Spectre netlist parser for PiSIM"
+
+[dependencies]
+pisim-core.workspace = true
+thiserror.workspace = true
+ahash.workspace = true
+smallvec.workspace = true
+log.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

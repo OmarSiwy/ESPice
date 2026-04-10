@@ -1,0 +1,15 @@
+[package]
+name = "pisim-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Core types and data structures for the PiSIM circuit simulator"
+
+[dependencies]
+ahash.workspace = true
+smallvec.workspace = true
+bitvec.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+
+[dev-dependencies]

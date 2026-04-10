@@ -1,0 +1,322 @@
+[package]
+name = "pisim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/compute",
+    "crates/device",
+    "crates/linalg",
+    "crates/solver",
+    "crates/cache",
+    "crates/analysis",
+    "crates/parser",
+    "crates/utility",
+    "crates/io",
+    "crates/test-harness",
+    "crates/osdi",
+    "crates/digital",
+    "crates/cosim",
+    "crates/bench-suite",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "LGPL-3.0"
+rust-version = "1.85.0"
+
+[workspace.dependencies]
+# Internal crates
+pisim-core = { path = "crates/core" }
+pisim-compute = { path = "crates/compute" }
+pisim-device = { path = "crates/device" }
+pisim-linalg = { path = "crates/linalg" }
+pisim-solver = { path = "crates/solver" }
+pisim-cache = { path = "crates/cache" }
+pisim-analysis = { path = "crates/analysis" }
+pisim-parser = { path = "crates/parser" }
+pisim-utility = { path = "crates/utility" }
+pisim-io = { path = "crates/io" }
+pisim-test-harness = { path = "crates/test-harness" }
+pisim-osdi = { path = "crates/osdi" }
+pisim-digital = { path = "crates/digital" }
+pisim-cosim = { path = "crates/cosim" }
+pisim-bench-suite = { path = "crates/bench-suite" }
+
+# External
+ahash = { version = "0.8", features = ["serde"] }
+smallvec = { version = "1.13", features = ["union", "const_generics", "serde"] }
+bitvec = { version = "1.0", features = ["serde"] }
+thiserror = "2"
+log = "0.4"
+rayon = "1.10"
+serde = { version = "1.0", features = ["derive"] }
+wgpu = "25"
+pollster = "0.4"
+bytemuck = { version = "1.21", features = ["derive"] }
+toml = "0.8"
+csv = "1.3"
+tempfile = "3"
+glob = "0.3"
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
+[profile.bench]
+inherits = "release"
+debug = true
+
+[dev-dependencies]
+pisim-test-harness = { path = "crates/test-harness" }
+pisim-core = { path = "crates/core" }
+pisim-parser = { path = "crates/parser" }
+pisim-device = { path = "crates/device" }
+pisim-solver = { path = "crates/solver" }
+pisim-analysis = { path = "crates/analysis" }
+pisim-cache = { path = "crates/cache" }
+pisim-compute = { path = "crates/compute" }
+pisim-linalg = { path = "crates/linalg" }
+pisim-cosim = { path = "crates/cosim" }
+pisim-digital = { path = "crates/digital" }
+pisim-osdi = { path = "crates/osdi" }
+criterion = { workspace = true }
+tempfile = { workspace = true }
+libloading = "0.8"
+
+[[bench]]
+name = "sparse_lu"
+harness = false
+
+[[bench]]
+name = "newton_raphson"
+harness = false
+
+[[bench]]
+name = "device_eval"
+harness = false
+
+[[bench]]
+name = "end_to_end"
+harness = false
+
+# Integration tests (in tests/integration/ subdirectory)
+[[test]]
+name = "dc_op"
+path = "tests/integration/dc_op.rs"
+
+[[test]]
+name = "dc_sweep"
+path = "tests/integration/dc_sweep.rs"
+
+[[test]]
+name = "transient"
+path = "tests/integration/transient.rs"
+
+[[test]]
+name = "ac"
+path = "tests/integration/ac.rs"
+
+[[test]]
+name = "noise"
+path = "tests/integration/noise.rs"
+
+[[test]]
+name = "harmonic_balance"
+path = "tests/integration/harmonic_balance.rs"
+
+[[test]]
+name = "sensitivity"
+path = "tests/integration/sensitivity.rs"
+
+[[test]]
+name = "measure"
+path = "tests/integration/measure.rs"
+
+[[test]]
+name = "incremental"
+path = "tests/integration/incremental.rs"
+
+[[test]]
+name = "gpu_equivalence"
+path = "tests/integration/gpu_equivalence.rs"
+
+[[test]]
+name = "gpu_dispatch"
+path = "tests/integration/gpu_dispatch.rs"
+
+[[test]]
+name = "gpu_monte_carlo"
+path = "tests/integration/gpu_monte_carlo.rs"
+
+[[test]]
+name = "robustness"
+path = "tests/integration/robustness.rs"
+
+[[test]]
+name = "compatibility"
+path = "tests/integration/compatibility.rs"
+
+[[test]]
+name = "ngspice_golden"
+path = "tests/integration/ngspice_golden.rs"
+
+[[test]]
+name = "ngspice_live"
+path = "tests/integration/ngspice_live.rs"
+
+[[test]]
+name = "ngspice_bench"
+path = "tests/integration/ngspice_bench.rs"
+
+[[test]]
+name = "ngspice_accuracy"
+path = "tests/integration/ngspice_accuracy.rs"
+
+[[test]]
+name = "bsource"
+path = "tests/integration/bsource.rs"
+
+[[test]]
+name = "options"
+path = "tests/integration/options.rs"
+
+[[test]]
+name = "diode_extended"
+path = "tests/integration/diode_extended.rs"
+
+[[test]]
+name = "vbic_and_k"
+path = "tests/integration/vbic_and_k.rs"
+
+[[test]]
+name = "tline"
+path = "tests/integration/tline.rs"
+
+[[test]]
+name = "fourier"
+path = "tests/integration/fourier.rs"
+
+[[test]]
+name = "disto_fft"
+path = "tests/integration/disto_fft.rs"
+
+[[test]]
+name = "vbic_avalanche"
+path = "tests/integration/vbic_avalanche.rs"
+
+[[test]]
+name = "jfet_l2"
+path = "tests/integration/jfet_l2.rs"
+
+[[test]]
+name = "ltra"
+path = "tests/integration/ltra.rs"
+
+[[test]]
+name = "laplace"
+path = "tests/integration/laplace.rs"
+
+[[test]]
+name = "bjt_gummel_poon_golden"
+path = "tests/integration/bjt_gummel_poon_golden.rs"
+
+[[test]]
+name = "sweep"
+path = "tests/integration/sweep.rs"
+
+[[test]]
+name = "parser_extensions"
+path = "tests/integration/parser_extensions.rs"
+
+[[test]]
+name = "temperature_golden"
+path = "tests/integration/temperature_golden.rs"
+
+[[test]]
+name = "solver_robustness"
+path = "tests/integration/solver_robustness.rs"
+
+[[test]]
+name = "bsim3_golden"
+path = "tests/integration/bsim3_golden.rs"
+
+[[test]]
+name = "bsim4_golden"
+path = "tests/integration/bsim4_golden.rs"
+
+[[test]]
+name = "vbic_golden"
+path = "tests/integration/vbic_golden.rs"
+
+[[test]]
+name = "tf_golden"
+path = "tests/integration/tf_golden.rs"
+
+[[test]]
+name = "pz_golden"
+path = "tests/integration/pz_golden.rs"
+
+[[test]]
+name = "disto_golden"
+path = "tests/integration/disto_golden.rs"
+
+[[test]]
+name = "sens_ac_golden"
+path = "tests/integration/sens_ac_golden.rs"
+
+[[test]]
+name = "fft_golden"
+path = "tests/integration/fft_golden.rs"
+
+[[test]]
+name = "verilator_spi_master"
+path = "tests/integration/verilator_spi_master.rs"
+
+[[test]]
+name = "poly_sources"
+path = "tests/integration/poly_sources.rs"
+
+[[test]]
+name = "bjt_extrinsic"
+path = "tests/integration/bjt_extrinsic.rs"
+
+[[test]]
+name = "vbic_extrinsic"
+path = "tests/integration/vbic_extrinsic.rs"
+
+[[test]]
+name = "trap_gear"
+path = "tests/integration/trap_gear.rs"
+
+[[test]]
+name = "nested_dc"
+path = "tests/integration/nested_dc.rs"
+
+[[test]]
+name = "osdi_va_golden"
+path = "tests/integration/osdi_va_golden.rs"
+
+[[test]]
+name = "sp_golden"
+path = "tests/integration/sp_golden.rs"
+
+[[test]]
+name = "alter_test"
+path = "tests/integration/alter_test.rs"
+
+[[test]]
+name = "control_script"
+path = "tests/integration/control_script.rs"

@@ -1,0 +1,15 @@
+[package]
+name = "pisim-digital"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Native XSPICE-class digital event engine for PiSIM (Phase 4.1)"
+
+[dependencies]
+pisim-core.workspace = true
+thiserror.workspace = true
+smallvec.workspace = true
+ahash.workspace = true
+log.workspace = true
+
+[dev-dependencies]

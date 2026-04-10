@@ -1,0 +1,20 @@
+[package]
+name = "pisim-osdi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "OSDI / OpenVAF compiled-model plugin loader for PiSIM (LGPL-3, dlopen-only, no GPL linkage)"
+
+[dependencies]
+pisim-core.workspace = true
+pisim-device.workspace = true
+thiserror.workspace = true
+libloading = "0.8"
+libc = "0.2"
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lib]
+name = "pisim_osdi"
+path = "src/lib.rs"

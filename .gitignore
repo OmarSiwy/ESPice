@@ -1,0 +1,17 @@
+/target
+tests/external/*
+!tests/external/.gitignore
+*.raw
+*.log
+benchmark-results.txt
+
+.claude/
+.omc/
+.omc/sessions/
+.omc/state/checkpoints/
+.venv/
+target/
+
+Cargo.lock
+CLAUDE.md
+flake.lock

@@ -1,0 +1,11 @@
+[test]
+name = "bsim4_nmos_iv_curves"
+type = "regression"
+tags = ["serial", "nightly", "device"]
+netlist = "bsim4_nmos_iv.sp"
+golden = "bsim4_nmos_iv_golden.csv"
+ignore = "requires BSIM4 model implementation via OpenVAF"
+
+[tolerance]
+voltage = 1e-6
+current = 1e-6

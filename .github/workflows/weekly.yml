@@ -1,0 +1,48 @@
+name: Weekly Stress Tests
+
+on:
+  schedule:
+    - cron: '0 2 * * 0'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  stress-test:
+    name: Stress Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: Fetch external test suites
+        run: scripts/fetch-test-suites.sh
+      - name: Install ngspice
+        run: sudo apt-get update && sudo apt-get install -y ngspice
+      - name: Generate goldens from external suites
+        run: cargo run -p pisim-test-harness --bin generate-goldens -- --suite ngspice --force
+        continue-on-error: true
+      - name: Run golden comparison tests
+        run: cargo test --test ngspice_golden
+      - name: Run all tests including ignored
+        run: cargo test --workspace -- --include-ignored
+        continue-on-error: true
+      - name: Run benchmarks
+        run: cargo bench --workspace
+
+  sanitizer-asan:
+    name: AddressSanitizer
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - run: |
+          RUSTFLAGS="-Z sanitizer=address" \
+          cargo test --workspace --target x86_64-unknown-linux-gnu \
+          -Z build-std
+        continue-on-error: true

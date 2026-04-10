@@ -1,0 +1,9 @@
+[test]
+name = "sky130_pdk_simulation"
+type = "regression"
+tags = ["weekly", "compat", "pdk"]
+netlist = "sky130_inverter.sp"
+ignore = "requires SKY130 PDK model cards"
+
+[tolerance]
+voltage = 1e-6

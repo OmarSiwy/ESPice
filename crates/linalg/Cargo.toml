@@ -1,0 +1,20 @@
+[package]
+name = "pisim-linalg"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sparse linear algebra engine for PiSIM"
+
+[features]
+# Enable the KLU linear solver backend (SuiteSparse).
+# Requires libklu.so to be found at build time (see build.rs).
+klu = []
+
+[dependencies]
+pisim-core.workspace = true
+thiserror.workspace = true
+ahash.workspace = true
+smallvec.workspace = true
+rayon.workspace = true
+
+[dev-dependencies]

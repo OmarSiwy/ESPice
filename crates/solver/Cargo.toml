@@ -1,0 +1,18 @@
+[package]
+name = "pisim-solver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Nonlinear solver core (Newton-Raphson) for PiSIM"
+
+[dependencies]
+pisim-core.workspace = true
+pisim-linalg.workspace = true
+pisim-device.workspace = true
+pisim-compute.workspace = true
+thiserror.workspace = true
+smallvec.workspace = true
+log.workspace = true
+rayon.workspace = true
+
+[dev-dependencies]

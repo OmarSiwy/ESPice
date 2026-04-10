@@ -1,0 +1,10 @@
+[test]
+name = "tran_rc_step_response"
+type = "regression"
+tags = ["serial", "nightly", "tran"]
+netlist = "../../fixtures/basic/rc_transient.sp"
+ignore = "requires capacitor companion model in transient engine"
+
+[tolerance]
+voltage = 1e-6
+timing = 1e-4

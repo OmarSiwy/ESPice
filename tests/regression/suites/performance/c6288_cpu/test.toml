@@ -1,0 +1,14 @@
+[test]
+name = "c6288_tran_cpu"
+type = "performance"
+tags = ["perf", "weekly"]
+netlist = "../../fixtures/iscas85/c6288.sp"
+ignore = "requires ISCAS85 SPICE netlist and full transient engine"
+
+[tolerance]
+voltage = 1e-4
+
+[performance]
+baseline_seconds = 48.0
+target_speedup = 1.0
+gpu_required = false

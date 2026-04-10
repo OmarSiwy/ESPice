@@ -1,0 +1,9 @@
+[test]
+name = "incremental_dc_resistor"
+type = "regression"
+tags = ["serial", "nightly", "incremental"]
+netlist = "../../fixtures/basic/voltage_divider.sp"
+ignore = "requires Woodbury rank-k update engine"
+
+[tolerance]
+voltage = 1e-9

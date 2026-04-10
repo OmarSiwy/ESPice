@@ -1,0 +1,12 @@
+[submodule "tests/external/iscas85-benchmarks"]
+	path = tests/external/iscas85-benchmarks
+	url = https://github.com/santoshsmalagi/Benchmarks.git
+[submodule "tests/external/xyce_regression"]
+	path = tests/external/xyce_regression
+	url = https://github.com/Xyce/Xyce_Regression.git
+[submodule "tests/external/va-models"]
+	path = tests/external/va-models
+	url = https://github.com/dwarning/VA-Models.git
+[submodule "tests/external/ngspice"]
+	path = tests/external/ngspice
+	url = https://git.code.sf.net/p/ngspice/ngspice
