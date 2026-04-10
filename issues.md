@@ -533,6 +533,10 @@ FIRST cause. Fix recipes for F1, F4, F5, F8, F10, F11 and E6 are in
   checked before, because `matex/dc` aborted the runner. Suspect the Arnoldi
   breakdown path (`ar.m == 0` zeroes `x_new` wholesale) and the R-MATEX
   `T = (h/γ)(I − H⁻¹)` reconstruction.
+  Phase 2b fixed two memory bugs on the way, no deck changed: the dense-LU
+  pivot buffer was a fixed [256]u32 against a user m_max, and the posterior
+  check got an n-long scratch for its 7*m^2 need, so it never ran on a small
+  circuit.
 
 - [x] **E4 — a current-swept `.dc` labels its axis `v(v-sweep)`.** 2 decks
   (`dc/current_ascending`, `dc/current_descending` → MissingColumn). The
