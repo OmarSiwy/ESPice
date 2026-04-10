@@ -81,7 +81,7 @@ pub fn solveLadder(
     // The always-on 1e-12 shunt this used to carry pinned every solution a
     // little differently from ngspice (voltage_divider read 2.5e-9 off), and
     // "converged" a floating bridge to a common mode ngspice never picks.
-    const plain = newtonRun(ckt, ws, x, options.tol, 0.0) catch |e| switch (e) {
+    const plain = newtonRun(ckt, ws, x, options.tol, 0.0, null) catch |e| switch (e) {
         error.SingularMatrix => null,
         else => return e,
     };
@@ -111,7 +111,7 @@ pub fn solveLadder(
         var have_good = false;
         var solves: u32 = 0;
         while (solves < 100) : (solves += 1) {
-            const r = newtonRun(ckt, ws, x, options.tol, gmin_val) catch |e| switch (e) {
+            const r = newtonRun(ckt, ws, x, options.tol, gmin_val, options.tol.itl2) catch |e| switch (e) {
                 error.SingularMatrix => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 },
                 else => return e,
             };
@@ -122,7 +122,7 @@ pub fn solveLadder(
                 if (gmin_val <= gtarget) {
                     // ngspice dynamic_gmin ends by REMOVING diagGmin for the
                     // last solve — the answer must not carry the shunt.
-                    const clean = newtonRun(ckt, ws, x, options.tol, 0.0) catch |err| switch (err) {
+                    const clean = newtonRun(ckt, ws, x, options.tol, 0.0, null) catch |err| switch (err) {
                         error.QueryCancelled => return err,
                         else => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 },
                     };
@@ -136,13 +136,18 @@ pub fn solveLadder(
                 good_gmin = gmin_val;
                 // Easy rung -> accelerate (cap at start factor);
                 // hard rung (> 3/4 budget) -> slow down BEFORE failing so
-                // folds are approached with shrinking steps.
-                if (r.iterations <= options.tol.itl1 / 4) {
+                // folds are approached with shrinking steps. Thresholds,
+                // floor and final clamp are cktop.c:207-222 verbatim, on
+                // the itl2 budget these solves run with.
+                if (r.iterations <= options.tol.itl2 / 4) {
                     factor = @min(factor * @sqrt(factor), 10.0);
-                } else if (r.iterations > 3 * (options.tol.itl1 / 4)) {
-                    factor = @sqrt(factor);
+                } else if (r.iterations > 3 * options.tol.itl2 / 4) {
+                    factor = @max(@sqrt(factor), 1.00005);
                 }
-                gmin_val = if (gmin_val < factor * gtarget) gtarget else gmin_val / factor;
+                if (gmin_val < factor * gtarget) {
+                    factor = gmin_val / gtarget;
+                    gmin_val = gtarget;
+                } else gmin_val /= factor;
             } else {
                 if (factor < 1.00005) break; // wedged against the last good rung
                 factor = @sqrt(@sqrt(factor));
@@ -166,7 +171,7 @@ pub fn solveLadder(
             ckt.applyAttempt(lambda);
             ckt.has_baseline = false;
             try ckt.computeBaseline();
-            const sr = newtonRun(ckt, ws, x, options.tol, 0.0) catch |e| switch (e) {
+            const sr = newtonRun(ckt, ws, x, options.tol, 0.0, options.tol.itl2) catch |e| switch (e) {
                 error.SingularMatrix => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 },
                 else => {
                     ckt.restoreModels();
@@ -191,8 +196,9 @@ pub fn solveLadder(
                     copySimd(x, x_good);
                     lambda = @min(lambda_good + delta, 1.0);
                 } else {
-                    coldStart(ckt, x);
-                    lambda = 0.0;
+                    // The lambda = 0 start failed and nothing converged yet:
+                    // a retry is the same cold solve, so stop here.
+                    break;
                 }
             }
         }
@@ -202,7 +208,7 @@ pub fn solveLadder(
     try ckt.computeBaseline();
 
     // Final solve at true parameters after source stepping
-    const final = newtonRun(ckt, ws, x, options.tol, 0.0) catch |e| switch (e) {
+    const final = newtonRun(ckt, ws, x, options.tol, 0.0, null) catch |e| switch (e) {
         error.SingularMatrix => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 },
         else => return e,
     };
@@ -279,7 +285,7 @@ fn transientOp(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, options: 
             const x_settled = try opa.alloc(f64, ckt.n);
             defer opa.free(x_settled);
             copySimd(x_settled, x);
-            const fin = newtonRun(ckt, ws, x, options.tol, 0.0) catch |err| switch (err) {
+            const fin = newtonRun(ckt, ws, x, options.tol, 0.0, null) catch |err| switch (err) {
                 error.QueryCancelled => return err,
                 else => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 },
             };
@@ -310,8 +316,10 @@ pub fn run(ctx: *const root.RunCtx, _: Options) !root.Result {
     };
 }
 
-fn newtonRun(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, tol: converger.Tolerances, gmin: f64) !converger.Result {
-    var copts = converger.optionsFromTolerances(tol, null);
+/// `max_iter` null = itl1. The stepping rungs pass itl2 (ngspice's
+/// CKTdcTrcvMaxIter, cktop.c:194 and the source-stepping NIiter calls).
+fn newtonRun(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, tol: converger.Tolerances, gmin: f64, max_iter: ?u16) !converger.Result {
+    var copts = converger.optionsFromTolerances(tol, max_iter);
     copts.gmin = gmin;
     return converger.run(ckt, ws, x, 0, copts, root.EvalHook{});
 }
