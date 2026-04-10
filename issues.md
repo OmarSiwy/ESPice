@@ -339,6 +339,9 @@ FIRST cause. Fix recipes for F1, F4, F5, F8, F10, F11 and E6 are in
 
 - [ ] **C4 — PAC injects a node current instead of honoring the named
   voltage-source excitation.** 5 decks (`pac/*`).
+  Phase 2b: `pac.linearize` and pnoise's sample loops now evaluate under
+  analysis("tran"), so SIN/PULSE sources and the LO move (they gave their
+  DC value); no deck's bytes changed (the pac/pnoise decks are LTI).
 
 - [ ] **C5 — periodic noise counts LTI sidebands as conversion.** 5 decks
   (`pnoise/lti_rc_sidebands_*`, `pnoise/noise_multiplier_*`). Extra sidebands
