@@ -1,5 +1,5 @@
 {
-  description = "VAICS - Vectorized Incremental Analog Circuit Simulator";
+  description = "BigOSpice - Vectorized Incremental Analog Circuit Simulator";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -31,50 +31,121 @@
             "rustfmt"
           ];
         };
+
+        # NOTE: VACASK SHA and hash are PLACEHOLDERS.
+        # The Codeberg API was unreachable during plan execution (no network).
+        # To fix: run the following and replace the values below:
+        #   curl -s "https://codeberg.org/api/v1/repos/arpadbuermen/VACASK/branches/main" \
+        #     | grep -o '"sha":"[^"]*"' | head -1
+        #   nix-prefetch-url --unpack \
+        #     "https://codeberg.org/arpadbuermen/VACASK/archive/<SHA>.tar.gz"
+        vacaskPkg = pkgs.stdenv.mkDerivation rec {
+          pname = "vacask";
+          version = "unstable-2026";
+
+          src = pkgs.fetchFromGitea {
+            domain = "codeberg.org";
+            owner = "arpadbuermen";
+            repo = "VACASK";
+            rev = "PLACEHOLDER_SHA_REPLACE_ME";
+            hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+          };
+
+          nativeBuildInputs = with pkgs; [
+            cmake
+            pkg-config
+          ];
+
+          buildInputs = with pkgs; [
+            suitesparse   # provides KLU
+            openblas
+          ];
+
+          cmakeFlags = [
+            "-DCMAKE_BUILD_TYPE=Release"
+          ];
+
+          installPhase = ''
+            runHook preInstall
+            mkdir -p $out/bin
+            # VACASK produces a 'vacask' binary in the build directory
+            cp vacask $out/bin/vacask
+            runHook postInstall
+          '';
+
+          meta = {
+            description = "VACASK – Verilog-A Circuit Analysis Kernel";
+            homepage = "https://codeberg.org/arpadbuermen/VACASK";
+            license = pkgs.lib.licenses.gpl2Plus;
+            platforms = pkgs.lib.platforms.linux ++ pkgs.lib.platforms.darwin;
+          };
+        };
+
+        commonInputs = with pkgs; [
+          rustNightly
+          pkg-config
+          openssl
+
+          # Linker
+          mold-wrapped
+          clang
+
+          # Linear algebra
+          suitesparse
+          openblas
+          lapack
+
+          # Build tools
+          cmake
+          gnumake
+
+          # Dev tools
+          cargo-watch
+          cargo-nextest
+          cargo-tarpaulin
+          cargo-flamegraph
+          cargo-expand
+
+          # Benchmarks
+          hyperfine
+
+          # Mixed-signal cosimulation
+          verilator
+          verible
+        ];
       in
       {
         devShells.default = pkgs.mkShell {
-          buildInputs = with pkgs; [
-            rustNightly
-            pkg-config
-            openssl
+          buildInputs = commonInputs;
 
-            # Linker
-            mold-wrapped
-            clang
+          shellHook = ''
+            export RUST_BACKTRACE=1
+            export RUST_LOG=bigospice=debug
+            echo "BigOSpice dev shell — nightly Rust $(rustc --version) + mold linker"
+            echo "Tip: use 'nix develop .#full' to get ngspice, xyce, and VACASK"
+          '';
 
-            # Linear algebra
-            suitesparse
-            openblas
-            lapack
+          SUITESPARSE_DIR = "${pkgs.suitesparse}";
+          OPENBLAS_DIR = "${pkgs.openblas}";
+        };
 
-            # Build tools
-            cmake
-            gnumake
-
-            # Dev tools
-            cargo-watch
-            cargo-nextest
-            cargo-tarpaulin
-            cargo-flamegraph
-            cargo-expand
-
-            # Benchmarks
-            hyperfine
-
-            # Reference simulators for head-to-head validation
-            ngspice
-            xyce-parallel  # 7.9.0, pre-built in cache
-
-            # Mixed-signal cosimulation
-            verilator
-            verible # SystemVerilog parser/lint (optional but handy)
+        devShells.full = pkgs.mkShell {
+          buildInputs = commonInputs ++ [
+            pkgs.ngspice
+            # NOTE: pkgs.xyce-parallel may not be available in nixpkgs-unstable.
+            # If evaluation fails, comment out the line below.
+            pkgs.xyce-parallel
+            vacaskPkg
           ];
 
           shellHook = ''
             export RUST_BACKTRACE=1
-            export RUST_LOG=pisim=debug
-            echo "VAICS dev shell — nightly Rust $(rustc --version) + mold linker"
+            export RUST_LOG=bigospice=debug
+            export BIGOSPICE_HAVE_SIMS=1
+            echo "BigOSpice FULL dev shell — nightly Rust $(rustc --version)"
+            echo "Simulators: ngspice $(ngspice --version 2>&1 | head -1)"
+            echo "            xyce    $(xyce --version 2>&1 | head -1)"
+            echo "            vacask  $(vacask --version 2>&1 | head -1 || echo 'available')"
           '';
 
           SUITESPARSE_DIR = "${pkgs.suitesparse}";
@@ -82,7 +153,7 @@
         };
 
         packages.default = pkgs.rustPlatform.buildRustPackage {
-          pname = "vaics";
+          pname = "bigospice";
           version = "0.1.0";
           src = ./.;
           cargoLock.lockFile = ./Cargo.lock;
