@@ -1,4 +1,4 @@
-use pisim_core::DeviceKind;
+use bigospice_core::DeviceKind;
 
 use crate::bsource::{BsourceIModel, BsourceVModel};
 use crate::dispatch::DeviceDispatch;
@@ -9,6 +9,9 @@ use crate::{
 use crate::mosfet::{MosfetLevel2, MosfetLevel3, MosfetLevel6};
 use crate::tline::Tline;
 use crate::ltra::Ltra;
+use crate::urc::Urc;
+use crate::wlossy::WLossy;
+use crate::port::Port;
 
 /// Maximum number of device kinds. Must be >= the number of DeviceKind variants.
 const MAX_DEVICE_KINDS: usize = 64;
@@ -82,6 +85,9 @@ impl DeviceRegistry {
         reg.register(DeviceKind::MosfetP3, DeviceDispatch::MosfetLevel3(MosfetLevel3));
         reg.register(DeviceKind::MosfetN6, DeviceDispatch::MosfetLevel6(MosfetLevel6));
         reg.register(DeviceKind::MosfetP6, DeviceDispatch::MosfetLevel6(MosfetLevel6));
+        reg.register(DeviceKind::Urc, DeviceDispatch::Urc(Urc::default()));
+        reg.register(DeviceKind::Wlossy, DeviceDispatch::Wlossy(WLossy::default()));
+        reg.register(DeviceKind::Port, DeviceDispatch::Port(Port));
         reg
     }
 
@@ -127,7 +133,7 @@ impl Default for DeviceRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pisim_core::ParamMap;
+    use bigospice_core::ParamMap;
 
     #[test]
     fn registry_default_has_all_builtins() {
@@ -151,7 +157,7 @@ mod tests {
         assert!(reg.get(DeviceKind::Bsim3P).is_some());
         assert!(reg.get(DeviceKind::Bsim4N).is_some());
         assert!(reg.get(DeviceKind::Bsim4P).is_some());
-        assert_eq!(reg.len(), 28);
+        assert_eq!(reg.len(), 37);
     }
 
     #[test]

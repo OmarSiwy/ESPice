@@ -40,6 +40,8 @@ fn token_display() {
     assert_eq!(format!("{}", Token::Dot("model".into())), ".model");
     assert_eq!(format!("{}", Token::Newline), "\\n");
     assert_eq!(format!("{}", Token::Eof), "EOF");
+    assert_eq!(format!("{}", Token::QuotedString("hello".into())), "\"hello\"");
+    assert_eq!(format!("{}", Token::SingleQuoteExpr("r0*scale".into())), "'r0*scale'");
 }
 
 #[test]
@@ -2033,4 +2035,35 @@ R1 out 0 1k
     let (circuit, _, _) = result.unwrap();
     // POLY form is realised as a B-source named b_poly_{instance}.
     assert!(circuit.find_device("b_poly_g1").is_some(), "b_poly_g1 B-source should exist after POLY parse");
+}
+
+#[test]
+fn parse_brace_expression_unclosed() {
+    use crate::tokenizer::parse_brace_expression;
+    use crate::types::Token;
+    // Simulate tokens: { 1 + 2  (no closing brace)
+    let tokens = vec![
+        Token::LeftBrace,
+        Token::Number(1.0),
+        Token::Plus,
+        Token::Number(2.0),
+    ];
+    assert!(parse_brace_expression(&tokens).is_err());
+}
+
+#[test]
+fn parse_brace_expression_valid() {
+    use crate::tokenizer::{eval_expression, parse_brace_expression};
+    use crate::types::Token;
+    let tokens = vec![
+        Token::LeftBrace,
+        Token::Number(3.0),
+        Token::Plus,
+        Token::Number(4.0),
+        Token::RightBrace,
+    ];
+    let (expr, consumed) = parse_brace_expression(&tokens).unwrap();
+    assert_eq!(consumed, 5);
+    let params = AHashMap::new();
+    assert_eq!(eval_expression(&expr, &params).unwrap(), 7.0);
 }

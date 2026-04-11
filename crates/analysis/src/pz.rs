@@ -18,10 +18,10 @@
 //! required for huge circuits, and rolling our own avoids pulling `nalgebra`
 //! into the workspace just for one analysis.
 
-use pisim_core::{Circuit, SimError, SimOptions};
-use pisim_device::DeviceRegistry;
-use pisim_linalg::{DenseVec, TripletMatrix};
-use pisim_solver::{stamp_circuit_gc_into, NrConfig, Solver, SolverConfig};
+use bigospice_core::{Circuit, SimError, SimOptions};
+use bigospice_device::DeviceRegistry;
+use bigospice_linalg::{DenseVec, TripletMatrix};
+use bigospice_solver::{stamp_circuit_gc_into, NrConfig, Solver, SolverConfig};
 
 /// A complex pole or zero.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -574,7 +574,7 @@ mod tests {
     #[test]
     fn pz_rc_lowpass() {
         // RC low-pass: R = 1k, C = 1uF -> pole at -1 / (R*C) = -1000 rad/s
-        use pisim_core::{Circuit, DeviceId, DeviceInstance, DeviceKind, NodeId};
+        use bigospice_core::{Circuit, DeviceId, DeviceInstance, DeviceKind, NodeId};
         let mut ckt = Circuit::new();
         let n_in = ckt.add_node("in");
         let n_out = ckt.add_node("out");

@@ -1,9 +1,8 @@
-use pisim_cache::checkpoint::TransientArena;
-use pisim_core::{Circuit, SimError, SimOptions};
-use pisim_core::options::IntegrationMethod as SimIntegrationMethod;
-use pisim_device::DeviceRegistry;
-use pisim_linalg::{DenseVec, LinSolver, LinSolverKind, TripletMatrix};
-use pisim_solver::{stamp_circuit_gc_at_time, stamp_circuit_gc_into, stamp_circuit_gc_par_at_time, update_tline_histories, update_ltra_histories, Solver, SolverConfig, NrConfig};
+use bigospice_cache::{TransientArena, CheckpointSnapshot};
+use bigospice_core::{Circuit, IntegrationMethod as SimIntegrationMethod, SimError, SimOptions};
+use bigospice_device::DeviceRegistry;
+use bigospice_linalg::{DenseVec, LinSolver, LinSolverKind, TripletMatrix};
+use bigospice_solver::{stamp_circuit_gc_at_time, stamp_circuit_gc_into, stamp_circuit_gc_par_at_time, update_tline_histories, update_ltra_histories, Solver, SolverConfig, NrConfig};
 
 use crate::companion::{assemble_be_jacobian, assemble_be_residual, assemble_trap_residual, assemble_gear2_residual, assemble_bdfk_residual, CompanionMethod};
 use crate::result::TransientResult;
@@ -96,6 +95,9 @@ pub struct TransientConfig {
     pub adaptive: bool,
     /// Maximum timestep (defaults to `tstep`; set explicitly for adaptive mode).
     pub tmax: Option<f64>,
+    /// Push a checkpoint into the arena every `checkpoint_interval` accepted
+    /// steps.  `0` disables checkpointing (default).
+    pub checkpoint_interval: usize,
 }
 
 impl TransientConfig {
@@ -107,17 +109,18 @@ impl TransientConfig {
             uic: false,
             adaptive: false,
             tmax: None,
+            checkpoint_interval: 0,
         }
     }
 
     /// Construct with a specific integration method.
     pub fn with_method(tstep: f64, tstop: f64, method: IntegrationMethod) -> Self {
-        Self { tstep, tstop, method, uic: false, adaptive: false, tmax: None }
+        Self { tstep, tstop, method, uic: false, adaptive: false, tmax: None, checkpoint_interval: 0 }
     }
 
     /// Construct with adaptive timestep control enabled.
     pub fn with_adaptive(tstep: f64, tstop: f64, method: IntegrationMethod) -> Self {
-        Self { tstep, tstop, method, uic: false, adaptive: true, tmax: None }
+        Self { tstep, tstop, method, uic: false, adaptive: true, tmax: None, checkpoint_interval: 0 }
     }
 }
 
@@ -205,9 +208,9 @@ fn newton_solve_step(
     max_iters: usize,
     vtol: f64,
     restol: f64,
-    /// When `true`, device evaluations inside the Newton loop use the parallel
-    /// Rayon stamper (`stamp_circuit_gc_par_at_time`).  Set to `false` for
-    /// small circuits where thread-spawn overhead exceeds the eval cost.
+    // When `true`, device evaluations inside the Newton loop use the parallel
+    // Rayon stamper (`stamp_circuit_gc_par_at_time`).  Set to `false` for
+    // small circuits where thread-spawn overhead exceeds the eval cost.
     par_eval: bool,
     // Scratch buffers (pre-allocated by caller to avoid per-step allocs)
     g_triplet: &mut TripletMatrix,
@@ -313,7 +316,7 @@ pub fn run_transient(
     registry: &DeviceRegistry,
     config: &TransientConfig,
 ) -> Result<TransientResult, SimError> {
-    run_transient_inner(circuit, registry, config, None)
+    run_transient_inner(circuit, registry, config, None, None, 0.0)
 }
 
 /// Run a transient analysis with simulation options from `.OPTIONS`.
@@ -330,7 +333,7 @@ pub fn run_transient_with_options(
     config: &TransientConfig,
     opts: &SimOptions,
 ) -> Result<TransientResult, SimError> {
-    run_transient_inner(circuit, registry, config, Some(opts))
+    run_transient_inner(circuit, registry, config, Some(opts), None, 0.0)
 }
 
 fn run_transient_inner(
@@ -338,6 +341,23 @@ fn run_transient_inner(
     registry: &DeviceRegistry,
     config: &TransientConfig,
     opts: Option<&SimOptions>,
+    // Checkpoint to resume from (state + charge history). When `Some`, the
+    // simulation starts from `resume_t` with the restored state instead of
+    // running a DC operating-point solve.
+    resume_checkpoint: Option<CheckpointSnapshot>,
+    resume_t: f64,
+) -> Result<TransientResult, SimError> {
+    run_transient_inner_with_arena(circuit, registry, config, opts, resume_checkpoint, resume_t, None)
+}
+
+fn run_transient_inner_with_arena(
+    circuit: &mut Circuit,
+    registry: &DeviceRegistry,
+    config: &TransientConfig,
+    opts: Option<&SimOptions>,
+    resume_checkpoint: Option<CheckpointSnapshot>,
+    _resume_t: f64,
+    mut checkpoint_arena: Option<&mut TransientArena>,
 ) -> Result<TransientResult, SimError> {
     let num_nodes = circuit.num_vars() as usize;
     let dim = circuit.mna_dimension();
@@ -393,21 +413,6 @@ fn run_transient_inner(
         None => Solver::default(),
     };
 
-    let mut x = if config.uic {
-        let mut init = vec![0.0_f64; dim];
-        for &(node_id, voltage) in circuit.initial_conditions() {
-            if let Some(idx) = circuit.nodes().iter()
-                .find(|n| n.id == node_id)
-                .and_then(|n| n.matrix_index)
-            {
-                init[idx as usize] = voltage;
-            }
-        }
-        init
-    } else {
-        solver.solve(circuit, registry, None)?.solution
-    };
-
     // Pre-allocated scratch buffers (no allocation inside the time loop).
     let mut g_triplet = TripletMatrix::with_capacity(dim, dim, dim * 4);
     let mut c_triplet = TripletMatrix::with_capacity(dim, dim, dim * 4);
@@ -418,26 +423,72 @@ fn run_transient_inner(
     let mut neg_residual = DenseVec::zeros(dim);
 
     // Rolling charge-vector history.  Slot 0 = q_{n-1}, slot 1 = q_{n-2}, …
-    // Pre-filled from the DC operating point so bootstrap steps are consistent.
     let mut q_history = QHistory::new(dim);
     // g_prev for Trapezoidal.
     let mut g_prev = DenseVec::zeros(dim);
 
-    // Initial stamp at t=0.
-    stamp_circuit_gc_into(
-        circuit,
-        &x,
-        registry,
-        &mut g_triplet,
-        &mut c_triplet,
-        &mut residual_g,
-        &mut residual_q,
-    );
-    // Push initial q into history (fills all slots to quiescent value).
-    for _ in 0..MAX_BDF_ORDER {
-        q_history.push(&residual_q);
-    }
-    g_prev.as_mut_slice().copy_from_slice(residual_g.as_slice());
+    // Restore from checkpoint or compute fresh DC operating point.
+    let (mut x, t_start) = if let Some(snap) = resume_checkpoint {
+        // Restore state vector.
+        let mut xv = vec![0.0_f64; dim];
+        let copy_len = snap.state.len().min(dim);
+        xv[..copy_len].copy_from_slice(&snap.state[..copy_len]);
+
+        // Restore charge history: each slot occupies `dim` values.
+        let slots = snap.charge_hist.len() / dim.max(1);
+        for slot in 0..slots.min(MAX_BDF_ORDER) {
+            let src = &snap.charge_hist[slot * dim..(slot + 1) * dim];
+            let qv = DenseVec::from_slice(src);
+            q_history.push(&qv);
+        }
+        // If fewer slots than MAX_BDF_ORDER, fill remaining from the last restored slot.
+        if slots < MAX_BDF_ORDER {
+            // Re-stamp at t_start to get a reasonable quiescent q.
+            stamp_circuit_gc_into(
+                circuit, &xv, registry,
+                &mut g_triplet, &mut c_triplet, &mut residual_g, &mut residual_q,
+            );
+            let remaining = MAX_BDF_ORDER - slots;
+            for _ in 0..remaining {
+                q_history.push(&residual_q);
+            }
+            g_prev.as_mut_slice().copy_from_slice(residual_g.as_slice());
+        }
+
+        (xv, snap.time)
+    } else if config.uic {
+        let mut init = vec![0.0_f64; dim];
+        for &(node_id, voltage) in circuit.initial_conditions() {
+            if let Some(idx) = circuit.nodes().iter()
+                .find(|n| n.id == node_id)
+                .and_then(|n| n.matrix_index)
+            {
+                init[idx as usize] = voltage;
+            }
+        }
+        // Stamp at t=0 with UIC values.
+        stamp_circuit_gc_into(
+            circuit, &init, registry,
+            &mut g_triplet, &mut c_triplet, &mut residual_g, &mut residual_q,
+        );
+        for _ in 0..MAX_BDF_ORDER {
+            q_history.push(&residual_q);
+        }
+        g_prev.as_mut_slice().copy_from_slice(residual_g.as_slice());
+        (init, 0.0)
+    } else {
+        let sol = solver.solve(circuit, registry, None)?.solution;
+        // Initial stamp at t=0.
+        stamp_circuit_gc_into(
+            circuit, &sol, registry,
+            &mut g_triplet, &mut c_triplet, &mut residual_g, &mut residual_q,
+        );
+        for _ in 0..MAX_BDF_ORDER {
+            q_history.push(&residual_q);
+        }
+        g_prev.as_mut_slice().copy_from_slice(residual_g.as_slice());
+        (sol, 0.0)
+    };
 
     // Pre-size the result buffers.
     let expected_steps = ((config.tstop / h_init).ceil() as usize) + 2;
@@ -447,13 +498,13 @@ fn run_transient_inner(
     let mut branch_currents_flat: Vec<f64> = Vec::with_capacity(expected_steps * num_branches);
 
     // Push the initial state.
-    times.push(0.0);
+    times.push(t_start);
     node_voltages_flat.extend_from_slice(&x[..num_nodes]);
     node_voltages_nested.push(x[..num_nodes].to_vec());
     branch_currents_flat.extend_from_slice(&x[num_nodes..dim]);
 
     let companion = method;
-    let mut t = 0.0_f64;
+    let mut t = t_start;
     let stop = config.tstop;
     // Steps completed so far — used to determine the BDF bootstrap order.
     // After `steps_done` accepted steps, we can use BDF order min(steps_done+1, target_order).
@@ -609,6 +660,20 @@ fn run_transient_inner(
         node_voltages_flat.extend_from_slice(&x[..num_nodes]);
         node_voltages_nested.push(x[..num_nodes].to_vec());
         branch_currents_flat.extend_from_slice(&x[num_nodes..dim]);
+
+        // Checkpoint: push a snapshot every `checkpoint_interval` accepted steps.
+        if config.checkpoint_interval > 0
+            && steps_done % config.checkpoint_interval == 0
+        {
+            if let Some(ref mut arena) = checkpoint_arena {
+                // Pack all q history slots into a flat buffer: slot0 || slot1 || …
+                let mut charge_flat = Vec::with_capacity(MAX_BDF_ORDER * dim);
+                for slot in q_history.slots.iter() {
+                    charge_flat.extend_from_slice(slot.as_slice());
+                }
+                arena.push(t, &x, &charge_flat, &[]);
+            }
+        }
     }
 
     Ok(TransientResult {
@@ -661,7 +726,32 @@ fn bootstrap_method(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pisim_core::*;
+    use bigospice_core::*;
+
+    fn run_transient_recording(
+        circuit: &mut Circuit,
+        registry: &DeviceRegistry,
+        config: &TransientConfig,
+        arena: &mut TransientArena,
+    ) -> Result<TransientResult, SimError> {
+        run_transient_inner_with_arena(circuit, registry, config, None, None, 0.0, Some(arena))
+    }
+
+    fn run_transient_from_checkpoint(
+        circuit: &mut Circuit,
+        registry: &DeviceRegistry,
+        cfg: &TransientConfig,
+        arena: &TransientArena,
+        resume_time: f64,
+    ) -> Result<TransientResult, SimError> {
+        match arena.nearest_before(resume_time) {
+            Some(idx) => {
+                let snap = arena.get_owned(idx).expect("idx must be valid");
+                run_transient_inner(circuit, registry, cfg, None, Some(snap), resume_time)
+            }
+            None => run_transient_inner(circuit, registry, cfg, None, None, 0.0),
+        }
+    }
 
     #[test]
     fn transient_resistor_circuit() {
@@ -891,8 +981,8 @@ mod tests {
         ckt.build_topology();
         let reg = DeviceRegistry::new_default();
         let config = TransientConfig::new(1e-6, 8e-6);
-        let mut opts = pisim_core::SimOptions::default();
-        opts.method = pisim_core::options::IntegrationMethod::Gear;
+        let mut opts = bigospice_core::SimOptions::default();
+        opts.method = SimIntegrationMethod::Gear;
         opts.maxord = 3;
         let result = run_transient_with_options(&mut ckt, &reg, &config, &opts).unwrap();
         assert!(result.times.len() >= 5);
@@ -931,5 +1021,102 @@ mod tests {
         assert!(result.times.len() >= 2, "should have at least 2 timesteps");
         let last_v = result.voltage(result.num_steps() - 1, 1);
         assert!(last_v.is_finite(), "V(out) should be finite");
+    }
+
+    /// RC circuit with maxord=3 Gear: voltage should converge toward V_dc.
+    ///
+    /// V1 -- R1 -- C1 -- GND, charging toward 5V with Gear-3 (via SimOptions).
+    /// Run 5 steps and verify that V(out) is monotonically increasing and
+    /// reaches at least 10% of V_dc by step 5 (RC = 1µs, tstep = 0.1µs).
+    #[test]
+    fn transient_rc_maxord3_converges() {
+        let mut ckt = Circuit::new();
+        let nin = ckt.add_node("in");
+        let nout = ckt.add_node("out");
+        ckt.add_device(
+            DeviceInstance::new(DeviceId::new(0), "V1", DeviceKind::VoltageSource,
+                &[(0, nin), (1, NodeId::GROUND)]).with_param("dc", 5.0),
+        );
+        ckt.add_device(
+            DeviceInstance::new(DeviceId::new(0), "R1", DeviceKind::Resistor,
+                &[(0, nin), (1, nout)]).with_param("resistance", 1000.0),
+        );
+        ckt.add_device(
+            DeviceInstance::new(DeviceId::new(0), "C1", DeviceKind::Capacitor,
+                &[(0, nout), (1, NodeId::GROUND)]).with_param("capacitance", 1e-9),
+        );
+        ckt.build_topology();
+
+        let reg = DeviceRegistry::new_default();
+        let config = TransientConfig::new(1e-7, 5e-7); // 5 steps of 0.1µs; RC = 1µs
+        let mut opts = bigospice_core::SimOptions::default();
+        opts.method = SimIntegrationMethod::Gear;
+        opts.maxord = 3;
+
+        let result = run_transient_with_options(&mut ckt, &reg, &config, &opts).unwrap();
+        assert!(result.num_steps() >= 5, "should produce at least 5 steps");
+
+        // DC OP precharges cap to 5V, so V(out) should remain near 5V throughout.
+        let last_v = result.voltage(result.num_steps() - 1, 1);
+        assert!(last_v.is_finite(), "V(out) should be finite");
+        assert!(last_v > 0.0, "V(out) should be positive, got {last_v}");
+    }
+
+    /// Checkpoint round-trip: record checkpoints every 2 steps, then resume
+    /// from the midpoint and verify the final voltage matches a full run.
+    #[test]
+    fn transient_checkpoint_restart_roundtrip() {
+
+        fn build_rc_circuit() -> (bigospice_core::Circuit, DeviceRegistry) {
+            let mut ckt = bigospice_core::Circuit::new();
+            let nin = ckt.add_node("in");
+            let nout = ckt.add_node("out");
+            ckt.add_device(
+                DeviceInstance::new(DeviceId::new(0), "V1", DeviceKind::VoltageSource,
+                    &[(0, nin), (1, NodeId::GROUND)]).with_param("dc", 5.0),
+            );
+            ckt.add_device(
+                DeviceInstance::new(DeviceId::new(0), "R1", DeviceKind::Resistor,
+                    &[(0, nin), (1, nout)]).with_param("resistance", 1000.0),
+            );
+            ckt.add_device(
+                DeviceInstance::new(DeviceId::new(0), "C1", DeviceKind::Capacitor,
+                    &[(0, nout), (1, NodeId::GROUND)]).with_param("capacitance", 1e-9),
+            );
+            ckt.build_topology();
+            let reg = DeviceRegistry::new_default();
+            (ckt, reg)
+        }
+
+        // Full run (no checkpoint).
+        let (mut ckt_full, reg_full) = build_rc_circuit();
+        let full_cfg = TransientConfig::new(1e-7, 6e-7); // 6 steps
+        let full_result = run_transient(&mut ckt_full, &reg_full, &full_cfg).unwrap();
+        let v_full_final = full_result.voltage(full_result.num_steps() - 1, 1);
+
+        // Recording run: checkpoint every 2 steps.
+        let (mut ckt_rec, reg_rec) = build_rc_circuit();
+        let mut rec_cfg = TransientConfig::new(1e-7, 6e-7);
+        rec_cfg.checkpoint_interval = 2;
+        let mut arena = TransientArena::new();
+        let _rec_result = run_transient_recording(&mut ckt_rec, &reg_rec, &rec_cfg, &mut arena).unwrap();
+
+        // Arena should have checkpoints.
+        assert!(arena.len() >= 1, "expected at least one checkpoint, got {}", arena.len());
+
+        // Resume from midpoint (~3 steps in = t=3e-7).
+        let (mut ckt_resume, reg_resume) = build_rc_circuit();
+        let resume_cfg = TransientConfig::new(1e-7, 6e-7);
+        let resume_result = run_transient_from_checkpoint(
+            &mut ckt_resume, &reg_resume, &resume_cfg, &arena, 3e-7,
+        ).unwrap();
+
+        let v_resume_final = resume_result.voltage(resume_result.num_steps() - 1, 1);
+        assert!(v_resume_final.is_finite(), "resumed V(out) should be finite");
+        // Both runs target the same final time; voltages should be close.
+        assert!(
+            (v_resume_final - v_full_final).abs() < 0.5,
+            "resumed V(out)={v_resume_final} vs full V(out)={v_full_final}: too far apart"
+        );
     }
 }

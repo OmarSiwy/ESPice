@@ -14,12 +14,12 @@
 //!         - re-solve AC system (re-uses the same factorisation pipeline)
 //!         - compute (V_h(f) - V0(f)) / h → magnitude / phase derivatives
 //!
-//! The implementation reuses `pisim_analysis::run_ac` so the heavy lifting
+//! The implementation reuses `bigospice_analysis::run_ac` so the heavy lifting
 //! (DC OP, frequency sweep, complex block solve) lives in one place and we
 //! only orchestrate the perturbations here.
 
-use pisim_core::{Circuit, DeviceKind, SimError, SimOptions};
-use pisim_device::DeviceRegistry;
+use bigospice_core::{Circuit, DeviceKind, SimError, SimOptions};
+use bigospice_device::DeviceRegistry;
 
 use crate::ac::{run_ac, run_ac_with_options, AcConfig};
 use crate::result::AcResult;
@@ -182,7 +182,7 @@ fn perturbation(p0: f64) -> f64 {
 
 fn primary_param(
     kind: DeviceKind,
-    params: &pisim_core::param::ParamMap,
+    params: &bigospice_core::ParamMap,
 ) -> Result<(String, f64), SimError> {
     let key = match kind {
         DeviceKind::Resistor => "resistance",
@@ -210,7 +210,7 @@ fn primary_param(
 mod tests {
     use super::*;
     use crate::ac::AcSweepType;
-    use pisim_core::{Circuit, DeviceId, DeviceInstance, DeviceKind, NodeId};
+    use bigospice_core::{Circuit, DeviceId, DeviceInstance, DeviceKind, NodeId};
 
     fn rc_lowpass(r: f64, c: f64) -> Circuit {
         let mut ckt = Circuit::new();

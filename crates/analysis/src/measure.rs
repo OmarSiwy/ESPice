@@ -160,7 +160,7 @@ pub struct MeasureStatement {
 
 /// Linear interpolation: given (x0,y0)→(x1,y1), find y at x.
 #[inline]
-fn lerp(x0: f64, y0: f64, x1: f64, y1: f64, x: f64) -> f64 {
+pub fn lerp(x0: f64, y0: f64, x1: f64, y1: f64, x: f64) -> f64 {
     if (x1 - x0).abs() < f64::EPSILON {
         return y0;
     }
@@ -284,7 +284,7 @@ pub fn window_slice(
 
 /// Trapezoidal integration of `values` over `xs`.
 #[inline]
-fn trapz(xs: &[f64], values: &[f64]) -> f64 {
+pub fn trapz(xs: &[f64], values: &[f64]) -> f64 {
     xs.windows(2)
         .zip(values.windows(2))
         .map(|(xw, yw)| 0.5 * (yw[0] + yw[1]) * (xw[1] - xw[0]))
@@ -362,7 +362,7 @@ pub fn deriv_at(xs: &[f64], values: &[f64], x: f64) -> Result<f64, SimError> {
 
 /// Apply a binary operator to two f64 values.
 #[inline]
-fn apply_binop(op: char, l: f64, r: f64) -> Result<f64, SimError> {
+pub fn apply_binop(op: char, l: f64, r: f64) -> Result<f64, SimError> {
     match op {
         '+' => Ok(l + r),
         '-' => Ok(l - r),
@@ -384,7 +384,7 @@ fn apply_binop(op: char, l: f64, r: f64) -> Result<f64, SimError> {
 
 /// Resolve a `Signal` to a values vector from a `TransientResult`.
 /// `node_names` must correspond to the column order in `result`.
-fn resolve_tran(
+pub fn resolve_tran(
     sig: &Signal,
     result: &TransientResult,
     node_names: &[String],
@@ -480,7 +480,7 @@ fn resolve_tran(
 ///
 /// `V(n)` and `VM(n)` return magnitude.  `VDB(n)` returns 20·log₁₀(mag).
 /// `VR(n)` returns real part, `VI(n)` imaginary, `VP(n)` phase in degrees.
-fn resolve_ac(
+pub fn resolve_ac(
     sig: &Signal,
     result: &AcResult,
     node_names: &[String],
@@ -552,7 +552,7 @@ fn resolve_ac(
 }
 
 /// Resolve a `Signal` to a values vector from a `DcSweepResult`.
-fn resolve_dc(
+pub fn resolve_dc(
     sig: &Signal,
     result: &DcSweepResult,
     node_names: &[String],
@@ -665,7 +665,7 @@ pub fn eval_all(
 // Per-analysis evaluators
 // ---------------------------------------------------------------------------
 
-fn eval_tran(
+pub fn eval_tran(
     stmt: &MeasureStatement,
     result: &TransientResult,
     node_names: &[String],
@@ -746,7 +746,7 @@ fn eval_tran(
     }
 }
 
-fn eval_ac(
+pub fn eval_ac(
     stmt: &MeasureStatement,
     result: &AcResult,
     node_names: &[String],
@@ -828,7 +828,7 @@ fn eval_ac(
     }
 }
 
-fn eval_dc(
+pub fn eval_dc(
     stmt: &MeasureStatement,
     result: &DcSweepResult,
     node_names: &[String],
@@ -914,7 +914,7 @@ fn eval_dc(
 // ---------------------------------------------------------------------------
 
 /// Resolve RISE/FALL/CROSS priority for WhenCross: RISE > FALL > CROSS.
-fn resolve_cross_kind(rise: Option<u32>, fall: Option<u32>, cross: Option<u32>) -> CrossKind {
+pub fn resolve_cross_kind(rise: Option<u32>, fall: Option<u32>, cross: Option<u32>) -> CrossKind {
     if let Some(n) = rise {
         CrossKind::Rise(n)
     } else if let Some(n) = fall {
@@ -926,7 +926,7 @@ fn resolve_cross_kind(rise: Option<u32>, fall: Option<u32>, cross: Option<u32>) 
 
 /// Evaluate a WHEN condition for transient analysis; returns the x (time) at
 /// which the condition is first satisfied.
-fn eval_when_cond_tran(
+pub fn eval_when_cond_tran(
     cond: &WhenCond,
     times: &[f64],
     result: &TransientResult,
@@ -976,7 +976,7 @@ pub fn parse_measure_line(tokens: &[&str]) -> Option<MeasureStatement> {
     Some(MeasureStatement { name, target, kind })
 }
 
-fn parse_measure_kind(rest: &[&str]) -> Option<MeasureKind> {
+pub fn parse_measure_kind(rest: &[&str]) -> Option<MeasureKind> {
     if rest.is_empty() {
         return None;
     }
@@ -1027,7 +1027,7 @@ fn parse_measure_kind(rest: &[&str]) -> Option<MeasureKind> {
     }
 }
 
-fn parse_find_kind(rest: &[&str]) -> Option<MeasureKind> {
+pub fn parse_find_kind(rest: &[&str]) -> Option<MeasureKind> {
     if rest.is_empty() {
         return None;
     }
@@ -1048,7 +1048,7 @@ fn parse_find_kind(rest: &[&str]) -> Option<MeasureKind> {
     None
 }
 
-fn parse_when_kind(rest: &[&str]) -> Option<MeasureKind> {
+pub fn parse_when_kind(rest: &[&str]) -> Option<MeasureKind> {
     // WHEN v(out)=0.5 [RISE=1 | FALL=1 | CROSS=1]
     if rest.is_empty() {
         return None;
@@ -1070,7 +1070,7 @@ fn parse_when_kind(rest: &[&str]) -> Option<MeasureKind> {
     Some(MeasureKind::WhenCross { signal, value, rise, fall, cross })
 }
 
-fn parse_trig_targ_kind(rest: &[&str]) -> Option<MeasureKind> {
+pub fn parse_trig_targ_kind(rest: &[&str]) -> Option<MeasureKind> {
     // TRIG v(out) VAL=0.1 RISE=1 TARG v(out) VAL=0.9 RISE=1
     // `rest[0]` is "trig"; split on "targ".
     let targ_pos = rest.iter().position(|t| t.to_ascii_lowercase() == "targ")?;
@@ -1082,7 +1082,7 @@ fn parse_trig_targ_kind(rest: &[&str]) -> Option<MeasureKind> {
     Some(MeasureKind::TrigTarg { trig, targ })
 }
 
-fn parse_trigger(tokens: &[&str]) -> Option<Trigger> {
+pub fn parse_trigger(tokens: &[&str]) -> Option<Trigger> {
     if tokens.is_empty() {
         return None;
     }
@@ -1115,7 +1115,7 @@ fn parse_trigger(tokens: &[&str]) -> Option<Trigger> {
     Some(Trigger { signal, value, rise_fall_cross, td })
 }
 
-fn parse_when_cond(tokens: &[&str]) -> Option<WhenCond> {
+pub fn parse_when_cond(tokens: &[&str]) -> Option<WhenCond> {
     if tokens.is_empty() {
         return None;
     }
@@ -1207,7 +1207,7 @@ pub fn parse_signal(tok: &str) -> Option<Signal> {
 }
 
 /// Parse `v(out)=0.5` into `(Signal, f64)`.
-fn parse_signal_eq_value(tok: &str) -> Option<(Signal, f64)> {
+pub fn parse_signal_eq_value(tok: &str) -> Option<(Signal, f64)> {
     let eq_pos = tok.find('=')?;
     let sig_str = &tok[..eq_pos];
     let val_str = &tok[eq_pos + 1..];
@@ -1217,7 +1217,7 @@ fn parse_signal_eq_value(tok: &str) -> Option<(Signal, f64)> {
 }
 
 /// Parse FROM= and TO= from a token slice.
-fn parse_from_to(tokens: &[&str]) -> (Option<f64>, Option<f64>) {
+pub fn parse_from_to(tokens: &[&str]) -> (Option<f64>, Option<f64>) {
     let mut from = None;
     let mut to = None;
     for tok in tokens {
@@ -1275,7 +1275,7 @@ pub fn parse_spice_value(s: &str) -> Result<f64, SimError> {
 
 /// Parse an HSPICE signal descriptor: `v(out)`, `i(r1)`, `v(a,b)`,
 /// `vm(out)`, `vdb(out)`, `vr(out)`, `vi(out)`, `vp(out)`.
-fn parse_hspice_signal(s: &str) -> Option<Signal> {
+pub fn parse_hspice_signal(s: &str) -> Option<Signal> {
     let s = s.trim();
     let paren = s.find('(')?;
     let func = s[..paren].trim().to_lowercase();
@@ -1303,7 +1303,7 @@ fn parse_hspice_signal(s: &str) -> Option<Signal> {
 }
 
 /// Resolve a signal to a value vector for any `ResultData` variant.
-fn resolve_for_data(
+pub fn resolve_for_data(
     sig: &Signal,
     data: &ResultData,
     node_names: &[String],
@@ -1319,7 +1319,7 @@ fn resolve_for_data(
 }
 
 /// Return the x-axis slice (time / frequency / sweep value) from `data`.
-fn result_xaxis(data: &ResultData) -> Result<&[f64], SimError> {
+pub fn result_xaxis(data: &ResultData) -> Result<&[f64], SimError> {
     match data {
         ResultData::Transient(r) => Ok(&r.times),
         ResultData::Ac(r) => Ok(&r.frequencies),
@@ -1331,7 +1331,7 @@ fn result_xaxis(data: &ResultData) -> Result<&[f64], SimError> {
 }
 
 /// X-axis value at the sample where `values` reaches its maximum.
-fn x_at_ymax(xs: &[f64], values: &[f64]) -> Result<f64, SimError> {
+pub fn x_at_ymax(xs: &[f64], values: &[f64]) -> Result<f64, SimError> {
     values
         .iter()
         .enumerate()
@@ -1341,7 +1341,7 @@ fn x_at_ymax(xs: &[f64], values: &[f64]) -> Result<f64, SimError> {
 }
 
 /// X-axis value at the sample where `values` reaches its minimum.
-fn x_at_ymin(xs: &[f64], values: &[f64]) -> Result<f64, SimError> {
+pub fn x_at_ymin(xs: &[f64], values: &[f64]) -> Result<f64, SimError> {
     values
         .iter()
         .enumerate()
@@ -1351,7 +1351,7 @@ fn x_at_ymin(xs: &[f64], values: &[f64]) -> Result<f64, SimError> {
 }
 
 /// Split a comma-separated argument string while respecting nested parentheses.
-fn split_args(s: &str) -> Vec<&str> {
+pub fn split_args(s: &str) -> Vec<&str> {
     let mut depth = 0usize;
     let mut start = 0;
     let mut parts = Vec::new();
@@ -1374,7 +1374,7 @@ fn split_args(s: &str) -> Vec<&str> {
 ///
 /// Tokenizes `inner` with the bigospice-parser lexer and evaluates with named
 /// parameters bound to the prior labels.
-fn eval_par_expr(inner: &str, prior: &[(&str, f64)]) -> Result<f64, SimError> {
+pub fn eval_par_expr(inner: &str, prior: &[(&str, f64)]) -> Result<f64, SimError> {
     use bigospice_parser::{Lexer, eval_expression, parse_expression};
     let tokens = Lexer::new(inner)
         .tokenize_all()
@@ -1393,7 +1393,7 @@ fn eval_par_expr(inner: &str, prior: &[(&str, f64)]) -> Result<f64, SimError> {
 ///
 /// `prior` holds `(label, value)` pairs from specs evaluated earlier in the
 /// same `.EXTRACT` block; they are available as named variables in `par()`.
-fn eval_extract_expr(
+pub fn eval_extract_expr(
     expr: &str,
     data: &ResultData,
     node_names: &[String],

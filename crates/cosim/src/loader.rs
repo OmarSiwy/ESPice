@@ -10,13 +10,13 @@
 //! The exact symbol names depend on Verilator's `--prefix` and the user's
 //! integration shim.  The loader accepts a `VerilatorSymbols` table so the
 //! caller can override defaults — defaults follow the convention used by the
-//! PiSIM example shims:
+//! BigOSpice example shims:
 //!
 //! ```text
-//!   pisim_verilator_eval
-//!   pisim_verilator_final
-//!   pisim_verilator_set_signal
-//!   pisim_verilator_get_signal
+//!   bigospice_verilator_eval
+//!   bigospice_verilator_final
+//!   bigospice_verilator_set_signal
+//!   bigospice_verilator_get_signal
 //! ```
 //!
 //! `unsafe` is confined to the `Library::get` lookups and the function-pointer
@@ -63,10 +63,10 @@ pub struct VerilatorSymbols {
 impl Default for VerilatorSymbols {
     fn default() -> Self {
         Self {
-            eval: "pisim_verilator_eval".into(),
-            final_: "pisim_verilator_final".into(),
-            set_signal: "pisim_verilator_set_signal".into(),
-            get_signal: "pisim_verilator_get_signal".into(),
+            eval: "bigospice_verilator_eval".into(),
+            final_: "bigospice_verilator_final".into(),
+            set_signal: "bigospice_verilator_set_signal".into(),
+            get_signal: "bigospice_verilator_get_signal".into(),
         }
     }
 }
@@ -75,9 +75,9 @@ impl Default for VerilatorSymbols {
 //
 // The shim is a thin layer the user writes once per design, e.g.:
 //
-//   extern "C" void pisim_verilator_eval(void* ctx);
-//   extern "C" void pisim_verilator_set_signal(void* ctx, const char* name, uint64_t v);
-//   extern "C" uint64_t pisim_verilator_get_signal(void* ctx, const char* name);
+//   extern "C" void bigospice_verilator_eval(void* ctx);
+//   extern "C" void bigospice_verilator_set_signal(void* ctx, const char* name, uint64_t v);
+//   extern "C" uint64_t bigospice_verilator_get_signal(void* ctx, const char* name);
 //
 // The opaque `void* ctx` is the Verilated top-module instance.
 type EvalFn = unsafe extern "C" fn(*mut std::ffi::c_void);
@@ -86,7 +86,7 @@ type SetSignalFn = unsafe extern "C" fn(*mut std::ffi::c_void, *const std::os::r
 type GetSignalFn = unsafe extern "C" fn(*mut std::ffi::c_void, *const std::os::raw::c_char) -> u64;
 type CtorFn = unsafe extern "C" fn() -> *mut std::ffi::c_void;
 
-const CTOR_SYMBOL: &str = "pisim_verilator_new";
+const CTOR_SYMBOL: &str = "bigospice_verilator_new";
 
 /// RAII wrapper around a loaded Verilator shared object.
 ///

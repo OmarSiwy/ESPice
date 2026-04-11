@@ -27,7 +27,7 @@
 
 use crate::csc::CscMatrix;
 use crate::permutation::Permutation;
-use pisim_core::SimError;
+use bigospice_core::SimError;
 
 /// Sparse LU factors stored as two CSC matrices plus a row permutation.
 ///

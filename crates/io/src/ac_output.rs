@@ -6,7 +6,7 @@
 //!
 //! # Design
 //!
-//! The io crate deliberately has **no** dependency on `pisim-analysis`.  This
+//! The io crate deliberately has **no** dependency on `bigospice-analysis`.  This
 //! module therefore accepts the four per-node arrays that `AcResult` provides
 //! as plain `&[Vec<f64>]` slices, together with a node-name list and a list of
 //! `PrintColumn` specs.  The caller (analysis crate or CLI) owns the `AcResult`

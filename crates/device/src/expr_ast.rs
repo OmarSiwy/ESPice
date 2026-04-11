@@ -2,7 +2,7 @@
 //!
 //! This module is the **DOD-friendly** representation of the behavioral
 //! expressions used by `B`, `E`, and `G` elements.  It is the device-side
-//! counterpart of `pisim_core::BehavioralExpr` (which is a tree built with
+//! counterpart of `bigospice_core::BehavioralExpr` (which is a tree built with
 //! `Box`).  The flat representation here:
 //!
 //! - Stores all nodes in a contiguous `Vec<ExprNode>` (struct-of-arrays
@@ -47,7 +47,7 @@
 //!
 //! The root of the expression is `nodes.last()` (the latest pushed).
 //!
-//! ## Why not use `pisim_core::BehavioralExpr`?
+//! ## Why not use `bigospice_core::BehavioralExpr`?
 //!
 //! `BehavioralExpr` is a tree of `Box<BehavioralExpr>` with `String` leaves.
 //! Every recursive call allocates and chases a pointer; differentiation
@@ -64,7 +64,7 @@
 //! `BehavioralExpr` remains the parser/circuit transport.  Conversion happens
 //! lazily via `ExprAst::from_behavioral`.
 
-use pisim_core::{BehavioralBinOp, BehavioralExpr, SimError};
+use bigospice_core::{BehavioralBinOp, BehavioralExpr, SimError};
 use smallvec::SmallVec;
 
 /// Typed index into an `ExprAst`'s `nodes` array.
@@ -830,7 +830,7 @@ pub fn table_slope(points: &[(f64, f64)], x: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pisim_core::{BehavioralBinOp, BehavioralExpr};
+    use bigospice_core::{BehavioralBinOp, BehavioralExpr};
 
     fn lit(v: f64) -> BehavioralExpr {
         BehavioralExpr::Lit(v)

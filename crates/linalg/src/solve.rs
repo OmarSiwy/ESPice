@@ -1,14 +1,14 @@
 //! Sparse triangular solves on top of [`LuFactors`].
 //!
 //! `lu_solve(factors, b)` solves `A x = b` where `factors` came from
-//! [`crate::lu::lu_factorize`].  The factorisation captures `P A Q = L U`
-//! where `P` is the row permutation chosen by partial pivoting and `Q`
-//! is the AMD column permutation.  The solve unrolls as:
+//! [`crate::lu::lu_factorize`].  The factorisation captures:
+//!   `(P_lu) * (P_btf_row * A * P_btf_col^{-1}) * Q_amd^{-1} = L * U`
+//! The solve unrolls as:
 //!
-//!   1. `pb = P b`        (permute the right-hand side by rows)
-//!   2. `L y = pb`        (sparse forward substitution)
-//!   3. `U z = y`         (sparse back substitution, in column order)
-//!   4. `x = Q^{-1} z`    (undo the AMD column permutation)
+//!   1. `b' = P_btf_row * b`    (BTF row permutation)
+//!   2. `L y = b'`              (sparse forward substitution, folds P_lu)
+//!   3. `U z = y`               (sparse back substitution)
+//!   4. `x = (Q_amd ∘ P_btf_col)^{-1} z`  (undo combined col permutation)
 //!
 //! All operations are performed using the underlying CSC L and U — there
 //! is no dense expansion.
@@ -16,25 +16,37 @@
 use crate::dense_vec::DenseVec;
 use crate::lu::LuFactors;
 use crate::sparse_lu;
-use pisim_core::SimError;
+use bigospice_core::SimError;
 
 /// Solve `A x = b` given LU factors from `lu_factorize`.
 pub fn lu_solve(factors: &LuFactors, b: &DenseVec) -> Result<DenseVec, SimError> {
     let n = factors.n;
     assert_eq!(b.len(), n, "lu_solve: dimension mismatch");
 
-    // Step 1: forward solve  L y = b   (the row permutation is folded into
-    // the forward solve itself).
-    let mut y = vec![0.0f64; n];
-    sparse_lu::forward_solve_inplace(&factors.inner, b.as_slice(), &mut y);
+    // Step 1: apply BTF row permutation — b' = P_btf_row * b.
+    // forward()[orig_row] = new_row, so b'[new_row] = b[orig_row].
+    let btf_fwd = factors.btf_row_perm.forward();
+    let b_perm: DenseVec = if btf_fwd.iter().enumerate().all(|(i, &p)| i == p) {
+        b.clone()
+    } else {
+        let mut bp = DenseVec::zeros(n);
+        for (orig, &new_row) in btf_fwd.iter().enumerate() {
+            bp[new_row] = b[orig];
+        }
+        bp
+    };
 
-    // Step 2: back solve  U z = y    (z is in the AMD-permuted column space).
+    // Step 2: forward solve  L y = b'  (the LU row permutation is folded in).
+    let mut y = vec![0.0f64; n];
+    sparse_lu::forward_solve_inplace(&factors.inner, b_perm.as_slice(), &mut y);
+
+    // Step 3: back solve  U z = y    (z is in the BTF+AMD-permuted col space).
     let mut z = vec![0.0f64; n];
     sparse_lu::back_solve_inplace(&factors.inner, &y, &mut z)?;
 
-    // Step 3: undo the AMD column permutation.  factors.inner.col_perm maps
-    // ORIGINAL column index -> permuted column index, so the solution in
-    // the original numbering is x[orig] = z[col_perm.forward()[orig]].
+    // Step 4: undo the combined BTF+AMD column permutation.
+    // col_perm.forward()[orig_col] = permuted col index, so
+    // x[orig] = z[col_perm.forward()[orig]].
     let col_perm = &factors.inner.col_perm;
     let fwd = col_perm.forward();
     let mut x = DenseVec::zeros(n);

@@ -30,10 +30,10 @@
 //! Wire up to `Touchstone` writer in `crates/io/` once the io crate stabilises
 //! its API. For now callers can access raw complex values from `SpResult`.
 
-use pisim_core::{Circuit, SimError, SimOptions};
-use pisim_device::DeviceRegistry;
-use pisim_linalg::{DenseVec, LinSolver, LinSolverKind, TripletMatrix};
-use pisim_solver::{stamp_circuit_gc_into, Solver, SolverConfig, NrConfig};
+use bigospice_core::{Circuit, SimError, SimOptions};
+use bigospice_device::DeviceRegistry;
+use bigospice_linalg::{DenseVec, LinSolver, LinSolverKind, TripletMatrix};
+use bigospice_solver::{stamp_circuit_gc_into, Solver, SolverConfig, NrConfig};
 
 use crate::ac::AcSweepType;
 
@@ -186,7 +186,7 @@ pub fn run_sp_with_options(
 // Core implementation
 // ---------------------------------------------------------------------------
 
-fn run_sp_inner(
+pub fn run_sp_inner(
     circuit: &Circuit,
     registry: &DeviceRegistry,
     config: &SpConfig,
@@ -376,7 +376,7 @@ fn run_sp_inner(
     Ok(SpResult { frequencies, num_ports: n_ports, s_matrix })
 }
 
-fn generate_sp_frequencies(config: &SpConfig) -> Vec<f64> {
+pub fn generate_sp_frequencies(config: &SpConfig) -> Vec<f64> {
     match config.sweep_type {
         AcSweepType::Linear => {
             let denom = (config.num_points.max(1) - 1).max(1) as f64;
@@ -411,8 +411,8 @@ fn generate_sp_frequencies(config: &SpConfig) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pisim_core::{Circuit, DeviceId, DeviceInstance, DeviceKind, NodeId};
-    use pisim_device::DeviceRegistry;
+    use bigospice_core::{Circuit, DeviceId, DeviceInstance, DeviceKind, NodeId};
+    use bigospice_device::DeviceRegistry;
 
     /// Build a 2-port "thru" circuit: two nodes connected by a wire (zero resistance).
     ///

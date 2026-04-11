@@ -1,14 +1,14 @@
 [package]
-name = "pisim-cache"
+name = "bigospice-cache"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Five-level incremental simulation cache for PiSIM"
+description = "Five-level incremental simulation cache for BigOSpice"
 
 [dependencies]
-pisim-core.workspace = true
-pisim-linalg.workspace = true
-pisim-device.workspace = true
+bigospice-core.workspace = true
+bigospice-linalg.workspace = true
+bigospice-device.workspace = true
 ahash.workspace = true
 bitvec.workspace = true
 smallvec.workspace = true

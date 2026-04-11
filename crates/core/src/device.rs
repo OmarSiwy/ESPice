@@ -108,6 +108,19 @@ pub enum DeviceKind {
     MosfetN6 = 36,
     /// P-channel MOSFET Level 6 (Sakurai-Newton power-law model)
     MosfetP6 = 37,
+    /// Uniform RC transmission line (`U` element).
+    ///
+    /// Expanded at parse time into `LUMPS` series-R + shunt-C segments.
+    Urc = 38,
+    /// W-element: frequency-domain lossy transmission line (Xyce stub).
+    ///
+    /// Falls back to LTRA with placeholder R/L/C values until tabulated
+    /// S/Y/Z-parameter interpolation is implemented.
+    Wlossy = 39,
+    /// PORT element: S-parameter excitation port (HSPICE).
+    ///
+    /// Thevenin equivalent — voltage source in series with Z0 resistor.
+    Port = 40,
     /// LTRA lossy transmission line (`O` element, 4-terminal: in+, in-, out+, out-).
     ///
     /// Per-unit-length parameters: `R`, `L`, `G`, `C`, total length `LEN`.
@@ -167,6 +180,9 @@ impl fmt::Display for DeviceKind {
             Self::MosfetP3 => "PMOS3",
             Self::MosfetN6 => "NMOS6",
             Self::MosfetP6 => "PMOS6",
+            Self::Urc => "U",
+            Self::Wlossy => "W",
+            Self::Port => "PORT",
         };
         write!(f, "{s}")
     }

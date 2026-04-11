@@ -5,7 +5,7 @@
 //!
 //! `.FFT` is a stub that returns `SimError::Analysis("unsupported")`.
 
-use pisim_core::SimError;
+use bigospice_core::SimError;
 
 use crate::result::TransientResult;
 

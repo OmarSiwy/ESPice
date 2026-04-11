@@ -15,9 +15,9 @@
 /// K. S. Kundert, "The Designer's Guide to SPICE and Spectre," §4 (Kluwer 1995).
 /// T.-L. Sheu, "Pseudo-transient continuation for solving nonlinear circuit
 /// equations," IEEE TCAD 2003.
-use pisim_core::{Circuit, SimError};
-use pisim_device::DeviceRegistry;
-use pisim_linalg::{lu_factorize, lu_solve, DenseVec, TripletMatrix};
+use bigospice_core::{Circuit, SimError};
+use bigospice_device::DeviceRegistry;
+use bigospice_linalg::{lu_factorize, lu_solve, DenseVec, TripletMatrix};
 
 use crate::stamper;
 
@@ -193,8 +193,8 @@ pub fn solve_pseudo_transient(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pisim_core::{Circuit, DeviceId, DeviceInstance, DeviceKind, NodeId};
-    use pisim_device::DeviceRegistry;
+    use bigospice_core::{Circuit, DeviceId, DeviceInstance, DeviceKind, NodeId};
+    use bigospice_device::DeviceRegistry;
 
     /// Build a minimal circuit: one resistor, one voltage source.
     /// V1 (5 V) from node 1 to GND, R1 (1kΩ) from node 1 to GND.

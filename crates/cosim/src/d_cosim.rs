@@ -15,7 +15,7 @@
 //! Clock-driven mode (the default) only invokes `eval` on a clock edge;
 //! continuous-assignment mode calls it every timestep.
 
-use pisim_digital::{DigNodeIdx, DigState, EventQueue, Strength};
+use bigospice_digital::{DigNodeIdx, DigState, EventQueue, Strength};
 
 use crate::clock_mode::{ClockMode, ClockSpec};
 use crate::loader::{CosimError, VerilatorModel};
@@ -158,7 +158,7 @@ impl DCosim {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pisim_digital::DigNodeIdx;
+    use bigospice_digital::DigNodeIdx;
 
     #[test]
     fn port_construction() {

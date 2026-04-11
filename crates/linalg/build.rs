@@ -1,4 +1,4 @@
-// build.rs for pisim-linalg
+// build.rs for bigospice-linalg
 //
 // When the `klu` feature is enabled, locate and link the SuiteSparse KLU
 // library.  We try three strategies in order:
@@ -7,7 +7,7 @@
 //     prefix explicitly.
 //  2. pkg-config — the library was installed system-wide.
 //  3. Well-known nix store prefix hard-coded from CI — this is the fallback
-//     for the NixOS dev-shell used by PiSIM.
+//     for the NixOS dev-shell used by BigOSpice.
 //
 // If none of the strategies succeeds, we print a warning and the build
 // continues without KLU (the `klu` feature will be a no-op stub).

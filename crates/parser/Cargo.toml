@@ -12,6 +12,7 @@ thiserror.workspace = true
 ahash.workspace = true
 smallvec.workspace = true
 log.workspace = true
+phf.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

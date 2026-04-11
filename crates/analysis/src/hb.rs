@@ -51,7 +51,7 @@
 //!   spectral Toeplitz block.  This is the standard "shooting Newton with
 //!   averaged Jacobian" simplification — it converges for circuits whose
 //!   nonlinearity is dominated by a single tone (rectifiers, mixers driven
-//!   by an LO well above the IF), which covers all current PiSIM tests.
+//!   by an LO well above the IF), which covers all current BigOSpice tests.
 //!   A future revision can swap in the full FFT-of-G(t) Toeplitz block
 //!   without touching the public API.
 //! - Diodes, BJTs (Gummel-Poon, VBIC), Level-1 MOSFETs (N and P), JFETs,
@@ -71,10 +71,11 @@
 
 use std::f64::consts::PI;
 
-use pisim_core::{Circuit, DeviceKind, NodeId, SimError};
-use pisim_device::{DeviceRegistry, OsdiEvalHook, OsdiHandle};
-use pisim_linalg::{DenseVec, LinSolver, LinSolverKind, TripletMatrix};
-use pisim_solver::{stamp_circuit_gc_into, Solver};
+use bigospice_core::{Circuit, DeviceKind, NodeId, SimError};
+use bigospice_device::{DeviceRegistry, OsdiEvalHook};
+use bigospice_osdi::OsdiInstance;
+use bigospice_linalg::{DenseVec, LinSolver, LinSolverKind, TripletMatrix};
+use bigospice_solver::{stamp_circuit_gc_into, Solver};
 
 // ---------------------------------------------------------------------------
 // Public configuration
@@ -701,7 +702,7 @@ pub fn run_hb_single_tone(
             rhs.fill_zero();
             if h == 1 {
                 for &stim in circuit.ac_stimuli() {
-                    use pisim_core::AcStimulus;
+                    use bigospice_core::AcStimulus;
                     match stim {
                         AcStimulus::VoltageSource(br, re, im) => {
                             if br < dim {
@@ -942,7 +943,7 @@ pub fn run_hb_two_tone(
             let inject = (prod.m.abs() + prod.n.abs()) == 1;
             if inject {
                 for &stim in circuit.ac_stimuli() {
-                    use pisim_core::AcStimulus;
+                    use bigospice_core::AcStimulus;
                     match stim {
                         AcStimulus::VoltageSource(br, re, im) => {
                             if br < dim {
@@ -1082,15 +1083,33 @@ fn apft_grid_ntone(num_products: usize) -> (Vec<f64>, usize) {
 /// tones.  The mixing-product set uses L1-norm box truncation at the
 /// specified `order`.  APFT maps the products onto a 1-D time grid.
 ///
+/// Binds one OSDI device instance to its circuit terminal nodes for use in
+/// `run_hb_n_tone`.  The `terminal_nodes` slice maps each device pin (0-based)
+/// to its MNA node index (0-based, `usize::MAX` for ground).
+pub struct OsdiHbDevice<'a> {
+    /// Mutable borrow of the OSDI instance that owns the plugin state.
+    pub instance: &'a mut OsdiInstance,
+    /// MNA node index for each device terminal (ground = `usize::MAX`).
+    pub terminal_nodes: Vec<usize>,
+}
+
 /// Pass `osdi_hook = Some(hook)` to enable OSDI-loaded model evaluation
 /// (e.g. HICUM, PSP via OpenVAF).  When `None`, OSDI devices are skipped
 /// and contribute zero nonlinear current (correct for circuits without
 /// OSDI components).
+///
+/// Pass `osdi_hb_devices = Some(devices)` to additionally evaluate
+/// OSDI-loaded devices via the harmonic-domain `OsdiInstance::eval_hb()`
+/// path (Q.4 frequency-domain wiring).  Each entry carries a mutable
+/// borrow of an `OsdiInstance` together with its terminal-to-MNA-node
+/// mapping.  When `None` (or empty), no frequency-domain OSDI stamping
+/// is performed.
 pub fn run_hb_n_tone(
     circuit: &Circuit,
     registry: &DeviceRegistry,
     config: &HbNToneConfig,
-    osdi_hook: Option<&mut dyn OsdiEvalHook>,
+    mut osdi_hook: Option<&mut dyn OsdiEvalHook>,
+    mut osdi_hb_devices: Option<&mut Vec<OsdiHbDevice<'_>>>,
 ) -> Result<HbResult, SimError> {
     if config.tones.is_empty() {
         return Err(SimError::Analysis("HB N-tone: must specify at least one tone".into()));
@@ -1209,7 +1228,7 @@ pub fn run_hb_n_tone(
                 for device in circuit.devices() {
                     // Recognise OSDI handles: their kind sentinel == VbicNpn,
                     // but the authoritative test is the DeviceDispatch variant.
-                    // Since hb.rs has no access to DeviceDispatch (pisim-device
+                    // Since hb.rs has no access to DeviceDispatch (bigospice-device
                     // internals), we rely on the OsdiHandle being detectable via
                     // the OSDI sentinel kind registered for that DeviceKind slot.
                     // The registry returns None for true OSDI DeviceKind values
@@ -1255,14 +1274,20 @@ pub fn run_hb_n_tone(
                         Some(idx) => idx,
                         None => continue,
                     };
+                    let mut out_i: Vec<f64> = time_i.iter().map(|v| v[t]).collect();
+                    let mut out_g: Vec<f64> = time_g.iter().map(|v| v[t]).collect();
                     hook.eval_instance(
                         instance_idx,
                         &voltages,
                         0.0, // time=0 for HB (steady-state, not transient)
-                        &mut time_i.iter_mut().map(|v| &mut v[t]).collect::<Vec<_>>()[..],
-                        &mut time_g.iter_mut().map(|v| &mut v[t]).collect::<Vec<_>>()[..],
+                        &mut out_i,
+                        &mut out_g,
                         &terminal_nodes,
                     );
+                    for nd in 0..num_nodes {
+                        time_i[nd][t] = out_i[nd];
+                        time_g[nd][t] = out_g[nd];
+                    }
                 }
             }
         }
@@ -1270,6 +1295,85 @@ pub fn run_hb_n_tone(
         // (c) Forward APFT → spectral nonlinear currents.
         for nd in 0..num_nodes {
             spec_i[nd] = apft_forward(&time_i[nd], &ntone_products_as_mixing(&products), &sample_times);
+        }
+
+        // (c.1) OSDI frequency-domain stamping via eval_hb() (Q.4).
+        //
+        // For each OSDI device we build a flat voltage slice of length
+        // `num_freqs * num_terminals`, call `eval_hb`, and accumulate:
+        //   - `currents`  → spec_i  (resistive spectral current)
+        //   - `charges`   → spec_i  (reactive: contribution is jω·Q, so
+        //                            real part gets −ω·Q_im, imag gets +ω·Q_re)
+        //   - `jacobians` → time_g  (averaged diagonal conductance)
+        if let Some(ref mut hb_devices) = osdi_hb_devices {
+            for dev in hb_devices.iter_mut() {
+                let n_terms = dev.instance.num_terminals() as usize;
+                // Build flat voltage slice: [harm0_t0, harm0_t1, ..., harm1_t0, ...]
+                let mut voltages = vec![0.0f64; num_freqs * n_terms];
+                for h in 0..num_freqs {
+                    for (pin, &mna_nd) in dev.terminal_nodes.iter().enumerate().take(n_terms) {
+                        let v = if mna_nd == usize::MAX {
+                            0.0
+                        } else if mna_nd < num_nodes {
+                            let idx = h * num_nodes + mna_nd;
+                            state.real[idx]
+                        } else {
+                            0.0
+                        };
+                        voltages[h * n_terms + pin] = v;
+                    }
+                }
+
+                // Use the fundamental angular frequency of the first tone for
+                // reactive-element scaling (omega_0 = 2π·f1).
+                let omega0 = 2.0 * std::f64::consts::PI * config.tones[0];
+
+                let eval = dev.instance.eval_hb(&voltages, num_freqs, omega0)
+                    .map_err(|e| SimError::Analysis(format!("OSDI eval_hb failed: {e}")))?;
+
+                // num_nodes in eval result may differ from circuit num_nodes;
+                // use the minimum to avoid out-of-bounds.
+                let eval_nodes = if num_freqs > 0 {
+                    eval.currents.len() / num_freqs
+                } else {
+                    0
+                };
+                let stamp_nodes = eval_nodes.min(num_nodes);
+
+                // Stamp resistive currents into spec_i.
+                for h in 0..num_freqs {
+                    for nd in 0..stamp_nodes {
+                        spec_i[nd][h].re += eval.currents[h * eval_nodes + nd];
+                    }
+                }
+
+                // Stamp reactive (charge) contributions: jω·Q adds
+                //   real: −ω·Q_im  (Q_im = 0 in real-signal steady state)
+                //   imag: +ω·Q_re
+                for (h, prod) in products.iter().enumerate() {
+                    let omega_h = 2.0 * std::f64::consts::PI * prod.freq;
+                    for nd in 0..stamp_nodes {
+                        let q = eval.charges[h * eval_nodes + nd];
+                        spec_i[nd][h].im += omega_h * q;
+                    }
+                }
+
+                // Stamp Jacobian diagonal into time_g for the averaged-conductance
+                // approximation.  eval.jacobians is indexed [harm * num_jac + entry].
+                // We use only the harmonic-0 (DC) diagonal as the time-average.
+                let num_jac = if num_freqs > 0 {
+                    eval.jacobians.len() / num_freqs
+                } else {
+                    0
+                };
+                let stamp_jac = num_jac.min(num_nodes);
+                for nd in 0..stamp_jac {
+                    let g_val = eval.jacobians[nd]; // harmonic 0, entry nd
+                    for t in 0..n_time {
+                        time_g[nd][t] += g_val / n_time as f64;
+                    }
+                }
+            }
         }
 
         // Time-averaged diagonal conductance.
@@ -1326,7 +1430,7 @@ pub fn run_hb_n_tone(
             // Inject AC stimuli at the fundamental-tone bins.
             if is_fundamental[h] {
                 for &stim in circuit.ac_stimuli() {
-                    use pisim_core::AcStimulus;
+                    use bigospice_core::AcStimulus;
                     match stim {
                         AcStimulus::VoltageSource(br, re, im) => {
                             if br < dim {
@@ -1585,8 +1689,8 @@ mod tests {
     // This proves the MOSFET contributes current/conductance into the HB
     // Jacobian rather than being skipped silently.
 
-    fn build_nmos_common_source_circuit() -> pisim_core::Circuit {
-        use pisim_core::{Circuit, DeviceId, DeviceInstance, DeviceKind, NodeId};
+    fn build_nmos_common_source_circuit() -> bigospice_core::Circuit {
+        use bigospice_core::{Circuit, DeviceId, DeviceInstance, DeviceKind, NodeId};
         let mut ckt = Circuit::new();
         // Nodes: vdd(1), drain(2), gate(3).  Source and bulk tied to GND.
         let vdd  = ckt.add_node("vdd");
@@ -1631,7 +1735,7 @@ mod tests {
     /// fundamental voltage at the drain node.
     #[test]
     fn hb_single_tone_nmos_level1_converges() {
-        use pisim_device::DeviceRegistry;
+        use bigospice_device::DeviceRegistry;
         let ckt = build_nmos_common_source_circuit();
         let reg = DeviceRegistry::new_default();
         let cfg = HbSingleConfig { f0: 1e9, num_harmonics: 2, max_iter: 50, tol: 1e-6 };
@@ -1656,8 +1760,8 @@ mod tests {
     /// BSIM4 model parameters which are subject to change.
     #[test]
     fn hb_single_tone_bsim4n_converges() {
-        use pisim_core::{Circuit, DeviceId, DeviceInstance, DeviceKind, NodeId};
-        use pisim_device::DeviceRegistry;
+        use bigospice_core::{Circuit, DeviceId, DeviceInstance, DeviceKind, NodeId};
+        use bigospice_device::DeviceRegistry;
 
         let mut ckt = Circuit::new();
         let vdd_n = ckt.add_node("vdd");
@@ -1698,8 +1802,8 @@ mod tests {
     /// Bsim3N: HB single-tone converges without panicking or returning Err.
     #[test]
     fn hb_single_tone_bsim3n_converges() {
-        use pisim_core::{Circuit, DeviceId, DeviceInstance, DeviceKind, NodeId};
-        use pisim_device::DeviceRegistry;
+        use bigospice_core::{Circuit, DeviceId, DeviceInstance, DeviceKind, NodeId};
+        use bigospice_device::DeviceRegistry;
 
         let mut ckt = Circuit::new();
         let vdd_n = ckt.add_node("vdd");
@@ -1735,5 +1839,48 @@ mod tests {
             .expect("HB single-tone with BSIM3N must not return Err");
         assert!(result.converged,
             "HB did not converge for BSIM3N (residual={:.3e})", result.final_residual);
+    }
+
+    // ── Q.4: OSDI HB device participation ────────────────────────────────
+
+    /// Placeholder: once an .osdi file is available, this test loads it,
+    /// builds a circuit with the OSDI device, runs HB via `run_hb_n_tone`
+    /// with `osdi_hb_devices = Some(...)`, and checks convergence.
+    /// For now just verifies the code path compiles and the function
+    /// accepts the new parameter without panicking on an empty device list.
+    #[test]
+    #[ignore = "requires .osdi file"]
+    fn hb_osdi_device_participates() {
+        use bigospice_core::{Circuit, DeviceId, DeviceInstance, DeviceKind, NodeId};
+        use bigospice_device::DeviceRegistry;
+
+        let mut ckt = Circuit::new();
+        let nd = ckt.add_node("drain");
+        let ng = ckt.add_node("gate");
+        ckt.add_device(
+            DeviceInstance::new(DeviceId::new(0), "Vdd", DeviceKind::VoltageSource,
+                &[(0, nd), (1, NodeId::GROUND)]).with_param("dc", 1.2));
+        ckt.add_device(
+            DeviceInstance::new(DeviceId::new(1), "Vg", DeviceKind::VoltageSource,
+                &[(0, ng), (1, NodeId::GROUND)]).with_param("dc", 0.8));
+        ckt.build_topology();
+
+        let reg = DeviceRegistry::new_default();
+        let cfg = HbNToneConfig {
+            tones: vec![1e9],
+            order: 2,
+            max_iter: 50,
+            tol: 1e-6,
+        };
+
+        // Empty OSDI device list — verifies the new parameter is wired
+        // without affecting existing convergence behaviour.
+        let mut osdi_devs: Vec<OsdiHbDevice<'_>> = Vec::new();
+        let result = run_hb_n_tone(&ckt, &reg, &cfg, None, Some(&mut osdi_devs))
+            .expect("HB N-tone with empty OSDI device list must not return Err");
+        // With no nonlinear devices the circuit is linear and should
+        // converge trivially in one iteration.
+        assert!(result.converged,
+            "HB did not converge (residual={:.3e})", result.final_residual);
     }
 }

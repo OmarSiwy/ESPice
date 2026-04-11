@@ -1,8 +1,8 @@
 use std::cell::RefCell;
 
-use pisim_core::{Circuit, DeviceKind, SimError};
-use pisim_device::DeviceRegistry;
-use pisim_linalg::{lu_factorize, lu_refactorize, lu_solve, lu_symbolic, DenseVec, TripletMatrix};
+use bigospice_core::{Circuit, DeviceKind, SimError};
+use bigospice_device::DeviceRegistry;
+use bigospice_linalg::{lu_factorize, lu_refactorize, lu_solve, lu_symbolic, DenseVec, TripletMatrix};
 
 use crate::anderson::AndersonAcceleration;
 use crate::convergence::ConvergenceCriteria;
@@ -112,7 +112,7 @@ fn limit_step(dx: &mut [f64], max_voltage_step: f64) {
 /// V=0 at high-impedance nodes), this Jacobian-only regularization
 /// preserves the basin of attraction for the correct operating point.
 fn regularize_weak_diagonals(
-    jac: &mut pisim_linalg::TripletMatrix,
+    jac: &mut bigospice_linalg::TripletMatrix,
     num_nodes: usize,
     gmin_floor: f64,
 ) {
@@ -168,7 +168,7 @@ pub struct NrConfig {
     /// Minimum BSIM4 device count required to consider GPU dispatch.
     ///
     /// When the number of BSIM4 devices in the circuit reaches this
-    /// threshold the auto-dispatch in `pisim_solver::device_eval`
+    /// threshold the auto-dispatch in `bigospice_solver::device_eval`
     /// switches from CPU SIMD to the WGSL `bsim4_eval` kernel.  The
     /// default of 1024 was chosen so the GPU host-side overhead
     /// (buffer creation, command-encoder construction, readback) is
@@ -202,7 +202,7 @@ impl NrConfig {
     /// - `vnstep` → `max_voltage_step` (per-iteration voltage limiting)
     ///
     /// // TODO(wave-E): integration method selection (opts.method: Trap/Gear/BE)
-    pub fn from_options(opts: &pisim_core::SimOptions) -> Self {
+    pub fn from_options(opts: &bigospice_core::SimOptions) -> Self {
         Self {
             convergence: ConvergenceCriteria::from_options(opts),
             damping: DampingStrategy::BankRose,
@@ -222,12 +222,12 @@ impl NrConfig {
 
 impl Default for NrConfig {
     fn default() -> Self {
-        Self::from_options(&pisim_core::SimOptions::default())
+        Self::from_options(&bigospice_core::SimOptions::default())
     }
 }
 
-impl From<&pisim_core::SimOptions> for NrConfig {
-    fn from(opts: &pisim_core::SimOptions) -> Self {
+impl From<&bigospice_core::SimOptions> for NrConfig {
+    fn from(opts: &bigospice_core::SimOptions) -> Self {
         Self::from_options(opts)
     }
 }
@@ -353,7 +353,7 @@ impl NewtonRaphson {
 
         // Per-node drain claim tracking: (type: 0=none, 1=nmos, 2=pmos, gate_node)
         let mut drain_claim_type = vec![0u8; num_nodes];
-        let mut drain_claim_gate = vec![None::<pisim_core::NodeId>; num_nodes];
+        let mut drain_claim_gate = vec![None::<bigospice_core::NodeId>; num_nodes];
 
         for dev in circuit.devices() {
             let is_nmos = dev.kind == DeviceKind::MosfetN;
@@ -736,7 +736,7 @@ impl NewtonRaphson {
         // solve() call.  On the first iteration we run the full symbolic +
         // numeric factorisation; on every subsequent iteration (same sparsity
         // pattern for RC/linear circuits) we skip AMD and run numeric-only.
-        let mut cached_symbolic: Option<pisim_linalg::LuSymbolic> = None;
+        let mut cached_symbolic: Option<bigospice_linalg::LuSymbolic> = None;
 
         for iter in 0..max_iter {
             // On iter 0, no previous solution for limiting; after that use x_prev.
@@ -1353,7 +1353,7 @@ impl NewtonRaphson {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pisim_core::*;
+    use bigospice_core::*;
 
     // --- NrConfig::from_options propagation tests ---
 

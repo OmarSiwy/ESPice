@@ -2,7 +2,7 @@
 //
 // Jacobian + RHS stamping for the DC load path.  Produces a 4-terminal
 // (D, G, S, B) device evaluation in the same shape that the existing
-// `pisim_device::eval::DeviceEval` infrastructure already understands.
+// `bigospice_device::eval::DeviceEval` infrastructure already understands.
 //
 // Mapped pin layout (matches existing `MosfetLevel1`):
 //   pin 0 = drain

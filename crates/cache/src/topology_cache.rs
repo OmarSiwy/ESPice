@@ -29,10 +29,10 @@
 //! between invocations.  `ahash` randomises its seed at process start, which
 //! would break that property.  FNV-1a is small, fast, and stable.
 
-use pisim_core::{Circuit, DeviceInstance, NodeId};
+use bigospice_core::{Circuit, DeviceInstance, NodeId};
 
 /// Bumped whenever the parser or topology layout changes meaning, so a stale
-/// on-disk cache from an older PiSIM version is automatically discarded.
+/// on-disk cache from an older BigOSpice version is automatically discarded.
 pub const TOPOLOGY_VERSION: u64 = 1;
 
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;

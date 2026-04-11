@@ -57,10 +57,11 @@ done
 
 # ── Sanity checks ─────────────────────────────────────────────────────────────
 if ! command -v "${OPENVAF}" &>/dev/null; then
-    echo "ERROR: openvaf not found (looked for '${OPENVAF}')." >&2
-    echo "  Install: cargo install openvaf" >&2
-    echo "  Or set OPENVAF=/path/to/openvaf" >&2
-    exit 1
+    echo "openvaf not found, skipping VA compilation"
+    echo "  (looked for '${OPENVAF}')"
+    echo "  Install: cargo install openvaf  OR  download from https://openvaf.semimod.de"
+    echo "  Or set OPENVAF=/path/to/openvaf and re-run this script."
+    exit 0
 fi
 
 OPENVAF_VERSION="$("${OPENVAF}" --version 2>&1 | head -1)"

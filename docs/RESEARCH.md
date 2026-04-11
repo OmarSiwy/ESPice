@@ -1,4 +1,4 @@
-# PiSIM Performance Research
+# BigOSpice Performance Research
 
 > Compiled 2026-04-06. Covers sparse solver backends, GPU acceleration, DOD audit findings, and the implementation roadmap to reach ngspice-parity accuracy with superior performance.
 
@@ -24,7 +24,7 @@
 
 ## Current Bottleneck
 
-PiSIM's `lu_factorize` in `crates/linalg/src/lu.rs` expands the sparse CSC matrix to a **dense** `Vec<f64>` of size n*n and runs dense Gaussian elimination. This is O(n^3) time, O(n^2) space.
+BigOSpice's `lu_factorize` in `crates/linalg/src/lu.rs` expands the sparse CSC matrix to a **dense** `Vec<f64>` of size n*n and runs dense Gaussian elimination. This is O(n^3) time, O(n^2) space.
 
 For a 1,000-node circuit: 8 MB dense matrix, ~1 billion FLOPs — but the sparse matrix has only ~5,000 nonzeros (0.5% fill). **99.5% of computation is on zeros.**
 
@@ -284,7 +284,7 @@ Per Newton iteration:
 
 ## Alternative Nonlinear Solvers
 
-| Method | When Better Than NR | Status in PiSIM |
+| Method | When Better Than NR | Status in BigOSpice |
 |---|---|---|
 | **Pseudo-transient continuation** | Hard-to-converge circuits (bandgaps, PTAT). Guaranteed convergence for passive circuits. | Not implemented. **High priority.** |
 | **Homotopy / continuation** | Multiple DC operating points | Not implemented |

@@ -20,7 +20,7 @@ impl ConvergenceCriteria {
     ///
     /// `chgtol` is preserved in `SimOptions` for transient charge-error checks
     /// but is not consumed here — that is a transient-analysis concern.
-    pub fn from_options(opts: &pisim_core::SimOptions) -> Self {
+    pub fn from_options(opts: &bigospice_core::SimOptions) -> Self {
         Self {
             abs_tol: opts.abstol,
             rel_tol: opts.reltol,
@@ -35,12 +35,12 @@ impl ConvergenceCriteria {
 
 impl Default for ConvergenceCriteria {
     fn default() -> Self {
-        Self::from_options(&pisim_core::SimOptions::default())
+        Self::from_options(&bigospice_core::SimOptions::default())
     }
 }
 
-impl From<&pisim_core::SimOptions> for ConvergenceCriteria {
-    fn from(opts: &pisim_core::SimOptions) -> Self {
+impl From<&bigospice_core::SimOptions> for ConvergenceCriteria {
+    fn from(opts: &bigospice_core::SimOptions) -> Self {
         Self::from_options(opts)
     }
 }
@@ -67,7 +67,7 @@ impl ConvergenceCriteria {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pisim_core::SimOptions;
+    use bigospice_core::SimOptions;
 
     #[test]
     fn converged_case() {

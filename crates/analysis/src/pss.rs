@@ -17,9 +17,9 @@
 //! ## Usage
 //!
 //! ```no_run
-//! use pisim_analysis::pss::{PssConfig, run_pss};
-//! use pisim_core::Circuit;
-//! use pisim_device::DeviceRegistry;
+//! use bigospice_analysis::pss::{PssConfig, run_pss};
+//! use bigospice_core::Circuit;
+//! use bigospice_device::DeviceRegistry;
 //!
 //! let mut ckt = Circuit::new();
 //! // ... build circuit ...
@@ -34,9 +34,9 @@
 //! [`PssResult`] stores the periodic waveform in a flat row-major buffer
 //! `waveforms[step * num_nodes + node]`, consistent with [`TransientResult`].
 
-use pisim_core::{Circuit, SimError};
-use pisim_device::DeviceRegistry;
-use pisim_linalg::{DenseVec, LinSolver, LinSolverKind, TripletMatrix};
+use bigospice_core::{Circuit, SimError};
+use bigospice_device::DeviceRegistry;
+use bigospice_linalg::{DenseVec, LinSolver, LinSolverKind, TripletMatrix};
 
 use crate::transient::{run_transient, IntegrationMethod, TransientConfig};
 use crate::result::TransientResult;
@@ -188,11 +188,14 @@ pub fn run_pss(
         tstop: period,
         method: config.method,
         uic: true,
+        adaptive: false,
+        tmax: None,
+        checkpoint_interval: 0,
     };
 
     // Initial x₀: start from the DC operating point.
     // We call the solver once to warm-start the shooting.
-    use pisim_solver::{Solver, SolverConfig, NrConfig};
+    use bigospice_solver::Solver;
     let solver = Solver::default();
     let dc = solver.solve(circuit, registry, None)?;
     let mut x0: Vec<f64> = dc.solution.clone();
@@ -215,7 +218,7 @@ pub fn run_pss(
         let x_t = extract_final_state(&tran, n_state);
 
         // ── (b) Shooting residual F = x(T) − x₀ ─────────────────────────
-        let mut f_vec: Vec<f64> = x_t.iter().zip(x0.iter()).map(|(xt, x)| xt - x).collect();
+        let f_vec: Vec<f64> = x_t.iter().zip(x0.iter()).map(|(xt, x)| xt - x).collect();
 
         final_residual = f_vec.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
         if final_residual < config.tol {
@@ -273,9 +276,12 @@ pub fn run_pss(
     let times = final_tran.times.clone();
     let n_steps = times.len();
     // Build the waveform flat buffer from the transient result.
-    let waveforms: Vec<f64> = (0..n_steps)
-        .flat_map(|step| (0..num_nodes).map(move |nd| final_tran.voltage(step, nd)))
-        .collect();
+    let mut waveforms: Vec<f64> = Vec::with_capacity(n_steps * num_nodes);
+    for step in 0..n_steps {
+        for nd in 0..num_nodes {
+            waveforms.push(final_tran.voltage(step, nd));
+        }
+    }
 
     Ok(PssResult {
         converged,
@@ -297,13 +303,21 @@ pub fn run_pss(
 /// (beyond `num_nodes`) are ignored because the transient solver re-derives
 /// them from Kirchhoff.
 fn inject_ic(circuit: &mut Circuit, x0: &[f64], num_nodes: usize) {
+    // Collect node data first to avoid simultaneous immutable + mutable borrow.
+    let node_entries: Vec<(usize, bigospice_core::NodeId, Option<u32>)> = circuit
+        .nodes()
+        .iter()
+        .enumerate()
+        .take(num_nodes)
+        .map(|(nd, node)| (nd, node.id, node.matrix_index))
+        .collect();
     circuit.clear_initial_conditions();
-    for (nd, node) in circuit.nodes().iter().enumerate().take(num_nodes) {
-        if let Some(idx) = node.matrix_index {
+    for (nd, node_id, matrix_index) in node_entries {
+        if let Some(idx) = matrix_index {
             let v = x0.get(idx as usize).copied().unwrap_or(0.0);
-            circuit.set_initial_condition(node.id, v);
+            circuit.set_initial_condition(node_id, v);
         } else if nd < x0.len() {
-            circuit.set_initial_condition(node.id, x0[nd]);
+            circuit.set_initial_condition(node_id, x0[nd]);
         }
     }
 }
@@ -327,8 +341,8 @@ fn extract_final_state(tran: &TransientResult, n_state: usize) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pisim_core::{DeviceId, DeviceInstance, DeviceKind, NodeId};
-    use pisim_device::DeviceRegistry;
+    use bigospice_core::{DeviceId, DeviceInstance, DeviceKind, NodeId};
+    use bigospice_device::DeviceRegistry;
 
     /// Very simple test: PSS of a purely resistive circuit driven by a DC
     /// source — the steady state is just the DC OP, so x(T) = x₀ = DC
@@ -336,7 +350,7 @@ mod tests {
     /// small) on the very first iterate.
     #[test]
     fn pss_resistor_dc_converges_immediately() {
-        let mut ckt = pisim_core::Circuit::new();
+        let mut ckt = bigospice_core::Circuit::new();
         let n1 = ckt.add_node("1");
         ckt.add_device(
             DeviceInstance::new(

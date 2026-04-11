@@ -5,9 +5,8 @@
 use ahash::AHashMap;
 use bigospice_core::{
     AcStimulus, BehavioralBinOp, BehavioralExpr, BsourceExpr, Circuit, DeviceId, DeviceInstance,
-    DeviceKind, NodeId, SimError, Terminal,
+    DeviceKind, NodeId, Si, SimError, Terminal,
 };
-use bigospice_core::units::Si;
 use bigospice_utility::si_multiplier;
 use std::path::{Path, PathBuf};
 
@@ -15,8 +14,8 @@ use crate::types::{
     AnalysisKind, AnalysisStatement, BinModel, BinModelEntry, ControlBlock, ControlStatement,
     CustomDistribution, DataBlock, DistoStatement, DistKind, ElementStatement, Expression,
     ExtractSpec, FftStatement, FuncDef, MeasureStatement, ModelStatement, NoiseStatement, Op,
-    OptimizeParam, ParsedNetlist, PendingSubcktInstance, PolySource, PrintFormat, SaveDirective,
-    SaveSpec, SensOutputSpec, SourceKind, StepDirective, StepKind, SubcircuitDef, Token,
+    OptimizeParam, ParsedNetlist, PendingSubcktInstance, PrintFormat, SaveDirective,
+    SaveSpec, SensOutputSpec, StepDirective, StepKind, SubcircuitDef, Token,
 };
 
 // ===========================================================================
@@ -522,30 +521,33 @@ pub fn eval_expression(
     }
 }
 
-/// Sample a standard-normal value using Box-Muller transform with a thread-local xorshift PRNG.
-fn sample_normal() -> f64 {
+/// Shared xorshift64 PRNG — one thread-local state for all statistical sampling.
+fn xorshift64_next() -> u64 {
     use std::cell::Cell;
     thread_local! {
         static STATE: Cell<u64> = Cell::new(0x9E3779B97F4A7C15u64);
     }
-    fn next_u64() -> u64 {
-        STATE.with(|s| {
-            let mut x = s.get();
-            x ^= x >> 12;
-            x ^= x << 25;
-            x ^= x >> 27;
-            s.set(x);
-            x.wrapping_mul(0x2545F4914F6CDD1D)
-        })
-    }
-    fn next_unit() -> f64 {
-        ((next_u64() >> 11) as f64) * (1.0 / ((1u64 << 53) as f64))
-    }
-    let mut u1 = next_unit();
+    STATE.with(|s| {
+        let mut x = s.get();
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        s.set(x);
+        x.wrapping_mul(0x2545F4914F6CDD1D)
+    })
+}
+
+fn prng_unit() -> f64 {
+    ((xorshift64_next() >> 11) as f64) * (1.0 / ((1u64 << 53) as f64))
+}
+
+/// Sample a standard-normal value using Box-Muller transform with a thread-local xorshift PRNG.
+fn sample_normal() -> f64 {
+    let mut u1 = prng_unit();
     if u1 < 1e-300 {
         u1 = 1e-300;
     }
-    let u2 = next_unit();
+    let u2 = prng_unit();
     let r = (-2.0 * u1.ln()).sqrt();
     let theta = 2.0 * std::f64::consts::PI * u2;
     r * theta.cos()
@@ -553,23 +555,7 @@ fn sample_normal() -> f64 {
 
 /// Sample a uniform value in [-1, 1) using a thread-local xorshift PRNG.
 fn sample_uniform_signed() -> f64 {
-    use std::cell::Cell;
-    thread_local! {
-        static STATE: Cell<u64> = Cell::new(0xD1B54A32D192ED03u64);
-    }
-    fn next_u64() -> u64 {
-        STATE.with(|s| {
-            let mut x = s.get();
-            x ^= x >> 12;
-            x ^= x << 25;
-            x ^= x >> 27;
-            s.set(x);
-            x.wrapping_mul(0x2545F4914F6CDD1D)
-        })
-    }
-    let bits = next_u64() >> 11;
-    let unit = (bits as f64) * (1.0 / ((1u64 << 53) as f64));
-    2.0 * unit - 1.0
+    2.0 * prng_unit() - 1.0
 }
 
 fn check_arity(name: &str, args: &[f64], expected: usize) -> Result<(), SimError> {
@@ -728,7 +714,7 @@ impl Lexer {
         })?;
         // Rewind: put the suffix bytes back.
         self.pos = suffix_start;
-        self.col -= suffix_buf.len();
+        self.col = self.col.saturating_sub(suffix_buf.len());
         Ok(Token::Number(val))
     }
 
@@ -2706,7 +2692,6 @@ impl SpiceParser {
                     // The simulator layer looks up netlist.data_blocks by this name.
                     let _ = block_name; // name stored implicitly via params tag
                     params.push(("_data_block_name_encoded".to_string(), 0.0));
-                    idx += 1;
                     break;
                 } else if kw_low == "data" {
                     idx += 1;
@@ -2716,7 +2701,6 @@ impl SpiceParser {
                         if let Token::Word(ref name) = line[idx] {
                             let _block_name = name.to_lowercase();
                             params.push(("data_block".to_string(), f64::NAN));
-                            idx += 1;
                         }
                     }
                     break;
@@ -2754,7 +2738,6 @@ impl SpiceParser {
                 let kw_low = kw.to_lowercase();
                 if kw_low.starts_with("data=") {
                     params.push(("data_block".to_string(), f64::NAN));
-                    idx += 1;
                     break;
                 } else if kw_low == "data" {
                     idx += 1;
@@ -2762,7 +2745,6 @@ impl SpiceParser {
                     if idx < line.len() {
                         if let Token::Word(_) = line[idx] {
                             params.push(("data_block".to_string(), f64::NAN));
-                            idx += 1;
                         }
                     }
                     break;

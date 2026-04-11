@@ -12,10 +12,10 @@
 //! 6. Compute input-referred PSD = output PSD / |H|² where H is the
 //!    transfer function from the `input_source` to the output node.
 
-use pisim_core::{Circuit, DeviceId, DeviceKind, SimError, SimOptions};
-use pisim_device::DeviceRegistry;
-use pisim_linalg::{DenseVec, LinSolver, LinSolverKind, TripletMatrix};
-use pisim_solver::{stamp_circuit_gc_into, Solver, SolverConfig, NrConfig};
+use bigospice_core::{Circuit, DeviceId, DeviceKind, SimError, SimOptions};
+use bigospice_device::DeviceRegistry;
+use bigospice_linalg::{DenseVec, LinSolver, LinSolverKind, TripletMatrix};
+use bigospice_solver::{stamp_circuit_gc_into, Solver, SolverConfig, NrConfig};
 
 use crate::ac::AcSweepType;
 
@@ -347,13 +347,13 @@ impl NoiseModel {
 
 /// Convert node index to 0-based MNA row.  Returns None for ground (index 0).
 #[inline]
-fn node_to_mna(node_id: pisim_core::NodeId) -> Option<usize> {
+fn node_to_mna(node_id: bigospice_core::NodeId) -> Option<usize> {
     let idx = node_id.index();
     if idx == 0 { None } else { Some(idx - 1) }
 }
 
 fn device_noise_psd(
-    dev: &pisim_core::DeviceInstance,
+    dev: &bigospice_core::DeviceInstance,
     dc_solution: &[f64],
     _circuit: &Circuit,
     temp_k: f64,
@@ -502,7 +502,7 @@ fn device_noise_psd(
 /// Read the DC node voltage for a given NodeId from the solution vector.
 /// Ground (index 0) is always 0 V.
 #[inline]
-fn node_voltage(node: pisim_core::NodeId, solution: &[f64]) -> f64 {
+fn node_voltage(node: bigospice_core::NodeId, solution: &[f64]) -> f64 {
     let idx = node.index();
     if idx == 0 { 0.0 } else { solution.get(idx - 1).copied().unwrap_or(0.0) }
 }
@@ -598,8 +598,8 @@ mod tests {
     // ── Integration test: resistor thermal noise ────────────────────────────
     #[test]
     fn resistor_thermal_noise_integration() {
-        use pisim_core::{Circuit, DeviceInstance, DeviceId, DeviceKind, NodeId};
-        use pisim_device::DeviceRegistry;
+        use bigospice_core::{Circuit, DeviceInstance, DeviceId, DeviceKind, NodeId};
+        use bigospice_device::DeviceRegistry;
 
         // Build a simple circuit: V1 (AC=1, DC=0) — R1 (1kΩ) — GND
         let mut ckt = Circuit::new();
@@ -646,11 +646,11 @@ mod tests {
     #[test]
     fn node_voltage_ground_is_zero() {
         let sol = vec![1.0, 2.0, 3.0];
-        assert_eq!(node_voltage(pisim_core::NodeId::GROUND, &sol), 0.0);
+        assert_eq!(node_voltage(bigospice_core::NodeId::GROUND, &sol), 0.0);
     }
 
     #[test]
     fn node_to_mna_ground_is_none() {
-        assert_eq!(node_to_mna(pisim_core::NodeId::GROUND), None);
+        assert_eq!(node_to_mna(bigospice_core::NodeId::GROUND), None);
     }
 }

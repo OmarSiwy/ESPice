@@ -4,10 +4,10 @@
 //! The pattern follows ngspice's `d_cosim` and Verilator's DPI shim:
 //!
 //! 1. The user writes a tiny C wrapper exposing each DPI export they want to
-//!    invoke from PiSIM (e.g. `pisim_get_voltage(const char* node)`).
+//!    invoke from BigOSpice (e.g. `bigospice_get_voltage(const char* node)`).
 //! 2. The wrapper forwards into a function pointer set by Rust at startup
 //!    via `DpiBridge::register`.
-//! 3. PiSIM's analog state is read through the closure.
+//! 3. BigOSpice's analog state is read through the closure.
 //!
 //! This module provides the type-safe registry of closures.  The actual
 //! `extern "C"` glue lives in the user's shim because it depends on the
@@ -70,13 +70,13 @@ mod tests {
     #[test]
     fn register_and_call() {
         let bridge = DpiBridge::new();
-        bridge.register("pisim_get_voltage", |node| match node {
+        bridge.register("bigospice_get_voltage", |node| match node {
             "vdd" => 3.3,
             "gnd" => 0.0,
             _ => f64::NAN,
         });
-        assert_eq!(bridge.call("pisim_get_voltage", "vdd"), Some(3.3));
-        assert_eq!(bridge.call("pisim_get_voltage", "gnd"), Some(0.0));
+        assert_eq!(bridge.call("bigospice_get_voltage", "vdd"), Some(3.3));
+        assert_eq!(bridge.call("bigospice_get_voltage", "gnd"), Some(0.0));
         assert_eq!(bridge.call("missing", "x"), None);
     }
 }

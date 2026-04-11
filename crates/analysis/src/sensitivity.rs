@@ -6,8 +6,8 @@
 //! `absolute = (out(p + h) - out(p)) / h`
 //! `relative  = (p / out) * absolute`
 
-use pisim_core::{Circuit, DeviceKind, SimError, SimOptions};
-use pisim_device::DeviceRegistry;
+use bigospice_core::{Circuit, DeviceKind, SimError, SimOptions};
+use bigospice_device::DeviceRegistry;
 
 use crate::dc_op::run_dc_op_with_config;
 
@@ -64,7 +64,7 @@ pub fn run_sens_dc_with_options(
     cfg: &SensConfig,
     opts: &SimOptions,
 ) -> Result<SensResult, SimError> {
-    use pisim_solver::NrConfig;
+    use bigospice_solver::NrConfig;
 
     let registry = DeviceRegistry::new_default();
     let nr_cfg = NrConfig::from(opts);
@@ -138,7 +138,7 @@ fn perturbation(p0: f64) -> f64 {
 /// Return `(param_key, value)` for the primary DC parameter of a device kind.
 fn primary_param(
     kind: DeviceKind,
-    params: &pisim_core::param::ParamMap,
+    params: &bigospice_core::ParamMap,
 ) -> Result<(String, f64), SimError> {
     let key = match kind {
         DeviceKind::Resistor => "resistance",
@@ -203,7 +203,7 @@ fn extract_output_from_result(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pisim_core::{Circuit, DeviceId, DeviceInstance, DeviceKind, NodeId};
+    use bigospice_core::{Circuit, DeviceId, DeviceInstance, DeviceKind, NodeId};
 
     fn voltage_divider(r1: f64, r2: f64, vcc: f64) -> Circuit {
         let mut ckt = Circuit::new();

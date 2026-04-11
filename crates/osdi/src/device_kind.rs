@@ -3,7 +3,7 @@
 // OSDI ABI definitions follow the public OpenVAF OSDI spec; this file
 // contains no OpenVAF source code.
 
-//! # `OsdiDeviceKind` — integration shim with PiSIM's device dispatch.
+//! # `OsdiDeviceKind` — integration shim with BigOSpice's device dispatch.
 //!
 //! `crates/device/src/dispatch.rs` exposes an enum `DeviceDispatch` that
 //! covers the built-in models. To slot OSDI devices into the same
@@ -16,10 +16,10 @@
 //! the stamper iterates the enum over every device every NR iteration.
 //!
 //! The actual evaluation uses the trampoline; this module only provides
-//! the type-level glue that lets PiSIM's existing dispatch enum reference
+//! the type-level glue that lets BigOSpice's existing dispatch enum reference
 //! an OSDI instance through a stable handle.
 
-use pisim_core::DeviceKind;
+use bigospice_core::DeviceKind;
 
 /// Stable u32 index into the OSDI instance arena owned by the registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -53,7 +53,7 @@ impl From<u32> for OsdiInstanceIdx {
 
 /// Logical device kind for an OSDI-registered model.
 ///
-/// PiSIM's built-in `DeviceKind` enum (in `pisim-core`) is closed; we
+/// BigOSpice's built-in `DeviceKind` enum (in `bigospice-core`) is closed; we
 /// cannot add `Osdi(...)` there without touching every existing match.
 /// Instead, we reserve a sentinel `DeviceKind` (e.g. one beyond the
 /// highest built-in discriminant) and let the dispatch layer recognise

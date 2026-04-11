@@ -19,7 +19,7 @@
 //! conservative — it answers "what is the worst possible value within the
 //! ±k·sigma envelope?" rather than "what is the realistic distribution?"
 
-use pisim_core::{Circuit, SimError};
+use bigospice_core::{Circuit, SimError};
 
 use crate::mc::{McSampleResults, StatOverride};
 
@@ -191,10 +191,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pisim_core::{
+    use bigospice_core::{
         DeviceId, DeviceInstance, DeviceKind, Matching, NodeId, StatExpr, StatKind,
     };
-    use pisim_device::DeviceRegistry;
+    use bigospice_device::DeviceRegistry;
 
     fn divider() -> Circuit {
         let mut ckt = Circuit::new();

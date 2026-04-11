@@ -127,6 +127,50 @@ D1 2 0 DMOD
         "Diode V(2): BigOSpice={pi_v2:.4} vs ngspice={ng_v2:.4}");
 }
 
+// ── VACASK live golden tests ──────────────────────────────────────────────────
+
+#[test]
+#[ignore = "requires vacask on PATH"]
+fn vacask_golden_voltage_divider() {
+    let config = common::VacaskConfig::default();
+    if !config.is_available() {
+        eprintln!("vacask not available — skipping");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("divider.sp");
+    std::fs::write(&path, "* Voltage divider\nV1 1 0 DC 5\nR1 1 2 1k\nR2 2 0 1k\n.OP\n.END\n").unwrap();
+    let va = config.run(&path).unwrap();
+    let va_v2 = va.node_voltages.iter().find(|(n, _)| n == "2").unwrap().1;
+    let (circuit, _) = parse_netlist_str("* Voltage divider\nV1 1 0 DC 5\nR1 1 2 1k\nR2 2 0 1k\n.OP\n.END\n").unwrap();
+    let result = run_dc_op(&circuit).unwrap();
+    let pi_v2 = result.node_voltages.iter().find(|(n, _)| n == "2").unwrap().1;
+    assert!(Tolerance::within(pi_v2, va_v2, 1e-6, 1e-4),
+        "BigOSpice V(2)={pi_v2} vs vacask V(2)={va_v2}");
+}
+
+// ── Xyce live golden tests ────────────────────────────────────────────────────
+
+#[test]
+#[ignore = "requires Xyce on PATH"]
+fn xyce_golden_voltage_divider() {
+    let config = common::XyceConfig::default();
+    if !config.is_available() {
+        eprintln!("Xyce not available — skipping");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("divider.sp");
+    std::fs::write(&path, "* Voltage divider\nV1 1 0 DC 5\nR1 1 2 1k\nR2 2 0 1k\n.OP\n.END\n").unwrap();
+    let xy = config.run(&path).unwrap();
+    let xy_v2 = xy.node_voltages.iter().find(|(n, _)| n == "2").unwrap().1;
+    let (circuit, _) = parse_netlist_str("* Voltage divider\nV1 1 0 DC 5\nR1 1 2 1k\nR2 2 0 1k\n.OP\n.END\n").unwrap();
+    let result = run_dc_op(&circuit).unwrap();
+    let pi_v2 = result.node_voltages.iter().find(|(n, _)| n == "2").unwrap().1;
+    assert!(Tolerance::within(pi_v2, xy_v2, 1e-6, 1e-4),
+        "BigOSpice V(2)={pi_v2} vs Xyce V(2)={xy_v2}");
+}
+
 #[test]
 #[ignore = "requires temperature sweep implementation"]
 fn temperature_golden_resistor_tc() {}

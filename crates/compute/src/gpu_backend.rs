@@ -48,7 +48,7 @@ impl WgpuBackend {
     }
 
     /// Borrow the underlying wgpu device.  Used by other crates
-    /// (e.g. `pisim_device::bsim4::gpu`) that need to compile a
+    /// (e.g. `bigospice_device::bsim4::gpu`) that need to compile a
     /// custom shader against the same adapter.
     #[inline]
     pub fn raw_device(&self) -> &wgpu::Device {
@@ -77,7 +77,7 @@ impl WgpuBackend {
 
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
-                label: Some("pisim-gpu"),
+                label: Some("bigospice-gpu"),
                 required_features: wgpu::Features::empty(),
                 required_limits: wgpu::Limits::default(),
                 ..Default::default()

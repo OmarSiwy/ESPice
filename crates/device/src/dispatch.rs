@@ -1,4 +1,4 @@
-use pisim_core::{DeviceKind, ParamMap};
+use bigospice_core::{DeviceKind, ParamMap};
 
 use crate::bsource::{BsourceIModel, BsourceVModel};
 use crate::eval::{DeviceEval, DeviceModel};
@@ -11,6 +11,9 @@ use crate::{
 use crate::mosfet::{MosfetLevel2, MosfetLevel3, MosfetLevel6};
 use crate::tline::Tline;
 use crate::ltra::Ltra;
+use crate::urc::Urc;
+use crate::wlossy::WLossy;
+use crate::port::Port;
 
 /// Enum-based dispatch for all built-in device models.
 ///
@@ -59,11 +62,17 @@ pub enum DeviceDispatch {
     ///
     /// The variant payload is just an `OsdiHandle` (8 bytes of POD): an
     /// instance index plus cached terminal/flags. The actual evaluation
-    /// is performed by `pisim_osdi::OsdiRegistry`, which the stamper
+    /// is performed by `bigospice_osdi::OsdiRegistry`, which the stamper
     /// borrows alongside the dispatch enum. Keeping the payload as POD
-    /// avoids a crate-graph cycle (`pisim-osdi` depends on
-    /// `pisim-device`, not the other way around).
+    /// avoids a crate-graph cycle (`bigospice-osdi` depends on
+    /// `bigospice-device`, not the other way around).
     Osdi(crate::osdi_shim::OsdiHandle),
+    /// Uniform RC transmission line (`U` element).
+    Urc(Urc),
+    /// W-element: frequency-domain lossy transmission line stub.
+    Wlossy(WLossy),
+    /// PORT element: S-parameter excitation port.
+    Port(Port),
 }
 
 impl DeviceDispatch {
@@ -104,11 +113,14 @@ impl DeviceDispatch {
             DeviceDispatch::VcvsExpr(m) => m.eval(voltages, params),
             DeviceDispatch::VccsExpr(m) => m.eval(voltages, params),
             // Sentinel: real OSDI eval is performed externally by
-            // `pisim_osdi::OsdiRegistry::evaluate`. Returning an empty
+            // `bigospice_osdi::OsdiRegistry::evaluate`. Returning an empty
             // `DeviceEval` here is intentional — callers that route
             // OSDI handles through this enum MUST also call into the
             // OSDI registry for the actual conductance/residual values.
             DeviceDispatch::Osdi(h) => h.eval(voltages, params),
+            DeviceDispatch::Urc(m) => m.eval(voltages, params),
+            DeviceDispatch::Wlossy(m) => m.eval(voltages, params),
+            DeviceDispatch::Port(m) => m.eval(voltages, params),
         }
     }
 
@@ -149,6 +161,9 @@ impl DeviceDispatch {
             DeviceDispatch::VcvsExpr(m) => m.num_terminals(),
             DeviceDispatch::VccsExpr(m) => m.num_terminals(),
             DeviceDispatch::Osdi(h) => h.num_terminals(),
+            DeviceDispatch::Urc(m) => m.num_terminals(),
+            DeviceDispatch::Wlossy(m) => m.num_terminals(),
+            DeviceDispatch::Port(m) => m.num_terminals(),
         }
     }
 
@@ -189,6 +204,9 @@ impl DeviceDispatch {
             DeviceDispatch::VcvsExpr(m) => m.needs_branch(),
             DeviceDispatch::VccsExpr(m) => m.needs_branch(),
             DeviceDispatch::Osdi(h) => h.needs_branch(),
+            DeviceDispatch::Urc(m) => m.needs_branch(),
+            DeviceDispatch::Wlossy(m) => m.needs_branch(),
+            DeviceDispatch::Port(m) => m.needs_branch(),
         }
     }
 
@@ -229,6 +247,9 @@ impl DeviceDispatch {
             DeviceDispatch::VcvsExpr(m) => m.kind(),
             DeviceDispatch::VccsExpr(m) => m.kind(),
             DeviceDispatch::Osdi(_) => crate::osdi_shim::OSDI_KIND_SENTINEL,
+            DeviceDispatch::Urc(m) => m.kind(),
+            DeviceDispatch::Wlossy(m) => m.kind(),
+            DeviceDispatch::Port(m) => m.kind(),
         }
     }
 
@@ -274,6 +295,9 @@ impl DeviceDispatch {
             DeviceDispatch::VcvsExpr(m) => m.eval_with_branch(voltages, branch_current, params),
             DeviceDispatch::VccsExpr(m) => m.eval_with_branch(voltages, branch_current, params),
             DeviceDispatch::Osdi(h) => h.eval_with_branch(voltages, branch_current, params),
+            DeviceDispatch::Urc(m) => m.eval_with_branch(voltages, branch_current, params),
+            DeviceDispatch::Wlossy(m) => m.eval_with_branch(voltages, branch_current, params),
+            DeviceDispatch::Port(m) => m.eval_with_branch(voltages, branch_current, params),
         }
     }
 

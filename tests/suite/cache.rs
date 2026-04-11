@@ -86,7 +86,7 @@ R2 2 0 1k
 
 #[test]
 fn step_cache_reuses_symbolic_lu() {
-    use bigospice_analysis::sweep::{ParamSweep, ParamTarget};
+    use bigospice_analysis::{ParamSweep, ParamTarget};
     use bigospice_cache::CacheManager;
     use bigospice_parser::SpiceParser;
 

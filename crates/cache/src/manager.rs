@@ -19,7 +19,7 @@
 //! Provides hooks the solver *could* call without modifying the solver yet
 //! (per ownership constraint in the prompt — we do not edit the solver here).
 
-use pisim_core::{Circuit, DeviceId};
+use bigospice_core::{Circuit, DeviceId};
 
 use crate::checkpoint::{CheckpointIdx, TransientArena};
 use crate::compiled_eval::{CompiledEvalCache, DeviceIdx, InvalidationReason};
@@ -318,7 +318,7 @@ impl CacheManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pisim_core::{
+    use bigospice_core::{
         DeviceInstance, DeviceKind, NodeId,
     };
 

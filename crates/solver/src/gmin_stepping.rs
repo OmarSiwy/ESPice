@@ -1,4 +1,4 @@
-use pisim_linalg::TripletMatrix;
+use bigospice_linalg::TripletMatrix;
 
 /// GMIN stepping convergence aid.
 ///

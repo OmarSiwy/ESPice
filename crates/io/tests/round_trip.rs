@@ -1,14 +1,16 @@
-//! Round-trip integration tests for the writers in `pisim_io`.
+//! Round-trip integration tests for the writers in `bigospice_io`.
 //!
 //! Each test creates a synthetic result, runs it through one of the writers,
 //! parses the bytes back via the public reader (or a small ad-hoc parser when
 //! no reader exists, e.g. HSPICE binary / Touchstone) and asserts equality
 //! column-by-column.
 
-use pisim_io::csv::CsvWriter;
-use pisim_io::hspice::{HspiceMt0Writer, HspicePostKind, HspicePostWriter, HspiceVarType};
-use pisim_io::rawfile::{RawFile, RawFlag, RawfileWriter};
-use pisim_io::touchstone::{ComplexFormat, FreqUnit, ParamType, TouchstoneWriter};
+use bigospice_io::{
+    CsvWriter,
+    HspiceMt0Writer, HspicePostKind, HspicePostWriter, HspiceVarType,
+    RawFile, RawFlag, RawfileWriter,
+    ComplexFormat, FreqUnit, ParamType, TouchstoneWriter,
+};
 
 // ─── rawfile (ASCII + binary) ────────────────────────────────────────────────
 

@@ -2,7 +2,7 @@
 //
 // One-time parameter checking and defaulting. The bulk of `b3set.c`
 // validates that user-supplied parameters lie within physical ranges
-// and emits warnings; in PiSIM these checks are performed lazily on the
+// and emits warnings; in BigOSpice these checks are performed lazily on the
 // first eval call (or skipped, depending on the `paramChk` flag).
 //
 // Reference (READ-ONLY):

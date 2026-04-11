@@ -1,7 +1,7 @@
-use pisim_core::{Circuit, SimError, SimOptions};
-use pisim_device::DeviceRegistry;
-use pisim_solver::{Solver, SolverConfig, NrConfig};
-use pisim_cache::IncrementalCache;
+use bigospice_core::{Circuit, SimError, SimOptions};
+use bigospice_device::DeviceRegistry;
+use bigospice_solver::{Solver, SolverConfig, NrConfig};
+use bigospice_cache::IncrementalCache;
 
 use crate::result::DcOpResult;
 
@@ -216,7 +216,7 @@ fn run_nested_dc_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pisim_core::*;
+    use bigospice_core::*;
 
     fn voltage_divider() -> Circuit {
         let mut ckt = Circuit::new();

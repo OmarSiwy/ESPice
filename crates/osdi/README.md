@@ -1,14 +1,14 @@
-# `pisim-osdi` — OSDI / OpenVAF compiled-model loader
+# `bigospice-osdi` — OSDI / OpenVAF compiled-model loader
 
 > OSDI ABI definitions follow the public OpenVAF OSDI spec; this crate
 > contains no OpenVAF source code.
 
-`pisim-osdi` lets PiSIM load any device model that has been compiled by
+`bigospice-osdi` lets BigOSpice load any device model that has been compiled by
 [OpenVAF](https://openvaf.semimod.de/) into an `.osdi` shared object —
 BSIM4, BSIM6, BSIM-CMG, PSP, HiSIM2, HICUM, MEXTRAM, EKV, VBIC, and so
 on — at runtime via `dlopen`.
 
-PiSIM remains LGPL-3 because **we never link OpenVAF**. We only consume
+BigOSpice remains LGPL-3 because **we never link OpenVAF**. We only consume
 its *output*: a position-independent shared library that exports a
 documented C ABI (the OSDI table). The OSDI ABI itself is not GPL.
 
@@ -18,11 +18,11 @@ documented C ABI (the OSDI table). The OSDI ABI itself is not GPL.
 
 ```bash
 # 1. Compile a Verilog-A model with OpenVAF (separate, GPL-3 tool —
-#    install it however you want; PiSIM does not depend on it).
+#    install it however you want; BigOSpice does not depend on it).
 openvaf bsim4.va -o bsim4.osdi
 
-# 2. Run PiSIM with the compiled .osdi loaded as a runtime plugin.
-pisim --osdi bsim4.osdi circuit.sp
+# 2. Run BigOSpice with the compiled .osdi loaded as a runtime plugin.
+bigospice --osdi bsim4.osdi circuit.sp
 ```
 
 Multiple `--osdi` flags can be passed; descriptors are merged into a
@@ -43,7 +43,7 @@ crates/osdi/
 │   ├── loader.rs       ← OsdiPlugin::open() via libloading::Library
 │   ├── instance.rs     ← OsdiInstance — Box<[u8]> handle buffer
 │   ├── trampoline.rs   ← OsdiTrampoline + SoaBuffers (DOD)
-│   ├── device_kind.rs  ← integration shim with pisim-device dispatch
+│   ├── device_kind.rs  ← integration shim with bigospice-device dispatch
 │   └── registry.rs     ← OsdiRegistry — runtime descriptor table
 └── tests/
     └── loader.rs       ← unit tests + #[ignore]'d real-dlopen test
@@ -54,8 +54,8 @@ crates/osdi/
 ## Public API at a glance
 
 ```rust
-use pisim_osdi::{OsdiPlugin, OsdiRegistry, OsdiError};
-use pisim_core::ParamMap;
+use bigospice_osdi::{OsdiPlugin, OsdiRegistry, OsdiError};
+use bigospice_core::ParamMap;
 
 // 1. Load a plugin
 let plugin = OsdiPlugin::open("bsim4.osdi")?;
@@ -97,7 +97,7 @@ contiguous `Vec<f64>` columns:
 Buffer sizes are fixed at construction, so the hot path never allocates.
 Trampolines live in a `Vec<OsdiTrampoline>` parallel to the
 `Vec<OsdiInstance>` arena owned by the registry — same SoA discipline as
-the rest of PiSIM's device dispatch.
+the rest of BigOSpice's device dispatch.
 
 ---
 
@@ -127,10 +127,10 @@ comment justifying soundness. The crate's invariants are:
 
 ```bash
 # Pure-Rust tests (no external tooling required)
-nix develop -c cargo test --package pisim-osdi
+nix develop -c cargo test --package bigospice-osdi
 
 # Real dlopen end-to-end test (requires a system C compiler)
-nix develop -c cargo test --package pisim-osdi -- --ignored
+nix develop -c cargo test --package bigospice-osdi -- --ignored
 ```
 
 The ignored test compiles a tiny C stub that exports a single

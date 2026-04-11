@@ -20,7 +20,7 @@
 
 use crate::csc::CscMatrix;
 use crate::dense_vec::DenseVec;
-use pisim_core::SimError;
+use bigospice_core::SimError;
 
 // ---------------------------------------------------------------------------
 // FFI bindings (klu feature only)
@@ -389,6 +389,68 @@ mod tests {
         t.add(2, 1, 1.0);
         t.add(2, 2, 4.0);
         t.to_csc()
+    }
+
+    /// Build a 4×4 nodal conductance matrix for a simple resistor mesh.
+    ///
+    /// Topology (all resistors = 1 Ω):
+    ///   Node 0 — R=1 — Node 1 — R=1 — Node 2 — R=1 — Node 3
+    ///   Node 0 — R=1 — Node 2   (cross link)
+    ///   Node 1 — R=1 — Node 3   (cross link)
+    ///
+    /// Nodal conductance stamp: G[i][i] += 1/R, G[i][j] -= 1/R.
+    ///
+    /// With all R=1 the matrix is:
+    ///   [ 2 -1 -1  0]
+    ///   [-1  2  0 -1]
+    ///   [-1  0  2 -1]
+    ///   [ 0 -1 -1  2]
+    ///
+    /// (Note: this is singular as written because all row/col sums are zero —
+    /// a grounded node is needed.  We fix node 3 by replacing its equation
+    /// with the identity row, giving a non-singular system.)
+    fn build_resistor_mesh_4x4() -> CscMatrix {
+        let mut t = TripletMatrix::new(4, 4);
+        // Stamps for edges: (0,1), (0,2), (1,3), (2,3) — all R=1.
+        // Edge 0-1
+        t.add(0, 0,  1.0); t.add(1, 1,  1.0);
+        t.add(0, 1, -1.0); t.add(1, 0, -1.0);
+        // Edge 0-2
+        t.add(0, 0,  1.0); t.add(2, 2,  1.0);
+        t.add(0, 2, -1.0); t.add(2, 0, -1.0);
+        // Edge 1-3
+        t.add(1, 1,  1.0); t.add(3, 3,  1.0);
+        t.add(1, 3, -1.0); t.add(3, 1, -1.0);
+        // Edge 2-3
+        t.add(2, 2,  1.0); t.add(3, 3,  1.0);
+        t.add(2, 3, -1.0); t.add(3, 2, -1.0);
+        // Fix node 3 (ground): replace row 3 with identity.
+        // Zero out the off-diagonal stamps for row 3 that we added above.
+        t.add(3, 1,  1.0); // cancels the -1 from edge 1-3
+        t.add(3, 2,  1.0); // cancels the -1 from edge 2-3
+        t.add(3, 3, -1.0); // net: G[3,3] = 1+1 + (-1) = 1
+        t.to_csc()
+    }
+
+    #[test]
+    fn klu_solve_resistor_mesh_4x4() {
+        // Known solution: voltages [V0, V1, V2, V3] = [2.0, 1.5, 1.5, 0.0].
+        // RHS is computed as A * x_true so the residual check is exact.
+        let a = build_resistor_mesh_4x4();
+        let solver = KluSolver::factorize(&a).expect("klu factorize 4x4 mesh");
+        let x_true = DenseVec::from_slice(&[2.0, 1.5, 1.5, 0.0]);
+        let b = a.mul_vec(&x_true);
+        let x = solver.solve(&b).expect("klu solve 4x4 mesh");
+        // Verify residual ||A*x - b|| < 1e-10 component-wise.
+        let residual = a.mul_vec(&x);
+        for i in 0..4 {
+            assert!(
+                (residual[i] - b[i]).abs() < 1e-10,
+                "residual[{i}] = {} (expected {})",
+                residual[i],
+                b[i]
+            );
+        }
     }
 
     #[test]

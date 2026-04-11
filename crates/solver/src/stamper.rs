@@ -1,7 +1,7 @@
-use pisim_core::{Circuit, DeviceKind, LtraHistoryStore};
-use pisim_device::{DeviceEval, DeviceRegistry, eval_bsource_i, eval_bsource_v};
-use pisim_device::ltra::{LtraLineParams, eval_ltra_transient_slices_nonint, LtraNorton};
-use pisim_linalg::{DenseVec, TripletMatrix};
+use bigospice_core::{Circuit, DeviceKind, LtraHistoryStore};
+use bigospice_device::{DeviceEval, DeviceRegistry, eval_bsource_i, eval_bsource_v};
+use bigospice_device::{LtraLineParams, LtraNorton, eval_ltra_transient_slices_nonint};
+use bigospice_linalg::{DenseVec, TripletMatrix};
 use rayon::prelude::*;
 
 use crate::junction_limit;
@@ -35,7 +35,7 @@ fn bsource_ref_pin_to_global(
 ///   variable at `num_vars + branch_index`.
 /// - Returns `None` for ground (no matrix entry).
 fn pin_to_global(
-    device: &pisim_core::DeviceInstance,
+    device: &bigospice_core::DeviceInstance,
     pin: u8,
     num_vars: u32,
 ) -> Option<usize> {
@@ -673,7 +673,7 @@ pub fn stamp_circuit_with_source_scale(
     source_factor: f64,
     prev_solution: Option<&[f64]>,
 ) -> (TripletMatrix, DenseVec) {
-    use pisim_core::DeviceKind;
+    use bigospice_core::DeviceKind;
 
     let mut triplet = TripletMatrix::with_capacity(dim, dim, dim * 4);
     let mut residual = DenseVec::zeros(dim);
@@ -964,7 +964,6 @@ pub fn stamp_circuit_gc_par_at_time(
         dev_idx: usize,
         voltages: smallvec::SmallVec<[f64; 4]>,
         branch_current: f64,
-        has_branch: bool,
     }
 
     let devices = circuit.devices();
@@ -1001,7 +1000,7 @@ pub fn stamp_circuit_gc_par_at_time(
             } else {
                 0.0
             };
-            ParEvalInput { dev_idx: i, voltages, branch_current, has_branch }
+            ParEvalInput { dev_idx: i, voltages, branch_current }
         })
         .collect();
 
@@ -1082,10 +1081,10 @@ pub fn stamp_circuit_gc_par_at_time(
 /// and pushes them into the ring buffer so the next timestep can retrieve
 /// the delayed values.
 pub fn update_tline_histories(circuit: &mut Circuit, solution: &[f64], time: f64) {
-    use pisim_core::DeviceKind;
+    use bigospice_core::DeviceKind;
 
     // Collect (id, e1, e2) to avoid simultaneous borrow of circuit.
-    let mut updates: Vec<(pisim_core::DeviceId, f64, f64, f64, f64)> = Vec::new();
+    let mut updates: Vec<(bigospice_core::DeviceId, f64, f64, f64, f64)> = Vec::new();
 
     for device in circuit.devices() {
         if device.kind != DeviceKind::Tline {
@@ -1133,7 +1132,7 @@ pub fn update_tline_histories(circuit: &mut Circuit, solution: &[f64], time: f64
         // Ensure a history buffer exists (first call for this device).
         if circuit.tline_history(id).is_none() {
             // Capacity: enough for TD / min_expected_dt samples (default 256).
-            circuit.add_tline_history(id, pisim_core::TlineHistory::new(z0, td, 256));
+            circuit.add_tline_history(id, bigospice_core::TlineHistory::new(z0, td, 256));
         }
         if let Some(hist) = circuit.tline_history_mut(id) {
             hist.push_p1(time, e_p1);
@@ -1145,7 +1144,7 @@ pub fn update_tline_histories(circuit: &mut Circuit, solution: &[f64], time: f64
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pisim_core::*;
+    use bigospice_core::*;
 
     /// Build: V1=5V from node 1 to GND, R1=1k from node 1 to node 2, R2=1k from node 2 to GND
     fn voltage_divider() -> Circuit {
@@ -1222,7 +1221,7 @@ mod tests {
 /// Roychowdhury-Pederson Norton equivalent.
 pub fn update_ltra_histories(circuit: &mut Circuit, solution: &[f64], time: f64) {
     // Collect updates first to avoid borrow-checker issues with circuit.
-    let mut updates: Vec<(pisim_core::DeviceId, f64, f64, f64, f64)> = Vec::new();
+    let mut updates: Vec<(bigospice_core::DeviceId, f64, f64, f64, f64)> = Vec::new();
 
     for device in circuit.devices() {
         if device.kind != DeviceKind::Ltra {

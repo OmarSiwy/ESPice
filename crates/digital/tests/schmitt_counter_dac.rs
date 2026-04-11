@@ -20,7 +20,7 @@
 //! 3. The DAC bridges produce the expected analog values for the bit pattern
 //!    on the counter outputs after settling.
 
-use pisim_digital::{
+use bigospice_digital::{
     AdcBridge, DacBridge, DigNodeIdx, DigState, DigitalNet, DigitalRuntime, EdgeKind,
     Primitive, PrimitiveKind, Strength,
 };

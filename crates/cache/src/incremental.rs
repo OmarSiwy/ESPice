@@ -1,4 +1,4 @@
-use pisim_core::{Circuit, DeviceId};
+use bigospice_core::{Circuit, DeviceId};
 use crate::dirty_tracker::DirtyTracker;
 use crate::op_cache::OpCache;
 use crate::topology_cache::TopologyCache;

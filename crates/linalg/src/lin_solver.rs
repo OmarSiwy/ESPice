@@ -3,7 +3,7 @@ use crate::dense_vec::DenseVec;
 use crate::klu::KluSolver;
 use crate::lu::{LuFactors, LuSymbolic, lu_factorize, lu_refactorize, lu_symbolic};
 use crate::solve::lu_solve;
-use pisim_core::SimError;
+use bigospice_core::SimError;
 
 /// Which linear solver algorithm to use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

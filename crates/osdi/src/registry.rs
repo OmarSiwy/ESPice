@@ -31,7 +31,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use pisim_core::ParamMap;
+use bigospice_core::ParamMap;
 
 use crate::abi::OsdiDescriptor;
 use crate::device_kind::{OsdiDeviceKind, OsdiInstanceIdx};

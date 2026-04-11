@@ -25,10 +25,9 @@ pub mod stamp;
 pub use eval::{evaluate_dc, Bsim4Eval};
 pub use instance::{Bsim4Geometry, Bsim4Instance};
 pub use model::Bsim4Model;
-pub use params::{Bsim4ModelFlags, Bsim4ModelParams, Bsim4Type};
-pub use state::Bsim4InstanceArray;
+pub use params::Bsim4Type;
 
-use pisim_core::{DeviceKind, ParamMap};
+use bigospice_core::{DeviceKind, ParamMap};
 
 use crate::eval::{DeviceEval, DeviceModel};
 

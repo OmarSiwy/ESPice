@@ -1,15 +1,15 @@
 [package]
-name = "pisim-solver"
+name = "bigospice-solver"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Nonlinear solver core (Newton-Raphson) for PiSIM"
+description = "Nonlinear solver core (Newton-Raphson) for BigOSpice"
 
 [dependencies]
-pisim-core.workspace = true
-pisim-linalg.workspace = true
-pisim-device.workspace = true
-pisim-compute.workspace = true
+bigospice-core.workspace = true
+bigospice-linalg.workspace = true
+bigospice-device.workspace = true
+bigospice-compute.workspace = true
 thiserror.workspace = true
 smallvec.workspace = true
 log.workspace = true

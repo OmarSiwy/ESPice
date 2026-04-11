@@ -30,9 +30,9 @@
 //! ## Usage
 //!
 //! ```no_run
-//! use pisim_analysis::envelope::{EnvelopeConfig, run_envelope};
-//! use pisim_core::Circuit;
-//! use pisim_device::DeviceRegistry;
+//! use bigospice_analysis::envelope::{EnvelopeConfig, run_envelope};
+//! use bigospice_core::Circuit;
+//! use bigospice_device::DeviceRegistry;
 //!
 //! let mut ckt = Circuit::new();
 //! // ... build circuit with AM-modulated source ...
@@ -48,8 +48,8 @@
 //! [`TransientResult`]).  The spectral amplitude magnitude at each step is
 //! available via [`EnvelopeResult::magnitude`].
 
-use pisim_core::{Circuit, SimError};
-use pisim_device::DeviceRegistry;
+use bigospice_core::{Circuit, SimError};
+use bigospice_device::DeviceRegistry;
 
 use crate::hb::{run_hb_single_tone, HbSingleConfig, HbResult};
 
@@ -261,8 +261,8 @@ fn apply_envelope_time(circuit: &mut Circuit, t_env: f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pisim_core::{DeviceId, DeviceInstance, DeviceKind, NodeId, Circuit};
-    use pisim_device::DeviceRegistry;
+    use bigospice_core::{DeviceId, DeviceInstance, DeviceKind, NodeId, Circuit};
+    use bigospice_device::DeviceRegistry;
 
     /// Build a simple resistor divider — purely linear, no carrier content.
     /// HB of a linear circuit should converge in one iteration to the DC OP.

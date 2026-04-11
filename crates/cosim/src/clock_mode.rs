@@ -5,7 +5,7 @@
 //! rising edge; in **continuous** mode it is `eval()`-ed every timestep so
 //! purely combinational designs can react to input changes between clocks.
 
-use pisim_digital::DigNodeIdx;
+use bigospice_digital::DigNodeIdx;
 
 /// Configuration for the clock node in clock-driven mode.
 #[derive(Debug, Clone, Copy)]

@@ -1,12 +1,12 @@
 //! Behavioral expression AST for B-source devices.
 //!
 //! This module defines the expression tree used by B-source (`B` element)
-//! device evaluation.  It lives in `pisim-core` so that both `pisim-device`
-//! (evaluation) and `pisim-parser` (construction) can use it without a
+//! device evaluation.  It lives in `bigospice-core` so that both `bigospice-device`
+//! (evaluation) and `bigospice-parser` (construction) can use it without a
 //! circular dependency.
 //!
 //! The parser builds an `Expression` (its own richer AST), then converts it
-//! to `BehavioralExpr` via `From<pisim_parser::Expression>`.
+//! to `BehavioralExpr` via `From<bigospice_parser::Expression>`.
 
 use serde::{Deserialize, Serialize};
 

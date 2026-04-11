@@ -1,4 +1,4 @@
-//! Integration glue between the digital event engine and PiSIM's analog
+//! Integration glue between the digital event engine and BigOSpice's analog
 //! transient solver.
 //!
 //! The contract with the analog Newton-Raphson driver is intentionally narrow:
@@ -129,8 +129,19 @@ impl DigitalRuntime {
                 let updates = self.net.primitives.eval(id, &self.net.node_state);
                 let delay = self.net.primitives.delays[id];
                 for (node, val) in updates {
-                    let t_emit = t_now + delay;
-                    self.net.queue.schedule(t_emit, node, val);
+                    // Only schedule an output event when the value actually
+                    // changes.  Suppressing no-change events prevents
+                    // downstream sequential primitives (e.g. DFF in a ripple
+                    // counter) from seeing spurious clock edges every time a
+                    // combinational gate re-evaluates to the same state.
+                    let cur = self.net.node_state
+                        .get(node.index())
+                        .copied()
+                        .unwrap_or(DigState::X);
+                    if val != cur {
+                        let t_emit = t_now + delay;
+                        self.net.queue.schedule(t_emit, node, val);
+                    }
                 }
             }
         }

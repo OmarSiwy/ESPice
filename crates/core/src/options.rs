@@ -104,11 +104,15 @@ pub struct SimOptions {
     /// Which linear solver to use.  Set via `.OPTIONS SOLVER=KLU` or
     /// `.LINSOL KLU`.  Defaults to the built-in sparse LU.
     pub lin_solver: LinSolverChoice,
+    /// Xyce-style linear solver kind (`.OPTIONS LINSOL solver=KLU`).
+    /// Mirrors `lin_solver` but uses the three-way [`LinSolverKind`] enum
+    /// which also includes the `Dense` fallback option.
+    pub linsol_kind: LinSolverKind,
 }
 
 /// Which linear solver backend to use.
 ///
-/// This enum lives in `pisim-core` (no dependency on `pisim-linalg`) so it
+/// This enum lives in `bigospice-core` (no dependency on `bigospice-linalg`) so it
 /// can be carried in [`SimOptions`] and threaded through the solver stack
 /// without creating a circular dependency.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -118,6 +122,56 @@ pub enum LinSolverChoice {
     SparseLu,
     /// SuiteSparse KLU — BTF + AMD + Gilbert-Peierls LU.
     Klu,
+}
+
+/// Linear solver kind — Xyce-style three-way selection used by the
+/// `.OPTIONS LINSOL solver=...` category dispatch.
+///
+/// Complements [`LinSolverChoice`] by adding a `Dense` fallback (small
+/// circuits where a direct dense LU is faster than sparse factorization).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LinSolverKind {
+    /// Built-in sparse LU (default).
+    #[default]
+    Sparse,
+    /// SuiteSparse KLU — BTF + AMD + Gilbert-Peierls LU.
+    Klu,
+    /// Dense LU — only practical for very small circuits (< ~200 nodes).
+    Dense,
+}
+
+// ---------------------------------------------------------------------------
+// Reliability/Aging (.ROL) configuration — W.4
+// ---------------------------------------------------------------------------
+
+/// Configuration for a `.ROL` reliability/aging analysis.
+///
+/// Lives in `bigospice-core` so the parser can populate it without depending on
+/// `bigospice-analysis`.  The analysis crate re-exports this type.
+#[derive(Debug, Clone)]
+pub struct RolConfig {
+    /// Operating lifetime [s].  Default: 3.15e9 s (≈ 100 years).
+    pub lifetime: f64,
+    /// Junction temperature [K].  Default: 358.15 K (85 °C).
+    pub temp: f64,
+    /// Enable electromigration (EM) analysis.
+    pub em_enabled: bool,
+    /// Enable NBTI analysis (pMOS Vth shift).
+    pub nbti_enabled: bool,
+    /// Enable HCI analysis (nMOS Id degradation, stub).
+    pub hci_enabled: bool,
+}
+
+impl Default for RolConfig {
+    fn default() -> Self {
+        Self {
+            lifetime: 3.15e9,
+            temp: 358.15,
+            em_enabled: true,
+            nbti_enabled: true,
+            hci_enabled: false,
+        }
+    }
 }
 
 impl Default for SimOptions {
@@ -156,6 +210,7 @@ impl Default for SimOptions {
             defw: 1e-6,
             keepopinfo: false,
             lin_solver: LinSolverChoice::SparseLu,
+            linsol_kind: LinSolverKind::Sparse,
         }
     }
 }

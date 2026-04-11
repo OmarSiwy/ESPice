@@ -3,7 +3,7 @@
 //! Executes the scripting language found inside `.control` blocks in ngspice
 //! netlists.  The interpreter is intentionally kept simple: it processes one
 //! statement at a time, supports the most common commands, and delegates
-//! analysis execution to the existing `pisim_analysis` functions.
+//! analysis execution to the existing `bigospice_analysis` functions.
 //!
 //! # Supported features (Wave R)
 //!
@@ -32,8 +32,8 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use pisim_core::{Circuit, SimError};
-use pisim_device::DeviceRegistry;
+use bigospice_core::{Circuit, SimError};
+use bigospice_device::DeviceRegistry;
 
 use crate::result::{DcOpResult, ResultData, TransientResult};
 use crate::dc_op::run_dc_op;
@@ -812,7 +812,7 @@ impl<'a> ControlInterpreter<'a> {
 ///
 /// Returns `(body_lines, total_lines_consumed_not_including_header)`.
 /// The returned `total_lines_consumed` includes the `end` line.
-fn collect_block_body(lines: &[String], start: usize) -> Result<(Vec<String>, usize), SimError> {
+pub fn collect_block_body(lines: &[String], start: usize) -> Result<(Vec<String>, usize), SimError> {
     let mut body = Vec::new();
     let mut depth = 1usize; // nesting depth
     let mut i = start;
@@ -838,7 +838,7 @@ fn collect_block_body(lines: &[String], start: usize) -> Result<(Vec<String>, us
 /// Split an `if` / `else` / `end` block into true-body and false-body slices.
 ///
 /// Returns `(true_body, Option<false_body>, total_lines_consumed_after_if_header)`.
-fn split_if_body(
+pub fn split_if_body(
     lines: &[String],
     start: usize,
 ) -> Result<(Vec<String>, Option<Vec<String>>, usize), SimError> {
@@ -894,7 +894,7 @@ fn split_if_body(
 // ---------------------------------------------------------------------------
 
 /// Split a string into `(first_word, rest)`.
-fn split_first_word(s: &str) -> (&str, &str) {
+pub fn split_first_word(s: &str) -> (&str, &str) {
     let s = s.trim();
     match s.find(char::is_whitespace) {
         Some(pos) => (&s[..pos], s[pos..].trim()),
@@ -980,8 +980,8 @@ mod tests {
 
     #[test]
     fn let_and_print() {
-        use pisim_core::{Circuit, NodeId, DeviceId, DeviceInstance, DeviceKind};
-        use pisim_device::DeviceRegistry;
+        use bigospice_core::{Circuit, NodeId, DeviceId, DeviceInstance, DeviceKind};
+        use bigospice_device::DeviceRegistry;
 
         let mut ckt = Circuit::new();
         let n1 = ckt.add_node("1");
@@ -1003,8 +1003,8 @@ mod tests {
 
     #[test]
     fn echo_with_var_expansion() {
-        use pisim_core::{Circuit, NodeId, DeviceId, DeviceInstance, DeviceKind};
-        use pisim_device::DeviceRegistry;
+        use bigospice_core::{Circuit, NodeId, DeviceId, DeviceInstance, DeviceKind};
+        use bigospice_device::DeviceRegistry;
 
         let mut ckt = Circuit::new();
         let n1 = ckt.add_node("1");
@@ -1026,8 +1026,8 @@ mod tests {
 
     #[test]
     fn foreach_loop() {
-        use pisim_core::{Circuit, NodeId, DeviceId, DeviceInstance, DeviceKind};
-        use pisim_device::DeviceRegistry;
+        use bigospice_core::{Circuit, NodeId, DeviceId, DeviceInstance, DeviceKind};
+        use bigospice_device::DeviceRegistry;
 
         let mut ckt = Circuit::new();
         let n1 = ckt.add_node("1");
@@ -1051,8 +1051,8 @@ mod tests {
 
     #[test]
     fn if_condition_true() {
-        use pisim_core::{Circuit, NodeId, DeviceId, DeviceInstance, DeviceKind};
-        use pisim_device::DeviceRegistry;
+        use bigospice_core::{Circuit, NodeId, DeviceId, DeviceInstance, DeviceKind};
+        use bigospice_device::DeviceRegistry;
 
         let mut ckt = Circuit::new();
         let n1 = ckt.add_node("1");
@@ -1078,8 +1078,8 @@ mod tests {
 
     #[test]
     fn set_and_unset() {
-        use pisim_core::{Circuit, NodeId, DeviceId, DeviceInstance, DeviceKind};
-        use pisim_device::DeviceRegistry;
+        use bigospice_core::{Circuit, NodeId, DeviceId, DeviceInstance, DeviceKind};
+        use bigospice_device::DeviceRegistry;
 
         let mut ckt = Circuit::new();
         let n1 = ckt.add_node("1");

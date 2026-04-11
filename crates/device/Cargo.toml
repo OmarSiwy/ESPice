@@ -1,13 +1,13 @@
 [package]
-name = "pisim-device"
+name = "bigospice-device"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Device model evaluation engine for PiSIM"
+description = "Device model evaluation engine for BigOSpice"
 
 [dependencies]
-pisim-core.workspace = true
-pisim-compute.workspace = true
+bigospice-core.workspace = true
+bigospice-compute.workspace = true
 thiserror.workspace = true
 smallvec.workspace = true
 ahash.workspace = true

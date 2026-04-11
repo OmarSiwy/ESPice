@@ -1,5 +1,5 @@
 use smallvec::SmallVec;
-use pisim_core::{DeviceKind, ParamMap};
+use bigospice_core::{DeviceKind, ParamMap};
 
 /// Result of evaluating a device model at a given operating point.
 ///

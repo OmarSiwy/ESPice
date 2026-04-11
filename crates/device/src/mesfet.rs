@@ -1,5 +1,5 @@
 use smallvec::{SmallVec, smallvec};
-use pisim_core::{DeviceKind, ParamMap};
+use bigospice_core::{DeviceKind, ParamMap};
 
 use crate::eval::{DeviceEval, DeviceModel};
 
@@ -139,14 +139,6 @@ impl DeviceModel for Mesfet {
         if self.polarity > 0.0 { DeviceKind::MesfetN } else { DeviceKind::MesfetP }
     }
 }
-
-// ── Convenience constructors (public API) ─────────────────────────────────────
-
-/// N-channel GaAs MESFET (Curtice model).
-pub fn NMesfet() -> Mesfet { Mesfet::nmos() }
-
-/// P-channel GaAs MESFET (Curtice model).
-pub fn PMesfet() -> Mesfet { Mesfet::pmos() }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 

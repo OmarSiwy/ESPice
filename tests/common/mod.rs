@@ -8,6 +8,8 @@ pub mod rawfile;
 pub mod golden;
 pub mod runner;
 pub mod ngspice;
+pub mod vacask;
+pub mod xyce;
 pub mod config;
 
 pub use tolerance::Tolerance;
@@ -17,3 +19,5 @@ pub use config::{TestConfig, discover_tests, ExternalSuite, ReferenceMeta};
 pub use runner::{parse_netlist_file, parse_netlist_str, run_dc_op, run_dc_sweep, run_transient, run_ac, RunError};
 pub use rawfile::{RawFile, RawFlag, RawVariable, RawFileError};
 pub use ngspice::{NgspiceConfig, NgspiceResult, NgspiceError};
+pub use vacask::{VacaskConfig, VacaskResult, VacaskError};
+pub use xyce::{XyceConfig, XyceResult, XyceError};

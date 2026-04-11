@@ -9,7 +9,7 @@
 //! Format (matches HSPICE `.mt0` ASCII):
 //!
 //! ```text
-//! $DATA1 SOURCE='pisim-mc' VERSION='1.0'
+//! $DATA1 SOURCE='bigospice-mc' VERSION='1.0'
 //! .TITLE 'monte_carlo'
 //! index   m1      m2      m3
 //!   1     ...     ...     ...
@@ -86,7 +86,7 @@ impl Mt0Writer {
     /// Render the file body as a `String`.
     pub fn render(&self) -> String {
         let mut s = String::new();
-        let _ = writeln!(s, "$DATA1 SOURCE='pisim-mc' VERSION='1.0'");
+        let _ = writeln!(s, "$DATA1 SOURCE='bigospice-mc' VERSION='1.0'");
         let _ = writeln!(s, ".TITLE '{}'", self.title);
 
         // Header row: index + measure names.
@@ -168,7 +168,7 @@ mod tests {
     #[test]
     fn write_to_path_creates_file() {
         let dir = std::env::temp_dir();
-        let path = dir.join("pisim_mt0_test.mt0");
+        let path = dir.join("bigospice_mt0_test.mt0");
         let mut w = Mt0Writer::new("mc", vec!["a".into(), "b".into()]);
         w.push_row(Mt0Row::new(1, vec![1.0, 2.0]));
         w.write_to_path(&path).unwrap();

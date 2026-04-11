@@ -16,7 +16,7 @@
 //! `iter_ones()`.
 
 use bitvec::prelude::*;
-use pisim_core::{Circuit, DeviceId};
+use bigospice_core::{Circuit, DeviceId};
 use smallvec::SmallVec;
 
 /// Bitset-backed dirty tracker for devices and nodes.

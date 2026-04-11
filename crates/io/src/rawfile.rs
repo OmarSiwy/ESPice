@@ -272,7 +272,7 @@ pub enum Filetype {
 ///
 /// # Example — binary (default)
 /// ```
-/// use pisim_io::rawfile::{RawfileWriter, RawFlag};
+/// use bigospice_io::rawfile::{RawfileWriter, RawFlag};
 /// let mut buf = Vec::<u8>::new();
 /// let mut w = RawfileWriter::new("rc demo", "Transient Analysis", RawFlag::Real);
 /// w.add_variable("time", "time");
@@ -288,7 +288,7 @@ pub enum Filetype {
 ///
 /// # Example — ASCII
 /// ```
-/// use pisim_io::rawfile::{RawfileWriter, RawFlag};
+/// use bigospice_io::rawfile::{RawfileWriter, RawFlag};
 /// let mut buf = Vec::<u8>::new();
 /// let mut w = RawfileWriter::new_ascii("rc demo", "Transient Analysis", RawFlag::Real);
 /// w.add_variable("time", "time");

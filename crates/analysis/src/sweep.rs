@@ -6,7 +6,7 @@
 //!
 //! ## Design
 //!
-//! Stays in the data-oriented spirit of the rest of `pisim-analysis`:
+//! Stays in the data-oriented spirit of the rest of `bigospice-analysis`:
 //!
 //! * `ParamSweep` is a tiny struct of arrays — one entry per swept point —
 //!   so the hot loop is a contiguous index over `Vec<f64>`.
@@ -19,8 +19,8 @@
 //! ## Example
 //!
 //! ```rust,ignore
-//! use pisim_analysis::sweep::{ParamSweep, ParamTarget};
-//! use pisim_analysis::dc_op::run_dc_op;
+//! use bigospice_analysis::sweep::{ParamSweep, ParamTarget};
+//! use bigospice_analysis::dc_op::run_dc_op;
 //!
 //! let sweep = ParamSweep::lin(ParamTarget::DeviceParam("r1".into(), "resistance".into()),
 //!                              1e3, 5e3, 1e3);
@@ -28,8 +28,8 @@
 //! ```
 
 use ahash::AHashMap;
-use pisim_cache::CacheManager;
-use pisim_core::{Circuit, SimError};
+use bigospice_cache::CacheManager;
+use bigospice_core::{Circuit, SimError};
 
 /// Identifies what a single sweep value should mutate.
 ///

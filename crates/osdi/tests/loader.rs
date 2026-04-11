@@ -3,7 +3,7 @@
 // OSDI ABI definitions follow the public OpenVAF OSDI spec; this file
 // contains no OpenVAF source code.
 //
-// Integration tests for the `pisim-osdi` plugin loader.
+// Integration tests for the `bigospice-osdi` plugin loader.
 //
 // We exercise the loader along two axes:
 //
@@ -17,15 +17,15 @@
 //    it via [`OsdiPlugin::open`], and verifies the descriptor reads back
 //    correctly. This test is `#[ignore]` by default because not every CI
 //    environment ships with a working `cc` toolchain — run it locally
-//    with `cargo test --package pisim-osdi -- --ignored` after `nix
+//    with `cargo test --package bigospice-osdi -- --ignored` after `nix
 //    develop` has provisioned a C compiler.
 
 use core::ffi::c_void;
 use core::ptr;
 use std::path::PathBuf;
 
-use pisim_core::ParamMap;
-use pisim_osdi::{
+use bigospice_core::ParamMap;
+use bigospice_osdi::{
     abi::{OsdiDescriptor, OSDI_VERSION_MAJOR, OSDI_VERSION_MINOR},
     OsdiError, OsdiPlugin, OsdiRegistry, OsdiTrampoline, SoaBuffers,
 };
@@ -74,7 +74,7 @@ fn version_constants_match_loader() {
 
 #[test]
 fn open_missing_file_returns_dlopen_error() {
-    let err = OsdiPlugin::open(PathBuf::from("/nonexistent/__pisim_test__.osdi")).unwrap_err();
+    let err = OsdiPlugin::open(PathBuf::from("/nonexistent/__bigospice_test__.osdi")).unwrap_err();
     assert!(matches!(err, OsdiError::DlOpen { .. }));
 }
 
@@ -144,7 +144,7 @@ fn registry_create_unknown_descriptor_errors() {
 /// not depend on `cc`. CI / contributors should run:
 ///
 /// ```bash
-/// nix develop -c cargo test --package pisim-osdi -- --ignored
+/// nix develop -c cargo test --package bigospice-osdi -- --ignored
 /// ```
 ///
 /// to exercise this end-to-end path.

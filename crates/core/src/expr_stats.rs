@@ -54,7 +54,7 @@ use serde::{Deserialize, Serialize};
 
 /// A small deterministic 64-bit PRNG using the xorshift64-star algorithm.
 ///
-/// Why not `rand_xoshiro`?  The PiSIM workspace deliberately does not depend
+/// Why not `rand_xoshiro`?  The BigOSpice workspace deliberately does not depend
 /// on the `rand` family today.  This implementation is ~20 lines of code,
 /// passes the bare-minimum quality checks for Monte Carlo simulation
 /// parameter draws, and produces fully reproducible streams from any seed.

@@ -3,18 +3,18 @@
 // OSDI ABI definitions follow the public OpenVAF OSDI spec; this file
 // contains no OpenVAF source code.
 
-//! # `OsdiTrampoline` — bridge between PiSIM stamping and OSDI buffers.
+//! # `OsdiTrampoline` — bridge between BigOSpice stamping and OSDI buffers.
 //!
 //! The hot path looks like this:
 //!
 //! ```text
-//!     PiSIM solver state ───voltages───▶ trampoline ───▶ OSDI eval()
+//!     BigOSpice solver state ───voltages───▶ trampoline ───▶ OSDI eval()
 //!                                                         │
 //!                                                         ▼
 //!                                              load_residual_resist
 //!                                              load_jacobian_resist
 //!                                                         │
-//!     PiSIM CSC stamping ◀──conductances + currents──── trampoline
+//!     BigOSpice CSC stamping ◀──conductances + currents──── trampoline
 //! ```
 //!
 //! The trampoline owns:
@@ -86,7 +86,7 @@ impl SoaBuffers {
 ///
 /// You typically construct one of these per OSDI device instance and call
 /// [`OsdiTrampoline::evaluate`] on every NR iteration. The output buffers
-/// are then read back by the PiSIM stamper, which translates the
+/// are then read back by the BigOSpice stamper, which translates the
 /// `OsdiNodePair` indices into MNA matrix coordinates and applies them to
 /// the global CSC system.
 #[derive(Debug)]
@@ -103,7 +103,7 @@ impl OsdiTrampoline {
     }
 
     /// Pre-fill the SoA voltage column from a slice supplied by the
-    /// PiSIM stamper. Slice length must equal `num_terminals`.
+    /// BigOSpice stamper. Slice length must equal `num_terminals`.
     pub fn write_voltages(&mut self, voltages: &[f64], descriptor: &OsdiDescriptor) -> OsdiResult<()> {
         let expected = descriptor.num_terminals as usize;
         if voltages.len() != expected {
@@ -197,7 +197,7 @@ impl OsdiTrampoline {
     }
 
     /// Borrow the resistive Jacobian buffer + the descriptor's node-pair
-    /// table. PiSIM's stamper iterates the two in parallel, mapping each
+    /// table. BigOSpice's stamper iterates the two in parallel, mapping each
     /// `OsdiNodePair` into a CSC entry and adding the corresponding
     /// conductance.
     pub fn jacobian_iter<'a>(

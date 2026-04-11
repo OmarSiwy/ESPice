@@ -7,8 +7,8 @@
 //! ## Usage
 //!
 //! ```rust,ignore
-//! use pisim_analysis::alter::{AlterBlock, AlterParam, run_alter};
-//! use pisim_analysis::dc_op::run_dc_op;
+//! use bigospice_analysis::alter::{AlterBlock, AlterParam, run_alter};
+//! use bigospice_analysis::dc_op::run_dc_op;
 //!
 //! let blocks = vec![
 //!     AlterBlock::new("run2")
@@ -29,7 +29,7 @@
 //!   directly.  The parser agent can convert `.ALTER` AST nodes into this
 //!   type.
 
-use pisim_core::{Circuit, SimError};
+use bigospice_core::{Circuit, SimError};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -175,8 +175,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pisim_core::{Circuit, DeviceId, DeviceInstance, DeviceKind, NodeId};
-    use pisim_device::DeviceRegistry;
+    use bigospice_core::{Circuit, DeviceId, DeviceInstance, DeviceKind, NodeId};
+    use bigospice_device::DeviceRegistry;
 
     fn voltage_divider(r1: f64) -> Circuit {
         let mut ckt = Circuit::new();

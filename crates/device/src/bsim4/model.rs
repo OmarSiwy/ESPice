@@ -7,7 +7,7 @@
 
 #![allow(non_snake_case)]
 
-use pisim_core::ParamMap;
+use bigospice_core::ParamMap;
 
 use super::params::{Bsim4ModelParams, Bsim4Type};
 

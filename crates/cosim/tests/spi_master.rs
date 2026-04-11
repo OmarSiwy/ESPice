@@ -15,15 +15,15 @@
 //!    sudo apt install verilator
 //!    ```
 //!
-//! 2. Build the SPI master shared object using the canonical PiSIM shim
+//! 2. Build the SPI master shared object using the canonical BigOSpice shim
 //!    convention (the shim is a tiny C++ file that exposes the Verilated
-//!    model under the `pisim_verilator_*` symbol names expected by
-//!    `pisim_cosim::loader`):
+//!    model under the `bigospice_verilator_*` symbol names expected by
+//!    `bigospice_cosim::loader`):
 //!
 //!    ```bash
 //!    verilator --cc --build -j 0 \
 //!      --top-module spi_master \
-//!      tests/cosim/spi_master.sv tests/cosim/pisim_shim.cpp \
+//!      tests/cosim/spi_master.sv tests/cosim/bigospice_shim.cpp \
 //!      -CFLAGS -fPIC -LDFLAGS -shared \
 //!      -o ../../target/cosim/libspi_master.so
 //!    ```
@@ -31,13 +31,13 @@
 //! 3. Run the test:
 //!
 //!    ```bash
-//!    cargo test -p pisim-cosim --test spi_master -- --ignored
+//!    cargo test -p bigospice-cosim --test spi_master -- --ignored
 //!    ```
 
 use std::path::PathBuf;
 
-use pisim_cosim::{ClockMode, ClockSpec, DCosim, DCosimPort, PortDirection, VerilatorModel};
-use pisim_digital::{
+use bigospice_cosim::{ClockMode, ClockSpec, DCosim, DCosimPort, PortDirection, VerilatorModel};
+use bigospice_digital::{
     AdcBridge, DacBridge, DigNodeIdx, DigState, DigitalNet, DigitalRuntime, EventQueue,
 };
 

@@ -35,10 +35,10 @@
 //! ## Usage
 //!
 //! ```no_run
-//! use pisim_analysis::sampling::{SamplingConfig, run_sampling};
-//! use pisim_analysis::mc::StatOverride;
-//! use pisim_core::{Circuit, StatExpr, StatKind, Matching};
-//! use pisim_device::DeviceRegistry;
+//! use bigospice_analysis::sampling::{SamplingConfig, run_sampling};
+//! use bigospice_analysis::mc::StatOverride;
+//! use bigospice_core::{Circuit, StatExpr, StatKind, Matching};
+//! use bigospice_device::DeviceRegistry;
 //!
 //! let base = Circuit::new(); // pre-built circuit
 //! let reg = DeviceRegistry::new_default();
@@ -54,7 +54,8 @@
 //! Results are stored in the [`McSampleResults`] SoA container identical to
 //! [`crate::mc::run_mc`] — flat row-major `values[sample * num_measures + measure]`.
 
-use pisim_core::{Circuit, SimError};
+use bigospice_core::{Circuit, SimError};
+use rayon::prelude::*;
 
 use crate::mc::{McSampleResults, StatOverride};
 
@@ -247,7 +248,7 @@ pub fn mc_unit_cube(n: usize, d: usize, seed: u64) -> Vec<f64> {
 /// We use the inverse-CDF (percent-point function) appropriate for each
 /// distribution kind, mirroring the sampling semantics in [`crate::mc::realise_sample`].
 fn unit_to_param(u: f64, ov: &StatOverride) -> f64 {
-    use pisim_core::StatKind;
+    use bigospice_core::StatKind;
     let expr = &ov.expr;
     match expr.kind {
         StatKind::Gauss | StatKind::AGauss => {
@@ -257,15 +258,16 @@ fn unit_to_param(u: f64, ov: &StatOverride) -> f64 {
             let sigma = expr.variation / expr.nsig;
             expr.mean + sigma * z
         }
-        StatKind::Uniform | StatKind::AUniform => {
+        StatKind::Limit => {
             // expr.variation is the half-width.
             let lo = expr.mean - expr.variation;
             let hi = expr.mean + expr.variation;
             lo + u * (hi - lo)
         }
-        StatKind::UniformPercent => {
-            let lo = expr.mean * (1.0 - expr.variation / 100.0);
-            let hi = expr.mean * (1.0 + expr.variation / 100.0);
+        StatKind::Unif => {
+            // expr.variation is a relative fraction; map to absolute range.
+            let lo = expr.mean * (1.0 - expr.variation);
+            let hi = expr.mean * (1.0 + expr.variation);
             lo + u * (hi - lo)
         }
     }
@@ -385,24 +387,39 @@ where
         })
         .collect();
 
-    // ── Apply overrides and run eval_sample ──────────────────────────────
+    // ── Build per-sample (index, circuit) pairs up-front ─────────────────
+    // Shared by both serial and parallel evaluation paths.
+    let samples: Vec<(usize, Circuit)> = (0..total)
+        .map(|sample_idx| {
+            let vals: &[f64] = if sample_idx == 0 {
+                &nominal_vals
+            } else {
+                &stochastic[sample_idx - 1]
+            };
+            let mut ckt = base_circuit.clone();
+            for (ov, &val) in overrides.iter().zip(vals.iter()) {
+                ckt.set_device_param(&ov.device_name, &ov.param_key, val);
+            }
+            (sample_idx, ckt)
+        })
+        .collect();
+
+    // ── Evaluate samples — parallel when config.parallel, serial otherwise ─
+    let raw: Vec<(usize, Result<Vec<f64>, SimError>)> = if config.parallel {
+        samples
+            .into_par_iter()
+            .map(|(idx, ckt)| (idx, eval_sample(&ckt, idx)))
+            .collect()
+    } else {
+        samples
+            .into_iter()
+            .map(|(idx, ckt)| (idx, eval_sample(&ckt, idx)))
+            .collect()
+    };
+
     let mut results = McSampleResults::new(measure_names, total);
-
-    // Serial evaluation (parallel path omitted for simplicity; add rayon
-    // par_iter here if config.parallel == true in a future revision).
-    for sample_idx in 0..total {
-        let vals: &[f64] = if sample_idx == 0 {
-            &nominal_vals
-        } else {
-            &stochastic[sample_idx - 1]
-        };
-
-        let mut ckt = base_circuit.clone();
-        for (ov, &val) in overrides.iter().zip(vals.iter()) {
-            ckt.set_device_param(&ov.device_name, &ov.param_key, val);
-        }
-
-        match eval_sample(&ckt, sample_idx) {
+    for (sample_idx, outcome) in raw {
+        match outcome {
             Ok(row) if row.len() == num_measures => {
                 results.set_row(sample_idx, &row);
             }
@@ -443,10 +460,10 @@ pub fn summarise(results: &McSampleResults) -> Vec<SamplingSummary> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pisim_core::{
+    use bigospice_core::{
         DeviceId, DeviceInstance, DeviceKind, Matching, NodeId, StatExpr, StatKind,
     };
-    use pisim_device::DeviceRegistry;
+    use bigospice_device::DeviceRegistry;
 
     // ── LHS unit tests ───────────────────────────────────────────────────
 

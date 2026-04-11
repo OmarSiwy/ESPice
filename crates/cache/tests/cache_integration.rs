@@ -7,12 +7,11 @@
 //! 3. Compiled-eval round-trip on a simple resistor (analytic linearisation).
 //! 4. Woodbury rank-1 update vs full refactor agree within 1e-12.
 
-use pisim_cache::compiled_eval::DeviceIdx;
-use pisim_cache::{
-    CacheManager, CompiledEvalCache, DirtyTracker, ParamChange, SymbolicLu, TopologyHash,
-    WoodburyUpdate,
+use bigospice_cache::{
+    CacheManager, CompiledEvalCache, DeviceIdx, DirtyTracker, ParamChange, SymbolicLu,
+    TopologyHash, WoodburyUpdate,
 };
-use pisim_core::{Circuit, DeviceId, DeviceInstance, DeviceKind, NodeId};
+use bigospice_core::{Circuit, DeviceId, DeviceInstance, DeviceKind, NodeId};
 
 /// Build: V1=5V from node 1 to GND, R1=1k from node 1 to node 2, R2=1k from node 2 to GND.
 fn voltage_divider(r1: f64, r2: f64) -> Circuit {
@@ -275,7 +274,7 @@ fn cache_manager_full_lifecycle() {
 
 #[test]
 fn checkpoint_arena_nearest_before() {
-    use pisim_cache::TransientArena;
+    use bigospice_cache::TransientArena;
 
     let mut arena = TransientArena::new();
     arena.push(0.0, &[0.0, 0.0], &[], &[]);

@@ -12,7 +12,7 @@
 
 #![allow(non_snake_case, dead_code)]
 
-use pisim_core::ParamMap;
+use bigospice_core::ParamMap;
 
 /// Polarity of a BSIM3 device: +1 for NMOS, -1 for PMOS.
 ///

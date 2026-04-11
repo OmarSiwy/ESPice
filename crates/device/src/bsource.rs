@@ -42,7 +42,7 @@
 //! Users who need accurate Newton convergence with such expressions should
 //! use smooth equivalents.
 
-use pisim_core::{BsourceExpr, DeviceKind};
+use bigospice_core::{BsourceExpr, DeviceKind};
 use smallvec::{SmallVec, smallvec};
 
 use crate::eval::{DeviceEval, DeviceModel};
@@ -66,7 +66,7 @@ pub struct BsourceIModel;
 // ─── DeviceModel impls ───────────────────────────────────────────────────────
 
 impl DeviceModel for BsourceVModel {
-    fn eval(&self, _voltages: &[f64], _params: &pisim_core::ParamMap) -> DeviceEval {
+    fn eval(&self, _voltages: &[f64], _params: &bigospice_core::ParamMap) -> DeviceEval {
         // This should never be called directly; the stamper has a special path
         // for BsourceV that passes the expression.  Return an identity DeviceEval.
         DeviceEval::new()
@@ -86,7 +86,7 @@ impl DeviceModel for BsourceVModel {
 }
 
 impl DeviceModel for BsourceIModel {
-    fn eval(&self, _voltages: &[f64], _params: &pisim_core::ParamMap) -> DeviceEval {
+    fn eval(&self, _voltages: &[f64], _params: &bigospice_core::ParamMap) -> DeviceEval {
         DeviceEval::new()
     }
 
@@ -118,7 +118,7 @@ pub fn eval_bsource_v(
     vn: f64,
     ref_voltages: &[(&str, f64)],
     branch_current: f64,
-) -> Result<DeviceEval, pisim_core::SimError> {
+) -> Result<DeviceEval, bigospice_core::SimError> {
     // f = expression value
     let f = bse.expr.eval(ref_voltages, &[])?;
 
@@ -161,7 +161,7 @@ pub fn eval_bsource_v(
 pub fn eval_bsource_i(
     bse: &BsourceExpr,
     ref_voltages: &[(&str, f64)],
-) -> Result<DeviceEval, pisim_core::SimError> {
+) -> Result<DeviceEval, bigospice_core::SimError> {
     let f = bse.expr.eval(ref_voltages, &[])?;
 
     // MNA convention: current LEAVING a node contributes positively to g[pin].
@@ -197,7 +197,7 @@ pub fn eval_bsource_i(
 pub fn resolve_ref_voltages<'a>(
     node_refs: &'a [String],
     solution: &[f64],
-    circuit: &pisim_core::Circuit,
+    circuit: &bigospice_core::Circuit,
     buf: &'a mut Vec<(&'a str, f64)>,
 ) {
     buf.clear();
@@ -222,7 +222,7 @@ pub fn resolve_ref_voltages<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pisim_core::{BehavioralExpr, BehavioralBinOp, BsourceExpr};
+    use bigospice_core::{BehavioralExpr, BehavioralBinOp, BsourceExpr};
 
     fn lit(v: f64) -> BehavioralExpr { BehavioralExpr::Lit(v) }
     fn nv(n: &str) -> BehavioralExpr { BehavioralExpr::NodeVoltage(n.into()) }

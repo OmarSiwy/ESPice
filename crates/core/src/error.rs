@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-/// Top-level error type for all VOLTAIC operations.
+/// Top-level error type for all BigOSpice operations.
 #[derive(Debug, Error)]
 pub enum SimError {
     #[error("Parse error: {0}")]
@@ -39,9 +39,6 @@ pub enum SimError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }
-
-/// Result alias for VOLTAIC operations.
-pub type Result<T> = std::result::Result<T, SimError>;
 
 #[cfg(test)]
 mod tests {

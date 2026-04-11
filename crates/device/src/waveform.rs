@@ -19,7 +19,7 @@
 //!
 //! The formulas follow SPICE3F5 / ngspice conventions exactly.
 
-use pisim_core::ParamMap;
+use bigospice_core::ParamMap;
 
 /// A source waveform — DC, PULSE, SIN, PWL, EXP, SFFM, AM, TRNOISE, TRRANDOM, or PWL REPEAT.
 ///

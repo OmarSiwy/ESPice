@@ -4,7 +4,7 @@
 //! A `.s2p` file looks like:
 //!
 //! ```text
-//! ! 2-port S-parameter file written by PiSIM
+//! ! 2-port S-parameter file written by BigOSpice
 //! # GHz S MA R 50
 //! 1.00  0.95 -10  0.05  20  0.05  20  0.95 -10
 //! 2.00  ...
@@ -140,7 +140,7 @@ pub enum TouchstoneError {
 ///
 /// # Example
 /// ```
-/// use pisim_io::touchstone::{TouchstoneWriter, FreqUnit, ParamType, ComplexFormat};
+/// use bigospice_io::touchstone::{TouchstoneWriter, FreqUnit, ParamType, ComplexFormat};
 /// let mut w = TouchstoneWriter::new(2, FreqUnit::GHz, ParamType::S, ComplexFormat::MA, 50.0);
 /// w.set_frequencies(&[1e9, 2e9]);
 /// // S-params at f0 and f1: 4 entries each (S11, S12, S21, S22).
@@ -223,7 +223,7 @@ impl TouchstoneWriter {
         // Comment block.
         writeln!(
             w,
-            "! {n}-port {p}-parameter file written by PiSIM",
+            "! {n}-port {p}-parameter file written by BigOSpice",
             n = self.n_ports,
             p = self.param.as_str()
         )?;

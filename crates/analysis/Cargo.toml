@@ -1,17 +1,19 @@
 [package]
-name = "pisim-analysis"
+name = "bigospice-analysis"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Analysis engines (DC, AC, TRAN, etc.) for PiSIM"
+description = "Analysis engines (DC, AC, TRAN, etc.) for BigOSpice"
 
 [dependencies]
-pisim-core.workspace = true
-pisim-linalg.workspace = true
-pisim-solver.workspace = true
-pisim-device.workspace = true
-pisim-cache.workspace = true
-pisim-compute.workspace = true
+bigospice-core.workspace = true
+bigospice-parser.workspace = true
+bigospice-linalg.workspace = true
+bigospice-solver.workspace = true
+bigospice-device.workspace = true
+bigospice-cache.workspace = true
+bigospice-compute.workspace = true
+bigospice-osdi.workspace = true
 thiserror.workspace = true
 log.workspace = true
 ahash.workspace = true

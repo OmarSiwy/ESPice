@@ -7,12 +7,12 @@
 //!
 //! This module exists purely to keep the `DeviceDispatch` enum in
 //! [`crate::dispatch`] able to reference an externally-loaded OSDI
-//! plugin without taking a dependency on `pisim-osdi` (which would
+//! plugin without taking a dependency on `bigospice-osdi` (which would
 //! create a crate-graph cycle).
 //!
 //! The trick: we expose an opaque [`OsdiHandle`] — a tiny `Copy` POD
 //! struct holding nothing but indices and cached scalars. The actual
-//! OSDI registry, plugin, and trampoline live in `pisim-osdi` and are
+//! OSDI registry, plugin, and trampoline live in `bigospice-osdi` and are
 //! borrowed by the simulator alongside the dispatch enum at stamping
 //! time.
 //!
@@ -24,7 +24,7 @@
 //!   `num_terminals()` and `needs_branch()` without chasing the plugin.
 //! - `flags`: bit-encoded metadata (currently just `needs_branch`).
 
-use pisim_core::{DeviceKind, ParamMap};
+use bigospice_core::{DeviceKind, ParamMap};
 
 use crate::eval::{DeviceEval, DeviceModel};
 
@@ -73,14 +73,14 @@ impl OsdiHandle {
 /// `DeviceModel` implementation for OSDI handles.
 ///
 /// The implementation deliberately returns *empty* `DeviceEval` values:
-/// the real evaluation must be performed by the `pisim-osdi` trampoline,
+/// the real evaluation must be performed by the `bigospice-osdi` trampoline,
 /// which the stamper invokes directly with a borrow of the OSDI registry.
 /// This trait impl exists only so the `DeviceDispatch::Osdi` variant can
 /// satisfy the `eval`/`num_terminals`/`needs_branch`/`kind` methods of
 /// the dispatch enum without panicking.
 impl DeviceModel for OsdiHandle {
     fn eval(&self, _voltages: &[f64], _params: &ParamMap) -> DeviceEval {
-        // Sentinel — the real eval comes from `pisim-osdi::OsdiRegistry::evaluate`.
+        // Sentinel — the real eval comes from `bigospice-osdi::OsdiRegistry::evaluate`.
         DeviceEval::new()
     }
 
@@ -100,7 +100,7 @@ impl DeviceModel for OsdiHandle {
 
 /// Sentinel `DeviceKind` value the dispatch layer uses to recognise an
 /// OSDI handle. We re-use `VbicNpn` rather than extending the closed
-/// `DeviceKind` enum (which is in `pisim-core` and would touch every
+/// `DeviceKind` enum (which is in `bigospice-core` and would touch every
 /// existing match) — the dispatch enum's `Osdi` variant is the
 /// authoritative source of truth, and consumers should match on it
 /// directly rather than relying on the `DeviceKind` discriminant.
@@ -112,8 +112,8 @@ pub const OSDI_KIND_SENTINEL: DeviceKind = DeviceKind::VbicNpn;
 
 /// Callback interface for evaluating OSDI-loaded device instances from
 /// analysis engines (e.g. Harmonic Balance) that cannot depend on
-/// `pisim-osdi` directly (which would create a crate-graph cycle since
-/// `pisim-osdi` depends on `pisim-device`).
+/// `bigospice-osdi` directly (which would create a crate-graph cycle since
+/// `bigospice-osdi` depends on `bigospice-device`).
 ///
 /// Callers that have an `OsdiRegistry` implement this trait, then pass
 /// `Some(&mut hook)` to functions like `run_hb_n_tone`.  When no OSDI

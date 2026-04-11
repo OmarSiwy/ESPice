@@ -22,10 +22,10 @@
 //!   - The output `ref` node defaults to ground (`0`).
 //!   - Only the resistive (DC) Jacobian is used; reactive elements drop out at ω = 0.
 
-use pisim_core::{Circuit, DeviceKind, SimError, SimOptions};
-use pisim_device::DeviceRegistry;
-use pisim_linalg::{DenseVec, LinSolver, LinSolverKind, TripletMatrix};
-use pisim_solver::{stamp_circuit_gc_into, NrConfig, Solver, SolverConfig};
+use bigospice_core::{Circuit, DeviceKind, SimError, SimOptions};
+use bigospice_device::DeviceRegistry;
+use bigospice_linalg::{DenseVec, LinSolver, LinSolverKind, TripletMatrix};
+use bigospice_solver::{stamp_circuit_gc_into, NrConfig, Solver, SolverConfig};
 
 /// Configuration for a `.TF` analysis.
 #[derive(Debug, Clone)]
@@ -233,7 +233,7 @@ fn resolve_node_row_or_ground(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pisim_core::{Circuit, DeviceId, DeviceInstance, DeviceKind, NodeId};
+    use bigospice_core::{Circuit, DeviceId, DeviceInstance, DeviceKind, NodeId};
 
     fn voltage_divider(r1: f64, r2: f64, vin: f64) -> Circuit {
         let mut ckt = Circuit::new();

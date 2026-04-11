@@ -1,9 +1,9 @@
 [package]
-name = "pisim-core"
+name = "bigospice-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Core types and data structures for the PiSIM circuit simulator"
+description = "Core types and data structures for the BigOSpice circuit simulator"
 
 [dependencies]
 ahash.workspace = true

@@ -154,6 +154,27 @@ pub struct Checkpoint<'a> {
     pub events: &'a [(f64, u32)],
 }
 
+/// Owned snapshot of one checkpoint — returned by [`TransientArena::get_owned`].
+#[derive(Debug, Clone)]
+pub struct CheckpointSnapshot {
+    pub time: f64,
+    pub state: Vec<f64>,
+    pub charge_hist: Vec<f64>,
+    pub events: Vec<(f64, u32)>,
+}
+
+impl TransientArena {
+    /// Return an owned copy of checkpoint `idx`, or `None` if out of bounds.
+    pub fn get_owned(&self, idx: CheckpointIdx) -> Option<CheckpointSnapshot> {
+        self.get(idx).map(|cp| CheckpointSnapshot {
+            time: cp.time,
+            state: cp.state.to_vec(),
+            charge_hist: cp.charges.to_vec(),
+            events: cp.events.to_vec(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

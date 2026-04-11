@@ -1,6 +1,6 @@
-use pisim_core::{Circuit, SimError, SimOptions};
-use pisim_device::DeviceRegistry;
-use pisim_solver::{Solver, SolverConfig, NrConfig};
+use bigospice_core::{Circuit, SimError, SimOptions};
+use bigospice_device::DeviceRegistry;
+use bigospice_solver::{Solver, SolverConfig, NrConfig};
 
 use crate::result::DcSweepResult;
 
@@ -83,7 +83,7 @@ fn run_dc_sweep_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pisim_core::*;
+    use bigospice_core::*;
 
     #[test]
     fn dc_sweep_voltage_divider() {

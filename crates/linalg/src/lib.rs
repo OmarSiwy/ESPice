@@ -1,15 +1,15 @@
-pub mod dense_vec;
-pub mod permutation;
-pub mod triplet;
-pub mod csc;
-pub mod amd;
+pub(crate) mod dense_vec;
+pub(crate) mod permutation;
+pub(crate) mod triplet;
+pub(crate) mod csc;
+pub(crate) mod amd;
 pub(crate) mod sparse_lu;
-pub mod lu;
-pub mod solve;
-pub mod woodbury;
-pub mod lin_solver;
-pub mod btf;
-pub mod klu;
+pub(crate) mod lu;
+pub(crate) mod solve;
+pub(crate) mod woodbury;
+pub(crate) mod lin_solver;
+pub(crate) mod btf;
+pub(crate) mod klu;
 
 pub use dense_vec::DenseVec;
 pub use permutation::Permutation;

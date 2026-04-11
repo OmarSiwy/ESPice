@@ -64,4 +64,76 @@ R2 2 0 1k
     });
 
     group.finish();
+
+    // ── VACASK comparison ─────────────────────────────────────────────────────
+    let vacask_bin = std::env::var("VACASK_BIN").unwrap_or_else(|_| "vacask".into());
+    let va_available = std::process::Command::new(&vacask_bin)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok();
+
+    if va_available {
+        let mut group = c.benchmark_group("compare/vacask");
+        group.bench_function("bigospice_dc_op_divider", |b| {
+            use bigospice_parser::SpiceParser;
+            use bigospice_device::DeviceRegistry;
+            let (circuit, _, _) = SpiceParser::parse(netlist_str).unwrap();
+            let registry = DeviceRegistry::new_default();
+            b.iter(|| bigospice_analysis::run_dc_op(&circuit, &registry).unwrap());
+        });
+        group.bench_function("vacask_dc_op_divider", |b| {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("divider.sp");
+            std::fs::write(&path, netlist_str).unwrap();
+            b.iter(|| {
+                std::process::Command::new(&vacask_bin)
+                    .arg(&path)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .unwrap()
+            });
+        });
+        group.finish();
+    } else {
+        eprintln!("bench_compare: vacask not available — skipping vacask comparison");
+    }
+
+    // ── Xyce comparison ───────────────────────────────────────────────────────
+    let xyce_bin = std::env::var("XYCE_BIN").unwrap_or_else(|_| "Xyce".into());
+    let xyce_available = std::process::Command::new(&xyce_bin)
+        .arg("-v")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok();
+
+    if xyce_available {
+        let mut group = c.benchmark_group("compare/xyce");
+        group.bench_function("bigospice_dc_op_divider", |b| {
+            use bigospice_parser::SpiceParser;
+            use bigospice_device::DeviceRegistry;
+            let (circuit, _, _) = SpiceParser::parse(netlist_str).unwrap();
+            let registry = DeviceRegistry::new_default();
+            b.iter(|| bigospice_analysis::run_dc_op(&circuit, &registry).unwrap());
+        });
+        group.bench_function("xyce_dc_op_divider", |b| {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("divider.sp");
+            std::fs::write(&path, netlist_str).unwrap();
+            b.iter(|| {
+                std::process::Command::new(&xyce_bin)
+                    .arg(&path)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .unwrap()
+            });
+        });
+        group.finish();
+    } else {
+        eprintln!("bench_compare: Xyce not available — skipping Xyce comparison");
+    }
 }

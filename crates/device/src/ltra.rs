@@ -63,7 +63,7 @@
 //! matrix stays non-singular.
 
 use smallvec::{SmallVec, smallvec};
-use pisim_core::{DeviceKind, ParamMap};
+use bigospice_core::{DeviceKind, ParamMap};
 
 use crate::eval::{DeviceEval, DeviceModel};
 
@@ -421,36 +421,6 @@ pub fn ltra_kernel(tau: f64, lp: &LtraLineParams) -> f64 {
     }
 }
 
-/// Linear interpolation into a history time-series at `target` time.
-///
-/// Returns `(value, found)` where `found` is false when `target` is out
-/// of range.
-pub fn interpolate_history(times: &[f64], values: &[f64], target: f64) -> (f64, bool) {
-    if times.len() < 2 || times.len() != values.len() {
-        return (0.0, false);
-    }
-    if target <= times[0] {
-        return (values[0], true);
-    }
-    if target >= *times.last().unwrap() {
-        return (*values.last().unwrap(), true);
-    }
-    // Binary search for the bracket.
-    let pos = times.partition_point(|&t| t <= target);
-    if pos == 0 {
-        return (values[0], true);
-    }
-    let i = pos - 1;
-    let t0 = times[i];
-    let t1 = times[i + 1];
-    let dt = t1 - t0;
-    if dt <= 0.0 {
-        return (values[i], true);
-    }
-    let frac = (target - t0) / dt;
-    (values[i] + frac * (values[i + 1] - values[i]), true)
-}
-
 /// Nearest-neighbour history lookup (the `NONINT=1` variant).
 ///
 /// Skips the linear interpolation done by [`interpolate_history`] and
@@ -490,26 +460,6 @@ pub fn nearest_history(times: &[f64], values: &[f64], target: f64) -> (f64, bool
         (values[i], true)
     } else {
         (values[i + 1], true)
-    }
-}
-
-/// Look up a single history sample, dispatching on the NONINT flag.
-///
-/// `nonint = false` → linear interpolation via [`interpolate_history`].
-/// `nonint = true`  → nearest-neighbour via [`nearest_history`].
-///
-/// This is the helper invoked by [`compute_norton_equivalent_nonint`].
-#[inline]
-pub fn history_sample_at(
-    times: &[f64],
-    values: &[f64],
-    target: f64,
-    nonint: bool,
-) -> (f64, bool) {
-    if nonint {
-        nearest_history(times, values, target)
-    } else {
-        interpolate_history(times, values, target)
     }
 }
 
@@ -645,21 +595,6 @@ pub fn compute_norton_equivalent_nonint(
         i_eq_p2: i2,
         g_eq_p2: g_eq,
     }
-}
-
-/// Stamper-facing transient evaluation using plain SoA slices.
-///
-/// Called by `stamp_circuit_gc_at_time` after reading the `LtraHistoryStore`
-/// fields from the circuit.  Returns the Norton equivalent for the
-/// dispersive transient stamp.
-pub fn eval_ltra_transient_slices(
-    t_now: f64,
-    lp: &LtraLineParams,
-    times: &[f64],
-    v1: &[f64],
-    v2: &[f64],
-) -> LtraNorton {
-    compute_norton_equivalent(t_now, lp, times, v1, v2)
 }
 
 /// NONINT-aware stamper-facing transient evaluation.

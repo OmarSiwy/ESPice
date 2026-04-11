@@ -1,7 +1,7 @@
-use pisim_core::{AcStimulus, Circuit, SimError, SimOptions};
-use pisim_device::DeviceRegistry;
-use pisim_linalg::{DenseVec, LinSolver, LinSolverKind, TripletMatrix};
-use pisim_solver::{stamp_circuit_gc_into, Solver, SolverConfig, NrConfig};
+use bigospice_core::{AcStimulus, Circuit, SimError, SimOptions};
+use bigospice_device::DeviceRegistry;
+use bigospice_linalg::{DenseVec, LinSolver, LinSolverKind, TripletMatrix};
+use bigospice_solver::{stamp_circuit_gc_into, Solver, SolverConfig, NrConfig};
 
 use crate::result::AcResult;
 

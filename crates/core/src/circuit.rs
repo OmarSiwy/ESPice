@@ -349,6 +349,20 @@ impl Circuit {
         self.initial_conditions.push((node, voltage));
     }
 
+    /// Remove all initial conditions (`.IC` entries).
+    pub fn clear_initial_conditions(&mut self) {
+        self.initial_conditions.clear();
+    }
+
+    /// Set (overwrite or add) an initial condition for a node.
+    pub fn set_initial_condition(&mut self, node: NodeId, voltage: f64) {
+        if let Some(entry) = self.initial_conditions.iter_mut().find(|(n, _)| *n == node) {
+            entry.1 = voltage;
+        } else {
+            self.initial_conditions.push((node, voltage));
+        }
+    }
+
     /// Node-set biases from `.NODESET` — (NodeId, hint voltage).
     pub fn node_sets(&self) -> &[(NodeId, f64)] {
         &self.node_sets

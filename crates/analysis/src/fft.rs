@@ -9,7 +9,7 @@
 //! (e.g. extracted from a transient result) and returns the magnitude /
 //! phase spectrum together with the window-corrected coefficient power.
 
-use pisim_core::SimError;
+use bigospice_core::SimError;
 
 use crate::fourier::FourierSignal;
 

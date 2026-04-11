@@ -1,9 +1,9 @@
 [package]
-name = "pisim-linalg"
+name = "bigospice-linalg"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Sparse linear algebra engine for PiSIM"
+description = "Sparse linear algebra engine for BigOSpice"
 
 [features]
 # Enable the KLU linear solver backend (SuiteSparse).
@@ -11,7 +11,7 @@ description = "Sparse linear algebra engine for PiSIM"
 klu = []
 
 [dependencies]
-pisim-core.workspace = true
+bigospice-core.workspace = true
 thiserror.workspace = true
 ahash.workspace = true
 smallvec.workspace = true

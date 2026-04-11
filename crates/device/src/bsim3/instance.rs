@@ -12,7 +12,7 @@
 
 #![allow(non_snake_case, dead_code)]
 
-use pisim_core::ParamMap;
+use bigospice_core::ParamMap;
 
 use super::model::Bsim3Model;
 use super::params::Bsim3Type;

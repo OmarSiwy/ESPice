@@ -7,7 +7,7 @@
 
 #![allow(non_snake_case)]
 
-use pisim_core::{DeviceKind, ParamMap};
+use bigospice_core::{DeviceKind, ParamMap};
 use smallvec::{SmallVec, smallvec};
 
 use crate::eval::{DeviceEval, DeviceModel};
@@ -107,7 +107,7 @@ impl DeviceModel for Bsim3 {
         let mut op = super::eval::Bsim3OpPoint::default();
         super::eval::compute_dc_currents(&size, vgs, vds, vbs, &mut op);
 
-        // GMIN leakage on the Vds branch — matches all other PiSIM device
+        // GMIN leakage on the Vds branch — matches all other BigOSpice device
         // models — and ensure the Jacobian stays well-conditioned even at
         // cutoff.
         const GDS_MIN: f64 = 1e-12;

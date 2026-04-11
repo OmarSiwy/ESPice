@@ -22,7 +22,7 @@ pub enum CsvError {
 ///
 /// # Example
 /// ```
-/// use pisim_io::csv::CsvWriter;
+/// use bigospice_io::csv::CsvWriter;
 /// let mut buf = Vec::<u8>::new();
 /// let mut w = CsvWriter::new();
 /// w.set_headers(&["time", "v(out)"]);

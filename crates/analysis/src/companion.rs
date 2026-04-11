@@ -32,7 +32,7 @@
 //! The `history_coeffs` field gives the coefficients applied to each
 //! historical q slot, in order from newest (n-1) to oldest (n-k).
 
-use pisim_linalg::{DenseVec, TripletMatrix};
+use bigospice_linalg::{DenseVec, TripletMatrix};
 
 /// Time integration method recognised by the companion solver.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

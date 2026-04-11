@@ -1,5 +1,5 @@
-use pisim_core::{Circuit, SimError};
-use pisim_device::DeviceRegistry;
+use bigospice_core::{Circuit, SimError};
+use bigospice_device::DeviceRegistry;
 
 use crate::newton::{NewtonRaphson, NrConfig, NrResult};
 
@@ -39,7 +39,7 @@ impl Solver {
     }
 
     /// Build a `Solver` with configuration derived from `.OPTIONS` sim options.
-    pub fn with_options(options: &pisim_core::SimOptions) -> Self {
+    pub fn with_options(options: &bigospice_core::SimOptions) -> Self {
         Self::NewtonRaphson(NewtonRaphson::new(NrConfig::from(options)))
     }
 
@@ -65,7 +65,7 @@ impl Default for Solver {
 mod tests {
     use super::*;
     use crate::convergence::ConvergenceCriteria;
-    use pisim_core::{Circuit, DeviceId, DeviceInstance, DeviceKind, NodeId, SimOptions};
+    use bigospice_core::{Circuit, DeviceId, DeviceInstance, DeviceKind, NodeId, SimOptions};
 
     #[test]
     fn solver_from_simoptions_uses_provided_tolerances() {

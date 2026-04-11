@@ -9,7 +9,7 @@
 //! solution vector is not modified. At convergence, limited voltages equal
 //! raw voltages (no change between iterations), so the solution is exact.
 
-use pisim_core::{DeviceKind, ParamMap};
+use bigospice_core::{DeviceKind, ParamMap};
 
 /// Thermal voltage at ~300K (same as diode.rs).
 const VT: f64 = 0.02585;

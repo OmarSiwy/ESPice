@@ -118,7 +118,7 @@ struct HspiceColumn {
 ///
 /// # Example — transient
 /// ```
-/// use pisim_io::hspice::{HspicePostWriter, HspicePostKind, HspiceVarType};
+/// use bigospice_io::hspice::{HspicePostWriter, HspicePostKind, HspiceVarType};
 /// let mut w = HspicePostWriter::new(HspicePostKind::Transient, "rc demo");
 /// w.set_independent("time", &[0.0, 1e-6, 2e-6]);
 /// w.add_column("v(out)", HspiceVarType::Voltage, &[0.0, 0.63, 0.86]);
@@ -129,7 +129,7 @@ struct HspiceColumn {
 ///
 /// # Example — AC with complex data
 /// ```
-/// use pisim_io::hspice::{HspicePostWriter, HspicePostKind, HspiceVarType};
+/// use bigospice_io::hspice::{HspicePostWriter, HspicePostKind, HspiceVarType};
 /// let freqs = [1e3, 10e3, 100e3];
 /// let complex = [(0.5_f64, 0.866_f64), (0.707, 0.707), (0.9, 0.1)];
 /// let mut w = HspicePostWriter::new(HspicePostKind::Ac, "ac test");
@@ -158,7 +158,7 @@ impl HspicePostWriter {
             title: title.to_string(),
             date: "01/01/2026".to_string(),
             time: "00:00:00".to_string(),
-            copyright: "PiSIM".to_string(),
+            copyright: "BigOSpice".to_string(),
             independent: None,
             columns: Vec::new(),
             ac_columns: Vec::new(),
@@ -330,7 +330,7 @@ fn write_record<W: Write>(w: &mut W, payload: &[u8]) -> io::Result<()> {
 ///
 /// # Example
 /// ```
-/// use pisim_io::hspice::HspiceMt0Writer;
+/// use bigospice_io::hspice::HspiceMt0Writer;
 /// let mut w = HspiceMt0Writer::new("rc demo");
 /// w.add_measurement("risetime", 1.2e-6);
 /// w.add_measurement("vmax", 4.95);
@@ -359,13 +359,13 @@ impl HspiceMt0Writer {
     /// Write the `.mt0` ASCII file.  Format is HSPICE-compatible:
     ///
     /// ```text
-    /// $DATA1 SOURCE='PiSIM' VERSION='0.1.0'
+    /// $DATA1 SOURCE='BigOSpice' VERSION='0.1.0'
     /// .TITLE '<title>'
     /// <name1>     <name2>     ...
     /// <value1>    <value2>    ...
     /// ```
     pub fn write<W: Write>(&self, mut w: W) -> io::Result<()> {
-        writeln!(w, "$DATA1 SOURCE='PiSIM' VERSION='0.1.0'")?;
+        writeln!(w, "$DATA1 SOURCE='BigOSpice' VERSION='0.1.0'")?;
         writeln!(w, ".TITLE '{}'", self.title)?;
         // Header: column names, space-padded to 16-char fields.
         for (name, _) in &self.measurements {

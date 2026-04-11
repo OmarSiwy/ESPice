@@ -1,6 +1,6 @@
-//! `pisim-io` — simulator output format writers.
+//! `bigospice-io` — simulator output format writers.
 //!
-//! Phase 3.8 of the PiSIM roadmap consolidates every disk format the
+//! Phase 3.8 of the BigOSpice roadmap consolidates every disk format the
 //! simulator can emit behind a single crate so that:
 //!
 //! * The analysis crate stays focused on numerical math.
@@ -23,18 +23,18 @@
 //! | [`ac_output`]    | AC column extraction (VDB/VR/VI/VP/VM from complex data) |
 //!
 //! The four "user-facing" writer types are re-exported at crate root for
-//! ergonomic `use pisim_io::{RawfileWriter, HspicePostWriter, …};`.
+//! ergonomic `use bigospice_io::{RawfileWriter, HspicePostWriter, …};`.
 
 #![deny(rust_2018_idioms)]
 
-pub mod ac_output;
-pub mod csv;
-pub mod format_kind;
-pub mod hspice;
-pub mod mt0;
-pub mod print_select;
-pub mod rawfile;
-pub mod touchstone;
+pub(crate) mod ac_output;
+pub(crate) mod csv;
+pub(crate) mod format_kind;
+pub(crate) mod hspice;
+pub(crate) mod mt0;
+pub(crate) mod print_select;
+pub(crate) mod rawfile;
+pub(crate) mod touchstone;
 
 // ── Public re-exports of the writer types ────────────────────────────────────
 

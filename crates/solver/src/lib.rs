@@ -1,14 +1,14 @@
-pub mod stamper;
-pub mod convergence;
-pub mod damping;
-pub mod source_stepping;
-pub mod gmin_stepping;
-pub mod junction_limit;
-pub mod newton;
-pub mod backend;
-pub mod anderson;
-pub mod pseudo_transient;
-pub mod device_eval;
+pub(crate) mod stamper;
+pub(crate) mod convergence;
+pub(crate) mod damping;
+pub(crate) mod source_stepping;
+pub(crate) mod gmin_stepping;
+pub(crate) mod junction_limit;
+pub(crate) mod newton;
+pub(crate) mod backend;
+pub(crate) mod anderson;
+pub(crate) mod pseudo_transient;
+pub(crate) mod device_eval;
 
 pub use stamper::{stamp_circuit, stamp_circuit_into, stamp_circuit_gc_into, stamp_circuit_gc_at_time, stamp_circuit_gc_par_at_time, stamp_circuit_with_source_scale, update_tline_histories, update_ltra_histories};
 pub use convergence::{ConvergenceCriteria, ConvergenceStatus};

@@ -6,10 +6,9 @@
 
 #![allow(non_snake_case)]
 
-use pisim_core::ParamMap;
+use bigospice_core::ParamMap;
 
-use super::instance::{Bsim4Geometry, Bsim4Instance};
-use super::model::Bsim4Model;
+use super::instance::Bsim4Geometry;
 
 /// Pull instance-level geometry parameters from a `ParamMap`.
 pub fn geometry_from_map(map: &ParamMap) -> Bsim4Geometry {
@@ -30,9 +29,3 @@ pub fn geometry_from_map(map: &ParamMap) -> Bsim4Geometry {
     }
 }
 
-/// Build a fully-resolved per-instance struct from a model and a
-/// `ParamMap`.  Convenience wrapper for the dispatch path.
-pub fn build_instance(model: &Bsim4Model, map: &ParamMap, temp_k: f64) -> Bsim4Instance {
-    let geom = geometry_from_map(map);
-    Bsim4Instance::from_model(model, &geom, temp_k)
-}

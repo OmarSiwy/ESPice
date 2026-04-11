@@ -181,7 +181,7 @@ impl ParamMap {
 /// # Example
 ///
 /// ```ignore
-/// use pisim_core::param::{CompiledParams, ParamMap};
+/// use bigospice_core::param::{CompiledParams, ParamMap};
 ///
 /// #[derive(Clone, Copy)]
 /// struct MosfetParams {
@@ -232,7 +232,7 @@ pub trait CompiledParams: Sized {
 /// of `(key, default)` pairs without repeating the `map.` prefix everywhere.
 ///
 /// ```ignore
-/// use pisim_core::param::{compiled_get, ParamMap};
+/// use bigospice_core::param::{compiled_get, ParamMap};
 /// let mut m = ParamMap::new();
 /// m.set("vth", 0.5);
 /// assert_eq!(compiled_get(&m, "vth", 0.7), 0.5);

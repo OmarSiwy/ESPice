@@ -5,6 +5,11 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[dependencies]
+bigospice-parser   = { workspace = true }
+bigospice-analysis = { workspace = true }
+bigospice-device   = { workspace = true }
+
 [workspace]
 resolver = "2"
 members = [

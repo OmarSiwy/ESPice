@@ -179,28 +179,34 @@ pub fn btf_decompose(a: &CscMatrix) -> BtfDecomposition {
         for &col in scc {
             perm_col.push(col);
             let row = col_match[col];
-            // For unmatched columns (structurally singular), assign them
-            // sequentially from any unmatched rows.  We fill those at the end.
+            // Push the matched row (may be usize::MAX for unmatched columns).
             perm_row.push(row);
         }
         block_starts.push(perm_col.len());
     }
 
-    // Handle unmatched rows (structurally singular matrix).
-    // Collect rows that didn't appear in col_match.
-    if perm_row.len() < n {
-        let mut used_rows = vec![false; n];
-        for &r in &perm_row {
-            if r != usize::MAX {
-                used_rows[r] = true;
-            }
-        }
-        for r in 0..n {
-            if !used_rows[r] {
-                perm_row.push(r);
-            }
+    // Replace usize::MAX slots (unmatched columns) with unmatched rows.
+    // First, collect all rows that are already matched.
+    let mut used_rows = vec![false; n];
+    for &r in &perm_row {
+        if r != usize::MAX {
+            used_rows[r] = true;
         }
     }
+    // Unmatched rows (those not in col_match).
+    let mut unmatched_rows: Vec<usize> = (0..n)
+        .filter(|&r| !used_rows[r])
+        .collect();
+    let mut ur_iter = unmatched_rows.drain(..);
+    for r in perm_row.iter_mut() {
+        if *r == usize::MAX {
+            // Assign an unmatched row to this slot.
+            *r = ur_iter.next().unwrap_or(0);
+        }
+    }
+
+    // Handle any remaining unmatched columns (shouldn't happen if SCCs cover
+    // all columns, but guard anyway).
     if perm_col.len() < n {
         let mut used_cols = vec![false; n];
         for &c in &perm_col {
@@ -209,6 +215,9 @@ pub fn btf_decompose(a: &CscMatrix) -> BtfDecomposition {
         for c in 0..n {
             if !used_cols[c] {
                 perm_col.push(c);
+                // Assign next unmatched row or fallback.
+                let r = ur_iter.next().unwrap_or(0);
+                perm_row.push(r);
             }
         }
         block_starts.push(n);
@@ -221,11 +230,10 @@ pub fn btf_decompose(a: &CscMatrix) -> BtfDecomposition {
         fwd_col[orig] = permuted;
     }
     // p_row.forward()[orig_row] = permuted_row
+    // All usize::MAX slots have been replaced above; every orig is valid.
     let mut fwd_row = vec![0usize; n];
     for (permuted, &orig) in perm_row.iter().enumerate() {
-        if orig != usize::MAX {
-            fwd_row[orig] = permuted;
-        }
+        fwd_row[orig] = permuted;
     }
 
     BtfDecomposition {
@@ -462,17 +470,6 @@ fn tarjan_sccs(a: &CscMatrix, n: usize, col_match: &[usize]) -> Vec<Vec<usize>> 
 }
 
 // ---------------------------------------------------------------------------
-// Query helpers
-// ---------------------------------------------------------------------------
-
-/// Return `true` when the BTF has only one block (the entire matrix is one SCC
-/// and no block-diagonal structure can be exploited).
-#[inline]
-pub fn is_btf_trivial(btf: &BtfDecomposition) -> bool {
-    btf.block_count <= 1
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -681,6 +678,60 @@ mod tests {
         let btf = btf_decompose(&a);
         assert_eq!(btf.block_count, 1);
         assert_eq!(btf.block_size(0), 1);
+        check_block_upper_triangular(&a, &btf);
+    }
+
+    // ------------------------------------------------------------------
+    // Test P.1: 6×6 block-diagonal matrix — 2 independent 3×3 blocks.
+    //
+    // Matrix structure:
+    //   [ A  0 ]   where A (3×3) and B (3×3) are each fully dense
+    //   [ 0  B ]   with a mutual cycle, making each a single SCC.
+    //
+    // BTF must find exactly 2 blocks, each of size 3.
+    // ------------------------------------------------------------------
+    #[test]
+    fn two_independent_3x3_blocks() {
+        // Block A: rows/cols 0,1,2 — cycle 0→1→2→0 (one SCC of size 3).
+        // Block B: rows/cols 3,4,5 — cycle 3→4→5→3 (one SCC of size 3).
+        // No coupling between A and B.
+        let a = build(
+            6,
+            &[
+                // Block A: diagonal + cycle
+                (0, 0, 1.0),
+                (1, 0, 1.0), // col 0 → row 1 (edge 0→1 in col graph)
+                (1, 1, 1.0),
+                (2, 1, 1.0), // col 1 → row 2
+                (2, 2, 1.0),
+                (0, 2, 1.0), // col 2 → row 0 (closes cycle)
+                // Block B: diagonal + cycle
+                (3, 3, 2.0),
+                (4, 3, 2.0), // col 3 → row 4
+                (4, 4, 2.0),
+                (5, 4, 2.0), // col 4 → row 5
+                (5, 5, 2.0),
+                (3, 5, 2.0), // col 5 → row 3 (closes cycle)
+            ],
+        );
+        let btf = btf_decompose(&a);
+
+        // Must detect exactly 2 blocks, each of size 3.
+        assert_eq!(
+            btf.block_count, 2,
+            "expected 2 independent blocks, got {}",
+            btf.block_count
+        );
+        // Both blocks must have size 3.
+        let sizes: Vec<usize> = (0..btf.block_count)
+            .map(|k| btf.block_size(k))
+            .collect();
+        assert!(
+            sizes.iter().all(|&s| s == 3),
+            "expected all blocks of size 3, got {:?}",
+            sizes
+        );
+        // The permuted matrix must be block-upper-triangular.
         check_block_upper_triangular(&a, &btf);
     }
 

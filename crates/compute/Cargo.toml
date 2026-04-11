@@ -1,12 +1,12 @@
 [package]
-name = "pisim-compute"
+name = "bigospice-compute"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Compute abstraction layer (CPU/GPU) for PiSIM"
+description = "Compute abstraction layer (CPU/GPU) for BigOSpice"
 
 [dependencies]
-pisim-core.workspace = true
+bigospice-core.workspace = true
 rayon.workspace = true
 thiserror.workspace = true
 wgpu.workspace = true

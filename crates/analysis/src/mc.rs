@@ -33,7 +33,7 @@
 //! contiguous slices that can feed downstream statistics or `.mt0` writers
 //! without re-shaping.
 
-use pisim_core::{Circuit, Matching, SimError, StatExpr, StatRng};
+use bigospice_core::{Circuit, Matching, SimError, StatExpr, StatRng};
 use rayon::prelude::*;
 
 // ---------------------------------------------------------------------------
@@ -410,8 +410,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pisim_core::{DeviceId, DeviceInstance, DeviceKind, NodeId, StatKind};
-    use pisim_device::DeviceRegistry;
+    use bigospice_core::{DeviceId, DeviceInstance, DeviceKind, NodeId, StatKind};
+    use bigospice_device::DeviceRegistry;
 
     fn divider(r1_value: f64) -> Circuit {
         let mut ckt = Circuit::new();

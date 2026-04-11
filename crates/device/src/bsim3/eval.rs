@@ -81,7 +81,7 @@ pub fn compute_vth(p: &Bsim3SizeParams, vbseff: f64, vds: f64) -> (f64, f64, f64
     // Phis(Vbs) = phi - Vbseff (clamped positive).
     let phis = (p.phi - vbseff).max(1.0e-3);
     let sqrt_phis = phis.sqrt();
-    let dphis_dvbs = -1.0;
+    let _dphis_dvbs = -1.0;
     let dsqrt_phis_dvbs = -0.5 / sqrt_phis;
 
     // Long-channel Vth0 + body effect.

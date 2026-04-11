@@ -1,5 +1,5 @@
 use smallvec::{SmallVec, smallvec};
-use pisim_core::{DeviceKind, ParamMap};
+use bigospice_core::{DeviceKind, ParamMap};
 
 use crate::eval::{DeviceEval, DeviceModel};
 use crate::waveform::Waveform;

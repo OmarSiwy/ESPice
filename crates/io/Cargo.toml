@@ -1,9 +1,9 @@
 [package]
-name = "pisim-io"
+name = "bigospice-io"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Simulator output formats (rawfile, HSPICE POST, Touchstone, CSV) for PiSIM"
+description = "Simulator output formats (rawfile, HSPICE POST, Touchstone, CSV) for BigOSpice"
 
 [dependencies]
 thiserror.workspace = true

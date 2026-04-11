@@ -1,12 +1,12 @@
 [package]
-name = "pisim-digital"
+name = "bigospice-digital"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Native XSPICE-class digital event engine for PiSIM (Phase 4.1)"
+description = "Native XSPICE-class digital event engine for BigOSpice (Phase 4.1)"
 
 [dependencies]
-pisim-core.workspace = true
+bigospice-core.workspace = true
 thiserror.workspace = true
 smallvec.workspace = true
 ahash.workspace = true

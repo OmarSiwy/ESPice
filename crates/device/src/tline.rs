@@ -1,5 +1,5 @@
 use smallvec::{SmallVec, smallvec};
-use pisim_core::{DeviceKind, ParamMap};
+use bigospice_core::{DeviceKind, ParamMap};
 
 use crate::eval::{DeviceEval, DeviceModel};
 
@@ -230,7 +230,7 @@ mod tests {
 
     #[test]
     fn tline_history_push_and_interpolate() {
-        use pisim_core::TlineHistory;
+        use bigospice_core::TlineHistory;
 
         let mut hist = TlineHistory::new(50.0, 1e-9, 16);
 
@@ -247,7 +247,7 @@ mod tests {
 
     #[test]
     fn tline_history_delayed_lookup() {
-        use pisim_core::TlineHistory;
+        use bigospice_core::TlineHistory;
 
         let td = 2e-9_f64;
         let mut hist = TlineHistory::new(50.0, td, 32);

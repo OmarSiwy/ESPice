@@ -14,9 +14,9 @@
 //! On any GPU error a `log::warn!` is emitted and the routine falls
 //! back to CPU.  The caller never sees the failure.
 //!
-//! The CPU path uses `pisim_device::bsim4::evaluate_dc` (the same
+//! The CPU path uses `bigospice_device::bsim4::evaluate_dc` (the same
 //! routine the per-device eval calls).  The GPU path delegates to
-//! `pisim_compute::WgpuBackend` — currently this loads the
+//! `bigospice_compute::WgpuBackend` — currently this loads the
 //! `bsim4_eval.wgsl` kernel via the `WgpuBackend::raw_device` /
 //! `raw_queue` accessors.  When the kernel build fails for any
 //! reason (no adapter, shader compile error, layout mismatch) the
@@ -28,8 +28,8 @@
 //! path is exercised by `tests/integration/gpu_dispatch.rs`.
 
 use crate::NrConfig;
-use pisim_compute::WgpuBackend;
-use pisim_device::bsim4::{evaluate_dc, Bsim4Eval, Bsim4Instance};
+use bigospice_compute::WgpuBackend;
+use bigospice_device::{Bsim4Eval, Bsim4Instance, evaluate_dc};
 
 /// Decide whether the GPU path should be attempted for `device_count`
 /// BSIM4 instances under the supplied solver configuration.
@@ -170,9 +170,9 @@ mod tests {
         // Exercise the CPU fallback path on a small ladder so we know
         // the dispatch returns the same numbers as the scalar
         // `evaluate_dc` API.
-        let inst = pisim_device::bsim4::Bsim4Instance::from_model(
-            &pisim_device::bsim4::Bsim4Model::nmos_default(),
-            &pisim_device::bsim4::Bsim4Geometry {
+        let inst = bigospice_device::Bsim4Instance::from_model(
+            &bigospice_device::Bsim4Model::nmos_default(),
+            &bigospice_device::Bsim4Geometry {
                 L: 1.0e-7,
                 W: 1.0e-6,
                 ..Default::default()

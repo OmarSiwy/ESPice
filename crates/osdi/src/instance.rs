@@ -27,7 +27,7 @@ use core::ptr::NonNull;
 use std::sync::Arc;
 
 use libloading::Library;
-use pisim_core::ParamMap;
+use bigospice_core::ParamMap;
 
 use crate::abi::{
     OsdiBool, OsdiDescriptor, OsdiInitInfo, OsdiSimInfo, OsdiSimParas,
@@ -231,6 +231,98 @@ impl OsdiInstance {
 
         self.initialised = true;
         Ok(())
+    }
+}
+
+/// Result of evaluating an OSDI model at a set of harmonic voltages.
+///
+/// Layout is flat: `currents[harm * num_ports + port]`, same for
+/// `jacobians` and `charges`. The HB solver reads these out and assembles
+/// the harmonic-balance residual / Jacobian.
+pub struct OsdiHbEval {
+    /// Current vector at each harmonic: `currents[harm * num_ports + port]`
+    pub currents: Vec<f64>,
+    /// Jacobian entries (dI/dV) at each harmonic, same layout
+    pub jacobians: Vec<f64>,
+    /// Charge/flux terms for reactive elements, same layout
+    pub charges: Vec<f64>,
+}
+
+impl OsdiInstance {
+    /// Evaluate the model at `num_harmonics` complex voltage points.
+    ///
+    /// `voltages`: flat slice `[v_harm0_node0, v_harm0_node1, ...,
+    ///   v_harm1_node0, ...]` of length `num_harmonics * num_terminals`.
+    /// `num_harmonics`: number of harmonic frequencies.
+    /// `omega`: fundamental angular frequency (rad/s), forwarded to the
+    ///   reactive Jacobian via the integration alpha parameter.
+    ///
+    /// For each harmonic k the method:
+    /// 1. Extracts voltages[k * num_terminals .. (k+1) * num_terminals].
+    /// 2. Calls the OSDI `eval` trampoline with those voltages.
+    /// 3. Reads `load_residual_resist` → `currents` slot k.
+    /// 4. Reads `load_jacobian_resist` → `jacobians` slot k.
+    /// 5. Reads `load_residual_react` → `charges` slot k.
+    pub fn eval_hb(
+        &mut self,
+        voltages: &[f64],
+        num_harmonics: usize,
+        omega: f64,
+    ) -> OsdiResult<OsdiHbEval> {
+        use crate::trampoline::OsdiTrampoline;
+
+        let n = self.num_terminals as usize;
+        let expected = num_harmonics * n;
+        if voltages.len() != expected {
+            return Err(OsdiError::VoltageLenMismatch {
+                name: self.name.clone(),
+                expected,
+                actual: voltages.len(),
+            });
+        }
+
+        let descriptor = unsafe { &*self.descriptor };
+        let num_nodes = n + descriptor.num_nodes as usize;
+        let num_jac = descriptor.num_jacobian_entries as usize;
+
+        let mut result = OsdiHbEval {
+            currents: vec![0.0; num_harmonics * num_nodes],
+            jacobians: vec![0.0; num_harmonics * num_jac],
+            charges: vec![0.0; num_harmonics * num_nodes],
+        };
+
+        let mut trampoline = OsdiTrampoline::new(descriptor);
+
+        for k in 0..num_harmonics {
+            let v_slice = &voltages[k * n..(k + 1) * n];
+            trampoline.write_voltages(v_slice, descriptor)?;
+            // Use omega as the integration alpha for reactive Jacobian.
+            trampoline.evaluate(self, 0.0, omega)?;
+
+            // Copy resistive residual → currents for harmonic k.
+            let curr_dst = &mut result.currents[k * num_nodes..(k + 1) * num_nodes];
+            curr_dst.iter_mut()
+                .zip(trampoline.buffers.residual_resist.iter())
+                .for_each(|(d, s)| *d = *s);
+
+            // Copy resistive Jacobian → jacobians for harmonic k.
+            if num_jac > 0 {
+                let jac_dst = &mut result.jacobians[k * num_jac..(k + 1) * num_jac];
+                jac_dst.iter_mut()
+                    .zip(trampoline.buffers.jacobian_resist.iter())
+                    .for_each(|(d, s)| *d = *s);
+            }
+
+            // Copy reactive residual → charges for harmonic k.
+            let chg_dst = &mut result.charges[k * num_nodes..(k + 1) * num_nodes];
+            chg_dst.iter_mut()
+                .zip(trampoline.buffers.residual_react.iter())
+                .for_each(|(d, s)| *d = *s);
+
+            trampoline.buffers.clear();
+        }
+
+        Ok(result)
     }
 }
 

@@ -6,11 +6,11 @@
 
 ---
 
-## 0. Why VOLTAIC Exists
+## 0. Why BigOSpice Exists
 
 Every existing open-source circuit simulator was designed in a world without GPUs, without terabytes of RAM, and without the need to simulate million-transistor post-layout circuits across hundreds of PVT corners in hours rather than weeks. The commercial world has partially caught up — Synopsis PrimeSim uses GPUs for 10× speedup, Empyrean ALPS-GT achieves 15× with heterogeneous compute — but these are closed-source, expensive, and architecturally constrained by backward compatibility.
 
-VOLTAIC is designed from first principles to be the simulator that should have existed from the start: one that treats GPU acceleration, incremental re-simulation, and massive parallelism as foundational requirements rather than bolted-on afterthoughts.
+BigOSpice is designed from first principles to be the simulator that should have existed from the start: one that treats GPU acceleration, incremental re-simulation, and massive parallelism as foundational requirements rather than bolted-on afterthoughts.
 
 **The three pillars:**
 
@@ -18,7 +18,7 @@ VOLTAIC is designed from first principles to be the simulator that should have e
 2. **Incremental simulation** — change a resistor value and get results in milliseconds, not minutes, by caching the compiled equation system and applying surgical matrix updates
 3. **GPU-native acceleration** — device evaluation, matrix solve, and Monte Carlo sweeps all run on GPU by default, with CPU fallback for small circuits
 
-No existing simulator combines all three. VOLTAIC does.
+No existing simulator combines all three. BigOSpice does.
 
 ---
 
@@ -26,7 +26,7 @@ No existing simulator combines all three. VOLTAIC does.
 
 ### 1.1 Feature Matrix
 
-| Capability            | NGSpice     | Xyce             | VACASK       | CedarSim      | PrimeSim         | **VOLTAIC**                |
+| Capability            | NGSpice     | Xyce             | VACASK       | CedarSim      | PrimeSim         | **BigOSpice**                |
 | --------------------- | ----------- | ---------------- | ------------ | ------------- | ---------------- | -------------------------- |
 | DC/AC/TRAN/Noise      | ✅          | ✅               | ✅           | ✅            | ✅               | **✅**                     |
 | Harmonic Balance      | ❌          | ✅               | ✅           | ❌            | ✅               | **✅**                     |
@@ -48,7 +48,7 @@ No existing simulator combines all three. VOLTAIC does.
 
 ### 1.2 Performance Targets
 
-| Benchmark                               | NGSpice      | Xyce         | VACASK      | **VOLTAIC Target** | **Speedup vs Best OSS** |
+| Benchmark                               | NGSpice      | Xyce         | VACASK      | **BigOSpice Target** | **Speedup vs Best OSS** |
 | --------------------------------------- | ------------ | ------------ | ----------- | ------------------ | ----------------------- |
 | C6288 multiplier (10K MOSFET, TRAN)     | 72s          | 152s         | 48s         | **≤8s**            | **6× vs VACASK**        |
 | 9-stage ring osc (PSP, 1M timepoints)   | 2.21s        | 10.60s       | 1.89s       | **≤0.4s**          | **5× vs VACASK**        |
@@ -69,7 +69,7 @@ These targets are achievable because:
 
 ### 2.1 Layered Design Philosophy
 
-VOLTAIC uses a strict 6-layer architecture. Each layer communicates only with its immediate neighbors through well-defined interfaces. This enables GPU acceleration, incremental caching, and parallelism to be implemented at the correct layer without cross-cutting concerns.
+BigOSpice uses a strict 6-layer architecture. Each layer communicates only with its immediate neighbors through well-defined interfaces. This enables GPU acceleration, incremental caching, and parallelism to be implemented at the correct layer without cross-cutting concerns.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -154,9 +154,9 @@ where `α` depends on the integration method and timestep. This is the system th
 
 ---
 
-## 3. The Incremental Simulation Engine — VOLTAIC's Killer Feature
+## 3. The Incremental Simulation Engine — BigOSpice's Killer Feature
 
-This is the capability no other simulator has. When a user changes one or two parameters and re-simulates, VOLTAIC avoids 95%+ of the computation by reusing cached intermediate results.
+This is the capability no other simulator has. When a user changes one or two parameters and re-simulates, BigOSpice avoids 95%+ of the computation by reusing cached intermediate results.
 
 ### 3.1 The Five-Level Cache Hierarchy
 
@@ -245,13 +245,13 @@ When a user changes parameter P from value v₁ to v₂:
 
 ### 3.3 Transient Re-Simulation with Matrix Exponential
 
-For transient analysis parameter changes, VOLTAIC uses a hybrid approach:
+For transient analysis parameter changes, BigOSpice uses a hybrid approach:
 
 **For linear regions of the circuit** (parasitics, passive networks): Use the R-MATEX matrix exponential method. The conductance matrix G is factored once at the start. During re-simulation, the Krylov subspace basis vectors from the original simulation are reused, enabling adaptive time-stepping without any additional matrix factorizations. Published results show up to 14× speedup over trapezoidal rule.
 
 **For nonlinear regions** (active devices): Use the standard BDF/Trap integration but with warm-started Newton iterations from the cached trajectory. The key insight from the Stanford dissertation (Deng): in a typical transient simulation, 80-95% of nodes are "idle" at any given timestep. Only the active nodes need re-evaluation.
 
-**Checkpoint-restart**: VOLTAIC periodically snapshots the full simulation state (solution vector, device states, matrix factors) to enable restarting from any timepoint. When a parameter changes, the simulator identifies the earliest affected timepoint and restarts from the previous checkpoint, rather than from t=0.
+**Checkpoint-restart**: BigOSpice periodically snapshots the full simulation state (solution vector, device states, matrix factors) to enable restarting from any timepoint. When a parameter changes, the simulator identifies the earliest affected timepoint and restarts from the previous checkpoint, rather than from t=0.
 
 ---
 
@@ -303,7 +303,7 @@ GPU DEVICE EVALUATION PIPELINE
    → Atomic adds for shared nodes (rare for well-partitioned circuits)
 ```
 
-**For BSIM4 specifically**: The model has ~300 parameters and significant branching (different equations for different operating regions). VOLTAIC handles this with:
+**For BSIM4 specifically**: The model has ~300 parameters and significant branching (different equations for different operating regions). BigOSpice handles this with:
 
 - **Region pre-sorting**: Before each Newton iteration, devices are bucketed by operating region (cutoff, linear, saturation, subthreshold). Each bucket launches a separate kernel with a region-specific code path, eliminating warp divergence.
 - **Parameter texture cache**: The ~300 model parameters per device type are stored in CUDA texture memory, which provides hardware-cached, coalesced access patterns.
@@ -311,7 +311,7 @@ GPU DEVICE EVALUATION PIPELINE
 
 ### 4.3 GPU Sparse LU Solver
 
-VOLTAIC implements a hybrid direct-iterative solver strategy:
+BigOSpice implements a hybrid direct-iterative solver strategy:
 
 **For circuits < 50K nodes**: Direct LU factorization using a GPU port of the SFLU (Synchronization-Free LU) algorithm:
 
@@ -336,7 +336,7 @@ VOLTAIC implements a hybrid direct-iterative solver strategy:
 
 ### 4.4 GPU Monte Carlo Batch Engine
 
-For statistical analysis (yield, mismatch, process variation), VOLTAIC runs thousands of independent circuit instances simultaneously on GPU:
+For statistical analysis (yield, mismatch, process variation), BigOSpice runs thousands of independent circuit instances simultaneously on GPU:
 
 ```
 BATCH MONTE CARLO PIPELINE
@@ -363,7 +363,7 @@ Following TinySPICE's approach but at production scale. For a medium-sized circu
 
 ### 5.1 The OpenVAF-Reloaded Pipeline
 
-VOLTAIC uses Bürmen's OpenVAF-Reloaded fork (OSDI v0.4) as the Verilog-A compiler. This provides:
+BigOSpice uses Bürmen's OpenVAF-Reloaded fork (OSDI v0.4) as the Verilog-A compiler. This provides:
 
 - **Symbolic differentiation**: Automatic Jacobian computation — no manual derivatives
 - **LLVM backend**: Compiles to native machine code (x86, ARM, RISC-V)
@@ -371,7 +371,7 @@ VOLTAIC uses Bürmen's OpenVAF-Reloaded fork (OSDI v0.4) as the Verilog-A compil
 - **Compilation speed**: PSP103 compiles in 3.5 seconds (vs 109s for ADMS)
 - **All CMC models supported**: BSIM3, BSIM4, BSIMBULK, BSIM-CMG, BSIM-IMG, PSP, HICUM, MEXTRAM, VBIC, JUNCAP, EKV
 
-**GPU model compilation extension**: VOLTAIC extends OpenVAF with a CUDA/HIP backend that compiles Verilog-A directly to GPU kernels. This is the key innovation over VACASK:
+**GPU model compilation extension**: BigOSpice extends OpenVAF with a CUDA/HIP backend that compiles Verilog-A directly to GPU kernels. This is the key innovation over VACASK:
 
 ```
 Verilog-A source (.va)
@@ -409,7 +409,7 @@ Following VACASK's pattern, some devices cannot be expressed in Verilog-A and ar
 
 ### 5.3 VADistiller Integration
 
-Bürmen's VADistiller tool converts legacy SPICE3 C-coded models to Verilog-A automatically. VOLTAIC includes this in its build pipeline so that legacy model cards from any SPICE variant can be imported:
+Bürmen's VADistiller tool converts legacy SPICE3 C-coded models to Verilog-A automatically. BigOSpice includes this in its build pipeline so that legacy model cards from any SPICE variant can be imported:
 
 ```bash
 voltaic import-model --format=spice3 --model=bsim4v4.8.3.c --output=bsim4.va
@@ -424,7 +424,7 @@ Each analysis engine is a self-contained module that uses the nonlinear solver c
 
 ### 6.1 DC Operating Point
 
-Standard Newton-Raphson with VOLTAIC enhancements:
+Standard Newton-Raphson with BigOSpice enhancements:
 
 - **Source stepping**: Ramp sources from 0 to final value for difficult convergence
 - **GMIN stepping**: Add/remove shunt conductances for numerical stability
@@ -434,7 +434,7 @@ Standard Newton-Raphson with VOLTAIC enhancements:
 
 ### 6.2 DC Sweep
 
-Multiple operating points with parameter variation. VOLTAIC's incremental engine makes this dramatically faster:
+Multiple operating points with parameter variation. BigOSpice's incremental engine makes this dramatically faster:
 
 - First point: full DC solve (cached)
 - Subsequent points: Woodbury update + 1-3 NR iterations
@@ -500,7 +500,7 @@ Time-domain approach to finding periodic solutions:
 
 ## 7. Netlist Compatibility Layer
 
-VOLTAIC reads all major netlist formats through a unified parser frontend:
+BigOSpice reads all major netlist formats through a unified parser frontend:
 
 ```
 Input Netlist (any format)
@@ -639,7 +639,7 @@ struct GPUDeviceArray {
 ### 8.3 The Newton-Raphson Loop (GPU-Accelerated)
 
 ```
-VOLTAIC NEWTON-RAPHSON ITERATION (one analysis step)
+BigOSpice NEWTON-RAPHSON ITERATION (one analysis step)
 
 Input: Previous solution x_k (from cache or initial guess)
 Output: Converged solution x_{k+1}
@@ -685,7 +685,7 @@ Output: Converged solution x_{k+1}
 
 ### 9.1 XSPICE-Compatible Code Model Interface
 
-VOLTAIC implements the XSPICE code model interface for:
+BigOSpice implements the XSPICE code model interface for:
 
 - Digital primitives (AND, OR, NAND, flip-flops, etc.)
 - A/D and D/A converters (automatic interface generation)
@@ -861,7 +861,7 @@ print(sens.ranking())  # Parameters sorted by impact
 
 ---
 
-## 14. Why VOLTAIC Wins
+## 14. Why BigOSpice Wins
 
 **Against NGSpice**: 10-30× faster on large circuits (GPU), 20× faster on parameter sweeps (incremental), modern C++20 codebase vs 30-year-old C, all features preserved.
 
@@ -873,4 +873,4 @@ print(sens.ranking())  # Parameters sorted by impact
 
 **Against PrimeSim/ALPS-GT (commercial)**: Open source, comparable GPU performance, incremental simulation (neither commercial tool has this), full transparency and extensibility.
 
-The combination of GPU acceleration + incremental simulation is VOLTAIC's unique moat. No simulator, open-source or commercial, has both. Together they enable workflows that are currently impossible: interactive circuit exploration with millisecond feedback, overnight yield analysis that currently takes weeks, and real-time what-if analysis during design reviews.
+The combination of GPU acceleration + incremental simulation is BigOSpice's unique moat. No simulator, open-source or commercial, has both. Together they enable workflows that are currently impossible: interactive circuit exploration with millisecond feedback, overnight yield analysis that currently takes weeks, and real-time what-if analysis during design reviews.

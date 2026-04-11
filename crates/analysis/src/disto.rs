@@ -24,10 +24,10 @@
 //! frequency, in keeping with the project requirement to reuse the AC matrix
 //! factorisation.
 
-use pisim_core::{AcStimulus, Circuit, SimError, SimOptions};
-use pisim_device::DeviceRegistry;
-use pisim_linalg::{DenseVec, LinSolver, LinSolverKind, TripletMatrix};
-use pisim_solver::{stamp_circuit_gc_into, NrConfig, Solver, SolverConfig};
+use bigospice_core::{AcStimulus, Circuit, SimError, SimOptions};
+use bigospice_device::DeviceRegistry;
+use bigospice_linalg::{DenseVec, LinSolver, LinSolverKind, TripletMatrix};
+use bigospice_solver::{stamp_circuit_gc_into, NrConfig, Solver, SolverConfig};
 
 /// Configuration for a `.DISTO` run.
 #[derive(Debug, Clone)]
@@ -257,7 +257,7 @@ fn node_row(circuit: &Circuit, name: &str, num_nodes: usize) -> Result<Option<us
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pisim_core::{Circuit, DeviceId, DeviceInstance, DeviceKind, NodeId};
+    use bigospice_core::{Circuit, DeviceId, DeviceInstance, DeviceKind, NodeId};
 
     fn rc_lowpass() -> Circuit {
         let mut ckt = Circuit::new();

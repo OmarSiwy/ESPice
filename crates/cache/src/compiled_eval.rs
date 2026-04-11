@@ -43,7 +43,7 @@
 //! this to a per-device-kind block layout.
 
 use bitvec::prelude::*;
-use pisim_core::DeviceId;
+use bigospice_core::DeviceId;
 
 /// Hard upper bound on rows of the cached affine model per device.
 /// Most analog devices use 2–4 terminals, so 4 is plenty.

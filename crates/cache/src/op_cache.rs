@@ -1,4 +1,4 @@
-use pisim_device::DeviceEval;
+use bigospice_device::DeviceEval;
 
 /// Level 3 cache: operating point solution and per-device evaluations.
 #[derive(Debug, Clone)]
