@@ -32,14 +32,55 @@
           ];
         };
 
-        # NOTE: VACASK SHA and hash are PLACEHOLDERS — fill them in before using .#full.
-        # GitHub mirror: https://github.com/robtaylor/VACASK
-        # To get the values:
-        #   SHA=$(curl -s https://api.github.com/repos/robtaylor/VACASK/commits/main \
-        #           | grep -m1 '"sha"' | cut -d'"' -f4)
-        #   nix-prefetch-url --unpack \
-        #     "https://github.com/robtaylor/VACASK/archive/${SHA}.tar.gz"
-        # Then replace rev and hash below.
+        # OpenVAF-reloaded: the Verilog-A compiler required by VACASK.
+        # Binary produced: openvaf-r (from the openvaf-driver crate).
+        # LLVM 18 is used (available in nixpkgs as llvm_18).
+        openvafPkg = pkgs.rustPlatform.buildRustPackage rec {
+          pname = "openvaf-r";
+          version = "unstable-2026";
+
+          src = pkgs.fetchFromGitHub {
+            owner = "arpadbuermen";
+            repo = "OpenVAF";
+            rev = "2e066436d985b05cf8e6563e936daf9ab875775a";
+            hash = "sha256-AXtp8qaDq/MRYz2TYXRwT3kS+8EnKyakD3lQwdv3K34=";
+          };
+
+          cargoLock = {
+            lockFile = ./nix/openvaf-Cargo.lock;
+            outputHashes = {
+              "salsa-0.17.0-pre.2" = "sha256-6GssvV76lFr5OzAUekz2h6f82Tn7usz5E8MSZ5DmgJw=";
+            };
+          };
+
+          buildAndTestSubdir = "openvaf/openvaf-driver";
+
+          buildFeatures = [ "llvm18" ];
+
+          nativeBuildInputs = with pkgs; [ pkg-config ];
+
+          buildInputs = with pkgs; [ llvm_18 libffi libxml2 zlib ];
+
+          env.LLVM_SYS_181_PREFIX = "${pkgs.llvm_18.dev}";
+          # Skip Windows UCRT import-lib generation in openvaf/target/build.rs
+          # (Linux builds don't need MSVC target stubs)
+          env.RUST_CHECK = "1";
+
+          doCheck = false;
+
+          # Only install the openvaf-r binary
+          postInstall = ''
+            find $out/bin -type f ! -name "openvaf-r" -delete 2>/dev/null || true
+          '';
+
+          meta = {
+            description = "OpenVAF-reloaded: Verilog-A compiler for VACASK";
+            homepage = "https://github.com/arpadbuermen/OpenVAF";
+            license = pkgs.lib.licenses.gpl3Only;
+            platforms = pkgs.lib.platforms.linux;
+          };
+        };
+
         vacaskPkg = pkgs.stdenv.mkDerivation rec {
           pname = "vacask";
           version = "unstable-2026";
@@ -54,15 +95,30 @@
           nativeBuildInputs = with pkgs; [
             cmake
             pkg-config
+            python3
+            bison
+            flex
           ];
 
           buildInputs = with pkgs; [
             suitesparse   # provides KLU
             openblas
+            boost
           ];
+
+          postPatch = ''
+            # Boost ≥1.87: boost_system is header-only — drop it from components.
+            # Also remove Boost_NO_SYSTEM_PATHS so nix-installed boost is found.
+            sed -i 's/set(Boost_NO_SYSTEM_PATHS TRUE)//' CMakeLists.txt
+            sed -i 's/find_package(Boost 1.88 REQUIRED COMPONENTS filesystem process system)/find_package(Boost REQUIRED COMPONENTS filesystem)/' CMakeLists.txt
+            sed -i '/Boost_EXTRA_LINK_DIR/d' CMakeLists.txt
+            # nixpkgs suitesparse puts klu.h directly in include/, not include/suitesparse/
+            sed -i 's|suitesparse/klu.h|klu.h|g' include/klumatrix.h
+          '';
 
           cmakeFlags = [
             "-DCMAKE_BUILD_TYPE=Release"
+            "-DOPENVAF_DIR=${openvafPkg}/bin"
           ];
 
           installPhase = ''
@@ -135,13 +191,7 @@
             # NOTE: pkgs.xyce-parallel may not be available in nixpkgs-unstable.
             # If evaluation fails, comment out the line below.
             # pkgs.xyce-parallel
-            # VACASK requires openvaf-r (OpenVAF-reloaded) to build from source.
-            # openvaf-r is not in nixpkgs. To enable:
-            #   Option A: Install pre-built binary from https://fides.fe.uni-lj.si/vacask/download/
-            #             and set SIM_OPENVAF=/path/to/openvaf-r in your shell.
-            #   Option B: Build openvaf-r from https://github.com/arpadbuermen/OpenVAF then
-            #             pass -DOPENVAF_DIR=/path/to/openvaf-r to cmake.
-            # vacaskPkg
+            vacaskPkg
           ];
 
           shellHook = ''
