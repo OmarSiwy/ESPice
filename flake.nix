@@ -47,8 +47,8 @@
           src = pkgs.fetchFromGitHub {
             owner = "robtaylor";
             repo = "VACASK";
-            rev = "PLACEHOLDER_SHA_REPLACE_ME";
-            hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+            rev = "bcd48e2dd25182f5aaa3392c4e27b4e198372744";
+            hash = "sha256-/x6yJ+fklipvYbtI5rHx4d5YIpC9IJ5uhHCtWC5eJJg=";
           };
 
           nativeBuildInputs = with pkgs; [
@@ -134,8 +134,14 @@
             pkgs.ngspice
             # NOTE: pkgs.xyce-parallel may not be available in nixpkgs-unstable.
             # If evaluation fails, comment out the line below.
-            pkgs.xyce-parallel
-            vacaskPkg
+            # pkgs.xyce-parallel
+            # VACASK requires openvaf-r (OpenVAF-reloaded) to build from source.
+            # openvaf-r is not in nixpkgs. To enable:
+            #   Option A: Install pre-built binary from https://fides.fe.uni-lj.si/vacask/download/
+            #             and set SIM_OPENVAF=/path/to/openvaf-r in your shell.
+            #   Option B: Build openvaf-r from https://github.com/arpadbuermen/OpenVAF then
+            #             pass -DOPENVAF_DIR=/path/to/openvaf-r to cmake.
+            # vacaskPkg
           ];
 
           shellHook = ''
