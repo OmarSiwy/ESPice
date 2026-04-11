@@ -32,20 +32,20 @@
           ];
         };
 
-        # NOTE: VACASK SHA and hash are PLACEHOLDERS.
-        # The Codeberg API was unreachable during plan execution (no network).
-        # To fix: run the following and replace the values below:
-        #   curl -s "https://codeberg.org/api/v1/repos/arpadbuermen/VACASK/branches/main" \
-        #     | grep -o '"sha":"[^"]*"' | head -1
+        # NOTE: VACASK SHA and hash are PLACEHOLDERS — fill them in before using .#full.
+        # GitHub mirror: https://github.com/robtaylor/VACASK
+        # To get the values:
+        #   SHA=$(curl -s https://api.github.com/repos/robtaylor/VACASK/commits/main \
+        #           | grep -m1 '"sha"' | cut -d'"' -f4)
         #   nix-prefetch-url --unpack \
-        #     "https://codeberg.org/arpadbuermen/VACASK/archive/<SHA>.tar.gz"
+        #     "https://github.com/robtaylor/VACASK/archive/${SHA}.tar.gz"
+        # Then replace rev and hash below.
         vacaskPkg = pkgs.stdenv.mkDerivation rec {
           pname = "vacask";
           version = "unstable-2026";
 
-          src = pkgs.fetchFromGitea {
-            domain = "codeberg.org";
-            owner = "arpadbuermen";
+          src = pkgs.fetchFromGitHub {
+            owner = "robtaylor";
             repo = "VACASK";
             rev = "PLACEHOLDER_SHA_REPLACE_ME";
             hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
@@ -75,7 +75,7 @@
 
           meta = {
             description = "VACASK – Verilog-A Circuit Analysis Kernel";
-            homepage = "https://codeberg.org/arpadbuermen/VACASK";
+            homepage = "https://github.com/robtaylor/VACASK";
             license = pkgs.lib.licenses.gpl2Plus;
             platforms = pkgs.lib.platforms.linux ++ pkgs.lib.platforms.darwin;
           };
