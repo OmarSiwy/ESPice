@@ -1,24 +1,24 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 //
 // OSDI ABI definitions follow the public OpenVAF OSDI spec; this file
-// contains no OpenVAF source code. PiSIM consumes the *output* of OpenVAF
+// contains no OpenVAF source code. BigOSpice consumes the *output* of OpenVAF
 // (compiled `.osdi` shared objects) via `dlopen`. The OSDI ABI itself is
 // not GPL — only the OpenVAF compiler is. We never link OpenVAF.
 //
 // Reference: https://openvaf.semimod.de/docs/osdi/
 
-//! # PiSIM OSDI Plugin Loader
+//! # BigOSpice OSDI Plugin Loader
 //!
 //! This crate loads compiled Verilog-A models produced by OpenVAF (`.osdi`
 //! shared objects) at runtime via `dlopen`/`libloading`, exposes their
 //! `OsdiDescriptor` table, instantiates devices, and bridges them into
-//! PiSIM's stamping layer.
+//! BigOSpice's stamping layer.
 //!
 //! ## Architecture
 //!
 //! ```text
 //! ┌──────────────┐    dlopen     ┌──────────────────┐
-//! │  pisim CLI   │──────────────▶│  bsim4.osdi (.so)│
+//! │  bigospice CLI   │──────────────▶│  bsim4.osdi (.so)│
 //! └──────┬───────┘   libloading  └────────┬─────────┘
 //!        │                                 │
 //!        │ register descriptor             │ OsdiDescriptor
@@ -41,8 +41,8 @@
 //! # 1. Compile the Verilog-A model with OpenVAF (separate, GPL-3 tool)
 //! openvaf bsim4.va -o bsim4.osdi
 //!
-//! # 2. Load it into PiSIM at runtime
-//! pisim --osdi bsim4.osdi circuit.sp
+//! # 2. Load it into BigOSpice at runtime
+//! bigospice --osdi bsim4.osdi circuit.sp
 //! ```
 //!
 //! ## Memory model (DOD)
@@ -55,19 +55,19 @@
 //!
 //! [`SoaBuffers`]: trampoline::SoaBuffers
 
-pub mod abi;
-pub mod loader;
-pub mod instance;
-pub mod trampoline;
-pub mod device_kind;
-pub mod registry;
+pub(crate) mod abi;
+pub(crate) mod loader;
+pub(crate) mod instance;
+pub(crate) mod trampoline;
+pub(crate) mod device_kind;
+pub(crate) mod registry;
 
 pub use abi::{
     OsdiDescriptor, OsdiInitInfo, OsdiNodePair, OsdiParamOpvar, OsdiSimInfo, OsdiSimParas,
     OSDI_VERSION_MAJOR, OSDI_VERSION_MINOR,
 };
 pub use device_kind::{OsdiDeviceKind, OsdiInstanceIdx};
-pub use instance::OsdiInstance;
+pub use instance::{OsdiHbEval, OsdiInstance};
 pub use loader::OsdiPlugin;
 pub use registry::OsdiRegistry;
 pub use trampoline::{OsdiTrampoline, SoaBuffers};

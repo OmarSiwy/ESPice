@@ -21,8 +21,8 @@
 //! ## Usage
 //!
 //! ```rust
-//! use pisim_utility::soa_define;
-//! use pisim_utility::soa::SoaVec;
+//! use bigospice_utility::soa_define;
+//! use bigospice_utility::soa::SoaVec;
 //!
 //! // Define your struct normally
 //! soa_define! {
@@ -260,8 +260,8 @@ macro_rules! soa_define {
 /// without aliasing. This is safe because each field is stored in a separate Vec.
 ///
 /// ```rust,ignore
-/// use pisim_utility::{soa_define, soa_fields_mut};
-/// use pisim_utility::soa::SoaVec;
+/// use bigospice_utility::{soa_define, soa_fields_mut};
+/// use bigospice_utility::soa::SoaVec;
 ///
 /// soa_define! {
 ///     pub struct Pos {

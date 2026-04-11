@@ -24,7 +24,7 @@
 //! ## Usage with SoaVec
 //!
 //! ```rust,no_run
-//! use pisim_utility::simd;
+//! use bigospice_utility::simd;
 //!
 //! // After extracting field slices from your SoaVec:
 //! // let positions_x = particles.x_mut();

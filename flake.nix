@@ -23,7 +23,7 @@
         overlays = [ (import rust-overlay) ];
         pkgs = import nixpkgs { inherit system overlays; };
 
-        rustNightly = pkgs.rust-bin.nightly.latest.default.override {
+        rustStable = pkgs.rust-bin.stable.latest.default.override {
           extensions = [
             "rust-src"
             "rust-analyzer"
@@ -53,6 +53,18 @@
             };
           };
 
+          # Patch build scripts to skip Windows-only steps on Linux hosts.
+          # RUST_CHECK was used previously for this but it also skips osdi stdlib.c bitcode
+          # generation, producing a broken binary. Instead patch each build.rs individually.
+          postPatch = ''
+            # target/build.rs: skip MSVC ucrt import-lib on non-Windows host
+            sed -i 's/if check {/if check || !cfg!(target_os = "windows") {/g' \
+              openvaf/target/build.rs
+            # osdi/build.rs: skip generating bitcode for MSVC targets on non-Windows host
+            sed -i 's/if no_gen {/if no_gen || (target.options.is_like_windows \&\& !cfg!(target_os = "windows")) {/' \
+              openvaf/osdi/build.rs
+          '';
+
           buildAndTestSubdir = "openvaf/openvaf-driver";
 
           buildFeatures = [ "llvm18" ];
@@ -61,10 +73,13 @@
 
           buildInputs = with pkgs; [ llvm_18 libffi libxml2 zlib ];
 
-          env.LLVM_SYS_181_PREFIX = "${pkgs.llvm_18.dev}";
-          # Skip Windows UCRT import-lib generation in openvaf/target/build.rs
-          # (Linux builds don't need MSVC target stubs)
-          env.RUST_CHECK = "1";
+          # symlinkJoin provides both llvm-config (for llvm-sys) AND unwrapped clang
+          # (for osdi/build.rs stdlib.c → bitcode cross-compilation).
+          # The wrapped clang adds x86_64-specific Nix flags that break -target riscv64 etc.
+          env.LLVM_SYS_181_PREFIX = "${pkgs.symlinkJoin {
+            name = "llvm18-prefix";
+            paths = [ pkgs.llvm_18.dev pkgs.llvmPackages_18.clang-unwrapped ];
+          }}";
 
           doCheck = false;
 
@@ -94,6 +109,7 @@
 
           nativeBuildInputs = with pkgs; [
             cmake
+            ninja
             pkg-config
             python3
             bison
@@ -104,14 +120,19 @@
             suitesparse   # provides KLU
             openblas
             boost
+            tomlplusplus
           ];
 
           postPatch = ''
-            # Boost ≥1.87: boost_system is header-only — drop it from components.
-            # Also remove Boost_NO_SYSTEM_PATHS so nix-installed boost is found.
+            # Remove Boost_NO_SYSTEM_PATHS so nix-installed boost is found.
             sed -i 's/set(Boost_NO_SYSTEM_PATHS TRUE)//' CMakeLists.txt
-            sed -i 's/find_package(Boost 1.88 REQUIRED COMPONENTS filesystem process system)/find_package(Boost REQUIRED COMPONENTS filesystem)/' CMakeLists.txt
-            sed -i '/Boost_EXTRA_LINK_DIR/d' CMakeLists.txt
+            # Remove version req (nixpkgs has 1.89) and drop 'system' component
+            # (boost_system is header-only in boost ≥1.87, no libboost_system.so).
+            sed -i 's/find_package(Boost 1.88 REQUIRED COMPONENTS filesystem process system)/find_package(Boost REQUIRED COMPONENTS filesystem process)/' CMakeLists.txt
+            # Fix Boost extra link dir: cmake-found lib dir instead of manual build stage path.
+            sed -i 's|set(Boost_EXTRA_LINK_DIR "''${Boost_INCLUDE_DIRS}/stage/lib")|set(Boost_EXTRA_LINK_DIR "''${Boost_LIBRARY_DIRS}")|' CMakeLists.txt
+            # Remove boost_system from link libs (header-only, no .so).
+            sed -i 's/boost_system boost_filesystem boost_process/boost_filesystem boost_process/' CMakeLists.txt
             # nixpkgs suitesparse puts klu.h directly in include/, not include/suitesparse/
             sed -i 's|suitesparse/klu.h|klu.h|g' include/klumatrix.h
           '';
@@ -119,13 +140,15 @@
           cmakeFlags = [
             "-DCMAKE_BUILD_TYPE=Release"
             "-DOPENVAF_DIR=${openvafPkg}/bin"
+            "-DTOMLPP_DIR=${pkgs.tomlplusplus}"
+            "-DSuiteSparse_DIR=${pkgs.suitesparse}"
           ];
 
           installPhase = ''
             runHook preInstall
             mkdir -p $out/bin
-            # VACASK produces a 'vacask' binary in the build directory
-            cp vacask $out/bin/vacask
+            # The simulator binary is built into the simulator/ subdirectory.
+            cp simulator/vacask $out/bin/vacask
             runHook postInstall
           '';
 
@@ -138,12 +161,12 @@
         };
 
         commonInputs = with pkgs; [
-          rustNightly
+          rustStable
           pkg-config
           openssl
 
           # Linker
-          mold-wrapped
+          mold
           clang
 
           # Linear algebra
@@ -177,7 +200,7 @@
           shellHook = ''
             export RUST_BACKTRACE=1
             export RUST_LOG=bigospice=debug
-            echo "BigOSpice dev shell — nightly Rust $(rustc --version) + mold linker"
+            echo "BigOSpice dev shell — stable Rust $(rustc --version) + mold linker"
             echo "Tip: use 'nix develop .#full' to get ngspice, xyce, and VACASK"
           '';
 
@@ -198,9 +221,8 @@
             export RUST_BACKTRACE=1
             export RUST_LOG=bigospice=debug
             export BIGOSPICE_HAVE_SIMS=1
-            echo "BigOSpice FULL dev shell — nightly Rust $(rustc --version)"
+            echo "BigOSpice FULL dev shell — stable Rust $(rustc --version)"
             echo "Simulators: ngspice $(ngspice --version 2>&1 | head -1)"
-            echo "            xyce    $(xyce --version 2>&1 | head -1)"
             echo "            vacask  $(vacask --version 2>&1 | head -1 || echo 'available')"
           '';
 
@@ -216,7 +238,7 @@
           nativeBuildInputs = with pkgs; [
             pkg-config
             cmake
-            mold-wrapped
+            mold
             clang
           ];
           buildInputs = with pkgs; [

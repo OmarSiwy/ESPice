@@ -28,7 +28,7 @@
 //! ## Usage
 //!
 //! ```rust
-//! use pisim_utility::Arena;
+//! use bigospice_utility::Arena;
 //!
 //! let mut arena = Arena::new(4096); // 4KB initial block
 //!

@@ -15,7 +15,7 @@
 //! ## Usage
 //!
 //! ```rust
-//! use pisim_utility::BitSet;
+//! use bigospice_utility::BitSet;
 //!
 //! let mut alive = BitSet::new();
 //! alive.insert(0);

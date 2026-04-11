@@ -25,7 +25,7 @@
 //! ## Usage
 //!
 //! ```rust
-//! use pisim_utility::{Pool, Handle};
+//! use bigospice_utility::{Pool, Handle};
 //!
 //! let mut pool: Pool<String> = Pool::new();
 //!

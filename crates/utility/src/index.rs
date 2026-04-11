@@ -16,7 +16,7 @@
 //! ## The solution
 //!
 //! ```rust
-//! use pisim_utility::typed_index;
+//! use bigospice_utility::typed_index;
 //!
 //! typed_index!(EntityIdx);
 //! typed_index!(MeshIdx);
@@ -195,7 +195,7 @@ macro_rules! typed_index {
 /// Prevents mixing up different index types at compile time.
 ///
 /// ```rust
-/// use pisim_utility::{typed_index, index::IndexVec};
+/// use bigospice_utility::{typed_index, index::IndexVec};
 ///
 /// typed_index!(pub EntityIdx);
 /// typed_index!(pub MeshIdx);

@@ -1,6 +1,6 @@
-//! `pisim-digital` — Native XSPICE-class digital event engine.
+//! `bigospice-digital` — Native XSPICE-class digital event engine.
 //!
-//! This crate implements Phase 4.1 of the PiSIM mixed-signal plan: a
+//! This crate implements Phase 4.1 of the BigOSpice mixed-signal plan: a
 //! data-oriented event-driven simulator for digital logic that interoperates
 //! with the analog Newton-Raphson transient solver via `adc_bridge` /
 //! `dac_bridge` elements (XSPICE-compatible `A` element syntax).
@@ -45,12 +45,12 @@
 //!
 //! See `tests/schmitt_counter_dac.rs` for an end-to-end integration example.
 
-pub mod state;
-pub mod event_queue;
-pub mod primitives;
-pub mod bridges;
-pub mod element;
-pub mod transient_hook;
+pub(crate) mod state;
+pub(crate) mod event_queue;
+pub(crate) mod primitives;
+pub(crate) mod bridges;
+pub(crate) mod element;
+pub(crate) mod transient_hook;
 
 pub use state::{DigState, Strength};
 pub use event_queue::{DigNodeIdx, Event, EventIdx, EventQueue};

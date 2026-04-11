@@ -6,7 +6,7 @@
 //! # `OsdiPlugin` — `dlopen`-based loader for `.osdi` shared objects.
 //!
 //! `OsdiPlugin::open(path)` does the bare minimum needed to make a model
-//! callable from PiSIM:
+//! callable from BigOSpice:
 //!
 //! 1. `dlopen` the file via [`libloading::Library::new`].
 //! 2. Resolve `OSDI_VERSION_MAJOR`/`MINOR`, validate against
@@ -23,7 +23,6 @@
 
 use core::ffi::CStr;
 use core::ptr::NonNull;
-use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -232,21 +231,6 @@ fn cstr_to_static(bytes: &[u8]) -> &'static str {
     unsafe { core::str::from_utf8_unchecked(core::mem::transmute::<&[u8], &'static [u8]>(no_nul)) }
 }
 
-/// Convenience: load every `.osdi` file in a directory.
-pub fn load_directory(dir: impl AsRef<OsStr>) -> std::io::Result<Vec<OsdiPlugin>> {
-    let dir_path = Path::new(dir.as_ref());
-    let mut plugins = Vec::new();
-    for entry in std::fs::read_dir(dir_path)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("osdi") {
-            if let Ok(plugin) = OsdiPlugin::open(&path) {
-                plugins.push(plugin);
-            }
-        }
-    }
-    Ok(plugins)
-}
 
 #[cfg(test)]
 mod tests {
