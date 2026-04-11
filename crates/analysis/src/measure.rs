@@ -3,7 +3,7 @@
 /// Evaluates named measurements over transient, AC, and DC sweep results after
 /// a simulation run completes.  All reductions use trapezoidal integration to
 /// match ngspice behaviour.
-use pisim_core::SimError;
+use bigospice_core::SimError;
 
 use crate::result::{AcResult, DcSweepResult, ResultData, TransientResult};
 
@@ -1267,6 +1267,263 @@ pub fn parse_spice_value(s: &str) -> Result<f64, SimError> {
         _ => 1.0,
     };
     Ok(base * mult)
+}
+
+// ---------------------------------------------------------------------------
+// HSPICE .EXTRACT evaluator (W.5)
+// ---------------------------------------------------------------------------
+
+/// Parse an HSPICE signal descriptor: `v(out)`, `i(r1)`, `v(a,b)`,
+/// `vm(out)`, `vdb(out)`, `vr(out)`, `vi(out)`, `vp(out)`.
+fn parse_hspice_signal(s: &str) -> Option<Signal> {
+    let s = s.trim();
+    let paren = s.find('(')?;
+    let func = s[..paren].trim().to_lowercase();
+    let close = s.rfind(')')?;
+    let inner = s[paren + 1..close].trim();
+    match func.as_str() {
+        "v" => {
+            if let Some(comma) = inner.find(',') {
+                Some(Signal::VDiff(
+                    inner[..comma].trim().to_string(),
+                    inner[comma + 1..].trim().to_string(),
+                ))
+            } else {
+                Some(Signal::V(inner.to_string()))
+            }
+        }
+        "i" => Some(Signal::I(inner.to_string())),
+        "vm" => Some(Signal::VAc(inner.to_string(), AcQuantity::Magnitude)),
+        "vdb" => Some(Signal::VAc(inner.to_string(), AcQuantity::Db)),
+        "vr" => Some(Signal::VAc(inner.to_string(), AcQuantity::Real)),
+        "vi" => Some(Signal::VAc(inner.to_string(), AcQuantity::Imag)),
+        "vp" => Some(Signal::VAc(inner.to_string(), AcQuantity::Phase)),
+        _ => None,
+    }
+}
+
+/// Resolve a signal to a value vector for any `ResultData` variant.
+fn resolve_for_data(
+    sig: &Signal,
+    data: &ResultData,
+    node_names: &[String],
+) -> Result<Vec<f64>, SimError> {
+    match data {
+        ResultData::Transient(r) => resolve_tran(sig, r, node_names),
+        ResultData::Ac(r) => resolve_ac(sig, r, node_names),
+        ResultData::DcSweep(r) => resolve_dc(sig, r, node_names),
+        ResultData::DcOp(_) => Err(SimError::Analysis(
+            ".EXTRACT signal resolution not supported for DC-op results".into(),
+        )),
+    }
+}
+
+/// Return the x-axis slice (time / frequency / sweep value) from `data`.
+fn result_xaxis(data: &ResultData) -> Result<&[f64], SimError> {
+    match data {
+        ResultData::Transient(r) => Ok(&r.times),
+        ResultData::Ac(r) => Ok(&r.frequencies),
+        ResultData::DcSweep(r) => Ok(&r.sweep_values),
+        ResultData::DcOp(_) => Err(SimError::Analysis(
+            ".EXTRACT x-axis not available for DC-op results".into(),
+        )),
+    }
+}
+
+/// X-axis value at the sample where `values` reaches its maximum.
+fn x_at_ymax(xs: &[f64], values: &[f64]) -> Result<f64, SimError> {
+    values
+        .iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(i, _)| xs[i])
+        .ok_or_else(|| SimError::Analysis("xmax: empty waveform".into()))
+}
+
+/// X-axis value at the sample where `values` reaches its minimum.
+fn x_at_ymin(xs: &[f64], values: &[f64]) -> Result<f64, SimError> {
+    values
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(i, _)| xs[i])
+        .ok_or_else(|| SimError::Analysis("xmin: empty waveform".into()))
+}
+
+/// Split a comma-separated argument string while respecting nested parentheses.
+fn split_args(s: &str) -> Vec<&str> {
+    let mut depth = 0usize;
+    let mut start = 0;
+    let mut parts = Vec::new();
+    for (i, c) in s.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                parts.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&s[start..]);
+    parts
+}
+
+/// Evaluate a `par('expr')` arithmetic expression using prior label values.
+///
+/// Tokenizes `inner` with the bigospice-parser lexer and evaluates with named
+/// parameters bound to the prior labels.
+fn eval_par_expr(inner: &str, prior: &[(&str, f64)]) -> Result<f64, SimError> {
+    use bigospice_parser::{Lexer, eval_expression, parse_expression};
+    let tokens = Lexer::new(inner)
+        .tokenize_all()
+        .map_err(|e| SimError::Analysis(format!("par() lex error: {e}")))?;
+    let params: ahash::AHashMap<String, f64> = prior
+        .iter()
+        .map(|(k, v)| ((*k).to_string(), *v))
+        .collect();
+    let expr = parse_expression(&tokens)
+        .map_err(|e| SimError::Analysis(format!("par() parse error: {e}")))?;
+    eval_expression(&expr, &params)
+        .map_err(|e| SimError::Analysis(format!("par() eval error: {e}")))
+}
+
+/// Evaluate a single HSPICE `.EXTRACT` expression string against `data`.
+///
+/// `prior` holds `(label, value)` pairs from specs evaluated earlier in the
+/// same `.EXTRACT` block; they are available as named variables in `par()`.
+fn eval_extract_expr(
+    expr: &str,
+    data: &ResultData,
+    node_names: &[String],
+    prior: &[(&str, f64)],
+) -> Result<f64, SimError> {
+    let expr = expr.trim();
+
+    let paren = match expr.find('(') {
+        Some(p) => p,
+        None => {
+            return expr
+                .parse::<f64>()
+                .map_err(|_| SimError::Analysis(format!("unknown .EXTRACT expr: {expr}")));
+        }
+    };
+    let func = expr[..paren].trim().to_lowercase();
+    let close = expr.rfind(')').ok_or_else(|| {
+        SimError::Analysis(format!("unmatched '(' in .EXTRACT expr: {expr}"))
+    })?;
+    let args_str = &expr[paren + 1..close];
+    let args = split_args(args_str);
+
+    match func.as_str() {
+        "ymax" => {
+            let sig = parse_hspice_signal(args[0]).ok_or_else(|| {
+                SimError::Analysis(format!("ymax: bad signal '{}'", args[0]))
+            })?;
+            let values = resolve_for_data(&sig, data, node_names)?;
+            max_in(&values)
+        }
+        "ymin" => {
+            let sig = parse_hspice_signal(args[0]).ok_or_else(|| {
+                SimError::Analysis(format!("ymin: bad signal '{}'", args[0]))
+            })?;
+            let values = resolve_for_data(&sig, data, node_names)?;
+            min_in(&values)
+        }
+        "xmax" => {
+            let sig = parse_hspice_signal(args[0]).ok_or_else(|| {
+                SimError::Analysis(format!("xmax: bad signal '{}'", args[0]))
+            })?;
+            let xs = result_xaxis(data)?;
+            let values = resolve_for_data(&sig, data, node_names)?;
+            x_at_ymax(xs, &values)
+        }
+        "xmin" => {
+            let sig = parse_hspice_signal(args[0]).ok_or_else(|| {
+                SimError::Analysis(format!("xmin: bad signal '{}'", args[0]))
+            })?;
+            let xs = result_xaxis(data)?;
+            let values = resolve_for_data(&sig, data, node_names)?;
+            x_at_ymin(xs, &values)
+        }
+        "avgy" => {
+            let sig = parse_hspice_signal(args[0]).ok_or_else(|| {
+                SimError::Analysis(format!("avgy: bad signal '{}'", args[0]))
+            })?;
+            let xs = result_xaxis(data)?;
+            let values = resolve_for_data(&sig, data, node_names)?;
+            let from = args.get(1).and_then(|s| s.trim().parse::<f64>().ok());
+            let to = args.get(2).and_then(|s| s.trim().parse::<f64>().ok());
+            let (xw, yw) = window_slice(xs, &values, from, to);
+            avg_trapz(&xw, &yw)
+        }
+        "avgx" => {
+            // avgx(signal, threshold) — average x-position of threshold crossings.
+            let sig = parse_hspice_signal(args[0]).ok_or_else(|| {
+                SimError::Analysis(format!("avgx: bad signal '{}'", args[0]))
+            })?;
+            let xs = result_xaxis(data)?;
+            let values = resolve_for_data(&sig, data, node_names)?;
+            let threshold = args
+                .get(1)
+                .and_then(|s| s.trim().parse::<f64>().ok())
+                .unwrap_or(0.0);
+            let mut sum = 0.0_f64;
+            let mut count = 0u32;
+            for i in 1..values.len() {
+                if (values[i - 1] < threshold) != (values[i] < threshold) {
+                    let dv = values[i] - values[i - 1];
+                    let frac = if dv.abs() < f64::EPSILON { 0.0 } else { (threshold - values[i - 1]) / dv };
+                    sum += xs[i - 1] + frac * (xs[i] - xs[i - 1]);
+                    count += 1;
+                }
+            }
+            if count == 0 {
+                Err(SimError::Analysis("avgx: no crossings found".into()))
+            } else {
+                Ok(sum / f64::from(count))
+            }
+        }
+        "par" => {
+            // par('expr') — arithmetic over prior labels.
+            let inner = args_str.trim().trim_matches('\'').trim_matches('"');
+            eval_par_expr(inner, prior)
+        }
+        _ => Err(SimError::Analysis(format!(
+            "unknown .EXTRACT function '{func}'"
+        ))),
+    }
+}
+
+/// Evaluate all `.EXTRACT` specs from a parsed netlist against a simulation
+/// result, returning `(label, value)` pairs in declaration order.
+///
+/// Labels from earlier specs are available as named variables in `par()` for
+/// later specs.
+///
+/// # Example
+/// ```text
+/// .EXTRACT TRAN vmax=ymax(v(out)) vmin=ymin(v(out)) swing=par('vmax-vmin')
+/// ```
+pub fn evaluate_extract_specs(
+    specs: &[bigospice_parser::ExtractSpec],
+    data: &ResultData,
+    node_names: &[String],
+) -> Vec<(String, Result<f64, SimError>)> {
+    let mut prior: Vec<(String, f64)> = Vec::new();
+    specs
+        .iter()
+        .map(|spec| {
+            let prior_refs: Vec<(&str, f64)> =
+                prior.iter().map(|(s, v)| (s.as_str(), *v)).collect();
+            let val = eval_extract_expr(&spec.expr, data, node_names, &prior_refs);
+            if let Ok(v) = val {
+                prior.push((spec.label.clone(), v));
+            }
+            (spec.label.clone(), val)
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------

@@ -287,19 +287,36 @@ impl Expression {
     }
 
     /// Collect the names of all `NodeVoltage(name)` leaves in this expression.
+    ///
+    /// Uses a temporary `HashSet` to deduplicate in O(1) per node rather than
+    /// O(n) `Vec::contains` scans.
     pub fn collect_node_refs(&self, out: &mut Vec<String>) {
+        use std::collections::HashSet;
+        // Collect existing entries into an owned set so the immutable borrow
+        // of `out` ends before we pass `out` mutably to the inner traversal.
+        let mut seen: HashSet<String> = out.iter().cloned().collect();
+        self.collect_node_refs_inner(out, &mut seen);
+    }
+
+    fn collect_node_refs_inner(
+        &self,
+        out: &mut Vec<String>,
+        seen: &mut std::collections::HashSet<String>,
+    ) {
         match self {
             Expression::NodeVoltage(n) => {
-                if !out.contains(n) {
+                if seen.insert(n.clone()) {
                     out.push(n.clone());
                 }
             }
             Expression::BinOp(_, l, r) => {
-                l.collect_node_refs(out);
-                r.collect_node_refs(out);
+                l.collect_node_refs_inner(out, seen);
+                r.collect_node_refs_inner(out, seen);
             }
-            Expression::UnaryMinus(inner) => inner.collect_node_refs(out),
-            Expression::Func(_, args) => args.iter().for_each(|a| a.collect_node_refs(out)),
+            Expression::UnaryMinus(inner) => inner.collect_node_refs_inner(out, seen),
+            Expression::Func(_, args) => {
+                args.iter().for_each(|a| a.collect_node_refs_inner(out, seen));
+            }
             _ => {}
         }
     }
@@ -587,13 +604,13 @@ pub enum PrintFormat {
 impl PrintFormat {
     /// Parse from the string after `FORMAT=` (case-insensitive).
     pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_ascii_uppercase().as_str() {
-            "CSV" => Some(PrintFormat::Csv),
-            "GNUPLOT" => Some(PrintFormat::Gnuplot),
-            "RAW" => Some(PrintFormat::Raw),
-            "PROBE" => Some(PrintFormat::Probe),
-            "TECPLOT" => Some(PrintFormat::Tecplot),
-            _ => None,
+        match s {
+            "csv"     => Some(PrintFormat::Csv),
+            "gnuplot" => Some(PrintFormat::Gnuplot),
+            "raw"     => Some(PrintFormat::Raw),
+            "probe"   => Some(PrintFormat::Probe),
+            "tecplot" => Some(PrintFormat::Tecplot),
+            _         => None,
         }
     }
 }
