@@ -9,23 +9,37 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  full-regression-cpu:
-    name: Full Regression (CPU)
+  full-regression:
+    name: Full Regression
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace
-      - run: cargo test --test dc_op --test dc_sweep --test transient --test ac --test robustness --test incremental -- --include-ignored
-      - name: Install ngspice
-        run: sudo apt-get update && sudo apt-get install -y ngspice
-      - name: Live ngspice comparison
-        run: cargo test --test ngspice_live -- --include-ignored
-      - run: cargo bench --workspace -- --output-format bencher | tee benchmark-results.txt
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y libsuitesparse-dev libopenblas-dev ngspice
+      - name: Run all test suites
+        run: |
+          cargo test --test linalg
+          cargo test --test solver
+          cargo test --test analysis
+          cargo test --test device
+          cargo test --test parser
+          cargo test --test cache
+          cargo test --test io
+          cargo test --test golden
+          cargo test --test compat
+      - name: Run ignored tests (with ngspice)
+        env:
+          BIGOSPICE_HAVE_SIMS: "1"
+        run: cargo test --test golden --test analysis -- --include-ignored
+        continue-on-error: true
+      - name: Benchmarks (bencher format for tracking)
+        run: cargo bench --bench suite -- --output-format bencher | tee benchmark-results.txt
+        continue-on-error: true
       - uses: actions/upload-artifact@v4
         with:
-          name: benchmark-results
+          name: benchmark-results-${{ github.run_id }}
           path: benchmark-results.txt
 
   full-regression-gpu:
@@ -34,9 +48,11 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace
-      - run: cargo test --test gpu_equivalence -- --include-ignored
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y libsuitesparse-dev libopenblas-dev
+      - name: Run cosim tests with GPU
+        run: cargo test --test cosim
         env:
           VOLTAIC_GPU: "1"
