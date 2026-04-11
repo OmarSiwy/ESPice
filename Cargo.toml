@@ -1,5 +1,5 @@
 [package]
-name = "pisim"
+name = "bigospice"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -18,11 +18,9 @@ members = [
     "crates/parser",
     "crates/utility",
     "crates/io",
-    "crates/test-harness",
     "crates/osdi",
     "crates/digital",
     "crates/cosim",
-    "crates/bench-suite",
 ]
 
 [workspace.package]
@@ -33,21 +31,19 @@ rust-version = "1.85.0"
 
 [workspace.dependencies]
 # Internal crates
-pisim-core = { path = "crates/core" }
-pisim-compute = { path = "crates/compute" }
-pisim-device = { path = "crates/device" }
-pisim-linalg = { path = "crates/linalg" }
-pisim-solver = { path = "crates/solver" }
-pisim-cache = { path = "crates/cache" }
-pisim-analysis = { path = "crates/analysis" }
-pisim-parser = { path = "crates/parser" }
-pisim-utility = { path = "crates/utility" }
-pisim-io = { path = "crates/io" }
-pisim-test-harness = { path = "crates/test-harness" }
-pisim-osdi = { path = "crates/osdi" }
-pisim-digital = { path = "crates/digital" }
-pisim-cosim = { path = "crates/cosim" }
-pisim-bench-suite = { path = "crates/bench-suite" }
+bigospice-core = { path = "crates/core" }
+bigospice-compute = { path = "crates/compute" }
+bigospice-device = { path = "crates/device" }
+bigospice-linalg = { path = "crates/linalg" }
+bigospice-solver = { path = "crates/solver" }
+bigospice-cache = { path = "crates/cache" }
+bigospice-analysis = { path = "crates/analysis" }
+bigospice-parser = { path = "crates/parser" }
+bigospice-utility = { path = "crates/utility" }
+bigospice-io = { path = "crates/io" }
+bigospice-osdi = { path = "crates/osdi" }
+bigospice-digital = { path = "crates/digital" }
+bigospice-cosim = { path = "crates/cosim" }
 
 # External
 ahash = { version = "0.8", features = ["serde"] }
@@ -67,6 +63,7 @@ glob = "0.3"
 serde_json = "1"
 clap = { version = "4", features = ["derive"] }
 criterion = { version = "0.5", features = ["html_reports"] }
+phf = { version = "0.11", features = ["macros"] }
 
 [profile.release]
 opt-level = 3
@@ -80,243 +77,73 @@ inherits = "release"
 debug = true
 
 [dev-dependencies]
-pisim-test-harness = { path = "crates/test-harness" }
-pisim-core = { path = "crates/core" }
-pisim-parser = { path = "crates/parser" }
-pisim-device = { path = "crates/device" }
-pisim-solver = { path = "crates/solver" }
-pisim-analysis = { path = "crates/analysis" }
-pisim-cache = { path = "crates/cache" }
-pisim-compute = { path = "crates/compute" }
-pisim-linalg = { path = "crates/linalg" }
-pisim-cosim = { path = "crates/cosim" }
-pisim-digital = { path = "crates/digital" }
-pisim-osdi = { path = "crates/osdi" }
+bigospice-core = { path = "crates/core" }
+bigospice-parser = { path = "crates/parser" }
+bigospice-device = { path = "crates/device" }
+bigospice-solver = { path = "crates/solver" }
+bigospice-analysis = { path = "crates/analysis" }
+bigospice-cache = { path = "crates/cache" }
+bigospice-compute = { path = "crates/compute" }
+bigospice-linalg = { path = "crates/linalg" }
+bigospice-cosim = { path = "crates/cosim" }
+bigospice-digital = { path = "crates/digital" }
+bigospice-osdi = { path = "crates/osdi" }
+bigospice-io = { path = "crates/io" }
 criterion = { workspace = true }
 tempfile = { workspace = true }
 libloading = "0.8"
+csv = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+glob = { workspace = true }
+toml = { workspace = true }
 
 [[bench]]
-name = "sparse_lu"
+name = "suite"
+path = "benches/suite.rs"
 harness = false
 
-[[bench]]
-name = "newton_raphson"
-harness = false
-
-[[bench]]
-name = "device_eval"
-harness = false
-
-[[bench]]
-name = "end_to_end"
-harness = false
-
-# Integration tests (in tests/integration/ subdirectory)
 [[test]]
-name = "dc_op"
-path = "tests/integration/dc_op.rs"
+name = "linalg"
+path = "tests/suite/linalg.rs"
 
 [[test]]
-name = "dc_sweep"
-path = "tests/integration/dc_sweep.rs"
+name = "solver"
+path = "tests/suite/solver.rs"
 
 [[test]]
-name = "transient"
-path = "tests/integration/transient.rs"
+name = "device"
+path = "tests/suite/device.rs"
 
 [[test]]
-name = "ac"
-path = "tests/integration/ac.rs"
+name = "analysis"
+path = "tests/suite/analysis.rs"
 
 [[test]]
-name = "noise"
-path = "tests/integration/noise.rs"
+name = "parser"
+path = "tests/suite/parser.rs"
 
 [[test]]
-name = "harmonic_balance"
-path = "tests/integration/harmonic_balance.rs"
+name = "cache"
+path = "tests/suite/cache.rs"
 
 [[test]]
-name = "sensitivity"
-path = "tests/integration/sensitivity.rs"
+name = "io"
+path = "tests/suite/io.rs"
 
 [[test]]
-name = "measure"
-path = "tests/integration/measure.rs"
+name = "cosim"
+path = "tests/suite/cosim.rs"
 
 [[test]]
-name = "incremental"
-path = "tests/integration/incremental.rs"
+name = "osdi"
+path = "tests/suite/osdi.rs"
 
 [[test]]
-name = "gpu_equivalence"
-path = "tests/integration/gpu_equivalence.rs"
+name = "golden"
+path = "tests/suite/golden.rs"
 
 [[test]]
-name = "gpu_dispatch"
-path = "tests/integration/gpu_dispatch.rs"
-
-[[test]]
-name = "gpu_monte_carlo"
-path = "tests/integration/gpu_monte_carlo.rs"
-
-[[test]]
-name = "robustness"
-path = "tests/integration/robustness.rs"
-
-[[test]]
-name = "compatibility"
-path = "tests/integration/compatibility.rs"
-
-[[test]]
-name = "ngspice_golden"
-path = "tests/integration/ngspice_golden.rs"
-
-[[test]]
-name = "ngspice_live"
-path = "tests/integration/ngspice_live.rs"
-
-[[test]]
-name = "ngspice_bench"
-path = "tests/integration/ngspice_bench.rs"
-
-[[test]]
-name = "ngspice_accuracy"
-path = "tests/integration/ngspice_accuracy.rs"
-
-[[test]]
-name = "bsource"
-path = "tests/integration/bsource.rs"
-
-[[test]]
-name = "options"
-path = "tests/integration/options.rs"
-
-[[test]]
-name = "diode_extended"
-path = "tests/integration/diode_extended.rs"
-
-[[test]]
-name = "vbic_and_k"
-path = "tests/integration/vbic_and_k.rs"
-
-[[test]]
-name = "tline"
-path = "tests/integration/tline.rs"
-
-[[test]]
-name = "fourier"
-path = "tests/integration/fourier.rs"
-
-[[test]]
-name = "disto_fft"
-path = "tests/integration/disto_fft.rs"
-
-[[test]]
-name = "vbic_avalanche"
-path = "tests/integration/vbic_avalanche.rs"
-
-[[test]]
-name = "jfet_l2"
-path = "tests/integration/jfet_l2.rs"
-
-[[test]]
-name = "ltra"
-path = "tests/integration/ltra.rs"
-
-[[test]]
-name = "laplace"
-path = "tests/integration/laplace.rs"
-
-[[test]]
-name = "bjt_gummel_poon_golden"
-path = "tests/integration/bjt_gummel_poon_golden.rs"
-
-[[test]]
-name = "sweep"
-path = "tests/integration/sweep.rs"
-
-[[test]]
-name = "parser_extensions"
-path = "tests/integration/parser_extensions.rs"
-
-[[test]]
-name = "temperature_golden"
-path = "tests/integration/temperature_golden.rs"
-
-[[test]]
-name = "solver_robustness"
-path = "tests/integration/solver_robustness.rs"
-
-[[test]]
-name = "bsim3_golden"
-path = "tests/integration/bsim3_golden.rs"
-
-[[test]]
-name = "bsim4_golden"
-path = "tests/integration/bsim4_golden.rs"
-
-[[test]]
-name = "vbic_golden"
-path = "tests/integration/vbic_golden.rs"
-
-[[test]]
-name = "tf_golden"
-path = "tests/integration/tf_golden.rs"
-
-[[test]]
-name = "pz_golden"
-path = "tests/integration/pz_golden.rs"
-
-[[test]]
-name = "disto_golden"
-path = "tests/integration/disto_golden.rs"
-
-[[test]]
-name = "sens_ac_golden"
-path = "tests/integration/sens_ac_golden.rs"
-
-[[test]]
-name = "fft_golden"
-path = "tests/integration/fft_golden.rs"
-
-[[test]]
-name = "verilator_spi_master"
-path = "tests/integration/verilator_spi_master.rs"
-
-[[test]]
-name = "poly_sources"
-path = "tests/integration/poly_sources.rs"
-
-[[test]]
-name = "bjt_extrinsic"
-path = "tests/integration/bjt_extrinsic.rs"
-
-[[test]]
-name = "vbic_extrinsic"
-path = "tests/integration/vbic_extrinsic.rs"
-
-[[test]]
-name = "trap_gear"
-path = "tests/integration/trap_gear.rs"
-
-[[test]]
-name = "nested_dc"
-path = "tests/integration/nested_dc.rs"
-
-[[test]]
-name = "osdi_va_golden"
-path = "tests/integration/osdi_va_golden.rs"
-
-[[test]]
-name = "sp_golden"
-path = "tests/integration/sp_golden.rs"
-
-[[test]]
-name = "alter_test"
-path = "tests/integration/alter_test.rs"
-
-[[test]]
-name = "control_script"
-path = "tests/integration/control_script.rs"
+name = "compat"
+path = "tests/suite/compat.rs"
