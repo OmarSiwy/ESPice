@@ -121,7 +121,15 @@ fn integrateOnePeriod(
     if (has_charge) {
         ckt.eval(x, 0);
         simdCopy(sc.q_prev[0..n], ckt.q_vec[0..n]);
-        simdZero(sc.i_prev[0..n]);
+        // Carry the trapezoid state across the period seam: a converged step
+        // leaves i_prev = -f(x), so at x0 that is -rhs. Zeroing it lost
+        // dt*i0/2 of charge per period (a DC offset of -(i0 R)/(2N) on RC).
+        // A function of x0, so it sits inside the shooting Jacobian.
+        // ponytail: masked to rows with a diagonal C entry — on algebraic rows
+        // an unmasked seed rings undamped; charge with no diagonal C keeps the
+        // old zero seed.
+        sc.i_prev[0] = 0;
+        for (1..n) |i| sc.i_prev[i] = if (ckt.c_vals[ckt.diag_slots[i]] != 0) -ckt.rhs[i] else 0;
     }
     if (wave.len != 0) {
         const row = wave[0..ncols];

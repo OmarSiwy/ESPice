@@ -10,7 +10,9 @@ pub fn numPoints(options: Options) u32 {
     if (options.t_step <= 0) return 1;
     const span = options.t_stop - options.t_start;
     if (span < 0) return 0;
-    return @as(u32, @intFromFloat(@floor(span / options.t_step))) + 1;
+    // Same 1e-6-step nudge as dc.zig sweepCount: an exact-integer ratio
+    // arrives just under it in f64 and a bare floor drops the endpoint.
+    return @as(u32, @intFromFloat(@floor(span / options.t_step + 1e-6))) + 1;
 }
 
 /// solveLanes apply/restore state: lane k installs temperature
