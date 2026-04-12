@@ -20,6 +20,7 @@ columns and axis). Base failing set: the 62 decks failing at 0424baf.
 |---|---|---|---|
 | 1 | LTE rejection keeps the order (dctran.c:966) | 554 | see below |
 | 2 | Newton failure: dt/8 and order 1, no same-dt BE retry (:815, :823) | 554 | 3 decks |
+| 3 | divided-difference history seeded with the max step (:312) | 554 | 4 decks |
 
 ### 1. LTE rejection keeps the integration order
 
@@ -52,3 +53,12 @@ never runs on the corpus). Against commit 1:
 - `hfet_inverter` 1.85e3 -> 704, `pvt_corners` 3.73e3 -> 3.23e3.
 - `mos6_inverter` 453 -> 668: predicted by the diagnosis (rows 317 -> 315,
   ngspice's count); the residual is the per-terminal q tape (fix 6, VerA).
+
+### 3. The divided-difference history starts at the max step
+
+`dt_prev`/`dt_prev2` start at `effective_dt_max` (ngspice
+`CKTdeltaOld[i] = CKTmaxStep`), not at the first dt. Only the first few LTE
+calls see it. No flip. Against commit 2: `vacask_mul` 234 -> 200,
+`vacask_graetz` 13.2 -> 13.5 (its grid is ngspice's point for point; the
+value gap is fix 4), `lc_energy_gear` / `lc_energy_trap` last-digit moves
+(both pass, 0.0016 / 0.0004).
