@@ -404,7 +404,7 @@ fn run_transient_inner_with_arena(
     let adaptive = config.adaptive;
 
     // Timestep bounds for adaptive mode.
-    let tmax = config.tmax.unwrap_or(h_init);
+    let tmax = config.tmax.unwrap_or(config.tstop);
     let h_min = h_init * LTE_MIN_STEP_RATIO;
 
     // --- Initial state vector ---
@@ -489,6 +489,11 @@ fn run_transient_inner_with_arena(
         g_prev.as_mut_slice().copy_from_slice(residual_g.as_slice());
         (sol, 0.0)
     };
+
+    // Seed T-line and LTRA histories with the DC operating point at t=0
+    // so the first transient Newton iteration has non-empty history.
+    update_tline_histories(circuit, &x, t_start);
+    update_ltra_histories(circuit, &x, t_start);
 
     // Pre-size the result buffers.
     let expected_steps = ((config.tstop / h_init).ceil() as usize) + 2;

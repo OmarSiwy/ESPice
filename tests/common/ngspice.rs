@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use super::rawfile::{RawFile, RawFileError};
 use std::path::{Path, PathBuf};
 use std::process::Command;

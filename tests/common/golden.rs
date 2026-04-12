@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use csv::ReaderBuilder;
 use std::path::Path;
 use thiserror::Error;

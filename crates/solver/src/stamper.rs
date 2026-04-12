@@ -532,43 +532,70 @@ pub fn stamp_circuit_gc_at_time(
             let vp2 = row_p2.map(|r| solution[r]).unwrap_or(0.0);
             let vn2 = row_n2.map(|r| solution[r]).unwrap_or(0.0);
 
-            let i_series = (vp1 - vp2) * g_s;
-            let i_sh1 = (vp1 - vn1) * g_shunt;
-            let i_sh2 = (vp2 - vn2) * g_shunt;
-
-            // Norton correction from the convolution history.  The
+            // Norton equivalent from the convolution history.  The
             // `nonint` model option chooses between the trapezoidal
             // (interpolated) and midpoint (nearest-neighbour) variants.
             let nonint = device.params.get_or("nonint", 0.0) != 0.0;
             let norton: LtraNorton = if let Some(hist) = circuit.ltra_history(device.id) {
                 eval_ltra_transient_slices_nonint(
-                    sim_time, &lp, &hist.times, &hist.v1, &hist.v2, nonint,
+                    sim_time, &lp, &hist.times, &hist.v1, &hist.v2, &hist.i1, &hist.i2, nonint,
                 )
             } else {
                 LtraNorton::default()
             };
 
-            // Stamp residual g(x).
-            if let Some(r) = row_p1 { residual_g[r] += i_series + i_sh1 + norton.i_eq_p1; }
-            if let Some(r) = row_n1 { residual_g[r] += -i_sh1; }
-            if let Some(r) = row_p2 { residual_g[r] += -i_series + i_sh2 + norton.i_eq_p2; }
-            if let Some(r) = row_n2 { residual_g[r] += -i_sh2; }
+            // When the companion model is active (g_eq > 0, i.e. history
+            // has >= 2 samples), use the transmission-line companion:
+            //   Port k: I_k = Y0 * V_k + I_eq_k
+            // where Y0 = 1/Z0 is the characteristic admittance.
+            // Otherwise fall back to the DC resistive-T network.
+            let use_companion = norton.g_eq_p1 > 0.0;
 
-            // Stamp Jacobian G.
-            let gs = g_s;
-            let gh = g_shunt;
-            let gc1 = norton.g_eq_p1;
-            let gc2 = norton.g_eq_p2;
-            if let (Some(r), Some(c)) = (row_p1, row_p1) { g_triplet.add(r, c, gs + gh + gc1); }
-            if let (Some(r), Some(c)) = (row_p1, row_n1) { g_triplet.add(r, c, -gh); }
-            if let (Some(r), Some(c)) = (row_p1, row_p2) { g_triplet.add(r, c, -gs); }
-            if let (Some(r), Some(c)) = (row_n1, row_p1) { g_triplet.add(r, c, -gh); }
-            if let (Some(r), Some(c)) = (row_n1, row_n1) { g_triplet.add(r, c, gh); }
-            if let (Some(r), Some(c)) = (row_p2, row_p1) { g_triplet.add(r, c, -gs); }
-            if let (Some(r), Some(c)) = (row_p2, row_p2) { g_triplet.add(r, c, gs + gh + gc2); }
-            if let (Some(r), Some(c)) = (row_p2, row_n2) { g_triplet.add(r, c, -gh); }
-            if let (Some(r), Some(c)) = (row_n2, row_p2) { g_triplet.add(r, c, -gh); }
-            if let (Some(r), Some(c)) = (row_n2, row_n2) { g_triplet.add(r, c, gh); }
+            if use_companion {
+                let y0 = norton.g_eq_p1; // = 1/Z0
+                let v1_diff = vp1 - vn1;
+                let v2_diff = vp2 - vn2;
+
+                // Residual: I_k = Y0 * V_k_diff + I_eq_k
+                if let Some(r) = row_p1 { residual_g[r] += y0 * v1_diff + norton.i_eq_p1; }
+                if let Some(r) = row_n1 { residual_g[r] += -(y0 * v1_diff + norton.i_eq_p1); }
+                if let Some(r) = row_p2 { residual_g[r] += y0 * v2_diff + norton.i_eq_p2; }
+                if let Some(r) = row_n2 { residual_g[r] += -(y0 * v2_diff + norton.i_eq_p2); }
+
+                // Jacobian: dI/dV — Y0 self-admittance at each port,
+                // no cross-port terms (coupling is through the Norton current).
+                if let (Some(r), Some(c)) = (row_p1, row_p1) { g_triplet.add(r, c, y0); }
+                if let (Some(r), Some(c)) = (row_p1, row_n1) { g_triplet.add(r, c, -y0); }
+                if let (Some(r), Some(c)) = (row_n1, row_p1) { g_triplet.add(r, c, -y0); }
+                if let (Some(r), Some(c)) = (row_n1, row_n1) { g_triplet.add(r, c, y0); }
+                if let (Some(r), Some(c)) = (row_p2, row_p2) { g_triplet.add(r, c, y0); }
+                if let (Some(r), Some(c)) = (row_p2, row_n2) { g_triplet.add(r, c, -y0); }
+                if let (Some(r), Some(c)) = (row_n2, row_p2) { g_triplet.add(r, c, -y0); }
+                if let (Some(r), Some(c)) = (row_n2, row_n2) { g_triplet.add(r, c, y0); }
+            } else {
+                // DC resistive-T fallback (no history yet).
+                let i_series = (vp1 - vp2) * g_s;
+                let i_sh1 = (vp1 - vn1) * g_shunt;
+                let i_sh2 = (vp2 - vn2) * g_shunt;
+
+                if let Some(r) = row_p1 { residual_g[r] += i_series + i_sh1; }
+                if let Some(r) = row_n1 { residual_g[r] += -i_sh1; }
+                if let Some(r) = row_p2 { residual_g[r] += -i_series + i_sh2; }
+                if let Some(r) = row_n2 { residual_g[r] += -i_sh2; }
+
+                let gs = g_s;
+                let gh = g_shunt;
+                if let (Some(r), Some(c)) = (row_p1, row_p1) { g_triplet.add(r, c, gs + gh); }
+                if let (Some(r), Some(c)) = (row_p1, row_n1) { g_triplet.add(r, c, -gh); }
+                if let (Some(r), Some(c)) = (row_p1, row_p2) { g_triplet.add(r, c, -gs); }
+                if let (Some(r), Some(c)) = (row_n1, row_p1) { g_triplet.add(r, c, -gh); }
+                if let (Some(r), Some(c)) = (row_n1, row_n1) { g_triplet.add(r, c, gh); }
+                if let (Some(r), Some(c)) = (row_p2, row_p1) { g_triplet.add(r, c, -gs); }
+                if let (Some(r), Some(c)) = (row_p2, row_p2) { g_triplet.add(r, c, gs + gh); }
+                if let (Some(r), Some(c)) = (row_p2, row_n2) { g_triplet.add(r, c, -gh); }
+                if let (Some(r), Some(c)) = (row_n2, row_p2) { g_triplet.add(r, c, -gh); }
+                if let (Some(r), Some(c)) = (row_n2, row_n2) { g_triplet.add(r, c, gh); }
+            }
 
             continue;
         }
@@ -861,29 +888,47 @@ pub fn stamp_circuit_gc_par_at_time(
                 let vn1 = row_n1.map(|r| solution[r]).unwrap_or(0.0);
                 let vp2 = row_p2.map(|r| solution[r]).unwrap_or(0.0);
                 let vn2 = row_n2.map(|r| solution[r]).unwrap_or(0.0);
-                let i_series = (vp1 - vp2) * g_s;
-                let i_sh1 = (vp1 - vn1) * g_shunt;
-                let i_sh2 = (vp2 - vn2) * g_shunt;
                 let nonint = device.params.get_or("nonint", 0.0) != 0.0;
                 let norton: LtraNorton = if let Some(hist) = circuit.ltra_history(device.id) {
-                    eval_ltra_transient_slices_nonint(sim_time, &lp, &hist.times, &hist.v1, &hist.v2, nonint)
+                    eval_ltra_transient_slices_nonint(sim_time, &lp, &hist.times, &hist.v1, &hist.v2, &hist.i1, &hist.i2, nonint)
                 } else { LtraNorton::default() };
-                if let Some(r) = row_p1 { residual_g[r] += i_series + i_sh1 + norton.i_eq_p1; }
-                if let Some(r) = row_n1 { residual_g[r] += -i_sh1; }
-                if let Some(r) = row_p2 { residual_g[r] += -i_series + i_sh2 + norton.i_eq_p2; }
-                if let Some(r) = row_n2 { residual_g[r] += -i_sh2; }
-                let gs = g_s; let gh = g_shunt;
-                let gc1 = norton.g_eq_p1; let gc2 = norton.g_eq_p2;
-                if let (Some(r), Some(c)) = (row_p1, row_p1) { g_triplet.add(r, c, gs + gh + gc1); }
-                if let (Some(r), Some(c)) = (row_p1, row_n1) { g_triplet.add(r, c, -gh); }
-                if let (Some(r), Some(c)) = (row_p1, row_p2) { g_triplet.add(r, c, -gs); }
-                if let (Some(r), Some(c)) = (row_n1, row_p1) { g_triplet.add(r, c, -gh); }
-                if let (Some(r), Some(c)) = (row_n1, row_n1) { g_triplet.add(r, c, gh); }
-                if let (Some(r), Some(c)) = (row_p2, row_p1) { g_triplet.add(r, c, -gs); }
-                if let (Some(r), Some(c)) = (row_p2, row_p2) { g_triplet.add(r, c, gs + gh + gc2); }
-                if let (Some(r), Some(c)) = (row_p2, row_n2) { g_triplet.add(r, c, -gh); }
-                if let (Some(r), Some(c)) = (row_n2, row_p2) { g_triplet.add(r, c, -gh); }
-                if let (Some(r), Some(c)) = (row_n2, row_n2) { g_triplet.add(r, c, gh); }
+                let use_companion = norton.g_eq_p1 > 0.0;
+                if use_companion {
+                    let y0 = norton.g_eq_p1;
+                    let v1d = vp1 - vn1;
+                    let v2d = vp2 - vn2;
+                    if let Some(r) = row_p1 { residual_g[r] += y0 * v1d + norton.i_eq_p1; }
+                    if let Some(r) = row_n1 { residual_g[r] += -(y0 * v1d + norton.i_eq_p1); }
+                    if let Some(r) = row_p2 { residual_g[r] += y0 * v2d + norton.i_eq_p2; }
+                    if let Some(r) = row_n2 { residual_g[r] += -(y0 * v2d + norton.i_eq_p2); }
+                    if let (Some(r), Some(c)) = (row_p1, row_p1) { g_triplet.add(r, c, y0); }
+                    if let (Some(r), Some(c)) = (row_p1, row_n1) { g_triplet.add(r, c, -y0); }
+                    if let (Some(r), Some(c)) = (row_n1, row_p1) { g_triplet.add(r, c, -y0); }
+                    if let (Some(r), Some(c)) = (row_n1, row_n1) { g_triplet.add(r, c, y0); }
+                    if let (Some(r), Some(c)) = (row_p2, row_p2) { g_triplet.add(r, c, y0); }
+                    if let (Some(r), Some(c)) = (row_p2, row_n2) { g_triplet.add(r, c, -y0); }
+                    if let (Some(r), Some(c)) = (row_n2, row_p2) { g_triplet.add(r, c, -y0); }
+                    if let (Some(r), Some(c)) = (row_n2, row_n2) { g_triplet.add(r, c, y0); }
+                } else {
+                    let i_series = (vp1 - vp2) * g_s;
+                    let i_sh1 = (vp1 - vn1) * g_shunt;
+                    let i_sh2 = (vp2 - vn2) * g_shunt;
+                    if let Some(r) = row_p1 { residual_g[r] += i_series + i_sh1; }
+                    if let Some(r) = row_n1 { residual_g[r] += -i_sh1; }
+                    if let Some(r) = row_p2 { residual_g[r] += -i_series + i_sh2; }
+                    if let Some(r) = row_n2 { residual_g[r] += -i_sh2; }
+                    let gs = g_s; let gh = g_shunt;
+                    if let (Some(r), Some(c)) = (row_p1, row_p1) { g_triplet.add(r, c, gs + gh); }
+                    if let (Some(r), Some(c)) = (row_p1, row_n1) { g_triplet.add(r, c, -gh); }
+                    if let (Some(r), Some(c)) = (row_p1, row_p2) { g_triplet.add(r, c, -gs); }
+                    if let (Some(r), Some(c)) = (row_n1, row_p1) { g_triplet.add(r, c, -gh); }
+                    if let (Some(r), Some(c)) = (row_n1, row_n1) { g_triplet.add(r, c, gh); }
+                    if let (Some(r), Some(c)) = (row_p2, row_p1) { g_triplet.add(r, c, -gs); }
+                    if let (Some(r), Some(c)) = (row_p2, row_p2) { g_triplet.add(r, c, gs + gh); }
+                    if let (Some(r), Some(c)) = (row_p2, row_n2) { g_triplet.add(r, c, -gh); }
+                    if let (Some(r), Some(c)) = (row_n2, row_p2) { g_triplet.add(r, c, -gh); }
+                    if let (Some(r), Some(c)) = (row_n2, row_n2) { g_triplet.add(r, c, gh); }
+                }
             }
             DeviceKind::BsourceV | DeviceKind::BsourceI | DeviceKind::VcvsExpr | DeviceKind::VccsExpr => {
                 let bse = match circuit.bsource_expr(device.id) { Some(b) => b, None => continue };
@@ -1246,11 +1291,32 @@ pub fn update_ltra_histories(circuit: &mut Circuit, solution: &[f64], time: f64)
         let v1 = vp1 - vn1;
         let v2 = vp2 - vn2;
 
-        // Approximate axial current via the DC resistive-T model.
-        let r_tot = (device.params.get_or("r", 0.0) * device.params.get_or("len", 1.0)).max(0.0);
-        let r_eff = if r_tot > 0.0 { r_tot } else { 1.0 / 1e-12_f64 };
-        let i1 = (v1 - v2) / r_eff;
-        let i2 = -i1;
+        // Compute port current using the companion model when history
+        // is available (transient), or DC resistive-T for initialization.
+        let lp = LtraLineParams::from_params(&device.params);
+        let nonint = device.params.get_or("nonint", 0.0) != 0.0;
+        let (i1, i2) = if let Some(hist) = circuit.ltra_history(device.id) {
+            if hist.times.len() >= 2 {
+                let norton = eval_ltra_transient_slices_nonint(
+                    time, &lp, &hist.times, &hist.v1, &hist.v2,
+                    &hist.i1, &hist.i2, nonint,
+                );
+                // LTRA residual current at port k = Y0*Vk + I_eq_k
+                // This is current LEAVING the node = current INTO the line.
+                let y0 = norton.g_eq_p1;
+                (y0 * v1 + norton.i_eq_p1, y0 * v2 + norton.i_eq_p2)
+            } else {
+                let r_tot = (lp.r * lp.len).max(0.0);
+                let r_eff = if r_tot > 0.0 { r_tot } else { 1.0 / 1e-12_f64 };
+                let i = (v1 - v2) / r_eff;
+                (i, -i)
+            }
+        } else {
+            let r_tot = (lp.r * lp.len).max(0.0);
+            let r_eff = if r_tot > 0.0 { r_tot } else { 1.0 / 1e-12_f64 };
+            let i = (v1 - v2) / r_eff;
+            (i, -i)
+        };
 
         updates.push((device.id, v1, v2, i1, i2));
     }

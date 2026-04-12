@@ -1,7 +1,7 @@
 //! Device model tests: BSIM3/4, BJT, VBIC, diode, JFET, B-source, poly sources.
 #[path = "../common/mod.rs"]
 mod common;
-use common::{parse_netlist_str, run_dc_op, Tolerance};
+use common::{parse_netlist_str, run_dc_op};
 
 // ── Basic device tests (from dc_op.rs) ──────────────────────────────────────
 

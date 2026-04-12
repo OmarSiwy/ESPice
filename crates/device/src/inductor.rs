@@ -14,11 +14,20 @@ use crate::eval::{DeviceEval, DeviceModel};
 ///   KCL at pin 1: ... - I_branch = 0
 ///   Branch equation: V0 - V1 = L * dI_branch/dt
 ///
-/// In the g/q framework:
+/// In the g/q framework the transient residual is
+///   F = g + alpha*(q - q_prev)           (alpha = 1/h for BE)
+///
+/// Setting F[branch]=0 must recover V0-V1 = L*dI/dt.  With alpha=1/h:
+///   (V0-V1) + (1/h)*( q[2] - q_prev[2] ) = 0
+///   (V0-V1) + (1/h)*(-L*I + L*I_prev)    = 0
+///   (V0-V1) = (L/h)*(I - I_prev)  =  L * dI/dt   ✓
+///
+/// Therefore q[2] = **-L** * I_branch  (note the minus sign).
+///
 ///   g[0] = +I_branch, g[1] = -I_branch, g[2] = V0 - V1  (branch eq residual)
-///   q[2] = L * I_branch  (reactive: L * dI/dt term)
+///   q[2] = -L * I_branch  (reactive term — sign chosen so F=0 ⇒ V=L·dI/dt)
 ///   G stamps: (0,2,+1), (1,2,-1), (2,0,+1), (2,1,-1)
-///   C stamps: (2,2, L)
+///   C stamps: (2,2, -L)
 #[derive(Debug, Clone, Copy)]
 pub struct Inductor;
 
@@ -47,9 +56,10 @@ impl DeviceModel for Inductor {
         let g_branch_eq = v0 - v1;
 
         // q contributions:
-        //   Row 2 (branch equation): L * I_branch
-        //   This enters as d(L*I)/dt = L*dI/dt in the time-domain equation
-        let q_branch = l * i_br;
+        //   Row 2 (branch equation): -L * I_branch
+        //   With the BE residual F = g + (1/h)*(q - q_prev), setting F=0 gives
+        //     V0-V1 = (L/h)*(I - I_prev) = L * dI/dt    (correct sign).
+        let q_branch = -l * i_br;
 
         DeviceEval {
             g: smallvec![i_br, -i_br, g_branch_eq],
@@ -61,7 +71,7 @@ impl DeviceModel for Inductor {
                 (2, 1, -1.0),  // dg[2]/dV1 = -1
             ],
             C: smallvec![
-                (2, 2, l),     // dq[2]/dI_branch = L
+                (2, 2, -l),    // dq[2]/dI_branch = -L
             ],
             rhs: SmallVec::new(),
         }
@@ -101,10 +111,10 @@ mod tests {
         assert!((eval.g[1] + 0.01).abs() < 1e-15);
         assert!((eval.g[2] - 3.0).abs() < 1e-15);
 
-        // q: [0, 0, L*I_br]
+        // q: [0, 0, -L*I_br]
         assert!((eval.q[0]).abs() < 1e-15);
         assert!((eval.q[1]).abs() < 1e-15);
-        assert!((eval.q[2] - 1e-3 * 0.01).abs() < 1e-15);
+        assert!((eval.q[2] - (-1e-3 * 0.01)).abs() < 1e-15);
     }
 
     #[test]
@@ -131,7 +141,7 @@ mod tests {
         assert_eq!(eval.C.len(), 1);
         assert_eq!(eval.C[0].0, 2);
         assert_eq!(eval.C[0].1, 2);
-        assert!((eval.C[0].2 - l).abs() < 1e-15);
+        assert!((eval.C[0].2 - (-l)).abs() < 1e-15);
     }
 
     #[test]
@@ -179,9 +189,9 @@ mod tests {
         let v = [1.0, 0.0];
         let eval0 = ind.eval_with_branch(&v, i_br, &params);
 
-        // Perturb I_branch for q[2]
+        // Perturb I_branch for q[2]  (q[2] = -L*I, so dq2/dI = -L)
         let eval_pi = ind.eval_with_branch(&v, i_br + h, &params);
         let dq2_di = (eval_pi.q[2] - eval0.q[2]) / h;
-        assert!((dq2_di - l).abs() < 1e-6 * l);
+        assert!((dq2_di - (-l)).abs() < 1e-6 * l);
     }
 }

@@ -1,0 +1,310 @@
+* CMOS Inverter Chain — 100 stages
+VDD vdd 0 DC 3.3
+VIN in 0 PULSE(0 3.3 1n 0.5n 0.5n 10n 20n)
+
+.MODEL NMOD NMOS (VTO=0.5 KP=120u)
+.MODEL PMOD PMOS (VTO=-0.5 KP=60u)
+
+Mn1 n1 in 0 0 NMOD W=10u L=1u
+Mp1 n1 in vdd vdd PMOD W=20u L=1u
+CL1 n1 0 0.01p
+Mn2 n2 n1 0 0 NMOD W=10u L=1u
+Mp2 n2 n1 vdd vdd PMOD W=20u L=1u
+CL2 n2 0 0.01p
+Mn3 n3 n2 0 0 NMOD W=10u L=1u
+Mp3 n3 n2 vdd vdd PMOD W=20u L=1u
+CL3 n3 0 0.01p
+Mn4 n4 n3 0 0 NMOD W=10u L=1u
+Mp4 n4 n3 vdd vdd PMOD W=20u L=1u
+CL4 n4 0 0.01p
+Mn5 n5 n4 0 0 NMOD W=10u L=1u
+Mp5 n5 n4 vdd vdd PMOD W=20u L=1u
+CL5 n5 0 0.01p
+Mn6 n6 n5 0 0 NMOD W=10u L=1u
+Mp6 n6 n5 vdd vdd PMOD W=20u L=1u
+CL6 n6 0 0.01p
+Mn7 n7 n6 0 0 NMOD W=10u L=1u
+Mp7 n7 n6 vdd vdd PMOD W=20u L=1u
+CL7 n7 0 0.01p
+Mn8 n8 n7 0 0 NMOD W=10u L=1u
+Mp8 n8 n7 vdd vdd PMOD W=20u L=1u
+CL8 n8 0 0.01p
+Mn9 n9 n8 0 0 NMOD W=10u L=1u
+Mp9 n9 n8 vdd vdd PMOD W=20u L=1u
+CL9 n9 0 0.01p
+Mn10 n10 n9 0 0 NMOD W=10u L=1u
+Mp10 n10 n9 vdd vdd PMOD W=20u L=1u
+CL10 n10 0 0.01p
+Mn11 n11 n10 0 0 NMOD W=10u L=1u
+Mp11 n11 n10 vdd vdd PMOD W=20u L=1u
+CL11 n11 0 0.01p
+Mn12 n12 n11 0 0 NMOD W=10u L=1u
+Mp12 n12 n11 vdd vdd PMOD W=20u L=1u
+CL12 n12 0 0.01p
+Mn13 n13 n12 0 0 NMOD W=10u L=1u
+Mp13 n13 n12 vdd vdd PMOD W=20u L=1u
+CL13 n13 0 0.01p
+Mn14 n14 n13 0 0 NMOD W=10u L=1u
+Mp14 n14 n13 vdd vdd PMOD W=20u L=1u
+CL14 n14 0 0.01p
+Mn15 n15 n14 0 0 NMOD W=10u L=1u
+Mp15 n15 n14 vdd vdd PMOD W=20u L=1u
+CL15 n15 0 0.01p
+Mn16 n16 n15 0 0 NMOD W=10u L=1u
+Mp16 n16 n15 vdd vdd PMOD W=20u L=1u
+CL16 n16 0 0.01p
+Mn17 n17 n16 0 0 NMOD W=10u L=1u
+Mp17 n17 n16 vdd vdd PMOD W=20u L=1u
+CL17 n17 0 0.01p
+Mn18 n18 n17 0 0 NMOD W=10u L=1u
+Mp18 n18 n17 vdd vdd PMOD W=20u L=1u
+CL18 n18 0 0.01p
+Mn19 n19 n18 0 0 NMOD W=10u L=1u
+Mp19 n19 n18 vdd vdd PMOD W=20u L=1u
+CL19 n19 0 0.01p
+Mn20 n20 n19 0 0 NMOD W=10u L=1u
+Mp20 n20 n19 vdd vdd PMOD W=20u L=1u
+CL20 n20 0 0.01p
+Mn21 n21 n20 0 0 NMOD W=10u L=1u
+Mp21 n21 n20 vdd vdd PMOD W=20u L=1u
+CL21 n21 0 0.01p
+Mn22 n22 n21 0 0 NMOD W=10u L=1u
+Mp22 n22 n21 vdd vdd PMOD W=20u L=1u
+CL22 n22 0 0.01p
+Mn23 n23 n22 0 0 NMOD W=10u L=1u
+Mp23 n23 n22 vdd vdd PMOD W=20u L=1u
+CL23 n23 0 0.01p
+Mn24 n24 n23 0 0 NMOD W=10u L=1u
+Mp24 n24 n23 vdd vdd PMOD W=20u L=1u
+CL24 n24 0 0.01p
+Mn25 n25 n24 0 0 NMOD W=10u L=1u
+Mp25 n25 n24 vdd vdd PMOD W=20u L=1u
+CL25 n25 0 0.01p
+Mn26 n26 n25 0 0 NMOD W=10u L=1u
+Mp26 n26 n25 vdd vdd PMOD W=20u L=1u
+CL26 n26 0 0.01p
+Mn27 n27 n26 0 0 NMOD W=10u L=1u
+Mp27 n27 n26 vdd vdd PMOD W=20u L=1u
+CL27 n27 0 0.01p
+Mn28 n28 n27 0 0 NMOD W=10u L=1u
+Mp28 n28 n27 vdd vdd PMOD W=20u L=1u
+CL28 n28 0 0.01p
+Mn29 n29 n28 0 0 NMOD W=10u L=1u
+Mp29 n29 n28 vdd vdd PMOD W=20u L=1u
+CL29 n29 0 0.01p
+Mn30 n30 n29 0 0 NMOD W=10u L=1u
+Mp30 n30 n29 vdd vdd PMOD W=20u L=1u
+CL30 n30 0 0.01p
+Mn31 n31 n30 0 0 NMOD W=10u L=1u
+Mp31 n31 n30 vdd vdd PMOD W=20u L=1u
+CL31 n31 0 0.01p
+Mn32 n32 n31 0 0 NMOD W=10u L=1u
+Mp32 n32 n31 vdd vdd PMOD W=20u L=1u
+CL32 n32 0 0.01p
+Mn33 n33 n32 0 0 NMOD W=10u L=1u
+Mp33 n33 n32 vdd vdd PMOD W=20u L=1u
+CL33 n33 0 0.01p
+Mn34 n34 n33 0 0 NMOD W=10u L=1u
+Mp34 n34 n33 vdd vdd PMOD W=20u L=1u
+CL34 n34 0 0.01p
+Mn35 n35 n34 0 0 NMOD W=10u L=1u
+Mp35 n35 n34 vdd vdd PMOD W=20u L=1u
+CL35 n35 0 0.01p
+Mn36 n36 n35 0 0 NMOD W=10u L=1u
+Mp36 n36 n35 vdd vdd PMOD W=20u L=1u
+CL36 n36 0 0.01p
+Mn37 n37 n36 0 0 NMOD W=10u L=1u
+Mp37 n37 n36 vdd vdd PMOD W=20u L=1u
+CL37 n37 0 0.01p
+Mn38 n38 n37 0 0 NMOD W=10u L=1u
+Mp38 n38 n37 vdd vdd PMOD W=20u L=1u
+CL38 n38 0 0.01p
+Mn39 n39 n38 0 0 NMOD W=10u L=1u
+Mp39 n39 n38 vdd vdd PMOD W=20u L=1u
+CL39 n39 0 0.01p
+Mn40 n40 n39 0 0 NMOD W=10u L=1u
+Mp40 n40 n39 vdd vdd PMOD W=20u L=1u
+CL40 n40 0 0.01p
+Mn41 n41 n40 0 0 NMOD W=10u L=1u
+Mp41 n41 n40 vdd vdd PMOD W=20u L=1u
+CL41 n41 0 0.01p
+Mn42 n42 n41 0 0 NMOD W=10u L=1u
+Mp42 n42 n41 vdd vdd PMOD W=20u L=1u
+CL42 n42 0 0.01p
+Mn43 n43 n42 0 0 NMOD W=10u L=1u
+Mp43 n43 n42 vdd vdd PMOD W=20u L=1u
+CL43 n43 0 0.01p
+Mn44 n44 n43 0 0 NMOD W=10u L=1u
+Mp44 n44 n43 vdd vdd PMOD W=20u L=1u
+CL44 n44 0 0.01p
+Mn45 n45 n44 0 0 NMOD W=10u L=1u
+Mp45 n45 n44 vdd vdd PMOD W=20u L=1u
+CL45 n45 0 0.01p
+Mn46 n46 n45 0 0 NMOD W=10u L=1u
+Mp46 n46 n45 vdd vdd PMOD W=20u L=1u
+CL46 n46 0 0.01p
+Mn47 n47 n46 0 0 NMOD W=10u L=1u
+Mp47 n47 n46 vdd vdd PMOD W=20u L=1u
+CL47 n47 0 0.01p
+Mn48 n48 n47 0 0 NMOD W=10u L=1u
+Mp48 n48 n47 vdd vdd PMOD W=20u L=1u
+CL48 n48 0 0.01p
+Mn49 n49 n48 0 0 NMOD W=10u L=1u
+Mp49 n49 n48 vdd vdd PMOD W=20u L=1u
+CL49 n49 0 0.01p
+Mn50 n50 n49 0 0 NMOD W=10u L=1u
+Mp50 n50 n49 vdd vdd PMOD W=20u L=1u
+CL50 n50 0 0.01p
+Mn51 n51 n50 0 0 NMOD W=10u L=1u
+Mp51 n51 n50 vdd vdd PMOD W=20u L=1u
+CL51 n51 0 0.01p
+Mn52 n52 n51 0 0 NMOD W=10u L=1u
+Mp52 n52 n51 vdd vdd PMOD W=20u L=1u
+CL52 n52 0 0.01p
+Mn53 n53 n52 0 0 NMOD W=10u L=1u
+Mp53 n53 n52 vdd vdd PMOD W=20u L=1u
+CL53 n53 0 0.01p
+Mn54 n54 n53 0 0 NMOD W=10u L=1u
+Mp54 n54 n53 vdd vdd PMOD W=20u L=1u
+CL54 n54 0 0.01p
+Mn55 n55 n54 0 0 NMOD W=10u L=1u
+Mp55 n55 n54 vdd vdd PMOD W=20u L=1u
+CL55 n55 0 0.01p
+Mn56 n56 n55 0 0 NMOD W=10u L=1u
+Mp56 n56 n55 vdd vdd PMOD W=20u L=1u
+CL56 n56 0 0.01p
+Mn57 n57 n56 0 0 NMOD W=10u L=1u
+Mp57 n57 n56 vdd vdd PMOD W=20u L=1u
+CL57 n57 0 0.01p
+Mn58 n58 n57 0 0 NMOD W=10u L=1u
+Mp58 n58 n57 vdd vdd PMOD W=20u L=1u
+CL58 n58 0 0.01p
+Mn59 n59 n58 0 0 NMOD W=10u L=1u
+Mp59 n59 n58 vdd vdd PMOD W=20u L=1u
+CL59 n59 0 0.01p
+Mn60 n60 n59 0 0 NMOD W=10u L=1u
+Mp60 n60 n59 vdd vdd PMOD W=20u L=1u
+CL60 n60 0 0.01p
+Mn61 n61 n60 0 0 NMOD W=10u L=1u
+Mp61 n61 n60 vdd vdd PMOD W=20u L=1u
+CL61 n61 0 0.01p
+Mn62 n62 n61 0 0 NMOD W=10u L=1u
+Mp62 n62 n61 vdd vdd PMOD W=20u L=1u
+CL62 n62 0 0.01p
+Mn63 n63 n62 0 0 NMOD W=10u L=1u
+Mp63 n63 n62 vdd vdd PMOD W=20u L=1u
+CL63 n63 0 0.01p
+Mn64 n64 n63 0 0 NMOD W=10u L=1u
+Mp64 n64 n63 vdd vdd PMOD W=20u L=1u
+CL64 n64 0 0.01p
+Mn65 n65 n64 0 0 NMOD W=10u L=1u
+Mp65 n65 n64 vdd vdd PMOD W=20u L=1u
+CL65 n65 0 0.01p
+Mn66 n66 n65 0 0 NMOD W=10u L=1u
+Mp66 n66 n65 vdd vdd PMOD W=20u L=1u
+CL66 n66 0 0.01p
+Mn67 n67 n66 0 0 NMOD W=10u L=1u
+Mp67 n67 n66 vdd vdd PMOD W=20u L=1u
+CL67 n67 0 0.01p
+Mn68 n68 n67 0 0 NMOD W=10u L=1u
+Mp68 n68 n67 vdd vdd PMOD W=20u L=1u
+CL68 n68 0 0.01p
+Mn69 n69 n68 0 0 NMOD W=10u L=1u
+Mp69 n69 n68 vdd vdd PMOD W=20u L=1u
+CL69 n69 0 0.01p
+Mn70 n70 n69 0 0 NMOD W=10u L=1u
+Mp70 n70 n69 vdd vdd PMOD W=20u L=1u
+CL70 n70 0 0.01p
+Mn71 n71 n70 0 0 NMOD W=10u L=1u
+Mp71 n71 n70 vdd vdd PMOD W=20u L=1u
+CL71 n71 0 0.01p
+Mn72 n72 n71 0 0 NMOD W=10u L=1u
+Mp72 n72 n71 vdd vdd PMOD W=20u L=1u
+CL72 n72 0 0.01p
+Mn73 n73 n72 0 0 NMOD W=10u L=1u
+Mp73 n73 n72 vdd vdd PMOD W=20u L=1u
+CL73 n73 0 0.01p
+Mn74 n74 n73 0 0 NMOD W=10u L=1u
+Mp74 n74 n73 vdd vdd PMOD W=20u L=1u
+CL74 n74 0 0.01p
+Mn75 n75 n74 0 0 NMOD W=10u L=1u
+Mp75 n75 n74 vdd vdd PMOD W=20u L=1u
+CL75 n75 0 0.01p
+Mn76 n76 n75 0 0 NMOD W=10u L=1u
+Mp76 n76 n75 vdd vdd PMOD W=20u L=1u
+CL76 n76 0 0.01p
+Mn77 n77 n76 0 0 NMOD W=10u L=1u
+Mp77 n77 n76 vdd vdd PMOD W=20u L=1u
+CL77 n77 0 0.01p
+Mn78 n78 n77 0 0 NMOD W=10u L=1u
+Mp78 n78 n77 vdd vdd PMOD W=20u L=1u
+CL78 n78 0 0.01p
+Mn79 n79 n78 0 0 NMOD W=10u L=1u
+Mp79 n79 n78 vdd vdd PMOD W=20u L=1u
+CL79 n79 0 0.01p
+Mn80 n80 n79 0 0 NMOD W=10u L=1u
+Mp80 n80 n79 vdd vdd PMOD W=20u L=1u
+CL80 n80 0 0.01p
+Mn81 n81 n80 0 0 NMOD W=10u L=1u
+Mp81 n81 n80 vdd vdd PMOD W=20u L=1u
+CL81 n81 0 0.01p
+Mn82 n82 n81 0 0 NMOD W=10u L=1u
+Mp82 n82 n81 vdd vdd PMOD W=20u L=1u
+CL82 n82 0 0.01p
+Mn83 n83 n82 0 0 NMOD W=10u L=1u
+Mp83 n83 n82 vdd vdd PMOD W=20u L=1u
+CL83 n83 0 0.01p
+Mn84 n84 n83 0 0 NMOD W=10u L=1u
+Mp84 n84 n83 vdd vdd PMOD W=20u L=1u
+CL84 n84 0 0.01p
+Mn85 n85 n84 0 0 NMOD W=10u L=1u
+Mp85 n85 n84 vdd vdd PMOD W=20u L=1u
+CL85 n85 0 0.01p
+Mn86 n86 n85 0 0 NMOD W=10u L=1u
+Mp86 n86 n85 vdd vdd PMOD W=20u L=1u
+CL86 n86 0 0.01p
+Mn87 n87 n86 0 0 NMOD W=10u L=1u
+Mp87 n87 n86 vdd vdd PMOD W=20u L=1u
+CL87 n87 0 0.01p
+Mn88 n88 n87 0 0 NMOD W=10u L=1u
+Mp88 n88 n87 vdd vdd PMOD W=20u L=1u
+CL88 n88 0 0.01p
+Mn89 n89 n88 0 0 NMOD W=10u L=1u
+Mp89 n89 n88 vdd vdd PMOD W=20u L=1u
+CL89 n89 0 0.01p
+Mn90 n90 n89 0 0 NMOD W=10u L=1u
+Mp90 n90 n89 vdd vdd PMOD W=20u L=1u
+CL90 n90 0 0.01p
+Mn91 n91 n90 0 0 NMOD W=10u L=1u
+Mp91 n91 n90 vdd vdd PMOD W=20u L=1u
+CL91 n91 0 0.01p
+Mn92 n92 n91 0 0 NMOD W=10u L=1u
+Mp92 n92 n91 vdd vdd PMOD W=20u L=1u
+CL92 n92 0 0.01p
+Mn93 n93 n92 0 0 NMOD W=10u L=1u
+Mp93 n93 n92 vdd vdd PMOD W=20u L=1u
+CL93 n93 0 0.01p
+Mn94 n94 n93 0 0 NMOD W=10u L=1u
+Mp94 n94 n93 vdd vdd PMOD W=20u L=1u
+CL94 n94 0 0.01p
+Mn95 n95 n94 0 0 NMOD W=10u L=1u
+Mp95 n95 n94 vdd vdd PMOD W=20u L=1u
+CL95 n95 0 0.01p
+Mn96 n96 n95 0 0 NMOD W=10u L=1u
+Mp96 n96 n95 vdd vdd PMOD W=20u L=1u
+CL96 n96 0 0.01p
+Mn97 n97 n96 0 0 NMOD W=10u L=1u
+Mp97 n97 n96 vdd vdd PMOD W=20u L=1u
+CL97 n97 0 0.01p
+Mn98 n98 n97 0 0 NMOD W=10u L=1u
+Mp98 n98 n97 vdd vdd PMOD W=20u L=1u
+CL98 n98 0 0.01p
+Mn99 n99 n98 0 0 NMOD W=10u L=1u
+Mp99 n99 n98 vdd vdd PMOD W=20u L=1u
+CL99 n99 0 0.01p
+Mn100 n100 n99 0 0 NMOD W=10u L=1u
+Mp100 n100 n99 vdd vdd PMOD W=20u L=1u
+CL100 n100 0 0.01p
+
+.TRAN 0.1n 50n
+.END

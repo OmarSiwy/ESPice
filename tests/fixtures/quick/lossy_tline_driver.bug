@@ -1,0 +1,17 @@
+# BUG: Lossy TLine Driver — FAIL 1.00e+00
+
+## Circuit
+`lossy_tline_driver.sp` — lossy transmission line driver, transient
+
+## Symptom
+FAIL with relative error 1.00e+00 (100%) vs ngspice.
+
+## Root Cause (suspected)
+100% relative error suggests BigOSpice output is near zero while ngspice produces nonzero values (or vice versa).
+The LTRA (lossy transmission line) model may not be propagating signals correctly in transient simulation.
+Possible: LTRA convolution history not initialized, or the lossy line stamp is wrong.
+
+## Key Files
+- `crates/device/src/ltra.rs` — LTRA model eval and history updates
+- `crates/solver/src/stamper.rs` — LTRA special-path stamping (lines ~500-575)
+- `crates/analysis/src/transient.rs` — `update_ltra_histories` call

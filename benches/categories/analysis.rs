@@ -1,66 +1,58 @@
-//! Analysis benchmarks: DC sweep, transient, AC.
+//! Analysis benchmarks: DC OP, transient, and AC across fixture files.
 
 use criterion::Criterion;
-use bigospice_parser::SpiceParser;
+use bigospice_analysis::{AcConfig, AcSweepType, TransientConfig};
 use bigospice_device::DeviceRegistry;
-use bigospice_analysis::{AcConfig, AcSweepType, DcSweepConfig, TransientConfig};
+use bigospice_parser::{AnalysisKind, SpiceParser};
 
 pub fn bench_analysis(c: &mut Criterion) {
     let mut group = c.benchmark_group("analysis");
 
-    // DC OP
-    let dc_netlist = "\
-* DC OP bench
-V1 1 0 DC 5
-R1 1 2 1k
-R2 2 0 1k
-.OP
-.END
-";
-    group.bench_function("dc_op_divider", |b| {
-        let (circuit, _, _) = SpiceParser::parse(dc_netlist).unwrap();
+    for (name, content) in crate::common::discover_all_fixtures() {
+        let Ok((circuit, analyses, _)) = SpiceParser::parse(&content) else { continue };
         let registry = DeviceRegistry::new_default();
-        b.iter(|| bigospice_analysis::run_dc_op(&circuit, &registry).unwrap());
-    });
 
-    // DC Sweep
-    group.bench_function("dc_sweep_10pts", |b| {
-        let (circuit, _, _) = SpiceParser::parse(dc_netlist).unwrap();
-        let registry = DeviceRegistry::new_default();
-        let cfg = DcSweepConfig::new("V1", 0.0, 5.0, 0.5);
-        b.iter(|| bigospice_analysis::run_dc_sweep(&circuit, &registry, &cfg).unwrap());
-    });
+        for stmt in &analyses {
+            let p = |key: &str| stmt.params.iter().find(|(k, _)| k == key).map(|(_, v)| *v);
 
-    // Transient
-    let tran_netlist = "\
-* Transient bench
-V1 1 0 DC 5
-R1 1 0 1k
-.TRAN 1n 100n
-.END
-";
-    group.bench_function("transient_resistive_100ns", |b| {
-        let (mut circuit, _, _) = SpiceParser::parse(tran_netlist).unwrap();
-        let registry = DeviceRegistry::new_default();
-        let cfg = TransientConfig::new(1e-9, 100e-9);
-        b.iter(|| bigospice_analysis::run_transient(&mut circuit, &registry, &cfg).unwrap());
-    });
-
-    // AC
-    let ac_netlist = "\
-* AC bench
-V1 1 0 DC 1 AC 1
-R1 1 2 1k
-R2 2 0 1k
-.AC DEC 10 1 1G
-.END
-";
-    group.bench_function("ac_decade_10pts_1_to_1G", |b| {
-        let (circuit, _, _) = SpiceParser::parse(ac_netlist).unwrap();
-        let registry = DeviceRegistry::new_default();
-        let cfg = AcConfig::new(1.0, 1e9, 10, AcSweepType::Decade);
-        b.iter(|| bigospice_analysis::run_ac(&circuit, &registry, &cfg).unwrap());
-    });
+            match &stmt.kind {
+                AnalysisKind::DcOp => {
+                    group.bench_function(format!("{name}/dc_op"), |b| {
+                        b.iter(|| bigospice_analysis::run_dc_op(&circuit, &registry).unwrap())
+                    });
+                }
+                AnalysisKind::Tran => {
+                    let cfg = TransientConfig::new(
+                        p("tstep").unwrap_or(1e-9),
+                        p("tstop").unwrap_or(1e-6),
+                    );
+                    group.bench_function(format!("{name}/tran"), |b| {
+                        b.iter(|| {
+                            let mut c = circuit.clone();
+                            bigospice_analysis::run_transient(&mut c, &registry, &cfg).unwrap()
+                        })
+                    });
+                }
+                AnalysisKind::Ac => {
+                    let sweep = match p("sweep_type").unwrap_or(1.0) as u8 {
+                        0 => AcSweepType::Linear,
+                        2 => AcSweepType::Octave,
+                        _ => AcSweepType::Decade,
+                    };
+                    let cfg = AcConfig::new(
+                        p("fstart").unwrap_or(1.0),
+                        p("fstop").unwrap_or(1e9),
+                        p("npoints").unwrap_or(10.0) as usize,
+                        sweep,
+                    );
+                    group.bench_function(format!("{name}/ac"), |b| {
+                        b.iter(|| bigospice_analysis::run_ac(&circuit, &registry, &cfg).unwrap())
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
 
     group.finish();
 }

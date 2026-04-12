@@ -30,8 +30,21 @@ impl DeviceModel for MosfetLevel1 {
         let is_pmos = params.get_or("pmos", 0.0) != 0.0;
         let sign = if is_pmos { -1.0 } else { 1.0 };
 
-        let vgs = sign * (voltages[1] - voltages[2]);
-        let vds = sign * (voltages[0] - voltages[2]);
+        let vgs_raw = sign * (voltages[1] - voltages[2]);
+        let vds_raw = sign * (voltages[0] - voltages[2]);
+
+        // Source-drain swap: when Vds < 0 the physical drain is at a lower
+        // potential than the source.  Standard SPICE (ngspice DEVmosfet1load)
+        // swaps drain and source internally so that the Shichman-Hodges
+        // equations always see Vds >= 0.  The effective gate voltage becomes
+        // Vgd (gate-to-drain) and Vds is negated.  After evaluation the
+        // current is negated and the Jacobian columns for D/S are swapped.
+        let (vgs, vds, reversed) = if vds_raw >= 0.0 {
+            (vgs_raw, vds_raw, false)
+        } else {
+            // vgd = vgs - vds (gate relative to the physical drain)
+            (vgs_raw - vds_raw, -vds_raw, true)
+        };
 
         // For PMOS, VTO is specified as negative in the netlist; use absolute value
         // since the sign convention is already handled by flipping vgs/vds.
@@ -66,21 +79,36 @@ impl DeviceModel for MosfetLevel1 {
             (id, gm, gds)
         };
 
-        let id_signed = sign * id;
+        // When reversed, physical current flows source→drain (pin 2 → pin 0),
+        // so the current seen at pin 0 is −id and at pin 2 is +id.
+        // The Jacobian columns for D(pin 0) and S(pin 2) swap because the
+        // internal variables were evaluated with swapped terminals.
+        let id_signed = if reversed { -sign * id } else { sign * id };
 
-        // Jacobian: d(id_signed)/d(Vd) = sign * d(id)/d(vds) * d(vds)/d(Vd)
-        //         = sign * gds * sign = gds  (sign cancels)
-        // Same for gm. So conductance stamps use unsigned gm, gds.
+        // Jacobian: in the normal case gm = dId/dVgs, gds = dId/dVds, and
+        // sign cancels in the chain rule so stamps use unsigned gm, gds.
+        //
+        // In the reversed case the derivatives are w.r.t. the swapped
+        // voltages.  Transforming back to physical pins (see derivation in
+        // BSIM4 eval.rs):
+        //   dI_D/dV_D = gm + gds,   dI_D/dV_G = -gm,   dI_D/dV_S = -gds
+        //   dI_S/dV_D = -(gm+gds),  dI_S/dV_G = +gm,   dI_S/dV_S = +gds
+        let (g_dd, g_dg, g_ds, g_sd, g_sg, g_ss) = if reversed {
+            ( gm + gds, -gm, -gds, -(gm + gds),  gm,  gds)
+        } else {
+            ( gds,       gm, -(gm + gds), -gds, -gm, gm + gds)
+        };
+
         DeviceEval {
             g: smallvec![id_signed, 0.0, -id_signed, 0.0],
             q: smallvec![0.0, 0.0, 0.0, 0.0],
             G: smallvec![
-                (0, 0, gds),
-                (0, 1, gm),
-                (0, 2, -(gm + gds)),
-                (2, 0, -gds),
-                (2, 1, -gm),
-                (2, 2, gm + gds),
+                (0, 0, g_dd),
+                (0, 1, g_dg),
+                (0, 2, g_ds),
+                (2, 0, g_sd),
+                (2, 1, g_sg),
+                (2, 2, g_ss),
             ],
             C: SmallVec::new(),
             rhs: SmallVec::new(),
@@ -118,9 +146,17 @@ impl DeviceModel for MosfetLevel2 {
         let is_pmos = params.get_or("pmos", 0.0) != 0.0;
         let sign = if is_pmos { -1.0 } else { 1.0 };
 
-        let vgs = sign * (voltages[1] - voltages[2]);
-        let vds = sign * (voltages[0] - voltages[2]);
-        let vbs = sign * (voltages[3] - voltages[2]);
+        let vgs_raw = sign * (voltages[1] - voltages[2]);
+        let vds_raw = sign * (voltages[0] - voltages[2]);
+        let vbs_raw = sign * (voltages[3] - voltages[2]);
+
+        // Source-drain swap when Vds < 0 (see MosfetLevel1 for full explanation).
+        let (vgs, vds, vbs, reversed) = if vds_raw >= 0.0 {
+            (vgs_raw, vds_raw, vbs_raw, false)
+        } else {
+            // Swap D↔S: vgs' = vgd, vds' = -vds, vbs' = vbd
+            (vgs_raw - vds_raw, -vds_raw, vbs_raw - vds_raw, true)
+        };
 
         // Body effect: Vth = vto + gamma*(sqrt(phi + Vsb) - sqrt(phi))
         let vsb = -vbs;
@@ -159,20 +195,30 @@ impl DeviceModel for MosfetLevel2 {
         } else {
             0.0
         };
-        let id_signed = sign * id;
+
+        let id_signed = if reversed { -sign * id } else { sign * id };
+
+        // Jacobian: when reversed, D/S columns swap (see MosfetLevel1).
+        let (g_dd, g_dg, g_ds, g_db, g_sd, g_sg, g_ss, g_sb) = if reversed {
+            ( gm + gds,    -gm,     -gds,     -gmb,
+             -(gm + gds),   gm,      gds,      gmb)
+        } else {
+            ( gds,           gm,     -(gm + gds + gmb),  gmb,
+             -gds,          -gm,      gm + gds + gmb,   -gmb)
+        };
 
         DeviceEval {
             g: smallvec![id_signed, 0.0, -id_signed, 0.0],
             q: smallvec![0.0, 0.0, 0.0, 0.0],
             G: smallvec![
-                (0, 0,  gds),
-                (0, 1,  gm),
-                (0, 2, -(gm + gds + gmb)),
-                (0, 3,  gmb),
-                (2, 0, -gds),
-                (2, 1, -gm),
-                (2, 2,  gm + gds + gmb),
-                (2, 3, -gmb),
+                (0, 0, g_dd),
+                (0, 1, g_dg),
+                (0, 2, g_ds),
+                (0, 3, g_db),
+                (2, 0, g_sd),
+                (2, 1, g_sg),
+                (2, 2, g_ss),
+                (2, 3, g_sb),
             ],
             C: SmallVec::new(),
             rhs: SmallVec::new(),
@@ -210,9 +256,16 @@ impl DeviceModel for MosfetLevel3 {
         let is_pmos = params.get_or("pmos", 0.0) != 0.0;
         let sign = if is_pmos { -1.0 } else { 1.0 };
 
-        let vgs = sign * (voltages[1] - voltages[2]);
-        let vds = sign * (voltages[0] - voltages[2]);
-        let vbs = sign * (voltages[3] - voltages[2]);
+        let vgs_raw = sign * (voltages[1] - voltages[2]);
+        let vds_raw = sign * (voltages[0] - voltages[2]);
+        let vbs_raw = sign * (voltages[3] - voltages[2]);
+
+        // Source-drain swap when Vds < 0 (see MosfetLevel1 for full explanation).
+        let (vgs, vds, vbs, reversed) = if vds_raw >= 0.0 {
+            (vgs_raw, vds_raw, vbs_raw, false)
+        } else {
+            (vgs_raw - vds_raw, -vds_raw, vbs_raw - vds_raw, true)
+        };
         let vsb = -vbs;
 
         // Body effect + narrow-width (delta) + DIBL (eta)
@@ -268,20 +321,30 @@ impl DeviceModel for MosfetLevel3 {
         // DIBL contribution to output conductance: d(Vth)/d(Vds) = -eta → gds gain
         let gds_eta = gm * eta;
         let gds_total = gds + gds_eta;
-        let id_signed = sign * id;
+
+        let id_signed = if reversed { -sign * id } else { sign * id };
+
+        // Jacobian: when reversed, D/S columns swap (see MosfetLevel1).
+        let (g_dd, g_dg, g_ds, g_db, g_sd, g_sg, g_ss, g_sb) = if reversed {
+            ( gm + gds_total,    -gm,     -gds_total,     -gmb,
+             -(gm + gds_total),   gm,      gds_total,      gmb)
+        } else {
+            ( gds_total,           gm,     -(gm + gds_total + gmb),  gmb,
+             -gds_total,          -gm,      gm + gds_total + gmb,   -gmb)
+        };
 
         DeviceEval {
             g: smallvec![id_signed, 0.0, -id_signed, 0.0],
             q: smallvec![0.0, 0.0, 0.0, 0.0],
             G: smallvec![
-                (0, 0,  gds_total),
-                (0, 1,  gm),
-                (0, 2, -(gm + gds_total + gmb)),
-                (0, 3,  gmb),
-                (2, 0, -gds_total),
-                (2, 1, -gm),
-                (2, 2,  gm + gds_total + gmb),
-                (2, 3, -gmb),
+                (0, 0, g_dd),
+                (0, 1, g_dg),
+                (0, 2, g_ds),
+                (0, 3, g_db),
+                (2, 0, g_sd),
+                (2, 1, g_sg),
+                (2, 2, g_ss),
+                (2, 3, g_sb),
             ],
             C: SmallVec::new(),
             rhs: SmallVec::new(),
@@ -314,8 +377,16 @@ impl DeviceModel for MosfetLevel6 {
         let is_pmos = params.get_or("pmos", 0.0) != 0.0;
         let sign = if is_pmos { -1.0 } else { 1.0 };
 
-        let vgs = sign * (voltages[1] - voltages[2]);
-        let vds = sign * (voltages[0] - voltages[2]);
+        let vgs_raw = sign * (voltages[1] - voltages[2]);
+        let vds_raw = sign * (voltages[0] - voltages[2]);
+
+        // Source-drain swap when Vds < 0 (see MosfetLevel1 for full explanation).
+        let (vgs, vds, reversed) = if vds_raw >= 0.0 {
+            (vgs_raw, vds_raw, false)
+        } else {
+            (vgs_raw - vds_raw, -vds_raw, true)
+        };
+
         let vth_eff = if is_pmos { vto.abs() } else { vto };
         let vov = vgs - vth_eff;
 
@@ -339,17 +410,25 @@ impl DeviceModel for MosfetLevel6 {
             (id, gm, gds)
         };
 
-        let id_signed = sign * id;
+        let id_signed = if reversed { -sign * id } else { sign * id };
+
+        // Jacobian: when reversed, D/S columns swap (see MosfetLevel1).
+        let (g_dd, g_dg, g_ds, g_sd, g_sg, g_ss) = if reversed {
+            ( gm + gds, -gm, -gds, -(gm + gds),  gm,  gds)
+        } else {
+            ( gds,       gm, -(gm + gds), -gds, -gm, gm + gds)
+        };
+
         DeviceEval {
             g: smallvec![id_signed, 0.0, -id_signed, 0.0],
             q: smallvec![0.0, 0.0, 0.0, 0.0],
             G: smallvec![
-                (0, 0,  gds),
-                (0, 1,  gm),
-                (0, 2, -(gm + gds)),
-                (2, 0, -gds),
-                (2, 1, -gm),
-                (2, 2,  gm + gds),
+                (0, 0, g_dd),
+                (0, 1, g_dg),
+                (0, 2, g_ds),
+                (2, 0, g_sd),
+                (2, 1, g_sg),
+                (2, 2, g_ss),
             ],
             C: SmallVec::new(),
             rhs: SmallVec::new(),
@@ -408,6 +487,85 @@ mod tests {
         assert!((eval.g[0] + eval.g[2]).abs() < 1e-20);
     }
 
+    // ── Source-drain swap tests (Vds < 0) ────────────────────────────────
+
+    #[test]
+    fn nmos_negative_vds_reverses_current() {
+        // When Vd < Vs, current should flow from source to drain (negative Id).
+        let m = MosfetLevel1;
+        let params = nmos_params();
+        // Normal: Vd=3, Vg=2, Vs=0 → positive Id (drain→source)
+        let eval_normal = m.eval(&[3.0, 2.0, 0.0, 0.0], &params);
+        assert!(eval_normal.g[0] > 0.0, "normal: Id should be positive");
+
+        // Swapped: Vd=0, Vg=2, Vs=3 → Vds_raw = 0-3 = -3, triggers swap
+        // Effective: vgs' = Vgd = 2-0 = 2, vds' = 3
+        // After swap, id is positive internally but negated → Id at pin 0 is negative
+        let eval_swapped = m.eval(&[0.0, 2.0, 3.0, 0.0], &params);
+        assert!(eval_swapped.g[0] < 0.0,
+            "reversed Vds: Id at drain should be negative, got {}", eval_swapped.g[0]);
+    }
+
+    #[test]
+    fn nmos_negative_vds_current_conservation() {
+        // KCL: current into drain + current into source = 0
+        let m = MosfetLevel1;
+        let params = nmos_params();
+        let eval = m.eval(&[0.0, 2.0, 3.0, 0.0], &params);
+        assert!((eval.g[0] + eval.g[2]).abs() < 1e-20,
+            "KCL violated: Id={} + Is={} != 0", eval.g[0], eval.g[2]);
+    }
+
+    #[test]
+    fn nmos_swap_symmetry() {
+        // Swapping drain and source physically should give equal-magnitude,
+        // opposite-sign drain current (for symmetric Vgs conditions).
+        let m = MosfetLevel1;
+        let params = nmos_params();
+        // Case A: Vd=3, Vg=2, Vs=0 → Vgs=2, Vds=3
+        let eval_a = m.eval(&[3.0, 2.0, 0.0, 0.0], &params);
+        // Case B: Vd=0, Vg=2, Vs=3 → swap triggers, effective Vgs'=Vgd=2, Vds'=3
+        let eval_b = m.eval(&[0.0, 2.0, 3.0, 0.0], &params);
+        // Magnitudes should be equal (same effective operating point)
+        let id_a = eval_a.g[0];
+        let id_b = eval_b.g[0];
+        assert!((id_a + id_b).abs() < 1e-15,
+            "swap symmetry: |Id_normal| should equal |Id_reversed|: {} vs {}", id_a, id_b);
+    }
+
+    #[test]
+    fn nmos_negative_vds_cutoff() {
+        // Vds < 0 but device in cutoff (Vgd < Vth after swap)
+        let m = MosfetLevel1;
+        let params = nmos_params();
+        // Vd=-1, Vg=0.3, Vs=0 → Vds_raw = -1, swap → vgs'=Vgd=0.3-(-1)=1.3... no
+        // Actually: Vd=0, Vg=0.3, Vs=3 → Vds_raw = 0-3 = -3, swap → vgs'=Vgd=0.3-0=0.3
+        // 0.3 < Vth=0.7 → cutoff
+        let eval = m.eval(&[0.0, 0.3, 3.0, 0.0], &params);
+        assert!(eval.g[0].abs() < 1e-10,
+            "reversed cutoff: current should be ~0, got {}", eval.g[0]);
+    }
+
+    #[test]
+    fn pmos_negative_vds_swap() {
+        // PMOS in reversed condition
+        let m = MosfetLevel1;
+        let mut p = nmos_params();
+        p.set("pmos", 1.0);
+        p.set("vth", -0.7); // PMOS threshold
+
+        // Normal PMOS: Vd=0, Vg=0, Vs=3.3, Vb=3.3
+        // sign=-1: vgs = -1*(0-3.3) = 3.3, vds = -1*(0-3.3) = 3.3 → normal operation
+        let eval_normal = m.eval(&[0.0, 0.0, 3.3, 3.3], &p);
+        assert!(eval_normal.g[0] < 0.0,
+            "PMOS normal: Id at drain should be negative (current into drain), got {}",
+            eval_normal.g[0]);
+
+        // KCL conservation
+        assert!((eval_normal.g[0] + eval_normal.g[2]).abs() < 1e-20,
+            "PMOS KCL violated");
+    }
+
     // ── Level 2 tests ──────────────────────────────────────────────────────
 
     #[test]
@@ -454,21 +612,27 @@ mod tests {
 
     #[test]
     fn mosfet_l3_dibl() {
-        // DIBL: eta > 0 lowers Vth at higher Vds → higher Id
+        // DIBL: eta > 0 lowers Vth → higher overdrive → higher Id at the same Vds.
+        // Compare eta=0 vs eta>0 at the same operating point to isolate the DIBL effect
+        // from region changes (kappa can move the saturation boundary).
         let m = MosfetLevel3;
-        let mut p = ParamMap::new();
-        p.set("kp",    2e-5);
-        p.set("vto",   0.7);
-        p.set("gamma", 0.0);
-        p.set("phi",   0.6);
-        p.set("eta",   0.1);
-        p.set("w",     10e-6);
-        p.set("l",     1e-6);
-        // Same Vgs, different Vds — higher Vds should give more current with eta>0
-        let eval_hi_vds = m.eval(&[2.0, 2.0, 0.0, 0.0], &p);
-        let eval_lo_vds = m.eval(&[1.0, 2.0, 0.0, 0.0], &p);
-        assert!(eval_hi_vds.g[0] > eval_lo_vds.g[0],
-            "DIBL should boost Id at higher Vds");
+        let mut p_no_dibl = ParamMap::new();
+        p_no_dibl.set("kp",    2e-5);
+        p_no_dibl.set("vto",   0.7);
+        p_no_dibl.set("gamma", 0.0);
+        p_no_dibl.set("phi",   0.6);
+        p_no_dibl.set("eta",   0.0);
+        p_no_dibl.set("w",     10e-6);
+        p_no_dibl.set("l",     1e-6);
+
+        let mut p_dibl = p_no_dibl.clone();
+        p_dibl.set("eta", 0.1);
+
+        // Same voltages: Vds=2 gives eta*Vds = 0.2V threshold reduction
+        let eval_no_dibl = m.eval(&[2.0, 2.0, 0.0, 0.0], &p_no_dibl);
+        let eval_dibl    = m.eval(&[2.0, 2.0, 0.0, 0.0], &p_dibl);
+        assert!(eval_dibl.g[0] > eval_no_dibl.g[0],
+            "DIBL should boost Id: with eta={} vs without={}", eval_dibl.g[0], eval_no_dibl.g[0]);
     }
 
     #[test]

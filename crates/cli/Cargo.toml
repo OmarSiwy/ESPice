@@ -1,0 +1,16 @@
+[package]
+name = "bigospice-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "bigospice"
+path = "src/main.rs"
+
+[dependencies]
+bigospice-core     = { workspace = true }
+bigospice-parser   = { workspace = true }
+bigospice-analysis = { workspace = true }
+bigospice-device   = { workspace = true }

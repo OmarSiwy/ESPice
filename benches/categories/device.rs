@@ -1,6 +1,6 @@
 //! Device evaluation benchmarks: MOSFET, diode, BJT stamp performance.
 
-use criterion::{BenchmarkId, Criterion};
+use criterion::Criterion;
 use bigospice_parser::SpiceParser;
 use bigospice_device::DeviceRegistry;
 

@@ -4,9 +4,9 @@
 //   token.rs, lexer.rs, expr.rs, netlist.rs, spice.rs
 
 use ahash::AHashMap;
-use bigospice_core::{DeviceId, DeviceInstance, DeviceKind, NodeId};
+use bigospice_core::{DeviceInstance, DeviceKind, NodeId};
 
-use crate::tokenizer::{eval_expression, parse_brace_expression, parse_expression, Lexer, SpiceParser};
+use crate::tokenizer::{eval_expression, parse_expression, Lexer, SpiceParser};
 use crate::types::{
     AnalysisKind, AnalysisStatement, ElementStatement, ModelStatement, ParsedNetlist, SubcircuitDef,
     Token,

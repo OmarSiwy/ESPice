@@ -2660,12 +2660,10 @@ impl SpiceParser {
         // .DC srcname start stop step
         let mut idx = 0;
 
-        // Source name.
+        // Source name — encode into params as ("__dc_src__<name>", 0.0).
         if idx < line.len() {
             if let Token::Word(ref src) = line[idx] {
-                // Store source name encoded as a special param.
-                // We'll just skip it for now — the analysis knows the source.
-                let _ = src;
+                params.push((format!("__dc_src__{}", src.to_lowercase()), 0.0));
                 idx += 1;
             }
         }

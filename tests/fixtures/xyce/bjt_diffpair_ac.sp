@@ -1,0 +1,18 @@
+SIMPLE DIFFERENTIAL PAIR
+VCC  7  0    12
+VEE  8  0    -12
+VIN  1  0 AC 1 0 SIN 0 1 1K 0 0 0
+RS1  1  2    1K
+RS2  6  0    1K
+Q1   3  2  4 MOD1
+Q2   5  6  4 MOD1
+RC1  7  3    10K
+RC2  7  5    10K
+RE   4  8    10K
+.MODEL MOD1 NPN BF=50 VAF=50 IS=1.E-12 RB=100 CJC=.5PF TF=.6NS
+
+.options device newexcessphase=1
+.print ac v(5)
+.AC DEC 10 1 100MEG
+
+.END

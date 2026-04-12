@@ -1,0 +1,31 @@
+# BUG: RLC Underdamped Step — Convergence Failure
+
+## Circuit
+`rlc_underdamped_step.sp` — V1 PULSE(0 1 0 1n 1n 100u 200u), R=10, L=1mH, C=100nF, .TRAN 1u 500u
+
+## Symptom
+```
+simulation error: Convergence failure after 50 iterations (residual=1.91e-6)
+```
+BigOSpice exits with code 1. ngspice solves it correctly.
+
+## Root Cause (suspected)
+This is a purely linear RLC circuit. Newton-Raphson on a linear system should converge in exactly 1 iteration.
+Failing after 50 iterations with residual=1.91e-6 (close to but not reaching NEWTON_RESTOL=1e-9) suggests:
+
+1. The Jacobian assembled by `assemble_be_jacobian` may have a sign or scaling error in the inductor C-matrix stamp.
+2. The inductor branch equation residual in `assemble_be_residual` may accumulate incorrectly across Newton iters.
+3. Possibly: the solution vector `x` is being updated in a way that the linear residual can never reach 1e-9 due to
+   floating-point ill-conditioning from L/h = 1e-3/1e-6 = 1000 (large companion conductance).
+
+## Key Files to Investigate
+- `crates/analysis/src/companion.rs` — `assemble_be_jacobian`, `assemble_be_residual`
+- `crates/analysis/src/transient.rs` — `newton_solve_step` (check convergence criterion mixing Volt/Amp rows)
+- `crates/device/src/inductor.rs` — `eval_with_branch` (g[2]=V0-V1, q[2]=L*I)
+- `crates/solver/src/stamper.rs` — `stamp_circuit_gc_at_time` (check branch current extraction)
+
+## Likely Fix
+Either:
+a) Loosen NEWTON_RESTOL to 1e-6 (sufficient for 0.1% accuracy target)
+b) Use a mixed VTOL/RESTOL check (V-tolerance for voltage rows, I-tolerance for KCL rows)
+c) Check sign of Jacobian update: Newton uses `x += J^{-1} * (-residual)` — verify the sign in `newton_solve_step`

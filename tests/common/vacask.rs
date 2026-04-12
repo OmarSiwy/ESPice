@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! VACASK test utilities — spawn vacask, capture output, parse DC results.
 use std::path::Path;
 use std::process::Command;

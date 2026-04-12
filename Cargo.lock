@@ -127,6 +127,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bigospice-cli"
+version = "0.1.0"
+dependencies = [
+ "bigospice-analysis",
+ "bigospice-core",
+ "bigospice-device",
+ "bigospice-parser",
+]
+
+[[package]]
 name = "bigospice-compute"
 version = "0.1.0"
 dependencies = [

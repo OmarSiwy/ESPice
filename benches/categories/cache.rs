@@ -7,29 +7,20 @@ use bigospice_device::DeviceRegistry;
 pub fn bench_cache(c: &mut Criterion) {
     let mut group = c.benchmark_group("cache");
 
-    let netlist = "\
-* Cache bench
-V1 1 0 DC 5
-R1 1 2 1k
-R2 2 0 1k
-.OP
-.END
-";
+    let netlist = crate::common::load_fixture("voltage_divider");
 
     // Warm-start: run twice, second should reuse cached solution
     group.bench_function("dc_op_warm_start", |b| {
-        let (mut circuit, _, _) = SpiceParser::parse(netlist).unwrap();
+        let (circuit, _, _) = SpiceParser::parse(&netlist).unwrap();
         let registry = DeviceRegistry::new_default();
-        // First run to populate cache
-        let _first = bigospice_analysis::run_dc_op(&circuit, &registry).unwrap();
-        b.iter(|| {
-            bigospice_analysis::run_dc_op(&circuit, &registry).unwrap()
-        });
+        // First run populates cache
+        let _ = bigospice_analysis::run_dc_op(&circuit, &registry).unwrap();
+        b.iter(|| bigospice_analysis::run_dc_op(&circuit, &registry).unwrap());
     });
 
-    // Incremental: change a parameter value between runs
+    // Incremental: alternate between two resistance values
     group.bench_function("dc_op_incremental_param_change", |b| {
-        let (mut circuit, _, _) = SpiceParser::parse(netlist).unwrap();
+        let (mut circuit, _, _) = SpiceParser::parse(&netlist).unwrap();
         let registry = DeviceRegistry::new_default();
         let mut toggle = false;
         b.iter(|| {

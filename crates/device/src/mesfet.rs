@@ -288,7 +288,7 @@ mod tests {
     #[test]
     fn mesfet_vto_alias() {
         let m = Mesfet::nmos();
-        let mut p_vth = n_params(); // uses "vth"
+        let p_vth = n_params(); // uses "vth"
         let mut p_vto = ParamMap::new();
         p_vto.set("beta",    1e-3_f64);
         p_vto.set("vto",    -0.8_f64); // alias

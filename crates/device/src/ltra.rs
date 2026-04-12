@@ -396,27 +396,30 @@ pub fn ltra_kernel(tau: f64, lp: &LtraLineParams) -> f64 {
             0.0
         }
         LtraRegime::RcDominated => {
-            // RC diffusion kernel: h(tau) = (1/sqrt(pi*r*c)) * exp(-tau^2 / (4*r*c*len^2))
-            // Per-unit quantities: use total r*len, c*len.
-            let rc = lp.r * lp.len * lp.c * lp.len;
-            if rc <= 0.0 {
+            // Causal RC diffusion kernel (Roychowdhury-Pederson):
+            //   h(tau) = (len / (2 * sqrt(pi * R_tot * C_tot))) * tau^(-3/2) * exp(-R_tot*C_tot*len^2 / (4*tau))
+            // where R_tot = r*len, C_tot = c*len.
+            let r_tot = lp.r * lp.len;
+            let c_tot = lp.c * lp.len;
+            let rc = r_tot * c_tot;
+            if rc <= 0.0 || tau <= 0.0 {
                 return 0.0;
             }
-            let denom = 4.0 * rc;
-            (1.0 / (std::f64::consts::PI * rc).sqrt()) * (-tau * tau / denom).exp()
+            let norm = lp.len / (2.0 * (std::f64::consts::PI * rc).sqrt());
+            norm * tau.powf(-1.5) * (-rc / (4.0 * tau)).exp()
         }
         LtraRegime::General => {
             let td = lp.td();
             if tau < td {
                 return 0.0;
             }
-            // Attenuated travelling-wave kernel.
-            // h(tau) = exp(-alpha*(tau-TD)) * I0(beta*sqrt((tau-TD)*tau)) approx
-            // where alpha = (R/2L + G/2C), beta = sqrt(R*G).
-            // Simplified: use exponential attenuation at the wave front.
+            // Attenuated travelling-wave kernel (without 1/Z0 factor).
+            // h(tau) = exp(-alpha*(tau-TD)) for tau > TD
+            // where alpha = (R/2L + G/2C).
+            // The 1/Z0 factor is applied separately in the companion model.
             let alpha = 0.5 * (lp.r / lp.l.max(1e-30) + lp.g / lp.c.max(1e-30));
             let delay = tau - td;
-            (-alpha * delay).exp() / lp.z0()
+            (-alpha * delay).exp()
         }
     }
 }
@@ -476,9 +479,28 @@ pub struct LtraNorton {
     pub g_eq_p2: f64,
 }
 
+/// Interpolate a history array at `target` time using linear interpolation.
+fn interp_history(times: &[f64], values: &[f64], target: f64) -> f64 {
+    if times.is_empty() { return 0.0; }
+    if target <= times[0] { return values[0]; }
+    if target >= *times.last().unwrap() { return *values.last().unwrap(); }
+    let idx = times.partition_point(|&t| t <= target);
+    if idx == 0 { return values[0]; }
+    if idx >= times.len() { return *values.last().unwrap(); }
+    let (t0, v0) = (times[idx - 1], values[idx - 1]);
+    let (t1, v1) = (times[idx], values[idx]);
+    let frac = (target - t0) / (t1 - t0);
+    v0 + frac * (v1 - v0)
+}
+
 /// Compute Norton equivalents for both ports of the LTRA line at `t_now`.
 ///
-/// `times`, `v1`, `v2` are the SoA history slices from `LtraHistoryStore`.
+/// Uses the attenuated Branin companion model: at each port, the Norton
+/// current comes from the *opposite* port's wave variable `E = V + Z0*I`
+/// delayed by TD and attenuated by `A = exp(-alpha*TD)`.
+///
+///   I_eq_p2(t) = -Y0 * A * E1(t - TD)
+///
 /// Returns `LtraNorton::default()` (zeros) when the history is empty.
 pub fn compute_norton_equivalent(
     t_now: f64,
@@ -486,46 +508,46 @@ pub fn compute_norton_equivalent(
     times: &[f64],
     v1: &[f64],
     v2: &[f64],
+    i1: &[f64],
+    i2: &[f64],
 ) -> LtraNorton {
     if times.len() < 2 {
         return LtraNorton::default();
     }
 
-    let n = times.len();
+    let z0 = lp.z0();
+    let y0 = 1.0 / z0;
+    let td = lp.td();
+    let alpha = 0.5 * (lp.r / lp.l.max(1e-30) + lp.g / lp.c.max(1e-30));
+    let atten = (-alpha * td).exp(); // attenuation factor
 
-    // Trapezoidal convolution: integral_0^t h(t - tau) * obs(tau) d tau.
-    // We use history times as quadrature points.
-    let convolve = |obs: &[f64]| -> f64 {
-        let mut acc = 0.0;
-        for i in 1..n {
-            let tau_i = t_now - times[i];
-            let tau_im1 = t_now - times[i - 1];
-            if tau_i < 0.0 {
-                break;
-            }
-            let h_i = ltra_kernel(tau_i, lp);
-            let h_im1 = ltra_kernel(tau_im1, lp);
-            let dt = times[i] - times[i - 1];
-            acc += 0.5 * dt * (h_i * obs[i] + h_im1 * obs[i - 1]);
-        }
-        acc
+    let t_delayed = t_now - td;
+
+    // Look up wave variables E = V + Z0*I at the delayed time.
+    let e1_delayed = if t_delayed >= times[0] {
+        let v = interp_history(times, v1, t_delayed);
+        let i = interp_history(times, i1, t_delayed);
+        v + z0 * i
+    } else {
+        0.0
+    };
+    let e2_delayed = if t_delayed >= times[0] {
+        let v = interp_history(times, v2, t_delayed);
+        let i = interp_history(times, i2, t_delayed);
+        v + z0 * i
+    } else {
+        0.0
     };
 
-    let i1 = convolve(v1);
-    let i2 = convolve(v2);
-
-    // Small-signal conductance companion (Jacobian of the convolution
-    // w.r.t. the current voltage sample, using the trapezoidal rule's
-    // last-step weight h(0) * dt/2).
-    let last_dt = if n >= 2 { times[n - 1] - times[n - 2] } else { 0.0 };
-    let h0 = ltra_kernel(0.0, lp);
-    let g_eq = 0.5 * last_dt * h0;
+    // Norton current: I_eq = -Y0 * A * E_opposite(t - TD)
+    let i_eq_p1 = -y0 * atten * e2_delayed;
+    let i_eq_p2 = -y0 * atten * e1_delayed;
 
     LtraNorton {
-        i_eq_p1: i1,
-        g_eq_p1: g_eq,
-        i_eq_p2: i2,
-        g_eq_p2: g_eq,
+        i_eq_p1,
+        g_eq_p1: y0,
+        i_eq_p2,
+        g_eq_p2: y0,
     }
 }
 
@@ -549,51 +571,46 @@ pub fn compute_norton_equivalent_nonint(
     times: &[f64],
     v1: &[f64],
     v2: &[f64],
+    i1: &[f64],
+    i2: &[f64],
     nonint: bool,
 ) -> LtraNorton {
     if !nonint {
-        return compute_norton_equivalent(t_now, lp, times, v1, v2);
+        return compute_norton_equivalent(t_now, lp, times, v1, v2, i1, i2);
     }
+    // NONINT variant uses nearest-neighbour lookup instead of interpolation.
     if times.len() < 2 {
         return LtraNorton::default();
     }
 
-    let n = times.len();
+    let z0 = lp.z0();
+    let y0 = 1.0 / z0;
+    let td = lp.td();
+    let alpha = 0.5 * (lp.r / lp.l.max(1e-30) + lp.g / lp.c.max(1e-30));
+    let atten = (-alpha * td).exp();
 
-    // Midpoint-rule convolution: each interval [t_{i-1}, t_i] contributes
-    //   Δt_i · h(t_now - t_mid) · obs_nearest(t_mid)
-    // where t_mid = (t_{i-1} + t_i) / 2 and obs_nearest is the
-    // non-interpolated history lookup.
-    let convolve = |obs: &[f64]| -> f64 {
-        let mut acc = 0.0;
-        for i in 1..n {
-            let t_mid = 0.5 * (times[i] + times[i - 1]);
-            let tau_mid = t_now - t_mid;
-            if tau_mid < 0.0 {
-                break;
-            }
-            let h_mid = ltra_kernel(tau_mid, lp);
-            let (obs_mid, _) = nearest_history(times, obs, t_mid);
-            let dt = times[i] - times[i - 1];
-            acc += dt * h_mid * obs_mid;
-        }
-        acc
-    };
+    let t_delayed = t_now - td;
 
-    let i1 = convolve(v1);
-    let i2 = convolve(v2);
+    // Nearest-neighbour wave variable lookup at delayed time.
+    let e1_delayed = if t_delayed >= times[0] {
+        let (v, _) = nearest_history(times, v1, t_delayed);
+        let (i, _) = nearest_history(times, i1, t_delayed);
+        v + z0 * i
+    } else { 0.0 };
+    let e2_delayed = if t_delayed >= times[0] {
+        let (v, _) = nearest_history(times, v2, t_delayed);
+        let (i, _) = nearest_history(times, i2, t_delayed);
+        v + z0 * i
+    } else { 0.0 };
 
-    // Companion conductance — same form as the interpolated path: the
-    // kernel weight at zero-lag times the most recent step Δt.
-    let last_dt = times[n - 1] - times[n - 2];
-    let h0 = ltra_kernel(0.0, lp);
-    let g_eq = last_dt * h0;
+    let i_eq_p1 = -y0 * atten * e2_delayed;
+    let i_eq_p2 = -y0 * atten * e1_delayed;
 
     LtraNorton {
-        i_eq_p1: i1,
-        g_eq_p1: g_eq,
-        i_eq_p2: i2,
-        g_eq_p2: g_eq,
+        i_eq_p1,
+        g_eq_p1: y0,
+        i_eq_p2,
+        g_eq_p2: y0,
     }
 }
 
@@ -608,9 +625,11 @@ pub fn eval_ltra_transient_slices_nonint(
     times: &[f64],
     v1: &[f64],
     v2: &[f64],
+    i1: &[f64],
+    i2: &[f64],
     nonint: bool,
 ) -> LtraNorton {
-    compute_norton_equivalent_nonint(t_now, lp, times, v1, v2, nonint)
+    compute_norton_equivalent_nonint(t_now, lp, times, v1, v2, i1, i2, nonint)
 }
 
 #[cfg(test)]
@@ -775,7 +794,7 @@ mod tests {
     #[test]
     fn norton_equiv_zero_for_empty_history() {
         let lp = lp_rc();
-        let n = compute_norton_equivalent(1.0, &lp, &[], &[], &[]);
+        let n = compute_norton_equivalent(1.0, &lp, &[], &[], &[], &[], &[]);
         assert_eq!(n.i_eq_p1, 0.0);
         assert_eq!(n.g_eq_p1, 0.0);
     }
@@ -788,7 +807,9 @@ mod tests {
         let v1: Vec<f64> = vec![1.0; times.len()];
         let v2: Vec<f64> = vec![0.0; times.len()];
         let t_now = *times.last().unwrap();
-        let n = compute_norton_equivalent(t_now, &lp, &times, &v1, &v2);
+        let i1: Vec<f64> = vec![0.0; times.len()];
+        let i2: Vec<f64> = vec![0.0; times.len()];
+        let n = compute_norton_equivalent(t_now, &lp, &times, &v1, &v2, &i1, &i2);
         assert!(n.i_eq_p1 > 0.0, "I_eq_p1 should be positive with 1V history");
     }
 }

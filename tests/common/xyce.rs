@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Xyce test utilities — spawn Xyce, parse .prn DC results.
 use std::path::Path;
 use std::process::Command;

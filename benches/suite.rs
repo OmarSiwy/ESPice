@@ -35,7 +35,6 @@ mod accuracy;
 #[path = "categories/end_to_end.rs"]
 mod end_to_end;
 
-use bigospice_analysis;
 use criterion::{criterion_group, criterion_main};
 
 criterion_group!(

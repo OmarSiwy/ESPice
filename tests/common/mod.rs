@@ -2,22 +2,35 @@
 // Shared test utilities for all suite categories.
 // Each suite file includes this via: #[path = "../common/mod.rs"] mod common;
 
+#[allow(dead_code)]
 pub mod tolerance;
-pub mod compare;
+#[allow(dead_code)]
 pub mod rawfile;
+#[allow(dead_code)]
 pub mod golden;
+#[allow(dead_code)]
 pub mod runner;
+#[allow(dead_code)]
 pub mod ngspice;
+#[allow(dead_code)]
 pub mod vacask;
+#[allow(dead_code)]
 pub mod xyce;
-pub mod config;
 
+// Re-exports used by various test binaries. Not every binary uses every
+// symbol, so we allow unused imports here — each test binary uses a
+// different subset.
+#[allow(unused_imports)]
 pub use tolerance::Tolerance;
-pub use compare::{CompareResult, SignalMismatch, compare_dc_values, compare_waveforms};
+#[allow(unused_imports)]
 pub use golden::GoldenData;
-pub use config::{TestConfig, discover_tests, ExternalSuite, ReferenceMeta};
-pub use runner::{parse_netlist_file, parse_netlist_str, run_dc_op, run_dc_sweep, run_transient, run_ac, RunError};
-pub use rawfile::{RawFile, RawFlag, RawVariable, RawFileError};
-pub use ngspice::{NgspiceConfig, NgspiceResult, NgspiceError};
-pub use vacask::{VacaskConfig, VacaskResult, VacaskError};
-pub use xyce::{XyceConfig, XyceResult, XyceError};
+#[allow(unused_imports)]
+pub use runner::{parse_netlist_str, run_dc_op, run_dc_sweep, run_transient, run_ac};
+#[allow(unused_imports)]
+pub use rawfile::{RawFile, RawFlag};
+#[allow(unused_imports)]
+pub use ngspice::NgspiceConfig;
+#[allow(unused_imports)]
+pub use vacask::VacaskConfig;
+#[allow(unused_imports)]
+pub use xyce::XyceConfig;

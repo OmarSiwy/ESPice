@@ -1,79 +1,14 @@
 //! Head-to-head comparison benchmarks: BigOSpice vs ngspice/xyce/VACASK.
 //!
-//! Measures wall-time for BigOSpice and each available external simulator
-//! on the same circuits. Use `BIGOSPICE_HAVE_SIMS=1` to opt-in.
-//! Individual simulators can be overridden via NGSPICE_BIN, XYCE_BIN, VACASK_BIN.
+//! Discovers all `.sp` fixture files across every known subdirectory under
+//! `tests/fixtures/` and runs each through BigOSpice and any available
+//! external simulators.
+//! Set `BIGOSPICE_HAVE_SIMS=1` to enable external comparisons.
+//! Override binaries via `NGSPICE_BIN`, `XYCE_BIN`, `VACASK_BIN`.
 
 use criterion::Criterion;
 
-// ── circuit corpus ────────────────────────────────────────────────────────────
-
-const DIVIDER_DC: &str = "\
-* Voltage divider — DC OP
-V1 1 0 DC 5
-R1 1 2 1k
-R2 2 0 1k
-.OP
-.END
-";
-
-const RC_CHAIN_DC: &str = "\
-* Three-resistor chain — DC OP
-V1 1 0 DC 10
-R1 1 2 1k
-R2 2 3 1k
-R3 3 0 1k
-.OP
-.END
-";
-
-const RC_TRAN: &str = "\
-* RC transient — 1 µs rise
-V1 1 0 PULSE(0 5 0 1n 1n 500n 1u)
-R1 1 2 1k
-C1 2 0 1n
-.TRAN 10n 2u
-.END
-";
-
-const RLC_AC: &str = "\
-* RLC bandpass — AC sweep 1 kHz–10 MHz
-V1 1 0 AC 1
-R1 1 2 100
-L1 2 3 1u
-C1 3 0 1n
-R2 3 0 1k
-.AC DEC 20 1k 10MEG
-.END
-";
-
-const RC_LADDER_100: &str = "\
-* RC ladder 100 nodes
-V1 1 0 DC 1
-R1 1 2 1k
-C1 2 0 1n
-R2 2 3 1k
-C2 3 0 1n
-R3 3 4 1k
-C3 4 0 1n
-R4 4 5 1k
-C4 5 0 1n
-R5 5 6 1k
-C5 6 0 1n
-R6 6 7 1k
-C6 7 0 1n
-R7 7 8 1k
-C7 8 0 1n
-R8 8 9 1k
-C8 9 0 1n
-R9 9 10 1k
-C9 10 0 1n
-R10 10 0 1k
-.OP
-.END
-";
-
-// ── helpers ───────────────────────────────────────────────────────────────────
+// ── external simulator runners ─────────────────────────────────────────────────
 
 fn ngspice_run(bin: &str, netlist: &str) {
     let tmp = tempfile::tempdir().unwrap();
@@ -123,45 +58,55 @@ fn vacask_run(bin: &str, netlist: &str) {
         .unwrap();
 }
 
-fn bigospice_dc(netlist: &str) {
+/// Run BigOSpice on a netlist string, dispatching on whatever analyses the
+/// file declares (DC OP, transient, AC). Parameters are taken from the
+/// parsed analysis statements, mirroring the CLI behaviour.
+fn bigospice_run(netlist: &str) {
+    use bigospice_analysis::{AcConfig, AcSweepType, TransientConfig};
     use bigospice_device::DeviceRegistry;
-    use bigospice_parser::SpiceParser;
-    let (circuit, _, _) = SpiceParser::parse(netlist).unwrap();
+    use bigospice_parser::{AnalysisKind, SpiceParser};
+
+    let Ok((circuit, analyses, _)) = SpiceParser::parse(netlist) else { return };
     let registry = DeviceRegistry::new_default();
-    let _ = bigospice_analysis::run_dc_op(&circuit, &registry);
+
+    for stmt in &analyses {
+        let p = |key: &str| stmt.params.iter().find(|(k, _)| k == key).map(|(_, v)| *v);
+        let _ = match &stmt.kind {
+            AnalysisKind::DcOp => bigospice_analysis::run_dc_op(&circuit, &registry).map(|_| ()),
+            AnalysisKind::Tran => {
+                let cfg = TransientConfig::new(
+                    p("tstep").unwrap_or(1e-9),
+                    p("tstop").unwrap_or(1e-6),
+                );
+                bigospice_analysis::run_transient(&mut circuit.clone(), &registry, &cfg)
+                    .map(|_| ())
+            }
+            AnalysisKind::Ac => {
+                let sweep = match p("sweep_type").unwrap_or(1.0) as u8 {
+                    0 => AcSweepType::Linear,
+                    2 => AcSweepType::Octave,
+                    _ => AcSweepType::Decade,
+                };
+                let cfg = AcConfig::new(
+                    p("fstart").unwrap_or(1.0),
+                    p("fstop").unwrap_or(1e9),
+                    p("npoints").unwrap_or(10.0) as usize,
+                    sweep,
+                );
+                bigospice_analysis::run_ac(&circuit, &registry, &cfg).map(|_| ())
+            }
+            _ => continue,
+        };
+    }
 }
 
-fn bigospice_tran(netlist: &str) {
-    use bigospice_analysis::{IntegrationMethod, TransientConfig};
-    use bigospice_device::DeviceRegistry;
-    use bigospice_parser::SpiceParser;
-    let (mut circuit, _, _) = SpiceParser::parse(netlist).unwrap();
-    let registry = DeviceRegistry::new_default();
-    let cfg = TransientConfig {
-        tstep: 10e-9,
-        tstop: 2e-6,
-        method: IntegrationMethod::BackwardEuler,
-        uic: false,
-        adaptive: false,
-        tmax: None,
-        checkpoint_interval: 0,
-    };
-    let _ = bigospice_analysis::run_transient(&mut circuit, &registry, &cfg);
-}
-
-fn bigospice_ac(netlist: &str) {
-    use bigospice_analysis::{AcConfig, AcSweepType};
-    use bigospice_device::DeviceRegistry;
-    use bigospice_parser::SpiceParser;
-    let (circuit, _, _) = SpiceParser::parse(netlist).unwrap();
-    let registry = DeviceRegistry::new_default();
-    let cfg = AcConfig {
-        freq_start: 1e3,
-        freq_stop: 10e6,
-        num_points: 20,
-        sweep_type: AcSweepType::Decade,
-    };
-    let _ = bigospice_analysis::run_ac(&circuit, &registry, &cfg);
+fn sim_available(bin: &str, version_flag: &str) -> bool {
+    std::process::Command::new(bin)
+        .arg(version_flag)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok()
 }
 
 // ── bench entry ───────────────────────────────────────────────────────────────
@@ -172,59 +117,26 @@ pub fn bench_compare(c: &mut Criterion) {
     let xyce = std::env::var("XYCE_BIN").unwrap_or_else(|_| "Xyce".into());
     let vacask = std::env::var("VACASK_BIN").unwrap_or_else(|_| "vacask".into());
 
-    let ng_ok = have_sims
-        && std::process::Command::new(&ng)
-            .arg("--version")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok();
+    let ng_ok = have_sims && sim_available(&ng, "--version");
+    let xyce_ok = have_sims && sim_available(&xyce, "-v");
+    let vacask_ok = have_sims && sim_available(&vacask, "--version");
 
-    let xyce_ok = have_sims
-        && std::process::Command::new(&xyce)
-            .arg("-v")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok();
+    for (name, netlist) in crate::common::discover_all_fixtures() {
+        let mut group = c.benchmark_group(format!("compare/{name}"));
 
-    let vacask_ok = have_sims
-        && std::process::Command::new(&vacask)
-            .arg("--version")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok();
-
-    // ── corpus ────────────────────────────────────────────────────────────────
-
-    let corpus: &[(&str, &str, fn(&str))] = &[
-        ("dc/divider",       DIVIDER_DC,    bigospice_dc),
-        ("dc/rc_chain",      RC_CHAIN_DC,   bigospice_dc),
-        ("dc/rc_ladder_100", RC_LADDER_100, bigospice_dc),
-        ("tran/rc",          RC_TRAN,       bigospice_tran),
-        ("ac/rlc_bandpass",  RLC_AC,        bigospice_ac),
-    ];
-
-    for (name, netlist, bos_fn) in corpus {
-        let group_name = format!("compare/{name}");
-        let mut group = c.benchmark_group(&group_name);
-
-        group.bench_function("bigospice", |b| b.iter(|| bos_fn(netlist)));
+        group.bench_function("bigospice", |b| b.iter(|| bigospice_run(&netlist)));
 
         if ng_ok {
             let ng = ng.clone();
-            group.bench_function("ngspice", |b| b.iter(|| ngspice_run(&ng, netlist)));
+            group.bench_function("ngspice", |b| b.iter(|| ngspice_run(&ng, &netlist)));
         }
-
         if xyce_ok {
             let xyce = xyce.clone();
-            group.bench_function("xyce", |b| b.iter(|| xyce_run(&xyce, netlist)));
+            group.bench_function("xyce", |b| b.iter(|| xyce_run(&xyce, &netlist)));
         }
-
         if vacask_ok {
             let vacask = vacask.clone();
-            group.bench_function("vacask", |b| b.iter(|| vacask_run(&vacask, netlist)));
+            group.bench_function("vacask", |b| b.iter(|| vacask_run(&vacask, &netlist)));
         }
 
         group.finish();

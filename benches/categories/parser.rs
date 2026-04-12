@@ -1,4 +1,7 @@
-//! Parser benchmarks: tokenizer, netlist parse throughput.
+//! Parser benchmarks: tokenizer and netlist parse throughput.
+//!
+//! File-based fixtures measure real-world parse performance; programmatic
+//! ladders give a scaling curve across netlist sizes.
 
 use criterion::{BenchmarkId, Criterion};
 use bigospice_parser::SpiceParser;
@@ -6,19 +9,16 @@ use bigospice_parser::SpiceParser;
 pub fn bench_parser(c: &mut Criterion) {
     let mut group = c.benchmark_group("parser");
 
-    let simple = "\
-* Simple divider
-V1 1 0 DC 5
-R1 1 2 1k
-R2 2 0 1k
-.OP
-.END
-";
-    group.bench_function("simple_divider", |b| {
-        b.iter(|| SpiceParser::parse(simple).unwrap());
-    });
+    // ── fixture files ──────────────────────────────────────────────────────────
+    for (name, content) in crate::common::discover_fixtures() {
+        group.bench_with_input(
+            BenchmarkId::new("fixture", &name),
+            &content,
+            |b, s| b.iter(|| SpiceParser::parse(s).unwrap()),
+        );
+    }
 
-    // Scale test: ladder with N resistors
+    // ── programmatic scaling: N-node resistor ladders ──────────────────────────
     for &n in &[10usize, 100, 500] {
         let mut netlist = format!("* {n}-node ladder\nV1 1 0 DC 1\n");
         for i in 1..=n {

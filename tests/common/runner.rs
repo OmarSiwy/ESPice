@@ -1,4 +1,4 @@
-use std::path::Path;
+#![allow(dead_code)]
 use bigospice_analysis::{
     AcSweepType, DcOpResult, AcResult, DcSweepResult, TransientResult,
     AcConfig, DcSweepConfig, TransientConfig,
@@ -14,14 +14,6 @@ pub enum RunError {
     Parse(#[from] SimError),
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("no analysis statement in netlist")]
-    NoAnalysis,
-}
-
-pub fn parse_netlist_file(path: &Path) -> Result<(Circuit, Vec<bigospice_parser::AnalysisStatement>), RunError> {
-    let content = std::fs::read_to_string(path)?;
-    let (circuit, analyses, _opts) = SpiceParser::parse(&content)?;
-    Ok((circuit, analyses))
 }
 
 pub fn parse_netlist_str(input: &str) -> Result<(Circuit, Vec<bigospice_parser::AnalysisStatement>), RunError> {

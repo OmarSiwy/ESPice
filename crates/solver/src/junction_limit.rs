@@ -144,28 +144,53 @@ pub fn limit_junction_voltages(
             let vth_eff = if is_pmos { vth.abs() } else { vth };
 
             // Pin 0=drain, 1=gate, 2=source, 3=bulk
-            let vgs_new = sign * (new_v[1] - new_v[2]);
-            let vgs_old = sign * (old_v[1] - old_v[2]);
-            let vds_new = sign * (new_v[0] - new_v[2]);
-            let vds_old = sign * (old_v[0] - old_v[2]);
+            let vgs_new_raw = sign * (new_v[1] - new_v[2]);
+            let vgs_old_raw = sign * (old_v[1] - old_v[2]);
+            let vds_new_raw = sign * (new_v[0] - new_v[2]);
+            let vds_old_raw = sign * (old_v[0] - old_v[2]);
+
+            // Source-drain swap: when Vds < 0 the model internally swaps
+            // D and S, so the effective gate voltage is Vgd, not Vgs.
+            // Apply fetlim to the effective gate voltage that the model
+            // will actually use.
+            let reversed = vds_new_raw < 0.0;
+            let (vgs_new, vgs_old, vds_new, vds_old) = if reversed {
+                (vgs_new_raw - vds_new_raw, vgs_old_raw - vds_old_raw,
+                 -vds_new_raw, -vds_old_raw)
+            } else {
+                (vgs_new_raw, vgs_old_raw, vds_new_raw, vds_old_raw)
+            };
 
             let vgs_lim = fetlim(vgs_new, vgs_old, vth_eff);
             let _vds_lim = limvds(vds_new, vds_old);
 
             // Apply Vgs correction via the source node (pin 2).
-            // Vgs = sign*(Vg - Vs) => to change Vgs by delta, change Vs by -sign*delta.
+            // In the normal case: Vgs = sign*(Vg - Vs), correct Vs.
+            // In the reversed case: effective Vgs = Vgd = sign*(Vg - Vd),
+            //   so the correction should be applied to the drain node (pin 0).
             let vgs_corr = vgs_lim - vgs_new;
             if vgs_corr.abs() > 1e-15 {
-                lim[2] -= sign * vgs_corr;
+                if reversed {
+                    // Vgd = sign*(Vg - Vd) → to change Vgd by delta, change Vd by -sign*delta.
+                    lim[0] -= sign * vgs_corr;
+                } else {
+                    // Vgs = sign*(Vg - Vs) → to change Vgs by delta, change Vs by -sign*delta.
+                    lim[2] -= sign * vgs_corr;
+                }
             }
 
             // Apply Vds correction via the drain node (pin 0).
             // Vds = sign*(Vd - Vs_lim) => to change Vds by delta, change Vd by sign*delta.
             let vds_adj = sign * (new_v[0] - lim[2]);
-            let vds_lim2 = limvds(vds_adj, vds_old);
-            let vds_corr = vds_lim2 - vds_adj;
+            let vds_adj_eff = if reversed { -vds_adj } else { vds_adj };
+            let vds_lim2 = limvds(vds_adj_eff, vds_old);
+            let vds_corr = vds_lim2 - vds_adj_eff;
             if vds_corr.abs() > 1e-15 {
-                lim[0] += sign * vds_corr;
+                if reversed {
+                    lim[0] -= sign * vds_corr;
+                } else {
+                    lim[0] += sign * vds_corr;
+                }
             }
         }
         _ => {}

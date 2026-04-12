@@ -47,7 +47,7 @@
           };
 
           cargoLock = {
-            lockFile = ./nix/openvaf-Cargo.lock;
+            lockFile = "${src}/Cargo.lock";
             outputHashes = {
               "salsa-0.17.0-pre.2" = "sha256-6GssvV76lFr5OzAUekz2h6f82Tn7usz5E8MSZ5DmgJw=";
             };
@@ -160,13 +160,84 @@
           };
         };
 
+        # Xyce 7.10.0 — MPI-parallel build from source.
+        # We build from source (not pkgs.xyce-parallel) so we control the
+        # exact Trilinos + OpenMPI versions and avoid the nixpkgs packaging
+        # conflicts that crash on this machine.
+        xcyeMpi = pkgs.openmpi;
+        xcyeTrilinos = pkgs.trilinos.override { withMPI = true; mpi = pkgs.openmpi; };
+
+        xcyePkg = pkgs.stdenv.mkDerivation rec {
+          pname = "xyce";
+          version = "7.10.0";
+
+          src = pkgs.fetchgit {
+            name = "Xyce";
+            url = "https://github.com/Xyce/Xyce.git";
+            rev = "Release-${version}";
+            hash = "sha256-8cvglBCykZVQk3BD7VE3riXfJ0PAEBwsoloqUsrMlBc=";
+          };
+
+          nativeBuildInputs = with pkgs; [
+            cmake
+            gfortran
+            libtool_2
+            bison
+            flex
+            xcyeMpi   # provides mpicc / mpicxx / mpifort wrappers
+          ];
+
+          buildInputs = with pkgs; [
+            blas
+            lapack
+            fftw
+            suitesparse
+            xcyeTrilinos   # Trilinos built with MPI=ON against our openmpi
+            xcyeMpi
+          ];
+
+          # Point cmake at the MPI compiler wrappers so Xyce picks up the
+          # same openmpi that Trilinos was built against.
+          cmakeFlags = [
+            "-DCMAKE_BUILD_TYPE=Release"
+            "-DBUILD_TESTING=OFF"
+            "-DMPI_C_COMPILER=${xcyeMpi}/bin/mpicc"
+            "-DMPI_CXX_COMPILER=${xcyeMpi}/bin/mpicxx"
+            "-DMPI_Fortran_COMPILER=${xcyeMpi}/bin/mpifort"
+            "-DMPI_C_LIBRARIES=${xcyeMpi}/lib/libmpi.so"
+            "-DMPI_CXX_LIBRARIES=${xcyeMpi}/lib/libmpi.so"
+            "-DMPI_C_INCLUDE_DIRS=${xcyeMpi}/include"
+            "-DMPI_CXX_INCLUDE_DIRS=${xcyeMpi}/include"
+            "-DTrilinos_DIR=${xcyeTrilinos}/lib/cmake/Trilinos"
+            "-DXyce_ENABLE_PARALLEL_DAE=ON"
+          ];
+
+          env.NIX_LDFLAGS = "-L${xcyeMpi}/lib -lmpi";
+
+          enableParallelBuilding = true;
+          doCheck = false;
+
+          installPhase = ''
+            runHook preInstall
+            cmake --install . --prefix $out
+            ln -s $out/bin/Xyce $out/bin/xyce
+            runHook postInstall
+          '';
+
+          meta = {
+            description = "Xyce high-performance parallel SPICE simulator (from source, MPI via openmpi)";
+            homepage = "https://xyce.sandia.gov";
+            license = pkgs.lib.licenses.gpl3;
+            platforms = [ "x86_64-linux" ];
+          };
+        };
+
         commonInputs = with pkgs; [
           rustStable
           pkg-config
           openssl
 
           # Linker
-          mold
           clang
 
           # Linear algebra
@@ -200,7 +271,7 @@
           shellHook = ''
             export RUST_BACKTRACE=1
             export RUST_LOG=bigospice=debug
-            echo "BigOSpice dev shell — stable Rust $(rustc --version) + mold linker"
+            echo "BigOSpice dev shell — stable Rust $(rustc --version)"
             echo "Tip: use 'nix develop .#full' to get ngspice, xyce, and VACASK"
           '';
 
@@ -211,9 +282,8 @@
         devShells.full = pkgs.mkShell {
           buildInputs = commonInputs ++ [
             pkgs.ngspice
-            # NOTE: pkgs.xyce-parallel may not be available in nixpkgs-unstable.
-            # If evaluation fails, comment out the line below.
-            # pkgs.xyce-parallel
+            # pkgs.xyce-parallel  -- crashes on this machine; use xcyePkg built from source
+            xcyePkg
             vacaskPkg
           ];
 
@@ -238,7 +308,6 @@
           nativeBuildInputs = with pkgs; [
             pkg-config
             cmake
-            mold
             clang
           ];
           buildInputs = with pkgs; [
