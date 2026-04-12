@@ -148,3 +148,7 @@ path = "tests/suite/golden.rs"
 [[test]]
 name = "compat"
 path = "tests/suite/compat.rs"
+
+[[test]]
+name = "external"
+path = "tests/external/test_external.rs"

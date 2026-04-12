@@ -15,7 +15,8 @@
 #   --no-xyce           Exclude Xyce from comparison
 #   --nruns N           Timing runs per circuit (default: 10)
 #   --warmup N          Warmup runs before timing (default: 3)
-#   --corpus DIR        Corpus directory (default: tests/fixtures/quick)
+#   --corpus DIR        Corpus directory (overrides default: all fixture categories)
+#   --category NAME     Run only one fixture category (e.g. basic, mosfet, xyce)
 #   --circuit NAME      Run only circuits matching NAME substring
 #   --tol-pass N        Relative error threshold for PASS (default: 1e-3 = 0.1%)
 #   -h|--help           Show this help
@@ -30,9 +31,10 @@ WITH_VACASK=1
 WITH_XYCE=1
 NRUNS=10
 WARMUP=3
-CORPUS="${ROOT}/tests/fixtures/quick"
+CORPUS=""
 FILTER=""
 TOL_PASS=1e-3   # 0.1%
+CATEGORY=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -42,12 +44,28 @@ while [[ $# -gt 0 ]]; do
         --nruns)        NRUNS="$2";     shift 2 ;;
         --warmup)       WARMUP="$2";    shift 2 ;;
         --corpus)       CORPUS="$2";    shift 2 ;;
+        --category)     CATEGORY="$2";  shift 2 ;;
         --circuit)      FILTER="$2";    shift 2 ;;
         --tol-pass)     TOL_PASS="$2";  shift 2 ;;
         -h|--help)      sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'; exit 0 ;;
         *) echo "Unknown flag: $1" >&2; exit 1 ;;
     esac
 done
+
+# Build list of corpus directories to benchmark.
+# --corpus overrides everything; --category picks one subfolder; default = all.
+FIXTURES_ROOT="${ROOT}/tests/fixtures"
+if [[ -n "${CORPUS}" ]]; then
+    CORPUS_DIRS=("${CORPUS}")
+elif [[ -n "${CATEGORY}" ]]; then
+    CORPUS_DIRS=("${FIXTURES_ROOT}/${CATEGORY}")
+    [[ -d "${CORPUS_DIRS[0]}" ]] || { echo "ERROR: category not found: ${CATEGORY}" >&2; exit 1; }
+else
+    CORPUS_DIRS=()
+    for d in "${FIXTURES_ROOT}"/*/; do
+        CORPUS_DIRS+=("${d%/}")
+    done
+fi
 
 # ── Build bigospice (skip if cargo not in PATH — binary must be pre-built) ───
 BIGS="${ROOT}/target/release/bigospice"
@@ -75,18 +93,27 @@ if ! command -v hyperfine &>/dev/null; then
     exit 1
 fi
 
-[[ -d "${CORPUS}" ]] || { echo "ERROR: corpus not found: ${CORPUS}" >&2; exit 1; }
-
 TMP="$(mktemp -d)"
 trap 'rm -rf "${TMP}"' EXIT
 
-# ── Print column header ──────────────────────────────────────────────────────
+# ── Iterate all corpus directories ────────────────────────────────────────────
+for CORPUS in "${CORPUS_DIRS[@]}"; do
+[[ -d "${CORPUS}" ]] || { echo "WARNING: corpus not found: ${CORPUS} — skipping" >&2; continue; }
+
+# Skip categories with no .sp files
+shopt -s nullglob
+sp_files=("${CORPUS}"/*.sp)
+shopt -u nullglob
+[[ ${#sp_files[@]} -eq 0 ]] && continue
+
+category_name="$(basename "${CORPUS}")"
 echo ""
+echo "╔══ ${category_name} (${#sp_files[@]} circuits) ══╗"
 printf "%-32s %-11s %-11s %-12s %s\n" "Circuit" "BigOSpice" "ngspice" "Accuracy" "Speed"
 printf '%.0s─' {1..76}; echo ""
 
 # ── Per-circuit: accuracy check first, then conditional timing ───────────────
-for sp in "${CORPUS}"/*.sp; do
+for sp in "${sp_files[@]}"; do
     name="$(basename "${sp}")"
     [[ -n "${FILTER}" && "${name}" != *"${FILTER}"* ]] && continue
 
@@ -306,7 +333,11 @@ PYEOF
     esac
 done
 
-printf '%.0s─' {1..76}; echo ""; echo ""
+printf '%.0s─' {1..76}; echo ""
+
+done  # ── end: for CORPUS in CORPUS_DIRS ──
+
+echo ""
 
 # ── Final summary: geomean speedup + accuracy pass rate ──────────────────────
 python3 - "${TMP}/ratios_ng.txt" "${TMP}/acc_counts.txt" "${WITH_NGSPICE}" <<'PYEOF'

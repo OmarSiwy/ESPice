@@ -99,9 +99,66 @@ impl DeviceModel for MosfetLevel1 {
             ( gds,       gm, -(gm + gds), -gds, -gm, gm + gds)
         };
 
+        // ── Meyer gate capacitances (opt-in: requires TOX in .MODEL) ─────────
+        // Only compute intrinsic gate caps when TOX is explicitly specified.
+        // Overlap caps (CGSO, CGDO, CGBO) are always honoured when present.
+        let has_tox = params.get("tox").is_some();
+        let cgso_ov = params.get_or("cgso", 0.0) * w;
+        let cgdo_ov = params.get_or("cgdo", 0.0) * w;
+
+        let (c_gd, c_gs, c_gb) = if has_tox {
+            const EPSOX: f64 = 3.453e-11;
+            let tox = params.get_or("tox", 1e-7).max(1e-12);
+            let ld = params.get_or("ld", 0.0);
+            let leff = (l - 2.0 * ld).max(1e-9);
+            let cox = EPSOX / tox * w * leff;
+            let cgbo_ov = params.get_or("cgbo", 0.0) * leff;
+
+            let (cgs_i, cgd_i, cgb_i) = if vov <= 0.0 {
+                (0.0, 0.0, cox)
+            } else if vds < vov {
+                let denom = 2.0 * vov - vds;
+                if denom.abs() < 1e-15 {
+                    (2.0 / 3.0 * cox, 0.0, 0.0)
+                } else {
+                    let arg_s = (vov - vds) / denom;
+                    let arg_d = vov / denom;
+                    (2.0 / 3.0 * cox * (1.0 - arg_s * arg_s),
+                     2.0 / 3.0 * cox * (1.0 - arg_d * arg_d),
+                     0.0)
+                }
+            } else {
+                (2.0 / 3.0 * cox, 0.0, 0.0)
+            };
+
+            if reversed {
+                (cgs_i + cgdo_ov, cgd_i + cgso_ov, cgb_i + cgbo_ov)
+            } else {
+                (cgd_i + cgdo_ov, cgs_i + cgso_ov, cgb_i + cgbo_ov)
+            }
+        } else {
+            // No TOX → overlap caps only (usually zero)
+            (cgdo_ov, cgso_ov, 0.0)
+        };
+
+        let has_caps = c_gd != 0.0 || c_gs != 0.0 || c_gb != 0.0;
+
+        let vgd_phys = voltages[1] - voltages[0];
+        let vgs_phys = voltages[1] - voltages[2];
+        let vgb_phys = voltages[1] - voltages[3];
+
         DeviceEval {
             g: smallvec![id_signed, 0.0, -id_signed, 0.0],
-            q: smallvec![0.0, 0.0, 0.0, 0.0],
+            q: if has_caps {
+                smallvec![
+                    -c_gd * vgd_phys,
+                     c_gd * vgd_phys + c_gs * vgs_phys + c_gb * vgb_phys,
+                    -c_gs * vgs_phys,
+                    -c_gb * vgb_phys,
+                ]
+            } else {
+                smallvec![0.0, 0.0, 0.0, 0.0]
+            },
             G: smallvec![
                 (0, 0, g_dd),
                 (0, 1, g_dg),
@@ -110,7 +167,22 @@ impl DeviceModel for MosfetLevel1 {
                 (2, 1, g_sg),
                 (2, 2, g_ss),
             ],
-            C: SmallVec::new(),
+            C: if has_caps {
+                smallvec![
+                    (0, 0,  c_gd),
+                    (0, 1, -c_gd),
+                    (1, 0, -c_gd),
+                    (1, 1,  c_gd + c_gs + c_gb),
+                    (1, 2, -c_gs),
+                    (1, 3, -c_gb),
+                    (2, 1, -c_gs),
+                    (2, 2,  c_gs),
+                    (3, 1, -c_gb),
+                    (3, 3,  c_gb),
+                ]
+            } else {
+                SmallVec::new()
+            },
             rhs: SmallVec::new(),
         }
     }
