@@ -1,4 +1,6 @@
 /target
+.worktrees/
+worktrees/
 tests/external/*
 !tests/external/.gitignore
 *.raw
