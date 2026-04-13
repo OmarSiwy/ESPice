@@ -384,7 +384,7 @@ impl LtraLineParams {
 /// Returns the value of the impulse-response function for the chosen
 /// regime.  Used by [`compute_norton_equivalent`] to form the
 /// trapezoidal convolution integral.
-pub fn ltra_kernel(tau: f64, lp: &LtraLineParams) -> f64 {
+pub(crate) fn ltra_kernel(tau: f64, lp: &LtraLineParams) -> f64 {
     if tau < 0.0 {
         return 0.0;
     }

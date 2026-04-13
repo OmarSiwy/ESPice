@@ -360,9 +360,7 @@ impl ComputeBackend for WgpuBackend {
 
     fn scale(&self, alpha: f64, x: &mut [f64]) {
         if x.len() < self.min_gpu_size {
-            for v in x.iter_mut() {
-                *v *= alpha;
-            }
+            x.iter_mut().for_each(|v| *v *= alpha);
             return;
         }
         self.gpu_axpy_or_scale(&self.scale_pipeline, alpha, x, None);

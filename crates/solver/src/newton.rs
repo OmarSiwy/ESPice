@@ -92,13 +92,7 @@ const DEFAULT_GMIN_FLOOR: f64 = 1e-9;
 /// devices (MOSFETs, diodes, BJTs).
 #[inline]
 fn limit_step(dx: &mut [f64], max_voltage_step: f64) {
-    for v in dx.iter_mut() {
-        if *v > max_voltage_step {
-            *v = max_voltage_step;
-        } else if *v < -max_voltage_step {
-            *v = -max_voltage_step;
-        }
-    }
+    dx.iter_mut().for_each(|v| *v = v.clamp(-max_voltage_step, max_voltage_step));
 }
 
 /// Regularize weak Jacobian diagonals (Levenberg-Marquardt style).
@@ -1324,7 +1318,7 @@ impl NewtonRaphson {
             let mut new_tx: Vec<f64> = (0..dim).map(|i| x_aug[i] - x0_aug[i]).collect();
             let new_tl = x_aug[dim] - x0_aug[dim];
             let norm = (new_tx.iter().map(|&v| v * v).sum::<f64>() + new_tl * new_tl).sqrt().max(1e-15);
-            for v in new_tx.iter_mut() { *v /= norm; }
+            new_tx.iter_mut().for_each(|v| *v /= norm);
             let new_tl_n = new_tl / norm;
 
             // Keep tangent pointing in the direction of increasing λ.
