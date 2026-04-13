@@ -2671,9 +2671,9 @@ impl SpiceParser {
         let param_names = ["start", "stop", "step"];
         for pname in &param_names {
             if idx < line.len() {
-                if let Some(val) = Self::token_to_number(&line[idx]) {
+                if let Some((val, consumed)) = Self::tokens_to_signed_number(&line[idx..]) {
                     params.push(((*pname).to_string(), val));
-                    idx += 1;
+                    idx += consumed;
                 }
             }
         }
@@ -2723,9 +2723,9 @@ impl SpiceParser {
         let mut idx = 0;
         for pname in &param_names {
             if idx < line.len() {
-                if let Some(val) = Self::token_to_number(&line[idx]) {
+                if let Some((val, consumed)) = Self::tokens_to_signed_number(&line[idx..]) {
                     params.push(((*pname).to_string(), val));
-                    idx += 1;
+                    idx += consumed;
                 }
             }
         }
@@ -2783,9 +2783,9 @@ impl SpiceParser {
         let param_names = ["npoints", "fstart", "fstop"];
         for pname in &param_names {
             if idx < line.len() {
-                if let Some(val) = Self::token_to_number(&line[idx]) {
+                if let Some((val, consumed)) = Self::tokens_to_signed_number(&line[idx..]) {
                     params.push(((*pname).to_string(), val));
-                    idx += 1;
+                    idx += consumed;
                 }
             }
         }
