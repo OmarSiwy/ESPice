@@ -635,7 +635,11 @@ fn compareCheck(a: Allocator, check: Json, plots: []const Plot) !void {
             const start = try number(window[0]);
             const stop = try number(window[1]);
             if (stop <= start) return error.InvalidOracle;
-            if (p.value(0, axis).re > start or p.value(p.rows - 1, axis).re < stop) return error.MissingTimeCoverage;
+            // 1e-12 relative slack: a `10u` t_stop parses to 9.999999999999999e-06 in
+            // espice and ngspice alike, one ulp short of a literal 1e-5 window end.
+            const slack = 1e-12;
+            if (p.value(0, axis).re > start + slack * @abs(start) or
+                p.value(p.rows - 1, axis).re < stop - slack * @abs(stop)) return error.MissingTimeCoverage;
             var count: u32 = 0;
             var integral: f64 = 0;
             var square: f64 = 0;
@@ -816,6 +820,12 @@ test "time statistics, phase wrap, THD, axis bounds and root sets are enforced" 
     var silent = waveform;
     silent.data = &.{ 0, 0, 0.5, 0, 1, 0 };
     try std.testing.expectError(error.StatisticMismatch, compareCheck(a, moments, &.{silent}));
+    var ulp_short = waveform;
+    ulp_short.data = &.{ 0, -1, 0.5, 1, 1 - 1e-16, -1 };
+    try compareCheck(a, moments, &.{ulp_short});
+    var short = waveform;
+    short.data = &.{ 0, -1, 0.5, 1, 1 - 1e-9, -1 };
+    try std.testing.expectError(error.MissingTimeCoverage, compareCheck(a, moments, &.{short}));
     const bounds = try std.json.parseFromSliceLeaky(Json, a,
         \\{"kind":"axis_bounds","plot":"Transient Noise Analysis","axis":"time","minimum":0.5,"maximum":1}
     , .{});

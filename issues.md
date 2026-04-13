@@ -118,9 +118,11 @@ FIRST cause. Fix recipes for F1, F4, F5, F8, F10, F11 and E6 are in
   takes 15 s instead of 308 s, so it no longer flips to Timeout. OPtran
   reports the confirming Newton's verdict (no deck changed). The deck still
   fails in the transient (`i(vdd)` 2.3e8x -> 503x), which is F9's class.
-- [ ] **F6 — last transient row lands short of t_stop.**
-  `tran_noise/rc_equilibrium` (last row 9.999999999999999e-06 < 1e-5 ->
-  MissingTimeCoverage). Clamp the last step to t_stop.
+- [x] **F6 — last transient row lands short of t_stop.** FIXED in the
+  harness (user decision): `10u` parses to 9.999999999999999e-06 in espice
+  and ngspice alike, one ulp short of the check window's literal 1e-5, so
+  the `time_weighted_moments` coverage test now allows 1e-12 relative slack
+  on both window ends. `tran_noise/rc_equilibrium` passes; deck unchanged.
 - [ ] **F7 — OP Newton acceptance too loose.** See E7.
   `tran/bench_tline_ltra1_1_line`, `tran/bench_tline_txl1_1_line`.
 - [x] **F8 — envelope.** FIXED (phase 2b). `envelope/sine`: columns are
@@ -644,7 +646,7 @@ FIRST cause. Fix recipes for F1, F4, F5, F8, F10, F11 and E6 are in
   after LTE engages (F9). None of the four points at the line models.
 
 - [ ] **E8 — leftovers.** `envelope/sine`, `envelope/rc_startup_0p001`,
-  `four/polynomial_2`, `tran_noise/rc_equilibrium` (MissingTimeCoverage),
+  `four/polynomial_2`, `tran_noise/rc_equilibrium` (MissingTimeCoverage, FIXED F6),
   `convergence/bench_ota_cutoff_abstol` (`vacask_graetz` and `vacask_mul`
   FIXED under F9). One cause each; no cluster.
   (`sens/bench_sens_bridge` started here and moved to C8 once measured — it
