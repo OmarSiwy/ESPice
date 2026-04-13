@@ -130,18 +130,26 @@ FIRST cause. Fix recipes for F1, F4, F5, F8, F10, F11 and E6 are in
   is now a trapezoid step carrying the charge history (it was quasi-static,
   the capacitor open); 498x -> 0.14x. `dc_offset`, `negative_offset` go from
   0.28x to exact, `rc_startup_1e-05` 0.57x -> 0.06x.
-- [ ] **F9 — transient drift once LTE engages.** 21 decks; re-measure after
-  F1. Grid divergence: `stress/scaling_parallel_inverters_100`,
+- [~] **F9 — transient drift once LTE engages.** 21 decks. Step control
+  now follows dctran.c (impl-drift, `docs/handoff-impl-drift.md`): an LTE
+  reject keeps the order (:966), a Newton failure cuts dt/8 at order 1
+  (:815, :823), the step history starts at the max step (:312), and CKTterr
+  reads the charge at the published solution. FIXED by the last:
+  `stress/vacask_graetz` (13.2x -> 0.17x), `stress/vacask_mul` (242x ->
+  0.71x), `tran/bench_bypass_gated_branch` (10.8x -> 0.63x),
+  `tran/bench_digital_clamp` (1.11x -> 0.92x). Open, remaining cause per
+  r-drift: per-terminal q tape (one slot per `ddt()` site needs VerA) for
+  mos6_inverter, schmitt, rca3040, rtlinv, hfet, chain_256; Newton
+  robustness (MODEINITPRED, fetlim/limvds, CKTconvTest) for pvt_corners and
+  mosamp. Grid divergence: `stress/scaling_parallel_inverters_100`,
   `stress/scaling_parallel_inverters_2000`, `stress/scaling_inverter_chain_256`,
   `tran/bench_bypass_idle_ladder`, `tran/bench_ensemble_pvt_corners`,
   `tran/bench_ngspice_mosmem`, `tran/device_mos6_inverter`,
   `tran/bench_tran_fourbitadder`, `tran/device_hfet_inverter`,
   `multi_analysis/bench_ngspice_rca3040`, `multi_analysis/bench_ngspice_rtlinv`,
   `tran/device_mos1_large_signal`, `tran/bench_ngspice_schmitt`,
-  `tran/bench_tline_txl2_3_line`, `tran/device_kinduc`, `stress/vacask_mul`,
-  `stress/vacask_graetz`. Value drift: `tran/bench_digital_clamp`,
-  `tran/device_mos6_simpleinv`, `tran/bench_bypass_gated_branch`,
-  `tran/device_urc`. Also `reference/diode_reverse_recovery` (2 rows in the
+  `tran/bench_tline_txl2_3_line`, `tran/device_kinduc`. Value drift:
+  `tran/device_mos6_simpleinv`, `tran/device_urc`. Also `reference/diode_reverse_recovery` (2 rows in the
   recovery tail).
 - [x] **F10 — PSS DC offset.** FIXED (phase 2b): `pss.zig` seeds the
   trapezoid `i_prev` at each period start with -f(x0) on rows with a
@@ -635,8 +643,8 @@ FIRST cause. Fix recipes for F1, F4, F5, F8, F10, F11 and E6 are in
 
 - [ ] **E8 — leftovers.** `envelope/sine`, `envelope/rc_startup_0p001`,
   `four/polynomial_2`, `tran_noise/rc_equilibrium` (MissingTimeCoverage),
-  `stress/vacask_graetz`, `stress/vacask_mul`,
-  `convergence/bench_ota_cutoff_abstol`. One cause each; no cluster.
+  `convergence/bench_ota_cutoff_abstol` (`vacask_graetz` and `vacask_mul`
+  FIXED under F9). One cause each; no cluster.
   (`sens/bench_sens_bridge` started here and moved to C8 once measured — it
   is a missing device parameter set, not a sensitivity bug.)
 

@@ -21,6 +21,7 @@ columns and axis). Base failing set: the 62 decks failing at 0424baf.
 | 1 | LTE rejection keeps the order (dctran.c:966) | 554 | see below |
 | 2 | Newton failure: dt/8 and order 1, no same-dt BE retry (:815, :823) | 554 | 3 decks |
 | 3 | divided-difference history seeded with the max step (:312) | 554 | 4 decks |
+| 4 | CKTterr on the charge at the published solution | 558 | 69 decks, 4 fixed |
 
 ### 1. LTE rejection keeps the integration order
 
@@ -62,3 +63,36 @@ calls see it. No flip. Against commit 2: `vacask_mul` 234 -> 200,
 `vacask_graetz` 13.2 -> 13.5 (its grid is ngspice's point for point; the
 value gap is fix 4), `lc_energy_gear` / `lc_energy_trap` last-digit moves
 (both pass, 0.0016 / 0.0004).
+
+### 4. The LTE reads the charge at the published solution
+
+`newton()` returns x_k+1 while the planes hold q(x_k). Before the LTE, one
+`evalQ(trial, t + dt)` fills `q_hist[0]` / `qt_hist[0]`, so CKTterr,
+`advanceCurrent` and the next residual all read q at the accepted point.
+That made the per-iteration `q_snap` / `qt_snap` copies in `TranHook` dead:
+deleted (byte-identical on all 616 decks). The post-accept `has_state_q`
+re-read stays: without it 4 decks change bytes (txl2_3, hfet, mesa_osc,
+mos6_inverter), so the commit does move q on some devices.
+
+Fixtures 554 -> 558, no regression. FIXED: `vacask_graetz` 13.2 -> 0.17
+(base -> after), `vacask_mul` 242 -> 0.71, `bench_bypass_gated_branch`
+10.8 -> 0.63, `bench_digital_clamp` 1.11 -> 0.92. 69 decks change bytes;
+most passing ones move in the 3rd digit or not at all at the tolerance
+scale. Notable against commit 3: `ltra2_2_line` 0.67 -> 0.24,
+`power_rectifier` 0.20 -> 0.11, `rtlinv` 3.28 -> 3.09; further:
+`diode_reverse_recovery` 13.6 -> 20.5 (predicted, ngspice grid),
+`inverter_chain_4k` 117 -> 193 (still below base 503), `idle_ladder` 1.27 ->
+1.38, `txl2_3` 988 -> 997.
+
+Cost, callgrind Ir, commit 3 -> commit 4 (whole run, parse included):
+
+| deck | before | after | |
+|---|---|---|---|
+| tran/device_mos6_inverter | 115.3M | 121.6M | +5.4% |
+| tran/bench_tran_fourbitadder | 290.4M | 297.4M | +2.4% |
+| stress/scaling_parallel_inverters_100 | 330.0M | 350.2M | +6.1% |
+| tran/bench_bypass_gated_branch | 36.4M | 39.3M | +8.0% |
+
+No cheaper pass keeps the values: the Jacobian-extrapolated C·dx is not
+q(x) for a nonlinear charge, and the re-read after the commit cannot move
+before the accept.
