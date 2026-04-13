@@ -49,8 +49,8 @@ failure (:823). No pass/fail flip. Changed decks:
 ### 2. Newton failure cuts dt by 8 and drops to order 1 in one retry
 
 The same-dt BE retry and the halving are gone; ngspice does `CKTdelta /= 8`
-and `CKTorder = 1` together. No pass/fail flip, no OP deck changed (OPtran
-never runs on the corpus). Against commit 1:
+and `CKTorder = 1` together. No pass/fail flip, no `op/` deck changed bytes (OPtran shares
+`tran.simulate`, so a deck reaching that rung would move). Against commit 1:
 
 - `hfet_inverter` 1.85e3 -> 704, `pvt_corners` 3.73e3 -> 3.23e3.
 - `mos6_inverter` 453 -> 668: predicted by the diagnosis (rows 317 -> 315,
@@ -115,3 +115,95 @@ Ceiling: every current row is appended, not just the inductors'. A device
 charging its own branch row appears twice with the same value (the min is
 unchanged); V-source rows are zero. Exact inductor rows need the tape's
 `rhs_idx` exposed by Circuit.
+
+## Every changed deck, a151db0 -> tip (worst err/tol)
+
+67 of 616 decks change bytes; no `op/` deck is among them. Pass count
+554 -> 559, and no deck on the base pass list fails.
+
+| deck | base | tip | status |
+|---|---|---|---|
+| `layout/fanout_tran` | 1.95e-08 | 1.93e-08 | pass -> pass |
+| `multi_analysis/bench_ngspice_rca3040` | 322 | 322 | FAIL -> FAIL |
+| `multi_analysis/bench_ngspice_rtlinv` | 4.13 | 3.09 | FAIL -> FAIL |
+| `reference/bridge_capacitor_transient` | 0.998 | 0.00544 | pass -> pass |
+| `reference/cmos_inverter_tran` | 0.135 | 9.2e-05 | pass -> pass |
+| `reference/diode_reverse_recovery` | 7.87 | 20.5 | FAIL -> FAIL |
+| `reference/rlc_underdamped_step` | 0.0517 | 3.18e-09 | pass -> pass |
+| `reference/stiff_two_time_constants` | 0.399 | 2.12e-07 | pass -> pass |
+| `stress/scaling_inverter_chain_256` | 1.43e+05 | 1.19e+04 | FAIL -> FAIL |
+| `stress/scaling_inverter_chain_4k` | 503 | 193 | FAIL -> FAIL |
+| `stress/scaling_parallel_inverters_100` | 537 | 174 | FAIL -> FAIL |
+| `stress/scaling_parallel_inverters_2000` | 1.86e+03 | 1.86e+03 | FAIL -> FAIL |
+| `stress/scaling_rc_ladder_100k` | 1.66e-07 | 1.66e-07 | pass -> pass |
+| `stress/scaling_rc_ladder_1k` | 1.66e-07 | 1.66e-07 | pass -> pass |
+| `stress/vacask_graetz` | 13.2 | 0.167 | FAIL -> pass |
+| `stress/vacask_mul` | 242 | 0.712 | FAIL -> pass |
+| `stress/vacask_rc` | 5.89e-07 | 5.89e-07 | pass -> pass |
+| `syntax/subckt_params` | 0.00152 | 0.00152 | pass -> pass |
+| `tran/bench_bypass_burst_clock` | 1.67e-07 | 1.67e-07 | pass -> pass |
+| `tran/bench_bypass_gated_branch` | 10.8 | 0.633 | FAIL -> pass |
+| `tran/bench_bypass_idle_ladder` | 9.42 | 1.38 | FAIL -> FAIL |
+| `tran/bench_digital_buffer_rc` | 5.89e-07 | 5.89e-07 | pass -> pass |
+| `tran/bench_digital_clamp` | 1.11 | 0.916 | FAIL -> pass |
+| `tran/bench_digital_rc_filter_chain` | 1.32e-07 | 1.32e-07 | pass -> pass |
+| `tran/bench_ensemble_opamp_mc` | 0.00138 | 0.00138 | pass -> pass |
+| `tran/bench_ensemble_pvt_corners` | 3.48e+03 | 3.23e+03 | FAIL -> FAIL |
+| `tran/bench_medium_rc_ladder_50` | 1.36e-05 | 1.36e-05 | pass -> pass |
+| `tran/bench_ngspice_mosamp` | 2.6e+05 | 3.84e+05 | FAIL -> FAIL |
+| `tran/bench_ngspice_mosmem` | 3.15e+07 | 3.16e+07 | FAIL -> FAIL |
+| `tran/bench_ngspice_rc` | 3.5e-10 | 3.49e-10 | pass -> pass |
+| `tran/bench_ngspice_schmitt` | 500 | 500 | FAIL -> FAIL |
+| `tran/bench_power_buck_open` | 0.0047 | 0.0047 | pass -> pass |
+| `tran/bench_power_rectifier` | 0.198 | 0.112 | pass -> pass |
+| `tran/bench_tline_ltra1_1_line` | 1.37e+06 | 1.37e+06 | FAIL -> FAIL |
+| `tran/bench_tline_ltra2_2_line` | 0.67 | 0.238 | pass -> pass |
+| `tran/bench_tline_txl1_1_line` | 1.37e+06 | 1.37e+06 | FAIL -> FAIL |
+| `tran/bench_tline_txl2_3_line` | 7.36e+03 | 997 | FAIL -> FAIL |
+| `tran/bench_tran_exp_source` | 3.7e-10 | 4.03e-10 | pass -> pass |
+| `tran/bench_tran_fourbitadder` | 2.66 | 2.66 | FAIL -> FAIL |
+| `tran/bench_tran_rc_pulse` | 4.53e-08 | 4.53e-08 | pass -> pass |
+| `tran/bench_tran_sffm_source` | 0.167 | 0.167 | pass -> pass |
+| `tran/device_hfet_inverter` | 1.85e+03 | 704 | FAIL -> FAIL |
+| `tran/device_kinduc` | 51.7 | 0.00127 | FAIL -> pass |
+| `tran/device_mesa_oscillator` | 1.9e+03 | 1.9e+03 | FAIL -> FAIL |
+| `tran/device_mos1_large_signal` | 13.9 | 13.9 | FAIL -> FAIL |
+| `tran/device_mos6_inverter` | 453 | 668 | FAIL -> FAIL |
+| `tran/device_mos6_simpleinv` | 3.49 | 3.49 | FAIL -> FAIL |
+| `tran/device_urc` | 22.8 | 22.8 | FAIL -> FAIL |
+| `tran/finite_rise_negative` | 0.019 | 0.019 | pass -> pass |
+| `tran/finite_rise_positive` | 0.019 | 0.019 | pass -> pass |
+| `tran/ic_large` | 0.000321 | 0.000321 | pass -> pass |
+| `tran/ic_negative` | 0.000321 | 0.000321 | pass -> pass |
+| `tran/ic_small` | 0.000321 | 0.000321 | pass -> pass |
+| `tran/lc_energy_gear` | 0.00159 | 0.00159 | pass -> pass |
+| `tran/lc_energy_trap` | 0.000398 | 0.000398 | pass -> pass |
+| `tran/rc_discharge_euler_0p001` | 0.582 | 0.582 | pass -> pass |
+| `tran/rc_discharge_euler_1` | 0.582 | 0.582 | pass -> pass |
+| `tran/rc_discharge_euler_1e-06` | 0.582 | 0.582 | pass -> pass |
+| `tran/rc_discharge_gear_0p001` | 0.00209 | 0.00209 | pass -> pass |
+| `tran/rc_discharge_gear_1` | 0.00209 | 0.00209 | pass -> pass |
+| `tran/rc_discharge_gear_1e-06` | 0.00209 | 0.00209 | pass -> pass |
+| `tran/rc_discharge_trap_0p001` | 0.000523 | 0.000523 | pass -> pass |
+| `tran/rc_discharge_trap_1` | 0.000523 | 0.000523 | pass -> pass |
+| `tran/rc_discharge_trap_1e-06` | 0.000523 | 0.000523 | pass -> pass |
+| `tran/rc_pulse_history_gear` | 0.00252 | 0.00252 | pass -> pass |
+| `tran/rc_pulse_history_trap` | 0.019 | 0.019 | pass -> pass |
+| `tran/rc_sinusoidal_startup` | 0.000135 | 0.000135 | pass -> pass |
+
+Further from the reference and failing either way (acceptable: the grid
+now follows ngspice's, per the r-drift A/B on an instrumented ngspice 44.2):
+`diode_reverse_recovery` 7.87 -> 20.5 (recovery tail tracks ngspice's grid
+to 4e-5), `mosamp` 2.6e5 -> 3.84e5 (the oracle carries ngspice's ~710
+Newton /8 cuts in the MOS2 slew: rebuild it tighter or mark KNOWN GAP),
+`mos6_inverter` 453 -> 668 (row count now ngspice's 315; per-terminal q
+tape, fix 6). `ltra1_1_line` / `txl1_1_line` / `rca3040` / `schmitt` /
+`parallel_inverters_2000` move below 3 digits.
+
+## Not done here
+
+- Fix 6, one tape slot per `ddt()` site with a per-site LTE mask: VerA.
+- Newton robustness (MODEINITPRED, fetlim/limvds, CKTconvTest), OP
+  precision, URC: separate owners per r-drift.
+- `tran_noise/rc_equilibrium` (F6) is a checker window one ulp past
+  t_stop, not the controller.
