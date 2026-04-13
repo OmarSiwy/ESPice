@@ -432,6 +432,8 @@ pub enum StepKind {
     List(Vec<f64>),
     /// `.STEP {param} start stop step`  (legacy implicit-LIN form)
     LinImplicit { start: f64, stop: f64, step: f64 },
+    /// `.STEP DATA dataname` — sweeps over a .DATA block
+    Data { block_name: String },
 }
 
 /// A `.STEP` parameter sweep directive.
@@ -489,6 +491,8 @@ impl StepDirective {
                     .filter(|v| *v <= stop * (1.0 + 1e-12))
                     .collect()
             }
+            // DATA sweep: values come from a .DATA block at analysis time
+            StepKind::Data { .. } => vec![],
         }
     }
 }

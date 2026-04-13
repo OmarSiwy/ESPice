@@ -960,6 +960,19 @@ enum PolyKind {
     Vccs,
 }
 
+/// Pending A-device (XSPICE A-element) record, stored before circuit construction.
+/// These are routed to the digital event engine during circuit build.
+struct PendingADevice {
+    /// Instance name, e.g. "ainv".
+    name: String,
+    /// Input node names (analog for ADC, digital for primitives).
+    inputs: Vec<String>,
+    /// Output node names (analog for DAC, digital for primitives).
+    outputs: Vec<String>,
+    /// Model name from the .model card, e.g. "d_inverter", "adc_bridge".
+    model_name: String,
+}
+
 /// Terminator kind for an `.IF / .ELSEIF / .ELSE / .ENDIF` block branch.
 ///
 /// Returned by both the executing and skipping body-walkers so the
@@ -987,6 +1000,8 @@ pub struct SpiceParser {
     pending_bsources: Vec<PendingBsource>,
     /// K (mutual inductance) elements accumulated during element parsing.
     pending_k_elements: Vec<PendingKElement>,
+    /// XSPICE A-device elements accumulated during element parsing.
+    pending_a_devices: Vec<PendingADevice>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1360,6 +1375,7 @@ impl SpiceParser {
             netlist: ParsedNetlist::new(),
             pending_bsources: Vec::new(),
             pending_k_elements: Vec::new(),
+            pending_a_devices: Vec::new(),
         };
 
         parser.netlist.title = title;
@@ -1957,13 +1973,36 @@ impl SpiceParser {
             Token::Word(w) => {
                 let lw = w.to_lowercase();
                 match lw.as_str() {
-                    "lin" | "dec" | "oct" | "list" => (Some(lw), idx + 1),
+                    "lin" | "dec" | "oct" | "list" | "data" => (Some(lw), idx + 1),
                     _ => (None, idx),
                 }
             }
             _ => (None, idx),
         };
         idx = after_kind_idx;
+
+        // Handle DATA form: .STEP DATA dataname
+        if kind_keyword.as_deref() == Some("data") {
+            // For DATA form, the next token is the data block name
+            if idx >= line.len() {
+                return Err(SimError::Parse(
+                    ".STEP DATA: expected data block name".into(),
+                ));
+            }
+            let block_name = match &line[idx] {
+                Token::Word(s) => s.to_lowercase(),
+                _ => {
+                    return Err(SimError::Parse(
+                        ".STEP DATA: expected data block name".into(),
+                    ));
+                }
+            };
+            self.netlist.steps.push(StepDirective {
+                target: block_name.clone(),
+                kind: StepKind::Data { block_name },
+            });
+            return Ok(());
+        }
 
         // Read target parameter name (may be `Word` or `Word . Word` for device.param,
         // or wrapped in `{...}` braces).
@@ -2674,6 +2713,42 @@ impl SpiceParser {
                 if let Some((val, consumed)) = Self::tokens_to_signed_number(&line[idx..]) {
                     params.push(((*pname).to_string(), val));
                     idx += consumed;
+                }
+            }
+        }
+
+        // ── Optional inner sweep ──────────────────────────────────────────────
+        // Either:  SRC2  start2 stop2 step2
+        // Or:      TEMP  start2 stop2 step2
+        if idx < line.len() {
+            if let Token::Word(ref word) = line[idx] {
+                let kw_low = word.to_lowercase();
+                if kw_low == "temp" {
+                    // TEMP sweep: no source_name2 needed
+                    params.push(("__dc_src2__temp".to_string(), 0.0));
+                    idx += 1;
+                    let inner_names = ["start2", "stop2", "step2"];
+                    for pname in &inner_names {
+                        if idx < line.len() {
+                            if let Some((val, consumed)) = Self::tokens_to_signed_number(&line[idx..]) {
+                                params.push(((*pname).to_string(), val));
+                                idx += consumed;
+                            }
+                        }
+                    }
+                } else {
+                    // Named inner source: "SRC2 start2 stop2 step2"
+                    params.push((format!("__dc_src2__{}", kw_low), 0.0));
+                    idx += 1;
+                    let inner_names = ["start2", "stop2", "step2"];
+                    for pname in &inner_names {
+                        if idx < line.len() {
+                            if let Some((val, consumed)) = Self::tokens_to_signed_number(&line[idx..]) {
+                                params.push(((*pname).to_string(), val));
+                                idx += consumed;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -3616,6 +3691,12 @@ impl SpiceParser {
                 self.parse_subckt_instance_top(&name, &line)?;
                 Ok(None) // stored in pending_subckt_instances; don't add to elements
             }
+            'a' => {
+                // XSPICE A-device: A<name> [in1 in2 ...] [out1 out2 ...] model_name
+                // or with () analog port syntax: A<name> (in1) (out1) model_name
+                self.parse_a_device_pending(&name, &line)?;
+                Ok(None) // stored in pending_a_devices; don't add to elements
+            }
             _ => {
                 // Unknown element prefix — skip.
                 Ok(None)
@@ -4293,6 +4374,18 @@ impl SpiceParser {
                         &line[3..],
                     );
                 }
+                // TABLE form: E<name> n+ n- TABLE {expr} = (x0,y0) (x1,y1) ...
+                if w.eq_ignore_ascii_case("table") {
+                    let np = Self::token_to_node_name(&line[0])?;
+                    let nn = Self::token_to_node_name(&line[1])?;
+                    return self.parse_table_device(
+                        name,
+                        DeviceKind::Vcvs,
+                        &np,
+                        &nn,
+                        &line[3..],
+                    );
+                }
                 // POLY(n) form: E<name> n+ n- POLY(k) (vc1+ vc1-) ... c0 c1 ...
                 if let Some(degree) = Self::try_parse_poly_keyword(w) {
                     let n_out_p = Self::token_to_node_name(&line[0])?;
@@ -4366,6 +4459,18 @@ impl SpiceParser {
                         LaplaceKind::Vccs,
                         &n_out_p,
                         &n_out_n,
+                        &line[3..],
+                    );
+                }
+                // TABLE form: G<name> n+ n- TABLE {expr} = (x0,y0) (x1,y1) ...
+                if w.eq_ignore_ascii_case("table") {
+                    let np = Self::token_to_node_name(&line[0])?;
+                    let nn = Self::token_to_node_name(&line[1])?;
+                    return self.parse_table_device(
+                        name,
+                        DeviceKind::Vccs,
+                        &np,
+                        &nn,
                         &line[3..],
                     );
                 }
@@ -4947,6 +5052,35 @@ impl SpiceParser {
         });
 
         Ok(None)
+    }
+
+    /// Parse a POLY(n) form where the POLY keyword and degree are fused into
+    /// a single token (e.g., `POLY(1)`).
+    ///
+    /// This is called when `try_parse_poly_keyword` returns `Some(degree)`
+    /// for a fused token like "POLY(1)".
+    ///
+    /// The tokens after skipping the fused POLY(n) token start directly with
+    /// the control pairs: `(nc1+ nc1-) (nc2+ nc2-) ... c0 c1 c2 ...`
+    fn parse_poly_fused(
+        &mut self,
+        name: &str,
+        kind: PolyKind,
+        n_out_p: &str,
+        n_out_n: &str,
+        degree: usize,
+        tokens: &[Token],
+    ) -> Result<Option<ElementStatement>, SimError> {
+        // Delegate to parse_poly_form with n_inputs_hint = degree.
+        // The tokens already start at the control pairs (no POLY keyword to skip).
+        self.parse_poly_form(
+            name,
+            kind,
+            n_out_p,
+            n_out_n,
+            degree,
+            tokens,
+        )
     }
 
     /// Build a `BehavioralExpr` for a POLY(n) polynomial.
@@ -6130,6 +6264,151 @@ impl SpiceParser {
         Ok(())
     }
 
+    /// Parse an XSPICE A-device line and store in `pending_a_devices`.
+    ///
+    /// Syntax forms:
+    /// - `Aname [in1 in2 ...] [out1 out2 ...] model_name` — digital port syntax
+    /// - `Aname (in1) (out1) model_name` — ngspice analog port syntax with ()
+    ///
+    /// The model name (e.g. `d_inverter`, `adc_bridge`, `dac_bridge`) is stored
+    /// and resolved during circuit build to instantiate the appropriate digital
+    /// primitive or bridge.
+    fn parse_a_device_pending(&mut self, name: &str, line: &[Token]) -> Result<(), SimError> {
+        if line.is_empty() {
+            return Err(SimError::Parse(format!(
+                "A-device '{name}': empty device line"
+            )));
+        }
+
+        // Reconstruct the line as a string for simpler parsing of bracketed groups.
+        // The original line uses () for analog ports and [] for digital ports.
+        let line_str: String = line.iter()
+            .map(|t| format!("{t} "))
+            .collect();
+        let line_str = line_str.trim();
+
+        // Try to parse using the digital crate's parse_a_element which handles both () and []
+        // We need to reconstruct the full line including the name prefix
+        let full_line = format!("A{} {}", name, line_str);
+
+        // Use the same parsing logic as parse_a_element from the digital crate
+        // but adapted for token-based parsing here
+        let (inputs, outputs, model_name) = self.parse_a_device_tokens(name, line)?;
+
+        self.pending_a_devices.push(PendingADevice {
+            name: name.to_string(),
+            inputs,
+            outputs,
+            model_name,
+        });
+        Ok(())
+    }
+
+    /// Parse A-device tokens to extract inputs, outputs, and model name.
+    ///
+    /// Handles both:
+    /// - `Aname [in1 in2] [out1] model_name` — bracket syntax
+    /// - `Aname (in1) (out1) model_name` — parenthesis syntax (ngspice analog ports)
+    fn parse_a_device_tokens(&mut self, name: &str, line: &[Token]) -> Result<(Vec<String>, Vec<String>, String), SimError> {
+        // A-device format: [inputs] [outputs] model_name
+        // where inputs/outputs can be [] or () delimited groups
+        // or even plain space-separated nodes (simplified form)
+
+        let mut inputs: Vec<String> = Vec::new();
+        let mut outputs: Vec<String> = Vec::new();
+        let mut model_name = String::new();
+        let mut phase = 0; // 0 = looking for input group, 1 = looking for output group, 2 = model name
+
+        let mut i = 0;
+        while i < line.len() {
+            let tok = &line[i];
+            match tok {
+                // Handle opening bracket/paren - start of a group
+                Token::LeftBrace | Token::LeftParen => {
+                    let close = if matches!(tok, Token::LeftBrace) { Token::RightBrace } else { Token::RightParen };
+                    let mut j = i + 1;
+                    let mut group: Vec<String> = Vec::new();
+                    while j < line.len() && line[j] != close {
+                        if let Token::Word(w) = &line[j] {
+                            group.push(w.clone());
+                        }
+                        j += 1;
+                    }
+                    if j >= line.len() {
+                        return Err(SimError::Parse(format!(
+                            "A-device '{name}': unclosed group"
+                        )));
+                    }
+                    // Consume tokens until the closing bracket
+                    i = j + 1; // skip closing bracket too
+
+                    if phase == 0 {
+                        inputs.extend(group);
+                        phase = 1;
+                    } else if phase == 1 {
+                        outputs.extend(group);
+                        phase = 2;
+                    } else {
+                        return Err(SimError::Parse(format!(
+                            "A-device '{name}': too many groups"
+                        )));
+                    }
+                }
+                // Handle a bare word (could be a single-node group or the model name)
+                Token::Word(w) => {
+                    // Check if next token might be another word (meaning this is a node, not model)
+                    // or if this is the model name (last token)
+                    if i + 1 < line.len() {
+                        if let Token::Word(_) = &line[i + 1] {
+                            // Next token is also a word, so this is a node
+                            if phase == 0 {
+                                inputs.push(w.clone());
+                                phase = 1;
+                            } else if phase == 1 {
+                                outputs.push(w.clone());
+                                phase = 2;
+                            } else {
+                                return Err(SimError::Parse(format!(
+                                    "A-device '{name}': too many nodes before model name"
+                                )));
+                            }
+                            i += 1;
+                            continue;
+                        }
+                    }
+                    // This is the model name (either last token, or followed by non-word)
+                    if phase < 2 {
+                        // Model name comes early - remaining tokens are outputs then model
+                        if phase == 0 {
+                            // No groups found, assume all words before model are inputs
+                            model_name = w.clone();
+                            phase = 3;
+                        } else if phase == 1 {
+                            // phase 1 means we had inputs but no outputs group yet
+                            // w must be the model name, outputs remain empty
+                            model_name = w.clone();
+                            phase = 3;
+                        }
+                    } else {
+                        model_name = w.clone();
+                    }
+                    i += 1;
+                }
+                _ => {
+                    i += 1;
+                }
+            }
+        }
+
+        if model_name.is_empty() {
+            return Err(SimError::Parse(format!(
+                "A-device '{name}': missing model name"
+            )));
+        }
+
+        Ok((inputs, outputs, model_name))
+    }
+
     /// Parse the right-hand side of `V=` / `I=` / `VALUE=` for B/E/G elements.
     ///
     /// Recognizes:
@@ -6259,6 +6538,43 @@ impl SpiceParser {
             args.push(BehavioralExpr::Lit(y));
         }
         Ok(BehavioralExpr::Func("__table__".into(), args))
+    }
+
+    /// Parse a TABLE-controlled E or G element and emit a PendingBsource.
+    ///
+    /// Syntax: `Ename n+ n- TABLE {expr} = (x0,y0) (x1,y1) ...`
+    ///
+    /// For VCVS: the B-source voltage is `V(n+, n-) = table_expr(V(expr))`.
+    /// For VCCS: the B-source current is `I = table_expr(V(expr))`.
+    fn parse_table_device(
+        &mut self,
+        name: &str,
+        kind: DeviceKind,
+        n_out_p: &str,
+        n_out_n: &str,
+        tokens: &[Token],
+    ) -> Result<Option<ElementStatement>, SimError> {
+        // Use the same parsing as B-source TABLE.
+        let table_expr = Self::parse_table_form(name, tokens)?;
+
+        let b_kind = match kind {
+            DeviceKind::Vcvs => DeviceKind::BsourceV,
+            DeviceKind::Vccs => DeviceKind::BsourceI,
+            _ => {
+                return Err(SimError::Parse(format!(
+                    "TABLE: invalid device kind '{kind:?}' for TABLE"
+                )));
+            }
+        };
+
+        self.pending_bsources.push(PendingBsource {
+            name: format!("b_tbl_{name}"),
+            node_p: n_out_p.to_string(),
+            node_n: n_out_n.to_string(),
+            kind: b_kind,
+            expr: table_expr,
+        });
+        Ok(None)
     }
 
     /// Strip trailing Newline / Eof tokens from a token slice.

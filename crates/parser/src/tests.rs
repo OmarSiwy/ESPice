@@ -868,7 +868,43 @@ R1 1 0 1k
     let (_circuit, analyses, _opts) = SpiceParser::parse(netlist).unwrap();
     assert_eq!(analyses.len(), 1);
     assert_eq!(analyses[0].kind, AnalysisKind::DcSweep);
-    assert_eq!(analyses[0].params.len(), 3);
+    // 4 params: __dc_src__v1, start, stop, step
+    assert_eq!(analyses[0].params.len(), 4);
+}
+
+#[test]
+fn parse_nested_dc_sweep() {
+    // Nested DC sweep: outer V1, inner V2
+    let netlist = "\
+* Nested DC sweep test
+V1 1 0 DC 0
+V2 2 0 DC 0
+R1 1 0 1k
+.DC V1 0 5 0.1 V2 0 3 0.5
+.END
+";
+    let (_circuit, analyses, _opts) = SpiceParser::parse(netlist).unwrap();
+    assert_eq!(analyses.len(), 1);
+    assert_eq!(analyses[0].kind, AnalysisKind::DcSweep);
+    // 8 params: __dc_src__v1, start, stop, step, __dc_src2__v2, start2, stop2, step2
+    assert_eq!(analyses[0].params.len(), 8);
+}
+
+#[test]
+fn parse_nested_dc_sweep_temp() {
+    // Nested DC sweep with temperature inner sweep
+    let netlist = "\
+* Nested DC sweep with TEMP test
+V1 1 0 DC 0
+R1 1 0 1k TC=0.01
+.DC V1 0 5 0.1 TEMP 0 100 25
+.END
+";
+    let (_circuit, analyses, _opts) = SpiceParser::parse(netlist).unwrap();
+    assert_eq!(analyses.len(), 1);
+    assert_eq!(analyses[0].kind, AnalysisKind::DcSweep);
+    // 7 params: __dc_src__v1, start, stop, step, _dc_src2__temp, start2, stop2, step2
+    assert_eq!(analyses[0].params.len(), 8);
 }
 
 #[test]
