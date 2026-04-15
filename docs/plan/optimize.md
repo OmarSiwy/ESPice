@@ -56,6 +56,13 @@ G. Native lines → .va (user decision 2026-09-24): per model, when ready. Move
    our side an erfc analog function in ltra.va (not an LRM builtin). Until then
    the .zig models stay the O/Y/P devices.
 
+F2. Per-ddt charge sites (VerA pin 0c4d6afc, local, not pushed; after F lands): host
+   q tape per site (n_q, q_stamps, qRows for row stamping), LTE per site masked by
+   q_lte, and mark .va sites `(* vera_lte = 0 *)` per ngspice's *trunc.c (mos1-9:
+   qbd/qbs off; BJT/VBIC: qbe/qbc/qsub/qbcx separate sites; BSIM/HiSIM per their
+   trunc routines). Targets r-drift cause #6: mos6_inverter, schmitt, rca3040,
+   rtlinv, hfet, chain_256. Then stepFill (per-timepoint cache), its own pin.
+
 H. Multithreaded device evaluation (user-requested 2026-09-24; starts after E merges):
    ParEval (analysis/par_eval.zig) already splits instances across threads with a
    deterministic plane reduction, but it is hidden behind ESPICE_THREADS (default 1).
