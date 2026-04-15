@@ -99,14 +99,19 @@ module vsource(p, n);
     parameter real pwl_repeat = 0.0;  // s  `r=<t>`: replay [r, t_last]
     parameter real pwl_td     = 0.0;  // s  `td=<t>`
 
-    // ---- SFFM(VO VA FC MDI FS PHASEC PHASES) --------------------------------
-    parameter real sffm_vo     = 0.0;  // V    offset
-    parameter real sffm_va     = 0.0;  // V    amplitude
-    parameter real sffm_fc     = 0.0;  // Hz   carrier frequency
-    parameter real sffm_mdi    = 0.0;  //      modulation index
-    parameter real sffm_fs     = 0.0;  // Hz   signal frequency
-    parameter real sffm_phasec = 0.0;  // deg  carrier phase
-    parameter real sffm_phases = 0.0;  // deg  signal phase
+    // ---- SFFM(VO VA FM MDI FC TD PHASEM PHASEC) -----------------------------
+    // ngspice 44 order and defaults (vsrcload.c:235-249): modulating frequency
+    // third, carrier fifth. The builder (resolvePulseDefaults) fills FM = 5/TSTOP
+    // over the -1 sentinel and FC = 500/TSTOP over 0 (ngspice also treats an
+    // explicit FC = 0 as omitted, vsrcload.c:241-243).
+    parameter real sffm_vo     =  0.0;  // V    offset
+    parameter real sffm_va     =  0.0;  // V    amplitude
+    parameter real sffm_fm     = -1.0;  // Hz   modulating frequency (-1 = 5/TSTOP)
+    parameter real sffm_mdi    = 90.0;  //      modulation index
+    parameter real sffm_fc     =  0.0;  // Hz   carrier frequency    (0 = 500/TSTOP)
+    parameter real sffm_td     =  0.0;  // s    delay
+    parameter real sffm_phasem =  0.0;  // deg  modulation phase
+    parameter real sffm_phasec =  0.0;  // deg  carrier phase
 
     // ---- AM(VA VO MF FC TD PHASEC PHASES) -----------------------------------
     parameter real am_va     = 0.0;  // V    amplitude
@@ -119,7 +124,7 @@ module vsource(p, n);
 
     real t, out;
     real p_tr, p_tf, p_pw, p_per, t_rel, t_mod;
-    real t_sin, t_e1, t_e2, fm_mod, am_env, am_car;
+    real t_sin, t_e1, t_e2, fm_mdi, t_fm, am_env, am_car;
     real t_e, t_first, t_last, v_first, v_last, tp, vp, tk, vk, span, excess;
     integer k, klo, khi;
 
@@ -293,9 +298,19 @@ module vsource(p, n);
             end
 
         end else if (waveform == 5) begin
-            // ---- SFFM: no delay; both phases in degrees.
-            fm_mod = sffm_mdi * sin(`M_TWO_PI * sffm_fs * t + sffm_phases * `M_PI / 180.0);
-            out = sffm_vo + sffm_va * sin(`M_TWO_PI * sffm_fc * t + sffm_phasec * `M_PI / 180.0 + fm_mod);
+            // ---- SFFM, vsrcload.c:228-282. MDI is limited to FC/FM, or
+            // raised to 0 (256-269); the source is 0 up to and at TD (271-274),
+            // then VO + VA*sin(2*pi*FC*t + PHASEC + MDI*sin(2*pi*FM*t + PHASEM))
+            // on the delayed time (277-279). No breakpoints (vsrcacct.c:160-163).
+            fm_mdi = sffm_mdi;
+            if (fm_mdi > sffm_fc / sffm_fm) fm_mdi = sffm_fc / sffm_fm;
+            else if (fm_mdi < 0.0) fm_mdi = 0.0;
+            t_fm = t - sffm_td;
+            if (t_fm <= 0.0)
+                out = 0.0;
+            else
+                out = sffm_vo + sffm_va * sin((`M_TWO_PI * sffm_fc * t_fm + sffm_phasec * `M_PI / 180.0)
+                    + fm_mdi * sin(`M_TWO_PI * sffm_fm * t_fm + sffm_phasem * `M_PI / 180.0));
 
         end else if (waveform == 6) begin
             // ---- AM: VA * (VO + sin(2*pi*MF*t + PHASES)) * sin(2*pi*FC*t + PHASEC),

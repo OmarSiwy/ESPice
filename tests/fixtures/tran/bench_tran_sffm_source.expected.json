@@ -4,7 +4,7 @@
   "purpose": "SFFM stimulus into an RC: single-frequency FM, the last independent-source",
   "oracle": {
     "kind": "ngspice-44.2",
-    "derivation": "ngspice 44.2 run of the deck at default options, the rows of the original benchmark oracle (253 of 2008 accepted points). ngspice reads SFFM(0 1 100k 2 10k) as (VO VA FM MDI FC) and limits MDI to FC/FM = 0.1 (vsrcload.c:235-259), so v(in) = sin(2*pi*10k*t + 0.1*sin(2*pi*100k*t)); espice reads (VO VA FC MDI FS). Tolerances are the original ones (v(out) atol 2e-6 V, i(v1) atol 1e-11 A). Replaces the closed-form oracle of 0243d0b (user decision).",
+    "derivation": "ngspice 44.2 run of the deck at default options, the rows of the original benchmark oracle (253 of 2008 accepted points). ngspice reads SFFM(0 1 100k 2 10k) as (VO VA FM MDI FC) and limits MDI to FC/FM = 0.1 (vsrcload.c:235-259), so v(in) = sin(2*pi*10k*t + 0.1*sin(2*pi*100k*t)). Tolerances are the original ones (v(out) atol 2e-6 V, i(v1) atol 1e-11 A). Replaces the closed-form oracle of 0243d0b (user decision).",
     "command": "ngspice -n -b -r reference.raw deck.sp"
   },
   "origin": "benchmark/fixtures/tran/sffm_source/circuit.sp",
@@ -1061,5 +1061,5 @@
     "finite_values_required": true,
     "all_requested_analyses_must_complete": true
   },
-  "netlist_sha256": "105eb4ac737c371d87fe13952c450fe7bf2a31b5b89146906f74d845c0f71a90"
+  "netlist_sha256": "fd88ddd393d9d074bb0dfd6caa32967a45c6707eb63d61f508291ad81adac949"
 }

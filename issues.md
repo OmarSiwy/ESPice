@@ -169,9 +169,10 @@ FIRST cause. Fix recipes for F1, F4, F5, F8, F10, F11 and E6 are in
   (phase 2b, options of docs/conformance-phase2.md group 15):
   `tran/bench_tran_sffm_source` back on ngspice 44.2's own run at the
   original tolerances (second user decision, replacing the closed form).
-  KNOWN GAP, 1.4e7x (i(v1)): ngspice reads SFFM as (VO VA FM MDI FC) and
-  limits MDI to FC/FM (vsrcload.c:235-259); espice reads the SPICE3 order
-  (VO VA FC MDI FS). `dc/bench_mosfet_cmos_inverter` with LAMBDA=0.01 on both models,
+  FIXED: vsource.va/isource.va now read SFFM as ngspice 44 does, (VO VA FM
+  MDI FC TD PHASEM PHASEC) with MDI limited to FC/FM, the TSTOP defaults and
+  the zero-before-TD V source (vsrcload.c:228-282, isrcload.c:206-254,
+  isrcload.c's one-slot-early phases included). `dc/bench_mosfet_cmos_inverter` with LAMBDA=0.01 on both models,
   oracle ngspice at reltol=1e-9; `convergence/bench_ota_cutoff_abstol` now
   carries `.options abstol=1e-18 reltol=1e-10 vntol=1e-12` and its oracle is
   ngspice at them; `sens/bench_sens_bridge` restricted to v(r1..r5), v(vin);
