@@ -48,6 +48,17 @@ pub fn run_dc_op_with_config(
         None => Solver::default(),
     };
 
+    // Propagate .TEMP / .OPTIONS TEMP to all devices that lack instance temp.
+    // We avoid cloning when no global temperature is configured.
+    let ckt_local_opt: Option<Circuit> = if !circuit.temperatures().is_empty() {
+        let mut c = circuit.clone();
+        c.propagate_global_temperature();
+        Some(c)
+    } else {
+        None
+    };
+    let circuit = ckt_local_opt.as_ref().unwrap_or(circuit);
+
     let warm_start = cache.and_then(|c| c.warm_start()).map(|s| s.to_vec());
     let nr_result = solver.solve(circuit, registry, warm_start.as_deref())?;
 
@@ -62,11 +73,28 @@ pub fn run_dc_op_with_config(
 }
 
 /// Run a DC operating point analysis with simulation options from `.OPTIONS`.
+///
+/// If `.OPTIONS TEMP` was set to a non-default value (i.e. `opts.temp != 300.15`),
+/// it is propagated to devices that lack an explicit instance temperature.
 pub fn run_dc_op_with_options(
     circuit: &Circuit,
     registry: &DeviceRegistry,
     opts: &SimOptions,
 ) -> Result<DcOpOutput, SimError> {
+    // When .OPTIONS TEMP is set, inject it as the global temperature so that
+    // propagation in run_dc_op_with_config picks it up.  opts.temp is in
+    // Kelvin; circuit.temperatures() also stores Kelvin.
+    //
+    // Priority: if a .TEMP directive already set the circuit temperature, that
+    // wins (handled by run_dc_op_with_config).  If not, and opts.temp differs
+    // from the 300.15 K default, inject it now.
+    const DEFAULT_TEMP_K: f64 = 300.15;
+    if circuit.temperatures().is_empty() && (opts.temp - DEFAULT_TEMP_K).abs() > 1e-9 {
+        let mut ckt = circuit.clone();
+        ckt.add_temperature(opts.temp); // add_temperature stores Kelvin directly
+        ckt.propagate_global_temperature();
+        return run_dc_op_with_config(&ckt, registry, Some(NrConfig::from(opts)), None);
+    }
     run_dc_op_with_config(circuit, registry, Some(NrConfig::from(opts)), None)
 }
 
@@ -174,6 +202,17 @@ fn run_nested_dc_inner(
         None => Solver::default(),
     };
 
+    // Propagate .TEMP once into a base clone so that all sweep-point clones
+    // inherit the correct global temperature without re-cloning from scratch.
+    let base_ckt_opt: Option<Circuit> = if !circuit.temperatures().is_empty() {
+        let mut c = circuit.clone();
+        c.propagate_global_temperature();
+        Some(c)
+    } else {
+        None
+    };
+    let circuit = base_ckt_opt.as_ref().unwrap_or(circuit);
+
     let n_outer = config.outer_values.len();
     let n_inner = config.inner_values.len();
     let mut points = Vec::with_capacity(n_outer * n_inner);
@@ -183,7 +222,10 @@ fn run_nested_dc_inner(
 
     for &outer_val in &config.outer_values {
         let mut outer_ckt = circuit.clone();
-        if !outer_ckt.set_device_param(&outer_lower, &config.outer_param, outer_val) {
+        if outer_lower == "temp" {
+            outer_ckt.set_global_temperature(outer_val);
+            outer_ckt.propagate_global_temperature();
+        } else if !outer_ckt.set_device_param(&outer_lower, &config.outer_param, outer_val) {
             return Err(SimError::Parse(format!(
                 "nested_dc: outer device '{}' param '{}' not found",
                 config.outer_device, config.outer_param
@@ -191,18 +233,94 @@ fn run_nested_dc_inner(
         }
 
         let mut prev_solution: Option<Vec<f64>> = None;
+        let mut prev_inner_val: Option<f64> = None;
         for &inner_val in &config.inner_values {
             let mut ckt = outer_ckt.clone();
-            if !ckt.set_device_param(&inner_lower, &config.inner_param, inner_val) {
+            if inner_lower == "temp" {
+                ckt.set_global_temperature(inner_val);
+                ckt.propagate_global_temperature();
+            } else if !ckt.set_device_param(&inner_lower, &config.inner_param, inner_val) {
                 return Err(SimError::Parse(format!(
                     "nested_dc: inner device '{}' param '{}' not found",
                     config.inner_device, config.inner_param
                 )));
             }
 
-            let nr_result = solver.solve(&ckt, registry, prev_solution.as_deref())?;
-            points.push(extract_results(&ckt, &nr_result.solution));
-            prev_solution = Some(nr_result.solution);
+            // Attempt 1: warm-start from previous solution.
+            // For temperature sweeps, device parameters (TC-scaled R) change
+            // nonlinearly — previous solution may be far from new OP, so cold-start.
+            let warm = if inner_lower == "temp" { None } else { prev_solution.as_deref() };
+            let solved = match solver.solve(&ckt, registry, warm) {
+                Ok(nr) => Some(nr.solution),
+                Err(SimError::Convergence { .. }) | Err(SimError::SingularMatrix { .. }) => {
+                    // Attempt 2: up to 3 bisection steps between last good point and target.
+                    let use_warm_bisect = inner_lower != "temp";
+                    let mut bisect_sol: Option<Vec<f64>> = None;
+                    if let (Some(ps), Some(prev_v)) = (&prev_solution, prev_inner_val) {
+                        let mut lo = prev_v;
+                        let mut hi = inner_val;
+                        let mut carry = ps.clone();
+                        let mut bisect_ok = true;
+                        for _ in 0..3 {
+                            let mid = 0.5 * (lo + hi);
+                            let mut mid_ckt = outer_ckt.clone();
+                            let mid_set_ok = if inner_lower == "temp" {
+                                mid_ckt.set_global_temperature(mid);
+                                mid_ckt.propagate_global_temperature();
+                                true
+                            } else {
+                                mid_ckt.set_device_param(&inner_lower, &config.inner_param, mid)
+                            };
+                            if !mid_set_ok {
+                                bisect_ok = false;
+                                break;
+                            }
+                            match solver.solve(&mid_ckt, registry, if use_warm_bisect { Some(&carry) } else { None }) {
+                                Ok(nr) => {
+                                    carry = nr.solution;
+                                    lo = mid;
+                                }
+                                Err(_) => {
+                                    hi = mid;
+                                }
+                            }
+                        }
+                        if bisect_ok {
+                            // Try target with the best bisection warm-start.
+                            bisect_sol = solver.solve(&ckt, registry, if use_warm_bisect { Some(&carry) } else { None }).ok()
+                                .map(|nr| nr.solution);
+                        }
+                    }
+
+                    if let Some(sol) = bisect_sol {
+                        Some(sol)
+                    } else {
+                        // Attempt 3: cold DC initial guess (pass None).
+                        match solver.solve(&ckt, registry, None) {
+                            Ok(nr) => Some(nr.solution),
+                            Err(e) => {
+                                // Attempt 4: give up on this point — warn and reuse last good.
+                                eprintln!(
+                                    "warning: DC sweep convergence failed at inner={inner_val:.6e} \
+                                     (outer={outer_val:.6e}): {e}; using last good solution"
+                                );
+                                None
+                            }
+                        }
+                    }
+                }
+                Err(e) => return Err(e),
+            };
+
+            let converged = solved.is_some();
+            let result_solution = solved.unwrap_or_else(|| {
+                prev_solution.clone().unwrap_or_else(|| vec![0.0; ckt.num_vars() as usize])
+            });
+            points.push(extract_results(&ckt, &result_solution));
+            if converged {
+                prev_solution = Some(result_solution);
+            }
+            prev_inner_val = Some(inner_val);
         }
     }
 

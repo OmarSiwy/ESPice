@@ -105,7 +105,7 @@ fn vcrit(nvt: f64, is: f64) -> f64 {
 ///
 /// Given new and old terminal voltages for a device, returns limited
 /// voltages that prevent Newton from overshooting device nonlinearities.
-/// Only diodes and MOSFETs are limited; linear devices pass through unchanged.
+/// Only diodes, BJTs, and MOSFETs are limited; linear devices pass through unchanged.
 pub fn limit_junction_voltages(
     kind: DeviceKind,
     new_v: &[f64],
@@ -131,8 +131,40 @@ pub fn limit_junction_voltages(
                 lim[0] += correction;
             }
         }
-        DeviceKind::MosfetN | DeviceKind::MosfetP => {
-            let is_pmos = kind == DeviceKind::MosfetP
+        DeviceKind::BjtNpn | DeviceKind::BjtPnp => {
+            // Pins: 0=collector, 1=base, 2=emitter, 3=substrate
+            // Limit both BE and BC junctions using pnjlim.
+            let is = params.get_or("is", 1e-16);
+            let n = params.get_or("nf", 1.0);  // forward emission coefficient
+            let nvt = n * VT;
+            let vc = vcrit(nvt, is);
+
+            // Vbe = Vb - Ve  (pins 1, 2)
+            let vbe_new = new_v[1] - new_v[2];
+            let vbe_old = old_v[1] - old_v[2];
+            let vbe_lim = pnjlim(vbe_new, vbe_old, nvt, vc);
+
+            // Vbc = Vb - Vc  (pins 1, 0)
+            let vbc_new = new_v[1] - new_v[0];
+            let vbc_old = old_v[1] - old_v[0];
+            let vbc_lim = pnjlim(vbc_new, vbc_old, nvt, vc);
+
+            // Apply corrections to base node (pin 1); keep emitter/collector fixed.
+            // Prioritize BE limiting (forward-active region is most common).
+            let be_corr = vbe_lim - vbe_new;
+            let bc_corr = vbc_lim - vbc_new;
+            // Use whichever correction is larger in magnitude.
+            let corr = if be_corr.abs() >= bc_corr.abs() { be_corr } else { bc_corr };
+            if corr.abs() > 1e-15 {
+                lim[1] += corr;
+            }
+        }
+        DeviceKind::MosfetN | DeviceKind::MosfetP
+        | DeviceKind::MosfetN2 | DeviceKind::MosfetP2
+        | DeviceKind::MosfetN3 | DeviceKind::MosfetP3
+        | DeviceKind::MosfetN6 | DeviceKind::MosfetP6 => {
+            let is_pmos = matches!(kind, DeviceKind::MosfetP | DeviceKind::MosfetP2
+                                       | DeviceKind::MosfetP3 | DeviceKind::MosfetP6)
                 || params.get_or("pmos", 0.0) != 0.0;
             let sign = if is_pmos { -1.0 } else { 1.0 };
 

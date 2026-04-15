@@ -136,18 +136,17 @@ fn compute_vgsteff(
 ) -> (f64, f64, f64, f64) {
     let n  = inst.nfactor.max(1.0e-3);    // sub-threshold slope factor
     let vt = inst.vtm;
-    let m  = 0.5;                         // BSIM4 mstar default
+    let _m = 0.5;                         // BSIM4 mstar default (reserved for future use)
 
     let vgst = vgs_eff - vth;
     let t0   = n * vt;
 
-    // Continuous smoothing (b4ld.c lines ~1272–1330):
-    //   T10 = m * Vgst
-    //   T11 = (2 - m) - exp(-Vgst/(n*Vt))
-    //   Vgsteff = (n*Vt) * ln(1 + exp(T10/(n*Vt))) / (m + (n*Vt)*exp(...))
-    // We use the standard ngspice form simplified:
-    //   Vgsteff = n*Vt * ln(1 + exp((Vgst - 2*voff*0)/((1+m)*n*Vt)))
-    let arg = (vgst - 2.0 * inst.voff) / ((1.0 + m) * t0);
+    // Continuous smoothing — standard BSIM4 Vgsteff softplus:
+    //   Vgsteff = n*Vt * ln(1 + exp((Vgst - Voff) / (n*Vt)))
+    // This is the log-sum-exp approximation that smoothly transitions from
+    // deep sub-threshold (Vgsteff ≈ n*Vt*exp((Vgst-Voff)/(n*Vt))) to
+    // strong inversion (Vgsteff ≈ Vgst - Voff).
+    let arg = (vgst - inst.voff) / t0;
 
     // Numerically stable softplus.
     let (sp, dsp_darg) = if arg > 40.0 {
@@ -159,11 +158,11 @@ fn compute_vgsteff(
         ((1.0 + e).ln(), e / (1.0 + e))
     };
 
-    let vgsteff = (1.0 + m) * t0 * sp * 0.5 + 0.0;
+    let vgsteff = t0 * sp;
 
-    let dvgsteff_dvg = 0.5 * dsp_darg * (1.0 - 0.0);
-    let dvgsteff_dvd = -0.5 * dsp_darg * dvth_dvd;
-    let dvgsteff_dvb = -0.5 * dsp_darg * dvth_dvb;
+    let dvgsteff_dvg = dsp_darg;
+    let dvgsteff_dvd = -dsp_darg * dvth_dvd / t0;
+    let dvgsteff_dvb = -dsp_darg * dvth_dvb / t0;
 
     (vgsteff.max(1.0e-10), dvgsteff_dvg, dvgsteff_dvd, dvgsteff_dvb)
 }
@@ -299,12 +298,10 @@ pub fn evaluate_dc(inst: &Bsim4Instance, vd_t: f64, vg_t: f64, vs_t: f64, vb_t: 
     let ids_core = beta0 * vgsteff * vdseff * bracket / denom_v;
 
     // CLM (channel-length modulation) multiplier.
-    let clm = if vds > vdseff {
-        let dvdsclm = (vds - vdseff) / inst.pclm.max(1.0e-3);
-        1.0 + dvdsclm / inst.leff.max(1.0e-9) * 1.0e-7
-    } else {
-        1.0
-    };
+    // Va_CLM = PCLM * EsatL  (Early voltage due to CLM)
+    // clm = 1 + (Vds - Vdseff) / Va_CLM
+    let va_clm = inst.pclm.max(1.0e-3) * esatl.max(1.0e-3);
+    let clm = 1.0 + (vds - vdseff).max(0.0) / va_clm;
 
     let ids = ids_core * clm;
 
@@ -319,7 +316,7 @@ pub fn evaluate_dc(inst: &Bsim4Instance, vd_t: f64, vg_t: f64, vs_t: f64, vb_t: 
     let gm   = ids * (dvgst_dvg * inv_vgsteff + dmueff_dvg / mueff.max(1.0e-12));
     let gds  = ids * (dvdseff_dvd * inv_vdseff)
               + ids * (dvdsat_dvg * 0.0)
-              + ids_core * (clm - 1.0) / inst.leff.max(1.0e-9) * 1.0e-9;
+              + ids_core / va_clm;
     let gmbs = ids * (dvgst_dvb * inv_vgsteff + dmueff_dvb / mueff.max(1.0e-12))
               + ids * (-dvth_dvb) * inv_vgsteff * dvgst_dvg.max(1.0e-30)
               + ids * (-abulk_dvb(inst, vgsteff) * 0.5 * vdseff / vgst2vtm) / bracket.max(1.0e-12);

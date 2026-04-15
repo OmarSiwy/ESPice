@@ -92,7 +92,13 @@ const DEFAULT_GMIN_FLOOR: f64 = 1e-9;
 /// devices (MOSFETs, diodes, BJTs).
 #[inline]
 fn limit_step(dx: &mut [f64], max_voltage_step: f64) {
-    dx.iter_mut().for_each(|v| *v = v.clamp(-max_voltage_step, max_voltage_step));
+    for v in dx.iter_mut() {
+        if *v > max_voltage_step {
+            *v = max_voltage_step;
+        } else if *v < -max_voltage_step {
+            *v = -max_voltage_step;
+        }
+    }
 }
 
 /// Regularize weak Jacobian diagonals (Levenberg-Marquardt style).
@@ -420,6 +426,139 @@ impl NewtonRaphson {
                         // Same type or different gates — average.
                         guess[idx] = (guess[idx] + v_drain) / 2.0;
                     }
+                }
+            }
+        }
+
+        // Pass 3.5: Apply .NODESET overrides.
+        //
+        // .NODESET biases the starting point toward a user-specified voltage
+        // but does not force the final converged value (unlike .IC). We apply
+        // it after the MOSFET pass so topology heuristics don't undo it, but
+        // before the BJT pass so BJT guesses can still use the biased values.
+        for &(node_id, voltage) in circuit.node_sets() {
+            if node_id.is_ground() {
+                continue;
+            }
+            let idx = (node_id.0 - 1) as usize;
+            if idx < num_nodes {
+                guess[idx] = voltage;
+            }
+        }
+
+        // Pass 4: Topology-aware BJT initial guess.
+        //
+        // Pin layout: 0=collector, 1=base, 2=emitter.
+        //
+        // Ground (NodeId==0) is always "known" at 0 V.  Nodes already set by
+        // Pass 1 (voltage-source terminals) are in `known[]`.  We use that
+        // information to compute physically meaningful Vbe/Vbc biases instead
+        // of the crude 10 %/90 % heuristic that ignores topology.
+        //
+        // Returns (voltage, is_known) for a node; ground is (0.0, true).
+        fn bjt_node_info(
+            node: Option<bigospice_core::NodeId>,
+            guess: &[f64],
+            known: &[bool],
+            num_nodes: usize,
+        ) -> (f64, bool) {
+            match node {
+                None => (0.0, true),
+                Some(n) if n.is_ground() => (0.0, true),
+                Some(n) => {
+                    let idx = (n.0 - 1) as usize;
+                    if idx < num_nodes {
+                        (guess[idx], known[idx])
+                    } else {
+                        (0.0, false)
+                    }
+                }
+            }
+        }
+
+        // Write a node guess only when it is not already pinned.
+        fn bjt_set_node(
+            node: Option<bigospice_core::NodeId>,
+            v: f64,
+            guess: &mut [f64],
+            known: &[bool],
+            num_nodes: usize,
+        ) {
+            if let Some(n) = node.filter(|n| !n.is_ground()) {
+                let idx = (n.0 - 1) as usize;
+                if idx < num_nodes && !known[idx] {
+                    guess[idx] = v;
+                }
+            }
+        }
+
+        for dev in circuit.devices() {
+            let is_npn = dev.kind == DeviceKind::BjtNpn;
+            let is_pnp = dev.kind == DeviceKind::BjtPnp;
+            if !is_npn && !is_pnp {
+                continue;
+            }
+
+            let col_node = dev.node(0);
+            let base_node = dev.node(1);
+            let emit_node = dev.node(2);
+
+            let (v_col, col_known) = bjt_node_info(col_node, &guess, &known, num_nodes);
+            let (v_emit, emit_known) = bjt_node_info(emit_node, &guess, &known, num_nodes);
+            let (_v_base, base_known) = bjt_node_info(base_node, &guess, &known, num_nodes);
+
+            if is_npn {
+                // NPN active region: Ve < Vb < Vc.
+                // Vbe ≈ +0.7 V,  Vc well above Ve.
+                if emit_known && col_known {
+                    // Both power-rail nodes are pinned — only set base.
+                    if !base_known {
+                        let v_base = v_emit + 0.7_f64.min((v_col - v_emit) * 0.4);
+                        bjt_set_node(base_node, v_base, &mut guess, &known, num_nodes);
+                    }
+                } else if emit_known {
+                    // Emitter is on a known rail (often ground).
+                    let v_base = v_emit + 0.7;
+                    let v_coll = v_emit + (v_max - v_emit) * 0.8;
+                    bjt_set_node(base_node, v_base, &mut guess, &known, num_nodes);
+                    bjt_set_node(col_node, v_coll, &mut guess, &known, num_nodes);
+                } else if col_known {
+                    // Collector pinned to supply.
+                    let v_emit_g = v_col * 0.1;
+                    let v_base = v_emit_g + 0.7;
+                    bjt_set_node(emit_node, v_emit_g, &mut guess, &known, num_nodes);
+                    bjt_set_node(base_node, v_base, &mut guess, &known, num_nodes);
+                } else {
+                    // No topology info — crude heuristic.
+                    bjt_set_node(emit_node, v_max * 0.1, &mut guess, &known, num_nodes);
+                    bjt_set_node(base_node, v_max * 0.1 + 0.7, &mut guess, &known, num_nodes);
+                    bjt_set_node(col_node, v_max * 0.8, &mut guess, &known, num_nodes);
+                }
+            } else {
+                // PNP active region: Ve > Vb > Vc.
+                // Veb ≈ +0.7 V,  Vc well below Ve.
+                if emit_known && col_known {
+                    if !base_known {
+                        let v_base = v_emit - 0.7_f64.min((v_emit - v_col) * 0.4);
+                        bjt_set_node(base_node, v_base, &mut guess, &known, num_nodes);
+                    }
+                } else if emit_known {
+                    // Emitter is on the high rail.
+                    let v_base = v_emit - 0.7;
+                    let v_coll = v_emit - (v_emit - v_min) * 0.8;
+                    bjt_set_node(base_node, v_base, &mut guess, &known, num_nodes);
+                    bjt_set_node(col_node, v_coll, &mut guess, &known, num_nodes);
+                } else if col_known {
+                    // Collector pinned to low rail.
+                    let v_emit_g = v_col + (v_max - v_col) * 0.9;
+                    let v_base = v_emit_g - 0.7;
+                    bjt_set_node(emit_node, v_emit_g, &mut guess, &known, num_nodes);
+                    bjt_set_node(base_node, v_base, &mut guess, &known, num_nodes);
+                } else {
+                    // No topology info — crude heuristic.
+                    bjt_set_node(emit_node, v_max * 0.9, &mut guess, &known, num_nodes);
+                    bjt_set_node(base_node, v_max * 0.9 - 0.7, &mut guess, &known, num_nodes);
+                    bjt_set_node(col_node, v_max * 0.2, &mut guess, &known, num_nodes);
                 }
             }
         }
@@ -1158,7 +1297,7 @@ impl NewtonRaphson {
         let mut ds = 0.1_f64;
         let ds_min = 1e-4_f64;
         let ds_max = 0.2_f64;
-        let max_steps = 200usize;
+        let max_steps = 50usize;
 
         // Tangent: initially pure lambda direction (sources increasing).
         // Augmented state vector: [x | λ], dimension = dim + 1.
@@ -1200,7 +1339,7 @@ impl NewtonRaphson {
             let lam0 = lambda;
 
             let mut corrector_ok = false;
-            let max_corr = self.config.convergence.max_iter.min(20);
+            let max_corr = self.config.convergence.max_iter.min(10);
 
             for _corr in 0..max_corr {
                 // Stamp with current lambda.
@@ -1318,7 +1457,7 @@ impl NewtonRaphson {
             let mut new_tx: Vec<f64> = (0..dim).map(|i| x_aug[i] - x0_aug[i]).collect();
             let new_tl = x_aug[dim] - x0_aug[dim];
             let norm = (new_tx.iter().map(|&v| v * v).sum::<f64>() + new_tl * new_tl).sqrt().max(1e-15);
-            new_tx.iter_mut().for_each(|v| *v /= norm);
+            for v in new_tx.iter_mut() { *v /= norm; }
             let new_tl_n = new_tl / norm;
 
             // Keep tangent pointing in the direction of increasing λ.

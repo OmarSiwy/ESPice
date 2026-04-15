@@ -66,19 +66,36 @@ pub struct Primitive {
     pub kind: PrimitiveKind,
     pub inputs: SmallVec<[DigNodeIdx; 4]>,
     pub outputs: SmallVec<[DigNodeIdx; 4]>,
-    pub delay: f64,
+    /// Rise propagation delay: 0→1 transition delay [s].
+    pub rise_delay: f64,
+    /// Fall propagation delay: 1→0 transition delay [s].
+    pub fall_delay: f64,
     pub edge: EdgeKind,
 }
 
 impl Primitive {
-    /// Build a generic combinational gate.
+    /// Build a generic combinational gate with symmetric rise/fall delay.
     pub fn new_comb(kind: PrimitiveKind, inputs: &[DigNodeIdx], output: DigNodeIdx, delay: f64) -> Self {
         let outs: SmallVec<[DigNodeIdx; 4]> = smallvec![output];
         Self {
             kind,
             inputs: SmallVec::from_slice(inputs),
             outputs: outs,
-            delay,
+            rise_delay: delay,
+            fall_delay: delay,
+            edge: EdgeKind::Rising,
+        }
+    }
+
+    /// Build a generic combinational gate with separate rise and fall delays.
+    pub fn new_comb_asym(kind: PrimitiveKind, inputs: &[DigNodeIdx], output: DigNodeIdx, rise_delay: f64, fall_delay: f64) -> Self {
+        let outs: SmallVec<[DigNodeIdx; 4]> = smallvec![output];
+        Self {
+            kind,
+            inputs: SmallVec::from_slice(inputs),
+            outputs: outs,
+            rise_delay,
+            fall_delay,
             edge: EdgeKind::Rising,
         }
     }
@@ -89,7 +106,8 @@ impl Primitive {
             kind: PrimitiveKind::DFlipFlop,
             inputs: smallvec![d, clk],
             outputs: smallvec![q],
-            delay,
+            rise_delay: delay,
+            fall_delay: delay,
             edge,
         }
     }
@@ -100,7 +118,8 @@ impl Primitive {
             kind: PrimitiveKind::DLatch,
             inputs: smallvec![d, gate],
             outputs: smallvec![q],
-            delay,
+            rise_delay: delay,
+            fall_delay: delay,
             edge: EdgeKind::Rising,
         }
     }
@@ -111,7 +130,8 @@ impl Primitive {
             kind: PrimitiveKind::Mux2,
             inputs: smallvec![sel, a, b],
             outputs: smallvec![y],
-            delay,
+            rise_delay: delay,
+            fall_delay: delay,
             edge: EdgeKind::Rising,
         }
     }
@@ -124,7 +144,8 @@ impl Primitive {
             kind: PrimitiveKind::Mux4,
             inputs,
             outputs: smallvec![y],
-            delay,
+            rise_delay: delay,
+            fall_delay: delay,
             edge: EdgeKind::Rising,
         }
     }
@@ -135,7 +156,8 @@ impl Primitive {
             kind: PrimitiveKind::Demux2,
             inputs: smallvec![sel, data],
             outputs: smallvec![y0, y1],
-            delay,
+            rise_delay: delay,
+            fall_delay: delay,
             edge: EdgeKind::Rising,
         }
     }
@@ -148,7 +170,8 @@ impl Primitive {
             kind: PrimitiveKind::Demux4,
             inputs: smallvec![s0, s1, data],
             outputs: outs,
-            delay,
+            rise_delay: delay,
+            fall_delay: delay,
             edge: EdgeKind::Rising,
         }
     }
@@ -160,7 +183,8 @@ impl Primitive {
             kind: PrimitiveKind::DPulse,
             inputs: SmallVec::new(),
             outputs: smallvec![out],
-            delay: period,
+            rise_delay: period,
+            fall_delay: period,
             edge: EdgeKind::Rising,
         }
     }
@@ -171,7 +195,8 @@ impl Primitive {
             kind: PrimitiveKind::DSource,
             inputs: SmallVec::new(),
             outputs: smallvec![out],
-            delay: 0.0,
+            rise_delay: 0.0,
+            fall_delay: 0.0,
             edge: EdgeKind::Rising,
         }
     }
@@ -184,7 +209,10 @@ pub struct PrimitiveBlock {
     pub kinds: Vec<PrimitiveKind>,
     pub inputs: Vec<SmallVec<[DigNodeIdx; 4]>>,
     pub outputs: Vec<SmallVec<[DigNodeIdx; 4]>>,
-    pub delays: Vec<f64>,
+    /// Rise delay: 0→1 transition propagation delay [s].
+    pub rise_delays: Vec<f64>,
+    /// Fall delay: 1→0 transition propagation delay [s].
+    pub fall_delays: Vec<f64>,
     pub edges: Vec<EdgeKind>,
     /// Per-primitive scratch state (e.g. last clock value for DFF edge detect,
     /// stored Q for DLatch).
@@ -197,7 +225,8 @@ impl PrimitiveBlock {
             kinds: Vec::with_capacity(cap),
             inputs: Vec::with_capacity(cap),
             outputs: Vec::with_capacity(cap),
-            delays: Vec::with_capacity(cap),
+            rise_delays: Vec::with_capacity(cap),
+            fall_delays: Vec::with_capacity(cap),
             edges: Vec::with_capacity(cap),
             memory: Vec::with_capacity(cap),
         }
@@ -217,7 +246,8 @@ impl PrimitiveBlock {
         self.kinds.push(p.kind);
         self.inputs.push(p.inputs);
         self.outputs.push(p.outputs);
-        self.delays.push(p.delay);
+        self.rise_delays.push(p.rise_delay);
+        self.fall_delays.push(p.fall_delay);
         self.edges.push(p.edge);
         self.memory.push(DigState::X);
         id
@@ -370,7 +400,8 @@ impl PrimitiveBlock {
             if self.kinds[id] != PrimitiveKind::DPulse {
                 continue;
             }
-            let period = self.delays[id];
+            // For a pulse source, rise_delay == fall_delay == period (set in new_pulse).
+            let period = self.rise_delays[id];
             if period <= 0.0 {
                 continue;
             }

@@ -50,6 +50,14 @@ fn run_dc_sweep_inner(
     opts: Option<&SimOptions>,
 ) -> Result<DcSweepResult, SimError> {
     let mut ckt = circuit.clone();
+    // Propagate .TEMP / .OPTIONS TEMP to all devices that lack instance temp.
+    if let Some(o) = opts {
+        const DEFAULT_TEMP_K: f64 = 300.15;
+        if ckt.temperatures().is_empty() && (o.temp - DEFAULT_TEMP_K).abs() > 1e-9 {
+            ckt.add_temperature(o.temp);
+        }
+    }
+    ckt.propagate_global_temperature();
     let num_nodes = ckt.num_vars() as usize;
     let solver = match opts {
         Some(o) => Solver::new(SolverConfig { nr: NrConfig::from(o), ..SolverConfig::default() }),

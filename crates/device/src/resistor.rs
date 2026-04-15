@@ -15,7 +15,13 @@ pub struct Resistor;
 impl DeviceModel for Resistor {
     fn eval(&self, voltages: &[f64], params: &ParamMap) -> DeviceEval {
         let r0   = params.get_or("resistance", 1e3);
-        let tc1  = params.get_or("tc1", 0.0);
+        // SPICE shorthand: `TC=0.01` stores as key "tc" (no number suffix).
+        // Check for "tc1" first; fall back to bare "tc" which maps to TC1.
+        let tc1 = if params.contains("tc1") {
+            params.get_or("tc1", 0.0)
+        } else {
+            params.get_or("tc", 0.0)
+        };
         let tc2  = params.get_or("tc2", 0.0);
         let temp = params.get_or("temp", 300.15);
         let tnom = params.get_or("tnom", 300.15);
@@ -23,7 +29,7 @@ impl DeviceModel for Resistor {
         let r    = if tc1 != 0.0 || tc2 != 0.0 {
             (r0 * (1.0 + tc1 * dt + tc2 * dt * dt)).max(1e-12)
         } else {
-            r0
+            r0.max(1e-12)
         };
         let g = 1.0 / r;
         let vd = voltages[0] - voltages[1];

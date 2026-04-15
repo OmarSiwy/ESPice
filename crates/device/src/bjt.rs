@@ -338,6 +338,70 @@ impl Bjt {
             g6_jac.push((row + 3, col + 3, *val));
         }
 
+        // ── Charge / capacitance (transient) ──────────────────────────────────
+        //
+        // The core (eval_intrinsic_3pin) was evaluated at [vc_int, vb_int, ve_int]
+        // so its q[] and C[] are already referenced to the internal nodes (pins 3,4,5).
+        // Re-index them from (0,1,2) → (3,4,5).
+        //
+        // XCJC correction: the (1-xcjc) fraction of CJC connects between the
+        // external base (pin 1) and the internal collector (pin 3).  The core
+        // computed all base-related CJC charge on core-pin 1 (→ int_B, pin 4).
+        // We split entries whose row or col is core-pin 1 (base) AND involves
+        // core-pin 0 (collector) — i.e. the four CJC Jacobian entries:
+        //   (1,0), (1,1)-for-bc, (0,1), (0,0)-for-bc.
+        // However the core mixes TF/TR and CJC in the same C[], all indexed at
+        // pins 0 (collector) and 1 (base).  We cannot distinguish them without
+        // tagging.  As a conservative correct default, entries involving ONLY
+        // pin 1 (base) AND pin 2 (emitter) are CJE and go entirely to int nodes.
+        // Entries involving pin 1 (base) AND pin 0 (collector) — but NOT pin 2 —
+        // include CJC + TF + TR.  We apply xcjc split only to those entries.
+        // TF and TR are transit-time charges that physically sit at the intrinsic
+        // junctions (internal base), so xcjc does not apply to them; however,
+        // when xcjc=1 (default) there is no split at all, so existing behaviour
+        // is preserved.  Non-default xcjc is only meaningful when CJC >> TF*Ic.
+        let xcjc = params.get_or("xcjc", 1.0).clamp(0.0, 1.0);
+        let xcjc_ext = 1.0 - xcjc; // fraction at external base
+
+        // q[] for 6 pins: pins 0,1,2 = external (only resistor currents, no charge storage);
+        // pins 3,4,5 = internal (all device charges from the core).
+        let mut q6: SmallVec<[f64; 8]> = smallvec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        // Re-index core q from (0,1,2) → (3,4,5).
+        for (i, &qval) in core.q.iter().enumerate() {
+            q6[i + 3] += qval;
+        }
+
+        // Build C Jacobian for 6 terminals.
+        let mut c6_jac: SmallVec<[(u8, u8, f64); 16]> = SmallVec::new();
+
+        for &(row, col, val) in &core.C {
+            // Entries involving the base pin (core-pin 1) that do NOT involve the
+            // emitter (core-pin 2) are either CJC, TF, or TR charges — all of which
+            // are associated with the BC junction and should be split by xcjc:
+            //   xcjc fraction  → internal base (pin 4)
+            //   (1-xcjc) fraction → external base (pin 1)
+            //
+            // Entries involving the emitter (pin 2) are CJE and stay entirely internal.
+            // Entries not involving base stay internal (CJS, etc.).
+            //
+            // When xcjc=1 (default) xcjc_ext=0 so no split occurs and all charges
+            // land on int_B exactly as before, preserving backward compatibility.
+            let base_no_emit = (row == 1 || col == 1) && row != 2 && col != 2;
+            if xcjc_ext > 0.0 && base_no_emit {
+                let row_is_b = row == 1;
+                let col_is_b = col == 1;
+                let int_row = if row_is_b { 4 } else { row + 3 };
+                let int_col = if col_is_b { 4 } else { col + 3 };
+                let ext_row = if row_is_b { 1 } else { row + 3 };
+                let ext_col = if col_is_b { 1 } else { col + 3 };
+                c6_jac.push((int_row, int_col, val * xcjc));
+                c6_jac.push((ext_row, ext_col, val * xcjc_ext));
+            } else {
+                // CJE (emitter involved), CJS, and all non-base entries: stay internal.
+                c6_jac.push((row + 3, col + 3, val));
+            }
+        }
+
         DeviceEval {
             g: smallvec![
                 ir_c,
@@ -347,9 +411,9 @@ impl Bjt {
                 core.g[1] - ir_b,
                 core.g[2] - ir_e,
             ],
-            q: smallvec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            q: q6,
             G: g6_jac,
-            C: SmallVec::new(),
+            C: c6_jac,
             rhs: SmallVec::new(),
         }
     }
@@ -386,20 +450,20 @@ impl Bjt {
         let _rbm  = params.get_or("rbm",  _rb);
         let _re   = params.get_or("re",   0.0);
         let _rc   = params.get_or("rc",   0.0);
-        let _cje  = params.get_or("cje",  0.0);
-        let _vje  = params.get_or("vje",  0.75);
-        let _mje  = params.get_or("mje",  0.33);
+        let cje   = params.get_or("cje",  0.0);
+        let vje   = params.get_or("vje",  0.75);
+        let mje   = params.get_or("mje",  0.33);
         // Transit-time parameters (active for charge stamping).
         let tf    = params.get_or("tf",   0.0);
         let xtf   = params.get_or("xtf",  0.0);
         let vtf   = params.get_or("vtf",  1e30);
         let itf   = params.get_or("itf",  0.0);
         let ptf   = params.get_or("ptf",  0.0);
-        let _cjc  = params.get_or("cjc",  0.0);
-        let _vjc  = params.get_or("vjc",  0.75);
-        let _mjc  = params.get_or("mjc",  0.33);
-        let _xcjc = params.get_or("xcjc", 1.0);
-        let _tr   = params.get_or("tr",   0.0);
+        let cjc   = params.get_or("cjc",  0.0);
+        let vjc   = params.get_or("vjc",  0.75);
+        let mjc   = params.get_or("mjc",  0.33);
+        let xcjc  = params.get_or("xcjc", 1.0);
+        let tr    = params.get_or("tr",   0.0);
         // CJS — collector-substrate capacitance (active: stamped between C and ground).
         let cjs   = params.get_or("cjs",  0.0);
         let vjs   = params.get_or("vjs",  0.75);
@@ -658,6 +722,102 @@ impl Bjt {
         let dqf_dvb =  c_tf_be + c_tf_bc;
         let dqf_dve = -c_tf_be;
 
+        // ── Transit-time reverse charge Q_R = TR * Ir ────────────────────────
+        //
+        // The reverse transit time TR stores minority-carrier charge at the BC
+        // junction during reverse/saturation operation.  By analogy with Q_F:
+        //
+        //   Q_R = TR * Ir   (Ir = reverse transport current through BC junction)
+        //
+        // Q_R is stored on the base (+) and removed from the collector (−):
+        //   q[1] += +Q_R  (base)
+        //   q[0] += -Q_R  (collector)
+        //
+        // Jacobian:
+        //   dQ_R/dVbc = TR * g_r  →  chain-rule to Vc/Vb below.
+        //   dQ_R/dVbe = 0         (Ir does not depend on Vbe in GP model)
+        let (q_tr, dqr_dvc, dqr_dvb) = if tr > 0.0 {
+            let q_r = tr * i_r;
+            // dVbc/dVb = p, dVbc/dVc = -p; p^2 = 1
+            let dqr_dvbc = tr * g_r;
+            let dqr_dvc_local = -dqr_dvbc; // d(Q_R)/d(Vc) = dQ_R/dVbc * d(Vbc)/d(Vc) = dqr_dvbc * (-p)*p = -dqr_dvbc
+            let dqr_dvb_local =  dqr_dvbc; // d(Q_R)/d(Vb) = dqr_dvbc * p*p = +dqr_dvbc
+            (q_r, dqr_dvc_local, dqr_dvb_local)
+        } else {
+            (0.0, 0.0, 0.0)
+        };
+
+        // ── CJE / CJC — base-emitter and base-collector depletion capacitance ──
+        //
+        // Standard SPICE junction charge formula (same as CJS above):
+        //   For V < FC*VJ:   C = CJ * (1 - V/VJ)^(-MJ)
+        //                    Q = CJ*VJ/(1-MJ) * [1 - (1 - V/VJ)^(1-MJ)]
+        //   For V >= FC*VJ:  C = CJ * (1-FC)^(-(1+MJ)) * [1 - FC*(1+MJ) + MJ*V/VJ]
+        //                    Q = Q_knee + C_knee * (V - FC*VJ)
+        //                        where C_knee = CJ / (1-FC)^MJ
+        //
+        // CJE is referenced Vbe (base-emitter junction):
+        //   +Q_be_dep on base (pin 1), -Q_be_dep on emitter (pin 2).
+        // CJC is referenced Vbc (base-collector junction):
+        //   +Q_bc_dep on base (pin 1), -Q_bc_dep on collector (pin 0).
+
+        /// Compute (charge, capacitance) for a SPICE depletion junction.
+        #[inline(always)]
+        fn junction_qc(v: f64, cj: f64, vj: f64, mj: f64, fc: f64) -> (f64, f64) {
+            let fc_vj = fc * vj;
+            if v < fc_vj {
+                let denom = (1.0 - v / vj).max(1e-6);
+                let cap = cj * denom.powf(-mj);
+                let charge = if (mj - 1.0).abs() > 1e-6 {
+                    cj * vj / (1.0 - mj) * (1.0 - denom.powf(1.0 - mj))
+                } else {
+                    -cj * vj * denom.ln()
+                };
+                (charge, cap)
+            } else {
+                let denom0 = (1.0 - fc).max(1e-6);
+                let q_knee = if (mj - 1.0).abs() > 1e-6 {
+                    cj * vj / (1.0 - mj) * (1.0 - denom0.powf(1.0 - mj))
+                } else {
+                    -cj * vj * denom0.ln()
+                };
+                let cap_knee = cj / denom0.powf(mj);
+                let cap = cj / denom0.powf(1.0 + mj) * (1.0 - fc * (1.0 + mj) + mj * v / vj);
+                let charge = q_knee + cap_knee * (v - fc_vj);
+                (charge, cap)
+            }
+        }
+
+        // CJE: junction voltage is Vbe (already polarity-adjusted).
+        let (q_cje, c_be_dep) = if cje > 0.0 {
+            junction_qc(vbe, cje, vje, mje, fc)
+        } else {
+            (0.0, 0.0)
+        };
+
+        // CJC: junction voltage is Vbc (already polarity-adjusted).
+        //
+        // XCJC splits the BC depletion cap between the internal base node (xcjc
+        // fraction, when internal nodes exist) and the external base node
+        // ((1-xcjc) fraction, always present).  In the 3-terminal eval both
+        // fractions land on pin 1 (external base), so the total is still q_cjc.
+        // The xcjc split only matters in eval_with_extrinsic (6-terminal path)
+        // where pin 1 = external base and pin 4 = internal base; that function
+        // uses these values directly.  Store both split charges here.
+        let (q_cjc, c_bc_dep) = if cjc > 0.0 {
+            junction_qc(vbc, cjc, vjc, mjc, fc)
+        } else {
+            (0.0, 0.0)
+        };
+        // xcjc fraction goes to internal base (or all to external base in 3-pin path).
+        let xcjc_clamped = xcjc.clamp(0.0, 1.0);
+        let c_bc_dep_int = c_bc_dep * xcjc_clamped;         // → internal base node (pin 4 when 6-terminal)
+        let c_bc_dep_ext = c_bc_dep * (1.0 - xcjc_clamped); // → external base node (pin 1 always)
+        // Split charges (used in q[] assembly below; both land on pin 1 in 3-pin path).
+        let q_cjc_int = q_cjc * xcjc_clamped;
+        let q_cjc_ext = q_cjc * (1.0 - xcjc_clamped);
+        let _ = (q_cjc_int, q_cjc_ext); // suppress unused warning; used via q_cjc in 3-pin path
+
         // ── CJS — collector-substrate junction capacitance ────────────────────
         //
         // CJS is the collector-to-substrate depletion capacitance. In the standard
@@ -718,8 +878,8 @@ impl Bjt {
         // Transit-time charge Q_F: net charge flows base (+) and collector (-).
         // CJS charge Q_cs: referenced collector-to-ground (pin 0 relative to ground).
 
-        // Build C Jacobian entries (accumulate tf and cjs contributions).
-        let mut cap_entries: SmallVec<[(u8, u8, f64); 8]> = SmallVec::new();
+        // Build C Jacobian entries (accumulate tf, tr, cje, cjc, and cjs contributions).
+        let mut cap_entries: SmallVec<[(u8, u8, f64); 16]> = SmallVec::new();
         if q_tf != 0.0 || dqf_dvb != 0.0 || dqf_dvc != 0.0 || dqf_dve != 0.0 {
             // Q_F on base (pin 1) and -Q_F on collector (pin 0).
             // C[row][col] = dQ_row/dV_col.
@@ -732,6 +892,40 @@ impl Bjt {
             if dqf_dvc != 0.0 { cap_entries.push((0, 0, -dqf_dvc)); }
             if dqf_dve != 0.0 { cap_entries.push((0, 2, -dqf_dve)); }
         }
+        // Q_R (TR reverse transit charge) on base (+) and collector (−).
+        // dQ_R/dVc and dQ_R/dVb are non-zero; dQ_R/dVe = 0 (Ir has no Vbe dep).
+        if q_tr != 0.0 || dqr_dvc != 0.0 || dqr_dvb != 0.0 {
+            if dqr_dvb != 0.0 { cap_entries.push((1, 1,  dqr_dvb)); } // dQ_base/dVb
+            if dqr_dvc != 0.0 { cap_entries.push((1, 0,  dqr_dvc)); } // dQ_base/dVc
+            if dqr_dvb != 0.0 { cap_entries.push((0, 1, -dqr_dvb)); } // dQ_collector/dVb
+            if dqr_dvc != 0.0 { cap_entries.push((0, 0, -dqr_dvc)); } // dQ_collector/dVc
+        }
+        if c_be_dep != 0.0 {
+            // CJE across Vbe: +Q on base (pin 1), -Q on emitter (pin 2).
+            // dVbe/dVb = p, dVbe/dVe = -p; p^2 = 1 so factors collapse as in G chain rule.
+            cap_entries.push((1, 1,  c_be_dep)); // dQ_base/dVb
+            cap_entries.push((1, 2, -c_be_dep)); // dQ_base/dVe
+            cap_entries.push((2, 1, -c_be_dep)); // dQ_emitter/dVb
+            cap_entries.push((2, 2,  c_be_dep)); // dQ_emitter/dVe
+        }
+        // CJC across Vbc: split by xcjc.
+        // In the 3-pin path both fractions land on pin 1 (external base); combined
+        // they equal c_bc_dep as before.  The xcjc split is activated by
+        // eval_with_extrinsic when 6 terminals are present.
+        if c_bc_dep_ext != 0.0 {
+            // (1-xcjc) fraction: external base (pin 1) ↔ collector (pin 0).
+            cap_entries.push((1, 1,  c_bc_dep_ext)); // dQ_base_ext/dVb
+            cap_entries.push((1, 0, -c_bc_dep_ext)); // dQ_base_ext/dVc
+            cap_entries.push((0, 1, -c_bc_dep_ext)); // dQ_collector/dVb
+            cap_entries.push((0, 0,  c_bc_dep_ext)); // dQ_collector/dVc
+        }
+        if c_bc_dep_int != 0.0 {
+            // xcjc fraction: in 3-pin path also routes to external base (pin 1).
+            cap_entries.push((1, 1,  c_bc_dep_int)); // dQ_base/dVb
+            cap_entries.push((1, 0, -c_bc_dep_int)); // dQ_base/dVc
+            cap_entries.push((0, 1, -c_bc_dep_int)); // dQ_collector/dVb
+            cap_entries.push((0, 0,  c_bc_dep_int)); // dQ_collector/dVc
+        }
         if c_cjs != 0.0 {
             // CJS between collector (pin 0) and ground:
             // dQ_c/dVc = +c_cjs  (only diagonal; ground row not tracked in 3-pin MNA)
@@ -741,9 +935,9 @@ impl Bjt {
         DeviceEval {
             g: smallvec![ic, ib, ie],
             q: smallvec![
-                ic_intrinsic * 0.0 - q_tf + q_cjs,  // collector: -Q_F (transit) + Q_cs (cjs)
-                q_tf,                                  // base: +Q_F (transit time charge)
-                0.0,                                   // emitter: no charge in 3-pin GP
+                -q_tf - q_tr + q_cjs - q_cjc, // collector: −Q_F − Q_R + Q_cs(cjs) − Q_bc_dep(cjc)
+                q_tf + q_tr + q_cje + q_cjc,  // base: +Q_F + Q_R + Q_be_dep(cje) + Q_bc_dep(cjc)
+                -q_cje,                         // emitter: −Q_be_dep(cje)
             ],
             G: smallvec![
                 // Collector row (pin 0)

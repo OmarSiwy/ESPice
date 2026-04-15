@@ -29,8 +29,8 @@ use common::vacask::VacaskConfig;
 use common::xyce::XyceConfig;
 
 use bigospice_analysis::{
-    AcConfig, AcSweepType, DcSweepConfig, TransientConfig,
-    run_ac, run_dc_op, run_dc_sweep, run_transient,
+    AcConfig, AcSweepType, DcSweepConfig, NestedDcConfig, TransientConfig,
+    run_ac, run_dc_op, run_dc_sweep, run_nested_dc, run_transient,
 };
 use bigospice_core::Circuit;
 use bigospice_device::DeviceRegistry;
@@ -127,6 +127,17 @@ fn glob_sp_files(dir: &Path) -> Vec<PathBuf> {
     files
 }
 
+/// Generate sweep values from start/stop/step (inclusive of stop within half-step tolerance).
+fn sweep_values(start: f64, stop: f64, step: f64) -> Vec<f64> {
+    let mut vals = Vec::new();
+    let mut v = start;
+    while v <= stop + step * 0.5 {
+        vals.push(v);
+        v += step;
+    }
+    vals
+}
+
 // ── BigOSpice runner ─────────────────────────────────────────────────────────
 
 fn circuit_node_names(circuit: &Circuit) -> Vec<String> {
@@ -148,6 +159,7 @@ fn run_bigospice(sp_path: &Path) -> Result<BigospiceOutput, String> {
     let node_names = circuit_node_names(&circuit);
     let mut voltages: HashMap<String, f64> = HashMap::new();
     let mut waveforms: Vec<(&str, Waveform)> = Vec::new();
+    let mut has_dc_op = false;
 
     for stmt in &analyses {
         let p = |key: &str| stmt.params.iter().find(|(k, _)| k == key).map(|(_, v)| *v);
@@ -162,6 +174,7 @@ fn run_bigospice(sp_path: &Path) -> Result<BigospiceOutput, String> {
                 for (name, val) in &out.result.branch_currents {
                     voltages.insert(format!("i({})", name.to_lowercase()), *val);
                 }
+                has_dc_op = true;
             }
 
             AnalysisKind::DcSweep => {
@@ -177,27 +190,50 @@ fn run_bigospice(sp_path: &Path) -> Result<BigospiceOutput, String> {
 
                 // Check for nested inner sweep
                 let src2_entry = stmt.params.iter().find(|(k, _)| k.starts_with("__dc_src2__"));
-                let cfg = if let Some((k, _)) = src2_entry {
+                if let Some((k, _)) = src2_entry {
                     let k_low = k.to_lowercase();
                     let is_temp = k_low == "__dc_src2__temp";
                     let src2_name = if is_temp {
-                        None
+                        "temp".to_string()
                     } else {
-                        Some(k_low["__dc_src2__".len()..].to_string())
+                        k_low["__dc_src2__".len()..].to_string()
                     };
                     let start2 = p("start2").unwrap_or(0.0);
                     let stop2 = p("stop2").unwrap_or(1.0);
                     let step2 = p("step2").unwrap_or(0.1);
-                    DcSweepConfig::new(&src_name, start, stop, step)
-                        .with_inner(src2_name, "dc", start2, stop2, step2, is_temp)
+
+                    // Build sweep value vectors
+                    let inner_values = sweep_values(start, stop, step);
+                    let outer_values = sweep_values(start2, stop2, step2);
+
+                    // SPICE convention: src1 is inner (fast), src2 is outer (slow)
+                    let outer_param = if is_temp { "temp" } else { "dc" };
+                    let nested_cfg = NestedDcConfig::new(
+                        &src2_name, outer_param, outer_values,
+                        &src_name, "dc", inner_values,
+                    );
+                    let out = run_nested_dc(&circuit, &registry, &nested_cfg)
+                        .map_err(|e| format!("DC nested sweep: {e}"))?;
+                    // Only record sweep endpoint voltages when no .OP was run,
+                    // because ngspice's rawfile parser reads the first plot
+                    // (the OP) when both .OP and .DC are present.
+                    if !has_dc_op {
+                        if let Some(last_point) = out.points.last() {
+                            for (name, val) in &last_point.node_voltages {
+                                voltages.insert(format!("v({})", name.to_lowercase()), *val);
+                            }
+                        }
+                    }
                 } else {
-                    DcSweepConfig::new(&src_name, start, stop, step)
-                };
-                let out = run_dc_sweep(&circuit, &registry, &cfg)
-                    .map_err(|e| format!("DC sweep: {e}"))?;
-                if let Some(last_vals) = out.node_voltages.last() {
-                    for (name, val) in node_names.iter().zip(last_vals.iter()) {
-                        voltages.insert(format!("v({})", name.to_lowercase()), *val);
+                    let cfg = DcSweepConfig::new(&src_name, start, stop, step);
+                    let out = run_dc_sweep(&circuit, &registry, &cfg)
+                        .map_err(|e| format!("DC sweep: {e}"))?;
+                    if !has_dc_op {
+                        if let Some(last_vals) = out.node_voltages.last() {
+                            for (name, val) in node_names.iter().zip(last_vals.iter()) {
+                                voltages.insert(format!("v({})", name.to_lowercase()), *val);
+                            }
+                        }
                     }
                 }
             }
@@ -257,6 +293,19 @@ fn run_bigospice(sp_path: &Path) -> Result<BigospiceOutput, String> {
             }
 
             AnalysisKind::Ac => {
+                // AC always linearises around the DC operating point (ngspice behaviour).
+                // If no explicit .OP statement preceded this .AC, run DC OP now so that
+                // `voltages` is populated and the linearisation point is well-defined.
+                if voltages.is_empty() {
+                    let op_out = run_dc_op(&circuit, &registry)
+                        .map_err(|e| format!("DC OP (implicit for AC): {e}"))?;
+                    for (name, val) in &op_out.result.node_voltages {
+                        voltages.insert(format!("v({})", name.to_lowercase()), *val);
+                    }
+                    for (name, val) in &op_out.result.branch_currents {
+                        voltages.insert(format!("i({})", name.to_lowercase()), *val);
+                    }
+                }
                 let sweep = match p("sweep_type").unwrap_or(1.0) as u8 {
                     0 => AcSweepType::Linear,
                     2 => AcSweepType::Octave,
@@ -266,12 +315,23 @@ fn run_bigospice(sp_path: &Path) -> Result<BigospiceOutput, String> {
                 let fstart = p("fstart").unwrap_or(1.0);
                 let fstop = p("fstop").unwrap_or(1e6);
                 let cfg = AcConfig::new(fstart, fstop, npoints, sweep);
-                let _out =
+                let out =
                     run_ac(&circuit, &registry, &cfg).map_err(|e| format!("AC: {e}"))?;
-                // AC analysis computes small-signal frequency response (magnitudes/phases),
-                // NOT DC operating point voltages. Only record frequencies/magnitudes for
-                // post-processing; do NOT overwrite the voltages HashMap with AC magnitudes.
-                // DC voltages from .op remain the authoritative DC values.
+                // Store AC magnitudes as a waveform with frequencies as the x-axis.
+                // This allows the test framework to compare frequency-domain results.
+                if !out.frequencies.is_empty() {
+                    let mut signals: HashMap<String, Vec<f64>> = HashMap::new();
+                    for (ni, name) in node_names.iter().enumerate() {
+                        let key = format!("v({})", name.to_lowercase());
+                        let mags: Vec<f64> = out.node_magnitudes.iter()
+                            .map(|freq_mags| freq_mags.get(ni).copied().unwrap_or(0.0))
+                            .collect();
+                        if mags.len() == out.frequencies.len() {
+                            signals.insert(key, mags);
+                        }
+                    }
+                    waveforms.push(("AC", Waveform { times: out.frequencies.clone(), signals }));
+                }
             }
 
             _ => continue,

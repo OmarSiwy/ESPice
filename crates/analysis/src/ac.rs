@@ -87,6 +87,14 @@ pub fn run_ac_with_options(
     config: &AcConfig,
     opts: &SimOptions,
 ) -> Result<AcResult, SimError> {
+    // When .OPTIONS TEMP is set and no .TEMP directive populated temperatures(),
+    // inject opts.temp (Kelvin) so the inner function's propagation picks it up.
+    const DEFAULT_TEMP_K: f64 = 300.15;
+    if circuit.temperatures().is_empty() && (opts.temp - DEFAULT_TEMP_K).abs() > 1e-9 {
+        let mut ckt = circuit.clone();
+        ckt.add_temperature(opts.temp);
+        return run_ac_inner(&ckt, registry, config, Some(opts));
+    }
     run_ac_inner(circuit, registry, config, Some(opts))
 }
 
@@ -96,6 +104,17 @@ fn run_ac_inner(
     config: &AcConfig,
     opts: Option<&SimOptions>,
 ) -> Result<AcResult, SimError> {
+    // Propagate .TEMP / .OPTIONS TEMP to all devices that lack instance temp.
+    // Avoid cloning when no global temperature is configured.
+    let ckt_local_opt: Option<Circuit> = if !circuit.temperatures().is_empty() {
+        let mut c = circuit.clone();
+        c.propagate_global_temperature();
+        Some(c)
+    } else {
+        None
+    };
+    let circuit = ckt_local_opt.as_ref().unwrap_or(circuit);
+
     let num_nodes = circuit.num_vars() as usize;
     let dim = circuit.mna_dimension();
 

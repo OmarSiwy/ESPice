@@ -201,7 +201,7 @@ pub fn compute_abulk_vdsat(
 ) -> (f64, f64, f64) {
     // Abulk = (1 + K1ox/(2*sqrt(phis))*(A0*Leff/(Leff + 2*sqrt(Xj*Xdep))
     //         + B0/(Weff+B1)) - Ags*Vgsteff) * (1 + Keta*Vbseff)
-    let xdep = p.Xdep0 * (1.0 - vbseff / p.phi).max(1.0).sqrt();
+    let xdep = p.Xdep0 * (1.0 - vbseff / p.phi).max(0.0).sqrt();
     let denom = p.leff + 2.0 * (p.xj * xdep).sqrt();
     let abulk0 = 1.0
         + p.k1ox / (2.0 * (p.phi - vbseff).max(1.0e-3).sqrt())

@@ -87,46 +87,61 @@ impl DeviceModel for Mesfet {
             (ids, gm, gds)
         };
 
-        // ── Gate Schottky diode (gate-source) ────────────────────────────────
-        // Use the physical (unsigned) gate-source voltage to avoid spurious
-        // forward bias on P-channel devices.
-        let vgs_phys  = voltages[1] - voltages[2];
+        // ── Gate Schottky diodes (gate-source and gate-drain) ────────────────
+        // Use physical (unsigned) voltages to avoid spurious forward bias on
+        // P-channel devices.
+        //   Vgs_phys = V(gate) - V(source) = voltages[1] - voltages[2]
+        //   Vgd_phys = V(gate) - V(drain)  = voltages[1] - voltages[0]
+        let vgs_phys = voltages[1] - voltages[2];
+        let vgd_phys = voltages[1] - voltages[0];
+
         let vgs_clamp = vgs_phys.clamp(-40.0 * VT, 0.5);
         let exp_vgs   = (vgs_clamp / VT).exp();
-        let ig        = is_g * (exp_vgs - 1.0);
-        let gg        = is_g * exp_vgs / VT;
+        let igs       = is_g * (exp_vgs - 1.0);
+        let ggs       = is_g * exp_vgs / VT;
+
+        let vgd_clamp = vgd_phys.clamp(-40.0 * VT, 0.5);
+        let exp_vgd   = (vgd_clamp / VT).exp();
+        let igd       = is_g * (exp_vgd - 1.0);
+        let ggd       = is_g * exp_vgd / VT;
 
         let ids_s = sign * ids;
-        let ig_s  = sign * ig;
 
-        // ── KCL stamp ─────────────────────────────────────────────────────────
-        // Drain (0):  +Ids + small gate-drain leakage (½ Ig)
-        // Gate  (1):  -Ig
-        // Source(2):  -(Ids + ½ Ig)
+        // ── KCL stamp (two-diode gate leakage model) ──────────────────────────
+        // Igs flows gate→source: gate loses Igs, source gains Igs.
+        // Igd flows gate→drain:  gate loses Igd, drain  gains Igd.
         //
-        // Conductance Jacobian (N-channel convention; sign cancels for P):
-        //   dId/dVd = gds,   dId/dVg = gm,   dId/dVs = -(gm+gds)
-        //   dIg/dVg = gg,    dIg/dVs = -gg
+        // MNA convention: g[node] = net current LEAVING that node.
+        //   drain  (0): id leaves; igd enters from gate → ids_s - sign*igd
+        //   gate   (1): igs and igd both leave           → sign*(igs + igd)
+        //   source (2): id and igs both enter            → -(ids_s + sign*igs)
+        //
+        // Jacobian (same derivation as jfet.rs — physical diode voltages used):
+        //   d(-sign*igd)/dV[0] = sign*ggd,  d(-sign*igd)/dV[1] = -sign*ggd
+        //   d(sign*igs)/dV[1]  = sign*ggs,  d(sign*igs)/dV[2]  = -sign*ggs
+        //   d(sign*igd)/dV[1]  = sign*ggd,  d(sign*igd)/dV[0]  = -sign*ggd
+        //   d(-sign*igs)/dV[1] = -sign*ggs, d(-sign*igs)/dV[2] = sign*ggs
 
         DeviceEval {
             g: smallvec![
-                 ids_s + ig_s * 0.5,
-                -ig_s,
-                -(ids_s + ig_s * 0.5),
+                ids_s - sign * igd,
+                sign * (igs + igd),
+                -(ids_s + sign * igs),
             ],
             q: SmallVec::new(),
             G: smallvec![
                 // Drain row
-                (0, 0,  gds),
-                (0, 1,  gm + gg * 0.5),
-                (0, 2, -(gm + gds) - gg * 0.5),
+                (0, 0,  gds + sign * ggd),
+                (0, 1,  gm - sign * ggd),
+                (0, 2, -(gm + gds)),
                 // Gate row
-                (1, 1, -gg),
-                (1, 2,  gg),
+                (1, 0, -sign * ggd),
+                (1, 1,  sign * (ggs + ggd)),
+                (1, 2, -sign * ggs),
                 // Source row
                 (2, 0, -gds),
-                (2, 1, -(gm + gg * 0.5)),
-                (2, 2,  gm + gds + gg * 0.5),
+                (2, 1, -(gm + sign * ggs)),
+                (2, 2,  gm + gds + sign * ggs),
             ],
             C: SmallVec::new(),
             rhs: SmallVec::new(),

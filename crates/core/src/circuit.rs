@@ -95,7 +95,7 @@ impl TlineHistory {
         pts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
 
         if target_time <= pts[0].0 {
-            return pts[0].1;
+            return 0.0; // Causal: zero before first sample
         }
         if target_time >= pts[pts.len() - 1].0 {
             return pts[pts.len() - 1].1;
@@ -167,6 +167,77 @@ impl LtraHistoryStore {
     /// Whether no samples have been stored yet.
     #[inline]
     pub fn is_empty(&self) -> bool { self.times.is_empty() }
+}
+
+// ── Digital (XSPICE) bridge / primitive specs ────────────────────────────
+//
+// Plain-data descriptions of ADC/DAC bridges and digital primitives parsed
+// from `A` element lines.  Stored on `Circuit` so the analysis crate can
+// construct a `DigitalRuntime` without the core crate depending on the
+// digital crate.
+
+/// Specification for an ADC bridge (analog -> digital).
+#[derive(Debug, Clone)]
+pub struct AdcBridgeSpec {
+    /// MNA row index of the analog node being observed.
+    pub analog_node_idx: u32,
+    /// Allocated digital node index for the output.
+    pub digital_node: u32,
+    /// Lower hysteresis threshold (volts).
+    pub in_low: f64,
+    /// Upper hysteresis threshold (volts).
+    pub in_high: f64,
+}
+
+/// Specification for a DAC bridge (digital -> analog).
+#[derive(Debug, Clone)]
+pub struct DacBridgeSpec {
+    /// MNA row index of the analog node being driven.
+    pub analog_node_idx: u32,
+    /// Digital node index whose state drives this bridge.
+    pub digital_node: u32,
+    /// Output voltage for logic 0.
+    pub out_low: f64,
+    /// Output voltage for logic 1.
+    pub out_high: f64,
+    /// Rise time [s].
+    pub t_rise: f64,
+    /// Fall time [s].
+    pub t_fall: f64,
+}
+
+/// Specification for a digital primitive (combinational or sequential gate).
+#[derive(Debug, Clone)]
+pub struct DigitalPrimitiveSpec {
+    /// Primitive kind tag (maps to `PrimitiveKind` repr).
+    pub kind: u8,
+    /// Digital input node indices.
+    pub inputs: Vec<u32>,
+    /// Digital output node indices.
+    pub outputs: Vec<u32>,
+    /// Rise propagation delay: 0→1 transition delay [s].
+    pub rise_delay: f64,
+    /// Fall propagation delay: 1→0 transition delay [s].
+    pub fall_delay: f64,
+}
+
+/// Complete specification of the digital sub-system attached to a circuit.
+///
+/// Built by the parser from `PendingADevice` records.  Consumed by the
+/// analysis crate to construct a `DigitalRuntime`.
+#[derive(Debug, Clone, Default)]
+pub struct DigitalNetSpec {
+    /// Total number of digital nodes (determines node-state vector size).
+    pub num_dig_nodes: u32,
+    pub adc_bridges: Vec<AdcBridgeSpec>,
+    pub dac_bridges: Vec<DacBridgeSpec>,
+    pub primitives: Vec<DigitalPrimitiveSpec>,
+}
+
+impl DigitalNetSpec {
+    pub fn is_empty(&self) -> bool {
+        self.adc_bridges.is_empty() && self.dac_bridges.is_empty() && self.primitives.is_empty()
+    }
 }
 
 /// The central circuit representation.
@@ -252,6 +323,12 @@ pub struct Circuit {
     // --- LTRA (lossy transmission line) history buffers ---
     /// Per-LTRA history buffers for Roychowdhury-Pederson convolution.
     ltra_histories: ahash::AHashMap<DeviceId, LtraHistoryStore>,
+
+    // --- Digital (XSPICE) bridge / primitive configuration ---
+    /// Specification of ADC/DAC bridges and digital primitives parsed from
+    /// A-device lines.  When non-empty, the transient analysis constructs a
+    /// `DigitalRuntime` and integrates it into the NR loop.
+    digital_spec: Option<DigitalNetSpec>,
 }
 
 impl Circuit {
@@ -274,6 +351,7 @@ impl Circuit {
             globals: Vec::new(),
             tline_histories: AHashMap::new(),
             ltra_histories: AHashMap::new(),
+            digital_spec: None,
         };
         // Always add ground node at index 0.
         let ground = Node::ground();
@@ -385,6 +463,19 @@ impl Circuit {
         self.temperatures.push(celsius);
     }
 
+    /// Set the global operating temperature (in Celsius).
+    ///
+    /// Replaces the first (and typically only) temperature entry, or pushes
+    /// one if the list is empty.  Used by `.DC TEMP` sweeps to update the
+    /// circuit temperature without referencing a named device.
+    pub fn set_global_temperature(&mut self, celsius: f64) {
+        if self.temperatures.is_empty() {
+            self.temperatures.push(celsius);
+        } else {
+            self.temperatures[0] = celsius;
+        }
+    }
+
     /// Mutual inductance couplings: `(id_L1, id_L2, coupling_coefficient)`.
     pub fn mutual_couplings(&self) -> &[(DeviceId, DeviceId, f64)] {
         &self.mutual_couplings
@@ -450,6 +541,23 @@ impl Circuit {
     /// Look up the LTRA history for a device (mutable).
     pub fn ltra_history_mut(&mut self, id: DeviceId) -> Option<&mut LtraHistoryStore> {
         self.ltra_histories.get_mut(&id)
+    }
+
+    // --- Digital spec accessors ---
+
+    /// Set the digital (XSPICE) sub-system specification.
+    pub fn set_digital_spec(&mut self, spec: DigitalNetSpec) {
+        self.digital_spec = Some(spec);
+    }
+
+    /// Borrow the digital sub-system specification, if any.
+    pub fn digital_spec(&self) -> Option<&DigitalNetSpec> {
+        self.digital_spec.as_ref()
+    }
+
+    /// Take the digital spec out (consumes it from the circuit).
+    pub fn take_digital_spec(&mut self) -> Option<DigitalNetSpec> {
+        self.digital_spec.take()
     }
 
     /// Add an internal (synthetic) node for a device, named `<device_id>.<suffix>`.
@@ -572,6 +680,29 @@ impl Circuit {
         self.nodes.retain(|n| n.id != id_b);
         // Recompute num_vars (exclude ground node at index 0).
         self.num_vars = (self.nodes.len() as u32).saturating_sub(1);
+    }
+
+    /// Propagate the global operating temperature to all devices that do not
+    /// have an explicit instance-level `"temp"` parameter.
+    ///
+    /// The global temperature is taken from the first entry of `temperatures`
+    /// (set by `.TEMP` or `.OPTIONS TEMP`, converted to Kelvin at parse time).
+    /// Devices that already carry their own `"temp"` param are left untouched
+    /// so that per-instance temperature overrides are honoured.
+    ///
+    /// This must be called after parsing and before stamping, once per analysis
+    /// run.  Call it again after each temperature sweep step if the global
+    /// temperature is updated.
+    pub fn propagate_global_temperature(&mut self) {
+        let global_temp_k = match self.temperatures.first() {
+            Some(&t) => t,
+            None => return, // No global temperature set; leave device defaults intact.
+        };
+        for dev in &mut self.devices {
+            if !dev.params.contains("temp") {
+                dev.params.set("temp", global_temp_k);
+            }
+        }
     }
 
     /// Set a parameter on a device by name and rebuild param deps.

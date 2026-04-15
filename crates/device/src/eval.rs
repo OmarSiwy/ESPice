@@ -18,7 +18,7 @@ pub struct DeviceEval {
     /// Conductance Jacobian: (row_pin, col_pin, value).
     pub G: SmallVec<[(u8, u8, f64); 8]>,
     /// Capacitance Jacobian: (row_pin, col_pin, value).
-    pub C: SmallVec<[(u8, u8, f64); 8]>,
+    pub C: SmallVec<[(u8, u8, f64); 16]>,
     /// RHS contributions (for sources).
     pub rhs: SmallVec<[f64; 4]>,
 }

@@ -194,7 +194,7 @@ impl DeviceModel for Diode {
             // Tangent-line at vlimit for Newton convergence from high guesses.
             let exp_lim = (vlimit / nvt).exp();
             let gd = is_eff * exp_lim / nvt + GMIN;
-            let id = is_eff * (exp_lim - 1.0) + gd * (vd - vlimit) + GMIN * vd;
+            let id = is_eff * (exp_lim - 1.0) + GMIN * vlimit + gd * (vd - vlimit);
             (id, gd)
         };
 

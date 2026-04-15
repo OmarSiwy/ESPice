@@ -3,8 +3,8 @@ use bigospice_core::DeviceKind;
 use crate::bsource::{BsourceIModel, BsourceVModel};
 use crate::dispatch::DeviceDispatch;
 use crate::{
-    Bjt, Bsim3, Capacitor, CurrentSource, Diode, Inductor, JfetLevel1, Mesfet, MosfetLevel1,
-    Resistor, Vccs, Vcvs, VoltageSource, Switch, CSwitch, Vbic,
+    Bjt, Bsim3, Capacitor, Cccs, Ccvs, CurrentSource, Diode, Inductor, JfetLevel1, Mesfet,
+    MosfetLevel1, Resistor, Vccs, Vcvs, VoltageSource, Switch, CSwitch, Vbic,
 };
 use crate::mosfet::{MosfetLevel2, MosfetLevel3, MosfetLevel6};
 use crate::tline::Tline;
@@ -61,6 +61,8 @@ impl DeviceRegistry {
         reg.register(DeviceKind::CurrentSource, DeviceDispatch::CurrentSource(CurrentSource));
         reg.register(DeviceKind::Vcvs, DeviceDispatch::Vcvs(Vcvs));
         reg.register(DeviceKind::Vccs, DeviceDispatch::Vccs(Vccs));
+        reg.register(DeviceKind::Ccvs, DeviceDispatch::Ccvs(Ccvs));
+        reg.register(DeviceKind::Cccs, DeviceDispatch::Cccs(Cccs));
         reg.register(DeviceKind::BsourceV, DeviceDispatch::BsourceV(BsourceVModel));
         reg.register(DeviceKind::BsourceI, DeviceDispatch::BsourceI(BsourceIModel));
         reg.register(DeviceKind::Switch, DeviceDispatch::Switch(Switch));
@@ -157,7 +159,7 @@ mod tests {
         assert!(reg.get(DeviceKind::Bsim3P).is_some());
         assert!(reg.get(DeviceKind::Bsim4N).is_some());
         assert!(reg.get(DeviceKind::Bsim4P).is_some());
-        assert_eq!(reg.len(), 37);
+        assert_eq!(reg.len(), 39);
     }
 
     #[test]

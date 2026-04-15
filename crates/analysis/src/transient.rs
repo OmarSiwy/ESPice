@@ -38,6 +38,9 @@ impl IntegrationMethod {
 /// Maximum BDF order supported.
 const MAX_BDF_ORDER: usize = 5;
 
+/// Hard cap on transient time steps to prevent H001/H002-style infinite loops.
+const MAX_TRANSIENT_STEPS: usize = 500_000;
+
 /// Rolling history buffer for BDF-k charge vectors.
 ///
 /// Slot 0 is always the most recently accepted q (= q_{n-1} from the
@@ -138,7 +141,7 @@ const LTE_TRTOL: f64 = 7.0;
 const LTE_SAFETY: f64 = 0.9;
 const LTE_MIN_FACTOR: f64 = 0.1;
 const LTE_MAX_FACTOR: f64 = 10.0;
-const LTE_MIN_STEP_RATIO: f64 = 1e-10;
+const LTE_MIN_STEP_RATIO: f64 = 1e-6;
 /// Maximum consecutive rejected steps before hard failure.
 const LTE_MAX_REJECTIONS: usize = 50;
 
@@ -316,6 +319,8 @@ pub fn run_transient(
     registry: &DeviceRegistry,
     config: &TransientConfig,
 ) -> Result<TransientResult, SimError> {
+    // Propagate .TEMP / .OPTIONS TEMP to all devices that lack instance temp.
+    circuit.propagate_global_temperature();
     run_transient_inner(circuit, registry, config, None, None, 0.0)
 }
 
@@ -333,6 +338,14 @@ pub fn run_transient_with_options(
     config: &TransientConfig,
     opts: &SimOptions,
 ) -> Result<TransientResult, SimError> {
+    // When .OPTIONS TEMP is set and no .TEMP directive populated temperatures(),
+    // inject opts.temp (Kelvin) so propagate_global_temperature picks it up.
+    const DEFAULT_TEMP_K: f64 = 300.15;
+    if circuit.temperatures().is_empty() && (opts.temp - DEFAULT_TEMP_K).abs() > 1e-9 {
+        circuit.add_temperature(opts.temp);
+    }
+    // Propagate .TEMP / .OPTIONS TEMP to all devices that lack instance temp.
+    circuit.propagate_global_temperature();
     run_transient_inner(circuit, registry, config, Some(opts), None, 0.0)
 }
 
@@ -406,6 +419,9 @@ fn run_transient_inner_with_arena(
     // Timestep bounds for adaptive mode.
     let tmax = config.tmax.unwrap_or(config.tstop);
     let h_min = h_init * LTE_MIN_STEP_RATIO;
+    // Absolute floor: never shrink below 1e-15 s (femtosecond) regardless of tstep.
+    // Prevents infinite shrink on stiff circuits at large tstep settings.
+    let h_min = h_min.max(1e-15);
 
     // --- Initial state vector ---
     let solver = match opts {
@@ -518,6 +534,7 @@ fn run_transient_inner_with_arena(
     let mut h = h_init;
     // Rejection counter for guard against infinite retries.
     let mut rejection_count = 0usize;
+    let mut step_count = 0usize;
 
     // Use parallel device eval (Rayon) when the circuit has enough devices to
     // amortise thread-spawn overhead.  Threshold of 32 devices matches the
@@ -527,6 +544,10 @@ fn run_transient_inner_with_arena(
     let par_eval = circuit.devices().len() >= PAR_EVAL_THRESHOLD;
 
     while t < stop - h_init * 1e-10 {
+        step_count += 1;
+        if step_count > MAX_TRANSIENT_STEPS {
+            return Err(SimError::Analysis("transient: exceeded 500k step limit".to_string()));
+        }
         // Clamp step so we don't overshoot tstop.
         let h_clamped = if t + h > stop + h * 1e-10 { stop - t } else { h };
         let h_step = h_clamped.max(h_min);

@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use bigospice_analysis::{AcConfig, AcResult, AcSweepType, DcSweepConfig, TransientConfig,
-                         TransientResult, run_ac, run_dc_op, run_dc_sweep, run_transient};
+                         TransientResult, run_ac, run_dc_op, run_dc_sweep, run_transient,
+                         NestedDcConfig, run_nested_dc};
 use bigospice_core::Circuit;
 use bigospice_device::DeviceRegistry;
 use bigospice_parser::{AnalysisKind, SpiceParser};
@@ -68,6 +69,22 @@ fn circuit_node_names(circuit: &Circuit) -> Vec<String> {
         .collect();
     nodes.sort_by_key(|(idx, _)| *idx);
     nodes.into_iter().map(|(_, name)| name).collect()
+}
+
+/// Generate a linear sweep value list from start to stop with given step size.
+fn generate_sweep_values(start: f64, stop: f64, step: f64) -> Vec<f64> {
+    let mut values = Vec::new();
+    if step <= 0.0 || stop < start {
+        values.push(start);
+        return values;
+    }
+    let eps = step.abs() * 0.5;
+    let mut v = start;
+    while v <= stop + eps {
+        values.push(v);
+        v += step;
+    }
+    values
 }
 
 fn main() -> ExitCode {
@@ -178,26 +195,78 @@ fn main() -> ExitCode {
                 let start = p("start").unwrap_or(0.0);
                 let stop  = p("stop").unwrap_or(1.0);
                 let step  = p("step").unwrap_or(0.1);
-                let cfg = DcSweepConfig::new(&src_name, start, stop, step);
-                match run_dc_sweep(&circuit, &registry, &cfg) {
-                    Ok(out) => {
-                        if let Some(w) = out_writer.as_mut() {
-                            if let Some(last_vals) = out.node_voltages.last() {
-                                let node_names = circuit_node_names(&circuit);
-                                let pairs: Vec<(String, f64)> = node_names.into_iter()
-                                    .zip(last_vals.iter().copied())
-                                    .collect();
-                                if let Err(e) = write_dc_op(w, &pairs, &[] as &[(String, f64)]) {
-                                    eprintln!("output error: {e}");
-                                    return ExitCode::FAILURE;
+
+                // Check for nested (two-variable) sweep.
+                let has_inner = stmt.params.iter()
+                    .any(|(k, _)| k.starts_with("__dc_src2__"));
+
+                if has_inner {
+                    // Extract inner sweep source and parameters.
+                    let src2_name = stmt.params.iter()
+                        .find(|(k, _)| k.starts_with("__dc_src2__"))
+                        .map(|(k, _)| k["__dc_src2__".len()..].to_string())
+                        .unwrap_or_default();
+                    let start2 = p("start2").unwrap_or(0.0);
+                    let stop2  = p("stop2").unwrap_or(1.0);
+                    let step2  = p("step2").unwrap_or(0.1);
+
+                    // Build value vectors.
+                    // In SPICE .DC, the first source is the inner (fast) sweep
+                    // and the second source is the outer (slow) sweep.
+                    let inner_values = generate_sweep_values(start, stop, step);
+                    let outer_values = generate_sweep_values(start2, stop2, step2);
+
+                    let is_temp = src2_name == "temp";
+                    let outer_param = if is_temp { "temp" } else { "dc" };
+
+                    let nested_cfg = NestedDcConfig::new(
+                        &src2_name,
+                        outer_param,
+                        outer_values,
+                        &src_name,
+                        "dc",
+                        inner_values,
+                    );
+                    match run_nested_dc(&circuit, &registry, &nested_cfg) {
+                        Ok(out) => {
+                            if let Some(w) = out_writer.as_mut() {
+                                // Output the last operating point (last outer, last inner).
+                                if let Some(last_op) = out.points.last() {
+                                    if let Err(e) = write_dc_op(w, &last_op.node_voltages, &last_op.branch_currents) {
+                                        eprintln!("output error: {e}");
+                                        return ExitCode::FAILURE;
+                                    }
                                 }
                             }
+                            ran += 1;
                         }
-                        ran += 1;
+                        Err(e) => {
+                            eprintln!("simulation error: {e}");
+                            return ExitCode::FAILURE;
+                        }
                     }
-                    Err(e) => {
-                        eprintln!("simulation error: {e}");
-                        return ExitCode::FAILURE;
+                } else {
+                    let cfg = DcSweepConfig::new(&src_name, start, stop, step);
+                    match run_dc_sweep(&circuit, &registry, &cfg) {
+                        Ok(out) => {
+                            if let Some(w) = out_writer.as_mut() {
+                                if let Some(last_vals) = out.node_voltages.last() {
+                                    let node_names = circuit_node_names(&circuit);
+                                    let pairs: Vec<(String, f64)> = node_names.into_iter()
+                                        .zip(last_vals.iter().copied())
+                                        .collect();
+                                    if let Err(e) = write_dc_op(w, &pairs, &[] as &[(String, f64)]) {
+                                        eprintln!("output error: {e}");
+                                        return ExitCode::FAILURE;
+                                    }
+                                }
+                            }
+                            ran += 1;
+                        }
+                        Err(e) => {
+                            eprintln!("simulation error: {e}");
+                            return ExitCode::FAILURE;
+                        }
                     }
                 }
             }

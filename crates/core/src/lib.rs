@@ -14,7 +14,7 @@ pub use node::{NodeId, Node, Ground};
 pub use device::{DeviceId, DeviceKind, DeviceInstance, Terminal};
 pub use param::{compiled_get, CompiledParams, ParamKey, ParamMap};
 pub use stamp::{StampEntry, StampType};
-pub use circuit::{AcStimulus, Circuit, TlineHistory, LtraHistoryStore};
+pub use circuit::{AcStimulus, Circuit, TlineHistory, LtraHistoryStore, DigitalNetSpec, AdcBridgeSpec, DacBridgeSpec, DigitalPrimitiveSpec};
 pub use graph::CompressedGraph;
 pub use error::SimError;
 pub use units::Si;

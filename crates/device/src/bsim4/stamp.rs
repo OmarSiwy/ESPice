@@ -115,7 +115,7 @@ pub fn stamp_bsim4(inst: &Bsim4Instance, voltages: &[f64]) -> DeviceEval {
     let cds = e.cds;
     let cdb = e.cdb;
 
-    let C: SmallVec<[(u8, u8, f64); 8]> = smallvec![
+    let C: SmallVec<[(u8, u8, f64); 16]> = smallvec![
         // Gate row (pin 1)
         (1, 1,  cgg),
         (1, 0,  cgd),

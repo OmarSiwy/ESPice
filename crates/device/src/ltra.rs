@@ -59,8 +59,8 @@
 //! | `nonint`| 0       | 0 = interpolated history; 1 = nearest    |
 //!
 //! When both `r` and `g` are zero the line degenerates to the
-//! lossless case and a small `gmin`-equivalent is inserted so the MNA
-//! matrix stays non-singular.
+//! lossless case; the DC stamp uses Z0 = sqrt(L/C) as the effective
+//! series resistance to keep the MNA matrix non-singular.
 
 use smallvec::{SmallVec, smallvec};
 use bigospice_core::{DeviceKind, ParamMap};
@@ -84,23 +84,34 @@ impl Ltra {
     ///
     /// Returns `(r_eff, g_shunt_half)`:
     ///   - `r_eff`       — series resistance between port-1+ and port-2+,
-    ///                     equal to `R*LEN` when positive, or `1/GMIN`
-    ///                     when the line is lossless (prevents a
-    ///                     singular MNA matrix).
+    ///                     equal to `R*LEN` when positive.  For the
+    ///                     lossless case (R=0, G=0, L>0, C>0) we use the
+    ///                     characteristic impedance Z0 = sqrt(L/C) so the
+    ///                     DC stamp sees the correct termination rather than
+    ///                     an arbitrary large resistor.  `1/GMIN` is only
+    ///                     used when Z0 is undefined (L=0 or C=0).
     ///   - `g_shunt_half = G*LEN/2` — shunt conductance at each port.
     #[inline]
     fn resolve(params: &ParamMap) -> (f64, f64) {
         let r = params.get_or("r", 0.0).max(0.0);
         let g = params.get_or("g", 0.0).max(0.0);
+        let l = params.get_or("l", 0.0).max(0.0);
+        let c = params.get_or("c", 0.0).max(0.0);
         let len = params.get_or("len", 1.0).max(0.0);
         let r_tot = r * len;
         // When the series resistance is zero the DC model degenerates
         // to an ideal wire, which makes the admittance matrix singular.
-        // We keep it regular by inserting a large but finite 1/GMIN
-        // series resistor (this is a DC approximation only — full
-        // dispersive transient behaviour requires the deferred
-        // Roychowdhury-Pederson convolution kernel).
-        let r_eff = if r_tot > 0.0 { r_tot } else { 1.0 / Self::GMIN };
+        // For the lossless case (R=0, G=0) use Z0 = sqrt(L/C) as the
+        // effective series resistance — this is the physically correct
+        // matched termination.  Fall back to 1/GMIN only when Z0 is
+        // undefined (L=0 or C=0).
+        let r_eff = if r_tot > 0.0 {
+            r_tot
+        } else if l > 0.0 && c > 0.0 {
+            (l / c).sqrt()
+        } else {
+            1.0 / Self::GMIN
+        };
         let g_shunt = 0.5 * g * len;
         (r_eff, g_shunt)
     }
@@ -384,7 +395,7 @@ impl LtraLineParams {
 /// Returns the value of the impulse-response function for the chosen
 /// regime.  Used by [`compute_norton_equivalent`] to form the
 /// trapezoidal convolution integral.
-pub(crate) fn ltra_kernel(tau: f64, lp: &LtraLineParams) -> f64 {
+pub fn ltra_kernel(tau: f64, lp: &LtraLineParams) -> f64 {
     if tau < 0.0 {
         return 0.0;
     }
@@ -396,17 +407,26 @@ pub(crate) fn ltra_kernel(tau: f64, lp: &LtraLineParams) -> f64 {
             0.0
         }
         LtraRegime::RcDominated => {
-            // Causal RC diffusion kernel (Roychowdhury-Pederson):
-            //   h(tau) = (len / (2 * sqrt(pi * R_tot * C_tot))) * tau^(-3/2) * exp(-R_tot*C_tot*len^2 / (4*tau))
-            // where R_tot = r*len, C_tot = c*len.
-            let r_tot = lp.r * lp.len;
-            let c_tot = lp.c * lp.len;
-            let rc = r_tot * c_tot;
-            if rc <= 0.0 || tau <= 0.0 {
+            // Causal RC diffusion kernel (Roychowdhury-Pederson Green's function
+            // for 1-D lossy RC line):
+            //
+            //   h(tau) = sqrt(r_pu * c_pu) * len / (2 * sqrt(pi))
+            //            * tau^(-3/2) * exp(-r_pu * c_pu * len^2 / (4 * tau))
+            //
+            // where r_pu, c_pu are per-unit-length R and C.
+            //
+            // Previous code used rc = r*len * c*len = r_pu*c_pu*len^2, which
+            // caused the norm to lose the len factor:
+            //   old: len / (2*sqrt(pi * r_pu*c_pu*len^2)) = 1/(2*sqrt(pi*r_pu*c_pu))
+            //   correct: sqrt(r_pu*c_pu)*len / (2*sqrt(pi))
+            let r_pu = lp.r;
+            let c_pu = lp.c;
+            let rc_pu = r_pu * c_pu;
+            if rc_pu <= 0.0 || tau <= 0.0 {
                 return 0.0;
             }
-            let norm = lp.len / (2.0 * (std::f64::consts::PI * rc).sqrt());
-            norm * tau.powf(-1.5) * (-rc / (4.0 * tau)).exp()
+            let norm = rc_pu.sqrt() * lp.len / (2.0 * std::f64::consts::PI.sqrt());
+            norm * tau.powf(-1.5) * (-rc_pu * lp.len * lp.len / (4.0 * tau)).exp()
         }
         LtraRegime::General => {
             let td = lp.td();
@@ -414,12 +434,13 @@ pub(crate) fn ltra_kernel(tau: f64, lp: &LtraLineParams) -> f64 {
                 return 0.0;
             }
             // Attenuated travelling-wave kernel (without 1/Z0 factor).
-            // h(tau) = exp(-alpha*(tau-TD)) for tau > TD
-            // where alpha = (R/2L + G/2C).
+            // h(tau) = exp(-alpha_rate*(tau-TD)) for tau > TD
+            // where alpha_rate = R/(2L) + G/(2C) has units 1/s (per-unit-length
+            // decay rate along the time axis of the convolution).
             // The 1/Z0 factor is applied separately in the companion model.
-            let alpha = 0.5 * (lp.r / lp.l.max(1e-30) + lp.g / lp.c.max(1e-30));
+            let alpha_rate = 0.5 * (lp.r / lp.l.max(1e-30) + lp.g / lp.c.max(1e-30));
             let delay = tau - td;
-            (-alpha * delay).exp()
+            (-alpha_rate * delay).exp()
         }
     }
 }
@@ -497,9 +518,16 @@ fn interp_history(times: &[f64], values: &[f64], target: f64) -> f64 {
 ///
 /// Uses the attenuated Branin companion model: at each port, the Norton
 /// current comes from the *opposite* port's wave variable `E = V + Z0*I`
-/// delayed by TD and attenuated by `A = exp(-alpha*TD)`.
+/// delayed by TD and attenuated by `A = exp(-alpha_neper)`.
 ///
 ///   I_eq_p2(t) = -Y0 * A * E1(t - TD)
+///
+/// For RC-dominated lines (L ≈ 0) the Branin wave-impedance model is
+/// degenerate (Z0 → ∞, Y0 → 0) and the Norton contribution would be
+/// numerically zero regardless.  The RC diffusion regime is handled by
+/// the convolution kernel in [`ltra_kernel`]; this function returns zeros
+/// early for that regime so the stamper relies purely on the resistive-T
+/// DC stamp for RC lines.
 ///
 /// Returns `LtraNorton::default()` (zeros) when the history is empty.
 pub fn compute_norton_equivalent(
@@ -515,11 +543,54 @@ pub fn compute_norton_equivalent(
         return LtraNorton::default();
     }
 
+    // RC-dominated lines have no wave impedance.  The Branin companion model
+    // requires a finite Z0; when L < threshold we switch to a trapezoidal
+    // convolution using the RC diffusion kernel (`ltra_kernel`) instead.
+    // The Norton current at each port is the integral of h(tau)*V_far(t-tau)
+    // over the available history; there is no companion conductance term
+    // (g_eq = 0) because the RC diffusion model has no instantaneous Y0*V term.
+    if lp.l < 1e-30 {
+        let n = times.len();
+        if n < 2 {
+            return LtraNorton::default();
+        }
+        let mut i_eq_p1 = 0.0_f64;
+        let mut i_eq_p2 = 0.0_f64;
+        for k in 0..n - 1 {
+            let t_k  = times[k];
+            let t_k1 = times[k + 1];
+            let tau_k  = t_now - t_k;
+            let tau_k1 = t_now - t_k1;
+            if tau_k < 0.0 {
+                break;
+            }
+            let dt = t_k1 - t_k;
+            let h_k  = ltra_kernel(tau_k,  lp);
+            let h_k1 = ltra_kernel(tau_k1, lp);
+            // Port 1 Norton current driven by far-end (port 2) voltage history.
+            i_eq_p1 += 0.5 * (h_k * v2[k] + h_k1 * v2[k + 1]) * dt;
+            // Port 2 Norton current driven by far-end (port 1) voltage history.
+            i_eq_p2 += 0.5 * (h_k * v1[k] + h_k1 * v1[k + 1]) * dt;
+        }
+        return LtraNorton {
+            g_eq_p1: 0.0,
+            g_eq_p2: 0.0,
+            i_eq_p1,
+            i_eq_p2,
+        };
+    }
+
     let z0 = lp.z0();
     let y0 = 1.0 / z0;
     let td = lp.td();
-    let alpha = 0.5 * (lp.r / lp.l.max(1e-30) + lp.g / lp.c.max(1e-30));
-    let atten = (-alpha * td).exp(); // attenuation factor
+    // Branin companion-model attenuation: dimensionless neper loss over one
+    // full transit of the line.  Correct formula (Roychowdhury-Pederson):
+    //   alpha_neper = len * (R / (2*Z0) + G*Z0 / 2)
+    // where R, G are per-unit-length and Z0 = sqrt(L/C) per-unit-length.
+    // The old formula `0.5*(R/L + G/C)*td` had units of 1/s * s = nepers but
+    // used the wrong per-unit-length impedance scaling.
+    let alpha_neper = lp.len * (lp.r / (2.0 * z0) + lp.g * z0 / 2.0);
+    let atten = (-alpha_neper).exp(); // total attenuation factor across the line
 
     let t_delayed = t_now - td;
 
@@ -583,11 +654,19 @@ pub fn compute_norton_equivalent_nonint(
         return LtraNorton::default();
     }
 
+    // RC-dominated lines: same guard as compute_norton_equivalent.
+    // Branin companion model is degenerate without inductance.
+    if lp.l < 1e-30 {
+        return LtraNorton::default();
+    }
+
     let z0 = lp.z0();
     let y0 = 1.0 / z0;
     let td = lp.td();
-    let alpha = 0.5 * (lp.r / lp.l.max(1e-30) + lp.g / lp.c.max(1e-30));
-    let atten = (-alpha * td).exp();
+    // Same corrected Branin attenuation as compute_norton_equivalent:
+    //   alpha_neper = len * (R / (2*Z0) + G*Z0 / 2)
+    let alpha_neper = lp.len * (lp.r / (2.0 * z0) + lp.g * z0 / 2.0);
+    let atten = (-alpha_neper).exp();
 
     let t_delayed = t_now - td;
 
@@ -678,7 +757,7 @@ mod tests {
 
     #[test]
     fn ltra_dc_shunt_conductance_draws_current() {
-        // R=0 (replaced by 1/gmin internally), G=2 S/m, LEN=0.5 m.
+        // R=0 (no L/C set, so 1/GMIN fallback applies), G=2 S/m, LEN=0.5 m.
         // G_tot = 1 S → G_shunt_half = 0.5 S at each port.
         let m = Ltra;
         let p = params(0.0, 2.0, 0.5);

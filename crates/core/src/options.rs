@@ -199,7 +199,7 @@ impl Default for SimOptions {
             trtol: 7.0,
             temp: 300.15,
             tnom: 300.15,
-            vnstep: 5.0,
+            vnstep: 0.5,
             numdgt: 4,
             limpts: 0,
             raw_fmt: RawFmt::Binary,

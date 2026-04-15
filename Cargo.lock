@@ -103,6 +103,7 @@ dependencies = [
  "bigospice-compute",
  "bigospice-core",
  "bigospice-device",
+ "bigospice-digital",
  "bigospice-linalg",
  "bigospice-osdi",
  "bigospice-parser",

@@ -18,13 +18,15 @@ pub struct MosfetLevel1;
 impl DeviceModel for MosfetLevel1 {
     fn eval(&self, voltages: &[f64], params: &ParamMap) -> DeviceEval {
         let kp = params.get("kp").unwrap_or(2e-5);
-        let vth = params.get("vto")
+        let vto = params.get("vto")
             .or_else(|| params.get("vth0"))
             .or_else(|| params.get("vth"))
             .unwrap_or(0.7);
         let lambda = params.get("lambda").unwrap_or(0.0);
         let w = params.get_or("w", 1e-6);
         let l = params.get_or("l", 1e-6);
+        let gamma = params.get_or("gamma", 0.0);
+        let phi = params.get_or("phi", 0.6).max(0.1);
         let beta = kp * w / l;
 
         let is_pmos = params.get_or("pmos", 0.0) != 0.0;
@@ -32,6 +34,7 @@ impl DeviceModel for MosfetLevel1 {
 
         let vgs_raw = sign * (voltages[1] - voltages[2]);
         let vds_raw = sign * (voltages[0] - voltages[2]);
+        let vbs_raw = sign * (voltages[3] - voltages[2]);
 
         // Source-drain swap: when Vds < 0 the physical drain is at a lower
         // potential than the source.  Standard SPICE (ngspice DEVmosfet1load)
@@ -39,16 +42,24 @@ impl DeviceModel for MosfetLevel1 {
         // equations always see Vds >= 0.  The effective gate voltage becomes
         // Vgd (gate-to-drain) and Vds is negated.  After evaluation the
         // current is negated and the Jacobian columns for D/S are swapped.
-        let (vgs, vds, reversed) = if vds_raw >= 0.0 {
-            (vgs_raw, vds_raw, false)
+        let (vgs, vds, vbs, reversed) = if vds_raw >= 0.0 {
+            (vgs_raw, vds_raw, vbs_raw, false)
         } else {
-            // vgd = vgs - vds (gate relative to the physical drain)
-            (vgs_raw - vds_raw, -vds_raw, true)
+            // Swap D↔S: vgs' = vgd, vds' = -vds, vbs' = vbd
+            (vgs_raw - vds_raw, -vds_raw, vbs_raw - vds_raw, true)
         };
 
-        // For PMOS, VTO is specified as negative in the netlist; use absolute value
-        // since the sign convention is already handled by flipping vgs/vds.
-        let vth_eff = if is_pmos { vth.abs() } else { vth };
+        // Body effect: Vth = vto + gamma*(sqrt(phi + Vsb) - sqrt(phi))
+        // vsb = Vs - Vb = -Vbs (source-bulk voltage, positive when body reverse-biased)
+        let vsb = -vbs;
+        let sqrt_phi_vsb = (phi + vsb.max(-phi + 1e-12)).sqrt();
+        let sqrt_phi = phi.sqrt();
+        let vth_base = if is_pmos { -(vto.abs()) } else { vto };
+        let vth_eff = if is_pmos {
+            vth_base + gamma * (sqrt_phi - sqrt_phi_vsb)
+        } else {
+            vth_base + gamma * (sqrt_phi_vsb - sqrt_phi)
+        };
         let vov = vgs - vth_eff;
 
         // Minimum drain-source conductance for well-conditioned Jacobians.
@@ -79,6 +90,13 @@ impl DeviceModel for MosfetLevel1 {
             (id, gm, gds)
         };
 
+        // Body-effect transconductance: gmbs = gm * gamma / (2 * sqrt(phi + Vsb))
+        let gmbs = if sqrt_phi_vsb > 1e-6 {
+            gm * gamma / (2.0 * sqrt_phi_vsb)
+        } else {
+            0.0
+        };
+
         // When reversed, physical current flows source→drain (pin 2 → pin 0),
         // so the current seen at pin 0 is −id and at pin 2 is +id.
         // The Jacobian columns for D(pin 0) and S(pin 2) swap because the
@@ -93,10 +111,12 @@ impl DeviceModel for MosfetLevel1 {
         // BSIM4 eval.rs):
         //   dI_D/dV_D = gm + gds,   dI_D/dV_G = -gm,   dI_D/dV_S = -gds
         //   dI_S/dV_D = -(gm+gds),  dI_S/dV_G = +gm,   dI_S/dV_S = +gds
-        let (g_dd, g_dg, g_ds, g_sd, g_sg, g_ss) = if reversed {
-            ( gm + gds, -gm, -gds, -(gm + gds),  gm,  gds)
+        let (g_dd, g_dg, g_ds, g_db, g_sd, g_sg, g_ss, g_sb) = if reversed {
+            ( gm + gds + gmbs,    -gm,     -gds,     -gmbs,
+             -(gm + gds + gmbs),   gm,      gds,      gmbs)
         } else {
-            ( gds,       gm, -(gm + gds), -gds, -gm, gm + gds)
+            ( gds,                  gm,     -(gm + gds + gmbs),  gmbs,
+             -gds,                 -gm,      gm + gds + gmbs,   -gmbs)
         };
 
         // ── Meyer gate capacitances (opt-in: requires TOX in .MODEL) ─────────
@@ -163,9 +183,12 @@ impl DeviceModel for MosfetLevel1 {
                 (0, 0, g_dd),
                 (0, 1, g_dg),
                 (0, 2, g_ds),
+                (0, 3, g_db),
                 (2, 0, g_sd),
                 (2, 1, g_sg),
                 (2, 2, g_ss),
+                (2, 3, g_sb),
+                (3u8, 3u8, GDS_MIN),
             ],
             C: if has_caps {
                 smallvec![
@@ -272,11 +295,11 @@ impl DeviceModel for MosfetLevel2 {
 
         // Jacobian: when reversed, D/S columns swap (see MosfetLevel1).
         let (g_dd, g_dg, g_ds, g_db, g_sd, g_sg, g_ss, g_sb) = if reversed {
-            ( gm + gds,    -gm,     -gds,     -gmb,
-             -(gm + gds),   gm,      gds,      gmb)
+            ( gm + gds + gmb,    -gm,     -gds,     -gmb,
+             -(gm + gds + gmb),   gm,      gds,      gmb)
         } else {
-            ( gds,           gm,     -(gm + gds + gmb),  gmb,
-             -gds,          -gm,      gm + gds + gmb,   -gmb)
+            ( gds,                 gm,     -(gm + gds + gmb),  gmb,
+             -gds,                -gm,      gm + gds + gmb,   -gmb)
         };
 
         DeviceEval {
@@ -291,6 +314,7 @@ impl DeviceModel for MosfetLevel2 {
                 (2, 1, g_sg),
                 (2, 2, g_ss),
                 (2, 3, g_sb),
+                (3u8, 3u8, GDS_MIN),
             ],
             C: SmallVec::new(),
             rhs: SmallVec::new(),
@@ -344,7 +368,7 @@ impl DeviceModel for MosfetLevel3 {
         let sqrt_phi_vsb = (phi + vsb.max(-phi + 1e-12)).sqrt();
         let sqrt_phi     = phi.sqrt();
         let gamma_w = gamma
-            + delta * std::f64::consts::PI * 3.9e-11 / (4.0 * l * sqrt_phi_vsb.max(1e-6));
+            + delta * std::f64::consts::PI * 3.9e-11 / (4.0 * w * sqrt_phi_vsb.max(1e-6));
         let vth = if is_pmos {
             -(vto.abs()) + gamma_w * (sqrt_phi - sqrt_phi_vsb) - eta * vds
         } else {
@@ -366,23 +390,41 @@ impl DeviceModel for MosfetLevel3 {
             vov
         };
 
+        // Chain-rule derivatives for beta and vdsat w.r.t. vov (used in gm below).
+        let d_beta_d_vov = if theta > 0.0 && vov > 0.0 {
+            -beta0 * theta / (1.0 + theta * vov).powi(2)
+        } else {
+            0.0
+        };
+        let d_vdsat_d_vov = if kappa > 0.0 && vov > 0.0 {
+            1.0 / (1.0 + kappa * vov).powi(2)
+        } else {
+            1.0
+        };
+
         const GDS_MIN: f64 = 1e-12;
         let (id, gm, gds) = if vov <= 0.0 {
             (GDS_MIN * vds, 0.0, GDS_MIN)
         } else if vds < vdsat {
             let id  = beta * (vov * vds - 0.5 * vds * vds) * (1.0 + lambda * vds)
                     + GDS_MIN * vds;
-            let gm  = beta * vds * (1.0 + lambda * vds);
+            // d(Id_lin)/d(vov) via product rule: beta depends on vov
+            let gm_lin = beta * vds * (1.0 + lambda * vds)
+                + (vov * vds - vds * vds * 0.5) * d_beta_d_vov;
             let gds = beta * (vov - vds) * (1.0 + lambda * vds)
                     + beta * (vov * vds - 0.5 * vds * vds) * lambda
                     + GDS_MIN;
-            (id, gm, gds)
+            (id, gm_lin, gds)
         } else {
             let id  = 0.5 * beta * vdsat * vdsat * (1.0 + lambda * vds)
                     + GDS_MIN * vds;
-            let gm  = beta * vdsat * (1.0 + lambda * vds);
+            // d(Id_sat)/d(vov): both beta and vdsat depend on vov
+            let gm_sat = (1.0 + lambda * vds) * (
+                d_beta_d_vov * vdsat * vdsat * 0.5
+                + beta * vdsat * d_vdsat_d_vov
+            );
             let gds = 0.5 * beta * vdsat * vdsat * lambda + GDS_MIN;
-            (id, gm, gds)
+            (id, gm_sat, gds)
         };
 
         let gmb = if sqrt_phi_vsb > 1e-6 {
@@ -398,11 +440,11 @@ impl DeviceModel for MosfetLevel3 {
 
         // Jacobian: when reversed, D/S columns swap (see MosfetLevel1).
         let (g_dd, g_dg, g_ds, g_db, g_sd, g_sg, g_ss, g_sb) = if reversed {
-            ( gm + gds_total,    -gm,     -gds_total,     -gmb,
-             -(gm + gds_total),   gm,      gds_total,      gmb)
+            ( gm + gds_total + gmb,    -gm,     -gds_total,     -gmb,
+             -(gm + gds_total + gmb),   gm,      gds_total,      gmb)
         } else {
-            ( gds_total,           gm,     -(gm + gds_total + gmb),  gmb,
-             -gds_total,          -gm,      gm + gds_total + gmb,   -gmb)
+            ( gds_total,                 gm,     -(gm + gds_total + gmb),  gmb,
+             -gds_total,                -gm,      gm + gds_total + gmb,   -gmb)
         };
 
         DeviceEval {
@@ -417,6 +459,7 @@ impl DeviceModel for MosfetLevel3 {
                 (2, 1, g_sg),
                 (2, 2, g_ss),
                 (2, 3, g_sb),
+                (3u8, 3u8, GDS_MIN),
             ],
             C: SmallVec::new(),
             rhs: SmallVec::new(),
@@ -501,6 +544,7 @@ impl DeviceModel for MosfetLevel6 {
                 (2, 0, g_sd),
                 (2, 1, g_sg),
                 (2, 2, g_ss),
+                (3u8, 3u8, GDS_MIN),
             ],
             C: SmallVec::new(),
             rhs: SmallVec::new(),

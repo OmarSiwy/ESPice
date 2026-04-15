@@ -14,6 +14,7 @@ bigospice-device.workspace = true
 bigospice-cache.workspace = true
 bigospice-compute.workspace = true
 bigospice-osdi.workspace = true
+bigospice-digital.workspace = true
 thiserror.workspace = true
 log.workspace = true
 ahash.workspace = true

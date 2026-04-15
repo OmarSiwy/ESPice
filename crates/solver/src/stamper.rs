@@ -140,8 +140,8 @@ pub fn stamp_circuit_into(
             let (e_hist_p1, e_hist_p2) = (0.0_f64, 0.0_f64);
 
             // Branch equation residuals: V(n+) - V(n-) - Z0*I_br - E_hist
-            let br_res1 = (vp1 - vn1) - z0 * i_br1 - e_hist_p1;
-            let br_res2 = (vp2 - vn2) - z0 * i_br2 - e_hist_p2;
+            let br_res1 = (vp1 - vn1) - z0 * i_br1 - e_hist_p2;
+            let br_res2 = (vp2 - vn2) - z0 * i_br2 - e_hist_p1;
 
             // Stamp residuals.
             if let Some(r) = rp1 { residual[r] += i_br1; }
@@ -340,13 +340,33 @@ pub fn stamp_circuit_into(
             );
         }
 
+        // For current-controlled switches (W elements), inject the controlling
+        // branch current into a temporary param copy before calling eval.
+        // The parser stored the sense V-source's MNA branch index in param
+        // `ctrl_branch_index`; we read that branch current from the solution
+        // vector and write it as `controlling_current` so the device model
+        // can evaluate the smooth tanh conductance correctly.
+        let cswitch_params_buf: Option<bigospice_core::ParamMap> =
+            if device.kind == DeviceKind::CSwitch {
+                device.params.get("ctrl_branch_index").map(|ctrl_bi| {
+                    let ctrl_br_idx = circuit.num_vars() as usize + ctrl_bi as usize;
+                    let ic = if ctrl_br_idx < solution.len() { solution[ctrl_br_idx] } else { 0.0 };
+                    let mut p = device.params.clone();
+                    p.set("controlling_current", ic);
+                    p
+                })
+            } else {
+                None
+            };
+        let eval_params = cswitch_params_buf.as_ref().unwrap_or(&device.params);
+
         // Get branch current if this device has one.
         let eval: DeviceEval = if device.needs_branch() {
             let br_idx = circuit.num_vars() as usize + device.branch_index.unwrap() as usize;
             let i_branch = if br_idx < solution.len() { solution[br_idx] } else { 0.0 };
-            model.eval_with_branch(&voltages, i_branch, &device.params)
+            model.eval_with_branch(&voltages, i_branch, eval_params)
         } else {
-            model.eval(&voltages, &device.params)
+            model.eval(&voltages, eval_params)
         };
 
         // --- Stamp residual (F vector) ---
@@ -477,8 +497,8 @@ pub fn stamp_circuit_gc_at_time(
                 (0.0, 0.0)
             };
 
-            let br_res1 = (vp1 - vn1) - z0 * i_br1 - e_hist_p1;
-            let br_res2 = (vp2 - vn2) - z0 * i_br2 - e_hist_p2;
+            let br_res1 = (vp1 - vn1) - z0 * i_br1 - e_hist_p2;
+            let br_res2 = (vp2 - vn2) - z0 * i_br2 - e_hist_p1;
 
             // Stamp resistive residual.
             if let Some(r) = rp1 { residual_g[r] += i_br1; }
@@ -617,6 +637,21 @@ pub fn stamp_circuit_gc_at_time(
             }
         }
 
+        // Inject controlling branch current for CSwitch (W element).
+        let cswitch_params_buf_gc: Option<bigospice_core::ParamMap> =
+            if device.kind == DeviceKind::CSwitch {
+                device.params.get("ctrl_branch_index").map(|ctrl_bi| {
+                    let ctrl_br_idx = circuit.num_vars() as usize + ctrl_bi as usize;
+                    let ic = if ctrl_br_idx < solution.len() { solution[ctrl_br_idx] } else { 0.0 };
+                    let mut p = device.params.clone();
+                    p.set("controlling_current", ic);
+                    p
+                })
+            } else {
+                None
+            };
+        let eval_params_gc = cswitch_params_buf_gc.as_ref().unwrap_or(&device.params);
+
         // `DeviceDispatch::eval_at_time(voltages, branch_current, params, t)`
         // handles all devices; for non-branch devices it passes 0.0 as the
         // branch current (unused) and dispatches to the waveform-aware path
@@ -624,9 +659,9 @@ pub fn stamp_circuit_gc_at_time(
         let eval: DeviceEval = if device.needs_branch() {
             let br_idx = circuit.num_vars() as usize + device.branch_index.unwrap() as usize;
             let i_branch = if br_idx < solution.len() { solution[br_idx] } else { 0.0 };
-            model.eval_at_time(&voltages, i_branch, &device.params, sim_time)
+            model.eval_at_time(&voltages, i_branch, eval_params_gc, sim_time)
         } else {
-            model.eval_at_time(&voltages, 0.0, &device.params, sim_time)
+            model.eval_at_time(&voltages, 0.0, eval_params_gc, sim_time)
         };
 
         let has_branch = device.needs_branch();
@@ -684,6 +719,60 @@ pub fn stamp_circuit_gc_at_time(
             }
         }
     }
+
+    // ── Mutual inductance cross-terms ─────────────────────────────────────
+    // For each K element coupling L1 and L2 with coefficient k:
+    //   M = k * sqrt(L1 * L2)
+    //
+    // The coupled branch equations add off-diagonal terms to the C matrix and
+    // off-diagonal reactive residual contributions to residual_q.
+    //
+    // In the g/q framework (transient BE companion):
+    //   q_L1_branch += -M * I2_branch  →  C stamp: (l1_br_row, l2_br_col, -M)
+    //   q_L2_branch += -M * I1_branch  →  C stamp: (l2_br_row, l1_br_col, -M)
+    //   residual_q[l1_br_row] += -M * I2
+    //   residual_q[l2_br_row] += -M * I1
+    //
+    // DC analysis has no mutual coupling effect (dI/dt = 0); these terms only
+    // appear in the transient stampers (stamp_circuit_gc_*).
+    let num_vars = circuit.num_vars() as usize;
+    for &(id_l1, id_l2, k) in circuit.mutual_couplings() {
+        let dev_l1 = match circuit.devices().iter().find(|d| d.id == id_l1) {
+            Some(d) => d,
+            None => continue,
+        };
+        let dev_l2 = match circuit.devices().iter().find(|d| d.id == id_l2) {
+            Some(d) => d,
+            None => continue,
+        };
+        let bi1 = match dev_l1.branch_index {
+            Some(b) => b as usize,
+            None => continue,
+        };
+        let bi2 = match dev_l2.branch_index {
+            Some(b) => b as usize,
+            None => continue,
+        };
+        let l1_val = dev_l1.params.get_or("inductance", 1e-3);
+        let l2_val = dev_l2.params.get_or("inductance", 1e-3);
+        let m = k * (l1_val * l2_val).sqrt();
+
+        let l1_br_row = num_vars + bi1;
+        let l2_br_row = num_vars + bi2;
+
+        // Branch currents from the current solution vector.
+        let i1 = if l1_br_row < solution.len() { solution[l1_br_row] } else { 0.0 };
+        let i2 = if l2_br_row < solution.len() { solution[l2_br_row] } else { 0.0 };
+
+        // Off-diagonal reactive residual contributions.
+        residual_q[l1_br_row] += -m * i2;
+        residual_q[l2_br_row] += -m * i1;
+
+        // Off-diagonal C Jacobian entries: dq_L1_branch/dI2 = -M, and vice-versa.
+        c_triplet.add(l1_br_row, l2_br_row, -m);
+        c_triplet.add(l2_br_row, l1_br_row, -m);
+    }
+    // ── end mutual inductance cross-terms ─────────────────────────────────
 }
 
 /// Stamp the entire circuit with independent source values scaled by `source_factor`.
@@ -741,13 +830,28 @@ pub fn stamp_circuit_with_source_scale(
             );
         }
 
+        // Inject controlling branch current for CSwitch (W element).
+        let cswitch_params_buf_ss: Option<bigospice_core::ParamMap> =
+            if device.kind == DeviceKind::CSwitch {
+                device.params.get("ctrl_branch_index").map(|ctrl_bi| {
+                    let ctrl_br_idx = circuit.num_vars() as usize + ctrl_bi as usize;
+                    let ic = if ctrl_br_idx < solution.len() { solution[ctrl_br_idx] } else { 0.0 };
+                    let mut p = device.params.clone();
+                    p.set("controlling_current", ic);
+                    p
+                })
+            } else {
+                None
+            };
+        let eval_params_ss = cswitch_params_buf_ss.as_ref().unwrap_or(&device.params);
+
         // Get branch current if this device has one.
         let mut eval: DeviceEval = if device.needs_branch() {
             let br_idx = circuit.num_vars() as usize + device.branch_index.unwrap() as usize;
             let i_branch = if br_idx < solution.len() { solution[br_idx] } else { 0.0 };
-            model.eval_with_branch(&voltages, i_branch, &device.params)
+            model.eval_with_branch(&voltages, i_branch, eval_params_ss)
         } else {
-            model.eval(&voltages, &device.params)
+            model.eval(&voltages, eval_params_ss)
         };
 
         // Scale independent source RHS values.
@@ -856,8 +960,8 @@ pub fn stamp_circuit_gc_par_at_time(
                 let (e_hist_p1, e_hist_p2) = if let Some(hist) = circuit.tline_history(device.id) {
                     (hist.delayed_p1(sim_time), hist.delayed_p2(sim_time))
                 } else { (0.0, 0.0) };
-                let br_res1 = (vp1 - vn1) - z0 * i_br1 - e_hist_p1;
-                let br_res2 = (vp2 - vn2) - z0 * i_br2 - e_hist_p2;
+                let br_res1 = (vp1 - vn1) - z0 * i_br1 - e_hist_p2;
+                let br_res2 = (vp2 - vn2) - z0 * i_br2 - e_hist_p1;
                 if let Some(r) = rp1 { residual_g[r] += i_br1; }
                 if let Some(r) = rn1 { residual_g[r] -= i_br1; }
                 if let Some(r) = rp2 { residual_g[r] += i_br2; }
@@ -1005,10 +1109,14 @@ pub fn stamp_circuit_gc_par_at_time(
     // Each entry: (device_index, voltages, branch_current_opt, model_kind)
     // We store the DeviceEval result alongside the device index so we can
     // stamp in order after the parallel section.
+    // `params_override` carries a pre-patched ParamMap for devices that need
+    // runtime-resolved params injected before eval (e.g. CSwitch controlling
+    // current). When `Some`, it is used in place of `dev.params`.
     struct ParEvalInput {
         dev_idx: usize,
         voltages: smallvec::SmallVec<[f64; 4]>,
         branch_current: f64,
+        params_override: Option<bigospice_core::ParamMap>,
     }
 
     let devices = circuit.devices();
@@ -1045,7 +1153,20 @@ pub fn stamp_circuit_gc_par_at_time(
             } else {
                 0.0
             };
-            ParEvalInput { dev_idx: i, voltages, branch_current }
+            // Pre-inject controlling_current for CSwitch so the parallel eval
+            // can read the correct branch current without accessing circuit.
+            let params_override = if dev.kind == DeviceKind::CSwitch {
+                dev.params.get("ctrl_branch_index").map(|ctrl_bi| {
+                    let ctrl_br_idx = num_vars as usize + ctrl_bi as usize;
+                    let ic = if ctrl_br_idx < solution.len() { solution[ctrl_br_idx] } else { 0.0 };
+                    let mut p = dev.params.clone();
+                    p.set("controlling_current", ic);
+                    p
+                })
+            } else {
+                None
+            };
+            ParEvalInput { dev_idx: i, voltages, branch_current, params_override }
         })
         .collect();
 
@@ -1056,7 +1177,8 @@ pub fn stamp_circuit_gc_par_at_time(
         .map(|inp| {
             let dev = &devices[inp.dev_idx];
             let model = registry.get(dev.kind).unwrap();
-            let eval = model.eval_at_time(&inp.voltages, inp.branch_current, &dev.params, sim_time);
+            let params = inp.params_override.as_ref().unwrap_or(&dev.params);
+            let eval = model.eval_at_time(&inp.voltages, inp.branch_current, params, sim_time);
             (inp.dev_idx, eval)
         })
         .collect();
@@ -1112,6 +1234,45 @@ pub fn stamp_circuit_gc_par_at_time(
             }
         }
     }
+
+    // ── Mutual inductance cross-terms (parallel stamper) ──────────────────
+    // Identical logic to the serial GC stamper: add off-diagonal C entries
+    // and reactive residual contributions for each K coupling element.
+    let num_vars_usize = num_vars as usize;
+    for &(id_l1, id_l2, k) in circuit.mutual_couplings() {
+        let dev_l1 = match circuit.devices().iter().find(|d| d.id == id_l1) {
+            Some(d) => d,
+            None => continue,
+        };
+        let dev_l2 = match circuit.devices().iter().find(|d| d.id == id_l2) {
+            Some(d) => d,
+            None => continue,
+        };
+        let bi1 = match dev_l1.branch_index {
+            Some(b) => b as usize,
+            None => continue,
+        };
+        let bi2 = match dev_l2.branch_index {
+            Some(b) => b as usize,
+            None => continue,
+        };
+        let l1_val = dev_l1.params.get_or("inductance", 1e-3);
+        let l2_val = dev_l2.params.get_or("inductance", 1e-3);
+        let m = k * (l1_val * l2_val).sqrt();
+
+        let l1_br_row = num_vars_usize + bi1;
+        let l2_br_row = num_vars_usize + bi2;
+
+        let i1 = if l1_br_row < solution.len() { solution[l1_br_row] } else { 0.0 };
+        let i2 = if l2_br_row < solution.len() { solution[l2_br_row] } else { 0.0 };
+
+        residual_q[l1_br_row] += -m * i2;
+        residual_q[l2_br_row] += -m * i1;
+
+        c_triplet.add(l1_br_row, l2_br_row, -m);
+        c_triplet.add(l2_br_row, l1_br_row, -m);
+    }
+    // ── end mutual inductance cross-terms ─────────────────────────────────
 }
 
 /// Update T-line history buffers after a converged transient timestep.
@@ -1266,7 +1427,7 @@ mod tests {
 /// Roychowdhury-Pederson Norton equivalent.
 pub fn update_ltra_histories(circuit: &mut Circuit, solution: &[f64], time: f64) {
     // Collect updates first to avoid borrow-checker issues with circuit.
-    let mut updates: Vec<(bigospice_core::DeviceId, f64, f64, f64, f64)> = Vec::new();
+    let mut updates: Vec<(bigospice_core::DeviceId, f64, f64, LtraLineParams, bool)> = Vec::new();
 
     for device in circuit.devices() {
         if device.kind != DeviceKind::Ltra {
@@ -1291,18 +1452,35 @@ pub fn update_ltra_histories(circuit: &mut Circuit, solution: &[f64], time: f64)
         let v1 = vp1 - vn1;
         let v2 = vp2 - vn2;
 
-        // Compute port current using the companion model when history
-        // is available (transient), or DC resistive-T for initialization.
         let lp = LtraLineParams::from_params(&device.params);
         let nonint = device.params.get_or("nonint", 0.0) != 0.0;
-        let (i1, i2) = if let Some(hist) = circuit.ltra_history(device.id) {
+        updates.push((device.id, v1, v2, lp, nonint));
+    }
+
+    // Two-phase push: first push (time, v1, v2, 0, 0) to make the current
+    // timestep visible to the Norton convolution, then compute i1/i2 from the
+    // updated history (which now includes the accepted v1/v2 at `time`), and
+    // finally overwrite the last i1/i2 with the correct values.
+    //
+    // This ensures the Norton integral runs over history through step n
+    // (not step n-1), so port currents stored at each sample are consistent
+    // with the voltage waveform recorded at that same instant.
+    for (id, v1, v2, lp, nonint) in updates {
+        if circuit.ltra_history(id).is_none() {
+            circuit.add_ltra_history(id, LtraHistoryStore::with_capacity(256));
+        }
+        // Phase 1: push the accepted voltages with placeholder currents.
+        if let Some(hist) = circuit.ltra_history_mut(id) {
+            hist.push(time, v1, v2, 0.0, 0.0);
+        }
+        // Phase 2: compute Norton using updated history (now includes t=`time`).
+        let (i1, i2) = if let Some(hist) = circuit.ltra_history(id) {
             if hist.times.len() >= 2 {
                 let norton = eval_ltra_transient_slices_nonint(
                     time, &lp, &hist.times, &hist.v1, &hist.v2,
                     &hist.i1, &hist.i2, nonint,
                 );
-                // LTRA residual current at port k = Y0*Vk + I_eq_k
-                // This is current LEAVING the node = current INTO the line.
+                // Port current at step n: I_k = Y0*V_k + I_eq_k
                 let y0 = norton.g_eq_p1;
                 (y0 * v1 + norton.i_eq_p1, y0 * v2 + norton.i_eq_p2)
             } else {
@@ -1317,16 +1495,12 @@ pub fn update_ltra_histories(circuit: &mut Circuit, solution: &[f64], time: f64)
             let i = (v1 - v2) / r_eff;
             (i, -i)
         };
-
-        updates.push((device.id, v1, v2, i1, i2));
-    }
-
-    for (id, v1, v2, i1, i2) in updates {
-        if circuit.ltra_history(id).is_none() {
-            circuit.add_ltra_history(id, LtraHistoryStore::with_capacity(256));
-        }
+        // Phase 3: overwrite the placeholder currents in the last sample.
         if let Some(hist) = circuit.ltra_history_mut(id) {
-            hist.push(time, v1, v2, i1, i2);
+            if let (Some(last_i1), Some(last_i2)) = (hist.i1.last_mut(), hist.i2.last_mut()) {
+                *last_i1 = i1;
+                *last_i2 = i2;
+            }
         }
     }
 }

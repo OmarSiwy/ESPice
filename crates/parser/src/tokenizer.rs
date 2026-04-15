@@ -4,8 +4,9 @@
 
 use ahash::AHashMap;
 use bigospice_core::{
-    AcStimulus, BehavioralBinOp, BehavioralExpr, BsourceExpr, Circuit, DeviceId, DeviceInstance,
-    DeviceKind, NodeId, Si, SimError, Terminal,
+    AcStimulus, AdcBridgeSpec, BehavioralBinOp, BehavioralExpr, BsourceExpr, Circuit, DacBridgeSpec,
+    DeviceId, DeviceInstance, DeviceKind, DigitalNetSpec, DigitalPrimitiveSpec, NodeId, Si,
+    SimError, Terminal,
 };
 use bigospice_utility::si_multiplier;
 use std::path::{Path, PathBuf};
@@ -1969,6 +1970,10 @@ impl SpiceParser {
         let mut idx = 0usize;
 
         // Detect kind keyword.
+        // F006 audit: "data" is only matched here, inside parse_step(), which is
+        // called exclusively from the ".step" handler in the directive dispatcher.
+        // parse_dc() and parse_tran() have their own separate trailing DATA= handling
+        // and never call parse_step(), so there is no cross-contamination.
         let (kind_keyword, after_kind_idx) = match &line[idx] {
             Token::Word(w) => {
                 let lw = w.to_lowercase();
@@ -3691,6 +3696,8 @@ impl SpiceParser {
                 self.parse_subckt_instance_top(&name, &line)?;
                 Ok(None) // stored in pending_subckt_instances; don't add to elements
             }
+            'h' => self.parse_ccvs(&name, &line),
+            'f' => self.parse_cccs(&name, &line),
             'a' => {
                 // XSPICE A-device: A<name> [in1 in2 ...] [out1 out2 ...] model_name
                 // or with () analog port syntax: A<name> (in1) (out1) model_name
@@ -4406,6 +4413,33 @@ impl SpiceParser {
         if line.len() >= 3 {
             if let Some(poly) = Self::try_parse_poly_form(name, DeviceKind::Vcvs, line)? {
                 return Ok(Some(poly));
+            }
+        }
+
+        // VALUE {expr} / VALUE = expr form:
+        // E<name> n+ n- VALUE { expr }
+        // E<name> n+ n- VALUE = { expr }
+        if line.len() >= 4 {
+            if let Token::Word(w) = &line[2] {
+                if w.eq_ignore_ascii_case("value") {
+                    let n_out_p = Self::token_to_node_name(&line[0])?;
+                    let n_out_n = Self::token_to_node_name(&line[1])?;
+                    // Skip optional '=' after VALUE keyword, then expect '{expr}'
+                    let expr_tokens = if matches!(line.get(3), Some(Token::Equals)) {
+                        &line[4..]
+                    } else {
+                        &line[3..]
+                    };
+                    let behavioral = Self::parse_bsource_rhs(name, expr_tokens)?;
+                    self.pending_bsources.push(PendingBsource {
+                        name: name.to_string(),
+                        node_p: n_out_p,
+                        node_n: n_out_n,
+                        kind: DeviceKind::VcvsExpr,
+                        expr: behavioral,
+                    });
+                    return Ok(None);
+                }
             }
         }
 
@@ -5555,6 +5589,103 @@ impl SpiceParser {
             k,
         });
         Ok(())
+    }
+
+    /// Parse a current-controlled voltage source: `H<name> n+ n- Vcontrol transresistance`
+    ///
+    /// The H-element output voltage is `transresistance * I(Vcontrol)`.
+    /// `Vcontrol` is the name of a voltage source whose branch current serves
+    /// as the control variable.  The stamper resolves the control branch at
+    /// solve time and injects the current into the device params.
+    fn parse_ccvs(
+        &self,
+        name: &str,
+        line: &[Token],
+    ) -> Result<Option<ElementStatement>, SimError> {
+        // Expected: n+ n- Vcontrol_name transresistance
+        let words: Vec<String> = line.iter().filter_map(|t| match t {
+            Token::Word(s) => Some(s.clone()),
+            Token::Number(n) => Some(format!("{n}")),
+            _ => None,
+        }).collect();
+
+        if words.len() < 3 {
+            return Err(SimError::Parse(format!(
+                "CCVS '{name}': expected n+ n- Vcontrol transresistance"
+            )));
+        }
+
+        let np = Self::token_to_node_name(&line[0])?;
+        let nn = Self::token_to_node_name(&line[1])?;
+
+        // The third word-like token is the controlling V-source name.
+        let ctrl_name = words[2].to_lowercase();
+
+        // Transresistance: the first numeric token after the control source name.
+        let rm = line.iter().skip(3).find_map(Self::token_to_number).unwrap_or(1.0);
+
+        Ok(Some(ElementStatement {
+            name: name.to_string(),
+            kind: DeviceKind::Ccvs,
+            nodes: vec![np, nn],
+            value: None,
+            model_name: None,
+            params: vec![
+                ("transresistance".to_string(), rm),
+                ("ctrl_source".to_string(), 0.0), // placeholder; real name stored below
+            ],
+        }))
+        .map(|mut opt| {
+            // Store the control source name in a side channel: we abuse a
+            // param with a sentinel value and store the actual name in the
+            // element's model_name field (which is otherwise unused for H).
+            if let Some(ref mut es) = opt {
+                es.model_name = Some(ctrl_name);
+                // Remove the placeholder param
+                es.params.retain(|(k, _)| k != "ctrl_source");
+            }
+            opt
+        })
+    }
+
+    /// Parse a current-controlled current source: `F<name> n+ n- Vcontrol gain`
+    ///
+    /// The F-element output current is `gain * I(Vcontrol)`.
+    /// `Vcontrol` is the name of a voltage source whose branch current serves
+    /// as the control variable.
+    fn parse_cccs(
+        &self,
+        name: &str,
+        line: &[Token],
+    ) -> Result<Option<ElementStatement>, SimError> {
+        let words: Vec<String> = line.iter().filter_map(|t| match t {
+            Token::Word(s) => Some(s.clone()),
+            Token::Number(n) => Some(format!("{n}")),
+            _ => None,
+        }).collect();
+
+        if words.len() < 3 {
+            return Err(SimError::Parse(format!(
+                "CCCS '{name}': expected n+ n- Vcontrol gain"
+            )));
+        }
+
+        let np = Self::token_to_node_name(&line[0])?;
+        let nn = Self::token_to_node_name(&line[1])?;
+
+        let ctrl_name = words[2].to_lowercase();
+        let gain = line.iter().skip(3).find_map(Self::token_to_number).unwrap_or(1.0);
+
+        Ok(Some(ElementStatement {
+            name: name.to_string(),
+            kind: DeviceKind::Cccs,
+            nodes: vec![np, nn],
+            value: None,
+            model_name: Some(ctrl_name), // store ctrl vsource name here
+            params: vec![
+                ("current_gain".to_string(), gain),
+            ],
+        }))
     }
 
     /// Parse a lossless transmission line: `T<name> n1+ n1- n2+ n2- Z0=value TD=value`
@@ -6886,6 +7017,12 @@ impl SpiceParser {
             .map(|m| (m.name.clone(), m))
             .collect();
 
+        // V-source AC stimuli must be registered after all nodes and B-source
+        // devices are added so that circuit.num_vars() is final.  During the
+        // element loop we only record (dev_id, re, im); the branch_row is
+        // computed in the post-pass below.
+        let mut pending_vsrc_stimuli: Vec<(DeviceId, f64, f64)> = Vec::new();
+
         for elem in &self.netlist.elements {
             // Resolve nodes.
             let node_ids: Vec<NodeId> = elem
@@ -6966,9 +7103,10 @@ impl SpiceParser {
                 &terminals,
             );
 
-            // If the resolved kind is PMOS, ensure the "pmos" flag is set so the
-            // device model can flip voltage polarities correctly.
-            if kind == DeviceKind::MosfetP {
+            // If the resolved kind is PMOS (any level), ensure the "pmos" flag is set
+            // so the device model can flip voltage polarities correctly.
+            if matches!(kind, DeviceKind::MosfetP | DeviceKind::MosfetP2
+                             | DeviceKind::MosfetP3 | DeviceKind::MosfetP6) {
                 device.params.set("pmos", 1.0);
             }
 
@@ -6992,11 +7130,15 @@ impl SpiceParser {
             // Apply model params (element params override model params).
             if let Some(ref model_name) = elem.model_name {
                 if let Some(model) = models.get(model_name) {
+                    eprintln!("[DEBUG] device '{}' model '{}' kind='{}' params={:?}", elem.name, model_name, model.kind, model.params);
                     for (k, v) in &model.params {
                         if !device.params.contains(k) {
                             device.params.set(k, *v);
                         }
                     }
+                } else {
+                    eprintln!("[DEBUG] device '{}' model '{}' NOT FOUND in models table", elem.name, model_name);
+                    eprintln!("[DEBUG]   available models: {:?}", models.keys().collect::<Vec<_>>());
                 }
             }
 
@@ -7009,6 +7151,31 @@ impl SpiceParser {
                     // create (or look up) an internal node named _<devname>_th
                     let th_node = circuit.add_internal_node(&elem.name, "th");
                     device.terminals.push(Terminal::new(4, th_node));
+                }
+            }
+
+            // BJT extrinsic resistances: when rb/rc/re > 0, create internal nodes
+            // for the intrinsic device (C', B', E').  This must be done after params
+            // are merged so the resistance values are visible.
+            //
+            // Pin layout with internal nodes:
+            //   0 = Collector (external)    3 = Collector' (internal, after RC)
+            //   1 = Base (external)         4 = Base'      (internal, after RB)
+            //   2 = Emitter (external)      5 = Emitter'   (internal, after RE)
+            //
+            // The eval_with_extrinsic function in bjt.rs expects exactly 6 voltages;
+            // it falls back to 3-terminal eval when voltages.len() < 6.
+            if matches!(kind, DeviceKind::BjtNpn | DeviceKind::BjtPnp) {
+                let rb = device.params.get_or("rb", 0.0);
+                let rc = device.params.get_or("rc", 0.0);
+                let re = device.params.get_or("re", 0.0);
+                if rb > 0.0 || rc > 0.0 || re > 0.0 {
+                    let ci_node = circuit.add_internal_node(&elem.name, "ci");
+                    let bi_node = circuit.add_internal_node(&elem.name, "bi");
+                    let ei_node = circuit.add_internal_node(&elem.name, "ei");
+                    device.terminals.push(Terminal::new(4, ci_node));
+                    device.terminals.push(Terminal::new(5, bi_node));
+                    device.terminals.push(Terminal::new(6, ei_node));
                 }
             }
 
@@ -7059,13 +7226,10 @@ impl SpiceParser {
 
                 match kind {
                     DeviceKind::VoltageSource => {
-                        // The V-source branch row = num_vars + branch_index.
-                        // After add_device the device is at dev_id; look it up.
-                        let dev = &circuit.devices()[dev_id.index()];
-                        if let Some(bi) = dev.branch_index {
-                            let branch_row = circuit.num_vars() as usize + bi as usize;
-                            circuit.add_ac_stimulus(AcStimulus::VoltageSource(branch_row, re, im));
-                        }
+                        // Defer branch_row computation: num_vars is not yet final
+                        // (later elements and B-sources may still add nodes).
+                        // Store (dev_id, re, im) and resolve in the post-pass below.
+                        pending_vsrc_stimuli.push((dev_id, re, im));
                     }
                     DeviceKind::CurrentSource => {
                         // node_ids[0] = positive node, node_ids[1] = negative node.
@@ -7098,6 +7262,19 @@ impl SpiceParser {
             let dev_id = circuit.add_device(device);
             let bse = BsourceExpr::new(pb.expr.clone());
             circuit.add_bsource_expr(dev_id, bse);
+        }
+
+        // ── AC stimulus post-pass (V-sources) ────────────────────────────
+        // num_vars is now final (all nodes, including B-source internal nodes,
+        // have been added).  Compute the correct MNA branch row for each
+        // deferred V-source stimulus.
+        let final_num_vars = circuit.num_vars() as usize;
+        for (dev_id, re, im) in pending_vsrc_stimuli {
+            let dev = &circuit.devices()[dev_id.index()];
+            if let Some(bi) = dev.branch_index {
+                let branch_row = final_num_vars + bi as usize;
+                circuit.add_ac_stimulus(AcStimulus::VoltageSource(branch_row, re, im));
+            }
         }
 
         // ── Initial conditions (.IC) ──────────────────────────────────────
@@ -7153,10 +7330,199 @@ impl SpiceParser {
             circuit.add_mutual_coupling(l1_id, l2_id, pk.k);
         }
 
+        // ── CCVS / CCCS / CSwitch control-source resolution ───────────────
+        // For H (CCVS), F (CCCS), and W (CSwitch) elements the parser stored
+        // the control V-source name in `elem.model_name`.  Now that all devices
+        // are added we can resolve that name to a branch index and write it into
+        // the device params as `ctrl_branch_index` for the stamper.
+        // CSwitch uses the same convention: the stamper reads `ctrl_branch_index`
+        // from params, samples the branch current from the solution vector, and
+        // injects it as `controlling_current` before calling eval each NR iter.
+        {
+            let pending: Vec<(String, String)> = self.netlist.elements.iter()
+                .filter(|e| matches!(e.kind, DeviceKind::Ccvs | DeviceKind::Cccs | DeviceKind::CSwitch))
+                .filter_map(|e| {
+                    let ctrl = e.model_name.as_ref()?.clone();
+                    Some((e.name.clone(), ctrl))
+                })
+                .collect();
+
+            for (dev_name, ctrl_name) in pending {
+                if let Some(ctrl_dev) = circuit.find_device(&ctrl_name) {
+                    if let Some(bi) = ctrl_dev.branch_index {
+                        circuit.set_device_param(&dev_name, "ctrl_branch_index", bi as f64);
+                    }
+                }
+            }
+        }
+
         // ── .CONNECT directives (W.6) ─────────────────────────────────────
         // Merge net pairs after all devices have been added.
         for (net_a, net_b) in &self.netlist.connect_directives.clone() {
             circuit.connect_nets(net_a, net_b);
+        }
+
+        // ── Wire up XSPICE A-devices into DigitalNetSpec ──────────────────
+        // Convert pending_a_devices into bridge/primitive specs and attach
+        // to the circuit so the transient analysis can construct a
+        // DigitalRuntime.
+        if !self.pending_a_devices.is_empty() {
+            let mut dig_spec = DigitalNetSpec::default();
+            let mut dig_node_counter: u32 = 0;
+            // Map digital node name → allocated digital node index.
+            let mut dig_node_map: AHashMap<String, u32> = AHashMap::new();
+
+            let mut alloc_dig_node = |name: &str, counter: &mut u32, map: &mut AHashMap<String, u32>| -> u32 {
+                if let Some(&idx) = map.get(name) {
+                    idx
+                } else {
+                    let idx = *counter;
+                    *counter += 1;
+                    map.insert(name.to_string(), idx);
+                    idx
+                }
+            };
+
+            for adev in &self.pending_a_devices {
+                let model_lower = adev.model_name.to_ascii_lowercase();
+
+                // Look up the .model card to get model kind and params.
+                let model_kind = models.get(&adev.model_name)
+                    .or_else(|| models.get(&model_lower))
+                    .map(|m| m.kind.to_ascii_lowercase())
+                    .unwrap_or_else(|| model_lower.clone());
+
+                let model_params: Vec<(String, f64)> = models.get(&adev.model_name)
+                    .or_else(|| models.get(&model_lower))
+                    .map(|m| m.params.iter().map(|(k, v)| (k.to_ascii_lowercase(), *v)).collect())
+                    .unwrap_or_default();
+
+                let get_param = |name: &str, default: f64| -> f64 {
+                    model_params.iter()
+                        .find(|(k, _)| k == name)
+                        .map(|(_, v)| *v)
+                        .unwrap_or(default)
+                };
+
+                // Classify the model: is it a known digital primitive with
+                // analog () ports (auto-insert ADC/DAC), a standalone
+                // adc_bridge, a standalone dac_bridge, or unknown?
+                match model_kind.as_str() {
+                    // Standalone ADC bridge: analog input → digital output
+                    "adc_bridge" => {
+                        for (inp, outp) in adev.inputs.iter().zip(adev.outputs.iter()) {
+                            let analog_node = circuit.add_node(inp);
+                            let analog_idx = analog_node.0.saturating_sub(1) as u32;
+                            let dig_out = alloc_dig_node(outp, &mut dig_node_counter, &mut dig_node_map);
+                            dig_spec.adc_bridges.push(AdcBridgeSpec {
+                                analog_node_idx: analog_idx,
+                                digital_node: dig_out,
+                                in_low: get_param("in_low", 0.1),
+                                in_high: get_param("in_high", 0.9),
+                            });
+                        }
+                    }
+                    // Standalone DAC bridge: digital input → analog output
+                    "dac_bridge" => {
+                        for (inp, outp) in adev.inputs.iter().zip(adev.outputs.iter()) {
+                            let dig_in = alloc_dig_node(inp, &mut dig_node_counter, &mut dig_node_map);
+                            let analog_node = circuit.add_node(outp);
+                            let analog_idx = analog_node.0.saturating_sub(1) as u32;
+                            dig_spec.dac_bridges.push(DacBridgeSpec {
+                                analog_node_idx: analog_idx,
+                                digital_node: dig_in,
+                                out_low: get_param("out_low", 0.0),
+                                out_high: get_param("out_high", 1.8),
+                                t_rise: get_param("t_rise", 1e-9),
+                                t_fall: get_param("t_fall", 1e-9),
+                            });
+                        }
+                    }
+                    // Digital primitives accessed through analog () ports:
+                    // auto-insert ADC on each input, DAC on each output.
+                    _ => {
+                        // Determine PrimitiveKind from model name
+                        let prim_kind: Option<u8> = match model_kind.as_str() {
+                            "d_buffer" | "buf" => Some(0),
+                            "d_inverter" | "not" | "inv" => Some(1),
+                            "d_and" | "and" | "and2" => Some(2),
+                            "d_nand" | "nand" | "nand2" => Some(3),
+                            "d_or" | "or" | "or2" => Some(4),
+                            "d_nor" | "nor" | "nor2" => Some(5),
+                            "d_xor" | "xor" | "xor2" => Some(6),
+                            "d_xnor" | "xnor" | "xnor2" => Some(7),
+                            "d_dff" | "dff" | "d_ff" => Some(13),
+                            "d_dlatch" | "dlatch" | "d_latch" => Some(12),
+                            _ => None,
+                        };
+
+                        let Some(kind_u8) = prim_kind else {
+                            eprintln!("[WARN] A-device '{}': unknown model '{}', skipping", adev.name, adev.model_name);
+                            continue;
+                        };
+
+                        let rise_delay = get_param("rise_delay", 1e-12);
+                        let fall_delay = get_param("fall_delay", 1e-12);
+
+                        // ngspice auto-bridge defaults for () analog port syntax:
+                        //   ADC: in_low=0.1, in_high=0.9
+                        //   DAC: out_low=0.0, out_high=1.8, t_rise=t_fall=1e-9
+
+                        // For each analog input: auto-insert ADC bridge
+                        let mut prim_inputs: Vec<u32> = Vec::new();
+                        for inp_name in &adev.inputs {
+                            let analog_node = circuit.add_node(inp_name);
+                            let analog_idx = analog_node.0.saturating_sub(1) as u32;
+                            let dig_node = alloc_dig_node(
+                                &format!("__adc_{}_{}", adev.name, inp_name),
+                                &mut dig_node_counter,
+                                &mut dig_node_map,
+                            );
+                            dig_spec.adc_bridges.push(AdcBridgeSpec {
+                                analog_node_idx: analog_idx,
+                                digital_node: dig_node,
+                                in_low: 0.1,
+                                in_high: 0.9,
+                            });
+                            prim_inputs.push(dig_node);
+                        }
+
+                        // For each analog output: auto-insert DAC bridge
+                        let mut prim_outputs: Vec<u32> = Vec::new();
+                        for outp_name in &adev.outputs {
+                            let analog_node = circuit.add_node(outp_name);
+                            let analog_idx = analog_node.0.saturating_sub(1) as u32;
+                            let dig_node = alloc_dig_node(
+                                &format!("__dac_{}_{}", adev.name, outp_name),
+                                &mut dig_node_counter,
+                                &mut dig_node_map,
+                            );
+                            dig_spec.dac_bridges.push(DacBridgeSpec {
+                                analog_node_idx: analog_idx,
+                                digital_node: dig_node,
+                                out_low: 0.0,
+                                out_high: 1.8,
+                                t_rise: 1e-9,
+                                t_fall: 1e-9,
+                            });
+                            prim_outputs.push(dig_node);
+                        }
+
+                        dig_spec.primitives.push(DigitalPrimitiveSpec {
+                            kind: kind_u8,
+                            inputs: prim_inputs,
+                            outputs: prim_outputs,
+                            rise_delay,
+                            fall_delay,
+                        });
+                    }
+                }
+            }
+
+            dig_spec.num_dig_nodes = dig_node_counter;
+            if !dig_spec.is_empty() {
+                circuit.set_digital_spec(dig_spec);
+            }
         }
 
         circuit.build_topology();

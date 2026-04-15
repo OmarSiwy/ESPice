@@ -122,12 +122,13 @@ impl DigitalRuntime {
         // Step 5: re-evaluate primitives whose inputs touched a changed node.
         // Today this is a coarse "evaluate every primitive" pass — fine for
         // small testbenches and dramatically simpler than maintaining a
-        // sensitivity list.  Outputs are scheduled with their per-primitive
-        // `delay` so causality is preserved.
+        // sensitivity list.  Outputs are scheduled with the per-primitive
+        // rise or fall delay based on the direction of the output transition.
         if processed > 0 {
             for id in 0..self.net.primitives.len() {
                 let updates = self.net.primitives.eval(id, &self.net.node_state);
-                let delay = self.net.primitives.delays[id];
+                let rise_delay = self.net.primitives.rise_delays[id];
+                let fall_delay = self.net.primitives.fall_delays[id];
                 for (node, val) in updates {
                     // Only schedule an output event when the value actually
                     // changes.  Suppressing no-change events prevents
@@ -139,6 +140,8 @@ impl DigitalRuntime {
                         .copied()
                         .unwrap_or(DigState::X);
                     if val != cur {
+                        // Pick rise or fall delay based on output transition direction.
+                        let delay = if val.is_one() { rise_delay } else { fall_delay };
                         let t_emit = t_now + delay;
                         self.net.queue.schedule(t_emit, node, val);
                     }

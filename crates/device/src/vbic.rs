@@ -650,7 +650,7 @@ impl Vbic {
             jac5.push((4, 2, -dp_dve));
             jac5.push((4, 4,  gth));
 
-            let mut cap5: SmallVec<[(u8, u8, f64); 8]> = SmallVec::new();
+            let mut cap5: SmallVec<[(u8, u8, f64); 16]> = SmallVec::new();
             if cth > 0.0 {
                 cap5.push((4, 4, cth));
             }

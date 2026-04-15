@@ -143,6 +143,22 @@ impl TripletMatrix {
             .map(|((&r, &c), &v)| (r as usize, c as usize, v))
     }
 
+    /// Zero all values in entries whose row matches `row`.
+    ///
+    /// The entries remain in the SoA arrays (with value 0.0) so the sparsity
+    /// pattern is preserved.  This is used for enforcing Dirichlet boundary
+    /// conditions (e.g. DAC bridge voltage constraints) where the entire row
+    /// is replaced by a single `J[row,row] = 1` after zeroing.
+    #[inline]
+    pub fn zero_row(&mut self, row: usize) {
+        let r32 = row as u32;
+        for (r, v) in self.row_idx.iter().zip(self.vals.iter_mut()) {
+            if *r == r32 {
+                *v = 0.0;
+            }
+        }
+    }
+
     /// Remove all entries without deallocating the backing storage.
     #[inline]
     pub fn clear(&mut self) {

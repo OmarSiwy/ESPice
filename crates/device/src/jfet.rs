@@ -133,7 +133,7 @@ fn ids_parker_skellern(
         (1.0, 0.0)
     } else {
         let exp_nds = (-nds * vds_pos).exp();
-        ((1.0 - exp_nds), nds * exp_nds)
+        ((1.0 - exp_nds) / nds, exp_nds)
     };
 
     // ── Core drain current ────────────────────────────────────────────────────
@@ -141,8 +141,17 @@ fn ids_parker_skellern(
     let ids_core = beta * veff * veff * clm * block / denom + GDS_MIN * vds;
 
     // ── Derivatives (analytical Jacobian) ────────────────────────────────────
-    // d(vst)/d(vov) for the smooth knee:
-    let dvst_dvov = 0.5 * (1.0 + vst_raw / (vst_raw * vst_raw + smooth_knee).sqrt());
+    // d(vst)/d(vov) for the smooth knee, multiplied by the chain rule factor
+    // d(vst_raw)/d(vov).  When delta==0, vst_raw==vov so the factor is 1.
+    // When delta!=0, vst_raw = vov/(1+delta*vov), so d(vst_raw)/d(vov) = 1/(1+delta*vov)^2.
+    let dvst_raw_dvov = if delta.abs() > 1e-12 && vov > 0.0 {
+        let denom_delta = (1.0 + delta * vov).max(1e-30);
+        1.0 / (denom_delta * denom_delta)
+    } else {
+        1.0
+    };
+    let dvst_dvov = 0.5 * (1.0 + vst_raw / (vst_raw * vst_raw + smooth_knee).sqrt())
+        * dvst_raw_dvov;
     // d(vst)/d(vgs) = dvst_dvov * d(vov)/d(vgs) = dvst_dvov * 1
     // d(vst)/d(vto) is via d(vov)/d(vto) = -1 (but vto is a param, not a variable)
 
@@ -246,18 +255,27 @@ impl DeviceModel for JfetLevel1 {
             }
         };
 
-        // Gate junction leakage (tiny Shockley diode, reverse biased).
-        // Use the ACTUAL physical gate-to-source voltage (before sign flip) so that
+        // Gate junction leakage: two separate Shockley diodes.
+        // Igs: gate→source diode.  Use physical (unsigned) voltages so that
         // P-channel devices with negative physical Vgs don't get a huge forward bias.
-        // Physical Vgs_actual = V(gate) - V(source) = voltages[1] - voltages[2].
+        //   Physical Vgs = V(gate) - V(source) = voltages[1] - voltages[2]
+        //   Physical Vgd = V(gate) - V(drain)  = voltages[1] - voltages[0]
         let vgs_physical = voltages[1] - voltages[2];
-        let vgs_clamped = vgs_physical.clamp(-40.0 * VT_THERMAL, 0.5);
-        let exp_vgs = (vgs_clamped / VT_THERMAL).exp();
-        let ig = is * (exp_vgs - 1.0);
-        let gg = is * exp_vgs / VT_THERMAL;
+        let vgd_physical = voltages[1] - voltages[0];
+
+        let nvt = VT_THERMAL; // N=1 (ideality factor default)
+
+        let vgs_c = vgs_physical.clamp(-40.0 * nvt, 0.5);
+        let exp_vgs = (vgs_c / nvt).exp();
+        let igs = is * (exp_vgs - 1.0);
+        let ggs = is * exp_vgs / nvt;
+
+        let vgd_c = vgd_physical.clamp(-40.0 * nvt, 0.5);
+        let exp_vgd = (vgd_c / nvt).exp();
+        let igd = is * (exp_vgd - 1.0);
+        let ggd = is * exp_vgd / nvt;
 
         let id_signed = sign * id;
-        let ig_signed = sign * ig;
 
         // ── Gate-source and gate-drain capacitances ───────────────────────
         // CGS and CGD are simple linear capacitors modelled as charge sources:
@@ -298,34 +316,80 @@ impl DeviceModel for JfetLevel1 {
         //   (1,1) already counted  (1,0) += -CGD   (0,1) += -CGD   (0,0) += +CGD
         let have_cap = cgs != 0.0 || cgd != 0.0;
 
-        // KCL:
-        //   drain node (pin 0): receives Id (current into drain from channel) + Ig/2 leakage
-        //   gate  node (pin 1): receives -Ig (gate draws tiny current)
-        //   source node (pin 2): receives -(Id + Ig) (current out of source)
+        // KCL (two-diode gate leakage model):
+        //   Igs flows gate→source: gate loses Igs, source gains Igs
+        //   Igd flows gate→drain:  gate loses Igd, drain  gains Igd
         //
-        // Jacobian (conductance matrix):
-        //   dId/dVd = gds (unsigned, sign factors cancel)
-        //   dId/dVg = gm
-        //   dId/dVs = -(gm + gds)
-        //   dIg/dVg = gg, dIg/dVs = -gg
+        // MNA convention: g[node] = net current LEAVING that node.
+        //   drain  (pin 0): id leaves via channel; igd enters from gate → id_signed - sign*igd
+        //   gate   (pin 1): igs and igd both leave gate                 → sign*(igs + igd)
+        //   source (pin 2): id enters from channel; igs enters from gate → -(id_signed + sign*igs)
+        //
+        // Jacobian:
+        //   dId/dVd = gds,  dId/dVg = dgm,  dId/dVs = -(dgm+gds)
+        //   d(igd)/dVg = ggd (physical Vgd = Vg - Vd, so d/dVd = -ggd, d/dVg = ggd)
+        //   d(igs)/dVg = ggs (physical Vgs = Vg - Vs, so d/dVs = -ggs, d/dVg = ggs)
+        //
+        // Drain row (row 0):  d/dVd = gds + sign²*ggd = gds + ggd (sign²=1)
+        //                     d/dVg = dgm - sign*sign*ggd = dgm - ggd
+        //                     d/dVs = -(dgm+gds)
+        // Gate row (row 1):   d/dVd = -sign*sign*ggd = -ggd
+        //                     d/dVg = sign*sign*(ggs+ggd) = ggs+ggd (but leaves gate, so negative sign)
+        //                     Wait — g[gate] = sign*(igs+igd).  With physical voltages:
+        //                       d(sign*igs)/dVg_phys = sign*ggs, d(sign*igs)/dVs_phys = -sign*ggs
+        //                       d(sign*igd)/dVg_phys = sign*ggd, d(sign*igd)/dVd_phys = -sign*ggd
+        //                     But voltages[] are physical, so row/col indices are straightforward.
+        //
+        // For N-channel (sign=+1) the gate row entries are:
+        //   (1,0) = -ggd   (1,1) = +(ggs+ggd)·sign² but leaving → -(ggs+ggd)  ...
+        //
+        // Re-derive cleanly using sign=+1 first, then generalise:
+        //   g[0] = id_signed - sign*igd   → dg[0]/dV[0] = sign*(gds + ggd·sign)  ... complex with sign
+        //
+        // Simpler: since physical voltages are used for the diodes (no sign flip),
+        // the Jacobian entries for the diode contributions use the PHYSICAL pin indices directly,
+        // regardless of polarity. The channel (ids) Jacobian already incorporates `sign` via
+        // the fact that `vgs` and `vds` were sign-flipped. We add the diode contributions
+        // using the signed conductances directly.
+        //
+        // Net Jacobian additions from gate leakage:
+        //   g[drain] -= sign*igd  → d(g[drain])/dV[drain] += sign*ggd·(-1)·(-sign) = ggd
+        //                           but igd uses Vgd=V[1]-V[0], so
+        //                           d(-sign*igd)/dV[0] = -sign*(-ggd) = sign*ggd ... no
+        //   Let's track: g[0] includes term (-sign*igd).
+        //   igd = is*(exp(Vgd/nvt)-1), Vgd = V[1]-V[0] (physical, no sign flip).
+        //   d(-sign*igd)/dV[0] = -sign * d(igd)/dV[0] = -sign * ggd * d(Vgd)/dV[0] = -sign*ggd*(-1) = sign*ggd
+        //   d(-sign*igd)/dV[1] = -sign * ggd
+        //   g[1] includes term (+sign*igd) and (+sign*igs).
+        //   igs = is*(exp(Vgs/nvt)-1), Vgs = V[1]-V[2].
+        //   d(sign*igs)/dV[1] = sign*ggs, d(sign*igs)/dV[2] = -sign*ggs
+        //   d(sign*igd)/dV[1] = sign*ggd, d(sign*igd)/dV[0] = -sign*ggd
+        //   g[2] includes term (-sign*igs).
+        //   d(-sign*igs)/dV[1] = -sign*ggs, d(-sign*igs)/dV[2] = sign*ggs
+        //
+        // With sign=+1 (N-ch): sign*x = x, so these reduce to the expected N-ch values.
+        // With sign=-1 (P-ch): sign*x = -x, consistent with P-ch polarity flip.
 
         DeviceEval {
-            g: smallvec![id_signed + ig_signed * 0.5,
-                         -ig_signed,
-                         -(id_signed + ig_signed * 0.5)],
+            g: smallvec![
+                id_signed - sign * igd,
+                sign * (igs + igd),
+                -(id_signed + sign * igs),
+            ],
             q: smallvec![q0, q1, q2],
             G: smallvec![
                 // Drain node (row 0) derivatives
-                (0, 0,  gds),
-                (0, 1,  dgm + gg * 0.5),
-                (0, 2, -(dgm + gds) - gg * 0.5),
+                (0, 0,  gds + sign * ggd),
+                (0, 1,  dgm - sign * ggd),
+                (0, 2, -(dgm + gds)),
                 // Gate node (row 1) derivatives
-                (1, 1, -gg),
-                (1, 2,  gg),
+                (1, 0, -sign * ggd),
+                (1, 1,  sign * (ggs + ggd)),
+                (1, 2, -sign * ggs),
                 // Source node (row 2) derivatives
                 (2, 0, -gds),
-                (2, 1, -(dgm + gg * 0.5)),
-                (2, 2,  dgm + gds + gg * 0.5),
+                (2, 1, -(dgm + sign * ggs)),
+                (2, 2,  dgm + gds + sign * ggs),
             ],
             C: if have_cap {
                 smallvec![
