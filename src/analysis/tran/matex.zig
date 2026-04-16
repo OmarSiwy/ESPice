@@ -10,7 +10,7 @@ const root = @import("../types.zig");
 const simdCopy = root.copySimd;
 const num = @import("numerics");
 const combinePlanes = @import("../Circuit.zig").combinePlanes;
-const solvers = @import("solvers");
+const solvers = @import("solver");
 
 const DenseLu = solvers.dense_lu.DenseLu(f64);
 const Solver = solvers.direct.Solver;

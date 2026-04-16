@@ -2,7 +2,7 @@
 //! per point. The circuit pattern and Newton workspace are shared across lanes.
 const root = @import("../types.zig");
 const lanes = @import("lanes.zig");
-const converger = @import("solvers").converger;
+const converger = @import("solver").converger;
 
 pub const Options = @import("requests").Temp;
 

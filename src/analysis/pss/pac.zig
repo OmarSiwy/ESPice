@@ -19,9 +19,9 @@
 //!   5. Result: complex transfer (gain + phase) at each sideband frequency.
 const std = @import("std");
 const root = @import("../types.zig");
-const converger = @import("solvers").converger;
+const converger = @import("solver").converger;
 const types = @import("numerics");
-const solvers = @import("solvers");
+const solvers = @import("solver");
 const fft_mod = solvers.fft;
 const dense_lu = solvers.dense_lu;
 

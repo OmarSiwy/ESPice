@@ -5,7 +5,7 @@ const std = @import("std");
 const freq = @import("freq.zig");
 const root = @import("../types.zig");
 const types = @import("numerics");
-const FreqSolver = @import("solvers").freq_solve.FreqSolver;
+const FreqSolver = @import("solver").freq_solve.FreqSolver;
 
 // ngspice include/ngspice/noisedef.h:105-113.
 const n_minlog = 1e-38;

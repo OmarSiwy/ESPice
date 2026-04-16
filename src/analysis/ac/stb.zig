@@ -4,7 +4,7 @@ const std = @import("std");
 const freq = @import("freq.zig");
 const root = @import("../types.zig");
 const types = @import("numerics");
-const solvers = @import("solvers");
+const solvers = @import("solver");
 const GROUND = root.GROUND;
 const FreqSolver = solvers.freq_solve.FreqSolver;
 

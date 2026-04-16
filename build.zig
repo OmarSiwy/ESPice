@@ -104,9 +104,9 @@ pub fn build(b: *std.Build) void {
         .{ .name = "device_ir", .module = device_ir_mod },
     });
     device_eval_mod.link_libc = true;
-    const solvers_mod = M.make(b.path("src/analysis/solvers/root.zig"), &.{.{ .name = "numerics", .module = numerics_mod }});
+    const solver_mod = M.make(b.path("src/solver/root.zig"), &.{.{ .name = "numerics", .module = numerics_mod }});
 
-    // Waveform writers. A leaf like `solvers`: it imports nothing but std, so
+    // Waveform writers. A leaf like `solver`: it imports nothing but std, so
     // it is a module rather than a set of files in the app root, and
     // `zig build test-output` runs it without building the simulator.
     const output_types_mod = M.make(b.path("src/output/types.zig"), &.{});
@@ -144,7 +144,7 @@ pub fn build(b: *std.Build) void {
     const one_models = b.allocator.alloc(*std.Build.Module, models.len) catch @panic("OOM");
     // One HOST object per model, the CPU counterpart of the per-model GPU
     // kernel roots below. Every `DeviceBatch(D)` used to be instantiated inside
-    // the single `zig build-exe` that also holds solvers/analysis/app, so Zig
+    // the single `zig build-exe` that also holds solver/analysis/app, so Zig
     // cached all 38 whale evals as ONE unit: a one-line solver edit recompiled
     // the lot, single-threaded, on a 32-core box. See
     // docs/perf/build-split-2026-09-10.md and src/analysis/eval.zig.
@@ -255,7 +255,7 @@ pub fn build(b: *std.Build) void {
 
     const analysis_mod = M.make(b.path("src/analysis/root.zig"), &.{
         .{ .name = "models", .module = models_mod },
-        .{ .name = "solvers", .module = solvers_mod },
+        .{ .name = "solver", .module = solver_mod },
         .{ .name = "numerics", .module = numerics_mod },
         .{ .name = "device_ir", .module = device_ir_mod },
         .{ .name = "device_eval", .module = device_eval_mod },
@@ -457,6 +457,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "builder", .module = builder_mod },
             .{ .name = "limiter_device", .module = limiter_mod },
         }, true)} },
+        .{ "test-solver", "Run solver tests", &.{t.run(solver_mod, &.{}, false)} },
         .{ "test-output", "Run waveform writer tests", &.{t.run(output_mod, &.{}, false)} },
         .{ "test-native-lines", "Run native transmission-line oracle tests", &.{t.run(native_models_mod, &.{}, false)} },
         .{ "test-device-errors", "Check separately compiled device callback statuses", &.{t.run(error_tests_mod, &.{}, false)} },

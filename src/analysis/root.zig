@@ -14,7 +14,6 @@ test {
     _ = @import("tests/periodic.zig");
     _ = @import("tests/pz.zig");
     _ = @import("tests/session.zig");
-    _ = @import("tests/solvers.zig");
     _ = @import("tests/sweep.zig");
     _ = @import("tests/transient.zig");
     _ = @import("tests/integration.zig");

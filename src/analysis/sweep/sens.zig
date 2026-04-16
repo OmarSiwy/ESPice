@@ -12,7 +12,7 @@
 //! Cost: O(nnz + N_params * n) vs old O(N_params * Newton_iters * nnz).
 const std = @import("std");
 const root = @import("../types.zig");
-const converger = @import("solvers").converger;
+const converger = @import("solver").converger;
 
 const W = std.simd.suggestVectorLength(f64) orelse 8;
 

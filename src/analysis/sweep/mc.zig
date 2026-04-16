@@ -8,7 +8,7 @@
 const std = @import("std");
 const root = @import("../types.zig");
 const lanes = @import("lanes.zig");
-const converger = @import("solvers").converger;
+const converger = @import("solver").converger;
 
 // ============================================================================
 // Parameter variation specification

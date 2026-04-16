@@ -21,7 +21,7 @@
 const std = @import("std");
 const root = @import("../types.zig");
 const types = @import("numerics");
-const solvers = @import("solvers");
+const solvers = @import("solver");
 const dense_lu = solvers.dense_lu;
 const qr = @import("qr.zig");
 

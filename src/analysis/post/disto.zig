@@ -15,7 +15,7 @@ const root = @import("../types.zig");
 const simdZero = root.zeroSimd;
 const simdCopy = root.copySimd;
 const types = @import("numerics");
-const solvers = @import("solvers");
+const solvers = @import("solver");
 const dense_lu = solvers.dense_lu;
 
 pub const Options = @import("requests").Disto;

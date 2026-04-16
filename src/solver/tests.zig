@@ -1,9 +1,9 @@
 const BbdTests = struct {
-    const impl = @import("solvers").bbd;
+    const impl = @import("root.zig").bbd;
     const Allocator = std.mem.Allocator;
     const Bbd = impl.Bbd;
     const Limits = impl.Limits;
-    const root = @import("solvers").types;
+    const root = @import("root.zig").types;
     const std = @import("std");
 
     // ============================================================================
@@ -13,7 +13,7 @@ const BbdTests = struct {
 
     const testing = std.testing;
 
-    const direct = @import("solvers").direct;
+    const direct = @import("root.zig").direct;
 
     /// Synthetic BBD system: ground node 0, `nb` blocks of size `s`, `ncpl`
     /// coupling nodes at the end. Deterministic values from a seeded PRNG;
@@ -337,7 +337,7 @@ const BbdTests = struct {
 };
 
 const ConvergerTests = struct {
-    const impl = @import("solvers").converger;
+    const impl = @import("root.zig").converger;
     const Workspace = impl.Workspace;
     const jfnk = impl.jfnk;
     const newton = impl.newton;
@@ -565,7 +565,7 @@ const ConvergerTests = struct {
 };
 
 const DenseLuTests = struct {
-    const impl = @import("solvers").dense_lu;
+    const impl = @import("root.zig").dense_lu;
     const DenseLu = impl.DenseLu;
     const buildComplexAdmittance = impl.buildComplexAdmittance;
     const factorize = impl.factorize;
@@ -875,10 +875,10 @@ const DenseLuTests = struct {
 };
 
 const DirectTests = struct {
-    const impl = @import("solvers").direct;
+    const impl = @import("root.zig").direct;
     const Allocator = std.mem.Allocator;
     const Solver = impl.Solver;
-    const sparse_lu = @import("solvers").sparse_lu;
+    const sparse_lu = @import("root.zig").sparse_lu;
     const std = @import("std");
 
     test "solver construction releases storage on every allocation failure" {
@@ -1057,7 +1057,7 @@ const DirectTests = struct {
 };
 
 const FftTests = struct {
-    const impl = @import("solvers").fft;
+    const impl = @import("root.zig").fft;
     const Fft = impl.Fft;
     const bluestein = impl.bluestein;
     const bluesteinSize = impl.bluesteinSize;
@@ -1322,10 +1322,10 @@ const FftTests = struct {
 };
 
 const FreqSolveTests = struct {
-    const impl = @import("solvers").freq_solve;
+    const impl = @import("root.zig").freq_solve;
     const FreqSolver = impl.FreqSolver;
     const FreqSolverT = impl.FreqSolverT;
-    const dense_lu = @import("solvers").dense_lu;
+    const dense_lu = @import("root.zig").dense_lu;
     const scaleCopy = impl.test_access.scaleCopy;
     const std = @import("std");
 
@@ -1609,7 +1609,7 @@ const FreqSolveTests = struct {
 };
 
 const GmresTests = struct {
-    const impl = @import("solvers").gmres;
+    const impl = @import("root.zig").gmres;
     const Gmres = impl.Gmres;
     const std = @import("std");
 
@@ -1942,13 +1942,13 @@ const GmresTests = struct {
 };
 
 const LaneLuTests = struct {
-    const impl = @import("solvers").lane_lu;
+    const impl = @import("root.zig").lane_lu;
     const Allocator = std.mem.Allocator;
     const LaneLu = impl.LaneLu;
     const broadcast = impl.broadcast;
     const deinterleave = impl.deinterleave;
     const interleave = impl.interleave;
-    const sparse_lu = @import("solvers").sparse_lu;
+    const sparse_lu = @import("root.zig").sparse_lu;
     const std = @import("std");
 
     // ============================================================================
@@ -2255,7 +2255,7 @@ const LaneLuTests = struct {
 };
 
 const NewtonCoreTests = struct {
-    const impl = @import("solvers").newton_core;
+    const impl = @import("root.zig").newton_core;
     const PostStep = impl.PostStep;
     const Result = impl.Result;
     const Tol = impl.Tol;
@@ -2404,7 +2404,7 @@ const NewtonCoreTests = struct {
 };
 
 const OrderTests = struct {
-    const impl = @import("solvers").order;
+    const impl = @import("root.zig").order;
     const Ws = impl.Ws;
     const amd = impl.amd;
     const order = impl.order;
@@ -2663,11 +2663,11 @@ const OrderTests = struct {
 };
 
 const PreconditionerTests = struct {
-    const impl = @import("solvers").preconditioner;
+    const impl = @import("root.zig").preconditioner;
     const Allocator = std.mem.Allocator;
     const Preconditioner = impl.Preconditioner;
     const averageSamples = impl.test_access.averageSamples;
-    const buildStackedRealPattern = @import("solvers").freq_solve.buildStackedRealPattern;
+    const buildStackedRealPattern = @import("root.zig").freq_solve.buildStackedRealPattern;
     const fillStackedReal = impl.test_access.fillStackedReal;
     const std = @import("std");
 
@@ -3031,12 +3031,12 @@ const PreconditionerTests = struct {
 };
 
 const SparseTests = struct {
-    const impl = @import("solvers").sparse_lu;
+    const impl = @import("root.zig").sparse_lu;
     const Allocator = std.mem.Allocator;
     const SparseLu = impl.SparseLu;
     const std = @import("std");
 
-    const order = @import("solvers").order;
+    const order = @import("root.zig").order;
 
     // ============================================================================
     // Tests
@@ -3770,7 +3770,7 @@ const SparseTests = struct {
 };
 
 const TridiagTests = struct {
-    const impl = @import("solvers").tridiag;
+    const impl = @import("root.zig").tridiag;
     const TriDiag = impl.TriDiag;
     const isTridiag = impl.isTridiag;
     const std = @import("std");
