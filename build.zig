@@ -375,6 +375,7 @@ pub fn build(b: *std.Build) void {
 
     const c_api_mod = M.make(b.path("src/problem/c_api.zig"), &.{.{ .name = "problem", .module = problem_mod }});
     c_api_mod.link_libc = true;
+    c_api_mod.addIncludePath(b.path("include")); // c_api.zig pins its enums to the header
     for (host_objs) |o| c_api_mod.addObject(o);
     const c_api_lib = b.addLibrary(.{ .name = "espice", .linkage = .static, .root_module = c_api_mod });
     c_api_lib.use_llvm = exe.use_llvm;

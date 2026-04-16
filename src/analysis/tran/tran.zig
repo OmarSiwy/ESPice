@@ -577,7 +577,6 @@ pub fn simulate(
         }
 
         if (t >= options.t_start) try waveform.record(t, cur, probes);
-        if (options.step_fn) |f| f(options.step_ctx, t, cur);
 
         // Breakpoint handling: clamp dt to land on the next breakpoint,
         // skipping breaks within min_break of the current time (ngspice
