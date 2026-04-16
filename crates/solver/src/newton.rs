@@ -430,22 +430,6 @@ impl NewtonRaphson {
             }
         }
 
-        // Pass 3.5: Apply .NODESET overrides.
-        //
-        // .NODESET biases the starting point toward a user-specified voltage
-        // but does not force the final converged value (unlike .IC). We apply
-        // it after the MOSFET pass so topology heuristics don't undo it, but
-        // before the BJT pass so BJT guesses can still use the biased values.
-        for &(node_id, voltage) in circuit.node_sets() {
-            if node_id.is_ground() {
-                continue;
-            }
-            let idx = (node_id.0 - 1) as usize;
-            if idx < num_nodes {
-                guess[idx] = voltage;
-            }
-        }
-
         // Pass 4: Topology-aware BJT initial guess.
         //
         // Pin layout: 0=collector, 1=base, 2=emitter.
@@ -556,10 +540,29 @@ impl NewtonRaphson {
                     bjt_set_node(base_node, v_base, &mut guess, &known, num_nodes);
                 } else {
                     // No topology info — crude heuristic.
-                    bjt_set_node(emit_node, v_max * 0.9, &mut guess, &known, num_nodes);
-                    bjt_set_node(base_node, v_max * 0.9 - 0.7, &mut guess, &known, num_nodes);
-                    bjt_set_node(col_node, v_max * 0.2, &mut guess, &known, num_nodes);
+                    // Handle negative-only supply (VEE): use the larger-magnitude rail.
+                    let v_emit_guess = if v_max.abs() >= v_min.abs() { v_max * 0.9 } else { v_min * 0.1 };
+                    let v_col_guess  = if v_max.abs() >= v_min.abs() { v_max * 0.2 } else { v_min * 0.8 };
+                    let v_base_guess = v_emit_guess - 0.7 - (v_max - v_min) * 0.4;
+                    bjt_set_node(emit_node, v_emit_guess, &mut guess, &known, num_nodes);
+                    bjt_set_node(base_node, v_base_guess, &mut guess, &known, num_nodes);
+                    bjt_set_node(col_node, v_col_guess, &mut guess, &known, num_nodes);
                 }
+            }
+        }
+
+        // Pass 5: Apply .NODESET overrides.
+        //
+        // .NODESET biases the starting point toward a user-specified voltage
+        // but does not force the final converged value (unlike .IC). Applied
+        // last so no subsequent heuristic pass can overwrite these hints.
+        for &(node_id, voltage) in circuit.node_sets() {
+            if node_id.is_ground() {
+                continue;
+            }
+            let idx = (node_id.0 - 1) as usize;
+            if idx < num_nodes {
+                guess[idx] = voltage;
             }
         }
 
@@ -820,6 +823,132 @@ impl NewtonRaphson {
         Err(SimError::Convergence {
             iterations: self.config.convergence.max_iter,
             residual: res_norm,
+        })
+    }
+
+    /// Solve DC operating point with `.IC` nodes pinned via stiff conductance.
+    ///
+    /// Each `ic_pins` entry is `(matrix_idx, target_voltage)`. A conductance of
+    /// `G_PIN = 1e9 S` is stamped from each pinned node to its target each NR
+    /// iteration. This forces convergence at the `.IC` voltage (error < 1 pV for
+    /// typical currents). Falls back to unpinned `solve` when `ic_pins` is empty.
+    ///
+    /// Caller must extract the solution at the original node indices and discard
+    /// the pin constraints before starting the transient sweep.
+    pub fn solve_with_ic_pins(
+        &self,
+        circuit: &Circuit,
+        registry: &DeviceRegistry,
+        ic_pins: &[(usize, f64)],
+    ) -> Result<NrResult, SimError> {
+        const G_PIN: f64 = 1e9;
+
+        if ic_pins.is_empty() {
+            return self.solve(circuit, registry, None);
+        }
+
+        let dim = circuit.mna_dimension();
+        let mut scratch = self.scratch.borrow_mut();
+        scratch.prepare(dim);
+
+        // Start from DC initial guess with IC nodes pre-set to target voltages.
+        let mut x = Self::compute_dc_initial_guess(circuit, dim);
+        for &(idx, v_ic) in ic_pins {
+            if idx < x.len() {
+                x[idx] = v_ic;
+            }
+        }
+
+        let max_iter = self.config.convergence.max_iter;
+        let num_nodes = circuit.num_vars() as usize;
+
+        let NrScratch { x_new, x_prev, neg_res, jac_triplet, residual } = &mut *scratch;
+        x_new.fill(0.0);
+        x_prev.fill(0.0);
+        neg_res.fill_zero();
+        residual.fill_zero();
+        jac_triplet.clear();
+
+        let mut cached_symbolic: Option<bigospice_linalg::LuSymbolic> = None;
+        let mut prev_res_norm = f64::MAX;
+
+        for iter in 0..max_iter {
+            let prev = if iter > 0 { Some(x_prev.as_slice()) } else { None };
+            stamper::stamp_circuit_into(dim, circuit, &x, registry, jac_triplet, residual, prev);
+
+            // Stamp stiff conductance pins: G*(v_node - v_ic) = 0.
+            for &(idx, v_ic) in ic_pins {
+                if idx < dim {
+                    jac_triplet.add(idx, idx, G_PIN);
+                    residual[idx] += G_PIN * (x[idx] - v_ic);
+                }
+            }
+
+            let res_norm = residual.norm_inf();
+            if res_norm < self.config.convergence.i_tol {
+                return Ok(NrResult {
+                    solution: x.to_vec(),
+                    iterations: iter,
+                    converged: true,
+                    residual: res_norm,
+                });
+            }
+
+            regularize_weak_diagonals(jac_triplet, num_nodes, self.config.gmin_floor);
+
+            let jac_csc = jac_triplet.to_csc();
+            let factors = if let Some(ref sym) = cached_symbolic {
+                match lu_refactorize(&jac_csc, sym) {
+                    Ok(f) => f,
+                    Err(_) => {
+                        cached_symbolic = None;
+                        match lu_factorize(&jac_csc) {
+                            Ok(f) => f,
+                            Err(_) => break,
+                        }
+                    }
+                }
+            } else {
+                let sym = lu_symbolic(&jac_csc);
+                let result = match lu_refactorize(&jac_csc, &sym) {
+                    Ok(f) => f,
+                    Err(_) => break,
+                };
+                cached_symbolic = Some(sym);
+                result
+            };
+
+            for i in 0..dim {
+                neg_res[i] = -residual[i];
+            }
+            let mut dx = match lu_solve(&factors, neg_res) {
+                Ok(d) => d,
+                Err(_) => break,
+            };
+
+            limit_step(dx.as_mut_slice(), self.config.max_voltage_step);
+
+            let residual_grew = res_norm > prev_res_norm * 1.01;
+            self.config.damping.apply(&x, dx.as_slice(), x_new, residual_grew);
+
+            if self.config.convergence.check(dx.as_slice(), &x, residual.as_slice()) {
+                x.copy_from_slice(x_new);
+                return Ok(NrResult {
+                    solution: x.to_vec(),
+                    iterations: iter + 1,
+                    converged: true,
+                    residual: res_norm,
+                });
+            }
+
+            prev_res_norm = res_norm;
+            x_prev.copy_from_slice(&x);
+            x.copy_from_slice(x_new);
+        }
+
+        Err(SimError::Convergence {
+            iterations: max_iter,
+            residual: prev_res_norm,
         })
     }
 

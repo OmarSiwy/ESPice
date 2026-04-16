@@ -132,31 +132,45 @@ pub fn limit_junction_voltages(
             }
         }
         DeviceKind::BjtNpn | DeviceKind::BjtPnp => {
-            // Pins: 0=collector, 1=base, 2=emitter, 3=substrate
-            // Limit both BE and BC junctions using pnjlim.
+            // Post-B001 pin layout:
+            //   3-terminal: 0=C, 1=B, 2=E
+            //   7-terminal: 0=extC, 1=extB, 2=extE, 3=sub, 4=intC', 5=intB', 6=intE'
+            // Limit the INTRINSIC junction voltages (internal nodes) when available,
+            // falling back to external pins for the 3-terminal case.
             let is = params.get_or("is", 1e-16);
-            let n = params.get_or("nf", 1.0);  // forward emission coefficient
-            let nvt = n * VT;
-            let vc = vcrit(nvt, is);
+            let nf = params.get_or("nf", 1.0);   // forward emission coefficient (BE)
+            let nr = params.get_or("nr", 1.0);   // reverse emission coefficient (BC)
+            let nvt_f = nf * VT;
+            let nvt_r = nr * VT;
+            let vc_f = vcrit(nvt_f, is);
+            let vc_r = vcrit(nvt_r, is);
 
-            // Vbe = Vb - Ve  (pins 1, 2)
-            let vbe_new = new_v[1] - new_v[2];
-            let vbe_old = old_v[1] - old_v[2];
-            let vbe_lim = pnjlim(vbe_new, vbe_old, nvt, vc);
+            let (b_pin, e_pin, c_pin) = if new_v.len() >= 7 {
+                (5usize, 6usize, 4usize) // intB', intE', intC'
+            } else {
+                (1usize, 2usize, 0usize) // extB, extE, extC
+            };
 
-            // Vbc = Vb - Vc  (pins 1, 0)
-            let vbc_new = new_v[1] - new_v[0];
-            let vbc_old = old_v[1] - old_v[0];
-            let vbc_lim = pnjlim(vbc_new, vbc_old, nvt, vc);
+            // Vbe = Vb - Ve — forward junction, use nf
+            let vbe_new = new_v[b_pin] - new_v[e_pin];
+            let vbe_old = old_v[b_pin] - old_v[e_pin];
+            let vbe_lim = pnjlim(vbe_new, vbe_old, nvt_f, vc_f);
 
-            // Apply corrections to base node (pin 1); keep emitter/collector fixed.
-            // Prioritize BE limiting (forward-active region is most common).
+            // Vbc = Vb - Vc — reverse junction, use nr
+            let vbc_new = new_v[b_pin] - new_v[c_pin];
+            let vbc_old = old_v[b_pin] - old_v[c_pin];
+            let vbc_lim = pnjlim(vbc_new, vbc_old, nvt_r, vc_r);
+
+            // Apply BE correction to emitter: Vbe_lim = Vb - Ve → delta_Ve = -(vbe_lim - vbe_new)
             let be_corr = vbe_lim - vbe_new;
+            if be_corr.abs() > 1e-15 {
+                lim[e_pin] -= be_corr;
+            }
+
+            // Apply BC correction to collector independently: delta_Vc = -(vbc_lim - vbc_new)
             let bc_corr = vbc_lim - vbc_new;
-            // Use whichever correction is larger in magnitude.
-            let corr = if be_corr.abs() >= bc_corr.abs() { be_corr } else { bc_corr };
-            if corr.abs() > 1e-15 {
-                lim[1] += corr;
+            if bc_corr.abs() > 1e-15 {
+                lim[c_pin] -= bc_corr;
             }
         }
         DeviceKind::MosfetN | DeviceKind::MosfetP

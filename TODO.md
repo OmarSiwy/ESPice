@@ -1,5 +1,31 @@
 Note: use scripts/run_benchmark.sh, validate the behavior of our SPICE IS IDENTICAL to other spice software, but immensely faster.
 
+## Agent 0: Fix External Test Failures (CURRENT — 2026-04-15)
+
+Run: `cargo test --test external <name> -- --include-ignored`
+
+### ❌ FAIL
+- bjt — convergence failures (9 circuits) + accuracy (cascode/common_base/emitter_follower)
+- analog — unknown; needs audit
+- devices — unknown; needs audit
+- dc_sweep — convergence (bjt_ic_vce) + accuracy (mosfet_ids_vds, nested_sweep_rc)
+- convergence — unknown; needs audit
+- digital — XSPICE AHDL parse error + DAC accuracy
+- medium — complex circuits hang/fail
+- parser — unknown; needs audit
+- quick — AC no output + MOSFET transient accuracy
+- tline — LTRA model accuracy (7 fixtures, NRMSE 9–77%)
+- power — fails after ~925s (convergence hang)
+
+### ⏱ TIMEOUT (>120s, result unknown)
+- mosfet — timed out
+- scaling — timed out
+- ngspice — timed out
+
+See ISSUES.md for detailed failure analysis.
+
+---
+
 Agent 1: (Not in parallel like the above, have to wait)
 Each crate should have the only functions it exposes defined in lib.rs, everything else is wrapped there for usage. - Allows for abstraction if there's different solving, compute, etc... methods. - ALlows for each crate to crate interactions because the API is stable, not internally based.
 

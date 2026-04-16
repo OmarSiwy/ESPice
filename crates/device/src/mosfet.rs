@@ -54,7 +54,7 @@ impl DeviceModel for MosfetLevel1 {
         let vsb = -vbs;
         let sqrt_phi_vsb = (phi + vsb.max(-phi + 1e-12)).sqrt();
         let sqrt_phi = phi.sqrt();
-        let vth_base = if is_pmos { -(vto.abs()) } else { vto };
+        let vth_base = if is_pmos { vto.abs() } else { vto };
         let vth_eff = if is_pmos {
             vth_base + gamma * (sqrt_phi - sqrt_phi_vsb)
         } else {
@@ -258,7 +258,7 @@ impl DeviceModel for MosfetLevel2 {
         let sqrt_phi_vsb = (phi + vsb.max(-phi + 1e-12)).sqrt();
         let sqrt_phi     = phi.sqrt();
         let vth = if is_pmos {
-            -(vto.abs()) + gamma * (sqrt_phi - sqrt_phi_vsb)
+            vto.abs() + gamma * (sqrt_phi - sqrt_phi_vsb)
         } else {
             vto + gamma * (sqrt_phi_vsb - sqrt_phi)
         };
@@ -370,7 +370,7 @@ impl DeviceModel for MosfetLevel3 {
         let gamma_w = gamma
             + delta * std::f64::consts::PI * 3.9e-11 / (4.0 * w * sqrt_phi_vsb.max(1e-6));
         let vth = if is_pmos {
-            -(vto.abs()) + gamma_w * (sqrt_phi - sqrt_phi_vsb) - eta * vds
+            vto.abs() + gamma_w * (sqrt_phi - sqrt_phi_vsb) - eta * vds
         } else {
             vto + gamma_w * (sqrt_phi_vsb - sqrt_phi) - eta * vds
         };

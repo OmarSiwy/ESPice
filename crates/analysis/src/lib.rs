@@ -27,7 +27,7 @@ pub(crate) mod rol;
 
 pub use result::{SimResult, ResultData, DcOpResult, DcSweepResult, TransientResult, AcResult};
 pub use companion::{CompanionMethod, assemble_be_jacobian, assemble_be_residual, assemble_gear2_residual};
-pub use dc_op::{run_dc_op, run_dc_op_with_config, run_dc_op_with_options, DcOpOutput,
+pub use dc_op::{run_dc_op, run_dc_op_with_config, run_dc_op_with_options, run_dc_op_with_ic_pins, DcOpOutput,
                 run_nested_dc, run_nested_dc_with_options, NestedDcConfig, NestedDcResult};
 pub use dc_sweep::{run_dc_sweep, run_dc_sweep_with_options, DcSweepConfig};
 pub use transient::{run_transient, run_transient_with_options, TransientConfig, IntegrationMethod};

@@ -262,9 +262,10 @@ impl Bjt {
         re: f64,
         rc: f64,
     ) -> DeviceEval {
-        // If fewer than 6 voltages, internal nodes haven't been wired yet.
+        // If fewer than 7 voltages, internal nodes haven't been wired yet.
         // Fall back to 3-terminal so the circuit still converges.
-        if voltages.len() < 6 {
+        // Pin layout post-B001: 0=extC, 1=extB, 2=extE, 3=substrate, 4=intC', 5=intB', 6=intE'
+        if voltages.len() < 7 {
             return self.eval_intrinsic_3pin(voltages, params);
         }
 
@@ -273,9 +274,9 @@ impl Bjt {
         let vb_ext = voltages[1];
         let ve_ext = voltages[2];
         // Internal pin voltages (internal nodes in MNA).
-        let vc_int = voltages[3];
-        let vb_int = voltages[4];
-        let ve_int = voltages[5];
+        let vc_int = voltages[4];
+        let vb_int = voltages[5];
+        let ve_int = voltages[6];
 
         // Evaluate the GP core using internal node voltages.
         let core = self.eval_intrinsic_3pin(&[vc_int, vb_int, ve_int], params);
@@ -285,20 +286,28 @@ impl Bjt {
         let gb = if rb > 0.0 { 1.0 / rb } else { 0.0 };
         let ge = if re > 0.0 { 1.0 / re } else { 0.0 };
 
+        // When extrinsic resistance is zero, short ext to int via large conductance
+        // to prevent internal nodes from floating in the MNA matrix.
+        const GSHORT: f64 = 1e9;
+        let gc_eff = if gc > 0.0 { gc } else { GSHORT };
+        let gb_eff = if gb > 0.0 { gb } else { GSHORT };
+        let ge_eff = if ge > 0.0 { ge } else { GSHORT };
+
         // Currents through the extrinsic resistors (flowing from ext to int).
         // i_R = (V_ext - V_int) * G
-        let ir_c = (vc_ext - vc_int) * gc;
-        let ir_b = (vb_ext - vb_int) * gb;
-        let ir_e = (ve_ext - ve_int) * ge;
+        let ir_c = (vc_ext - vc_int) * gc_eff;
+        let ir_b = (vb_ext - vb_int) * gb_eff;
+        let ir_e = (ve_ext - ve_int) * ge_eff;
 
-        // Build combined 6-terminal DeviceEval.
+        // Build combined 7-terminal DeviceEval.
         // Residual currents:
         //   ext_C (pin 0): current = +ir_c (flowing into the node from resistor)
         //   ext_B (pin 1): current = +ir_b
         //   ext_E (pin 2): current = +ir_e
-        //   int_C (pin 3): current = core.g[0] - ir_c (GP current minus what flows to ext)
-        //   int_B (pin 4): current = core.g[1] - ir_b
-        //   int_E (pin 5): current = core.g[2] - ir_e
+        //   substrate (pin 3): current = 0 (no extrinsic contribution)
+        //   int_C' (pin 4): current = core.g[0] - ir_c (GP current minus what flows to ext)
+        //   int_B' (pin 5): current = core.g[1] - ir_b
+        //   int_E' (pin 6): current = core.g[2] - ir_e
         //
         // Sign convention matches the stamper: g[pin] is the KCL residual
         // that must sum to zero at convergence.
@@ -308,44 +317,38 @@ impl Bjt {
         // d(i_R_ext) / d(V_ext) = +G,   d(i_R_ext) / d(V_int) = -G
         // d(i_R_int) / d(V_ext) = -G,   d(i_R_int) / d(V_int) = +G
         //
-        // For int_pin currents we also add the GP core Jacobian (re-indexed to pins 3,4,5).
+        // For int_pin currents we also add the GP core Jacobian (re-indexed to pins 4,5,6).
         let mut g6_jac: SmallVec<[(u8, u8, f64); 8]> = SmallVec::new();
 
-        // RC: pins 0 (ext_C) and 3 (int_C)
-        if gc > 0.0 {
-            g6_jac.push((0, 0,  gc));
-            g6_jac.push((0, 3, -gc));
-            g6_jac.push((3, 0, -gc));
-            g6_jac.push((3, 3,  gc));
-        }
-        // RB: pins 1 (ext_B) and 4 (int_B)
-        if gb > 0.0 {
-            g6_jac.push((1, 1,  gb));
-            g6_jac.push((1, 4, -gb));
-            g6_jac.push((4, 1, -gb));
-            g6_jac.push((4, 4,  gb));
-        }
-        // RE: pins 2 (ext_E) and 5 (int_E)
-        if ge > 0.0 {
-            g6_jac.push((2, 2,  ge));
-            g6_jac.push((2, 5, -ge));
-            g6_jac.push((5, 2, -ge));
-            g6_jac.push((5, 5,  ge));
-        }
+        // RC: pins 0 (ext_C) and 4 (int_C') — always stamp (GSHORT when rc=0)
+        g6_jac.push((0, 0,  gc_eff));
+        g6_jac.push((0, 4, -gc_eff));
+        g6_jac.push((4, 0, -gc_eff));
+        g6_jac.push((4, 4,  gc_eff));
+        // RB: pins 1 (ext_B) and 5 (int_B') — always stamp (GSHORT when rb=0)
+        g6_jac.push((1, 1,  gb_eff));
+        g6_jac.push((1, 5, -gb_eff));
+        g6_jac.push((5, 1, -gb_eff));
+        g6_jac.push((5, 5,  gb_eff));
+        // RE: pins 2 (ext_E) and 6 (int_E') — always stamp (GSHORT when re=0)
+        g6_jac.push((2, 2,  ge_eff));
+        g6_jac.push((2, 6, -ge_eff));
+        g6_jac.push((6, 2, -ge_eff));
+        g6_jac.push((6, 6,  ge_eff));
 
-        // Append GP core Jacobian re-indexed from (0,1,2) → (3,4,5).
+        // Append GP core Jacobian re-indexed from (0,1,2) → (4,5,6).
         for (row, col, val) in &core.G {
-            g6_jac.push((row + 3, col + 3, *val));
+            g6_jac.push((row + 4, col + 4, *val));
         }
 
         // ── Charge / capacitance (transient) ──────────────────────────────────
         //
         // The core (eval_intrinsic_3pin) was evaluated at [vc_int, vb_int, ve_int]
-        // so its q[] and C[] are already referenced to the internal nodes (pins 3,4,5).
-        // Re-index them from (0,1,2) → (3,4,5).
+        // so its q[] and C[] are already referenced to the internal nodes (pins 4,5,6).
+        // Re-index them from (0,1,2) → (4,5,6).
         //
         // XCJC correction: the (1-xcjc) fraction of CJC connects between the
-        // external base (pin 1) and the internal collector (pin 3).  The core
+        // external base (pin 1) and the internal collector (pin 4).  The core
         // computed all base-related CJC charge on core-pin 1 (→ int_B, pin 4).
         // We split entries whose row or col is core-pin 1 (base) AND involves
         // core-pin 0 (collector) — i.e. the four CJC Jacobian entries:
@@ -363,12 +366,12 @@ impl Bjt {
         let xcjc = params.get_or("xcjc", 1.0).clamp(0.0, 1.0);
         let xcjc_ext = 1.0 - xcjc; // fraction at external base
 
-        // q[] for 6 pins: pins 0,1,2 = external (only resistor currents, no charge storage);
-        // pins 3,4,5 = internal (all device charges from the core).
-        let mut q6: SmallVec<[f64; 8]> = smallvec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
-        // Re-index core q from (0,1,2) → (3,4,5).
+        // q[] for 7 pins: pins 0,1,2 = external (only resistor currents, no charge storage);
+        // pin 3 = substrate (no charge); pins 4,5,6 = internal (all device charges from core).
+        let mut q6: SmallVec<[f64; 8]> = smallvec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        // Re-index core q from (0,1,2) → (4,5,6).
         for (i, &qval) in core.q.iter().enumerate() {
-            q6[i + 3] += qval;
+            q6[i + 4] += qval;
         }
 
         // Build C Jacobian for 6 terminals.
@@ -390,15 +393,15 @@ impl Bjt {
             if xcjc_ext > 0.0 && base_no_emit {
                 let row_is_b = row == 1;
                 let col_is_b = col == 1;
-                let int_row = if row_is_b { 4 } else { row + 3 };
-                let int_col = if col_is_b { 4 } else { col + 3 };
-                let ext_row = if row_is_b { 1 } else { row + 3 };
-                let ext_col = if col_is_b { 1 } else { col + 3 };
+                let int_row = if row_is_b { 5 } else { row + 4 };
+                let int_col = if col_is_b { 5 } else { col + 4 };
+                let ext_row = if row_is_b { 1 } else { row + 4 };
+                let ext_col = if col_is_b { 1 } else { col + 4 };
                 c6_jac.push((int_row, int_col, val * xcjc));
                 c6_jac.push((ext_row, ext_col, val * xcjc_ext));
             } else {
                 // CJE (emitter involved), CJS, and all non-base entries: stay internal.
-                c6_jac.push((row + 3, col + 3, val));
+                c6_jac.push((row + 4, col + 4, val));
             }
         }
 
@@ -407,9 +410,10 @@ impl Bjt {
                 ir_c,
                 ir_b,
                 ir_e,
-                core.g[0] - ir_c,
-                core.g[1] - ir_b,
-                core.g[2] - ir_e,
+                0.0,               // substrate (pin 3) — no extrinsic resistor
+                core.g[0] - ir_c,  // int_C' (pin 4)
+                core.g[1] - ir_b,  // int_B' (pin 5)
+                core.g[2] - ir_e,  // int_E' (pin 6)
             ],
             q: q6,
             G: g6_jac,

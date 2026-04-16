@@ -84,9 +84,15 @@ if [[ "${WITH_VACASK}" -eq 1 ]] && ! command -v vacask &>/dev/null; then
     echo "WARNING: vacask not found — disabling vacask comparison" >&2
     WITH_VACASK=0
 fi
-if [[ "${WITH_XYCE}" -eq 1 ]] && ! command -v xyce &>/dev/null; then
-    echo "WARNING: xyce not found — disabling xyce comparison" >&2
-    WITH_XYCE=0
+if [[ "${WITH_XYCE}" -eq 1 ]]; then
+    if command -v Xyce &>/dev/null; then
+        XYCE_BIN="Xyce"
+    elif command -v xyce &>/dev/null; then
+        XYCE_BIN="xyce"
+    else
+        echo "WARNING: Xyce not found — disabling Xyce comparison" >&2
+        WITH_XYCE=0
+    fi
 fi
 if ! command -v hyperfine &>/dev/null; then
     echo "ERROR: hyperfine not found — run inside nix develop shell" >&2
@@ -274,7 +280,7 @@ PYEOF
         )
         [[ "${WITH_NGSPICE}" -eq 1 ]] && hf_args+=(-n ngspice "ngspice -b ${wrapper}")
         [[ "${WITH_VACASK}"  -eq 1 ]] && hf_args+=(-n vacask  "vacask --no-output --quiet-progress ${sp_abs}")
-        [[ "${WITH_XYCE}"    -eq 1 ]] && hf_args+=(-n xyce    "xyce -b ${sp_abs}")
+        [[ "${WITH_XYCE}"    -eq 1 ]] && hf_args+=(-n xyce    "${XYCE_BIN} ${sp_abs}")
 
         hyperfine "${hf_args[@]}" >/dev/null 2>&1 || true
 

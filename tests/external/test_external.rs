@@ -245,9 +245,12 @@ fn run_bigospice(sp_path: &Path) -> Result<BigospiceOutput, String> {
                 // Try two methods: Trap-adaptive (best accuracy for oscillatory circuits),
                 // then BE-adaptive (more robust for stiff circuits).
                 use bigospice_analysis::IntegrationMethod as IM;
+                // Cap tmax at tstep*10 to prevent the adaptive stepper from
+                // taking steps larger than ~1 oscillation cycle.
+                let tmax = tstep * 10.0;
                 let configs: [(&str, TransientConfig); 2] = [
-                    ("Trap-adapt",  TransientConfig::with_adaptive(tstep, tstop, IM::Trapezoidal)),
-                    ("BE-adaptive", TransientConfig::with_adaptive(tstep, tstop, IM::BackwardEuler)),
+                    ("Trap-adapt",  TransientConfig { tmax: Some(tmax), ..TransientConfig::with_adaptive(tstep, tstop, IM::Trapezoidal) }),
+                    ("BE-adaptive", TransientConfig { tmax: Some(tmax), ..TransientConfig::with_adaptive(tstep, tstop, IM::BackwardEuler) }),
                 ];
                 let mut any_succeeded = false;
                 for (method_name, cfg) in &configs {

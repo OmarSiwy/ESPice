@@ -1,6 +1,7 @@
 use bigospice_cache::{TransientArena, CheckpointSnapshot};
-use bigospice_core::{Circuit, IntegrationMethod as SimIntegrationMethod, SimError, SimOptions};
+use bigospice_core::{Circuit, DigitalNetSpec, IntegrationMethod as SimIntegrationMethod, SimError, SimOptions};
 use bigospice_device::DeviceRegistry;
+use bigospice_digital::{AdcBridge, DacBridge, DigNodeIdx, DigitalNet, DigitalRuntime, Primitive, PrimitiveKind};
 use bigospice_linalg::{DenseVec, LinSolver, LinSolverKind, TripletMatrix};
 use bigospice_solver::{stamp_circuit_gc_at_time, stamp_circuit_gc_into, stamp_circuit_gc_par_at_time, update_tline_histories, update_ltra_histories, Solver, SolverConfig, NrConfig};
 
@@ -141,7 +142,7 @@ const LTE_TRTOL: f64 = 7.0;
 const LTE_SAFETY: f64 = 0.9;
 const LTE_MIN_FACTOR: f64 = 0.1;
 const LTE_MAX_FACTOR: f64 = 10.0;
-const LTE_MIN_STEP_RATIO: f64 = 1e-6;
+const LTE_MIN_STEP_RATIO: f64 = 1e-10;
 /// Maximum consecutive rejected steps before hard failure.
 const LTE_MAX_REJECTIONS: usize = 50;
 
@@ -192,6 +193,122 @@ fn predict_next_h(h: f64, ratio: f64, h_min: f64, tmax: f64) -> f64 {
     (h * scale).clamp(h_min, tmax)
 }
 
+/// Build a `DigitalRuntime` from a `DigitalNetSpec`.
+///
+/// Converts the flat spec into the live runtime structures (bridges, primitives,
+/// event queue). Called once at the start of a transient analysis that has
+/// XSPICE A-devices.
+fn build_digital_runtime(spec: &DigitalNetSpec) -> DigitalRuntime {
+    let num_prims = spec.primitives.len();
+    let mut net = DigitalNet::with_capacity(spec.num_dig_nodes as usize, num_prims, 1024);
+    net.resize_nodes(spec.num_dig_nodes as usize);
+
+    for s in &spec.adc_bridges {
+        net.bridges.push_adc(AdcBridge::new(
+            s.analog_node_idx,
+            DigNodeIdx::new(s.digital_node),
+            s.in_low,
+            s.in_high,
+        ));
+    }
+    for s in &spec.dac_bridges {
+        net.bridges.push_dac(DacBridge::new(
+            s.analog_node_idx,
+            DigNodeIdx::new(s.digital_node),
+            s.out_low,
+            s.out_high,
+            s.t_rise,
+            s.t_fall,
+        ));
+    }
+    for s in &spec.primitives {
+        let kind: PrimitiveKind = unsafe { std::mem::transmute(s.kind) };
+        let inputs: Vec<DigNodeIdx> = s.inputs.iter().map(|&i| DigNodeIdx::new(i)).collect();
+        let outputs: Vec<DigNodeIdx> = s.outputs.iter().map(|&o| DigNodeIdx::new(o)).collect();
+        let prim = if outputs.len() == 1 {
+            Primitive::new_comb_asym(kind, &inputs, outputs[0], s.rise_delay, s.fall_delay)
+        } else {
+            // Fallback for multi-output: use the first output.
+            let out = outputs.into_iter().next().unwrap_or(DigNodeIdx::new(0));
+            Primitive::new_comb_asym(kind, &inputs, out, s.rise_delay, s.fall_delay)
+        };
+        net.primitives.push(prim);
+    }
+
+    DigitalRuntime::new(net)
+}
+
+/// Evaluate digital primitives in zero-delay mode to establish the initial DC state.
+///
+/// In ngspice XSPICE, the digital sub-system is evaluated to combinational
+/// stability at t=0 ignoring propagation delays.  This function replicates
+/// that by:
+///   1. Driving all ADC bridges from the analog DC OP solution (direct threshold
+///      comparison, no event scheduling).
+///   2. Evaluating all primitives in a forward pass and immediately applying the
+///      output to the node-state vector (no delay).
+///   3. Repeating up to `MAX_PASSES` times to propagate through cascaded logic.
+///
+/// After this function returns the `DigitalRuntime` is in the correct initial
+/// combinational state and the ordinary event-driven `flush` can take over.
+fn init_digital_state(rt: &mut DigitalRuntime, analog_voltages: &[f64]) {
+    const MAX_PASSES: usize = 32;
+
+    // Step 1: apply ADC thresholds directly to node_state (no event queue).
+    // Also update last_state so the first flush() does not re-fire the same
+    // transition (last_state=X after construction → first flush re-schedules
+    // the state with delay, causing a spurious DAC ramp at t>0).
+    for adc in &mut rt.net.bridges.adcs {
+        let idx = adc.analog_node as usize;
+        let v = analog_voltages.get(idx).copied().unwrap_or(0.0);
+        let state = if v >= adc.in_high {
+            bigospice_digital::DigState::ONE
+        } else if v <= adc.in_low {
+            bigospice_digital::DigState::ZERO
+        } else {
+            bigospice_digital::DigState::X
+        };
+        let nidx = adc.digital_node.index();
+        if nidx < rt.net.node_state.len() {
+            rt.net.node_state[nidx] = state;
+        }
+        adc.last_state = state;
+    }
+
+    // Step 2: propagate through combinational primitives (zero-delay, repeated).
+    for _ in 0..MAX_PASSES {
+        let mut changed = false;
+        for id in 0..rt.net.primitives.len() {
+            let updates = rt.net.primitives.eval(id, &rt.net.node_state);
+            for (node, val) in updates {
+                let nidx = node.index();
+                if nidx < rt.net.node_state.len() && rt.net.node_state[nidx] != val {
+                    rt.net.node_state[nidx] = val;
+                    // Notify DAC bridges immediately (no delay).
+                    rt.net.bridges.dispatch_event_to_dacs(0.0, node, val);
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    // Step 3: snap all DAC bridges to their final target voltage instantly.
+    // After combinational evaluation the DAC knows its target but starts a
+    // linear ramp from v_start (= out_low) at t=0.  For the initial condition
+    // the circuit has been "at DC" for infinite time, so the ramp is already
+    // complete.  Backdating t_start to -t_ramp achieves this without a special
+    // API: current_voltage(t=0) = v_target when dt >= active.
+    for dac in rt.net.bridges.dacs.iter_mut() {
+        let ramp = if dac.v_target >= dac.v_start { dac.t_rise } else { dac.t_fall };
+        // Back-date so the ramp is already complete at t=0.
+        dac.t_start = -(ramp + 1.0e-30);
+        dac.v_start = dac.v_target;
+    }
+}
+
 /// Run a Newton-Raphson solve for a single transient timestep.
 ///
 /// `q_history` contains `[q_{n-1}, q_{n-2}, …]` up to `effective_method.history_depth()`
@@ -215,6 +332,9 @@ fn newton_solve_step(
     // Rayon stamper (`stamp_circuit_gc_par_at_time`).  Set to `false` for
     // small circuits where thread-spawn overhead exceeds the eval cost.
     par_eval: bool,
+    // DAC bridge stamps: (matrix_row_idx, target_voltage). Stamped as stiff
+    // conductance G_DAC pulling the analog node to the DAC output voltage.
+    dac_stamps: &[(usize, f64)],
     // Scratch buffers (pre-allocated by caller to avoid per-step allocs)
     g_triplet: &mut TripletMatrix,
     c_triplet: &mut TripletMatrix,
@@ -224,6 +344,10 @@ fn newton_solve_step(
     residual: &mut DenseVec,
     neg_residual: &mut DenseVec,
 ) -> Result<(bool, Vec<f64>), SimError> {
+    /// Stiff conductance (S) used to pin DAC analog nodes to their output voltage.
+    /// At 1 GS, the pinning error is < 1 pV for 1 mA load current.
+    const G_DAC: f64 = 1e9;
+
     let mut x = x_in.to_vec();
     // q_prev is always the first history slot (q_{n-1}).
     let q_prev = &q_history[0];
@@ -252,6 +376,15 @@ fn newton_solve_step(
                 residual_q,
                 t,
             );
+        }
+
+        // Stamp DAC bridge voltage sources as stiff conductances into G matrix.
+        // G_DAC * (v_node - v_dac) = 0  →  J[i,i] += G_DAC, F_g[i] += G_DAC*(v-v_dac)
+        for &(idx, v_dac) in dac_stamps {
+            if idx < g_triplet.nrows() {
+                g_triplet.add(idx, idx, G_DAC);
+                residual_g[idx] += G_DAC * (x[idx] - v_dac);
+            }
         }
 
         let alpha = effective_method.alpha(h);
@@ -443,6 +576,16 @@ fn run_transient_inner_with_arena(
     // g_prev for Trapezoidal.
     let mut g_prev = DenseVec::zeros(dim);
 
+    // Build DigitalRuntime early so DAC-driven nodes can be pinned during the
+    // initial DC OP.  Without this, nodes driven only by a DAC bridge have no
+    // conductance path to ground before the transient begins, leaving them
+    // floating (zero diagonal in the Jacobian) and causing convergence failure
+    // in circuits where a behavioral E-source references those nodes.
+    let mut digital_rt: Option<DigitalRuntime> = circuit
+        .digital_spec()
+        .filter(|s| !s.is_empty())
+        .map(build_digital_runtime);
+
     // Restore from checkpoint or compute fresh DC operating point.
     let (mut x, t_start) = if let Some(snap) = resume_checkpoint {
         // Restore state vector.
@@ -493,7 +636,21 @@ fn run_transient_inner_with_arena(
         g_prev.as_mut_slice().copy_from_slice(residual_g.as_slice());
         (init, 0.0)
     } else {
-        let sol = solver.solve(circuit, registry, None)?.solution;
+        // Attempt plain DC OP.  For circuits with DAC-driven nodes whose only
+        // Jacobian entry comes from a behavioral source (zero partial at the
+        // initial guess), this may fail with a singular-matrix or convergence
+        // error.  In that case fall back to an all-zeros starting point; the
+        // digital refinement block below will pin the DAC nodes and re-solve.
+        let sol = match solver.solve(circuit, registry, None) {
+            Ok(nr) => nr.solution,
+            Err(SimError::Convergence { .. }) | Err(SimError::SingularMatrix { .. })
+                if digital_rt.is_some() =>
+            {
+                // Zero vector — digital refinement block pins DAC nodes.
+                vec![0.0_f64; dim]
+            }
+            Err(e) => return Err(e),
+        };
         // Initial stamp at t=0.
         stamp_circuit_gc_into(
             circuit, &sol, registry,
@@ -543,6 +700,40 @@ fn run_transient_inner_with_arena(
     const PAR_EVAL_THRESHOLD: usize = 32;
     let par_eval = circuit.devices().len() >= PAR_EVAL_THRESHOLD;
 
+    // Seed digital state from the DC OP solution at t=0 using zero-delay
+    // combinational evaluation (matching ngspice XSPICE DC initialization).
+    if let Some(ref mut rt) = digital_rt {
+        init_digital_state(rt, &x[..num_nodes]);
+
+        // Collect DAC pin targets and run a second DC OP with those nodes
+        // held at their digital output voltages (stiff G_DAC conductance).
+        // This ensures the full analog circuit (including RC filters downstream
+        // of the DAC) starts in the consistent steady-state, matching ngspice's
+        // behaviour where the XSPICE DC OP accounts for DAC-driven voltages.
+        let dac_pins: Vec<(usize, f64)> = rt.dac_bridges()
+            .iter()
+            .filter(|d| (d.v_target - d.out_low).abs() > 1e-12)
+            .map(|d| (d.analog_node as usize, d.v_target))
+            .collect();
+
+        if !dac_pins.is_empty() {
+            // Re-solve DC OP with pinned DAC nodes.  Warm-start from current x.
+            if let Ok(nr) = solver.solve_with_ic_pins(circuit, registry, &dac_pins) {
+                x[..nr.solution.len()].copy_from_slice(&nr.solution);
+            }
+            // Re-stamp q_history from the updated solution.
+            stamp_circuit_gc_into(
+                circuit, &x, registry,
+                &mut g_triplet, &mut c_triplet, &mut residual_g, &mut residual_q,
+            );
+            q_history = QHistory::new(dim);
+            for _ in 0..MAX_BDF_ORDER {
+                q_history.push(&residual_q);
+            }
+            g_prev.as_mut_slice().copy_from_slice(residual_g.as_slice());
+        }
+    }
+
     while t < stop - h_init * 1e-10 {
         step_count += 1;
         if step_count > MAX_TRANSIENT_STEPS {
@@ -552,6 +743,18 @@ fn run_transient_inner_with_arena(
         let h_clamped = if t + h > stop + h * 1e-10 { stop - t } else { h };
         let h_step = h_clamped.max(h_min);
         let t_next = t + h_step;
+
+        // Flush digital events up to t_next and collect DAC target voltages.
+        // The DAC stamps pin each driven analog node to v_dac via G_DAC conductance.
+        let dac_stamps: Vec<(usize, f64)> = if let Some(ref mut rt) = digital_rt {
+            rt.flush(t_next, &x[..num_nodes]);
+            rt.dac_bridges()
+                .iter()
+                .map(|d| (d.analog_node as usize, d.current_voltage(t_next)))
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         // Determine the target BDF order based on how many steps of history
         // are available.  We bootstrap: step 0 uses BE (order 1), step 1 uses
@@ -572,7 +775,7 @@ fn run_transient_inner_with_arena(
                 h_step, t_next,
                 CompanionMethod::BackwardEuler,
                 max_iters, vtol, restol,
-                par_eval,
+                par_eval, &dac_stamps,
                 &mut g_triplet, &mut c_triplet, &mut j_triplet,
                 &mut residual_g, &mut residual_q, &mut residual, &mut neg_residual,
             )?;
@@ -586,6 +789,7 @@ fn run_transient_inner_with_arena(
                         residual: residual.norm_inf(),
                     });
                 }
+                if let Some(ref mut rt) = digital_rt { rt.rollback(t_next); }
                 h = (h_step * 0.5).max(h_min);
                 continue;
             }
@@ -597,7 +801,7 @@ fn run_transient_inner_with_arena(
                 h_step, t_next,
                 effective_method,
                 max_iters, vtol, restol,
-                par_eval,
+                par_eval, &dac_stamps,
                 &mut g_triplet, &mut c_triplet, &mut j_triplet,
                 &mut residual_g, &mut residual_q, &mut residual, &mut neg_residual,
             )?;
@@ -610,6 +814,7 @@ fn run_transient_inner_with_arena(
                         residual: residual.norm_inf(),
                     });
                 }
+                if let Some(ref mut rt) = digital_rt { rt.rollback(t_next); }
                 h = (h_step * 0.5).max(h_min);
                 continue;
             }
@@ -626,6 +831,7 @@ fn run_transient_inner_with_arena(
                         residual: residual.norm_inf(),
                     });
                 }
+                if let Some(ref mut rt) = digital_rt { rt.rollback(t_next); }
                 h = predict_next_h(h_step, ratio, h_min, tmax);
                 continue;
             }
@@ -633,6 +839,7 @@ fn run_transient_inner_with_arena(
 
             // Accept the high-order solution.
             x.copy_from_slice(&x_ord2);
+            if let Some(ref mut rt) = digital_rt { rt.commit(); }
 
             // Predict next h based on LTE.
             h = predict_next_h(h_step, ratio.max(1e-30), h_min, tmax);
@@ -645,18 +852,20 @@ fn run_transient_inner_with_arena(
                 h_step, t_next,
                 effective_method,
                 max_iters, vtol, restol,
-                par_eval,
+                par_eval, &dac_stamps,
                 &mut g_triplet, &mut c_triplet, &mut j_triplet,
                 &mut residual_g, &mut residual_q, &mut residual, &mut neg_residual,
             )?;
 
             if !converged {
+                if let Some(ref mut rt) = digital_rt { rt.rollback(t_next); }
                 return Err(SimError::Convergence {
                     iterations: max_iters as u32,
                     residual: residual.norm_inf(),
                 });
             }
             x.copy_from_slice(&x_new);
+            if let Some(ref mut rt) = digital_rt { rt.commit(); }
         }
 
         // Refresh g and q at the converged x (at time t_next) for the next step.

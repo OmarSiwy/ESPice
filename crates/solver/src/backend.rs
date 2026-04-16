@@ -53,6 +53,17 @@ impl Solver {
             Self::NewtonRaphson(nr) => nr.solve(circuit, registry, initial_guess),
         }
     }
+
+    pub fn solve_with_ic_pins(
+        &self,
+        circuit: &Circuit,
+        registry: &DeviceRegistry,
+        ic_pins: &[(usize, f64)],
+    ) -> Result<NrResult, SimError> {
+        match self {
+            Self::NewtonRaphson(nr) => nr.solve_with_ic_pins(circuit, registry, ic_pins),
+        }
+    }
 }
 
 impl Default for Solver {

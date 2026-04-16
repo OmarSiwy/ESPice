@@ -36,6 +36,49 @@ pub fn run_dc_op(
     run_dc_op_with_config(circuit, registry, None, None)
 }
 
+/// Run DC operating point with `.IC` nodes pinned to their initial-condition voltages.
+///
+/// Used when `.TRAN` does not include `UIC`: ngspice solves the DC OP with `.IC`
+/// nodes held at their specified voltages (stiff conductance), then releases them
+/// for the transient. This prevents the DC OP from converging to a quiescent point
+/// that ignores user-specified initial conditions (e.g. Colpitts oscillator tank).
+///
+/// If the circuit has no `.IC` entries, falls through to a plain DC OP.
+pub fn run_dc_op_with_ic_pins(
+    circuit: &Circuit,
+    registry: &DeviceRegistry,
+) -> Result<DcOpOutput, SimError> {
+    let ics = circuit.initial_conditions();
+    if ics.is_empty() {
+        return run_dc_op(circuit, registry);
+    }
+
+    // Resolve NodeId → matrix_index for each .IC entry.
+    let ic_pins: Vec<(usize, f64)> = ics
+        .iter()
+        .filter_map(|&(node_id, voltage)| {
+            circuit
+                .nodes()
+                .iter()
+                .find(|n| n.id == node_id)
+                .and_then(|n| n.matrix_index)
+                .map(|idx| (idx as usize, voltage))
+        })
+        .collect();
+
+    let solver = Solver::default();
+    let nr_result = solver.solve_with_ic_pins(circuit, registry, &ic_pins)?;
+
+    let mut new_cache = IncrementalCache::new(circuit.devices().len());
+    new_cache.store_topology(circuit);
+    new_cache.store_op(&nr_result.solution);
+
+    Ok(DcOpOutput {
+        result: extract_results(circuit, &nr_result.solution),
+        cache: new_cache,
+    })
+}
+
 /// Run a DC operating point analysis with optional solver config and cache.
 pub fn run_dc_op_with_config(
     circuit: &Circuit,
@@ -223,7 +266,7 @@ fn run_nested_dc_inner(
     for &outer_val in &config.outer_values {
         let mut outer_ckt = circuit.clone();
         if outer_lower == "temp" {
-            outer_ckt.set_global_temperature(outer_val);
+            outer_ckt.set_global_temperature(outer_val + 273.15);
             outer_ckt.propagate_global_temperature();
         } else if !outer_ckt.set_device_param(&outer_lower, &config.outer_param, outer_val) {
             return Err(SimError::Parse(format!(
@@ -237,7 +280,7 @@ fn run_nested_dc_inner(
         for &inner_val in &config.inner_values {
             let mut ckt = outer_ckt.clone();
             if inner_lower == "temp" {
-                ckt.set_global_temperature(inner_val);
+                ckt.set_global_temperature(inner_val + 273.15);
                 ckt.propagate_global_temperature();
             } else if !ckt.set_device_param(&inner_lower, &config.inner_param, inner_val) {
                 return Err(SimError::Parse(format!(
@@ -265,7 +308,7 @@ fn run_nested_dc_inner(
                             let mid = 0.5 * (lo + hi);
                             let mut mid_ckt = outer_ckt.clone();
                             let mid_set_ok = if inner_lower == "temp" {
-                                mid_ckt.set_global_temperature(mid);
+                                mid_ckt.set_global_temperature(mid + 273.15);
                                 mid_ckt.propagate_global_temperature();
                                 true
                             } else {

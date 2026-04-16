@@ -17,4 +17,3 @@ target/
 # Cargo.lock is committed — BigOSpice includes binary targets
 CLAUDE.md
 flake.lock
-nix/

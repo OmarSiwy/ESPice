@@ -3317,27 +3317,33 @@ impl SpiceParser {
                         };
                         if let Some(node) = node_opt {
                             if matches!(tokens[i + 3], Token::RightParen)
-                                && tokens[i + 4] == Token::Equals
-                                && i + 5 < tokens.len()
+                                && i + 4 < tokens.len()
                             {
+                                // Accept both `V(n)=val` and `V(n) val` (no equals).
+                                let (val_idx, stride) =
+                                    if tokens[i + 4] == Token::Equals && i + 5 < tokens.len() {
+                                        (i + 5, 6)
+                                    } else {
+                                        (i + 4, 5)
+                                    };
                                 // Value may be a plain number or a brace expression.
-                                if tokens[i + 5] == Token::LeftBrace {
+                                if tokens[val_idx] == Token::LeftBrace {
                                     if let Ok((expr, consumed)) =
-                                        parse_brace_expression(&tokens[i + 5..])
+                                        parse_brace_expression(&tokens[val_idx..])
                                     {
                                         if let Ok(val) =
                                             eval_expression(&expr, &empty_params)
                                         {
                                             result.push((node, val));
-                                            i += 5 + consumed;
+                                            i += (stride - 1) + consumed;
                                             continue;
                                         }
                                     }
                                 } else if let Some(val) =
-                                    Self::token_to_number(&tokens[i + 5])
+                                    Self::token_to_number(&tokens[val_idx])
                                 {
                                     result.push((node, val));
-                                    i += 6;
+                                    i += stride;
                                     continue;
                                 }
                             }
@@ -7432,7 +7438,7 @@ impl SpiceParser {
                                 analog_node_idx: analog_idx,
                                 digital_node: dig_in,
                                 out_low: get_param("out_low", 0.0),
-                                out_high: get_param("out_high", 1.8),
+                                out_high: get_param("out_high", 3.3),
                                 t_rise: get_param("t_rise", 1e-9),
                                 t_fall: get_param("t_fall", 1e-9),
                             });
@@ -7501,7 +7507,7 @@ impl SpiceParser {
                                 analog_node_idx: analog_idx,
                                 digital_node: dig_node,
                                 out_low: 0.0,
-                                out_high: 1.8,
+                                out_high: 3.3,
                                 t_rise: 1e-9,
                                 t_fall: 1e-9,
                             });

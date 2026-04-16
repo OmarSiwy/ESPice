@@ -355,6 +355,14 @@ pub fn stamp_circuit_into(
                     p.set("controlling_current", ic);
                     p
                 })
+            } else if matches!(device.kind, DeviceKind::Ccvs | DeviceKind::Cccs) {
+                device.params.get("ctrl_branch_index").map(|ctrl_bi| {
+                    let ctrl_br_idx = circuit.num_vars() as usize + ctrl_bi as usize;
+                    let ic = if ctrl_br_idx < solution.len() { solution[ctrl_br_idx] } else { 0.0 };
+                    let mut p = device.params.clone();
+                    p.set("ctrl_current", ic);
+                    p
+                })
             } else {
                 None
             };
@@ -645,6 +653,14 @@ pub fn stamp_circuit_gc_at_time(
                     let ic = if ctrl_br_idx < solution.len() { solution[ctrl_br_idx] } else { 0.0 };
                     let mut p = device.params.clone();
                     p.set("controlling_current", ic);
+                    p
+                })
+            } else if matches!(device.kind, DeviceKind::Ccvs | DeviceKind::Cccs) {
+                device.params.get("ctrl_branch_index").map(|ctrl_bi| {
+                    let ctrl_br_idx = circuit.num_vars() as usize + ctrl_bi as usize;
+                    let ic = if ctrl_br_idx < solution.len() { solution[ctrl_br_idx] } else { 0.0 };
+                    let mut p = device.params.clone();
+                    p.set("ctrl_current", ic);
                     p
                 })
             } else {
