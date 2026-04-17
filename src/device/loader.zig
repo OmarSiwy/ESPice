@@ -1,10 +1,10 @@
-//! Frontend model loading: compile HDL sources, bind their neutral device IR,
-//! and retain loaded code for the process model registry. Runtime evaluation
-//! is instantiated by the analysis-owned evaluator compiled into each binding.
+//! Runtime HDL loading: compile a source to a shared library, dlopen it, and
+//! keep its vtable in the process registry. The library is built from the same
+//! evaluator (eval.zig) as the built-in device objects.
 
 const std = @import("std");
 const fastvaf = @import("fastvaf");
-const ir = @import("device_ir");
+const ir = @import("device_abi");
 
 const DeviceVtable = ir.DeviceVtable;
 
@@ -58,13 +58,13 @@ pub const BuildPaths = struct {
     work_dir: []const u8,
     /// VerA device contract imported by the generated model.
     contract: []const u8,
-    /// Analysis evaluator source root exposing `exportDevice`.
+    /// Evaluator source root (src/device/eval.zig) exposing `exportDevice`.
     dyn: []const u8,
     /// gompute's module root — engine.zig imports it (Sink shares the GPU
     /// math core), so the .so's `dyn` module needs it as a dependency.
     gompute: []const u8,
     /// Neutral device ABI used by both host and generated evaluator.
-    device_ir: []const u8,
+    device_abi: []const u8,
 };
 
 const PreparedDevice = struct { loaded: *const DeviceVtable, owned_name: []const u8 };
@@ -106,8 +106,8 @@ fn prepareOne(gpa: std.mem.Allocator, io: std.Io, path: []const u8, paths: Build
     const modules = [_]fastvaf.orchestrator.Module{
         .{ .name = "contract", .root = paths.contract },
         .{ .name = "gompute", .root = paths.gompute },
-        .{ .name = "device_ir", .root = paths.device_ir, .deps = &.{"contract"} },
-        .{ .name = "dyn", .root = paths.dyn, .deps = &.{ "contract", "gompute", "device_ir" } },
+        .{ .name = "device_abi", .root = paths.device_abi, .deps = &.{"contract"} },
+        .{ .name = "dyn", .root = paths.dyn, .deps = &.{ "contract", "gompute", "device_abi" } },
     };
     // MATCH THE HOST. The vtable crosses the dlopen boundary with zig
     // callconv and auto struct layout, neither guaranteed across

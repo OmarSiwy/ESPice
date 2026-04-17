@@ -35,7 +35,7 @@
 
 const std = @import("std");
 const analysis = @import("types.zig");
-const device_ir = @import("device_ir");
+const device_ir = @import("device").abi;
 const gompute = @import("gompute");
 
 const Circuit = analysis.Circuit;

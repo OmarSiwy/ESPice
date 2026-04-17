@@ -404,7 +404,7 @@ pub fn gpuJacFloat(comptime D: type) type {
     return if (@hasDecl(D, "jac_f32") and D.jac_f32) f32 else f64;
 }
 
-const ir = @import("device_ir");
+const ir = @import("device_abi");
 pub const GROUND = ir.GROUND;
 pub const StateCtlOp = ir.StateCtlOp;
 pub const SimState = ir.SimState;

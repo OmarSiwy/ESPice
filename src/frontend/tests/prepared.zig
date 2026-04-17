@@ -253,7 +253,7 @@ test "prepared bindings retain model fields and exclude runtime state from param
     var prepared = try build(session.allocator(), parse_arena.allocator(), nl);
     defer prepared.deinit();
     _ = parse_arena.reset(.free_all);
-    var refs: std.ArrayList(problem.device_ir.ParamRef) = .empty;
+    var refs: std.ArrayList(@import("device").abi.ParamRef) = .empty;
     for (prepared.circuit.batches) |batch| try batch.hooks.collect_params(batch.ctx, session.allocator(), &refs).unwrap();
     var saw_pub = false;
     var resistors: u32 = 0;
@@ -296,7 +296,7 @@ test "behavioral sources fold constants and extract probes and polynomials" {
         const nl = try parse(a, "behavioral source\nb1 out 0 " ++ output ++ "\nr1 out 0 1k\n.end\n");
         var prepared = try build(a, a, nl);
         defer prepared.deinit();
-        var refs: std.ArrayList(problem.device_ir.ParamRef) = .empty;
+        var refs: std.ArrayList(@import("device").abi.ParamRef) = .empty;
         for (prepared.circuit.batches) |batch| try batch.hooks.collect_params(batch.ctx, a, &refs).unwrap();
         var found: u32 = 0;
         for (refs.items) |ref| if (std.mem.eql(u8, ref.device_type, "bsource")) {
@@ -364,7 +364,7 @@ test "control source binding retains first exact duplicate and distinct mixed-ca
     , .spectre);
     var prepared = try build(a, a, nl);
     defer prepared.deinit();
-    var refs: std.ArrayList(problem.device_ir.ParamRef) = .empty;
+    var refs: std.ArrayList(@import("device").abi.ParamRef) = .empty;
     for (prepared.circuit.batches) |batch| try batch.hooks.collect_params(batch.ctx, a, &refs).unwrap();
     var found: u32 = 0;
     for (refs.items) |ref| {

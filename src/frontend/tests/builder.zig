@@ -1,6 +1,7 @@
 const std = @import("std");
 const builder = @import("builder");
-const devices = @import("device_models");
+const devices = @import("builder").spice;
+const device = @import("device");
 const netlist = @import("netlist");
 const Value = netlist.Value;
 const Builder = builder.Builder;
@@ -132,7 +133,7 @@ test "transmission-line cards retain native numerical algorithms" {
         var nb = try builder.NetBuilder.init(a, &b, nl);
         try nb.build();
         try std.testing.expectEqual(@as(usize, 1), b.protos.items.len);
-        try std.testing.expectEqualStrings(devices.vtable(case[1]).name, b.protos.items[0].type_name);
+        try std.testing.expectEqualStrings(device.vtable(case[1]).name, b.protos.items[0].type_name);
         if (case[0][0] == 'Y' or case[0][0] == 'P') {
             try std.testing.expectEqual(@as(u32, 1), @as(u32, @intCast(nb.br.len)));
             try std.testing.expectEqual(b.n - 1, nb.br.items(.row)[0]);
@@ -193,7 +194,7 @@ test "RG line retains the checked instance length alias" {
     var circuit = try b.compile();
     compiled = true;
     defer circuit.deinit();
-    var params: std.ArrayList(devices.ir.ParamRef) = .empty;
+    var params: std.ArrayList(device.abi.ParamRef) = .empty;
     defer params.deinit(a);
     const batch = circuit.batches[0];
     try batch.hooks.collect_params(batch.ctx, a, &params).unwrap();

@@ -40,12 +40,11 @@ pub fn build(b: *std.Build) void {
     const bopts = b.addOptions();
     bopts.addOption([]const u8, "src_root", b.build_root.path orelse ".");
     bopts.addOption([]const u8, "contract_path", vera.builder.pathFromRoot("tools/contract.zig"));
-    bopts.addOption([]const u8, "dyn_path", b.pathFromRoot("src/analysis/eval.zig"));
-    // The runtime HDL loader rebuilds engine.zig as the .so's `dyn` module,
-    // and engine.zig imports gompute — without this root the generated
-    // device compiled against a moduleless import and every `.hdl` card
-    // died with GeneratedDeviceDoesNotCompile.
-    bopts.addOption([]const u8, "device_ir_path", b.pathFromRoot("src/problem/device_ir.zig"));
+    bopts.addOption([]const u8, "dyn_path", b.pathFromRoot("src/device/eval.zig"));
+    // The runtime HDL loader rebuilds device/eval.zig as the .so's `dyn`
+    // module; it imports device_abi and gompute by these roots. These paths are
+    // the hidden edges of the module graph: move a file, move its path here.
+    bopts.addOption([]const u8, "device_abi_path", b.pathFromRoot("src/device/abi.zig"));
     bopts.addOption([]const u8, "gompute_path", gompute.builder.pathFromRoot("src/root.zig"));
 
     // Every module in this tree is (root file, target, optimize) plus imports.
@@ -88,20 +87,19 @@ pub fn build(b: *std.Build) void {
     const build_options_mod = bopts.createModule();
 
     const numerics_mod = M.make(b.path("src/problem/numerics.zig"), &.{});
-    const device_ir_mod = M.make(b.path("src/problem/device_ir.zig"), &.{.{ .name = "contract", .module = contract_mod }});
+    const device_abi_mod = M.make(b.path("src/device/abi.zig"), &.{.{ .name = "contract", .module = contract_mod }});
     const requests_mod = M.make(b.path("src/problem/requests.zig"), &.{
         .{ .name = "numerics", .module = numerics_mod },
-        .{ .name = "device_ir", .module = device_ir_mod },
+        .{ .name = "device_abi", .module = device_abi_mod },
     });
     const problem_types_mod = M.make(b.path("src/problem/types.zig"), &.{
         .{ .name = "numerics", .module = numerics_mod },
-        .{ .name = "device_ir", .module = device_ir_mod },
         .{ .name = "requests", .module = requests_mod },
     });
-    const device_eval_mod = M.make(b.path("src/analysis/eval.zig"), &.{
+    const device_eval_mod = M.make(b.path("src/device/eval.zig"), &.{
         .{ .name = "contract", .module = contract_mod },
         .{ .name = "gompute", .module = gompute.module("gompute") },
-        .{ .name = "device_ir", .module = device_ir_mod },
+        .{ .name = "device_abi", .module = device_abi_mod },
     });
     device_eval_mod.link_libc = true;
     const solver_mod = M.make(b.path("src/solver/root.zig"), &.{.{ .name = "numerics", .module = numerics_mod }});
@@ -147,7 +145,7 @@ pub fn build(b: *std.Build) void {
     // the single `zig build-exe` that also holds solver/analysis/app, so Zig
     // cached all 38 whale evals as ONE unit: a one-line solver edit recompiled
     // the lot, single-threaded, on a 32-core box. See
-    // docs/perf/build-split-2026-09-10.md and src/analysis/eval.zig.
+    // docs/perf/build-split-2026-09-10.md and src/device/eval.zig.
     const host_objs = b.allocator.alloc(*std.Build.Step.Compile, models.len + 1) catch @panic("OOM");
     for (models, 0..) |m, i| {
         const run = b.addRunArtifact(vera_exe);
@@ -204,13 +202,13 @@ pub fn build(b: *std.Build) void {
         // `-Ddebug-info=true` every host device object SEGV'd the compiler, so
         // no symbolized profile could be built. Pinned, the symbols survive
         // (callgrind names `DeviceBatch(mos1).eval`) and src/ keeps its lines.
-        const host_mod = GPU.make(b.path("src/analysis/eval.zig"), &.{
+        const host_mod = GPU.make(b.path("src/device/eval.zig"), &.{
             .{ .name = "contract", .module = contract_mod },
             .{ .name = "models", .module = one_models[i] },
-            .{ .name = "device_ir", .module = device_ir_mod },
+            .{ .name = "device_abi", .module = device_abi_mod },
             .{ .name = "gompute", .module = gompute.module("gompute") },
         });
-        // engine.zig's runtime-`.so` half dlopens; matches devices_mod.
+        // The runtime-`.so` half of the evaluator dlopens; matches device_mod.
         host_mod.link_libc = true;
         // The device vtable is `callconv(.auto)`, and a compilation with error
         // tracing passes every such function a hidden `*StackTrace`. Stripping
@@ -230,10 +228,10 @@ pub fn build(b: *std.Build) void {
     const native_models_mod = M.make(b.path("models/native/root.zig"), &.{.{ .name = "contract", .module = contract_mod }});
     inline for (.{ "ltra_native", "txl_native", "cpl_native_2", "cpl_native_3", "cpl_native_4" }) |name|
         agg_src.appendSlice(b.allocator, b.fmt("pub const {s} = @import(\"native_models\").{s};\n", .{ name, name })) catch @panic("OOM");
-    const native_host_mod = M.make(b.path("src/analysis/eval.zig"), &.{
+    const native_host_mod = M.make(b.path("src/device/eval.zig"), &.{
         .{ .name = "contract", .module = contract_mod },
         .{ .name = "models", .module = native_models_mod },
-        .{ .name = "device_ir", .module = device_ir_mod },
+        .{ .name = "device_abi", .module = device_abi_mod },
         .{ .name = "gompute", .module = gompute.module("gompute") },
     });
     native_host_mod.link_libc = true;
@@ -245,20 +243,21 @@ pub fn build(b: *std.Build) void {
     models_mod.addImport("native_models", native_models_mod);
     for (models, dev_mods) |m, dev_mod| models_mod.addImport(m.name, dev_mod);
 
-    const devices_mod = M.make(b.path("src/frontend/models.zig"), &.{
+    // Catalog, runtime HDL loader (dlopen) and the frozen Circuit.
+    const device_mod = M.make(b.path("src/device/root.zig"), &.{
         .{ .name = "models", .module = models_mod },
-        .{ .name = "device_ir", .module = device_ir_mod },
+        .{ .name = "device_abi", .module = device_abi_mod },
+        .{ .name = "numerics", .module = numerics_mod },
         .{ .name = "fastvaf", .module = vera.module("vera") },
+        .{ .name = "build_options", .module = build_options_mod },
     });
-    // DynDevice dlopens generated .so devices.
-    devices_mod.linkSystemLibrary("c", .{});
+    device_mod.link_libc = true;
+    problem_types_mod.addImport("device", device_mod);
 
     const analysis_mod = M.make(b.path("src/analysis/root.zig"), &.{
-        .{ .name = "models", .module = models_mod },
         .{ .name = "solver", .module = solver_mod },
         .{ .name = "numerics", .module = numerics_mod },
-        .{ .name = "device_ir", .module = device_ir_mod },
-        .{ .name = "device_eval", .module = device_eval_mod },
+        .{ .name = "device", .module = device_mod },
         .{ .name = "problem_types", .module = problem_types_mod },
         .{ .name = "requests", .module = requests_mod },
         .{ .name = "output_types", .module = output_types_mod },
@@ -271,19 +270,16 @@ pub fn build(b: *std.Build) void {
         .{ .name = "problem_types", .module = problem_types_mod },
         .{ .name = "requests", .module = requests_mod },
         .{ .name = "numerics", .module = numerics_mod },
-        .{ .name = "device_ir", .module = device_ir_mod },
-        .{ .name = "devices", .module = devices_mod },
+        .{ .name = "device", .module = device_mod },
         .{ .name = "netlist", .module = netlist_mod },
     });
     const frontend_mod = M.make(b.path("src/frontend/root.zig"), &.{
         .{ .name = "numerics", .module = numerics_mod },
-        .{ .name = "device_ir", .module = device_ir_mod },
+        .{ .name = "device", .module = device_mod },
         .{ .name = "problem_types", .module = problem_types_mod },
         .{ .name = "requests", .module = requests_mod },
         .{ .name = "netlist", .module = netlist_mod },
         .{ .name = "builder", .module = builder_mod },
-        .{ .name = "device_models", .module = devices_mod },
-        .{ .name = "build_options", .module = build_options_mod },
     });
 
     // The owning facade composes frontend preparation, analysis and output.
@@ -343,10 +339,10 @@ pub fn build(b: *std.Build) void {
         if (!gpu_kernels and !std.mem.eql(u8, m.name, smallest_model)) continue;
         if (m.size >= gpu_max_model_bytes) continue;
         const dev_imports = b.allocator.create(DeviceImports) catch @panic("OOM");
-        dev_imports.* = .{ .models = one_mod, .contract = contract_mod, .device_ir = device_ir_mod };
+        dev_imports.* = .{ .models = one_mod, .contract = contract_mod, .device_abi = device_abi_mod };
         roots.append(b.allocator, .{
             .name = m.name,
-            .root = b.path("src/analysis/eval.zig"),
+            .root = b.path("src/device/eval.zig"),
             .imports = &deviceKernelImports,
             .imports_ctx = dev_imports,
             // The compact models are single enormous eval functions; letting
@@ -434,13 +430,13 @@ pub fn build(b: *std.Build) void {
 
     // A separate object is essential: Zig error ordinals differ between
     // compilations even when the callback signatures use the same error set.
-    const error_object_mod = M.make(b.path("src/analysis/tests/device_errors_object.zig"), &.{
+    const error_object_mod = M.make(b.path("src/device/tests/device_errors_object.zig"), &.{
         .{ .name = "device_eval", .module = device_eval_mod },
-        .{ .name = "device_ir", .module = device_ir_mod },
+        .{ .name = "device_abi", .module = device_abi_mod },
     });
     error_object_mod.link_libc = true;
     const error_object = b.addObject(.{ .name = "device_errors", .root_module = error_object_mod, .use_llvm = optimize != .Debug });
-    const error_tests_mod = M.make(b.path("src/analysis/tests/device_errors.zig"), &.{.{ .name = "device_ir", .module = device_ir_mod }});
+    const error_tests_mod = M.make(b.path("src/device/tests/device_errors.zig"), &.{.{ .name = "device_abi", .module = device_abi_mod }});
     error_tests_mod.addObject(error_object);
 
     for ([_]struct { []const u8, []const u8, []const *std.Build.Step.Run }{
@@ -456,11 +452,18 @@ pub fn build(b: *std.Build) void {
         .{ "test-analysis", "Run all analysis tests", &.{t.run(analysis_mod, &.{
             .{ .name = "builder", .module = builder_mod },
             .{ .name = "limiter_device", .module = limiter_mod },
+            .{ .name = "models", .module = models_mod },
+            .{ .name = "device_eval", .module = device_eval_mod },
         }, true)} },
         .{ "test-solver", "Run solver tests", &.{t.run(solver_mod, &.{}, false)} },
         .{ "test-output", "Run waveform writer tests", &.{t.run(output_mod, &.{}, false)} },
         .{ "test-native-lines", "Run native transmission-line oracle tests", &.{t.run(native_models_mod, &.{}, false)} },
-        .{ "test-device-errors", "Check separately compiled device callback statuses", &.{t.run(error_tests_mod, &.{}, false)} },
+        .{ "test-device", "Run device catalog, evaluator and ABI tests", &.{
+            t.run(device_mod, &.{}, false),
+            t.run(M.make(b.path("src/device/tests/eval.zig"), &.{.{ .name = "device_eval", .module = device_eval_mod }}), &.{}, false),
+            // Callback statuses across a separately compiled object.
+            t.run(error_tests_mod, &.{}, false),
+        } },
     }) |suite| {
         const step = b.step(suite[0], suite[1]);
         for (suite[2]) |r| step.dependOn(&r.step);
@@ -673,10 +676,10 @@ fn gpuArch(arch: []const u8) gompute_build.CudaOptions {
 const DeviceImports = struct {
     models: *std.Build.Module,
     contract: *std.Build.Module,
-    device_ir: *std.Build.Module,
+    device_abi: *std.Build.Module,
 };
 
-/// `src/analysis/eval.zig` reaches the device catalog through `models`, and
+/// `src/device/eval.zig` reaches the device catalog through `models`, and
 /// `engine.zig` behind it needs `contract`. gompute adds `gompute` (its device
 /// shim) itself, so those two are the whole delta.
 ///
@@ -693,6 +696,6 @@ fn deviceKernelImports(
     const out = b.allocator.alloc(std.Build.Module.Import, 3) catch @panic("OOM");
     out[0] = .{ .name = "models", .module = di.models };
     out[1] = .{ .name = "contract", .module = di.contract };
-    out[2] = .{ .name = "device_ir", .module = di.device_ir };
+    out[2] = .{ .name = "device_abi", .module = di.device_abi };
     return out;
 }
