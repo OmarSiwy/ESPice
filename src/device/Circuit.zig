@@ -12,6 +12,8 @@ col_ptr: []u32,
 row_idx: []u32,
 diag_slots: []u32,
 batches: []abi.Batch,
+/// The Library type of each batch, parallel to `batches`.
+batch_types: []abi.DeviceType,
 current_row: []bool,
 intern_bytes: []u8,
 intern_offs: []u32,
@@ -26,9 +28,10 @@ pub fn freeze(
     intern_bytes: []u8,
     intern_offs: []u32,
     protos: []const abi.Proto,
+    types: []const abi.DeviceType,
     bbd: ?numerics.BbdInfo,
 ) !Circuit {
-    if (n == 0 or intern_offs.len != @as(usize, n) + 1)
+    if (n == 0 or intern_offs.len != @as(usize, n) + 1 or types.len != protos.len)
         return error.InvalidCircuit;
     const scratch = std.heap.smp_allocator;
     var pattern: abi.PatternBuilder = .{};
@@ -66,6 +69,8 @@ pub fn freeze(
         has_state_q = has_state_q or (batch.has_charge and
             (batch.hooks.update_state != null or batch.hooks.commit_state != null));
     }
+    const batch_types = try allocator.dupe(abi.DeviceType, types);
+    errdefer allocator.free(batch_types);
     const current_row = try allocator.alloc(bool, n);
     @memset(current_row, false);
     for (batches) |batch| if (batch.hooks.mark_current_rows) |mark|
@@ -80,6 +85,7 @@ pub fn freeze(
         .row_idx = row_idx,
         .diag_slots = diagonal,
         .batches = batches,
+        .batch_types = batch_types,
         .current_row = current_row,
         .intern_bytes = intern_bytes,
         .intern_offs = intern_offs,
@@ -93,6 +99,7 @@ pub fn deinit(self: *Circuit) void {
     const allocator = self.allocator;
     for (self.batches) |batch| batch.hooks.deinit(batch.ctx, allocator);
     allocator.free(self.batches);
+    allocator.free(self.batch_types);
     allocator.free(self.col_ptr);
     allocator.free(self.row_idx);
     allocator.free(self.diag_slots);

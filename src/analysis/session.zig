@@ -475,6 +475,7 @@ fn copyValue(allocator: std.mem.Allocator, value: anytype) std.mem.Allocator.Err
 
 const output = @import("output_types");
 const ir = @import("device").abi;
+const Circuit = @import("types.zig").Circuit;
 
 pub fn validateOutputSchema(allocator: std.mem.Allocator, prepared: *const Prepared, query: requests.Query, format: output.Format) !void {
     if (format == .touchstone or format == .citi) {
@@ -498,7 +499,7 @@ pub fn validateOutputSchema(allocator: std.mem.Allocator, prepared: *const Prepa
         .sens, .dcmatch => blk: {
             var refs: std.ArrayList(ir.ParamRef) = .empty;
             defer refs.deinit(allocator);
-            for (prepared.circuit.batches) |batch| try batch.hooks.collect_params(batch.ctx, allocator, &refs).unwrap();
+            try Circuit.collectTyped(prepared.circuit.batches, prepared.circuit.batch_types, allocator, &refs);
             break :blk refs.items.len + @intFromBool(query == .dcmatch);
         },
         else => prepared.probes.len + 1,

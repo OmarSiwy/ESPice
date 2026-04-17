@@ -31,9 +31,9 @@ pub fn parseDialect(name: []const u8) ?Dialect {
     }).get(name);
 }
 
-/// Read, expand and flatten `input` into `session`, then load its HDL models.
-/// The netlist borrows `session`; release it once `build` has returned.
-pub fn prepare(io: std.Io, session: std.mem.Allocator, input: Source, dialect: Dialect) !netlist.Netlist {
+/// Read, expand and flatten `input` into `session`, then load its HDL models
+/// into `lib`. The netlist borrows `session`; release it once `build` has returned.
+pub fn prepare(io: std.Io, lib: *device.Library, session: std.mem.Allocator, input: Source, dialect: Dialect) !netlist.Netlist {
     const origin = switch (input) {
         .file => |path| path,
         .bytes => |bytes| bytes.origin,
@@ -44,11 +44,11 @@ pub fn prepare(io: std.Io, session: std.mem.Allocator, input: Source, dialect: D
     };
     const text = if (dialect == .spectre) raw else try netlist.source.expand(io, session, origin, raw);
     const nl = try netlist.parse(session, text, dialect);
-    try loadModels(io, session, nl.deck.foreign, origin);
+    try loadModels(io, lib, session, nl.deck.foreign, origin);
     return nl;
 }
 
-fn loadModels(io: std.Io, session: std.mem.Allocator, foreign: []const netlist.Foreign, origin: []const u8) !void {
+fn loadModels(io: std.Io, lib: *device.Library, session: std.mem.Allocator, foreign: []const netlist.Foreign, origin: []const u8) !void {
     var paths: std.ArrayList([]const u8) = .empty;
     for (foreign) |f| if (f.kind == .verilog_a or f.kind == .verilog) try paths.append(session, if (std.fs.path.isAbsolute(f.path))
         f.path
@@ -56,15 +56,15 @@ fn loadModels(io: std.Io, session: std.mem.Allocator, foreign: []const netlist.F
         try std.fs.path.join(session, &.{ std.fs.path.dirname(origin) orelse ".", f.path }));
     if (paths.items.len == 0) return;
 
-    try device.load(io, paths.items);
+    try lib.load(io, paths.items);
 }
 
 /// Build a passive circuit from a netlist. Scratch owns wiring; the session
 /// arena owns every published slice.
-pub fn build(sim_arena: std.mem.Allocator, parse_arena: std.mem.Allocator, nl: netlist.Netlist) !Prepared {
+pub fn build(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_arena: std.mem.Allocator, nl: netlist.Netlist) !Prepared {
     if (nl.deck.analyses.len > (std.math.maxInt(u32) - 1) / 3) return error.CircuitTooLarge;
     const deck_opts = try analyses.deckOptions(nl.deck.config);
-    var b = try Builder.init(sim_arena);
+    var b = try Builder.init(sim_arena, lib);
     var compiled_ok = false;
     errdefer if (!compiled_ok) b.deinit();
 

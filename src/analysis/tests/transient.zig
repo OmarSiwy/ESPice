@@ -485,7 +485,7 @@ const TranTests = struct {
         const intern_bytes = try gpa.dupe(u8, "000");
         const intern_offs = try gpa.alloc(u32, 4);
         for (intern_offs, 0..) |*o, i| o.* = @intCast(i);
-        var ckt = try root.freeze(gpa, 3, intern_bytes, intern_offs, &protos, null);
+        var ckt = try root.freeze(gpa, 3, intern_bytes, intern_offs, &protos, &@as([protos.len]@import("device").DeviceType, @splat(.unset)), null);
         defer ckt.deinit();
 
         // 2 instances * 2 unknowns. Per NODE there would be 3 rows; per STATE there
@@ -581,7 +581,7 @@ const TranTests = struct {
         const intern_bytes = try gpa.dupe(u8, "000");
         const intern_offs = try gpa.alloc(u32, 4);
         for (intern_offs, 0..) |*o, i| o.* = @intCast(i);
-        var ckt = try root.freeze(gpa, 3, intern_bytes, intern_offs, &protos, null);
+        var ckt = try root.freeze(gpa, 3, intern_bytes, intern_offs, &protos, &@as([protos.len]@import("device").DeviceType, @splat(.unset)), null);
         defer ckt.deinit();
 
         const x = try gpa.alloc(f64, 3);

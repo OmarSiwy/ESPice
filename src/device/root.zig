@@ -2,28 +2,14 @@
 //! `Circuit` every analysis runs on. `abi` is the neutral construction and
 //! evaluation ABI (device_abi); `eval.zig` implements it per device type.
 const std = @import("std");
-const build_options = @import("build_options");
 pub const abi = @import("device_abi");
 pub const Circuit = @import("Circuit.zig");
 pub const loader = @import("loader.zig");
+pub const Library = @import("Library.zig");
+pub const DeviceType = abi.DeviceType;
 /// Every build-time device, keyed by its binding name. `models.NAME` is
 /// the contract-shaped device type.
 pub const models = @import("models");
-
-/// Compile and dlopen each HDL source once per process (see loader.zig). The
-/// source-tree paths the generated device builds against come from the build.
-pub fn load(io: std.Io, files: []const []const u8) !void {
-    const gpa = std.heap.smp_allocator; // registry keys and code outlive any Problem
-    const work_dir = try std.fs.path.join(gpa, &.{ build_options.src_root, ".zig-cache", "espice-hdl" });
-    defer gpa.free(work_dir);
-    try loader.ensureAllLoaded(gpa, io, files, .{
-        .work_dir = work_dir,
-        .contract = build_options.contract_path,
-        .dyn = build_options.dyn_path,
-        .gompute = build_options.gompute_path,
-        .device_abi = build_options.device_abi_path,
-    });
-}
 
 pub const Entry = struct { name: []const u8, type: type };
 

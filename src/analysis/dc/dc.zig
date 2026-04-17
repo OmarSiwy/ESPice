@@ -149,7 +149,7 @@ fn runSerial(
         // outer `.dc ... temp` loop may just have changed it, possibly
         // re-wiring a device (see `Circuit.recomputeType`). So point 0 takes
         // the full walk and the rest narrow.
-        if (pt == 0) try ckt.recompute() else try ckt.recomputeType(t.device_type);
+        if (pt == 0) try ckt.recompute() else try ckt.recomputeType(t.type);
         try ckt.computeBaseline();
 
         var converged = false;

@@ -129,7 +129,7 @@ pub fn solve(
         p.ptr.set(orig + delta_req);
         defer {
             p.ptr.set(orig);
-            ckt.recomputeType(p.ptr.device_type) catch unreachable; // restores the checked original parameter
+            ckt.recomputeType(p.ptr.type) catch unreachable; // restores the checked original parameter
         }
         // A parameter whose NOMINAL value collapses an internal node (gummel_poon
         // RC/RE = 0, mos1 RD/RS = 0, ...) is re-wired by the +1e-12 floor in
@@ -140,7 +140,7 @@ pub fn solve(
         // Report 0 rather than failing the whole analysis; ngspice's sens
         // never perturbs a topology parameter at all (cktsens.c drives the
         // per-device analytic sensitivity routines, not a generic FD).
-        ckt.recomputeType(p.ptr.device_type) catch |e| switch (e) {
+        ckt.recomputeType(p.ptr.type) catch |e| switch (e) {
             error.TopologyChanged => {
                 entry.* = .{
                     .device_name = p.device_name,

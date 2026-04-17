@@ -6,7 +6,20 @@ const problem = @import("problem_types");
 const requests = @import("requests");
 const Job = requests.Query;
 const NO_NODE = analyses.NO_NODE;
-const build = input.build;
+const device = @import("device");
+
+/// Built-ins only: their vtables are static, so the Library may die first.
+fn build(sim_arena: std.mem.Allocator, parse_arena: std.mem.Allocator, nl: netlist.Netlist) !input.Prepared {
+    var lib = try device.Library.init(std.testing.allocator);
+    defer lib.deinit();
+    return input.build(&lib, sim_arena, parse_arena, nl);
+}
+
+fn prepare(io: std.Io, session: std.mem.Allocator, source: input.Source, dialect: input.Dialect) !netlist.Netlist {
+    var lib = try device.Library.init(std.testing.allocator);
+    defer lib.deinit();
+    return input.prepare(io, &lib, session, source, dialect);
+}
 const resolveQueries = input.resolveQueries;
 
 fn parse(arena: std.mem.Allocator, src: []const u8) !netlist.Netlist {
@@ -253,7 +266,7 @@ test "prepared bindings retain model fields and exclude runtime state from param
     var prepared = try build(session.allocator(), parse_arena.allocator(), nl);
     defer prepared.deinit();
     _ = parse_arena.reset(.free_all);
-    var refs: std.ArrayList(@import("device").abi.ParamRef) = .empty;
+    var refs: std.ArrayList(device.abi.ParamRef) = .empty;
     for (prepared.circuit.batches) |batch| try batch.hooks.collect_params(batch.ctx, session.allocator(), &refs).unwrap();
     var saw_pub = false;
     var resistors: u32 = 0;
@@ -296,7 +309,7 @@ test "behavioral sources fold constants and extract probes and polynomials" {
         const nl = try parse(a, "behavioral source\nb1 out 0 " ++ output ++ "\nr1 out 0 1k\n.end\n");
         var prepared = try build(a, a, nl);
         defer prepared.deinit();
-        var refs: std.ArrayList(@import("device").abi.ParamRef) = .empty;
+        var refs: std.ArrayList(device.abi.ParamRef) = .empty;
         for (prepared.circuit.batches) |batch| try batch.hooks.collect_params(batch.ctx, a, &refs).unwrap();
         var found: u32 = 0;
         for (refs.items) |ref| if (std.mem.eql(u8, ref.device_type, "bsource")) {
@@ -315,7 +328,7 @@ test "input preparation retains bytes and origin after caller storage changes" {
     defer arena.deinit();
     var source = "retained input\nV1 out 0 1\nR1 out 0 1k\n.op\n.end\n".*;
     var origin = "Models/Deck.cir".*;
-    const prepared = try input.prepare(std.testing.io, arena.allocator(), .{
+    const prepared = try prepare(std.testing.io, arena.allocator(), .{
         .bytes = .{ .data = &source, .origin = &origin },
     }, .ngspice);
     @memset(&source, 'x');
@@ -337,9 +350,9 @@ test "input preparation resolves file includes and selected dialect" {
         .data = "included input\n.include res.inc\nV1 out 0 1\n.op\n.end\n",
     });
     const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/input.cir", .{tmp.sub_path});
-    const prepared = try input.prepare(io, a, .{ .file = path }, .hspice);
+    const prepared = try prepare(io, a, .{ .file = path }, .hspice);
     try std.testing.expectEqual(@as(u32, 2), prepared.deviceCount());
-    const from_bytes = try input.prepare(io, a, .{
+    const from_bytes = try prepare(io, a, .{
         .bytes = .{ .data = "byte input\n.include res.inc\nV1 out 0 1\n.end\n", .origin = path },
     }, .ngspice);
     try std.testing.expectEqual(@as(u32, 2), from_bytes.deviceCount());
@@ -364,7 +377,7 @@ test "control source binding retains first exact duplicate and distinct mixed-ca
     , .spectre);
     var prepared = try build(a, a, nl);
     defer prepared.deinit();
-    var refs: std.ArrayList(@import("device").abi.ParamRef) = .empty;
+    var refs: std.ArrayList(device.abi.ParamRef) = .empty;
     for (prepared.circuit.batches) |batch| try batch.hooks.collect_params(batch.ctx, a, &refs).unwrap();
     var found: u32 = 0;
     for (refs.items) |ref| {
@@ -374,4 +387,46 @@ test "control source binding retains first exact duplicate and distinct mixed-ca
         found += 1;
     }
     try std.testing.expectEqual(@as(u32, 2), found);
+}
+
+test "one binder: a runtime-registered device binds a card exactly as the same model built in" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var lib = try device.Library.init(std.testing.allocator);
+    defer lib.deinit();
+    // The built-in resistor's own vtable, registered the way `Library.load`
+    // registers a dlopen'd one: its cards then take the runtime-device route
+    // (loadedType, bind_model, derive, collapse). A real .so of models/*.va
+    // cannot be the fixture yet: VerA's library emit declares `h` twice for
+    // every model with hoisted temporaries (GeneratedDeviceDoesNotCompile,
+    // on b1054dc too), so only the dlopen step is left out.
+    const loaded = try lib.register("resistor_rt", device.vtable("resistor"));
+    try std.testing.expect(loaded != device.Library.builtin("resistor"));
+
+    // One card, bound twice: R1 through the built-in resistor, N1 through the
+    // loaded one (`.model` kind names the module).
+    const pairs = "r=2k tc1=1e-3 tc2=1e-6 dtemp=5";
+    const nl = try netlist.parse(a, try std.fmt.allocPrint(a,
+        \\one binder
+        \\V1 a 0 1
+        \\R1 a 0 {s}
+        \\N1 a 0 rloaded
+        \\.model rloaded resistor_rt {s}
+        \\.end
+    , .{ pairs, pairs }), .ngspice);
+    var prepared = try input.build(&lib, a, a, nl);
+    defer prepared.deinit();
+
+    var refs: [2]std.ArrayList(device.abi.ParamRef) = .{ .empty, .empty };
+    for (prepared.circuit.batches, prepared.circuit.batch_types) |batch, t| {
+        const side: usize = if (t == device.Library.builtin("resistor")) 0 else if (t == loaded) 1 else continue;
+        try batch.hooks.collect_params(batch.ctx, a, &refs[side]).unwrap();
+    }
+    try std.testing.expect(refs[0].items.len > 0);
+    try std.testing.expectEqual(refs[0].items.len, refs[1].items.len);
+    for (refs[0].items, refs[1].items) |built_in, runtime| {
+        try std.testing.expectEqualStrings(built_in.param_name, runtime.param_name);
+        try std.testing.expectEqual(built_in.get(), runtime.get());
+    }
 }

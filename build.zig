@@ -447,7 +447,8 @@ pub fn build(b: *std.Build) void {
         } },
         .{ "test-frontend", "Run netlist, builder and prepared-circuit tests", &.{
             t.run(netlist_mod, &.{}, false),
-            t.run(frontend_mod, &.{}, true),
+            // build_options: the binder test loads models/diode.va at runtime.
+            t.run(frontend_mod, &.{.{ .name = "build_options", .module = build_options_mod }}, true),
         } },
         .{ "test-analysis", "Run all analysis tests", &.{t.run(analysis_mod, &.{
             .{ .name = "builder", .module = builder_mod },
@@ -459,7 +460,8 @@ pub fn build(b: *std.Build) void {
         .{ "test-output", "Run waveform writer tests", &.{t.run(output_mod, &.{}, false)} },
         .{ "test-native-lines", "Run native transmission-line oracle tests", &.{t.run(native_models_mod, &.{}, false)} },
         .{ "test-device", "Run device catalog, evaluator and ABI tests", &.{
-            t.run(device_mod, &.{}, false),
+            t.run(device_mod, &.{}, true),
+            t.run(device_abi_mod, &.{}, false),
             t.run(M.make(b.path("src/device/tests/eval.zig"), &.{.{ .name = "device_eval", .module = device_eval_mod }}), &.{}, false),
             // Callback statuses across a separately compiled object.
             t.run(error_tests_mod, &.{}, false),
