@@ -94,7 +94,7 @@ pub const Executor = struct {
         for (self.deck.ac_overrides, mapped) |override, *target| {
             for (params) |param| {
                 if (param.index == override.index and !param.is_instance and
-                    std.mem.eql(u8, param.device_type, override.type_name) and
+                    param.type == override.type and
                     std.mem.eql(u8, param.param_name, override.param_name))
                 {
                     target.* = .{ .ptr = param, .ac_value = override.value };

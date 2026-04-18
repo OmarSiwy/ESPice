@@ -13,6 +13,6 @@ test "parallel model preparation propagates errors" {
         &lib,
         std.testing.io,
         &.{ "first.v", "second.sv" },
-        .{ .work_dir = "", .contract = "", .dyn = "", .gompute = "", .device_abi = "" },
+        .{ .work_dir = "", .contract = "", .dyn = "", .gompute = "", .device_abi = "", .core = "" },
     ));
 }

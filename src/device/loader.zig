@@ -24,6 +24,8 @@ pub const BuildPaths = struct {
     gompute: []const u8,
     /// Neutral device ABI used by both host and generated evaluator.
     device_abi: []const u8,
+    /// Shared ids the ABI names (`DeviceType`).
+    core: []const u8,
 };
 
 const PreparedDevice = struct { loaded: *const DeviceVtable, owned_name: []const u8 };
@@ -63,7 +65,8 @@ fn prepareOne(lib: *const Library, gpa: std.mem.Allocator, io: std.Io, path: []c
     const modules = [_]fastvaf.orchestrator.Module{
         .{ .name = "contract", .root = paths.contract },
         .{ .name = "gompute", .root = paths.gompute },
-        .{ .name = "device_abi", .root = paths.device_abi, .deps = &.{"contract"} },
+        .{ .name = "core", .root = paths.core },
+        .{ .name = "device_abi", .root = paths.device_abi, .deps = &.{ "contract", "core" } },
         .{ .name = "dyn", .root = paths.dyn, .deps = &.{ "contract", "gompute", "device_abi" } },
     };
     // MATCH THE HOST. The vtable crosses the dlopen boundary with zig

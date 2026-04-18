@@ -1620,7 +1620,6 @@ pub fn DeviceBatch(comptime D: type) type {
         }
 
         fn appendParams(comptime T: type, items: anytype, comptime is_instance: bool, gpa: std.mem.Allocator, list: *std.ArrayList(ParamRef)) error{OutOfMemory}!void {
-            const type_name = comptime baseName(D);
             comptime var field_idx: usize = 0;
             inline for (@typeInfo(T).@"struct".fields) |field| {
                 if (comptime paramField(T, field)) {
@@ -1636,7 +1635,6 @@ pub fn DeviceBatch(comptime D: type) type {
                                 .{ .f32 = &@field(it, field.name) }
                             else
                                 .{ .f64 = &@field(it, field.name) },
-                            .device_type = type_name,
                             .param_name = field.name,
                             .index = @intCast(idx),
                             .is_instance = is_instance,

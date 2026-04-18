@@ -94,20 +94,21 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
 fn sweepColumn(target: Options.SweepTarget) []const u8 {
     if (target.is_temp) return "temp-sweep";
-    const named = std.StaticStringMap([]const u8).initComptime(.{
+    const Library = @import("device").Library;
+    inline for (.{
         .{ "isource", "i(i-sweep)" },
         .{ "resistor", "res-sweep" },
         .{ "capacitor", "cap-sweep" },
         .{ "inductor", "ind-sweep" },
-    });
-    return named.get(target.type_name) orelse "v(v-sweep)";
+    }) |pair| if (target.type == Library.builtin(pair[0])) return pair[1];
+    return "v(v-sweep)";
 }
 
 fn findTarget(refs: []const root.ParamRef, want: Options.SweepTarget) ?root.ParamRef {
     for (refs) |ref| {
         if (ref.index == want.index and
             std.mem.eql(u8, ref.param_name, want.param_name) and
-            std.mem.eql(u8, ref.device_type, want.type_name)) return ref;
+            ref.type == want.type) return ref;
     }
     return null;
 }

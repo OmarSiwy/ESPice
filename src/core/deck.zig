@@ -8,7 +8,7 @@ pub const Ic = struct { node: u32, value: f64 };
 
 /// A stable parameter identity; each analysis clone resolves its own pointer.
 pub const AcOverride = struct {
-    type_name: []const u8,
+    type: @import("root.zig").DeviceType,
     index: u32,
     param_name: []const u8,
     value: f64,

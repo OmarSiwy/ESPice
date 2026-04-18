@@ -108,7 +108,7 @@ test "control source sensing ignores case while binding rejects missing and inex
         var nb = try builder.NetBuilder.init(a, &b, nl);
         try std.testing.expectError(if (control.len == 0) error.MissingControlSource else error.UnknownControlSource, nb.build());
         if (std.mem.eql(u8, control, "vcase"))
-            try std.testing.expect(!b.card_counts.contains("vsource"));
+            try std.testing.expect(b.card_counts.items.len <= @intFromEnum(device.Library.builtin("vsource")));
     }
 }
 
