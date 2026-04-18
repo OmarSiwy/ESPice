@@ -1,7 +1,6 @@
 //! CLI policy only; Problem owns preparation, query execution and delivery.
 const std = @import("std");
-const problem = @import("problem");
-const output = @import("output");
+const problem = @import("espice");
 
 pub fn main(init: std.process.Init) !u8 {
     var args = init.minimal.args.iterate();
@@ -9,7 +8,7 @@ pub fn main(init: std.process.Init) !u8 {
     var paths: std.ArrayList([]const u8) = .empty;
     defer paths.deinit(init.gpa);
     var dialect: problem.Dialect = .ngspice;
-    var selection: output.Selection = .{};
+    var selection: problem.Selection = .{};
     var backend: problem.Request = .cpu;
     var explicit_gpu = false;
     var max_parallel: u16 = 1;
@@ -50,7 +49,7 @@ pub fn main(init: std.process.Init) !u8 {
         } else if (optionValue(arg, "-r", "--rawfile", &args)) |value| {
             selection.path = value orelse return usageFail();
         } else if (optionValue(arg, "", "--format", &args)) |value| {
-            selection.format = output.parseFormat(value orelse return usageFail()) orelse return usageFail();
+            selection.format = problem.parseFormat(value orelse return usageFail()) orelse return usageFail();
         } else if (optionValue(arg, "", "--backend", &args)) |value| {
             backend = std.StaticStringMap(problem.Request).initComptime(.{
                 .{ "cpu", .cpu }, .{ "auto", .auto }, .{ "cuda", .cuda }, .{ "hip", .hip },

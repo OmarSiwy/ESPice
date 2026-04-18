@@ -1,4 +1,5 @@
-//! Owning public Problem API. Shared data is in the separate problem_types module.
+//! ESPice: the owning Problem facade over frontend, analysis and output.
+//! main.zig and c_api.zig import only this module.
 const std = @import("std");
 const frontend = @import("frontend");
 const analysis = @import("analysis");
@@ -19,6 +20,8 @@ pub const QueryInfo = analysis.session.QueryInfo;
 pub const Advance = analysis.session.Advance;
 pub const Result = output.Result;
 pub const Format = output.Format;
+pub const Selection = output.Selection;
+pub const parseFormat = output.parseFormat;
 pub const Options = struct {
     source: Source,
     dialect: Dialect = .ngspice,
