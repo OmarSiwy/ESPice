@@ -1,16 +1,27 @@
 //! Source to netlist to immutable circuit and queries, for Problem.
 const std = @import("std");
-const problem = @import("problem_types");
-const requests = @import("requests");
+const core = @import("core");
+const requests = @import("core").query;
 const netlist = @import("netlist");
 const device = @import("device");
 const analyses = @import("analyses.zig");
 const builder = @import("builder");
 const Builder = builder.Builder;
 const Job = requests.Query;
-const Ic = problem.Ic;
-pub const Prepared = problem.Prepared;
-const GROUND = problem.GROUND;
+const Ic = core.Ic;
+const GROUND = core.GROUND;
+
+/// Construction result: the frozen topology and what the deck says about it.
+/// The session arena owns every deck slice; `deinit` releases the circuit.
+pub const Prepared = struct {
+    circuit: device.Circuit,
+    deck: core.Deck,
+
+    pub fn deinit(self: *Prepared) void {
+        self.circuit.deinit();
+        self.* = undefined;
+    }
+};
 const NO_NODE = analyses.NO_NODE;
 
 pub const Dialect = netlist.Dialect;
@@ -108,7 +119,7 @@ pub fn build(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_are
         try ic.append(sim_arena, .{ .node = row, .value = item.value });
     }
 
-    const bindings: problem.QueryBindings = .{
+    const bindings: core.QueryBindings = .{
         .v_names = try copyNames(sim_arena, nb.v.items(.name)),
         .i_names = try copyNames(sim_arena, nb.i.items(.name)),
         .v_branches = try sim_arena.dupe(u32, nb.v.items(.branch)),
@@ -152,8 +163,7 @@ pub fn build(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_are
         a.neg = nb.frozenRow(a.neg);
         for (&a.ports) |*p| p.* = nb.frozenRow(p.*);
     }
-    return .{
-        .circuit = circuit,
+    return .{ .circuit = circuit, .deck = .{
         .probes = probe_buf[0..n_probes],
         .probe_labels = label_buf[0..n_probes],
         .source_node = nb.source_node,
@@ -169,7 +179,7 @@ pub fn build(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_are
         .bindings = bindings,
         .cards = cards,
         .ac_overrides = try acOverrides(sim_arena, cards, nb.ac_res.items(.name), nb.ac_res.items(.value)),
-    };
+    } };
 }
 
 fn copyNames(arena: std.mem.Allocator, names: []const []const u8) ![]const []const u8 {
@@ -182,7 +192,7 @@ fn copyNames(arena: std.mem.Allocator, names: []const []const u8) ![]const []con
 const NodeIndex = struct {
     map: std.StringHashMapUnmanaged(u32),
 
-    fn init(arena: std.mem.Allocator, circuit: *const problem.Circuit) !NodeIndex {
+    fn init(arena: std.mem.Allocator, circuit: *const device.Circuit) !NodeIndex {
         var map: std.StringHashMapUnmanaged(u32) = .empty;
         try map.ensureTotalCapacity(arena, circuit.n);
         for (0..circuit.n) |i| {
@@ -204,10 +214,10 @@ pub fn resolveQueries(arena: std.mem.Allocator, prepared: *const Prepared, direc
     const cards = try netlist.parseAnalyses(arena, directive_text, nodes);
     if (cards.len == 0) return error.InvalidAnalysisArguments;
     // Appended queries accept only single-ended outputs.
-    return analyses.queries(arena, cards, 1, prepared.bindings, prepared.cards, .{
-        .tol = prepared.deck_tol,
-        .method = prepared.deck_method,
-        .temp_c = prepared.deck_temp,
+    return analyses.queries(arena, cards, 1, prepared.deck.bindings, prepared.deck.cards, .{
+        .tol = prepared.deck.deck_tol,
+        .method = prepared.deck.deck_method,
+        .temp_c = prepared.deck.deck_temp,
     });
 }
 
@@ -217,8 +227,8 @@ fn acOverrides(
     cards: []const requests.CardRef,
     names: []const []const u8,
     values: []const f64,
-) ![]const problem.AcOverride {
-    const overrides = try arena.alloc(problem.AcOverride, names.len);
+) ![]const core.AcOverride {
+    const overrides = try arena.alloc(core.AcOverride, names.len);
     for (names, values, overrides) |name, value, *override| {
         for (cards) |card| {
             if (!std.mem.eql(u8, card.name, name)) continue;

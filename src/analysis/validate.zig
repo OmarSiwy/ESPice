@@ -1,8 +1,8 @@
 //! Query validation at the analysis boundary: every numeric option a driver
 //! would otherwise trust, checked once before any allocation.
 const std = @import("std");
-const requests = @import("requests");
-const Prepared = @import("problem_types").Prepared;
+const requests = @import("core").query;
+const Deck = @import("core").Deck;
 
 fn finite(value: anytype) bool {
     return switch (@typeInfo(@TypeOf(value))) {
@@ -61,7 +61,7 @@ fn elements(factors: []const usize) !usize {
     return count;
 }
 
-fn tolerance(t: @import("numerics").Tolerances) !void {
+fn tolerance(t: @import("core").numerics.Tolerances) !void {
     inline for (.{ "reltol", "abstol", "vntol", "residual_tol", "chgtol", "trtol" }) |field|
         try positive(@field(t, field));
     if (t.gmin < 0 or t.gmin_start < 0 or t.itl1 == 0 or t.itl2 == 0 or t.itl4 == 0)
@@ -221,20 +221,20 @@ pub fn validate(query: requests.Query, n: u32) !void {
     }
 }
 
-pub fn validatePrepared(query: requests.Query, prepared: *const Prepared) !void {
-    try validate(query, prepared.circuit.n);
+pub fn validateDeck(query: requests.Query, n: u32, deck: *const Deck) !void {
+    try validate(query, n);
     if (query == .dc) {
-        try dcTargetExists(query.dc.target, prepared);
-        if (query.dc.target2) |t2| try dcTargetExists(t2, prepared);
+        try dcTargetExists(query.dc.target, deck);
+        if (query.dc.target2) |t2| try dcTargetExists(t2, deck);
     }
 }
 
 /// The swept card has to be one the circuit actually built — the card table
 /// is keyed the same way `ParamRef` is, so this is the same lookup `dc.run`
 /// will do, just before anything is allocated for it.
-fn dcTargetExists(target: requests.Dc.SweepTarget, prepared: *const Prepared) !void {
+fn dcTargetExists(target: requests.Dc.SweepTarget, deck: *const Deck) !void {
     if (target.is_temp) return;
-    for (prepared.cards) |card| {
+    for (deck.cards) |card| {
         if (card.index == target.index and std.mem.eql(u8, card.type_name, target.type_name)) return;
     }
     return error.DcSweepSourceNotFound;

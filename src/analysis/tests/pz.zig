@@ -1,5 +1,5 @@
 const qr = @import("../eigen/qr.zig");
-const Complex = @import("numerics").Complex;
+const Complex = @import("core").numerics.Complex;
 const eigenvalues = qr.eigenvalues;
 const hessenbergReduce = qr.hessenbergReduce;
 const std = @import("std");

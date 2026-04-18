@@ -2,8 +2,8 @@ const std = @import("std");
 const input = @import("../prepare.zig");
 const analyses = @import("../analyses.zig");
 const netlist = @import("netlist");
-const problem = @import("problem_types");
-const requests = @import("requests");
+const core = @import("core");
+const requests = @import("core").query;
 const Job = requests.Query;
 const NO_NODE = analyses.NO_NODE;
 const device = @import("device");
@@ -40,7 +40,7 @@ test "analysis directives dispatch every implemented capability and reject malfo
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const sources: problem.QueryBindings = .{ .v_names = &.{"vin"}, .i_names = &.{}, .v_branches = &.{2}, .v_pos = &.{1}, .v_neg = &.{0}, .i_pos = &.{}, .i_neg = &.{}, .v_distof1 = &.{.{ 0, 0 }}, .ports = &.{} };
+    const sources: core.QueryBindings = .{ .v_names = &.{"vin"}, .i_names = &.{}, .v_branches = &.{2}, .v_pos = &.{1}, .v_neg = &.{0}, .i_pos = &.{}, .i_neg = &.{}, .v_distof1 = &.{.{ 0, 0 }}, .ports = &.{} };
     const cards: []const requests.CardRef = &.{.{ .type_name = "vsource", .index = 0, .name = "vin" }};
     const directives = [_][]const u8{
         ".ac dec 2 10 100",                     ".dc vin 0 1 0.1",       ".dcmatch v(out)",
@@ -143,29 +143,29 @@ test "prepared metadata and query identities outlive parse storage" {
     var prepared = try build(session.allocator(), parse_arena.allocator(), nl);
     defer prepared.deinit();
     _ = parse_arena.reset(.free_all);
-    try std.testing.expectEqualStrings("prepared lifetime", prepared.title);
-    try std.testing.expectEqual(@as(usize, 5), prepared.queries.len);
-    try std.testing.expectEqual(@as(f64, 85), prepared.deck_temp.?);
-    try std.testing.expectEqual(@as(f64, 1e-5), prepared.deck_tol.reltol);
-    try std.testing.expectEqualStrings("i(va)", prepared.probe_labels[0]);
-    try std.testing.expectEqualStrings("v(2)", prepared.probe_labels[prepared.probe_labels.len - 1]);
-    const node = prepared.probes[prepared.probes.len - 1];
-    try std.testing.expectEqual(node, prepared.queries[0].tf.output_node.?);
-    try std.testing.expectEqual(prepared.probes[1], prepared.queries[0].tf.input_branch.?);
-    try std.testing.expectEqual(node, prepared.queries[1].noise.out_node);
-    try std.testing.expect(!prepared.queries[1].noise.integrated);
-    try std.testing.expect(prepared.queries[2].noise.integrated);
-    try std.testing.expectEqualStrings("r1", prepared.queries[3].sens.cards[2].name);
-    try std.testing.expectEqual(requests.Method.backward_euler, prepared.queries[4].tran.method);
-    try std.testing.expect(prepared.queries[4].tran.uic);
-    try std.testing.expectEqual(@as(usize, 1), prepared.ic.len);
-    try std.testing.expectEqual(node, prepared.ic[0].node);
-    try std.testing.expectEqual(@as(f64, 0.25), prepared.ic[0].value);
-    try std.testing.expectEqual(@as(usize, 1), prepared.ac_overrides.len);
-    try std.testing.expectEqualStrings("resistor", prepared.ac_overrides[0].type_name);
-    try std.testing.expectEqualStrings("r", prepared.ac_overrides[0].param_name);
-    try std.testing.expectEqual(@as(u32, 0), prepared.ac_overrides[0].index);
-    try std.testing.expectEqual(@as(f64, 2000), prepared.ac_overrides[0].value);
+    try std.testing.expectEqualStrings("prepared lifetime", prepared.deck.title);
+    try std.testing.expectEqual(@as(usize, 5), prepared.deck.queries.len);
+    try std.testing.expectEqual(@as(f64, 85), prepared.deck.deck_temp.?);
+    try std.testing.expectEqual(@as(f64, 1e-5), prepared.deck.deck_tol.reltol);
+    try std.testing.expectEqualStrings("i(va)", prepared.deck.probe_labels[0]);
+    try std.testing.expectEqualStrings("v(2)", prepared.deck.probe_labels[prepared.deck.probe_labels.len - 1]);
+    const node = prepared.deck.probes[prepared.deck.probes.len - 1];
+    try std.testing.expectEqual(node, prepared.deck.queries[0].tf.output_node.?);
+    try std.testing.expectEqual(prepared.deck.probes[1], prepared.deck.queries[0].tf.input_branch.?);
+    try std.testing.expectEqual(node, prepared.deck.queries[1].noise.out_node);
+    try std.testing.expect(!prepared.deck.queries[1].noise.integrated);
+    try std.testing.expect(prepared.deck.queries[2].noise.integrated);
+    try std.testing.expectEqualStrings("r1", prepared.deck.queries[3].sens.cards[2].name);
+    try std.testing.expectEqual(requests.Method.backward_euler, prepared.deck.queries[4].tran.method);
+    try std.testing.expect(prepared.deck.queries[4].tran.uic);
+    try std.testing.expectEqual(@as(usize, 1), prepared.deck.ic.len);
+    try std.testing.expectEqual(node, prepared.deck.ic[0].node);
+    try std.testing.expectEqual(@as(f64, 0.25), prepared.deck.ic[0].value);
+    try std.testing.expectEqual(@as(usize, 1), prepared.deck.ac_overrides.len);
+    try std.testing.expectEqualStrings("resistor", prepared.deck.ac_overrides[0].type_name);
+    try std.testing.expectEqualStrings("r", prepared.deck.ac_overrides[0].param_name);
+    try std.testing.expectEqual(@as(u32, 0), prepared.deck.ac_overrides[0].index);
+    try std.testing.expectEqual(@as(f64, 2000), prepared.deck.ac_overrides[0].value);
 
     const appended = try resolveQueries(session.allocator(), &prepared,
         \\.tf v(2) vb
@@ -176,13 +176,13 @@ test "prepared metadata and query identities outlive parse storage" {
     );
     try std.testing.expectEqual(@as(usize, 6), appended.len);
     try std.testing.expectEqual(node, appended[0].tf.output_node.?);
-    try std.testing.expectEqual(prepared.probes[1], appended[0].tf.input_branch.?);
+    try std.testing.expectEqual(prepared.deck.probes[1], appended[0].tf.input_branch.?);
     try std.testing.expectEqualStrings("vsource", appended[1].dc.target.type_name);
     try std.testing.expectEqual(@as(u32, 1), appended[1].dc.target.index);
     try std.testing.expectEqual(node, appended[2].noise.out_node);
     try std.testing.expect(appended[3].noise.integrated);
     try std.testing.expectEqual(requests.Method.backward_euler, appended[4].tran.method);
-    try std.testing.expectEqual(prepared.deck_tol.reltol, appended[4].tran.tol.reltol);
+    try std.testing.expectEqual(prepared.deck.deck_tol.reltol, appended[4].tran.tol.reltol);
     try std.testing.expectEqualStrings("r1", appended[5].sens.cards[2].name);
     for ([_][]const u8{
         "r3 2 0 1k",            ".model rm r(r=1k)", ".hdl \"part.va\"", ".include \"part.cir\"",
@@ -192,7 +192,7 @@ test "prepared metadata and query identities outlive parse storage" {
     try std.testing.expectError(error.InvalidAnalysisArguments, resolveQueries(session.allocator(), &prepared, "* nothing\n"));
     try std.testing.expectError(error.AnalysisNodeNotFound, resolveQueries(session.allocator(), &prepared, ".tf v(missing) vb"));
     try std.testing.expectError(error.UnsupportedAnalysisOutput, resolveQueries(session.allocator(), &prepared, ".tf v(in, 2) vb"));
-    try std.testing.expectEqual(@as(usize, 5), prepared.queries.len);
+    try std.testing.expectEqual(@as(usize, 5), prepared.deck.queries.len);
 }
 
 test "a numeric reference node is that node, not ground" {
@@ -210,10 +210,10 @@ test "a numeric reference node is that node, not ground" {
     );
     var prepared = try build(a, a, nl);
     defer prepared.deinit();
-    const node = prepared.probes[prepared.probes.len - 1];
-    try std.testing.expectEqualStrings("v(2)", prepared.probe_labels[prepared.probe_labels.len - 1]);
-    try std.testing.expectEqual(node, prepared.queries[0].tf.output_neg);
-    try std.testing.expectEqual(node, prepared.queries[1].noise.out_neg);
+    const node = prepared.deck.probes[prepared.deck.probes.len - 1];
+    try std.testing.expectEqualStrings("v(2)", prepared.deck.probe_labels[prepared.deck.probe_labels.len - 1]);
+    try std.testing.expectEqual(node, prepared.deck.queries[0].tf.output_neg);
+    try std.testing.expectEqual(node, prepared.deck.queries[1].noise.out_neg);
 }
 
 test "selected unresolved parameters fail while unused models stay inert" {
@@ -244,7 +244,7 @@ test "selected unresolved parameters fail while unused models stay inert" {
     );
     var prepared = try build(session.allocator(), parse_arena.allocator(), nl);
     defer prepared.deinit();
-    try std.testing.expectEqual(@as(usize, 1), prepared.queries.len);
+    try std.testing.expectEqual(@as(usize, 1), prepared.deck.queries.len);
 }
 
 test "prepared bindings retain model fields and exclude runtime state from parameter collection" {
@@ -319,7 +319,7 @@ test "behavioral sources fold constants and extract probes and polynomials" {
             found += 1;
         };
         try std.testing.expectEqual(@as(u32, 3), found);
-        try std.testing.expectEqual(output[0] == 'v', std.mem.eql(u8, prepared.probe_labels[0], "i(b1)"));
+        try std.testing.expectEqual(output[0] == 'v', std.mem.eql(u8, prepared.deck.probe_labels[0], "i(b1)"));
     }
 }
 

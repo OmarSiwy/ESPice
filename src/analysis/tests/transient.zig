@@ -1,6 +1,6 @@
 const EnvelopeTests = struct {
     const impl = @import("../tran/envelope.zig");
-    const Options = @import("requests").Envelope;
+    const Options = @import("core").query.Envelope;
     const maxPoints = impl.maxPoints;
     const std = @import("std");
 

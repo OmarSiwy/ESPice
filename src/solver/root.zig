@@ -13,7 +13,7 @@ pub const preconditioner = @import("preconditioner.zig");
 pub const order = @import("order.zig");
 pub const converger = @import("converger.zig");
 pub const newton_core = @import("newton_core.zig");
-pub const types = @import("numerics");
+pub const types = @import("core").numerics;
 
 // Shared numerical contracts. Solver leaves import numerics directly.
 pub const BbdBlock = types.BbdBlock;

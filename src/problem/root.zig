@@ -1,10 +1,9 @@
 //! Owning public Problem API. Shared data is in the separate problem_types module.
 const std = @import("std");
 const frontend = @import("frontend");
-const shared = @import("problem_types");
 const analysis = @import("analysis");
 const output = @import("output");
-pub const requests = @import("requests");
+pub const requests = @import("core").query;
 pub const QueryId = requests.QueryId;
 pub const Query = requests.Query;
 pub const Source = frontend.Source;
@@ -38,7 +37,7 @@ pub const Problem = struct {
     arena: std.heap.ArenaAllocator,
     /// Every device type this problem can instantiate; outlives `prepared`.
     library: frontend.Library,
-    prepared: shared.Prepared,
+    prepared: frontend.Prepared,
     session: analysis.session.Session,
     delivery: output.Session,
     limits: Limits,
@@ -76,12 +75,12 @@ pub const Problem = struct {
         self.delivery_error = null;
         var execution = options.backend;
         execution.timing_in_depth = options.timing_in_depth;
-        self.session = analysis.session.Session.init(self.workerAllocator(), io, &self.prepared, execution);
+        self.session = analysis.session.Session.init(self.workerAllocator(), io, &self.prepared.circuit, &self.prepared.deck, execution);
         errdefer self.session.deinit();
-        const jobs = if (self.prepared.queries.len == 0)
-            &[_]Query{.{ .op = .{ .tol = self.prepared.deck_tol } }}
+        const jobs = if (self.prepared.deck.queries.len == 0)
+            &[_]Query{.{ .op = .{ .tol = self.prepared.deck.deck_tol } }}
         else
-            self.prepared.queries;
+            self.prepared.deck.queries;
         const ids = try scratch.alloc(QueryId, jobs.len);
         _ = try self.append_queries(jobs, ids);
         timingLap(io, &lap, "query graph and output setup");
@@ -99,11 +98,11 @@ pub const Problem = struct {
     }
 
     pub fn title(self: *const Problem) []const u8 {
-        return self.prepared.title;
+        return self.prepared.deck.title;
     }
 
     pub fn device_count(self: *const Problem) u32 {
-        return self.prepared.n_devices;
+        return self.prepared.deck.n_devices;
     }
 
     pub fn output_error(self: *const Problem) ?anyerror {
@@ -125,7 +124,7 @@ pub const Problem = struct {
     pub fn append_queries(self: *Problem, queries: []const Query, ids: []QueryId) !usize {
         if (ids.len < queries.len) return queries.len;
         for (queries) |query|
-            try analysis.validateOutputSchema(self.allocator, &self.prepared, query, self.delivery.selection.format);
+            try analysis.validateOutputSchema(self.allocator, &self.prepared.circuit, &self.prepared.deck, query, self.delivery.selection.format);
         return self.session.append(queries, ids);
     }
 
@@ -201,7 +200,7 @@ pub const Problem = struct {
                 var lap = if (self.timing_in_depth) std.Io.Timestamp.now(self.io, .awake) else null;
                 defer timingLap(self.io, &lap, "output delivery");
                 self.delivery.publish(self.io, self.delivery.published, .{
-                    .title = self.prepared.title,
+                    .title = self.prepared.deck.title,
                     .plotname = res.plotname,
                     .varnames = res.varnames,
                     .is_complex = res.is_complex,

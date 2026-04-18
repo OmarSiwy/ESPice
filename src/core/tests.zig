@@ -1,5 +1,5 @@
 const std = @import("std");
-const numerics = @import("numerics");
+const numerics = @import("numerics.zig");
 const zeroSimd = numerics.zeroSimd;
 const copySimd = numerics.copySimd;
 

@@ -2,7 +2,7 @@
 //! consumes the construction protos; analysis instantiates mutable state from it.
 const std = @import("std");
 const abi = @import("device_abi");
-const numerics = @import("numerics");
+const numerics = @import("core").numerics;
 const Circuit = @This();
 
 allocator: std.mem.Allocator,
