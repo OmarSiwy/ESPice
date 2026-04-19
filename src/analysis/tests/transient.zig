@@ -53,7 +53,8 @@ const MatexTests = struct {
         var H = [_]f64{ 0, 0, 0, 0 };
         var out: [4]f64 = undefined;
         var scratch: [20]f64 = undefined; // 5*2*2 = 20
-        expmSmall(2, &H, &out, &scratch);
+        var piv: [3]u32 = undefined;
+        expmSmall(2, &H, &out, &scratch, &piv);
         try testing.expectApproxEqAbs(@as(f64, 1.0), out[0], 1e-12);
         try testing.expectApproxEqAbs(@as(f64, 0.0), out[1], 1e-12);
         try testing.expectApproxEqAbs(@as(f64, 0.0), out[2], 1e-12);
@@ -65,7 +66,8 @@ const MatexTests = struct {
         var H = [_]f64{ 1, 0, 0, 2 };
         var out: [4]f64 = undefined;
         var scratch: [20]f64 = undefined;
-        expmSmall(2, &H, &out, &scratch);
+        var piv: [3]u32 = undefined;
+        expmSmall(2, &H, &out, &scratch, &piv);
         // Padé(6,6) + scaling-squaring: ~1e-10 on the small matrix
         try testing.expectApproxEqRel(std.math.e, out[0], 1e-6);
         try testing.expectApproxEqAbs(@as(f64, 0.0), out[1], 1e-10);
@@ -77,7 +79,8 @@ const MatexTests = struct {
         var H = [_]f64{1.0};
         var out: [1]f64 = undefined;
         var scratch: [5]f64 = undefined; // 5*1*1
-        expmSmall(1, &H, &out, &scratch);
+        var piv: [3]u32 = undefined;
+        expmSmall(1, &H, &out, &scratch, &piv);
         try testing.expectApproxEqRel(std.math.e, out[0], 1e-6);
     }
 
@@ -87,7 +90,8 @@ const MatexTests = struct {
         var H = [_]f64{ 0, 1, 0, 0, 0, 1, 0, 0, 0 };
         var out: [9]f64 = undefined;
         var scratch: [45]f64 = undefined; // 5*3*3
-        expmSmall(3, &H, &out, &scratch);
+        var piv: [3]u32 = undefined;
+        expmSmall(3, &H, &out, &scratch, &piv);
         try testing.expectApproxEqAbs(@as(f64, 1.0), out[0], 1e-12); // [0,0]
         try testing.expectApproxEqAbs(@as(f64, 1.0), out[1], 1e-12); // [0,1]
         try testing.expectApproxEqAbs(@as(f64, 0.5), out[2], 1e-12); // [0,2]
@@ -104,7 +108,8 @@ const MatexTests = struct {
         var H = [_]f64{ 5, 0, 0, 5 };
         var out: [4]f64 = undefined;
         var scratch: [20]f64 = undefined;
-        expmSmall(2, &H, &out, &scratch);
+        var piv: [3]u32 = undefined;
+        expmSmall(2, &H, &out, &scratch, &piv);
         const e5 = @exp(@as(f64, 5.0));
         try testing.expectApproxEqRel(e5, out[0], 1e-6);
         try testing.expectApproxEqAbs(@as(f64, 0.0), out[1], 1e-6);
@@ -119,7 +124,8 @@ const MatexTests = struct {
         var H = [_]f64{ 0, -angle, angle, 0 };
         var out: [4]f64 = undefined;
         var scratch: [20]f64 = undefined;
-        expmSmall(2, &H, &out, &scratch);
+        var piv: [3]u32 = undefined;
+        expmSmall(2, &H, &out, &scratch, &piv);
         const c = @cos(angle);
         const s_val = @sin(angle);
         try testing.expectApproxEqRel(c, out[0], 1e-6);

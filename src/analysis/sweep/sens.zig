@@ -76,32 +76,23 @@ inline fn adjointFd(lambda: []const f64, pert: []const f64, nom: []const f64, in
 /// (resistors) and mask the very perturbations being measured.
 pub fn solve(
     ckt: *root.Circuit,
+    x_op: []const f64,
     params: []const SensParam,
     output_node: u32,
     output_neg: u32,
-    tol: converger.Tolerances,
     allocator: std.mem.Allocator,
 ) ![]SensEntry {
     const n: usize = ckt.n;
     const ws = try ckt.workspace();
-    const nopts = converger.optionsFromTolerances(tol, tol.itl2);
 
-    // -- 1. Nominal OP solve (cold start) --
-    // After convergence, ws.slv holds the factored Jacobian at x_op.
-    const x_op = try allocator.alloc(f64, n);
-    defer allocator.free(x_op);
-    root.zeroSimd(x_op);
-    ckt.seedJunctions(x_op);
-
-    const dc_result = try converger.run(ckt, ws, x_op, 0, nopts, root.EvalHook{});
-    if (!dc_result.converged) return error.DcNotConverged;
-
-    // -- Capture nominal RHS at the operating point --
-    // Re-eval at x_op to get the nominal F(x_op) residual in ckt.rhs.
+    // -- 1. Nominal OP: the executor's, which ran the full OP ladder (a cold
+    // plain Newton here failed on circuits whose OP needs gmin or source
+    // stepping). Nominal F(x_op) and the Jacobian at x_op.
     ckt.evalNewton(x_op, 0);
     const rhs_nom = try allocator.alloc(f64, n);
     defer allocator.free(rhs_nom);
     copySimd(rhs_nom, ckt.rhs[0..n]);
+    try ws.slv.factor(ckt.g_vals);
 
     // -- 2. Adjoint solve: J^T · λ = e_out --
     const lambda = try allocator.alloc(f64, n);
@@ -216,7 +207,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         n_named += 1;
     }
 
-    const entries = try solve(ctx.circuit, params, output_node, opts.output_neg, opts.tol, scratch);
+    const entries = try solve(ctx.circuit, ctx.x_op, params, output_node, opts.output_neg, scratch);
     defer scratch.free(entries);
 
     const names = try a.alloc([]const u8, entries.len);

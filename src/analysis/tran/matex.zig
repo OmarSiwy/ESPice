@@ -57,7 +57,7 @@ fn cscMulVec(
 
 /// Compute expm(H) for m×m dense row-major H. Result written to out (m×m).
 /// Scratch must be at least 5*m*m. Destroys H.
-fn expmSmall(m: usize, H: []f64, out: []f64, scratch: []f64) void {
+fn expmSmall(m: usize, H: []f64, out: []f64, scratch: []f64, piv_buf: []u32) void {
     // Padé [6/6] coefficients: b_j = (12-j)! · 6! / (12! · j! · (6-j)!)
     const b = [_]f64{
         1.0, // b[0] = 1
@@ -147,7 +147,6 @@ fn expmSmall(m: usize, H: []f64, out: []f64, scratch: []f64) void {
     }
 
     // Solve (V - U) * expm = (V + U) column by column using dense LU
-    var piv_buf: [256]u32 = undefined;
     const piv = piv_buf[0..m];
     DenseLu.factorize(m, H, piv) catch {
         // Singular — fall back to identity (degenerate zero matrix)
@@ -235,9 +234,10 @@ fn arnoldi(
     m_max: u32,
     h_step: f64,
     krylov_tol: f64,
-    // Scratch: 2*n
+    // Scratch: tmp1 >= max(n, 7*m_max^2) (the posterior reuses it), tmp2 n
     tmp1: []f64,
     tmp2: []f64,
+    piv: []u32, // m_max
 ) ArnoldiResult {
     const nn: usize = n;
 
@@ -313,7 +313,7 @@ fn arnoldi(
         // small relative to beta. For efficiency, only do the full expm check
         // every 5 iterations after m >= 4.
         if (j >= 3 and (j + 1) % 5 == 0) {
-            if (posteriorOk(j + 1, m_max, H, h_jp1_j, h_step, beta, krylov_tol, tmp1))
+            if (posteriorOk(j + 1, m_max, H, h_jp1_j, h_step, beta, krylov_tol, tmp1, piv))
                 return .{ .m = j + 1, .beta = beta };
         }
     }
@@ -342,6 +342,7 @@ fn posteriorOk(
     beta: f64,
     tol: f64,
     scratch: []f64, // needs at least 7*m*m
+    piv: []u32, // m
 ) bool {
     const mm: usize = m;
     const msq = mm * mm;
@@ -361,7 +362,7 @@ fn posteriorOk(
 
     for (0..msq) |i| H_copy[i] *= h_step;
 
-    expmSmall(mm, H_copy, expm_out, expm_scratch);
+    expmSmall(mm, H_copy, expm_out, expm_scratch, piv);
 
     // Error ≈ beta * h_mp1_m * |expm_out[m-1, 0]|
     const last_elem = @abs(expm_out[(mm - 1) * mm]);
@@ -560,9 +561,13 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const h_size = m_max_usize * m_max_usize;
     const H_mat = try scratch.alloc(f64, h_size + m_max_usize);
 
-    // Scratch for Arnoldi: 2*n
-    const arnoldi_tmp1 = try scratch.alloc(f64, n);
+    // Scratch for Arnoldi: tmp1 doubles as posteriorOk's 7*m*m expm scratch
+    // (an n-long tmp1 made the posterior return false on every small circuit).
+    const arnoldi_tmp1 = try scratch.alloc(f64, @max(n, 7 * h_size));
     const arnoldi_tmp2 = try scratch.alloc(f64, n);
+    // Dense LU pivots, sized by the Krylov cap (a fixed [256] overflowed
+    // once m_max passed 256).
+    const piv_all = try scratch.alloc(u32, m_max_usize);
 
     // Padé(6) needs 5*m*m scratch; H_copy and expm_out are separate below.
     const expm_scratch = try scratch.alloc(f64, @max(5 * h_size, 1));
@@ -693,6 +698,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
             opts.krylov_tol,
             arnoldi_tmp1,
             arnoldi_tmp2,
+            piv_all,
         );
 
         if (ar.m == 0) {
@@ -719,8 +725,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
             // Step 1: Invert H_copy (m×m) using dense LU
             const H_inv = expm_out[0..msq]; // reuse buffer
 
-            var piv_buf: [256]u32 = undefined;
-            const piv = piv_buf[0..m];
+            const piv = piv_all[0..m];
 
             DenseLu.factorize(m, H_copy[0..msq], piv) catch {
                 // Singular H — fall back to forward Euler
@@ -749,7 +754,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
             for (0..m) |i| H_copy[i * m + i] += scale;
 
             // Step 3: expm(T) → expm_out
-            expmSmall(m, H_copy, expm_out, expm_scratch);
+            expmSmall(m, H_copy, expm_out, expm_scratch, piv_all);
 
             // x_exp = beta * V_m * (expm_out * e1)
             // y_small = expm_out[:,0] (column 0 of m×m row-major)

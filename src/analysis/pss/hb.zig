@@ -65,6 +65,7 @@ pub fn solve(
         total_unknowns + // f_hat
         nf * n + // x_td (node-major)
         nf * n + // f_td (node-major)
+        nf * n + // q_td (node-major)
         n * n + // c_mat
         total_unknowns * total_unknowns + // jac
         total_unknowns + // dx_hat
@@ -86,6 +87,8 @@ pub fn solve(
     const x_td = arena[off..][0 .. nf * n];
     off += nf * n;
     const f_td = arena[off..][0 .. nf * n];
+    off += nf * n;
+    const q_td = arena[off..][0 .. nf * n];
     off += nf * n;
     const c_mat = arena[off..][0 .. n * n];
     off += n * n;
@@ -199,6 +202,7 @@ pub fn solve(
             ckt.setSimState(.{ .t = t_k, .dt = dt_sample, .kind = .tran });
             ckt.eval(x_sample, t_k);
             for (0..n) |node| f_td[node * nf + k] = ckt.rhs[node];
+            for (0..n) |node| q_td[node * nf + k] = ckt.q_vec[node];
             for (ckt.g_vals[0..nnz], 0..) |g, slot| g_td[slot * nf + k] = g;
             if (k == 0) {
                 // dQ/dx at the DC sample, straight off the analytic C plane
@@ -246,33 +250,31 @@ pub fn solve(
         }
 
         // Add frequency-domain charge terms: the (cos, sin) coefficients of
-        // C dx/dt, in the SAME basis the IDFT above reconstructs x from.
-        //   x(t)     = a cos(w_h t) + b sin(w_h t)
-        //   dx/dt    = w_h*b cos(w_h t) - w_h*a sin(w_h t)
-        // so cos takes +w_h*C*X_sin and sin takes -w_h*C*X_cos. The signs used
-        // to be the other pair — the j*omega rule for the phasor X = a + jb,
-        // which is the CONJUGATE of this basis's a - jb. Self-consistent with
-        // the Jacobian below, so it converged; it just converged on the
-        // time-reversed solution, invisible to a magnitude-only oracle but not
-        // to a rectifier's signed DC term.
-        for (0..nh) |hi| {
-            const h = hi + 1;
-            const omega_h = @as(f64, @floatFromInt(h)) * omega0;
-            for (0..n) |row| {
-                var sum_cos: f64 = 0;
-                var sum_sin: f64 = 0;
-                for (0..n) |col| {
-                    const c_val = c_mat[row * n + col];
-                    if (c_val == 0) continue;
-                    const x_cos = x_hat[col * nf + 2 * h - 1];
-                    const x_sin = x_hat[col * nf + 2 * h];
-                    sum_cos += c_val * (omega_h * x_sin);
-                    sum_sin += c_val * (-omega_h * x_cos);
+        // dq/dt, from the DFT of q(t_k) sampled at every point — C(t0)·X was
+        // exact only for linear charge. In the basis the IDFT above uses,
+        //   q(t)     = a cos(w_h t) + b sin(w_h t)
+        //   dq/dt    = w_h*b cos(w_h t) - w_h*a sin(w_h t)
+        // so cos takes +w_h*Q_sin and sin takes -w_h*Q_cos. (The signs used
+        // to be the phasor pair, the CONJUGATE of this basis's a - jb: self-
+        // consistent with the Jacobian, so it converged on the time-reversed
+        // solution, invisible to a magnitude-only oracle but not to a
+        // rectifier's signed DC term.)
+        // ponytail: scalar O(n*nh*nf) projection, same order as the residual
+        // DFT above; vectorize with it if HB ever profiles hot.
+        if (ckt.has_charge) for (0..n) |node| {
+            const q_slice = q_td[node * nf ..][0..nf];
+            for (0..nh) |hi| {
+                var q_cos: f64 = 0;
+                var q_sin: f64 = 0;
+                for (q_slice, basis_cos[hi * nf ..][0..nf], basis_sin[hi * nf ..][0..nf]) |q, bc, bs| {
+                    q_cos += q * bc;
+                    q_sin += q * bs;
                 }
-                f_hat[row * nf + 2 * h - 1] += sum_cos;
-                f_hat[row * nf + 2 * h] += sum_sin;
+                const omega_h = @as(f64, @floatFromInt(hi + 1)) * omega0;
+                f_hat[node * nf + 2 * (hi + 1) - 1] += omega_h * (2.0 * q_sin / nf_f);
+                f_hat[node * nf + 2 * (hi + 1)] += -omega_h * (2.0 * q_cos / nf_f);
             }
-        }
+        };
 
         const max_residual = num.normInf(f_hat);
         if (converger.hbTrace()) std.debug.print("HB iter={d} res={e} step={e} normx={e}\n", .{ iter, max_residual, step, num.normInf(x_hat) });
@@ -390,7 +392,11 @@ pub fn solve(
             }
         }
 
-        // Add charge Jacobian contribution: ±omega_h * C skew blocks
+        // Add charge Jacobian contribution: ±omega_h * C skew blocks.
+        // ponytail: C(t0), not the C(t) convolution the G blocks get — exact
+        // for linear charge, a quasi-Newton step for nonlinear charge (the
+        // residual above is exact either way, so the fixed point is right).
+        // Convolve C like G if a nonlinear-charge deck converges too slowly.
         for (0..nh) |hi| {
             const h = hi + 1;
             const omega_h = @as(f64, @floatFromInt(h)) * omega0;
