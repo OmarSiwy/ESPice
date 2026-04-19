@@ -20,6 +20,8 @@ obj_dir/
 *.log
 core
 *.dump
+# ...but not the source module of that name
+!src/core/
 
 # Claude Code
 .claude/
