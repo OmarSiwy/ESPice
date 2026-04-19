@@ -1,14 +1,16 @@
-//! Builder: netlist hypergraph → frozen problem.Circuit.
+//! Builder: netlist hypergraph → frozen device.Circuit.
 //!
 //! Frontend construction owns net-to-row mapping, subcircuit tagging, BBD
-//! permutation and device accumulation through the neutral device IR.
-//! problem/types.zig freezes the pattern; analysis owns numerical execution.
+//! permutation and device accumulation through the device ABI. Every device
+//! type, built-in or loaded, is a `device.Library` id; `Circuit.freeze`
+//! freezes the pattern; analysis owns numerical execution.
 
 const std = @import("std");
-const problem = @import("problem_types");
-const requests = @import("requests");
-const numerics = @import("numerics");
-const devices = @import("devices");
+const requests = @import("core").query;
+const numerics = @import("core").numerics;
+const devices = @import("spice.zig");
+const device = @import("device");
+pub const spice = devices;
 const netlist = @import("netlist");
 const Netlist = netlist.Netlist;
 const Device = Netlist.View;
@@ -16,32 +18,31 @@ const Model = netlist.Model;
 const Kv = netlist.Kv;
 const Value = netlist.Value;
 const Op = netlist.expr.Op;
-const vaload = @import("devices").vaload;
-const batch = @import("device_ir");
+const batch = device.abi;
+const Library = device.Library;
+const DeviceType = batch.DeviceType;
+const castField = batch.bind.castField;
+const markGiven = batch.bind.markGiven;
 
 const GROUND = @as(u32, 0);
-const Circuit = problem.Circuit;
+const Circuit = device.Circuit;
 const Proto = batch.Proto;
 
 // ---------------------------------------------------------------------------
-// Builder: mutable netlist. compile() freezes it into an problem.Circuit.
+// Builder: mutable netlist. compile() freezes it into a device.Circuit.
 // ---------------------------------------------------------------------------
 const MULTI_INSTANCE: u32 = std.math.maxInt(u32);
 
-/// `ParamRef.device_type` is `@typeName(D)` past the last dot; match it.
-fn shortTypeName(comptime D: type) []const u8 {
-    const full = @typeName(D);
-    const dot = std.mem.lastIndexOfScalar(u8, full, '.') orelse return full;
-    return full[dot + 1 ..];
-}
-
 pub const Builder = struct {
     gpa: std.mem.Allocator,
+    lib: *const Library,
     n: u32,
     /// Per row, the net name it came from ("" for internal unknowns).
     /// Borrowed: copied into the circuit's intern table at the freeze.
     node_labels: std.ArrayList([]const u8),
     protos: std.ArrayList(Proto),
+    /// Library type of each proto, parallel to `protos`.
+    proto_types: std.ArrayList(DeviceType) = .empty,
     // Per-node subcircuit instance (0 = top-level, MULTI_INSTANCE = coupling).
     // Populated by tagNodeInstance(); empty if no subcircuit structure.
     node_instance: std.ArrayList(u32) = .empty,
@@ -69,13 +70,14 @@ pub const Builder = struct {
     /// is instantiated through `vt.proto_add` into the device object's own
     /// store, which this compilation unit deliberately cannot name. Counted for
     /// EVERY add, card or not, so the ordinal stays in lockstep with the store.
-    card_counts: std.StringHashMapUnmanaged(u32) = .empty,
+    card_counts: std.ArrayList(u32) = .empty,
 
-    pub fn init(gpa: std.mem.Allocator) !Builder {
+    pub fn init(gpa: std.mem.Allocator, lib: *const Library) !Builder {
         var labels: std.ArrayList([]const u8) = .empty;
         try labels.append(gpa, "0");
         return .{
             .gpa = gpa,
+            .lib = lib,
             .n = 1,
             .node_labels = labels,
             .protos = .empty,
@@ -90,6 +92,7 @@ pub const Builder = struct {
 
     inline fn deinitStorage(self: *Builder) void {
         self.protos.deinit(self.gpa);
+        self.proto_types.deinit(self.gpa);
         self.cards.deinit(self.gpa);
         self.card_counts.deinit(self.gpa);
         self.node_labels.deinit(self.gpa);
@@ -228,46 +231,41 @@ pub const Builder = struct {
         var all: [n_u]u32 = undefined;
         inline for (0..D.num_ports) |p| all[p] = nodes[p];
 
-        {
-            const gop = try self.card_counts.getOrPut(self.gpa, comptime shortTypeName(D));
-            if (!gop.found_existing) gop.value_ptr.* = 0;
-            if (self.card.len != 0) try self.cards.append(self.gpa, .{
-                .type_name = comptime shortTypeName(D),
-                .index = gop.value_ptr.*,
-                .name = self.card,
-            });
-            gop.value_ptr.* += 1;
-        }
-
         // Reach the device through its own object's vtable: naming
         // `D.collapse` or `ProtoStore(D)` here would compile the device body
-        // into the executable a second time (analysis/eval.zig).
-        const vt = if (comptime devices.modelName(D)) |name|
-            devices.vtable(name)
-        else if (@hasDecl(D, "deviceVtable"))
-            D.deviceVtable()
-        else
-            @compileError("custom models must provide a neutral deviceVtable binding");
+        // into the executable a second time (device/eval.zig).
+        const t = comptime Library.builtin(device.modelName(D) orelse
+            @compileError(@typeName(D) ++ " is not a catalog device"));
+        const vt = self.lib.vtable(t);
+        {
+            const i = @intFromEnum(t);
+            if (self.card_counts.items.len <= i)
+                try self.card_counts.appendNTimes(self.gpa, 0, i + 1 - self.card_counts.items.len);
+            const ordinal = &self.card_counts.items[i];
+            if (self.card.len != 0) try self.cards.append(self.gpa, .{ .type = t, .index = ordinal.*, .name = self.card });
+            ordinal.* += 1;
+        }
         if (comptime n_u > D.num_ports) {
             var col: [n_u]i32 = @splat(-1);
             if (vt.collapse) |collapse| collapse(@ptrCast(&model), @ptrCast(&instance), &col);
             for (D.num_ports..n_u) |u|
                 all[u] = if (col[u] >= 0) all[@intCast(col[u])] else try self.addNode();
         }
-        const proto = try self.dynProto(vt);
+        const proto = try self.protoOf(t);
         try vt.proto_add(proto.ctx, self.gpa, @ptrCast(&model), @ptrCast(&instance), &all).unwrap();
     }
 
-    /// Find-or-create the type-erased proto for a runtime (dlopen'd) device.
-    /// Identity: the vtable's static name pointer — same trick as
-    /// protoStore's @typeName pointer identity for comptime devices.
-    pub fn dynProto(self: *Builder, vt: *const batch.DeviceVtable) !Proto {
-        for (self.protos.items) |p| {
-            if (p.type_name.ptr == vt.name.ptr) return p;
+    /// Find-or-create the one proto (future batch) of device type `t`.
+    pub fn protoOf(self: *Builder, t: DeviceType) !Proto {
+        for (self.protos.items, self.proto_types.items) |p, pt| {
+            if (pt == t) return p;
         }
-        const proto = try vt.proto_create(self.gpa).unwrap();
-        try self.protos.append(self.gpa, proto);
-        return proto;
+        try self.protos.ensureUnusedCapacity(self.gpa, 1);
+        try self.proto_types.ensureUnusedCapacity(self.gpa, 1);
+        const p = try self.lib.vtable(t).proto_create(self.gpa).unwrap();
+        self.protos.appendAssumeCapacity(p);
+        self.proto_types.appendAssumeCapacity(t);
+        return p;
     }
 
     /// `compilePerm` for callers that recorded no node or branch row.
@@ -319,10 +317,10 @@ pub const Builder = struct {
         }
         intern_offs[n] = off;
 
-        var ckt = try problem.Circuit.init(gpa, self.n, intern_bytes, intern_offs, self.protos.items, bbd.info);
+        var ckt = try Circuit.freeze(gpa, self.n, intern_bytes, intern_offs, self.protos.items, self.proto_types.items, bbd.info);
         ckt.needs_tran_op = self.needs_tran_op;
 
-        self.deinitStorage(); // Circuit.init consumed the protos
+        self.deinitStorage(); // Circuit.freeze consumed the protos
 
         return ckt;
     }
@@ -334,75 +332,9 @@ pub const Builder = struct {
 
 /// The runtime-loaded (.hdl) module a card's first positional names, directly
 /// or through its `.model` card's kind (`.model psp103n psp103va ...`).
-fn dynVtable(dev: Device) ?*const batch.DeviceVtable {
-    if (vaload.isEmpty()) return null;
+fn loadedType(lib: *const Library, dev: Device) ?DeviceType {
     const name = positionalName(dev, 0) orelse return null;
-    return vaload.get(name) orelse if (dev.model) |m| vaload.get(m.kind) else null;
-}
-
-/// ngspice IOPR alternate parameter spellings — card keys accepted for a model
-/// field of the canonical name. Comptime: drives applyKv's fallback probe.
-/// A field may carry SEVERAL keys (dio.c answers to `cjo`, `cj0` and `cj`), so
-/// this returns every match, not the first.
-///
-/// The table is GLOBAL across every comptime device, so a pair is only safe
-/// when no other model declares the alias as a parameter in its own right.
-/// That is why dio.c's `js`->`is` is NOT here: mos1/mos2/mos3/mos6/mos9 declare
-/// both `is` (bulk junction current) and `js` (its area density), and the pair
-/// would smear a MOS card's JS into IS as well.
-fn aliasesOf(comptime field: []const u8) []const []const u8 {
-    const pairs = [_][2][]const u8{
-        .{ "vt0", "vto" }, .{ "vto", "vt0" },
-        .{ "vaf", "va" },  .{ "VAR", "vb" },
-        .{ "ikf", "ik" },  .{ "cjs", "ccs" },
-        // BJT depletion-cap alternates (bjt.c IOPR).
-        .{ "vje", "pe" },  .{ "mje", "me" },
-        .{ "vjc", "pc" },  .{ "mjc", "mc" },
-        .{ "vjs", "ps" },  .{ "mjs", "ms" },
-        // mesa.va channel depth: ngspice's card key is `d`, which Verilog-A
-        // cannot use as a parameter name (drain port).
-        .{ "dch", "d" },
-        // `u0`/`u1`/`u10` are Zig primitive type names, so VerA emits the
-        // Model fields with its `Z` escape; card keys stay unescaped.
-          .{ "u0Z", "u0" },
-        .{ "u1Z", "u1" },  .{ "u10Z", "u10" },
-        .{ "pubZ", "pub" }, // BSIM mobility bin coefficient; pub is a Zig keyword.
-        // Diode alternates (dio.c IOPR). Only diode.va/vdmos.va declare `cjo`
-        // and `vj`, and nothing declares `trs`/`cta`/`tpb` but diode.va, so
-        // none of these can collide with another model's own parameter.
-        .{ "tnom", "tref" },
-        .{ "cjo", "cj0" },
-        .{ "cjo", "cj" },
-        .{ "vj", "pb" },
-        .{ "trs", "trs1" },
-        .{ "cta", "ctc" },
-        .{ "tpb", "tvj" },
-    };
-    comptime {
-        var out: [pairs.len][]const u8 = undefined;
-        var n: usize = 0;
-        for (pairs) |p| {
-            if (std.mem.eql(u8, field, p[0])) {
-                out[n] = p[1];
-                n += 1;
-            }
-        }
-        const frozen = out;
-        return frozen[0..n];
-    }
-}
-
-fn applyKvDyn(set: *const fn ([*]u8, []const u8, f64) bool, dest: [*]u8, kv: []const Kv) !void {
-    for (kv) |item| {
-        if (valueNumber(item.value)) |num| {
-            if (set(dest, item.key, num)) continue;
-        }
-        // The bool ABI distinguishes success from unknown/invalid together.
-        // Zero probes field existence only on a failed write. A recognized
-        // invalid value immediately discards this construction blob, so the
-        // probe's mutation never reaches a prepared circuit.
-        if (set(dest, item.key, 0)) return error.InvalidParameterValue;
-    }
+    return lib.find(name) orelse if (dev.model) |m| lib.find(m.kind) else null;
 }
 
 /// Write a POSITIONAL card value (`R1 a b 1k`, `F1 … 2.0`) to the named
@@ -535,25 +467,26 @@ pub const NetBuilder = struct {
     /// bound through the dyn vtable. Param blobs live on the arena until
     /// proto_add copies them.
     pub fn addDynDevices(self: *NetBuilder) !void {
-        if (vaload.isEmpty()) return;
         const b = self.b;
         const arena = self.arena;
+        if (b.lib.names.items.len == Library.builtin_count) return;
         for (self.nl.order) |e| {
             const dev = self.nl.device(e);
-            const vt = dynVtable(dev) orelse continue;
+            const t = loadedType(b.lib, dev) orelse continue;
+            const vt = b.lib.vtable(t);
 
             const mblob = try arena.alignedAlloc(u8, .@"16", vt.model_size);
             vt.init_model(mblob.ptr);
-            if (dev.model) |m| try applyKvDyn(vt.set_model_param, mblob.ptr, m.kv);
+            if (dev.model) |m| try bindKv(vt.bind_model, mblob.ptr, m.kv);
             // Card kv overrides the .model card. VA parameters are Model fields,
             // so card values go to the model blob too.
-            try applyKvDyn(vt.set_model_param, mblob.ptr, dev.kv);
+            try bindKv(vt.bind_model, mblob.ptr, dev.kv);
             // LRM 6.3.4/3.4.5: recompute dependent parameters and localparams after
             // the last write and before `collapse`/`proto_add` read the blob.
             if (vt.derive) |df| df(mblob.ptr);
             const iblob = try arena.alignedAlloc(u8, .@"16", vt.instance_size);
             vt.init_instance(iblob.ptr);
-            try applyKvDyn(vt.set_instance_param, iblob.ptr, dev.kv);
+            try bindKv(vt.bind_instance, iblob.ptr, dev.kv);
 
             // Same port/internal-node policy as Builder.addDevice.
             const nodes = try arena.alloc(u32, vt.n_u);
@@ -567,7 +500,7 @@ pub const NetBuilder = struct {
                     nodes[u] = if (col[u] >= 0) nodes[@intCast(col[u])] else try b.addNode();
             }
 
-            const proto = try b.dynProto(vt);
+            const proto = try b.protoOf(t);
             try vt.proto_add(proto.ctx, b.gpa, mblob.ptr, iblob.ptr, nodes.ptr).unwrap();
         }
     }
@@ -750,7 +683,7 @@ pub const NetBuilder = struct {
         defer self.b.card = "";
         // HDL devices are added by addDynDevices after the freeze-order pass.
         // An opaque model's nodes count as a DC path for the topology check.
-        if (dynVtable(dev) != null) {
+        if (loadedType(self.b.lib, dev) != null) {
             try self.topoMark(dev, .dc, 0);
             return;
         }
@@ -1228,7 +1161,7 @@ pub const NetBuilder = struct {
         const tri = n_lines * (n_lines + 1) / 2;
         if (nr != tri or nl != tri or nc != tri or (ng != 0 and ng != tri) or !std.math.isFinite(length) or length <= 0)
             return error.UnsupportedTransmissionLineParameters;
-        inline for (.{ devices.models.cpl_native_2, devices.models.cpl_native_3, devices.models.cpl_native_4 }) |D| {
+        inline for (.{ device.models.cpl_native_2, device.models.cpl_native_3, device.models.cpl_native_4 }) |D| {
             const N = D.num_ports / 2;
             if (n_lines == N) {
                 var model: D.Model = .{ .length = length };
@@ -1409,8 +1342,8 @@ pub const nom_temp_field = "nom_temp__";
 fn deriveModel(comptime D: type, model: *D.Model, nom_temp_c: f64) void {
     if (comptime @hasField(D.Model, nom_temp_field))
         @field(model, nom_temp_field) = nom_temp_c;
-    if (comptime devices.modelName(D)) |name| {
-        if (devices.vtable(name).derive) |f| f(@ptrCast(model));
+    if (comptime device.modelName(D)) |name| {
+        if (device.vtable(name).derive) |f| f(@ptrCast(model));
     } else if (comptime @hasDecl(D, "derive")) D.derive(model);
 }
 
@@ -2031,76 +1964,30 @@ fn numericParameter(kv: []const Kv, key: []const u8) !?f64 {
     return null;
 }
 
+/// Card pairs onto a built-in's Model or Instance, through the device's own
+/// binder (`DeviceVtable.bind_model`), the one every loaded device uses too.
 fn applyKv(target: anytype, kv: []const Kv) !void {
-    const T = @TypeOf(target.*);
-    // BSIMSOI's Model has ~1600 fields and each now runs a comptime
-    // char-lowering loop on top of the aliasesOf scan.
-    @setEvalBranchQuota(1_000_000);
-    inline for (@typeInfo(T).@"struct".fields) |field| {
-        if (comptime isScalarAssignable(field.type)) {
-            // Card keys are lowercased at parse; VA fields keep their spec
-            // spelling (BSIMSOI `VTH0`), so match the lowercased field name.
-            const key = comptime blk: {
-                var buf: [field.name.len]u8 = undefined;
-                for (field.name, 0..) |c, i| buf[i] = std.ascii.toLower(c);
-                const frozen = buf;
-                break :blk frozen;
-            };
-            if (try numericParameter(kv, &key)) |num| {
-                @field(target.*, field.name) = try castField(field.type, num);
-                markGiven(target, field.name);
-            } else {
-                // ngspice IOPR alternate spellings: vt0|vto, vaf|va, var|vb,
-                // ikf|ik, cjs|ccs (bjt.c iopr table), cjo|cj0|cj (dio.c).
-                inline for (comptime aliasesOf(field.name)) |alias| {
-                    if (try numericParameter(kv, alias)) |num| {
-                        @field(target.*, field.name) = try castField(field.type, num);
-                        markGiven(target, field.name);
-                    }
-                }
-            }
-        }
+    const name, const is_model = comptime ownerOf(@TypeOf(target.*));
+    const vt = device.vtable(name);
+    try bindKv(if (is_model) vt.bind_model else vt.bind_instance, @ptrCast(target), kv);
+}
+
+fn bindKv(bind: *const fn ([*]u8, []const batch.Param) batch.BindStatus, blob: [*]u8, kv: []const Kv) !void {
+    var fallback = std.heap.stackFallback(4096, std.heap.smp_allocator);
+    const a = fallback.get();
+    const params = try a.alloc(batch.Param, kv.len);
+    defer a.free(params);
+    for (kv, params) |item, *p| p.* = .{ .key = item.key, .value = valueNumber(item.value) };
+    try bind(blob, params).unwrap();
+}
+
+/// The catalog device whose Model (true) or Instance (false) `T` is.
+fn ownerOf(comptime T: type) struct { []const u8, bool } {
+    for (device.catalog) |e| {
+        if (@hasDecl(e.type, "Model") and e.type.Model == T) return .{ e.name, true };
+        if (@hasDecl(e.type, "Instance") and e.type.Instance == T) return .{ e.name, false };
     }
-}
-
-/// §9.19 `$param_given`: VerA emits a `<name>__given: bool = false` companion
-/// for every parameter the model queries. Binding a card value without raising
-/// the flag leaves the model in its "defaulted" branch — bsim3's b3temp-style
-/// derived defaults (k1/k2/vth0/vfb interdependence) mis-fire, and mos1's
-/// NSUB-driven overrides never ran. No-op for fields without a companion.
-fn markGiven(target: anytype, comptime field: []const u8) void {
-    const T = @TypeOf(target.*);
-    if (comptime @hasField(T, field ++ "__given"))
-        @field(target.*, field ++ "__given") = true;
-}
-
-fn isScalarAssignable(comptime T: type) bool {
-    return switch (@typeInfo(T)) {
-        .float, .int, .bool => true,
-        else => false,
-    };
-}
-
-fn castField(comptime T: type, value: f64) !T {
-    if (!std.math.isFinite(value)) return error.NonFiniteParameter;
-    return switch (@typeInfo(T)) {
-        .float => blk: {
-            const converted: T = @floatCast(value);
-            if (!std.math.isFinite(converted)) return error.ParameterOutOfRange;
-            break :blk converted;
-        },
-        .int => |info| blk: {
-            // An exclusive power-of-two bound stays exact when maxInt(i64)
-            // would round upward in f64.
-            const upper: f64 = comptime std.math.pow(f64, 2, info.bits - @intFromBool(info.signedness == .signed));
-            const lower: f64 = if (info.signedness == .signed) -upper else 0;
-            const truncated = @trunc(value);
-            if (truncated != value or truncated < lower or truncated >= upper) return error.ParameterOutOfRange;
-            break :blk @intFromFloat(value);
-        },
-        .bool => value != 0,
-        else => @compileError("unsupported numeric field type"),
-    };
+    @compileError(@typeName(T) ++ " is no catalog device's Model or Instance");
 }
 
 // Private implementation access for the frontend test suite.
@@ -2110,5 +1997,5 @@ pub const test_access = if (@import("builtin").is_test) .{
     .pwlCapacity = pwlCapacity,
     .Wave = Wave,
     .castField = castField,
-    .applyKvDyn = applyKvDyn,
+    .bindKv = bindKv,
 } else {};

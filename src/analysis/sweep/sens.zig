@@ -12,7 +12,7 @@
 //! Cost: O(nnz + N_params * n) vs old O(N_params * Newton_iters * nnz).
 const std = @import("std");
 const root = @import("../types.zig");
-const converger = @import("solvers").converger;
+const converger = @import("solver").converger;
 
 const W = std.simd.suggestVectorLength(f64) orelse 8;
 
@@ -35,7 +35,7 @@ pub const SensEntry = struct {
     principal: bool = false,
 };
 
-pub const Options = @import("requests").Sens;
+pub const Options = @import("core").query.Sens;
 
 const copySimd = root.copySimd;
 
@@ -120,7 +120,7 @@ pub fn solve(
         p.ptr.set(orig + delta_req);
         defer {
             p.ptr.set(orig);
-            ckt.recomputeType(p.ptr.device_type) catch unreachable; // restores the checked original parameter
+            ckt.recomputeType(p.ptr.type) catch unreachable; // restores the checked original parameter
         }
         // A parameter whose NOMINAL value collapses an internal node (gummel_poon
         // RC/RE = 0, mos1 RD/RS = 0, ...) is re-wired by the +1e-12 floor in
@@ -131,7 +131,7 @@ pub fn solve(
         // Report 0 rather than failing the whole analysis; ngspice's sens
         // never perturbs a topology parameter at all (cktsens.c drives the
         // per-device analytic sensitivity routines, not a generic FD).
-        ckt.recomputeType(p.ptr.device_type) catch |e| switch (e) {
+        ckt.recomputeType(p.ptr.type) catch |e| switch (e) {
             error.TopologyChanged => {
                 entry.* = .{
                     .device_name = p.device_name,
@@ -198,10 +198,10 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     for (refs, params) |ref, *p| {
         p.* = .{
             .ptr = ref,
-            .device_name = if (root.CardRef.lookup(opts.cards, ref)) |card|
+            .device_name = if (root.CardRef.lookup(opts.cards, ref.type, ref.index)) |card|
                 try scratch.dupe(u8, card)
             else
-                try std.fmt.allocPrint(scratch, "{s}#{d}", .{ ref.device_type, ref.index }),
+                try std.fmt.allocPrint(scratch, "{s}#{d}", .{ ctx.circuit.typeName(ref.type), ref.index }),
             .param_name = ref.param_name,
         };
         n_named += 1;

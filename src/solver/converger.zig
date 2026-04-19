@@ -15,7 +15,7 @@
 const std = @import("std");
 const direct = @import("direct.zig");
 const newton_core = @import("newton_core.zig");
-const BbdInfo = @import("numerics").BbdInfo;
+const BbdInfo = @import("core").numerics.BbdInfo;
 
 pub const Strategy = enum { newton, jfnk };
 
@@ -111,7 +111,7 @@ fn Deref(comptime P: type) type {
 // Tolerances — user-facing accuracy profile
 // ---------------------------------------------------------------------------
 
-pub const Tolerances = @import("numerics").Tolerances;
+pub const Tolerances = @import("core").numerics.Tolerances;
 
 pub fn optionsFromTolerances(tol: Tolerances, max_iter_override: ?u16) Options {
     return .{

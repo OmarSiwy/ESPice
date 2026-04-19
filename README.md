@@ -155,10 +155,14 @@ one instruction-level before/after measured so far.
 
 ```
 ├── src/
+│   ├── core/         # Shared data: ids, numerics, queries, deck, results
+│   ├── solver/       # Linear and nonlinear solvers, private to analysis
+│   ├── device/       # Device ABI, evaluator, HDL loading, frozen Circuit
 │   ├── frontend/     # Netlist parsing and circuit construction
-│   ├── analysis/     # The analysis drivers; solvers/ is private to it
-│   ├── problem/      # The owning API, and the C ABI behind include/espice.h
-│   ├── output/       # Result writers
+│   ├── analysis/     # The analysis drivers
+│   ├── output/       # Result encoders
+│   ├── espice.zig    # The owning API
+│   ├── c_api.zig     # The C ABI behind include/espice.h
 │   └── main.zig      # CLI
 ├── models/           # Verilog-A device sources, compiled at build time
 ├── tests/            # 616 fixtures, the cross-module suites and the bench runner
@@ -166,8 +170,8 @@ one instruction-level before/after measured so far.
 └── ref/              # SIMD strategy reference
 ```
 
-`frontend` and `analysis` are siblings; neither imports the other. `problem`
-composes both plus `output`, and `main` sees only `problem` and `output`.
+`frontend` and `analysis` are siblings; neither imports the other. `espice`
+composes both plus `output`, and `main` sees only `espice`.
 
 `zig build test` runs every suite, and `zig build --help` lists the per-area
 steps. To co-develop VerA or Gompute, point its entry in `build.zig.zon` back at

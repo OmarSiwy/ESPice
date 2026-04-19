@@ -8,10 +8,10 @@
 //!   DC   A = G;   TRAN  A = G + a*C;   AC  A = G + jwC.
 
 const std = @import("std");
-const device_ir = @import("device_ir");
-const Prepared = @import("problem_types").Circuit;
+const device_ir = @import("device").abi;
+const Prepared = @import("device").Circuit;
 const progress_api = @import("progress.zig");
-const solvers = @import("solvers");
+const solvers = @import("solver");
 
 const Batch = device_ir.Batch;
 const Planes = device_ir.Planes;
@@ -47,8 +47,8 @@ pub const GROUND: u32 = 0;
 // Re-exports from solvers
 // ---------------------------------------------------------------------------
 
-pub const BbdBlock = @import("numerics").BbdBlock;
-pub const BbdInfo = @import("numerics").BbdInfo;
+pub const BbdBlock = @import("core").numerics.BbdBlock;
+pub const BbdInfo = @import("core").numerics.BbdInfo;
 
 // ---------------------------------------------------------------------------
 // Utility types
@@ -133,6 +133,8 @@ pub const Circuit = struct {
     // -- hot: eval dispatch --
     diag_slots: []u32,
     batches: []Batch,
+    /// Library type of each batch (borrowed topology).
+    batch_types: []const device_ir.DeviceType,
 
     /// true ⇒ unknown i is an MNA branch current (KVL row); false ⇒ node
     /// voltage (KCL row). Read by the converger's per-row tolerance.
@@ -168,7 +170,7 @@ pub const Circuit = struct {
 
     // -- cold: structure --
     bbd: ?BbdInfo = null,
-    solver_execution: @import("numerics").Execution = .{},
+    solver_execution: @import("core").numerics.Execution = .{},
     /// Executor-owned parallel evaluation context. Null ⇒ serial eval.
     par_eval: ?*ParEval = null,
     /// Executor-owned persistent GPU context (mechanism in gpu.zig).
@@ -269,6 +271,7 @@ pub const Circuit = struct {
             .q_vec = q_vec,
             .diag_slots = data.diag_slots,
             .batches = batches,
+            .batch_types = data.batch_types,
             .current_row = data.current_row,
             .has_charge = data.has_charge,
             .has_state_q = data.has_state_q,
@@ -302,6 +305,7 @@ pub const Circuit = struct {
             gpa.free(self.row_idx);
             gpa.free(self.diag_slots);
             gpa.free(self.current_row);
+            gpa.free(self.batch_types);
             if (self.bbd) |bbd| gpa.free(bbd.blocks);
             gpa.free(self.intern_bytes);
             gpa.free(self.intern_offs);
@@ -755,26 +759,17 @@ pub const Circuit = struct {
     /// first point of every inner sweep, which is the point right after the
     /// outer loop may have moved temperature, and narrows only thereafter.
     ///
-    /// `Batch.type_name` and `ParamRef.device_type` are both `baseName(D)`
-    /// (`Vsource`). No match at all falls back to the full walk: a silently
-    /// skipped re-derivation is a wrong answer, not a slow one.
-    pub fn recomputeType(self: *Circuit, type_name: []const u8) error{TopologyChanged}!void {
+    /// `t` is `ParamRef.type`, stamped by `collectParams` from `batch_types`.
+    pub fn recomputeType(self: *Circuit, t: device_ir.DeviceType) error{TopologyChanged}!void {
         self.lin.valid = false;
         self.has_baseline = false;
         self.markGpuDirty();
-        var hit = false;
-        for (self.batches) |b| {
-            if (!std.mem.eql(u8, b.type_name, type_name)) continue;
-            hit = true;
+        for (self.batches, self.batch_types) |b, bt| {
+            if (bt != t) continue;
             if (b.hooks.recompute) |f| {
                 if (!f(b.ctx)) return error.TopologyChanged;
             }
         }
-        if (!hit) for (self.batches) |b| {
-            if (b.hooks.recompute) |f| {
-                if (!f(b.ctx)) return error.TopologyChanged;
-            }
-        };
     }
 
     pub fn applyAttempt(self: *Circuit, lambda: f64) void {
@@ -796,9 +791,24 @@ pub const Circuit = struct {
         const gpa = self.gpa;
         var list: std.ArrayList(ParamRef) = .empty;
         errdefer list.deinit(gpa);
-        for (self.batches) |b| try b.hooks.collect_params(b.ctx, gpa, &list).unwrap();
+        try collectTyped(self.batches, self.batch_types, gpa, &list);
         self.param_refs = try list.toOwnedSlice(gpa);
         return self.param_refs.?;
+    }
+
+    /// Display name of device type `t` (its batch's short type name).
+    pub fn typeName(self: *const Circuit, t: device_ir.DeviceType) []const u8 {
+        for (self.batches, self.batch_types) |b, bt| if (bt == t) return b.type_name;
+        return "";
+    }
+
+    /// Every batch's parameters, each stamped with its batch's Library type.
+    pub fn collectTyped(batches: []const Batch, types: []const device_ir.DeviceType, gpa: std.mem.Allocator, list: *std.ArrayList(ParamRef)) !void {
+        for (batches, types) |b, t| {
+            const first = list.items.len;
+            try b.hooks.collect_params(b.ctx, gpa, list).unwrap();
+            for (list.items[first..]) |*ref| ref.type = t;
+        }
     }
 
     /// Every device's noise generators at state vector `x`, PSDs included —
@@ -831,9 +841,10 @@ pub fn init(
     intern_bytes: []u8,
     intern_offs: []u32,
     protos: []const Proto,
+    types: []const device_ir.DeviceType,
     bbd: ?BbdInfo,
 ) !Circuit {
-    return Circuit.fromPrepared(try Prepared.init(gpa, n, intern_bytes, intern_offs, protos, bbd));
+    return Circuit.fromPrepared(try Prepared.freeze(gpa, n, intern_bytes, intern_offs, protos, types, bbd));
 }
 
 // ---------------------------------------------------------------------------
@@ -841,8 +852,8 @@ pub fn init(
 // above and below Circuit share one copy. Re-exported for the 50+ callers.
 // ---------------------------------------------------------------------------
 
-pub const zeroSimd = @import("numerics").zeroSimd;
-pub const copySimd = @import("numerics").copySimd;
+pub const zeroSimd = @import("core").numerics.zeroSimd;
+pub const copySimd = @import("core").numerics.copySimd;
 
 /// Independent CSC entries: out = G + alpha*C. W=1 is also the tail and oracle.
 pub fn combinePlanes(comptime W: usize, out: []f64, g: []const f64, c: []const f64, alpha: f64) void {

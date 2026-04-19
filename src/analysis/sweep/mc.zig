@@ -8,7 +8,7 @@
 const std = @import("std");
 const root = @import("../types.zig");
 const lanes = @import("lanes.zig");
-const converger = @import("solvers").converger;
+const converger = @import("solver").converger;
 
 // ============================================================================
 // Parameter variation specification
@@ -37,7 +37,7 @@ pub const ParamVar = struct {
 // Options
 // ============================================================================
 
-pub const Options = @import("requests").Mc;
+pub const Options = @import("core").query.Mc;
 
 // ============================================================================
 // Per-lane parameter draw — the ONE place the distributions are sampled

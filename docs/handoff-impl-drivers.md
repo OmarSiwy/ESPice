@@ -2,7 +2,7 @@
 
 Branch `worktree-agent-a636125ab705ffa04`, based on main `4614f9a`. Scope:
 `src/analysis/{dc,ac,eigen,post,sweep,tran,pss}/`, their tests, the dead
-GpuHook fields, and add-only vector helpers in `src/problem/numerics.zig`.
+GpuHook fields, and add-only vector helpers in `src/core/numerics.zig`.
 Every change is meant to be byte-identical; nothing here moves a number.
 
 ## Gate

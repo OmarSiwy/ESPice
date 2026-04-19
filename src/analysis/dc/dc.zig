@@ -2,10 +2,10 @@
 //! warm-started Newton per point on A = G, and records the probes.
 const std = @import("std");
 const root = @import("../types.zig");
-const converger = @import("solvers").converger;
+const converger = @import("solver").converger;
 const op = @import("op.zig");
 
-pub const Options = @import("requests").Dc;
+pub const Options = @import("core").query.Dc;
 
 /// Contract entry: sweep the primary source dc value, one warm-started
 /// solve per point. Swept value restored afterwards so the cached operating
@@ -98,20 +98,21 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
 fn sweepColumn(target: Options.SweepTarget) []const u8 {
     if (target.is_temp) return "temp-sweep";
-    const named = std.StaticStringMap([]const u8).initComptime(.{
+    const Library = @import("device").Library;
+    inline for (.{
         .{ "isource", "i(i-sweep)" },
         .{ "resistor", "res-sweep" },
         .{ "capacitor", "cap-sweep" },
         .{ "inductor", "ind-sweep" },
-    });
-    return named.get(target.type_name) orelse "v(v-sweep)";
+    }) |pair| if (target.type == Library.builtin(pair[0])) return pair[1];
+    return "v(v-sweep)";
 }
 
 fn findTarget(refs: []const root.ParamRef, want: Options.SweepTarget) ?root.ParamRef {
     for (refs) |ref| {
         if (ref.index == want.index and
             std.mem.eql(u8, ref.param_name, want.param_name) and
-            std.mem.eql(u8, ref.device_type, want.type_name)) return ref;
+            ref.type == want.type) return ref;
     }
     return null;
 }
@@ -155,7 +156,7 @@ fn runSerial(
         // outer `.dc ... temp` loop may just have changed it, possibly
         // re-wiring a device (see `Circuit.recomputeType`). So point 0 takes
         // the full walk and the rest narrow.
-        if (pt == 0) try ckt.recompute() else try ckt.recomputeType(t.device_type);
+        if (pt == 0) try ckt.recompute() else try ckt.recomputeType(t.type);
         try ckt.computeBaseline();
 
         var converged = false;

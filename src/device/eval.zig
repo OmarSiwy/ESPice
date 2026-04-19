@@ -404,7 +404,7 @@ pub fn gpuJacFloat(comptime D: type) type {
     return if (@hasDecl(D, "jac_f32") and D.jac_f32) f32 else f64;
 }
 
-const ir = @import("device_ir");
+const ir = @import("device_abi");
 pub const GROUND = ir.GROUND;
 pub const StateCtlOp = ir.StateCtlOp;
 pub const SimState = ir.SimState;
@@ -1622,7 +1622,6 @@ pub fn DeviceBatch(comptime D: type) type {
         }
 
         fn appendParams(comptime T: type, items: anytype, comptime is_instance: bool, gpa: std.mem.Allocator, list: *std.ArrayList(ParamRef)) error{OutOfMemory}!void {
-            const type_name = comptime baseName(D);
             comptime var field_idx: usize = 0;
             inline for (@typeInfo(T).@"struct".fields) |field| {
                 if (comptime paramField(T, field)) {
@@ -1638,7 +1637,6 @@ pub fn DeviceBatch(comptime D: type) type {
                                 .{ .f32 = &@field(it, field.name) }
                             else
                                 .{ .f64 = &@field(it, field.name) },
-                            .device_type = type_name,
                             .param_name = field.name,
                             .index = @intCast(idx),
                             .is_instance = is_instance,
@@ -1862,7 +1860,7 @@ pub fn hasCtlKernel(comptime D: type) bool {
 }
 
 /// Device D's type name without its namespace (`vsource.Vsource` -> `Vsource`):
-/// the batch `type_name`, the `ParamRef.device_type` and every kernel symbol
+/// the batch `type_name` and every kernel symbol
 /// suffix.
 pub fn baseName(comptime D: type) []const u8 {
     const full = @typeName(D);
@@ -2336,8 +2334,8 @@ fn Impl(comptime D: type, comptime device_name: []const u8) type {
             .instance_size = @sizeOf(D.Instance),
             .init_model = initBlob(D.Model),
             .init_instance = initBlob(D.Instance),
-            .set_model_param = setParam(D.Model),
-            .set_instance_param = setParam(D.Instance),
+            .bind_model = bindFn(D.Model),
+            .bind_instance = bindFn(D.Instance),
             .derive = if (@hasDecl(D, "derive")) deriveFn else null,
             .collapse = if (@hasDecl(D, "collapse")) collapseFn else null,
             .proto_create = protoCreate,
@@ -2353,65 +2351,10 @@ fn Impl(comptime D: type, comptime device_name: []const u8) type {
             }.f;
         }
 
-        fn setParam(comptime T: type) *const fn ([*]u8, []const u8, f64) bool {
+        fn bindFn(comptime T: type) *const fn ([*]u8, []const ir.Param) ir.BindStatus {
             return struct {
-                fn f(dest: [*]u8, param: []const u8, value: f64) bool {
-                    @setEvalBranchQuota(10_000 + 10 * @typeInfo(T).@"struct".fields.len);
-                    if (!std.math.isFinite(value)) return false;
-                    const p: *T = @ptrCast(@alignCast(dest));
-                    inline for (@typeInfo(T).@"struct".fields) |field| {
-                        switch (@typeInfo(field.type)) {
-                            .float => if (matches(param, field.name)) {
-                                const converted: field.type = @floatCast(value);
-                                if (!std.math.isFinite(converted)) return false;
-                                @field(p, field.name) = converted;
-                                markGiven(p, field.name);
-                                return true;
-                            },
-                            .int => |info| if (matches(param, field.name)) {
-                                if (@trunc(value) != value) return false;
-                                if (info.bits == 0) {
-                                    if (value != 0) return false;
-                                } else {
-                                    // The exclusive power-of-two bound is exact
-                                    // in f64; floatFromInt(maxInt(i64/u64)) rounds
-                                    // up and would admit an overflowing value.
-                                    const signed = info.signedness == .signed;
-                                    const upper = comptime std.math.pow(f64, 2, @floatFromInt(info.bits - @intFromBool(signed)));
-                                    if (value >= upper or value < (if (signed) -upper else 0)) return false;
-                                }
-                                @field(p, field.name) = @intFromFloat(value);
-                                markGiven(p, field.name);
-                                return true;
-                            },
-                            .bool => if (matches(param, field.name)) {
-                                @field(p, field.name) = value != 0;
-                                return true;
-                            },
-                            else => {},
-                        }
-                    }
-                    return false;
-                }
-
-                /// A VA parameter whose name collides with a Zig primitive
-                /// (`u0`, `type`, ...) is emitted by VerA's naming.zig with a
-                /// trailing `Z` escape marker; the card key keeps the VA
-                /// spelling, so match it against the unescaped name too.
-                fn matches(param: []const u8, comptime field: []const u8) bool {
-                    if (std.ascii.eqlIgnoreCase(param, field)) return true;
-                    if (comptime field.len > 1 and field[field.len - 1] == 'Z')
-                        return std.ascii.eqlIgnoreCase(param, field[0 .. field.len - 1]);
-                    return false;
-                }
-
-                /// §9.19 `$param_given` companion (`<name>__given: bool`),
-                /// emitted by VerA only for queried parameters. Raise it with
-                /// the value or derived-default logic runs as if the card
-                /// said nothing.
-                fn markGiven(p: *T, comptime field: []const u8) void {
-                    if (comptime @hasField(T, field ++ "__given"))
-                        @field(p, field ++ "__given") = true;
+                fn f(dest: [*]u8, params: []const ir.Param) ir.BindStatus {
+                    return ir.bind.apply(@as(*T, @ptrCast(@alignCast(dest))), params);
                 }
             }.f;
         }

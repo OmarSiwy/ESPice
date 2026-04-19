@@ -5,7 +5,9 @@ pub const Dialect = preparation.Dialect;
 pub const prepare = preparation.prepare;
 pub const parseDialect = preparation.parseDialect;
 pub const build = preparation.build;
+pub const Prepared = preparation.Prepared;
 pub const resolveQueries = preparation.resolveQueries;
+pub const Library = @import("device").Library;
 
 test {
     _ = @import("tests/builder.zig");

@@ -25,11 +25,11 @@ const std = @import("std");
 const root = @import("../types.zig");
 const simdZero = root.zeroSimd;
 const simdCopy = root.copySimd;
-const num = @import("numerics");
-const converger = @import("solvers").converger;
+const num = @import("core").numerics;
+const converger = @import("solver").converger;
 const integrator = @import("../tran/integrator.zig");
-const dense_lu = @import("solvers").dense_lu;
-const Gmres = @import("solvers").gmres.Gmres(f64);
+const dense_lu = @import("solver").dense_lu;
+const Gmres = @import("solver").gmres.Gmres(f64);
 
 const W = std.simd.suggestVectorLength(f64) orelse 8;
 const V = @Vector(W, f64);
@@ -38,7 +38,7 @@ const V = @Vector(W, f64);
 /// Below this, the O(n^2) dense path is cheaper than Krylov overhead.
 const krylov_threshold: usize = 50;
 
-pub const Options = @import("requests").Pss;
+pub const Options = @import("core").query.Pss;
 
 pub const SolveResult = struct {
     converged: bool,

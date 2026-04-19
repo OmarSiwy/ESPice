@@ -3,7 +3,7 @@
 //! quantum·2n values instead of points·2n.
 const std = @import("std");
 const root = @import("../types.zig");
-const FreqSolver = @import("solvers").freq_solve.FreqSolver;
+const FreqSolver = @import("solver").freq_solve.FreqSolver;
 
 // ponytail: 64 frequencies per chunk and per checkpoint; expose a work budget
 // if callers need another latency/throughput tradeoff. A factorization is atomic.

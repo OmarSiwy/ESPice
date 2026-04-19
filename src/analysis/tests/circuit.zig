@@ -3,7 +3,7 @@ const combinePlanes = impl.combinePlanes;
 const std = @import("std");
 
 test "pattern CSC matches comparison sort across radix digits" {
-    const PatternBuilder = @import("device_ir").PatternBuilder;
+    const PatternBuilder = @import("device").abi.PatternBuilder;
     const gpa = std.testing.allocator;
     var random = std.Random.DefaultPrng.init(0x5041545445524e);
     for ([_]u32{ 1, 31, 65537, 131073 }) |n| {

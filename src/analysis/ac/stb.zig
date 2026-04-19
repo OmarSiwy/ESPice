@@ -3,14 +3,14 @@
 const std = @import("std");
 const freq = @import("freq.zig");
 const root = @import("../types.zig");
-const types = @import("numerics");
-const solvers = @import("solvers");
+const types = @import("core").numerics;
+const solvers = @import("solver");
 const GROUND = root.GROUND;
 const FreqSolver = solvers.freq_solve.FreqSolver;
 
 const Complex = types.Complex;
 
-pub const Options = @import("requests").Stb;
+pub const Options = @import("core").query.Stb;
 
 pub const SolveResult = struct {
     freqs: []f64,

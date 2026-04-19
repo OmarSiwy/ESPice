@@ -37,7 +37,7 @@ fn spectrumOf(samples: []const f64, n_harmonics: usize, allocator: std.mem.Alloc
     const im = try allocator.alloc(f64, samples.len);
     defer allocator.free(im);
     @memset(im, 0);
-    @import("solvers").fft.fft(re, im);
+    @import("solver").fft.fft(re, im);
     return impl.test_access.extractSpectrum(re, im, samples.len, n_harmonics);
 }
 

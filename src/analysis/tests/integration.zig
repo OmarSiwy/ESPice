@@ -2,17 +2,20 @@
 const std = @import("std");
 const analysis = @import("../types.zig");
 const Builder = @import("builder").Builder;
+const Library = @import("device").Library;
 const eval = @import("device_eval");
-const converger = @import("solvers").converger;
+const converger = @import("solver").converger;
 const D = @import("limiter_device");
 const t = std.testing;
 
 test "generated limiter: failed trial rollback and retry match an untried circuit" {
     inline for (.{ converger.newton, converger.jfnk }) |solve| {
-        var b = try Builder.init(t.allocator);
+        var lib = try Library.init(t.allocator);
+        defer lib.deinit();
+        var b = try Builder.init(t.allocator, &lib);
         const out = try b.addNode();
         const vt = eval.deviceVtable(D, "va_limit_state");
-        const proto = try b.dynProto(vt);
+        const proto = try b.protoOf(try lib.register("va_limit_state", vt));
         const model: D.Model = .{};
         const instance: D.Instance = .{};
         const nodes = [_]u32{ out, analysis.GROUND };
@@ -68,7 +71,9 @@ const testing = std.testing;
 const GROUND = analysis.GROUND;
 
 test "jfnk vs newton: divider OP agrees to 1e-9" {
-    var b = try Builder.init(testing.allocator);
+    var lib = try Library.init(testing.allocator);
+    defer lib.deinit();
+    var b = try Builder.init(testing.allocator, &lib);
     const vin = try b.addNode();
     const out = try b.addNode();
     try b.addDevice(@import("models").vsource, .{ .dc = 10 }, .{}, .{ vin, GROUND });
@@ -106,7 +111,9 @@ test "jfnk vs newton: divider OP agrees to 1e-9" {
 
 test "jfnk: 100-diode ladder converges" {
     const n_diodes: usize = 100;
-    var b = try Builder.init(testing.allocator);
+    var lib = try Library.init(testing.allocator);
+    defer lib.deinit();
+    var b = try Builder.init(testing.allocator, &lib);
     const vin = try b.addNode();
     try b.addDevice(@import("models").vsource, .{ .dc = 5 }, .{}, .{ vin, GROUND });
 

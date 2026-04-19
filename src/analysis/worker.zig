@@ -1,6 +1,6 @@
 //! Cooperative worker control; independent of circuit and solver state.
 const std = @import("std");
-const requests = @import("requests");
+const requests = @import("core").query;
 const progress = @import("progress.zig");
 
 pub const Options = struct {

@@ -120,7 +120,7 @@ methods win instead.
 
 ## 3. Pseudo-code, CPU sequential
 
-Matches `src/analysis/solvers/direct.zig` `Lu.factor` (SoA CSC, u32 indices,
+Matches `src/solver/direct.zig` `Lu.factor` (SoA CSC, u32 indices,
 `NONE = maxInt(u32)`, workspaces `w/flag/topo/stack/pstack` allocated once
 at init):
 
@@ -249,10 +249,10 @@ result; thesis §2.9 states the rule, not the bound). §2 — source-verified
 implementation directly. §4 — level-set structure source-verified against
 GLU3.0 paper; the batched-solve section is our own design, not from a source.
 
-**Our implementation:** `src/analysis/solvers/direct.zig` (`Lu.factor`,
+**Our implementation:** `src/solver/direct.zig` (`Lu.factor`,
 `Lu.refactor`, `Lu.solve/solveT`); ordering consumed from
-`src/analysis/solvers/order.zig`; Newton caller in
-`src/analysis/solvers/converger.zig`. Scaling fixtures:
+`src/solver/order.zig`; Newton caller in
+`src/solver/converger.zig`. Scaling fixtures:
 `benchmark/fixtures/scaling/rc_ladder_{1k,10k,100k}`, `rc_mesh_{1k,10k}`,
 `resistor_grid_100x100` (fill/ordering stress), `inverter_chain_{256,1k,4k}`
 (refactor hot path).

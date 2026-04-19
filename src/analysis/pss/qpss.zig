@@ -63,10 +63,10 @@ const std = @import("std");
 const root = @import("../types.zig");
 const simdZero = root.zeroSimd;
 const simdCopy = root.copySimd;
-const solvers = @import("solvers");
+const solvers = @import("solver");
 const gmres_mod = solvers.gmres;
 const dense_lu = solvers.dense_lu;
-const num = @import("numerics");
+const num = @import("core").numerics;
 
 const W = std.simd.suggestVectorLength(f64) orelse 8;
 const V = @Vector(W, f64);
@@ -75,7 +75,7 @@ const V = @Vector(W, f64);
 // Options + public types
 // ============================================================================
 
-pub const Options = @import("requests").Qpss;
+pub const Options = @import("core").query.Qpss;
 
 pub const SolveResult = @import("pss.zig").SolveResult;
 

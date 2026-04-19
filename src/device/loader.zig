@@ -1,77 +1,38 @@
-//! Frontend model loading: compile HDL sources, bind their neutral device IR,
-//! and retain loaded code for the process model registry. Runtime evaluation
-//! is instantiated by the analysis-owned evaluator compiled into each binding.
+//! Runtime HDL loading: compile a source to a shared library, dlopen it, and
+//! register its vtable in a `Library`. The library is built from the same
+//! evaluator (eval.zig) as the built-in device objects. Loaded code is never
+//! unmapped: a vtable stays valid for the process.
 
 const std = @import("std");
 const fastvaf = @import("fastvaf");
-const ir = @import("device_ir");
+const ir = @import("device_abi");
 
 const DeviceVtable = ir.DeviceVtable;
-
-/// Registry guard.
-///
-/// ponytail: a spinlock, not `std.Io.Mutex`. In Zig 0.16 `Mutex.lock` takes an
-/// `Io` (it parks on `io.futexWait`), but `get`/`isEmpty` are called from
-/// netlist parsing with no `Io` in hand, so adopting it would mean threading
-/// `Io` through the public read API and every caller of it. Everything this
-/// lock protects is a hash-map lookup or insert — the expensive part (codegen,
-/// `zig build`, `dlopen`) runs OUTSIDE it in `prepareOne` — so the critical
-/// section is nanoseconds and never worth a syscall to sleep on. Upgrade to
-/// `std.Io.Mutex` if the registry ever guards real work.
-const SpinLock = struct {
-    held: std.atomic.Value(bool) = .init(false),
-
-    fn lock(l: *SpinLock) void {
-        while (l.held.cmpxchgWeak(false, true, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
-    }
-
-    fn unlock(l: *SpinLock) void {
-        l.held.store(false, .release);
-    }
-};
-
-var reg_mutex: SpinLock = .{};
-var registry: std.StringHashMapUnmanaged(*const DeviceVtable) = .empty;
-
-pub fn get(name: []const u8) ?*const DeviceVtable {
-    var buf: [128]u8 = undefined;
-    if (name.len > buf.len) return null;
-    reg_mutex.lock();
-    defer reg_mutex.unlock();
-    return registry.get(std.ascii.lowerString(&buf, name));
-}
-
-pub fn isEmpty() bool {
-    reg_mutex.lock();
-    defer reg_mutex.unlock();
-    return registry.count() == 0;
-}
+const Library = @import("Library.zig");
 
 /// Where the loader may build, and the module roots the generated device needs.
-///
-/// Passed in rather than derived here: these are SOURCE-TREE paths, and the
-/// devices package has no `build_options` (only the app does, via `src_root`).
-/// The app is the only caller, and it is the only one that knows where it was
-/// built from.
+/// `Library.load` fills these from build_options; tests pass their own.
 pub const BuildPaths = struct {
     /// Parent of isolated generated-source build trees and compiler caches.
     work_dir: []const u8,
     /// VerA device contract imported by the generated model.
     contract: []const u8,
-    /// Analysis evaluator source root exposing `exportDevice`.
+    /// Evaluator source root (src/device/eval.zig) exposing `exportDevice`.
     dyn: []const u8,
     /// gompute's module root — engine.zig imports it (Sink shares the GPU
     /// math core), so the .so's `dyn` module needs it as a dependency.
     gompute: []const u8,
     /// Neutral device ABI used by both host and generated evaluator.
-    device_ir: []const u8,
+    device_abi: []const u8,
+    /// Shared ids the ABI names (`DeviceType`).
+    core: []const u8,
 };
 
 const PreparedDevice = struct { loaded: *const DeviceVtable, owned_name: []const u8 };
 
-/// Codegen + compile + dlopen for one file. No registry access — safe to run
+/// Codegen + compile + dlopen for one file. Reads `lib` only — safe to run
 /// concurrently. Returns null if the device was already registered when checked.
-fn prepareOne(gpa: std.mem.Allocator, io: std.Io, path: []const u8, paths: BuildPaths) !?PreparedDevice {
+fn prepareOne(lib: *const Library, gpa: std.mem.Allocator, io: std.Io, path: []const u8, paths: BuildPaths) !?PreparedDevice {
     // ponytail: .v/.sv used to come through here via the deleted
     // fastvaf.fromVerilog; that path belongs to modules/FastVF now and is not
     // wired yet. Rejected loudly rather than silently ignored.
@@ -89,9 +50,7 @@ fn prepareOne(gpa: std.mem.Allocator, io: std.Io, path: []const u8, paths: Build
     if (result.mir.name.len > lower_buf.len) return error.NameTooLong;
     const lower_name = std.ascii.lowerString(&lower_buf, result.mir.name);
 
-    reg_mutex.lock();
-    const already = registry.contains(lower_name);
-    reg_mutex.unlock();
+    const already = lib.find(lower_name) != null;
     // Registered already ⇒ nothing below is wanted, INCLUDING generateDevice.
     // compileSource still has to run: the registry key is the module name and
     // only the MIR knows it. Deliberate diagnostic change: a second card for an
@@ -106,8 +65,9 @@ fn prepareOne(gpa: std.mem.Allocator, io: std.Io, path: []const u8, paths: Build
     const modules = [_]fastvaf.orchestrator.Module{
         .{ .name = "contract", .root = paths.contract },
         .{ .name = "gompute", .root = paths.gompute },
-        .{ .name = "device_ir", .root = paths.device_ir, .deps = &.{"contract"} },
-        .{ .name = "dyn", .root = paths.dyn, .deps = &.{ "contract", "gompute", "device_ir" } },
+        .{ .name = "core", .root = paths.core },
+        .{ .name = "device_abi", .root = paths.device_abi, .deps = &.{ "contract", "core" } },
+        .{ .name = "dyn", .root = paths.dyn, .deps = &.{ "contract", "gompute", "device_abi" } },
     };
     // MATCH THE HOST. The vtable crosses the dlopen boundary with zig
     // callconv and auto struct layout, neither guaranteed across
@@ -187,23 +147,18 @@ fn prepareOne(gpa: std.mem.Allocator, io: std.Io, path: []const u8, paths: Build
     return .{ .loaded = loaded, .owned_name = owned_name };
 }
 
-fn registerPrepared(gpa: std.mem.Allocator, r: PreparedDevice) !void {
-    errdefer gpa.free(r.owned_name);
-    reg_mutex.lock();
-    defer reg_mutex.unlock();
-    if (!registry.contains(r.owned_name)) {
-        try registry.put(gpa, r.owned_name, r.loaded);
-    } else {
-        gpa.free(r.owned_name);
-    }
+fn registerPrepared(lib: *Library, r: PreparedDevice) !void {
+    defer lib.gpa.free(r.owned_name);
+    _ = try lib.register(r.owned_name, r.loaded);
 }
 
 /// Load multiple HDL files in parallel — codegen + zig-build run concurrently,
-/// then results register sequentially into the process-lifetime registry.
-pub fn ensureAllLoaded(gpa: std.mem.Allocator, io: std.Io, files: []const []const u8, paths: BuildPaths) !void {
+/// then results register sequentially into `lib`.
+pub fn ensureAllLoaded(lib: *Library, io: std.Io, files: []const []const u8, paths: BuildPaths) !void {
+    const gpa = lib.gpa;
     if (files.len <= 1) {
         for (files) |p| {
-            if (try prepareOne(gpa, io, p, paths)) |r| try registerPrepared(gpa, r);
+            if (try prepareOne(lib, gpa, io, p, paths)) |r| try registerPrepared(lib, r);
         }
         return;
     }
@@ -223,17 +178,17 @@ pub fn ensureAllLoaded(gpa: std.mem.Allocator, io: std.Io, files: []const []cons
     defer group.cancel(io);
     for (files, results) |path, *slot| {
         group.async(io, struct {
-            fn run(inner_io: std.Io, ctx: struct { g: std.mem.Allocator, p: []const u8, s: *Result, bp: BuildPaths }) void {
-                ctx.s.* = prepareOne(ctx.g, inner_io, ctx.p, ctx.bp);
+            fn run(inner_io: std.Io, ctx: struct { l: *const Library, g: std.mem.Allocator, p: []const u8, s: *Result, bp: BuildPaths }) void {
+                ctx.s.* = prepareOne(ctx.l, ctx.g, inner_io, ctx.p, ctx.bp);
             }
-        }.run, .{ io, .{ .g = gpa, .p = path, .s = slot, .bp = paths } });
+        }.run, .{ io, .{ .l = lib, .g = gpa, .p = path, .s = slot, .bp = paths } });
     }
     try group.await(io);
 
     for (results) |*slot| {
         if (try slot.*) |prepared| {
             slot.* = null; // registerPrepared consumes the owned name on every path.
-            try registerPrepared(gpa, prepared);
+            try registerPrepared(lib, prepared);
         }
     }
 }

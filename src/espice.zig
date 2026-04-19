@@ -1,10 +1,10 @@
-//! Owning public Problem API. Shared data is in the separate problem_types module.
+//! ESPice: the owning Problem facade over frontend, analysis and output.
+//! main.zig and c_api.zig import only this module.
 const std = @import("std");
 const frontend = @import("frontend");
-const shared = @import("problem_types");
 const analysis = @import("analysis");
 const output = @import("output");
-pub const requests = @import("requests");
+pub const requests = @import("core").query;
 pub const QueryId = requests.QueryId;
 pub const Query = requests.Query;
 pub const Source = frontend.Source;
@@ -20,6 +20,8 @@ pub const QueryInfo = analysis.session.QueryInfo;
 pub const Advance = analysis.session.Advance;
 pub const Result = output.Result;
 pub const Format = output.Format;
+pub const Selection = output.Selection;
+pub const parseFormat = output.parseFormat;
 pub const Options = struct {
     source: Source,
     dialect: Dialect = .ngspice,
@@ -36,7 +38,9 @@ pub const Problem = struct {
     io: std.Io,
     allocation_mutex: std.Io.Mutex = .init,
     arena: std.heap.ArenaAllocator,
-    prepared: shared.Prepared,
+    /// Every device type this problem can instantiate; outlives `prepared`.
+    library: frontend.Library,
+    prepared: frontend.Prepared,
     session: analysis.session.Session,
     delivery: output.Session,
     limits: Limits,
@@ -60,9 +64,11 @@ pub const Problem = struct {
         var parse_arena = std.heap.ArenaAllocator.init(allocator);
         defer parse_arena.deinit();
         const scratch = parse_arena.allocator();
-        const ast = try frontend.prepare(io, scratch, options.source, options.dialect);
+        self.library = try frontend.Library.init(allocator);
+        errdefer self.library.deinit();
+        const ast = try frontend.prepare(io, &self.library, scratch, options.source, options.dialect);
         timingLap(io, &lap, "frontend (source, parsing, HDL)");
-        self.prepared = try frontend.build(a, scratch, ast);
+        self.prepared = try frontend.build(&self.library, a, scratch, ast);
         timingLap(io, &lap, "Problem creation (expansion, binding, topology)");
         errdefer self.prepared.deinit();
         self.delivery = try output.Session.init(allocator, options.output);
@@ -72,12 +78,12 @@ pub const Problem = struct {
         self.delivery_error = null;
         var execution = options.backend;
         execution.timing_in_depth = options.timing_in_depth;
-        self.session = analysis.session.Session.init(self.workerAllocator(), io, &self.prepared, execution);
+        self.session = analysis.session.Session.init(self.workerAllocator(), io, &self.prepared.circuit, &self.prepared.deck, execution);
         errdefer self.session.deinit();
-        const jobs = if (self.prepared.queries.len == 0)
-            &[_]Query{.{ .op = .{ .tol = self.prepared.deck_tol } }}
+        const jobs = if (self.prepared.deck.queries.len == 0)
+            &[_]Query{.{ .op = .{ .tol = self.prepared.deck.deck_tol } }}
         else
-            self.prepared.queries;
+            self.prepared.deck.queries;
         const ids = try scratch.alloc(QueryId, jobs.len);
         _ = try self.append_queries(jobs, ids);
         timingLap(io, &lap, "query graph and output setup");
@@ -89,16 +95,17 @@ pub const Problem = struct {
         self.session.deinit();
         self.delivery.deinit();
         self.prepared.deinit();
+        self.library.deinit();
         self.arena.deinit();
         a.destroy(self);
     }
 
     pub fn title(self: *const Problem) []const u8 {
-        return self.prepared.title;
+        return self.prepared.deck.title;
     }
 
     pub fn device_count(self: *const Problem) u32 {
-        return self.prepared.n_devices;
+        return self.prepared.deck.n_devices;
     }
 
     pub fn output_error(self: *const Problem) ?anyerror {
@@ -120,7 +127,7 @@ pub const Problem = struct {
     pub fn append_queries(self: *Problem, queries: []const Query, ids: []QueryId) !usize {
         if (ids.len < queries.len) return queries.len;
         for (queries) |query|
-            try analysis.validateOutputSchema(self.allocator, &self.prepared, query, self.delivery.selection.format);
+            try output.validateQuery(self.delivery.selection.format, try analysis.schemaOf(self.allocator, &self.prepared.circuit, &self.prepared.deck, query), &self.prepared.deck);
         return self.session.append(queries, ids);
     }
 
@@ -195,14 +202,7 @@ pub const Problem = struct {
                 const res = self.result(id) catch unreachable;
                 var lap = if (self.timing_in_depth) std.Io.Timestamp.now(self.io, .awake) else null;
                 defer timingLap(self.io, &lap, "output delivery");
-                self.delivery.publish(self.io, self.delivery.published, .{
-                    .title = self.prepared.title,
-                    .plotname = res.plotname,
-                    .varnames = res.varnames,
-                    .is_complex = res.is_complex,
-                    .npoints = res.npoints,
-                    .data = res.data,
-                }) catch |err| {
+                self.delivery.publish(self.io, self.delivery.published, .{ .title = self.prepared.deck.title, .result = res }) catch |err| {
                     self.delivery_error = err;
                     return;
                 };

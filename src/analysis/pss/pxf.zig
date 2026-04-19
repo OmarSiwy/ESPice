@@ -13,7 +13,7 @@
 const std = @import("std");
 const root = @import("../types.zig");
 const pac = @import("pac.zig");
-const types = @import("numerics");
+const types = @import("core").numerics;
 
 pub const Complex = types.Complex;
 

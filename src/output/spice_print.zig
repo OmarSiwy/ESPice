@@ -1,25 +1,18 @@
 const std = @import("std");
 const Io = std.Io;
-const types = @import("output_types");
+const types = @import("types.zig");
 const Plot = types.Plot;
 
 /// Write SPICE3-style tabular text output (.print/.plot format).
-pub fn write(io: Io, path: []const u8, plot: Plot) !void {
-    const nvars = plot.varnames.len;
-    try types.validatePlot(.print, plot);
+pub fn encode(w: *Io.Writer, plot: Plot) !void {
+    const nvars = plot.result.varnames.len;
 
-    const file = try Io.Dir.cwd().createFile(io, path, .{});
-    defer file.close(io);
-    var buf: [8192]u8 = undefined;
-    var fw = file.writer(io, &buf);
-    const w = &fw.interface;
-
-    try w.print("{s}: {s}\n", .{ plot.plotname, plot.title });
+    try w.print("{s}: {s}\n", .{ plot.result.plotname, plot.title });
     try w.writeAll("Index");
-    for (plot.varnames) |name| {
+    for (plot.result.varnames) |name| {
         try w.writeByte('\t');
         try w.writeAll(name);
-        if (plot.is_complex) {
+        if (plot.result.is_complex) {
             try w.writeAll("\t(imag)");
         }
     }
@@ -28,23 +21,22 @@ pub fn write(io: Io, path: []const u8, plot: Plot) !void {
     try w.writeAll("-----");
     for (0..nvars) |_| {
         try w.writeAll("\t---------------");
-        if (plot.is_complex) try w.writeAll("\t---------------");
+        if (plot.result.is_complex) try w.writeAll("\t---------------");
     }
     try w.writeByte('\n');
 
-    for (0..plot.npoints) |pt| {
+    for (0..plot.result.npoints) |pt| {
         try w.print("{d}", .{pt});
         for (0..nvars) |v| {
-            if (plot.is_complex) {
+            if (plot.result.is_complex) {
                 const idx = pt * nvars * 2 + v * 2;
-                try w.print("\t{e}\t{e}", .{ plot.data[idx], plot.data[idx + 1] });
+                try w.print("\t{e}\t{e}", .{ plot.result.data[idx], plot.result.data[idx + 1] });
             } else {
-                try w.print("\t{e}", .{plot.data[pt * nvars + v]});
+                try w.print("\t{e}", .{plot.result.data[pt * nvars + v]});
             }
         }
         try w.writeByte('\n');
     }
-    try w.flush();
 }
 
 test "SPICE3 print real data" {
@@ -52,10 +44,10 @@ test "SPICE3 print real data" {
     const allocator = std.testing.allocator;
     const varnames = [_][]const u8{ "time", "v(out)" };
     const data = [_]f64{ 0.0, 1.0, 0.5, 2.0 };
-    const plot: Plot = .{ .title = "test", .plotname = "Transient Analysis", .varnames = &varnames, .is_complex = false, .npoints = 2, .data = &data };
+    const plot: Plot = .{ .title = "test", .result = .{ .plotname = "Transient Analysis", .varnames = &varnames, .is_complex = false, .npoints = 2, .data = &data } };
     const path = "zig-out/test_print.txt";
     Io.Dir.cwd().createDirPath(io, "zig-out") catch {};
-    try write(io, path, plot);
+    try @import("write.zig").write(io, path, .print, plot);
     defer Io.Dir.cwd().deleteFile(io, path) catch {};
     const blob = try Io.Dir.cwd().readFileAlloc(io, path, allocator, .unlimited);
     defer allocator.free(blob);
@@ -69,10 +61,10 @@ test "SPICE3 print complex data" {
     const allocator = std.testing.allocator;
     const varnames = [_][]const u8{ "frequency", "v(out)" };
     const data = [_]f64{ 1.0, 0.0, 0.5, -0.5 };
-    const plot: Plot = .{ .title = "ac", .plotname = "AC Analysis", .varnames = &varnames, .is_complex = true, .npoints = 1, .data = &data };
+    const plot: Plot = .{ .title = "ac", .result = .{ .plotname = "AC Analysis", .varnames = &varnames, .is_complex = true, .npoints = 1, .data = &data } };
     const path = "zig-out/test_print_ac.txt";
     Io.Dir.cwd().createDirPath(io, "zig-out") catch {};
-    try write(io, path, plot);
+    try @import("write.zig").write(io, path, .print, plot);
     defer Io.Dir.cwd().deleteFile(io, path) catch {};
     const blob = try Io.Dir.cwd().readFileAlloc(io, path, allocator, .unlimited);
     defer allocator.free(blob);

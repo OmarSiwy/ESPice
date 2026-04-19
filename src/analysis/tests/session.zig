@@ -1,8 +1,9 @@
-const Prepared = @import("problem_types").Prepared;
-const requests = @import("requests");
+const Deck = @import("core").Deck;
+const builtin = @import("device").Library.builtin;
+const requests = @import("core").query;
 const std = @import("std");
 const validate = @import("../validate.zig").validate;
-const validatePrepared = @import("../validate.zig").validatePrepared;
+const validateDeck = @import("../validate.zig").validateDeck;
 
 test "query boundary rejects nonfinite values and nonterminating sweeps" {
     const t = std.testing;
@@ -38,19 +39,18 @@ test "query boundary checks derived frequencies, dimensions and nested controls"
 }
 
 test "a dc sweep target resolves against the prepared card table, type included" {
-    var prepared: Prepared = undefined;
-    prepared.circuit.n = 4;
-    prepared.cards = &.{
-        .{ .type_name = "vsource", .index = 0, .name = "v1" },
-        .{ .type_name = "isource", .index = 0, .name = "i1" },
-        .{ .type_name = "resistor", .index = 1, .name = "r2" },
+    var deck: Deck = undefined;
+    deck.cards = &.{
+        .{ .type = builtin("vsource"), .index = 0, .name = "v1" },
+        .{ .type = builtin("isource"), .index = 0, .name = "i1" },
+        .{ .type = builtin("resistor"), .index = 1, .name = "r2" },
     };
-    try validatePrepared(.{ .dc = .{} }, &prepared);
+    try validateDeck(.{ .dc = .{ .target = .{ .type = builtin("vsource") } } }, 4, &deck);
     // Same ordinal, different device type: the two no longer alias.
-    try validatePrepared(.{ .dc = .{ .target = .{ .type_name = "isource", .index = 0 } } }, &prepared);
-    try validatePrepared(.{ .dc = .{ .target = .{ .type_name = "resistor", .index = 1, .param_name = "r" } } }, &prepared);
-    try std.testing.expectError(error.DcSweepSourceNotFound, validatePrepared(.{ .dc = .{ .target = .{ .index = 1 } } }, &prepared));
-    try std.testing.expectError(error.DcSweepSourceNotFound, validatePrepared(.{ .dc = .{ .target2 = .{ .type_name = "resistor", .index = 0 } } }, &prepared));
+    try validateDeck(.{ .dc = .{ .target = .{ .type = builtin("isource"), .index = 0 } } }, 4, &deck);
+    try validateDeck(.{ .dc = .{ .target = .{ .type = builtin("resistor"), .index = 1, .param_name = "r" } } }, 4, &deck);
+    try std.testing.expectError(error.DcSweepSourceNotFound, validateDeck(.{ .dc = .{ .target = .{ .index = 1 } } }, 4, &deck));
+    try std.testing.expectError(error.DcSweepSourceNotFound, validateDeck(.{ .dc = .{ .target = .{ .type = builtin("vsource") }, .target2 = .{ .type = builtin("resistor"), .index = 0 } } }, 4, &deck));
     // The temperature is not a card and is never looked up.
-    try validatePrepared(.{ .dc = .{ .target2 = .{ .is_temp = true } } }, &prepared);
+    try validateDeck(.{ .dc = .{ .target = .{ .type = builtin("vsource") }, .target2 = .{ .is_temp = true } } }, 4, &deck);
 }

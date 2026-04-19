@@ -2,9 +2,8 @@
 //! independent of query IDs, and retains results until this call acknowledges them.
 //! ponytail: whole plots only; add chunk delivery when writer framing supports it.
 const std = @import("std");
-const types = @import("output_types");
+const types = @import("types.zig");
 const dispatch = @import("write.zig");
-const rawfile = @import("rawfile.zig");
 
 pub const Session = struct {
     allocator: std.mem.Allocator,
@@ -45,7 +44,7 @@ pub const Session = struct {
                 null;
             defer if (numbered) |p| self.allocator.free(p);
             const written = if (self.selection.format == .binary and ordinal != 0)
-                rawfile.writeAppend(io, path, plot)
+                dispatch.append(io, path, plot)
             else
                 dispatch.write(io, numbered orelse path, self.selection.format, plot);
             written catch |err| {
@@ -74,11 +73,13 @@ test "session: finish and repeated publication preserve binary append order" {
     defer session.deinit();
     const first: types.Plot = .{
         .title = "session",
-        .plotname = "first",
-        .varnames = &.{"v(out)"},
-        .is_complex = false,
-        .npoints = 1,
-        .data = &.{1},
+        .result = .{
+            .plotname = "first",
+            .varnames = &.{"v(out)"},
+            .is_complex = false,
+            .npoints = 1,
+            .data = &.{1},
+        },
     };
     try session.publish(io, 0, first);
     try session.finish();
@@ -86,7 +87,7 @@ test "session: finish and repeated publication preserve binary append order" {
     defer a.free(initial);
     try session.publish(io, 0, first);
     var second = first;
-    second.plotname = "second";
+    second.result.plotname = "second";
     try session.publish(io, 1, second);
     try session.finish();
     const complete = try tmp.dir.readFileAlloc(io, "plots.raw", a, .unlimited);
@@ -108,11 +109,13 @@ test "session: owned destination, numbered files and order validation" {
     @memset(path, 'x');
     const plot: types.Plot = .{
         .title = "csv",
-        .plotname = "op",
-        .varnames = &.{"v(out)"},
-        .is_complex = false,
-        .npoints = 1,
-        .data = &.{1},
+        .result = .{
+            .plotname = "op",
+            .varnames = &.{"v(out)"},
+            .is_complex = false,
+            .npoints = 1,
+            .data = &.{1},
+        },
     };
     try std.testing.expectError(error.OutOfOrder, session.publish(io, 1, plot));
     try session.publish(io, 0, plot);
@@ -138,17 +141,19 @@ test "session: validation preserves destination and permits a corrected publicat
     defer session.deinit();
     var plot: types.Plot = .{
         .title = "s1p",
-        .plotname = "sp",
-        .varnames = &.{ "frequency", "S(2,2)" },
-        .is_complex = true,
-        .npoints = 1,
-        .data = &.{ 1e9, 0, 1, 0 },
+        .result = .{
+            .plotname = "sp",
+            .varnames = &.{ "frequency", "S(2,2)" },
+            .is_complex = true,
+            .npoints = 1,
+            .data = &.{ 1e9, 0, 1, 0 },
+        },
     };
     try std.testing.expectError(error.NotSParameterData, session.publish(io, 0, plot));
     const old = try tmp.dir.readFileAlloc(io, "plot.s1p", a, .unlimited);
     defer a.free(old);
     try std.testing.expectEqualStrings("existing", old);
-    plot.varnames = &.{ "frequency", "S(1,1)" };
+    plot.result.varnames = &.{ "frequency", "S(1,1)" };
     try session.publish(io, 0, plot);
     try session.finish();
 }
@@ -164,11 +169,13 @@ test "session: writer failure is terminal and does not acknowledge output" {
     defer session.deinit();
     const plot: types.Plot = .{
         .title = "bad path",
-        .plotname = "op",
-        .varnames = &.{"v(out)"},
-        .is_complex = false,
-        .npoints = 1,
-        .data = &.{1},
+        .result = .{
+            .plotname = "op",
+            .varnames = &.{"v(out)"},
+            .is_complex = false,
+            .npoints = 1,
+            .data = &.{1},
+        },
     };
     try std.testing.expectError(error.FileNotFound, session.publish(io, 0, plot));
     try std.testing.expectEqual(@as(u32, 0), session.published);

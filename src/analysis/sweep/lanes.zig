@@ -6,7 +6,7 @@
 //! driver's job, not the caller's.
 const std = @import("std");
 const root = @import("../types.zig");
-const converger = @import("solvers").converger;
+const converger = @import("solver").converger;
 
 /// Solve `n_lanes` cold DC points into the flat blob `x_lanes` (lane k at
 /// x_lanes[k*n..][0..n]); `results[k]` gets lane k's converger.Result. The

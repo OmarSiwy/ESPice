@@ -210,8 +210,8 @@ kernel param_stamp_pass(blob, x, lambda):
 - Exists (ingredients): `../VerA/tools/contract.zig` (S contract,
   `Dual`, `mc_param`, `evalValues`), `src/analysis/eval/engine.zig`
   (`AdScalar`), `src/analysis/eval/engine.zig` (SoA layout,
-  gathers), `src/analysis/solvers/direct.zig solveT`,
-  `src/analysis/solvers/freq_solve.zig solveRhsT`.
+  gathers), `src/solver/direct.zig solveT`,
+  `src/solver/freq_solve.zig solveRhsT`.
 - Consumers: [dcmatch](../analysis/dcmatch.md) (future — hard
   requirement), [sensitivity](../analysis/sensitivity.md) adjoint + AC
   upgrade, later optimization/tuning loops.

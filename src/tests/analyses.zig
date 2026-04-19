@@ -1,6 +1,6 @@
 //! Numerical regressions through the owning Problem API.
 const std = @import("std");
-const api = @import("problem");
+const api = @import("espice");
 const Result = api.Result;
 
 fn runDeck(source: []const u8) !*api.Problem {

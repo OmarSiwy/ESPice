@@ -1,5 +1,5 @@
 const std = @import("std");
-const api = @import("problem");
+const api = @import("espice");
 const t = std.testing;
 const deck = "query fixture\nV1 in 0 dc 1 ac 1\nR1 in out 1k\nC1 out 0 1n\n.ac dec 80 1 100k\n.tran 1n 10n uic\n.end\n";
 
@@ -175,7 +175,7 @@ test "Problem: source and appended port slices are owned after the call returns"
     try t.expectEqualStrings("owned input", p.title());
     try t.expectEqual(@as(u32, 1), p.query_count());
     const op = try find(p, .op); // A deck without directives gets one OP.
-    var ports = [_]api.requests.Port{.{ .node = p.prepared.source_node, .branch = p.prepared.source_branch }};
+    var ports = [_]api.requests.Port{.{ .node = p.prepared.deck.source_node, .branch = p.prepared.deck.source_branch }};
     var ids: [1]api.QueryId = undefined;
     _ = try p.append_queries(&.{.{ .sp = .{ .sweep = .{ .f_start = 1, .f_stop = 10, .points = 2, .kind = .lin }, .ports = &ports } }}, &ids);
     ports[0].z0 = 150;
@@ -201,7 +201,7 @@ test "Problem: allocation failures during append preserve results and permit ret
     const op = try find(p, .op);
     const retained = try p.result(op);
     const count = p.query_count();
-    const ports = [_]api.requests.Port{.{ .node = p.prepared.source_node, .branch = p.prepared.source_branch }};
+    const ports = [_]api.requests.Port{.{ .node = p.prepared.deck.source_node, .branch = p.prepared.deck.source_branch }};
     var failures: usize = 0;
     while (failures < 100) : (failures += 1) {
         var ids = [_]api.QueryId{api.requests.invalid_query};

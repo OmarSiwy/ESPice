@@ -6,6 +6,12 @@ const contract = @import("contract");
 
 pub const GROUND: u32 = 0;
 
+pub const DeviceType = @import("core").DeviceType;
+
+pub const bind = @import("bind.zig");
+pub const Param = bind.Param;
+pub const BindStatus = bind.BindStatus;
+
 /// Launch width shared by the kernel export shim and analysis GPU launcher.
 pub const gpu_block_size: u32 = 256;
 
@@ -31,7 +37,8 @@ pub const ParamRef = struct {
     /// compute in — an `f32` field round-trips through `@floatCast`, which is
     /// exactly the precision the device declared.
     ptr: Ptr,
-    device_type: []const u8,
+    /// Written by the host when it collects the batch's parameters.
+    type: DeviceType = .unset,
     param_name: []const u8,
     index: u32,
     is_instance: bool,
@@ -282,7 +289,7 @@ pub const PatternView = struct {
 /// BEFORE dedup, sorted and uniqued into CSC by `toCsc`.
 ///
 /// The `gpa` its methods take is build-time SCRATCH, not the circuit's owner:
-/// `keys` and the radix ping-pong buffer die inside `Circuit.init`, and only
+/// `keys` and the radix ping-pong buffer die inside `Circuit.freeze`, and only
 /// `col_ptr`/`row_idx` — which `toCsc` takes a separate allocator for —
 /// outlive it. Passing the sim arena here left the pre-dedup key array and the
 /// sort scratch resident for the whole run (measured 14.6 MB on
@@ -436,8 +443,11 @@ pub const GpuPayload = struct {
 // 11: dead fields dropped: `Batch.thread_safe`, `Hooks.record_history` and
 //    `inject_history`, `DeviceVtable.gpu_kernel_name`/`gpu_ptx`/`gpu_amdgcn`;
 //    `Batch.type_name` is the short type name.
-// GPU planes, Model/Instance PODs and scatter tapes are unchanged by 10 and 11.
-pub const abi_version: u32 = 11;
+// 12: `set_model_param`/`set_instance_param` become `bind_model`/`bind_instance`
+//    (one binder for every device, bind.zig); `ParamRef.type`.
+// 13: `ParamRef.device_type` dropped; the host names a type from its batch.
+// GPU planes, Model/Instance PODs and scatter tapes are unchanged by 10 to 13.
+pub const abi_version: u32 = 13;
 
 pub const DeviceVtable = struct {
     name: []const u8,
@@ -447,13 +457,14 @@ pub const DeviceVtable = struct {
     instance_size: usize,
     init_model: *const fn ([*]u8) void,
     init_instance: *const fn ([*]u8) void,
-    set_model_param: *const fn ([*]u8, []const u8, f64) bool,
-    set_instance_param: *const fn ([*]u8, []const u8, f64) bool,
+    /// Card pairs onto the Model / Instance blob (bind.zig).
+    bind_model: *const fn ([*]u8, []const Param) BindStatus,
+    bind_instance: *const fn ([*]u8, []const Param) BindStatus,
     /// LRM 6.3.4 / 3.4.5: a parameter whose value is an expression over OTHER
     /// parameters, plus every localparam. The Model is a flat struct, so a host
     /// write to a base parameter cannot reach what was declared over it — the
     /// device closes that gap here, and the contract requires the host to call it
-    /// once after the last `set_model_param` and before anything READS the model.
+    /// once after the last `bind_model` and before anything READS the model.
     /// Null when the module has no such parameter, which is the common case.
     derive: ?*const fn (model: [*]u8) void,
     collapse: ?*const fn (model: [*]const u8, instance: [*]const u8, out: [*]i32) void,
@@ -470,12 +481,14 @@ pub fn layoutHash() u64 {
         for (builtin.zig_version_string) |c| h = mix(h, c);
         h = mix(h, @intFromEnum(builtin.zig_backend));
         h = mix(h, @intFromEnum(builtin.mode));
+        // Error tracing adds a hidden argument to every callconv(.auto) call.
+        h = mix(h, @intFromBool(builtin.have_error_return_tracing));
         for ([_]type{
             DeviceVtable,        Proto,               Batch,
             Hooks,               Planes,              PatternView,
             PatternBuilder,      ParamRef,            NoiseSource,
             std.mem.Allocator,   DeviceStatus,        DeviceResult(void),
-            DeviceResult(Batch), DeviceResult(Proto),
+            DeviceResult(Batch), DeviceResult(Proto), Param,
         }) |T| h = hashType(h, T);
         // Not a type: the SEMANTICS of the slot tape. A `.so` built before
         // `jac_pattern` reserves every (ru, cu) in the matrix and fills every
@@ -499,4 +512,8 @@ fn hashType(h0: u64, comptime T: type) u64 {
         else => {},
     }
     return h;
+}
+
+test {
+    _ = bind;
 }
