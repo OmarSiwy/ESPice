@@ -321,6 +321,12 @@ is ngspice's output, so it pins ngspice's defect.
 Options: (a) regenerate the oracle from the closed form (or VACASK) and keep
 the deck as an SFFM test; (b) delete the deck; (c) keep it red as the
 documented ngspice outlier. Recommended: (a).
+Resolved: (a) landed in 0243d0b, then the user chose the ngspice oracle again
+(original tolerances), so the deck is red by design. Correction to the
+diagnosis above: ngspice's SFFM is not unmodulated. It reads the card as
+(VO VA FM MDI FC) and limits MDI to FC/FM (vsrcload.c:235-259), so this card
+is a 10 kHz carrier at MDI = 0.1, modulated at 100 kHz. espice now reads
+SFFM the same way (models/vsource.va, isource.va), and the deck passes.
 
 **`dc/bench_mosfet_cmos_inverter`**: 1/101 fails, row 50 (vin = 2.5 V):
 oracle 3.20557, ours 3.20234. The inverter is exactly balanced

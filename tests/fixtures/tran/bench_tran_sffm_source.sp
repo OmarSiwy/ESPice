@@ -4,15 +4,14 @@
 * waveform nothing in the suite exercised. PULSE, SIN and PWL are each covered
 * several times over; EXP (tran/exp_source) and this one were not covered at all.
 *
-* For SFFM(VO VA FC MDI FS) the defining formula is
+* The oracle is ngspice 44.2's run of this deck. ngspice reads the card as
+* SFFM(VO VA FM MDI FC), modulating frequency third and carrier fifth, and
+* limits MDI to FC/FM (vsrcload.c:235-259, "MDI in v1 limited to FC/FM"),
+* so it simulates a 10 kHz carrier modulated at 100 kHz with MDI = 0.1:
 *
-*     v(t) = VO + VA * sin(2*pi*FC*t + MDI * sin(2*pi*FS*t))
+*     v(t) = VO + VA * sin(2*pi*FC*t + MDI * sin(2*pi*FM*t))
 *
-* and the oracle is that closed form (v(out) the RC driven by it). ngspice
-* 44.2 cannot be the reference: it emits a clean 10 kHz sinusoid for this
-* card, the MODULATING frequency as the carrier with no modulation on it, and
-* disagrees with the closed form, with espice and with VACASK alike
-* (comma-separated and fully-expanded argument forms give the same output).
+* espice (models/vsource.va) reads the card the same way.
 V1 in 0 SFFM(0 1 100k 2 10k)
 R1 in out 1k
 C1 out 0 1n

@@ -564,16 +564,8 @@ pub const NetBuilder = struct {
     /// no-op on the one that does not declare the PULSE block — see
     /// `bindSource`.
     fn resolvePulseDefaults(self: *const NetBuilder, target: anytype) void {
-        if (comptime !@hasField(@TypeOf(target.*), "pulse_tr")) return;
-        // Only a PULSE waveform gets the TRANinit fill (ngspice runs it per
-        // PULSE function). Any other waveform parks TD past every tstop so its
-        // unused pulse fields mint no breakpoint.
-        if (comptime @hasField(@TypeOf(target.*), "waveform")) {
-            if (target.waveform != @intFromEnum(Wave.pulse)) {
-                target.pulse_td = 1e30;
-                return;
-            }
-        }
+        const T = @TypeOf(target.*);
+        if (comptime !@hasField(T, "pulse_tr")) return;
         var tstep: f64 = 1e-9;
         var tstop: f64 = 1e30;
         for (self.nl.deck.analyses) |dir| {
@@ -583,6 +575,21 @@ pub const NetBuilder = struct {
             if (a1 orelse a0) |ts| tstop = ts;
             tstep = if (a1 != null) a0.? else tstop / 100.0;
             break;
+        }
+        // Only a PULSE waveform gets the TRANinit fill (ngspice runs it per
+        // PULSE function). Any other waveform parks TD past every tstop so its
+        // unused pulse fields mint no breakpoint.
+        if (comptime @hasField(T, "waveform")) {
+            // SFFM's CKTfinalTime defaults: FM = 5/TSTOP when omitted, FC =
+            // 500/TSTOP when omitted or 0 (vsrcload.c:237-243, isrcload.c:215-221).
+            if (comptime @hasField(T, "sffm_fm")) if (target.waveform == @intFromEnum(Wave.sffm)) {
+                if (target.sffm_fm == -1.0) target.sffm_fm = @floatCast(5.0 / tstop);
+                if (target.sffm_fc == 0.0) target.sffm_fc = @floatCast(500.0 / tstop);
+            };
+            if (target.waveform != @intFromEnum(Wave.pulse)) {
+                target.pulse_td = 1e30;
+                return;
+            }
         }
         if (target.pulse_tr < 0) target.pulse_tr = tstep;
         if (target.pulse_tf < 0) target.pulse_tf = tstep;
@@ -1682,7 +1689,17 @@ fn dcFromWaveform(target: anytype) void {
                 @sin(2.0 * std.math.pi * rd(target.*, "sin_phase", "sin_phase") / 360.0),
         3 => rd(target.*, "exp_v1", "exp_i1"),
         4 => rd(target.*, pwlSlot("pwl_values", 0), pwlSlot("pwl_values", 0)),
-        5 => rd(target.*, "sffm_vo", "sffm_io"),
+        // ngspice's DCOP evaluates SFFM at time 0: the V source is 0 there
+        // (vsrcload.c:271-274), the I source has no delay and reads its phases
+        // one slot early (isrcload.c:222-252, see isource.va).
+        5 => if (comptime !@hasField(T, "sffm_fm") or T == devices.vsource.Model or T == devices.vsource.Instance) 0 else blk: {
+            const mdi = if (target.sffm_mdi > target.sffm_fc / target.sffm_fm)
+                target.sffm_fc / target.sffm_fm
+            else
+                @max(target.sffm_mdi, 0);
+            break :blk target.sffm_vo + target.sffm_va *
+                @sin(target.sffm_phasem * std.math.pi / 180.0 + mdi * @sin(target.sffm_td * std.math.pi / 180.0));
+        },
         else => return,
     };
     target.dc = @floatCast(v);
@@ -1706,7 +1723,8 @@ fn fieldPairs(comptime w: Wave) []const []const u8 {
         .sin => &.{ "sin_vo", "sin_ioff", "sin_va", "sin_iamp", "sin_freq", "sin_freq", "sin_td", "sin_td", "sin_theta", "sin_theta", "sin_phase", "sin_phase" },
         .exp => &.{ "exp_v1", "exp_i1", "exp_v2", "exp_i2", "exp_td1", "exp_td1", "exp_tau1", "exp_tau1", "exp_td2", "exp_td2", "exp_tau2", "exp_tau2" },
         .pwl => &.{},
-        .sffm => &.{ "sffm_vo", "sffm_vo", "sffm_va", "sffm_va", "sffm_fc", "sffm_fc", "sffm_mdi", "sffm_mdi", "sffm_fs", "sffm_fs", "sffm_phasec", "sffm_phasec", "sffm_phases", "sffm_phases" },
+        // ngspice 44 order (vsrcload.c:235-249): FM third, FC fifth.
+        .sffm => &.{ "sffm_vo", "sffm_vo", "sffm_va", "sffm_va", "sffm_fm", "sffm_fm", "sffm_mdi", "sffm_mdi", "sffm_fc", "sffm_fc", "sffm_td", "sffm_td", "sffm_phasem", "sffm_phasem", "sffm_phasec", "sffm_phasec" },
         .am => &.{ "am_va", "am_va", "am_vo", "am_vo", "am_mf", "am_mf", "am_fc", "am_fc", "am_td", "am_td", "am_phasec", "am_phasec", "am_phases", "am_phases" },
     };
 }
