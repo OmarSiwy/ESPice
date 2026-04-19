@@ -211,10 +211,10 @@ reference). §2/§3 — verified against `direct.zig` (the growth monitor as a
 diagnostic; noted as such). §4 — derived, not source-verified (design
 aligned with GLU3.0's host-pivoting assumption).
 
-**Our implementation:** `src/analysis/solvers/direct.zig` (`Params`
+**Our implementation:** `src/solver/direct.zig` (`Params`
 {pivot_tol, refactor_growth_limit, iter_refine_steps}, `Solver.factor`
 bypass + fallback chain, `Lu.refactor`, `refine()`); Newton caller
-`src/analysis/solvers/converger.zig` (`newton()`, `matrix_sig`
+`src/solver/converger.zig` (`newton()`, `matrix_sig`
 factor-once). Condition estimation: not implemented (documented here as the
 KLU reference design). Scaling fixtures:
 `benchmark/fixtures/scaling/inverter_chain_{256,1k,4k}` (refactor per Newton

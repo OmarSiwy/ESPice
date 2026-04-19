@@ -48,11 +48,11 @@ implementation + bench fixtures.
 
 ## Shared machinery
 
-Nonlinear analyses use `src/analysis/solvers/converger.zig`
+Nonlinear analyses use `src/solver/converger.zig`
 (one `Tolerances` bundle, one acceptance kernel, direct-Newton + JFNK
 strategies) and, on GPU, the cooperative megakernel in
 `src/analysis/eval/engine.zig` (batched SoA device eval, on-device
 GMRES, CPU-identical acceptance gates). Linear-solver theory lives in
 [docs/solvers/](../solvers/README.md); each analysis doc's **Solvers
 used** section maps its phases onto those docs and
-`src/analysis/solvers/*`.
+`src/solver/*`.

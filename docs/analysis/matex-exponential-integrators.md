@@ -215,7 +215,7 @@ host: sum group results (superposition) at output grid
 
 | Phase | Solver doc | Impl |
 |---|---|---|
-| One-time factorization of $(C + \gamma G)$ (R-MATEX) | [klu-pipeline.md](../solvers/klu-pipeline.md), [gilbert-peierls-lu.md](../solvers/gilbert-peierls-lu.md), [btf-permutation.md](../solvers/btf-permutation.md), [amd-ordering.md](../solvers/amd-ordering.md) | `src/analysis/solvers/direct.zig`; small projected solves use `dense_lu.zig` |
+| One-time factorization of $(C + \gamma G)$ (R-MATEX) | [klu-pipeline.md](../solvers/klu-pipeline.md), [gilbert-peierls-lu.md](../solvers/gilbert-peierls-lu.md), [btf-permutation.md](../solvers/btf-permutation.md), [amd-ordering.md](../solvers/amd-ordering.md) | `src/solver/direct.zig`; small projected solves use `dense_lu.zig` |
 | Arnoldi triangular solves on GPU (level-scheduled or GMRES-replaced) | [gpu-sparse-lu.md](../solvers/gpu-sparse-lu.md) | requirement |
 | Automatic linear-circuit eligibility detection | [circuit-matrix-specifics.md](../solvers/circuit-matrix-specifics.md) (`matrix_sig`) | target; current `.matex` selection is explicit |
 
@@ -242,8 +242,8 @@ host: sum group results (superposition) at output grid
 
 - `src/analysis/tran/matex.zig`: fixed-matrix R-MATEX, source transition
   collection, rational Arnoldi, and the projected matrix exponential.
-- `src/analysis/solvers/direct.zig`: retained sparse factors;
-  `src/analysis/solvers/dense_lu.zig`: projected dense solves.
+- `src/solver/direct.zig`: retained sparse factors;
+  `src/solver/dense_lu.zig`: projected dense solves.
 - Bench fixtures that would judge it: `benchmark/fixtures/scaling/*`
   (rc_ladder class), `benchmark/fixtures/power/*`,
   `benchmark/fixtures/basic/*` linear RC/RLC.

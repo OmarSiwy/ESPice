@@ -24,9 +24,10 @@ The four contracts are:
 4. [Module APIs and main](<Problem/4)Module APIs and main.md>): the concrete
    producer/consumer seams and CLI orchestration.
 
-Model sources live in `models/`. Construction lives in `src/frontend/`, the
-owning API in `src/problem/`, execution in `src/analysis/`, and encoding in
-`src/output/`. Solvers under `src/analysis/solvers/` are private to analysis.
+Model sources live in `models/`. Shared data lives in `src/core/`, devices
+and HDL loading in `src/device/`, construction in `src/frontend/`, execution
+in `src/analysis/`, encoding in `src/output/`, and the owning API in
+`src/espice.zig`. Solvers under `src/solver/` are private to analysis.
 [Migration notes](Problem/migration-notes.md) record deliberate limitations,
 retired paths, and their replacements.
 

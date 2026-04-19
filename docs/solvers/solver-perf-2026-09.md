@@ -296,7 +296,7 @@ Where vacask_mul's time is now (`-Ddebug-info` callgrind, 11,358M Ir):
 refactor 19.4% (1,630 Ir per call, 1.35M calls), solve 8.6%, diode eval
 15.5%, and 4.4% in compiler_rt `memset` called twice per Newton iterate
 from `Circuit.evalNewtonCpu` (analysis/Circuit.zig and
-problem/numerics.zig, zeroing the planes). That memset is outside
+core/numerics.zig, zeroing the planes). That memset is outside
 `solvers/`; an inline laned zero there (the `fillZero` pattern) is the
 next small-matrix win.
 

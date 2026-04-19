@@ -229,10 +229,10 @@ refactor-replay variant and batched-solve design are ours, not from a
 source.
 
 **Our implementation:** none yet on-device for LU — this doc is the port
-spec. Host pieces it would reuse: `src/analysis/solvers/direct.zig` (frozen
+spec. Host pieces it would reuse: `src/solver/direct.zig` (frozen
 pattern, `up/ui` topo order, `prow`, growth monitor),
 `src/analysis/gpu.zig` (cooperative-launch driver, staged prefix,
-one-HtoD/one-DtoH protocol), `src/analysis/solvers/converger.zig`
+one-HtoD/one-DtoH protocol), `src/solver/converger.zig`
 (fallback ladder the GPU path must respect). Scaling fixtures:
 `benchmark/fixtures/scaling/resistor_grid_100x100`, `rc_mesh_10k` (wide
 DAGs — level-set friendly), `rc_ladder_100k` (adversarial: depth-n DAG,

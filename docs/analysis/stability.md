@@ -105,7 +105,7 @@ kernel stb(lanes = freq points):
 | Phase | Solver doc | Impl |
 |---|---|---|
 | Upstream DC | [homotopy-continuation.md](../solvers/homotopy-continuation.md), [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | the job's shared operating point (`dc/op.zig`) |
-| Stacked-real sweep | [klu-pipeline.md](../solvers/klu-pipeline.md) | `src/analysis/solvers/freq_solve.zig fromCircuit` + `solveBatch`, streamed by `src/analysis/ac/freq.zig` |
+| Stacked-real sweep | [klu-pipeline.md](../solvers/klu-pipeline.md) | `src/solver/freq_solve.zig fromCircuit` + `solveBatch`, streamed by `src/analysis/ac/freq.zig` |
 
 ---
 

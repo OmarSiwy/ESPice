@@ -1,7 +1,7 @@
 # docs/solvers — Solver Theory References
 
-Documentation of the algorithms behind `src/analysis/solvers/` and the nonlinear
-layer in `src/analysis/solvers/converger.zig`. Each file follows the
+Documentation of the algorithms behind `src/solver/` and the nonlinear
+layer in `src/solver/converger.zig`. Each file follows the
 same structure: **1.** mathematical specification, **2.** flow explanation,
 **3.** CPU-sequential pseudo-code, **4.** GPU-parallel pseudo-code — and
 ends with fetched sources, per-section verification status, and pointers to
@@ -56,9 +56,9 @@ doc carries the reverse mapping in its "Solvers used" section. *(future)*
 | [structured-preconditioners.md](structured-preconditioners.md) | Krylov-HB in [pss-shooting-harmonic-balance](../analysis/pss-shooting-harmonic-balance.md), [pac](../analysis/pac.md)/[pxf](../analysis/pxf.md) matrix-free path, [qpss](../analysis/qpss.md) (simplified dominant-tone implementation; full multidimensional extension pending), [mpde-envelope](../analysis/mpde-envelope.md) Fourier-envelope steps |
 | [parameter-derivative-stamps.md](parameter-derivative-stamps.md) *(future)* | [dcmatch](../analysis/dcmatch.md) (analytic upgrade; finite-difference stamps exist), [sensitivity](../analysis/sensitivity.md) adjoint/AC upgrade |
 
-Not covered by a solver doc (used directly): `src/analysis/solvers/dense_lu.zig`
+Not covered by a solver doc (used directly): `src/solver/dense_lu.zig`
 (tf, pz, sp, stb dense path, disto, pnoise, PAC/PXF, MATEX projected systems, shooting/HB Jacobians) and
-`src/analysis/solvers/fft.zig` (fourier-thd, pac, HB/envelope upgrades) —
+`src/solver/fft.zig` (fourier-thd, pac, HB/envelope upgrades) —
 support kernels, not sparse-solver theory.
 
 ## Source status summary
