@@ -475,19 +475,14 @@ fn copyValue(allocator: std.mem.Allocator, value: anytype) std.mem.Allocator.Err
     }
 }
 
-const output = @import("output_types");
+const core = @import("core");
 const ir = @import("device").abi;
 const Circuit = @import("device").Circuit;
 const collectTyped = @import("types.zig").Circuit.collectTyped;
 
-pub fn validateOutputSchema(allocator: std.mem.Allocator, topology: *const Circuit, deck: *const Deck, query: requests.Query, format: output.Format) !void {
-    if (format == .touchstone or format == .citi) {
-        if (query != .sp) return error.NotSParameterData;
-        if (query.sp.ports.len == 0 and deck.source_branch == 0) return error.NoPorts;
-    }
-    if (format != .sst2 and format != .fsdb) return;
-    // SST2 has a fixed 64-variable header; FSDB has 16-bit label lengths.
-    const nvars: usize = switch (query) {
+/// The shape `query` publishes over this circuit and deck, before it runs.
+pub fn schemaOf(allocator: std.mem.Allocator, topology: *const Circuit, deck: *const Deck, query: requests.Query) !core.QuerySchema {
+    const columns: usize = switch (query) {
         .op => deck.probes.len,
         .tf => 3,
         .noise => |o| if (o.integrated) 1 else 2,
@@ -507,10 +502,9 @@ pub fn validateOutputSchema(allocator: std.mem.Allocator, topology: *const Circu
         },
         else => deck.probes.len + 1,
     };
-    if (nvars == 0) return error.DataLengthMismatch;
-    if (format == .sst2 and nvars > 64) return error.FormatLimitExceeded;
-    if (format == .fsdb) {
-        if (nvars > std.math.maxInt(u32) or deck.title.len > std.math.maxInt(u16)) return error.FormatLimitExceeded;
-        for (deck.probe_labels) |label| if (label.len > std.math.maxInt(u16)) return error.FormatLimitExceeded;
-    }
+    return .{
+        .kind = query,
+        .columns = columns,
+        .portless = query == .sp and query.sp.ports.len == 0 and deck.source_branch == 0,
+    };
 }

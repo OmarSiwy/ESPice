@@ -127,7 +127,7 @@ pub const Problem = struct {
     pub fn append_queries(self: *Problem, queries: []const Query, ids: []QueryId) !usize {
         if (ids.len < queries.len) return queries.len;
         for (queries) |query|
-            try analysis.validateOutputSchema(self.allocator, &self.prepared.circuit, &self.prepared.deck, query, self.delivery.selection.format);
+            try output.validateQuery(self.delivery.selection.format, try analysis.schemaOf(self.allocator, &self.prepared.circuit, &self.prepared.deck, query), &self.prepared.deck);
         return self.session.append(queries, ids);
     }
 
@@ -202,14 +202,7 @@ pub const Problem = struct {
                 const res = self.result(id) catch unreachable;
                 var lap = if (self.timing_in_depth) std.Io.Timestamp.now(self.io, .awake) else null;
                 defer timingLap(self.io, &lap, "output delivery");
-                self.delivery.publish(self.io, self.delivery.published, .{
-                    .title = self.prepared.deck.title,
-                    .plotname = res.plotname,
-                    .varnames = res.varnames,
-                    .is_complex = res.is_complex,
-                    .npoints = res.npoints,
-                    .data = res.data,
-                }) catch |err| {
+                self.delivery.publish(self.io, self.delivery.published, .{ .title = self.prepared.deck.title, .result = res }) catch |err| {
                     self.delivery_error = err;
                     return;
                 };

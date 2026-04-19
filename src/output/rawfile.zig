@@ -1,7 +1,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const types = @import("output_types");
+const types = @import("types.zig");
 pub const Plot = types.Plot;
 
 /// Infer the ngspice type string for a variable name.
@@ -16,49 +16,24 @@ pub fn varType(name: []const u8) []const u8 {
     return "voltage";
 }
 
-/// Write an ngspice-compatible binary raw file to `path`.
-pub fn write(io: Io, path: []const u8, plot: Plot) !void {
-    return writeInner(io, path, plot, false);
-}
-
-/// A multi-analysis deck produces one plot per directive; ngspice appends
-/// them all to ONE raw file, and consumers (the benchmark runner included)
-/// read the concatenation. Result 2+ goes through this.
-pub fn writeAppend(io: Io, path: []const u8, plot: Plot) !void {
-    return writeInner(io, path, plot, true);
-}
-
-fn writeInner(io: Io, path: []const u8, plot: Plot, append: bool) !void {
-    try types.validatePlot(.binary, plot);
-
-    const file = try Io.Dir.cwd().createFile(io, path, .{ .truncate = !append });
-    defer file.close(io);
-    const start_pos: u64 = if (append) try file.length(io) else 0;
-
-    var buf: [4096]u8 = undefined;
-    var fw = file.writer(io, &buf);
-    fw.pos = start_pos; // append lands after the previous plot
-    const w = &fw.interface;
-    try writeHeader(&fw.interface, plot, true);
-
-    // Write f64 values as raw bytes in native endian (ngspice uses host endian).
-    try w.flush();
-    try w.writeAll(std.mem.sliceAsBytes(plot.data));
-    try w.flush();
+/// An ngspice-compatible binary raw plot: text header, then native-endian f64.
+pub fn encode(w: *Io.Writer, plot: Plot) !void {
+    try writeHeader(w, plot, true);
+    try w.writeAll(std.mem.sliceAsBytes(plot.result.data));
 }
 
 pub inline fn writeHeader(w: *Io.Writer, plot: Plot, comptime binary: bool) !void {
     try w.print("Title: {s}\n", .{plot.title});
     try w.writeAll("Date: Thu Jan  1 00:00:00 1970\n");
-    try w.print("Plotname: {s}\n", .{plot.plotname});
-    if (plot.is_complex) {
+    try w.print("Plotname: {s}\n", .{plot.result.plotname});
+    if (plot.result.is_complex) {
         try w.writeAll("Flags: complex\n");
     } else {
         try w.writeAll("Flags: real\n");
     }
-    try w.print("No. Variables: {d}\nNo. Points: {d}\n", .{ plot.varnames.len, plot.npoints });
+    try w.print("No. Variables: {d}\nNo. Points: {d}\n", .{ plot.result.varnames.len, plot.result.npoints });
     try w.writeAll("Variables:\n");
-    for (plot.varnames, 0..) |name, i| {
+    for (plot.result.varnames, 0..) |name, i| {
         try w.print("\t{d}\t{s}\t{s}\n", .{ i, name, varType(name) });
     }
     try w.writeAll(if (binary) "Binary:\n" else "Values:\n");
@@ -77,18 +52,20 @@ test "write and read back real .op raw file" {
 
     const plot: Plot = .{
         .title = "test op",
-        .plotname = "Operating Point",
-        .varnames = &varnames,
-        .is_complex = false,
-        .npoints = 1,
-        .data = &data,
+        .result = .{
+            .plotname = "Operating Point",
+            .varnames = &varnames,
+            .is_complex = false,
+            .npoints = 1,
+            .data = &data,
+        },
     };
 
     const path = "zig-out/test_op.raw";
 
     Io.Dir.cwd().createDirPath(io, "zig-out") catch {};
 
-    try write(io, path, plot);
+    try @import("write.zig").write(io, path, .binary, plot);
     defer Io.Dir.cwd().deleteFile(io, path) catch {};
 
     const blob = try Io.Dir.cwd().readFileAlloc(io, path, allocator, .unlimited);
@@ -132,17 +109,19 @@ test "write and read back real .tran raw file" {
 
     const plot: Plot = .{
         .title = "test tran",
-        .plotname = "Transient Analysis",
-        .varnames = &varnames,
-        .is_complex = false,
-        .npoints = 3,
-        .data = &data,
+        .result = .{
+            .plotname = "Transient Analysis",
+            .varnames = &varnames,
+            .is_complex = false,
+            .npoints = 3,
+            .data = &data,
+        },
     };
 
     const path = "zig-out/test_tran.raw";
     Io.Dir.cwd().createDirPath(io, "zig-out") catch {};
 
-    try write(io, path, plot);
+    try @import("write.zig").write(io, path, .binary, plot);
     defer Io.Dir.cwd().deleteFile(io, path) catch {};
 
     const blob = try Io.Dir.cwd().readFileAlloc(io, path, allocator, .unlimited);
@@ -187,17 +166,19 @@ test "write and read back complex .ac raw file" {
 
     const plot: Plot = .{
         .title = "test ac",
-        .plotname = "AC Analysis",
-        .varnames = &varnames,
-        .is_complex = true,
-        .npoints = 2,
-        .data = &data,
+        .result = .{
+            .plotname = "AC Analysis",
+            .varnames = &varnames,
+            .is_complex = true,
+            .npoints = 2,
+            .data = &data,
+        },
     };
 
     const path = "zig-out/test_ac.raw";
     Io.Dir.cwd().createDirPath(io, "zig-out") catch {};
 
-    try write(io, path, plot);
+    try @import("write.zig").write(io, path, .binary, plot);
     defer Io.Dir.cwd().deleteFile(io, path) catch {};
 
     const blob = try Io.Dir.cwd().readFileAlloc(io, path, allocator, .unlimited);
@@ -241,14 +222,16 @@ test "data length mismatch returns error" {
 
     const plot: Plot = .{
         .title = "bad",
-        .plotname = "bad",
-        .varnames = &varnames,
-        .is_complex = false,
-        .npoints = 2,
-        .data = &data,
+        .result = .{
+            .plotname = "bad",
+            .varnames = &varnames,
+            .is_complex = false,
+            .npoints = 2,
+            .data = &data,
+        },
     };
 
-    const result = write(io, "zig-out/should_not_exist.raw", plot);
+    const result = @import("write.zig").write(io, "zig-out/should_not_exist.raw", .binary, plot);
     try std.testing.expectError(error.DataLengthMismatch, result);
 }
 

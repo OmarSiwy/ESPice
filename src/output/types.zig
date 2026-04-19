@@ -9,21 +9,19 @@ pub const Selection = struct {
     path: ?[]const u8 = null,
 };
 
-pub const Schema = @import("core").Schema;
-pub const Result = @import("core").Result;
+const core = @import("core");
+pub const Schema = core.Schema;
+pub const Result = core.Result;
 
+/// A result as one file shows it: the deck title over the analysis payload.
+/// `result.data` is point-major; complex variables occupy adjacent real and
+/// imaginary f64 values.
 pub const Plot = struct {
     title: []const u8,
-    plotname: []const u8,
-    varnames: []const []const u8,
-    is_complex: bool,
-    npoints: usize,
-    /// Point-major; complex variables occupy adjacent real/imaginary f64 values.
-    /// Length is npoints * varnames.len * (if is_complex then 2 else 1).
-    data: []const f64,
+    result: Result,
 
     pub fn schema(self: Plot) Schema {
-        return .{ .varnames = self.varnames, .is_complex = self.is_complex, .npoints = self.npoints };
+        return .{ .varnames = self.result.varnames, .is_complex = self.result.is_complex, .npoints = self.result.npoints };
     }
 };
 
@@ -94,9 +92,25 @@ pub fn validateSchema(format: Format, schema: Schema) ValidationError!void {
 
 pub fn validatePlot(format: Format, plot: Plot) ValidationError!void {
     try validateSchema(format, plot.schema());
-    if (plot.data.len != try sampleCount(plot.schema(), plot.npoints)) return error.DataLengthMismatch;
-    if (format == .fsdb and (plot.title.len > std.math.maxInt(u16) or plot.plotname.len > std.math.maxInt(u16)))
+    if (plot.result.data.len != try sampleCount(plot.schema(), plot.result.npoints)) return error.DataLengthMismatch;
+    if (format == .fsdb and (plot.title.len > std.math.maxInt(u16) or plot.result.plotname.len > std.math.maxInt(u16)))
         return error.FormatLimitExceeded;
+}
+
+/// Refuse, before it runs, a query whose result `format` cannot encode.
+pub fn validateQuery(format: Format, query: core.QuerySchema, deck: *const core.Deck) error{ NotSParameterData, NoPorts, DataLengthMismatch, FormatLimitExceeded }!void {
+    if (format == .touchstone or format == .citi) {
+        if (query.kind != .sp) return error.NotSParameterData;
+        if (query.portless) return error.NoPorts;
+    }
+    if (format != .sst2 and format != .fsdb) return;
+    // SST2 has a fixed 64-variable header; FSDB has 16-bit label lengths.
+    if (query.columns == 0) return error.DataLengthMismatch;
+    if (format == .sst2 and query.columns > 64) return error.FormatLimitExceeded;
+    if (format == .fsdb) {
+        if (query.columns > std.math.maxInt(u32) or deck.title.len > std.math.maxInt(u16)) return error.FormatLimitExceeded;
+        for (deck.probe_labels) |label| if (label.len > std.math.maxInt(u16)) return error.FormatLimitExceeded;
+    }
 }
 
 test "output schemas validate unknown sizes, checked dimensions and S-parameter layout" {

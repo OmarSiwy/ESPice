@@ -18,10 +18,9 @@ obj_dir/
 
 # Logs / dumps
 *.log
-core
+/core
+core.[0-9]*
 *.dump
-# ...but not the source module of that name
-!src/core/
 
 # Claude Code
 .claude/
