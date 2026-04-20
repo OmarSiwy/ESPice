@@ -1,32 +1,24 @@
+//! Build graph for espice. Module imports here ARE the dependency DAG in
+//! AGENTS.md: a module can only import what this file hands it.
 const std = @import("std");
 const gompute_build = @import("gompute");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
-    // ReleaseFast by DEFAULT: this is a numerical simulator whose proof rule
-    // ships bench numbers in commit messages — an accidental Debug `zig build
-    // bench` benchmarked a Debug espice against -O2 ngspice and every CPU
-    // column in RESULTS.md was ~10-40x pessimistic. Debug stays one
-    // `-Doptimize=Debug` away. (Not `standardOptimizeOption`: in 0.16 its
-    // preferred mode only rides the `-Drelease` flag; the default stays Debug.)
+    // ReleaseFast by default: `zig build bench` compares against -O2 ngspice,
+    // and a Debug espice is 10-40x slower. Not `standardOptimizeOption`: in
+    // 0.16 its preferred mode applies only under `-Drelease`.
     const optimize = b.option(std.builtin.OptimizeMode, "optimize", "Prioritize performance, safety, or binary size") orelse .ReleaseFast;
-    // Mixed precision (docs/perf/jac-width-2026-09-10.md). Two lists, because
-    // the f32 Jacobian is worth 1.21x on a GPU and −6.4%/+13.7% (deck
-    // depending) on this CPU, and the width is a property of the
-    // INSTANTIATION, not of the device.
+    // Mixed precision (docs/perf/jac-width-2026-09-10.md). The Jacobian width
+    // is a property of the instantiation, not of the device, hence two lists.
     //
-    // `-Djac-f32-gpu` — the PERMISSION. A listed model gets vera's
-    // `--jac-f32` ⇒ `pub const jac_f32 = true`, which `engine.gpuJacFloat`
-    // takes in the device kernel and `engine.jacFloat` declines on the host.
-    // Default is the measured set: mos1 (GPU 1.21x, agreeing to 3.9e-10) and
-    // mos6 (same n_u = 8, same U set, same accuracy sweep). Everything else
-    // stays f64 on both paths — `diode` and `bsim4va` are excluded by
-    // measurement, not by caution.
+    // `-Djac-f32-gpu` permits an f32 Jacobian: vera's `--jac-f32` sets
+    // `jac_f32`, which the GPU kernel takes and the host declines. Default is
+    // the measured set, mos1 (1.21x on GPU, agrees to 3.9e-10) and mos6 (same
+    // unknowns and accuracy). diode and bsim4va measured worse and stay f64.
     const jac_f32_gpu_list = b.option([]const u8, "jac-f32-gpu", "Comma-separated model stems whose physics permits an f32 Jacobian (GPU kernel takes it)") orelse "mos1,mos6";
-    // `-Djac-f32` — the HOST ORDER, and it still means exactly what it meant
-    // when the CPU numbers were taken: these stems run f32 on the CPU too.
-    // Now spelled `--jac-f32-host`, which implies the permission, so
-    // `-Djac-f32=mos1,mos6` reproduces the old build bit for bit.
+    // `-Djac-f32` also runs the listed stems in f32 on the CPU (vera's
+    // `--jac-f32-host`, which implies the permission).
     const jac_f32_list = b.option([]const u8, "jac-f32", "Comma-separated model stems to ALSO build with an f32 Jacobian on the CPU path") orelse "";
 
     const gompute = b.dependency("gompute", .{});
@@ -40,28 +32,22 @@ pub fn build(b: *std.Build) void {
     const bopts = b.addOptions();
     bopts.addOption([]const u8, "src_root", b.build_root.path orelse ".");
     bopts.addOption([]const u8, "contract_path", vera.builder.pathFromRoot("tools/contract.zig"));
+    // The runtime HDL loader rebuilds device/eval.zig as a .so and imports
+    // these roots by path. They are hidden edges of the module graph: move a
+    // file, move its path here.
     bopts.addOption([]const u8, "dyn_path", b.pathFromRoot("src/device/eval.zig"));
-    // The runtime HDL loader rebuilds device/eval.zig as the .so's `dyn`
-    // module; it imports device_abi and gompute by these roots. These paths are
-    // the hidden edges of the module graph: move a file, move its path here.
     bopts.addOption([]const u8, "device_abi_path", b.pathFromRoot("src/device/abi.zig"));
     bopts.addOption([]const u8, "core_path", b.pathFromRoot("src/core/root.zig"));
     bopts.addOption([]const u8, "gompute_path", gompute.builder.pathFromRoot("src/root.zig"));
 
-    // Every module in this tree is (root file, target, optimize) plus imports.
-    //
-    // strip in Release: DWARF maintenance is ~2/3 of the LLVM compile
-    // (measured /tmp/audit-llvm-time.md: 737 s espice compile ≈ 490 s of
-    // O3-with-debug-info; the DI cost is SUPERLINEAR in function size —
-    // exponent 2.0 vs 1.2 stripped on the whale models — and the shipped
-    // binary carried 115 MB of DWARF, 96 MB of it .debug_loc). Debug keeps
-    // full DI on the fast self-hosted backend; `-Ddebug-info` forces it
-    // back on in Release when a symbolized profile is worth the wait.
+    // Release strips DWARF: debug info was ~2/3 of LLVM time, superlinear in
+    // function size, and 115 MB of the shipped binary. `-Ddebug-info` puts it
+    // back when a symbolized profile is worth the wait.
     const debug_info = b.option(bool, "debug-info", "Emit DWARF in Release builds (slow: ~3x LLVM time)") orelse false;
-    // Compiling 38 device models for NVPTX and AMDGCN is most of a full build.
-    // `-Dgpu=false` is the CPU-measurement/iteration build; it is NOT a shipping
-    // configuration and not what `zig build bench` should run.
+    // Compiling every model for NVPTX and AMDGCN is most of a full build.
+    // `-Dgpu=false` is the CPU iteration build, not a shipping or bench one.
     const gpu_kernels = b.option(bool, "gpu", "Compile the GPU device kernels (default true)") orelse true;
+    // Every module here is (root, target, optimize, strip) plus imports.
     const M = struct {
         b: *std.Build,
         target: std.Build.ResolvedTarget,
@@ -81,13 +67,14 @@ pub fn build(b: *std.Build) void {
             });
         }
     }{ .b = b, .target = target, .optimize = optimize, .strip = optimize != .Debug and !debug_info };
-    // Same maker, strip PINNED on: for modules that also cross into the
-    // NVPTX/AMDGCN kernel builds. See gpu_dev_mod below.
+    // Strip pinned on, `-Ddebug-info` or not, for device code: DWARF over
+    // generated models is superlinear and maps to cache files nobody reads,
+    // and with DI on, the NVPTX backend and the host device objects SEGV'd
+    // the compiler (mos2, vdmos). Symbols survive; only line tables go.
     const GPU = @TypeOf(M){ .b = b, .target = target, .optimize = optimize, .strip = true };
 
     const build_options_mod = bopts.createModule();
 
-    // Shared data every layer speaks. Imports nothing.
     const core_mod = M.make(b.path("src/core/root.zig"), &.{});
     const core_import: std.Build.Module.Import = .{ .name = "core", .module = core_mod };
     const device_abi_mod = M.make(b.path("src/device/abi.zig"), &.{ .{ .name = "contract", .module = contract_mod }, core_import });
@@ -98,15 +85,10 @@ pub fn build(b: *std.Build) void {
     });
     device_eval_mod.link_libc = true;
     const solver_mod = M.make(b.path("src/solver/root.zig"), &.{core_import});
-
-    // Waveform writers. A leaf like `solver`: it imports nothing but core, so
-    // it is a module rather than a set of files in the app root, and
-    // `zig build test-output` runs it without building the simulator.
+    // A leaf on core alone, so `zig build test-output` skips the simulator.
     const output_mod = M.make(b.path("src/output/root.zig"), &.{core_import});
 
-    // Netlist lines -> hypergraph + analysis cards. Imports only shared leaves.
-    const netlist_imports: []const std.Build.Module.Import = &.{core_import};
-    const netlist_mod = M.make(b.path("src/frontend/netlist.zig"), netlist_imports);
+    const netlist_mod = M.make(b.path("src/frontend/netlist.zig"), &.{core_import});
     const frontend_bench = b.addExecutable(.{
         .name = "frontend-bench",
         .use_llvm = optimize != .Debug,
@@ -116,16 +98,10 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_frontend_bench.addArgs(args);
     b.step("bench-frontend", "Measure netlist parsing and expansion").dependOn(&run_frontend_bench.step);
 
-    // =======================================================================
-    // Devices: every models/* compiled to Zig at build time
-    //
-    // Auto-discovered — drop a source in and it is built, whichever HDL it is
-    // written in. `wf` collects every generated aggregate root: one models.zig
-    // re-exporting all devices (what device/root.zig reflects over), plus a
-    // one-device models.zig per model, because a GPU kernel root must see
-    // exactly the device it compiles (see kernel_roots below).
-    // =======================================================================
-
+    // Devices: every models/* file compiled to Zig at build time, whatever its
+    // HDL. `wf` collects the generated roots: one models.zig re-exporting all
+    // devices (device/root.zig reflects over it) and one single-device
+    // models.zig per model, because a GPU kernel root must see only its device.
     const models = discoverModels(b);
     const wf = b.addWriteFiles();
 
@@ -134,35 +110,27 @@ pub fn build(b: *std.Build) void {
 
     const dev_mods = b.allocator.alloc(*std.Build.Module, models.len) catch @panic("OOM");
     const one_models = b.allocator.alloc(*std.Build.Module, models.len) catch @panic("OOM");
-    // One HOST object per model, the CPU counterpart of the per-model GPU
-    // kernel roots below. Every `DeviceBatch(D)` used to be instantiated inside
-    // the single `zig build-exe` that also holds solver/analysis/app, so Zig
-    // cached all 38 whale evals as ONE unit: a one-line solver edit recompiled
-    // the lot, single-threaded, on a 32-core box. See
-    // docs/perf/build-split-2026-09-10.md and src/device/eval.zig.
+    // One host object per model (plus the native lines), so a solver edit
+    // does not recompile every device eval as one single-threaded unit.
+    // See docs/perf/build-split-2026-09-10.md.
     const host_objs = b.allocator.alloc(*std.Build.Step.Compile, models.len + 1) catch @panic("OOM");
     for (models, 0..) |m, i| {
         const run = b.addRunArtifact(vera_exe);
-        // The catalog keys devices by FILE stem while the generated type name
-        // comes from the MODULE name; both frontends fail on a mismatch.
+        // The catalog keys on the file stem, the generated type on the module
+        // name; vera fails on a mismatch.
         run.addArg(b.fmt("--expect-module={s}", .{m.name}));
-        // Verilog-A only: the Verilog frontend is a translator with two flags
-        // and rejects the rest rather than pretending to honour them.
-        //
-        // `--check` type-checks the generated device at its .va, so a bad
-        // lowering names the source instead of surfacing inside a cache file.
+        // The digital frontend rejects these flags, so Verilog-A only.
+        // `--check` type-checks the generated device, so a bad lowering names
+        // the .va instead of a cache file.
         if (m.hdl == .verilog_a) {
             run.addArgs(&.{"--emit-zig"});
             if (inCsv(jac_f32_gpu_list, m.name)) run.addArg("--jac-f32");
             if (inCsv(jac_f32_list, m.name)) run.addArg("--jac-f32-host");
-            // W0650 (unit not provably finite -> strict float) predates the
-            // current vera on several models; the empty-stderr gate would
-            // otherwise fail any model that regenerates. Strict mode is
-            // correct, just unvectorized — re-prove models (teach the prover
-            // $limit's bound) when device-eval speed is the open front.
-            // W0651: upstream .va ports use closed-infinity ranges; W0850:
-            // hisim-class models $display in the device artifact. Both are
-            // pre-existing; same re-prove pass as W0650 owns them.
+            // Existing model warnings, allowed so the empty-stderr gate passes:
+            // W0650 (unit not provably finite, so strict float: correct but
+            // unvectorized), W0651 (closed-infinity ranges in upstream ports),
+            // W0850 ($display in hisim-class devices). Re-proving the models
+            // clears them.
             run.addArgs(&.{ "--allow=W0650", "--allow=W0651", "--allow=W0850", "--color=never", "--check", "--contract" });
             run.addFileArg(vera.path("tools/contract.zig"));
         }
@@ -170,55 +138,34 @@ pub fn build(b: *std.Build) void {
         const gen_zig = run.addOutputFileArg(b.fmt("{s}.zig", .{m.name}));
         run.addFileArg(b.path(b.fmt("models/{s}", .{m.file})));
 
-        // ALWAYS stripped, `-Ddebug-info` included. DWARF over generated code
-        // maps to a cache file nobody reads, and the DI cost is superlinear in
-        // function size (build.zig's strip header) — the whale models ARE the
-        // superlinear tail, which made `-Ddebug-info=true` a ~1 h build for a
-        // profile whose interesting frames are all in src/. The device symbol
-        // still names itself; only its line table goes.
         dev_mods[i] = GPU.make(gen_zig, &.{.{ .name = "contract", .module = contract_mod }});
 
         const one_line = b.fmt("pub const {s} = @import(\"{s}\");\n", .{ m.name, m.name });
         agg_src.appendSlice(b.allocator, one_line) catch @panic("OOM");
 
-        // Also `GPU.make`: this one crosses into the NVPTX/AMDGCN builds, and
-        // -Ddebug-info=true crashed `zig build-obj -target nvptx64-cuda` (SEGV
-        // in DWARF emission for mos2/vdmos), so the one build mode the
-        // profiling doc names was unusable.
         one_models[i] = GPU.make(wf.add(b.fmt("{s}/models.zig", .{m.name}), one_line), &.{});
         one_models[i].addImport(m.name, dev_mods[i]);
 
-        // The one-device object: `engine.deviceVtable(D)` and everything it
-        // pulls — ProtoStore, DeviceBatch, eval, hooks — under the runtime ABI
-        // symbol `arp_device_<stem>`. Same `one_models` aggregate the GPU
-        // kernel root gets, so host and device compile the SAME device type.
-        // Strip pinned (`GPU.make`) for the same reason as `dev_mods`: with
-        // `-Ddebug-info=true` every host device object SEGV'd the compiler, so
-        // no symbolized profile could be built. Pinned, the symbols survive
-        // (callgrind names `DeviceBatch(mos1).eval`) and src/ keeps its lines.
+        // The host object exporting `arp_device_<stem>`, built from the same
+        // one-device aggregate as the GPU kernel so both see the same type.
         const host_mod = GPU.make(b.path("src/device/eval.zig"), &.{
             .{ .name = "contract", .module = contract_mod },
             .{ .name = "models", .module = one_models[i] },
             .{ .name = "device_abi", .module = device_abi_mod },
             .{ .name = "gompute", .module = gompute.module("gompute") },
         });
-        // The runtime-`.so` half of the evaluator dlopens; matches device_mod.
+        // The runtime-.so half of the evaluator dlopens.
         host_mod.link_libc = true;
-        // The device vtable is `callconv(.auto)`, and a compilation with error
-        // tracing passes every such function a hidden `*StackTrace`. Stripping
-        // turns tracing off by default, so a Debug exe (traced) called these
-        // stripped objects with a shifted argument list: the allocator
-        // `proto_create` received was garbage and every Debug test that built a
-        // circuit crashed. Pin it to what the unstripped side gets.
+        // The device vtable is callconv(.auto), which passes a hidden
+        // *StackTrace when error tracing is on. Stripping turns tracing off,
+        // so a traced Debug exe would call these with shifted arguments.
         host_mod.error_tracing = optimize == .Debug;
         host_objs[i] = b.addObject(.{ .name = b.fmt("dev_{s}", .{m.name}), .root_module = host_mod });
-        // Same reason the executable does it: the self-hosted backend has no
-        // optimizer, whatever the optimize mode claims (see `exe.use_llvm`).
-        host_objs[i].use_llvm = optimize != .Debug;
+        host_objs[i].use_llvm = optimize != .Debug; // see exe.use_llvm
     }
 
-    // Native line algorithms retain their own accepted-step history. Export
-    // the existing neutral vtables from a CPU object, as for generated models.
+    // The native transmission lines keep their own accepted-step history and
+    // export neutral vtables from a CPU object, like the generated models.
     const native_models_mod = M.make(b.path("models/native/root.zig"), &.{.{ .name = "contract", .module = contract_mod }});
     inline for (.{ "ltra_native", "txl_native", "cpl_native_2", "cpl_native_3", "cpl_native_4" }) |name|
         agg_src.appendSlice(b.allocator, b.fmt("pub const {s} = @import(\"native_models\").{s};\n", .{ name, name })) catch @panic("OOM");
@@ -237,7 +184,6 @@ pub fn build(b: *std.Build) void {
     models_mod.addImport("native_models", native_models_mod);
     for (models, dev_mods) |m, dev_mod| models_mod.addImport(m.name, dev_mod);
 
-    // Catalog, runtime HDL loader (dlopen) and the frozen Circuit.
     const device_mod = M.make(b.path("src/device/root.zig"), &.{
         .{ .name = "models", .module = models_mod },
         .{ .name = "device_abi", .module = device_abi_mod },
@@ -255,7 +201,7 @@ pub fn build(b: *std.Build) void {
     });
     analysis_mod.linkSystemLibrary("c", .{});
 
-    // Passive circuit construction is shared by the frontend and its tests.
+    // Passive circuit construction, shared by the frontend and its tests.
     const builder_mod = M.make(b.path("src/frontend/builder.zig"), &.{
         core_import,
         .{ .name = "device", .module = device_mod },
@@ -268,41 +214,28 @@ pub fn build(b: *std.Build) void {
         .{ .name = "builder", .module = builder_mod },
     });
 
-    // The owning facade composes frontend preparation, analysis and output.
-    const espice_imports: []const std.Build.Module.Import = &.{
+    const espice_mod = M.make(b.path("src/espice.zig"), &.{
         core_import,
         .{ .name = "analysis", .module = analysis_mod },
         .{ .name = "frontend", .module = frontend_mod },
         .{ .name = "output", .module = output_mod },
-    };
-    const espice_mod = M.make(b.path("src/espice.zig"), espice_imports);
+    });
 
-    // =======================================================================
-    // The app
-    // =======================================================================
-
-    const app_imports: []const std.Build.Module.Import = &.{.{ .name = "espice", .module = espice_mod }};
     const exe = b.addExecutable(.{
         .name = "espice",
-        .root_module = M.make(b.path("src/main.zig"), app_imports),
+        .root_module = M.make(b.path("src/main.zig"), &.{.{ .name = "espice", .module = espice_mod }}),
     });
     exe.root_module.link_libc = true;
-    // Backend follows the optimize mode: the self-hosted x86 backend compiles
-    // fast but emits UNOPTIMIZED code whatever the mode says — a "ReleaseFast"
-    // espice off it benchmarked 10-40x behind ngspice while the profile showed
-    // plain scalar device eval. Debug keeps the fast-iterating self-hosted
-    // backend; any Release* goes through LLVM, which is the only backend with
-    // an optimizer.
+    // The self-hosted backend emits unoptimized code whatever the mode says,
+    // so every Release build goes through LLVM; Debug keeps the fast backend.
     exe.use_llvm = optimize != .Debug;
     // LLD cannot link Mach-O; macOS keeps Zig's own linker.
     exe.use_lld = optimize != .Debug and !target.result.os.tag.isDarwin();
     for (host_objs) |o| exe.root_module.addObject(o);
     b.installArtifact(exe);
 
-    // GPU kernels, unconditionally: the arch probe inside `emitKernels` is what
-    // decides, and a machine with no device emits nothing and stays green. This
-    // is also what makes `gompute_kernels` always exist for analysis/gpu.zig.
-    // Emission sits below the executable because `emitKernels` takes it.
+    // GPU kernels. `emitKernels` probes the arch, and a machine with no device
+    // emits nothing, but `gompute_kernels` always exists for analysis/gpu.zig.
     const smallest_model = blk: {
         var best = models[0];
         for (models) |m| if (m.size < best.size) {
@@ -312,12 +245,8 @@ pub fn build(b: *std.Build) void {
     };
     var roots: std.ArrayList(gompute_build.KernelRoot) = .empty;
     for (models, one_models) |m, one_mod| {
-        // `-Dgpu=false` compiles ONE model for the GPU instead of all 38, which
-        // is the bulk of a full build. Not zero: gompute panics on an empty
-        // root list, and `gompute_kernels` has to exist for analysis/gpu.zig to
-        // compile and for `--backend cuda` to keep erroring by name. This is
-        // the CPU-iteration build — not a shipping one, and not what
-        // `zig build bench` should run.
+        // `-Dgpu=false` still compiles one model: gompute panics on an empty
+        // root list, and `--backend cuda` must keep erroring by name.
         if (!gpu_kernels and !std.mem.eql(u8, m.name, smallest_model)) continue;
         if (m.size >= gpu_max_model_bytes) continue;
         const dev_imports = b.allocator.create(DeviceImports) catch @panic("OOM");
@@ -327,18 +256,16 @@ pub fn build(b: *std.Build) void {
             .root = b.path("src/device/eval.zig"),
             .imports = &deviceKernelImports,
             .imports_ctx = dev_imports,
-            // The compact models are single enormous eval functions; letting
-            // them all compile at once is a memory problem, not a speedup.
+            // Large models are single enormous eval functions; compiling them
+            // all at once runs out of memory.
             .heavy = m.size >= heavy_model_bytes,
         }) catch @panic("OOM");
     }
-    // HIP is PINNED, CUDA is probed by default. `.auto` asks the BUILD machine,
-    // so on a dev box with an NVIDIA card it found no AMD device and compiled
-    // the hip backend out — silently making `--backend hip` a hard error in
-    // every binary shipped from here, whatever the deploy machine has. gfx1100
-    // (RDNA3) is the baseline we claim. Release builds run on GPU-less CI and
-    // must pin CUDA too: the CUDA blob is PTX, which the driver JITs forward,
-    // so an old `sm_` runs on every newer card. `none` compiles a backend out.
+    // HIP is pinned: `.auto` probes the BUILD machine, and a box without an
+    // AMD card would compile `--backend hip` out of every binary it ships.
+    // gfx1100 (RDNA3) is the claimed baseline. Release CI has no GPU and must
+    // pin CUDA too; the driver JITs PTX forward, so an old `sm_` runs on
+    // newer cards. `none` compiles a backend out.
     const cuda_arch = b.option([]const u8, "cuda-arch", "CUDA arch (sm_75, ...), `auto` to probe the build machine, `none` to omit") orelse "auto";
     const hip_arch = b.option([]const u8, "hip-arch", "HIP arch (gfx1100, ...), `none` to omit") orelse "gfx1100";
     gompute_build.emitKernels(b, gompute, exe, .{
@@ -347,7 +274,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .cuda = gpuArch(cuda_arch),
         .hip = gpuArch(hip_arch),
-        // measured 443s vs 13.6s for hisimhv_va.
+        // Debug kernels compile 30x slower (443 s vs 13.6 s for hisimhv_va).
         .optimize = if (optimize == .Debug) .ReleaseFast else optimize,
     });
 
@@ -366,30 +293,15 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_cmd.addArgs(args);
     b.step("run", "Run ESPice").dependOn(&run_cmd.step);
 
-    // The generator, on demand. One step now that one binary handles every HDL.
     const run_vera = b.addRunArtifact(vera_exe);
     if (b.args) |args| run_vera.addArgs(args);
     b.step("vera", "Run the vera CLI (any .va/.v/.sv/.vhd)").dependOn(&run_vera.step);
 
-    // =======================================================================
-    // Tests
-    //
-    // One test root PER MODULE, because `zig test` collects tests only from the
-    // root module's own file set. A cross-module `_ = @import("analysis")`
-    // crosses a MODULE boundary, so its tests are silently dropped — measured:
-    // importing all five modules there added ZERO tests, which is exactly how a green suite hides a whole engine going untested.
-    //
-    // WITHIN a module, one root is enough: every root.zig ends in a
-    // `test { _ = <each sibling>; }` aggregator, so the module root pulls its
-    // files in. That is what collapses FastVAF's 17 per-file test binaries into
-    // one. `HostTest` builds each suite; `test` runs them all.
-    //
-    // The Verilog-A conformance and exhaustive oracles live in VerA with the
-    // fixtures they read — they test the compiler, not the simulator:
-    //   cd ../VerA && zig build conformance
-    //   cd ../VerA && zig build exhaustive
-    // =======================================================================
-
+    // Tests: one test binary per module. `zig test` collects tests only from
+    // the root module's own files, so a cross-module `_ = @import(...)` adds
+    // none. Within a module, each root.zig's `test { _ = ...; }` aggregator
+    // pulls in its siblings. The Verilog-A conformance oracles live in VerA
+    // (`zig build conformance`, `zig build exhaustive` there).
     const test_step = b.step("test", "Run every suite and the numeric SPICE fixtures");
     const t: HostTest = .{ .b = b, .exe = exe, .objs = host_objs };
 
@@ -399,8 +311,7 @@ pub fn build(b: *std.Build) void {
     c_api_test_mod.linkLibrary(c_api_lib);
     const run_c_api_tests = t.run(c_api_test_mod, &.{}, false);
 
-    // `analysis_mod` is declared before emitKernels runs, so its
-    // `gompute_kernels` import (analysis/gpu.zig) is wired here.
+    // analysis_mod predates emitKernels, so its `gompute_kernels` import is wired here.
     if (exe.root_module.import_table.get("gompute_kernels")) |artifacts|
         analysis_mod.addImport("gompute_kernels", artifacts);
 
@@ -410,8 +321,8 @@ pub fn build(b: *std.Build) void {
     limiter_gen.addFileArg(b.path("tests/fixtures/hdl/veriloga_limit.assets/va_limit_state.va"));
     const limiter_mod = M.make(limiter_source, &.{.{ .name = "contract", .module = contract_mod }});
 
-    // A separate object is essential: Zig error ordinals differ between
-    // compilations even when the callback signatures use the same error set.
+    // A separate object on purpose: Zig error ordinals differ between
+    // compilations even for the same error set, which is what this tests.
     const error_object_mod = M.make(b.path("src/device/tests/device_errors_object.zig"), &.{
         .{ .name = "device_eval", .module = device_eval_mod },
         .{ .name = "device_abi", .module = device_abi_mod },
@@ -426,11 +337,14 @@ pub fn build(b: *std.Build) void {
             t.run(M.make(b.path("src/tests/espice.zig"), &.{.{ .name = "espice", .module = espice_mod }}), &.{}, true),
             run_c_api_tests,
         } },
-        .{ "test-frontend", "Run netlist, builder and prepared-circuit tests", &.{
-            t.run(netlist_mod, &.{}, false),
-            // build_options: the binder test loads models/diode.va at runtime.
-            t.run(frontend_mod, &.{.{ .name = "build_options", .module = build_options_mod }}, true),
-        } },
+        .{
+            "test-frontend", "Run netlist, builder and prepared-circuit tests",
+            &.{
+                t.run(netlist_mod, &.{}, false),
+                // build_options: the binder test loads models/diode.va at runtime.
+                t.run(frontend_mod, &.{.{ .name = "build_options", .module = build_options_mod }}, true),
+            },
+        },
         .{ "test-analysis", "Run all analysis tests", &.{t.run(analysis_mod, &.{
             .{ .name = "builder", .module = builder_mod },
             .{ .name = "limiter_device", .module = limiter_mod },
@@ -445,7 +359,6 @@ pub fn build(b: *std.Build) void {
             t.run(device_mod, &.{}, true),
             t.run(device_abi_mod, &.{}, false),
             t.run(M.make(b.path("src/device/tests/eval.zig"), &.{.{ .name = "device_eval", .module = device_eval_mod }}), &.{}, false),
-            // Callback statuses across a separately compiled object.
             t.run(error_tests_mod, &.{}, false),
         } },
     }) |suite| {
@@ -455,7 +368,7 @@ pub fn build(b: *std.Build) void {
     }
     b.step("test-c-api", "Run C ABI boundary tests").dependOn(&run_c_api_tests.step);
 
-    // Both runners receive the same recursively discovered compile-time catalog.
+    // The correctness and benchmark runners share one build-time fixture catalog.
     const fixture_catalog = @import("tests/fixture_catalog.zig").create(b);
     const fixture_imports: []const std.Build.Module.Import = &.{.{ .name = "fixture_catalog", .module = fixture_catalog }};
     const correctness = b.addExecutable(.{
@@ -488,11 +401,13 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_bench_tests.step);
 }
 
-/// One test binary per module root, linked like the executable. The module is
-/// COPIED: `addObject` mutates the module it is called on, and adding the
-/// device objects to a shared one linked every `arp_device_*` into the exe
-/// twice. A module that already backs an installed artifact also silently
-/// produced a binary that ran zero tests.
+/// Builds one test binary from `m`, linked like the executable.
+///
+/// `m` is copied rather than reused: `addObject` mutates its module, so
+/// adding the device objects to a shared one linked every `arp_device_*`
+/// into the exe twice, and a module that already backs an installed
+/// artifact yields a test binary that runs zero tests. `devices` links the
+/// per-model host objects.
 const HostTest = struct {
     b: *std.Build,
     exe: *std.Build.Step.Compile,
@@ -519,23 +434,18 @@ const HostTest = struct {
     }
 };
 
-// ===========================================================================
-// Model discovery
-// ===========================================================================
-
-/// One discovered model source. `name` is the file stem — the key the device
-/// catalog is formed from — and `hdl` picks which generator CLI compiles it.
+/// One model source under models/.
 const Model = struct {
+    /// File stem: the device catalog's key.
     name: []const u8,
     file: []const u8,
     hdl: enum { verilog_a, digital },
-    /// Source bytes. Only used for the two GPU thresholds below — a stand-in
-    /// for "how big is this device's eval function", which is not knowable at
-    /// configure time and which source size tracks closely enough.
+    /// Source size in bytes, the configure-time stand-in for the size of the
+    /// device's eval function. Only the two GPU thresholds read it.
     size: u64,
 };
 
-/// Is `name` one of the comma-separated entries of `csv`? (`-Djac-f32=a,b`.)
+/// Whether `name` is one of the comma-separated entries of `csv`.
 fn inCsv(csv: []const u8, name: []const u8) bool {
     var it = std.mem.splitScalar(u8, csv, ',');
     while (it.next()) |e| {
@@ -544,51 +454,38 @@ fn inCsv(csv: []const u8, name: []const u8) bool {
     return false;
 }
 
-/// Source size past which a model's GPU compilation is `heavy` — chained into
-/// `heavy_lanes` rather than run alongside every other big one.
-///
-/// MUST sit under `gpu_max_model_bytes` or it gates nothing: at the old
-/// 100 KB no admitted root could ever be heavy (everything ≥ 80 KB is
-/// excluded outright), so `heavy_lanes` and the memory-protection chaining
-/// silently never engaged. 20 KB puts the largest admitted kernels
-/// (mos9/gummel_poon at 20 KB, mos2 at 24 KB) on the chained lanes.
+/// Source size from which a model's GPU compile runs on the chained
+/// `heavy_lanes` instead of alongside the others. Must stay below
+/// `gpu_max_model_bytes` to gate anything; 20 KB puts the largest admitted
+/// kernels (mos9, gummel_poon, mos2) on those lanes.
 const heavy_model_bytes: u64 = 20 * 1024;
 
-/// Source size at or above which a model gets NO GPU kernel at all.
-///
-/// Not a build-time convenience — the emitted kernels past this line cannot win.
-/// Measured on an RTX 4060 Laptop (sm_89):
+/// Source size at or above which a model gets no GPU kernel: past it the
+/// kernel cannot win. Measured on an RTX 4060 Laptop (sm_89):
 ///
 ///   model        source   PTX      cold cuModuleLoadData
 ///   mos9          20 KB   731 KB    11.4 ms
 ///   gummel_poon   20 KB   895 KB    12.6 ms
 ///   hicumL2_va    90 KB   9.7 MB    (not measured; sized like bsim4)
-///   bsim4va      440 KB   8.7 MB    37.9 ms WARM
-///   bsimsoi_va   399 KB  11.3 MB   308_667 ms  <-- five minutes, cold
+///   bsim4va      440 KB   8.7 MB    37.9 ms warm
+///   bsimsoi_va   399 KB  11.3 MB   308_667 ms cold
 ///   hisimhv_va   614 KB  38.4 MB   >900_000 ms, killed
 ///
-/// The driver caches JIT output in ~/.nv/ComputeCache, so that cost is paid once
-/// per (model, arch, driver) — but it IS paid, the cache evicts at ~109 MB here,
-/// and it bought a kernel that loses anyway: bsim4's PTX carries 142_990 f64 ops
-/// and 7104+ virtual 64-bit registers against a 255-register file, so it spills
-/// to local memory and runs at ~16% occupancy on a part whose f64 rate is 1/69
-/// of its f32 rate. The CPU does the same work at 1449 GFLOP/s against the GPU's
-/// 152.7. Emitting these also put 68 MB of PTX in .data — most of a 549 MB
-/// binary — for kernels that were slower than not having them.
+/// The driver caches the JIT in ~/.nv/ComputeCache (evicting at ~109 MB), and
+/// the kernel loses anyway: bsim4's PTX needs 7104+ virtual 64-bit registers
+/// against 255, spills, runs at ~16% occupancy on a part with 1/69-rate f64,
+/// and reaches 152.7 GFLOP/s against the CPU's 1449.
 ///
-/// 80 KB because the sizes cluster: hicumL2_va at 90 KB is the smallest model
-/// that blows up (9.7 MB of PTX), and mos2 at 24 KB is the largest that does
-/// not. Nothing lives in between.
+/// 80 KB sits in the gap between mos2 (24 KB, fine) and hicumL2_va (90 KB,
+/// 9.7 MB of PTX); no model lies between.
 ///
-/// ponytail: source bytes, not emitted PTX bytes. PTX size is the quantity that
-/// actually predicts JIT cost, but it is only known AFTER paying the build-time
-/// compile this threshold exists to skip. Source size is the proxy available at
-/// configure time and the cluster gap is wide enough that it separates cleanly.
+/// ponytail: source bytes, not PTX bytes. PTX size predicts JIT cost but is
+/// known only after the compile this threshold skips; switch if a model ever
+/// lands inside the gap.
 const gpu_max_model_bytes: u64 = 80 * 1024;
 
-/// Extension -> generator. Verilog-A goes to FastVAF; the digital HDLs all go
-/// to FastVF, which internally routes .sv through sv2v and .vhd through ghdl
-/// before verilator sees them.
+/// Extension -> generator. Verilog-A goes to vera's analog frontend; the
+/// digital HDLs go to its Verilog frontend (.sv via sv2v, .vhd via ghdl).
 const hdl_by_ext = [_]struct { ext: []const u8, hdl: @FieldType(Model, "hdl") }{
     .{ .ext = ".va", .hdl = .verilog_a },
     .{ .ext = ".v", .hdl = .digital },
@@ -597,7 +494,8 @@ const hdl_by_ext = [_]struct { ext: []const u8, hdl: @FieldType(Model, "hdl") }{
     .{ .ext = ".vhdl", .hdl = .digital },
 };
 
-/// Configure-time glob of devices/models/* -> sorted model list, stable across builds.
+/// Lists models/* sorted by stem, so builds are reproducible. Panics on two
+/// sources sharing a stem, since one would silently shadow the other.
 fn discoverModels(b: *std.Build) []const Model {
     const io = b.graph.io;
     var out: std.ArrayList(Model) = .empty;
@@ -621,9 +519,7 @@ fn discoverModels(b: *std.Build) []const Model {
             return std.mem.lessThan(u8, a.name, c.name);
         }
     }.lt);
-    // Two sources with the same stem emit the same catalog key, and the
-    // aggregate would silently keep whichever import landed last. Sorted, so a
-    // duplicate is adjacent.
+    // Sorted, so a duplicate stem is adjacent.
     if (out.items.len > 1) {
         for (out.items[1..], out.items[0 .. out.items.len - 1]) |cur, prev| {
             if (std.mem.eql(u8, cur.name, prev.name))
@@ -634,7 +530,7 @@ fn discoverModels(b: *std.Build) []const Model {
     return out.toOwnedSlice(b.allocator) catch @panic("OOM");
 }
 
-/// No entry in `hdl_by_ext` is a suffix of another, so first match is the match.
+/// No extension in `hdl_by_ext` is a suffix of another, so the first match wins.
 fn matchExt(file_name: []const u8) ?@TypeOf(hdl_by_ext[0]) {
     for (hdl_by_ext) |cand| {
         if (std.mem.endsWith(u8, file_name, cand.ext)) return cand;
@@ -642,34 +538,24 @@ fn matchExt(file_name: []const u8) ?@TypeOf(hdl_by_ext[0]) {
     return null;
 }
 
-// ===========================================================================
-// GPU kernels for the generated devices
-//
-// Only the IMPORTS are ours. `gompute_build.emitKernels` owns the arch probe,
-// the device compilation, the IR rewrite, PTX/HSACO assembly and the artifacts
-// module.
-// ===========================================================================
-
+/// `-Dcuda-arch`/`-Dhip-arch` as gompute options: `none`, `auto` or an arch name.
 fn gpuArch(arch: []const u8) gompute_build.CudaOptions {
     if (std.mem.eql(u8, arch, "none")) return .{ .enabled = false };
     if (std.mem.eql(u8, arch, "auto")) return .{};
     return .{ .gpu = .{ .name = arch } };
 }
 
-/// What `deviceKernelImports` needs, passed through `emitKernels` untouched.
+/// Context `deviceKernelImports` receives through `emitKernels`.
 const DeviceImports = struct {
     models: *std.Build.Module,
     contract: *std.Build.Module,
     device_abi: *std.Build.Module,
 };
 
-/// `src/device/eval.zig` reaches the device catalog through `models`, and
-/// `engine.zig` behind it needs `contract`. gompute adds `gompute` (its device
-/// shim) itself, so those two are the whole delta.
-///
-/// The modules are reused as-is rather than rebuilt for the GPU target: a
-/// device module carries no target-specific code of its own, and rebuilding
-/// them here would fork the types the host and the kernel must agree on.
+/// The imports a GPU kernel root (src/device/eval.zig) needs beyond the
+/// `gompute` shim gompute adds itself. The host modules are reused as-is: a
+/// device module has no target-specific code, and rebuilding it per target
+/// would fork types the host and kernel must share.
 fn deviceKernelImports(
     b: *std.Build,
     _: std.Build.ResolvedTarget,
