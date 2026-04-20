@@ -1,3 +1,5 @@
+//! Problem facade contract: ownership, transactional appends, stepped vs
+//! batch execution, output ordering and failure isolation.
 const std = @import("std");
 const api = @import("espice");
 const t = std.testing;

@@ -1,3 +1,4 @@
+//! C ABI contract through include/espice.h, linked against libespice.a.
 const std = @import("std");
 const c = @cImport({
     @cInclude("espice.h");

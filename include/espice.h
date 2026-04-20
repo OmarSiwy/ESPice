@@ -1,3 +1,5 @@
+/* espice C API: create a Problem from a SPICE netlist, run or step its
+ * analysis queries, and copy results out. Implemented in src/c_api.zig. */
 #ifndef ESPICE_H
 #define ESPICE_H
 
@@ -8,28 +10,36 @@
 extern "C" {
 #endif
 
+/* Must match espice_abi_version() and espice_create_options.abi_version. */
 #define ESPICE_ABI_VERSION 1u
 #define ESPICE_NO_QUERY UINT32_MAX
 
 typedef struct espice_problem espice_problem;
 typedef uint32_t espice_status;
+/* espice_status */
 enum {
     ESPICE_OK = 0, ESPICE_INVALID_ARGUMENT = 1, ESPICE_BUFFER_TOO_SMALL = 2,
     ESPICE_OUT_OF_MEMORY = 3, ESPICE_INVALID_QUERY = 4,
     ESPICE_RESULT_UNAVAILABLE = 5, ESPICE_FAILED = 6, ESPICE_ABI_MISMATCH = 7
 };
+/* espice_create_options.source_kind: a path, or netlist text named by origin. */
 enum { ESPICE_FILE = 0, ESPICE_BYTES = 1 };
+/* espice_create_options.dialect */
 enum { ESPICE_NGSPICE = 0, ESPICE_HSPICE = 1, ESPICE_SPECTRE = 2 };
+/* espice_create_options.backend */
 enum { ESPICE_CPU = 0, ESPICE_AUTO = 1, ESPICE_CUDA = 2, ESPICE_HIP = 3 };
+/* espice_create_options.output_format */
 enum {
     ESPICE_BINARY = 0, ESPICE_ASCII = 1, ESPICE_CSV = 2, ESPICE_TOUCHSTONE = 3,
     ESPICE_PSF = 4, ESPICE_FSDB = 5, ESPICE_SST2 = 6, ESPICE_CITI = 7,
     ESPICE_PRINT = 8
 };
+/* Query status (espice_query_info.status, espice_advance_event.status) */
 enum {
     ESPICE_PENDING = 0, ESPICE_PAUSED = 1, ESPICE_COMPLETE = 2,
     ESPICE_QUERY_FAILED = 3, ESPICE_DEPENDENCY_FAILED = 4, ESPICE_CANCELLED = 5
 };
+/* Query kind (espice_query_info.kind) */
 enum {
     ESPICE_AC = 0, ESPICE_DC = 1, ESPICE_DCMATCH = 2, ESPICE_DISTO = 3,
     ESPICE_ENVELOPE = 4, ESPICE_FOUR = 5, ESPICE_HB = 6, ESPICE_MATEX = 7,
@@ -38,12 +48,16 @@ enum {
     ESPICE_QPSS = 16, ESPICE_SENS = 17, ESPICE_SP = 18, ESPICE_STB = 19,
     ESPICE_TEMP = 20, ESPICE_TF = 21, ESPICE_TRAN = 22, ESPICE_TRAN_NOISE = 23
 };
+/* espice_progress.phase */
 enum {
     ESPICE_PREPARE = 0, ESPICE_NONLINEAR = 1, ESPICE_DC_PHASE = 2,
     ESPICE_FREQUENCY = 3, ESPICE_TRANSIENT = 4, ESPICE_PERIODIC = 5,
     ESPICE_HARMONIC = 6, ESPICE_SWEEP = 7, ESPICE_POSTPROCESS = 8
 };
+/* espice_scope.kind: every query, one query and its prerequisites, or one
+ * connected component of the DAG. */
 enum { ESPICE_ALL = 0, ESPICE_QUERY = 1, ESPICE_COMPONENT = 2 };
+/* espice_print_options.preview: which call's next frontier to mark. */
 enum { ESPICE_PREVIEW_RUN_ALL = 0, ESPICE_PREVIEW_ADVANCE = 1, ESPICE_PREVIEW_READY = 2 };
 
 typedef struct { const char *data; size_t len; } espice_bytes;

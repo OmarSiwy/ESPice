@@ -1,4 +1,4 @@
-//! Numerical regressions through the owning Problem API.
+//! Numerical regressions run end to end through the Problem API.
 const std = @import("std");
 const api = @import("espice");
 const Result = api.Result;
@@ -108,9 +108,8 @@ test "envelope exhaustion and failed minimum step terminate without publishing" 
 }
 
 test "uic: .ic seeds the transient and the OP is skipped" {
-    // An RC with the source at 0 V: the operating point is v(2) = 0, so a
-    // transient that ran the OP starts flat at zero. With `uic` the cap starts
-    // charged at 1 V and decays — the two are unmistakable.
+    // RC with the source at 0 V: the OP gives v(2) = 0, while `uic` starts the
+    // cap at the 1 V IC and lets it decay.
     const sim = try runDeck(
         \\uic rc
         \\v1 1 0 dc 0
@@ -128,13 +127,12 @@ test "uic: .ic seeds the transient and the OP is skipped" {
     const v2_first = probeFirst(res, "2") orelse return error.NoProbe;
     try std.testing.expectApproxEqAbs(@as(f64, 1.0), v2_first, 1e-9);
 
-    // ...and it must decay: one RC is 1 ms, so by 2 ms it is well under half.
+    // One RC is 1 ms, so by 2 ms it has decayed well under half.
     const v2_last = probeLast(res, "2") orelse return error.NoProbe;
     try std.testing.expect(v2_last < 0.5);
 }
 
 test "uic: without the keyword the transient starts from the operating point" {
-
     // Same deck, same .ic card, no `uic`: the OP wins and v(2) starts at 0.
     const sim = try runDeck(
         \\op rc
@@ -169,9 +167,8 @@ test "uic: keyword is positional-independent and .ic on an unknown node is dropp
 }
 
 test "branch currents: op emits i(<card>) with ngspice's sign, last probe stays a node" {
-
-    // ngspice 44.2 on this deck: i(v1) = -1e-3 (current INTO the + terminal),
-    // i(l1) = +1e-3 (p->n through the inductor). Signs must match exactly.
+    // ngspice 44.2 on this deck: i(v1) = -2e-3 (current into the + terminal),
+    // i(l1) = +2e-3 (p->n through the inductor).
     const sim = try runDeck(
         \\divider
         \\v1 1 0 dc 1
@@ -187,13 +184,12 @@ test "branch currents: op emits i(<card>) with ngspice's sign, last probe stays 
     const il = findNameIndex(res.varnames, "i(l1)") orelse return error.NoBranchColumn;
     try std.testing.expectApproxEqAbs(@as(f64, -2e-3), res.data[iv], 1e-9);
     try std.testing.expectApproxEqAbs(@as(f64, 2e-3), res.data[il], 1e-9);
-    // Branch probes go FIRST: tf/sens/dcmatch/pxf/pac/disto default their
-    // output to probes[len-1], which must remain the last named node.
+    // Branch probes come first: tf/sens/dcmatch/pxf/pac/disto default their
+    // output to probes[len-1], which must stay the last named node.
     try std.testing.expect(std.mem.startsWith(u8, res.varnames[res.varnames.len - 1], "v("));
 }
 
 test "urc: U card expands into a lump ladder whose series R telescopes to L*RPERL" {
-
     // r0 = L*RPERL = 1k against a 1k load: v(out) is 0.5 iff the geometric
     // lump sizing (r1*K^i from both ends) sums back to exactly r0 and the
     // two half-chains actually meet in the middle.
@@ -212,13 +208,12 @@ test "urc: U card expands into a lump ladder whose series R telescopes to L*RPER
     try std.testing.expectApproxEqAbs(@as(f64, 0.5), vout, 1e-6);
 }
 
-/// Probe columns are named `v(<node>)`/`i(<card>)` (probeNames) and a
-/// transient's column 0 is "time". Result.data is ROW-major:
-/// data[point * ncols + col].
+/// The column of `v(<node>)`. Result.data is row-major:
+/// data[point * varnames.len + col].
 fn probeColumn(r: Result, node: []const u8) ?usize {
     var buf: [64]u8 = undefined;
     const want = std.fmt.bufPrint(&buf, "v({s})", .{node}) catch return null;
-    // ponytail: reuse the exact, first-match lookup already used for source names.
+    // ponytail: exact first match, no SPICE name aliasing; add it when a probe needs it.
     return findNameIndex(r.varnames, want);
 }
 
