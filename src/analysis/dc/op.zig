@@ -1,43 +1,40 @@
-//! Operating point: 5-rung Newton ladder (plain → gmin → source → JFNK →
-//! optran). One Workspace for the whole continuation — the pattern is
-//! frozen, so ordering/symbolic work happens exactly once.
+//! Operating point: a five-rung Newton ladder (plain, gmin stepping, source
+//! stepping, JFNK, OPtran) over one Workspace. The pattern is frozen, so the
+//! ordering and symbolic factorization happen once for the whole ladder.
 const std = @import("std");
 const root = @import("../types.zig");
 const converger = @import("solver").converger;
 const tran = @import("../tran/tran.zig");
 
-pub const Method = enum { plain, gmin, source, jfnk, optran };
-
+/// Query options, defined in core/query.zig.
 pub const Options = @import("core").query.Op;
-
-pub const SolveResult = struct {
-    converged: bool,
-    iterations: u16,
-    max_dx: f64,
-    method_used: Method,
-};
 
 const copySimd = root.copySimd;
 
-/// Cold-start: zero x, then apply SPICE MODEINITJCT junction seeds so
-/// iteration 1 linearizes at vcrit/vto instead of 0.
+const failed: converger.Result = .{ .converged = false, .iterations = 0, .max_dx = 0 };
+
+/// Zeroes `x`, then applies the SPICE MODEINITJCT junction seeds so the first
+/// iteration linearizes at vcrit/vto instead of 0.
 pub fn coldStart(ckt: *root.Circuit, x: []f64) void {
     root.zeroSimd(x);
     ckt.seedJunctions(x);
 }
 
-/// Fine-grained primitive: solve the operating point into caller-owned x.
-/// engine.zig warm-starts every other analysis through this.
+/// Solves the operating point into caller-owned `x` (cold-started unless
+/// `options.warm_start`). On convergence the FSM devices commit their state,
+/// and the circuit is left in the static simulation state later evals at this
+/// point expect. `iterations` sums every rung tried.
 pub fn solve(
     ckt: *root.Circuit,
     x: []f64,
     options: Options,
-) !SolveResult {
-    // §4.6.1: the operating point is a static solve — `analysis("dc")` and
-    // `$abstime` = 0. §5.10.2 `initial_step` is the first step of the analysis,
-    // and the OP is it: this is where a switch latches its power-on state from
-    // `ic`, before any @(cross) can move it. computeBaseline() evaluates
-    // const-Jacobian batches, so the state has to be in place first.
+) !converger.Result {
+    // Verilog-A §4.6.1: the operating point is a static solve, so
+    // `analysis("dc")` holds and `$abstime` = 0. §5.10.2 `initial_step` is the
+    // first step of the analysis, which is this solve: a switch latches its
+    // power-on state from `ic` here, before any @(cross) can move it.
+    // computeBaseline() evaluates const-Jacobian batches, so the state has to
+    // be in place first.
     ckt.setSimState(.{ .kind = if (options.tran_op) .ic else .dc, .initial_step = true });
     if (!options.warm_start) coldStart(ckt, x);
     try ckt.computeBaseline();
@@ -45,42 +42,42 @@ pub fn solve(
     const ws = try ckt.workspace();
 
     const r = try solveLadder(ckt, ws, x, options);
-    // Operating point accepted: sync FSM devices (switches) so a following
-    // transient starts from a committed state.
+    // Commit FSM devices (switches) so a following transient starts from the
+    // accepted state.
     if (r.converged) _ = ckt.stateCtl(.commit);
-    // The latch is committed; every later eval at this OP (ac, tf, noise,
-    // post-processing) is NOT an initial step and must not re-latch.
+    // Every later eval at this point (ac, tf, noise, post-processing) is not
+    // an initial step and must not re-latch.
     ckt.setSimState(.{ .kind = if (options.tran_op) .ic else .dc });
     return r;
 }
 
-/// The four-strategy continuation ladder: plain Newton → dynamic gmin
-/// stepping → source stepping → JFNK guarantee rung. Takes a caller-owned
-/// Workspace so dc.run can reuse its sweep workspace for fallback solves.
+/// The continuation ladder from `x` as given: plain Newton, dynamic gmin
+/// stepping, source stepping, JFNK, then OPtran. Takes the caller's Workspace
+/// so dc.zig can fall back to it mid-sweep. Returns error.FloatingNode when a
+/// node has no DC path to ground outside a TRANOP.
 pub fn solveLadder(
     ckt: *root.Circuit,
     ws: *converger.Workspace,
     x: []f64,
     options: Options,
-) !SolveResult {
+) !converger.Result {
     if (ckt.needs_tran_op) {
-        // A node with no DC path has an identically-zero G row, so the static
-        // operating point is not unique — the transient fallback only reports
-        // whichever value the from-zero settling happened to land on. ngspice
-        // accepts that under TRANOP, where the transient owns the initial
-        // condition; a standalone .op/.ac/.pz has no such owner and the deck
-        // is a floating-node deck, not a converged one.
+        // A node with no DC path has an all-zero G row, so the static
+        // operating point is not unique and the transient only reports
+        // wherever settling from zero landed. ngspice accepts that under
+        // TRANOP, where the transient owns the initial condition; a standalone
+        // .op/.ac/.pz has no such owner, so the deck is rejected.
         if (!options.tran_op) {
             std.log.err("topology: a node has no DC path to ground (capacitor-only island) — the operating point is not unique", .{});
             return error.FloatingNode;
         }
         return transientOp(ckt, ws, x, options);
     }
-    // Rung 1: plain Newton. NO diagonal gmin: ngspice's NIiter never loads
-    // one outside gmin stepping — junction gmin lives in the device models.
-    // The always-on 1e-12 shunt this used to carry pinned every solution a
-    // little differently from ngspice (voltage_divider read 2.5e-9 off), and
-    // "converged" a floating bridge to a common mode ngspice never picks.
+    // Rung 1: plain Newton with no diagonal gmin. ngspice's NIiter loads one
+    // only during gmin stepping (junction gmin lives in the device models);
+    // an always-on shunt moves every solution off ngspice's (voltage_divider
+    // by 2.5e-9) and settles a floating bridge on a common mode ngspice never
+    // picks.
     const plain = newtonRun(ckt, ws, x, options.tol, 0.0, null) catch |e| switch (e) {
         error.SingularMatrix => null,
         else => return e,
@@ -88,20 +85,19 @@ pub fn solveLadder(
     if (converger.opdbg())
         std.debug.print("ladder: plain conv={?}\n", .{if (plain) |p| p.converged else null});
     if (plain) |p| {
-        if (p.converged)
-            return .{ .converged = true, .iterations = p.iterations, .max_dx = p.max_dx, .method_used = .plain };
+        if (p.converged) return p;
     }
 
-    // Last-converged solution for continuation restarts (both rungs).
+    // Last converged solution, the restart point of both stepping rungs.
     const gpa = ws.slv.gpa;
     const x_good = try gpa.alloc(f64, ckt.n);
     defer gpa.free(x_good);
     var total_iter: u16 = 0;
 
-    // Rung 2: dynamic gmin stepping (ngspice cktop.c dynamic_gmin).
-    // Descend gmin by `factor`; on a failed rung back gmin up toward the
-    // last good value with a gentler factor (4th root) and retry from the
-    // last converged x; give up when factor ~ 1.
+    // Rung 2: dynamic gmin stepping (ngspice cktop.c dynamic_gmin). Descend
+    // gmin by `factor`; on a failed step, back up toward the last good gmin
+    // with the 4th root of the factor and retry from the last converged x;
+    // give up once the factor is ~1.
     {
         coldStart(ckt, x);
         const gtarget = options.tol.gmin;
@@ -112,7 +108,7 @@ pub fn solveLadder(
         var solves: u32 = 0;
         while (solves < 100) : (solves += 1) {
             const r = newtonRun(ckt, ws, x, options.tol, gmin_val, options.tol.itl2) catch |e| switch (e) {
-                error.SingularMatrix => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 },
+                error.SingularMatrix => failed,
                 else => return e,
             };
             total_iter +|= r.iterations;
@@ -120,24 +116,24 @@ pub fn solveLadder(
                 std.debug.print("ladder: gmin={e:.3} conv={} it={d}\n", .{ gmin_val, r.converged, r.iterations });
             if (r.converged) {
                 if (gmin_val <= gtarget) {
-                    // ngspice dynamic_gmin ends by REMOVING diagGmin for the
-                    // last solve — the answer must not carry the shunt.
+                    // ngspice's dynamic_gmin removes diagGmin for the last
+                    // solve: the answer must not carry the shunt.
                     const clean = newtonRun(ckt, ws, x, options.tol, 0.0, null) catch |err| switch (err) {
                         error.QueryCancelled => return err,
-                        else => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 },
+                        else => failed,
                     };
                     total_iter +|= clean.iterations;
                     if (clean.converged)
-                        return .{ .converged = true, .iterations = total_iter, .max_dx = clean.max_dx, .method_used = .gmin };
-                    break; // clean solve failed: fall through the ladder
+                        return .{ .converged = true, .iterations = total_iter, .max_dx = clean.max_dx };
+                    break;
                 }
                 copySimd(x_good, x);
                 have_good = true;
                 good_gmin = gmin_val;
-                // Easy rung -> accelerate (cap at start factor);
-                // hard rung (> 3/4 budget) -> slow down BEFORE failing so
-                // folds are approached with shrinking steps. Thresholds,
-                // floor and final clamp are cktop.c:207-222 verbatim, on
+                // An easy step accelerates (capped at the start factor); a
+                // hard one (over 3/4 of the budget) slows down before it
+                // fails, so folds are approached with shrinking steps.
+                // Thresholds, floor and final clamp are cktop.c:207-222, on
                 // the itl2 budget these solves run with.
                 if (r.iterations <= options.tol.itl2 / 4) {
                     factor = @min(factor * @sqrt(factor), 10.0);
@@ -149,7 +145,7 @@ pub fn solveLadder(
                     gmin_val = gtarget;
                 } else gmin_val /= factor;
             } else {
-                if (factor < 1.00005) break; // wedged against the last good rung
+                if (factor < 1.00005) break; // wedged against the last good step
                 factor = @sqrt(@sqrt(factor));
                 gmin_val = good_gmin / factor;
                 if (have_good) copySimd(x, x_good) else coldStart(ckt, x);
@@ -157,9 +153,9 @@ pub fn solveLadder(
         }
     }
 
-    // Rung 3: source stepping via device attempt(lambda), adaptive delta:
-    // grow 1.5x on success, halve on failure and retry from the last good
-    // lambda/x (ngspice src stepping flavor).
+    // Rung 3: source stepping through the devices' attempt(lambda), with an
+    // adaptive step: grow 1.5x on success, halve on failure and retry from
+    // the last good lambda and x.
     coldStart(ckt, x);
     total_iter = 0;
     {
@@ -172,7 +168,7 @@ pub fn solveLadder(
             ckt.has_baseline = false;
             try ckt.computeBaseline();
             const sr = newtonRun(ckt, ws, x, options.tol, 0.0, options.tol.itl2) catch |e| switch (e) {
-                error.SingularMatrix => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 },
+                error.SingularMatrix => failed,
                 else => {
                     ckt.restoreModels();
                     ckt.has_baseline = false;
@@ -192,14 +188,11 @@ pub fn solveLadder(
             } else {
                 delta *= 0.5;
                 if (delta < 1e-4) break;
-                if (lambda_good >= 0.0) {
-                    copySimd(x, x_good);
-                    lambda = @min(lambda_good + delta, 1.0);
-                } else {
-                    // The lambda = 0 start failed and nothing converged yet:
-                    // a retry is the same cold solve, so stop here.
-                    break;
-                }
+                // Nothing converged yet means the lambda = 0 start failed, and
+                // a retry would be the same cold solve.
+                if (lambda_good < 0.0) break;
+                copySimd(x, x_good);
+                lambda = @min(lambda_good + delta, 1.0);
             }
         }
     }
@@ -207,34 +200,27 @@ pub fn solveLadder(
     ckt.has_baseline = false;
     try ckt.computeBaseline();
 
-    // Final solve at true parameters after source stepping
     const final = newtonRun(ckt, ws, x, options.tol, 0.0, null) catch |e| switch (e) {
-        error.SingularMatrix => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 },
+        error.SingularMatrix => failed,
         else => return e,
     };
     total_iter +|= final.iterations;
     if (final.converged)
-        return .{
-            .converged = true,
-            .iterations = total_iter,
-            .max_dx = final.max_dx,
-            .method_used = .source,
-        };
+        return .{ .converged = true, .iterations = total_iter, .max_dx = final.max_dx };
 
-    // Rung 4: JFNK guarantee rung — the same algorithm the GPU kernel
-    // runs, so CPU convergence is a superset of GPU convergence by
-    // construction. Damping + residual backtracking globalize differently
-    // than direct Newton and catch circuits where the factored step wedges.
+    // Rung 4: JFNK, the algorithm the GPU kernel runs, so CPU convergence is
+    // a superset of GPU convergence. Damping plus residual backtracking
+    // catches circuits where the factored Newton step wedges.
     {
         coldStart(ckt, x);
         const copts = converger.optionsFromTolerances(options.tol, null);
         // converger.run clears device limiting state on exit; a direct jfnk
-        // call must do the same so post-solve evals see clean state.
+        // call must too, so post-solve evals see clean state.
         defer ckt.clearLimits();
         const jr = try converger.jfnk(ckt, ws, x, 0, copts, root.EvalHook{});
         total_iter +|= jr.iterations;
         if (jr.converged)
-            return .{ .converged = true, .iterations = total_iter, .max_dx = jr.max_dx, .method_used = .jfnk };
+            return .{ .converged = true, .iterations = total_iter, .max_dx = jr.max_dx };
     }
 
     var result = try transientOp(ckt, ws, x, options);
@@ -242,51 +228,43 @@ pub fn solveLadder(
     return result;
 }
 
-fn transientOp(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, options: Options) !SolveResult {
-    // Rung 5: ngspice OPtran (optran.c) — when every static strategy fails,
-    // the operating point is the SETTLED STATE of a real transient with full
-    // sources: dt 10 ns, run to 1 µs, no ramp, no extra regularization —
-    // device capacitances do the conditioning statics could not, and a
-    // clean Newton from that state is the answer. (ngspice 44.2 runs no such
-    // rung unless `optran` is given, cktop.c:94-97.)
-    {
-        const opa = ws.slv.gpa;
-        root.zeroSimd(x);
-        var wf = try tran.Waveform.init(opa, 0, 16);
-        defer wf.deinit();
-        const sim = tran.simulate(ckt, x, &.{}, &wf, .{
-            .tol = options.tol,
-            .t_stop = 1e-6,
-            .dt_init = 1e-8,
-            .dt_max = 1e-8,
-            .uic = true,
-        }, opa) catch |err| switch (err) {
-            error.QueryCancelled => return err,
-            else => null,
-        };
-        // The transient left .tran device state behind; the op contract is
-        // a static circuit whatever the outcome.
-        ckt.setSimState(.{ .kind = if (options.tran_op) .ic else .dc });
-        ckt.has_baseline = false;
-        try ckt.computeBaseline();
-        if (sim != null and sim.?.completed) {
-            if (ckt.needs_tran_op) return .{ .converged = true, .iterations = 0, .max_dx = 0, .method_used = .optran };
-            // The settled state is a SEED: the operating point is what the
-            // confirming Newton converges to. Reporting the settled state as
-            // converged when that Newton failed was a false success
-            // (stress/scaling_inverter_chain_4k published 77 wrong stages).
-            const fin = newtonRun(ckt, ws, x, options.tol, 0.0, null) catch |err| switch (err) {
-                error.QueryCancelled => return err,
-                else => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 },
-            };
-            return .{ .converged = fin.converged, .iterations = fin.iterations, .max_dx = fin.max_dx, .method_used = .optran };
-        }
-    }
-
-    return .{ .converged = false, .iterations = 0, .max_dx = 0, .method_used = .source };
+/// Rung 5, ngspice OPtran (optran.c): a real transient with full sources,
+/// dt 10 ns to 1 µs, no ramp and no extra regularization, so the device
+/// capacitances do the conditioning the static rungs could not. The settled
+/// state only seeds a clean Newton, whose result is the answer; reporting the
+/// settled state itself would be a false success
+/// (stress/scaling_inverter_chain_4k). Under `needs_tran_op` the settled state
+/// is the answer. ngspice 44.2 runs this rung only when `optran` is given
+/// (cktop.c:94-97).
+fn transientOp(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, options: Options) !converger.Result {
+    const opa = ws.slv.gpa;
+    root.zeroSimd(x);
+    var wf = try tran.Waveform.init(opa, 0, 16);
+    defer wf.deinit();
+    const sim = tran.simulate(ckt, x, &.{}, &wf, .{
+        .tol = options.tol,
+        .t_stop = 1e-6,
+        .dt_init = 1e-8,
+        .dt_max = 1e-8,
+        .uic = true,
+    }, opa) catch |err| switch (err) {
+        error.QueryCancelled => return err,
+        else => null,
+    };
+    // The transient left .tran device state behind; the op contract is a
+    // static circuit whatever the outcome.
+    ckt.setSimState(.{ .kind = if (options.tran_op) .ic else .dc });
+    ckt.has_baseline = false;
+    try ckt.computeBaseline();
+    if (sim == null or !sim.?.completed) return failed;
+    if (ckt.needs_tran_op) return .{ .converged = true, .iterations = 0, .max_dx = 0 };
+    return newtonRun(ckt, ws, x, options.tol, 0.0, null) catch |err| switch (err) {
+        error.QueryCancelled => return err,
+        else => failed,
+    };
 }
 
-/// Contract entry: format the executor's solved ctx.x_op, one point per probe.
+/// Contract entry: the executor's solved ctx.x_op, one point per probe.
 pub fn run(ctx: *const root.RunCtx, _: Options) !root.Result {
     const x = ctx.x_op;
     const names = try root.probeNames(ctx, null);
@@ -305,7 +283,7 @@ pub fn run(ctx: *const root.RunCtx, _: Options) !root.Result {
     };
 }
 
-/// `max_iter` null = itl1. The stepping rungs pass itl2 (ngspice's
+/// `max_iter` null means itl1. The stepping rungs pass itl2 (ngspice's
 /// CKTdcTrcvMaxIter, cktop.c:194 and the source-stepping NIiter calls).
 fn newtonRun(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, tol: converger.Tolerances, gmin: f64, max_iter: ?u16) !converger.Result {
     var copts = converger.optionsFromTolerances(tol, max_iter);
