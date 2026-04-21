@@ -1,8 +1,8 @@
-//! End-to-end numeric fixture runner. From the repository root:
+//! End-to-end fixture runner: simulates every tests/fixtures deck in a child
+//! espice and checks the raw output against its embedded .expected.json
+//! oracle. An unsupported feature is a failure, never a skip. From the root:
 //!   zig build test -- --jobs 8 --filter op/
 //!   zig build test -- --list
-//! Expected JSON (including numeric values) is embedded at compile time.
-//! Unsupported simulator features are failures, never skipped or blessed.
 const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -10,12 +10,12 @@ const Json = std.json.Value;
 const Complex = std.math.Complex(f64);
 
 const catalog = @import("fixture_catalog");
-pub const spice_files = catalog.spice_files;
-pub const expected_files = catalog.expected_files;
-pub const expected_outputs = catalog.expected_outputs;
+const spice_files = catalog.spice_files;
+const expected_files = catalog.expected_files;
+const expected_outputs = catalog.expected_outputs;
 
-// Metadata is cold; numeric data stays in the raw file's contiguous row layout.
-// All counts are bounded by u32; offsets into allocated byte slices use usize.
+// Oracle schema (.expected.json, schema_version 1). Counts fit u32; byte
+// offsets use usize.
 const Column = struct { values: []const Json, rtol: f64, atol: f64 };
 const Axis = struct { name: []const u8, values: []const f64, rtol: f64, atol: f64 };
 const ExpectedPlot = struct {
@@ -34,6 +34,7 @@ const Expectation = struct {
     category: ?[]const u8 = null,
 };
 const Oracle = struct { schema_version: u8, netlist_sha256: []const u8, expect: Expectation };
+/// One plot of a binary raw file, borrowing the file's row-major data.
 const Plot = struct {
     name: []const u8,
     names: []const []const u8,
@@ -46,8 +47,9 @@ const Plot = struct {
         return .init(self.data[i], if (self.complex) self.data[i + 1] else 0);
     }
 
+    /// Case-insensitive column lookup: an exact name first, then the
+    /// `canonical` aliases, which must match exactly one column.
     fn column(self: Plot, name: []const u8) !usize {
-        // Prefer an exact name before the documented SPICE spelling aliases.
         for (self.names, 0..) |actual, i| if (equal(actual, name)) return i;
         var found: ?usize = null;
         for (self.names, 0..) |actual, i| {
@@ -69,6 +71,7 @@ const Runner = struct {
     next: std.atomic.Value(u32) = .init(0),
     outcomes: []Outcome,
 };
+/// Per-case failure detail, printed under the case's FAIL line.
 threadlocal var diagnostics: ?*Io.Writer = null;
 fn diagnostic(comptime fmt: []const u8, args: anytype) void {
     if (diagnostics) |writer| writer.print(fmt, args) catch {};
@@ -146,6 +149,8 @@ fn worker(runner: *Runner) void {
     }
 }
 
+/// Checks the oracle, the deck's hash against it, then simulates and compares.
+/// A `repeatability` check reruns the deck and requires bitwise-equal output.
 fn runCase(a: Allocator, io: Io, app: []const u8, path: []const u8, expected: []const u8, timeout_seconds: u32) !void {
     const oracle = try std.json.parseFromSliceLeaky(Oracle, a, expected, .{ .ignore_unknown_fields = true });
     try validateOracle(oracle);
@@ -181,6 +186,8 @@ fn runCase(a: Allocator, io: Io, app: []const u8, path: []const u8, expected: []
     }
 }
 
+/// Runs espice on `netlist` from its own directory, so relative includes
+/// resolve. `error.Timeout` after `timeout_seconds`.
 fn simulate(a: Allocator, io: Io, app: []const u8, netlist: []const u8, output: []const u8, timeout_seconds: u32) !std.process.RunResult {
     // A total deadline also covers a child that closes its streams then hangs.
     const Event = union(enum) { process: std.process.RunError!std.process.RunResult, timeout: Io.Cancelable!void };
@@ -243,6 +250,8 @@ fn equal(a: []const u8, b: []const u8) bool {
     return std.ascii.eqlIgnoreCase(a, b);
 }
 
+/// Folds the spellings ngspice and espice use for the same `.tf` and
+/// branch-current columns onto one name.
 fn canonical(name: []const u8) []const u8 {
     const tf = std.StaticStringMap([]const u8).initComptime(.{
         .{ "v(transfer_function)", "transfer_function" },
@@ -264,6 +273,8 @@ fn line(bytes: []const u8, pos: *usize) ![]const u8 {
     return text;
 }
 
+/// Parses concatenated binary raw plots, rejecting duplicate columns,
+/// truncation and non-finite values.
 fn parseRaw(a: Allocator, bytes: []const u8) ![]const Plot {
     var plots: std.ArrayList(Plot) = .empty;
     var pos: usize = 0;
@@ -344,6 +355,7 @@ fn scalar(value: Json) !Complex {
     if (pair.len != 2) return error.InvalidOracle;
     return .init(try number(pair[0]), try number(pair[1]));
 }
+/// |actual - expected| <= atol + rtol * |expected|, on the complex plane.
 fn close(actual: Complex, expected: Complex, rtol: f64, atol: f64) bool {
     return std.math.hypot(actual.re - expected.re, actual.im - expected.im) <= atol + rtol * std.math.hypot(expected.re, expected.im);
 }
@@ -383,6 +395,7 @@ fn validateOracle(oracle: Oracle) !void {
     for (oracle.expect.checks) |check| _ = try checkKind(check);
 }
 
+/// Plot names match case-insensitively; espice appends the THD to Fourier titles.
 fn plotName(actual: []const u8, expected: []const u8) bool {
     if (equal(actual, expected)) return true;
     return equal(expected, "Fourier Analysis") and std.mem.startsWith(u8, actual, "Fourier Analysis (THD = ");
@@ -507,6 +520,8 @@ fn increasing(p: Plot, axis: usize) !void {
     }
 }
 
+/// Linear interpolation of column `col` at axis value `t`. An endpoint
+/// within tolerance of `t` counts as covering it.
 fn sample(p: Plot, axis: usize, col: usize, t: f64, rtol: f64, atol: f64) !Complex {
     if (p.rows == 0) return error.MissingSamples;
     const first = p.value(0, axis).re;

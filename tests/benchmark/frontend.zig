@@ -1,5 +1,6 @@
-//! Parse and flatten a netlist without device compilation or solver work.
-//! zig build bench-frontend -- tests/fixtures/stress/scaling_rc_ladder_100k.sp 15
+//! `zig build bench-frontend`: median time to parse and flatten one netlist,
+//! with no device compilation or solver work. Arguments: path, run count (default 9).
+//!   zig build bench-frontend -- tests/fixtures/stress/scaling_rc_ladder_100k.sp 15
 const std = @import("std");
 const netlist = @import("netlist");
 pub fn main(init: std.process.Init) !void {

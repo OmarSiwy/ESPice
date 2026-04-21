@@ -1,6 +1,7 @@
-//! nix develop .#benchmarking --command zig build bench -- --iters 3 --filter op/
-//! Fixtures come from the shared build-generated catalog. Timings are serial:
-//! parallel correctness is `zig build test`; competing timings distort results.
+//! `zig build bench`: times espice, ngspice and VACASK on every fixture and
+//! writes a markdown table of medians and pairwise waveform agreement.
+//! Runs are serial, since concurrent runs distort each other's timings.
+//!   nix develop .#benchmarking --command zig build bench -- --iters 3 --filter op/
 const std = @import("std");
 const Io = std.Io;
 const ngspice = @import("ngspice.zig");
@@ -10,7 +11,7 @@ const common = @import("job.zig");
 const catalog = @import("fixture_catalog");
 const Allocator = std.mem.Allocator;
 
-// Each engine's label, binary and adapter are selected together by this index.
+/// Indexes `Config.bins` and every per-engine array in `main`.
 const Engine = enum(u8) { espice, ngspice, vacask };
 const Config = struct {
     bins: [3][]const u8,
@@ -23,7 +24,8 @@ const Config = struct {
     list: bool = false,
     report: []const u8 = "zig-out/benchmark-results.md",
 };
-// A row is consumed as a whole for reporting, and owns slices in the case arena.
+/// Median wall time in ms and the plots of one engine on one fixture,
+/// allocated in the fixture's arena.
 const Measurement = struct { milliseconds: f64, plots: []const compare.Plot };
 
 pub fn main(init: std.process.Init) !void {
@@ -169,6 +171,8 @@ fn matches(path: []const u8, filter: []const u8) bool {
     return std.mem.indexOf(u8, path, filter) != null;
 }
 
+/// One warm-up plus `iters` timed runs under `timeout`, with process startup
+/// and output included. Returns the median and the last run's plots.
 fn measure(io: Io, a: Allocator, job: common.Job, iters: u16, seconds: u32) !Measurement {
     const timeout = try std.fmt.allocPrint(a, "{d}", .{seconds});
     const argv = try std.mem.concat(a, []const u8, &.{ &.{ "timeout", "--kill-after=5", timeout }, job.argv });
@@ -208,6 +212,7 @@ fn clearRaws(io: Io, path: []const u8) !void {
     };
 }
 
+/// The plots of every raw file VACASK wrote into `path`, in file-name order.
 fn vacaskPlots(io: Io, a: Allocator, path: []const u8) ![]const compare.Plot {
     var dir = try Io.Dir.cwd().openDir(io, path, .{ .iterate = true });
     defer dir.close(io);
