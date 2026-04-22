@@ -1,30 +1,30 @@
-//! Distortion analysis via simplified Volterra series. One eval() at the
-//! operating point yields the analytic G and C planes; the second-order
-//! kernel is finite differences OF the analytic Jacobian (d2F = dG/dx),
-//! one eval per unknown. Per-frequency solves are dense.
+//! Distortion analysis (`.disto`) by a simplified Volterra series. One eval
+//! at the operating point gives the analytic G and C planes. The
+//! second-order kernel is a forward difference of the analytic Jacobian
+//! (d2F = dG/dx), one eval per unknown, and each frequency is a few dense
+//! solves.
 //!
-//! The third-order kernel is NOT stored. d3 is O(n^4) and every use of it is
-//! the single contraction d3(V1,V1,V1), so it is taken as a directional
-//! second difference of the analytic Jacobian along the two real directions
-//! V1 spans — four evals per frequency point, no tensor. See `cubicForms`.
+//! The third-order kernel is never stored. d3 is O(n^4) and its only use is
+//! the contraction d3(V1,V1,V1), so that is taken as a directional second
+//! difference of the Jacobian along the two real directions V1 spans: four
+//! evals per frequency point, no tensor (see `cubicForms`).
 //!
-//! ponytail: O(n^3) d2 tensor + O(n^2) dense solves; device-side analytic
-//! F''/F''' stamps are the scalable upgrade for large n.
+//! ponytail: O(n^3) d2 tensor and O(n^2) dense solves; device-side analytic
+//! F''/F''' stamps are the upgrade for large n.
 const std = @import("std");
 const root = @import("../types.zig");
 const simdZero = root.zeroSimd;
 const simdCopy = root.copySimd;
-const types = @import("core").numerics;
-const solvers = @import("solver");
-const dense_lu = solvers.dense_lu;
+const dense_lu = @import("solver").dense_lu;
 
+/// Query options, defined in core/query.zig.
 pub const Options = @import("core").query.Disto;
 
-/// Everything one sweep can deposit. The four summary columns are always
-/// written, one value per frequency point. `h2`/`h3` are ngspice's own
-/// output product: the whole second- and third-harmonic SOLUTION VECTOR
-/// sampled at `probes`, point-major with (re, im) adjacent — leave them
-/// empty and the matching order is not computed at all.
+/// The caller's output buffers for one sweep. The four summary columns are
+/// always written, one value per frequency point. `h2`/`h3` are ngspice's
+/// own product, the second- and third-harmonic solution sampled at `probes`,
+/// point-major with (re, im) adjacent; left empty, that order is not
+/// computed at all.
 pub const Out = struct {
     freqs: []f64,
     hd2: []f64,
@@ -35,13 +35,10 @@ pub const Out = struct {
     h3: []f64 = &.{},
 };
 
-/// Distortion analysis via simplified Volterra series.
-///
-/// Computes the harmonic responses across a frequency sweep:
-///   1. Linearize at the DC operating point: one eval(), dense G and C.
-///   2. Second-order kernel d2F/dxa dxb = dG[.,a]/dx_b by differencing the
-///      analytic Jacobian at n perturbed points (first derivatives are
-///      analytic; only the extra order is FD).
+/// Harmonic responses across the frequency sweep, into `out`:
+///   1. Linearize at the operating point: one eval(), dense G and C.
+///   2. Second-order kernel d2F/dxa dxb = dG[.,a]/dx_b, differencing the
+///      analytic Jacobian at n perturbed points (only the extra order is FD).
 ///   3. For each frequency f:
 ///      a. Solve first-order: (G + jwC) * V1 = excitation
 ///      b. Second-order nonlinear current ½ F''(V1, V1) from the kernel
@@ -51,14 +48,14 @@ pub const Out = struct {
 ///         F''(V1, V2) + ⅙·F'''(V1, V1, V1), and
 ///         (G + j*3w*C) * V3 = -that.
 ///
-/// PHASOR CONVENTION, ngspice's throughout: the drive is HALF the sinusoid
-/// amplitude (cktdisto.c:115) and every kernel is a one-sided phasor, so the
-/// 2f1 source term is ½·F''·V1² — ngspice spells the ½ into the device
-/// coefficient (`g2 = 0.5 * gd / vte`, diodset.c:78) and contributes
-/// `g2 * V1²` (dloadfns.c:545 D1n2F1). The harmonic VECTORS are reported back
-/// as sinusoid amplitudes, i.e. ×2 — that is DkerProc (dkerproc.c:43-52) and
-/// `HARMONIC_SCALE` below. The summary columns are not rescaled; see the
-/// comment on `v1_mag`.
+/// The phasor convention is ngspice's throughout: the drive is half the
+/// sinusoid amplitude (cktdisto.c:115) and every kernel is a one-sided
+/// phasor, so the 2f1 source term is ½·F''·V1². ngspice spells the ½ into the
+/// device coefficient (`g2 = 0.5 * gd / vte`, diodset.c:78) and contributes
+/// `g2 * V1²` (dloadfns.c:545 D1n2F1). The harmonic vectors are reported as
+/// sinusoid amplitudes, ×2 (DkerProc, dkerproc.c:43-52, `HARMONIC_SCALE`);
+/// the summary magnitudes are not rescaled. The planes are left at the
+/// operating point.
 pub fn sweep(
     ckt: *root.Circuit,
     x_op: []const f64,
@@ -77,7 +74,6 @@ pub fn sweep(
     std.debug.assert(!want_h2 or out.h2.len == freqs.len * out.probes.len * 2);
     std.debug.assert(!want_h3 or out.h3.len == freqs.len * out.probes.len * 2);
 
-    // -- Step 1: Linearize at DC operating point (analytic planes) --
     ckt.eval(x_op, 0);
 
     const g_dense = try allocator.alloc(f64, n * n);
@@ -88,7 +84,6 @@ pub fn sweep(
     defer allocator.free(c_mat);
     ckt.denseC(c_mat);
 
-    // -- Step 2: Second derivatives = FD of the analytic Jacobian --
     // d2[row][a][b] ≈ (G(x_op + eps*e_b) − G(x_op))[row][a] / eps
     const eps = options.fd_eps;
     const inv_eps = 1.0 / eps;
@@ -100,8 +95,8 @@ pub fn sweep(
     const x_pert = try allocator.alloc(f64, n);
     defer allocator.free(x_pert);
 
-    // ponytail: strided tensor layout d2[row*n*n + a*n + b] prevents contiguous
-    // SIMD on the inner (a) loop; scalar per element, n evals dominate cost anyway
+    // ponytail: the d2[row*n*n + a*n + b] layout makes these writes strided;
+    // the n evals dominate the cost, so the fill stays scalar.
     for (0..n) |b| {
         if (b != 0) try ckt.checkpoint(.{ .phase = .prepare, .completed = b, .total = n });
         simdCopy(x_pert, x_op[0..n]);
@@ -116,10 +111,9 @@ pub fn sweep(
         }
     }
 
-    // Leave the planes consistent with the operating point
+    // Put the planes back at the operating point.
     ckt.eval(x_op, 0);
 
-    // -- Step 3: Frequency sweep --
     const nn = 2 * n;
     const a_work = try allocator.alloc(f64, nn * nn);
     defer allocator.free(a_work);
@@ -133,9 +127,9 @@ pub fn sweep(
     const x_work3 = try allocator.alloc(f64, nn);
     defer allocator.free(x_work3);
 
-    // Third-order scratch: one more dense Jacobian plus the four real cubic
-    // forms of `cubicForms`. Both are O(n^2) or smaller next to d2's O(n^3),
-    // so they are allocated unconditionally rather than branched around.
+    // Third-order scratch: one more dense Jacobian and the four real cubic
+    // forms of `cubicForms`. Both are small next to d2's O(n^3), so they are
+    // allocated even when h3 is not wanted.
     const g_minus = try allocator.alloc(f64, n * n);
     defer allocator.free(g_minus);
     const cubic = try allocator.alloc(f64, 4 * n);
@@ -146,8 +140,8 @@ pub fn sweep(
     const v2_re = x_work2[0..n];
     const v2_im = x_work2[n..nn];
 
-    // ngspice cktdisto.c:115-116 — HALF amplitude: the F1 drive is the
-    // one-sided phasor of a cosine of amplitude `ac_magnitude`.
+    // Half amplitude (cktdisto.c:115-116): the F1 drive is the one-sided
+    // phasor of a cosine of amplitude `ac_magnitude`.
     const phase_rad = options.ac_phase * std.math.pi / 180.0;
     const drive_re = 0.5 * options.ac_magnitude * @cos(phase_rad);
     const drive_im = 0.5 * options.ac_magnitude * @sin(phase_rad);
@@ -158,7 +152,7 @@ pub fn sweep(
         if (k != 0) try ckt.checkpoint(.{ .phase = .frequency, .completed = k, .total = freqs.len });
         const omega = 2.0 * std.math.pi * f;
 
-        // -- 3a: First-order solve: (G + jwC) * V1 = ½ mag * e[drive row] --
+        // 3a. First order: (G + jwC) V1 = ½ mag · e[drive row].
         dense_lu.buildComplexAdmittance(n, nn, g_dense, c_mat, omega, a_work);
 
         simdZero(rhs_work);
@@ -167,7 +161,7 @@ pub fn sweep(
             rhs_work[options.drive_branch] = drive_re;
             rhs_work[n + options.drive_branch] = drive_im;
         } else {
-            // I card: current INTO the node, so the row is negated
+            // I card: current into the node, so the row is negated
             // (cktdisto.c:151-158, ISRCposNode gets −0.5·mag).
             rhs_work[options.ac_source_node] = -drive_re;
             rhs_work[n + options.ac_source_node] = -drive_im;
@@ -175,12 +169,12 @@ pub fn sweep(
 
         try dense_lu.factorizeSolve(nn, a_work, rhs_work, x_work);
 
-        // -- 3b: Build second-order RHS: -½ F''[V1, V1] --
-        // D2[row] = sum_ab d2[row,a,b] * V1[a] * V1[b]  (complex product).
-        // The ½ is ngspice's: `g2 = 0.5 * gd / vte` is exactly ½·d²I/dV²
-        // (diodset.c:78), and D1n2F1 contributes `g2 * V1²` (dloadfns.c:545).
+        // 3b. Second-order rhs, -½ F''[V1, V1]:
+        // D2[row] = sum_ab d2[row,a,b] · V1[a] · V1[b] (complex product).
+        // The ½ is ngspice's: `g2 = 0.5 * gd / vte` is ½·d²I/dV²
+        // (diodset.c:78) and D1n2F1 contributes `g2 * V1²` (dloadfns.c:545).
         // The full double sum already carries both (a,b) and (b,a), so the
-        // factor belongs here once.
+        // factor appears once.
         for (0..n) |row| {
             var d2_re: f64 = 0;
             var d2_im: f64 = 0;
@@ -188,7 +182,6 @@ pub fn sweep(
                 for (0..n) |b_idx| {
                     const coeff = d2[row * n * n + a * n + b_idx];
                     if (coeff == 0) continue;
-                    // Complex product: V1[a] * V1[b]
                     const prod_re = v1_re[a] * v1_re[b_idx] - v1_im[a] * v1_im[b_idx];
                     const prod_im = v1_re[a] * v1_im[b_idx] + v1_im[a] * v1_re[b_idx];
                     d2_re += coeff * prod_re;
@@ -199,16 +192,15 @@ pub fn sweep(
             rhs_work[n + row] = -0.5 * d2_im;
         }
 
-        // -- 3c: Solve second-order: (G + j*2w*C) * V2 = -D2(V1,V1) --
+        // 3c. Second order: (G + j·2w·C) V2 = -D2(V1,V1).
         const omega2 = 2.0 * omega;
         dense_lu.buildComplexAdmittance(n, nn, g_dense, c_mat, omega2, a_work);
 
         try dense_lu.factorizeSolve(nn, a_work, rhs_work, x_work2);
 
-        // -- 3d: Third order, only when a third-harmonic column was asked for.
-        // The 3f1 current is F''(V1,V2) + ⅙·F'''(V1,V1,V1): the 2f1·f1 beat
-        // through the quadratic kernel plus the direct cube. F'' is the stored
-        // d2; F''' is never stored (see `cubicForms`).
+        // 3d. Third order, only when h3 is wanted. The 3f1 current is
+        // F''(V1,V2) + ⅙·F'''(V1,V1,V1): the 2f1·f1 beat through the
+        // quadratic kernel plus the direct cube.
         if (want_h3) {
             const d3v = cubicForms(ckt, x_op, v1_re, v1_im, eps, g_dense, g_pert, g_minus, x_pert, cubic);
             for (0..n) |row| {
@@ -229,7 +221,7 @@ pub fn sweep(
             try dense_lu.factorizeSolve(nn, a_work, rhs_work, x_work3);
         }
 
-        // -- 3e: Compute HD2 = |V2[output]| / |V1[output]| --
+        // 3e. HD2 = |V2[output]| / |V1[output]|.
         const out_row = options.output_node;
         const v1_out_re = v1_re[out_row];
         const v1_out_im = v1_im[out_row];
@@ -243,18 +235,14 @@ pub fn sweep(
 
         freqs[k] = f;
         hd2[k] = hd2_val;
-        // The printed magnitudes are the HALF-AMPLITUDE kernels, exactly as
-        // solved: the F1 drive is ½·DISTOF1 on the branch row and what comes
-        // out of the output node is what gets printed. An earlier ×2 here
-        // cited DkerProc's rescale, but the oracles say otherwise and say it
-        // unambiguously — `disto/linear_divider_0p01` is a plain 0.75 divider
-        // on `DISTOF1 0.01` and wants 3.75e-3, i.e. ½·0.01·0.75. hd2 is a
-        // ratio and was right either way, which is how the factor survived.
+        // The summary magnitudes are the half-amplitude kernels as solved,
+        // with no DkerProc ×2: `disto/linear_divider_0p01`, a 0.75 divider on
+        // `DISTOF1 0.01`, wants 3.75e-3 = ½·0.01·0.75.
         v1_mag[k] = v1_out_mag;
         v2_mag[k] = v2_out_mag;
 
-        // ngspice's own product: the harmonic vector at every probe, rescaled
-        // from the one-sided kernel to the sinusoid amplitude (DkerProc).
+        // ngspice's own product: the harmonic vector at every probe, as a
+        // sinusoid amplitude (DkerProc).
         const stride = out.probes.len * 2;
         for (out.probes, 0..) |row, i| {
             if (want_h2) {
@@ -268,25 +256,23 @@ pub fn sweep(
         }
     }
 
-    // Leave the planes consistent with the operating point: the third-order
-    // kernel perturbs them once per frequency point.
+    // The third-order kernel perturbs the planes at every point.
     if (want_h3) ckt.eval(x_op, 0);
 }
 
-/// DkerProc (ngspice dkerproc.c:43-52): the harmonic plots report the SINUSOID
-/// amplitude, which is twice the one-sided phasor the Volterra recursion
-/// solves for. The summary plot deliberately does not apply it (see `v1_mag`).
+/// The harmonic plots report the sinusoid amplitude, twice the one-sided
+/// phasor the Volterra recursion solves for (DkerProc, dkerproc.c:43-52).
+/// The summary plot does not apply it.
 const HARMONIC_SCALE: f64 = 2.0;
 
-/// `d3(V1, V1, V1)` without ever forming d3 — returned as `.{ re, im }`,
-/// each an n-vector aliasing `cubic`.
+/// `d3(V1, V1, V1)` without forming d3, returned as `.{ re, im }`, each an
+/// n-vector aliasing `cubic`.
 ///
-/// d3 is O(n^4) and the only thing it is ever used for is this one
-/// contraction, so it is taken as a directional second difference of the
-/// analytic Jacobian: for a unit direction u,
+/// It is a directional second difference of the analytic Jacobian: for a
+/// unit direction u,
 ///   S(u)[row,a] = (G(x+h·u) − 2G(x) + G(x−h·u))[row,a] / h²  =  d3[row,a,·,·](u,u)
 /// and the cubic form T(w,u,u)[row] = Σ_a w[a]·S(u)[row,a] by symmetry of d3.
-/// With V1 = p + jq that is four evals — S(p̂) and S(q̂) — and
+/// With V1 = p + jq that is four evals, S(p̂) and S(q̂), and
 ///   Re = T(p,p,p) − 3T(p,q,q),  Im = 3T(p,p,q) − T(q,q,q).
 /// `g_work`/`g_minus` are n·n scratch, `x_work` is n scratch, `cubic` is 4n.
 fn cubicForms(
@@ -369,7 +355,7 @@ fn secondDirDeriv(
     for (g_out, g0, g_minus) |*out, plane, minus| out.* = (out.* - 2.0 * plane + minus) * inv_h2;
 }
 
-/// dst[row] := Σ_a (scale·w[a]) · s[row·n + a].
+/// dst[row] := (Σ_a s[row·n + a] · w[a]) · scale.
 fn contract(s: []const f64, w: []const f64, scale: f64, dst: []f64) void {
     const n = w.len;
     for (dst, 0..) |*d, row| {
@@ -380,23 +366,22 @@ fn contract(s: []const f64, w: []const f64, scale: f64, dst: []f64) void {
     }
 }
 
-/// Contract entry: drive the branch of the `DISTOF1` card (opts.drive_branch,
-/// resolved from the deck by the engine), measure at opts.output_node (or the
-/// last probe).
+/// Contract entry: drive the `DISTOF1` card's branch (opts.drive_branch,
+/// resolved from the deck) and measure at opts.output_node, or the last probe.
 ///
 /// One `.disto` card publishes three plots, one query each (`opts.plot`):
 /// ngspice's `DISTORTION - 2nd harmonic` and `- 3rd harmonic`, complex and
-/// point-major (frequency, probes...); and espice's `Distortion Analysis`
-/// digest, real and point-major (frequency, hd2, v1_mag, v2_mag).
+/// point-major (frequency, probes...), and espice's `Distortion Analysis`
+/// summary, real and point-major (frequency, hd2, v1_mag, v2_mag).
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
     const x_op = ctx.x_op;
 
     var o = opts;
-    // No DISTOF1 anywhere in the deck: ngspice would solve an unexcited system
-    // and print zeros. ponytail: fall back to the deck's drive source instead,
-    // so a card-less `.disto` still reports something; drop the fallback the
-    // day a fixture wants ngspice's literal zeros.
+    // ponytail: with no DISTOF1 in the deck ngspice solves an unexcited system
+    // and prints zeros; this falls back to the deck's drive source so a
+    // card-less `.disto` still reports something. Drop the fallback when a
+    // fixture wants ngspice's zeros.
     if (o.drive_branch == root.GROUND and o.ac_source_node == root.GROUND)
         o.drive_branch = ctx.source_branch;
     if (o.output_node == root.GROUND) {
@@ -405,10 +390,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     }
 
     const n_points: usize = o.sweep.count();
-    // `defer`-freed == scratch; `a` is a results arena. See
-    // RunCtx.scratch_allocator.
     const scratch = ctx.scratch_allocator;
-    // One flat block, four columns
     const cols = try scratch.alloc(f64, n_points * 4);
     defer scratch.free(cols);
     const freqs = cols[0..n_points];
@@ -418,8 +400,9 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     var out: Out = .{ .freqs = freqs, .hd2 = hd2_buf, .v1_mag = v1_buf, .v2_mag = v2_buf };
     const harmonic = o.plot != .summary;
-    // ponytail: allocated on every path; n_points·probes·2 is the size of the
-    // result plot itself, so branching around it would save nothing measurable.
+    // ponytail: allocated on every path; it is the size of the result plot
+    // itself, so branching around it would save nothing measurable.
+
     const harm_buf = try scratch.alloc(f64, n_points * ctx.probes.len * 2);
     defer scratch.free(harm_buf);
     if (harmonic) {
