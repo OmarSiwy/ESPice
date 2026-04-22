@@ -1,19 +1,15 @@
-//! Structural sweep lanes: one driver for the "N independent cold DC solves,
-//! one param install per lane" shape. Lane k lands at x_lanes[k*n..][0..n].
-//!
-//! `apply(k)` installs lane k's params (ParamRef writes) and is invoked in
-//! lane order (k = 0, 1, ... n_lanes-1). `recompute()` after apply is the
-//! driver's job, not the caller's.
+//! Structural sweep lanes: N independent cold DC solves, each after one
+//! parameter install, sharing the circuit pattern and one Newton workspace.
+//! Lane k's solution lands at x_lanes[k*n..][0..n].
 const std = @import("std");
 const root = @import("../types.zig");
 const converger = @import("solver").converger;
 
-/// Solve `n_lanes` cold DC points into the flat blob `x_lanes` (lane k at
-/// x_lanes[k*n..][0..n]); `results[k]` gets lane k's converger.Result. The
-/// caller owns both slices (x_lanes.len == n_lanes*ckt.n, results.len ==
-/// n_lanes). `setup` is a pointer to the caller's installer: `apply(k)`
-/// writes lane k's params, `restore()` puts the nominals back, and runs
-/// before returning on success and on error.
+/// Solves `results.len` lanes into `x_lanes` (`results.len * ckt.n` long);
+/// `results[k]` is lane k's Newton result, non-converged on a solver error.
+/// `setup` points at the caller's installer: `apply(k)` writes lane k's
+/// params and is called in lane order, `restore()` puts the nominals back.
+/// The driver recomputes after each, and restores on success and on error.
 pub fn solveLanes(
     ckt: *root.Circuit,
     setup: anytype,
@@ -23,7 +19,7 @@ pub fn solveLanes(
 ) !void {
     errdefer {
         setup.restore();
-        ckt.recompute() catch {}; // preserve the original failure; no further solve follows
+        ckt.recompute() catch {}; // keep the original error; no solve follows
     }
     const n: usize = ckt.n;
     const n_lanes = results.len;

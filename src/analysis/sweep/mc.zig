@@ -1,171 +1,101 @@
-//! Monte Carlo: perturb device parameters through raw ParamRef-style f32
-//! pointers, re-solve DC per trial, record the probes. One trial per
-//! structural sweep lane (`lanes.solveLanes`) —
-//! the pattern is frozen, so one Workspace serves every trial. The RNG is a
-//! deterministic std.Random.DefaultPrng seeded from Options.seed; `run` is
-//! `analyze` with param_vars collected from the netlist, so there is exactly
-//! one numeric path.
+//! Monte Carlo (`.mc`): gaussian variation of every device's primary
+//! parameter, one cold DC solve per trial. Each trial is a structural sweep
+//! lane (`lanes.solveLanes`) sharing one Newton workspace. The draws come
+//! from a std.Random.DefaultPrng seeded with Options.seed, so a run is
+//! reproducible.
 const std = @import("std");
 const root = @import("../types.zig");
 const lanes = @import("lanes.zig");
 const converger = @import("solver").converger;
 
-// ============================================================================
-// Parameter variation specification
-// ============================================================================
-
-pub const Distribution = enum {
-    uniform,
-    gaussian,
-};
-
-/// Describes how a single device parameter should be varied.
-/// `param_ptr` refers to the numeric field in the device Model/Instance struct
-/// (take it from a root.ParamRef — batch arrays are stable after
-/// compile()). The nominal value is captured at setup; each MC run perturbs it.
-pub const ParamVar = struct {
-    /// Pointer to the model parameter field to vary.
-    param_ptr: root.ParamRef,
-    /// Nominal (original) value of the parameter.
-    nominal: f64,
-    /// Relative tolerance (fraction of nominal). E.g. 0.05 for 5%.
-    rel_tol: f64,
-    dist: Distribution,
-};
-
-// ============================================================================
-// Options
-// ============================================================================
-
+/// Query options, defined in core/query.zig.
 pub const Options = @import("core").query.Mc;
 
-// ============================================================================
-// Per-lane parameter draw — the ONE place the distributions are sampled
-// ============================================================================
+/// One varied parameter and the nominal value its trials perturb.
+const ParamVar = struct {
+    ref: root.ParamRef,
+    nominal: f64,
+};
 
-/// solveLanes apply/restore state: the perturbable params, plus a PRNG that
-/// reseeds on lane 0 so every sweep draws the same sequence.
+/// Trial k draws `nominal · (1 + variation · N(0,1))` for every parameter.
+/// The PRNG reseeds on trial 0, so every sweep draws the same sequence.
 const LaneCtx = struct {
     param_vars: []const ParamVar,
+    variation: f64,
     seed: u64,
     prng: std.Random.DefaultPrng,
 
     pub fn apply(self: *LaneCtx, k: usize) void {
         if (k == 0) self.prng = std.Random.DefaultPrng.init(self.seed);
         const rng = self.prng.random();
-        for (self.param_vars) |pv| {
-            const varied = switch (pv.dist) {
-                .uniform => blk: {
-                    const lo = pv.nominal * (1.0 - pv.rel_tol);
-                    const hi = pv.nominal * (1.0 + pv.rel_tol);
-                    break :blk lo + (hi - lo) * rng.float(f64);
-                },
-                .gaussian => pv.nominal + pv.nominal * pv.rel_tol * rng.floatNorm(f64),
-            };
-            pv.param_ptr.set(varied);
-        }
+        for (self.param_vars) |pv| pv.ref.set(pv.nominal + pv.nominal * self.variation * rng.floatNorm(f64));
     }
 
     pub fn restore(self: *LaneCtx) void {
-        for (self.param_vars) |pv| pv.param_ptr.set(pv.nominal);
+        for (self.param_vars) |pv| pv.ref.set(pv.nominal);
     }
 };
 
-// ============================================================================
-// Monte Carlo analysis entry point
-// ============================================================================
-
-/// Caller owns `samples[probes.len * n_trials]`, probe-major with stride
-/// n_trials; converged trials are packed at the front of each probe row
-/// (samples[p * n_trials + k], k < the returned count). Parameters are
-/// restored to their nominals afterwards.
-pub fn analyze(
-    ckt: *root.Circuit,
-    param_vars: []const ParamVar,
-    probes: []const u32,
-    samples: []f64,
-    options: Options,
-    allocator: std.mem.Allocator,
-) !u32 {
-    const stride: usize = options.n_trials;
-    std.debug.assert(samples.len == probes.len * stride);
-
-    // Structural sweep lanes: one trial per lane.
-    const n: usize = ckt.n;
-    const x_lanes = try allocator.alloc(f64, stride * n);
-    defer allocator.free(x_lanes);
-    const results = try allocator.alloc(converger.Result, stride);
-    defer allocator.free(results);
-
-    var lane_ctx: LaneCtx = .{ .param_vars = param_vars, .seed = options.seed, .prng = undefined };
-    const nopts = converger.optionsFromTolerances(options.dc_options.tol, options.dc_options.tol.itl2);
-    try lanes.solveLanes(ckt, &lane_ctx, x_lanes, results, nopts);
-
-    var n_conv: u32 = 0;
-    for (results, 0..) |r, t| {
-        if (!r.converged) continue;
-        const xl = x_lanes[t * n ..][0..n];
-        for (probes, 0..) |node, p| samples[p * stride + n_conv] = xl[node];
-        n_conv += 1;
-    }
-    return n_conv;
-}
-
-/// Contract entry: gaussian variation on each device's primary instance
-/// value (skipping unset zeros), per-trial DC re-solve. Data layout:
-/// point-major (run, probes...), one row per converged trial. Parameters are
-/// restored so later jobs see the netlist-declared circuit.
+/// Contract entry: real, point-major (run, probes...), one row per converged
+/// trial and no rows when there are no probes. Varies each device's primary
+/// parameter, skipping those that are zero. Parameters are back at their
+/// nominals afterwards so later jobs see the netlist's circuit.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const ckt = ctx.circuit;
     const a = ctx.allocator;
-
-    // `defer`-freed below == scratch; `a` is a results arena. See
-    // RunCtx.scratch_allocator.
     const scratch = ctx.scratch_allocator;
 
     const refs = try ckt.collectParams();
     var n_vars: usize = 0;
-    for (refs) |ref| {
-        if (ref.primary and ref.get() != 0) n_vars += 1;
-    }
+    for (refs) |ref| n_vars += @intFromBool(ref.primary and ref.get() != 0);
     const param_vars = try scratch.alloc(ParamVar, n_vars);
     defer scratch.free(param_vars);
     var i: usize = 0;
     for (refs) |ref| {
         if (!ref.primary or ref.get() == 0) continue;
-        param_vars[i] = .{ .param_ptr = ref, .nominal = ref.get(), .rel_tol = opts.variation, .dist = .gaussian };
+        param_vars[i] = .{ .ref = ref, .nominal = ref.get() };
         i += 1;
     }
-    defer {
-        // analyze() restores on success; this covers early-error paths too.
-        for (param_vars) |pv| pv.param_ptr.set(pv.nominal);
-        ckt.recompute() catch unreachable; // nominals were read from the checked circuit
+
+    const n: usize = ckt.n;
+    const n_trials: usize = opts.n_trials;
+    const x_lanes = try scratch.alloc(f64, n_trials * n);
+    defer scratch.free(x_lanes);
+    const results = try scratch.alloc(converger.Result, n_trials);
+    defer scratch.free(results);
+
+    var lane_ctx: LaneCtx = .{ .param_vars = param_vars, .variation = opts.variation, .seed = opts.seed, .prng = undefined };
+    const nopts = converger.optionsFromTolerances(opts.dc_options.tol, opts.dc_options.tol.itl2);
+    try lanes.solveLanes(ckt, &lane_ctx, x_lanes, results, nopts);
+
+    var n_conv: usize = 0;
+    if (ctx.probes.len > 0) {
+        for (results) |r| n_conv += @intFromBool(r.converged);
     }
-
-    const stride: usize = opts.n_trials;
-    const samples = try scratch.alloc(f64, ctx.probes.len * stride);
-    defer scratch.free(samples);
-    const n_conv = try analyze(ckt, param_vars, ctx.probes, samples, opts, scratch);
-
-    const npoints: usize = if (ctx.probes.len > 0) n_conv else 0;
     const names = try root.probeNames(ctx, "run");
     errdefer {
         for (names[1..]) |s| a.free(s);
         a.free(names);
     }
     const ncols = names.len;
-    const data = try a.alloc(f64, npoints * ncols);
-    for (0..npoints) |k| {
-        const row = data[k * ncols ..][0..ncols];
-        row[0] = @floatFromInt(k);
-        for (0..ctx.probes.len) |p| row[1 + p] = samples[p * stride + k];
+    const data = try a.alloc(f64, n_conv * ncols);
+    if (n_conv > 0) {
+        var k: usize = 0;
+        for (results, 0..) |r, t| {
+            if (!r.converged) continue;
+            const row = data[k * ncols ..][0..ncols];
+            row[0] = @floatFromInt(k);
+            const xl = x_lanes[t * n ..][0..n];
+            for (ctx.probes, row[1..]) |node, *out| out.* = xl[node];
+            k += 1;
+        }
     }
 
     return .{
         .plotname = "Monte Carlo",
         .varnames = names,
         .is_complex = false,
-        .npoints = npoints,
+        .npoints = n_conv,
         .data = data,
     };
 }

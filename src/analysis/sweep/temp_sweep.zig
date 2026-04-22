@@ -1,22 +1,25 @@
-//! Temperature sweep: device-native temperature physics, one structural lane
-//! per point. The circuit pattern and Newton workspace are shared across lanes.
+//! Temperature sweep (`.temp`): one structural lane per temperature, using
+//! the devices' own temperature physics (setCircuitTemp), no external
+//! coefficients.
 const root = @import("../types.zig");
 const lanes = @import("lanes.zig");
 const converger = @import("solver").converger;
 
+/// Query options, defined in core/query.zig.
 pub const Options = @import("core").query.Temp;
 
+/// Points from t_start to t_stop by t_step, endpoint inclusive; 1 for a
+/// non-positive step, 0 for a descending span.
 pub fn numPoints(options: Options) u32 {
     if (options.t_step <= 0) return 1;
     const span = options.t_stop - options.t_start;
     if (span < 0) return 0;
     // Same 1e-6-step nudge as dc.zig sweepCount: an exact-integer ratio
-    // arrives just under it in f64 and a bare floor drops the endpoint.
+    // arrives just under itself in f64 and a bare floor drops the endpoint.
     return @as(u32, @intFromFloat(@floor(span / options.t_step + 1e-6))) + 1;
 }
 
-/// solveLanes apply/restore state: lane k installs temperature
-/// t_start + k*t_step; the lane driver recomputes after restoring t_nom.
+/// Lane k runs at t_start + k*t_step; restore returns the circuit to t_nom.
 const LaneCtx = struct {
     ckt: *root.Circuit,
     t_start: f64,
@@ -32,23 +35,17 @@ const LaneCtx = struct {
     }
 };
 
-/// Contract entry: device-internal temperature physics via setCircuitTemp —
-/// no external coefficients. Data layout: point-major (temp, probes...), one
-/// row per converged temperature. Temperature restored to t_nom afterwards so
-/// later jobs see the netlist-declared circuit.
+/// Contract entry: real, point-major (temp, probes...), one row per converged
+/// temperature. The circuit is back at t_nom afterwards so later jobs see the
+/// netlist's temperature.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const ckt = ctx.circuit;
     const a = ctx.allocator;
+    const scratch = ctx.scratch_allocator;
     const max_points: usize = numPoints(opts);
     const ncols = ctx.probes.len + 1;
-
-    // Structural sweep lanes: lane k is temperature t_start + k*t_step. No
-    // external coeffs on this path — device-internal temp physics only,
-    // installed via setCircuitTemp.
     const n: usize = ckt.n;
-    // `defer`-freed == scratch; `a` is a results arena. See
-    // RunCtx.scratch_allocator.
-    const scratch = ctx.scratch_allocator;
+
     const x_lanes = try scratch.alloc(f64, max_points * n);
     defer scratch.free(x_lanes);
     const results = try scratch.alloc(converger.Result, max_points);
@@ -58,19 +55,16 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const nopts = converger.optionsFromTolerances(opts.dc_options.tol, opts.dc_options.tol.itl2);
     try lanes.solveLanes(ckt, &lane_ctx, x_lanes, results, nopts);
 
-    // Collect converged points, point-major (temp, probes...).
     var npoints: usize = 0;
-    for (results) |r| {
-        if (r.converged) npoints += 1;
-    }
+    for (results) |r| npoints += @intFromBool(r.converged);
     const data = try a.alloc(f64, npoints * ncols);
     var pt: usize = 0;
-    for (0..max_points) |k| {
-        if (!results[k].converged) continue;
+    for (results, 0..) |r, k| {
+        if (!r.converged) continue;
         const row = data[pt * ncols ..][0..ncols];
         row[0] = opts.t_start + @as(f64, @floatFromInt(k)) * opts.t_step;
         const lane = x_lanes[k * n ..][0..n];
-        for (ctx.probes, 0..) |node, p| row[1 + p] = lane[node];
+        for (ctx.probes, row[1..]) |node, *out| out.* = lane[node];
         pt += 1;
     }
 
