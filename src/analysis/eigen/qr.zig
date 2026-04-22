@@ -3,16 +3,16 @@
 const std = @import("std");
 const Complex = @import("core").numerics.Complex;
 
-// ponytail: platform SIMD width — not hardcoded
 const W = std.simd.suggestVectorLength(f64) orelse 8;
 const V = @Vector(W, f64);
 
+/// How many eigenvalues were written, and whether all of them were.
 pub const Eigs = struct { count: usize, converged: bool };
 
-/// Writes eigenvalues into out (caller provides n slots — the exact upper
-/// bound). A subdiagonal entry below `tol` relative to its diagonal pair
-/// deflates. converged is false if `max_iter` Francis steps on one block were
-/// exhausted (remaining eigenvalues dropped).
+/// Writes the eigenvalues of `a` (n×n, destroyed) into `out[0..count]`;
+/// `out` needs n slots. A subdiagonal entry below `tol` relative to its
+/// diagonal pair deflates. `converged` is false when one block exhausted
+/// `max_iter` Francis steps; its eigenvalues are then missing.
 pub fn eigenvalues(n: usize, a: []f64, out: []Complex, tol: f64, max_iter: u32) Eigs {
     if (n == 0) return .{ .count = 0, .converged = true };
 
@@ -29,12 +29,11 @@ pub fn eigenvalues(n: usize, a: []f64, out: []Complex, tol: f64, max_iter: u32) 
     var iter: u32 = 0;
 
     while (nn > 0) {
-        // Top of the ACTIVE block: the largest l whose entry above it on the
-        // subdiagonal is negligible. Chasing the bulge from row 0 instead —
-        // which is what this did before there was a search — sweeps a
-        // deflated block back into the iteration, and on a matrix that splits
-        // in the middle (every MNA pencil with an isolated branch row does)
-        // it stops converging at all.
+        // Top of the active block: the largest l whose subdiagonal entry is
+        // negligible. Chasing the bulge from row 0 would sweep a deflated
+        // block back into the iteration, and on a matrix that splits in the
+        // middle (every MNA pencil with an isolated branch row does) the
+        // iteration would stop converging.
         var l = nn - 1;
         while (l > 0) : (l -= 1) {
             const sub = @abs(a[l * n + (l - 1)]);
@@ -65,13 +64,12 @@ pub fn eigenvalues(n: usize, a: []f64, out: []Complex, tol: f64, max_iter: u32) 
 }
 
 /// dgebal-style scaling: the diagonal similarity D⁻¹AD that evens each row's
-/// norm against its column's. D is powers of two, so the similarity is EXACT
-/// in floating point and the eigenvalues are untouched — what changes is the
-/// QR's conditioning, and A = −M⁻¹C spans the decades between a picofarad and
-/// a kilohm, which is enough to hand back eigenvalues with the wrong ORDER of
-/// magnitude (`pz/bench_pz_pz2` reported a pole at 4e15 rad/s for a circuit
-/// whose fastest is 1e9). Numerical Recipes `balanc`, sweeping until a pass
-/// changes nothing.
+/// norm against its column's (Numerical Recipes `balanc`, swept until a pass
+/// changes nothing). D is powers of two, so the similarity is exact in
+/// floating point and only the QR's conditioning changes. That matters
+/// because A = −M⁻¹C spans the decades between a picofarad and a kilohm:
+/// unbalanced, `pz/bench_pz_pz2` gets a pole at 4e15 rad/s for a circuit
+/// whose fastest is 1e9.
 fn balance(n: usize, a: []f64) void {
     const radix: f64 = 2;
     const radix_sq = radix * radix;
@@ -110,7 +108,7 @@ fn balance(n: usize, a: []f64) void {
     }
 }
 
-/// Extract eigenvalues of the 2x2 block at (offset, offset).
+/// Eigenvalues of the 2x2 block at (offset, offset).
 fn extract2x2(a: []const f64, n: usize, offset: usize, out: *[2]Complex) void {
     const a11 = a[offset * n + offset];
     const a12 = a[offset * n + offset + 1];
@@ -132,15 +130,13 @@ fn extract2x2(a: []const f64, n: usize, offset: usize, out: *[2]Complex) void {
     }
 }
 
-// ============================================================================
-// Hessenberg reduction via Householder reflections (SIMD-accelerated)
-// ============================================================================
-
+/// Reduces `a` (n×n, row-major) in place to upper Hessenberg form by
+/// Householder similarities; the eigenvalues are unchanged and every entry
+/// below the subdiagonal is an exact zero.
 pub fn hessenbergReduce(n: usize, a: []f64) void {
     if (n <= 2) return;
 
     for (0..n - 2) |k| {
-        // Compute norm of sub-column a[k+1..n, k].
         var sigma: f64 = 0;
         for (k + 1..n) |row| {
             const v = a[row * n + k];
@@ -212,20 +208,16 @@ pub fn hessenbergReduce(n: usize, a: []f64) void {
             }
         }
 
-        // Write sub-diagonal entry and zero below.
-        a[(k + 1) * n + k] = -sigma;
         // The reflector maps its own storage v to -v (Hv = -v), leaving
         // nonzeros below the subdiagonal; francisStep reads those slots as
         // bulge entries, so they must be true zeros.
+        a[(k + 1) * n + k] = -sigma;
         for (k + 2..n) |row| a[row * n + k] = 0;
     }
 }
 
-// ============================================================================
-// Francis double-shift QR step (SIMD-accelerated reflectors)
-// ============================================================================
-
-/// One bulge chase over the ACTIVE block, rows/columns [lo, nn).
+/// One Francis double-shift bulge chase over the active block, rows and
+/// columns [lo, nn).
 fn francisStep(n: usize, a: []f64, lo: usize, nn: usize, iter: u32) void {
     // Shift polynomial from trailing 2x2 block.
     const am = a[(nn - 2) * n + (nn - 2)];
@@ -236,12 +228,10 @@ fn francisStep(n: usize, a: []f64, lo: usize, nn: usize, iter: u32) void {
     var s = am + dm; // trace
     var t = am * dm - bm * cm; // determinant
 
-    // EISPACK's exceptional shift. After ten sweeps the trailing 2x2 has
-    // stopped telling the iteration anything, and a shift built from the
-    // subdiagonal alone breaks the cycle. Without it a matrix with REPEATED
-    // eigenvalues never deflates: `pz/bench_pz_pzt` is three identical R/L
-    // sections, so all three of its poles sit on top of each other and the
-    // iteration burned its whole budget without emitting one of them.
+    // EISPACK's exceptional shift: after ten sweeps the trailing 2x2 has
+    // stopped steering the iteration, and a shift built from the subdiagonal
+    // alone breaks the cycle. Without it a matrix with repeated eigenvalues
+    // never deflates (`pz/bench_pz_pzt`, three identical R/L sections).
     if (iter > 0 and iter % 10 == 0) {
         const mag = @abs(cm) + @abs(a[(nn - 2) * n + (nn - 3)]);
         s = 1.5 * mag;
@@ -278,6 +268,8 @@ fn francisStep(n: usize, a: []f64, lo: usize, nn: usize, iter: u32) void {
     }
 }
 
+/// Applies the 3-element Householder reflector that zeroes (y, z) against x
+/// to rows and columns k..k+2 of the active block.
 fn applyReflector3(n: usize, a: []f64, lo: usize, nn: usize, k: usize, x_in: f64, y_in: f64, z_in: f64, nr: f64) void {
     const sign_x: f64 = if (x_in >= 0) 1.0 else -1.0;
     const v0 = x_in + sign_x * nr;
@@ -292,9 +284,9 @@ fn applyReflector3(n: usize, a: []f64, lo: usize, nn: usize, k: usize, x_in: f64
     const v2v: V = @splat(v2);
     const betav: V = @splat(beta);
 
-    // Apply from left: rows k, k+1, k+2
-    // Column lo-1 is the split this block was deflated at; reaching back into
-    // it would refill the negligible subdiagonal entry and undo the split.
+    // From the left, rows k..k+2. Column lo-1 is the split this block was
+    // deflated at; reaching back into it would refill the negligible
+    // subdiagonal entry and undo the split.
     const col_start = if (k > lo) k - 1 else lo;
     var j: usize = col_start;
     while (j + W <= nn) : (j += W) {
@@ -310,7 +302,6 @@ fn applyReflector3(n: usize, a: []f64, lo: usize, nn: usize, k: usize, x_in: f64
         p1.* = r1 - tv * v1v;
         p2.* = r2 - tv * v2v;
     }
-    // Scalar tail for non-W-aligned columns.
     while (j < nn) : (j += 1) {
         const dot = v0 * a[k * n + j] + v1 * a[(k + 1) * n + j] + v2 * a[(k + 2) * n + j];
         const tv = beta * dot;
@@ -319,9 +310,11 @@ fn applyReflector3(n: usize, a: []f64, lo: usize, nn: usize, k: usize, x_in: f64
         a[(k + 2) * n + j] -= tv * v2;
     }
 
-    // Apply from right: rows 0..min(nn-1, k+3), columns k, k+1, k+2
+    // From the right, columns k..k+2, rows lo..min(nn, k+4). Rows above lo
+    // couple to deflated blocks and are never read again, since only the
+    // eigenvalues are wanted.
     const row_end = @min(nn, k + 4);
-    for (0..row_end) |row| {
+    for (lo..row_end) |row| {
         const dot = a[row * n + k] * v0 + a[row * n + k + 1] * v1 + a[row * n + k + 2] * v2;
         const tv = beta * dot;
         a[row * n + k] -= tv * v0;
@@ -330,6 +323,8 @@ fn applyReflector3(n: usize, a: []f64, lo: usize, nn: usize, k: usize, x_in: f64
     }
 }
 
+/// The 2-element reflector at the bottom of the chase, rows and columns
+/// k..k+1.
 fn applyReflector2(n: usize, a: []f64, lo: usize, nn: usize, k: usize, x_in: f64, y_in: f64) void {
     const nr = @sqrt(x_in * x_in + y_in * y_in);
     if (nr < 1e-30) return;
@@ -345,8 +340,7 @@ fn applyReflector2(n: usize, a: []f64, lo: usize, nn: usize, k: usize, x_in: f64
     const v1v: V = @splat(v1);
     const betav: V = @splat(beta);
 
-    // Column lo-1 is the split this block was deflated at; reaching back into
-    // it would refill the negligible subdiagonal entry and undo the split.
+    // Same column and row ranges as applyReflector3.
     const col_start = if (k > lo) k - 1 else lo;
     var j: usize = col_start;
     while (j + W <= nn) : (j += W) {
@@ -359,7 +353,6 @@ fn applyReflector2(n: usize, a: []f64, lo: usize, nn: usize, k: usize, x_in: f64
         p0.* = r0 - tv * v0v;
         p1.* = r1 - tv * v1v;
     }
-    // Scalar tail.
     while (j < nn) : (j += 1) {
         const dot = v0 * a[k * n + j] + v1 * a[(k + 1) * n + j];
         const tv = beta * dot;
@@ -368,7 +361,7 @@ fn applyReflector2(n: usize, a: []f64, lo: usize, nn: usize, k: usize, x_in: f64
     }
 
     const row_end = @min(nn, k + 3);
-    for (0..row_end) |row| {
+    for (lo..row_end) |row| {
         const dot = a[row * n + k] * v0 + a[row * n + k + 1] * v1;
         const tv = beta * dot;
         a[row * n + k] -= tv * v0;
