@@ -1,35 +1,29 @@
-//! Envelope-following transient: trapezoid steps (A = G + 2C/dt; A = G with
-//! no charge) sampled along the carrier. Outer steps skip whole carrier periods; one fine-resolution
-//! period per outer step feeds the peak/RMS envelope extraction.
-//!
-//! Algorithm (sample-envelope, doc §3):
-//!   1. Record DC point as envelope sample 0.
-//!   2. Outer loop: Δt = periods_per_step * T_c.
-//!      a. If Δt > T_c, coarse-advance to t_target − T_c (4× inner dt).
-//!      b. One fine period at carrier_steps_per_period resolution;
-//!         accumulate per-probe peak and Σv² (RMS).
-//!   3. Record (t, peak, rms) per probe.
-//!   4. Adapt: rel change > envelope_reltol → halve pps; < reltol/4 → double.
-//!   5. Newton failure → restore snapshot, halve pps, retry.
-
+//! Envelope-following transient. Each outer step skips `periods_per_step`
+//! carrier periods with coarse trapezoid steps, then resolves the last period
+//! finely to extract per-probe peak and RMS. The outer step halves when the
+//! envelope moves more than envelope_reltol and doubles below a quarter of it.
 const std = @import("std");
 const root = @import("../types.zig");
 const simdCopy = root.copySimd;
 const converger = @import("solver").converger;
+const integrator = @import("integrator.zig");
 
 pub const Options = @import("core").query.Envelope;
 
+/// Outcome of one envelope run.
 pub const SimResult = struct {
+    /// True when t reached t_stop.
     completed: bool,
     outer_steps: u32,
+    /// Time of the last envelope point, in seconds.
     t_final: f64,
-    /// Rows actually written into the caller's buffer.
+    /// Rows written into the caller's buffer, the t = 0 row included.
     n_points: u32,
 };
 
-/// Upper bound on recorded envelope points: every accepted outer step
-/// advances at least min_periods_per_step * t_carrier, plus the initial
-/// point (and one row of float-rounding slack).
+/// Upper bound on envelope rows: every accepted outer step advances at least
+/// min_periods_per_step carrier periods, plus the t = 0 row and one row of
+/// rounding slack.
 pub fn maxPoints(options: Options) u32 {
     const min_step = @as(f64, @floatFromInt(@max(options.min_periods_per_step, 1))) * options.t_carrier;
     const by_time = @ceil(options.t_stop / min_step);
@@ -37,13 +31,12 @@ pub fn maxPoints(options: Options) u32 {
     return @as(u32, @intFromFloat(@min(by_time, cap))) + 2;
 }
 
-/// Trapezoidal charge history carried across every envelope step (coarse
-/// and fine alike: trapezoid is one-step, so dt may change between them).
-/// Without it the envelope was quasi-static and a capacitor was open
-/// (`rc_startup` published v(out) = v(in)).
+/// Trapezoidal charge history carried across every envelope step, coarse and
+/// fine alike (trapezoid is one-step, so dt may change between them).
 const Trap = struct {
     q_prev: []f64,
     i_prev: []f64,
+    /// q(x) from the last Newton assemble.
     q_cur: []f64,
     a_vals: []f64,
     alpha: f64 = 0,
@@ -68,11 +61,9 @@ const Trap = struct {
         simdCopy(self.q_prev[0..n], self.q_cur[0..n]);
     }
 };
-const integrator = @import("integrator.zig");
 
 /// One step to absolute time t: a trapezoid step of length dt when the
-/// circuit has charge (`trap`), else the static solve (A = G). Shared
-/// workspace; returns convergence only.
+/// circuit has charge (`trap`), else a static solve. Returns convergence.
 fn newtonAt(
     ckt: *root.Circuit,
     ws: *converger.Workspace,
@@ -82,16 +73,15 @@ fn newtonAt(
     options: Options,
     trap: ?*Trap,
 ) !bool {
-    // §9.10 `$abstime`: a generated device reads Instance.abstime, not the `t`
-    // argument, so the envelope's probes have to publish it too — otherwise
-    // every source in the envelope sees t = 0.
+    // Devices read Instance.abstime (§9.10 `$abstime`), not the `t`
+    // argument, so every step publishes its time.
     const opts = converger.optionsFromTolerances(options.tol, options.tol.itl4);
     const nr = if (trap) |tr| blk: {
         ckt.setSimState(.{ .t = t, .dt = dt, .kind = .tran });
         tr.alpha = 2.0 / dt;
         break :blk converger.run(ckt, ws, x, t, opts, tr.*);
     } else blk: {
-        // No charge: dt stays 0, the step IS static.
+        // No charge: dt stays 0 and the step is static.
         ckt.setSimState(.{ .t = t, .kind = .tran });
         break :blk converger.run(ckt, ws, x, t, opts, root.EvalHook{});
     };
@@ -103,15 +93,10 @@ fn newtonAt(
     return r.converged;
 }
 
-// ============================================================================
-// Core simulation
-// ============================================================================
-
-/// Envelope-following transient analysis.
-///
-/// Caller owns `rows`: point-major envelope samples with stride
-/// 1 + 2*probes.len, row = [t, peak_p0, rms_p0, peak_p1, rms_p1, ...];
-/// size it with maxPoints(options). SimResult.n_points rows are written.
+/// Envelope-following transient from `x`. The caller owns `rows`, sized
+/// maxPoints(options) * (1 + 2*probes.len): point-major rows
+/// [t, peak_p0, rms_p0, peak_p1, rms_p1, ...]. Returns
+/// error.EnvelopeDidNotConverge when a step fails at min_periods_per_step.
 pub fn simulate(
     ckt: *root.Circuit,
     x: []f64,
@@ -128,19 +113,19 @@ pub fn simulate(
     try ckt.computeBaseline();
     const ws = try ckt.workspace();
 
-    // One scratch alloc: [x_outer_save | prev_peak | peak | sum_sq | trap state]
-    // trap state = q_prev, i_prev, q_cur and the rollback copies of the first
-    // two, only when the circuit has charge.
-    const n_trap: usize = if (ckt.has_charge) 5 * n else 0;
-    const scratch = try allocator.alloc(f64, n + 3 * probes.len + n_trap);
+    // One scratch block: [x_outer_save | prev_peak | peak | sum_sq | trap]
+    // where trap = q_prev, i_prev, q_cur and rollback copies of the first
+    // two, present only when the circuit has charge.
+    const nt: usize = if (ckt.has_charge) n else 0;
+    const scratch = try allocator.alloc(f64, n + 3 * probes.len + 5 * nt);
     defer allocator.free(scratch);
     const x_outer_save = scratch[0..n];
-    // Previous envelope values for adaptive stepping (one per probe),
-    // plus envelope extraction scratch.
     const prev_peak = scratch[n..][0..probes.len];
     const peak = scratch[n + probes.len ..][0..probes.len];
     const sum_sq = scratch[n + 2 * probes.len ..][0..probes.len];
-    const ts = scratch[n + 3 * probes.len ..][0..n_trap];
+    const ts = scratch[n + 3 * probes.len ..][0 .. 5 * nt];
+    const q_save = ts[3 * nt ..][0..nt];
+    const i_save = ts[4 * nt ..][0..nt];
     var trap_state: Trap = undefined;
     const trap: ?*Trap = if (ckt.has_charge) blk: {
         trap_state = .{
@@ -155,11 +140,9 @@ pub fn simulate(
         @memset(trap_state.i_prev, 0);
         break :blk &trap_state;
     } else null;
-    const q_save = ts[n_trap / 5 * 3 ..][0 .. n_trap / 5];
-    const i_save = ts[n_trap / 5 * 4 ..][0 .. n_trap / 5];
     const dt_inner: f64 = t_carrier / @as(f64, @floatFromInt(options.carrier_steps_per_period));
 
-    // Record initial envelope point (DC operating point)
+    // Row 0 is the operating point.
     {
         const row = rows[0..ncols];
         row[0] = 0;
@@ -181,7 +164,6 @@ pub fn simulate(
     while (t < options.t_stop and outer_steps < options.max_outer_steps) {
         if (attempts != 0) try ckt.checkpoint(.{ .phase = .transient, .completed = attempts });
         attempts += 1;
-        // Snapshot state for rollback on Newton failure
         simdCopy(x_outer_save, x);
         if (trap) |tr| {
             simdCopy(q_save, tr.q_prev);
@@ -192,41 +174,17 @@ pub fn simulate(
         const t_target = @min(t + t_outer_step, options.t_stop);
         const actual_outer_dt = t_target - t;
 
-        // Strategy (doc §2): skip to t_target − T_carrier with coarse steps,
-        // then run one full carrier period with fine steps for envelope extraction.
+        // Coarse steps (4x the inner dt) up to one carrier period short of
+        // the target, then one fine period for the envelope.
         const t_fine_start = if (actual_outer_dt > t_carrier)
             t_target - t_carrier
         else
             t;
-
-        // Coarse advance: skip intermediate carrier periods (4× inner step)
-        if (t_fine_start > t) {
-            const coarse_ok = try coarseAdvance(
-                ckt,
-                ws,
-                x,
-                t,
-                t_fine_start - t,
-                dt_inner * 4.0,
-                options,
-                trap,
-            );
-            if (!coarse_ok) {
-                // Coarse advance failed to converge; halve outer step, restore, retry
-                simdCopy(x, x_outer_save);
-                if (trap) |tr| {
-                    simdCopy(tr.q_prev, q_save);
-                    simdCopy(tr.i_prev, i_save);
-                }
-                if (periods_per_step == options.min_periods_per_step) return error.EnvelopeDidNotConverge;
-                periods_per_step = @max(periods_per_step / 2, options.min_periods_per_step);
-                continue;
-            }
-        }
+        const needs_coarse = t_fine_start > t;
+        var ok = !needs_coarse or try coarseAdvance(ckt, ws, x, t, t_fine_start - t, dt_inner * 4.0, options, trap);
 
         // RMS by trapezoid weights over the window: half weight on each
-        // endpoint. Counting both endpoints in full (65 samples over 64
-        // steps) read a sine sqrt(64/65) low.
+        // endpoint, so a sine reads its true RMS.
         for (probes, 0..) |node, p| {
             peak[p] = @abs(x[node]);
             sum_sq[p] = 0.5 * x[node] * x[node];
@@ -235,12 +193,9 @@ pub fn simulate(
 
         var t_inner: f64 = 0;
         const fine_duration = t_target - t_fine_start;
-        var inner_failed = false;
-        while (t_inner < fine_duration) {
-            const inner_converged = try newtonAt(ckt, ws, x, t_fine_start + t_inner + dt_inner, dt_inner, options, trap);
-            if (!inner_converged) {
-                // Inner step fails → outer step too aggressive
-                inner_failed = true;
+        while (ok and t_inner < fine_duration) {
+            if (!try newtonAt(ckt, ws, x, t_fine_start + t_inner + dt_inner, dt_inner, options, trap)) {
+                ok = false;
                 break;
             }
 
@@ -254,8 +209,8 @@ pub fn simulate(
             }
         }
 
-        if (inner_failed) {
-            // Inner sim did not complete; retry with smaller outer step
+        if (!ok) {
+            // The outer step was too aggressive: restore and retry shorter.
             simdCopy(x, x_outer_save);
             if (trap) |tr| {
                 simdCopy(tr.q_prev, q_save);
@@ -286,12 +241,9 @@ pub fn simulate(
             prev_peak[p] = peak[p];
         }
 
-        // Adapt outer step size based on envelope rate of change (doc §3 pseudocode)
         if (max_rel_change > options.envelope_reltol) {
-            // Envelope changing fast: reduce outer step
             periods_per_step = @max(periods_per_step / 2, options.min_periods_per_step);
         } else if (max_rel_change < options.envelope_reltol * 0.25) {
-            // Envelope changing slowly: increase outer step
             periods_per_step = @min(periods_per_step * 2, options.max_periods_per_step);
         }
     }
@@ -304,8 +256,8 @@ pub fn simulate(
     };
 }
 
-/// Coarse advance: quasi-static Newton solves with larger timesteps to skip
-/// intermediate carrier periods where we do not need fine resolution.
+/// Steps from t_start through `duration` seconds at `dt_coarse`, the last
+/// step shortened to land exactly. Returns false on the first Newton failure.
 fn coarseAdvance(
     ckt: *root.Circuit,
     ws: *converger.Workspace,
@@ -325,26 +277,24 @@ fn coarseAdvance(
     return true;
 }
 
-/// Contract entry: envelope-follow from ctx.x_op. Data layout: point-major
-/// rows (time, peak/rms per probe) — the same rows simulate() writes.
+/// Contract entry: envelope-follow from ctx.x_op. Point-major rows
+/// (time, peak and rms per probe), exactly what `simulate` writes.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
     const x_op = ctx.x_op;
-    // `defer`-freed == scratch; `a` is a results arena. `data` stays on `a`:
-    // it IS the Result. See RunCtx.scratch_allocator.
     const scratch = ctx.scratch_allocator;
     const x = try scratch.alloc(f64, x_op.len);
     defer scratch.free(x);
     simdCopy(x, x_op);
 
+    // `data` is the Result, so it lives on the results arena.
     const ncols = 1 + 2 * ctx.probes.len;
     const data = try a.alloc(f64, @as(usize, maxPoints(opts)) * ncols);
     errdefer a.free(data);
     const st = try simulate(ctx.circuit, x, ctx.probes, data, opts, scratch);
     if (!st.completed) return error.EnvelopeDidNotConverge;
 
-    // probeNames prefers the deck's probe labels: a branch-current row has
-    // no node name, and naming by node published `i(vin)` as `v(2)`.
+    // probeNames uses the deck's labels, which also name branch-current rows.
     const labels = try root.probeNames(ctx, null);
     const names = try a.alloc([]const u8, ncols);
     names[0] = "time";

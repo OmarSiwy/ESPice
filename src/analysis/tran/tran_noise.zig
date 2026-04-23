@@ -1,28 +1,23 @@
-//! Transient noise: transient Newton per timestep with sampled noise currents
-//! injected into the residual. Each step draws one Gaussian sample per source
-//! with sigma = sqrt(S*BW), BW = 1/(2*dt), so the discrete-time sequence
-//! carries the correct white PSD. Source PSDs come from the DEVICE
-//! (root.Circuit.collectNoiseSources -> the model's own `noisePsd`) — this
-//! analysis never re-derives them.
+//! Transient noise: backward-Euler transient with one Gaussian current
+//! sample per noise source per step, sigma = sqrt(S * BW) with BW = 1/(2dt),
+//! so the sampled sequence carries the source's white PSD. The PSDs come
+//! from the devices (`Circuit.collectNoiseSources`).
 const std = @import("std");
 const root = @import("../types.zig");
-// ponytail: the shared copy owns SIMD setup; seeded noise sampling stays scalar.
 const simdCopy = root.copySimd;
 const converger = @import("solver").converger;
 const integrator = @import("integrator.zig");
 
-pub const NoiseSource = root.NoiseSource;
+const NoiseSource = root.NoiseSource;
 
 pub const Options = @import("core").query.TranNoise;
 const Waveform = @import("types.zig").Waveform;
 
-// ============================================================================
-// Xorshift64 PRNG
-// ============================================================================
-
+/// Xorshift64 PRNG with a Box-Muller normal draw: deterministic per seed.
 const Xorshift64 = struct {
     state: u64,
 
+    /// Seed 0 maps to 1, since xorshift is stuck at zero.
     pub fn init(seed: u64) Xorshift64 {
         return .{ .state = if (seed == 0) 1 else seed };
     }
@@ -36,33 +31,28 @@ const Xorshift64 = struct {
         return s;
     }
 
-    /// Uniform in [0, 1).
+    /// Uniform in [0, 1) from the top 53 bits.
     fn uniform(self: *Xorshift64) f64 {
         return @as(f64, @floatFromInt(self.next() >> 11)) / @as(f64, @floatFromInt(@as(u64, 1) << 53));
     }
 
-    /// Standard normal via Box-Muller transform.
+    /// Standard normal via Box-Muller.
     pub fn randn(self: *Xorshift64) f64 {
-        const r1 = @max(self.uniform(), 1e-300); // avoid log(0)
+        const r1 = @max(self.uniform(), 1e-300); // keeps log finite
         const r2 = self.uniform();
         return @sqrt(-2.0 * @log(r1)) * @cos(2.0 * std.math.pi * r2);
     }
 };
 
-// ============================================================================
-// Transient noise simulation
-// ============================================================================
-
 /// Newton hook: backward-Euler companion from the q plane plus the sampled
-/// noise currents on top of the device residual. Matrix = G + (1/dt)*C.
+/// noise currents on top of the device residual. Matrix G + C/dt.
 const NoiseHook = struct {
     alpha: f64,
     q_prev: []const f64,
     a_vals: []f64,
     has_charge: bool,
-    /// Injection endpoints only, interleaved (p0, n0, p1, n1, ...) in source
-    /// order — the shared `NoiseSource` is 48 bytes and this loop wants 8 of
-    /// them. Same order, same per-source add-then-subtract.
+    /// Injection endpoints (p0, n0, p1, n1, ...) in source order: the only
+    /// 8 bytes of each 48-byte `NoiseSource` this loop reads.
     inj_nodes: []const u32,
     noise_currents: []const f64,
 
@@ -85,15 +75,18 @@ const NoiseHook = struct {
         ckt.combineGC(self.alpha, self.a_vals);
         return self.a_vals;
     }
-    /// One diagonal, without materializing the whole combined plane —
-    /// see `Circuit.gcAt`. The residual gate calls this per unknown.
+
+    /// One diagonal of the combined matrix without materializing it
+    /// (`Circuit.gcAt`); the residual gate calls this per unknown.
     pub fn diagAt(self: NoiseHook, ckt: *root.Circuit, slot: u32) f64 {
         return if (self.has_charge) ckt.gcAt(self.alpha, slot) else ckt.g_vals[slot];
     }
 };
 
-/// Integrate from x, recording accepted points into `waveform`. Returns
-/// whether it reached t_stop (false: dt fell below dt_min).
+/// Integrates from `x`, recording every accepted point into `waveform`.
+/// Returns false when dt fell below dt_min before t_stop. There is no LTE
+/// control: the noise dominates the local error, so dt only shrinks (by half)
+/// on a Newton failure and otherwise grows 1.5x up to dt_max.
 pub fn simulate(
     ckt: *root.Circuit,
     x: []f64,
@@ -110,22 +103,16 @@ pub fn simulate(
     const x_try = try allocator.alloc(f64, n);
     defer allocator.free(x_try);
 
-    // One noise current sample per source per step.
     const noise_currents = try allocator.alloc(f64, noise_sources.len);
     defer allocator.free(noise_currents);
 
-    // Simulation-lifetime split of the shared NoiseSource table: sampling
-    // streams only the white PSD, injection only the endpoints. The prefix is
-    // the invariant head of sigma = sqrt(S*BW). Requires the source data to be
-    // immutable over the run, which it is — collectNoiseSources runs once on
-    // x_op.
-    //
-    // ponytail: the WHITE half only. A `flicker` term is 1/f^ef, and a
-    // per-step iid draw cannot produce that shape — sampling it as if it were
-    // white would put the whole 1/f power at every frequency, which is worse
-    // than omitting it. Upgrade path is a shaping filter (the standard sum of
-    // first-order poles) driving the same draw; until then a 1/f generator
-    // contributes its white half here and its full PSD in `.noise`/`.pnoise`.
+    // Split the source table for the run: sampling streams sqrt(white), the
+    // dt-independent factor of sigma, and injection streams the endpoints.
+    // Valid because collectNoiseSources ran once on x_op.
+    // ponytail: white half only. An iid draw per step cannot shape 1/f, and
+    // sampling flicker as white would spread its power over every frequency.
+    // Upgrade: a shaping filter (sum of first-order poles) driving the same
+    // draw. `.noise` and `.pnoise` carry the full PSD.
     const noise_prefix = try allocator.alloc(f64, noise_sources.len);
     defer allocator.free(noise_prefix);
     const inj_nodes = try allocator.alloc(u32, 2 * noise_sources.len);
@@ -136,8 +123,6 @@ pub fn simulate(
         inj_nodes[2 * s + 1] = src.node_n;
     }
 
-    // Backward-Euler charge state (no LTE control here: noise dominates the
-    // local error, so the step only shrinks on Newton failure).
     var a_vals: []f64 = &.{};
     var q_prev: []f64 = &.{};
     defer if (has_charge) allocator.free(q_prev);
@@ -160,10 +145,8 @@ pub fn simulate(
     while (t < options.t_stop and steps < options.max_steps) {
         if (attempts != 0) try ckt.checkpoint(.{ .phase = .transient, .completed = attempts });
         attempts += 1;
-        // Bandwidth for this timestep: BW = 1 / (2 * dt)
+        // sqrt(BW), BW = 1/(2dt).
         const bandwidth_scale = @sqrt(1.0 / (2.0 * dt));
-
-        // Scale device-generated white noise to this timestep's bandwidth.
         for (noise_prefix, noise_currents) |pfx, *i_n| {
             const sigma = pfx * bandwidth_scale;
             i_n.* = sigma * rng.randn();
@@ -178,9 +161,8 @@ pub fn simulate(
             .noise_currents = noise_currents,
         };
 
-        // Same contract as tran.simulate: the devices' §9.10 `$abstime`/dt must
-        // describe the point this attempt targets, and a rejected step
-        // `continue`s back here with the halved dt.
+        // As in tran.simulate, devices must see the point this attempt
+        // targets (§9.10 `$abstime`); a rejected step retries from here.
         ckt.setSimState(.{ .t = t + dt, .dt = dt, .kind = .tran, .initial_step = steps == 0 });
         simdCopy(x_try, x);
         var tn_nr_opts = converger.optionsFromTolerances(options.tol, options.tol.itl4);
@@ -197,7 +179,7 @@ pub fn simulate(
         }
 
         if (has_charge) {
-            // exact q at the converged point (planes are one iterate stale)
+            // The planes are one iterate behind the converged point.
             ckt.eval(x_try, t + dt);
             simdCopy(q_prev, ckt.q_vec[0..n]);
         }
@@ -215,12 +197,12 @@ pub fn simulate(
     return t >= options.t_stop;
 }
 
-/// Contract entry: device-generated sources from collectNoiseSources, BE transient with
-/// per-step noise injection. Data layout: point-major (time, probes...).
+/// Contract entry: sample the devices' noise sources at x_op and integrate.
+/// Point-major rows (time, probes...); a run cut short by dt_min says so in
+/// the plot name rather than failing.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
     const x_op = ctx.x_op;
-    // `defer`-freed == scratch; `a` is a results arena.
     const scratch = ctx.scratch_allocator;
     const x = try scratch.alloc(f64, x_op.len);
     defer scratch.free(x);
@@ -229,11 +211,9 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const srcs = try ctx.circuit.collectNoiseSources(x_op, scratch);
     defer scratch.free(srcs);
 
-    // ponytail: waveform capacity heuristic. dt starts at dt_init and only
-    // grows (x1.5 up to dt_max) on an accepted step, so a run with no Newton
-    // failures records at most t_stop/dt_init + 1 rows. 2x keeps headroom for
-    // the dt_min tail; only repeated Newton failure drives dt below dt_init,
-    // and the waveform doubles for that.
+    // ponytail: capacity heuristic. Without Newton failures dt only grows
+    // from dt_init, so t_stop/dt_init + 1 rows is the most a run records; 2x
+    // is headroom and the waveform doubles past it.
     const est_rows = 2.0 * opts.t_stop / opts.dt_init;
     var wf = try Waveform.init(scratch, @intCast(ctx.probes.len), @intFromFloat(@min(@max(1024.0, est_rows), @as(f64, 1 << 22))));
     defer wf.deinit();
@@ -243,7 +223,6 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     errdefer a.free(data);
     const names = try root.probeNames(ctx, "time");
     return .{
-        // Early stop surfaced in the plotname — run() stays pure.
         .plotname = if (completed) "Transient Noise Analysis" else "Transient Noise Analysis (stopped early)",
         .varnames = names,
         .is_complex = false,

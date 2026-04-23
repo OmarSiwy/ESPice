@@ -1,27 +1,24 @@
-//! Transient: Newton per timestep on A = G + alpha*C (one axpy over nnz).
-//! The companion residual uses the exact q(x) plane; the companion Jacobian
-//! is the analytic C plane — nothing is lagged, nothing is dense.
+//! Transient analysis: Newton per timestep on A = G + ag0*C, with ngspice's
+//! LTE step control, order promotion and breakpoint landing. The companion
+//! residual uses the exact q(x) plane and the Jacobian the analytic C plane.
 const std = @import("std");
 const root = @import("../types.zig");
 const converger = @import("solver").converger;
+const integrator = @import("integrator.zig");
+const simdCopy = root.copySimd;
 
-// ponytail: platform SIMD width — not hardcoded
+// ponytail: platform SIMD width, not hardcoded.
 const W = std.simd.suggestVectorLength(f64) orelse 8;
 
-// Data types live in types.zig (integrator.zig and matex.zig read them without
-// the driver); re-exported so consumers write tran.Options / tran.Waveform.
 const tran_types = @import("types.zig");
 pub const Method = tran_types.Method;
 pub const Options = tran_types.Options;
 pub const Waveform = tran_types.Waveform;
 pub const SimResult = tran_types.SimResult;
 pub const initialCapacity = tran_types.initialCapacity;
-const simdCopy = @import("core").numerics.copySimd;
-
-const integrator = @import("integrator.zig");
 
 /// ZP_TRAN_STATS step-economics counters: wall time in a slow transient is
-/// attempts x Newton iterations x eval cost, and this says which factor.
+/// attempts x Newton iterations x eval cost, and these say which factor.
 const Stats = struct {
     attempts: u64 = 0,
     nr_iters: u64 = 0,
@@ -32,11 +29,10 @@ const Stats = struct {
     bp_landings: u64 = 0,
 };
 
-/// Newton hook: companion RHS from the q plane, matrix = G + alpha*C.
+/// Newton hook: companion RHS from the q plane, matrix G + ag0*C.
 const TranHook = struct {
     /// The method this attempt integrates with (BE while order-dropped).
     method: Method,
-    /// ag0 is alpha, the q(x) coefficient; ag2 the gear q_prev2 coefficient.
     c: integrator.Coeffs,
     q_prev: []const f64,
     i_prev: []const f64, // read by trap only
@@ -59,14 +55,17 @@ const TranHook = struct {
         ckt.combineGC(self.c.ag0, self.a_vals);
         return self.a_vals;
     }
-    /// One diagonal, without materializing the whole combined plane —
-    /// see `Circuit.gcAt`. The residual gate calls this per unknown.
+
+    /// One diagonal of the combined matrix without materializing it
+    /// (`Circuit.gcAt`); the residual gate calls this per unknown.
     pub fn diagAt(self: TranHook, ckt: *root.Circuit, slot: u32) f64 {
         return if (self.has_charge) ckt.gcAt(self.c.ag0, slot) else ckt.g_vals[slot];
     }
 };
 
-/// Integrate from caller-owned x, recording accepted samples into `waveform`.
+/// Integrates from the operating point in `x` to options.t_stop, recording
+/// accepted points at t >= t_start into `waveform`. On return `x` holds the
+/// last accepted solution. `allocator` backs per-run scratch only.
 pub fn simulate(
     ckt: *root.Circuit,
     x: []f64,
@@ -82,9 +81,9 @@ pub fn simulate(
     const x_try = try allocator.alloc(f64, n);
     defer allocator.free(x_try);
 
-    // Charge state: dynamic current i_prev and a charge-history ring
-    // [cur, prev, prev2, prev3] for the companion residual + trap LTE.
-    // Slot 0 receives the charge at each converged attempt; the solve only reads slots 1..3.
+    // Row-plane charge state: the dynamic current and the charge ring
+    // [cur, prev, prev2, prev3]. Slot 0 takes the charge of each converged
+    // attempt; the companion residual reads slots 1 and 2.
     var a_vals: []f64 = &.{};
     var i_prev: []f64 = &.{};
     var q_hist: [4][]f64 = .{ &.{}, &.{}, &.{}, &.{} };
@@ -92,38 +91,28 @@ pub fn simulate(
         allocator.free(i_prev);
         for (q_hist) |q| allocator.free(q);
     };
-    // Per-device-STATE LTE. ngspice calls CKTterr once per device charge state
-    // and mins over states, then over devices (ckttrunc.c, captrunc.c,
-    // bjttrunc.c, mos1trun.c); this ran it once per matrix ROW off the summed q
-    // plane. Co-moving charges on one node add their divided differences, so
-    // the row slope is not any real state's: on tline/txl2_3_line node 168
-    // carries a 7.398 fF load cap plus two MOS gate charges, the row reads
-    // 7.498 fF, and the post-breakpoint step seed comes out 1.3% short.
+
+    // The LTE runs per device charge state, as ngspice's CKTterr does
+    // (ckttrunc.c and the per-device trunc routines), not per matrix row:
+    // charges that share a node add their divided differences, so a row's
+    // slope belongs to no real state. The device tape (`buildTapes`,
+    // rhs_idx[id*n_u + ru]) indexes the states, and the host keeps a second
+    // history over it. The companion residual still integrates the row plane.
     //
-    // The device tape already carried the per-contribution identity —
-    // `buildTapes` writes rhs_idx[id*n_u + ru], a dense (instance, unknown)
-    // array whose VALUE is the row — so the host keeps a second history over
-    // that index space and reduces over it instead. Purely additive: the
-    // companion residual still integrates the summed plane, bit for bit.
-    //
-    // n_qt == 0 (nothing carries charge, or a GPU plane-stamp hook means the
-    // host batches never ran) falls back to the row plane — same kernel, same
-    // formula, and the scalar oracle the tape path is differenced against.
-    // ZP_NO_QTAPE forces the per-row fallback on a live binary. Not decoration:
-    // it is the A/B that says whether a fixture's grid moved because of THIS
-    // controller or because of something else, and `n_qt` in the stats line
-    // says whether the tape is live at all. Setup-path getenv, never hot.
+    // n_qt == 0 (no charge, or a GPU plane-stamp hook that bypasses the host
+    // batches) runs the same kernel over the row plane. ZP_NO_QTAPE forces
+    // that fallback for A/B runs; `n_qt` in the stats line says which is live.
     const n_qt: usize = if (has_charge and std.c.getenv("ZP_NO_QTAPE") == null) ckt.qTapeLen() else 0;
-    // Coupled inductors: ngspice truncates ONE state per inductor, INDflux =
-    // L·i + Σ M·i_other (indload.c:72-76; MUT has no trunc routine). The tape
-    // holds L·i and each M·i as separate states, which bind where INDflux
-    // does not (device_kinduc 51.7x). With a K card, `lteSnap` zeroes the
-    // inductor and kinduc tape spans (a flat zero history never binds) and
-    // appends the row plane at every current row: an inductor's branch row
-    // sums exactly its INDflux. Circuits without a K card are unchanged.
+    // Coupled inductors: ngspice truncates one state per inductor, INDflux =
+    // L*i + sum M*i_other (indload.c:72-76; MUT has no trunc routine). The
+    // tape holds L*i and each M*i as separate states, which bind where
+    // INDflux does not. With a K card, `lteSnap` zeroes the inductor and
+    // kinduc tape spans (a flat zero history never binds) and appends the row
+    // plane at every current row, since an inductor's branch row sums exactly
+    // its INDflux.
     // ponytail: every current row is appended (V-source rows carry no charge
-    // and stay inert); take only the inductors' rows once Circuit exposes
-    // the tape's rhs_idx.
+    // and stay inert); take only the inductors' rows once Circuit exposes the
+    // tape's rhs_idx.
     const lte_rows: []u32 = rows: {
         if (n_qt == 0) break :rows &.{};
         for (ckt.batches) |b| {
@@ -158,13 +147,11 @@ pub fn simulate(
         allocator.free(qt_i_prev);
         for (qt_hist) |q| allocator.free(q);
     };
-    // uic: op.solve never ran, so nothing has put the devices in a defined
-    // static state. It normally does three things this transient now owes:
-    // latch power-on FSM state under `initial_step` (§5.10.2 — the OP is the
-    // first step of the analysis; with uic the transient is), commit that
-    // latch, and leave a static kind behind for the charge seeding below.
-    // .ic, not .dc: the uic start IS the transient's ic phase, so waveform
-    // sources evaluate at t = 0 (analysis("tran") also true there).
+
+    // uic skipped op.solve, so do its device bookkeeping here: latch power-on
+    // FSM state under `initial_step` (§5.10.2), commit it, and leave a static
+    // kind for the charge seeding below. `.ic`, not `.dc`: the uic start is
+    // the transient's ic phase, so waveform sources evaluate at t = 0.
     if (options.uic) {
         ckt.setSimState(.{ .kind = .ic, .initial_step = true });
         _ = ckt.stateCtl(.commit);
@@ -182,75 +169,57 @@ pub fn simulate(
             root.zeroSimd(qt_i_prev);
             for (&qt_hist) |*q| q.* = try allocator.alloc(f64, n_lt);
         }
-        // Deliberately NOT preceded by setSimState: q_prev must be the charge
-        // the OPERATING POINT saw, so this seeding eval runs in the static
-        // state op.solve left behind (t = 0, dt = 0, analysis "dc"). The first
-        // loop iteration below is what switches the devices into "tran".
+        // No setSimState first: q_prev must be the charge the operating point
+        // saw, so this eval runs in the static state op.solve left behind.
         ckt.eval(x, 0);
-        // Seed the whole history with q(0): divided differences over the
-        // flat history vanish, so LTE control runs from the first step.
+        // A flat q(0) history makes every divided difference vanish, so LTE
+        // control runs from the first step.
         simdCopy(q_hist[1], ckt.q_vec[0..n]);
         simdCopy(q_hist[2], ckt.q_vec[0..n]);
         simdCopy(q_hist[3], ckt.q_vec[0..n]);
-        // Same seeding on the per-state tape, off the same eval.
         if (n_qt > 0) {
             lteSnap(ckt, qt_hist[1], lte_rows);
             simdCopy(qt_hist[2], qt_hist[1]);
             simdCopy(qt_hist[3], qt_hist[1]);
         }
     }
-    // LTE reads the per-device-STATE history when the tape is live and the
-    // per-row one when it is not. Same kernel, same formula, same acceptance
-    // test, only the length changes, which is why the n_qt == 0 path is a
-    // genuine scalar oracle and not a second implementation. The pointer sees
-    // the ring rotation below.
+    // The LTE history: per state when the tape is live, per row otherwise.
+    // Same kernel either way, so the row path is the scalar oracle for the
+    // tape path. The pointer follows the ring rotation.
     const lte_hist: *[4][]f64 = if (n_qt > 0) &qt_hist else &q_hist;
     const lte_ip: []const f64 = if (n_qt > 0) qt_i_prev else i_prev;
 
-    // Seed absdelay rings with the operating point: commitStates drives the
-    // §4.5.7 zHistPush, whose first push fills the WHOLE ring with (0, v_op).
-    // Without it the first Newton solve queries an all-zero ring and every
-    // delay line reads 0 V for t < td — a false transient off the DC state.
-    // Must run under kind=.tran: the generated core only computes the delay
-    // operators' input expressions on the non-static branch (dt stays 0, so
-    // zAbsdelay itself is still the DC identity).
+    // Seed absdelay rings with the operating point: the first §4.5.7
+    // zHistPush fills the whole ring with (0, v_op), so no delay line reads
+    // 0 V for t < td. Needs kind = .tran, the only branch on which the
+    // generated core computes the delay inputs (dt = 0 keeps zAbsdelay the
+    // DC identity).
     ckt.setSimState(.{ .t = 0, .dt = 0, .kind = .tran, .initial_step = true });
     _ = ckt.commitStates(x);
 
-    // ngspice tmax default is (tstop-tstart)/50; explicit tmax replaces it.
-    // Clamp to minimum delay for history-aware timestep control.
+    // ngspice tmax defaults to (tstop - tstart)/50; the circuit's minimum
+    // delay caps it further.
     var effective_dt_max = options.dt_max orelse options.t_stop / 50.0;
     if (ckt.minDelay()) |td_min| effective_dt_max = @min(effective_dt_max, td_min);
-    // ngspice CKTminBreak: breakpoints closer than this to the current time
-    // (or to each other) are merged/skipped (dctran.c:636, cktsetbk.c:45).
-    //
-    // This read `5e-5 * effective_dt_max`, which is optran.c:419's constant —
-    // the OPERATING-POINT transient's rule, not the analysis's. The transient's
-    // own is traninit.c:36 + dctran.c:170: delmin = 1e-11·maxStep and
-    // CKTminBreak = 10·delmin, i.e. 500000x finer. Anything shorter than the
-    // wrong value was merged away, so a deck with 1 ns PULSE corners and
-    // tmax = 5 us (min_break 250 ps) dropped the corner at t = 1 ns entirely:
-    // the grid stepped 0.8 ns -> 1.6 ns straight OVER the edge where ngspice
-    // clamps and lands on it exactly. That is the whole "edge-phase" failure
-    // class — the comparator was reading espice's missing sample, not a model.
+    // The analysis' own CKTminBreak: delmin = 1e-11*maxStep and minBreak =
+    // 10*delmin (traninit.c:36, dctran.c:170). Breakpoints closer than this
+    // to the current time or to each other merge (dctran.c:636,
+    // cktsetbk.c:45). optran.c:419's 5e-5*tmax is the OP transient's rule and
+    // would merge away ns-scale source corners.
     const delmin = 1e-11 * effective_dt_max;
     const min_break = 10.0 * delmin;
-    // espice's own state-flip resolution floor — how sharply a switch crossing
-    // must land before the step is accepted. Deliberately NOT min_break: it is
-    // a Newton/FSM tolerance, has no ngspice counterpart, and the switch
-    // fixtures are tuned against this value.
+    // How sharply a device state flip must land before the step is accepted.
+    // An espice Newton/FSM tolerance with no ngspice counterpart; the switch
+    // fixtures are tuned against it, so it is not min_break.
     const state_eps = 5e-5 * effective_dt_max;
 
-    // Delayed breakpoint echoes: ngspice traload registers a breakpoint at
-    // t + td whenever a transmission-line input has a sharp edge, so the
-    // integrator lands exactly on the arriving wavefront. Approximation:
-    // every LANDED breakpoint re-emits one echo at t + td; echo landings
-    // re-emit in turn, so reflections cascade (t + 2td, 3td, ...).
-    // ponytail: one td (circuit min delay) for all history devices; enumerate
-    // per-device delays if mixed-td circuits still show edge smear.
+    // Delayed breakpoint echoes, standing in for ngspice traload's t + td
+    // breakpoint on a sharp line input: every landed breakpoint re-emits one
+    // echo at t + td, and echo landings re-emit in turn (t + 2td, 3td, ...).
+    // ponytail: one td (the circuit's minimum delay) for every history
+    // device; enumerate per-device delays if mixed-td circuits show edge smear.
     var echo_bps: [256]f64 = undefined;
     var n_echo: usize = 0;
-    // Generated absdelay models declare the delay used for wavefront echoes.
     const echo_td: ?f64 = ckt.minDelay();
     if (echo_td) |td_| {
         // t = 0 is itself a breakpoint (source edges often start there).
@@ -268,42 +237,35 @@ pub fn simulate(
         }
     }.call;
 
-    // ngspice tstart suppresses OUTPUT, never the solve: t = 0 through
-    // t_start is integrated with the same history and simply not recorded.
+    // tstart suppresses output, never the solve: [0, t_start) is integrated
+    // with full history and not recorded.
     if (options.t_start <= 0) try waveform.record(0, x, probes);
 
     var cur: []f64 = x;
     var trial: []f64 = x_try;
     var t: f64 = 0;
-    // ngspice dctran first step: min(tstop/100, tstep)/10 at init, clamped to
-    // tmax (OUTSIDE the min — dctran.c:134 + the resume-loop maxStep clamp),
-    // then /10 again at the t = 0 breakpoint landing (`firsttime` cut) — net
-    // /100. Operand order matters: folding tmax into the min shifts the whole
-    // accepted grid by a constant phase on every tmax < tstep deck (measured
-    // 1 ps vs ngspice on tline/txl1, ringing down the TXL slow pole for 18 ns
-    // after every wavefront). Never past the first breakpoint — a 1ns pulse
-    // edge at t~0 must not be skipped.
-    // dctran.c:578-586: the t = 0 breakpoint clamp (0.1 * breaks[1]) comes
-    // BEFORE the firsttime /10, so a binding breakpoint keeps it.
+    // ngspice's first step: min(tstep, tstop/100)/10 clamped to tmax outside
+    // the min (dctran.c:134), then the t = 0 breakpoint clamp 0.1*breaks[1]
+    // (dctran.c:578-586), then the firsttime /10. The operand order sets the
+    // phase of the whole accepted grid.
     var dt: f64 = @min(@min(options.dt_init, options.t_stop / 100.0) / 10.0, effective_dt_max);
     if (nextBp(ckt, echo_bps[0..n_echo], min_break)) |bp0| dt = @min(dt, 0.1 * bp0);
     dt /= 10.0;
     if (options.t_start > 0 and dt > options.t_start) dt = options.t_start;
-    // dctran.c:312: CKTdeltaOld[] starts at CKTmaxStep, not the first dt —
-    // the first divided differences are ngspice's only with this seed.
+    // CKTdeltaOld[] starts at CKTmaxStep (dctran.c:312), which the first
+    // divided differences read.
     var dt_prev: f64 = effective_dt_max;
     var dt_prev2: f64 = effective_dt_max;
     var steps: u32 = 0;
     const stats_on = std.c.getenv("ZP_TRAN_STATS") != null;
     var st: Stats = .{};
-    // Order control (ngspice-style): start at BE, promote to configured
-    // method when LTE says it's safe. Drop back to BE at breakpoints to
-    // suppress trap companion ringing after source-edge discontinuities.
+    // Order control: start at BE, promote to the configured method when the
+    // LTE allows, and drop back to BE at breakpoints so trap does not ring
+    // after a source edge.
     var use_be: bool = true;
-    // Breakpoint we clamped dt_next toward; landing is |t - bp| <= min_break
-    // checked after the step is ACCEPTED (a rejected clamped step must not
-    // leave a stale landing flag behind). bp_save_dt is spice3's CKTsaveDelta:
-    // the dt the LTE wanted before the breakpoint clamp shortened it.
+    // The breakpoint dt_next was clamped toward. Landing is tested after the
+    // step is accepted, so a rejected clamped step leaves no stale flag.
+    // bp_save_dt is spice3's CKTsaveDelta, the dt the LTE wanted before the clamp.
     var bp_target: ?f64 = null;
     var bp_save_dt: f64 = 0;
     var attempted_dt = dt;
@@ -318,15 +280,12 @@ pub fn simulate(
             .accepted = steps,
         });
         attempted_dt = dt;
-        // Publish the point this attempt is aiming at BEFORE anything evaluates
-        // it: converger.run below drives eval (§9.10 `$abstime`, `ddt`) and
-        // updateStates, and a generated device reads Instance.abstime, not the
-        // `t` argument. Per ATTEMPT, not per accepted point — a rejected step
-        // `continue`s back to here with the shrunken dt, so the last write
-        // before an accept is always the dt that was actually accepted. Still
-        // O(instances) per timepoint: it is outside the Newton loop.
-        // §5.10.2 initial_step = the first step of the analysis; final_step =
-        // the step that lands on t_stop (dt is clamped to it at the bottom).
+        // Publish the point this attempt aims at before anything evaluates
+        // it: generated devices read Instance.abstime (§9.10 `$abstime`,
+        // `ddt`), not the `t` argument. A rejected step comes back here with
+        // the shrunken dt, so the last write before an accept is the accepted
+        // dt. §5.10.2: initial_step is the analysis' first step, final_step
+        // the one that lands on t_stop.
         ckt.setSimState(.{
             .t = t + dt,
             .dt = dt,
@@ -336,7 +295,6 @@ pub fn simulate(
         });
         const eff_method: Method = if (use_be) .backward_euler else options.method;
         const cf = integrator.coeffs(eff_method, dt, dt_prev);
-        const alpha_val = cf.ag0;
         const hook = TranHook{
             .method = eff_method,
             .c = cf,
@@ -359,16 +317,14 @@ pub fn simulate(
 
         if (!nr.converged) {
             st.rej_newton += 1;
-            // Rejected point: restore FSM devices to the last accepted state.
+            // Restore FSM devices to the last accepted state.
             _ = ckt.stateCtl(.revert);
-            // dctran.c:815, :823: cut dt by 8 AND drop to order 1 in one
-            // retry — no same-dt BE attempt first.
+            // Cut dt by 8 and drop to order 1 in one retry (dctran.c:815, :823).
             if (!use_be) st.order_drops += 1;
             use_be = true;
             dt /= 8.0;
             if (dt < options.dt_min) {
-                // The most interesting exit — say where it died. (The stats
-                // block at the bottom is skipped by this return.)
+                // The stats block at the bottom is skipped by this return.
                 if (stats_on) std.debug.print(
                     "tran-stats: DT UNDERFLOW (newton) at t={e:.6} dt={e:.3} accepted={d} attempts={d} nr_iters={d}\n",
                     .{ t, dt, steps, st.attempts, st.nr_iters },
@@ -378,11 +334,9 @@ pub fn simulate(
             continue;
         }
 
-        // Device state flip (switch crossed its threshold inside this step):
-        // reject and shrink so the conductance discontinuity lands sharp at
-        // the crossing (within state_eps) instead of smeared across dt.
-        // ngspice's raw output samples always straddle the true crossing, so
-        // a sharp edge interpolates correctly onto its grid.
+        // A device state flipped inside this step (a switch crossed its
+        // threshold): reject and shrink so the conductance step lands within
+        // state_eps of the crossing instead of smeared across dt.
         if (dt > state_eps and ckt.stateCtl(.query)) {
             st.rej_state += 1;
             _ = ckt.stateCtl(.revert);
@@ -391,36 +345,22 @@ pub fn simulate(
             continue;
         }
 
-        // §9.17.2 `$bound_step`: read after the accepted step, applied to the
-        // NEXT one. Not folded into `effective_dt_max` above, because that is
-        // computed once before the loop and every device's bound is still at
-        // its `inf` default until an `updateState` has run.
-        //
-        // Nothing consumed this before. `min_delay` looks like the same
-        // channel but is not: it reads `D.delays`, a decl no VerA-generated
-        // device has, so it was null for every model here. tline's
-        // `$bound_step(0.25*td)` was computed and stored and read by nobody,
-        // which is why a TD=2 ns line responded at t=1.5 ns — the absdelay
-        // history is a fixed 32-entry ring, and a query older than the ring
-        // silently returns the newest sample instead of the delayed one.
-        // dctran.c firsttime: the first accepted point skips CKTtrunc
-        // entirely ("no check on first time point") — dt REPEATS, it neither
-        // grows nor rejects, with or without charge. Without this the
-        // accepted grid runs one first-dt ahead of ngspice's for the whole
-        // transient.
+        // The first accepted point skips CKTtrunc (dctran.c firsttime), so dt
+        // repeats. §9.17.2 `$bound_step` is read after the step and applies
+        // to the next one; devices only set it in `updateState`, so it cannot
+        // be folded into effective_dt_max.
         var dt_next = if (steps == 0) dt else @min(dt * 2.0, effective_dt_max);
         if (ckt.boundStep()) |bs| dt_next = @min(dt_next, bs);
 
         if (has_charge) {
-            // CKTterr reads the charge the published point carries. `newton()`
+            // CKTterr reads the charge of the published point. The converger
             // returns x_k+1 while the planes hold q(x_k) (or a JFNK matvec's
-            // x), one correction back; read them at the solution so the LTE,
-            // advanceCurrent and the next residual all see q(trial). One
-            // charge-only pass per converged attempt.
+            // x), so re-read q at the solution: the LTE, advanceCurrent and
+            // the next residual all see q(trial).
             ckt.evalQ(trial, t + dt);
             simdCopy(q_hist[0], ckt.q_vec[0..n]);
             if (n_qt > 0) lteSnap(ckt, qt_hist[0], lte_rows);
-            // Captured before the ring rotation at the bottom of this block.
+            // Taken before the ring rotation below.
             const lh = lte_hist.*;
             const lq: [4][]const f64 = .{ lh[0], lh[1], lh[2], lh[3] };
             const lte: integrator.LteIn = .{
@@ -433,19 +373,15 @@ pub fn simulate(
                 .trtol = options.tol.trtol,
             };
 
-            // First accepted point: no CKTtrunc (see dt_next above).
             if (steps > 0) {
                 const del = integrator.stepBound(eff_method, eff_method, lq, lte_ip, cf, lte);
                 if (del < 0.9 * dt) {
                     st.rej_lte += 1;
                     _ = ckt.stateCtl(.revert);
-                    // ngspice retries at the LTE-suggested dt (dctran.c:966
-                    // `CKTdelta = newdelta`) at the SAME order — only a Newton
-                    // failure drops to order 1 (:823) — and not a halving ladder: one reject
-                    // lands the right dt, so the step phase through an edge
-                    // tracks ngspice's instead of drifting a half-octave
-                    // (digital/clamp's 0.48 ns final edge chord). The branch
-                    // guard makes del < 0.9*dt, so this shrinks every retry.
+                    // Retry at the LTE's dt and the same order
+                    // (dctran.c:966 `CKTdelta = newdelta`); only a Newton
+                    // failure drops the order. del < 0.9*dt here, so every
+                    // retry shrinks.
                     dt = del;
                     if (dt < options.dt_min) {
                         if (stats_on) std.debug.print(
@@ -456,20 +392,13 @@ pub fn simulate(
                     }
                     continue;
                 }
-                // ngspice caps growth at 2x per accepted step — without it a
-                // post-breakpoint shrink jumps straight back to a huge dt and
-                // starves edge ramps of points.
+                // Growth capped at 2x per accepted step, as in ngspice.
                 dt_next = @min(@max(del, options.dt_min), 2.0 * dt, effective_dt_max);
             }
 
-            // Promote BE → configured method when LTE-based dt is stable
-            // (dctran.c:901-913): recompute the trunc at order 2 and ADOPT
-            // min(2·dt, del₂) as the next dt EITHER WAY — ngspice's
-            // `CKTdelta = newdelta` keeps the order-2 result even when the
-            // order drops back to 1. Keeping the order-1 del here instead
-            // left the post-breakpoint ramp a half-octave behind ngspice's
-            // (ltra1_1_line: 37 ps grid-phase offset by 32.3 ns, 1.02e-2 on
-            // the delayed wavefront at 33.04 ns).
+            // Order promotion (dctran.c:901-913): recompute the trunc at
+            // order 2 and adopt min(2*dt, del2) as the next dt whether or not
+            // the order changes, as ngspice's `CKTdelta = newdelta` does.
             if (steps > 0 and use_be) {
                 const trial_del = integrator.stepBound(options.method, eff_method, lq, lte_ip, cf, lte);
                 const nd2 = @min(2.0 * dt, trial_del);
@@ -478,47 +407,36 @@ pub fn simulate(
                 if (ckt.boundStep()) |bs| dt_next = @min(dt_next, bs);
             }
 
-            // Dynamic current update — must match the method actually used.
-            // Both index spaces run the SAME recurrence: ngspice keeps the
-            // dynamic current in CKTstates[0][qcap+1], i.e. per state, and
-            // CKTterr's volttol reads it there.
+            // The dynamic current under the method actually used. Both index
+            // spaces run it: ngspice keeps it per state in
+            // CKTstates[0][qcap+1], where CKTterr's volttol reads it.
             integrator.advanceCurrent(eff_method, i_prev, q_hist[0], q_hist[1], q_hist[2], cf);
             if (n_qt > 0)
                 integrator.advanceCurrent(eff_method, qt_i_prev, qt_hist[0], qt_hist[1], qt_hist[2], cf);
 
-            const tail = q_hist[3];
-            q_hist[3] = q_hist[2];
-            q_hist[2] = q_hist[1];
-            q_hist[1] = q_hist[0];
-            q_hist[0] = tail;
-            if (n_qt > 0) {
-                const qt_tail = qt_hist[3];
-                qt_hist[3] = qt_hist[2];
-                qt_hist[2] = qt_hist[1];
-                qt_hist[1] = qt_hist[0];
-                qt_hist[0] = qt_tail;
-            }
+            // [cur, prev, prev2, prev3] -> [stale, cur, prev, prev2].
+            std.mem.rotate([]f64, &q_hist, 3);
+            if (n_qt > 0) std.mem.rotate([]f64, &qt_hist, 3);
             dt_prev2 = dt_prev;
             dt_prev = dt;
         }
 
-        // ponytail: stdlib swaps the slices; accepted states need no copy.
+        // ponytail: swap the slices; accepted states need no copy.
         std.mem.swap([]f64, &cur, &trial);
         t += dt;
         steps += 1;
         _ = ckt.stateCtl(.commit);
 
-        // If we just landed on a breakpoint, drop to BE + resume with
-        // 0.1*min(saveDelta, gap to next break) — spice3 dctran's resume
-        // rule, which resolves a paired edge (rise start/end 1ns apart)
-        // instead of stepping over it. The history is NOT flushed — the
-        // promotion check above re-promotes to trap on the next accepted step.
+        // Landed on a breakpoint: drop to BE and resume at
+        // 0.1*min(saveDelta, gap to the next break), spice3 dctran's rule,
+        // which resolves paired edges instead of stepping over them. The
+        // history is kept; the promotion check re-promotes next step.
         if (bp_target) |bp| {
             if (@abs(t - bp) <= min_break) {
                 st.bp_landings += 1;
                 use_be = true;
-                // Re-emit the landed breakpoint one line-delay later (see
-                // echo_bps above). Dedupe within min_break; drop when full.
+                // Re-emit one line delay later; dedupe within min_break and
+                // drop when the table is full.
                 if (echo_td) |td_| {
                     const e = t + td_;
                     if (e < options.t_stop and n_echo < echo_bps.len) {
@@ -542,48 +460,35 @@ pub fn simulate(
             bp_target = null;
         }
 
-        // §4.5.2 accepted-step bookkeeping for devices whose state is not
-        // revertible. Here — once per ACCEPTED point, beside the host's own
-        // history record — and not inside the Newton loop, which ran it per
-        // iteration including every rejected attempt. See `Hooks.commit_state`.
+        // §4.5.2 bookkeeping for non-revertible device state, once per
+        // accepted point (`Hooks.commit_state`).
         _ = ckt.commitStates(cur);
 
-        // Safety net for stateful-charge devices: if a state advance above
-        // (stateCtl commit, commitStates) moved any device's reported q away
-        // from the last Newton assemble, re-read it so q_prev is what the
-        // NEXT step's residual reproduces at x = cur. Left open, that gap
-        // opens the next attempt on F = α·(q_committed − q_recorded), which
-        // DOUBLES every dt halving (mesa_oscillator wedged at t≈350 ps this
-        // way under the retired freeze_grad latch). VerA's path-integrated
-        // latches commit value-continuously — pq+wq in stateCtl equals the
-        // assemble's fadd(pq, D) bit for bit. The i_prev correction is the same
-        // α·Δq for both methods.
-        //
-        // The charge read before the LTE (above) already put q_hist at
-        // q(cur), so Δq here is only what the commit moved. It is not zero:
-        // dropping this re-read changes the bytes of txl2_3_line,
-        // hfet_inverter, mesa_oscillator and mos6_inverter. `evalQ` is the
-        // charge-only pass: same `D.q`, same scatter, same bits as `eval`.
+        // Stateful-charge devices: the commits above can move a device's q
+        // away from what q_hist recorded. Re-read it so the next residual
+        // starts from q(cur); otherwise it opens on alpha*(q_committed -
+        // q_recorded), which doubles with every dt halving. The i_prev
+        // correction is the same alpha*dq for every method. dq is not zero
+        // after the pre-LTE re-read: dropping this changes the output of
+        // txl2_3_line, hfet_inverter, mesa_oscillator and mos6_inverter.
+        // `evalQ` computes the same q bits as `eval`, charges only.
         if (has_charge and ckt.has_state_q) {
             ckt.evalQ(cur, t);
-            integrator.rebaseCurrent(W, i_prev, ckt.q_vec[0..n], q_hist[1], alpha_val);
+            integrator.rebaseCurrent(W, i_prev, ckt.q_vec[0..n], q_hist[1], cf.ag0);
             simdCopy(q_hist[1], ckt.q_vec[0..n]);
-            // The per-state tape takes the SAME two writes on the same Δq.
             if (n_qt > 0) {
                 lteSnap(ckt, qt_hist[0], lte_rows);
-                integrator.rebaseCurrent(W, qt_i_prev, qt_hist[0], qt_hist[1], alpha_val);
-                // Swap, not copy: qt_hist[0] is the ring's scratch slot (the
-                // rotation above just parked the stale tail there) and the next
-                // accepted attempt's charge read overwrites it before anything reads it.
+                integrator.rebaseCurrent(W, qt_i_prev, qt_hist[0], qt_hist[1], cf.ag0);
+                // Swap, not copy: slot 0 is the ring's scratch slot, and the
+                // next accepted attempt overwrites it before any read.
                 std.mem.swap([]f64, &qt_hist[0], &qt_hist[1]);
             }
         }
 
         if (t >= options.t_start) try waveform.record(t, cur, probes);
 
-        // Breakpoint handling: clamp dt to land on the next breakpoint,
-        // skipping breaks within min_break of the current time (ngspice
-        // CKTminBreak merge of near-coincident breakpoints).
+        // Clamp dt to land on the next breakpoint, skipping those within
+        // min_break of now (ngspice CKTminBreak merge).
         if (nextBp(ckt, echo_bps[0..n_echo], t + min_break)) |bp| {
             const dt_to_bp = bp - t;
             if (dt_to_bp < dt_next) {
@@ -593,10 +498,8 @@ pub fn simulate(
             }
         }
 
-        // Land one step exactly on t_start so the first PRINTED point is at
-        // t_start rather than wherever LTE happened to put the step after it
-        // (ngspice does this with a breakpoint). Not a discontinuity: no
-        // order drop, no bp_target, nothing else changes.
+        // Land exactly on t_start so the first printed point is there, as
+        // ngspice does with a breakpoint. Not a discontinuity: no order drop.
         if (t < options.t_start and t + dt_next > options.t_start) dt_next = options.t_start - t;
 
         dt = dt_next;
@@ -618,13 +521,13 @@ pub fn simulate(
         );
     }
 
-    // Ensure caller's buffer has the final result
     if (cur.ptr != x.ptr) simdCopy(x, cur);
     return .{ .completed = t >= options.t_stop, .steps = steps, .t_final = t };
 }
 
-/// Contract entry: integrate from the operating point and format the
-/// waveform point-major: (time, probes...) per row.
+/// Contract entry: integrate from the operating point and return the
+/// waveform as point-major rows (time, probes...). A run that stops short of
+/// t_stop is error.TimestepTooSmall, as in ngspice.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
     const scratch = ctx.scratch_allocator;
@@ -635,8 +538,6 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     var wf = try Waveform.init(scratch, @intCast(ctx.probes.len), initialCapacity(opts));
     defer wf.deinit();
-    // ngspice treats a truncated transient as a hard failure ("timestep too
-    // small") — never return a silently-truncated waveform.
     const sim = try simulate(ctx.circuit, x, ctx.probes, &wf, opts, scratch);
     if (!sim.completed) return error.TimestepTooSmall;
 
