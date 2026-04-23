@@ -1,25 +1,13 @@
-//! Harmonic Balance: Newton on the spectral residual. Time-domain device
-//! evals (IDFT samples) meet frequency-domain charge terms (j*omega*h*C);
-//! one dense frequency-domain Jacobian per iteration.
-//!
-//! Algorithm (from pss-shooting-harmonic-balance.md §3):
-//!   X = 0  (Fourier coefficients: [dc, cos_1, sin_1, ..., cos_K, sin_K] per node)
-//!   for iter:
-//!     x_td = IDFT(X)                    — 2K+1 time samples per node
-//!     for each sample k: eval(x_td[:,k]) at t_k, analysis("tran")
-//!                         — fills F (source waveform included) and analytic G
-//!                         (k==0: capture C)
-//!     F = DFT(f_td) + spectral charge terms (w_h C X_h)
-//!     if max|F| < hb_tol: return X
-//!     J = spectral(G(t)) blocks + (+-w_h C) skew blocks
-//!     solve dense J dX = -F;  X += dX
+//! Harmonic balance: Newton on the spectral residual with a backtracking
+//! line search. Each iteration IDFTs the unknowns to 2K+1 time samples,
+//! evaluates the circuit at each (sources included), DFTs the residual and
+//! adds the dq/dt terms, then solves one dense harmonic-convolution Jacobian.
 const std = @import("std");
 const root = @import("../types.zig");
 const simdCopy = root.copySimd;
 const num = @import("core").numerics;
 const converger = @import("solver").converger;
-const solvers = @import("solver");
-const dense_lu = solvers.dense_lu;
+const dense_lu = @import("solver").dense_lu;
 
 const W = std.simd.suggestVectorLength(f64) orelse 8;
 const V = @Vector(W, f64);
@@ -28,20 +16,22 @@ pub const Options = @import("core").query.Hb;
 
 pub const SolveResult = @import("pss.zig").SolveResult;
 
-/// Magnitude of the k-th harmonic (k=0 is DC) from one probe's spectrum
-/// slice [dc, cos_1, sin_1, ..., cos_N, sin_N] (length 2*n_harmonics+1).
-pub fn magnitude(spectrum: []const f64, k: u16) f64 {
-    if (k == 0) return @abs(spectrum[0]);
+/// The shortest step the line search takes before it stops shortening.
+const min_step: f64 = 1.0 / 1024.0;
+
+/// Magnitude of harmonic k >= 1 from one probe's spectrum
+/// [dc, cos_1, sin_1, ..., cos_K, sin_K].
+fn magnitude(spectrum: []const f64, k: u16) f64 {
     const c = spectrum[2 * @as(usize, k) - 1];
     const s = spectrum[2 * @as(usize, k)];
     return @sqrt(c * c + s * s);
 }
 
-/// Harmonic Balance solve. The excitation is whatever the deck's source cards
-/// put in the residual at each time sample — see the eval loop below.
-///
-/// Caller owns `spectra`: probes.len * (2*n_harmonics+1) flat, probe-major —
-/// spectra[p*nf..][0..nf] = [dc, cos_1, sin_1, ..., cos_N, sin_N].
+/// Harmonic balance from the DC operating point; the excitation is whatever
+/// the deck's sources stamp at each time sample. The caller owns `spectra`,
+/// probes.len * (2*n_harmonics+1) probe-major:
+/// spectra[p*nf..][0..nf] = [dc, cos_1, sin_1, ..., cos_K, sin_K].
+/// Memory is O((n*nf)^2) for the dense Jacobian.
 pub fn solve(
     ckt: *root.Circuit,
     probes: []const u32,
@@ -74,7 +64,7 @@ pub fn solve(
         nf * nh + // basis_sin
         n + // x_sample (gather buffer for device eval)
         total_unknowns + // x_prev (line-search rewind point)
-        2 * (nh + 1); // gc / gs: one node pair's G(t) spectrum
+        2 * (nh + 1); // gc / gs: one slot's G(t) spectrum
 
     const arena = try allocator.alloc(f64, total_f64);
     defer allocator.free(arena);
@@ -114,9 +104,8 @@ pub fn solve(
 
     root.zeroSimd(x_hat);
 
-    // DC seed: solve the DC operating point via converger.run + EvalHook.
-    // Seeding x_hat[dc] from the true DC op dramatically reduces HB iterations
-    // for circuits with a nontrivial bias point.
+    // Seed the DC coefficients with the DC operating point, which cuts the
+    // iteration count on biased circuits.
     {
         const ws = try ckt.workspace();
         ckt.setSimState(.{ .kind = .dc });
@@ -125,7 +114,7 @@ pub fn solve(
         for (0..n) |node| x_hat[node * nf] = x_sample[node];
     }
 
-    // Basis: harmonic-major layout — basis_cos[hi * nf + k], basis_sin[hi * nf + k]
+    // Harmonic-major basis: basis_cos[hi * nf + k] = cos((hi+1)*w0*t_k).
     for (0..nh) |hi| {
         const h = hi + 1;
         for (0..nf) |k| {
@@ -136,19 +125,15 @@ pub fn solve(
         }
     }
 
-    // ponytail: GPU status for HB —
-    //   HB inner loop (DFT sandwich: IDFT → device eval → DFT) stays CPU.
-    //   GPU upgrade path: batched device eval kernel over nf time samples (each independent),
-    //   plus cuSOLVER dense LU for the total_unknowns×total_unknowns spectral Jacobian.
-    //   IDFT/DFT are also trivially parallel per (node, harmonic) element.
+    // ponytail: all on the CPU. The GPU path would batch the nf independent
+    // sample evals in one launch and factor the spectral Jacobian with
+    // cuSOLVER; the IDFT/DFT are parallel per (node, harmonic).
 
-    // Backtracking line search. Newton's full step overshoots badly once a
-    // source is actually applied — a diode sees the whole swing in one step and
-    // answers with exp(2/vt), so `hb/diode_rectifier_rc` ran the iteration
-    // limit out. The search reuses the loop's OWN residual evaluation rather
-    // than adding a second one: a step that made the residual worse (or
-    // non-finite, hence the negated comparison) is undone from `x_prev` and
-    // retried at half the length, and a step that helped earns the length back.
+    // Backtracking line search on the loop's own residual evaluation: a step
+    // that made the residual worse (or non-finite, hence the negated
+    // comparison) is undone from `x_prev` and retaken at half length, and a
+    // step that helped earns the length back. A full Newton step can hand a
+    // diode the whole source swing at once.
     var step: f64 = 1.0;
     var prev_residual: f64 = std.math.inf(f64);
     var retrying = false;
@@ -156,8 +141,7 @@ pub fn solve(
     var iter: u16 = 0;
     while (iter < options.max_iter) : (iter += 1) {
         if (iter != 0) try ckt.checkpoint(.{ .phase = .harmonic, .completed = iter });
-        // IDFT: Fourier coefficients -> time-domain samples (node-major: x_td[node * nf + k])
-        // ponytail: IDFT is trivially parallel per (node, k) — one GPU thread per element
+        // IDFT to node-major samples x_td[node * nf + k].
         for (0..n) |node| {
             const dc = x_hat[node * nf];
             const cos_base = node * nf + 1;
@@ -185,17 +169,11 @@ pub fn solve(
             }
         }
 
-        // Evaluate F(x(t_k)) at each time sample: one eval fills residual +
-        // analytic G plane; k=0 also serves as the DC sample for the C plane.
-        //
-        // Sample k IS the circuit at t_k = k*T/nf, and §4.6.1 only lets a
-        // source waveform exist while `analysis("tran")` is true. Both were
-        // missing: every sample was evaluated at t = 0 in whatever phase the
-        // shared operating point left behind, so a SIN/PULSE/PWL card answered
-        // with one DC value for the whole period and HB balanced an undriven
-        // circuit. The deck's excitation enters here and nowhere else.
-        // ponytail: nf evals are independent — GPU batch kernel dispatches all
-        // samples in one launch, upgrade path from serial ckt.eval loop
+        // Sample k is the circuit at t_k = k*T/nf in the transient phase,
+        // the only phase in which a source follows its waveform (§4.6.1).
+        // One eval fills the residual and the G plane; sample 0 also gives C.
+        // ponytail: the nf evals are independent; batch them on the GPU when
+        // HB needs it.
         for (0..nf) |k| {
             const t_k = period * @as(f64, @floatFromInt(k)) / nf_f;
             for (0..n) |node| x_sample[node] = x_td[node * nf + k];
@@ -205,13 +183,12 @@ pub fn solve(
             for (0..n) |node| q_td[node * nf + k] = ckt.q_vec[node];
             for (ckt.g_vals[0..nnz], 0..) |g, slot| g_td[slot * nf + k] = g;
             if (k == 0) {
-                // dQ/dx at the DC sample, straight off the analytic C plane
                 if (ckt.has_charge) ckt.denseC(c_mat) else root.zeroSimd(c_mat);
             }
         }
 
-        // DFT: time-domain residuals -> frequency domain
-        // Node-major f_td[node * nf + k] means contiguous vector loads over k
+        // DFT of the residual; node-major f_td makes each node's samples one
+        // contiguous run.
         for (0..n) |node| {
             const f_slice = f_td[node * nf ..][0..nf];
 
@@ -249,18 +226,11 @@ pub fn solve(
             }
         }
 
-        // Add frequency-domain charge terms: the (cos, sin) coefficients of
-        // dq/dt, from the DFT of q(t_k) sampled at every point — C(t0)·X was
-        // exact only for linear charge. In the basis the IDFT above uses,
-        //   q(t)     = a cos(w_h t) + b sin(w_h t)
-        //   dq/dt    = w_h*b cos(w_h t) - w_h*a sin(w_h t)
-        // so cos takes +w_h*Q_sin and sin takes -w_h*Q_cos. (The signs used
-        // to be the phasor pair, the CONJUGATE of this basis's a - jb: self-
-        // consistent with the Jacobian, so it converged on the time-reversed
-        // solution, invisible to a magnitude-only oracle but not to a
-        // rectifier's signed DC term.)
-        // ponytail: scalar O(n*nh*nf) projection, same order as the residual
-        // DFT above; vectorize with it if HB ever profiles hot.
+        // dq/dt from the DFT of q(t_k), exact for nonlinear charge. With
+        // q(t) = a cos(w_h t) + b sin(w_h t), dq/dt = w_h b cos - w_h a sin,
+        // so the cos row takes +w_h*Q_sin and the sin row -w_h*Q_cos.
+        // ponytail: scalar O(n*nh*nf) projection, the same order as the
+        // residual DFT; vectorize both if HB ever profiles hot.
         if (ckt.has_charge) for (0..n) |node| {
             const q_slice = q_td[node * nf ..][0..nf];
             for (0..nh) |hi| {
@@ -284,8 +254,8 @@ pub fn solve(
         }
 
         if (iter != 0 and !(max_residual <= prev_residual) and step > min_step) {
-            // The last step was too long: rewind and retake it shorter. `dx_hat`
-            // still holds that direction, so no Jacobian is rebuilt.
+            // Rewind and retake the last step at half length along the same
+            // `dx_hat`; no Jacobian rebuild.
             step *= 0.5;
             simdCopy(x_hat, x_prev);
             num.axpy(x_hat, step, dx_hat);
@@ -296,35 +266,27 @@ pub fn solve(
         if (!retrying) step = @min(step * 2.0, 1.0);
         retrying = false;
 
-        // The harmonic-convolution Jacobian. dF/dX is exactly the spectrum of
-        // G(t) convolved with the basis, and the product-to-sum identities turn
-        // that into DIFFERENCE and SUM terms:
+        // The harmonic-convolution Jacobian: dF/dX is the spectrum of G(t)
+        // convolved with the basis, and product-to-sum gives
         //
-        //   d F_ch / d a_m = ½(Gc[|h-m|] + Gc[h+m])
-        //   d F_ch / d b_m = ½(Gs[h+m]   + Gs[m-h])
-        //   d F_sh / d a_m = ½(Gs[h+m]   + Gs[h-m])
-        //   d F_sh / d b_m = ½(Gc[|h-m|] - Gc[h+m])
+        //   d F_ch / d a_m = 1/2 (Gc[|h-m|] + Gc[h+m])
+        //   d F_ch / d b_m = 1/2 (Gs[h+m]   + Gs[m-h])
+        //   d F_sh / d a_m = 1/2 (Gs[h+m]   + Gs[h-m])
+        //   d F_sh / d b_m = 1/2 (Gc[|h-m|] - Gc[h+m])
         //
-        // with Gc[0] = 2·mean(G), Gs[0] = 0, Gs[-d] = -Gs[d], and every index
-        // past nh truncated away (the box the analysis was asked for).
-        //
-        // Only the h = m diagonal and the h ↔ 0 column/row of this used to be
-        // built, which is a quasi-Newton matrix that carries NO coupling
-        // between two nonzero harmonics — the very term by which a nonlinearity
-        // generates them. It converged on the undriven circuit because there
-        // was nothing to generate; with the source applied, `hb/diode_clipper`
-        // and `hb/diode_rectifier_rc` ran the iteration limit out instead.
+        // with Gc[0] = 2*mean(G), Gs[0] = 0, Gs[-d] = -Gs[d], and indices past
+        // nh truncated. The h != m blocks are how a nonlinearity couples
+        // harmonics.
         root.zeroSimd(jac);
 
-        // Only the pattern's slots: a structurally zero (row, col) has an
-        // all-zero G(t), every projection of which is +0, which is exactly
-        // what zeroSimd left in its jac entries.
+        // Pattern slots only: a structurally zero entry has G(t) = 0, whose
+        // projections are the +0 already in jac.
         for (0..n) |col| {
             for (ckt.col_ptr[col]..ckt.col_ptr[col + 1]) |slot| {
                 const row: usize = ckt.row_idx[slot];
                 const g_slice = g_td[slot * nf ..][0..nf];
 
-                // Gc[0] = 2·mean(G); Gc[k>0], Gs[k>0] = the 2/nf projections.
+                // Gc[0] = 2*mean(G); Gc[k>0], Gs[k>0] are the 2/nf projections.
                 var g_dc_acc: V = @splat(0.0);
                 var k2: usize = 0;
                 while (k2 + W <= nf) : (k2 += W) {
@@ -366,7 +328,8 @@ pub fn solve(
                 for (1..nh + 1) |h| {
                     const row_cos = row * nf + 2 * h - 1;
                     const row_sin = row * nf + 2 * h;
-                    // DC row takes the half-weight projection; DC column the full one.
+                    // The DC row takes the half-weight projection, the DC
+                    // column the full one.
                     jac[row_dc * total_unknowns + col_dc + 2 * h - 1] = gc[h] * 0.5;
                     jac[row_dc * total_unknowns + col_dc + 2 * h] = gs[h] * 0.5;
                     jac[row_cos * total_unknowns + col_dc] = gc[h];
@@ -392,11 +355,11 @@ pub fn solve(
             }
         }
 
-        // Add charge Jacobian contribution: ±omega_h * C skew blocks.
-        // ponytail: C(t0), not the C(t) convolution the G blocks get — exact
-        // for linear charge, a quasi-Newton step for nonlinear charge (the
-        // residual above is exact either way, so the fixed point is right).
-        // Convolve C like G if a nonlinear-charge deck converges too slowly.
+        // Charge Jacobian: +-w_h*C skew blocks.
+        // ponytail: C(t0), not the C(t) convolution G gets. Exact for linear
+        // charge and quasi-Newton otherwise; the residual is exact either
+        // way, so the fixed point is right. Convolve C like G if a
+        // nonlinear-charge deck converges too slowly.
         for (0..nh) |hi| {
             const h = hi + 1;
             const omega_h = @as(f64, @floatFromInt(h)) * omega0;
@@ -410,16 +373,14 @@ pub fn solve(
                     const col_cos = col * nf + 2 * h - 1;
                     const col_sin = col * nf + 2 * h;
 
-                    // d(cos coeff of C dx/dt)/d(X_sin) = +omega_h*C
                     jac[row_cos * total_unknowns + col_sin] += omega_h * c_val;
-                    // d(sin coeff of C dx/dt)/d(X_cos) = -omega_h*C
                     jac[row_sin * total_unknowns + col_cos] += -omega_h * c_val;
                 }
             }
         }
 
-        // ponytail: single dense system of size total_unknowns = n*(2K+1); cuSOLVER
-        // dgetrf+dgetrs replaces this when total_unknowns > ~256, add when GPU HB kernel lands
+        // ponytail: one dense n*(2K+1) system on the CPU; a GPU dense LU
+        // (cuSOLVER getrf/getrs) replaces it past ~256 unknowns.
         try dense_lu.factorizeSolveNeg(total_unknowns, jac, f_hat[0..total_unknowns], dx_hat);
 
         simdCopy(x_prev, x_hat);
@@ -431,25 +392,20 @@ pub fn solve(
     return .{ .converged = false, .iterations = options.max_iter, .residual_norm = final_norm };
 }
 
-/// The shortest step the line search will take before giving up on shortening.
-const min_step: f64 = 1.0 / 1024.0;
-
-/// Copy each probed node's [dc, cos_1, sin_1, ...] block out of x_hat —
-/// spectra shares x_hat's per-node layout exactly.
+/// Copies each probed node's [dc, cos_1, sin_1, ...] block out of x_hat,
+/// whose per-node layout `spectra` shares.
 fn extractSpectra(x_hat: []const f64, probes: []const u32, spectra: []f64, nf: usize) void {
     for (probes, 0..) |node, p|
         simdCopy(spectra[p * nf ..][0..nf], x_hat[node * nf ..][0..nf]);
 }
 
-/// Contract entry: the deck's own source cards drive the solve; harmonic
-/// magnitudes per probe. Data layout: point-major rows
-/// (frequency = k*f0, probes...), k = 0 (DC, signed) .. n_harmonics.
+/// Contract entry: harmonic magnitudes per probe as point-major rows
+/// (frequency = k*f0, probes...) for k = 0 .. n_harmonics; the DC row keeps
+/// its sign. Non-convergence is error.HbDidNotConverge.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
     const nf: usize = 2 * @as(usize, opts.n_harmonics) + 1;
 
-    // `defer`-freed == scratch; `a` is a results arena. See
-    // RunCtx.scratch_allocator.
     const scratch = ctx.scratch_allocator;
     const spectra = try scratch.alloc(f64, ctx.probes.len * nf);
     defer scratch.free(spectra);

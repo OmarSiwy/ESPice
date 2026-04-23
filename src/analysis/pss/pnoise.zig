@@ -1,24 +1,13 @@
-//! Periodic noise (PNoise): PSS via shooting Newton, then a frozen-time LPTV
-//! sweep with sideband folding. Source PSDs come from the DEVICE
-//! (root.Circuit.collectNoiseSources -> the model's own `noisePsd`), never
-//! re-derived here.
-//!
-//! Every source is `S(f) = white + flicker/f^ef`: thermal is `white = 4kTg`,
-//! shot is `white = 2q|I|`, flicker is `flicker = KF·|I|^AF` at `ef = EF`. The
-//! device states which, because in Verilog-A §4.6.4.1 the PSD IS the call's
-//! argument — see devices/engine.zig `NoiseSource`.
-//!
-//! Cyclostationary modulation: `noisePsd` is pure in the state vector, so it is
-//! called at each PSS sample and the whole density tracks the periodic orbit
-//! (the dominant modulation effect for switched networks). Inter-sideband
-//! correlation and true LPTV conversion matrices are the adjoint upgrade path.
+//! Periodic noise: fixed-point shooting to the periodic steady state, then a
+//! frozen-time LPTV sweep that averages |H|^2 * PSD over the period at each
+//! sideband and folds the sidebands. Source PSDs come from the devices'
+//! `noisePsd`, re-sampled along the orbit (cyclostationary modulation).
 const std = @import("std");
 const root = @import("../types.zig");
 const simdZero = root.zeroSimd;
 const simdCopy = root.copySimd;
 const converger = @import("solver").converger;
 const dense_lu = @import("solver").dense_lu;
-const types = @import("core").numerics;
 
 const W = std.simd.suggestVectorLength(f64) orelse 8;
 const V = @Vector(W, f64);
@@ -27,50 +16,32 @@ pub const NoiseSource = root.NoiseSource;
 
 pub const Options = @import("core").query.Pnoise;
 
+/// Outcome of a pnoise sweep.
 pub const SweepStatus = struct {
+    /// sqrt of the trapezoid integral of the density over the sweep, in V.
     total_noise: f64,
     pss_converged: bool,
 };
 
-// ---------------------------------------------------------------------------
-// Per-source PSD computation
-// ---------------------------------------------------------------------------
-
-/// `S(f) = white + flicker / |f|^ef` at one sideband. `white`/`flicker` are the
-/// TIME-SAMPLE values (cyclostationary modulation), including the exponent.
+/// S(f) = white + flicker/|f|^ef at one sideband, from one time sample's
+/// coefficients.
 inline fn sourcePsd(white: f64, flicker: f64, ef: f64, f_sideband: f64) f64 {
     if (flicker == 0) return white;
-    // ponytail: guard f_sideband == 0 (DC sideband); a 1/f PSD diverges there —
-    // clamp to a floor. Upgrade: the analytic band integral if it ever matters.
+    // ponytail: 1/f diverges at the DC sideband, so |f| is floored at 1e-30.
+    // Upgrade to the analytic band integral if it ever matters.
     const f_abs = @max(@abs(f_sideband), 1e-30);
     return white + flicker / std.math.pow(f64, f_abs, ef);
 }
 
-// ---------------------------------------------------------------------------
-// Public API: fine-grained sweep primitive
-// ---------------------------------------------------------------------------
-
-/// Periodic Noise (PNoise) analysis.
-///
-/// Algorithm (frozen-time LPTV approximation):
-///   1. Run simplified PSS via shooting Newton to find the periodic steady-state
-///      solution x(t) over one period T = 1/f_fundamental.
-///   2. Sample the circuit Jacobian G(t_k) and charge Jacobian C(t_k) at each
-///      PSS time sample t_k (k = 0..N-1) — one ckt.eval per sample fills both
-///      planes, denseG/denseC capture them.
-///   3. Collect noise sources at each PSS sample for cyclostationary modulation:
-///      g_s(t_k) and I(t_k) vary over the period as the bias varies along the orbit.
-///   4. For each output frequency f_out in the sweep range:
-///      a. For each sideband m = -M..+M, compute the sideband frequency
-///         f_m = f_out + m * f_fundamental.
-///      b. At each time sample, build the complex admittance Y_k = G_k + j*2*pi*f_m*C_k,
-///         factor once, then solve the adjoint for the measurement node.
-///      c. Average |H_k(f_m)|^2 * S_s(f_m, t_k) over the PSS period (frozen-time
-///         approximation with cyclostationary source modulation and per-kind PSD).
-///      d. Fold: sum contributions from all sidebands.
-///   5. Output: noise spectral density S_v(f_out) [V^2/Hz] at each frequency.
-///
-/// Fine-grained primitive: caller owns freqs/density (both logSweepCount long).
+/// Periodic noise density at `options.out_node`, frozen-time approximation:
+///   1. Shoot to the periodic orbit x(t_k), k = 0..N-1, T = 1/f_fundamental.
+///   2. At each t_k take dense G_k, C_k and each source's PSD coefficients.
+///   3. For each f_out and sideband f_m = f_out + m*f_fundamental, factor
+///      Y_k = G_k + j*2*pi*|f_m|*C_k per sample, solve the adjoint once for
+///      every source, and average |H_k|^2 * S(f_m, t_k) over k.
+///   4. Sum the sidebands into S_v(f_out), in V^2/Hz.
+/// The caller owns freqs and density, both sweep-count long. Returns
+/// error.NoiseTopologyChanged if the sources differ along the orbit.
 pub fn sweep(
     ckt: *root.Circuit,
     x_dc: []const f64,
@@ -88,21 +59,18 @@ pub fn sweep(
     const n_srcs = noise_sources.len;
     std.debug.assert(freqs.len == density.len);
 
-    // --- Phase 1: PSS via shooting Newton ---
     const pss_traj = try allocator.alloc(f64, n_samples * n);
     defer allocator.free(pss_traj);
 
     const pss_converged = try runPSS(ckt, x_dc, pss_traj, n, n_samples, period, options, allocator);
 
-    // --- Phase 2: Extract G(t_k) and C(t_k) at each sample ---
     const g_mats = try allocator.alloc(f64, n_samples * n * n);
     defer allocator.free(g_mats);
     const c_mats = try allocator.alloc(f64, n_samples * n * n);
     defer allocator.free(c_mats);
 
-    // Per-sample noise PSDs for cyclostationary modulation: the device's own
-    // white and 1/f coefficients at x(t_k), which vary along the orbit.
-    // ponytail: SoA layout — n_samples * n_srcs flat array, sample-major
+    // Per-sample source coefficients, SoA and sample-major:
+    // src_white[k * n_srcs + s].
     const terms = @as(usize, n_samples) * n_srcs;
     const source_planes = try allocator.alloc(f64, 3 * terms);
     defer allocator.free(source_planes);
@@ -113,7 +81,7 @@ pub fn sweep(
     for (0..n_samples) |k| {
         const x_k = pss_traj[k * n .. (k + 1) * n];
         const t_k = @as(f64, @floatFromInt(k)) * dt;
-        // Same time the sample was solved at (integrateOnePeriod below).
+        // The time the sample was solved at (integrateOnePeriod).
         ckt.setSimState(.{ .t = t_k, .kind = .tran });
         ckt.eval(x_k, t_k);
         ckt.denseG(g_mats[k * n * n ..][0 .. n * n]);
@@ -135,7 +103,6 @@ pub fn sweep(
         }
     }
 
-    // --- Phase 3: Frequency sweep with sideband folding ---
     const nn = 2 * n;
     const a_work = try allocator.alloc(f64, nn * nn);
     defer allocator.free(a_work);
@@ -147,8 +114,7 @@ pub fn sweep(
     if (options.out_node != root.GROUND) rhs_work[options.out_node] = 1;
     const x_work = try allocator.alloc(f64, nn);
     defer allocator.free(x_work);
-    // Per-source period-averaged |H|^2 * PSD accumulator (one admittance
-    // factorization per sample serves every source).
+    // Per-source sum over samples of |H|^2 * PSD at one sideband.
     const h_sq_acc = try allocator.alloc(f64, n_srcs);
     defer allocator.free(h_sq_acc);
 
@@ -168,16 +134,13 @@ pub fn sweep(
         var m: i32 = -m_max;
         while (m <= m_max) : (m += 1) {
             const f_sb = f_out + @as(f64, @floatFromInt(m)) * options.f_fundamental;
-            // Fold negative frequencies via conjugate symmetry (|H(f)| = |H(-f)|
-            // for real networks)
+            // |H(f)| = |H(-f)| for a real network, so fold to |f|.
             const f_phys = @abs(f_sb);
             if (f_phys < 1e-30) continue;
             const omega = 2.0 * std.math.pi * f_phys;
 
             simdZero(h_sq_acc);
 
-            // Average over PSS time samples: factor the admittance once per
-            // sample, then one adjoint back-substitution for all sources.
             for (0..n_samples) |k| {
                 const g_offset = k * n * n;
                 const g_mat = g_mats[g_offset .. g_offset + n * n];
@@ -186,13 +149,12 @@ pub fn sweep(
                 const f_row = src_flicker[k * n_srcs ..][0..n_srcs];
                 const e_row = src_exponent[k * n_srcs ..][0..n_srcs];
 
-                // Build 2n x 2n complex admittance system:
                 //   | G  -wC | | v_re |   | i_re |
                 //   | wC   G | | v_im | = | i_im |
                 dense_lu.buildComplexAdmittance(n, nn, g_mat, c_mat, omega, a_work);
                 try dense_lu.factorize(nn, a_work, piv);
 
-                // One adjoint solve measures every device generator.
+                // One adjoint solve gives every source's transfer.
                 dense_lu.solveFactoredT(nn, a_work, piv, rhs_work, x_work);
                 for (noise_sources, 0..) |src, s| {
                     const h_re = (if (src.node_p != root.GROUND) x_work[src.node_p] else 0) -
@@ -201,15 +163,13 @@ pub fn sweep(
                         (if (src.node_n != root.GROUND) x_work[n + src.node_n] else 0);
                     const h_sq = h_re * h_re + h_im * h_im;
 
-                    // Per-source PSD with cyclostationary modulation. `f_sb` is
-                    // the actual (unfolded) sideband frequency, which is what
-                    // a 1/f shape has to be evaluated at.
+                    // A 1/f shape is evaluated at the unfolded sideband f_sb.
                     const psd = sourcePsd(w_row[s], f_row[s], e_row[s], f_sb);
                     h_sq_acc[s] += h_sq * psd;
                 }
             }
 
-            // Sum over sources: density = (1/N) * sum_k |H_k|^2 * PSD_s(t_k, f_sb)
+            // Sideband density = (1/N) * sum over sources of h_sq_acc.
             var sb_density: f64 = 0;
             var si: usize = 0;
             const splat_inv: V = @splat(inv_n_samples);
@@ -228,7 +188,6 @@ pub fn sweep(
         freqs[pt] = f_out;
         density[pt] = total_density;
 
-        // Trapezoidal integration
         if (pt > 0) {
             integrated_noise += 0.5 * (prev_density + total_density) * (f_out - prev_freq);
         }
@@ -239,25 +198,18 @@ pub fn sweep(
     return .{ .total_noise = @sqrt(integrated_noise), .pss_converged = pss_converged };
 }
 
-// ---------------------------------------------------------------------------
-// Contract entry: run()
-// ---------------------------------------------------------------------------
-
-/// Contract entry: sources from each device's own `noisePsd` (via
-/// collectNoiseSources — never re-derived per resistor), LPTV sweep, periodic
-/// noise density per point. Data layout: point-major (frequency, pnoise_density).
+/// Contract entry: device noise sources at ctx.x_op, LPTV sweep. Point-major
+/// rows (frequency, pnoise_density); an unconverged PSS says so in the plot
+/// name rather than failing.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
     const x_op = ctx.x_op;
 
-    // ponytail: no lane batching here. Each PSS time sample k has its own
-    // Jacobian (G_k, C_k) from the periodic orbit, so FreqSolver.solveBatch
-    // (one shared G,C, many omegas) cannot batch the (freq × sideband ×
-    // sample) inner loop. Upgrade path: a per-sample-batched variant taking
-    // N×(G,C,omega) triples.
+    // ponytail: no lane batching. Every PSS sample has its own (G_k, C_k),
+    // so FreqSolver.solveBatch (one G, C, many omegas) does not fit the
+    // (freq x sideband x sample) loop. The upgrade is a batched variant
+    // taking N (G, C, omega) triples.
 
-    // `defer`-freed == scratch; `a` is a results arena. See
-    // RunCtx.scratch_allocator.
     const scratch = ctx.scratch_allocator;
     const srcs = try ctx.circuit.collectNoiseSources(x_op, scratch);
     defer scratch.free(srcs);
@@ -279,7 +231,6 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     }
 
     return .{
-        // Non-convergence surfaced in the plotname — run() stays pure.
         .plotname = if (st.pss_converged) "Periodic Noise Analysis" else "Periodic Noise Analysis (PSS not converged)",
         .varnames = names,
         .is_complex = false,
@@ -288,20 +239,10 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     };
 }
 
-// ============================================================================
-// PSS: Simplified shooting Newton
-// ============================================================================
-
-/// Run PSS via shooting Newton method.
-/// Integrates the circuit over one period using per-sample frozen-time Newton
-/// solves, then checks if x(T) == x(0). Fixed-point iteration on the shooting
-/// function phi(x0) = x(T) - x0.
-///
-/// For LTI circuits (resistors only), the PSS solution is the DC operating point
-/// replicated at every time sample, and convergence is immediate.
-///
-/// Returns true if converged. Fills pss_traj with n_samples state snapshots
-/// uniformly distributed over one period [0, T).
+/// Fixed-point shooting: integrate one period from x0 and repeat from x(T)
+/// until max|x(T) - x0| < pss_shoot_tol. Fills pss_traj with n_samples
+/// states over [0, T), from the last attempt when it does not converge.
+/// Returns whether it converged.
 fn runPSS(
     ckt: *root.Circuit,
     x_dc: []const f64,
@@ -325,15 +266,12 @@ fn runPSS(
         if (shoot_iter != 0) try ckt.checkpoint(.{ .phase = .periodic, .completed = shoot_iter });
         try integrateOnePeriod(ckt, x0, x_end, pss_traj, n, n_samples, period, options, ws);
 
-        // Shooting residual: phi = x_end - x0
         var max_residual: f64 = 0;
         var j: usize = 0;
         while (j + W <= n) : (j += W) {
             const ev: V = x_end[j..][0..W].*;
             const xv: V = x0[j..][0..W].*;
-            const dv = ev - xv;
-            const av = @abs(dv);
-            max_residual = @max(max_residual, @reduce(.Max, av));
+            max_residual = @max(max_residual, @reduce(.Max, @abs(ev - xv)));
         }
         while (j < n) : (j += 1) {
             max_residual = @max(max_residual, @abs(x_end[j] - x0[j]));
@@ -344,14 +282,14 @@ fn runPSS(
         simdCopy(x0, x_end);
     }
 
-    // If not converged, fill the trajectory with the last attempt anyway.
     try integrateOnePeriod(ckt, x0, x_end, pss_traj, n, n_samples, period, options, ws);
 
     return false;
 }
 
-/// Integrate the circuit over one period [0, T) using frozen-time Newton
-/// solves, storing state snapshots at n_samples uniformly spaced time points.
+/// Walks one period from x0 with frozen-time quasi-static Newton solves at
+/// n_samples uniform points, storing each state in pss_traj (sample 0 is
+/// x0) and leaving the last in x_end. Newton failures are ignored.
 fn integrateOnePeriod(
     ckt: *root.Circuit,
     x0: []const f64,
@@ -369,16 +307,13 @@ fn integrateOnePeriod(
         .abstol = options.pss_newton_tol,
     };
 
-    // Start from x0; store initial state as sample 0.
     simdCopy(x_end, x0);
     simdCopy(pss_traj[0..n], x0);
 
-    // Solve at each subsequent time sample (frozen-time quasi-static Newton).
     for (1..n_samples) |k| {
         const t_k = @as(f64, @floatFromInt(k)) * dt;
-        // §4.6.1: sources follow their waveform only under analysis("tran");
-        // without it every SIN/PULSE card gave its DC value (no LO). dt stays
-        // 0: these solves are quasi-static.
+        // Sources follow their waveform only under analysis("tran")
+        // (§4.6.1). dt stays 0: these solves are quasi-static.
         ckt.setSimState(.{ .t = t_k, .kind = .tran });
         _ = converger.run(ckt, ws, x_end, t_k, nr_opts, root.EvalHook{}) catch |err| switch (err) {
             error.QueryCancelled => return err,
