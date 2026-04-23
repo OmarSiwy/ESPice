@@ -179,8 +179,9 @@ pub fn simulate(
         }
 
         if (has_charge) {
-            // The planes are one iterate behind the converged point.
-            ckt.eval(x_try, t + dt);
+            // The planes are one iterate behind the converged point. Charges
+            // only: the next assemble restamps the other planes.
+            ckt.evalQ(x_try, t + dt);
             simdCopy(q_prev, ckt.q_vec[0..n]);
         }
 
