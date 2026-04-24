@@ -1,22 +1,15 @@
-//! Standalone sparse LU kernel: left-looking Gilbert–Peierls factorization
-//! with threshold partial pivoting, numeric refactorization on a frozen
-//! pattern, forward/back substitution, and transpose solve.
-//!
-//! This is a pure computation module — no ordering, no BTF, no higher-level
-//! solver facade. The column permutation `q` is supplied by the caller.
-//!
-//! Algorithm reference: gilbert-peierls-lu.md, klu-pipeline.md
-//!
-//! Data layout: SoA with hot/cold split. Iteration-hot arrays (lp/up/udiag,
-//! li/lx, ui/ux, w, pinv, q) are contiguous; DFS workspace (flag/topo/
-//! stack/pstack) is cold (touched only during full factor). prow is cold
-//! (touched only during refactor scatter).
+//! Left-looking Gilbert-Peierls sparse LU with threshold partial pivoting,
+//! a numeric refactor that replays the frozen pattern and pivot sequence,
+//! and forward/transpose solves. The caller supplies the column ordering.
+//! Background: docs/solvers/gilbert-peierls-lu.md, klu-pipeline.md.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const NONE: u32 = std.math.maxInt(u32);
 
+/// Sparse LU over f32 or f64. Arrays are SoA; the DFS workspace is touched
+/// only by a full `factor`.
 pub fn SparseLu(comptime T: type) type {
     comptime {
         std.debug.assert(T == f32 or T == f64);
@@ -25,6 +18,8 @@ pub fn SparseLu(comptime T: type) type {
     return struct {
         const Self = @This();
 
+        /// `SingularMatrix`: some column has no finite nonzero pivot and is
+        /// not a structurally void unknown.
         pub const FactorError = error{ OutOfMemory, SingularMatrix };
 
         /// Supernode steps [first, last]. Its rows are L[:,first]'s: first
@@ -38,42 +33,38 @@ pub fn SparseLu(comptime T: type) type {
         /// the 100x100 grid and the sweep_opamp AC matrix respectively.
         const panel_min_rows = 32;
 
-        // ---- dimensions ----
         n: u32,
+        /// Borrowed column ordering: pivot step k factors column q[k].
+        q: []const u32,
+        /// Original row -> pivot step.
+        pinv: []u32,
 
-        // ---- permutations (length n) ----
-        q: []const u32, // column ordering: pivot step k factors column q[k] — NOT owned
-        pinv: []u32, // original row → pivot step
+        /// L, strictly lower with unit diagonal, CSC over pivot steps. Row
+        /// indices are pivot steps once `factor` returns.
+        lp: []u32,
+        li: std.ArrayList(u32) = .empty,
+        lx: std.ArrayList(T) = .empty,
 
-        // ---- L (strictly lower, unit diagonal) — CSC over pivot steps ----
-        // Row indices are in PERMUTED coordinates after factor().
-        lp: []u32, // column pointers, length n+1
-        li: std.ArrayList(u32) = .empty, // row indices (permuted)
-        lx: std.ArrayList(T) = .empty, // values
+        /// U, strictly upper, CSC over pivot steps. Each column's rows are in
+        /// the topological order the triangular solve visited them, which is
+        /// the order `refactor` replays.
+        up: []u32,
+        ui: std.ArrayList(u32) = .empty,
+        ux: std.ArrayList(T) = .empty,
+        udiag: []T,
 
-        // ---- U (strictly upper) — CSC over pivot steps ----
-        // Row indices stored in the topological solve order so refactor replays.
-        up: []u32, // column pointers, length n+1
-        ui: std.ArrayList(u32) = .empty, // row indices (pivot-step coords)
-        ux: std.ArrayList(T) = .empty, // values
-        udiag: []T, // diagonal of U, length n
-
-        // ---- refactor scatter tape (length nnz(A)) ----
-        // prow[p] = pinv[row_idx[p]]: maps A's structural entries to permuted rows.
+        /// prow[p] = pinv[row_idx[p]]: A entry p -> its permuted row.
         prow: []u32,
 
-        /// Pivot steps that factored a STRUCTURALLY VOID unknown — see
-        /// `voidUnknown`. `refactor` must replay the fabricated unit pivot
-        /// instead of reading a zero out of `w` and reporting singularity.
+        /// Pivot steps that got a fabricated unit pivot (see `voidUnknown`).
         void_col: []bool,
-        // CSC entries touching a fabricated pivot's row or column. Reuse is
-        // valid only while these stay zero; parameter changes can activate them.
+        /// CSC entries in a fabricated pivot's row or column. A replay is
+        /// valid only while all of them stay zero.
         void_slots: std.ArrayList(u32) = .empty,
 
-        /// Pivot steps whose diagonal was accepted only by the ROW-SCALED
-        /// threshold test. Such a pivot is legitimately orders below its own
-        /// column max, so `refactor`'s raw growth monitor would reject every
-        /// replay of the tape — it is skipped for these steps.
+        /// Pivot steps whose diagonal passed only the row-scaled threshold
+        /// test. Such a pivot sits far below its raw column max, so the
+        /// refactor growth monitor skips these steps.
         scaled_pivot: []bool,
         /// Full-factor DFS scan end of L[:,s]: lp[s+1], or just past the row
         /// pivoted at step s+1 when every later entry of L[:,s] is in
@@ -84,45 +75,46 @@ pub fn SparseLu(comptime T: type) type {
         /// applies a run of its steps as vector updates. `sn_of[s]` is the
         /// panel holding step s, or NONE.
         sn_of: []u32,
-        sn_slot: []u32, // row -> slot in the open panel
+        /// Row -> slot in the open panel.
+        sn_slot: []u32,
         panels: std.ArrayList(Panel) = .empty,
         panel_rows: std.ArrayList(u32) = .empty,
         panel_vals: std.ArrayList(T) = .empty,
 
-        // ---- small-matrix refactor tape (see `refactorTape`) ----
-        /// One {dst, l, u} slot triple per flop, `tv[dst] -= tv[l] * tv[u]`,
-        /// in refactor order. Empty when the factor has more than
-        /// `tape_max_flops` flops; `refactor` then runs the column loop.
+        /// Small-matrix refactor tape: one {dst, l, u} slot triple per flop,
+        /// `tv[dst] -= tv[l] * tv[u]`, in refactor order. Empty above
+        /// `tape_max_flops`, where `refactor` runs the column loop instead.
         tape: std.ArrayList([3]u32) = .empty,
-        tape_col: []u32, // column k's flops are tape[tape_col[k]..tape_col[k+1]]
-        amap: []u32, // A entry p -> its slot in tv
-        lsrc: std.ArrayList(u32) = .empty, // L entry q -> its column; tape only
-        /// Slot values: ux ++ udiag ++ lx ++ one discard slot.
+        /// Column k's flops are tape[tape_col[k]..tape_col[k+1]].
+        tape_col: []u32,
+        /// A entry p -> its slot in `tv`.
+        amap: []u32,
+        /// L entry -> its column; built only with a tape.
+        lsrc: std.ArrayList(u32) = .empty,
+        /// Tape slot values: ux ++ udiag ++ lx ++ one discard slot.
         tv: std.ArrayList(T) = .empty,
 
-        // ---- hot workspace (length n each) ----
-        /// Dense accumulator. INVARIANT: all-zero on entry to and exit from
-        /// every public entry point, error returns included. `factor` needs it
-        /// (a fill row it never scatters must read 0), and `refactor` needs it
-        /// because it dropped the per-column zero-the-pattern prologue: each
-        /// column zeroes its own slots as it consumes them instead.
+        /// Dense accumulator, all-zero on entry to and exit from every public
+        /// call, errors included. `factor` reads unscattered fill rows as 0,
+        /// and `refactor` zeroes each slot as it consumes it rather than
+        /// clearing the pattern up front.
         w: []T,
-        y: []T, // solve workspace
-        /// Implicit row scaling for the pivot test: rscale[r] = 1/max_j|A[r][j]|
-        /// (1 for an all-zero or non-finite row). Indexed by ORIGINAL row,
-        /// recomputed once per full `factor`; `refactor` never reads it.
+        /// Solve workspace; also panel scratch during `factor`.
+        y: []T,
+        /// rscale[r] = 1 / max_j |A[r][j]| (1 for an all-zero or non-finite
+        /// row), by original row. Recomputed by each `factor`.
         rscale: []T,
 
-        // ---- cold workspace (length n each, used only in factor) ----
-        flag: []u32, // epoch-based DFS visited marker
-        topo: []u32, // topological finish order
-        stack: []u32, // DFS vertex stack
-        pstack: []u32, // DFS position stack (resume offset into L adjacency)
+        // DFS workspace, `factor` only.
+        flag: []u32, // epoch visited marker
+        topo: []u32, // finish order
+        stack: []u32,
+        pstack: []u32, // resume offset into each vertex's L column
 
         factored: bool = false,
 
-        /// Allocate all workspace. `q` is the caller's column permutation
-        /// (borrowed, not copied — must outlive the SparseLu).
+        /// Allocates every workspace. `q` is borrowed and must outlive the
+        /// SparseLu; `row_idx` is unused until `factor`.
         pub fn init(
             gpa: Allocator,
             n: u32,
@@ -132,8 +124,8 @@ pub fn SparseLu(comptime T: type) type {
         ) !Self {
             _ = row_idx;
             const nnz = col_ptr[n];
-            // ponytail: pre-size L/U to ~2x nnz — typical circuit fill; avoids
-            // ArrayList growth during first factor. Upgrade: profile and tune.
+            // ponytail: pre-size L and U to max(nnz, 2n), typical circuit
+            // fill; tune from a fill profile if first factors reallocate.
             const est_lu: usize = @max(nnz, 2 * @as(usize, n));
 
             var self = Self{
@@ -212,13 +204,10 @@ pub fn SparseLu(comptime T: type) type {
             self.ux.deinit(gpa);
         }
 
-        // ====================================================================
-        // factor: full symbolic + numeric factorization with threshold pivoting
-        // ====================================================================
-
-        /// Full factorization: DFS reach → sparse triangular solve → threshold
-        /// partial pivoting → store L/U columns. Builds the sparsity pattern,
-        /// pivot sequence, and refactor scatter tape (prow).
+        /// Full symbolic and numeric factorization. Per column: DFS reach,
+        /// sparse triangular solve, threshold pivot (diagonal preferred),
+        /// store L and U. Rebuilds the pattern, pivot sequence and replay
+        /// tapes. On error the factorization is unusable (`factored` false).
         pub fn factor(
             self: *Self,
             gpa: Allocator,
@@ -233,7 +222,7 @@ pub fn SparseLu(comptime T: type) type {
             @memset(self.flag, 0);
             @memset(self.void_col, false);
             @memset(self.scaled_pivot, false);
-            self.tv.clearRetainingCapacity(); // no tape until this factor ends
+            self.tv.clearRetainingCapacity();
             self.panels.clearRetainingCapacity();
             self.panel_rows.clearRetainingCapacity();
             self.panel_vals.clearRetainingCapacity();
@@ -244,13 +233,10 @@ pub fn SparseLu(comptime T: type) type {
             self.ui.clearRetainingCapacity();
             self.ux.clearRetainingCapacity();
 
-            // ---- implicit row scaling for the pivot test ----
-            // Threshold PARTIAL pivoting compares candidates in whatever units
-            // each device wrote its KCL row in, so the choice is not invariant
-            // under row scaling. One O(nnz) pass records 1/max|A[r,:]| so the
-            // diagonal test below can be retried in the scale-free metric.
-            // Runs only on a FULL factor; `refactor` never pays for it.
-            @memset(self.rscale, 0); // running row max, inverted in place below
+            // Threshold pivoting compares candidates in whatever units each
+            // device wrote its row in. Record 1/max|A[r,:]| so the diagonal
+            // test below can retry in a scale-free metric.
+            @memset(self.rscale, 0);
             for (0..n) |j| {
                 for (col_ptr[j]..col_ptr[j + 1]) |p|
                     self.rscale[row_idx[p]] = @max(self.rscale[row_idx[p]], @abs(vals[p]));
@@ -258,9 +244,8 @@ pub fn SparseLu(comptime T: type) type {
             for (self.rscale) |*s|
                 s.* = if (s.* > 0 and std.math.isFinite(s.*)) 1 / s.* else 1;
 
-            // Locals for every slice the column loop indexes: a store through
-            // any of them may alias `self`, so field access reloaded the slice
-            // pointers per element (the same hoist `refactor` carries).
+            // Locals, not fields: a store through any slice may alias `self`,
+            // and field access would reload the slice pointers per element.
             const pinv = self.pinv;
             const flag = self.flag;
             const stack = self.stack;
@@ -271,9 +256,8 @@ pub fn SparseLu(comptime T: type) type {
             const rscale = self.rscale;
             const lend = self.lend;
             // Two copies of the column loop. The plain one runs until an L
-            // column reaches panel_min_rows; typical circuit matrices never
-            // get there and pay one compare per column. The supernodal copy
-            // adds the lend scan shortcut and the panels.
+            // column reaches panel_min_rows, which typical circuit matrices
+            // never do. The supernodal copy adds the lend shortcut and panels.
             var k: usize = 0;
             inline for (.{ false, true }) |sn| {
                 if (sn) {
@@ -286,11 +270,10 @@ pub fn SparseLu(comptime T: type) type {
                     lp[k] = @intCast(self.li.items.len);
                     self.up[k] = @intCast(self.ui.items.len);
                     const mark: u32 = @intCast(k + 1);
-                    // The DFS reads L's index array only; L grows (and may move)
-                    // at the reservation below, so the solve re-takes both slices.
+                    // L may move at the reservation below; re-take it after.
                     const li = self.li.items;
 
-                    // ---- symbolic: DFS reach from pattern of A[:,c] through G(L) ----
+                    // Reach of A[:,c] through the graph of L.
                     var nt: u32 = 0;
                     for (col_ptr[c]..col_ptr[c + 1]) |p| {
                         var r = row_idx[p];
@@ -304,8 +287,7 @@ pub fn SparseLu(comptime T: type) type {
                             r = stack[sp];
                             const kc = pinv[r];
                             const end = if (kc == NONE) 0 else if (sn) lend[kc] else lp[kc + 1];
-                            // Resume cursor lives in a register; memory sees it
-                            // only when the walk descends and must come back.
+                            // Keep the cursor in a register; spill it only on descent.
                             var pos = pstack[sp];
                             var descended = false;
                             while (pos < end) {
@@ -329,9 +311,8 @@ pub fn SparseLu(comptime T: type) type {
                         }
                     }
 
-                    // The reach bounds both halves of this column: at most `nt` U
-                    // entries and `nt` L entries. Reserved before the scatter, so
-                    // an OutOfMemory leaves `w` zero.
+                    // The reach bounds this column's U and L entries. Reserve
+                    // before the scatter so OutOfMemory leaves `w` zero.
                     try self.ui.ensureUnusedCapacity(gpa, nt);
                     try self.ux.ensureUnusedCapacity(gpa, nt);
                     try self.li.ensureUnusedCapacity(gpa, nt);
@@ -339,10 +320,9 @@ pub fn SparseLu(comptime T: type) type {
                     const lcol = self.li.items;
                     const lval = self.lx.items;
 
-                    // ---- scatter A[:,c] into dense workspace ----
                     for (col_ptr[c]..col_ptr[c + 1]) |p| w[row_idx[p]] = vals[p];
 
-                    // ---- sparse triangular solve in reverse finish (topo) order ----
+                    // Triangular solve in reverse finish order.
                     var idx: u32 = nt;
                     while (idx > 0) {
                         idx -= 1;
@@ -359,13 +339,10 @@ pub fn SparseLu(comptime T: type) type {
                         scatterAxpy(w, lcol, lval, lp[kc], lp[kc + 1], ukr);
                     }
 
-                    // ---- threshold partial pivoting, diagonal preferred ----
-                    // Two magnitudes per candidate. `amax` is the raw column max:
-                    // it picks the off-diagonal fallback and gates singularity,
-                    // exactly as before. `smax` is the same max taken in the
-                    // implicit row scaling — that is what the diagonal test falls
-                    // back to, so an equation living decades below the rest of the
-                    // matrix is still allowed to own its own unknown.
+                    // `amax`, the raw column max, picks the off-diagonal
+                    // fallback and gates singularity. `smax` is the same max
+                    // under row scaling, the diagonal test's second chance: an
+                    // equation decades below the rest may still own its unknown.
                     var amax: T = 0;
                     var smax: T = 0;
                     var piv: u32 = NONE;
@@ -379,34 +356,19 @@ pub fn SparseLu(comptime T: type) type {
                         smax = @max(smax, a * rscale[r]);
                     }
                     if (piv == NONE or amax == 0 or !std.math.isFinite(amax)) {
-                        // A column with no nonzero unpivoted candidate is normally
-                        // a singular circuit — but not always. A compact model can
-                        // STRUCTURALLY DISABLE part of itself (HICUM's thermal tie
-                        // `V(br_sht) <+ 0` when flsh = 0, BSIM4/BSIMSOI/HiSIM do the
-                        // same for their self-heating nodes), and Verilog-A cannot
-                        // delete a node: the branch-flow unknown survives with an
-                        // all-zero row AND an all-zero column. Unknown x_c then
-                        // appears in no equation at all, which is not a singular
-                        // system, it is a system with one free variable — and the
-                        // ground row this simulator already pins with a unit
-                        // diagonal is the same situation.
-                        //
-                        // Fabricating A[c][c] = 1 is sound ONLY when row c is void
-                        // too, i.e. equation c reads 0 = b_c; then the unit pivot
-                        // means x_c = b_c, and a b_c that is not zero cannot pass
-                        // the Newton residual gate, so an inconsistent system still
-                        // reports as unconverged rather than silently solving.
-                        // `voidUnknown` costs O(nnz) and only runs on this path.
-                        //
-                        // Before this, devices/hicum2_output failed the plain
-                        // Newton factor at EVERY one of its 1809 DC points and paid
-                        // the whole gmin + source-stepping continuation ladder for
-                        // each: 68772 Newton iterations against ngspice's ~5000,
-                        // 0.93 s against 0.02 s.
+                        // Usually a singular circuit, but a compact model can
+                        // disable part of itself (HICUM's `V(br_sht) <+ 0` at
+                        // flsh = 0, the BSIM4/BSIMSOI/HiSIM self-heating nodes),
+                        // and Verilog-A cannot delete the node: its unknown keeps
+                        // an all-zero row and column. That is a free variable,
+                        // not a singular system. A unit pivot is sound only when
+                        // row c is void too: then x_c = b_c, and a nonzero b_c
+                        // fails the Newton residual gate instead of solving
+                        // silently. Without this, devices/hicum2_output paid the
+                        // whole continuation ladder at each of 1809 DC points.
                         if (!self.voidUnknown(col_ptr, row_idx, vals, c)) {
-                            // `w` still holds this column's U values (NaNs when the
-                            // column went non-finite), and the next factor reads
-                            // every fill row as zero.
+                            // `w` still holds this column's values; restore
+                            // the all-zero invariant.
                             for (topo[0..nt]) |r| w[r] = 0;
                             return error.SingularMatrix;
                         }
@@ -414,7 +376,7 @@ pub fn SparseLu(comptime T: type) type {
                         has_void = true;
                         self.udiag[k] = 1;
                         pinv[c] = @intCast(k);
-                        if (sn) lend[k] = lp[k]; // no L column
+                        if (sn) lend[k] = lp[k]; // empty L column
                         for (topo[0..nt]) |r| w[r] = 0;
                         continue;
                     }
@@ -423,22 +385,17 @@ pub fn SparseLu(comptime T: type) type {
                         if (dmag >= pivot_tol * amax) {
                             piv = c;
                         } else if (dmag > 0 and dmag * rscale[c] >= pivot_tol * smax) {
-                            // The raw test rejected a diagonal that is the biggest
-                            // entry of the column MEASURED AGAINST ITS OWN EQUATION.
-                            // A BSIMSOI floating body at default junction params is
-                            // exactly this: every entry of the body KCL row is
-                            // ~1e-18 S while Gmbs ~1e-4 S sits in the same COLUMN on
-                            // the drain row. Eliminating the body column through the
-                            // drain row rebuilds the body equation out of numbers
-                            // 1e14 times its own size and dx_body becomes drain-row
-                            // rounding noise divided by Gmbs (observed: -13.9 V).
-                            // ngspice dodges this by DEFERRING the pair — Sparse 1.3
-                            // permutes rows and columns together (spfactor.c
-                            // ExchangeRowsAndCols), which a fixed BTF+AMD column
-                            // order cannot do. See docs/spice-audit-2026-09.md.
-                            // ponytail: implicit scaling of the CHOICE only; the
-                            // upgrade is full row equilibration (KLU Common->scale=2)
-                            // if a fixture ever needs the arithmetic scaled too.
+                            // The diagonal is the largest entry measured against
+                            // its own equation. A BSIMSOI floating body at default
+                            // junction params: its KCL row is ~1e-18 S while Gmbs
+                            // ~1e-4 S sits in its column on the drain row, and
+                            // pivoting there makes dx_body drain-row rounding noise
+                            // (observed -13.9 V). ngspice avoids it by permuting
+                            // rows and columns together (Sparse 1.3 spfactor.c
+                            // ExchangeRowsAndCols), which a fixed column order
+                            // cannot do.
+                            // ponytail: scales the pivot choice only; full row
+                            // equilibration (KLU scale=2) if the arithmetic needs it.
                             piv = c;
                             self.scaled_pivot[k] = true;
                         }
@@ -447,7 +404,7 @@ pub fn SparseLu(comptime T: type) type {
                     self.udiag[k] = d;
                     pinv[piv] = @intCast(k);
 
-                    // ---- store L[:,k] (scaled unpivoted candidates), clear w ----
+                    // L[:,k] is the unpivoted reach over the pivot; clear w.
                     for (topo[0..nt]) |r| {
                         if (pinv[r] == NONE) {
                             self.li.appendAssumeCapacity(r);
@@ -463,7 +420,7 @@ pub fn SparseLu(comptime T: type) type {
                         continue;
                     }
                     lend[k] = @intCast(self.li.items.len);
-                    // Short columns gain nothing from either shortcut; skip the scan.
+                    // Short columns gain nothing from either shortcut.
                     if (k > 0 and (lp[k] - lp[k - 1] >= panel_min_rows or self.sn_of[k - 1] != NONE))
                         try self.linkStep(gpa, @intCast(k), piv, mark);
                 }
@@ -471,10 +428,7 @@ pub fn SparseLu(comptime T: type) type {
             self.lp[n] = @intCast(self.li.items.len);
             self.up[n] = @intCast(self.ui.items.len);
 
-            // L row indices: original → permuted coordinates
             for (self.li.items) |*r| r.* = self.pinv[r.*];
-
-            // Build refactor scatter tape: prow[p] = pinv[row_idx[p]]
             for (row_idx[0..self.prow.len], self.prow) |r, *pr| pr.* = self.pinv[r];
 
             if (has_void) {
@@ -494,9 +448,8 @@ pub fn SparseLu(comptime T: type) type {
 
             try self.buildTape(gpa, col_ptr);
 
-            // ZP_LU_STATS: one line per full factor — n, input nnz, fill.
-            // link_libc guard: the solvers test module builds without libc,
-            // same idiom as direct.zig's ESPICE_NO_BBD.
+            // ZP_LU_STATS=1 prints n, nnz and fill per full factor. The test
+            // module builds without libc, hence the guard.
             if (comptime @import("builtin").link_libc) if (std.c.getenv("ZP_LU_STATS") != null) {
                 std.debug.print("lu-stats: n={d} nnz={d} L={d} U={d} fill={d:.1}x\n", .{
                     n,                 col_ptr[n],
@@ -506,25 +459,11 @@ pub fn SparseLu(comptime T: type) type {
                 });
             };
 
-            if (comptime @import("builtin").link_libc) if (std.c.getenv("ZP_LU_HIST") != null) {
-                var h = [_]u64{0} ** 17;
-                var tot: u64 = 0;
-                for (self.ui.items) |i| {
-                    const len = self.lp[i + 1] - self.lp[i];
-                    tot += len;
-                    h[@min(len, 16)] += 1;
-                }
-                std.debug.print("lu-hist: n={d} U={d} axpy_elems={d} mean={d:.3} hist(0..15,16+)={any}\n", .{
-                    n,                                                                                  self.ui.items.len, tot,
-                    @as(f64, @floatFromInt(tot)) / @as(f64, @floatFromInt(@max(self.ui.items.len, 1))), h,
-                });
-            };
-
             self.factored = true;
         }
 
-        /// Step k just stored L[:,k] and pivoted row `piv`. Compare L[:,k-1]
-        /// against it: set lend[k-1], and grow a panel when the two columns
+        /// Step k just stored L[:,k] and pivoted row `piv`. Compares L[:,k-1]
+        /// with it: sets lend[k-1], and grows a panel when the two columns
         /// form a supernode. A row of L[:,k] is exactly a row this column's
         /// walk reached (flag == mark) that is still unpivoted.
         fn linkStep(self: *Self, gpa: Allocator, k: u32, piv: u32, mark: u32) Allocator.Error!void {
@@ -545,9 +484,9 @@ pub fn SparseLu(comptime T: type) type {
             if (joins) try self.growPanel(gpa, k, piv);
         }
 
-        /// Step k joined step k-1's supernode; `piv` is the
-        /// row it pivoted. Opens a panel at k-1 if none is open, moves `piv`
-        /// to block slot k-first-1 and appends column k.
+        /// Step k joined step k-1's supernode; `piv` is the row it pivoted.
+        /// Opens a panel at k-1 if none is open, moves `piv` to block slot
+        /// k-first-1 and appends column k.
         fn growPanel(self: *Self, gpa: Allocator, k: u32, piv: u32) Allocator.Error!void {
             const lp = self.lp;
             const li = self.li.items;
@@ -594,11 +533,11 @@ pub fn SparseLu(comptime T: type) type {
             self.sn_of[k] = pid;
         }
 
-        /// Apply the run of panel steps that starts at topo[idx0] (step kc)
-        /// and continues while the next topo entry is the next step of the
-        /// same panel. Returns the topo index of the run's last entry. Per row
-        /// the subtractions happen in step order, as the column-at-a-time loop
-        /// does them, so the result is bitwise the same.
+        /// Applies the run of panel steps that starts at topo[idx0] (step kc)
+        /// and continues while the next topo entry is the panel's next step.
+        /// Returns the topo index of the run's last entry. Per row the
+        /// subtractions happen in step order, so the result is bitwise the
+        /// column-at-a-time loop's.
         fn panelRun(self: *Self, w: []T, topo: []const u32, idx0: u32, kc: u32) u32 {
             const pan = self.panels.items[self.sn_of[kc]];
             const nrows = self.lp[pan.first + 1] - self.lp[pan.first];
@@ -661,12 +600,10 @@ pub fn SparseLu(comptime T: type) type {
             inline for (0..W) |l| w[rows[i + l]] = acc[l];
         }
 
-        /// Does unknown `c` appear in NO equation and does equation `c` contain
-        /// no unknown? Both halves are required: a zero COLUMN alone says x_c is
-        /// free, but fabricating A[c][c] = 1 would corrupt equation c unless
-        /// that row is empty too. Structural entries carrying a zero value
-        /// count as absent — the host's pattern is the per-device dense block,
-        /// so a disabled branch keeps its slots and only its values vanish.
+        /// True when unpivoted unknown `c` appears in no equation and
+        /// equation `c` holds no unknown. Zero-valued structural entries count
+        /// as absent: a disabled branch keeps its slots, only its values
+        /// vanish. O(nnz); runs only on a failed pivot.
         fn voidUnknown(
             self: *const Self,
             col_ptr: []const u32,
@@ -687,27 +624,21 @@ pub fn SparseLu(comptime T: type) type {
             return true;
         }
 
-        /// `dst[idx[p]] -= src[p] * f` for p in [p0, p1) — the one scatter-axpy
-        /// behind refactor's replay and both of `solve`'s substitutions.
-        ///
-        /// Stepped two at a time BY HAND because the trip count is a sparse
-        /// matrix column length, and circuit columns are tiny: measured over a
-        /// whole run, `scaling/parallel_inverters_100` is 205x length 1 and
-        /// 200x length 2, `devices/mos6_inverter` 47/32/72 at lengths 1/2/3 —
-        /// nothing longer, ever. LLVM runtime-unrolls the plain loop by 4, so
-        /// the 4-wide body it built never executes and every call still pays
-        /// the guard chain: 31 Ir per call for ~1.5 elements of work.
-        ///
-        /// Not vectorized: the scatter is a gather-modify-scatter, and without
-        /// AVX-512 there is nothing to widen (see refactor-tape-2026-09.md,
-        /// where a run-vectorized variant lost even in the hot microbench).
-        /// Pairing is bit-identical regardless: a column's row indices are
-        /// distinct, so the two updates hit different slots.
         pub const test_access = if (@import("builtin").is_test) .{
             .scatterAxpy = scatterAxpy,
             .refactorColumns = refactorColumns,
         } else {};
 
+        /// dst[idx[p]] -= src[p] * f for p in [p0, p1): the scatter-axpy of
+        /// the column replay and both `solve` substitutions.
+        ///
+        /// Stepped two at a time by hand because circuit columns are 1 to 3
+        /// entries long (scaling/parallel_inverters_100: 205 of length 1, 200
+        /// of length 2). LLVM unrolls the plain loop by 4, a body that never
+        /// runs, and every call still pays its guard chain. A gather-modify-
+        /// scatter has nothing to widen without AVX-512; a run-vectorized
+        /// variant lost (docs/solvers/refactor-tape-2026-09.md). Pairing is
+        /// bitwise the one-at-a-time loop: a column's rows are distinct.
         inline fn scatterAxpy(dst: []T, idx: []const u32, src: []const T, p0: u32, p1: u32, f: T) void {
             var p = p0;
             while (p + 1 < p1) : (p += 2) {
@@ -717,13 +648,11 @@ pub fn SparseLu(comptime T: type) type {
             if (p < p1) dst[idx[p]] -= src[p] * f;
         }
 
-        // ====================================================================
-        // refactor: numeric-only replay on frozen pattern + pivot sequence
-        // ====================================================================
-
-        /// Numeric refactorization: same sparsity pattern, same pivot sequence,
-        /// new values. Zero allocation. Fails on pivot collapse or growth
-        /// exceeding `growth_limit` (caller should fall back to full factor).
+        /// Numeric refactor: the last factor's pattern and pivot sequence,
+        /// new values, no allocation. Fails when a pivot is zero or
+        /// non-finite, falls below `growth_limit` times its column max, or a
+        /// fabricated pivot's row or column turned nonzero; the caller then
+        /// runs a full `factor`. Requires a successful `factor` first.
         pub fn refactor(
             self: *Self,
             col_ptr: []const u32,
@@ -738,8 +667,8 @@ pub fn SparseLu(comptime T: type) type {
             return self.refactorColumns(col_ptr, vals, growth_limit);
         }
 
-        /// The column-at-a-time replay: the path for matrices too big for a
-        /// tape, and the tape's scalar oracle.
+        /// Column-at-a-time replay: the path for matrices too big for a tape,
+        /// and the tape's oracle.
         fn refactorColumns(
             self: *Self,
             col_ptr: []const u32,
@@ -750,15 +679,9 @@ pub fn SparseLu(comptime T: type) type {
             const lx = self.lx.items;
             const ui = self.ui.items;
             const ux = self.ux.items;
-            // Same hoist as the four above, for the fields the loop bodies
-            // index. Not style: `ux[p] = uki` is an f64 store that LLVM cannot
-            // prove disjoint from `self.w`, so every U-entry reloaded `self.w`
-            // and `self.lp` from the struct — two loads inside the 23-
-            // instruction preamble that already dominates this kernel (measured
-            // 35% of refactor on scaling/parallel_inverters_100, where U has
-            // 405 entries and the inner axpy averages under one iteration).
-            // A local slice is loop-invariant by construction, so the reloads
-            // go. Identical operations in identical order — no FP change.
+            // Locals, not fields: LLVM cannot prove the `ux[p]` store
+            // disjoint from `self`, and the field reloads cost 35% of this
+            // kernel on scaling/parallel_inverters_100.
             const w = self.w;
             const lp = self.lp;
             const up = self.up;
@@ -771,16 +694,12 @@ pub fn SparseLu(comptime T: type) type {
                 const uk1 = up[k + 1];
                 const lk0 = lp[k];
                 const lk1 = lp[k + 1];
-                // `w` is all-zero here (see the field doc), so the stored
-                // pattern needs no zero prologue — scatter A[:,c] straight in.
+                // `w` is all-zero here (see the field doc).
                 for (col_ptr[c]..col_ptr[c + 1]) |p| w[prow[p]] = vals[p];
 
                 // Replay the triangular solve in stored topological order.
-                // `w[i] = 0` right after the read is safe and is what pays for
-                // dropping the prologue: a U row is written only by EARLIER
-                // entries of this column. An entry writes rows of L[:,i], and
-                // L[r][i] != 0 is the edge i -> r that put r after i in the
-                // topological order — so nothing later can touch w[i].
+                // Zeroing w[i] right after the read is safe: only earlier
+                // entries write row i, since L[r][i] != 0 puts r after i.
                 for (uk0..uk1) |p| {
                     const i = ui[p];
                     const uki = w[i];
@@ -807,14 +726,10 @@ pub fn SparseLu(comptime T: type) type {
                 }
                 udiag[k] = d;
 
-                // The growth monitor compares |d| against the RAW column max,
-                // which is meaningless for a scale-accepted pivot: that pivot
-                // was chosen precisely because its equation lives decades below
-                // the column. Leaving it armed would reject every replay of a
-                // BSIMSOI tape (|d| ~ 1e-18 vs cmax ~ 1e-4) and force a full
-                // factor per Newton iterate.
-                // ponytail: those steps run unmonitored; the upgrade is a
-                // row-scaled cmax, which needs rscale in permuted coordinates.
+                // A scale-accepted pivot is decades below its raw column max
+                // by design, so the raw monitor would reject every replay.
+                // ponytail: those steps run unmonitored; a row-scaled cmax
+                // needs rscale in permuted coordinates.
                 if (growth_limit > 0 and !self.scaled_pivot[k]) {
                     var cmax: T = @abs(d);
                     for (lk0..lk1) |p| {
@@ -835,16 +750,16 @@ pub fn SparseLu(comptime T: type) type {
             }
         }
 
-        /// Flops at most this many get the flat tape: 12 bytes each, so the
-        /// tape stays L1-resident between Newton iterates. A large tape
-        /// streams from L2 with no reuse and loses to the column loop
-        /// (refactor-tape-2026-09.md).
+        /// Factors with at most this many flops get the flat tape, 12 bytes
+        /// per flop, so it stays in L1 between Newton iterates. A larger tape
+        /// streams from L2 and loses to the column loop
+        /// (docs/solvers/refactor-tape-2026-09.md).
         const tape_max_flops = 2048;
 
-        /// Record the refactor as flat slot operations. Every A entry and
-        /// every flop target of column k is a slot of column k's pattern (U
-        /// rows, the diagonal, L rows), except below-diagonal rows of a void
-        /// column, which has no L: those go to the discard slot.
+        /// Records the refactor as flat slot operations. Every A entry and
+        /// flop target of column k is a slot of column k's pattern (U rows,
+        /// the diagonal, L rows), except below-diagonal rows of a void column,
+        /// which has no L: those go to the discard slot.
         fn buildTape(self: *Self, gpa: Allocator, col_ptr: []const u32) Allocator.Error!void {
             const n = self.n;
             const lp = self.lp;
@@ -863,7 +778,7 @@ pub fn SparseLu(comptime T: type) type {
             try self.lsrc.resize(gpa, li.len);
             for (0..n) |k| @memset(self.lsrc.items[lp[k]..lp[k + 1]], @intCast(k));
             try self.tv.resize(gpa, discard + 1);
-            const pos = self.flag; // DFS scratch, free until the next factor
+            const pos = self.flag; // DFS scratch is free until the next factor
             for (0..n) |k| {
                 const void_k = self.void_col[k];
                 for (up[k]..up[k + 1]) |p| pos[ui[p]] = @intCast(p);
@@ -887,10 +802,9 @@ pub fn SparseLu(comptime T: type) type {
             self.tape_col[n] = @intCast(self.tape.items.len);
         }
 
-        /// `refactor` for a matrix with a tape: the same operations per
-        /// slot in the same order, so bitwise the column loop's result, with
-        /// no dense scatter/gather and one flat loop per column. The U values
-        /// are read in place (a U slot is final before any flop reads it).
+        /// `refactor` through the tape: the column loop's operations per slot
+        /// in the same order, so bitwise its result, without the dense
+        /// scatter and gather. U slots are final before any flop reads them.
         fn refactorTape(self: *Self, vals: []const T, growth_limit: T) error{SingularMatrix}!void {
             const n = self.n;
             const tv = self.tv.items;
@@ -926,12 +840,10 @@ pub fn SparseLu(comptime T: type) type {
             copyOut(self.lx.items, tv[lx0 .. lx0 + self.lx.items.len]);
         }
 
-        // The tape's buffers are a few hundred bytes: a compiler_rt memset or
-        // memcpy call costs more than the copy (760 Ir per memset on
-        // vacask_mul's 100 slots). LLVM turns a plain zero or copy loop back
-        // into that call, so the lanes are spelled out and the zero is read
-        // through a volatile pointer (refactor-tape-2026-09.md, the memset
-        // loop-idiom hazard).
+        // The tape buffers are a few hundred bytes, where a memset or memcpy
+        // call costs more than the copy (760 Ir per memset on vacask_mul's
+        // 100 slots). LLVM turns a plain loop back into that call, so the
+        // lanes are spelled out and the zero is read through a volatile.
         var opaque_zero: T = 0;
         inline fn fillZero(dst: []T) void {
             const W = comptime std.simd.suggestVectorLength(T) orelse 1;
@@ -947,31 +859,24 @@ pub fn SparseLu(comptime T: type) type {
             while (i < dst.len) : (i += 1) dst[i] = src[i];
         }
 
-        // ====================================================================
-        // solve: P → L → U → Q permuted substitution
-        // ====================================================================
-
-        /// Solve Ax = b. `b` and `x` may alias (in-place).
+        /// x = A^-1 b. `b` and `x` may alias.
         pub fn solve(self: *Self, b: []const T, x: []T) void {
             const li = self.li.items;
             const lx = self.lx.items;
             const ui = self.ui.items;
             const ux = self.ux.items;
-            // Same reason as `refactor`: `y[...] -= ...` is an f64 store LLVM
-            // cannot prove disjoint from `self.lp`/`self.up`, so the column
-            // bounds were re-fetched through `self` on every substitution step.
+            // Locals for the same aliasing reason as `refactorColumns`.
             const y = self.y;
             const lp = self.lp;
             const up = self.up;
 
-            // 1. y = P b (permute rows by pinv)
+            // y = P b
             for (b, 0..) |bi, r| y[self.pinv[r]] = bi;
 
-            // 2. L y' = y (forward substitution, L is unit lower triangular)
+            // Forward through unit-lower L.
             if (self.tv.items.len != 0) {
-                // Tape matrices: one flat pass over L in column order, no
-                // per-column loop setup. A zero y[k] leaves its rows alone,
-                // as the column loop's skip does (signed zeros included).
+                // Tape matrices: one flat pass over L. Skipping a zero y[k]
+                // matches the column loop, signed zeros included.
                 for (li, lx, self.lsrc.items) |r, l, k| {
                     const yk = y[k];
                     if (yk != 0) y[r] -= l * yk;
@@ -982,7 +887,7 @@ pub fn SparseLu(comptime T: type) type {
                 scatterAxpy(y, li, lx, lp[k], lp[k + 1], yk);
             }
 
-            // 3. U z = y' (back substitution)
+            // Back through U.
             var k = self.n;
             while (k > 0) {
                 k -= 1;
@@ -992,43 +897,33 @@ pub fn SparseLu(comptime T: type) type {
                 scatterAxpy(y, ui, ux, up[k], up[k + 1], zk);
             }
 
-            // 4. x = Q^{-1} z (un-permute columns)
+            // x = Q^-1 z
             for (self.q, 0..) |c, j| x[c] = y[j];
         }
 
-        // ====================================================================
-        // solveT: Q^T → U^{-T} → L^{-T} → P^{-1} transpose solve
-        // ====================================================================
-
-        /// Solve A^T x = b. Used by adjoint analyses (noise, sens).
-        /// A = P^{-1} L U Q^{-1}, so A^{-T} = Q L^{-T} U^{-T} P.
-        ///   1. z = Q^T b   (column permutation)
-        ///   2. U^{-T} z    (forward sub on U^T, lower triangular)
-        ///   3. L^{-T} z    (back sub on L^T, unit upper triangular)
-        ///   4. x = P^{-1} z
+        /// x = A^-T b, for adjoint analyses. A = P^-1 L U Q^-1, so
+        /// A^-T = P^T L^-T U^-T Q^T. `b` and `x` may alias.
         pub fn solveT(self: *Self, b: []const T, x: []T) void {
             const li = self.li.items;
             const lx = self.lx.items;
             const ui = self.ui.items;
             const ux = self.ux.items;
 
-            // 1. z = Q^T b: pivot-step k gets b[q[k]]
             for (self.q, 0..) |c, k| self.y[k] = b[c];
 
-            // 2. U^{-T} z: U^T is lower triangular, gather-mode forward sub.
+            // Forward through U^T, gathering.
             for (0..self.n) |k| {
                 for (self.up[k]..self.up[k + 1]) |p| self.y[k] -= ux[p] * self.y[ui[p]];
                 self.y[k] /= self.udiag[k];
             }
 
-            // 3. L^{-T} z: L^T is unit upper triangular, gather-mode back sub.
+            // Back through unit-upper L^T, gathering.
             var k = self.n;
             while (k > 0) {
                 k -= 1;
                 for (self.lp[k]..self.lp[k + 1]) |p| self.y[k] -= lx[p] * self.y[li[p]];
             }
 
-            // 4. P^{-1} z: pinv[r] = step that pivoted row r → x[r] = z[pinv[r]]
             for (0..self.n) |r| x[r] = self.y[self.pinv[r]];
         }
     };
