@@ -1,29 +1,54 @@
-//! Shared analysis context: what every analysis leaf needs, and nothing the
-//! leaves feed back into. Leaves import THIS file (usually as `root`), never
-//! ../root.zig — root.zig imports the leaves for dispatch, and importing it
-//! back would close the cycle this file exists to break.
-//!
-//! File-level DAG inside src/analysis/:
-//!   Circuit.zig -> types.zig -> leaves / executor.zig -> root.zig
+//! Shared analysis context: the circuit, the run context and the result type
+//! every analysis leaf needs. Leaves import this file, never ../root.zig,
+//! which imports the leaves for dispatch. File DAG inside src/analysis/:
+//! Circuit.zig -> types.zig -> leaves / executor.zig -> root.zig.
 const std = @import("std");
 
 const circuit_mod = @import("Circuit.zig");
-
 const device_ir = @import("device").abi;
 
-// -- Re-exports from Circuit.zig --
 pub const Circuit = circuit_mod.Circuit;
 pub const EvalHook = circuit_mod.EvalHook;
 pub const GpuHook = circuit_mod.GpuHook;
-pub const BbdBlock = circuit_mod.BbdBlock;
-pub const BbdInfo = circuit_mod.BbdInfo;
+pub const AcParam = circuit_mod.AcParam;
 pub const GROUND = circuit_mod.GROUND;
 pub const zeroSimd = circuit_mod.zeroSimd;
 pub const copySimd = circuit_mod.copySimd;
-/// Column names for one Result: optional scale literal at [0], then one
-/// allocated name per probe. Engine-built ctxs carry a label per probe
-/// ("v(out)", "i(v1)"); hand-built ones (tests) may leave `probe_labels`
-/// empty and get the v(<node>) fallback off the circuit's intern table.
+/// Builds an owning Circuit from protos, for tests. See `Circuit.zig` `init`.
+pub const freeze = circuit_mod.init;
+
+pub const CardRef = @import("core").query.CardRef;
+pub const ParamRef = device_ir.ParamRef;
+pub const NoiseSource = device_ir.NoiseSource;
+pub const Result = @import("core").Result;
+
+/// Everything an analysis needs, resolved before dispatch.
+pub const RunCtx = struct {
+    circuit: *Circuit,
+    /// The operating point. The session solves one ahead of every query except
+    /// `.op` (the executor solves it) and `.tran uic` (the executor seeds ICs).
+    x_op: []f64,
+    probes: []const u32,
+    /// Raw column label per probe, parallel to `probes`. May be empty in
+    /// hand-built contexts; see `probeNames`.
+    probe_labels: []const []const u8 = &.{},
+    source_node: u32,
+    source_branch: u32,
+    /// Composite AC excitation `[re(0..n), im(0..n)]`, length `2 * circuit.n`,
+    /// summed over every source card with an `AC mag [phase]`. An .ac sweep is
+    /// one solve per frequency against this drive. Empty means no AC source,
+    /// which gives a zero response, as in ngspice.
+    ac_drive: []const f64 = &.{},
+    /// Results arena: everything in the returned Result lives here.
+    allocator: std.mem.Allocator,
+    /// Reclaimable work storage.
+    scratch_allocator: std.mem.Allocator,
+};
+
+/// Returns one column name per probe, preceded by `first` when given.
+/// Unlabeled contexts fall back to `v(<node name>)`, or `v(<row>)` for an
+/// unnamed branch row so two such columns never share a name. Every name
+/// except `first` is allocated from `ctx.allocator`.
 pub fn probeNames(ctx: *const RunCtx, first: ?[]const u8) ![]const []const u8 {
     const a = ctx.allocator;
     const extra: usize = if (first == null) 0 else 1;
@@ -38,9 +63,6 @@ pub fn probeNames(ctx: *const RunCtx, first: ?[]const u8) ![]const []const u8 {
             try a.dupe(u8, ctx.probe_labels[i])
         else blk: {
             const label = ctx.circuit.nodeName(row);
-            // Unlabeled rows are branch/internal unknowns and a deck can have
-            // more than one; a shared "?" makes two columns with one name,
-            // which is an invalid raw file. Fall back to the row index.
             break :blk if (label.len == 0)
                 try std.fmt.allocPrint(a, "v({d})", .{row})
             else
@@ -50,53 +72,3 @@ pub fn probeNames(ctx: *const RunCtx, first: ?[]const u8) ![]const []const u8 {
     }
     return names;
 }
-
-/// One netlist card, keyed the way `ParamRef` identifies a device: by device
-/// TYPE plus ordinal within that type. The netlist layer fills it (src/
-/// builder.zig, at the one place instance ordinals are handed out); `.sens` is
-/// the consumer, because ngspice names a sensitivity column after the CARD and
-/// `resistor#0` resolves to nothing a raw-file reader can use.
-pub const CardRef = @import("core").query.CardRef;
-
-// -- Re-exports for analysis modules + src/ consumers --
-pub const ParamRef = device_ir.ParamRef;
-pub const AcParam = circuit_mod.AcParam;
-pub const NoiseSource = device_ir.NoiseSource;
-pub const NoiseGenKind = device_ir.NoiseGenKind;
-pub const NoiseGen = device_ir.NoiseGen;
-pub const PsdTerm = device_ir.PsdTerm;
-/// Internal test construction: protos -> evaluated Circuit storage.
-pub const freeze = circuit_mod.init;
-
-// ---------------------------------------------------------------------------
-// Run context — everything an analysis needs, resolved before dispatch
-// ---------------------------------------------------------------------------
-
-pub const RunCtx = struct {
-    circuit: *Circuit,
-    /// The operating point. Session.prerequisite solves one for every job but
-    /// `.op` (the executor solves it) and `.tran uic` (the executor seeds ICs).
-    x_op: []f64,
-    probes: []const u32,
-    /// Raw column label per probe, parallel to `probes` (see probeNames).
-    probe_labels: []const []const u8 = &.{},
-    source_node: u32,
-    source_branch: u32,
-    /// Composite AC excitation over the circuit unknowns, stacked real:
-    /// `[re(0..n), im(0..n)]`, length `2 * circuit.n`. Every source card
-    /// carrying an `AC mag [phase]` contributes to it (builder.zig
-    /// `acExcitation`), so an .ac sweep is one solve per frequency against the
-    /// whole deck's drive — the SPICE semantics, not a unit poke at one branch.
-    /// Empty (hand-built contexts) reads as "no source named AC", which is a
-    /// zero response — the same answer ngspice gives such a deck.
-    ac_drive: []const f64 = &.{},
-    allocator: std.mem.Allocator,
-    /// Reclaimable work storage; `allocator` is the results arena.
-    scratch_allocator: std.mem.Allocator,
-};
-
-// ---------------------------------------------------------------------------
-// Uniform result — every analysis produces this
-// ---------------------------------------------------------------------------
-
-pub const Result = @import("core").Result;

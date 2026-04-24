@@ -4,6 +4,8 @@ const std = @import("std");
 const requests = @import("core").query;
 const Deck = @import("core").Deck;
 
+/// True when every float reachable from `value` is finite. `dx_clamp` is the
+/// exception: +inf means "no clamp", so it only has to be positive.
 fn finite(value: anytype) bool {
     return switch (@typeInfo(@TypeOf(value))) {
         .float => std.math.isFinite(value),
@@ -25,6 +27,7 @@ fn finite(value: anytype) bool {
     };
 }
 
+/// Returns the point count of an ascending or descending linear sweep.
 fn sweep(start: f64, stop: f64, step: f64) !usize {
     const intervals = (stop - start) / step;
     if (step == 0 or intervals < 0) return error.InvalidQueryOptions;
@@ -51,9 +54,9 @@ fn frequency(value: f64) !void {
     try positive(2 * std.math.pi * value);
 }
 
-// Bound derived slabs before entering algorithms with unchecked arithmetic.
-// Sixty-four f64 planes leave room for each family's sums and byte counts;
-// this is a representability ceiling, not an allocation or performance budget.
+/// Returns the product of `factors`, rejecting any slab too large for 64 f64
+/// planes of it to be byte-addressable. A representability ceiling for the
+/// unchecked arithmetic downstream, not a memory budget.
 fn elements(factors: []const usize) !usize {
     var count: usize = 1;
     for (factors) |factor| count = std.math.mul(usize, count, factor) catch return error.InvalidQueryOptions;
@@ -68,6 +71,9 @@ fn tolerance(t: @import("core").numerics.Tolerances) !void {
         return error.InvalidQueryOptions;
 }
 
+/// Checks `query` against a circuit of `n` unknowns: finite options, valid
+/// tolerances, in-range node and branch indices, positive steps and counts,
+/// and representable derived sizes. Fails with `error.InvalidQueryOptions`.
 pub fn validate(query: requests.Query, n: u32) !void {
     @setEvalBranchQuota(10000);
     if (n == 0) return error.InvalidQueryOptions;
@@ -221,6 +227,8 @@ pub fn validate(query: requests.Query, n: u32) !void {
     }
 }
 
+/// `validate`, plus `error.DcSweepSourceNotFound` when a `.dc` sweep names a
+/// card the deck does not have.
 pub fn validateDeck(query: requests.Query, n: u32, deck: *const Deck) !void {
     try validate(query, n);
     if (query == .dc) {
@@ -229,9 +237,8 @@ pub fn validateDeck(query: requests.Query, n: u32, deck: *const Deck) !void {
     }
 }
 
-/// The swept card has to be one the circuit actually built — the card table
-/// is keyed the same way `ParamRef` is, so this is the same lookup `dc.run`
-/// will do, just before anything is allocated for it.
+/// The same (type, ordinal) lookup `dc.run` does, made before anything is
+/// allocated for the sweep.
 fn dcTargetExists(target: requests.Dc.SweepTarget, deck: *const Deck) !void {
     if (target.is_temp) return;
     for (deck.cards) |card| {

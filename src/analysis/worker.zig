@@ -1,17 +1,24 @@
-//! Cooperative worker control; independent of circuit and solver state.
+//! Worker: runs one analysis on its own thread and parks it at every
+//! progress checkpoint until the coordinator resumes or cancels it.
+//! Independent of circuit and solver state.
 const std = @import("std");
 const requests = @import("core").query;
 const progress = @import("progress.zig");
 
 pub const Options = struct {
     stack_size: usize = 512 * 1024 * 1024,
-    /// OP can expose Newton iterations; other queries publish outer boundaries.
+    /// Park on `.nonlinear` checkpoints too. Only `.op` does; other queries
+    /// park at outer boundaries and only poll cancellation inside Newton.
     report_nonlinear: bool = false,
+    /// Print per-quantum timing under this query id.
     timing_query: ?requests.QueryId = null,
 };
 
-// ponytail: retain one thread stack per started query; use explicit phase
-// storage if retained stacks become the limiting resource.
+/// A resumable run of `run(ctx)` producing `Product`. Must stay at a fixed
+/// address from `callback` until `deinit`: the thread and the callback hold it.
+///
+/// ponytail: one retained thread stack per started query; move to explicit
+/// phase storage if stacks become the limiting resource.
 pub fn Worker(comptime Product: type) type {
     return struct {
         io: std.Io,
@@ -45,12 +52,14 @@ pub fn Worker(comptime Product: type) type {
             return .{ .io = io, .ctx = ctx, .run = execute_fn, .options = options };
         }
 
+        /// Returns the checkpoint callback the analysis must call.
         pub fn callback(self: *Self) progress.Callback {
             return .{ .ctx = self, .yield_fn = checkpoint };
         }
 
-        /// Start one quantum without waiting, so the coordinator can start a batch.
-        /// A failed thread spawn leaves the query unstarted and retryable.
+        /// Starts or resumes one quantum without waiting, so the coordinator
+        /// can start several. A failed thread spawn leaves the worker unstarted
+        /// and retryable; `error.AlreadyRunning` if a quantum is in flight.
         pub fn start(self: *Self) !void {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
@@ -71,7 +80,9 @@ pub fn Worker(comptime Product: type) type {
             }
         }
 
-        /// Wait for the quantum started by start(), or read an existing terminal result.
+        /// Waits for the quantum `start` began, or returns the terminal
+        /// outcome again. Joins the thread once the run is over.
+        /// `error.NotStarted` before the first `start`.
         pub fn wait(self: *Self) !Outcome {
             const outcome = try self.waitOutcome();
             if (outcome != .progress) if (self.thread) |thread| {
@@ -102,12 +113,14 @@ pub fn Worker(comptime Product: type) type {
             };
         }
 
+        /// `start` then `wait`.
         pub fn advance(self: *Self) !Outcome {
             try self.start();
             return self.wait();
         }
 
-        /// Request cancellation. A running query observes it at its next checkpoint.
+        /// Requests cancellation. A running analysis sees it at its next
+        /// checkpoint; an unstarted one never runs.
         pub fn cancel(self: *Self) void {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
@@ -117,7 +130,7 @@ pub fn Worker(comptime Product: type) type {
             self.changed.broadcast(self.io);
         }
 
-        /// Joins before releasing the controller; run's defers finish before return.
+        /// Cancels and joins, so the analysis's defers have run on return.
         pub fn deinit(self: *Self) void {
             self.cancel();
             if (self.thread) |thread| thread.join();
@@ -125,8 +138,7 @@ pub fn Worker(comptime Product: type) type {
 
         fn checkpoint(ctx: *anyopaque, event: progress.Event) error{QueryCancelled}!void {
             const self: *Self = @ptrCast(@alignCast(ctx));
-            // Suppressed inner iterations only poll cancellation; scheduler
-            // state is touched at the outer query boundary under the mutex.
+            // Suppressed Newton checkpoints only poll cancellation, lock-free.
             if (event.phase == .nonlinear and !self.options.report_nonlinear) {
                 if (self.cancel_requested.load(.monotonic)) return error.QueryCancelled;
                 return;

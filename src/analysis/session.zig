@@ -1,14 +1,22 @@
-//! Query graph and coordinator. Numerical state remains in each Executor.
+//! Session: the query graph and its cooperative scheduler. Each row is one
+//! query plus its implicit OP prerequisite; numerical state lives in the
+//! row's Executor.
 const std = @import("std");
-const requests = @import("core").query;
-const Deck = @import("core").Deck;
+const core = @import("core");
+const requests = core.query;
+const Deck = core.Deck;
+const Circuit = @import("device").Circuit;
+const ParamRef = @import("device").abi.ParamRef;
 const execution = @import("executor.zig");
 const progress = @import("progress.zig");
-const Result = @import("types.zig").Result;
+const types = @import("types.zig");
+const Result = types.Result;
 const validateDeck = @import("validate.zig").validateDeck;
 
 pub const QueryId = requests.QueryId;
 const none = requests.invalid_query;
+
+/// Lifecycle of one query row.
 pub const Status = enum(u8) {
     pending,
     paused,
@@ -24,8 +32,12 @@ pub const Status = enum(u8) {
         };
     }
 };
+/// A query selection: everything, one query with its prerequisite, or one
+/// connected component (a shared OP and its dependents).
 pub const Scope = union(enum) { all, query: QueryId, component: u32 };
+/// How many ready queries one scheduling round may run at once.
 pub const Limits = struct { max_parallel: u16 = 1 };
+/// Which advancement `print` previews.
 pub const Preview = union(enum) { run_all, advance: QueryId, advance_ready: []const QueryId };
 pub const PrintOptions = struct {
     scope: Scope = .all,
@@ -33,6 +45,7 @@ pub const PrintOptions = struct {
     ascii: bool = false,
     limits: ?Limits = null,
 };
+/// Snapshot of one query row.
 pub const QueryInfo = struct {
     id: QueryId,
     kind: requests.Kind,
@@ -43,6 +56,8 @@ pub const QueryInfo = struct {
     progress: ?progress.Event,
     failure: ?anyerror,
 };
+/// What one advancement did: `advanced` may be the prerequisite of
+/// `requested`, and `target_status` is the requested query's status after it.
 pub const Advance = struct {
     requested: QueryId,
     advanced: QueryId,
@@ -63,6 +78,8 @@ const Row = struct {
     executor: ?*execution.Executor = null,
 };
 
+/// The query graph over one prepared circuit and deck, both borrowed for the
+/// session's lifetime. `QueryId` is the row index.
 pub const Session = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -70,8 +87,11 @@ pub const Session = struct {
     deck: *const Deck,
     config: execution.Config,
     rows: std.MultiArrayList(Row) = .empty,
+    /// Requested queries in first-request order, for delivery.
     outputs: std.ArrayList(QueryId) = .empty,
+    /// One arena per `append`, holding its copied query options.
     request_arenas: std.ArrayList(std.heap.ArenaAllocator) = .empty,
+    /// Round-robin start for `readyQueries`.
     cursor: u32 = 0,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, topology: *const Circuit, deck: *const Deck, config: execution.Config) Session {
@@ -79,7 +99,7 @@ pub const Session = struct {
     }
 
     pub fn deinit(self: *Session) void {
-        // Join dependents before releasing their immutable OP products.
+        // Newest first: dependents join before the OP products they copied from.
         var i = self.rows.len;
         while (i != 0) {
             i -= 1;
@@ -92,7 +112,10 @@ pub const Session = struct {
         self.* = undefined;
     }
 
-    /// Validates and copies the whole extension before publishing IDs or rows.
+    /// Adds `jobs`, writing their ids to `ids`, and returns `jobs.len`. Each
+    /// non-OP job shares an existing matching OP prerequisite or gets a new
+    /// one. All-or-nothing: every job is validated and deep-copied before any
+    /// row or id is published.
     pub fn append(self: *Session, jobs: []const requests.Query, ids: []QueryId) !usize {
         if (ids.len < jobs.len) return error.BufferTooSmall;
         if (jobs.len == 0) return 0;
@@ -171,6 +194,8 @@ pub const Session = struct {
         return status;
     }
 
+    /// Returns a snapshot of query `id`. A non-terminal query whose
+    /// prerequisite ended without a result reads as `.dependency_failed`.
     pub fn info(self: *const Session, id: QueryId) !QueryInfo {
         const i = try self.index(id);
         const dep = self.rows.items(.dependency)[i];
@@ -212,7 +237,9 @@ pub const Session = struct {
         return dep == none or self.rows.items(.status)[@intFromEnum(dep)] == .complete;
     }
 
-    /// Copy-out in scheduler order. Returns required capacity without partial writes.
+    /// Copies the ready queries in `scope` into `ids` in scheduler order and
+    /// returns how many there are. When `ids` is too short, writes nothing and
+    /// returns the required length.
     pub fn readyQueries(self: *const Session, scope: Scope, ids: []QueryId) !usize {
         try self.validateScope(scope);
         var n: usize = 0;
@@ -262,7 +289,9 @@ pub const Session = struct {
         }
     }
 
-    /// Every selected query is on the initial ready frontier; validation is atomic.
+    /// Advances each of `ids` by one quantum, at most `limits.max_parallel` at
+    /// a time, and writes one event per id. Every id must be ready and unique;
+    /// that is checked for all of them before any runs.
     pub fn advanceReady(self: *Session, ids: []const QueryId, limits: Limits, events: []Advance) !usize {
         try self.validateReady(ids, limits);
         if (events.len < ids.len) return error.BufferTooSmall;
@@ -307,6 +336,8 @@ pub const Session = struct {
         return ids.len;
     }
 
+    /// Advances `target`, or its prerequisite first, by one quantum. A
+    /// terminal target returns its status without running anything.
     pub fn advance(self: *Session, target: QueryId) !Advance {
         const target_info = try self.info(target);
         if (target_info.status.terminal()) return .{
@@ -327,11 +358,14 @@ pub const Session = struct {
         return events[0];
     }
 
+    /// True when every requested query is terminal.
     pub fn finished(self: *const Session) bool {
         for (self.outputs.items) |id| if (!self.effectiveStatus(@intFromEnum(id)).terminal()) return false;
         return true;
     }
 
+    /// Returns the error of the first requested query that ended without a
+    /// result, or null.
     pub fn failure(self: *const Session) ?anyerror {
         for (self.outputs.items) |id| {
             const i = @intFromEnum(id);
@@ -342,13 +376,16 @@ pub const Session = struct {
         return null;
     }
 
+    /// Returns a completed query's result, valid until `deinit`.
     pub fn result(self: *const Session, id: QueryId) !Result {
         const i = try self.index(id);
         if (self.effectiveStatus(i) != .complete) return error.ResultUnavailable;
         return self.rows.items(.executor)[i].?.result() orelse error.ResultUnavailable;
     }
 
-    /// Pure preview: uses the same readiness order and validation as advancement.
+    /// Writes the query tree for `options.scope`, marking what the chosen
+    /// preview would run next. Runs nothing; uses the same readiness order and
+    /// validation as advancement.
     pub fn print(self: *const Session, writer: *std.Io.Writer, options: PrintOptions) !void {
         try self.validateScope(options.scope);
         const limits = options.limits orelse Limits{};
@@ -442,6 +479,8 @@ fn findOp(rows: std.MultiArrayList(Row), op: requests.Op) ?QueryId {
     return null;
 }
 
+/// The OP a query needs first: its tolerances, transient-flavoured for
+/// time-domain kinds. Null for `.op` itself and `.tran uic`.
 fn prerequisite(job: requests.Query) ?requests.Op {
     if (job == .op or (job == .tran and job.tran.uic)) return null;
     return .{ .tol = switch (job) {
@@ -453,6 +492,7 @@ fn connector(ascii: bool, last: bool) []const u8 {
     return if (ascii) (if (last) "`--" else "|--") else (if (last) "└──" else "├──");
 }
 
+/// Deep-copies every slice reachable from `value` into `allocator`.
 fn copyValue(allocator: std.mem.Allocator, value: anytype) std.mem.Allocator.Error!@TypeOf(value) {
     const T = @TypeOf(value);
     switch (@typeInfo(T)) {
@@ -475,12 +515,8 @@ fn copyValue(allocator: std.mem.Allocator, value: anytype) std.mem.Allocator.Err
     }
 }
 
-const core = @import("core");
-const ir = @import("device").abi;
-const Circuit = @import("device").Circuit;
-const collectTyped = @import("types.zig").Circuit.collectTyped;
-
-/// The shape `query` publishes over this circuit and deck, before it runs.
+/// Returns the shape `query` publishes over this circuit and deck, without
+/// running it.
 pub fn schemaOf(allocator: std.mem.Allocator, topology: *const Circuit, deck: *const Deck, query: requests.Query) !core.QuerySchema {
     const columns: usize = switch (query) {
         .op => deck.probes.len,
@@ -495,9 +531,9 @@ pub fn schemaOf(allocator: std.mem.Allocator, topology: *const Circuit, deck: *c
             break :blk 1 + try std.math.mul(usize, n, n);
         },
         .sens, .dcmatch => blk: {
-            var refs: std.ArrayList(ir.ParamRef) = .empty;
+            var refs: std.ArrayList(ParamRef) = .empty;
             defer refs.deinit(allocator);
-            try collectTyped(topology.batches, topology.batch_types, allocator, &refs);
+            try types.Circuit.collectTyped(topology.batches, topology.batch_types, allocator, &refs);
             break :blk refs.items.len + @intFromBool(query == .dcmatch);
         },
         else => deck.probes.len + 1,

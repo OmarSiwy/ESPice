@@ -1,4 +1,5 @@
-//! Public query execution seam. Numerical implementations stay inside analysis.
+//! The analysis module's public seam: the query session, execution config and
+//! result schemas. The numerical implementations stay private to the module.
 pub const session = @import("session.zig");
 pub const ExecutionConfig = @import("executor.zig").Config;
 pub const validateBackend = @import("executor.zig").validateBackend;
@@ -17,14 +18,9 @@ test {
     _ = @import("tests/transient.zig");
     _ = @import("tests/integration.zig");
 
-    // The `pss/*` implementations, imported for SEMA rather than for tests of
-    // their own (they have none yet). Zig analyses lazily: a function nothing
-    // references is never type-checked, so `hb.zig` sat on a `std.posix.getenv`
-    // that Zig 0.16 had removed while `zig build test-analysis` reported every
-    // test passing. It surfaced only when an artifact reaching `executor.zig`'s
-    // harmonic-balance arm was linked, which the default `test` step does not
-    // do. Importing them here turns a compile error in this subtree into a test
-    // failure, where it is visible.
+    // Imported for semantic analysis only: Zig never type-checks an
+    // unreferenced function, and the test step does not link the executor's
+    // dispatch into these files.
     _ = @import("pss/hb.zig");
     _ = @import("pss/pac.zig");
     _ = @import("pss/pnoise.zig");
