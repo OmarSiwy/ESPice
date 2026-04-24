@@ -42,7 +42,7 @@ test "generated limiter: failed trial rollback and retry match an untried circui
             try t.expect((try solve(ckt, &ws, x, 0, options, analysis.EvalHook{})).converged);
             _ = ckt.stateCtl(.commit);
         }
-        // Simulate the Newton-failure rejection path at a later trial time.
+        // A failed Newton trial at a later time, then revert.
         tried.setSimState(.{ .t = 1, .dt = 1, .kind = .tran });
         try t.expect(!(try solve(&tried, &ws, xs, 1, .{ .gmin = 0, .max_iter = 2 }, analysis.EvalHook{})).converged);
         _ = tried.stateCtl(.revert);
@@ -86,7 +86,6 @@ test "jfnk vs newton: divider OP agrees to 1e-9" {
 
     try ckt.computeBaseline();
 
-    // Newton (direct)
     var ws_n = try converger.Workspace.init(testing.allocator, ckt.n, ckt.col_ptr, ckt.row_idx, ckt.bbd);
     defer ws_n.deinit(testing.allocator);
     const x_n = try testing.allocator.alloc(f64, ckt.n);
@@ -95,7 +94,6 @@ test "jfnk vs newton: divider OP agrees to 1e-9" {
     const nr = try converger.newton(&ckt, &ws_n, x_n, 0, .{}, analysis.EvalHook{});
     try testing.expect(nr.converged);
 
-    // JFNK
     var ws_j = try converger.Workspace.init(testing.allocator, ckt.n, ckt.col_ptr, ckt.row_idx, ckt.bbd);
     defer ws_j.deinit(testing.allocator);
     const x_j = try testing.allocator.alloc(f64, ckt.n);
@@ -117,7 +115,7 @@ test "jfnk: 100-diode ladder converges" {
     const vin = try b.addNode();
     try b.addDevice(@import("models").vsource, .{ .dc = 5 }, .{}, .{ vin, GROUND });
 
-    // Chain: R—D—R—D—...—GND
+    // vin -R- n1 -R- n2 ... -R- gnd, a diode from every n to ground.
     var prev: u32 = vin;
     for (0..n_diodes) |_| {
         const mid = try b.addNode();
@@ -125,7 +123,6 @@ test "jfnk: 100-diode ladder converges" {
         try b.addDevice(@import("models").diode, .{ .is = 1e-14 }, .{}, .{ mid, GROUND });
         prev = mid;
     }
-    // Final resistor to ground
     try b.addDevice(@import("models").resistor, .{ .r = 100 }, .{}, .{ prev, GROUND });
 
     var prepared = try b.compile();
@@ -146,6 +143,5 @@ test "jfnk: 100-diode ladder converges" {
     }, analysis.EvalHook{});
     try testing.expect(r.converged);
 
-    // Sanity: first node should be near 5V (source), diode nodes between 0 and 1V
     try testing.expectApproxEqAbs(@as(f64, 5.0), x[vin], 1e-3);
 }

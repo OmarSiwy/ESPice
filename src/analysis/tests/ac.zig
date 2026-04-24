@@ -1,3 +1,5 @@
+//! Frequency-domain unit tests: the frequency stream and noise PSD/integration.
+
 const StreamTests = struct {
     const freq = @import("../ac/freq.zig");
     const FreqSolver = @import("solver").freq_solve.FreqSolver;
@@ -15,8 +17,6 @@ const StreamTests = struct {
         for (&frequencies, 0..) |*f, i| f.* = @floatFromInt(i);
         const rhs = [_]f64{ 1, 2, 0, 0 };
 
-        // One cold callback record: events update two counters; no numerical data
-        // is stored here. u16 covers this 131-frequency fixture's whole lifetime.
         const Probe = struct {
             calls: u16 = 0,
             completed: u16 = 0,
@@ -68,21 +68,18 @@ const NoiseTests = struct {
     const std = @import("std");
 
     const k_boltzmann = 1.380649e-23;
-
     const q_electron = 1.602176634e-19;
 
-    // ── Tests ──────────────────────────────────────────────────────────────
-
     test "sourcePsd white is flat" {
-        // Thermal, 100 ohm: the device would have handed us 4kT*g.
+        // Thermal, 100 ohm: the device hands over 4kT*g.
         const src: NoiseSource = .{ .node_p = 0, .node_n = 1, .white = 4.0 * k_boltzmann * 300.15 * 0.01 };
         try std.testing.expectApproxEqRel(src.white, sourcePsd(src, 1e6), 1e-12);
         try std.testing.expectApproxEqRel(sourcePsd(src, 1e6), sourcePsd(src, 1e9), 1e-12);
     }
 
     test "sourcePsd shot is 2q|I|, not 4kT*g" {
-        // THE 2x THIS BRANCH EXISTS TO FIX. A junction at I has g = dI/dV = I/Vt,
-        // so the old Jacobian read gave 4kT*I/Vt = 4q*I -- exactly twice 2q*I.
+        // A junction at I has g = dI/dV = I/Vt, so reading shot noise off the
+        // Jacobian as 4kT*g gives 4q*I, exactly twice 2q*I.
         const i_bias = 1e-3;
         const vt = k_boltzmann * 300.15 / q_electron;
         const src: NoiseSource = .{ .node_p = 0, .node_n = 1, .white = 2.0 * q_electron * i_bias };
