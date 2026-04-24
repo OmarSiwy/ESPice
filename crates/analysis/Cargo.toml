@@ -1,0 +1,17 @@
+[package]
+name = "incspice-analysis"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+incspice-core   = { workspace = true }
+incspice-solver = { workspace = true }
+incspice-cache  = { workspace = true }
+rayon     = { workspace = true }
+ahash      = { workspace = true }
+libloading = { workspace = true }
+smallvec  = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+incspice-parser = { workspace = true }

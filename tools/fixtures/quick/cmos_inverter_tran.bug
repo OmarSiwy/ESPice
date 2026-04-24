@@ -1,0 +1,26 @@
+# BUG: CMOS Inverter Transient — Wrong Output Values (FAIL 2.78e+02)
+
+## Circuit
+`cmos_inverter_tran.sp` — CMOS inverter, PULSE(0 3.3 1n 0.5n 0.5n 10n 20n), .TRAN 1n 50n
+
+## Symptom
+FAIL with relative error 2.78e+02 (27800%) vs ngspice.
+BigOSpice runs (exit 0) but produces wrong node voltages.
+
+## Root Cause (suspected)
+The MOSFET Level 1 model (NMOS/PMOS) is likely not stamping correctly during transient simulation.
+The gate-driven switching behavior (v(out) should rail to ~0V or ~3.3V) is not being reproduced.
+Possible issues:
+1. MOSFET threshold voltage (Vth) parsing from `.MODEL` is wrong — NMOS stays off when it should be on
+2. MOSFET Level 1 Ids formula has a sign error or incorrect saturation region detection
+3. The transient solution is stuck at the DC OP value (t=0) rather than evolving with the PULSE input
+
+## Key Files to Investigate
+- `crates/device/src/mosfet.rs` — Level 1 MOSFET model eval
+- `crates/parser/src/tokenizer.rs` — `.MODEL NMOS/PMOS` parameter parsing
+- `crates/analysis/src/transient.rs` — MOSFET convergence during Newton iterations
+
+## Additional Bug: Adaptive Timestep Hang
+When CLI uses `TransientConfig::with_adaptive(tstep, Trapezoidal)`, bigospice hangs indefinitely.
+Root cause: `tmax` defaults to `h_init` (1ns), so h_min = 1e-19s → 5e11 iterations needed.
+Fixed temporarily by reverting to `TransientConfig::new(tstep)` (fixed BackwardEuler).

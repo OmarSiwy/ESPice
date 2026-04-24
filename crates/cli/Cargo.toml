@@ -1,0 +1,20 @@
+[package]
+name = "incspice-cli"
+edition.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "incspice"
+path = "src/main.rs"
+
+[dependencies]
+incspice-parser   = { workspace = true }
+incspice-core     = { workspace = true }
+incspice-analysis = { workspace = true }
+incspice-solver   = { workspace = true }
+incspice-cache    = { workspace = true }
+clap              = { workspace = true }
+thiserror         = { workspace = true }
+crossbeam-channel = { workspace = true }
+csv               = { workspace = true }
+rayon             = { workspace = true }

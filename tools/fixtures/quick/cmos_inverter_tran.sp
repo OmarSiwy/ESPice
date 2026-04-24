@@ -1,0 +1,10 @@
+* Q06: CMOS Inverter Switching Transient — Level 1 MOSFETs, VDD=3.3V
+VDD vdd 0 DC 3.3
+VIN in 0 PULSE(0 3.3 1n 0.5n 0.5n 10n 20n)
+M1 out in 0 0 NMOD W=10u L=1u
+M2 out in vdd vdd PMOD W=20u L=1u
+CL out 0 0.1p
+.MODEL NMOD NMOS (VTO=0.5 KP=120u GAMMA=0.4 PHI=0.65 LAMBDA=0.04)
+.MODEL PMOD PMOS (VTO=-0.5 KP=60u GAMMA=0.4 PHI=0.65 LAMBDA=0.05)
+.TRAN 0.1n 50n
+.END

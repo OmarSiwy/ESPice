@@ -1,0 +1,15 @@
+[package]
+name = "incspice-parser"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+incspice-core   = { workspace = true }
+thiserror        = { workspace = true }
+phf              = { workspace = true }
+smallvec         = { workspace = true }
+arrayvec         = { workspace = true }
+indexmap         = { workspace = true }
+compact_str      = { workspace = true }
+string-interner  = { workspace = true }
+memchr           = { workspace = true }

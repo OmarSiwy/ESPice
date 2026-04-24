@@ -1,0 +1,5 @@
+* models.lib — shared device models library
+* Included by include_test.sp via .include "models.lib"
+*
+.model DMOD D (IS=1E-14 N=1.05 RS=5 CJO=0.5P TT=5P BV=50 IBV=1u)
+.model QNPN NPN (IS=1E-15 BF=120 VAF=80 TF=300P CJE=1.5P CJC=0.8P RC=5)

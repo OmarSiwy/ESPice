@@ -1,0 +1,15 @@
+# BUG: Ring Oscillator 5 — FAIL 3.76e+02
+
+## Circuit
+`ring_oscillator_5.sp` — 5-stage CMOS ring oscillator, transient
+
+## Symptom
+FAIL with relative error 3.76e+02 (37600%) vs ngspice.
+
+## Root Cause (suspected)
+Same MOSFET Level 1 model issue as cmos_inverter_tran.sp.
+The ring oscillator relies on MOSFET switching — if NMOS/PMOS don't switch correctly,
+oscillation won't start and BigOSpice will output wrong DC-like values.
+
+## Key Files
+- `crates/device/src/mosfet.rs` — Level 1 eval (same fix as CMOS inverter)

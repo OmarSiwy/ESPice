@@ -1,0 +1,20 @@
+* std_cells.lib — process corner library file
+* Contains named sections selected via .lib "file" <corner>
+*
+.lib tt
+* Typical-Typical corner models
+.model NMOD NMOS LEVEL=1 VTO=0.42 KP=270u LAMBDA=0.01 TNOM=27
+.model PMOD PMOS LEVEL=1 VTO=-0.42 KP=90u LAMBDA=0.01 TNOM=27
+.endl tt
+*
+.lib ff
+* Fast-Fast corner (lower Vt, higher KP)
+.model NMOD NMOS LEVEL=1 VTO=0.35 KP=310u LAMBDA=0.01 TNOM=27
+.model PMOD PMOS LEVEL=1 VTO=-0.35 KP=105u LAMBDA=0.01 TNOM=27
+.endl ff
+*
+.lib ss
+* Slow-Slow corner (higher Vt, lower KP)
+.model NMOD NMOS LEVEL=1 VTO=0.50 KP=230u LAMBDA=0.01 TNOM=27
+.model PMOD PMOS LEVEL=1 VTO=-0.50 KP=75u LAMBDA=0.01 TNOM=27
+.endl ss

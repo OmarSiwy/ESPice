@@ -1,0 +1,22 @@
+[package]
+name = "incspice-solver"
+edition.workspace = true
+version.workspace = true
+
+[features]
+default = []
+gpu = ["wgpu", "bytemuck", "pollster"]
+klu = []
+
+[dependencies]
+incspice-core  = { workspace = true }
+incspice-cache = { workspace = true }
+rayon        = { workspace = true }
+smallvec     = { workspace = true }
+thiserror    = { workspace = true }
+log          = { workspace = true }
+wgpu         = { workspace = true, optional = true }
+bytemuck     = { workspace = true, optional = true }
+pollster     = { workspace = true, optional = true }
+libloading   = { workspace = true }
+wide         = { workspace = true }

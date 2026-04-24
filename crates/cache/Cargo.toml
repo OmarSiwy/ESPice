@@ -1,0 +1,12 @@
+[package]
+name = "incspice-cache"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+incspice-core = { workspace = true }
+log = { workspace = true }
+bitvec      = { workspace = true }
+smallvec    = { workspace = true }
+fixedbitset = { workspace = true }
+arrayvec    = { workspace = true }
