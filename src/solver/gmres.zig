@@ -1,28 +1,12 @@
-//! GMRES(m) — restarted Krylov iterative solver, right-preconditioned.
-//!
-//! Matrix-free: the caller supplies a matvec callback (w = A*v) and an
-//! optional right-preconditioner callback (r = M^{-1} * r in-place).
-//!
-//! Data layout (SoA, contiguous, pre-allocated at init):
-//!   V:  (m+1) * n   Arnoldi basis, column-major (contiguous per vector)
-//!   H:  (m+1) * m   upper Hessenberg, row-major
-//!   cs, sn: m       Givens rotation cosines / sines
-//!   g:  m+1          transformed RHS
-//!   y:  m            triangular-solve workspace
-//!   w:  n            matvec / precond scratch
-//!   r:  n            residual scratch
-//!
-//! Zero allocation in solve(); all memory from init().
-//! SIMD-accelerated dot products and axpy in the Gram-Schmidt inner loop.
-//!
-//! Serves: JFNK inner solve (converger.zig), monodromy-Krylov PSS (future),
-//! any matrix-free system. See docs/solvers/newton-raphson-convergence.md §JFNK
-//! and docs/solvers/monodromy-krylov.md §GMRES.
+//! Matrix-free restarted GMRES(m) with optional right preconditioning, for
+//! the PSS monodromy and QPSS Krylov solves. All workspace is allocated by
+//! `init`; `solve` allocates nothing. Background:
+//! docs/solvers/monodromy-krylov.md.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-/// Right-preconditioned GMRES(m) solver, monomorphized per element type T.
+/// GMRES(m) workspace for n-dimensional systems over f32 or f64.
 pub fn Gmres(comptime T: type) type {
     comptime {
         std.debug.assert(T == f32 or T == f64);
@@ -33,36 +17,35 @@ pub fn Gmres(comptime T: type) type {
         const W = std.simd.suggestVectorLength(T) orelse 1;
         const Vec = @Vector(W, T);
 
-        /// Result of a solve() call.
         pub const SolveResult = struct {
+            /// Arnoldi steps across all restarts.
             iterations: u32,
+            /// ||b - A x|| / ||b||: the Givens estimate when converged, the
+            /// true residual otherwise.
             residual: T,
             converged: bool,
         };
 
-        // System dimension and restart depth.
         n: u32,
+        /// Restart depth.
         m: u32,
 
-        // --- Hot workspace (touched every Arnoldi step) ---
-        // Arnoldi basis: (m+1) vectors of length n, contiguous.
-        // v_basis[k * n .. (k+1) * n] is v_k.
+        /// Arnoldi basis: v_k is v_basis[k*n..][0..n], m + 1 vectors.
         v_basis: []T,
-        // Upper Hessenberg: (m+1) rows x m cols, row-major.
-        // H[i * m + j] = h_{i,j}.
+        /// Upper Hessenberg, (m + 1) x m row-major.
         h: []T,
-        // Givens rotation parameters.
+        /// Givens rotations.
         cs: []T,
         sn: []T,
-        // Transformed RHS (length m+1).
+        /// Rotated right-hand side, m + 1 entries.
         g: []T,
-        // Triangular solve workspace (length m).
+        /// Triangular-solve result, m entries.
         y: []T,
-        // Scratch vectors (length n each).
+        // Scratch, n entries each.
         w: []T,
         r: []T,
 
-        /// Allocate workspace for GMRES(m) on n-dimensional systems.
+        /// Allocates the workspace; n and m must be positive.
         pub fn init(gpa: Allocator, n: u32, m: u32) !Self {
             std.debug.assert(n > 0);
             std.debug.assert(m > 0);
@@ -104,14 +87,11 @@ pub fn Gmres(comptime T: type) type {
             self.* = undefined;
         }
 
-        /// Solve A*x = b matrix-free via right-preconditioned GMRES(m).
-        ///
-        /// matvec(v, w, ctx): compute w = A*v.
-        /// precond(r, ctx): apply right preconditioner in-place (r <- M^{-1} r).
-        ///   Pass null for unpreconditioned solve.
-        /// x: initial guess on entry, solution on exit.
-        /// tol: relative residual tolerance (||r|| / ||b|| < tol).
-        /// max_restarts: maximum number of outer restarts (0 = single cycle).
+        /// Solves A x = b. `matvec(v, w, ctx)` writes w = A v; `precond(r,
+        /// ctx)`, when given, applies M^-1 in place and the solve is right
+        /// preconditioned. `x` holds the initial guess and receives the
+        /// solution. Stops at ||r|| <= tol * ||b|| or after
+        /// `max_restarts + 1` cycles. A zero `b` returns x = 0 at once.
         pub fn solve(
             self: *Self,
             matvec: *const fn (v: []const T, w: []T, ctx: *anyopaque) void,
@@ -129,7 +109,6 @@ pub fn Gmres(comptime T: type) type {
             std.debug.assert(x.len >= n);
 
             const b_norm = vecNorm(b[0..n]);
-            // ponytail: zero RHS => x=0 is exact; skip iteration
             if (b_norm == 0) {
                 @memset(x[0..n], 0);
                 return .{ .iterations = 0, .residual = 0, .converged = true };
@@ -139,7 +118,6 @@ pub fn Gmres(comptime T: type) type {
             var total_iters: u32 = 0;
 
             for (0..max_restarts + 1) |_| {
-                // r = b - A*x
                 matvec(x[0..n], self.r[0..n], ctx);
                 for (0..n) |i| self.r[i] = b[i] - self.r[i];
 
@@ -148,11 +126,9 @@ pub fn Gmres(comptime T: type) type {
                     return .{ .iterations = total_iters, .residual = beta / b_norm, .converged = true };
                 }
 
-                // v_0 = r / beta
                 const v0 = self.getV(0);
                 vecScale(self.r[0..n], 1.0 / beta, v0);
 
-                // g = beta * e_1
                 @memset(self.g[0 .. m + 1], 0);
                 self.g[0] = beta;
 
@@ -163,8 +139,7 @@ pub fn Gmres(comptime T: type) type {
 
                     const vj = self.getV(j);
 
-                    // Right preconditioning: w = M^{-1} v_j, then z = A*w.
-                    // Without precond: z = A*v_j.
+                    // z = A M^-1 v_j, into r.
                     if (precond) |pc| {
                         @memcpy(self.w[0..n], vj);
                         pc(self.w[0..n], precond_ctx.?);
@@ -173,8 +148,7 @@ pub fn Gmres(comptime T: type) type {
                         matvec(vj, self.r[0..n], ctx);
                     }
 
-                    // Modified Gram-Schmidt orthogonalization.
-                    // z is stored in self.r (reused as scratch).
+                    // Modified Gram-Schmidt.
                     for (0..ju + 1) |i| {
                         const vi = self.getV(@intCast(i));
                         const hij = vecDot(self.r[0..n], vi);
@@ -185,23 +159,18 @@ pub fn Gmres(comptime T: type) type {
                     const h_jp1_j = vecNorm(self.r[0..n]);
                     self.h[(ju + 1) * m + ju] = h_jp1_j;
 
-                    // If not breakdown, normalize the next basis vector.
                     if (h_jp1_j != 0) {
                         const vjp1 = self.getV(j + 1);
                         vecScale(self.r[0..n], 1.0 / h_jp1_j, vjp1);
                     }
 
-                    // Apply previous Givens rotations to column j of H.
                     self.applyPreviousGivens(j);
-
-                    // Compute new Givens rotation for (h_{j,j}, h_{j+1,j}).
                     const hjj = self.h[ju * m + ju];
                     const hjp1j = self.h[(ju + 1) * m + ju];
                     const rot = givensRotation(hjj, hjp1j);
                     self.cs[ju] = rot.c;
                     self.sn[ju] = rot.s;
 
-                    // Apply to H column and g.
                     self.h[ju * m + ju] = rot.c * hjj + rot.s * hjp1j;
                     self.h[(ju + 1) * m + ju] = 0;
 
@@ -210,46 +179,37 @@ pub fn Gmres(comptime T: type) type {
                     self.g[ju] = rot.c * g_j + rot.s * g_jp1;
                     self.g[ju + 1] = -rot.s * g_j + rot.c * g_jp1;
 
-                    // Breakdown or convergence: exit the Arnoldi loop.
+                    // Breakdown or convergence.
                     if (h_jp1_j == 0 or @abs(self.g[ju + 1]) <= abs_tol) {
                         j += 1;
                         break;
                     }
                 }
 
-                // Solve the upper triangular system H*y = g (j columns).
-                const k = j; // number of Arnoldi steps completed
+                const k = j; // Arnoldi steps completed
                 if (k > 0) {
                     self.solveUpperTriangular(k);
-                    // Update x: x += V_k * y (with right preconditioning:
-                    // x += M^{-1} * V_k * y).
                     self.updateSolution(x[0..n], k, precond, precond_ctx);
                 }
 
-                // ponytail: one residual gate covers both early exit and a full restart window.
                 const res_norm = @abs(self.g[k]);
                 if (res_norm <= abs_tol) {
                     return .{ .iterations = total_iters, .residual = res_norm / b_norm, .converged = true };
                 }
             }
 
-            // Did not converge within max_restarts.
-            // Compute actual residual for the report.
             matvec(x[0..n], self.r[0..n], ctx);
             for (0..n) |i| self.r[i] = b[i] - self.r[i];
             const final_res = vecNorm(self.r[0..n]);
             return .{ .iterations = total_iters, .residual = final_res / b_norm, .converged = false };
         }
 
-        // --- Internal helpers ---
-
-        /// Get the i-th Arnoldi basis vector (slice of v_basis).
         inline fn getV(self: *Self, i: u32) []T {
             const off: usize = @as(usize, i) * @as(usize, self.n);
             return self.v_basis[off..][0..self.n];
         }
 
-        /// Apply Givens rotations 0..j-1 to column j of H (in-place).
+        /// Applies rotations 0..j-1 to column j of H.
         fn applyPreviousGivens(self: *Self, j: u32) void {
             const m: usize = self.m;
             const ju: usize = j;
@@ -263,10 +223,8 @@ pub fn Gmres(comptime T: type) type {
             }
         }
 
-        /// Back-solve the upper triangular k x k system from H into y.
-        /// If a diagonal is zero (breakdown on a singular operator), truncate
-        /// by setting that y-component to zero — gives the best solution in
-        /// the available Krylov subspace.
+        /// y = H^-1 g over the leading k x k triangle. A zero diagonal (a
+        /// singular operator) sets that component to zero.
         fn solveUpperTriangular(self: *Self, k: u32) void {
             const m: usize = self.m;
             const ku: usize = k;
@@ -279,8 +237,6 @@ pub fn Gmres(comptime T: type) type {
                 }
                 const diag = self.h[i * m + i];
                 if (diag == 0) {
-                    // ponytail: singular Hessenberg diagonal — Krylov subspace
-                    // doesn't span this direction. Set y[i]=0 (least-norm).
                     self.y[i] = 0;
                 } else {
                     self.y[i] /= diag;
@@ -288,7 +244,7 @@ pub fn Gmres(comptime T: type) type {
             }
         }
 
-        /// Update x += V_k * y, applying right-preconditioner if present.
+        /// x += M^-1 V_k y.
         fn updateSolution(
             self: *Self,
             x: []T,
@@ -298,7 +254,6 @@ pub fn Gmres(comptime T: type) type {
         ) void {
             const n: usize = self.n;
             if (precond) |pc| {
-                // Accumulate V_k * y into w, then apply M^{-1}, then add to x.
                 @memset(self.w[0..n], 0);
                 for (0..k) |j| {
                     const vj = self.getV(@intCast(j));
@@ -307,7 +262,6 @@ pub fn Gmres(comptime T: type) type {
                 pc(self.w[0..n], precond_ctx.?);
                 for (0..n) |i| x[i] += self.w[i];
             } else {
-                // x += V_k * y directly.
                 for (0..k) |j| {
                     const vj = self.getV(@intCast(j));
                     vecAxpy(x, self.y[j], vj);
@@ -315,14 +269,11 @@ pub fn Gmres(comptime T: type) type {
             }
         }
 
-        // --- SIMD-accelerated vector operations ---
-
-        /// ||v||_2
         fn vecNorm(v: []const T) T {
             return @sqrt(vecDot(v, v));
         }
 
-        /// <a, b> dot product, SIMD-accelerated.
+        /// W-lane partial sums, one reduce, then the scalar tail.
         fn vecDot(a: []const T, b: []const T) T {
             std.debug.assert(a.len == b.len);
             const n = a.len;
@@ -334,12 +285,10 @@ pub fn Gmres(comptime T: type) type {
                 acc += va * vb;
             }
             var s: T = @reduce(.Add, acc);
-            // Scalar tail.
             while (i < n) : (i += 1) s += a[i] * b[i];
             return s;
         }
 
-        /// a[i] += alpha * b[i], SIMD-accelerated.
         fn vecAxpy(a: []T, alpha: T, b: []const T) void {
             std.debug.assert(a.len == b.len);
             const n = a.len;
@@ -353,7 +302,6 @@ pub fn Gmres(comptime T: type) type {
             while (i < n) : (i += 1) a[i] += alpha * b[i];
         }
 
-        /// dst[i] = alpha * src[i]
         fn vecScale(src: []const T, alpha: T, dst: []T) void {
             std.debug.assert(src.len == dst.len);
             const n = src.len;
@@ -369,9 +317,7 @@ pub fn Gmres(comptime T: type) type {
     };
 }
 
-/// Compute Givens rotation parameters: c, s such that
-///   [ c  s ] [ a ]   [ r ]
-///   [-s  c ] [ b ] = [ 0 ]
+/// c, s with [c s; -s c] [a; b] = [r; 0].
 fn givensRotation(a: anytype, b: @TypeOf(a)) struct { c: @TypeOf(a), s: @TypeOf(a) } {
     if (b == 0) return .{ .c = 1, .s = 0 };
     if (a == 0) return .{ .c = 0, .s = std.math.sign(b) };

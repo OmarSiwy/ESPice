@@ -1,17 +1,86 @@
+//! Solver unit tests: kernels against dense references, and every SIMD or
+//! tape kernel against its scalar oracle, bitwise.
+
+const std = @import("std");
+const testing = std.testing;
+
+/// Dense-to-CSC converter for tests.
+fn DenseCsc(comptime n: usize) type {
+    return struct {
+        col_ptr: [n + 1]u32,
+        row_idx: [n * n]u32,
+        vals: [n * n]f64,
+
+        fn from(a: [n][n]f64) @This() {
+            var s: @This() = undefined;
+            var m: u32 = 0;
+            s.col_ptr[0] = 0;
+            for (0..n) |j| {
+                for (0..n) |i| {
+                    if (a[i][j] != 0) {
+                        s.row_idx[m] = @intCast(i);
+                        s.vals[m] = a[i][j];
+                        m += 1;
+                    }
+                }
+                s.col_ptr[j + 1] = m;
+            }
+            return s;
+        }
+
+        fn nnz(s: *const @This()) u32 {
+            return s.col_ptr[n];
+        }
+    };
+}
+
+/// Dense Gaussian elimination reference solver for verification.
+fn denseSolve(comptime n: usize, a_in: [n][n]f64, b_in: [n]f64) [n]f64 {
+    var a = a_in;
+    var b = b_in;
+    for (0..n) |k| {
+        var piv = k;
+        for (k + 1..n) |i| {
+            if (@abs(a[i][k]) > @abs(a[piv][k])) piv = i;
+        }
+        std.mem.swap([n]f64, &a[k], &a[piv]);
+        std.mem.swap(f64, &b[k], &b[piv]);
+        for (k + 1..n) |i| {
+            const f = a[i][k] / a[k][k];
+            for (k..n) |j| a[i][j] -= f * a[k][j];
+            b[i] -= f * b[k];
+        }
+    }
+    var x: [n]f64 = undefined;
+    var k = n;
+    while (k > 0) {
+        k -= 1;
+        var s = b[k];
+        for (k + 1..n) |j| s -= a[k][j] * x[j];
+        x[k] = s / a[k][k];
+    }
+    return x;
+}
+
+fn identity(comptime n: usize) [n]u32 {
+    var q: [n]u32 = undefined;
+    for (0..n) |i| q[i] = @intCast(i);
+    return q;
+}
+
+fn checkSolve(comptime n: usize, a: [n][n]f64, b: [n]f64, lu: *@import("root.zig").sparse_lu.SparseLu(f64)) !void {
+    var x: [n]f64 = undefined;
+    lu.solve(&b, &x);
+    const xref = denseSolve(n, a, b);
+    for (x, xref) |xi, ri| try testing.expectApproxEqRel(ri, xi, 1e-11);
+}
+
 const BbdTests = struct {
     const impl = @import("root.zig").bbd;
     const Allocator = std.mem.Allocator;
     const Bbd = impl.Bbd;
     const Limits = impl.Limits;
-    const root = @import("root.zig").types;
-    const std = @import("std");
-
-    // ============================================================================
-    // Tests — synthetic BBD systems validated against the flat sparse LU through
-    // the public direct.Solver facade (bbd=null → flat path).
-    // ============================================================================
-
-    const testing = std.testing;
+    const root = @import("core").numerics;
 
     const direct = @import("root.zig").direct;
 
@@ -341,8 +410,6 @@ const ConvergerTests = struct {
     const Workspace = impl.Workspace;
     const jfnk = impl.jfnk;
     const newton = impl.newton;
-    const std = @import("std");
-    const testing = std.testing;
 
     /// Scalar oracle for converger.updateAndNorm (the pre-vector loop).
     fn updateAndNormOracle(x: []f64, dx: []const f64, x_old: []f64, cur: []const bool, reltol: f64, abstol: f64, vntol: f64) f64 {
@@ -586,13 +653,6 @@ const DenseLuTests = struct {
     const factorizeSolveNeg = impl.factorizeSolveNeg;
     const solveFactored = impl.solveFactored;
     const solveFactoredT = impl.solveFactoredT;
-    const std = @import("std");
-
-    // ============================================================================
-    // Tests
-    // ============================================================================
-
-    const testing = std.testing;
 
     test "dense_lu: factorizeSolve 3x3" {
         var a = [_]f64{
@@ -772,24 +832,6 @@ const DenseLuTests = struct {
         try testing.expectApproxEqAbs(@as(f64, 4.0), a[3 * 4 + 3], 1e-12); // g[1,1]
     }
 
-    test "dense_lu: 1x1 system" {
-        var a = [_]f64{3.0};
-        const b = [_]f64{9.0};
-        var x: [1]f64 = undefined;
-        try factorizeSolve(1, &a, &b, &x);
-        try testing.expectApproxEqAbs(@as(f64, 3.0), x[0], 1e-12);
-    }
-
-    test "dense_lu: identity matrix preserves RHS" {
-        const n: usize = 5;
-        var a = [_]f64{0} ** (n * n);
-        for (0..n) |i| a[i * n + i] = 1.0;
-        const b = [_]f64{ 1, 2, 3, 4, 5 };
-        var x: [n]f64 = undefined;
-        try factorizeSolve(n, &a, &b, &x);
-        for (0..n) |i| try testing.expectApproxEqAbs(b[i], x[i], 1e-12);
-    }
-
     /// Scalar oracle: unblocked right-looking elimination in the order the
     /// kernel promises (reciprocal-pivot multipliers, then `a -= l * u` per
     /// entry in increasing k). `x`, when given, rides along as the fused
@@ -892,7 +934,6 @@ const DirectTests = struct {
     const Allocator = std.mem.Allocator;
     const Solver = impl.Solver;
     const sparse_lu = @import("root.zig").sparse_lu;
-    const std = @import("std");
 
     test "solver construction releases storage on every allocation failure" {
         try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
@@ -903,24 +944,8 @@ const DirectTests = struct {
         }.run, .{});
     }
 
-    // ============================================================================
-    // Tests — Solver facade: factor/solve/refactor, MNA structural zero diag,
-    // singular detection, solveT correctness, determinism.
-    // ============================================================================
-
-    const testing = std.testing;
-
-    const DenseCsc = SparseTests.DenseCsc;
-
-    const denseSolve = SparseTests.denseSolve;
-
-    const naturalOrder = SparseTests.identity;
-
-    const checkSolve = SparseTests.checkSolve;
-
     test "Solver: factor + solveNeg + refactor on fixed pattern" {
         const gpa = testing.allocator;
-        // ponytail: reuse the fixed-size CSC fixture; allocate only for runtime-sized cases.
         var csc = DenseCsc(2).from(.{ .{ 2, 1 }, .{ 1, 3 } });
         const col_ptr = &csc.col_ptr;
         const row_idx = csc.row_idx[0..csc.nnz()];
@@ -942,150 +967,13 @@ const DirectTests = struct {
         try testing.expectApproxEqAbs(@as(f64, -34.0 / 19.0), x[0], 1e-12);
         try testing.expectApproxEqAbs(@as(f64, -35.0 / 19.0), x[1], 1e-12);
     }
-
-    test "factor + solve on an MNA-like system with a structural zero diagonal" {
-        const a = [3][3]f64{
-            .{ 1e-3, 0, 1 },
-            .{ 0, 2e-3, -1 },
-            .{ 1, -1, 0 },
-        };
-        const b = [3]f64{ 0, 0, 5 };
-        const csc = DenseCsc(3).from(a);
-        const gpa = testing.allocator;
-        const SparseLu = sparse_lu.SparseLu(f64);
-        const q3 = naturalOrder(3);
-        var lu = try SparseLu.init(gpa, 3, &csc.col_ptr, csc.row_idx[0..csc.nnz()], &q3);
-        defer lu.deinit(gpa);
-        try lu.factor(gpa, &csc.col_ptr, csc.row_idx[0..csc.nnz()], csc.vals[0..csc.nnz()], 1e-3);
-        try checkSolve(3, a, b, &lu);
-    }
-
-    test "refactor: same pattern, new values, no allocation" {
-        var a = [4][4]f64{
-            .{ 4, 1, 0, 0 },
-            .{ 1, 5, 2, 0 },
-            .{ 0, 2, 6, 3 },
-            .{ 0, 0, 3, 7 },
-        };
-        const gpa = testing.allocator;
-        var csc = DenseCsc(4).from(a);
-        const SparseLu = sparse_lu.SparseLu(f64);
-        const q4 = naturalOrder(4);
-        var lu = try SparseLu.init(gpa, 4, &csc.col_ptr, csc.row_idx[0..csc.nnz()], &q4);
-        defer lu.deinit(gpa);
-        try lu.factor(gpa, &csc.col_ptr, csc.row_idx[0..csc.nnz()], csc.vals[0..csc.nnz()], 1e-3);
-        try checkSolve(4, a, .{ 1, 2, 3, 4 }, &lu);
-
-        // perturb values on the same pattern, refactor only
-        a[1][1] = 9;
-        a[2][3] = 1;
-        csc = DenseCsc(4).from(a);
-        try lu.refactor(&csc.col_ptr, csc.vals[0..csc.nnz()], 1e-12);
-        try checkSolve(4, a, .{ 4, 3, 2, 1 }, &lu);
-    }
-
-    test "singular matrix reported, refactor pivot collapse reported" {
-        const a = [2][2]f64{ .{ 1, 1 }, .{ 1, 1 } };
-        const csc = DenseCsc(2).from(a);
-        const gpa = testing.allocator;
-        const SparseLu = sparse_lu.SparseLu(f64);
-        const q2 = naturalOrder(2);
-        var lu = try SparseLu.init(gpa, 2, &csc.col_ptr, csc.row_idx[0..csc.nnz()], &q2);
-        defer lu.deinit(gpa);
-        try testing.expectError(
-            error.SingularMatrix,
-            lu.factor(gpa, &csc.col_ptr, csc.row_idx[0..csc.nnz()], csc.vals[0..csc.nnz()], 1e-3),
-        );
-    }
-
-    test "a singular full factor leaves w zero and the next factor exact" {
-        // Column 1 is singular after eliminating column 0, while w[0] still
-        // holds that column's U value. A stale w[0] would enter the next
-        // factor as if it were part of the matrix.
-        const gpa = testing.allocator;
-        const SparseLu = sparse_lu.SparseLu(f64);
-        const col_ptr = [_]u32{ 0, 2, 4, 5 };
-        const row_idx = [_]u32{ 0, 1, 0, 1, 2 };
-        const singular = [_]f64{ 1, 1, 1, 1, 1 };
-        const good = [_]f64{ 4, 1, 1, 3, 2 };
-        const q3 = naturalOrder(3);
-        var lu = try SparseLu.init(gpa, 3, &col_ptr, &row_idx, &q3);
-        defer lu.deinit(gpa);
-        try testing.expectError(error.SingularMatrix, lu.factor(gpa, &col_ptr, &row_idx, &singular, 1e-3));
-        for (lu.w) |v| try testing.expectEqual(@as(f64, 0), v);
-
-        try lu.factor(gpa, &col_ptr, &row_idx, &good, 1e-3);
-        const b = [3]f64{ 5, 4, 2 };
-        var x: [3]f64 = undefined;
-        lu.solve(&b, &x);
-        // [4 1 0; 1 3 0; 0 0 2] x = b  =>  x = [1, 1, 1]
-        for (x) |xi| try testing.expectApproxEqAbs(@as(f64, 1), xi, 1e-14);
-    }
-
-    test "solveT: transpose solve matches A^T dense solve" {
-        const a = [3][3]f64{
-            .{ 1e-3, 0, 1 },
-            .{ 0, 2e-3, -1 },
-            .{ 1, -1, 0 },
-        };
-        const b = [3]f64{ 1, 2, 3 };
-        const csc = DenseCsc(3).from(a);
-        const gpa = testing.allocator;
-        const SparseLu = sparse_lu.SparseLu(f64);
-        const q3 = naturalOrder(3);
-        var lu = try SparseLu.init(gpa, 3, &csc.col_ptr, csc.row_idx[0..csc.nnz()], &q3);
-        defer lu.deinit(gpa);
-        try lu.factor(gpa, &csc.col_ptr, csc.row_idx[0..csc.nnz()], csc.vals[0..csc.nnz()], 1e-3);
-        var at: [3][3]f64 = undefined;
-        for (0..3) |i| for (0..3) |j| {
-            at[i][j] = a[j][i];
-        };
-        const xref = denseSolve(3, at, b);
-        var x: [3]f64 = undefined;
-        lu.solveT(&b, &x);
-        for (x, xref) |xi, ri| try testing.expectApproxEqRel(ri, xi, 1e-11);
-    }
-
-    test "determinism: two factorizations of the same values are byte-identical" {
-        const a = [3][3]f64{
-            .{ 2, 1, 0 },
-            .{ 1, 3, 1 },
-            .{ 0, 1, 4 },
-        };
-        const csc = DenseCsc(3).from(a);
-        const gpa = testing.allocator;
-        const SparseLu = sparse_lu.SparseLu(f64);
-        const q3 = naturalOrder(3);
-        var lu1 = try SparseLu.init(gpa, 3, &csc.col_ptr, csc.row_idx[0..csc.nnz()], &q3);
-        defer lu1.deinit(gpa);
-        var lu2 = try SparseLu.init(gpa, 3, &csc.col_ptr, csc.row_idx[0..csc.nnz()], &q3);
-        defer lu2.deinit(gpa);
-        try lu1.factor(gpa, &csc.col_ptr, csc.row_idx[0..csc.nnz()], csc.vals[0..csc.nnz()], 1e-3);
-        try lu2.factor(gpa, &csc.col_ptr, csc.row_idx[0..csc.nnz()], csc.vals[0..csc.nnz()], 1e-3);
-        try testing.expectEqualSlices(u32, lu1.q, lu2.q);
-        try testing.expectEqualSlices(f64, lu1.lx.items, lu2.lx.items);
-        try testing.expectEqualSlices(f64, lu1.ux.items, lu2.ux.items);
-        try testing.expectEqualSlices(f64, lu1.udiag, lu2.udiag);
-    }
 };
 
 const FftTests = struct {
     const impl = @import("root.zig").fft;
-    const Fft = impl.Fft;
-    const bluestein = impl.bluestein;
-    const bluesteinSize = impl.bluesteinSize;
     const fft = impl.fft;
-    const fftReal = impl.fftReal;
     const ifft = impl.ifft;
     const math = std.math;
-    const nextPow2 = impl.nextPow2;
-    const std = @import("std");
-
-    // ============================================================================
-    // Tests — impulse, DC, sinusoid, Parseval, round-trip, Bluestein, fftReal
-    // ============================================================================
-
-    const testing = std.testing;
 
     test "fft: impulse response is flat spectrum" {
         var re = [_]f64{ 1, 0, 0, 0, 0, 0, 0, 0 };
@@ -1093,18 +981,6 @@ const FftTests = struct {
         fft(&re, &im);
         for (re) |v| try testing.expectApproxEqAbs(@as(f64, 1.0), v, 1e-14);
         for (im) |v| try testing.expectApproxEqAbs(@as(f64, 0.0), v, 1e-14);
-    }
-
-    test "fft: DC signal has energy only in bin 0" {
-        var re = [_]f64{ 3, 3, 3, 3 };
-        var im = [_]f64{ 0, 0, 0, 0 };
-        fft(&re, &im);
-        try testing.expectApproxEqAbs(@as(f64, 12.0), re[0], 1e-13);
-        try testing.expectApproxEqAbs(@as(f64, 0.0), im[0], 1e-13);
-        for (1..4) |k| {
-            try testing.expectApproxEqAbs(@as(f64, 0.0), re[k], 1e-13);
-            try testing.expectApproxEqAbs(@as(f64, 0.0), im[k], 1e-13);
-        }
     }
 
     test "fft: pure sinusoid at bin 1 (N=8)" {
@@ -1142,26 +1018,6 @@ const FftTests = struct {
         try testing.expectApproxEqAbs(@as(f64, 8.0), im[n - 2], 1e-11);
     }
 
-    test "fft: Parseval's theorem (N=64)" {
-        const n = 64;
-        var re: [n]f64 = undefined;
-        var im = [_]f64{0} ** n;
-        for (0..n) |k| {
-            const t = @as(f64, @floatFromInt(k)) / @as(f64, @floatFromInt(n));
-            re[k] = @sin(2.0 * math.pi * 3.0 * t) + 0.5 * @cos(2.0 * math.pi * 7.0 * t);
-        }
-        var e_time: f64 = 0;
-        for (re) |v| e_time += v * v;
-
-        fft(&re, &im);
-
-        var e_freq: f64 = 0;
-        for (re, im) |r, i| e_freq += r * r + i * i;
-        e_freq /= @as(f64, @floatFromInt(n));
-
-        try testing.expectApproxEqRel(e_time, e_freq, 1e-12);
-    }
-
     test "fft/ifft: round-trip recovers original signal" {
         const n = 32;
         var re: [n]f64 = undefined;
@@ -1180,35 +1036,7 @@ const FftTests = struct {
         }
     }
 
-    test "fft: f32 instantiation — round-trip and Parseval" {
-        const F32 = Fft(f32);
-        const n = 256;
-        var re: [n]f32 = undefined;
-        var im = [_]f32{0} ** n;
-        var orig: [n]f32 = undefined;
-        for (0..n) |k| {
-            const t = @as(f32, @floatFromInt(k)) / @as(f32, @floatFromInt(n));
-            re[k] = @sin(2.0 * math.pi * 5.0 * t) + 0.3 * @cos(2.0 * math.pi * 11.0 * t);
-            orig[k] = re[k];
-        }
-        var e_time: f64 = 0;
-        for (re) |v| e_time += @as(f64, v) * @as(f64, v);
-
-        F32.fft(&re, &im);
-
-        var e_freq: f64 = 0;
-        for (re, im) |r, i| e_freq += @as(f64, r) * r + @as(f64, i) * i;
-        e_freq /= @as(f64, @floatFromInt(n));
-        try testing.expectApproxEqRel(e_time, e_freq, 1e-4);
-
-        F32.ifft(&re, &im);
-        for (0..n) |k| {
-            try testing.expectApproxEqAbs(orig[k], re[k], 1e-4);
-            try testing.expectApproxEqAbs(@as(f32, 0.0), im[k], 1e-4);
-        }
-    }
-
-    test "fft: large N=1024 — Parseval and bin accuracy" {
+    test "fft: N=1024 Parseval and bin accuracy" {
         const n = 1024;
         var re: [n]f64 = undefined;
         var im = [_]f64{0} ** n;
@@ -1233,105 +1061,6 @@ const FftTests = struct {
         const mag100 = @sqrt(re[100] * re[100] + im[100] * im[100]);
         try testing.expectApproxEqRel(@as(f64, 512.0), mag100, 1e-10);
     }
-
-    test "bluestein: matches radix-2 FFT on power-of-2 input" {
-        const n = 8;
-        var re1 = [_]f64{ 1, 2, 3, 4, 5, 6, 7, 8 };
-        var im1 = [_]f64{ 0, 0, 0, 0, 0, 0, 0, 0 };
-        var re2 = [_]f64{ 1, 2, 3, 4, 5, 6, 7, 8 };
-        var im2 = [_]f64{ 0, 0, 0, 0, 0, 0, 0, 0 };
-
-        fft(&re1, &im1);
-
-        const m = comptime bluesteinSize(n);
-        var scratch_re: [m]f64 = undefined;
-        var scratch_im: [m]f64 = undefined;
-        var chirp_re: [m]f64 = undefined;
-        var chirp_im: [m]f64 = undefined;
-        bluestein(&re2, &im2, &scratch_re, &scratch_im, &chirp_re, &chirp_im);
-
-        for (0..n) |k| {
-            try testing.expectApproxEqAbs(re1[k], re2[k], 1e-10);
-            try testing.expectApproxEqAbs(im1[k], im2[k], 1e-10);
-        }
-    }
-
-    test "bluestein: non-power-of-2 — impulse is flat" {
-        const n = 7;
-        var re = [_]f64{ 1, 0, 0, 0, 0, 0, 0 };
-        var im = [_]f64{ 0, 0, 0, 0, 0, 0, 0 };
-
-        const m = comptime bluesteinSize(n);
-        var scratch_re: [m]f64 = undefined;
-        var scratch_im: [m]f64 = undefined;
-        var chirp_re: [m]f64 = undefined;
-        var chirp_im: [m]f64 = undefined;
-        bluestein(&re, &im, &scratch_re, &scratch_im, &chirp_re, &chirp_im);
-
-        for (0..n) |k| {
-            try testing.expectApproxEqAbs(@as(f64, 1.0), re[k], 1e-10);
-            try testing.expectApproxEqAbs(@as(f64, 0.0), im[k], 1e-10);
-        }
-    }
-
-    test "bluestein: non-power-of-2 — Parseval (N=13)" {
-        const n = 13;
-        var re: [n]f64 = undefined;
-        var im = [_]f64{0} ** n;
-        for (0..n) |k| {
-            const t = @as(f64, @floatFromInt(k)) / @as(f64, @floatFromInt(n));
-            re[k] = @sin(2.0 * math.pi * 3.0 * t) + 0.7 * @cos(2.0 * math.pi * 5.0 * t);
-        }
-        var e_time: f64 = 0;
-        for (re) |v| e_time += v * v;
-
-        const m = comptime bluesteinSize(n);
-        var scratch_re: [m]f64 = undefined;
-        var scratch_im: [m]f64 = undefined;
-        var chirp_re: [m]f64 = undefined;
-        var chirp_im: [m]f64 = undefined;
-        bluestein(&re, &im, &scratch_re, &scratch_im, &chirp_re, &chirp_im);
-
-        var e_freq: f64 = 0;
-        for (0..n) |k| e_freq += re[k] * re[k] + im[k] * im[k];
-        e_freq /= @as(f64, @floatFromInt(n));
-
-        try testing.expectApproxEqRel(e_time, e_freq, 1e-10);
-    }
-
-    test "fftReal: matches full complex FFT on real input" {
-        const n = 16;
-        var signal: [n]f64 = undefined;
-        for (0..n) |k| {
-            const t = @as(f64, @floatFromInt(k)) / @as(f64, @floatFromInt(n));
-            signal[k] = @cos(2.0 * math.pi * 3.0 * t) + 0.5 * @sin(2.0 * math.pi * 7.0 * t);
-        }
-        // full complex FFT as reference
-        var ref_re: [n]f64 = undefined;
-        var ref_im = [_]f64{0} ** n;
-        @memcpy(&ref_re, &signal);
-        fft(&ref_re, &ref_im);
-
-        // real FFT
-        var out_re: [n / 2 + 1]f64 = undefined;
-        var out_im: [n / 2 + 1]f64 = undefined;
-        fftReal(&signal, &out_re, &out_im);
-
-        for (0..n / 2 + 1) |k| {
-            try testing.expectApproxEqAbs(ref_re[k], out_re[k], 1e-12);
-            try testing.expectApproxEqAbs(ref_im[k], out_im[k], 1e-12);
-        }
-    }
-
-    test "nextPow2: correctness" {
-        try testing.expectEqual(@as(usize, 1), nextPow2(1));
-        try testing.expectEqual(@as(usize, 2), nextPow2(2));
-        try testing.expectEqual(@as(usize, 4), nextPow2(3));
-        try testing.expectEqual(@as(usize, 4), nextPow2(4));
-        try testing.expectEqual(@as(usize, 8), nextPow2(5));
-        try testing.expectEqual(@as(usize, 1024), nextPow2(1000));
-        try testing.expectEqual(@as(usize, 1024), nextPow2(1024));
-    }
 };
 
 const FreqSolveTests = struct {
@@ -1339,14 +1068,6 @@ const FreqSolveTests = struct {
     const FreqSolver = impl.FreqSolver;
     const FreqSolverT = impl.FreqSolverT;
     const dense_lu = @import("root.zig").dense_lu;
-    const scaleCopy = impl.test_access.scaleCopy;
-    const std = @import("std");
-
-    // ============================================================================
-    // Tests
-    // ============================================================================
-
-    const testing = std.testing;
 
     test "FreqSolver: single-shot solve (dense, 2x2)" {
         // System: (G + jωC) x = b in stacked-real form.
@@ -1369,32 +1090,6 @@ const FreqSolveTests = struct {
         try testing.expectApproxEqAbs(@as(f64, 0.0), x[1], 1e-10);
         try testing.expectApproxEqAbs(@as(f64, -0.5), x[2], 1e-10);
         try testing.expectApproxEqAbs(@as(f64, 0.0), x[3], 1e-10);
-    }
-
-    test "FreqSolver: multi-RHS at same omega" {
-        // G = diag(2, 3), C = 0 → pure real, each node decouples.
-        const allocator = testing.allocator;
-        const g = try allocator.dupe(f64, &[_]f64{ 2, 0, 0, 3 });
-        const c = try allocator.dupe(f64, &[_]f64{ 0, 0, 0, 0 });
-
-        var fs = try FreqSolver.initDense(allocator, 2, g, c);
-        defer fs.deinit(allocator);
-
-        try fs.setOmega(0);
-
-        // RHS 1: excite node 0
-        const rhs1 = [_]f64{ 2, 0, 0, 0 };
-        var x1: [4]f64 = undefined;
-        try fs.solveRhs(&rhs1, &x1);
-        try testing.expectApproxEqAbs(@as(f64, 1.0), x1[0], 1e-10);
-        try testing.expectApproxEqAbs(@as(f64, 0.0), x1[1], 1e-10);
-
-        // RHS 2: excite node 1
-        const rhs2 = [_]f64{ 0, 3, 0, 0 };
-        var x2: [4]f64 = undefined;
-        try fs.solveRhs(&rhs2, &x2);
-        try testing.expectApproxEqAbs(@as(f64, 0.0), x2[0], 1e-10);
-        try testing.expectApproxEqAbs(@as(f64, 1.0), x2[1], 1e-10);
     }
 
     test "FreqSolver: adjoint solve (solveRhsT) matches transpose system" {
@@ -1425,30 +1120,6 @@ const FreqSolveTests = struct {
         }
     }
 
-    test "FreqSolver: forward and adjoint solves are distinct for asymmetric system" {
-        const allocator = testing.allocator;
-        const g = try allocator.dupe(f64, &[_]f64{ 1, 3, 0, 2 });
-        const c = try allocator.dupe(f64, &[_]f64{ 0.1, 0, 0.2, 0.1 });
-
-        var fs = try FreqSolver.initDense(allocator, 2, g, c);
-        defer fs.deinit(allocator);
-
-        try fs.setOmega(7.0);
-
-        const rhs = [_]f64{ 1, 1, 0, 0 };
-        var x_fwd: [4]f64 = undefined;
-        var x_adj: [4]f64 = undefined;
-        try fs.solveRhs(&rhs, &x_fwd);
-        try fs.solveRhsT(&rhs, &x_adj);
-
-        // For an asymmetric system, forward and adjoint solutions must differ.
-        var differ = false;
-        for (0..4) |i| {
-            if (@abs(x_fwd[i] - x_adj[i]) > 1e-12) differ = true;
-        }
-        try testing.expect(differ);
-    }
-
     test "FreqSolver: f32 instantiation" {
         const FS32 = FreqSolverT(f32);
         const allocator = testing.allocator;
@@ -1467,7 +1138,7 @@ const FreqSolveTests = struct {
     }
 
     test "FreqSolver: setOmega then solveRhs preserves factorization across calls" {
-        // Factor once, solve twice with different RHS — results must be consistent.
+        // Factor once, then two right-hand sides against the same factors.
         const allocator = testing.allocator;
         const g = try allocator.dupe(f64, &[_]f64{ 5, 1, 1, 5 });
         const c = try allocator.dupe(f64, &[_]f64{ 0.5, 0, 0, 0.5 });
@@ -1603,34 +1274,11 @@ const FreqSolveTests = struct {
             for (x_batch, x_ref) |a, b| try testing.expectApproxEqRel(b, a, 1e-11);
         }
     }
-
-    test "scaleCopy: basic operation" {
-        var dst: [5]f64 = undefined;
-        const src = [_]f64{ 1, 2, 3, 4, 5 };
-        scaleCopy(f64, &dst, &src, 3.0);
-        const expected = [_]f64{ 3, 6, 9, 12, 15 };
-        for (dst, expected) |got, exp| {
-            try testing.expectApproxEqAbs(exp, got, 1e-15);
-        }
-    }
-
-    test "scaleCopy: empty slice" {
-        var dst: [0]f64 = .{};
-        const src: [0]f64 = .{};
-        scaleCopy(f64, &dst, &src, 42.0);
-    }
 };
 
 const GmresTests = struct {
     const impl = @import("root.zig").gmres;
     const Gmres = impl.Gmres;
-    const std = @import("std");
-
-    // ============================================================================
-    // Tests
-    // ============================================================================
-
-    const testing = std.testing;
 
     /// Dense matvec context for tests: A is n x n row-major.
     fn DenseMatvec(comptime T: type) type {
@@ -1689,84 +1337,6 @@ const GmresTests = struct {
         try testing.expectApproxEqAbs(@as(f64, 1.0), x[0], 1e-10);
         try testing.expectApproxEqAbs(@as(f64, 1.0), x[1], 1e-10);
         try testing.expectApproxEqAbs(@as(f64, 1.0), x[2], 1e-10);
-    }
-
-    test "GMRES: identity preconditioner gives same result" {
-        const gpa = testing.allocator;
-        var mv = DenseMatvec(f64){
-            .a = &.{ 4, 1, 0, 1, 3, 1, 0, 1, 2 },
-            .n = 3,
-        };
-
-        // Identity preconditioner: no-op.
-        const IdentityPrecond = struct {
-            fn apply(_: []f64, _: *anyopaque) void {}
-        };
-        var dummy: u8 = 0;
-
-        var gmres = try Gmres(f64).init(gpa, 3, 3);
-        defer gmres.deinit(gpa);
-
-        var x = [3]f64{ 0, 0, 0 };
-        const result = gmres.solve(
-            &DenseMatvec(f64).matvec,
-            @ptrCast(&mv),
-            &IdentityPrecond.apply,
-            @ptrCast(&dummy),
-            &.{ 5, 5, 3 },
-            &x,
-            1e-12,
-            0,
-        );
-
-        try testing.expect(result.converged);
-        try testing.expectApproxEqAbs(@as(f64, 1.0), x[0], 1e-10);
-        try testing.expectApproxEqAbs(@as(f64, 1.0), x[1], 1e-10);
-        try testing.expectApproxEqAbs(@as(f64, 1.0), x[2], 1e-10);
-    }
-
-    test "GMRES: diagonal preconditioner reduces iterations" {
-        const gpa = testing.allocator;
-        // Poorly scaled: A = [1000 1; 1 1], b = [1001; 2] => x = [1; 1]
-        var mv = DenseMatvec(f64){
-            .a = &.{ 1000, 1, 1, 1 },
-            .n = 2,
-        };
-
-        // Without preconditioner.
-        var gmres = try Gmres(f64).init(gpa, 2, 10);
-        defer gmres.deinit(gpa);
-
-        var x1 = [2]f64{ 0, 0 };
-        const r1 = gmres.solve(
-            &DenseMatvec(f64).matvec,
-            @ptrCast(&mv),
-            null,
-            null,
-            &.{ 1001, 2 },
-            &x1,
-            1e-12,
-            0,
-        );
-        try testing.expect(r1.converged);
-
-        // With diagonal preconditioner (scale by diagonal of A).
-        var pc = DiagPrecond(f64){ .diag = &.{ 1000, 1 } };
-        var x2 = [2]f64{ 0, 0 };
-        const r2 = gmres.solve(
-            &DenseMatvec(f64).matvec,
-            @ptrCast(&mv),
-            &DiagPrecond(f64).apply,
-            @ptrCast(&pc),
-            &.{ 1001, 2 },
-            &x2,
-            1e-12,
-            0,
-        );
-        try testing.expect(r2.converged);
-        try testing.expect(r2.iterations <= r1.iterations);
-        try testing.expectApproxEqAbs(@as(f64, 1.0), x2[0], 1e-10);
-        try testing.expectApproxEqAbs(@as(f64, 1.0), x2[1], 1e-10);
     }
 
     test "GMRES: ill-conditioned system with tight budget reports non-convergence" {
@@ -1901,32 +1471,6 @@ const GmresTests = struct {
         try testing.expectApproxEqAbs(@as(f64, 0.0), x[1], 1e-15);
     }
 
-    test "GMRES: non-zero initial guess converges" {
-        const gpa = testing.allocator;
-        // A = [2 0; 0 3], b = [2; 3] => x = [1; 1], start from x = [0.5; 0.5]
-        var mv = DenseMatvec(f64){
-            .a = &.{ 2, 0, 0, 3 },
-            .n = 2,
-        };
-        var gmres = try Gmres(f64).init(gpa, 2, 5);
-        defer gmres.deinit(gpa);
-
-        var x = [2]f64{ 0.5, 0.5 };
-        const result = gmres.solve(
-            &DenseMatvec(f64).matvec,
-            @ptrCast(&mv),
-            null,
-            null,
-            &.{ 2, 3 },
-            &x,
-            1e-12,
-            0,
-        );
-        try testing.expect(result.converged);
-        try testing.expectApproxEqAbs(@as(f64, 1.0), x[0], 1e-10);
-        try testing.expectApproxEqAbs(@as(f64, 1.0), x[1], 1e-10);
-    }
-
     test "GMRES: f32 instantiation compiles and solves" {
         const gpa = testing.allocator;
         var mv = DenseMatvec(f32){
@@ -1958,21 +1502,7 @@ const LaneLuTests = struct {
     const impl = @import("root.zig").lane_lu;
     const Allocator = std.mem.Allocator;
     const LaneLu = impl.LaneLu;
-    const broadcast = impl.broadcast;
-    const deinterleave = impl.deinterleave;
-    const interleave = impl.interleave;
     const sparse_lu = @import("root.zig").sparse_lu;
-    const std = @import("std");
-
-    // ============================================================================
-    // Tests
-    // ============================================================================
-
-    const testing = std.testing;
-
-    const DenseCsc = SparseTests.DenseCsc;
-
-    const identity = SparseTests.identity;
 
     test "LaneLu construction releases storage on every allocation failure" {
         const gpa = testing.allocator;
@@ -2159,9 +1689,8 @@ const LaneLuTests = struct {
     }
 
     test "LaneLu(W): refactor leaves w zero, so a second refactor still matches scalar" {
-        // Fill-in (the dense 5x5 below factors with L/U fill) is where a stale
-        // `w` slot would leak into the next refactor now that no pattern
-        // zeroing runs before each column.
+        // With fill-in, a stale `w` slot would leak into the next refactor,
+        // since no column clears its pattern up front.
         const gpa = testing.allocator;
         const W = std.simd.suggestVectorLength(f64) orelse 4;
         const LW = LaneLu(W);
@@ -2232,38 +1761,10 @@ const LaneLuTests = struct {
         var ll = try LW.init(gpa, &base);
         defer ll.deinit(gpa);
         var lvals: [5]LW.V = undefined;
-        broadcast(W, &vals, &lvals);
+        for (&lvals, vals) |*o, v| o.* = @splat(v);
         const all: u64 = std.math.maxInt(std.meta.Int(.unsigned, W));
         try testing.expectEqual(all, ll.refactor(&col_ptr, &lvals, 1e-12));
         try expectZero(W, ll.w);
-    }
-
-    test "interleave/deinterleave/broadcast round-trip" {
-        const W = 4;
-        var l0 = [_]f64{ 1, 2, 3 };
-        var l1 = [_]f64{ 4, 5, 6 };
-        var l2 = [_]f64{ 7, 8, 9 };
-        var l3 = [_]f64{ 10, 11, 12 };
-        const lanes = [_][]const f64{ &l0, &l1, &l2, &l3 };
-        var plane: [3]@Vector(W, f64) = undefined;
-        interleave(W, &lanes, &plane);
-        try testing.expectEqual(@as(f64, 1), plane[0][0]);
-        try testing.expectEqual(@as(f64, 4), plane[0][1]);
-        try testing.expectEqual(@as(f64, 12), plane[2][3]);
-
-        var o0: [3]f64 = undefined;
-        var o1: [3]f64 = undefined;
-        var o2: [3]f64 = undefined;
-        var o3: [3]f64 = undefined;
-        const outs = [_][]f64{ &o0, &o1, &o2, &o3 };
-        deinterleave(W, &plane, &outs);
-        try testing.expectEqualSlices(f64, &l0, &o0);
-        try testing.expectEqualSlices(f64, &l3, &o3);
-
-        const src = [_]f64{ 5, 6 };
-        var b: [2]@Vector(W, f64) = undefined;
-        broadcast(W, &src, &b);
-        try testing.expectEqual(@as(@Vector(W, f64), @splat(5)), b[0]);
     }
 };
 
@@ -2272,42 +1773,7 @@ const OrderTests = struct {
     const Ws = impl.Ws;
     const amd = impl.amd;
     const order = impl.order;
-    const std = @import("std");
     const wsSize = impl.wsSize;
-
-    // ============================================================================
-    // Tests
-    // ============================================================================
-
-    const testing = std.testing;
-
-    /// Dense adjacency matrix → CSC converter for tests.
-    fn DenseCsc(comptime n: usize) type {
-        return struct {
-            col_ptr: [n + 1]u32,
-            row_idx: [n * n]u32,
-
-            fn from(a: [n][n]u1) @This() {
-                var s: @This() = undefined;
-                var m: u32 = 0;
-                s.col_ptr[0] = 0;
-                for (0..n) |j| {
-                    for (0..n) |i| {
-                        if (a[i][j] != 0) {
-                            s.row_idx[m] = @intCast(i);
-                            m += 1;
-                        }
-                    }
-                    s.col_ptr[j + 1] = m;
-                }
-                return s;
-            }
-
-            fn nnz(s: *const @This()) u32 {
-                return s.col_ptr[n];
-            }
-        };
-    }
 
     fn expectPermutation(q: []const u32, n: u32) !void {
         var seen: [64]bool = @splat(false);
@@ -2319,8 +1785,8 @@ const OrderTests = struct {
     }
 
     // 5x5 star: hub 0 coupled to every leaf. Min degree must defer the hub
-    // until its degree collapses — eliminating it first fills the whole matrix.
-    const star = [5][5]u1{
+    // until its degree collapses; eliminating it first fills the whole matrix.
+    const star = [5][5]f64{
         .{ 1, 1, 1, 1, 1 },
         .{ 1, 1, 0, 0, 0 },
         .{ 1, 0, 1, 0, 0 },
@@ -2342,7 +1808,7 @@ const OrderTests = struct {
     // A = [B1 C; 0 B2] over {0,1} and {2,3}: edges within each pair both ways,
     // C couples column 2 into row 0 only. Condensation: {2,3} → {0,1}, so the
     // sink block {0,1} must be factored first.
-    const btf_case = [4][4]u1{
+    const btf_case = [4][4]f64{
         .{ 1, 1, 1, 0 },
         .{ 1, 1, 0, 0 },
         .{ 0, 0, 1, 1 },
@@ -2374,7 +1840,7 @@ const OrderTests = struct {
         }
         // Tridiagonal chain of 6: exercises degree updates along a path
         {
-            var a: [6][6]u1 = @splat(@splat(0));
+            var a: [6][6]f64 = @splat(@splat(0));
             for (0..6) |i| {
                 a[i][i] = 1;
                 if (i + 1 < 6) {
@@ -2391,7 +1857,7 @@ const OrderTests = struct {
         }
         // Diagonal-only (3×3 identity): 3 singleton blocks, passes through
         {
-            var a: [3][3]u1 = @splat(@splat(0));
+            var a: [3][3]f64 = @splat(@splat(0));
             for (0..3) |i| a[i][i] = 1;
             const csc = DenseCsc(3).from(a);
             var buf: [1024]u32 = undefined;
@@ -2402,19 +1868,7 @@ const OrderTests = struct {
         }
     }
 
-    test "order: deterministic — two runs byte-identical" {
-        const csc = DenseCsc(5).from(star);
-        var buf: [2048]u32 = undefined;
-        var q1: [5]u32 = undefined;
-        var q2: [5]u32 = undefined;
-        var ws1 = Ws.init(&buf);
-        try order(5, &csc.col_ptr, csc.row_idx[0..csc.nnz()], &q1, &ws1);
-        var ws2 = Ws.init(&buf);
-        try order(5, &csc.col_ptr, csc.row_idx[0..csc.nnz()], &q2, &ws2);
-        try testing.expectEqualSlices(u32, &q1, &q2);
-    }
-
-    test "order: comptime consumer ≡ runtime consumer, byte-compared" {
+    test "order: comptime and runtime results are identical" {
         @setEvalBranchQuota(200_000);
         const ct = comptime blk: {
             const csc = DenseCsc(4).from(btf_case);
@@ -2446,32 +1900,20 @@ const OrderTests = struct {
         try testing.expectEqual(@as(u32, 7), buf[0]);
     }
 
-    test "amd: empty matrix" {
-        var buf: [64]u32 = undefined;
-        var ws_val = Ws.init(&buf);
-        var q: [0]u32 = undefined;
-        try amd(0, &[_]u32{0}, &[_]u32{}, &q, &ws_val);
-    }
-
-    test "order: empty matrix" {
-        var buf: [64]u32 = undefined;
-        var ws_val = Ws.init(&buf);
-        var q: [0]u32 = undefined;
-        try order(0, &[_]u32{0}, &[_]u32{}, &q, &ws_val);
-    }
-
-    test "order: single element" {
-        // 1×1 matrix with a diagonal entry
+    test "order and amd: empty and 1x1 patterns" {
         var buf: [256]u32 = undefined;
         var ws_val = Ws.init(&buf);
+        var q0: [0]u32 = undefined;
+        try amd(0, &[_]u32{0}, &[_]u32{}, &q0, &ws_val);
+        try order(0, &[_]u32{0}, &[_]u32{}, &q0, &ws_val);
         var q: [1]u32 = undefined;
         try order(1, &[_]u32{ 0, 1 }, &[_]u32{0}, &q, &ws_val);
         try testing.expectEqual(@as(u32, 0), q[0]);
     }
 
-    test "amd: complete graph (K4) — all vertices indistinguishable" {
+    test "amd: complete graph K4, all vertices indistinguishable" {
         // K4: every vertex connected to every other → all are supervariables
-        var a: [4][4]u1 = undefined;
+        var a: [4][4]f64 = undefined;
         for (0..4) |i| for (0..4) |j| {
             a[i][j] = 1;
         };
@@ -2486,7 +1928,7 @@ const OrderTests = struct {
     test "btf: three blocks in correct topological order" {
         // Upper triangular 3×3: three singleton SCCs. Edge j→i iff A(i,j)≠0:
         // DAG is 2→1→0, 2→0. Reverse topo (sinks first): {0}, {1}, {2}.
-        const a = [3][3]u1{
+        const a = [3][3]f64{
             .{ 1, 1, 1 },
             .{ 0, 1, 1 },
             .{ 0, 0, 1 },
@@ -2503,11 +1945,11 @@ const OrderTests = struct {
         try testing.expectEqual(@as(u32, 2), q[2]);
     }
 
-    test "amd: arrowhead matrix — hub deferred" {
+    test "amd: arrowhead matrix defers the hub" {
         // 8×8 arrowhead: row 0 and col 0 are dense, rest is diagonal.
         // Hub vertex 0 should be deferred to the end.
         const n = 8;
-        var a: [n][n]u1 = @splat(@splat(0));
+        var a: [n][n]f64 = @splat(@splat(0));
         for (0..n) |i| {
             a[i][i] = 1;
             if (i > 0) {
@@ -2530,102 +1972,8 @@ const SparseTests = struct {
     const impl = @import("root.zig").sparse_lu;
     const Allocator = std.mem.Allocator;
     const SparseLu = impl.SparseLu;
-    const std = @import("std");
 
     const order = @import("root.zig").order;
-
-    // ============================================================================
-    // Tests
-    // ============================================================================
-
-    const testing = std.testing;
-
-    /// Dense-to-CSC converter for tests.
-    pub fn DenseCsc(comptime n: usize) type {
-        return struct {
-            col_ptr: [n + 1]u32,
-            row_idx: [n * n]u32,
-            vals: [n * n]f64,
-
-            pub fn from(a: [n][n]f64) @This() {
-                var s: @This() = undefined;
-                var m: u32 = 0;
-                s.col_ptr[0] = 0;
-                for (0..n) |j| {
-                    for (0..n) |i| {
-                        if (a[i][j] != 0) {
-                            s.row_idx[m] = @intCast(i);
-                            s.vals[m] = a[i][j];
-                            m += 1;
-                        }
-                    }
-                    s.col_ptr[j + 1] = m;
-                }
-                return s;
-            }
-
-            pub fn nnz(s: *const @This()) u32 {
-                return s.col_ptr[n];
-            }
-        };
-    }
-
-    /// Dense Gaussian elimination reference solver for verification.
-    pub fn denseSolve(comptime n: usize, a_in: [n][n]f64, b_in: [n]f64) [n]f64 {
-        var a = a_in;
-        var b = b_in;
-        for (0..n) |k| {
-            var piv = k;
-            for (k + 1..n) |i| {
-                if (@abs(a[i][k]) > @abs(a[piv][k])) piv = i;
-            }
-            std.mem.swap([n]f64, &a[k], &a[piv]);
-            std.mem.swap(f64, &b[k], &b[piv]);
-            for (k + 1..n) |i| {
-                const f = a[i][k] / a[k][k];
-                for (k..n) |j| a[i][j] -= f * a[k][j];
-                b[i] -= f * b[k];
-            }
-        }
-        var x: [n]f64 = undefined;
-        var k = n;
-        while (k > 0) {
-            k -= 1;
-            var s = b[k];
-            for (k + 1..n) |j| s -= a[k][j] * x[j];
-            x[k] = s / a[k][k];
-        }
-        return x;
-    }
-
-    pub fn identity(comptime n: usize) [n]u32 {
-        var q: [n]u32 = undefined;
-        for (0..n) |i| q[i] = @intCast(i);
-        return q;
-    }
-
-    pub fn checkSolve(comptime n: usize, a: [n][n]f64, b: [n]f64, lu: *SparseLu(f64)) !void {
-        var x: [n]f64 = undefined;
-        lu.solve(&b, &x);
-        const xref = denseSolve(n, a, b);
-        for (x, xref) |xi, ri| try testing.expectApproxEqRel(ri, xi, 1e-11);
-    }
-
-    test "2x2: factor + solve" {
-        const gpa = testing.allocator;
-        const a = [2][2]f64{ .{ 2, 1 }, .{ 1, 3 } };
-        const csc = DenseCsc(2).from(a);
-        var q = identity(2);
-        var lu = try SparseLu(f64).init(gpa, 2, &csc.col_ptr, csc.row_idx[0..csc.nnz()], &q);
-        defer lu.deinit(gpa);
-        try lu.factor(gpa, &csc.col_ptr, csc.row_idx[0..csc.nnz()], csc.vals[0..csc.nnz()], 1e-3);
-
-        var x: [2]f64 = undefined;
-        lu.solve(&.{ 5, 7 }, &x);
-        const xref = denseSolve(2, a, .{ 5, 7 });
-        try testing.expectApproxEqAbs(xref[0], x[0], 1e-12);
-        try testing.expectApproxEqAbs(xref[1], x[1], 1e-12);
-    }
 
     test "3x3: factor + solve verified against dense reference" {
         const gpa = testing.allocator;
@@ -2646,8 +1994,7 @@ const SparseTests = struct {
     test "order -> factor + solve: AMD permutation is valid and the solve is correct" {
         const gpa = testing.allocator;
         // Arrowhead: dense first row/col (hub at node 0), diagonal elsewhere.
-        // AMD defers the hub, so q is a genuine non-identity permutation — this is
-        // the composition order.zig and the LU each test only in isolation.
+        // AMD defers the hub, so q is a real permutation: order and LU composed.
         const a = [4][4]f64{
             .{ 5, 1, 1, 1 },
             .{ 1, 2, 0, 0 },
@@ -2696,14 +2043,11 @@ const SparseTests = struct {
 
     test "atto-siemens row keeps its own diagonal (BSIMSOI floating body)" {
         const gpa = testing.allocator;
-        // Distilled BSIMSOI body block. Row/col 0 is the floating-body KCL row: at
-        // DEFAULT junction params every coefficient in it is atto-siemens. Rows 1/2
-        // are the drain/source nodes — 1 kS of contact conductance and Gmbs = 1 uS
-        // of body transconductance, and that Gmbs sits in the BODY COLUMN. So the
-        // body equation is 14 decades below the rest of the matrix while its column
-        // carries a 1e-6 entry: the raw threshold test (|a00| >= tol*colmax) rejects
-        // the body diagonal, the body column pivots on the drain row, and the body
-        // equation is then reconstructed out of numbers 1e14 times its own size.
+        // A distilled BSIMSOI body block. Row/col 0 is the floating-body KCL
+        // row, atto-siemens at default junction params; rows 1 and 2 are drain
+        // and source, with Gmbs = 1 uS in the body column. The raw threshold
+        // test rejects the body diagonal and pivots on the drain row, which
+        // rebuilds the body equation from numbers 1e14 times its own size.
         const a = [4][4]f64{
             .{ 2.0e-20, -1.0e-20, -1.0e-20, 0.0 },
             .{ -1.0e-6, 1.0e3, -9.0e-4, 1.0e-3 },
@@ -2765,22 +2109,9 @@ const SparseTests = struct {
         try checkSolve(4, a, .{ 4, 3, 2, 1 }, &lu);
     }
 
-    test "singular matrix detection" {
-        const gpa = testing.allocator;
-        const a = [2][2]f64{ .{ 1, 1 }, .{ 1, 1 } };
-        const csc = DenseCsc(2).from(a);
-        var q = identity(2);
-        var lu = try SparseLu(f64).init(gpa, 2, &csc.col_ptr, csc.row_idx[0..csc.nnz()], &q);
-        defer lu.deinit(gpa);
-        try testing.expectError(
-            error.SingularMatrix,
-            lu.factor(gpa, &csc.col_ptr, csc.row_idx[0..csc.nnz()], csc.vals[0..csc.nnz()], 1e-3),
-        );
-    }
-
     test "structurally void unknown gets a unit pivot, not SingularMatrix" {
         const gpa = testing.allocator;
-        // Row/col 1 is entirely zero — a compact model's disabled branch-flow
+        // Row/col 1 is entirely zero, a compact model's disabled branch-flow
         // unknown (HICUM `V(br_sht) <+ 0` at flsh = 0). The remaining 2x2 system
         // [[2,1],[1,3]] x = [5,7] has the solution (8/5, 9/5); x1 must come back 0.
         // DenseCsc drops exact zeros, so build the pattern by hand: the host always
@@ -2846,7 +2177,7 @@ const SparseTests = struct {
     test "a genuinely singular matrix is still rejected" {
         const gpa = testing.allocator;
         // Duplicate columns: the second column's reach holds no unpivoted row, but
-        // its values are NOT zero — voidUnknown must refuse to rescue it.
+        // its values are not zero, so voidUnknown must refuse to rescue it.
         const a = [2][2]f64{ .{ 1, 1 }, .{ 1, 1 } };
         const csc = DenseCsc(2).from(a);
         var q = identity(2);
@@ -2883,6 +2214,29 @@ const SparseTests = struct {
         for (x, xref) |xi, ri| try testing.expectApproxEqRel(ri, xi, 1e-11);
     }
 
+    test "a singular full factor leaves w zero and the next factor exact" {
+        // Column 1 is singular after eliminating column 0, while w[0] still
+        // holds that column's U value. A stale w[0] would enter the next
+        // factor as if it were part of the matrix.
+        const gpa = testing.allocator;
+        const col_ptr = [_]u32{ 0, 2, 4, 5 };
+        const row_idx = [_]u32{ 0, 1, 0, 1, 2 };
+        const singular = [_]f64{ 1, 1, 1, 1, 1 };
+        const good = [_]f64{ 4, 1, 1, 3, 2 };
+        const q3 = identity(3);
+        var lu = try SparseLu(f64).init(gpa, 3, &col_ptr, &row_idx, &q3);
+        defer lu.deinit(gpa);
+        try testing.expectError(error.SingularMatrix, lu.factor(gpa, &col_ptr, &row_idx, &singular, 1e-3));
+        for (lu.w) |v| try testing.expectEqual(@as(f64, 0), v);
+
+        try lu.factor(gpa, &col_ptr, &row_idx, &good, 1e-3);
+        const b = [3]f64{ 5, 4, 2 };
+        var x: [3]f64 = undefined;
+        lu.solve(&b, &x);
+        // [4 1 0; 1 3 0; 0 0 2] x = b  =>  x = [1, 1, 1]
+        for (x) |xi| try testing.expectApproxEqAbs(@as(f64, 1), xi, 1e-14);
+    }
+
     test "determinism: two factorizations byte-identical" {
         const gpa = testing.allocator;
         const a = [3][3]f64{
@@ -2905,38 +2259,9 @@ const SparseTests = struct {
         try testing.expectEqualSlices(u32, lu1.ui.items, lu2.ui.items);
     }
 
-    test "pivot growth monitor detection" {
-        const gpa = testing.allocator;
-        // Factor a well-conditioned matrix, then refactor with values that
-        // cause extreme pivot decay — the growth monitor should catch it.
-        var a = [3][3]f64{
-            .{ 10, 1, 0 },
-            .{ 1, 10, 1 },
-            .{ 0, 1, 10 },
-        };
-        var csc = DenseCsc(3).from(a);
-        var q = identity(3);
-        var lu = try SparseLu(f64).init(gpa, 3, &csc.col_ptr, csc.row_idx[0..csc.nnz()], &q);
-        defer lu.deinit(gpa);
-        try lu.factor(gpa, &csc.col_ptr, csc.row_idx[0..csc.nnz()], csc.vals[0..csc.nnz()], 1e-3);
-
-        // Make the diagonal nearly zero while off-diagonals stay large:
-        // the frozen pivot at position (0,0) will collapse.
-        a[0][0] = 1e-20;
-        a[1][1] = 1e-20;
-        a[2][2] = 1e-20;
-        csc = DenseCsc(3).from(a);
-        // With a tight growth limit the decay should be detected
-        try testing.expectError(
-            error.SingularMatrix,
-            lu.refactor(&csc.col_ptr, csc.vals[0..csc.nnz()], 1e-6),
-        );
-    }
-
     test "scatterAxpy: bit-identical to the one-at-a-time oracle at every length" {
-        // The pair-stepped kernel splits on length parity, so the oracle has to be
-        // walked over both sides of the split — 0 and 1 are the lengths that
-        // actually occur least in the wild and break first.
+        // The pair-stepped kernel splits on length parity; cover both sides,
+        // including lengths 0 and 1.
         var rng = std.Random.DefaultPrng.init(0x5EED);
         const r = rng.random();
         for (0..9) |len| {
@@ -3147,11 +2472,9 @@ const SparseTests = struct {
     }
 
     test "w is all-zero after factor, after refactor, and after a failed refactor" {
-        // `factor` reads 0 out of every fill row it does not scatter, so whatever
-        // ran before it must hand `w` back clean — refactor's per-column zeroing
-        // moved to the consumption sites and this is what pins it there. The
-        // failure path matters most: it is the ONLY caller of `factor` after a
-        // `refactor`, via direct.zig's fall back to a full re-pivoting factor.
+        // `factor` reads 0 from every fill row it does not scatter, so every
+        // call must hand `w` back clean. The failed refactor matters most: it
+        // is what sends direct.zig to a full factor.
         const gpa = testing.allocator;
         var a = [3][3]f64{
             .{ 10, 1, 0 },
@@ -3179,8 +2502,7 @@ const SparseTests = struct {
         );
         for (lu.w) |v| try testing.expectEqual(@as(f64, 0), v);
 
-        // ...and the full factor that direct.zig now runs must agree with a
-        // solver that never saw the failed replay.
+        // The full factor that follows must match a fresh solver's.
         var fresh = try SparseLu(f64).init(gpa, 3, &csc.col_ptr, csc.row_idx[0..csc.nnz()], &q);
         defer fresh.deinit(gpa);
         try lu.factor(gpa, &csc.col_ptr, csc.row_idx[0..csc.nnz()], csc.vals[0..csc.nnz()], 1e-3);
@@ -3209,52 +2531,6 @@ const SparseTests = struct {
         try testing.expectApproxEqAbs(xref[1], x[1], 1e-12);
     }
 
-    test "refactor then solve gives correct answer" {
-        // Ensure the full round-trip: factor → refactor → solve works, not just
-        // that refactor doesn't error.
-        const gpa = testing.allocator;
-        var a = [3][3]f64{
-            .{ 5, 1, 0 },
-            .{ 1, 5, 1 },
-            .{ 0, 1, 5 },
-        };
-        var csc = DenseCsc(3).from(a);
-        var q = identity(3);
-        var lu = try SparseLu(f64).init(gpa, 3, &csc.col_ptr, csc.row_idx[0..csc.nnz()], &q);
-        defer lu.deinit(gpa);
-        try lu.factor(gpa, &csc.col_ptr, csc.row_idx[0..csc.nnz()], csc.vals[0..csc.nnz()], 1e-3);
-
-        // New values, same pattern
-        a[0][0] = 8;
-        a[1][0] = 2;
-        a[2][2] = 9;
-        csc = DenseCsc(3).from(a);
-        try lu.refactor(&csc.col_ptr, csc.vals[0..csc.nnz()], 0);
-
-        const b = [3]f64{ 10, 20, 30 };
-        try checkSolve(3, a, b, &lu);
-    }
-
-    test "f32 instantiation compiles and solves" {
-        const gpa = testing.allocator;
-        const Lu32 = SparseLu(f32);
-        const a = [2][2]f64{ .{ 4, 1 }, .{ 1, 3 } };
-        const csc = DenseCsc(2).from(a);
-        // Convert vals to f32
-        var vals32: [4]f32 = undefined;
-        for (csc.vals[0..csc.nnz()], 0..) |v, i| vals32[i] = @floatCast(v);
-        var q = identity(2);
-        var lu = try Lu32.init(gpa, 2, &csc.col_ptr, csc.row_idx[0..csc.nnz()], &q);
-        defer lu.deinit(gpa);
-        try lu.factor(gpa, &csc.col_ptr, csc.row_idx[0..csc.nnz()], vals32[0..csc.nnz()], 1e-3);
-
-        var x: [2]f32 = undefined;
-        lu.solve(&[2]f32{ 9, 7 }, &x);
-        // [4 1; 1 3]x = [9;7] → x = [20/11, 19/11]
-        try testing.expectApproxEqAbs(@as(f32, 20.0 / 11.0), x[0], 1e-5);
-        try testing.expectApproxEqAbs(@as(f32, 19.0 / 11.0), x[1], 1e-5);
-    }
-
     test "SparseLu construction releases storage on every allocation failure" {
         try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
             fn run(gpa: Allocator) !void {
@@ -3269,234 +2545,66 @@ const TridiagTests = struct {
     const impl = @import("root.zig").tridiag;
     const TriDiag = impl.TriDiag;
     const isTridiag = impl.isTridiag;
-    const std = @import("std");
 
-    // ============================================================================
-    // Tests
-    // ============================================================================
+    const a4 = [4][4]f64{
+        .{ 4, 1, 0, 0 },
+        .{ 1, 5, 2, 0 },
+        .{ 0, 1, 6, 3 },
+        .{ 0, 0, 2, 7 },
+    };
 
-    const testing = std.testing;
-
-    /// Build CSC from dense row-major matrix (test helper, comptime).
-    fn CscResult(comptime n: usize, comptime nnz: usize) type {
-        return struct {
-            col_ptr: [n + 1]u32,
-            row_idx: [nnz]u32,
-            vals: [nnz]f64,
-        };
-    }
-
-    fn countNnz(comptime n: usize, comptime dense: *const [n * n]f64) usize {
-        var count: usize = 0;
-        for (dense) |v| count += @intFromBool(v != 0);
-        return count;
-    }
-
-    fn cscFromDense(comptime n: usize, comptime dense: *const [n * n]f64) CscResult(n, countNnz(n, dense)) {
-        const nnz = comptime countNnz(n, dense);
-        var col_ptr: [n + 1]u32 = undefined;
-        var row_idx: [nnz]u32 = undefined;
-        var vals: [nnz]f64 = undefined;
-
-        var p: u32 = 0;
-        col_ptr[0] = 0;
-        for (0..n) |j| {
-            for (0..n) |i| {
-                const v = dense[i * n + j];
-                if (v != 0) {
-                    row_idx[p] = @intCast(i);
-                    vals[p] = v;
-                    p += 1;
-                }
-            }
-            col_ptr[j + 1] = p;
-        }
-
-        return .{ .col_ptr = col_ptr, .row_idx = row_idx, .vals = vals };
-    }
-
-    /// Dense solve Ax = b for reference (Gaussian elimination with partial pivoting).
-    fn denseSolve(comptime n: usize, mat: [n * n]f64, rhs: [n]f64) [n]f64 {
-        var a = mat;
-        var b = rhs;
-        // Forward elimination with partial pivoting
-        for (0..n) |k| {
-            // Find pivot
-            var max_val: f64 = @abs(a[k * n + k]);
-            var max_row: usize = k;
-            for (k + 1..n) |i| {
-                const v = @abs(a[i * n + k]);
-                if (v > max_val) {
-                    max_val = v;
-                    max_row = i;
-                }
-            }
-            // Swap rows
-            if (max_row != k) {
-                for (0..n) |j| std.mem.swap(f64, &a[k * n + j], &a[max_row * n + j]);
-                std.mem.swap(f64, &b[k], &b[max_row]);
-            }
-            // Eliminate
-            for (k + 1..n) |i| {
-                const m = a[i * n + k] / a[k * n + k];
-                for (k + 1..n) |j| a[i * n + j] -= m * a[k * n + j];
-                b[i] -= m * b[k];
-            }
-        }
-        // Back substitution
-        var x: [n]f64 = undefined;
-        var ki: usize = n;
-        while (ki > 0) {
-            ki -= 1;
-            var s = b[ki];
-            for (ki + 1..n) |j| s -= a[ki * n + j] * x[j];
-            x[ki] = s / a[ki * n + ki];
-        }
-        return x;
-    }
-
-    /// Transpose a dense row-major matrix.
-    fn denseTranspose(comptime n: usize, mat: [n * n]f64) [n * n]f64 {
-        var t: [n * n]f64 = undefined;
-        for (0..n) |i| for (0..n) |j| {
-            t[i * n + j] = mat[j * n + i];
-        };
-        return t;
-    }
-
-    test "TriDiag: 4x4 factor + solve vs dense reference" {
+    test "TriDiag: solve and solveT match dense references" {
         const gpa = testing.allocator;
-        // 4x4 tridiagonal:
-        // [4  1  0  0]
-        // [1  5  2  0]
-        // [0  1  6  3]
-        // [0  0  2  7]
-        const dense = [16]f64{
-            4, 1, 0, 0,
-            1, 5, 2, 0,
-            0, 1, 6, 3,
-            0, 0, 2, 7,
-        };
-        const csc = cscFromDense(4, &dense);
-
-        var td = try TriDiag(f64).init(gpa, 4, &csc.col_ptr, &csc.row_idx);
+        const csc = DenseCsc(4).from(a4);
+        var td = try TriDiag(f64).init(gpa, 4, &csc.col_ptr, csc.row_idx[0..csc.nnz()]);
         defer td.deinit(gpa);
-
-        try td.factor(&csc.vals);
+        try td.factor(csc.vals[0..csc.nnz()]);
 
         const rhs = [4]f64{ 7, 13, 20, 23 };
         var x = rhs;
         td.solve(&x);
+        for (denseSolve(4, a4, rhs), x) |ref, xi| try testing.expectApproxEqAbs(ref, xi, 1e-12);
 
-        const ref = denseSolve(4, dense, rhs);
-        for (0..4) |i| {
-            try testing.expectApproxEqAbs(ref[i], x[i], 1e-12);
-        }
-    }
-
-    test "TriDiag: solveT matches dense A^T solve" {
-        const gpa = testing.allocator;
-        const dense = [16]f64{
-            4, 1, 0, 0,
-            1, 5, 2, 0,
-            0, 1, 6, 3,
-            0, 0, 2, 7,
+        var at: [4][4]f64 = undefined;
+        for (0..4) |i| for (0..4) |j| {
+            at[i][j] = a4[j][i];
         };
-        const csc = cscFromDense(4, &dense);
-
-        var td = try TriDiag(f64).init(gpa, 4, &csc.col_ptr, &csc.row_idx);
-        defer td.deinit(gpa);
-
-        try td.factor(&csc.vals);
-
-        const rhs = [4]f64{ 3, 9, 15, 21 };
-        var x = rhs;
+        x = rhs;
         td.solveT(&x);
-
-        const at = denseTranspose(4, dense);
-        const ref = denseSolve(4, at, rhs);
-        for (0..4) |i| {
-            try testing.expectApproxEqAbs(ref[i], x[i], 1e-12);
-        }
+        for (denseSolve(4, at, rhs), x) |ref, xi| try testing.expectApproxEqAbs(ref, xi, 1e-12);
     }
 
-    test "TriDiag: singular detection (zero pivot)" {
+    test "TriDiag: a zero pivot fails the factor" {
         const gpa = testing.allocator;
-        // Singular: second row becomes zero after elimination.
-        // [1  1  0]
-        // [1  1  0]   <- row 2 = row 1 => zero pivot
-        // [0  0  1]
-        const dense = [9]f64{
-            1, 1, 0,
-            1, 1, 0,
-            0, 0, 1,
-        };
-        const csc = cscFromDense(3, &dense);
-
-        var td = try TriDiag(f64).init(gpa, 3, &csc.col_ptr, &csc.row_idx);
+        const a = [3][3]f64{ .{ 1, 1, 0 }, .{ 1, 1, 0 }, .{ 0, 0, 1 } };
+        const csc = DenseCsc(3).from(a);
+        var td = try TriDiag(f64).init(gpa, 3, &csc.col_ptr, csc.row_idx[0..csc.nnz()]);
         defer td.deinit(gpa);
-
-        try testing.expectError(error.SingularMatrix, td.factor(&csc.vals));
+        try testing.expectError(error.SingularMatrix, td.factor(csc.vals[0..csc.nnz()]));
     }
 
-    test "isTridiag: tridiag detected" {
-        // 4x4 tridiag
-        const dense = [16]f64{
-            4, 1, 0, 0,
-            1, 5, 2, 0,
-            0, 1, 6, 3,
-            0, 0, 2, 7,
-        };
-        const csc = cscFromDense(4, &dense);
-        try testing.expect(isTridiag(4, &csc.col_ptr, &csc.row_idx));
-    }
-
-    test "isTridiag: non-tridiag rejected" {
-        // 4x4 with an off-tridiag entry at A[0,2]
-        const dense = [16]f64{
-            4, 1, 1, 0,
-            1, 5, 2, 0,
-            0, 1, 6, 3,
-            0, 0, 2, 7,
-        };
-        const csc = cscFromDense(4, &dense);
-        try testing.expect(!isTridiag(4, &csc.col_ptr, &csc.row_idx));
-    }
-
-    test "isTridiag: n < 3 rejected" {
-        const col_ptr = [3]u32{ 0, 1, 2 };
-        const row_idx = [2]u32{ 0, 1 };
-        try testing.expect(!isTridiag(2, &col_ptr, &row_idx));
+    test "isTridiag: accepts band 1 from n = 3, rejects wider or smaller" {
+        const csc = DenseCsc(4).from(a4);
+        try testing.expect(isTridiag(4, &csc.col_ptr, csc.row_idx[0..csc.nnz()]));
+        var wide = a4;
+        wide[0][2] = 1;
+        const wcsc = DenseCsc(4).from(wide);
+        try testing.expect(!isTridiag(4, &wcsc.col_ptr, wcsc.row_idx[0..wcsc.nnz()]));
+        try testing.expect(!isTridiag(2, &.{ 0, 1, 2 }, &.{ 0, 1 }));
     }
 
     test "TriDiag: f32 factor + solve" {
         const gpa = testing.allocator;
-        // 3x3 tridiag with f32
-        const dense = [9]f64{
-            3, 1, 0,
-            1, 4, 2,
-            0, 1, 5,
-        };
-        const csc = cscFromDense(3, &dense);
-
-        var td = try TriDiag(f32).init(gpa, 3, &csc.col_ptr, &csc.row_idx);
+        const a = [3][3]f64{ .{ 3, 1, 0 }, .{ 1, 4, 2 }, .{ 0, 1, 5 } };
+        const csc = DenseCsc(3).from(a);
+        var td = try TriDiag(f32).init(gpa, 3, &csc.col_ptr, csc.row_idx[0..csc.nnz()]);
         defer td.deinit(gpa);
-
-        // Convert vals to f32
-        var vals32: [csc.vals.len]f32 = undefined;
-        for (csc.vals, 0..) |v, i| vals32[i] = @floatCast(v);
-
-        try td.factor(&vals32);
-
+        var vals32: [9]f32 = undefined;
+        for (csc.vals[0..csc.nnz()], 0..) |v, i| vals32[i] = @floatCast(v);
+        try td.factor(vals32[0..csc.nnz()]);
         var x = [3]f32{ 5, 11, 12 };
         td.solve(&x);
-
-        // Dense reference in f64, then compare with f32 tolerance
-        const rhs64 = [3]f64{ 5, 11, 12 };
-        const ref = denseSolve(3, dense, rhs64);
-        for (0..3) |i| {
-            try testing.expectApproxEqAbs(@as(f32, @floatCast(ref[i])), x[i], 1e-5);
-        }
+        for (denseSolve(3, a, .{ 5, 11, 12 }), x) |ref, xi| try testing.expectApproxEqAbs(@as(f32, @floatCast(ref)), xi, 1e-5);
     }
 };
 

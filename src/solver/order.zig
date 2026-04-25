@@ -1,33 +1,17 @@
-//! Fill-reducing column ordering: BTF (Tarjan SCC) + per-block AMD.
-//!
-//! `order()` produces the column permutation `q` consumed by LU factorization:
-//! iterative Tarjan SCC decomposes the pattern into irreducible diagonal blocks
-//! (precondition: structurally full diagonal — pattern merge guarantees it —
-//! so the identity transversal is valid and no matching step is needed); SCCs
-//! emit in reverse topological order of the condensation; within each non-
-//! singleton block, AMD (Amestoy–Davis–Duff approximate minimum degree) orders
-//! columns for fill reduction: quotient graph, approximate external degrees,
-//! aggressive element absorption, supervariable merging via hash buckets,
-//! doubly-linked degree lists for O(1) pivot selection, dense-row deferral.
-//!
-//! Everything lives in a single caller-provided u32 slab (`Ws`): no allocator,
-//! so the identical code runs at comptime (Path B), runtime setup (Path A),
-//! and under the C emitter. SoA layout throughout: parallel arrays indexed by
-//! vertex u32 — sequential scan, cache-friendly, no pointer chasing between
-//! solver objects.
+//! Fill-reducing column ordering for the sparse LU: block triangular form by
+//! Tarjan SCC, then AMD (Amestoy-Davis-Duff approximate minimum degree)
+//! inside each block. All scratch comes from one caller-owned u32 slab, with
+//! no allocator, so the same code also runs at comptime.
+//! Background: docs/solvers/btf-permutation.md, amd-ordering.md.
 
 const std = @import("std");
 
+/// The slab from `wsSize` was too small for this pattern's fill.
 pub const Error = error{OutOfWorkspace};
 
 const NONE: u32 = std.math.maxInt(u32);
 
-// ============================================================================
-// Ws — bump workspace
-// ============================================================================
-
-/// Caller-owned bump workspace: allocates u32 slices from a contiguous slab
-/// with mark/release checkpoints. No allocator — comptime-friendly.
+/// Bump allocator over a caller-owned u32 slab, with mark/release.
 pub const Ws = struct {
     buf: []u32,
     used: usize = 0,
@@ -58,55 +42,41 @@ pub const Ws = struct {
     }
 };
 
-// ============================================================================
-// wsSize — workspace bound
-// ============================================================================
-
-/// Conservative workspace bound for `order(n, nnz)` or `amd(n, nnz)`.
-/// The quotient graph's element lists grow with fill; `order`/`amd` return
-/// `OutOfWorkspace` if a pathological pattern exceeds this.
+/// Slab length for `order` or `amd` on an n x n pattern with nnz entries.
+/// A pathological fill can still exceed it (`error.OutOfWorkspace`).
 pub fn wsSize(n: usize, nnz: usize) usize {
     return 48 * n + 8 * nnz + 64;
 }
 
-// ============================================================================
-// BTF + per-block AMD
-// ============================================================================
-
-/// BTF + per-block AMD. `q[k]` = original column factored at step k.
-///
-/// Precondition: structurally full diagonal (pattern merge guarantees it).
-/// The directed graph has edge j→i iff A(i,j)≠0, i≠j. Tarjan SCC finds
-/// irreducible blocks; SCCs emit in reverse topological order (sink block
-/// first = factored first). Singletons pass through; non-trivial blocks
-/// get AMD-ordered.
+/// Writes q[k] = the column factored at step k: strongly connected blocks of
+/// the graph j -> i for A(i,j) != 0, sink block first, each block's columns
+/// AMD-ordered. Requires a structurally full diagonal (the pattern merge
+/// guarantees it), so no matching step is needed. Restores `ws` on return.
 pub fn order(n: u32, col_ptr: []const u32, row_idx: []const u32, q: []u32, ws: *Ws) Error!void {
     if (n == 0) return;
     std.debug.assert(q.len == n);
     const base = ws.mark();
     defer ws.release(base);
 
-    // ---- Tarjan SCC arrays (SoA: one array per field) ----
-    const num = try ws.allocSet(n, NONE); // DFS numbering
-    const low = try ws.alloc(n); // low-link values
-    const on = try ws.allocSet(n, 0); // on SCC stack?
-    const scc_stack = try ws.alloc(n); // Tarjan stack
+    // Iterative Tarjan.
+    const num = try ws.allocSet(n, NONE); // DFS number
+    const low = try ws.alloc(n); // low-link
+    const on = try ws.allocSet(n, 0); // on the SCC stack
+    const scc_stack = try ws.alloc(n);
     const frame_v = try ws.alloc(n); // DFS frame: vertex
-    const frame_p = try ws.alloc(n); // DFS frame: edge pointer
+    const frame_p = try ws.alloc(n); // DFS frame: next edge
     const emit = try ws.alloc(n); // vertices grouped by block
-    const block_ptr = try ws.alloc(n + 1); // block boundaries in emit[]
+    const block_ptr = try ws.alloc(n + 1); // block boundaries in `emit`
 
-    var sp: u32 = 0; // SCC stack pointer
-    var fp: u32 = 0; // frame stack pointer
-    var counter: u32 = 0; // DFS counter
-    var no: u32 = 0; // emission cursor
-    var nb: u32 = 0; // block count
+    var sp: u32 = 0;
+    var fp: u32 = 0;
+    var counter: u32 = 0;
+    var no: u32 = 0;
+    var nb: u32 = 0;
     block_ptr[0] = 0;
 
-    // ---- iterative Tarjan: edge j → row_idx[p] for p in col_ptr[j..j+1] ----
     for (0..n) |root| {
         if (num[root] != NONE) continue;
-        // Visit root
         num[root] = counter;
         low[root] = counter;
         counter += 1;
@@ -122,9 +92,8 @@ pub fn order(n: u32, col_ptr: []const u32, row_idx: []const u32, q: []u32, ws: *
             if (frame_p[fp - 1] < col_ptr[v + 1]) {
                 const child = row_idx[frame_p[fp - 1]];
                 frame_p[fp - 1] += 1;
-                if (child == v) continue; // skip self-loop
+                if (child == v) continue;
                 if (num[child] == NONE) {
-                    // Tree edge: visit child
                     num[child] = counter;
                     low[child] = counter;
                     counter += 1;
@@ -135,14 +104,12 @@ pub fn order(n: u32, col_ptr: []const u32, row_idx: []const u32, q: []u32, ws: *
                     frame_p[fp] = col_ptr[child];
                     fp += 1;
                 } else if (on[child] != 0) {
-                    // Back/cross edge to vertex on stack
                     low[v] = @min(low[v], num[child]);
                 }
                 continue;
             }
-            // v finished: check if SCC root
+            // v is finished; if it roots an SCC, pop that block.
             if (low[v] == num[v]) {
-                // Pop SCC stack down to v — this is one block
                 while (true) {
                     sp -= 1;
                     const m = scc_stack[sp];
@@ -154,7 +121,6 @@ pub fn order(n: u32, col_ptr: []const u32, row_idx: []const u32, q: []u32, ws: *
                 nb += 1;
                 block_ptr[nb] = no;
             }
-            // Pop frame; propagate low-link to parent
             fp -= 1;
             if (fp > 0) {
                 low[frame_v[fp - 1]] = @min(low[frame_v[fp - 1]], low[v]);
@@ -162,8 +128,7 @@ pub fn order(n: u32, col_ptr: []const u32, row_idx: []const u32, q: []u32, ws: *
         }
     }
 
-    // ---- per-block AMD; singletons pass through ----
-    // Build vertex→block and vertex→local-index maps for sub-pattern extraction
+    // AMD inside each non-singleton block, on the block's sub-pattern.
     const blk_of = try ws.alloc(n);
     const loc = try ws.alloc(n);
     for (0..nb) |b| {
@@ -184,7 +149,6 @@ pub fn order(n: u32, col_ptr: []const u32, row_idx: []const u32, q: []u32, ws: *
             continue;
         }
 
-        // Extract the block's sub-pattern: columns of verts, rows restricted to block
         const blk_mark = ws.mark();
         defer ws.release(blk_mark);
 
@@ -214,17 +178,11 @@ pub fn order(n: u32, col_ptr: []const u32, row_idx: []const u32, q: []u32, ws: *
     }
 }
 
-// ============================================================================
-// AMD — Approximate Minimum Degree
-// ============================================================================
-
-/// Doubly-linked degree buckets: head[d] → chain of variables with degree d.
-/// O(1) insert/remove; mindeg scan amortized O(n) since min degree is
-/// non-decreasing in practice.
+/// Doubly-linked degree buckets: O(1) insert and remove.
 const DegLists = struct {
-    head: []u32, // head[d] = first variable at degree d, or NONE
-    next: []u32, // next[i] = next variable in same bucket
-    prev: []u32, // prev[i] = previous variable in same bucket
+    head: []u32, // first variable of each degree, or NONE
+    next: []u32,
+    prev: []u32,
 
     fn insert(s: *DegLists, d: u32, i: u32) void {
         s.next[i] = s.head[d];
@@ -243,16 +201,13 @@ const DegLists = struct {
     }
 };
 
-// ponytail: contiguous packed adj in va[] replaces slab linked-lists → sequential scan.
-// Ceiling: ea[] fragmentation under pathological fill; upgrade: compaction pass or
-// adaptive slab sizing.
+// ponytail: element lists grow by relocation in `ea` without compaction;
+// pathological fill can exhaust the slab. A compaction pass is the upgrade.
 
-/// Standalone AMD ordering. `q[k]` = original column at elimination step k.
-///
-/// Quotient-graph based: approximate external degrees (w[e] one-scan trick),
-/// aggressive element absorption, supervariable merge via hash buckets,
-/// doubly-linked degree lists, dense-row deferral (threshold: max(16, 10√n)).
-/// All workspace from caller's `Ws` bump slab — no allocator.
+/// AMD on the symmetrized pattern; writes q[k] = column eliminated at step k.
+/// Quotient graph with approximate external degrees, aggressive absorption,
+/// hashed supervariable detection and dense-row deferral (rows of degree
+/// >= max(16, 10 sqrt(n)) go last). Restores `ws` on return.
 pub fn amd(n: u32, col_ptr: []const u32, row_idx: []const u32, q: []u32, ws: *Ws) Error!void {
     if (n == 0) return;
     const base = ws.mark();
@@ -260,53 +215,45 @@ pub fn amd(n: u32, col_ptr: []const u32, row_idx: []const u32, q: []u32, ws: *Ws
 
     const nnz = col_ptr[n];
 
-    // ---- SoA workspace arrays ----
-    // Variable adjacency: packed contiguous spans in va[]
+    // Variable adjacency: packed spans in `va`; eliminated elements append
+    // their member lists at its tail.
     const va = try ws.alloc(4 * @as(usize, nnz) + 4 * @as(usize, n) + 16);
-    const va_pe = try ws.alloc(n); // va_pe[i]: start of i's VA span in va[]
-    const va_len = try ws.alloc(n); // va_len[i]: length of i's VA span
+    const va_pe = try ws.alloc(n);
+    const va_len = try ws.alloc(n);
 
-    // Element adjacency: per-variable, bump-allocated with 2x growth
+    // Element adjacency per variable, bump-allocated with 2x growth.
     const ea = try ws.alloc(8 * @as(usize, n) + @as(usize, nnz));
-    const ea_pe = try ws.alloc(n); // ea_pe[i]: start of i's EA span in ea[]
-    const ea_len = try ws.allocSet(n, 0); // ea_len[i]: length of i's EA span
-    const ea_lim = try ws.alloc(n); // ea_lim[i]: capacity of i's EA span
+    const ea_pe = try ws.alloc(n);
+    const ea_len = try ws.allocSet(n, 0);
+    const ea_lim = try ws.alloc(n);
 
-    // Per-variable scalars
     const nv = try ws.allocSet(n, 1); // supervariable count (0 = dead/absorbed)
     const elem_alive = try ws.allocSet(n, 0); // 1 = live element
     const esize = try ws.alloc(n); // esize[e] = Σnv over Le members
     const deg = try ws.alloc(n); // approximate external degree
-    const w_buf = try ws.alloc(n); // w_buf[e] = |Le \ Lp| bound (per pivot step)
+    const w_buf = try ws.alloc(n); // |Le \ Lp| bound, per pivot step
 
-    // Epoch-based marking — avoids memset-clearing between steps
+    // Epoch marks, so no clearing between steps.
     const mark_arr = try ws.allocSet(n, 0);
     const wmark_arr = try ws.allocSet(n, 0);
     var era: u32 = 0; // epoch for mark_arr
     var erw: u32 = 0; // epoch for wmark_arr
 
-    // Supervariable hashing
     const hkey = try ws.alloc(n);
     const hhead = try ws.allocSet(n, NONE);
     const hnext = try ws.alloc(n);
-    const hbuckets = try ws.alloc(n); // active bucket indices for cleanup
-
-    // Supervariable merge chains
-    const mlink = try ws.allocSet(n, NONE);
-
-    // Scratch: Lp members, touched elements
+    const hbuckets = try ws.alloc(n); // buckets in use, for reset
+    const mlink = try ws.allocSet(n, NONE); // supervariable merge chains
     const lp_buf = try ws.alloc(n);
     const touched = try ws.alloc(n);
 
-    // Degree buckets
     var dl = DegLists{
         .head = try ws.allocSet(n + 1, NONE),
         .next = try ws.alloc(n),
         .prev = try ws.alloc(n),
     };
 
-    // ==== Phase 1: build symmetrized variable adjacency (contiguous in va[]) ====
-    // Count degrees first (two passes: count then scatter)
+    // Symmetrized adjacency: count, place spans, scatter, dedup.
     @memset(deg, 0);
     for (0..n) |j| {
         for (col_ptr[j]..col_ptr[j + 1]) |pi| {
@@ -316,13 +263,11 @@ pub fn amd(n: u32, col_ptr: []const u32, row_idx: []const u32, q: []u32, ws: *Ws
             deg[r] += 1;
         }
     }
-    // Assign contiguous spans
     var va_free: usize = 0;
     for (0..n) |i| {
         va_pe[i] = @intCast(va_free);
         va_free += deg[i];
     }
-    // Scatter edges (both directions for symmetrization)
     @memset(deg, 0);
     for (0..n) |j| {
         for (col_ptr[j]..col_ptr[j + 1]) |pi| {
@@ -334,10 +279,7 @@ pub fn amd(n: u32, col_ptr: []const u32, row_idx: []const u32, q: []u32, ws: *Ws
             deg[r] += 1;
         }
     }
-    // ponytail: both workspace slices have length n; reuse the bulk copy primitive.
     @memcpy(va_len, deg);
-
-    // Dedup (epoch-mark each neighbor, compact in-place)
     for (0..n) |i| {
         era += 1;
         var wp: u32 = 0;
@@ -353,8 +295,7 @@ pub fn amd(n: u32, col_ptr: []const u32, row_idx: []const u32, q: []u32, ws: *Ws
         va_len[i] = wp;
     }
 
-    // ==== Phase 2: dense-row deferral (threshold: max(16, 10·⌊√n⌋)) ====
-    // ponytail: stdlib integer sqrt preserves the exact floor without a counting loop.
+    // Dense rows leave the quotient graph and are ordered last.
     const isq: u32 = std.math.sqrt(n);
     const dense_thresh: u32 = @max(@as(u32, 16), 10 * isq);
     var ndense: u32 = 0;
@@ -366,13 +307,12 @@ pub fn amd(n: u32, col_ptr: []const u32, row_idx: []const u32, q: []u32, ws: *Ws
         var di: u32 = 0;
         for (0..n) |i| {
             if (va_len[i] >= dense_thresh) {
-                nv[i] = 0; // mark dead — excluded from quotient graph
+                nv[i] = 0;
                 lp_buf[dense_start + di] = @intCast(i);
                 di += 1;
             }
         }
     }
-    // Remove dead (dense) vertices from all adjacency lists
     if (ndense > 0) {
         for (0..n) |i| {
             if (nv[i] == 0) continue;
@@ -389,7 +329,6 @@ pub fn amd(n: u32, col_ptr: []const u32, row_idx: []const u32, q: []u32, ws: *Ws
         }
     }
 
-    // Initialize element adjacency: 4 slots each (grows 2x on overflow)
     var ea_free: usize = 0;
     for (0..n) |i| {
         ea_pe[i] = @intCast(ea_free);
@@ -397,31 +336,26 @@ pub fn amd(n: u32, col_ptr: []const u32, row_idx: []const u32, q: []u32, ws: *Ws
         ea_free += 4;
     }
 
-    // Insert live variables into degree buckets
     for (0..n) |i| {
         if (nv[i] == 0) continue;
         deg[i] = va_len[i];
         dl.insert(deg[i], @intCast(i));
     }
 
-    // ==== Phase 3: main elimination loop ====
     const n_amd: u32 = n - ndense;
     var mindeg: u32 = 0;
     var k: u32 = 0;
 
     while (k < n_amd) {
-        // Find minimum-degree pivot
         while (dl.head[mindeg] == NONE) mindeg += 1;
         const p = dl.head[mindeg];
         dl.remove(deg[p], p);
 
-        // ---- Form Lp = (A_p ∪ ⋃{Le : e ∈ E_p}) \ {p} ----
-        // Epoch mark to deduplicate union
+        // Lp = (A_p union every Le for e in E_p) minus p.
         era += 1;
         mark_arr[p] = era;
         var nlp: u32 = 0;
 
-        // Direct variable neighbors of p
         for (va[va_pe[p]..][0..va_len[p]]) |v| {
             if (nv[v] != 0 and mark_arr[v] != era) {
                 mark_arr[v] = era;
@@ -429,7 +363,6 @@ pub fn amd(n: u32, col_ptr: []const u32, row_idx: []const u32, q: []u32, ws: *Ws
                 nlp += 1;
             }
         }
-        // Members of elements adjacent to p
         for (ea[ea_pe[p]..][0..ea_len[p]]) |e| {
             if (elem_alive[e] == 0) continue;
             for (va[va_pe[e]..][0..va_len[e]]) |v| {
@@ -439,31 +372,27 @@ pub fn amd(n: u32, col_ptr: []const u32, row_idx: []const u32, q: []u32, ws: *Ws
                     nlp += 1;
                 }
             }
-            // Kill absorbed elements (their members ⊆ Lp ∪ {p})
-            elem_alive[e] = 0;
+            elem_alive[e] = 0; // absorbed into p
         }
 
-        // p becomes element: nv[p]=0, elem_alive[p]=1
+        // p becomes an element whose member list is Lp.
         const nvpiv = nv[p];
         nv[p] = 0;
         elem_alive[p] = 1;
 
-        // Store Le(p) = Lp in va[] tail (element member list)
         if (va_free + nlp > va.len) return error.OutOfWorkspace;
         va_pe[p] = @intCast(va_free);
         va_len[p] = nlp;
         @memcpy(va[va_free..][0..nlp], lp_buf[0..nlp]);
         va_free += nlp;
 
-        // Weighted size of Lp
         var lpsize: u32 = 0;
         for (lp_buf[0..nlp]) |i| lpsize += nv[i];
         esize[p] = lpsize;
 
-        // Remove Lp members from degree buckets (they'll be reinserted)
         for (lp_buf[0..nlp]) |i| dl.remove(deg[i], i);
 
-        // ---- w[e] = |Le \ Lp| upper bound (one scan of Lp's element adj) ----
+        // w[e] = |Le minus Lp|, in one scan of Lp's element lists.
         erw += 1;
         var ntouched: u32 = 0;
         for (lp_buf[0..nlp]) |i| {
@@ -478,13 +407,13 @@ pub fn amd(n: u32, col_ptr: []const u32, row_idx: []const u32, q: []u32, ws: *Ws
                 w_buf[e] -= @min(w_buf[e], nv[i]);
             }
         }
-        // Aggressive absorption: kill elements fully absorbed into p
+        // Aggressive absorption.
         for (touched[0..ntouched]) |e| {
             if (w_buf[e] == 0) elem_alive[e] = 0;
         }
-        // ---- Per-member: prune adjacency, compute approximate degree ----
+        // Per member: prune, then the approximate external degree.
         for (lp_buf[0..nlp]) |i| {
-            // E_i := live(E_i) ∪ {p}, with esum = Σ w[e] for degree bound
+            // E_i = live(E_i) + p, esum = sum of w[e].
             var esum: u32 = 0;
             var ewp: u32 = 0;
             for (ea[ea_pe[i]..][0..ea_len[i]]) |e| {
@@ -494,7 +423,6 @@ pub fn amd(n: u32, col_ptr: []const u32, row_idx: []const u32, q: []u32, ws: *Ws
                     esum += w_buf[e];
                 }
             }
-            // Append p to element adjacency (relocate if full)
             if (ewp < ea_lim[i]) {
                 ea[ea_pe[i] + ewp] = p;
             } else {
@@ -508,7 +436,7 @@ pub fn amd(n: u32, col_ptr: []const u32, row_idx: []const u32, q: []u32, ws: *Ws
             }
             ea_len[i] = ewp + 1;
 
-            // A_i := A_i \ (Lp ∪ dead), with asum = Σ nv for degree bound
+            // A_i = A_i minus Lp and dead variables, asum = sum of nv.
             var asum: u32 = 0;
             var vwp: u32 = 0;
             for (va[va_pe[i]..][0..va_len[i]]) |v| {
@@ -520,12 +448,11 @@ pub fn amd(n: u32, col_ptr: []const u32, row_idx: []const u32, q: []u32, ws: *Ws
             }
             va_len[i] = vwp;
 
-            // Approximate external degree = min(asum + |Lp_weighted \ nv_i| + esum, cap)
             const cap: u32 = n_amd - k - nvpiv;
             deg[i] = @min(asum + (lpsize - nv[i]) + esum, cap);
         }
 
-        // ---- Supervariable detection: hash + compare within buckets ----
+        // Supervariables: hash, then compare within each bucket.
         var nhb: u32 = 0;
         for (lp_buf[0..nlp]) |i| {
             if (nv[i] == 0) continue;
@@ -550,28 +477,25 @@ pub fn amd(n: u32, col_ptr: []const u32, row_idx: []const u32, q: []u32, ws: *Ws
                     if (nv[j] == 0 or hkey[j] != hkey[i]) continue;
                     if (!sameAdj(va, va_pe, va_len, ea, ea_pe, ea_len, mark_arr, &era, i, j))
                         continue;
-                    // Merge j into i
                     deg[i] -= @min(deg[i], nv[j]);
                     nv[i] += nv[j];
                     nv[j] = 0;
-                    // Append j's merge chain to i's
                     var tail = j;
                     while (mlink[tail] != NONE) tail = mlink[tail];
                     mlink[tail] = mlink[i];
                     mlink[i] = j;
                 }
             }
-            hhead[b] = NONE; // reset bucket head for next pivot step
+            hhead[b] = NONE;
         }
 
-        // Reinsert live Lp members into degree buckets
         for (lp_buf[0..nlp]) |i| {
             if (nv[i] == 0) continue;
             dl.insert(deg[i], i);
             if (deg[i] < mindeg) mindeg = deg[i];
         }
 
-        // Emit pivot p and its merge chain (mass elimination)
+        // Mass elimination: p and every variable merged into it.
         q[k] = p;
         k += 1;
         var mb = mlink[p];
@@ -581,14 +505,11 @@ pub fn amd(n: u32, col_ptr: []const u32, row_idx: []const u32, q: []u32, ws: *Ws
         }
     }
 
-    // ==== Phase 4: append deferred dense rows ====
     @memcpy(q[k..][0..ndense], lp_buf[dense_start..][0..ndense]);
 }
 
-/// Compare variable and element adjacency of two vertices for supervariable
-/// detection. Uses epoch-mark to avoid set sorting. Returns true iff
-/// A_i = A_j and E_i = E_j (exact set equality — not closed adjacency,
-/// because Lp members have been pruned from both sides already).
+/// True when i and j have equal variable and element adjacency sets (exact
+/// equality: Lp members are already pruned from both).
 fn sameAdj(
     va: []const u32,
     va_pe: []const u32,
@@ -601,7 +522,6 @@ fn sameAdj(
     i: u32,
     j: u32,
 ) bool {
-    // Fast reject on size mismatch
     if (va_len[i] != va_len[j] or ea_len[i] != ea_len[j]) return false;
     inline for (.{ va, ea }, .{ va_pe, ea_pe }, .{ va_len, ea_len }) |adj, pos, len| {
         era.* += 1;
