@@ -364,18 +364,19 @@ pub fn main() void {
     // pivot tape, values as []@Vector(W,f64). Its differential case (vector lane
     // l vs scalar SparseLu replay of lane l, on +/-5% perturbed matrices incl.
     // an MNA zero-diagonal pattern and a singular-lane/mask case) lives IN
-    // src/analysis/tests/solvers.zig (LaneLuTests), not here: this file runs standalone
-    // via `zig run` and cannot import the solvers module (SparseLu, the oracle).
-    // Run it under `zig build test-solvers`.
+    // src/solver/tests.zig (LaneLuTests), not here: this file runs standalone
+    // via `zig run` and cannot import the solver module (SparseLu, the oracle).
+    // Run it under `zig build test-solver`. FreqSolver.solveBatch, which feeds
+    // LaneLu one frequency per lane, is checked against its per-frequency
+    // loop in the same file (FreqSolveTests).
 
     // SparseLu.refactor stays SCALAR — measured, not assumed. The active-set
     // -local u16 replay tape (dense front, vector zero/normalize, run-split
     // vector axpy variants) was bit-identical to the scalar oracle but lost
     // 19% wall end-to-end: the per-flop tape streams with zero reuse (2.8x L2
     // read traffic) while global-coordinate li/lx column reads stay
-    // D1-resident. Rerunnable rig: src/analysis/solvers/dev_harness.zig on a
-    // ZP_LU_DUMP capture (differential-checks every variant vs lu.refactor,
-    // bit-identical, before racing them). Full evidence:
+    // D1-resident. Full evidence, and the measurement rig (removed from the
+    // tree; see git history for src/solvers/dev_harness.zig):
     // docs/solvers/refactor-tape-2026-09.md.
     //
     // What DID pay there was the opposite of widening: `SparseLu.scatterAxpy`
@@ -385,7 +386,7 @@ pub fn main() void {
     // 47/32/72 at len 1/2/3 on devices/mos6_inverter. LLVM runtime-unrolls the
     // plain loop by 4, so the wide body it builds never runs and each call
     // still pays the guard chain. Differential case against the one-at-a-time
-    // oracle over lengths 0..8: src/analysis/tests/solvers.zig (SparseTests) (same
+    // oracle over lengths 0..8: src/solver/tests.zig (SparseTests) (same
     // standalone-import reason as LaneLu above).
     //
     // SparseLu.factor's supernode panels (`panelRows`, 4 rows per ymm, W == 1
@@ -393,18 +394,23 @@ pub fn main() void {
     // steps as vector updates. Oracle: `refactor`, which replays the same U
     // order one column at a time; L, U and the diagonal must match bit for
     // bit. Case: "factor: supernode panels are bitwise the column-at-a-time
-    // refactor" in src/analysis/tests/solvers.zig (SparseTests), same
+    // refactor" in src/solver/tests.zig (SparseTests), same
     // standalone-import reason as LaneLu above.
     //
     // SparseLu.refactorTape (small matrices) is scalar; only its zero fill
     // and copy-out are laned. Oracle: refactorColumns, the column replay.
-    // Case: "refactor: the small-matrix tape is bitwise the column replay"
+    // Case: "refactor and solve: the small-matrix tape is bitwise the column path"
     // in the same SparseTests.
     //
     // converger.updateAndNorm (x_old = x; x += dx; max scaled |dx|) is
     // W-wide with a scalar tail. Max is exact, so the lane split cannot change
     // the result; its bitwise case against the scalar loop, lengths 0..39 with
-    // NaN/inf/-0 inputs, is ConvergerTests in src/analysis/tests/solvers.zig.
+    // NaN/inf/-0 inputs, is ConvergerTests in src/solver/tests.zig.
+    //
+    // dense_lu's rank-8 panel elimination (`eliminateBlocked`) promises the
+    // unblocked loops' factors, pivots and fused solution bit for bit. Case:
+    // "dense_lu: blocked elimination is bitwise the scalar oracle" in
+    // src/solver/tests.zig (DenseLuTests).
 
     // evalRange's `corr_live` predicate (analysis/eval.zig anyNonzero): an
     // integer shift-and-test standing in for `@reduce(.Or, v != 0)`. Its
