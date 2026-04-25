@@ -110,6 +110,7 @@ pub const Options = struct {
     matrix_sig: u64 = 0,
 };
 
+/// Outcome of a nonlinear solve.
 pub const Result = struct {
     converged: bool,
     iterations: u16,
@@ -338,14 +339,14 @@ pub fn jfnk(
         g[0] = beta;
         @memset(g[1 .. m + 1], 0);
 
+        // eps_j = sqrt(eps_mach) * max(||x||, 1) / ||v_j||.
+        acc = 0;
+        for (x) |xi| acc += xi * xi;
+        const x_norm = @max(@sqrt(acc), 1.0);
+
         var jj: usize = 0; // Arnoldi steps completed
         for (0..m) |j| {
             const vj = v_basis[j * n ..][0..n];
-
-            // eps = sqrt(eps_mach) * max(||x||, 1) / ||v_j||.
-            acc = 0;
-            for (x) |xi| acc += xi * xi;
-            const x_norm = @max(@sqrt(acc), 1.0);
             acc = 0;
             for (vj) |vi| acc += vi * vi;
             const v_norm = @sqrt(acc);
