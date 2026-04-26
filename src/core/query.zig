@@ -1,18 +1,32 @@
-//! Resolved query descriptions: the analysis contract. Card keywords live in
-//! frontend/netlist.zig `cards`. No parser, driver, or solver imports.
+//! Resolved query descriptions: the contract between the frontend, which
+//! fills them from analysis cards (keywords in frontend/netlist.zig `cards`),
+//! and the analysis drivers. Node and branch fields are MNA rows.
 const std = @import("std");
 const Tolerances = @import("numerics.zig").Tolerances;
 const DeviceType = @import("root.zig").DeviceType;
+
+/// Dense id of a query within one session.
 pub const QueryId = enum(u32) { _ };
+/// Sentinel `QueryId` that names no query.
 pub const invalid_query: QueryId = @enumFromInt(std.math.maxInt(u32));
+/// Transient integration method.
 pub const Method = enum { backward_euler, trapezoidal, gear_2 };
 pub const FreqSweep = @import("numerics.zig").FreqSweep;
 pub const SweepKind = @import("numerics.zig").SweepKind;
+
+/// One `.sp` port: the node and branch row of its source and its reference
+/// impedance in ohms.
 pub const Port = struct { node: u32, branch: u32, z0: f64 = 50.0 };
+
+/// The card name of one device instance.
 pub const CardRef = struct {
     type: DeviceType,
+    /// Instance index within `type`.
     index: u32,
     name: []const u8,
+
+    /// Returns the card name of instance `index` of type `t`, if listed.
+    /// Linear scan over `cards`.
     pub fn lookup(cards: []const CardRef, t: DeviceType, index: u32) ?[]const u8 {
         for (cards) |c| if (c.index == index and c.type == t) return c.name;
         return null;
@@ -27,14 +41,13 @@ pub const Ac = struct {
 pub const Noise = struct {
     tol: Tolerances = .{},
     out_node: u32,
-    /// `v(a,b)`: the measurement is v(out_node) − v(out_neg). GROUND is the
-    /// single-ended case and costs nothing — the adjoint rhs is e_pos − e_neg
-    /// and e_GROUND is not stamped.
+    /// `v(a,b)` reference: the measurement is v(out_node) - v(out_neg).
+    /// GROUND is the single-ended case.
     out_neg: u32 = 0,
     sweep: FreqSweep,
-    /// MNA branch row of the `.noise v(out) SRC ...` input source. It does
-    /// not drive the solve — it is what `inoise_spectrum` refers the measured
-    /// noise back to. null emits the output-referred curve only.
+    /// Branch row of the `.noise v(out) SRC ...` input source. It does not
+    /// drive the solve; `inoise_spectrum` refers the output noise back to
+    /// it. Null emits the output-referred curve only.
     in_branch: ?u32 = null,
     /// Emit integrated device noise in V rms instead of the measured PSD.
     integrated: bool = false,
@@ -43,8 +56,8 @@ pub const Noise = struct {
 pub const Sp = struct {
     tol: Tolerances = .{},
     sweep: FreqSweep,
-    /// Explicit port list. Empty means one port at the drive source
-    /// (ctx.source_node / ctx.source_branch) when running via the contract.
+    /// Explicit port list. Empty means one port at the deck's drive source
+    /// (`Deck.source_node`/`source_branch`).
     ports: []const Port = &.{},
 };
 
@@ -52,7 +65,7 @@ pub const Stb = struct {
     tol: Tolerances = .{},
     sweep: FreqSweep,
     /// The deck's own 0 V probe source (`.stb Vprobe ...`): its two node rows
-    /// and its MNA branch row. `probe_p` is the arriving (driven) side.
+    /// and its branch row. `probe_p` is the arriving (driven) side.
     probe_p: u32,
     probe_n: u32,
     probe_branch: u32,
@@ -61,10 +74,9 @@ pub const Stb = struct {
 pub const Op = struct {
     tol: Tolerances = .{},
     warm_start: bool = false,
-    /// ngspice's TRANOP/DCOP split: the operating point that STARTS a
-    /// transient runs in the LRM "ic" phase (analysis("tran") also true),
-    /// so waveform sources evaluate at t = 0 instead of their DC value.
-    /// The engine sets this when the deck contains a transient-family job.
+    /// This operating point starts a transient (ngspice MODETRANOP), so
+    /// waveform sources evaluate at t = 0 instead of at their DC value. The
+    /// engine sets it when the deck has a transient-family query.
     tran_op: bool = false,
 };
 
@@ -73,26 +85,24 @@ pub const Dc = struct {
     start: f64 = 0,
     stop: f64 = 0,
     step: f64 = 1,
-    /// What the inner sweep drives. A bare batch-local index aliased a V card
-    /// with an I card of the same ordinal — which is why a deck holding both
-    /// had to be rejected outright — and could not name a resistor at all.
-    /// The device type and parameter travel with the index instead.
+    /// What the inner sweep drives, named by device type and parameter so a
+    /// V card, an I card and a resistor with the same index stay distinct.
     target: SweepTarget = .{},
-    /// ngspice's optional second sweep variable — the OUTER loop
-    /// (`.dc src1 ... src2 start2 stop2 incr2`), or `.dc ... temp ...`.
+    /// Optional outer sweep (`.dc src1 ... src2 start2 stop2 incr2`, or
+    /// `.dc ... temp ...`).
     target2: ?SweepTarget = null,
     start2: f64 = 0,
     stop2: f64 = 0,
     step2: f64 = 1,
 
+    /// The device parameter, or the temperature, a `.dc` sweep drives.
     pub const SweepTarget = struct {
         /// Set by the frontend from the swept card; `unset` names no card.
         type: DeviceType = .unset,
-        /// Batch-local instance index within that type.
+        /// Instance index within `type`.
         index: u32 = 0,
         param_name: []const u8 = "dc",
-        /// `.dc ... temp ...` sweeps the circuit temperature; the three
-        /// fields above are then unused.
+        /// Sweep the circuit temperature instead; the fields above are unused.
         is_temp: bool = false,
     };
 
@@ -105,63 +115,66 @@ pub const Tf = struct {
     tol: Tolerances = .{},
     /// `v(a,b)` reference node for the output; GROUND is single-ended.
     output_neg: u32 = 0,
-    /// `.tf i(Vmeasure) ...`: the output is that source's BRANCH current, not
-    /// a node voltage. Set ⇒ `output_node`/`output_neg` are unused.
+    /// `.tf i(Vmeasure) ...`: the output is that source's branch current.
+    /// When set, `output_node` and `output_neg` are unused.
     output_branch: ?u32 = null,
     /// `.tf v(out) Iin`: the input is a current source, which has no branch
-    /// row — the excitation is a unit current into its node pair instead.
-    /// Set ⇒ `input_branch` is unused.
+    /// row, so the excitation is a unit current into this node pair. When
+    /// set, `input_branch` is unused.
     input_nodes: ?[2]u32 = null,
-    /// Branch-current unknown of the input vsource (its row is v_p - v_n - V = 0).
-    /// null -> ctx.source_branch (the first source's branch).
+    /// Branch row of the input V source. Null means `Deck.source_branch`.
     input_branch: ?u32 = null,
-    /// null -> the last probe node.
+    /// Null means the last probe row.
     output_node: ?u32 = null,
 };
 
 pub const Dcmatch = struct {
     tol: Tolerances = .{},
-    /// null -> the last probe node.
+    /// Null means the last probe row.
     output_node: ?u32 = null,
 };
 
 pub const Pss = struct {
     tol: Tolerances = .{},
+    /// Seconds.
     period: f64,
     max_shooting_iter: u16 = 50,
     shooting_tol: f64 = 1e-7,
+    /// Perturbation of the finite-difference monodromy Jacobian.
     fd_epsilon: f64 = 1e-7,
     max_newton_iter: u16 = 50,
     newton_tol: f64 = 1e-9,
-    /// Fixed trapezoidal steps per period; the waveform has n_samples+1 rows.
+    /// Fixed trapezoidal steps per period; the waveform has n_samples + 1 rows.
     n_samples: u32 = 256,
-    /// GMRES restart depth for Krylov path (n >= krylov_threshold).
+    /// GMRES restart depth; used only on the Krylov path for large circuits.
     gmres_restart: u32 = 30,
-    /// Maximum GMRES outer restarts.
     gmres_max_restarts: u32 = 10,
-    /// GMRES relative tolerance for the inner linear solve.
+    /// Relative tolerance of the inner GMRES solve.
     gmres_tol: f64 = 1e-3,
 };
 
 pub const Hb = struct {
     tol: Tolerances = .{},
+    /// Fundamental, in Hz.
     f0: f64,
     n_harmonics: u16 = 8,
     max_iter: u16 = 200,
     hb_tol: f64 = 1e-9,
 };
 
+/// Periodic AC (`.pac`) and periodic transfer function (`.pxf`) options.
 pub const Pac = struct {
     tol: Tolerances = .{},
-    /// LO (pump) frequency — the fundamental periodicity.
+    /// LO (pump) frequency in Hz: the fundamental periodicity.
     f_lo: f64,
-    /// Number of LO harmonics to include: sidebands span [-n_harmonics..+n_harmonics].
+    /// LO harmonics kept: sidebands span `-n_harmonics..n_harmonics`.
     n_harmonics: u16 = 3,
     /// Input frequency sweep.
     sweep: FreqSweep,
-    /// Number of time samples per LO period (must be power of 2, >= 2*(2*n_harmonics+1)).
+    /// Time samples per LO period. Must be a power of two and at least
+    /// 2 * (2 * n_harmonics + 1).
     n_time_samples: u16 = 64,
-    /// PSS shooting parameters.
+    /// Periods integrated to settle before the PSS solve.
     pss_periods: u16 = 20,
     pss_newton_tol: f64 = 1e-9,
     pss_max_newton_iter: u16 = 50,
@@ -171,120 +184,119 @@ pub const Pnoise = struct {
     tol: Tolerances = .{},
     out_node: u32,
     sweep: FreqSweep,
+    /// Hz.
     f_fundamental: f64,
     pss_n_samples: u32 = 64,
     pss_shoot_tol: f64 = 1e-6,
     pss_shoot_max_iter: u16 = 50,
     pss_newton_max_iter: u16 = 50,
     pss_newton_tol: f64 = 1e-9,
+    /// Sidebands kept on each side of the carrier.
     n_sidebands: u16 = 7,
 };
 
+/// Two-tone quasi-periodic steady state.
 pub const Qpss = struct {
     tol: Tolerances = .{},
+    /// The two fundamentals, in Hz.
     f1: f64,
     f2: f64,
+    /// Harmonics kept of `f1` and `f2`.
     k1: u16 = 5,
     k2: u16 = 5,
     max_newton: u16 = 50,
     hb_tol: f64 = 1e-9,
-    /// GMRES restart depth (per Newton step)
+    /// GMRES restart depth per Newton step.
     gmres_restart: u16 = 30,
-    /// Max GMRES restarts per Newton step
     gmres_max_restarts: u16 = 10,
-    /// GMRES relative tolerance
     gmres_tol: f64 = 1e-3,
-    /// Source excitation magnitude (cosine current at f1 into source_node)
-    source_mag: f64 = 1.0,
 };
 
 pub const Tran = struct {
     tol: Tolerances = .{},
+    /// Seconds, like every time field below.
     t_stop: f64,
     dt_init: f64 = 1e-9,
     dt_min: f64 = 1e-18,
-    /// ngspice tstart: OUTPUT suppression only. The integration still starts
-    /// at t = 0 with the same history, so a deck that relies on settling
-    /// before the printed window keeps it; only the recorded points before
-    /// `t_start` are dropped. The driver lands one step exactly on it so the
-    /// first printed point is at `t_start`, as ngspice's breakpoint does.
+    /// ngspice tstart: output suppression only. Integration still starts at
+    /// t = 0 with the same history; points before `t_start` are dropped, and
+    /// one step lands exactly on it, as ngspice's breakpoint does.
     t_start: f64 = 0,
-    /// ngspice tmax: default is t_stop/50; an explicit value replaces it.
+    /// ngspice tmax. Null means t_stop / 50.
     dt_max: ?f64 = null,
     method: Method = .trapezoidal,
-    // Runaway guard only — a healthy 1 us-grid second is 1e6 accepted points
-    // (vacask/rc hit the old 1e6 wall at t = 0.994 s and reported
-    // TimestepTooSmall on a perfectly marching transient). dt_min is the
-    // real brake; this only stops a stuck loop.
+    /// Runaway guard only; `dt_min` is the real brake. A 1 s run on a 1 us
+    /// grid is already 1e6 accepted points.
     max_steps: u32 = 1_000_000_000,
-    /// `.tran ... uic`: no operating point ran, so the starting `x` came from
-    /// the `.ic` cards (zero elsewhere) rather than from `op.solve`. The
-    /// transient then owes the setup op.solve normally performs — the
-    /// `initial_step` latch and the static state the charge seeding reads.
+    /// `.tran ... uic`: no operating point runs; the starting state comes
+    /// from the `.ic` cards (zero elsewhere), and the transient does the
+    /// setup the operating point would have done.
     uic: bool = false,
 };
 
 pub const TranNoise = struct {
     tol: Tolerances = .{},
+    /// Seconds, like every time field below.
     t_stop: f64,
     dt_init: f64 = 1e-9,
     dt_min: f64 = 1e-18,
     dt_max: f64 = 1e-3,
-    // Runaway guard only — a healthy 1 us-grid second is 1e6 accepted points
-    // (vacask/rc hit the old 1e6 wall at t = 0.994 s and reported
-    // TimestepTooSmall on a perfectly marching transient). dt_min is the
-    // real brake; this only stops a stuck loop.
+    /// Runaway guard only, as in `Tran.max_steps`.
     max_steps: u32 = 1_000_000_000,
+    /// Noise generator seed; the same seed reproduces the same run.
     seed: u64 = 0xDEAD_BEEF_CAFE_1234,
 };
 
 pub const Envelope = struct {
     tol: Tolerances = .{},
-    /// Carrier period (1 / f_carrier).
+    /// Carrier period (1 / f_carrier), in seconds.
     t_carrier: f64,
-    /// Total simulation time (covers the full modulation envelope).
+    /// Total simulated time, in seconds.
     t_stop: f64,
     carrier_steps_per_period: u32 = 64,
-    /// Number of carrier periods per outer envelope step. 1 = sample every period.
+    /// Carrier periods per outer envelope step; 1 samples every period.
     periods_per_outer_step: u32 = 1,
-    /// Maximum total outer (envelope) steps before giving up.
+    /// Outer steps allowed before giving up.
     max_outer_steps: u32 = 1_000_000,
-    /// Envelope rate-of-change tolerance for adaptive outer stepping.
-    /// If the relative change in envelope between two outer steps exceeds this,
-    /// the outer step is halved.
+    /// The outer step halves when the envelope changes by more than this
+    /// fraction between two outer steps.
     envelope_reltol: f64 = 0.05,
-    /// Minimum outer step expressed as a multiple of T_carrier.
+    /// Outer step bounds, in carrier periods.
     min_periods_per_step: u32 = 1,
-    /// Maximum outer step expressed as a multiple of T_carrier.
     max_periods_per_step: u32 = 16,
 };
 
+/// Matrix-exponential transient (MATEX).
 pub const Matex = struct {
     tol: Tolerances = .{},
+    /// Seconds.
     t_stop: f64,
-    /// Krylov posterior tolerance (role of reltol on the exponential).
+    /// Krylov posterior tolerance, the exponential's counterpart of reltol.
     krylov_tol: f64 = 1e-10,
-    /// Maximum Krylov subspace dimension before declaring failure.
+    /// Largest Krylov subspace before the step fails.
     m_max: u32 = 80,
-    /// R-MATEX shift parameter γ — order of intended timestep, insensitive.
+    /// R-MATEX shift γ, on the order of the intended step; results are
+    /// insensitive to it. Null means t_stop / 1000.
     gamma: ?f64 = null,
-    /// Output resolution cap — maximum h between recorded points.
+    /// Largest step between recorded points. Null means t_stop / 200.
     h_output_cap: ?f64 = null,
-    /// Maximum recorded points (controls initial waveform allocation).
+    /// Recorded-point ceiling; sizes the initial waveform allocation.
     max_points: u32 = 1 << 22,
 };
 
+/// Monte Carlo over the DC solution.
 pub const Mc = struct {
     tol: Tolerances = .{},
     n_trials: u16 = 100,
-    /// Seed for the PRNG (deterministic).
+    /// PRNG seed; the same seed reproduces the same trials.
     seed: u64 = 42,
-    /// Relative tolerance applied to every primary instance value in run().
+    /// Relative spread applied to every primary instance value.
     variation: f64 = 0.05,
-    /// DC solver options forwarded to each trial's solve.
+    /// Options for each trial's DC solve.
     dc_options: Dc = .{},
 };
 
+/// DC solution over a temperature sweep, in °C.
 pub const Temp = struct {
     tol: Tolerances = .{},
     t_start: f64 = -40.0,
@@ -296,13 +308,12 @@ pub const Temp = struct {
 
 pub const Sens = struct {
     tol: Tolerances = .{},
-    /// null → the last probe node.
+    /// Null means the last probe row.
     output_node: ?u32 = null,
     /// `v(a,b)` reference node for the output; GROUND is single-ended.
     output_neg: u32 = 0,
-    /// Instance-ordinal → card name, so a column can name the card ngspice
-    /// names. Empty falls back to `<type>#<ordinal>`, which is what every
-    /// column read like before this table existed.
+    /// Card names for the result columns, so they match ngspice's. Empty
+    /// falls back to `<type>#<ordinal>`.
     cards: []const CardRef = &.{},
 };
 
@@ -310,16 +321,13 @@ pub const Pz = struct {
     tol: Tolerances = .{},
     qr_max_iter: u32 = 1000,
     qr_tol: f64 = 1e-12,
-    /// `.pz in+ in− out+ out− vol|cur pol|zer|pz`. The output side of the
-    /// transfer, as MNA rows. A bare `.pz` leaves both at GROUND and asks for
-    /// the circuit's own poles, which is all a deck written before the ports
-    /// existed ever meant.
+    /// Output side of `.pz in+ in- out+ out- vol|cur pol|zer|pz`. A bare
+    /// `.pz` leaves both at GROUND and asks for the circuit's own poles.
     out_pos: u32 = 0,
     out_neg: u32 = 0,
-    /// Where the input drive enters the matrix. `vol` drives a voltage source,
-    /// so the column is that card's BRANCH row; GROUND selects the `cur` form
-    /// below, a current injected at the input node pair. Same convention as
-    /// `Disto.drive_branch`.
+    /// Where the input drive enters. `vol` drives a voltage source, so this
+    /// is its branch row; GROUND selects `cur`, a current injected at
+    /// `in_pos`/`in_neg`. Same convention as `Disto.drive_branch`.
     drive_branch: u32 = 0,
     in_pos: u32 = 0,
     in_neg: u32 = 0,
@@ -330,46 +338,46 @@ pub const Pz = struct {
 
 pub const Four = struct {
     tol: Tolerances = .{},
+    /// Hz.
     f_fundamental: f64,
     n_harmonics: u16 = 9,
     output_node: u32 = 0,
-    /// Transient window to analyze; defaults to 5 fundamental periods at
-    /// 200 points/period (the old engine reused a queued .tran here).
+    /// Transient window to analyze. Null means 5 fundamental periods at
+    /// 200 points per period.
     tran_opts: ?Tran = null,
 
-    /// Size of the harmonic table the extractor carries. A `Spectrum` is
-    /// returned by value, so the table is fixed and this is its ceiling.
+    /// Size of the fixed harmonic table the extractor returns by value.
     pub const max_harmonics = 64;
 };
 
 pub const Disto = struct {
     tol: Tolerances = .{},
     sweep: FreqSweep,
-    /// MNA BRANCH row of the V card carrying `DISTOF1`. ngspice cktdisto.c:115
-    /// puts a voltage source's F1 drive there and nowhere else; a NODE row is
-    /// wrong, because that node is pinned by the source's own branch equation
-    /// and the first-order solve comes back with V1(out) = 0 — which is what
-    /// left hd2/v1_mag/v2_mag identically zero on every `.disto` deck.
+    /// Branch row of the V card carrying `DISTOF1`, where ngspice puts a
+    /// voltage source's F1 drive (cktdisto.c:115). A node row would be
+    /// pinned by the source's own branch equation and give V1(out) = 0.
     /// GROUND selects the current-source form below.
     drive_branch: u32 = 0,
-    /// Current-source form, ngspice cktdisto.c:151-158: the drive is a current
-    /// INTO `ac_source_node`, so that row takes −0.5·mag. GROUND means "the
-    /// drive source branch" (ctx.source_branch) when running via the contract.
+    /// Current-source form (ngspice cktdisto.c:151-158): the drive is a
+    /// current into this row, which takes -0.5·mag. GROUND means the drive
+    /// source (`Deck.source_branch`).
     ac_source_node: u32 = 0,
     /// `DISTOF1 <mag> [<phase deg>]` off the card (ngspice vsrcpar.c:180-193).
     ac_magnitude: f64 = 1.0,
     ac_phase: f64 = 0.0,
-    /// Output node; GROUND means "the last probe" when running via the contract.
+    /// GROUND means the last probe row.
     output_node: u32 = 0,
     fd_eps: f64 = 1e-6,
-    /// Which of the card's three plots this query publishes. ngspice prints
-    /// the two harmonic SOLUTION VECTORS; `summary` is espice's own 4-column
-    /// digest at one node. prepare.zig fans one `.disto` card out into all
-    /// three, the way it already fans `.noise` out into two.
+    /// Which of the card's three plots this query publishes. The frontend
+    /// fans one `.disto` card out into all three.
     plot: Plot = .summary,
 
+    /// `second` and `third` are the harmonic solution vectors ngspice
+    /// prints; `summary` is a 4-column digest at one node.
     pub const Plot = enum(u8) { summary, second, third };
 };
+
+/// Tag of `Query`: one per analysis.
 pub const Kind = enum(u8) {
     ac,
     dc,
@@ -405,6 +413,8 @@ pub const Kind = enum(u8) {
         };
     }
 };
+
+/// One resolved analysis request.
 pub const Query = union(Kind) {
     ac: Ac,
     dc: Dc,

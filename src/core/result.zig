@@ -1,3 +1,4 @@
+//! What an analysis publishes: the shape known up front and the finished payload.
 const Kind = @import("query.zig").Kind;
 
 /// What a query will publish, known before it runs: enough for an output
@@ -10,18 +11,21 @@ pub const QuerySchema = struct {
     portless: bool,
 };
 
-/// Available before samples exist; adaptive analyses leave npoints unknown.
+/// The column layout of a result, available before any samples exist.
 pub const Schema = struct {
     varnames: []const []const u8,
     is_complex: bool,
+    /// Null when the analysis is adaptive and the point count is unknown.
     npoints: ?usize = null,
 };
 
-/// A completed analysis payload, retained until the owning Problem is destroyed.
+/// A completed analysis payload, valid until the owning Problem is destroyed.
 pub const Result = struct {
     plotname: []const u8,
     varnames: []const []const u8,
     is_complex: bool,
     npoints: usize,
+    /// Point-major samples, `npoints * varnames.len` of them; a complex
+    /// variable takes two adjacent f64s (real, imaginary).
     data: []const f64,
 };

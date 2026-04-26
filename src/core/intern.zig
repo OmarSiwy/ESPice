@@ -11,6 +11,8 @@ pub const Name = enum(u32) {
     }
 };
 
+/// Deduplicating string table. Names live in one byte buffer; the map holds
+/// only ids and hashes the stored bytes on demand.
 pub const InternPool = struct {
     bytes: std.ArrayList(u8) = .empty,
     /// `offs[i]` starts name i; one trailing entry ends the last name.
@@ -28,6 +30,7 @@ pub const InternPool = struct {
         }
     };
 
+    /// Looks a string up against stored ids without interning it.
     const Adapter = struct {
         pool: *const InternPool,
         pub fn hash(_: Adapter, s: []const u8) u64 {
@@ -45,7 +48,8 @@ pub const InternPool = struct {
         p.* = undefined;
     }
 
-    /// The id of `s`, added on first sight.
+    /// Returns the id of `s`, adding it on first sight. May invalidate
+    /// slices returned by `str`. Leaves the pool unchanged on error.
     pub fn intern(p: *InternPool, gpa: Allocator, s: []const u8) Allocator.Error!Name {
         if (p.offs.items.len == 0) try p.offs.append(gpa, 0);
         const gop = try p.map.getOrPutContextAdapted(gpa, s, Adapter{ .pool = p }, .{ .pool = p });
@@ -59,15 +63,17 @@ pub const InternPool = struct {
         return n;
     }
 
+    /// Pre-sizes the map for `names` distinct names.
     pub fn reserve(p: *InternPool, gpa: Allocator, names: u32) Allocator.Error!void {
         try p.map.ensureTotalCapacityContext(gpa, names, .{ .pool = p });
     }
 
+    /// Returns the id of `s` if it was interned, without adding it.
     pub fn find(p: *const InternPool, s: []const u8) ?Name {
         return p.map.getKeyAdapted(s, Adapter{ .pool = p });
     }
 
-    /// Valid until the next `intern`.
+    /// Returns the bytes of `n`. Valid until the next `intern`.
     pub fn str(p: *const InternPool, n: Name) []const u8 {
         return p.bytes.items[p.offs.items[n.index()]..p.offs.items[n.index() + 1]];
     }
