@@ -1,27 +1,34 @@
-//! Shared output data. Writers and producers import this leaf, not root.zig.
+//! Shared output data and the checks that decide whether a format can hold a
+//! result. Writers and producers import this leaf, never root.zig.
 const std = @import("std");
+const core = @import("core");
 
 pub const Format = enum(u8) { binary, ascii, csv, touchstone, psf, fsdb, sst2, citi, print };
 
-/// Fixed for one output session. Null path retains results without file output.
+/// Where and how a session writes its plots. Fixed for the session's life.
 pub const Selection = struct {
     format: Format = .binary,
+    /// Null keeps results in memory and writes no file.
     path: ?[]const u8 = null,
 };
 
-const core = @import("core");
 pub const Schema = core.Schema;
 pub const Result = core.Result;
 
 /// A result as one file shows it: the deck title over the analysis payload.
-/// `result.data` is point-major; complex variables occupy adjacent real and
-/// imaginary f64 values.
 pub const Plot = struct {
     title: []const u8,
     result: Result,
 
     pub fn schema(self: Plot) Schema {
         return .{ .varnames = self.result.varnames, .is_complex = self.result.is_complex, .npoints = self.result.npoints };
+    }
+
+    /// Returns the samples of point `pt`: one f64 per variable, or a
+    /// (real, imaginary) pair per variable when complex.
+    pub fn point(self: Plot, pt: usize) []const f64 {
+        const stride = self.result.varnames.len * @as(usize, if (self.result.is_complex) 2 else 1);
+        return self.result.data[pt * stride ..][0..stride];
     }
 };
 
@@ -32,7 +39,8 @@ fn sampleCount(schema: Schema, npoints: usize) ValidationError!usize {
     return std.math.mul(usize, count, if (schema.is_complex) 2 else 1) catch error.DataLengthMismatch;
 }
 
-/// One-based port indices in an S(m,n) label or ngspice's v(S_m_n) label.
+/// Returns the one-based port pair of an `S(m,n)` or ngspice `v(S_m_n)`
+/// label, or null if `name` is neither.
 pub fn sParameter(name: []const u8) ?[2]u32 {
     if (!std.mem.endsWith(u8, name, ")")) return null;
     const ngspice = std.mem.startsWith(u8, name, "v(S_");
@@ -46,7 +54,9 @@ pub fn sParameter(name: []const u8) ?[2]u32 {
     return .{ m, n };
 }
 
-/// Touchstone writes a complete row-major matrix after the frequency column.
+/// Returns the port count of a complete S matrix: complex data, `frequency`
+/// first, then every `S(m,n)` in row-major order. Touchstone needs exactly
+/// this layout.
 pub fn portCount(schema: Schema) ValidationError!u32 {
     if (!schema.is_complex or schema.varnames.len < 2 or
         !std.mem.eql(u8, schema.varnames[0], "frequency")) return error.NotSParameterData;
@@ -62,7 +72,8 @@ pub fn portCount(schema: Schema) ValidationError!u32 {
     return last[0];
 }
 
-/// Pure validation: construction can reject incompatible output before any I/O.
+/// Checks that `format` can hold a result of this shape. Pure, so
+/// construction can reject a bad selection before any I/O.
 pub fn validateSchema(format: Format, schema: Schema) ValidationError!void {
     if (schema.varnames.len == 0) return error.DataLengthMismatch;
     if (schema.npoints) |n| _ = try sampleCount(schema, n);
@@ -84,12 +95,14 @@ pub fn validateSchema(format: Format, schema: Schema) ValidationError!void {
             if (schema.npoints) |n| if (n > std.math.maxInt(u32)) return error.FormatLimitExceeded;
             for (schema.varnames) |name| if (name.len > std.math.maxInt(u16)) return error.FormatLimitExceeded;
         },
-        // The existing writer has 64 fixed-width name slots.
+        // sst2.zig has 64 fixed name slots.
         .sst2 => if (schema.varnames.len > 64) return error.FormatLimitExceeded,
         else => {},
     }
 }
 
+/// `validateSchema`, plus the data length and the fsdb string limits.
+/// Every encoder assumes a plot that passed this.
 pub fn validatePlot(format: Format, plot: Plot) ValidationError!void {
     try validateSchema(format, plot.schema());
     if (plot.result.data.len != try sampleCount(plot.schema(), plot.result.npoints)) return error.DataLengthMismatch;
@@ -97,14 +110,14 @@ pub fn validatePlot(format: Format, plot: Plot) ValidationError!void {
         return error.FormatLimitExceeded;
 }
 
-/// Refuse, before it runs, a query whose result `format` cannot encode.
+/// Refuses, before it runs, a query whose result `format` cannot encode.
+/// `NoPorts`: a Touchstone or CITI request for an `.sp` with no ports.
 pub fn validateQuery(format: Format, query: core.QuerySchema, deck: *const core.Deck) error{ NotSParameterData, NoPorts, DataLengthMismatch, FormatLimitExceeded }!void {
     if (format == .touchstone or format == .citi) {
         if (query.kind != .sp) return error.NotSParameterData;
         if (query.portless) return error.NoPorts;
     }
     if (format != .sst2 and format != .fsdb) return;
-    // SST2 has a fixed 64-variable header; FSDB has 16-bit label lengths.
     if (query.columns == 0) return error.DataLengthMismatch;
     if (format == .sst2 and query.columns > 64) return error.FormatLimitExceeded;
     if (format == .fsdb) {
@@ -140,4 +153,16 @@ test "output schemas validate unknown sizes, checked dimensions and S-parameter 
     }));
     const mislabeled: Schema = .{ .varnames = &.{ "time", "S(1,1)" }, .is_complex = true };
     try t.expectError(error.NotSParameterData, validateSchema(.citi, mislabeled));
+}
+
+test "S-parameter labels accept both producers and reject malformed port identities" {
+    try std.testing.expectEqual([2]u32{ 12, 3 }, sParameter("S(12,3)").?);
+    try std.testing.expectEqual([2]u32{ 12, 3 }, sParameter("v(S_12_3)").?);
+    for ([_][]const u8{ "S()", "S(0,1)", "S(1,)", "S(1,2,3)", "v(S_)", "v(S_1_0)", "v(S_1_2_3)", "v(S_+1_2)", "v(S_4294967296_1)" }) |name| {
+        try std.testing.expect(sParameter(name) == null);
+        try std.testing.expectError(error.NotSParameterData, validateSchema(.citi, .{
+            .varnames = &.{ "frequency", "S(1,1)", name },
+            .is_complex = true,
+        }));
+    }
 }
