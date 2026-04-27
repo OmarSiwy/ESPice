@@ -103,12 +103,12 @@ pub const Builder = struct {
 
     /// Tag a node as belonging to a subcircuit instance.
     /// If a node is tagged by multiple instances, it becomes a coupling node.
-    pub fn tagNodeInstance(self: *Builder, node: u32, subckt_type: u16, subckt_instance: u32) !void {
+    fn tagNodeInstance(self: *Builder, node: u32, subckt_type: u16, subckt_instance: u32) !void {
         if (node == GROUND) return;
-        // Grow to cover the node id.
-        while (self.node_instance.items.len <= node) {
-            try self.node_instance.append(self.gpa, 0);
-            try self.node_type.append(self.gpa, 0);
+        if (self.node_instance.items.len <= node) {
+            const grow = node + 1 - self.node_instance.items.len;
+            try self.node_instance.appendNTimes(self.gpa, 0, grow);
+            try self.node_type.appendNTimes(self.gpa, 0, grow);
         }
         const cur = self.node_instance.items[node];
         if (cur == 0 and subckt_instance != 0) {
@@ -150,7 +150,7 @@ pub const Builder = struct {
             const gop = try index.getOrPut(gpa, inst);
             if (!gop.found_existing) {
                 gop.value_ptr.* = @intCast(instance_list.items.len);
-                try instance_list.append(gpa, .{ .inst = inst, .typ = if (i < nt.len) nt[i] else 0, .at = 0 });
+                try instance_list.append(gpa, .{ .inst = inst, .typ = nt[i], .at = 0 });
             }
             instance_list.items[gop.value_ptr.*].at += 1;
         }
@@ -293,10 +293,7 @@ pub const Builder = struct {
             const old_labels = try gpa.alloc([]const u8, n);
             defer gpa.free(old_labels);
             @memcpy(old_labels, self.node_labels.items);
-            for (old_labels, 0..) |label, i| {
-                const new_i = if (i < perm.len) perm[i] else @as(u32, @intCast(i));
-                self.node_labels.items[new_i] = label;
-            }
+            for (old_labels, perm) |label, new_i| self.node_labels.items[new_i] = label;
             perm_out.* = perm; // owned by the caller from here
             bbd.perm = null; // ownership moved; disarm the errdefer
         }
@@ -432,7 +429,7 @@ pub const NetBuilder = struct {
     }
 
     /// The row of net `v`, allocated on first touch.
-    pub fn rowOf(self: *NetBuilder, v: netlist.VertexId) !u32 {
+    fn rowOf(self: *NetBuilder, v: netlist.VertexId) !u32 {
         const row = &self.rows[v.index()];
         if (row.* != 0 or v == netlist.ground) return row.*;
         row.* = try self.b.addNode();
@@ -573,7 +570,9 @@ pub const NetBuilder = struct {
             const a0 = argNumber(dir.args, 0);
             const a1 = argNumber(dir.args, 1);
             if (a1 orelse a0) |ts| tstop = ts;
-            tstep = if (a1 != null) a0.? else tstop / 100.0;
+            // A malformed card (`.tran xyz 1u`) keeps the default step; the
+            // query check rejects it after the build.
+            tstep = if (a1 != null) a0 orelse tstep else tstop / 100.0;
             break;
         }
         // Only a PULSE waveform gets the TRANinit fill (ngspice runs it per
@@ -874,10 +873,8 @@ pub const NetBuilder = struct {
             return error.UnsupportedTransmissionLineParameters;
         }
 
-        const pos1 = if (dev.pins.len > 0) try self.rowOf(dev.pins[0]) else GROUND;
-        const neg1 = if (dev.pins.len > 1) try self.rowOf(dev.pins[1]) else GROUND;
-        const pos2 = if (dev.pins.len > 2) try self.rowOf(dev.pins[2]) else GROUND;
-        const neg2 = if (dev.pins.len > 3) try self.rowOf(dev.pins[3]) else GROUND;
+        var ports: [4]u32 = undefined;
+        for (&ports, dev.pins) |*port, pin| port.* = try self.rowOf(pin);
 
         if (rc or r_t > 0) {
             const nm: devices.ltra_native.Model = .{
@@ -892,7 +889,7 @@ pub const NetBuilder = struct {
                 .steplimit = if (model.nosteplimit != 0) 0 else 1,
                 .truncdontcut = @floatFromInt(model.truncdontcut),
             };
-            return self.b.addDevice(devices.ltra_native, nm, .{}, [4]u32{ pos1, neg1, pos2, neg2 });
+            return self.b.addDevice(devices.ltra_native, nm, .{}, ports);
         }
 
         // Lossless LC: one exact Bergeron ideal line.
@@ -902,7 +899,7 @@ pub const NetBuilder = struct {
         };
         if (!finiteLineCoefficients(.{ t_model.z0, t_model.td }) or t_model.z0 <= 0 or t_model.td <= 0)
             return error.UnsupportedTransmissionLineParameters;
-        try self.b.addDevice(devices.tline, t_model, .{}, [4]u32{ pos1, neg1, pos2, neg2 });
+        try self.b.addDevice(devices.tline, t_model, .{}, ports);
     }
 
     /// URC (U card): `Uxxx n1 n2 ngnd model [l=len] [n=lumps]`. ngspice has no
@@ -1271,8 +1268,7 @@ fn resolveDeviceId(letter: u8, dev: Device) !devices.DeviceId {
 
 fn inferDeviceFromModel(dev: Device) !?devices.DeviceId {
     const m = dev.model orelse return null;
-    const level = try numericParameter(m.kv, "level");
-    const l = if (level) |lv| try castField(u16, lv) else 1;
+    const l = try modelLevel(dev);
     if (std.ascii.eqlIgnoreCase(m.kind, "vdmos"))
         return .vdmos;
     if (eqlAny(m.kind, &.{ "nmos", "pmos" }))
@@ -1325,7 +1321,7 @@ fn setPolarity(comptime D: type, model: *D.Model) !void {
 
 /// VerA's reserved Model field for §9.15 `$simparam("tnom")` — the circuit's
 /// nominal temperature in degC. See `Lower.simparamHostField`.
-pub const nom_temp_field = "nom_temp__";
+const nom_temp_field = "nom_temp__";
 
 /// §6.3.4/§3.4.5 `derive`, through the device's own object when it has one.
 /// Same function either way — calling `D.derive` directly would codegen the
@@ -1588,10 +1584,16 @@ fn numericCoeff(ops: []const Op, consts: []const f64, end: usize) f64 {
 
 const Wave = enum(u8) { pulse = 1, sin = 2, exp = 3, pwl = 4, sffm = 5, am = 6 };
 
-const wave_map = std.StaticStringMap(Wave).initComptime(.{
-    .{ "pulse", .pulse }, .{ "sin", .sin },   .{ "exp", .exp },
-    .{ "pwl", .pwl },     .{ "sffm", .sffm }, .{ "am", .am },
-});
+/// The waveform a source keyword names, case-insensitively.
+fn waveKind(name: []const u8) ?Wave {
+    const map = std.StaticStringMap(Wave).initComptime(.{
+        .{ "pulse", .pulse }, .{ "sin", .sin },   .{ "exp", .exp },
+        .{ "pwl", .pwl },     .{ "sffm", .sffm }, .{ "am", .am },
+    });
+    var buf: [8]u8 = undefined;
+    if (name.len > buf.len) return null;
+    return map.get(std.ascii.lowerString(&buf, name));
+}
 
 /// FastVAF flattens `parameter real pwl_times[0:63]` into 63+1 SCALAR Model
 /// fields — there is no array to index — each named with the `naming.sanitize`
@@ -1622,18 +1624,14 @@ fn applySourceWaveform(target: anytype, dev: Device) void {
     while (i < dev.positional.len) : (i += 1) {
         switch (dev.positional[i]) {
             .group => |group| {
-                var buf: [8]u8 = undefined;
-                if (group.name.len > buf.len) continue;
-                const kind = wave_map.get(std.ascii.lowerString(&buf, group.name)) orelse continue;
+                const kind = waveKind(group.name) orelse continue;
                 applyWaveArgs(T, target, kind, group.args);
             },
             // Parenless spelling (`vs a 0 dc=0 sin 0 50 100k`): the keyword is
             // a bare positional name and its args are the numeric positionals
-            // that follow. Same table as the group form.
+            // that follow.
             .name => |nm| {
-                var buf: [8]u8 = undefined;
-                if (nm.len > buf.len) continue;
-                const kind = wave_map.get(std.ascii.lowerString(&buf, nm)) orelse continue;
+                const kind = waveKind(nm) orelse continue;
                 const start = i + 1;
                 var end = start;
                 while (end < dev.positional.len and dev.positional[end] == .num) end += 1;
@@ -1683,16 +1681,16 @@ fn dcFromWaveform(target: anytype) void {
         }
     }.f;
     const v: f64 = switch (target.waveform) {
-        1 => rd(target.*, "pulse_v1", "pulse_i1"),
-        2 => rd(target.*, "sin_vo", "sin_ioff") +
+        @intFromEnum(Wave.pulse) => rd(target.*, "pulse_v1", "pulse_i1"),
+        @intFromEnum(Wave.sin) => rd(target.*, "sin_vo", "sin_ioff") +
             rd(target.*, "sin_va", "sin_iamp") *
                 @sin(2.0 * std.math.pi * rd(target.*, "sin_phase", "sin_phase") / 360.0),
-        3 => rd(target.*, "exp_v1", "exp_i1"),
-        4 => rd(target.*, pwlSlot("pwl_values", 0), pwlSlot("pwl_values", 0)),
+        @intFromEnum(Wave.exp) => rd(target.*, "exp_v1", "exp_i1"),
+        @intFromEnum(Wave.pwl) => rd(target.*, pwlSlot("pwl_values", 0), pwlSlot("pwl_values", 0)),
         // ngspice's DCOP evaluates SFFM at time 0: the V source is 0 there
         // (vsrcload.c:271-274), the I source has no delay and reads its phases
         // one slot early (isrcload.c:222-252, see isource.va).
-        5 => if (comptime !@hasField(T, "sffm_fm") or T == devices.vsource.Model or T == devices.vsource.Instance) 0 else blk: {
+        @intFromEnum(Wave.sffm) => if (comptime !@hasField(T, "sffm_fm") or T == devices.vsource.Model or T == devices.vsource.Instance) 0 else blk: {
             const mdi = if (target.sffm_mdi > target.sffm_fc / target.sffm_fm)
                 target.sffm_fc / target.sffm_fm
             else
@@ -1776,8 +1774,7 @@ fn findNameIndex(names: []const []const u8, target: []const u8) ?usize {
 }
 
 fn positionalNumber(dev: Device, index: usize) ?f64 {
-    if (index >= dev.positional.len) return null;
-    return valueNumber(dev.positional[index]);
+    return argNumber(dev.positional, index);
 }
 
 fn positionalName(dev: Device, index: usize) ?[]const u8 {
@@ -1947,7 +1944,7 @@ fn cplVector(kv: []const Kv, key: []const u8, out: []f64) !usize {
     return 0;
 }
 
-pub fn valueNumber(value: Value) ?f64 {
+fn valueNumber(value: Value) ?f64 {
     return switch (value) {
         .num => |n| n,
         else => null,
