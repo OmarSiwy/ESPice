@@ -1,7 +1,7 @@
-//! Every device type one Problem can instantiate, built-in and runtime-loaded,
-//! behind one dense `DeviceType`. Built-ins take ids [0, builtin_count) in
-//! catalog order, so a built-in's id is known at comptime (`builtin`); each
-//! `load`ed HDL module appends one.
+//! Every device type one Problem can instantiate, built-in or runtime-loaded,
+//! under one dense `DeviceType` id. Built-ins take ids [0, builtin_count) in
+//! catalog order, so their ids are comptime-known (`builtin`); each loaded
+//! HDL module appends one.
 const std = @import("std");
 const abi = @import("device_abi");
 const catalog = @import("root.zig");
@@ -11,12 +11,13 @@ const DeviceType = abi.DeviceType;
 const Library = @This();
 
 gpa: std.mem.Allocator,
-/// SoA by id. Names of loaded types are owned (lowercased module names);
-/// built-in names are static.
+/// Type names by id. Loaded names are owned and lowercased; built-in names
+/// are static.
 names: std.ArrayList([]const u8) = .empty,
+/// Vtables by id, parallel to `names`.
 vtables: std.ArrayList(*const abi.DeviceVtable) = .empty,
 
-/// Built-in devices: catalog entries with an evaluator, in catalog order.
+/// Catalog entries with an evaluator, in catalog order.
 const builtins = blk: {
     var list: []const []const u8 = &.{};
     for (catalog.catalog) |e| {
@@ -26,7 +27,7 @@ const builtins = blk: {
 };
 pub const builtin_count: u16 = builtins.len;
 
-/// Registers the built-ins; `vtable` resolves each through its linked object.
+/// A library holding the built-ins, each resolved through its linked object.
 pub fn init(gpa: std.mem.Allocator) !Library {
     var lib: Library = .{ .gpa = gpa };
     errdefer lib.names.deinit(gpa);
@@ -47,7 +48,7 @@ pub fn deinit(self: *Library) void {
     self.* = undefined;
 }
 
-/// The id of built-in `name` (a catalog stem with an evaluator).
+/// The id of built-in `name`; a compile error when there is none.
 pub fn builtin(comptime name: []const u8) DeviceType {
     inline for (builtins, 0..) |b, i| {
         if (comptime std.mem.eql(u8, b, name)) return @enumFromInt(i);
@@ -61,7 +62,7 @@ pub fn vtable(self: *const Library, t: DeviceType) *const abi.DeviceVtable {
 
 /// A runtime-loaded type by module name, case-insensitively. Built-ins are not
 /// searched: a netlist reaches them through SPICE letters and LEVELs.
-// ponytail: linear scan, a deck loads a handful of HDL modules.
+// ponytail: linear scan; a deck loads a handful of HDL modules.
 pub fn find(self: *const Library, module: []const u8) ?DeviceType {
     for (self.names.items[builtin_count..], builtin_count..) |n, i| {
         if (std.ascii.eqlIgnoreCase(n, module)) return @enumFromInt(i);
@@ -69,8 +70,9 @@ pub fn find(self: *const Library, module: []const u8) ?DeviceType {
     return null;
 }
 
-/// Add a device type under `module` (copied, lowercased). A name already
-/// loaded keeps its first vtable and id.
+/// Adds a device type under `module` (copied and lowercased) and returns its
+/// id. A name already loaded keeps its first vtable and id. Fails with
+/// `TooManyDeviceTypes` when the id space is full.
 pub fn register(self: *Library, module: []const u8, vt: *const abi.DeviceVtable) !DeviceType {
     if (self.find(module)) |t| return t;
     if (self.names.items.len >= @intFromEnum(DeviceType.unset)) return error.TooManyDeviceTypes;
@@ -82,8 +84,9 @@ pub fn register(self: *Library, module: []const u8, vt: *const abi.DeviceVtable)
     return @enumFromInt(self.names.items.len - 1);
 }
 
-/// Compile and dlopen each HDL source not yet loaded here (loader.zig), then
-/// register its module. The generated device builds against this source tree.
+/// Compiles, opens and registers each HDL source not loaded yet (loader.zig).
+/// The generated devices build against this source tree, under
+/// `.zig-cache/espice-hdl`.
 pub fn load(self: *Library, io: std.Io, files: []const []const u8) !void {
     const work_dir = try std.fs.path.join(self.gpa, &.{ build_options.src_root, ".zig-cache", "espice-hdl" });
     defer self.gpa.free(work_dir);

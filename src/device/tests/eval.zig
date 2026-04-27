@@ -1,3 +1,5 @@
+//! Tests for the evaluator: AD scalars, the bit-trick helpers, the runtime
+//! vtable and binder, and batch instantiation and hooks.
 const impl = @import("device_eval");
 const Batch = impl.Batch;
 const DeviceBatch = impl.DeviceBatch;
@@ -52,14 +54,10 @@ test "Dual: expm1 and log1p retain finite range and IEEE endpoints" {
 }
 
 test "Dual: an f32 Jacobian leaves the residual bit-identical" {
-    // The one invariant the whole mixed-precision construction rests on
-    // (docs/gpu-device-eval.md §9): `F` is the width of the DERIVATIVE, and the
-    // residual is f64 on both instantiations. Not a tolerance — every operation
-    // on `.v` is the same f64 arithmetic, so the values must be EQUAL. If this
-    // ever needs a tolerance, the split has leaked into the residual.
+    // `F` is the derivative width only; the residual is the same f64
+    // arithmetic at either width, so values must be equal, not close.
     const core = struct {
-        // The diode's own core, which is what the prototype ships:
-        // is·(exp(v/vt) − 1) + gmin·v.
+        // A diode core: is·(exp(v/vt) − 1) + gmin·v.
         fn f(comptime S: type, bias: f64) S {
             const x = [2]S{ S.seed(bias, 0), S.seed(0, 1) };
             const v = x[0].sub(x[1]);
@@ -72,17 +70,14 @@ test "Dual: an f32 Jacobian leaves the residual bit-identical" {
         const a = core(Dual(2, f64), bias);
         const b = core(Dual(2, f32), bias);
         try std.testing.expectEqual(a.val(), b.val());
-        // …and the Jacobian degrades to f32 precision, and only to that.
+        // The Jacobian degrades to f32 precision and no further.
         for (0..2) |c| try std.testing.expectApproxEqRel(a.ddxAt(c), b.ddxAt(c), 1e-6);
     }
 }
 
 test "jac width: one device, two instantiations" {
-    // The whole of docs/perf/jac-width-2026-09-10.md in four lines. `jac_f32`
-    // is a permission the GPU kernel takes and the host declines; `jac_f32_host`
-    // is the separate order that makes the host take it too. If these two ever
-    // collapse back into one predicate, the GPU loses its 1.21x or the CPU
-    // inherits `ngspice/mosmem`'s gmin ladder — and this is where it shows.
+    // `jac_f32` is a permission the GPU kernel takes and the host declines;
+    // `jac_f32_host` makes the host take it too.
     const Plain = struct {};
     const Permitted = struct {
         pub const jac_f32 = true;
@@ -100,13 +95,8 @@ test "jac width: one device, two instantiations" {
 }
 
 test "RealFor: every primitive is Dual's value half, bit for bit" {
-    // The invariant `evalQRange` rests on. Not a tolerance: the post-accept
-    // charge re-read must reproduce the Dual pass EXACTLY, because `q_hist`/
-    // `i_prev`/`q_tape` feed the next step's residual and `stepBound`'s LTE, so
-    // one ulp here walks the timestep sequence off. If a `Dual` value expression
-    // is ever changed (`div`'s reciprocal-multiply and `abs`'s sign test are the
-    // two that do not read as the obvious thing), this fails instead of silently
-    // perturbing every transient.
+    // `evalQRange` must reproduce the Dual pass exactly: its charges feed the
+    // next step's residual and LTE, so one ulp shifts the timestep sequence.
     const core = struct {
         fn f(comptime S: type, a: f64, b: f64) S {
             const x = S.seed(a, 0);
@@ -123,8 +113,8 @@ test "RealFor: every primitive is Dual's value half, bit for bit" {
     }.f;
     for (0..13) |i| {
         for (0..13) |j| {
-            // Spans both signs and crosses zero exactly, which is where `abs`,
-            // `min`/`max` ties and `sel`'s 0/1 mask differ if they differ.
+            // Crosses zero exactly, where `abs`, min/max ties and `sel` would
+            // differ.
             const a = @as(f64, @floatFromInt(i)) * 0.25 - 1.5;
             const b = @as(f64, @floatFromInt(j)) * 0.25 - 1.5;
             try std.testing.expectEqual(
@@ -139,9 +129,7 @@ test "dyn vtable: blob init, param set by name, proto add" {
     const R = struct {
         pub const U = enum(u8) { p, n };
         pub const num_ports: usize = 2;
-        // One cold construction blob, initialized/set by name and consumed by
-        // the vtable. Fixed scalar widths exercise the ABI conversion bounds;
-        // no per-instance table, cross-reference or independent lane is added.
+        // Mixed scalar widths exercise the binder's conversion bounds.
         pub const Model = struct {
             r: f32 = 1000,
             mode: i8 = 0,
@@ -240,8 +228,7 @@ test "prepared device instances share tapes and isolate parameters and accepted 
     const a = std.testing.allocator;
     var proto: ProtoStore(D) = .{};
     try proto.append(.{}, .{}, .{ 1, 2 });
-    // The normal freeze provides a union pattern. A dense 3-row pattern is
-    // sufficient here; the fourth row/last slot are the ground-write sinks.
+    // A dense 3x3 pattern; row 3 and slot 9 take the ground writes.
     const batch = try ProtoStore(D).finalize(&proto, a, .{
         .col_ptr = &.{ 0, 3, 6, 9 },
         .row_idx = &.{ 0, 1, 2, 0, 1, 2, 0, 1, 2 },

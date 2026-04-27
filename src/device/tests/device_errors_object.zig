@@ -1,4 +1,5 @@
-//! Compiled as its own object: importing this into the test would hide the bug.
+//! A test device compiled as its own object, so its callbacks cross a real
+//! compilation boundary; importing it into the test would hide ordinal bugs.
 const std = @import("std");
 const ir = @import("device_abi");
 const eval = @import("device_eval");
