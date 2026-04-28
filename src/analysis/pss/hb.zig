@@ -1,5 +1,5 @@
 //! Harmonic balance: Newton on the spectral residual with a backtracking
-//! line search. Each iteration IDFTs the unknowns to 2K+1 time samples,
+//! line search. Each iteration IDFTs the unknowns to 2(2K+1) time samples,
 //! evaluates the circuit at each (sources included), DFTs the residual and
 //! adds the dq/dt terms, then solves one dense harmonic-convolution Jacobian.
 const std = @import("std");
@@ -15,6 +15,12 @@ const V = @Vector(W, f64);
 pub const Options = @import("core").query.Hb;
 
 pub const SolveResult = @import("pss.zig").SolveResult;
+
+/// Time samples per spectral unknown. The 2K+1 collocation points alias
+/// the harmonics a nonlinearity generates past K onto the top of the kept
+/// band; 2(2K+1) > 4K samples project the residual of any cubic in x(t)
+/// onto harmonics 0..K exactly, a Galerkin rather than collocation fit.
+const oversample: usize = 2;
 
 /// The shortest step the line search takes before it stops shortening.
 const min_step: f64 = 1.0 / 1024.0;
@@ -43,28 +49,29 @@ pub fn solve(
     const nnz: usize = ckt.nnz;
     const nh: usize = options.n_harmonics;
     const nf: usize = 2 * nh + 1;
+    const nt: usize = nf * oversample;
     const total_unknowns = n * nf;
     std.debug.assert(spectra.len == probes.len * nf);
 
     const period: f64 = 1.0 / options.f0;
     const omega0: f64 = 2.0 * std.math.pi * options.f0;
-    const nf_f: f64 = @floatFromInt(nf);
-    const dt_sample: f64 = period / nf_f;
+    const nt_f: f64 = @floatFromInt(nt);
+    const dt_sample: f64 = period / nt_f;
 
     const total_f64 = total_unknowns + // x_hat
         total_unknowns + // f_hat
-        nf * n + // x_td (node-major)
-        nf * n + // f_td (node-major)
-        nf * n + // q_td (node-major)
+        nt * n + // x_td (node-major)
+        nt * n + // f_td (node-major)
+        nt * n + // q_td (node-major)
         n * n + // c_mat
         total_unknowns * total_unknowns + // jac
         total_unknowns + // dx_hat
-        nf * nnz + // g_td (slot-major, samples contiguous)
-        nf * nh + // basis_cos (harmonic-major)
-        nf * nh + // basis_sin
+        nt * nnz + // g_td (slot-major, samples contiguous)
+        nt * 2 * nh + // basis_cos (harmonic-major, harmonics 1..2K)
+        nt * 2 * nh + // basis_sin
         n + // x_sample (gather buffer for device eval)
         total_unknowns + // x_prev (line-search rewind point)
-        2 * (nh + 1); // gc / gs: one slot's G(t) spectrum
+        2 * (2 * nh + 1); // gc / gs: one slot's G(t) spectrum to 2K
 
     const arena = try allocator.alloc(f64, total_f64);
     defer allocator.free(arena);
@@ -74,32 +81,32 @@ pub fn solve(
     off += total_unknowns;
     const f_hat = arena[off..][0..total_unknowns];
     off += total_unknowns;
-    const x_td = arena[off..][0 .. nf * n];
-    off += nf * n;
-    const f_td = arena[off..][0 .. nf * n];
-    off += nf * n;
-    const q_td = arena[off..][0 .. nf * n];
-    off += nf * n;
+    const x_td = arena[off..][0 .. nt * n];
+    off += nt * n;
+    const f_td = arena[off..][0 .. nt * n];
+    off += nt * n;
+    const q_td = arena[off..][0 .. nt * n];
+    off += nt * n;
     const c_mat = arena[off..][0 .. n * n];
     off += n * n;
     const jac = arena[off..][0 .. total_unknowns * total_unknowns];
     off += total_unknowns * total_unknowns;
     const dx_hat = arena[off..][0..total_unknowns];
     off += total_unknowns;
-    const g_td = arena[off..][0 .. nf * nnz];
-    off += nf * nnz;
-    const basis_cos = arena[off..][0 .. nf * nh];
-    off += nf * nh;
-    const basis_sin = arena[off..][0 .. nf * nh];
-    off += nf * nh;
+    const g_td = arena[off..][0 .. nt * nnz];
+    off += nt * nnz;
+    const basis_cos = arena[off..][0 .. nt * 2 * nh];
+    off += nt * 2 * nh;
+    const basis_sin = arena[off..][0 .. nt * 2 * nh];
+    off += nt * 2 * nh;
     const x_sample = arena[off..][0..n];
     off += n;
     const x_prev = arena[off..][0..total_unknowns];
     off += total_unknowns;
-    const gc = arena[off..][0 .. nh + 1];
-    off += nh + 1;
-    const gs = arena[off..][0 .. nh + 1];
-    off += nh + 1;
+    const gc = arena[off..][0 .. 2 * nh + 1];
+    off += 2 * nh + 1;
+    const gs = arena[off..][0 .. 2 * nh + 1];
+    off += 2 * nh + 1;
     std.debug.assert(off == total_f64);
 
     root.zeroSimd(x_hat);
@@ -114,18 +121,20 @@ pub fn solve(
         for (0..n) |node| x_hat[node * nf] = x_sample[node];
     }
 
-    // Harmonic-major basis: basis_cos[hi * nf + k] = cos((hi+1)*w0*t_k).
-    for (0..nh) |hi| {
+    // Harmonic-major basis: basis_cos[hi * nt + k] = cos((hi+1)*w0*t_k).
+    // The IDFT/DFT read harmonics 1..K; the Jacobian's G(t) spectrum needs
+    // them to 2K.
+    for (0..2 * nh) |hi| {
         const h = hi + 1;
-        for (0..nf) |k| {
-            const t_k = @as(f64, @floatFromInt(k)) * period / @as(f64, @floatFromInt(nf));
+        for (0..nt) |k| {
+            const t_k = @as(f64, @floatFromInt(k)) * period / nt_f;
             const angle = @as(f64, @floatFromInt(h)) * omega0 * t_k;
-            basis_cos[hi * nf + k] = @cos(angle);
-            basis_sin[hi * nf + k] = @sin(angle);
+            basis_cos[hi * nt + k] = @cos(angle);
+            basis_sin[hi * nt + k] = @sin(angle);
         }
     }
 
-    // ponytail: all on the CPU. The GPU path would batch the nf independent
+    // ponytail: all on the CPU. The GPU path would batch the nt independent
     // sample evals in one launch and factor the spectral Jacobian with
     // cuSOLVER; the IDFT/DFT are parallel per (node, harmonic).
 
@@ -141,11 +150,11 @@ pub fn solve(
     var iter: u16 = 0;
     while (iter < options.max_iter) : (iter += 1) {
         if (iter != 0) try ckt.checkpoint(.{ .phase = .harmonic, .completed = iter });
-        // IDFT to node-major samples x_td[node * nf + k].
+        // IDFT to node-major samples x_td[node * nt + k].
         for (0..n) |node| {
             const dc = x_hat[node * nf];
             const cos_base = node * nf + 1;
-            for (0..nf) |k| {
+            for (0..nt) |k| {
                 var val: f64 = dc;
                 var hi: usize = 0;
                 while (hi + W <= nh) : (hi += W) {
@@ -154,34 +163,34 @@ pub fn solve(
                     var cv: V = undefined;
                     var sv: V = undefined;
                     inline for (0..W) |w| {
-                        bcv[w] = basis_cos[(hi + w) * nf + k];
-                        bsv[w] = basis_sin[(hi + w) * nf + k];
+                        bcv[w] = basis_cos[(hi + w) * nt + k];
+                        bsv[w] = basis_sin[(hi + w) * nt + k];
                         cv[w] = x_hat[cos_base + 2 * (hi + w)];
                         sv[w] = x_hat[cos_base + 2 * (hi + w) + 1];
                     }
                     val += @reduce(.Add, cv * bcv + sv * bsv);
                 }
                 while (hi < nh) : (hi += 1) {
-                    val += x_hat[cos_base + 2 * hi] * basis_cos[hi * nf + k] +
-                        x_hat[cos_base + 2 * hi + 1] * basis_sin[hi * nf + k];
+                    val += x_hat[cos_base + 2 * hi] * basis_cos[hi * nt + k] +
+                        x_hat[cos_base + 2 * hi + 1] * basis_sin[hi * nt + k];
                 }
-                x_td[node * nf + k] = val;
+                x_td[node * nt + k] = val;
             }
         }
 
-        // Sample k is the circuit at t_k = k*T/nf in the transient phase,
+        // Sample k is the circuit at t_k = k*T/nt in the transient phase,
         // the only phase in which a source follows its waveform (§4.6.1).
         // One eval fills the residual and the G plane; sample 0 also gives C.
-        // ponytail: the nf evals are independent; batch them on the GPU when
+        // ponytail: the nt evals are independent; batch them on the GPU when
         // HB needs it.
-        for (0..nf) |k| {
-            const t_k = period * @as(f64, @floatFromInt(k)) / nf_f;
-            for (0..n) |node| x_sample[node] = x_td[node * nf + k];
+        for (0..nt) |k| {
+            const t_k = period * @as(f64, @floatFromInt(k)) / nt_f;
+            for (0..n) |node| x_sample[node] = x_td[node * nt + k];
             ckt.setSimState(.{ .t = t_k, .dt = dt_sample, .kind = .tran });
             ckt.eval(x_sample, t_k);
-            for (0..n) |node| f_td[node * nf + k] = ckt.rhs[node];
-            for (0..n) |node| q_td[node * nf + k] = ckt.q_vec[node];
-            for (ckt.g_vals[0..nnz], 0..) |g, slot| g_td[slot * nf + k] = g;
+            for (0..n) |node| f_td[node * nt + k] = ckt.rhs[node];
+            for (0..n) |node| q_td[node * nt + k] = ckt.q_vec[node];
+            for (ckt.g_vals[0..nnz], 0..) |g, slot| g_td[slot * nt + k] = g;
             if (k == 0) {
                 if (ckt.has_charge) ckt.denseC(c_mat) else root.zeroSimd(c_mat);
             }
@@ -190,25 +199,25 @@ pub fn solve(
         // DFT of the residual; node-major f_td makes each node's samples one
         // contiguous run.
         for (0..n) |node| {
-            const f_slice = f_td[node * nf ..][0..nf];
+            const f_slice = f_td[node * nt ..][0..nt];
 
             var dc_acc: V = @splat(0.0);
             var k: usize = 0;
-            while (k + W <= nf) : (k += W) {
+            while (k + W <= nt) : (k += W) {
                 const fv: V = f_slice[k..][0..W].*;
                 dc_acc += fv;
             }
             var dc_sum: f64 = @reduce(.Add, dc_acc);
-            while (k < nf) : (k += 1) dc_sum += f_slice[k];
-            f_hat[node * nf] = dc_sum / nf_f;
+            while (k < nt) : (k += 1) dc_sum += f_slice[k];
+            f_hat[node * nf] = dc_sum / nt_f;
 
             for (0..nh) |hi| {
-                const bc_slice = basis_cos[hi * nf ..][0..nf];
-                const bs_slice = basis_sin[hi * nf ..][0..nf];
+                const bc_slice = basis_cos[hi * nt ..][0..nt];
+                const bs_slice = basis_sin[hi * nt ..][0..nt];
                 var cos_acc: V = @splat(0.0);
                 var sin_acc: V = @splat(0.0);
                 k = 0;
-                while (k + W <= nf) : (k += W) {
+                while (k + W <= nt) : (k += W) {
                     const fv: V = f_slice[k..][0..W].*;
                     const bcv: V = bc_slice[k..][0..W].*;
                     const bsv: V = bs_slice[k..][0..W].*;
@@ -217,32 +226,32 @@ pub fn solve(
                 }
                 var cos_sum: f64 = @reduce(.Add, cos_acc);
                 var sin_sum: f64 = @reduce(.Add, sin_acc);
-                while (k < nf) : (k += 1) {
+                while (k < nt) : (k += 1) {
                     cos_sum += f_slice[k] * bc_slice[k];
                     sin_sum += f_slice[k] * bs_slice[k];
                 }
-                f_hat[node * nf + 2 * (hi + 1) - 1] = 2.0 * cos_sum / nf_f;
-                f_hat[node * nf + 2 * (hi + 1)] = 2.0 * sin_sum / nf_f;
+                f_hat[node * nf + 2 * (hi + 1) - 1] = 2.0 * cos_sum / nt_f;
+                f_hat[node * nf + 2 * (hi + 1)] = 2.0 * sin_sum / nt_f;
             }
         }
 
         // dq/dt from the DFT of q(t_k), exact for nonlinear charge. With
         // q(t) = a cos(w_h t) + b sin(w_h t), dq/dt = w_h b cos - w_h a sin,
         // so the cos row takes +w_h*Q_sin and the sin row -w_h*Q_cos.
-        // ponytail: scalar O(n*nh*nf) projection, the same order as the
+        // ponytail: scalar O(n*nh*nt) projection, the same order as the
         // residual DFT; vectorize both if HB ever profiles hot.
         if (ckt.has_charge) for (0..n) |node| {
-            const q_slice = q_td[node * nf ..][0..nf];
+            const q_slice = q_td[node * nt ..][0..nt];
             for (0..nh) |hi| {
                 var q_cos: f64 = 0;
                 var q_sin: f64 = 0;
-                for (q_slice, basis_cos[hi * nf ..][0..nf], basis_sin[hi * nf ..][0..nf]) |q, bc, bs| {
+                for (q_slice, basis_cos[hi * nt ..][0..nt], basis_sin[hi * nt ..][0..nt]) |q, bc, bs| {
                     q_cos += q * bc;
                     q_sin += q * bs;
                 }
                 const omega_h = @as(f64, @floatFromInt(hi + 1)) * omega0;
-                f_hat[node * nf + 2 * (hi + 1) - 1] += omega_h * (2.0 * q_sin / nf_f);
-                f_hat[node * nf + 2 * (hi + 1)] += -omega_h * (2.0 * q_cos / nf_f);
+                f_hat[node * nf + 2 * (hi + 1) - 1] += omega_h * (2.0 * q_sin / nt_f);
+                f_hat[node * nf + 2 * (hi + 1)] += -omega_h * (2.0 * q_cos / nt_f);
             }
         };
 
@@ -274,8 +283,10 @@ pub fn solve(
         //   d F_sh / d a_m = 1/2 (Gs[h+m]   + Gs[h-m])
         //   d F_sh / d b_m = 1/2 (Gc[|h-m|] - Gc[h+m])
         //
-        // with Gc[0] = 2*mean(G), Gs[0] = 0, Gs[-d] = -Gs[d], and indices past
-        // nh truncated. The h != m blocks are how a nonlinearity couples
+        // with Gc[0] = 2*mean(G), Gs[0] = 0 and Gs[-d] = -Gs[d]. h + m runs
+        // to 2K: product-to-sum is exact on the samples, so projecting G(t)
+        // onto harmonics past K keeps the Jacobian exact for the sampled
+        // residual. The h != m blocks are how a nonlinearity couples
         // harmonics.
         root.zeroSimd(jac);
 
@@ -284,27 +295,27 @@ pub fn solve(
         for (0..n) |col| {
             for (ckt.col_ptr[col]..ckt.col_ptr[col + 1]) |slot| {
                 const row: usize = ckt.row_idx[slot];
-                const g_slice = g_td[slot * nf ..][0..nf];
+                const g_slice = g_td[slot * nt ..][0..nt];
 
-                // Gc[0] = 2*mean(G); Gc[k>0], Gs[k>0] are the 2/nf projections.
+                // Gc[0] = 2*mean(G); Gc[k>0], Gs[k>0] are the 2/nt projections.
                 var g_dc_acc: V = @splat(0.0);
                 var k2: usize = 0;
-                while (k2 + W <= nf) : (k2 += W) {
+                while (k2 + W <= nt) : (k2 += W) {
                     const gv: V = g_slice[k2..][0..W].*;
                     g_dc_acc += gv;
                 }
                 var g_sum: f64 = @reduce(.Add, g_dc_acc);
-                while (k2 < nf) : (k2 += 1) g_sum += g_slice[k2];
-                gc[0] = 2.0 * g_sum / nf_f;
+                while (k2 < nt) : (k2 += 1) g_sum += g_slice[k2];
+                gc[0] = 2.0 * g_sum / nt_f;
                 gs[0] = 0;
 
-                for (0..nh) |hi| {
-                    const bc_slice = basis_cos[hi * nf ..][0..nf];
-                    const bs_slice = basis_sin[hi * nf ..][0..nf];
+                for (0..2 * nh) |hi| {
+                    const bc_slice = basis_cos[hi * nt ..][0..nt];
+                    const bs_slice = basis_sin[hi * nt ..][0..nt];
                     var g_cos_acc: V = @splat(0.0);
                     var g_sin_acc: V = @splat(0.0);
                     var k3: usize = 0;
-                    while (k3 + W <= nf) : (k3 += W) {
+                    while (k3 + W <= nt) : (k3 += W) {
                         const gv: V = g_slice[k3..][0..W].*;
                         const bcv: V = bc_slice[k3..][0..W].*;
                         const bsv: V = bs_slice[k3..][0..W].*;
@@ -313,12 +324,12 @@ pub fn solve(
                     }
                     var g_cos_h: f64 = @reduce(.Add, g_cos_acc);
                     var g_sin_h: f64 = @reduce(.Add, g_sin_acc);
-                    while (k3 < nf) : (k3 += 1) {
+                    while (k3 < nt) : (k3 += 1) {
                         g_cos_h += g_slice[k3] * bc_slice[k3];
                         g_sin_h += g_slice[k3] * bs_slice[k3];
                     }
-                    gc[hi + 1] = 2.0 * g_cos_h / nf_f;
-                    gs[hi + 1] = 2.0 * g_sin_h / nf_f;
+                    gc[hi + 1] = 2.0 * g_cos_h / nt_f;
+                    gs[hi + 1] = 2.0 * g_sin_h / nt_f;
                 }
 
                 const row_dc = row * nf;
@@ -341,8 +352,8 @@ pub fn solve(
                         const c_diff = gc[adiff];
                         const s_diff = if (diff < 0) -gs[adiff] else gs[adiff];
                         const sum = h + m;
-                        const c_sum = if (sum <= nh) gc[sum] else 0;
-                        const s_sum = if (sum <= nh) gs[sum] else 0;
+                        const c_sum = gc[sum];
+                        const s_sum = gs[sum];
 
                         const col_cos = col * nf + 2 * m - 1;
                         const col_sin = col * nf + 2 * m;
