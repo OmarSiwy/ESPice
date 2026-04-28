@@ -212,8 +212,11 @@ fn nextPhysicalLine(rest: *[]const u8) ?[]const u8 {
 
 /// ngspice: title line, case folded, `*` comments, `$`/`;` tails, `+` continuation.
 pub const ngspice = struct {
+    /// The first line is the deck title, not a card.
     pub const title_line = true;
+    /// Cards are case-insensitive: the text is lowercased before parsing.
     pub const fold_case = true;
+    /// Field splitter over one logical line.
     pub const Split = Fields("'", true);
 
     /// Logical-line iterator; a joined line is allocated in `arena`.
@@ -268,8 +271,11 @@ pub const ngspice = struct {
 /// HSPICE: like ngspice, but `"` also quotes, `$` starts a comment only after
 /// a blank, and a trailing `\\` continues the line.
 pub const hspice = struct {
+    /// The first line is the deck title, not a card.
     pub const title_line = true;
+    /// Cards are case-insensitive: the text is lowercased before parsing.
     pub const fold_case = true;
+    /// Field splitter over one logical line.
     pub const Split = Fields("'\"", false);
 
     pub const Lines = struct {
@@ -347,8 +353,11 @@ pub const hspice = struct {
 /// Spectre: no title line, case kept, `//` and `/* */` comments, `\` or `+`
 /// continuation.
 pub const spectre = struct {
+    /// The first line is the deck title, not a card.
     pub const title_line = false;
+    /// Cards are case-insensitive: the text is lowercased before parsing.
     pub const fold_case = false;
+    /// Field splitter over one logical line.
     pub const Split = Fields("\"", false);
 
     pub const Lines = struct {
