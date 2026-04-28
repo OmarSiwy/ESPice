@@ -25,7 +25,7 @@ test "dispatch policy resolves letters and levels" {
     defer std.testing.log_level = level;
     try std.testing.expectError(error.UnsupportedDevice, mosfetDeviceId(55));
     try std.testing.expectError(error.UnsupportedDevice, mosfetDeviceId(1040));
-    // Every tag must resolve to a type — consumers switch `inline else` over
+    // Every tag must resolve to a type: consumers switch `inline else` over
     // the whole enum, so a tag that fails to resolve breaks their build.
     inline for (@typeInfo(DeviceId).@"enum".fields) |f| _ = DeviceId.Type(@field(DeviceId, f.name));
 }

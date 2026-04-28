@@ -16,15 +16,10 @@ fn card(name: []const u8, positional: []const Value) netlist.Netlist.View {
     return .{ .name = name, .kind = 'v', .pins = &.{}, .positional = positional, .kv = &.{}, .model = null, .subckt_type = 0, .subckt_instance = 0 };
 }
 
-// ---------------------------------------------------------------------------
-// Source binding regression check
-//
-// The two things that break silently when the .va and the binder drift apart:
-// the flattened PWL table (`applySourceWaveform` writes mangled field names
-// that no compiler will catch a typo in — @hasField just skips) and the -1
-// PULSE sentinels (an unspecified PULSE has to stay a step; if a default ever
-// stops being -1 the .tran resolution turns into a 2 ns square wave).
-// ---------------------------------------------------------------------------
+// Source binding: the two things that break silently when the .va and the
+// binder drift apart. The flattened PWL table (a typo in a mangled field name
+// is skipped by @hasField, not caught) and the -1 PULSE sentinels (if a
+// default stops being -1, an unspecified PULSE becomes a 2 ns square wave).
 
 test "V card: PWL table lands in the flattened Model slots" {
     const args = [_]Value{
@@ -51,7 +46,7 @@ test "V card: PWL table lands in the flattened Model slots" {
 }
 
 test "V/I cards: unspecified PULSE edges stay at the -1 sentinel" {
-    // PULSE(0 5) — no TR/TF/PW/PER. resolvePulseDefaults fills these from the
+    // PULSE(0 5): no TR/TF/PW/PER. resolvePulseDefaults fills these from the
     // .tran card; until it runs they must still read as "unset".
     const args = [_]Value{ .{ .num = 0.0 }, .{ .num = 5.0 } };
     const positional = [_]Value{.{ .group = .{ .name = "PULSE", .args = &args } }};

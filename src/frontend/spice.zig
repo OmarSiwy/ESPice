@@ -1,25 +1,17 @@
-//! SPICE device selection: netlist letter and `.model` LEVEL -> device name.
-//! The device types behind the names come from the device catalog.
+//! SPICE device selection: netlist letter and `.model` LEVEL to a device
+//! name, following ngspice conventions. The types behind the names come
+//! from the device catalog.
 
 const std = @import("std");
 const device = @import("device");
 const has = device.has;
 const byName = device.byName;
 
-// ===========================================================================
-// SPICE dispatch policy — semantic (netlist letter / model LEVEL -> model
-// name). Kept explicit because it encodes SPICE conventions, not code shape;
-// resolved back to a device type through the auto catalog. Extend as models
-// are authored.
-// ===========================================================================
-
-/// Every model name the dispatch policy can name. This is a NAME list, not a
-/// type list: the type behind a tag always comes from the auto catalog, via
-/// `Type`. Names with no generated model (BSIM3, the B3SOI family, SOI3) are
-/// tags anyway so the level tables can report them by name.
-///
-/// Written out rather than reflected from `catalog` because `@Enum` cannot
-/// attach declarations and `DeviceId.Type` has to live on the enum.
+/// Every model name the dispatch policy can name. The type behind a tag
+/// comes from the catalog via `Type`. Names with no generated model (BSIM3,
+/// the B3SOI family, SOI3) are tags anyway so the level tables can report
+/// them by name. Written out rather than reflected from the catalog because
+/// `@Enum` cannot attach the `Type` declaration.
 pub const DeviceId = enum {
     // Netlist letters.
     resistor,
@@ -81,18 +73,18 @@ pub const DeviceId = enum {
     }
 };
 
-/// Stand-in for a policy name with no generated model. Deliberately NOT
-/// value-form (no `eval`), which is what every consumer gates on.
+/// Stand-in for a policy name with no generated model. It has no `eval`,
+/// which is what every consumer gates on.
 fn Absent(comptime name: []const u8) type {
     return struct {
         pub const absent_model = name;
     };
 }
 
-/// Netlist first-letter -> device. Letters with a LEVEL table (m q j z) are
-/// resolved by the *DeviceId functions below, not here; 'd' is listed only so
-/// diode cards pass the "known letter" gate. Unknown letters fall through to
-/// runtime VA/Verilog loading.
+/// Netlist first letter to device. Letters with a LEVEL table (m q j z) are
+/// resolved by the *DeviceId functions below; 'd' is listed only so diode
+/// cards pass the known-letter gate. Other letters fall through to the
+/// runtime-loaded HDL devices.
 pub const letter_map = std.StaticStringMap(DeviceId).initComptime(.{
     .{ "r", DeviceId.resistor },
     .{ "c", DeviceId.capacitor },
@@ -115,11 +107,10 @@ pub const letter_map = std.StaticStringMap(DeviceId).initComptime(.{
     .{ "d", DeviceId.diode },
 });
 
-/// Flat aliases, for the devices a consumer names directly
-/// (`devices.resistor`) because it wires their ports/branches by hand instead
-/// of dispatching through `DeviceId`. Types still come from the catalog.
-/// ponytail: only the names consumers actually use — everything else reaches
-/// its type via `DeviceId.Type`.
+/// Flat aliases for the devices the builder wires by hand instead of
+/// dispatching through `DeviceId`.
+/// ponytail: only the names the builder uses; everything else goes through
+/// `DeviceId.Type`.
 pub const resistor = DeviceId.Type(.resistor);
 pub const capacitor = DeviceId.Type(.capacitor);
 pub const inductor = DeviceId.Type(.inductor);
@@ -188,11 +179,9 @@ const mes_levels = [_]Level{
     .{ .level = 6, .model = .hfet2 },
 };
 
-/// LEVEL -> device. An unknown level, or a level whose model is not in the
-/// catalog, is an unsupported NETLIST, not a programmer bug: it errors so the
-/// loader reports a clean `{"skip":...}` instead of a panic (a bsim3 card
-/// took the whole benchmark runner down with it). Never a silent fall back
-/// to a different device.
+/// LEVEL to device. An unknown level, or one whose model is not in the
+/// catalog, is an unsupported netlist: it logs a warning and returns
+/// `UnsupportedDevice`, never a panic and never a different device.
 fn levelId(comptime kind: []const u8, comptime table: []const Level, level: u16) error{UnsupportedDevice}!DeviceId {
     inline for (table) |e| {
         if (e.level == level) {
@@ -208,18 +197,23 @@ fn levelId(comptime kind: []const u8, comptime table: []const Level, level: u16)
     return error.UnsupportedDevice;
 }
 
+/// The M card device for `.model ... LEVEL=level` (ngspice inpdomod.c).
 pub fn mosfetDeviceId(level: u16) !DeviceId {
     return levelId("MOSFET", &mos_levels, level);
 }
+/// The Q card device for `level`.
 pub fn bjtDeviceId(level: u16) !DeviceId {
     return levelId("BJT", &bjt_levels, level);
 }
+/// The D card device for `level`.
 pub fn diodeDeviceId(level: u16) !DeviceId {
     return levelId("diode", &diode_levels, level);
 }
+/// The J card device for `level`.
 pub fn jfetDeviceId(level: u16) !DeviceId {
     return levelId("JFET", &jfet_levels, level);
 }
+/// The Z card device for `level`.
 pub fn mesDeviceId(level: u16) !DeviceId {
     return levelId("MESFET", &mes_levels, level);
 }

@@ -86,11 +86,11 @@ test "analysis directives dispatch every implemented capability and reject malfo
 }
 
 test "deck temperature and tolerances reach statistical and noise jobs" {
-    // `.temp` reaches noise through the DEVICES (engine.zig setCircuitTemp ->
+    // `.temp` reaches noise through the devices (Circuit.setCircuitTemp ->
     // Instance.temperature -> the model's own `noisePsd`), not through an
     // analysis-card copy: ngspice's NevalSrc multiplies by `ckt->CKTtemp`
-    // (nevalsrc.c:111) precisely because its devices hand over a bare
-    // conductance, and ours hand over a finished density.
+    // (nevalsrc.c:111) because its devices hand over a bare conductance,
+    // and ours hand over a finished density.
     const options: analyses.DeckOptions = .{ .temp_c = 85, .tol = .{ .reltol = 1e-5 } };
     var temp_job: Job = .{ .temp = .{} };
     analyses.applyDeckOptions(&temp_job, options);
@@ -422,10 +422,9 @@ test "one binder: a runtime-registered device binds a card exactly as the same m
     defer lib.deinit();
     // The built-in resistor's own vtable, registered the way `Library.load`
     // registers a dlopen'd one: its cards then take the runtime-device route
-    // (loadedType, bind_model, derive, collapse). A real .so of models/*.va
-    // cannot be the fixture yet: VerA's library emit declares `h` twice for
-    // every model with hoisted temporaries (GeneratedDeviceDoesNotCompile,
-    // on b1054dc too), so only the dlopen step is left out.
+    // (loadedType, bind_model, derive, collapse). Only the dlopen step is
+    // left out; a real .so of models/*.va is not a fixture yet because VerA's
+    // library emit declares `h` twice for models with hoisted temporaries.
     const loaded = try lib.register("resistor_rt", device.vtable("resistor"));
     try std.testing.expect(loaded != device.Library.builtin("resistor"));
 

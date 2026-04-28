@@ -1,10 +1,10 @@
-//! Bytes to logical lines to fields, per dialect, plus SPICE numbers.
-//!
-//! A field is a slice of the line. `=`, `(`, `)` and `,` are one-byte
-//! fields; a `{...}` or quoted field keeps its delimiters, so its kind is
-//! its first byte. Every other field is a word.
+//! Bytes to logical lines to fields, per dialect, plus SPICE number literals.
+//! A field is a slice of the line: `=`, `(`, `)` and `,` are one-byte fields,
+//! a `{...}` or quoted field keeps its delimiters (its kind is its first
+//! byte), and anything else is a word.
 const std = @import("std");
 
+/// Input syntax.
 pub const Dialect = enum { ngspice, hspice, spectre };
 
 /// Split `line` into fields. `quotes` are the quote bytes, `braces` keeps
@@ -25,6 +25,7 @@ pub fn Fields(comptime quotes: []const u8, comptime braces: bool) type {
             return std.mem.trim(u8, self.line[self.pos..], " \t");
         }
 
+        /// The next field, without consuming it.
         pub fn peek(self: Self) ?[]const u8 {
             var copy = self;
             return copy.next();
@@ -43,6 +44,7 @@ pub fn Fields(comptime quotes: []const u8, comptime braces: bool) type {
             return true;
         }
 
+        /// True unless `f` is a punctuation, quoted or braced field.
         pub fn isWord(f: []const u8) bool {
             return !isBreak(f[0]);
         }
@@ -59,6 +61,7 @@ pub fn Fields(comptime quotes: []const u8, comptime braces: bool) type {
             return breaks[c];
         }
 
+        /// True for this dialect's quote bytes.
         pub fn isQuote(c: u8) bool {
             inline for (quotes) |q| if (c == q) return true;
             return false;
@@ -70,6 +73,8 @@ pub fn Fields(comptime quotes: []const u8, comptime braces: bool) type {
             return if (f.len >= 2 and f[f.len - 1] == close) f[1 .. f.len - 1] else f[1..];
         }
 
+        /// Consumes and returns the next field; null at the end of the line.
+        /// An unterminated quote or brace runs to the end of the line.
         pub fn next(self: *Self) ?[]const u8 {
             const line = self.line;
             while (self.pos < line.len and (line[self.pos] == ' ' or line[self.pos] == '\t')) self.pos += 1;
@@ -109,6 +114,7 @@ pub fn Fields(comptime quotes: []const u8, comptime braces: bool) type {
 
 const NumParts = struct { base: f64, suffix: []const u8 };
 
+/// The leading decimal literal of `text` and the suffix after it.
 fn parseNumBase(text: []const u8) ?NumParts {
     if (text.len == 0) return null;
     var end: usize = 0;
@@ -140,6 +146,8 @@ fn parseNumBase(text: []const u8) ?NumParts {
     return .{ .base = base, .suffix = text[end..] };
 }
 
+/// A number with a SPICE scale suffix (`10meg`, `2.5u`); HSPICE also reads
+/// `x` as 1e6. An unknown suffix scales by 1.
 inline fn parseSpiceNum(text: []const u8, comptime hspice_suffix: bool) ?f64 {
     const parsed = parseNumBase(text) orelse return null;
     const s = parsed.suffix;
@@ -164,8 +172,8 @@ inline fn parseSpiceNum(text: []const u8, comptime hspice_suffix: bool) ?f64 {
     return parsed.base * scale;
 }
 
-/// Copy `src` lowercased into `dst` and count its newlines in one pass.
-/// W=1 is the scalar oracle and tail; byte lanes are independent.
+/// Copies `src` lowercased into `dst` (at least as long) and returns its
+/// newline count, in one pass. W = 1 is the scalar oracle and the tail.
 pub fn normalize(comptime W: comptime_int, dst: []u8, src: []const u8) usize {
     const V = @Vector(W, u8);
     var lines: usize = 0;
@@ -181,7 +189,7 @@ pub fn normalize(comptime W: comptime_int, dst: []u8, src: []const u8) usize {
     return lines;
 }
 
-/// Append a continuation piece to a logical line, copying `head` on first use.
+/// Appends a continuation piece to a logical line, copying `head` on first use.
 fn join(arena: std.mem.Allocator, joined: *?std.ArrayList(u8), head: []const u8, piece: []const u8) !void {
     if (joined.* == null) {
         joined.* = .empty;
@@ -191,6 +199,7 @@ fn join(arena: std.mem.Allocator, joined: *?std.ArrayList(u8), head: []const u8,
     try joined.*.?.appendSlice(arena, piece);
 }
 
+/// The next physical line without its `\r`, advancing `rest`.
 // ponytail: all dialects share physical lines; comment and continuation rules stay local.
 fn nextPhysicalLine(rest: *[]const u8) ?[]const u8 {
     const src = rest.*;
@@ -201,16 +210,18 @@ fn nextPhysicalLine(rest: *[]const u8) ?[]const u8 {
     return line;
 }
 
+/// ngspice: title line, case folded, `*` comments, `$`/`;` tails, `+` continuation.
 pub const ngspice = struct {
     pub const title_line = true;
     pub const fold_case = true;
     pub const Split = Fields("'", true);
 
+    /// Logical-line iterator; a joined line is allocated in `arena`.
     pub const Lines = struct {
         rest: []const u8,
         arena: std.mem.Allocator,
 
-        /// Cut at the first `$` or `;`. One scalar pass: cards are short, and
+        /// Cuts at the first `$` or `;`. One scalar pass: cards are short, and
         /// two stdlib vector scans cost more in setup than they save.
         fn stripComment(line: []const u8) []const u8 {
             const cut = for (line, 0..) |c, i| {
@@ -219,6 +230,7 @@ pub const ngspice = struct {
             return std.mem.trim(u8, line[0..cut], " \t");
         }
 
+        /// The next logical line, continuations joined; null at the end.
         pub fn next(self: *Lines) !?[]const u8 {
             var head: []const u8 = undefined;
             while (true) {
@@ -247,11 +259,14 @@ pub const ngspice = struct {
         }
     };
 
+    /// A number literal with an ngspice scale suffix; null when `text` is not one.
     pub fn parseNum(text: []const u8) ?f64 {
         return parseSpiceNum(text, false);
     }
 };
 
+/// HSPICE: like ngspice, but `"` also quotes, `$` starts a comment only after
+/// a blank, and a trailing `\\` continues the line.
 pub const hspice = struct {
     pub const title_line = true;
     pub const fold_case = true;
@@ -280,6 +295,7 @@ pub const hspice = struct {
             return .{ .text = line, .continues = false };
         }
 
+        /// The next logical line, continuations joined; null at the end.
         pub fn next(self: *Lines) !?[]const u8 {
             var head: []const u8 = undefined;
             var trailing_cont = false;
@@ -322,11 +338,14 @@ pub const hspice = struct {
         }
     };
 
+    /// A number literal with an HSPICE scale suffix.
     pub fn parseNum(text: []const u8) ?f64 {
         return parseSpiceNum(text, true);
     }
 };
 
+/// Spectre: no title line, case kept, `//` and `/* */` comments, `\` or `+`
+/// continuation.
 pub const spectre = struct {
     pub const title_line = false;
     pub const fold_case = false;
@@ -351,8 +370,8 @@ pub const spectre = struct {
             return std.mem.trim(u8, line, " \t");
         }
 
-        /// Copies the spans between comments, not byte by byte. An unterminated
-        /// `/*` still discards the rest of the line.
+        /// Removes `/* */` comments, copying the spans between them. An
+        /// unterminated `/*` discards the rest of the line.
         pub fn stripBlockComments(arena: std.mem.Allocator, line: []const u8) ![]const u8 {
             var open = std.mem.indexOf(u8, line, "/*") orelse return line;
             var buf: std.ArrayList(u8) = .empty;
@@ -376,6 +395,7 @@ pub const spectre = struct {
             return line;
         }
 
+        /// The next logical line, continuations joined; null at the end.
         pub fn next(self: *Lines) !?[]const u8 {
             var head: []const u8 = undefined;
             var trailing_cont = false;
@@ -409,6 +429,7 @@ pub const spectre = struct {
         }
     };
 
+    /// A number literal with a case-sensitive Spectre suffix (`M` mega, `m` milli).
     pub fn parseNum(text: []const u8) ?f64 {
         const parsed = parseNumBase(text) orelse return null;
         const s = parsed.suffix;

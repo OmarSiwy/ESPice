@@ -1,4 +1,5 @@
-//! Source to netlist to immutable circuit and queries, for Problem.
+//! Source to netlist to frozen circuit and queries: the frontend's entry
+//! points for the Problem facade.
 const std = @import("std");
 const core = @import("core");
 const requests = @import("core").query;
@@ -26,14 +27,18 @@ const NO_NODE = analyses.NO_NODE;
 
 pub const Dialect = netlist.Dialect;
 
+/// Where a deck comes from.
 pub const Source = union(enum) {
+    /// Path of the deck file.
     file: []const u8,
     bytes: Bytes,
 
-    /// origin is a real or virtual filename; relative paths use its directory.
+    /// In-memory deck; `origin` is a real or virtual filename whose
+    /// directory relative includes resolve against.
     pub const Bytes = struct { data: []const u8, origin: []const u8 };
 };
 
+/// The dialect a CLI name or short alias (`ng`, `hs`, `scs`) selects.
 pub fn parseDialect(name: []const u8) ?Dialect {
     return std.StaticStringMap(Dialect).initComptime(.{
         .{ "ngspice", .ngspice }, .{ "ng", .ngspice },
@@ -42,8 +47,9 @@ pub fn parseDialect(name: []const u8) ?Dialect {
     }).get(name);
 }
 
-/// Read, expand and flatten `input` into `session`, then load its HDL models
-/// into `lib`. The netlist borrows `session`; release it once `build` has returned.
+/// Reads, expands and flattens `input` into `session`, then loads its HDL
+/// models into `lib`. The netlist borrows `session`; release it once `build`
+/// has returned. Spectre input takes no `.include` expansion.
 pub fn prepare(io: std.Io, lib: *device.Library, session: std.mem.Allocator, input: Source, dialect: Dialect) !netlist.Netlist {
     const origin = switch (input) {
         .file => |path| path,
@@ -70,8 +76,9 @@ fn loadModels(io: std.Io, lib: *device.Library, session: std.mem.Allocator, fore
     try lib.load(io, paths.items);
 }
 
-/// Build a passive circuit from a netlist. Scratch owns wiring; the session
-/// arena owns every published slice.
+/// Builds the frozen circuit and deck data from `nl`. `parse_arena` holds
+/// construction scratch; `sim_arena` owns every published slice and must
+/// outlive the result, as must `lib` when the deck uses loaded devices.
 pub fn build(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_arena: std.mem.Allocator, nl: netlist.Netlist) !Prepared {
     if (nl.deck.analyses.len > (std.math.maxInt(u32) - 1) / 3) return error.CircuitTooLarge;
     const deck_opts = try analyses.deckOptions(nl.deck.config);
@@ -187,7 +194,7 @@ fn copyNames(arena: std.mem.Allocator, names: []const []const u8) ![]const []con
     return copied;
 }
 
-/// Frozen-circuit node row by label; NO_NODE when the deck never named it.
+/// Frozen-circuit node row by label, for cards appended after the build.
 const NodeIndex = struct {
     map: std.StringHashMapUnmanaged(u32),
 
@@ -201,13 +208,15 @@ const NodeIndex = struct {
         return .{ .map = map };
     }
 
+    /// Row of net `name`; NO_NODE when the deck never named it.
     pub fn node(self: NodeIndex, name: []const u8) u32 {
         return self.map.get(name) orelse NO_NODE;
     }
 };
 
-/// Resolve additional SPICE analysis cards against the published circuit.
-/// Topology and deck settings are fixed; only query descriptions are allocated.
+/// Resolves analysis cards appended to a built circuit. Topology and deck
+/// settings stay fixed; only the queries are allocated, in `arena`. Any card
+/// that is not an analysis is `UnsupportedDirectiveMutation`.
 pub fn resolveQueries(arena: std.mem.Allocator, prepared: *const Prepared, directive_text: []const u8) ![]const Job {
     const nodes: NodeIndex = try .init(arena, &prepared.circuit);
     const cards = try netlist.parseAnalyses(arena, directive_text, nodes);
@@ -220,7 +229,8 @@ pub fn resolveQueries(arena: std.mem.Allocator, prepared: *const Prepared, direc
     });
 }
 
-/// Preserve card identities so each mutable analysis clone binds its own pointers.
+/// Each `ac=` resistance as a (type, instance, parameter) override, so every
+/// analysis clone binds its own parameter pointer.
 fn acOverrides(
     arena: std.mem.Allocator,
     cards: []const requests.CardRef,
