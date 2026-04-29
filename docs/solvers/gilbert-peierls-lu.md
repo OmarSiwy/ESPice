@@ -120,9 +120,10 @@ methods win instead.
 
 ## 3. Pseudo-code, CPU sequential
 
-Matches `src/solver/direct.zig` `Lu.factor` (SoA CSC, u32 indices,
-`NONE = maxInt(u32)`, workspaces `w/flag/topo/stack/pstack` allocated once
-at init):
+The column loop of `SparseLu.factor` in `src/solver/sparse_lu.zig` (SoA
+CSC, u32 indices, workspaces `w/flag/topo/stack/pstack` allocated once at
+init). The shipped loop adds supernode panels and encodes an unpivoted row
+as an empty range; see `solver-perf-2026-09.md`:
 
 ```
 factor(col_ptr, row_idx, vals, tau):
@@ -171,7 +172,7 @@ factor(col_ptr, row_idx, vals, tau):
   prow[p] = pinv[row_idx[p]]             # refactor scatter targets
 ```
 
-Solve (`Lu.solve`): permute $b$ by `pinv`, forward-substitute through
+Solve (`SparseLu.solve`): permute $b$ by `pinv`, forward-substitute through
 `lp/li/lx` skipping zero $y_k$, back-substitute through `up/ui/ux` dividing
 by `udiag`, un-permute by `q`. Transpose solve runs the same arrays in
 gather mode ($U^T$ lower, $L^T$ unit upper).
@@ -211,7 +212,7 @@ gpu_refactor(col_ptr, prow, vals, lp/li/lx, up/ui/ux, udiag, levels):
       d = w_k[k];  if d == 0: flag singular, abort grid
       udiag[k] = d
       parfor t over lp[k]..lp[k+1]: lx[t] = w_k[li[t]] / d
-    grid barrier                         # cooperative launch, like arp_solve
+    grid barrier                         # cooperative launch
 
 batched solves (Newton RHS per sweep point / MC sample):
   parfor batch b:                        # each b = independent rhs
@@ -222,11 +223,10 @@ batched solves (Newton RHS per sweep point / MC sample):
 Notes tying to our code:
 
 - Batched RHS is the natural GPU win for us: sweeps (`dc`/`mc`/`temp`) and
-  periodic problems produce many independent solves on one factorization —
-  `src/analysis/gpu.zig` already ships whole Newton solves per cooperative
-  launch; a batched substitution kernel drops in beside `arp_solve`.
+  periodic problems produce many independent solves on one factorization.
+  Nothing here is implemented: every factor and solve runs on the host.
 - Level-set numeric refactor needs *no* pivot search on device precisely
-  because `direct.zig` stores the U pattern in solve order and replays the
+  because `sparse_lu.zig` stores the U pattern in solve order and replays the
   pivot sequence (`refactor`); the CPU pivot-collapse fallback (full
   re-factor with fresh pivoting) stays host-side.
 - Per-column dense workspaces are the memory cost: a pool of `n`-sized
@@ -249,10 +249,12 @@ result; thesis §2.9 states the rule, not the bound). §2 — source-verified
 implementation directly. §4 — level-set structure source-verified against
 GLU3.0 paper; the batched-solve section is our own design, not from a source.
 
-**Our implementation:** `src/solver/direct.zig` (`Lu.factor`,
-`Lu.refactor`, `Lu.solve/solveT`); ordering consumed from
-`src/solver/order.zig`; Newton caller in
-`src/solver/converger.zig`. Scaling fixtures:
-`benchmark/fixtures/scaling/rc_ladder_{1k,10k,100k}`, `rc_mesh_{1k,10k}`,
-`resistor_grid_100x100` (fill/ordering stress), `inverter_chain_{256,1k,4k}`
-(refactor hot path).
+**Our implementation:** `src/solver/sparse_lu.zig` (`SparseLu.factor`,
+`refactor`, `solve`, `solveT`), wrapped by `src/solver/direct.zig`;
+ordering from `src/solver/order.zig`; Newton caller in
+`src/solver/converger.zig`. `solver-perf-2026-09.md` records the supernode
+panels and the small-matrix refactor tape added on top of the column loop
+described here. Fixtures in `tests/fixtures/stress/`:
+`scaling_rc_ladder_{1k,100k}`, `scaling_resistor_grid_{32x32,100x100}`
+(fill and ordering stress), `scaling_inverter_chain_{256,4k}` (refactor hot
+path).

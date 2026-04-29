@@ -110,10 +110,12 @@ implementation means the direct and Krylov paths cannot drift.
   constant Jacobians. This is the default: numeric refactor at
   $O(\mathrm{nnz}(L{+}U))$ is far cheaper than JFNK's per-Krylov-vector
   full circuit evals at every size we bench.
-- **JFNK** is chosen when GPU is active (matrix-free = no factorization on
-  device; every $Jv$ is one more residual eval, which is exactly what the
-  megakernel does fast) — and falls back to direct Newton on
-  non-convergence.
+- **JFNK** is never chosen automatically. `converger.run` uses it only
+  under `ESPICE_SOLVER=jfnk` (LU-preconditioned) or `jfnk-nolu`
+  (Jacobi-preconditioned, no factorization), and falls back to direct
+  Newton when the pinned JFNK fails. The operating-point ladder calls
+  `converger.jfnk` directly as rung 4 (`src/analysis/dc/op.zig`), after
+  plain Newton, gmin stepping and source stepping have failed.
 - **Damping**: if $\max|\Delta x_i| >$ clamp, scale the *whole* vector —
   componentwise clamping breaks the Newton direction and turns junction
   overshoot into a fixed-step walk; scaling keeps linear-row residuals
@@ -170,43 +172,24 @@ jfnk(ckt, x, opts, hook):                       # GMRES(m), right-precond
     finalizeStep(...)  # SAME gates as newton
 ```
 
-## 4. Pseudo-code, GPU parallel
+## 4. GPU
 
-JFNK is the GPU-native strategy: its primitives are residual evals
-(device-parallel across devices/nodes), axpy/dot (parallel reductions),
-and small host-side $H$ updates. This is what our megakernel implements —
-one cooperative launch runs the *whole* Newton solve.
+None. The GPU evaluates device planes (`src/analysis/gpu.zig`, reached
+through `Circuit.gpu_hook.eval_planes`); the linear solve, the Newton update
+and the convergence test always run on the host. The on-device JFNK kernel
+this section once described was removed.
 
-```
-arp_solve (device, cooperative launch, our layout):
-  # staged prefix: header{t, Tol{reltol,abstol,vntol,residual_tol,gmin,
-  #   dx_clamp,max_iter,gmres_m}}, x[n]; SoA problem data; ws after prefix
-  for iter in 0..max_iter:                      # loop entirely on device
-    parfor device batches: eval -> stamp F (and J·v support data)
-    grid barrier
-    GMRES(m): each Krylov vector =
-      parfor: x_pert = x + eps*v
-      parfor batches: residual eval at x_pert   # the dominant kernel work
-      parfor: w = (F_pert - F0)/eps; precondition (diag: one parfor mul)
-      dot/norm = grid reductions; H/Givens on thread 0 (n_gmres ~ 30: cheap)
-      grid barrier per vector                   # SERIALIZES: Arnoldi chain
-    parfor: dx = V y; damp by grid-max reduction
-    parfor: x += dx; limiting per device (pnjlim/fetlim in the kernel)
-    grid reductions: scaled norm, limited-flag, residual gate
-    if accepted: write ResultHeader{status, iterations, max_dx}; break
-  # host: ONE HtoD (prefix), ONE launch, ONE DtoH (x + ResultHeader);
-  # non-finite x is not copied back (poisoned warm start guard);
-  # non-convergence falls back host-side: JFNK (CPU) then direct Newton.
+## 5. Open divergence: the residual gate
 
-what fundamentally serializes:
-  - Newton iterations (x^(m+1) needs x^(m)) — irreducible outer chain
-  - Arnoldi: v_{j+1} needs v_j orthogonalized — m sequential J·v evals;
-    s-step/communication-avoiding GMRES trades stability for fewer barriers
-  - grid barriers between eval/reduce phases — the cooperative-launch cost
-direct-Newton-on-GPU alternative: level-set refactor + batched solve
-  (see klu-pipeline.md §4 / gpu-sparse-lu.md) — wins when m·(eval cost)
-  exceeds refactor cost, i.e. big linear-ish circuits.
-```
+The residual gate of §1 (`residualConverged` in `converger.zig`) is a
+voltage tolerance scaled by the row's diagonal conductance. ngspice's
+NIconvTest has no residual gate; its current check is
+reltol * max(|I_new|, |I_old|) + abstol on the device currents. On
+`tran/bench_tline_ltra1_1_line` and `tran/bench_tline_txl1_1_line` the gate
+allows about 1.5e-4 A on the affected rows, loose enough that the operating
+point accepts v(2) = 5.005 V over a 5 V supply. The gate is global, so
+loosening or tightening it needs its own full-corpus A/B. Tracked as F7/E7
+in `issues.md`.
 
 ---
 
@@ -224,15 +207,12 @@ NIconvTest; niiter.c "iterno != 1" rule); marked high-confidence but not
 re-fetched. §1 residual gate — our addition, not ngspice (documented as
 such in the code). §1 JFNK/GMRES math — derived, not source-verified
 (standard Saad/Kelley material; Kelley & Keyes paywalled). §2/§3 — verified
-against `converger.zig` directly. §4 — verified against
-`src/analysis/gpu.zig` + `converger.run` dispatch; kernel internals
-paraphrase our ABI (`analysis.gpu_abi`).
+against `converger.zig` directly.
 
 **Our implementation:** `src/solver/converger.zig`
-(`newton`, `jfnk`, `finalizeStep`, `dampStep`, `updateAndNorm`,
-`Tolerances`); device limiting in `src/analysis/eval/engine.zig` and compiled models
-(`ckt.applyLimits`); GPU driver `src/analysis/gpu.zig` (`solveNewton`).
-Fixtures: `benchmark/fixtures/convergence/{diode_bridge,schmitt,
-high_gain_fb}`, `benchmark/fixtures/op/`, scaling:
-`inverter_chain_{256,1k,4k}` (Newton per step),
-`parallel_inverters_2000` (JFNK/GPU eval dominance).
+(`run`, `newton`, `jfnk`, `finalizeStep`, `dampStep`, `updateAndNorm`,
+`residualConverged`); `Tolerances` in `src/core/numerics.zig`; device
+limiting in `src/analysis/Circuit.zig` (`applyLimits`) and the compiled
+models. Fixtures: `tests/fixtures/convergence/` (`bench_diode_bridge`,
+`bench_schmitt`, `bench_high_gain_fb`), `tests/fixtures/op/`, and
+`tests/fixtures/stress/scaling_inverter_chain_{256,4k}` (Newton per step).

@@ -1,5 +1,10 @@
 # GPU Sparse LU: GLU 3.0 Level Sets, NICSLU Parallelism
 
+**Status: not implemented.** ESPice factors every matrix on the host; the
+GPU only evaluates device planes. This page is the research and port spec
+for a level-set refactor, kept for the day a matrix size in the corpus
+justifies it.
+
 ## 1. Mathematical specification
 
 **The dependency structure.** In left-looking LU, column $j$ depends on
@@ -99,7 +104,7 @@ Phases of a GLU-style solver:
 
 Divergence from our CPU design, and why it matters for porting: GLU
 *replaces* pivoting with MC64 static pivoting + fill from the no-pivot
-pattern; our `direct.zig` factors with threshold pivoting on the CPU once
+pattern; our `sparse_lu.zig` factors with threshold pivoting on the CPU once
 and *replays* the pivot sequence — the GPU work we'd ship is the
 **refactor**, which needs no pivot search either. Both approaches keep all
 pivot decisions off the device; ours keeps KLU's numerics (τ-threshold on
@@ -150,8 +155,8 @@ levelize_relaxed(As):                   # GLU3.0 Algorithm 4, two loops
 
 ## 4. Pseudo-code, GPU parallel
 
-Aligned with our data layout (SoA CSC, u32, `NONE` sentinel, allocate-once;
-grid-sync = cooperative launch as in `src/analysis/gpu.zig`):
+Aligned with our data layout (SoA CSC, u32 indices, allocate-once;
+grid-sync = a cooperative launch):
 
 ```
 # device residents (allocated once): col_ptr/row_idx of the FILLED pattern,
@@ -176,7 +181,7 @@ host loop (or single cooperative kernel with grid barriers):
          : size(L) > 16       ? large_block : stream
     launch factor_level(L, mode)        # normalize cols of L, then updates
     grid barrier / stream sync
-  download status (+ x after solve)     # one DtoH, mirrors arp_solve
+  download status (+ x after solve)     # one DtoH
 
 # our refactor-replay variant (pivot sequence frozen by CPU factor):
 kernel refactor_level(L):
@@ -204,7 +209,7 @@ what fundamentally serializes, and why:
      ours: CPU-frozen sequence) removes it from the device.
   4. launch/driver overhead per level — GLU measures it at up to 40% of
      GPU time for ~100k-row matrices; batching levels into one cooperative
-     kernel with grid barriers (our megakernel pattern) is the mitigation.
+     kernel with grid barriers is the mitigation.
 ```
 
 ---
@@ -212,7 +217,7 @@ what fundamentally serializes, and why:
 **Sources fetched:** GLU3.0 paper, Peng & Tan, arXiv:1908.00204 (fetched in
 full — algorithms 1–5, eq. 1–5, figs. 5/10/11, tables I–III);
 GLU_public README (fetched — github.com/sheldonucr/GLU_public; note the
-repo moved from the GLU3.0 URL in RESEARCH.md, and its README documents
+repo moved from its old GLU3.0 URL, and its README documents
 2026 bug fixes incl. a divergent-`__syncthreads` deadlock in
 `RL_onecol_updateSubmat` — worth remembering if we ever port their
 kernels); NICSLU README (fetched — github.com/chenxm1986/nicslu;
@@ -228,12 +233,16 @@ GLU3.0 Algorithms 1/2/4. §4 — GLU parts source-verified; the
 refactor-replay variant and batched-solve design are ours, not from a
 source.
 
-**Our implementation:** none yet on-device for LU — this doc is the port
-spec. Host pieces it would reuse: `src/solver/direct.zig` (frozen
-pattern, `up/ui` topo order, `prow`, growth monitor),
-`src/analysis/gpu.zig` (cooperative-launch driver, staged prefix,
-one-HtoD/one-DtoH protocol), `src/solver/converger.zig`
-(fallback ladder the GPU path must respect). Scaling fixtures:
-`benchmark/fixtures/scaling/resistor_grid_100x100`, `rc_mesh_10k` (wide
-DAGs — level-set friendly), `rc_ladder_100k` (adversarial: depth-n DAG,
-GPU should decline), `parallel_inverters_2000` (block-parallel best case).
+**Our implementation:** none. Every factorization runs on the host; an
+earlier `gpu_lu.zig` (level-set bookkeeping only, no kernel) was removed
+unused. This doc is the port spec. Host pieces it would reuse:
+`src/solver/sparse_lu.zig` (frozen pattern, `up`/`ui` topological order,
+`prow`, growth monitor), `src/analysis/gpu.zig` (the device-plane upload
+and fallback protocol), `src/solver/converger.zig` (the fallback ladder a
+GPU path must respect). The level-scheduling upper bound measured on the
+CPU (1.3x to 2.1x at 8 threads, see `solver-perf-2026-09.md`) argues
+against the port for the corpus's matrix sizes. Scaling fixtures:
+`tests/fixtures/stress/scaling_resistor_grid_100x100` (wide DAG, level-set
+friendly), `scaling_rc_ladder_100k` (adversarial: depth-n DAG, a GPU path
+should decline), `scaling_parallel_inverters_2000` (block-parallel best
+case).

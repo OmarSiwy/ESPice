@@ -1,5 +1,12 @@
 # Solver performance pass (2026-09)
 
+Two passes over `src/solver/`, each landed as bitwise-identical commits
+except the one LaneLu repivot divergence recorded below. Gate for every
+commit: `zig build` and `zig build test` green, the fixture pass set
+unchanged, and all 616 decks byte-identical in raw file, stdout and exit
+code against the parent build (the `-Dgpu=false` build; the GPU-kernel build
+was not rerun in these passes).
+
 Machine: i9-14900HX (AVX2 + FMA, no AVX-512, 4 f64 lanes), zig 0.16.0,
 ReleaseFast. Instruction counts come from callgrind on a `-Ddebug-info`
 build; wall times are hyperfine medians and were taken on a shared machine
@@ -26,10 +33,12 @@ inlined into the AC batch; "converger" is converger.zig's own loops.
 On the AC decks, the scalar pivot refresh `solveBatch` ran per chunk (not
 in the table, attributed to `setOmegaSparse`) was another 16%.
 
-`stress/scaling_inverter_chain_4k` (360 s) is not a solver problem: 321 s is
-the OP falling through to pseudo-transient continuation (24k steps in
-`dc/op.zig`) at about 1 ms per Newton iteration, the same per-iteration cost
-as the 2000-stage chain.
+`stress/scaling_inverter_chain_4k` (360 s) was not a solver problem: 321 s
+was the OP falling through to its transient rung (24k steps in `dc/op.zig`)
+at about 1 ms per Newton iteration, the same per-iteration cost as the
+2000-stage chain. The OP ladder fix that followed (gmin and source stepping
+on itl2 with cktop.c's factor rules) finishes that OP on the gmin rung in
+15 s; see `docs/conformance-phase2.md` group 6.
 
 ## Frequency lanes: LaneLu and FreqSolver.solveBatch
 
@@ -233,8 +242,8 @@ refactor on vacask_mul's 100 slots, which cancelled the whole win in the
 first cut.
 
 `refactorColumns` (the previous loop) is still the path above 2,048 flops
-and is the oracle: SparseTests "refactor: the small-matrix tape is bitwise
-the column replay" runs eight value sets (f64 and f32) through both on a
+and is the oracle: SparseTests "refactor and solve: the small-matrix tape is
+bitwise the column path" runs eight value sets (f64 and f32) through both on a
 40-unknown matrix with a zero-diagonal branch row and a void unknown,
 including one set where the growth monitor fails in both.
 
@@ -295,10 +304,11 @@ inverter_chain_256, against 2,688 / 2,496 / 67,475):
 Where vacask_mul's time is now (`-Ddebug-info` callgrind, 11,358M Ir):
 refactor 19.4% (1,630 Ir per call, 1.35M calls), solve 8.6%, diode eval
 15.5%, and 4.4% in compiler_rt `memset` called twice per Newton iterate
-from `Circuit.evalNewtonCpu` (analysis/Circuit.zig and
-core/numerics.zig, zeroing the planes). That memset is outside
-`solvers/`; an inline laned zero there (the `fillZero` pattern) is the
-next small-matrix win.
+from `Circuit.evalNewtonCpu`, zeroing the planes. `evalNewtonCpu` now clears
+through `Circuit.clearPlanes`, which uses the vector loop
+`numerics.zeroSimd`; LLVM can still turn such a loop into a `memset` call
+(see the loop-idiom hazard in `refactor-tape-2026-09.md`), and this deck was
+not re-profiled, so whether the 4.4% is gone is unverified.
 
 ## Converger: per-iterate O(n) passes
 
@@ -310,6 +320,35 @@ now does both in one W-wide pass (the current-row mask selects abstol or
 vntol per lane) with a scalar tail. Max is exact and order-independent, so
 the result is bitwise the scalar loop's; the differential case covers
 lengths 0 to 39 with NaN, inf and -0 inputs (ConvergerTests).
+
+| measure (callgrind Ir, whole run) | change |
+|---|---|
+| `scaling_rc_ladder_100k` | -8.6% |
+| `vacask_rc`, `vacask_mul` | -3.3% |
+
+## Dense LU: rank-8 panels
+
+`DenseLu` factors from n = 40 up in rank-8 panels (blocked right-looking
+elimination) and keeps the unblocked loops below that, where the panel
+bookkeeping costs more than it saves. Each entry still sees the same
+operations in the same order, so the factors are bitwise the unblocked
+LU's. The HB deck profiled here spent 95% of its time in this kernel.
+
+| measure | before | after |
+|---|---|---|
+| dense factor, n = 640 | 36.7 ms | 12.8 ms |
+| dense factor, n = 100 | 171 us | 83 us |
+
+Not measured: the HB deck end to end, and a full-corpus raw diff on the
+default (GPU) build for this commit.
+
+## Correctness fix found on the way
+
+A full `SparseLu.factor` that failed with `SingularMatrix` left stale
+values in the dense workspace `w`, breaking the invariant that `w` is zero
+between calls; the next factor then read them. `w` is now zeroed on that
+path. The same commit made the LaneLu failure masks exact under the
+self-hosted backend. No deck changed bytes.
 
 ## Retired experiments
 
@@ -332,13 +371,20 @@ lengths 0 to 39 with NaN, inf and -0 inputs (ConvergerTests).
   change at n=991. Bitwise identical but under 2% of the n=12 vacask deck.
   Parked.
 
-## Follow-ups outside `solvers/`
+## Open follow-ups
 
 - **Ordering computed per executor.** The OP and tran executors each build
   a Circuit and a `converger.Workspace`, and each runs BTF + AMD on the same
   frozen pattern: two `computeOrdering` calls, 95M Ir each on
   `scaling_rc_ladder_100k` (1.5% of the run; about 2% on the 100x100 grid).
   The ordering belongs with the prepared pattern; `direct.SolverT` would
-  take it as an input instead of computing it.
-- **`scaling_inverter_chain_4k`.** 321 of its 360 s are the OP falling
-  through to pseudo-transient continuation in `dc/op.zig`.
+  take it as an input instead of computing it. Still open: each `Circuit`
+  builds its own `Workspace` (`Circuit.workspace`).
+- **Grid full factor.** The DFS is now the larger half of the
+  `scaling_resistor_grid_100x100` factor. A supernodal DFS, or sorting the
+  reach by pivot step, changes every full factor's summation order and
+  needs a decision to accept that one-time FP change (see "Not done"
+  above).
+- **Tiny-n overhead.** Refactor on vacask is about 1,630 Ir per call for
+  36 flops; what is left is per-column loop setup (12 columns) and the
+  copy-out of the values.

@@ -4,9 +4,11 @@ The conversion-matrix system behind PAC/PXF/pnoise/QPAC as a structured
 linear-algebra problem: block factorization, factor reuse, transpose
 solves, storage, matrix-free application.
 
-**Status: partially implemented** — `pss/pac.zig` builds and solves the
-full conversion matrix densely; everything block-structured below is the
-documented upgrade required by PXF, true-LPTV pnoise, and QPSS.
+**Status: partially implemented.** `src/analysis/pss/pac.zig` builds the
+full conversion matrix densely and solves it with `dense_lu`; PXF
+(`pxf.zig`) reuses it for the dense adjoint. There is no `lptv.zig`: the
+block-structured, sparse and matrix-free paths below are design, required
+for true-LPTV pnoise, QPAC and larger PAC/PXF circuits.
 
 ## 1. Mathematical specification
 
@@ -165,8 +167,7 @@ Every piece maps onto existing kernel patterns:
   the device batches** (instance eval at the orbit point with directional
   seed), which is the JFNK trick specialized to LPTV;
 - DFT/IDFT: batched FFTs over nodes (nodes × N);
-- GMRES scalar bookkeeping: thread-0 + grid barriers, verbatim from
-  `kernel.zig`;
+- GMRES scalar bookkeeping: thread 0 plus grid barriers;
 - frequency points of the sweep: independent lanes (the AC §4 story);
 - direct path: batched stacked-real refactors per lane.
 
@@ -196,7 +197,7 @@ kernel lptv_adjoint_apply: same, transposed scatter + conj twiddles
   not source-verified (standard; FFT-apply consistency checkable against
   the dense path on any fixture).
 - §2–§4: design spec grounded in existing impl (`freq_solve.zig`
-  dense/sparse policy, `direct.zig solveT`, `kernel.zig` GMRES).
+  dense/sparse policy, `direct.zig solveT`, `gmres.zig`).
 
 **Our implementation**
 
@@ -208,5 +209,5 @@ kernel lptv_adjoint_apply: same, transposed scatter + conj twiddles
 - Consumers: [pac](../analysis/pac.md) (today),
   [pxf](../analysis/pxf.md), [periodic-noise](../analysis/periodic-noise.md)
   true-LPTV upgrade, [qpss](../analysis/qpss.md) QPAC (future).
-- Bench fixtures: `benchmark/fixtures/pss/*` (orbit source);
-  LTI-reduction cross-check vs `benchmark/fixtures/ac/*`.
+- Fixtures: `tests/fixtures/pac/` and `tests/fixtures/pxf/`;
+  LTI-reduction cross-check against `tests/fixtures/ac/`.

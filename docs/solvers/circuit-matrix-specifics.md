@@ -145,17 +145,16 @@ pcr_solve(a, b, c, x):                  # O(n log n) work, O(log n) depth
     grid barrier
   parfor i: x[i] = rhs[i] / b[i]
 # worth it only when n is large AND the solve is on the device critical
-# path (our megakernel transient); for host solves Thomas at O(n) wins.
+# path; every solve is on the host today, where Thomas at O(n) wins.
 
 # value bypass on device: memcmp is a parallel reduction —
 parfor chunks: local_eq = all(vals[chunk] == vcopy[chunk]); and-reduce
 if equal: skip refactor launch entirely  # saves the whole level-set sweep
 
-# signature bypass: pure host logic — zero device cost, decided before
-# any launch; matrix_sig lives beside the staged header (gpu_solver.zig
-# already patches per-solve headers; the sig is one more u64 compare).
+# signature bypass: pure host logic, zero device cost, decided before
+# any launch (one u64 compare).
 
-# BBD on GPU: the natural megakernel layout —
+# BBD on GPU: the natural single-launch layout:
 parfor blocks b: dense refactor of block b   # batched small dense LU,
                                              # one thread-block each
 serial: assemble + factor Schur border       # small dense, one block
@@ -187,11 +186,11 @@ has a related per-device "bypass" option but no matrix-level equivalent).
 §3 — verified against `direct.zig`/`converger.zig` directly. §4 — derived,
 not source-verified.
 
-**Our implementation:** `src/solver/direct.zig` (`isTridiag`,
-`TriDiag`, `Solver.factor` vcopy bypass, BBD dispatch + demotion),
-`src/solver/bbd.zig`, `src/solver/converger.zig`
-(`Options.matrix_sig`, `Workspace.factored_sig`). Scaling fixtures:
-`benchmark/fixtures/scaling/rc_ladder_{1k,10k,100k}` + `rc_chain_500`
-(tridiag path), `parallel_inverters_{100,500,2000}` (BBD partitions),
-`divider_chain` (signature/bypass on linear sweep),
-`benchmark/fixtures/bypass/` (bypass correctness).
+**Our implementation:** `src/solver/direct.zig` (engine dispatch,
+`SolverT.factor` vcopy bypass, BBD and tridiagonal demotion),
+`src/solver/tridiag.zig` (`isTridiag`, `TriDiag`), `src/solver/bbd.zig`,
+`src/solver/converger.zig` (`Options.matrix_sig`, `Workspace.factored_sig`).
+Fixtures in `tests/fixtures/stress/`: `scaling_rc_ladder_{1k,100k}`
+(tridiagonal path), `scaling_parallel_inverters_{100,2000}` (BBD
+partitions), `scaling_divider_chain` (signature bypass on a linear sweep);
+`tests/fixtures/tran/bench_bypass_*` (bypass correctness).

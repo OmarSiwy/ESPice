@@ -39,8 +39,10 @@ $\lambda^{\mathsf H} (\partial F/\partial p + j\omega\, \partial q/\partial p)\b
 
 ### How the contract delivers it: one more dual lane
 
-Device physics is value-form, generic over an opaque scalar `S`
-(`contract.zig`); the batch instantiates `S = AdScalar(n_u)` seeding the
+Device physics is value-form, generic over an opaque scalar `S` (VerA's
+`contract` module). In the text below `AdScalar(N)` stands for the
+evaluator's `Dual(N, F)` (`src/device/eval.zig`); the batch instantiates
+`S = AdScalar(n_u)` seeding the
 $n_u$ unknowns — one pass yields residual + full local Jacobian. The
 parameter derivative is the **same mechanism with one more seed lane**:
 
@@ -95,7 +97,7 @@ $\sigma^2(\delta p_d)$ and reduces.
 
 ### SoA memory layout
 
-Batches are SoA per device type (`batch.zig`): `models[]`, `instances[]`,
+Batches are SoA per device type (`src/device/eval.zig`): `models[]`, `instances[]`,
 `gath[count × n_u]`, `rhs_idx[count × n_u]`. The stamp pass needs **no new
 persistent arrays** in the common case — it is a streaming
 eval-gather-dot-reduce with one output scalar per (instance, param):
@@ -155,8 +157,9 @@ for each batch B (device type D):                # comptime dispatch
 
 ## 4. Pseudo-code, GPU parallel
 
-The pass is one more comptime-dispatched batch kernel, identical in shape
-to the residual megakernel pass (`kernel.zig assemble`): grid-stride over
+The pass would be one more comptime-dispatched batch kernel, identical in
+shape to the device-plane evaluation (`evalRange` in `src/device/eval.zig`):
+grid-stride over
 instances, SoA gathers, no atomics needed (output is instance-major, one
 writer per slot).
 
@@ -172,9 +175,9 @@ kernel param_stamp_pass(blob, x, lambda):
 ```
 
 - The adjoint $\lambda$ comes from either a host `solveT` (upload one
-  vector) or, matrix-free, transposed-GMRES on-device (the megakernel's
-  GMRES with the transposed-scatter eval — same machinery listed in
-  [lptv-block-solves.md](lptv-block-solves.md) §4).
+  vector) or, matrix-free, a transposed GMRES on the device with the
+  transposed-scatter eval (the machinery sketched in
+  [lptv-block-solves.md](lptv-block-solves.md) §4; none of it exists).
 - The extra dual lane costs one more `@Vector` lane in registers — on GPU
   the `AdScalar` vector width already rounds up; for most devices
   $n_u + 1$ stays within the same occupancy bucket (measure per model, as
@@ -197,23 +200,21 @@ kernel param_stamp_pass(blob, x, lambda):
   standard.
 - §1 contract analysis (S-generic physics, `AdScalar(N)` seeding,
   params-as-constants, `mc_param`, Model value-type enforcement, prep
-  rules): **verified against source** — `../VerA/tools/contract.zig`
-  (module doc RULES, `Dual`, `validateMcParam`,
-  `validateDefaultedStruct`), `src/analysis/eval/engine.zig`,
-  `src/analysis/eval/engine.zig` (seed loop `d[u] = 1`, `gath`
-  tables, `localX`, noise-collector shape).
-- §2–§4: design spec (nothing implemented); FD-fallback rung verified
-  feasible against existing `evalValues` helper in `contract.zig`.
+  rules): verified when written against VerA's contract module and the
+  evaluator. The evaluator is now `src/device/eval.zig` (`Dual`, the
+  `seed` that sets `d[u] = 1`, `evalRange`, `gath` tables, `mc_param`);
+  the VerA-side names (`validateMcParam`, `validateDefaultedStruct`,
+  `evalValues`) live in VerA and were not rechecked.
+- §2–§4: design spec (nothing implemented).
 
 **Our implementation**
 
-- Exists (ingredients): `../VerA/tools/contract.zig` (S contract,
-  `Dual`, `mc_param`, `evalValues`), `src/analysis/eval/engine.zig`
-  (`AdScalar`), `src/analysis/eval/engine.zig` (SoA layout,
-  gathers), `src/solver/direct.zig solveT`,
-  `src/solver/freq_solve.zig solveRhsT`.
+- Exists (ingredients): VerA's `contract` module (the S contract,
+  `mc_param`), `src/device/eval.zig` (`Dual(N, F)` forward AD, SoA batches,
+  gathers), `src/solver/direct.zig` `solveT`,
+  `src/solver/freq_solve.zig` `solveRhsT`.
 - Consumers: [dcmatch](../analysis/dcmatch.md) (future — hard
   requirement), [sensitivity](../analysis/sensitivity.md) adjoint + AC
   upgrade, later optimization/tuning loops.
-- Bench fixtures: `benchmark/fixtures/sens/*` (FD path is the oracle the
+- Fixtures: `tests/fixtures/sens/` (the FD path is the oracle the
   analytic stamps must match).
