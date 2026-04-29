@@ -44,8 +44,5 @@
     "finite_values_required": true,
     "all_requested_analyses_must_complete": true
   },
-  "netlist_sha256": "d14f0382332458a7fa5b1cb948c2cd6a30f598bb659124450256c682c04dd220",
-  "known_gaps": [
-    "HB does not yet drive the solve from the physical source waveforms and amplitudes"
-  ]
+  "netlist_sha256": "aff942c6af5913a83f766f6ed2c2cb66860408a2a3e736326cc09e36b60817dd"
 }
