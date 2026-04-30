@@ -26,7 +26,8 @@ Iteration hooks do not write the integration or event history managed by
 and device convergence gates pass. Existing transient commit/revert calls
 continue to own accepted-time history.
 
-Devices exposing iteration hooks are excluded from GPU residency. Mixed GPU
+Devices exposing iteration hooks are excluded from GPU residency
+(`gpuEligible` in `src/device/eval.zig`). Mixed GPU
 circuits evaluate those batches on the CPU and use the same solver lifecycle.
 This is the fallback until resident kernels implement all three hooks and their
 ordering. No GPU execution claim is made for these devices.
@@ -37,12 +38,17 @@ batch tests for per-instance voltage gathering; and the `hdl/veriloga_limit`
 numeric fixture, whose independently derived solution is 2 V. Run:
 
 ```sh
-zig build test-solvers test-eval test-iteration
+zig build test-solver test-analysis
 zig build test -- --filter hdl/veriloga_limit
 ESPICE_SOLVER=jfnk zig build test -- --filter hdl/veriloga_limit
 ```
 
-`test-iteration` compiles a Verilog-A model with limiter and reactive history.
+The solver case is "Newton lifecycle: veto, zero residual, repeated solve and
+no finite-difference history" in `src/solver/tests.zig`. The analysis case
+"generated limiter: failed trial rollback and retry match an untried circuit"
+(`src/analysis/tests/integration.zig`) compiles a Verilog-A model with limiter
+and reactive history
+(`tests/fixtures/hdl/veriloga_limit.assets/va_limit_state.va`).
 Through Circuit and both solvers it commits an initial solution, forces a
 Newton failure at a later trial, reverts, and retries at a smaller time. Its
 residual, charge and solution match a circuit that never took the failed trial.
@@ -53,4 +59,4 @@ transient driver's retry loop; those need separate integration coverage.
 These tests cover the Newton hooks. They do not establish full Verilog-AMS
 conformance, a digital event engine, arbitrary history/convolution support, or
 bit-for-bit agreement with ngspice transmission-line algorithms. The full
-compiler backlog remains in `../VerA/docs/CONFORMANCE-GAPS.md`.
+compiler backlog is VerA's `docs/CONFORMANCE.md`.

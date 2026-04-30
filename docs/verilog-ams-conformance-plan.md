@@ -3,7 +3,7 @@
 Target: Accellera Verilog-AMS 2023, including the inherited IEEE 1364 digital
 language, mixed-signal execution, and the required programming interfaces.
 Primary reference: [VAMS-2023 LRM](https://www.accellera.org/images/downloads/standards/v-ams/VAMS-LRM-2023.pdf).
-Compiler inventory: [VerA conformance gaps](../../VerA/docs/CONFORMANCE-GAPS.md).
+Compiler inventory: VerA `docs/CONFORMANCE.md`.
 This plan covers VerA and the simulator services supplied by ARPice.
 
 **Full conformance is not implemented.** This is an implementation and audit
@@ -37,34 +37,33 @@ Every package requires a build, appropriate unit and behavioral tests, and the
 relevant regression suites. Broader failures remain visible rather than being
 reclassified as successes. See Q01–Q04 for the final conformance gate.
 
-## Agent assignments and dependencies
+## Recorded status and dependencies
 
-Three implementation workers can run concurrently with the integrating agent.
-Each works from the same source snapshot in a private directory; patches are
-reviewed and combined before changes reach the shared compiler. This prevents
-concurrent edits to `lower.zig` and `codegen.zig` from overwriting one another.
+The last recorded state of the work items in progress. VerA's own
+`docs/CONFORMANCE.md` and `docs/CLAUSE-AUDIT.md` are authoritative for the
+compiler side; this table is not re-verified on every change.
 
-| Work item | Current assignment | Scope of the current patch |
-|---|---|---|
-| D01 | `ams_digital` | Frontend and packed four-state helpers integrated; initial-process source slice now preserves runtime X/Z |
-| A05 | `ams_tables` | First-call mutable-array snapshots integrated; compiler regression and direct/JFNK numeric circuit pass |
-| S01 | `ams_formatting` | Integer ASCII-string formatting implemented and reviewed. Unsupported operand widths diagnose explicitly |
-| H01 | `ams_dynamic_arrays` | Exact defaults, conditional/short-circuit derivation, logical shifts and real remainder integrated and reviewed; general context typing remains open |
-| A01 | `ams_dynamic_arrays` | Runtime multidimensional reads/writes, direction, scope and guarded reads integrated and reviewed |
-| D02 | Integrating agent and `ams_parameter_precision` | Recursive typing, integral power, casts and concatenation/replication integrated; packed read selects under implementation |
-| D04/D05 | `ams_parameter_precision` and `ams_standards_review` | Initial/always control flow and explicit `@` event control integrated; implicit sensitivity, named events and mixed-signal re-entry remain open |
-| A07 | `ams_dynamic_arrays` and `ams_standards_review` | Reference algorithms, guarded errors and host overrides integrated; paramset skipped-arm folding under implementation; fractional counts and lifecycle open |
-| Q03 | Integrating agent | Loader isolation and CPU ABI 10 integrated; Problem allocation regressions and separate-object tests pass, combined verification continues |
-| X01 | Integrating agent | Native routes and setup guards restored; prescribed ngspice-grid replay passes, five of eleven full waveform comparisons remain open |
-| Q01–Q03 | Integrating agent and `ams_dynamic_arrays` | Compiler build, 404 units and 1,323/1,323 strict fixtures pass. Host build and 297 units pass; the circuit suite is NOT a stable gate — see the completion rules |
-| D03 | `nets` worktree | Net state, independent drivers, §7.9 wired-logic resolution, `assign` and one-dimensional memories integrated; drive strengths remain open |
-| P01 | `vpi` worktree | `vpi_user.h`, the elaborated object model and eleven handle/traversal/property routines integrated; a compiled C application walks a three-deep design. P02/P03 values and callbacks remain open |
-| A06 | `noise` worktree | `noise_table`/`noise_table_log` export as `noise_tables` with linear and log-log interpolation; ARPice host spectral integration remains open |
-| D10 | `directives` worktree | `default_nettype`, `celldefine` and `unconnected_drive` now reach elaboration; timescale operands validated |
-| A08/A02 | `analog-gaps` worktree | Nodeset exports as `u_nodeset`; `$analog_node_alias`/`$analog_port_alias` perform the alias. Switch branches were already implemented |
-| Q01 | `audit` worktree | `VerA/docs/CLAUSE-AUDIT.md`: 119 inherited obligations classified, and the chapter `COVERAGE.md` files reconciled against source |
+| Work item | Recorded state |
+|---|---|
+| D01 | Frontend and packed four-state helpers integrated; initial-process source slice now preserves runtime X/Z |
+| A05 | First-call mutable-array snapshots integrated; compiler regression and direct/JFNK numeric circuit pass |
+| S01 | Integer ASCII-string formatting implemented and reviewed. Unsupported operand widths diagnose explicitly |
+| H01 | Exact defaults, conditional/short-circuit derivation, logical shifts and real remainder integrated and reviewed; general context typing remains open |
+| A01 | Runtime multidimensional reads/writes, direction, scope and guarded reads integrated and reviewed |
+| D02 | Recursive typing, integral power, casts and concatenation/replication integrated; packed read selects under implementation |
+| D04/D05 | Initial/always control flow and explicit `@` event control integrated; implicit sensitivity, named events and mixed-signal re-entry remain open |
+| A07 | Reference algorithms, guarded errors and host overrides integrated; paramset skipped-arm folding under implementation; fractional counts and lifecycle open |
+| Q03 | Loader isolation and the portable device error status (device ABI 10, now 13) integrated; separate-object allocation tests pass (`zig build test-device`) |
+| X01 | Native routes and setup guards restored; prescribed ngspice-grid replay passes; full waveform comparisons are tracked in `issues.md` |
+| Q01–Q03 | Compiler build, 404 units and 1,323/1,323 strict fixtures passed when recorded. ESPice host counts are in AGENTS.md "Verification" |
+| D03 | Net state, independent drivers, §7.9 wired-logic resolution, `assign` and one-dimensional memories integrated; drive strengths remain open |
+| P01 | `vpi_user.h`, the elaborated object model and eleven handle/traversal/property routines integrated; a compiled C application walks a three-deep design. P02/P03 values and callbacks remain open |
+| A06 | `noise_table`/`noise_table_log` export as `noise_tables` with linear and log-log interpolation; ARPice host spectral integration remains open |
+| D10 | `default_nettype`, `celldefine` and `unconnected_drive` now reach elaboration; timescale operands validated |
+| A08/A02 | Nodeset exports as `u_nodeset`; `$analog_node_alias`/`$analog_port_alias` perform the alias. Switch branches were already implemented |
+| Q01 | `VerA/docs/CLAUSE-AUDIT.md`: 119 inherited obligations classified, and the chapter `COVERAGE.md` files reconciled against source |
 
-Subsequent work is queued, not already running. The main dependencies are:
+The main dependencies are:
 
 - D01 → D02/D03 → D04/D05 → D06/D07/D08/D09.
 - D04/D05 plus analog lifecycle A09/A10 → M01/M02.
@@ -140,7 +139,7 @@ sequential blocks, whole-variable blocking/NBA assignments, integral delays,
 explicit `@` event control, if/case and
 while/repeat/for control, `%b` display and finish. CLI and unit tests distinguish inactive/NBA regions, captured RHS
 values, lexical NBA order, time advance and cancellation. Unsupported forms
-fail before execution. See [source execution scope](../../VerA/docs/digital-source-execution.md).
+fail before execution.
 
 `@(v)`, `@(posedge v)`, `@(negedge v)` and `or` lists of those terms suspend a
 process; both the active and NBA regions publish through one write path, so
@@ -173,13 +172,10 @@ The connected initial-process runner brings `test-sim` to 39 passing tests in
 Debug and ReleaseFast, plus scheduling, expression, control and concatenation
 CLI transcripts. It preserves integer timestamps,
 region promotion, NBA order, cancellation and analog request coalescing.
-The analog solver is not connected yet. The
-[scheduler notes](../../VerA/docs/simulator-scheduler.md) record the integration
-work and the conflict between §8.5.1's D2A ordering and §8.5.2's pseudocode.
-`src/sim/time.zig` validates decimal scales, preserves integral delay counts and
-rounds real delays locally before integer global scaling. The
-[time conversion notes](../../VerA/docs/digital-time.md) document real rounding,
-explicit limits and the remaining source-level integration.
+The analog solver is not connected yet. VerA's
+`docs/conformance-scheduling.md` records the scheduling work and the conflict between §8.5.1's D2A ordering and §8.5.2's pseudocode.
+VerA's `src/sim/time.zig` validates decimal scales, preserves integral delay counts and
+rounds real delays locally before integer global scaling.
 
 - Implement active, explicit D2A, inactive, nonblocking-update, analog
   macro-process, monitor, and future-event regions with the prescribed promotion
@@ -346,7 +342,7 @@ The 4096-degree/stage substitution is removed. Supported integral counts follow
 the IEEE reference listing, with independent C value/seed checks. Runtime
 validation remains observable when outputs are unused and is skipped on untaken
 paths; thirty-four generated-device scenarios cover guards, loops, host overrides and error order
-in Debug/ReleaseFast. See [remaining distribution limits](../../VerA/docs/RNG-REFERENCE-LIMITS.md).
+in Debug/ReleaseFast.
 
 - Implement legal fractional/out-of-range count semantics without substitution.
 - Validate dynamic argument domains, seed mutation and per-instance/per-analysis
@@ -525,7 +521,7 @@ Direct Newton/JFNK limiter hooks exist; this item is not a rewrite of those hook
 - Mark each obligation missing, partial, implemented-without-evidence, verified,
   optional, implementation-defined or non-normative, with a reason and reference.
 - Keep native compatibility X01 separate. Do not use fixture count as a percent.
-- The ARPice circuit suite is not reproducible run to run: one tree scored 492,
+- The ARPice circuit suite has not always been reproducible run to run: one tree scored 492,
   494 and 518 of 616 on three runs. Device code emitted for all 39 models was
   checked byte-identical outside comments across that span, so the movement is
   the suite's own and not the compiler's. The load-sensitive failure kinds

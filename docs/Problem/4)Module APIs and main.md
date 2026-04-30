@@ -26,15 +26,15 @@ These are the implemented frontend signatures, abbreviated only by omitting
 module qualifiers on common types:
 
 ```text
-prepare(io, arena, Source, Dialect) !PreparedInput
-build(session_arena, parse_arena, Ast) !Prepared
+prepare(io, *Library, arena, Source, Dialect) !Netlist
+build(*const Library, session_arena, parse_arena, Netlist) !Prepared
 resolveQueries(arena, *const Prepared, directive_text) ![]const Query
 ```
 
-`prepare` owns source loading and model preparation. `PreparedInput` holds
-expanded source, origin, and an unresolved AST in the supplied arena.
-`build` performs no I/O: it resolves those tables into a passive circuit
-and analysis requests. `resolveQueries` reuses retained name bindings without
+`prepare` owns source loading and HDL model loading into the `Library`. The
+returned `Netlist` (flat tables, subcircuits flattened) lives in the supplied
+arena. `build` performs no I/O: it resolves those tables into a passive
+circuit and analysis requests. `resolveQueries` reuses retained name bindings without
 rebuilding the circuit; it rejects topology, model, include, parameter, and
 deck-setting cards.
 
@@ -101,8 +101,9 @@ other encodings receive numbered paths after the first plot.
 
 `finish()` checks delivery state. Every current publication has already flushed
 and closed its writer, so finish neither closes the Problem nor prevents later
-append-and-run calls. `deinit()` releases the owned destination. Low-level
-writers, including `output.Stream`, remain available independently.
+append-and-run calls. `deinit()` releases the owned destination. The
+per-format encoders and `output.write`/`output.append` remain callable
+directly.
 
 A writer failure marks the output session failed to avoid replaying a possibly
 partial append. Problem retains the original delivery error and numerical
@@ -135,8 +136,9 @@ analysis-session fields. Default `print()` uses the Problem's configured limits.
 
 `--jobs=N` sets query concurrency. `--backend=cpu|auto|cuda|hip`, `--gpu`,
 `--format`, `--rawfile`, and `--tokenizer` become creation options.
-`ESPICE_THREADS` and `ESPICE_SOLVER_THREADS` supply device/solver concurrency
-policy; main translates them without importing solver types.
+The environment variables `ESPICE_THREADS` (device-evaluation lanes) and
+`ESPICE_SOLVER_THREADS` (solver threads, capped at 16) default to 1; main
+passes them as `ExecutionConfig` fields without importing solver types.
 
 `--plan` still loads and validates the source/models, but performs no numerical
 query work or output writing. `--print-dag` prints the initial frontier and then
@@ -154,14 +156,15 @@ and synchronous execution otherwise.
 Regression coverage lives in [Problem tests](../../src/tests/espice.zig),
 [numerical compatibility tests](../../src/tests/analyses.zig),
 [C ABI tests](../../src/tests/c_api.zig),
-[numerical helper tests](../../src/core/tests.zig),
+[numerical helper tests](../../src/core/numerics.zig),
 [frontend preparation tests](../../src/frontend/tests/prepared.zig), and
 [output session tests](../../src/output/session.zig). These check state/ownership
 contracts; analysis fixtures remain the evidence for numerical capability.
 
-`zig build test-problem` runs all four Problem test files, including the C tests
-compiled against `include/espice.h` and linked to the public library. `zig build
-test` includes this gate alongside the numerical fixtures. The tests exercise
+`zig build test-espice` runs the Problem tests and the C tests compiled
+against `include/espice.h` and linked to the public library
+(`zig build test-c-api` runs the C tests alone). `zig build test` includes
+both alongside the numerical fixtures. The tests exercise
 buffer ownership, transactional append failures, scheduling, output order,
 failure isolation, and analytical circuit results.
 

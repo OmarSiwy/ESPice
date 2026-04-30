@@ -1,6 +1,6 @@
 # Analysis queries
 
-A query is a resolved `requests.Query` plus execution state, identified by a
+A query is a resolved `core.query.Query` plus execution state, identified by a
 stable `QueryId`. The description contains numerical options and circuit
 indices. Mutable numerical state belongs to an analysis executor.
 
@@ -73,7 +73,6 @@ Only **complete queries** publish `Result` data through this API. Accepted
 samples remain private while a query is paused; there is no partial-result
 copy or output chunk API. A rejected transient attempt can therefore report
 progress without a result. Unconverged iterates never become valid OP products.
-The existing low-level transient recorder remains separate from Problem delivery.
 
 ## State and errors
 
@@ -115,7 +114,8 @@ when the buffer is large enough. The C ABI also exposes result dimensions and
 column-name copying. Neither append nor subsequent advancement invalidates a
 completed result.
 
-Implementation: [session](../../src/analysis/session.zig),
-[executor](../../src/analysis/executor.zig),
-[checkpoint controller](../../src/analysis/query_runtime.zig), and
-[request validation](../../src/analysis/request_validation.zig).
+Implementation: [session](../../src/analysis/session.zig) (graph,
+publication, `schemaOf`), [executor](../../src/analysis/executor.zig)
+(dispatch and per-query state), [worker](../../src/analysis/worker.zig) (the
+checkpoint controller), [progress](../../src/analysis/progress.zig), and
+[request validation](../../src/analysis/validate.zig).
