@@ -35,12 +35,22 @@ and its results can be driven from another language.
 git clone https://github.com/OmarSiwy/ESPice
 cd ESPice
 nix develop     # Zig 0.16 and the GPU toolchain
-zig build       # the app, and device kernels for the detected arch
+zig build       # zig-out/bin/espice, plus device kernels for the detected GPU arch
 ```
 
 [VerA](https://github.com/OmarSiwy/VerA) and
 [Gompute](https://github.com/OmarSiwy/Gompute) are pinned git dependencies in
 `build.zig.zon`, so a fresh clone builds on its own. Nothing else is required.
+
+Build options (`zig build --help` lists them all):
+
+| Option | Default | Effect |
+|---|---|---|
+| `-Doptimize=` | `ReleaseFast` | Zig optimize mode |
+| `-Dgpu=false` | `true` | skip the CUDA/HIP device kernels; a CPU-only build is much faster to compile |
+| `-Dcuda-arch=` | `auto` | CUDA arch (`sm_75`, ...), `auto` probes the build machine, `none` omits CUDA |
+| `-Dhip-arch=` | `gfx1100` | HIP arch, `none` omits HIP |
+| `-Ddebug-info` | `false` | DWARF in release builds, for profiling (about 3x the LLVM time) |
 
 ## Usage
 
@@ -59,6 +69,15 @@ Usage: espice [OPTION]... FILE...
   -v, --version               Version
 ```
 
+Each file becomes one `Problem`; a one-line summary per result goes to
+stderr. The exit code is 1 if any file fails and 2 on a usage error.
+`zig build run -- FILE.sp` builds and runs in one step.
+
+Two environment variables control threading, both default 1:
+`ESPICE_THREADS` splits device evaluation across worker threads, and
+`ESPICE_SOLVER_THREADS` (at most 16) schedules the bordered-block-diagonal
+factor.
+
 ## Analyses
 
 | Domain | Analyses |
@@ -75,15 +94,17 @@ Usage: espice [OPTION]... FILE...
 |---|---|
 | MOSFET | BSIM1, BSIM2, BSIM3, BSIM4, BSIM-SOI, HiSIM2, HiSIM-HV, MOS levels 1/2/3/6/9, VDMOS |
 | Bipolar | BJT, VBIC 1.3 4T, HICUM/L2 |
-| Other FETs | JFET, JFET2, MESFET, HFET1, HFET2 |
+| Other FETs | JFET, JFET2, MESFET, MESA, HFET1, HFET2 |
 | Passives | resistor, capacitor, inductor, coupled inductor, diode |
 | Sources | independent V and I, VCVS, VCCS, CCVS, CCCS, behavioural B-source |
 | Switches | voltage- and current-controlled |
 | Transmission lines | `tline`, `lossy_tline`, `coupled_tlines`, and native LTRA, TXL and coupled-LTRA |
 
-Transmission lines are the one place native Zig beats the Verilog-A route: the
-`.va` versions dropped convolution kernels and fell back to a two-conductor
-modal approximation, so the native models stay.
+Transmission lines are the one place native Zig still beats the Verilog-A
+route. The O, Y and P cards (LTRA, TXL, CPL) run native Zig devices, because
+`lossy_tline.va` and `coupled_tlines.va` approximate them. Full Verilog-A
+transcriptions sit in `models/native/` and wait on VerA features; see
+[docs/vera-gaps.md](docs/vera-gaps.md).
 
 ## Formats
 
@@ -142,14 +163,13 @@ is not even like-for-like. `vacask_ring` produces nothing at all.
 
 That table is a differential comparison against two simulators, not a
 conformance score, and it covers only decks all three engines can express.
-Separately, `zig build test` has scored 492, 494 and 518 out of 616 on one
-unchanged tree while the emitted device code stayed byte-identical. That
-instability is in the host suite rather than the benchmark, and until it is
-fixed no pass rate is quoted as a release number. A model appearing in a
-dispatch table does not establish complete SPICE conformance; `docs/` carries
-per-area status labels, and
-[preparation-performance.md](docs/Problem/preparation-performance.md) has the
-one instruction-level before/after measured so far.
+Separately, `zig build test` scores every deck against its own checked-in
+oracle: 560 of 616 pass at the time of writing, and `issues.md` indexes the
+56 failures by cause. That count is a snapshot of work in progress, not a
+release number. A model appearing in a dispatch table does not establish
+complete SPICE conformance; `docs/` carries per-area status labels, and the
+measured before/after numbers for each optimization sit on the topical pages
+(for example [solver-perf-2026-09.md](docs/solvers/solver-perf-2026-09.md)).
 
 ## Project structure
 
@@ -165,7 +185,7 @@ one instruction-level before/after measured so far.
 │   ├── c_api.zig     # The C ABI behind include/espice.h
 │   └── main.zig      # CLI
 ├── models/           # Verilog-A device sources, compiled at build time
-├── tests/            # 616 fixtures, the cross-module suites and the bench runner
+├── tests/            # 616 fixture decks, pending decks, the correctness harness, the bench runner
 ├── docs/             # Design notes and measured evidence
 └── ref/              # SIMD strategy reference
 ```
@@ -173,10 +193,35 @@ one instruction-level before/after measured so far.
 `frontend` and `analysis` are siblings; neither imports the other. `espice`
 composes both plus `output`, and `main` sees only `espice`.
 
-`zig build test` runs every suite, and `zig build --help` lists the per-area
-steps. To co-develop VerA or Gompute, point its entry in `build.zig.zon` back at
-a local `.path` and restore the pin before pushing; a pinned build resolves to
+To co-develop VerA or Gompute, point its entry in `build.zig.zon` back at a
+local `.path` and restore the pin before pushing; a pinned build resolves to
 the package cache and will not see your sibling checkout.
+
+## Tests
+
+`zig build test` runs every unit suite and then the numeric fixture corpus
+(`tests/test_correctness.zig`, which runs `zig-out/bin/espice` on each deck
+and scores it against its `.expected.json`). The step exits nonzero while any
+deck fails; `issues.md` indexes the failing decks and their causes, and a
+deck whose feature is missing says so in a `* KNOWN GAP:` comment.
+
+Per-area steps, each part of `zig build test`:
+
+| Step | Covers |
+|---|---|
+| `test-core` | shared data and numerics |
+| `test-solver` | sparse, dense and frequency-lane LU, ordering, Newton/JFNK |
+| `test-device` | device catalog, evaluator, ABI and cross-object error codes |
+| `test-frontend` | netlist parsing, builder, prepared circuits |
+| `test-analysis` | every analysis driver |
+| `test-output` | waveform writers |
+| `test-native-lines` | native transmission-line oracles |
+| `test-espice` | the Problem facade, the analysis contract and the C ABI (`test-c-api` alone) |
+
+Outside `zig build test`: `zig build test-benchmark` tests the reference
+adapters, `zig build bench-frontend` times netlist parsing, and
+`zig build vera -- FILE.va` runs the bundled VerA compiler. Decks that are
+written but not yet in the corpus wait in `tests/pending/`.
 
 ## Why the name
 
