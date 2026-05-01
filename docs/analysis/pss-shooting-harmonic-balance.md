@@ -1,7 +1,7 @@
 # Periodic Steady State: Shooting Newton + Harmonic Balance
 
-Krylov matrix-free shooting (SpectreRF core) and the harmonic balance
-formulation.
+Shooting Newton (dense finite-difference or matrix-free Krylov) and harmonic
+balance.
 
 ## 1. Mathematical specification
 
@@ -23,7 +23,7 @@ $$
 
 ### Shooting Newton
 
-Define the **state transition function** $\phi_T(v_0, t_0)$ — the solution
+Define the **state transition function** $\phi_T(v_0, t_0)$: the solution
 at $t_0 + T$ of the initial value problem started at $v_0$ (rf-sim eq. 35):
 
 $$
@@ -53,12 +53,12 @@ $$
 M \;=\; \prod_{s=S-1}^{0} \big(G_{s+1} + \alpha\, C_{s+1}\big)^{-1} \beta\, C_s ,
 $$
 
-($\alpha,\beta$ the integration coefficients — for BE,
+($\alpha,\beta$ the integration coefficients: for BE,
 $\alpha = \beta = 1/h_s$), i.e. one extra back-substitution per timestep per
 initial-condition direction, using the *already factored* companion matrices
 of the inner transient.
 
-**Matrix-free Krylov shooting** *(Telichevesky/Kundert/White DAC'95 —
+**Matrix-free Krylov shooting** *(Telichevesky/Kundert/White DAC'95 -
 paywalled; derivation marked derived, concept verified against rf-sim.pdf)*:
 never form $M$. Solve $ (M - I)\,\Delta v_0 = -\Phi $ with GMRES; each
 Krylov application $M \cdot w$ is one pass of the recurrence
@@ -67,13 +67,21 @@ $$
 w_{s+1} = \big(G_{s+1} + \alpha C_{s+1}\big)^{-1} \beta\, C_s\, w_s,
 $$
 
-which costs $S$ back-substitutions on saved factorizations — no new
+which costs $S$ back-substitutions on saved factorizations: no new
 factorizations, no $n \times n$ dense storage. GMRES converges in few
 iterations because $M$'s spectrum clusters near 0 for stable circuits (fast
 modes decay within a period), so $M - I$ has clustered eigenvalues near
 $-1$. This is the SpectreRF PSS core; cost per shooting-Newton iteration is
 $O(S \cdot \text{nnz})$ instead of $O(S \cdot n \cdot \text{nnz})$ for the
 dense/FD Jacobian.
+
+**Implementation status.** The Krylov path is implemented with a
+finite-difference matvec instead of the saved-factor recurrence above:
+$M w \approx (\phi_T(v_0 + \epsilon w) - \phi_T(v_0))/\epsilon$, one full
+period integration per GMRES iteration, unpreconditioned. It runs from 50
+unknowns up; below that the dense FD Jacobian is cheaper. The saved-factor
+recurrence and subspace recycling remain targets (see
+[monodromy-krylov.md](../solvers/monodromy-krylov.md)).
 
 Convergence test: $\|\Phi(v_0)\|_\infty < \texttt{shooting\_tol}$, with the
 inner transient's Newton solves governed by the usual tolerance bundle.
@@ -85,7 +93,7 @@ closes the system (rf-sim §4.1.5).
 ### Harmonic balance
 
 Assume $v(t)$, $u(t)$ T-periodic and expand the DAE in a Fourier series
-(rf-sim eqs. 23–24):
+(rf-sim eqs. 23-24):
 
 $$
 \sum_{k=-\infty}^{\infty} F_k(V)\, e^{j2\pi k f t} = 0,
@@ -129,29 +137,59 @@ sharp edges).
 **Shooting** (`src/analysis/pss/pss.zig`): start $v_0$ from the DC
 operating point. Each shooting iteration integrates one period with
 fixed-step trapezoidal ($n_{\text{samples}}$ steps, every buffer size known
-up front — one scratch arena, zero growth), computes
-$\Phi = x(T) - x_0$, tests $\|\Phi\|_\infty$, then builds $J_\Phi$
-**column-by-column via finite differences over the flow map** (one full
-period integration per column — this stays FD by construction; the analytic
-planes give the Jacobian of $F$, not of the period map) and takes a dense-LU
-Newton step. A failed inner integration inside a perturbed column falls back
-to an identity column rather than aborting. After convergence one final
-period is integrated to record the waveform. The FD/dense Jacobian is the
-current implementation's scaling ceiling ($n{+}1$ period integrations per
-shooting iteration, $O(n^2)$ storage); the Krylov matrix-free path in §1 is
-the designed upgrade (RESEARCH.md checklist item 3).
+up front, one scratch arena), computes $\Phi = x(T) - x_0$ and tests
+$\|\Phi\|_\infty$. The Newton step depends on size:
+
+- below 50 unknowns, $J_\Phi$ is built column by column by finite
+  differences over the flow map (one period integration per column; the
+  analytic planes give the Jacobian of $F$, not of the period map) and solved
+  by dense LU. A failed inner integration in a perturbed column becomes an
+  identity column instead of aborting;
+- from 50 unknowns up, $(M - I)\,\Delta v_0 = -\Phi$ is solved by
+  matrix-free GMRES with the FD matvec of §1. A failed integration inside a
+  matvec returns a zero column.
+
+After convergence one final period is integrated to record the waveform.
+
+**Period seam.** Each period starts with the trapezoid dynamic current
+seeded as $i_{\text{prev}} = -f(x_0)$ (the static residual at $x_0$) on rows
+with a nonzero diagonal $C$ entry, and 0 elsewhere. A converged trapezoid
+step always leaves $i_{\text{prev}} = -f(x_{\text{new}})$, so this is the
+periodic trapezoid state carried across the seam; since it is a function of
+$x_0$ it sits inside the FD shooting Jacobian and Newton stays quadratic.
+The mask matters: unmasked, algebraic rows at a perturbed $x_0$ ring as
+$\pm f(x_0)$ undamped and make the Jacobian near singular. Rows whose charge
+has no diagonal $C$ entry get 0 (a `ponytail:` comment in `pss.zig` names
+this ceiling). Zeroing $i_{\text{prev}}$ at every period start, as the code
+once did, loses $dt\,i_0/2$ of charge per period: a steady mean offset of
+$-(i_0 R)/(2N)$ on the RC decks, which matched the measured offsets to three
+digits. The seed fixed `pss/rc_default` (3.91x to 0.03x of tolerance),
+`rc_minimal_grid`, `rc_negative_amplitude`, `rc_slow_settling`,
+`bench_pss_rlc_driven` (20.8x to 0.10x) and `diode_clipper` (issues.md F10,
+commit `6ccb2a7`). Rejected alternatives: backward Euler for the first step of
+each period (fails `rc_minimal_grid` at 3.17x and `rc_slow_settling` at
+1003x), and carrying $i_{\text{prev}}(T)$ from the previous base integration
+(a Picard update contracting at $e^{-T/\tau}$ per iteration, about 0.999 on
+`rc_slow_settling`).
 
 **HB** (`src/analysis/pss/hb.zig`): real trigonometric basis
 $[\,dc, \cos_1, \sin_1, \dots, \cos_K, \sin_K\,]$, $2K{+}1$ time samples per
 period. Per Newton iteration: IDFT $\hat V \to$ samples; one `ckt.eval` per
-sample fills the residual **and** the analytic $G$ plane (sample 0 also
-captures the $C$ plane, a DC-sample approximation of $C(t)$); cosine source
-excitation added in time domain; DFT residuals to $\hat F$; charge terms
-$j\omega_h C \hat V_h$ added spectrally; dense HB Jacobian assembled from
-the harmonic content of $G(t)$ (DC + first-order cos/sin cross-blocks kept;
-higher-order intermodulation blocks truncated) plus the $\pm\omega_h C$
-skew blocks; dense LU, full Newton update. Non-convergence surfaces as a
-warning with the residual (the spectra are still extracted).
+sample fills the residual, the analytic $G$ plane and $q(t_k)$; cosine source
+excitation added in the time domain; DFT residuals to $\hat F$. The charge
+term is the DFT of $q(t_k)$ differentiated spectrally, exact for nonlinear
+charge (commit `c0023c8`; QPSS does the same). The dense HB Jacobian is
+assembled from the harmonic content of $G(t)$ (DC and first-order cos/sin
+cross-blocks kept, higher-order intermodulation blocks truncated) plus the
+$\pm\omega_h C$ skew blocks, where $C$ is sampled at $t_0$ only. That makes
+Newton quasi-Newton for nonlinear charge; the residual is exact, so the
+fixed point is right. Dense LU, full Newton update. Non-convergence surfaces
+as a warning with the residual (the spectra are still extracted). The
+per-sample $G$ values are stored slot-major over the nnz pattern (samples
+contiguous per slot), not as dense per-sample matrices: `hb/diode_clipper`
+219.1M to 210.1M Ir (-4.1%), and a diode clipper with a 40-stage RC ladder
+at `.hb 1k 8` 19.28G to 18.42G Ir with peak RSS 12.8 to 11.2 MB (commit
+`47e9b03`).
 
 Knobs: `period`/`f0`, `n_samples` (shooting time resolution),
 `n_harmonics`, `shooting_tol`/`hb_tol`, `fd_epsilon`, inner Newton budget
@@ -172,81 +210,51 @@ pss_shooting(ckt, x_dc, T, S=n_samples):
         solve dense (J) dx0 = -phi;  x0 += dx0
     record final period from x0
 
-# matrix-free Krylov upgrade (target, not yet implemented):
+# n >= 50: matrix-free Krylov (implemented with an FD matvec)
 pss_krylov(ckt, x_dc, T):
     for iter in ...:
-        integrate one period, SAVING each step's factored (G + alpha*C) and C_s
-        phi = x(T) - x0; if converged: break
+        phi = integrate_one_period(x0) - x0; if converged: break
         GMRES solve (M - I) dx0 = -phi where
-            M*w: w_{s+1} = solve_saved(s+1, beta*C_s*w_s)  for s = 0..S-1
+            (M - I)*w = ((integrate_one_period(x0 + eps*w) - (x0 + eps*w)) - phi)/eps
         x0 += dx0
+# target: replace the FD matvec with the saved-factor recurrence
+#   w_{s+1} = solve_saved(s+1, beta*C_s*w_s)  for s = 0..S-1
 
 hb(ckt, f0, K):
     X = 0                                        # [dc,cos,sin]*K per node
     for iter in 0..max_iter:
         x_td = IDFT(X)                           # 2K+1 samples per node
-        for each sample k: eval(x_td[:,k])       # fills F and analytic G
+        for each sample k: eval(x_td[:,k])       # fills F, analytic G, q(t_k)
                             (k==0: capture C)
         f_td += source excitation
-        F = DFT(f_td) + spectral charge terms (w_h C X_h)
+        F = DFT(f_td) + spectral derivative of DFT(q_td)
         if max|F| < hb_tol: return X
         J = spectral(G(t)) blocks + (+-w_h C) skew blocks
         solve dense J dX = -F;  X += dX
 ```
 
-## 4. Pseudo-code, GPU parallel
+## 4. Parallel execution
 
-**Shooting.** The inner time march is sequential (see transient doc), but
-PSS adds two wide parallel axes on top:
+Today everything runs on the host: the shooting and HB Newton loops, the
+dense LUs and GMRES. Device evaluation inside each inner Newton iterate can
+use `ParEval` threads or the GPU plane hook (`Circuit.gpu_hook.eval_planes`).
 
-- **Shooting sensitivities / multiple RHS**: the FD Jacobian's $n$ columns
-  are independent period integrations from perturbed initial states — ideal
-  batch parallelism (each column is one lane/launch). In the Krylov
-  version, the per-step propagation $w_{s+1} = A_{s+1}^{-1}\beta C_s w_s$
-  applies to *all* Krylov vectors (and, for pnoise later, all adjoint
-  vectors) as a blocked multiple-RHS triangular solve.
-- **Within each timestep**: batched SoA device eval + JFNK exactly as in
-  the transient megakernel; the shooting outer loop is host-side.
+Not implemented (design notes):
 
-```
-host pss_gpu:
-    for shooting iter:                          # sequential
-        launch tran_chunk(s) for the period     # sequential march on-device
-        phi readback (n floats)
-        # Jacobian: batch the n (or m Krylov) perturbed integrations
-        launch batched_period_integrations(X0 + eps*E)   # lanes = columns
-        (or: GMRES where M*w is replayed back-substitutions on stored
-         per-step factors — sequential in s, parallel over n per step,
-         parallel over Krylov block width)
-        dense/least-squares solve on host (n small) or cuSolver
-```
+- **Shooting.** The FD Jacobian's $n$ columns are independent period
+  integrations from perturbed initial states, one lane each. With the
+  saved-factor recurrence, the per-step propagation
+  $w_{s+1} = A_{s+1}^{-1}\beta C_s w_s$ applies to a whole block of Krylov (or,
+  for pnoise, adjoint) vectors as one multiple-RHS triangular solve.
+- **HB.** The $2K{+}1$ sample evaluations are independent (a `ponytail:`
+  comment in `hb.zig` marks where to batch them); DFT/IDFT are batched GEMMs
+  or FFTs; the Jacobian solve becomes matrix-free GMRES with the
+  block-Toeplitz operator applied as FFT, diag($G(t)$), IFFT per Krylov
+  vector and a block-diagonal $(G_0 + j\omega_h C)$ preconditioner per
+  harmonic.
 
-**HB.** Frequency-domain structure is the GPU-friendly one:
-
-- device evaluation parallelizes over **samples × instances** (the $2K{+}1$
-  sample evals are independent — batch them as one big SoA eval with a
-  sample index axis);
-- DFT/IDFT are batched GEMMs (or FFTs for large $K$);
-- the HB Jacobian solve parallelizes as a block system — matrix-free
-  GMRES with the block-Toeplitz operator applied via
-  FFT · diag(G(t)) · IFFT per Krylov vector, block-diagonal
-  $(G_0 + j\omega_h C)$ preconditioner per harmonic (standard Krylov-HB;
-  fits the repo's JFNK/GMRES kernel pattern directly).
-
-```
-kernel hb_gpu(iteration):
-    parallel IDFT: X -> x_td            # batched GEMM, nodes x samples
-    parallel eval: for (sample, batch, instance) grid-stride:
-        stamp f_td[:, sample], G_td[:, sample]      # SoA, atomics per sample
-    parallel DFT: f_td -> F_hat; add spectral charge terms
-    GMRES on J_hb * dX = -F_hat:
-        J*v = DFT( G(t) .* IDFT(v) ) + Omega*C*v    # matrix-free, all parallel
-        precond: per-harmonic block solves           # independent -> parallel
-    thread0/host: convergence check
-```
-
-Sequential remains: the outer Newton iterations (both methods) and the time
-march inside shooting.
+The outer Newton iterations (both methods) and the time march inside
+shooting stay sequential.
 
 ## Solvers used
 
@@ -254,8 +262,8 @@ march inside shooting.
 |---|---|---|
 | Inner fixed-step trap Newton (per timestep of every period integration) | [klu-pipeline.md](../solvers/klu-pipeline.md), [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `src/solver/direct.zig` via `converger.run` + `PeriodHook` |
 | Shooting Jacobian solve (dense $J_\Phi$) | none (dense path) | `src/solver/dense_lu.zig factorizeSolveNeg` |
-| Krylov-shooting upgrade: monodromy products via sensitivity replay on saved per-step factors, GMRES on $(\Phi-I)$, subspace recycling | [monodromy-krylov.md](../solvers/monodromy-krylov.md) — full spec | target — reuses `converger.jfnk` GMRES core + `direct.zig solve/solveT` |
-| HB spectral Jacobian solve (dense) | none (dense path); Krylov-HB upgrade = matrix-free block-Toeplitz apply per [lptv-block-solves.md](../solvers/lptv-block-solves.md) + block-circulant preconditioner per [structured-preconditioners.md](../solvers/structured-preconditioners.md) | `dense_lu.zig`; `src/solver/fft.zig` for the operator apply |
+| Krylov shooting from 50 unknowns up: GMRES on $(\Phi-I)$ with an FD matvec | [monodromy-krylov.md](../solvers/monodromy-krylov.md) | `src/solver/gmres.zig`; saved-factor replay and recycling are targets |
+| HB spectral Jacobian solve (dense) | none (dense path); a Krylov-HB upgrade would use the block-Toeplitz apply of [lptv-block-solves.md](../solvers/lptv-block-solves.md) and a preconditioner from [structured-preconditioners.md](../solvers/structured-preconditioners.md) (neither implemented) | `dense_lu.zig` |
 | Upstream OP for the initial orbit guess | [homotopy-continuation.md](../solvers/homotopy-continuation.md) | `dc/op.zig` |
 
 ---
@@ -264,25 +272,23 @@ march inside shooting.
 
 | Source | Status |
 |---|---|
-| Kundert, *Introduction to RF Simulation and its Application*, designers-guide.org/analysis/rf-sim.pdf | **fetched, verified** — eqs. 22–24 (HB), 34–36 (shooting), autonomous variants, method trade-offs |
-| Telichevesky/Kundert/White DAC'95 (matrix-free Krylov shooting) | **paywalled — derived, not source-verified**; concept and motivation verified against rf-sim.pdf §4.1.4 ("Krylov subspace methods have been applied to accelerate both harmonic balance and the shooting methods") |
-| Xyce Math Formulation | fetched — this revision has no HB section (noted by fetch) |
+| Kundert, *Introduction to RF Simulation and its Application*, designers-guide.org/analysis/rf-sim.pdf | **fetched, verified**: eqs. 22-24 (HB), 34-36 (shooting), autonomous variants, method trade-offs |
+| Telichevesky/Kundert/White DAC'95 (matrix-free Krylov shooting) | **paywalled: derived, not source-verified**; concept and motivation verified against rf-sim.pdf §4.1.4 ("Krylov subspace methods have been applied to accelerate both harmonic balance and the shooting methods") |
+| Xyce Math Formulation | fetched: this revision has no HB section (noted by fetch) |
 
 **Per-section verification**
 
 - §1 BVP/shooting/HB formulations: verified against rf-sim.pdf.
 - §1 monodromy chain + Krylov spectrum argument: derived, not
   source-verified (standard; matches DAC'95 abstract-level description).
-- §2/§3 implementation flow: direct transcription of repo source (including
-  the FD-Jacobian ceiling and the DC-sample $C$ approximation in HB —
-  honest deltas vs the ideal spec).
-- §4: repo kernel patterns extrapolated; GPU PSS/HB not yet implemented.
+- §2/§3 implementation flow: transcribed from `pss.zig` and `hb.zig`
+  (including the FD matvec and the $C(t_0)$ Jacobian in HB).
+- §4: design notes; GPU PSS/HB is not implemented.
 
 **Our implementation**
 
-- `src/analysis/pss/pss.zig` — shooting Newton (FD dense Jacobian).
-- `src/analysis/pss/hb.zig` — harmonic balance (dense spectral
-  Jacobian).
-- `src/analysis/pss/pac.zig` — periodic AC on the PSS orbit.
-- Bench fixtures: `benchmark/fixtures/pss/{diode_rect_driven,rc_driven,rlc_driven}`,
-  `benchmark/fixtures/hb/{diode_clipper,rc_single_tone,tline_guard}`.
+- `src/analysis/pss/pss.zig`: shooting Newton (dense FD Jacobian or
+  FD-matvec GMRES).
+- `src/analysis/pss/hb.zig`: harmonic balance (dense spectral Jacobian).
+- `src/analysis/pss/pac.zig`: periodic AC on the PSS orbit.
+- Fixtures: `tests/fixtures/pss/`, `tests/fixtures/hb/`.

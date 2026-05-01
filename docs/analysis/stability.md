@@ -1,6 +1,7 @@
 # Loop-Gain Stability (STB)
 
-Middlebrook and Tian loop-gain probes; return ratio, gain/phase margins.
+Middlebrook and Tian loop-gain probes; return ratio, gain/phase margins
+(theory; the analysis publishes $T(f)$ only).
 
 ## 1. Mathematical specification
 
@@ -32,7 +33,7 @@ $$
 T = \frac{T_v^n\, T_i^n}{T_v^n + T_i^n}
 $$
 
-— exact for a **unilateral** loop regardless of the impedances either side
+- exact for a **unilateral** loop regardless of the impedances either side
 of the injection point (a single voltage injection alone requires
 $|Y_f| \ll |Y_e|$; the double injection cancels the break-point loading).
 
@@ -42,7 +43,7 @@ $|Y_f| \ll |Y_e|$; the double injection cancels the break-point loading).
 Middlebrook's combination still assumes forward-only signal flow through
 the injection point. Tian et al. account for **bidirectional** transmission
 (feedback signal flowing both ways through the break), deriving the loop
-gain from two standard AC analyses at the same probe element — this is
+gain from two standard AC analyses at the same probe element: this is
 Spectre's `.stb`. In simulator form: insert a 0 V source (or replicate the
 probe element), run two small-signal solves (voltage-drive and
 current-drive configurations), and combine the four measured responses so
@@ -58,7 +59,7 @@ source across the same node pair. Return ratio, ngspice's orientation:
 $T(\omega) = -V(+)/V(-)$, with `+` the side where the signal arrives.
 
 This is exact where the probe point is a good voltage-transfer break
-(low source impedance driving high load impedance — output of an op-amp /
+(low source impedance driving high load impedance: output of an op-amp /
 controlled source, the usual `.stb` probe discipline) and inherits the
 single-injection caveat otherwise. Tian's two-analysis combination is the
 documented upgrade (it costs exactly one more solve per frequency on the
@@ -89,7 +90,7 @@ stb(ckt, x_op, probe_p, probe_n, probe_branch):
         T(f) = -x[probe_p] / x[probe_n]        # complex, stacked-real x
 ```
 
-## 4. Pseudo-code, GPU parallel
+## 4. Parallel design notes (not implemented)
 
 Identical shape to AC: frequency points are independent lanes; the Tian
 upgrade adds a second RHS per lane (multiple-RHS on one factorization).
@@ -113,8 +114,8 @@ kernel stb(lanes = freq points):
 
 | Source | Status |
 |---|---|
-| Tian, Visvanathan, Hantgan, Kundert, "Striving for small-signal stability", IEEE Circuits & Devices 17(1) 2001 (kenkundert.com/docs/cd2001-01.pdf) | **fetched, verified** — return ratio definition, Middlebrook null double injection, $T = T_v^n T_i^n/(T_v^n + T_i^n)$, margin definitions |
-| Middlebrook 1975 original | **paywalled — covered via the fetched Tian review** |
+| Tian, Visvanathan, Hantgan, Kundert, "Striving for small-signal stability", IEEE Circuits & Devices 17(1) 2001 (kenkundert.com/docs/cd2001-01.pdf) | **fetched, verified**: return ratio definition, Middlebrook null double injection, $T = T_v^n T_i^n/(T_v^n + T_i^n)$, margin definitions |
+| Middlebrook 1975 original | **paywalled: covered via the fetched Tian review** |
 
 **Per-section verification**
 
@@ -123,10 +124,11 @@ kernel stb(lanes = freq points):
   described at review level (full four-response algebra not transcribed).
 - §1 our single-injection probe + its validity condition: verified against
   `stb.zig` source; honestly flagged as not-yet-Tian.
-- §2/§3: direct transcription (incl. unwrapped GM scan). §4: prospective.
+- §2/§3: transcribed from `stb.zig`. §4: design notes.
 
 **Our implementation**
 
-- `src/analysis/ac/stb.zig` — probe, sweep, margins (+ unit tests
-  for one/two/three-pole margin behavior).
-- Bench fixtures: `benchmark/fixtures/stb/*`.
+- `src/analysis/ac/stb.zig`: probe and sweep through `freq.Stream`,
+  publishing (`frequency`, `loop_gain`). Margin extraction was deleted
+  (commit `9761a98`) because nothing in the raw output carries it.
+- Fixtures: `tests/fixtures/stb/`.

@@ -1,58 +1,57 @@
-# Analysis Documentation
+# Analysis documentation
 
-Per-analysis specs: mathematical formulation, flow, CPU pseudo-code, GPU
-pseudo-code, plus a **Solvers used** section cross-referencing
-[docs/solvers/](../solvers/README.md). Every file ends with fetched
-sources, per-section verification status, and pointers to our
-implementation + bench fixtures.
+One page per analysis: the mathematical formulation, the flow through
+`src/analysis/`, CPU pseudo-code, parallel design notes, and a
+**Solvers used** section that maps each phase onto
+[docs/solvers/](../solvers/README.md). Every page ends with its sources,
+per-section verification status, and pointers to the implementation and
+fixtures under `tests/fixtures/`.
 
-## Index — core analyses
+Every solve runs on the host. The GPU evaluates device planes only
+(`Circuit.gpu_hook.eval_planes`, `src/analysis/gpu.zig`); §4 of each page
+separates what runs in parallel today (device evaluation on `ParEval`
+threads or the GPU, SIMD frequency lanes) from design notes that are not
+implemented.
 
-| Doc | Covers | Impl status |
+## Core analyses
+
+| Doc | Covers | Status |
 |---|---|---|
-| [operating-point-homotopy.md](operating-point-homotopy.md) | Newton + device limiting, dynamic gmin stepping, source stepping, PTC, JFNK rung | implemented (PTC: documented, not implemented) |
-| [dc-sweep.md](dc-sweep.md) | Swept-source continuation, warm start, nested sweeps, ladder fallback | implemented |
-| [transient-integration.md](transient-integration.md) | BE/trap/Gear-2, TR-BDF2, LTE step control (`CKTterr`), breakpoints, charge conservation | implemented (TR-BDF2: documented, not implemented) |
-| [tolerance-system.md](tolerance-system.md) | reltol/abstol/vntol/chgtol semantics, errpreset-style bundles (`Tolerances` profiles) | implemented |
-| [ac-small-signal-noise.md](ac-small-signal-noise.md) | AC sweep (stacked-real), adjoint noise analysis | implemented |
-| [tf.md](tf.md) | DC transfer function: gain, Rin, Rout via forward + adjoint solve | implemented |
-| [sensitivity.md](sensitivity.md) | DC/AC sensitivity: direct vs adjoint vs FD; our FD choice | implemented (DC FD; adjoint + AC: documented targets) |
-| [pole-zero.md](pole-zero.md) | Pencil $(G,C)$ eigenproblem, $-G^{-1}C$ reduction, Hessenberg + Francis QR | implemented (poles; zeros/QZ: documented) |
-| [s-parameters.md](s-parameters.md) | Port formulation, z0 Thevenin terminations, wave extraction | implemented |
-| [stability.md](stability.md) | Return ratio, Middlebrook/Tian probes, gain/phase margins | implemented (single-injection probe; Tian double-injection: documented target) |
-| [distortion.md](distortion.md) | Volterra small-signal disto, FD-of-analytic-Jacobian kernel, HD2 | implemented (HD2; HD3/IM: documented) |
-| [fourier-thd.md](fourier-thd.md) | .FOUR harmonic extraction: final-period resample, FFT, THD | implemented |
-| [ensemble-sweeps.md](ensemble-sweeps.md) | Monte Carlo / corners / temperature: lane batching, seed policy, statistics | implemented |
-| [transient-noise.md](transient-noise.md) | Time-domain noise synthesis ($\sigma = \sqrt{4kTg/2h}$), BE rationale, `.noise` correlation | implemented (thermal; flicker: documented gap) |
-| [pss-shooting-harmonic-balance.md](pss-shooting-harmonic-balance.md) | Shooting-Newton PSS, matrix-free Krylov shooting, harmonic balance | implemented (FD-Jacobian shooting + dense HB; Krylov shooting: documented target) |
-| [periodic-noise.md](periodic-noise.md) | LPTV small-signal, sideband folding, cyclostationary noise, adjoint pnoise | implemented (frozen-time LPTV approximation; full LPTV/adjoint: documented target) |
+| [operating-point-homotopy.md](operating-point-homotopy.md) | Newton with device limiting; plain, gmin, source, JFNK and OPtran rungs; PTC theory | implemented (SER-controlled PTC: not implemented) |
+| [dc-sweep.md](dc-sweep.md) | Swept-source continuation, warm start, nested sweeps, ladder fallback, ngspice axis accumulation | implemented |
+| [transient-integration.md](transient-integration.md) | BE/trap/Gear-2, TR-BDF2, per-state LTE (`CKTterr`), dctran.c step control, breakpoints | implemented (TR-BDF2: not implemented) |
+| [tolerance-system.md](tolerance-system.md) | reltol/abstol/vntol/chgtol semantics, the residual gate and its ngspice divergence, errpreset theory | implemented (named bundles: not implemented) |
+| [ac-small-signal-noise.md](ac-small-signal-noise.md) | AC sweep (stacked-real, SIMD frequency lanes), adjoint noise | implemented |
+| [tf.md](tf.md) | DC transfer function: gain, Rin, Rout via forward and adjoint solve | implemented |
+| [sensitivity.md](sensitivity.md) | DC/AC sensitivity: direct, adjoint and FD | implemented (DC adjoint with FD stamps; AC: not implemented) |
+| [pole-zero.md](pole-zero.md) | Pencil $(G,C)$ eigenproblem, Hessenberg + Francis QR, column-swap zeros | implemented (QZ: not implemented) |
+| [s-parameters.md](s-parameters.md) | Port formulation, z0 terminations, wave extraction | implemented |
+| [stability.md](stability.md) | Return ratio, Middlebrook/Tian probes, margins | implemented (single-injection probe, $T(f)$ only; Tian and margins: not implemented) |
+| [distortion.md](distortion.md) | Volterra small-signal distortion, FD-of-analytic-Jacobian kernels | implemented (HD2, HD3; two-tone IM: not implemented) |
+| [fourier-thd.md](fourier-thd.md) | `.four` harmonic extraction: final-period resample, FFT, THD | implemented |
+| [ensemble-sweeps.md](ensemble-sweeps.md) | Monte Carlo and temperature sweeps on structural lanes, seed policy | implemented |
+| [transient-noise.md](transient-noise.md) | Time-domain noise synthesis ($\sigma = \sqrt{S/2h}$), BE rationale | implemented (white part only) |
+| [pss-shooting-harmonic-balance.md](pss-shooting-harmonic-balance.md) | Shooting Newton (dense FD or FD-matvec GMRES), harmonic balance | implemented (saved-factor Krylov shooting: not implemented) |
+| [periodic-noise.md](periodic-noise.md) | LPTV small-signal, sideband folding, cyclostationary sources | implemented (frozen-time approximation; true LPTV: not implemented) |
 | [pac.md](pac.md) | Periodic AC: harmonic conversion matrix over the PSS orbit | implemented (settling PSS front end) |
-| [mpde-envelope.md](mpde-envelope.md) | MPDE multirate formulation, Fourier-envelope, sample-envelope following | partial (sample-envelope variant, quasi-static inner; MPDE/Fourier-envelope: documented target) |
-| [matex-exponential-integrators.md](matex-exponential-integrators.md) | Exponential integrators, Krylov e^{Ah}v, I-/R-MATEX | implemented (explicit linear R-MATEX; I-MATEX/nonlinear/GPU paths remain targets) |
-| [pxf.md](pxf.md) | Periodic transfer function (adjoint PAC) | implemented (dense adjoint conversion matrix; matrix-free/time-domain/GPU extensions remain targets) |
-| [qpss.md](qpss.md) | Quasi-periodic steady state (QP-HB, MFT shooting) | implemented (two-tone QP-HB with GMRES; MFT/full multidimensional preconditioning remain targets) |
-| [dcmatch.md](dcmatch.md) | Pelgrom mismatch offset via adjoint sensitivity | implemented (finite-difference stamps; analytic stamps/AC mismatch remain targets) |
+| [pxf.md](pxf.md) | Periodic transfer function (adjoint PAC) | implemented (dense adjoint) |
+| [qpss.md](qpss.md) | Quasi-periodic steady state (QP-HB, MFT shooting) | implemented (two-tone QP-HB, unpreconditioned GMRES; MFT: not implemented) |
+| [mpde-envelope.md](mpde-envelope.md) | MPDE, Fourier-envelope, sample-envelope following | partial (sample envelope with trapezoid inner steps) |
+| [matex-exponential-integrators.md](matex-exponential-integrators.md) | Exponential integrators, Krylov $e^{Ah}v$, I-/R-MATEX | implemented (explicit linear R-MATEX) |
+| [dcmatch.md](dcmatch.md) | Pelgrom mismatch offset via adjoint sensitivity | implemented (FD stamps) |
 
-## Beat-Spectre checklist mapping (RESEARCH.md §2)
+## Engine pages
 
-| # | Checklist item | Doc(s) |
-|---|---|---|
-| 1 | TR-BDF2 / strict LTE control + errpreset-style tolerance bundles | [transient-integration.md](transient-integration.md), [tolerance-system.md](tolerance-system.md) |
-| 2 | Robust OP homotopy chain: gmin → source → pseudo-transient | [operating-point-homotopy.md](operating-point-homotopy.md) |
-| 3 | Krylov-shooting PSS + pnoise (SpectreRF core) | [pss-shooting-harmonic-balance.md](pss-shooting-harmonic-balance.md), [periodic-noise.md](periodic-noise.md), [pac.md](pac.md), [pxf.md](pxf.md) |
-| 4 | Multirate/envelope for RF (MPDE) | [mpde-envelope.md](mpde-envelope.md), [qpss.md](qpss.md) |
-| 5 | Parallel/GPU transient (megakernel angle) | §4 of [transient-integration.md](transient-integration.md) + §4 of every doc; kernel spec in `src/analysis/eval/engine.zig` |
-| — | Past-Spectre: matrix-exponential integrators | [matex-exponential-integrators.md](matex-exponential-integrators.md) |
-| — | AC + adjoint noise (baseline capability) | [ac-small-signal-noise.md](ac-small-signal-noise.md) |
-| — | Spectre-suite parity: sp/stb/pz/tf/sens/disto/four/MC/dcmatch | [s-parameters.md](s-parameters.md), [stability.md](stability.md), [pole-zero.md](pole-zero.md), [tf.md](tf.md), [sensitivity.md](sensitivity.md), [distortion.md](distortion.md), [fourier-thd.md](fourier-thd.md), [ensemble-sweeps.md](ensemble-sweeps.md), [dcmatch.md](dcmatch.md) |
+| Doc | Covers |
+|---|---|
+| [refactoring.md](refactoring.md) | Module ownership, plane evaluation, ParEval, GPU plane hook, decisions kept on purpose, retired paths |
+| [evaluation-profile.md](evaluation-profile.md) | Where a transient run's instructions go; kept and dropped host-pass kernel changes with measurements |
 
 ## Shared machinery
 
-Nonlinear analyses use `src/solver/converger.zig`
-(one `Tolerances` bundle, one acceptance kernel, direct-Newton + JFNK
-strategies) and, on GPU, the cooperative megakernel in
-`src/analysis/eval/engine.zig` (batched SoA device eval, on-device
-GMRES, CPU-identical acceptance gates). Linear-solver theory lives in
-[docs/solvers/](../solvers/README.md); each analysis doc's **Solvers
-used** section maps its phases onto those docs and
-`src/solver/*`.
+Nonlinear analyses converge through `src/solver/converger.zig`: one
+`Tolerances` struct (`src/core/numerics.zig`), one set of acceptance gates,
+and two strategies (direct Newton by default, JFNK under
+`ESPICE_SOLVER=jfnk` and as rung 4 of the OP ladder). Frequency-domain
+analyses share `ac/freq.zig Stream` over `FreqSolver.solveBatch`. Linear
+solver theory lives in [docs/solvers/](../solvers/README.md).

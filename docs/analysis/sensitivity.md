@@ -1,7 +1,7 @@
 # Sensitivity Analysis (DC + AC)
 
-Direct vs adjoint methods; our brute-force implementation and its upgrade
-path.
+Direct, adjoint and finite-difference methods; the implementation is adjoint
+with finite-difference stamp derivatives.
 
 ## 1. Mathematical specification
 
@@ -17,13 +17,13 @@ $$
 
 Three evaluation strategies, all computing the same quantity:
 
-**Direct (forward) method** — one linear solve per parameter on the
+**Direct (forward) method**: one linear solve per parameter on the
 already-factored $J$:
 $J\,s_j = -\partial F/\partial p_j$, then $\partial y/\partial p_j = c^{\mathsf T} s_j$.
 Cost: 1 factorization + $m$ back-substitutions. Right choice when many
 outputs, few parameters.
 
-**Adjoint method** — one *transposed* solve total:
+**Adjoint method**: one *transposed* solve total:
 
 $$
 J^{\mathsf T} \lambda = c
@@ -32,12 +32,12 @@ J^{\mathsf T} \lambda = c
 $$
 
 each parameter then costs one sparse dot against its stamp derivative
-(a handful of entries — a resistor's $\partial F/\partial G$ touches 4).
+(a handful of entries: a resistor's $\partial F/\partial G$ touches 4).
 Cost: 1 factorization + 1 back-substitution + $m$ dots. Right choice for
-the SPICE .SENS shape (one output, *all* parameters) — this is Director &
+the SPICE .SENS shape (one output, *all* parameters): this is Director &
 Rohrer's adjoint-network method.
 
-**Finite-difference (perturbation)** — re-solve the nonlinear system at
+**Finite-difference (perturbation)**: re-solve the nonlinear system at
 $p_j + \delta_j$ and difference the outputs:
 
 $$
@@ -59,83 +59,93 @@ system $A(\omega) = G + j\omega C$ per frequency point:
 $\partial X/\partial p_j = -A^{-1}(\partial A/\partial p_j) X$, adjoint form
 $A^{\mathsf H}\lambda = c$ then
 $\partial X_{\text{out}}/\partial p_j = -\lambda^{\mathsf H}(\partial A/\partial p_j)X$
-— one extra transposed solve per frequency on the AC sweep's existing
+- one extra transposed solve per frequency on the AC sweep's existing
 factorization (the same `solveRhsT` the noise analysis already uses).
 
-**Our implementation choice:** finite-difference (matches ngspice), one
-f32-aware refinement — the FD is taken against the step the f32 parameter
-*actually* took after rounding, not the requested $\delta$, eliminating a
-systematic quantization error. Adjoint is the documented upgrade when $m$
-grows (it drops $m$ Newton solves to $m$ dots).
+**Our implementation choice:** the adjoint method with a finite-difference
+stamp derivative. One factorization of $J$ at the operating point and one
+transposed solve give $\lambda$; each parameter then costs one re-evaluation
+of $F(x_{op})$ with that parameter nudged, and
+$\partial y/\partial p_j \approx -\lambda^{\mathsf T}(F(x_{op}; p_j + \delta_j) - F(x_{op}; p_j))/\delta_j$.
+That replaces the $m$ Newton solves of full finite differencing with $m$
+residual evaluations and dots, and needs no analytic
+$\partial F/\partial p$ stamps. Two refinements: the difference is taken
+against the step the parameter actually stored (an f32 parameter rounds
+$\delta$, and the requested $\delta$ would give a wrong derivative, not a
+small one), and a zero stored step is an error (`error.ZeroDelta`).
+ngspice's `.sens` uses per-device analytic sensitivities (`cktsens.c`);
+analytic stamps are the upgrade
+([parameter-derivative-stamps.md](../solvers/parameter-derivative-stamps.md)).
 
 ## 2. Flow explanation
 
 `src/analysis/sweep/sens.zig`:
 
-1. Collect all device parameters (`collectParams` → raw f32 pointers with
-   device/param names). Nominal solve at ITL2 → $y_0$.
-   `computeBaseline()` is deliberately **not** called: the baseline would
-   freeze const-Jacobian stamps (resistors) and mask the very perturbations
-   being measured.
-2. Per parameter: write $p_j + \delta_j$, `recompute()`, read back the
-   *actual* delta after f32 rounding, cold-start Newton re-solve, FD the
-   output node, restore the parameter (defer-guaranteed even on error).
-3. One `Workspace` serves nominal + every perturbed solve (frozen
-   pattern). A perturbed solve that fails to converge errors the analysis
-   (a silent zero would be a wrong answer, not a missing one).
+1. Linearize at the executor's operating point `ctx.x_op`, the result of the
+   full OP ladder. An earlier version ran its own cold Newton here, which
+   fails on circuits that need stepping (commit `ff3e91f`; no deck bytes
+   changed). `computeBaseline()` is deliberately not called: the baseline
+   would freeze the const-Jacobian stamps (resistors) and mask the very
+   perturbations being measured.
+2. `evalNewton(x_op)`, keep the nominal residual, factor $J$, and solve
+   $J^{\mathsf T}\lambda = e_{\text{out}}$ (for `v(a,b)` the seed is
+   $e_a - e_b$).
+3. Per parameter from `collectParams`: write $p_j + \delta_j$ with
+   $\delta_j = 10^{-6}|p_j| + 10^{-12}$, re-derive only that device type
+   (`recomputeType`), read back the stored step, re-evaluate $F(x_{op})$, and
+   take the fused dot. The parameter is restored on every exit path. A
+   parameter whose nominal value collapses an internal node (for example
+   Gummel-Poon RC/RE = 0, MOS1 RD/RS = 0) is re-wired by the $10^{-12}$
+   floor, the batch reports `TopologyChanged`, and the derivative is reported
+   as 0: the perturbed circuit has a node the frozen pattern lacks. ngspice
+   never perturbs a topology parameter.
+4. Columns carry ngspice's names (`cktsens.c:224-238`): `<card>:<param>` for
+   a model parameter, `<card>` for the principal instance parameter,
+   `<card>_<param>` for any other instance parameter.
 
-Knobs: `output_node` (default: last probe), the tolerance bundle (ITL2 per
-solve). $\delta$ is fixed at $10^{-6}|p| + 10^{-12}$ (relative with an
-absolute floor).
+Per-parameter re-derivation through `recomputeType` instead of a full
+`recompute` (commit `148361f`) took `multi_analysis/bench_sens_diffpair`
+(4 BJTs) from 80.61M to 42.51M Ir (-47.3%) and `sens/bench_sens_bridge` from
+1.930M to 1.896M. Resistor-only decks (`sens/divider`,
+`sens/high_impedance`, `dcmatch/divider_0_1000`,
+`dcmatch/high_resistance`) got 0.8% to 2.4% slower (15k to 36k Ir), because
+the type-name match costs more than recomputing a resistor.
+
+Knobs: `output_node` (default: the last probe), `output_neg`. $\delta$ is
+fixed at $10^{-6}|p| + 10^{-12}$ (relative with an absolute floor).
 
 ## 3. Pseudo-code, CPU sequential
 
 ```
-sens(ckt, params, out, tol):
-    ws = workspace(ckt)                     # one symbolic factorization
-    x0 = newton_cold(ckt, ws, itl2); y0 = x0[out]
-    for p in params:
-        delta_req = 1e-6*|p| + 1e-12
-        p.set(p.nominal + delta_req); ckt.recompute()
-        delta = f64(p.value) - p.nominal    # what the f32 actually took
-        x = newton_cold(ckt, ws, itl2)      # fail -> analysis error
-        S[p] = (x[out] - y0)/delta
-        p.restore()
-    ckt.recompute()
-
-# adjoint upgrade (documented, not implemented):
-sens_adjoint(ckt, params, out):
-    solve nominal; keep factored J
+sens(ckt, x_op, params, out):
+    ws = workspace(ckt)
+    F0 = evalNewton(x_op); factor(J)
     lambda = solveT(J, e_out)               # ONE transposed solve
-    for p in params: S[p] = -dot(lambda, dF_dp_stamp(p))   # ~4 flops each
+    for p in params:
+        p.set(p.nominal + 1e-6*|p| + 1e-12); recomputeType(p.type)
+        if TopologyChanged: S[p] = 0; restore; continue
+        delta = p.value - p.nominal         # what the parameter actually stored
+        F = evalNewton(x_op)
+        S[p] = -dot(lambda, (F - F0)/delta)
+        p.restore(); recomputeType(p.type)
 ```
 
-## 4. Pseudo-code, GPU parallel
+## 4. Parallel execution
 
-The FD method is embarrassingly parallel over parameters — each perturbed
-solve is an independent Newton problem on the same pattern:
-
-```
-host: build L = m perturbed blob instances (one param each nudged)
-kernel lanes 0..m: cold newton/jfnk per lane (megakernel batching)
-host:  S[j] = (y_j - y_0)/delta_j
-```
-
-The adjoint method is the *cheaper* GPU story: one transposed solve
-(or transposed-GMRES with the batched-eval $J^{\mathsf T} v$ apply), then a
-grid-stride pass computing all $m$ dots at once — parameters map to
-instances, so the dot pass is exactly one batched SoA sweep over the device
-batches accumulating $\lambda_p - \lambda_n$ terms. AC sensitivity batches
-over frequency points on top (independent lanes, as in
-[ac-small-signal-noise.md](ac-small-signal-noise.md) §4).
+Everything runs on the host. The per-parameter loop is embarrassingly
+parallel (each iteration is one residual evaluation and a dot), but it
+mutates the shared circuit's parameters, so parallelizing it would need
+per-lane parameter copies. Not implemented. AC sensitivity would batch over
+frequency points on top, as in
+[ac-small-signal-noise.md](ac-small-signal-noise.md) §4.
 
 ## Solvers used
 
 | Phase | Solver doc | Impl |
 |---|---|---|
-| Nominal + perturbed Newton solves (refactor on frozen pattern) | [klu-pipeline.md](../solvers/klu-pipeline.md), [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `src/solver/direct.zig` via `converger.run` |
-| Workspace/pattern reuse across all solves | [circuit-matrix-specifics.md](../solvers/circuit-matrix-specifics.md) | `ckt.workspace()` |
-| Adjoint upgrade (transposed solve on existing factors) | [klu-pipeline.md](../solvers/klu-pipeline.md) (solve with $L^{\mathsf T}U^{\mathsf T}$ order swapped) | `direct.zig` solveT / `freq_solve.zig` `solveRhsT` (AC case) |
+| One factorization of $J$ at the OP | [klu-pipeline.md](../solvers/klu-pipeline.md) | `ws.slv.factor` (`src/solver/direct.zig`) |
+| Adjoint (transposed solve on the same factors) | [klu-pipeline.md](../solvers/klu-pipeline.md) (solve with $L^{\mathsf T}U^{\mathsf T}$ order swapped) | `direct.Solver.solveT`; `freq_solve` adjoint `solveBatch` for the AC case (not implemented) |
+| Analytic $\partial F/\partial p$ stamps (upgrade) | [parameter-derivative-stamps.md](../solvers/parameter-derivative-stamps.md) | not implemented |
 
 ---
 
@@ -143,19 +153,18 @@ over frequency points on top (independent lanes, as in
 
 | Source | Status |
 |---|---|
-| ngspice manual §1.2.6/§11.3.7 (.SENS) | **fetched, verified** — perturbation method, zero-param skipping, second-order caveat |
-| Director & Rohrer adjoint sensitivity | **paywalled — derived, not source-verified** (standard result) |
+| ngspice manual §1.2.6/§11.3.7 (.SENS) | fetched, verified: perturbation method, zero-param skipping, second-order caveat |
+| Director & Rohrer adjoint sensitivity | paywalled; derived, not source-verified (standard result) |
 
 **Per-section verification**
 
-- §1 three methods + cost model: direct/adjoint derived (textbook);
-  FD verified against ngspice manual + our source (incl. the
-  actual-f32-delta refinement, which is ours).
-- §2/§3: direct transcription of `sens.zig`. AC sensitivity: not
-  implemented, math given for the upgrade.
-- §4: prospective.
+- §1 three methods and cost model: direct/adjoint derived (textbook); FD
+  verified against the ngspice manual.
+- §2/§3: transcribed from `sens.zig`. AC sensitivity: not implemented, math
+  given for the upgrade.
+- §4: design note.
 
 **Our implementation**
 
-- `src/analysis/sweep/sens.zig` — brute-force DC sensitivity.
-- Bench fixtures: `benchmark/fixtures/sens/*`.
+- `src/analysis/sweep/sens.zig`: adjoint DC sensitivity with FD stamps.
+- Fixtures: `tests/fixtures/sens/`, `tests/fixtures/multi_analysis/bench_sens_diffpair`.

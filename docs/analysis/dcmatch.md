@@ -10,7 +10,7 @@ AC mismatch remain extensions.
 ## 1. Mathematical specification
 
 Device-to-device *mismatch* (local variation, uncorrelated between
-instances — unlike the correlated process variation Monte-Carlo corners
+instances: unlike the correlated process variation Monte-Carlo corners
 model) perturbs each device $d$'s parameters by zero-mean random
 $\delta p_d$ with variance from the Pelgrom model:
 
@@ -34,18 +34,18 @@ $J^{\mathsf T}\lambda = e_{\text{out}}$ at the operating point, then each
 device's contribution is a sparse dot
 $\partial y/\partial p_d = -\lambda^{\mathsf T} (\partial F/\partial p_d)$.
 Output: total $\sigma(y)$ plus the ranked per-device contribution table
-(the design-actionable part — "which pair to upsize"). Equivalent
+(the design-actionable part: "which pair to upsize"). Equivalent
 Monte-Carlo (per-instance draws + $N$ re-solves) costs $O(N)$ solves and
 converges as $1/\sqrt N$; dcmatch is exact-to-first-order at the cost of
-**one** adjoint solve — the entire point of the analysis.
+**one** adjoint solve: the entire point of the analysis.
 
-Validity limit: first-order in $\delta p$ — breaks for comparators biased
+Validity limit: first-order in $\delta p$: breaks for comparators biased
 at metastability or any $y$ with vanishing gradient; Spectre documents the
 same caveat.
 
 ## 2. Flow
 
-1. OP solve; keep the factored $J$.
+1. Linearize at the executor's operating point `ctx.x_op`; factor $J$.
 2. Adjoint solve $J^{\mathsf T}\lambda = e_{\text{out}}$ on the existing
    factors.
 3. Per matched device: mismatch $\sigma(\delta p)$ from model cards
@@ -53,8 +53,15 @@ same caveat.
    $\lambda$, accumulate variance; sort contributions.
 4. Report $3\sigma$ offset + contribution table.
 
+`src/analysis/dc/dcmatch.zig` computes $\partial F/\partial p_d$ as a forward
+difference of $F(x_{op})$, re-deriving only the perturbed device's type
+(`recomputeType`, as in [sensitivity.md](sensitivity.md) §2, with the same
+measured cost on resistor-only decks). Its dot uses a per-block `@reduce`
+summation order that differs from `sens.zig`'s, so the two must not share
+the kernel without accepting a rounding change.
+
 An analytic-stamp upgrade needs per-model $\partial F/\partial p$ stamp
-derivatives for the mismatch parameters (VT0, beta/KP, R) — the
+derivatives for the mismatch parameters (VT0, beta/KP, R): the
 [parameter-derivative-stamps](../solvers/parameter-derivative-stamps.md)
 hook, shared with the adjoint-sensitivity upgrade.
 
@@ -64,20 +71,20 @@ in-device noise convention (model sources are in
 ($A_{VT}, A_\beta$, area terms) live on the device model card next to its
 noise PSDs, the device geometry ($W, L$) that sets $\sigma(\delta p)$ is
 instance data, and the analysis only consumes the per-device
-$(\sigma^2(\delta p_d),\ \partial F/\partial p_d)$ pairs — it never owns a
+$(\sigma^2(\delta p_d),\ \partial F/\partial p_d)$ pairs: it never owns a
 mismatch table of its own.
 
 ## Solvers used and extensions
 
 | Phase | Solver doc | Impl |
 |---|---|---|
-| Adjoint solve $J^{\mathsf T}\lambda = e_{\text{out}}$ on the OP factors | [klu-pipeline.md](../solvers/klu-pipeline.md) | `direct.zig solveT` (**exists**); one back-substitution total |
+| Adjoint solve $J^{\mathsf T}\lambda = e_{\text{out}}$ on the OP factors | [klu-pipeline.md](../solvers/klu-pipeline.md) | `direct.Solver.solveT`; one back-substitution total |
 | Per-device $\partial F/\partial p$ stamps + adjoint dot accumulation | [parameter-derivative-stamps.md](../solvers/parameter-derivative-stamps.md) | finite differences implemented; analytic `evalp` hook remains a target |
-| AC-swept variant (offset vs frequency) | frequency lanes as in [ac-small-signal-noise.md](ac-small-signal-noise.md) §4, complex adjoint via `freq_solve.solveRhsT` (exists) | requirement |
+| AC-swept variant (offset vs frequency) | frequency lanes as in [ac-small-signal-noise.md](ac-small-signal-noise.md) §4, complex adjoint via `freq_solve` | not implemented |
 
 ---
 
-**Sources fetched**: none free found for Spectre dcmatch specifics —
+**Sources fetched**: none free found for Spectre dcmatch specifics -
 **derived, not source-verified** (Pelgrom's paper is paywalled; the
 $A/\sqrt{WL}$ law and adjoint formulation are standard). **Implementation
 status:** adjoint DC mismatch with finite-difference stamps; analytic

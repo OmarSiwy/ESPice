@@ -66,7 +66,7 @@ etc.); the analysis outputs $S$ directly.
    the circuit planes.
 2. `FreqSolver.initDense` over the modified pair (stacked-real
    $2n \times 2n$; the dense path here since terminations densify the
-   branch rows anyway and port counts are small — the sparse pipeline
+   branch rows anyway and port counts are small: the sparse pipeline
    remains the path for large $n$ via `fromCircuit`, see the solver note
    below).
 3. Sweep (log or linear, `n_points`): per frequency set $\omega$, then per
@@ -97,14 +97,14 @@ sp_sweep(ckt, x_op, ports):
                 S[k][p](f) = b_k / a_p
 ```
 
-## 4. Pseudo-code, GPU parallel
+## 4. Parallel design notes (not implemented)
 
 Same shape as AC ([ac-small-signal-noise.md](ac-small-signal-noise.md) §4)
 with one extra inner axis:
 
-- **frequency points** — independent lanes (shared symbolic, per-lane
+- **frequency points**: independent lanes (shared symbolic, per-lane
   values);
-- **driven ports** — the $P$ RHS per frequency are a multiple-RHS block
+- **driven ports**: the $P$ RHS per frequency are a multiple-RHS block
   solve on one factorization (blocked triangular solves; $P$ is small so
   this rides along free);
 - wave extraction is a trivial per-lane epilogue.
@@ -124,7 +124,7 @@ kernel sp(lanes = freq points):
 | Dense factorization per point | none (dense path) | `src/solver/dense_lu.zig` |
 | Upstream OP | [homotopy-continuation.md](../solvers/homotopy-continuation.md) | `dc/op.zig` |
 
-Note: the termination stamp densifies only port branch diagonals — a
+Note: the termination stamp densifies only port branch diagonals: a
 sparse-path variant would stamp $-z_0$ into the CSC copy and keep the KLU
 pipeline; documented upgrade for many-node DUTs.
 
@@ -135,7 +135,7 @@ pipeline; documented upgrade for many-node DUTs.
 | Source | Status |
 |---|---|
 | Kundert rf-sim.pdf | fetched (background; no S-param formulation section) |
-| Power-wave definition (Kurokawa 1965) | **paywalled — derived, not source-verified** (standard definition) |
+| Power-wave definition (Kurokawa 1965) | **paywalled: derived, not source-verified** (standard definition) |
 | designers-guide S-param paper | none found on the fetched analysis index |
 
 **Per-section verification**
@@ -143,9 +143,9 @@ pipeline; documented upgrade for many-node DUTs.
 - §1 Thevenin termination stamp, $a$/$b$ extraction incl. the
   $I = -i_{br}$ sign and $a_p = 1/(2\sqrt{z_0})$: verified against
   `sp.zig` source.
-- §2/§3: direct transcription. §4: prospective.
+- §2/§3: direct transcription. §4: design notes.
 
 **Our implementation**
 
 - `src/analysis/ac/sp.zig`.
-- Bench fixtures: `benchmark/fixtures/sp/*`.
+- Fixtures: `tests/fixtures/sp/`.
