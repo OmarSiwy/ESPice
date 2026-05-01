@@ -749,7 +749,7 @@ pub const NetBuilder = struct {
                 // the unknown either way; the I-mode one stays unprobed rather
                 // than published as a column ngspice never writes.
                 if (try addBsource(self, dev))
-                    try self.addBranchProbe(dev.name, internalRow(devices.bsource, "flowZ28pZ2cnZ29", first));
+                    try self.addBranchProbe(dev.name, internalRow(devices.bsource, "br", first));
             },
             'p' => try self.addCpl(dev),
             'o' => try self.addLossyLine(dev),
@@ -1341,57 +1341,179 @@ fn addSingleDevice(self: *NetBuilder, comptime D: type, dev: Device) !void {
     try b.addDevice(D, model, instance, try deviceNodes(self, D, dev));
 }
 
-/// B card as a polynomial source. Returns true for a voltage-mode B, the
-/// only kind with a branch current worth probing (ngspice asrcset.c:81-88).
+/// B card as an expression tape (models/native/bsource.zig). Returns true for
+/// a voltage-mode B, the only kind with a branch current worth probing
+/// (ngspice asrcset.c:81-88).
 fn addBsource(self: *NetBuilder, dev: Device) !bool {
-    if (comptime !@hasDecl(devices.bsource, "eval")) return error.UnsupportedDevice;
-    var model: devices.bsource.Model = .{};
-    var instance: devices.bsource.Instance = .{};
+    const B = devices.bsource;
+    if (comptime !@hasDecl(B, "eval")) return error.UnsupportedDevice;
+    var model: B.Model = .{};
+    var instance: B.Instance = .{};
     if (dev.model) |m| try applyKv(&model, m.kv);
     try applyKv(&model, dev.kv);
     try applyKv(&instance, dev.kv);
 
-    var ctrl_probe: ?Probe = null;
-    const modes = std.StaticStringMap(u1).initComptime(.{ .{ "v", 0 }, .{ "i", 1 } });
+    // Output rows before control rows, so node numbering follows the card.
+    var nodes: [B.num_ports]u32 = @splat(GROUND);
+    for (dev.pins[0..@min(dev.pins.len, 2)], 0..) |pin, k| nodes[k] = try self.rowOf(pin);
+    const modes = std.StaticStringMap(bool).initComptime(.{ .{ "v", false }, .{ "i", true } });
     for (dev.kv) |item| {
         model.imode = modes.get(item.key) orelse continue;
         switch (item.value) {
-            .num => |value| model.c0 = try castField(@TypeOf(model.c0), value),
+            .num => |value| {
+                model.op_code[0] = .num;
+                model.op_a[0] = 0;
+                model.consts[0] = value;
+                model.n_ops = 1;
+            },
             .expr => |span| {
                 const ops = self.nl.exprOps(span);
-                ctrl_probe = extractVoltageProbe(ops);
-                // An expression outside the subset must fail loudly, not
-                // become all-zero coefficients (a silent open circuit).
-                if (!extractPolyCoeffs(ops, self.nl.consts, &model)) {
-                    // The test runner fails any test that logs an error.
-                    if (!@import("builtin").is_test) std.log.err("B-source '{s}': the {s}= expression is outside the supported subset (a polynomial of degree <= 3 in one V(p[,n]) pair, integer powers via ^, ** or pow(), times at most one tanh(k*V) factor)", .{ dev.name, item.key });
-                    return error.UnsupportedBsourceExpression;
-                }
+                compileTape(self, ops, &model, &nodes) catch |err| switch (err) {
+                    error.OutOfMemory => return err,
+                    else => {
+                        // The test runner fails any test that logs an error.
+                        if (!@import("builtin").is_test) std.log.err("B-source '{s}': the {s}= expression is not supported ({s}); the limits are no i() or unknown names, known functions only, {d} probed nets, {d} ops, {d} constants", .{ dev.name, item.key, @errorName(err), tape.max_probes, tape.max_ops, tape.max_consts });
+                        return error.UnsupportedBsourceExpression;
+                    },
+                };
+                hornerTape(ops, self.nl.consts, &model);
             },
             else => return error.UnresolvedParameter,
         }
     }
-
-    const nodes = [4]u32{
-        if (dev.pins.len > 0) try self.rowOf(dev.pins[0]) else GROUND,
-        if (dev.pins.len > 1) try self.rowOf(dev.pins[1]) else GROUND,
-        if (ctrl_probe) |pr| try self.rowOf(.from(pr.p)) else GROUND,
-        if (ctrl_probe) |pr| (if (pr.n != netlist.none) try self.rowOf(.from(pr.n)) else GROUND) else GROUND,
-    };
-    try self.b.addDevice(devices.bsource, model, instance, nodes);
-    return model.imode == 0;
+    try self.b.addDevice(B, model, instance, nodes);
+    return !model.imode;
 }
 
-/// A V(p) or differential V(p,n) probe, as nets; `n` is `netlist.none` when
-/// single-ended. The polynomial model reads one pair per source.
-const Probe = struct { p: u32, n: u32 };
+/// The bsource tape's opcode and capacities, read off its Model.
+const tape = struct {
+    const M = devices.bsource.Model;
+    const Code = std.meta.Elem(@FieldType(M, "op_code"));
+    const max_ops = @typeInfo(@FieldType(M, "op_code")).array.len;
+    const max_consts = @typeInfo(@FieldType(M, "consts")).array.len;
+    const max_probes = devices.bsource.num_ports - 2;
+};
 
-/// The first V() probe in `ops`.
-fn extractVoltageProbe(ops: []const Op) ?Probe {
-    // Leaves keep their left-to-right order in postfix, so the first probe op
-    // is the first probe a pre-order walk meets.
-    for (ops) |op| if (op.code == .vprobe and op.a != netlist.none) return .{ .p = op.a, .n = op.b };
-    return null;
+/// Translates a postfix card expression into the bsource tape, giving each
+/// distinct probed net a control port in `nodes`. Fails on anything the tape
+/// cannot express or hold.
+fn compileTape(self: *NetBuilder, ops: []const Op, model: *devices.bsource.Model, nodes: []u32) !void {
+    var nets: [tape.max_probes]u32 = undefined;
+    var n_nets: usize = 0;
+    var n_consts: usize = 0;
+    var n: usize = 0;
+    for (ops) |op| {
+        if (n == tape.max_ops) return error.TooManyOps;
+        const code: tape.Code = switch (op.code) {
+            .num => blk: {
+                if (n_consts == tape.max_consts) return error.TooManyConstants;
+                model.consts[n_consts] = self.nl.consts[op.a];
+                model.op_a[n] = @intCast(n_consts);
+                n_consts += 1;
+                break :blk .num;
+            },
+            .vprobe => blk: {
+                if (op.a == netlist.none) return error.EmptyProbe;
+                var port: [2]u8 = .{ 0, 0 };
+                for ([2]u32{ op.a, op.b }, &port) |net, *slot| {
+                    if (net == netlist.none) break;
+                    const k = std.mem.indexOfScalar(u32, nets[0..n_nets], net) orelse k: {
+                        if (n_nets == tape.max_probes) return error.TooManyProbes;
+                        nets[n_nets] = net;
+                        nodes[2 + n_nets] = try self.rowOf(.from(net));
+                        n_nets += 1;
+                        break :k n_nets - 1;
+                    };
+                    slot.* = @intCast(k);
+                }
+                model.op_a[n] = port[0];
+                model.op_b[n] = port[1];
+                break :blk if (op.b == netlist.none) .v else .vd;
+            },
+            .call => try callCode(@enumFromInt(op.a), op.b),
+            .ident, .iprobe => return error.UnsupportedOperand,
+            inline else => |c| @field(tape.Code, @tagName(c)),
+        };
+        model.op_code[n] = code;
+        // A constant exponent folds into the power op: that constant is the
+        // previous op and the last pool entry (`powc` keeps its index).
+        if (code == .pow and model.op_code[n - 1] == .num) {
+            const e = model.consts[n_consts - 1];
+            n -= 1;
+            if (e >= 0 and e <= 255 and e == @round(e)) {
+                n_consts -= 1;
+                model.op_code[n] = .powi;
+                model.op_a[n] = @intFromFloat(e);
+            } else model.op_code[n] = .powc;
+        }
+        n += 1;
+    }
+    model.n_ops = @intCast(n);
+}
+
+/// The tape op for a call of `f` with `argc` arguments.
+fn callCode(f: netlist.expr.Fn, argc: u32) !tape.Code {
+    const want: u32 = switch (f) {
+        .min, .max, .pow => 2,
+        .ternary => 3,
+        else => 1,
+    };
+    if (argc != want) return error.WrongArity;
+    return switch (f) {
+        .ternary => .sel,
+        .ln, .log => .ln,
+        .agauss, .other => error.UnsupportedFunction,
+        inline else => |g| @field(tape.Code, @tagName(g)),
+    };
+}
+
+/// Rewrites the tape of an expression that is a cubic in its one V() pair,
+/// times at most one tanh(k·V) factor, into the Horner form
+/// (c0 + v·(c1 + v·(c2 + v·c3)))·tanh(th·v). Other tapes are left alone.
+// ponytail: this exists only to keep the rounding of the polynomial device the
+// tape replaced, so the polynomial and MESFET-load decks stay byte-identical.
+// The direct tape moves dc/device_mesa_inverter by roundoff (0.9722x of its
+// tolerance either way); delete this and the helpers below it once that is
+// accepted.
+fn hornerTape(ops: []const Op, consts: []const f64, model: *devices.bsource.Model) void {
+    var probe: ?Op = null;
+    for (ops) |op| if (op.code == .vprobe) {
+        const first = probe orelse {
+            probe = op;
+            continue;
+        };
+        if (op.a != first.a or op.b != first.b) return;
+    };
+    if (probe == null) return;
+    const c = poly(ops, consts, ops.len - 1) orelse return;
+    // poly() read the tanh as the constant 1, so it must be a factor of the
+    // whole expression, exactly once, with a linear argument.
+    var th: f64 = 0;
+    var n_tanh: u32 = 0;
+    for (ops) |op| n_tanh += @intFromBool(isCall(op, .tanh));
+    if (n_tanh > 1) return;
+    if (n_tanh == 1) {
+        const arg = tanhFactorArg(ops, ops.len - 1) orelse return;
+        if ((vDegree(ops, arg) orelse return) != 1) return;
+        th = numericCoeff(ops, consts, arg);
+    }
+
+    // `.v` stands for the probe op; the constants are read in pool order.
+    const horner = [_]tape.Code{ .v, .v, .v, .num, .mul, .num, .add, .mul, .num, .add, .mul, .num, .add, .v, .num, .mul, .tanh, .mul };
+    const len: usize = if (th != 0) horner.len else 13;
+    const k = std.mem.indexOfAny(tape.Code, model.op_code[0..model.n_ops], &.{ .v, .vd }).?;
+    const p_code, const p_a, const p_b = .{ model.op_code[k], model.op_a[k], model.op_b[k] };
+    var n_consts: u8 = 0;
+    for (horner[0..len], 0..) |code, i| {
+        model.op_code[i], model.op_a[i], model.op_b[i] = switch (code) {
+            .v => .{ p_code, p_a, p_b },
+            .num => .{ code, n_consts, 0 },
+            else => .{ code, 0, 0 },
+        };
+        n_consts += @intFromBool(code == .num);
+    }
+    model.consts[0..5].* = .{ c[3], c[2], c[1], c[0], th };
+    model.n_ops = @intCast(len);
 }
 
 const expr = netlist.expr;
@@ -1404,36 +1526,6 @@ fn isCall(op: Op, f: expr.Fn) bool {
 fn operand(ops: []const Op, end: usize, i: usize) usize {
     var buf: [3]usize = undefined;
     return expr.operands(ops, end, &buf)[i];
-}
-
-/// Writes `ops` into the bsource's c0..c3 and th; false when the expression
-/// is outside the supported subset.
-fn extractPolyCoeffs(ops: []const Op, consts: []const f64, model: *devices.bsource.Model) bool {
-    // Every V() probe must name the one control pair the model reads.
-    const pair = extractVoltageProbe(ops) orelse Probe{ .p = netlist.none, .n = netlist.none };
-    for (ops) |op| switch (op.code) {
-        .vprobe => if (op.a == netlist.none or op.a != pair.p or op.b != pair.n) return false,
-        .ident, .iprobe => return false,
-        else => {},
-    };
-    const c = poly(ops, consts, ops.len - 1) orelse return false;
-    // One multiplicative tanh(k*vc) factor rides along as model.th (the
-    // MESFET "ungated load" idiom, Is*tanh(v/Is/R)*(1+lambda*v)). poly()
-    // read it as the constant 1, so it must be a factor of the whole
-    // expression, exactly once, with a linear argument.
-    var n_tanh: u32 = 0;
-    for (ops) |op| n_tanh += @intFromBool(isCall(op, .tanh));
-    if (n_tanh > 1) return false;
-    if (n_tanh == 1) {
-        const arg = tanhFactorArg(ops, ops.len - 1) orelse return false;
-        if ((vDegree(ops, arg) orelse return false) != 1) return false;
-        model.th = @floatCast(numericCoeff(ops, consts, arg));
-    }
-    model.c0 = @floatCast(c[0]);
-    model.c1 = @floatCast(c[1]);
-    model.c2 = @floatCast(c[2]);
-    model.c3 = @floatCast(c[3]);
-    return true;
 }
 
 /// The argument of a tanh() that is a multiplicative factor of the whole

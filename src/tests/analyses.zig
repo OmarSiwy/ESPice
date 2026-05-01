@@ -189,6 +189,45 @@ test "branch currents: op emits i(<card>) with ngspice's sign, last probe stays 
     try std.testing.expect(std.mem.startsWith(u8, res.varnames[res.varnames.len - 1], "v("));
 }
 
+test "bsource: expressions of several probes match ngspice at the operating point" {
+    // ngspice 45 on this deck (numdgt=12), except v(c): ngspice's default
+    // `^` is |x|^3 = +0.421875; an integer power keeps the sign here.
+    const sim = try runDeck(
+        \\bsource multi-probe op
+        \\va a 0 1.5
+        \\vb b 0 -0.75
+        \\bm m 0 v=v(a)*v(b)
+        \\bs s 0 v=(v(a)+v(b))^2
+        \\bc c 0 v=v(b)^3
+        \\bd d 0 v=v(a,b)/v(a) + sqrt(v(a)+1) - exp(v(b)) + log10(v(a)+1) + ln(v(a)+2)
+        \\bt t 0 v=v(a) > 0 ? tanh(v(b)) : 0
+        \\bx x 0 v=min(v(a),v(b)) + max(v(a),v(b))*atan(v(b)) + abs(v(b)) + (v(a)+1)^0.5
+        \\bi 0 ni i=v(a)*v(b)*1m + v(ni)*v(ni)*1m
+        \\rm m 0 1k
+        \\rs s 0 1k
+        \\rc c 0 1k
+        \\rd d 0 1k
+        \\rt t 0 1k
+        \\rx x 0 1k
+        \\rni ni 0 1k
+        \\.op
+        \\.end
+    );
+    defer sim.deinit();
+
+    const res = try requestedResult(sim, 0);
+    const want = [_]struct { []const u8, f64 }{
+        .{ "v(m)", -1.125 },           .{ "v(s)", 0.5625 },
+        .{ "v(c)", -0.421875 },        .{ "v(d)", 4.259475254511 },
+        .{ "v(t)", -0.635148952387 },  .{ "v(x)", 0.6158871668943 },
+        .{ "v(ni)", -0.672603939956 }, .{ "i(bm)", 1.125e-3 },
+    };
+    for (want) |w| {
+        const k = findNameIndex(res.varnames, w[0]) orelse return error.MissingColumn;
+        try std.testing.expectApproxEqRel(w[1], res.data[k], 1e-9);
+    }
+}
+
 test "urc: U card expands into a lump ladder whose series R telescopes to L*RPERL" {
     // r0 = L*RPERL = 1k against a 1k load: v(out) is 0.5 iff the geometric
     // lump sizing (r1*K^i from both ends) sums back to exactly r0 and the

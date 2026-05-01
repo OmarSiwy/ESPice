@@ -164,10 +164,11 @@ pub fn build(b: *std.Build) void {
         host_objs[i].use_llvm = optimize != .Debug; // see exe.use_llvm
     }
 
-    // The native transmission lines keep their own accepted-step history and
-    // export neutral vtables from a CPU object, like the generated models.
+    // The native devices (transmission lines with their own accepted-step
+    // history, the expression-tape B source) export neutral vtables from a
+    // CPU object, like the generated models.
     const native_models_mod = M.make(b.path("models/native/root.zig"), &.{.{ .name = "contract", .module = contract_mod }});
-    inline for (.{ "ltra_native", "txl_native", "cpl_native_2", "cpl_native_3", "cpl_native_4" }) |name|
+    inline for (.{ "bsource", "ltra_native", "txl_native", "cpl_native_2", "cpl_native_3", "cpl_native_4" }) |name|
         agg_src.appendSlice(b.allocator, b.fmt("pub const {s} = @import(\"native_models\").{s};\n", .{ name, name })) catch @panic("OOM");
     const native_host_mod = M.make(b.path("src/device/eval.zig"), &.{
         .{ .name = "contract", .module = contract_mod },
