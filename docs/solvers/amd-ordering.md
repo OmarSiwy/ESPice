@@ -1,18 +1,18 @@
-# AMD — Approximate Minimum Degree Ordering
+# AMD: Approximate Minimum Degree Ordering
 
 ## 1. Mathematical specification
 
 **Objective.** Find a permutation $P$ minimizing fill in the Cholesky-like
-factorization of $PAP^T$ (of $P(A + A^T)P^T$ when $A$ is unsymmetric —
+factorization of $PAP^T$ (of $P(A + A^T)P^T$ when $A$ is unsymmetric:
 thesis §2.8). A fill-in is $L_{ij} \ne 0$ where $A_{ij} = 0$. Minimum-fill
 ordering is NP-complete (thesis §1), so all practical orderings are
 heuristics on the *elimination graph* model:
 
 Represent the (symmetrized) pattern as an undirected graph $G(V,E)$,
 $\{i,j\} \in E \iff A_{ij} \ne 0$. Eliminating vertex $p$ deletes $p$ and
-adds edges to make its neighborhood a clique (thesis §2.8, figs. 2–4/2–5);
+adds edges to make its neighborhood a clique (thesis §2.8, figs. 2-4/2-5);
 each added edge is one fill-in. The **minimum degree** rule greedily picks
-the vertex of smallest current degree each step — a vertex of degree $d$
+the vertex of smallest current degree each step: a vertex of degree $d$
 creates at most $\binom{d}{2}$ fill edges, so small degree bounds fill per
 step (greedy bound only: no global optimality guarantee).
 
@@ -28,13 +28,13 @@ $$\mathrm{Adj}_G(i) = \Bigl(\mathcal{A}_i \cup \bigcup_{e \in \mathcal{E}_i} L_e
 
 Eliminating $p$: form $L_p = \mathrm{Adj}_G(p)$, make $p$ an element,
 absorb all elements $e \in \mathcal{E}_p$ into $p$ (their $L_e \subseteq
-L_p \cup \{p\}$ makes them redundant — *element absorption*), and prune
+L_p \cup \{p\}$ makes them redundant: *element absorption*), and prune
 each member $i \in L_p$: $\mathcal{A}_i \gets \mathcal{A}_i \setminus (L_p
 \cup \{p\})$, $\mathcal{E}_i \gets (\mathcal{E}_i \setminus \text{dead})
 \cup \{p\}$.
 
 **Approximate degree (the "A" in AMD).** True external degree
-$d_i = |\mathrm{Adj}_G(i)|$ requires set unions. Amestoy–Davis–Duff replace
+$d_i = |\mathrm{Adj}_G(i)|$ requires set unions. Amestoy-Davis-Duff replace
 it with the upper bound
 
 $$\bar d_i = \min\Bigl( n - k,\ \ d_i^{\text{prev}} + |L_p \setminus i|,\ \ |\mathcal{A}_i \setminus L_p| + |L_p \setminus i| + \sum_{e \in \mathcal{E}_i \setminus p} |L_e \setminus L_p| \Bigr)$$
@@ -45,7 +45,7 @@ $|\text{supervariable } i|$ for each member $i$ of $L_p$ adjacent to $e$;
 the leftover $w_e$ is exactly $|L_e \setminus L_p|$). This makes the whole
 degree update cost proportional to quotient-graph edges scanned, giving
 AMD's $O(\mathrm{nnz} \cdot \text{small factor})$ practical complexity, and
-$\bar d_i \ge d_i$ always (overestimate — safe for the greedy rule).
+$\bar d_i \ge d_i$ always (overestimate: safe for the greedy rule).
 Elements with $w_e = 0$ satisfy $L_e \subseteq L_p$ and are absorbed
 (*aggressive absorption*).
 
@@ -59,7 +59,7 @@ whole index sets.
 
 **Mass elimination & dense rows.** A merged supervariable of size $nv$
 emits $nv$ consecutive pivots at once. Rows denser than a threshold
-($10\sqrt{n}$ classical) are withheld from the graph and appended last —
+($10\sqrt{n}$ classical) are withheld from the graph and appended last:
 they would otherwise pollute every degree update at quadratic cost while
 inevitably being ordered last anyway.
 
@@ -78,10 +78,10 @@ One phase, purely symbolic, run once per pattern (per BTF block for us):
 3. **Tail:** append dense rows.
 
 Data structures (ours, `order.zig amd()`): degree buckets as doubly-linked
-lists (`head/next/prev`) for $O(1)$ pop/remove — minimum degree only ever
+lists (`head/next/prev`) for $O(1)$ pop/remove: minimum degree only ever
 decreases by bounded amounts so a rising `mindeg` scan is amortized $O(n)$;
 variable adjacency `va[]` as **contiguous packed** spans (pointer+len per
-vertex) rather than linked slabs — sequential scans, at the cost of
+vertex) rather than linked slabs: sequential scans, at the cost of
 relocating element-adjacency spans `ea[]` on growth (bump-allocated,
 2× growth, `OutOfWorkspace` on exhaustion → caller retries with a bigger
 slab); element member lists $L_e$ appended to the `va[]` tail; epoch marks
@@ -90,9 +90,9 @@ Everything lives in one caller-provided `u32` slab (`wsSize(n,nnz) = 48n +
 8·nnz + 64`) so the identical code runs at comptime, runtime, and under the
 emitter.
 
-Where AMD wins: nearly-symmetric patterns — precisely what BTF blocks of
+Where AMD wins: nearly-symmetric patterns: precisely what BTF blocks of
 circuit matrices are (thesis §3.1: block patterns are *more* symmetric than
-the original). Thesis tables 3–4/3–5: BTF+AMD beats AMD alone, MMD, and
+the original). Thesis tables 3-4/3-5: BTF+AMD beats AMD alone, MMD, and
 COLAMD on fill for circuit matrices (e.g. Sandia/mult_dcop_01: 227k fill
 for BTF+AMD vs 2.18M for plain AMD). COLAMD targets $A^TA$-like patterns
 (unsymmetric with pivoting) and consistently over-fills on circuits.
@@ -140,7 +140,7 @@ amd(n, col_ptr, row_idx, q, ws):
 ## 4. Pseudo-code, GPU parallel
 
 Honest answer first: **AMD does not belong on the GPU.** It is a serial
-greedy heuristic — each pivot choice depends on all previous updates; the
+greedy heuristic: each pivot choice depends on all previous updates; the
 "work" is irregular pointer-chasing over a mutating graph; and it runs
 *once per pattern* while factor/solve run millions of times. Amdahl kills
 any conceivable win. Parallel-ordering literature replaces the algorithm
@@ -165,25 +165,25 @@ alternative: nested dissection per BTF block
 
 The one ordering choice that *matters* for the GPU is fill vs level count:
 lower fill (AMD's objective) shortens each level's work but can deepen the
-column-dependency DAG; nested dissection yields shallower, wider DAGs —
+column-dependency DAG; nested dissection yields shallower, wider DAGs:
 better level-set parallelism at somewhat higher fill. Worth measuring only
-if GPU factorization (not refactor-replay) becomes our hot path — for
+if GPU factorization (not refactor-replay) becomes our hot path: for
 refactor-replay the DAG is fixed by the CPU factorization anyway.
 
 ---
 
-**Sources fetched:** Palamadai Natarajan thesis (fetched — §§2.8, 3.4–3.6,
-tables 3–3..3–8: ordering comparisons, phase timings); SuiteSparse AMD is the
+**Sources fetched:** Palamadai Natarajan thesis (fetched: §§2.8, 3.4-3.6,
+tables 3-3..3-8: ordering comparisons, phase timings); SuiteSparse AMD is the
 reference implementation (repository known, paper "An Approximate Minimum
-Degree Ordering Algorithm", Amestoy–Davis–Duff 1996, paywalled SIAM).
+Degree Ordering Algorithm", Amestoy-Davis-Duff 1996, paywalled SIAM).
 
 **Verification status:** §1 elimination-graph model, MD rule, AMD-vs-MMD/
-COLAMD behavior — source-verified against thesis §§2.8, 3.4–3.6. §1 quotient
+COLAMD behavior: source-verified against thesis §§2.8, 3.4-3.6. §1 quotient
 graph identity, approximate-degree bound, $w_e$ one-scan trick, aggressive
-absorption, supervariable hashing, dense-row threshold — derived, not
+absorption, supervariable hashing, dense-row threshold: derived, not
 source-verified (from the AMD paper's known content and our implementation;
-the thesis describes these only at survey level). §2/§3 — verified against
-`order.zig` directly. §4 — derived, not source-verified (engineering
+the thesis describes these only at survey level). §2/§3: verified against
+`order.zig` directly. §4: derived, not source-verified (engineering
 judgment; no source parallelizes MD on GPU).
 
 **Our implementation:** `src/solver/order.zig` (`amd()`, `DegLists`,

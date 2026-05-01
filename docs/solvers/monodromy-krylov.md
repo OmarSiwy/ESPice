@@ -31,7 +31,7 @@ $$
 
 so $\Phi v = w_S$ from $w_0 = v$: **one back-substitution per timestep on
 the factorization that step already produced**, plus one SpMV with the
-saved $C_s$. Never form $\Phi$ ($n^2$ dense) — a product costs
+saved $C_s$. Never form $\Phi$ ($n^2$ dense): a product costs
 $O(S \cdot \text{nnz}(LU))$.
 
 For trapezoidal the exact recurrence carries the dynamic-current
@@ -44,7 +44,7 @@ u_{s+1} = \alpha (C_{s+1} w_{s+1} - C_s w_s) - u_s ,
 $$
 
 (BE drops $u$). Getting this chain right is what makes matrix-free $\Phi v$
-*exact* — the FD flow-map derivative it replaces was only $O(\epsilon)$.
+*exact*: the FD flow-map derivative it replaces was only $O(\epsilon)$.
 
 ### GMRES on the shooting Jacobian
 
@@ -54,7 +54,7 @@ $\mu_i = e^{\lambda_i T}$; every mode with time constant $\ll T$ has
 $|\mu_i| \approx 0$, so the spectrum of $\Phi - I$ clusters at $-1$ with a
 handful of outliers (slow modes, high-Q resonances, the $\mu \to 1$ mode
 of near-autonomous circuits). GMRES iteration count tracks the outlier
-count, not $n$ — typically ≤ 10 even for large circuits (the
+count, not $n$: typically ≤ 10 even for large circuits (the
 Telichevesky/Kundert/White observation that made SpectreRF PSS scale;
 concept verified via rf-sim.pdf, derivation marked derived below). No
 preconditioner is usually needed; when it is (high-Q), the recycling
@@ -70,23 +70,23 @@ z_s = C_s^{\mathsf T}\, \beta\, A_{s+1}^{-\mathsf T} z_{s+1},
 $$
 
 each step one `solveT` on the *same* saved factorization. Same cost, same
-storage, opposite traversal — the time-domain twin of the conversion-matrix
+storage, opposite traversal: the time-domain twin of the conversion-matrix
 adjoint in [lptv-block-solves.md](lptv-block-solves.md).
 
 ### Storage
 
 The recurrence needs, per step: the factorization of $A_s$ and $C_s$'s
-values. $S \times (\text{nnz}(LU) + \text{nnz}(C))$ floats — for
+values. $S \times (\text{nnz}(LU) + \text{nnz}(C))$ floats: for
 $S = 256$, a 10k-nnz-LU circuit ≈ 20 MB; affordable, and the factors were
 already computed during the period integration (the *only* change is not
-throwing them away). Fallback when memory-bound: checkpointing — store
+throwing them away). Fallback when memory-bound: checkpointing: store
 every $k$-th factor, re-factor the gaps during the sweep
 (classic adjoint checkpointing trade, $O(S/k)$ storage for $O(k)$ extra
 refactors per product).
 
 ### Krylov subspace recycling (GCRO-DR style)
 
-*(derived, not source-verified — Parks, de Sturler et al., SIAM J. Sci.
+*(derived, not source-verified: Parks, de Sturler et al., SIAM J. Sci.
 Comput. 28(5) 2006, is paywalled)*
 
 Consecutive shooting-Newton iterations (and adjacent sweep points in
@@ -102,12 +102,12 @@ vectors of the previous solve) and solves the next system deflated:
   combined subspace → next $U$ (this is the DR/"deflated restart" part).
 
 Effect: the outliers that dominate GMRES iteration count are solved
-"for free" from the second Newton iteration on — measured payoffs in the
-literature are 2–5× on sequences of related systems. Ordering of value
+"for free" from the second Newton iteration on: measured payoffs in the
+literature are 2-5× on sequences of related systems. Ordering of value
 here: (1) between Newton iterations of one shooting solve, (2) between
 sweep points (pnoise frequencies), (3) between MFT cycles. Simplest
 correct start: plain deflated restarts within one solve, recycling across
-solves later — the data structure ($U$, $C$, $k \lesssim 10$ vectors) is
+solves later: the data structure ($U$, $C$, $k \lesssim 10$ vectors) is
 identical.
 
 ### Cost model vs the FD-dense method
@@ -123,7 +123,7 @@ remains the right *debug oracle* (it validates the recurrence).
 Integration into the existing code:
 
 1. `integrateOnePeriod` (pss.zig) already runs `converger` per step whose
-   `Workspace.slv` holds the factored $A_s$ at acceptance — the change is
+   `Workspace.slv` holds the factored $A_s$ at acceptance: the change is
    a per-step **factor snapshot** (copy of the numeric LU arrays; symbolic
    is shared) plus a $C_s$ vals snapshot, both appended to a period tape.
 2. Shooting iteration: integrate (filling the tape) → $\phi$ → GMRES on
@@ -134,7 +134,7 @@ Integration into the existing code:
    recurrence replaces only that operator callback.
 3. Convergence/tolerances: outer shooting tol unchanged; inner GMRES tol
    tied to the outer residual (inexact-Newton forcing, e.g.
-   $\eta = \min(0.1, \|\phi\|)$ — cheap Eisenstat–Walker flavor, derived).
+   $\eta = \min(0.1, \|\phi\|)$: cheap Eisenstat-Walker flavor, derived).
 4. Failure handling: GMRES stagnation → grow restart, then deflated
    restart, then fall back to the FD-dense path (which stays as the
    guarantee rung, mirroring the OP ladder philosophy).
@@ -177,16 +177,16 @@ pss_krylov(x0):
 ## 4. Pseudo-code, GPU parallel
 
 - **Within one $\Phi v$**: the step loop is sequential (recurrence), but
-  each step is a sparse triangular solve + SpMV — level-scheduled solves
+  each step is a sparse triangular solve + SpMV: level-scheduled solves
   per [gpu-sparse-lu.md](gpu-sparse-lu.md), or keep the whole replay
   on-device with the tape resident in GPU memory.
-- **Across Krylov vectors**: block-GMRES — propagate all $m$ basis
+- **Across Krylov vectors**: block-GMRES: propagate all $m$ basis
   candidates (or the $2K{+}1$ MFT cycles' vectors) through the recurrence
   as a multiple-RHS blocked triangular solve per step; this is the axis
   that actually fills a GPU, since single-vector triangular solves are
   latency-bound.
 - **FD-column fallback** (today's method) parallelizes as independent
-  period-integration lanes — worth keeping as the batched oracle.
+  period-integration lanes: worth keeping as the batched oracle.
 - Recycling bookkeeping ($U$ updates, small Ritz eigenproblems) is
   thread-0/host scalar work.
 
@@ -204,10 +204,10 @@ kernel monodromy_block_apply(tape, V[m]):      # all Krylov vectors at once
 
 | Source | Status |
 |---|---|
-| Kundert rf-sim.pdf §4.1.4 (shooting, sensitivity of final state, Krylov acceleration) | fetched (prior pass), verified — problem statement + "Krylov subspace methods have been applied to accelerate... shooting methods" |
-| Telichevesky/Kundert/White DAC'95 (matrix-implicit shooting) | **paywalled — derived, not source-verified** (recurrence + Floquet clustering argument from knowledge; consistent with rf-sim) |
-| Parks, de Sturler et al., GCRO-DR (SISC 2006) | **paywalled — derived, not source-verified** (GCRO split + harmonic-Ritz deflated restart from knowledge) |
-| Eisenstat–Walker forcing terms | **paywalled — derived** (simple min-rule variant stated) |
+| Kundert rf-sim.pdf §4.1.4 (shooting, sensitivity of final state, Krylov acceleration) | fetched (prior pass), verified: problem statement + "Krylov subspace methods have been applied to accelerate... shooting methods" |
+| Telichevesky/Kundert/White DAC'95 (matrix-implicit shooting) | **paywalled: derived, not source-verified** (recurrence + Floquet clustering argument from knowledge; consistent with rf-sim) |
+| Parks, de Sturler et al., GCRO-DR (SISC 2006) | **paywalled: derived, not source-verified** (GCRO split + harmonic-Ritz deflated restart from knowledge) |
+| Eisenstat-Walker forcing terms | **paywalled: derived** (simple min-rule variant stated) |
 
 **Per-section verification**
 
@@ -216,7 +216,7 @@ kernel monodromy_block_apply(tape, V[m]):      # all Krylov vectors at once
   verified against source); the trap dynamic-current chain matches the
   implemented `i_prev` update rule.
 - §1 Floquet clustering, GCRO-DR, checkpointing: derived, marked.
-- §2–§4: design spec; existing pieces verified (`gmres.zig`,
+- §2-§4: design spec; existing pieces verified (`gmres.zig`,
   `direct.zig` solve/solveT, `pss.zig` FD path as oracle).
 
 **Our implementation**

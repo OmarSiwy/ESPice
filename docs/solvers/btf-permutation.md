@@ -15,12 +15,12 @@ A_{11} & A_{12} & \cdots & A_{1b} \\
 is block *upper* triangular with irreducible square diagonal blocks
 $A_{ii}$. Consequences (thesis §2.6): (i) the sub-diagonal region needs no
 factorization work; (ii) only diagonal blocks are factored, independently;
-(iii) off-diagonal blocks generate **zero fill** — they enter only the
+(iii) off-diagonal blocks generate **zero fill**: they enter only the
 block back-substitution. The BTF of a matrix is essentially unique (the
-Dulmage–Mendelsohn decomposition fixes the blocks up to ordering within the
+Dulmage-Mendelsohn decomposition fixes the blocks up to ordering within the
 condensation's topological order; derived, not source-verified).
 
-**Stage 1 — maximum transversal (unsymmetric permutation).** A transversal
+**Stage 1: maximum transversal (unsymmetric permutation).** A transversal
 is a set of nonzeros, no two sharing a row or column, placed on the
 diagonal by a row permutation. Duff's algorithm (thesis §2.5) finds a
 maximum one via augmenting paths: model rows as vertices; from an
@@ -34,7 +34,7 @@ the row/column bipartite graph; equivalence stated in thesis §2.5).
 Worst-case $O(n \cdot \tau)$ with $\tau = \mathrm{nnz}(A)$; in practice
 $O(n + \tau)$.
 
-**Stage 2 — symmetric permutation to BTF (Tarjan SCC).** With a zero-free
+**Stage 2: symmetric permutation to BTF (Tarjan SCC).** With a zero-free
 diagonal, take the directed graph $G$ with an edge $j \to i$ iff
 $A_{ij} \ne 0$, $i \ne j$. Finding a symmetric permutation to BTF is
 equivalent to finding the strongly connected components of $G$: each SCC is
@@ -45,7 +45,7 @@ all SCCs in one DFS pass:
 $$\mathrm{low}(v) = \min\bigl(\mathrm{num}(v),\ \min_{(v,w),\, w\ \text{on stack}} \mathrm{num}(w),\ \min_{w\ \text{child}} \mathrm{low}(w)\bigr),$$
 
 $v$ is an SCC root iff $\mathrm{low}(v) = \mathrm{num}(v)$; on detecting a
-root, pop the vertex stack down to $v$ — that set is one component. SCCs
+root, pop the vertex stack down to $v$: that set is one component. SCCs
 emit in **reverse topological order** of the condensation. Complexity
 $O(n + \tau)$ (thesis §2.6, Duff & Reid's implementation of Tarjan).
 
@@ -55,7 +55,7 @@ decomposition of $G$ correspond exactly to the irreducible blocks; without
 it the "blocks" of an arbitrary pattern are not square.
 
 **Solve.** With scaling $R$, factored blocks $L_iU_i$ and off-diagonal part
-$F$ (thesis eqs. 3–1..3–10):
+$F$ (thesis eqs. 3-1..3-10):
 
 $$(LU + F)\,Q^T x = P R\, b,$$
 
@@ -73,18 +73,18 @@ solve time.
 Our variant (`order.zig`): the pattern-merge step of circuit compilation
 **guarantees a structurally full diagonal** (every MNA row gets its diagonal
 slot stamped), so the identity transversal is already maximum and stage 1
-is skipped entirely — documented as a precondition in the module header.
-Tarjan runs iteratively (explicit `frame_v`/`frame_p` stacks — no
+is skipped entirely: documented as a precondition in the module header.
+Tarjan runs iteratively (explicit `frame_v`/`frame_p` stacks: no
 recursion, same rationale as the factorization DFS), emits SCCs into
 `emit[]` with `block_ptr[]` boundaries in reverse topological order, and
 each block's sub-pattern is extracted (columns restricted to in-block rows)
-and handed to AMD. Singleton blocks pass through — for circuit matrices
+and handed to AMD. Singleton blocks pass through: for circuit matrices
 most blocks are singletons plus one large block (thesis §3.4: "BTF is not
 able to find many blocks... a single large block and the remaining are
 singletons"); the payoff is dense source rows/columns peeled into
 singletons and the fill-free off-diagonal region.
 
-Note our factorization consumes only the column order `q` — off-diagonal
+Note our factorization consumes only the column order `q`: off-diagonal
 entries stay inside the single flat factorization rather than a separate
 $F$ block-solve. That is a simplification relative to full KLU: correctness
 is unchanged (the ordering still confines pivots and most fill within
@@ -95,7 +95,7 @@ retained; the storage benefit is approximated.
 When BTF wins: block-triangularizable systems (circuits with unidirectional
 signal flow, source-driven partitions). When it does nothing: fully
 irreducible matrices (one SCC), where `order()` degenerates to plain AMD at
-$O(n+\tau)$ wasted preprocessing — an acceptable constant.
+$O(n+\tau)$ wasted preprocessing: an acceptable constant.
 
 ## 3. Pseudo-code, CPU sequential
 
@@ -132,7 +132,7 @@ btf_order(n, col_ptr, row_idx, q):
     amd(sub) -> local order; q[lo..hi] = verts[local order]
 ```
 
-Maximum transversal (not implemented — precondition makes it dead code;
+Maximum transversal (not implemented: precondition makes it dead code;
 kept here as the reference algorithm):
 
 ```
@@ -171,7 +171,7 @@ gpu_block_solve(x):
 ```
 
 What fundamentally serializes: the block back-substitution follows the
-condensation DAG — topological depth of the block graph is a hard lower
+condensation DAG: topological depth of the block graph is a hard lower
 bound on solve steps, exactly like column levels inside one block. Factor
 time, by contrast, is embarrassingly parallel across blocks; BTF is
 therefore *more* valuable on GPU than on CPU (it manufactures coarse-grain
@@ -181,16 +181,16 @@ barrier only between solve levels of the condensation.
 
 ---
 
-**Sources fetched:** Palamadai Natarajan thesis (fetched, §§2.5–2.6, 3.1–3.4,
-eqs. 3–1..3–10); GLU3.0 paper arXiv:1908.00204 (fetched, MC64+AMD
+**Sources fetched:** Palamadai Natarajan thesis (fetched, §§2.5-2.6, 3.1-3.4,
+eqs. 3-1..3-10); GLU3.0 paper arXiv:1908.00204 (fetched, MC64+AMD
 preprocessing flow, fig. 5).
 
-**Verification status:** §1 transversal/Tarjan/complexities/solve equations —
-source-verified against thesis §§2.5–2.6, ch. 3. §1 Dulmage–Mendelsohn
-uniqueness remark — derived, not source-verified (standard result, Davis
-*Direct Methods* is the paywalled reference). §2/§3 — verified against
+**Verification status:** §1 transversal/Tarjan/complexities/solve equations:
+source-verified against thesis §§2.5-2.6, ch. 3. §1 Dulmage-Mendelsohn
+uniqueness remark: derived, not source-verified (standard result, Davis
+*Direct Methods* is the paywalled reference). §2/§3: verified against
 `order.zig` directly; the flat-storage deviation from KLU's block storage is
-our reading of our own code. §4 — derived, not source-verified (design
+our reading of our own code. §4: derived, not source-verified (design
 reasoning; GLU papers do per-matrix, not per-block, GPU scheduling).
 
 **Our implementation:** `src/solver/order.zig` (`order()` = iterative

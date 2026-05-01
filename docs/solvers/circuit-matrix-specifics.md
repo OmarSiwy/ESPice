@@ -21,22 +21,22 @@ for voltage-defined branches with **structural zero diagonals**. Properties
 
 1. *Dense-row removal:* BTF peels source rows/columns into singleton blocks
    or the off-diagonal region $F$. Since $F$ is never factored, it
-   contributes **zero fill** — whereas a general ordering must schedule
+   contributes **zero fill**, whereas a general ordering must schedule
    dense rows late and still eats $\Theta(d^2)$ clique fill from a row of
    degree $d$ when it finally pivots. AMD's dense-row deferral mitigates,
    BTF eliminates.
 2. *Fill confinement:* fill can only appear inside diagonal blocks;
    the search space of the NP-hard fill problem factorizes into independent
-   subproblems, each smaller and more symmetric — exactly AMD's model
+   subproblems, each smaller and more symmetric: exactly AMD's model
    ($P(A+A^T)P^T$) assumption, so its optimistic estimate tracks reality.
 3. *Work restriction:* the block back-substitution does $O(\mathrm{nnz}(F))$
    extra solve work instead of factor work.
 
-Thesis evidence (tables 3–4/3–5): BTF+AMD ≤ AMD ≤ {MMD, COLAMD} in fill on
+Thesis evidence (tables 3-4/3-5): BTF+AMD ≤ AMD ≤ {MMD, COLAMD} in fill on
 circuit matrices, with pathological blowups for the general orderings
 (mult_dcop_01: 227k vs 2.18M AMD-alone vs 1.46M COLAMD); supernodal codes
 (SuperLU/UMFPACK) lose additionally because circuit fill never produces the
-dense sub-blocks their BLAS-3 kernels amortize on (table 3–1: KLU 1.5–3×).
+dense sub-blocks their BLAS-3 kernels amortize on (table 3-1: KLU 1.5-3×).
 
 **Tridiagonal fast path.** If the pattern satisfies $|i - j| \le 1$ for all
 nonzeros, LU without pivoting is the Thomas algorithm:
@@ -46,7 +46,7 @@ $$b'_1 = b_1, \quad m_i = a_i / b'_{i-1}, \quad b'_i = b_i - m_i c_{i-1}, \qquad
 then one forward sweep ($x_i \mathrel{-}= m_i x_{i-1}$) and one back sweep
 ($x_i = (x_i - c_i x_{i+1})/b'_i$): $O(n)$ time, $O(n)$ memory, zero fill,
 zero symbolic work. Stable without pivoting when $A$ is diagonally dominant
-or SPD (derived, not source-verified — standard result); MNA + gmin
+or SPD (derived, not source-verified: standard result); MNA + gmin
 satisfies this for RC/RLC ladder topologies, which is exactly where the
 pattern occurs. Banded generalizations follow the same recurrence with
 bandwidth-$w$ inner loops at $O(nw^2)$.
@@ -54,7 +54,7 @@ bandwidth-$w$ inner loops at $O(nw^2)$.
 **Matrix signature / bypass.** Two levels of "the matrix didn't change":
 
 - *Value identity:* if $\mathrm{vals} = \mathrm{vals}_{\text{prev}}$
-  elementwise, the existing factorization is exact — an $O(\mathrm{nnz})$
+  elementwise, the existing factorization is exact: an $O(\mathrm{nnz})$
   compare avoids an $O(\mathrm{flops}(LU))$ refactor. Pays off whenever
   assembly is deterministic and the circuit is linear at fixed $(\alpha,
   g_{\min}, \Delta t)$.
@@ -63,7 +63,7 @@ bandwidth-$w$ inner loops at $O(nw^2)$.
   circuit, constant Jacobian, fixed companion coefficients). Then even the
   compare is skipped and Newton reuses the LU across iterations *and*
   timesteps. Invalidation is the caller's contract (new $\sigma$ after any
-  model/step-size mutation) — the classic cache trade: cheap hit, dangerous
+  model/step-size mutation): the classic cache trade: cheap hit, dangerous
   stale.
 
 Both are instances of the refactorization theorem (pattern + pivot sequence
@@ -73,27 +73,27 @@ frozen ⇒ replay is valid) pushed to its degenerate cases.
 
 Dispatch precedence in our `Solver` (init-time, pattern-only decisions):
 
-1. **tridiag** — pattern scan `isTridiag`; if yes, Thomas engine: `a_pos/
+1. **tridiag**: pattern scan `isTridiag`; if yes, Thomas engine: `a_pos/
    b_pos/c_pos` map CSC slots to the three diagonals once, factor/solve are
    the recurrences above. No pivoting (ponytail-commented ceiling: fine for
    diagonally-dominant MNA + gmin; the fixture set keeps it honest).
-2. **BBD** — bordered block diagonal engine when the compiler hands a
+2. **BBD**: bordered block diagonal engine when the compiler hands a
    partition (`root.BbdInfo`): per-block dense refactor + Schur border,
    falls back permanently to flat on singularity (`ESPICE_NO_BBD` forces
-   flat — A/B switch).
-3. **flat KLU-style LU** — everything else (see `gilbert-peierls-lu.md`,
+   flat: A/B switch).
+3. **flat KLU-style LU**: everything else (see `gilbert-peierls-lu.md`,
    `klu-pipeline.md`).
 
 Value-bypass sits above all engines in `Solver.factor` (memcmp against
 `vcopy`); the symbolic signature sits above the *solver* in
-`converger.newton` (`Options.matrix_sig` vs `ws.factored_sig`) — two
+`converger.newton` (`Options.matrix_sig` vs `ws.factored_sig`): two
 distinct caches, deliberately: the memcmp needs no caller contract, the
 signature costs nothing per iteration. Off-diagonal-source peeling comes
 for free through BTF ordering rather than explicit block storage (see
 `btf-permutation.md` for the deviation from full KLU).
 
 When each path wins: tridiag on ladders/chains ($O(n)$ vs $O(n)$-with-
-constants — measured ~5–10× on `rc_ladder_100k`-class shapes); BBD when the
+constants: measured ~5-10× on `rc_ladder_100k`-class shapes); BBD when the
 netlist has repeated-structure partitions; value-bypass on any linear
 circuit between $\Delta t$ changes (transient with fixed step: factor cost
 → one memcmp per step); signature on all-const-Jacobian circuits under
@@ -164,7 +164,7 @@ parfor blocks b: back-substitute block b against border solution
 ```
 
 What fundamentally serializes: the Thomas recurrence (each $b'_i$ needs
-$b'_{i-1}$ — PCR trades work for depth); the Schur border factor (all
+$b'_{i-1}$: PCR trades work for depth); the Schur border factor (all
 blocks feed it); and, as everywhere, the column DAG of any flat sparse
 factor. The circuit-matrix escape hatches are exactly the structures above:
 compile-time-known partitions (BBD/BTF) manufacture parallelism that
@@ -172,18 +172,18 @@ generic level sets can't.
 
 ---
 
-**Sources fetched:** Palamadai Natarajan thesis (fetched — §§1, 3.1, 3.4,
-tables 3–1..3–5 for the ordering/solver comparisons); GLU3.0 paper
-arXiv:1908.00204 (fetched — confirms MC64+AMD preprocessing as the GPU-side
+**Sources fetched:** Palamadai Natarajan thesis (fetched: §§1, 3.1, 3.4,
+tables 3-1..3-5 for the ordering/solver comparisons); GLU3.0 paper
+arXiv:1908.00204 (fetched: confirms MC64+AMD preprocessing as the GPU-side
 standard too).
 
-**Verification status:** §1 circuit-matrix properties and BTF+AMD superiority
-— source-verified against thesis (properties §3.1, numbers tables 3–1/3–4/
-3–5). §1 Thomas algorithm + stability condition, PCR — derived, not
+**Verification status:** §1 circuit-matrix properties and BTF+AMD superiority:
+source-verified against thesis (properties §3.1, numbers tables 3-1/3-4/
+3-5). §1 Thomas algorithm + stability condition, PCR: derived, not
 source-verified (standard texts; Davis book paywalled). §1/§2 signature &
-bypass — our design, verified against our code (no external source; ngspice
+bypass: our design, verified against our code (no external source; ngspice
 has a related per-device "bypass" option but no matrix-level equivalent).
-§3 — verified against `direct.zig`/`converger.zig` directly. §4 — derived,
+§3: verified against `direct.zig`/`converger.zig` directly. §4: derived,
 not source-verified.
 
 **Our implementation:** `src/solver/direct.zig` (engine dispatch,

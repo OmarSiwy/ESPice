@@ -17,7 +17,7 @@ for true-LPTV pnoise, QPAC and larger PAC/PXF circuits.
 Linearizing about a T-periodic orbit gives periodic
 $G(t) = \sum_m G_m e^{jm\omega_0 t}$, $C(t) = \sum_m C_m e^{jm\omega_0 t}$
 (each $G_m, C_m \in \mathbb{C}^{n\times n}$ carries the **circuit's
-sparsity pattern** — the harmonic expansion never densifies a block).
+sparsity pattern**: the harmonic expansion never densifies a block).
 Truncated to sidebands $m \in [-M, M]$, the response phasors
 $X = (X_{-M}, \dots, X_{M})$ at analysis frequency $f$ solve
 
@@ -29,17 +29,17 @@ $$
 
 a $(2M{+}1)n$ complex system. Structure to exploit:
 
-1. **Block-Toeplitz in the harmonic index** — block $(p,q)$ depends only
+1. **Block-Toeplitz in the harmonic index**: block $(p,q)$ depends only
    on $p-q$ through $G_{p-q}, C_{p-q}$; the $j\omega_p C$ factor breaks
    exact Toeplitz-ness only via the *diagonal-scalar* $\omega_p$, so the
    operator is "Toeplitz + frequency ramp": storage is $2M{+}1$
    coefficient pairs, never $(2M{+}1)^2$ blocks.
-2. **Harmonic decay** — for any orbit with finite smoothness,
+2. **Harmonic decay**: for any orbit with finite smoothness,
    $\|G_m\| \to 0$ as $|m|$ grows (exponentially for smooth orbits). The
    matrix is block-*banded* in practice: keeping $|p-q| \le M_G \ll 2M$
    loses nothing measurable. The LTI limit ($G_m = 0$ for $m \ne 0$) is
    exactly block-diagonal = $2M{+}1$ independent AC solves.
-3. **Frequency-sweep reuse** — $\mathcal A(f)$ and $\mathcal A(f')$ differ
+3. **Frequency-sweep reuse**: $\mathcal A(f)$ and $\mathcal A(f')$ differ
    only in the $\omega_p$ scalars multiplying the same $C_{p-q}$ blocks:
    the assembled block pattern, orderings, and symbolic factorization are
    sweep-invariant. Refactor values only, as `freq_solve` already does per
@@ -49,10 +49,10 @@ a $(2M{+}1)n$ complex system. Structure to exploit:
 
 Complex arithmetic maps to the engine's existing stacked-real trick
 (one real solver, no complex kernels): each complex block $Z = Z_r + jZ_i$
-becomes $\left(\begin{smallmatrix} Z_r & -Z_i \\ Z_i & Z_r \end{smallmatrix}\right)$
-— for AC this is `freq_solve.zig`'s $2n$ form
+becomes $\left(\begin{smallmatrix} Z_r & -Z_i \\ Z_i & Z_r \end{smallmatrix}\right)$;
+for AC this is `freq_solve.zig`'s $2n$ form
 $[G, -\omega C; \omega C, G]$; for the conversion matrix it is the same
-expansion at $(2M{+}1)n$ ("real expansion of the complex system" — exactly
+expansion at $(2M{+}1)n$ ("real expansion of the complex system": exactly
 what `pac.zig` builds today, dense). The sparse-path lesson transfers
 verbatim: derive the $2\cdot(2M{+}1)n$ pattern once from the circuit CSC ×
 harmonic band, then per frequency the fill is a streamed copy of plane
@@ -64,7 +64,7 @@ Options ordered by exploited structure:
 
 - **Flat sparse LU** on the stacked-real pattern (KLU pipeline as-is):
   correct, reuses everything; fill grows with the harmonic band coupling
-  — fine for small $M$.
+  fine for small $M$.
 - **Block-banded elimination**: eliminate sideband blocks in order; each
   pivot block is an $n \times n$ circuit-pattern matrix factored by the
   existing sparse LU; off-band fill is limited by $M_G$. Cost
@@ -78,18 +78,18 @@ Options ordered by exploited structure:
 
 PXF and adjoint pnoise need $\mathcal A^{\mathsf H} Y = e_{\text{out}}$.
 Structure: $\mathcal A^{\mathsf H}$ has blocks
-$(\mathcal A^{\mathsf H})_{pq} = \overline{G_{q-p}}^{\mathsf T} - j\omega_q \overline{C_{q-p}}^{\mathsf T}$
-— block-Toeplitz again with conjugated, transposed coefficients and the
+$(\mathcal A^{\mathsf H})_{pq} = \overline{G_{q-p}}^{\mathsf T} - j\omega_q \overline{C_{q-p}}^{\mathsf T}$,
+block-Toeplitz again with conjugated, transposed coefficients and the
 frequency ramp moved to the *column* index. Consequences:
 
-- **direct path**: one factorization serves both directions — the sparse
+- **direct path**: one factorization serves both directions: the sparse
   LU's `solveT` (already in `direct.zig`: $x = A^{\mathsf T}\backslash b$
   on the same $L, U$) extends to the block factorization; in stacked-real
   form, conjugation = negating the $\omega C$ off-blocks' sign
   contribution, which the noise path already handles ("the conjugate drops
   out of $|H|^2$", `noise.zig`);
 - **matrix-free path**: the adjoint operator apply is the forward apply
-  with conjugated twiddle factors and $G(t)^{\mathsf T}$ — one extra
+  with conjugated twiddle factors and $G(t)^{\mathsf T}$: one extra
   transposed-scatter variant of the batched eval.
 
 ### Matrix-free application
@@ -104,7 +104,7 @@ $$
 $$
 
 i.e. IDFT the sideband vector to time samples, multiply by the *sampled*
-(sparse, circuit-pattern) $G(t_k)$/$C(t_k)$ — one SpMV per sample — and
+(sparse, circuit-pattern) $G(t_k)$/$C(t_k)$ (one SpMV per sample) and
 DFT back, applying the frequency ramp spectrally. Cost per apply:
 $O(N \cdot \text{nnz} + N \log N \cdot n)$, no harmonic-band truncation
 error at all. This is the operator the repo's JFNK/GMRES core
@@ -121,7 +121,7 @@ storage are the ceilings.
 Upgrade flow (serves PAC, PXF, LPTV-pnoise, QPAC):
 
 1. **Sample once** per orbit: keep $G(t_k), C(t_k)$ in *sparse* plane
-   copies (nnz × N floats), not dense — the batched eval already produces
+   copies (nnz × N floats), not dense: the batched eval already produces
    plane values; snapshotting is a memcpy of the vals arrays.
 2. **Choose path by size**: small $(2M{+}1)n$ → assemble stacked-real
    sparse, KLU factor, `solve`/`solveT` per RHS (mirrors
@@ -133,8 +133,8 @@ Upgrade flow (serves PAC, PXF, LPTV-pnoise, QPAC):
    preconditioner refresh. PXF flips RHS/solve-direction, nothing else.
 4. **Failure handling**: preconditioned GMRES stagnation at strongly
    switching orbits → fall back to the direct sparse factorization (same
-   hierarchy the AC path uses when dense/sparse crossover is wrong —
-   measured, not guessed).
+   hierarchy the AC path uses when dense/sparse crossover is wrong:
+measured, not guessed).
 
 ## 3. Pseudo-code, CPU sequential
 
@@ -161,7 +161,7 @@ solve_point(f, rhs, adjoint=false):
 
 Every piece maps onto existing kernel patterns:
 
-- the per-sample SpMVs are **batched over samples** — one grid-stride pass
+- the per-sample SpMVs are **batched over samples**: one grid-stride pass
   over (sample × nnz), same shape as the batched device eval; better, skip
   the snapshots entirely and evaluate $G(t_k)v_k$ **matrix-free through
   the device batches** (instance eval at the orbit point with directional
@@ -186,8 +186,8 @@ kernel lptv_adjoint_apply: same, transposed scatter + conj twiddles
 
 | Source | Status |
 |---|---|
-| Kundert rf-sim.pdf (LPTV response eqs. 48–49, HB frequency-domain machinery §4.1.1) | fetched (prior pass), verified — sideband/transfer-function structure |
-| Conversion-matrix / harmonic transfer matrix algebra (Maas, Wereley) | **books/paywalled — derived, not source-verified** (standard LPTV result; consistent with the implemented `pac.zig`) |
+| Kundert rf-sim.pdf (LPTV response eqs. 48-49, HB frequency-domain machinery §4.1.1) | fetched (prior pass), verified: sideband/transfer-function structure |
+| Conversion-matrix / harmonic transfer matrix algebra (Maas, Wereley) | **books/paywalled: derived, not source-verified** (standard LPTV result; consistent with the implemented `pac.zig`) |
 
 **Per-section verification**
 
@@ -196,7 +196,7 @@ kernel lptv_adjoint_apply: same, transposed scatter + conj twiddles
 - §1 Toeplitz/decay/reuse structure, adjoint blocks, FFT apply: derived,
   not source-verified (standard; FFT-apply consistency checkable against
   the dense path on any fixture).
-- §2–§4: design spec grounded in existing impl (`freq_solve.zig`
+- §2-§4: design spec grounded in existing impl (`freq_solve.zig`
   dense/sparse policy, `direct.zig solveT`, `gmres.zig`).
 
 **Our implementation**
