@@ -453,8 +453,5 @@
     "finite_values_required": true,
     "all_requested_analyses_must_complete": true
   },
-  "netlist_sha256": "922056b681298058da88eabf73b137be91910c5ad00e1b08a483f18cf77b1cd4",
-  "known_gaps": [
-    "PAC currently injects a node current instead of honoring the named voltage-source excitation"
-  ]
+  "netlist_sha256": "fd9301ade4337e7ce136384533050c800aa3eeef7471429f1eaf6cbef548cc5f"
 }

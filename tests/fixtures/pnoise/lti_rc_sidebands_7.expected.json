@@ -54,8 +54,5 @@
     "finite_values_required": true,
     "all_requested_analyses_must_complete": true
   },
-  "netlist_sha256": "c5414e0cf0b71c8af8e354538b0f2866598d72ba83b374a1a5d0a62e50087466",
-  "known_gaps": [
-    "periodic noise must distinguish genuine frequency conversion from an LTI circuit; extra LTI sidebands must not add noise"
-  ]
+  "netlist_sha256": "7072ffbf1c0fcbe7906cff98ff28556f9cb0c3df667d4cae569b70b250319366"
 }
