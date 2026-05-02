@@ -167,6 +167,8 @@ pub const Pac = struct {
     tol: Tolerances = .{},
     /// LO (pump) frequency in Hz: the fundamental periodicity.
     f_lo: f64,
+    /// Output row: PAC's probe, PXF's injection point.
+    out_node: u32,
     /// LO harmonics kept: sidebands span `-n_harmonics..n_harmonics`.
     n_harmonics: u16 = 3,
     /// Input frequency sweep.
@@ -174,8 +176,6 @@ pub const Pac = struct {
     /// Time samples per LO period. Must be a power of two and at least
     /// 2 * (2 * n_harmonics + 1).
     n_time_samples: u16 = 64,
-    /// Periods integrated to settle before the PSS solve.
-    pss_periods: u16 = 20,
     pss_newton_tol: f64 = 1e-9,
     pss_max_newton_iter: u16 = 50,
 };
@@ -186,6 +186,8 @@ pub const Pnoise = struct {
     sweep: FreqSweep,
     /// Hz.
     f_fundamental: f64,
+    /// Time samples per period, rounded up to a power of two of at least
+    /// 2 * (2 * n_sidebands + 1).
     pss_n_samples: u32 = 64,
     pss_shoot_tol: f64 = 1e-6,
     pss_shoot_max_iter: u16 = 50,

@@ -63,7 +63,7 @@ const PacTests = struct {
             var a_work: [4 * n_sb * n_sb]f64 = @splat(0);
             var rhs: [2 * n_sb]f64 = @splat(0);
             var x: [2 * n_sb]f64 = undefined;
-            const opts: impl.Options = .{ .f_lo = f_lo, .n_harmonics = n_harm, .n_time_samples = n_samples, .sweep = .{ .f_start = 1, .f_stop = 1 } };
+            const opts: impl.Options = .{ .f_lo = f_lo, .out_node = 0, .n_harmonics = n_harm, .n_time_samples = n_samples, .sweep = .{ .f_start = 1, .f_stop = 1 } };
             const lin: impl.Linearization = .{ .g_hat = &g_hat, .c_hat = &c_hat, .col_ptr = &.{ 0, 1 }, .row_idx = &.{0} };
             impl.buildConversionMatrix(adjoint, &a_work, lin, 1, n_sb, n_sb, 2 * n_sb, 0, opts);
             rhs[n_harm] = 1.0;

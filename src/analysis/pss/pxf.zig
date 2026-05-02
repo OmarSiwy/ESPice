@@ -10,14 +10,10 @@ const Complex = pac.Complex;
 
 pub const Options = pac.Options;
 
-/// Contract entry: output at the last probe. Point-major complex rows
+/// Contract entry: output at `opts.out_node`. Point-major complex rows
 /// (frequency, pxf_h{m}(node) for every sideband then node), (re, im) each.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
-    const x_op = ctx.x_op;
-    if (ctx.probes.len == 0) return error.NoProbe;
-    const probe = ctx.probes[ctx.probes.len - 1];
-
     const n: usize = ctx.circuit.n;
     const n_freqs: usize = opts.sweep.count();
     const n_sb: usize = 2 * @as(usize, opts.n_harmonics) + 1;
@@ -29,7 +25,13 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const transfer = try scratch.alloc(Complex, n_freqs * n_transfers);
     defer scratch.free(transfer);
 
-    try pac.sweep(true, ctx.circuit, x_op, probe, 1.0, probe, freqs_buf, transfer, opts, scratch);
+    const drive = try scratch.alloc(f64, 2 * n);
+    defer scratch.free(drive);
+    @memset(drive, 0);
+    drive[opts.out_node] = 1;
+    const lin = try pac.settle(ctx.circuit, ctx.x_op, opts, scratch);
+    defer lin.deinit(scratch);
+    try pac.sweep(true, ctx.circuit, lin, drive, 0, freqs_buf, transfer, opts, scratch);
 
     const ncols = 1 + n_transfers;
     const names = try a.alloc([]const u8, ncols);

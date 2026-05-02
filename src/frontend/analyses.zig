@@ -452,8 +452,9 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
             try arity(args, 5, 5);
             const sweep = try frequencySweep(args, 1);
             const lo = try positive(args, 0);
-            if (id == .pac) return .{ .pac = .{ .f_lo = lo, .sweep = sweep } };
-            return .{ .pxf = .{ .f_lo = lo, .sweep = sweep } };
+            const out = try outputNode(node_id);
+            if (id == .pac) return .{ .pac = .{ .f_lo = lo, .sweep = sweep, .out_node = out } };
+            return .{ .pxf = .{ .f_lo = lo, .sweep = sweep, .out_node = out } };
         },
         .sp => {
             try arity(args, 4, 4);

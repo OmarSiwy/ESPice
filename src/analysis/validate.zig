@@ -153,6 +153,7 @@ pub fn validate(query: requests.Query, n: u32) !void {
         .pac, .pxf => |o| {
             if (!std.math.isPowerOfTwo(o.n_time_samples) or @as(u32, o.n_time_samples) < 2 * (2 * @as(u32, o.n_harmonics) + 1))
                 return error.InvalidQueryOptions;
+            if (o.out_node >= n) return error.InvalidQueryOptions;
             try timeStep((1 / o.f_lo) / @as(f64, @floatFromInt(o.n_time_samples)));
             const bands = 2 * @as(usize, o.n_harmonics) + 1;
             _ = try elements(&.{ bands, n, bands, n });

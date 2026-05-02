@@ -1,10 +1,11 @@
-//! Periodic AC: settle to the LO-driven steady state, Fourier-decompose the
-//! G(t) and C(t) planes over one period, then per input frequency solve the
-//! LPTV conversion matrix that couples sidebands f_in + m*f_LO, m in -M..M.
-//! pxf.zig runs the same sweep on the transposed system.
+//! Periodic AC: shoot to the LO-driven periodic steady state, Fourier-
+//! decompose the G(t) and C(t) planes over one period, then per input
+//! frequency solve the LPTV conversion matrix that couples sidebands
+//! f_in + m*f_LO, m in -M..M. pxf.zig runs the same sweep on the transposed
+//! system, pnoise.zig on the transposed system with noise sources.
 const std = @import("std");
 const root = @import("../types.zig");
-const converger = @import("solver").converger;
+const pss = @import("pss.zig");
 const num = @import("core").numerics;
 const fft_mod = @import("solver").fft;
 const dense_lu = @import("solver").dense_lu;
@@ -13,22 +14,21 @@ pub const Complex = num.Complex;
 
 pub const Options = @import("core").query.Pac;
 
-/// The LPTV sweep PAC and PXF share: linearise about the periodic steady
-/// state, then per input frequency build the conversion matrix A(f) (A^T when
-/// `adjoint`), drive unknown `exc_node` of sideband m = 0 with `exc_val`, and
+/// The LPTV sweep PAC, PXF and PNOISE share: per input frequency build the
+/// conversion matrix A(f) (A^T when `adjoint`) from `lin`, drive sideband
+/// m = 0 with `drive` (`[re(0..n), im(0..n)]`, or empty for no drive), and
 /// solve. The caller owns `freqs` (sweep count long) and `out`:
 ///   PAC (adjoint = false): out[fi*n_sb + p] is `probe_node` at sideband
 ///     m = p - n_harmonics, output frequency f_in + m*f_LO.
 ///   PXF (adjoint = true): out[fi*n_sb*n + sb*n + node] = conj(Y), the
-///     transfer from every node at every sideband to the output `exc_node`;
-///     `probe_node` is unused.
+///     transfer from a current injected at `node` on sideband sb to the
+///     output `drive` selects; `probe_node` is unused.
 /// Cost: one dense (2(2M+1)n)^2 LU per frequency.
 pub fn sweep(
     comptime adjoint: bool,
     ckt: *root.Circuit,
-    x_init: []const f64,
-    exc_node: u32,
-    exc_val: f64,
+    lin: Linearization,
+    drive: []const f64,
     probe_node: u32,
     freqs: []f64,
     out: []Complex,
@@ -44,16 +44,16 @@ pub fn sweep(
     const n_freqs = options.sweep.count();
     std.debug.assert(freqs.len == n_freqs);
     std.debug.assert(out.len == @as(usize, n_freqs) * (if (adjoint) nn else n_sb));
-
-    const linearization = try linearize(ckt, x_init, options, allocator);
-    defer linearization.deinit(allocator);
+    std.debug.assert(drive.len == 2 * n or drive.len == 0);
 
     // Sideband p (m_p = p - n_harm, w_p = 2*pi*(f_in + m_p*f_LO)) satisfies
     //   sum_q [G_{p-q} + j*w_p*C_{p-q}] X_q = B_p
     // with G_m, C_m the m-th Fourier coefficients. The adjoint A^H Y = e is
     // A^T Y = e here, since the real expansion of A is real.
-    // ponytail: dense and serial per frequency. A batched dense LU over all
-    // frequencies is the upgrade when PAC/PXF sweeps dominate a mixer run.
+    // ponytail: dense and serial per frequency. The frequency lanes of
+    // LaneLu do not apply: G_m, C_m are complex and w_p differs per block
+    // row, so A(f) is not G + jwC. A batched dense LU over all frequencies
+    // is the upgrade when PAC/PXF sweeps dominate a mixer run.
     const a_work = try allocator.alloc(f64, nn2 * nn2);
     defer allocator.free(a_work);
     const rhs_work = try allocator.alloc(f64, nn2);
@@ -68,8 +68,11 @@ pub fn sweep(
         root.zeroSimd(a_work);
         root.zeroSimd(rhs_work);
 
-        buildConversionMatrix(adjoint, a_work, linearization, n, n_sb, nn, nn2, f_in, options);
-        rhs_work[n_harm * n + exc_node] = exc_val; // real part
+        buildConversionMatrix(adjoint, a_work, lin, n, n_sb, nn, nn2, f_in, options);
+        if (drive.len != 0) {
+            @memcpy(rhs_work[n_harm * n ..][0..n], drive[0..n]);
+            @memcpy(rhs_work[nn + n_harm * n ..][0..n], drive[n..]);
+        }
 
         try dense_lu.factorizeSolve(nn2, a_work, rhs_work, x_work);
 
@@ -99,97 +102,107 @@ pub const Linearization = struct {
     }
 };
 
-/// Settles pss_periods - 1 LO periods from x_init with frozen-time
-/// quasi-static Newton solves, samples G and C over one more period, and
-/// FFTs each pattern slot. The caller owns the result; scratch is freed.
-fn linearize(
-    ckt: *root.Circuit,
-    x_init: []const f64,
-    options: Options,
-    allocator: std.mem.Allocator,
-) !Linearization {
-    const n: usize = ckt.n;
-    const n_samples: usize = options.n_time_samples;
-    const period = 1.0 / options.f_lo;
-    const dt = period / @as(f64, @floatFromInt(n_samples));
+/// One period of the shooting PSS with every unknown recorded.
+pub const Orbit = struct {
+    /// n_samples + 1 point-major rows [t, x(0..n)], row k at t = k*T/n_samples.
+    wave: []f64,
+    converged: bool,
 
-    const nr_opts = converger.Options{
-        .max_iter = options.pss_max_newton_iter,
-        .abstol = options.pss_newton_tol,
-    };
-
-    const x_cur = try allocator.alloc(f64, n);
-    defer allocator.free(x_cur);
-    root.copySimd(x_cur, x_init[0..n]);
-
-    try ckt.computeBaseline();
-    const ws = try ckt.workspace();
-
-    const nnz: usize = ckt.nnz;
-    // Slot-major samples: g_td[slot * n_samples + k].
-    const g_td = try allocator.alloc(f64, n_samples * nnz);
-    defer allocator.free(g_td);
-    const c_td = try allocator.alloc(f64, n_samples * nnz);
-    defer allocator.free(c_td);
-
-    var t: f64 = 0;
-    const settle_steps = (@as(usize, options.pss_periods) - 1) * n_samples;
-    for (0..settle_steps) |k| {
-        if (k != 0 and k % n_samples == 0) try ckt.checkpoint(.{ .phase = .periodic, .completed = k / n_samples });
-        t += dt;
-        // Sources follow their waveform only under analysis("tran")
-        // (§4.6.1). dt stays 0: the settling is quasi-static.
-        ckt.setSimState(.{ .t = t, .kind = .tran });
-        _ = converger.run(ckt, ws, x_cur, t, nr_opts, root.EvalHook{}) catch |err| switch (err) {
-            error.QueryCancelled => return err,
-            else => {},
-        };
+    /// The state at sample k.
+    pub fn state(self: Orbit, k: usize, n: usize) []const f64 {
+        return self.wave[k * (n + 1) + 1 ..][0..n];
     }
+
+    /// Samples per period, the last row (t = T) excluded.
+    pub fn samples(self: Orbit, n: usize) usize {
+        return self.wave.len / (n + 1) - 1;
+    }
+};
+
+/// Shoots from x_init to the periodic steady state (`pss.solve`: trapezoid
+/// steps that carry the charge history) and records one period of every
+/// unknown. An unconverged shoot still returns its last period, flagged. The
+/// caller frees `wave` with `allocator`.
+pub fn orbit(ckt: *root.Circuit, x_init: []const f64, options: pss.Options, allocator: std.mem.Allocator) !Orbit {
+    const n: usize = ckt.n;
+    const rows = try allocator.alloc(u32, n);
+    defer allocator.free(rows);
+    for (rows, 0..) |*r, i| r.* = @intCast(i);
+    const wave = try allocator.alloc(f64, (@as(usize, options.n_samples) + 1) * (n + 1));
+    errdefer allocator.free(wave);
+    const res = try pss.solve(ckt, x_init, rows, wave, options, allocator);
+    return .{ .wave = wave, .converged = res.converged };
+}
+
+/// Samples G and C along `orb` and Fourier-transforms each pattern slot.
+/// The orbit's sample count must be a power of two. The caller owns the
+/// result.
+pub fn linearize(ckt: *root.Circuit, orb: Orbit, allocator: std.mem.Allocator) !Linearization {
+    const n: usize = ckt.n;
+    const n_samples = orb.samples(n);
+    const nnz: usize = ckt.nnz;
+    const plane = n_samples * nnz;
+    // Slot-major samples, G then C: td[slot * n_samples + k].
+    const td = try allocator.alloc(f64, 2 * plane);
+    defer allocator.free(td);
 
     for (0..n_samples) |k| {
         if (k != 0 and k % 64 == 0) try ckt.checkpoint(.{ .phase = .prepare, .completed = k, .total = n_samples });
-        t += dt;
+        const t = orb.wave[k * (n + 1)];
+        // Sources follow their waveform only under analysis("tran") (§4.6.1).
         ckt.setSimState(.{ .t = t, .kind = .tran });
-        _ = converger.run(ckt, ws, x_cur, t, nr_opts, root.EvalHook{}) catch |err| switch (err) {
-            error.QueryCancelled => return err,
-            else => {},
-        };
-        ckt.eval(x_cur, t);
+        ckt.eval(orb.state(k, n), t);
         for (ckt.g_vals[0..nnz], ckt.c_vals[0..nnz], 0..) |g, c, slot| {
-            g_td[slot * n_samples + k] = g;
-            c_td[slot * n_samples + k] = c;
+            td[slot * n_samples + k] = g;
+            td[plane + slot * n_samples + k] = c;
         }
     }
 
     // Only pattern slots: a structurally zero entry's series FFTs to +0 in
     // every bin, which adds nothing to the zeroed conversion matrix.
-    const g_hat = try allocator.alloc(Complex, n_samples * nnz);
+    const g_hat = try allocator.alloc(Complex, plane);
     errdefer allocator.free(g_hat);
-    const c_hat = try allocator.alloc(Complex, n_samples * nnz);
+    const c_hat = try allocator.alloc(Complex, plane);
     errdefer allocator.free(c_hat);
-
-    const fft_re = try allocator.alloc(f64, n_samples);
-    defer allocator.free(fft_re);
-    const fft_im = try allocator.alloc(f64, n_samples);
-    defer allocator.free(fft_im);
-
-    const inv_n = 1.0 / @as(f64, @floatFromInt(n_samples));
-
-    for (0..nnz) |slot| {
-        inline for (.{ .{ g_td, g_hat }, .{ c_td, c_hat } }) |plane| {
-            @memcpy(fft_re, plane[0][slot * n_samples ..][0..n_samples]);
-            @memset(fft_im, 0);
-            fft_mod.fft(fft_re, fft_im);
-            for (0..n_samples) |m| {
-                plane[1][m * nnz + slot] = .{
-                    .re = fft_re[m] * inv_n,
-                    .im = fft_im[m] * inv_n,
-                };
-            }
-        }
-    }
+    try spectra(td[0..plane], n_samples, g_hat, allocator);
+    try spectra(td[plane..], n_samples, c_hat, allocator);
 
     return .{ .g_hat = g_hat, .c_hat = c_hat, .col_ptr = ckt.col_ptr, .row_idx = ckt.row_idx };
+}
+
+/// Fourier coefficients of the `td.len / n_samples` series stored
+/// series-major in `td` (td[s * n_samples + k]), written bin-major into
+/// `hat` (hat[m * count + s]) and scaled by 1/n_samples, so bin m is the
+/// m-th complex Fourier coefficient. n_samples must be a power of two.
+pub fn spectra(td: []const f64, n_samples: usize, hat: []Complex, allocator: std.mem.Allocator) !void {
+    std.debug.assert(hat.len == td.len);
+    const count = td.len / n_samples;
+    const fft_buf = try allocator.alloc(f64, 2 * n_samples);
+    defer allocator.free(fft_buf);
+    const fft_re = fft_buf[0..n_samples];
+    const fft_im = fft_buf[n_samples..];
+    const inv_n = 1.0 / @as(f64, @floatFromInt(n_samples));
+    for (0..count) |s| {
+        @memcpy(fft_re, td[s * n_samples ..][0..n_samples]);
+        @memset(fft_im, 0);
+        fft_mod.fft(fft_re, fft_im);
+        for (0..n_samples) |m| hat[m * count + s] = .{ .re = fft_re[m] * inv_n, .im = fft_im[m] * inv_n };
+    }
+}
+
+/// Shoots to the LO-periodic steady state in n_time_samples steps and
+/// linearizes about it: the PAC and PXF front half. The caller owns the
+/// result.
+pub fn settle(ckt: *root.Circuit, x_init: []const f64, options: Options, allocator: std.mem.Allocator) !Linearization {
+    const orb = try orbit(ckt, x_init, .{
+        .tol = options.tol,
+        .period = 1.0 / options.f_lo,
+        .n_samples = options.n_time_samples,
+        .max_newton_iter = options.pss_max_newton_iter,
+        .newton_tol = options.pss_newton_tol,
+    }, allocator);
+    defer allocator.free(orb.wave);
+    return linearize(ckt, orb, allocator);
 }
 
 /// Adds the real-expanded LPTV matrix into the zeroed `a_work`
@@ -207,9 +220,9 @@ pub inline fn buildConversionMatrix(
     f_in: f64,
     options: Options,
 ) void {
-    const n_samples: usize = options.n_time_samples;
     const n_harm: usize = options.n_harmonics;
-    const nnz = lin.g_hat.len / n_samples;
+    const nnz: usize = lin.col_ptr[n];
+    const n_samples = lin.g_hat.len / nnz;
     for (0..n_sb) |p| {
         const m_p: i32 = @as(i32, @intCast(p)) - @as(i32, @intCast(n_harm));
         const omega_p = 2.0 * std.math.pi * (f_in + @as(f64, @floatFromInt(m_p)) * options.f_lo);
@@ -243,14 +256,11 @@ pub inline fn buildConversionMatrix(
     }
 }
 
-/// Contract entry: drive ctx.source_node, read the last probe. Point-major
+/// Contract entry: the deck's AC excitation (`ctx.ac_drive`, applied as
+/// `.ac` applies it) on sideband 0, read at `opts.out_node`. Point-major
 /// complex rows (frequency, tf_h{-M}..tf_h{+M}), (re, im) per variable.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
-    const x_op = ctx.x_op;
-    if (ctx.probes.len == 0) return error.NoProbe;
-    const probe = ctx.probes[ctx.probes.len - 1];
-
     const n_freqs: usize = opts.sweep.count();
     const n_sb: usize = 2 * @as(usize, opts.n_harmonics) + 1;
     const scratch = ctx.scratch_allocator;
@@ -259,7 +269,9 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const transfer = try scratch.alloc(Complex, n_freqs * n_sb);
     defer scratch.free(transfer);
 
-    try sweep(false, ctx.circuit, x_op, ctx.source_node, 1.0, probe, freqs, transfer, opts, scratch);
+    const lin = try settle(ctx.circuit, ctx.x_op, opts, scratch);
+    defer lin.deinit(scratch);
+    try sweep(false, ctx.circuit, lin, ctx.ac_drive, opts.out_node, freqs, transfer, opts, scratch);
 
     const names = try a.alloc([]const u8, 1 + n_sb);
     names[0] = "frequency";
