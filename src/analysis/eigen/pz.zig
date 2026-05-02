@@ -103,7 +103,8 @@ pub fn solve(
     // Denominator: σ = 0 and no rank count, the form every bare `.pz` deck is
     // validated against.
     try shiftedFactor(&w, 0, 0);
-    const den = buildA(&w, options);
+    buildA(&w);
+    const den = qr.eigenvalues(n, w.a, eigs, options.qr_tol, options.qr_max_iter);
 
     // s = 1/λ = conj(λ)/|λ|². |λ| ≈ 0 is a row with no dynamics (a resistive
     // node, a branch row), not a pole at the origin, and it is zero to within
@@ -172,16 +173,15 @@ fn shiftedFactor(w: *Work, sigma: f64, min_ratio: f64) !void {
     if (min_piv <= min_ratio * scale) return error.Singular;
 }
 
-/// A = −M⁻¹C, one back-substitution per column of C against the LU in `w.m`,
-/// then its eigenvalues into `w.eigs`.
-fn buildA(w: *Work, options: Options) qr.Eigs {
+/// A = −M⁻¹C into `w.a`, one back-substitution per column of C against the
+/// LU in `w.m`.
+fn buildA(w: *Work) void {
     const n = w.n;
     for (0..n) |j| {
         for (0..n) |r| w.col[r] = w.c[r * n + j];
         dense_lu.solveFactored(n, w.m, w.piv, w.col, w.sol);
         for (0..n) |r| w.a[r * n + j] = -w.sol[r];
     }
-    return qr.eigenvalues(n, w.a, w.eigs, options.qr_tol, options.qr_max_iter);
 }
 
 /// Rewrites (G, C) in place as the transfer numerator's pencil: the MNA with
@@ -243,10 +243,12 @@ fn zeroRoots(w: *Work, options: Options, pole_scale: f64) !qr.Eigs {
         break;
     }
 
-    const found = buildA(w, options);
+    buildA(w);
     // How many eigenvalues are nonzero in exact arithmetic (see coreRank);
-    // the rest are roots at infinity.
-    const keep = @min(coreRank(w), found.count);
+    // the rest are roots at infinity. Counted before the QR destroys A.
+    const rank = coreRank(w);
+    const found = qr.eigenvalues(n, w.a, w.eigs, options.qr_tol, options.qr_max_iter);
+    const keep = @min(rank, found.count);
     // |λ| descending puts the genuine roots first: the spurious ones belong to
     // the nilpotent block and sit within eps^(1/k)·‖A‖ of zero. A conjugate
     // pair shares a magnitude, so this never splits one.
