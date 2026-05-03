@@ -229,7 +229,7 @@ module bsim2(d, g, s, b);
     real vgst, vgeff, dvgeff, ua, ub, uvert, u1s, u1, vc, kk, vdsat, vdsch, t4;
     real beta0b, betas, beta1, beta2, beta3, beta4, beta, betaeff, targ;
     real ai, bi, dvds, fclm, idscore, gmch, id, idst;
-    real qgch, qbch, qdch, qgso, qgdo, qgbo, qbs, qbd;
+    real qgch, qbch, qdch, qgso, qgdo, qgbo, qbs, qbd, dq;
 
     // Junction depletion charge, forward/reverse blended by a steep sigmoid
     // (one differentiable expression instead of a v<0 branch). The reverse
@@ -590,7 +590,9 @@ module bsim2(d, g, s, b);
         I(b, di) <+ ddt(qbd);
         // The channel charge's drain side is di in forward mode, si in
         // reverse (the intrinsic charges are in the swapped frame).
-        if (mode >= 0.0) I(di, si) <+ ddt(qdch);
-        else I(si, di) <+ ddt(qdch);
+        // LRM 5.8.1: ddt on the spine, only its use conditional (E0514).
+        dq = ddt(qdch);
+        if (mode >= 0.0) I(di, si) <+ dq;
+        else I(si, di) <+ dq;
     end
 endmodule
