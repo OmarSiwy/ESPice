@@ -40,6 +40,8 @@ const max_consts = 32;
 
 pub const U = enum(u8) { p, n, c0, c1, c2, c3, c4, c5, c6, c7, br };
 pub const num_ports: usize = 2 + max_probes;
+/// Hand-written against VerA's device ABI 4 (`contract.abi_version`); review on a bump.
+pub const contract_abi: u32 = 4;
 const n_u = contract.nU(Self);
 const br = @intFromEnum(U.br);
 
