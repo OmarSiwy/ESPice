@@ -1,6 +1,4 @@
 VBIC Pole Zero Test
-* KNOWN GAP: explicit PZ ports and transfer zeros are not yet exposed by the dispatcher.
-* This correctness test should currently fail; implement support to match the expected output.
 * Expected results: device_vbic_ce_amp.expected.json
 * Origin: benchmark/fixtures/devices/vbic_ce_amp/circuit.sp
 
