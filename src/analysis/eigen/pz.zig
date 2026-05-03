@@ -31,9 +31,6 @@ pub const Options = @import("core").query.Pz;
 pub const Roots = struct {
     poles: []Complex,
     zeros: []Complex,
-    /// False if the QR hit qr_max_iter before deflating every eigenvalue; the
-    /// root lists are then incomplete.
-    qr_converged: bool,
     allocator: std.mem.Allocator,
 
     /// Frees both root lists.
@@ -65,7 +62,12 @@ const Work = struct {
 /// Poles and, when the directive asks for them, transfer zeros at the
 /// operating point `x_op`. Returns error.Singular when G itself is singular
 /// (a node reached only through capacitors), or when no shift of the zeros'
-/// ladder gives a factorable numerator.
+/// ladder gives a factorable numerator, and error.PzDidNotConverge when the
+/// QR runs out of `qr_max_iter` with roots still missing: a partial root set
+/// is never returned.
+///
+/// Diverges from ngspice, which warns at its iteration limit and publishes
+/// the roots it found (cktpzstr.c:225).
 pub fn solve(
     ckt: *root.Circuit,
     x_op: []const f64,
@@ -76,7 +78,7 @@ pub fn solve(
 
     try ckt.linearizeAc(x_op);
 
-    const planes: usize = if (options.want_zeros) 5 else 4;
+    const planes: usize = if (options.want != .poles) 5 else 4;
     const arena = try allocator.alloc(f64, planes * n * n + 2 * n);
     defer allocator.free(arena);
     const piv = try allocator.alloc(u32, n);
@@ -91,7 +93,7 @@ pub fn solve(
         .c = arena[n * n .. 2 * n * n],
         .m = arena[2 * n * n .. 3 * n * n],
         .a = arena[3 * n * n .. 4 * n * n],
-        .p = if (options.want_zeros) arena[4 * n * n .. 5 * n * n] else &.{},
+        .p = if (options.want != .poles) arena[4 * n * n .. 5 * n * n] else &.{},
         .col = arena[planes * n * n ..][0..n],
         .sol = arena[planes * n * n + n ..][0..n],
         .piv = piv,
@@ -105,6 +107,7 @@ pub fn solve(
     try shiftedFactor(&w, 0, 0);
     buildA(&w);
     const den = qr.eigenvalues(n, w.a, eigs, options.qr_tol, options.qr_max_iter);
+    if (!den.converged) return error.PzDidNotConverge;
 
     // s = 1/λ = conj(λ)/|λ|². |λ| ≈ 0 is a row with no dynamics (a resistive
     // node, a branch row), not a pole at the origin, and it is zero to within
@@ -122,7 +125,7 @@ pub fn solve(
 
     // The pole set is built even for `zer`, because it also fixes the
     // frequency scale the zeros' shift ladder is measured in.
-    const poles = try allocator.alloc(Complex, if (options.want_poles) n_poles else 0);
+    const poles = try allocator.alloc(Complex, if (options.want != .zeros) n_poles else 0);
     errdefer allocator.free(poles);
     var scale: f64 = 0;
     var kept: usize = 0;
@@ -130,17 +133,16 @@ pub fn solve(
         const m2 = l.magSq();
         if (l.mag() <= cutoff or m2 == 0) continue;
         const pole = Complex{ .re = l.re / m2, .im = -l.im / m2 };
-        if (options.want_poles) poles[kept] = pole;
+        if (options.want != .zeros) poles[kept] = pole;
         kept += 1;
         scale = @max(scale, pole.mag());
     }
 
     var zeros: []Complex = &.{};
-    var converged = den.converged;
-    if (options.want_zeros) {
+    if (options.want != .poles) {
         numeratorPencil(&w, options);
         const num = try zeroRoots(&w, options, scale);
-        converged = converged and num.converged;
+        if (!num.converged) return error.PzDidNotConverge;
         zeros = try allocator.alloc(Complex, num.count);
         @memcpy(zeros, eigs[0..num.count]);
     }
@@ -148,7 +150,6 @@ pub fn solve(
     return .{
         .poles = poles,
         .zeros = zeros,
-        .qr_converged = converged,
         .allocator = allocator,
     };
 }
@@ -371,7 +372,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     defer res.deinit();
 
-    if (!opts.want_zeros) {
+    if (opts.want == .poles) {
         const n = res.poles.len;
         const names = try a.dupe([]const u8, &.{ "index", "pole" });
         const data = try a.alloc(f64, n * 4);

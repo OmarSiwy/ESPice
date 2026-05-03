@@ -54,6 +54,27 @@ test "spectral queries cannot publish an unconverged result" {
     }
 }
 
+test "pz cannot publish a partial root set" {
+    const problem = try api.Problem.init(std.testing.allocator, std.testing.io, .{
+        .source = .{ .bytes = .{ .origin = "ladder.cir", .data =
+        \\three-pole ladder
+        \\v1 in 0 dc 0 ac 1
+        \\r1 in 1 1k
+        \\c1 1 0 1u
+        \\r2 1 2 1k
+        \\c2 2 0 1u
+        \\r3 2 3 1k
+        \\c3 3 0 1u
+        \\.end
+        } },
+    });
+    defer problem.deinit();
+    var ids: [1]api.QueryId = undefined;
+    _ = try problem.append_queries(&.{.{ .pz = .{ .qr_max_iter = 1 } }}, &ids);
+    try std.testing.expectError(error.PzDidNotConverge, problem.run_all());
+    try std.testing.expectError(error.ResultUnavailable, problem.result(ids[0]));
+}
+
 test "a failed query does not prevent an independent query from completing" {
     const p = try api.Problem.init(std.testing.allocator, std.testing.io, .{
         .source = .{ .bytes = .{ .data = "failure isolation\nV1 in 0 dc 1 ac 1 sin(0 1 1k)\nR1 in out 1k\nC1 out 0 1u\n.end\n", .origin = "failure.cir" } },
