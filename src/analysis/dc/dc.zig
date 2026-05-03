@@ -30,12 +30,34 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     // V and an I card (their per-type indices overlap) and lets the sweep
     // name a resistor.
     const refs = try ckt.collectParams();
-    const t = findTarget(refs, opts.target) orelse return error.DcSweepSourceNotFound;
-    const saved = t.get();
+    // A null target is the temperature (`.dc TEMP ...`).
+    const t: ?root.ParamRef = if (opts.target.is_temp)
+        null
+    else
+        findTarget(refs, opts.target) orelse return error.DcSweepSourceNotFound;
+    const saved: f64 = if (t) |r| r.get() else 0;
     defer {
-        t.set(saved);
+        if (t) |r| r.set(saved);
         ckt.recompute() catch unreachable; // restores the checked original source value
     }
+    // A temperature sweep at either level writes every instance's
+    // temperature; put the netlist's back before the recompute above.
+    const sweeps_temp = opts.target.is_temp or (opts.hasOuter() and opts.target2.?.is_temp);
+    var temperatures: std.ArrayList(f64) = .empty;
+    defer temperatures.deinit(scratch);
+    if (sweeps_temp) for (refs) |ref| {
+        if (ref.is_instance and std.mem.eql(u8, ref.param_name, "temperature"))
+            try temperatures.append(scratch, ref.get());
+    };
+    defer if (sweeps_temp) {
+        var i: usize = 0;
+        for (refs) |ref| {
+            if (ref.is_instance and std.mem.eql(u8, ref.param_name, "temperature")) {
+                ref.set(temperatures.items[i]);
+                i += 1;
+            }
+        }
+    };
 
     const n_inner = sweepCount(opts.start, opts.stop, opts.step);
     const n_outer: usize = if (opts.hasOuter()) sweepCount(opts.start2, opts.stop2, opts.step2) else 1;
@@ -56,21 +78,6 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         const saved2: f64 = if (t2) |r| r.get() else 0;
         defer if (t2) |r| {
             r.set(saved2);
-        };
-        var temperatures: std.ArrayList(f64) = .empty;
-        defer temperatures.deinit(scratch);
-        if (outer.is_temp) for (refs) |ref| {
-            if (ref.is_instance and std.mem.eql(u8, ref.param_name, "temperature"))
-                try temperatures.append(scratch, ref.get());
-        };
-        defer if (outer.is_temp) {
-            var i: usize = 0;
-            for (refs) |ref| {
-                if (ref.is_instance and std.mem.eql(u8, ref.param_name, "temperature")) {
-                    ref.set(temperatures.items[i]);
-                    i += 1;
-                }
-            }
         };
         // Accumulated, not start + k*step: ngspice steps both levels with
         // `+= TRCVvStep` (dctrcurv.c:469) and its axis carries that roundoff
@@ -120,14 +127,15 @@ fn findTarget(refs: []const root.ParamRef, want: Options.SweepTarget) ?root.Para
     return null;
 }
 
-/// Sweeps `t` over `npoints` values into `data` (row-major, `ncols` wide).
+/// Sweeps `t` over `npoints` values into `data` (row-major, `ncols` wide);
+/// a null `t` sweeps the circuit temperature.
 /// Each point warm-starts from the previous solution; the first point, and
 /// any point whose warm Newton fails, cold-starts through the full OP ladder.
 fn runSerial(
     ctx: *const root.RunCtx,
     ckt: *root.Circuit,
     a: std.mem.Allocator,
-    t: root.ParamRef,
+    t: ?root.ParamRef,
     opts: Options,
     npoints: usize,
     ncols: usize,
@@ -146,14 +154,16 @@ fn runSerial(
         if (pt != 0) try ckt.checkpoint(.{ .phase = .dc, .completed = pt, .total = npoints });
         // Accumulated like ngspice (see the outer loop in `run`).
         if (pt != 0) v += opts.step;
-        t.set(v);
+        if (t) |r| r.set(v) else ckt.setCircuitTemp(@floatCast(v));
         // Recompute device params so const-Jacobian stamps see the new value.
         // Only `t`'s device type moved, so later points re-derive just that
         // type (a full walk cost 1,811 BJT preamble runs on a one-instance
         // deck). Point 0 takes the full walk: an outer `.dc ... temp` loop
         // may just have changed the temperature and re-wired a device (see
-        // `Circuit.recomputeType`).
-        if (pt == 0) try ckt.recompute() else try ckt.recomputeType(t.type);
+        // `Circuit.recomputeType`). A temperature point moves every type.
+        if (t) |r| {
+            if (pt == 0) try ckt.recompute() else try ckt.recomputeType(r.type);
+        } else try ckt.recompute();
         try ckt.computeBaseline();
 
         var converged = false;
