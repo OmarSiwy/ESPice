@@ -1587,7 +1587,9 @@ analog begin : analogBlock
         Ibex     =  Ibex + gminMod * Vbex;
         Ibep     =  Ibep + gminMod * Vbep;
         Ibc      =  Ibc  + gminMod * Vbci;
-        Igcx     =  Igcx + gminMod * Vbxcx;
+        // ngspice puts gmin on Irci (three terms, vbicload.c:765-770), not
+        // on Igcx.
+        Irci     =  Irci + gminMod * (Vrci + Vbci + Vbcx);
             Ibcp     =  Ibcp + gminMod * Vbcp;
 
         //
