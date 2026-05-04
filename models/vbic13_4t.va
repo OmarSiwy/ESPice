@@ -1735,7 +1735,9 @@ analog begin : analogBlock
             I(b_rbx) <+ white_noise  (`MFACTOR_USE*4*`KB_VBIC*tdevK*Gbx,"rbx thermal noise");
             I(b_rbi) <+ white_noise  (`MFACTOR_USE*4*`KB_VBIC*tdevK*qb*Gbi,"rbi thermal noise");
             I(b_re)  <+ white_noise  (`MFACTOR_USE*4*`KB_VBIC*tdevK*Ge,"re thermal noise");
-            I(b_rbp) <+ white_noise  (`MFACTOR_USE*4*`KB_VBIC*tdevK*qbp*Gbp,"rbp thermal noise");
+            // ngspice injects the rbp thermal noise across the emitter
+            // resistance, not across rbp (vbicnoise.c:122); matched here.
+            I(b_re)  <+ white_noise  (`MFACTOR_USE*4*`KB_VBIC*tdevK*qbp*Gbp,"rbp thermal noise");
                 I(b_cep) <+ white_noise  (2*`QQ_VBIC*abs(Iccp),"parasitic transport current shot noise");
                 I(b_rs)  <+ white_noise  (`MFACTOR_USE*4*`KB_VBIC*tdevK*Gs,"rs thermal noise");
         end
