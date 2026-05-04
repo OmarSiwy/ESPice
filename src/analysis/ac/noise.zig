@@ -89,14 +89,15 @@ pub fn sweep(
     var stream = try freq.Stream.init(allocator, &fs, omegas, e, true);
     defer stream.deinit(allocator);
 
-    // ln of each source's density at the previous point (ngspice's
-    // `nVar[LNLSTDENS][i]`), the other end of the per-source fit. The first
-    // half is output-referred, the second input-referred: dividing by a
-    // frequency-dependent gain does not rescale the integral, so the input
-    // side needs its own fit.
+    // ln of each source's output density at the previous point (ngspice's
+    // `nVar[LNLSTDENS][i]`), the other end of the per-source fit; then the
+    // same densities unlogged. The input side divides the previous point's
+    // output density by the CURRENT gain, as every ngspice device does
+    // (resnoise.c:145-150, `LNLSTDENS + lnGainInv`): the gain is held
+    // constant across the interval.
     const ln_last = try allocator.alloc(f64, 2 * noise_sources.len);
     defer allocator.free(ln_last);
-    const ln_last_in = ln_last[noise_sources.len..];
+    const dens_last = ln_last[noise_sources.len..];
 
     var integrated: f64 = 0;
     var integrated_in: f64 = 0;
@@ -123,12 +124,13 @@ pub fn sweep(
         const gain_sq: f64 = if (options.in_branch) |br| blk: {
             const g_re = y[br];
             const g_im = y[n + br];
-            break :blk g_re * g_re + g_im * g_im;
+            // Floored at N_MINGAIN (noisean.c:487-488).
+            break :blk @max(g_re * g_re + g_im * g_im, 1e-20);
         } else 0;
 
         var total_density: f64 = 0;
         var total_in_density: f64 = 0;
-        for (noise_sources, ln_last[0..noise_sources.len], ln_last_in) |src, *last, *last_in| {
+        for (noise_sources, ln_last[0..noise_sources.len], dens_last) |src, *last, *last_dens| {
             const psd = sourcePsd(src, f);
             const yp_re: f64 = if (src.node_p != root.GROUND) y[src.node_p] else 0;
             const yn_re: f64 = if (src.node_n != root.GROUND) y[src.node_n] else 0;
@@ -146,13 +148,13 @@ pub fn sweep(
             last.* = ln_dens;
 
             if (options.in_branch != null) {
-                const dens_in = if (gain_sq > 0) dens / gain_sq else 0;
+                const dens_in = dens / gain_sq;
                 total_in_density += dens_in;
                 const ln_dens_in = @log(@max(dens_in, n_minlog));
                 if (band.del_freq != 0) {
-                    integrated_in += nintegrate(dens_in, ln_dens_in, last_in.*, band);
+                    integrated_in += nintegrate(dens_in, ln_dens_in, @log(@max(last_dens.* / gain_sq, n_minlog)), band);
                 }
-                last_in.* = ln_dens_in;
+                last_dens.* = dens;
             }
         }
 
