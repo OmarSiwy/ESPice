@@ -485,7 +485,17 @@ pub fn simulate(
             }
         }
 
-        if (t >= options.t_start) try waveform.record(t, cur, probes);
+        if (t >= options.t_start) {
+            // ngspice does not step onto TSTART (dctran.c records the first
+            // accepted t >= TSTART), and landing there would shift the whole
+            // accepted grid. The first printed point is still TSTART itself,
+            // interpolated from the step that crosses it (`trial` holds the
+            // previous accepted state after the swap).
+            const t_prev = t - dt;
+            if (t_prev < options.t_start and t > options.t_start)
+                try waveform.recordLerp(options.t_start, trial, cur, (options.t_start - t_prev) / dt, probes);
+            try waveform.record(t, cur, probes);
+        }
 
         // Clamp dt to land on the next breakpoint, skipping those within
         // min_break of now (ngspice CKTminBreak merge).
@@ -497,10 +507,6 @@ pub fn simulate(
                 bp_target = bp;
             }
         }
-
-        // Land exactly on t_start so the first printed point is there, as
-        // ngspice does with a breakpoint. Not a discontinuity: no order drop.
-        if (t < options.t_start and t + dt_next > options.t_start) dt_next = options.t_start - t;
 
         dt = dt_next;
         if (t + dt > options.t_stop) dt = options.t_stop - t;
