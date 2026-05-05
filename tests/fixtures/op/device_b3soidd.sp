@@ -1,6 +1,4 @@
 * BSIM3SOI-DD (Dynamic Depletion) NMOS operating point.
-* KNOWN GAP: the BSIM3SOI FD/DD model families are absent from the current device catalog.
-* This correctness test should currently fail; implement support to match the expected output.
 * Expected results: device_b3soidd.expected.json
 * Origin: benchmark/fixtures/devices/b3soidd/circuit.sp
 * ngspice: NMOS level=56, 4 terminals (D G S E).
