@@ -8,8 +8,8 @@ const has = device.has;
 const byName = device.byName;
 
 /// Every model name the dispatch policy can name. The type behind a tag
-/// comes from the catalog via `Type`. Names with no generated model (BSIM3,
-/// the B3SOI family, SOI3) are tags anyway so the level tables can report
+/// comes from the catalog via `Type`. Names with no generated model
+/// (B3SOIPD, SOI3) are tags anyway so the level tables can report
 /// them by name. Written out rather than reflected from the catalog because
 /// `@Enum` cannot attach the `Type` declaration.
 pub const DeviceId = enum {

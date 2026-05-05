@@ -1,0 +1,1031 @@
+// BSIM3SOI-DD 2.1 dynamically depleted SOI MOSFET (ngspice netlist letter M,
+// LEVEL 56).
+//
+// Verilog-A implementation: Omar El-Sawy, University of Waterloo.
+// Based on: ngspice bsim3soi_dd (b3soiddset.c, b3soiddtemp.c, b3soiddld.c),
+//   BSIMDD2.1 (99/9/27) by Weidong Liu, Pin Su, Samuel Fung, Dennis
+//   Sinitsky, Stephen Tang and Wei Jin, UC Berkeley.
+//   ngspice: Copyright Regents of the University of California and others,
+//   modified BSD license.
+//
+// Same film/temperature prep as models/b3soifd.va (b3soiddset.c and
+// b3soiddtemp.c differ from the FD files only in the body node). Four
+// terminals (D G S E): the body is the internal floating node b (ngspice
+// bodyMod 0 with a created "Body" node), held by impact ionization, GIDL,
+// the S/D diodes, the parasitic BJT and tunnelling. Physical constants are
+// b3soiddld.c's own #defines, so values match the C bit for bit.
+//
+// Not implemented:
+//   * Hand-chained d*/dV of the C: AD differentiates the value chain.
+//   * Self-heating (shMod 1 with rth0 > 0): runs isothermal.
+//     ponytail: add the temperature node when a deck sets shMod=1.
+//   * Body-contacted cards (5-7 nodes, bodyMod 1/2, Ibp) and noise.
+//   * L/W/P binning, except kb3/dvbd0/dvbd1: b3soiddset.c defaults their
+//     l/w/p terms to 1.0 (not 0), so those three bin even on a plain card.
+//     ponytail: the other ~300 l*/w*/p* params; add when a deck bins.
+//   * Newton limiting (B3SOIDDlimit, SmartVbs): shapes the path, not the
+//     solution.
+module b3soidd(d, g, s, e);
+    inout d, g, s, e;
+    electrical d, g, s, e;
+    electrical di, si;              // behind RSH*NRD/NRS (collapse at 0)
+    electrical b;                   // floating body
+
+    // ---- model parameters (b3soidd.c spellings, b3soiddset.c defaults) ----
+    parameter real type = 1.0;           // +1 NMOS, -1 PMOS (builder-set)
+    parameter integer mobmod = 1 from [1:3];
+    parameter integer capmod = 2 from [0:3];
+    parameter real tnom = $simparam("tnom");          // degC
+    parameter real tox  = 100.0e-10;
+    parameter real cdsc = 2.4e-4;
+    parameter real cdscb = 0.0;
+    parameter real cdscd = 0.0;
+    parameter real cit  = 0.0;
+    parameter real nfactor = 1.0;
+    parameter real vsat = 8.0e4;
+    parameter real at   = 3.3e4;
+    parameter real a0   = 1.0;
+    parameter real ags  = 0.0;
+    parameter real a1   = 0.0;
+    parameter real a2   = 1.0;
+    parameter real keta = -0.6;
+    parameter real nsub = 6.0e16;
+    parameter real nch  = 1.7e17;        // npeak; >1e20 read as m^-3
+    parameter real ngate = 0.0;          // >1e23 read as m^-3
+    parameter real gamma1 = 0.0;         // default: derived
+    parameter real gamma2 = 0.0;         // default: derived
+    parameter real vbx  = 0.0;           // default: derived
+    parameter real vbm  = -3.0;
+    parameter real xt   = 1.55e-7;
+    parameter real k1   = 0.53;          // default: derived when neither k given
+    parameter real k2   = -0.0186;
+    parameter real kt1  = -0.11;
+    parameter real kt1l = 0.0;
+    parameter real kt2  = 0.022;
+    parameter real k3   = 0.0;
+    parameter real k3b  = 0.0;
+    parameter real w0   = 2.5e-6;
+    parameter real nlx  = 1.74e-7;
+    parameter real dvt0 = 2.2;
+    parameter real dvt1 = 0.53;
+    parameter real dvt2 = -0.032;
+    parameter real dvt0w = 0.0;
+    parameter real dvt1w = 5.3e6;
+    parameter real dvt2w = -0.032;
+    parameter real drout = 0.56;
+    parameter real dsub = 0.56;          // default: drout
+    parameter real vth0 = 0.7;           // signed; default derived from vfb = -1
+    parameter real ua   = 2.25e-9;
+    parameter real ua1  = 4.31e-9;
+    parameter real ub   = 5.87e-19;
+    parameter real ub1  = -7.61e-18;
+    parameter real uc   = -0.0465e-9;    // default: mobmod-dependent
+    parameter real uc1  = -0.056e-9;     // default: mobmod-dependent
+    parameter real u0   = 0.067;         // default: type-dependent; >1 in cm^2/Vs
+    parameter real ute  = -1.5;
+    parameter real voff = -0.08;
+    parameter real delta = 0.01;
+    parameter real rdsw = 100.0;
+    parameter real prwg = 0.0;
+    parameter real prwb = 0.0;
+    parameter real prt  = 0.0;
+    parameter real eta0 = 0.08;
+    parameter real etab = -0.07;
+    parameter real pclm = 1.3;
+    parameter real pdiblc1 = 0.39;
+    parameter real pdiblc2 = 0.0086;
+    parameter real pdiblcb = 0.0;
+    parameter real pvag = 0.0;
+    parameter real wr   = 1.0;
+    parameter real dwg  = 0.0;
+    parameter real dwb  = 0.0;
+    parameter real b0   = 0.0;
+    parameter real b1   = 0.0;
+    parameter real tbox = 3.0e-7;
+    parameter real tsi  = 1.0e-7;
+    parameter real xj   = 1.0e-7;        // default: tsi
+    parameter real kb1  = 1.0;
+    parameter real kb3  = 1.0;
+    parameter real dvbd0 = 0.0;
+    parameter real dvbd1 = 0.0;
+    parameter real vbsa = 0.0;
+    parameter real delp = 0.02;
+    parameter real adice0 = 1.0;
+    parameter real abp  = 1.0;
+    parameter real mxc  = -0.9;
+    parameter real isdif = 0.0;
+    parameter real isrec = 1.0e-5;
+    // body currents
+    parameter real alpha0 = 0.0;
+    parameter real alpha1 = 1.0;
+    parameter real beta0 = 30.0;
+    parameter real aii  = 0.0;
+    parameter real bii  = 0.0;
+    parameter real cii  = 0.0;
+    parameter real dii  = -1.0;
+    parameter real agidl = 0.0;
+    parameter real bgidl = 0.0;
+    parameter real ngidl = 1.2;
+    parameter real ndiode = 1.0;
+    parameter real ntun = 10.0;
+    parameter real isbjt = 1.0e-6;
+    parameter real istun = 0.0;
+    parameter real xbjt = 2.0;
+    parameter real xdif = 2.0;
+    parameter real xrec = 20.0;
+    parameter real xtun = 0.0;
+    parameter real edl  = 2.0e-6;
+    parameter real kbjt1 = 0.0;
+    parameter real tt   = 1.0e-12;
+    parameter real cjswg = 1.0e-10;
+    parameter real pbswg = 0.7;
+    parameter real mjswg = 0.5;
+    parameter real rsh  = 0.0;
+    // the only binned params (see header)
+    parameter integer binunit = 1;
+    parameter real lkb3 = 1.0;
+    parameter real wkb3 = 1.0;
+    parameter real pkb3 = 1.0;
+    parameter real ldvbd0 = 1.0;
+    parameter real wdvbd0 = 1.0;
+    parameter real pdvbd0 = 1.0;
+    parameter real ldvbd1 = 1.0;
+    parameter real wdvbd1 = 1.0;
+    parameter real pdvbd1 = 1.0;
+    // geometry corrections
+    parameter real lint = 0.0;
+    parameter real ll   = 0.0;
+    parameter real lln  = 1.0;
+    parameter real lw   = 0.0;
+    parameter real lwn  = 1.0;
+    parameter real lwl  = 0.0;
+    parameter real wint = 0.0;
+    parameter real wl   = 0.0;
+    parameter real wln  = 1.0;
+    parameter real ww   = 0.0;
+    parameter real wwn  = 1.0;
+    parameter real wwl  = 0.0;
+    parameter real dwc  = 0.0;           // default: wint
+    parameter real dlc  = 0.0;           // default: lint
+    // C-V
+    parameter real xpart = 0.0;
+    parameter real cgso = 0.0;           // default: derived
+    parameter real cgdo = 0.0;           // default: derived
+    parameter real cgeo = 0.0;
+    parameter real cgsl = 0.0;
+    parameter real cgdl = 0.0;
+    parameter real ckappa = 0.6;
+    parameter real cf   = 0.0;           // default: derived from tox
+    parameter real clc  = 0.1e-7;
+    parameter real cle  = 0.0;
+    parameter real vsdfb = 0.0;          // default: derived
+    parameter real vsdth = 0.0;          // default: derived
+    parameter real csdmin = 0.0;         // default: derived
+    parameter real asd  = 0.3;
+    parameter real csdesw = 0.0;
+    aliasparam vtho = vth0;
+    aliasparam npeak = nch;
+
+    // ---- instance parameters ---------------------------------------------
+    parameter real l  = 5.0e-6 from (0:inf);
+    parameter real w  = 5.0e-6 from (0:inf);
+    parameter real ad = 0.0;
+    parameter real as = 0.0;
+    parameter real pd = 0.0;
+    parameter real ps = 0.0;
+    parameter real nrd = 1.0 from [0:inf);
+    parameter real nrs = 1.0 from [0:inf);
+    parameter real m  = 1.0 from (0:inf);
+    parameter integer bjtoff = 0 from [0:1];
+
+    // bias-independent prep (b3soiddset.c, b3soiddtemp.c)
+    real tk, tnomk, tratio, vtm, eg, eg0, ni, cox, factor1, jbjt, jdif, jrec, jtun, pbswgx;
+    real xjx, cbox, csi, cboxt0, npeakm, qsi, csieff, qsieff, cboxt, adice;
+    real dl, dlcx, dwx, dwcx, leff, weff, leffcv, weffcv, abulkcvfactor;
+    real inv_l, inv_w, inv_lw, kb3x, dvbd0x, dvbd1x;
+    real uax, ubx, ucx, uc1x, u0x, u0temp, vsattemp, rds0;
+    real npeakx, ngatex, vfbb, vsdfbx, vsdthx, csdminx, sdphi, sdgamma;
+    real csesw, cdesw, phi, sqrtphi, xdep0, litl, vbi, cdep0;
+    real k1x, k2x, vbxx, vbmx, g1, g2, vfbx, vth0x, theta0vb0, thetarout;
+    real cgdox, cgsox, cfx, cgdop, cgsop, cgeop, minisub;
+    real csbox, csmin, cdbox, cdmin, sdt1, st2, st3, st4, dt2, dt3, dt4;
+    real gdrain, gsource, gminx;
+    // bias-dependent (b3soiddld.c)
+    real vgs, vds, ves, vbs, vgd, ved, vbd, vge, mode, vdsx, vgsx, vesx, vbsx, vbdx;
+    real vesfb, vgs_eff, v0, tempratio;
+    real vbs0t, vbs0, vbs0mos, vthfd, vbs0teff, nfb, vbs0eff, vbsdio, vbsmos, vcs;
+    real vbseff, phis, sqrtphis, xdep, lt1, ltw, theta0, deltvth, deltvthw;
+    real deltvthtemp, diblsft, vth, n, vgst, vgstnvt, exparg, expvgst, vgsteff;
+    real vgst2vtm, weffv, rds, abulk0, abulk, xcsat, abeff, denomi, ueff;
+    real wvcox, wvcoxrds, esatl, lambda, vdsat, vdseff, diffvds;
+    real vasat, vaclm, vadibl, va, beta, fgche1, fgche2, gche, idl, ids;
+    real vdsatii, diffvdsii, iii, idgidl, isgidl, wtsi, nvtm1, nvtm2;
+    real expvbs1, expvbd1, expvbs4, expvbd4, ibs1, ibd1, bjta, ibjt, ic, ibs, ibd;
+    // charges
+    real coxwl, cboxwl, abulkcv, vdsatcv, vdseffcv, vdscv, qe1, qinv, qsrc;
+    real vfb, vfbeff, qac0, qsub0, vcscv, xc, qsubs1, qsubs2, qdep0, qbf;
+    real phisd, phisc, qsicv, qbf0, qe2, qex, cjsbs, qjs, qjd;
+    real qgate, qbody, qdrn, qsub, qgdo, qgso, qge, qse, qde;
+    real t0, t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11;
+    real tmp1, tmp2, tmp3, tmp4;
+
+    // lt1/ltw: factor1*sqrt(Xdep)*(1 + dvt2*Vbs), smoothed below -0.5
+    // (b3soiddld.c:948-975).
+    analog function real ltx;
+        input f1, sqxd, dvt2x, vb;
+        real f1, sqxd, dvt2x, vb, u, r;
+        begin
+            u = dvt2x * vb;
+            if (u >= -0.5) r = 1.0 + u;
+            else r = (1.0 + 3.0 * u) / (3.0 + 8.0 * u);
+            ltx = f1 * sqxd * r;
+        end
+    endfunction
+
+    // exp(x)*(1 + 2 exp(x)) with ngspice's MIN_EXP floor below -34.
+    analog function real theta;
+        input x;
+        real x, u;
+        begin
+            if (x > -34.0) u = exp(x);
+            else u = 1.713908431e-15;
+            theta = u * (1.0 + 2.0 * u);
+        end
+    endfunction
+
+    analog begin
+        // ============ film and temperature (set.c:973-1000, temp.c) ======
+        tnomk = tnom + 273.15;
+        tk = $temperature;
+        tratio = tk / tnomk;
+        vtm = 8.617087e-5 * tk;
+        eg = 1.16 - 7.02e-4 * tk * tk / (tk + 1108.0);
+        ni = 1.45e10 * (tk / 300.15) * sqrt(tk / 300.15)
+           * exp(21.5565981 - eg / (2.0 * vtm));
+        eg0 = 1.16 - 7.02e-4 * tnomk * tnomk / (tnomk + 1108.0);
+        cox = 3.453133e-11 / tox;
+        factor1 = sqrt(1.03594e-10 / 3.453133e-11 * tox);
+
+        if ($param_given(xj)) xjx = xj; else xjx = tsi;
+        npeakm = nch;
+        if (npeakm > 1.0e20) npeakm = npeakm * 1.0e-6;
+        cbox = 3.453133e-11 / tbox;
+        csi = 1.03594e-10 / tsi;
+        cboxt0 = cbox * csi / (cbox + csi);
+        qsi = 1.60219e-19 * npeakm * 1.0e6 * tsi;
+        t1 = 2.0 * 1.03594e-10 * vbsa / 1.60219e-19 / (1.0e6 * npeakm);
+        if (tsi * tsi < t1) begin
+            csieff = csi;
+            qsieff = qsi;
+        end else begin
+            t1 = sqrt(tsi * tsi - t1);
+            csieff = 1.03594e-10 / t1;
+            qsieff = 1.60219e-19 * npeakm * 1.0e6 * t1;
+        end
+        cboxt = 1.0 / (1.0 / cbox + 1.0 / csieff);
+        adice = adice0 / (1.0 + cboxt0 / cox);
+
+        // ============ geometry (temp.c:118-195) ==========================
+        t0 = pow(l, lln);
+        t1 = pow(w, lwn);
+        tmp1 = ll / t0 + lw / t1 + lwl / (t0 * t1);
+        dl = lint + tmp1;
+        if ($param_given(dlc)) dlcx = dlc + tmp1; else dlcx = lint + tmp1;
+        t2 = pow(l, wln);
+        t3 = pow(w, wwn);
+        tmp2 = wl / t2 + ww / t3 + wwl / (t2 * t3);
+        dwx = wint + tmp2;
+        if ($param_given(dwc)) dwcx = dwc + tmp2; else dwcx = wint + tmp2;
+        leff = l - 2.0 * dl;
+        weff = w - 2.0 * dwx;
+        leffcv = l - 2.0 * dlcx;
+        weffcv = w - 2.0 * dwcx;
+        // ngspice E_BADPARMs on non-positive effective sizes.
+        // ponytail: silent 1e-9 floor, as bsim3.va; report the day a deck trips it.
+        if (leff < 1.0e-9) leff = 1.0e-9;
+        if (weff < 1.0e-9) weff = 1.0e-9;
+        if (leffcv < 1.0e-9) leffcv = 1.0e-9;
+        if (weffcv < 1.0e-9) weffcv = 1.0e-9;
+        abulkcvfactor = pow(1.0 + clc / leff, cle);
+        if (binunit == 1) begin
+            inv_l = 1.0e-6 / leff;
+            inv_w = 1.0e-6 / weff;
+            inv_lw = 1.0e-12 / (leff * weff);
+        end else begin
+            inv_l = 1.0 / leff;
+            inv_w = 1.0 / weff;
+            inv_lw = 1.0 / (leff * weff);
+        end
+        kb3x = kb3 + lkb3 * inv_l + wkb3 * inv_w + pkb3 * inv_lw;
+        dvbd0x = dvbd0 + ldvbd0 * inv_l + wdvbd0 * inv_w + pdvbd0 * inv_lw;
+        dvbd1x = dvbd1 + ldvbd1 * inv_l + wdvbd1 * inv_w + pdvbd1 * inv_lw;
+
+        // ============ parameter defaulting (temp.c:529-744) ==============
+        t0 = tratio - 1.0;
+        uax = ua + ua1 * t0;
+        ubx = ub + ub1 * t0;
+        if ($param_given(uc)) ucx = uc;
+        else if (mobmod == 3) ucx = -0.0465;
+        else ucx = -0.0465e-9;
+        if ($param_given(uc1)) uc1x = uc1;
+        else if (mobmod == 3) uc1x = -0.056;
+        else uc1x = -0.056e-9;
+        ucx = ucx + uc1x * t0;
+        if ($param_given(u0)) u0x = u0;
+        else if (type > 0.0) u0x = 0.067;
+        else u0x = 0.025;
+        if (u0x > 1.0) u0x = u0x / 1.0e4;
+        u0temp = u0x * pow(tratio, ute);
+        vsattemp = vsat - at * t0;
+        rds0 = (rdsw + prt * t0) / pow(weff * 1.0e6, wr);
+
+        if ($param_given(cf)) cfx = cf;
+        else cfx = 2.0 * 3.453133e-11 / 3.141592654 * ln(1.0 + 0.4e-6 / tox);
+        if ($param_given(cgdo)) cgdox = cgdo;
+        else if ($param_given(dlc) && (dlc > 0.0)) cgdox = dlc * cox - cgdl;
+        else cgdox = 0.6 * xjx * cox;
+        if ($param_given(cgso)) cgsox = cgso;
+        else if ($param_given(dlc) && (dlc > 0.0)) cgsox = dlc * cox - cgsl;
+        else cgsox = 0.6 * xjx * cox;
+        cgdop = (cgdox + cfx) * weffcv;
+        cgsop = (cgsox + cfx) * weffcv;
+        cgeop = cgeo * leffcv;
+
+        if ($param_given(nch) || !$param_given(gamma1)) npeakx = npeakm;
+        else begin
+            t0 = gamma1 * cox;
+            npeakx = 3.021e22 * t0 * t0;
+        end
+        ngatex = ngate;
+        if (ngatex > 1.0e23) ngatex = ngatex * 1.0e-6;
+
+        if (nsub > 0.0) vfbb = -type * vtm * ln(npeakx / nsub);
+        else if (nsub < 0.0) vfbb = -type * vtm * ln(-npeakx * nsub / ni / ni);
+        else vfbb = 0.0; // nsub = 0: ln(0) in the C
+
+        if ($param_given(vsdfb)) vsdfbx = vsdfb;
+        else if (nsub > 0.0) vsdfbx = -type * (vtm * ln(1.0e20 * nsub / ni / ni) - 0.3);
+        // The 1e-300 floor only satisfies VerA's range check (the ratio
+        // reaches 0 only as nsub -> -inf).
+        else if (nsub < 0.0) vsdfbx = -type * (vtm * ln(max(-1.0e20 / nsub, 1.0e-300)) + 0.3);
+        else vsdfbx = 0.0;
+        sdphi = 2.0 * vtm * ln(abs(nsub) / ni);
+        sdgamma = 5.753e-12 * sqrt(abs(nsub)) / cbox;
+        if ($param_given(vsdth)) vsdthx = vsdth;
+        else if (((nsub > 0.0) && (type > 0.0)) || ((nsub < 0.0) && (type < 0.0)))
+            vsdthx = vsdfbx + sdphi + sdgamma * sqrt(sdphi);
+        else vsdthx = vsdfbx - sdphi - sdgamma * sqrt(sdphi);
+        if ($param_given(csdmin)) csdminx = csdmin;
+        else begin
+            tmp1 = 1.03594e-10 / sqrt(2.0 * 1.03594e-10 * sdphi
+                 / (1.60219e-19 * abs(nsub) * 1.0e6));
+            csdminx = tmp1 * cbox / (tmp1 + cbox);
+        end
+
+        t0 = csdesw * ln(1.0 + tsi / tbox);
+        if (ps > weff) csesw = t0 * (ps - weff); else csesw = 0.0;
+        if (pd > weff) cdesw = t0 * (pd - weff); else cdesw = 0.0;
+
+        phi = 2.0 * vtm * ln(npeakx / ni);
+        sqrtphi = sqrt(phi);
+        xdep0 = sqrt(2.0 * 1.03594e-10 / (1.60219e-19 * npeakx * 1.0e6)) * sqrtphi;
+        litl = sqrt(3.0 * xjx * tox);
+        vbi = vtm * ln(1.0e20 * npeakx / (ni * ni));
+        cdep0 = sqrt(1.60219e-19 * 1.03594e-10 * npeakx * 1.0e6 / 2.0 / phi);
+
+        vbmx = vbm;
+        if ($param_given(k1) || $param_given(k2)) begin
+            if ($param_given(k1)) k1x = k1; else k1x = 0.53;
+            if ($param_given(k2)) k2x = k2; else k2x = -0.0186;
+        end else begin
+            if ($param_given(vbx)) vbxx = vbx;
+            else vbxx = phi - 7.7348e-4 * npeakx * xt * xt;
+            if (vbxx > 0.0) vbxx = -vbxx;
+            if (vbmx > 0.0) vbmx = -vbmx;
+            if ($param_given(gamma1)) g1 = gamma1;
+            else g1 = 5.753e-12 * sqrt(npeakx) / cox;
+            if ($param_given(gamma2)) g2 = gamma2;
+            else g2 = 5.753e-12 * sqrt(nsub) / cox;
+            t0 = g1 - g2;
+            t1 = sqrt(phi - vbxx) - sqrtphi;
+            t2 = sqrt(phi * (phi - vbmx)) - phi;
+            k2x = t0 * t1 / (2.0 * t2 + vbmx);
+            k1x = g2 - 2.0 * k2x * sqrt(phi - vbmx);
+        end
+
+        if ($param_given(vth0)) begin
+            vth0x = vth0;
+            vfbx = type * vth0 - phi - k1x * sqrtphi;
+        end else begin
+            vfbx = -1.0;
+            vth0x = type * (vfbx + phi + k1x * sqrtphi);
+        end
+
+        t1 = sqrt(1.03594e-10 / 3.453133e-11 * tox * xdep0);
+        if ($param_given(dsub)) t0 = exp(-0.5 * dsub * leff / t1);
+        else t0 = exp(-0.5 * drout * leff / t1);
+        theta0vb0 = t0 + 2.0 * t0 * t0;
+        t0 = exp(-0.5 * drout * leff / t1);
+        thetarout = pdiblc1 * (t0 + 2.0 * t0 * t0) + pdiblc2;
+
+        minisub = 5.0e-2 * weff * tsi * max(isdif, isrec);
+
+        t5 = exp(-eg0 / ndiode / vtm * (1.0 - tratio));
+        jbjt = isbjt * pow(tratio, xbjt / ndiode) * t5;
+        jdif = isdif * pow(tratio, xdif / ndiode) * t5;
+        jrec = isrec * pow(tratio, xrec / ndiode / 2.0) * sqrt(t5);
+        jtun = istun * pow(tratio, xtun / ntun);
+        pbswgx = max(pbswg, 0.1);
+
+        // S/D-to-substrate charge breakpoints (temp.c:747-787)
+        csbox = cbox * as;
+        csmin = csdminx * as;
+        cdbox = cbox * ad;
+        cdmin = csdminx * ad;
+        if (((nsub > 0.0) && (type > 0.0)) || ((nsub < 0.0) && (type < 0.0))) begin
+            t0 = vsdthx - vsdfbx;
+            sdt1 = vsdfbx + asd * t0;
+            t1 = csbox - csmin;
+            t2 = t1 / t0 / t0;
+            st2 = t2 / asd;
+            st3 = t2 / (1.0 - asd);
+            st4 = t0 * t1 * (1.0 + asd) / 3.0 - csmin * vsdfbx;
+            t1 = cdbox - cdmin;
+            t2 = t1 / t0 / t0;
+            dt2 = t2 / asd;
+            dt3 = t2 / (1.0 - asd);
+            dt4 = t0 * t1 * (1.0 + asd) / 3.0 - cdmin * vsdfbx;
+        end else begin
+            t0 = vsdfbx - vsdthx;
+            sdt1 = vsdthx + asd * t0;
+            t1 = csmin - csbox;
+            t2 = t1 / t0 / t0;
+            st2 = t2 / asd;
+            st3 = t2 / (1.0 - asd);
+            st4 = t0 * t1 * (1.0 + asd) / 3.0 - csbox * vsdthx;
+            t1 = cdmin - cdbox;
+            t2 = t1 / t0 / t0;
+            dt2 = t2 / asd;
+            dt3 = t2 / (1.0 - asd);
+            dt4 = t0 * t1 * (1.0 + asd) / 3.0 - cdbox * vsdthx;
+        end
+
+        if ((rsh > 0.0) && (nrd > 0.0)) gdrain = m / (rsh * nrd);
+        else gdrain = 0.0;
+        if ((rsh > 0.0) && (nrs > 0.0)) gsource = m / (rsh * nrs);
+        else gsource = 0.0;
+        gminx = $simparam("gmin", 1.0e-12);
+
+        // ============ bias and mode (ld.c:466-831) =======================
+        // The unconnected P node is ground (pNode = 0).
+        vbs = type * V(b, si);
+        vgs = type * V(g, si);
+        vds = type * V(di, si);
+        ves = type * V(e, si);
+        vgd = vgs - vds;
+        ved = ves - vds;
+        vbd = vbs - vds;
+        vge = vgs - ves;
+        tempratio = tk / tnomk - 1.0;
+        if (vds >= 0.0) begin
+            mode = 1.0;
+            vdsx = vds;
+            vgsx = vgs;
+            vesx = ves;
+            vbsx = vbs;
+            vbdx = vbd;
+        end else begin
+            mode = -1.0;
+            vdsx = -vds;
+            vgsx = vgd;
+            vesx = ved;
+            vbsx = vbd;
+            vbdx = vbs;
+        end
+        vesfb = vesx - vfbb;
+
+        // poly gate depletion (ld.c:857-877)
+        t0 = vfbx + phi;
+        if ((ngatex > 1.0e18) && (ngatex < 1.0e25) && (vgsx > t0)) begin
+            t1 = 1.0e6 * 1.60219e-19 * 1.03594e-10 * ngatex / (cox * cox);
+            t4 = sqrt(1.0 + 2.0 * (vgsx - t0) / t1);
+            t2 = t1 * (t4 - 1.0);
+            t3 = 0.5 * t2 * t2 / t1;
+            t7 = 1.12 - t3 - 0.05;
+            t6 = sqrt(t7 * t7 + 0.224);
+            t5 = 1.12 - 0.5 * (t7 + t6);
+            vgs_eff = vgsx - t5;
+        end else vgs_eff = vgsx;
+        v0 = vbi - phi;
+
+        // ============ dynamically depleted body (ld.c:921-1192) ==========
+        t0 = -dvbd1x * leff / litl;
+        t1 = dvbd0x * (exp(0.5 * t0) + 2.0 * exp(t0));
+        vbs0t = phi - 0.5 * qsi / csi + vbsa + t1 * (vbi - phi);
+
+        t1 = kb1 / (1.0 + csieff / cbox);
+        t6 = vbs0t - t1 * (vbs0t - vesfb);
+        t1 = phi - delp;
+        t2 = t1 - t6 - 0.005;
+        vbs0 = t1 - 0.5 * (t2 + sqrt(t2 * t2 + 4.0 * 0.005));
+
+        t1 = vbs0t - vbs0 - 0.005;
+        t3 = 0.5 * (t1 + sqrt(t1 * t1 + 0.005 * 0.005));
+        vbs0mos = vbs0 - 0.5 * t3 * t3 * csieff / qsieff;
+
+        // Vthfd: Vth with Vbs0mos standing in for the body bias
+        phis = phi - vbs0mos;
+        sqrtphis = sqrt(phis);
+        xdep = xdep0 * sqrtphis / sqrtphi;
+        lt1 = ltx(factor1, sqrt(xdep), dvt2, vbs0mos);
+        ltw = ltx(factor1, sqrt(xdep), dvt2w, vbs0mos);
+        deltvth = dvt0 * theta(-0.5 * dvt1 * leff / lt1) * v0;
+        deltvthw = dvt0w * theta(-0.5 * dvt1w * weff * leff / ltw) * v0;
+        deltvthtemp = k1x * (sqrt(1.0 + nlx / leff) - 1.0) * sqrtphi
+                    + (kt1 + kt1l / leff + kt2 * vbs0mos) * tempratio;
+        tmp2 = tox * phi / (weff + w0);
+        t3 = eta0 + etab * vbs0mos;
+        if (t3 < 1.0e-4) t3 = (2.0e-4 - t3) / (3.0 - 2.0e4 * t3);
+        diblsft = t3 * theta0vb0 * vdsx;
+        vthfd = type * vth0x + k1x * (sqrtphis - sqrtphi) - k2x * vbs0mos
+              - deltvth - deltvthw + (k3 + k3b * vbs0mos) * tmp2
+              + deltvthtemp - diblsft;
+
+        t1 = vthfd - vgs_eff - 0.02;
+        t2 = sqrt(t1 * t1 + 0.02 * 0.02);
+        vbs0teff = vbs0t - 0.5 * (t1 + t2);
+
+        t3 = 1.0 / (k1x * k1x);
+        t4 = kb3x * cbox / cox;
+        t8 = sqrt(phi - vbs0mos);
+        t5 = sqrt(1.0 + 4.0 * t3 * (phi + k1x * t8 - vbs0mos));
+        nfb = 1.0 / (1.0 + t4 * t5);
+        vbs0eff = vbs0 - nfb * 0.5 * (t1 + t2);
+        // the node Vbs, floored smoothly at Vbs0eff + 20 mV (ld.c:1119-1123)
+        t1 = vbsx - (vbs0eff + 0.02) - 0.01;
+        vbsdio = vbs0eff + 0.02 + 0.5 * (t1 + sqrt(t1 * t1 + 0.01 * 0.01));
+
+        t1 = vbs0teff - vbsdio - 0.005;
+        t3 = 0.5 * (t1 + sqrt(t1 * t1 + 0.005 * 0.005));
+        vbsmos = vbsdio - 0.5 * t3 * t3 * csieff / qsieff;
+        vcs = vbsdio - vbs0eff;
+
+        t1 = phi - delp;
+        t2 = t1 - vbsmos - 0.005;
+        vbseff = t1 - 0.5 * (t2 + sqrt(t2 * t2 + 4.0 * 0.005 * t1));
+
+        // ============ threshold (ld.c:1163-1308) =========================
+        phis = phi - vbseff;
+        sqrtphis = sqrt(phis);
+        xdep = xdep0 * sqrtphis / sqrtphi;
+        lt1 = ltx(factor1, sqrt(xdep), dvt2, vbseff);
+        ltw = ltx(factor1, sqrt(xdep), dvt2w, vbseff);
+        theta0 = theta(-0.5 * dvt1 * leff / lt1);
+        deltvth = dvt0 * theta0 * v0;
+        deltvthw = dvt0w * theta(-0.5 * dvt1w * weff * leff / ltw) * v0;
+        deltvthtemp = k1x * (sqrt(1.0 + nlx / leff) - 1.0) * sqrtphi
+                    + (kt1 + kt1l / leff + kt2 * vbseff) * tempratio;
+        tmp2 = tox * phi / (weff + w0);
+        t3 = eta0 + etab * vbseff;
+        if (t3 < 1.0e-4) t3 = (2.0e-4 - t3) / (3.0 - 2.0e4 * t3);
+        diblsft = t3 * theta0vb0 * vdsx;
+        vth = type * vth0x + k1x * (sqrtphis - sqrtphi) - k2x * vbseff
+            - deltvth - deltvthw + (k3 + k3b * vbseff) * tmp2
+            + deltvthtemp - diblsft;
+
+        t2 = nfactor * 1.03594e-10 / xdep;
+        t3 = cdsc + cdscb * vbseff + cdscd * vdsx;
+        t4 = (t2 + t3 * theta0 + cit) / cox;
+        if (t4 >= -0.5) n = 1.0 + t4;
+        else n = (1.0 + 3.0 * t4) / (3.0 + 8.0 * t4);
+
+        // ============ Vgsteff (ld.c:1310-1391) ===========================
+        vgst = vgs_eff - vth;
+        t10 = 2.0 * n * vtm;
+        vgstnvt = vgst / t10;
+        exparg = (2.0 * voff - vgst) / t10;
+        expvgst = 0.0;
+        if (vgstnvt > 34.0) vgsteff = vgst;
+        else if (exparg > 34.0) begin
+            expvgst = exp((vgst - voff) / (n * vtm));
+            vgsteff = vtm * cdep0 / cox * expvgst;
+        end else begin
+            expvgst = exp(vgstnvt);
+            t1 = t10 * ln(1.0 + expvgst);
+            t2 = 1.0 + t10 * cox / (vtm * cdep0) * exp(exparg);
+            vgsteff = t1 / t2;
+        end
+        vgst2vtm = vgsteff + 2.0 * vtm;
+
+        // ============ geometry, Rds, Abulk, Abeff (ld.c:1393-1513) =======
+        t9 = sqrtphis - sqrtphi;
+        weffv = weff - 2.0 * (dwg * vgsteff + dwb * t9);
+        if (weffv < 2.0e-8) weffv = 2.0e-8 * (4.0e-8 - weffv) / (6.0e-8 - 2.0 * weffv);
+
+        t0 = prwg * vgsteff + prwb * t9;
+        if (t0 >= -0.9) rds = rds0 * (1.0 + t0);
+        else rds = rds0 * (0.8 + t0) / (17.0 + 20.0 * t0);
+
+        if (a0 == 0.0) begin
+            abulk0 = 0.0;
+            abulk = 0.0;
+        end else begin
+            t1 = 0.5 * k1x / sqrtphi;
+            t9 = sqrt(xjx * xdep);
+            tmp1 = leff + 2.0 * t9;
+            t5 = leff / tmp1;
+            tmp2 = a0 * t5;
+            t2 = tmp2 + b0 / (weff + b1);
+            abulk0 = t1 * t2;
+            abulk = abulk0 - t1 * ags * a0 * t5 * t5 * t5 * vgsteff;
+        end
+        if (abulk0 < 0.01) abulk0 = (0.02 - abulk0) / (3.0 - 200.0 * abulk0);
+        if (abulk < 0.01) abulk = (0.02 - abulk) / (3.0 - 200.0 * abulk);
+        t2 = keta * vbseff;
+        if (t2 >= -0.9) t0 = 1.0 / (1.0 + t2);
+        else t0 = (17.0 + 20.0 * t2) / (0.8 + t2);
+        abulk = abulk * t0 + 1.0;
+        abulk0 = abulk0 * t0 + 1.0;
+
+        t0 = abp * vgst2vtm;
+        t1 = 1.0 - vcs / t0 - 0.2;
+        t2 = sqrt(t1 * t1 + 0.2 * 0.2);
+        t3 = 1.0 - 0.5 * (t1 + t2);
+        xcsat = mxc * t3 * t3 + (1.0 - mxc) * t3;
+        abeff = xcsat * abulk + (1.0 - xcsat) * adice;
+
+        // ============ mobility (ld.c:1515-1586) ==========================
+        if (mobmod == 1) begin
+            t3 = (vgsteff + vth + vth) / tox;
+            t5 = t3 * (uax + ucx * vbseff + ubx * t3);
+        end else if (mobmod == 2) begin
+            t5 = vgsteff / tox * (uax + ucx * vbseff + ubx * vgsteff / tox);
+        end else begin
+            t3 = (vgsteff + vth + vth) / tox;
+            t5 = t3 * (uax + ubx * t3) * (1.0 + ucx * vbseff);
+        end
+        if (t5 >= -0.8) denomi = 1.0 + t5;
+        else denomi = (0.6 + t5) / (7.0 + 10.0 * t5);
+        ueff = u0temp / denomi;
+
+        // ============ Vdsat, Vdseff (ld.c:1588-1832) =====================
+        wvcox = weffv * vsattemp * cox;
+        wvcoxrds = wvcox * rds;
+        esatl = 2.0 * vsattemp / ueff * leff;
+        if (a1 == 0.0) lambda = a2;
+        else if (a1 > 0.0) begin
+            t0 = 1.0 - a2;
+            t1 = t0 - a1 * vgsteff - 0.0001;
+            lambda = a2 + t0 - 0.5 * (t1 + sqrt(t1 * t1 + 0.0004 * t0));
+        end else begin
+            t1 = a2 + a1 * vgsteff - 0.0001;
+            lambda = 0.5 * (t1 + sqrt(t1 * t1 + 0.0004 * a2));
+        end
+        if ((rds == 0.0) && (lambda == 1.0))
+            vdsat = esatl * vgst2vtm / (abeff * esatl + vgst2vtm);
+        else begin
+            t9 = abeff * wvcoxrds;
+            t7 = vgst2vtm * t9;
+            t6 = vgst2vtm * wvcoxrds;
+            t0 = 2.0 * abeff * (t9 - 1.0 + 1.0 / lambda);
+            t1 = vgst2vtm * (2.0 / lambda - 1.0) + abeff * esatl + 3.0 * t7;
+            t2 = vgst2vtm * (esatl + 2.0 * t6);
+            t3 = sqrt(t1 * t1 - 2.0 * t0 * t2);
+            vdsat = (t1 - t3) / t0;
+        end
+
+        t1 = vdsat - vdsx - delta;
+        t2 = sqrt(t1 * t1 + 4.0 * delta * vdsat);
+        vdseff = vdsat - 0.5 * (t1 + t2);
+        if (vdseff > vdsx) vdseff = vdsx;
+        diffvds = vdsx - vdseff;
+
+        // ============ output resistance (ld.c:1834-2025) =================
+        tmp4 = 1.0 - 0.5 * abeff * vdsat / vgst2vtm;
+        t0 = esatl + vdsat + 2.0 * wvcoxrds * vgsteff * tmp4;
+        t1 = 2.0 / lambda - 1.0 + wvcoxrds * abeff;
+        vasat = t0 / t1;
+
+        if ((pclm > 0.0) && (diffvds > 1.0e-10))
+            vaclm = leff * (abeff + vgsteff / esatl) * diffvds
+                  / (pclm * abeff * litl);
+        else vaclm = 5.834617425e14;
+
+        if (thetarout > 0.0) begin
+            t8 = abeff * vdsat;
+            vadibl = (vgst2vtm - vgst2vtm * t8 / (vgst2vtm + t8)) / thetarout;
+            t7 = pdiblcb * vbseff;
+            if (t7 >= -0.9) vadibl = vadibl / (1.0 + t7);
+            else vadibl = vadibl * (17.0 + 20.0 * t7) / (0.8 + t7);
+        end else vadibl = 5.834617425e14;
+
+        t9 = pvag / esatl * vgsteff;
+        if (t9 > -0.9) t0 = 1.0 + t9;
+        else t0 = (0.8 + t9) / (17.0 + 20.0 * t9);
+        va = vasat + t0 * vaclm * vadibl / (vaclm + vadibl);
+
+        // ============ Ids (ld.c:2027-2099) ===============================
+        beta = ueff * cox * weffv / leff;
+        fgche1 = vgsteff * (1.0 - 0.5 * abeff * vdseff / vgst2vtm);
+        fgche2 = 1.0 + vdseff / esatl;
+        gche = beta * fgche1 / fgche2;
+        idl = gche * vdseff / (1.0 + gche * rds);
+        ids = idl * (1.0 + diffvds / va);
+
+        // ============ body currents (ld.c:1727-1832, 2157-2479) ==========
+        if (aii > 0.0) begin
+            if (cii != 0.0) begin
+                t0 = cii / sqrt(3.0) + dii;
+                t1 = vdsx - t0 - 0.1;
+                t3 = t0 + 0.5 * (t1 + sqrt(t1 * t1 + 0.4));
+                t0 = (cii / (t3 - dii)) * (cii / (t3 - dii));
+            end else t0 = 0.0;
+            t0 = t0 + 1.0;
+            t3 = aii + bii / leff;
+            vdsatii = esatl * vgsteff / (t0 * vgsteff + t3 * esatl);
+        end else vdsatii = vdsat;
+        t1 = vdsatii - vdsx - delta;
+        diffvdsii = vdsx - (vdsatii - 0.5 * (t1 + sqrt(t1 * t1 + 4.0 * delta * vdsatii)));
+
+        // impact ionization
+        t2 = alpha1 + alpha0 / leff;
+        if ((t2 <= 0.0) || (beta0 <= 0.0)) iii = 0.0;
+        else if (diffvdsii > beta0 / 34.0) iii = t2 * diffvdsii * exp(-beta0 / diffvdsii) * ids;
+        else iii = t2 * 1.713908431e-15 * diffvdsii * ids;
+
+        // GIDL, drain then source side
+        t0 = 3.0 * tox;
+        t1 = (vdsx - vgs_eff - ngidl) / t0;
+        if ((agidl <= 0.0) || (bgidl <= 0.0) || (t1 <= 0.0)) idgidl = 0.0;
+        else if (bgidl / t1 < 34.0) idgidl = weff * agidl * t1 * exp(-bgidl / t1);
+        else idgidl = weff * agidl * 1.713908431e-15 * t1;
+        t1 = (-vgs_eff - ngidl) / t0;
+        if ((agidl <= 0.0) || (bgidl <= 0.0) || (t1 <= 0.0)) isgidl = 0.0;
+        else if (bgidl / t1 < 34.0) isgidl = weff * agidl * t1 * exp(-bgidl / t1);
+        else isgidl = weff * agidl * 1.713908431e-15 * t1;
+
+        // diodes, parasitic BJT, tunnelling; exponents linear past 30
+        wtsi = weff * tsi;
+        nvtm1 = vtm * ndiode;
+        nvtm2 = vtm * ntun;
+        if (vbsx / nvtm1 < 30.0) expvbs1 = exp(vbsx / nvtm1);
+        else expvbs1 = 1.0686e13 / nvtm1 * vbsx - 29.0 * 1.0686e13;
+        if (vbdx / nvtm1 < 30.0) expvbd1 = exp(vbdx / nvtm1);
+        else expvbd1 = 1.0686e13 / nvtm1 * vbdx - 29.0 * 1.0686e13;
+        expvbs4 = 0.0;
+        expvbd4 = 0.0;
+        if (jtun > 0.0) begin
+            if (-vbsx / nvtm2 < 30.0) expvbs4 = exp(-vbsx / nvtm2);
+            else expvbs4 = -1.0686e13 / nvtm2 * vbsx - 29.0 * 1.0686e13;
+            if (-vbdx / nvtm2 < 30.0) expvbd4 = exp(-vbdx / nvtm2);
+            else expvbd4 = -1.0686e13 / nvtm2 * vbdx - 29.0 * 1.0686e13;
+        end
+        ibs1 = wtsi * jdif * (expvbs1 - 1.0);
+        ibd1 = wtsi * jdif * (expvbd1 - 1.0);
+        ibs = ibs1 + wtsi * jrec * (sqrt(expvbs1) - 1.0);
+        ibd = ibd1 + wtsi * jrec * (sqrt(expvbd1) - 1.0);
+        if ((bjtoff == 1) || (vdsx == 0.0) || (jbjt == 0.0)) ic = 0.0;
+        else begin
+            t1 = (leff - kbjt1 * vdsx) / edl;
+            if (t1 < 1.0e-3) t1 = (2.0e-3 - t1) / (3.0 - 2.0e3 * t1);
+            else if (t1 > 1.0) t1 = 1.0;
+            bjta = 1.0 - 0.5 * t1 * t1;
+            t5 = wtsi * jbjt;
+            ibjt = t5 * (expvbs1 - expvbd1);
+            t3 = (1.0 - bjta) * t5;
+            ibs = ibs + t3 * expvbs1;
+            ibd = ibd + t3 * expvbd1;
+            ic = ibjt - t3 * expvbs1 + t3 * expvbd1;
+        end
+        if (jtun != 0.0) begin
+            ibs = ibs + wtsi * jtun * (1.0 - expvbs4);
+            ibd = ibd + wtsi * jtun * (1.0 - expvbd4);
+        end
+
+        // ============ charges (ld.c:2637-3432, 3438-3610, 3655-3780) =====
+        qgate = 0.0;
+        qbody = 0.0;
+        qdrn = 0.0;
+        qsub = 0.0;
+        qsrc = 0.0;
+        if ((xpart >= 0.0) && ((capmod == 2) || (capmod == 3))) begin
+            coxwl = cox * weffcv * leffcv;
+            if ((vgstnvt > -34.0) && (vgstnvt < 34.0))
+                vgsteff = n * vtm * ln(1.0 + expvgst * expvgst);
+            vfb = vth - phi - k1x * sqrtphis;
+            vgsteff = vgsteff + 1.0e-4;
+
+            // accumulation and depletion (ld.c:2688-2735)
+            t3 = vfb - vgs_eff + vbseff - 0.02;
+            if (vfb <= 0.0) t0 = sqrt(t3 * t3 - 4.0 * 0.02 * vfb);
+            else t0 = sqrt(t3 * t3 + 4.0 * 0.02 * vfb);
+            vfbeff = vfb - 0.5 * (t3 + t0);
+            qac0 = -coxwl * (vfbeff - vfb);
+            t0 = 0.5 * k1x;
+            t3 = vgs_eff - vfbeff - vbseff - vgsteff;
+            if (k1x == 0.0) t1 = 0.0;
+            else if (t3 < 0.0) t1 = t0 + t3 / k1x;
+            else t1 = sqrt(t0 * t0 + t3);
+            qsub0 = coxwl * k1x * (t0 - t1);
+
+            abulkcv = abulk0 * abulkcvfactor;
+            vdsatcv = vgsteff / abulkcv + 1.0e-5;
+            t4 = vdsatcv - vdsx - 0.02;
+            vdseffcv = vdsatcv - 0.5 * (t4 + sqrt(t4 * t4 + 4.0 * 0.02 * vdsatcv));
+
+            if (capmod == 2) begin
+                vdscv = vdseffcv + 1.0e-5;
+                if (vdscv > vdsatcv - 1.0e-7) vdscv = vdsatcv - 1.0e-7;
+                t1 = vdscv - vcs - vdscv * vdscv * 0.0004;
+                vcscv = vcs + 0.5 * (t1 - sqrt(t1 * t1 + 2.0 * 0.0004 * vdscv * vdscv));
+                if (vcscv < 0.0) vcscv = 0.0;
+                else if (vcscv > vdscv) vcscv = vdscv;
+                xc = (2.0 * vdsatcv - vcscv) * vcscv / ((2.0 * vdsatcv - vdscv) * vdscv);
+                t0 = abulkcv * vcscv;
+                t1 = 12.0 * (vgsteff - 0.5 * t0 + 1.0e-20);
+                qsubs1 = coxwl * xc * (1.0 - abulkcv) * (0.5 * vcscv - t0 * vcscv / t1);
+                qsubs2 = -coxwl * (1.0 - xc) * (abulkcv - 1.0) * vcs;
+                qbf = qac0 + qsub0 + qsubs1 + qsubs2;
+            end else begin
+                t1 = vgsteff + k1x * sqrtphis + 0.5 * k1x * k1x;
+                t2 = vgsteff + k1x * sqrtphis + phis + 0.25 * k1x * k1x;
+                vdsatcv = t1 - k1x * sqrt(t2);
+                t1 = vdsatcv - vdsat;
+                if (t1 != 0.0) begin
+                    t3 = -0.5 * vdsat / t1;
+                    t2 = t3 * vdsat;
+                    if ((vdseff > t2) && (t1 < 0.0)) vdscv = t2 + t1 * t3 * t3;
+                    else vdscv = vdseff + t1 * (vdseff / vdsat) * (vdseff / vdsat);
+                end else vdscv = vdseff;
+                if (vdscv < 0.0) vdscv = 0.0;
+                vdscv = vdscv + 1.0e-4;
+                if (vdscv > vdsatcv - 1.0e-7) vdscv = vdsatcv - 1.0e-7;
+                phisd = phis + vdscv;
+                qdep0 = coxwl * k1x * sqrtphis;
+                t1 = vdscv - vcs - vdscv * vdscv * 0.0004;
+                vcscv = vcs + 0.5 * (t1 - sqrt(t1 * t1 + 2.0 * 0.0004 * vdscv * vdscv));
+                phisc = phis + vcscv;
+                t10 = phis * sqrtphis;
+                t1 = vgsteff + k1x * sqrtphis - 0.5 * vdscv;
+                t2 = 0.6666666666 * k1x * (phisd * sqrt(phisd) - t10);
+                t3 = vgsteff + k1x * sqrtphis - 0.5 * vcscv;
+                t4 = 0.6666666666 * k1x * (phisc * sqrt(phisc) - t10);
+                xc = (t3 * vcscv - t4) / (t1 * vdscv - t2);
+                t5 = phisc * sqrt(phisc);
+                t0 = t5 - t10;
+                t1 = vgsteff + k1x * sqrtphis + phis;
+                t2 = phisc * t5 - phis * t10;
+                t3 = k1x * vcscv * (phis + 0.5 * vcscv);
+                t6 = k1x * (0.6666666666 * t1 * t0 - 0.4 * t2 - t3);
+                t4 = vgsteff + k1x * sqrtphis - 0.5 * vdscv;
+                t5 = 0.6666666666 * k1x * (phisd * sqrt(phisd) - t10);
+                qsubs1 = -coxwl / (t4 * vdscv - t5) * t6;
+                qsubs2 = -k1x * coxwl * sqrt(1.0e-4 + phi - vbs0eff) * (1.0 - xc);
+                qbf = qac0 + qsub0 + qsubs1 + qsubs2 + qdep0;
+            end
+
+            // back-gate charge (ld.c:3228-3270)
+            cboxwl = kb3x * cbox * weffcv * leffcv;
+            t0 = 0.5 * k1x;
+            t2 = sqrt(phi - vbs0t);
+            qsicv = k1x * coxwl * (t0 - sqrt(t0 * t0 + phi + k1x * t2 - vbs0t));
+            t2 = sqrt(phi - vbs0mos);
+            qbf0 = k1x * coxwl * (t0 - sqrt(t0 * t0 + phi + k1x * t2 - vbs0mos));
+            qe1 = -qsicv + qbf0 - cboxwl * (vbsdio - vbs0) * xc;
+            qe2 = -cboxt * weffcv * leffcv * 0.5 * (1.0 - xc) * (vdscv - vcscv);
+
+            // inversion charge and its S/D partition
+            t0 = abulkcv * vdseffcv;
+            t1 = 12.0 * (vgsteff - 0.5 * t0 + 1.0e-20);
+            qinv = coxwl * (vgsteff - 0.5 * vdseffcv + t0 * vdseffcv / t1);
+            if (xpart > 0.5) begin
+                t1 = t1 + t1;
+                qsrc = -coxwl * (0.5 * vgsteff + 0.25 * t0 - t0 * t0 / t1);
+            end else if (xpart < 0.5) begin
+                t1 = t1 / 12.0;
+                t2 = 0.5 * coxwl / (t1 * t1);
+                t3 = vgsteff * (2.0 * t0 * t0 / 3.0 + vgsteff * (vgsteff - 4.0 * t0 / 3.0))
+                   - 2.0 * t0 * t0 * t0 / 15.0;
+                qsrc = -t2 * t3;
+            end else qsrc = -0.5 * qinv;
+
+            qex = 20.0 * k1x * coxwl * (vbsx - vbsdio);
+            qgate = qinv - (qbf + qe2);
+            qbody = qbf - qe1 + qex;
+            qsub = qe1 + qe2 - qex;
+            qdrn = -(qinv + qsrc);
+        end
+
+        // body junction charges (ld.c:3440-3485)
+        cjsbs = cjswg * weff * tsi / 1.0e-7;
+        if (vbsx < 0.0) begin
+            t0 = 1.0 - vbsx / pbswgx;
+            qjs = (1.0 - t0 * exp(-mjswg * ln(t0))) * pbswgx / (1.0 - mjswg);
+        end else qjs = vbsx * (1.0 + 0.5 * mjswg * vbsx / pbswgx);
+        qjs = cjsbs * qjs + tt * ibs1;
+        if (vbdx < 0.0) begin
+            t0 = 1.0 - vbdx / pbswgx;
+            qjd = (1.0 - t0 * exp(-mjswg * ln(t0))) * pbswgx / (1.0 - mjswg);
+        end else qjd = vbdx * (1.0 + 0.5 * mjswg * vbdx / pbswgx);
+        qjd = cjsbs * qjd + tt * ibd1;
+        qdrn = qdrn - qjd;
+        qbody = qbody + qjs + qjd;
+        qsrc = -(qgate + qbody + qdrn + qsub);
+
+        // extrinsic S/D-to-substrate charges, true polarity (ld.c:2615-2728)
+        t10 = -type * ves;
+        if (((nsub > 0.0) && (type > 0.0)) || ((nsub < 0.0) && (type < 0.0))) begin
+            if (t10 < vsdfbx) qse = csbox * (t10 - vsdfbx);
+            else if (t10 < sdt1) begin
+                t0 = t10 - vsdfbx;
+                qse = t0 * (csbox - st2 / 3.0 * t0 * t0);
+            end else if (t10 < vsdthx) begin
+                t0 = t10 - vsdthx;
+                qse = csmin * t10 + st4 + st3 / 3.0 * t0 * t0 * t0;
+            end else qse = csmin * t10 + st4;
+        end else begin
+            if (t10 < vsdthx) qse = csmin * (t10 - vsdthx);
+            else if (t10 < sdt1) begin
+                t0 = t10 - vsdthx;
+                qse = t0 * (csmin - st2 / 3.0 * t0 * t0);
+            end else if (t10 < vsdfbx) begin
+                t0 = t10 - vsdfbx;
+                qse = csbox * t10 + st4 + st3 / 3.0 * t0 * t0 * t0;
+            end else qse = csbox * t10 + st4;
+        end
+        t11 = type * (vds - ves);
+        if (((nsub > 0.0) && (type > 0.0)) || ((nsub < 0.0) && (type < 0.0))) begin
+            if (t11 < vsdfbx) qde = cdbox * (t11 - vsdfbx);
+            else if (t11 < sdt1) begin
+                t0 = t11 - vsdfbx;
+                qde = t0 * (cdbox - dt2 / 3.0 * t0 * t0);
+            end else if (t11 < vsdthx) begin
+                t0 = t11 - vsdthx;
+                qde = cdmin * t11 + dt4 + dt3 / 3.0 * t0 * t0 * t0;
+            end else qde = cdmin * t11 + dt4;
+        end else begin
+            if (t11 < vsdthx) qde = cdmin * (t11 - vsdthx);
+            else if (t11 < sdt1) begin
+                t0 = t11 - vsdthx;
+                qde = t0 * (cdmin - dt2 / 3.0 * t0 * t0);
+            end else if (t11 < vsdfbx) begin
+                t0 = t11 - vsdfbx;
+                qde = cdbox * t11 + dt4 + dt3 / 3.0 * t0 * t0 * t0;
+            end else qde = cdbox * t11 + dt4;
+        end
+        qse = type * (qse + csesw * t10);
+        qde = type * (qde + cdesw * t11);
+
+        // overlap charges (ld.c:2777-2796)
+        t0 = vgd + 0.02;
+        t1 = sqrt(t0 * t0 + 4.0 * 0.02);
+        t2 = 0.5 * (t0 - t1);
+        t3 = weffcv * cgdl;
+        t4 = sqrt(1.0 - 4.0 * t2 / ckappa);
+        qgdo = (cgdop + t3) * vgd - t3 * (t2 + 0.5 * ckappa * (t4 - 1.0));
+        t0 = vgs + 0.02;
+        t1 = sqrt(t0 * t0 + 4.0 * 0.02);
+        t2 = 0.5 * (t0 - t1);
+        t3 = weffcv * cgsl;
+        t4 = sqrt(1.0 - 4.0 * t2 / ckappa);
+        qgso = (cgsop + t3) * vgs - t3 * (t2 + 0.5 * ckappa * (t4 - 1.0));
+        qge = cgeop * vge;
+
+        qgate = qgate + qgdo + qgso + qge;
+        if (mode > 0.0) begin
+            qdrn = qdrn + qde - qgdo;
+            qsub = qsub - (qge + qse + qde);
+            qsrc = -(qgate + qbody + qdrn + qsub);
+        end else begin
+            qsrc = qdrn - qgso + qse;
+            qsub = qsub - (qge + qse + qde);
+            qdrn = -(qgate + qbody + qsrc + qsub);
+        end
+
+        // ============ stamps (ld.c:4011-4128) ============================
+        // Channel and BJT current dp->sp; the body currents in the mode frame
+        // (source side cjs, drain side cjd, swapped in reverse mode) each
+        // carrying minIsub/2; gmin gate-drain and gmin*1e-6 body-source;
+        // then charges in type frame.
+        I(di, si) <+ m * type * mode * (ids + ic);
+        if (mode > 0.0) begin
+            I(b, si) <+ m * type * (ibs - isgidl - 0.5 * minisub);
+            I(b, di) <+ m * type * (ibd - iii - idgidl - 0.5 * minisub);
+        end else begin
+            I(b, di) <+ m * type * (ibs - isgidl - 0.5 * minisub);
+            I(b, si) <+ m * type * (ibd - iii - idgidl - 0.5 * minisub);
+        end
+        I(g, di) <+ m * gminx * V(g, di);
+        I(b, si) <+ m * gminx * 1.0e-6 * V(b, si);
+        I(g)  <+ m * type * ddt(qgate);
+        I(di) <+ m * type * ddt(qdrn);
+        I(si) <+ m * type * ddt(qsrc);
+        I(e)  <+ m * type * ddt(qsub);
+        I(b)  <+ m * type * ddt(qbody);
+
+        if (gdrain > 0.0) I(d, di) <+ gdrain * V(d, di);
+        else V(d, di) <+ 0.0;
+        if (gsource > 0.0) I(s, si) <+ gsource * V(s, si);
+        else V(s, si) <+ 0.0;
+    end
+endmodule
