@@ -151,25 +151,80 @@ fn parseNumBase(text: []const u8) ?NumParts {
 inline fn parseSpiceNum(text: []const u8, comptime hspice_suffix: bool) ?f64 {
     const parsed = parseNumBase(text) orelse return null;
     const s = parsed.suffix;
-    const scale: f64 = if (s.len == 0)
-        1
+    const scale_exp: i32 = if (s.len == 0)
+        0
     else if (std.mem.startsWith(u8, s, "meg"))
-        1e6
+        6
     else if (std.mem.startsWith(u8, s, "mil"))
-        25.4e-6
+        -6
     else switch (s[0]) {
-        't' => 1e12,
-        'g' => 1e9,
-        'x' => if (hspice_suffix) 1e6 else 1,
-        'k' => 1e3,
-        'm' => 1e-3,
-        'u' => 1e-6,
-        'n' => 1e-9,
-        'p' => 1e-12,
-        'f' => 1e-15,
-        else => 1,
+        't' => 12,
+        'g' => 9,
+        'x' => if (hspice_suffix) 6 else 0,
+        'k' => 3,
+        'm' => -3,
+        'u' => -6,
+        'n' => -9,
+        'p' => -12,
+        'f' => -15,
+        else => 0,
     };
-    return parsed.base * scale;
+    const lit = text[0 .. text.len - s.len];
+    return inpEvaluate(lit, scale_exp, std.mem.startsWith(u8, s, "mil"));
+}
+
+/// The value of the literal `lit` (as `parseNumBase` delimits it) with scale
+/// exponent `scale_exp`, computed as ngspice's INPevaluate does (inpeval.c):
+/// every digit accumulates into one f64 mantissa, then `sign * mantissa *
+/// pow(10, exponent)`. That is not the correctly rounded value: `0.1n` reads
+/// 1e-10 here and in ngspice, where parseFloat("0.1") * 1e-9 is
+/// 1.0000000000000002e-10, and a time grid built from it drifts off
+/// ngspice's by an ulp per step.
+fn inpEvaluate(lit: []const u8, scale_exp: i32, mil: bool) f64 {
+    var i: usize = 0;
+    var sign: f64 = 1;
+    if (lit[0] == '+' or lit[0] == '-') {
+        if (lit[0] == '-') sign = -1;
+        i = 1;
+    }
+    var mantis: f64 = 0;
+    var e: i32 = scale_exp;
+    while (i < lit.len and std.ascii.isDigit(lit[i])) : (i += 1)
+        mantis = 10 * mantis + @as(f64, @floatFromInt(lit[i] - '0'));
+    if (i < lit.len and lit[i] == '.') {
+        i += 1;
+        while (i < lit.len and std.ascii.isDigit(lit[i])) : (i += 1) {
+            mantis = 10 * mantis + @as(f64, @floatFromInt(lit[i] - '0'));
+            e -= 1;
+        }
+    }
+    if (i < lit.len) { // `parseNumBase` admits only an exponent here
+        i += 1;
+        var esign: i32 = 1;
+        if (lit[i] == '+' or lit[i] == '-') {
+            if (lit[i] == '-') esign = -1;
+            i += 1;
+        }
+        var x: i32 = 0;
+        while (i < lit.len) : (i += 1) x = @min(10 * x + (lit[i] - '0'), 100_000);
+        e += esign * x;
+    }
+    if (mil) mantis *= 25.4;
+    return sign * mantis * pow10(e);
+}
+
+/// 10^e as glibc's pow(10.0, e) returns it, which is the correctly rounded
+/// power for every e in [-40, 40] but 23.
+fn pow10(e: i32) f64 {
+    const table = comptime blk: {
+        @setEvalBranchQuota(200_000);
+        var t: [81]f64 = undefined;
+        for (&t, 0..) |*p, k| p.* = std.fmt.parseFloat(f64, std.fmt.comptimePrint("1e{d}", .{@as(i32, k) - 40})) catch unreachable;
+        t[40 + 23] = 1.0000000000000001e23; // glibc rounds this one up
+        break :blk t;
+    };
+    if (e < -40 or e > 40) return std.math.pow(f64, 10, @floatFromInt(e));
+    return table[@intCast(e + 40)];
 }
 
 /// Copies `src` lowercased into `dst` (at least as long) and returns its

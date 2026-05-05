@@ -275,7 +275,8 @@ test "parameters: disabled stochastic term folds without erasing arbitrary unkno
         \\.end
     );
     try std.testing.expectEqual(@as(f64, 1000), try numeric((try device(disabled, "r1")).positional[0]));
-    try std.testing.expectEqual(@as(f64, 0.7), try parameter(disabled.models[0].kv, "vto"));
+    // 7 * 0.1: ngspice INPevaluate bits, not the correctly rounded 0.7.
+    try std.testing.expectEqual(@as(f64, 7) * @as(f64, 0.1), try parameter(disabled.models[0].kv, "vto"));
     const unknown = try parse(arena.allocator(),
         \\unresolved term
         \\.param dummy=1
@@ -433,7 +434,8 @@ test "CPL matrices preserve negative entries after the named coefficient" {
     const values = nl.models[0].kv;
     try std.testing.expectEqual(@as(usize, 4), values.len);
     try std.testing.expectEqual(@as(f64, 3.5e-12), values[0].value.num);
-    try std.testing.expectEqual(@as(f64, -0.3e-12), values[1].value.num);
+    // 3 * 1e-13: ngspice INPevaluate bits, not the correctly rounded -0.3e-12.
+    try std.testing.expectEqual(@as(f64, -3) * @as(f64, 1e-13), values[1].value.num);
     try std.testing.expectEqual(@as(f64, 3.5e-12), values[2].value.num);
     try std.testing.expectEqual(@as(f64, 2), values[3].value.num);
 }
