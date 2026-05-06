@@ -66,7 +66,9 @@ fn envFlag(cache: *std.atomic.Value(u8), name: [*:0]const u8) bool {
 /// Which gate refused an iterate, for the `ZP_OPDBG` trace. ngspice's
 /// NIconvTest (maths/ni/niconv.c) has only the delta test, the first-iterate
 /// floor and the device limiting flag; `.residual` is ours. Disabling it on
-/// vacask/mul changed the Newton count by 0.01%.
+/// vacask/mul changed the Newton count by 0.01%. ngspice's CKTconvTest
+/// device tests are dead in 44.2: they bump CKTnoncon, then NIiter assigns
+/// NIconvTest's return over it, and CKTconvTest returns OK (niiter.c:288).
 const Reject = enum { converged, first_iter, delta, limited, flipped, residual, device };
 
 fn Deref(comptime P: type) type {
@@ -108,6 +110,11 @@ pub const Options = struct {
     /// Nonzero when the caller knows the matrix is unchanged since the last
     /// factor with this signature, so `newton` skips the factor.
     matrix_sig: u64 = 0,
+    /// The solve is a cold operating point, ngspice's MODEINITJCT/INITFIX:
+    /// the first iterate that passes every gate only switches to INITFLOAT
+    /// and the next must pass too, so `newton` publishes the first passing
+    /// solve (niiter.c, the MODEINITFIX branch).
+    init_fix: bool = false,
 };
 
 /// Outcome of a nonlinear solve.
@@ -120,6 +127,11 @@ pub const Result = struct {
 
 /// Direct Newton: assemble, factor (skipped when `opts.matrix_sig` matches),
 /// solve, accept. Errors are the factorization's and the checkpoint's.
+///
+/// A converged `x` is the last linearization point x_k, not the x_k+1 of the
+/// final solve, which only feeds the acceptance gates. ngspice's NIiter
+/// returns before swapping CKTrhs into CKTrhsOld (niiter.c), and CKTdump and
+/// every device state read CKTrhsOld.
 pub fn newton(
     sys: anytype,
     ws: *Workspace,
@@ -133,6 +145,7 @@ pub fn newton(
     const dx = ws.dx;
     const x_old = ws.x_old;
     var iter: u16 = 0;
+    var init_fix = opts.init_fix;
     if (comptime @hasDecl(S, "beginSolve")) sys.beginSolve();
 
     while (iter < opts.max_iter) : (iter += 1) {
@@ -182,8 +195,12 @@ pub fn newton(
             const name_di = sysNodeName(sys, @intCast(di));
             std.debug.print("  newton it={d} |F|={e:.3}@{d}({s}) dx={e:.3}@{d}({s}) x={e:.3} scaled={e:.3} conv={} why={s}\n", .{ iter, norm_f, fi, name_fi, dx[di], di, name_di, x[di], st.scaled, st.converged, @tagName(st.why) });
         }
-        if (st.converged)
+        if (st.converged and init_fix) {
+            init_fix = false;
+        } else if (st.converged) {
+            @memcpy(x[0..sys.n], x_old[0..sys.n]);
             return .{ .converged = true, .iterations = iter + 1, .max_dx = st.scaled };
+        }
     }
     return .{ .converged = false, .iterations = opts.max_iter, .max_dx = 0 };
 }
@@ -242,13 +259,13 @@ fn finalizeStep(
     if (comptime @hasDecl(S, "checkConvergence")) {
         if (!sys.checkConvergence(x)) return .{ .converged = false, .scaled = scaled, .why = .device };
     }
-    // Last, at the x `commit` will use: staging per iterate re-entered every
+    // Last, at the x_k `newton` publishes: staging per iterate re-entered every
     // model core once per instance per iteration (18% of
     // scaling/parallel_inverters_100), and devices whose core reads the
     // staged latches (cswitch/vswitch hysteresis) saw F change mid-solve.
     // A device that flips here forces one more iterate.
     if (comptime @hasDecl(S, "updateStates")) {
-        if (sys.updateStates(x)) |_| return .{ .converged = false, .scaled = scaled, .flipped = true, .why = .flipped };
+        if (sys.updateStates(x_old[0..n])) |_| return .{ .converged = false, .scaled = scaled, .flipped = true, .why = .flipped };
     }
     return .{ .converged = true, .scaled = scaled };
 }
@@ -442,6 +459,8 @@ pub fn jfnk(
         // Limiting may clamp x, so it runs before the residual gate.
         const limited = applyLimits(sys, x, x_old);
         const residual_ok = residualConverged(sys, hook, x, f0, opts);
+        // Publishes x_k+1: JFNK is not ngspice's iteration, and its inexact
+        // steps leave x_k further out than a direct solve does.
         if (iter > 0 and scaled < 1.0 and residual_ok and !limited and acceptStep(sys, x))
             return .{ .converged = true, .iterations = iter + 1, .max_dx = scaled };
     }
