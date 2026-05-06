@@ -629,6 +629,13 @@ pub fn CoupledLtra(comptime N: usize) type {
             hist_vo: [N][CAP]f64 = @splat(@splat(0)),
             hist_ii: [N][CAP]f64 = @splat(@splat(0)),
             hist_io: [N][CAP]f64 = @splat(@splat(0)),
+
+            // The accepted point `updateState` staged for `flushStaged`,
+            // with the time and step it was accepted at.
+            staged: bool = false,
+            staged_t: f64 = 0,
+            staged_dt: f64 = 0,
+            staged_x: [n_u]f64 = @splat(0),
         };
 
         pub fn precompute(_: *Instance, model: *Model) void {
@@ -948,8 +955,10 @@ pub fn CoupledLtra(comptime N: usize) type {
         pub fn eval(comptime S: type, x: [n_u]S, model: *const Model, inst: *const Instance, t: f64) [n_u]S {
             var res: [n_u]S = undefined;
             for (0..N) |k| {
-                res[k] = x[br1(k)];
-                res[p2(k)] = x[br2(k)];
+                // cplload.c:81-87, the same stamp as txl.gmin_stamp.
+                const gs = x[k].add(x[p2(k)]).scale(txl.gmin_stamp);
+                res[k] = x[br1(k)].add(gs);
+                res[p2(k)] = x[br2(k)].add(gs);
             }
 
             if (inst.dt <= 0.0 or inst.analysis_kind != .tran or !model.ok or inst.n_hist == 0) {
@@ -964,6 +973,7 @@ pub fn CoupledLtra(comptime N: usize) type {
             }
 
             const ii: *Instance = @constCast(inst);
+            if (ii.staged and t != ii.staged_t) flushStaged(model, ii, t);
             if (ii.cache_t != t or ii.cache_dt != inst.dt) {
                 rebuild(model, ii, inst.dt, @trunc(t * 1e12));
                 ii.cache_t = t;
@@ -991,9 +1001,9 @@ pub fn CoupledLtra(comptime N: usize) type {
 
         pub fn updateState(model: *Model, inst: *Instance, x: [n_u]f64, _: *State) contract.UpdateResult {
             if (inst.analysis_kind != .tran or !model.ok) return .ok;
-            const t_ps: f64 = @trunc(inst.abstime * 1e12);
 
             if (inst.abstime == 0 or inst.n_hist == 0) {
+                inst.staged = false;
                 // cplload dc setup: steady h1/h3 states (complex pairs via
                 // proper complex division), zero h2, one t=0 history point.
                 inst.n_hist = 1;
@@ -1026,11 +1036,26 @@ pub fn CoupledLtra(comptime N: usize) type {
                 return .ok;
             }
 
-            const tail = inst.hist_t[inst.n_hist - 1];
-            if (t_ps <= tail) return .ok;
+            inst.staged = true;
+            inst.staged_t = inst.abstime;
+            inst.staged_dt = inst.dt;
+            inst.staged_x = x;
+            return .ok;
+        }
 
-            if (inst.cache_t != inst.abstime or inst.cache_dt != inst.dt)
-                rebuild(model, inst, inst.dt, t_ps);
+        /// Commits the point `updateState` staged and appends it to the
+        /// history under cplload.c:64-103's label: the next timepoint's
+        /// trunc((t - h)·1e12), clamped up to the history tail (the same
+        /// picosecond as `txl.flushStaged`).
+        fn flushStaged(model: *const Model, inst: *Instance, t: f64) void {
+            inst.staged = false;
+            const x = inst.staged_x;
+            const tail = inst.hist_t[inst.n_hist - 1];
+            const t_ps = @max(@trunc((t - inst.dt) * 1e12), tail);
+            if (t_ps <= tail) return;
+
+            if (inst.cache_t != inst.staged_t or inst.cache_dt != inst.staged_dt)
+                rebuild(model, inst, inst.staged_dt, @trunc(inst.staged_t * 1e12));
             // Adopt the pending h2/h3 advances, then advance h1 over the
             // accepted segment (update_cnv / update_cnv_a).
             inst.cnv2 = inst.p2c;
@@ -1121,8 +1146,6 @@ pub fn CoupledLtra(comptime N: usize) type {
             }
             inst.n_hist = j + 1;
             inst.cache_t = 1e31;
-            inst.bound_step = 0.9 * model.min_tau_s;
-            return .ok;
         }
 
         fn seedTms(tms: *const Tms, cv: *Cnv, dc1: f64, dc2: f64) void {

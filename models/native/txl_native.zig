@@ -628,6 +628,13 @@ pub const Instance = struct {
     hist_vo: [CAP]f64 = @splat(0),
     hist_ii: [CAP]f64 = @splat(0),
     hist_io: [CAP]f64 = @splat(0),
+
+    // The accepted point `updateState` staged for `flushStaged`, with the
+    // time and step it was accepted at.
+    staged: bool = false,
+    staged_t: f64 = 0,
+    staged_dt: f64 = 0,
+    staged_x: [n_u]f64 = @splat(0),
 };
 
 pub fn precompute(_: *Instance, model: *Model) void {
@@ -657,14 +664,23 @@ fn hist(inst: anytype) Hist {
     };
 }
 
+/// txlload.c:62-73 adds 0.1 * CKTgmin to all four (pos, neg) matrix entries,
+/// signs and all, on every load, so each port row carries
+/// `gmin_stamp * (v1 + v2)`. Not a conductance, but it is what the golden decks
+/// ran: 1e-12 A on each port of a 5 V line.
+// ponytail: CKTgmin fixed at its 1e-12 default; plumb `.options gmin` into
+// native devices when a line deck sets it.
+pub const gmin_stamp = 0.1 * 1e-12;
+
 pub fn eval(comptime S: type, x: [n_u]S, model: *const Model, inst: *const Instance, t: f64) [n_u]S {
     var res: [n_u]S = undefined;
     const ib1 = x[@intFromEnum(U.br1)];
     const ib2 = x[@intFromEnum(U.br2)];
-    res[@intFromEnum(U.p1)] = ib1;
-    res[@intFromEnum(U.p2)] = ib2;
     const v1 = x[@intFromEnum(U.p1)];
     const v2 = x[@intFromEnum(U.p2)];
+    const gs = v1.add(v2).scale(gmin_stamp);
+    res[@intFromEnum(U.p1)] = ib1.add(gs);
+    res[@intFromEnum(U.p2)] = ib2.add(gs);
 
     if (inst.dt <= 0.0 or inst.analysis_kind != .tran or !model.fit.ok or inst.n_hist == 0) {
         // MODEDC rows: i1 + i2 = 0; v1 − v2 = R·len·i1.
@@ -674,6 +690,7 @@ pub fn eval(comptime S: type, x: [n_u]S, model: *const Model, inst: *const Insta
     }
 
     const ii: *Instance = @constCast(inst);
+    if (ii.staged and t != ii.staged_t) flushStaged(model, ii, t);
     if (ii.cache_t != t or ii.cache_dt != inst.dt) {
         rebuildLine(&model.fit, &ii.line, inst.dt, @trunc(t * 1e12), hist(ii));
         ii.cache_t = t;
@@ -697,10 +714,10 @@ pub fn updateState(model: *Model, inst: *Instance, x: [n_u]f64, _: *State) contr
     if (inst.analysis_kind != .tran or !model.fit.ok) return .ok;
     const v1 = x[@intFromEnum(U.p1)];
     const v2 = x[@intFromEnum(U.p2)];
-    const t_ps: f64 = @trunc(inst.abstime * 1e12);
 
     if (inst.abstime == 0 or inst.n_hist == 0) {
         // Fresh transient: DC seed (dc setup block of TXLload).
+        inst.staged = false;
         inst.n_hist = 1;
         inst.hist_t[0] = 0;
         inst.hist_vi[0] = v1;
@@ -713,11 +730,30 @@ pub fn updateState(model: *Model, inst: *Instance, x: [n_u]f64, _: *State) contr
         return .ok;
     }
 
-    const tail = inst.hist_t[inst.n_hist - 1];
-    if (t_ps <= tail) return .ok; // sub-ps step: reference merges it (no-op)
+    inst.staged = true;
+    inst.staged_t = inst.abstime;
+    inst.staged_dt = inst.dt;
+    inst.staged_x = x;
+    return .ok;
+}
 
-    if (inst.cache_t != inst.abstime or inst.cache_dt != inst.dt)
-        rebuildLine(&model.fit, &inst.line, inst.dt, t_ps, hist(inst));
+/// Commits the point `updateState` staged and appends it to the history,
+/// labelled as txlload.c:55-106 labels it: the next timepoint's
+/// trunc((t - h)·1e12), clamped up to the history tail, rather than
+/// trunc(t_accepted·1e12). The two differ by 1 ps whenever t - h lands an ulp
+/// below an integer picosecond, and the delayed reads and h1 slopes of the
+/// reference carry that picosecond.
+fn flushStaged(model: *const Model, inst: *Instance, t: f64) void {
+    inst.staged = false;
+    const x = inst.staged_x;
+    const v1 = x[@intFromEnum(U.p1)];
+    const v2 = x[@intFromEnum(U.p2)];
+    const tail = inst.hist_t[inst.n_hist - 1];
+    const t_ps = @max(@trunc((t - inst.dt) * 1e12), tail);
+    if (t_ps <= tail) return; // same picosecond: the reference drops it
+
+    if (inst.cache_t != inst.staged_t or inst.cache_dt != inst.staged_dt)
+        rebuildLine(&model.fit, &inst.line, inst.staged_dt, @trunc(inst.staged_t * 1e12), hist(inst));
     commitLine(&model.fit, &inst.line, t_ps - tail, v1, v2);
 
     // Prune the dead front (all delayed reads anchor at tail − τ; keep one
@@ -743,8 +779,6 @@ pub fn updateState(model: *Model, inst: *Instance, x: [n_u]f64, _: *State) contr
     inst.hist_io[j] = x[@intFromEnum(U.br2)];
     inst.n_hist = j + 1;
     inst.cache_t = 1e31;
-    inst.bound_step = 0.9 * model.fit.taul * 1e-12;
-    return .ok;
 }
 
 // ---------------------------------------------------------------------------
