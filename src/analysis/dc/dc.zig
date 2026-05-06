@@ -141,8 +141,17 @@ fn runSerial(
     ncols: usize,
     data: []f64,
 ) !void {
-    const x = try a.alloc(f64, ckt.n);
-    defer a.free(x);
+    const buf = try a.alloc(f64, 2 * ckt.n);
+    defer a.free(buf);
+    // The last two points, for the predictor. Zero before the second point,
+    // as ngspice's never-written CKTstate2 is.
+    // ponytail: restarts at zero on each outer block, where ngspice carries
+    // the previous block's last point; carrying it sends models without a
+    // `$limit` (hisimhv_va) to an unlimited guess that ngspice's own load
+    // would limit (hsmhv2ld.c:924).
+    @memset(buf, 0);
+    const x = buf[0..ckt.n];
+    const x_prev = buf[ckt.n..];
 
     // The pattern is frozen, so one workspace (one symbolic factorization)
     // serves every point.
@@ -166,8 +175,18 @@ fn runSerial(
         } else try ckt.recompute();
         try ckt.computeBaseline();
 
+        // MODEINITPRED (dctrcurv.c:375, DEVpred in the device loads): start
+        // from the last two points extrapolated (xfact = 1 on the uniform
+        // step), limited against the last one. A cold point overwrites the
+        // guess; the rotation still runs, as ngspice's state rotation does.
+        for (x, x_prev) |*xi, *xp| {
+            const last = xi.*;
+            xi.* = 2.0 * last - xp.*;
+            xp.* = last;
+        }
         var converged = false;
         if (!cold) {
+            _ = ckt.applyLimits(x, x_prev);
             // A SingularMatrix here (NaN stamps from a bad warm guess) must
             // not abort the sweep; the point falls to the ladder like any
             // other failure.
