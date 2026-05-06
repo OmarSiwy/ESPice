@@ -158,18 +158,12 @@ pub fn solve(
 
 /// Contract entry: one real point, `total_3sigma` followed by each
 /// parameter's sensitivity (`<type>#<index>.<param>`) in descending variance
-/// order. The output defaults to the last probe.
+/// order.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
     const ckt = ctx.circuit;
-
-    const output_node = opts.output_node orelse blk: {
-        if (ctx.probes.len == 0) return error.NoOutputNode;
-        break :blk ctx.probes[ctx.probes.len - 1];
-    };
-
     const scratch = ctx.scratch_allocator;
-    const res = try solve(ckt, ctx.x_op, output_node, scratch);
+    const res = try solve(ckt, ctx.x_op, opts.output_node, scratch);
     defer scratch.free(res.contributions);
 
     const n_contribs = res.contributions.len;

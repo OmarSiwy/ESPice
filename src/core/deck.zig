@@ -47,6 +47,10 @@ pub const Deck = struct {
     /// Node and branch row of the drive source that analyses default to.
     source_node: u32,
     source_branch: u32,
+    /// Row of the last net the deck introduces: the output of cards that
+    /// name none (`.pac`, `.pxf`, `.disto`). Not the last probe, whose place
+    /// the BBD permutation moves.
+    output_node: u32,
     /// AC excitation: n real rows, then n imaginary rows.
     ac_drive: []const f64,
     title: []const u8,

@@ -117,17 +117,11 @@ pub fn solve(
 ///   model parameter                  -> `<card>:<param>`   (r1:tc1)
 ///   principal instance parameter     -> `<card>`           (r1)
 ///   any other instance parameter     -> `<card>_<param>`   (r1_scale)
-/// The output defaults to the last probe.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
     const scratch = ctx.scratch_allocator;
-    const output_node = opts.output_node orelse blk: {
-        if (ctx.probes.len == 0) return error.NoOutputNode;
-        break :blk ctx.probes[ctx.probes.len - 1];
-    };
-
     const refs = try ctx.circuit.collectParams();
-    const sens = try solve(ctx.circuit, ctx.x_op, refs, output_node, opts.output_neg, scratch);
+    const sens = try solve(ctx.circuit, ctx.x_op, refs, opts.output_node, opts.output_neg, scratch);
     defer scratch.free(sens);
 
     const names = try a.alloc([]const u8, refs.len);

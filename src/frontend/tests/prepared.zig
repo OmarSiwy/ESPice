@@ -159,7 +159,7 @@ test "prepared metadata and query identities outlive parse storage" {
     try std.testing.expectEqualStrings("i(va)", prepared.deck.probe_labels[0]);
     try std.testing.expectEqualStrings("v(2)", prepared.deck.probe_labels[prepared.deck.probe_labels.len - 1]);
     const node = prepared.deck.probes[prepared.deck.probes.len - 1];
-    try std.testing.expectEqual(node, prepared.deck.queries[0].tf.output_node.?);
+    try std.testing.expectEqual(node, prepared.deck.queries[0].tf.output_node);
     try std.testing.expectEqual(prepared.deck.probes[1], prepared.deck.queries[0].tf.input_branch.?);
     try std.testing.expectEqual(node, prepared.deck.queries[1].noise.out_node);
     try std.testing.expect(!prepared.deck.queries[1].noise.integrated);
@@ -184,7 +184,7 @@ test "prepared metadata and query identities outlive parse storage" {
         \\.sens v(2)
     );
     try std.testing.expectEqual(@as(usize, 6), appended.len);
-    try std.testing.expectEqual(node, appended[0].tf.output_node.?);
+    try std.testing.expectEqual(node, appended[0].tf.output_node);
     try std.testing.expectEqual(prepared.deck.probes[1], appended[0].tf.input_branch.?);
     try std.testing.expectEqual(device.Library.builtin("vsource"), appended[1].dc.target.type);
     try std.testing.expectEqual(@as(u32, 1), appended[1].dc.target.index);
@@ -223,6 +223,34 @@ test "a numeric reference node is that node, not ground" {
     try std.testing.expectEqualStrings("v(2)", prepared.deck.probe_labels[prepared.deck.probe_labels.len - 1]);
     try std.testing.expectEqual(node, prepared.deck.queries[0].tf.output_neg);
     try std.testing.expectEqual(node, prepared.deck.queries[1].noise.out_neg);
+}
+
+test "cards without an output measure the last net the deck introduces, whatever the BBD order" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const nl = try parse(a,
+        \\bbd output
+        \\.subckt rc p q
+        \\r1 p m 1k
+        \\c1 m q 1n
+        \\.ends
+        \\v1 in 0 dc 0 ac 1 distof1 0.01
+        \\x1 in mid rc
+        \\x2 mid out rc
+        \\r2 out 0 1k
+        \\.disto dec 2 10 100
+        \\.pac 1k dec 2 10 100
+        \\.end
+    );
+    var prepared = try build(a, a, nl);
+    defer prepared.deinit();
+    const deck = prepared.deck;
+    // x2's internal net comes last in the deck; the permutation puts v(mid) last among the probes.
+    try std.testing.expectEqualStrings("x2.m", prepared.circuit.nodeName(deck.output_node));
+    try std.testing.expectEqualStrings("v(mid)", deck.probe_labels[deck.probe_labels.len - 1]);
+    try std.testing.expectEqual(deck.output_node, deck.queries[0].disto.output_node);
+    try std.testing.expectEqual(deck.output_node, deck.queries[3].pac.out_node);
 }
 
 test "selected unresolved parameters fail while unused models stay inert" {

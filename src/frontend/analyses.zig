@@ -324,7 +324,7 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
             try arity(args, 4, 4);
             const grid = try frequencySweep(args, 0);
             if (id == .ac) return .{ .ac = .{ .sweep = grid } };
-            var opts: requests.Disto = .{ .sweep = grid };
+            var opts: requests.Disto = .{ .sweep = grid, .output_node = try outputNode(node_id) };
             // ngspice cktdisto.c:100-117: the F1 drive is the card carrying
             // DISTOF1, not the first source, on that card's branch row
             // (`disto/bjt_ce`: Vcc comes first, DISTOF1 is on Vin).
@@ -371,7 +371,7 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
         },
         .tf => {
             try arity(args, 2, 2);
-            var opts: requests.Tf = .{};
+            var opts: requests.Tf = .{ .output_node = GROUND };
             // `.tf i(Vmeasure) ...` measures a branch current.
             if (currentProbeName(args, 0)) |probe| {
                 opts.output_branch = sources.v_branches[findNameIndex(sources.v_names, probe) orelse return error.AnalysisSourceNotFound];
