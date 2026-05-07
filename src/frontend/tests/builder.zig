@@ -203,3 +203,29 @@ test "RG line retains the checked instance length alias" {
     }
     return error.MissingLineLength;
 }
+
+test "compile frees the BBD permutation it does not return" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const nl = try netlist.parse(a,
+        \\* two subcircuit instances
+        \\.subckt rc p q
+        \\r1 p m 1k
+        \\r2 m q 1k
+        \\.ends
+        \\x1 in mid rc
+        \\x2 mid 0 rc
+        \\.end
+    , .ngspice);
+    const lib = try device.Library.init(a);
+    var b = try Builder.init(std.testing.allocator, &lib);
+    var compiled = false;
+    defer if (!compiled) b.deinit();
+    var nb = try builder.NetBuilder.init(a, &b, nl);
+    try nb.build();
+    try nb.tagSubcircuitNodes();
+    var circuit = try b.compile();
+    compiled = true;
+    circuit.deinit();
+}
