@@ -33,7 +33,8 @@ pub const Session = struct {
     }
 
     /// Writes plot `ordinal`. Ordinal 0 writes `path`; later ones append to it
-    /// for binary raw and go to `path.<ordinal + 1>` for every other format.
+    /// for binary and ASCII raw and `.print` listings, and go to
+    /// `path.<ordinal + 1>` for every other format.
     /// An already acknowledged ordinal is a no-op. A gap (`OutOfOrder`) or an
     /// invalid plot fails before any I/O. A writer error is terminal
     /// (`DeliveryFailed` from then on): a partial append cannot be replayed.
@@ -45,13 +46,14 @@ pub const Session = struct {
         try types.validatePlot(self.selection.format, plot);
 
         if (self.selection.path) |path| {
-            const numbered = if (ordinal != 0 and self.selection.format != .binary)
+            const appends = dispatch.concatenates(self.selection.format);
+            const numbered = if (ordinal != 0 and !appends)
                 try std.fmt.allocPrint(self.allocator, "{s}.{d}", .{ path, ordinal + 1 })
             else
                 null;
             defer if (numbered) |p| self.allocator.free(p);
-            const written = if (self.selection.format == .binary and ordinal != 0)
-                dispatch.append(io, path, plot)
+            const written = if (appends and ordinal != 0)
+                dispatch.append(io, path, self.selection.format, plot)
             else
                 dispatch.write(io, numbered orelse path, self.selection.format, plot);
             written catch |err| {
@@ -70,39 +72,41 @@ pub const Session = struct {
     }
 };
 
-test "session: finish and repeated publication preserve binary append order" {
-    const io = std.testing.io;
-    const a = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/plots.raw", .{tmp.sub_path});
-    defer a.free(path);
-    var session = try Session.init(a, .{ .path = path });
-    defer session.deinit();
-    const first: types.Plot = .{
-        .title = "session",
-        .result = .{
-            .plotname = "first",
-            .varnames = &.{"v(out)"},
-            .is_complex = false,
-            .npoints = 1,
-            .data = &.{1},
-        },
-    };
-    try session.publish(io, 0, first);
-    try session.finish();
-    const initial = try tmp.dir.readFileAlloc(io, "plots.raw", a, .unlimited);
-    defer a.free(initial);
-    try session.publish(io, 0, first);
-    var second = first;
-    second.result.plotname = "second";
-    try session.publish(io, 1, second);
-    try session.finish();
-    const complete = try tmp.dir.readFileAlloc(io, "plots.raw", a, .unlimited);
-    defer a.free(complete);
-    try std.testing.expect(std.mem.startsWith(u8, complete, initial));
-    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, complete, "Title: session\n"));
-    try std.testing.expect(std.mem.indexOf(u8, complete[initial.len..], "Plotname: second\n") != null);
+test "session: finish and repeated publication preserve raw append order" {
+    for ([_]types.Format{ .binary, .ascii }) |format| {
+        const io = std.testing.io;
+        const a = std.testing.allocator;
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/plots.raw", .{tmp.sub_path});
+        defer a.free(path);
+        var session = try Session.init(a, .{ .format = format, .path = path });
+        defer session.deinit();
+        const first: types.Plot = .{
+            .title = "session",
+            .result = .{
+                .plotname = "first",
+                .varnames = &.{"v(out)"},
+                .is_complex = false,
+                .npoints = 1,
+                .data = &.{1},
+            },
+        };
+        try session.publish(io, 0, first);
+        try session.finish();
+        const initial = try tmp.dir.readFileAlloc(io, "plots.raw", a, .unlimited);
+        defer a.free(initial);
+        try session.publish(io, 0, first);
+        var second = first;
+        second.result.plotname = "second";
+        try session.publish(io, 1, second);
+        try session.finish();
+        const complete = try tmp.dir.readFileAlloc(io, "plots.raw", a, .unlimited);
+        defer a.free(complete);
+        try std.testing.expect(std.mem.startsWith(u8, complete, initial));
+        try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, complete, "Title: session\n"));
+        try std.testing.expect(std.mem.indexOf(u8, complete[initial.len..], "Plotname: second\n") != null);
+    }
 }
 
 test "session: owned destination, numbered files and order validation" {

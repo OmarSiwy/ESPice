@@ -96,8 +96,9 @@ the file atomically.
 `output.Session.init(allocator, selection)` copies its destination.
 `publish(io, ordinal, plot)` validates and writes one whole committed plot.
 Ordinals are consecutive delivery numbers, separate from query IDs. An already
-acknowledged ordinal is a no-op; a gap is an error. Binary raw appends plots;
-other encodings receive numbered paths after the first plot.
+acknowledged ordinal is a no-op; a gap is an error. Binary and ASCII raw and
+`print` append plots; other encodings receive numbered paths after the first
+plot.
 
 `finish()` checks delivery state. Every current publication has already flushed
 and closed its writer, so finish neither closes the Problem nor prevents later

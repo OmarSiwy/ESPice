@@ -11,12 +11,23 @@ pub fn write(io: Io, path: []const u8, format: types.Format, plot: types.Plot) !
     return put(io, path, format, plot, false);
 }
 
-/// Appends `plot` to the binary raw file at `path`, creating it if missing.
-/// ngspice writes every plot of a deck into one raw file and readers take
-/// the concatenation. The old plots are copied into the replacement, so the
-/// append is atomic too.
-pub fn append(io: Io, path: []const u8, plot: types.Plot) !void {
-    return put(io, path, .binary, plot, true);
+/// Appends `plot` to the file at `path`, creating it if missing. Only for
+/// formats that `concatenates`. The old plots are copied into the
+/// replacement, so the append is atomic too.
+pub fn append(io: Io, path: []const u8, format: types.Format, plot: types.Plot) !void {
+    std.debug.assert(concatenates(format));
+    return put(io, path, format, plot, true);
+}
+
+/// Whether one file holds several plots back to back. ngspice writes every
+/// plot of a deck into one raw file, binary or ASCII, and readers take the
+/// concatenation; a `.print` listing is a sequence of tables. The other
+/// formats hold one dataset per file.
+pub fn concatenates(format: types.Format) bool {
+    return switch (format) {
+        .binary, .ascii, .print => true,
+        else => false,
+    };
 }
 
 fn put(io: Io, path: []const u8, format: types.Format, plot: types.Plot, keep: bool) !void {
