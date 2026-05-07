@@ -91,12 +91,14 @@ fn fdSensitivity(
     return -dot;
 }
 
-/// Every collected parameter's contribution to the mismatch of `output_node`
-/// at `x_op`. Leaves the circuit's planes at the last perturbed eval.
+/// Every collected parameter's contribution to the mismatch of
+/// v(output_node) - v(output_neg) at `x_op`. Leaves the circuit's planes at
+/// the last perturbed eval.
 pub fn solve(
     ckt: *root.Circuit,
     x_op: []const f64,
     output_node: u32,
+    output_neg: u32,
     allocator: std.mem.Allocator,
 ) !MismatchResult {
     const n: usize = ckt.n;
@@ -121,6 +123,8 @@ pub fn solve(
 
     root.zeroSimd(e_out[0..n]);
     e_out[output_node] = 1.0;
+    // `v(a,b)`: the adjoint seed is the node difference.
+    if (output_neg != root.GROUND) e_out[output_neg] = -1.0;
     ws.slv.solveT(e_out[0..n], lambda[0..n]);
 
     const contributions = try allocator.alloc(Contribution, refs.len);
@@ -163,7 +167,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
     const ckt = ctx.circuit;
     const scratch = ctx.scratch_allocator;
-    const res = try solve(ckt, ctx.x_op, opts.output_node, scratch);
+    const res = try solve(ckt, ctx.x_op, opts.output_node, opts.output_neg, scratch);
     defer scratch.free(res.contributions);
 
     const n_contribs = res.contributions.len;

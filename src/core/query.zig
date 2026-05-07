@@ -131,6 +131,8 @@ pub const Tf = struct {
 pub const Dcmatch = struct {
     tol: Tolerances = .{},
     output_node: u32,
+    /// `v(a,b)` reference node for the output; GROUND is single-ended.
+    output_neg: u32 = 0,
 };
 
 pub const Pss = struct {

@@ -391,8 +391,9 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
         .sens, .dcmatch => {
             try arity(args, 1, 1);
             const node = try outputNode(node_id);
-            if (id == .sens) return .{ .sens = .{ .output_node = node, .output_neg = try outputNeg(node_neg), .cards = cards } };
-            return .{ .dcmatch = .{ .output_node = node } };
+            const neg = try outputNeg(node_neg);
+            if (id == .sens) return .{ .sens = .{ .output_node = node, .output_neg = neg, .cards = cards } };
+            return .{ .dcmatch = .{ .output_node = node, .output_neg = neg } };
         },
         .four => {
             try arity(args, 2, 3);
