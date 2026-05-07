@@ -389,19 +389,35 @@ pub const GpuContext = struct {
             }
             errdefer if (ctl_kernel) |*ck| ck.deinit();
 
+            // One errdefer per buffer: `bg` counts only once it is whole, so
+            // a failure part way through frees what this batch already holds.
+            var d_models = try uploadBytes(&kernel, p.models);
+            errdefer d_models.free();
+            var d_instances = try uploadBytes(&kernel, p.instances);
+            errdefer d_instances.free();
+            var d_gath = try uploadBytes(&kernel, std.mem.sliceAsBytes(p.gath));
+            errdefer d_gath.free();
+            var d_rhs_idx = try uploadBytes(&kernel, std.mem.sliceAsBytes(p.rhs_idx));
+            errdefer d_rhs_idx.free();
+            var d_slots = try uploadBytes(&kernel, std.mem.sliceAsBytes(p.slots));
+            errdefer d_slots.free();
+            // Left unwritten: reads are gated by `lim_active`, like the host's
+            // `lim_x`.
+            var d_lim = try kernel.alloc(if (p.lim_x.len > 0) @as(usize, p.count) * p.n_u * @sizeOf(f64) else 1);
+            errdefer d_lim.free();
+            const d_states = try uploadBytes(&kernel, p.states);
+
             bg.* = .{
                 .kernel = kernel,
                 .lim_kernel = lim_kernel,
                 .ctl_kernel = ctl_kernel,
-                .d_models = try uploadBytes(&kernel, p.models),
-                .d_instances = try uploadBytes(&kernel, p.instances),
-                .d_gath = try uploadBytes(&kernel, std.mem.sliceAsBytes(p.gath)),
-                .d_rhs_idx = try uploadBytes(&kernel, std.mem.sliceAsBytes(p.rhs_idx)),
-                .d_slots = try uploadBytes(&kernel, std.mem.sliceAsBytes(p.slots)),
-                // Left unwritten: reads are gated by `lim_active`, like the
-                // host's `lim_x`.
-                .d_lim = try kernel.alloc(if (p.lim_x.len > 0) @as(usize, p.count) * p.n_u * @sizeOf(f64) else 1),
-                .d_states = try uploadBytes(&kernel, p.states),
+                .d_models = d_models,
+                .d_instances = d_instances,
+                .d_gath = d_gath,
+                .d_rhs_idx = d_rhs_idx,
+                .d_slots = d_slots,
+                .d_lim = d_lim,
+                .d_states = d_states,
                 .ctx = b.ctx,
                 .payload = get,
                 .set_limit_active = b.hooks.set_limit_active,
@@ -434,6 +450,64 @@ pub const GpuContext = struct {
         errdefer reduce.deinit();
         try order.upload(batches[0..n_up]);
 
+        // One errdefer per resource, so a failure part way through releases
+        // exactly what was made. Pinned memory goes through batch 0's handle,
+        // which the batch errdefer above releases after these run.
+        const pin_g = try pinnedF64(k0, ckt.g_vals.len);
+        errdefer k0.freePinned(std.mem.sliceAsBytes(pin_g));
+        const pin_rhs = try pinnedF64(k0, ckt.rhs.len);
+        errdefer k0.freePinned(std.mem.sliceAsBytes(pin_rhs));
+        const pin_c: []f64 = if (resident_charge) try pinnedF64(k0, ckt.c_vals.len) else &.{};
+        errdefer k0.freePinned(std.mem.sliceAsBytes(pin_c));
+        const pin_q: []f64 = if (resident_charge) try pinnedF64(k0, ckt.q_vec.len) else &.{};
+        errdefer k0.freePinned(std.mem.sliceAsBytes(pin_q));
+        const pin_x = try pinnedF64(k0, ckt.n + 1);
+        errdefer k0.freePinned(std.mem.sliceAsBytes(pin_x));
+        const pin_x2 = try pinnedF64(k0, ckt.n + 1);
+        errdefer k0.freePinned(std.mem.sliceAsBytes(pin_x2));
+        const pin_flags = try k0.allocPinned(4);
+        errdefer k0.freePinned(pin_flags);
+        var d_x = try k0.alloc(x_bytes);
+        errdefer d_x.free();
+        var d_g = try k0.alloc(g_bytes);
+        errdefer d_g.free();
+        var d_c = try k0.alloc(g_bytes);
+        errdefer d_c.free();
+        var d_rhs = try k0.alloc(rhs_bytes);
+        errdefer d_rhs.free();
+        var d_q = try k0.alloc(rhs_bytes);
+        errdefer d_q.free();
+        var d_x2 = try k0.alloc(x_bytes);
+        errdefer d_x2.free();
+        var d_flags = try k0.alloc(4);
+        errdefer d_flags.free();
+        var d_seg1_slot = try uploadBytes(k0, std.mem.sliceAsBytes(order.seg1_slot));
+        errdefer d_seg1_slot.free();
+        var d_seg1_row = try uploadBytes(k0, std.mem.sliceAsBytes(order.seg1_row));
+        errdefer d_seg1_row.free();
+        var d_seg2_slot = try uploadBytes(k0, std.mem.sliceAsBytes(order.seg2_slot));
+        errdefer d_seg2_slot.free();
+        var d_seg2_row = try uploadBytes(k0, std.mem.sliceAsBytes(order.seg2_row));
+        errdefer d_seg2_row.free();
+        var d_stage_g = try k0.alloc(@max(order.n_slot, 1) * @sizeOf(f64));
+        errdefer d_stage_g.free();
+        var d_stage_c = try k0.alloc(@max(order.n_slot, 1) * @sizeOf(f64));
+        errdefer d_stage_c.free();
+        var d_stage_rhs = try k0.alloc(@max(order.n_row, 1) * @sizeOf(f64));
+        errdefer d_stage_rhs.free();
+        var d_stage_q = try k0.alloc(@max(order.n_row, 1) * @sizeOf(f64));
+        errdefer d_stage_q.free();
+        var d_mid_slot = try k0.alloc(@max(order.n_vslot, 1) * @sizeOf(f64));
+        errdefer d_mid_slot.free();
+        var d_mid_row = try k0.alloc(@max(order.n_vrow, 1) * @sizeOf(f64));
+        errdefer d_mid_row.free();
+        var stream = try k0.createStream();
+        errdefer stream.deinit();
+        const chk: []f64 = if (std.c.getenv("ESPICE_GPU_EVAL_CHECK") != null)
+            try gpa.alloc(f64, ckt.g_vals.len + ckt.rhs.len)
+        else
+            &.{};
+
         self.* = .{
             .gpa = gpa,
             .ckt = ckt,
@@ -441,41 +515,38 @@ pub const GpuContext = struct {
             .cpu_batches = cpu_batches[0..n_cpu],
             .batches_owned = batches,
             .cpu_owned = cpu_batches,
-            .pin_g = try pinnedF64(k0, ckt.g_vals.len),
-            .pin_rhs = try pinnedF64(k0, ckt.rhs.len),
-            .pin_c = if (resident_charge) try pinnedF64(k0, ckt.c_vals.len) else &.{},
-            .pin_q = if (resident_charge) try pinnedF64(k0, ckt.q_vec.len) else &.{},
-            .pin_x = try pinnedF64(k0, ckt.n + 1),
-            .pin_x2 = try pinnedF64(k0, ckt.n + 1),
-            .pin_flags = try k0.allocPinned(4),
-            .d_x = try k0.alloc(x_bytes),
-            .d_g = try k0.alloc(g_bytes),
-            .d_c = try k0.alloc(g_bytes),
-            .d_rhs = try k0.alloc(rhs_bytes),
-            .d_q = try k0.alloc(rhs_bytes),
-            .d_x2 = try k0.alloc(x_bytes),
-            .d_flags = try k0.alloc(4),
+            .pin_g = pin_g,
+            .pin_rhs = pin_rhs,
+            .pin_c = pin_c,
+            .pin_q = pin_q,
+            .pin_x = pin_x,
+            .pin_x2 = pin_x2,
+            .pin_flags = pin_flags,
+            .d_x = d_x,
+            .d_g = d_g,
+            .d_c = d_c,
+            .d_rhs = d_rhs,
+            .d_q = d_q,
+            .d_x2 = d_x2,
+            .d_flags = d_flags,
             .reduce = reduce,
-            .d_seg1_slot = try uploadBytes(k0, std.mem.sliceAsBytes(order.seg1_slot)),
-            .d_seg1_row = try uploadBytes(k0, std.mem.sliceAsBytes(order.seg1_row)),
-            .d_seg2_slot = try uploadBytes(k0, std.mem.sliceAsBytes(order.seg2_slot)),
-            .d_seg2_row = try uploadBytes(k0, std.mem.sliceAsBytes(order.seg2_row)),
-            .d_stage_g = try k0.alloc(@max(order.n_slot, 1) * @sizeOf(f64)),
-            .d_stage_c = try k0.alloc(@max(order.n_slot, 1) * @sizeOf(f64)),
-            .d_stage_rhs = try k0.alloc(@max(order.n_row, 1) * @sizeOf(f64)),
-            .d_stage_q = try k0.alloc(@max(order.n_row, 1) * @sizeOf(f64)),
-            .d_mid_slot = try k0.alloc(@max(order.n_vslot, 1) * @sizeOf(f64)),
-            .d_mid_row = try k0.alloc(@max(order.n_vrow, 1) * @sizeOf(f64)),
+            .d_seg1_slot = d_seg1_slot,
+            .d_seg1_row = d_seg1_row,
+            .d_seg2_slot = d_seg2_slot,
+            .d_seg2_row = d_seg2_row,
+            .d_stage_g = d_stage_g,
+            .d_stage_c = d_stage_c,
+            .d_stage_rhs = d_stage_rhs,
+            .d_stage_q = d_stage_q,
+            .d_mid_slot = d_mid_slot,
+            .d_mid_row = d_mid_row,
             .n_slot = order.n_slot,
             .n_row = order.n_row,
             .n_vslot = order.n_vslot,
             .n_vrow = order.n_vrow,
-            .stream = try k0.createStream(),
+            .stream = stream,
             .resident_charge = resident_charge,
-            .chk = if (std.c.getenv("ESPICE_GPU_EVAL_CHECK") != null)
-                try gpa.alloc(f64, ckt.g_vals.len + ckt.rhs.len)
-            else
-                &.{},
+            .chk = chk,
         };
         return self;
     }
@@ -986,6 +1057,7 @@ pub const GpuContext = struct {
     fn stateCtlOnGpu(self: *Self, op: device_ir.StateCtlOp) !bool {
         if (comptime backend == null) return false;
         if (self.poisoned) return error.GpuStateReject;
+        if (self.params_dirty) try self.repack();
         var launched = false;
         for (self.batches) |*bg| {
             const ck = if (bg.ctl_kernel) |*k| k else continue;
