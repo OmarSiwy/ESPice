@@ -425,7 +425,8 @@ module hfet1(d, g, s);
         // v*dC/dv term (hfetload.c:326-336, 360-369).
         I(gi, si) <+ mult * capgs * ddt(V(gi, si));
         I(gi, di) <+ mult * capgd * ddt(V(gi, di));
-        I(di, si) <+ mult * cds   * ddt(V(di, si));
+        // hfettrunc.c truncates qgs and qgd, not qds.
+        (* vera_lte = 0 *) I(di, si) <+ mult * cds   * ddt(V(di, si));
 
         // Series parasitics; R == 0 stays an exact short, which is ngspice not
         // creating the internal node at all.  m parallel devices divide them.

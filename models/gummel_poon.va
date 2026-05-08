@@ -278,9 +278,9 @@ module gummel_poon(c, b, e, s);
             icc = cbe / qb - cbc / qb;
         end else begin
             I(xf1) <+ V(xf2) - cbe / qb;
-            I(xf1) <+ ddt(td * V(xf1));
+            (* vera_lte = 0 *) I(xf1) <+ ddt(td * V(xf1));
             I(xf2) <+ V(xf2) - V(xf1);
-            I(xf2) <+ ddt(td * V(xf2) / 3.0);
+            (* vera_lte = 0 *) I(xf2) <+ ddt(td * V(xf2) / 3.0);
             icc = V(xf2) - cbc / qb;
         end
 
@@ -315,7 +315,9 @@ module gummel_poon(c, b, e, s);
         I(bi, ei) <+ type * ddt(qbe);
         I(bi, ci) <+ type * (cbc / br_t + cbcn);
         I(bi, ci) <+ type * ddt(qbc);
-        I(b, ci)  <+ type * ddt(qbx);
+        // bjttrunc.c truncates qbe, qbc and qsub, not qbx (nor the excess
+        // phase network above).
+        (* vera_lte = 0 *) I(b, ci)  <+ type * ddt(qbx);
         I(s, ci)  <+ vert * type * cdsub;
         I(s, ci)  <+ vert * type * ddt(qsub);
         I(s, bi)  <+ (1.0 - vert) * type * cdsub;

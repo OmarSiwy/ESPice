@@ -408,6 +408,24 @@ fn writtenRows(comptime D: type, comptime name: []const u8) [contract.nU(D)]bool
     return out;
 }
 
+/// The charge sites of D that join the transient LTE (`contract.qLte`), in
+/// site order. `q_tape` holds one entry per instance and listed site,
+/// indexed `id * lteSites(D).len + j`, the way ngspice's `*trunc.c` routines
+/// hand CKTterr one charge state each.
+fn lteSites(comptime D: type) []const usize {
+    comptime {
+        const on = contract.qLte(D);
+        var out: [on.len]usize = undefined;
+        var n: usize = 0;
+        for (on, 0..) |o, k| if (o) {
+            out[n] = k;
+            n += 1;
+        };
+        const sites = out[0..n].*;
+        return &sites;
+    }
+}
+
 /// The derivative basis `evalRange` seeds: `w` lanes, and the lane each
 /// unknown seeds into.
 ///
@@ -573,19 +591,19 @@ fn evalRange(comptime D: type, comptime narrow: bool, comptime F: type, sink: an
         inline for (0..n_u) |u| xv[u] = S.seed(lx[u], lane[u]);
 
         var out: [n_u]S = undefined;
+        // `q` returns one charge per ddt site. The planes take the rows
+        // (`qRows`); the host `q_tape` takes the LTE sites.
+        var qs: if (has_q) [contract.nQ(D)]S else void = undefined;
         var qo: if (has_q) [n_u]S else void = undefined;
-        // ponytail: `q` returns one charge per ddt site; `qRows` sums them
-        // back into rows, so the tape and LTE stay per row and `q_lte` is
-        // unread (no model sets `vera_lte`). Tape per site when a model needs
-        // mos1trun/bjttrunc-style split truncation checks.
         if (comptime fuse) {
             const both = @call(.always_inline, D.evalQ, .{ S, xv, sink.model(id), sink.inst(id), t });
             out = both.res;
-            qo = contract.qRows(D, S, both.q);
+            qs = both.q;
         } else {
             out = D.eval(S, xv, sink.model(id), sink.inst(id), t);
-            if (comptime has_q) qo = contract.qRows(D, S, D.q(S, xv, sink.model(id), sink.inst(id), t));
+            if (comptime has_q) qs = D.q(S, xv, sink.model(id), sink.inst(id), t);
         }
+        if (comptime has_q) qo = contract.qRows(D, S, qs);
 
         // Rows the device never writes (`jac_row`) and entries it can never
         // fill (`jac_pat`) are dropped at comptime; the planes start at +0.0,
@@ -612,15 +630,14 @@ fn evalRange(comptime D: type, comptime narrow: bool, comptime F: type, sink: an
         if (comptime has_q) {
             // Gated on `q_row`, never on `q_pat`: a `ddt()` of something that
             // varies in t but not in x has a clear pattern row and a live
-            // charge the LTE must see. A skipped row's `q_tape` slot keeps the
-            // zero `finalize` wrote, which is the value the store would write.
+            // charge.
             inline for (0..n_u) |ru| if (comptime q_row[ru]) {
                 const row = sink.rhsRow(id, ru);
                 var qv = qo[ru].v;
                 if (comptime has_limit) {
                     if (corr_live and comptime q_pat[ru] != 0) qv += @reduce(.Add, qo[ru].grad() * corr);
                 }
-                sink.scatterQ(id, ru, row, qv);
+                sink.scatterQ(row, qv);
                 if (comptime !SinkT.skip_c and q_pat[ru] != 0) {
                     if (!mask_ground or active[ru]) {
                         const gq = qo[ru].grad();
@@ -629,6 +646,13 @@ fn evalRange(comptime D: type, comptime narrow: bool, comptime F: type, sink: an
                         };
                     }
                 }
+            };
+            if (comptime !SinkT.on_device) inline for (comptime lteSites(D), 0..) |k, j| {
+                var qv = qs[k].v;
+                if (comptime has_limit) {
+                    if (corr_live) qv += @reduce(.Add, qs[k].grad() * corr);
+                }
+                sink.tapeQ(id, j, qv);
             };
         }
     }
@@ -658,9 +682,11 @@ fn evalQRange(comptime D: type, comptime S: type, sink: anytype, first: u32, end
     while (id < end) : (id += 1) {
         var xv: [n_u]S = undefined;
         inline for (0..n_u) |u| xv[u] = S.seed(sink.x(sink.gath(id, u)), u);
-        const qo = contract.qRows(D, S, D.q(S, xv, sink.model(id), sink.inst(id), t));
+        const qs = D.q(S, xv, sink.model(id), sink.inst(id), t);
+        const qo = contract.qRows(D, S, qs);
         // Same `q_row` gate as `evalRange`, or the two passes would differ.
-        inline for (0..n_u) |ru| if (comptime q_row[ru]) sink.scatterQ(id, ru, sink.rhsRow(id, ru), qo[ru].v);
+        inline for (0..n_u) |ru| if (comptime q_row[ru]) sink.scatterQ(sink.rhsRow(id, ru), qo[ru].v);
+        inline for (comptime lteSites(D), 0..) |k, j| sink.tapeQ(id, j, qs[k].v);
     }
 }
 
@@ -807,7 +833,7 @@ pub fn ProtoStore(comptime D: type) type {
             const flat_nodes = @as([*]const u32, @ptrCast(self.rows.items(.nodes).ptr))[0 .. count * n_u];
             buildTapes(flat_nodes, n_u, &jacPattern(D), pv, store.gath, store.rhs_idx, store.slots);
             if (comptime has_q) {
-                store.q_tape = try gpa.alloc(f64, count * n_u);
+                store.q_tape = try gpa.alloc(f64, count * comptime lteSites(D).len);
                 @memset(store.q_tape, 0);
             }
             self.rows.deinit(staging_gpa);
@@ -928,9 +954,8 @@ pub fn DeviceBatch(comptime D: type) type {
         gath: []u32,
         rhs_idx: []u32,
         slots: []u32,
-        /// Charge per instance and row, indexed `id * n_u + ru` like the
-        /// tapes. Written by `Sink.scatterQ` on the host only; see
-        /// `Hooks.q_tape`.
+        /// Charge per instance and LTE site, indexed `id * lteSites(D).len +
+        /// j`. Written by `Sink.tapeQ` on the host only; see `Hooks.q_tape`.
         q_tape: if (has_q) []f64 else void,
 
         const Self = @This();
@@ -1393,7 +1418,7 @@ pub fn DeviceBatch(comptime D: type) type {
                 if (accepted) @memcpy(self.lim_x, template.lim_x) else @memset(self.lim_x, 0);
             }
             if (comptime has_q) {
-                self.q_tape = try gpa.alloc(f64, self.count * n_u);
+                self.q_tape = try gpa.alloc(f64, self.count * comptime lteSites(D).len);
                 if (accepted) @memcpy(self.q_tape, template.q_tape) else @memset(self.q_tape, 0);
             }
             if (comptime has_state) {
@@ -1568,12 +1593,12 @@ fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool) type
         pub inline fn scatterJac(s: *const Sk, id: u32, ru: usize, cu: usize, val: f64) void {
             add(s.g_vals, s.slot(id, ru, cu), val);
         }
-        /// Adds a charge to the q plane and, on the host, records it in
-        /// `q_tape` for the per-state LTE.
-        pub inline fn scatterQ(s: *const Sk, id: u32, ru: usize, row: u32, qv: f64) void {
+        pub inline fn scatterQ(s: *const Sk, row: u32, qv: f64) void {
             add(s.q_vec, row, qv);
-            if (comptime !device and @hasDecl(D, "q"))
-                s.q_tape[@as(usize, id) * n_u + ru] = qv;
+        }
+        /// Records LTE site `j` of instance `id` in the host `q_tape`.
+        pub inline fn tapeQ(s: *const Sk, id: u32, j: usize, qv: f64) void {
+            s.q_tape[@as(usize, id) * (comptime lteSites(D).len) + j] = qv;
         }
         pub inline fn scatterQJac(s: *const Sk, id: u32, ru: usize, cu: usize, val: f64) void {
             add(s.c_vals, s.slot(id, ru, cu), val);

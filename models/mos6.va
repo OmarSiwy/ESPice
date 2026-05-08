@@ -391,8 +391,9 @@ module mos6(d, g, s, b);
         I(di, si) <+ ty * mode * id;
         I(b, di) <+ ty * ibd;
         I(b, si) <+ ty * ibs;
-        I(b, di) <+ ty * ddt(qbd);
-        I(b, si) <+ ty * ddt(qbs);
+        // qbd/qbs join no LTE check: mos6trun.c truncates qgs, qgd, qgb only.
+        (* vera_lte = 0 *) I(b, di) <+ ty * ddt(qbd);
+        (* vera_lte = 0 *) I(b, si) <+ ty * ddt(qbs);
         // Meyer caps are capacitance-based, not charge-conserving (ngspice
         // advances q = q_prev + cap*(v - v_prev)), so the Jacobian entry is
         // exactly cap; ddt(cap*v) would add v*dcap/dv. Both plates are

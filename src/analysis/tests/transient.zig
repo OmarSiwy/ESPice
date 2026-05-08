@@ -431,10 +431,10 @@ const TranTests = struct {
         try testing.expectApproxEqRel(del_one, del_big, 1e-9);
     }
 
-    // Every stamped charge is in the tape exactly once, per instance rather
-    // than merged onto the node. Catches a missing or doubled scatterQ write, a
-    // stale dedup replay and a ParEval lane overlap, which are otherwise silent.
-    test "q tape: per-device-state charges, one entry each, summing to the q plane" {
+    // Every charge site is in the tape exactly once, per instance rather than
+    // merged onto the node. Catches a missing or doubled tapeQ write, a stale
+    // dedup replay and a ParEval lane overlap, which are otherwise silent.
+    test "q tape: one entry per device charge site" {
         const gpa = testing.allocator;
         const models = @import("models");
         const evaluator = @import("device_eval");
@@ -464,9 +464,9 @@ const TranTests = struct {
         var ckt = try root.freeze(gpa, 3, intern_bytes, intern_offs, &protos, &@as([protos.len]@import("device").DeviceType, @splat(.unset)), null);
         defer ckt.deinit();
 
-        // 2 instances * 2 unknowns. Per NODE there would be 3 rows; per STATE there
-        // are 4 contributions, and node 1 carries two of them.
-        try testing.expectEqual(@as(u32, 4), ckt.qTapeLen());
+        // 2 instances * 1 ddt site each (ngspice's CAPqcap). Per NODE there
+        // would be 3 rows, and node 1 carries both charges.
+        try testing.expectEqual(@as(u32, 2), ckt.qTapeLen());
 
         const x = [_]f64{ 0.0, 1.0, 0.25 };
         ckt.eval(&x, 0);
@@ -475,19 +475,9 @@ const TranTests = struct {
         defer gpa.free(tape);
         ckt.snapshotQTape(tape);
 
-        // Indexed id*n_u + ru, exactly like rhs_idx.
+        // Indexed by instance, one site each.
         try testing.expectApproxEqRel(@as(f64, 7.398e-15 * 1.00), tape[0], 1e-9);
-        try testing.expectApproxEqRel(@as(f64, -7.398e-15 * 1.00), tape[1], 1e-9);
-        try testing.expectApproxEqRel(@as(f64, 5.0e-17 * 0.75), tape[2], 1e-9);
-        try testing.expectApproxEqRel(@as(f64, -5.0e-17 * 0.75), tape[3], 1e-9);
-
-        // Every contribution lands in exactly one q_vec cell (the ground terminal
-        // in the trash row q_vec[n]), so the two totals are the same number.
-        var sum_tape: f64 = 0;
-        for (tape) |v| sum_tape += v;
-        var sum_plane: f64 = 0;
-        for (ckt.q_vec) |v| sum_plane += v;
-        try testing.expectApproxEqAbs(sum_plane, sum_tape, 1e-30);
+        try testing.expectApproxEqRel(@as(f64, 5.0e-17 * 0.75), tape[1], 1e-9);
 
         // Node 1's row is the sum, whose slope is neither cap's.
         try testing.expectApproxEqRel(
