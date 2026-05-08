@@ -84,9 +84,5 @@
     "finite_values_required": true,
     "all_requested_analyses_must_complete": true
   },
-  "netlist_sha256": "e5291fd73bf4c20f8e69abe2ba4e4d6c8d0693c5d4648e5a22b8a7151f7a99cd",
-  "known_gaps": [
-    "QPSS does not yet honor the physical two-tone source spectra",
-    "the behavioral-source compiler only supports a limited single-control polynomial subset"
-  ]
+  "netlist_sha256": "e6c90967fe2a3e9de669d23bb0385ffea8ced187ea01fa979d0ef910b98cf75d"
 }
