@@ -352,9 +352,18 @@ module mos1(d, g, s, b);
         // still averages gs with gs. $prev latches at OP exit and per accepted
         // step, so AC and the first transient step read 2*half + overlap (the
         // MODETRANOP/MODEINITSMSIG branch).
-        capgs = chgs + $prev(chgs) + cgso * w * m;
-        capgd = chgd + $prev(chgd) + cgdo * w * m;
-        capgb = cgbh + $prev(cgbh) + cgbo * leff * m;
+        // At the operating point $prev is not latched yet, and ngspice's
+        // MODETRANOP charge, which the transient's charge history starts
+        // from, is (2*half + overlap)*v (mos1load.c).
+        if (analysis("static")) begin
+            capgs = 2.0 * chgs + cgso * w * m;
+            capgd = 2.0 * chgd + cgdo * w * m;
+            capgb = 2.0 * cgbh + cgbo * leff * m;
+        end else begin
+            capgs = chgs + $prev(chgs) + cgso * w * m;
+            capgd = chgd + $prev(chgd) + cgdo * w * m;
+            capgb = cgbh + $prev(cgbh) + cgbo * leff * m;
+        end
 
         // ============ contributions =======================================
         I(di, si) <+ type * mode * id;

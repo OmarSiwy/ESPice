@@ -472,9 +472,18 @@ module mos3(d, g, s, b);
             chgs = cgdh;
             chgd = cgsh;
         end
-        capgs = chgs + $prev(chgs) + cgsov;
-        capgd = chgd + $prev(chgd) + cgdov;
-        capgb = cgbh + $prev(cgbh) + cgbov;
+        // At the operating point $prev is not latched yet, and ngspice's
+        // MODETRANOP charge, which the transient's charge history starts
+        // from, is (2*half + overlap)*v (mos3load.c).
+        if (analysis("static")) begin
+            capgs = 2.0 * chgs + cgsov;
+            capgd = 2.0 * chgd + cgdov;
+            capgb = 2.0 * cgbh + cgbov;
+        end else begin
+            capgs = chgs + $prev(chgs) + cgsov;
+            capgd = chgd + $prev(chgd) + cgdov;
+            capgb = cgbh + $prev(cgbh) + cgbov;
+        end
 
         // ============ contributions =======================================
         I(di, si) <+ type * m * mode * id;
