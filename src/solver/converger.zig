@@ -78,10 +78,13 @@ fn Deref(comptime P: type) type {
 /// The user-facing accuracy profile (SPICE .options).
 pub const Tolerances = @import("core").numerics.Tolerances;
 
-/// Newton options for `tol`, with `max_iter_override` replacing ITL1.
+/// Newton options for `tol`, with `max_iter_override` replacing ITL1. The
+/// cap is never below 100: ngspice's NIiter raises any smaller maxIter to
+/// 100 (niiter.c:38), so ITL2 and ITL4 only steer the callers' own
+/// iteration-count heuristics, never the Newton loop itself.
 pub fn optionsFromTolerances(tol: Tolerances, max_iter_override: ?u16) Options {
     return .{
-        .max_iter = max_iter_override orelse tol.itl1,
+        .max_iter = @max(max_iter_override orelse tol.itl1, 100),
         .abstol = tol.abstol,
         .reltol = tol.reltol,
         .vntol = tol.vntol,
