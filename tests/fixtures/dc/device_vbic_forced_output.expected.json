@@ -2434,5 +2434,8 @@
     "finite_values_required": true,
     "all_requested_analyses_must_complete": true
   },
-  "netlist_sha256": "03ed60f130f4d86b4ff296600f320aa1c4a00fc50fc1e432e6b01b25e67fd159"
+  "netlist_sha256": "05b3a09d7e31252f92995b4e2f4e886e495c75a6c3b8202925f4ac23eb1a56a0",
+  "known_gaps": [
+    "model version \u2014 models/vbic13_4t.va (VBIC 1.3) avalm shifts the smooth max by vminm (lines ~753-757); the ngspice oracle is VBIC 1.2 (vbicload.c:3597) with no shift"
+  ]
 }

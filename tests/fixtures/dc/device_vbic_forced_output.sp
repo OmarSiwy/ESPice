@@ -1,4 +1,6 @@
 VBIC Output Test
+* KNOWN GAP: model version — models/vbic13_4t.va (VBIC 1.3) avalm shifts the smooth max by vminm (lines ~753-757); the ngspice oracle is VBIC 1.2 (vbicload.c:3597) with no shift.
+* This correctness test should currently fail; implement support to match the expected output.
 * Expected results: device_vbic_forced_output.expected.json
 * Origin: benchmark/fixtures/devices/vbic_forced_output/circuit.sp
 V1 V1_P V1_N 0.0
