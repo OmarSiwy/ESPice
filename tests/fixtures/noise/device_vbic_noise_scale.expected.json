@@ -448,5 +448,8 @@
     "finite_values_required": true,
     "all_requested_analyses_must_complete": true
   },
-  "netlist_sha256": "705825533bb082c7b1f2c02384a304c4337cb37512402130e537cd9cdf623e8b"
+  "netlist_sha256": "d81e8b56a3670954837f41a2453f84a298e5f8272349cd7fc75b915e1529d319",
+  "known_gaps": [
+    "ngspice inconsistency \u2014 ngspice omits RS and ICCP noise from the density total (vbicnoise.c:167-177) but integrates them in the totals; espice keeps them in both"
+  ]
 }
