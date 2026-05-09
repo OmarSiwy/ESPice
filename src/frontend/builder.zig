@@ -893,7 +893,7 @@ pub const NetBuilder = struct {
 
     /// URC (U card): `Uxxx n1 n2 ngnd model [l=len] [n=lumps]`. Expanded, as
     /// ngspice URCsetup does, into a ladder of R/C lumps (diodes when ISPERL
-    /// > 0) sized geometrically by K from both ends toward the middle, so the
+    /// is given) sized geometrically by K from both ends toward the middle, so the
     /// totals telescope to L*RPERL and L*CPERL.
     fn addUrc(self: *NetBuilder, dev: Device) !void {
         // Model defaults from urcsetup.c; a card without a .model is legal.
@@ -901,14 +901,14 @@ pub const NetBuilder = struct {
         var fmax: f64 = 1e9;
         var rperl: f64 = 1000;
         var cperl: f64 = 1e-12;
-        var isperl: f64 = 0;
+        var isperl: ?f64 = null;
         var rsperl: f64 = 0;
         if (dev.model) |m| {
             k = kvNumber(m.kv, "k") orelse k;
             fmax = kvNumber(m.kv, "fmax") orelse fmax;
             rperl = kvNumber(m.kv, "rperl") orelse rperl;
             cperl = kvNumber(m.kv, "cperl") orelse cperl;
-            isperl = kvNumber(m.kv, "isperl") orelse isperl;
+            isperl = kvNumber(m.kv, "isperl");
             rsperl = kvNumber(m.kv, "rsperl") orelse rsperl;
         }
         // ngspice defaults the length to 0 (0-ohm lumps); a card without l=
@@ -917,7 +917,7 @@ pub const NetBuilder = struct {
         const p = k;
         const r0 = len * rperl;
         const c0 = len * cperl;
-        const is0 = len * isperl;
+        const is0 = len * (isperl orelse 0);
 
         const lumps: u32 = if (try numericParameter(dev.kv, "n")) |nv|
             // The clamp keeps @intFromFloat defined on absurd cards.
@@ -942,11 +942,10 @@ pub const NetBuilder = struct {
         const neg = if (dev.pins.len > 1) try self.rowOf(dev.pins[1]) else GROUND;
         const gnd = if (dev.pins.len > 2) try self.rowOf(dev.pins[2]) else GROUND;
 
-        // ngspice switches to diodes when ISPERL is merely given, so ISPERL=0
-        // makes is=0 diodes that act only as depletion capacitance. The
-        // linear capacitor is that diode's zero-current limit, so ISPERL > 0
-        // is the trigger here.
-        const use_diodes = isperl > 0;
+        // ngspice switches to diodes when ISPERL is merely given
+        // (urcsetup.c:106), so ISPERL=0 makes is=0 diodes: gmin plus a
+        // voltage-dependent depletion capacitance, not a linear capacitor.
+        const use_diodes = isperl != null;
         var prop: f64 = 1; // K^(i-1)
         var lowl = pos; // low-side chain head (walks pos -> middle)
         var hir = neg; // high-side chain head (walks neg -> middle)
@@ -965,7 +964,9 @@ pub const NetBuilder = struct {
                 // scales each lump by area=prop; diode.va has no area, so the
                 // scaling goes into per-lump model values.
                 var dm: Diode.Model = .{};
-                dm.is = @floatCast(is1 * prop);
+                // diosetup.c:216 raises IS below CKTepsmin (1e-28) to it,
+                // so ISPERL=0 still conducts ~6e-12 A per unit area at 1 V.
+                dm.is = @floatCast(@max(is1, 1e-28) * prop);
                 dm.cjo = @floatCast(c1 * prop);
                 dm.rs = @floatCast(rd / prop);
                 try self.b.addDevice(Diode, dm, .{}, [2]u32{ lowr, gnd });
