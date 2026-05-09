@@ -92,9 +92,10 @@ dense cost.
    back-substitution per column of $C$. Singular $G$ gives `error.Singular`
    (a node reached only through capacitors).
 3. Hessenberg reduction and Francis QR (`eigen/qr.zig eigenvalues`, up to
-   `qr_max_iter` sweeps). Hitting the iteration cap without full deflation is
-   not an error: the root lists are returned with `qr_converged = false`
-   (incomplete, flagged).
+   `qr_max_iter` sweeps). Hitting the iteration cap without full deflation
+   raises `error.PzDidNotConverge`: a partial root set is never returned.
+   Diverges from ngspice, which warns at its iteration limit and publishes
+   the roots it found (cktpzstr.c:225).
 4. Eigenvalue post-pass: cutoff filter,
    $\lambda \to s = \bar\lambda/|\lambda|^2$, stability count.
 5. When zeros are requested: build the numerator pencil, walk the shift

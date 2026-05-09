@@ -95,6 +95,20 @@ ngspice puts it between emitEI and emit (0.9% at 100 MHz), and the VBIC
 physical constants differ from ngspice's (about 1e-6 relative at one zero
 crossing). Both are described under group 5.
 
+Intentional divergences, kept rather than matched:
+
+- `bsource`: a constant integer exponent (`powi`) keeps the sign of its base
+  through repeated multiplication, matching ngspice's hspice/ltspice compat
+  mode (ptfuncs.c `PTpowerH`) and the fixture oracles' analytic math;
+  ngspice's default mode computes `|x|^k` for every constant power (see
+  `models/native/bsource.zig`).
+- `vbic13_4t` keeps VBIC 1.3's `avalm` smoothing, which shifts the smooth
+  max by `vminm` (lines ~753-757); `dc/device_vbic_forced_output`'s ngspice
+  44.2 oracle runs VBIC 1.2 (vbicload.c:3597), which has no such shift.
+- `noise/device_vbic_noise_scale`: ngspice's own noise density total omits
+  the RS and ICCP contributions that its integrated totals include
+  (vbicnoise.c:167-177); espice keeps them in both.
+
 ## Nominal temperature
 
 `.options tnom` reaches a built-in model through VerA's reserved Model field
