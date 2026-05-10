@@ -40,11 +40,11 @@ pub fn FreqSolverT(comptime T: type) type {
             piv: []u32,
         };
 
-        /// Owns the 2n stacked-real CSC and its solver; borrows the circuit's
-        /// G and C planes, which must not be re-evaluated during a sweep.
+        /// Owns the 2n stacked-real CSC, its solver and a snapshot of the
+        /// circuit's G and C planes; borrows only the frozen source pattern.
         const Sparse = struct {
-            g_vals: []const T,
-            c_vals: []const T,
+            g_vals: []T,
+            c_vals: []T,
             src_col_ptr: []const u32,
             col_ptr: []u32,
             row_idx: []u32,
@@ -57,8 +57,9 @@ pub fn FreqSolverT(comptime T: type) type {
         };
 
         /// Linearizes `ckt` at `x_op` (one eval; its G and C planes are the
-        /// linearization) and builds the solver. The sparse path borrows the
-        /// circuit's planes and pattern for the solver's lifetime.
+        /// linearization) and builds the solver from copies of them, so the
+        /// circuit may be re-evaluated afterwards. The sparse path borrows
+        /// the circuit's CSC pattern for the solver's lifetime.
         pub fn fromCircuit(allocator: Allocator, ckt: anytype, x_op: []const T) !Self {
             try ckt.linearizeAc(x_op);
             const n: u32 = @intCast(ckt.n);
@@ -89,6 +90,10 @@ pub fn FreqSolverT(comptime T: type) type {
             errdefer allocator.free(row_idx);
             const vals = try allocator.alloc(T, total_nnz);
             errdefer allocator.free(vals);
+            const g_vals = try allocator.dupe(T, ckt.g_vals[0..src_nnz]);
+            errdefer allocator.free(g_vals);
+            const c_vals = try allocator.dupe(T, ckt.c_vals[0..src_nnz]);
+            errdefer allocator.free(c_vals);
 
             buildStackedRealPattern(n, ckt.col_ptr, ckt.row_idx, col_ptr, row_idx);
 
@@ -99,8 +104,8 @@ pub fn FreqSolverT(comptime T: type) type {
                 .n = n,
                 .nn = nn,
                 .strategy = .{ .sp = .{
-                    .g_vals = ckt.g_vals,
-                    .c_vals = ckt.c_vals,
+                    .g_vals = g_vals,
+                    .c_vals = c_vals,
                     .src_col_ptr = ckt.col_ptr,
                     .col_ptr = col_ptr,
                     .row_idx = row_idx,
@@ -148,6 +153,8 @@ pub fn FreqSolverT(comptime T: type) type {
                     allocator.free(s.col_ptr);
                     allocator.free(s.row_idx);
                     allocator.free(s.vals);
+                    allocator.free(s.g_vals);
+                    allocator.free(s.c_vals);
                 },
             }
         }

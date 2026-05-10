@@ -1246,6 +1246,9 @@ const FreqSolveTests = struct {
         };
         var fs = try FreqSolver.fromCircuit(allocator, ckt, &.{});
         defer fs.deinit(allocator);
+        // A re-evaluated circuit cannot reach the solver's snapshot.
+        @memset(g_vals.items, std.math.nan(f64));
+        @memset(c_vals.items, std.math.nan(f64));
 
         // Enough omegas to span more than one W-chunk plus a ragged tail.
         const omegas = [_]f64{ 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000 };
