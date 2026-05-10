@@ -1280,35 +1280,40 @@ const GmresTests = struct {
     const impl = @import("root.zig").gmres;
     const Gmres = impl.Gmres;
 
-    /// Dense matvec context for tests: A is n x n row-major.
+    fn denseMatvec(comptime T: type, a: []const T, n: usize, v: []const T, w: []T) void {
+        for (0..n) |i| {
+            var s: T = 0;
+            for (0..n) |j| s += a[i * n + j] * v[j];
+            w[i] = s;
+        }
+    }
+
+    /// Dense operator for tests: A is n x n row-major.
     fn DenseMatvec(comptime T: type) type {
         return struct {
             a: []const T,
             n: u32,
 
-            fn matvec(v: []const T, w: []T, ctx_ptr: *anyopaque) void {
-                const self: *const @This() = @ptrCast(@alignCast(ctx_ptr));
-                const n: usize = self.n;
-                for (0..n) |i| {
-                    var s: T = 0;
-                    for (0..n) |j| s += self.a[i * n + j] * v[j];
-                    w[i] = s;
-                }
+            pub fn matvec(self: *const @This(), v: []const T, w: []T) void {
+                denseMatvec(T, self.a, self.n, v, w);
             }
         };
     }
 
-    /// Diagonal preconditioner: r[i] /= diag[i].
-    fn DiagPrecond(comptime T: type) type {
-        return struct {
-            diag: []const T,
+    /// Dense operator with a diagonal preconditioner, r[i] /= diag[i].
+    const DiagPreconditioned = struct {
+        a: []const f64,
+        n: u32,
+        diag: []const f64,
 
-            fn apply(r: []T, ctx_ptr: *anyopaque) void {
-                const self: *const @This() = @ptrCast(@alignCast(ctx_ptr));
-                for (r, self.diag) |*ri, di| ri.* /= di;
-            }
-        };
-    }
+        pub fn matvec(self: *const @This(), v: []const f64, w: []f64) void {
+            denseMatvec(f64, self.a, self.n, v, w);
+        }
+
+        pub fn precond(self: *const @This(), r: []f64) void {
+            for (r, self.diag) |*ri, di| ri.* /= di;
+        }
+    };
 
     test "GMRES: 3x3 SPD system converges in at most 3 iterations" {
         const gpa = testing.allocator;
@@ -1322,10 +1327,7 @@ const GmresTests = struct {
 
         var x = [3]f64{ 0, 0, 0 };
         const result = gmres.solve(
-            &DenseMatvec(f64).matvec,
-            @ptrCast(&mv),
-            null,
-            null,
+            &mv,
             &.{ 5, 5, 3 },
             &x,
             1e-12,
@@ -1358,10 +1360,7 @@ const GmresTests = struct {
 
         var x = [n]f64{ 0, 0, 0, 0 };
         const result = gmres_s.solve(
-            &DenseMatvec(f64).matvec,
-            @ptrCast(&mv),
-            null,
-            null,
+            &mv,
             &.{ 1, 1, 1, 1 },
             &x,
             1e-14,
@@ -1395,10 +1394,7 @@ const GmresTests = struct {
 
         var x = [n]f64{ 0, 0, 0, 0, 0, 0, 0, 0 };
         const result = gmres.solve(
-            &DenseMatvec(f64).matvec,
-            @ptrCast(&mv),
-            null,
-            null,
+            &mv,
             &b,
             &x,
             1e-10,
@@ -1410,7 +1406,7 @@ const GmresTests = struct {
 
         // Verify solution: A*x should equal b.
         var check: [n]f64 = undefined;
-        DenseMatvec(f64).matvec(&x, &check, @ptrCast(&mv));
+        mv.matvec(&x, &check);
         for (0..n) |i| try testing.expectApproxEqAbs(b[i], check[i], 1e-8);
     }
 
@@ -1419,21 +1415,14 @@ const GmresTests = struct {
         // A = [10 1; 2 8], b = [11; 10] => x = [1; 1]
         // Precond M = diag(10, 8): the solution must be in the original space,
         // not in the preconditioned space.
-        var mv = DenseMatvec(f64){
-            .a = &.{ 10, 1, 2, 8 },
-            .n = 2,
-        };
-        var pc = DiagPrecond(f64){ .diag = &.{ 10, 8 } };
+        var op = DiagPreconditioned{ .a = &.{ 10, 1, 2, 8 }, .n = 2, .diag = &.{ 10, 8 } };
 
         var gmres = try Gmres(f64).init(gpa, 2, 10);
         defer gmres.deinit(gpa);
 
         var x = [2]f64{ 0, 0 };
         const result = gmres.solve(
-            &DenseMatvec(f64).matvec,
-            @ptrCast(&mv),
-            &DiagPrecond(f64).apply,
-            @ptrCast(&pc),
+            &op,
             &.{ 11, 10 },
             &x,
             1e-12,
@@ -1456,10 +1445,7 @@ const GmresTests = struct {
 
         var x = [2]f64{ 42, 99 };
         const result = gmres.solve(
-            &DenseMatvec(f64).matvec,
-            @ptrCast(&mv),
-            null,
-            null,
+            &mv,
             &.{ 0, 0 },
             &x,
             1e-12,
@@ -1482,10 +1468,7 @@ const GmresTests = struct {
 
         var x = [2]f32{ 0, 0 };
         const result = gmres.solve(
-            &DenseMatvec(f32).matvec,
-            @ptrCast(&mv),
-            null,
-            null,
+            &mv,
             &[2]f32{ 5, 4 },
             &x,
             1e-5,

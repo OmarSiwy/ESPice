@@ -86,6 +86,8 @@ const OperatorCtx = struct {
     x_sample: []f64,
     /// Dense G extraction scratch, n * n.
     g_buf: []f64,
+
+    pub const matvec = jacobianMatvec;
 };
 
 /// Scratch `buildTransform` needs, in f64 and in u32.
@@ -352,8 +354,7 @@ fn computeResidual(
 /// the spectral slab resident and fuse IDFT, the nf batched G*v products and
 /// the DFT into one launch; it needs a gpu_hook entry point for it. Add when
 /// a profile shows host-device latency dominating.
-fn matvec(v: []const f64, w: []f64, ctx_raw: *anyopaque) void {
-    const ctx: *OperatorCtx = @ptrCast(@alignCast(ctx_raw));
+fn jacobianMatvec(ctx: *OperatorCtx, v: []const f64, w: []f64) void {
     const n = ctx.n;
     const nf = ctx.grid.nf;
     const total_re = n * nf;
@@ -560,16 +561,7 @@ pub fn solve(
         num.scale(residual, -1.0, residual);
         simdZero(dx);
 
-        _ = gmres.solve(
-            &matvec,
-            @ptrCast(&op_ctx),
-            null,
-            null,
-            residual,
-            dx,
-            options.gmres_tol,
-            options.gmres_max_restarts,
-        );
+        _ = gmres.solve(&op_ctx, residual, dx, options.gmres_tol, options.gmres_max_restarts);
 
         num.axpy(x_hat, 1.0, dx);
     }

@@ -87,17 +87,15 @@ pub fn Gmres(comptime T: type) type {
             self.* = undefined;
         }
 
-        /// Solves A x = b. `matvec(v, w, ctx)` writes w = A v; `precond(r,
-        /// ctx)`, when given, applies M^-1 in place and the solve is right
-        /// preconditioned. `x` holds the initial guess and receives the
-        /// solution. Stops at ||r|| <= tol * ||b|| or after
+        /// Solves A x = b. `op` points at the caller's operator:
+        /// `op.matvec(v, w)` writes w = A v, and `op.precond(r)`, when its
+        /// type declares one, applies M^-1 in place for a right
+        /// preconditioned solve. `x` holds the initial guess and receives
+        /// the solution. Stops at ||r|| <= tol * ||b|| or after
         /// `max_restarts + 1` cycles. A zero `b` returns x = 0 at once.
         pub fn solve(
             self: *Self,
-            matvec: *const fn (v: []const T, w: []T, ctx: *anyopaque) void,
-            ctx: *anyopaque,
-            precond: ?*const fn (r: []T, ctx: *anyopaque) void,
-            precond_ctx: ?*anyopaque,
+            op: anytype,
             b: []const T,
             x: []T,
             tol: T,
@@ -105,6 +103,7 @@ pub fn Gmres(comptime T: type) type {
         ) SolveResult {
             const n: usize = self.n;
             const m: usize = self.m;
+            const has_precond = comptime @hasDecl(std.meta.Child(@TypeOf(op)), "precond");
             std.debug.assert(b.len >= n);
             std.debug.assert(x.len >= n);
 
@@ -118,7 +117,7 @@ pub fn Gmres(comptime T: type) type {
             var total_iters: u32 = 0;
 
             for (0..max_restarts + 1) |_| {
-                matvec(x[0..n], self.r[0..n], ctx);
+                op.matvec(x[0..n], self.r[0..n]);
                 for (0..n) |i| self.r[i] = b[i] - self.r[i];
 
                 const beta = vecNorm(self.r[0..n]);
@@ -140,12 +139,12 @@ pub fn Gmres(comptime T: type) type {
                     const vj = self.getV(j);
 
                     // z = A M^-1 v_j, into r.
-                    if (precond) |pc| {
+                    if (has_precond) {
                         @memcpy(self.w[0..n], vj);
-                        pc(self.w[0..n], precond_ctx.?);
-                        matvec(self.w[0..n], self.r[0..n], ctx);
+                        op.precond(self.w[0..n]);
+                        op.matvec(self.w[0..n], self.r[0..n]);
                     } else {
-                        matvec(vj, self.r[0..n], ctx);
+                        op.matvec(vj, self.r[0..n]);
                     }
 
                     // Modified Gram-Schmidt.
@@ -189,7 +188,7 @@ pub fn Gmres(comptime T: type) type {
                 const k = j; // Arnoldi steps completed
                 if (k > 0) {
                     self.solveUpperTriangular(k);
-                    self.updateSolution(x[0..n], k, precond, precond_ctx);
+                    self.updateSolution(x[0..n], k, op);
                 }
 
                 const res_norm = @abs(self.g[k]);
@@ -198,7 +197,7 @@ pub fn Gmres(comptime T: type) type {
                 }
             }
 
-            matvec(x[0..n], self.r[0..n], ctx);
+            op.matvec(x[0..n], self.r[0..n]);
             for (0..n) |i| self.r[i] = b[i] - self.r[i];
             const final_res = vecNorm(self.r[0..n]);
             return .{ .iterations = total_iters, .residual = final_res / b_norm, .converged = false };
@@ -249,17 +248,16 @@ pub fn Gmres(comptime T: type) type {
             self: *Self,
             x: []T,
             k: u32,
-            precond: ?*const fn (r: []T, ctx: *anyopaque) void,
-            precond_ctx: ?*anyopaque,
+            op: anytype,
         ) void {
             const n: usize = self.n;
-            if (precond) |pc| {
+            if (comptime @hasDecl(std.meta.Child(@TypeOf(op)), "precond")) {
                 @memset(self.w[0..n], 0);
                 for (0..k) |j| {
                     const vj = self.getV(@intCast(j));
                     vecAxpy(self.w[0..n], self.y[j], vj);
                 }
-                pc(self.w[0..n], precond_ctx.?);
+                op.precond(self.w[0..n]);
                 for (0..n) |i| x[i] += self.w[i];
             } else {
                 for (0..k) |j| {
