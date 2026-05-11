@@ -24,154 +24,149 @@ pub const Params = struct {
     refactor_growth_limit: f64 = 1e-12,
 };
 
-/// Sparse direct solver over f32 or f64 values on one frozen CSC pattern.
-pub fn SolverT(comptime T: type) type {
-    return struct {
-        const Self = @This();
-        const SparseLu = sparse_lu.SparseLu(T);
-        const TriDiag = tridiag_mod.TriDiag(T);
-        const BbdEng = bbd_mod.Bbd(T);
+/// Sparse direct solver on one frozen CSC pattern.
+pub const Solver = struct {
+    const Self = @This();
+    const SparseLu = sparse_lu.SparseLu;
+    const TriDiag = tridiag_mod.TriDiag;
+    const BbdEng = bbd_mod.Bbd;
 
-        n: u32,
-        /// Borrowed CSC pattern; must outlive the solver.
-        col_ptr: []const u32,
-        row_idx: []const u32,
-        /// At most one engine is live. `lu` is built lazily when a structured
-        /// engine is demoted, so BBD and tridiagonal systems never pay for it.
-        lu: ?SparseLu,
-        tri: ?TriDiag,
-        bbd_eng: ?BbdEng = null,
-        gpa: Allocator,
-        /// True once a factorization matches `vcopy`.
-        factored: bool = false,
-        params: Params = .{},
-        /// Owned column ordering handed to `lu`; empty until `lu` exists.
-        q: []u32 = &.{},
-        /// Values of the last factorization, for the unchanged-matrix bypass.
-        vcopy: []T = &.{},
+    n: u32,
+    /// Borrowed CSC pattern; must outlive the solver.
+    col_ptr: []const u32,
+    row_idx: []const u32,
+    /// At most one engine is live. `lu` is built lazily when a structured
+    /// engine is demoted, so BBD and tridiagonal systems never pay for it.
+    lu: ?SparseLu,
+    tri: ?TriDiag,
+    bbd_eng: ?BbdEng = null,
+    gpa: Allocator,
+    /// True once a factorization matches `vcopy`.
+    factored: bool = false,
+    params: Params = .{},
+    /// Owned column ordering handed to `lu`; empty until `lu` exists.
+    q: []u32 = &.{},
+    /// Values of the last factorization, for the unchanged-matrix bypass.
+    vcopy: []f64 = &.{},
 
-        /// Chooses the engine from the pattern alone: tridiagonal, then BBD
-        /// when `bbd` describes a profitable split, else sparse LU.
-        pub fn init(gpa: Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32, bbd: ?root.BbdInfo) !Self {
-            var self: Self = .{ .n = n, .col_ptr = col_ptr, .row_idx = row_idx, .lu = null, .tri = null, .gpa = gpa };
-            errdefer self.deinit();
-            if (tridiag_mod.isTridiag(n, col_ptr, row_idx)) {
-                self.tri = try TriDiag.init(gpa, n, col_ptr, row_idx);
-            } else if (try initBbd(gpa, n, col_ptr, row_idx, bbd)) |eng| {
-                self.bbd_eng = eng;
-            } else {
-                self.q = try computeOrdering(gpa, n, col_ptr, row_idx);
-                self.lu = try SparseLu.init(gpa, n, col_ptr, row_idx, self.q);
-            }
-            self.vcopy = try gpa.alloc(T, col_ptr[n]);
-            return self;
+    /// Chooses the engine from the pattern alone: tridiagonal, then BBD
+    /// when `bbd` describes a profitable split, else sparse LU.
+    pub fn init(gpa: Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32, bbd: ?root.BbdInfo) !Self {
+        var self: Self = .{ .n = n, .col_ptr = col_ptr, .row_idx = row_idx, .lu = null, .tri = null, .gpa = gpa };
+        errdefer self.deinit();
+        if (tridiag_mod.isTridiag(n, col_ptr, row_idx)) {
+            self.tri = try TriDiag.init(gpa, n, col_ptr, row_idx);
+        } else if (try initBbd(gpa, n, col_ptr, row_idx, bbd)) |eng| {
+            self.bbd_eng = eng;
+        } else {
+            self.q = try computeOrdering(gpa, n, col_ptr, row_idx);
+            self.lu = try SparseLu.init(gpa, n, col_ptr, row_idx, self.q);
         }
+        self.vcopy = try gpa.alloc(f64, col_ptr[n]);
+        return self;
+    }
 
-        fn initBbd(gpa: Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32, bbd: ?root.BbdInfo) !?BbdEng {
-            const info = bbd orelse return null;
-            // ESPICE_NO_BBD forces the flat LU for A/B comparisons.
-            if (comptime @import("builtin").link_libc) {
-                if (std.c.getenv("ESPICE_NO_BBD") != null) return null;
-            }
-            return BbdEng.init(gpa, n, col_ptr, row_idx, info, .{}) catch |err| switch (err) {
-                error.NotApplicable => null,
-                error.OutOfMemory => error.OutOfMemory,
-            };
+    fn initBbd(gpa: Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32, bbd: ?root.BbdInfo) !?BbdEng {
+        const info = bbd orelse return null;
+        // ESPICE_NO_BBD forces the flat LU for A/B comparisons.
+        if (comptime @import("builtin").link_libc) {
+            if (std.c.getenv("ESPICE_NO_BBD") != null) return null;
         }
+        return BbdEng.init(gpa, n, col_ptr, row_idx, info, .{}) catch |err| switch (err) {
+            error.NotApplicable => null,
+            error.OutOfMemory => error.OutOfMemory,
+        };
+    }
 
-        pub fn deinit(self: *Self) void {
-            if (self.lu) |*lu| lu.deinit(self.gpa);
-            if (self.tri) |*tri| tri.deinit(self.gpa);
-            if (self.bbd_eng) |*eng| eng.deinit();
-            self.gpa.free(self.q);
-            self.gpa.free(self.vcopy);
-            self.* = undefined;
-        }
+    pub fn deinit(self: *Self) void {
+        if (self.lu) |*lu| lu.deinit(self.gpa);
+        if (self.tri) |*tri| tri.deinit(self.gpa);
+        if (self.bbd_eng) |*eng| eng.deinit();
+        self.gpa.free(self.q);
+        self.gpa.free(self.vcopy);
+        self.* = undefined;
+    }
 
-        /// Factors `vals` (length nnz, pattern order). Returns at once when
-        /// the values equal the last factored ones, which is common on linear
-        /// circuits between timestep changes. Otherwise refactors on the
-        /// existing pivot sequence and falls back to a full factor if the
-        /// replay fails. The solver keeps its own copy of `vals`.
-        pub fn factor(self: *Self, vals: []const T) !void {
-            const nnz = self.vcopy.len;
-            if (self.factored and simdEql(T, self.vcopy, vals[0..nnz])) return;
-            try self.factorInner(vals);
-            @memcpy(self.vcopy, vals[0..nnz]);
-        }
+    /// Factors `vals` (length nnz, pattern order). Returns at once when
+    /// the values equal the last factored ones, which is common on linear
+    /// circuits between timestep changes. Otherwise refactors on the
+    /// existing pivot sequence and falls back to a full factor if the
+    /// replay fails. The solver keeps its own copy of `vals`.
+    pub fn factor(self: *Self, vals: []const f64) !void {
+        const nnz = self.vcopy.len;
+        if (self.factored and simdEql(self.vcopy, vals[0..nnz])) return;
+        try self.factorInner(vals);
+        @memcpy(self.vcopy, vals[0..nnz]);
+    }
 
-        fn factorInner(self: *Self, vals: []const T) !void {
-            if (self.tri) |*tri| {
-                if (tri.factor(vals)) |_| {
-                    self.factored = true;
-                    return;
-                } else |_| {
-                    // Thomas has no pivoting, so an MNA branch row's zero
-                    // diagonal lands here. Demote to the pivoting LU for good.
-                    // ponytail: vsource-bearing ladders lose the tridiagonal
-                    // speed; a 2x2-block-pivot Thomas would recover it.
-                    tri.deinit(self.gpa);
-                    self.tri = null;
-                    self.factored = false;
-                }
-            }
-            if (self.bbd_eng) |*eng| {
-                if (eng.factorWithExecution(vals, self.params.execution)) |_| {
-                    self.factored = true;
-                    return;
-                } else |_| {
-                    // A singular block: demote to the flat LU for good.
-                    eng.deinit();
-                    self.bbd_eng = null;
-                    self.factored = false;
-                }
-            }
-            if (self.lu == null) {
-                if (self.q.len == 0) self.q = try computeOrdering(self.gpa, self.n, self.col_ptr, self.row_idx);
-                self.lu = try SparseLu.init(self.gpa, self.n, self.col_ptr, self.row_idx, self.q);
-            }
-            const lu = &self.lu.?;
-            const ptol: T = @floatCast(self.params.pivot_tol);
-            const growth: T = @floatCast(self.params.refactor_growth_limit);
-            if (self.factored) {
-                if (lu.refactor(self.col_ptr, vals, growth)) |_| return else |_| {}
+    fn factorInner(self: *Self, vals: []const f64) !void {
+        if (self.tri) |*tri| {
+            if (tri.factor(vals)) |_| {
+                self.factored = true;
+                return;
+            } else |_| {
+                // Thomas has no pivoting, so an MNA branch row's zero
+                // diagonal lands here. Demote to the pivoting LU for good.
+                // ponytail: vsource-bearing ladders lose the tridiagonal
+                // speed; a 2x2-block-pivot Thomas would recover it.
+                tri.deinit(self.gpa);
+                self.tri = null;
                 self.factored = false;
             }
-            try lu.factor(self.gpa, self.col_ptr, self.row_idx, vals, ptol);
-            self.factored = true;
         }
-
-        /// Solves in place with whichever engine is live.
-        fn solveInPlace(self: *Self, x: []T) void {
-            if (self.tri) |*tri| return tri.solve(x[0..self.n]);
-            if (self.bbd_eng) |*eng| return eng.solveInPlace(x[0..self.n]);
-            self.lu.?.solve(x[0..self.n], x[0..self.n]);
+        if (self.bbd_eng) |*eng| {
+            if (eng.factorWithExecution(vals, self.params.execution)) |_| {
+                self.factored = true;
+                return;
+            } else |_| {
+                // A singular block: demote to the flat LU for good.
+                eng.deinit();
+                self.bbd_eng = null;
+                self.factored = false;
+            }
         }
-
-        /// x = -A^-1 rhs, the Newton step. `rhs` and `x` may alias.
-        pub fn solveNeg(self: *Self, rhs: []const T, x: []T) void {
-            negateSimd(T, rhs[0..self.n], x[0..self.n]);
-            self.solveInPlace(x);
+        if (self.lu == null) {
+            if (self.q.len == 0) self.q = try computeOrdering(self.gpa, self.n, self.col_ptr, self.row_idx);
+            self.lu = try SparseLu.init(self.gpa, self.n, self.col_ptr, self.row_idx, self.q);
         }
-
-        /// x = A^-1 rhs. `rhs` and `x` may alias.
-        pub fn solve(self: *Self, rhs: []const T, x: []T) void {
-            if (rhs.ptr != x.ptr) @memcpy(x[0..self.n], rhs[0..self.n]);
-            self.solveInPlace(x);
+        const lu = &self.lu.?;
+        const ptol = self.params.pivot_tol;
+        const growth = self.params.refactor_growth_limit;
+        if (self.factored) {
+            if (lu.refactor(self.col_ptr, vals, growth)) |_| return else |_| {}
+            self.factored = false;
         }
+        try lu.factor(self.gpa, self.col_ptr, self.row_idx, vals, ptol);
+        self.factored = true;
+    }
 
-        /// x = A^-T rhs, for adjoint analyses. `rhs` and `x` may alias.
-        pub fn solveT(self: *Self, rhs: []const T, x: []T) void {
-            if (rhs.ptr != x.ptr) @memcpy(x[0..self.n], rhs[0..self.n]);
-            if (self.tri) |*tri| return tri.solveT(x[0..self.n]);
-            if (self.bbd_eng) |*eng| return eng.solveTInPlace(x[0..self.n]);
-            self.lu.?.solveT(x[0..self.n], x[0..self.n]);
-        }
-    };
-}
+    /// Solves in place with whichever engine is live.
+    fn solveInPlace(self: *Self, x: []f64) void {
+        if (self.tri) |*tri| return tri.solve(x[0..self.n]);
+        if (self.bbd_eng) |*eng| return eng.solveInPlace(x[0..self.n]);
+        self.lu.?.solve(x[0..self.n], x[0..self.n]);
+    }
 
-/// The f64 solver every analysis uses.
-pub const Solver = SolverT(f64);
+    /// x = -A^-1 rhs, the Newton step. `rhs` and `x` may alias.
+    pub fn solveNeg(self: *Self, rhs: []const f64, x: []f64) void {
+        negateSimd(rhs[0..self.n], x[0..self.n]);
+        self.solveInPlace(x);
+    }
+
+    /// x = A^-1 rhs. `rhs` and `x` may alias.
+    pub fn solve(self: *Self, rhs: []const f64, x: []f64) void {
+        if (rhs.ptr != x.ptr) @memcpy(x[0..self.n], rhs[0..self.n]);
+        self.solveInPlace(x);
+    }
+
+    /// x = A^-T rhs, for adjoint analyses. `rhs` and `x` may alias.
+    pub fn solveT(self: *Self, rhs: []const f64, x: []f64) void {
+        if (rhs.ptr != x.ptr) @memcpy(x[0..self.n], rhs[0..self.n]);
+        if (self.tri) |*tri| return tri.solveT(x[0..self.n]);
+        if (self.bbd_eng) |*eng| return eng.solveTInPlace(x[0..self.n]);
+        self.lu.?.solveT(x[0..self.n], x[0..self.n]);
+    }
+};
 
 /// BTF + AMD column ordering; caller owns the result.
 fn computeOrdering(gpa: Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32) ![]u32 {
@@ -185,9 +180,9 @@ fn computeOrdering(gpa: Allocator, n: u32, col_ptr: []const u32, row_idx: []cons
 }
 
 /// Bitwise-meaningful float equality (-0 == +0, NaN != NaN), W lanes at a time.
-fn simdEql(comptime T: type, a: []const T, b: []const T) bool {
-    const W = std.simd.suggestVectorLength(T) orelse 1;
-    const V = @Vector(W, T);
+fn simdEql(a: []const f64, b: []const f64) bool {
+    const W = std.simd.suggestVectorLength(f64) orelse 1;
+    const V = @Vector(W, f64);
     var i: usize = 0;
     while (i + W <= a.len) : (i += W) {
         const av: V = a[i..][0..W].*;
@@ -200,9 +195,9 @@ fn simdEql(comptime T: type, a: []const T, b: []const T) bool {
     return true;
 }
 
-fn negateSimd(comptime T: type, src: []const T, dst: []T) void {
-    const W = std.simd.suggestVectorLength(T) orelse 1;
-    const V = @Vector(W, T);
+fn negateSimd(src: []const f64, dst: []f64) void {
+    const W = std.simd.suggestVectorLength(f64) orelse 1;
+    const V = @Vector(W, f64);
     var i: usize = 0;
     while (i + W <= src.len) : (i += W) {
         const v: V = src[i..][0..W].*;

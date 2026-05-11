@@ -12,16 +12,16 @@ const solver = @import("solver");
 
 ```
 root.zig          exports the files below; `test` pulls in tests.zig
-direct.zig        SolverT(T) / Solver: the fixed-pattern facade every Newton caller uses
+direct.zig        Solver: the fixed-pattern facade every Newton caller uses
   tridiag.zig     Thomas algorithm, picked when the pattern is tridiagonal
   bbd.zig         bordered block diagonal engine, picked when a BbdInfo split pays
   sparse_lu.zig   Gilbert-Peierls left-looking LU with refactor replay
   order.zig       BTF (maximum transversal + Tarjan SCC) and per-block AMD
 lane_lu.zig       LaneLu(W): W frequency lanes replaying one SparseLu pivot tape
-freq_solve.zig    FreqSolverT(T) / FreqSolver: (G + jwC) x = b in stacked-real form
+freq_solve.zig    FreqSolver: (G + jwC) x = b in stacked-real form
 dense_lu.zig      DenseLu(T): partial-pivoting dense LU (rank-8 panels for n >= 40)
 fft.zig           radix-2 complex FFT and inverse
-gmres.zig         Gmres(T): restarted, right-preconditioned GMRES(m)
+gmres.zig         Gmres: restarted, right-preconditioned GMRES(m)
 converger.zig     Newton and JFNK loops, acceptance gates, per-circuit Workspace
 tests.zig         unit and differential tests (scalar oracle vs vector kernel)
 ```
@@ -62,7 +62,8 @@ always BTF + AMD.
 
 `freq_solve.zig` solves (G + jwC) x = b as the 2n real system
 [G, -wC; wC, G]. Circuits with n <= 16 use a dense LU; larger ones use a
-sparse 2n pattern derived once from the circuit CSC.
+sparse 2n pattern derived once from the circuit CSC. Both keep their own
+copy of G and C, so re-evaluating the circuit does not change the sweep.
 
 ```zig
 var fs = try solver.freq_solve.FreqSolver.fromCircuit(gpa, ckt, x_op);
@@ -106,8 +107,9 @@ of the operating-point ladder in `src/analysis/dc/op.zig`.
   pz, disto, HB, PAC/PXF, pnoise, MATEX projections and the dense PSS
   shooting Jacobian.
 - `fft`: `fft`, `ifft`, `nextPow2`. Used by `.four` and PAC.
-- `gmres`: `Gmres(T).init(gpa, n, m)` then `solve(matvec, ctx, precond,
-  precond_ctx, b, x, tol, max_restarts)`. Used without a preconditioner by
+- `gmres`: `Gmres.init(gpa, n, m)` then `solve(&op, b, x, tol,
+  max_restarts)`, where `op` has `matvec(v, w)` and, for a right
+  preconditioned solve, `precond(r)`. Used without a preconditioner by
   matrix-free PSS shooting (above 50 unknowns) and QPSS. JFNK carries its own
   GMRES(30) inside `converger.zig`, in `Workspace.gmres`.
 - `order`: `order` (BTF + AMD) and `amd` on a caller-supplied `Ws` slab of

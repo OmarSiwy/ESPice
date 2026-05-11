@@ -6,314 +6,308 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-/// GMRES(m) workspace for n-dimensional systems over f32 or f64.
-pub fn Gmres(comptime T: type) type {
-    comptime {
-        std.debug.assert(T == f32 or T == f64);
+/// GMRES(m) workspace for n-dimensional systems.
+pub const Gmres = struct {
+    const Self = @This();
+    const W = std.simd.suggestVectorLength(f64) orelse 1;
+    const Vec = @Vector(W, f64);
+
+    pub const SolveResult = struct {
+        /// Arnoldi steps across all restarts.
+        iterations: u32,
+        /// ||b - A x|| / ||b||: the Givens estimate when converged, the
+        /// true residual otherwise.
+        residual: f64,
+        converged: bool,
+    };
+
+    n: u32,
+    /// Restart depth.
+    m: u32,
+
+    /// Arnoldi basis: v_k is v_basis[k*n..][0..n], m + 1 vectors.
+    v_basis: []f64,
+    /// Upper Hessenberg, (m + 1) x m row-major.
+    h: []f64,
+    /// Givens rotations.
+    cs: []f64,
+    sn: []f64,
+    /// Rotated right-hand side, m + 1 entries.
+    g: []f64,
+    /// Triangular-solve result, m entries.
+    y: []f64,
+    // Scratch, n entries each.
+    w: []f64,
+    r: []f64,
+
+    /// Allocates the workspace; n and m must be positive.
+    pub fn init(gpa: Allocator, n: u32, m: u32) !Self {
+        std.debug.assert(n > 0);
+        std.debug.assert(m > 0);
+        const nu: usize = n;
+        const mu: usize = m;
+
+        const v_basis = try gpa.alloc(f64, (mu + 1) * nu);
+        errdefer gpa.free(v_basis);
+        const h = try gpa.alloc(f64, (mu + 1) * mu);
+        errdefer gpa.free(h);
+        const cs = try gpa.alloc(f64, mu);
+        errdefer gpa.free(cs);
+        const sn = try gpa.alloc(f64, mu);
+        errdefer gpa.free(sn);
+        const g_ws = try gpa.alloc(f64, mu + 1);
+        errdefer gpa.free(g_ws);
+        const y_ws = try gpa.alloc(f64, mu);
+        errdefer gpa.free(y_ws);
+        const w_ws = try gpa.alloc(f64, nu);
+        errdefer gpa.free(w_ws);
+        const r_ws = try gpa.alloc(f64, nu);
+
+        return .{
+            .n = n,
+            .m = m,
+            .v_basis = v_basis,
+            .h = h,
+            .cs = cs,
+            .sn = sn,
+            .g = g_ws,
+            .y = y_ws,
+            .w = w_ws,
+            .r = r_ws,
+        };
     }
 
-    return struct {
-        const Self = @This();
-        const W = std.simd.suggestVectorLength(T) orelse 1;
-        const Vec = @Vector(W, T);
+    pub fn deinit(self: *Self, gpa: Allocator) void {
+        inline for (.{ self.v_basis, self.h, self.cs, self.sn, self.g, self.y, self.w, self.r }) |s| gpa.free(s);
+        self.* = undefined;
+    }
 
-        pub const SolveResult = struct {
-            /// Arnoldi steps across all restarts.
-            iterations: u32,
-            /// ||b - A x|| / ||b||: the Givens estimate when converged, the
-            /// true residual otherwise.
-            residual: T,
-            converged: bool,
-        };
+    /// Solves A x = b. `op` points at the caller's operator:
+    /// `op.matvec(v, w)` writes w = A v, and `op.precond(r)`, when its
+    /// type declares one, applies M^-1 in place for a right
+    /// preconditioned solve. `x` holds the initial guess and receives
+    /// the solution. Stops at ||r|| <= tol * ||b|| or after
+    /// `max_restarts + 1` cycles. A zero `b` returns x = 0 at once.
+    pub fn solve(
+        self: *Self,
+        op: anytype,
+        b: []const f64,
+        x: []f64,
+        tol: f64,
+        max_restarts: u32,
+    ) SolveResult {
+        const n: usize = self.n;
+        const m: usize = self.m;
+        const has_precond = comptime @hasDecl(std.meta.Child(@TypeOf(op)), "precond");
+        std.debug.assert(b.len >= n);
+        std.debug.assert(x.len >= n);
 
-        n: u32,
-        /// Restart depth.
-        m: u32,
-
-        /// Arnoldi basis: v_k is v_basis[k*n..][0..n], m + 1 vectors.
-        v_basis: []T,
-        /// Upper Hessenberg, (m + 1) x m row-major.
-        h: []T,
-        /// Givens rotations.
-        cs: []T,
-        sn: []T,
-        /// Rotated right-hand side, m + 1 entries.
-        g: []T,
-        /// Triangular-solve result, m entries.
-        y: []T,
-        // Scratch, n entries each.
-        w: []T,
-        r: []T,
-
-        /// Allocates the workspace; n and m must be positive.
-        pub fn init(gpa: Allocator, n: u32, m: u32) !Self {
-            std.debug.assert(n > 0);
-            std.debug.assert(m > 0);
-            const nu: usize = n;
-            const mu: usize = m;
-
-            const v_basis = try gpa.alloc(T, (mu + 1) * nu);
-            errdefer gpa.free(v_basis);
-            const h = try gpa.alloc(T, (mu + 1) * mu);
-            errdefer gpa.free(h);
-            const cs = try gpa.alloc(T, mu);
-            errdefer gpa.free(cs);
-            const sn = try gpa.alloc(T, mu);
-            errdefer gpa.free(sn);
-            const g_ws = try gpa.alloc(T, mu + 1);
-            errdefer gpa.free(g_ws);
-            const y_ws = try gpa.alloc(T, mu);
-            errdefer gpa.free(y_ws);
-            const w_ws = try gpa.alloc(T, nu);
-            errdefer gpa.free(w_ws);
-            const r_ws = try gpa.alloc(T, nu);
-
-            return .{
-                .n = n,
-                .m = m,
-                .v_basis = v_basis,
-                .h = h,
-                .cs = cs,
-                .sn = sn,
-                .g = g_ws,
-                .y = y_ws,
-                .w = w_ws,
-                .r = r_ws,
-            };
+        const b_norm = vecNorm(b[0..n]);
+        if (b_norm == 0) {
+            @memset(x[0..n], 0);
+            return .{ .iterations = 0, .residual = 0, .converged = true };
         }
+        const abs_tol = tol * b_norm;
 
-        pub fn deinit(self: *Self, gpa: Allocator) void {
-            inline for (.{ self.v_basis, self.h, self.cs, self.sn, self.g, self.y, self.w, self.r }) |s| gpa.free(s);
-            self.* = undefined;
-        }
+        var total_iters: u32 = 0;
 
-        /// Solves A x = b. `op` points at the caller's operator:
-        /// `op.matvec(v, w)` writes w = A v, and `op.precond(r)`, when its
-        /// type declares one, applies M^-1 in place for a right
-        /// preconditioned solve. `x` holds the initial guess and receives
-        /// the solution. Stops at ||r|| <= tol * ||b|| or after
-        /// `max_restarts + 1` cycles. A zero `b` returns x = 0 at once.
-        pub fn solve(
-            self: *Self,
-            op: anytype,
-            b: []const T,
-            x: []T,
-            tol: T,
-            max_restarts: u32,
-        ) SolveResult {
-            const n: usize = self.n;
-            const m: usize = self.m;
-            const has_precond = comptime @hasDecl(std.meta.Child(@TypeOf(op)), "precond");
-            std.debug.assert(b.len >= n);
-            std.debug.assert(x.len >= n);
-
-            const b_norm = vecNorm(b[0..n]);
-            if (b_norm == 0) {
-                @memset(x[0..n], 0);
-                return .{ .iterations = 0, .residual = 0, .converged = true };
-            }
-            const abs_tol = tol * b_norm;
-
-            var total_iters: u32 = 0;
-
-            for (0..max_restarts + 1) |_| {
-                op.matvec(x[0..n], self.r[0..n]);
-                for (0..n) |i| self.r[i] = b[i] - self.r[i];
-
-                const beta = vecNorm(self.r[0..n]);
-                if (beta <= abs_tol) {
-                    return .{ .iterations = total_iters, .residual = beta / b_norm, .converged = true };
-                }
-
-                const v0 = self.getV(0);
-                vecScale(self.r[0..n], 1.0 / beta, v0);
-
-                @memset(self.g[0 .. m + 1], 0);
-                self.g[0] = beta;
-
-                var j: u32 = 0;
-                while (j < m) : (j += 1) {
-                    const ju: usize = j;
-                    total_iters += 1;
-
-                    const vj = self.getV(j);
-
-                    // z = A M^-1 v_j, into r.
-                    if (has_precond) {
-                        @memcpy(self.w[0..n], vj);
-                        op.precond(self.w[0..n]);
-                        op.matvec(self.w[0..n], self.r[0..n]);
-                    } else {
-                        op.matvec(vj, self.r[0..n]);
-                    }
-
-                    // Modified Gram-Schmidt.
-                    for (0..ju + 1) |i| {
-                        const vi = self.getV(@intCast(i));
-                        const hij = vecDot(self.r[0..n], vi);
-                        self.h[i * m + ju] = hij;
-                        vecAxpy(self.r[0..n], -hij, vi);
-                    }
-
-                    const h_jp1_j = vecNorm(self.r[0..n]);
-                    self.h[(ju + 1) * m + ju] = h_jp1_j;
-
-                    if (h_jp1_j != 0) {
-                        const vjp1 = self.getV(j + 1);
-                        vecScale(self.r[0..n], 1.0 / h_jp1_j, vjp1);
-                    }
-
-                    self.applyPreviousGivens(j);
-                    const hjj = self.h[ju * m + ju];
-                    const hjp1j = self.h[(ju + 1) * m + ju];
-                    const rot = givensRotation(hjj, hjp1j);
-                    self.cs[ju] = rot.c;
-                    self.sn[ju] = rot.s;
-
-                    self.h[ju * m + ju] = rot.c * hjj + rot.s * hjp1j;
-                    self.h[(ju + 1) * m + ju] = 0;
-
-                    const g_j = self.g[ju];
-                    const g_jp1 = self.g[ju + 1];
-                    self.g[ju] = rot.c * g_j + rot.s * g_jp1;
-                    self.g[ju + 1] = -rot.s * g_j + rot.c * g_jp1;
-
-                    // Breakdown or convergence.
-                    if (h_jp1_j == 0 or @abs(self.g[ju + 1]) <= abs_tol) {
-                        j += 1;
-                        break;
-                    }
-                }
-
-                const k = j; // Arnoldi steps completed
-                if (k > 0) {
-                    self.solveUpperTriangular(k);
-                    self.updateSolution(x[0..n], k, op);
-                }
-
-                const res_norm = @abs(self.g[k]);
-                if (res_norm <= abs_tol) {
-                    return .{ .iterations = total_iters, .residual = res_norm / b_norm, .converged = true };
-                }
-            }
-
+        for (0..max_restarts + 1) |_| {
             op.matvec(x[0..n], self.r[0..n]);
             for (0..n) |i| self.r[i] = b[i] - self.r[i];
-            const final_res = vecNorm(self.r[0..n]);
-            return .{ .iterations = total_iters, .residual = final_res / b_norm, .converged = false };
-        }
 
-        inline fn getV(self: *Self, i: u32) []T {
-            const off: usize = @as(usize, i) * @as(usize, self.n);
-            return self.v_basis[off..][0..self.n];
-        }
-
-        /// Applies rotations 0..j-1 to column j of H.
-        fn applyPreviousGivens(self: *Self, j: u32) void {
-            const m: usize = self.m;
-            const ju: usize = j;
-            for (0..ju) |i| {
-                const c = self.cs[i];
-                const s = self.sn[i];
-                const h_ij = self.h[i * m + ju];
-                const h_ip1j = self.h[(i + 1) * m + ju];
-                self.h[i * m + ju] = c * h_ij + s * h_ip1j;
-                self.h[(i + 1) * m + ju] = -s * h_ij + c * h_ip1j;
+            const beta = vecNorm(self.r[0..n]);
+            if (beta <= abs_tol) {
+                return .{ .iterations = total_iters, .residual = beta / b_norm, .converged = true };
             }
-        }
 
-        /// y = H^-1 g over the leading k x k triangle. A zero diagonal (a
-        /// singular operator) sets that component to zero.
-        fn solveUpperTriangular(self: *Self, k: u32) void {
-            const m: usize = self.m;
-            const ku: usize = k;
-            @memcpy(self.y[0..ku], self.g[0..ku]);
-            var i: usize = ku;
-            while (i > 0) {
-                i -= 1;
-                for (i + 1..ku) |jj| {
-                    self.y[i] -= self.h[i * m + jj] * self.y[jj];
-                }
-                const diag = self.h[i * m + i];
-                if (diag == 0) {
-                    self.y[i] = 0;
+            const v0 = self.getV(0);
+            vecScale(self.r[0..n], 1.0 / beta, v0);
+
+            @memset(self.g[0 .. m + 1], 0);
+            self.g[0] = beta;
+
+            var j: u32 = 0;
+            while (j < m) : (j += 1) {
+                const ju: usize = j;
+                total_iters += 1;
+
+                const vj = self.getV(j);
+
+                // z = A M^-1 v_j, into r.
+                if (has_precond) {
+                    @memcpy(self.w[0..n], vj);
+                    op.precond(self.w[0..n]);
+                    op.matvec(self.w[0..n], self.r[0..n]);
                 } else {
-                    self.y[i] /= diag;
+                    op.matvec(vj, self.r[0..n]);
                 }
+
+                // Modified Gram-Schmidt.
+                for (0..ju + 1) |i| {
+                    const vi = self.getV(@intCast(i));
+                    const hij = vecDot(self.r[0..n], vi);
+                    self.h[i * m + ju] = hij;
+                    vecAxpy(self.r[0..n], -hij, vi);
+                }
+
+                const h_jp1_j = vecNorm(self.r[0..n]);
+                self.h[(ju + 1) * m + ju] = h_jp1_j;
+
+                if (h_jp1_j != 0) {
+                    const vjp1 = self.getV(j + 1);
+                    vecScale(self.r[0..n], 1.0 / h_jp1_j, vjp1);
+                }
+
+                self.applyPreviousGivens(j);
+                const hjj = self.h[ju * m + ju];
+                const hjp1j = self.h[(ju + 1) * m + ju];
+                const rot = givensRotation(hjj, hjp1j);
+                self.cs[ju] = rot.c;
+                self.sn[ju] = rot.s;
+
+                self.h[ju * m + ju] = rot.c * hjj + rot.s * hjp1j;
+                self.h[(ju + 1) * m + ju] = 0;
+
+                const g_j = self.g[ju];
+                const g_jp1 = self.g[ju + 1];
+                self.g[ju] = rot.c * g_j + rot.s * g_jp1;
+                self.g[ju + 1] = -rot.s * g_j + rot.c * g_jp1;
+
+                // Breakdown or convergence.
+                if (h_jp1_j == 0 or @abs(self.g[ju + 1]) <= abs_tol) {
+                    j += 1;
+                    break;
+                }
+            }
+
+            const k = j; // Arnoldi steps completed
+            if (k > 0) {
+                self.solveUpperTriangular(k);
+                self.updateSolution(x[0..n], k, op);
+            }
+
+            const res_norm = @abs(self.g[k]);
+            if (res_norm <= abs_tol) {
+                return .{ .iterations = total_iters, .residual = res_norm / b_norm, .converged = true };
             }
         }
 
-        /// x += M^-1 V_k y.
-        fn updateSolution(
-            self: *Self,
-            x: []T,
-            k: u32,
-            op: anytype,
-        ) void {
-            const n: usize = self.n;
-            if (comptime @hasDecl(std.meta.Child(@TypeOf(op)), "precond")) {
-                @memset(self.w[0..n], 0);
-                for (0..k) |j| {
-                    const vj = self.getV(@intCast(j));
-                    vecAxpy(self.w[0..n], self.y[j], vj);
-                }
-                op.precond(self.w[0..n]);
-                for (0..n) |i| x[i] += self.w[i];
+        op.matvec(x[0..n], self.r[0..n]);
+        for (0..n) |i| self.r[i] = b[i] - self.r[i];
+        const final_res = vecNorm(self.r[0..n]);
+        return .{ .iterations = total_iters, .residual = final_res / b_norm, .converged = false };
+    }
+
+    inline fn getV(self: *Self, i: u32) []f64 {
+        const off: usize = @as(usize, i) * @as(usize, self.n);
+        return self.v_basis[off..][0..self.n];
+    }
+
+    /// Applies rotations 0..j-1 to column j of H.
+    fn applyPreviousGivens(self: *Self, j: u32) void {
+        const m: usize = self.m;
+        const ju: usize = j;
+        for (0..ju) |i| {
+            const c = self.cs[i];
+            const s = self.sn[i];
+            const h_ij = self.h[i * m + ju];
+            const h_ip1j = self.h[(i + 1) * m + ju];
+            self.h[i * m + ju] = c * h_ij + s * h_ip1j;
+            self.h[(i + 1) * m + ju] = -s * h_ij + c * h_ip1j;
+        }
+    }
+
+    /// y = H^-1 g over the leading k x k triangle. A zero diagonal (a
+    /// singular operator) sets that component to zero.
+    fn solveUpperTriangular(self: *Self, k: u32) void {
+        const m: usize = self.m;
+        const ku: usize = k;
+        @memcpy(self.y[0..ku], self.g[0..ku]);
+        var i: usize = ku;
+        while (i > 0) {
+            i -= 1;
+            for (i + 1..ku) |jj| {
+                self.y[i] -= self.h[i * m + jj] * self.y[jj];
+            }
+            const diag = self.h[i * m + i];
+            if (diag == 0) {
+                self.y[i] = 0;
             } else {
-                for (0..k) |j| {
-                    const vj = self.getV(@intCast(j));
-                    vecAxpy(x, self.y[j], vj);
-                }
+                self.y[i] /= diag;
             }
         }
+    }
 
-        fn vecNorm(v: []const T) T {
-            return @sqrt(vecDot(v, v));
-        }
-
-        /// W-lane partial sums, one reduce, then the scalar tail.
-        fn vecDot(a: []const T, b: []const T) T {
-            std.debug.assert(a.len == b.len);
-            const n = a.len;
-            var acc: Vec = @splat(0);
-            var i: usize = 0;
-            while (i + W <= n) : (i += W) {
-                const va: Vec = a[i..][0..W].*;
-                const vb: Vec = b[i..][0..W].*;
-                acc += va * vb;
+    /// x += M^-1 V_k y.
+    fn updateSolution(
+        self: *Self,
+        x: []f64,
+        k: u32,
+        op: anytype,
+    ) void {
+        const n: usize = self.n;
+        if (comptime @hasDecl(std.meta.Child(@TypeOf(op)), "precond")) {
+            @memset(self.w[0..n], 0);
+            for (0..k) |j| {
+                const vj = self.getV(@intCast(j));
+                vecAxpy(self.w[0..n], self.y[j], vj);
             }
-            var s: T = @reduce(.Add, acc);
-            while (i < n) : (i += 1) s += a[i] * b[i];
-            return s;
-        }
-
-        fn vecAxpy(a: []T, alpha: T, b: []const T) void {
-            std.debug.assert(a.len == b.len);
-            const n = a.len;
-            const va: Vec = @splat(alpha);
-            var i: usize = 0;
-            while (i + W <= n) : (i += W) {
-                const p: *[W]T = a[i..][0..W];
-                const vb: Vec = b[i..][0..W].*;
-                p.* = @as(Vec, p.*) + va * vb;
+            op.precond(self.w[0..n]);
+            for (0..n) |i| x[i] += self.w[i];
+        } else {
+            for (0..k) |j| {
+                const vj = self.getV(@intCast(j));
+                vecAxpy(x, self.y[j], vj);
             }
-            while (i < n) : (i += 1) a[i] += alpha * b[i];
         }
+    }
 
-        fn vecScale(src: []const T, alpha: T, dst: []T) void {
-            std.debug.assert(src.len == dst.len);
-            const n = src.len;
-            const va: Vec = @splat(alpha);
-            var i: usize = 0;
-            while (i + W <= n) : (i += W) {
-                const vs: Vec = src[i..][0..W].*;
-                const p: *[W]T = dst[i..][0..W];
-                p.* = va * vs;
-            }
-            while (i < n) : (i += 1) dst[i] = alpha * src[i];
+    fn vecNorm(v: []const f64) f64 {
+        return @sqrt(vecDot(v, v));
+    }
+
+    /// W-lane partial sums, one reduce, then the scalar tail.
+    fn vecDot(a: []const f64, b: []const f64) f64 {
+        std.debug.assert(a.len == b.len);
+        const n = a.len;
+        var acc: Vec = @splat(0);
+        var i: usize = 0;
+        while (i + W <= n) : (i += W) {
+            const va: Vec = a[i..][0..W].*;
+            const vb: Vec = b[i..][0..W].*;
+            acc += va * vb;
         }
-    };
-}
+        var s: f64 = @reduce(.Add, acc);
+        while (i < n) : (i += 1) s += a[i] * b[i];
+        return s;
+    }
+
+    fn vecAxpy(a: []f64, alpha: f64, b: []const f64) void {
+        std.debug.assert(a.len == b.len);
+        const n = a.len;
+        const va: Vec = @splat(alpha);
+        var i: usize = 0;
+        while (i + W <= n) : (i += W) {
+            const p: *[W]f64 = a[i..][0..W];
+            const vb: Vec = b[i..][0..W].*;
+            p.* = @as(Vec, p.*) + va * vb;
+        }
+        while (i < n) : (i += 1) a[i] += alpha * b[i];
+    }
+
+    fn vecScale(src: []const f64, alpha: f64, dst: []f64) void {
+        std.debug.assert(src.len == dst.len);
+        const n = src.len;
+        const va: Vec = @splat(alpha);
+        var i: usize = 0;
+        while (i + W <= n) : (i += W) {
+            const vs: Vec = src[i..][0..W].*;
+            const p: *[W]f64 = dst[i..][0..W];
+            p.* = va * vs;
+        }
+        while (i < n) : (i += 1) dst[i] = alpha * src[i];
+    }
+};
 
 /// c, s with [c s; -s c] [a; b] = [r; 0].
 fn givensRotation(a: anytype, b: @TypeOf(a)) struct { c: @TypeOf(a), s: @TypeOf(a) } {
