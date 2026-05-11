@@ -12,19 +12,17 @@ const Job = requests.Query;
 const GROUND = core.GROUND;
 /// Unresolved or absent node row.
 pub const NO_NODE = netlist.none;
-/// Nodes a deck's output `v(...)` may name; appended cards take one.
-pub const deck_output_nodes = 2;
 
 /// Queries for `cards` (nets already circuit rows), in card order, allocated
 /// in `arena`. `.noise` also yields its integrated plot, `.disto` its two
-/// harmonic vectors; a single-value `.temp` yields none. `max_group_args` is
-/// how many nodes an output `v(...)` may name.
-pub fn queries(arena: std.mem.Allocator, cards: []const netlist.Analysis, max_group_args: usize, sources: core.QueryBindings, card_refs: []const requests.CardRef, deck_opts: DeckOptions) ![]const Job {
+/// harmonic vectors; a single-value `.temp` yields none. An output `v(...)`
+/// names one or two nodes in the deck; `appended` cards must name exactly one.
+pub fn queries(arena: std.mem.Allocator, cards: []const netlist.Analysis, appended: bool, sources: core.QueryBindings, card_refs: []const requests.CardRef, deck_opts: DeckOptions) ![]const Job {
     for (cards) |c| {
         const args = c.args;
         const arg: usize = if (c.kind == .four) 1 else 0;
         if (arg < args.len) switch (args[arg]) {
-            .group => |g| if (g.args.len > max_group_args or (max_group_args == 1 and g.args.len == 0))
+            .group => |g| if (g.args.len > @as(usize, if (appended) 1 else 2) or (appended and g.args.len == 0))
                 return error.UnsupportedAnalysisOutput,
             else => {},
         };
@@ -238,14 +236,9 @@ fn currentProbeName(args: []const Value, i: usize) ?[]const u8 {
     };
 }
 
-fn findNameIndex(names: []const []const u8, target: []const u8) ?usize {
-    for (names, 0..) |n, i| if (std.mem.eql(u8, n, target)) return i;
-    return null;
-}
-
 fn voltageSource(args: []const Value, i: usize, sources: core.QueryBindings) !usize {
     const name = nameAt(args, i) orelse return error.InvalidAnalysisArguments;
-    return findNameIndex(sources.v_names, name) orelse error.AnalysisSourceNotFound;
+    return netlist.nameIndex(sources.v_names, name) orelse error.AnalysisSourceNotFound;
 }
 
 /// The swept quantity of `.dc <card|TEMP> start stop step`, as the
@@ -374,16 +367,16 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
             var opts: requests.Tf = .{ .output_node = GROUND };
             // `.tf i(Vmeasure) ...` measures a branch current.
             if (currentProbeName(args, 0)) |probe| {
-                opts.output_branch = sources.v_branches[findNameIndex(sources.v_names, probe) orelse return error.AnalysisSourceNotFound];
+                opts.output_branch = sources.v_branches[netlist.nameIndex(sources.v_names, probe) orelse return error.AnalysisSourceNotFound];
             } else {
                 opts.output_node = try outputNode(node_id);
                 opts.output_neg = try outputNeg(node_neg);
             }
             // The drive is a V card (branch row) or an I card (node pair).
             const drive = nameAt(args, 1) orelse return error.InvalidAnalysisArguments;
-            if (findNameIndex(sources.v_names, drive)) |v| {
+            if (netlist.nameIndex(sources.v_names, drive)) |v| {
                 opts.input_branch = sources.v_branches[v];
-            } else if (findNameIndex(sources.i_names, drive)) |i_idx| {
+            } else if (netlist.nameIndex(sources.i_names, drive)) |i_idx| {
                 opts.input_nodes = .{ sources.i_pos[i_idx], sources.i_neg[i_idx] };
             } else return error.AnalysisSourceNotFound;
             return .{ .tf = opts };

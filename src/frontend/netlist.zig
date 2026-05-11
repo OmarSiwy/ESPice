@@ -183,6 +183,13 @@ pub fn isGroundName(name: []const u8) bool {
         std.ascii.eqlIgnoreCase(name, "ground");
 }
 
+/// Index of the first card name in `names` equal to `target`, byte for
+/// byte; null when none is. O(names.len).
+pub fn nameIndex(names: []const []const u8, target: []const u8) ?usize {
+    for (names, 0..) |n, i| if (std.mem.eql(u8, n, target)) return i;
+    return null;
+}
+
 const Card = union(enum) { end, ends, subckt, param, model, include, osdi_include, pre_osdi, verilog, options, ic, analysis: Kind };
 
 fn an(kind: Kind) Card {

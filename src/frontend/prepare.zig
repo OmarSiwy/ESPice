@@ -107,14 +107,7 @@ pub fn build(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_are
     compiled_ok = true;
     errdefer circuit.deinit();
 
-    // Rows the NetBuilder recorded before the freeze are in pre-BBD coordinates.
-    if (perm) |p| for ([_][]u32{
-        nb.v.items(.branch),       nb.v.items(.pos),    nb.v.items(.neg),  nb.i.items(.pos),  nb.i.items(.neg),
-        nb.br.items(.row),         nb.l.items(.branch), nb.ac.items(.pos), nb.ac.items(.neg), (&nb.source_node)[0..1],
-        (&nb.source_branch)[0..1], nb.rows,
-    }) |rows| for (rows) |*row| {
-        if (row.* < p.len) row.* = p[row.*];
-    };
+    const out = try nb.publish(sim_arena, &circuit, perm);
 
     var ic: std.ArrayList(Ic) = .empty;
     for (nl.deck.ic) |item| {
@@ -125,72 +118,29 @@ pub fn build(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_are
         try ic.append(sim_arena, .{ .node = row, .value = item.value });
     }
 
-    const bindings: core.QueryBindings = .{
-        .v_names = try copyNames(sim_arena, nb.v.items(.name)),
-        .i_names = try copyNames(sim_arena, nb.i.items(.name)),
-        .v_branches = try sim_arena.dupe(u32, nb.v.items(.branch)),
-        .v_pos = try sim_arena.dupe(u32, nb.v.items(.pos)),
-        .v_neg = try sim_arena.dupe(u32, nb.v.items(.neg)),
-        .i_pos = try sim_arena.dupe(u32, nb.i.items(.pos)),
-        .i_neg = try sim_arena.dupe(u32, nb.i.items(.neg)),
-        .v_distof1 = try sim_arena.dupe([2]f64, nb.v.items(.distof1)),
-        .ports = try nb.portList(sim_arena),
-    };
-
-    // Probes: branch currents first, then every named node. ngspice gives every
-    // MNA branch-current unknown an `i(<card>)` column (V, L, E, H, V-mode B);
-    // F, G, S and I-mode B stamp no branch. Branch-first, unlike ngspice.
-    // Named nodes and branch rows are disjoint, so circuit.n bounds the total.
-    const probe_buf = try sim_arena.alloc(u32, circuit.n);
-    const label_buf = try sim_arena.alloc([]const u8, circuit.n);
-    var n_probes: u32 = 0;
-    for ([_][]const []const u8{ nb.v.items(.name), nb.l.items(.name), nb.br.items(.name) }, [_][]const u32{ nb.v.items(.branch), nb.l.items(.branch), nb.br.items(.row) }) |names, rows| {
-        for (names, rows) |name, br| {
-            probe_buf[n_probes] = br;
-            label_buf[n_probes] = try std.fmt.allocPrint(sim_arena, "i({s})", .{name});
-            n_probes += 1;
-        }
-    }
-    for (1..circuit.n) |i| {
-        const label = circuit.nodeName(@intCast(i));
-        if (label.len != 0) {
-            probe_buf[n_probes] = @intCast(i);
-            label_buf[n_probes] = try std.fmt.allocPrint(sim_arena, "v({s})", .{label});
-            n_probes += 1;
-        }
-    }
-
-    // Cards that name no output measure the last net the deck introduces.
-    // The last probe will not do, since the BBD permutation reorders node rows.
-    var last_net: u32 = 0;
-    for (nb.rows, 0..) |row, net| if (row != GROUND) {
-        last_net = @intCast(net);
-    };
-    const output_node = nb.frozenRow(last_net);
-
     // Analysis nets to circuit rows.
     const cards_rows = try parse_arena.dupe(netlist.Analysis, nl.deck.analyses);
     for (cards_rows) |*a| {
         a.pos = nb.frozenRow(a.pos);
-        if (namesNoOutput(a.kind)) a.pos = output_node;
+        if (namesNoOutput(a.kind)) a.pos = out.output_node;
         a.neg = nb.frozenRow(a.neg);
         for (&a.ports) |*p| p.* = nb.frozenRow(p.*);
     }
     return .{ .circuit = circuit, .deck = .{
-        .probes = probe_buf[0..n_probes],
-        .probe_labels = label_buf[0..n_probes],
-        .source_node = nb.source_node,
-        .source_branch = nb.source_branch,
-        .output_node = output_node,
-        .ac_drive = try nb.acExcitation(sim_arena, circuit.n),
+        .probes = out.probes,
+        .probe_labels = out.probe_labels,
+        .source_node = out.source_node,
+        .source_branch = out.source_branch,
+        .output_node = out.output_node,
+        .ac_drive = out.ac_drive,
         .title = try sim_arena.dupe(u8, nl.deck.title),
         .n_devices = nl.deviceCount(),
         .ic = ic.items,
         .deck_tol = deck_opts.tol,
         .deck_temp = deck_opts.temp_c,
         .deck_method = deck_opts.method,
-        .queries = try analyses.queries(sim_arena, cards_rows, analyses.deck_output_nodes, bindings, cards, deck_opts),
-        .bindings = bindings,
+        .queries = try analyses.queries(sim_arena, cards_rows, false, out.bindings, cards, deck_opts),
+        .bindings = out.bindings,
         .cards = cards,
         .ac_overrides = try acOverrides(sim_arena, cards, nb.ac_res.items(.name), nb.ac_res.items(.value)),
     } };
@@ -199,12 +149,6 @@ pub fn build(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_are
 /// Cards whose output is `Deck.output_node` because they name none.
 fn namesNoOutput(kind: netlist.Kind) bool {
     return kind == .pac or kind == .pxf or kind == .disto;
-}
-
-fn copyNames(arena: std.mem.Allocator, names: []const []const u8) ![]const []const u8 {
-    const copied = try arena.alloc([]const u8, names.len);
-    for (names, copied) |name, *copy| copy.* = try arena.dupe(u8, name);
-    return copied;
 }
 
 /// Frozen-circuit node row by label, for cards appended after the build.
@@ -237,8 +181,7 @@ pub fn resolveQueries(arena: std.mem.Allocator, prepared: *const Prepared, direc
     for (cards) |*a| if (namesNoOutput(a.kind)) {
         a.pos = prepared.deck.output_node;
     };
-    // Appended queries accept only single-ended outputs.
-    return analyses.queries(arena, cards, 1, prepared.deck.bindings, prepared.deck.cards, .{
+    return analyses.queries(arena, cards, true, prepared.deck.bindings, prepared.deck.cards, .{
         .tol = prepared.deck.deck_tol,
         .method = prepared.deck.deck_method,
         .temp_c = prepared.deck.deck_temp,

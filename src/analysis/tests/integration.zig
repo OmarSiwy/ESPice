@@ -76,9 +76,9 @@ test "jfnk vs newton: divider OP agrees to 1e-9" {
     var b = try Builder.init(testing.allocator, &lib);
     const vin = try b.addNode();
     const out = try b.addNode();
-    try b.addDevice(@import("models").vsource, .{ .dc = 10 }, .{}, .{ vin, GROUND });
-    try b.addDevice(@import("models").resistor, .{ .r = 1000 }, .{}, .{ vin, out });
-    try b.addDevice(@import("models").resistor, .{ .r = 3000 }, .{}, .{ out, GROUND });
+    try b.addDevice(@import("models").vsource, "", .{ .dc = 10 }, .{}, .{ vin, GROUND });
+    try b.addDevice(@import("models").resistor, "", .{ .r = 1000 }, .{}, .{ vin, out });
+    try b.addDevice(@import("models").resistor, "", .{ .r = 3000 }, .{}, .{ out, GROUND });
     var prepared = try b.compile();
     defer prepared.deinit();
     var ckt = try analysis.Circuit.instantiate(&prepared, testing.allocator);
@@ -113,17 +113,17 @@ test "jfnk: 100-diode ladder converges" {
     defer lib.deinit();
     var b = try Builder.init(testing.allocator, &lib);
     const vin = try b.addNode();
-    try b.addDevice(@import("models").vsource, .{ .dc = 5 }, .{}, .{ vin, GROUND });
+    try b.addDevice(@import("models").vsource, "", .{ .dc = 5 }, .{}, .{ vin, GROUND });
 
     // vin -R- n1 -R- n2 ... -R- gnd, a diode from every n to ground.
     var prev: u32 = vin;
     for (0..n_diodes) |_| {
         const mid = try b.addNode();
-        try b.addDevice(@import("models").resistor, .{ .r = 100 }, .{}, .{ prev, mid });
-        try b.addDevice(@import("models").diode, .{ .is = 1e-14 }, .{}, .{ mid, GROUND });
+        try b.addDevice(@import("models").resistor, "", .{ .r = 100 }, .{}, .{ prev, mid });
+        try b.addDevice(@import("models").diode, "", .{ .is = 1e-14 }, .{}, .{ mid, GROUND });
         prev = mid;
     }
-    try b.addDevice(@import("models").resistor, .{ .r = 100 }, .{}, .{ prev, GROUND });
+    try b.addDevice(@import("models").resistor, "", .{ .r = 100 }, .{}, .{ prev, GROUND });
 
     var prepared = try b.compile();
     defer prepared.deinit();
