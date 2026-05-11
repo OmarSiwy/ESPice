@@ -161,8 +161,9 @@ pub const Problem = struct {
     /// unchanged. An existing identical query returns its old ID.
     pub fn append_queries(self: *Problem, queries: []const Query, ids: []QueryId) !usize {
         if (ids.len < queries.len) return queries.len;
+        const deck = &self.prepared.deck;
         for (queries) |query|
-            try output.validateQuery(self.delivery.selection.format, try analysis.schemaOf(self.allocator, &self.prepared.circuit, &self.prepared.deck, query), &self.prepared.deck);
+            try output.validateQuery(self.delivery.selection.format, try analysis.schemaOf(self.allocator, &self.prepared.circuit, deck, query), deck.title, deck.probe_labels);
         return self.session.append(queries, ids);
     }
 
@@ -256,7 +257,7 @@ pub const Problem = struct {
                 const res = self.result(id) catch unreachable;
                 var lap = if (self.timing_in_depth) std.Io.Timestamp.now(self.io, .awake) else null;
                 defer timingLap(self.io, &lap, "output delivery");
-                self.delivery.publish(self.io, self.delivery.published, .{ .title = self.prepared.deck.title, .result = res }) catch |err| {
+                self.delivery.publish(self.io, .{ .title = self.prepared.deck.title, .result = res }) catch |err| {
                     self.delivery_error = err;
                     return;
                 };
