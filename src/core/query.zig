@@ -87,7 +87,7 @@ pub const Dc = struct {
     step: f64 = 1,
     /// What the inner sweep drives, named by device type and parameter so a
     /// V card, an I card and a resistor with the same index stay distinct.
-    target: SweepTarget = .{},
+    target: SweepTarget = .{ .device = .{} },
     /// Optional outer sweep (`.dc src1 ... src2 start2 stop2 incr2`, or
     /// `.dc ... temp ...`).
     target2: ?SweepTarget = null,
@@ -96,14 +96,18 @@ pub const Dc = struct {
     step2: f64 = 1,
 
     /// The device parameter, or the temperature, a `.dc` sweep drives.
-    pub const SweepTarget = struct {
-        /// Set by the frontend from the swept card; `unset` names no card.
-        type: DeviceType = .unset,
-        /// Instance index within `type`.
-        index: u32 = 0,
-        param_name: []const u8 = "dc",
-        /// Sweep the circuit temperature instead; the fields above are unused.
-        is_temp: bool = false,
+    pub const SweepTarget = union(enum) {
+        device: Param,
+        temp,
+
+        /// A card parameter, keyed like `ParamRef`.
+        pub const Param = struct {
+            /// Set by the frontend from the swept card; `unset` names no card.
+            type: DeviceType = .unset,
+            /// Instance index within `type`.
+            index: u32 = 0,
+            param_name: []const u8 = "dc",
+        };
     };
 
     pub fn hasOuter(self: Dc) bool {

@@ -31,10 +31,10 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     // name a resistor.
     const refs = try ckt.collectParams();
     // A null target is the temperature (`.dc TEMP ...`).
-    const t: ?root.ParamRef = if (opts.target.is_temp)
-        null
-    else
-        findTarget(refs, opts.target) orelse return error.DcSweepSourceNotFound;
+    const t: ?root.ParamRef = switch (opts.target) {
+        .temp => null,
+        .device => |d| findTarget(refs, d) orelse return error.DcSweepSourceNotFound,
+    };
     const saved: f64 = if (t) |r| r.get() else 0;
     defer {
         if (t) |r| r.set(saved);
@@ -42,7 +42,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     }
     // A temperature sweep at either level writes every instance's
     // temperature; put the netlist's back before the recompute above.
-    const sweeps_temp = opts.target.is_temp or (opts.hasOuter() and opts.target2.?.is_temp);
+    const sweeps_temp = opts.target == .temp or (opts.hasOuter() and opts.target2.? == .temp);
     var temperatures: std.ArrayList(f64) = .empty;
     defer temperatures.deinit(scratch);
     if (sweeps_temp) for (refs) |ref| {
@@ -71,10 +71,10 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     // The outer install is one ParamRef write or a circuit temperature set.
     if (opts.hasOuter()) {
         const outer = opts.target2.?;
-        const t2: ?root.ParamRef = if (outer.is_temp)
-            null
-        else
-            findTarget(refs, outer) orelse return error.DcSweepSourceNotFound;
+        const t2: ?root.ParamRef = switch (outer) {
+            .temp => null,
+            .device => |d| findTarget(refs, d) orelse return error.DcSweepSourceNotFound,
+        };
         const saved2: f64 = if (t2) |r| r.get() else 0;
         defer if (t2) |r| {
             r.set(saved2);
@@ -107,18 +107,21 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 /// current source sweeps `i(i-sweep)`, a resistance `res-sweep`, the
 /// temperature `temp-sweep`.
 fn sweepColumn(target: Options.SweepTarget) []const u8 {
-    if (target.is_temp) return "temp-sweep";
+    const d = switch (target) {
+        .temp => return "temp-sweep",
+        .device => |d| d,
+    };
     const Library = @import("device").Library;
     inline for (.{
         .{ "isource", "i(i-sweep)" },
         .{ "resistor", "res-sweep" },
         .{ "capacitor", "cap-sweep" },
         .{ "inductor", "ind-sweep" },
-    }) |pair| if (target.type == Library.builtin(pair[0])) return pair[1];
+    }) |pair| if (d.type == Library.builtin(pair[0])) return pair[1];
     return "v(v-sweep)";
 }
 
-fn findTarget(refs: []const root.ParamRef, want: Options.SweepTarget) ?root.ParamRef {
+fn findTarget(refs: []const root.ParamRef, want: Options.SweepTarget.Param) ?root.ParamRef {
     for (refs) |ref| {
         if (ref.index == want.index and
             std.mem.eql(u8, ref.param_name, want.param_name) and
