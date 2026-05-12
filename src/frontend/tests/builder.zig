@@ -142,6 +142,34 @@ test "transmission-line cards retain native numerical algorithms" {
     }
 }
 
+test "held variables without an accepted copy commit once per accepted point" {
+    // vbic13_4t holds its @(initial_step) values with no `__acc` copy, so
+    // `stateCtl(.revert)` cannot restore them; the switch's hysteresis latch
+    // has one and keeps its per-solve staging.
+    const cases = .{
+        .{ "Q1 c b 0 qm\n.model qm NPN LEVEL=4\n", true },
+        .{ "S1 a 0 c 0 sw\n.model sw SW vt=0.5\n", false },
+    };
+    inline for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const nl = try netlist.parse(a, "* held state routing\n" ++ case[0] ++ ".end\n", .ngspice);
+        const lib = try device.Library.init(a);
+        var b = try Builder.init(a, &lib);
+        var compiled = false;
+        defer if (!compiled) b.deinit();
+        var nb = try builder.NetBuilder.init(a, &b, nl);
+        try nb.build();
+        var circuit = try b.compile();
+        compiled = true;
+        defer circuit.deinit();
+        const hooks = circuit.batches[0].hooks;
+        try std.testing.expectEqual(case[1], hooks.commit_held != null);
+        try std.testing.expectEqual(!case[1], hooks.update_state != null);
+    }
+}
+
 test "unsupported transmission-line cards never select approximate fallbacks" {
     const cases = .{
         .{ "P1 a b c d e 0 f g h i j 0 line\n.model line CPL length=1\n", error.UnsupportedCoupledLineDimension },

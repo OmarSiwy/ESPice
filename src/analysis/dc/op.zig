@@ -42,9 +42,13 @@ pub fn solve(
     const ws = try ckt.workspace();
 
     const r = try solveLadder(ckt, ws, x, options);
-    // Commit FSM devices (switches) so a following transient starts from the
-    // accepted state.
-    if (r.converged) _ = ckt.stateCtl(.commit);
+    // Commit device state so later analyses start from the accepted state:
+    // held variables first (their `updateState` stages path latches too),
+    // then the FSM devices (switches).
+    if (r.converged) {
+        _ = ckt.commitHeld(x);
+        _ = ckt.stateCtl(.commit);
+    }
     // Every later eval at this point (ac, tf, noise, post-processing) is not
     // an initial step and must not re-latch.
     ckt.setSimState(.{ .kind = if (options.tran_op) .ic else .dc });

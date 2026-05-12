@@ -440,6 +440,10 @@ pub fn simulate(
         trial = stale;
         t += dt;
         steps += 1;
+        // §4.5.2 bookkeeping for non-revertible device state, once per
+        // accepted point (`Hooks.commit_state`), then the commit that latches
+        // what it staged.
+        _ = ckt.commitStates(cur);
         _ = ckt.stateCtl(.commit);
 
         // Landed on a breakpoint: drop to BE and resume at
@@ -474,10 +478,6 @@ pub fn simulate(
             }
             bp_target = null;
         }
-
-        // §4.5.2 bookkeeping for non-revertible device state, once per
-        // accepted point (`Hooks.commit_state`).
-        _ = ckt.commitStates(cur);
 
         // Stateful-charge devices: the commits above can move a device's q
         // away from what q_hist recorded. Re-read it so the next residual
