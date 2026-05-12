@@ -6,9 +6,13 @@ const api = @import("espice");
 const allocator = std.heap.smp_allocator;
 /// Bumped on any layout or semantics change; `espice_create` rejects a mismatch.
 const abi_version = 1;
-/// ESPICE_NO_QUERY: "no dependency" in `QueryInfo`, "plot title" in `espice_copy_result_name`.
+/// ESPICE_NO_QUERY, "no dependency" in `QueryInfo`, and ESPICE_PLOT_TITLE,
+/// "plot title" in `espice_copy_result_name`.
 const no_query = std.math.maxInt(u32);
 const header = @cImport(@cInclude("espice.h"));
+comptime {
+    if (header.ESPICE_NO_QUERY != no_query or header.ESPICE_PLOT_TITLE != no_query) @compileError("include/espice.h sentinels drifted");
+}
 
 // Enums cross the boundary as tag values, so each is pinned to the header's
 // ESPICE_<NAME> constants: a reordered or renamed tag fails the build.
@@ -276,6 +280,18 @@ export fn espice_copy_result(handle: ?*Handle, id: u32, values: ?[*]f64, capacit
     return if (count.* > capacity) h.fail(error.BufferTooSmall) else 0;
 }
 
+export fn espice_result_view(handle: ?*Handle, id: u32, data: ?*?[*]const f64, len: ?*usize) u32 {
+    const h = handle orelse return status(error.InvalidArgument);
+    const view = data orelse return h.fail(error.InvalidArgument);
+    const count = len orelse return h.fail(error.InvalidArgument);
+    view.* = null;
+    count.* = 0;
+    const values = (h.problem.result(@enumFromInt(id)) catch |err| return h.fail(err)).data;
+    view.* = values.ptr;
+    count.* = values.len;
+    return 0;
+}
+
 export fn espice_copy_result_name(handle: ?*Handle, id: u32, variable: u32, buffer: ?[*]u8, capacity: usize, required: ?*usize) u32 {
     const h = handle orelse return status(error.InvalidArgument);
     const result = h.problem.result(@enumFromInt(id)) catch |err| return h.fail(err);
@@ -291,7 +307,7 @@ export fn espice_print(handle: ?*Handle, options: ?*const PrintOptions, buffer: 
         if (o.ascii > 1) return h.fail(error.InvalidArgument);
         config.scope = decodeScope(o.scope) catch |err| return h.fail(err);
         config.ascii = o.ascii == 1;
-        config.limits = .{ .max_parallel = concurrency(o.max_parallel) catch |err| return h.fail(err) };
+        if (o.max_parallel != 0) config.limits = .{ .max_parallel = concurrency(o.max_parallel) catch |err| return h.fail(err) };
         config.preview = switch (o.preview) {
             0 => .run_all,
             1 => .{ .advance = @enumFromInt(o.query) },

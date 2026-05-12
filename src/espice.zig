@@ -137,6 +137,12 @@ pub const Problem = struct {
         return self.delivery_error;
     }
 
+    /// True once every requested query has ended, completed or not: the
+    /// stop condition of a stepping loop over `ready_queries`.
+    pub fn finished(self: *const Problem) bool {
+        return self.session.finished();
+    }
+
     /// Queries in the DAG, prerequisites included. IDs run `0..query_count()`.
     pub fn query_count(self: *const Problem) u32 {
         return self.session.count();
@@ -208,7 +214,7 @@ pub const Problem = struct {
         defer self.allocator.free(ids);
         const events = try self.allocator.alloc(Advance, @min(ids.len, self.limits.max_parallel));
         defer self.allocator.free(events);
-        while (!self.session.finished()) {
+        while (!self.finished()) {
             const n = try self.ready_queries(.all, ids);
             if (n == 0) return error.SchedulingFailure;
             // The same bounded frontier `print` marks NEXT for a run_all preview.

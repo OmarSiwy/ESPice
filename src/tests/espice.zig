@@ -6,7 +6,11 @@ const t = std.testing;
 const deck = "query fixture\nV1 in 0 dc 1 ac 1\nR1 in out 1k\nC1 out 0 1n\n.ac dec 80 1 100k\n.tran 1n 10n uic\n.end\n";
 
 fn create(source: []const u8) !*api.Problem {
-    return api.Problem.init(t.allocator, t.io, .{ .source = .{ .bytes = .{ .data = source, .origin = "memory.cir" } }, .max_parallel = 2 });
+    return createLimited(source, 2);
+}
+
+fn createLimited(source: []const u8, max_parallel: u16) !*api.Problem {
+    return api.Problem.init(t.allocator, t.io, .{ .source = .{ .bytes = .{ .data = source, .origin = "memory.cir" } }, .max_parallel = max_parallel });
 }
 
 fn find(p: *api.Problem, kind: api.requests.Kind) !api.QueryId {
@@ -76,16 +80,15 @@ test "Problem: pure preview, automatic prerequisite, independent frontier and re
 }
 
 test "Problem: stepped and parallel execution match run_all for AC and transient" {
-    const serial = try create(deck);
+    const serial = try createLimited(deck, 1);
     defer serial.deinit();
-    serial.limits.max_parallel = 1;
     try serial.run_all();
     const stepped = try create(deck);
     defer stepped.deinit();
     var ids: [8]api.QueryId = undefined;
     var events: [8]api.Advance = undefined;
     var advances: usize = 0;
-    while (!stepped.session.finished()) {
+    while (!stepped.finished()) {
         const n = try stepped.ready_queries(.all, &ids);
         try t.expect(n != 0);
         _ = try stepped.advance_ready(ids[0..n], .{ .max_parallel = 2 }, &events);
@@ -335,9 +338,8 @@ test {
 
 test "Problem: parameter sweeps cannot mutate concurrently running transient state" {
     const input = "independent state\nV1 in 0 dc 1\nR1 in out 1k\nC1 out 0 1n\n.tran 1n 8n\n.end\n";
-    const serial = try create(input);
+    const serial = try createLimited(input, 1);
     defer serial.deinit();
-    serial.limits.max_parallel = 1;
     const parallel = try create(input);
     defer parallel.deinit();
     const jobs = [_]api.Query{
