@@ -2299,6 +2299,7 @@ real Carr1 , Carr2 ;
 // Local Vars. for hsmhveval.c
 integer m0     , mm     , i     ;
 real x2     , xmax2  , xp     , xmp    , dnm    , vbd    , Vbsi    ;
+real hvty ;
 real Vdsi    , vgd    , Vgsi    , deltemp , Vdsei   , Vgsei   , Vbsei   , Isubs  ;
 real IsubLDs , IdsIBPCs , GD     , Gth    , Qs     , Qdext  , Qgext  , Qbext  ;
 real Veffpower , P      , Qi_nqs , Qb_nqs , Iqi_nqs , Iqb_nqs , Qd_nqs , Qs_nqs ;
@@ -4686,8 +4687,23 @@ end
     //   Check 5 Terminals
     //
     //   get biases from CKT //
-    Vdsi  = TYPE * V(BRdpsp) ;
-    Vgsi  = TYPE * V(BRgpsp) ;
+    // Newton limiting of the channel, hsmhv2ld.c:929-973: VerA's
+    // "fetlimds" pair plus "limvds" is ngspice's old-vds dispatch (fetlim on
+    // vgs, then limvds, when the last vds >= 0; fetlim on vgd otherwise).
+    // The trailing `hvty` puts the clamp in the TYPE frame; $limit takes
+    // real arguments and TYPE is an integer. The `vgd` site only names the
+    // inverse-mode leg: vgd is derived from the limited Vgsi and Vdsi below.
+    // ponytail: two gaps against ngspice. Its fetlim threshold is the
+    // previous load's Vth (HSMHV2_von), and VerA holds no per-iterate value,
+    // so the threshold is 0 V (ngspice's von before its first load). And the
+    // junction pnjlim (hsmhv2ld.c:976-1000) is left out: VerA seeds every
+    // pnjlim site at forward vcrit, where ngspice's MODEINITJCT starts
+    // HiSIM-HV at vbs = 0, vgs = vds = 0.1 (hsmhv2ld.c:497-500). Upgrade:
+    // VerA iterate-held values and branch seeds (ABI 5).
+    hvty  = TYPE ;
+    Vgsi  = hvty * $limit(V(gp, sp), "fetlimds", 0.0, hvty) ;
+    vgd   = hvty * $limit(V(gp, dp), "fetlimds", 0.0, hvty) ;
+    Vdsi  = hvty * $limit(V(dp, sp), "limvds", hvty) ;
     Vbsi  = TYPE * V(BRbpsp) ;
     Vdsei = TYPE * V(BRds )  ;
     Vgsei = TYPE * V(BRgps ) ;
