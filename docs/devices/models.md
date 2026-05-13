@@ -32,10 +32,20 @@ Every source header carries one of three attribution forms:
 | tline, lossy_tline, coupled_tlines, diode, jfet, jfet2, mes, mesa, gummel_poon | derived |
 | mos1, mos2, mos3, mos6, mos9, bsim1, bsim2, bsim3 | derived |
 | hfet1, hfet2, vdmos | derived |
-| bsim4va, bsimsoi_va, hisim2_va, hisimhv_va, hicumL2_va, vbic13_4t | third-party |
+| bsim4va, bsimsoi_va, hisim2_va, hisimhv_va, hicumL2_va, vbic13_4t, psp103 | third-party |
 
 **`bsim4va.va` is Cogenda's VA-BSIM48 under CC-BY-NC 4.0, a non-commercial
 license.** Check it before any commercial use of ESPice.
+
+`psp103.va` is PSP 103.7 (NXP Semiconductors, CEA-Leti, Delft University of
+Technology) as ngspice-45 ships it, under the Si2 CMC in-code statement
+reproduced in its header. That license forbids charging for the model code
+itself, and any product built on it must credit NXP Semiconductors, Delft
+University of Technology and CEA in its documentation; this paragraph is that
+credit. The only edits are the module name and the escaped `\nmos`/`\pmos`
+parameter identifiers (Annex B keywords VerA rightly refuses as plain names).
+It has no `$limit`, so Newton runs it unlimited. The MOSFET LEVEL is 1040,
+since ngspice-45 has no PSP LEVEL.
 
 These originator attributions were written from memory and still need a
 check against the original sources: T. Ytterdal (hfet1, hfet2), Holger Vogt
