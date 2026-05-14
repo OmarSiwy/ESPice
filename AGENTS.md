@@ -86,7 +86,7 @@ in, not retrofitted per-loop:
 
 | Axis | Mechanism |
 |---|---|
-| Frequency points (ac, noise, stb through `ac/freq.zig`) | SIMD lanes: `LaneLu(W)` replay of one SparseLu pivot tape; `FreqSolver.solveBatch`. sp, pac, pxf and pnoise still solve per point |
+| Frequency points (ac, noise, stb, sp through `ac/freq.zig`) | SIMD lanes: `LaneLu(W)` replay of one SparseLu pivot tape; `FreqSolver.solveBatch`, every rhs (sp: one per port) per factorization. pac, pxf and pnoise still solve per point |
 | Sweep points (mc/temp/sens/dcmatch) | Structural lanes: `sweep/lanes.zig solveLanes` (serial over lanes) |
 | Device derivatives | `Dual(N, F)` forward AD (device/eval.zig) |
 | Device instances | ParEval worker threads |

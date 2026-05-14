@@ -1,6 +1,6 @@
 //! S-parameter sweep. One linearization gives G and C, the port z0
-//! terminations go into a dense copy of G, and each frequency is one factor
-//! plus one solve per port.
+//! terminations go into the frequency solver's copy of G, and each frequency
+//! is one lane of `freq.Stream` with one right-hand side per port.
 //!
 //! Wave variables (Kurokawa power waves):
 //!   a_k = (V_k + z0_k·I_k) / (2√z0_k)
@@ -9,6 +9,7 @@
 //! negated). Driving port p with a unit source voltage (rhs[b_p] = 1) gives
 //! a_p = 1/(2√z0_p) and a_j = 0 elsewhere, so column p of S(ω) is b_j / a_p.
 const std = @import("std");
+const freq = @import("freq.zig");
 const root = @import("../types.zig");
 const Complex = @import("core").numerics.Complex;
 const FreqSolver = @import("solver").freq_solve.FreqSolver;
@@ -30,6 +31,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const scratch = ctx.scratch_allocator;
     const ckt = ctx.circuit;
     const n: usize = ckt.n;
+    const nn = 2 * n;
 
     const one_port = [_]Port{.{ .node = ctx.source_node, .branch = ctx.source_branch }};
     const ports: []const Port = if (opts.ports.len > 0) opts.ports else &one_port;
@@ -48,39 +50,31 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const row_len = names.len * 2;
     const data = try a.alloc(f64, n_points * row_len);
 
-    try ckt.linearizeAc(ctx.x_op);
-    const g = try scratch.alloc(f64, n * n);
-    ckt.denseG(g);
-    const c = scratch.alloc(f64, n * n) catch |err| {
-        scratch.free(g);
-        return err;
-    };
-    ckt.denseC(c);
-    // Series z0 inside each port source: the branch row gains −z0·i_br.
-    for (ports) |port| g[@as(usize, port.branch) * n + port.branch] -= port.z0;
-
-    // Takes ownership of g and c.
-    var fs = try FreqSolver.initDense(scratch, @intCast(n), g, c);
+    var fs = try FreqSolver.fromCircuit(scratch, ckt, ctx.x_op);
     defer fs.deinit(scratch);
+    // Series z0 inside each port source: the branch row gains −z0·i_br.
+    for (ports) |port| fs.addDiagG(port.branch, -port.z0);
 
-    const work = try scratch.alloc(f64, 4 * n);
-    defer scratch.free(work);
-    const rhs = work[0 .. 2 * n];
-    const x = work[2 * n ..];
+    const axis = try scratch.alloc(f64, 2 * n_points);
+    defer scratch.free(axis);
+    const freqs = axis[0..n_points];
+    const omegas = axis[n_points..];
+    opts.sweep.fill(freqs, omegas);
 
-    for (0..n_points) |fi| {
-        if (fi != 0) try ckt.checkpoint(.{ .phase = .frequency, .completed = fi, .total = n_points });
-        const f = opts.sweep.at(@intCast(fi));
-        try fs.setOmega(2.0 * std.math.pi * f);
-        const row = data[fi * row_len ..][0..row_len];
-        row[0] = f;
+    // One unit drive per port, every one solved against each factorization.
+    const rhs = try scratch.alloc(f64, n_ports * nn);
+    defer scratch.free(rhs);
+    root.zeroSimd(rhs);
+    for (ports, 0..) |port, p| rhs[p * nn + port.branch] = 1.0;
+
+    var stream = try freq.Stream.init(scratch, &fs, omegas, rhs, false);
+    defer stream.deinit(scratch);
+    while (try stream.next(ckt)) |pt| {
+        const row = data[pt.k * row_len ..][0..row_len];
+        row[0] = freqs[pt.k];
         row[1] = 0;
-        for (ports, 0..) |port, p| {
-            root.zeroSimd(rhs);
-            rhs[port.branch] = 1.0;
-            try fs.solveRhs(rhs, x);
-            writeColumn(n, ports, x, 1.0 / (2.0 * @sqrt(port.z0)), row[2..], p);
-        }
+        for (ports, 0..) |port, p|
+            writeColumn(n, ports, pt.x[p * nn ..][0..nn], 1.0 / (2.0 * @sqrt(port.z0)), row[2..], p);
     }
 
     return .{

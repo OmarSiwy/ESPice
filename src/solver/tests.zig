@@ -1228,6 +1228,17 @@ const FreqSolveTests = struct {
         };
         var fs = try FreqSolver.fromCircuit(allocator, ckt, &.{});
         defer fs.deinit(allocator);
+        // The same matrices, dense, for the multi-rhs check below.
+        const gd = try allocator.alloc(f64, n * n);
+        const cd = try allocator.alloc(f64, n * n);
+        @memset(gd, 0);
+        @memset(cd, 0);
+        for (0..n) |j| for (col_ptr.items[j]..col_ptr.items[j + 1]) |p| {
+            gd[row_idx.items[p] * n + j] = g_vals.items[p];
+            cd[row_idx.items[p] * n + j] = c_vals.items[p];
+        };
+        var fd = try FreqSolver.initDense(allocator, n, gd, cd);
+        defer fd.deinit(allocator);
         // A re-evaluated circuit cannot reach the solver's snapshot.
         @memset(g_vals.items, std.math.nan(f64));
         @memset(c_vals.items, std.math.nan(f64));
@@ -1257,6 +1268,23 @@ const FreqSolveTests = struct {
             try testing.expectEqual(work_ptr, fs.strategy.sp.lane_work.ptr);
             try @TypeOf(fs).test_access.solveBatchSerial(&fs, &omegas, rhs, x_ref, adjoint);
             for (x_batch, x_ref) |a, b| try testing.expectApproxEqRel(b, a, 1e-11);
+        }
+
+        // Two right-hand sides share each lane factorization, and addDiagG
+        // lands on the same entry in the sparse and the dense copy.
+        fs.addDiagG(7, -3.5);
+        fd.addDiagG(7, -3.5);
+        const rhs2 = try allocator.alloc(f64, 2 * nn);
+        defer allocator.free(rhs2);
+        for (rhs2, 0..) |*value, i| value.* = @cos(@as(f64, @floatFromInt(i)));
+        const x2 = try allocator.alloc(f64, 2 * total);
+        defer allocator.free(x2);
+        const x2_ref = try allocator.alloc(f64, 2 * total);
+        defer allocator.free(x2_ref);
+        for ([_]bool{ false, true }) |adjoint| {
+            try fs.solveBatch(&omegas, rhs2, x2, adjoint);
+            try fd.solveBatch(&omegas, rhs2, x2_ref, adjoint);
+            for (x2, x2_ref) |a, b| try testing.expectApproxEqRel(b, a, 1e-10);
         }
     }
 };

@@ -77,8 +77,10 @@ try fs.solveBatch(omegas, rhs, x_out, adjoint); // W omegas per LaneLu pass
 ```
 
 `FreqSolver.initDense(gpa, n, g, c)` builds the dense form directly from
-row-major G and C. `solveBatch` runs W frequencies per `LaneLu` replay; any
-lane whose refactor fails peels to the scalar per-omega path.
+row-major G and C. `solveBatch` runs W frequencies per `LaneLu` replay and
+solves every 2n block of `rhs` against each factorization; any lane whose
+refactor fails peels to the scalar per-omega path. `addDiagG` adds to a
+diagonal of the solver's G copy (sp's port terminations).
 
 ## Nonlinear solves
 
