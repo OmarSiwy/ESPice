@@ -6,7 +6,10 @@ mosamp - mos amplifier - transient
 * .options acct abstol=10n  vntol=10n
 
 .options  abstol=10n  vntol=10n noacct
-.tran 0.1us 10us
+* The oracle is ngspice at tight tolerances with tmax 0.1 ns: at the options
+* above ngspice cuts dt/8 on 718 Newton failures in the MOS2 slewing.
+.options reltol=1e-6 abstol=1e-15 vntol=1e-9
+.tran 0.1us 10us 0 0.1ns
 m1  15 15  1 32 m w=88.9u  l=25.4u
 m2   1  1  2 32 m w=12.7u  l=266.7u
 m3   2  2 30 32 m w=88.9u  l=25.4u
