@@ -114,6 +114,31 @@ pub fn sweep(
     // Put the planes back at the operating point.
     ckt.eval(x_op, 0);
 
+    // d2's nonzero terms, row by row in (a, b) order: the per-frequency
+    // contractions add exactly the terms a dense sweep with a zero skip
+    // would, in the same order, so the sums are bitwise the same.
+    // (-0 compares equal to 0 and is skipped too; NaN is kept.)
+    const Term = struct { a: u32, b: u32, coeff: f64 };
+    var n_terms: usize = 0;
+    for (d2) |coeff| n_terms += @intFromBool(coeff != 0);
+    const terms = try allocator.alloc(Term, n_terms);
+    defer allocator.free(terms);
+    const row_start = try allocator.alloc(u32, n + 1);
+    defer allocator.free(row_start);
+    {
+        var t: u32 = 0;
+        for (0..n) |row| {
+            row_start[row] = t;
+            for (0..n) |a| for (0..n) |b| {
+                const coeff = d2[row * n * n + a * n + b];
+                if (coeff == 0) continue;
+                terms[t] = .{ .a = @intCast(a), .b = @intCast(b), .coeff = coeff };
+                t += 1;
+            };
+        }
+        row_start[n] = t;
+    }
+
     const nn = 2 * n;
     const a_work = try allocator.alloc(f64, nn * nn);
     defer allocator.free(a_work);
@@ -178,15 +203,13 @@ pub fn sweep(
         for (0..n) |row| {
             var d2_re: f64 = 0;
             var d2_im: f64 = 0;
-            for (0..n) |a| {
-                for (0..n) |b_idx| {
-                    const coeff = d2[row * n * n + a * n + b_idx];
-                    if (coeff == 0) continue;
-                    const prod_re = v1_re[a] * v1_re[b_idx] - v1_im[a] * v1_im[b_idx];
-                    const prod_im = v1_re[a] * v1_im[b_idx] + v1_im[a] * v1_re[b_idx];
-                    d2_re += coeff * prod_re;
-                    d2_im += coeff * prod_im;
-                }
+            for (terms[row_start[row]..row_start[row + 1]]) |term| {
+                const a = term.a;
+                const b_idx = term.b;
+                const prod_re = v1_re[a] * v1_re[b_idx] - v1_im[a] * v1_im[b_idx];
+                const prod_im = v1_re[a] * v1_im[b_idx] + v1_im[a] * v1_re[b_idx];
+                d2_re += term.coeff * prod_re;
+                d2_im += term.coeff * prod_im;
             }
             rhs_work[row] = -0.5 * d2_re;
             rhs_work[n + row] = -0.5 * d2_im;
@@ -206,13 +229,11 @@ pub fn sweep(
             for (0..n) |row| {
                 var m_re: f64 = 0;
                 var m_im: f64 = 0;
-                for (0..n) |a| {
-                    for (0..n) |b_idx| {
-                        const coeff = d2[row * n * n + a * n + b_idx];
-                        if (coeff == 0) continue;
-                        m_re += coeff * (v1_re[a] * v2_re[b_idx] - v1_im[a] * v2_im[b_idx]);
-                        m_im += coeff * (v1_re[a] * v2_im[b_idx] + v1_im[a] * v2_re[b_idx]);
-                    }
+                for (terms[row_start[row]..row_start[row + 1]]) |term| {
+                    const a = term.a;
+                    const b_idx = term.b;
+                    m_re += term.coeff * (v1_re[a] * v2_re[b_idx] - v1_im[a] * v2_im[b_idx]);
+                    m_im += term.coeff * (v1_re[a] * v2_im[b_idx] + v1_im[a] * v2_re[b_idx]);
                 }
                 rhs_work[row] = -(m_re + d3v[0][row] / 6.0);
                 rhs_work[n + row] = -(m_im + d3v[1][row] / 6.0);
