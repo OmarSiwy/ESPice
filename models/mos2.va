@@ -31,6 +31,12 @@ module mos2(d, g, s, b);
     electrical d, g, s, b;
     electrical di, si;              // internal drain/source behind rd/rs
 
+    // ---- physical constants (ngspice 44 const.h, mos2temp.c EPSSIL) ------
+    localparam real kb     = 1.38064852e-23;          // CONSTboltz        [J/K]
+    localparam real qe     = 1.6021766208e-19;        // CHARGE              [C]
+    localparam real eps_si = 11.7*8.854214871e-12;    // EPSSIL            [F/m]
+    localparam real eps_ox = 3.9*8.854214871e-12;     // oxide permittivity [F/m]
+
     // ---- polarity -------------------------------------------------------
     parameter real type = 1.0 from [-1.0:1.0] exclude 0.0;  // +1 NMOS, -1 PMOS
 
@@ -137,12 +143,12 @@ module mos2(d, g, s, b);
     analog begin
         // ============ parameter defaulting (mos2temp.c) ====================
         tnomk  = tnom + 273.15;
-        vtnom  = `P_K*tnomk/`P_Q;
+        vtnom  = kb*tnomk/qe;
         egfet1 = 1.16 - (7.02e-4*tnomk*tnomk)/(tnomk + 1108.0);
 
-        coxp    = 3.453133e-11/tox;                     // eps_ox/tox   [F/m2]
+        coxp    = eps_ox/tox;                           // eps_ox/tox   [F/m2]
         nsub_si = nsub*1.0e6;                           // cm^-3 -> m^-3
-        xd      = (nsub > 0.0) ? sqrt(2.0*1.03594e-10/(`P_Q*nsub_si)) : 0.0;
+        xd      = (nsub > 0.0) ? sqrt(2.0*eps_si/(qe*nsub_si)) : 0.0;
 
         // NSUB-driven defaulting of PHI / GAMMA / VTO (mos2temp.c
         // substrateDopingGiven block): surface potential from the doping, then
@@ -156,7 +162,7 @@ module mos2(d, g, s, b);
             if (!$param_given(phi))
                 phix = max(0.1, 2.0*vtnom*ln(nsub*1.0e6/1.45e16));
             if (!$param_given(gamma))
-                gammax = sqrt(2.0*1.03594e-10*`P_Q*nsub_si)/coxp;
+                gammax = sqrt(2.0*eps_si*qe*nsub_si)/coxp;
             if (!$param_given(vto)) begin
                 fermis = type*0.5*phix;
                 if (tpg != 0) begin                  // poly gate
@@ -164,21 +170,21 @@ module mos2(d, g, s, b);
                     wkfng  = 3.25 + 0.5*egfet1 - fermig;
                 end else wkfng = 3.2;                // aluminium gate
                 wkfngs = wkfng - (3.25 + 0.5*egfet1 + fermis);
-                vfb    = wkfngs - `P_Q*nss*1.0e4/coxp;
+                vfb    = wkfngs - qe*nss*1.0e4/coxp;
                 vtox   = vfb + type*(gammax*sqrt(phix) + phix);
             end
         end
 
         // ============ temperature scaling (mos2temp.c) =====================
         tk    = $temperature;
-        vt    = `P_K*tk/`P_Q;
+        vt    = kb*tk/qe;
         fact1 = tnomk/300.15;
         fact2 = tk/300.15;
         egfet = 1.16 - (7.02e-4*tk*tk)/(tk + 1108.0);
-        arg1  = -egfet1/(2.0*`P_K*tnomk) + 1.1150877/(2.0*`P_K*300.15);
-        argt  = -egfet/(2.0*`P_K*tk)    + 1.1150877/(2.0*`P_K*300.15);
-        pbfact1 = -2.0*vtnom*(1.5*ln(fact1) + `P_Q*arg1);
-        pbfact  = -2.0*vt   *(1.5*ln(fact2) + `P_Q*argt);
+        arg1  = -egfet1/(2.0*kb*tnomk) + 1.1150877/(2.0*kb*300.15);
+        argt  = -egfet/(2.0*kb*tk)    + 1.1150877/(2.0*kb*300.15);
+        pbfact1 = -2.0*vtnom*(1.5*ln(fact1) + qe*arg1);
+        pbfact  = -2.0*vt   *(1.5*ln(fact2) + qe*argt);
 
         // KP(T) = KP/r^1.5, mu(T) = UO/r^1.5
         ratio = tk/tnomk;
@@ -210,9 +216,9 @@ module mos2(d, g, s, b);
         beta0 = kpt*m*weff/leff;
 
         // narrow-width term and its eta / vbin partners (mos2load.c)
-        factor = 0.25*`M_PI*1.03594e-10*delta/(coxp*m*weff);
+        factor = 0.25*`M_PI*eps_si*delta/(coxp*m*weff);
         eta    = 1.0 + factor;
-        ucrit_term = ucrit*1.0e2*1.03594e-10/coxp;      // UCRIT*eps_si/Cox'
+        ucrit_term = ucrit*1.0e2*eps_si/coxp;           // UCRIT*eps_si/Cox'
 
         // JS is temperature-scaled like IS, and wins only when both areas are
         // given: mos2load.c decides once for the pair, not per junction.
@@ -305,7 +311,7 @@ module mos2(d, g, s, b);
         // depletion-capacitance term is mos2load.c's cdonco, i.e. the full
         // d(vth)/dvbs: -(gamasd*dsrgdb + dgddvb*sarg) + narrow-width factor.
         if (nfs > 0.0) begin
-            xn  = 1.0 + `P_Q*nfs*1.0e4/coxp
+            xn  = 1.0 + qe*nfs*1.0e4/coxp
                 - (gamasd*dsrgdb + dgddvb*sarg) + factor;
             von = vth + vt*xn;
         end else begin
@@ -479,9 +485,9 @@ module mos2(d, g, s, b);
 
         // ============ noise (mos2noi.c) ===================================
         // A collapsed RD/RS is a short and has no thermal noise.
-        if (gdrain > 0.0) I(d, di) <+ white_noise(4.0*`P_K*tk*gdrain, "rd");
-        if (gsource > 0.0) I(s, si) <+ white_noise(4.0*`P_K*tk*gsource, "rs");
-        I(di, si) <+ white_noise(4.0*`P_K*tk*(2.0/3.0)*abs(gm), "channel");
+        if (gdrain > 0.0) I(d, di) <+ white_noise(4.0*kb*tk*gdrain, "rd");
+        if (gsource > 0.0) I(s, si) <+ white_noise(4.0*kb*tk*gsource, "rs");
+        I(di, si) <+ white_noise(4.0*kb*tk*(2.0/3.0)*abs(gm), "channel");
         I(di, si) <+ flicker_noise(kf*pow(abs(id), af)
                                    /(weff*m*leff*coxp*coxp), 1.0, "flicker");
     end
