@@ -53,10 +53,12 @@ and espice both converge on a 3.4393 ns ring period: at reltol=1e-6 they sit
 2.6e-5 apart (3.439325 vs 3.439414 ns). At the deck's own options the periods
 are 3.452040 ns (VACASK, PSP 103.7), 3.452546 ns (VACASK's PSP 103.4 OSDI,
 the oracle) and 3.454436 ns (espice), so the 6.9e-4 gap is the two
-simulators' timestep control, not the device. The deck's oracle samples a
-free-running oscillator over 290 periods at rtol 3e-3, which only a run on
-VACASK's exact time grid passes: VACASK itself scores 1.75e4x against it with
-the 103.7 OSDI swapped in, and 4.5e5x at reltol=1e-5.
+simulators' timestep control, not the device. Converged, the two model
+versions differ by 7e-6 (VACASK/103.4 3.439302 ns). Samples of the free-running
+ring match only on VACASK's exact grid (VACASK itself scores 1.75e4x with the
+103.7 OSDI), so the deck checks the measured period and swing of v(1)
+(the harness `oscillation` check, rtol 7e-3 and 1e-2) plus samples up to
+1.25 ns; the tolerance rationale is in the oracle's notes.
 
 These originator attributions were written from memory and still need a
 check against the original sources: T. Ytterdal (hfet1, hfet2), Holger Vogt
