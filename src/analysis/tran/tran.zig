@@ -386,7 +386,7 @@ pub fn simulate(
             };
 
             if (steps > 0) {
-                const del = integrator.stepBound(eff_method, eff_method, lq, lte_ip, cf, lte);
+                const del = integrator.stepBound(W, eff_method, eff_method, lq, lte_ip, cf, lte);
                 if (del < 0.9 * dt) {
                     st.rej_lte += 1;
                     _ = ckt.stateCtl(.revert);
@@ -412,7 +412,7 @@ pub fn simulate(
             // order 2 and adopt min(2*dt, del2) as the next dt whether or not
             // the order changes, as ngspice's `CKTdelta = newdelta` does.
             if (steps > 0 and use_be) {
-                const trial_del = integrator.stepBound(options.method, eff_method, lq, lte_ip, cf, lte);
+                const trial_del = integrator.stepBound(W, options.method, eff_method, lq, lte_ip, cf, lte);
                 const nd2 = @min(2.0 * dt, trial_del);
                 if (nd2 > 1.05 * dt) use_be = false;
                 dt_next = @min(@max(nd2, options.dt_min), effective_dt_max);
