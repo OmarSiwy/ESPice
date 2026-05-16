@@ -13,7 +13,7 @@ const castField = builder.test_access.castField;
 const bindKv = builder.test_access.bindKv;
 
 fn card(name: []const u8, positional: []const Value) netlist.Netlist.View {
-    return .{ .name = name, .kind = 'v', .pins = &.{}, .positional = positional, .kv = &.{}, .model = null, .subckt_type = 0, .subckt_instance = 0 };
+    return .{ .name = name, .kind = 'v', .pins = &.{}, .positional = positional, .kv = &.{}, .model = null, .subckt_instance = 0 };
 }
 
 // Source binding: the two things that break silently when the .va and the

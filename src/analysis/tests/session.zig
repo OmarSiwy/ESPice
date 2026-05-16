@@ -34,7 +34,7 @@ test "query boundary checks derived frequencies, dimensions and nested controls"
         .{ .envelope = .{ .t_carrier = 1e-3, .t_stop = 1, .max_outer_steps = std.math.maxInt(u32) } },
     };
     for (invalid) |query| try t.expectError(error.InvalidQueryOptions, validate(query, 4));
-    try validate(.{ .op = .{} }, 4); // +inf dx_clamp means disabled.
+    try validate(.{ .op = .{} }, 4);
     try validate(.{ .mc = .{} }, 4);
     try validate(.{ .hb = .{ .f0 = 1e3 } }, 4);
     try validate(.{ .qpss = .{ .f1 = 1e3, .f2 = 1414 } }, 4);

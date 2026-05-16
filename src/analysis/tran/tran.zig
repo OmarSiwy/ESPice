@@ -318,8 +318,7 @@ pub fn simulate(
         const xfact = dt / dt_prev;
         for (trial, cur, prev) |*xt, xc, xp| xt.* = xc + xfact * (xc - xp);
         _ = ckt.applyLimits(trial, cur);
-        var nr_opts = converger.optionsFromTolerances(options.tol, options.tol.itl4);
-        nr_opts.dx_clamp = std.math.inf(f64);
+        const nr_opts = converger.optionsFromTolerances(options.tol, options.tol.itl4);
         const nr = converger.run(ckt, ws, trial, t + dt, nr_opts, hook) catch |err| switch (err) {
             error.QueryCancelled => return err,
             else => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 },

@@ -360,7 +360,7 @@ pub const FreqSolver = struct {
             p += lenu;
         }
 
-        try s.slv.factor(s.vals);
+        try s.slv.factor(s.vals, .{});
     }
 };
 

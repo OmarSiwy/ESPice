@@ -118,7 +118,6 @@ There are no named bundles. One struct, `Tolerances`
 | `vntol` | 1e-6 V | Newton delta test on voltage rows, residual gate |
 | `gmin` | 1e-12 S | target of the gmin-stepping rung |
 | `residual_tol` | 1e-9 | floor of the residual gate |
-| `dx_clamp` | inf | direction-preserving damping bound |
 | `gmin_start` | 1e-2 S | first rung of gmin stepping |
 | `itl1` / `itl2` / `itl4` | 100 / 50 / 10 | Newton budgets: DC OP and final clean solves / stepping rungs and DC sweep points / transient point |
 | `chgtol` | 1e-14 C | LTE charge floor |
@@ -149,8 +148,6 @@ Knob by knob, in flow order:
 - `reltol`, `vntol`, `abstol`: Newton acceptance in every analysis (DC,
   transient point, PSS inner step; HB uses its own spectral residual).
 - `residual_tol`: floor of the row-scaled residual gate.
-- `dx_clamp`: direction-preserving damping bound; default $\infty$ (device
-  limiting is the globalization; see the OP doc).
 - `chgtol`, `trtol`: transient LTE only.
 - `itl1`, `itl2`, `itl4`: iteration budgets.
 

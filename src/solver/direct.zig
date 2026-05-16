@@ -12,10 +12,8 @@ const root = @import("core").numerics;
 
 const Allocator = std.mem.Allocator;
 
-/// Pivoting and scheduling knobs. The defaults are the production settings.
+/// Pivoting knobs. The defaults are the production settings.
 pub const Params = struct {
-    /// Scheduler for the BBD block factors; serial when `io` is null.
-    execution: root.Execution = .{},
     /// Threshold partial pivoting keeps the diagonal while
     /// |diag| >= pivot_tol * column max (KLU's default 0.001).
     pivot_tol: f64 = 1e-3,
@@ -91,15 +89,16 @@ pub const Solver = struct {
     /// the values equal the last factored ones, which is common on linear
     /// circuits between timestep changes. Otherwise refactors on the
     /// existing pivot sequence and falls back to a full factor if the
-    /// replay fails. The solver keeps its own copy of `vals`.
-    pub fn factor(self: *Self, vals: []const f64) !void {
+    /// replay fails. The solver keeps its own copy of `vals`. `execution`
+    /// schedules the BBD block factors; `.{}` runs them serially.
+    pub fn factor(self: *Self, vals: []const f64, execution: root.Execution) !void {
         const nnz = self.vcopy.len;
         if (self.factored and simdEql(self.vcopy, vals[0..nnz])) return;
-        try self.factorInner(vals);
+        try self.factorInner(vals, execution);
         @memcpy(self.vcopy, vals[0..nnz]);
     }
 
-    fn factorInner(self: *Self, vals: []const f64) !void {
+    fn factorInner(self: *Self, vals: []const f64, execution: root.Execution) !void {
         if (self.tri) |*tri| {
             if (tri.factor(vals)) |_| {
                 self.factored = true;
@@ -115,7 +114,7 @@ pub const Solver = struct {
             }
         }
         if (self.bbd_eng) |*eng| {
-            if (eng.factorWithExecution(vals, self.params.execution)) |_| {
+            if (eng.factorWithExecution(vals, execution)) |_| {
                 self.factored = true;
                 return;
             } else |_| {

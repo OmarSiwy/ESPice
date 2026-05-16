@@ -119,7 +119,7 @@ pub fn solve(
 
     @memcpy(rhs_nom, ckt.rhs[0..n]);
 
-    try ws.slv.factor(ckt.g_vals);
+    try ws.slv.factor(ckt.g_vals, ckt.solver_execution);
 
     root.zeroSimd(e_out[0..n]);
     e_out[output_node] = 1.0;

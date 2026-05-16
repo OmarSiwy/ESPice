@@ -48,8 +48,6 @@ pub const Builder = struct {
     /// Per-row subcircuit instance: 0 is top level, MULTI_INSTANCE a
     /// coupling node. Empty when the deck has no subcircuits.
     node_instance: std.ArrayList(u32) = .empty,
-    /// Per-row subcircuit definition, parallel to `node_instance`.
-    node_type: std.ArrayList(u16) = .empty,
     /// Some node has no DC path, so the operating point needs the transient fallback.
     needs_tran_op: bool = false,
     /// `.options tnom` in degrees Celsius, ngspice's `CKTnomTemp`
@@ -93,26 +91,22 @@ pub const Builder = struct {
         self.card_counts.deinit(self.gpa);
         self.node_labels.deinit(self.gpa);
         self.node_instance.deinit(self.gpa);
-        self.node_type.deinit(self.gpa);
         self.* = undefined;
     }
 
     /// Tags a node with a subcircuit instance; a second instance makes it a
     /// coupling node.
-    fn tagNodeInstance(self: *Builder, node: u32, subckt_type: u16, subckt_instance: u32) !void {
+    fn tagNodeInstance(self: *Builder, node: u32, subckt_instance: u32) !void {
         if (node == GROUND) return;
         if (self.node_instance.items.len <= node) {
             const grow = node + 1 - self.node_instance.items.len;
             try self.node_instance.appendNTimes(self.gpa, 0, grow);
-            try self.node_type.appendNTimes(self.gpa, 0, grow);
         }
         const cur = self.node_instance.items[node];
         if (cur == 0 and subckt_instance != 0) {
             self.node_instance.items[node] = subckt_instance;
-            self.node_type.items[node] = subckt_type;
         } else if (cur != 0 and subckt_instance != 0 and cur != subckt_instance) {
             self.node_instance.items[node] = MULTI_INSTANCE;
-            self.node_type.items[node] = 0;
         }
     }
 
@@ -128,11 +122,10 @@ pub const Builder = struct {
         const gpa = self.gpa;
         const n: u32 = self.n;
         const ni = self.node_instance.items;
-        const nt = self.node_type.items;
 
         // One block per instance, in first-seen node order. `at` counts the
         // block's nodes here and becomes its write cursor below.
-        var instance_list: std.ArrayList(struct { inst: u32, typ: u16, at: u32 }) = .empty;
+        var instance_list: std.ArrayList(struct { inst: u32, at: u32 }) = .empty;
         defer instance_list.deinit(gpa);
         // Instance to block index.
         var index: std.AutoHashMapUnmanaged(u32, u32) = .empty;
@@ -144,7 +137,7 @@ pub const Builder = struct {
             const gop = try index.getOrPut(gpa, inst);
             if (!gop.found_existing) {
                 gop.value_ptr.* = @intCast(instance_list.items.len);
-                try instance_list.append(gpa, .{ .inst = inst, .typ = nt[i], .at = 0 });
+                try instance_list.append(gpa, .{ .inst = inst, .at = 0 });
             }
             instance_list.items[gop.value_ptr.*].at += 1;
         }
@@ -162,12 +155,7 @@ pub const Builder = struct {
         // node in one ascending pass.
         const blocks = try gpa.alloc(numerics.BbdBlock, instance_list.items.len);
         for (instance_list.items, blocks) |*entry, *blk| {
-            blk.* = .{
-                .start = pos,
-                .size = entry.at,
-                .type_id = entry.typ,
-                .instance_id = entry.inst,
-            };
+            blk.* = .{ .start = pos, .size = entry.at };
             entry.at = pos;
             pos += blk.size;
         }
@@ -475,7 +463,7 @@ pub const NetBuilder = struct {
             if (dev.subckt_instance == 0) continue;
             for (dev.pins) |pin| {
                 const r = self.rows[pin.index()];
-                if (r != 0) try self.b.tagNodeInstance(r, dev.subckt_type, dev.subckt_instance);
+                if (r != 0) try self.b.tagNodeInstance(r, dev.subckt_instance);
             }
         }
     }

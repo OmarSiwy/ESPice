@@ -61,8 +61,7 @@ pub const Device = struct {
     positional: Span,
     /// Rows of `Netlist.kvs`.
     kv: Span,
-    /// Subcircuit definition + 1 and expansion ordinal, 0 at top level.
-    subckt_type: u16,
+    /// Subcircuit expansion ordinal, 0 at top level.
     subckt_instance: u32,
 };
 
@@ -130,7 +129,6 @@ pub const Netlist = struct {
         positional: []const Value,
         kv: []const Kv,
         model: ?Model,
-        subckt_type: u16,
         subckt_instance: u32,
     };
 
@@ -150,7 +148,6 @@ pub const Netlist = struct {
             .positional = nl.values[d.positional.start..][0..d.positional.len],
             .kv = nl.kvs[d.kv.start..][0..d.kv.len],
             .model = if (d.model == none) null else nl.models[d.model],
-            .subckt_type = d.subckt_type,
             .subckt_instance = d.subckt_instance,
         };
     }
@@ -302,7 +299,6 @@ const Frame = struct {
     actuals: []const VertexId = &.{},
     scopes: []const *const Scope,
     depth: u8 = 0,
-    subckt_type: u16 = 0,
     instance: u32 = 0,
 };
 
@@ -951,7 +947,6 @@ fn Reader(comptime S: type) type {
                 .model = model,
                 .positional = try appendSpan(Value, arena, &r.values, r.positional.items),
                 .kv = try appendSpan(Kv, arena, &r.kvs, r.card_kv.items),
-                .subckt_type = frame.subckt_type,
                 .subckt_instance = frame.instance,
             }, r.pins.items) catch |err| return switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
@@ -993,7 +988,6 @@ fn Reader(comptime S: type) type {
                 .actuals = actuals,
                 .scopes = scopes,
                 .depth = frame.depth + 1,
-                .subckt_type = id + 1,
                 .instance = instance,
             };
             for (r.lines.items[sub.first..sub.end]) |line| {

@@ -118,7 +118,7 @@ const BbdTests = struct {
             const blocks = try gpa.alloc(root.BbdBlock, nb);
             for (0..nb) |bi| {
                 const st = 1 + @as(u32, @intCast(bi)) * s;
-                blocks[bi] = .{ .start = st, .size = s, .type_id = 0, .instance_id = @intCast(bi + 1) };
+                blocks[bi] = .{ .start = st, .size = s };
                 // block interior: dense-ish, diagonally dominant
                 for (0..s) |i| {
                     for (0..s) |j| {
@@ -202,7 +202,7 @@ const BbdTests = struct {
     fn expectMatchesFlat(gpa: Allocator, sy: *const Synth, eng: *Bbd) !void {
         var flat = try direct.Solver.init(gpa, sy.n, sy.col_ptr, sy.row_idx, null);
         defer flat.deinit();
-        try flat.factor(sy.vals);
+        try flat.factor(sy.vals, .{});
         try eng.factorWithExecution(sy.vals, .{});
 
         const b_rhs = try sy.rhs(gpa);
@@ -345,8 +345,8 @@ const BbdTests = struct {
         var s_flat = try direct.Solver.init(gpa, sy.n, sy.col_ptr, sy.row_idx, null);
         defer s_flat.deinit();
 
-        try s_bbd.factor(sy.vals);
-        try s_flat.factor(sy.vals);
+        try s_bbd.factor(sy.vals, .{});
+        try s_flat.factor(sy.vals, .{});
 
         const b_rhs = try sy.rhs(gpa);
         defer gpa.free(b_rhs);
@@ -379,13 +379,13 @@ const BbdTests = struct {
 
         // block 2 singular but the full matrix is regular through the border:
         // factor must succeed via the flat fallback
-        try s.factor(sy.vals);
+        try s.factor(sy.vals, .{});
         try testing.expect(s.bbd_eng == null);
         try testing.expect(s.lu != null);
 
         var flat = try direct.Solver.init(gpa, sy.n, sy.col_ptr, sy.row_idx, null);
         defer flat.deinit();
-        try flat.factor(sy.vals);
+        try flat.factor(sy.vals, .{});
 
         const b_rhs = try sy.rhs(gpa);
         defer gpa.free(b_rhs);
@@ -398,7 +398,7 @@ const BbdTests = struct {
         for (x, x_ref) |xi, ri| try testing.expectApproxEqAbs(ri, xi, 1e-11);
 
         // second factor stays flat (refactor path) and still works
-        try s.factor(sy.vals);
+        try s.factor(sy.vals, .{});
         try testing.expect(s.bbd_eng == null);
         s.solve(b_rhs, x);
         for (x, x_ref) |xi, ri| try testing.expectApproxEqAbs(ri, xi, 1e-11);
@@ -646,7 +646,6 @@ const ConvergerTests = struct {
 
 const DenseLuTests = struct {
     const impl = @import("root.zig").dense_lu;
-    const DenseLu = impl.DenseLu;
     const buildComplexAdmittance = impl.buildComplexAdmittance;
     const factorize = impl.factorize;
     const factorizeSolve = impl.factorizeSolve;
@@ -690,25 +689,6 @@ const DenseLuTests = struct {
 
         // x_neg should be -x_pos
         for (0..3) |i| try testing.expectApproxEqAbs(-x_pos[i], x_neg[i], 1e-10);
-    }
-
-    test "dense_lu: f32 instantiation solves the same system" {
-        const LU32 = DenseLu(f32);
-        var a = [_]f32{
-            2, 1, 0,
-            0, 3, 1,
-            1, 0, 4,
-        };
-        const b = [_]f32{ 5, 7, 10 };
-        var x: [3]f32 = undefined;
-        try LU32.factorizeSolve(3, &a, &b, &x);
-
-        const orig = [_]f32{ 2, 1, 0, 0, 3, 1, 1, 0, 4 };
-        for (0..3) |row| {
-            var sum: f32 = 0;
-            for (0..3) |col| sum += orig[row * 3 + col] * x[col];
-            try testing.expectApproxEqAbs(b[row], sum, 1e-4);
-        }
     }
 
     test "dense_lu: singular matrix returns error" {
@@ -889,7 +869,7 @@ const DenseLuTests = struct {
             defer gpa.free(ak);
             const pk = try gpa.alloc(u32, n);
             defer gpa.free(pk);
-            if (DenseLu(f64).factorize(n, ak, pk)) |_| {
+            if (factorize(n, ak, pk)) |_| {
                 try testing.expect(ok);
                 try testing.expectEqualSlices(u32, po, pk);
                 try testing.expectEqualSlices(u64, @ptrCast(ao), @ptrCast(ak));
@@ -953,7 +933,7 @@ const DirectTests = struct {
 
         var s = try Solver.init(gpa, 2, col_ptr, row_idx, null);
         defer s.deinit();
-        try s.factor(vals);
+        try s.factor(vals, .{});
         var x: [2]f64 = undefined;
         s.solveNeg(&.{ 5, 7 }, &x);
         try testing.expectApproxEqAbs(@as(f64, -1.6), x[0], 1e-12);
@@ -962,7 +942,7 @@ const DirectTests = struct {
         // new values, same pattern -> refactor path
         vals[0] = 4;
         vals[3] = 5; // [4 1; 1 5]
-        try s.factor(vals);
+        try s.factor(vals, .{});
         s.solveNeg(&.{ 9, 11 }, &x);
         try testing.expectApproxEqAbs(@as(f64, -34.0 / 19.0), x[0], 1e-12);
         try testing.expectApproxEqAbs(@as(f64, -35.0 / 19.0), x[1], 1e-12);
@@ -1110,7 +1090,7 @@ const FreqSolveTests = struct {
         // Verify: build A explicitly, check A^T y ≈ rhs.
         const nn: usize = 4;
         var a: [16]f64 = undefined;
-        dense_lu.DenseLu(f64).buildComplexAdmittance(2, 4, &[_]f64{ 1, 2, 3, 4 }, &[_]f64{ 0.1, 0.2, 0.3, 0.4 }, omega, &a);
+        dense_lu.buildComplexAdmittance(2, 4, &[_]f64{ 1, 2, 3, 4 }, &[_]f64{ 0.1, 0.2, 0.3, 0.4 }, omega, &a);
 
         for (0..nn) |row| {
             var sum: f64 = 0;
@@ -1132,7 +1112,7 @@ const FreqSolveTests = struct {
 
         // Solve two different RHS and verify Ax = rhs for each.
         var a: [16]f64 = undefined;
-        dense_lu.DenseLu(f64).buildComplexAdmittance(2, 4, &[_]f64{ 5, 1, 1, 5 }, &[_]f64{ 0.5, 0, 0, 0.5 }, 3.0, &a);
+        dense_lu.buildComplexAdmittance(2, 4, &[_]f64{ 5, 1, 1, 5 }, &[_]f64{ 0.5, 0, 0, 0.5 }, 3.0, &a);
 
         const rhs_list = [_][4]f64{
             .{ 1, 0, 0, 0 },

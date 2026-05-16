@@ -131,7 +131,6 @@ fn integrateOnePeriod(
         const nr = converger.run(ckt, ws, x, t, .{
             .max_iter = options.max_newton_iter,
             .abstol = options.newton_tol,
-            .dx_clamp = std.math.inf(f64),
         }, hook) catch return false;
         if (!nr.converged) return false;
 

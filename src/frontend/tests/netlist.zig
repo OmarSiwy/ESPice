@@ -211,7 +211,6 @@ test "parameters: global definitions keep their scope under nested overrides" {
     var buf: [2][]const u8 = undefined;
     try std.testing.expectEqualStrings("top", pinNames(nl, inner, &buf)[0]);
     try std.testing.expectEqualStrings("xone.mid", nl.netName((try device(nl, "r.xone.rlocal")).pins[1]));
-    try std.testing.expectEqual(@as(u16, 1), inner.subckt_type);
     try std.testing.expectEqual(@as(u32, 2), inner.subckt_instance);
 }
 
