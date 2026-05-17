@@ -184,6 +184,7 @@ const QpssTests = struct {
     const transformWork = impl.test_access.transformWork;
     const dft2D = impl.test_access.dft2D;
     const gvProduct = impl.test_access.gvProduct;
+    const transposePattern = impl.test_access.transposePattern;
     const idft2D = impl.test_access.idft2D;
     const simdZero = impl.test_access.simdZero;
     const std = @import("std");
@@ -491,6 +492,23 @@ const QpssTests = struct {
             }
             gvProduct(got, g_td, v_td, col_ptr.items, row_idx.items, nf);
             try testing.expectEqualSlices(u64, @ptrCast(want), @ptrCast(got));
+
+            // The charge term's row-order view of the same pattern: every
+            // entry once, rows in order, columns ascending, slots pointing
+            // back at (row, col).
+            const t = try alloc.alloc(u32, n + 1 + 2 * nnz);
+            defer alloc.free(t);
+            const row_ptr = t[0 .. n + 1];
+            const cols = t[n + 1 ..][0..nnz];
+            const slots = t[n + 1 + nnz ..][0..nnz];
+            transposePattern(col_ptr.items, row_idx.items, row_ptr, cols, slots);
+            try testing.expectEqual(@as(u32, @intCast(nnz)), row_ptr[n]);
+            for (0..n) |row| for (row_ptr[row]..row_ptr[row + 1]) |k| {
+                const col = cols[k];
+                if (k > row_ptr[row]) try testing.expect(cols[k - 1] < col);
+                try testing.expect(slots[k] >= col_ptr.items[col] and slots[k] < col_ptr.items[col + 1]);
+                try testing.expectEqual(@as(u32, @intCast(row)), row_idx.items[slots[k]]);
+            };
         }
     }
 
