@@ -548,7 +548,7 @@ fn evalRange(comptime D: type, comptime narrow: bool, comptime F: type, sink: an
     };
     const jac_rep = comptime repMask(n_u, lane, alias, jac_pat);
     const q_rep = comptime repMask(n_u, lane, alias, q_pat);
-    const S = DualFor(W, F, @hasDecl(D, "collapse"));
+    const S = DualFor(if (!SinkT.on_device and padsLanes(D, narrow)) std.mem.alignForward(usize, W, 4) else W, F, @hasDecl(D, "collapse"));
     const use_lim = if (comptime has_limit) limiting else false;
     const lim_writes = comptime if (has_limit) contract.limitWrites(D) else 0;
     const has_q = comptime @hasDecl(D, "q");
@@ -616,7 +616,7 @@ fn evalRange(comptime D: type, comptime narrow: bool, comptime F: type, sink: an
             if (comptime has_limit) {
                 // The correction lands on the f64 residual. An empty pattern
                 // row has zero gradient, so it has no correction either.
-                if (corr_live and comptime jac_pat[ru] != 0) val += @reduce(.Add, out[ru].grad() * corr);
+                if (corr_live and comptime jac_pat[ru] != 0) val += @reduce(.Add, head(W, out[ru].grad()) * corr);
             }
             sink.scatterRes(row, val);
             if (comptime !SinkT.skip_g and jac_pat[ru] != 0) {
@@ -635,7 +635,7 @@ fn evalRange(comptime D: type, comptime narrow: bool, comptime F: type, sink: an
                 const row = sink.rhsRow(id, ru);
                 var qv = qo[ru].v;
                 if (comptime has_limit) {
-                    if (corr_live and comptime q_pat[ru] != 0) qv += @reduce(.Add, qo[ru].grad() * corr);
+                    if (corr_live and comptime q_pat[ru] != 0) qv += @reduce(.Add, head(W, qo[ru].grad()) * corr);
                 }
                 sink.scatterQ(row, qv);
                 if (comptime !SinkT.skip_c and q_pat[ru] != 0) {
@@ -650,12 +650,42 @@ fn evalRange(comptime D: type, comptime narrow: bool, comptime F: type, sink: an
             if (comptime !SinkT.on_device) inline for (comptime lteSites(D), 0..) |k, j| {
                 var qv = qs[k].v;
                 if (comptime has_limit) {
-                    if (corr_live) qv += @reduce(.Add, qs[k].grad() * corr);
+                    if (corr_live) qv += @reduce(.Add, head(W, qs[k].grad()) * corr);
                 }
                 sink.tapeQ(id, j, qv);
             };
         }
     }
+}
+
+/// Host models whose derivative lanes pad to a multiple of 4, mapped to
+/// whether the narrow (collapsed) basis pads too. Opt-in, because no rule on
+/// W or n_u predicts the sign. Callgrind Ir, padded/unpadded, 100-instance
+/// DC sweeps with/without series resistances: gummel_poon 0.65/0.60,
+/// vbic13_4t 0.65, vdmos 0.73/0.68, bsim2 0.82, mes 0.78 (narrow basis
+/// unpadded: 1.00), jfet 0.76/1.02 (both on the wide basis). Losers left out:
+/// bsim4va and bsimsoi_va 1.05, b3soidd 1.09, hfet1 and jfet2 1.06,
+/// hisim2_va 1.03; every other model measured 1.00.
+/// Pad lanes carry zero partials (or NaN from a 0/0) that no stamp reads,
+/// so the output is byte-identical either way.
+const pad_lanes = std.StaticStringMap(bool).initComptime(.{
+    .{ "gummel_poon", true },
+    .{ "vbic13_4t", true },
+    .{ "vdmos", true },
+    .{ "jfet", false },
+    .{ "mes", false },
+    .{ "bsim2", true },
+});
+
+fn padsLanes(comptime D: type, comptime narrow: bool) bool {
+    const both = pad_lanes.get(comptime baseName(D)) orelse return false;
+    return both or !narrow;
+}
+
+/// The first `w` lanes of `v`: the unpadded basis, so the correction dot
+/// product sums exactly the lanes it sums without padding.
+inline fn head(comptime w: usize, v: anytype) @Vector(w, f64) {
+    return @shuffle(f64, v, undefined, std.simd.iota(i32, w));
 }
 
 /// `@reduce(.Or, v != 0)` computed on the bits: true when any lane is nonzero
