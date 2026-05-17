@@ -75,6 +75,44 @@ test "pz cannot publish a partial root set" {
     try std.testing.expectError(error.ResultUnavailable, problem.result(ids[0]));
 }
 
+test "pz of a femtosecond RC ladder: closed-form poles, no finite zeros" {
+    // RC = 1 fs puts A = −G⁻¹C near 1e-12, where the QR's shift polynomial
+    // (entries squared) fell under absolute 1e-30 guards, skipped its
+    // reflectors and cycled on the numerator's nilpotent block until
+    // PzDidNotConverge (5 and 30 stages both did). Poles of N equal sections
+    // driven by a shorted source: s_k = −4 sin²((2k−1)π / (2(2N+1))) / RC.
+    const r = 100.0;
+    const c = 10e-15;
+    inline for (.{ 5, 30 }) |stages| {
+        var deck: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer deck.deinit();
+        const w = &deck.writer;
+        try w.print("rc ladder\nv1 n0 0 0 ac 1\n", .{});
+        for (0..stages) |i| try w.print("r{d} n{d} n{d} {e}\nc{d} n{d} 0 {e}\n", .{ i, i, i + 1, r, i, i + 1, c });
+        try w.print(".pz n0 0 n{d} 0 vol pz\n.end\n", .{stages});
+
+        const problem = try runDeck(deck.written());
+        defer problem.deinit();
+        const res = try requestedResult(problem, 0);
+        var poles: [stages]f64 = undefined;
+        var n_poles: usize = 0;
+        for (res.varnames, 0..) |name, k| {
+            try std.testing.expect(!std.mem.startsWith(u8, name, "zero"));
+            if (!std.mem.startsWith(u8, name, "pole")) continue;
+            try std.testing.expectEqual(@as(f64, 0), res.data[2 * k + 1]);
+            poles[n_poles] = res.data[2 * k];
+            n_poles += 1;
+        }
+        try std.testing.expectEqual(@as(usize, stages), n_poles);
+        std.mem.sort(f64, &poles, {}, std.sort.desc(f64));
+        for (poles, 1..) |p, k| {
+            const kf: f64 = @floatFromInt(2 * k - 1);
+            const sn = @sin(kf * std.math.pi / (2 * (2 * stages + 1)));
+            try std.testing.expectApproxEqRel(-4 * sn * sn / (r * c), p, 1e-12);
+        }
+    }
+}
+
 test "a failed query does not prevent an independent query from completing" {
     const p = try api.Problem.init(std.testing.allocator, std.testing.io, .{
         .source = .{ .bytes = .{ .data = "failure isolation\nV1 in 0 dc 1 ac 1 sin(0 1 1k)\nR1 in out 1k\nC1 out 0 1u\n.end\n", .origin = "failure.cir" } },

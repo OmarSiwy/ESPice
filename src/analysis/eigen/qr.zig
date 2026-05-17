@@ -220,7 +220,7 @@ pub fn hessenbergReduce(n: usize, a: []f64, v_buf: []f64) void {
         }
         sigma = @sqrt(sigma);
 
-        if (sigma < 1e-30) continue;
+        if (sigma == 0) continue;
 
         if (a[(k + 1) * n + k] < 0) sigma = -sigma;
 
@@ -308,7 +308,7 @@ fn francisStep(n: usize, a: []f64, lo: usize, nn: usize, iter: u32) void {
 
     for (lo..nn - 1) |k| {
         const nr = @sqrt(x * x + y * y + z * z);
-        if (nr < 1e-30) {
+        if (nr == 0) {
             if (k + 1 < nn - 1) {
                 x = a[(k + 1) * n + k];
                 y = a[(k + 2) * n + k];
@@ -339,7 +339,7 @@ fn applyReflector3(n: usize, a: []f64, lo: usize, nn: usize, k: usize, x_in: f64
     const v1 = y_in;
     const v2 = z_in;
     const denom = v0 * v0 + v1 * v1 + v2 * v2;
-    if (denom < 1e-60) return;
+    if (denom == 0) return;
     const beta = 2.0 / denom;
 
     const v0v: V = @splat(v0);
@@ -390,13 +390,13 @@ fn applyReflector3(n: usize, a: []f64, lo: usize, nn: usize, k: usize, x_in: f64
 /// k..k+1.
 fn applyReflector2(n: usize, a: []f64, lo: usize, nn: usize, k: usize, x_in: f64, y_in: f64) void {
     const nr = @sqrt(x_in * x_in + y_in * y_in);
-    if (nr < 1e-30) return;
+    if (nr == 0) return;
 
     const sign_x: f64 = if (x_in >= 0) 1.0 else -1.0;
     const v0 = x_in + sign_x * nr;
     const v1 = y_in;
     const denom = v0 * v0 + v1 * v1;
-    if (denom < 1e-60) return;
+    if (denom == 0) return;
     const beta = 2.0 / denom;
 
     const v0v: V = @splat(v0);
