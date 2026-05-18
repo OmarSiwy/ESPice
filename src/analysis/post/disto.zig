@@ -9,8 +9,9 @@
 //! difference of the Jacobian along the two real directions V1 spans: four
 //! evals per frequency point, no tensor (see `cubicForms`).
 //!
-//! ponytail: O(n^3) d2 tensor and O(n^2) dense solves; device-side analytic
-//! F''/F''' stamps are the upgrade for large n.
+//! ponytail: d2 kept as its nonzero terms (at most nnz(G) per unknown) and
+//! O(n^3) dense solves per frequency; device-side analytic F''/F''' stamps and
+//! a sparse frequency solve are the upgrade for large n.
 const std = @import("std");
 const root = @import("../types.zig");
 const simdZero = root.zeroSimd;
@@ -84,57 +85,56 @@ pub fn sweep(
     defer allocator.free(c_mat);
     ckt.denseC(c_mat);
 
-    // d2[row][a][b] ≈ (G(x_op + eps*e_b) − G(x_op))[row][a] / eps
+    // d2[row][a][b] ≈ (G(x_op + eps*e_b) − G(x_op))[row][a] / eps, kept as
+    // its nonzero terms only. Outside G's pattern both planes are 0, so
+    // only pattern slots can contribute.
     const eps = options.fd_eps;
     const inv_eps = 1.0 / eps;
-    const d2 = try allocator.alloc(f64, n * n * n);
-    defer allocator.free(d2);
+    const nnz: usize = ckt.nnz;
+    const g0 = try allocator.dupe(f64, ckt.g_vals[0..nnz]);
+    defer allocator.free(g0);
 
     const g_pert = try allocator.alloc(f64, n * n);
     defer allocator.free(g_pert);
     const x_pert = try allocator.alloc(f64, n);
     defer allocator.free(x_pert);
 
-    // ponytail: the d2[row*n*n + a*n + b] layout makes these writes strided;
-    // the n evals dominate the cost, so the fill stays scalar.
+    const Term = struct { row: u32, a: u32, b: u32, coeff: f64 };
+    var term_list: std.ArrayList(Term) = .empty;
+    defer term_list.deinit(allocator);
     for (0..n) |b| {
         if (b != 0) try ckt.checkpoint(.{ .phase = .prepare, .completed = b, .total = n });
         simdCopy(x_pert, x_op[0..n]);
         x_pert[b] += eps;
         ckt.eval(x_pert, 0);
-        ckt.denseG(g_pert);
-        for (0..n) |row| {
-            for (0..n) |a| {
-                d2[row * n * n + a * n + b] =
-                    (g_pert[row * n + a] - g_dense[row * n + a]) * inv_eps;
-            }
-        }
+        for (0..n) |a| for (ckt.col_ptr[a]..ckt.col_ptr[a + 1]) |slot| {
+            // (-0 compares equal to 0 and is skipped; NaN is kept.)
+            const coeff = (ckt.g_vals[slot] - g0[slot]) * inv_eps;
+            if (coeff == 0) continue;
+            try term_list.append(allocator, .{ .row = ckt.row_idx[slot], .a = @intCast(a), .b = @intCast(b), .coeff = coeff });
+        };
     }
 
     // Put the planes back at the operating point.
     ckt.eval(x_op, 0);
 
-    // d2's nonzero terms, row by row in (a, b) order: the per-frequency
-    // contractions add exactly the terms a dense sweep with a zero skip
-    // would, in the same order, so the sums are bitwise the same.
-    // (-0 compares equal to 0 and is skipped too; NaN is kept.)
-    const Term = struct { a: u32, b: u32, coeff: f64 };
-    var n_terms: usize = 0;
-    for (d2) |coeff| n_terms += @intFromBool(coeff != 0);
-    const terms = try allocator.alloc(Term, n_terms);
-    defer allocator.free(terms);
+    // Row by row in (a, b) order: the per-frequency contractions add
+    // exactly the terms a dense d2 sweep with a zero skip would, in the same
+    // order, so the sums are bitwise the same. The sort is stable and b was
+    // appended in ascending order.
+    const terms = term_list.items;
+    std.sort.block(Term, terms, {}, struct {
+        fn lt(_: void, x: Term, y: Term) bool {
+            return x.row < y.row or (x.row == y.row and x.a < y.a);
+        }
+    }.lt);
     const row_start = try allocator.alloc(u32, n + 1);
     defer allocator.free(row_start);
     {
         var t: u32 = 0;
         for (0..n) |row| {
             row_start[row] = t;
-            for (0..n) |a| for (0..n) |b| {
-                const coeff = d2[row * n * n + a * n + b];
-                if (coeff == 0) continue;
-                terms[t] = .{ .a = @intCast(a), .b = @intCast(b), .coeff = coeff };
-                t += 1;
-            };
+            while (t < terms.len and terms[t].row == row) t += 1;
         }
         row_start[n] = t;
     }
@@ -153,7 +153,7 @@ pub fn sweep(
     defer allocator.free(x_work3);
 
     // Third-order scratch: one more dense Jacobian and the four real cubic
-    // forms of `cubicForms`. Both are small next to d2's O(n^3), so they are
+    // forms of `cubicForms`. Both are small next to the (2n)^2 LU slab, so they are
     // allocated even when h3 is not wanted.
     const g_minus = try allocator.alloc(f64, n * n);
     defer allocator.free(g_minus);
