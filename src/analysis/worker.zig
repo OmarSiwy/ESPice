@@ -5,6 +5,16 @@ const std = @import("std");
 const requests = @import("core").query;
 const progress = @import("progress.zig");
 
+/// Where a quantum started by `start` may end.
+pub const Quantum = enum(u8) {
+    /// At the next reported checkpoint: callers that step or interleave
+    /// queries see every transient point.
+    checkpoint,
+    /// Only at completion; checkpoints just poll cancellation. A parked
+    /// checkpoint costs two thread handoffs per transient step.
+    completion,
+};
+
 pub const Options = struct {
     stack_size: usize = 512 * 1024 * 1024,
     /// Park on `.nonlinear` checkpoints too. Only `.op` does; other queries
@@ -29,6 +39,9 @@ pub fn Worker(comptime Product: type) type {
         changed: std.Io.Condition = .init,
         thread: ?std.Thread = null,
         state: State = .created,
+        /// The running quantum's end rule; written by `start` before the
+        /// worker thread resumes, read only by that thread.
+        quantum: Quantum = .checkpoint,
         cancel_requested: std.atomic.Value(bool) = .init(false),
         timed_from: ?std.Io.Timestamp = null,
         active_ns: i96 = 0,
@@ -60,9 +73,10 @@ pub fn Worker(comptime Product: type) type {
         /// Starts or resumes one quantum without waiting, so the coordinator
         /// can start several. A failed thread spawn leaves the worker unstarted
         /// and retryable; `error.AlreadyRunning` if a quantum is in flight.
-        pub fn start(self: *Self) !void {
+        pub fn start(self: *Self, quantum: Quantum) !void {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
+            if (self.state != .running) self.quantum = quantum;
             switch (self.state) {
                 .created => {
                     self.state = .running;
@@ -113,9 +127,9 @@ pub fn Worker(comptime Product: type) type {
             };
         }
 
-        /// `start` then `wait`.
+        /// `start` then `wait`, one checkpoint quantum.
         pub fn advance(self: *Self) !Outcome {
-            try self.start();
+            try self.start(.checkpoint);
             return self.wait();
         }
 
@@ -138,8 +152,8 @@ pub fn Worker(comptime Product: type) type {
 
         fn checkpoint(ctx: *anyopaque, event: progress.Event) error{QueryCancelled}!void {
             const self: *Self = @ptrCast(@alignCast(ctx));
-            // Suppressed Newton checkpoints only poll cancellation, lock-free.
-            if (event.phase == .nonlinear and !self.options.report_nonlinear) {
+            // Suppressed checkpoints only poll cancellation, lock-free.
+            if (self.quantum == .completion or (event.phase == .nonlinear and !self.options.report_nonlinear)) {
                 if (self.cancel_requested.load(.monotonic)) return error.QueryCancelled;
                 return;
             }

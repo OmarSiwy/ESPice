@@ -219,7 +219,10 @@ pub const Problem = struct {
             if (n == 0) return error.SchedulingFailure;
             // The same bounded frontier `print` marks NEXT for a run_all preview.
             const selected = @min(n, events.len);
-            _ = try self.advance_ready(ids[0..selected], self.limits, events);
+            // Whole-query quanta: nothing here reads intermediate progress,
+            // except the in-depth timing, which reports per checkpoint.
+            const quantum: Limits = .{ .max_parallel = self.limits.max_parallel, .quantum = if (self.timing_in_depth) .checkpoint else .completion };
+            _ = try self.advance_ready(ids[0..selected], quantum, events);
         }
         self.deliver();
         if (self.session.failure()) |err| return err;

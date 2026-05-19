@@ -22,10 +22,17 @@ entry. It validates the complete selection and event-buffer capacity before
 execution. It then processes the selection in batches of at most
 `limits.max_parallel`, starting each batch before waiting for its checkpoints.
 Each selected query advances once; newly ready dependents wait for a later call.
-It returns one event per selected ID in the supplied order.
+It returns one event per selected ID in the supplied order. `limits.quantum`
+says how far "once" goes: `.checkpoint` (the default) stops at the next
+progress checkpoint, one accepted transient step for instance, and
+`.completion` runs the query to its end, polling only for cancellation.
 
 `advance(target)` automatically selects its ready prerequisite or itself.
-`run_all()` repeatedly selects the bounded ready frontier. Applications do not
+`run_all()` repeatedly selects the bounded ready frontier with `.completion`
+quanta. Each parked checkpoint is two thread handoffs, and per-step quanta
+made small transients 2-11x slower than ngspice on a loaded machine
+(vacask_rc: 5406 ms against 481 ms). Under `--timing-in-depth` it keeps
+`.checkpoint` quanta, because that timing reports per checkpoint. Applications do not
 need thread claims, lock tokens, or an external scheduler. Serialize calls on
 one Problem; do not inspect it concurrently with advancement or destruction.
 
