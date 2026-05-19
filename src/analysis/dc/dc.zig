@@ -65,9 +65,9 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const ncols = ctx.probes.len + 1;
     const data = try a.alloc(f64, npoints * ncols);
     errdefer a.free(data);
-    // The last two points, for the predictor. Zero before the second point,
-    // as ngspice's never-written CKTstate2 is, and carried across outer
-    // blocks, as ngspice's state rotation is (dctrcurv.c:290).
+    // The last two points, for the predictor, carried across outer blocks as
+    // ngspice's state rotation is (dctrcurv.c:290). The analysis' first
+    // point fills both, so the second point starts from the first.
     const hist = try scratch.alloc(f64, 2 * ckt.n);
     defer scratch.free(hist);
     @memset(hist, 0);
@@ -94,10 +94,10 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
             if (po != 0) v2 += opts.step2;
             if (t2) |r| r.set(v2) else ckt.setCircuitTemp(@floatCast(v2));
             const block = data[po * n_inner * ncols ..][0 .. n_inner * ncols];
-            try runSerial(ctx, ckt, hist, t, opts, n_inner, ncols, block);
+            try runSerial(ctx, ckt, hist, t, opts, n_inner, ncols, block, po == 0);
         }
     } else {
-        try runSerial(ctx, ckt, hist, t, opts, npoints, ncols, data);
+        try runSerial(ctx, ckt, hist, t, opts, npoints, ncols, data, true);
     }
 
     return .{
@@ -141,7 +141,8 @@ fn findTarget(refs: []const root.ParamRef, want: Options.SweepTarget.Param) ?roo
 /// Each point warm-starts from the previous solution; the first point, and
 /// any point whose warm Newton fails, cold-starts through the full OP ladder.
 /// `hist` (2 * n) holds the last two points and is left holding this block's
-/// last two, for the next block's predictor.
+/// last two, for the next block's predictor. `first_block` marks the
+/// analysis' first block, whose first point also fills the older slot.
 fn runSerial(
     ctx: *const root.RunCtx,
     ckt: *root.Circuit,
@@ -151,6 +152,7 @@ fn runSerial(
     npoints: usize,
     ncols: usize,
     data: []f64,
+    first_block: bool,
 ) !void {
     const x = hist[0..ckt.n];
     const x_prev = hist[ckt.n..];
@@ -210,6 +212,10 @@ fn runSerial(
         if (converged) {
             for (ctx.probes, row[1..]) |node, *out| out.* = x[node];
             cold = false;
+            // ngspice copies state0 into state1 after the first point
+            // (dctrcurv.c:457-462), so the second point's MODEINITPRED
+            // extrapolation holds the first point instead of doubling it.
+            if (first_block and pt == 0) @memcpy(x_prev, x);
         } else {
             for (row[1..]) |*out| out.* = std.math.nan(f64);
             cold = true;
