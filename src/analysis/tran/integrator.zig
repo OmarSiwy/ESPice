@@ -60,8 +60,9 @@ pub fn advanceCurrent(method: Method, i_cur: []f64, q0: []const f64, q1: []const
 ///   accumulate = false: out  = d - history   (NIintegrate)
 ///   accumulate = true:  out += d - history   (the Newton residual's dynamic part)
 /// `i_prev` may alias `out`. q2 is read by gear only, i_prev by trap only.
-/// With `accumulate`, the vector body rounds (out + d) - history and the
-/// scalar tail out + (d - history); changing either order moves deck output.
+/// With `accumulate` every element rounds (out + d) - history: the tail is
+/// the w == 1 instantiation of the vector lane, so position in the slice
+/// never changes the bits.
 pub fn companionAt(
     comptime method: Method,
     comptime accumulate: bool,
@@ -72,30 +73,33 @@ pub fn companionAt(
     i_prev: []const f64,
     c: Coeffs,
 ) void {
-    const V = @Vector(W, f64);
-    const av: V = @splat(c.ag0);
-    const a2: V = @splat(c.ag2);
     var j: usize = 0;
-    while (j + W <= out.len) : (j += W) {
-        const a: V = q0[j..][0..W].*;
-        const b: V = q1[j..][0..W].*;
-        const d = av * (a - b);
-        const base = if (accumulate) @as(V, out[j..][0..W].*) + d else d;
-        out[j..][0..W].* = switch (method) {
-            .trapezoidal => base - @as(V, i_prev[j..][0..W].*),
-            .gear_2 => base - a2 * (b - @as(V, q2[j..][0..W].*)),
-            .backward_euler => base,
-        };
-    }
-    while (j < out.len) : (j += 1) {
-        const d = c.ag0 * (q0[j] - q1[j]);
-        const v = switch (method) {
-            .trapezoidal => d - i_prev[j],
-            .gear_2 => d - c.ag2 * (q1[j] - q2[j]),
-            .backward_euler => d,
-        };
-        out[j] = if (accumulate) out[j] + v else v;
-    }
+    while (j + W <= out.len) : (j += W) companionLane(W, method, accumulate, j, out, q0, q1, q2, i_prev, c);
+    while (j < out.len) : (j += 1) companionLane(1, method, accumulate, j, out, q0, q1, q2, i_prev, c);
+}
+
+inline fn companionLane(
+    comptime w: usize,
+    comptime method: Method,
+    comptime accumulate: bool,
+    j: usize,
+    out: []f64,
+    q0: []const f64,
+    q1: []const f64,
+    q2: []const f64,
+    i_prev: []const f64,
+    c: Coeffs,
+) void {
+    const V = @Vector(w, f64);
+    const a: V = q0[j..][0..w].*;
+    const b: V = q1[j..][0..w].*;
+    const d = @as(V, @splat(c.ag0)) * (a - b);
+    const base = if (accumulate) @as(V, out[j..][0..w].*) + d else d;
+    out[j..][0..w].* = switch (method) {
+        .trapezoidal => base - @as(V, i_prev[j..][0..w].*),
+        .gear_2 => base - @as(V, @splat(c.ag2)) * (b - @as(V, q2[j..][0..w].*)),
+        .backward_euler => base,
+    };
 }
 
 /// Accepted-point charge re-read: `i_cur += alpha*(q_new - q_old)`.
