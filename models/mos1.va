@@ -80,10 +80,9 @@ module mos1(d, g, s, b);
     real gdrain, gsource;
     // bias-dependent
     real vgs, vds, vbs, vbd, vgd, mode, vdsx, vgsx, vbx, vcrits, vcritd;
-    real sbody, von, vgst, vdsat, bp, id, ibs, ibd, qbs, qbd;
+    real vonp, von, vgst, vdsat, bp, id, ibs, ibd, qbs, qbd;
     real vdsp, vddif, vddif1, vddif2, cgsp, cgsh, cgdh, cgbh, chgs, chgd;
     real capgs, capgd, capgb;
-    real tmp;
 
     // Bulk junction diode (both junctions, same law). The exponent is
     // tangent-continued above 80*vtx: pnjlim keeps Newton iterates below it,
@@ -98,6 +97,17 @@ module mos1(d, g, s, b);
                 u = min(v / vtx, 80.0);
                 jcur = isat * (exp(u) * (1.0 + (v / vtx - u)) - 1.0) + gm * v;
             end else jcur = gm * v - isat;
+        end
+    endfunction
+
+    // Body-effect root sqrt(phi - vbs), Taylor-continued above vbs = 0 and
+    // floored at 0 (mos1load.c:478-485).
+    analog function real sbody;
+        input vbx, phit;
+        real vbx, phit;
+        begin
+            if (vbx <= 0.0) sbody = sqrt(phit - vbx);
+            else sbody = max(sqrt(phit) - vbx / (2.0 * sqrt(phit)), 0.0);
         end
     endfunction
 
@@ -254,20 +264,27 @@ module mos1(d, g, s, b);
 
         // ============ bias and limiting (mos1load.c) ======================
         // "fetlimds" on both gate legs + "limvds" on the channel makes VerA
-        // emit mos1load.c's swap: fetlim the leg that controls the channel in
+        // emit mos1load.c:361-373: fetlim the leg that controls the channel in
         // the sign of the OLD vds (vgs when >= 0, vgd when < 0), limvds, then
-        // derive the other leg. pnjlim stays on BOTH bulk junctions: ngspice
-        // derives the second through the bulk port, which a $limit write-back
-        // cannot reach. The trailing `type` is VerA's frame sign (PMOS limits
-        // type*v).
+        // derive the other leg. "pnjlimds" on both bulk legs is the rung at
+        // :376-384: pnjlim one junction, picked by the LIMITED vds, and move
+        // only the bulk. The trailing `type` is VerA's frame sign (PMOS limits
+        // type*v); the argument after it is the MODEINITJCT seed (:397-407):
+        // vgs = type*tVto, vds = 0, vbs = -1.
         vcrits = vt * ln(vt / (1.4142135623730951 * isats));
         vcritd = vt * ln(vt / (1.4142135623730951 * isatd));
-        vgs = type * $limit(V(g, si), "fetlimds", type * vtox, type);
-        vgd = type * $limit(V(g, di), "fetlimds", type * vtox, type);
-        vds = type * $limit(V(di, si), "limvds", type);
+        // fetlim's threshold is the von the previous load stored (:351, :535):
+        // VerA evaluates a solve-dependent limiter argument at that iterate.
+        if (type * V(di, si) >= 0.0) vbx = type * V(b, si);
+        else vbx = type * V(b, di);
+        vonp = vbit * type + gammax * sbody(vbx, phit);
+        vgs = type * $limit(V(g, si), "fetlimds", vonp, type,
+                            type * vbit + gammax * sqrt(phit));
+        vgd = type * $limit(V(g, di), "fetlimds", vonp, type);
+        vds = type * $limit(V(di, si), "limvds", type, 0.0);
         vgd = vgs - vds;
-        vbs = type * $limit(V(b, si), "pnjlim", vt, vcrits, type);
-        vbd = type * $limit(V(b, di), "pnjlim", vt, vcritd, type);
+        vbs = type * $limit(V(b, si), "pnjlimds", vt, vcrits, type, -1.0);
+        vbd = type * $limit(V(b, di), "pnjlimds", vt, vcritd, type);
 
         // ============ bulk junctions ======================================
         ibs = jcur(vbs, isats, vt, gmin);
@@ -287,13 +304,7 @@ module mos1(d, g, s, b);
         vdsx = mode * vds;                      // |vds|
 
         // ============ drain current (Shichman-Hodges) =====================
-        if (vbx <= 0.0) sbody = sqrt(phit - vbx);
-        else begin
-            tmp = sqrt(phit);
-            sbody = tmp - vbx / (2.0 * tmp);
-            if (sbody < 0.0) sbody = 0.0;       // Taylor branch keeps s >= 0
-        end
-        von = vbit * type + gammax * sbody;
+        von = vbit * type + gammax * sbody(vbx, phit);
         vgst = vgsx - von;
         if (vgst > 0.0) vdsat = vgst; else vdsat = 0.0;
         bp = beta * (1.0 + lambda * vdsx);
