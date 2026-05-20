@@ -241,16 +241,23 @@ module mos2(d, g, s, b);
         // ============ bias and limiting (mos2load.c) ======================
         // As in mos1.va: "fetlimds" on both gate legs + "limvds" emits
         // ngspice's swap (fetlim only the leg controlling the channel in the
-        // sign of the OLD vds, limvds, derive the other); pnjlim on both bulk
-        // junctions; the trailing `type` is VerA's frame sign.
+        // sign of the OLD vds, limvds, derive the other); the trailing `type`
+        // is VerA's frame sign. pnjlimds on both bulk legs: ngspice's rung
+        // limits one junction, picked by the LIMITED vds, and moves only the
+        // bulk. The argument after the frame sign is the MODEINITJCT seed:
+        // vgs = type*tVto, vds = 0, vbs = -1.
+        // ponytail: fetlim's threshold is the static tVto, where mos2load.c:331
+        // uses the previous load's von; porting the von chain ahead of the
+        // limits (as mos1.va does) is the upgrade if a mos2 deck needs it.
         vcrits = vt*ln(vt/(1.4142135623730951*isats));
         vcritd = vt*ln(vt/(1.4142135623730951*isatd));
-        vgs = type*$limit(V(g, si), "fetlimds", type*vtox, type);
+        vgs = type*$limit(V(g, si), "fetlimds", type*vtox, type,
+                          type*vbit + gammax*sqphit);
         vgd = type*$limit(V(g, di), "fetlimds", type*vtox, type);
-        vds = type*$limit(V(di, si), "limvds", type);
+        vds = type*$limit(V(di, si), "limvds", type, 0.0);
         vgd = vgs - vds;
-        vbs = type*$limit(V(b, si), "pnjlim", vt, vcrits, type);
-        vbd = type*$limit(V(b, di), "pnjlim", vt, vcritd, type);
+        vbs = type*$limit(V(b, si), "pnjlimds", vt, vcrits, type, -1.0);
+        vbd = type*$limit(V(b, di), "pnjlimds", vt, vcritd, type);
 
         // ============ bulk junctions ======================================
         // limexp is tangent-continued above 80, so no flat-clamp hazard.
