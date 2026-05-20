@@ -333,15 +333,21 @@ module bsim3(d, g, s, b);
         else gsource = 0.0;
 
         // ============ bias and limiting (b3ld.c) ==========================
-        // ngspice fetlims against the per-iteration von; the clamp list is
-        // stateless, so the zero-bias threshold stands in. Limiting shapes
-        // only the Newton path, never the converged bias.
-        vgs = type * $limit(V(g, si), "fetlim", type * vth0i, type);
-        vgd = type * $limit(V(g, di), "fetlim", type * vth0i, type);
-        vds = type * $limit(V(di, si), "limvds", type);
+        // mos1.va's ladder, which b3ld.c:343-367 shares: "fetlimds" on both
+        // gate legs + "limvds" fetlims the leg the OLD vds picks and derives
+        // the other; "pnjlimds" limits one bulk junction, picked by the
+        // LIMITED vds, and moves only the bulk. The argument after the frame
+        // sign is the MODEINITJCT seed (:202-214): vgs = type*vth0 + 0.1,
+        // vds = 0.1, vbs = 0. ponytail: fetlim's threshold is the zero-bias
+        // vth0, where b3ld.c:343 uses the previous load's von (Vth, :615);
+        // porting the Vth chain ahead of the limits is the upgrade.
+        vgs = type * $limit(V(g, si), "fetlimds", type * vth0i, type,
+                            type * vth0i + 0.1);
+        vgd = type * $limit(V(g, di), "fetlimds", type * vth0i, type);
+        vds = type * $limit(V(di, si), "limvds", type, 0.1);
         vgd = vgs - vds;
-        vbs = type * $limit(V(b, si), "pnjlim", vt0, vcrit, type);
-        vbd = type * $limit(V(b, di), "pnjlim", vt0, vcrit, type);
+        vbs = type * $limit(V(b, si), "pnjlimds", vt0, vcrit, type, 0.0);
+        vbd = type * $limit(V(b, di), "pnjlimds", vt0, vcrit, type);
 
         // ============ bulk junctions (b3ld.c) =============================
         gminx = $simparam("gmin", 1.0e-12);

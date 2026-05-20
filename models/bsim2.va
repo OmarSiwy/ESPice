@@ -389,16 +389,22 @@ module bsim2(d, g, s, b);
         gsource = rsh > 0.0 ? m / (rsh * max(nrs, 1.0e-6)) : 1.0e12 * m;
 
         // ============ bias and limiting (b2ld.c) ==========================
-        // fetlim on both gate legs, limvds on the channel, pnjlim on both bulk
-        // junctions. The trailing `ty` is VerA's frame sign; it must be
+        // mos1.va's ladder, which b2ld.c shares: "fetlimds" on both gate legs +
+        // "limvds" fetlims the leg the OLD vds picks and derives the other;
+        // "pnjlimds" limits one bulk junction, picked by the LIMITED vds, and
+        // moves only the bulk. The trailing `ty` is VerA's frame sign; it must be
         // real-typed, hence the copy.
         ty  = type;
         vtx = vfbe + phie + k1e * sqrt(phie) - k2e * phie;  // zero-bias vth
-        vgs = ty * $limit(V(g, si), "fetlim", vtx, ty);
-        vgd = ty * $limit(V(g, di), "fetlim", vtx, ty);
-        vds = ty * $limit(V(di, si), "limvds", ty);
-        vbs = ty * $limit(V(b, si), "pnjlim", vt, vcrits, ty);
-        vbd = ty * $limit(V(b, di), "pnjlim", vt, vcritd, ty);
+        // The argument after the frame sign is the MODEINITJCT seed: vgs =
+        // type*vt0, vds = 0, vbs = -1. ponytail: fetlim's threshold is the
+        // zero-bias vth, where b2ld.c uses the previous load's von; porting the
+        // von chain ahead of the limits (as mos1.va does) is the upgrade.
+        vgs = ty * $limit(V(g, si), "fetlimds", vtx, ty, ty * vtx);
+        vgd = ty * $limit(V(g, di), "fetlimds", vtx, ty);
+        vds = ty * $limit(V(di, si), "limvds", ty, 0.0);
+        vbs = ty * $limit(V(b, si), "pnjlimds", vt, vcrits, ty, -1.0);
+        vbd = ty * $limit(V(b, di), "pnjlimds", vt, vcritd, ty);
 
         // ============ bulk junctions ======================================
         // On the true junction voltages (mode-free).
