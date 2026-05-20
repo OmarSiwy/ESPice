@@ -483,7 +483,10 @@ module mos3(d, g, s, b);
         // At the operating point $prev is not latched yet, and ngspice's
         // MODETRANOP charge, which the transient's charge history starts
         // from, is (2*half + overlap)*v (mos3load.c).
-        if (analysis("static")) begin
+        // ngspice stamps geq = ag0*C with no dC/dV term (NIintegrate at
+        // mos3load.c:1182): vera_nodiff keeps the caps coefficients, so C*ddt(V)
+        // linearizes to exactly C.
+        (* vera_nodiff *) if (analysis("static")) begin
             capgs = 2.0 * chgs + cgsov;
             capgd = 2.0 * chgd + cgdov;
             capgb = 2.0 * cgbh + cgbov;

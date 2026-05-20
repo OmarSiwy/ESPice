@@ -435,6 +435,12 @@ module mesa(d, g, s);
         // to NIintegrate on the voltage increment (mesaload.c:341-347), so the
         // stamped current is exactly capgs*dv/dt and the AC entry is capgs*ag0.
         // ddt(capgs*v) would add a spurious v*dcapgs/dt of the same order.
+        // vera_nodiff drops the dC/dV forward AD would otherwise stamp
+        // (mesaload.c:365-370 integrates with capgs/capgd as coefficients).
+        (* vera_nodiff *) begin
+            capgs = capgs;
+            capgd = capgd;
+        end
         I(g1, s2) <+ mult * capgs * ddt(V(g1, s2));
         I(g1, d2) <+ mult * capgd * ddt(V(g1, d2));
 
