@@ -336,12 +336,12 @@ const TranTests = struct {
         }
     }
 
-    // Matches ngspice cktterr.c:24-34. gear_2 must read gearCoeff[1] (2/9), not
-    // trapCoeff[1] (1/12), which would give a 1.63x looser dt bound.
+    // Matches ngspice cktterr.c:24-34. gear_2 must read gearCoeff[1] (.2222222222), not
+    // trapCoeff[1] (.08333333333), which would give a 1.63x looser dt bound.
     test "lteCoeff: ngspice gearCoeff/trapCoeff tables" {
         try testing.expectEqual(@as(f64, 0.5), integrator.lteCoeff(.backward_euler));
-        try testing.expectApproxEqRel(@as(f64, 0.08333333333), integrator.lteCoeff(.trapezoidal), 1e-10);
-        try testing.expectApproxEqRel(@as(f64, 0.2222222222), integrator.lteCoeff(.gear_2), 1e-10);
+        try testing.expectEqual(@as(f64, 0.08333333333), integrator.lteCoeff(.trapezoidal));
+        try testing.expectEqual(@as(f64, 0.2222222222), integrator.lteCoeff(.gear_2));
         // The bound is trtol*tol/(coeff*|dd|) under a sqrt, so the ratio a gear
         // deck's dt moves by is sqrt(trapCoeff[1]/gearCoeff[1]) = 0.6124.
         try testing.expectApproxEqRel(
