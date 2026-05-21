@@ -847,6 +847,7 @@ pub fn ProtoStore(comptime D: type) type {
                 store.saved_models = try gpa.alloc(D.Model, count);
                 store.attempt_saved = false;
             }
+            if (comptime @hasDecl(D, "nextBreakpoint") and skipsTimerState(D)) store.bp = .{ .lo = std.math.inf(f64), .hi = std.math.inf(f64) };
             if (comptime @hasDecl(D, "limit")) {
                 // Full n_u stride and zeroed, although only `limitWrites`
                 // slots are used: the GPU uploads the whole plane, and the
@@ -932,6 +933,31 @@ pub fn ProtoStore(comptime D: type) type {
     };
 }
 
+/// Models whose `updateState` only advances §5.10.3 timer bookkeeping
+/// (`__analog_op__timer__*`). This host never reads it: breakpoints come from
+/// the model-level `nextBreakpoint`, and the pass writes `bound_step = inf`
+/// and `discontinuity_order = -1`, the Instance defaults. So the batch skips
+/// `updateState` and the `bound_step` walk. Opt-in by name because a
+/// `$bound_step` or `$discontinuity` call leaves no trace in the Instance:
+/// vsource.va and isource.va call neither (only `$abstime` and `@(timer)`);
+/// re-check before adding one. `skipsTimerState` rejects any other state.
+/// Measured on tran/rc_sinusoidal_startup: ~660 Ir per step.
+const timer_only_state = std.StaticStringMap(void).initComptime(.{
+    .{"vsource"},
+    .{"isource"},
+});
+
+fn skipsTimerState(comptime D: type) bool {
+    if (timer_only_state.get(comptime baseName(D)) == null) return false;
+    if (@sizeOf(D.State) != 0) @compileError(@typeName(D) ++ " carries State; drop it from timer_only_state");
+    @setEvalBranchQuota(200_000);
+    for (@typeInfo(D.Instance).@"struct".fields) |f| {
+        if (std.mem.indexOf(u8, f.name, "__") != null and std.mem.indexOf(u8, f.name, "__analog_op__timer") == null)
+            @compileError(@typeName(D) ++ " holds non-timer state (" ++ f.name ++ "); drop it from timer_only_state");
+    }
+    return true;
+}
+
 /// Whether D's `updateState` pushes history it cannot take back (LRM §4.5
 /// `absdelay`). Native devices declare `unrevertible_state`; VerA devices are
 /// recognized by the `__absdelay__` infix its naming scheme puts on the
@@ -980,6 +1006,9 @@ pub fn DeviceBatch(comptime D: type) type {
         @hasField(D.Instance, "is_initial_step") or
         @hasField(D.Instance, "is_final_step");
     const narrowable = canNarrow(D);
+    // Only timer-only models: their breakpoints are pure in (model, t).
+    // Native lines rewrite `Model.brk` as they step, so theirs are not.
+    const has_bp = @hasDecl(D, "nextBreakpoint") and skipsTimerState(D);
 
     return struct {
         count: u32,
@@ -991,6 +1020,11 @@ pub fn DeviceBatch(comptime D: type) type {
         models: []D.Model,
         saved_models: if (has_attempt) []D.Model else void,
         attempt_saved: if (has_attempt) bool else void,
+        /// `nextBreakpointFn` returned `hi` (inf for none) at `lo`. That
+        /// answer holds for every `t` in `[lo, hi)`: no fire lies strictly
+        /// between. `lo = inf` is empty. Every model write goes through
+        /// `reprep` or `applyAttempt`, which empty it.
+        bp: if (has_bp) struct { lo: f64, hi: f64 } else void,
         lim_x: if (has_limit) []f64 else void,
         lim_active: if (has_limit) bool else void,
         instances: []D.Instance,
@@ -1020,12 +1054,12 @@ pub fn DeviceBatch(comptime D: type) type {
             .mark_current_rows = if (@hasDecl(D, "u_kinds")) markCurrentRows else null,
             // Unrevertible state runs once per accepted point; everything
             // else per converged solve. See `Hooks.commit_state`.
-            .update_state = if (@hasDecl(D, "updateState") and !hasAbsdelayState(D) and !hasUnrevertibleHeld(D)) updateState else null,
+            .update_state = if (@hasDecl(D, "updateState") and !hasAbsdelayState(D) and !hasUnrevertibleHeld(D) and !skipsTimerState(D)) updateState else null,
             .commit_state = if (@hasDecl(D, "updateState") and hasAbsdelayState(D)) updateState else null,
             .commit_held = if (@hasDecl(D, "updateState") and !hasAbsdelayState(D) and hasUnrevertibleHeld(D)) updateState else null,
             .state_ctl = if (@hasDecl(D, "stateCtl")) stateCtl else null,
             // Only `updateState` writes `bound_step`.
-            .bound_step = if (@hasDecl(D, "updateState") and @hasField(D.Instance, "bound_step")) boundStep else null,
+            .bound_step = if (@hasDecl(D, "updateState") and @hasField(D.Instance, "bound_step") and !skipsTimerState(D)) boundStep else null,
             .set_temp = if (@hasField(D.Instance, "temperature")) setTemp else null,
             .set_sim_state = if (has_sim_state) setSimState else null,
             .min_delay = if (@hasDecl(D, "delays")) minDelay else null,
@@ -1037,7 +1071,7 @@ pub fn DeviceBatch(comptime D: type) type {
                     " declares noise_gens without noisePsd; see docs/devices/noise-contract.md §3");
                 break :blk collectNoise;
             } else null,
-            .recompute = if (@hasDecl(D, "collapse") or @hasDecl(D, "precompute") or @hasDecl(D, "setup")) recomputePrecomputed else null,
+            .recompute = if (@hasDecl(D, "collapse") or @hasDecl(D, "precompute") or @hasDecl(D, "setup") or has_bp) recomputePrecomputed else null,
             .gpu_payload = if (gpuEligible(D)) gpuPayload else null,
             .apply_attempt = if (has_attempt) applyAttempt else null,
             .restore_models = if (has_attempt) restoreAttempt else null,
@@ -1229,6 +1263,7 @@ pub fn DeviceBatch(comptime D: type) type {
                 self.attempt_saved = true;
             }
             for (self.models, self.saved_models) |*m, s| m.* = D.attempt(s, lambda);
+            if (comptime has_bp) self.bp.lo = std.math.inf(f64);
             self.reprep();
         }
 
@@ -1284,6 +1319,7 @@ pub fn DeviceBatch(comptime D: type) type {
         }
 
         fn reprep(self: *Self) void {
+            if (comptime has_bp) self.bp.lo = std.math.inf(f64);
             if (comptime @hasDecl(D, "setup")) {
                 for (self.instances, self.models) |*inst, *mdl| D.setup(Dual(1, f64), mdl, inst);
             }
@@ -1301,12 +1337,20 @@ pub fn DeviceBatch(comptime D: type) type {
             return min_td;
         }
 
+        /// The earliest model breakpoint strictly after `t`. The transient
+        /// asks once per step; for a timer-only model (`has_bp`) the answer
+        /// only moves when `t` reaches it, so the walk (68 timers per vsource
+        /// model, ~425 Ir) runs once per breakpoint instead.
         fn nextBreakpointFn(ctx: *anyopaque, t: f64) ?f64 {
             const self: *Self = @ptrCast(@alignCast(ctx));
+            if (comptime has_bp) {
+                if (self.bp.lo <= t and t < self.bp.hi) return if (self.bp.hi == std.math.inf(f64)) null else self.bp.hi;
+            }
             var best: f64 = std.math.inf(f64);
             for (self.models) |*m| {
                 if (D.nextBreakpoint(m, t)) |bp| best = @min(best, bp);
             }
+            if (comptime has_bp) self.bp = .{ .lo = t, .hi = best };
             return if (best == std.math.inf(f64)) null else best;
         }
 
