@@ -82,7 +82,7 @@ pub fn solveLadder(
     // an always-on shunt moves every solution off ngspice's (voltage_divider
     // by 2.5e-9) and settles a floating bridge on a common mode ngspice never
     // picks.
-    const plain = newtonRun(ckt, ws, x, options.tol, 0.0, null, true) catch |e| switch (e) {
+    const plain = newtonRun(ckt, ws, x, options.tol, 0.0, &.{}, null, true) catch |e| switch (e) {
         error.SingularMatrix => null,
         else => return e,
     };
@@ -103,6 +103,10 @@ pub fn solveLadder(
     // with the 4th root of the factor and retry from the last converged x;
     // give up once the factor is ~1.
     {
+        // The planes still hold the plain rung's last assembly, which is
+        // where ngspice's preorder reads its twins.
+        const stamps = try gminStamps(ckt, gpa);
+        defer gpa.free(stamps);
         coldStart(ckt, x);
         const gtarget = options.tol.gmin;
         var factor: f64 = 10.0;
@@ -111,7 +115,7 @@ pub fn solveLadder(
         var have_good = false;
         var solves: u32 = 0;
         while (solves < 100) : (solves += 1) {
-            const r = newtonRun(ckt, ws, x, options.tol, gmin_val, options.tol.itl2, !have_good) catch |e| switch (e) {
+            const r = newtonRun(ckt, ws, x, options.tol, gmin_val, stamps, options.tol.itl2, !have_good) catch |e| switch (e) {
                 error.SingularMatrix => failed,
                 else => return e,
             };
@@ -122,7 +126,7 @@ pub fn solveLadder(
                 if (gmin_val <= gtarget) {
                     // ngspice's dynamic_gmin removes diagGmin for the last
                     // solve: the answer must not carry the shunt.
-                    const clean = newtonRun(ckt, ws, x, options.tol, 0.0, null, false) catch |err| switch (err) {
+                    const clean = newtonRun(ckt, ws, x, options.tol, 0.0, &.{}, null, false) catch |err| switch (err) {
                         error.QueryCancelled => return err,
                         else => failed,
                     };
@@ -171,7 +175,7 @@ pub fn solveLadder(
             ckt.applyAttempt(lambda);
             ckt.has_baseline = false;
             try ckt.computeBaseline();
-            const sr = newtonRun(ckt, ws, x, options.tol, 0.0, options.tol.itl2, lambda_good < 0.0) catch |e| switch (e) {
+            const sr = newtonRun(ckt, ws, x, options.tol, 0.0, &.{}, options.tol.itl2, lambda_good < 0.0) catch |e| switch (e) {
                 error.SingularMatrix => failed,
                 else => {
                     ckt.restoreModels();
@@ -204,7 +208,7 @@ pub fn solveLadder(
     ckt.has_baseline = false;
     try ckt.computeBaseline();
 
-    const final = newtonRun(ckt, ws, x, options.tol, 0.0, null, false) catch |e| switch (e) {
+    const final = newtonRun(ckt, ws, x, options.tol, 0.0, &.{}, null, false) catch |e| switch (e) {
         error.SingularMatrix => failed,
         else => return e,
     };
@@ -262,7 +266,7 @@ fn transientOp(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, options: 
     try ckt.computeBaseline();
     if (sim == null or !sim.?.completed) return failed;
     if (ckt.needs_tran_op) return .{ .converged = true, .iterations = 0, .max_dx = 0 };
-    return newtonRun(ckt, ws, x, options.tol, 0.0, null, false) catch |err| switch (err) {
+    return newtonRun(ckt, ws, x, options.tol, 0.0, &.{}, null, false) catch |err| switch (err) {
         error.QueryCancelled => return err,
         else => failed,
     };
@@ -287,13 +291,99 @@ pub fn run(ctx: *const root.RunCtx, _: Options) !root.Result {
     };
 }
 
+/// ngspice's diagonal-gmin placement. LoadGmin (spsmp.c) adds gmin to the
+/// diagonal Sparse holds after spMNA_Preorder (sputils.c), which swaps each
+/// column with no diagonal element for a symmetric pair of +-1 entries: a
+/// grounded source's gmin lands on its two incidence entries, turning
+/// V = E into (1 + gmin) V = E, and not on its node's diagonal. `ckt`'s
+/// planes must hold an assembled iterate. Caller owns the result.
+fn gminStamps(ckt: *const root.Circuit, gpa: std.mem.Allocator) ![]converger.GminStamp {
+    const n = ckt.n;
+    const none = std.math.maxInt(u32);
+    // perm: column position -> original column. dcol: original column of the
+    // diagonal element at each position, `none` for Sparse's Diag == NULL,
+    // which in MNA is a branch row nothing stamps a diagonal into.
+    const perm = try gpa.alloc(u32, n);
+    defer gpa.free(perm);
+    const dcol = try gpa.alloc(u32, n);
+    defer gpa.free(dcol);
+    for (perm, dcol, 0..) |*p, *d, i| {
+        const slot = ckt.diag_slots[i];
+        p.* = @intCast(i);
+        d.* = if (ckt.current_row[i] and ckt.g_vals[slot] == 0 and ckt.c_vals[slot] == 0) none else @intCast(i);
+    }
+    const Twin = struct { count: u32, row: u32 };
+    // CountTwins: the first +-1 entry of column position j whose transpose
+    // is +-1 too, and how many there are (stops at 2).
+    const countTwins = struct {
+        fn f(c: *const root.Circuit, pm: []const u32, j: u32) Twin {
+            var t: Twin = .{ .count = 0, .row = 0 };
+            const col = pm[j];
+            for (c.col_ptr[col]..c.col_ptr[col + 1]) |p| {
+                const r = c.row_idx[p];
+                if (r == root.GROUND or @abs(c.g_vals[p]) != 1.0) continue;
+                const q = c.findSlot(j, pm[r]) orelse continue;
+                if (@abs(c.g_vals[q]) != 1.0) continue;
+                t.count += 1;
+                if (t.count == 1) t.row = r else break;
+            }
+            return t;
+        }
+    }.f;
+    // SwapCols: exchange positions j and r; each diagonal becomes the twin.
+    const swap = struct {
+        fn f(pm: []u32, dc: []u32, j: u32, r: u32) void {
+            dc[j] = pm[r];
+            dc[r] = pm[j];
+            std.mem.swap(u32, &pm[j], &pm[r]);
+        }
+    }.f;
+    // spMNA_Preorder: lone twins first, then the first multi-twin column.
+    var start: u32 = 1;
+    while (true) {
+        var swapped = false;
+        var again = false;
+        var j = start;
+        while (j < n) : (j += 1) if (dcol[j] == none) {
+            const t = countTwins(ckt, perm, j);
+            if (t.count == 1) {
+                swap(perm, dcol, j, t.row);
+                swapped = true;
+            } else if (t.count > 1 and !again) {
+                again = true;
+                start = j;
+            }
+        };
+        if (!again) break;
+        j = start;
+        while (!swapped and j < n) : (j += 1) if (dcol[j] == none) {
+            const t = countTwins(ckt, perm, j);
+            if (t.count > 0) {
+                swap(perm, dcol, j, t.row);
+                swapped = true;
+            }
+        };
+        if (!swapped) break;
+    }
+    var stamps: std.ArrayList(converger.GminStamp) = .empty;
+    errdefer stamps.deinit(gpa);
+    try stamps.ensureTotalCapacityPrecise(gpa, n);
+    for (1..n) |i| if (dcol[i] != none) stamps.appendAssumeCapacity(.{
+        .slot = ckt.findSlot(@intCast(i), dcol[i]).?,
+        .row = @intCast(i),
+        .col = dcol[i],
+    });
+    return stamps.toOwnedSlice(gpa);
+}
+
 /// `max_iter` null means itl1. The stepping rungs pass itl2 (ngspice's
 /// CKTdcTrcvMaxIter, cktop.c:194 and the source-stepping NIiter calls).
 /// `init_fix` marks a solve from the cold start, which ngspice runs in
 /// MODEINITJCT until a rung's first success switches it to continuemode.
-fn newtonRun(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, tol: converger.Tolerances, gmin: f64, max_iter: ?u16, init_fix: bool) !converger.Result {
+fn newtonRun(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, tol: converger.Tolerances, gmin: f64, gmin_stamps: []const converger.GminStamp, max_iter: ?u16, init_fix: bool) !converger.Result {
     var copts = converger.optionsFromTolerances(tol, max_iter);
     copts.gmin = gmin;
+    copts.gmin_stamps = gmin_stamps;
     copts.init_fix = init_fix;
     return converger.run(ckt, ws, x, 0, copts, root.EvalHook{});
 }

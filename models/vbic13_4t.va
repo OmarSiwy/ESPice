@@ -1052,7 +1052,7 @@ real sgIf,rIf,mIf,tff;
 real Qbe,Qbex,Qbc,Qbcx,Qbep,Qbcp,Qbeo,Qbco;
 real Vxf1,Vxf2,Ixf1,Ixf2,Qxf1,Qxf2,Itxf;
 real dt_et,Ith,power,Irth,Qcth;
-real Vbei,Vbci,Vbex,Vbep,Vbcp,Vbcx,Vbxcx,Bvbe;
+real Vbei,Vbci,Vbex,Vbep,Vbcp,Vbcx,Vbxcx,Bvbe,vtlim,vcrit;
 real Vbe,Vbc,Vrcx,Vrci,Vrbx,Vrbi,Vre,Vrbp,Vrs,Vcei,Vcep;
 
 real VBICtype;
@@ -1321,12 +1321,18 @@ analog begin : analogBlock
         //  Branch voltages
         //
 
-        Vbei     =  VBICtype*V(b_bei);
-        Vbex     =  VBICtype*V(b_bex);
-        Vbci     =  VBICtype*V(b_bci);
-        Vbcx     =  VBICtype*V(b_bcx);
+        //  ngspice's junction limiting (vbicload.c:655-667): DEVpnjlim on
+        //  the six junctions at the ambient vt, vcrit from the untempered IS.
+        //  ponytail: ngspice also log-damps the thermal node beyond 100 K
+        //  per iterate (DEVlimitlog); VerA's $limit has no such limiter yet.
+        vtlim    = `KB_VBIC*($temperature+trise)/`QQ_VBIC;
+        vcrit    =  vtlim*ln(vtlim/(1.4142135623730951*is*m));
+        Vbei     =  VBICtype*$limit(V(b_bei), "pnjlim", vtlim, vcrit, VBICtype);
+        Vbex     =  VBICtype*$limit(V(b_bex), "pnjlim", vtlim, vcrit, VBICtype);
+        Vbci     =  VBICtype*$limit(V(b_bci), "pnjlim", vtlim, vcrit, VBICtype);
+        Vbcx     =  VBICtype*$limit(V(b_bcx), "pnjlim", vtlim, vcrit, VBICtype);
         Vbxcx    =  VBICtype*V(b_bxcx);
-        Vbep     =  VBICtype*V(b_bep);
+        Vbep     =  VBICtype*$limit(V(b_bep), "pnjlim", vtlim, vcrit, VBICtype);
         Vbe      =           V(b_be);
         Vcei     =  VBICtype*V(b_cei);
         Vbc      =           V(b_bc);
@@ -1336,7 +1342,7 @@ analog begin : analogBlock
         Vrbi     =           V(b_rbi);
         Vre      =           V(b_re);
         Vrbp     =           V(b_rbp);
-            Vbcp     =  VBICtype*V(b_bcp);
+            Vbcp     =  VBICtype*$limit(V(b_bcp), "pnjlim", vtlim, vcrit, VBICtype);
             Vcep     =  VBICtype*V(b_cep);
             Vrs      =           V(b_rs);
         Vxf1     =           V(b_xf1);

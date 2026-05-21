@@ -114,6 +114,8 @@ pub const Options = struct {
     residual_tol: f64 = 1e-9,
     /// Conductance added to every diagonal (and gmin * x to the residual).
     gmin: f64 = 1e-12,
+    /// Where `gmin` lands instead of every diagonal, when non-empty.
+    gmin_stamps: []const GminStamp = &.{},
     /// Nonzero when the caller knows the matrix is unchanged since the last
     /// factor with this signature, so `newton` skips the factor.
     matrix_sig: u64 = 0,
@@ -123,6 +125,10 @@ pub const Options = struct {
     /// solve (niiter.c, the MODEINITFIX branch).
     init_fix: bool = false,
 };
+
+/// One `gmin` load: `vals[slot] += gmin` and `rhs[row] += gmin * x[col]`,
+/// the residual form of a conductance at (row, col).
+pub const GminStamp = struct { slot: u32, row: u32, col: u32 };
 
 /// Outcome of a nonlinear solve.
 pub const Result = struct {
@@ -162,7 +168,12 @@ pub fn newton(
         hook.assemble(sys, x, t);
         const v = hook.vals(sys);
         if (opts.gmin > 0) {
-            for (0..sys.n) |i| {
+            if (opts.gmin_stamps.len > 0) {
+                for (opts.gmin_stamps) |g| {
+                    v[g.slot] += opts.gmin;
+                    sys.rhs[g.row] += opts.gmin * x[g.col];
+                }
+            } else for (0..sys.n) |i| {
                 v[sys.diag_slots[i]] += opts.gmin;
                 sys.rhs[i] += opts.gmin * x[i];
             }
