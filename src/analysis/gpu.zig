@@ -112,9 +112,15 @@ const cost_init_us: f64 = 350_000;
 /// the GPU's lead is large, and does not credit the light ones with lanes
 /// they do not get.
 const cost_lane_gain: f64 = 0.1;
-/// The GPU must beat the CPU by this factor: wall time on a shared machine
-/// wanders by more than the model's error.
+/// The GPU must beat the CPU by this factor over the whole query: wall time
+/// on a shared machine wanders by more than the model's error.
 const cost_margin: f64 = 1.3;
+/// ...and by this factor per eval. The probe's host time moves by up to 2x
+/// between queries of one process under load (scaling_rc_ladder_100k: 1.5
+/// and 2.9 ms), and that deck's GPU path costs more per step than its evals
+/// show (8.3-8.9 ms against 8.2 on the CPU). The decks where the GPU wins
+/// clear this easily: bsim3_2000 5.8x, bsim4va and psp103 ~5x.
+const cost_min_ratio: f64 = 2.0;
 
 /// A context came up in this process, so the driver setup is paid. Queries
 /// on other threads may race on it; a stale read only overprices one query.
@@ -796,7 +802,7 @@ pub const GpuContext = struct {
                 stage_bytes / cost_stage_b_per_us + host_us * cost_kernel_ratio;
             const lanes = 1.0 + cost_lane_gain * @as(f64, @floatFromInt(@max(1, threads) - 1));
             const cpu_us = host_us / lanes;
-            if (cost_margin * (init_us + evals * gpu_us) >= evals * cpu_us)
+            if (cpu_us < cost_min_ratio * gpu_us or cost_margin * (init_us + evals * gpu_us) >= evals * cpu_us)
                 return decline(cpu_us, gpu_us, "the CPU is priced faster");
             if (statsOn()) std.debug.print(
                 "gpu-stats: cost per eval cpu={d:.0} us gpu={d:.0} us, {d:.0} evals, setup {d:.0} ms: GPU\n",
