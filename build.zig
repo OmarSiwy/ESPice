@@ -382,6 +382,15 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_correctness.addArgs(args);
     test_step.dependOn(&run_correctness.step);
 
+    // The same corpus and expectations on the device path. Not part of
+    // `test`: it needs a GPU, and without one every deck fails by design.
+    const run_gpu_corpus = b.addRunArtifact(correctness);
+    run_gpu_corpus.setCwd(b.path("."));
+    run_gpu_corpus.addArtifactArg(exe);
+    run_gpu_corpus.addArgs(&.{ "--backend", "cuda" });
+    if (b.args) |args| run_gpu_corpus.addArgs(args);
+    b.step("test-gpu", "Run the numeric SPICE fixtures with --backend cuda").dependOn(&run_gpu_corpus.step);
+
     const run_harness_tests = t.run(M.make(b.path("tests/test_correctness.zig"), fixture_imports), &.{}, false);
     run_harness_tests.setCwd(b.path("."));
     run_correctness.step.dependOn(&run_harness_tests.step);
@@ -461,29 +470,26 @@ fn inCsv(csv: []const u8, name: []const u8) bool {
 /// kernels (mos9, gummel_poon, mos2) on those lanes.
 const heavy_model_bytes: u64 = 20 * 1024;
 
-/// Source size at or above which a model gets no GPU kernel: past it the
-/// kernel cannot win. Measured on an RTX 4060 Laptop (sm_89):
+/// Source size at or above which a model gets no GPU kernel. Every model in
+/// `models/` fits (hisimhv_va is the largest at 601 KB), so this only guards
+/// a future one. Measured on an RTX 4060 Laptop (sm_89) against an
+/// i9-14900HX, 2000 parallel inverters, per device eval:
 ///
-///   model        source   PTX      cold cuModuleLoadData
-///   mos9          20 KB   731 KB    11.4 ms
-///   gummel_poon   20 KB   895 KB    12.6 ms
-///   hicumL2_va    90 KB   9.7 MB    (not measured; sized like bsim4)
-///   bsim4va      440 KB   8.7 MB    37.9 ms warm
-///   bsimsoi_va   399 KB  11.3 MB   308_667 ms cold
-///   hisimhv_va   614 KB  38.4 MB   >900_000 ms, killed
+///   model        source   PTX      cold JIT   GPU eval   one host core
+///   bsim4va      431 KB   3.6 MB     15 s       0.7 ms      7.3 ms
+///   psp103       397 KB   7.8 MB     35 s       1.1 ms      ~8 ms
+///   hisimhv_va   601 KB  29.3 MB   1001 s       6.3 ms     ~33 ms
 ///
-/// The driver caches the JIT in ~/.nv/ComputeCache (evicting at ~109 MB), and
-/// the kernel loses anyway: bsim4's PTX needs 7104+ virtual 64-bit registers
-/// against 255, spills, runs at ~16% occupancy on a part with 1/69-rate f64,
-/// and reaches 152.7 GFLOP/s against the CPU's 1449.
+/// The cold JIT happens once per build: the driver caches the result in
+/// ~/.nv/ComputeCache (raised to 4 GiB at run time, see analysis/gpu.zig),
+/// and `--backend auto` leaves an image over 1 MB of PTX on the CPU until an
+/// explicit `--backend cuda` run has compiled it. Admitting them costs the
+/// default build ~4 more minutes (7 min to 11-12 min on this machine).
 ///
-/// 80 KB sits in the gap between mos2 (24 KB, fine) and hicumL2_va (90 KB,
-/// 9.7 MB of PTX); no model lies between.
-///
-/// ponytail: source bytes, not PTX bytes. PTX size predicts JIT cost but is
-/// known only after the compile this threshold skips; switch if a model ever
-/// lands inside the gap.
-const gpu_max_model_bytes: u64 = 80 * 1024;
+/// The previous 80 KB limit assumed the kernels lose; that was before
+/// held-variable models could be resident and before the fused reduce and
+/// the one-wait Newton iteration.
+const gpu_max_model_bytes: u64 = 1024 * 1024;
 
 /// Extension -> generator. Verilog-A goes to vera's analog frontend; the
 /// digital HDLs go to its Verilog frontend (.sv via sv2v, .vhd via ghdl).
