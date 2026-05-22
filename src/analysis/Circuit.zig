@@ -55,13 +55,26 @@ pub const EvalHook = struct {
 /// falls back to the host walk itself, so none of these can fail.
 pub const GpuHook = struct {
     ctx: *anyopaque,
+    /// Every resident batch that has a host `q_tape` gets it from the device
+    /// through `sync_q_tape`; false keeps the transient on the row-plane LTE.
+    q_tape: bool,
     /// Stamps all four planes, ground pin included. Serves both `eval` and
     /// `evalNewton`: the device path never uses the constant-Jacobian baseline.
     eval_planes: *const fn (*anyopaque, x: []const f64, t: f64) void,
+    /// Brings the resident batches' host `q_tape` up to the last eval.
+    sync_q_tape: *const fn (*anyopaque) void,
+    /// Announces an eval at `x` and `t` right after the next `apply_limits`
+    /// or `state_ctl(.query)` (`Circuit.evalFollows`).
+    eval_follows: *const fn (*anyopaque, x: []const f64, t: f64, charge: bool) void,
+    /// `eval_planes` for `Circuit.evalQ`: also brings the resident batches'
+    /// host `q_tape` to x, on the same wait.
+    eval_charge: *const fn (*anyopaque, x: []const f64, t: f64) void,
     /// Runs the device limit pass fused with the state latch, so
     /// `update_states` only walks the host-resident batches.
     apply_limits: *const fn (*anyopaque, x: []f64, x_old: []const f64) bool,
     update_states: *const fn (*anyopaque, x: []const f64) ?f64,
+    /// Runs `commit_held` on the resident batches and walks the host ones.
+    commit_held: *const fn (*anyopaque, x: []const f64) ?f64,
     clear_limits: *const fn (*anyopaque) void,
     seed_junctions: *const fn (*anyopaque, x: []f64) void,
     /// Accepted-step latches mutate device-resident instance blobs, so a host
@@ -265,11 +278,11 @@ pub const Circuit = struct {
     /// (instance, LTE charge site) of every charge-carrying batch,
     /// batch-major.
     ///
-    /// Zero when nothing carries charge, and zero under a GPU plane hook,
-    /// whose eval never runs the host batches that write the tapes. The
+    /// Zero when nothing carries charge, and zero under a GPU plane hook that
+    /// cannot fill the resident batches' tapes (`GpuHook.q_tape`). The
     /// transient reads zero as "use per-row LTE on the summed q plane".
     pub fn qTapeLen(self: *const Circuit) u32 {
-        if (self.gpu_hook != null) return 0;
+        if (self.gpu_hook) |gh| if (!gh.q_tape) return 0;
         var total: u32 = 0;
         for (self.batches) |b| {
             if (b.hooks.q_tape) |f| total += @intCast(f(b.ctx).len);
@@ -280,6 +293,7 @@ pub const Circuit = struct {
     /// Concatenates every batch's live charge tape into `dst`, which must hold
     /// exactly `qTapeLen()` entries.
     pub fn snapshotQTape(self: *const Circuit, dst: []f64) void {
+        if (self.gpu_hook) |gh| gh.sync_q_tape(gh.ctx);
         var off: usize = 0;
         for (self.batches) |b| {
             const f = b.hooks.q_tape orelse continue;
@@ -352,8 +366,8 @@ pub const Circuit = struct {
     /// promise holds threaded too. The GPU has no charge-only kernel and runs
     /// the full pass.
     pub fn evalQ(self: *Circuit, x: []const f64, t: f64) void {
-        if (self.gpu_hook != null) return self.eval(x, t);
         self.lin.valid = false;
+        if (self.gpu_hook) |gh| return gh.eval_charge(gh.ctx, x, t);
         self.stamp(x, t, .charge);
     }
 
@@ -478,6 +492,17 @@ pub const Circuit = struct {
         return pattern.findSlot(row, col);
     }
 
+    /// Tells the circuit that the next `applyLimits` or `stateCtl(.query)`
+    /// is followed by `eval` (or, with `charge`, `evalQ`) at `x` and `t`,
+    /// with nothing in between that changes device state. `x` is read when
+    /// that call runs, so for `applyLimits` it is the limited iterate. The
+    /// GPU path then runs both on one host wait; the host path ignores it. A
+    /// wrong promise costs one wasted device eval, never a wrong stamp: the
+    /// eval checks its x and t.
+    pub fn evalFollows(self: *const Circuit, x: []const f64, t: f64, charge: bool) void {
+        if (self.gpu_hook) |gh| gh.eval_follows(gh.ctx, x, t, charge);
+    }
+
     /// Limits the Newton update in place (pnjlim/fetlim). Returns true when any
     /// device clamped `x`.
     pub fn applyLimits(self: *const Circuit, x: []f64, x_old: []const f64) bool {
@@ -506,6 +531,10 @@ pub const Circuit = struct {
 
     pub fn updateBatches(batches: []const Batch, x: []const f64) ?f64 {
         return minReject(batches, "update_state", x);
+    }
+
+    pub fn commitHeldBatches(batches: []const Batch, x: []const f64) ?f64 {
+        return minReject(batches, "commit_held", x);
     }
 
     pub fn stateCtlBatches(batches: []const Batch, sop: StateCtlOp) bool {
@@ -582,7 +611,8 @@ pub const Circuit = struct {
     /// The held-variable part of `commitStates`, for the operating point,
     /// where no `absdelay` ring may be pushed.
     pub fn commitHeld(self: *const Circuit, x: []const f64) ?f64 {
-        return minReject(self.batches, "commit_held", x);
+        if (self.gpu_hook) |gh| return gh.commit_held(gh.ctx, x);
+        return commitHeldBatches(self.batches, x);
     }
 
     /// Commits, reverts or queries the accepted device state (switch FSMs,

@@ -190,6 +190,7 @@ fn runSerial(
         }
         var converged = false;
         if (!cold) {
+            ckt.evalFollows(x, 0, false);
             _ = ckt.applyLimits(x, x_prev);
             // A SingularMatrix here (NaN stamps from a bad warm guess) must
             // not abort the sweep; the point falls to the ladder like any

@@ -197,7 +197,7 @@ pub const Executor = struct {
     fn prepareGpu(self: *Executor) !?*gpu.GpuContext {
         if (self.config.backend == .cpu) return null;
         const explicit = self.config.gpu_explicit or self.config.backend != .auto;
-        const context = gpu.GpuContext.init(self.allocator, &self.circuit, explicit) catch |err| {
+        const context = gpu.GpuContext.init(self.allocator, &self.circuit, explicit, self.config.device_threads, expectedEvals(self.job)) catch |err| {
             if (explicit and gpu.declineKind(err) == .machine) {
                 std.debug.print("Error: GPU requested but unavailable ({s}); detected artifacts: {s}\n", .{ @errorName(err), gpu.detectedName() });
                 return err;
@@ -210,6 +210,27 @@ pub const Executor = struct {
         return context;
     }
 };
+
+/// A rough count of the device evals `job` runs, for the GPU cost model:
+/// four per transient step (measured 4.3 on mos1_2000 and 5.2 on
+/// vacask_ring) at the step the deck asks for, three per dc point, and a
+/// Newton solve's worth for an operating point. Small-signal analyses
+/// linearize once.
+/// ponytail: a static guess; count evals as the query runs and move to the
+/// GPU mid-run if a guess ever misprices a deck.
+fn expectedEvals(job: requests.Query) f64 {
+    return switch (job) {
+        .op => 30,
+        .dc => |d| blk: {
+            const inner = @abs(d.stop - d.start) / @max(@abs(d.step), 1e-300) + 1;
+            const outer = if (d.target2 != null) @abs(d.stop2 - d.start2) / @max(@abs(d.step2), 1e-300) + 1 else 1;
+            break :blk 3 * inner * outer;
+        },
+        .tran => |t| 4 * t.t_stop / @min(t.dt_init, t.dt_max orelse t.t_stop / 50.0),
+        .ac, .noise, .sp, .stb, .tf, .pz, .disto, .four, .dcmatch, .sens => 1,
+        else => 200,
+    };
+}
 
 fn module(comptime kind: requests.Kind) type {
     return switch (kind) {

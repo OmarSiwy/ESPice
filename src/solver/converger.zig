@@ -200,7 +200,7 @@ pub fn newton(
             ws.factored_sig = opts.matrix_sig;
         }
         slv.solveNeg(sys.rhs, dx);
-        const st = finalizeStep(sys, x, dx, x_old, sys.rhs, v, iter, opts);
+        const st = finalizeStep(sys, x, dx, x_old, sys.rhs, v, iter, t, opts);
         if (opdbg()) {
             var fi: usize = 0;
             var di: usize = 0;
@@ -241,11 +241,19 @@ fn finalizeStep(
     residual: []const f64,
     vals: []const f64,
     iter: u16,
+    t: f64,
     opts: Options,
 ) Step {
     const S = Deref(@TypeOf(sys));
     const n = sys.n;
     const scaled = updateAndNorm(x[0..n], dx[0..n], x_old[0..n], sys.current_row[0..n], opts.reltol, opts.abstol, opts.vntol);
+
+    // The first-iterate and delta gates are already decided and neither
+    // reads the limiter, so the next assemble at the limited x is certain:
+    // a system that batches its limit pass with that eval may start both.
+    if (comptime @hasDecl(S, "evalFollows")) {
+        if ((iter == 0 or scaled >= 1.0) and iter + 1 < opts.max_iter) sys.evalFollows(x, t, false);
+    }
 
     const limited = if (comptime @hasDecl(S, "applyLimits")) sys.applyLimits(x, x_old) else false;
 
