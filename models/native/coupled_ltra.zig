@@ -541,9 +541,10 @@ pub fn CoupledLtra(comptime N: usize) type {
             break :vals &frozen;
         });
         pub const num_ports: usize = 2 * N;
-        /// Hand-written against VerA's device ABI 4 (`contract.abi_version`); review on a bump.
-        pub const contract_abi: u32 = 4;
+        /// Hand-written against VerA's device ABI 5 (`contract.abi_version`); review on a bump.
+        pub const contract_abi: u32 = 5;
         const n_u = NU;
+        const Self = @This();
 
         inline fn p2(k: usize) usize {
             return N + k;
@@ -568,7 +569,6 @@ pub fn CoupledLtra(comptime N: usize) type {
             break :blk a;
         };
 
-        pub const AnalysisKind = enum(u8) { static, ic, nodeset, dc, tran, ac, noise };
         pub const unrevertible_state = true;
         pub const mc_param = "length";
 
@@ -599,9 +599,6 @@ pub fn CoupledLtra(comptime N: usize) type {
         };
 
         pub const Instance = struct {
-            abstime: f64 = 0,
-            dt: f64 = 0,
-            analysis_kind: AnalysisKind = .dc,
             bound_step: f64 = inf,
 
             cache_t: f64 = 1e31,
@@ -952,8 +949,10 @@ pub fn CoupledLtra(comptime N: usize) type {
             inst.in2 = gg;
         }
 
-        pub fn eval(comptime S: type, x: [n_u]S, model: *const Model, inst: *const Instance, t: f64) [n_u]S {
-            var res: [n_u]S = undefined;
+        pub fn eval(comptime S: type, xv: *const [n_u]S.V, model: *const Model, inst: *const Instance, sim: contract.SimState) contract.Rows(Self, S) {
+            const x = contract.probes(Self, S, xv);
+            const t = sim.t;
+            var res: @TypeOf(x) = undefined;
             for (0..N) |k| {
                 // cplload.c:81-87, the same stamp as txl.gmin_stamp.
                 const gs = x[k].add(x[p2(k)]).scale(txl.gmin_stamp);
@@ -961,7 +960,7 @@ pub fn CoupledLtra(comptime N: usize) type {
                 res[p2(k)] = x[br2(k)].add(gs);
             }
 
-            if (inst.dt <= 0.0 or inst.analysis_kind != .tran or !model.ok or inst.n_hist == 0) {
+            if (sim.dt <= 0.0 or sim.kind != .tran or !model.ok or inst.n_hist == 0) {
                 // cplload cond1: per conductor, i1 + i2 = 0 and
                 // v1 − v2 = R[m][m]·len·i1 (diagonal R only, as the
                 // reference's resindex walk stamps).
@@ -969,17 +968,17 @@ pub fn CoupledLtra(comptime N: usize) type {
                     res[br1(m)] = x[br1(m)].add(x[br2(m)]);
                     res[br2(m)] = x[m].sub(x[p2(m)]).sub(x[br1(m)].scale(model.rdiag[m]));
                 }
-                return res;
+                return contract.rows(Self, S, res);
             }
 
             const ii: *Instance = @constCast(inst);
-            if (ii.staged and t != ii.staged_t) flushStaged(model, ii, t);
-            if (ii.cache_t != t or ii.cache_dt != inst.dt) {
-                rebuild(model, ii, inst.dt, @trunc(t * 1e12));
+            if (ii.staged and t != ii.staged_t) flushStaged(model, ii, t, sim.dt);
+            if (ii.cache_t != t or ii.cache_dt != sim.dt) {
+                rebuild(model, ii, sim.dt, @trunc(t * 1e12));
                 ii.cache_t = t;
-                ii.cache_dt = inst.dt;
+                ii.cache_dt = sim.dt;
             }
-            const h1 = 0.5 * inst.dt;
+            const h1 = 0.5 * sim.dt;
             for (0..N) |m| {
                 var row1 = x[br1(m)].neg().addC(-ii.in1[m]);
                 var row2 = x[br2(m)].neg().addC(-ii.in2[m]);
@@ -991,7 +990,7 @@ pub fn CoupledLtra(comptime N: usize) type {
                 res[br1(m)] = row1;
                 res[br2(m)] = row2;
             }
-            return res;
+            return contract.rows(Self, S, res);
         }
 
         pub const State = struct {};
@@ -999,10 +998,10 @@ pub fn CoupledLtra(comptime N: usize) type {
             return .{};
         }
 
-        pub fn updateState(model: *Model, inst: *Instance, x: [n_u]f64, _: *State) contract.UpdateResult {
-            if (inst.analysis_kind != .tran or !model.ok) return .ok;
+        pub fn updateState(comptime _: type, model: *Model, inst: *Instance, x: [n_u]f64, _: *State, sim: contract.SimState) contract.UpdateResult {
+            if (sim.kind != .tran or !model.ok) return .ok;
 
-            if (inst.abstime == 0 or inst.n_hist == 0) {
+            if (sim.t == 0 or inst.n_hist == 0) {
                 inst.staged = false;
                 // cplload dc setup: steady h1/h3 states (complex pairs via
                 // proper complex division), zero h2, one t=0 history point.
@@ -1037,8 +1036,8 @@ pub fn CoupledLtra(comptime N: usize) type {
             }
 
             inst.staged = true;
-            inst.staged_t = inst.abstime;
-            inst.staged_dt = inst.dt;
+            inst.staged_t = sim.t;
+            inst.staged_dt = sim.dt;
             inst.staged_x = x;
             return .ok;
         }
@@ -1047,11 +1046,11 @@ pub fn CoupledLtra(comptime N: usize) type {
         /// history under cplload.c:64-103's label: the next timepoint's
         /// trunc((t - h)·1e12), clamped up to the history tail (the same
         /// picosecond as `txl.flushStaged`).
-        fn flushStaged(model: *const Model, inst: *Instance, t: f64) void {
+        fn flushStaged(model: *const Model, inst: *Instance, t: f64, dt: f64) void {
             inst.staged = false;
             const x = inst.staged_x;
             const tail = inst.hist_t[inst.n_hist - 1];
-            const t_ps = @max(@trunc((t - inst.dt) * 1e12), tail);
+            const t_ps = @max(@trunc((t - dt) * 1e12), tail);
             if (t_ps <= tail) return;
 
             if (inst.cache_t != inst.staged_t or inst.cache_dt != inst.staged_dt)

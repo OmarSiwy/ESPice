@@ -27,14 +27,13 @@ const inf = std.math.inf(f64);
 
 pub const U = enum(u8) { p1, p2, br1, br2 };
 pub const num_ports: usize = 2;
-/// Hand-written against VerA's device ABI 4 (`contract.abi_version`); review on a bump.
-pub const contract_abi: u32 = 4;
+/// Hand-written against VerA's device ABI 5 (`contract.abi_version`); review on a bump.
+pub const contract_abi: u32 = 5;
 const n_u = contract.nU(Self);
 
 pub const u_kinds = [n_u]contract.UnknownKind{ .voltage, .voltage, .current, .current };
 pub const u_abstol = [n_u]f64{ 1e-6, 1e-6, 1e-12, 1e-12 };
 
-pub const AnalysisKind = enum(u8) { static, ic, nodeset, dc, tran, ac, noise };
 pub const unrevertible_state = true;
 pub const mc_param = "len";
 
@@ -613,9 +612,6 @@ pub const Model = struct {
 };
 
 pub const Instance = struct {
-    abstime: f64 = 0,
-    dt: f64 = 0,
-    analysis_kind: AnalysisKind = .dc,
     bound_step: f64 = inf,
 
     cache_t: f64 = 1e31,
@@ -672,8 +668,10 @@ fn hist(inst: anytype) Hist {
 // native devices when a line deck sets it.
 pub const gmin_stamp = 0.1 * 1e-12;
 
-pub fn eval(comptime S: type, x: [n_u]S, model: *const Model, inst: *const Instance, t: f64) [n_u]S {
-    var res: [n_u]S = undefined;
+pub fn eval(comptime S: type, xv: *const [n_u]S.V, model: *const Model, inst: *const Instance, sim: contract.SimState) contract.Rows(Self, S) {
+    const x = contract.probes(Self, S, xv);
+    const t = sim.t;
+    var res: @TypeOf(x) = undefined;
     const ib1 = x[@intFromEnum(U.br1)];
     const ib2 = x[@intFromEnum(U.br2)];
     const v1 = x[@intFromEnum(U.p1)];
@@ -682,26 +680,26 @@ pub fn eval(comptime S: type, x: [n_u]S, model: *const Model, inst: *const Insta
     res[@intFromEnum(U.p1)] = ib1.add(gs);
     res[@intFromEnum(U.p2)] = ib2.add(gs);
 
-    if (inst.dt <= 0.0 or inst.analysis_kind != .tran or !model.fit.ok or inst.n_hist == 0) {
+    if (sim.dt <= 0.0 or sim.kind != .tran or !model.fit.ok or inst.n_hist == 0) {
         // MODEDC rows: i1 + i2 = 0; v1 − v2 = R·len·i1.
         res[@intFromEnum(U.br1)] = ib1.add(ib2);
         res[@intFromEnum(U.br2)] = v1.sub(v2).sub(ib1.scale(model.rtot));
-        return res;
+        return contract.rows(Self, S, res);
     }
 
     const ii: *Instance = @constCast(inst);
-    if (ii.staged and t != ii.staged_t) flushStaged(model, ii, t);
-    if (ii.cache_t != t or ii.cache_dt != inst.dt) {
-        rebuildLine(&model.fit, &ii.line, inst.dt, @trunc(t * 1e12), hist(ii));
+    if (ii.staged and t != ii.staged_t) flushStaged(model, ii, t, sim.dt);
+    if (ii.cache_t != t or ii.cache_dt != sim.dt) {
+        rebuildLine(&model.fit, &ii.line, sim.dt, @trunc(t * 1e12), hist(ii));
         ii.cache_t = t;
-        ii.cache_dt = inst.dt;
+        ii.cache_dt = sim.dt;
     }
 
-    const h1 = 0.5 * inst.dt;
+    const h1 = 0.5 * sim.dt;
     const yc = model.fit.sqtCdL + h1 * model.fit.h1C;
     res[@intFromEnum(U.br1)] = v1.scale(yc).sub(ib1).addC(-ii.line.in1);
     res[@intFromEnum(U.br2)] = v2.scale(yc).sub(ib2).addC(-ii.line.in2);
-    return res;
+    return contract.rows(Self, S, res);
 }
 
 pub const State = struct {};
@@ -710,12 +708,12 @@ pub fn initState(_: *const Model, _: *Instance) State {
     return .{};
 }
 
-pub fn updateState(model: *Model, inst: *Instance, x: [n_u]f64, _: *State) contract.UpdateResult {
-    if (inst.analysis_kind != .tran or !model.fit.ok) return .ok;
+pub fn updateState(comptime _: type, model: *Model, inst: *Instance, x: [n_u]f64, _: *State, sim: contract.SimState) contract.UpdateResult {
+    if (sim.kind != .tran or !model.fit.ok) return .ok;
     const v1 = x[@intFromEnum(U.p1)];
     const v2 = x[@intFromEnum(U.p2)];
 
-    if (inst.abstime == 0 or inst.n_hist == 0) {
+    if (sim.t == 0 or inst.n_hist == 0) {
         // Fresh transient: DC seed (dc setup block of TXLload).
         inst.staged = false;
         inst.n_hist = 1;
@@ -731,8 +729,8 @@ pub fn updateState(model: *Model, inst: *Instance, x: [n_u]f64, _: *State) contr
     }
 
     inst.staged = true;
-    inst.staged_t = inst.abstime;
-    inst.staged_dt = inst.dt;
+    inst.staged_t = sim.t;
+    inst.staged_dt = sim.dt;
     inst.staged_x = x;
     return .ok;
 }
@@ -743,13 +741,13 @@ pub fn updateState(model: *Model, inst: *Instance, x: [n_u]f64, _: *State) contr
 /// trunc(t_accepted·1e12). The two differ by 1 ps whenever t - h lands an ulp
 /// below an integer picosecond, and the delayed reads and h1 slopes of the
 /// reference carry that picosecond.
-fn flushStaged(model: *const Model, inst: *Instance, t: f64) void {
+fn flushStaged(model: *const Model, inst: *Instance, t: f64, dt: f64) void {
     inst.staged = false;
     const x = inst.staged_x;
     const v1 = x[@intFromEnum(U.p1)];
     const v2 = x[@intFromEnum(U.p2)];
     const tail = inst.hist_t[inst.n_hist - 1];
-    const t_ps = @max(@trunc((t - inst.dt) * 1e12), tail);
+    const t_ps = @max(@trunc((t - dt) * 1e12), tail);
     if (t_ps <= tail) return; // same picosecond: the reference drops it
 
     if (inst.cache_t != inst.staged_t or inst.cache_dt != inst.staged_dt)
@@ -864,39 +862,20 @@ test "matched TXL line: delayed replica and DC settle" {
     const rs = 138.5;
     const rl = 138.5;
 
-    inst.analysis_kind = .tran;
+    // Values only: the contract's reference family with no lanes.
+    const TS = contract.RefFamily(f64, &(.{contract.no_lane} ** n_u), .{ .dense = true });
     var st: State = .{};
-    inst.abstime = 0;
-    inst.dt = 0;
     var xacc = [_]f64{0} ** n_u;
-    _ = updateState(&model, &inst, xacc, &st);
-
-    const TS = struct {
-        v: f64,
-        const T = @This();
-        pub fn add(a: T, b: T) T {
-            return .{ .v = a.v + b.v };
-        }
-        pub fn sub(a: T, b: T) T {
-            return .{ .v = a.v - b.v };
-        }
-        pub fn scale(a: T, c: f64) T {
-            return .{ .v = a.v * c };
-        }
-        pub fn addC(a: T, c: f64) T {
-            return .{ .v = a.v + c };
-        }
-    };
+    _ = updateState(TS, &model, &inst, xacc, &st, .{ .kind = .tran });
 
     const dt = 0.05e-9;
     var t: f64 = dt;
     var v2_before_tau: f64 = 1;
     var v2_final: f64 = 0;
     while (t <= 40e-9 + 1e-15) : (t += dt) {
-        inst.dt = dt;
-        inst.abstime = t;
-        var x = [_]TS{.{ .v = 0 }} ** n_u;
-        const r0 = eval(TS, x, &model, &inst, t);
+        const sim: contract.SimState = .{ .t = t, .dt = dt, .kind = .tran };
+        var x = [_]f64{0} ** n_u;
+        const r0 = eval(TS, &x, &model, &inst, sim);
         const in1 = -r0[@intFromEnum(U.br1)].v;
         const in2 = -r0[@intFromEnum(U.br2)].v;
         const yc = model.fit.sqtCdL + 0.5 * dt * model.fit.h1C;
@@ -905,16 +884,13 @@ test "matched TXL line: delayed replica and DC settle" {
         const ib2 = -in2 / (1.0 + yc * rl);
         const v1 = vs - rs * ib1;
         const v2 = -rl * ib2;
-        x[0] = .{ .v = v1 };
-        x[2] = .{ .v = ib1 };
-        x[1] = .{ .v = v2 };
-        x[3] = .{ .v = ib2 };
-        const rchk = eval(TS, x, &model, &inst, t);
+        x = .{ v1, v2, ib1, ib2 };
+        const rchk = eval(TS, &x, &model, &inst, sim);
         try std.testing.expectApproxEqAbs(@as(f64, 0), rchk[@intFromEnum(U.br1)].v, 1e-9);
         try std.testing.expectApproxEqAbs(@as(f64, 0), rchk[@intFromEnum(U.br2)].v, 1e-9);
 
         xacc = .{ v1, v2, ib1, ib2 };
-        _ = updateState(&model, &inst, xacc, &st);
+        _ = updateState(TS, &model, &inst, xacc, &st, sim);
         if (t < 0.9e-9) v2_before_tau = @min(v2_before_tau, @abs(v2));
         v2_final = v2;
     }

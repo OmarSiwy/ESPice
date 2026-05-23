@@ -1,15 +1,16 @@
 //! Tests for the evaluator: AD scalars, the bit-trick helpers, the runtime
 //! vtable and binder, and batch instantiation and hooks.
 const impl = @import("device_eval");
+const contract = @import("contract");
+const SimState = contract.SimState;
 const Batch = impl.Batch;
 const DeviceBatch = impl.DeviceBatch;
 const Dual = impl.Dual;
-const DualFor = impl.test_access.DualFor;
 const NoiseGen = impl.NoiseGen;
 const NoiseSource = impl.NoiseSource;
 const ProtoStore = impl.ProtoStore;
 const PsdTerm = impl.PsdTerm;
-const RealFor = impl.test_access.RealFor;
+const Real = impl.test_access.Real;
 const deviceVtable = impl.deviceVtable;
 const gpuJacFloat = impl.gpuJacFloat;
 const jacFloat = impl.jacFloat;
@@ -33,24 +34,24 @@ test "anyNonzero matches the float compare it replaces, ±0 and NaN included" {
 test "Dual: expm1 and log1p retain finite range and IEEE endpoints" {
     const S = Dual(1, f64);
     for ([_]f64{ -740, -1, -1e-17, -0.0, 0, 1e-17, 0.5, 704, 709 }) |x| {
-        const y = S.seed(x, 0).expm1();
+        const y = S.probe(0, x).expm1();
         try std.testing.expect(std.math.isFinite(y.v));
         try std.testing.expectApproxEqRel(std.math.expm1(x), y.v, 3e-15);
         try std.testing.expectEqual(@exp(x), y.ddxAt(0));
     }
     for ([_]f64{ -1, -0.9999999999999999, -1e-17, -0.0, 0, 1e-17, 0.5, 1e308, std.math.inf(f64) }) |x| {
-        const y = S.seed(x, 0).log1p();
+        const y = S.probe(0, x).log1p();
         try std.testing.expectApproxEqRel(std.math.log1p(x), y.v, 3e-15);
         try std.testing.expectEqual(1.0 / (1.0 + x), y.ddxAt(0));
     }
-    try std.testing.expectEqual(std.math.inf(f64), S.seed(710, 0).expm1().v);
-    try std.testing.expectEqual(std.math.inf(f64), S.seed(std.math.inf(f64), 0).expm1().v);
-    try std.testing.expectEqual(@as(f64, -1), S.seed(-std.math.inf(f64), 0).expm1().v);
-    try std.testing.expect(std.math.isNan(S.seed(-2, 0).log1p().v));
-    try std.testing.expect(std.math.isNan(S.seed(std.math.nan(f64), 0).expm1().v));
-    try std.testing.expect(std.math.isNan(S.seed(std.math.nan(f64), 0).log1p().v));
-    try std.testing.expect(std.math.signbit(S.seed(-0.0, 0).expm1().v));
-    try std.testing.expect(std.math.signbit(S.seed(-0.0, 0).log1p().v));
+    try std.testing.expectEqual(std.math.inf(f64), S.probe(0, 710).expm1().v);
+    try std.testing.expectEqual(std.math.inf(f64), S.probe(0, std.math.inf(f64)).expm1().v);
+    try std.testing.expectEqual(@as(f64, -1), S.probe(0, -std.math.inf(f64)).expm1().v);
+    try std.testing.expect(std.math.isNan(S.probe(0, -2).log1p().v));
+    try std.testing.expect(std.math.isNan(S.probe(0, std.math.nan(f64)).expm1().v));
+    try std.testing.expect(std.math.isNan(S.probe(0, std.math.nan(f64)).log1p().v));
+    try std.testing.expect(std.math.signbit(S.probe(0, -0.0).expm1().v));
+    try std.testing.expect(std.math.signbit(S.probe(0, -0.0).log1p().v));
 }
 
 test "Dual: an f32 Jacobian leaves the residual bit-identical" {
@@ -58,9 +59,8 @@ test "Dual: an f32 Jacobian leaves the residual bit-identical" {
     // arithmetic at either width, so values must be equal, not close.
     const core = struct {
         // A diode core: is·(exp(v/vt) − 1) + gmin·v.
-        fn f(comptime S: type, bias: f64) S {
-            const x = [2]S{ S.seed(bias, 0), S.seed(0, 1) };
-            const v = x[0].sub(x[1]);
+        fn f(comptime S: type, bias: f64) S.Of(0b11) {
+            const v = S.probe(0, bias).sub(S.probe(1, 0));
             return S.con(1e-14).mul(v.div(S.con(0.025851999786450736)).exp().addC(-1.0))
                 .add(v.scale(1e-12));
         }
@@ -71,7 +71,7 @@ test "Dual: an f32 Jacobian leaves the residual bit-identical" {
         const b = core(Dual(2, f32), bias);
         try std.testing.expectEqual(a.val(), b.val());
         // The Jacobian degrades to f32 precision and no further.
-        for (0..2) |c| try std.testing.expectApproxEqRel(a.ddxAt(c), b.ddxAt(c), 1e-6);
+        inline for (0..2) |c| try std.testing.expectApproxEqRel(a.ddxAt(c), b.ddxAt(c), 1e-6);
     }
 }
 
@@ -94,20 +94,23 @@ test "jac width: one device, two instantiations" {
     try std.testing.expectEqual(f32, gpuJacFloat(Ordered));
 }
 
-test "RealFor: every primitive is Dual's value half, bit for bit" {
+test "Real: every primitive is Dual's value half, bit for bit" {
     // `evalQRange` must reproduce the Dual pass exactly: its charges feed the
     // next step's residual and LTE, so one ulp shifts the timestep sequence.
     const core = struct {
-        fn f(comptime S: type, a: f64, b: f64) S {
-            const x = S.seed(a, 0);
-            const y = S.seed(b, 1);
+        fn f(comptime S: type, a: f64, b: f64) S.Of(0b11) {
+            const x = S.probe(0, a);
+            const y = S.probe(1, b);
             // One chain per primitive, so a desync anywhere lands in the result.
             var r = x.add(y).sub(y).neg().mul(x).div(y.addC(3.0)).scale(-0.5);
-            r = r.abs().minC(4.0).maxC(-4.0);
+            // §4.3.1's abs and slew clamps, as generated devices spell them.
+            r = S.sel(S.con(0.0).lt(r), r, r.neg());
+            r = S.sel(S.con(4.0).lt(r), S.con(4.0).to(0b11), r);
+            r = S.sel(r.lt(S.con(-4.0)), S.con(-4.0).to(0b11), r);
             r = r.add(x.exp().log().expm1().log1p());
             r = r.add(y.addC(9.0).sqrt().pow(1.5));
             r = r.add(x.sin().cos().tanh().sinh().cosh().atan());
-            r = r.add(S.sel(x.lt(y), x.max(y), x.min(y)));
+            r = r.add(S.sel(x.lt(y), S.sel(y.lt(x), x, y), S.sel(x.lt(y), x, y)));
             return r.add(S.sel(x.le(y).add(x.eq(y)), x, y));
         }
     }.f;
@@ -118,8 +121,8 @@ test "RealFor: every primitive is Dual's value half, bit for bit" {
             const a = @as(f64, @floatFromInt(i)) * 0.25 - 1.5;
             const b = @as(f64, @floatFromInt(j)) * 0.25 - 1.5;
             try std.testing.expectEqual(
-                core(DualFor(2, f64, false), a, b).val(),
-                core(RealFor(false), a, b).val(),
+                core(Dual(2, f64), a, b).val(),
+                core(Real, a, b).val(),
             );
         }
     }
@@ -138,9 +141,10 @@ test "dyn vtable: blob init, param set by name, proto add" {
             wide: i64 = 0,
         };
         pub const Instance = struct { temp: f32 = 300.15 };
-        pub fn eval(comptime Sc: type, x: [2]Sc, m: *const Model, _: *const Instance, _: f64) [2]Sc {
+        pub fn eval(comptime Sc: type, xv: *const [2]Sc.V, m: *const Model, _: *const Instance, _: SimState) contract.Rows(@This(), Sc) {
+            const x = contract.probes(@This(), Sc, xv);
             const i = x[0].sub(x[1]).scale(1.0 / @as(f64, m.r));
-            return .{ i, i.neg() };
+            return contract.rows(@This(), Sc, .{ i, i.neg() });
         }
     };
     const testing = std.testing;
@@ -206,7 +210,7 @@ test "prepared device instances share tapes and isolate parameters and accepted 
             .{ .row = 0, .col = 1, .kind = .shot },
             .{ .row = 1, .col = 0, .kind = .thermal },
         };
-        pub fn noisePsd(x: [2]f64, _: *const Model, _: *const Instance) [2]PsdTerm {
+        pub fn noisePsd(comptime _: type, x: [2]f64, _: *const Model, _: *const Instance, _: SimState) [2]PsdTerm {
             return .{ .{ .white = @abs(x[0] - x[1]) }, .{ .white = 7 } };
         }
         pub const U = enum(u8) { p, n };
@@ -220,9 +224,10 @@ test "prepared device instances share tapes and isolate parameters and accepted 
         pub fn initState(_: *const Model, _: *const Instance) State {
             return .{};
         }
-        pub fn eval(comptime S: type, x: [2]S, m: *const Model, _: *const Instance, _: f64) [2]S {
+        pub fn eval(comptime S: type, xv: *const [2]S.V, m: *const Model, _: *const Instance, _: SimState) contract.Rows(@This(), S) {
+            const x = contract.probes(@This(), S, xv);
             const current = x[0].sub(x[1]).scale(1 / m.r);
-            return .{ current, current.neg() };
+            return contract.rows(@This(), S, .{ current, current.neg() });
         }
     };
     const a = std.testing.allocator;
@@ -288,23 +293,19 @@ test "iteration hooks gather each instance and preserve accepted-time state" {
         pub const num_ports: usize = 2;
         pub const Model = struct {};
         pub const Instance = struct {
-            iteration: u8 = 9,
             previous: f64 = 0,
             accepted_time: f64 = 17,
         };
-        pub fn eval(comptime S: type, x: [2]S, _: *const Model, _: *const Instance, _: f64) [2]S {
+        pub fn eval(comptime S: type, xv: *const [2]S.V, _: *const Model, _: *const Instance, _: SimState) contract.Rows(@This(), S) {
+            const x = contract.probes(@This(), S, xv);
             const current = x[0].sub(x[1]);
-            return .{ current, current.neg() };
+            return contract.rows(@This(), S, .{ current, current.neg() });
         }
-        pub fn beginSolve(inst: *Instance) void {
-            inst.iteration = 1;
-        }
-        pub fn advanceIteration(_: *const Model, inst: *Instance, x: [2]f64) void {
+        pub fn advanceIteration(comptime _: type, _: *const Model, inst: *Instance, x: [2]f64, _: SimState) void {
             inst.previous = x[0] - x[1];
-            inst.iteration += 1;
         }
-        pub fn checkConvergence(_: *const Model, inst: *const Instance, x: [2]f64) bool {
-            return inst.iteration > 1 and inst.previous == x[0] - x[1];
+        pub fn checkConvergence(comptime _: type, _: *const Model, inst: *const Instance, x: [2]f64, sim: SimState) bool {
+            return sim.iteration > 1 and inst.previous == x[0] - x[1];
         }
     };
     const a = std.testing.allocator;
@@ -321,17 +322,16 @@ test "iteration hooks gather each instance and preserve accepted-time state" {
     const typed: *DeviceBatch(D) = @ptrCast(@alignCast(batch.ctx));
     try std.testing.expect(batch.hooks.gpu_payload == null);
     const x = [_]f64{ 0, 5, 2 };
-    batch.hooks.begin_solve.?(batch.ctx);
+    // The host counts iterations into the SimState it publishes.
+    batch.hooks.set_sim_state(batch.ctx, .{ .iteration = 1 });
     try std.testing.expect(!batch.hooks.check_convergence.?(batch.ctx, &x));
     batch.hooks.advance_iteration.?(batch.ctx, &x);
+    batch.hooks.set_sim_state(batch.ctx, .{ .iteration = 2 });
     try std.testing.expect(batch.hooks.check_convergence.?(batch.ctx, &x));
     try std.testing.expectEqual(@as(f64, 3), typed.instances[0].previous);
     try std.testing.expectEqual(@as(f64, -3), typed.instances[1].previous);
-    for (typed.instances) |inst| {
-        try std.testing.expectEqual(@as(u8, 2), inst.iteration);
-        try std.testing.expectEqual(@as(f64, 17), inst.accepted_time);
-    }
-    batch.hooks.begin_solve.?(batch.ctx);
+    for (typed.instances) |inst| try std.testing.expectEqual(@as(f64, 17), inst.accepted_time);
+    batch.hooks.set_sim_state(batch.ctx, .{ .iteration = 1 });
     try std.testing.expect(!batch.hooks.check_convergence.?(batch.ctx, &x));
     try std.testing.expectEqual(@as(f64, 3), typed.instances[0].previous);
 }
@@ -339,7 +339,7 @@ test "iteration hooks gather each instance and preserve accepted-time state" {
 test "mutable evaluation captures per-instance data without GPU residency" {
     const D = struct {
         pub const mutable_eval = true;
-        pub const contract_abi: u32 = 4;
+        pub const contract_abi: u32 = 5;
         pub const U = enum(u8) { p, n };
         pub const num_ports: usize = 2;
         pub const Model = struct {};
@@ -347,14 +347,15 @@ test "mutable evaluation captures per-instance data without GPU residency" {
             ready: bool = false,
             first_value: f64 = 0,
         };
-        pub fn eval(comptime S: type, x: [2]S, _: *const Model, inst: *Instance, _: f64) [2]S {
+        pub fn eval(comptime S: type, xv: *const [2]S.V, _: *const Model, inst: *Instance, _: SimState) contract.Rows(@This(), S) {
+            const x = contract.probes(@This(), S, xv);
             const v = x[0].sub(x[1]);
             if (!inst.ready) {
                 inst.first_value = v.val();
                 inst.ready = true;
             }
             const current = v.sub(S.con(inst.first_value));
-            return .{ current, current.neg() };
+            return contract.rows(@This(), S, .{ current, current.neg() });
         }
     };
     comptime impl.checkHost(D);

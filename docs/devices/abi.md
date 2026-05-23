@@ -11,7 +11,7 @@ sides compile the same ABI source.
 
 `layoutHash()` hashes the size, alignment and field offsets of every
 boundary type, the Zig version, backend and optimize mode, whether error
-return tracing is on, and `abi_version` (13). Each device object exports it
+return tracing is on, and `abi_version` (14). Each device object exports it
 as `arp_layout_hash`. The runtime loader (`src/device/loader.zig`) refuses a
 shared library whose hash differs (`error.LayoutMismatch`), and the hash keys
 the runtime build cache, so a bump rebuilds every cached device once.
@@ -19,8 +19,19 @@ the runtime build cache, so a bump rebuilds every cached device once.
 `hashType` sees only layout, so a change that moves no field (a tape's
 meaning, a function signature) must bump `abi_version`. The version history
 is the comment above `abi_version`. The GPU planes, Model/Instance PODs and
-scatter tapes did not change from version 10 to 13; they are frozen at the GPU
+scatter tapes did not change from version 10 to 14; they are frozen at the GPU
 boundary (see AGENTS.md).
+
+## Analysis state
+
+VerA's contract ABI 5 passes `contract.SimState` (24 bytes, `extern`) by value
+to every device entry point and GPU kernel: `$abstime`, the timestep,
+`analysis()`, the initial/final-step flags, `analog initial` and the Newton
+iteration. It is in `layoutHash`'s type list. The `Circuit` owns it:
+`setSimState` publishes the analysis fields, `beginSolve` sets `iteration` to
+1 and `advanceIteration` adds 1 after the device hooks run, and each batch
+stores the current value through `Hooks.set_sim_state`. `eval` overrides
+`t` with its own argument, which callers keep equal to the published time.
 
 ## Device types
 

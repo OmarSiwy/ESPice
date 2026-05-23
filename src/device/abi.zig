@@ -152,7 +152,6 @@ pub const Hooks = struct {
     scatter_bounds: *const fn (*anyopaque, first: u32, last: u32, trash_slot: u32, trash_row: u32) [4]u32,
     apply_limits: ?*const fn (*anyopaque, []f64, []const f64) bool = null,
     clear_limits: ?*const fn (*anyopaque) void = null,
-    begin_solve: ?*const fn (*anyopaque) void = null,
     /// Advances Newton-history state between evaluated iterates, given the
     /// previous x.
     advance_iteration: ?*const fn (*anyopaque, []const f64) void = null,
@@ -176,10 +175,11 @@ pub const Hooks = struct {
     state_ctl: ?*const fn (*anyopaque, StateCtlOp) bool = null,
     /// Sets every instance's temperature, in Celsius.
     set_temp: ?*const fn (*anyopaque, f32) void = null,
-    /// Publishes the host-owned Instance fields (`$abstime`, timestep,
-    /// `analysis()`, initial/final step), which devices read and never write.
-    /// Call once per solve attempt, before eval; it walks every instance.
-    set_sim_state: ?*const fn (*anyopaque, SimState) void = null,
+    /// Stores the analysis state (`$abstime`, timestep, `analysis()`,
+    /// initial/final step, Newton iteration) that every later device call
+    /// of this batch receives. One store per batch, so it is cheap enough
+    /// to call per Newton iteration.
+    set_sim_state: *const fn (*anyopaque, SimState) void,
     /// The model's smallest static delay (`D.delays`).
     min_delay: ?*const fn (*anyopaque) f64 = null,
     /// The tightest LRM §9.17.2 `$bound_step` any instance requested for the
@@ -388,8 +388,11 @@ pub const GpuPayload = struct {
 // 12: `set_model_param`/`set_instance_param` became `bind_model`/
 //    `bind_instance`; `ParamRef.type`.
 // 13: dropped `ParamRef.device_type`.
-// GPU planes, Model/Instance PODs and scatter tapes are unchanged by 10 to 13.
-pub const abi_version: u32 = 13;
+// 14: VerA contract ABI 5. `SimState` (hashed) reaches every device call and
+//    GPU kernel by value; `Hooks.begin_solve` is gone and `set_sim_state` is
+//    required.
+// GPU planes, Model/Instance PODs and scatter tapes are unchanged by 10 to 14.
+pub const abi_version: u32 = 14;
 
 /// A device type's construction entry points, exported by each device object
 /// and by runtime-loaded `.so` devices.
@@ -434,6 +437,7 @@ pub fn layoutHash() u64 {
             PatternBuilder,      ParamRef,            NoiseSource,
             std.mem.Allocator,   DeviceStatus,        DeviceResult(void),
             DeviceResult(Batch), DeviceResult(Proto), Param,
+            SimState,
         }) |T| h = hashType(h, T);
         h = mix(h, abi_version);
         break :blk h;

@@ -13,6 +13,7 @@ const gompute = @import("gompute");
 const Circuit = analysis.Circuit;
 const GpuHook = analysis.GpuHook;
 const Planes = device_ir.Planes;
+const SimState = device_ir.SimState;
 
 /// The backend this binary carries kernel images for. Comptime, because
 /// naming `gompute.RawByName(.cuda)` is a compile error in a build without
@@ -1118,6 +1119,14 @@ pub const GpuContext = struct {
     /// Enqueues the device half without waiting: upload x, clear the stage,
     /// launch every resident batch, reduce, download into the pinned planes.
     /// Separate so `evalCheck` can replay the same pass.
+    /// The circuit's analysis state at eval time `t`, as the host batches
+    /// build it (`DeviceBatch.simAt`).
+    fn simAt(self: *const Self, t: f64) SimState {
+        var sim = self.ckt.sim;
+        sim.t = t;
+        return sim;
+    }
+
     fn enqueueEval(self: *Self, x: []const f64, t: f64, buf: u1, charge: bool) !void {
         if (comptime backend == null) return Error.NoGpuArtifacts;
         @memcpy(self.pin_x[buf][0..x.len], x);
@@ -1133,11 +1142,11 @@ pub const GpuContext = struct {
             try syncSeededLim(bg);
             // Scalars are passed by pointer and must outlive the launch call.
             var count: u64 = bg.count;
-            var time: f64 = t;
+            var sim = self.simAt(t);
             var limiting: u64 = @intFromBool(bg.lim_active);
             try bg.launch(&bg.kernel, &self.stream, &.{
                 gompute.interface.arg(&count),
-                gompute.interface.arg(&time),
+                gompute.interface.arg(&sim),
                 self.d_x[buf].argPtr(),
                 bg.d_gath.argPtr(),
                 bg.d_rhs_idx.argPtr(),
@@ -1278,10 +1287,10 @@ pub const GpuContext = struct {
             const k = if (bg.qtp_kernel) |*k| k else continue;
             if (bg.tape.len == 0) continue;
             var count: u64 = bg.count;
-            var time: f64 = t;
+            var sim = self.simAt(t);
             try bg.launch(k, &self.stream, &.{
                 gompute.interface.arg(&count),
-                gompute.interface.arg(&time),
+                gompute.interface.arg(&sim),
                 self.d_x[buf].argPtr(),
                 bg.d_gath.argPtr(),
                 bg.d_models.argPtr(),
@@ -1357,6 +1366,7 @@ pub const GpuContext = struct {
             try syncSeededLim(bg);
             var count: u64 = bg.count;
             var lim_active: u64 = @intFromBool(bg.lim_active);
+            var sim = self.ckt.sim;
             try bg.launch(lk, &self.stream, &.{
                 gompute.interface.arg(&count),
                 self.d_x2.argPtr(),
@@ -1368,6 +1378,7 @@ pub const GpuContext = struct {
                 bg.d_states.argPtr(),
                 gompute.interface.arg(&lim_active),
                 self.d_flags.argPtr(),
+                gompute.interface.arg(&sim),
             });
             bg.lim_active = bg.lim_active or bg.has_lim;
             launched = true;
@@ -1447,6 +1458,7 @@ pub const GpuContext = struct {
             }
             var count: u64 = bg.count;
             var lim_active: u64 = 0;
+            var sim = self.ckt.sim;
             try bg.launch(lk, &self.stream, &.{
                 gompute.interface.arg(&count),
                 self.d_x2.argPtr(),
@@ -1458,6 +1470,7 @@ pub const GpuContext = struct {
                 bg.d_states.argPtr(),
                 gompute.interface.arg(&lim_active),
                 self.d_flags.argPtr(),
+                gompute.interface.arg(&sim),
             });
             launched = true;
         }

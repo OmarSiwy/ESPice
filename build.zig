@@ -327,6 +327,7 @@ pub fn build(b: *std.Build) void {
     const error_object_mod = M.make(b.path("src/device/tests/device_errors_object.zig"), &.{
         .{ .name = "device_eval", .module = device_eval_mod },
         .{ .name = "device_abi", .module = device_abi_mod },
+        .{ .name = "contract", .module = contract_mod },
     });
     error_object_mod.link_libc = true;
     const error_object = b.addObject(.{ .name = "device_errors", .root_module = error_object_mod, .use_llvm = optimize != .Debug });
@@ -359,7 +360,10 @@ pub fn build(b: *std.Build) void {
         .{ "test-device", "Run device catalog, evaluator and ABI tests", &.{
             t.run(device_mod, &.{}, true),
             t.run(device_abi_mod, &.{}, false),
-            t.run(M.make(b.path("src/device/tests/eval.zig"), &.{.{ .name = "device_eval", .module = device_eval_mod }}), &.{}, false),
+            t.run(M.make(b.path("src/device/tests/eval.zig"), &.{
+                .{ .name = "device_eval", .module = device_eval_mod },
+                .{ .name = "contract", .module = contract_mod },
+            }), &.{}, false),
             t.run(error_tests_mod, &.{}, false),
         } },
     }) |suite| {

@@ -40,10 +40,11 @@ const max_consts = 32;
 
 pub const U = enum(u8) { p, n, c0, c1, c2, c3, c4, c5, c6, c7, br };
 pub const num_ports: usize = 2 + max_probes;
-/// Hand-written against VerA's device ABI 4 (`contract.abi_version`); review on a bump.
-pub const contract_abi: u32 = 4;
+/// Hand-written against VerA's device ABI 5 (`contract.abi_version`); review on a bump.
+pub const contract_abi: u32 = 5;
 const n_u = contract.nU(Self);
 const br = @intFromEnum(U.br);
+const dense = contract.denseMask(Self);
 
 pub const u_kinds = [_]contract.UnknownKind{.voltage} ** num_ports ++ [_]contract.UnknownKind{.current};
 pub const u_abstol = [_]f64{1e-6} ** num_ports ++ [_]f64{1e-12};
@@ -121,13 +122,16 @@ pub const Instance = struct {
     temperature: f64 = 300.15,
 };
 
-pub fn eval(comptime S: type, x: [n_u]S, model: *const Model, inst: *const Instance, _: f64) [n_u]S {
+pub fn eval(comptime S: type, xv: *const [n_u]S.V, model: *const Model, inst: *const Instance, _: contract.SimState) contract.Rows(Self, S) {
+    const x = contract.probes(Self, S, xv);
     const f = run(S, x, model).scale(tempFactor(model, inst));
-    const ib = x[br];
-    var res: [n_u]S = @splat(S.con(0.0));
-    res[@intFromEnum(U.p)] = ib;
-    res[@intFromEnum(U.n)] = ib.neg();
-    res[br] = if (model.imode) ib.sub(f) else x[@intFromEnum(U.p)].sub(x[@intFromEnum(U.n)]).sub(f);
+    // The output rows carry the branch current's lane alone.
+    const ib = S.probe(br, xv[br]);
+    var res: contract.Rows(Self, S) = undefined;
+    inline for (0..n_u) |u| res[u] = S.con(0.0).to(contract.rowMask(Self, u));
+    res[@intFromEnum(U.p)] = ib.to(contract.rowMask(Self, @intFromEnum(U.p)));
+    res[@intFromEnum(U.n)] = ib.neg().to(contract.rowMask(Self, @intFromEnum(U.n)));
+    res[br] = (if (model.imode) x[br].sub(f) else x[@intFromEnum(U.p)].sub(x[@intFromEnum(U.n)]).sub(f)).to(contract.rowMask(Self, br));
     return res;
 }
 
@@ -138,11 +142,21 @@ fn tempFactor(model: *const Model, inst: *const Instance) f64 {
     return if (model.reciproctc) 1.0 / factor else factor;
 }
 
-/// The tape's value at `x`. An empty tape is 0.
-fn run(comptime S: type, x: [n_u]S, model: *const Model) S {
+/// The tape's value at `x`. An empty tape is 0. min, max and abs keep
+/// ngspice's tie rules (a tie goes to `a`, abs keeps -0) over `lt`/`le`/`sel`.
+fn run(comptime S: type, x: [n_u]S.Of(dense), model: *const Model) S.Of(dense) {
+    const T = S.Of(dense);
+    const k = struct {
+        fn c(v: f64) T {
+            return S.con(v).to(dense);
+        }
+        fn abs(a: T) T {
+            return S.sel(a.lt(S.con(0.0)), a.neg(), a);
+        }
+    };
     // ponytail: sized for the worst case (every op a push), ~6 KB of Dual on
     // the stack; bound it by the tape's real depth if B sources reach the GPU.
-    var st: [max_ops]S = undefined;
+    var st: [max_ops]T = undefined;
     var sp: usize = 0;
     const ctl = x[2..num_ports];
     const n = model.n_ops;
@@ -150,7 +164,7 @@ fn run(comptime S: type, x: [n_u]S, model: *const Model) S {
         switch (code) {
             .num, .v, .vd => {
                 st[sp] = switch (code) {
-                    .num => S.con(model.consts[oa]),
+                    .num => k.c(model.consts[oa]),
                     .v => ctl[oa],
                     else => ctl[oa].sub(ctl[ob]),
                 };
@@ -164,8 +178,8 @@ fn run(comptime S: type, x: [n_u]S, model: *const Model) S {
                 sp -= 1;
                 const a = st[sp - 1];
                 const b = st[sp];
-                const one = S.con(1.0);
-                const zero = S.con(0.0);
+                const one = k.c(1.0);
+                const zero = k.c(0.0);
                 st[sp - 1] = switch (code) {
                     .add => a.add(b),
                     .sub => a.sub(b),
@@ -174,34 +188,34 @@ fn run(comptime S: type, x: [n_u]S, model: *const Model) S {
                     // gmin·1e-20 at the default gmin) away from zero, so 0/0 at
                     // an all-zero starting point is 0 instead of NaN.
                     .div => a.div(b.addC(if (b.val() >= 0.0) 1e-32 else -1e-32)),
-                    .pow => a.abs().log().mul(b).exp(),
-                    .lt => a.lt(b),
-                    .gt => b.lt(a),
-                    .le => a.le(b),
-                    .ge => b.le(a),
-                    .eq => a.eq(b),
+                    .pow => k.abs(a).log().mul(b).exp(),
+                    .lt => a.lt(b).to(dense),
+                    .gt => b.lt(a).to(dense),
+                    .le => a.le(b).to(dense),
+                    .ge => b.le(a).to(dense),
+                    .eq => a.eq(b).to(dense),
                     .ne => one.sub(a.eq(b)),
                     .@"and" => S.sel(a, S.sel(b, one, zero), zero),
                     .@"or" => S.sel(a, one, S.sel(b, one, zero)),
-                    .min => a.min(b),
-                    else => a.max(b),
+                    .min => S.sel(a.le(b), a, b),
+                    else => S.sel(b.le(a), a, b),
                 };
             },
             else => {
                 const a = st[sp - 1];
                 st[sp - 1] = switch (code) {
                     .neg => a.neg(),
-                    .not => a.eq(S.con(0.0)),
+                    .not => a.eq(S.con(0.0)).to(dense),
                     // x·(x·(x·…)): the base multiplies the running power.
                     .powi => blk: {
-                        if (oa == 0) break :blk S.con(1.0);
+                        if (oa == 0) break :blk k.c(1.0);
                         var r = a;
                         for (1..oa) |_| r = a.mul(r);
                         break :blk r;
                     },
-                    .powc => a.abs().pow(model.consts[oa]),
+                    .powc => k.abs(a).pow(model.consts[oa]),
                     .sqrt => a.sqrt(),
-                    .abs => a.abs(),
+                    .abs => k.abs(a),
                     .exp => a.exp(),
                     .ln => a.log(),
                     .log10 => a.log().scale(1.0 / std.math.ln10),
@@ -210,14 +224,14 @@ fn run(comptime S: type, x: [n_u]S, model: *const Model) S {
                     .tan => a.sin().div(a.cos()),
                     .atan => a.atan(),
                     .tanh => a.tanh(),
-                    .floor => S.con(@floor(a.val())),
-                    .ceil => S.con(@ceil(a.val())),
+                    .floor => k.c(@floor(a.val())),
+                    .ceil => k.c(@ceil(a.val())),
                     else => unreachable,
                 };
             },
         }
     }
-    return if (sp == 0) S.con(0.0) else st[0];
+    return if (sp == 0) k.c(0.0) else st[0];
 }
 
 comptime {
