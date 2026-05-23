@@ -197,11 +197,13 @@ fn DualFor(comptime F: type, comptime lane: []const u8, comptime layout: Layout,
                     if (ls == 0) return .{ .v = a.v * b.v, .d = b.spread(J.lanes) * J.k(a.v) };
                     return .{ .v = a.v * b.v, .d = mulAddV(J.Lanes, b.spread(J.lanes), J.k(a.v), a.spread(J.lanes) * J.k(b.v)) };
                 }
+                /// The value is the IEEE quotient (contract §3); the lanes
+                /// keep the reciprocal.
                 pub fn div(a: T, b: anytype) Val(ls | @TypeOf(b).lanes) {
                     const B = @TypeOf(b);
                     const J = Val(ls | B.lanes);
                     const inv = 1.0 / b.v;
-                    const q = a.v * inv;
+                    const q = a.v / b.v;
                     if (B.lanes == 0) return .{ .v = q, .d = a.spread(J.lanes) * J.k(inv) };
                     return .{ .v = q, .d = mulAddV(J.Lanes, b.spread(J.lanes), J.k(-q), a.spread(J.lanes)) * J.k(inv) };
                 }
@@ -326,9 +328,8 @@ fn RealFor(comptime collapsed: bool) type {
         pub fn mul(a: Self, b: Self) Self {
             return .{ .v = a.v * b.v };
         }
-        // Reciprocal-multiply, not `/`: matches `DualFor.div` to the last bit.
         pub fn div(a: Self, b: Self) Self {
-            return .{ .v = a.v * (1.0 / b.v) };
+            return .{ .v = a.v / b.v };
         }
         pub fn scale(a: Self, c: f64) Self {
             return .{ .v = a.v * c };
