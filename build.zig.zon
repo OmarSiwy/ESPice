@@ -4,12 +4,12 @@
     .fingerprint = 0x8b858d53fd1540a,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
-        // Both deps are pinned git+URLs, so a checkout of this repo alone
-        // builds. The cost, and it is a real one: the build resolves to a
-        // content-addressed copy under the global cache, so an edit in a
-        // sibling `../VerA` or `../Gompute` working tree does NOT reach this
-        // build. While co-developing either one, point the dep back at
-        // `.{ .path = "../VerA" }` locally and restore the pin before pushing.
+        // VerA is a pinned git+URL, so a checkout builds on its own; an edit
+        // in a sibling `../VerA` does not reach this build until the pin moves.
+        // Gompute is co-developed and points at the sibling `../Gompute`
+        // working tree (last pinned: 67f1983). Worktrees under
+        // `.claude/worktrees/` resolve it through a `Gompute` symlink there.
+        // Restore a git pin before publishing this repo.
 
         // The Verilog-A / Verilog compiler, and the `contract` its generated
         // devices import.
@@ -20,10 +20,7 @@
         // The GPU runtime, plus `gompute.math`: every generated device routes
         // its transcendentals through it, so it sits on the hottest path in
         // the simulator.
-        .gompute = .{
-            .url = "git+https://github.com/OmarSiwy/Gompute#67f1983b2741275765e45124ff83235ed5832432",
-            .hash = "gompute-1.0.0-YJVc1tJmBgDAQL6u0F8AQHejCpSxtLB5Rk75ResEwGeh",
-        },
+        .gompute = .{ .path = "../Gompute" },
     },
     .paths = .{
         "build.zig",
