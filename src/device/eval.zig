@@ -1630,10 +1630,8 @@ fn isVera(comptime D: type) bool {
 /// Whether D gets GPU kernels. Excluded, and kept on the host:
 /// - `mutable_eval` devices, whose first-call snapshots need exclusive
 ///   evaluation;
-/// - Newton-history devices (`beginSolve`/`advanceIteration`/
-///   `checkConvergence`);
-/// - `core_reads_simstate` cores, since sim state is published to the host
-///   copy only;
+/// - Newton-history devices (`advanceIteration`/`checkConvergence`), whose
+///   `limiter_previous` the host advances on its own Instance copy;
 /// - unrevertible held variables (`hasUnrevertibleHeld`) together with
 ///   `limit`: the launcher runs a held device's `StateKernel` only at
 ///   accepted points (`commit_held`), so it could not also limit per solve;
@@ -1641,14 +1639,15 @@ fn isVera(comptime D: type) bool {
 ///   host-owned per-attempt state).
 /// `State` with `limit` is the path-latch pattern that `StateKernel` and
 /// `CtlKernel` run on the device; a held device's `State` is that latch plus
-/// its held variables, all in the resident Instance.
+/// its held variables, all in the resident Instance. `SimState` is a kernel
+/// argument, so a core that reads `analysis()` or `$abstime` (the Meyer MOS
+/// models, jfet2) runs resident too.
 // ponytail: the State-with-limit rule is decl correlation, not proof;
 // `StateKernel` flags any non-`.ok` `updateState` so a device that breaks it
 // falls back to the CPU instead of running wrong.
 fn gpuEligible(comptime D: type) bool {
     if (@hasDecl(D, "mutable_eval") and D.mutable_eval) return false;
-    if (@hasDecl(D, "beginSolve") or @hasDecl(D, "advanceIteration") or @hasDecl(D, "checkConvergence")) return false;
-    if (@hasDecl(D, "core_reads_simstate")) return false;
+    if (@hasDecl(D, "advanceIteration") or @hasDecl(D, "checkConvergence")) return false;
     // ponytail: no model holds variables and limits; split `StateKernel`
     // into its two halves when one does.
     if (hasUnrevertibleHeld(D)) return !@hasDecl(D, "limit");
