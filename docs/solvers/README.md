@@ -41,6 +41,7 @@ parameter stamps and any GPU factorization remain targets.
 | [gpu-convergence.md](gpu-convergence.md) | Which nonlinear algorithm fits a batch-evaluating GPU: sync census, lanes over independent problems, exact speculation, why not JFNK; ranked options and first experiments | Knoll & Keyes, Thornquist et al., GLU, parareal/MGRIT literature (links in page) |
 | [gpu-convergence-fields.md](gpu-convergence-fields.md) | Batched stiff nonlinear solving in chemistry, power systems, reservoir, ODE ensembles, ML and FEM, mapped onto MNA: nonlinear elimination of internal nodes, localization, lagged Newton matrix, f32 planes, batched LU | SUNDIALS, Zhou et al., DiffEqGPU, MAPS (links in page) |
 | [gpu-sparse-lu.md](gpu-sparse-lu.md) | GLU 3.0 level sets, double-U relaxed dependency detection, three kernel modes; NICSLU cluster/pipeline modes; refactor-replay port spec | GLU3.0 arXiv:1908.00204 (fetched), NICSLU README (fetched) |
+| [gpu-lu.md](gpu-lu.md) | Design for post-layout decks: sync-free replay of the host pivot tape, sync-free solves, resident assembly, host re-pivot as the peel; options ranked, experiments | GLU, Chen TPDS 2015, KLU guide, cuDSS and rocSOLVER docs, sync-free SpTRSV (links in page) |
 
 ## Consumers: which analyses use which solver doc
 
@@ -96,7 +97,8 @@ is second order. Ranked:
    github.com/chenxm1986/cktso) is the unread reference if it reopens.
 4. **GPU factorization.** None today. GLU's wins start around 80k rows,
    above most fixtures; batched solves (sweeps, Monte Carlo) would pay
-   before batched factorization does. `gpu-sparse-lu.md` is the spec.
+   before batched factorization does. `gpu-sparse-lu.md` is the theory,
+   `gpu-lu.md` the design and the experiments that decide it.
 5. **Condition estimation and row scaling.** Both KLU features are skipped
    (`klu-pipeline.md`). Cheap to add (Hager/Higham is a few solves on the
    existing factors); add when a fixture fails on conditioning rather than
