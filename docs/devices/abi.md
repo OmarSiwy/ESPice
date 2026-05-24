@@ -77,3 +77,24 @@ build.zig therefore pins `error_tracing = (optimize == .Debug)` on every host
 device object, including the native transmission-line object. `layoutHash`
 includes the tracing flag, so a runtime-loaded library built with the other
 setting is refused rather than miscalled. Check: `zig build test-frontend -Doptimize=Debug`.
+
+## Derivative lanes
+
+The host's `Dual` is VerA's scalar family: a value of `Of(mask)` carries the
+lanes of the unknowns in `mask`, and only `derivReads` unknowns get a lane
+(the others stamp their `jac_const` partial). `hostLayout` in
+`src/device/eval.zig` picks the width per basis: on the wide basis every value
+carries exactly its mask's lanes, rounded up to a power of two; on the narrow
+(collapsed) basis every value carries all of at most 4 lanes. The GPU kernel
+stays dense and unpadded.
+
+This retired the per-model `pad_lanes` table (pad the dense width to a
+multiple of 4 for six models). Measured with callgrind on 100-instance DC
+sweeps, per-instance Ir, dense exact / sparse power-of-two: hisimhv_va
+23.7M/6.8M, hisim2_va 37.1M/13.7M, bsimsoi_va 7.36M/3.95M, vbic13_4t
+7.74M/3.83M, bsim4va 4.14M/2.32M, gummel_poon 3.46M/1.96M, mos1 with RD/RS
+1.33M/1.14M, bsim2 1.35M/0.99M, jfet 0.48M/0.37M. No wide model lost. On the
+narrow basis the sparse layout lost up to 2.8% (bsim1, mos2/3/9), so it stays
+dense there. Unpadded widths that are not powers of two (12, 26) cost up to
+2x: LLVM splits them into shuffles and spills. Every layout gives
+byte-identical corpus output.
