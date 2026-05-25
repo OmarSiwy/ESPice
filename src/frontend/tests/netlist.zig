@@ -125,7 +125,12 @@ test "source: nested relative includes select only requested case-insensitive co
     defer std.testing.allocator.free(text);
     try std.testing.expect(std.mem.indexOf(u8, text, "R1 out 0 1k") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "missing") == null);
-    try tmp.dir.writeFile(io, .{ .sub_path = "Models/lib.sp", .data = ".lib tt\n.endl ff\n" });
+    // ngspice ignores the name after `.endl` (GF180 closes `.lib dio` with `.endl diode`).
+    try tmp.dir.writeFile(io, .{ .sub_path = "Models/lib.sp", .data = ".lib tt\nR2 a 0 1\n.endl ff\n" });
+    const renamed = try source.load(io, std.testing.allocator, path);
+    defer std.testing.allocator.free(renamed);
+    try std.testing.expect(std.mem.indexOf(u8, renamed, "R2 a 0 1") != null);
+    try tmp.dir.writeFile(io, .{ .sub_path = "Models/lib.sp", .data = ".endl tt\n" });
     try std.testing.expectError(error.InvalidLibrarySection, source.load(io, std.testing.allocator, path));
     try tmp.dir.writeFile(io, .{ .sub_path = "Models/lib.sp", .data = ".lib ff\n.endl ff\n" });
     try std.testing.expectError(error.LibrarySectionNotFound, source.load(io, std.testing.allocator, path));

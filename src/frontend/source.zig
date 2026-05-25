@@ -86,10 +86,9 @@ fn appendContents(io: Io, path: []const u8, src: []const u8, section: ?[]const u
         if (directiveOf(trimmed)) |kind| {
             _ = try word(&tokens);
             if (kind == .endl) {
-                const active = current_section orelse return error.InvalidLibrarySection;
-                if (try word(&tokens)) |closing| {
-                    if (!std.ascii.eqlIgnoreCase(active, closing)) return error.InvalidLibrarySection;
-                }
+                // The name after `.endl` is not checked: ngspice ignores it
+                // (inpcom.c), and GF180 closes `.lib dio` with `.endl diode`.
+                if (current_section == null) return error.InvalidLibrarySection;
                 current_section = null;
                 selected = section == null;
                 continue;
