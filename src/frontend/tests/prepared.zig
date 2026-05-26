@@ -133,6 +133,25 @@ test "nonfinite model parameter cannot become its default" {
     try std.testing.expectError(error.NonFiniteParameter, build(sa.allocator(), pa.allocator(), nl));
 }
 
+test "an N card on a psp103va model runs the built-in PSP 103, as ngspice with OSDI does" {
+    var sa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer sa.deinit();
+    var pa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer pa.deinit();
+    const nl = try parse(pa.allocator(),
+        \\osdi module name
+        \\.model pch psp103va type=-1
+        \\vd d 0 -1
+        \\np d d 0 0 pch w=1u l=1u
+        \\.op
+        \\.end
+    );
+    var prepared = try build(sa.allocator(), pa.allocator(), nl);
+    defer prepared.deinit();
+    const psp = device.Library.builtin("psp103");
+    try std.testing.expect(std.mem.indexOfScalar(@TypeOf(psp), prepared.circuit.batch_types, psp) != null);
+}
+
 test "prepared metadata and query identities outlive parse storage" {
     var session = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer session.deinit();
