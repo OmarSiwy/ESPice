@@ -243,6 +243,47 @@ test "parameters: sibling subcircuits do not leak local parameters" {
     }
 }
 
+test ".if chains keep the first true branch, per subcircuit instance" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const nl = try parse(arena.allocator(),
+        \\ngspice .if/.elseif/.else/.endif
+        \\.param top=2
+        \\.subckt rr a b r0=1k sel=0
+        \\.if (sel == 0)
+        \\r1 a b 'r0'
+        \\.elseif (sel == 1)
+        \\.if (r0 > 5k)
+        \\r1 a b 7
+        \\.else
+        \\r1 a b '2*r0'
+        \\.endif
+        \\.else
+        \\r1 a b 5
+        \\.endif
+        \\.ends
+        \\x0 a 0 rr
+        \\x1 b 0 rr sel=1
+        \\x2 c 0 rr sel=2
+        \\x3 d 0 rr sel=1 r0=10k
+        \\.if (top > 3)
+        \\rgone e 0 1
+        \\.elseif (top == 2)
+        \\rtop e 0 3
+        \\.else
+        \\rgone2 e 0 1
+        \\.endif
+        \\.end
+    );
+    try std.testing.expectEqual(5, nl.deviceCount());
+    for ([_][]const u8{ "r.x0.r1", "r.x1.r1", "r.x2.r1", "r.x3.r1", "rtop" }, [_]f64{ 1e3, 2e3, 5, 7, 3 }) |name, expected| {
+        try std.testing.expectEqual(expected, try numeric((try device(nl, name)).positional[0]));
+    }
+    var arena2 = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena2.deinit();
+    try std.testing.expectError(error.ParseError, parse(arena2.allocator(), "t\n.if (1)\nr1 a 0 1\n.end\n"));
+}
+
 test "parameters: ngspice power unary logical and ternary precedence" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

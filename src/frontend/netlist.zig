@@ -9,7 +9,8 @@ pub const lines = @import("lines.zig");
 pub const source = @import("source.zig");
 const csr = @import("csr.zig");
 pub const expr = @import("expr.zig");
-const Name = @import("core").Name;
+const core = @import("core");
+const Name = core.Name;
 const InternPool = @import("core").InternPool;
 const requests = @import("core").query;
 
@@ -187,10 +188,32 @@ pub fn nameIndex(names: []const []const u8, target: []const u8) ?usize {
     return null;
 }
 
-const Card = union(enum) { end, ends, subckt, param, model, include, osdi_include, pre_osdi, verilog, options, ic, analysis: Kind };
+const Card = union(enum) { end, ends, subckt, param, model, include, osdi_include, pre_osdi, verilog, options, ic, analysis: Kind, cond: CondCard };
+
+const CondCard = enum { @"if", elseif, @"else", endif };
+
+/// Open `.if` chains, matching ngspice's recifeval (inp.c): each chain keeps
+/// the lines of its first true branch and drops the rest.
+const Branches = struct {
+    open: [max]State = undefined,
+    depth: u8 = 0,
+
+    /// `live`: in the kept branch; `pending`: no branch held yet; `spent`:
+    /// a branch already held, or the whole chain sits in a dropped region.
+    const State = enum(u2) { live, pending, spent };
+    const max = 32;
+
+    fn active(b: Branches) bool {
+        return b.depth == 0 or b.open[b.depth - 1] == .live;
+    }
+};
 
 fn an(kind: Kind) Card {
     return .{ .analysis = kind };
+}
+
+fn cond(c: CondCard) Card {
+    return .{ .cond = c };
 }
 
 /// Every dot card the three dialects accept, looked up lowercased.
@@ -209,6 +232,8 @@ const cards = std.StaticStringMap(Card).initComptime(.{
     .{ "qpss", an(.qpss) },   .{ "sens", an(.sens) },             .{ "sp", an(.sp) },
     .{ "stb", an(.stb) },     .{ "temp", an(.temp) },             .{ "tf", an(.tf) },
     .{ "tran", an(.tran) },   .{ "trannoise", an(.tran_noise) },  .{ "tran_noise", an(.tran_noise) },
+    .{ "if", cond(.@"if") },  .{ "elseif", cond(.elseif) },       .{ "else", cond(.@"else") },
+    .{ "endif", cond(.endif) },
 });
 
 /// The card a `.keyword` names, case-insensitively; null for any other card.
@@ -471,19 +496,31 @@ fn Reader(comptime S: type) type {
             const arena = r.arena;
             var open: ?u16 = null;
             var defaults: std.ArrayList(@typeInfo(@FieldType(Subckt, "defaults")).pointer.child) = .empty;
+            // Top-level `.if` conditions see the `.param` cards above them.
+            // Inside a subcircuit they are left to `expand`, per instance.
+            // ponytail: `.param`/`.model` under a subcircuit's `.if` apply
+            // unconditionally; scope them when a PDK needs it.
+            var branches: Branches = .{};
+            const global: Frame = .{ .scopes = &r.global_scopes };
             for (r.lines.items, 0..) |line, index| {
                 const i: u32 = @intCast(index);
+                const live = open != null or branches.active();
                 if (line[0] != '.') {
-                    if (open == null) try top.append(arena, i);
+                    if (open == null and live) try top.append(arena, i);
                     continue;
                 }
                 var f = F.init(line);
                 const head = f.next().?;
                 if (head.len < 2) return error.ParseError;
                 const card = cardOf(head[1..]) orelse {
-                    try directives.append(arena, i);
+                    if (live) try directives.append(arena, i);
                     continue;
                 };
+                if (card == .cond) {
+                    if (open == null) try r.branch(&branches, card.cond, &f, &global);
+                    continue;
+                }
+                if (!live) continue;
                 switch (card) {
                     .end => break,
                     .ends => {
@@ -536,7 +573,34 @@ fn Reader(comptime S: type) type {
                     else => try directives.append(arena, i),
                 }
             }
-            if (open != null) return error.ParseError;
+            if (open != null or branches.depth != 0) return error.ParseError;
+        }
+
+        /// Applies one `.if`/`.elseif`/`.else`/`.endif` card to `b`. A
+        /// condition is the rest of the line, evaluated under `frame` only
+        /// when its branch could still be taken; nonzero is true.
+        fn branch(r: *R, b: *Branches, card: CondCard, f: *F, frame: *const Frame) Error!void {
+            if (card == .@"if") {
+                if (b.depth == Branches.max) return error.ParseError;
+                b.open[b.depth] = if (!b.active()) .spent else if (try r.condition(f, frame)) .live else .pending;
+                b.depth += 1;
+                return;
+            }
+            if (b.depth == 0) return error.ParseError;
+            const top = &b.open[b.depth - 1];
+            switch (card) {
+                .@"if" => unreachable,
+                .elseif => top.* = if (top.* != .pending) .spent else if (try r.condition(f, frame)) .live else .pending,
+                .@"else" => top.* = if (top.* == .pending) .live else .spent,
+                .endif => b.depth -= 1,
+            }
+        }
+
+        fn condition(r: *R, f: *F, frame: *const Frame) Error!bool {
+            return switch (try r.exprValue(f.rest(), frame, false)) {
+                .num => |n| n != 0,
+                else => error.ParseError,
+            };
         }
 
         /// A quoted or bare path; its original case survives case folding.
@@ -990,9 +1054,17 @@ fn Reader(comptime S: type) type {
                 .depth = frame.depth + 1,
                 .instance = instance,
             };
+            var branches: Branches = .{};
             for (r.lines.items[sub.first..sub.end]) |line| {
-                if (line[0] != '.') try r.readDevice(line, &child);
+                if (line[0] != '.') {
+                    if (branches.active()) try r.readDevice(line, &child);
+                    continue;
+                }
+                var f = F.init(line);
+                const card = cardOf(f.next().?[1..]) orelse continue;
+                if (card == .cond) try r.branch(&branches, card.cond, &f, &child);
             }
+            if (branches.depth != 0) return error.ParseError;
         }
 
         // After the walk: model bins.
