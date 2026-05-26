@@ -73,7 +73,10 @@ test "numeric field binding rejects invalid native and dynamic parameter values"
     try std.testing.expectEqual(@as(i8, -128), try castField(i8, -128));
     try std.testing.expectEqual(@as(i8, 127), try castField(i8, 127));
     try std.testing.expectError(error.ParameterOutOfRange, castField(i8, 128));
-    try std.testing.expectError(error.ParameterOutOfRange, castField(i8, 1.5));
+    try std.testing.expectEqual(@as(i8, 2), try castField(i8, 1.5));
+    try std.testing.expectEqual(@as(i8, -1), try castField(i8, -1.5));
+    try std.testing.expectEqual(@as(u16, 104), try castField(u16, 103.60));
+    try std.testing.expectError(error.ParameterOutOfRange, castField(i8, 127.5));
     try std.testing.expectError(error.ParameterOutOfRange, castField(u16, -1));
     try std.testing.expectError(error.ParameterOutOfRange, castField(u16, 65536));
     try std.testing.expectError(error.ParameterOutOfRange, castField(i64, 0x1p63));
