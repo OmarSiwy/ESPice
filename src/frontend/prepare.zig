@@ -143,7 +143,21 @@ pub fn build(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_are
         .bindings = out.bindings,
         .cards = cards,
         .ac_overrides = try acOverrides(sim_arena, cards, nb.ac_res.items(.name), nb.ac_res.items(.value)),
+        .measures = try measures(sim_arena, nl.deck.measures),
     } };
+}
+
+/// `.meas` cards with their strings copied out of the parse arena.
+fn measures(arena: std.mem.Allocator, cards: []const core.Measure) ![]const core.Measure {
+    const out = try arena.dupe(core.Measure, cards);
+    for (out) |*m| {
+        m.name = try arena.dupe(u8, m.name);
+        for ([_]*core.MeasureClause{ &m.first, &m.second }) |c| {
+            c.vec = try arena.dupe(u8, c.vec);
+            c.vec2 = try arena.dupe(u8, c.vec2);
+        }
+    }
+    return out;
 }
 
 /// Cards whose output is `Deck.output_node` because they name none.

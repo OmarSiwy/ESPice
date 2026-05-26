@@ -23,6 +23,7 @@ numbers as they are read.
 | `expr.zig` | Expressions as postfix: compile, fold, subtree walks |
 | `csr.zig` | The bipartite hypergraph (adapted from cktImg) |
 | `netlist.zig` | Lines to nets × devices, models and analysis cards; parameter scopes, subcircuit frames, model bins |
+| `measure.zig` | `.meas` card text to `core.Measure` |
 | `analyses.zig` | Analysis cards and `.options` to queries |
 | `spice.zig` | SPICE device selection: card letter and `.model` LEVEL to a device name, following ngspice |
 | `builder.zig` | `NetBuilder`: card binding, net-to-row mapping and circuit topology |
@@ -108,6 +109,31 @@ behavioural sources are the only consumer that reads inside them
 `v(a,b)` probes hold net ids, mapped through the subcircuit frame. A zero
 switch still disables a stochastic or geometry term (`0*agauss(...)` folds to
 0), as in the nominal PDK corners.
+
+## PDK conveniences
+
+These follow ngspice 45, because the open PDKs (sky130, GF180, IHP SG13G2)
+are written against it:
+
+- `.endl` closes the open `.lib` section whatever name follows it
+  (inpcom.c). GF180 closes `.lib dio` with `.endl diode`.
+- `.if`/`.elseif`/`.else`/`.endif` keep the first branch whose condition is
+  nonzero (inp.c recifeval). Top-level conditions are evaluated in walk 1
+  against the `.param` cards above them; inside a subcircuit they are
+  evaluated per `X` instance in `expand`, under the instance's parameters.
+  Divergence: a `.param` or `.model` inside a subcircuit's `.if` applies
+  unconditionally, since subcircuit dot cards are read once in walk 1.
+- `.model <name> psp103va` (the OSDI module name) selects the built-in
+  PSP 103, as ngspice does after loading `psp103va.osdi`.
+- `.meas`/`.measure` cards are parsed by `measure.zig` into `core.Measure`
+  rows (`deck.measures`) and evaluated after the run by
+  `src/output/measure.zig`, a port of com_measure2.c: the same event
+  counting, interpolation, Simpson/trapezoid panels and print format, so
+  results match ngspice byte for byte on the same waveform. `DERIV` is
+  rejected as ngspice 45 rejects it; `PARAM`/`EXPR` cards are not
+  supported. Divergence: ngspice refuses `.meas` in batch mode with `-r`;
+  espice always prints them, and reports a failed card on stderr in a
+  shorter form.
 
 ## Build
 

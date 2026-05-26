@@ -103,6 +103,15 @@ pub fn main(init: std.process.Init) !u8 {
             failed = true;
             continue;
         };
+        {
+            var out_buf: [4096]u8 = undefined;
+            var err_buf: [1024]u8 = undefined;
+            var stdout: std.Io.File.Writer = .initStreaming(.stdout(), init.io, &out_buf);
+            var stderr: std.Io.File.Writer = .initStreaming(.stderr(), init.io, &err_buf);
+            try p.print_measures(&stdout.interface, &stderr.interface);
+            try stdout.interface.flush();
+            try stderr.interface.flush();
+        }
         std.debug.print("{s}: {d} devices\n", .{ p.title(), p.device_count() });
         for (0..p.query_count()) |i| {
             const id: problem.QueryId = @enumFromInt(i);

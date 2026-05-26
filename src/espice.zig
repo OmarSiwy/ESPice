@@ -240,6 +240,22 @@ pub const Problem = struct {
         try self.session.print(writer, resolved);
     }
 
+    /// Writes the deck's `.meas` results for every completed tran, AC and
+    /// DC result, in request order, as ngspice prints them; cards that
+    /// cannot be measured are reported on `err`.
+    pub fn print_measures(self: *const Problem, out: *std.Io.Writer, err: *std.Io.Writer) !void {
+        const measures = self.prepared.deck.measures;
+        if (measures.len == 0) return;
+        for (self.session.outputs.items) |id| {
+            const info = try self.query_info(id);
+            if (info.status != .complete) continue;
+            switch (info.kind) {
+                .tran, .ac, .dc => try output.printMeasures(out, err, measures, info.kind, try self.result(id)),
+                else => {},
+            }
+        }
+    }
+
     /// A completed query's result, valid until `deinit`.
     /// `error.ResultUnavailable` until the query completes.
     pub fn result(self: *const Problem, id: QueryId) !Result {
