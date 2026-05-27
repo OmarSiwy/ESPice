@@ -243,6 +243,31 @@ test "parameters: sibling subcircuits do not leak local parameters" {
     }
 }
 
+test "subcircuit models that need instance parameters are read per instance and shared when equal" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const nl = try parse(arena.allocator(),
+        \\instance models
+        \\.param shift=1
+        \\.subckt cell d g s pre=1 w=1u
+        \\m1 d g s s nm w=w l=1u
+        \\.model nm nmos level=1 vto='shift+(1-pre)*0.5' kp='2e-5*w/1u'
+        \\.ends
+        \\x1 a b 0 cell
+        \\x2 a b 0 cell pre=0
+        \\x3 a b 0 cell
+        \\x4 a b 0 cell w=2u
+        \\.end
+    );
+    for ([_][]const u8{ "m.x1.m1", "m.x2.m1", "m.x3.m1", "m.x4.m1" }, [_]f64{ 1, 1.5, 1, 1 }, [_]f64{ 2e-5, 2e-5, 2e-5, 4e-5 }) |name, vto, kp| {
+        const m = (try device(nl, name)).model.?;
+        try std.testing.expectEqual(vto, try parameter(m.kv, "vto"));
+        try std.testing.expectApproxEqRel(kp, try parameter(m.kv, "kp"), 1e-12);
+    }
+    // The unresolved global row, then one row per distinct parameter set.
+    try std.testing.expectEqual(@as(usize, 4), nl.models.len);
+}
+
 test ".if chains keep the first true branch, per subcircuit instance" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

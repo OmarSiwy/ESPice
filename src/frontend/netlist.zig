@@ -328,18 +328,28 @@ const Frame = struct {
     scopes: []const *const Scope,
     depth: u8 = 0,
     instance: u32 = 0,
+    /// The subcircuit being expanded, null at top level.
+    sub: ?u16 = null,
+    /// Where this instance's rows start in `Reader.instance_models`.
+    models_mark: u32 = 0,
 };
 
 const Subckt = struct {
     name: []const u8,
     ports: []const []const u8,
     defaults: []const struct { key: []const u8, text: []const u8 },
-    /// Lines between `.subckt` and `.ends`; dot cards among them are global.
+    /// Lines between `.subckt` and `.ends`. Dot cards among them are global,
+    /// except a `.model` that needs instance parameters (`InstanceModel`).
     first: u32,
     end: u32,
 };
 
 const ModelRow = struct { name: []const u8, kind: []const u8, kv: Span };
+
+/// A `.model` card inside subcircuit `sub` whose values need a parameter the
+/// global scope lacks (IHP's `pre_layout`, or the subcircuit's `l`/`w`). Like
+/// ngspice, each `X` instance reads it again under its own parameters.
+const InstanceModel = struct { sub: u16, name: []const u8, line: u32 };
 
 fn Reader(comptime S: type) type {
     const F = S.Split;
@@ -365,6 +375,13 @@ fn Reader(comptime S: type) type {
         model_ids: std.StringHashMapUnmanaged(u32) = .empty,
         subckts: std.ArrayList(Subckt) = .empty,
         subckt_ids: std.StringHashMapUnmanaged(u16) = .empty,
+        instance_lines: std.ArrayList(InstanceModel) = .empty,
+        /// Model rows read from each `instance_lines` line, one per distinct
+        /// set of values, so instances with equal parameters share a row.
+        variants: std.AutoHashMapUnmanaged(u32, std.ArrayList(u32)) = .empty,
+        /// `(name, row)` of the instance models the open expansions resolved;
+        /// `Frame.models_mark` splits it by instance.
+        instance_models: std.ArrayList(struct { name: []const u8, row: u32 }) = .empty,
         globals: Scope = .empty,
         global_scopes: [1]*const Scope = undefined,
         analyses: std.ArrayList(Analysis) = .empty,
@@ -418,10 +435,17 @@ fn Reader(comptime S: type) type {
             var model_lines: std.ArrayList(u32) = .empty;
             var directive_lines: std.ArrayList(u32) = .empty;
             try r.declarations(&top_devices, &model_lines, &directive_lines);
-            for (model_lines.items) |i| try r.readModel(r.lines.items[i]);
+            const top: Frame = .{ .scopes = &r.global_scopes };
+            for (model_lines.items) |i| {
+                try r.readModel(r.lines.items[i], &top);
+                if (!r.unresolved(r.models.items[r.models.items.len - 1].kv)) continue;
+                // ponytail: linear scan; few models need instance parameters.
+                for (r.subckts.items, 0..) |sub, id| if (i >= sub.first and i < sub.end) {
+                    try r.instance_lines.append(arena, .{ .sub = @intCast(id), .name = r.models.items[r.models.items.len - 1].name, .line = i });
+                };
+            }
             for (directive_lines.items) |i| try r.readDirective(r.lines.items[i]);
 
-            const top: Frame = .{ .scopes = &r.global_scopes };
             for (top_devices.items) |i| try r.readDevice(r.lines.items[i], &top);
             try r.modelBins();
 
@@ -640,13 +664,12 @@ fn Reader(comptime S: type) type {
             return f.line[start..f.pos];
         }
 
-        fn readModel(r: *R, line: []const u8) Error!void {
+        fn readModel(r: *R, line: []const u8, frame: *const Frame) Error!void {
             var f = F.init(line);
             _ = f.next();
             const name = f.next() orelse return error.ParseError;
             const kind = f.next() orelse return error.ParseError;
             if (!F.isWord(name) or !F.isWord(kind)) return error.ParseError;
-            const top: Frame = .{ .scopes = &r.global_scopes };
             const matrix_keys = std.StaticStringMap(void).initComptime(.{ .{ "r", {} }, .{ "l", {} }, .{ "g", {} }, .{ "c", {} } });
             // CPL matrices are blank-separated; a negative entry is not a subtraction.
             const cpl = std.mem.eql(u8, kind, "cpl");
@@ -655,10 +678,10 @@ fn Reader(comptime S: type) type {
                 if (t[0] == '(' or t[0] == ')' or t[0] == ',') continue;
                 if (!F.isWord(t)) return error.ParseError;
                 if (f.takeEq()) {
-                    const value = if (cpl and matrix_keys.has(t)) try r.readValue(&f, &top, true, true) else try r.kvValue(&f, &top, true);
+                    const value = if (cpl and matrix_keys.has(t)) try r.readValue(&f, frame, true, true) else try r.kvValue(&f, frame, true);
                     try r.card_kv.append(r.arena, .{ .key = t, .value = value });
                 } else {
-                    const value: Value = if (S.parseNum(t)) |n| .{ .num = n } else try r.nameValue(t, &top, true);
+                    const value: Value = if (S.parseNum(t)) |n| .{ .num = n } else try r.nameValue(t, frame, true);
                     try r.card_kv.append(r.arena, .{ .key = "", .value = value });
                 }
             }
@@ -666,6 +689,56 @@ fn Reader(comptime S: type) type {
             const gop = try r.model_ids.getOrPut(r.arena, name);
             if (!gop.found_existing) gop.value_ptr.* = @intCast(r.models.items.len);
             try r.models.append(r.arena, .{ .name = name, .kind = kind, .kv = span });
+        }
+
+        /// True when a value in `span` did not fold: it names a parameter the
+        /// global scope lacks, which no device could bind.
+        fn unresolved(r: *const R, span: Span) bool {
+            for (r.kvs.items[span.start..][0..span.len]) |kv| if (kv.value == .expr) return true;
+            return false;
+        }
+
+        /// The model row a card inside `frame` names: an instance model of the
+        /// frame's subcircuit, read under its parameters on first use, else
+        /// the first global row.
+        fn modelRow(r: *R, name: []const u8, frame: *const Frame) Error!u32 {
+            const sub = frame.sub orelse return r.model_ids.get(name) orelse none;
+            for (r.instance_models.items[frame.models_mark..]) |m| if (std.mem.eql(u8, m.name, name)) return m.row;
+            // ponytail: linear scan over the instance-model lines, few per PDK.
+            const line = for (r.instance_lines.items) |m| {
+                if (m.sub == sub and std.mem.eql(u8, m.name, name)) break m.line;
+            } else return r.model_ids.get(name) orelse none;
+            const kv_mark = r.kvs.items.len;
+            try r.readModel(r.lines.items[line], frame);
+            var row: u32 = @intCast(r.models.items.len - 1);
+            const gop = try r.variants.getOrPut(r.arena, line);
+            if (!gop.found_existing) gop.value_ptr.* = .empty;
+            const fresh = r.kvs.items[kv_mark..];
+            for (gop.value_ptr.items) |old| {
+                const kv = r.models.items[old].kv;
+                if (!sameValues(r.kvs.items[kv.start..][0..kv.len], fresh)) continue;
+                r.models.shrinkRetainingCapacity(row);
+                r.kvs.shrinkRetainingCapacity(kv_mark);
+                row = old;
+                break;
+            } else try gop.value_ptr.append(r.arena, row);
+            try r.instance_models.append(r.arena, .{ .name = name, .row = row });
+            return row;
+        }
+
+        /// Equal keys and values; an unfolded expression never compares equal.
+        fn sameValues(a: []const Kv, b: []const Kv) bool {
+            if (a.len != b.len) return false;
+            for (a, b) |x, y| {
+                if (!std.mem.eql(u8, x.key, y.key)) return false;
+                const same = switch (x.value) {
+                    .num => |n| y.value == .num and y.value.num == n,
+                    .name => |n| y.value == .name and std.mem.eql(u8, y.value.name, n),
+                    else => false,
+                };
+                if (!same) return false;
+            }
+            return true;
         }
 
         fn readArgs(r: *R, f: *F) Error![]const Value {
@@ -1024,8 +1097,11 @@ fn Reader(comptime S: type) type {
             const arena = r.arena;
             try r.pins.resize(arena, r.nodes.items.len);
             for (r.nodes.items, r.pins.items) |n, *pin| pin.* = try r.netOf(frame, n);
+            const positional = try appendSpan(Value, arena, &r.values, r.positional.items);
+            const kv = try appendSpan(Kv, arena, &r.kvs, r.card_kv.items);
+            // After the spans: reading an instance model reuses the card scratch.
             const model: u32 = if (r.positional.items.len > 0 and r.positional.items[0] == .name)
-                r.model_ids.get(r.positional.items[0].name) orelse none
+                try r.modelRow(r.positional.items[0].name, frame)
             else
                 none;
             const name = try r.internName(if (frame.path) |path| try r.joined(&[_][]const u8{ &.{letter}, ".", path, ".", head }) else head);
@@ -1033,8 +1109,8 @@ fn Reader(comptime S: type) type {
                 .kind = letter,
                 .name = name,
                 .model = model,
-                .positional = try appendSpan(Value, arena, &r.values, r.positional.items),
-                .kv = try appendSpan(Kv, arena, &r.kvs, r.card_kv.items),
+                .positional = positional,
+                .kv = kv,
                 .subckt_instance = frame.instance,
             }, r.pins.items) catch |err| return switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
@@ -1077,7 +1153,10 @@ fn Reader(comptime S: type) type {
                 .scopes = scopes,
                 .depth = frame.depth + 1,
                 .instance = instance,
+                .sub = id,
+                .models_mark = @intCast(r.instance_models.items.len),
             };
+            defer r.instance_models.shrinkRetainingCapacity(child.models_mark);
             var branches: Branches = .{};
             for (r.lines.items[sub.first..sub.end]) |line| {
                 if (line[0] != '.') {
