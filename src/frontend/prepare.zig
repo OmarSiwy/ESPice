@@ -76,6 +76,26 @@ fn loadModels(io: std.Io, lib: *device.Library, session: std.mem.Allocator, fore
     try lib.load(io, paths.items);
 }
 
+/// Narrows the published outputs to the `.save` labels, in place. The
+/// probes keep their order; a label nothing publishes is dropped.
+fn keepSaved(scratch: std.mem.Allocator, probes: *[]u32, labels: *[][]const u8, saves: []const []const u8) !void {
+    var wanted: std.StringHashMapUnmanaged(void) = .empty;
+    for (saves) |s| try wanted.put(scratch, s, {});
+    const p = probes.*;
+    const l = labels.*;
+    var kept: usize = 0;
+    for (p, l) |row, label| {
+        if (label.len > 64) continue;
+        var buf: [64]u8 = undefined;
+        if (!wanted.contains(std.ascii.lowerString(&buf, label))) continue;
+        p[kept] = row;
+        l[kept] = label;
+        kept += 1;
+    }
+    probes.* = p[0..kept];
+    labels.* = l[0..kept];
+}
+
 /// Builds the frozen circuit and deck data from `nl`. `parse_arena` holds
 /// construction scratch; `sim_arena` owns every published slice and must
 /// outlive the result, as must `lib` when the deck uses loaded devices.
@@ -107,7 +127,8 @@ pub fn build(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_are
     compiled_ok = true;
     errdefer circuit.deinit();
 
-    const out = try nb.publish(sim_arena, &circuit, perm);
+    var out = try nb.publish(sim_arena, &circuit, perm);
+    if (nl.deck.saves.len > 0) try keepSaved(parse_arena, &out.probes, &out.probe_labels, nl.deck.saves);
 
     var ic: std.ArrayList(Ic) = .empty;
     for (nl.deck.ic) |item| {

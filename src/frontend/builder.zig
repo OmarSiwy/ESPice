@@ -512,9 +512,10 @@ pub const NetBuilder = struct {
     /// What the deck keeps of the cards, in frozen rows.
     pub const Published = struct {
         bindings: core.QueryBindings,
-        /// Branch currents first, then every named node; parallel to `probe_labels`.
-        probes: []const u32,
-        probe_labels: []const []const u8,
+        /// Branch currents first, then every named node; parallel to
+        /// `probe_labels`. Mutable so `.save` can narrow them in place.
+        probes: []u32,
+        probe_labels: [][]const u8,
         /// `acExcitation` over the frozen rows.
         ac_drive: []const f64,
         source_node: u32,
