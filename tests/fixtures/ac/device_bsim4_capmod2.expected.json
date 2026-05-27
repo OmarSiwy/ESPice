@@ -1,0 +1,113 @@
+{
+  "schema_version": 1,
+  "analysis": "ac",
+  "purpose": "BSIM4 capMod 2 gate charge: AC gate and drain currents of an NMOS biased on.",
+  "oracle": {
+    "kind": "ngspice-45",
+    "derivation": "Independent ngspice-45 run of this deck. Stored binary raw doubles, selected by column name.",
+    "command": "ngspice -n -b -r reference.raw circuit.sp",
+    "source_sha256": "1ab43bf10746e2d004a0eb943ccaa4792aa47a0772d80a5e6e88ff5fc8ec9c80"
+  },
+  "origin": "tests/fixtures/ac/device_bsim4_capmod2.sp",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "AC Analysis",
+        "match": "exact",
+        "row_count": 3,
+        "axis": {
+          "name": "frequency",
+          "values": [
+            1000000.0,
+            10000000.000000002,
+            100000000.00000003
+          ],
+          "atol": 1e-15,
+          "rtol": 1e-08
+        },
+        "columns": {
+          "v(d)": {
+            "values": [
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ]
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(g)": {
+            "values": [
+              [
+                1.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0
+              ]
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "i(vg)": {
+            "values": [
+              [
+                0.0,
+                -1.918280199686039e-07
+              ],
+              [
+                0.0,
+                -1.9182801996860393e-06
+              ],
+              [
+                0.0,
+                -1.9182801996860395e-05
+              ]
+            ],
+            "unit": "A",
+            "rtol": 0.001,
+            "atol": 1e-11
+          },
+          "i(vd)": {
+            "values": [
+              [
+                -0.006531454276679518,
+                8.688717393273265e-08
+              ],
+              [
+                -0.006531454276679518,
+                8.688717393273266e-07
+              ],
+              [
+                -0.006531454276679518,
+                8.688717393273267e-06
+              ]
+            ],
+            "unit": "A",
+            "rtol": 0.001,
+            "atol": 1e-11
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "1ab43bf10746e2d004a0eb943ccaa4792aa47a0772d80a5e6e88ff5fc8ec9c80"
+}

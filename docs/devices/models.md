@@ -114,6 +114,7 @@ current deck status is in `issues.md`.
 | vbic13_4t | DEVpnjlim on the six junctions at the ambient vt, vcrit from IS * M; without it plain Newton swung internal nodes by kV and never converged on `multi_analysis/device_vbic_ce_amp` | vbicload.c:655-667, vbictemp.c:84 |
 | vdmos | d'-s' leakage is m/RDS, or 1e-15 S without RDS; gmin goes on the body diode only | vdmosset.c:292-299, vdmosload.c:808 |
 | vsource, isource | SFFM reads (VO VA FM MDI FC TD PHASEM PHASEC) and limits MDI to FC/FM | vsrcload.c:228-282, isrcload.c:206-254 |
+| bsim4va | CVCHARGEMOD defaults to 0 (upstream VA had 1), so capMod 1/2 take VgsteffCV from NOFF and VOFFCV as the BSIM4.8 manual specifies. With 1, sky130 nfet Cgg ran 3.9% low at 1 MHz and inverter tpd_hl 1.8% fast; now within 3e-6 and 0.12% (`ac/device_bsim4_capmod2`) | b4set.c:102-103, b4ld.c:3351 |
 
 Known open differences: VBIC puts the RBP thermal noise on bp-cx where
 ngspice puts it between emitEI and emit (0.9% at 100 MHz), and the VBIC

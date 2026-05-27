@@ -1320,7 +1320,8 @@ module bsim4va(d, g, s, b);
     `MPRcc( lfgidl  ,0.0              ,""            ,0.0           ,1.0     ,"")
     `MPRcc( pfgidl  ,0.0              ,""            ,0.0           ,1.0     ,"")
 
-    `MPIcc( cvchargemod ,1              ,""            ,0             ,1          ,"")
+    // BSIM4.8 manual and ngspice b4set.c:103 default cvchargeMod to 0 (noff/voffcv VgsteffCV); upstream VA had 1.
+    `MPIcc( cvchargemod ,0              ,""            ,0             ,1          ,"")
     `MPRcc( ud  ,0.0              ,""            ,0.0           ,1.0     ,"")
     `MPRcc( wud  ,0.0              ,""            ,0.0           ,1.0        ,"")
     `MPRcc( lud  ,0.0              ,""            ,0.0           ,1.0        ,"")
