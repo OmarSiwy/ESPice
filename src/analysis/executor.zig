@@ -166,7 +166,7 @@ pub const Executor = struct {
             if (gpu_context) |g| g.deinit();
         }
         if (self.config.timing_in_depth) (try self.circuit.workspace()).prof.io = self.io;
-        defer if (self.config.timing_in_depth) printNewtonSplit(self.circuit.ws.?.prof, self.job);
+        defer if (self.config.timing_in_depth) printNewtonSplit(&self.circuit.ws.?, self.job);
         const transient = if (self.job == .op) self.job.op.tran_op else @as(requests.Kind, self.job).transient();
         self.circuit.setSimState(.{ .kind = if (transient) .ic else .dc });
         if (self.job == .op) {
@@ -215,14 +215,17 @@ pub const Executor = struct {
 };
 
 /// `--timing-in-depth`: where the query's Newton time went.
-fn printNewtonSplit(p: converger.Prof, job: requests.Query) void {
+/// The matrix size and the flat LU's fill (L + U + diagonal) close the line.
+fn printNewtonSplit(ws: *const converger.Workspace, job: requests.Query) void {
+    const p = ws.prof;
     const ms = struct {
         fn f(ns: u64) f64 {
             return @as(f64, @floatFromInt(ns)) / 1e6;
         }
     }.f;
-    std.debug.print("timing: {s} newton: iterations={d} factors={d} eval={d:.3}ms load={d:.3}ms factor={d:.3}ms solve={d:.3}ms update={d:.3}ms\n", .{
-        @tagName(job), p.counts[0], p.counts[1], ms(p.ns[0]), ms(p.ns[1]), ms(p.ns[2]), ms(p.ns[3]), ms(p.ns[4]),
+    std.debug.print("timing: {s} newton: iterations={d} factors={d} eval={d:.3}ms load={d:.3}ms factor={d:.3}ms solve={d:.3}ms update={d:.3}ms n={d} lu_nnz={d}\n", .{
+        @tagName(job),                                   p.counts[0], p.counts[1], ms(p.ns[0]), ms(p.ns[1]), ms(p.ns[2]), ms(p.ns[3]), ms(p.ns[4]), ws.dx.len,
+        if (ws.slv.lu) |lu| lu.li.items.len + lu.ui.items.len + lu.n else 0,
     });
 }
 
