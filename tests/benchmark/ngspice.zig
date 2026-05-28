@@ -11,9 +11,10 @@ pub fn prepare(io: std.Io, a: std.mem.Allocator, bin: []const u8, netlist: []con
     const source = std.Io.Dir.cwd().realPathFileAlloc(io, netlist, a) catch return error.DeckFailed;
     const raw_dir = std.Io.Dir.cwd().realPathFileAlloc(io, std.fs.path.dirname(raw_path) orelse ".", a) catch return error.ScratchFailed;
     const raw = try std.fmt.allocPrint(a, "{s}/{s}", .{ raw_dir, std.fs.path.basename(raw_path) });
+    const text = std.Io.Dir.cwd().readFileAlloc(io, source, a, .limited(1 << 27)) catch return error.DeckFailed;
+    if (hasPsp(text)) return .{ .refused = "ngspice-45 has no PSP103 (LEVEL=1040)" };
     var deck: []const u8 = source;
     if (klu) {
-        const text = std.Io.Dir.cwd().readFileAlloc(io, source, a, .limited(1 << 26)) catch return error.DeckFailed;
         if (!deckHasKlu(text)) {
             deck = try std.fmt.allocPrint(a, "{s}.sp", .{raw});
             const body = try withKlu(a, text);
@@ -25,6 +26,19 @@ pub fn prepare(io: std.Io, a: std.mem.Allocator, bin: []const u8, netlist: []con
         .cwd = .{ .path = std.fs.path.dirname(source).? },
         .raw = raw,
     };
+}
+
+/// Whether the deck names espice's PSP103 level. ngspice-45 accepts the
+/// card and simulates something else, slowly.
+fn hasPsp(text: []const u8) bool {
+    var i: usize = 0;
+    while (std.ascii.indexOfIgnoreCasePos(text, i, "level")) |at| : (i = at + 5) {
+        var rest = std.mem.trimStart(u8, text[at + 5 ..], " \t");
+        if (!std.mem.startsWith(u8, rest, "=")) continue;
+        rest = std.mem.trimStart(u8, rest[1..], " \t");
+        if (std.mem.startsWith(u8, rest, "1040")) return true;
+    }
+    return false;
 }
 
 /// Whether any `.option(s)` card after the title names `klu`.
@@ -43,6 +57,11 @@ fn deckHasKlu(text: []const u8) bool {
 fn withKlu(a: std.mem.Allocator, text: []const u8) ![]const u8 {
     const nl = std.mem.indexOfScalar(u8, text, '\n') orelse text.len;
     return std.fmt.allocPrint(a, "{s}\n.options klu\n{s}", .{ text[0..nl], text[@min(nl + 1, text.len)..] });
+}
+
+test "a PSP103 deck is refused" {
+    try std.testing.expect(hasPsp("t\n.model n nmos(LEVEL = 1040 toxo=1e-9)\n"));
+    try std.testing.expect(!hasPsp("t\n.model n nmos(level=54)\n"));
 }
 
 test "KLU preprocessing preserves the title and source body" {
