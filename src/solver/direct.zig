@@ -65,15 +65,24 @@ pub const Solver = struct {
     }
 
     fn initBbd(gpa: Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32, bbd: ?root.BbdInfo) !?BbdEng {
-        const info = bbd orelse return null;
+        const info = bbd orelse {
+            if (comptime @import("builtin").link_libc) if (std.c.getenv("ZP_LU_STATS") != null) std.debug.print("lu-census: no BbdInfo\n", .{});
+            return null;
+        };
         // ESPICE_NO_BBD forces the flat LU for A/B comparisons.
         if (comptime @import("builtin").link_libc) {
             if (std.c.getenv("ESPICE_NO_BBD") != null) return null;
         }
-        return BbdEng.init(gpa, n, col_ptr, row_idx, info, .{}) catch |err| switch (err) {
-            error.NotApplicable => null,
-            error.OutOfMemory => error.OutOfMemory,
+        const stats = comptime @import("builtin").link_libc;
+        const eng = BbdEng.init(gpa, n, col_ptr, row_idx, info, .{}) catch |err| switch (err) {
+            error.NotApplicable => {
+                if (stats) if (std.c.getenv("ZP_LU_STATS") != null) std.debug.print("lu-census: BbdInfo emitted; Bbd.init declined (NotApplicable)\n", .{});
+                return null;
+            },
+            error.OutOfMemory => return error.OutOfMemory,
         };
+        if (stats) if (std.c.getenv("ZP_LU_STATS") != null) std.debug.print("lu-census: BbdInfo emitted; Bbd.init accepted\n", .{});
+        return eng;
     }
 
     pub fn deinit(self: *Self) void {
