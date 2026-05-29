@@ -168,7 +168,15 @@ pub const Executor = struct {
         if (self.config.timing_in_depth) (try self.circuit.workspace()).prof.io = self.io;
         defer if (self.config.timing_in_depth) printNewtonSplit(&self.circuit.ws.?, self.job);
         const transient = if (self.job == .op) self.job.op.tran_op else @as(requests.Kind, self.job).transient();
-        self.circuit.setSimState(.{ .kind = if (transient) .ic else .dc });
+        self.circuit.setSimState(.{ .kind = switch (self.job) {
+            // Small-signal linearizations run as analysis("ac") or ("noise"),
+            // LRM Table 4-22, as ngspice's MODEINITSMSIG load sets ANALYSIS_AC
+            // for ac, noise, pz and disto (osdiload.c:165). It is what gives a
+            // host-integrated idt its 1/(jw) instead of its DC form.
+            .ac, .sp, .stb, .pz, .disto => .ac,
+            .noise => .noise,
+            else => if (transient) .ic else .dc,
+        } });
         if (self.job == .op) {
             self.x = try self.work.allocator().alloc(f64, self.circuit.n);
             @memset(self.x.?, 0);
