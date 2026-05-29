@@ -191,8 +191,13 @@ class Deck:
 def window(size, ps):
     """`.tran` card: a 2 ps step cap, and a stop time cut 2x at 10k and 5x
     at 100k so one benchmark pass stays in minutes. The SRAM keeps its 1 ns
-    write/precharge/read sequence."""
-    return f"2p {ps // (1 if size < 5000 else 2 if size < 50000 else 5)}p"
+    write/precharge/read sequence. At 100k the decks skip the operating
+    point (`uic`, as ngspice's own c7552 benchmark does): the 100k chain's
+    OP Newton diverged (dx 1e17 on its first step) and each re-pivoting
+    full factor then filled 12-25x, 9e10 multiply-adds, minutes apiece."""
+    if size >= 50000:
+        return f"2p {ps // 5}p uic"
+    return f"2p {ps // (1 if size < 5000 else 2)}p"
 
 
 def pulse(vdd, delay, width, period):
