@@ -766,6 +766,13 @@ iteration.
 - If `S_r` is within 10x of n, the critical path is serial and the gather
   form for wide columns (§4.2) comes before any tuning.
 
+E1 ran on 2026-09-27 (`ZP_LU_STATS` census, `--timing-in-depth` split);
+the tables are in `docs/devices/gpu-evaluation.md`, "Post-layout results".
+Refactor plus solve reached 40% of wall time under `cuda` on 14 of 20
+decks (all synthetic 10k and 100k ones) and on none of the three real
+ones; `Bbd.init` declined every deck; `S_r` was within 10x of n on the
+SRAMs and on every real deck, whose one supply column holds most of it.
+
 **E2. Kernels in isolation (stage 1).** Host-uploaded A, device refactor
 and solves, on CUDA and on HIP where hardware exists. Inputs: the
 post-layout matrices, plus two synthetic ones that separate the ceilings: a
