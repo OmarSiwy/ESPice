@@ -45,6 +45,10 @@ fn applyKv(target: anytype, params: []const Param) !void {
     // BSIMSOI's Model has ~1600 fields, each lowered and alias-scanned at
     // comptime.
     @setEvalBranchQuota(1_000_000);
+    // A field whose key's `keyBit` no pair sets skips the scan: an instance
+    // card binds a dozen pairs against BSIM4's ~1000 fields.
+    var seen: u64 = 0;
+    for (params) |p| seen |= keyBit(p.key);
     inline for (@typeInfo(T).@"struct".fields) |field| {
         if (comptime isScalar(field.type)) {
             // Card keys are lowercased at parse; VA fields keep their spec
@@ -55,12 +59,12 @@ fn applyKv(target: anytype, params: []const Param) !void {
                 const frozen = buf;
                 break :blk frozen;
             };
-            if (try number(params, &key)) |num| {
+            if (try number(params, seen, &key)) |num| {
                 @field(target.*, field.name) = try castField(field.type, num);
                 markGiven(target, field.name);
             } else {
                 inline for (comptime aliasesOf(field.name)) |alias| {
-                    if (try number(params, alias)) |num| {
+                    if (try number(params, seen, alias)) |num| {
                         @field(target.*, field.name) = try castField(field.type, num);
                         markGiven(target, field.name);
                     }
@@ -72,13 +76,21 @@ fn applyKv(target: anytype, params: []const Param) !void {
 
 /// The value of the first pair keyed `key`, or null when there is none.
 /// Errors rather than letting a recognized field fall back to its default.
-fn number(params: []const Param, key: []const u8) !?f64 {
+/// `seen` is the `keyBit` union of `params`' keys.
+fn number(params: []const Param, seen: u64, key: []const u8) !?f64 {
+    if (seen & keyBit(key) == 0) return null;
     for (params) |p| if (std.mem.eql(u8, p.key, key)) {
         const value = p.value orelse return error.UnresolvedParameter;
         if (!std.math.isFinite(value)) return error.NonFiniteParameter;
         return value;
     };
     return null;
+}
+
+/// One of 64 bits from a key's first byte and length; 0 for "".
+fn keyBit(key: []const u8) u64 {
+    if (key.len == 0) return 0;
+    return @as(u64, 1) << @truncate(key[0] *% 7 +% @as(u8, @truncate(key.len)));
 }
 
 /// Sets the `<field>__given` flag VerA emits for LRM §9.19 `$param_given`, if
@@ -203,5 +215,5 @@ test "first pair wins; an alias applies only when the field's own key is absent"
     // cjo: both aliases present, table order cj0 then cj, the last write stays.
     try std.testing.expectEqual(M{ .vt0 = 1, .cjo = 4, .cjo__given = true }, m);
     try std.testing.expectEqual(BindStatus.unresolved_parameter, apply(&m, &.{.{ .key = "vt0", .value = null }}));
-    try std.testing.expectEqual(BindStatus.ok, apply(&m, &.{.{ .key = "unknown", .value = null }}));
+    try std.testing.expectEqual(BindStatus.ok, apply(&m, &.{ .{ .key = "unknown", .value = null }, .{ .key = "", .value = null } }));
 }
