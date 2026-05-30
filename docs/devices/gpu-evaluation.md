@@ -385,7 +385,17 @@ Against E1's rules:
 2. **Setup on PDK decks.** Parse, subcircuit expansion and binding of the
    sky130 and IHP model libraries take 7.9-9.2 s on c7552 and 1.6 s on
    the TDC, 28-47% of the `cuda` wall time. ngspice's own profile of the
-   same c7552 spent 80 of 217 s parsing (ngspice-41, KLU).
+   same c7552 spent 80 of 217 s parsing (ngspice-41, KLU). Since then
+   (the table above predates it) a `.model` card binds once per netlist
+   model row instead of once per instance, the binder skips fields no
+   card key can match, and expansion skips the dot cards of a subcircuit
+   without `.if`. `Problem.init` went from 30.5G to 2.9G instructions on
+   c7552_sky130 (setup 9.3 s to about 0.7 s), from 5.7G to 0.9G on the
+   TDC, and from 33.4G to 10.6G on c7552_ihp. What is left on c7552_ihp
+   is parsing: every PSP instance re-reads its ~390-pair `.model` card
+   under its own subcircuit parameters (`pre_layout`, `rfmode`, `ng`)
+   before the duplicate check folds it into an existing row, 78% of
+   `Problem.init`.
 3. **Eight host threads.** `cpu8` often loses to `cpu1` on the factor
    (sram_bsim4_10k: 37.7 s of LU on one thread, 42.9 s with seven more
    lanes; logic_psp103_10k: 238 against 279 s). The likely cause is the
