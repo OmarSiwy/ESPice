@@ -349,6 +349,9 @@ const Subckt = struct {
     /// except a `.model` that needs instance parameters (`InstanceModel`).
     first: u32,
     end: u32,
+    /// Some line in the body is an `.if` chain card: `expand` reads the dot
+    /// cards only then, since a PDK wrapper carries ~180 `.model` bins.
+    has_cond: bool = false,
 };
 
 const ModelRow = struct { name: []const u8, kind: []const u8, kv: Span };
@@ -556,7 +559,7 @@ fn Reader(comptime S: type) type {
                     continue;
                 };
                 if (card == .cond) {
-                    if (open == null) try r.branch(&branches, card.cond, &f, &global);
+                    if (open) |id| r.subckts.items[id].has_cond = true else try r.branch(&branches, card.cond, &f, &global);
                     continue;
                 }
                 if (!live) continue;
@@ -1185,6 +1188,7 @@ fn Reader(comptime S: type) type {
                     if (branches.active()) try r.readDevice(line, &child);
                     continue;
                 }
+                if (!sub.has_cond) continue;
                 var f = F.init(line);
                 const card = cardOf(f.next().?[1..]) orelse continue;
                 if (card == .cond) try r.branch(&branches, card.cond, &f, &child);
