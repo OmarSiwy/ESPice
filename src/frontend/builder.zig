@@ -333,6 +333,9 @@ fn setParam(comptime D: type, model: *D.Model, instance: *D.Instance, comptime f
     return true;
 }
 
+/// A model card bound once for device type `type`; `model` points at its `D.Model`.
+const BoundCard = struct { type: DeviceType, model: *const anyopaque };
+
 /// Netlist to Builder: one pass over the cards, recording the source,
 /// branch and port tables the deck's queries resolve against. Rows it
 /// records are pre-permutation; `prepare.build` maps them after the freeze.
@@ -369,6 +372,10 @@ pub const NetBuilder = struct {
     l: std.MultiArrayList(struct { name: []const u8, branch: u32, value: f64 }) = .empty,
     /// F/H/W/K cards, added after every other card so V and L rows exist.
     deferred: std.ArrayList(Device) = .empty,
+    /// Per `Netlist.models` row, the Model its card binds to (`.{}`, the
+    /// card's pairs, its polarity), bound on first use and copied per
+    /// instance: a BSIM4 bin card is ~270 pairs against ~1000 fields.
+    bound_cards: []?BoundCard,
 
     /// The first `.tran` card's TSTEP and TSTOP, ngspice's TRANinit values
     /// for `resolvePulseDefaults`; 1 ns and 1e30 s without one.
@@ -422,7 +429,9 @@ pub const NetBuilder = struct {
         }.less);
         const rows = try arena.alloc(u32, nl.graph.vertexCount());
         @memset(rows, 0);
-        var nb: NetBuilder = .{ .arena = arena, .b = b, .nl = nl, .rows = rows, .sensed_sources = sensed.items };
+        const cards = try arena.alloc(?BoundCard, nl.models.len);
+        @memset(cards, null);
+        var nb: NetBuilder = .{ .arena = arena, .b = b, .nl = nl, .rows = rows, .sensed_sources = sensed.items, .bound_cards = cards };
         for (nl.deck.analyses) |dir| {
             if (dir.kind != .tran) continue;
             const a0 = argNumber(dir.args, 0);
@@ -1385,6 +1394,26 @@ fn deriveModel(comptime D: type, model: *D.Model, nom_temp_c: f64) void {
     } else if (comptime @hasDecl(D, "derive")) D.derive(model);
 }
 
+/// `base` with model card `m` (netlist row `row`) and its polarity bound.
+/// Cached per row when `base` is `.{}`, which holds for every device but
+/// VBIC's `sw_et` pre-set.
+fn boundCard(self: *NetBuilder, comptime D: type, base: D.Model, m: Model, row: u32) !D.Model {
+    const t = comptime Library.builtin(device.modelName(D).?);
+    const cacheable = comptime !@hasField(D.Model, "sw_et");
+    if (cacheable and row != netlist.none) if (self.bound_cards[row]) |c| if (c.type == t)
+        return @as(*const D.Model, @ptrCast(@alignCast(c.model))).*;
+    var model = base;
+    try applyKv(&model, m.kv);
+    // Polarity comes from the model card kind, outside applyKv.
+    if (eqlAny(m.kind, &.{ "pmos", "pnp", "pjf", "pmf", "phfet" })) try setPolarity(D, &model);
+    if (cacheable and row != netlist.none and self.bound_cards[row] == null) {
+        const slot = try self.arena.create(D.Model);
+        slot.* = model;
+        self.bound_cards[row] = .{ .type = t, .model = slot };
+    }
+    return model;
+}
+
 /// Binds one card onto built-in `D`: model card, polarity, card pairs, derive.
 fn addSingleDevice(self: *NetBuilder, comptime D: type, dev: Device) !void {
     const b = self.b;
@@ -1398,11 +1427,7 @@ fn addSingleDevice(self: *NetBuilder, comptime D: type, dev: Device) !void {
     if (comptime @hasField(D.Model, "sw_et")) {
         if (dev.pins.len < 5) model.sw_et = 0;
     }
-    if (dev.model) |m| {
-        try applyKv(&model, m.kv);
-        // Polarity comes from the model card kind, outside applyKv.
-        if (eqlAny(m.kind, &.{ "pmos", "pnp", "pjf", "pmf", "phfet" })) try setPolarity(D, &model);
-    }
+    if (dev.model) |m| model = try boundCard(self, D, model, m, dev.model_row);
     _ = try setParam(D, &model, &instance, "gain", positionalNumber(dev, 0) orelse 0);
     // Card pairs go to both structs: VerA puts every Verilog-A `parameter`
     // (W and L included) on Model. `model` is a per-device copy, so this
