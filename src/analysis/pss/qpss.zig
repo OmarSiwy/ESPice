@@ -293,13 +293,17 @@ fn computeResidual(
     // ponytail: the nf evals are independent; ckt.eval already uses the
     // thread pool, and a GPU batch launch would take the whole loop.
     const ckt = ctx.ckt;
+    // Tone 1's sample spacing, HB's period/nt. The instants are not evenly
+    // spaced, but a dynamic operator only needs dt > 0 to integrate: at
+    // dt = 0 an idt with ic takes its static form and holds ic.
+    const dt = 1.0 / (ctx.f1 * @as(f64, @floatFromInt(ctx.grid.nf1)));
 
     for (0..nf) |s| {
         for (0..n) |node| ctx.x_sample[node] = ctx.x_td[node * nf + s];
 
         // Each grid point is its own instant, in the transient phase so the
         // sources follow their waveforms (§4.6.1).
-        ckt.setSimState(.{ .t = ctx.times[s], .kind = .tran });
+        ckt.setSimState(.{ .t = ctx.times[s], .dt = dt, .kind = .tran });
         ckt.eval(ctx.x_sample[0..n], ctx.times[s]);
 
         for (0..n) |node| ctx.w_td[node * nf + s] = ckt.rhs[node];

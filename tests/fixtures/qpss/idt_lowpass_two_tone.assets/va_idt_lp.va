@@ -1,0 +1,9 @@
+`include "disciplines.vams"
+// VAMS-2023 4.5.4: an idt in negative feedback is the first-order lowpass
+// wc/(s + wc). Its ic fixes only the operating point, never the steady state.
+module va_idt_lp(in, out);
+    inout in, out;
+    electrical in, out;
+    parameter real wc = 1000.0;
+    analog V(out) <+ idt(wc * (V(in) - V(out)), 0.5);
+endmodule
