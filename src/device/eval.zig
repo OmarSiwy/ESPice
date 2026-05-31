@@ -1731,8 +1731,13 @@ fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool) type
         /// LLVM reloaded it before each charge store.
         q_tape: if (device or !@hasDecl(D, "q")) void else [*]f64,
 
-        pub const skip_g = skip_const and const_g;
-        pub const skip_c = skip_const and const_c;
+        // `Circuit.computeBaseline` stamps only batches whose whole Jacobian
+        // is constant (`Batch.has_const_jacobian`). A lone constant half has
+        // no baseline copy, so skipping it would drop it from the Newton
+        // matrix: an idt's charge (C = 1) beside a non-constant G, say.
+        const in_baseline = const_g and (!@hasDecl(D, "q") or const_c);
+        pub const skip_g = skip_const and in_baseline;
+        pub const skip_c = skip_const and in_baseline;
         pub const on_device = device;
 
         const Sk = @This();
