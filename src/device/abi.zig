@@ -157,6 +157,12 @@ pub const Hooks = struct {
     advance_iteration: ?*const fn (*anyopaque, []const f64) void = null,
     check_convergence: ?*const fn (*anyopaque, []const f64) bool = null,
     seed: ?*const fn (*anyopaque, []f64) void = null,
+    /// Writes each LRM §4.5.4 `idt` initial condition into its operator
+    /// unknown in `x`, for a transient that skips the operating point
+    /// (`uic`), which would otherwise have solved it. Reads the device's
+    /// static form, so the host sets a static sim state (dt = 0) first. An
+    /// idt without ic keeps its value.
+    seed_ic: ?*const fn (*anyopaque, []f64) void = null,
     mark_current_rows: ?*const fn (*anyopaque, []bool) void = null,
     /// Runs `updateState` at x once per converged solve; returns the earliest
     /// requested rejection time, if any. Only for state that
