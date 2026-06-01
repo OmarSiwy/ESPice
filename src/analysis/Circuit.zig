@@ -69,12 +69,11 @@ pub const GpuHook = struct {
     /// `eval_planes` for `Circuit.evalQ`: also brings the resident batches'
     /// host `q_tape` to x, on the same wait.
     eval_charge: *const fn (*anyopaque, x: []const f64, t: f64) void,
-    /// Runs the device limit pass fused with the state latch, so
-    /// `update_states` only walks the host-resident batches.
+    /// Runs the device limit pass fused with the path-latch staging.
     apply_limits: *const fn (*anyopaque, x: []f64, x_old: []const f64) bool,
+    /// Runs the resident held-variable batches' state pass and walks the
+    /// host ones; the fused limit launch already staged the rest.
     update_states: *const fn (*anyopaque, x: []const f64) ?f64,
-    /// Runs `commit_held` on the resident batches and walks the host ones.
-    commit_held: *const fn (*anyopaque, x: []const f64) ?f64,
     clear_limits: *const fn (*anyopaque) void,
     seed_junctions: *const fn (*anyopaque, x: []f64) void,
     /// Accepted-step latches mutate device-resident instance blobs, so a host
@@ -154,6 +153,8 @@ pub const Circuit = struct {
     /// identity key and is never dereferenced: x_op is one arena slice that
     /// the executor hands read-only to each consumer.
     lin: struct { x_ptr: [*]const f64 = undefined, len: u32 = 0, valid: bool = false } = .{},
+    /// `updateStates` ran since the last `stateCtl(.commit)` or `.revert`.
+    state_staged: bool = false,
 
     /// Symbolic LU and Newton scratch, built on first use and shared by every
     /// analysis. The pattern is frozen, so it stays valid for the lifetime.
@@ -545,10 +546,6 @@ pub const Circuit = struct {
         return minReject(batches, "update_state", x);
     }
 
-    pub fn commitHeldBatches(batches: []const Batch, x: []const f64) ?f64 {
-        return minReject(batches, "commit_held", x);
-    }
-
     pub fn stateCtlBatches(batches: []const Batch, sop: StateCtlOp) bool {
         var dirty = false;
         for (batches) |b| if (b.hooks.state_ctl) |f| {
@@ -607,34 +604,32 @@ pub const Circuit = struct {
         return true;
     }
 
-    /// Updates revertible device state at `x`. Returns the earliest time a
-    /// device asks the step to be rejected at, or null.
-    pub fn updateStates(self: *const Circuit, x: []const f64) ?f64 {
+    /// Advances device state (operator history, held variables, latches)
+    /// from the last accepted point to `x`. Returns the earliest time a
+    /// device asks the step to be rejected at, or null. A second call
+    /// before the next commit or revert (a flip that forced another
+    /// iterate, a continuation rung) reverts first, since `stateCtl(.revert)`
+    /// is exact only across one `updateState`.
+    pub fn updateStates(self: *Circuit, x: []const f64) ?f64 {
+        if (self.state_staged) _ = self.stateCtl(.revert);
+        self.state_staged = true;
         if (self.gpu_hook) |gh| return gh.update_states(gh.ctx, x);
         return updateBatches(self.batches, x);
     }
 
-    /// Accepted-point half of `updateStates`: devices whose state
-    /// `stateCtl(.revert)` cannot restore, so it must not be written
-    /// speculatively. The transient calls this once per accepted point,
-    /// before `stateCtl(.commit)`.
+    /// Accepted-point half of `updateStates`, for delay-line history no
+    /// static solve may push (`Hooks.commit_state`). The transient calls it
+    /// once per accepted point, before `stateCtl(.commit)`.
     pub fn commitStates(self: *const Circuit, x: []const f64) ?f64 {
-        const a = minReject(self.batches, "commit_state", x);
-        const b = self.commitHeld(x);
-        return if (a != null and b != null) @min(a.?, b.?) else a orelse b;
+        return minReject(self.batches, "commit_state", x);
     }
 
-    /// The held-variable part of `commitStates`, for the operating point,
-    /// where no `absdelay` ring may be pushed.
-    pub fn commitHeld(self: *const Circuit, x: []const f64) ?f64 {
-        if (self.gpu_hook) |gh| return gh.commit_held(gh.ctx, x);
-        return commitHeldBatches(self.batches, x);
-    }
-
-    /// Commits, reverts or queries the accepted device state (switch FSMs,
-    /// path-integrated latches). For `.query`, returns true when any working
-    /// state differs from its last accepted state.
-    pub fn stateCtl(self: *const Circuit, sop: StateCtlOp) bool {
+    /// Commits, reverts or queries the accepted device state. `.commit` at
+    /// every accepted point, the operating point included; `.revert` after
+    /// every rejected attempt. For `.query`, returns true when a cross/above
+    /// flip moved the working state off the last accepted one.
+    pub fn stateCtl(self: *Circuit, sop: StateCtlOp) bool {
+        if (sop != .query) self.state_staged = false;
         if (self.gpu_hook) |gh| return gh.state_ctl(gh.ctx, sop);
         return stateCtlBatches(self.batches, sop);
     }

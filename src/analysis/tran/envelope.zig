@@ -89,10 +89,19 @@ fn newtonAt(
     };
     const r = nr catch |err| switch (err) {
         error.QueryCancelled => return err,
-        else => return false,
+        else => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 },
     };
-    if (r.converged) if (trap) |tr| tr.accept(ckt.n);
-    return r.converged;
+    if (!r.converged) {
+        _ = ckt.stateCtl(.revert);
+        return false;
+    }
+    if (trap) |tr| tr.accept(ckt.n);
+    // ponytail: commits per inner step, so an outer-step rollback restores x
+    // and the companion history but leaves device state at the failed inner
+    // point; snapshot the batches' state at the outer step if a stateful
+    // device needs it.
+    _ = ckt.stateCtl(.commit);
+    return true;
 }
 
 /// Envelope-following transient from `x`. The caller owns `rows`, sized

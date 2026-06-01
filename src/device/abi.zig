@@ -165,19 +165,18 @@ pub const Hooks = struct {
     seed_ic: ?*const fn (*anyopaque, []f64) void = null,
     mark_current_rows: ?*const fn (*anyopaque, []bool) void = null,
     /// Runs `updateState` at x once per converged solve; returns the earliest
-    /// requested rejection time, if any. Only for state that
-    /// `state_ctl(.revert)` restores when the step is rejected.
+    /// requested rejection time, if any. `state_ctl(.revert)` takes it back
+    /// exactly only when it is the one `updateState` since the last commit
+    /// or revert.
     update_state: ?*const fn (*anyopaque, []const f64) ?f64 = null,
-    /// `update_state` for `absdelay` history, which cannot be rolled back:
+    /// `update_state` for delay-line history (`absdelay`, the native lines):
     /// called once per accepted transient point instead, before
-    /// `state_ctl(.commit)`. Pushing on every Newton attempt would fill the
-    /// delay ring with rejected iterates.
+    /// `state_ctl(.commit)`, so no static solve pushes the ring.
     commit_state: ?*const fn (*anyopaque, []const f64) ?f64 = null,
-    /// `update_state` for held variables with no accepted copy to revert to:
-    /// called once per accepted point, the operating point included, before
-    /// `state_ctl(.commit)`. Per solve it would latch an iterate, or a solve
-    /// the step then rejected.
-    commit_held: ?*const fn (*anyopaque, []const f64) ?f64 = null,
+    /// VerA `stateCtl`: `.commit` at every accepted point, the operating
+    /// point included, `.revert` after a rejected attempt, `.query` for a
+    /// cross/above flip since the last commit. Commit runs once at
+    /// instantiation too, so a revert is always defined.
     state_ctl: ?*const fn (*anyopaque, StateCtlOp) bool = null,
     /// Sets every instance's temperature, in Celsius.
     set_temp: ?*const fn (*anyopaque, f32) void = null,

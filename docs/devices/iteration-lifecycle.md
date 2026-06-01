@@ -28,6 +28,24 @@ Iteration hooks do not write the integration or event history managed by
 and device convergence gates pass. Existing transient commit/revert calls
 continue to own accepted-time history.
 
+`stateCtl` covers every field `updateState` advances (operator history,
+§5.10 held variables, seeds, `$bound_step`) plus `State.t_prev`, under three
+rules the host keeps:
+
+- `.commit` at every accepted point: the operating point, each transient,
+  envelope, PSS and tran-noise step, each DC sweep point. Each batch also
+  commits once at instantiation, so a revert is always defined.
+- `.revert` after every rejected attempt (Newton failure, LTE, state flip).
+- A revert is exact across one `updateState` only. `Circuit.updateStates`
+  reverts first when it already staged since the last commit or revert: a
+  flip that forces another iterate, or the next rung of the OP ladder.
+
+Delay-line history (`absdelay`, the native lines) still stages only at
+accepted transient points (`Hooks.commit_state`), since a push at the
+operating point seeds the ring with a static solve. The
+`hdl/veriloga_transition_reject` fixture checks a cross-started `transition`
+through 252 LTE and 12 state rejections against its analytic ramp.
+
 Devices exposing iteration hooks are excluded from GPU residency
 (`gpuEligible` in `src/device/eval.zig`). Mixed GPU
 circuits evaluate those batches on the CPU and use the same solver lifecycle.

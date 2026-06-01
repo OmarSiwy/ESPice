@@ -209,6 +209,7 @@ pub fn simulate(
     // DC identity).
     ckt.setSimState(.{ .t = 0, .dt = 0, .kind = .tran, .initial_step = true });
     _ = ckt.commitStates(x);
+    _ = ckt.stateCtl(.commit);
 
     // ngspice tmax defaults to (tstop - tstart)/50; the circuit's minimum
     // delay caps it further.
@@ -448,9 +449,8 @@ pub fn simulate(
         trial = stale;
         t += dt;
         steps += 1;
-        // §4.5.2 bookkeeping for non-revertible device state, once per
-        // accepted point (`Hooks.commit_state`), then the commit that latches
-        // what it staged.
+        // §4.5.2 delay-line bookkeeping, once per accepted point
+        // (`Hooks.commit_state`), then the commit that latches every stage.
         _ = ckt.commitStates(cur);
         _ = ckt.stateCtl(.commit);
 
