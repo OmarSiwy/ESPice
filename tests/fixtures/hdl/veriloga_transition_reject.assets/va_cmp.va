@@ -1,0 +1,15 @@
+`include "disciplines.vams"
+// VAMS-2023 4.5.8: an input crossing 0.5 V upward steps the target 0 -> 1,
+// which transition slews to the output over tr.
+module va_cmp(in, out);
+    input in;
+    output out;
+    electrical in, out;
+    parameter real tr = 1e-6;
+    real lvl;
+    analog begin
+        @(initial_step) lvl = 0;
+        @(cross(V(in) - 0.5, +1)) lvl = 1;
+        V(out) <+ transition(lvl, 0, tr);
+    end
+endmodule

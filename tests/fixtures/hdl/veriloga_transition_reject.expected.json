@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "A transition whose target a cross event steps keeps its history through rejected steps: stateCtl(.revert) takes back what a rejected attempt advanced.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "VAMS-2023 4.5.8 and 5.10.3: V(in) = t/10u crosses 0.5 V upward at t = 5 us, where lvl steps 0 -> 1, and transition(lvl, 0, 1u) slews V(out) linearly from 0 to 1 over [5 us, 6 us]. V(out) is driven, so the R-L-C tank only shapes the timestep (252 LTE and 12 state rejections). Without the revert the output steps at the first rejected attempt past 5 us (|error| ~ 1 V)."
+  },
+  "netlist_sha256": "a29cb4ebd9170e0fdd5be867ccc8d05ba10dee6e5ac39aa5131d8f71c23dada8",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "axis": {
+          "name": "time",
+          "values": [
+            4.5e-06,
+            5.25e-06,
+            5.5e-06,
+            5.75e-06,
+            6.5e-06,
+            9e-06
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 1e-04,
+            "atol": 1e-04,
+            "values": [
+              0.0,
+              0.25,
+              0.5,
+              0.75,
+              1.0,
+              1.0
+            ]
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  }
+}
