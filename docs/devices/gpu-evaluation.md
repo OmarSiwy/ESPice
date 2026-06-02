@@ -408,9 +408,19 @@ Against E1's rules:
    ParEval workers, which spin and then yield between evals while the
    single-threaded LU runs beside them. The eval itself barely scales on
    the PSP103 decks (chain_psp103_10k: 20.3 s on one thread, 21.8 s on
-   eight). ParEval balances lanes by `count * n_u^2` and sums each lane's
-   private slab back serially over its write window; on a 0.66M-nnz
-   pattern that summation is the suspect, not yet profiled.
+   eight). Profiled since: lane 0 reduced every slab alone over windows of
+   300k-660k slots, 8.4 ms a pass against an 8 ms stamp; each worker
+   cleared its whole window before stamping; and `count * n_u^2` gave
+   lane 0 the capacitors and nothing else. ParEval now reduces in
+   parallel, clears as it reduces, weighs nonlinear instances 16x, and
+   parks idle workers on a futex (see
+   [refactoring.md](../analysis/refactoring.md)). On short-window copies
+   of these decks at load under 20, 8 threads: device eval
+   chain_psp103_10k 4.0 to 1.8 s (one thread: 2.9 s), logic_psp103_10k 2.1
+   to 1.5 s; CPU time 2.3-5.8x lower. The LU slowdown showed up in one of
+   three runs before and none after; wall time is otherwise flat. Eval
+   is faster at 4 threads (1.5 s) than at 8: a worker lane stamps PSP103
+   about 2x slower than lane 0, likely E-cores or the shared L3.
 
 ## Limits
 
