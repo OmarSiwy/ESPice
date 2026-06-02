@@ -36,27 +36,62 @@ that branch on "static" therefore take their non-static path in AC: the
 mos1/2/3/6/9 Meyer caps (`chgs + $prev(chgs)`, equal to `2*chgs` at the
 operating point) and tline's `absdelay` branch. Measured, no corpus deck's
 output changed. A 50 Ω, 1 ns line differs from the old static branch by
-1e-13 relative. Both miss ngspice's e^{-jωτ} phase, which the VA tline has
-never had in AC.
+1e-13 relative.
 
-Why the phase is missing (`ac/device_tline_delay`, a known gap): VerA's
-`zAbsdelay` returns its input, derivative and all, whenever dt ≤ 0, whatever
-the kind, so the AC linearization sees a transparent line. It could not do
-better through the ABI anyway, which carries only G and C. LRM §4.5.7 makes
-absdelay e^{-jωτ} in AC; ngspice's TRAacLoad stamps cos(ωτ) and -sin(ωτ)
-per frequency (traacld.c). Planned host path:
-- VerA, under kind .ac, emits each absdelay site as a constant (no
-  derivative) in G and publishes the part of the Jacobian that flows
-  through it, as (slot, value, τ) triples, through a new `Hooks.ac_delays`.
-- The circuit keeps them as SoA arrays next to the G and C planes.
-- The FreqSolver fill adds d·cos(ωτ) to the real block and -d·sin(ωτ) to
-  the imaginary block of each lane, after G + jωC.
+### Frequency-dependent entries (absdelay, laplace, zi)
 
-The slots already exist in the pattern, because the transient stamps the
-same entries, so one pivot tape still serves every lane. Delay terms only
-change the per-lane values, as ωC does, and a lane whose pivot degrades
-fails its mask and refactors on the scalar path. pz has no finite form for
-e^{-sτ} and keeps the transparent line.
+LRM §4.5.7 makes `absdelay` e^{-jωτ} in AC (ngspice's TRAacLoad stamps
+cos(ωτ) and -sin(ωτ) per frequency, traacld.c), §4.5.11 `laplace_*` H(jω)
+and §4.5.12 `zi_*` H(e^{jωT}). G and C cannot carry that, so VerA (contract
+ABI 5) splits it out. Under kind `.ac` or `.noise` the device's eval keeps
+each operator's value and drops its partials, and the device publishes the
+dropped Jacobian slots as `ac_dyn_slots` with a pure
+`acDyn(F, model, inst, x, sim, ω, out)` that returns their complex terms,
+the jω of a charge the operator feeds included:
+
+$$
+A(\omega)[s] = G[s] + j\omega C[s] + \mathrm{acDyn}(\omega)[s].
+$$
+
+At ω = 0, `acDyn(0).re` is exactly the partial a `.dc` eval stamps, and the
+imaginary part is 0.
+
+Host path:
+- `Hooks.collect_ac_dyn` maps each instance's `ac_dyn_slots` through its slot
+  tape to global CSC slots, and `Circuit.freeze` concatenates them into
+  `ac_dyn_slots` (trash slot for a ground entry). The slots are already in
+  the pattern, because the transient stamps them, so the GPU layout and the
+  pivot tape are unchanged.
+- `Hooks.ac_dyn` calls `acDyn` once per instance and lane-width chunk of
+  frequencies (F = `@Vector(W, f64)`, bit-identical to W scalar calls), and
+  `Circuit.acDyn` fills a (entry, ω) table. It runs on the host whether or
+  not a GPU context is live.
+- `freq.Stream` fills that table per quantum chunk and hands it to
+  `FreqSolver.solveBatch` as a `Dyn`. The lane fill adds re to both real
+  blocks, +im to the lower-left and -im to the upper-right, after G + jωC;
+  the scalar fill does the same adds in the same order, so each lane is
+  bitwise its scalar fill (`src/solver/tests.zig`, the sparse lane-path
+  test). One LaneLu pivot tape still serves all lanes, and a lane whose
+  pivot degrades peels to the scalar path as before. ac, noise, stb and sp
+  all run through it; the dense strategy adds the same terms by (row, col).
+- disto adds `acDyn` at ω, 2ω and 3ω to each dense A. Its second- and
+  third-order kernels are differences of G, which leave the operator out:
+  exact for the linear lines in `models/`, not for a nonlinearity behind a
+  delay.
+- pz adds `acDyn(0).re` into G. e^{-sτ} has no finite pole-zero form, so a
+  delay stays transparent there, as in the `.dc` eval.
+- pac, pxf and pnoise keep the orbit when the circuit has entries, and per
+  input frequency sample `acDyn` along it at every sideband's ω_q (negative
+  ω included), Fourier-transform each (entry, sideband) series and add bin
+  m_p - m_q at block (p, q). The operator sees its input sideband's ω_q,
+  which is exact when the chain into the operator is time-invariant along
+  the orbit (all three line models). An LTI line through PAC reproduces the
+  AC response on sideband 0 to 1e-16.
+
+Measured: `ac/device_tline_delay` matches its ngspice-45 oracle in magnitude
+and phase; VerA's `absdelay(V(in), 1n)` repro into 1 kΩ gives |V(out)| = 1 at
+-45°, -90°, -135° for 125, 250, 375 MHz. No other deck's output changed; no
+other corpus deck puts a line in a small-signal analysis.
 
 ### Stacked-real formulation
 

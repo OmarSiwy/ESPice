@@ -86,7 +86,7 @@ pub fn sweep(
     e[options.out_node] = 1.0;
     if (options.out_neg != root.GROUND) e[options.out_neg] = -1.0;
 
-    var stream = try freq.Stream.init(allocator, &fs, omegas, e, true);
+    var stream = try freq.Stream.init(allocator, &fs, ckt, x_op, omegas, e, true);
     defer stream.deinit(allocator);
 
     // ln of each source's output density at the previous point (ngspice's

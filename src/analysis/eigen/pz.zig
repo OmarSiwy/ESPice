@@ -19,6 +19,7 @@ const std = @import("std");
 const root = @import("../types.zig");
 const types = @import("core").numerics;
 const dense_lu = @import("solver").dense_lu;
+const freq_solve = @import("solver").freq_solve;
 const qr = @import("qr.zig");
 
 const Complex = types.Complex;
@@ -101,6 +102,18 @@ pub fn solve(
     };
     ckt.denseG(w.g);
     ckt.denseC(w.c);
+    // The frequency-dependent entries at their DC gain, acDyn(0).re (absdelay
+    // 1, a laplace H(0)): what a .dc eval stamps in G, bit for bit. e^(-sτ)
+    // has no finite pole-zero form, so a delay stays transparent.
+    if (ckt.ac_dyn_slots.len != 0) {
+        const dyn = try allocator.alloc(f64, 2 * ckt.ac_dyn_slots.len);
+        defer allocator.free(dyn);
+        const re = dyn[0..ckt.ac_dyn_slots.len];
+        ckt.acDyn(x_op, &.{0}, re, dyn[re.len..]);
+        for (ckt.ac_dyn_slots, re) |slot, v| {
+            if (slot < ckt.nnz) w.g[@as(usize, ckt.row_idx[slot]) * n + freq_solve.slotCol(ckt.col_ptr, slot)] += v;
+        }
+    }
 
     // Denominator: σ = 0 and no rank count, the form every bare `.pz` deck is
     // validated against.

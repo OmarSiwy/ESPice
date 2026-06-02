@@ -49,7 +49,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const data = try a.alloc(f64, n_points * row_len);
     errdefer a.free(data);
 
-    var stream = try freq.Stream.init(scratch, &fs, omegas, rhs, false);
+    var stream = try freq.Stream.init(scratch, &fs, ckt, ctx.x_op, omegas, rhs, false);
     defer stream.deinit(scratch);
     while (try stream.next(ckt)) |pt| {
         const row = data[pt.k * row_len ..][0..row_len];

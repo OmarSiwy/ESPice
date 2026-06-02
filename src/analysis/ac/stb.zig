@@ -50,7 +50,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const data = try a.alloc(f64, n_points * 4);
     errdefer a.free(data);
 
-    var stream = try freq.Stream.init(scratch, &fs, omegas, rhs, false);
+    var stream = try freq.Stream.init(scratch, &fs, ckt, ctx.x_op, omegas, rhs, false);
     defer stream.deinit(scratch);
     while (try stream.next(ckt)) |pt| {
         const v_p: Complex = .{ .re = pt.x[opts.probe_p], .im = pt.x[n + opts.probe_p] };

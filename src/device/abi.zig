@@ -204,6 +204,18 @@ pub const Hooks = struct {
     /// Appends every declared noise generator with its PSD at x. Temperature
     /// is the instance's own, already applied by the device.
     collect_noise: ?*const fn (*anyopaque, []const f64, std.mem.Allocator, *std.ArrayList(NoiseSource)) DeviceResult(void) = null,
+    /// Appends the global CSC slot of every frequency-dependent small-signal
+    /// entry (VerA `ac_dyn_slots`: §4.5.7 absdelay, §4.5.11 laplace, §4.5.12
+    /// zi), instance-major. A ground entry reads as the trash slot. Under
+    /// kind `.ac`/`.noise` the G and C planes leave these partials out, and
+    /// `ac_dyn` supplies them. Null when the device has none.
+    collect_ac_dyn: ?*const fn (*anyopaque, std.mem.Allocator, *std.ArrayList(u32)) DeviceResult(void) = null,
+    /// Writes the small-signal term of each `collect_ac_dyn` entry e at x and
+    /// at every ω in `omegas`: `re[e * omegas.len + k]` and `im[...]`, so
+    /// A(ω_k) = G + jω_kC + (re + j·im) per entry. Reads the stored sim state
+    /// (`set_sim_state`), its t included. Returns the number of entries
+    /// written; `re`/`im` must hold at least that many times `omegas.len`.
+    ac_dyn: ?*const fn (*anyopaque, x: []const f64, omegas: []const f64, re: []f64, im: []f64) usize = null,
     /// Reruns parameter-derived state; false means the new parameters need
     /// a different topology than the frozen one.
     recompute: ?*const fn (*anyopaque) bool = null,
@@ -396,8 +408,9 @@ pub const GpuPayload = struct {
 // 14: VerA contract ABI 5. `SimState` (hashed) reaches every device call and
 //    GPU kernel by value; `Hooks.begin_solve` is gone and `set_sim_state` is
 //    required.
-// GPU planes, Model/Instance PODs and scatter tapes are unchanged by 10 to 14.
-pub const abi_version: u32 = 14;
+// 15: `Hooks.collect_ac_dyn`/`ac_dyn`, VerA's frequency-dependent entries.
+// GPU planes, Model/Instance PODs and scatter tapes are unchanged by 10 to 15.
+pub const abi_version: u32 = 15;
 
 /// A device type's construction entry points, exported by each device object
 /// and by runtime-loaded `.so` devices.

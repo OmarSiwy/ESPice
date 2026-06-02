@@ -9,6 +9,7 @@ const pss = @import("pss.zig");
 const num = @import("core").numerics;
 const fft_mod = @import("solver").fft;
 const dense_lu = @import("solver").dense_lu;
+const slotCol = @import("solver").freq_solve.slotCol;
 
 pub const Complex = num.Complex;
 
@@ -61,6 +62,15 @@ pub fn sweep(
     const x_work = try allocator.alloc(f64, nn2);
     defer allocator.free(x_work);
 
+    // Frequency-dependent entries: per input frequency, `acDyn` along the
+    // orbit at every sideband ω, as (entry, sideband) series.
+    const n_samples = lin.g_hat.len / lin.col_ptr[n];
+    const series = if (lin.wave.len != 0) ckt.ac_dyn_slots.len * n_sb else 0;
+    const dyn_f = try allocator.alloc(f64, n_sb + 2 * series * (n_samples + 1) + 2 * n_samples);
+    defer allocator.free(dyn_f);
+    const dyn_hat = try allocator.alloc(Complex, series * n_samples);
+    defer allocator.free(dyn_hat);
+
     var sw = options.sweep.iter();
     var fi: usize = 0;
     while (sw.next()) |f_in| : (fi += 1) {
@@ -69,6 +79,12 @@ pub fn sweep(
         root.zeroSimd(rhs_work);
 
         buildConversionMatrix(adjoint, a_work, lin, n, n_sb, nn, nn2, f_in, options);
+        if (series != 0) {
+            const omegas = dyn_f[0..n_sb];
+            for (omegas, 0..) |*w, q| w.* = 2.0 * std.math.pi * (f_in + @as(f64, @floatFromInt(@as(i32, @intCast(q)) - @as(i32, @intCast(n_harm)))) * options.f_lo);
+            dynSpectra(ckt, lin, omegas, dyn_f[n_sb..], dyn_hat);
+            addDynConversion(adjoint, a_work, lin, ckt.ac_dyn_slots, dyn_hat, n, n_sb, nn, nn2);
+        }
         if (drive.len != 0) {
             @memcpy(rhs_work[n_harm * n ..][0..n], drive[0..n]);
             @memcpy(rhs_work[nn + n_harm * n ..][0..n], drive[n..]);
@@ -89,16 +105,23 @@ pub fn sweep(
 /// Settled G/C Fourier coefficients, bin-major over the circuit's CSC
 /// pattern: g_hat[m * nnz + slot] is the slot's m-th coefficient, the slot
 /// being (row_idx[slot], col) for col_ptr[col] <= slot < col_ptr[col + 1].
-/// Owns g_hat and c_hat; the pattern slices borrow the circuit's.
+/// Owns g_hat, c_hat and wave; the pattern slices borrow the circuit's.
 pub const Linearization = struct {
     g_hat: []const Complex,
     c_hat: []const Complex,
     col_ptr: []const u32,
     row_idx: []const u32,
+    /// The orbit's sample rows (`Orbit.wave`) and the kind they linearize
+    /// under, kept only when the circuit has frequency-dependent entries
+    /// (`Circuit.ac_dyn_slots`), whose terms `sweep` samples per input
+    /// frequency. Empty otherwise.
+    wave: []const f64 = &.{},
+    kind: root.AnalysisKind = .ac,
 
     pub fn deinit(self: Linearization, allocator: std.mem.Allocator) void {
         allocator.free(self.g_hat);
         allocator.free(self.c_hat);
+        allocator.free(self.wave);
     }
 };
 
@@ -168,8 +191,9 @@ pub fn linearize(ckt: *root.Circuit, orb: Orbit, kind: root.AnalysisKind, alloca
     errdefer allocator.free(c_hat);
     try spectra(td[0..plane], n_samples, g_hat, allocator);
     try spectra(td[plane..], n_samples, c_hat, allocator);
+    const wave: []const f64 = if (ckt.ac_dyn_slots.len != 0) try allocator.dupe(f64, orb.wave) else &.{};
 
-    return .{ .g_hat = g_hat, .c_hat = c_hat, .col_ptr = ckt.col_ptr, .row_idx = ckt.row_idx };
+    return .{ .g_hat = g_hat, .c_hat = c_hat, .col_ptr = ckt.col_ptr, .row_idx = ckt.row_idx, .wave = wave, .kind = kind };
 }
 
 /// Fourier coefficients of the `td.len / n_samples` series stored
@@ -207,6 +231,83 @@ pub fn settle(ckt: *root.Circuit, x_init: []const f64, options: Options, allocat
     return linearize(ckt, orb, .ac, allocator);
 }
 
+/// Fourier coefficients of `Circuit.acDyn` along `lin`'s orbit at each ω in
+/// `omegas` (one per sideband): hat[m * series + e * omegas.len + q] is bin m
+/// of entry e at omegas[q], series = entries * omegas.len. `work` holds
+/// 2 * series * (n_samples + 1) + 2 * n_samples values. Leaves the sim state
+/// at the last sample.
+fn dynSpectra(ckt: *root.Circuit, lin: Linearization, omegas: []const f64, work: []f64, hat: []Complex) void {
+    const n: usize = ckt.n;
+    const n_samples = lin.wave.len / (n + 1) - 1;
+    const series = ckt.ac_dyn_slots.len * omegas.len;
+    const re = work[0..series];
+    const im = work[series..][0..series];
+    const td = work[2 * series ..][0 .. 2 * series * n_samples];
+    const fft_re = work[2 * series * (n_samples + 1) ..][0..n_samples];
+    const fft_im = work[2 * series * (n_samples + 1) + n_samples ..][0..n_samples];
+    for (0..n_samples) |k| {
+        const row = lin.wave[k * (n + 1) ..][0 .. n + 1];
+        ckt.setSimState(.{ .t = row[0], .kind = lin.kind });
+        ckt.acDyn(row[1..], omegas, re, im);
+        for (re, im, 0..) |r, i, sr| {
+            td[sr * n_samples + k] = r;
+            td[(series + sr) * n_samples + k] = i;
+        }
+    }
+    const inv_n = 1.0 / @as(f64, @floatFromInt(n_samples));
+    for (0..series) |sr| {
+        @memcpy(fft_re, td[sr * n_samples ..][0..n_samples]);
+        @memcpy(fft_im, td[(series + sr) * n_samples ..][0..n_samples]);
+        fft_mod.fft(fft_re, fft_im);
+        for (0..n_samples) |m| hat[m * series + sr] = .{ .re = fft_re[m] * inv_n, .im = fft_im[m] * inv_n };
+    }
+}
+
+/// Adds the frequency-dependent entries into `a_work` as
+/// `buildConversionMatrix` adds G + jωC: bin m_p - m_q of entry e at the
+/// input sideband's ω_q couples sideband q into p.
+// ponytail: the operator sees its input's sideband ω_q, exact when the chain
+// into the operator is time-invariant along the orbit (every line in
+// models/). An operator fed by a modulated signal, or a ddt of an operator
+// with a modulated gain, needs acDyn split at the operator.
+fn addDynConversion(
+    comptime transpose: bool,
+    a_work: []f64,
+    lin: Linearization,
+    slots: []const u32,
+    hat: []const Complex,
+    n: usize,
+    n_sb: usize,
+    nn: usize,
+    nn2: usize,
+) void {
+    const nnz = lin.col_ptr[n];
+    const n_samples = lin.g_hat.len / nnz;
+    const series = slots.len * n_sb;
+    for (0..n_sb) |p| for (0..n_sb) |q| {
+        const bin = mapHarmonicToFftBin(@as(i32, @intCast(p)) - @as(i32, @intCast(q)), n_samples) orelse continue;
+        for (slots, 0..) |slot, e| {
+            if (slot >= nnz) continue;
+            const z = hat[bin * series + e * n_sb + q];
+            stamp(transpose, a_work, n, nn, nn2, p, q, lin.row_idx[slot], slotCol(lin.col_ptr, slot), z.re, z.im);
+        }
+    };
+}
+
+/// Adds z at sideband block (p, q), entry (row, col), of the real-expanded
+/// `a_work`, or of its transpose.
+inline fn stamp(comptime transpose: bool, a_work: []f64, n: usize, nn: usize, nn2: usize, p: usize, q: usize, row: usize, col: usize, z_re: f64, z_im: f64) void {
+    //   | Re  -Im |   | X_re |   | B_re |
+    //   | Im   Re | * | X_im | = | B_im |
+    const gr = if (transpose) q * n + col else p * n + row;
+    const gc = if (transpose) p * n + row else q * n + col;
+
+    a_work[gr * nn2 + gc] += z_re;
+    a_work[gr * nn2 + (nn + gc)] += if (transpose) z_im else -z_im;
+    a_work[(nn + gr) * nn2 + gc] += if (transpose) -z_im else z_im;
+    a_work[(nn + gr) * nn2 + (nn + gc)] += z_re;
+}
+
 /// Adds the real-expanded LPTV matrix into the zeroed `a_work`
 /// (nn2 x nn2 row-major), or its transpose when `transpose`, so PXF needs no
 /// extra pass. Each (p, q, row, col) owns its four entries, so slot order is
@@ -242,16 +343,7 @@ pub inline fn buildConversionMatrix(
                     // z = G + j*w*C
                     const z_re = g_coeff.re - omega_p * c_coeff.im;
                     const z_im = g_coeff.im + omega_p * c_coeff.re;
-
-                    //   | Re  -Im |   | X_re |   | B_re |
-                    //   | Im   Re | * | X_im | = | B_im |
-                    const gr = if (transpose) q * n + col else p * n + row;
-                    const gc = if (transpose) p * n + row else q * n + col;
-
-                    a_work[gr * nn2 + gc] += z_re;
-                    a_work[gr * nn2 + (nn + gc)] += if (transpose) z_im else -z_im;
-                    a_work[(nn + gr) * nn2 + gc] += if (transpose) -z_im else z_im;
-                    a_work[(nn + gr) * nn2 + (nn + gc)] += z_re;
+                    stamp(transpose, a_work, n, nn, nn2, p, q, row, col, z_re, z_im);
                 }
             }
         }

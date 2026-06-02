@@ -9,7 +9,7 @@
     "source_sha256": "01777b5dc41944ac90a67c853fd6f414711546dc1c62c954995890224d02e51c"
   },
   "origin": "tests/fixtures/ac/device_tline_delay.sp",
-  "netlist_sha256": "01777b5dc41944ac90a67c853fd6f414711546dc1c62c954995890224d02e51c",
+  "netlist_sha256": "a8a3a280c7a3ace351c7051e87235566f8f231701a2d2bd293f2c016cf836112",
   "expect": {
     "status": "success",
     "plots": [

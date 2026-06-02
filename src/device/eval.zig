@@ -1113,6 +1113,7 @@ pub fn DeviceBatch(comptime D: type) type {
     // Only timer-only models: their breakpoints are pure in (model, t).
     // Native lines rewrite `Model.brk` as they step, so theirs are not.
     const has_bp = @hasDecl(D, "nextBreakpoint") and skipsTimerState(D);
+    const has_ac_dyn = @hasDecl(D, "ac_dyn_slots");
 
     return struct {
         count: u32,
@@ -1177,6 +1178,8 @@ pub fn DeviceBatch(comptime D: type) type {
                     " declares noise_gens without noisePsd; see docs/devices/noise-contract.md §3");
                 break :blk collectNoise;
             } else null,
+            .collect_ac_dyn = if (has_ac_dyn) collectAcDyn else null,
+            .ac_dyn = if (has_ac_dyn) acDyn else null,
             .recompute = if (@hasDecl(D, "collapse") or @hasDecl(D, "precompute") or @hasDecl(D, "setup") or has_bp) recomputePrecomputed else null,
             .gpu_payload = if (gpuEligible(D)) gpuPayload else null,
             .apply_attempt = if (has_attempt) applyAttempt else null,
@@ -1565,6 +1568,45 @@ pub fn DeviceBatch(comptime D: type) type {
                     });
                 }
             }
+        }
+
+        fn collectAcDyn(ctx: *anyopaque, gpa: std.mem.Allocator, list: *std.ArrayList(u32)) ir.DeviceResult(void) {
+            const self: *Self = @ptrCast(@alignCast(ctx));
+            list.ensureUnusedCapacity(gpa, self.count * D.ac_dyn_slots.len) catch return .out_of_memory;
+            for (0..self.count) |id| {
+                for (D.ac_dyn_slots) |s| list.appendAssumeCapacity(self.slots[id * n_u * n_u + s]);
+            }
+            return .{ .ok = {} };
+        }
+
+        /// `Hooks.ac_dyn`: one `D.acDyn` call per instance and lane-width
+        /// chunk of `omegas`, a ragged tail padded with its last ω.
+        fn acDyn(ctx: *anyopaque, x: []const f64, omegas: []const f64, re: []f64, im: []f64) usize {
+            const self: *Self = @ptrCast(@alignCast(ctx));
+            const K = D.ac_dyn_slots.len;
+            const LW = std.simd.suggestVectorLength(f64) orelse 1;
+            const V = @Vector(LW, f64);
+            const nw = omegas.len;
+            const sim = self.sim;
+            for (0..self.count) |id| {
+                const lx = self.localX(x, id);
+                var j: usize = 0;
+                while (j < nw) : (j += LW) {
+                    const cnt = @min(LW, nw - j);
+                    var ow: [LW]f64 = undefined;
+                    for (0..LW) |l| ow[l] = omegas[j + @min(l, cnt - 1)];
+                    var out: [K]std.math.Complex(V) = undefined;
+                    D.acDyn(V, &self.models[id], &self.instances[id], &lx, sim, ow, &out);
+                    for (out, 0..) |o, k| {
+                        const e = (id * K + k) * nw + j;
+                        const r: [LW]f64 = o.re;
+                        const i: [LW]f64 = o.im;
+                        @memcpy(re[e..][0..cnt], r[0..cnt]);
+                        @memcpy(im[e..][0..cnt], i[0..cnt]);
+                    }
+                }
+            }
+            return self.count * K;
         }
 
         fn binding(self: *Self) Batch {
@@ -2082,6 +2124,9 @@ const VpiHost = struct {
     /// temperature write.
     pub const calls_setup = true;
     pub const mutable_eval = true;
+    /// Every small-signal matrix adds the device's `acDyn` terms
+    /// (`Hooks.ac_dyn`).
+    pub const calls_ac_dyn = true;
 };
 
 /// Compile error unless this host provides everything D requires. The check
