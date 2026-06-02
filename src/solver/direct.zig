@@ -20,6 +20,9 @@ pub const Params = struct {
     /// A refactor whose reused pivot falls below this fraction of its column
     /// max fails, forcing a full re-pivoting factor. 0 disables the monitor.
     refactor_growth_limit: f64 = 1e-12,
+    /// A re-pivot whose L plus U outgrows this multiple of the fresh
+    /// factor's restarts on the previous pivots (`SparseLu.fill_cap`).
+    repivot_fill_cap: f64 = 3,
 };
 
 /// Sparse direct solver on one frozen CSC pattern.
@@ -138,6 +141,7 @@ pub const Solver = struct {
             self.lu = try SparseLu.init(self.gpa, self.n, self.col_ptr, self.row_idx, self.q);
         }
         const lu = &self.lu.?;
+        lu.fill_cap = self.params.repivot_fill_cap;
         const ptol = self.params.pivot_tol;
         const growth = self.params.refactor_growth_limit;
         if (self.factored) {

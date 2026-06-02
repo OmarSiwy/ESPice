@@ -382,8 +382,12 @@ Against E1's rules:
    refactor fails its growth check, the re-pivoting full factor can fill
    far worse: on the 100k chain's diverging operating point the fill went
    from 2.9x to 25x (9e10 multiply-adds a factor), which is why the 100k
-   decks start from `uic`. This decides where GPU work goes next: the
-   solve, not more eval.
+   decks start from `uic`. A re-pivot now hands a displaced diagonal to
+   the column that lost it and gives up past 3x the fresh fill
+   ([gilbert-peierls-lu.md](../solvers/gilbert-peierls-lu.md),
+   "Re-pivoting"): that operating point finishes in 210 s with fill at
+   most 8.2x, where it had not finished in 45 minutes. This decides where
+   GPU work goes next: the solve, not more eval.
 2. **Setup on PDK decks.** Parse, subcircuit expansion and binding of the
    sky130 and IHP model libraries take 7.9-9.2 s on c7552 and 1.6 s on
    the TDC, 28-47% of the `cuda` wall time. ngspice's own profile of the

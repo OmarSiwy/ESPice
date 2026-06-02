@@ -160,7 +160,9 @@ factor(col_ptr, row_idx, vals, tau):
     # ---- threshold partial pivoting, diagonal preferred ----
     amax = max |w[r]| over r in topo[0..nt] with pinv[r] == NONE; piv = argmax
     if amax == 0 or !finite(amax): error SingularMatrix
-    if pinv[c] == NONE and |w[c]| >= tau * amax: piv = c
+    d = want[c]                          # c, unless a swap moved it (below)
+    if pinv[d] == NONE and |w[d]| >= tau * amax: piv = d
+    if piv != d: swap want of the column that wanted piv to d
     udiag[k] = w[piv]; pinv[piv] = k
 
     # ---- store scaled L column, clear w along the pattern ----
@@ -176,6 +178,64 @@ Solve (`SparseLu.solve`): permute $b$ by `pinv`, forward-substitute through
 `lp/li/lx` skipping zero $y_k$, back-substitute through `up/ui/ux` dividing
 by `udiag`, un-permute by `q`. Transpose solve runs the same arrays in
 gather mode ($U^T$ lower, $L^T$ unit upper).
+
+### Re-pivoting
+
+`Solver.factor` (`direct.zig`) refactors on the frozen pivot sequence and
+runs a full `factor` only when the refactor's growth monitor rejects a
+pivot below `1e-12` of its column. The full factor keeps the BTF+AMD column
+order and picks rows by threshold partial pivoting, diagonal first
+(`tau = 1e-3`), the rule KLU uses. Nothing in it looks at sparsity once the
+diagonal fails: the fallback is the column's largest entry.
+
+That is fine while few columns leave the diagonal. On a diverging Newton
+step it is not. On the chain_bsim4_10k operating point (n = 44,925, 215k
+entries) a device stamped conductances up to 1e60, and the re-pivot sent
+4,503 columns off the diagonal: L+U filled 34.2x against 2.6x for the fresh
+factor, 2.3 s against 22 ms. On chain_bsim4_100k the fill reached 63.5x and
+the operating point had not finished after 45 minutes.
+
+Two causes, measured on the dumped matrices:
+
+- Cascades. When column c pivots on row r, column r later finds its
+  diagonal taken and must leave the diagonal too, and so on. In one 2,654
+  off-diagonal re-pivot, 1,811 were such cascades. The factor now keeps
+  `want[c]`, the row column c tries first (the identity to start with).
+  When c pivots on r != want[c], the column that wanted r inherits
+  want[c], a 2x2 exchange. It is the pairing ngspice's Sparse 1.3 gets by
+  exchanging rows and columns together (`spfactor.c`
+  `ExchangeRowsAndCols`); KLU has no counterpart. That re-pivot drops to
+  2,334 off-diagonal pivots and 4.37x, the 34.2x one to 24.3x.
+- Genuine threshold failures. On the 1e60 matrices the remaining off-diagonal
+  pivots fail the test by 1e-3 to 1e-40 even after row scaling, so no
+  threshold choice rescues them: 1e-6 gave 20.3x, 1e-9 20.7x, and
+  `tau = 1e-300` overflowed to a singular factor. A Markowitz tie-break (fewest remaining
+  row entries among the rows that pass) did not help either: 25.8x.
+
+So `factor` also caps a re-pivot. `base_lu` is the L+U count of the last
+factor without a previous sequence. A re-pivot that grows past
+`fill_cap * base_lu` (`Params.repivot_fill_cap = 3`) is abandoned and redone
+on the previous pivot sequence, taking every old pivot that is still
+nonzero and threshold-pivoting only where one is zero. That keeps the old
+fill. The refactor's growth monitor still checks the kept pivots, so the
+next iteration re-pivots again once the matrix is sane. Preferring the
+previous pivots on every re-pivot (kept down to the refactor's 1e-12) was
+tried and dropped: it carried pivots picked for a 1e60 matrix into the
+healthy ones after it, with componentwise backward errors of 1e-3 to 1
+where a fresh factor gives 1e-16.
+
+ngspice with KLU never gets here: `klusmp.c` re-pivots only when
+`klu_refactor` meets an exactly zero pivot, and ngspice's Sparse reorders
+only from the first failing step, with Markowitz on the active submatrix,
+which a fixed column order cannot do.
+
+Measured (callgrind, `op` of chain_bsim4_10k): 56.3G to 44.0G instructions
+(-22%), largest fill 34.2x to 6.6x. chain_bsim4_100k's operating point:
+did not finish in 45 minutes (fill 25x, 12x, 63.5x in its first five
+factors) against 210 s, largest fill 8.2x, the cap tripping four times.
+Corpus: 18 decks change bytes from re-chosen pivots, all by roundoff in
+err/tol (largest: stress/vacask_ring 0.2563 to 0.2564); no deck changes
+pass or fail.
 
 ## 4. Pseudo-code, GPU parallel
 
