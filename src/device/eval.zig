@@ -928,6 +928,7 @@ pub fn ProtoStore(comptime D: type) type {
             store.slots = &.{};
             if (comptime has_q) store.q_tape = &.{};
             if (comptime has_attempt_decl) store.saved_models = &.{};
+            if (comptime hasSpicePulse(D)) store.pulse_brk = &.{};
             if (comptime @hasDecl(D, "limit")) store.lim_x = &.{};
             if (comptime @hasDecl(D, "State")) store.states = &.{};
             errdefer DeviceBatch(D).hooks.deinit(store, gpa);
@@ -940,6 +941,10 @@ pub fn ProtoStore(comptime D: type) type {
                 store.attempt_saved = false;
             }
             if (comptime @hasDecl(D, "nextBreakpoint") and skipsTimerState(D)) store.bp = .{ .lo = std.math.inf(f64), .hi = std.math.inf(f64) };
+            if (comptime hasSpicePulse(D)) {
+                store.pulse_brk = try gpa.alloc(PulseBrk, count);
+                @memset(store.pulse_brk, .{});
+            }
             if (comptime @hasDecl(D, "limit")) {
                 // Full n_u stride and zeroed, although only `limitWrites`
                 // slots are used: the GPU uploads the whole plane, and the
@@ -1055,6 +1060,53 @@ fn skipsTimerState(comptime D: type) bool {
     return true;
 }
 
+/// A source model whose PULSE corners follow ngspice's request-time rounding
+/// (`spicePulseBreak`) instead of VerA's `td + k*per` timer arithmetic.
+fn hasSpicePulse(comptime D: type) bool {
+    return @hasDecl(D, "nextBreakpoint") and skipsTimerState(D) and @hasField(D.Model, "pulse_td");
+}
+
+const PulseBrk = struct { req: f64 = std.math.inf(f64), at: f64 = std.math.inf(f64) };
+
+/// ngspice's PULSE breakpoint (vsrcacct.c:48-121, isrcacct.c the same): the
+/// corner after `tq`, requested at the accepted time `t_acc <= tq` and
+/// rounded as ngspice rounds it, `t_acc + (corner - phase(t_acc))`. VerA's
+/// `td + tr + pw + tf` can land one ulp away, which moves a breakpoint across
+/// an integer picosecond and changes every TXL/CPL delayed read after it
+/// (txlload.c truncates time to ps). Null when the result is not after `tq`,
+/// i.e. `t_acc` is not a time ngspice would have asked at, and for any
+/// waveform but PULSE. Nonzero PHASE is left to the timers too: ngspice gives
+/// it a different meaning outside xs mode. The widths are vsource.va's
+/// P_TR/P_TF/P_PW/P_PER.
+fn spicePulseBreak(m: anytype, t_acc: f64, tq: f64) ?f64 {
+    if (m.waveform != 1 or m.pulse_phase != 0) return null;
+    const tr = @max(m.pulse_tr, 1.0e-12);
+    const tf = @max(m.pulse_tf, 1.0e-12);
+    const pw = @max(m.pulse_pw, 0.0) + @max(-m.pulse_pw, 0.0) * 1.0e30;
+    const per = @max(m.pulse_per, tr + pw + tf + 1.0e-12);
+    var time = t_acc - m.pulse_td;
+    if (time >= per) time -= per * @floor(time / per);
+    // ngspice's `atime = time + CKTminBreak`; the host asks at t + minBreak.
+    const atime = time + (tq - t_acc);
+    const corner: f64 = if (atime < 0.0) 0.0 else if (atime < tr) tr else if (atime < tr + pw) tr + pw else if (atime < tr + pw + tf) tr + pw + tf else per;
+    const bp = t_acc + (corner - time);
+    return if (bp > tq) bp else null;
+}
+
+test "spicePulseBreak rounds from the request time as ngspice does" {
+    // tran/bench_tline_txl1_1_line's VS: PULSE(0 5 15.9n 0.2n 0.2n 15.8n 32n).
+    const m = .{ .waveform = @as(i64, 1), .pulse_phase = 0.0, .pulse_td = 15.9e-9, .pulse_tr = 0.2e-9, .pulse_tf = 0.2e-9, .pulse_pw = 15.8e-9, .pulse_per = 32e-9 };
+    const mb = 1e-20;
+    try std.testing.expectEqual(@as(?f64, 15.9e-9), spicePulseBreak(m, 0, mb));
+    try std.testing.expectEqual(@as(?f64, 1.61e-8), spicePulseBreak(m, 15.9e-9, 15.9e-9 + mb));
+    // The fall's end: ngspice lands one ulp below td+tr+pw+tf = 3.21e-8,
+    // at 32099.999... ps, which txlload.c truncates to 32099.
+    try std.testing.expectEqual(@as(?f64, 3.2099999999999996e-08), spicePulseBreak(m, 3.19e-8, 3.19e-8 + mb));
+    try std.testing.expectEqual(@as(?f64, 4.79e-8), spicePulseBreak(m, 3.2099999999999996e-08, 3.2099999999999996e-08 + mb));
+    // An anchor ngspice would not ask at yields nothing (caller falls back).
+    try std.testing.expectEqual(@as(?f64, null), spicePulseBreak(m, 0, 60e-9));
+}
+
 /// Whether D's `updateState` pushes delay-line history, which only accepted
 /// transient points may feed: LRM §4.5 `absdelay`, and the native lines that
 /// declare `unrevertible_state` (they have no `stateCtl`). A VerA ring would
@@ -1113,6 +1165,7 @@ pub fn DeviceBatch(comptime D: type) type {
     // Only timer-only models: their breakpoints are pure in (model, t).
     // Native lines rewrite `Model.brk` as they step, so theirs are not.
     const has_bp = @hasDecl(D, "nextBreakpoint") and skipsTimerState(D);
+    const has_pulse = hasSpicePulse(D);
     const has_ac_dyn = @hasDecl(D, "ac_dyn_slots");
 
     return struct {
@@ -1130,6 +1183,10 @@ pub fn DeviceBatch(comptime D: type) type {
         /// between. `lo = inf` is empty. Every model write goes through
         /// `reprep` or `applyAttempt`, which empty it.
         bp: if (has_bp) struct { lo: f64, hi: f64 } else void,
+        /// Per model, ngspice's VSRCbreak_time: the PULSE breakpoint `at`
+        /// requested at query time `req`, kept until a query reaches it
+        /// (or goes back before `req`, a new run). `req = inf` is empty.
+        pulse_brk: if (has_pulse) []PulseBrk else void,
         lim_x: if (has_limit) []f64 else void,
         lim_active: if (has_limit) bool else void,
         /// The analysis state every device call receives; `eval` takes `t`
@@ -1446,6 +1503,7 @@ pub fn DeviceBatch(comptime D: type) type {
 
         fn reprep(self: *Self) void {
             if (comptime has_bp) self.bp.lo = std.math.inf(f64);
+            if (comptime has_pulse) @memset(self.pulse_brk, .{});
             if (comptime @hasDecl(D, "setup")) {
                 for (self.instances, self.models) |*inst, *mdl| D.setup(Real, mdl, inst);
             }
@@ -1466,14 +1524,24 @@ pub fn DeviceBatch(comptime D: type) type {
         /// The earliest model breakpoint strictly after `t`. The transient
         /// asks once per step; for a timer-only model (`has_bp`) the answer
         /// only moves when `t` reaches it, so the walk (68 timers per vsource
-        /// model, ~425 Ir) runs once per breakpoint instead.
+        /// model, ~425 Ir) runs once per breakpoint instead. A PULSE source
+        /// rounds its corner from the accepted time `sim.t` (the transient
+        /// asks right after accepting it), as ngspice's VSRCaccept does.
         fn nextBreakpointFn(ctx: *anyopaque, t: f64) ?f64 {
             const self: *Self = @ptrCast(@alignCast(ctx));
             if (comptime has_bp) {
                 if (self.bp.lo <= t and t < self.bp.hi) return if (self.bp.hi == std.math.inf(f64)) null else self.bp.hi;
             }
+            const t_acc = if (self.sim.kind == .tran and self.sim.t <= t) self.sim.t else t;
             var best: f64 = std.math.inf(f64);
-            for (self.models) |*m| {
+            for (self.models, 0..) |*m, i| {
+                if (comptime has_pulse) {
+                    const b = &self.pulse_brk[i];
+                    if (t < b.req or t >= b.at)
+                        b.* = .{ .req = t, .at = spicePulseBreak(m, t_acc, t) orelse D.nextBreakpoint(m, t) orelse std.math.inf(f64) };
+                    best = @min(best, b.at);
+                    continue;
+                }
                 if (D.nextBreakpoint(m, t)) |bp| best = @min(best, bp);
             }
             if (comptime has_bp) self.bp = .{ .lo = t, .hi = best };
@@ -1658,11 +1726,13 @@ pub fn DeviceBatch(comptime D: type) type {
                 self.lim_x = &.{};
                 self.lim_active = if (accepted) template.lim_active else false;
             }
+            if (comptime has_pulse) self.pulse_brk = &.{};
             errdefer destroy(self, gpa);
 
             // Model/Instance are POD, so a byte copy is a deep copy.
             self.models = try gpa.dupe(D.Model, template.models);
             self.instances = try gpa.dupe(D.Instance, template.instances);
+            if (comptime has_pulse) self.pulse_brk = try gpa.dupe(PulseBrk, template.pulse_brk);
             if (comptime has_attempt) {
                 self.saved_models = try gpa.alloc(D.Model, self.count);
                 if (accepted and template.attempt_saved) @memcpy(self.saved_models, template.saved_models);
@@ -1693,6 +1763,7 @@ pub fn DeviceBatch(comptime D: type) type {
             gpa.free(self.models);
             if (comptime has_attempt) gpa.free(self.saved_models);
             if (comptime has_limit) gpa.free(self.lim_x);
+            if (comptime has_pulse) gpa.free(self.pulse_brk);
             gpa.free(self.instances);
             if (comptime has_state) gpa.free(self.states);
             if (self.owns_tapes) {
