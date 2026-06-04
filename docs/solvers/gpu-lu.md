@@ -1,7 +1,12 @@
 # GPU LU for large Newton solves: design
 
-**Status: design, not implemented.** Every factor and solve runs on the
-host today (`direct.zig`, `sparse_lu.zig`); the GPU only evaluates device
+**Status: stage 1 built and opt-in; E2 failed its gate.** With
+`ESPICE_GPU_LU=1` (and a GPU backend) the device refactors and solves every
+Newton iteration of the general sparse LU, bitwise the host
+(`src/solver/lu_kernels.zig`, `lu_device.zig`, `src/analysis/gpu_lu.zig`).
+Nothing admits it by default: the kernels beat the better host path by 2x
+on no deck (§5, E2 results), so the cost model declines everything and
+stage 2 and E3 were not started. The GPU otherwise only evaluates device
 planes (`docs/devices/gpu-evaluation.md`). This page answers one question:
 if the host sparse LU dominates on post-layout netlists (extracted RC plus
 many transistors), how should espice factor and solve on the GPU? The
@@ -9,9 +14,9 @@ theory behind level-set GPU LU (GLU, NICSLU) is in `gpu-sparse-lu.md` and is
 not repeated here. The conformance constraints come from
 `gpu-convergence.md` §2.6 and §10.
 
-Nothing here has been measured on a post-layout deck yet. Those decks are
-being built on another branch (`tests/benchmark/postlayout/`), so §5 lists
-the metrics that decide this design instead of numbers.
+§4 is the design as proposed. Stage 1 as built departs from it in the
+solves and a few mechanics; "Stage 1 as built" in §5 lists what changed
+and why, with the measurements.
 
 ## Summary
 
@@ -792,6 +797,95 @@ the refactor and solve bodies; there must be none.
 - If cuDSS beats our kernel by more than 3x, look at the gap (supernodes,
   ordering) before tuning ours.
 
+**E2 results (2026-09-28).** `ESPICE_GPU_LU=1 ESPICE_GPU_LU_CHECK=1
+ESPICE_GPU_LU_BENCH=10` on a `-Dgpu=false` build (device evals on the
+host; the LU kernels are built anyway), RTX 4060 Laptop, i9-14900HX, load
+average 1.4-2.2. Medians of the first 10 device refactors of the transient
+(the only query for the 100k decks, which start from `uic`), in ms. Device
+times are CUDA event times of the kernels alone; the host columns are
+`SparseLu.refactor` plus `solve` on one thread, and the same kernel bodies
+with the refactor on 8 threads (`runHost`; its solves run on one thread,
+as the host's do). The GPU held 2640 MHz with no throttle reason even at a
+CPU load of 150, so the device columns do not move with host load.
+
+| deck | n | F | dev refactor | dev solves | dev total | host 1 thr | kernels 8 thr | vs better host |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| logic_bsim4_10k | 38.6k | 167M | 11.7 | 10.0 | 21.7 | 103.1 | 28.5 | 1.31x |
+| sram_bsim4_10k | 17.1k | 59M | 10.5 | 7.8 | 18.3 | 35.8 | 13.0 | 0.71x |
+| chain_bsim4_10k | 44.9k | 2.9M | 3.2 | 3.8 | 7.0 | 3.3 | 8.1 | 0.47x |
+| chain_bsim4_100k | 446k | 74M | 40.2 | 47.9 | 88.0 | 63.1 | 116.5 | 0.72x |
+| ring_bsim4_100k | 442k | 70M | 28.4 | 60.2 | 88.6 | 69.3 | 111.8 | 0.78x |
+| c7552_sky130 | 117k | 2.0M | 14.9 | 20.6 | 35.5 | 5.4 | 18.9 | 0.15x |
+
+`ESPICE_GPU_LU_CHECK` compared every device refactor of those runs with the
+host's, factors and dx, bitwise: 0 mismatches over 4,900 refactors (every
+query to completion on the 10k decks, c7552 and both 100k decks). The
+chain's operating point peeled 23 times, exactly where the host refactor
+fails too. The raw outputs of logic_bsim4_10k, sram_bsim4_10k and
+chain_bsim4_10k are byte-identical with the device LU on and off. The PTX has no `fma`
+(`mul.rn.f64` and `sub.rn.f64`, which ptxas may not fuse, and
+`div.rn.f64`); the HIP image is compile-only and its IR carries no
+`contract` flag or `fmuladd`, but its asm was not read (no AMD toolchain
+here).
+
+The gate fails: 1.31x at best, and the device loses outright on the chain,
+the 100k decks and c7552. Against the path that ships today (the host LU on
+one thread) the kernels win 4.7x on logic_bsim4_10k and 2.0x on
+sram_bsim4_10k. End to end (same build, one run each, load under 2.5) the
+wall time fell from 176.8 to 65.1 s on logic and from 55.6 to 37.2 s on the
+SRAM, and rose from 16.8 to 23.9 s on the chain. That is E3's 1.3x on two
+decks of three, against a host path that 8 threads would beat; the gate
+asks for the harder comparison, so E3 was not run.
+
+Why, on this card:
+
+- f64 runs at 1/64 of f32, two operations per clock per SM. In the dense
+  trailing block (logic, SRAM) each column on the critical path costs its
+  last U step, about a thousand IEEE divisions to scale L, and the handoff
+  to the next column: about 3.5 µs, times the S_r of §4.2.
+- Bitwise order forbids splitting a long row's sum. c7552's supply row is a
+  49k-term chain in the refactor and in both solves.
+- The solves are one block. On the 100k decks their wide head levels
+  (hundreds of thousands of rows) run on one SM, latency-bound.
+- The host kernel bodies on one thread are 1.2-2.6x slower than
+  `SparseLu` (indirection and tickets), so "8 threads" beats one host
+  thread only where F is large (logic 3.6x, SRAM 2.8x) and loses elsewhere.
+
+**Stage 1 as built.** Departures from §4, each measured on
+logic_bsim4_10k and chain_bsim4_10k (device ms, refactor/solves):
+
+- Solves: one block, not sync-free row chunks across the grid. Chunks of
+  64 rows, each waiting on every chunk of the level below, took 145 ms of
+  solves on logic (one thread walks each dense-tail row serially). The
+  built form runs the sparse head level by level (a gather per row, eight
+  loads before their subtractions) and sweeps the dense tail column by
+  column with the tail's y in shared memory, the host's own order. The
+  cut is priced per epoch (`solveCost`, t0 from n - 16 to n - 4096):
+  logic 145 -> 10.0 ms. 256 lanes, not 1024 (18.6 ms, register-starved);
+  prefetching 2 entries per lane a step ahead, not 4 (10.6) or 8 (13.5);
+  one lane divides in the back sweep (all lanes dividing cost 4 µs a step).
+- Refactor: 64-lane blocks, a 256-slot shared scratch. A 3072-slot scratch
+  cut residency (logic 17.7 -> 28.2, chain 6.8 -> 16.6); 128 and 256 lanes
+  were 0.97-1.8x the time. The column max is a tree over the lanes (a
+  serial fold cost 9.2 vs 7.1 ms on the chain, 61 vs 14 ms at 256 lanes).
+  One barrier per U step, with the next source polled a window of 64 steps
+  at a time (13.1 -> 12.4, 3.7 -> 3.5). The gather form serves the wide
+  shallow columns (c7552's rail, 332 columns); on logic it neither helps nor
+  hurts (17.3 vs 17.4).
+- Done stamps use device-scope acquire and release (inline PTX in
+  `lu_device.zig`): Zig lowers its atomics at system scope, and that cost
+  15.0 vs 13.1 ms on logic and 7.1 vs 3.7 on the chain. §7 R6.
+- Division is IEEE `/`. A reciprocal multiply (not bitwise, timing only)
+  saved 12% on logic, so a Markstein division with a slow-path fallback is
+  worth about that much.
+- `ESPICE_GPU_LU_TAIL=m` and `ESPICE_GPU_LU_NOGATHER` override the cut and
+  the gather form for calibration.
+
+Next, if this is picked up again: multi-block head levels for the 100k
+solves; the Markstein division; and rank 3, which the numbers above
+already favor on the high-F decks (the refactor on 8 host threads is
+2.8-3.6x the one-thread host LU on logic and SRAM) but not elsewhere.
+
 E2 also measures the launch strategy, and this part needs no LU kernel:
 capture today's eval chain (x upload, staging fill, one eval kernel per
 resident batch, two reduces, the plane download) and replay it. On
@@ -871,6 +965,22 @@ If Zig's `@atomicRmw`, `@atomicLoad` and `@atomicStore` lower correctly on
 `addrspace(.global)` for NVPTX and AMDGCN, these are one-line wrappers; the
 request is also for the compile check on both targets. For the host
 instance, the same names on plain pointers use Zig's atomics directly.
+
+**R6. Scoped acquire and release** (added after E2). Zig lowers
+`@atomicLoad(.acquire)` and `@atomicStore(.release)` to `.sys` scope on
+NVPTX, and the LU's done stamps paid for it (§5, E2). Requested:
+
+```zig
+/// Device (agent) scope: `ld.acquire.gpu` / `st.release.gpu` on NVPTX,
+/// `syncscope("agent")` on AMDGCN.
+pub inline fn loadAcquireDevice(ptr: *addrspace(.global) const u32) u32;
+pub inline fn storeReleaseDevice(ptr: *addrspace(.global) u32, v: u32) void;
+```
+
+`lu_device.zig` carries the NVPTX half as inline PTX until then. Also,
+`barrier()` on AMDGCN is a bare `s_barrier`; HIP's `__syncthreads` fences
+workgroup memory around it, which the LU kernels' global read-modify-writes
+between barriers rely on.
 
 **R2. Graphs with capture.**
 

@@ -8,6 +8,7 @@ const requests = @import("core").query;
 const types = @import("types.zig");
 const op = @import("dc/op.zig");
 const gpu = @import("gpu.zig");
+const gpu_lu = @import("gpu_lu.zig");
 const ParEval = @import("par_eval.zig").ParEval;
 const Controller = @import("worker.zig").Worker(types.Result);
 const Quantum = @import("worker.zig").Quantum;
@@ -165,6 +166,11 @@ pub const Executor = struct {
             self.circuit.gpu_hook = null;
             if (gpu_context) |g| g.deinit();
         }
+        const lu_context = self.prepareGpuLu();
+        defer {
+            self.circuit.lu_hook = null;
+            if (lu_context) |l| l.deinit();
+        }
         if (self.config.timing_in_depth) (try self.circuit.workspace()).prof.io = self.io;
         defer if (self.config.timing_in_depth) printNewtonSplit(&self.circuit.ws.?, self.job);
         const transient = if (self.job == .op) self.job.op.tran_op else @as(requests.Kind, self.job).transient();
@@ -203,6 +209,22 @@ pub const Executor = struct {
             .scratch_allocator = self.allocator,
         };
         return run(&run_ctx, self.job);
+    }
+
+    /// The device LU, on only for `ESPICE_GPU_LU=1` and a GPU backend: E2
+    /// found no deck where it beats 8 host threads by 2x, so nothing admits
+    /// it by default (docs/solvers/gpu-lu.md). A driver that refuses leaves
+    /// the host LU.
+    fn prepareGpuLu(self: *Executor) ?*gpu_lu.GpuLu {
+        if (self.config.backend == .cpu) return null;
+        const env = std.c.getenv("ESPICE_GPU_LU") orelse return null;
+        if (!std.mem.eql(u8, std.mem.span(env), "1")) return null;
+        const context = gpu_lu.GpuLu.init(self.allocator, self.circuit.n, self.circuit.nnz) catch |err| {
+            std.debug.print("warning: device LU unavailable ({s})\n", .{@errorName(err)});
+            return null;
+        };
+        self.circuit.lu_hook = .{ .ctx = context, .solve = gpu_lu.GpuLu.solve };
+        return context;
     }
 
     fn prepareGpu(self: *Executor) !?*gpu.GpuContext {

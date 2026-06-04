@@ -2639,6 +2639,204 @@ const TridiagTests = struct {
     }
 };
 
+/// The device LU's kernel bodies (lu_kernels.zig) on host threads against
+/// their oracle, `refactorColumns` plus `solve`: bitwise, with the refactor
+/// on one thread (every ticket in order) and on four (real waits).
+/// docs/solvers/gpu-lu.md §4.6.
+const LuKernelTests = struct {
+    const SparseLu = @import("root.zig").sparse_lu.SparseLu;
+    const K = @import("root.zig").lu_kernels;
+    const order = @import("root.zig").order;
+
+    const Case = struct {
+        n: u32,
+        col_ptr: []u32,
+        row_idx: []u32,
+        q: []u32,
+        fn deinit(c: *Case, gpa: std.mem.Allocator) void {
+            gpa.free(c.col_ptr);
+            gpa.free(c.row_idx);
+            gpa.free(c.q);
+        }
+    };
+
+    /// Circuit-like pattern: random local couplings, a rail node coupled
+    /// to most unknowns (a wide U column once AMD defers it), a branch row
+    /// with a zero diagonal, and a void unknown.
+    fn circuit(gpa: std.mem.Allocator, n: u32, seed: u64) !Case {
+        var rng = std.Random.DefaultPrng.init(seed);
+        const r = rng.random();
+        const v = n - 1;
+        const rail = n - 2;
+        const br = 5;
+        const dense = try gpa.alloc(bool, n * n);
+        defer gpa.free(dense);
+        @memset(dense, false);
+        for (0..n - 1) |j| {
+            dense[j * n + j] = j != br;
+            // Couplings stay inside clusters of 6, so the rail's U column
+            // is wide and shallow, the shape the gather form is for.
+            for (0..2) |_| {
+                const i = @min(@as(u32, @intCast(j / 6 * 6)) + r.uintLessThan(u32, 6), n - 3);
+                dense[i * n + j] = true;
+                dense[j * n + i] = true;
+            }
+            if (j % 3 != 0) {
+                dense[rail * n + j] = true;
+                dense[j * n + rail] = true;
+            }
+        }
+        dense[3 * n + v] = true;
+        dense[v * n + 3] = true;
+        dense[br * n + 2] = true;
+        dense[2 * n + br] = true;
+        var rows: std.ArrayList(u32) = .empty;
+        errdefer rows.deinit(gpa);
+        const col_ptr = try gpa.alloc(u32, n + 1);
+        errdefer gpa.free(col_ptr);
+        col_ptr[0] = 0;
+        for (0..n) |j| {
+            for (0..n) |i| if (dense[i * n + j]) try rows.append(gpa, @intCast(i));
+            col_ptr[j + 1] = @intCast(rows.items.len);
+        }
+        const q = try gpa.alloc(u32, n);
+        errdefer gpa.free(q);
+        const ws_buf = try gpa.alloc(u32, order.wsSize(n, col_ptr[n]));
+        defer gpa.free(ws_buf);
+        var ws = order.Ws.init(ws_buf);
+        const row_idx = try rows.toOwnedSlice(gpa);
+        errdefer gpa.free(row_idx);
+        try order.order(n, col_ptr, row_idx, q, &ws);
+        return .{ .n = n, .col_ptr = col_ptr, .row_idx = row_idx, .q = q };
+    }
+
+    fn values(c: Case, r: std.Random, vals: []f64) void {
+        const v = c.n - 1;
+        const br = 5;
+        for (0..c.n) |j| for (c.col_ptr[j]..c.col_ptr[j + 1]) |p| {
+            const i = c.row_idx[p];
+            vals[p] = if (i == v or j == v) 0 else if (i == br or j == br) (if (i < j) 1 else -1) else if (i == j) 4 + r.float(f64) else r.float(f64) - 0.5;
+        };
+    }
+
+    /// Refactors `vals` with the oracle and with the kernels (1 and 4
+    /// threads, scratch and in-place columns); both must fail at the same
+    /// step or agree bitwise. Returns whether the oracle succeeded.
+    fn expectMatch(gpa: std.mem.Allocator, lu: *SparseLu, c: Case, tb: K.Tables, vals: []const f64, rhs: []const f64, stamp: *u32) !bool {
+        const n = c.n;
+        const t = tb.tab;
+        const val = try gpa.alloc(f64, t.n_val);
+        defer gpa.free(val);
+        const y = try gpa.alloc(f64, n);
+        defer gpa.free(y);
+        const dx = try gpa.alloc(f64, n);
+        defer gpa.free(dx);
+        const sync = try gpa.alloc(u32, t.syncLen());
+        defer gpa.free(sync);
+        @memset(sync, 0);
+        const ok = if (SparseLu.test_access.refactorColumns(lu, c.col_ptr, vals, t.growth)) |_| true else |_| false;
+        const neg = try gpa.alloc(f64, n);
+        defer gpa.free(neg);
+        for (neg, rhs) |*o, b| o.* = -b;
+        const ref = try gpa.alloc(f64, n);
+        defer gpa.free(ref);
+        if (ok) lu.solve(neg, ref);
+        // Shared-scratch columns on 1 and 4 threads; every column in `val`.
+        inline for (.{ .{ K.col_max, 1 }, .{ K.col_max, 4 }, .{ 0, 4 } }) |run| {
+            stamp.* += 1;
+            const fail = try K.runHostCap(run[0], t, .{ .idx = tb.idx, .val = val, .a = vals, .rhs = rhs, .y = y, .dx = dx, .sync = sync }, stamp.*, run[1]);
+            try testing.expectEqual(ok, fail == null);
+            // Every step below the failing one holds the oracle's values.
+            for (0..fail orelse n) |k| {
+                const base = tb.idx[t.coff + k];
+                const nuk = lu.up[k + 1] - lu.up[k];
+                const nlk = lu.lp[k + 1] - lu.lp[k];
+                try testing.expectEqualSlices(u8, std.mem.sliceAsBytes(lu.ux.items[lu.up[k]..lu.up[k + 1]]), std.mem.sliceAsBytes(val[base..][0..nuk]));
+                try testing.expectEqual(@as(u64, @bitCast(lu.udiag[k])), @as(u64, @bitCast(val[base + nuk])));
+                try testing.expectEqualSlices(u8, std.mem.sliceAsBytes(lu.lx.items[lu.lp[k]..lu.lp[k + 1]]), std.mem.sliceAsBytes(val[base + nuk + 1 ..][0..nlk]));
+            }
+            if (ok) try testing.expectEqualSlices(u8, std.mem.sliceAsBytes(ref), std.mem.sliceAsBytes(dx));
+        }
+        return ok;
+    }
+
+    test "lu kernels: host threads are bitwise refactorColumns + solve, failures included" {
+        const gpa = testing.allocator;
+        var c = try circuit(gpa, 300, 0x11C0);
+        defer c.deinit(gpa);
+        const nnz = c.col_ptr[c.n];
+        const vals = try gpa.alloc(f64, nnz);
+        defer gpa.free(vals);
+        const rhs = try gpa.alloc(f64, c.n);
+        defer gpa.free(rhs);
+        var rng = std.Random.DefaultPrng.init(0x5EED);
+        const r = rng.random();
+        var lu = try SparseLu.init(gpa, c.n, c.col_ptr, c.row_idx, c.q);
+        defer lu.deinit(gpa);
+        values(c, r, vals);
+        try lu.factor(gpa, c.col_ptr, c.row_idx, vals, 1e-3);
+        try testing.expect(std.mem.indexOfScalar(bool, lu.void_col, true) != null);
+        // Solves all head (the cost model's pick here), half tail, all tail.
+        var failed: u32 = 0;
+        for ([_]?u32{ null, c.n / 2, 0 }) |tail| {
+            var tb = try K.build(gpa, &lu, c.col_ptr, 1e-12, .{ .tail = tail });
+            defer tb.deinit(gpa);
+            // Some column (the rail's) took the gather form, not all of them.
+            const wlev = tb.idx[tb.tab.wlev..][0 .. c.n + 1];
+            var gathered: u32 = 0;
+            for (0..c.n) |k| gathered += @intFromBool(wlev[k] != wlev[k + 1]);
+            try testing.expect(gathered > 0 and gathered < c.n);
+
+            var stamp: u32 = 0;
+            for (0..6) |round| {
+                values(c, r, vals);
+                for (rhs, 0..) |*x, i| x.* = switch (i % 5) {
+                    0 => 0,
+                    1 => -0.0,
+                    else => r.float(f64) - 0.5,
+                };
+                // Round 3 puts the first step from 40 on with an A entry
+                // below its pivot under the growth limit: those grow 1e20.
+                if (round == 3) {
+                    var k: u32 = 40;
+                    while (true) : (k += 1) {
+                        var hit = false;
+                        for (c.col_ptr[c.q[k]]..c.col_ptr[c.q[k] + 1]) |p| if (lu.prow[p] > k) {
+                            vals[p] *= 1e20;
+                            hit = true;
+                        };
+                        if (hit) break;
+                    }
+                }
+                if (!try expectMatch(gpa, &lu, c, tb, vals, rhs, &stamp)) failed += 1;
+            }
+        }
+        try testing.expectEqual(3, failed);
+    }
+
+    test "lu kernels: a scale-accepted pivot skips the growth monitor on the device too" {
+        const gpa = testing.allocator;
+        // The BSIMSOI body block of "atto-siemens row keeps its own diagonal".
+        const a = [4][4]f64{
+            .{ 2.0e-20, -1.0e-20, -1.0e-20, 0.0 },
+            .{ -1.0e-6, 1.0e3, -9.0e-4, 1.0e-3 },
+            .{ 1.0e-6, -9.0e-4, 2.0e-3, -1.0e-3 },
+            .{ 0.0, 0.0, -1.0e-3, 1.0 },
+        };
+        var csc = DenseCsc(4).from(a);
+        var q = identity(4);
+        const c: Case = .{ .n = 4, .col_ptr = &csc.col_ptr, .row_idx = csc.row_idx[0..csc.nnz()], .q = &q };
+        var lu = try SparseLu.init(gpa, 4, c.col_ptr, c.row_idx, &q);
+        defer lu.deinit(gpa);
+        try lu.factor(gpa, c.col_ptr, c.row_idx, csc.vals[0..csc.nnz()], 1e-3);
+        try testing.expect(lu.scaled_pivot[0]);
+        var tb = try K.build(gpa, &lu, c.col_ptr, 1e-12, .{});
+        defer tb.deinit(gpa);
+        var stamp: u32 = 0;
+        try testing.expect(try expectMatch(gpa, &lu, c, tb, csc.vals[0..csc.nnz()], &.{ 1, -2, 0.5, 3 }, &stamp));
+    }
+};
+
 test {
     _ = BbdTests;
     _ = ConvergerTests;
@@ -2648,6 +2846,7 @@ test {
     _ = FreqSolveTests;
     _ = GmresTests;
     _ = LaneLuTests;
+    _ = LuKernelTests;
     _ = OrderTests;
     _ = SparseTests;
     _ = TridiagTests;

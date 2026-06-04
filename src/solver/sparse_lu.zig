@@ -122,6 +122,9 @@ pub const SparseLu = struct {
     pstack: []u32, // resume offset into each vertex's L column
 
     factored: bool = false,
+    /// Bumped by every successful `factor`: a new pattern and pivot
+    /// sequence, so device tables built from the old ones are stale.
+    pattern_epoch: u32 = 0,
 
     /// Allocates every workspace. `q` is borrowed and must outlive the
     /// SparseLu; `row_idx` is unused until `factor`.
@@ -532,6 +535,7 @@ pub const SparseLu = struct {
             self.census(gpa, col_ptr, row_idx) catch {};
         };
 
+        self.pattern_epoch +%= 1;
         self.factored = true;
         return false;
     }

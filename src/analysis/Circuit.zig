@@ -10,6 +10,7 @@ const progress_api = @import("progress.zig");
 const par_eval = @import("par_eval.zig");
 const converger = @import("solver").converger;
 const freq_solve = @import("solver").freq_solve;
+const direct = @import("solver").direct;
 const numerics = @import("core").numerics;
 
 const Batch = device_ir.Batch;
@@ -85,6 +86,16 @@ pub const GpuHook = struct {
     mark_dirty: *const fn (*anyopaque) void,
 };
 
+/// The device LU the executor installs (gpu_lu.zig), independent of
+/// `GpuHook`: a deck whose devices all evaluate on the host can still factor
+/// on the device.
+pub const LuHook = struct {
+    ctx: *anyopaque,
+    /// dx = -A^-1 rhs on the device; false leaves the factor and solve to
+    /// the host. See `GpuLu.solve`.
+    solve: *const fn (*anyopaque, slv: *direct.Solver, vals: []const f64, rhs: []const f64, dx: []f64, need: bool) bool,
+};
+
 /// Frozen topology plus the mutable device and solver state of one query.
 ///
 /// Field order is the hot/cold split: the pattern, the planes, the batch table
@@ -145,6 +156,8 @@ pub const Circuit = struct {
     par_eval: ?*ParEval = null,
     /// Executor-owned GPU context; null means CPU only.
     gpu_hook: ?GpuHook = null,
+    /// Executor-owned device LU; null means the host factors.
+    lu_hook: ?LuHook = null,
     /// The analysis state every device call receives (`setSimState`), with
     /// the Newton iteration `beginSolve`/`advanceIteration` count.
     sim: device_ir.SimState = .{},
@@ -171,6 +184,13 @@ pub const Circuit = struct {
     ac_params: []AcParam = &.{},
 
     /// Returns the shared Newton/JFNK workspace, building it on first use.
+    /// `newton`'s device path: factors `vals` (when `need`) and solves
+    /// dx = -A^-1 rhs on the device. False when the host must do both.
+    pub fn deviceSolve(self: *Circuit, slv: *direct.Solver, vals: []const f64, dx: []f64, need: bool) bool {
+        const h = self.lu_hook orelse return false;
+        return h.solve(h.ctx, slv, vals, self.rhs[0..self.n], dx, need);
+    }
+
     pub fn workspace(self: *Circuit) !*converger.Workspace {
         if (self.ws == null) self.ws = try converger.Workspace.init(self.gpa, self.n, self.col_ptr, self.row_idx, self.bbd);
         return &self.ws.?;

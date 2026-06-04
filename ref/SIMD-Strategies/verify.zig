@@ -411,6 +411,12 @@ pub fn main() void {
     // unblocked loops' factors, pivots and fused solution bit for bit. Case:
     // "dense_lu: blocked elimination is bitwise the scalar oracle" in
     // src/solver/tests.zig (DenseLuTests).
+    //
+    // The device LU (solver/lu_kernels.zig): GPU blocks of 64 and 256 lanes
+    // and host threads run one body; the one-lane host instance is its
+    // oracle's twin, and `refactorColumns` plus `solve` the oracle. Cases:
+    // "lu kernels: ..." in src/solver/tests.zig (LuKernelTests), bitwise,
+    // failures included.
 
     // evalRange's `corr_live` predicate (analysis/eval.zig anyNonzero): an
     // integer shift-and-test standing in for `@reduce(.Or, v != 0)`. Its
