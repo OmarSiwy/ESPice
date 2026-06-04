@@ -1,7 +1,8 @@
 # Pole-Zero Analysis
 
-Eigenproblem formulation; QZ vs reduced standard eigenproblem; our
-Hessenberg + Francis QR solver.
+Eigenproblem formulation; QZ vs reduced standard eigenproblem. Poles go
+through Hessenberg + Francis QR on $-G^{-1}C$, zeros through QZ on the
+numerator pencil.
 
 ## 1. Mathematical specification
 
@@ -18,8 +19,8 @@ $$
 The clean general formulation is the **QZ (generalized Schur)
 decomposition** of $(-G, C)$, which handles singular $C$ (MNA always has
 resistive rows and branch rows with no charge) by producing infinite
-eigenvalues for the non-dynamic directions. *(QZ path: derived, not
-implemented; see below.)*
+eigenvalues for the non-dynamic directions. The zeros take this path
+(`eigen/qz.zig`); the poles take the reduction below.
 
 ### Reduction to a standard eigenproblem (our route)
 
@@ -56,11 +57,37 @@ the input drive $d$. That equals the bordered determinant
 $\begin{bmatrix} Y & d \\ e_{\text{out}}^{\mathsf T} & 0 \end{bmatrix}$,
 but as a column swap the $C$ plane stays emptier: a grounded output
 capacitor drops out of the pencil instead of surviving as a spurious root.
-The numerator pencil goes through the same reduction and QR. Its $G$ part
-can be singular at $s = 0$, so the zeros pass factors $M = G + \sigma C$ on a
-ladder of shifts $\sigma$ scaled by the largest pole magnitude and maps the
-eigenvalues back with $s = \sigma + 1/\lambda$. The denominator uses
-$\sigma = 0$.
+The numerator pencil is solved as it stands, by QZ. Two things rule out
+the reduction for it. Its $G$ part is singular at $s = 0$ whenever the
+transfer has a zero there. And most of its roots are at infinity in a
+defective block: through $A = -M^{-1}C$ that block comes back as roundoff
+eigenvalues near zero spread over $\epsilon^{1/k}\|A\|$, as large as
+genuine roots, so no cutoff or rank count separates them. An RC ladder with
+bridging capacitors (each bridge's zero exactly $-1/(R\,C_b)$) got 38 zeros
+where LAPACK `dggev` finds 8, and 0 where it finds 11, through the old
+shift ladder and $\mathrm{rank}(A^m)$ count.
+
+QZ (`eigen/qz.zig`, LAPACK `dggbal` 'P' + `dgghrd` + `dhgeqz`, all Givens):
+exact-zero row/column isolation, Hessenberg-triangular reduction, then the
+double-shift iteration. A diagonal of $C$'s triangular factor at or below
+$\epsilon\|C\|_F$ is a root at infinity; it is chased to the bottom of its
+block and deflated there, one per root, whatever the Jordan structure.
+Everything else is finite, $z = \alpha/\beta$.
+
+Measured against `dggev` and the exact bridge zeros (12 random bridged
+ladders, 5 to 90 sections): every zero count matches, worst relative error
+4.7e-16. The old path got the count wrong on 10 of 12 and was off by
+6.1e-10 on one it counted right. 40 uniform ladders (2 to 80 sections, RC
+from 1e-21 to 1e6 s): no zeros, as before.
+
+**Poles stay on the QR.** QZ on $(G, -C)$ would retire `qr.zig` too, but it
+is normwise backward stable in $(G, C)$, which costs the slow poles of a
+long ladder relative accuracy: on the same 40 uniform ladders the worst
+pole error against the closed form grew from 5.5e-14 to 2.1e-12 (80
+sections), and a relative deflation tolerance of eps instead of `qr_tol`
+did not recover it. $-G^{-1}C$ keeps the slow poles as the largest
+eigenvalues. Fallback if a pole deck needs a singular $G$: QZ on $(G, -C)$
+via `qz.roots`.
 
 ### The eigen solver
 
@@ -98,9 +125,9 @@ dense cost.
    the roots it found (cktpzstr.c:225).
 4. Eigenvalue post-pass: cutoff filter,
    $\lambda \to s = \bar\lambda/|\lambda|^2$, stability count.
-5. When zeros are requested: build the numerator pencil, walk the shift
-   ladder until $G + \sigma C$ factors, and repeat steps 2 to 4 with
-   $s = \sigma + 1/\lambda$. No factorable shift gives `error.Singular`.
+5. When zeros are requested: build the numerator pencil and take its
+   finite roots with `eigen/qz.zig roots` (same `qr_tol`, `qr_max_iter`
+   and `error.PzDidNotConverge`). A singular numerator $G$ is fine.
 
 Knobs: `qr_max_iter` (1000), `qr_tol` (1e-12); tolerance bundle only feeds
 the upstream OP.
@@ -124,9 +151,10 @@ pz(ckt, x_op):
     n_stable = count(Re < 0)
     if want_zeros:
         replace the output column of (G, C) by the input drive
-        for sigma in shift ladder (scaled by max|pole|):
-            if factor(G + sigma*C) succeeds: break
-        zeros = { sigma + 1/l : eigenvalues l of -(G + sigma*C)^-1 C }
+        isolate rows/columns with one nonzero across (G, -C)
+        (H, T) = hessenberg_triangular(G, -C)       # Givens
+        QZ sweeps; T[j,j] <= eps*||T||_F: chase to the bottom, drop (infinite)
+        zeros = { alpha/beta of the deflated 1x1 and 2x2 blocks }
 ```
 
 ## 4. Parallel execution
@@ -144,7 +172,8 @@ Carlo pole clouds, one $n \times n$ problem per lane).
 | Phase | Solver doc | Impl |
 |---|---|---|
 | Dense LU of $G$ + per-column solves | none (dense path) | `src/solver/dense_lu.zig` `factorize`/`solveFactored` |
-| Eigen solver (Hessenberg + Francis double-shift QR) | none (analysis-local) | `src/analysis/eigen/qr.zig` (`hessenbergReduce`, `eigenvalues`) |
+| Eigen solver (Hessenberg + Francis double-shift QR), poles | none (analysis-local) | `src/analysis/eigen/qr.zig` (`hessenbergReduce`, `eigenvalues`) |
+| Generalized eigen solver (Hessenberg-triangular + double-shift QZ), zeros | none (analysis-local) | `src/analysis/eigen/qz.zig` (`roots`) |
 | Sparse alternative for large n (factor $G$ sparsely, shift-invert Arnoldi for the few dominant poles) | [klu-pipeline.md](../solvers/klu-pipeline.md), [gilbert-peierls-lu.md](../solvers/gilbert-peierls-lu.md) | upgrade path: reuses `direct.zig` factors as the Arnoldi operator (same pattern as [matex-exponential-integrators.md](matex-exponential-integrators.md) rational Krylov) |
 | Upstream OP | [homotopy-continuation.md](../solvers/homotopy-continuation.md) | `dc/op.zig` |
 
@@ -160,12 +189,13 @@ Carlo pole clouds, one $n \times n$ problem per lane).
 **Per-section verification**
 
 - §1 pencil-to-standard reduction, $\lambda$ cutoff, $s = 1/\lambda$ map, and
-  the column-swap zeros: verified against `pz.zig`. QZ formulation: derived,
-  not implemented.
+  the column-swap zeros and the QZ zeros path: verified against `pz.zig` and
+  `qz.zig`.
 - §2/§3: transcribed from source. §4: design notes.
 
 **Our implementation**
 
-- `src/analysis/eigen/pz.zig`: poles and zeros via $-M^{-1}C$ eigenvalues.
+- `src/analysis/eigen/pz.zig`: poles via $-G^{-1}C$ eigenvalues, zeros via QZ.
 - `src/analysis/eigen/qr.zig`: Hessenberg reduction and Francis QR.
+- `src/analysis/eigen/qz.zig`: isolation, Hessenberg-triangular reduction, QZ.
 - Fixtures: `tests/fixtures/pz/`.
