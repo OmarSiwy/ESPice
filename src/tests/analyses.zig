@@ -113,6 +113,51 @@ test "pz of a femtosecond RC ladder: closed-form poles, no finite zeros" {
     }
 }
 
+test "pz of a bridged RC ladder: one zero per bridge, at -1/(R·Cb)" {
+    // A capacitor across a series resistor blocks transmission where that
+    // section's admittance 1/R + s·Cb vanishes, and nowhere else: every other
+    // root of the numerator is at infinity. The old A = −M⁻¹C route found 8
+    // zeros for this kind of deck where there are 2, or none.
+    const problem = try runDeck(
+        \\bridged ladder
+        \\v1 n0 0 0 ac 1
+        \\r0 n0 n1 1k
+        \\c0 n1 0 1n
+        \\r1 n1 n2 2.2k
+        \\cb1 n1 n2 10p
+        \\c1 n2 0 1n
+        \\r2 n2 n3 1k
+        \\c2 n3 0 1n
+        \\r3 n3 n4 4.7k
+        \\c3 n4 0 1n
+        \\r4 n4 n5 3.3k
+        \\cb4 n4 n5 22p
+        \\c4 n5 0 1n
+        \\r5 n5 n6 1k
+        \\c5 n6 0 1n
+        \\.pz n0 0 n6 0 vol pz
+        \\.end
+    );
+    defer problem.deinit();
+    const res = try requestedResult(problem, 0);
+    var zeros: [2]f64 = undefined;
+    var n_zeros: usize = 0;
+    var n_poles: usize = 0;
+    for (res.varnames, 0..) |name, k| {
+        if (std.mem.startsWith(u8, name, "pole")) n_poles += 1;
+        if (!std.mem.startsWith(u8, name, "zero")) continue;
+        try std.testing.expect(n_zeros < zeros.len);
+        try std.testing.expectEqual(@as(f64, 0), res.data[2 * k + 1]);
+        zeros[n_zeros] = res.data[2 * k];
+        n_zeros += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 6), n_poles);
+    try std.testing.expectEqual(@as(usize, 2), n_zeros);
+    std.mem.sort(f64, &zeros, {}, std.sort.asc(f64));
+    try std.testing.expectApproxEqRel(-1.0 / (2.2e3 * 10e-12), zeros[0], 1e-12);
+    try std.testing.expectApproxEqRel(-1.0 / (3.3e3 * 22e-12), zeros[1], 1e-12);
+}
+
 test "a failed query does not prevent an independent query from completing" {
     const p = try api.Problem.init(std.testing.allocator, std.testing.io, .{
         .source = .{ .bytes = .{ .data = "failure isolation\nV1 in 0 dc 1 ac 1 sin(0 1 1k)\nR1 in out 1k\nC1 out 0 1u\n.end\n", .origin = "failure.cir" } },
