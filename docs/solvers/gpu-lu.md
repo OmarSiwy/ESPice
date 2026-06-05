@@ -1,12 +1,17 @@
 # GPU LU for large Newton solves: design
 
-**Status: stage 1 built and opt-in; E2 failed its gate.** With
-`ESPICE_GPU_LU=1` (and a GPU backend) the device refactors and solves every
-Newton iteration of the general sparse LU, bitwise the host
-(`src/solver/lu_kernels.zig`, `lu_device.zig`, `src/analysis/gpu_lu.zig`).
-Nothing admits it by default: the kernels beat the better host path by 2x
-on no deck (§5, E2 results), so the cost model declines everything and
-stage 2 and E3 were not started. The GPU otherwise only evaluates device
+**Status: stage 1 built; the multicore host refactor (option 3) is on by
+default.** The kernel body in `src/solver/lu_kernels.zig` runs as the
+device LU (`lu_device.zig`, `src/analysis/gpu_lu.zig`) and as a refactor on
+host threads (`HostRefactor`, picked by `direct.Solver`). Both are bitwise
+`SparseLu.refactor` (plus `solve` on the device). The host form runs
+whenever the query has more than one thread (`ESPICE_THREADS`, or
+`ESPICE_SOLVER_THREADS`) and its flop-count model admits the epoch; see
+"Multicore host refactor" in §5. The device form is `auto` only on a card
+whose FP64 runs at 1/4 of FP32 or better (gompute's `fp64Ratio` at most 4)
+and n of 10k or more; `ESPICE_GPU_LU=1` forces it on and `=0` off. On this
+RTX 4060 (ratio 64) it lost to 8 host threads on every E2 deck, so stage 2
+was not started. The GPU otherwise only evaluates device
 planes (`docs/devices/gpu-evaluation.md`). This page answers one question:
 if the host sparse LU dominates on post-layout netlists (extracted RC plus
 many transistors), how should espice factor and solve on the GPU? The
@@ -882,9 +887,39 @@ logic_bsim4_10k and chain_bsim4_10k (device ms, refactor/solves):
   the gather form for calibration.
 
 Next, if this is picked up again: multi-block head levels for the 100k
-solves; the Markstein division; and rank 3, which the numbers above
-already favor on the high-F decks (the refactor on 8 host threads is
-2.8-3.6x the one-thread host LU on logic and SRAM) but not elsewhere.
+solves, and the Markstein division.
+
+**Multicore host refactor (option 3).** `lu_kernels.HostRefactor` runs the
+refactor body on the caller plus `lu_threads - 1` tasks of the query's
+`std.Io` (one lane per "block"), then copies the column-contiguous values
+into `SparseLu`'s `ux`, `udiag` and `lx`; the solve stays `SparseLu.solve`.
+A failure is `refactor`'s failure, so the full re-pivoting factor follows
+as before. `direct.Solver` judges each pivot epoch once: at least 500k
+flops, at least 300 flops per column, at most 400M (the tables cost 4
+bytes per flop). `ESPICE_LU_PAR=0/1` forces it, `ESPICE_LU_PAR_STATS`
+prints each verdict. Host waits spin 256 times, then yield: without that,
+chain_psp103_10k at a load of 98 spent 149 s factoring instead of 16.7.
+
+The crossover, factor time summed over the run, `--backend=cpu`, serial
+refactor vs the kernel body (all bitwise equal):
+
+| deck | n | F | F/n | 2 thr | 4 thr | 8 thr |
+|---|---:|---:|---:|---:|---:|---:|
+| sram_bsim4_1k | 1.7k | 0.78M | 449 | 1.48x | 1.17x | 1.47x-1.55x |
+| logic_bsim4_1k | 4.0k | 1.8M | 445 | 1.40x | 1.06x | 1.81x-1.94x |
+| sram_bsim4_10k | 17k | 40M | 2,349 | | | 1.68x |
+| logic_psp103_1k | 12.6k | 1.9M | 152 | 0.79x | 0.99x | 0.87x-1.03x |
+| ring_bsim4_10k | 44k | 3.9M | 87 | | | 0.57x |
+| chain_bsim4_10k | 45k | 2.9M | 63 | | | 0.39x |
+| c7552_sky130 | 117k | 2.0M | 17 | | | 0.39x |
+| stress/scaling_inverter_chain_4k | 4.0k | 20k | 4 | | | 0.08x |
+
+The 2- and 4-thread rows ran at a load of 130-215 and are noisy; the
+8-thread rows at 10-50 except where two runs are given. Below F/n of about
+150 the columns form a chain and every step is a handoff; the admission
+bar of 300 sits between the last loss and the first win.
+
+E3 for the host path is below ("E3, host").
 
 E2 also measures the launch strategy, and this part needs no LU kernel:
 capture today's eval chain (x upload, staging fill, one eval kernel per
@@ -977,10 +1012,10 @@ pub inline fn loadAcquireDevice(ptr: *addrspace(.global) const u32) u32;
 pub inline fn storeReleaseDevice(ptr: *addrspace(.global) u32, v: u32) void;
 ```
 
-`lu_device.zig` carries the NVPTX half as inline PTX until then. Also,
-`barrier()` on AMDGCN is a bare `s_barrier`; HIP's `__syncthreads` fences
-workgroup memory around it, which the LU kernels' global read-modify-writes
-between barriers rely on.
+Delivered in gompute 064fcd8, which also made AMDGCN's `barrier()` fence
+like `__syncthreads`; `lu_device.zig` uses them. a91b9b1 added
+`fp64Ratio` (CUDA only; HIP answers `Unsupported`, which `auto` reads as
+slow FP64).
 
 **R2. Graphs with capture.**
 

@@ -8,6 +8,9 @@ pub const Execution = struct {
     /// Null runs everything on the calling thread.
     io: ?std.Io = null,
     threads: u8 = 1,
+    /// Workers the sparse refactor may use when its cost model admits the
+    /// multicore kernel (`direct.Solver`); 1 keeps it serial.
+    lu_threads: u8 = 1,
 };
 
 // Elementwise helpers are exact at any width. `dot` fixes one reduction

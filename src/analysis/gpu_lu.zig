@@ -124,6 +124,14 @@ pub const GpuLu = struct {
         return self;
     }
 
+    /// True when the device's FP64 runs at least 1/4 of its FP32 rate (a
+    /// data-center card), the bar for `auto` to keep the device LU. A
+    /// driver that cannot say (HIP today) counts as slow.
+    pub fn fp64Fast(self: *Self) bool {
+        const ratio = self.k_ref.context.fp64Ratio() catch return false;
+        return ratio <= 4;
+    }
+
     fn pinnedF64(k: *Raw, n: usize) ![]f64 {
         const bytes = try k.allocPinned(@max(n, 1) * @sizeOf(f64));
         return @as([*]f64, @ptrCast(@alignCast(bytes.ptr)))[0..n];
