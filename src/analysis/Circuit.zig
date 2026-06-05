@@ -91,9 +91,10 @@ pub const GpuHook = struct {
 /// on the device.
 pub const LuHook = struct {
     ctx: *anyopaque,
-    /// dx = -A^-1 rhs on the device; false leaves the factor and solve to
-    /// the host. See `GpuLu.solve`.
-    solve: *const fn (*anyopaque, slv: *direct.Solver, vals: []const f64, rhs: []const f64, dx: []f64, need: bool) bool,
+    /// dx = -A^-1 rhs on the device: true when solved, false when the
+    /// host must run its exact factor and solve, null when the device did
+    /// not try. See `GpuLu.solve`.
+    solve: *const fn (*anyopaque, slv: *direct.Solver, vals: []const f64, rhs: []const f64, dx: []f64, need: bool) ?bool,
 };
 
 /// Frozen topology plus the mutable device and solver state of one query.
@@ -158,6 +159,8 @@ pub const Circuit = struct {
     gpu_hook: ?GpuHook = null,
     /// Executor-owned device LU; null means the host factors.
     lu_hook: ?LuHook = null,
+    /// `direct.Params.fast_mode` of the workspace's solver.
+    lu_fast: bool = false,
     /// The analysis state every device call receives (`setSimState`), with
     /// the Newton iteration `beginSolve`/`advanceIteration` count.
     sim: device_ir.SimState = .{},
@@ -185,14 +188,17 @@ pub const Circuit = struct {
 
     /// Returns the shared Newton/JFNK workspace, building it on first use.
     /// `newton`'s device path: factors `vals` (when `need`) and solves
-    /// dx = -A^-1 rhs on the device. False when the host must do both.
-    pub fn deviceSolve(self: *Circuit, slv: *direct.Solver, vals: []const f64, dx: []f64, need: bool) bool {
-        const h = self.lu_hook orelse return false;
+    /// dx = -A^-1 rhs on the device. See `LuHook.solve`.
+    pub fn deviceSolve(self: *Circuit, slv: *direct.Solver, vals: []const f64, dx: []f64, need: bool) ?bool {
+        const h = self.lu_hook orelse return null;
         return h.solve(h.ctx, slv, vals, self.rhs[0..self.n], dx, need);
     }
 
     pub fn workspace(self: *Circuit) !*converger.Workspace {
-        if (self.ws == null) self.ws = try converger.Workspace.init(self.gpa, self.n, self.col_ptr, self.row_idx, self.bbd);
+        if (self.ws == null) {
+            self.ws = try converger.Workspace.init(self.gpa, self.n, self.col_ptr, self.row_idx, self.bbd);
+            self.ws.?.slv.params.fast_mode = self.lu_fast;
+        }
         return &self.ws.?;
     }
 

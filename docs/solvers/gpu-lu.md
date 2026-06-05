@@ -948,6 +948,60 @@ construction, so any difference is a bug).
   remaining wait per iteration is still at least 20% of the iteration on
   the decks that motivate it.
 
+**E3, host.** End-to-end wall time is not measured yet: every attempt so
+far ran at a 1-minute load of 100 to 350 from other builds. The
+factor-time table above is the evidence for admitting the kernel body by
+default; its wall-time gate is still open.
+
+### fast_mode (opt-in, not bit-identical)
+
+`direct.Params.fast_mode` (`--lu-fast`, C API `espice_create_options.lu_fast`,
+default off) runs Newton's refactor in f32 and refines each solve back to
+f64 accuracy (`src/solver/fast_lu.zig`). Off, nothing changes: the corpus
+is byte-identical to the default path.
+
+- The full factor, and so every pivot decision, stays f64 (`SparseLu.factor`).
+  The f32 refactor replays its tape with the same kernel body, `T = f32`:
+  on host threads (`HostFactor(f32)`, threads by the multicore model) or on
+  the device (`arp_lu_*_f32`, when the device LU is on).
+- Before it, A is equilibrated with powers of two, rows by their largest
+  entry and then columns, so R A C is exact in f64 and a 1e60 conductance
+  lands near 1 in f32. The scales stay f64.
+- The f32 pivot monitor uses a growth limit of 1e-6; a failure sends that
+  Newton iteration to the exact f64 refactor (and its re-pivot).
+- Each solve: x = 0, r = b; per step d = C (LU_32)^-1 (R r), scaled into f32
+  range by a power of two, x += d, r = b - A x in f64 over the f64 values.
+  Stop when ||r|| <= 16 u (||A|| ||x|| + ||b||), u = 2^-53 (normwise
+  backward error at f64 roundoff, infinity norms). A step that shrinks the
+  backward error by less than half switches to GMRES-IR (Carson and Higham
+  2017): up to 3 outer steps of GMRES(30) in f64, right-preconditioned by
+  the f32 factors. Past 8 plain steps or 3 GMRES-IR steps the solve gives
+  up and the exact f64 factor and solve run for that Newton iteration, so
+  no answer is worse than the f64 path's.
+
+Corpus (`zig build test-fast`, 622 decks, `--backend cpu`): 613 pass and 9
+fail, the same 9 as the default path, so no deck changes pass/fail. The
+9 fail with their default reasons (ValueMismatch on
+dc/device_vbic_forced_output, noise/device_vbic_noise_scale,
+tran/bench_ngspice_mosamp, the two txl lines, tran/device_hfet_inverter,
+tran/device_mesa_oscillator, tran/device_mos6_inverter; SimulatorFailed on
+hdl/verilog_inverter). 531 decks take the fast path and change bytes; the
+other 91 never refactor a general sparse LU in Newton (tridiagonal or BBD
+engines, linear analyses only, or a parse error). Over all fast solves,
+`ESPICE_LU_FAST_STATS`:
+
+| | solves | steps per solve | GMRES-IR | fallbacks | f32 refactor failures |
+|---|---:|---:|---:|---:|---:|
+| 530 decks | 4,522,814 | 2.20 | 702 | 37 | 341 of 1.62M |
+| stress/vacask_graetz | 1,994,308 | 5.34 | 1,990,097 | 699,852 (35%) | 5,714 of 2.0M |
+
+The Graetz bridge's diodes swing the matrix across many decades each step,
+so f32 refinement contracts slowly there and a third of its solves fall
+back.
+
+Wall time is unmeasured for the same reason as E3, host, so fast_mode
+stays opt-in with no speed claim until it is.
+
 ## 6. Rejected and deferred
 
 | Idea | Status | Reason |

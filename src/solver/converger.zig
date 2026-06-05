@@ -190,8 +190,11 @@ pub fn newton(
         prof.lap(.load);
         const need = opts.matrix_sig == 0 or ws.factored_sig != opts.matrix_sig;
         // The device LU (docs/solvers/gpu-lu.md) is bitwise this factor and
-        // solve; false leaves both to the host.
-        const on_device = if (comptime @hasDecl(S, "deviceSolve")) sys.deviceSolve(slv, v, dx, need) else false;
+        // solve unless fast_mode; false leaves both to the host.
+        const device: ?bool = if (comptime @hasDecl(S, "deviceSolve")) sys.deviceSolve(slv, v, dx, need) else null;
+        // Where the device did not try, fast_mode on the host: an f32
+        // refactor and a refined solve. False runs the exact pair below.
+        const on_device = device orelse slv.fastSolveNeg(v, sys.rhs, dx, need, executionOf(sys));
         if (on_device and need) ws.factored_sig = opts.matrix_sig;
         if (!on_device and need) {
             slv.factor(v, executionOf(sys)) catch |e| {
