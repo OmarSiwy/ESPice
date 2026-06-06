@@ -13,6 +13,7 @@ pub const QueryBindings = deck.QueryBindings;
 pub const Measure = deck.Measure;
 pub const MeasureClause = deck.MeasureClause;
 pub const MeasureFunc = deck.MeasureFunc;
+pub const MeasureOp = deck.MeasureOp;
 pub const measure_unset = deck.measure_unset;
 pub const measure_last = deck.measure_last;
 pub const measure_no_at = deck.measure_no_at;

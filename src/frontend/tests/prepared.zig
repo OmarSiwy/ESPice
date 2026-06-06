@@ -108,12 +108,19 @@ test "deck options reject invalid numeric conversions before construction" {
     for ([_][]const u8{ "itl1=-1", "itl2=65536", "itl4=1.5", "temp=-300", "tnom=nan", "reltol=-1" }) |option| {
         const source = try std.fmt.allocPrint(arena.allocator(), "invalid options\n.options {s}\n.end\n", .{option});
         const nl = try parse(arena.allocator(), source);
-        try std.testing.expectError(error.InvalidAnalysisArguments, analyses.deckOptions(nl.deck.config));
+        try std.testing.expectError(error.InvalidAnalysisArguments, analyses.deckOptions(nl.deck.config, .ngspice));
     }
     const nl = try parse(arena.allocator(), "later wins\n.temp 50\n.options temp=27 method=gear maxord=1\n.end\n");
-    const o = try analyses.deckOptions(nl.deck.config);
+    const o = try analyses.deckOptions(nl.deck.config, .ngspice);
     try std.testing.expectEqual(@as(f64, 27), o.temp_c.?);
     try std.testing.expectEqual(requests.Method.backward_euler, o.method.?);
+    // HSPICE: DELMAX caps a .tran that sets no tmax; TNOM and TEMP default to 25.
+    const h = try analyses.deckOptions((try parse(arena.allocator(), "delmax\n.options delmax=2n\n.end\n")).deck.config, .hspice);
+    var tran: Job = .{ .tran = .{ .t_stop = 1e-6, .dt_init = 1e-8 } };
+    analyses.applyDeckOptions(&tran, h);
+    try std.testing.expectEqual(@as(f64, 2e-9), tran.tran.dt_max.?);
+    try std.testing.expectEqual(@as(f64, 25), h.temp_c.?);
+    try std.testing.expectEqual(@as(f64, 25), h.tnom_c);
 }
 
 test "nonfinite model parameter cannot become its default" {
@@ -306,7 +313,8 @@ test "selected unresolved parameters fail while unused models stay inert" {
     inline for (.{
         ".model nm nmos(level=1 tox={missing})\nm1 out in 0 0 nm\n",
         "r1 out 0 r=0*missing\n",
-        ".param mc=1\n.model nm nmos(level=1 tox={1e-7+mc*agauss(0,1e-9,1)})\nm1 out in 0 0 nm\n",
+        // A value naming no parameter and no model, not the 1 mOhm default.
+        "r1 out 0 missing\n",
     }) |body| {
         var session = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer session.deinit();
@@ -389,7 +397,7 @@ test "selected model integer fields and levels reject out-of-range values" {
 }
 
 test "behavioral sources the tape cannot express are rejected, not opened" {
-    inline for (.{ "v=v(out)+i(r1)", "i=v(out)*x", "i=foo(v(out))", "i=agauss(1,1,1)", "i=min(v(a))", "v=v(out)+v(a)+v(b)+v(c)+v(d)+v(e)+v(f)+v(g)+v(h)" }) |output| {
+    inline for (.{ "v=v(out)+i(r1)", "i=v(out)*x", "i=foo(v(out))", "i=agauss(v(out),1,1)", "i=min(v(a))", "v=v(out)+v(a)+v(b)+v(c)+v(d)+v(e)+v(f)+v(g)+v(h)" }) |output| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
         const a = arena.allocator();

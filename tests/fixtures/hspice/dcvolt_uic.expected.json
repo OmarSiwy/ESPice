@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": ".dcvolt sets initial node voltages.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "RC discharge from the .dcvolt value: v = v0 exp(-t / RC), RC = 1 us."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "columns": {
+          "v(a)": {
+            "unit": "V",
+            "rtol": 0.002,
+            "atol": 1e-05,
+            "values": [
+              0.6065306597126334,
+              0.36787944117144233,
+              0.1353352832366127,
+              0.049787068367863944,
+              0.006737946999085461
+            ]
+          },
+          "v(b)": {
+            "unit": "V",
+            "rtol": 0.002,
+            "atol": 1e-05,
+            "values": [
+              1.2130613194252668,
+              0.7357588823428847,
+              0.2706705664732254,
+              0.09957413673572789,
+              0.013475893998170922
+            ]
+          }
+        },
+        "axis": {
+          "name": "time",
+          "values": [
+            5e-07,
+            1e-06,
+            2e-06,
+            3e-06,
+            5e-06
+          ],
+          "atol": 1e-15,
+          "rtol": 1e-09
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "6879173a391de82afc42a95aab0e62368ee2738c347772d4c7e6f5c8047f0f34"
+}

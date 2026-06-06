@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "analysis": "ac",
+  "purpose": "An unsupported HSPICE card is rejected with the line, not ignored.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "An unsupported HSPICE card is rejected with the line, not ignored."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "error",
+    "category": "unsupported_input",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "9d80abd69d4d7a543ad019ce322f6a74df79078f900c442f75fbf67c000a7132"
+}

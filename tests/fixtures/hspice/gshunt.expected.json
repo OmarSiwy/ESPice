@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "GSHUNT loads every node; option aliases are accepted.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "1 mA into 1 kOhm in parallel with the 1 mS shunt: 0.5 V."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(a)": {
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09,
+            "values": [
+              0.5
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "30a1113eee78ab8bf9d722bea026858bf77b12267443ba10a0d0bd28bae47e72"
+}

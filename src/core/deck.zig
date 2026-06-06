@@ -56,6 +56,9 @@ pub const Deck = struct {
     title: []const u8,
     n_devices: u32,
     ic: []const Ic,
+    /// `.nodeset` guesses: where the operating point's first solve holds
+    /// each node.
+    nodeset: []const Ic = &.{},
     /// `.options` tolerances every query starts from.
     deck_tol: numerics.Tolerances,
     /// `.temp` or `.options temp`, in °C, when given.
@@ -71,9 +74,14 @@ pub const Deck = struct {
     measures: []const Measure = &.{},
 };
 
-/// What a `.meas` card computes, after ngspice com_measure2.c. `deriv` is
-/// parsed but, as in ngspice 45, not supported.
-pub const MeasureFunc = enum(u8) { trig_targ, find, when, avg, min, max, min_at, max_at, pp, rms, integ, deriv };
+/// What a `.meas` card computes, after ngspice com_measure2.c, plus the
+/// HSPICE forms: `param` (an expression over other results) and the `err`
+/// relative-error family [CR .MEASURE (Error Function)].
+pub const MeasureFunc = enum(u8) { trig_targ, find, when, avg, min, max, min_at, max_at, pp, rms, integ, deriv, param, err, err1, err2, err3 };
+
+/// One postfix op of a `PARAM=` measure: a constant, the result of the
+/// `measure`-th card, or an arithmetic operator.
+pub const MeasureOp = union(enum) { num: f64, measure: u32, neg, add, sub, mul, div, pow };
 
 /// Event count not given (ngspice MEASURE_DEFAULT).
 pub const measure_unset: i32 = -1;
@@ -100,6 +108,11 @@ pub const MeasureClause = struct {
     from: f64 = 0,
     to: f64 = 0,
     at: f64 = measure_no_at,
+    /// ERR family: the smallest |meas_var| used as a denominator, and the
+    /// |meas_var| band outside which a point is skipped (HSPICE defaults).
+    minval: f64 = 1e-12,
+    ymin: f64 = 1e-15,
+    ymax: f64 = 1e15,
 };
 
 /// A parsed `.meas` card.
@@ -113,4 +126,6 @@ pub const Measure = struct {
     first: MeasureClause,
     /// TARG, or FIND's WHEN clause.
     second: MeasureClause = .{},
+    /// The expression of a `param` card.
+    expr: []const MeasureOp = &.{},
 };

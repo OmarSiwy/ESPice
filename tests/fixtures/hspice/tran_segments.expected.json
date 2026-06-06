@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "A multi-segment .tran runs to its last stop time.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "RC = 5 ns step response from 0 V; the run covers 0..40 ns."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 0.002,
+            "atol": 0.0001,
+            "values": [
+              0.18126924692201818,
+              0.3296799539643607,
+              0.6321205588285577,
+              0.8646647167633873,
+              0.950212931632136,
+              0.9816843611112658,
+              0.9975212478233336,
+              0.9996645373720975
+            ]
+          }
+        },
+        "axis": {
+          "name": "time",
+          "values": [
+            1e-09,
+            2e-09,
+            5e-09,
+            1e-08,
+            1.5e-08,
+            2e-08,
+            3e-08,
+            4e-08
+          ],
+          "atol": 1e-15,
+          "rtol": 1e-09
+        }
+      }
+    ],
+    "checks": [
+      {
+        "kind": "axis_bounds",
+        "plot": "Transient Analysis",
+        "axis": "time",
+        "minimum": 0,
+        "maximum": 4.000000000004e-08
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "52971ff9712ad44a942e5daf0b42f23062cde113912f411385d76dbf6b43ded7"
+}

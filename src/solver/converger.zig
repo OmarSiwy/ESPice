@@ -124,7 +124,18 @@ pub const Options = struct {
     /// and the next must pass too, so `newton` publishes the first passing
     /// solve (niiter.c, the MODEINITFIX branch).
     init_fix: bool = false,
+    /// Rows held near a value by a `force_g` conductance, as ngspice holds
+    /// `.nodeset` nodes during MODEINITJCT/INITFIX (cktload.c). Direct Newton
+    /// only.
+    force: []const Force = &.{},
 };
+
+/// Conductance, in siemens, of a `Force` hold.
+pub const force_g = 1e10;
+
+/// `vals[slot] += force_g` and `rhs[row] += force_g * (x[row] - value)`: a
+/// `force_g` conductance from row `row` to a source at `value`.
+pub const Force = struct { slot: u32, row: u32, value: f64 };
 
 /// One `gmin` load: `vals[slot] += gmin` and `rhs[row] += gmin * x[col]`,
 /// the residual form of a conductance at (row, col).
@@ -180,6 +191,10 @@ pub fn newton(
                 v[sys.diag_slots[i]] += opts.gmin;
                 sys.rhs[i] += opts.gmin * x[i];
             }
+        }
+        for (opts.force) |f| {
+            v[f.slot] += force_g;
+            sys.rhs[f.row] += force_g * (x[f.row] - f.value);
         }
         var norm_f: f64 = 0; // read only by the traces
         if (newtonDbg() or opdbg()) {

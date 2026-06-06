@@ -1,6 +1,8 @@
 //! `.meas` card text to a `core.Measure`, after ngspice com_measure2.c
 //! (measure_parse_trigtarg, _find, _when and _stdParams). The caller
-//! evaluates the numbers, so a value may be a parameter expression.
+//! evaluates the numbers, so a value may be a parameter expression. HSPICE
+//! forms ride along: an omitted analysis type, INTEGRAL/DERIVATIVE, PARAM=
+//! and ERR/ERR1/ERR2/ERR3 [CR .MEASURE].
 const std = @import("std");
 const core = @import("core");
 const Kind = core.query.Kind;
@@ -16,16 +18,25 @@ const funcs = std.StaticStringMap(core.MeasureFunc).initComptime(.{
     .{ "find", .find },      .{ "when", .when },       .{ "avg", .avg },
     .{ "min", .min },        .{ "max", .max },         .{ "min_at", .min_at },
     .{ "max_at", .max_at },  .{ "rms", .rms },         .{ "pp", .pp },
-    .{ "integ", .integ },    .{ "deriv", .deriv },
+    .{ "integ", .integ },    .{ "deriv", .deriv },      .{ "integral", .integ },
+    .{ "derivative", .deriv }, .{ "param", .param },    .{ "err", .err },
+    .{ "err1", .err1 },      .{ "err2", .err2 },       .{ "err3", .err3 },
 });
 
 /// Parses `text`, the card after `.meas`, lowercased. `ctx.measureValue(text)
-/// !f64` evaluates a value. Strings in the result are slices of `text` or
-/// allocated in `arena`. ParseError for anything ngspice would reject.
-pub fn parse(arena: std.mem.Allocator, text: []const u8, ctx: anytype) !core.Measure {
-    const w = try words(arena, text);
+/// !f64` evaluates a value and `ctx.measureExpr(text) ![]const
+/// core.MeasureOp` compiles a PARAM= expression. A card without an analysis
+/// type reads `default`, HSPICE's last analysis card. Strings in the result
+/// are slices of `text` or allocated in `arena`. ParseError for anything
+/// neither simulator accepts.
+pub fn parse(arena: std.mem.Allocator, text: []const u8, ctx: anytype, default: ?Kind) !core.Measure {
+    const typed = try words(arena, text);
+    if (typed.len < 2) return error.ParseError;
+    const given = analyses.get(typed[0].lhs);
+    const analysis = given orelse default orelse return error.ParseError;
+    // `w[0]` is the analysis type's slot either way.
+    const w = if (given != null) typed else try std.mem.concat(arena, Word, &.{ &.{.{ .lhs = "" }}, typed });
     if (w.len < 3) return error.ParseError;
-    const analysis = analyses.get(w[0].lhs) orelse return error.ParseError;
     const func = funcs.get(w[2].lhs) orelse return error.ParseError;
     // ngspice widens the default window of a DC sweep, which may run negative.
     var base: Clause = .{};
@@ -46,7 +57,15 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8, ctx: anytype) !core.Mea
             }
             if (m.first.from != 0 and m.second.from == 0) m.second.from = m.first.from else if (m.second.from != 0 and m.first.from == 0) m.first.from = m.second.from;
         },
-        .find => {
+        .param => m.expr = try ctx.measureExpr(w[2].rhs orelse return error.ParseError),
+        .err, .err1, .err2, .err3 => {
+            if (rest.len < 2) return error.ParseError;
+            m.first.vec = try vector(arena, &m.first, analysis, rest[0].lhs);
+            var ignored: Clause = .{};
+            m.first.vec2 = try vector(arena, &ignored, analysis, rest[1].lhs);
+            try stdParams(&m.first, analysis, rest[2..], ctx);
+        },
+        .find, .deriv => {
             const k = find(rest, "when") orelse rest.len;
             if (k == 0 or rest[0].rhs != null) return error.ParseError;
             m.first.vec = try vector(arena, &m.first, analysis, rest[0].lhs);
@@ -111,7 +130,8 @@ fn stdParams(c: *Clause, analysis: Kind, w: []const Word, ctx: anytype) !void {
             continue;
         };
         const v: f64 = if (std.mem.eql(u8, rhs, "last")) core.measure_last else try ctx.measureValue(rhs);
-        const Key = enum { rise, fall, cross, val, td, from, to, at };
+        // `goal` and `weight` only steer HSPICE's optimizer.
+        const Key = enum { rise, fall, cross, val, td, from, to, at, minval, ignor, ymin, ymax, goal, weight };
         const key = std.meta.stringToEnum(Key, x.lhs) orelse return error.ParseError;
         switch (key) {
             .rise, .fall, .cross => {
@@ -125,6 +145,10 @@ fn stdParams(c: *Clause, analysis: Kind, w: []const Word, ctx: anytype) !void {
             .from => c.from = v,
             .to => c.to = v,
             .at => c.at = v,
+            .minval => c.minval = v,
+            .ignor, .ymin => c.ymin = v,
+            .ymax => c.ymax = v,
+            .goal, .weight => {},
         }
     }
     if (analysis == .dc and c.to < c.from) std.mem.swap(f64, &c.from, &c.to);
@@ -147,7 +171,7 @@ fn words(arena: std.mem.Allocator, text: []const u8) ![]Word {
         var quote = false;
         while (i < text.len) : (i += 1) {
             const b = text[i];
-            if (b == '\'') quote = !quote;
+            if (b == '\'' or b == '"') quote = !quote;
             if (quote) continue;
             if (b == '{' or b == '(') depth += 1;
             if ((b == '}' or b == ')') and depth > 0) depth -= 1;
@@ -180,23 +204,38 @@ test "meas cards parse like ngspice's word lists" {
         fn measureValue(_: @This(), t: []const u8) !f64 {
             return std.fmt.parseFloat(f64, t) catch error.ParseError;
         }
+        fn measureExpr(_: @This(), _: []const u8) ![]const core.MeasureOp {
+            return &.{.{ .measure = 0 }};
+        }
     };
-    const t = try parse(a, "tran tpd trig v(in) val = 0.9 rise=1 targ v(out) val= 0.9 fall =last td=1e-9", Ctx{});
+    const t = try parse(a, "tran tpd trig v(in) val = 0.9 rise=1 targ v(out) val= 0.9 fall =last td=1e-9", Ctx{}, null);
     try std.testing.expectEqual(.trig_targ, t.func);
     try std.testing.expectEqualStrings("v(out)", t.second.vec);
     try std.testing.expectEqual(0.9, t.first.val);
     try std.testing.expectEqual(1, t.first.rise);
     try std.testing.expectEqual(core.measure_last, t.second.fall);
     try std.testing.expectEqual(1e-9, t.second.td);
-    const f = try parse(a, "ac g find vdb(out) when vp(out)=-45 cross=1", Ctx{});
+    const f = try parse(a, "ac g find vdb(out) when vp(out)=-45 cross=1", Ctx{}, null);
     try std.testing.expectEqualStrings("v(out)", f.first.vec);
     try std.testing.expectEqual('d', f.first.vectype);
     try std.testing.expectEqual('p', f.second.vectype);
     try std.testing.expectEqual(-45, f.second.val);
-    const d = try parse(a, "dc x max v(1) from=2 to=-1", Ctx{});
+    const d = try parse(a, "dc x max v(1) from=2 to=-1", Ctx{}, null);
     try std.testing.expectEqual(-1, d.first.from);
-    const w = try parse(a, "tran x when v(a)=v(b)", Ctx{});
+    const w = try parse(a, "tran x when v(a)=v(b)", Ctx{}, null);
     try std.testing.expectEqualStrings("v(b)", w.first.vec2);
-    try std.testing.expectError(error.ParseError, parse(a, "tran x trig v(a) val=1 targ v(b) val=1", Ctx{}));
-    try std.testing.expectError(error.ParseError, parse(a, "tran x bogus v(a)", Ctx{}));
+    try std.testing.expectError(error.ParseError, parse(a, "tran x trig v(a) val=1 targ v(b) val=1", Ctx{}, null));
+    try std.testing.expectError(error.ParseError, parse(a, "tran x bogus v(a)", Ctx{}, null));
+    // HSPICE: the analysis type defaults to the last analysis card.
+    const e = try parse(a, "e err1 v(a) v(b) minval=1e-3 ymax=5", Ctx{}, .ac);
+    try std.testing.expectEqual(.ac, e.analysis);
+    try std.testing.expectEqual(.err1, e.func);
+    try std.testing.expectEqualStrings("v(b)", e.first.vec2);
+    try std.testing.expectEqual(1e-3, e.first.minval);
+    try std.testing.expectError(error.ParseError, parse(a, "e err1 v(a) v(b)", Ctx{}, null));
+    const p = try parse(a, "tran r param='tpd*2'", Ctx{}, null);
+    try std.testing.expectEqual(.param, p.func);
+    const s = try parse(a, "tran s derivative v(out) at=1e-9", Ctx{}, null);
+    try std.testing.expectEqual(.deriv, s.func);
+    try std.testing.expectEqual(1e-9, s.first.at);
 }

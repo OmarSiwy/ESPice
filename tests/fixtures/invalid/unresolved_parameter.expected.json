@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "An unfolded parameter value is rejected, not replaced by a default.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "An unfolded parameter value is rejected, not replaced by a default."
+  },
+  "expect": {
+    "status": "error",
+    "category": "unsupported_input",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "0b7265a00287908914ba8d8423bede30ff16017081ce6c461f16e4a8cde867fa"
+}

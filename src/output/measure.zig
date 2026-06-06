@@ -12,8 +12,18 @@ const nan = std.math.nan(f64);
 /// Writes every card in `measures` that targets `analysis`, evaluated over
 /// `result`, under ngspice's heading. Writes nothing when none targets it.
 pub fn print(out: *Writer, err: *Writer, measures: []const core.Measure, analysis: Kind, result: core.Result) Writer.Error!void {
+    // As ngspice's measure.c, PARAM cards read every other card's result,
+    // so those are evaluated first; each card still prints in deck order.
+    // ponytail: a fixed table; cards past the 256th read as NaN to a PARAM.
+    var values: [256]f64 = @splat(nan);
+    var discard_buf: [64]u8 = undefined;
+    var discard: Writer.Discarding = .init(&discard_buf);
+    for (measures, 0..) |m, i| {
+        if (m.analysis != analysis or m.func == .param or i >= values.len) continue;
+        values[i] = evaluate(&discard.writer, m, .{ .result = result, .analysis = analysis, .values = &values }) catch nan;
+    }
     var heading = false;
-    for (measures) |m| {
+    for (measures, 0..) |m, i| {
         if (m.analysis != analysis) continue;
         if (!heading) {
             heading = true;
@@ -23,55 +33,109 @@ pub fn print(out: *Writer, err: *Writer, measures: []const core.Measure, analysi
                 else => "DC",
             }});
         }
-        if (m.func == .deriv) {
-            try err.print("\nError: measure  {s} failed:\n\tfunction 'deriv' currently not supported\n\n", .{m.name});
-            continue;
-        }
-        const w: Wave = .{ .result = result, .analysis = analysis };
-        evaluate(out, m, w) catch |e| switch (e) {
+        const w: Wave = .{ .result = result, .analysis = analysis, .values = &values };
+        const value = evaluate(out, m, w) catch |e| switch (e) {
             error.WriteFailed => return error.WriteFailed,
-            error.NoSuchVector => try err.print("\nError: measure  {s} : no such vector\n", .{m.name}),
-            error.OutOfInterval => try err.print("\nError: measure  {s} : out of interval\n", .{m.name}),
+            error.NoSuchVector => blk: {
+                try err.print("\nError: measure  {s} : no such vector\n", .{m.name});
+                break :blk nan;
+            },
+            error.OutOfInterval => blk: {
+                try err.print("\nError: measure  {s} : out of interval\n", .{m.name});
+                break :blk nan;
+            },
         };
+        if (m.func == .param and i < values.len) values[i] = value;
     }
 }
 
-fn evaluate(out: *Writer, m: core.Measure, w: Wave) !void {
+/// Prints card `m` and returns its result, the value a PARAM card reads.
+fn evaluate(out: *Writer, m: core.Measure, w: Wave) !f64 {
     const a = m.first;
     switch (m.func) {
         .trig_targ => {
             const trig = try defined(if (a.at == core.measure_no_at) try w.when(a) else a.at);
             const targ = try defined(if (m.second.at == core.measure_no_at) try w.when(m.second) else m.second.at);
             try out.print("{s:<20}=  {f} targ=  {f} trig=  {f}\n", .{ m.name, sci(targ - trig, 6), sci(targ, 6), sci(trig, 6) });
+            return targ - trig;
         },
-        .find => {
+        .find, .deriv => {
             const at = if (a.at == core.measure_no_at) try defined(try w.when(m.second)) else a.at;
-            try out.print("{s:<20}=  {f}\n", .{ m.name, sci(try defined(try w.valueAt(a, at)), 6) });
+            const v = try defined(if (m.func == .find) try w.valueAt(a, at) else try w.slopeAt(a, at));
+            try out.print("{s:<20}=  {f}\n", .{ m.name, sci(v, 6) });
+            return v;
         },
-        .when => try out.print("{s:<20}=   {f}\n", .{ m.name, sci(try defined(try w.when(a)), 5) }),
+        .when => {
+            const v = try defined(try w.when(a));
+            try out.print("{s:<20}=   {f}\n", .{ m.name, sci(v, 5) });
+            return v;
+        },
         .rms, .integ => {
             const r = try w.rmsInteg(a, m.func == .rms);
             try out.print("{s:<20}=   {f} from=  {f} to=  {f}\n", .{ m.name, sci(try defined(r.value), 5), sci(r.from, 5), sci(r.to, 5) });
+            return r.value;
         },
         .avg => {
             const r = try w.extremum(a, .avg);
             try out.print("{s:<20}=  {f} from=  {f} to=  {f}\n", .{ m.name, sci(try defined(r.value), 6), sci(if (a.at == core.measure_no_at) a.from else a.at, 6), sci(r.at, 6) });
+            return r.value;
         },
         .min, .max => {
             const r = try w.extremum(a, if (m.func == .min) .min else .max);
             try out.print("{s:<20}=  {f} at=  {f}\n", .{ m.name, sci(try defined(r.value), 6), sci(r.at, 6) });
+            return r.value;
         },
         .min_at, .max_at => {
             const r = try w.extremum(a, if (m.func == .min_at) .min else .max);
             try out.print("{s:<20}=  {f} with=  {f}\n", .{ m.name, sci(try defined(r.at), 6), sci(r.value, 6) });
+            return r.at;
         },
         .pp => {
             const lo = try defined((try w.extremum(a, .min)).value);
             const hi = try defined((try w.extremum(a, .max)).value);
             try out.print("{s:<20}=  {f} from=  {f} to=  {f}\n", .{ m.name, sci(hi - lo, 6), sci(a.from, 6), sci(a.to, 6) });
+            return hi - lo;
         },
-        .deriv => unreachable,
+        .param => {
+            const v = try defined(paramValue(m.expr, w.values));
+            try out.print("{s:<20}=  {f}\n", .{ m.name, sci(v, 6) });
+            return v;
+        },
+        .err, .err1, .err2, .err3 => {
+            const v = try defined(try w.relError(a, m.func));
+            try out.print("{s:<20}=  {f}\n", .{ m.name, sci(v, 6) });
+            return v;
+        },
     }
+}
+
+/// Folds a PARAM card's postfix over the results in `values`; NaN when a
+/// result it reads is missing.
+fn paramValue(ops: []const core.MeasureOp, values: []const f64) f64 {
+    var stack: [32]f64 = undefined;
+    var n: usize = 0;
+    for (ops) |op| switch (op) {
+        .num, .measure => {
+            if (n == stack.len) return nan;
+            stack[n] = if (op == .num) op.num else if (op.measure < values.len) values[op.measure] else nan;
+            n += 1;
+        },
+        .neg => stack[n - 1] = -stack[n - 1],
+        else => {
+            n -= 1;
+            const b = stack[n];
+            const x = &stack[n - 1];
+            x.* = switch (op) {
+                .add => x.* + b,
+                .sub => x.* - b,
+                .mul => x.* * b,
+                .div => x.* / b,
+                .pow => std.math.pow(f64, x.*, b),
+                else => unreachable,
+            };
+        },
+    };
+    return if (n == 1) stack[0] else nan;
 }
 
 fn defined(x: f64) error{OutOfInterval}!f64 {
@@ -108,6 +172,8 @@ const Stat = struct { value: f64, at: f64 };
 const Wave = struct {
     result: core.Result,
     analysis: Kind,
+    /// Results of the cards evaluated so far, by card index.
+    values: []const f64 = &.{},
 
     fn len(w: Wave) usize {
         return w.result.npoints;
@@ -223,6 +289,52 @@ const Wave = struct {
             pv = v;
         }
         return nan;
+    }
+
+    /// Slope of the vector against the scale at `at`, off the sample pair
+    /// around it; NaN outside the sweep.
+    fn slopeAt(w: Wave, c: Clause, at: f64) !f64 {
+        const x = w.scale();
+        const y = try w.column(c.vec, c.vectype);
+        for (1..w.len()) |i| {
+            const x0 = x.get(i - 1);
+            const x1 = x.get(i);
+            if ((x0 <= at and x1 >= at) or (w.analysis == .dc and x0 >= at and x1 <= at))
+                return (y.get(i) - y.get(i - 1)) / (x1 - x0);
+        }
+        return nan;
+    }
+
+    /// HSPICE's ERR family over the window [SA Ch.11 "Error Equations"]:
+    /// with e = (M - C) / M, M = `c.vec` floored at `c.minval`, C =
+    /// `c.vec2`, ERR and ERR1 return the RMS of e and ERR2 the mean of |e|.
+    /// ERR3 takes e = +-log|M/C| / log(M), signed as M/C, reduced as ERR1.
+    /// Points with |M| outside [ymin, ymax] are skipped; NaN when none is left.
+    fn relError(w: Wave, c: Clause, func: core.MeasureFunc) !f64 {
+        const x = w.scale();
+        const mv = try w.column(c.vec, c.vectype);
+        const cv = try w.column(c.vec2, c.vectype);
+        var sum: f64 = 0;
+        var count: f64 = 0;
+        for (0..w.len()) |i| {
+            const xv = x.get(i);
+            if (w.analysis == .dc) {
+                if (xv < c.from or xv > c.to) continue;
+            } else {
+                if (xv < c.from) continue;
+                if (c.to != 0 and xv > c.to) break;
+            }
+            const m = mv.get(i);
+            const calc = cv.get(i);
+            if (@abs(m) < c.ymin or @abs(m) > c.ymax) continue;
+            const d = if (@abs(m) < c.minval) c.minval else m;
+            // ponytail: the manual gives no reduction for ERR3; RMS, as ERR1.
+            const e = if (func == .err3) std.math.sign(m / calc) * @log(@abs(m / calc)) / @log(d) else (m - calc) / d;
+            sum += if (func == .err2) @abs(e) else e * e;
+            count += 1;
+        }
+        if (count == 0) return nan;
+        return if (func == .err2) sum / count else @sqrt(sum / count);
     }
 
     /// MIN/MAX (value, where) or AVG (trapezoidal mean, last scale read)
@@ -397,8 +509,12 @@ test "measurements match ngspice on a sampled ramp" {
         .{ .analysis = .tran, .name = "mx", .func = .max, .first = .{ .vec = "v(a)", .to = 3 } },
         .{ .analysis = .tran, .name = "gone", .func = .when, .first = .{ .vec = "v(a)", .val = 9 } },
         .{ .analysis = .ac, .name = "skipped", .func = .max, .first = .{ .vec = "v(a)" } },
+        // HSPICE forms: DERIVATIVE, ERR2 (t = 0 falls under YMIN), PARAM.
+        .{ .analysis = .tran, .name = "s", .func = .deriv, .first = .{ .vec = "v(b)", .at = 2.5 } },
+        .{ .analysis = .tran, .name = "e", .func = .err2, .first = .{ .vec = "v(a)", .vec2 = "v(b)" } },
+        .{ .analysis = .tran, .name = "p", .func = .param, .first = .{}, .expr = &.{ .{ .measure = 0 }, .{ .num = 2 }, .mul } },
     };
-    var out_buf: [512]u8 = undefined;
+    var out_buf: [1024]u8 = undefined;
     var err_buf: [256]u8 = undefined;
     var out: Writer = .fixed(&out_buf);
     var err: Writer = .fixed(&err_buf);
@@ -414,6 +530,9 @@ test "measurements match ngspice on a sampled ramp" {
         \\f                   =  1.500000e+00
         \\i                   =   8.00000e+00 from=  0.00000e+00 to=  4.00000e+00
         \\mx                  =  3.000000e+00 at=  3.000000e+00
+        \\s                   =  -1.000000e+00
+        \\e                   =  9.166667e-01
+        \\p                   =  4.000000e+00
         \\
     , out.buffered());
     try std.testing.expect(std.mem.indexOf(u8, err.buffered(), "gone") != null);

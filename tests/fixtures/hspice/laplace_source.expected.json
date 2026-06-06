@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "An unsupported E/G keyword form is rejected, not read as node names.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "An unsupported E/G keyword form is rejected, not read as node names."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "error",
+    "category": "unsupported_input",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "dec7e5b5bc510b932266b4e9f37233a2cea70694eb1adf8765b1959cacd1437c"
+}

@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "A .temp list runs the analysis once per temperature.",
+  "oracle": {
+    "kind": "ngspice-45",
+    "derivation": "ngspice -b with .options tnom=25 and .temp t, once per list entry."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point (temp=-55)",
+        "match": "exact",
+        "columns": {
+          "v(a)": {
+            "unit": "V",
+            "rtol": 1e-05,
+            "atol": 1e-09,
+            "values": [
+              0.8918258085313189
+            ]
+          }
+        },
+        "row_count": 1
+      },
+      {
+        "name": "Operating Point (temp=25)",
+        "match": "exact",
+        "columns": {
+          "v(a)": {
+            "unit": "V",
+            "rtol": 1e-05,
+            "atol": 1e-09,
+            "values": [
+              0.7859038965696223
+            ]
+          }
+        },
+        "row_count": 1
+      },
+      {
+        "name": "Operating Point (temp=125)",
+        "match": "exact",
+        "columns": {
+          "v(a)": {
+            "unit": "V",
+            "rtol": 1e-05,
+            "atol": 1e-09,
+            "values": [
+              0.64575296040063
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "f30df0f9d9ec2f86b5b762b7f91432b2d3bff9220e853fca5637088b3327a070"
+}
