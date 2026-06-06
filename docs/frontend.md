@@ -108,7 +108,52 @@ behavioural sources are the only consumer that reads inside them
 (`builder.zig` probe and polynomial extraction walk the postfix by subtree).
 `v(a,b)` probes hold net ids, mapped through the subcircuit frame. A zero
 switch still disables a stochastic or geometry term (`0*agauss(...)` folds to
-0), as in the nominal PDK corners.
+0), as in the nominal PDK corners. `agauss`, `gauss`, `unif`, `aunif` and a
+two-argument `limit` fold to their nominal, the first argument, in every
+dialect; Monte Carlo sampling is future work (hspice-comparison C3).
+
+A resistor, capacitor or inductor value that did not fold, an undefined name
+with no `.model` behind it, is `UnresolvedParameter`. It used to fall back to
+the 1 mOhm (or zero) default of a missing value.
+
+## Unsupported input
+
+A card ESPice cannot simulate is `UnsupportedCard`, logged with the line as
+written; nothing is dropped silently. That covers dot cards outside `cards`
+(`.alter`, `.lstb`, `.data`, `.control`, ...), an E/F/G/H card whose first
+control word is a behavioural keyword (`poly`, `value`, `vol`, `laplace`,
+`delay`, `vcr`, ...: ngspice's inpcom.c list plus HSPICE's), and in the
+HSPICE dialect the B, P, S, U and W letters, which HSPICE reads as IBIS
+buffers, ports, S-parameter blocks and lossy lines. Output-only cards
+(`.print`, `.plot`, `.probe`, `.graph`, `.width`, `.title`, `.protect`
+and friends) are accepted and ignored, since every vector is written. An
+analysis card that fails to build logs its line before the error.
+
+## HSPICE dialect
+
+`--tokenizer=hspice` also switches these semantics [CR = HSPICE Command
+Reference, SA = Simulation and Analysis guide]:
+
+| Input | HSPICE dialect | ngspice dialect |
+|---|---|---|
+| no `.option tnom`, no `.temp` | TNOM 25 degC, circuit at TNOM [SA Ch.20] | 27 degC both |
+| `.temp t1 t2 ...` | every query once per temperature, plots named `<plot> (temp=t)` | three numbers: a DC temperature sweep |
+| `.tran s1 t1 s2 t2 ...` | one run to the last stop [CR .TRAN]; the SPICE `tstep tstop tstart tmax` reading only when `s2` and `t2` are both below `t1` and no `START=` | ngspice |
+| untyped `.measure name func ...` | the last `.tran`/`.ac`/`.dc` card | rejected |
+| unknown `.option` names | one warning each | ignored, as ngspice does |
+
+In both dialects: `.global` nets join through every subcircuit level;
+`.connect a b` joins two top-level nets (a subcircuit's `.connect` is
+refused); `.dcvolt` is `.ic`, and takes bare `node value` pairs too;
+`.nodeset` holds its nodes through a 1e10 S conductance for the operating
+point's first Newton solve, then releases them, as ngspice's cktload.c does
+in MODEINITJCT/INITFIX (the DC sweep's own points do not read it yet).
+`.option gshunt`/`cshunt` add an R and a C from every net to ground
+(`r.gshunt.<net>`, `c.cshunt.<net>`), `delmax` caps the transient step when
+the `.tran` card gives no tmax, and `gmindc`, `absv`, `relv`, `absi` and
+`method=bdf` alias `gmin`, `vntol`, `reltol`, `abstol` and Gear.
+Divergence: ESPice's `.tran` segments share the finest segment's step cap;
+HSPICE's `RUNLVL`, `ACCURATE` and `SEARCH` are not read.
 
 ## PDK conveniences
 
@@ -129,9 +174,14 @@ are written against it:
   rows (`deck.measures`) and evaluated after the run by
   `src/output/measure.zig`, a port of com_measure2.c: the same event
   counting, interpolation, Simpson/trapezoid panels and print format, so
-  results match ngspice byte for byte on the same waveform. `DERIV` is
-  rejected as ngspice 45 rejects it; `PARAM`/`EXPR` cards are not
-  supported. Divergence: ngspice refuses `.meas` in batch mode with `-r`;
+  results match ngspice byte for byte on the same waveform. HSPICE's
+  `INTEGRAL`, `DERIVATIVE`, `PARAM=` (arithmetic over other results and
+  global parameters, evaluated after the other cards as ngspice's
+  measure.c does) and `ERR`/`ERR1`/`ERR2`/`ERR3` [CR .MEASURE] are read
+  too; `GOAL` and `WEIGHT` are accepted and unused. Divergences: `DERIV`
+  returns the slope of the sample pair around its point, where ngspice 45
+  rejects it; the manual gives ERR3 no reduction, so ESPice returns its
+  RMS as for ERR1; ngspice refuses `.meas` in batch mode with `-r`;
   espice always prints them, and reports a failed card on stderr in a
   shorter form.
 
