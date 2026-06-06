@@ -297,6 +297,51 @@ test "prepared device instances share tapes and isolate parameters and accepted 
     }.run, .{batch});
 }
 
+test "a live timer schedule reaches next_breakpoint" {
+    const D = struct {
+        pub const U = enum(u8) { p, n };
+        pub const num_ports: usize = 2;
+        pub const Model = struct {};
+        pub const Instance = struct { next: f64 = std.math.inf(f64) };
+        pub const State = struct {};
+        pub fn initState(_: *const Model, _: *const Instance) State {
+            return .{};
+        }
+        pub fn eval(comptime S: type, xv: *const [2]S.V, _: *const Model, _: *const Instance, _: SimState) contract.Rows(@This(), S) {
+            const x = contract.probes(@This(), S, xv);
+            const current = x[0].sub(x[1]);
+            return contract.rows(@This(), S, .{ current, current.neg() });
+        }
+        pub fn updateState(comptime _: type, _: *const Model, inst: *Instance, _: [2]f64, _: *State, sim: SimState) contract.UpdateResult {
+            // A timer re-armed during the solve: fires 1 ns after each update.
+            inst.next = sim.t + 1e-9;
+            return .ok;
+        }
+        pub fn pendingBreakpoint(inst: *const Instance, t: f64) ?f64 {
+            return if (inst.next > t) inst.next else null;
+        }
+    };
+    const a = std.testing.allocator;
+    var proto: ProtoStore(D) = .{};
+    try proto.append(.{}, .{}, .{ 1, 2 });
+    try proto.append(.{}, .{}, .{ 2, 1 });
+    const batch = try ProtoStore(D).finalize(&proto, a, .{
+        .col_ptr = &.{ 0, 3, 6, 9 },
+        .row_idx = &.{ 0, 1, 2, 0, 1, 2, 0, 1, 2 },
+        .n = 3,
+        .trash_slot = 9,
+    }).unwrap();
+    defer batch.hooks.deinit(batch.ctx, a);
+    const next = batch.hooks.next_breakpoint.?;
+    try std.testing.expectEqual(@as(?f64, null), next(batch.ctx, 0));
+    const self: *DeviceBatch(D) = @ptrCast(@alignCast(batch.ctx));
+    self.sim.t = 2e-9;
+    _ = batch.hooks.update_state.?(batch.ctx, &.{ 0, 0, 0 });
+    const fire = self.sim.t + 1e-9;
+    try std.testing.expectEqual(@as(?f64, fire), next(batch.ctx, 2e-9));
+    try std.testing.expectEqual(@as(?f64, null), next(batch.ctx, fire));
+}
+
 test "iteration hooks gather each instance and preserve accepted-time state" {
     const D = struct {
         pub const U = enum(u8) { p, n };
