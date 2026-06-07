@@ -349,6 +349,32 @@ test "a live timer schedule reaches next_breakpoint" {
     try std.testing.expectEqual(@as(?f64, null), next(batch.ctx, fire));
 }
 
+test "a field that only names absdelay keeps updateState on every solve" {
+    const D = struct {
+        pub const U = enum(u8) { p, n };
+        pub const num_ports: usize = 2;
+        pub const Model = struct {};
+        // Named like a delay ring, but outside VerA's operator namespace
+        // (`__analog_op__absdelay__`): routed to `commit_state`, the
+        // operating point would never run updateState.
+        pub const Instance = struct { sig__absdelay__x: f64 = 0 };
+        pub const State = struct {};
+        pub fn initState(_: *const Model, _: *const Instance) State {
+            return .{};
+        }
+        pub fn eval(comptime S: type, xv: *const [2]S.V, _: *const Model, _: *const Instance, _: SimState) contract.Rows(@This(), S) {
+            const x = contract.probes(@This(), S, xv);
+            const current = x[0].sub(x[1]);
+            return contract.rows(@This(), S, .{ current, current.neg() });
+        }
+        pub fn updateState(comptime _: type, _: *const Model, _: *Instance, _: [2]f64, _: *State, _: SimState) contract.UpdateResult {
+            return .ok;
+        }
+    };
+    try std.testing.expect(DeviceBatch(D).hooks.update_state != null);
+    try std.testing.expect(DeviceBatch(D).hooks.commit_state == null);
+}
+
 test "iteration hooks gather each instance and preserve accepted-time state" {
     const D = struct {
         pub const U = enum(u8) { p, n };

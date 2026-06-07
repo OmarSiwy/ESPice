@@ -1112,12 +1112,15 @@ test "spicePulseBreak rounds from the request time as ngspice does" {
 /// declare `unrevertible_state` (they have no `stateCtl`). A VerA ring would
 /// revert, but a push at the operating point seeds it with a static solve
 /// (multi_analysis/bench_hb_tline_guard: 6.7e-8 to 0.66 of its tolerance).
-/// VerA devices are recognized by the `__absdelay__` infix its naming scheme
-/// puts on the Instance fields.
+/// VerA devices are recognized by the `__analog_op__absdelay__` infix its
+/// naming scheme puts on an absdelay operator's Instance fields. A bare
+/// `__absdelay__` also matches a field that merely carries the name (a
+/// Verilog device's), and a device routed to `commit_state` never runs
+/// `updateState` at the operating point, so its fixed point never forms.
 // ponytail: field-name matching until VerA's contract marks delay history.
 fn hasAbsdelayState(comptime D: type) bool {
     if (@hasDecl(D, "unrevertible_state")) return D.unrevertible_state;
-    return hasInstanceField(D, "__absdelay__");
+    return hasInstanceField(D, "__analog_op__absdelay__");
 }
 
 /// D's §4.5.4 `idt` operator unknowns, as local indices. VerA spells the
