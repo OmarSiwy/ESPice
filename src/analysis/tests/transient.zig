@@ -610,6 +610,75 @@ const TranTests = struct {
             if (!on_edge) try testing.expectApproxEqAbs(want, v, 1e-6);
         }
     }
+
+    const contract = @import("contract");
+
+    /// A one-node circuit: one instance of two-terminal device D from node 1
+    /// to ground. Caller deinits it.
+    fn oneDevice(comptime D: type, gpa: std.mem.Allocator) !root.Circuit {
+        const evaluator = @import("device_eval");
+        const Store = evaluator.ProtoStore(D);
+        const store = try gpa.create(Store);
+        store.* = .{};
+        try store.append(.{}, .{}, .{ 1, 0 });
+        const protos = [_]evaluator.Proto{.{
+            .ctx = store,
+            .type_name = "one",
+            .pattern = Store.addPattern,
+            .finalize = Store.finalize,
+            .destroy = Store.destroy,
+            .apply_perm = Store.applyPerm,
+        }};
+        const intern_bytes = try gpa.dupe(u8, "00");
+        const intern_offs = try gpa.dupe(u32, &.{ 0, 1, 2 });
+        return root.freeze(gpa, 2, intern_bytes, intern_offs, &protos, &@as([protos.len]@import("device").DeviceType, @splat(.unset)), null);
+    }
+
+    /// A conductance of 1 + n siemens, where `updateState` sets n to the
+    /// branch voltage: its stamp shows which state the batch holds.
+    const Latch = struct {
+        pub const U = enum(u8) { p, n };
+        pub const num_ports: usize = 2;
+        pub const Model = struct {};
+        pub const Instance = struct { n: f64 = 0 };
+        pub const State = struct {};
+        pub fn initState(_: *const Model, _: *const Instance) State {
+            return .{};
+        }
+        pub fn eval(comptime S: type, xv: *const [2]S.V, _: *const Model, inst: *const Instance, _: contract.SimState) contract.Rows(@This(), S) {
+            const v = contract.probes(@This(), S, xv);
+            const current = v[0].sub(v[1]).scale(1 + inst.n);
+            return contract.rows(@This(), S, .{ current, current.neg() });
+        }
+        pub fn updateState(comptime _: type, _: *const Model, inst: *Instance, x: [2]f64, _: *State, _: contract.SimState) contract.UpdateResult {
+            inst.n = x[0] - x[1];
+            return .ok;
+        }
+    };
+
+    // OPtran and the envelope's outer rollback rewind committed device state.
+    test "circuit: restoreState rewinds device state in place" {
+        const gpa = testing.allocator;
+        var ckt = try oneDevice(Latch, gpa);
+        defer ckt.deinit();
+        const x = [_]f64{ 0, 2 };
+        _ = ckt.updateStates(&x);
+        _ = ckt.stateCtl(.commit);
+        const saved = try ckt.saveState(gpa);
+        defer saved.deinit(gpa);
+        _ = ckt.updateStates(&.{ 0, 5 });
+        _ = ckt.stateCtl(.commit);
+        ckt.restoreState(saved);
+        ckt.eval(&x, 0);
+        try testing.expectEqual(@as(f64, 3), ckt.g_vals[ckt.diag_slots[1]]);
+        // A refreshed save holds the newer state.
+        _ = ckt.updateStates(&.{ 0, 5 });
+        ckt.storeState(saved);
+        _ = ckt.updateStates(&x);
+        ckt.restoreState(saved);
+        ckt.eval(&x, 0);
+        try testing.expectEqual(@as(f64, 6), ckt.g_vals[ckt.diag_slots[1]]);
+    }
 };
 
 const TranNoiseTests = struct {

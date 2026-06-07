@@ -289,6 +289,13 @@ test "prepared device instances share tapes and isolate parameters and accepted 
     try std.testing.expectEqual(@as(f64, 3), captured.states[0].bias);
     one.instances[0].history[0] = 99;
     try std.testing.expectEqual(@as(f64, 2), captured.instances[0].history[0]);
+    // `copy_state` rewinds in place, so storage a ParamRef points into stays.
+    one.states[0].bias = 42;
+    const storage = one.instances.ptr;
+    first.hooks.copy_state(first.ctx, accepted.ctx);
+    try std.testing.expectEqual(@as(f64, 2), one.instances[0].history[0]);
+    try std.testing.expectEqual(@as(f64, 3), one.states[0].bias);
+    try std.testing.expectEqual(storage, one.instances.ptr);
     try std.testing.checkAllAllocationFailures(a, struct {
         fn run(allocator: std.mem.Allocator, prepared: Batch) !void {
             const instance = try prepared.hooks.instantiate(prepared.ctx, allocator).unwrap();

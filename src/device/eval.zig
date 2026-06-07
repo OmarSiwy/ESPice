@@ -1214,6 +1214,7 @@ pub fn DeviceBatch(comptime D: type) type {
         pub const hooks: Hooks = .{
             .instantiate = instantiate,
             .snapshot = snapshot,
+            .copy_state = copyState,
             .set_limit_active = if (has_limit) setLimitActive else null,
             .scatter_bounds = scatterBounds,
             .q_tape = if (has_q) qTape else null,
@@ -1713,6 +1714,25 @@ pub fn DeviceBatch(comptime D: type) type {
 
         fn snapshot(ctx: *const anyopaque, gpa: std.mem.Allocator) ir.DeviceResult(Batch) {
             return ir.DeviceResult(Batch).fromLocal(duplicate(ctx, gpa, true));
+        }
+
+        fn copyState(dst_ctx: *anyopaque, src_ctx: *const anyopaque) void {
+            const dst: *Self = @ptrCast(@alignCast(dst_ctx));
+            const src: *const Self = @ptrCast(@alignCast(src_ctx));
+            @memcpy(dst.models, src.models);
+            @memcpy(dst.instances, src.instances);
+            if (comptime has_state) @memcpy(dst.states, src.states);
+            if (comptime has_q) @memcpy(dst.q_tape, src.q_tape);
+            if (comptime has_attempt) {
+                @memcpy(dst.saved_models, src.saved_models);
+                dst.attempt_saved = src.attempt_saved;
+            }
+            if (comptime has_limit) {
+                @memcpy(dst.lim_x, src.lim_x);
+                dst.lim_active = src.lim_active;
+            }
+            if (comptime has_bp) dst.bp = src.bp;
+            if (comptime has_pulse) @memcpy(dst.pulse_brk, src.pulse_brk);
         }
 
         fn setLimitActive(ctx: *anyopaque, active: bool) void {

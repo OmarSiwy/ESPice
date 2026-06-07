@@ -145,6 +145,11 @@ pub const Hooks = struct {
     instantiate: *const fn (*const anyopaque, std.mem.Allocator) DeviceResult(Batch),
     /// A copy of an accepted batch, mutable history included.
     snapshot: *const fn (*const anyopaque, std.mem.Allocator) DeviceResult(Batch),
+    /// Overwrites the first batch's mutable state (models, instances,
+    /// history, limiting state) with the second's. Both must be this type
+    /// and one a `snapshot` of the other, or of a common batch. Allocates
+    /// nothing, so `ParamRef`s into the first stay valid.
+    copy_state: *const fn (*anyopaque, *const anyopaque) void,
     /// Syncs the host limiting flag after GPU state is downloaded.
     set_limit_active: ?*const fn (*anyopaque, bool) void = null,
     /// `{slot_lo, slot_hi, row_lo, row_hi}` touched by instances
@@ -409,8 +414,9 @@ pub const GpuPayload = struct {
 //    GPU kernel by value; `Hooks.begin_solve` is gone and `set_sim_state` is
 //    required.
 // 15: `Hooks.collect_ac_dyn`/`ac_dyn`, VerA's frequency-dependent entries.
-// GPU planes, Model/Instance PODs and scatter tapes are unchanged by 10 to 15.
-pub const abi_version: u32 = 15;
+// 16: `Hooks.copy_state`.
+// GPU planes, Model/Instance PODs and scatter tapes are unchanged by 10 to 16.
+pub const abi_version: u32 = 16;
 
 /// A device type's construction entry points, exported by each device object
 /// and by runtime-loaded `.so` devices.
