@@ -96,10 +96,8 @@ fn newtonAt(
         return false;
     }
     if (trap) |tr| tr.accept(ckt.n);
-    // ponytail: commits per inner step, so an outer-step rollback restores x
-    // and the companion history but leaves device state at the failed inner
-    // point; snapshot the batches' state at the outer step if a stateful
-    // device needs it.
+    // Per inner step; an outer-step rollback restores the device state
+    // `simulate` saved at the outer step's start.
     _ = ckt.stateCtl(.commit);
     return true;
 }
@@ -152,6 +150,8 @@ pub fn simulate(
         break :blk &trap_state;
     } else null;
     const dt_inner: f64 = t_carrier / @as(f64, @floatFromInt(options.carrier_steps_per_period));
+    const outer_state = try ckt.saveState(allocator);
+    defer outer_state.deinit(allocator);
 
     // Row 0 is the operating point.
     {
@@ -176,6 +176,7 @@ pub fn simulate(
         if (attempts != 0) try ckt.checkpoint(.{ .phase = .transient, .completed = attempts });
         attempts += 1;
         simdCopy(x_outer_save, x);
+        ckt.storeState(outer_state);
         if (trap) |tr| {
             simdCopy(q_save, tr.q_prev);
             simdCopy(i_save, tr.i_prev);
@@ -223,6 +224,7 @@ pub fn simulate(
         if (!ok) {
             // The outer step was too aggressive: restore and retry shorter.
             simdCopy(x, x_outer_save);
+            ckt.restoreState(outer_state);
             if (trap) |tr| {
                 simdCopy(tr.q_prev, q_save);
                 simdCopy(tr.i_prev, i_save);
