@@ -626,6 +626,7 @@ fn extractSpectra2D(
 /// +-(k, l) conjugate pair and its amplitude is twice one line's magnitude
 /// (DC excepted). Non-convergence is error.QpssDidNotConverge.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
+    try ctx.circuit.refuseDigital("qpss");
     const a = ctx.allocator;
     const grid = MixGrid.init(opts.k1, opts.k2);
     const nf = grid.nf;

@@ -291,6 +291,7 @@ fn coarseAdvance(
 /// Contract entry: envelope-follow from ctx.x_op. Point-major rows
 /// (time, peak and rms per probe), exactly what `simulate` writes.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
+    try ctx.circuit.refuseDigital("envelope");
     const a = ctx.allocator;
     const x_op = ctx.x_op;
     const scratch = ctx.scratch_allocator;

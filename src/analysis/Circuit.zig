@@ -350,6 +350,17 @@ pub const Circuit = struct {
         self.lin.valid = false;
     }
 
+    /// Fails with `error.DigitalDeviceUnsupported` when a device type runs
+    /// a digital engine (`Batch.digital`), for an analysis that rewinds
+    /// time (pss, qpss, hb, envelope): a committed digital time cannot move
+    /// back. A warning names the analysis and the type.
+    pub fn refuseDigital(self: *const Circuit, analysis: []const u8) error{DigitalDeviceUnsupported}!void {
+        for (self.batches) |b| if (b.digital) {
+            std.log.warn("{s}: device type '{s}' holds digital state, whose time cannot rewind", .{ analysis, b.type_name });
+            return error.DigitalDeviceUnsupported;
+        };
+    }
+
     /// Returns a view of this circuit's own value planes.
     pub fn ownPlanes(self: *Circuit) Planes {
         return .{ .g_vals = self.g_vals, .c_vals = self.c_vals, .rhs = self.rhs, .q_vec = self.q_vec };
