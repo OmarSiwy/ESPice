@@ -78,6 +78,9 @@ pub fn simulate(
     const has_charge = ckt.has_charge;
 
     const ws = try ckt.workspace();
+    // A device's `request_reject_at` retries the step ending at that time.
+    ckt.land_rejects = true;
+    defer ckt.land_rejects = false;
     const x_try = try allocator.alloc(f64, n);
     defer allocator.free(x_try);
     // The accepted point before `cur`, for the predictor. Equal to `cur`
@@ -328,6 +331,7 @@ pub fn simulate(
         ckt.evalFollows(trial, t + dt, false);
         _ = ckt.applyLimits(trial, cur);
         const nr_opts = converger.optionsFromTolerances(options.tol, options.tol.itl4);
+        ckt.reject_at = null;
         const nr = converger.run(ckt, ws, trial, t + dt, nr_opts, hook) catch |err| switch (err) {
             error.QueryCancelled => return err,
             else => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 },
@@ -353,6 +357,17 @@ pub fn simulate(
             }
             continue;
         }
+
+        // A device located an event inside this step and asked for the step
+        // to end on it (`request_reject_at`): retry landing there. A time
+        // within state_eps of the step's end counts as the end, the
+        // resolution the flip query below keeps too.
+        if (ckt.reject_at) |tr| if (tr > t and t + dt - tr > state_eps and tr - t >= options.dt_min) {
+            st.rej_state += 1;
+            _ = ckt.stateCtl(.revert);
+            dt = tr - t;
+            continue;
+        };
 
         // A device state flipped inside this step (a switch crossed its
         // threshold): reject and shrink so the conductance step lands within

@@ -688,6 +688,45 @@ const TranTests = struct {
         ckt.batches[0].digital = true;
         try testing.expectError(error.DigitalDeviceUnsupported, ckt.refuseDigital("pss"));
     }
+
+    // A device that locates an event inside a step asks for the step to end
+    // there (`request_reject_at`). Taken as a flip, every step across the
+    // event fails Newton and dt underflows; honoured, one retry lands on it.
+    test "transient: a request_reject_at step retries ending at the requested time" {
+        const gpa = testing.allocator;
+        const tc: f64 = 0.375;
+        const D = struct {
+            pub const U = enum(u8) { p, n };
+            pub const num_ports: usize = 2;
+            pub const Model = struct {};
+            pub const Instance = struct {};
+            pub const State = struct {};
+            pub fn initState(_: *const Model, _: *const Instance) State {
+                return .{};
+            }
+            pub fn eval(comptime S: type, xv: *const [2]S.V, _: *const Model, _: *const Instance, _: contract.SimState) contract.Rows(@This(), S) {
+                const v = contract.probes(@This(), S, xv);
+                const current = v[0].sub(v[1]);
+                return contract.rows(@This(), S, .{ current, current.neg() });
+            }
+            pub fn updateState(comptime _: type, _: *const Model, _: *Instance, _: [2]f64, _: *State, sim: contract.SimState) contract.UpdateResult {
+                return if (sim.kind == .tran and sim.t > tc and sim.t - sim.dt < tc) .{ .request_reject_at = tc } else .ok;
+            }
+        };
+        var ckt = try oneDevice(D, gpa);
+        defer ckt.deinit();
+        const x = try gpa.alloc(f64, 2);
+        defer gpa.free(x);
+        root.zeroSimd(x);
+        const probes = [_]u32{1};
+        var wf = try Waveform.init(gpa, 1, 256);
+        defer wf.deinit();
+        const sim = try simulate(&ckt, x, &probes, &wf, .{ .t_stop = 1, .dt_init = 0.1, .uic = true }, gpa);
+        try testing.expect(sim.completed);
+        for (wf.timeSlice()) |tt| {
+            if (tt == tc) break;
+        } else return error.TestExpectedLanding;
+    }
 };
 
 const TranNoiseTests = struct {
