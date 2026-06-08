@@ -85,8 +85,8 @@ module jfet(d, g, s);
         // (jfettemp.c).
         tnk    = tnom + 273.15;
         tj     = (temp > -273.0 ? temp + 273.15 : $temperature) + dtemp;
-        vt     = 1.380649e-23 * tj / 1.602176634e-19;
-        vtnom  = 1.380649e-23 * tnk / 1.602176634e-19;
+        vt     = 1.38064852e-23 / 1.6021766208e-19 * tj;
+        vtnom  = 1.38064852e-23 / 1.6021766208e-19 * tnk;
         // IS(T), jfettemp.c: exp((T/tnom-1)*eg/(n*vt)), times (T/tnom)^XTI
         // only when the card gives XTI; the exponent is not divided by n.
         ist    = is * exp((tj / tnk - 1.0) * eg / (n * vt));
@@ -112,12 +112,12 @@ module jfet(d, g, s);
         fact2   = tj / 300.15;
         egfet1  = 1.16 - (7.02e-4 * tnk * tnk) / (tnk + 1108.0);
         egfet   = 1.16 - (7.02e-4 * tj * tj) / (tj + 1108.0);
-        arg1    = -egfet1 / (2.0 * 1.380649e-23 * tnk)
-                + 1.1150877 / (2.0 * 1.380649e-23 * 300.15);
-        argt    = -egfet / (2.0 * 1.380649e-23 * tj)
-                + 1.1150877 / (2.0 * 1.380649e-23 * 300.15);
-        pbfact1 = -2.0 * vtnom * (1.5 * ln(fact1) + 1.602176634e-19 * arg1);
-        pbfact  = -2.0 * vt * (1.5 * ln(fact2) + 1.602176634e-19 * argt);
+        arg1    = -egfet1 / (2.0 * 1.38064852e-23 * tnk)
+                + 1.1150877 / (2.0 * 1.38064852e-23 * 300.15);
+        argt    = -egfet / (2.0 * 1.38064852e-23 * tj)
+                + 1.1150877 / (2.0 * 1.38064852e-23 * 300.15);
+        pbfact1 = -2.0 * vtnom * (1.5 * ln(fact1) + 1.6021766208e-19 * arg1);
+        pbfact  = -2.0 * vt * (1.5 * ln(fact2) + 1.6021766208e-19 * argt);
         pbo     = (pb - pbfact1) / fact1;
         pbt     = fact2 * pbo + pbfact;
         gmaold  = (pb - pbo) / pbo;
@@ -204,11 +204,11 @@ module jfet(d, g, s);
         // 4kT*g*A*m on the conducting branch (jfetnoi.c RD/RS rows).
         if (rd > 0.0)
             I(brd) <+ scale * V(brd) / rd
-                    + white_noise(4.0 * 1.380649e-23 * tj * scale / rd, "rd");
+                    + white_noise(4.0 * 1.38064852e-23 * tj * scale / rd, "rd");
         else V(brd) <+ 0.0;
         if (rs > 0.0)
             I(brs) <+ scale * V(brs) / rs
-                    + white_noise(4.0 * 1.380649e-23 * tj * scale / rs, "rs");
+                    + white_noise(4.0 * 1.38064852e-23 * tj * scale / rs, "rs");
         else V(brs) <+ 0.0;
 
         // ---- channel noise (jfetnoi.c): NLEV<3 is 4kT*(2/3)|gm|, NLEV=3 the
@@ -219,7 +219,7 @@ module jfet(d, g, s);
             pnch = 2.0 / 3.0 * beta_t * area * vgst
                  * (1.0 + alpha + alpha * alpha) / (1.0 + alpha) * gdsnoi;
         end else pnch = 0.0;
-        I(dp, sp) <+ white_noise(4.0 * 1.380649e-23 * tj * pnch * m, "channel");
+        I(dp, sp) <+ white_noise(4.0 * 1.38064852e-23 * tj * pnch * m, "channel");
         if (kf > 0.0)
             I(dp, sp) <+ flicker_noise(m * kf * pow(abs(id), af), 1.0, "flicker");
     end

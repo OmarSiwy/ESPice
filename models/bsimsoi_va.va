@@ -7791,7 +7791,7 @@ analog begin : the_module
             else
                 cd = abs(Ids - Ic - Ibs + Iii + Igidl);
 
-            fourkt = 4.0 * `P_K * B4SOITempSH;
+            fourkt = 4.0 * 1.38064852e-23 * B4SOITempSH;
             if (B4SOIrdsMod != 2) begin
                 gdnoise = 1 / Rd ;
                 gsnoise = 1 / Rs ;
@@ -7943,14 +7943,14 @@ analog begin : the_module
                         DelClm = pParam_B4SOIlitl * ln(T0);
                 end
 
-                T1 = `Charge_q * `Charge_q * `P_K * cd * B4SOITempSH * B4SOIueff;
+                T1 = 1.6021766208e-19 * 1.6021766208e-19 * 1.38064852e-23 * cd * B4SOITempSH * B4SOIueff;
                 T2 = 1.0e10 * B4SOIAbulk * B4SOIcox
                    * pParam_B4SOIleff * pParam_B4SOIleff;
 
                 /* v2.2.3 bug fix */
-                N0 = B4SOIcox * B4SOIVgsteff / `Charge_q;
+                N0 = B4SOIcox * B4SOIVgsteff / 1.6021766208e-19;
                 Nl = B4SOIcox * B4SOIVgsteff
-                     * (1.0 - B4SOIAbovVgst2Vtm * B4SOIVdseff) / `Charge_q;
+                     * (1.0 - B4SOIAbovVgst2Vtm * B4SOIVdseff) / 1.6021766208e-19;
 
                 Nratio = (N0 + B4SOInstar) / (Nl + B4SOInstar);
                 if (Nratio < 1e-38)
@@ -7960,7 +7960,7 @@ analog begin : the_module
                 T4 = B4SOIoxideTrapDensityB * (N0 - Nl);
                 T5 = B4SOIoxideTrapDensityC * 0.5 * (N0 * N0 - Nl * Nl);
 
-                T6 = `P_K * B4SOITempSH * cd * cd;
+                T6 = 1.38064852e-23 * B4SOITempSH * cd * cd;
                 T7 = 1.0e10 * pParam_B4SOIleff
                    * pParam_B4SOIleff * wefftot;
                 T8 = B4SOIoxideTrapDensityA + B4SOIoxideTrapDensityB * Nl
@@ -7968,7 +7968,7 @@ analog begin : the_module
                 T9 = (Nl + B4SOInstar) * (Nl + B4SOInstar);
 
                 Ssi = T1 / T2 * (T3 + T4 + T5) + T6 / T7 * DelClm * T8 / T9;
-                T10 = B4SOIoxideTrapDensityA * `P_K * B4SOITempSH;
+                T10 = B4SOIoxideTrapDensityA * 1.38064852e-23 * B4SOITempSH;
                 T11 = wefftot * pParam_B4SOIleff
                         * 1.0e10 * B4SOInstar * B4SOInstar ;
                 Swi = T10 / T11 * cd * cd;
@@ -8045,13 +8045,13 @@ analog begin : the_module
         /* Low frequency excess noise due to FBE */
         /* Absolute values of Ibd, Ibs, (B4SOIIgd + B4SOIIgcd), (B4SOIIgs + B4SOIIgcs), and B4SOIig used by Pankaj in May 2012 */
 
-        I(db,di) <+ white_noise( 2 * `Charge_q * B4SOInoif * abs(Ibd), "ibd");
-        I(sb,si) <+ white_noise( 2 * `Charge_q * B4SOInoif * abs(Ibs), "ibs");
+        I(db,di) <+ white_noise( 2 * 1.6021766208e-19 * B4SOInoif * abs(Ibd), "ibd");
+        I(sb,si) <+ white_noise( 2 * 1.6021766208e-19 * B4SOInoif * abs(Ibs), "ibs");
 
         /* v3.2 for gate tunneling shot noise */
-        I(gi,di) <+ white_noise( 2 * `Charge_q * abs(B4SOIIgd + B4SOIIgcd), "igd");
-        I(gi,si) <+ white_noise( 2 * `Charge_q * abs(B4SOIIgs + B4SOIIgcs), "igs");
-        I(gi,b)  <+ white_noise( 2 * `Charge_q * abs(B4SOIig), "igb");
+        I(gi,di) <+ white_noise( 2 * 1.6021766208e-19 * abs(B4SOIIgd + B4SOIIgcd), "igd");
+        I(gi,si) <+ white_noise( 2 * 1.6021766208e-19 * abs(B4SOIIgs + B4SOIIgcs), "igs");
+        I(gi,b)  <+ white_noise( 2 * 1.6021766208e-19 * abs(B4SOIig), "igb");
 
         I(di,b)  <+ ddt(B4SOIqdrn);
         I(si,b)  <+ ddt(B4SOIqsrc);

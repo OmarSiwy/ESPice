@@ -131,19 +131,18 @@ module jfet2(d, g, s);
         // only the junction moves.
         tnomk = tnom + 273.15;
         tdev  = temp + 273.15 + dtemp;
-        vt    = 8.617333262145e-5 * tdev;      // k/q * T
-        vtnom = 8.617333262145e-5 * tnomk;
+        vt    = 1.38064852e-23 / 1.6021766208e-19 * tdev;
+        vtnom = 1.38064852e-23 / 1.6021766208e-19 * tnomk;
         nvt   = vt * n;
         fact1 = tnomk / 300.15;
         fact2 = tdev / 300.15;
         egfet = 1.16 - 7.02e-4 * tdev * tdev / (tdev + 1108.0);
         egnom = 1.16 - 7.02e-4 * tnomk * tnomk / (tnomk + 1108.0);
-        // pbfact = -2*Vt*(1.5*ln(fact) + q*arg); with Vt = kT/q the charge
-        // cancels into egfet/(2*Vt), which is the form below.
-        argt    = -egfet / (2.0 * vt) + 1.1150877 / (2.0 * 300.15 * 8.617333262145e-5);
-        argn    = -egnom / (2.0 * vtnom) + 1.1150877 / (2.0 * 300.15 * 8.617333262145e-5);
-        pbfact  = -2.0 * vt * (1.5 * ln(fact2) + argt);
-        pbfactn = -2.0 * vtnom * (1.5 * ln(fact1) + argn);
+        // jfet2temp.c's own arithmetic, so the rounding matches too.
+        argt    = -egfet / (2.0 * 1.38064852e-23 * tdev) + 1.1150877 / (1.38064852e-23 * (300.15 + 300.15));
+        argn    = -egnom / (2.0 * 1.38064852e-23 * tnomk) + 1.1150877 / (1.38064852e-23 * (300.15 + 300.15));
+        pbfact  = -2.0 * vt * (1.5 * ln(fact2) + 1.6021766208e-19 * argt);
+        pbfactn = -2.0 * vtnom * (1.5 * ln(fact1) + 1.6021766208e-19 * argn);
         pbo     = (pb - pbfactn) / fact1;
         gmaold  = (pb - pbo) / pbo;
         cjfact  = 1.0 / (1.0 + 0.5 * (4e-4 * (tnomk - 300.15) - gmaold));
@@ -155,7 +154,7 @@ module jfet2(d, g, s);
         // Vcrit per gate junction. IS = 0 has no junction to limit.
         if (isat > 0.0) vcrit = nvt * ln(nvt / (1.4142135623730951 * isat));
         else            vcrit = 0.6;
-        fourkt = 4.0 * 1.380649e-23 * tdev;
+        fourkt = 4.0 * 1.38064852e-23 * tdev;
         // rd/rs = 0 is ngspice's node collapse (JFET2setup), written as a
         // switch branch below.
         grd = 0.0;

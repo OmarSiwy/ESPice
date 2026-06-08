@@ -982,7 +982,7 @@ analog begin
 
         Tnom    = tnom+`P_CELSIUS0;
         Tamb    = $temperature;
-        vt0     = `P_K*Tnom /`P_Q;
+        vt0     = 1.38064852e-23 / 1.6021766208e-19 * Tnom;
         k10     = f1vg*Tnom*ln(Tnom);
         k20     = f2vg*Tnom;
         avs     = alvs*Tnom;
@@ -992,7 +992,7 @@ analog begin
         vgbe0   = (vgb+vge)/2;
         vgbc0   = (vgb+vgc)/2;
         vgsc0   = (vgs+vgc)/2;
-        mg      = 3-`P_Q*f1vg/`P_K;
+        mg      = 3-f1vg/(1.38064852e-23 / 1.6021766208e-19);
         zetabci = mg+1-zetaci;
         zetabcxt= mg+1-zetacx;
         zetasct = mg-1.5;
@@ -1049,7 +1049,7 @@ analog begin
                     Tdev = `TMAX + 273.15;
                 end
             end
-            VT      = `P_K*Tdev /`P_Q;
+            VT      = 1.38064852e-23 / 1.6021766208e-19 * Tdev;
             dT      = Tdev-Tnom;
             qtt0    = Tdev/Tnom;
             ln_qtt0 = ln(qtt0);
@@ -1268,7 +1268,7 @@ analog begin
                 Tdev = `TMAX + 273.15;
             end
         end
-        VT      = `P_K*Tdev /`P_Q;
+        VT      = 1.38064852e-23*Tdev /1.6021766208e-19;
         dT      = Tdev-Tnom;
         qtt0    = Tdev/Tnom;
         ln_qtt0 = ln(qtt0);
@@ -1928,7 +1928,7 @@ analog begin
     `NOISE begin : Noise_sources
 
         //Thermal noise
-        fourkt  = 4.0 * `P_K * Tdev;
+        fourkt  = 4.0 * 1.38064852e-23 * Tdev;
         if (rbx >= `MIN_R) begin
             I(br_bbp_i)     <+ white_noise(fourkt/rbx_t,    "rbx");
         end
@@ -1961,7 +1961,7 @@ analog begin
 
         //Shot noise
 
-        twoq    = 2.0 * `P_Q;
+        twoq    = 2.0 * 1.6021766208e-19;
         I(br_cibi)      <+ white_noise(twoq*iavl,       "iavl");
 
         I(br_bici)      <+ white_noise(twoq*abs(ibci),  "ibci");
@@ -1989,7 +1989,7 @@ analog begin
 
 
             // realization  of modified base shot noise source I1(bi,ei)
-            I(b_n1)  <+ white_noise(2*`P_Q*abs(ibei),"ibei");
+            I(b_n1)  <+ white_noise(2*1.6021766208e-19*abs(ibei),"ibei");
             I(b_n1)  <+ -V(b_n1);
             I(bi,ei) <+ V(b_n1);
             I(bi,ei) <+ n_2/n_w*ddt(n_w*V(b_n1));
@@ -2000,7 +2000,7 @@ analog begin
 
             // realization of modified collector shot noise source I(ci,ei) (uncontrolled)
 
-            I(b_n2)  <+ white_noise(2*`P_Q*abs(it),"it");
+            I(b_n2)  <+ white_noise(2*1.6021766208e-19*abs(it),"it");
             I(b_n2)  <+ -V(b_n2);
             I(ci,ei) <+ V(b_n2);
 
