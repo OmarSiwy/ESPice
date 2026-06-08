@@ -375,9 +375,12 @@ const Subckt = struct {
     ports: []const []const u8,
     defaults: []const struct { key: []const u8, text: []const u8 },
     /// Lines between `.subckt` and `.ends`. Dot cards among them are global,
-    /// except a `.model` that needs instance parameters (`InstanceModel`).
+    /// except `.model` (`LocalModel`).
     first: u32,
     end: u32,
+    /// This subcircuit's `.model` cards, `Reader.local_models[models_lo..models_hi]`.
+    models_lo: u32 = 0,
+    models_hi: u32 = 0,
     /// Some line in the body is an `.if` chain card: `expand` reads the dot
     /// cards only then, since a PDK wrapper carries ~180 `.model` bins.
     has_cond: bool = false,
@@ -385,10 +388,17 @@ const Subckt = struct {
 
 const ModelRow = struct { name: []const u8, kind: []const u8, kv: Span };
 
-/// A `.model` card inside subcircuit `sub` whose values need a parameter the
-/// global scope lacks (IHP's `pre_layout`, or the subcircuit's `l`/`w`). Like
-/// ngspice, each `X` instance reads it again under its own parameters.
-const InstanceModel = struct { sub: u16, name: []const u8, line: u32 };
+/// A `.model` card inside a subcircuit. As in ngspice (subckt.c
+/// modtranslate), only cards of that subcircuit's own body see it. `top` is
+/// the card read at global scope. Every instance shares it when `shared`;
+/// otherwise each `X` instance reads the card again under its own
+/// parameters, because its values need one the global scope lacks (IHP's
+/// `pre_layout`, or the subcircuit's `l`/`w`) or it sits under the body's
+/// `.if` (`cond`), which only an instance can decide.
+const LocalModel = struct { name: []const u8, line: u32, top: u32, shared: bool, cond: bool };
+
+/// A `.model` line and whether it sits under a subcircuit body's `.if`.
+const ModelLine = struct { line: u32, cond: bool };
 
 fn Reader(comptime S: type) type {
     const F = S.Split;
@@ -414,8 +424,14 @@ fn Reader(comptime S: type) type {
         model_ids: std.StringHashMapUnmanaged(u32) = .empty,
         subckts: std.ArrayList(Subckt) = .empty,
         subckt_ids: std.StringHashMapUnmanaged(u16) = .empty,
-        instance_lines: std.ArrayList(InstanceModel) = .empty,
-        /// Model rows read from each `instance_lines` line, one per distinct
+        /// Every subcircuit's `.model` cards, in line order.
+        local_models: std.ArrayList(LocalModel) = .empty,
+        /// Names in `local_models`, for `isModel`.
+        local_names: std.StringHashMapUnmanaged(void) = .empty,
+        /// `.option scale` and `wnflag`, read before any device.
+        scale: f64 = 1,
+        wnflag: bool = false,
+        /// Model rows read from each `local_models` line, one per distinct
         /// set of values, so instances with equal parameters share a row.
         variants: std.AutoHashMapUnmanaged(u32, std.ArrayList(u32)) = .empty,
         /// `(name, row)` of the instance models the open expansions resolved;
@@ -477,19 +493,28 @@ fn Reader(comptime S: type) type {
             try r.values.ensureTotalCapacity(arena, line_hint);
 
             var top_devices: std.ArrayList(u32) = .empty;
-            var model_lines: std.ArrayList(u32) = .empty;
+            var model_lines: std.ArrayList(ModelLine) = .empty;
             var directive_lines: std.ArrayList(u32) = .empty;
             try r.declarations(&top_devices, &model_lines, &directive_lines);
             const top: Frame = .{ .scopes = &r.global_scopes };
-            for (model_lines.items) |i| {
-                try r.readModel(r.lines.items[i], &top);
-                if (!r.unresolved(r.models.items[r.models.items.len - 1].kv)) continue;
-                // ponytail: linear scan; few models need instance parameters.
-                for (r.subckts.items, 0..) |sub, id| if (i >= sub.first and i < sub.end) {
-                    try r.instance_lines.append(arena, .{ .sub = @intCast(id), .name = r.models.items[r.models.items.len - 1].name, .line = i });
-                };
+            // Model lines and subcircuit bodies both run in line order.
+            var s: usize = 0;
+            for (model_lines.items) |ml| {
+                const subs = r.subckts.items;
+                while (s < subs.len and subs[s].end <= ml.line) s += 1;
+                const local = s < subs.len and ml.line >= subs[s].first;
+                try r.readModel(r.lines.items[ml.line], &top, !local);
+                if (!local) continue;
+                const row: u32 = @intCast(r.models.items.len - 1);
+                const name = r.models.items[row].name;
+                const shared = !ml.cond and !r.unresolved(r.models.items[row].kv) and !r.namesParam(r.models.items[row].kv, subs[s]);
+                if (subs[s].models_hi == 0) subs[s].models_lo = @intCast(r.local_models.items.len);
+                try r.local_models.append(arena, .{ .name = name, .line = ml.line, .top = row, .shared = shared, .cond = ml.cond });
+                subs[s].models_hi = @intCast(r.local_models.items.len);
+                try r.local_names.put(arena, name, {});
             }
             for (directive_lines.items) |i| try r.readDirective(r.lines.items[i]);
+            try r.binOptions();
 
             for (top_devices.items) |i| try r.readDevice(r.lines.items[i], &top);
             try r.shunts();
@@ -576,15 +601,17 @@ fn Reader(comptime S: type) type {
 
         // Walk 1: declarations.
 
-        fn declarations(r: *R, top: *std.ArrayList(u32), models: *std.ArrayList(u32), directives: *std.ArrayList(u32)) Error!void {
+        fn declarations(r: *R, top: *std.ArrayList(u32), models: *std.ArrayList(ModelLine), directives: *std.ArrayList(u32)) Error!void {
             const arena = r.arena;
             var open: ?u16 = null;
             var defaults: std.ArrayList(@typeInfo(@FieldType(Subckt, "defaults")).pointer.child) = .empty;
             // Top-level `.if` conditions see the `.param` cards above them.
-            // Inside a subcircuit they are left to `expand`, per instance.
-            // ponytail: `.param`/`.model` under a subcircuit's `.if` apply
-            // unconditionally; scope them when a PDK needs it.
+            // Inside a subcircuit they are left to `expand`, per instance;
+            // `sub_ifs` counts the open ones so a `.model` there is marked.
+            // ponytail: a `.param` under a subcircuit's `.if` applies
+            // unconditionally; scope it when a PDK needs it.
             var branches: Branches = .{};
+            var sub_ifs: u8 = 0;
             const global: Frame = .{ .scopes = &r.global_scopes };
             for (r.lines.items, 0..) |line, index| {
                 const i: u32 = @intCast(index);
@@ -601,7 +628,14 @@ fn Reader(comptime S: type) type {
                     continue;
                 };
                 if (card == .cond) {
-                    if (open) |id| r.subckts.items[id].has_cond = true else try r.branch(&branches, card.cond, &f, &global);
+                    if (open) |id| {
+                        r.subckts.items[id].has_cond = true;
+                        switch (card.cond) {
+                            .@"if" => sub_ifs +|= 1,
+                            .endif => sub_ifs -|= 1,
+                            else => {},
+                        }
+                    } else try r.branch(&branches, card.cond, &f, &global);
                     continue;
                 }
                 if (!live) continue;
@@ -612,6 +646,7 @@ fn Reader(comptime S: type) type {
                         r.subckts.items[id].end = i;
                         r.subckts.items[id].defaults = defaults.items;
                         open = null;
+                        sub_ifs = 0;
                     },
                     .subckt => {
                         if (open != null) return error.ParseError;
@@ -643,7 +678,7 @@ fn Reader(comptime S: type) type {
                         else
                             try r.globals.put(arena, key, .{ .text = text });
                     },
-                    .model => try models.append(arena, i),
+                    .model => try models.append(arena, .{ .line = i, .cond = open != null and sub_ifs > 0 }),
                     .include, .osdi_include, .pre_osdi, .verilog => {
                         const path = try r.pathOf(&f);
                         const kind: ForeignKind = switch (card) {
@@ -719,7 +754,9 @@ fn Reader(comptime S: type) type {
             return f.line[start..f.pos];
         }
 
-        fn readModel(r: *R, line: []const u8, frame: *const Frame) Error!void {
+        /// Reads a `.model` card under `frame` into a new row; `global`
+        /// makes it the row its name resolves to outside subcircuits.
+        fn readModel(r: *R, line: []const u8, frame: *const Frame, global: bool) Error!void {
             var f = F.init(line);
             _ = f.next();
             const name = f.next() orelse return error.ParseError;
@@ -741,8 +778,10 @@ fn Reader(comptime S: type) type {
                 }
             }
             const span = try appendSpan(Kv, r.arena, &r.kvs, r.card_kv.items);
-            const gop = try r.model_ids.getOrPut(r.arena, name);
-            if (!gop.found_existing) gop.value_ptr.* = @intCast(r.models.items.len);
+            if (global) {
+                const gop = try r.model_ids.getOrPut(r.arena, name);
+                if (!gop.found_existing) gop.value_ptr.* = @intCast(r.models.items.len);
+            }
             try r.models.append(r.arena, .{ .name = name, .kind = kind, .kv = span });
         }
 
@@ -753,18 +792,58 @@ fn Reader(comptime S: type) type {
             return false;
         }
 
-        /// The model row a card inside `frame` names: an instance model of the
-        /// frame's subcircuit, read under its parameters on first use, else
-        /// the first global row.
-        fn modelRow(r: *R, name: []const u8, frame: *const Frame) Error!u32 {
-            const sub = frame.sub orelse return r.model_ids.get(name) orelse none;
+        /// True when a value in `span` is a bare name `sub` declares as a
+        /// parameter: read at global scope it stayed a name, but each
+        /// instance substitutes its own value.
+        fn namesParam(r: *const R, span: Span, sub: Subckt) bool {
+            for (r.kvs.items[span.start..][0..span.len]) |kv| if (kv.value == .name) {
+                for (sub.defaults) |d| if (std.mem.eql(u8, d.key, kv.value.name)) return true;
+            };
+            return false;
+        }
+
+        /// The model row card `letter` inside `frame` names: a `.model` of
+        /// the frame's own subcircuit (for an M card, the `name.N` bin the
+        /// card's L and W select, as ngspice bins the renamed subcircuit
+        /// models), else the first global row. Rewrites the card's model
+        /// name, `r.values[pos]`, to the bin it picks.
+        fn modelRow(r: *R, letter: u8, name: []const u8, pos: u32, frame: *const Frame) Error!u32 {
+            const sub = r.subckts.items[frame.sub orelse return r.model_ids.get(name) orelse none];
             for (r.instance_models.items[frame.models_mark..]) |m| if (std.mem.eql(u8, m.name, name)) return m.row;
-            // ponytail: linear scan over the instance-model lines, few per PDK.
-            const line = for (r.instance_lines.items) |m| {
-                if (m.sub == sub and std.mem.eql(u8, m.name, name)) break m.line;
-            } else return r.model_ids.get(name) orelse none;
+            const locals = r.local_models.items[sub.models_lo..sub.models_hi];
+            for (locals) |m| if (!m.cond and std.mem.eql(u8, m.name, name)) return r.localRow(m, frame);
+            if (letter != 'm') return r.model_ids.get(name) orelse none;
+            // ngspice prepends model declarations (inpmkmod.c): the last
+            // matching bin wins, as in `modelBins`.
+            const kv = r.card_kv.items;
+            const l = (number(kv, "l") orelse return r.model_ids.get(name) orelse none) * r.scale;
+            const use_nf = if (number(kv, "wnflag")) |flag| flag != 0 else r.wnflag;
+            const nf = if (use_nf) number(kv, "nf") orelse 1 else 1;
+            const w = (number(kv, "w") orelse return r.model_ids.get(name) orelse none) * r.scale / nf;
+            var k = locals.len;
+            while (k > 0) {
+                k -= 1;
+                const m = locals[k];
+                if (m.cond or !isBinOf(m.name, name)) continue;
+                // ponytail: bounds from the global-scope read; a bin whose
+                // bounds need instance parameters is never picked.
+                const b = binBounds(r.kvs.items[r.models.items[m.top].kv.start..][0..r.models.items[m.top].kv.len]) orelse continue;
+                if (!binHolds(b, l, w)) continue;
+                r.values.items[pos] = .{ .name = m.name };
+                return r.localRow(m, frame);
+            }
+            return r.model_ids.get(name) orelse none;
+        }
+
+        /// The row of local model `m` for the instance `frame` expands: the
+        /// shared global-scope row, else one read under the instance's
+        /// parameters on first use.
+        fn localRow(r: *R, m: LocalModel, frame: *const Frame) Error!u32 {
+            if (m.shared) return m.top;
+            const line = m.line;
+            const name = m.name;
             const kv_mark = r.kvs.items.len;
-            try r.readModel(r.lines.items[line], frame);
+            try r.readModel(r.lines.items[line], frame, false);
             var row: u32 = @intCast(r.models.items.len - 1);
             const gop = try r.variants.getOrPut(r.arena, line);
             if (!gop.found_existing) gop.value_ptr.* = .empty;
@@ -1223,7 +1302,7 @@ fn Reader(comptime S: type) type {
         }
 
         fn isModel(r: *R, name: []const u8) bool {
-            return r.model_ids.contains(name);
+            return r.model_ids.contains(name) or r.local_names.contains(name);
         }
 
         /// Q cards carry 3-5 terminals and M cards 3-7 against the fixed 3
@@ -1275,7 +1354,7 @@ fn Reader(comptime S: type) type {
             const kv = try appendSpan(Kv, arena, &r.kvs, r.card_kv.items);
             // After the spans: reading an instance model reuses the card scratch.
             const model: u32 = if (r.positional.items.len > 0 and r.positional.items[0] == .name)
-                try r.modelRow(r.positional.items[0].name, frame)
+                try r.modelRow(letter, r.positional.items[0].name, positional.start, frame)
             else
                 none;
             const name = try r.internName(if (frame.path) |path| try r.joined(&[_][]const u8{ &.{letter}, ".", path, ".", head }) else head);
@@ -1331,6 +1410,26 @@ fn Reader(comptime S: type) type {
                 .models_mark = @intCast(r.instance_models.items.len),
             };
             defer r.instance_models.shrinkRetainingCapacity(child.models_mark);
+            // Models first, as ngspice reads every `.model` before any
+            // device: the ones under a branch this instance keeps.
+            const locals = r.local_models.items[sub.models_lo..sub.models_hi];
+            if (for (locals) |m| {
+                if (m.cond) break true;
+            } else false) {
+                var kept: Branches = .{};
+                for (r.lines.items[sub.first..sub.end], sub.first..) |line, i| {
+                    if (line[0] != '.') continue;
+                    var f = F.init(line);
+                    const card = cardOf(f.next().?[1..]) orelse continue;
+                    switch (card) {
+                        .cond => |c| try r.branch(&kept, c, &f, &child),
+                        .model => if (kept.active()) for (locals) |m| {
+                            if (m.cond and m.line == i) _ = try r.localRow(m, &child);
+                        },
+                        else => {},
+                    }
+                }
+            }
             var branches: Branches = .{};
             for (r.lines.items[sub.first..sub.end]) |line| {
                 if (line[0] != '.') {
@@ -1383,12 +1482,9 @@ fn Reader(comptime S: type) type {
             return out;
         }
 
-        /// `.option scale` and ngspice model binning (INPgetModBin): an M card
-        /// naming `nm` takes the last-declared `nm.<n>` whose L/W bounds
-        /// hold it, within 1 nm.
-        fn modelBins(r: *R) Error!void {
-            var scale: f64 = 1;
-            var wnflag = r.dialect != .ngspice;
+        /// `.option scale` and `wnflag`, which bin selection reads.
+        fn binOptions(r: *R) Error!void {
+            r.wnflag = r.dialect != .ngspice;
             for (r.config.items) |c| {
                 if (c.temp) continue;
                 for (c.args, 0..) |arg, i| {
@@ -1396,10 +1492,19 @@ fn Reader(comptime S: type) type {
                     const is_scale = std.mem.eql(u8, arg.name, "scale");
                     if (!is_scale and !std.mem.eql(u8, arg.name, "wnflag")) continue;
                     if (i + 1 == c.args.len or c.args[i + 1] != .num) return error.ParseError;
-                    if (is_scale) scale = c.args[i + 1].num else wnflag = c.args[i + 1].num != 0;
+                    if (is_scale) r.scale = c.args[i + 1].num else r.wnflag = c.args[i + 1].num != 0;
                 }
             }
-            if (!(scale > 0) or !std.math.isFinite(scale)) return error.ParseError;
+            if (!(r.scale > 0) or !std.math.isFinite(r.scale)) return error.ParseError;
+        }
+
+        /// `.option scale` and ngspice model binning (INPgetModBin): an M card
+        /// naming `nm` takes the last-declared global `nm.<n>` whose L/W
+        /// bounds hold it, within 1 nm. `modelRow` already binned the cards
+        /// that name a subcircuit's own bins.
+        fn modelBins(r: *R) Error!void {
+            const scale = r.scale;
+            const wnflag = r.wnflag;
             const arena = r.arena;
             const models = r.models.items;
             const kvs = r.kvs.items;
@@ -1407,15 +1512,13 @@ fn Reader(comptime S: type) type {
             const next = try arena.alloc(u32, models.len);
             @memset(next, none);
             const bounds = try arena.alloc([4]f64, models.len);
-            for (models, 0..) |m, i| try names.put(arena, m.name, @intCast(i));
+            // Global rows only: a subcircuit's models are its own.
+            for (models, 0..) |m, i| if (r.model_ids.contains(m.name)) try names.put(arena, m.name, @intCast(i));
             for (models, 0..) |m, mi| {
+                if (!r.model_ids.contains(m.name)) continue;
                 const dot = std.mem.lastIndexOfScalar(u8, m.name, '.') orelse continue;
                 _ = std.fmt.parseInt(u32, m.name[dot + 1 ..], 10) catch continue;
-                const kv = kvs[m.kv.start..][0..m.kv.len];
-                bounds[mi] = .{
-                    number(kv, "lmin") orelse continue, number(kv, "lmax") orelse continue,
-                    number(kv, "wmin") orelse continue, number(kv, "wmax") orelse continue,
-                };
+                bounds[mi] = binBounds(kvs[m.kv.start..][0..m.kv.len]) orelse continue;
                 const entry = try names.getOrPut(arena, m.name[0..dot]);
                 if (entry.found_existing) {
                     if (std.mem.eql(u8, models[entry.value_ptr.*].name, m.name[0..dot])) continue;
@@ -1446,10 +1549,7 @@ fn Reader(comptime S: type) type {
                 const nf = if (use_nf) number(kv, "nf") orelse 1 else 1;
                 const w = (number(kv, "w") orelse return error.ParseError) / nf;
                 while (bin != none) : (bin = next[bin]) {
-                    const b = bounds[bin];
-                    if ((@abs(l - b[0]) < 1e-9 or @abs(l - b[1]) < 1e-9 or (l > b[0] and l < b[1])) and
-                        (@abs(w - b[2]) < 1e-9 or @abs(w - b[3]) < 1e-9 or (w > b[2] and w < b[3])))
-                    {
+                    if (binHolds(bounds[bin], l, w)) {
                         first.* = .{ .name = models[bin].name };
                         model.* = r.model_ids.get(models[bin].name) orelse none;
                         break;
@@ -1457,6 +1557,27 @@ fn Reader(comptime S: type) type {
                 }
                 if (bin == none) return error.ModelBinNotFound;
             }
+        }
+
+        /// Whether `model` is a bin of `base`: `base.<n>`.
+        fn isBinOf(model: []const u8, base: []const u8) bool {
+            if (model.len <= base.len + 1 or !std.mem.startsWith(u8, model, base) or model[base.len] != '.') return false;
+            _ = std.fmt.parseInt(u32, model[base.len + 1 ..], 10) catch return false;
+            return true;
+        }
+
+        /// A bin card's `{lmin, lmax, wmin, wmax}`, null unless all four are numbers.
+        fn binBounds(kv: []const Kv) ?[4]f64 {
+            return .{
+                number(kv, "lmin") orelse return null, number(kv, "lmax") orelse return null,
+                number(kv, "wmin") orelse return null, number(kv, "wmax") orelse return null,
+            };
+        }
+
+        /// Whether bin bounds `b` hold `l` and `w`, each within 1 nm.
+        fn binHolds(b: [4]f64, l: f64, w: f64) bool {
+            return (@abs(l - b[0]) < 1e-9 or @abs(l - b[1]) < 1e-9 or (l > b[0] and l < b[1])) and
+                (@abs(w - b[2]) < 1e-9 or @abs(w - b[3]) < 1e-9 or (w > b[2] and w < b[3]));
         }
 
         fn number(kv: []const Kv, key: []const u8) ?f64 {

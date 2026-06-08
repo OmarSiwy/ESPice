@@ -268,6 +268,75 @@ test "subcircuit models that need instance parameters are read per instance and 
     try std.testing.expectEqual(@as(usize, 4), nl.models.len);
 }
 
+// ngspice renames a subcircuit's models per instance and translates only
+// its own body's references (subckt.c modtranslate): the top level and a
+// nested instance of another subcircuit see the global card.
+test "subcircuit models are visible only to their own body" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const nl = try parse(arena.allocator(),
+        \\local model scope
+        \\.subckt inner a b
+        \\d1 a b dm
+        \\.ends
+        \\.subckt outer a b isv=1e-12
+        \\.model dm d is={isv}
+        \\x1 a b inner
+        \\d2 a b dm
+        \\.ends
+        \\.model dm d is=1e-14
+        \\x0 1 0 outer isv=1e-13
+        \\d3 1 0 dm
+        \\.end
+    );
+    for ([_][]const u8{ "d.x0.x1.d1", "d.x0.d2", "d3" }, [_]f64{ 1e-14, 1e-13, 1e-14 }) |name, is| {
+        try std.testing.expectEqual(is, try parameter((try device(nl, name)).model.?.kv, "is"));
+    }
+}
+
+test "a subcircuit .model under .if applies only to the instances that keep it" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const nl = try parse(arena.allocator(),
+        \\conditional models
+        \\.subckt cell a b sel=0
+        \\d1 a b dm
+        \\.if (sel == 1)
+        \\.model dm d is=1e-12
+        \\.else
+        \\.model dm d is=1e-14
+        \\.endif
+        \\.ends
+        \\x1 1 0 cell sel=1
+        \\x2 1 0 cell
+        \\.end
+    );
+    try std.testing.expectEqual(@as(f64, 1e-12), try parameter((try device(nl, "d.x1.d1")).model.?.kv, "is"));
+    try std.testing.expectEqual(@as(f64, 1e-14), try parameter((try device(nl, "d.x2.d1")).model.?.kv, "is"));
+}
+
+test "model bins: a subcircuit's own bins are picked and read per instance" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const nl = try parse(arena.allocator(),
+        \\local bins
+        \\.subckt cell d g vt=0.5 w0=1u
+        \\m1 d g 0 0 nm l=1u w=w0
+        \\.model nm.1 nmos level=1 lmin=0.9u lmax=1.1u wmin=0.9u wmax=1.1u vto=vt
+        \\.model nm.2 nmos level=1 lmin=0.9u lmax=1.1u wmin=1.9u wmax=2.1u vto='vt+1'
+        \\.ends
+        \\x1 d g cell
+        \\x2 d g cell vt=0.7 w0=2u
+        \\.end
+    );
+    for ([_][]const u8{ "m.x1.m1", "m.x2.m1" }, [_][]const u8{ "nm.1", "nm.2" }, [_]f64{ 0.5, 1.7 }) |name, bin, vto| {
+        const m = try device(nl, name);
+        try std.testing.expectEqualStrings(bin, m.positional[0].name);
+        try std.testing.expectEqualStrings(bin, m.model.?.name);
+        try std.testing.expectApproxEqRel(vto, try parameter(m.model.?.kv, "vto"), 1e-12);
+    }
+}
+
 test ".if chains keep the first true branch, per subcircuit instance" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
