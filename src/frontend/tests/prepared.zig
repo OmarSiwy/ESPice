@@ -105,7 +105,7 @@ test "deck temperature and tolerances reach statistical and noise jobs" {
 test "deck options reject invalid numeric conversions before construction" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    for ([_][]const u8{ "itl1=-1", "itl2=65536", "itl4=1.5", "temp=-300", "tnom=nan", "reltol=-1" }) |option| {
+    for ([_][]const u8{ "itl1=-1", "itl2=65536", "itl4=0.4", "temp=-300", "tnom=nan", "reltol=-1" }) |option| {
         const source = try std.fmt.allocPrint(arena.allocator(), "invalid options\n.options {s}\n.end\n", .{option});
         const nl = try parse(arena.allocator(), source);
         try std.testing.expectError(error.InvalidAnalysisArguments, analyses.deckOptions(nl.deck.config, .ngspice));
@@ -121,6 +121,12 @@ test "deck options reject invalid numeric conversions before construction" {
     try std.testing.expectEqual(@as(f64, 2e-9), tran.tran.dt_max.?);
     try std.testing.expectEqual(@as(f64, 25), h.temp_c.?);
     try std.testing.expectEqual(@as(f64, 25), h.tnom_c);
+    // Integer options round as ngspice's floor(0.5 + x).
+    const rounded = try parse(arena.allocator(), "rounded\n.options itl4=1.5 itl1=99.4 itl2=2.5\n.end\n");
+    const r = try analyses.deckOptions(rounded.deck.config, .ngspice);
+    try std.testing.expectEqual(@as(u16, 2), r.tol.itl4);
+    try std.testing.expectEqual(@as(u16, 99), r.tol.itl1);
+    try std.testing.expectEqual(@as(u16, 3), r.tol.itl2);
 }
 
 test "nonfinite model parameter cannot become its default" {
