@@ -525,9 +525,11 @@ pub fn schemaOf(allocator: std.mem.Allocator, topology: *const Circuit, deck: *c
         .tf => 3,
         .noise => |o| if (o.integrated) 1 else 2,
         .four, .disto => 4,
-        .pz, .stb, .pnoise => 2,
+        .pz, .stb, .pnoise, .hbnoise, .phasenoise => 2,
         .pac => |o| 2 + 2 * @as(usize, o.n_harmonics),
+        .hbac => |o| 2 + 2 * @as(usize, o.n_sidebands),
         .pxf => |o| 1 + (1 + 2 * @as(usize, o.n_harmonics)) * topology.n,
+        .hbxf => |o| 1 + (1 + 2 * @as(usize, o.n_sidebands)) * topology.n,
         .sp => |o| blk: {
             const n = @max(o.ports.len, 1);
             break :blk 1 + try std.math.mul(usize, n, n);

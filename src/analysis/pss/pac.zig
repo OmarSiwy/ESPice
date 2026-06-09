@@ -125,7 +125,8 @@ pub const Linearization = struct {
     }
 };
 
-/// One period of the shooting PSS with every unknown recorded.
+/// One period of a periodic steady state (the shooting PSS's `orbit` or
+/// `hb.orbit`) with every unknown recorded.
 pub const Orbit = struct {
     /// n_samples + 1 point-major rows [t, x(0..n)], row k at t = k*T/n_samples.
     wave: []f64,
@@ -366,11 +367,19 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const lin = try settle(ctx.circuit, ctx.x_op, opts, scratch);
     defer lin.deinit(scratch);
     try sweep(false, ctx.circuit, lin, ctx.ac_drive, opts.out_node, freqs, transfer, opts, scratch);
+    return result(a, freqs, transfer, opts.n_harmonics, "Periodic AC Analysis");
+}
 
+/// PAC's published shape, shared with `.hbac`: point-major complex rows
+/// (frequency, tf_h{-M}..tf_h{+M}) from `sweep(false, ...)`'s `freqs` and
+/// `transfer`, allocated in `a`.
+pub fn result(a: std.mem.Allocator, freqs: []const f64, transfer: []const Complex, n_harmonics: u16, plotname: []const u8) !root.Result {
+    const n_freqs = freqs.len;
+    const n_sb: usize = 2 * @as(usize, n_harmonics) + 1;
     const names = try a.alloc([]const u8, 1 + n_sb);
     names[0] = "frequency";
     for (0..n_sb) |k| {
-        const harmonic = @as(i32, @intCast(k)) - @as(i32, opts.n_harmonics);
+        const harmonic = @as(i32, @intCast(k)) - @as(i32, n_harmonics);
         names[1 + k] = try std.fmt.allocPrint(a, "tf_h{d}", .{harmonic});
     }
     const ncols = names.len;
@@ -386,7 +395,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         }
     }
     return .{
-        .plotname = "Periodic AC Analysis",
+        .plotname = plotname,
         .varnames = names,
         .is_complex = true,
         .npoints = n_freqs,

@@ -250,6 +250,8 @@ const cards = std.StaticStringMap(Card).initComptime(.{
     .{ "ac", an(.ac) },       .{ "dc", an(.dc) },                 .{ "dcmatch", an(.dcmatch) },
     .{ "disto", an(.disto) }, .{ "envelope", an(.envelope) },     .{ "envlp", an(.envelope) },
     .{ "four", an(.four) },   .{ "hb", an(.hb) },                 .{ "matex", an(.matex) },
+    .{ "hbac", an(.hbac) },   .{ "hbnoise", an(.hbnoise) },       .{ "hbxf", an(.hbxf) },
+    .{ "hbosc", an(.hb) },    .{ "snosc", an(.pss) },         .{ "phasenoise", an(.phasenoise) },
     .{ "mc", an(.mc) },       .{ "montecarlo", an(.mc) },         .{ "noise", an(.noise) },
     .{ "op", an(.op) },       .{ "pac", an(.pac) },               .{ "pnoise", an(.pnoise) },
     .{ "pss", an(.pss) },     .{ "pxf", an(.pxf) },               .{ "pz", an(.pz) },

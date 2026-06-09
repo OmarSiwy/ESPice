@@ -158,6 +158,33 @@ test "pz of a bridged RC ladder: one zero per bridge, at -1/(R·Cb)" {
     try std.testing.expectApproxEqRel(-1.0 / (3.3e3 * 22e-12), zeros[1], 1e-12);
 }
 
+test "hbnoise and shooting pnoise agree about a diode mixer's orbit" {
+    // The two orbit providers feed one linearization and sideband fold, so
+    // what is left between them is the shooting orbit's trapezoid error
+    // (64 steps a period), about 2e-4 here. The flicker term puts a
+    // sideband exactly at DC for f = 1 kHz.
+    const sim = try runDeck(
+        \\diode mixer
+        \\vlo lo 0 dc 0 sin(0.5 0.3 1k)
+        \\r1 lo a 1k
+        \\d1 a out dmod
+        \\r2 out 0 10k
+        \\c1 out 0 10n
+        \\.model dmod d is=1e-14 cjo=1p kf=1e-16
+        \\.pnoise v(out) vlo dec 2 10 10k 1k 3
+        \\.hbnoise v(out) vlo dec 2 10 10k 1k 16 3
+        \\.end
+    );
+    defer sim.deinit();
+    const shooting = try requestedResult(sim, 0);
+    const hb = try requestedResult(sim, 1);
+    try std.testing.expectEqual(@as(usize, 7), hb.npoints);
+    for (0..hb.npoints) |i| {
+        try std.testing.expectEqual(shooting.data[2 * i], hb.data[2 * i]);
+        try std.testing.expectApproxEqRel(shooting.data[2 * i + 1], hb.data[2 * i + 1], 1e-3);
+    }
+}
+
 test "a failed query does not prevent an independent query from completing" {
     const p = try api.Problem.init(std.testing.allocator, std.testing.io, .{
         .source = .{ .bytes = .{ .data = "failure isolation\nV1 in 0 dc 1 ac 1 sin(0 1 1k)\nR1 in out 1k\nC1 out 0 1u\n.end\n", .origin = "failure.cir" } },

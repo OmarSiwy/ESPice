@@ -156,6 +156,15 @@ pub const Pss = struct {
     gmres_max_restarts: u32 = 10,
     /// Relative tolerance of the inner GMRES solve.
     gmres_tol: f64 = 1e-3,
+    /// Oscillator node row of an autonomous solve (`.snosc`). The period is
+    /// then an unknown and `period` only its first guess, and this node's
+    /// value at t = 0 is pinned as the phase condition. GROUND means a
+    /// driven circuit with a known period.
+    osc_node: u32 = 0,
+    /// Guess periods an autonomous solve integrates from the kicked DC
+    /// point before it measures the period, so the oscillator has settled
+    /// onto its limit cycle (HSPICE's TRINIT, counted in periods).
+    osc_settle_periods: u16 = 30,
 };
 
 pub const Hb = struct {
@@ -165,6 +174,11 @@ pub const Hb = struct {
     n_harmonics: u16 = 8,
     max_iter: u16 = 200,
     hb_tol: f64 = 1e-9,
+    /// Oscillator node row of an autonomous solve (`.hbosc`): f0 is then an
+    /// unknown seeded from the oscillator's shooting orbit, and this node's
+    /// fundamental is held a pure cosine as the phase condition. GROUND
+    /// means a driven circuit with a known f0.
+    osc_node: u32 = 0,
 };
 
 /// Periodic AC (`.pac`) and periodic transfer function (`.pxf`) options.
@@ -188,6 +202,9 @@ pub const Pac = struct {
 pub const Pnoise = struct {
     tol: Tolerances = .{},
     out_node: u32,
+    /// `v(a,b)` reference: the measurement is v(out_node) - v(out_neg).
+    /// GROUND is the single-ended case.
+    out_neg: u32 = 0,
     sweep: FreqSweep,
     /// Hz.
     f_fundamental: f64,
@@ -200,6 +217,56 @@ pub const Pnoise = struct {
     pss_newton_tol: f64 = 1e-9,
     /// Sidebands kept on each side of the carrier.
     n_sidebands: u16 = 7,
+};
+
+/// Small-signal analyses about the harmonic-balance solution: `.hbac`
+/// (periodic AC), `.hbxf` (periodic transfer function) and `.hbnoise`
+/// (periodic noise) run the `.pac`, `.pxf` and `.pnoise` sweeps on the
+/// `.hb` orbit instead of the shooting one.
+pub const HbLptv = struct {
+    tol: Tolerances = .{},
+    /// HB fundamental, in Hz.
+    f0: f64,
+    /// HB harmonics kept.
+    n_harmonics: u16 = 8,
+    /// Sidebands kept on each side of the carrier in the conversion matrix.
+    n_sidebands: u16 = 8,
+    /// Output row: `.hbac`'s probe, `.hbxf`'s injection point, `.hbnoise`'s
+    /// measured node.
+    out_node: u32,
+    /// `.hbnoise v(a,b)` reference node; GROUND is single-ended.
+    out_neg: u32 = 0,
+    /// Input (offset) frequency sweep.
+    sweep: FreqSweep,
+    max_iter: u16 = 200,
+    hb_tol: f64 = 1e-9,
+
+    /// The `.hb` solve this analysis linearizes about.
+    pub fn hb(self: HbLptv) Hb {
+        return .{ .tol = self.tol, .f0 = self.f0, .n_harmonics = self.n_harmonics, .max_iter = self.max_iter, .hb_tol = self.hb_tol };
+    }
+};
+
+/// Oscillator phase noise (`.phasenoise`): the perturbation projection
+/// vector of the autonomous HB solution (Demir's method, HSPICE METHOD=0)
+/// projects every white noise source onto the oscillator's phase.
+pub const PhaseNoise = struct {
+    tol: Tolerances = .{},
+    /// Oscillation frequency guess, in Hz.
+    f0: f64,
+    /// HB harmonics kept.
+    n_harmonics: u16 = 8,
+    /// Oscillator phase node (`Hb.osc_node`); never GROUND.
+    osc_node: u32,
+    /// Offset-from-carrier sweep.
+    sweep: FreqSweep,
+    max_iter: u16 = 200,
+    hb_tol: f64 = 1e-9,
+
+    /// The autonomous `.hb` solve the phase noise is computed about.
+    pub fn hb(self: PhaseNoise) Hb {
+        return .{ .tol = self.tol, .f0 = self.f0, .n_harmonics = self.n_harmonics, .max_iter = self.max_iter, .hb_tol = self.hb_tol, .osc_node = self.osc_node };
+    }
 };
 
 /// Two-tone quasi-periodic steady state.
@@ -411,6 +478,12 @@ pub const Kind = enum(u8) {
     tf,
     tran,
     tran_noise,
+    // Appended after the alphabetical block: the tag values are the C ABI
+    // (include/espice.h).
+    hbac,
+    hbnoise,
+    hbxf,
+    phasenoise,
 
     /// Runs off a transient operating point (ngspice MODETRANOP) and starts
     /// its devices in `.ic` rather than `.dc` state.
@@ -448,4 +521,8 @@ pub const Query = union(Kind) {
     tf: Tf,
     tran: Tran,
     tran_noise: TranNoise,
+    hbac: HbLptv,
+    hbnoise: HbLptv,
+    hbxf: HbLptv,
+    phasenoise: PhaseNoise,
 };

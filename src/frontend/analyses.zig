@@ -31,8 +31,31 @@ pub fn queries(arena: std.mem.Allocator, cards: []const netlist.Analysis, append
     const temps = @max(deck_opts.temp_list.len, 1);
     const jobs = try arena.alloc(Job, cards.len * 3 * (temps + 1));
     var n: usize = 0;
+    // HSPICE's `.hbac`, `.hbxf`, `.hbnoise` and `.phasenoise` take the tone
+    // and harmonic count (and oscillator node) of the deck's `.hb` or
+    // `.hbosc` card unless the card gives its own.
+    var hb: ?requests.Hb = null;
+    for (cards) |c| if (c.kind == .hb) {
+        hb = ((buildJob(c, sources, card_refs) catch |err| return cardError(c.line, err)).?).hb;
+    };
     for (cards) |c| {
         var job = (buildJob(c, sources, card_refs) catch |err| return cardError(c.line, err)) orelse continue;
+        switch (job) {
+            .hbac, .hbxf, .hbnoise => |*o| if (o.f0 == 0) {
+                const tone = hb orelse return cardError(c.line, error.InvalidAnalysisArguments);
+                o.f0 = tone.f0;
+                o.n_harmonics = tone.n_harmonics;
+                o.n_sidebands = tone.n_harmonics;
+            },
+            .phasenoise => |*o| if (o.f0 == 0) {
+                const tone = hb orelse return cardError(c.line, error.InvalidAnalysisArguments);
+                if (tone.osc_node == GROUND) return cardError(c.line, error.InvalidAnalysisArguments);
+                o.f0 = tone.f0;
+                o.n_harmonics = tone.n_harmonics;
+                o.osc_node = tone.osc_node;
+            },
+            else => {},
+        }
         applyDeckOptions(&job, deck_opts);
         jobs[n] = job;
         n += 1;
@@ -473,7 +496,7 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
             const sweep = try frequencySweep(args, 2);
             const sidebands = if (args.len == 8) try number(args, 7) else 7;
             if (sidebands < 0 or sidebands != @trunc(sidebands) or sidebands > 31) return error.InvalidAnalysisArguments;
-            return .{ .pnoise = .{ .out_node = try outputNode(node_id), .sweep = sweep, .f_fundamental = try positive(args, 6), .n_sidebands = @intFromFloat(sidebands) } };
+            return .{ .pnoise = .{ .out_node = try outputNode(node_id), .out_neg = try outputNeg(node_neg), .sweep = sweep, .f_fundamental = try positive(args, 6), .n_sidebands = @intFromFloat(sidebands) } };
         },
         .tf => {
             try arity(args, 2, 2);
@@ -536,19 +559,77 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
             return .{ .pz = opts };
         },
         .pss => {
-            try arity(args, 1, 2);
-            return .{ .pss = .{ .period = 1 / try positive(args, 0), .n_samples = try count(u32, args, 1, 256) } };
+            // `.pss v(osc) f [n [settle]]` (HSPICE `.snosc`) solves an
+            // oscillator: f is the first guess and osc the phase node.
+            const osc = args.len != 0 and args[0] == .group;
+            const at: usize = @intFromBool(osc);
+            try arity(args, at + 1, at + @as(usize, if (osc) 3 else 2));
+            var opts: requests.Pss = .{ .period = 1 / try positive(args, at), .n_samples = try count(u32, args, at + 1, 256) };
+            if (osc) {
+                opts.osc_node = try outputNode(node_id);
+                opts.osc_settle_periods = try count(u16, args, at + 2, 30);
+            }
+            return .{ .pss = opts };
         },
         .hb => {
             // HB drives from whatever sources the deck has, current ones
-            // included, so it names none.
-            try arity(args, 1, 2);
-            return .{ .hb = .{ .f0 = try positive(args, 0), .n_harmonics = try count(u16, args, 1, 8) } };
+            // included, so it names none. `.hb v(osc) f [K]` (HSPICE
+            // `.hbosc`) solves an oscillator from the first guess f.
+            const osc = args.len != 0 and args[0] == .group;
+            const at: usize = @intFromBool(osc);
+            try arity(args, at + 1, at + 2);
+            return .{ .hb = .{
+                .f0 = try positive(args, at),
+                .n_harmonics = try count(u16, args, at + 1, 8),
+                .osc_node = if (osc) try outputNode(node_id) else GROUND,
+            } };
         },
         .qpss => {
             // Like HB, QPSS drives from every source the deck stamps.
             try arity(args, 2, 4);
             return .{ .qpss = .{ .f1 = try positive(args, 0), .f2 = try positive(args, 1), .k1 = try count(u16, args, 2, 5), .k2 = try count(u16, args, 3, 5) } };
+        },
+        .hbac, .hbxf, .hbnoise => {
+            // `.hbac sweep`, `.hbxf v(out) sweep` and
+            // `.hbnoise v(out[,ref]) [Vsrc] sweep`, each optionally followed
+            // by `f0 [K]` (`.hbnoise`: `f0 [K [M]]`). Without f0, `queries`
+            // fills the tone from the deck's `.hb` card, as HSPICE does.
+            var at: usize = @intFromBool(id != .hbac);
+            // As in `.pnoise`, the input source is checked but does not
+            // drive the solve.
+            if (id == .hbnoise and nameAt(args, at) != null and std.meta.isError(frequencySweep(args, at))) {
+                _ = try voltageSource(args, at, sources);
+                at += 1;
+            }
+            const grid = try frequencySweep(args, at);
+            at += 4;
+            try arity(args, at, at + @as(usize, if (id == .hbnoise) 3 else 2));
+            if (id != .hbnoise and node_neg != NO_NODE) return error.InvalidAnalysisArguments;
+            var opts: requests.HbLptv = .{ .f0 = 0, .sweep = grid, .out_node = try outputNode(node_id), .out_neg = try outputNeg(node_neg) };
+            if (at < args.len) {
+                opts.f0 = try positive(args, at);
+                opts.n_harmonics = try count(u16, args, at + 1, 8);
+                opts.n_sidebands = opts.n_harmonics;
+                if (at + 2 < args.len) {
+                    const m = try number(args, at + 2);
+                    if (m < 0 or m != @trunc(m) or m > 31) return error.InvalidAnalysisArguments;
+                    opts.n_sidebands = @intFromFloat(m);
+                }
+            }
+            return switch (id) {
+                .hbac => .{ .hbac = opts },
+                .hbxf => .{ .hbxf = opts },
+                else => .{ .hbnoise = opts },
+            };
+        },
+        .phasenoise => {
+            // `.phasenoise v(out) sweep [f0 [K]]`: without f0 the oscillator
+            // is the deck's `.hbosc`; with it, v(out) is the phase node.
+            const out = try outputNode(node_id);
+            const grid = try frequencySweep(args, 1);
+            try arity(args, 5, 7);
+            if (args.len == 5) return .{ .phasenoise = .{ .f0 = 0, .osc_node = out, .sweep = grid } };
+            return .{ .phasenoise = .{ .f0 = try positive(args, 5), .n_harmonics = try count(u16, args, 6, 8), .osc_node = out, .sweep = grid } };
         },
         .pac, .pxf => {
             try arity(args, 5, 5);

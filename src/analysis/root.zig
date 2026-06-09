@@ -22,6 +22,8 @@ test {
     // unreferenced function, and the test step does not link the executor's
     // dispatch into these files.
     _ = @import("pss/hb.zig");
+    _ = @import("pss/hb_lptv.zig");
+    _ = @import("pss/phasenoise.zig");
     _ = @import("pss/pac.zig");
     _ = @import("pss/pnoise.zig");
     _ = @import("pss/pss.zig");

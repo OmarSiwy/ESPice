@@ -13,7 +13,6 @@ pub const Options = pac.Options;
 /// Contract entry: output at `opts.out_node`. Point-major complex rows
 /// (frequency, pxf_h{m}(node) for every sideband then node), (re, im) each.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
-    const a = ctx.allocator;
     const n: usize = ctx.circuit.n;
     const n_freqs: usize = opts.sweep.count();
     const n_sb: usize = 2 * @as(usize, opts.n_harmonics) + 1;
@@ -32,7 +31,18 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const lin = try pac.settle(ctx.circuit, ctx.x_op, opts, scratch);
     defer lin.deinit(scratch);
     try pac.sweep(true, ctx.circuit, lin, drive, 0, freqs_buf, transfer, opts, scratch);
+    return result(ctx, freqs_buf, transfer, opts.n_harmonics, "Periodic Transfer Function Analysis");
+}
 
+/// PXF's published shape, shared with `.hbxf`: point-major complex rows
+/// (frequency, pxf_h{m}(node) for every sideband then node) from
+/// `pac.sweep(true, ...)`'s `freqs_buf` and `transfer`.
+pub fn result(ctx: *const root.RunCtx, freqs_buf: []const f64, transfer: []const Complex, n_harmonics: u16, plotname: []const u8) !root.Result {
+    const a = ctx.allocator;
+    const n: usize = ctx.circuit.n;
+    const n_freqs = freqs_buf.len;
+    const n_sb: usize = 2 * @as(usize, n_harmonics) + 1;
+    const n_transfers = n_sb * n;
     const ncols = 1 + n_transfers;
     const names = try a.alloc([]const u8, ncols);
     names[0] = "frequency";
@@ -41,7 +51,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         for (names[1..][0..done]) |s| a.free(s);
         a.free(names);
     }
-    const n_harm: usize = opts.n_harmonics;
+    const n_harm: usize = n_harmonics;
     for (0..n_sb) |sb| {
         const harmonic = @as(i32, @intCast(sb)) - @as(i32, @intCast(n_harm));
         for (0..n) |node| {
@@ -68,7 +78,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         }
     }
     return .{
-        .plotname = "Periodic Transfer Function Analysis",
+        .plotname = plotname,
         .varnames = names,
         .is_complex = true,
         .npoints = n_freqs,

@@ -75,7 +75,7 @@ pub fn validate(query: requests.Query, n: u32) !void {
         inline else => |o| {
             if (!finite(o)) return error.InvalidQueryOptions;
             try tolerance(o.tol);
-            inline for (.{ "out_node", "output_node", "source_node", "ac_source_node", "probe_p", "probe_n", "input_branch", "in_branch", "drive_branch" }) |field| {
+            inline for (.{ "out_node", "out_neg", "osc_node", "output_node", "source_node", "ac_source_node", "probe_p", "probe_n", "input_branch", "in_branch", "drive_branch" }) |field| {
                 if (@hasField(@TypeOf(o), field)) {
                     const node = @field(o, field);
                     if (@typeInfo(@TypeOf(node)) == .optional) {
@@ -174,6 +174,16 @@ pub fn validate(query: requests.Query, n: u32) !void {
             if (o.n_samples == std.math.maxInt(u32)) return error.InvalidQueryOptions;
             try timeStep(o.period / @as(f64, @floatFromInt(o.n_samples)));
             _ = try elements(&.{ @as(usize, o.n_samples) + 1, @as(usize, n) + 1 });
+        },
+        .phasenoise => |o| {
+            if (o.osc_node == 0) return error.InvalidQueryOptions;
+            try validate(.{ .hb = o.hb() }, n);
+        },
+        .hbac, .hbxf, .hbnoise => |o| {
+            try validate(.{ .hb = o.hb() }, n);
+            const bands = 2 * @as(usize, o.n_sidebands) + 1;
+            _ = try elements(&.{ bands, n, bands, n, 4 });
+            try frequency(o.sweep.f_stop + @as(f64, @floatFromInt(o.n_sidebands)) * o.f0);
         },
         .pnoise => |o| {
             try timeStep((1 / o.f_fundamental) / @as(f64, @floatFromInt(o.pss_n_samples)));

@@ -2,12 +2,19 @@
 //! line search. Each iteration IDFTs the unknowns to 2(2K+1) time samples,
 //! evaluates the circuit at each (sources included), DFTs the residual and
 //! adds the dq/dt terms, then solves one dense harmonic-convolution Jacobian.
+//!
+//! An oscillator (`Options.osc_node`) trades one unknown for f0: the osc
+//! node's sin_1 coefficient stays 0, which fixes the phase, and its Jacobian
+//! column becomes dF/d(ln f0). The charge terms are the only place f0
+//! enters the residual, and they are linear in it, so that column is the
+//! charge terms themselves.
 const std = @import("std");
 const root = @import("../types.zig");
 const simdCopy = root.copySimd;
 const num = @import("core").numerics;
 const converger = @import("solver").converger;
 const dense_lu = @import("solver").dense_lu;
+const pac = @import("pac.zig");
 
 const W = std.simd.suggestVectorLength(f64) orelse 8;
 const V = @Vector(W, f64);
@@ -15,6 +22,10 @@ const V = @Vector(W, f64);
 pub const Options = @import("core").query.Hb;
 
 pub const SolveResult = @import("pss.zig").SolveResult;
+
+/// `solveSpectrum`'s outcome: the Newton status and the fundamental the
+/// spectrum is at, `Options.f0` unless the solve was autonomous.
+pub const Spectrum = struct { status: SolveResult, f0: f64 };
 
 /// Time samples per spectral unknown. The 2K+1 collocation points alias
 /// the harmonics a nonlinearity generates past K onto the top of the kept
@@ -33,33 +44,48 @@ fn magnitude(spectrum: []const f64, k: u16) f64 {
     return @sqrt(c * c + s * s);
 }
 
-/// Harmonic balance from the DC operating point; the excitation is whatever
-/// the deck's sources stamp at each time sample. The caller owns `spectra`,
-/// probes.len * (2*n_harmonics+1) probe-major:
-/// spectra[p*nf..][0..nf] = [dc, cos_1, sin_1, ..., cos_K, sin_K].
-/// Memory is O((n*nf)^2) for the dense Jacobian.
-pub fn solve(
+/// Harmonic balance from the DC operating point, keeping every unknown's
+/// spectrum: `x_hat` (n * (2*n_harmonics+1), caller-owned) receives
+/// node-major blocks x_hat[node*nf..][0..nf] = [dc, cos_1, sin_1, ...,
+/// cos_K, sin_K], the last iterate when Newton does not converge. `orbit`
+/// samples it for the small-signal analyses about the HB solution. The
+/// excitation is whatever the deck's sources stamp at each time sample.
+/// Memory is O((n*nf)^2) for the dense Jacobian. Autonomous (`osc_node`
+/// set): `x_hat` must arrive holding a seed near the oscillation (`seed`),
+/// with f0 its frequency, and the result carries the solved f0. A
+/// non-empty `ppv` (autonomous only, x_hat.len long) receives y with
+/// J_w^T y = e_w at the solution, J_w the Newton Jacobian with its f0
+/// column: the left null vector of the HB Jacobian, normalized so that
+/// y . dF/d(ln w0) = 1. phasenoise.zig turns it into the perturbation
+/// projection vector.
+pub fn solveSpectrum(
     ckt: *root.Circuit,
-    probes: []const u32,
-    spectra: []f64,
+    x_hat: []f64,
+    ppv: []f64,
     options: Options,
     allocator: std.mem.Allocator,
-) !SolveResult {
+) !Spectrum {
     const n: usize = ckt.n;
     const nnz: usize = ckt.nnz;
     const nh: usize = options.n_harmonics;
     const nf: usize = 2 * nh + 1;
     const nt: usize = nf * oversample;
     const total_unknowns = n * nf;
-    std.debug.assert(spectra.len == probes.len * nf);
+    std.debug.assert(x_hat.len == total_unknowns);
+    std.debug.assert(ppv.len == 0 or (ppv.len == total_unknowns and options.osc_node != root.GROUND));
 
-    const period: f64 = 1.0 / options.f0;
-    const omega0: f64 = 2.0 * std.math.pi * options.f0;
+    var period: f64 = 1.0 / options.f0;
+    var omega0: f64 = 2.0 * std.math.pi * options.f0;
     const nt_f: f64 = @floatFromInt(nt);
-    const dt_sample: f64 = period / nt_f;
+    // Autonomous: the unknown the osc node's sin_1 gives up to ln(f0).
+    const osc = options.osc_node;
+    const omega_col = osc * nf + 2;
+    var omega_prev = omega0;
+    var d_ln_omega: f64 = 0;
+    // Set once converged when the caller wants `ppv`: one more Jacobian.
+    var solved: ?Spectrum = null;
 
-    const total_f64 = total_unknowns + // x_hat
-        total_unknowns + // f_hat
+    const total_f64 = total_unknowns + // f_hat
         nt * n + // x_td (node-major)
         nt * n + // f_td (node-major)
         nt * n + // q_td (node-major)
@@ -71,14 +97,13 @@ pub fn solve(
         nt * 2 * nh + // basis_sin
         n + // x_sample (gather buffer for device eval)
         total_unknowns + // x_prev (line-search rewind point)
+        total_unknowns + // q_term (charge terms: the autonomous f0 column)
         2 * (2 * nh + 1); // gc / gs: one slot's G(t) spectrum to 2K
 
     const arena = try allocator.alloc(f64, total_f64);
     defer allocator.free(arena);
 
     var off: usize = 0;
-    const x_hat = arena[off..][0..total_unknowns];
-    off += total_unknowns;
     const f_hat = arena[off..][0..total_unknowns];
     off += total_unknowns;
     const x_td = arena[off..][0 .. nt * n];
@@ -103,17 +128,18 @@ pub fn solve(
     off += n;
     const x_prev = arena[off..][0..total_unknowns];
     off += total_unknowns;
+    const q_term = arena[off..][0..total_unknowns];
+    off += total_unknowns;
     const gc = arena[off..][0 .. 2 * nh + 1];
     off += 2 * nh + 1;
     const gs = arena[off..][0 .. 2 * nh + 1];
     off += 2 * nh + 1;
     std.debug.assert(off == total_f64);
 
-    root.zeroSimd(x_hat);
-
     // Seed the DC coefficients with the DC operating point, which cuts the
     // iteration count on biased circuits.
-    {
+    if (osc == root.GROUND) {
+        root.zeroSimd(x_hat);
         const ws = try ckt.workspace();
         ckt.setSimState(.{ .kind = .dc });
         root.zeroSimd(x_sample);
@@ -178,6 +204,7 @@ pub fn solve(
             }
         }
 
+        const dt_sample = period / nt_f;
         // Sample k is the circuit at t_k = k*T/nt in the transient phase,
         // the only phase in which a source follows its waveform (§4.6.1).
         // One eval fills the residual and the G plane; sample 0 also gives C.
@@ -240,6 +267,8 @@ pub fn solve(
         // so the cos row takes +w_h*Q_sin and the sin row -w_h*Q_cos.
         // ponytail: scalar O(n*nh*nt) projection, the same order as the
         // residual DFT; vectorize both if HB ever profiles hot.
+        // They are linear in w0, so q_term is also dF/d(ln w0).
+        root.zeroSimd(q_term);
         if (ckt.has_charge) for (0..n) |node| {
             const q_slice = q_td[node * nt ..][0..nt];
             for (0..nh) |hi| {
@@ -250,24 +279,26 @@ pub fn solve(
                     q_sin += q * bs;
                 }
                 const omega_h = @as(f64, @floatFromInt(hi + 1)) * omega0;
-                f_hat[node * nf + 2 * (hi + 1) - 1] += omega_h * (2.0 * q_sin / nt_f);
-                f_hat[node * nf + 2 * (hi + 1)] += -omega_h * (2.0 * q_cos / nt_f);
+                q_term[node * nf + 2 * (hi + 1) - 1] = omega_h * (2.0 * q_sin / nt_f);
+                q_term[node * nf + 2 * (hi + 1)] = -omega_h * (2.0 * q_cos / nt_f);
             }
         };
+        num.axpy(f_hat, 1.0, q_term);
 
         const max_residual = num.normInf(f_hat);
         if (converger.hbTrace()) std.debug.print("HB iter={d} res={e} step={e} normx={e}\n", .{ iter, max_residual, step, num.normInf(x_hat) });
         if (max_residual < options.hb_tol) {
-            extractSpectra(x_hat, probes, spectra, nf);
-            return .{ .converged = true, .iterations = iter + 1, .residual_norm = max_residual };
+            solved = .{ .status = .{ .converged = true, .iterations = iter + 1, .residual_norm = max_residual }, .f0 = if (osc == root.GROUND) options.f0 else omega0 / (2.0 * std.math.pi) };
+            if (ppv.len == 0) return solved.?;
         }
 
-        if (iter != 0 and !(max_residual <= prev_residual) and step > min_step) {
+        if (solved == null and iter != 0 and !(max_residual <= prev_residual) and step > min_step) {
             // Rewind and retake the last step at half length along the same
             // `dx_hat`; no Jacobian rebuild.
             step *= 0.5;
             simdCopy(x_hat, x_prev);
             num.axpy(x_hat, step, dx_hat);
+            if (osc != root.GROUND) setOmega(&omega0, &period, omega_prev * (1 + step * d_ln_omega));
             retrying = true;
             continue;
         }
@@ -390,24 +421,142 @@ pub fn solve(
             }
         }
 
+        if (osc != root.GROUND) for (0..total_unknowns) |r| {
+            jac[r * total_unknowns + omega_col] = q_term[r];
+        };
+        if (solved) |done| {
+            const piv = try allocator.alloc(u32, total_unknowns);
+            defer allocator.free(piv);
+            try dense_lu.factorize(total_unknowns, jac, piv);
+            root.zeroSimd(f_hat);
+            f_hat[omega_col] = 1;
+            dense_lu.solveFactoredT(total_unknowns, jac, piv, f_hat, ppv);
+            return done;
+        }
+
         // ponytail: one dense n*(2K+1) system on the CPU; a GPU dense LU
         // (cuSOLVER getrf/getrs) replaces it past ~256 unknowns.
         try dense_lu.factorizeSolveNeg(total_unknowns, jac, f_hat[0..total_unknowns], dx_hat);
 
         simdCopy(x_prev, x_hat);
+        if (osc != root.GROUND) {
+            d_ln_omega = dx_hat[omega_col];
+            dx_hat[omega_col] = 0;
+            omega_prev = omega0;
+            setOmega(&omega0, &period, omega0 * (1 + step * d_ln_omega));
+        }
         num.axpy(x_hat, step, dx_hat);
     }
 
-    const final_norm = num.normInf(f_hat);
-    extractSpectra(x_hat, probes, spectra, nf);
-    return .{ .converged = false, .iterations = options.max_iter, .residual_norm = final_norm };
+    return .{
+        .status = .{ .converged = false, .iterations = options.max_iter, .residual_norm = num.normInf(f_hat) },
+        .f0 = if (osc == root.GROUND) options.f0 else omega0 / (2.0 * std.math.pi),
+    };
 }
 
-/// Copies each probed node's [dc, cos_1, sin_1, ...] block out of x_hat,
-/// whose per-node layout `spectra` shares.
-fn extractSpectra(x_hat: []const f64, probes: []const u32, spectra: []f64, nf: usize) void {
-    for (probes, 0..) |node, p|
-        simdCopy(spectra[p * nf ..][0..nf], x_hat[node * nf ..][0..nf]);
+/// Autonomous HB from the DC point `x_dc`: the oscillator's shooting orbit
+/// (`pss.solve` with the same osc node, from the guess `options.f0`) seeds
+/// `x_hat` and f0, then `solveSpectrum` refines both. `ppv` as there.
+/// error.HbDidNotConverge when the shooting seed does not converge.
+pub fn solveOscillator(ckt: *root.Circuit, x_dc: []const f64, x_hat: []f64, ppv: []f64, options: Options, allocator: std.mem.Allocator) !Spectrum {
+    // ponytail: HSPICE's HBOSC searches amplitude and frequency from a
+    // probe voltage; the shooting orbit is a seed already on the limit
+    // cycle, at the cost of one autonomous PSS.
+    const n: usize = ckt.n;
+    const orb = try pac.orbit(ckt, x_dc, .{ .tol = options.tol, .period = 1 / options.f0, .osc_node = options.osc_node }, allocator);
+    defer allocator.free(orb.wave);
+    if (!orb.converged) return error.HbDidNotConverge;
+    seed(x_hat, orb, n, options.osc_node);
+    var opts = options;
+    opts.f0 = 1 / orb.wave[orb.samples(n) * (n + 1)];
+    return solveSpectrum(ckt, x_hat, ppv, opts, allocator);
+}
+
+/// Moves the autonomous fundamental and the period with it.
+fn setOmega(omega0: *f64, period: *f64, omega: f64) void {
+    omega0.* = omega;
+    period.* = 2.0 * std.math.pi / omega;
+}
+
+/// Seeds `x_hat` for an autonomous solve from one period of the
+/// oscillator's shooting orbit: the first K harmonics of every unknown,
+/// time-shifted so the osc node's fundamental is a pure cosine (sin_1 = 0,
+/// the phase condition `solveSpectrum` holds).
+pub fn seed(x_hat: []f64, orb: pac.Orbit, n: usize, osc: u32) void {
+    const nf = x_hat.len / n;
+    const nh = (nf - 1) / 2;
+    const ns = orb.samples(n);
+    const ns_f: f64 = @floatFromInt(ns);
+    root.zeroSimd(x_hat);
+    for (0..ns) |k| {
+        const x = orb.state(k, n);
+        for (0..n) |node| {
+            const spec = x_hat[node * nf ..][0..nf];
+            spec[0] += x[node] / ns_f;
+            for (1..nh + 1) |h| {
+                const angle = 2.0 * std.math.pi * @as(f64, @floatFromInt((h * k) % ns)) / ns_f;
+                spec[2 * h - 1] += 2.0 * x[node] * @cos(angle) / ns_f;
+                spec[2 * h] += 2.0 * x[node] * @sin(angle) / ns_f;
+            }
+        }
+    }
+    // Shift t by phi/w0: harmonic h rotates by h*phi.
+    const phi = std.math.atan2(x_hat[osc * nf + 2], x_hat[osc * nf + 1]);
+    for (0..n) |node| for (1..nh + 1) |h| {
+        const c = x_hat[node * nf + 2 * h - 1];
+        const s = x_hat[node * nf + 2 * h];
+        const a = @as(f64, @floatFromInt(h)) * phi;
+        x_hat[node * nf + 2 * h - 1] = c * @cos(a) + s * @sin(a);
+        x_hat[node * nf + 2 * h] = s * @cos(a) - c * @sin(a);
+    };
+    x_hat[osc * nf + 2] = 0;
+}
+
+/// One period of the HB solution `x_hat` (`solveSpectrum`'s layout, n
+/// unknowns, fundamental `f0`) on `n_samples` uniform points, as the
+/// `pac.Orbit` rows [t, x(0..n)] the periodic small-signal analyses
+/// linearize about. HB's own grid, 2(2K+1) points, is not a power of two;
+/// this one is whatever the caller asks, a power of two for
+/// `pac.linearize`. Row k is the band-limited x(k*T/n_samples) exactly, so
+/// the last row repeats the first. O(n*K*n_samples). The caller frees
+/// `wave` with `allocator`.
+pub fn orbit(
+    x_hat: []const f64,
+    n: usize,
+    f0: f64,
+    n_samples: usize,
+    converged: bool,
+    allocator: std.mem.Allocator,
+) !pac.Orbit {
+    const nf = x_hat.len / n;
+    const nh = (nf - 1) / 2;
+    const cols = n + 1;
+    const wave = try allocator.alloc(f64, (n_samples + 1) * cols);
+    errdefer allocator.free(wave);
+    // cos/sin of 2*pi*j/n_samples; harmonic h at sample k reads entry
+    // (h*k) mod n_samples, so every sample sees the same rounded values.
+    const table = try allocator.alloc(f64, 2 * n_samples);
+    defer allocator.free(table);
+    const ns_f: f64 = @floatFromInt(n_samples);
+    for (0..n_samples) |j| {
+        const angle = 2.0 * std.math.pi * @as(f64, @floatFromInt(j)) / ns_f;
+        table[j] = @cos(angle);
+        table[n_samples + j] = @sin(angle);
+    }
+    for (0..n_samples + 1) |k| {
+        const row = wave[k * cols ..][0..cols];
+        row[0] = @as(f64, @floatFromInt(k)) / ns_f / f0;
+        for (row[1..], 0..) |*x, node| {
+            const spec = x_hat[node * nf ..][0..nf];
+            var v = spec[0];
+            for (1..nh + 1) |h| {
+                const j = (h * k) % n_samples;
+                v += spec[2 * h - 1] * table[j] + spec[2 * h] * table[n_samples + j];
+            }
+            x.* = v;
+        }
+    }
+    return .{ .wave = wave, .converged = converged };
 }
 
 /// Contract entry: harmonic magnitudes per probe as point-major rows
@@ -419,10 +568,13 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const nf: usize = 2 * @as(usize, opts.n_harmonics) + 1;
 
     const scratch = ctx.scratch_allocator;
-    const spectra = try scratch.alloc(f64, ctx.probes.len * nf);
-    defer scratch.free(spectra);
-    const st = try solve(ctx.circuit, ctx.probes, spectra, opts, scratch);
-    if (!st.converged) return error.HbDidNotConverge;
+    const x_hat = try scratch.alloc(f64, @as(usize, ctx.circuit.n) * nf);
+    defer scratch.free(x_hat);
+    const st = if (opts.osc_node != root.GROUND)
+        try solveOscillator(ctx.circuit, ctx.x_op, x_hat, &.{}, opts, scratch)
+    else
+        try solveSpectrum(ctx.circuit, x_hat, &.{}, opts, scratch);
+    if (!st.status.converged) return error.HbDidNotConverge;
 
     const names = try root.probeNames(ctx, "frequency");
     errdefer {
@@ -434,9 +586,9 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const data = try a.alloc(f64, n_rows * ncols);
     for (0..n_rows) |k| {
         const row = data[k * ncols ..][0..ncols];
-        row[0] = @as(f64, @floatFromInt(k)) * opts.f0;
-        for (0..ctx.probes.len) |p| {
-            const spec = spectra[p * nf ..][0..nf];
+        row[0] = @as(f64, @floatFromInt(k)) * st.f0;
+        for (ctx.probes, 0..) |node, p| {
+            const spec = x_hat[node * nf ..][0..nf];
             row[p + 1] = if (k == 0) spec[0] else magnitude(spec, @intCast(k));
         }
     }

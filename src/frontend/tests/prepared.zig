@@ -60,6 +60,8 @@ test "analysis directives dispatch every implemented capability and reject malfo
         ".pz",                                  ".qpss 1k 1414 1 1",     ".sens v(out)",
         ".sp dec 2 10 100",                     ".stb vin dec 2 10 100", ".temp -40 125 55",
         ".tf v(out) vin",                       ".tran 1u 10u",          ".tran_noise 1u 10u",
+        ".hbac dec 2 10 100 1k",                ".hbnoise v(out) vin dec 2 10 100 1k 4 2",
+        ".hbxf v(out) dec 2 10 100 1k",         ".phasenoise v(out) dec 2 10 100 1meg",
     };
     try std.testing.expectEqual(std.meta.fields(requests.Kind).len, directives.len);
     for (directives, 0..) |directive, index| {
