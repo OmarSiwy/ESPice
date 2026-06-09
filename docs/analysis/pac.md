@@ -34,6 +34,14 @@ averaging): sideband coupling is exact within the harmonic truncation.
 
 ## 2. Flow explanation
 
+`.hbac sweep [f0 [K]]` (HSPICE `.HBAC`; without f0 the tone and K come
+from the deck's `.hb` card) runs the same `pac.sweep` about the HB orbit
+instead: `hb.solveSpectrum`, `hb.orbit` onto a power-of-two grid, then
+`pac.linearize`. Sidebands M default to K, and the output is the last net,
+as for `.pac`. On LTI decks both providers match the analytic transfer
+(`hbac/rc`, `hbac/two_poles_hspice`), and the ideal multiplier's
+conversion gain is the same (`hbac/ideal_multiplier`).
+
 `src/analysis/pss/pac.zig analyze()`:
 
 1. **PSS (simplified)**: brute-force settling, `pss_periods - 1` periods

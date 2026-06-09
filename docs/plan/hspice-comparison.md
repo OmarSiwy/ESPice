@@ -558,10 +558,10 @@ tier, the smaller item with more users goes first.
 | 21 | C5 | `.acmatch`, variation-block `.dcmatch`, `.dcsens` | M |
 | 22 | C6 | `.save`/`.load` OP files; `.store` checkpoints | S, M |
 | 23 | C9 | `_CONT` measures, EM_AVG, measures over new plots, `par()` outputs | M |
-| 24 | D1 | HB orbit adapter, `.hbnoise`, `.hbac`, `.hbxf` | M |
-| 25 | D3 | Oscillator PSS (`.snosc`, `.hbosc`) | M |
+| 24 | D1 | HB orbit adapter, `.hbnoise`, `.hbac`, `.hbxf` (done: [periodic-noise.md](../analysis/periodic-noise.md)) | M |
+| 25 | D3 | Oscillator PSS (`.snosc`, `.hbosc`) (done: [pss-shooting-harmonic-balance.md](../analysis/pss-shooting-harmonic-balance.md)) | M |
 | 26 | D2 | Multi-tone sparse HB with lane preconditioner and phasors | L |
-| 27 | D4 | `.phasenoise`, then `.acphasenoise` | M, M |
+| 27 | D4 | `.phasenoise` (METHOD=0, white sources: done, [phase-noise.md](../analysis/phase-noise.md)), then `.acphasenoise` | M, M |
 | 28 | C7 | HSPICE `.trannoise`, flicker noise, `.jitter` | M |
 | 29 | C8 | Optimization (LM, bisection, pass/fail, pushout) | L |
 | 30 | B6 | `.disto` SIM2/DIM2/DIM3 and the Rload form | M |

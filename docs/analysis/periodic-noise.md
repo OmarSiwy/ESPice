@@ -69,7 +69,10 @@ On the shooting/monodromy machinery this is the transposed recurrence of
 the sensitivity chain, i.e. back-substitutions on the *transposed* saved
 step factors.
 
-### Frozen-time approximation (what this repo currently implements)
+### Frozen-time approximation (retired)
+
+An earlier version averaged frozen-time LTI snapshots; the conversion-matrix
+sweep of §2 replaced it. Kept for the record:
 
 Replace the true LPTV solve by an average over frozen-time LTI snapshots:
 for each PSS sample $t_k$, treat $(G_k, C_k) = (G(t_k), C(t_k))$ as an LTI
@@ -91,83 +94,84 @@ networks).
 
 ## 2. Flow explanation
 
-`src/analysis/pss/pnoise.zig`, three phases:
+`src/analysis/pss/pnoise.zig` splits into an orbit provider and
+`orbitSweep`, which takes any periodic orbit (`pac.Orbit`: N + 1 rows
+[t, x(0..n)], N a power of two):
 
-**Phase 1: PSS.** A simplified shooting pass finds the periodic orbit:
-integrate one period with frozen-time quasi-static Newton solves at
-$N = $ `pss_n_samples` uniform samples, fixed-point iterate
-$x_0 \leftarrow x(T)$ up to `pss_shoot_max_iter`, converged when
-$\|x(T) - x_0\|_\infty <$ `pss_shoot_tol`. (Fixed point, not shooting Newton:
-adequate for mildly nonlinear circuits, immediate for LTI; the full Newton
-machinery lives in `pss.zig`.) Each sample is solved under
-`analysis("tran")` so time-varying sources follow their waveform
-(§4.6.1). The solves are quasi-static with no charge history, so the PSS
-period-seam fix of `pss.zig` does not apply here. Non-convergence does not
-abort: the last trajectory is used and the result is flagged (`plotname`
-carries "PSS not converged").
+- `.pnoise` gets the orbit from the shooting PSS (`pac.orbit`, which is
+  `pss.solve` recording every unknown), N = `samplesFor(pss_n_samples,
+  2M + 1)`.
+- `.hbnoise` (`pss/hb_lptv.zig`) gets it from harmonic balance:
+  `hb.solveSpectrum` keeps every unknown's spectrum, and `hb.orbit`
+  synthesizes it on N = `samplesFor(max(64, 2(2K + 1)), 2M + 1)` points,
+  since HB's own 2(2K + 1)-point grid is not a power of two.
 
-**Phase 2: LPTV sampling.** One `ckt.eval` per PSS sample fills both
-analytic planes; `denseG`/`denseC` capture $G(t_k)$, $C(t_k)$ as dense
-$n \times n$ snapshots.
+Everything after the orbit is shared:
 
-**Noise sources: the in-device convention.** pnoise folds the same
-device-owned noise sources the LTI analysis uses (see
-[ac-small-signal-noise.md](ac-small-signal-noise.md) §2 and the model
-sources in [models/](../../models/)): devices declare `noise_gens` and
-`noisePsd`, and this analysis never owns a source table. Cyclostationarity
-is, by this convention, the device PSD evaluated along the periodic orbit:
-`collectNoiseSources` runs at every sample $x(t_k)$ and yields each
-generator's white part, flicker part and exponent at $t_k$, the periodically
-modulated $S_s(t)$ of §1. If the generator list changes along the orbit
-(different count or nodes), the sweep fails with
-`error.NoiseTopologyChanged`.
+1. `pac.linearize(ckt, orb, .noise)` samples G(t_k) and C(t_k) (and keeps
+   the orbit for the `acDyn` entries) and FFTs each pattern slot.
+2. `collectNoiseSources` at every sample gives each generator's white and
+   flicker density; their square roots, sign(D)·sqrt(|D|) as in VACASK
+   (`lib/osdiinstance.cpp:1684-1708`) so a negative density cannot become
+   NaN, are FFT'd into the amplitude spectra A_k.
+3. `pac.sweep(true, ...)` solves the transposed conversion matrix once per
+   output frequency, driven by +1 at `out_node` and -1 at `out_neg` (the
+   `v(a,b)` form); that gives H_m, every node's transfer from sideband m.
+4. Folding: S(f) = Σ_s Σ_j S_n(f + j f0) |Σ_m H_m A_{m−j}|², the 1/f shape
+   evaluated at the unfolded sideband.
 
-**Phase 3: swept sideband folding.** For each output frequency (log sweep)
-and each sideband $m \in [-M, M]$ ($M = $ `n_sidebands`), for each sample
-$k$: build the $2n \times 2n$ stacked-real admittance
-$Y_k = G_k + j\,2\pi|f_m| C_k$, factor it, and solve the adjoint
-$Y_k^{\mathsf T} y = e_{\text{out}}$ once; every source's transfer is then a
-two-element difference of $y$. Accumulate $|H_{s,k}|^2 S_s(f_m, t_k)$, with
-$S_s(f) = W_s + K_s/|f|^{e_s}$ ($|f|$ floored at 1e-30 at the DC sideband),
-average over $k$, sum over sources and sidebands, and integrate the density
-over the band with the trapezoid rule.
+For an LTI circuit, G, C and every source are constant, so their spectra
+are exact zeros off bin 0 (a radix-2 FFT of a constant produces exact
+zeros), H_m = 0 for m ≠ 0, and the fold collapses to |H_0|² S(f): no
+sideband adds noise, whatever M is and whichever provider found the orbit.
+That is `issues.md` C5, checked on both paths by `pnoise/lti_rc_sidebands_*`
+and `hbnoise/lti_rc*` (analytic 4kTR/(1+(2πfRC)²) under a 10 V sine).
 
-Knobs: everything the PSS has, plus `n_sidebands` (folding truncation) and
-the sweep triple. The tolerance bundle governs the inner Newton solves.
-Known gaps against Spectre pnoise, called out on purpose: frozen-time
-averaging instead of true LPTV conversion matrices; no cyclostationary
-correlation between sources; dense $n \times n$ snapshots. Multi-probe
-B-source expressions are rejected with `UnsupportedBsourceExpression`
-(`pnoise/noise_multiplier_*`), and the sideband-transfer formulation that
-the `pnoise/lti_rc_sidebands_*` decks need is open (issues.md C5).
+Measured agreement between the providers on a nonlinear circuit (a diode
+mixer, LO 1 kHz, K = 16, M = 3, with flicker and one sideband exactly at
+DC for f = 1 kHz; `src/tests/analyses.zig`): the densities differ by at
+most 2.2e-4 relative over 10 Hz to 10 kHz, which is the shooting orbit's
+64-step trapezoid error. The test holds them to 1e-3.
+
+Divergences:
+
+- `v(a,b)` outputs are differential on both `.pnoise` and `.hbnoise`
+  (`pnoise/differential_rc`, `hbnoise/differential_rc`). Before this
+  `.pnoise` read `v(a)` and silently dropped `b`.
+- The input source (`Vsrc`) is checked but not used: there is no
+  input-referred column. VACASK and HSPICE report both.
+- No per-source contributions (VACASK G5).
+- `.hbnoise` sidebands M default to the HB harmonic count K. HSPICE's
+  `.HBNOISE` folds over the `.HB` harmonics as well; its
+  `[n1, ..., nk, +/-1]` output-tone selector is not accepted, the output
+  is always the baseband sideband.
+
+Card syntax:
+
+```
+.pnoise  v(out[,ref]) Vsrc sweep f0 [M]
+.hbnoise v(out[,ref]) [Vsrc] sweep [f0 [K [M]]]
+```
+
+`.hbnoise` without f0 takes f0 and K from the deck's `.hb` card, as HSPICE
+does; `sweep` is `dec|oct|lin N fstart fstop`.
 
 ## 3. Pseudo-code, CPU sequential
 
 ```
-pnoise(ckt, x_dc, out, f_range, M, N):
-    # phase 1: PSS (fixed-point shooting, frozen-time Newton per sample)
-    x0 = x_dc
-    repeat up to pss_shoot_max_iter:
-        traj[0..N] = integrate period (quasi-static Newton at each t_k, analysis("tran"))
-        if max|traj[N] - x0| < tol: break
-        x0 = traj[N]
-    # phase 2: sample the LPTV planes and the sources along the orbit
+orbitSweep(ckt, orb, out, out_neg, sweep, f0, M):
+    lin = linearize(ckt, orb, .noise)                 # FFT of G(t), C(t)
     for k in 0..N:
-        eval(traj[k], t_k); G[k], C[k] = dense planes
-        (white, flicker, ef)[k][s] = collect_noise_sources(traj[k])
-    # phase 3: sweep with sideband folding
-    for f in log_sweep(f_range):
-        S = 0
-        for m in -M..M:
-            fm = f + m*f_L
-            acc[s] = 0
-            for k in 0..N:                                   # period average
-                A = [G[k]  -w C[k]; w C[k]  G[k]],  w = 2*pi*|fm|
-                factor(A); y = solve(A^T, e_out)             # one adjoint per (m, k)
-                for s in srcs:
-                    acc[s] += |y_p - y_n|^2 * psd(white[k][s], flicker[k][s], ef[k][s], fm)
-            S += sum_s acc[s]/N
-        density(f) = S; integrate trapezoid
+        srcs[k] = collect_noise_sources(orb.state(k))
+        a_white[s][k], a_flicker[s][k] = signed_sqrt(srcs[k][s])
+    A_white, A_flicker = fft(a_white), fft(a_flicker)
+    for f in sweep:
+        H = solve(conversion_matrix(lin, f)^T, e_out - e_out_neg)   # all nodes, all sidebands
+        density(f) = sum_s sum_j psd_j(|sum_m H_m[p_s - n_s] A_{m-j}|^2 for white and flicker)
+    return sqrt(trapezoid_integral(density))
+
+pnoise  = orbitSweep(pac.orbit(shooting PSS))
+hbnoise = orbitSweep(hb.orbit(hb.solveSpectrum))
 ```
 
 ## 4. Parallel execution
@@ -188,8 +192,8 @@ implemented (design notes):
 
 | Phase | Solver doc | Impl |
 |---|---|---|
-| PSS phase (frozen-time Newton per sample) | [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md), [klu-pipeline.md](../solvers/klu-pipeline.md) | `converger.run` in `pnoise.runPSS` |
-| Per-(frequency, sideband, sample) admittance factor and one adjoint solve | none (dense stacked-real path) | `src/solver/dense_lu.zig` (`buildComplexAdmittance`, `factorize`, `solveFactoredT`) |
+| Orbit: shooting PSS or harmonic balance | [pss-shooting-harmonic-balance.md](pss-shooting-harmonic-balance.md) | `pac.orbit`, `hb.solveSpectrum` + `hb.orbit` |
+| One transposed conversion-matrix solve per frequency | none (dense stacked-real path) | `pac.sweep(true, ...)` on `src/solver/dense_lu.zig` |
 | Sparse adjoint factors (target) | [klu-pipeline.md](../solvers/klu-pipeline.md) (`solveT`) | not implemented; same shape as `freq_solve`'s adjoint `solveBatch` |
 
 ---
@@ -214,7 +218,9 @@ implemented (design notes):
 
 **Our implementation**
 
-- `src/analysis/pss/pnoise.zig`: PSS and the frozen-time LPTV sweep.
+- `src/analysis/pss/pnoise.zig`: `sweep` (shooting orbit) and `orbitSweep`.
+- `src/analysis/pss/hb_lptv.zig`: `.hbnoise`, `.hbac`, `.hbxf` on the HB orbit.
 - `src/analysis/pss/pss.zig`: full shooting-Newton PSS.
 - `src/analysis/ac/noise.zig`: the LTI limit it must reduce to.
-- Fixtures: `tests/fixtures/pnoise/`, `tests/fixtures/noise/` (LTI reduction).
+- Fixtures: `tests/fixtures/pnoise/`, `tests/fixtures/hbnoise/`,
+  `tests/fixtures/noise/` (LTI reduction).

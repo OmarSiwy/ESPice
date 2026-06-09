@@ -183,13 +183,58 @@ assembled from the harmonic content of $G(t)$ (DC and first-order cos/sin
 cross-blocks kept, higher-order intermodulation blocks truncated) plus the
 $\pm\omega_h C$ skew blocks, where $C$ is sampled at $t_0$ only. That makes
 Newton quasi-Newton for nonlinear charge; the residual is exact, so the
-fixed point is right. Dense LU, full Newton update. Non-convergence surfaces
-as a warning with the residual (the spectra are still extracted). The
+fixed point is right. Dense LU, a backtracking line search on the
+residual. Non-convergence is `error.HbDidNotConverge`.
+`hb.solveSpectrum` returns every unknown's spectrum, and `hb.orbit`
+samples it on any grid, which is how `.hbac`, `.hbxf` and `.hbnoise` reuse
+the shooting analyses' back halves ([periodic-noise.md](periodic-noise.md),
+[pac.md](pac.md)). The
 per-sample $G$ values are stored slot-major over the nnz pattern (samples
 contiguous per slot), not as dense per-sample matrices: `hb/diode_clipper`
 219.1M to 210.1M Ir (-4.1%), and a diode clipper with a 40-stage RC ladder
 at `.hb 1k 8` 19.28G to 18.42G Ir with peak RSS 12.8 to 11.2 MB (commit
 `47e9b03`).
+
+**Oscillators (autonomous PSS and HB).** An oscillator has no drive to
+set the period, so T is an unknown, and every time shift of the orbit is
+another solution. One unknown has to go to fix the phase.
+
+- Shooting (`.pss v(osc) f [n [settle]]`, alias HSPICE `.snosc`): T joins
+  the unknowns and x0[osc] leaves them, pinned at its start value, so the
+  Newton system stays n x n with the osc column holding dφ/d(ln T) (an FD
+  period integration at T(1 + ε); the Krylov matvec perturbs T the same
+  way). The start is VACASK and Spectre's tstab in miniature
+  (`startOscillator`): kick the DC point by 1 mV at the osc node, integrate
+  `settle` guess periods (default 30), record 8 more, take the period as
+  the mean spacing of the osc node's rising mid-swing crossings, and start
+  Newton from the first sample after the last crossing. Steps change ln T
+  by at most 0.2. `error.OscillatorDidNotStart` when fewer than two
+  crossings show. The period is the last row's time. VACASK's phase
+  condition is αᵀΔx0 = 0 with α = ẋ(0); pinning one node is HSPICE's
+  OSCNODE, cheaper and enough when that node's slope at the anchor is not
+  small, which the mid-swing anchor ensures.
+- HB (`.hb v(osc) f [K]`, alias HSPICE `.hbosc`): the osc node's sin_1
+  coefficient is held at 0 and its unknown becomes ln f0. f0 enters the
+  residual only through the charge terms, linearly, so that Jacobian column
+  is the charge-term vector itself, exact. HB from the DC point would find
+  the trivial solution, so the seed is the shooting orbit above: its first K
+  harmonics, time-shifted so the osc fundamental is a cosine. HSPICE's
+  HBOSC instead searches amplitude and frequency with a probe source of
+  voltage VP (PROBENODE, FSPTS); that is not implemented, and PROBENODE's
+  VP is not accepted.
+
+Measured against ngspice-45 long transients (`uic`, reltol 1e-6, periods
+from 50 to 150 rising crossings, same digits at a 2.5x to 4x finer step):
+
+| Deck | ngspice | ESPice | Rel. error |
+|---|---|---|---|
+| `pss/ring_oscillator` (3-stage tanh ring, 256 steps) | T = 3.52176 us | 3.52195 us | 5.4e-5 (trapezoid, 256 steps) |
+| `hb/ring_oscillator` (K = 15) | f = 283.9489 kHz | 283.9493 kHz | 1.4e-6 |
+| `hb/lc_oscillator` (Van der Pol, K = 7) | f = 999.4303 kHz | 999.4305 kHz | 2e-7 |
+
+The Van der Pol frequency sits eps²/16 below 1/(2π sqrt(LC)) (eps = 0.095),
+and HB puts the fundamental at 1.00007 V against the describing-function
+1 V.
 
 Knobs: `period`/`f0`, `n_samples` (shooting time resolution),
 `n_harmonics`, `shooting_tol`/`hb_tol`, `fd_epsilon`, inner Newton budget
