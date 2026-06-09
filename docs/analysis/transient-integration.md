@@ -415,8 +415,10 @@ grid now follows ngspice's:
 Open:
 - One tape slot per `ddt()` site with a per-site LTE mask (Divergence 1).
   Needs VerA.
-- Newton robustness: `MODEINITPRED`, `fetlim`/`limvds`, `CKTconvTest`
-  (`bench_ensemble_pvt_corners`, `bench_ngspice_mosamp`).
+- Newton robustness: `fetlim`/`limvds`, `CKTconvTest`
+  (`bench_ensemble_pvt_corners`, `bench_ngspice_mosamp`). The Meyer MOS
+  models (mos1/2/3/6/9) follow `MODEINITPRED` and `MODEINITTRAN` for their
+  gate charges; see [models.md](../devices/models.md).
 - `bench_ngspice_mosamp` publishes far fewer points than ngspice's 2316 later
   in the run.
 

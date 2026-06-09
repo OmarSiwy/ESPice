@@ -97,6 +97,19 @@ Colin McAndrew et al. (VBIC).
   `qdep` variants, mos6), the reverse-bias junction current (flat in mos1,
   cubic in mos3/mos9), Meyer halves against full-and-average, and the form
   of KP(T).
+- The Meyer gate charges of mos1/2/3/6/9 follow ngspice's first Newton
+  iteration of each transient step. On a MODEINITPRED iteration, ngspice
+  extrapolates the charge from the last two accepted points, which with
+  the host's linear predictor is the increment since the last accept times
+  that accept's capacitance, while `geq` keeps the present one. On the
+  first step's MODEINITTRAN iteration, the caps stamp nothing. A step that
+  converges in two iterations publishes that first solve, so this shows in
+  the output. Each cap carries a second `ddt()` site with a zero Jacobian
+  that holds the difference. Against main 6d0b951: `tran/device_mos6_inverter`
+  goes 41.4x -> 0.105x (with `vera_nodiff` on mos6's caps, as on the others),
+  `tran/bench_tline_txl1_1_line` 5.41x -> 0.0017x,
+  `tran/bench_ngspice_mosmem` 0.073x -> 0.0002x. `tran/bench_ngspice_mosamp`
+  now tracks ngspice's grid to 1.31 ns instead of 1.15 ns.
 - Sharing the MOS junction helpers through an `include` would need build.zig
   to track the included file as a VerA input. Not done.
 - A model of at least 20 KB (`heavy_model_bytes` in build.zig) is scheduled

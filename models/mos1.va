@@ -83,6 +83,7 @@ module mos1(d, g, s, b);
     real vonp, sarg, sarg0, vbx0, von, vgst, vdsat, bp, id, ibs, ibd, qbs, qbd;
     real vdsp, vddif, vddif1, vddif2, cgsp, cgsh, cgdh, cgbh, chgs, chgd;
     real capgs, capgd, capgb;
+    real pcapgs, pcapgd, pcapgb, vgsf, vgdf, vgbf;
 
     // Bulk junction diode (both junctions, same law). The exponent is
     // tangent-continued above 80*vtx: pnjlim keeps Newton iterates below it,
@@ -391,6 +392,39 @@ module mos1(d, g, s, b);
             capgd = chgd + $prev(chgd) + cgdo * w * m;
             capgb = cgbh + $prev(cgbh) + cgbo * leff * m;
         end
+        // The first Newton iteration of a transient step (mos1load.c:809-867).
+        // MODEINITPRED extrapolates the gate charges from the last two
+        // accepted points. On the host's linear predictor that is the
+        // increment since the last accept at that accept's capacitance.
+        // MODEINITTRAN, the first step, stamps no gate-cap current or
+        // conductance; $abstime > 0 leaves out the t = 0 commit.
+        // ngspice's geq keeps the present capacitance, so the extrapolation
+        // is a second ddt() site per cap on a frozen copy of the voltage:
+        // (pcap - cap)*(V - V_accept) in value, no Jacobian, zero at every
+        // accepted point.
+        pcapgs = $prev(capgs);
+        pcapgd = $prev(capgd);
+        pcapgb = $prev(capgb);
+        (* vera_nodiff *) begin
+            vgsf = V(g, si);
+            vgdf = V(g, di);
+            vgbf = V(g, b);
+        end
+        if (analysis("static") || $simparam("iteration") != 1) begin
+            pcapgs = capgs;
+            pcapgd = capgd;
+            pcapgb = capgb;
+        end
+        @(initial_step("tran")) begin
+            if ($abstime > 0.0 && $simparam("iteration") == 1) begin
+                capgs = 0.0;
+                capgd = 0.0;
+                capgb = 0.0;
+                pcapgs = 0.0;
+                pcapgd = 0.0;
+                pcapgb = 0.0;
+            end
+        end
 
         // ============ contributions =======================================
         I(di, si) <+ type * mode * id;
@@ -407,6 +441,9 @@ module mos1(d, g, s, b);
         I(g, si) <+ capgs * ddt(V(g, si));
         I(g, di) <+ capgd * ddt(V(g, di));
         I(g, b) <+ capgb * ddt(V(g, b));
+        (* vera_lte = 0 *) I(g, si) <+ (pcapgs - capgs) * ddt(vgsf);
+        (* vera_lte = 0 *) I(g, di) <+ (pcapgd - capgd) * ddt(vgdf);
+        (* vera_lte = 0 *) I(g, b) <+ (pcapgb - capgb) * ddt(vgbf);
 
         if (gdrain > 0.0) I(d, di) <+ gdrain * V(d, di);
         else V(d, di) <+ 0.0;
