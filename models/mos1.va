@@ -147,7 +147,7 @@ module mos1(d, g, s, b);
         egfet1 = 1.16 - (7.02e-4 * tnomk * tnomk) / (tnomk + 1108.0);
 
         // TOX not given (or 0) => no oxide cap and no derived KP (mos1temp.c:61-63).
-        if ($param_given(tox) && tox > 0.0) coxp = 3.9 * 8.8541878128e-12 / tox;
+        if ($param_given(tox) && tox > 0.0) coxp = 3.9 * 8.854214871e-12 / tox;
         else coxp = 0.0;
 
         phix = phi;
@@ -163,7 +163,7 @@ module mos1(d, g, s, b);
             // Both remaining overrides divide by Cox', so they need TOX.
             if (coxp > 0.0) begin
                 if (!$param_given(gamma))
-                    gammax = sqrt(2.0 * 11.7 * 8.8541878128e-12
+                    gammax = sqrt(2.0 * 11.7 * 8.854214871e-12
                                   * 1.6021766208e-19 * nsub * 1.0e6) / coxp;
                 if (!$param_given(vto)) begin
                     fermis = type * 0.5 * phix;

@@ -148,9 +148,9 @@ module mos6(d, g, s, b);
         // "Given" is $param_given, not a value test: every default here (KC,
         // PHI, GAMMA, VTO) is also a legal user value. TOX not given => no
         // intrinsic Meyer caps, as in ngspice (oxideCapFactor stays 0).
-        if (tox > 0.0) coxp = 3.9 * 8.854187817e-12 / tox;
+        if (tox > 0.0) coxp = 3.9 * 8.854214871e-12 / tox;
         else coxp = 0.0;
-        vtnom = 1.380649e-23 * tnom / 1.602176634e-19;
+        vtnom = tnom * (1.38064852e-23 / 1.6021766208e-19);
         egnom = 1.16 - 7.02e-4 * tnom * tnom / (tnom + 1108.0);
 
         phix   = phi;
@@ -160,8 +160,8 @@ module mos6(d, g, s, b);
             if (!$param_given(phi)) phix = max(0.1, 2.0 * vtnom * ln(nsub * 1e6 / 1.45e16));
             if (coxp > 0.0) begin   // both remaining overrides divide by Cox'
                 if (!$param_given(gamma))
-                    gammax = sqrt(2.0 * 11.7 * 8.854187817e-12
-                                  * 1.602176634e-19 * nsub * 1e6) / coxp;
+                    gammax = sqrt(2.0 * 11.7 * 8.854214871e-12
+                                  * 1.6021766208e-19 * nsub * 1e6) / coxp;
                 if (!$param_given(vto)) begin
                     fermis = ty * 0.5 * phix;
                     if (tpg != 0.0) begin
@@ -169,7 +169,7 @@ module mos6(d, g, s, b);
                         wkfng  = 3.25 + 0.5 * egnom - fermig;
                     end else wkfng = 3.2;
                     wkfngs = wkfng - (3.25 + 0.5 * egnom + fermis);
-                    vfb    = wkfngs - nss * 1e4 * 1.602176634e-19 / coxp;
+                    vfb    = wkfngs - nss * 1e4 * 1.6021766208e-19 / coxp;
                     vtox   = vfb + ty * (gammax * sqrt(phix) + phix);
                 end
             end
@@ -181,18 +181,18 @@ module mos6(d, g, s, b);
         // ============ temperature scaling (mos1temp.c) =====================
         // Identity at T = TNOM; TNOM is in kelvin on this card.
         tk    = $temperature;
-        vt    = 1.380649e-23 * tk / 1.602176634e-19;
+        vt    = tk * (1.38064852e-23 / 1.6021766208e-19);
         eg    = 1.16 - 7.02e-4 * tk * tk / (tk + 1108.0);
         fact1 = tnom / 300.15;
         fact2 = tk / 300.15;
         // arg is ngspice's literal 1/Joule form; the q factor below converts it,
         // so it must NOT already be divided by q.
-        arg1    = -egnom / (2.0 * 1.380649e-23 * tnom)
-                  + 1.1150877 / (2.0 * 1.380649e-23 * 300.15);
-        argt    = -eg / (2.0 * 1.380649e-23 * tk)
-                  + 1.1150877 / (2.0 * 1.380649e-23 * 300.15);
-        pbfact1 = -2.0 * vtnom * (1.5 * ln(fact1) + 1.602176634e-19 * arg1);
-        pbfactt = -2.0 * vt * (1.5 * ln(fact2) + 1.602176634e-19 * argt);
+        arg1    = -egnom / (2.0 * 1.38064852e-23 * tnom)
+                  + 1.1150877 / (2.0 * 1.38064852e-23 * 300.15);
+        argt    = -eg / (2.0 * 1.38064852e-23 * tk)
+                  + 1.1150877 / (2.0 * 1.38064852e-23 * 300.15);
+        pbfact1 = -2.0 * vtnom * (1.5 * ln(fact1) + 1.6021766208e-19 * arg1);
+        pbfactt = -2.0 * vt * (1.5 * ln(fact2) + 1.6021766208e-19 * argt);
 
         // Surface potential and built-in voltage at T.
         phio  = (phix - pbfact1) / fact1;
@@ -220,7 +220,7 @@ module mos6(d, g, s, b);
         cox  = coxp * weff * leff * m;
         // Flicker noise uses mos1noi.c's nominal TOX = 1e-7 when Cox' is 0.
         if (coxp > 0.0) coxn = coxp;
-        else coxn = 3.9 * 8.854187817e-12 / 1e-7;
+        else coxn = 3.9 * 8.854214871e-12 / 1e-7;
 
         // JS wins only when BOTH areas are given: ngspice decides once for the
         // pair (mos6load.c:127-138), never mixing IS on one junction with JS*A
@@ -471,9 +471,9 @@ module mos6(d, g, s, b);
         else V(s, si) <+ 0.0;
 
         // ============ noise (mos1noi.c template) ==========================
-        if (gdrain > 0.0) I(d, di) <+ white_noise(4.0 * 1.380649e-23 * tk * gdrain, "rd");
-        if (gsource > 0.0) I(s, si) <+ white_noise(4.0 * 1.380649e-23 * tk * gsource, "rs");
-        I(di, si) <+ white_noise(4.0 * 1.380649e-23 * tk * 2.0 / 3.0 * abs(gmch), "channel");
+        if (gdrain > 0.0) I(d, di) <+ white_noise(4.0 * 1.38064852e-23 * tk * gdrain, "rd");
+        if (gsource > 0.0) I(s, si) <+ white_noise(4.0 * 1.38064852e-23 * tk * gsource, "rs");
+        I(di, si) <+ white_noise(4.0 * 1.38064852e-23 * tk * 2.0 / 3.0 * abs(gmch), "channel");
         // mos1noi.c:319 substitutes a nominal TOX = 1e-7 when Cox' is zero
         // rather than dropping the flicker source.
         if (kf > 0.0)

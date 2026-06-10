@@ -158,9 +158,9 @@ module mos9(d, g, s, b);
 
         // ============ parameter defaulting (mos9temp.c) ====================
         tnomk = tnom + 273.15;
-        vtnom = 1.380649e-23 * tnomk / 1.602176634e-19;
+        vtnom = tnomk * (1.38064852e-23 / 1.6021766208e-19);
         egnom = 1.16 - 7.02e-4 * tnomk * tnomk / (tnomk + 1108.0);
-        coxp = 3.9 * 8.8541878128e-12 / tox;      // C'ox [F/m^2]
+        coxp = 3.9 * 8.854214871e-12 / tox;      // C'ox [F/m^2]
         // "Given" is $param_given, as in mos1.va: the KP/PHI defaults
         // (2e-5, 0.6) are legal card values, so a value sentinel can never
         // take mos9temp.c:66-68's UO derivation or the NSUB-derived PHI.
@@ -169,21 +169,21 @@ module mos9(d, g, s, b);
         if ($param_given(phi) || nsub <= 1.45e10) phix = phi;
         else phix = max(0.1, 2.0 * vtnom * ln(nsub * 1.0e6 / 1.45e16));
         gammax = ((gamma <= 0.0) && (nsub > 0.0))
-                 ? sqrt(2.0 * 11.7 * 8.8541878128e-12 * 1.602176634e-19 * nsub * 1.0e6) / coxp
+                 ? sqrt(2.0 * 11.7 * 8.854214871e-12 * 1.6021766208e-19 * nsub * 1.0e6) / coxp
                  : gamma;
         // VTO from the gate work-function difference when the card gives
         // NSUB (+NSS/TPG) but no VTO (mos9temp.c:81-104, V_fb chain).
         wkfngs = ((tpg != 0) ? 3.25 + 0.5 * egnom - tpg * type * 0.5 * egnom : 3.2)
                  - (3.25 + 0.5 * egnom + type * 0.5 * phix);
         vtox = ((vto == 0.0) && (nsub > 1.45e10))
-               ? wkfngs - nss * 1.0e4 * 1.602176634e-19 / coxp
+               ? wkfngs - nss * 1.0e4 * 1.6021766208e-19 / coxp
                  + type * (gammax * sqrt(phix) + phix)
                : vto;
 
         // ============ temperature scaling (mos9temp.c) =====================
         tk = $temperature;
-        vt = 1.380649e-23 * tk / 1.602176634e-19;
-        vt300 = 1.380649e-23 * 300.15 / 1.602176634e-19;
+        vt = tk * (1.38064852e-23 / 1.6021766208e-19);
+        vt300 = 300.15 * (1.38064852e-23 / 1.6021766208e-19);
         eg = 1.16 - 7.02e-4 * tk * tk / (tk + 1108.0);
         fact1 = tnomk / 300.15;
         fact2 = tk / 300.15;
@@ -220,12 +220,12 @@ module mos9(d, g, s, b);
         // alpha = 2*eps_si/(q*Nsub) drives both the CLM depletion width and
         // the short-channel depletion-layer coefficient xd = sqrt(alpha).
         alpha = (nsub > 0.0)
-                ? 2.0 * 11.7 * 8.8541878128e-12 / (1.602176634e-19 * nsub * 1.0e6)
+                ? 2.0 * 11.7 * 8.854214871e-12 / (1.6021766208e-19 * nsub * 1.0e6)
                 : 0.0;
         xd = sqrt(alpha);
         etac = eta * 8.15e-22 / (coxp * leff * leff * leff);
-        narrow = delta * 0.5 * 3.14159265358979323846 * 11.7 * 8.8541878128e-12 / (coxp * weff);
-        csonco = 1.602176634e-19 * nfs * 1.0e4 / coxp;
+        narrow = delta * 0.5 * 3.14159265358979323846 * 11.7 * 8.854214871e-12 / (coxp * weff);
+        csonco = 1.6021766208e-19 * nfs * 1.0e4 / coxp;
 
         isatd = (((js > 0.0) && (ad > 0.0)) ? js * ad * m : is * m) * ist;
         isats = (((js > 0.0) && (as > 0.0)) ? js * as * m : is * m) * ist;
@@ -502,11 +502,11 @@ module mos9(d, g, s, b);
         else V(s, si) <+ 0.0;
 
         // ============ noise (mos9noi.c, the mos1noi.c template) ===========
-        if (gdrain > 0.0) I(d, di) <+ white_noise(4.0 * 1.380649e-23 * tk * gdrain, "rd");
-        if (gsource > 0.0) I(s, si) <+ white_noise(4.0 * 1.380649e-23 * tk * gsource, "rs");
+        if (gdrain > 0.0) I(d, di) <+ white_noise(4.0 * 1.38064852e-23 * tk * gdrain, "rd");
+        if (gsource > 0.0) I(s, si) <+ white_noise(4.0 * 1.38064852e-23 * tk * gsource, "rs");
         // gm comes from the same AD that builds the Jacobian.
         gmch = ddx(type * mode * id, V(g));
-        I(di, si) <+ white_noise(4.0 * 1.380649e-23 * tk * (2.0 / 3.0) * abs(gmch),
+        I(di, si) <+ white_noise(4.0 * 1.38064852e-23 * tk * (2.0 / 3.0) * abs(gmch),
                                  "channel");
         if (kf > 0.0)
             I(di, si) <+ flicker_noise(kf * pow(abs(id), af)
