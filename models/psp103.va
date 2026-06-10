@@ -55,12 +55,13 @@
 //        http://www.cea.fr/cea-tech/leti/pspsupport
 //
 //
-// ESPice integration: PSP 103.7 (QS, no self-heating, NQSmodel undefined) from
-// ngspice-45 src/spicelib/devices/adms/psp103/admsva, flattened into one file
-// for VerA (the `[flatten]` markers). PSP103_nqs_macrodefs.include, which
-// upstream's psp103_nqs.va adds after `OPderiv, is flattened there under
-// `ifdef NQSmodel, so defining NQSmodel builds the NQS model (SWNQS). Two
-// edits, nothing else:
+// ESPice integration: PSP 103.7 (NQS, no self-heating) from ngspice-45
+// src/spicelib/devices/adms/psp103/admsva, flattened into one file for VerA
+// (the `[flatten]` markers). PSP103_nqs_macrodefs.include, which upstream's
+// psp103_nqs.va adds after `OPderiv, is flattened there under `ifdef
+// NQSmodel. NQSmodel is defined, so the SWNQS card parameter (default 0,
+// quasi-static) selects the NQS mode. Three edits, nothing else:
+//  - `define NQSmodel is uncommented;
 //  - the module is renamed PSP103VA -> psp103, the stem the device catalog
 //    keys on;
 //  - the parameters `nmos` and `pmos` are written as the escaped identifiers
@@ -98,7 +99,7 @@
 // [flatten] annex D `include "disciplines.vams" — supplied by VerA
 // [flatten] annex D `include "constants.vams" — supplied by VerA
 
-//`define NQSmodel true
+`define NQSmodel true
 
 //`define SelfHeating true
 
