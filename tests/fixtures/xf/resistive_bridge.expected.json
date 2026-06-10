@@ -1,0 +1,118 @@
+{
+  "schema_version": 1,
+  "analysis": "dcxf",
+  "purpose": "All-source DC transfer to a differential and a branch-current output",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "v(a,b) = V1*(3/4 - 2/4) + I1*(1k||3k): tf(v1) = 0.25, tf(i1) = 750. V1 sees (1k+3k)||(2k+2k) = 2k; I1 (0 -> a) sees 1k||3k = 750. i(V1) is the SPICE branch current (+ to - through the card): -1/2k per volt of V1, and +750/1k per ampere of I1, which flows back through R1 into V1."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "DC Transfer Functions",
+        "match": "exact",
+        "row_count": 1,
+        "columns": {
+          "tf(v1)": {
+            "unit": "V/V or V/A",
+            "rtol": 1e-09,
+            "atol": 1e-12,
+            "values": [
+              0.25
+            ]
+          },
+          "zin(v1)": {
+            "unit": "ohm",
+            "rtol": 1e-09,
+            "atol": 1e-12,
+            "values": [
+              2000.0
+            ]
+          },
+          "yin(v1)": {
+            "unit": "S",
+            "rtol": 1e-09,
+            "atol": 1e-12,
+            "values": [
+              0.0005
+            ]
+          },
+          "tf(i1)": {
+            "unit": "V/V or V/A",
+            "rtol": 1e-09,
+            "atol": 1e-12,
+            "values": [
+              750.0
+            ]
+          },
+          "zin(i1)": {
+            "unit": "ohm",
+            "rtol": 1e-09,
+            "atol": 1e-12,
+            "values": [
+              750.0
+            ]
+          },
+          "yin(i1)": {
+            "unit": "S",
+            "rtol": 1e-09,
+            "atol": 1e-12,
+            "values": [
+              0.0013333333333333333
+            ]
+          }
+        }
+      },
+      {
+        "name": "DC Transfer Functions",
+        "match": "exact",
+        "row_count": 1,
+        "columns": {
+          "tf(v1)": {
+            "unit": "V/V or V/A",
+            "rtol": 1e-09,
+            "atol": 1e-12,
+            "values": [
+              0.25
+            ]
+          },
+          "tf(i1)": {
+            "unit": "V/V or V/A",
+            "rtol": 1e-09,
+            "atol": 1e-12,
+            "values": [
+              750.0
+            ]
+          }
+        }
+      },
+      {
+        "name": "DC Transfer Functions",
+        "match": "exact",
+        "row_count": 1,
+        "columns": {
+          "tf(v1)": {
+            "unit": "A/V",
+            "rtol": 1e-09,
+            "atol": 1e-12,
+            "values": [
+              -0.0005
+            ]
+          },
+          "tf(i1)": {
+            "unit": "A/A",
+            "rtol": 1e-09,
+            "atol": 1e-12,
+            "values": [
+              0.75
+            ]
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "7002f621e63c75e1376677eedb5c80f52637d4a71394b1e38db3422f7ef3f4a8"
+}

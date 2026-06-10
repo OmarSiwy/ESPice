@@ -1,7 +1,8 @@
 # Loop-Gain Stability (STB)
 
-Middlebrook and Tian loop-gain probes; return ratio, gain/phase margins
-(theory; the analysis publishes $T(f)$ only).
+Middlebrook and Tian loop-gain probes; return ratio, gain/phase margins.
+`.stb` is a single voltage injection; `.lstb` is Tian's double injection
+(VACASK `acstb`) with differential and common modes and margins.
 
 ## 1. Mathematical specification
 
@@ -61,10 +62,83 @@ $T(\omega) = -V(+)/V(-)$, with `+` the side where the signal arrives.
 This is exact where the probe point is a good voltage-transfer break
 (low source impedance driving high load impedance: output of an op-amp /
 controlled source, the usual `.stb` probe discipline) and inherits the
-single-injection caveat otherwise. Tian's two-analysis combination is the
-documented upgrade (it costs exactly one more solve per frequency on the
-same factorization). The result is the complex $T(f)$ column; margins are
-not computed (nothing in the raw output carries them).
+single-injection caveat otherwise. The result is the complex $T(f)$
+column; `.stb` computes no margins.
+
+### `.lstb`: double injection and margins
+
+`.lstb mode=single|diff|comm vsource=v1[,v2]` (HSPICE [CR .LSTB]) runs
+VACASK's `acstb` algorithm (`lib/coreacstb.cpp`), read from its source.
+The probe orientation is HSPICE's and VACASK's, the reverse of `.stb`:
+`+` faces the loop's input (drv), `−` its output (fbk). At every
+frequency two right-hand sides share one lane factorization:
+
+- **current injection**: 1 A into the probe's `+` node from ground, the
+  probe still a short. Probe current $A$, `+` node voltage $C$;
+- **voltage injection**: 1 V on the probe's branch row. Probe current $B$,
+  `+` node voltage $D$.
+
+With $\Delta = AD - BC$ the DUT y-parameters and the loop gains are
+
+$$
+y_{11} = \frac{1+\Delta-A-D}{C},\;
+y_{12} = \frac{D-\Delta}{C},\;
+y_{21} = \frac{A-\Delta}{C},\;
+y_{22} = \frac{\Delta}{C},
+$$
+
+$$
+W_f = \frac{A-\Delta}{1+2\Delta-A-D},\quad
+W_r = \frac{D-\Delta}{1+2\Delta-A-D},\quad
+W = W_f + W_r .
+$$
+
+$W = N/(1-N)$ with $N = A + D - 2\Delta$, the form of Tian's loop gain
+$T = -1/(1 - 1/(2(AD-BC)+A+D))$ with VACASK's signs for the four
+responses. So VACASK's method is Tian's double injection, written as a
+two-port so the forward and reverse parts come apart; we reproduce it.
+$W$ is exact for a bilateral loop and any loading on either side of the
+break (`stb/lstb_loaded_break` checks it against the return ratio of the
+loop's transconductor, where a single voltage injection is off).
+
+`diff` and `comm` drive the pair $\pm 1$ or $+1/+1$ in both right-hand
+sides and read each response as the weighted mean
+$(r_1 \mp r_2)/2$: the half circuit of a symmetric pair, so the same
+formulas apply to the differential or common-mode loop.
+
+The frequencies are the `.lstb` card's own `dec|oct|lin N f1 f2` when
+it has one, else the deck's `.ac` sweep (HSPICE's rule). Each card
+publishes two plots:
+
+| Plot | Columns |
+|---|---|
+| `Loop Stability Analysis` (complex) | `frequency`, `loop_gain` ($W$), `loop_gain_forward`, `loop_gain_reverse`, `y11`, `y12`, `y21`, `y22` |
+| `Loop Stability Margins` (one real row) | `gain_margin` (dB), `phase_crossover_freq` (Hz), `phase_margin` (deg), `unity_gain_freq` (Hz), `loop_gain_minifreq` (dB) |
+
+The margins are HSPICE's listing scalars [CR .MEASURE LSTB] plus the
+frequency the gain margin is read at. The first sweep interval where
+$|W|$ crosses 1 (or where $W$ crosses the negative real axis) brackets
+the crossing, and Illinois regula falsi refines it on the circuit itself,
+one single-lane `solveBatch` per step, to a relative frequency width of
+$10^{-13}$. The margins therefore do not depend on the grid, where
+HSPICE's and a `.measure ... when lstb(db)=0` interpolate between points.
+A crossing the sweep never brackets leaves its pair NaN, with a warning
+on stderr.
+
+Divergences, recorded:
+
+- VACASK's `acstb` is newer than the pinned VACASK binary
+  (unstable-2026 has `dcxf`/`acxf`/`dcinc` but no `acstb`), so the
+  `.lstb` fixtures use analytic oracles.
+- HSPICE's `lstb` output keeps a 180° offset convention we cannot check
+  without a binary; `loop_gain` here is the return ratio $W$, positive at
+  DC for negative feedback, unstable at $W = -1$, the same sign `.stb`
+  publishes. $PM = 180° + \angle W$ at $|W| = 1$, $GM = -20\log_{10}|W|$
+  where $\angle W = -180°$.
+- The y-parameters divide by $C$: a probe whose `+` node is an ideal
+  source (an E output) makes them infinite, as in VACASK. $W$ stays finite.
+- VACASK's `localgnd` (a reference other than ground for $C$, $D$) is not
+  offered.
 
 ## 2. Flow explanation
 
@@ -129,6 +203,10 @@ kernel stb(lanes = freq points):
 **Our implementation**
 
 - `src/analysis/ac/stb.zig`: probe and sweep through `freq.Stream`,
-  publishing (`frequency`, `loop_gain`). Margin extraction was deleted
-  (commit `9761a98`) because nothing in the raw output carries it.
-- Fixtures: `tests/fixtures/stb/`.
+  publishing (`frequency`, `loop_gain`).
+- `src/analysis/ac/lstb.zig`: `.lstb`, two right-hand sides per lane
+  factorization through `freq.Stream`; the margins plot (its own query,
+  fanned out by `frontend/analyses.zig` like `.noise`'s integrated plot)
+  refines each crossing with single-lane `solveBatch` calls.
+- Fixtures: `tests/fixtures/stb/` (`lstb_three_pole`, `lstb_diff_comm`
+  and `lstb_loaded_break` for `.lstb`, analytic).

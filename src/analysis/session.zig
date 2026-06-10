@@ -521,8 +521,11 @@ fn copyValue(allocator: std.mem.Allocator, value: anytype) std.mem.Allocator.Err
 /// running it.
 pub fn schemaOf(allocator: std.mem.Allocator, topology: *const Circuit, deck: *const Deck, query: requests.Query) !core.QuerySchema {
     const columns: usize = switch (query) {
-        .op => deck.probes.len,
+        .op, .dcinc => deck.probes.len,
         .tf => 3,
+        .lstb => |o| if (o.margins) 5 else 8,
+        .dcxf => |o| (if (o.tf_only) @as(usize, 1) else 3) * o.sources.len,
+        .acxf => |o| 1 + (if (o.tf_only) @as(usize, 1) else 3) * o.sources.len,
         .noise => |o| if (o.integrated) 1 else 2,
         .four, .disto => 4,
         .pz, .stb, .pnoise, .hbnoise, .phasenoise => 2,

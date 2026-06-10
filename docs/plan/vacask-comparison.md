@@ -43,11 +43,11 @@ the ngspice-45 source (`src/spicelib/analysis/*.c`) and covers analyses only.
 |---|---|---|---|
 | DC operating point | `op` | `.op`, five-rung ladder (`dc/op.zig`) | yes |
 | DC sweep | `sweep` + `op` over any parameter, option or variable, nested to any depth (`docs/cmd-sweep.md`) | `.dc` over V, I, R, C, L or TEMP, two levels (`dc/dc.zig`) | V, I, R, TEMP |
-| DC small-signal response | `dcinc` | no | no |
-| DC transfer function | `dcxf`: every independent source to one output in one run, plus `zin`/`yin` per source | `.tf`: one source (`dc/tf.zig`) | `.tf` |
+| DC small-signal response | `dcinc` | `.dcinc` (`dc/xf.zig`) | no |
+| DC transfer function | `dcxf`: every independent source to one output in one run, plus `zin`/`yin` per source | `.tf`: one source (`dc/tf.zig`); `.dcxf` every source (`dc/xf.zig`) | `.tf` |
 | AC | `ac` | `.ac`, SIMD frequency lanes (`ac/freq.zig`) | yes |
-| AC transfer function | `acxf`: all sources, `tf`/`zin`/`yin` over frequency | no | no |
-| Stability | `acstb`: current and voltage injection, forward and reverse loop gain, DUT y-parameters (`docs/cmd-analysis-acstb.md`) | `.stb`: single injection on the probe branch, no margins (`ac/stb.zig`) | no |
+| AC transfer function | `acxf`: all sources, `tf`/`zin`/`yin` over frequency | `.acxf` (`ac/xf.zig`) | no |
+| Stability | `acstb`: current and voltage injection, forward and reverse loop gain, DUT y-parameters (`docs/cmd-analysis-acstb.md`) | `.lstb`: `acstb`'s algorithm plus diff/comm modes and margins (`ac/lstb.zig`); `.stb` single injection | no |
 | S-parameters | `acsp`, ports from source and series-resistor pairs | `.sp`, ports from `portnum` (`ac/sp.zig`) | `.sp` |
 | Small-signal noise | `noise`, with per-instance and per-source contributions `n(inst)`, `n(inst,contrib)` and power gain | `.noise`: total output and input-referred only (`ac/noise.zig`) | yes, per device |
 | Pole-zero | no | `.pz` (`eigen/pz.zig`) | yes |

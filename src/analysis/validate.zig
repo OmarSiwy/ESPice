@@ -228,6 +228,20 @@ pub fn validate(query: requests.Query, n: u32) !void {
         .tf, .pz => {
             _ = try elements(&.{ n, n });
         },
+        .lstb => |o| {
+            for (o.probes[0..if (o.mode == .single) 1 else 2]) |p|
+                if (p.p >= n or p.n >= n or p.branch >= n) return error.InvalidQueryOptions;
+            _ = try elements(&.{ o.sweep.count(), n, 4 });
+        },
+        inline .dcxf, .acxf => |o| {
+            if (o.output_neg >= n) return error.InvalidQueryOptions;
+            if (o.output_branch) |br| if (br >= n) return error.InvalidQueryOptions;
+            for (o.sources) |s| {
+                if (s.branch) |br| if (br >= n) return error.InvalidQueryOptions;
+                if (s.nodes[0] >= n or s.nodes[1] >= n) return error.InvalidQueryOptions;
+            }
+            if (query == .acxf) _ = try elements(&.{ @min(o.sources.len, 64), o.sources.len + 1, n, 2 });
+        },
         else => {},
     }
 }

@@ -71,6 +71,68 @@ pub const Stb = struct {
     probe_branch: u32,
 };
 
+/// Loop stability by double injection (`.lstb`, VACASK `acstb`): a current
+/// and a voltage injection at the probe, combined into the loop gain, the
+/// forward and reverse gains and the DUT y-parameters.
+pub const Lstb = struct {
+    tol: Tolerances = .{},
+    sweep: FreqSweep,
+    mode: Mode = .single,
+    /// The 0 V probe sources, HSPICE's orientation: `+` faces the loop's
+    /// input (drv), `−` its output (fbk). `probes[1]` is read in `diff`
+    /// and `comm` modes only.
+    probes: [2]Probe,
+    /// Publish the one-row margins plot instead of the sweep.
+    margins: bool = false,
+
+    /// Node rows and branch row of one probe source.
+    pub const Probe = struct { p: u32, n: u32, branch: u32 };
+    /// Single-ended loop, or the differential (+1/−1) or common-mode
+    /// (+1/+1) loop through a pair of probes.
+    pub const Mode = enum(u8) { single, diff, comm };
+};
+
+/// One independent source of an all-source transfer (`.dcxf`, `.acxf`).
+pub const XfSource = struct {
+    /// Card name, for the result's column labels.
+    name: []const u8,
+    /// V card: its branch row. Null for an I card, whose unit current
+    /// flows from `nodes[0]` through the card into `nodes[1]`.
+    branch: ?u32,
+    nodes: [2]u32 = .{ 0, 0 },
+};
+
+/// DC transfer from every independent source to one output (`.dcxf`).
+pub const Dcxf = struct {
+    tol: Tolerances = .{},
+    /// Output row; unused when `output_branch` is set.
+    output_node: u32,
+    /// `v(a,b)` reference node; GROUND is single-ended.
+    output_neg: u32 = 0,
+    /// `i(Vmeasure)` output: that source's branch current.
+    output_branch: ?u32 = null,
+    sources: []const XfSource,
+    /// Transfer functions only, from one adjoint solve; otherwise one
+    /// forward solve per source also gives its input impedance.
+    tf_only: bool = false,
+};
+
+/// `Dcxf` over a frequency sweep (`.acxf`).
+pub const Acxf = struct {
+    tol: Tolerances = .{},
+    sweep: FreqSweep,
+    output_node: u32,
+    output_neg: u32 = 0,
+    output_branch: ?u32 = null,
+    sources: []const XfSource,
+    tf_only: bool = false,
+};
+
+/// Incremental DC response to every source's AC magnitude (`.dcinc`).
+pub const Dcinc = struct {
+    tol: Tolerances = .{},
+};
+
 pub const Op = struct {
     tol: Tolerances = .{},
     warm_start: bool = false,
@@ -484,6 +546,10 @@ pub const Kind = enum(u8) {
     hbnoise,
     hbxf,
     phasenoise,
+    lstb,
+    acxf,
+    dcxf,
+    dcinc,
 
     /// Runs off a transient operating point (ngspice MODETRANOP) and starts
     /// its devices in `.ic` rather than `.dc` state.
@@ -525,4 +591,8 @@ pub const Query = union(Kind) {
     hbnoise: HbLptv,
     hbxf: HbLptv,
     phasenoise: PhaseNoise,
+    lstb: Lstb,
+    acxf: Acxf,
+    dcxf: Dcxf,
+    dcinc: Dcinc,
 };
