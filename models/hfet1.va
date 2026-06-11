@@ -94,7 +94,8 @@ module hfet1(d, g, s);
 
     // --- gate leakage, gatemod = 1 (thermionic + self-heating) ---
     parameter real astar  = 4.0e4 from [0:inf);   // Richardson constant [A/m^2K^2]
-    parameter real phib   = 0.5 * 1.6021766208e-19;         // barrier height [J] (0.5*q)
+    parameter real phib   = 0.5;                  // barrier height [eV]; ngspice stores
+                                                  // phib*CHARGE in J (hfetmpar.c:188-191)
     parameter real talpha = 1200.0;               // self-heating coefficient [K/V^2]
     parameter real mt1    = 3.5   from (0:inf);
     parameter real mt2    = 9.9   from (0:inf);
@@ -118,9 +119,12 @@ module hfet1(d, g, s);
     parameter real kvto    = 0.0;
     parameter real kmu     = 0.0;
     parameter real klambda = 0.0;
-    parameter real tf      = 300.15 from (0:inf);  // FGDS/DELF reference [K];
-                                                   // FGDS/DELF are dead in
-                                                   // hfetload.c, so tf is inert
+    parameter real tf      = 27.0;                 // FGDS/DELF reference [degC], read
+                                                   // as ngspice reads it (hfetmpar.c:
+                                                   // 180-183; its default is the
+                                                   // circuit temperature). FGDS/DELF
+                                                   // are dead in hfetload.c, so tf
+                                                   // is inert
     parameter real gmin = 1e-12 from [0:inf);      // only inside the gate diodes
 
     // ---- diode(): ngspice hfetload.c:772-798, the exact large-argument
@@ -256,7 +260,7 @@ module hfet1(d, g, s);
         ggrwl  = ggr   * area_half;
         iso    = astar * area_half;
         csat_th = iso * tempk * tempk
-                * exp(-phib / (1.38064852e-23 * tempk));
+                * exp(-phib * 1.6021766208e-19 / (1.38064852e-23 * tempk));
 
         // ==== §3 bias ====================================================
         // §1.5 limiting: fetlim on both gate branches (hfetload.c:268). The
@@ -388,7 +392,7 @@ module hfet1(d, g, s);
             dd     = pow(1.0 + cc, 1.0 / mt1);
             td     = tempk + talpha * vdse * vdse / dd;
             vte_td = 1.38064852e-23 / 1.6021766208e-19 * td * m2d;
-            hh2    = iso * td * td * exp(-phib / (1.38064852e-23 * td))
+            hh2    = iso * td * td * exp(-phib * 1.6021766208e-19 / (1.38064852e-23 * td))
                    * exp(min((vx - vdse) / vte_td, 80.0));
             igd    = hh2 - csat_th;
 
