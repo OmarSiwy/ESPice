@@ -6,7 +6,7 @@
 //!
 //! The third-order kernel is never stored. d3 is O(n^4) and its only use is
 //! the contraction d3(V1,V1,V1), so that is taken as a directional second
-//! difference of the Jacobian along the two real directions V1 spans: four
+//! difference of the Jacobian along the two real directions V1 spans: eight
 //! evals per frequency point, no tensor (see `cubicForms`).
 //!
 //! ponytail: d2 kept as its nonzero terms (at most nnz(G) per unknown) and
@@ -234,7 +234,7 @@ pub fn sweep(
         // F''(V1,V2) + ⅙·F'''(V1,V1,V1): the 2f1·f1 beat through the
         // quadratic kernel plus the direct cube.
         if (want_h3) {
-            const d3v = cubicForms(ckt, x_op, v1_re, v1_im, eps, g_dense, g_pert, g_minus, x_pert, cubic);
+            const d3v = cubicForms(ckt, x_op, v1_re, v1_im, cubic_step, g_dense, g_pert, g_minus, x_pert, cubic);
             for (0..n) |row| {
                 var m_re: f64 = 0;
                 var m_im: f64 = 0;
@@ -291,6 +291,17 @@ pub fn sweep(
     if (want_h3) ckt.eval(x_op, 0);
 }
 
+/// Step of the third-order kernel's second difference, along a unit
+/// direction (volts, for the node rows that dominate V1). It is not
+/// `fd_eps`: a second difference loses ε·|G|/h² to roundoff, and V1 is often
+/// dominated by a nearly linear output node, so the controlling voltage of
+/// the nonlinearity moves only a fraction of h. At h = 1e-6 that left the
+/// BJT common-emitter HD3 as roundoff, moving 1.5% for a 1e-5 K temperature
+/// change (disto/bench_disto_bjt_ce). The fourth-order stencil keeps the
+/// truncation at (h/Vt)^4/90, 2.4e-8 relative for an exponential at 1e-3 V;
+/// that deck's HD3 is flat to four digits for h from 1e-4 to 1e-2.
+const cubic_step: f64 = 1e-3;
+
 /// The harmonic plots report the sinusoid amplitude, twice the one-sided
 /// phasor the Volterra recursion solves for (DkerProc, dkerproc.c:43-52).
 /// The summary plot does not apply it.
@@ -300,10 +311,11 @@ const HARMONIC_SCALE: f64 = 2.0;
 /// n-vector aliasing `cubic`.
 ///
 /// It is a directional second difference of the analytic Jacobian: for a
-/// unit direction u,
-///   S(u)[row,a] = (G(x+h·u) − 2G(x) + G(x−h·u))[row,a] / h²  =  d3[row,a,·,·](u,u)
+/// unit direction u, with G(k) = G(x + k·h·u),
+///   S(u)[row,a] = (16(G(1) + G(−1)) − (G(2) + G(−2)) − 30G(0))[row,a] / 12h²
+///               = d3[row,a,·,·](u,u) + O(h⁴)
 /// and the cubic form T(w,u,u)[row] = Σ_a w[a]·S(u)[row,a] by symmetry of d3.
-/// With V1 = p + jq that is four evals, S(p̂) and S(q̂), and
+/// With V1 = p + jq that is eight evals, S(p̂) and S(q̂), and
 ///   Re = T(p,p,p) − 3T(p,q,q),  Im = 3T(p,p,q) − T(q,q,q).
 /// `g_work`/`g_minus` are n·n scratch, `x_work` is n scratch, `cubic` is 4n.
 fn cubicForms(
@@ -358,7 +370,8 @@ fn norm(v: []const f64) f64 {
     return @sqrt(acc);
 }
 
-/// g_out := (G(x_op + h·scale·u) − 2·G(x_op) + G(x_op − h·scale·u)) / h².
+/// g_out := the second derivative of G along `scale·u` at x_op, by the
+/// five-point stencil in `cubicForms`.
 fn secondDirDeriv(
     ckt: *root.Circuit,
     x_op: []const f64,
@@ -367,23 +380,23 @@ fn secondDirDeriv(
     h: f64,
     g0: []const f64,
     g_out: []f64,
-    g_minus: []f64,
+    g_tap: []f64,
     x_work: []f64,
 ) void {
     const n = u.len;
-    const step = h * scale;
-    simdCopy(x_work, x_op[0..n]);
-    for (0..n) |i| x_work[i] += step * u[i];
-    ckt.eval(x_work, 0);
-    ckt.denseG(g_out);
-
-    simdCopy(x_work, x_op[0..n]);
-    for (0..n) |i| x_work[i] -= step * u[i];
-    ckt.eval(x_work, 0);
-    ckt.denseG(g_minus);
-
-    const inv_h2 = 1.0 / (h * h);
-    for (g_out, g0, g_minus) |*out, plane, minus| out.* = (out.* - 2.0 * plane + minus) * inv_h2;
+    // (k, weight) of the stencil's off-centre points.
+    const taps = [_]struct { f64, f64 }{ .{ 1, 16 }, .{ -1, 16 }, .{ 2, -1 }, .{ -2, -1 } };
+    for (g_out, g0) |*out, plane| out.* = -30.0 * plane;
+    for (taps) |tap| {
+        const step = tap[0] * h * scale;
+        simdCopy(x_work, x_op[0..n]);
+        for (0..n) |i| x_work[i] += step * u[i];
+        ckt.eval(x_work, 0);
+        ckt.denseG(g_tap);
+        for (g_out, g_tap) |*out, g| out.* += tap[1] * g;
+    }
+    const inv = 1.0 / (12.0 * h * h);
+    for (g_out) |*out| out.* *= inv;
 }
 
 /// dst[row] := (Σ_a s[row·n + a] · w[a]) · scale.

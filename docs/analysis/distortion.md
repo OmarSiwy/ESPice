@@ -84,12 +84,29 @@ only the *extra* order is FD, so the truncation error is one order better
 conditioned than FD-ing the residual twice.
 
 The third-order kernel is never stored: $F'''$ is $O(n^4)$ and its only use
-is the contraction $F'''[V_1, V_1, V_1]$. For a unit direction $u$,
-$S(u) = (G(x + hu) - 2G(x) + G(x - hu))/h^2 = F'''(\cdot, \cdot, u, u)$,
-and the cubic form follows by symmetry. With $V_1 = p + jq$ that is four
+is the contraction $F'''[V_1, V_1, V_1]$. For a unit direction $u$ and
+$G_k = G(x + khu)$,
+$S(u) = (16(G_1 + G_{-1}) - (G_2 + G_{-2}) - 30G_0)/12h^2 = F'''(\cdot, \cdot, u, u) + O(h^4)$,
+and the cubic form follows by symmetry. With $V_1 = p + jq$ that is eight
 evaluations per frequency point, $S(\hat p)$ and $S(\hat q)$
 (`cubicForms`). Implemented scope: second and third harmonics for a single
 tone. The two-tone intermodulation buckets are not implemented.
+
+The step is its own constant, $h = 10^{-3}$ (`cubic_step`), not `fd_eps`.
+A second difference loses $\varepsilon|G|/h^2$ to roundoff, and $V_1$ is
+usually dominated by a nearly linear output node, so the nonlinearity's
+controlling voltage moves only a small fraction of $h$. With the old
+three-point stencil at $h = 10^{-6}$, `disto/bench_disto_bjt_ce`'s HD3 was
+roundoff: its worst i(vcc) err/tol read 11.5, 0.16, 0.57, 9.05 and 1.03 at
+26.99998, 26.99999, 27, 27.00001 and 27.00002 °C. At $h \ge 10^{-4}$ it
+reads 0.094 at all five, and the five-point stencil is flat to four digits
+from $h = 10^{-4}$ to $10^{-2}$ (the three-point one drifts to 0.083 at
+$10^{-2}$ from truncation). The fourth-order truncation is
+$(h/V_t)^4/90$, $2.4\times10^{-8}$ relative for a bare exponential at
+$10^{-3}$ V. ngspice gets exact coefficients from each device's DISTO
+Taylor sections; an exact $F'''$ here would need a second-order AD pass
+through the device ABI, which this step makes unnecessary at the corpus's
+$10^{-3}$ tolerances.
 
 ## 2. Flow explanation
 
