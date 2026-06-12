@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "A Verilog flip-flop clocked through the A2D threshold band: hysteresis rejects a glitch that stays inside the band, and each real edge toggles q once.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "vth = 2.5 V, vhys = 1 V: clk rises through 3 V at 6 ns and 28 ns; the 14 ns dip to 2.2 V stays above 2 V. q toggles at 6 ns and 28 ns with 1 ns linear ramps to 5*1000/1001 V. Mid-ramp samples allow 5 mV for the ramp start, which lags the crossing by at most ttol = 0.5 ps (2.5 mV). Without the band q would fall at 14.43 ns and read 0 at 16 ns and 24 ns."
+  },
+  "netlist_sha256": "a49fab0cd6891b9dfe766ff212375769dfcec885c475af50e614aa84ef01e9b6",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "axis": {
+          "name": "time",
+          "values": [
+            5e-09,
+            6.5e-09,
+            1e-08,
+            1.6e-08,
+            2.4e-08,
+            2.85e-08,
+            3e-08,
+            4.4e-08
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "columns": {
+          "v(q)": {
+            "unit": "V",
+            "rtol": 0.0001,
+            "atol": 0.005,
+            "values": [
+              0,
+              2.4975024975024973,
+              4.995004995004995,
+              4.995004995004995,
+              4.995004995004995,
+              2.4975024975024973,
+              0,
+              0
+            ]
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  }
+}

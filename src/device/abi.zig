@@ -108,9 +108,8 @@ pub const Batch = struct {
     hooks: *const Hooks,
     /// The type runs a digital engine (a Verilog `.v` module) whose time
     /// only moves forward, so analyses that rewind time refuse it
-    /// (`Circuit.refuseDigital`).
-    // ponytail: nothing sets it while the loader rejects `.v`; the loader
-    // sets it from the source extension when it accepts one.
+    /// (`Circuit.refuseDigital`). The frontend copies it from
+    /// `Library.digital` at the freeze.
     digital: bool = false,
 };
 

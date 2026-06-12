@@ -304,6 +304,7 @@ pub const Builder = struct {
 
         var ckt = try Circuit.freeze(gpa, self.n, intern_bytes, intern_offs, self.protos.items, self.proto_types.items, bbd.info);
         ckt.needs_tran_op = self.needs_tran_op;
+        for (ckt.batches, ckt.batch_types) |*b, t| b.digital = self.lib.digital.items[@intFromEnum(t)];
 
         self.deinitStorage(); // Circuit.freeze consumed the protos
 

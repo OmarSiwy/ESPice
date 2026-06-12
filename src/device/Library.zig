@@ -16,6 +16,9 @@ gpa: std.mem.Allocator,
 names: std.ArrayList([]const u8) = .empty,
 /// Vtables by id, parallel to `names`.
 vtables: std.ArrayList(*const abi.DeviceVtable) = .empty,
+/// Whether each type runs a digital engine (a `.v` design), parallel to
+/// `names`; it becomes `Batch.digital` at the freeze.
+digital: std.ArrayList(bool) = .empty,
 
 /// Catalog entries with an evaluator, in catalog order.
 const builtins = blk: {
@@ -32,8 +35,10 @@ pub fn init(gpa: std.mem.Allocator) !Library {
     var lib: Library = .{ .gpa = gpa };
     errdefer lib.names.deinit(gpa);
     errdefer lib.vtables.deinit(gpa);
+    errdefer lib.digital.deinit(gpa);
     try lib.names.ensureTotalCapacity(gpa, builtin_count);
     try lib.vtables.ensureTotalCapacity(gpa, builtin_count);
+    try lib.digital.appendNTimes(gpa, false, builtin_count);
     inline for (builtins) |name| {
         lib.names.appendAssumeCapacity(name);
         lib.vtables.appendAssumeCapacity(catalog.vtable(name));
@@ -45,6 +50,7 @@ pub fn deinit(self: *Library) void {
     for (self.names.items[builtin_count..]) |name| self.gpa.free(name);
     self.names.deinit(self.gpa);
     self.vtables.deinit(self.gpa);
+    self.digital.deinit(self.gpa);
     self.* = undefined;
 }
 
@@ -71,16 +77,19 @@ pub fn find(self: *const Library, module: []const u8) ?DeviceType {
 }
 
 /// Adds a device type under `module` (copied and lowercased) and returns its
-/// id. A name already loaded keeps its first vtable and id. Fails with
-/// `TooManyDeviceTypes` when the id space is full.
-pub fn register(self: *Library, module: []const u8, vt: *const abi.DeviceVtable) !DeviceType {
+/// id; `is_digital` marks a `.v` design (`digital`). A name already loaded
+/// keeps its first vtable, flag and id. Fails with `TooManyDeviceTypes` when
+/// the id space is full.
+pub fn register(self: *Library, module: []const u8, vt: *const abi.DeviceVtable, is_digital: bool) !DeviceType {
     if (self.find(module)) |t| return t;
     if (self.names.items.len >= @intFromEnum(DeviceType.unset)) return error.TooManyDeviceTypes;
     const owned = try std.ascii.allocLowerString(self.gpa, module);
     errdefer self.gpa.free(owned);
     try self.vtables.ensureUnusedCapacity(self.gpa, 1);
+    try self.digital.ensureUnusedCapacity(self.gpa, 1);
     try self.names.append(self.gpa, owned);
     self.vtables.appendAssumeCapacity(vt);
+    self.digital.appendAssumeCapacity(is_digital);
     return @enumFromInt(self.names.items.len - 1);
 }
 

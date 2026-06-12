@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "A combinational Verilog block settles in the operating point: the device is born with x outputs and drives s = 2'b10 after its static pass reads the inputs.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "vdd = 3.3 V, vth = vdd/2: a = b = 1, cin = 0, so s = 2. s[1] drives 3.3 V through rout = 1 ohm into 10 kohm (3.3*10000/10001 V), s[0] drives 0 V."
+  },
+  "netlist_sha256": "da2de2a796008969b073d31b3e1245ccf3062d05d331387de111201f28bbbd5d",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "row_count": 1,
+        "columns": {
+          "v(s1)": {
+            "values": [
+              3.2996700329967004
+            ],
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09
+          },
+          "v(s0)": {
+            "values": [
+              0.0
+            ],
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  }
+}

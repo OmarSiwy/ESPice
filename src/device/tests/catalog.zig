@@ -13,7 +13,7 @@ test "parallel model preparation propagates errors" {
     try std.testing.expectError(error.UnsupportedHdlExtension, device.loader.ensureAllLoaded(
         &lib,
         std.testing.io,
-        &.{ "first.v", "second.sv" },
+        &.{ "first.sv", "second.vhd" },
         .{ .work_dir = "", .contract = "", .dyn = "", .gompute = "", .device_abi = "", .core = "" },
     ));
 }
