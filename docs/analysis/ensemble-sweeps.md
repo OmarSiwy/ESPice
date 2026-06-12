@@ -75,6 +75,9 @@ The caller supplies `apply(k)` (install lane $k$'s parameters, called in lane
 order) and `restore()`; the driver recomputes after each and restores the
 nominals on success and on error. Lanes run serially: this is the
 "structural lanes" axis of the lane-axis doctrine in AGENTS.md, not SIMD.
+With `warm`, a lane starts from the previous lane's solution when that one
+converged; the deck-variant ensembles (`.dc DATA=`, `.dc MONTE=`,
+[variants.md](variants.md)) use it, `.mc` and `.temp` stay cold.
 
 **Monte Carlo** (`src/analysis/sweep/mc.zig`): collect every device's
 nonzero primary parameter (`collectParams`); lane $k$ sets each to

@@ -257,6 +257,14 @@ pub fn validate(query: requests.Query, n: u32) !void {
 /// card the deck does not have.
 pub fn validateDeck(query: requests.Query, n: u32, deck: *const Deck) !void {
     try validate(query, n);
+    const variant = switch (query) {
+        inline else => |o| o.tol.variant,
+    };
+    if (variant) |v| if (v >= deck.variants.count()) return error.InvalidQueryOptions;
+    if (query == .mc) {
+        const r = query.mc.variants;
+        if (@as(u64, r.first) + r.count > deck.variants.count()) return error.InvalidQueryOptions;
+    }
     if (query == .dc) {
         try dcTargetExists(query.dc.target, deck);
         if (query.dc.target2) |t2| try dcTargetExists(t2, deck);

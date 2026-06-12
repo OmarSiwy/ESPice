@@ -9,6 +9,7 @@ const deck = @import("deck.zig");
 pub const Deck = deck.Deck;
 pub const Ic = deck.Ic;
 pub const AcOverride = deck.AcOverride;
+pub const Variants = deck.Variants;
 pub const QueryBindings = deck.QueryBindings;
 pub const Measure = deck.Measure;
 pub const MeasureClause = deck.MeasureClause;

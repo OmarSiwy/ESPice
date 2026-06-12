@@ -267,6 +267,8 @@ pub const Tolerances = struct {
     /// `.options temp` for this query alone, in degC (one entry of an HSPICE
     /// `.temp` list); null runs at the deck temperature.
     temp_c: ?f64 = null,
+    /// Row of `Deck.variants` this query runs; null runs the nominal circuit.
+    variant: ?u32 = null,
 };
 
 test "bulk buffers preserve bits, common prefixes and exact aliases" {

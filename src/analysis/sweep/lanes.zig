@@ -10,12 +10,15 @@ const converger = @import("solver").converger;
 /// `setup` points at the caller's installer: `apply(k)` writes lane k's
 /// params and is called in lane order, `restore()` puts the nominals back.
 /// The driver recomputes after each, and restores on success and on error.
+/// With `warm`, a lane starts from the previous lane's solution when that
+/// one converged (neighbouring sweep points), else cold.
 pub fn solveLanes(
     ckt: *root.Circuit,
     setup: anytype,
     x_lanes: []f64,
     results: []converger.Result,
     opts: converger.Options,
+    warm: bool,
 ) !void {
     errdefer {
         setup.restore();
@@ -29,8 +32,12 @@ pub fn solveLanes(
         setup.apply(k);
         try ckt.recompute();
         const xl = x_lanes[k * n ..][0..n];
-        root.zeroSimd(xl);
-        ckt.seedJunctions(xl);
+        if (warm and k != 0 and results[k - 1].converged) {
+            @memcpy(xl, x_lanes[(k - 1) * n ..][0..n]);
+        } else {
+            root.zeroSimd(xl);
+            ckt.seedJunctions(xl);
+        }
         results[k] = converger.run(ckt, ws, xl, 0, opts, root.EvalHook{}) catch |err| switch (err) {
             error.QueryCancelled => return err,
             else => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 },

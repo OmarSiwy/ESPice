@@ -41,6 +41,8 @@ pub const RunCtx = struct {
     /// one solve per frequency against this drive. Empty means no AC source,
     /// which gives a zero response, as in ngspice.
     ac_drive: []const f64 = &.{},
+    /// The deck's circuit variants, for queries that sweep them as lanes.
+    variants: @import("core").Variants = .{},
     /// Results arena: everything in the returned Result lives here.
     allocator: std.mem.Allocator,
     /// Reclaimable work storage.
