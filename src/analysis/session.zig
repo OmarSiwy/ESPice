@@ -528,7 +528,7 @@ pub fn schemaOf(allocator: std.mem.Allocator, topology: *const Circuit, deck: *c
         .acxf => |o| 1 + (if (o.tf_only) @as(usize, 1) else 3) * o.sources.len,
         .noise => |o| if (o.integrated) 1 else 2,
         .four, .disto => 4,
-        .pz, .stb, .pnoise, .hbnoise, .phasenoise => 2,
+        .pz, .stb, .pnoise, .hbnoise, .phasenoise, .fft => 2,
         .pac => |o| 2 + 2 * @as(usize, o.n_harmonics),
         .hbac => |o| 2 + 2 * @as(usize, o.n_sidebands),
         .pxf => |o| 1 + (1 + 2 * @as(usize, o.n_harmonics)) * topology.n,

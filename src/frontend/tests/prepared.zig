@@ -51,6 +51,8 @@ test "analysis directives dispatch every implemented capability and reject malfo
     const a = arena.allocator();
     const sources: core.QueryBindings = .{ .v_names = &.{"vin"}, .i_names = &.{}, .v_branches = &.{2}, .v_pos = &.{1}, .v_neg = &.{0}, .i_pos = &.{}, .i_neg = &.{}, .v_distof1 = &.{.{ 0, 0 }}, .ports = &.{} };
     const cards: []const requests.CardRef = &.{.{ .type = device.Library.builtin("vsource"), .index = 0, .name = "vin" }};
+    // `.fft` reads the deck's `.tran`.
+    const ctx: analyses.CardContext = .{ .arena = a, .tran = .{ .t_stop = 10e-6, .dt_init = 1e-6 } };
     const directives = [_][]const u8{
         ".ac dec 2 10 100",                     ".dc vin 0 1 0.1",       ".dcmatch v(out)",
         ".disto dec 2 10 100",                  ".envelope 1m 5m",       ".four 1k v(out)",
@@ -64,11 +66,12 @@ test "analysis directives dispatch every implemented capability and reject malfo
         ".hbxf v(out) dec 2 10 100 1k",         ".phasenoise v(out) dec 2 10 100 1meg",
         ".lstb mode=single vsource=vin dec 2 10 100", ".acxf v(out) dec 2 10 100",
         ".dcxf v(out) tf",                      ".dcinc",
+        ".fft v(out)",
     };
     try std.testing.expectEqual(std.meta.fields(requests.Kind).len, directives.len);
-    for (directives, 0..) |directive, index| {
-        const id: requests.Kind = @enumFromInt(index);
-        const job = (try analyses.buildJob(try card(a, directive), sources, cards)).?;
+    inline for (directives, std.meta.fields(requests.Kind)) |directive, field| {
+        const id = @field(requests.Kind, field.name);
+        const job = (try analyses.buildJob(try card(a, directive), sources, cards, ctx)).?;
         try std.testing.expectEqual(id, std.meta.activeTag(job));
         if (job == .pss) try std.testing.expectEqual(@as(f64, 1e-3), job.pss.period);
     }
@@ -82,7 +85,7 @@ test "analysis directives dispatch every implemented capability and reject malfo
         ".dcxf v(out) zin",              ".acxf v(out) dec 2 10 100 tf extra",
     };
     for (malformed) |directive| {
-        if (analyses.buildJob(try card(a, directive), sources, cards)) |_| {
+        if (analyses.buildJob(try card(a, directive), sources, cards, ctx)) |_| {
             std.debug.print("accepted: {s}\n", .{directive});
             return error.AcceptedInvalidAnalysis;
         } else |_| {}
@@ -90,9 +93,9 @@ test "analysis directives dispatch every implemented capability and reject malfo
     // HB and QPSS drive from whatever sources the deck stamps, current ones
     // included, so a deck without a V card is valid.
     const no_v: core.QueryBindings = .{ .v_names = &.{}, .i_names = &.{}, .v_branches = &.{}, .v_pos = &.{}, .v_neg = &.{}, .i_pos = &.{}, .i_neg = &.{}, .v_distof1 = &.{}, .ports = &.{} };
-    for ([_][]const u8{ ".hb 1k", ".qpss 1k 1414 1 1" }) |directive| _ = try analyses.buildJob(try card(a, directive), no_v, cards);
+    for ([_][]const u8{ ".hb 1k", ".qpss 1k 1414 1 1" }) |directive| _ = try analyses.buildJob(try card(a, directive), no_v, cards, ctx);
     // A single `.temp` is deck configuration, not a query.
-    try std.testing.expectEqual(null, try analyses.buildJob(try card(a, ".temp 50"), sources, cards));
+    try std.testing.expectEqual(null, try analyses.buildJob(try card(a, ".temp 50"), sources, cards, ctx));
 }
 
 test "deck temperature and tolerances reach statistical and noise jobs" {

@@ -1,0 +1,242 @@
+{
+  "schema_version": 1,
+  "analysis": "noise",
+  "purpose": "HSPICE .noise ov src inter takes the .ac sweep and publishes the per-device contributions.",
+  "oracle": {
+    "kind": "ngspice-44.2",
+    "command": "ngspice -b -r reference.raw twin.sp",
+    "derivation": "ngspice on the same circuit with `.noise v(out) vin dec 2 1k 100k 1`; the zero _1overf generators ESPice does not declare are left out."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Noise Spectral Density Curves",
+        "match": "exact",
+        "row_count": 5,
+        "columns": {
+          "onoise_d1_rs": {
+            "rtol": 1e-06,
+            "atol": 1e-20,
+            "values": [
+              3.386892657030519e-10,
+              3.3868830910085795e-10,
+              3.386787435247004e-10,
+              3.385831323182356e-10,
+              3.376314526116523e-10
+            ]
+          },
+          "onoise_d1_id": {
+            "rtol": 1e-06,
+            "atol": 1e-20,
+            "values": [
+              9.011045142185615e-10,
+              9.011019691170694e-10,
+              9.01076519288186e-10,
+              9.008221395410867e-10,
+              8.982901346429897e-10
+            ]
+          },
+          "onoise_d1": {
+            "rtol": 1e-06,
+            "atol": 1e-20,
+            "values": [
+              9.626524628585033e-10,
+              9.62649743919489e-10,
+              9.626225557963944e-10,
+              9.623508012039107e-10,
+              9.596458533175532e-10
+            ]
+          },
+          "onoise_r1_thermal": {
+            "rtol": 1e-06,
+            "atol": 1e-20,
+            "values": [
+              5.133581960649996e-10,
+              5.133567461236329e-10,
+              5.133422473856513e-10,
+              5.131973275389233e-10,
+              5.117548472867386e-10
+            ]
+          },
+          "onoise_r1": {
+            "rtol": 1e-06,
+            "atol": 1e-20,
+            "values": [
+              5.133581960649996e-10,
+              5.133567461236329e-10,
+              5.133422473856513e-10,
+              5.131973275389233e-10,
+              5.117548472867386e-10
+            ]
+          },
+          "onoise_r2_thermal": {
+            "rtol": 1e-06,
+            "atol": 1e-20,
+            "values": [
+              2.9638749268882816e-10,
+              2.9638665556478986e-10,
+              2.963782847145132e-10,
+              2.962946152019939e-10,
+              2.9546179884009435e-10
+            ]
+          },
+          "onoise_r2": {
+            "rtol": 1e-06,
+            "atol": 1e-20,
+            "values": [
+              2.9638749268882816e-10,
+              2.9638665556478986e-10,
+              2.963782847145132e-10,
+              2.962946152019939e-10,
+              2.9546179884009435e-10
+            ]
+          },
+          "onoise_spectrum": {
+            "rtol": 1e-06,
+            "atol": 1e-20,
+            "values": [
+              1.1305228646679478e-09,
+              1.1305196715916904e-09,
+              1.1304877423171163e-09,
+              1.1301685982934577e-09,
+              1.1269919529814187e-09
+            ]
+          },
+          "inoise_spectrum": {
+            "rtol": 1e-06,
+            "atol": 1e-20,
+            "values": [
+              8.966017568093435e-09,
+              8.966017568093433e-09,
+              8.966017568093437e-09,
+              8.966017568093433e-09,
+              8.966017568093437e-09
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            1000.0,
+            3162.2776601683795,
+            10000.000000000002,
+            31622.7766016838,
+            100000.00000000003
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        }
+      },
+      {
+        "name": "Integrated Noise",
+        "match": "exact",
+        "row_count": 1,
+        "columns": {
+          "v(onoise_total_d1_rs)": {
+            "rtol": 1e-06,
+            "atol": 1e-20,
+            "values": [
+              1.0641544002413643e-07
+            ]
+          },
+          "v(inoise_total_d1_rs)": {
+            "rtol": 1e-06,
+            "atol": 1e-20,
+            "values": [
+              8.458506146484973e-07
+            ]
+          },
+          "v(onoise_total_d1_id)": {
+            "rtol": 1e-06,
+            "atol": 1e-20,
+            "values": [
+              2.831251034462288e-07
+            ]
+          },
+          "v(inoise_total_d1_id)": {
+            "rtol": 1e-06,
+            "atol": 1e-20,
+            "values": [
+              2.2504398113478127e-06
+            ]
+          },
+          "v(onoise_total_d1)": {
+            "rtol": 1e-06,
+            "atol": 1e-20,
+            "values": [
+              3.024633367483873e-07
+            ]
+          },
+          "v(inoise_total_d1)": {
+            "rtol": 1e-06,
+            "atol": 1e-20,
+            "values": [
+              2.4041511197926844e-06
+            ]
+          },
+          "v(onoise_total_r1_thermal)": {
+            "rtol": 1e-06,
+            "atol": 1e-20,
+            "values": [
+              1.6129604288123594e-07
+            ]
+          },
+          "v(inoise_total_r1_thermal)": {
+            "rtol": 1e-06,
+            "atol": 1e-20,
+            "values": [
+              1.2820729490055125e-06
+            ]
+          },
+          "v(onoise_total_r1)": {
+            "rtol": 1e-06,
+            "atol": 1e-20,
+            "values": [
+              1.6129604288123594e-07
+            ]
+          },
+          "v(inoise_total_r1)": {
+            "rtol": 1e-06,
+            "atol": 1e-20,
+            "values": [
+              1.2820729490055125e-06
+            ]
+          },
+          "v(onoise_total_r2)": {
+            "rtol": 1e-06,
+            "atol": 1e-20,
+            "values": [
+              9.312431377670309e-08
+            ]
+          },
+          "v(inoise_total_r2)": {
+            "rtol": 1e-06,
+            "atol": 1e-20,
+            "values": [
+              7.402051622290708e-07
+            ]
+          },
+          "v(onoise_total)": {
+            "rtol": 1e-06,
+            "atol": 1e-20,
+            "values": [
+              3.552078565326163e-07
+            ]
+          },
+          "v(inoise_total)": {
+            "rtol": 1e-06,
+            "atol": 1e-20,
+            "values": [
+              2.8233946475054945e-06
+            ]
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "4f3a9d7ae3cdf0eaf83ec3f32e21fcbb0258ee61a1455a54c1b26e2c9eb27286"
+}

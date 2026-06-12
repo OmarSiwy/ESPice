@@ -416,7 +416,9 @@ fn validateOracle(oracle: Oracle) !void {
 /// Plot names match case-insensitively; espice appends the THD to Fourier titles.
 fn plotName(actual: []const u8, expected: []const u8) bool {
     if (equal(actual, expected)) return true;
-    return equal(expected, "Fourier Analysis") and std.mem.startsWith(u8, actual, "Fourier Analysis (THD = ");
+    // `.four` ends its name with the THD: "Fourier Analysis[ v(out)] (THD = ...)".
+    return std.mem.startsWith(u8, expected, "Fourier Analysis") and std.mem.startsWith(u8, actual, expected) and
+        std.mem.startsWith(u8, actual[expected.len..], " (THD = ");
 }
 
 fn findPlot(plots: []const Plot, name: []const u8) !Plot {

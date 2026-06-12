@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "analysis": "pz",
+  "purpose": "HSPICE .pz v(out) vin drives the named source and finds poles and zeros.",
+  "oracle": {
+    "kind": "ngspice-44.2",
+    "command": "ngspice -b -r reference.raw twin.sp",
+    "derivation": "ngspice on the same circuit with `.pz in 0 out 0 vol pz`."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "plots": [],
+    "checks": [
+      {
+        "kind": "pole_zero_sets",
+        "plot": "Pole-Zero Analysis",
+        "poles": [
+          [
+            -1893149.8239234455,
+            0.0
+          ],
+          [
+            -440183.5094098878,
+            0.0
+          ]
+        ],
+        "zeros": [
+          [
+            -750000.0,
+            2106537.4432940898
+          ],
+          [
+            -750000.0,
+            -2106537.4432940898
+          ]
+        ],
+        "rtol": 1e-06,
+        "atol": 1e-06,
+        "multiplicity": true
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "15b16f7113260db7fe76074ec905a3b71ff7c54b170956d05b9fa5409419d28d"
+}

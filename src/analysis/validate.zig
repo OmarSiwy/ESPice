@@ -114,8 +114,8 @@ pub fn validate(query: requests.Query, n: u32) !void {
     }
     switch (query) {
         .dc => |o| {
-            const inner = try sweep(o.start, o.stop, o.step);
-            const outer = if (o.hasOuter()) try sweep(o.start2, o.stop2, o.step2) else 1;
+            const inner = if (o.points.len > 0) o.points.len else try sweep(o.start, o.stop, o.step);
+            const outer = if (!o.hasOuter()) 1 else if (o.points2.len > 0) o.points2.len else try sweep(o.start2, o.stop2, o.step2);
             _ = try elements(&.{ inner, outer, @as(usize, n) + 1 });
         },
         .temp => |o| {
@@ -241,6 +241,13 @@ pub fn validate(query: requests.Query, n: u32) !void {
                 if (s.nodes[0] >= n or s.nodes[1] >= n) return error.InvalidQueryOptions;
             }
             if (query == .acxf) _ = try elements(&.{ @min(o.sources.len, 64), o.sources.len + 1, n, 2 });
+        },
+        // HSPICE's bounds [CR .FFT]: 4 <= NP <= 2^27, a window inside the run.
+        .fft => |o| {
+            if (!std.math.isPowerOfTwo(o.np) or o.np < 4 or o.np > 1 << 27) return error.InvalidQueryOptions;
+            if (!(o.start >= 0) or !(o.stop > o.start) or o.stop > o.tran.t_stop) return error.InvalidQueryOptions;
+            if (o.out_pos >= n or o.out_neg >= n) return error.InvalidQueryOptions;
+            try validate(.{ .tran = o.tran }, n);
         },
         else => {},
     }

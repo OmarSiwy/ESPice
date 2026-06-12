@@ -584,6 +584,19 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     defer wf.deinit();
     const sim = try simulate(ctx.circuit, x, ctx.probes, &wf, opts, scratch);
     if (!sim.completed) return error.TimestepTooSmall;
+    // HSPICE `.op <time>`: the state at t_stop, laid out as `.op` lays it out.
+    if (opts.snapshot) {
+        const names = try root.probeNames(ctx, null);
+        const data = try a.alloc(f64, names.len);
+        for (ctx.probes, data) |node, *out| out.* = x[node];
+        return .{
+            .plotname = try std.fmt.allocPrint(a, "Operating Point (time={e})", .{opts.t_stop}),
+            .varnames = names,
+            .is_complex = false,
+            .npoints = 1,
+            .data = data,
+        };
+    }
 
     const names = try root.probeNames(ctx, "time");
     errdefer {

@@ -155,6 +155,52 @@ the `.tran` card gives no tmax, and `gmindc`, `absv`, `relv`, `absi` and
 Divergence: ESPice's `.tran` segments share the finest segment's step cap;
 HSPICE's `RUNLVL`, `ACCURATE` and `SEARCH` are not read.
 
+### HSPICE analysis forms
+
+These forms are read in every dialect, because none of them collides
+with an ngspice spelling. A form that borrows from another card (the
+first `.ac`, `.tran` or `.sn`) fails with `MissingAnalysisCard` when the
+deck has none. `analyses.zig CardContext` holds what they borrow.
+
+| Card | Runs as | Divergence |
+|---|---|---|
+| `.noise v(out) src [inter]` | `.noise` over the `.ac` sweep | `src` must be a V card |
+| `.noise ... dec N f1 f2 pts` (ngspice), nonzero `pts` or `inter` | adds the contribution columns below | published at every frequency, not every `pts`-th |
+| `.dc var LIN\|DEC\|OCT np start stop`, `POI np v...`, `START= STOP= STEP=` | an explicit point list per level | `SWEEP`, `DATA=` and `MONTE=` are the variant runner's |
+| `.ac POI np f1 ... fn` | the listed frequencies | they must be positive and ascending |
+| `.pz v(a[,b]) src` | `.pz` driven at the source's own nodes, `vol` for a V card, `cur` for an I card, poles and zeros | an `i(...)` output is refused |
+| `.op [format] t1 t2 ...` | one transient per time, run to it with the `.tran` card's step capped at t/50, published as `Operating Point (time=<t>)`; `t = 0` is the DC point | the snapshot is not written as an `.ic0` file |
+| `.four f v(a) v(b) ...` | one query per output, plots `Fourier Analysis v(a) (THD = ...)` | none |
+| `.sn TRES= PERIOD=` / `TONE= NHARMS=` | `.pss`, PERIOD/TRES steps a period | TRINIT, MAXTRINITCYCLES, NUMPEROUT and NHARMS are read and unused |
+| `.snac sweep`, `.snxf v(out) sweep`, `.snnoise v(out) src sweep [n1 ±1]` | `.pac`, `.pxf`, `.pnoise` at the `.sn` tone | `.snnoise` measures only the n1 = 0 band |
+| `.fft v(a[,b]) [START= STOP= NP= FORMAT= WINDOW= ALFA= FREQ= FMIN= FMAX=]` | the `.tran` resampled on NP points, windowed, one FFT (`post/fft.zig`) | see below |
+
+Noise contributions follow ngspice's names and units: `onoise_<inst>_<gen>`
+and `onoise_<inst>` in V/sqrt(Hz) in the spectrum, `v(onoise_total_...)` and
+`v(inoise_total_...)` in V rms in the integrated plot, each generator
+integrated on its own power-law fit. The generator names are the models'
+LRM §4.6.4 `name` arguments (`thermal`, `id`, `rs`), which match ngspice's
+suffixes for the resistor and diode; generators of one instance that share
+a name form one column. Divergence: ngspice also lists generators the model
+does not have at that bias (a resistor's zero `_1overf`); ESPice lists what
+the model declares. HSPICE's per-subcircuit sums (`listckt`) are not built.
+
+`.fft` publishes the `.ft#` data: every bin from DC to NP/2 as one complex
+column named for the output, in a plot `FFT Analysis v(out)`. Bin k ≥ 1
+holds 2·X[k]/Σw, so a bin-centred tone reads its amplitude under any window,
+with the sine phase HSPICE's listing shows (0 for a `sin` source; `.four`
+reports the cosine phase). NORM divides by the largest non-DC bin. The
+windows are HSPICE's table [SA Ch.15 Table 56], its Gaussian taken
+literally. Divergences: samples come by linear interpolation, as `.four`
+takes them, where HSPICE interpolates to second order; FREQ, FMIN and FMAX
+only shape HSPICE's printed listing and are checked, not used.
+
+`.measure fft` reads that plot [CR .MEASURE FFT]: `FIND vm(out) AT=f` and
+the other `v?` forms, and THD, SNR, SNDR, ENOB and SFDR with NBHARM,
+MINFREQ, MAXFREQ and BINSIZ. The fundamental is the largest non-DC bin; its
+harmonics are its bin multiples up to NBHARM and MAXFREQ; DC is left out of
+the noise. THD is the ratio the SA formula gives, not percent.
+
 ## PDK conveniences
 
 These follow ngspice 45, because the open PDKs (sky130, GF180, IHP SG13G2)

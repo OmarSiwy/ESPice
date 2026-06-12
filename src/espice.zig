@@ -240,8 +240,8 @@ pub const Problem = struct {
         try self.session.print(writer, resolved);
     }
 
-    /// Writes the deck's `.meas` results for every completed tran, AC and
-    /// DC result, in request order, as ngspice prints them; cards that
+    /// Writes the deck's `.meas` results for every completed tran, AC, DC
+    /// and FFT result, in request order, as ngspice prints them; cards that
     /// cannot be measured are reported on `err`.
     pub fn print_measures(self: *const Problem, out: *std.Io.Writer, err: *std.Io.Writer) !void {
         const measures = self.prepared.deck.measures;
@@ -250,7 +250,7 @@ pub const Problem = struct {
             const info = try self.query_info(id);
             if (info.status != .complete) continue;
             switch (info.kind) {
-                .tran, .ac, .dc => try output.printMeasures(out, err, measures, info.kind, try self.result(id)),
+                .tran, .ac, .dc, .fft => try output.printMeasures(out, err, measures, info.kind, try self.result(id)),
                 else => {},
             }
         }

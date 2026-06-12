@@ -342,6 +342,7 @@ fn module(comptime kind: requests.Kind) type {
         .qpss => @import("pss/qpss.zig"),
         .four => @import("post/four.zig"),
         .disto => @import("post/disto.zig"),
+        .fft => @import("post/fft.zig"),
         .sens => @import("sweep/sens.zig"),
         .mc => @import("sweep/mc.zig"),
         .temp => @import("sweep/temp_sweep.zig"),

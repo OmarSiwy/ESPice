@@ -131,7 +131,10 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     }
 
     return .{
-        .plotname = try std.fmt.allocPrint(a, "Fourier Analysis (THD = {d:.4} %)", .{spec.thd_percent}),
+        .plotname = if (opts.label.len == 0)
+            try std.fmt.allocPrint(a, "Fourier Analysis (THD = {d:.4} %)", .{spec.thd_percent})
+        else
+            try std.fmt.allocPrint(a, "Fourier Analysis {s} (THD = {d:.4} %)", .{ opts.label, spec.thd_percent }),
         .varnames = names,
         .is_complex = false,
         .npoints = npoints,
@@ -188,7 +191,7 @@ fn extractSpectrum(re: []const f64, im: []const f64, n_fft: usize, n_harmonics: 
 /// `cursor` to the bracketing index instead of searching for it. Targets must
 /// come in non-decreasing order. tests/four.zig checks it element for element
 /// against a binary-search oracle.
-fn interpolateAt(times: []const f64, values: []const f64, t: f64, cursor: *usize) f64 {
+pub fn interpolateAt(times: []const f64, values: []const f64, t: f64, cursor: *usize) f64 {
     if (times.len == 0) return 0;
     if (t <= times[0]) return values[0];
     if (t >= times[times.len - 1]) return values[values.len - 1];

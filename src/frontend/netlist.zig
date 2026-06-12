@@ -87,7 +87,33 @@ pub const Analysis = struct {
     pos: u32 = none,
     neg: u32 = none,
     ports: [4]u32 = @splat(none),
+    /// Written as an HSPICE shooting-Newton card (`.sn`, `.snac`,
+    /// `.snnoise`, `.snxf`), whose keyword arguments differ from `.pss`,
+    /// `.pac`, `.pnoise` and `.pxf`.
+    sn: bool = false,
+    /// One output of a `.four` card that named several; each is its own card.
+    split: bool = false,
 };
+
+/// Appends `a` to `list`, a `.four` naming several outputs as one card per
+/// output (the frequency, that output, and any trailing numbers).
+fn appendAnalysis(arena: Allocator, list: *std.ArrayList(Analysis), a: Analysis) Allocator.Error!void {
+    var outputs: usize = 0;
+    if (a.kind == .four) for (a.args) |v| {
+        if (v == .group) outputs += 1;
+    };
+    if (outputs < 2) return list.append(arena, a);
+    for (a.args[1..]) |v| {
+        if (v != .group) continue;
+        var args: std.ArrayList(Value) = .empty;
+        try args.appendSlice(arena, &.{ a.args[0], v });
+        for (a.args[1..]) |t| if (t != .group) try args.append(arena, t);
+        var part = a;
+        part.args = args.items;
+        part.split = true;
+        try list.append(arena, part);
+    }
+}
 
 /// `.options` and single-value `.temp` cards, in deck order.
 pub const Config = struct {
@@ -257,6 +283,8 @@ const cards = std.StaticStringMap(Card).initComptime(.{
     .{ "pss", an(.pss) },     .{ "pxf", an(.pxf) },               .{ "pz", an(.pz) },
     .{ "qpss", an(.qpss) },   .{ "sens", an(.sens) },             .{ "sp", an(.sp) },
     .{ "stb", an(.stb) },     .{ "temp", an(.temp) },             .{ "tf", an(.tf) },
+    .{ "sn", an(.pss) },      .{ "snac", an(.pac) },              .{ "snnoise", an(.pnoise) },
+    .{ "snxf", an(.pxf) },    .{ "fft", an(.fft) },
     .{ "tran", an(.tran) },   .{ "trannoise", an(.tran_noise) },  .{ "tran_noise", an(.tran_noise) },
     .{ "lstb", an(.lstb) },   .{ "acxf", an(.acxf) },             .{ "dcxf", an(.dcxf) },
     .{ "dcinc", an(.dcinc) },
@@ -312,11 +340,20 @@ pub fn parseAnalyses(arena: Allocator, text: []const u8, lookup: anytype) (Error
         const args = try r.readArgs(&f);
         // A single `.temp` is deck configuration, fixed at build.
         if (card.analysis == .temp and args.len == 1) return error.UnsupportedDirectiveMutation;
-        var a: Analysis = .{ .kind = card.analysis, .args = args, .line = line };
-        resolve(&a, lookup);
-        try out.append(arena, a);
+        const first = out.items.len;
+        try appendAnalysis(arena, &out, .{ .kind = card.analysis, .args = args, .line = line, .sn = isSn(line) });
+        for (out.items[first..]) |*a| resolve(a, lookup);
     }
     return out.items;
+}
+
+/// `.sn`, `.snac`, `.snnoise` or `.snxf`: the HSPICE shooting-Newton
+/// spelling of a periodic card. `.snosc` keeps the `.pss` form.
+fn isSn(line: []const u8) bool {
+    const words = std.StaticStringMap(void).initComptime(.{ .{"sn"}, .{"snac"}, .{"snnoise"}, .{"snxf"} });
+    const head = line[1 .. std.mem.indexOfAny(u8, line, " \t") orelse line.len];
+    var buf: [8]u8 = undefined;
+    return head.len <= buf.len and words.has(std.ascii.lowerString(buf[0..head.len], head));
 }
 
 /// Name inside a `v(...)` group, or a bare name; `which` 1 is the reference.
@@ -903,7 +940,7 @@ fn Reader(comptime S: type) type {
                     // HSPICE's `.temp t1 t2 ...` lists run temperatures; ngspice's
                     // three-number form is a sweep.
                     const temp_list = kind == .temp and args.len > 1 and r.dialect == .hspice;
-                    if (!temp_list) try r.analyses.append(r.arena, .{ .kind = kind, .args = args, .line = r.written(line), .dialect = r.dialect });
+                    if (!temp_list) try appendAnalysis(r.arena, &r.analyses, .{ .kind = kind, .args = args, .line = r.written(line), .dialect = r.dialect, .sn = isSn(line) });
                     if (kind == .temp and (args.len == 1 or temp_list)) try r.config.append(r.arena, .{ .temp = true, .args = args, .line = r.written(line) });
                 },
                 .options => try r.config.append(r.arena, .{ .temp = false, .args = args, .line = r.written(line) }),

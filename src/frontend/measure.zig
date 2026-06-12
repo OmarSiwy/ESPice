@@ -11,7 +11,7 @@ const Clause = core.MeasureClause;
 /// `lhs`, or `lhs=rhs` with blanks around the `=` dropped.
 const Word = struct { lhs: []const u8, rhs: ?[]const u8 = null };
 
-const analyses = std.StaticStringMap(Kind).initComptime(.{ .{ "tran", .tran }, .{ "ac", .ac }, .{ "dc", .dc } });
+const analyses = std.StaticStringMap(Kind).initComptime(.{ .{ "tran", .tran }, .{ "ac", .ac }, .{ "dc", .dc }, .{ "fft", .fft } });
 
 const funcs = std.StaticStringMap(core.MeasureFunc).initComptime(.{
     .{ "trig", .trig_targ }, .{ "delay", .trig_targ }, .{ "targ", .trig_targ },
@@ -21,6 +21,8 @@ const funcs = std.StaticStringMap(core.MeasureFunc).initComptime(.{
     .{ "integ", .integ },    .{ "deriv", .deriv },      .{ "integral", .integ },
     .{ "derivative", .deriv }, .{ "param", .param },    .{ "err", .err },
     .{ "err1", .err1 },      .{ "err2", .err2 },       .{ "err3", .err3 },
+    .{ "thd", .thd },        .{ "snr", .snr },         .{ "sndr", .sndr },
+    .{ "enob", .enob },      .{ "sfdr", .sfdr },
 });
 
 /// Parses `text`, the card after `.meas`, lowercased. `ctx.measureValue(text)
@@ -44,6 +46,8 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8, ctx: anytype, default: 
         base.from = -1e99;
         base.to = 1e99;
     }
+    // MAXFREQ defaults to the top of the spectrum [CR .MEASURE FFT].
+    if (analysis == .fft) base.to = 1e99;
     var m: core.Measure = .{ .analysis = analysis, .name = w[1].lhs, .func = func, .first = base, .second = base };
     const rest = w[3..];
     switch (func) {
@@ -80,6 +84,13 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8, ctx: anytype, default: 
             }
         },
         .when => try when(arena, &m.first, analysis, rest, ctx),
+        // `.meas fft name THD|SNR|SNDR|ENOB|SFDR v(out) [NBHARM=] [MAXFREQ=]
+        // [MINFREQ=] [BINSIZ=]`.
+        .thd, .snr, .sndr, .enob, .sfdr => {
+            if (analysis != .fft or rest.len == 0 or rest[0].rhs != null) return error.ParseError;
+            m.first.vec = rest[0].lhs;
+            try stdParams(&m.first, analysis, rest[1..], ctx);
+        },
         else => try trigTarg(arena, &m.first, analysis, rest, ctx),
     }
     return m;
@@ -114,7 +125,7 @@ fn when(arena: std.mem.Allocator, c: *Clause, analysis: Kind, w: []const Word, c
 
 /// `vdb(out)` reads `v(out)` in dB for AC (ngspice correct_vec).
 fn vector(arena: std.mem.Allocator, c: *Clause, analysis: Kind, name: []const u8) ![]const u8 {
-    if (analysis != .ac or name.len < 2 or name[0] != 'v' or name[1] == '(') return name;
+    if ((analysis != .ac and analysis != .fft) or name.len < 2 or name[0] != 'v' or name[1] == '(') return name;
     const paren = std.mem.indexOfScalar(u8, name, '(') orelse return name;
     c.vectype = name[1];
     return std.mem.concat(arena, u8, &.{ "v", name[paren..] });
@@ -131,7 +142,8 @@ fn stdParams(c: *Clause, analysis: Kind, w: []const Word, ctx: anytype) !void {
         };
         const v: f64 = if (std.mem.eql(u8, rhs, "last")) core.measure_last else try ctx.measureValue(rhs);
         // `goal` and `weight` only steer HSPICE's optimizer.
-        const Key = enum { rise, fall, cross, val, td, from, to, at, minval, ignor, ymin, ymax, goal, weight };
+        // `print` only switches HSPICE's listing.
+        const Key = enum { rise, fall, cross, val, td, from, to, at, minval, ignor, ymin, ymax, goal, weight, nbharm, minfreq, maxfreq, binsiz, print };
         const key = std.meta.stringToEnum(Key, x.lhs) orelse return error.ParseError;
         switch (key) {
             .rise, .fall, .cross => {
@@ -148,7 +160,14 @@ fn stdParams(c: *Clause, analysis: Kind, w: []const Word, ctx: anytype) !void {
             .minval => c.minval = v,
             .ignor, .ymin => c.ymin = v,
             .ymax => c.ymax = v,
-            .goal, .weight => {},
+            .goal, .weight, .print => {},
+            .minfreq => c.from = v,
+            .maxfreq => c.to = v,
+            .nbharm, .binsiz => {
+                if (!(v >= 0) or v > std.math.maxInt(u32)) return error.ParseError;
+                const n: u32 = @intFromFloat(@floor(v + 0.5));
+                if (key == .nbharm) c.nbharm = n else c.binsiz = n;
+            },
         }
     }
     if (analysis == .dc and c.to < c.from) std.mem.swap(f64, &c.from, &c.to);

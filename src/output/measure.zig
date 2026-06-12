@@ -19,17 +19,18 @@ pub fn print(out: *Writer, err: *Writer, measures: []const core.Measure, analysi
     var discard_buf: [64]u8 = undefined;
     var discard: Writer.Discarding = .init(&discard_buf);
     for (measures, 0..) |m, i| {
-        if (m.analysis != analysis or m.func == .param or i >= values.len) continue;
+        if (!targets(m, analysis, result) or m.func == .param or i >= values.len) continue;
         values[i] = evaluate(&discard.writer, m, .{ .result = result, .analysis = analysis, .values = &values }) catch nan;
     }
     var heading = false;
     for (measures, 0..) |m, i| {
-        if (m.analysis != analysis) continue;
+        if (!targets(m, analysis, result)) continue;
         if (!heading) {
             heading = true;
             try out.print("\n  Measurements for {s} Analysis\n\n", .{switch (analysis) {
                 .tran => "Transient",
                 .ac => "AC",
+                .fft => "FFT",
                 else => "DC",
             }});
         }
@@ -47,6 +48,16 @@ pub fn print(out: *Writer, err: *Writer, measures: []const core.Measure, analysi
         };
         if (m.func == .param and i < values.len) values[i] = value;
     }
+}
+
+/// Whether card `m` reads `result`. Each `.fft` card has its own plot, so an
+/// FFT card reads the one holding its vector.
+fn targets(m: core.Measure, analysis: Kind, result: core.Result) bool {
+    if (m.analysis != analysis) return false;
+    if (analysis != .fft or m.func == .param) return true;
+    const w: Wave = .{ .result = result, .analysis = analysis };
+    _ = w.column(m.first.vec, 0) catch return false;
+    return true;
 }
 
 /// Prints card `m` and returns its result, the value a PARAM card reads.
@@ -106,7 +117,51 @@ fn evaluate(out: *Writer, m: core.Measure, w: Wave) !f64 {
             try out.print("{s:<20}=  {f}\n", .{ m.name, sci(v, 6) });
             return v;
         },
+        .thd, .snr, .sndr, .enob, .sfdr => {
+            const v = try defined(fftFigure(try w.column(a.vec, 'm'), w.scale(), w.len(), a, m.func));
+            try out.print("{s:<20}=  {f}\n", .{ m.name, sci(v, 6) });
+            return v;
+        },
     }
+}
+
+/// An FFT figure of merit over the magnitude spectrum `mag` on `freq`
+/// [SA Ch.15, CR .MEASURE FFT]. The fundamental is the largest non-DC bin;
+/// its harmonics are its bin multiples up to NBHARM (every one when 0) and
+/// MAXFREQ; BINSIZ bins either side of it count as signal. THD is the ratio
+/// sqrt(Σ harmonic²)/fundamental; SNR leaves the harmonics out of the noise,
+/// SNDR keeps them, both in dB over every other non-DC bin; ENOB is
+/// (SNDR − 1.76)/6.02; SFDR is the fundamental over the largest other bin
+/// in [MINFREQ, MAXFREQ], in dB. NaN for a spectrum with no non-DC bin.
+fn fftFigure(mag: Column, freq: Column, n: usize, c: Clause, func: core.MeasureFunc) f64 {
+    var k0: usize = 0;
+    for (1..n) |k| if (k0 == 0 or mag.get(k) > mag.get(k0)) {
+        k0 = k;
+    };
+    if (k0 == 0) return nan;
+    const fund = mag.get(k0);
+    var harmonics: f64 = 0;
+    var noise: f64 = 0;
+    var spur: f64 = 0;
+    for (1..n) |k| {
+        const d = if (k > k0) k - k0 else k0 - k;
+        if (d <= c.binsiz) continue;
+        const v = mag.get(k);
+        const f = freq.get(k);
+        const h = k / k0;
+        const harmonic = k % k0 == 0 and (c.nbharm == 0 or h <= c.nbharm) and f <= c.to;
+        if (harmonic) harmonics += v * v else noise += v * v;
+        if (f >= c.from and f <= c.to) spur = @max(spur, v);
+    }
+    const sndr = 10 * std.math.log10(fund * fund / (harmonics + noise));
+    return switch (func) {
+        .thd => @sqrt(harmonics) / fund,
+        .snr => 10 * std.math.log10(fund * fund / noise),
+        .sndr => sndr,
+        .enob => (sndr - 1.76) / 6.02,
+        .sfdr => 20 * std.math.log10(fund / spur),
+        else => unreachable,
+    };
 }
 
 /// Folds a PARAM card's postfix over the results in `values`; NaN when a
