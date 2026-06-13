@@ -3,6 +3,7 @@
 const std = @import("std");
 pub const numerics = @import("numerics.zig");
 pub const query = @import("query.zig");
+pub const lm = @import("lm.zig");
 pub const QueryId = query.QueryId;
 
 const deck = @import("deck.zig");
@@ -39,4 +40,5 @@ pub const GROUND: u32 = 0;
 test {
     _ = numerics;
     _ = intern;
+    _ = lm;
 }

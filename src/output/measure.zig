@@ -50,6 +50,21 @@ pub fn print(out: *Writer, err: *Writer, measures: []const core.Measure, analysi
     }
 }
 
+/// Evaluates every card in `measures` that targets `analysis` over
+/// `result` into `values` (parallel to `measures`), PARAM cards last in
+/// deck order, as `print` does. A card that does not target the result, or
+/// whose event never happens, reads NaN.
+pub fn evaluateAll(measures: []const core.Measure, analysis: Kind, result: core.Result, out: []f64) void {
+    std.debug.assert(out.len == measures.len);
+    @memset(out, nan);
+    var discard_buf: [64]u8 = undefined;
+    var discard: Writer.Discarding = .init(&discard_buf);
+    for ([_]bool{ false, true }) |param| for (measures, out) |m, *v| {
+        if (!targets(m, analysis, result) or (m.func == .param) != param) continue;
+        v.* = evaluate(&discard.writer, m, .{ .result = result, .analysis = analysis, .values = out }) catch nan;
+    };
+}
+
 /// Whether card `m` reads `result`. Each `.fft` card has its own plot, so an
 /// FFT card reads the one holding its vector.
 fn targets(m: core.Measure, analysis: Kind, result: core.Result) bool {

@@ -151,6 +151,9 @@ pub const MeasureClause = struct {
     /// counted as signal. MINFREQ and MAXFREQ are `from` and `to`.
     nbharm: u32 = 0,
     binsiz: u32 = 0,
+    /// HSPICE optimization target (`GOAL=`) and the weight of its error.
+    goal: ?f64 = null,
+    weight: f64 = 1,
 };
 
 /// A parsed `.meas` card.
@@ -166,4 +169,13 @@ pub const Measure = struct {
     second: MeasureClause = .{},
     /// The expression of a `param` card.
     expr: []const MeasureOp = &.{},
+
+    /// The card's optimization error for result `value`, HSPICE's
+    /// WEIGHT * (result - GOAL) / max(|GOAL|, MINVAL), from the clause that
+    /// carries `GOAL=`; null for a card without one.
+    pub fn goalError(m: Measure, value: f64) ?f64 {
+        const c = if (m.first.goal != null) m.first else if (m.second.goal != null) m.second else return null;
+        const goal = c.goal.?;
+        return c.weight * (value - goal) / @max(@abs(goal), c.minval);
+    }
 };
