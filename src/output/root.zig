@@ -13,6 +13,8 @@ pub const Plot = types.Plot;
 pub const validateQuery = types.validateQuery;
 /// `.meas` results in ngspice's print format.
 pub const printMeasures = @import("measure.zig").print;
+/// `.meas` statistics over Monte Carlo trials.
+pub const printMeasureStatistics = @import("measure.zig").printStatistics;
 
 /// Resolves a user-facing format name or alias to a `Format`. Returns null
 /// for an unknown name so the caller owns the diagnostic.

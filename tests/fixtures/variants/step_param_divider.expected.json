@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "A .step param list runs the operating point once per point, through a derived .param.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "v(b) = rp/(1k + rp) with rp = rv || rv/2; i(v1) = -(1 - v(b))/1k."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point (rv=1000)",
+        "match": "exact",
+        "columns": {
+          "v(b)": {
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09,
+            "values": [
+              0.25
+            ]
+          },
+          "i(v1)": {
+            "unit": "A",
+            "rtol": 1e-06,
+            "atol": 1e-12,
+            "values": [
+              -0.00075
+            ]
+          }
+        },
+        "row_count": 1
+      },
+      {
+        "name": "Operating Point (rv=3000)",
+        "match": "exact",
+        "columns": {
+          "v(b)": {
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09,
+            "values": [
+              0.5
+            ]
+          },
+          "i(v1)": {
+            "unit": "A",
+            "rtol": 1e-06,
+            "atol": 1e-12,
+            "values": [
+              -0.0005
+            ]
+          }
+        },
+        "row_count": 1
+      },
+      {
+        "name": "Operating Point (rv=6000)",
+        "match": "exact",
+        "columns": {
+          "v(b)": {
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09,
+            "values": [
+              0.6666666666666666
+            ]
+          },
+          "i(v1)": {
+            "unit": "A",
+            "rtol": 1e-06,
+            "atol": 1e-12,
+            "values": [
+              -0.0003333333333333334
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "5c02c18351c4a1a83fa9be72ea2722b026d872d3fea0af40a76c84c275b89ac4"
+}

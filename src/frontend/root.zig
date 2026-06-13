@@ -13,4 +13,6 @@ test {
     _ = @import("tests/builder.zig");
     _ = @import("tests/prepared.zig");
     _ = @import("tests/models.zig");
+    _ = @import("tests/variants.zig");
+    _ = @import("variants.zig");
 }

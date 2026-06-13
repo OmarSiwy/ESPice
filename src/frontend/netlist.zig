@@ -75,11 +75,91 @@ pub const Hypergraph = csr.BipartiteHypergraph(Net, Device);
 /// A `.model` card: `kind` is the type word (`nmos`, `d`, a VA module name).
 pub const Model = struct { name: []const u8, kind: []const u8, kv: []const Kv };
 
+/// What a `.step` card or an HSPICE `SWEEP` varies.
+pub const StepTarget = union(enum) {
+    /// A global `.param`, by its row in `Live.names`.
+    param: u32,
+    temp,
+    /// A card's primary value (a source's `dc`, a resistor's `r`), by card name.
+    card: []const u8,
+};
+
+/// One swept quantity and its points, in sweep order.
+pub const Step = struct { target: StepTarget, values: []const f64 };
+
+/// HSPICE `MONTE=n [FIRSTRUN=k]`: trials `first..first + n - 1`.
+pub const Monte = struct { n: u32, first: u32 = 1 };
+
+/// An HSPICE sweep on one analysis card: the card runs once per point.
+/// On a `.dc` card with no sweep of its own (`.dc DATA=d`, `.dc MONTE=n`)
+/// the points are the DC sweep.
+pub const Sweep = union(enum) {
+    none,
+    /// `SWEEP DATA=name`: one point per row of that `.data` table.
+    data: []const u8,
+    monte: Monte,
+    step: Step,
+};
+
+/// An inline `.data` table: one target per column, `values` row-major.
+pub const Data = struct {
+    name: []const u8,
+    labels: []const []const u8,
+    columns: []const StepTarget,
+    values: []const f64,
+};
+
+/// One Monte Carlo variation of a model or element parameter: HSPICE
+/// `DEV`/`LOT` on a `.model` value, or a `.variation` block row.
+pub const Variation = struct {
+    /// `DEV` and local variation draw once per device; `LOT` and global
+    /// variation once per model.
+    per_device: bool,
+    dist: Dist,
+    /// The `.model` name; empty for element variation, which `letter` names.
+    model: []const u8,
+    letter: u8 = 0,
+    param: []const u8,
+    /// One sigma for `gauss`, the half range otherwise; a fraction of the
+    /// nominal when `relative`.
+    value: f64,
+    relative: bool,
+
+    /// Normal, uniform over ±value, or one of the two extremes.
+    pub const Dist = enum(u8) { gauss, unif, limit };
+};
+
+/// Values a variant re-evaluates: device and model values that read a swept
+/// `.param` or, when some card runs Monte Carlo, a distribution call.
+pub const Live = struct {
+    /// Swept global `.param` names; a `.live` op indexes them.
+    names: []const []const u8 = &.{},
+    /// Each name's value in the deck as written.
+    nominal: []const f64 = &.{},
+    /// Rows of `values`, `kvs` or a group's arguments, parallel to `ops`.
+    slots: []const *Value = &.{},
+    /// Postfix each slot is evaluated from, and the factor `.option scale`
+    /// applies to it afterwards.
+    ops: []const Span = &.{},
+    scale: []const f64 = &.{},
+    /// Distribution calls: op index (ascending) and site key. A site draws
+    /// once per trial wherever it is read.
+    site_ops: []const u32 = &.{},
+    site_keys: []const u64 = &.{},
+    /// Constant-pool row that stands in for each name inside expressions a
+    /// device keeps as postfix (a B source), or `none`.
+    pool_rows: []const u32 = &.{},
+    /// Some kept expression reads a swept name, so a variant changes storage
+    /// `ParamRef` cannot reach and must be rebuilt.
+    opaque_reads: bool = false,
+};
+
 /// An analysis card. `pos`/`neg` are the output `v(a[,b])` nets, `ports` the
 /// four `.pz` nets; `none` where the card names none or an unknown net.
 pub const Analysis = struct {
     kind: Kind,
     args: []const Value,
+    sweep: Sweep = .none,
     /// The card as written, for diagnostics.
     line: []const u8 = "",
     /// The syntax the card is read in (`.tran` segments, for one).
@@ -143,6 +223,13 @@ pub const Deck = struct {
     foreign: []const Foreign,
     /// `.meas` cards; their strings borrow the parse arena.
     measures: []const core.Measure,
+    /// `.step` cards in deck order; the last varies fastest.
+    steps: []const Step = &.{},
+    data: []const Data = &.{},
+    variations: []const Variation = &.{},
+    /// Each `.alter` run's full source, cumulative, expanded; set by
+    /// `prepare`.
+    alters: []const []const u8 = &.{},
 };
 
 /// A parsed, flattened deck. Every slice lives in the parse arena.
@@ -166,6 +253,7 @@ pub const Netlist = struct {
     /// Model name to its first `.model` row.
     model_ids: std.StringHashMapUnmanaged(u32),
     deck: Deck,
+    live: Live = .{},
 
     /// A card as the builder reads it.
     pub const View = struct {
@@ -220,7 +308,63 @@ pub const Netlist = struct {
     pub fn exprOps(nl: *const Netlist, span: Span) []const expr.Op {
         return nl.ops[span.start..][0..span.len];
     }
+
+    /// Rewrites every live value for one variant: `values[k]` is live name
+    /// k, and `draw.sample(site, f, args)` answers each distribution call
+    /// (`null` keeps nominals). Returns true when some value changed.
+    /// `stack` is scratch.
+    pub fn setLive(nl: *const Netlist, gpa: Allocator, stack: *std.ArrayList(expr.Val), values: []const f64, draw: anytype) !bool {
+        const live = nl.live;
+        const pool: []f64 = @constCast(nl.consts);
+        var changed = false;
+        for (live.pool_rows, values) |row, v| if (row != none) {
+            changed = changed or pool[row] != v;
+            pool[row] = v;
+        };
+        for (live.slots, live.ops, live.scale) |slot, span, scale| {
+            const ops = nl.exprOps(span);
+            const x = scale * if (@TypeOf(draw) == @TypeOf(null))
+                try expr.eval(gpa, stack, ops, nl.consts, values, null)
+            else
+                try expr.eval(gpa, stack, ops, nl.consts, values, SiteDraw(@TypeOf(draw)){ .inner = draw, .base = span.start, .ops = live.site_ops, .keys = live.site_keys });
+            changed = changed or slot.num != x;
+            slot.* = .{ .num = x };
+        }
+        return changed;
+    }
 };
+
+/// Maps an op index inside one slot's postfix to its site key.
+fn SiteDraw(comptime D: type) type {
+    return struct {
+        inner: D,
+        base: u32,
+        ops: []const u32,
+        keys: []const u64,
+
+        pub fn value(self: @This(), i: usize, f: expr.Fn, args: []const f64) f64 {
+            const at: u32 = self.base + @as(u32, @intCast(i));
+            const k = std.sort.lowerBound(u32, self.ops, at, struct {
+                fn order(a: u32, b: u32) std.math.Order {
+                    return std.math.order(a, b);
+                }
+            }.order);
+            return self.inner.sample(self.keys[k], f, args);
+        }
+    };
+}
+
+/// A site key: `owner` mixed with `salt` (splitmix64 finalizer).
+pub fn siteKey(owner: u64, salt: u64) u64 {
+    var z = owner ^ (salt +% 0x9e3779b97f4a7c15);
+    z = (z ^ (z >> 30)) *% 0xbf58476d1ce4e5b9;
+    z = (z ^ (z >> 27)) *% 0x94d049bb133111eb;
+    return z ^ (z >> 31);
+}
+
+fn nameKey(owner: u64, name: []const u8) u64 {
+    return siteKey(owner, std.hash.Wyhash.hash(0, name));
+}
 
 /// True for `0`, `gnd` and `ground`, case-insensitively.
 pub fn isGroundName(name: []const u8) bool {
@@ -238,7 +382,7 @@ pub fn nameIndex(names: []const []const u8, target: []const u8) ?usize {
 
 /// `ignored`: a card that only shapes printed output, which ESPice writes
 /// in full anyway.
-const Card = union(enum) { end, ends, subckt, param, model, include, osdi_include, pre_osdi, verilog, options, ic, nodeset, global, connect, save, meas, ignored, analysis: Kind, cond: CondCard };
+const Card = union(enum) { end, ends, subckt, param, model, include, osdi_include, pre_osdi, verilog, options, ic, nodeset, global, connect, save, meas, ignored, step, data, enddata, variation, end_variation, analysis: Kind, cond: CondCard };
 
 const CondCard = enum { @"if", elseif, @"else", endif };
 
@@ -298,6 +442,11 @@ const cards = std.StaticStringMap(Card).initComptime(.{
     .{ "unprot", .ignored },
 });
 
+/// Sweep and variation cards (frontend/variants.zig).
+const variant_cards = std.StaticStringMap(Card).initComptime(.{
+    .{ "step", .step }, .{ "data", .data }, .{ "enddata", .enddata }, .{ "variation", .variation }, .{ "end_variation", .end_variation },
+});
+
 /// Words that open a behavioural E/F/G/H form in the first control-node
 /// slot (ngspice inpcom.c, HSPICE's E/G element keywords). None is built.
 const behavioural = std.StaticStringMap(void).initComptime(.{
@@ -311,7 +460,8 @@ const behavioural = std.StaticStringMap(void).initComptime(.{
 fn cardOf(head: []const u8) ?Card {
     var buf: [16]u8 = undefined;
     if (head.len > buf.len) return null;
-    return cards.get(std.ascii.lowerString(buf[0..head.len], head));
+    const lower = std.ascii.lowerString(buf[0..head.len], head);
+    return cards.get(lower) orelse variant_cards.get(lower);
 }
 
 /// Parses `src` in `dialect` into `arena`. The result borrows `src` (paths
@@ -492,6 +642,27 @@ fn Reader(comptime S: type) type {
         foreign: std.ArrayList(Foreign) = .empty,
         measures: std.ArrayList(core.Measure) = .empty,
         instances: u32 = 1,
+        /// `.data` and `.variation` blocks: first and one-past-last line.
+        blocks: std.ArrayList([2]u32) = .empty,
+        steps: std.ArrayList(Step) = .empty,
+        data: std.ArrayList(Data) = .empty,
+        variations: std.ArrayList(Variation) = .empty,
+        /// Swept global parameters, registered before any device is read.
+        live_names: std.StringArrayHashMapUnmanaged(void) = .empty,
+        live_nominal: std.ArrayList(f64) = .empty,
+        /// A device or model value is being read: one that reads a live name
+        /// or (under `monte`) a distribution keeps its postfix.
+        in_card: bool = false,
+        /// A live name may appear outside a card (a live name's own value).
+        live_ok: bool = false,
+        /// Some card runs Monte Carlo.
+        monte: bool = false,
+        site_ops: std.ArrayList(u32) = .empty,
+        site_keys: std.ArrayList(u64) = .empty,
+        /// Key of the text whose distribution calls are being emitted, and
+        /// the next call's ordinal within it.
+        site_owner: u64 = 0,
+        site_ordinal: u32 = 0,
         // Per-card scratch.
         nodes: std.ArrayList([]const u8) = .empty,
         pins: std.ArrayList(VertexId) = .empty,
@@ -554,13 +725,15 @@ fn Reader(comptime S: type) type {
                 subs[s].models_hi = @intCast(r.local_models.items.len);
                 try r.local_names.put(arena, name, {});
             }
+            for (r.blocks.items) |b| try r.readBlock(b);
             for (directive_lines.items) |i| try r.readDirective(r.lines.items[i]);
             try r.binOptions();
 
             for (top_devices.items) |i| try r.readDevice(r.lines.items[i], &top);
             try r.shunts();
             try r.readMeasures();
-            try r.modelBins();
+            const live = try r.resolveLive();
+            try r.modelBins(live);
 
             const graph = try r.hg.finish(arena);
             const models = try arena.alloc(Model, r.models.items.len);
@@ -592,6 +765,7 @@ fn Reader(comptime S: type) type {
                 .consts = r.consts.items,
                 .models = models,
                 .model_ids = r.model_ids,
+                .live = live,
                 .deck = .{
                     .title = title,
                     .dialect = dialect,
@@ -602,6 +776,9 @@ fn Reader(comptime S: type) type {
                     .saves = if (r.save_all) &.{} else r.saves.items,
                     .foreign = r.foreign.items,
                     .measures = r.measures.items,
+                    .steps = r.steps.items,
+                    .data = r.data.items,
+                    .variations = r.variations.items,
                 },
             };
         }
@@ -654,8 +831,19 @@ fn Reader(comptime S: type) type {
             var branches: Branches = .{};
             var sub_ifs: u8 = 0;
             const global: Frame = .{ .scopes = &r.global_scopes };
+            // An open `.data` or `.variation` block: its closing card and first line.
+            var block: ?struct { close: Card, first: u32 } = null;
             for (r.lines.items, 0..) |line, index| {
                 const i: u32 = @intCast(index);
+                if (block) |b| {
+                    if (line[0] != '.') continue;
+                    var bf = F.init(line);
+                    const c = cardOf(bf.next().?[1..]) orelse continue;
+                    if (std.meta.activeTag(c) != std.meta.activeTag(b.close)) continue;
+                    if (open == null and branches.active()) try r.blocks.append(arena, .{ b.first, i });
+                    block = null;
+                    continue;
+                }
                 const live = open != null or branches.active();
                 if (line[0] != '.') {
                     if (open == null and live) try top.append(arena, i);
@@ -677,6 +865,10 @@ fn Reader(comptime S: type) type {
                             else => {},
                         }
                     } else try r.branch(&branches, card.cond, &f, &global);
+                    continue;
+                }
+                if (card == .data or card == .variation) {
+                    block = .{ .close = if (card == .data) .enddata else .end_variation, .first = i };
                     continue;
                 }
                 if (!live) continue;
@@ -733,7 +925,7 @@ fn Reader(comptime S: type) type {
                     else => try directives.append(arena, i),
                 }
             }
-            if (open != null or branches.depth != 0) return error.ParseError;
+            if (open != null or branches.depth != 0 or block != null) return error.ParseError;
         }
 
         /// Applies one `.if`/`.elseif`/`.else`/`.endif` card to `b`. A
@@ -757,6 +949,9 @@ fn Reader(comptime S: type) type {
         }
 
         fn condition(r: *R, f: *F, frame: *const Frame) Error!bool {
+            const was_in_card = r.in_card;
+            r.in_card = false;
+            defer r.in_card = was_in_card;
             return switch (try r.exprValue(f.rest(), frame, false)) {
                 .num => |n| n != 0,
                 else => error.ParseError,
@@ -803,6 +998,11 @@ fn Reader(comptime S: type) type {
             const name = f.next() orelse return error.ParseError;
             const kind = f.next() orelse return error.ParseError;
             if (!F.isWord(name) or !F.isWord(kind)) return error.ParseError;
+            const was_in_card = r.in_card;
+            r.in_card = true;
+            defer r.in_card = was_in_card;
+            r.site_owner = nameKey(nameKey(0, frame.path orelse ""), name);
+            r.site_ordinal = 0;
             const matrix_keys = std.StaticStringMap(void).initComptime(.{ .{ "r", {} }, .{ "l", {} }, .{ "g", {} }, .{ "c", {} } });
             // CPL matrices are blank-separated; a negative entry is not a subtraction.
             const cpl = std.mem.eql(u8, kind, "cpl");
@@ -811,6 +1011,13 @@ fn Reader(comptime S: type) type {
                 if (t[0] == '(' or t[0] == ')' or t[0] == ',') continue;
                 if (!F.isWord(t)) return error.ParseError;
                 if (f.takeEq()) {
+                    // DEV/LOT tolerances apply to the value before them;
+                    // the global-scope read records them once.
+                    const prev = if (r.card_kv.items.len > 0) r.card_kv.items[r.card_kv.items.len - 1].key else "";
+                    if (try r.devLot(t, prev, name, &f, line)) |v| {
+                        if (global) try r.variations.append(r.arena, v);
+                        continue;
+                    }
                     const value = if (cpl and matrix_keys.has(t)) try r.readValue(&f, frame, true, true) else try r.kvValue(&f, frame, true);
                     try r.card_kv.append(r.arena, .{ .key = t, .value = value });
                 } else {
@@ -936,11 +1143,13 @@ fn Reader(comptime S: type) type {
             if (c == .ignored) return;
             const args = try r.readArgs(&f);
             switch (c) {
+                .step => try r.steps.append(r.arena, r.readStep(args) catch |err| return r.failed(line, err)),
                 .analysis => |kind| {
                     // HSPICE's `.temp t1 t2 ...` lists run temperatures; ngspice's
                     // three-number form is a sweep.
                     const temp_list = kind == .temp and args.len > 1 and r.dialect == .hspice;
-                    if (!temp_list) try appendAnalysis(r.arena, &r.analyses, .{ .kind = kind, .args = args, .line = r.written(line), .dialect = r.dialect, .sn = isSn(line) });
+                    const swept = r.readSweep(kind, args) catch |err| return r.failed(line, err);
+                    if (!temp_list) try appendAnalysis(r.arena, &r.analyses, .{ .kind = kind, .args = swept.args, .sweep = swept.sweep, .line = r.written(line), .dialect = r.dialect, .sn = isSn(line) });
                     if (kind == .temp and (args.len == 1 or temp_list)) try r.config.append(r.arena, .{ .temp = true, .args = args, .line = r.written(line) });
                 },
                 .options => try r.config.append(r.arena, .{ .temp = false, .args = args, .line = r.written(line) }),
@@ -982,6 +1191,296 @@ fn Reader(comptime S: type) type {
             const at = @intFromPtr(line.ptr);
             const base = @intFromPtr(r.text.ptr);
             return if (at >= base and at + line.len <= base + r.text.len) r.orig[at - base ..][0..line.len] else line;
+        }
+
+        /// Logs `line` with `err` and returns `err`; `ParseError` for a
+        /// malformed card, `UnsupportedCard` for a form ESPice cannot run.
+        fn failed(r: *const R, line: []const u8, err: Error) Error {
+            if (!@import("builtin").is_test) std.log.err("netlist: {s}: {s}", .{ @errorName(err), r.written(line) });
+            return err;
+        }
+
+        // Sweeps and variants.
+
+        /// The live-table row of global `.param` `name`, registering it (and
+        /// folding its nominal value) on first use; null for a name no
+        /// `.param` defines.
+        fn liveParam(r: *R, name: []const u8) Error!?u32 {
+            if (r.live_names.getIndex(name)) |k| return @intCast(k);
+            const entry = r.globals.get(name) orelse return null;
+            const top: Frame = .{ .scopes = &r.global_scopes };
+            r.live_ok = true;
+            defer r.live_ok = false;
+            const v = switch (entry) {
+                .num => |n| n,
+                .text => |text| switch (try r.exprValue(text, &top, false)) {
+                    .num => |n| n,
+                    else => return error.ParseError,
+                },
+            };
+            try r.live_names.put(r.arena, name, {});
+            try r.live_nominal.append(r.arena, v);
+            return @intCast(r.live_names.count() - 1);
+        }
+
+        /// A swept name: a global `.param`, `temp`, or a card.
+        fn stepTarget(r: *R, name: []const u8) Error!StepTarget {
+            if (std.mem.eql(u8, name, "temp")) return .temp;
+            if (try r.liveParam(name)) |k| return .{ .param = k };
+            return .{ .card = name };
+        }
+
+        /// `.step [lin|dec|oct] [param] name start stop incr`, `.step
+        /// [param] name list v...`, with `temp` or a source for the name
+        /// (ngspice/LTspice form). `dec`/`oct` take points per decade or
+        /// octave.
+        fn readStep(r: *R, args: []const Value) Error!Step {
+            var i: usize = 0;
+            var grid: Grid = .lin;
+            if (i < args.len and args[i] == .name) if (grids.get(args[i].name)) |g| {
+                grid = g;
+                i += 1;
+            };
+            const param = i < args.len and args[i] == .name and std.mem.eql(u8, args[i].name, "param");
+            i += @intFromBool(param);
+            if (i >= args.len or args[i] != .name) return error.ParseError;
+            const target: StepTarget = if (param)
+                .{ .param = try r.liveParam(args[i].name) orelse return error.ParseError }
+            else
+                try r.stepTarget(args[i].name);
+            i += 1;
+            if (i < args.len and args[i] == .name and std.mem.eql(u8, args[i].name, "list")) return .{ .target = target, .values = try r.numbers(args[i + 1 ..]) };
+            if (grid == .poi) return error.ParseError;
+            const n = try r.numbers(args[i..]);
+            if (n.len != 3) return error.ParseError;
+            return .{ .target = target, .values = try points(r.arena, grid, n[0], n[1], n[2], .per_unit) };
+        }
+
+        /// Splits an analysis card's HSPICE sweep tail (`SWEEP ...`, or a
+        /// bare `DATA=`/`MONTE=` on `.dc`) off its arguments.
+        fn readSweep(r: *R, kind: Kind, args: []const Value) Error!struct { args: []const Value, sweep: Sweep } {
+            var at: ?usize = null;
+            for (args, 0..) |a, i| if (a == .name and std.mem.eql(u8, a.name, "sweep")) {
+                at = i;
+                break;
+            };
+            if (at == null and kind == .dc and args.len >= 2 and args[0] == .name and
+                (std.mem.eql(u8, args[0].name, "data") or std.mem.eql(u8, args[0].name, "monte"))) at = 0;
+            const i = at orelse return .{ .args = args, .sweep = .none };
+            const tail = args[i + @intFromBool(args[i] == .name and std.mem.eql(u8, args[i].name, "sweep")) ..];
+            if (tail.len < 2 or tail[0] != .name) return error.ParseError;
+            const head = tail[0].name;
+            const sweep: Sweep = if (std.mem.eql(u8, head, "data")) blk: {
+                if (tail.len != 2 or tail[1] != .name) return error.ParseError;
+                break :blk .{ .data = tail[1].name };
+            } else if (std.mem.eql(u8, head, "monte")) blk: {
+                var m: Monte = .{ .n = try positiveCount(tail, 1) };
+                if (tail.len == 4 and tail[2] == .name and std.mem.eql(u8, tail[2].name, "firstrun")) {
+                    m.first = try positiveCount(tail, 3);
+                } else if (tail.len != 2) return error.ParseError;
+                r.monte = true;
+                break :blk .{ .monte = m };
+            } else blk: {
+                const target = try r.stepTarget(head);
+                if (tail.len >= 2 and tail[1] == .name) {
+                    const grid = grids.get(tail[1].name) orelse return error.ParseError;
+                    const n = try r.numbers(tail[2..]);
+                    if (n.len < 1 or n[0] != @trunc(n[0]) or n[0] < 1) return error.ParseError;
+                    if (grid == .poi) {
+                        if (n.len != 1 + @as(usize, @intFromFloat(n[0]))) return error.ParseError;
+                        break :blk .{ .step = .{ .target = target, .values = n[1..] } };
+                    }
+                    if (n.len != 3) return error.ParseError;
+                    break :blk .{ .step = .{ .target = target, .values = try points(r.arena, grid, n[1], n[2], n[0], if (grid == .lin) .total else .per_unit) } };
+                }
+                const n = try r.numbers(tail[1..]);
+                if (n.len != 3) return error.ParseError;
+                break :blk .{ .step = .{ .target = target, .values = try points(r.arena, .lin, n[0], n[1], n[2], .per_unit) } };
+            };
+            return .{ .args = args[0..i], .sweep = sweep };
+        }
+
+        /// A positive integer argument.
+        fn positiveCount(args: []const Value, i: usize) Error!u32 {
+            if (i >= args.len or args[i] != .num) return error.ParseError;
+            const n = args[i].num;
+            if (!(n >= 1) or n != @trunc(n) or n > std.math.maxInt(u32)) return error.ParseError;
+            return @intFromFloat(n);
+        }
+
+        /// Every value as a finite number.
+        fn numbers(r: *R, args: []const Value) Error![]const f64 {
+            const out = try r.arena.alloc(f64, args.len);
+            for (args, out) |a, *o| {
+                if (a != .num or !std.math.isFinite(a.num)) return error.ParseError;
+                o.* = a.num;
+            }
+            return out;
+        }
+
+        /// A `.data` or `.variation` block, lines `b[0]..b[1]`.
+        fn readBlock(r: *R, b: [2]u32) Error!void {
+            var f = F.init(r.lines.items[b[0]]);
+            const card = cardOf(f.next().?[1..]).?;
+            if (card == .variation) return r.readVariation(b);
+            const top: Frame = .{ .scopes = &r.global_scopes };
+            const name = f.next() orelse return r.failed(r.lines.items[b[0]], error.ParseError);
+            var labels: std.ArrayList([]const u8) = .empty;
+            var columns: std.ArrayList(StepTarget) = .empty;
+            var values: std.ArrayList(f64) = .empty;
+            for (b[0]..b[1]) |li| {
+                const line = r.lines.items[li];
+                var lf = F.init(line);
+                if (li == b[0]) {
+                    _ = lf.next();
+                    _ = lf.next();
+                }
+                while (lf.next()) |t| {
+                    if (t[0] == ',' or t[0] == '+') continue;
+                    if (F.isWord(t) and S.parseNum(t) == null) {
+                        // `MER`/`LAM` and `FILE=` read external tables.
+                        if (values.items.len != 0 or lf.nextByte() == '=') return r.failed(line, error.UnsupportedCard);
+                        try labels.append(r.arena, t);
+                        try columns.append(r.arena, try r.stepTarget(t));
+                        continue;
+                    }
+                    switch (try r.valueAt(t, &lf, &top, false, false)) {
+                        .num => |n| try values.append(r.arena, n),
+                        else => return r.failed(line, error.ParseError),
+                    }
+                }
+            }
+            if (columns.items.len == 0 or values.items.len % columns.items.len != 0)
+                return r.failed(r.lines.items[b[0]], error.ParseError);
+            try r.data.append(r.arena, .{ .name = name, .labels = labels.items, .columns = columns.items, .values = values.items });
+        }
+
+        /// HSPICE `.variation` block [SA Ch.20]: `.global_variation` and
+        /// `.local_variation` rows `<type> <model> p=sigma [%] ...`, and
+        /// `.element_variation` rows `<letter> p=sigma [%] ...`. Sigmas are
+        /// one sigma of a Gaussian, relative when followed by `%`.
+        fn readVariation(r: *R, b: [2]u32) Error!void {
+            var local = false;
+            var element = false;
+            for (b[0] + 1..b[1]) |li| {
+                const line = r.lines.items[li];
+                var f = F.init(line);
+                const head = f.next().?;
+                if (head[0] == '.') {
+                    const markers = std.StaticStringMap([2]?bool).initComptime(.{
+                        .{ ".global_variation", .{ false, false } }, .{ ".end_global_variation", .{ null, null } },
+                        .{ ".local_variation", .{ true, false } },   .{ ".end_local_variation", .{ null, null } },
+                        .{ ".element_variation", .{ null, true } },  .{ ".end_element_variation", .{ null, false } },
+                    });
+                    const m = markers.get(head) orelse return r.failed(line, error.UnsupportedCard);
+                    if (m[0]) |l| local = l;
+                    if (m[1]) |e| element = e;
+                    continue;
+                }
+                if (std.mem.eql(u8, head, "option")) continue;
+                var model: []const u8 = "";
+                var letter: u8 = 0;
+                if (element) letter = head[0] else model = f.next() orelse return r.failed(line, error.ParseError);
+                while (f.next()) |key| {
+                    if (!F.isWord(key) or !f.takeEq()) return r.failed(line, error.ParseError);
+                    const v = try r.percentValue(&f) orelse return r.failed(line, error.ParseError);
+                    try r.variations.append(r.arena, .{ .per_device = local or element, .dist = .gauss, .model = model, .letter = letter, .param = key, .value = v.value, .relative = v.relative });
+                }
+            }
+        }
+
+        /// A number, optionally followed by (or ending in) `%`.
+        fn percentValue(r: *R, f: *F) Error!?struct { value: f64, relative: bool } {
+            _ = r;
+            const t = f.next() orelse return null;
+            const pct = t[t.len - 1] == '%';
+            const n = S.parseNum(if (pct) t[0 .. t.len - 1] else t) orelse return null;
+            if (!std.math.isFinite(n)) return null;
+            if (!pct and f.nextByte() == '%') {
+                _ = f.next();
+                return .{ .value = n / 100, .relative = true };
+            }
+            return .{ .value = if (pct) n / 100 else n, .relative = pct };
+        }
+
+        /// HSPICE `dev[/n][/dist]=v` or `lot[/n][/dist]=v` after model value
+        /// `param`; null when `key` is neither.
+        fn devLot(r: *R, key: []const u8, param: []const u8, model: []const u8, f: *F, line: []const u8) Error!?Variation {
+            var parts = std.mem.splitScalar(u8, key, '/');
+            const head = parts.next().?;
+            const per_device = std.mem.eql(u8, head, "dev");
+            if (!per_device and !std.mem.eql(u8, head, "lot")) return null;
+            var dist: Variation.Dist = .unif;
+            while (parts.next()) |p| {
+                if (p.len > 0 and std.ascii.isDigit(p[0])) continue;
+                const dists = std.StaticStringMap(Variation.Dist).initComptime(.{
+                    .{ "gauss", .gauss }, .{ "unif", .unif }, .{ "uniform", .unif }, .{ "limit", .limit },
+                });
+                dist = dists.get(p) orelse return r.failed(line, error.UnsupportedCard);
+            }
+            if (param.len == 0) return r.failed(line, error.ParseError);
+            const v = try r.percentValue(f) orelse return r.failed(line, error.ParseError);
+            return .{ .per_device = per_device, .dist = dist, .model = model, .param = param, .value = v.value, .relative = v.relative };
+        }
+
+        /// Collects the live values after the device walk: each table value
+        /// kept as postfix because it read a live name or a distribution
+        /// becomes a slot holding its nominal number. Other kept postfix
+        /// (a B source's) reads each live name from a constant-pool row.
+        fn resolveLive(r: *R) Error!Live {
+            if (r.live_names.count() == 0 and r.site_ops.items.len == 0) return .{};
+            var slots: std.ArrayList(*Value) = .empty;
+            var spans: std.ArrayList(Span) = .empty;
+            var out: Live = .{ .names = r.live_names.keys(), .nominal = r.live_nominal.items };
+            const pool_rows = try r.arena.alloc(u32, r.live_names.count());
+            @memset(pool_rows, none);
+            for (r.values.items) |*v| try r.liveSlot(v, &slots, &spans, pool_rows, &out);
+            for (r.kvs.items) |*kv| try r.liveSlot(&kv.value, &slots, &spans, pool_rows, &out);
+            out.slots = slots.items;
+            out.ops = spans.items;
+            const scale = try r.arena.alloc(f64, slots.items.len);
+            @memset(scale, 1);
+            out.scale = scale;
+            out.site_ops = r.site_ops.items;
+            out.site_keys = r.site_keys.items;
+            out.pool_rows = pool_rows;
+            return out;
+        }
+
+        fn liveSlot(r: *R, v: *Value, slots: *std.ArrayList(*Value), spans: *std.ArrayList(Span), pool_rows: []u32, out: *Live) Error!void {
+            switch (v.*) {
+                .group => |g| for (g.args) |*a| try r.liveSlot(@constCast(a), slots, spans, pool_rows, out),
+                .expr => |span| {
+                    const ops = r.ops.items[span.start..][0..span.len];
+                    const sited = blk: {
+                        const k = std.sort.lowerBound(u32, r.site_ops.items, span.start, orderU32);
+                        break :blk k < r.site_ops.items.len and r.site_ops.items[k] < span.start + span.len;
+                    };
+                    var reads = false;
+                    for (ops) |op| reads = reads or op.code == .live;
+                    if (!reads and !sited) return;
+                    const folded = try expr.fold(r.arena, &r.stack, ops, r.consts.items, false, r.live_nominal.items);
+                    if (folded.known) {
+                        try slots.append(r.arena, v);
+                        try spans.append(r.arena, span);
+                        v.* = .{ .num = folded.num };
+                        return;
+                    }
+                    for (@constCast(ops)) |*op| if (op.code == .live) {
+                        if (pool_rows[op.a] == none) {
+                            try r.consts.append(r.arena, r.live_nominal.items[op.a]);
+                            pool_rows[op.a] = @intCast(r.consts.items.len - 1);
+                        }
+                        op.* = .{ .code = .num, .a = pool_rows[op.a] };
+                        out.opaque_reads = true;
+                    };
+                },
+                else => {},
+            }
+        }
+
+        fn orderU32(a: u32, b: u32) std.math.Order {
+            return std.math.order(a, b);
         }
 
         /// Logs `line` as `what` and fails the parse with `UnsupportedCard`.
@@ -1127,15 +1626,32 @@ fn Reader(comptime S: type) type {
 
         /// Splice parameters into the scratch ops from `from` on, then fold. A
         /// number keeps nothing; anything else keeps its postfix.
+        /// A device or model value that reads a live name, or a distribution
+        /// when some card runs Monte Carlo, keeps its postfix too: a variant
+        /// re-evaluates it (`resolveLive`). A live name read anywhere else is
+        /// `UnsupportedCard`, since nothing would re-read it.
         fn fold(r: *R, from: usize, frame: *const Frame, geometry: bool) Error!Value {
             const ops_mark = r.ops.items.len;
             const consts_mark = r.consts.items.len;
+            const sites_mark = r.site_ops.items.len;
             try r.subst(from, r.scratch.ops.items.len, frame, frame.scopes, 0);
-            const v = try expr.fold(r.arena, &r.stack, r.ops.items[ops_mark..], r.consts.items, geometry);
+            const ops = r.ops.items[ops_mark..];
+            const v = try expr.fold(r.arena, &r.stack, ops, r.consts.items, geometry, r.live_nominal.items);
             if (v.known) {
-                r.ops.shrinkRetainingCapacity(ops_mark);
-                r.consts.shrinkRetainingCapacity(consts_mark);
-                return .{ .num = v.num };
+                var reads = false;
+                for (ops) |op| reads = reads or op.code == .live;
+                const sited = r.site_ops.items.len > sites_mark;
+                if (reads and !r.in_card and !r.live_ok) {
+                    if (!@import("builtin").is_test) std.log.err("netlist: a swept parameter is read outside a device or model value", .{});
+                    return error.UnsupportedCard;
+                }
+                if (!(r.in_card and (reads or sited))) {
+                    r.ops.shrinkRetainingCapacity(ops_mark);
+                    r.consts.shrinkRetainingCapacity(consts_mark);
+                    r.site_ops.shrinkRetainingCapacity(sites_mark);
+                    r.site_keys.shrinkRetainingCapacity(sites_mark);
+                    return .{ .num = v.num };
+                }
             }
             return .{ .expr = .{ .start = @intCast(ops_mark), .len = @intCast(r.ops.items.len - ops_mark) } };
         }
@@ -1168,12 +1684,26 @@ fn Reader(comptime S: type) type {
                             try r.ops.append(r.arena, .{ .code = .ident, .a = @intFromBool(geometry_names.has(name)) });
                             continue;
                         };
+                        if (hit.level == 0) if (r.live_names.getIndex(name)) |k| {
+                            try r.ops.append(r.arena, .{ .code = .live, .a = @intCast(k) });
+                            continue;
+                        };
                         switch (hit.entry) {
                             .num => |n| try r.emitNum(n),
                             .text => |text| {
                                 const mark = r.scratch.mark();
                                 defer r.scratch.reset(mark);
                                 try expr.compileAll(S.parseNum, r.arena, &r.scratch, text);
+                                // Calls inside a parameter's text draw once per
+                                // scope that defines it: globally, or per instance.
+                                const owner = r.site_owner;
+                                const ordinal = r.site_ordinal;
+                                defer {
+                                    r.site_owner = owner;
+                                    r.site_ordinal = ordinal;
+                                }
+                                r.site_owner = nameKey(nameKey(0, levelPath(frame, hit.level)), name);
+                                r.site_ordinal = 0;
                                 try r.subst(mark.ops, r.scratch.ops.items.len, frame, scopes[0 .. hit.level + 1], depth + 1);
                             },
                         }
@@ -1185,9 +1715,29 @@ fn Reader(comptime S: type) type {
                         .a = if (op.a == none) none else (try r.netOf(frame, r.scratch.names.items[op.a])).index(),
                         .b = if (op.b == none) none else (try r.netOf(frame, r.scratch.names.items[op.b])).index(),
                     }),
-                    else => try r.ops.append(r.arena, op),
+                    else => {
+                        if (r.monte and op.code == .call and expr.isDistribution(@enumFromInt(op.a))) {
+                            try r.site_ops.append(r.arena, @intCast(r.ops.items.len));
+                            try r.site_keys.append(r.arena, siteKey(r.site_owner, r.site_ordinal));
+                            r.site_ordinal += 1;
+                        }
+                        try r.ops.append(r.arena, op);
+                    },
                 }
             }
+        }
+
+        /// The instance path whose scope sits at `level` of `frame`'s
+        /// scopes: its first `level` dotted components, "" for globals.
+        fn levelPath(frame: *const Frame, level: usize) []const u8 {
+            const path = frame.path orelse return "";
+            if (level == 0) return "";
+            var seen: usize = 0;
+            for (path, 0..) |c, i| if (c == '.') {
+                seen += 1;
+                if (seen == level) return path[0..i];
+            };
+            return path;
         }
 
         fn emitNum(r: *R, n: f64) Error!void {
@@ -1264,6 +1814,11 @@ fn Reader(comptime S: type) type {
             const arena = r.arena;
             var f = F.init(line);
             const head = f.next() orelse return error.ParseError;
+            const was_in_card = r.in_card;
+            r.in_card = true;
+            defer r.in_card = was_in_card;
+            r.site_owner = nameKey(nameKey(0, frame.path orelse ""), head);
+            r.site_ordinal = 0;
             if (!F.isWord(head) or !std.ascii.isAlphabetic(head[0])) return error.ParseError;
             const letter = std.ascii.toLower(head[0]);
             // HSPICE reads these letters as lossy lines, S-parameter blocks,
@@ -1543,8 +2098,11 @@ fn Reader(comptime S: type) type {
         /// naming `nm` takes the last-declared global `nm.<n>` whose L/W
         /// bounds hold it, within 1 nm. `modelRow` already binned the cards
         /// that name a subcircuit's own bins.
-        fn modelBins(r: *R) Error!void {
+        fn modelBins(r: *R, live: Live) Error!void {
             const scale = r.scale;
+            // Slot of each live table value, for the scale and the bin check.
+            var slot_of: std.AutoHashMapUnmanaged(*const Value, u32) = .empty;
+            for (live.slots, 0..) |slot, k| try slot_of.put(r.arena, slot, @intCast(k));
             const wnflag = r.wnflag;
             const arena = r.arena;
             const models = r.models.items;
@@ -1575,16 +2133,27 @@ fn Reader(comptime S: type) type {
             for (edges.items(.kind), edges.items(.positional), edges.items(.kv), edges.items(.model)) |kind, ps, ks, *model| {
                 if (kind != 'm') continue;
                 const kv = r.kvs.items[ks.start..][0..ks.len];
+                var swept_geometry = false;
                 for (kv) |*item| {
                     const power = lengths.get(item.key) orelse continue;
                     if (item.value != .num) return error.ParseError;
-                    if (scale != 1) item.value.num *= if (power == 2) scale * scale else scale;
+                    const factor = if (power == 2) scale * scale else scale;
+                    if (slot_of.get(&item.value)) |k| {
+                        @constCast(live.scale)[k] = factor;
+                        swept_geometry = swept_geometry or std.mem.eql(u8, item.key, "l") or std.mem.eql(u8, item.key, "w");
+                    }
+                    if (scale != 1) item.value.num *= factor;
                 }
                 if (ps.len == 0) continue;
                 const first = &r.values.items[ps.start];
                 if (first.* != .name) continue;
                 var bin = names.get(first.name) orelse continue;
                 if (std.mem.eql(u8, first.name, models[bin].name)) continue;
+                // A variant rewrites values, never the bin a card picked.
+                if (swept_geometry) {
+                    if (!@import("builtin").is_test) std.log.err("netlist: a swept or sampled l/w on binned model '{s}'", .{first.name});
+                    return error.UnsupportedCard;
+                }
                 const l = number(kv, "l") orelse return error.ParseError;
                 const use_nf = if (number(kv, "wnflag")) |flag| flag != 0 else wnflag;
                 const nf = if (use_nf) number(kv, "nf") orelse 1 else 1;
@@ -1629,6 +2198,49 @@ fn Reader(comptime S: type) type {
             return null;
         }
     };
+}
+
+/// A sweep grid: `lin` from an increment or a point count, `dec`/`oct`
+/// from points per decade or octave, `poi` an explicit list.
+const Grid = enum { lin, dec, oct, poi };
+const grids = std.StaticStringMap(Grid).initComptime(.{ .{ "lin", .lin }, .{ "dec", .dec }, .{ "oct", .oct }, .{ "poi", .poi } });
+
+/// The points of `grid` from `start` to `stop`. `x` is the increment
+/// (`per_unit`) or the point count (`total`) for `lin`, and points per
+/// decade or octave for `dec`/`oct`. The end point is kept within a
+/// relative 1e-9, as a SPICE sweep keeps it.
+fn points(arena: Allocator, grid: Grid, start: f64, stop: f64, x: f64, mode: enum { per_unit, total }) Error![]const f64 {
+    const max_points = 1 << 24;
+    var n: f64 = undefined;
+    var ratio: f64 = 1;
+    switch (grid) {
+        .poi => unreachable,
+        .lin => if (mode == .total) {
+            if (!(x >= 1) or x != @trunc(x)) return error.ParseError;
+            n = x;
+        } else {
+            if (x == 0 or !std.math.isFinite((stop - start) / x) or (stop - start) / x < 0) return error.ParseError;
+            n = @floor((stop - start) / x + 1e-9) + 1;
+        },
+        .dec, .oct => {
+            if (!(start > 0) or !(stop >= start) or !(x > 0)) return error.ParseError;
+            ratio = std.math.pow(f64, if (grid == .dec) 10 else 2, 1 / x);
+            n = @floor(@log(stop / start) / @log(ratio) + 1e-9) + 1;
+        },
+    }
+    if (!(n <= max_points)) return error.ParseError;
+    const out = try arena.alloc(f64, @intFromFloat(n));
+    for (out, 0..) |*o, k| {
+        const kf: f64 = @floatFromInt(k);
+        o.* = switch (grid) {
+            .lin => if (mode == .total)
+                (if (out.len == 1) start else start + kf * (stop - start) / (n - 1))
+            else
+                start + kf * x,
+            else => start * std.math.pow(f64, ratio, kf),
+        };
+    }
+    return out;
 }
 
 fn appendSpan(comptime T: type, arena: Allocator, list: *std.ArrayList(T), items: []const T) Error!Span {

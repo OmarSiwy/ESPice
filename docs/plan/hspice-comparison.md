@@ -368,6 +368,8 @@ view. `dcinc` is the forward solve with each source's increment.
 
 ### C1. Variant runner: `.alter`, `.data` and parameter sweeps
 
+Status: landed; see [variants.md](../analysis/variants.md) for what was built and where it differs from this sketch.
+
 `.alter` has to re-prepare the deck anyway: it swaps `.lib` sections,
 replaces models and elements, and can add devices [SA Ch.4]. That makes
 re-preparation the first thing to build:
@@ -395,12 +397,16 @@ and simple. C2 makes it fast.
 
 ### C2. Live parameters
 
+Status: landed; see [variants.md](../analysis/variants.md) for what was built and where it differs from this sketch.
+
 This is vacask-comparison G1: a table of the device parameters that depend
 on swept names, rewritten through `ParamRef.set`, with no re-preparation.
 Land it under C1's interface and measure it against C1 on a PDK deck. A
 point that changes topology falls back to C1.
 
 ### C3. Monte Carlo
+
+Status: landed; see [variants.md](../analysis/variants.md) for what was built and where it differs from this sketch.
 
 - Draws: a counter-based generator keyed by (seed, sample, call site,
   instance path), so any sample can be recomputed alone, in any order, on

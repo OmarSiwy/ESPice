@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "analysis": "mc",
+  "purpose": "Monte Carlo draws: one global .param site shared by two elements, one per-element site.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "v(b) = (rv + d)/(2k + d), rv ~ N(1k, 50) read by both resistors, d ~ N(0, 50): to first order mean 0.5 and sigma = sqrt((50/2k)^2 + (50/4k)^2) = 27.95 mV; independent draws per use would give 21.7 mV."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "plots": [],
+    "checks": [
+      {
+        "kind": "sample_moments",
+        "plot": "Monte Carlo",
+        "column": "v(b)",
+        "row_count": 2000,
+        "mean_min": 0.4975,
+        "mean_max": 0.5025,
+        "stddev_min": 0.0255,
+        "stddev_max": 0.0305
+      },
+      {
+        "kind": "repeatability",
+        "same_netlist": true,
+        "comparison": "bitwise_numeric_results"
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "notes": [
+    "Limits are about six standard errors of 2000 trials. The seed is fixed, so repeat runs are bit-identical."
+  ],
+  "netlist_sha256": "5e0271a12b7bbbdf07b3bb812b618536ed344d1309ffcf4bdec957075ecb8cf3"
+}

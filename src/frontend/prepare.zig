@@ -7,18 +7,24 @@ const netlist = @import("netlist");
 const device = @import("device");
 const analyses = @import("analyses.zig");
 const builder = @import("builder");
+const variants = @import("variants.zig");
 const Builder = builder.Builder;
 const Job = requests.Query;
 const Ic = core.Ic;
 const GROUND = core.GROUND;
 
 /// Construction result: the frozen topology and what the deck says about it.
-/// The session arena owns every deck slice; `deinit` releases the circuit.
+/// The session arena owns every deck slice; `deinit` releases the circuits.
 pub const Prepared = struct {
     circuit: device.Circuit,
     deck: core.Deck,
+    /// Variant runs whose topology differs from `circuit` (an `.alter`
+    /// that swaps elements, a point that collapses a node), each with its
+    /// own circuit, deck and variant labels, in output order after this one.
+    runs: []const Prepared = &.{},
 
     pub fn deinit(self: *Prepared) void {
+        for (self.runs) |*run| @constCast(run).deinit();
         self.circuit.deinit();
         self.* = undefined;
     }
@@ -59,8 +65,16 @@ pub fn prepare(io: std.Io, lib: *device.Library, session: std.mem.Allocator, inp
         .file => |path| try std.Io.Dir.cwd().readFileAlloc(io, path, session, .unlimited),
         .bytes => |bytes| try session.dupe(u8, bytes.data),
     };
-    const text = if (dialect == .spectre) raw else try netlist.source.expand(io, session, origin, raw);
-    const nl = try netlist.parse(session, text, dialect);
+    if (dialect == .spectre) {
+        const nl = try netlist.parse(session, raw, dialect);
+        try loadModels(io, lib, session, nl.deck.foreign, origin);
+        return nl;
+    }
+    const runs = try netlist.source.splitAlters(session, raw);
+    var nl = try netlist.parse(session, try netlist.source.expand(io, session, origin, runs[0]), dialect);
+    const alters = try session.alloc([]const u8, runs.len - 1);
+    for (alters, runs[1..]) |*text, run| text.* = try netlist.source.expand(io, session, origin, run);
+    nl.deck.alters = alters;
     try loadModels(io, lib, session, nl.deck.foreign, origin);
     return nl;
 }
@@ -96,10 +110,29 @@ fn keepSaved(scratch: std.mem.Allocator, probes: *[]u32, labels: *[][]const u8, 
     labels.* = l[0..kept];
 }
 
-/// Builds the frozen circuit and deck data from `nl`. `parse_arena` holds
+/// Builds the frozen circuit and deck data from `nl`, with its variants
+/// (`.step`, `SWEEP`, `.alter`, Monte Carlo). `parse_arena` holds
 /// construction scratch; `sim_arena` owns every published slice and must
 /// outlive the result, as must `lib` when the deck uses loaded devices.
 pub fn build(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_arena: std.mem.Allocator, nl: netlist.Netlist) !Prepared {
+    const owned = try parse_arena.create(netlist.Netlist);
+    owned.* = nl;
+    return buildRun(lib, sim_arena, parse_arena, owned, .{});
+}
+
+/// Which run of a deck `buildRun` builds.
+pub const Run = struct {
+    /// Label of the run's rows: `alter=2`, or a rebuilt point's own.
+    prefix: []const u8 = "",
+    /// A point whose circuit differs from the nominal one: `nl` already
+    /// holds its live values, and the run is that one row.
+    point: ?variants.Point = null,
+    /// The point belongs to this analysis card's sweep alone.
+    card: ?u32 = null,
+};
+
+/// `build` for one run of the deck in `nl`.
+pub fn buildRun(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_arena: std.mem.Allocator, nl: *const netlist.Netlist, run: Run) anyerror!Prepared {
     if (nl.deck.analyses.len > (std.math.maxInt(u32) - 1) / 3) return error.CircuitTooLarge;
     const deck_opts = try analyses.deckOptions(nl.deck.config, nl.deck.dialect);
     var b = try Builder.init(sim_arena, lib);
@@ -111,7 +144,7 @@ pub fn build(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_are
     b.nom_temp_c = deck_opts.tnom_c;
     try b.reserveNodes(nl.graph.vertexCount());
 
-    var nb = try builder.NetBuilder.init(parse_arena, &b, nl);
+    var nb = try builder.NetBuilder.init(parse_arena, &b, nl.*);
     try nb.build();
     try nb.tagSubcircuitNodes();
     // Runtime-loaded HDL devices, after the built-in ones and before the freeze.
@@ -138,7 +171,17 @@ pub fn build(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_are
         a.neg = nb.frozenRow(a.neg);
         for (&a.ports) |*p| p.* = nb.frozenRow(p.*);
     }
-    return .{ .circuit = circuit, .deck = .{
+    const plan: variants.Plan = if (run.point) |pt| blk: {
+        var planner = try variants.Planner.init(lib, sim_arena, parse_arena, nl, &circuit, cards, "");
+        var own = pt;
+        own.label = run.prefix;
+        try planner.add(own);
+        break :blk .{ .variants = try planner.table(), .fanout = .{ .global = .{ .count = 1, .nominal = false }, .only = run.card } };
+    } else if (run.prefix.len != 0 or variants.any(nl.deck)) blk: {
+        var planner = try variants.Planner.init(lib, sim_arena, parse_arena, nl, &circuit, cards, run.prefix);
+        break :blk try variants.plan(&planner);
+    } else .{};
+    return .{ .circuit = circuit, .runs = plan.runs, .deck = .{
         .probes = out.probes,
         .probe_labels = out.probe_labels,
         .source_node = out.source_node,
@@ -152,7 +195,8 @@ pub fn build(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_are
         .deck_tol = deck_opts.tol,
         .deck_temp = deck_opts.temp_c,
         .deck_method = deck_opts.method,
-        .queries = try analyses.queries(sim_arena, cards_rows, false, out.bindings, cards, deck_opts),
+        .queries = try analyses.queries(sim_arena, cards_rows, false, out.bindings, cards, deck_opts, plan.fanout),
+        .variants = plan.variants,
         .bindings = out.bindings,
         .cards = cards,
         .ac_overrides = try acOverrides(sim_arena, cards, nb.ac_res.items(.name), nb.ac_res.items(.value)),
@@ -226,7 +270,7 @@ pub fn resolveQueries(arena: std.mem.Allocator, prepared: *const Prepared, direc
         .tol = prepared.deck.deck_tol,
         .method = prepared.deck.deck_method,
         .temp_c = prepared.deck.deck_temp,
-    });
+    }, .{});
 }
 
 /// Each `ac=` resistance as a (type, instance, parameter) override, so every

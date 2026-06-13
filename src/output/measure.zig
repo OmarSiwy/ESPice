@@ -60,6 +60,47 @@ fn targets(m: core.Measure, analysis: Kind, result: core.Result) bool {
     return true;
 }
 
+/// Mean, sigma, min and max of each card over Monte Carlo trials, as
+/// `mean(name) = x` lines (sigma with Bessel's correction). `trials` holds
+/// the results the cards are evaluated over; a card that fails in a trial
+/// leaves that trial out.
+pub fn printStatistics(out: *Writer, measures: []const core.Measure, analysis: Kind, trials: []const core.Result) Writer.Error!void {
+    var discard_buf: [64]u8 = undefined;
+    var discard: Writer.Discarding = .init(&discard_buf);
+    var heading = false;
+    for (measures, 0..) |m, i| {
+        if (m.analysis != analysis or i >= 256) continue;
+        var n: f64 = 0;
+        var mean: f64 = 0;
+        var m2: f64 = 0;
+        var lo: f64 = std.math.inf(f64);
+        var hi: f64 = -std.math.inf(f64);
+        for (trials) |result| {
+            var values: [256]f64 = @splat(nan);
+            for (measures, 0..) |other, k| {
+                if (other.analysis != analysis or k >= values.len) continue;
+                if (other.func == .param and k > i) continue;
+                values[k] = evaluate(&discard.writer, other, .{ .result = result, .analysis = analysis, .values = &values }) catch nan;
+            }
+            const x = values[i];
+            if (!std.math.isFinite(x)) continue;
+            n += 1;
+            const delta = x - mean;
+            mean += delta / n;
+            m2 += delta * (x - mean);
+            lo = @min(lo, x);
+            hi = @max(hi, x);
+        }
+        if (n == 0) continue;
+        if (!heading) {
+            heading = true;
+            try out.print("\n  Monte Carlo statistics over {d} trials\n\n", .{trials.len});
+        }
+        const sigma = if (n > 1) @sqrt(m2 / (n - 1)) else 0;
+        try out.print("mean({s}) = {f}\nsigma({s}) = {f}\nmin({s}) = {f}\nmax({s}) = {f}\n", .{ m.name, sci(mean, 6), m.name, sci(sigma, 6), m.name, sci(lo, 6), m.name, sci(hi, 6) });
+    }
+}
+
 /// Prints card `m` and returns its result, the value a PARAM card reads.
 fn evaluate(out: *Writer, m: core.Measure, w: Wave) !f64 {
     const a = m.first;

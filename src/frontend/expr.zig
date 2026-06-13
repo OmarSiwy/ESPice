@@ -16,6 +16,9 @@ pub const Code = enum(u8) {
     num,
     /// A name no scope defines. Final ops: a = 1 for `l`, `w`, `mult`.
     ident,
+    /// A swept global parameter kept symbolic: a indexes the live table
+    /// (`fold`'s `live`). Only netlist.zig `subst` emits it.
+    live,
     /// `v(p[,n])`: a, b are the nets (names before `subst`), `none` if absent.
     vprobe,
     /// `i(device)`; the device is not kept.
@@ -39,19 +42,27 @@ pub const Code = enum(u8) {
     call,
 };
 
-/// Built-in functions; `other` is any name the table does not know.
-/// `agauss` stands for every statistical distribution (`agauss`, `gauss`,
-/// `unif`, `aunif`) and `limit` for HSPICE's `limit(nom, var)`: outside
-/// Monte Carlo each folds to its nominal, the first argument.
-pub const Fn = enum(u8) { sqrt, abs, min, max, pow, exp, ln, log, log10, sin, cos, tan, atan, floor, ceil, ternary, tanh, agauss, limit, other };
+/// Built-in functions; `other` is any name the table does not know. The
+/// statistical distributions `agauss`, `gauss`, `unif`, `aunif` and HSPICE's
+/// `limit(nom, var)` fold to their nominal, the first argument; a Monte Carlo
+/// trial draws them instead (`eval`).
+pub const Fn = enum(u8) { sqrt, abs, min, max, pow, exp, ln, log, log10, sin, cos, tan, atan, floor, ceil, ternary, tanh, agauss, gauss, unif, aunif, limit, other };
+
+/// True for the functions a Monte Carlo trial draws.
+pub fn isDistribution(f: Fn) bool {
+    return switch (f) {
+        .agauss, .gauss, .unif, .aunif, .limit => true,
+        else => false,
+    };
+}
 
 const fns = std.StaticStringMap(Fn).initComptime(.{
-    .{ "sqrt", .sqrt },   .{ "abs", .abs },       .{ "min", .min },      .{ "max", .max },
-    .{ "pow", .pow },     .{ "exp", .exp },       .{ "ln", .ln },        .{ "log", .log },
-    .{ "log10", .log10 }, .{ "sin", .sin },       .{ "cos", .cos },      .{ "tan", .tan },
-    .{ "atan", .atan },   .{ "floor", .floor },   .{ "ceil", .ceil },    .{ "ternary", .ternary },
-    .{ "tanh", .tanh },   .{ "agauss", .agauss }, .{ "gauss", .agauss },  .{ "unif", .agauss },
-    .{ "aunif", .agauss }, .{ "limit", .limit },
+    .{ "sqrt", .sqrt },   .{ "abs", .abs },       .{ "min", .min },     .{ "max", .max },
+    .{ "pow", .pow },     .{ "exp", .exp },       .{ "ln", .ln },       .{ "log", .log },
+    .{ "log10", .log10 }, .{ "sin", .sin },       .{ "cos", .cos },     .{ "tan", .tan },
+    .{ "atan", .atan },   .{ "floor", .floor },   .{ "ceil", .ceil },   .{ "ternary", .ternary },
+    .{ "tanh", .tanh },   .{ "agauss", .agauss }, .{ "gauss", .gauss }, .{ "unif", .unif },
+    .{ "aunif", .aunif }, .{ "limit", .limit },
 });
 
 /// One postfix op.
@@ -313,55 +324,60 @@ fn bool01(b: bool) f64 {
 }
 
 /// Folds final ops (after `subst`) to a value; `stack` is reused scratch.
-/// `geometry` lets model-card `l`/`w`/`mult` vanish behind a zero switch.
-pub fn fold(gpa: std.mem.Allocator, stack: *std.ArrayList(Val), ops: []const Op, consts: []const f64, geometry: bool) Error!Val {
+/// `geometry` lets model-card `l`/`w`/`mult` vanish behind a zero switch;
+/// `live` holds the current value of each `.live` operand.
+pub fn fold(gpa: std.mem.Allocator, stack: *std.ArrayList(Val), ops: []const Op, consts: []const f64, geometry: bool, live: []const f64) Error!Val {
     stack.clearRetainingCapacity();
-    for (ops) |op| {
-        const v: Val = switch (op.code) {
-            .num => .of(consts[op.a]),
-            .ident => .unknown(geometry and op.a == 1),
-            .vprobe, .iprobe => .unknown(false),
-            .neg, .not => blk: {
-                const x = stack.pop().?;
-                if (!x.known) break :blk .unknown(x.isNominal());
-                break :blk .of(if (op.code == .neg) -x.num else bool01(x.num == 0));
-            },
-            .call => blk: {
-                const argc: usize = op.b;
-                const args = stack.items[stack.items.len - argc ..];
-                const result = call(@enumFromInt(op.a), args);
-                stack.shrinkRetainingCapacity(stack.items.len - argc);
-                break :blk result;
-            },
-            else => blk: {
-                const b = stack.pop().?;
-                const a = stack.pop().?;
-                if (op.code == .mul and ((a.known and a.num == 0 and !b.known and b.nominal) or
-                    (b.known and b.num == 0 and !a.known and a.nominal))) break :blk .of(0);
-                if (!a.known or !b.known) break :blk .unknown(a.isNominal() and b.isNominal());
-                const x = a.num;
-                const y = b.num;
-                break :blk .of(switch (op.code) {
-                    .add => x + y,
-                    .sub => x - y,
-                    .mul => x * y,
-                    .div => x / y,
-                    .pow => std.math.pow(f64, x, y),
-                    .lt => bool01(x < y),
-                    .gt => bool01(x > y),
-                    .le => bool01(x <= y),
-                    .ge => bool01(x >= y),
-                    .eq => bool01(x == y),
-                    .ne => bool01(x != y),
-                    .@"and" => bool01(x != 0 and y != 0),
-                    .@"or" => bool01(x != 0 or y != 0),
-                    else => unreachable,
-                });
-            },
-        };
-        try stack.append(gpa, v);
-    }
+    for (ops) |op| try step(gpa, stack, op, consts, geometry, live);
     return stack.pop().?;
+}
+
+/// Applies one postfix op to the value stack.
+fn step(gpa: std.mem.Allocator, stack: *std.ArrayList(Val), op: Op, consts: []const f64, geometry: bool, live: []const f64) Error!void {
+    const v: Val = switch (op.code) {
+        .num => .of(consts[op.a]),
+        .live => .of(live[op.a]),
+        .ident => .unknown(geometry and op.a == 1),
+        .vprobe, .iprobe => .unknown(false),
+        .neg, .not => blk: {
+            const x = stack.pop().?;
+            if (!x.known) break :blk .unknown(x.isNominal());
+            break :blk .of(if (op.code == .neg) -x.num else bool01(x.num == 0));
+        },
+        .call => blk: {
+            const argc: usize = op.b;
+            const args = stack.items[stack.items.len - argc ..];
+            const result = call(@enumFromInt(op.a), args);
+            stack.shrinkRetainingCapacity(stack.items.len - argc);
+            break :blk result;
+        },
+        else => blk: {
+            const b = stack.pop().?;
+            const a = stack.pop().?;
+            if (op.code == .mul and ((a.known and a.num == 0 and !b.known and b.nominal) or
+                (b.known and b.num == 0 and !a.known and a.nominal))) break :blk .of(0);
+            if (!a.known or !b.known) break :blk .unknown(a.isNominal() and b.isNominal());
+            const x = a.num;
+            const y = b.num;
+            break :blk .of(switch (op.code) {
+                .add => x + y,
+                .sub => x - y,
+                .mul => x * y,
+                .div => x / y,
+                .pow => std.math.pow(f64, x, y),
+                .lt => bool01(x < y),
+                .gt => bool01(x > y),
+                .le => bool01(x <= y),
+                .ge => bool01(x >= y),
+                .eq => bool01(x == y),
+                .ne => bool01(x != y),
+                .@"and" => bool01(x != 0 and y != 0),
+                .@"or" => bool01(x != 0 or y != 0),
+                else => unreachable,
+            });
+        },
+    };
+    try stack.append(gpa, v);
 }
 
 fn call(f: Fn, args: []const Val) Val {
@@ -374,7 +390,7 @@ fn call(f: Fn, args: []const Val) Val {
     const want: usize = switch (f) {
         .tanh, .other => return .unknown(false),
         // ponytail: nominal only; Monte Carlo sampling (C3) draws here.
-        .agauss => return if (args.len >= 2 and args.len <= 4 and args[0].known) args[0] else .unknown(args.len >= 2 and all_nominal),
+        .agauss, .gauss, .unif, .aunif => return if (args.len >= 2 and args.len <= 4 and args[0].known) args[0] else .unknown(args.len >= 2 and all_nominal),
         .limit => return if (args.len == 2 and args[0].known) args[0] else .unknown(false),
         .ternary => 3,
         .pow, .min, .max => 2,
@@ -403,14 +419,14 @@ fn call(f: Fn, args: []const Val) Val {
         .atan => std.math.atan(a),
         .floor => @floor(a),
         .ceil => @ceil(a),
-        .ternary, .tanh, .agauss, .limit, .other => unreachable,
+        .ternary, .tanh, .agauss, .gauss, .unif, .aunif, .limit, .other => unreachable,
     });
 }
 
 /// Operands an op pops.
 pub fn arity(op: Op) u32 {
     return switch (op.code) {
-        .num, .ident, .vprobe, .iprobe => 0,
+        .num, .ident, .live, .vprobe, .iprobe => 0,
         .neg, .not => 1,
         .call => op.b,
         else => 2,
@@ -439,4 +455,28 @@ pub fn operands(ops: []const Op, end: usize, out: []usize) []usize {
         last = subtreeStart(ops, last);
     }
     return out[0..@min(n, out.len)];
+}
+
+/// Evaluates ops that fold to a number: constants, `.live` operands and
+/// arithmetic, as `fold` would, except that the distribution call ending at
+/// op `i` returns `draw.value(i, f, args)` when `draw` is not null. `stack`
+/// is reused scratch. Ops `fold` leaves unknown evaluate to NaN.
+pub fn eval(gpa: std.mem.Allocator, stack: *std.ArrayList(Val), ops: []const Op, consts: []const f64, live: []const f64, draw: anytype) Error!f64 {
+    stack.clearRetainingCapacity();
+    for (ops, 0..) |op, i| {
+        if (op.code == .call and @TypeOf(draw) != @TypeOf(null) and isDistribution(@enumFromInt(op.a))) {
+            const argc: usize = op.b;
+            var nums: [4]f64 = @splat(0);
+            const args = stack.items[stack.items.len - argc ..];
+            for (args, 0..) |a, k| if (k < nums.len) {
+                nums[k] = if (a.known) a.num else std.math.nan(f64);
+            };
+            stack.shrinkRetainingCapacity(stack.items.len - argc);
+            try stack.append(gpa, .of(draw.value(i, @enumFromInt(op.a), nums[0..@min(argc, nums.len)])));
+            continue;
+        }
+        try step(gpa, stack, op, consts, false, live);
+    }
+    const top = stack.pop().?;
+    return if (top.known) top.num else std.math.nan(f64);
 }
