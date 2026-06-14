@@ -293,6 +293,34 @@ test "V card: PWL td= and r= suffixes bind, and r=0 means repeat" {
     try std.testing.expectEqual(@as(u8, 2), seen);
 }
 
+test "branch probes land on the branch row when the card's nets are new" {
+    // Each card's first net (and B1's probed net c) is new to the builder
+    // when the card is added, so the device's internal rows start past them.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const nl = try netlist.parse(a, "* probes\nB1 x 0 V=2*V(c)\nE1 y 0 d 0 3\nV1 c 0 1\nV2 d 0 1\n.end\n", .ngspice);
+    const lib = try device.Library.init(a);
+    var b = try Builder.init(a, &lib);
+    var compiled = false;
+    defer if (!compiled) b.deinit();
+    var nb = try builder.NetBuilder.init(a, &b, nl);
+    try nb.build();
+    var circuit = try b.compile();
+    compiled = true;
+    defer circuit.deinit();
+    const published = try nb.publish(a, &circuit, null);
+    var found: u8 = 0;
+    for (published.probe_labels, published.probes) |label, row| {
+        if (label[0] != 'i') continue;
+        // No branch column may alias a named node's row.
+        for (1..circuit.n) |i| if (circuit.nodeName(@intCast(i)).len != 0)
+            try std.testing.expect(row != i);
+        found += 1;
+    }
+    try std.testing.expectEqual(@as(u8, 4), found);
+}
+
 test "compile frees the BBD permutation it does not return" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

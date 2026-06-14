@@ -825,22 +825,20 @@ pub const NetBuilder = struct {
             },
             'f', 'h', 'w', 'k' => try self.deferred.append(self.arena, dev),
             'b' => {
-                const first = self.b.n;
                 // Only a V-mode B gets an i() column: ngspice makes the branch
                 // only for ASRC_VOLTAGE (asrcset.c:81-88). Our bsource declares
                 // the unknown either way; the I-mode one stays unprobed rather
                 // than published as a column ngspice never writes.
                 if (try addBsource(self, dev))
-                    try self.addBranchProbe(dev.name, internalRow(devices.bsource, "br", first));
+                    try self.addBranchProbe(dev.name, internalRow(devices.bsource, "br", self.b.n));
             },
             'p' => try self.addCpl(dev),
             'o' => try self.addLossyLine(dev),
             'y' => try self.addTxl(dev),
             'u' => try self.addUrc(dev),
             'e' => {
-                const first = self.b.n;
                 try self.addByLetter(letter, dev);
-                try self.addBranchProbe(dev.name, internalRow(devices.vcvs, "flowZ28pZ2cnZ29", first));
+                try self.addBranchProbe(dev.name, internalRow(devices.vcvs, "flowZ28pZ2cnZ29", self.b.n));
             },
             else => try self.addByLetter(letter, dev),
         }
@@ -1164,14 +1162,13 @@ pub const NetBuilder = struct {
         switch (try resolveDeviceId(letter, dev)) {
             inline else => |comptime_id| {
                 const D = devices.DeviceId.Type(comptime_id);
-                const first = self.b.n;
                 try addSingleDevice(self, D, dev);
                 // ngspice's VBIC `i(q1)` is its excess-phase branch, made only
                 // when TD > 0 (vbicsetup.c:510-525). Node xf2 carries only a
                 // 1 ohm load, so that current equals v(xf2): alias the column.
                 if (comptime_id == .vbic13_4t) {
                     const td = kvNumber(dev.kv, "td") orelse if (dev.model) |m| kvNumber(m.kv, "td") orelse 0 else 0;
-                    if (td > 0) try self.addBranchProbe(dev.name, internalRow(D, "xf2", first));
+                    if (td > 0) try self.addBranchProbe(dev.name, internalRow(D, "xf2", self.b.n));
                 }
             },
         }
@@ -1271,15 +1268,14 @@ pub const NetBuilder = struct {
             self.v.items(.pos)[ctrl],
             self.v.items(.neg)[ctrl],
         };
-        const first = self.b.n;
         try self.b.addDevice(D, dev.name, model, instance, nodes);
 
         // The sensed source's current lives on this model's control branch;
         // its `i(v...)` column reads that row (ngspice cccsset.c:47).
-        self.v.items(.branch)[ctrl] = internalRow(D, "flowZ28cpZ2ccnZ29", first);
+        self.v.items(.branch)[ctrl] = internalRow(D, "flowZ28cpZ2ccnZ29", self.b.n);
         // H also carries its own output branch, and ngspice names it i(h1).
         if (comptime @hasDecl(D, "U") and D == devices.ccvs)
-            try self.addBranchProbe(dev.name, internalRow(D, "flowZ28pZ2cnZ29", first));
+            try self.addBranchProbe(dev.name, internalRow(D, "flowZ28pZ2cnZ29", self.b.n));
     }
 
     /// K card: mutual inductance between two L cards' branches.
@@ -1735,24 +1731,28 @@ fn modelLevel(dev: Device) !u16 {
     return 1;
 }
 
-/// Row `Builder.addDevice` gave `D`'s internal unknown `tag`, where `first`
-/// is `b.n` sampled before the call (internal rows follow `D.U` order).
+/// Row `Builder.addDevice` gave `D`'s internal unknown `tag`, where `end`
+/// is `b.n` sampled right after the call. Internal rows follow `D.U` order
+/// and end at `end`, so the precondition is that no internal after `tag`
+/// collapsed onto another node. Counting from the end, not from `b.n`
+/// before the call, keeps it right when the card's own pins or probed nets
+/// take fresh rows inside the call, and when an earlier internal collapses.
 ///
 /// VerA names a Verilog-A `branch (a, b)` as the U member `flowZ28aZ2cbZ29`
 /// (`(` = Z28, `,` = Z2c, `)` = Z29). Naming the member rather than writing
 /// `first + 1` makes a wrong branch a compile error instead of a mislabelled
 /// current column: ccvs declares two branches, the sense one first.
-fn internalRow(comptime D: type, comptime tag: []const u8, first: u32) u32 {
+fn internalRow(comptime D: type, comptime tag: []const u8, end: u32) u32 {
     const off = comptime blk: {
         for (@typeInfo(D.U).@"enum".fields, 0..) |f, i| {
             if (std.mem.eql(u8, f.name, tag)) {
                 if (i < D.num_ports) @compileError(@typeName(D) ++ ": `" ++ tag ++ "` is a port, not an internal unknown");
-                break :blk i - D.num_ports;
+                break :blk @typeInfo(D.U).@"enum".fields.len - i;
             }
         }
         @compileError(@typeName(D) ++ ": no unknown named `" ++ tag ++ "`");
     };
-    return first + @as(u32, @intCast(off));
+    return end - @as(u32, @intCast(off));
 }
 
 fn copyNames(arena: std.mem.Allocator, names: []const []const u8) ![]const []const u8 {
