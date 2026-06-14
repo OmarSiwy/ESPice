@@ -99,7 +99,7 @@ module isource(p, n);
     parameter real pwl_times[0:63]  = '{0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
     parameter real pwl_values[0:63] = '{0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
     parameter integer pwl_len = 0;    //    points filled
-    parameter real pwl_repeat = 0.0;  // s  `r=<t>`: replay [r, t_last]
+    parameter real pwl_repeat = -1.0; // s  `r=<t>`: replay [r, t_last]; < 0 = no repeat
     parameter real pwl_td     = 0.0;  // s  `td=<t>`
 
     // ---- SFFM(IO IA FM MDI FC TD PHASEM PHASEC) -----------------------------
@@ -267,7 +267,7 @@ module isource(p, n);
 
                 // `r=<t>`: past the last point, jump back to time r and replay
                 // [r, t_last] forever.
-                if (pwl_repeat > 0.0 && pwl_len > 1 && t_e > t_last && t_last > pwl_repeat) begin
+                if (pwl_repeat >= 0.0 && pwl_len > 1 && t_e > t_last && t_last > pwl_repeat) begin
                     span = t_last - pwl_repeat;
                     if (span > 0.0) begin
                         excess = t_e - pwl_repeat;

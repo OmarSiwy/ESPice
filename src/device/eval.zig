@@ -1120,7 +1120,7 @@ fn spicePwlBreak(m: anytype, t_acc: f64, tq: f64) ?f64 {
     const n: usize = @min(@as(usize, @intCast(m.pwl_len)), cap);
     const t_last = ts[n - 1];
     const r = m.pwl_repeat;
-    const repeats = r > 0.0 and n > 1 and t_last > r;
+    const repeats = r >= 0.0 and n > 1 and t_last > r;
     const period = t_last - r;
     var time = t_acc - m.pwl_td;
     if (time > t_last) {
@@ -1146,7 +1146,7 @@ test "spicePwlBreak rounds from the request time as ngspice does" {
     const M = struct {
         waveform: i64 = 4,
         pwl_len: i64 = 3,
-        pwl_repeat: f64 = 0,
+        pwl_repeat: f64 = -1,
         pwl_td: f64 = 0,
         pwl_timesZ5b0Z5d: f64 = 0,
         pwl_timesZ5b1Z5d: f64 = 1.0e-9,
@@ -1169,6 +1169,9 @@ test "spicePwlBreak rounds from the request time as ngspice does" {
     const bp = spicePwlBreak(&m, 3.1e-9, 3.1e-9 + mb).?;
     try std.testing.expectApproxEqRel(@as(f64, 5.2e-9), bp, 1e-12);
     try std.testing.expectApproxEqRel(@as(f64, 7.3e-9), spicePwlBreak(&m, bp, bp + mb).?, 1e-12);
+    // `r=0` repeats the whole table (period 3.1n); a negative `r` is no repeat.
+    m = .{ .pwl_repeat = 0 };
+    try std.testing.expectApproxEqRel(@as(f64, 4.1e-9), spicePwlBreak(&m, 3.1e-9, 3.1e-9 + mb).?, 1e-12);
     // Not PWL: the caller falls back.
     m.waveform = 1;
     try std.testing.expectEqual(@as(?f64, null), spicePwlBreak(&m, 0, mb));
