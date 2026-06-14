@@ -52,6 +52,7 @@ pub fn any(deck: netlist.Deck) bool {
 pub fn plan(p: *Planner) !Plan {
     const nl = p.nl;
     const deck = nl.deck;
+    if (deck.optimize != null) return p.planOptimize();
     var fanout: analyses.Fanout = .{};
     const card_spans = try p.scratch.alloc(analyses.Fanout.Span, deck.analyses.len);
     @memset(card_spans, .{});
@@ -67,7 +68,7 @@ pub fn plan(p: *Planner) !Plan {
         span.nominal = a.sweep == .monte and !lanes;
         p.card = @intCast(ci);
         switch (a.sweep) {
-            .none => unreachable,
+            .none, .optimize => unreachable,
             .step => |st| for (st.values) |v| try p.addStep(&.{st}, &.{v}),
             .data => |name| {
                 const table = for (deck.data) |d| {
@@ -173,6 +174,24 @@ pub const Planner = struct {
         _ = p;
         if (!@import("builtin").is_test) std.log.err("variants: {s}: {s}", .{ what, line });
         return error.UnsupportedCard;
+    }
+
+    /// HSPICE `OPTIMIZE=`: row 0 is the optimized card's, row 1 every later
+    /// card's. Both start empty (the initial values) and receive the
+    /// optimum's writes once the optimizer has run (`Tuner`).
+    fn planOptimize(p: *Planner) !Plan {
+        const deck = p.nl.deck;
+        const spans = try p.sim.alloc(analyses.Fanout.Span, deck.analyses.len);
+        var card: ?u32 = null;
+        for (deck.analyses, spans, 0..) |a, *span, ci| {
+            if (a.sweep == .optimize) card = @intCast(ci) else if (a.sweep != .none) return p.refuse(a.line, "OPTIMIZE together with another SWEEP");
+            span.* = if (card) |c| .{ .first = @intFromBool(c != ci), .count = 1, .nominal = false } else .{};
+        }
+        if (deck.steps.len != 0 or deck.alters.len != 0) return p.refuse(deck.analyses[card.?].line, "OPTIMIZE together with .step or .alter");
+        const label = try std.fmt.allocPrint(p.sim, "optimize={s}", .{deck.optimize.?.name});
+        try p.closeRow(label, 0, null);
+        try p.closeRow(label, 0, null);
+        return .{ .variants = try p.table(), .fanout = .{ .cards = spans } };
     }
 
     /// The rows so far, copied into the session arena.
@@ -464,6 +483,110 @@ pub const Planner = struct {
         return ord;
     }
 };
+
+/// Turns optimizer points into variant rows (HSPICE `OPTIMIZE=`,
+/// docs/analysis/optimize.md): each point sets the optimized parameters'
+/// live values and goes through `Planner.add`, so it takes the same
+/// probe-mapped fast path as a `.step` point. Lives in the parse arena,
+/// with the netlist it re-evaluates.
+pub const Tuner = struct {
+    planner: Planner,
+    /// The optimized card's index in the deck's analyses.
+    card: u32,
+    /// The optimization, its parameters' initial values and names, and
+    /// the `.model OPT` options.
+    spec: netlist.Optimize,
+    initial: []const f64,
+    names: []const []const u8,
+    options: core.lm.Options,
+    /// The RESULTS cards' indices in the deck's `.meas` cards.
+    results: []const u32,
+
+    /// A tuner over the planner of the deck's main run.
+    pub fn init(planner: Planner) !Tuner {
+        const nl = planner.nl;
+        const spec = nl.deck.optimize.?;
+        const card: u32 = for (nl.deck.analyses, 0..) |a, ci| {
+            if (a.sweep == .optimize) break @intCast(ci);
+        } else unreachable;
+        const init_values = try planner.scratch.alloc(f64, spec.live.len);
+        const names = try planner.scratch.alloc([]const u8, spec.live.len);
+        for (spec.live, init_values, names) |k, *v, *name| {
+            v.* = nl.live.nominal[k];
+            name.* = nl.live.names[k];
+        }
+        const line = nl.deck.analyses[card].line;
+        const results = try planner.scratch.alloc(u32, spec.results.len);
+        for (spec.results, results) |name, *index| {
+            index.* = for (nl.deck.measures, 0..) |m, i| {
+                if (std.mem.eql(u8, m.name, name) and m.analysis == nl.deck.analyses[card].kind and m.goalError(0) != null) break @intCast(i);
+            } else return planner.refuse(line, "a RESULTS name that is no .meas card of this analysis with GOAL=");
+        }
+        return .{ .planner = planner, .card = card, .spec = spec, .initial = init_values, .names = names, .options = try optOptions(nl, spec.model, line), .results = results };
+    }
+
+    /// One row per point of `points` (the optimized parameters' values,
+    /// `spec.live.len` per point), allocated in `arena`. `nominal` is the
+    /// prepared circuit the rows write into.
+    pub fn rows(t: *Tuner, arena: std.mem.Allocator, nominal: *const device.Circuit, points: []const f64) !core.Variants {
+        const p = &t.planner;
+        p.nominal = nominal;
+        p.sim = arena;
+        inline for (.{ &p.labels, &p.temps, &p.axes, &p.write_refs, &p.write_values }) |list| list.clearRetainingCapacity();
+        p.starts.shrinkRetainingCapacity(1);
+        const live = try arena.dupe(f64, p.nl.live.nominal);
+        const n = t.spec.live.len;
+        var at: usize = 0;
+        while (at < points.len) : (at += n) {
+            for (t.spec.live, points[at..][0..n]) |k, v| live[k] = v;
+            try p.add(.{ .label = "", .axis = 0, .live = live });
+            if (p.runs.items.len != 0) return p.refuse(p.nl.deck.analyses[t.card].line, "an optimized value that changes the topology");
+        }
+        return p.table();
+    }
+};
+
+/// The optimizer options of `.model name OPT` [SA Ch.27]. METHOD other
+/// than LM, LEVEL other than 1 and unknown keys are refused; CENDIF is
+/// accepted and ignored.
+fn optOptions(nl: *const Netlist, name: []const u8, line: []const u8) !core.lm.Options {
+    const model = nl.findModel(name) orelse {
+        if (!@import("builtin").is_test) std.log.err("optimize: no .model {s} OPT: {s}", .{ name, line });
+        return error.UnsupportedCard;
+    };
+    var o: core.lm.Options = .{};
+    const Key = enum { itropt, relin, relout, close, cut, difsiz, parmin, grad, max, level, method, cendif };
+    const ok = std.mem.eql(u8, model.kind, "opt") and for (model.kv) |kv| {
+        const key = std.meta.stringToEnum(Key, kv.key) orelse break false;
+        if (key == .method) {
+            if (kv.value != .name or !std.mem.eql(u8, kv.value.name, "lm")) break false;
+            continue;
+        }
+        const v = switch (kv.value) {
+            .num => |v| v,
+            else => break false,
+        };
+        if (!(v > 0) or !std.math.isFinite(v)) break false;
+        switch (key) {
+            .itropt => o.itropt = std.math.lossyCast(u32, v),
+            .relin => o.relin = v,
+            .relout => o.relout = v,
+            .close => o.close = v,
+            .cut => o.cut = v,
+            .difsiz => o.difsiz = v,
+            .parmin => o.parmin = v,
+            .grad => o.grad = v,
+            .max => o.max = v,
+            .level => if (v != 1) break false,
+            .method, .cendif => {},
+        }
+    } else true;
+    if (!ok or o.cut <= 1) {
+        if (!@import("builtin").is_test) std.log.err("optimize: unsupported .model {s} OPT option: {s}", .{ name, line });
+        return error.UnsupportedCard;
+    }
+    return o;
+}
 
 fn refKey(a: std.mem.Allocator, t: core.DeviceType, name: []const u8) ![]const u8 {
     return std.fmt.allocPrint(a, "{d}:{s}", .{ @intFromEnum(t), name });

@@ -99,6 +99,26 @@ pub const Sweep = union(enum) {
     data: []const u8,
     monte: Monte,
     step: Step,
+    /// `SWEEP OPTIMIZE=`: the card is the one `Deck.optimize` fits.
+    optimize,
+};
+
+/// HSPICE optimization [SA Ch.27]: `<card> SWEEP OPTIMIZE=name
+/// RESULTS=m1,m2 MODEL=optmod` fits the `.param p = name(init, lo, hi
+/// [, dels])` and `OPTRANGE(...)` parameters to the `GOAL=` of the named
+/// `.meas` cards. The parameter columns are parallel.
+pub const Optimize = struct {
+    name: []const u8,
+    /// `.meas` card names.
+    results: []const []const u8,
+    /// The `.model name OPT` card with the optimizer's options.
+    model: []const u8,
+    /// Each parameter's row in `Live.names`; its nominal is the initial value.
+    live: []const u32,
+    lo: []const f64,
+    hi: []const f64,
+    /// Finite-difference step; 0 when not given.
+    dels: []const f64,
 };
 
 /// An inline `.data` table: one target per column, `values` row-major.
@@ -227,6 +247,8 @@ pub const Deck = struct {
     steps: []const Step = &.{},
     data: []const Data = &.{},
     variations: []const Variation = &.{},
+    /// The optimization of the deck's one `SWEEP OPTIMIZE=` card.
+    optimize: ?Optimize = null,
     /// Each `.alter` run's full source, cumulative, expanded; set by
     /// `prepare`.
     alters: []const []const u8 = &.{},
@@ -657,6 +679,7 @@ fn Reader(comptime S: type) type {
         live_ok: bool = false,
         /// Some card runs Monte Carlo.
         monte: bool = false,
+        optimize: ?Optimize = null,
         site_ops: std.ArrayList(u32) = .empty,
         site_keys: std.ArrayList(u64) = .empty,
         /// Key of the text whose distribution calls are being emitted, and
@@ -779,6 +802,7 @@ fn Reader(comptime S: type) type {
                     .steps = r.steps.items,
                     .data = r.data.items,
                     .variations = r.variations.items,
+                    .optimize = r.optimize,
                 },
             };
         }
@@ -1270,7 +1294,12 @@ fn Reader(comptime S: type) type {
             const tail = args[i + @intFromBool(args[i] == .name and std.mem.eql(u8, args[i].name, "sweep")) ..];
             if (tail.len < 2 or tail[0] != .name) return error.ParseError;
             const head = tail[0].name;
-            const sweep: Sweep = if (std.mem.eql(u8, head, "data")) blk: {
+            const sweep: Sweep = if (std.mem.eql(u8, head, "optimize")) blk: {
+                // ponytail: one optimization per deck.
+                if (r.optimize != null) return error.UnsupportedCard;
+                r.optimize = try r.readOptimize(tail);
+                break :blk .optimize;
+            } else if (std.mem.eql(u8, head, "data")) blk: {
                 if (tail.len != 2 or tail[1] != .name) return error.ParseError;
                 break :blk .{ .data = tail[1].name };
             } else if (std.mem.eql(u8, head, "monte")) blk: {
@@ -1298,6 +1327,88 @@ fn Reader(comptime S: type) type {
                 break :blk .{ .step = .{ .target = target, .values = try points(r.arena, .lin, n[0], n[1], n[2], .per_unit) } };
             };
             return .{ .args = args[0..i], .sweep = sweep };
+        }
+
+        /// `OPTIMIZE=name RESULTS=m1,m2 MODEL=optmod`, in any order, and the
+        /// parameters `name(...)` or `OPTRANGE(...)` define, registered live
+        /// at their initial values in deck order.
+        fn readOptimize(r: *R, tail: []const Value) Error!Optimize {
+            var opt: Optimize = .{ .name = "", .results = &.{}, .model = "", .live = &.{}, .lo = &.{}, .hi = &.{}, .dels = &.{} };
+            var results: std.ArrayList([]const u8) = .empty;
+            const Key = enum { none, optimize, results, model };
+            var key: Key = .none;
+            for (tail) |v| {
+                if (v != .name) return error.ParseError;
+                if (std.meta.stringToEnum(Key, v.name)) |k| {
+                    key = k;
+                    continue;
+                }
+                switch (key) {
+                    .optimize => opt.name = v.name,
+                    .model => opt.model = v.name,
+                    .results => try results.append(r.arena, v.name),
+                    .none => return error.ParseError,
+                }
+            }
+            if (opt.name.len == 0 or opt.model.len == 0 or results.items.len == 0) return error.ParseError;
+            opt.results = results.items;
+            const Def = struct { key: []const u8, text: []const u8 };
+            var defs: std.ArrayList(Def) = .empty;
+            var it = r.globals.iterator();
+            while (it.next()) |e| if (e.value_ptr.* == .text) {
+                const text = e.value_ptr.text;
+                const paren = std.mem.indexOfScalar(u8, text, '(') orelse continue;
+                const head = std.mem.trim(u8, text[0..paren], " \t{'");
+                if (std.mem.eql(u8, head, opt.name) or std.mem.eql(u8, head, "optrange"))
+                    try defs.append(r.arena, .{ .key = e.key_ptr.*, .text = text[paren..] });
+            };
+            if (defs.items.len == 0) return error.ParseError;
+            // Deck order: every definition's text is a slice of the deck.
+            std.mem.sort(Def, defs.items, {}, struct {
+                fn less(_: void, a: Def, b: Def) bool {
+                    return @intFromPtr(a.text.ptr) < @intFromPtr(b.text.ptr);
+                }
+            }.less);
+            const n = defs.items.len;
+            const live = try r.arena.alloc(u32, n);
+            const lo = try r.arena.alloc(f64, n);
+            const hi = try r.arena.alloc(f64, n);
+            const dels = try r.arena.alloc(f64, n);
+            const top: Frame = .{ .scopes = &r.global_scopes };
+            for (defs.items, live, lo, hi, dels) |d, *k, *l, *u, *h| {
+                // `(init, lo, hi[, dels])`, each a number or an expression.
+                const close = std.mem.lastIndexOfScalar(u8, d.text, ')') orelse return error.ParseError;
+                var args: [4]f64 = @splat(0);
+                var count: usize = 0;
+                var depth: u32 = 0;
+                var start: usize = 1;
+                for (d.text[1 .. close + 1], 1..) |c, i| {
+                    if (c == '(') depth += 1;
+                    if (c == ')' and depth > 0) {
+                        depth -= 1;
+                        continue;
+                    }
+                    if (depth != 0 or (c != ',' and i != close)) continue;
+                    if (count == args.len) return error.ParseError;
+                    args[count] = switch (try r.exprValue(d.text[start..i], &top, false)) {
+                        .num => |x| x,
+                        else => return error.ParseError,
+                    };
+                    count += 1;
+                    start = i + 1;
+                }
+                if (count < 3 or !(args[1] <= args[0] and args[0] <= args[2] and args[1] < args[2])) return error.ParseError;
+                r.globals.getPtr(d.key).?.* = .{ .num = args[0] };
+                k.* = (try r.liveParam(d.key)).?;
+                l.* = args[1];
+                u.* = args[2];
+                h.* = args[3];
+            }
+            opt.live = live;
+            opt.lo = lo;
+            opt.hi = hi;
+            opt.dels = dels;
+            return opt;
         }
 
         /// A positive integer argument.

@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "analysis": "dc",
+  "purpose": "Two parameters against two GOALs, one exact solution.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "v(b) = 1 V puts 1 mA through the 1k foot: ra = 2 V / 1 mA, rb = 2 V / 1 mA."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "plots": [],
+    "checks": [
+      {
+        "kind": "measure",
+        "name": "ra",
+        "value": 2000.0,
+        "rtol": 1e-05,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "rb",
+        "value": 2000.0,
+        "rtol": 1e-05,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "va",
+        "value": 3.0,
+        "rtol": 1e-05,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "vb",
+        "value": 1.0,
+        "rtol": 1e-05,
+        "atol": 0
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "notes": [],
+  "netlist_sha256": "1d21c644cb5188f3966e32c9420f90e4c668248e0ae43121b043b7f46c480d11"
+}

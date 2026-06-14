@@ -6,6 +6,7 @@ pub const prepare = preparation.prepare;
 pub const parseDialect = preparation.parseDialect;
 pub const build = preparation.build;
 pub const Prepared = preparation.Prepared;
+pub const Tuner = @import("variants.zig").Tuner;
 pub const resolveQueries = preparation.resolveQueries;
 pub const Library = @import("device").Library;
 

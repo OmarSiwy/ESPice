@@ -149,7 +149,7 @@ the build-order id in the last column.
 | `.LIB 'f' corner` plus `.ALTER` with `.DEL LIB` [CR .LIB; SA Ch.4] | corners | `.lib` sections work (`frontend/source.zig`); no `.alter` (S2) | `alter` | very high | C1, M |
 | `.DATA` inline, `MER`, `LAM` [CR .DATA] | table-driven sweeps | parse error | no | high for characterization | C1 |
 | `.DESIGN_EXPLORATION` [CR; SA Ch.26] | design-space sweep block | no | no | low | E8, S after C1 |
-| `.MODEL m OPT [METHOD=BISECTION\|PASSFAIL] ...`, `p=OPTxxx(init,lo,hi)`, `OPTIMIZE= RESULTS= MODEL=` [CR .MODEL; SA Ch.27] | Levenberg-Marquardt fitting of parameters to `.MEASURE GOAL=` targets; bisection and pass/fail searches | no | no | medium to high for sizing and model fitting | C8, L |
+| `.MODEL m OPT [METHOD=BISECTION\|PASSFAIL] ...`, `p=OPTxxx(init,lo,hi)`, `OPTIMIZE= RESULTS= MODEL=` [CR .MODEL; SA Ch.27] | Levenberg-Marquardt fitting of parameters to `.MEASURE GOAL=` targets; bisection and pass/fail searches | LM: yes ([optimize.md](../analysis/optimize.md)); bisection, pass/fail: no | no | medium to high for sizing and model fitting | C8, L |
 | `.MEASURE ... pushout=` [CR .MEASURE (Pushout Bisection); SA Ch.19] | setup/hold search by bisection | no | no | medium for cell characterization | C8 |
 
 ### 2.4 Measurement and output
@@ -295,7 +295,7 @@ is an expression over earlier measure names, evaluated after the others in
 card order. `ERR`, `ERR1`, `ERR2` and `ERR3` compare two vectors over the
 sweep with the definitions in [SA Ch.11 "Error Equations"], including
 `MINVAL`, `IGNOR`/`YMIN` and `YMAX`. `GOAL`, `MINVAL` and `WEIGHT` are
-parsed and stored now and read by C8. C9 adds the `_CONT` forms, `EM_AVG`
+stored on the card and read by C8's optimizer. C9 adds the `_CONT` forms, `EM_AVG`
 (max(I⁺avg, I⁻avg) − R·min(...), where R is `.OPTION EM_RECOVERY`), and
 measures over the plots that B1, B4, B5 and C5 add.
 
@@ -486,6 +486,9 @@ applies. Bisection and pass/fail (`METHOD=BISECTION|PASSFAIL`, `pushout=`)
 are a 1-D root find over one parameter on one measure. HSPICE runs these
 serially, as far as its manual describes.
 
+Status: Levenberg-Marquardt landed; see [optimize.md](../analysis/optimize.md).
+Bisection, pass/fail and `pushout=` are refused.
+
 ### D1 to D7. RF
 
 Follow vacask-comparison G4. Phase A adds an orbit adapter (`hbOrbit`) and
@@ -569,7 +572,7 @@ tier, the smaller item with more users goes first.
 | 26 | D2 | Multi-tone sparse HB with lane preconditioner and phasors | L |
 | 27 | D4 | `.phasenoise` (METHOD=0, white sources: done, [phase-noise.md](../analysis/phase-noise.md)), then `.acphasenoise` | M, M |
 | 28 | C7 | HSPICE `.trannoise`, flicker noise, `.jitter` | M |
-| 29 | C8 | Optimization (LM, bisection, pass/fail, pushout) | L |
+| 29 | C8 | Optimization (LM: done, [optimize.md](../analysis/optimize.md); bisection, pass/fail, pushout) | L |
 | 30 | B6 | `.disto` SIM2/DIM2/DIM3 and the Rload form | M |
 | 31 | D5 | `.hblin`, `.hblsp` | M each |
 | 32 | D6 | `.ptdnoise`, `.sample` | M, S |

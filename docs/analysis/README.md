@@ -31,6 +31,7 @@ implemented.
 | [fourier-thd.md](fourier-thd.md) | `.four` harmonic extraction: final-period resample, FFT, THD | implemented |
 | [ensemble-sweeps.md](ensemble-sweeps.md) | Monte Carlo and temperature sweeps on structural lanes, seed policy | implemented |
 | [variants.md](variants.md) | `.step`, `.data`/`SWEEP`, `.alter` and statistical Monte Carlo over any analysis: live parameters, `ParamRef` rows, warm-started lanes | implemented |
+| [optimize.md](optimize.md) | HSPICE `OPTIMIZE=`: bounded Levenberg-Marquardt over live parameters, finite-difference points as parallel variant queries | implemented (LM only; bisection and pass/fail: not implemented) |
 | [transient-noise.md](transient-noise.md) | Time-domain noise synthesis ($\sigma = \sqrt{S/2h}$), BE rationale | implemented (white part only) |
 | [pss-shooting-harmonic-balance.md](pss-shooting-harmonic-balance.md) | Shooting Newton (dense FD or FD-matvec GMRES), harmonic balance, autonomous oscillators (`.snosc`, `.hbosc`) | implemented (saved-factor Krylov shooting: not implemented) |
 | [periodic-noise.md](periodic-noise.md) | LPTV small-signal, sideband folding, cyclostationary sources; `.pnoise` on the shooting orbit, `.hbnoise` on the HB orbit | implemented (dense conversion matrix) |
