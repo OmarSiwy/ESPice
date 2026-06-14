@@ -42,9 +42,5 @@
     "finite_values_required": true,
     "all_requested_analyses_must_complete": true
   },
-  "netlist_sha256": "98b5d72b5ce92ce8bc5719a876445393679734934cabacbbdfb4c4388aefdd9a",
-  "known_gaps": [
-    "the behavioral-source compiler only supports a limited single-control polynomial subset",
-    "periodic noise must distinguish genuine frequency conversion from an LTI circuit; extra LTI sidebands must not add noise"
-  ]
+  "netlist_sha256": "dbdd3b47c54c89713f91df3dcb2a9e26a366f9ed81fabb47e6b8ed138d0391e9"
 }
