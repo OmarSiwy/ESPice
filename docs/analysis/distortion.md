@@ -76,12 +76,15 @@ MOS1-3/9/BSIM1). This engine gets $F''$ **by finite-differencing the
 analytic Jacobian**:
 
 $$
-F''_{i,ab} \;\approx\; \frac{G_{ia}(x_0 + \epsilon e_b) - G_{ia}(x_0)}{\epsilon},
+F''_{i,ab} \;\approx\; \frac{G_{ia}(x_0 + \epsilon e_b) - G_{ia}(x_0 - \epsilon e_b)}{2\epsilon},
 $$
 
-one `eval` per unknown ($n$ evals total): first derivatives stay analytic,
+two `eval`s per unknown ($2n$ evals total): first derivatives stay analytic,
 only the *extra* order is FD, so the truncation error is one order better
-conditioned than FD-ing the residual twice.
+conditioned than FD-ing the residual twice. The difference is central
+because the forward one's $O(\epsilon F''')$ error was the whole residual of
+`disto/bench_disto_diode_clipper`'s 2nd-harmonic plot (err/tol 0.016-0.019
+forward, 2.1e-7 and 2.5e-7 central for v(out) and i(vin)).
 
 The third-order kernel is never stored: $F'''$ is $O(n^4)$ and its only use
 is the contraction $F'''[V_1, V_1, V_1]$. For a unit direction $u$ and
@@ -152,8 +155,8 @@ disto(ckt, x_op, f_range):
     eval(x_op); G, C = dense planes
     # second-order kernel: FD of the analytic Jacobian
     for b in 0..n:
-        eval(x_op + eps*e_b)
-        d2[:, :, b] = (denseG() - G)/eps
+        Gp = eval(x_op + eps*e_b); Gm = eval(x_op - eps*e_b)
+        d2[:, :, b] = (Gp - Gm)/(2*eps)
     eval(x_op)                          # restore planes
     for f in log_sweep(f_range):
         solve (G + jwC) V1 = 0.5*mag*e^{j*phase} * e[drive_branch]

@@ -1,7 +1,7 @@
 //! Distortion analysis (`.disto`) by a simplified Volterra series. One eval
 //! at the operating point gives the analytic G and C planes. The
-//! second-order kernel is a forward difference of the analytic Jacobian
-//! (d2F = dG/dx), one eval per unknown, and each frequency is a few dense
+//! second-order kernel is a central difference of the analytic Jacobian
+//! (d2F = dG/dx), two evals per unknown, and each frequency is a few dense
 //! solves.
 //!
 //! The third-order kernel is never stored. d3 is O(n^4) and its only use is
@@ -38,8 +38,9 @@ pub const Out = struct {
 
 /// Harmonic responses across the frequency sweep, into `out`:
 ///   1. Linearize at the operating point: one eval(), dense G and C.
-///   2. Second-order kernel d2F/dxa dxb = dG[.,a]/dx_b, differencing the
-///      analytic Jacobian at n perturbed points (only the extra order is FD).
+///   2. Second-order kernel d2F/dxa dxb = dG[.,a]/dx_b, a central difference
+///      of the analytic Jacobian at 2n perturbed points (only the extra
+///      order is FD).
 ///   3. For each frequency f:
 ///      a. Solve first-order: (G + jwC) * V1 = excitation
 ///      b. Second-order nonlinear current ½ F''(V1, V1) from the kernel
@@ -85,14 +86,16 @@ pub fn sweep(
     defer allocator.free(c_mat);
     ckt.denseC(c_mat);
 
-    // d2[row][a][b] ≈ (G(x_op + eps*e_b) − G(x_op))[row][a] / eps, kept as
-    // its nonzero terms only. Outside G's pattern both planes are 0, so
-    // only pattern slots can contribute.
+    // d2[row][a][b] ≈ (G(x_op + eps*e_b) − G(x_op − eps*e_b))[row][a] / 2eps,
+    // kept as its nonzero terms only. Outside G's pattern both planes are 0,
+    // so only pattern slots can contribute. Central, not forward: the
+    // forward difference's O(eps·d3) error was the whole 2nd-harmonic
+    // residual of disto/bench_disto_diode_clipper.
     const eps = options.fd_eps;
-    const inv_eps = 1.0 / eps;
+    const inv_2eps = 0.5 / eps;
     const nnz: usize = ckt.nnz;
-    const g0 = try allocator.dupe(f64, ckt.g_vals[0..nnz]);
-    defer allocator.free(g0);
+    const g_plus = try allocator.alloc(f64, nnz);
+    defer allocator.free(g_plus);
 
     const g_pert = try allocator.alloc(f64, n * n);
     defer allocator.free(g_pert);
@@ -107,9 +110,12 @@ pub fn sweep(
         simdCopy(x_pert, x_op[0..n]);
         x_pert[b] += eps;
         ckt.eval(x_pert, 0);
+        simdCopy(g_plus, ckt.g_vals[0..nnz]);
+        x_pert[b] = x_op[b] - eps;
+        ckt.eval(x_pert, 0);
         for (0..n) |a| for (ckt.col_ptr[a]..ckt.col_ptr[a + 1]) |slot| {
             // (-0 compares equal to 0 and is skipped; NaN is kept.)
-            const coeff = (ckt.g_vals[slot] - g0[slot]) * inv_eps;
+            const coeff = (g_plus[slot] - ckt.g_vals[slot]) * inv_2eps;
             if (coeff == 0) continue;
             try term_list.append(allocator, .{ .row = ckt.row_idx[slot], .a = @intCast(a), .b = @intCast(b), .coeff = coeff });
         };
