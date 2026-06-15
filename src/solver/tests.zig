@@ -1097,6 +1097,24 @@ const FreqSolveTests = struct {
             for (0..nn) |col| sum += a[col * nn + row] * y[col]; // A^T
             try testing.expectApproxEqAbs(rhs[row], sum, 1e-10);
         }
+
+        // As a complex system that is A^H y = b, A = G + jωC: row i of
+        // (G^T − jωC^T) y, not (G^T + jωC^T) y, reproduces b. Callers that
+        // need A^T's solution (acxf, PXF) conjugate.
+        const gm = [_]f64{ 1, 2, 3, 4 };
+        const cm = [_]f64{ 0.1, 0.2, 0.3, 0.4 };
+        for (0..2) |i| {
+            var re: f64 = 0;
+            var im: f64 = 0;
+            for (0..2) |k| {
+                const gr = gm[k * 2 + i];
+                const ci = -omega * cm[k * 2 + i];
+                re += gr * y[k] - ci * y[2 + k];
+                im += gr * y[2 + k] + ci * y[k];
+            }
+            try testing.expectApproxEqAbs(rhs[i], re, 1e-10);
+            try testing.expectApproxEqAbs(rhs[2 + i], im, 1e-10);
+        }
     }
 
     test "FreqSolver: setOmega then solveRhs preserves factorization across calls" {

@@ -207,7 +207,10 @@ pub const FreqSolver = struct {
         }
     }
 
-    /// Adjoint solve A^T x = rhs with the current factorization.
+    /// Adjoint solve with the current factorization: the transpose of the
+    /// stacked-real system, which as a complex system is A^H x = rhs
+    /// (A = G + jωC, so A^H = G^T − jωC^T). A caller that needs A^T's
+    /// solution conjugates this one; |x| is the same either way.
     pub fn solveRhsT(self: *Self, rhs: []const f64, x_out: []f64) !void {
         switch (self.strategy) {
             .dense => |*d| dense_lu.solveFactoredT(self.nn, d.a_lu, d.piv, rhs, x_out),
@@ -235,7 +238,8 @@ pub const FreqSolver = struct {
     /// (nr stacked 2n vectors), with `dyn`'s terms added to each A(ω), W
     /// frequencies per LaneLu pass;
     /// `x_out[(k*nr + r)*2n..][0..2n]` receives ω_k for rhs r, so one
-    /// factorization serves every rhs. `adjoint` selects A^T. The dense
+    /// factorization serves every rhs. `adjoint` selects A^H (see
+    /// `solveRhsT`), not A^T: conjugate the solution for A^T's. The dense
     /// strategy, a non-LU engine and any lane whose refactor fails take the
     /// per-ω scalar path. The scalar factorization afterwards holds some ω
     /// of the batch.
