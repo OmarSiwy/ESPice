@@ -44,7 +44,7 @@ itself, and any product built on it must credit NXP Semiconductors, Delft
 University of Technology and CEA in its documentation; this paragraph is that
 credit. The only edits are the module name, the escaped `\nmos`/`\pmos`
 parameter identifiers (Annex B keywords VerA rightly refuses as plain names)
-and the `NQSmodel` define (below).
+and the `NQSmodel` build split (below).
 It has no `$limit`, so Newton runs it unlimited. The MOSFET LEVEL is 1040,
 since ngspice-45 has no PSP LEVEL.
 
@@ -61,13 +61,21 @@ ring match only on VACASK's exact grid (VACASK itself scores 1.75e4x with the
 (the harness `oscillation` check, rtol 7e-3 and 1e-2) plus samples up to
 1.25 ns; the tolerance rationale is in the oracle's notes.
 
-The NQS model ships on (user decision). `PSP103_nqs_macrodefs.include` sits
-after `` `define OPderiv `` under `` `ifdef NQSmodel ``, where upstream's
-`psp103_nqs.va` includes it, and `` `define NQSmodel true `` is set, so
-every PSP instance carries 48 unknowns instead of 12: nine NQS nodes, nine
-of VerA's host-integrated `idt$k` and their 18 branch flows. None of them
-collapse at SWNQS=0, because SWNQS is a card parameter. Cards still default
-to SWNQS=0, the quasi-static model.
+PSP 103 ships as two devices, as upstream does. `psp103.va` leaves
+`NQSmodel` undefined and builds the quasi-static device (12 unknowns per
+instance). `psp103_nqs.va` defines `NQSmodel`, names the module
+`psp103_nqs` through `` `PSP103_MODULE `` and `` `include ``s `psp103.va`
+(build.zig `model_includes` hands VerA `models/` as its include directory).
+`PSP103_nqs_macrodefs.include` sits after `` `define OPderiv `` under
+`` `ifdef NQSmodel ``, where upstream's `psp103_nqs.va` includes it, so the
+NQS device carries 48 unknowns: nine NQS nodes, nine of VerA's
+host-integrated `idt$k` and their 18 branch flows, none of which collapse at
+SWNQS=0 because SWNQS is a card parameter. The frontend
+(`resolveDeviceId`) therefore picks `psp103_nqs` only for a card whose
+instance or model sets SWNQS != 0; every other PSP card runs the QS device.
+The generated QS device is byte-identical to VerA's output for the pre-NQS
+`psp103.va` (08e8d80^), and the NQS one to the previous single NQS build
+apart from its name.
 
 Checked against VACASK, which ran the same PSP 103.7 sources compiled by
 OpenVAF-r as `PSPNQS103VA`, on a 10u/10u nMOS at Vd = 1.2 V with the gate
@@ -77,25 +85,24 @@ from 50 ps after the edge to the end, drain and gate currents agree within
 NQS effect itself (SWNQS=1 minus SWNQS=0) is 9.011e-3 A in espice against
 9.015e-3 A in VACASK.
 
-Cost at SWNQS=0, measured against the QS build (main daa50f3). Callgrind
-instructions: `stress/vacask_ring` cut to 50 ns (18 instances, 1107 vs 1113
-steps) goes 0.84e9 -> 2.32e9 (2.8x). The post-layout `ring_psp103_1k` deck
-from `tests/benchmark/postlayout/gen.py`, cut to 200 ps (960 instances, 114
-steps both), goes 9.44e9 -> 19.7e9 (2.1x). Charge states double (vacask_ring
-n_qt 162 -> 324). Wall time on a loaded host (load average 160-300), best of
-three: vacask_ring 6.0 -> 11.1 s, ring_psp103_1k 18.7 -> 57.3 s,
-chain_psp103_1k 10.8 -> 26.5 s. The CUDA image grows from 7.8 MB to 34 MB
-of PTX, larger than hisimhv_va's, so the cold-JIT figure in build.zig's
-`gpu_max_model_bytes` table no longer holds for psp103. It was not
-re-measured.
+Why two devices: the NQS build at SWNQS=0 costs 2-3x the QS one. Callgrind
+instructions, `stress/vacask_ring` cut to 50 ns (18 instances): 2.325e9 on
+the NQS device against 0.837e9 on the QS device (2.8x; 0.84e9 -> 2.32e9 when
+08e8d80 first switched NQS on). Full deck wall time, best of three on a host
+at load average 15-25: 4.68 s NQS, 2.40 s QS. When NQS was on for every card,
+the post-layout `ring_psp103_1k` deck (960 instances, 200 ps) measured
+9.44e9 -> 19.7e9 instructions (2.1x). The NQS CUDA image is 34 MB of PTX
+against the QS device's 7.8 MB, larger than hisimhv_va's, so the cold-JIT
+figure in build.zig's `gpu_max_model_bytes` table does not hold for
+`psp103_nqs`. It has not been re-measured.
 
-Output at SWNQS=0: the extra unknowns change the matrix, so results match
-the QS build to roundoff but not bitwise. `chain`/`ring` post-layout decks
-at 200 ps keep the same time grid, with at most 4.9e-13 V difference. The
-`stress/vacask_ring` operating point moves 8.7e-12 V. The free-running ring
-grows that by about 10x per 300 ps until the time grid splits at 2.2 ns
-(20741 -> 20370 accepted points over 1 us). Its checked period and swing
-move 0.2564x -> 0.2565x of tolerance.
+At SWNQS=0 the two builds agree to roundoff, not bitwise: the extra unknowns
+change the matrix. `chain`/`ring` post-layout decks at 200 ps keep the same
+time grid, with at most 4.9e-13 V difference. The `stress/vacask_ring`
+operating point moves 8.7e-12 V, and the free-running ring grows that by
+about 10x per 300 ps until the time grid splits at 2.2 ns. Its checked
+period and swing read 0.25639x of tolerance on the QS device and 0.25634x on
+the NQS one.
 
 These originator attributions were written from memory and still need a
 check against the original sources: T. Ytterdal (hfet1, hfet2), Holger Vogt

@@ -1,0 +1,9 @@
+// PSP 103.7 with the NQS model compiled in: psp103.va (see its header for
+// the source, the edits and the CMC terms) with NQSmodel defined, as
+// upstream's psp103_nqs.va is PSP103_module.include with NQSmodel defined.
+// Each instance carries 48 unknowns instead of 12 (nine NQS nodes, nine
+// host-integrated idt$k and their 18 branch flows), so the frontend picks
+// this device only for a card that sets SWNQS != 0.
+`define NQSmodel true
+`define PSP103_MODULE psp103_nqs
+`include "psp103.va"

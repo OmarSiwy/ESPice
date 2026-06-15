@@ -136,6 +136,10 @@ pub fn build(b: *std.Build) void {
             run.addArgs(&.{ "--allow=W0650", "--allow=W0651", "--allow=W0850", "--color=never", "--check", "--contract" });
             run.addFileArg(vera.path("tools/contract.zig"));
         }
+        if (m.include) |inc| {
+            run.addArgs(&.{ "-I", b.pathFromRoot("models") });
+            run.addFileInput(b.path(b.fmt("models/{s}", .{inc})));
+        }
         run.addArg("-o");
         const gen_zig = run.addOutputFileArg(b.fmt("{s}.zig", .{m.name}));
         run.addFileArg(b.path(b.fmt("models/{s}", .{m.file})));
@@ -483,8 +487,19 @@ const Model = struct {
     file: []const u8,
     hdl: enum { verilog_a, digital },
     /// Source size in bytes, the configure-time stand-in for the size of the
-    /// device's eval function. Only the two GPU thresholds read it.
+    /// device's eval function. Only the two GPU thresholds read it. A
+    /// wrapper counts the file it includes.
     size: u64,
+    /// The models/ file this one `include`s (`model_includes`), or null.
+    include: ?[]const u8 = null,
+};
+
+/// Model sources that are a few defines and an `include of another models/
+/// file, as upstream PSP ships psp103_nqs.va next to psp103.va. VerA gets
+/// models/ as an include directory for them, and the included file becomes
+/// an input of their generate step.
+const model_includes = [_]struct { name: []const u8, file: []const u8 }{
+    .{ .name = "psp103_nqs", .file = "psp103.va" },
 };
 
 /// Whether `name` is one of the comma-separated entries of `csv`.
@@ -546,11 +561,20 @@ fn discoverModels(b: *std.Build) []const Model {
         if (e.kind != .file) continue;
         const m = matchExt(e.name) orelse continue;
         const st = dir.statFile(io, e.name, .{}) catch @panic("devices: models/ stat failed");
+        const name = e.name[0 .. e.name.len - m.ext.len];
+        const include = for (model_includes) |mi| {
+            if (std.mem.eql(u8, mi.name, name)) break mi.file;
+        } else null;
+        const inc_size = if (include) |f|
+            (dir.statFile(io, f, .{}) catch @panic("devices: models/ include missing")).size
+        else
+            0;
         out.append(b.allocator, .{
-            .name = b.dupe(e.name[0 .. e.name.len - m.ext.len]),
+            .name = b.dupe(name),
             .file = b.dupe(e.name),
             .hdl = m.hdl,
-            .size = st.size,
+            .size = st.size + inc_size,
+            .include = include,
         }) catch @panic("OOM");
     }
     std.mem.sort(Model, out.items, {}, struct {
