@@ -294,6 +294,13 @@ module hfet2(d, g, s);
         // as the small-signal caps, so the effective capacitance is exactly
         // capgs/capgd.  ddt(cgse*V()) would add a spurious V*dC/dV term, and
         // these caps are strongly bias-dependent (cgc, cg1, vsate, vdse, pcap).
+        // The Jacobian entry is geq = ag0*C with no dC/dV either (NIintegrate
+        // on capgs/capgd, hfet2load.c:251-258); vera_nodiff drops the dC/dV
+        // forward AD would otherwise stamp.
+        (* vera_nodiff *) begin
+            cgse = cgse;
+            cgde = cgde;
+        end
         I(g, sp)  <+ mult * (type_nfet * igs) + mult * cgse * ddt(V(g, sp));
         I(g, dp)  <+ mult * (type_nfet * igd) + mult * cgde * ddt(V(g, dp));
         I(dp, sp) <+ mult * (ids + gmin * V(dp, sp));
