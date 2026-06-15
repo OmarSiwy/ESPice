@@ -281,11 +281,14 @@ pub fn simulate(
     // LTE allows, and drop back to BE at breakpoints so trap does not ring
     // after a source edge.
     var use_be: bool = true;
-    // The breakpoint dt_next was clamped toward. Landing is tested after the
-    // step is accepted, so a rejected clamped step leaves no stale flag.
-    // bp_save_dt is spice3's CKTsaveDelta, the dt the LTE wanted before the clamp.
-    var bp_target: ?f64 = null;
-    var bp_save_dt: f64 = 0;
+    // ngspice's CKTbreaks[0] as the next step starts: the first breakpoint
+    // past t + min_break, and whether dt_next was clamped onto it. Landing is
+    // tested after the step is accepted, so a rejected step leaves no stale
+    // flag. bp_save_dt is spice3's CKTsaveDelta, the dt the LTE wanted before
+    // the last clamp; ngspice starts it at tstop/50 (dctran.c:318).
+    var bp_next: ?f64 = null;
+    var bp_clamped = false;
+    var bp_save_dt: f64 = options.t_stop / 50.0;
     var attempted_dt = dt;
 
     while (t < options.t_stop and steps < options.max_steps) {
@@ -472,9 +475,20 @@ pub fn simulate(
         // Landed on a breakpoint: drop to BE and resume at
         // 0.1*min(saveDelta, gap to the next break), spice3 dctran's rule,
         // which resolves paired edges instead of stepping over them. The
-        // history is kept; the promotion check re-promotes next step.
-        if (bp_target) |bp| {
-            if (@abs(t - bp) <= min_break) {
+        // history is kept; the promotion check re-promotes next step. A step
+        // that was not clamped lands too when it ends within 100 ulps of the
+        // breakpoint or delmin short of it (dctran.c:559); only min_break
+        // separates a clamped landing from its target. The line echoes are
+        // left out of that: they stand in for traload breakpoints ngspice
+        // sets only on a sharp input, and tran/bench_tline_delay_line steps
+        // through its t = td echo without a cut there.
+        if (bp_next) |bp| {
+            const landed = if (bp_clamped)
+                @abs(t - bp) <= min_break
+            else
+                (bp - t <= delmin or almostEqualUlps(t, bp, 100)) and
+                    std.mem.indexOfScalar(f64, echo_bps[0..n_echo], bp) == null;
+            if (landed) {
                 st.bp_landings += 1;
                 use_be = true;
                 // Re-emit one line delay later; dedupe within min_break and
@@ -499,7 +513,7 @@ pub fn simulate(
                 if (nextBp(ckt, echo_bps[0..n_echo], t + min_break)) |nb| shrink = @min(shrink, nb - t);
                 dt_next = @min(dt_next, 0.1 * shrink);
             }
-            bp_target = null;
+            bp_next = null;
         }
 
         // Stateful-charge devices: the commits above can move a device's q
@@ -537,12 +551,14 @@ pub fn simulate(
 
         // Clamp dt to land on the next breakpoint, skipping those within
         // min_break of now (ngspice CKTminBreak merge).
-        if (nextBp(ckt, echo_bps[0..n_echo], t + min_break)) |bp| {
+        bp_next = nextBp(ckt, echo_bps[0..n_echo], t + min_break);
+        bp_clamped = false;
+        if (bp_next) |bp| {
             const dt_to_bp = bp - t;
             if (dt_to_bp < dt_next) {
                 bp_save_dt = dt_next;
                 dt_next = dt_to_bp;
-                bp_target = bp;
+                bp_clamped = true;
             }
         }
 
@@ -617,4 +633,18 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 pub const test_access = if (@import("builtin").is_test) .{
     .W = W,
     .integrator = integrator,
+    .almostEqualUlps = almostEqualUlps,
 } else {};
+
+/// ngspice's AlmostEqualUlps (maths/misc/equality.c): `a` and `b` are at
+/// most `max_ulps` representable doubles apart, across zero included.
+fn almostEqualUlps(a: f64, b: f64, max_ulps: i64) bool {
+    if (a == b) return true;
+    const lex = struct {
+        fn f(x: f64) i128 {
+            const i: i64 = @bitCast(x);
+            return if (i < 0) @as(i128, std.math.minInt(i64)) - i else i;
+        }
+    }.f;
+    return @abs(lex(a) - lex(b)) <= max_ulps;
+}
