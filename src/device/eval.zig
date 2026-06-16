@@ -1071,17 +1071,29 @@ const SrcBrk = struct { req: f64 = std.math.inf(f64), at: f64 = std.math.inf(f64
 
 /// Models whose ngspice load extrapolates the first Newton iterate of a
 /// transient step over CKTdeltaOld[2], the step two back, where the host
-/// and the other models use the previous step (hfetload.c:129,
-/// mesaload.c:150). Every branch voltage these two read lies between
-/// internal nodes (gp/sp/dp, g1/s1/d1/s2/d2), so re-predicting only those
-/// reproduces ngspice's and leaves the ports' prediction to the other
-/// devices on them. hfet2 predicts the same way but reads its gate port
-/// directly, so it keeps the host's prediction.
-const delta_old2_predict = std.StaticStringMap(void).initComptime(.{ .{"hfet1"}, .{"mesa"} });
+/// and the other models use the previous step (hfetload.c:129). Every
+/// branch voltage hfet1 reads lies between its internal nodes gp/sp/dp, so
+/// re-predicting only those reproduces ngspice's and leaves the ports'
+/// prediction to the other devices on them. mesaload.c:150 and
+/// hfet2load.c:98 predict the same way; mesa stays off because it moved
+/// tran/device_mesa_oscillator away from ngspice (52.5x -> 57.7x), and
+/// hfet2 reads its gate port directly.
+const delta_old2_predict = std.StaticStringMap(void).initComptime(.{.{"hfet1"}});
 
 fn predictsOverDeltaOld2(comptime D: type) bool {
     return delta_old2_predict.get(comptime baseName(D)) != null;
 }
+
+/// Models whose ngspice load flags non-convergence itself when a branch
+/// current misses its linear prediction from the previous iterate
+/// (hfetload.c:389), checked host-side by `Circuit.loadCheck`. The MOS,
+/// BJT and diode tests are dead in ngspice (NIiter overwrites CKTnoncon).
+/// hfet2load.c:270 and mesaload.c:388 have the same test, but it moved
+/// tran/device_mesa_oscillator away from ngspice (52.5x -> 65x: mesa.va's
+/// series resistors are flow unknowns ngspice does not have, and their
+/// delta test already adds an iteration) and op/device_hfet2 only by
+/// roundoff, so both stay off.
+const load_check = std.StaticStringMap(void).initComptime(.{.{"hfet1"}});
 
 /// ngspice's PULSE breakpoint (vsrcacct.c:48-121, isrcacct.c the same): the
 /// corner after `tq`, requested at the accepted time `t_acc <= tq` and
@@ -1335,6 +1347,7 @@ pub fn DeviceBatch(comptime D: type) type {
             .advance_iteration = if (@hasDecl(D, "advanceIteration")) advanceIteration else null,
             .check_convergence = if (@hasDecl(D, "checkConvergence")) checkConvergence else null,
             .predict_first_iterate = if (predictsOverDeltaOld2(D)) predictFirstIterate else null,
+            .mark_load_check_rows = if (load_check.get(baseName(D)) != null) markInternalRows else null,
             .seed = if (@hasDecl(D, "seed")) seedFn else null,
             .seed_ic = if (idtUnknowns(D).len != 0) seedIc else null,
             .mark_current_rows = if (@hasDecl(D, "u_kinds")) markCurrentRows else null,
@@ -1433,6 +1446,16 @@ pub fn DeviceBatch(comptime D: type) type {
                 if (!D.checkConvergence(Real, &self.models[id], &self.instances[id], self.localX(x, id), self.sim)) return false;
             }
             return true;
+        }
+
+        fn markInternalRows(ctx: *anyopaque, mask: []bool) void {
+            const self: *Self = @ptrCast(@alignCast(ctx));
+            for (0..self.count) |id| {
+                inline for (D.num_ports..n_u) |u| if (comptime D.u_kinds[u] == .voltage) {
+                    const row = self.gath[id * n_u + u];
+                    if (row != GROUND) mask[row] = true;
+                };
+            }
         }
 
         fn predictFirstIterate(ctx: *anyopaque, trial: []f64, cur: []const f64, prev: []const f64, xfact: f64) void {

@@ -172,6 +172,11 @@ pub const Hooks = struct {
     /// Only models whose load predicts over another step than the host's
     /// dt/dt_prev have it (`predictsOverDeltaOld2` in eval.zig).
     predict_first_iterate: ?*const fn (*anyopaque, trial: []f64, cur: []const f64, prev: []const f64, xfact: f64) void = null,
+    /// Sets `mask[row]` for each internal node voltage of a model whose
+    /// ngspice load keeps its own current convergence test (the host's
+    /// `Circuit.loadCheck`); every device current into those rows is the
+    /// model's own.
+    mark_load_check_rows: ?*const fn (*anyopaque, mask: []bool) void = null,
     seed: ?*const fn (*anyopaque, []f64) void = null,
     /// Writes each LRM §4.5.4 `idt` initial condition into its operator
     /// unknown in `x`, for a transient that skips the operating point
@@ -430,7 +435,7 @@ pub const GpuPayload = struct {
 //    required.
 // 15: `Hooks.collect_ac_dyn`/`ac_dyn`, VerA's frequency-dependent entries.
 // 16: `Hooks.copy_state`, `Batch.digital`.
-// 17: `Hooks.predict_first_iterate`.
+// 17: `Hooks.predict_first_iterate`, `Hooks.mark_load_check_rows`.
 // GPU planes, Model/Instance PODs and scatter tapes are unchanged by 10 to 17.
 pub const abi_version: u32 = 17;
 
