@@ -336,6 +336,26 @@ test {
     _ = @import("analyses.zig");
 }
 
+test "Problem: .lin format=touchstone writes <deck>.s2p beside the deck with the noise block" {
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const origin = try std.fmt.allocPrint(t.allocator, ".zig-cache/tmp/{s}/amp.sp", .{tmp.sub_path});
+    defer t.allocator.free(origin);
+    const p = try api.Problem.init(t.allocator, t.io, .{
+        .source = .{ .bytes = .{
+            .data = "pad\nP1 a 0 port=1 z0=50\nR1 a b 50\nR2 b 0 50\nP2 b 0 port=2 z0=50\n.ac dec 1 1k 10k\n.lin noisecalc=1 format=touchstone\n.end\n",
+            .origin = origin,
+        } },
+        .dialect = .hspice,
+    });
+    defer p.deinit();
+    try p.run_all();
+    const written = try tmp.dir.readFileAlloc(t.io, "amp.s2p", t.allocator, .unlimited);
+    defer t.allocator.free(written);
+    try t.expect(std.mem.indexOf(u8, written, "# Hz S RI R 50\n1e3 ") != null);
+    try t.expect(std.mem.indexOf(u8, written, "! noise parameters\n1e3 ") != null);
+}
+
 test "Problem: parameter sweeps cannot mutate concurrently running transient state" {
     const input = "independent state\nV1 in 0 dc 1\nR1 in out 1k\nC1 out 0 1n\n.tran 1n 8n\n.end\n";
     const serial = try createLimited(input, 1);

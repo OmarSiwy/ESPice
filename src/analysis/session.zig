@@ -379,6 +379,11 @@ pub const Session = struct {
     }
 
     /// Returns a completed query's result, valid until `deinit`.
+    /// The request `id` was appended as.
+    pub fn query(self: *const Session, id: QueryId) !requests.Query {
+        return self.rows.items(.job)[try self.index(id)];
+    }
+
     pub fn result(self: *const Session, id: QueryId) !Result {
         const i = try self.index(id);
         if (self.effectiveStatus(i) != .complete) return error.ResultUnavailable;
@@ -533,10 +538,7 @@ pub fn schemaOf(allocator: std.mem.Allocator, topology: *const Circuit, deck: *c
         .hbac => |o| 2 + 2 * @as(usize, o.n_sidebands),
         .pxf => |o| 1 + (1 + 2 * @as(usize, o.n_harmonics)) * topology.n,
         .hbxf => |o| 1 + (1 + 2 * @as(usize, o.n_sidebands)) * topology.n,
-        .sp => |o| blk: {
-            const n = @max(o.ports.len, 1);
-            break :blk 1 + try std.math.mul(usize, n, n);
-        },
+        .sp => |o| @import("ac/sp.zig").columns(@max(o.ports.len, 1), o.lin),
         .sens, .dcmatch => blk: {
             var refs: std.ArrayList(ParamRef) = .empty;
             defer refs.deinit(allocator);

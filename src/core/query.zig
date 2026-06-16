@@ -14,9 +14,9 @@ pub const Method = enum { backward_euler, trapezoidal, gear_2 };
 pub const FreqSweep = @import("numerics.zig").FreqSweep;
 pub const SweepKind = @import("numerics.zig").SweepKind;
 
-/// One `.sp` port: the node and branch row of its source and its reference
-/// impedance in ohms.
-pub const Port = struct { node: u32, branch: u32, z0: f64 = 50.0 };
+/// One `.sp` port: the node rows and branch row of its source and its
+/// reference impedance in ohms. The port voltage is v(node) - v(neg).
+pub const Port = struct { node: u32, branch: u32, z0: f64 = 50.0, neg: u32 = 0 };
 
 /// The card name of one device instance.
 pub const CardRef = struct {
@@ -66,6 +66,25 @@ pub const Sp = struct {
     /// Explicit port list. Empty means one port at the deck's drive source
     /// (`Deck.source_node`/`source_branch`).
     ports: []const Port = &.{},
+    /// HSPICE `.lin` network parameters after S; null is the plain `.sp`
+    /// S matrix.
+    lin: ?Lin = null,
+
+    /// What `.lin` adds to the S matrix: Y and Z always, H for two or more
+    /// ports (from the port 1-2 block), then the optional group delays and
+    /// two-port noise parameters.
+    pub const Lin = struct {
+        /// `gdcalc=1`: the group delay of every S, Y, Z and H entry.
+        group_delay: bool = false,
+        /// `noisecalc=1`: NFMIN, NF, RN, YOPT and GAMMA_OPT between ports
+        /// 1 and 2, the others terminated in their z0.
+        noise: bool = false,
+        /// `format=touchstone`: the facade also writes the result as a
+        /// Touchstone file, `<file>.s<N>p` beside the deck.
+        touchstone: bool = false,
+        /// `filename=`; empty is the deck's file name without extension.
+        file: []const u8 = "",
+    };
 };
 
 pub const Stb = struct {

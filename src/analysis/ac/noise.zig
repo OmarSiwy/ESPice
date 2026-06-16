@@ -41,7 +41,7 @@ fn nintegrate(dens: f64, ln_dens: f64, ln_last_dens: f64, b: Band) f64 {
 }
 
 /// The source's PSD at `f`: white plus flicker / f^ef, in A^2/Hz.
-inline fn sourcePsd(src: NoiseSource, f: f64) f64 {
+pub inline fn sourcePsd(src: NoiseSource, f: f64) f64 {
     if (src.flicker == 0 or f <= 0) return src.white;
     return src.white + src.flicker / std.math.pow(f64, f, src.ef);
 }
