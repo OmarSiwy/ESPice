@@ -722,6 +722,13 @@ pub const Circuit = struct {
         self.publishSim();
     }
 
+    /// Lets each device that predicts its first transient iterate over the
+    /// step two back (`Hooks.predict_first_iterate`) overwrite its internal
+    /// unknowns in `trial` with `cur + xfact2 * (cur - prev)`.
+    pub fn predictFirstIterate(self: *const Circuit, trial: []f64, cur: []const f64, prev: []const f64, xfact2: f64) void {
+        for (self.batches) |b| if (b.hooks.predict_first_iterate) |f| f(b.ctx, trial, cur, prev, xfact2);
+    }
+
     /// Returns false when any device vetoes convergence at `x`.
     pub fn checkConvergence(self: *const Circuit, x: []const f64) bool {
         for (self.batches) |b| if (b.hooks.check_convergence) |f| {

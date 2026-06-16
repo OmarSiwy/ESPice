@@ -166,6 +166,12 @@ pub const Hooks = struct {
     /// previous x.
     advance_iteration: ?*const fn (*anyopaque, []const f64) void = null,
     check_convergence: ?*const fn (*anyopaque, []const f64) bool = null,
+    /// Overwrites the batch's internal voltage unknowns in `trial`, the
+    /// transient's first Newton iterate, with `cur + xfact * (cur - prev)`:
+    /// the last two accepted points extrapolated at the device's own ratio.
+    /// Only models whose load predicts over another step than the host's
+    /// dt/dt_prev have it (`predictsOverDeltaOld2` in eval.zig).
+    predict_first_iterate: ?*const fn (*anyopaque, trial: []f64, cur: []const f64, prev: []const f64, xfact: f64) void = null,
     seed: ?*const fn (*anyopaque, []f64) void = null,
     /// Writes each LRM §4.5.4 `idt` initial condition into its operator
     /// unknown in `x`, for a transient that skips the operating point
@@ -424,8 +430,9 @@ pub const GpuPayload = struct {
 //    required.
 // 15: `Hooks.collect_ac_dyn`/`ac_dyn`, VerA's frequency-dependent entries.
 // 16: `Hooks.copy_state`, `Batch.digital`.
-// GPU planes, Model/Instance PODs and scatter tapes are unchanged by 10 to 16.
-pub const abi_version: u32 = 16;
+// 17: `Hooks.predict_first_iterate`.
+// GPU planes, Model/Instance PODs and scatter tapes are unchanged by 10 to 17.
+pub const abi_version: u32 = 17;
 
 /// A device type's construction entry points, exported by each device object
 /// and by runtime-loaded `.so` devices.
