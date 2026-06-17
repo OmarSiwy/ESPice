@@ -129,8 +129,11 @@ query on its own circuit copy.
 ## 4. Limits
 
 - `ponytail:` a swept name read by an analysis card, `.meas`, `.ic`,
-  `.options` or `.if` is refused (`UnsupportedCard`), since nothing would
-  re-read it. A top-level `.if` on a swept name keeps its nominal branch.
+  `.options` or a subcircuit's `.if` is refused (`UnsupportedCard`), since
+  nothing would re-read it. A top-level `.if` whose condition reads a swept
+  name is re-evaluated at every point; a point where it would select another
+  branch is refused, because the branches can change the topology and a
+  point never re-parses. HSPICE re-reads the netlist per point there.
 - A swept or sampled `l`/`w` on an M card whose model is binned is refused:
   a variant never re-picks the bin.
 - `.data` reads inline tables only (`MER`, `LAM`, `FILE=` are refused).

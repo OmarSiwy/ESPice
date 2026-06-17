@@ -118,3 +118,31 @@ test "Monte Carlo draws depend only on seed, trial and site; LHS strata cover ea
         seen[stratum] = true;
     }
 }
+
+test "a top-level .if on a swept parameter holds only while its branch does" {
+    var sa = std.heap.ArenaAllocator.init(t.allocator);
+    defer sa.deinit();
+    var pa = std.heap.ArenaAllocator.init(t.allocator);
+    defer pa.deinit();
+    var lib = try device.Library.init(t.allocator);
+    defer lib.deinit();
+    const deck =
+        \\if on a swept name
+        \\.param p=1
+        \\v1 in 0 1
+        \\.if (p > 2)
+        \\r1 in 0 1k
+        \\.else
+        \\r1 in 0 2k
+        \\.endif
+        \\.step param p list 1 {s}
+        \\.op
+        \\.end
+    ;
+    const same = try netlist.parse(pa.allocator(), try std.fmt.allocPrint(pa.allocator(), deck, .{"2"}), .ngspice);
+    var prepared = try input.build(&lib, sa.allocator(), pa.allocator(), same);
+    defer prepared.deinit();
+    try t.expectEqual(@as(usize, 2), prepared.deck.variants.count());
+    const flips = try netlist.parse(pa.allocator(), try std.fmt.allocPrint(pa.allocator(), deck, .{"3"}), .ngspice);
+    try t.expectError(error.UnsupportedCard, input.build(&lib, sa.allocator(), pa.allocator(), flips));
+}

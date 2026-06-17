@@ -172,6 +172,10 @@ pub const Live = struct {
     /// Some kept expression reads a swept name, so a variant changes storage
     /// `ParamRef` cannot reach and must be rebuilt.
     opaque_reads: bool = false,
+    /// Postfix of each top-level `.if`/`.elseif` condition the parse
+    /// evaluated that reads a live name. A variant keeps the nominal
+    /// branches only while each still has its nominal truth value.
+    conds: []const Span = &.{},
 };
 
 /// An analysis card. `pos`/`neg` are the output `v(a[,b])` nets, `ports` the
@@ -670,6 +674,8 @@ fn Reader(comptime S: type) type {
         steps: std.ArrayList(Step) = .empty,
         data: std.ArrayList(Data) = .empty,
         variations: std.ArrayList(Variation) = .empty,
+        /// Top-level `.if`/`.elseif` conditions evaluated in walk 1, in order.
+        cond_texts: std.ArrayList([]const u8) = .empty,
         /// Swept global parameters, registered before any device is read.
         live_names: std.StringArrayHashMapUnmanaged(void) = .empty,
         live_nominal: std.ArrayList(f64) = .empty,
@@ -756,7 +762,8 @@ fn Reader(comptime S: type) type {
             for (top_devices.items) |i| try r.readDevice(r.lines.items[i], &top);
             try r.shunts();
             try r.readMeasures();
-            const live = try r.resolveLive();
+            var live = try r.resolveLive();
+            live.conds = try r.liveConds();
             try r.modelBins(live);
 
             const graph = try r.hg.finish(arena);
@@ -977,6 +984,7 @@ fn Reader(comptime S: type) type {
             const was_in_card = r.in_card;
             r.in_card = false;
             defer r.in_card = was_in_card;
+            if (frame.sub == null) try r.cond_texts.append(r.arena, f.rest());
             return switch (try r.exprValue(f.rest(), frame, false)) {
                 .num => |n| n != 0,
                 else => error.ParseError,
@@ -1589,6 +1597,22 @@ fn Reader(comptime S: type) type {
                 },
                 else => {},
             }
+        }
+
+        /// Recompiles the top-level conditions walk 1 evaluated, now that the
+        /// swept names are known, keeping those that read one.
+        fn liveConds(r: *R) Error![]const Span {
+            if (r.live_names.count() == 0) return &.{};
+            const was_in_card = r.in_card;
+            r.in_card = true;
+            defer r.in_card = was_in_card;
+            const top: Frame = .{ .scopes = &r.global_scopes };
+            var out: std.ArrayList(Span) = .empty;
+            for (r.cond_texts.items) |text| switch (try r.exprValue(text, &top, false)) {
+                .expr => |span| try out.append(r.arena, span),
+                else => {},
+            };
+            return out.items;
         }
 
         fn orderU32(a: u32, b: u32) std.math.Order {

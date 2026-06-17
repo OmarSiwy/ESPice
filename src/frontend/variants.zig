@@ -289,6 +289,14 @@ pub const Planner = struct {
     /// values change the topology or storage `ParamRef` cannot reach.
     pub fn add(p: *Planner, pt: Point) !void {
         const label = if (p.prefix.len == 0) try p.sim.dupe(u8, pt.label) else try std.fmt.allocPrint(p.sim, "{s}, {s}", .{ p.prefix, pt.label });
+        // ponytail: a point that flips a top-level `.if` is refused; re-parse
+        // it as its own run if a deck needs branch selection per point.
+        for (p.nl.live.conds) |span| {
+            const ops = p.nl.exprOps(span);
+            const at = try expr.eval(p.scratch, &p.stack, ops, p.nl.consts, pt.live, null);
+            const nominal = try expr.eval(p.scratch, &p.stack, ops, p.nl.consts, p.nl.live.nominal, null);
+            if ((at != 0) != (nominal != 0)) return p.refuse(label, "a top-level .if condition reads a swept parameter and selects another branch at this point");
+        }
         try p.setLive(pt);
         var moved = false;
         var crossed = false;
