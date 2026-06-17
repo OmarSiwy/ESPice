@@ -453,6 +453,9 @@ right-hand side per port. On top of that:
 
 ### C5. Mismatch and variation sensitivities
 
+Status: landed; see [dcmatch.md](../analysis/dcmatch.md) §3-4. One table
+over local and global groups instead of HSPICE's split tables.
+
 `.acmatch` follows `dc/dcmatch.zig` per frequency lane: one adjoint
 right-hand side per frequency gives λ(ω), and each parameter costs a
 finite-difference re-evaluation of G and C at the operating point. The

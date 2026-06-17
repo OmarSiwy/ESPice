@@ -51,8 +51,8 @@ test "analysis directives dispatch every implemented capability and reject malfo
     const a = arena.allocator();
     const sources: core.QueryBindings = .{ .v_names = &.{"vin"}, .i_names = &.{}, .v_branches = &.{2}, .v_pos = &.{1}, .v_neg = &.{0}, .i_pos = &.{}, .i_neg = &.{}, .v_distof1 = &.{.{ 0, 0 }}, .ports = &.{} };
     const cards: []const requests.CardRef = &.{.{ .type = device.Library.builtin("vsource"), .index = 0, .name = "vin" }};
-    // `.fft` reads the deck's `.tran`.
-    const ctx: analyses.CardContext = .{ .arena = a, .tran = .{ .t_stop = 10e-6, .dt_init = 1e-6 } };
+    // `.fft` reads the deck's `.tran`, `.acmatch` its `.ac`.
+    const ctx: analyses.CardContext = .{ .arena = a, .tran = .{ .t_stop = 10e-6, .dt_init = 1e-6 }, .ac = .{ .f_start = 10, .f_stop = 100 } };
     const directives = [_][]const u8{
         ".ac dec 2 10 100",                     ".dc vin 0 1 0.1",       ".dcmatch v(out)",
         ".disto dec 2 10 100",                  ".envelope 1m 5m",       ".four 1k v(out)",
@@ -66,7 +66,7 @@ test "analysis directives dispatch every implemented capability and reject malfo
         ".hbxf v(out) dec 2 10 100 1k",         ".phasenoise v(out) dec 2 10 100 1meg",
         ".lstb mode=single vsource=vin dec 2 10 100", ".acxf v(out) dec 2 10 100",
         ".dcxf v(out) tf",                      ".dcinc",
-        ".fft v(out)",
+        ".fft v(out)",                          ".acmatch v(out)",      ".dcsens v(out)",
     };
     try std.testing.expectEqual(std.meta.fields(requests.Kind).len, directives.len);
     inline for (directives, std.meta.fields(requests.Kind)) |directive, field| {

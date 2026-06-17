@@ -445,6 +445,40 @@ pub const Planner = struct {
         return p.targets.?;
     }
 
+    /// The `.variation`/`DEV`/`LOT` rows as mismatch and sensitivity
+    /// groups: a per-device row is one group per device it reaches
+    /// (`<card>@<param>`), a per-model row one group over all of them
+    /// (`<model>@<param>`). A member's step is one sigma: the row's value
+    /// (times the nominal when relative), over sqrt(3) for a uniform spread
+    /// and the half range itself for `limit`.
+    pub fn variations(p: *Planner) !core.query.Variations {
+        const targets = try p.variationTargets();
+        var labels: std.ArrayList([]const u8) = .empty;
+        var starts: std.ArrayList(u32) = .empty;
+        var params: std.ArrayList(u32) = .empty;
+        var sigmas: std.ArrayList(f64) = .empty;
+        try starts.append(p.sim, 0);
+        for (p.nl.deck.variations, 0..) |v, i| {
+            const ords = targets.ords[targets.starts[i]..targets.starts[i + 1]];
+            if (ords.len == 0) continue;
+            for (ords) |ord| {
+                const r = p.refs[ord];
+                const spread = if (v.relative) v.value * r.get() else v.value;
+                try params.append(p.sim, ord);
+                try sigmas.append(p.sim, if (v.dist == .unif) spread / @sqrt(3.0) else spread);
+                if (!v.per_device) continue;
+                const card = core.query.CardRef.lookup(p.cards, r.type, r.index) orelse "?";
+                try labels.append(p.sim, try std.fmt.allocPrint(p.sim, "{s}@{s}", .{ card, v.param }));
+                try starts.append(p.sim, @intCast(params.items.len));
+            }
+            if (v.per_device) continue;
+            try labels.append(p.sim, try std.fmt.allocPrint(p.sim, "{s}@{s}", .{ v.model, v.param }));
+            try starts.append(p.sim, @intCast(params.items.len));
+        }
+        if (labels.items.len == 0) return .{};
+        return .{ .labels = labels.items, .starts = starts.items, .params = params.items, .sigmas = sigmas.items };
+    }
+
     /// The value parameter `ord` has in the open row.
     fn current(p: *Planner, ord: u32) f64 {
         const at = p.row_at[ord];

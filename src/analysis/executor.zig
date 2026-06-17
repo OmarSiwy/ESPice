@@ -335,7 +335,7 @@ fn expectedEvals(job: requests.Query) f64 {
             break :blk 3 * inner * outer;
         },
         .tran => |t| 4 * t.t_stop / @min(t.dt_init, t.dt_max orelse t.t_stop / 50.0),
-        .ac, .noise, .sp, .stb, .tf, .pz, .disto, .four, .dcmatch, .sens, .lstb, .acxf, .dcxf, .dcinc => 1,
+        .ac, .noise, .sp, .stb, .tf, .pz, .disto, .four, .dcmatch, .sens, .lstb, .acxf, .dcxf, .dcinc, .acmatch, .dcsens => 1,
         else => 200,
     };
 }
@@ -346,6 +346,8 @@ fn module(comptime kind: requests.Kind) type {
         .dc => @import("dc/dc.zig"),
         .tf => @import("dc/tf.zig"),
         .dcmatch => @import("dc/dcmatch.zig"),
+        .dcsens => @import("dc/dcmatch.zig").Sens,
+        .acmatch => @import("ac/acmatch.zig"),
         .ac => @import("ac/ac.zig"),
         .noise => @import("ac/noise.zig"),
         .sp => @import("ac/sp.zig"),

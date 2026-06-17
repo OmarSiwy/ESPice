@@ -52,7 +52,7 @@ pub fn queries(arena: std.mem.Allocator, cards: []const netlist.Analysis, append
     }
     // What HSPICE forms borrow from the other cards: the first `.ac`,
     // `.tran` and `.sn`. A malformed one reports on its own turn below.
-    var ctx: CardContext = .{ .arena = arena };
+    var ctx: CardContext = .{ .arena = arena, .variations = deck_opts.variations };
     // Fan-out ceiling: `.disto` gives three plots per line, `.op t1 t2 ...`
     // one per time.
     var fan: usize = 3;
@@ -202,6 +202,8 @@ pub const CardContext = struct {
     tran: ?requests.Tran = null,
     /// The first `.sn` card's fundamental, in Hz.
     sn_f0: ?f64 = null,
+    /// The deck's variation groups (`DeckOptions.variations`).
+    variations: requests.Variations = .{},
 };
 
 fn hasNumber(args: []const Value) bool {
@@ -264,6 +266,8 @@ pub const DeckOptions = struct {
     /// from cktntask.c:127). Unlike `temp`, where the circuit runs, it reaches
     /// the devices at build time, so no sweep can move it.
     tnom_c: f64 = 27.0,
+    /// The variation block as `.dcmatch`, `.acmatch` and `.dcsens` groups.
+    variations: requests.Variations = .{},
 };
 
 /// Option names outside this list are not simulated; the HSPICE dialect
@@ -1028,7 +1032,29 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
             const node = try outputNode(node_id);
             const neg = try outputNeg(node_neg);
             if (id == .sens) return .{ .sens = .{ .output_node = node, .output_neg = neg, .cards = cards } };
-            return .{ .dcmatch = .{ .output_node = node, .output_neg = neg } };
+            return .{ .dcmatch = .{ .output_node = node, .output_neg = neg, .variations = ctx.variations } };
+        },
+        .acmatch, .dcsens => {
+            // HSPICE `.acmatch v(out) [THRESHOLD= FILE= INTERVAL=
+            // VIRTUAL_SENSITIVITY= SENS_THRESHOLD=]` over the `.ac` sweep, and
+            // `.dcsens v(out) [FILE= PERTURBATION= INTERVAL= THRESHOLD=
+            // GROUPBYDEVICE=]` [CR .ACMATCH, .DCSENS]. Every group is
+            // published, so the listing keywords are checked and unused;
+            // the derivative is the adjoint one, so PERTURBATION is too.
+            if (args.len == 0 or args.len % 2 != 1) return error.InvalidAnalysisArguments;
+            const keys = std.StaticStringMap(void).initComptime(.{
+                .{"threshold"}, .{"file"}, .{"interval"}, .{"virtual_sensitivity"}, .{"virtual_sens"},
+                .{"sens_threshold"}, .{"perturbation"}, .{"groupbydevice"},
+            });
+            var i: usize = 1;
+            while (i < args.len) : (i += 2) {
+                var lower: [24]u8 = undefined;
+                if (!keys.has(try keyword(args, i, &lower))) return error.InvalidAnalysisArguments;
+            }
+            const node = try outputNode(node_id);
+            const neg = try outputNeg(node_neg);
+            if (id == .dcsens) return .{ .dcsens = .{ .output_node = node, .output_neg = neg, .variations = ctx.variations } };
+            return .{ .acmatch = .{ .sweep = ctx.ac orelse return error.MissingAnalysisCard, .output_node = node, .output_neg = neg, .variations = ctx.variations } };
         },
         .four => {
             try arity(args, 2, 3);
