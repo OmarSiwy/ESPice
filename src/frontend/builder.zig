@@ -413,6 +413,8 @@ pub const NetBuilder = struct {
         portnum: u16,
         /// Port reference impedance in ohms.
         z0: f64,
+        /// `.hblin` band of a P card (`hblin=[h, s]`).
+        band: requests.Port.Band,
     };
 
     /// A builder over `nl` writing into `b`; both must outlive it.
@@ -634,11 +636,11 @@ pub const NetBuilder = struct {
         const ports = try arena.alloc(requests.Port, n_ports);
         for (ports) |*p| p.branch = std.math.maxInt(u32); // unset
         const v = self.v.slice();
-        for (v.items(.portnum), v.items(.pos), v.items(.neg), v.items(.branch), v.items(.z0)) |num, node, neg, br, z0| {
+        for (v.items(.portnum), v.items(.pos), v.items(.neg), v.items(.branch), v.items(.z0), v.items(.band)) |num, node, neg, br, z0, band| {
             if (num == 0) continue;
             const slot = &ports[num - 1];
             if (slot.branch != std.math.maxInt(u32)) return error.DuplicatePortNumber;
-            slot.* = .{ .node = node, .branch = br, .z0 = z0, .neg = neg };
+            slot.* = .{ .node = node, .branch = br, .z0 = z0, .neg = neg, .band = band };
         }
         for (ports) |p| if (p.branch == std.math.maxInt(u32)) return error.MissingPortNumber;
         return ports;
@@ -804,6 +806,7 @@ pub const NetBuilder = struct {
                     .distof1 = sourceDistoF1(dev),
                     .portnum = if (port) |p| p.num else 0,
                     .z0 = if (port) |p| p.z0 else 0,
+                    .band = if (port) |p| p.band else .{},
                 });
                 // A replaced source stamps nothing, so it can neither anchor
                 // the .op ladder nor be driven: `br` is the next card's row.
@@ -1834,7 +1837,7 @@ fn sourceDc(dev: Device) ?f64 {
 /// vsrctemp.c:74-82). `z0` defaults to 50 ohm.
 /// Both `portnum 1` and `portnum=1` are accepted. A given `portnum` outside
 /// 1..1024 or a non-positive `z0` is an error, not a plain source.
-fn sourcePort(dev: Device) !?struct { num: u16, z0: f64 } {
+fn sourcePort(dev: Device) !?struct { num: u16, z0: f64, band: requests.Port.Band } {
     const num_f = blk: {
         if (kvNumber(dev.kv, "portnum") orelse kvNumber(dev.kv, "port")) |v| break :blk v;
         for (dev.positional, 0..) |pos, idx| {
@@ -1852,7 +1855,10 @@ fn sourcePort(dev: Device) !?struct { num: u16, z0: f64 } {
         break :blk 50.0;
     };
     if (!(num_f >= 1) or num_f > 1024 or !(z0 > 0)) return error.InvalidAnalysisArguments;
-    return .{ .num = @intFromFloat(num_f), .z0 = z0 };
+    const h = kvNumber(dev.kv, "hblin_h") orelse 0;
+    const s = kvNumber(dev.kv, "hblin_s") orelse 1;
+    if (h != @trunc(h) or @abs(h) > 1024 or @abs(s) != 1) return error.InvalidAnalysisArguments;
+    return .{ .num = @intFromFloat(num_f), .z0 = z0, .band = .{ .harmonic = @intFromFloat(h), .sign = @intFromFloat(s) } };
 }
 
 /// The `AC` spec of a source card as its complex excitation

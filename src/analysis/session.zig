@@ -538,6 +538,7 @@ pub fn schemaOf(allocator: std.mem.Allocator, topology: *const Circuit, deck: *c
         .hbac => |o| 2 + 2 * @as(usize, o.n_sidebands),
         .pxf => |o| 1 + (1 + 2 * @as(usize, o.n_harmonics)) * topology.n,
         .hbxf => |o| 1 + (1 + 2 * @as(usize, o.n_sidebands)) * topology.n,
+        .hblin => |o| 1 + o.ports.len * o.ports.len,
         .sp => |o| @import("ac/sp.zig").columns(@max(o.ports.len, 1), o.lin),
         .sens, .dcmatch, .dcsens, .acmatch => blk: {
             const groups = switch (query) {

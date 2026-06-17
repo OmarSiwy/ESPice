@@ -368,6 +368,7 @@ fn module(comptime kind: requests.Kind) type {
         .hbac => @import("pss/hb_lptv.zig").Ac,
         .hbxf => @import("pss/hb_lptv.zig").Xf,
         .hbnoise => @import("pss/hb_lptv.zig").Noise,
+        .hblin => @import("pss/hb_lptv.zig").Lin,
         .phasenoise => @import("pss/phasenoise.zig"),
         .qpss => @import("pss/qpss.zig"),
         .four => @import("post/four.zig"),

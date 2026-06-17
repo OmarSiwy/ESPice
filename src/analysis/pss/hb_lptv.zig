@@ -4,13 +4,15 @@
 //! twin: `.hbac` is PAC's forward sweep, `.hbxf` PXF's adjoint sweep and
 //! `.hbnoise` `pnoise.orbitSweep`. The linearization, conversion matrix and
 //! sideband folding are shared code, so the two orbit providers differ only
-//! in how they find the orbit.
+//! in how they find the orbit. `.hblin` builds the same conversion matrix
+//! with the port terminations and reads S-parameters between port bands.
 const std = @import("std");
 const root = @import("../types.zig");
 const hb = @import("hb.zig");
 const pac = @import("pac.zig");
 const pxf = @import("pxf.zig");
 const pnoise = @import("pnoise.zig");
+const dense_lu = @import("solver").dense_lu;
 
 const Complex = pac.Complex;
 const HbLptv = @import("core").query.HbLptv;
@@ -119,5 +121,122 @@ pub const Noise = struct {
             .n_sidebands = opts.n_sidebands,
         }, scratch);
         return pnoise.result(ctx.allocator, freqs, density, "hbnoise_density", "Harmonic Balance Noise Analysis");
+    }
+};
+
+/// `.hblin`: frequency-translation S-parameters about the HB orbit (HSPICE
+/// RF, [RF Ch.10]). Port i is read in its band s_i·f + h_i·f0, which is
+/// sideband s_i·h_i of the conversion matrix, conjugated for a lower band
+/// (s = −1): that band's physical phasor is the conjugate of the sideband's.
+/// Every port is terminated in its z0 on every sideband; per input frequency
+/// one dense factorization serves one solve per port.
+pub const Lin = struct {
+    pub const Options = @import("core").query.Hblin;
+    const Band = @import("core").query.Port.Band;
+
+    /// Contract entry: complex point-major rows (frequency, S(1,1), S(1,2),
+    /// ..., S(N,N)), S(i,j) = b_i / a_j with each wave in its port's band.
+    /// error.PortBandOutsideSidebands when a band's harmonic exceeds
+    /// `opts.n_sidebands`.
+    pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
+        const a = ctx.allocator;
+        const scratch = ctx.scratch_allocator;
+        const ckt = ctx.circuit;
+        const n: usize = ckt.n;
+        const ports = opts.ports;
+        const np = ports.len;
+        const n_harm: usize = opts.n_sidebands;
+        for (ports) |p| if (@abs(p.band.harmonic) > n_harm) return error.PortBandOutsideSidebands;
+        const lptv = opts.lptv();
+        const lin = try linearize(ckt, lptv, .ac, scratch);
+        defer lin.deinit(scratch);
+        const pac_opts = pacOptions(lptv);
+
+        const n_sb = 2 * n_harm + 1;
+        const nn = n_sb * n;
+        const nn2 = 2 * nn;
+        const work = try scratch.alloc(f64, nn2 * nn2 + 2 * nn2);
+        defer scratch.free(work);
+        const a_work = work[0 .. nn2 * nn2];
+        const rhs = work[nn2 * nn2 ..][0..nn2];
+        const x = work[nn2 * nn2 + nn2 ..][0..nn2];
+        const piv = try scratch.alloc(u32, nn2);
+        defer scratch.free(piv);
+        // Frequency-dependent stamps, added as `pac.sweep` adds them.
+        const n_samples = lin.g_hat.len / lin.col_ptr[n];
+        const series = if (lin.wave.len != 0) ckt.ac_dyn_slots.len * n_sb else 0;
+        const dyn_f = try scratch.alloc(f64, n_sb + 2 * series * (n_samples + 1) + 2 * n_samples);
+        defer scratch.free(dyn_f);
+        const dyn_hat = try scratch.alloc(Complex, series * n_samples);
+        defer scratch.free(dyn_hat);
+
+        const names = try a.alloc([]const u8, 1 + np * np);
+        names[0] = "frequency";
+        for (0..np) |i| for (0..np) |j| {
+            names[1 + i * np + j] = try std.fmt.allocPrint(a, "S({d},{d})", .{ i + 1, j + 1 });
+        };
+        const n_points: usize = opts.sweep.count();
+        const row_len = 2 * names.len;
+        const data = try a.alloc(f64, n_points * row_len);
+
+        var sw = opts.sweep.iter();
+        var k: usize = 0;
+        while (sw.next()) |f| : (k += 1) {
+            if (k != 0) try ckt.checkpoint(.{ .phase = .frequency, .completed = k, .total = n_points });
+            root.zeroSimd(a_work);
+            pac.buildConversionMatrix(false, a_work, lin, n, n_sb, nn, nn2, f, pac_opts);
+            if (series != 0) {
+                const omegas = dyn_f[0..n_sb];
+                for (omegas, 0..) |*w, q| w.* = 2.0 * std.math.pi * (f + @as(f64, @floatFromInt(@as(i32, @intCast(q)) - @as(i32, @intCast(n_harm)))) * opts.f0);
+                pac.dynSpectra(ckt, lin, omegas, dyn_f[n_sb..], dyn_hat);
+                pac.addDynConversion(false, a_work, lin, ckt.ac_dyn_slots, dyn_hat, n, n_sb, nn, nn2);
+            }
+            // z0 in series with every port source, on every sideband.
+            for (ports) |p| for (0..n_sb) |q| {
+                const r = q * n + p.branch;
+                a_work[r * nn2 + r] -= p.z0;
+                a_work[(nn + r) * nn2 + nn + r] -= p.z0;
+            };
+            try dense_lu.factorize(nn2, a_work, piv);
+            const row = data[k * row_len ..][0..row_len];
+            row[0] = f;
+            row[1] = 0;
+            for (ports, 0..) |pj, j| {
+                // A unit source voltage on port j's branch in its band.
+                @memset(rhs, 0);
+                rhs[sideband(pj.band, n_harm) * n + pj.branch] = 1;
+                dense_lu.solveFactored(nn2, a_work, piv, rhs, x);
+                const a_j = 1 / (2 * @sqrt(pj.z0));
+                for (ports, 0..) |pi, i| {
+                    const base = sideband(pi.band, n_harm) * n;
+                    const v = rowV(x, nn, base, pi.node).sub(rowV(x, nn, base, pi.neg));
+                    const cur = rowV(x, nn, base, pi.branch).scale(-1);
+                    var b = v.sub(cur.scale(pi.z0)).scale(1 / (2 * @sqrt(pi.z0)));
+                    if (pi.band.sign < 0) b.im = -b.im;
+                    const s = b.scale(1 / a_j);
+                    row[2 * (1 + i * np + j)] = s.re;
+                    row[2 * (1 + i * np + j) + 1] = s.im;
+                }
+            }
+        }
+        return .{
+            .plotname = "Harmonic Balance LIN Analysis",
+            .varnames = names,
+            .is_complex = true,
+            .npoints = n_points,
+            .data = data,
+        };
+    }
+
+    /// Conversion-matrix sideband index of a port band: s·h, offset by M.
+    fn sideband(band: Band, n_harm: usize) usize {
+        return @intCast(@as(i32, @intCast(n_harm)) + @as(i32, band.sign) * @as(i32, band.harmonic));
+    }
+
+    /// Unknown `row` of the sideband block at `base` in the stacked-real
+    /// solution; ground is zero.
+    fn rowV(x: []const f64, nn: usize, base: usize, row: u32) Complex {
+        if (row == root.GROUND) return Complex.zero;
+        return .{ .re = x[base + row], .im = x[nn + base + row] };
     }
 };

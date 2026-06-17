@@ -238,7 +238,7 @@ pub fn settle(ckt: *root.Circuit, x_init: []const f64, options: Options, allocat
 /// of entry e at omegas[q], series = entries * omegas.len. `work` holds
 /// 2 * series * (n_samples + 1) + 2 * n_samples values. Leaves the sim state
 /// at the last sample.
-fn dynSpectra(ckt: *root.Circuit, lin: Linearization, omegas: []const f64, work: []f64, hat: []Complex) void {
+pub fn dynSpectra(ckt: *root.Circuit, lin: Linearization, omegas: []const f64, work: []f64, hat: []Complex) void {
     const n: usize = ckt.n;
     const n_samples = lin.wave.len / (n + 1) - 1;
     const series = ckt.ac_dyn_slots.len * omegas.len;
@@ -272,7 +272,7 @@ fn dynSpectra(ckt: *root.Circuit, lin: Linearization, omegas: []const f64, work:
 // into the operator is time-invariant along the orbit (every line in
 // models/). An operator fed by a modulated signal, or a ddt of an operator
 // with a modulated gain, needs acDyn split at the operator.
-fn addDynConversion(
+pub fn addDynConversion(
     comptime transpose: bool,
     a_work: []f64,
     lin: Linearization,

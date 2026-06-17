@@ -42,6 +42,30 @@ as for `.pac`. On LTI decks both providers match the analytic transfer
 (`hbac/rc`, `hbac/two_poles_hspice`), and the ideal multiplier's
 conversion gain is the same (`hbac/ideal_multiplier`).
 
+`.hblin <sweep>` (HSPICE RF `.HBLIN` [RF Ch.10], `hb_lptv.Lin`) reads
+frequency-translation S-parameters off the same HB conversion matrix.
+Each P element names its band, `hblin=[h, s]`: the frequency
+$s f + h f_0$ (default `[0, 1]`, the input band). That band is sideband
+$m = s h$ of the matrix, and for a lower band ($s = -1$) its physical
+phasor is the conjugate of the sideband's. Every port is terminated in
+its z0 on every sideband ($-z_0$ on its branch diagonal, as `.sp` does),
+one dense factorization per input frequency serves one solve per port
+(a unit source in its own band), and
+$S_{ij} = b_{i,m_i}/a_{j,m_j}$ with each wave conjugated for a lower band.
+The oracle `hspice/hblin_mixer` is two saturated MOS1 mixers whose
+source is pumped, $g_m(t) = \beta(1 - 0.5\sin\omega_0 t)$, read at the
+input band, the lower sideband (with 1 nF across the port) and the upper
+sideband; it matches the closed form to 1e-10.
+
+`ponytail:` not built: `NOISECALC=1` (the noise figure needs the
+terminations inside `pnoise.orbitSweep`) and mixed-mode ports are
+refused, `SS_TONE` and multi-tone port vectors are refused, and `.hblsp`
+is not built. `.hblsp` sweeps the port's drive power through a large-signal
+HB, which needs the P element's z0 inside the HB circuit; a P element is
+an ideal source outside the port analyses here (see
+[s-parameters.md](s-parameters.md) §5), so the HB orbit also sees the
+ports as ideal sources at their `dc=` values.
+
 `src/analysis/pss/pac.zig analyze()`:
 
 1. **PSS (simplified)**: brute-force settling, `pss_periods - 1` periods

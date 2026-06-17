@@ -513,6 +513,9 @@ G₀ + jkω₀C₀ are `LaneLu` frequency lanes, and complex phasor output.
   method 1 is D1's periodic AC.
 - D5: `.hblin` is D1's conversion matrix read between sidebands at
   P-element ports. `.hblsp` sweeps port power (a C1 sweep) over D2.
+  Status: `.hblin` landed (S-parameters only, single tone; see
+  [pac.md](../analysis/pac.md) §2); `.hblsp` and `.hblin` noise wait on
+  z0 inside the large-signal P element.
 - D6: `.ptdnoise` is the pnoise machinery with the output sampled at one
   phase of the period. `.sample` folds a `.noise` spectrum computed out to
   MAXFLD·FS into [0, FS/2].
