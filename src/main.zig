@@ -124,6 +124,9 @@ pub fn main(init: std.process.Init) !u8 {
             const result = try p.result(id);
             std.debug.print("  {s}: {d} points, {d} variables\n", .{ result.plotname, result.npoints, result.varnames.len });
         }
+        const runs = try p.run_results(init.gpa);
+        defer init.gpa.free(runs);
+        for (runs) |result| std.debug.print("  {s}: {d} points, {d} variables\n", .{ result.plotname, result.npoints, result.varnames.len });
     }
     return if (failed) 1 else 0;
 }

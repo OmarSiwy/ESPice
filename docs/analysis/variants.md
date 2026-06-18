@@ -144,6 +144,6 @@ query on its own circuit copy.
   parameter that is a non-identity function of a slot but equals it there
   (a clamp that is inactive near the nominal) would be written as the slot
   value. The rebuild path has no such blind spot.
-- Runs with their own topology are listed on stderr only for the main
-  session (`espice` prints its summary from the main Problem); their plots
-  are in the output file.
+- Runs with their own topology are summarized on stderr after the main
+  session's results, in output order, and their Monte Carlo trials count
+  toward the `.meas` statistics.

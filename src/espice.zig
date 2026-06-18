@@ -304,14 +304,23 @@ pub const Problem = struct {
         defer trials.deinit(self.allocator);
         inline for (.{ .tran, .ac, .dc }) |kind| {
             trials.clearRetainingCapacity();
-            for (self.session.outputs.items) |id| {
-                const info = try self.query_info(id);
-                if (info.status != .complete or info.kind != kind) continue;
-                const res = try self.result(id);
-                if (std.mem.indexOf(u8, res.plotname, "(monte=") != null) try trials.append(self.allocator, res);
-            }
+            try monteTrials(self.allocator, &self.session, kind, &trials);
+            for (self.runs) |*run| try monteTrials(self.allocator, &run.session, kind, &trials);
             if (trials.items.len != 0) try output.printMeasureStatistics(out, measures, kind, trials.items);
         }
+    }
+
+    /// The completed results of the variant runs with their own topology
+    /// (an `.alter` that swaps elements, a point that collapses a node), in
+    /// output order. The caller frees the slice with `gpa`; the results stay
+    /// valid until `deinit`.
+    pub fn run_results(self: *const Problem, gpa: std.mem.Allocator) ![]Result {
+        var list: std.ArrayList(Result) = .empty;
+        errdefer list.deinit(gpa);
+        for (self.runs) |*run| for (run.session.outputs.items) |id| {
+            if ((try run.session.info(id)).status == .complete) try list.append(gpa, try run.session.result(id));
+        };
+        return list.toOwnedSlice(gpa);
     }
 
     /// A completed query's result, valid until `deinit`.
@@ -488,6 +497,16 @@ fn runSession(session: *analysis.session.Session, max_parallel: u16) !void {
         const n = try session.readyQueries(.all, ids);
         if (n == 0) return error.SchedulingFailure;
         _ = try session.advanceReady(ids[0..@min(n, events.len)], .{ .max_parallel = max_parallel, .quantum = .completion }, events);
+    }
+}
+
+/// Appends `session`'s completed Monte Carlo trial results of `kind`.
+fn monteTrials(gpa: std.mem.Allocator, session: *const analysis.session.Session, kind: requests.Kind, trials: *std.ArrayList(Result)) !void {
+    for (session.outputs.items) |id| {
+        const info = try session.info(id);
+        if (info.status != .complete or info.kind != kind) continue;
+        const res = try session.result(id);
+        if (std.mem.indexOf(u8, res.plotname, "(monte=") != null) try trials.append(gpa, res);
     }
 }
 
