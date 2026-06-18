@@ -2,7 +2,9 @@
 //! (measure_parse_trigtarg, _find, _when and _stdParams). The caller
 //! evaluates the numbers, so a value may be a parameter expression. HSPICE
 //! forms ride along: an omitted analysis type, INTEGRAL/DERIVATIVE, PARAM=
-//! and ERR/ERR1/ERR2/ERR3 [CR .MEASURE].
+//! and ERR/ERR1/ERR2/ERR3, the `_CONT` analyses, EM_AVG, `par('expr')`
+//! waveforms, values naming earlier results and TARG's `TD=TRIG` and
+//! inherited TD [CR .MEASURE].
 const std = @import("std");
 const core = @import("core");
 const Kind = core.query.Kind;
@@ -12,6 +14,8 @@ const Clause = core.MeasureClause;
 const Word = struct { lhs: []const u8, rhs: ?[]const u8 = null };
 
 const analyses = std.StaticStringMap(Kind).initComptime(.{ .{ "tran", .tran }, .{ "ac", .ac }, .{ "dc", .dc }, .{ "fft", .fft } });
+/// HSPICE continuous measures [CR .MEASURE (Continuous Results)].
+const cont_analyses = std.StaticStringMap(Kind).initComptime(.{ .{ "tran_cont", .tran }, .{ "ac_cont", .ac }, .{ "dc_cont", .dc } });
 
 const funcs = std.StaticStringMap(core.MeasureFunc).initComptime(.{
     .{ "trig", .trig_targ }, .{ "delay", .trig_targ }, .{ "targ", .trig_targ },
@@ -22,19 +26,21 @@ const funcs = std.StaticStringMap(core.MeasureFunc).initComptime(.{
     .{ "derivative", .deriv }, .{ "param", .param },    .{ "err", .err },
     .{ "err1", .err1 },      .{ "err2", .err2 },       .{ "err3", .err3 },
     .{ "thd", .thd },        .{ "snr", .snr },         .{ "sndr", .sndr },
-    .{ "enob", .enob },      .{ "sfdr", .sfdr },
+    .{ "enob", .enob },      .{ "sfdr", .sfdr },       .{ "em_avg", .em_avg },
 });
 
 /// Parses `text`, the card after `.meas`, lowercased. `ctx.measureValue(text)
-/// !f64` evaluates a value and `ctx.measureExpr(text) ![]const
-/// core.MeasureOp` compiles a PARAM= expression. A card without an analysis
-/// type reads `default`, HSPICE's last analysis card. Strings in the result
-/// are slices of `text` or allocated in `arena`. ParseError for anything
-/// neither simulator accepts.
-pub fn parse(arena: std.mem.Allocator, text: []const u8, ctx: anytype, default: ?Kind) !core.Measure {
+/// !f64` evaluates a value, `ctx.measureExpr(text) ![]const core.MeasureOp`
+/// compiles a PARAM= or `par()` expression and `ctx.measureOption(name) ?f64`
+/// reads an `.option`. A card without an analysis type reads `default`,
+/// HSPICE's last analysis card; `hspice` selects HSPICE's TARG TD
+/// inheritance. Strings in the result are slices of `text` or allocated in
+/// `arena`. ParseError for anything neither simulator accepts.
+pub fn parse(arena: std.mem.Allocator, text: []const u8, ctx: anytype, default: ?Kind, hspice: bool) !core.Measure {
     const typed = try words(arena, text);
     if (typed.len < 2) return error.ParseError;
-    const given = analyses.get(typed[0].lhs);
+    const cont = cont_analyses.get(typed[0].lhs);
+    const given = analyses.get(typed[0].lhs) orelse cont;
     const analysis = given orelse default orelse return error.ParseError;
     // `w[0]` is the analysis type's slot either way.
     const w = if (given != null) typed else try std.mem.concat(arena, Word, &.{ &.{.{ .lhs = "" }}, typed });
@@ -48,7 +54,7 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8, ctx: anytype, default: 
     }
     // MAXFREQ defaults to the top of the spectrum [CR .MEASURE FFT].
     if (analysis == .fft) base.to = 1e99;
-    var m: core.Measure = .{ .analysis = analysis, .name = w[1].lhs, .func = func, .first = base, .second = base };
+    var m: core.Measure = .{ .analysis = analysis, .name = w[1].lhs, .func = func, .first = base, .second = base, .cont = cont != null };
     const rest = w[3..];
     switch (func) {
         .trig_targ => {
@@ -59,27 +65,36 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8, ctx: anytype, default: 
                 if (c.rise == core.measure_unset and c.fall == core.measure_unset and
                     c.cross == core.measure_unset and c.at == core.measure_no_at) return error.ParseError;
             }
+            // HSPICE: a TARG without TD inherits TRIG's [CR .MEASURE (Rise,
+            // Fall, Delay, and Power Measurements)]. ngspice keeps it at 0.
+            // ponytail: an explicit TD=0 on TARG reads as omitted.
+            if (hspice and m.second.td == 0 and !m.second.td_trig and !hasRef(m.second, .td)) {
+                m.second.td = m.first.td;
+                var refs: std.ArrayList(core.MeasureRef) = .empty;
+                try refs.appendSlice(arena, m.second.refs);
+                for (m.first.refs) |r| if (r.field == .td) try refs.append(arena, r);
+                m.second.refs = refs.items;
+            }
             if (m.first.from != 0 and m.second.from == 0) m.second.from = m.first.from else if (m.second.from != 0 and m.first.from == 0) m.first.from = m.second.from;
         },
         .param => {
             m.expr = try ctx.measureExpr(w[2].rhs orelse return error.ParseError);
-            try stdParams(&m.first, analysis, rest, ctx);
+            try stdParams(arena, &m.first, analysis, rest, ctx);
         },
         .err, .err1, .err2, .err3 => {
             if (rest.len < 2) return error.ParseError;
-            m.first.vec = try vector(arena, &m.first, analysis, rest[0].lhs);
+            m.first.vec = try vector(arena, &m.first, analysis, rest[0].lhs, ctx);
             var ignored: Clause = .{};
-            m.first.vec2 = try vector(arena, &ignored, analysis, rest[1].lhs);
-            try stdParams(&m.first, analysis, rest[2..], ctx);
+            m.first.vec2 = try vector(arena, &ignored, analysis, rest[1].lhs, ctx);
+            try stdParams(arena, &m.first, analysis, rest[2..], ctx);
         },
         .find, .deriv => {
             const k = find(rest, "when") orelse rest.len;
             if (k == 0 or rest[0].rhs != null) return error.ParseError;
-            m.first.vec = try vector(arena, &m.first, analysis, rest[0].lhs);
+            m.first.vec = try vector(arena, &m.first, analysis, rest[0].lhs, ctx);
             if (k > 1) {
                 if (!std.mem.eql(u8, rest[1].lhs, "at") or rest[1].rhs == null) return error.ParseError;
-                m.first.at = try ctx.measureValue(rest[1].rhs.?);
-                try stdParams(&m.first, analysis, rest[2..k], ctx);
+                try stdParams(arena, &m.first, analysis, rest[1..k], ctx);
             }
             if (m.first.at == core.measure_no_at) {
                 if (k == rest.len) return error.ParseError;
@@ -92,11 +107,20 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8, ctx: anytype, default: 
         .thd, .snr, .sndr, .enob, .sfdr => {
             if (analysis != .fft or rest.len == 0 or rest[0].rhs != null) return error.ParseError;
             m.first.vec = rest[0].lhs;
-            try stdParams(&m.first, analysis, rest[1..], ctx);
+            try stdParams(arena, &m.first, analysis, rest[1..], ctx);
         },
         else => try trigTarg(arena, &m.first, analysis, rest, ctx),
     }
+    if (func == .em_avg) {
+        if (analysis != .tran) return error.ParseError;
+        m.first.val = ctx.measureOption("em_recovery") orelse 1;
+    }
     return m;
+}
+
+fn hasRef(c: Clause, field: core.MeasureRef.Field) bool {
+    for (c.refs) |r| if (r.field == field) return true;
+    return false;
 }
 
 fn find(w: []const Word, key: []const u8) ?usize {
@@ -108,45 +132,83 @@ fn find(w: []const Word, key: []const u8) ?usize {
 fn trigTarg(arena: std.mem.Allocator, c: *Clause, analysis: Kind, w: []const Word, ctx: anytype) !void {
     if (w.len == 0) return error.ParseError;
     const has_vec = !std.mem.startsWith(u8, w[0].lhs, "at");
-    if (has_vec) c.vec = try vector(arena, c, analysis, w[0].lhs);
-    try stdParams(c, analysis, w[@intFromBool(has_vec)..], ctx);
+    if (has_vec) c.vec = try vector(arena, c, analysis, w[0].lhs, ctx);
+    try stdParams(arena, c, analysis, w[@intFromBool(has_vec)..], ctx);
 }
 
 /// `vec=level` or `vec=vec2`, then parameters.
 fn when(arena: std.mem.Allocator, c: *Clause, analysis: Kind, w: []const Word, ctx: anytype) !void {
     if (w.len == 0) return error.ParseError;
     const rhs = w[0].rhs orelse return error.ParseError;
-    c.vec = try vector(arena, c, analysis, w[0].lhs);
+    c.vec = try vector(arena, c, analysis, w[0].lhs, ctx);
     c.val = 1e99;
-    // A result variable is always `v(..)`/`i(..)`: a `(` names one.
+    // A result variable is always `v(..)`/`i(..)`/`par(..)`: a `(` names one.
     if (std.mem.indexOfScalar(u8, rhs, '(') != null) {
-        var ignored: Clause = .{};
-        c.vec2 = try vector(arena, &ignored, analysis, rhs);
-    } else c.val = try ctx.measureValue(rhs);
-    try stdParams(c, analysis, w[1..], ctx);
+        var other: Clause = .{};
+        c.vec2 = try vector(arena, &other, analysis, rhs, ctx);
+        c.ops2 = other.ops;
+    } else try setValue(arena, c, .val, rhs, ctx);
+    try stdParams(arena, c, analysis, w[1..], ctx);
 }
 
-/// `vdb(out)` reads `v(out)` in dB for AC (ngspice correct_vec).
-fn vector(arena: std.mem.Allocator, c: *Clause, analysis: Kind, name: []const u8) ![]const u8 {
+/// `vdb(out)` reads `v(out)` in dB for AC (ngspice correct_vec);
+/// `par('expr')` compiles into `c.ops`.
+fn vector(arena: std.mem.Allocator, c: *Clause, analysis: Kind, name: []const u8, ctx: anytype) ![]const u8 {
+    if (std.mem.startsWith(u8, name, "par(") and name[name.len - 1] == ')') {
+        c.ops = try ctx.measureExpr(name[4 .. name.len - 1]);
+        return name;
+    }
     if ((analysis != .ac and analysis != .fft) or name.len < 2 or name[0] != 'v' or name[1] == '(') return name;
     const paren = std.mem.indexOfScalar(u8, name, '(') orelse return name;
     c.vectype = name[1];
     return std.mem.concat(arena, u8, &.{ "v", name[paren..] });
 }
 
-fn stdParams(c: *Clause, analysis: Kind, w: []const Word, ctx: anytype) !void {
+/// Sets `field` of `c` from `text`: a number or parameter expression, or,
+/// in HSPICE, an expression over earlier `.meas` results kept as a ref.
+fn setValue(arena: std.mem.Allocator, c: *Clause, field: core.MeasureRef.Field, text: []const u8, ctx: anytype) !void {
+    const v = ctx.measureValue(text) catch |err| {
+        if (err == error.OutOfMemory) return err;
+        var refs: std.ArrayList(core.MeasureRef) = .empty;
+        try refs.appendSlice(arena, c.refs);
+        try refs.append(arena, .{ .field = field, .expr = try ctx.measureExpr(text) });
+        c.refs = refs.items;
+        return;
+    };
+    switch (field) {
+        .val => c.val = v,
+        .td => c.td = v,
+        .from => c.from = v,
+        .to => c.to = v,
+        .at => c.at = v,
+    }
+}
+
+fn stdParams(arena: std.mem.Allocator, c: *Clause, analysis: Kind, w: []const Word, ctx: anytype) !void {
     for (w) |x| {
         const rhs = x.rhs orelse {
+            // REVERSE lets the target precede the trigger, which a
+            // negative result already reports.
+            if (std.mem.eql(u8, x.lhs, "reverse")) continue;
             if (!std.mem.eql(u8, x.lhs, "last")) return error.ParseError;
             c.cross = core.measure_last;
             c.rise = core.measure_unset;
             c.fall = core.measure_unset;
             continue;
         };
-        const v: f64 = if (std.mem.eql(u8, rhs, "last")) core.measure_last else try ctx.measureValue(rhs);
         // `print` only switches HSPICE's listing.
         const Key = enum { rise, fall, cross, val, td, from, to, at, minval, ignor, ymin, ymax, goal, weight, nbharm, minfreq, maxfreq, binsiz, print };
         const key = std.meta.stringToEnum(Key, x.lhs) orelse return error.ParseError;
+        switch (key) {
+            .val, .td, .from, .to, .at => {
+                if (key == .td and std.mem.eql(u8, rhs, "trig")) {
+                    c.td_trig = true;
+                } else try setValue(arena, c, std.meta.stringToEnum(core.MeasureRef.Field, x.lhs).?, rhs, ctx);
+                continue;
+            },
+            else => {},
+        }
+        const v: f64 = if (std.mem.eql(u8, rhs, "last")) core.measure_last else try ctx.measureValue(rhs);
         switch (key) {
             .rise, .fall, .cross => {
                 const n = std.math.lossyCast(i32, @floor(v + 0.5));
@@ -154,11 +216,7 @@ fn stdParams(c: *Clause, analysis: Kind, w: []const Word, ctx: anytype) !void {
                 c.fall = if (key == .fall) n else core.measure_unset;
                 c.cross = if (key == .cross) n else core.measure_unset;
             },
-            .val => c.val = v,
-            .td => c.td = v,
-            .from => c.from = v,
-            .to => c.to = v,
-            .at => c.at = v,
+            .val, .td, .from, .to, .at => unreachable,
             .minval => c.minval = v,
             .ignor, .ymin => c.ymin = v,
             .ymax => c.ymax = v,
@@ -230,38 +288,57 @@ test "meas cards parse like ngspice's word lists" {
         fn measureExpr(_: @This(), _: []const u8) ![]const core.MeasureOp {
             return &.{.{ .measure = 0 }};
         }
+        fn measureOption(_: @This(), _: []const u8) ?f64 {
+            return 0.5;
+        }
     };
-    const t = try parse(a, "tran tpd trig v(in) val = 0.9 rise=1 targ v(out) val= 0.9 fall =last td=1e-9", Ctx{}, null);
+    const t = try parse(a, "tran tpd trig v(in) val = 0.9 rise=1 targ v(out) val= 0.9 fall =last td=1e-9", Ctx{}, null, false);
     try std.testing.expectEqual(.trig_targ, t.func);
     try std.testing.expectEqualStrings("v(out)", t.second.vec);
     try std.testing.expectEqual(0.9, t.first.val);
     try std.testing.expectEqual(1, t.first.rise);
     try std.testing.expectEqual(core.measure_last, t.second.fall);
     try std.testing.expectEqual(1e-9, t.second.td);
-    const f = try parse(a, "ac g find vdb(out) when vp(out)=-45 cross=1", Ctx{}, null);
+    const f = try parse(a, "ac g find vdb(out) when vp(out)=-45 cross=1", Ctx{}, null, false);
     try std.testing.expectEqualStrings("v(out)", f.first.vec);
     try std.testing.expectEqual('d', f.first.vectype);
     try std.testing.expectEqual('p', f.second.vectype);
     try std.testing.expectEqual(-45, f.second.val);
-    const d = try parse(a, "dc x max v(1) from=2 to=-1", Ctx{}, null);
+    const d = try parse(a, "dc x max v(1) from=2 to=-1", Ctx{}, null, false);
     try std.testing.expectEqual(-1, d.first.from);
-    const w = try parse(a, "tran x when v(a)=v(b)", Ctx{}, null);
+    const w = try parse(a, "tran x when v(a)=v(b)", Ctx{}, null, false);
     try std.testing.expectEqualStrings("v(b)", w.first.vec2);
-    try std.testing.expectError(error.ParseError, parse(a, "tran x trig v(a) val=1 targ v(b) val=1", Ctx{}, null));
-    try std.testing.expectError(error.ParseError, parse(a, "tran x bogus v(a)", Ctx{}, null));
+    try std.testing.expectError(error.ParseError, parse(a, "tran x trig v(a) val=1 targ v(b) val=1", Ctx{}, null, false));
+    try std.testing.expectError(error.ParseError, parse(a, "tran x bogus v(a)", Ctx{}, null, false));
     // HSPICE: the analysis type defaults to the last analysis card.
-    const e = try parse(a, "e err1 v(a) v(b) minval=1e-3 ymax=5", Ctx{}, .ac);
+    const e = try parse(a, "e err1 v(a) v(b) minval=1e-3 ymax=5", Ctx{}, .ac, true);
     try std.testing.expectEqual(.ac, e.analysis);
     try std.testing.expectEqual(.err1, e.func);
     try std.testing.expectEqualStrings("v(b)", e.first.vec2);
     try std.testing.expectEqual(1e-3, e.first.minval);
-    try std.testing.expectError(error.ParseError, parse(a, "e err1 v(a) v(b)", Ctx{}, null));
-    const p = try parse(a, "tran r param='tpd*2' goal=2 weight=3", Ctx{}, null);
+    try std.testing.expectError(error.ParseError, parse(a, "e err1 v(a) v(b)", Ctx{}, null, false));
+    const p = try parse(a, "tran r param='tpd*2' goal=2 weight=3", Ctx{}, null, false);
     try std.testing.expectEqual(.param, p.func);
     try std.testing.expectEqual(3.0, p.goalError(4).?);
-    const g = try parse(a, "dc v find v(out) at=5 goal=0 minval=0.5", Ctx{}, null);
+    const g = try parse(a, "dc v find v(out) at=5 goal=0 minval=0.5", Ctx{}, null, false);
     try std.testing.expectEqual(0.4, g.goalError(0.2).?);
-    const s = try parse(a, "tran s derivative v(out) at=1e-9", Ctx{}, null);
+    const s = try parse(a, "tran s derivative v(out) at=1e-9", Ctx{}, null, false);
     try std.testing.expectEqual(.deriv, s.func);
     try std.testing.expectEqual(1e-9, s.first.at);
+    // HSPICE: TARG inherits TRIG's TD, TD=TRIG, values naming results,
+    // par() waveforms, REVERSE, the _CONT analyses and EM_AVG.
+    const h = try parse(a, "tran d trig v(a) val=1 td=2 rise=1 targ v(b) val=1 rise=1 reverse", Ctx{}, null, true);
+    try std.testing.expectEqual(2, h.second.td);
+    const n = try parse(a, "tran d trig v(a) val=1 td=2 rise=1 targ v(b) val=1 rise=1", Ctx{}, null, false);
+    try std.testing.expectEqual(0, n.second.td);
+    const tt = try parse(a, "tran d trig v(a) val=1 rise=2 targ v(b) val=1 rise=1 td=trig", Ctx{}, null, true);
+    try std.testing.expect(tt.second.td_trig);
+    const r = try parse(a, "tran r avg par('v(a)/2') from=t10 to=2", Ctx{}, null, true);
+    try std.testing.expectEqual(1, r.first.ops.len);
+    try std.testing.expectEqual(.from, r.first.refs[0].field);
+    try std.testing.expectEqual(2, r.first.to);
+    const c = try parse(a, "tran_cont c when v(a)=1 fall=2", Ctx{}, null, true);
+    try std.testing.expect(c.cont and c.analysis == .tran);
+    const em = try parse(a, "tran em em_avg i(r1) from=1 to=2", Ctx{}, null, true);
+    try std.testing.expectEqual(0.5, em.first.val);
 }

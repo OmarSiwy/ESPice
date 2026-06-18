@@ -230,6 +230,22 @@ are written against it:
   RMS as for ERR1; ngspice refuses `.meas` in batch mode with `-r`;
   espice always prints them, and reports a failed card on stderr in a
   shorter form.
+- The rest of HSPICE's `.MEASURE` [CR .MEASURE]: `VAL`, `TD`, `FROM`, `TO`
+  and `AT` may name earlier results (`from=t10 to='t90+1n'`), resolved when
+  the card runs; `TD=TRIG` counts TARG events from the trigger time; in the
+  HSPICE dialect a TARG without `TD` inherits TRIG's (ngspice keeps 0, and
+  an explicit `TD=0` on TARG reads as omitted); `REVERSE` is accepted, as a
+  negative result already reports a target before its trigger;
+  `par('expr')` stands for a vector anywhere one is read, arithmetic over
+  `v(a[,b])`, `i(x)` and parameters, evaluated per sample; `EM_AVG` is
+  max(I+, I-) - R min(I+, I-) over the window, I+/I- the trapezoidal means
+  of the positive and negative parts (each segment split at its zero) and R
+  `.option em_recovery` (default 1), with window ends at samples as AVG's.
+  `TRAN_CONT`/`AC_CONT`/`DC_CONT` report the named event and every later
+  one (CROSS=1 when none is named) as `name[1]`, `name[2]`, ...; a PARAM
+  card reads the first. HSPICE writes these to `.mt0` columns, a format
+  ESPice does not produce. Not read: pushout bisection, and the PHASENOISE,
+  PTDNOISE, LSTB, ACMATCH and DCMATCH keyword forms.
 
 ## Build
 

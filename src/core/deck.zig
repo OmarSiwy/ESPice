@@ -109,12 +109,24 @@ pub const Deck = struct {
 /// What a `.meas` card computes, after ngspice com_measure2.c, plus the
 /// HSPICE forms: `param` (an expression over other results) and the `err`
 /// relative-error family [CR .MEASURE (Error Function)], and the FFT
-/// figures THD, SNR, SNDR, ENOB and SFDR [CR .MEASURE FFT].
-pub const MeasureFunc = enum(u8) { trig_targ, find, when, avg, min, max, min_at, max_at, pp, rms, integ, deriv, param, err, err1, err2, err3, thd, snr, sndr, enob, sfdr };
+/// figures THD, SNR, SNDR, ENOB and SFDR [CR .MEASURE FFT], and the
+/// recovered electromigration average `em_avg`.
+pub const MeasureFunc = enum(u8) { trig_targ, find, when, avg, min, max, min_at, max_at, pp, rms, integ, deriv, param, err, err1, err2, err3, thd, snr, sndr, enob, sfdr, em_avg };
 
-/// One postfix op of a `PARAM=` measure: a constant, the result of the
-/// `measure`-th card, or an arithmetic operator.
-pub const MeasureOp = union(enum) { num: f64, measure: u32, neg, add, sub, mul, div, pow };
+/// One postfix op of a `PARAM=` measure or a `par('expr')` waveform: a
+/// constant, the result of the `measure`-th card, a result vector by label
+/// (`v(out)`, `i(v1)`; waveforms only), or an arithmetic operator.
+pub const MeasureOp = union(enum) { num: f64, measure: u32, vector: []const u8, neg, add, sub, mul, div, pow };
+
+/// A clause value HSPICE lets name earlier `.meas` results (`FROM=t10`,
+/// `TD='tr+1n'`): `expr` is evaluated over them before the clause runs and
+/// overrides `field`.
+pub const MeasureRef = struct {
+    field: Field,
+    expr: []const MeasureOp,
+
+    pub const Field = enum(u8) { val, td, from, to, at };
+};
 
 /// Event count not given (ngspice MEASURE_DEFAULT).
 pub const measure_unset: i32 = -1;
@@ -130,6 +142,14 @@ pub const MeasureClause = struct {
     vec: []const u8 = "",
     /// Right side of `WHEN vec=vec2`; empty when the level is `val`.
     vec2: []const u8 = "",
+    /// `par('expr')` waveforms standing in for `vec` and `vec2`, sample by
+    /// sample; empty for a plain vector.
+    ops: []const MeasureOp = &.{},
+    ops2: []const MeasureOp = &.{},
+    /// Values read from earlier results, applied before the clause runs.
+    refs: []const MeasureRef = &.{},
+    /// HSPICE `TD=TRIG` on a TARG: count events only after the trigger.
+    td_trig: bool = false,
     /// How an AC value is read: `m`, `p`, `r`, `i`, `d` from `vm(..)` and
     /// the like, 0 for the real part.
     vectype: u8 = 0,
@@ -149,6 +169,7 @@ pub const MeasureClause = struct {
     /// FFT figures: the highest harmonic counted as distortion (0: every
     /// one in the spectrum), and the bins either side of the fundamental
     /// counted as signal. MINFREQ and MAXFREQ are `from` and `to`.
+    /// EM_AVG keeps `.option em_recovery` in `val`.
     nbharm: u32 = 0,
     binsiz: u32 = 0,
     /// HSPICE optimization target (`GOAL=`) and the weight of its error.
@@ -169,6 +190,9 @@ pub const Measure = struct {
     second: MeasureClause = .{},
     /// The expression of a `param` card.
     expr: []const MeasureOp = &.{},
+    /// HSPICE `TRAN_CONT`/`AC_CONT`/`DC_CONT`: every event from the given
+    /// count on, one result each.
+    cont: bool = false,
 
     /// The card's optimization error for result `value`, HSPICE's
     /// WEIGHT * (result - GOAL) / max(|GOAL|, MINVAL), from the clause that

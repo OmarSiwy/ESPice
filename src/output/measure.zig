@@ -116,18 +116,23 @@ pub fn printStatistics(out: *Writer, measures: []const core.Measure, analysis: K
     }
 }
 
+const EvalError = Writer.Error || error{ NoSuchVector, OutOfInterval };
+
 /// Prints card `m` and returns its result, the value a PARAM card reads.
-fn evaluate(out: *Writer, m: core.Measure, w: Wave) !f64 {
-    const a = m.first;
+fn evaluate(out: *Writer, m: core.Measure, w: Wave) EvalError!f64 {
+    if (m.cont) return evaluateCont(out, m, w);
+    const a = try resolve(m.first, w.values);
+    var b = try resolve(m.second, w.values);
     switch (m.func) {
         .trig_targ => {
             const trig = try defined(if (a.at == core.measure_no_at) try w.when(a) else a.at);
-            const targ = try defined(if (m.second.at == core.measure_no_at) try w.when(m.second) else m.second.at);
+            if (b.td_trig) b.td = trig;
+            const targ = try defined(if (b.at == core.measure_no_at) try w.when(b) else b.at);
             try out.print("{s:<20}=  {f} targ=  {f} trig=  {f}\n", .{ m.name, sci(targ - trig, 6), sci(targ, 6), sci(trig, 6) });
             return targ - trig;
         },
         .find, .deriv => {
-            const at = if (a.at == core.measure_no_at) try defined(try w.when(m.second)) else a.at;
+            const at = if (a.at == core.measure_no_at) try defined(try w.when(b)) else a.at;
             const v = try defined(if (m.func == .find) try w.valueAt(a, at) else try w.slopeAt(a, at));
             try out.print("{s:<20}=  {f}\n", .{ m.name, sci(v, 6) });
             return v;
@@ -140,6 +145,11 @@ fn evaluate(out: *Writer, m: core.Measure, w: Wave) !f64 {
         .rms, .integ => {
             const r = try w.rmsInteg(a, m.func == .rms);
             try out.print("{s:<20}=   {f} from=  {f} to=  {f}\n", .{ m.name, sci(try defined(r.value), 5), sci(r.from, 5), sci(r.to, 5) });
+            return r.value;
+        },
+        .em_avg => {
+            const r = try w.emAvg(a);
+            try out.print("{s:<20}=  {f} from=  {f} to=  {f}\n", .{ m.name, sci(try defined(r.value), 6), sci(r.from, 6), sci(r.to, 6) });
             return r.value;
         },
         .avg => {
@@ -179,6 +189,65 @@ fn evaluate(out: *Writer, m: core.Measure, w: Wave) !f64 {
             return v;
         },
     }
+}
+
+/// `c` with its refs to earlier results applied; OutOfInterval when one
+/// has no value.
+fn resolve(c: Clause, values: []const f64) !Clause {
+    var r = c;
+    for (c.refs) |ref| {
+        const v = try defined(paramValue(ref.expr, values));
+        switch (ref.field) {
+            .val => r.val = v,
+            .td => r.td = v,
+            .from => r.from = v,
+            .to => r.to = v,
+            .at => r.at = v,
+        }
+    }
+    return r;
+}
+
+/// A `_CONT` card: the event it names and every later one, printed as
+/// `name[k]`. Returns the first; OutOfInterval when there is none.
+fn evaluateCont(out: *Writer, m: core.Measure, w: Wave) EvalError!f64 {
+    var first: f64 = nan;
+    var buf: [96]u8 = undefined;
+    var k: i32 = 0;
+    while (true) : (k += 1) {
+        var one = m;
+        one.cont = false;
+        one.name = std.fmt.bufPrint(&buf, "{s}[{d}]", .{ m.name, k + 1 }) catch m.name;
+        switch (m.func) {
+            .trig_targ => {
+                one.first = nth(m.first, k) orelse break;
+                one.second = nth(m.second, k) orelse break;
+            },
+            .find, .deriv => one.second = nth(m.second, k) orelse break,
+            .when => one.first = nth(m.first, k) orelse break,
+            else => return evaluate(out, one, w),
+        }
+        const v = evaluate(out, one, w) catch |e| switch (e) {
+            error.OutOfInterval => break,
+            else => return e,
+        };
+        if (k == 0) first = v;
+        if (lastEvent(m.first) or lastEvent(m.second)) break;
+    }
+    return defined(first);
+}
+
+fn lastEvent(c: Clause) bool {
+    return c.rise == core.measure_last or c.fall == core.measure_last or c.cross == core.measure_last;
+}
+
+/// `c` counting `k` events past the one it names (CROSS=1 when it names
+/// none); null for an `AT=` clause past its one value.
+fn nth(c: Clause, k: i32) ?Clause {
+    if (c.at != core.measure_no_at) return if (k == 0) c else null;
+    var r = c;
+    if (c.rise > 0) r.rise = c.rise + k else if (c.fall > 0) r.fall = c.fall + k else if (c.cross > 0) r.cross = c.cross + k else if (!lastEvent(c)) r.cross = 1 + k;
+    return r;
 }
 
 /// An FFT figure of merit over the magnitude spectrum `mag` on `freq`
@@ -221,14 +290,29 @@ fn fftFigure(mag: Column, freq: Column, n: usize, c: Clause, func: core.MeasureF
 }
 
 /// Folds a PARAM card's postfix over the results in `values`; NaN when a
-/// result it reads is missing.
+/// result it reads is missing or it reads a vector.
 fn paramValue(ops: []const core.MeasureOp, values: []const f64) f64 {
+    return fold(ops, struct {
+        values: []const f64,
+        fn leaf(s: @This(), op: core.MeasureOp) f64 {
+            return switch (op) {
+                .num => |x| x,
+                .measure => |k| if (k < s.values.len) s.values[k] else nan,
+                else => nan,
+            };
+        }
+    }{ .values = values });
+}
+
+/// Folds measure postfix; `leaves.leaf(op)` values each `num`, `measure`
+/// and `vector` op. NaN on a stack overflow or a malformed tail.
+fn fold(ops: []const core.MeasureOp, leaves: anytype) f64 {
     var stack: [32]f64 = undefined;
     var n: usize = 0;
     for (ops) |op| switch (op) {
-        .num, .measure => {
+        .num, .measure, .vector => {
             if (n == stack.len) return nan;
-            stack[n] = if (op == .num) op.num else if (op.measure < values.len) values[op.measure] else nan;
+            stack[n] = leaves.leaf(op);
             n += 1;
         },
         .neg => stack[n - 1] = -stack[n - 1],
@@ -254,15 +338,19 @@ fn defined(x: f64) error{OutOfInterval}!f64 {
 }
 
 /// A result column, real or read out of complex samples as `vectype` says
-/// (ngspice get_value).
+/// (ngspice get_value), or a `par()` waveform over other columns.
 const Column = struct {
     data: []const f64,
     stride: usize,
     offset: usize,
     complex: bool,
     vectype: u8,
+    /// `par()` postfix and the result labels its vectors name.
+    ops: []const core.MeasureOp = &.{},
+    names: []const []const u8 = &.{},
 
     fn get(c: Column, i: usize) f64 {
+        if (c.ops.len != 0) return fold(c.ops, Sample{ .column = c, .i = i });
         const re = c.data[i * c.stride + c.offset];
         if (!c.complex) return re;
         const im = c.data[i * c.stride + c.offset + 1];
@@ -276,6 +364,40 @@ const Column = struct {
         };
     }
 };
+
+/// Sample `i` of the columns a `par()` waveform reads.
+const Sample = struct {
+    column: Column,
+    i: usize,
+
+    // ponytail: each vector op finds its column by name per sample,
+    // O(vectors); resolve the indices once if par() waveforms get hot.
+    fn leaf(s: Sample, op: core.MeasureOp) f64 {
+        return switch (op) {
+            .num => |x| x,
+            .vector => |name| blk: {
+                const k = columnIndex(s.column.names, name) orelse break :blk nan;
+                var c = s.column;
+                c.ops = &.{};
+                c.offset = k * @as(usize, if (c.complex) 2 else 1);
+                break :blk c.get(s.i);
+            },
+            .measure => nan,
+            else => unreachable,
+        };
+    }
+};
+
+/// The column labelled `name`; a bare node name reads `v(name)`, as
+/// ngspice's vector lookup does.
+fn columnIndex(names: []const []const u8, name: []const u8) ?usize {
+    var buf: [256]u8 = undefined;
+    const alt = std.fmt.bufPrint(&buf, "v({s})", .{name}) catch name;
+    for (names, 0..) |v, i| {
+        if (std.ascii.eqlIgnoreCase(v, name) or std.ascii.eqlIgnoreCase(v, alt)) return i;
+    }
+    return null;
+}
 
 const Stat = struct { value: f64, at: f64 };
 
@@ -299,23 +421,29 @@ const Wave = struct {
         return .{ .data = w.result.data, .stride = w.result.varnames.len * width, .offset = i * width, .complex = w.result.is_complex, .vectype = vectype };
     }
 
-    /// `name` as the result labels it; a bare node name reads `v(name)`,
-    /// as ngspice's vector lookup does.
+    /// `name` as the result labels it (`columnIndex`).
     fn column(w: Wave, name: []const u8, vectype: u8) error{NoSuchVector}!Column {
-        var buf: [256]u8 = undefined;
-        const alt = std.fmt.bufPrint(&buf, "v({s})", .{name}) catch name;
-        for (w.result.varnames, 0..) |v, i| {
-            if (std.ascii.eqlIgnoreCase(v, name) or std.ascii.eqlIgnoreCase(v, alt)) return w.col(i, vectype);
-        }
-        return error.NoSuchVector;
+        return w.col(columnIndex(w.result.varnames, name) orelse return error.NoSuchVector, vectype);
+    }
+
+    /// The vector `name`, or the `par()` waveform `ops` when given.
+    fn waveform(w: Wave, name: []const u8, ops: []const core.MeasureOp, vectype: u8) error{NoSuchVector}!Column {
+        if (ops.len == 0) return w.column(name, vectype);
+        for (ops) |op| if (op == .vector) {
+            _ = try w.column(op.vector, vectype);
+        };
+        var c = w.col(0, vectype);
+        c.ops = ops;
+        c.names = w.result.varnames;
+        return c;
     }
 
     /// Scale value of the event `c` names; NaN when it never happens
     /// (ngspice com_measure_when).
     fn when(w: Wave, c: Clause) !f64 {
         const x = w.scale();
-        const y = try w.column(c.vec, c.vectype);
-        const y2: ?Column = if (c.vec2.len > 0) try w.column(c.vec2, c.vectype) else null;
+        const y = try w.waveform(c.vec, c.ops, c.vectype);
+        const y2: ?Column = if (c.vec2.len > 0) try w.waveform(c.vec2, c.ops2, c.vectype) else null;
         const dc = w.analysis == .dc;
         var td = c.td;
         var rise: i32 = 0;
@@ -388,7 +516,7 @@ const Wave = struct {
     /// (ngspice measure_at).
     fn valueAt(w: Wave, c: Clause, at: f64) !f64 {
         const x = w.scale();
-        const y = try w.column(c.vec, c.vectype);
+        const y = try w.waveform(c.vec, c.ops, c.vectype);
         var px: f64 = 0;
         var pv: f64 = 0;
         for (0..w.len()) |i| {
@@ -406,7 +534,7 @@ const Wave = struct {
     /// around it; NaN outside the sweep.
     fn slopeAt(w: Wave, c: Clause, at: f64) !f64 {
         const x = w.scale();
-        const y = try w.column(c.vec, c.vectype);
+        const y = try w.waveform(c.vec, c.ops, c.vectype);
         for (1..w.len()) |i| {
             const x0 = x.get(i - 1);
             const x1 = x.get(i);
@@ -423,7 +551,7 @@ const Wave = struct {
     /// Points with |M| outside [ymin, ymax] are skipped; NaN when none is left.
     fn relError(w: Wave, c: Clause, func: core.MeasureFunc) !f64 {
         const x = w.scale();
-        const mv = try w.column(c.vec, c.vectype);
+        const mv = try w.waveform(c.vec, c.ops, c.vectype);
         const cv = try w.column(c.vec2, c.vectype);
         var sum: f64 = 0;
         var count: f64 = 0;
@@ -453,7 +581,7 @@ const Wave = struct {
     /// measure_minMaxAvg).
     fn extremum(w: Wave, c: Clause, op: enum { min, max, avg }) !Stat {
         const x = w.scale();
-        const y = try w.column(c.vec, c.vectype);
+        const y = try w.waveform(c.vec, c.ops, c.vectype);
         var first = false;
         var m: f64 = 0;
         var m_at: f64 = 0;
@@ -500,12 +628,42 @@ const Wave = struct {
 
     const Integral = struct { value: f64, from: f64, to: f64 };
 
+    /// HSPICE EM_AVG over the window [CR .MEASURE (AVG, EM_AVG, ...)]:
+    /// with I+ and I- the trapezoidal averages of the positive and negative
+    /// parts (each segment split at its zero crossing), max(I+, I-) minus
+    /// `c.val` (`.option em_recovery`) times min(I+, I-). The window ends
+    /// are samples, as AVG's.
+    fn emAvg(w: Wave, c: Clause) !Integral {
+        const x = w.scale();
+        const y = try w.waveform(c.vec, c.ops, c.vectype);
+        var pos: f64 = 0;
+        var neg: f64 = 0;
+        var from: f64 = nan;
+        var to: f64 = nan;
+        var pv: f64 = 0;
+        for (0..w.len()) |i| {
+            const v = y.get(i);
+            const xv = x.get(i);
+            if (xv < c.from) continue;
+            if (c.to != 0 and xv > c.to) break;
+            if (!std.math.isNan(from)) {
+                pos += positiveArea(pv, v, xv - to);
+                neg += positiveArea(-pv, -v, xv - to);
+            } else from = xv;
+            to = xv;
+            pv = v;
+        }
+        const span = to - from;
+        if (!(span > 0)) return .{ .value = nan, .from = from, .to = to };
+        return .{ .value = (@max(pos, neg) - c.val * @min(pos, neg)) / span, .from = from, .to = to };
+    }
+
     /// Integral, or RMS, of the vector over [from, to], ends interpolated,
     /// by composite Simpson 3/8, Simpson 1/3 and trapezoid panels as the
     /// sample spacing allows (ngspice measure_rms_integral).
     fn rmsInteg(w: Wave, c: Clause, rms: bool) !Integral {
         const x = w.scale();
-        const y = try w.column(c.vec, c.vectype);
+        const y = try w.waveform(c.vec, c.ops, c.vectype);
         const n = w.len();
         var win: Window = .{ .x = x, .y = y, .from = c.from, .to = c.to, .rms = rms };
         while (win.lo < n and x.get(win.lo) < c.from) win.lo += 1;
@@ -537,6 +695,14 @@ const Wave = struct {
         return .{ .value = if (rms) @sqrt(total / (to - from)) else total, .from = from, .to = to };
     }
 };
+
+/// Area under max(v, 0) over one linear segment from `v0` to `v1`, `dx` wide.
+fn positiveArea(v0: f64, v1: f64, dx: f64) f64 {
+    if (v0 >= 0 and v1 >= 0) return 0.5 * (v0 + v1) * dx;
+    if (v0 <= 0 and v1 <= 0) return 0;
+    const hi = @max(v0, v1);
+    return 0.5 * hi * dx * hi / (hi - @min(v0, v1));
+}
 
 /// Samples lo..hi of an RMS/INTEG window. With `cut`, sample hi-1 is the
 /// first past `to` and reads as the value at `to`; the first sample reads as

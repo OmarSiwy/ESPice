@@ -310,8 +310,9 @@ pub fn deckOptions(config: []const netlist.Config, dialect: netlist.Dialect) !De
         while (i < args.len) : (i += 1) {
             const key = nameAt(args, i) orelse continue;
             if (key.len > lower.len) continue;
-            // Monte Carlo draws read these (frontend/variants.zig).
-            if (std.ascii.eqlIgnoreCase(key, "seed") or std.ascii.eqlIgnoreCase(key, "sampling_method")) {
+            // Monte Carlo draws read these (frontend/variants.zig), EM_AVG
+            // measures the last (frontend/measure.zig).
+            if (std.ascii.eqlIgnoreCase(key, "seed") or std.ascii.eqlIgnoreCase(key, "sampling_method") or std.ascii.eqlIgnoreCase(key, "em_recovery")) {
                 i += 1;
                 continue;
             }

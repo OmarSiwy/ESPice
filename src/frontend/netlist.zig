@@ -1702,7 +1702,7 @@ fn Reader(comptime S: type) type {
             for (r.meas_lines.items) |line| {
                 var f = F.init(line);
                 _ = f.next();
-                const m = measure.parse(r.arena, f.rest(), r, last) catch |err| switch (err) {
+                const m = measure.parse(r.arena, f.rest(), r, last, r.dialect == .hspice) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     else => {
                         std.log.warn("netlist: ignoring malformed card '{s}'", .{line});
@@ -1713,9 +1713,10 @@ fn Reader(comptime S: type) type {
             }
         }
 
-        /// A `PARAM=` measure expression in postfix: names of earlier `.meas`
-        /// cards read their results, global parameters fold to numbers.
-        /// Arithmetic only; anything else is a ParseError.
+        /// A `PARAM=` or `par()` measure expression in postfix: names of
+        /// earlier `.meas` cards read their results, global parameters fold
+        /// to numbers, `v(a[,b])` and `i(x)` read result vectors. Arithmetic
+        /// only; anything else is a ParseError.
         pub fn measureExpr(r: *R, text: []const u8) Error![]const core.MeasureOp {
             const body = if (text.len > 0 and (text[0] == '{' or F.isQuote(text[0]))) F.body(text) else text;
             const mark = r.scratch.mark();
@@ -1725,9 +1726,17 @@ fn Reader(comptime S: type) type {
             const ops = try r.arena.dupe(expr.Op, r.scratch.ops.items[mark.ops..]);
             const names = try r.arena.dupe([]const u8, r.scratch.names.items);
             const consts = try r.arena.dupe(f64, r.scratch.consts.items);
-            const out = try r.arena.alloc(core.MeasureOp, ops.len);
-            for (ops, out) |op, *o| o.* = switch (op.code) {
+            var out: std.ArrayList(core.MeasureOp) = .empty;
+            for (ops) |op| try out.append(r.arena, switch (op.code) {
                 .num => .{ .num = consts[op.a] },
+                .vprobe, .iprobe => {
+                    const letter = if (op.code == .vprobe) "v" else "i";
+                    try out.append(r.arena, .{ .vector = try std.fmt.allocPrint(r.arena, "{s}({s})", .{ letter, names[op.a] }) });
+                    if (op.b == expr.none) continue;
+                    try out.append(r.arena, .{ .vector = try std.fmt.allocPrint(r.arena, "{s}({s})", .{ letter, names[op.b] }) });
+                    try out.append(r.arena, .sub);
+                    continue;
+                },
                 .ident => for (r.measures.items, 0..) |m, i| {
                     if (std.mem.eql(u8, m.name, names[op.a])) break .{ .measure = @intCast(i) };
                 } else .{ .num = try r.measureValue(names[op.a]) },
@@ -1738,8 +1747,18 @@ fn Reader(comptime S: type) type {
                 .div => .div,
                 .pow => .pow,
                 else => return error.ParseError,
+            });
+            return out.items;
+        }
+
+        /// A numeric `.option name=value`, the last one given.
+        pub fn measureOption(r: *R, name: []const u8) ?f64 {
+            var found: ?f64 = null;
+            for (r.config.items) |c| if (!c.temp) for (c.args, 0..) |a, i| {
+                if (a != .name or i + 1 >= c.args.len or !std.mem.eql(u8, a.name, name)) continue;
+                if (c.args[i + 1] == .num) found = c.args[i + 1].num;
             };
-            return out;
+            return found;
         }
 
         /// A `.meas` value: a number or a global parameter expression.
