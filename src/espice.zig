@@ -516,7 +516,7 @@ fn printSessionMeasures(session: *const analysis.session.Session, out: *std.Io.W
         const info = try session.info(id);
         if (info.status != .complete) continue;
         switch (info.kind) {
-            .tran, .ac, .dc, .fft => try output.printMeasures(out, err, measures, info.kind, try session.result(id)),
+            .tran, .ac, .dc, .fft, .tran_noise => try output.printMeasures(out, err, measures, info.kind, try session.result(id)),
             else => {},
         }
     }

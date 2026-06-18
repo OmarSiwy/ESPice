@@ -29,6 +29,7 @@ pub fn print(out: *Writer, err: *Writer, measures: []const core.Measure, analysi
             heading = true;
             try out.print("\n  Measurements for {s} Analysis\n\n", .{switch (analysis) {
                 .tran => "Transient",
+                .tran_noise => "Transient Noise",
                 .ac => "AC",
                 .fft => "FFT",
                 else => "DC",
@@ -146,6 +147,11 @@ fn evaluate(out: *Writer, m: core.Measure, w: Wave) EvalError!f64 {
             const r = try w.rmsInteg(a, m.func == .rms);
             try out.print("{s:<20}=   {f} from=  {f} to=  {f}\n", .{ m.name, sci(try defined(r.value), 5), sci(r.from, 5), sci(r.to, 5) });
             return r.value;
+        },
+        .jitter => {
+            const j = try w.jitter(a);
+            try out.print("{s:<20}=  {f} pp=  {f} period=  {f} edges=  {d}\n", .{ m.name, sci(j.rms, 6), sci(j.pp, 6), sci(j.period, 6), j.edges });
+            return j.rms;
         },
         .em_avg => {
             const r = try w.emAvg(a);
@@ -462,7 +468,7 @@ const Wave = struct {
             const v2 = if (y2) |c2| c2.get(i) else nan;
             // A DC sweep may start anywhere: ngspice keeps its origin in td.
             if (dc and i == 0) td = xv;
-            if (w.analysis == .tran and xv < td) continue;
+            if ((w.analysis == .tran or w.analysis == .tran_noise) and xv < td) continue;
             if (w.analysis == .ac and xv < 0) continue;
             if (dc) {
                 if (xv < c.from or xv > c.to) continue;
@@ -627,6 +633,55 @@ const Wave = struct {
     }
 
     const Integral = struct { value: f64, from: f64, to: f64 };
+
+    const Jitter = struct { rms: f64, pp: f64, period: f64, edges: u32 };
+
+    /// Time interval error of the repeating event `c` names (rising edges
+    /// unless it counts falls or crossings) after `c.td`: each event time
+    /// minus the least-squares line through event time against index, the
+    /// ideal clock the edges recover. OutOfInterval below three events.
+    // ponytail: each event rescans the waveform from its start, O(N events);
+    // one scan collecting every crossing when clocks get long.
+    fn jitter(w: Wave, c: Clause) !Jitter {
+        var times: [4096]f64 = undefined;
+        var n: usize = 0;
+        while (n < times.len) : (n += 1) {
+            var e = c;
+            const k: i32 = @intCast(n + 1);
+            if (c.fall > 0) e.fall = k else if (c.cross > 0) e.cross = k else e.rise = k;
+            const t = try w.when(e);
+            if (std.math.isNan(t)) break;
+            times[n] = t;
+        }
+        if (n < 3) return error.OutOfInterval;
+        const count: f64 = @floatFromInt(n);
+        var sx: f64 = 0;
+        var st: f64 = 0;
+        for (times[0..n], 0..) |t, i| {
+            sx += @floatFromInt(i);
+            st += t;
+        }
+        const mx = sx / count;
+        const mt = st / count;
+        var sxx: f64 = 0;
+        var sxt: f64 = 0;
+        for (times[0..n], 0..) |t, i| {
+            const dx = @as(f64, @floatFromInt(i)) - mx;
+            sxx += dx * dx;
+            sxt += dx * (t - mt);
+        }
+        const period = sxt / sxx;
+        var sum2: f64 = 0;
+        var lo: f64 = std.math.inf(f64);
+        var hi: f64 = -std.math.inf(f64);
+        for (times[0..n], 0..) |t, i| {
+            const tie = t - (mt + period * (@as(f64, @floatFromInt(i)) - mx));
+            sum2 += tie * tie;
+            lo = @min(lo, tie);
+            hi = @max(hi, tie);
+        }
+        return .{ .rms = @sqrt(sum2 / count), .pp = hi - lo, .period = period, .edges = @intCast(n) };
+    }
 
     /// HSPICE EM_AVG over the window [CR .MEASURE (AVG, EM_AVG, ...)]:
     /// with I+ and I- the trapezoidal averages of the positive and negative

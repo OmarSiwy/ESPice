@@ -33,8 +33,29 @@ per-step variance rescales as $1/h$, keeping the PSD level constant across
 step-size changes (the discrete increments mimic Brownian-motion scaling
 $\Delta W \sim \sqrt h$: $i_n \cdot h \sim \sqrt{S_i h/2}$).
 
-Flicker ($1/f$) sources need correlated synthesis (sum-of-Ornstein-
-Uhlenbeck / filtered-white cascades): *not implemented*; only the white part of each source is sampled.
+### Flicker synthesis
+
+A flicker source $K/f^{e_f}$ is a sum of Ornstein-Uhlenbeck processes
+(Lorentzians). Pole $k$ has corner $f_k$, $\tau_k = 1/(2\pi f_k)$ and
+variance $v_k$, one-sided PSD $4 v_k \tau_k / (1 + (2\pi f \tau_k)^2)$.
+With corners log-spaced by ratio $r$ over $[f_{\min}, f_{\max}]$ and
+
+$$
+v_k = K \ln r \,\sin\!\big(\tfrac{\pi (2 - e_f)}{2}\big)\, f_k^{\,1 - e_f},
+$$
+
+the sum approximates $K/f^{e_f}$ between the outer corners (the Lorentzian
+integrated over $\ln f_c$ is $\tfrac{\pi}{2} / \sin(\pi s/2)$ with
+$s = 2 - e_f$). For $e_f = 1$ every pole carries $K \ln r$ and the
+variance is exactly $K \ln(f_{\max}/f_{\min})$. Each process advances
+exactly over a step of any length,
+$y \leftarrow y\,e^{-h/\tau} + \sqrt{v (1 - e^{-2h/\tau})}\,\xi$, and
+starts from its stationary law. $f_{\max} = 1/(2 h_{\max})$, the white
+band; $f_{\min}$ defaults to $1/t_{\text{stop}}$ (HSPICE `FMIN`). Three
+corners per decade keep the ripple near 0.1 dB; the band edges roll off
+over about a decade, which shifts a filtered variance by a few percent
+(3.4 % in `jfet_flicker`'s 10 MHz pole). $e_f$ outside $(0, 2)$ has no
+finite sum, and such a source keeps its white part only.
 
 ### Integration in the presence of noise
 
@@ -86,10 +107,10 @@ to exist.
    in [models/](../../models/)): devices declare `noise_gens` and
    `noisePsd`, and `collectNoiseSources` returns each generator's white and
    flicker parts at the device's own bias. The synthesis step maps the white
-   part to $\sigma = \sqrt{S \cdot B}$. Only the white half is sampled: an
-   i.i.d. draw per step cannot shape $1/f$, and sampling flicker as white
-   would spread its power over every frequency. §1's flicker synthesis
-   (correlated OU cascade) is not implemented.
+   part to $\sigma = \sqrt{S \cdot B}$ and the flicker part to §1's OU
+   poles (`Flicker`, SoA over every pole), whose values add to the same
+   injected current. A rejected step's pole advance stands; each process
+   stays stationary. `scale` (HSPICE `SCALE`) multiplies every PSD.
 2. RNG: private Xorshift64 + Box-Muller, seed in `Options`
    (default `0xDEAD_BEEF_CAFE_1234`), deterministic and reproducible per
    seed, same policy as [ensemble-sweeps.md](ensemble-sweeps.md).
@@ -104,18 +125,37 @@ to exist.
    Result-layout.
 
 Knobs: transient knobs minus LTE (`dt_init/dt_min/dt_max/max_steps`),
-`seed`; the tolerance bundle for the per-step Newton. The temperature is the
-circuit's.
+`seed`, `scale`, `f_min`; the tolerance bundle for the per-step Newton. The
+temperature is the circuit's.
+
+Cards: `.trannoise tstep tstop` (ESPice's own), and HSPICE's
+`.trannoise out [METHOD=MC] [SEED=] [FMIN=] [FMAX=] [SCALE=]
+[AUTOCORRELATION=]` [CR .TRANNOISE] over the deck's `.tran`, stepped at
+$h = 1/(2\,\text{FMAX})$ with FMAX defaulting to 1/TSTEP. Divergences:
+`METHOD=SDE`, `TIME=` and `SAMPLES` above 1 are refused (use one card per
+seed); every probe is recorded rather than an ONOISE trace;
+AUTOCORRELATION is accepted and unused, since `.jitter` needs none.
+
+`.jitter trannoise|tran TRIG v(x) VAL= [TD=] [RISE=|FALL=|CROSS=]`
+[CR .JITTER] runs as a `.meas` over that result: the event times after TD
+(rising edges unless the card counts falls or crossings), minus their
+least-squares line against edge index, give the time interval error;
+`jitter = <rms> pp= <peak to peak> period= <fitted period> edges= <n>` is
+printed. HSPICE computes TIE from an autocorrelation of the noisy output
+against the noiseless run; the fitted ideal clock needs neither and
+reproduces a deterministic modulation exactly (`tran/jitter_sffm`).
 
 ## 3. Pseudo-code, CPU sequential
 
 ```
 tran_noise(ckt, x, t_stop, seed):
-    srcs = collect_noise_sources(x_op)          # white part per generator
+    srcs = collect_noise_sources(x_op)          # white and flicker per generator
+    poles = flicker_poles(srcs, f_min, 1/(2 dt_max))
     rng = xorshift64(seed); q_prev = q(x); h = dt_init
     while t < t_stop:
         B = 1/(2h)
         for s in srcs: i_n[s] = sqrt(white_s*B) * randn(rng)
+        for p in poles: y[p] = y[p] e^(-h/tau_p) + sqrt(v_p (1 - e^(-2h/tau_p))) randn(rng); i_n[src_p] += y[p]
         nr = newton(x_try, t+h, hook = { rhs += (q - q_prev)/h + noise stamps,
                                           A = G + C/h }, itl4)
         if !nr.converged:
@@ -161,8 +201,10 @@ runs on the host; device evaluation inside each Newton iterate can use
 
 - §1 $\sigma = \sqrt{4kTgB}$, $B = 1/(2h)$, BE, no-LTE rationale: verified
   against `tran_noise.zig` source (rationale documented in-source).
-- §1 flicker gap + `.noise` correlation identity: derived; the
-  LTI-reduction check is the natural fixture (see below).
+- §1 flicker synthesis: derived; `tran_noise/jfet_flicker` checks the
+  $K \ln(f_{\max}/f_{\min})$ variance and its share through a pole.
+  `.noise` correlation identity: derived; the LTI-reduction check is the
+  natural fixture (see below).
 - §2/§3: transcribed from `tran_noise.zig`. §4: design notes (the
   implementation uses one sequential stream).
 
@@ -170,5 +212,6 @@ runs on the host; device evaluation inside each Newton iterate can use
 
 - `src/analysis/tran/tran_noise.zig`.
 - Fixtures: `tests/fixtures/tran_noise/` (`rc_equilibrium` checks the
-  $kT/C$ variance; `ideal_clamp_*`), `tests/fixtures/noise/` for
-  frequency-domain cross-checks.
+  $kT/C$ variance; `ideal_clamp_*`; `jfet_flicker` the flicker synthesis
+  through the HSPICE card), `tests/fixtures/tran/jitter_sffm` (`.jitter`),
+  `tests/fixtures/noise/` for frequency-domain cross-checks.

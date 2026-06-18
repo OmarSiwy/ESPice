@@ -1,7 +1,9 @@
 //! Transient noise: backward-Euler transient with one Gaussian current
 //! sample per noise source per step, sigma = sqrt(S * BW) with BW = 1/(2dt),
-//! so the sampled sequence carries the source's white PSD. The PSDs come
-//! from the devices (`Circuit.collectNoiseSources`).
+//! so the sampled sequence carries the source's white PSD. Flicker noise
+//! (K / f^ef) is a sum of Ornstein-Uhlenbeck (Lorentzian) processes with
+//! corners log-spaced over [f_min, 1/(2 dt_max)], each advanced exactly over
+//! the step. The PSDs come from the devices (`Circuit.collectNoiseSources`).
 const std = @import("std");
 const root = @import("../types.zig");
 const simdCopy = root.copySimd;
@@ -41,6 +43,77 @@ const Xorshift64 = struct {
         const r1 = @max(self.uniform(), 1e-300); // keeps log finite
         const r2 = self.uniform();
         return @sqrt(-2.0 * @log(r1)) * @cos(2.0 * std.math.pi * r2);
+    }
+};
+
+/// Flicker generators, SoA over every pole of every source with flicker
+/// noise. A pole is an Ornstein-Uhlenbeck process of corner f_k and
+/// variance v_k, one-sided PSD 4 v_k tau_k / (1 + (2 pi f tau_k)^2) with
+/// tau_k = 1 / (2 pi f_k). With `per_decade` corners log-spaced by ratio r,
+/// v_k = K ln(r) sin(pi (2 - ef) / 2) f_k^(1 - ef) makes the sum K / f^ef
+/// between the outer corners (the integral of the Lorentzian over log f),
+/// so for ef = 1 the variance is K ln(f_max / f_min).
+const Flicker = struct {
+    /// Owning noise source per pole, 1/tau and stationary variance.
+    source: []u32,
+    rate: []f64,
+    variance: []f64,
+    /// Process value. Every attempt advances it; a rejected attempt's
+    /// advance stands, which keeps each process stationary.
+    y: []f64,
+    started: bool = false,
+
+    // ponytail: fixed density; the sum ripples about 0.1 dB around K/f^ef.
+    const per_decade = 3.0;
+
+    fn init(gpa: std.mem.Allocator, sources: []const NoiseSource, options: Options) !Flicker {
+        const f_max = 0.5 / options.dt_max;
+        const f_min = options.f_min orelse 1.0 / options.t_stop;
+        const decades = if (f_max > f_min) std.math.log10(f_max / f_min) else 0;
+        const k: usize = @intFromFloat(@ceil(per_decade * decades));
+        var count: usize = 0;
+        // ponytail: ef outside (0, 2) has no finite Lorentzian sum; such a
+        // source keeps its white half only.
+        for (sources) |s| count += if (s.flicker > 0 and s.ef > 0 and s.ef < 2) k else 0;
+        var f: Flicker = .{
+            .source = try gpa.alloc(u32, count),
+            .rate = try gpa.alloc(f64, count),
+            .variance = try gpa.alloc(f64, count),
+            .y = try gpa.alloc(f64, count),
+        };
+        if (count == 0) return f;
+        const ln_r = @log(f_max / f_min) / @as(f64, @floatFromInt(k));
+        var p: usize = 0;
+        for (sources, 0..) |s, i| {
+            if (!(s.flicker > 0 and s.ef > 0 and s.ef < 2)) continue;
+            const weight = s.flicker * options.scale * ln_r * @sin(std.math.pi * (2 - s.ef) / 2);
+            for (0..k) |j| {
+                const corner = f_min * @exp(ln_r * (@as(f64, @floatFromInt(j)) + 0.5));
+                f.source[p] = @intCast(i);
+                f.rate[p] = 2 * std.math.pi * corner;
+                f.variance[p] = weight * std.math.pow(f64, corner, 1 - s.ef);
+                p += 1;
+            }
+        }
+        return f;
+    }
+
+    fn deinit(f: *Flicker, gpa: std.mem.Allocator) void {
+        gpa.free(f.source);
+        gpa.free(f.rate);
+        gpa.free(f.variance);
+        gpa.free(f.y);
+    }
+
+    /// Advances every pole by `dt` and adds each to its source's current.
+    /// The first call draws the stationary state.
+    fn step(f: *Flicker, dt: f64, rng: *Xorshift64, currents: []f64) void {
+        for (f.source, f.rate, f.variance, f.y) |s, rate, v, *y| {
+            const decay = @exp(-rate * dt);
+            y.* = if (f.started) y.* * decay + @sqrt(v * (1 - decay * decay)) * rng.randn() else @sqrt(v) * rng.randn();
+            currents[s] += y.*;
+        }
+        f.started = true;
     }
 };
 
@@ -109,19 +182,17 @@ pub fn simulate(
     // Split the source table for the run: sampling streams sqrt(white), the
     // dt-independent factor of sigma, and injection streams the endpoints.
     // Valid because collectNoiseSources ran once on x_op.
-    // ponytail: white half only. An iid draw per step cannot shape 1/f, and
-    // sampling flicker as white would spread its power over every frequency.
-    // Upgrade: a shaping filter (sum of first-order poles) driving the same
-    // draw. `.noise` and `.pnoise` carry the full PSD.
     const noise_prefix = try allocator.alloc(f64, noise_sources.len);
     defer allocator.free(noise_prefix);
     const inj_nodes = try allocator.alloc(u32, 2 * noise_sources.len);
     defer allocator.free(inj_nodes);
     for (noise_sources, 0..) |src, s| {
-        noise_prefix[s] = @sqrt(src.white);
+        noise_prefix[s] = @sqrt(src.white * options.scale);
         inj_nodes[2 * s] = src.node_p;
         inj_nodes[2 * s + 1] = src.node_n;
     }
+    var flicker = try Flicker.init(allocator, noise_sources, options);
+    defer flicker.deinit(allocator);
 
     var a_vals: []f64 = &.{};
     var q_prev: []f64 = &.{};
@@ -151,6 +222,7 @@ pub fn simulate(
             const sigma = pfx * bandwidth_scale;
             i_n.* = sigma * rng.randn();
         }
+        flicker.step(dt, &rng, noise_currents);
 
         const hook = NoiseHook{
             .alpha = 1.0 / dt,
