@@ -1,0 +1,3 @@
+* load_ic, saved with .save type=ic after c1 was left at 0.25 V
+* operating point written by .save
+.ic v(b)=2.5e-1

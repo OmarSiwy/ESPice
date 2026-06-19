@@ -1,11 +1,12 @@
-//! `.include` and `.lib` expansion, before parsing. Paths resolve against
-//! the directory of the file that names them.
+//! `.include`, `.lib` and HSPICE `.load` expansion, before parsing. Paths
+//! resolve against the directory of the file that names them.
 const std = @import("std");
 const Io = std.Io;
 const Fields = @import("lines.zig").Fields("\"'", false);
-const Directive = enum { include, lib, endl };
+const Directive = enum { include, lib, endl, load };
 const directives = std.StaticStringMap(Directive).initComptime(.{
     .{ ".include", .include }, .{ ".inc", .include }, .{ ".lib", .lib }, .{ ".endl", .endl },
+    .{ ".load", .load },
 });
 
 /// Reads `path` and expands it (see `expand`). The result is allocated in `arena`.
@@ -194,6 +195,30 @@ fn appendFile(io: Io, path: []const u8, section: ?[]const u8, depth: u8, out: *s
     try appendContents(io, path, src, section, depth, out);
 }
 
+/// HSPICE `.load [FILE=f] [RUN=...]` [CR .LOAD]: inlines the `.nodeset`/`.ic`
+/// cards an earlier `.save` wrote, `<stem of path>.ic0` by default. A file
+/// not there yet (the run that first saves it) is skipped with a warning.
+/// RUN= only picks between `.alter` runs' files, which ESPice does not
+/// number; it is accepted and unused.
+fn appendLoad(io: Io, path: []const u8, tokens: *Fields, depth: u8, out: *std.ArrayList(u8)) anyerror!void {
+    const gpa = std.heap.page_allocator;
+    var file: ?[]const u8 = null;
+    while (tokens.next()) |key| {
+        if (!Fields.isWord(key) or !tokens.takeEq()) return error.InvalidInclude;
+        const value = (try word(tokens)) orelse return error.InvalidInclude;
+        if (std.ascii.eqlIgnoreCase(key, "file")) file = value else if (!std.ascii.eqlIgnoreCase(key, "run")) return error.InvalidInclude;
+    }
+    const stem = std.fs.path.stem(path);
+    const default = try std.mem.concat(gpa, u8, &.{ stem, ".ic0" });
+    defer gpa.free(default);
+    const resolved = try std.fs.path.resolve(gpa, &.{ std.fs.path.dirname(path) orelse ".", file orelse default });
+    defer gpa.free(resolved);
+    appendFile(io, resolved, null, depth + 1, out) catch |err| switch (err) {
+        error.FileNotFound => std.log.warn(".load: {s} not found; no saved operating point", .{resolved}),
+        else => return err,
+    };
+}
+
 fn appendContents(io: Io, path: []const u8, src: []const u8, section: ?[]const u8, depth: u8, out: *std.ArrayList(u8)) anyerror!void {
     const gpa = std.heap.page_allocator;
     var lines = std.mem.splitScalar(u8, src, '\n');
@@ -211,6 +236,10 @@ fn appendContents(io: Io, path: []const u8, src: []const u8, section: ?[]const u
         }
         if (directiveOf(trimmed)) |kind| {
             _ = try word(&tokens);
+            if (kind == .load) {
+                if (selected) try appendLoad(io, path, &tokens, depth, out);
+                continue;
+            }
             if (kind == .endl) {
                 // The name after `.endl` is not checked: ngspice ignores it
                 // (inpcom.c), and GF180 closes `.lib dio` with `.endl diode`.

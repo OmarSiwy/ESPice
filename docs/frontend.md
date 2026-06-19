@@ -141,6 +141,23 @@ Reference, SA = Simulation and Analysis guide]:
 | `.tran s1 t1 s2 t2 ...` | one run to the last stop [CR .TRAN]; the SPICE `tstep tstop tstart tmax` reading only when `s2` and `t2` are both below `t1` and no `START=` | ngspice |
 | untyped `.measure name func ...` | the last `.tran`/`.ac`/`.dc` card | rejected |
 | unknown `.option` names | one warning each | ignored, as ngspice does |
+| `.save [TYPE=NODESET\|IC] [FILE=] [LEVEL=] [TIME=]` | writes the operating point as `.nodeset` (or `.ic`) cards [CR .SAVE] | output vector selection |
+
+HSPICE `.save` writes after the run, beside the output file (the working
+directory without one), to FILE= or `<deck stem>.ic0`: every `v(node)`
+of the first `.op` result, else of row 0 of the first transient (its
+operating point) or DC sweep (its first point); TIME= reads the first
+transient at that time, interpolated. LEVEL=TOP drops subcircuit nodes,
+NONE saves nothing, SELECT saves every node. `.load [FILE=] [RUN=]`
+[CR .LOAD] inlines such a file before parsing, like `.include`, in every
+dialect; a file not there yet is skipped with a warning, and RUN= is
+accepted and unused (ESPice does not number `.alter` runs' files).
+`.store` [CR .STORE] is accepted with a warning: HSPICE checkpoints the
+process for an OS-level restore on a wall-clock schedule, which does not
+change results, and ESPice writes no checkpoint. Divergence: ESPice's
+`.ic` holds nodes only under UIC (`.tran ... uic`), so a loaded TYPE=IC
+file forces the operating point only there; HSPICE and ngspice also hold
+`.ic` nodes during the transient's operating point.
 
 In both dialects: `.global` nets join through every subcircuit level;
 `.connect a b` joins two top-level nets (a subcircuit's `.connect` is

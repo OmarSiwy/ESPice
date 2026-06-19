@@ -6,7 +6,7 @@ const frontend = @import("frontend");
 const analysis = @import("analysis");
 const output = @import("output");
 const core = @import("core");
-pub const requests = @import("core").query;
+pub const requests = core.query;
 pub const QueryId = requests.QueryId;
 pub const Query = requests.Query;
 pub const Source = frontend.Source;
@@ -63,6 +63,8 @@ pub const Problem = struct {
     /// First output failure. Once set, nothing else is published.
     delivery_error: ?anyerror = null,
     timing_in_depth: bool = false,
+    /// Where an HSPICE `.save` writes the operating point; null without one.
+    save_path: ?[]const u8 = null,
     /// One session per `prepared.runs` entry (variants with their own
     /// topology), run after the main session by `run_all`.
     runs: []Run = &.{},
@@ -119,6 +121,17 @@ pub const Problem = struct {
         self.prepared = try frontend.build(&self.library, a, scratch, ast);
         timingLap(io, &lap, "Problem creation (expansion, binding, topology)");
         errdefer self.prepared.deinit();
+        self.save_path = null;
+        if (self.prepared.deck.save_op) |save| {
+            // Beside the output file, as HSPICE writes beside its listing.
+            const origin = switch (options.source) {
+                .file => |path| path,
+                .bytes => |bytes| bytes.origin,
+            };
+            const name = save.file orelse try std.mem.concat(a, u8, &.{ std.fs.path.stem(origin), ".ic0" });
+            const dir = if (options.output.path) |out| std.fs.path.dirname(out) orelse "." else ".";
+            self.save_path = try std.fs.path.resolve(a, &.{ dir, name });
+        }
         self.delivery = try output.Session.init(allocator, options.output);
         errdefer self.delivery.deinit();
         self.limits = .{ .max_parallel = options.max_parallel };
@@ -280,6 +293,52 @@ pub const Problem = struct {
         var output_lap = if (self.timing_in_depth) std.Io.Timestamp.now(self.io, .awake) else null;
         defer timingLap(self.io, &output_lap, "output finish");
         try self.delivery.finish();
+        if (self.save_path) |path| try self.saveOperatingPoint(path, self.prepared.deck.save_op.?);
+    }
+
+    /// Writes the node voltages of the main session's operating point as
+    /// `.nodeset` or `.ic` cards: the first `.op` result, else row 0 of the
+    /// first transient (its operating point) or DC sweep (its first point,
+    /// as HSPICE saves only a sweep's first). `save.time` > 0 reads the first
+    /// transient at that time, interpolated. Nothing to save only warns.
+    fn saveOperatingPoint(self: *Problem, path: []const u8, save: core.SaveOp) !void {
+        const found: ?struct { result: Result, row: usize, frac: f64 } = for (self.session.outputs.items) |id| {
+            const info = try self.session.info(id);
+            if (info.status != .complete) continue;
+            const res = try self.session.result(id);
+            if (res.is_complex or res.npoints == 0) continue;
+            if (save.time > 0) {
+                if (info.kind != .tran) continue;
+                const width = res.varnames.len;
+                var i: usize = 0;
+                while (i + 1 < res.npoints and res.data[(i + 1) * width] < save.time) i += 1;
+                if (i + 1 >= res.npoints) continue;
+                const t0 = res.data[i * width];
+                const t1 = res.data[(i + 1) * width];
+                break .{ .result = res, .row = i, .frac = if (t1 > t0) (save.time - t0) / (t1 - t0) else 0 };
+            }
+            switch (info.kind) {
+                .op, .tran, .dc => break .{ .result = res, .row = 0, .frac = 0 },
+                else => {},
+            }
+        } else null;
+        const op = found orelse {
+            std.log.warn(".save: no {s} result to save", .{if (save.time > 0) "transient" else "operating point"});
+            return;
+        };
+        var text: std.Io.Writer.Allocating = .init(self.allocator);
+        defer text.deinit();
+        const w = &text.writer;
+        try w.print("* {s}\n* operating point written by .save\n", .{self.prepared.deck.title});
+        const width = op.result.varnames.len;
+        for (op.result.varnames, 0..) |name, k| {
+            if (!std.mem.startsWith(u8, name, "v(") or std.mem.indexOfScalar(u8, name, ',') != null) continue;
+            if (save.top_only and std.mem.indexOfScalar(u8, name, '.') != null) continue;
+            const v0 = op.result.data[op.row * width + k];
+            const v = if (op.frac == 0) v0 else v0 + op.frac * (op.result.data[(op.row + 1) * width + k] - v0);
+            try w.print("{s} {s}={e}\n", .{ if (save.ic) ".ic" else ".nodeset", name, v });
+        }
+        try std.Io.Dir.cwd().writeFile(self.io, .{ .sub_path = path, .data = text.written() });
     }
 
     /// Writes the query DAG with the frontier `options.preview` would run

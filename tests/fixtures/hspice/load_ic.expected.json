@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "HSPICE .load inlines the .ic cards a .save TYPE=IC wrote.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "UIC start at the loaded v(b) = 0.25 V, RC = 1 us charging to 1 V: v(b) = 1 - 0.75 exp(-t / 1 us)."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "columns": {
+          "v(b)": {
+            "unit": "V",
+            "rtol": 0.002,
+            "atol": 1e-05,
+            "values": [
+              0.25,
+              0.5451020052155249,
+              0.7240904191214182,
+              0.8984985375725405,
+              0.9862632708334493
+            ]
+          }
+        },
+        "axis": {
+          "name": "time",
+          "values": [
+            0.0,
+            5e-07,
+            1e-06,
+            2e-06,
+            4e-06
+          ],
+          "atol": 1e-15,
+          "rtol": 1e-09
+        }
+      }
+    ],
+    "checks": [],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "e3b0c3db662cd3bab23f9326c47e89c2e935134f377bcc4b6ab0609bc2cd6aa1"
+}

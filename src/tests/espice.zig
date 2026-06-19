@@ -418,3 +418,32 @@ test "device noise needs no input source and retains its thermal PSD" {
     try t.expectEqual(@as(u8, 2), spectra);
     try t.expectEqual(@as(u8, 1), totals);
 }
+
+test "HSPICE .save writes the operating point beside the output and .load reads it back" {
+    const io = t.io;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(t.allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer t.allocator.free(dir);
+    const out = try std.fmt.allocPrint(t.allocator, "{s}/a.raw", .{dir});
+    defer t.allocator.free(out);
+    const saver = try api.Problem.init(t.allocator, io, .{
+        .source = .{ .bytes = .{ .data = "save\nv1 a 0 2\nr1 a b 1k\nr2 b 0 1k\nx1 b sub\n.subckt sub p\nr1 p m 1k\nr2 m 0 1k\n.ends\n.op\n.save type=ic level=top\n.end\n", .origin = "divider.sp" } },
+        .dialect = .hspice,
+        .output = .{ .path = out },
+    });
+    defer saver.deinit();
+    try saver.run_all();
+    const text = try tmp.dir.readFileAlloc(io, "divider.ic0", t.allocator, .unlimited);
+    defer t.allocator.free(text);
+    try t.expect(std.mem.indexOf(u8, text, ".ic v(a)=2e0\n") != null);
+    try t.expect(std.mem.indexOf(u8, text, ".ic v(b)=") != null);
+    try t.expect(std.mem.indexOf(u8, text, "x1.") == null);
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "load.sp", .data = "load\nv1 a 0 1\nr1 a b 1k\nc1 b 0 1n\n.load file=divider.ic0\n.tran 1n 10n\n.end\n" });
+    const deck_path = try std.fmt.allocPrint(t.allocator, "{s}/load.sp", .{dir});
+    defer t.allocator.free(deck_path);
+    const loader = try api.Problem.init(t.allocator, io, .{ .source = .{ .file = deck_path }, .dialect = .hspice });
+    defer loader.deinit();
+    try t.expectEqual(@as(usize, 2), loader.prepared.deck.ic.len);
+}
