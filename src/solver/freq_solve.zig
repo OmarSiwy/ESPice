@@ -39,6 +39,9 @@ pub const FreqSolver = struct {
     n: u32,
     nn: u32,
     strategy: Strategy,
+    /// `factorEach`'s ω indices held as the identity: a singular block, or
+    /// a lane no pivot tape it tried could replay.
+    held_id: std.ArrayList(u32) = .empty,
 
     const Strategy = union(enum) {
         dense: Dense,
@@ -55,6 +58,9 @@ pub const FreqSolver = struct {
         c_mat: []f64,
         a_lu: []f64,
         piv: []u32,
+        /// `factorEach`'s factors, one 2n x 2n LU and pivot row per ω.
+        held: []f64 = &.{},
+        held_piv: []u32 = &.{},
     };
 
     /// Owns the 2n stacked-real CSC, its solver and a snapshot of the
@@ -71,6 +77,9 @@ pub const FreqSolver = struct {
         /// and solution planes. Allocated by the first `solveBatch`.
         lane_work: []@Vector(W, f64) = &.{},
         lanes: ?lane_lu.LaneLu(W) = null,
+        /// `factorEach`'s factors: W ω per group, all replaying `slv.lu`'s
+        /// pivot tape.
+        held: []lane_lu.LaneLu(W) = &.{},
     };
 
     /// Linearizes `ckt` at `x_op` (one eval; its G and C planes are the
@@ -159,14 +168,18 @@ pub const FreqSolver = struct {
     }
 
     pub fn deinit(self: *Self, allocator: Allocator) void {
+        self.held_id.deinit(allocator);
         switch (self.strategy) {
             .dense => |*d| {
+                allocator.free(d.held);
+                allocator.free(d.held_piv);
                 allocator.free(d.g_dense);
                 allocator.free(d.c_mat);
                 allocator.free(d.a_lu);
                 allocator.free(d.piv);
             },
             .sp => |*s| {
+                freeHeld(allocator, s);
                 if (s.lanes) |*l| l.deinit(allocator);
                 allocator.free(s.lane_work);
                 s.slv.deinit();
@@ -319,6 +332,142 @@ pub const FreqSolver = struct {
             for (0..cnt) |l| if ((bad & (@as(u64, 1) << @intCast(l))) != 0)
                 try self.solveBatchSerial(omegas, dyn, base + l, 1, rhs, x_out, adjoint);
         }
+    }
+
+    /// Replaces the solver's G and C with `g` and `c`, indexed by CSC slot
+    /// of the source pattern (a circuit's `g_vals`/`c_vals` layout). The
+    /// dense strategy places them through the pattern `fromCircuit`
+    /// borrowed.
+    pub fn setPlanes(self: *Self, g: []const f64, c: []const f64) void {
+        switch (self.strategy) {
+            .dense => |*d| {
+                const n: usize = self.n;
+                @memset(d.g_dense, 0);
+                @memset(d.c_mat, 0);
+                for (0..n) |j| for (d.src_col_ptr[j]..d.src_col_ptr[j + 1]) |p| {
+                    const at = @as(usize, d.src_row_idx[p]) * n + j;
+                    d.g_dense[at] += g[p];
+                    d.c_mat[at] += c[p];
+                };
+            },
+            .sp => |*s| {
+                @memcpy(s.g_vals, g[0..s.g_vals.len]);
+                @memcpy(s.c_vals, c[0..s.c_vals.len]);
+            },
+        }
+    }
+
+    /// Factors G + jω_k C for every ω_k in `omegas` and keeps all of them,
+    /// so `solveEach` can solve a different right-hand side per ω as often
+    /// as it likes: the block-diagonal preconditioner shape. The sparse
+    /// strategy holds ceil(len/W) LaneLu groups replaying one pivot tape,
+    /// taken at the middle ω. A lane the tape cannot replay has the tape
+    /// repivoted at its ω, at most twice; a lane that still fails, or a
+    /// singular dense block, is held as the identity and listed in
+    /// `held_id`. Any other factor or solve on `self` invalidates the held
+    /// factors.
+    pub fn factorEach(self: *Self, allocator: Allocator, omegas: []const f64) !void {
+        std.debug.assert(omegas.len > 0);
+        self.held_id.clearRetainingCapacity();
+        switch (self.strategy) {
+            .dense => |*d| {
+                const nn: usize = self.nn;
+                if (d.held.len != omegas.len * nn * nn) {
+                    allocator.free(d.held);
+                    allocator.free(d.held_piv);
+                    d.held = &.{};
+                    d.held_piv = &.{};
+                    d.held = try allocator.alloc(f64, omegas.len * nn * nn);
+                    d.held_piv = try allocator.alloc(u32, omegas.len * nn);
+                }
+                for (omegas, 0..) |omega, k| {
+                    const a = d.held[k * nn * nn ..][0 .. nn * nn];
+                    dense_lu.buildComplexAdmittance(self.n, self.nn, d.g_dense, d.c_mat, omega, a);
+                    dense_lu.factorize(nn, a, d.held_piv[k * nn ..][0..nn]) catch
+                        try self.held_id.append(allocator, @intCast(k));
+                }
+            },
+            .sp => |*sp| try self.factorEachSparse(allocator, sp, omegas),
+        }
+    }
+
+    fn factorEachSparse(self: *Self, allocator: Allocator, sp: *Sparse, omegas: []const f64) !void {
+        const gpa = sp.slv.gpa;
+        const LL = lane_lu.LaneLu(W);
+        const nn: usize = self.nn;
+        const nnz2 = sp.vals.len;
+        if (sp.lane_work.len == 0)
+            sp.lane_work = try gpa.alloc(@Vector(W, f64), nnz2 + 2 * nn);
+        const vplane = sp.lane_work[0..nnz2];
+        const groups = (omegas.len + W - 1) / W;
+        var tape = omegas.len / 2;
+        var tries: u8 = 0;
+        while (true) : (tries += 1) {
+            // A full factor at omegas[tape] lays down a fresh pivot tape.
+            sp.slv.factored = false;
+            try setOmegaSparse(self.n, sp, omegas[tape], .{}, 0);
+            const lu = if (sp.slv.lu) |*l| l else return error.UnsupportedEngine;
+            freeHeld(gpa, sp);
+            sp.held = try gpa.alloc(LL, groups);
+            for (sp.held, 0..) |*h, g| h.* = LL.init(gpa, lu) catch |err| {
+                for (sp.held[0..g]) |*done| done.deinit(gpa);
+                gpa.free(sp.held);
+                sp.held = &.{};
+                return err;
+            };
+            self.held_id.clearRetainingCapacity();
+            for (sp.held, 0..) |*h, g| {
+                const base = g * W;
+                const cnt = @min(W, omegas.len - base);
+                var ow: [W]f64 = undefined;
+                for (0..W) |l| ow[l] = omegas[base + @min(l, cnt - 1)];
+                fillLanePlane(self.n, sp, ow, vplane);
+                const bad = h.refactor(sp.col_ptr, vplane, sp.slv.params.refactor_growth_limit);
+                for (0..cnt) |l| if ((bad >> @intCast(l)) & 1 != 0)
+                    try self.held_id.append(allocator, @intCast(base + l));
+            }
+            if (self.held_id.items.len == 0 or tries == 2) return;
+            tape = self.held_id.items[0];
+        }
+    }
+
+    /// Solves right-hand side k (the stacked 2n vector at `rhs[k*2n..]`)
+    /// against `factorEach`'s factor k into the same rows of `x_out`, for
+    /// every held ω. The identity lanes copy their right-hand side.
+    pub fn solveEach(self: *Self, rhs: []const f64, x_out: []f64) void {
+        const nn: usize = self.nn;
+        switch (self.strategy) {
+            .dense => |*d| for (0..d.held_piv.len / nn) |k| {
+                dense_lu.solveFactored(nn, d.held[k * nn * nn ..][0 .. nn * nn], d.held_piv[k * nn ..][0..nn], rhs[k * nn ..][0..nn], x_out[k * nn ..][0..nn]);
+            },
+            .sp => |*sp| {
+                const nnz2 = sp.vals.len;
+                const b_plane = sp.lane_work[nnz2..][0..nn];
+                const x_plane = sp.lane_work[nnz2 + nn ..];
+                const m = rhs.len / nn;
+                for (sp.held, 0..) |*h, g| {
+                    const base = g * W;
+                    const cnt = @min(W, m - base);
+                    for (b_plane, 0..) |*lane, i| {
+                        var row: [W]f64 = undefined;
+                        for (0..W) |l| row[l] = rhs[(base + @min(l, cnt - 1)) * nn + i];
+                        lane.* = row;
+                    }
+                    h.solve(b_plane, x_plane);
+                    for (x_plane, 0..) |lane, i| {
+                        const row: [W]f64 = lane;
+                        for (0..cnt) |l| x_out[(base + l) * nn + i] = row[l];
+                    }
+                }
+            },
+        }
+        for (self.held_id.items) |k| @memcpy(x_out[k * nn ..][0..nn], rhs[k * nn ..][0..nn]);
+    }
+
+    fn freeHeld(gpa: Allocator, sp: *Sparse) void {
+        for (sp.held) |*h| h.deinit(gpa);
+        gpa.free(sp.held);
+        sp.held = &.{};
     }
 
     pub const test_access = if (@import("builtin").is_test) .{
