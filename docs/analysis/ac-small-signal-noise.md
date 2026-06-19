@@ -179,6 +179,24 @@ operating-point accuracy (all of [tolerance-system.md](tolerance-system.md)
 applies to the OP) plus factorization conditioning; there is no iteration
 to tolerance here.
 
+### Sampled noise (`.sample`)
+
+HSPICE's `.sample FS= [TOL=] [NUMF=] [MAXFLD=] [BETA=]` [CR .SAMPLE] adds
+`onoise_sampled` (V/sqrt(Hz)) to every `.noise` spectrum: the density a
+sampler at FS sees at $f$, every band up to MAXFLD·FS folded in,
+
+$$
+S_s(f) = \sum_k S(|f + k F_S|)\,\operatorname{sinc}^2\!\big(\pi |f + k F_S| \beta / F_S\big),
+\qquad 0 < |f + k F_S| \le \text{MAXFLD}\cdot F_S,
+$$
+
+where the sinc² is an integrator over $\beta / F_S$ seconds ahead of the
+sampler (none at BETA=0). The manual names BETA a duty-cycle integrator
+without giving its transfer; the averaging window is ESPice's reading of
+it. TOL and NUMF size HSPICE's adaptive fold count, which MAXFLD bounds
+here; they are checked and unused. The folded frequencies are one extra
+`.noise` sweep over a POI list. `hspice/sample_rc` checks an RC at BETA=0.
+
 ## 2. Flow explanation
 
 **AC** (`src/analysis/ac/ac.zig`): one `eval()` at $x_{op}$

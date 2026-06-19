@@ -258,6 +258,8 @@ pub const Deck = struct {
     alters: []const []const u8 = &.{},
     /// HSPICE `.save` (the last one); ngspice's `.save` fills `saves`.
     save_op: ?core.SaveOp = null,
+    /// HSPICE `.sample` (the last one), for the `.noise` spectra.
+    sample: ?core.query.NoiseSample = null,
 };
 
 /// A parsed, flattened deck. Every slice lives in the parse arena.
@@ -410,7 +412,7 @@ pub fn nameIndex(names: []const []const u8, target: []const u8) ?usize {
 
 /// `ignored`: a card that only shapes printed output, which ESPice writes
 /// in full anyway.
-const Card = union(enum) { end, ends, subckt, param, model, include, osdi_include, pre_osdi, verilog, options, ic, nodeset, global, connect, save, store, meas, ignored, step, data, enddata, variation, end_variation, analysis: Kind, cond: CondCard };
+const Card = union(enum) { end, ends, subckt, param, model, include, osdi_include, pre_osdi, verilog, options, ic, nodeset, global, connect, save, store, sample, meas, ignored, step, data, enddata, variation, end_variation, analysis: Kind, cond: CondCard };
 
 const CondCard = enum { @"if", elseif, @"else", endif };
 
@@ -456,7 +458,7 @@ const cards = std.StaticStringMap(Card).initComptime(.{
     .{ "qpss", an(.qpss) },   .{ "sens", an(.sens) },             .{ "sp", an(.sp) },
     .{ "stb", an(.stb) },     .{ "temp", an(.temp) },             .{ "tf", an(.tf) },
     .{ "sn", an(.pss) },      .{ "snac", an(.pac) },              .{ "snnoise", an(.pnoise) },
-    .{ "snxf", an(.pxf) },    .{ "fft", an(.fft) },
+    .{ "snxf", an(.pxf) },    .{ "fft", an(.fft) },               .{ "ptdnoise", an(.pnoise) },
     .{ "tran", an(.tran) },   .{ "trannoise", an(.tran_noise) },  .{ "tran_noise", an(.tran_noise) },
     .{ "lstb", an(.lstb) },   .{ "acxf", an(.acxf) },             .{ "dcxf", an(.dcxf) },
     .{ "dcinc", an(.dcinc) },   .{ "lin", an(.sp) },            .{ "acmatch", an(.acmatch) },
@@ -465,7 +467,7 @@ const cards = std.StaticStringMap(Card).initComptime(.{
     .{ "endif", cond(.endif) }, .{ "meas", .meas },           .{ "measure", .meas },
     .{ "save", .save },         .{ "dcvolt", .ic },                 .{ "nodeset", .nodeset },
     .{ "global", .global },     .{ "connect", .connect },           .{ "jitter", .meas },
-    .{ "store", .store },
+    .{ "store", .store },       .{ "sample", .sample },
     .{ "print", .ignored },     .{ "plot", .ignored },              .{ "probe", .ignored },
     .{ "graph", .ignored },     .{ "width", .ignored },             .{ "title", .ignored },
     .{ "protect", .ignored },   .{ "unprotect", .ignored },         .{ "prot", .ignored },
@@ -530,7 +532,7 @@ pub fn parseAnalyses(arena: Allocator, text: []const u8, lookup: anytype) (Error
 /// `.sn`, `.snac`, `.snnoise` or `.snxf`: the HSPICE shooting-Newton
 /// spelling of a periodic card. `.snosc` keeps the `.pss` form.
 fn isSn(line: []const u8) bool {
-    const words = std.StaticStringMap(void).initComptime(.{ .{"sn"}, .{"snac"}, .{"snnoise"}, .{"snxf"} });
+    const words = std.StaticStringMap(void).initComptime(.{ .{"sn"}, .{"snac"}, .{"snnoise"}, .{"snxf"}, .{"ptdnoise"} });
     const head = line[1 .. std.mem.indexOfAny(u8, line, " \t") orelse line.len];
     var buf: [8]u8 = undefined;
     return head.len <= buf.len and words.has(std.ascii.lowerString(buf[0..head.len], head));
@@ -670,6 +672,7 @@ fn Reader(comptime S: type) type {
         saves: std.ArrayList([]const u8) = .empty,
         save_all: bool = false,
         save_op: ?core.SaveOp = null,
+        sample: ?core.query.NoiseSample = null,
         foreign: std.ArrayList(Foreign) = .empty,
         measures: std.ArrayList(core.Measure) = .empty,
         instances: u32 = 1,
@@ -816,6 +819,7 @@ fn Reader(comptime S: type) type {
                     .variations = r.variations.items,
                     .optimize = r.optimize,
                     .save_op = r.save_op,
+                    .sample = r.sample,
                 },
             };
         }
@@ -1197,6 +1201,7 @@ fn Reader(comptime S: type) type {
                 },
                 .options => try r.config.append(r.arena, .{ .temp = false, .args = args, .line = r.written(line) }),
                 .ic => try r.ic_cards.append(r.arena, args),
+                .sample => r.sample = r.readSample(args) catch |err| return r.failed(line, err),
                 .nodeset => try r.nodeset_cards.append(r.arena, args),
                 .global => for (args) |a| {
                     var buf: [24]u8 = undefined;
@@ -1226,6 +1231,28 @@ fn Reader(comptime S: type) type {
                 },
                 else => {},
             }
+        }
+
+        /// HSPICE `.sample FS= [TOL=] [NUMF=] [MAXFLD=] [BETA=]` [CR .SAMPLE].
+        /// TOL and NUMF size HSPICE's adaptive fold count; MAXFLD bounds it
+        /// here, so they are checked and unused.
+        fn readSample(r: *R, args: []const Value) Error!core.query.NoiseSample {
+            _ = r;
+            var s: core.query.NoiseSample = .{ .fs = 0 };
+            var i: usize = 0;
+            while (i + 1 < args.len) : (i += 2) {
+                if (args[i] != .name or args[i + 1] != .num) return error.ParseError;
+                const v = args[i + 1].num;
+                const Key = enum { fs, tol, numf, maxfld, beta };
+                switch (std.meta.stringToEnum(Key, args[i].name) orelse return error.ParseError) {
+                    .fs => s.fs = v,
+                    .maxfld => s.max_fold = v,
+                    .beta => s.beta = v,
+                    .tol, .numf => {},
+                }
+            }
+            if (i != args.len or !(s.fs > 0) or !(s.max_fold >= 1) or !(s.beta >= 0 and s.beta <= 1)) return error.ParseError;
+            return s;
         }
 
         /// HSPICE `.save [TYPE=NODESET|IC] [FILE=] [LEVEL=ALL|TOP|SELECT|NONE]

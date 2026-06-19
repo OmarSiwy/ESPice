@@ -135,6 +135,7 @@ pub fn orbitSweep(
     try pac.spectra(amp[terms..], n_samples, amp_hat[terms..], allocator);
     const white_hat = amp_hat[0..terms];
     const flicker_hat = amp_hat[terms..];
+    if (options.strobe) |t| return strobed(ckt, lin, noise_sources, .{ white_hat, flicker_hat }, exponent, n_samples, freqs, density, options, t, allocator);
 
     // Adjoint transfers of every node and sideband to out_node at f_out.
     const nn = n_sb * n;
@@ -181,6 +182,90 @@ pub fn orbitSweep(
     return @sqrt(integrated_noise);
 }
 
+/// Periodic time-dependent noise (HSPICE `.ptdnoise`): the density, over
+/// noise frequency f, whose integral is the output noise variance at time
+/// `t` of the period. A unit source n at f enters at f + i*f0 with the
+/// amplitude's coefficient A_i and reaches the output at f + p*f0, so
+///   S_t(f) = sum_s S_s(f) |sum_p e^(j 2 pi p f0 t) sum_m H^(p)_m A_{m-M+p}|^2
+/// with H^(p)_m the adjoint transfer from input sideband m to the output at
+/// f + p*f0. Averaged over t it is the power the output receives from f,
+/// summed over output sidebands. Cost: 2M+1 adjoint solves per point,
+/// against one for `.pnoise`. Returns the rms noise at `t` over the sweep.
+fn strobed(
+    ckt: *root.Circuit,
+    lin: pac.Linearization,
+    noise_sources: []const NoiseSource,
+    hats: [2][]const Complex,
+    exponent: []const f64,
+    n_samples: usize,
+    freqs: []f64,
+    density: []f64,
+    options: Options,
+    t: f64,
+    allocator: std.mem.Allocator,
+) !f64 {
+    const n: usize = ckt.n;
+    const n_srcs = noise_sources.len;
+    const m_max: usize = options.n_sidebands;
+    const n_sb = 2 * m_max + 1;
+    const nn = n_sb * n;
+    const f0 = options.f_fundamental;
+    const shifted = try allocator.alloc(f64, n_sb);
+    defer allocator.free(shifted);
+    const out_freqs = try allocator.alloc(f64, n_sb);
+    defer allocator.free(out_freqs);
+    const transfer = try allocator.alloc(Complex, n_sb * nn);
+    defer allocator.free(transfer);
+    const drive = try allocator.alloc(f64, 2 * n);
+    defer allocator.free(drive);
+    @memset(drive, 0);
+    if (options.out_node != root.GROUND) drive[options.out_node] = 1;
+    if (options.out_neg != root.GROUND) drive[options.out_neg] = -1;
+    const phase = try allocator.alloc(Complex, n_sb);
+    defer allocator.free(phase);
+    for (phase, 0..) |*e, p| {
+        const w = 2 * std.math.pi * (@as(f64, @floatFromInt(p)) - @as(f64, @floatFromInt(m_max))) * f0 * t;
+        e.* = .{ .re = @cos(w), .im = @sin(w) };
+    }
+
+    var integrated: f64 = 0;
+    var sw = options.sweep.iter();
+    var fi: usize = 0;
+    while (sw.next()) |f| : (fi += 1) {
+        freqs[fi] = f;
+        for (shifted, 0..) |*s, p| s.* = f + (@as(f64, @floatFromInt(p)) - @as(f64, @floatFromInt(m_max))) * f0;
+        const pac_opts: pac.Options = .{
+            .f_lo = f0,
+            .out_node = options.out_node,
+            .n_harmonics = options.n_sidebands,
+            .sweep = .{ .f_start = shifted[0], .f_stop = shifted[n_sb - 1], .points = @intCast(n_sb), .kind = .poi, .list = shifted },
+        };
+        try pac.sweep(true, ckt, lin, drive, 0, out_freqs, transfer, pac_opts, allocator);
+        var total: f64 = 0;
+        for (noise_sources, exponent, 0..) |src, ef, s| {
+            for (hats, 0..) |hat, part| {
+                var g: Complex = .zero;
+                for (0..n_sb) |p| {
+                    const h = transfer[p * nn ..][0..nn];
+                    var inner: Complex = .zero;
+                    for (0..n_sb) |m| {
+                        const i = @as(i32, @intCast(m + p)) - 2 * @as(i32, @intCast(m_max));
+                        const bin = pac.mapHarmonicToFftBin(i, n_samples) orelse continue;
+                        const hp = if (src.node_p != root.GROUND) h[m * n + src.node_p] else Complex.zero;
+                        const hn = if (src.node_n != root.GROUND) h[m * n + src.node_n] else Complex.zero;
+                        inner = Complex.add(inner, Complex.mul(Complex.sub(hp, hn), hat[bin * n_srcs + s]));
+                    }
+                    g = Complex.add(g, Complex.mul(phase[p], inner));
+                }
+                total += if (part == 0) g.magSq() else sourcePsd(0, g.magSq(), ef, f);
+            }
+        }
+        density[fi] = total;
+        if (fi > 0) integrated += 0.5 * (density[fi - 1] + total) * (f - freqs[fi - 1]);
+    }
+    return @sqrt(integrated);
+}
+
 /// sign(d)*sqrt(|d|): a source amplitude whose square is the density d.
 inline fn signedSqrt(d: f64) f64 {
     return std.math.copysign(@sqrt(@abs(d)), d);
@@ -203,6 +288,11 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     defer scratch.free(density_buf);
 
     const st = try sweep(ctx.circuit, x_op, srcs, freqs_buf, density_buf, opts, scratch);
+    if (opts.strobe) |t| {
+        var res = try result(ctx.allocator, freqs_buf, density_buf, "ptdnoise_density", "");
+        res.plotname = try std.fmt.allocPrint(ctx.allocator, "Periodic Time-Dependent Noise Analysis (time={e}){s}", .{ t, if (st.pss_converged) "" else " (PSS not converged)" });
+        return res;
+    }
     return result(ctx.allocator, freqs_buf, density_buf, "pnoise_density", if (st.pss_converged) "Periodic Noise Analysis" else "Periodic Noise Analysis (PSS not converged)");
 }
 

@@ -149,9 +149,36 @@ Divergences:
 Card syntax:
 
 ```
-.pnoise  v(out[,ref]) Vsrc sweep f0 [M]
-.hbnoise v(out[,ref]) [Vsrc] sweep [f0 [K [M]]]
+.pnoise   v(out[,ref]) Vsrc sweep f0 [M]
+.hbnoise  v(out[,ref]) [Vsrc] sweep [f0 [K [M]]]
+.ptdnoise v(out[,ref]) TIME=t [TDELTA=dt] sweep [LIST...=]   (HSPICE, with .sn)
 ```
+
+### Periodic time-dependent noise (`.ptdnoise`)
+
+HSPICE's `.ptdnoise` [CR .PTDNOISE] asks for the noise at one time $t$ of
+the period rather than its average. A unit noise $n$ at frequency $f$
+enters at $f + i f_0$ with the source amplitude's coefficient $A_i$ and
+reaches the output at $f + p f_0$; the output variance at $t$ is the
+integral over $f$ of
+
+$$
+S_t(f) = \sum_s S_s(f)\,\Big|\sum_p e^{j 2\pi p f_0 t}
+\sum_m H^{(p)}_m A_{s,\,m-M+p}\Big|^2,
+$$
+
+$H^{(p)}_m$ the adjoint transfer from input sideband $m$ to the output at
+$f + p f_0$ (`pnoise.strobed`). That costs $2M+1$ adjoint solves per
+point, one per output sideband, where `.pnoise` needs one. The result is
+`ptdnoise_density` over noise frequency in a plot named
+`Periodic Time-Dependent Noise Analysis (time=<t>)`; averaged over $t$ it
+is the power the output receives from $f$ over all sidebands, which is not
+`.pnoise`'s density per output frequency, though both integrate to the same
+total. `hspice/ptdnoise_diode` checks $2qV_t^2/I(t)$ at two phases of a
+memoryless cyclostationary diode to 1e-4. Divergences: a TIME sweep or a
+`.meas` name for TIME is refused (one card per time point); TDELTA and the
+LIST keywords only shape HSPICE's strobed-jitter measure and listing, and
+are checked and unused; `.MEASURE PTDNOISE` is not read.
 
 `.hbnoise` without f0 takes f0 and K from the deck's `.hb` card, as HSPICE
 does; `sweep` is `dec|oct|lin N fstart fstop`.

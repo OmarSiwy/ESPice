@@ -68,6 +68,18 @@ pub const Noise = struct {
     /// Card names for the contribution columns. Empty falls back to
     /// `<type>#<ordinal>`.
     cards: []const CardRef = &.{},
+    /// HSPICE `.sample`: also publish the output noise folded by a sampler
+    /// (`onoise_sampled`); spectrum queries only.
+    sample: ?NoiseSample = null,
+};
+
+/// HSPICE `.sample FS= [MAXFLD=] [BETA=]` [CR .SAMPLE]: noise sampled at
+/// `fs` Hz folds every band up to `max_fold * fs` into [0, fs/2], after an
+/// integrator over `beta / fs` seconds (none when `beta` is 0).
+pub const NoiseSample = struct {
+    fs: f64,
+    max_fold: f64 = 10,
+    beta: f64 = 1,
 };
 
 pub const Sp = struct {
@@ -356,6 +368,9 @@ pub const Pnoise = struct {
     pss_newton_tol: f64 = 1e-9,
     /// Sidebands kept on each side of the carrier.
     n_sidebands: u16 = 7,
+    /// HSPICE `.ptdnoise`: the noise density at this time of the period, in
+    /// seconds, instead of the time average; see pnoise.zig `strobed`.
+    strobe: ?f64 = null,
 };
 
 /// Small-signal analyses about the harmonic-balance solution: `.hbac`
