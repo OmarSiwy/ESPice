@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "hbac",
+  "purpose": "HB small-signal analyses linearize about one tone; a multi-tone .hb card cannot feed them.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "HB small-signal analyses linearize about one tone; a multi-tone .hb card cannot feed them."
+  },
+  "expect": {
+    "status": "error",
+    "category": "invalid_analysis_arguments",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "0d58dd243205280c3c53ea805adc79a4d0705bda6f22e1f920cb0d55f353edf7"
+}

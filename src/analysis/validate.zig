@@ -75,7 +75,7 @@ pub fn validate(query: requests.Query, n: u32) !void {
         inline else => |o| {
             if (!finite(o)) return error.InvalidQueryOptions;
             try tolerance(o.tol);
-            inline for (.{ "out_node", "out_neg", "osc_node", "output_node", "source_node", "ac_source_node", "probe_p", "probe_n", "input_branch", "in_branch", "drive_branch" }) |field| {
+            inline for (.{ "out_node", "out_neg", "osc_node", "output_node", "source_node", "ac_source_node", "probe_p", "probe_n", "input_branch", "in_branch", "drive_branch", "drive2_branch" }) |field| {
                 if (@hasField(@TypeOf(o), field)) {
                     const node = @field(o, field);
                     if (@typeInfo(@TypeOf(node)) == .optional) {
@@ -223,9 +223,12 @@ pub fn validate(query: requests.Query, n: u32) !void {
             _ = try elements(&.{ width, @as(usize, o.gmres_restart) + 1 });
             try frequency(o.f1 * @as(f64, @floatFromInt(@max(o.k1, 1))) + o.f2 * @as(f64, @floatFromInt(@max(o.k2, 1))));
         },
-        .disto => {
+        .disto => |o| {
             _ = try elements(&.{ n, n, n });
-            try frequency(query.disto.sweep.f_stop * 2);
+            try frequency(o.sweep.f_stop * 2);
+            const im = o.plot == .f1pf2 or o.plot == .f1mf2 or o.plot == .twof1mf2;
+            if (o.f2_ratio < 0 or (im and o.f2_ratio == 0)) return error.InvalidQueryOptions;
+            if (o.f2_ratio != 0) try frequency(o.sweep.f_stop * 2 + o.f2_ratio * o.sweep.f_start);
         },
         .envelope => |o| {
             if (o.min_periods_per_step > o.max_periods_per_step or o.periods_per_outer_step < o.min_periods_per_step or

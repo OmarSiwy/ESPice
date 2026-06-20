@@ -409,6 +409,8 @@ pub const NetBuilder = struct {
         /// `DISTOF1 [mag [phase]]`, `.disto`'s F1 drive (ngspice
         /// cktdisto.c:100-117), phase in degrees. `{0, 0}` when not given.
         distof1: [2]f64,
+        /// `DISTOF2 [mag [phase]]`, the F2 drive of a two-tone `.disto`.
+        distof2: [2]f64,
         /// `.sp` port index, 1-based; 0 when not a port (vsrcdefs.h:104-105).
         portnum: u16,
         /// Port reference impedance in ohms.
@@ -589,6 +591,7 @@ pub const NetBuilder = struct {
                 .i_pos = try arena.dupe(u32, self.i.items(.pos)),
                 .i_neg = try arena.dupe(u32, self.i.items(.neg)),
                 .v_distof1 = try arena.dupe([2]f64, self.v.items(.distof1)),
+                .v_distof2 = try arena.dupe([2]f64, self.v.items(.distof2)),
                 .ports = try self.portList(arena),
             },
             .probes = probe_buf[0..n_probes],
@@ -803,7 +806,8 @@ pub const NetBuilder = struct {
                     .neg = if (nodes.len > 1) nodes[1] else 0,
                     .branch = br,
                     .dc = bound[0].dc,
-                    .distof1 = sourceDistoF1(dev),
+                    .distof1 = sourceDisto(dev, "distof1"),
+                    .distof2 = sourceDisto(dev, "distof2"),
                     .portnum = if (port) |p| p.num else 0,
                     .z0 = if (port) |p| p.z0 else 0,
                     .band = if (port) |p| p.band else .{},
@@ -1896,13 +1900,14 @@ fn sourceAc(dev: Device) ?struct { re: f64, im: f64 } {
     return .{ .re = mag * @cos(rad), .im = mag * @sin(rad) };
 }
 
-/// `DISTOF1 [mag [phase]]` on a source card (ngspice vsrcpar.c:180-193): the
-/// bare keyword is mag 1 phase 0, one number sets the magnitude, two set
-/// both. `{0, 0}` when the card never names it, so it is no F1 drive.
-fn sourceDistoF1(dev: Device) [2]f64 {
-    if (kvNumber(dev.kv, "distof1")) |mag| return .{ mag, 0 };
+/// `DISTOF1 [mag [phase]]` or `DISTOF2 ...` (`key`) on a source card
+/// (ngspice vsrcpar.c:180-205): the bare keyword is mag 1 phase 0, one
+/// number sets the magnitude, two set both. `{0, 0}` when the card never
+/// names it, so it is no drive.
+fn sourceDisto(dev: Device, key: []const u8) [2]f64 {
+    if (kvNumber(dev.kv, key)) |mag| return .{ mag, 0 };
     for (dev.positional, 0..) |pos, idx| switch (pos) {
-        .name => |name| if (std.mem.eql(u8, name, "distof1")) return .{
+        .name => |name| if (std.mem.eql(u8, name, key)) return .{
             positionalNumber(dev, idx + 1) orelse 1.0,
             positionalNumber(dev, idx + 2) orelse 0.0,
         },

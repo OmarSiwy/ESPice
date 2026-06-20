@@ -653,13 +653,23 @@ pub const Disto = struct {
     /// `Deck.output_node`, since the card names none.
     output_node: u32,
     fd_eps: f64 = 1e-6,
-    /// Which of the card's three plots this query publishes. The frontend
-    /// fans one `.disto` card out into all three.
+    /// The card's `f2overf1`: F2 = f2_ratio·f_start, held for the whole
+    /// sweep as ngspice does (distoan.c:143). 0 means one tone.
+    f2_ratio: f64 = 0,
+    /// Branch row of the V card carrying `DISTOF2`, the F2 drive, and its
+    /// `<mag> [<phase deg>]` (ngspice cktdisto.c:107-117).
+    drive2_branch: u32 = 0,
+    ac2_magnitude: f64 = 1.0,
+    ac2_phase: f64 = 0.0,
+    /// Which of the card's plots this query publishes. The frontend fans
+    /// one `.disto` card out into all of them.
     plot: Plot = .summary,
 
     /// `second` and `third` are the harmonic solution vectors ngspice
-    /// prints; `summary` is a 4-column digest at one node.
-    pub const Plot = enum(u8) { summary, second, third };
+    /// prints for one tone; with F2, ngspice prints the intermodulation
+    /// vectors at f1+f2, f1-f2 and 2f1-f2 instead. `summary` is a 4-column
+    /// digest at one node.
+    pub const Plot = enum(u8) { summary, second, third, f1pf2, f1mf2, twof1mf2 };
 };
 
 /// HSPICE `.fft` [CR .FFT]: the windowed spectrum of one transient output.
