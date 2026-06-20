@@ -82,6 +82,35 @@ pub const FreqSolver = struct {
         held: []lane_lu.LaneLu(W) = &.{},
     };
 
+    /// A solver over the CSC pattern `col_ptr`/`row_idx` (n columns,
+    /// borrowed for the solver's lifetime) with G and C given per slot, for
+    /// callers whose planes are not a circuit evaluation. Nothing is
+    /// evaluated.
+    pub fn fromPlanes(allocator: Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32, g: []const f64, c: []const f64) !Self {
+        const Planes = struct {
+            n: usize,
+            nnz: usize,
+            col_ptr: []const u32,
+            row_idx: []const u32,
+            g_vals: []const f64,
+            c_vals: []const f64,
+            fn linearizeAc(_: @This(), _: []const f64) !void {}
+            fn denseG(p: @This(), out: []f64) void {
+                p.dense(p.g_vals, out);
+            }
+            fn denseC(p: @This(), out: []f64) void {
+                p.dense(p.c_vals, out);
+            }
+            fn dense(p: @This(), vals: []const f64, out: []f64) void {
+                @memset(out[0 .. p.n * p.n], 0);
+                for (0..p.n) |j| for (p.col_ptr[j]..p.col_ptr[j + 1]) |s| {
+                    out[@as(usize, p.row_idx[s]) * p.n + j] += vals[s];
+                };
+            }
+        };
+        return fromCircuit(allocator, Planes{ .n = n, .nnz = col_ptr[n], .col_ptr = col_ptr, .row_idx = row_idx, .g_vals = g, .c_vals = c }, &.{});
+    }
+
     /// Linearizes `ckt` at `x_op` (one eval; its G and C planes are the
     /// linearization) and builds the solver from copies of them, so the
     /// circuit may be re-evaluated afterwards. The sparse path borrows
@@ -433,12 +462,17 @@ pub const FreqSolver = struct {
 
     /// Solves right-hand side k (the stacked 2n vector at `rhs[k*2n..]`)
     /// against `factorEach`'s factor k into the same rows of `x_out`, for
-    /// every held ω. The identity lanes copy their right-hand side.
-    pub fn solveEach(self: *Self, rhs: []const f64, x_out: []f64) void {
+    /// every held ω; `adjoint` solves the stacked-real transpose, which is
+    /// A^H. The identity lanes copy their right-hand side.
+    pub fn solveEach(self: *Self, rhs: []const f64, x_out: []f64, adjoint: bool) void {
         const nn: usize = self.nn;
         switch (self.strategy) {
             .dense => |*d| for (0..d.held_piv.len / nn) |k| {
-                dense_lu.solveFactored(nn, d.held[k * nn * nn ..][0 .. nn * nn], d.held_piv[k * nn ..][0..nn], rhs[k * nn ..][0..nn], x_out[k * nn ..][0..nn]);
+                const lu = d.held[k * nn * nn ..][0 .. nn * nn];
+                const piv = d.held_piv[k * nn ..][0..nn];
+                const b = rhs[k * nn ..][0..nn];
+                const x = x_out[k * nn ..][0..nn];
+                if (adjoint) dense_lu.solveFactoredT(nn, lu, piv, b, x) else dense_lu.solveFactored(nn, lu, piv, b, x);
             },
             .sp => |*sp| {
                 const nnz2 = sp.vals.len;
@@ -453,7 +487,7 @@ pub const FreqSolver = struct {
                         for (0..W) |l| row[l] = rhs[(base + @min(l, cnt - 1)) * nn + i];
                         lane.* = row;
                     }
-                    h.solve(b_plane, x_plane);
+                    if (adjoint) h.solveT(b_plane, x_plane) else h.solve(b_plane, x_plane);
                     for (x_plane, 0..) |lane, i| {
                         const row: [W]f64 = lane;
                         for (0..cnt) |l| x_out[(base + l) * nn + i] = row[l];

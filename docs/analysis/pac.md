@@ -119,8 +119,12 @@ conversion-matrix apply done as FFT·(time-domain multiply)·IFFT per Krylov
 vector and a block-diagonal $(G_0 + j\omega_p C_0)$ preconditioner
 (identical machinery to Krylov-HB in
 [pss-shooting-harmonic-balance.md](pss-shooting-harmonic-balance.md) §4);
-sparse per-block factors would come from the KLU pipeline. Not implemented:
-the conversion matrix is dense today, and there is no GPU path.
+sparse per-block factors would come from the KLU pipeline. Implemented from
+n(2M+1) >= 64 (`pac.sweepKrylov`): the apply is the block convolution over
+the stored $G_m$, $C_m$ spectra rather than FFT sandwiches, and the block
+factors are LaneLu frequency lanes; below that the dense LU is cheaper
+(measurements in [multitone-hb.md](multitone-hb.md#conversion-matrix)).
+There is no GPU path.
 
 ## Solvers used
 
@@ -128,7 +132,7 @@ the conversion matrix is dense today, and there is no GPU path.
 |---|---|---|
 | PSS settle solves | [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md), [klu-pipeline.md](../solvers/klu-pipeline.md) | `converger.run` per sample |
 | Harmonic decomposition | none (support kernel) | `src/solver/fft.zig` |
-| Conversion-matrix solve | none (dense path today); Krylov upgrade per above | `src/solver/dense_lu.zig factorizeSolve` |
+| Conversion-matrix solve | dense below n(2M+1) = 64, preconditioned GMRES above | `src/solver/dense_lu.zig factorizeSolve`, `pac.sweepKrylov` |
 
 ---
 

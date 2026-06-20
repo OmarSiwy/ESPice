@@ -647,6 +647,69 @@ const MhbTests = struct {
         }
     }
 
+    // The conversion-matrix Krylov path's oracle is the dense LU, forward
+    // (PAC) and adjoint (PXF), on a pumped diode ladder with charge.
+    test "pac: the Krylov conversion solve matches the dense LU both ways" {
+        const a = testing.allocator;
+        const pac = @import("../pss/pac.zig");
+        const converger = @import("solver").converger;
+        var lib = try Library.init(a);
+        defer lib.deinit();
+        var b = try Builder.init(a, &lib);
+        const vin = try b.addNode();
+        try b.addDevice(models.vsource, "", .{ .dc = 0.2, .waveform = 2, .sin_vo = 0.2, .sin_va = 0.6, .sin_freq = 1e3 }, .{}, .{ vin, analysis.GROUND });
+        var prev = vin;
+        for (0..4) |_| {
+            const mid = try b.addNode();
+            try b.addDevice(models.resistor, "", .{ .r = 300 }, .{}, .{ prev, mid });
+            try b.addDevice(models.diode, "", .{ .is = 1e-14, .cjo = 5e-12 }, .{}, .{ mid, analysis.GROUND });
+            try b.addDevice(models.capacitor, "", .{ .c = 2e-8 }, .{}, .{ mid, analysis.GROUND });
+            prev = mid;
+        }
+        var prepared = try b.compile();
+        defer prepared.deinit();
+        var ckt = try analysis.Circuit.instantiate(&prepared, a);
+        defer ckt.deinit();
+        try ckt.computeBaseline();
+        const n: usize = ckt.n;
+
+        const x_op = try a.alloc(f64, n);
+        defer a.free(x_op);
+        @memset(x_op, 0);
+        const ws = try ckt.workspace();
+        ckt.setSimState(.{ .kind = .dc });
+        _ = try converger.run(&ckt, ws, x_op, 0, .{}, analysis.EvalHook{});
+
+        const opts: pac.Options = .{ .f_lo = 1e3, .out_node = prev, .n_harmonics = 3, .sweep = .{ .f_start = 10, .f_stop = 1e4, .points = 2 } };
+        const lin = try pac.settle(&ckt, x_op, opts, a);
+        defer lin.deinit(a);
+        const n_f = opts.sweep.count();
+        const n_sb: usize = 7;
+        const drive = try a.alloc(f64, 2 * n);
+        defer a.free(drive);
+        @memset(drive, 0);
+        drive[prev] = 1;
+        drive[n + vin] = 0.5;
+        const freqs = try a.alloc(f64, 2 * n_f);
+        defer a.free(freqs);
+        const out = try a.alloc(@import("core").numerics.Complex, 4 * n_f * n_sb * n);
+        defer a.free(out);
+        const ta = pac.test_access;
+        inline for (.{ false, true }) |adjoint| {
+            const len = n_f * (if (adjoint) n_sb * n else n_sb);
+            const dense = out[0..len];
+            const krylov = out[len..][0..len];
+            try ta.sweepDense(adjoint, &ckt, lin, drive, @intCast(prev), freqs[0..n_f], dense, opts, a);
+            try ta.sweepKrylov(adjoint, &ckt, lin, drive, @intCast(prev), freqs[n_f..], krylov, opts, a);
+            var peak: f64 = 0;
+            for (dense) |z| peak = @max(peak, @abs(z.re) + @abs(z.im));
+            for (dense, krylov) |d, k| {
+                try testing.expectApproxEqAbs(d.re, k.re, 1e-8 * peak);
+                try testing.expectApproxEqAbs(d.im, k.im, 1e-8 * peak);
+            }
+        }
+    }
+
     // The GMRES path's oracle is the dense Newton hb.zig takes below
     // `useGmres`: same residual, same fixed point.
     test "mhb: one tone through GMRES matches the dense Jacobian solve" {
