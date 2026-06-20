@@ -39,6 +39,7 @@ implemented.
 | [pxf.md](pxf.md) | Periodic transfer function (adjoint PAC; `.pxf`, `.hbxf`) | implemented (dense adjoint) |
 | [phase-noise.md](phase-noise.md) | Oscillator phase noise by the PPV (`.phasenoise`, HSPICE METHOD=0) | implemented (white sources only) |
 | [qpss.md](qpss.md) | Quasi-periodic steady state (QP-HB, MFT shooting) | implemented (two-tone QP-HB, unpreconditioned GMRES; MFT: not implemented) |
+| [multitone-hb.md](multitone-hb.md) | `.hb TONES=`: any number of tones, box/diamond truncation, APFT collocation, GMRES with LaneLu block-diagonal preconditioning; large one-tone HB | implemented |
 | [mpde-envelope.md](mpde-envelope.md) | MPDE, Fourier-envelope, sample-envelope following | partial (sample envelope with trapezoid inner steps) |
 | [matex-exponential-integrators.md](matex-exponential-integrators.md) | Exponential integrators, Krylov $e^{Ah}v$, I-/R-MATEX | implemented (explicit linear R-MATEX) |
 | [dcmatch.md](dcmatch.md) | Pelgrom mismatch offset via adjoint sensitivity | implemented (FD stamps) |

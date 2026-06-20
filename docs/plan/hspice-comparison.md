@@ -100,7 +100,7 @@ the build-order id in the last column.
 | `.AC type np f1 f2 [SWEEP ...]`, `POI`, `DATA=` [CR .AC] | small signal; also hosts `.NOISE`, `.DISTO`, `.LIN`, `.LSTB`, `.ACMATCH`, `.SAMPLE` | DEC/OCT/LIN, SIMD frequency lanes (`ac/freq.zig`) | `ac` | POI: low; SWEEP: high | B3, C1 |
 | `.TRAN tstep1 tstop1 [tstep2 tstop2 ...] [START=] [UIC] [SWEEP ...]` [CR .TRAN] | transient, multi-segment, swept | ngspice form (`tran/tran.zig`); segments misread (S4) | `tran` | high | A6 (S), C1 |
 | `.NOISE ov src [inter] [listckt listfreq listcount listfloor listsources]` [CR .NOISE] | noise over the `.AC` sweep, sorted per-device table, per-subcircuit sums | ngspice form with its own sweep; totals only (`ac/noise.zig`) | `noise` with `n(inst)` and `n(inst,contrib)` | high | B1, S |
-| `.DISTO Rload [inter [skw2 [refpwr spwf]]]` [CR .DISTO] | HD2, HD3, SIM2, DIM2, DIM3 into a load | ngspice form, HD2/HD3 (`post/disto.zig`) | no | low to medium | B6, M |
+| `.DISTO Rload [inter [skw2 [refpwr spwf]]]` [CR .DISTO] | HD2, HD3, SIM2, DIM2, DIM3 into a load | ngspice form: HD2/HD3, and with `f2overf1` the f1+f2, f1-f2, 2f1-f2 vectors (`post/disto.zig`) | no | low to medium | B6 done (ngspice form) |
 | `.TF ov src` [CR .TF] | DC gain, Rin, Rout | yes (`dc/tf.zig`); every source at once as `.dcxf`/`.acxf` (`dc/xf.zig`, `ac/xf.zig`) | `dcxf` (every source at once, plus `zin`/`yin`), `acxf` | medium | done |
 | `.SENS ov ...` [CR .SENS] | DC sensitivity to every parameter | yes, adjoint (`sweep/sens.zig`) | no | medium | done |
 | `.DCSENS outvar [Perturbation= Threshold= GroupByDevice=]` [CR .DCSENS; SA Ch.25] | finite-difference sensitivity to variation-block parameters | no | no | medium | C5, S after C3 |
@@ -122,7 +122,7 @@ the build-order id in the last column.
 
 | Card | What it does | ESPice | VACASK | Value | Build id, size |
 |---|---|---|---|---|---|
-| `.HB TONES= NHARMS= INTMODMAX= SUBHARMS= SS_TONE= [SWEEP]` [CR .HB; RF Ch.5] | multi-tone harmonic balance | `.hb` one tone, dense Jacobian, magnitudes only (`pss/hb.zig`); `.qpss` two tones (`pss/qpss.zig`) | any number of tones, sparse blocks | high for RF | D2, L |
+| `.HB TONES= NHARMS= INTMODMAX= SUBHARMS= SS_TONE= [SWEEP]` [CR .HB; RF Ch.5] | multi-tone harmonic balance | `.hb TONES= NHARMS= INTMODMAX=`, any number of tones, magnitudes only (`pss/mhb.zig`); SUBHARMS, SS_TONE, SWEEP not taken | any number of tones, sparse blocks | high for RF | D2 done |
 | `.HBAC sweep` [CR .HBAC; RF Ch.8] | periodic AC on the HB orbit | `.pac` on the shooting orbit (`pss/pac.zig`) | `hbac` | high for RF | D1, S after the orbit adapter |
 | `.HBNOISE out src sweep [sidebands]` [CR .HBNOISE; RF Ch.8] | cyclostationary noise on the HB orbit | `.pnoise` on the shooting orbit (`pss/pnoise.zig`) | `hbnoise` | high for RF | D1, M (vacask-comparison G4) |
 | `.HBXF out sweep` [CR .HBXF] | periodic transfer function | `.pxf` on the shooting orbit (`pss/pxf.zig`) | no | medium | D1, S |

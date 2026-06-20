@@ -3,6 +3,10 @@
 Steady state under multiple incommensurate tones (mixers, blockers,
 intermod).
 
+Multi-tone `.hb TONES=` ([multitone-hb.md](multitone-hb.md)) subsumes this
+card: any number of tones, box or diamond truncation, and a preconditioned
+Krylov solve. `.qpss` stays for its two-sided output and its decks.
+
 `src/analysis/pss/qpss.zig` implements two-tone harmonic balance over the
 $(2K_1+1) \times (2K_2+1)$ mix-product grid with a 2-D DFT operator and
 unpreconditioned matrix-free GMRES. The charge term is the DFT of $q(t)$ at

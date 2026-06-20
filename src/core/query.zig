@@ -330,6 +330,17 @@ pub const Hb = struct {
     /// fundamental is held a pure cosine as the phase condition. GROUND
     /// means a driven circuit with a known f0.
     osc_node: u32 = 0,
+    /// Tones after `f0`, HSPICE `.hb TONES=f0 f1 ...` [CR .HB]; empty for
+    /// one tone. Driven only.
+    extra_tones: []const f64 = &.{},
+    /// Harmonics kept of each of `extra_tones`, parallel to it (`n_harmonics` is
+    /// f0's).
+    extra_harmonics: []const u16 = &.{},
+    /// HSPICE INTMODMAX: the largest |k_0| + |k_1| + ... a kept mixing
+    /// product k_0·f0 + k_1·f1 + ... may have. A single tone's own
+    /// harmonics are kept up to its count regardless, and every |k_i| stays
+    /// within tone i's count. 0 keeps that whole box.
+    intmodmax: u16 = 0,
 };
 
 /// Periodic AC (`.pac`) and periodic transfer function (`.pxf`) options.

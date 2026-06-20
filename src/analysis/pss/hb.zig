@@ -15,6 +15,7 @@ const num = @import("core").numerics;
 const converger = @import("solver").converger;
 const dense_lu = @import("solver").dense_lu;
 const pac = @import("pac.zig");
+const mhb = @import("mhb.zig");
 
 const W = std.simd.suggestVectorLength(f64) orelse 8;
 const V = @Vector(W, f64);
@@ -36,6 +37,17 @@ const oversample: usize = 2;
 /// The shortest step the line search takes before it stops shortening.
 const min_step: f64 = 1.0 / 1024.0;
 
+/// True when a driven solve of n unknowns and nf = 2K+1 coefficients each
+/// takes `mhb.zig`'s preconditioned GMRES instead of the dense Jacobian.
+/// The dense LU is O((n·nf)^3) a step and GMRES O(iterations·n·nf^2), so
+/// n decides. Callgrind (docs/analysis/multitone-hb.md): a 4-node diode
+/// clipper at K = 32 is 1.23x cheaper dense, a 6-node rectifier at K = 32
+/// 1.31x; the diode-RC ladders are cheaper on GMRES by 2.2x at 14 nodes and
+/// K = 8, 3.6x at 9 nodes and K = 32, and 16x at 44 nodes and K = 8.
+fn useGmres(n: usize, nf: usize) bool {
+    return n >= 10 or n * nf >= 512;
+}
+
 /// Magnitude of harmonic k >= 1 from one probe's spectrum
 /// [dc, cos_1, sin_1, ..., cos_K, sin_K].
 fn magnitude(spectrum: []const f64, k: u16) f64 {
@@ -50,7 +62,9 @@ fn magnitude(spectrum: []const f64, k: u16) f64 {
 /// cos_K, sin_K], the last iterate when Newton does not converge. `orbit`
 /// samples it for the small-signal analyses about the HB solution. The
 /// excitation is whatever the deck's sources stamp at each time sample.
-/// Memory is O((n*nf)^2) for the dense Jacobian. Autonomous (`osc_node`
+/// Memory is O((n*nf)^2) for the dense Jacobian; a driven circuit past
+/// `useGmres` solves through `mhb.solveOneTone` instead, O(nnz*nt).
+/// Autonomous (`osc_node`
 /// set): `x_hat` must arrive holding a seed near the oscillation (`seed`),
 /// with f0 its frequency, and the result carries the solved f0. A
 /// non-empty `ppv` (autonomous only, x_hat.len long) receives y with
@@ -73,6 +87,8 @@ pub fn solveSpectrum(
     const total_unknowns = n * nf;
     std.debug.assert(x_hat.len == total_unknowns);
     std.debug.assert(ppv.len == 0 or (ppv.len == total_unknowns and options.osc_node != root.GROUND));
+    if (options.osc_node == root.GROUND and useGmres(n, nf))
+        return .{ .status = try mhb.solveOneTone(ckt, x_hat, options, allocator), .f0 = options.f0 };
 
     var period: f64 = 1.0 / options.f0;
     var omega0: f64 = 2.0 * std.math.pi * options.f0;
@@ -434,8 +450,9 @@ pub fn solveSpectrum(
             return done;
         }
 
-        // ponytail: one dense n*(2K+1) system on the CPU; a GPU dense LU
-        // (cuSOLVER getrf/getrs) replaces it past ~256 unknowns.
+        // One dense n*(2K+1) system; large driven circuits never get here
+        // (`useGmres`). Oscillators still do: their f0 column and `ppv`
+        // adjoint are dense-only.
         try dense_lu.factorizeSolveNeg(total_unknowns, jac, f_hat[0..total_unknowns], dx_hat);
 
         simdCopy(x_prev, x_hat);
@@ -564,6 +581,7 @@ pub fn orbit(
 /// its sign. Non-convergence is error.HbDidNotConverge.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     try ctx.circuit.refuseDigital("hb");
+    if (opts.extra_tones.len != 0) return mhb.run(ctx, opts);
     const a = ctx.allocator;
     const nf: usize = 2 * @as(usize, opts.n_harmonics) + 1;
 

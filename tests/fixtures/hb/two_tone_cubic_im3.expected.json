@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "analysis": "hb",
+  "purpose": "Two-tone intermodulation of a cubic, diamond truncation at order 3",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "(A sin w1t + B sin w2t)^3 with A=1, B=0.5: f1 3A^3/4+3AB^2/2, f2 3B^3/4+3A^2B/2, 3f 1/4 of the cube, IM3 at 2f1+-f2 3A^2B/4 and 2f2+-f1 3AB^2/4, every even-order line 0. Evaluated as the DFT of the cubic over its 10 ms common period."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Harmonic Balance",
+        "match": "exact",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 1e-09,
+            "atol": 1e-09,
+            "values": [
+              1.7320388084527e-17,
+              1.1779635159466e-16,
+              0.375,
+              1.125,
+              0.84375,
+              0.1875,
+              1.1617383998857e-16,
+              1.9691525303865e-16,
+              4.2396463351866e-16,
+              0.25,
+              0.375,
+              0.1875,
+              0.03125
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            0.0,
+            300.0,
+            700.0,
+            1000.0,
+            1300.0,
+            1600.0,
+            2000.0,
+            2300.0,
+            2600.0,
+            3000.0,
+            3300.0,
+            3600.0,
+            3900.0
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-09
+        },
+        "row_count": 13
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "099e083a391c345cc5054925296004412f9ed9e0548f9a14b45cda1bfe65f4c7"
+}

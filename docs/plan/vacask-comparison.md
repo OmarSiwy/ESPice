@@ -60,7 +60,7 @@ the ngspice-45 source (`src/spicelib/analysis/*.c`) and covers analyses only.
 | Exponential integrator | no | `.matex`, linear circuits (`tran/matex.zig`) | no |
 | Envelope | no | `.envelope`, sample-envelope following (`tran/envelope.zig`) | no |
 | PSS | `pss`: single shooting with the monodromy matrix integrated alongside, driven and autonomous (oscillator, period solved) (`lib/corepss.cpp`) | `.pss`: shooting, dense FD monodromy below 50 unknowns, matrix-free GMRES above; driven, and autonomous with the period solved and one node pinned (`.pss v(osc)`, `.snosc`) (`pss/pss.zig`) | `.pss`, experimental |
-| Harmonic balance | `hb`: any number of tones, box/diamond/hybrid truncation, APFT collocation, sparse block Jacobian on KLU or SuperLU_MT (`lib/corehb*.cpp`) | `.hb`: one tone, dense Jacobian, magnitudes only (`pss/hb.zig`) | no |
+| Harmonic balance | `hb`: any number of tones, box/diamond/hybrid truncation, APFT collocation, sparse block Jacobian on KLU or SuperLU_MT (`lib/corehb*.cpp`) | `.hb`: one tone dense (`pss/hb.zig`); `.hb TONES=` any number of tones, box/diamond (hybrid) truncation, APFT collocation, matrix-free block Jacobian by GMRES with a LaneLu block-diagonal preconditioner, also taken by large one-tone circuits (`pss/mhb.zig`, [multitone-hb.md](../analysis/multitone-hb.md)); magnitudes only | no |
 | Quasi-periodic steady state | `hb` with two or more tones | `.qpss`: two tones, GMRES without a preconditioner (`pss/qpss.zig`) | no |
 | Periodic AC | `pac` (shooting) and `hbac` (HB, multi-tone) | `.pac` (shooting) and `.hbac` (one-tone HB), dense conversion matrix | no |
 | Periodic transfer function | no | `.pxf` (shooting) and `.hbxf` (HB) | no |

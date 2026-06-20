@@ -192,6 +192,23 @@ pub fn validate(query: requests.Query, n: u32) !void {
         },
         .hb => |o| {
             if (o.n_harmonics == 0) return error.InvalidQueryOptions;
+            if (o.extra_tones.len != 0) {
+                const mhb = @import("pss/mhb.zig");
+                if (o.osc_node != 0 or o.extra_harmonics.len != o.extra_tones.len or o.extra_tones.len >= mhb.max_tones)
+                    return error.InvalidQueryOptions;
+                var box: usize = 2 * @as(usize, o.n_harmonics) + 1;
+                var top = o.f0 * @as(f64, @floatFromInt(o.n_harmonics));
+                for (o.extra_tones, o.extra_harmonics) |f, h| {
+                    try positive(f);
+                    if (h == 0 or h > std.math.maxInt(i16)) return error.InvalidQueryOptions;
+                    box = try elements(&.{ box, 2 * @as(usize, h) + 1 });
+                    top += f * @as(f64, @floatFromInt(h));
+                }
+                if (box > mhb.max_box) return error.InvalidQueryOptions;
+                _ = try elements(&.{ box, box, 2 * n });
+                try frequency(top);
+                return;
+            }
             const bands = 2 * @as(usize, o.n_harmonics) + 1;
             _ = try elements(&.{ bands, n, bands, n });
             _ = try elements(&.{ bands, bands });
