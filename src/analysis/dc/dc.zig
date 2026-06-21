@@ -206,7 +206,7 @@ fn runSerial(
         }
         if (!converged) {
             op.coldStart(ckt, x);
-            const lr = try op.solveLadder(ckt, ws, x, .{ .tol = opts.tol });
+            const lr = try op.solveLadder(ckt, ws, x, .{ .tol = opts.tol }, &.{});
             converged = lr.converged;
         }
 
