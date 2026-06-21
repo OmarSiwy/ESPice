@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "HSPICE SFFM reads the carrier frequency third",
+  "tokenizer": "hspice",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "HSPICE SFFM(VO VA FC MDI FS): v(a)=sin(2 pi 10M t + 0.5 sin(2 pi 1M t)); v(b), MDI and FS omitted, sin(2 pi 10M t)."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "columns": {
+          "v(a)": {
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 0.002,
+            "values": [
+              0.0,
+              0.28968013440080337,
+              0.31312442924557277,
+              -1.2246467991473533e-15,
+              0.16270373631531007,
+              0.45780815947121745,
+              -0.28968013440079615
+            ]
+          },
+          "v(b)": {
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 0.002,
+            "values": [
+              0.0,
+              -2.4492935982947064e-16,
+              0.7289686274214112,
+              -1.2246467991473533e-15,
+              0.5877852522924744,
+              3.921345679817883e-15,
+              2.45176952084106e-15
+            ]
+          }
+        },
+        "axis": {
+          "name": "time",
+          "values": [
+            0,
+            1e-07,
+            2.37e-07,
+            5e-07,
+            8.1e-07,
+            1.3e-06,
+            1.9e-06
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "57a2ab08c512d8f86fb78717e3d4241c408b275a1f6dc8f0a9eb6725f217d198"
+}
