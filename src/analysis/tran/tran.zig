@@ -335,7 +335,12 @@ pub fn simulate(
         ckt.predictFirstIterate(trial, cur, prev, dt / dt_prev2);
         ckt.evalFollows(trial, t + dt, false);
         _ = ckt.applyLimits(trial, cur);
-        const nr_opts = converger.optionsFromTolerances(options.tol, options.tol.itl4);
+        // ngspice's transient Newton accepts on the per-row delta test alone
+        // (niconv.c): a step that has converged in x but leaves a residual on
+        // a row, e.g. a Meyer gate cap's curvature at a source-driven node,
+        // is not iterated again.
+        var nr_opts = converger.optionsFromTolerances(options.tol, options.tol.itl4);
+        nr_opts.residual_tol = std.math.inf(f64);
         ckt.reject_at = null;
         const nr = converger.run(ckt, ws, trial, t + dt, nr_opts, hook) catch |err| switch (err) {
             error.QueryCancelled => return err,
