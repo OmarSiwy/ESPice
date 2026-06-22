@@ -527,6 +527,8 @@ fn copyValue(allocator: std.mem.Allocator, value: anytype) std.mem.Allocator.Err
 pub fn schemaOf(allocator: std.mem.Allocator, topology: *const Circuit, deck: *const Deck, query: requests.Query) !core.QuerySchema {
     const columns: usize = switch (query) {
         .op, .dcinc => deck.probes.len,
+        // HSPICE `.op <time>` publishes the `.op` layout, with no time column.
+        .tran => |o| deck.probes.len + @intFromBool(!o.snapshot),
         .tf => 3,
         .lstb => |o| if (o.margins) 5 else 8,
         .dcxf => |o| (if (o.tf_only) @as(usize, 1) else 3) * o.sources.len,

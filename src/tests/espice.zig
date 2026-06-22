@@ -447,3 +447,21 @@ test "HSPICE .save writes the operating point beside the output and .load reads 
     defer loader.deinit();
     try t.expectEqual(@as(usize, 2), loader.prepared.deck.ic.len);
 }
+
+test "HSPICE .op <time> counts its columns as .op does" {
+    // 63 nets and one source current: 64 columns, SST2's limit. A time
+    // column that the snapshot never publishes would make it 65.
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(t.allocator);
+    try text.appendSlice(t.allocator, "snapshot\nv1 n1 0 1\n");
+    for (1..63) |i| try text.print(t.allocator, "r{d} n{d} n{d} 1k\n", .{ i, i, i + 1 });
+    try text.appendSlice(t.allocator, "r63 n63 0 1k\n.op 1n\n.end\n");
+    const p = try api.Problem.init(t.allocator, t.io, .{
+        .source = .{ .bytes = .{ .data = text.items, .origin = "snapshot.sp" } },
+        .dialect = .hspice,
+        .output = .{ .format = .sst2 },
+    });
+    defer p.deinit();
+    try p.run_all();
+    try t.expectEqual(@as(usize, 64), (try p.result(@enumFromInt(0))).varnames.len);
+}
