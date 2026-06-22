@@ -86,10 +86,6 @@ pub fn queries(arena: std.mem.Allocator, cards: []const netlist.Analysis, append
     for (cards) |c| if (c.kind == .hb) {
         hb = ((buildJob(c, sources, card_refs, ctx) catch |err| return cardError(c.line, err)).?).hb;
     };
-    // HSPICE's `.lstb` sweeps the deck's `.ac` frequencies [CR .LSTB].
-    const ac_sweep: ?numerics.FreqSweep = for (cards) |c| {
-        if (c.kind == .ac) break frequencySweep(c.args, 0) catch null;
-    } else null;
     var xf_sources: ?[]const requests.XfSource = null;
     for (cards, 0..) |c, ci| {
         if (fanout.only) |only| if (ci != only) continue;
@@ -120,9 +116,6 @@ pub fn queries(arena: std.mem.Allocator, cards: []const netlist.Analysis, append
                 o.f0 = tone.f0;
                 o.n_harmonics = tone.n_harmonics;
                 o.osc_node = tone.osc_node;
-            },
-            .lstb => |*o| if (o.sweep.points == 0) {
-                o.sweep = ac_sweep orelse return cardError(c.line, error.InvalidAnalysisArguments);
             },
             inline .dcxf, .acxf => |*o| {
                 if (xf_sources == null) xf_sources = try xfSources(arena, sources);
@@ -196,8 +189,8 @@ pub fn queries(arena: std.mem.Allocator, cards: []const netlist.Analysis, append
     return jobs[base..][0..n];
 }
 
-/// What a card borrows from the rest of the deck: HSPICE's `.noise` runs
-/// over the `.ac` sweep, `.fft` and `.op <time>` over the `.tran`, and
+/// What a card borrows from the rest of the deck: HSPICE's `.noise` and
+/// `.lstb` run over the `.ac` sweep, `.fft` and `.op <time>` over the `.tran`, and
 /// `.snac`/`.snnoise`/`.snxf` at the `.sn` fundamental.
 pub const CardContext = struct {
     /// Owns the point lists and labels a card allocates.
@@ -489,8 +482,8 @@ fn xfSources(arena: std.mem.Allocator, sources: core.QueryBindings) ![]const req
 
 /// `.lstb mode=single|diff|comm vsource=v1[,v2] [dec|oct|lin N f1 f2]`
 /// [CR .LSTB]: the first three letters of the mode count. Without a sweep
-/// the card takes the deck's `.ac` frequencies (`points` 0 until then).
-fn lstbJob(args: []const Value, sources: core.QueryBindings) !requests.Lstb {
+/// the card takes the deck's `.ac` frequencies, `ac`.
+fn lstbJob(args: []const Value, sources: core.QueryBindings, ac: ?numerics.FreqSweep) !requests.Lstb {
     const Key = enum { mode, vsource, dec, oct, lin };
     const keys = std.StaticStringMap(Key).initComptime(.{
         .{ "mode", .mode }, .{ "vsource", .vsource }, .{ "dec", .dec }, .{ "oct", .oct }, .{ "lin", .lin },
@@ -498,7 +491,8 @@ fn lstbJob(args: []const Value, sources: core.QueryBindings) !requests.Lstb {
     const modes = std.StaticStringMap(requests.Lstb.Mode).initComptime(.{
         .{ "sin", .single }, .{ "dif", .diff }, .{ "com", .comm },
     });
-    var opts: requests.Lstb = .{ .sweep = .{ .f_start = 0, .f_stop = 0, .points = 0, .kind = .lin }, .probes = undefined };
+    var sweep = ac;
+    var opts: requests.Lstb = .{ .sweep = undefined, .probes = undefined };
     var n_probes: usize = 0;
     var buf: [16]u8 = undefined;
     var i: usize = 0;
@@ -522,13 +516,14 @@ fn lstbJob(args: []const Value, sources: core.QueryBindings) !requests.Lstb {
             },
             .dec, .oct, .lin => {
                 try arity(args, i + 4, i + 4);
-                opts.sweep = try frequencySweep(args, i);
+                sweep = try frequencySweep(args, i);
                 i += 4;
             },
         }
     }
     if (n_probes != @as(usize, if (opts.mode == .single) 1 else 2)) return error.InvalidAnalysisArguments;
     if (n_probes == 1) opts.probes[1] = opts.probes[0];
+    opts.sweep = sweep orelse return error.MissingAnalysisCard;
     return opts;
 }
 
@@ -1366,7 +1361,7 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
                 .probe_branch = sources.v_branches[probe],
             } };
         },
-        .lstb => return .{ .lstb = try lstbJob(args, sources) },
+        .lstb => return .{ .lstb = try lstbJob(args, sources, ctx.ac) },
         .dcxf => {
             try arity(args, 1, 2);
             return .{ .dcxf = try xfOutput(requests.Dcxf, args, node_id, node_neg, sources) };
