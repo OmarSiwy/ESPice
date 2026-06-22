@@ -27,7 +27,7 @@ implemented.
 | [pole-zero.md](pole-zero.md) | Pencil $(G,C)$ eigenproblem, Hessenberg + Francis QR, column-swap zeros | implemented (QZ: not implemented) |
 | [s-parameters.md](s-parameters.md) | Port formulation, z0 terminations, wave extraction | implemented |
 | [stability.md](stability.md) | Return ratio, Middlebrook/Tian probes, margins | implemented (`.stb` single injection; `.lstb` Tian double injection, diff/comm modes, margins) |
-| [distortion.md](distortion.md) | Volterra small-signal distortion, FD-of-analytic-Jacobian kernels | implemented (HD2, HD3, two-tone f1±f2 and 2f1−f2; nonlinear charge: not in the kernels) |
+| [distortion.md](distortion.md) | Volterra small-signal distortion, FD-of-analytic-Jacobian kernels | implemented (HD2, HD3, two-tone f1±f2 and 2f1−f2; resistive and charge kernels) |
 | [fourier-thd.md](fourier-thd.md) | `.four` harmonic extraction: final-period resample, FFT, THD | implemented |
 | [ensemble-sweeps.md](ensemble-sweeps.md) | Monte Carlo and temperature sweeps on structural lanes, seed policy | implemented |
 | [variants.md](variants.md) | `.step`, `.data`/`SWEEP`, `.alter` and statistical Monte Carlo over any analysis: live parameters, `ParamRef` rows, warm-started lanes | implemented |
