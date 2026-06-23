@@ -6,9 +6,11 @@ mosamp - mos amplifier - transient
 * .options acct abstol=10n  vntol=10n
 
 .options  abstol=10n  vntol=10n noacct
-* The oracle is ngspice at tight tolerances with tmax 0.1 ns: at the options
-* above ngspice cuts dt/8 on 718 Newton failures in the MOS2 slewing.
-.options reltol=1e-6 abstol=1e-15 vntol=1e-9
+* The oracle is the converged waveform (gear, reltol=1e-7, tmax 0.05 ns).
+* The deck runs gear with trtol=1: the trapezoid rule rings undamped in
+* i(vin) and i(vb) at any tolerance, and the options above leave ngspice
+* 1.3e3x off the converged v(66).
+.options reltol=1e-6 abstol=1e-15 vntol=1e-9 method=gear trtol=1
 .tran 0.1us 10us 0 0.1ns
 m1  15 15  1 32 m w=88.9u  l=25.4u
 m2   1  1  2 32 m w=12.7u  l=266.7u
