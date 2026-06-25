@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const core = @import("core");
+const z = @import("stdpp");
 const requests = core.query;
 const numerics = @import("core").numerics;
 const devices = @import("spice.zig");
@@ -633,8 +634,8 @@ pub const NetBuilder = struct {
     /// (vsrctemp.c:143-160). Empty when no V card carries `portnum`, which
     /// leaves `.sp` on its one-port fallback.
     fn portList(self: *const NetBuilder, arena: std.mem.Allocator) ![]requests.Port {
-        var n_ports: usize = 0;
-        for (self.v.items(.portnum)) |num| n_ports = @max(n_ports, num);
+        var nums = z.fromSlice(u16, self.v.items(.portnum));
+        const n_ports: usize = nums.max() orelse 0;
         if (n_ports == 0) return &.{};
         const ports = try arena.alloc(requests.Port, n_ports);
         for (ports) |*p| p.branch = std.math.maxInt(u32); // unset
