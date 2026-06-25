@@ -39,7 +39,7 @@ code we write, never what shape the data takes.
 A module can only import what build.zig hands it, so the wiring is the DAG:
 
 ```
-core     src/core/          std only: ids (DeviceType, QueryId, Name), InternPool,
+core     src/core/          std + stdpp only: ids (DeviceType, QueryId, Name), InternPool,
                             numerics, query requests, Deck, Result/Schema, GROUND
 solver   src/solver/        core
 device   src/device/        core, device_abi (abi.zig), models, fastvaf (VerA),
@@ -51,6 +51,17 @@ output   src/output/        core
 espice   src/espice.zig     core, frontend, analysis, output (the Problem facade)
 main     src/main.zig       espice only; src/c_api.zig likewise
 ```
+
+**stdpp** (vectorizing iterators, `build.zig.zon` `.path` until it has a git
+remote) is a std extension that every host module gets through `M.make`. GPU
+device modules do not get it, so `device/eval.zig`, `device/abi.zig` and
+anything only a kernel root reaches (`solver/sparse_lu.zig`,
+`lu_kernels.zig`) must not import it. Its SIMD paths need the LLVM backend; a
+self-hosted Debug build silently takes the scalar path. Loop rule: a
+contiguous, pure, per-element loop (elementwise, reduction, search) goes
+through `core.numerics` or a stdpp pipeline; gathers, sparse walks, chains and
+parsers stay plain loops. Float sums through `foldAssoc` reassociate, so
+order-documented sums stay scalar.
 
 **Only `analysis` imports `solver`.** build.zig wires `solver` into the
 analysis module and its test root and nowhere else, so an import from any
