@@ -390,7 +390,7 @@ pub const Bbd = struct {
             for (lo, 0..) |g, j| {
                 const xgj = self.bg[g];
                 if (xgj == 0) continue;
-                axpySimdNeg(xi, coupling[j * s ..][0..s], xgj);
+                root.axpy(xi, -xgj, coupling[j * s ..][0..s]);
             }
             if (transpose) {
                 const a = self.arena[self.blk_a_off[bi]..][0 .. s * s];
@@ -421,19 +421,6 @@ pub const Bbd = struct {
         var sum = @reduce(.Add, acc);
         while (i < a.len) : (i += 1) sum += a[i] * c[i];
         return sum;
-    }
-
-    /// x[i] -= w[i] * scalar.
-    fn axpySimdNeg(x: []f64, w: []const f64, scalar: f64) void {
-        std.debug.assert(x.len == w.len);
-        const sv: Vec = @splat(scalar);
-        var i: usize = 0;
-        while (i + VecLen <= x.len) : (i += VecLen) {
-            const xv: Vec = x[i..][0..VecLen].*;
-            const wv: Vec = w[i..][0..VecLen].*;
-            x[i..][0..VecLen].* = xv - wv * sv;
-        }
-        while (i < x.len) : (i += 1) x[i] -= w[i] * scalar;
     }
 };
 

@@ -258,7 +258,7 @@ pub const Solver = struct {
 
     /// x = -A^-1 rhs, the Newton step. `rhs` and `x` may alias.
     pub fn solveNeg(self: *Self, rhs: []const f64, x: []f64) void {
-        negateSimd(rhs[0..self.n], x[0..self.n]);
+        root.scale(x[0..self.n], -1, rhs[0..self.n]);
         self.solveInPlace(x);
     }
 
@@ -330,15 +330,4 @@ fn simdEql(a: []const f64, b: []const f64) bool {
         if (ai != bi) return false;
     }
     return true;
-}
-
-fn negateSimd(src: []const f64, dst: []f64) void {
-    const W = std.simd.suggestVectorLength(f64) orelse 1;
-    const V = @Vector(W, f64);
-    var i: usize = 0;
-    while (i + W <= src.len) : (i += W) {
-        const v: V = src[i..][0..W].*;
-        dst[i..][0..W].* = -v;
-    }
-    for (src[i..], dst[i..]) |s, *d| d.* = -s;
 }

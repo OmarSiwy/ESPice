@@ -10,6 +10,21 @@ const std = @import("std");
 const SparseLu = @import("sparse_lu.zig").SparseLu;
 const lu_kernels = @import("lu_kernels.zig");
 const Gmres = @import("gmres.zig").Gmres;
+const num = @import("core").numerics;
+const z = @import("stdpp");
+
+const absMul = z.lanewise(absMulFn);
+fn absMulFn(p: anytype) @TypeOf(p.left) {
+    return @abs(p.left * p.right);
+}
+const max = z.lanewise(maxFn);
+fn maxFn(a: anytype, b: anytype) @TypeOf(a) {
+    return @max(a, b);
+}
+const isNan = z.lanewise(isNanFn);
+fn isNanFn(a: anytype) @TypeOf(a != a) {
+    return a != a;
+}
 
 /// Growth limit of the f32 refactor's pivot monitor: f32 keeps about 7
 /// digits, so a pivot 1e-6 below its column cannot help refinement.
@@ -104,9 +119,7 @@ pub const Refiner = struct {
             self.rs[ri[p]] = @max(self.rs[ri[p]], v);
             self.r[ri[p]] += v;
         };
-        var anorm: f64 = 0;
-        for (self.r) |v| anorm = @max(anorm, v);
-        self.anorm = anorm;
+        self.anorm = num.normInf(self.r);
         for (self.rs) |*s| s.* = pow2Inv(s.*);
         for (0..n) |j| {
             var m: f64 = 0;
@@ -138,7 +151,7 @@ pub const Refiner = struct {
         while (it < max_ir) : (it += 1) {
             if (infNorm(self.r) == 0) return true;
             self.correct(corr, self.r, self.d);
-            for (x[0..n], self.d) |*xi, di| xi.* += di;
+            num.axpy(x[0..n], 1, self.d);
             const eta = self.residual(b, x, bnorm);
             self.stats.iterations += 1;
             if (!std.math.isFinite(eta)) return self.fail();
@@ -166,7 +179,7 @@ pub const Refiner = struct {
             @memcpy(self.b, self.r);
             @memset(self.d, 0);
             _ = self.gm.?.solve(&op, self.b, self.d, 1e-12, 0);
-            for (x[0..n], self.d) |*xi, di| xi.* += di;
+            num.axpy(x[0..n], 1, self.d);
             const eta = self.residual(b, x, bnorm);
             self.stats.iterations += 1;
             if (!std.math.isFinite(eta)) break;
@@ -183,8 +196,8 @@ pub const Refiner = struct {
     /// d = A^-1 r through the f32 factors: R r scaled by a power of two
     /// into f32 range, solved, scaled back through C.
     fn correct(self: *Refiner, corr: anytype, r: []const f64, d: []f64) void {
-        var m: f64 = 0;
-        for (r, self.rs) |ri, s| m = @max(m, @abs(ri * s));
+        var rs = z.fromSlice(f64, r).zip(z.fromSlice(f64, self.rs[0..r.len])).map(absMul);
+        const m = rs.foldAssoc(@as(f64, 0), max);
         if (m == 0 or !std.math.isFinite(m) or std.math.isNan(infNorm(r))) {
             @memset(d, if (m == 0) 0 else std.math.nan(f64));
             return;
@@ -208,17 +221,15 @@ pub const Refiner = struct {
     /// r = b - A x; returns the normwise backward error.
     fn residual(self: *Refiner, b: []const f64, x: []const f64, bnorm: f64) f64 {
         self.matvec(x, self.r);
-        for (self.r, b[0..self.n]) |*ri, bi| ri.* = bi - ri.*;
+        num.sub(self.r, b[0..self.n], self.r);
         const den = self.anorm * infNorm(x[0..self.n]) + bnorm;
         return if (den == 0) 0 else infNorm(self.r) / den;
     }
 
     fn infNorm(v: []const f64) f64 {
-        var m: f64 = 0;
-        for (v) |e| m = @max(m, @abs(e));
-        // @max drops NaN; a NaN anywhere must fail the tests.
-        for (v) |e| if (std.math.isNan(e)) return std.math.nan(f64);
-        return m;
+        // normInf drops NaN; a NaN anywhere must fail the tests.
+        var it = z.fromSlice(f64, v);
+        return if (it.any(isNan)) std.math.nan(f64) else num.normInf(v);
     }
 };
 
@@ -282,7 +293,7 @@ pub const FastLu = struct {
 
     /// x = -A^-1 rhs to f64 backward error; false when refinement missed.
     pub fn solveNeg(self: *FastLu, gpa: std.mem.Allocator, rhs: []const f64, x: []f64) bool {
-        for (self.bneg, rhs[0..self.ref.n]) |*o, v| o.* = -v;
+        num.scale(self.bneg, -1, rhs[0..self.ref.n]);
         return self.ref.solve(gpa, self, self.bneg, x);
     }
 

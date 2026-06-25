@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const math = std.math;
+const scale = @import("core").numerics.scale;
 
 const W = std.simd.suggestVectorLength(f64) orelse 1;
 const V = @Vector(W, f64);
@@ -25,8 +26,8 @@ pub fn ifft(re: []f64, im: []f64) void {
     bitReverse(re, im);
     butterflyPass(re, im, true);
     const inv = 1.0 / @as(f64, @floatFromInt(n));
-    for (re) |*v| v.* *= inv;
-    for (im) |*v| v.* *= inv;
+    scale(re, inv, re);
+    scale(im, inv, im);
 }
 
 /// Smallest power of two >= n; n must be > 0.
