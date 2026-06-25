@@ -222,7 +222,7 @@ fn runSerial(
             // extrapolation holds the first point instead of doubling it.
             if (first_block and pt == 0) @memcpy(x_prev, x);
         } else {
-            for (row[1..]) |*out| out.* = std.math.nan(f64);
+            @memset(row[1..], std.math.nan(f64));
             cold = true;
         }
     }

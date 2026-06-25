@@ -8,6 +8,7 @@
 const std = @import("std");
 const gompute = @import("gompute");
 const solver = @import("solver");
+const numerics = @import("core").numerics;
 
 const K = solver.lu_kernels;
 const direct = solver.direct;
@@ -313,7 +314,7 @@ pub const GpuLu = struct {
             if (std.mem.bytesToValue(u32, self.pin_fail[0..4]) != 0) return fast32Failed(ref);
             self.valid32 = true;
         }
-        for (self.bneg, rhs[0..n]) |*o, v| o.* = -v;
+        numerics.scale(self.bneg, -1, rhs[0..n]);
         return ref.solve(self.gpa, self, self.bneg, dx);
     }
 
@@ -490,7 +491,7 @@ const Bench = struct {
         var t1 = nowNs();
         try b.s[3].append(gpa, @as(f64, @floatFromInt(t1 - t0)) * 1e-3);
         const neg = b.dx; // scratch until the kernel runs below
-        for (neg, rhs[0..t.n]) |*o, v| o.* = -v;
+        numerics.scale(neg, -1, rhs[0..t.n]);
         t0 = nowNs();
         lu.solve(neg, neg);
         t1 = nowNs();

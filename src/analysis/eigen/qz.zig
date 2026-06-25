@@ -7,7 +7,8 @@
 //! textbook step cost fewer flops, but a pole-zero pencil is solved once per
 //! query and one primitive keeps the step short.
 const std = @import("std");
-const Complex = @import("core").numerics.Complex;
+const num = @import("core").numerics;
+const Complex = num.Complex;
 
 const eps = std.math.floatEps(f64);
 
@@ -31,14 +32,8 @@ pub fn roots(n: usize, a: []f64, b: []f64, out: []Complex, tol: f64, max_iter: u
     if (m == 0) return .{ .count = count, .converged = true };
     hessenbergTriangular(m, a, b);
 
-    var a_norm: f64 = 0;
-    var b_norm: f64 = 0;
-    for (a[0 .. m * m], b[0 .. m * m]) |av, bv| {
-        a_norm += av * av;
-        b_norm += bv * bv;
-    }
-    const a_tol = eps * @sqrt(a_norm);
-    const b_tol = eps * @sqrt(b_norm);
+    const a_tol = eps * @sqrt(num.dot(a[0 .. m * m], a[0 .. m * m]));
+    const b_tol = eps * @sqrt(num.dot(b[0 .. m * m], b[0 .. m * m]));
 
     var hi = m;
     var iter: u32 = 0;
@@ -124,10 +119,8 @@ fn isolate(n: usize, a: []f64, b: []f64, out: []Complex, count: *usize) usize {
     // in-place copy never overwrites an entry it has yet to read.
     const m = hi - lo;
     for (0..m) |r| {
-        for (0..m) |c| {
-            a[r * m + c] = a[(lo + r) * n + lo + c];
-            b[r * m + c] = b[(lo + r) * n + lo + c];
-        }
+        std.mem.copyForwards(f64, a[r * m ..][0..m], a[(lo + r) * n + lo ..][0..m]);
+        std.mem.copyForwards(f64, b[r * m ..][0..m], b[(lo + r) * n + lo ..][0..m]);
     }
     return m;
 }
