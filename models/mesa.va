@@ -15,7 +15,7 @@
 //   channel -> gate charges -> stamp through the RD/RS/RG/RI/RF series network.
 //
 // Topology (mesaload.c stamp rows, one internal node per series resistor):
-//   d --RD-- d1 --RF-- d2      g --RG-- g1      s --RS-- s1 --RI-- s2
+//  dr --RD-- d1 --RF-- d2      g --RG-- g1      s --RS-- s1 --RI-- s2
 //   gate junctions g1-s1, g1-d1;  channel d1-s1;  gate charges g1-s2, g1-d2.
 // The series elements are voltage branches, so R=0 (the ngspice default, where
 // the node is not created at all) is an exact short, not a 1/0 conductance.
@@ -28,12 +28,12 @@
 //     from ngspice if any device runs at vds < 0.
 //   * ngspice's `off` flag / icvds / icvgs cold-start seeds are netlist-level
 //     initial conditions, not model equations; the solver owns them.
-module mesa(d, g, s);
-    inout d, g, s;
-    electrical d, g, s;
+module mesa(dr, g, s);
+    inout dr, g, s;
+    electrical dr, g, s;
     electrical d1, s1, g1, d2, s2;
 
-    branch (d, d1)  brd;    // RD
+    branch (dr, d1) brd;    // RD
     branch (s, s1)  brs;    // RS
     branch (g, g1)  brg;    // RG
     branch (s1, s2) bri;    // RI
@@ -88,11 +88,10 @@ module mesa(d, g, s);
     parameter real ag      = 0.0;                    //       gate-current split
 
     // ---- layer structure ---------------------------------------------------
-    // LRM 3.4/3.6: one identifier namespace per module, so the layer thickness
-    // cannot be spelled `d` alongside the drain terminal (hfet1.va uses `di` for
-    // the same reason).  `aliasparam` keeps the ngspice model-card keyword.
-    parameter real dch    = 0.12e-6  from (0:inf);   // m     channel depth
-    aliasparam d = dch;
+    // LRM 3.4/3.6: one identifier namespace per module, so the drain terminal
+    // is `dr` and the ngspice model-card keyword `d` stays a plain parameter.
+    // (An aliasparam beside a net `d` is E0373 since VerA cc40b0a9.)
+    parameter real d      = 0.12e-6  from (0:inf);   // m     channel depth
     parameter real nd     = 2.0e23   from (0:inf);   // 1/m3  channel doping
     parameter real du     = 0.035e-6 from (0:inf);   // m     undoped spacer
     parameter real ndu    = 1.0e22   from (0:inf);   // 1/m3  spacer doping
@@ -204,7 +203,7 @@ module mesa(d, g, s);
         if (level == 2) begin
             vpou = 0.0;
             vpod = 0.0;
-            vpo  = qe * nd * dch * dch / 2.0 / eps_gaas;
+            vpo  = qe * nd * d * d / 2.0 / eps_gaas;
         end else begin
             vpou = qe * ndu * du * du / 2.0 / eps_gaas;
             vpod = qe * ndelta * th * (2.0 * du + th) / 2.0 / eps_gaas;
@@ -215,9 +214,9 @@ module mesa(d, g, s);
         // Charge-control prefactors.
         if (level == 2) gchi0 = qe * w / l;
         else            gchi0 = qe * w / l * t_mu;
-        beta_i = 2.0 * eps_gaas * vs * zeta * w / dch;
+        beta_i = 2.0 * eps_gaas * vs * zeta * w / d;
         if (level == 3) dlay = du;
-        else            dlay = dch;
+        else            dlay = d;
         if (level == 4) n0 = epsi * t_eta * vt / 2.0 / qe / dlay;
         else            n0 = eps_gaas * t_eta * vt / qe / dlay;
         nsb0   = eps_gaas * t_eta * vt / qe / (du + th);
@@ -306,7 +305,7 @@ module mesa(d, g, s);
                 vdse   = vdsx * pow(1.0 + pow(ratio, mc), -1.0 / mc);
                 hh     = pow(1.0 + pow(ratio, knee), 1.0 / knee);
                 cdrain = gch * vdsx * (1.0 + t_lambda * vdsx) / hh;
-                cgcm   = 1.0 / (dch / (cas * epsi)
+                cgcm   = 1.0 / (d / (cas * epsi)
                        + etavth / (cbs * qe * n0) * exp(-vgt / etavth));
                 cgc    = w * l * cgcm / pow(1.0 + cc, 1.0 + 1.0 / gamma);
                 rr     = (vsate - vdse) / (2.0 * vsate - vdse);
@@ -382,7 +381,7 @@ module mesa(d, g, s);
             // ponytail: (1 - sqrt1) -> 0 as vgte -> 0 is a 1/0 in ngspice
             // (ns collapses to 0 by inf); the floor gets the same limit with a
             // finite derivative.
-            ns = 1.0 / (1.0 / (nd * dch * max(1.0 - sqrt1, 1.0e-30)) + bexp / n0);
+            ns = 1.0 / (1.0 / (nd * d * max(1.0 - sqrt1, 1.0e-30)) + bexp / n0);
             if (ns < 1.0e-38) begin
                 cdrain = 0.0;
                 capgs  = cf;
@@ -403,7 +402,7 @@ module mesa(d, g, s);
                 cdrain = gch * vdsx * (1.0 + t_lambda * vdsx) / hh;
                 if (vgt > vpo) rr = 0.0;
                 else           rr = sqrt(1.0 - vgt / vpo);
-                cgc    = w * l * eps_gaas / (rr + bexp) / dch;
+                cgc    = w * l * eps_gaas / (rr + bexp) / d;
                 rr     = (vsate - vdse) / (2.0 * vsate - vdse);
                 capgs  = cf + 2.0 / 3.0 * cgc * (1.0 - rr * rr);
                 rr     = vsate / (2.0 * vsate - vdse);
