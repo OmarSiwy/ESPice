@@ -1048,7 +1048,8 @@ const timer_only_state = std.StaticStringMap(void).initComptime(.{
 
 fn skipsTimerState(comptime D: type) bool {
     if (timer_only_state.get(comptime baseName(D)) == null) return false;
-    @setEvalBranchQuota(200_000);
+    // Two substring scans per field name; VerA emits one field per timer.
+    @setEvalBranchQuota(200_000 + 2_000 * @typeInfo(D.Instance).@"struct".fields.len);
     for (@typeInfo(D.State).@"struct".fields) |f| {
         if (!@hasField(D.Instance, f.name))
             @compileError(@typeName(D) ++ " carries State beyond stateCtl twins (" ++ f.name ++ "); drop it from timer_only_state");

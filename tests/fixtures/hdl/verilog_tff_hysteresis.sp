@@ -8,12 +8,13 @@
 * (trise = tfall = 1 ns) of the Thevenin driver (rout = 1 ohm) into 1 kohm,
 * so the high level is 5 * 1000/1001 = 4.995005 V. Mid-ramp samples allow
 * 5 mV: the device starts a ramp at the accepted step's end, at most ttol =
-* 0.5 ps (half the 1 ps tick) after the crossing, i.e. 2.5 mV of ramp.
+* 0.5 ps (half the 1 ps tick, set on the card; VerA's default since 048b37ca
+* is min(trise, tfall)/50 = 20 ps) after the crossing, i.e. 2.5 mV of ramp.
 * With vhys = 0 q would fall at 14.43 ns and read 0 V at 16 ns.
 .hdl "verilog_tff_hysteresis.assets/v_tff.v"
 Vclk clk 0 PWL(0 0 10n 5 14n 2.2 18n 5 22n 0 32n 5 42n 0)
 N1 clk q tffm
-.model tffm v_tff vhys=1
+.model tffm v_tff vhys=1 ttol=0.5p
 Rl q 0 1k
 .tran 0.1n 45n
 .end
