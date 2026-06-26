@@ -32,7 +32,6 @@ pub fn build(b: *std.Build) void {
     }).artifact("vera");
 
     const bopts = b.addOptions();
-    bopts.addOption([]const u8, "src_root", b.build_root.path orelse ".");
     bopts.addOption([]const u8, "contract_path", vera.builder.pathFromRoot("tools/contract.zig"));
     // The runtime HDL loader rebuilds device/eval.zig as a .so and imports
     // these roots by path. They are hidden edges of the module graph: move a
@@ -41,6 +40,8 @@ pub fn build(b: *std.Build) void {
     bopts.addOption([]const u8, "device_abi_path", b.pathFromRoot("src/device/abi.zig"));
     bopts.addOption([]const u8, "core_path", b.pathFromRoot("src/core/root.zig"));
     bopts.addOption([]const u8, "gompute_path", gompute.builder.pathFromRoot("src/root.zig"));
+    const stdpp_dep = b.dependency("stdpp", .{ .target = target, .optimize = optimize });
+    bopts.addOption([]const u8, "stdpp_path", stdpp_dep.builder.pathFromRoot("src/root.zig"));
 
     // Release strips DWARF: debug info was ~2/3 of LLVM time, superlinear in
     // function size, and 115 MB of the shipped binary. `-Ddebug-info` puts it
@@ -52,7 +53,7 @@ pub fn build(b: *std.Build) void {
     // Every module here is (root, target, optimize, strip) plus imports.
     // stdpp (vectorizing iterators) is a std extension: every host module
     // gets it. GPU device modules do not; eval.zig must not import it.
-    const stdpp_mod = b.dependency("stdpp", .{ .target = target, .optimize = optimize }).module("stdpp");
+    const stdpp_mod = stdpp_dep.module("stdpp");
     const M = struct {
         b: *std.Build,
         target: std.Build.ResolvedTarget,
@@ -247,6 +248,23 @@ pub fn build(b: *std.Build) void {
     exe.use_lld = optimize != .Debug and !target.result.os.tag.isDarwin();
     for (host_objs) |o| exe.root_module.addObject(o);
     b.installArtifact(exe);
+    // Runtime `.hdl` builds compile eval.zig against these roots (the
+    // `*_path` options above). Installing them in share/espice, where
+    // Library.load looks first, frees an installed espice from this tree.
+    for ([_]struct { std.Build.LazyPath, []const u8 }{
+        .{ b.path("src/core"), "core" },
+        .{ b.path("src/device"), "device" },
+        .{ gompute.path("src"), "gompute" },
+        .{ stdpp_dep.path("src"), "stdpp" },
+        .{ vera.path("lib"), "vera/lib" },
+        .{ vera.path("src/sim"), "vera/src/sim" },
+    }) |dir| b.installDirectory(.{
+        .source_dir = dir[0],
+        .install_dir = .prefix,
+        .install_subdir = b.fmt("share/espice/{s}", .{dir[1]}),
+        .include_extensions = &.{".zig"},
+    });
+    b.getInstallStep().dependOn(&b.addInstallFileWithDir(vera.path("tools/contract.zig"), .prefix, "share/espice/vera/tools/contract.zig").step);
 
     // GPU kernels. `emitKernels` probes the arch, and a machine with no device
     // emits nothing, but `gompute_kernels` always exists for analysis/gpu.zig.

@@ -84,10 +84,37 @@ pub fn prepare(io: std.Io, lib: *device.Library, session: std.mem.Allocator, inp
 
 fn loadModels(io: std.Io, lib: *device.Library, session: std.mem.Allocator, foreign: []const netlist.Foreign, origin: []const u8) !void {
     var paths: std.ArrayList([]const u8) = .empty;
-    for (foreign) |f| if (f.kind == .verilog_a or f.kind == .verilog) try paths.append(session, if (std.fs.path.isAbsolute(f.path))
-        f.path
-    else
-        try std.fs.path.join(session, &.{ std.fs.path.dirname(origin) orelse ".", f.path }));
+    for (foreign) |f| {
+        const path = if (std.fs.path.isAbsolute(f.path))
+            f.path
+        else
+            try std.fs.path.join(session, &.{ std.fs.path.dirname(origin) orelse ".", f.path });
+        switch (f.kind) {
+            .verilog_a, .verilog => try paths.append(session, path),
+            // ngspice loads a compiled OSDI binary; espice compiles Verilog-A
+            // itself, so it takes the `.va` beside one, or its built-in model
+            // of that name (`psp103va.osdi`: the `psp103va` kind runs psp103).
+            .osdi_include, .pre_osdi => {
+                const card = @tagName(f.kind);
+                const va = try std.mem.concat(session, u8, &.{ path[0 .. path.len - std.fs.path.extension(path).len], ".va" });
+                if (std.Io.Dir.cwd().access(io, va, .{})) |_| {
+                    std.log.warn("netlist: {s} {s}: loading {s} in its place; espice compiles Verilog-A directly", .{ card, f.path, va });
+                    try paths.append(session, va);
+                    continue;
+                } else |_| {}
+                const base = std.fs.path.stem(path);
+                const bare = if (std.ascii.endsWithIgnoreCase(base, "va")) base[0 .. base.len - 2] else base;
+                for (lib.names.items) |n| {
+                    if (!std.ascii.eqlIgnoreCase(n, base) and !std.ascii.eqlIgnoreCase(n, bare)) continue;
+                    std.log.warn("netlist: {s} {s}: using the built-in model {s}", .{ card, f.path, n });
+                    break;
+                } else {
+                    if (!@import("builtin").is_test) std.log.err("netlist: {s} {s}: espice cannot load OSDI binaries; it compiles Verilog-A directly, so load the source with .hdl \"model.va\"", .{ card, f.path });
+                    return error.OsdiUnsupported;
+                }
+            },
+        }
+    }
     if (paths.items.len == 0) return;
 
     try lib.load(io, paths.items);

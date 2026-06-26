@@ -505,12 +505,27 @@ pub const NetBuilder = struct {
             if (vt.derive) |df| df(mblob.ptr);
             const iblob = try arena.alignedAlloc(u8, .@"16", vt.instance_size);
             vt.init_instance(iblob.ptr);
+            // A key neither blob declares would be dropped, and the model
+            // default used in its place. The binder rejects a null value for
+            // a key it knows and ignores one it does not, so a null probe
+            // tells the two apart without writing either blob.
+            for (dev.kv) |item| {
+                const probe = [_]batch.Param{.{ .key = item.key, .value = null }};
+                if (vt.bind_model(mblob.ptr, &probe) == .ok and vt.bind_instance(iblob.ptr, &probe) == .ok) {
+                    if (!@import("builtin").is_test) std.log.err("{s}: module '{s}' has no parameter '{s}'", .{ dev.name, vt.name, item.key });
+                    return error.UnknownParameter;
+                }
+            }
             try bindKv(vt.bind_instance, iblob.ptr, dev.kv);
+            if (dev.pins.len != vt.num_ports) {
+                if (!@import("builtin").is_test) std.log.err("{s}: module '{s}' has {d} ports, the card connects {d} nodes", .{ dev.name, vt.name, vt.num_ports, dev.pins.len });
+                return error.WrongNodeCount;
+            }
 
             // Same port/internal-node policy as Builder.addDevice.
             const nodes = try arena.alloc(u32, vt.n_u);
             for (0..vt.num_ports) |p|
-                nodes[p] = if (p < dev.pins.len) try self.rowOf(dev.pins[p]) else GROUND;
+                nodes[p] = try self.rowOf(dev.pins[p]);
             if (vt.n_u > vt.num_ports) {
                 const col = try arena.alloc(i32, vt.n_u);
                 @memset(col, -1);

@@ -14,6 +14,6 @@ test "parallel model preparation propagates errors" {
         &lib,
         std.testing.io,
         &.{ "first.sv", "second.vhd" },
-        .{ .work_dir = "", .contract = "", .dyn = "", .gompute = "", .device_abi = "", .core = "" },
+        .{ .work_dir = "", .contract = "", .dyn = "", .gompute = "", .device_abi = "", .core = "", .stdpp = "" },
     ));
 }

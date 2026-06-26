@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "An .hdl instance whose node count differs from the module's ports is an error (WrongNodeCount), not grounded.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "An .hdl instance whose node count differs from the module's ports is an error (WrongNodeCount), not grounded."
+  },
+  "expect": {
+    "status": "error",
+    "category": "inconsistent_circuit",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "dffa65080ba6d88d7d5fcb7bce5b57fc875b1478c46c264e1301617605f3a027"
+}

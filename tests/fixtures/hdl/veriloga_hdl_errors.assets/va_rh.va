@@ -1,0 +1,13 @@
+// Resistor whose local `h` used to shadow the generated `h` import (VerA
+// f4b44c69); the misspelled-parameter decks below bind against it.
+`include "disciplines.vams"
+module va_rh(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real R = 100.0 from (0:inf);
+    real h;
+    analog begin
+        h = V(p, n) / R;
+        I(p, n) <+ h;
+    end
+endmodule

@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "A misspelled .hdl instance parameter is an error (UnknownParameter), not a silent default.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "A misspelled .hdl instance parameter is an error (UnknownParameter), not a silent default."
+  },
+  "expect": {
+    "status": "error",
+    "category": "unsupported_input",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "1691f586683f7bf3a720165878a79088ed39f9f294b7022ddc914eb5d29576b3"
+}

@@ -29,6 +29,11 @@ pub const BuildPaths = struct {
     device_abi: []const u8,
     /// The core module, for the ids the ABI names.
     core: []const u8,
+    /// stdpp's module root; core imports it.
+    stdpp: []const u8,
+    /// The Zig compiler that builds the device. It must be the version this
+    /// espice was built with.
+    zig: []const u8 = "zig",
 };
 
 /// A compiled and opened device, not yet registered.
@@ -58,6 +63,8 @@ fn prepareOne(lib: *const Library, gpa: std.mem.Allocator, io: std.Io, path: []c
 
     const source = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(64 * 1024 * 1024));
     defer gpa.free(source);
+    var bag: fastvaf.diag.Bag = .init(gpa);
+    defer bag.deinit(gpa);
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -69,7 +76,11 @@ fn prepareOne(lib: *const Library, gpa: std.mem.Allocator, io: std.Io, path: []c
     var v: digital.DeviceZig = undefined;
     const module_name = switch (hdl) {
         .va => blk: {
-            va = try fastvaf.compileSource(gpa, source, .build);
+            const dir = std.fs.path.dirname(path) orelse ".";
+            va = fastvaf.compileSourceOpts(gpa, source, .build, .{ .file_name = path, .include_dirs = &.{dir}, .diags = &bag }) catch |err| {
+                printDiags(&bag);
+                return err;
+            };
             break :blk va.?.mir.name;
         },
         .v => blk: {
@@ -88,6 +99,9 @@ fn prepareOne(lib: *const Library, gpa: std.mem.Allocator, io: std.Io, path: []c
         .va => try va.?.generateOutput(),
         .v => .{ .text = v.zig },
     };
+    // Warnings of a successful compile, and codegen's refusals (E0515).
+    printDiags(&bag);
+    if (va != null and va.?.device_has_compile_error) return error.HdlCodegenRefused;
 
     std.debug.print("loader: compiling '{s}' ({s}) — first load, cached afterwards\n", .{ module_name, path });
     // The orchestrator hashes this list into its cache key. `sim` and its
@@ -97,7 +111,8 @@ fn prepareOne(lib: *const Library, gpa: std.mem.Allocator, io: std.Io, path: []c
     const modules = [_]fastvaf.orchestrator.Module{
         .{ .name = "contract", .root = paths.contract },
         .{ .name = "gompute", .root = paths.gompute },
-        .{ .name = "core", .root = paths.core },
+        .{ .name = "stdpp", .root = paths.stdpp },
+        .{ .name = "core", .root = paths.core, .deps = &.{"stdpp"} },
         .{ .name = "device_abi", .root = paths.device_abi, .deps = &.{ "contract", "core" } },
         .{ .name = "dyn", .root = paths.dyn, .deps = &.{ "contract", "gompute", "device_abi" } },
         .{ .name = "sim", .root = try std.fs.path.join(arena, &.{ vera_root, "src/sim/root.zig" }), .deps = &.{ "contract", "diag", "frontend", "kernels" } },
@@ -109,13 +124,17 @@ fn prepareOne(lib: *const Library, gpa: std.mem.Allocator, io: std.Io, path: []c
     // auto layout, so the library must match the host's backend and mode
     // (`layoutHash` checks both). The orchestrator builds only with LLVM, so a
     // self-hosted host cannot load HDL.
-    if (builtin.zig_backend != .stage2_llvm) return error.HdlNeedsLlvmHost;
+    if (builtin.zig_backend != .stage2_llvm) {
+        std.debug.print("loader: this espice is a Debug build; runtime .hdl needs one built with -Doptimize=ReleaseFast (the default)\n", .{});
+        return error.HdlNeedsLlvmHost;
+    }
     var options: fastvaf.orchestrator.Options = .{
         .work_dir = paths.work_dir,
         .name = module_name,
         .optimize = builtin.mode,
         .backend = .llvm,
         .modules = &modules,
+        .zig_exe = paths.zig,
     };
     // One build tree per (source, host ABI, module set): VerA's writer prunes
     // its tree, so unrelated sources must not share one, and a stable path
@@ -153,7 +172,14 @@ fn prepareOne(lib: *const Library, gpa: std.mem.Allocator, io: std.Io, path: []c
         error.FileNotFound => {},
         else => return err,
     };
-    var built = try fastvaf.orchestrator.compileRelease(gpa, io, options, device, generation);
+    var built = fastvaf.orchestrator.compileRelease(gpa, io, options, device, generation) catch |err| {
+        switch (err) {
+            error.CompilerGone => std.debug.print("loader: the Zig compiler '{s}' did not start or exited mid-build; runtime .hdl needs zig {s} on PATH, or its path in $ZIG\n", .{ paths.zig, builtin.zig_version_string }),
+            error.ProtocolMismatch => std.debug.print("loader: '{s}' is not zig {s}, the compiler this espice was built with; put that version on PATH or in $ZIG\n", .{ paths.zig, builtin.zig_version_string }),
+            else => {},
+        }
+        return err;
+    };
     defer built.deinit(gpa);
     const art = switch (built) {
         .ok => |a| a,
@@ -202,15 +228,19 @@ fn emitDigital(arena: std.mem.Allocator, path: []const u8, source: []const u8) !
     var bag: fastvaf.diag.Bag = .init(arena);
     try bag.setSingleFile(path, source);
     const dev = digital.emitDevice(arena, source, .{ .file_name = path }, .static, &bag);
-    if (!bag.isEmpty()) {
-        var buf: [1024]u8 = undefined;
-        const stderr = std.debug.lockStderr(&buf);
-        defer std.debug.unlockStderr();
-        const w = &stderr.file_writer.interface;
-        fastvaf.diag.render(&bag, w, .{}) catch {};
-        w.flush() catch {};
-    }
+    printDiags(&bag);
     return dev;
+}
+
+/// Prints VerA's diagnostics (file:line, code, message) to stderr.
+fn printDiags(bag: *fastvaf.diag.Bag) void {
+    if (bag.isEmpty()) return;
+    var buf: [1024]u8 = undefined;
+    const stderr = std.debug.lockStderr(&buf);
+    defer std.debug.unlockStderr();
+    const w = &stderr.file_writer.interface;
+    fastvaf.diag.render(bag, w, .{}) catch {};
+    w.flush() catch {};
 }
 
 /// Opens a device library for the life of the process and returns its
