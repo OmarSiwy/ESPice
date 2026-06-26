@@ -1,0 +1,5 @@
+// bsource_i: the current-output B element, I(p,n) = expression. Same tape as
+// bsource.va; ngspice makes no branch for it (asrcset.c:81-88), so neither
+// does this module.
+`define BSRC_CURRENT
+`include "bsource.va"

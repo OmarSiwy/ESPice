@@ -1,0 +1,146 @@
+// bsource: ngspice's B element (ASRC, asrc/asrcload.c). V(p,n) (or, with
+// BSRC_CURRENT defined, I(p,n); see bsource_i.va) equals an arbitrary
+// expression of node voltages. The frontend compiles the card's expression
+// into a postfix tape held in the op_code/op_a/op_b/consts parameter arrays
+// (src/frontend/builder.zig compileTape); this module interprets it, and
+// VerA's forward-mode AD supplies the Jacobian through the runtime-indexed
+// stack, in place of ngspice's symbolic derivative trees.
+//
+// Control ports c0..c7 are the distinct probed nets; unused ones are tied to
+// ground by the host. A control port may also be wired to a branch-current
+// row, so V(ck) then reads that current (the i() probe).
+//
+// Opcodes (keep in step with the builder's tape.Code):
+//   0 num  push consts[a]        1 v    push V(c[a])      2 vd  push V(c[a])-V(c[b])
+//   3 neg  4 not  5 add  6 sub  7 mul  8 div  9 powi (a = exponent)
+//  10 powc (a = const index of the exponent)  11 pow  12 lt  13 gt  14 le
+//  15 ge  16 eq  17 ne  18 and  19 or  20 sel  21 sqrt  22 abs  23 min  24 max
+//  25 exp 26 ln  27 log10  28 sin  29 cos  30 tan  31 atan  32 tanh  33 floor
+//  34 ceil  35 time  36 temper
+//
+// Semantics that differ from ngspice's defaults, on purpose:
+// - x^k with a constant integer k in [0, 255] keeps the sign of x (x*x*...*x),
+//   as ngspice's hspice/ltspice compat (ptfuncs.c PTpowerH) and the corpus
+//   oracles do; any other exponent is |x|^y, ngspice's default.
+// - sqrt/log of a negative argument, log(0) and exp overflow follow IEEE
+//   (NaN/inf, caught by the solver's finiteness check) instead of ptfuncs.c's
+//   HUGE and +-1e99 substitutes. Division follows ngspice (PTdivide's 1e-32).
+// - min, max and abs keep ngspice's tie rules: a tie goes to a, abs keeps -0.
+//
+// Temperature (asrcload.c): the value is scaled by 1 + tc1*dT + tc2*dT^2,
+// dT = (T + dtemp) - 300.15 K, inverted when reciproctc != 0.
+`include "disciplines.vams"
+`include "constants.vams"
+
+`ifdef BSRC_CURRENT
+module bsource_i(p, n, c0, c1, c2, c3, c4, c5, c6, c7);
+`else
+module bsource(p, n, c0, c1, c2, c3, c4, c5, c6, c7);
+`endif
+    inout p, n, c0, c1, c2, c3, c4, c5, c6, c7;
+    electrical p, n, c0, c1, c2, c3, c4, c5, c6, c7;
+    branch (p, n) br;
+
+    parameter real tc1 = 0.0;
+    parameter real tc2 = 0.0;
+    parameter real dtemp = 0.0;
+    // Device temperature in K; <= 0 means the circuit temperature.
+    parameter real temp = -1.0e3;
+    parameter integer reciproctc = 0;
+    parameter integer n_ops = 0 from [0:64];
+    parameter integer op_code[0:63] = '{64{0}};
+    parameter integer op_a[0:63] = '{64{0}};
+    parameter integer op_b[0:63] = '{64{0}};
+    parameter real consts[0:31] = '{32{0.0}};
+
+    analog begin : tape
+        // ponytail: VAMS variables are static, and VerA cannot prove every
+        // runtime-indexed read follows a write, so it holds this block (64
+        // reals copied per evaluation, state_class .history). Mark it
+        // (* vera_scratch *) when VerA ships that attribute.
+        real vc[0:7];
+        real st[0:63];
+        real a, b, r, f, tdev, dt, factor;
+        integer k, sp, j;
+        vc[0] = V(c0); vc[1] = V(c1); vc[2] = V(c2); vc[3] = V(c3);
+        vc[4] = V(c4); vc[5] = V(c5); vc[6] = V(c6); vc[7] = V(c7);
+        sp = 0;
+        for (k = 0; k < n_ops; k = k + 1) begin
+            case (op_code[k])
+                0: begin st[sp] = consts[op_a[k]]; sp = sp + 1; end
+                1: begin st[sp] = vc[op_a[k]]; sp = sp + 1; end
+                2: begin st[sp] = vc[op_a[k]] - vc[op_b[k]]; sp = sp + 1; end
+                35: begin st[sp] = $abstime; sp = sp + 1; end
+                36: begin st[sp] = $temperature - `P_CELSIUS0; sp = sp + 1; end
+                20: begin
+                    sp = sp - 2;
+                    if (st[sp - 1] != 0.0) st[sp - 1] = st[sp]; else st[sp - 1] = st[sp + 1];
+                end
+                5, 6, 7, 8, 11, 12, 13, 14, 15, 16, 17, 18, 19, 23, 24: begin
+                    sp = sp - 1;
+                    a = st[sp - 1];
+                    b = st[sp];
+                    case (op_code[k])
+                        5: r = a + b;
+                        6: r = a - b;
+                        7: r = a * b;
+                        // ptfuncs.c PTdivide: the divisor moves 1e-32 away
+                        // from zero, so 0/0 at an all-zero start is 0.
+                        8: r = a / (b + ((b >= 0.0) ? 1e-32 : -1e-32));
+                        11: r = exp(ln((a < 0.0) ? -a : a) * b);
+                        12: r = (a < b) ? 1.0 : 0.0;
+                        13: r = (b < a) ? 1.0 : 0.0;
+                        14: r = (a <= b) ? 1.0 : 0.0;
+                        15: r = (b <= a) ? 1.0 : 0.0;
+                        16: r = (a == b) ? 1.0 : 0.0;
+                        17: r = (a == b) ? 0.0 : 1.0;
+                        18: r = (a != 0.0 && b != 0.0) ? 1.0 : 0.0;
+                        19: r = (a != 0.0 || b != 0.0) ? 1.0 : 0.0;
+                        23: if (a <= b) r = a; else r = b;
+                        default: if (b <= a) r = a; else r = b;
+                    endcase
+                    st[sp - 1] = r;
+                end
+                default: begin
+                    a = st[sp - 1];
+                    case (op_code[k])
+                        3: r = -a;
+                        4: r = (a == 0.0) ? 1.0 : 0.0;
+                        // x*(x*(x*...)): the base multiplies the running power.
+                        9: begin
+                            if (op_a[k] == 0) r = 1.0;
+                            else begin
+                                r = a;
+                                for (j = 1; j < op_a[k]; j = j + 1) r = a * r;
+                            end
+                        end
+                        10: r = pow((a < 0.0) ? -a : a, consts[op_a[k]]);
+                        21: r = sqrt(a);
+                        22: if (a < 0.0) r = -a; else r = a;
+                        25: r = exp(a);
+                        26: r = ln(a);
+                        27: r = ln(a) * 0.4342944819032518;
+                        28: r = sin(a);
+                        29: r = cos(a);
+                        30: r = sin(a) / cos(a);
+                        31: r = atan(a);
+                        32: r = tanh(a);
+                        33: r = floor(a);
+                        default: r = ceil(a);
+                    endcase
+                    st[sp - 1] = r;
+                end
+            endcase
+        end
+        f = (sp == 0) ? 0.0 : st[0];
+        tdev = (temp <= 0.0) ? $temperature : temp;
+        dt = (tdev + dtemp) - 300.15;
+        factor = 1.0 + tc1 * dt + tc2 * dt * dt;
+        if (reciproctc != 0) factor = 1.0 / factor;
+`ifdef BSRC_CURRENT
+        I(br) <+ f * factor;
+`else
+        V(br) <+ f * factor;
+`endif
+    end
+endmodule
