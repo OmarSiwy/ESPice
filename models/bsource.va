@@ -58,12 +58,10 @@ module bsource(p, n, c0, c1, c2, c3, c4, c5, c6, c7);
     parameter real consts[0:31] = '{32{0.0}};
 
     analog begin : tape
-        // ponytail: VAMS variables are static, and VerA cannot prove every
-        // runtime-indexed read follows a write, so it holds this block (64
-        // reals copied per evaluation, state_class .history). Mark it
-        // (* vera_scratch *) when VerA ships that attribute.
-        real vc[0:7];
-        real st[0:63];
+        // Per-evaluation scratch, never held state (VAMS variables are
+        // static; VerA's vera_scratch starts them at 0 on every evaluation).
+        (* vera_scratch *) real vc[0:7];
+        (* vera_scratch *) real st[0:15];
         real a, b, r, f, tdev, dt, factor;
         integer k, sp, j, np, at;
         real d, xi, yi, lower, upper, seg_lo, seg_hi, u, w;

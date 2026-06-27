@@ -4,7 +4,7 @@
     .fingerprint = 0x8b858d53fd1540a,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
-        // Local: VerA 9da4c81f (timepoint cache, $vera_reject_step, laplace_nd
+        // Local: VerA 4a86146d (vera_scratch, timepoint cache, $vera_reject_step, laplace_nd
         // runtime degree) is not pushed yet. Restore a git pin before pushing
         // (AGENTS.md).
         .vera = .{ .path = "../VerA-pin" },
