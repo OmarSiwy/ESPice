@@ -1,0 +1,22 @@
+// VCCS with a pure delay: HSPICE's G ... DELAY in+ in- TD=val [SCALE=val],
+// I(p,n) = gain * V(cp,cn)(t - td).
+//
+// Verilog-A implementation: Omar El-Sawy, University of Waterloo.
+// Based on: HSPICE G-element Delay Element [HSPICE User Guide: Simulation
+//   and Analysis, Sources and Stimuli].
+//
+// At DC the delay is transparent, as in vcvs_delay.va.
+module vccs_delay(p, n, cp, cn);
+    inout p, n, cp, cn;
+    electrical p, n, cp, cn;
+
+    parameter real gain = 1.0;               // A/V  SCALE
+    parameter real td   = 1e-9 from (0:inf); // s    delay
+
+    analog begin
+        if (analysis("static"))
+            I(p, n) <+ gain * V(cp, cn);
+        else
+            I(p, n) <+ gain * absdelay(V(cp, cn), td);
+    end
+endmodule

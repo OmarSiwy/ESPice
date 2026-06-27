@@ -26,6 +26,7 @@ pub const DeviceId = enum {
     ccvs,
     bsource,
     bsource_i,
+    bsource_q,
     vswitch,
     cswitch,
     tline,
@@ -127,10 +128,15 @@ pub const ccvs = DeviceId.Type(.ccvs);
 pub const vcvs = DeviceId.Type(.vcvs);
 pub const bsource = DeviceId.Type(.bsource);
 pub const bsource_i = DeviceId.Type(.bsource_i);
+pub const bsource_q = DeviceId.Type(.bsource_q);
 pub const cswitch = DeviceId.Type(.cswitch);
 pub const tline = DeviceId.Type(.tline);
 pub const lossy_tline = DeviceId.Type(.lossy_tline);
 pub const ltra_native = byName("ltra_native");
+pub const vcvs_laplace = byName("vcvs_laplace");
+pub const vccs_laplace = byName("vccs_laplace");
+pub const vcvs_delay = byName("vcvs_delay");
+pub const vccs_delay = byName("vccs_delay");
 pub const txl_native = byName("txl_native");
 
 /// `.model` LEVEL tables, per ngspice src/spicelib/parser/inpdomod.c.

@@ -14,14 +14,16 @@ pub const none = std.math.maxInt(u32);
 pub const Code = enum(u8) {
     /// a: constant pool index.
     num,
-    /// A name no scope defines. Final ops: a = 1 for `l`, `w`, `mult`.
+    /// A name no scope defines. Final ops: a = 1 for `l`, `w`, `mult`,
+    /// 2 for `time`, 3 for `temper`, 0 otherwise.
     ident,
     /// A swept global parameter kept symbolic: a indexes the live table
     /// (`fold`'s `live`). Only netlist.zig `subst` emits it.
     live,
     /// `v(p[,n])`: a, b are the nets (names before `subst`), `none` if absent.
     vprobe,
-    /// `i(device)`; the device is not kept.
+    /// `i(device)`: a is the device name (a name before `subst`, its
+    /// flattened `Netlist.pool` index after).
     iprobe,
     neg,
     not,
@@ -45,8 +47,10 @@ pub const Code = enum(u8) {
 /// Built-in functions; `other` is any name the table does not know. The
 /// statistical distributions `agauss`, `gauss`, `unif`, `aunif` and HSPICE's
 /// `limit(nom, var)` fold to their nominal, the first argument; a Monte Carlo
-/// trial draws them instead (`eval`).
-pub const Fn = enum(u8) { sqrt, abs, min, max, pow, exp, ln, log, log10, sin, cos, tan, atan, floor, ceil, ternary, tanh, agauss, gauss, unif, aunif, limit, other };
+/// trial draws them instead (`eval`). `table(x, d, x1, y1, ...)` is the
+/// smoothed transfer of an E/G TABLE or PWL(1) card, built only by the
+/// B-source tape (models/bsource.va opcode 37).
+pub const Fn = enum(u8) { sqrt, abs, min, max, pow, exp, ln, log, log10, sin, cos, tan, atan, floor, ceil, ternary, tanh, agauss, gauss, unif, aunif, limit, table, other };
 
 /// True for the functions a Monte Carlo trial draws.
 pub fn isDistribution(f: Fn) bool {
@@ -62,7 +66,7 @@ const fns = std.StaticStringMap(Fn).initComptime(.{
     .{ "log10", .log10 }, .{ "sin", .sin },       .{ "cos", .cos },     .{ "tan", .tan },
     .{ "atan", .atan },   .{ "floor", .floor },   .{ "ceil", .ceil },   .{ "ternary", .ternary },
     .{ "tanh", .tanh },   .{ "agauss", .agauss }, .{ "gauss", .gauss }, .{ "unif", .unif },
-    .{ "aunif", .aunif }, .{ "limit", .limit },
+    .{ "aunif", .aunif }, .{ "limit", .limit },   .{ "table", .table },
 });
 
 /// One postfix op.
@@ -388,7 +392,7 @@ fn call(f: Fn, args: []const Val) Val {
         all_known = all_known and a.known;
     }
     const want: usize = switch (f) {
-        .tanh, .other => return .unknown(false),
+        .tanh, .table, .other => return .unknown(false),
         // ponytail: nominal only; Monte Carlo sampling (C3) draws here.
         .agauss, .gauss, .unif, .aunif => return if (args.len >= 2 and args.len <= 4 and args[0].known) args[0] else .unknown(args.len >= 2 and all_nominal),
         .limit => return if (args.len == 2 and args[0].known) args[0] else .unknown(false),
@@ -419,7 +423,7 @@ fn call(f: Fn, args: []const Val) Val {
         .atan => std.math.atan(a),
         .floor => @floor(a),
         .ceil => @ceil(a),
-        .ternary, .tanh, .agauss, .gauss, .unif, .aunif, .limit, .other => unreachable,
+        .ternary, .tanh, .agauss, .gauss, .unif, .aunif, .limit, .table, .other => unreachable,
     });
 }
 

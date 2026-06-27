@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "analysis": "ac",
+  "purpose": "HSPICE/ngspice behavioural E/G/H forms (VALUE, POLY, TABLE, i(), temper, VCR, VCCAP)",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "See the deck header: each output is a closed form of the fixed control voltages and currents."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "row_count": 1,
+        "columns": {
+          "v(o1)": {
+            "values": [
+              2.0
+            ],
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09
+          },
+          "v(o2)": {
+            "values": [
+              38.0
+            ],
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09
+          },
+          "v(o3)": {
+            "values": [
+              1.0
+            ],
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09
+          },
+          "v(o4)": {
+            "values": [
+              -0.2
+            ],
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09
+          },
+          "v(o5)": {
+            "values": [
+              27.0
+            ],
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09
+          },
+          "v(o8)": {
+            "values": [
+              3.0
+            ],
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09
+          }
+        }
+      },
+      {
+        "name": "AC Analysis",
+        "match": "exact",
+        "row_count": 1,
+        "columns": {
+          "v(o9)": {
+            "values": [
+              [
+                0.5,
+                -0.5
+              ]
+            ],
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "83a22b47df0baabee548df9bda50be48c1ea4220b883b3a74b14d171970de7d1"
+}

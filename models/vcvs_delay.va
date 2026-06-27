@@ -1,0 +1,25 @@
+// VCVS with a pure delay: HSPICE's E ... DELAY in+ in- TD=val [SCALE=val],
+// V(p,n) = gain * V(cp,cn)(t - td).
+//
+// Verilog-A implementation: Omar El-Sawy, University of Waterloo.
+// Based on: HSPICE E-element Delay Element [HSPICE User Guide: Simulation
+//   and Analysis, Sources and Stimuli].
+//
+// At DC the delay is transparent (the history is the operating point), as the
+// ideal line in tline.va; small-signal analyses read absdelay's exact
+// e^(-jw td) through the host's frequency-dependent stamps.
+module vcvs_delay(p, n, cp, cn);
+    inout p, n, cp, cn;
+    electrical p, n, cp, cn;
+    branch (p, n) br;
+
+    parameter real gain = 1.0;               // V/V  SCALE
+    parameter real td   = 1e-9 from (0:inf); // s    delay
+
+    analog begin
+        if (analysis("static"))
+            V(br) <+ gain * V(cp, cn);
+        else
+            V(br) <+ gain * absdelay(V(cp, cn), td);
+    end
+endmodule

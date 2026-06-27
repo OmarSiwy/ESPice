@@ -172,6 +172,9 @@ pub fn buildRun(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_
     // `.options tnom` is a model-card default (b4set.c:1950): models read it
     // as they are derived, before the pattern freezes.
     b.nom_temp_c = deck_opts.tnom_c;
+    b.reltol = deck_opts.tol.reltol;
+    b.abstol = deck_opts.tol.abstol;
+    b.vntol = deck_opts.tol.vntol;
     try b.reserveNodes(nl.graph.vertexCount());
 
     var nb = try builder.NetBuilder.init(parse_arena, &b, nl.*);

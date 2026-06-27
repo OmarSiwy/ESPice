@@ -525,6 +525,8 @@ const Model = struct {
 const model_includes = [_]struct { name: []const u8, file: []const u8 }{
     .{ .name = "psp103_nqs", .file = "psp103.va" },
     .{ .name = "bsource_i", .file = "bsource.va" },
+    .{ .name = "bsource_q", .file = "bsource.va" },
+    .{ .name = "vccs_laplace", .file = "vcvs_laplace.va" },
 };
 
 /// Whether `name` is one of the comma-separated entries of `csv`.

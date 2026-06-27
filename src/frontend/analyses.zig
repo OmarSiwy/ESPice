@@ -1080,8 +1080,15 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
                     return name.len <= buf.len and words.has(std.ascii.lowerString(buf[0..name.len], name));
                 }
             }.f;
+            var in_nodes: ?[2]u32 = null;
             if (i < args.len and !isGrid(grid_words, args, i, &lower)) {
-                in_branch = sources.v_branches[try voltageSource(args, i, sources)];
+                // A V or an I card (ngspice noisean.c: VSRC or ISRC).
+                const name = nameAt(args, i) orelse return error.InvalidAnalysisArguments;
+                if (netlist.nameIndex(sources.v_names, name)) |v| {
+                    in_branch = sources.v_branches[v];
+                } else if (netlist.nameIndex(sources.i_names, name)) |k| {
+                    in_nodes = .{ sources.i_pos[k], sources.i_neg[k] };
+                } else return error.AnalysisSourceNotFound;
                 i += 1;
             }
             var sweep: numerics.FreqSweep = undefined;
@@ -1097,6 +1104,7 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
                 .out_node = try outputNode(node_id),
                 .out_neg = try outputNeg(node_neg),
                 .in_branch = in_branch,
+                .in_nodes = in_nodes,
                 .sweep = sweep,
                 .contributions = contributions,
                 .cards = cards,

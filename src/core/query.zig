@@ -59,6 +59,9 @@ pub const Noise = struct {
     /// drive the solve; `inoise_spectrum` refers the output noise back to
     /// it. Null emits the output-referred curve only.
     in_branch: ?u32 = null,
+    /// The (n+, n-) rows of a current-source input, which drives current
+    /// from n+ to n- through itself; set instead of `in_branch`.
+    in_nodes: ?[2]u32 = null,
     /// Emit integrated device noise in V rms instead of the measured PSD.
     integrated: bool = false,
     /// Publish each device instance's contribution, per generator name and

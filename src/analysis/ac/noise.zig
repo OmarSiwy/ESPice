@@ -57,7 +57,7 @@ pub const PerSource = struct { dens: []f64, out: []f64, in: []f64 };
 
 /// Fills `freqs`, `density` and `in_density` (V^2/Hz, all `sweep.count()`
 /// long) and returns the band integrals. `in_density` is all zeros unless
-/// `options.in_branch` names a source. `per_source`, when given, also
+/// `options.in_branch` or `options.in_nodes` names a source. `per_source`, when given, also
 /// receives every generator's density and integrals.
 pub fn sweep(
     ckt: *root.Circuit,
@@ -106,6 +106,7 @@ pub fn sweep(
     defer allocator.free(ln_last);
     const dens_last = ln_last[noise_sources.len..];
 
+    const referred = options.in_branch != null or options.in_nodes != null;
     var integrated: f64 = 0;
     var integrated_in: f64 = 0;
     // noisean.c:376 sets lstFreq = freq before the loop, so the first point
@@ -128,9 +129,17 @@ pub fn sweep(
         // Gain from the input source to the output without a second solve:
         // the adjoint y is the transfer row, so a unit drive on the input
         // branch gives v_out = y[in_branch] (e_out^T A^-1 e_in = (A^-T e_out)^T e_in).
-        const gain_sq: f64 = if (options.in_branch) |br| blk: {
-            const g_re = y[br];
-            const g_im = y[n + br];
+        // A current input drives its node pair: |y[n+] - y[n-]|.
+        const gain_sq: f64 = if (referred) blk: {
+            var g_re: f64 = 0;
+            var g_im: f64 = 0;
+            if (options.in_branch) |br| {
+                g_re = y[br];
+                g_im = y[n + br];
+            } else for (options.in_nodes.?, [2]f64{ 1, -1 }) |row, sign| if (row != root.GROUND) {
+                g_re += sign * y[row];
+                g_im += sign * y[n + row];
+            };
             // Floored at N_MINGAIN (noisean.c:487-488).
             break :blk @max(g_re * g_re + g_im * g_im, 1e-20);
         } else 0;
@@ -157,7 +166,7 @@ pub fn sweep(
             }
             last.* = ln_dens;
 
-            if (options.in_branch != null) {
+            if (referred) {
                 const dens_in = dens / gain_sq;
                 total_in_density += dens_in;
                 const ln_dens_in = @log(@max(dens_in, n_minlog));

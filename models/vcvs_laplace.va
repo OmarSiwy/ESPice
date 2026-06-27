@@ -1,0 +1,36 @@
+// VCVS through a rational transfer function: HSPICE's E ... LAPLACE in+ in-
+// k0 k1 ... / d0 d1 ... [SCALE=val], V(p,n) = scale * H(s) V(cp,cn) with
+// H(s) = (k0 + k1 s + ...) / (d0 + d1 s + ...), coefficients ascending.
+// With LAPLACE_CURRENT defined (vccs_laplace.va) it is the G card: I(p,n).
+//
+// Verilog-A implementation: Omar El-Sawy, University of Waterloo.
+// Based on: HSPICE E-element Laplace Transform [HSPICE User Guide:
+//   Simulation and Analysis, Sources and Stimuli]; VAMS-2023 §4.5.11.4.
+//
+// The coefficient arrays are zero padded to order 8; VerA runs laplace_nd at
+// the runtime degree (trailing zeros dropped), and a common factor of s
+// cancels before the DC gain. ponytail: one direct-form section, so orders
+// past 8 are refused by the builder; a biquad cascade lifts that.
+`include "disciplines.vams"
+
+`ifdef LAPLACE_CURRENT
+module vccs_laplace(p, n, cp, cn);
+`else
+module vcvs_laplace(p, n, cp, cn);
+`endif
+    inout p, n, cp, cn;
+    electrical p, n, cp, cn;
+    branch (p, n) br;
+
+    parameter real gain = 1.0;               // SCALE (times M for G)
+    parameter real num[0:8] = '{9{0.0}};     // k0 .. k8
+    parameter real den[0:8] = '{1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0}; // d0 .. d8
+
+    analog begin
+`ifdef LAPLACE_CURRENT
+        I(br) <+ gain * laplace_nd(V(cp, cn), num, den);
+`else
+        V(br) <+ gain * laplace_nd(V(cp, cn), num, den);
+`endif
+    end
+endmodule

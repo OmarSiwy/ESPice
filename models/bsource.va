@@ -1,6 +1,7 @@
 // bsource: ngspice's B element (ASRC, asrc/asrcload.c). V(p,n) (or, with
-// BSRC_CURRENT defined, I(p,n); see bsource_i.va) equals an arbitrary
-// expression of node voltages. The frontend compiles the card's expression
+// BSRC_CURRENT defined, I(p,n), see bsource_i.va; with BSRC_CHARGE, the
+// charge whose ddt is I(p,n), see bsource_q.va) equals an arbitrary
+// expression of node voltages, branch currents, time and temperature. The frontend compiles the card's expression
 // into a postfix tape held in the op_code/op_a/op_b/consts parameter arrays
 // (src/frontend/builder.zig compileTape); this module interprets it, and
 // VerA's forward-mode AD supplies the Jacobian through the runtime-indexed
@@ -16,7 +17,8 @@
 //  10 powc (a = const index of the exponent)  11 pow  12 lt  13 gt  14 le
 //  15 ge  16 eq  17 ne  18 and  19 or  20 sel  21 sqrt  22 abs  23 min  24 max
 //  25 exp 26 ln  27 log10  28 sin  29 cos  30 tan  31 atan  32 tanh  33 floor
-//  34 ceil  35 time  36 temper
+//  34 ceil  35 time  36 temper  37 pwl (a = const index of the table, b = its
+//  point count; see below)
 //
 // Semantics that differ from ngspice's defaults, on purpose:
 // - x^k with a constant integer k in [0, 255] keeps the sign of x (x*x*...*x),
@@ -32,7 +34,9 @@
 `include "disciplines.vams"
 `include "constants.vams"
 
-`ifdef BSRC_CURRENT
+`ifdef BSRC_CHARGE
+module bsource_q(p, n, c0, c1, c2, c3, c4, c5, c6, c7);
+`elsif BSRC_CURRENT
 module bsource_i(p, n, c0, c1, c2, c3, c4, c5, c6, c7);
 `else
 module bsource(p, n, c0, c1, c2, c3, c4, c5, c6, c7);
@@ -61,7 +65,8 @@ module bsource(p, n, c0, c1, c2, c3, c4, c5, c6, c7);
         real vc[0:7];
         real st[0:63];
         real a, b, r, f, tdev, dt, factor;
-        integer k, sp, j;
+        integer k, sp, j, np, at;
+        real d, xi, yi, lower, upper, seg_lo, seg_hi, u, w;
         vc[0] = V(c0); vc[1] = V(c1); vc[2] = V(c2); vc[3] = V(c3);
         vc[4] = V(c4); vc[5] = V(c5); vc[6] = V(c6); vc[7] = V(c7);
         sp = 0;
@@ -126,7 +131,43 @@ module bsource(p, n, c0, c1, c2, c3, c4, c5, c6, c7);
                         31: r = atan(a);
                         32: r = tanh(a);
                         33: r = floor(a);
-                        default: r = ceil(a);
+                        34: r = ceil(a);
+                        // A smoothed piecewise-linear transfer through the
+                        // table at consts[a]: the corner width, then op_b[k]
+                        // (x, y) pairs, x ascending. The ends hold their y.
+                        // Each corner is a parabola over |x - x_i| < d_i
+                        // (XSPICE cm_smooth_corner): d_i = width times the
+                        // shorter neighbouring segment for width > 0
+                        // (ngspice TABLE: cm_pwl, input_domain = 0.1), or
+                        // -width for width < 0 (HSPICE PWL(1) DELTA). The
+                        // corner is picked at the midpoints, as cm_pwl does.
+                        default: begin
+                            at = op_a[k];
+                            np = op_b[k];
+                            j = 0;
+                            while (j + 1 < np && a >= 0.5 * (consts[at + 1 + 2 * j] + consts[at + 3 + 2 * j])) j = j + 1;
+                            xi = consts[at + 1 + 2 * j];
+                            yi = consts[at + 2 + 2 * j];
+                            if (j == 0) lower = 0.0;
+                            else lower = (yi - consts[at + 2 * j]) / (xi - consts[at + 2 * j - 1]);
+                            if (j + 1 == np) upper = 0.0;
+                            else upper = (consts[at + 4 + 2 * j] - yi) / (consts[at + 3 + 2 * j] - xi);
+                            // The virtual end points mirror the neighbouring segment.
+                            if (j == 0) seg_lo = consts[at + 3] - xi;
+                            else seg_lo = xi - consts[at + 2 * j - 1];
+                            if (j + 1 == np) seg_hi = seg_lo;
+                            else seg_hi = consts[at + 3 + 2 * j] - xi;
+                            if (consts[at] > 0.0) d = consts[at] * min(seg_lo, seg_hi);
+                            else d = -consts[at];
+                            u = a - xi;
+                            if (u < -d) r = yi + lower * u;
+                            else if (u >= d) r = yi + upper * u;
+                            else begin
+                                // y = y_i + upper*u + (upper - lower)/(4d) * (u - d)^2.
+                                w = u - d;
+                                r = yi + upper * u + (upper - lower) / (4.0 * d) * w * w;
+                            end
+                        end
                     endcase
                     st[sp - 1] = r;
                 end
@@ -137,7 +178,9 @@ module bsource(p, n, c0, c1, c2, c3, c4, c5, c6, c7);
         dt = (tdev + dtemp) - 300.15;
         factor = 1.0 + tc1 * dt + tc2 * dt * dt;
         if (reciproctc != 0) factor = 1.0 / factor;
-`ifdef BSRC_CURRENT
+`ifdef BSRC_CHARGE
+        I(br) <+ ddt(f * factor);
+`elsif BSRC_CURRENT
         I(br) <+ f * factor;
 `else
         V(br) <+ f * factor;
