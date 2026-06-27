@@ -1,5 +1,21 @@
 # Fixture audit — open issues
 
+## Current index (2026-10-01)
+
+**Corpus 724/726 pass at `7535909f`; 391/391 unit tests.** The two failures
+are known model-version gaps, marked `* KNOWN GAP:` in their decks, which the
+harness reports as XFAIL (they do not fail `zig build test`; an XPASS does):
+
+| Deck | Cause | Status |
+|---|---|---|
+| `dc/device_vbic_forced_output` | VBIC 1.3 `avalm` shifts the smooth max by `vminm`; the ngspice 44.2 oracle runs VBIC 1.2 | kept: model version, not force-matched (`docs/devices/models.md`) |
+| `noise/device_vbic_noise_scale` | same VBIC 1.2/1.3 difference in the noise scale | kept, as above |
+
+Open work that has no failing deck lives in `FUTURE_PLANS.md`. Everything
+below is the audit history (sections A-F), indexed as of 2026-09-24.
+
+---
+
 Audit date 2026-09-16, branch `spice-audit`. Method: full `tests/fixtures`
 sweep (616 decks) with `zig-out/bin/espice --backend=cpu --format=binary -b`,
 cross-referenced against every `KNOWN GAP:` marker carried in the fixture
