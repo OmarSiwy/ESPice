@@ -32,7 +32,7 @@ retired paths and their replacements.
 | Area | Pages |
 |---|---|
 | Frontend | [frontend.md](frontend.md): netlist bytes to `Prepared`, stage by stage, with measurements; [preparation performance](Problem/preparation-performance.md) |
-| Devices | [devices/models.md](devices/models.md): attribution, licensing and ngspice-conformance fixes per model; [devices/abi.md](devices/abi.md): the device ABI and its identity rules; [devices/iteration-lifecycle.md](devices/iteration-lifecycle.md): Verilog-AMS iteration hooks; [devices/gpu-evaluation.md](devices/gpu-evaluation.md): device planes on the GPU, the wait schedule and the `auto` cost model |
+| Devices | [devices/models.md](devices/models.md): attribution, licensing and ngspice-conformance fixes per model; [devices/abi.md](devices/abi.md): the device ABI and its identity rules; [devices/iteration-lifecycle.md](devices/iteration-lifecycle.md): Verilog-AMS iteration hooks; [devices/gpu-evaluation.md](devices/gpu-evaluation.md): device planes on the GPU, the wait schedule and the `auto` cost model; [devices/verilog-digital.md](devices/verilog-digital.md): `.v` digital devices, A2D/D2A and the `ttol` cost |
 | Analyses | [analysis/](analysis/README.md): one page per analysis |
 | Solvers | [solvers/](solvers/README.md): sparse LU, ordering, Newton, continuation, measured performance |
 | Conformance | [conformance-phase2.md](conformance-phase2.md): root causes and fix recipes behind `issues.md` section F; [verilog-ams-conformance-plan.md](verilog-ams-conformance-plan.md): the Verilog-AMS audit checklist |
