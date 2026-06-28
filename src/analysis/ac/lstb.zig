@@ -66,11 +66,12 @@ fn weights(mode: Options.Mode) [2]f64 {
     };
 }
 
-/// The two stacked 2n right-hand sides: current injection, then voltage
-/// injection. `rhs` must be zeroed.
+/// The two stacked 2n right-hand sides: current injection from the local
+/// ground, then voltage injection. `rhs` must be zeroed.
 fn fill(opts: Options, n: usize, rhs: []f64) void {
     for (opts.probes, weights(opts.mode)) |p, e| {
         if (p.p != root.GROUND) rhs[p.p] += e;
+        if (opts.local_gnd != root.GROUND) rhs[opts.local_gnd] -= e;
         rhs[2 * n + p.branch] += e;
     }
 }
@@ -86,9 +87,9 @@ fn responses(opts: Options, n: usize, x: []const f64) Responses {
         if (w == 0) continue;
         const s = w * share;
         r.a = r.a.add(at(x, n, p.branch).scale(s));
-        r.c = r.c.add(at(x, n, p.p).scale(s));
+        r.c = r.c.add(at(x, n, p.p).sub(at(x, n, opts.local_gnd)).scale(s));
         r.b = r.b.add(at(x[2 * n ..], n, p.branch).scale(s));
-        r.d = r.d.add(at(x[2 * n ..], n, p.p).scale(s));
+        r.d = r.d.add(at(x[2 * n ..], n, p.p).sub(at(x[2 * n ..], n, opts.local_gnd)).scale(s));
     }
     return r;
 }
@@ -110,6 +111,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const n: usize = ckt.n;
     const used: usize = if (opts.mode == .single) 1 else 2;
     for (opts.probes[0..used]) |p| if (p.p >= n or p.n >= n or p.branch >= n) return error.InvalidProbe;
+    if (opts.local_gnd >= n) return error.InvalidProbe;
 
     var fs = try FreqSolver.fromCircuit(scratch, ckt, ctx.x_op);
     defer fs.deinit(scratch);

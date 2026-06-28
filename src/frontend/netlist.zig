@@ -630,6 +630,15 @@ fn resolve(a: *Analysis, lookup: anytype) void {
         if (groupNode(a.args[arg], 0, &buf)) |n| a.pos = lookup.node(n);
         if (groupNode(a.args[arg], 1, &buf)) |n| a.neg = lookup.node(n);
     }
+    // `.lstb ... localgnd=n` (VACASK `acstb`): `pos` is the local ground,
+    // ground itself when absent.
+    if (a.kind == .lstb) {
+        a.pos = 0;
+        for (a.args[0 .. a.args.len -| 1], 1..) |v, i| if (v == .name and std.ascii.eqlIgnoreCase(v.name, "localgnd")) {
+            const n = nodeText(a.args[i], &buf) orelse continue;
+            a.pos = if (isGroundName(n)) 0 else lookup.node(n);
+        };
+    }
     if (a.kind != .pz) return;
     for (&a.ports, 0..) |*id, i| {
         if (i >= a.args.len) break;

@@ -4,6 +4,7 @@
 const std = @import("std");
 const Tolerances = @import("numerics.zig").Tolerances;
 const DeviceType = @import("root.zig").DeviceType;
+const GROUND = @import("root.zig").GROUND;
 
 /// Dense id of a query within one session.
 pub const QueryId = enum(u32) { _ };
@@ -135,6 +136,9 @@ pub const Lstb = struct {
     probes: [2]Probe,
     /// Publish the one-row margins plot instead of the sweep.
     margins: bool = false,
+    /// VACASK's `localgnd`: the node the current injection returns to and
+    /// the `+` node voltage is read against.
+    local_gnd: u32 = GROUND,
 
     /// Node rows and branch row of one probe source.
     pub const Probe = struct { p: u32, n: u32, branch: u32 };
