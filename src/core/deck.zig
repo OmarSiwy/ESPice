@@ -170,8 +170,9 @@ pub const MeasureClause = struct {
     refs: []const MeasureRef = &.{},
     /// HSPICE `TD=TRIG` on a TARG: count events only after the trigger.
     td_trig: bool = false,
-    /// How an AC value is read: `m`, `p`, `r`, `i`, `d` from `vm(..)` and
-    /// the like, 0 for the real part.
+    /// How an AC value is read: `m`, `p` (radians), `r`, `i`, `d` from
+    /// `vm(..)` and the like, `g` (degrees) from `lstb(p)`, 0 for the real
+    /// part.
     vectype: u8 = 0,
     val: f64 = 0,
     rise: i32 = measure_unset,

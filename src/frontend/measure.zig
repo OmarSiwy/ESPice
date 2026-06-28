@@ -3,8 +3,9 @@
 //! evaluates the numbers, so a value may be a parameter expression. HSPICE
 //! forms ride along: an omitted analysis type, INTEGRAL/DERIVATIVE, PARAM=
 //! and ERR/ERR1/ERR2/ERR3, the `_CONT` analyses, EM_AVG, `par('expr')`
-//! waveforms, values naming earlier results and TARG's `TD=TRIG` and
-//! inherited TD [CR .MEASURE].
+//! waveforms, values naming earlier results, TARG's `TD=TRIG` and
+//! inherited TD, and the DCMATCH, ACMATCH, LSTB, PHASENOISE and PTDNOISE
+//! analyses, which read those plots' columns by name [CR .MEASURE].
 const std = @import("std");
 const core = @import("core");
 const Kind = core.query.Kind;
@@ -13,7 +14,17 @@ const Clause = core.MeasureClause;
 /// `lhs`, or `lhs=rhs` with blanks around the `=` dropped.
 const Word = struct { lhs: []const u8, rhs: ?[]const u8 = null };
 
-const analyses = std.StaticStringMap(Kind).initComptime(.{ .{ "tran", .tran }, .{ "ac", .ac }, .{ "dc", .dc }, .{ "fft", .fft }, .{ "trannoise", .tran_noise } });
+const analyses = std.StaticStringMap(Kind).initComptime(.{
+    .{ "tran", .tran },         .{ "ac", .ac },                 .{ "dc", .dc },
+    .{ "fft", .fft },           .{ "trannoise", .tran_noise },  .{ "dcmatch", .dcmatch },
+    .{ "acmatch", .acmatch },   .{ "lstb", .lstb },             .{ "phasenoise", .phasenoise },
+    .{ "ptdnoise", .pnoise },
+});
+/// `.lstb`'s margins-plot columns, each a measure of its own:
+/// `.meas lstb pm phase_margin` [CR .MEASURE LSTB].
+const lstb_margins = std.StaticStringMap(void).initComptime(.{ .{"gain_margin"}, .{"phase_crossover_freq"}, .{"phase_margin"}, .{"unity_gain_freq"}, .{"loop_gain_minifreq"} });
+/// HSPICE's `lstb(db)` spellings of the loop gain; `p` is in degrees.
+const lstb_types = std.StaticStringMap(u8).initComptime(.{ .{ "db", 'd' }, .{ "m", 'm' }, .{ "mag", 'm' }, .{ "p", 'g' }, .{ "r", 'r' }, .{ "i", 'i' } });
 /// HSPICE continuous measures [CR .MEASURE (Continuous Results)].
 const cont_analyses = std.StaticStringMap(Kind).initComptime(.{ .{ "tran_cont", .tran }, .{ "ac_cont", .ac }, .{ "dc_cont", .dc } });
 
@@ -46,6 +57,8 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8, ctx: anytype, default: 
     // `w[0]` is the analysis type's slot either way.
     const w = if (given != null) typed else try std.mem.concat(arena, Word, &.{ &.{.{ .lhs = "" }}, typed });
     if (w.len < 3) return error.ParseError;
+    if (analysis == .lstb and w.len == 3 and lstb_margins.has(w[2].lhs))
+        return .{ .analysis = analysis, .name = w[1].lhs, .func = .find, .first = .{ .vec = w[2].lhs } };
     const func = funcs.get(w[2].lhs) orelse return error.ParseError;
     // ngspice widens the default window of a DC sweep, which may run negative.
     var base: Clause = .{};
@@ -98,8 +111,10 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8, ctx: anytype, default: 
                 try stdParams(arena, &m.first, analysis, rest[1..k], ctx);
             }
             if (m.first.at == core.measure_no_at) {
-                if (k == rest.len) return error.ParseError;
-                try when(arena, &m.second, analysis, rest[k + 1 ..], ctx);
+                // A bare FIND reads a one-row plot (`.dcmatch`, `.lstb` margins).
+                if (k == rest.len) {
+                    if (func != .find or (analysis != .dcmatch and analysis != .lstb)) return error.ParseError;
+                } else try when(arena, &m.second, analysis, rest[k + 1 ..], ctx);
             }
         },
         .when => try when(arena, &m.first, analysis, rest, ctx),
@@ -159,12 +174,16 @@ fn when(arena: std.mem.Allocator, c: *Clause, analysis: Kind, w: []const Word, c
     try stdParams(arena, c, analysis, w[1..], ctx);
 }
 
-/// `vdb(out)` reads `v(out)` in dB for AC (ngspice correct_vec);
-/// `par('expr')` compiles into `c.ops`.
+/// `vdb(out)` reads `v(out)` in dB for AC (ngspice correct_vec), `lstb(db)`
+/// `loop_gain` in dB; `par('expr')` compiles into `c.ops`.
 fn vector(arena: std.mem.Allocator, c: *Clause, analysis: Kind, name: []const u8, ctx: anytype) ![]const u8 {
     if (std.mem.startsWith(u8, name, "par(") and name[name.len - 1] == ')') {
         c.ops = try ctx.measureExpr(name[4 .. name.len - 1]);
         return name;
+    }
+    if (analysis == .lstb and std.mem.startsWith(u8, name, "lstb(") and name[name.len - 1] == ')') {
+        c.vectype = lstb_types.get(name[5 .. name.len - 1]) orelse return error.ParseError;
+        return "loop_gain";
     }
     if ((analysis != .ac and analysis != .fft) or name.len < 2 or name[0] != 'v' or name[1] == '(') return name;
     const paren = std.mem.indexOfScalar(u8, name, '(') orelse return name;
@@ -349,4 +368,16 @@ test "meas cards parse like ngspice's word lists" {
     try std.testing.expect(c.cont and c.analysis == .tran);
     const em = try parse(a, "tran em em_avg i(r1) from=1 to=2", Ctx{}, null, true);
     try std.testing.expectEqual(0.5, em.first.val);
+    // Measures over the newer plots: LSTB keywords and lstb(db), a bare
+    // FIND on a one-row plot, PTDNOISE reading the .pnoise result.
+    const pm = try parse(a, "lstb pm phase_margin", Ctx{}, null, true);
+    try std.testing.expectEqual(.find, pm.func);
+    try std.testing.expectEqualStrings("phase_margin", pm.first.vec);
+    const lg = try parse(a, "lstb f0 when lstb(db)=0", Ctx{}, null, true);
+    try std.testing.expectEqualStrings("loop_gain", lg.first.vec);
+    try std.testing.expectEqual('d', lg.first.vectype);
+    const dm = try parse(a, "dcmatch s find total_3sigma", Ctx{}, null, true);
+    try std.testing.expectEqual(core.measure_no_at, dm.first.at);
+    try std.testing.expectError(error.ParseError, parse(a, "ac s find v(out)", Ctx{}, null, true));
+    try std.testing.expectEqual(.pnoise, (try parse(a, "ptdnoise n find ptdnoise_density at=1e3", Ctx{}, null, true)).analysis);
 }

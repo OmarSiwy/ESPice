@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "analysis": "pnoise",
+  "purpose": ".measure PTDNOISE reads the time-point noise density",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Memoryless diode driven by I(t) = 1m + 0.5m sin(2 pi 1MHz t): shot noise 2 q I(t) through conductance I(t)/Vt gives 2 q Vt^2 / I(t) V^2/Hz at every frequency; I = 1.5 mA at 250 ns and 0.5 mA at 750 ns; Vt at 25 degC. Flat in frequency, so FIND at 10 kHz and AVG over 1k..100k both give 2 q Vt^2 / 1.5 mA."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Periodic Time-Dependent Noise Analysis (time=2.5000000000000004e-7)",
+        "match": "samples",
+        "columns": {
+          "ptdnoise_density": {
+            "unit": "V^2/Hz",
+            "rtol": 0.001,
+            "atol": 0,
+            "values": [
+              1.4101474798657552e-19,
+              1.4101474798657552e-19,
+              1.4101474798657552e-19
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            1000.0,
+            10000.0,
+            100000.0
+          ],
+          "atol": 0,
+          "rtol": 1e-09
+        }
+      }
+    ],
+    "checks": [
+      {
+        "kind": "measure",
+        "name": "n10k",
+        "value": 1.4101474798657552e-19,
+        "rtol": 0.001,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "navg",
+        "value": 1.4101474798657552e-19,
+        "rtol": 0.001,
+        "atol": 0
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "272986975231c858a6dff2fe5ca9a52f4022b6e387995252ab861f28bfc9a1d6"
+}

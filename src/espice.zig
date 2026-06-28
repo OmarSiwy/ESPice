@@ -349,8 +349,9 @@ pub const Problem = struct {
         try self.session.print(writer, resolved);
     }
 
-    /// Writes the deck's `.meas` results for every completed tran, AC, DC
-    /// and FFT result, in request order, as ngspice prints them; cards that
+    /// Writes the deck's `.meas` results for every completed result a card
+    /// can read (tran, AC, DC, FFT, mismatch, loop stability, phase and
+    /// periodic noise), in request order, as ngspice prints them; cards that
     /// cannot be measured are reported on `err`.
     pub fn print_measures(self: *const Problem, out: *std.Io.Writer, err: *std.Io.Writer) !void {
         const measures = self.prepared.deck.measures;
@@ -575,7 +576,7 @@ fn printSessionMeasures(session: *const analysis.session.Session, out: *std.Io.W
         const info = try session.info(id);
         if (info.status != .complete) continue;
         switch (info.kind) {
-            .tran, .ac, .dc, .fft, .tran_noise => try output.printMeasures(out, err, measures, info.kind, try session.result(id)),
+            .tran, .ac, .dc, .fft, .tran_noise, .dcmatch, .acmatch, .lstb, .phasenoise, .pnoise => try output.printMeasures(out, err, measures, info.kind, try session.result(id)),
             else => {},
         }
     }

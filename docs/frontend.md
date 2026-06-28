@@ -218,6 +218,17 @@ MINFREQ, MAXFREQ and BINSIZ. The fundamental is the largest non-DC bin; its
 harmonics are its bin multiples up to NBHARM and MAXFREQ; DC is left out of
 the noise. THD is the ratio the SA formula gives, not percent.
 
+`.measure dcmatch|acmatch|lstb|phasenoise|ptdnoise` read those analyses'
+plots by column name: `total_3sigma` and `<card>@<param>` (DCMATCH),
+`acm_mag`/`acm_phase`/`acm_re`/`acm_im` (ACMATCH), `phnoise`,
+`ptdnoise_density`. A bare `FIND col` with no `AT` or `WHEN` reads a
+one-row plot (DC mismatch, the LSTB margins); the swept plots take the
+usual forms. LSTB's margin keywords and `lstb(db)` are in
+[stability.md](analysis/stability.md). The manual names HSPICE's own
+output variables (`DCm_*` and the like), which we do not have; these are
+our columns, unconfirmed against HSPICE (`hspice/meas_match`,
+`hspice/meas_lstb`, `hspice/meas_ptdnoise`, `phasenoise/meas_phasenoise`).
+
 ## PDK conveniences
 
 These follow ngspice 45, because the open PDKs (sky130, GF180, IHP SG13G2)

@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "analysis": "phasenoise",
+  "purpose": ".measure PHASENOISE reads the phase noise at an offset",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Only R1 is noisy (4kT/R, T = 300.15 K). For a sinusoidal orbit of amplitude A the PPV at the tank is -sin(w0 t)/(C A w0), so c = (4kT/R)/2 * 1/(2 C^2 A^2 w0^2) and L(fm) = f0^2 c / fm^2 = kT/(R C^2 A^2 (2 pi fm)^2) (Hajimiri-Lee with Gamma_rms^2 = 1/2). A = sqrt(4(g1 - 1/R)/(3 g3)) = 1 V by describing function; the orbit's O(eps^2) distortion (eps = 0.095) bounds the error well inside 0.1 dB. FIND at 10 kHz, a grid point."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Phase Noise Analysis",
+        "match": "exact",
+        "row_count": 7,
+        "columns": {
+          "phnoise": {
+            "unit": "dBc/Hz",
+            "rtol": 0,
+            "atol": 0.1,
+            "values": [
+              -139.78938106346,
+              -149.78938106346,
+              -159.78938106346,
+              -169.78938106346,
+              -179.78938106346,
+              -189.78938106346,
+              -199.78938106346
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            1000.0,
+            3162.2776601684,
+            10000.0,
+            31622.776601684,
+            100000.0,
+            316227.76601684,
+            1000000.0
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        }
+      }
+    ],
+    "checks": [
+      {
+        "kind": "measure",
+        "name": "l10k",
+        "value": -159.78938106346,
+        "rtol": 0,
+        "atol": 0.1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "82caaeff6bbe1a393f50cfbae910fbd89e1ec9aa10da8f55ecf3b314f3b25710"
+}
