@@ -127,13 +127,13 @@ the full matrix. Open items:
   - mixed-mode;
   - K and MU;
   - Touchstone files that are not 50 Ω.
-- **`.dcxf`:** does not exclude F/H sources.
 - **Unconfirmed against HSPICE:** each of these follows the manual and has
   never been run against real HSPICE:
   - `.alter` being cumulative;
   - the `.lstb` sign;
   - `.measure` over DCMATCH, ACMATCH, LSTB, PHASENOISE and PTDNOISE
     (our column names, not HSPICE's output variables);
+  - `.dcxf` leaving out F/H-sensed sources;
   - DEV/LOT sigma;
   - VCR and VCCAP.
 - **Long tail:** digital vector cards, `.check` cards, SEARCH, RUNLVL and

@@ -101,7 +101,7 @@ the build-order id in the last column.
 | `.TRAN tstep1 tstop1 [tstep2 tstop2 ...] [START=] [UIC] [SWEEP ...]` [CR .TRAN] | transient, multi-segment, swept | ngspice form (`tran/tran.zig`); segments misread (S4) | `tran` | high | A6 (S), C1 |
 | `.NOISE ov src [inter] [listckt listfreq listcount listfloor listsources]` [CR .NOISE] | noise over the `.AC` sweep, sorted per-device table, per-subcircuit sums | ngspice form with its own sweep; totals only (`ac/noise.zig`) | `noise` with `n(inst)` and `n(inst,contrib)` | high | B1, S |
 | `.DISTO Rload [inter [skw2 [refpwr spwf]]]` [CR .DISTO] | HD2, HD3, SIM2, DIM2, DIM3 into a load | ngspice form: HD2/HD3, and with `f2overf1` the f1+f2, f1-f2, 2f1-f2 vectors (`post/disto.zig`) | no | low to medium | B6 done (ngspice form) |
-| `.TF ov src` [CR .TF] | DC gain, Rin, Rout | yes (`dc/tf.zig`); every source at once as `.dcxf`/`.acxf` (`dc/xf.zig`, `ac/xf.zig`) | `dcxf` (every source at once, plus `zin`/`yin`), `acxf` | medium | done |
+| `.TF ov src` [CR .TF] | DC gain, Rin, Rout | yes (`dc/tf.zig`); every source at once as `.dcxf`/`.acxf` (`dc/xf.zig`, `ac/xf.zig`), V cards an F/H senses left out | `dcxf` (every source at once, plus `zin`/`yin`), `acxf` | medium | done |
 | `.SENS ov ...` [CR .SENS] | DC sensitivity to every parameter | yes, adjoint (`sweep/sens.zig`) | no | medium | done |
 | `.DCSENS outvar [Perturbation= Threshold= GroupByDevice=]` [CR .DCSENS; SA Ch.25] | finite-difference sensitivity to variation-block parameters | no | no | medium | C5, S after C3 |
 | `.PZ ov src` [CR .PZ; SA Ch.15] | poles and zeros | ngspice form (`eigen/pz.zig`) | no | medium | B2, S |
