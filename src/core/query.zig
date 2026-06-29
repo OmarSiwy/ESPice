@@ -25,6 +25,10 @@ pub const Port = struct {
     /// The band `.hblin` reads this port in (an HSPICE P card's
     /// `hblin=[harmonic, sign]`): sign·f + harmonic·f0 for input frequency f.
     band: Band = .{},
+    /// z0 is already a resistor in the circuit, in series between `node`
+    /// and the source (an HSPICE P card), so the port analyses must not
+    /// terminate the branch again. False for ngspice's ideal portnum source.
+    series_z0: bool = false,
 
     pub const Band = struct { harmonic: i16 = 0, sign: i8 = 1 };
 };
@@ -435,6 +439,9 @@ pub const Hblin = struct {
     max_iter: u16 = 200,
     hb_tol: f64 = 1e-9,
     ports: []const Port,
+    /// `noisecalc=1`: append the port 1 to port 2 noise figure (two or
+    /// more ports).
+    noise: bool = false,
 
     /// The HB-orbit small-signal options the orbit and linearization take.
     pub fn lptv(self: Hblin) HbLptv {

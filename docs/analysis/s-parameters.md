@@ -154,6 +154,14 @@ $Y_{opt} = (\sqrt{S_{ii}S_{vv} - \mathrm{Im}^2 S_{iv}} - j\,\mathrm{Im}\,S_{iv})
 $F_{min} = 1 + (\mathrm{Re}\,S_{iv} + \sqrt{S_{ii}S_{vv} - \mathrm{Im}^2 S_{iv}})/2kT_0$,
 and NF at $Y_s = 1/z_{01}$.
 
+**P elements.** A P card keeps its z0 in series in every analysis, as
+HSPICE does [SA Ch.17]: the builder puts a noiseless resistor (the
+resistor model with `noisy=0`) between n+ and a hidden node the source
+drives, so DC, transient and HB see a source behind z0. The port node is
+still n+, and `Port.series_z0` tells `sp.zig` and `hb_lptv.zig` not to
+add the $-z_0$ branch term on top. ngspice's `portnum` V card stays an
+ideal source terminated only inside the port analyses.
+
 **Touchstone.** `format=touchstone` (or `touchstone2`) writes
 `<filename or deck name>.s<N>p` beside the deck after the plot is
 published: the S block (Touchstone 1.0, RI, 50 ohm), then for two ports
@@ -172,13 +180,11 @@ Twiss's theorem ($C_Y = 4kT\,\mathrm{Re}\,Y$ for a passive network at one
 temperature) read through the textbook Rn, Gu, Yc route. Its NF matches
 ngspice `.noise` on the same network with a 50 ohm source and a noiseless
 75 ohm load (4.70010 at 1 MHz, ngspice's printed digits). `lin_line` is a
-matched lossless line: $S_{21} = e^{-j\omega t_d}$, group delay $t_d$.
+matched lossless line: $S_{21} = e^{-j\omega t_d}$, group delay $t_d$. `port_series_z0`
+checks z0 in the OP and transient (a divider and an RC charge).
 
 **Divergences from HSPICE**, each a `ponytail:` until a deck needs it:
 
-- A P element is ngspice's port: an ideal source outside the port
-  analyses. HSPICE puts z0 in series in DC and transient too, so a port
-  node that carries bias sits at the source's DC value here.
 - Mixed-mode ports (`P1 inp inn 0 ...`) and `mixedmode2port` other than
   `ss` are refused; `noisecalc=2` publishes the two-port parameters only;
   the stability, gain and matching measurements (K, MU, G_MAX, ...) and

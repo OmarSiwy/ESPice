@@ -26,7 +26,8 @@ const FreqSolver = @import("solver").freq_solve.FreqSolver;
 /// its MNA branch-current unknown. Adding −z0 to the branch row diagonal
 /// turns it into a Thevenin source with series z0
 /// (v_p − v_n − z0·i_br = V_s), so an undriven port terminates in z0
-/// instead of clamping its node.
+/// instead of clamping its node. An HSPICE P card (`series_z0`) already
+/// has that resistor in the circuit, between `node` and its source.
 const Port = @import("core").query.Port;
 
 /// Query options, defined in core/query.zig.
@@ -34,9 +35,9 @@ pub const Options = @import("core").query.Sp;
 const Lin = Options.Lin;
 
 /// ngspice CONSTboltz (const.h), the constant the device noise models use.
-const k_boltzmann = 1.38064852e-23;
+pub const k_boltzmann = 1.38064852e-23;
 /// Noise figure reference temperature, K (IEEE; HSPICE's RN and GN too).
-const t0_kelvin = 290.0;
+pub const t0_kelvin = 290.0;
 /// Relative half-width of the group-delay central difference. Truncation is
 /// O(gd_step²) and roundoff O(1e-16 / gd_step), both near 1e-10 relative.
 const gd_step = 1e-5;
@@ -73,8 +74,8 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     var fs = try FreqSolver.fromCircuit(scratch, ckt, ctx.x_op);
     defer fs.deinit(scratch);
-    // Series z0 inside each port source: the branch row gains −z0·i_br.
-    for (ports) |port| fs.addDiagG(port.branch, -port.z0);
+    // Series z0 inside each ideal port source: the branch row gains −z0·i_br.
+    for (ports) |port| if (!port.series_z0) fs.addDiagG(port.branch, -port.z0);
 
     const axis = try scratch.alloc(f64, 2 * n_points);
     defer scratch.free(axis);

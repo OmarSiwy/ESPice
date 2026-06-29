@@ -13,6 +13,8 @@ const pac = @import("pac.zig");
 const pxf = @import("pxf.zig");
 const pnoise = @import("pnoise.zig");
 const dense_lu = @import("solver").dense_lu;
+const k_boltzmann = @import("../ac/sp.zig").k_boltzmann;
+const t0_kelvin = @import("../ac/sp.zig").t0_kelvin;
 
 const Complex = pac.Complex;
 const HbLptv = @import("core").query.HbLptv;
@@ -129,13 +131,19 @@ pub const Noise = struct {
 /// sideband s_i·h_i of the conversion matrix, conjugated for a lower band
 /// (s = −1): that band's physical phasor is the conjugate of the sideband's.
 /// Every port is terminated in its z0 on every sideband; per input frequency
-/// one dense factorization serves one solve per port.
+/// one dense factorization serves one solve per port. `noisecalc=1` adds
+/// the single-sideband noise figure from port 1 to port 2 (`NF`, a power
+/// ratio): the output noise in port 2's band with port 1's z0 at 290 K, from
+/// every sideband, over that z0's noise from port 1's band alone. The
+/// circuit's own noise comes from `pnoise.orbitSweep` at port 2's band and
+/// the z0 terms from one adjoint solve on the same factor.
 pub const Lin = struct {
     pub const Options = @import("core").query.Hblin;
     const Band = @import("core").query.Port.Band;
 
     /// Contract entry: complex point-major rows (frequency, S(1,1), S(1,2),
-    /// ..., S(N,N)), S(i,j) = b_i / a_j with each wave in its port's band.
+    /// ..., S(N,N)[, NF]), S(i,j) = b_i / a_j with each wave in its port's
+    /// band.
     /// error.PortBandOutsideSidebands when a band's harmonic exceeds
     /// `opts.n_sidebands`.
     pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
@@ -148,7 +156,9 @@ pub const Lin = struct {
         const n_harm: usize = opts.n_sidebands;
         for (ports) |p| if (@abs(p.band.harmonic) > n_harm) return error.PortBandOutsideSidebands;
         const lptv = opts.lptv();
-        const lin = try linearize(ckt, lptv, .ac, scratch);
+        const orb = try orbit(ckt, lptv, scratch);
+        defer scratch.free(orb.wave);
+        const lin = try pac.linearize(ckt, orb, .ac, scratch);
         defer lin.deinit(scratch);
         const pac_opts = pacOptions(lptv);
 
@@ -170,12 +180,18 @@ pub const Lin = struct {
         const dyn_hat = try scratch.alloc(Complex, series * n_samples);
         defer scratch.free(dyn_hat);
 
-        const names = try a.alloc([]const u8, 1 + np * np);
+        const noisy = opts.noise and np >= 2;
+        const names = try a.alloc([]const u8, 1 + np * np + @intFromBool(noisy));
         names[0] = "frequency";
         for (0..np) |i| for (0..np) |j| {
             names[1 + i * np + j] = try std.fmt.allocPrint(a, "S({d},{d})", .{ i + 1, j + 1 });
         };
+        if (noisy) names[names.len - 1] = "NF";
         const n_points: usize = opts.sweep.count();
+        // Noise: port 2's band frequency, and the output noise of port 1's
+        // z0 at T0 from every sideband and from port 1's band alone.
+        const noise_work = try scratch.alloc(f64, if (noisy) 3 * n_points else 0);
+        defer scratch.free(noise_work);
         const row_len = 2 * names.len;
         const data = try a.alloc(f64, n_points * row_len);
 
@@ -191,8 +207,8 @@ pub const Lin = struct {
                 pac.dynSpectra(ckt, lin, omegas, dyn_f[n_sb..], dyn_hat);
                 pac.addDynConversion(false, a_work, lin, ckt.ac_dyn_slots, dyn_hat, n, n_sb, nn, nn2);
             }
-            // z0 in series with every port source, on every sideband.
-            for (ports) |p| for (0..n_sb) |q| {
+            // z0 in series with every ideal port source, on every sideband.
+            for (ports) |p| if (!p.series_z0) for (0..n_sb) |q| {
                 const r = q * n + p.branch;
                 a_work[r * nn2 + r] -= p.z0;
                 a_work[(nn + r) * nn2 + nn + r] -= p.z0;
@@ -217,6 +233,49 @@ pub const Lin = struct {
                     row[2 * (1 + i * np + j)] = s.re;
                     row[2 * (1 + i * np + j) + 1] = s.im;
                 }
+            }
+            if (noisy) {
+                // Adjoint of port 2's voltage in its band: Aᵀ y = e on the
+                // stacked-real factor gives |transfer|² = y_re² + y_im² from
+                // a voltage on port 1's branch in each sideband.
+                const p1 = ports[0];
+                const p2 = ports[1];
+                @memset(rhs, 0);
+                const out = sideband(p2.band, n_harm) * n;
+                if (p2.node != root.GROUND) rhs[out + p2.node] = 1;
+                if (p2.neg != root.GROUND) rhs[out + p2.neg] = -1;
+                dense_lu.solveFactoredT(nn2, a_work, piv, rhs, x);
+                const e2 = 4 * k_boltzmann * t0_kelvin * p1.z0;
+                var all: f64 = 0;
+                for (0..n_sb) |q| all += rowV(x, nn, q * n, p1.branch).magSq();
+                noise_work[k] = @abs(@as(f64, @floatFromInt(p2.band.sign)) * f + @as(f64, @floatFromInt(p2.band.harmonic)) * opts.f0);
+                noise_work[n_points + k] = e2 * all;
+                noise_work[2 * n_points + k] = e2 * rowV(x, nn, sideband(p1.band, n_harm) * n, p1.branch).magSq();
+            }
+        }
+        if (noisy) {
+            // The circuit's own noise at port 2's band (`.hbnoise` on the same
+            // orbit); the P cards' z0 are noiseless resistors, so it holds
+            // no port termination.
+            const f_out = noise_work[0..n_points];
+            const dev = try scratch.alloc(f64, n_points);
+            defer scratch.free(dev);
+            const freqs = try scratch.alloc(f64, n_points);
+            defer scratch.free(freqs);
+            const srcs = try ckt.collectNoiseSources(ctx.x_op, scratch);
+            defer scratch.free(srcs);
+            _ = try pnoise.orbitSweep(ckt, orb, srcs, freqs, dev, .{
+                .tol = opts.tol,
+                .out_node = ports[1].node,
+                .out_neg = ports[1].neg,
+                .sweep = .{ .kind = .poi, .list = f_out, .points = @intCast(n_points), .f_start = f_out[0], .f_stop = f_out[n_points - 1] },
+                .f_fundamental = opts.f0,
+                .n_sidebands = opts.n_sidebands,
+            }, scratch);
+            for (0..n_points) |i| {
+                const f_ssb = (dev[i] + noise_work[n_points + i]) / noise_work[2 * n_points + i];
+                data[i * row_len + row_len - 2] = f_ssb;
+                data[i * row_len + row_len - 1] = 0;
             }
         }
         return .{

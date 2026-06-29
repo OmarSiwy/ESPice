@@ -419,10 +419,9 @@ pub const NetBuilder = struct {
         distof2: [2]f64,
         /// `.sp` port index, 1-based; 0 when not a port (vsrcdefs.h:104-105).
         portnum: u16,
-        /// Port reference impedance in ohms.
-        z0: f64,
-        /// `.hblin` band of a P card (`hblin=[h, s]`).
-        band: requests.Port.Band,
+        /// The port the card is, valid when `portnum` is nonzero. A P card's
+        /// port node is n+ in front of its z0.
+        port: requests.Port,
     };
 
     /// A builder over `nl` writing into `b`; both must outlive it.
@@ -666,11 +665,11 @@ pub const NetBuilder = struct {
         const ports = try arena.alloc(requests.Port, n_ports);
         for (ports) |*p| p.branch = std.math.maxInt(u32); // unset
         const v = self.v.slice();
-        for (v.items(.portnum), v.items(.pos), v.items(.neg), v.items(.branch), v.items(.z0), v.items(.band)) |num, node, neg, br, z0, band| {
+        for (v.items(.portnum), v.items(.port)) |num, port| {
             if (num == 0) continue;
             const slot = &ports[num - 1];
             if (slot.branch != std.math.maxInt(u32)) return error.DuplicatePortNumber;
-            slot.* = .{ .node = node, .branch = br, .z0 = z0, .neg = neg, .band = band };
+            slot.* = port;
         }
         for (ports) |p| if (p.branch == std.math.maxInt(u32)) return error.MissingPortNumber;
         return ports;
@@ -803,7 +802,8 @@ pub const NetBuilder = struct {
             'c' => try self.topoMark(dev, .cap, 0),
             'i' => try self.topoMark(dev, .cur, 0),
             // A V source shorts its pair at its DC value; an inductor at 0 V.
-            'v' => try self.topoMark(dev, .short, sourceDc(dev) orelse 0),
+            // A P card's series z0 keeps n+ off the short.
+            'v' => if (isPortCard(dev)) try self.topoMark(dev, .dc, 0) else try self.topoMark(dev, .short, sourceDc(dev) orelse 0),
             'l' => try self.topoMark(dev, .short, 0),
             else => try self.topoMark(dev, .dc, 0),
         }
@@ -819,31 +819,46 @@ pub const NetBuilder = struct {
             'v' => {
                 if (comptime !@hasDecl(devices.vsource, "eval")) return error.UnsupportedDevice;
                 const bound = try self.bindSource(devices.vsource, dev);
-                const nodes = try deviceNodes(self, devices.vsource, dev);
-                const br = self.b.n;
+                var nodes = try deviceNodes(self, devices.vsource, dev);
+                const pos = nodes[0];
                 // A source sensed by F/H/W is replaced by the sensing model's
                 // own `branch (cp,cn) ctrl`; stamping both would split the
                 // current between two sources on one node pair.
                 const sensed = std.sort.binarySearch([]const u8, self.sensed_sources, dev.name, std.ascii.orderIgnoreCase) != null;
-                if (!sensed) try self.b.addDevice(devices.vsource, dev.name, bound[0], bound[1], nodes);
                 const port = if (sensed) null else try sourcePort(dev);
+                // An HSPICE P card keeps its z0 in series in every analysis
+                // [SA Ch.17]: a noiseless resistor from n+ to a hidden node the
+                // source drives. ngspice's portnum V stays ideal.
+                const series = port != null and isPortCard(dev);
+                if (series) {
+                    nodes[0] = try self.b.addNode();
+                    try self.b.addDevice(devices.resistor, dev.name, .{ .r = port.?.z0, .noisy = 0 }, .{}, [2]u32{ pos, nodes[0] });
+                }
+                const br = self.b.n;
+                if (!sensed) try self.b.addDevice(devices.vsource, dev.name, bound[0], bound[1], nodes);
                 try self.v.append(self.arena, .{
                     .name = dev.name,
-                    .pos = nodes[0],
-                    .neg = if (nodes.len > 1) nodes[1] else 0,
+                    .pos = pos,
+                    .neg = nodes[1],
                     .branch = br,
                     .dc = bound[0].dc,
                     .distof1 = sourceDisto(dev, "distof1"),
                     .distof2 = sourceDisto(dev, "distof2"),
                     .portnum = if (port) |p| p.num else 0,
-                    .z0 = if (port) |p| p.z0 else 0,
-                    .band = if (port) |p| p.band else .{},
+                    .port = if (port) |p| .{
+                        .node = pos,
+                        .neg = nodes[1],
+                        .branch = br,
+                        .z0 = p.z0,
+                        .band = p.band,
+                        .series_z0 = series,
+                    } else .{ .node = GROUND, .branch = GROUND },
                 });
                 // A replaced source stamps nothing, so it can neither anchor
                 // the .op ladder nor be driven: `br` is the next card's row.
                 if (!sensed) {
                     if (self.source_branch == GROUND) {
-                        self.source_node = nodes[0];
+                        self.source_node = if (series) pos else nodes[0];
                         self.source_branch = br;
                     }
                     if (sourceAc(dev)) |ac| try self.ac.append(self.arena, .{ .pos = GROUND, .neg = br, .re = ac.re, .im = ac.im });
@@ -2055,6 +2070,13 @@ fn sourceDc(dev: Device) ?f64 {
         else => {},
     };
     return null;
+}
+
+/// An HSPICE P card, which the reader turns into a V card (netlist.zig
+/// readDevice): kind `v` under a leaf name that starts with `p`.
+fn isPortCard(dev: Device) bool {
+    const leaf = dev.name[if (std.mem.lastIndexOfScalar(u8, dev.name, '.')) |i| i + 1 else 0..];
+    return dev.kind == 'v' and leaf.len > 0 and std.ascii.toLower(leaf[0]) == 'p';
 }
 
 /// The RF port of a V card (`VP1 in 0 DC 0 AC 1 portnum 1 z0 50`, or an

@@ -129,7 +129,7 @@ the build-order id in the last column.
 | `.HBOSC`, `.SNOSC` [CR; RF Ch.7] | oscillator steady state, period solved | no (`.pss` is driven only) | `pss` autonomous | high for RF | D3, M |
 | `.PHASENOISE out sweep method=0\|1\|2` [CR .PHASENOISE; RF Ch.7] | oscillator phase noise: nonlinear perturbation, periodic AC, broadband | no | no | high for RF | D4, M |
 | `.ACPHASENOISE out in carrier=` [CR .ACPHASENOISE] | phase-domain noise and jitter of a closed-loop PLL model | no | no | low | D4, M |
-| `.HBLIN sweep [NOISECALC=]` [CR .HBLIN; RF Ch.10] | frequency-translating S-parameters and noise figure (mixers) | no | no | medium | D5, M |
+| `.HBLIN sweep [NOISECALC=]` [CR .HBLIN; RF Ch.10] | frequency-translating S-parameters and noise figure (mixers) | S and SSB noise figure, single tone (`pss/hb_lptv.zig`) | no | medium | D5, landed |
 | `.HBLSP NHARMS= FREQSWEEP POWERSWEEP` [CR .HBLSP; RF Ch.10] | large-signal, power-dependent S-parameters | no | no | medium | D5, M |
 | `.SN TRES= PERIOD=` or `.SN TONE= NHARMS=` [CR .SN; RF Ch.6] | shooting-Newton PSS | `.pss` (`pss/pss.zig`) | `pss` | done | syntax alias, S |
 | `.SNAC`, `.SNNOISE`, `.SNXF` [CR] | periodic AC, noise, transfer on the shooting orbit | `.pac`, `.pnoise`, `.pxf` | `pac` | done | syntax aliases, S |
@@ -195,7 +195,7 @@ the build-order id in the last column.
 | U-element [SA Ch.8] | lumped lossy line | letter taken by URC | no | low | E2, S |
 | S-element, Touchstone/CITI models [SA Ch.8; SI] | multiport S-parameter block, recursive convolution, passivity | no | no | high for SI | E3, L |
 | B-element, `.IBIS`, `.EBD`, `.PKG`, `.ICM` [SI] | IBIS buffers and packages | no | no | high for SI | E3, L |
-| P-element [SA Ch.17] | port for `.LIN`, also a source | `.sp` ports come from `portnum` on V sources | port pairs | medium | C4, S |
+| P-element [SA Ch.17] | port for `.LIN`, also a source | a V source behind a noiseless z0 resistor in every analysis | port pairs | medium | C4, landed |
 | `.STATEYE` [CR; SA Ch.18] | statistical eye and BER | no | no | medium for SerDes | E3, L |
 | Field solver: `.MATERIAL`, `.LAYERSTACK`, `.SHAPE`, `.FSOPTIONS` | 2-D field solver for W-element models | no | no | low | out of scope |
 
@@ -513,9 +513,9 @@ G₀ + jkω₀C₀ are `LaneLu` frequency lanes, and complex phasor output.
   method 1 is D1's periodic AC.
 - D5: `.hblin` is D1's conversion matrix read between sidebands at
   P-element ports. `.hblsp` sweeps port power (a C1 sweep) over D2.
-  Status: `.hblin` landed (S-parameters only, single tone; see
-  [pac.md](../analysis/pac.md) §2); `.hblsp` and `.hblin` noise wait on
-  z0 inside the large-signal P element.
+  Status: `.hblin` landed with `noisecalc=1` (single tone; see
+  [pac.md](../analysis/pac.md) §2). P elements now keep z0 in the HB
+  circuit; `.hblsp` is not built.
 - D6: `.ptdnoise` is the pnoise machinery with the output sampled at one
   phase of the period. `.sample` folds a `.noise` spectrum computed out to
   MAXFLD·FS into [0, FS/2].
