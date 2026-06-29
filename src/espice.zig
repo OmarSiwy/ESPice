@@ -497,13 +497,18 @@ pub const Problem = struct {
 
     /// Writes a `.lin format=touchstone` result as `<file>.s<N>p` beside the
     /// deck, `file` defaulting to the deck's name without its extension
-    /// (HSPICE names it after the netlist). The writer's header states a
-    /// 50 ohm reference, so another port z0 is
-    /// `error.UnsupportedReferenceImpedance`.
-    fn writeTouchstone(self: *Problem, file: []const u8, ports: []const requests.Port, plot: output.Plot) !void {
-        for (ports) |p| if (p.z0 != 50) return error.UnsupportedReferenceImpedance;
+    /// (HSPICE names it after the netlist), against the ports' own z0.
+    fn writeTouchstone(self: *Problem, file: []const u8, ports: []const requests.Port, plot_in: output.Plot) !void {
+        var plot = plot_in;
+        // Mode impedances in sp.zig's `Basis` order: each port's first mode
+        // (a balanced one's differential, 2·z0), then the common modes (z0/2).
+        var z0: std.ArrayList(f64) = .empty;
+        defer z0.deinit(self.allocator);
+        for (ports) |p| try z0.append(self.allocator, if (p.balanced != null) 2 * p.z0 else p.z0);
+        for (ports) |p| if (p.balanced != null) try z0.append(self.allocator, p.z0 / 2);
+        plot.z0 = z0.items;
         const stem = if (file.len > 0) file else std.fs.path.stem(self.origin);
-        const name = try std.fmt.allocPrint(self.allocator, "{s}.s{d}p", .{ stem, @max(ports.len, 1) });
+        const name = try std.fmt.allocPrint(self.allocator, "{s}.s{d}p", .{ stem, @max(z0.items.len, 1) });
         defer self.allocator.free(name);
         const path = try std.fs.path.join(self.allocator, &.{ std.fs.path.dirname(self.origin) orelse ".", name });
         defer self.allocator.free(path);

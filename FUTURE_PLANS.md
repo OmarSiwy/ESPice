@@ -122,11 +122,6 @@ the full matrix. Open items:
   - optimization combined with `.step`.
 - **Variants:** external `.data` files and the other limits listed in
   hspice-comparison.
-- **`.lin`:**
-  - `.net`;
-  - mixed-mode;
-  - K and MU;
-  - Touchstone files that are not 50 Ω.
 - **Unconfirmed against HSPICE:** each of these follows the manual and has
   never been run against real HSPICE:
   - `.alter` being cumulative;

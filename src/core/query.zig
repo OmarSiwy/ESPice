@@ -29,6 +29,16 @@ pub const Port = struct {
     /// and the source (an HSPICE P card), so the port analyses must not
     /// terminate the branch again. False for ngspice's ideal portnum source.
     series_z0: bool = false,
+    /// A mixed-mode (balanced) P card's − leg, against the same `neg`
+    /// reference and z0; `node`/`branch` are then its + leg. Null for a
+    /// single-ended port.
+    balanced: ?Leg = null,
+
+    pub const Leg = struct { node: u32, branch: u32 };
+
+    /// `branch` of a port with no source branch, which `.net` drives with
+    /// a current into `node`.
+    pub const no_branch = std.math.maxInt(u32);
 
     pub const Band = struct { harmonic: i16 = 0, sign: i8 = 1 };
 };
@@ -99,6 +109,11 @@ pub const Sp = struct {
     /// HSPICE `.lin` network parameters after S; null is the plain `.sp`
     /// S matrix.
     lin: ?Lin = null,
+    /// HSPICE `.net`: the ports are ideal (a V card's port is a short, any
+    /// other an open) and driven as such, and S comes from the measured
+    /// Z against each port's z0 (RIN, ROUT). `lin` is set, without group
+    /// delay or noise.
+    net: bool = false,
 
     /// What `.lin` adds to the S matrix: Y and Z always, H for two or more
     /// ports (from the port 1-2 block), then the optional group delays and
@@ -114,6 +129,10 @@ pub const Sp = struct {
         touchstone: bool = false,
         /// `filename=`; empty is the deck's file name without extension.
         file: []const u8 = "",
+        /// `mixedmode2port=`: whether port 1's and port 2's mode in the
+        /// two-port measurements (H, stability, noise) is its common mode
+        /// (`c`) rather than its first one (`s` or `d`).
+        common: [2]bool = .{ false, false },
     };
 };
 

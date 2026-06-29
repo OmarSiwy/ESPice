@@ -542,7 +542,7 @@ pub fn schemaOf(allocator: std.mem.Allocator, topology: *const Circuit, deck: *c
         .pxf => |o| 1 + (1 + 2 * @as(usize, o.n_harmonics)) * topology.n,
         .hbxf => |o| 1 + (1 + 2 * @as(usize, o.n_sidebands)) * topology.n,
         .hblin => |o| 1 + o.ports.len * o.ports.len + @intFromBool(o.noise and o.ports.len >= 2),
-        .sp => |o| @import("ac/sp.zig").columns(@max(o.ports.len, 1), o.lin),
+        .sp => |o| @import("ac/sp.zig").columns(@import("ac/sp.zig").modeCount(o.ports), o.lin),
         .sens, .dcmatch, .dcsens, .acmatch => blk: {
             const groups = switch (query) {
                 inline .dcmatch, .dcsens, .acmatch => |o| o.variations.starts.len -| 1,

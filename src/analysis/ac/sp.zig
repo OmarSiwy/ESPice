@@ -53,7 +53,10 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const nn = 2 * n;
 
     const one_port = [_]Port{.{ .node = ctx.source_node, .branch = ctx.source_branch }};
-    const ports: []const Port = if (opts.ports.len > 0) opts.ports else &one_port;
+    var basis = try Basis.init(scratch, if (opts.ports.len > 0) opts.ports else &one_port, if (opts.lin) |l| l.common else .{ false, false });
+    defer basis.deinit(scratch);
+    // Solves run over the legs; every published matrix is over the modes.
+    const ports = basis.legs;
     const n_ports = ports.len;
     const n_points: usize = opts.sweep.count();
 
@@ -75,7 +78,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     var fs = try FreqSolver.fromCircuit(scratch, ckt, ctx.x_op);
     defer fs.deinit(scratch);
     // Series z0 inside each ideal port source: the branch row gains −z0·i_br.
-    for (ports) |port| if (!port.series_z0) fs.addDiagG(port.branch, -port.z0);
+    if (!opts.net) for (ports) |port| if (!port.series_z0) fs.addDiagG(port.branch, -port.z0);
 
     const axis = try scratch.alloc(f64, 2 * n_points);
     defer scratch.free(axis);
@@ -87,7 +90,15 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const rhs = try scratch.alloc(f64, n_ports * nn);
     defer scratch.free(rhs);
     root.zeroSimd(rhs);
-    for (ports, 0..) |port, p| rhs[p * nn + port.branch] = 1.0;
+    for (ports, 0..) |port, p| {
+        if (port.branch != Port.no_branch) {
+            rhs[p * nn + port.branch] = 1.0;
+            continue;
+        }
+        // `.net`: a unit current into `node`, out of `neg`.
+        if (port.node != root.GROUND) rhs[p * nn + port.node] = 1.0;
+        if (port.neg != root.GROUND) rhs[p * nn + port.neg] = -1.0;
+    }
 
     var stream = try freq.Stream.init(scratch, &fs, ckt, ctx.x_op, omegas, rhs, false);
     defer stream.deinit(scratch);
@@ -95,10 +106,13 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         const row = data[pt.k * row_len ..][0..row_len];
         row[0] = freqs[pt.k];
         row[1] = 0;
-        for (0..n_ports) |p| writeColumn(n, ports, pt.x[p * nn ..][0..nn], row[2..], p);
+        if (opts.net) {
+            netRow(n, ports, pt.x, row[2..]);
+        } else for (0..n_ports) |p| writeColumn(n, ports, pt.x[p * nn ..][0..nn], row[2..], p);
+        try basis.toModes(row[2..][0 .. 2 * n_ports * n_ports]);
     }
 
-    if (opts.lin) |lin| try linColumns(ctx, &fs, ports, omegas, rhs, data, row_len, lin);
+    if (opts.lin) |lin| try linColumns(ctx, &fs, &basis, omegas, rhs, data, row_len, lin);
 
     return .{
         // The job name ngspice opens the plot under (span.c:599-601).
@@ -134,6 +148,145 @@ fn writeColumn(n: usize, ports: []const Port, x: []const f64, s_row: []f64, p: u
     }
 }
 
+/// Writes the S matrix of one `.net` frequency from the ideal-port
+/// solutions `x` (one stacked block per port drive). Each drive j gives
+/// every port's voltage and current into the network (a branch port's
+/// −i_br, otherwise the unit drive or nothing), so V = Vm·d and I = Im·d,
+/// Z = Vm·Im⁻¹, and S = (Zn − E)(Zn + E)⁻¹ with Zn = F⁻¹ Z F⁻¹, F = diag(√z0).
+/// One or two ports.
+fn netRow(n: usize, ports: []const Port, x: []const f64, s_row: []f64) void {
+    const np = ports.len;
+    var vt: [4]Complex = undefined;
+    var it: [4]Complex = undefined;
+    for (0..np) |j| {
+        const xj = x[j * 2 * n ..][0 .. 2 * n];
+        for (ports, 0..) |port, k| {
+            // Transposed: row j is drive j.
+            vt[j * np + k] = nodeV(xj, n, port.node).sub(nodeV(xj, n, port.neg));
+            it[j * np + k] = if (port.branch != Port.no_branch)
+                .{ .re = -xj[port.branch], .im = -xj[n + port.branch] }
+            else
+                .{ .re = @floatFromInt(@intFromBool(j == k)), .im = 0 };
+        }
+    }
+    // Imᵀ Zᵀ = Vmᵀ, then (Znᵀ + E) Sᵀ = (Znᵀ − E).
+    solveDense(np, it[0 .. np * np], vt[0 .. np * np]);
+    for (0..np) |i| for (0..np) |j| {
+        const zn = vt[i * np + j].scale(1 / @sqrt(ports[i].z0 * ports[j].z0));
+        const eye: f64 = @floatFromInt(@intFromBool(i == j));
+        it[i * np + j] = .{ .re = zn.re + eye, .im = zn.im };
+        vt[i * np + j] = .{ .re = zn.re - eye, .im = zn.im };
+    };
+    solveDense(np, it[0 .. np * np], vt[0 .. np * np]);
+    for (0..np) |k| for (0..np) |p| {
+        s_row[(k * np + p) * 2] = vt[p * np + k].re;
+        s_row[(k * np + p) * 2 + 1] = vt[p * np + k].im;
+    };
+}
+
+/// Mixed-mode ports [SA Ch.17] as a change of basis. A balanced port has
+/// two legs, each a single-ended port against the shared reference, and two
+/// modes: differential, (a+ − a−)/√2 against 2·z0, and common, (a+ + a−)/√2
+/// against z0/2. These are the power waves of V+ − V− and of (V+ + V−)/2
+/// (Bockelman and Eisenstadt, IEEE Trans. MTT 43(7), 1995), so S over the
+/// modes is M·S_legs·Mᵀ for the orthogonal M, and Y, Z, H and the noise
+/// parameters follow from it unchanged. Modes are ordered as HSPICE maps
+/// them to Touchstone (S13 = SDC11 for two balanced ports): each port's
+/// first mode (single-ended or differential) in port order, then the common
+/// modes of the balanced ports in port order. Legs follow the same order, so
+/// with no balanced port M is the identity and is not stored.
+const Basis = struct {
+    legs: []Port,
+    /// Mode-by-leg M, row-major; empty when no port is balanced.
+    m: []f64,
+    /// Reference impedance of each mode.
+    z0: []f64,
+    /// The modes `.lin` reads as its two-port (H, stability, noise).
+    pair: [2]usize,
+
+    /// `common[i]` picks port i's common mode for the two-port
+    /// (`Lin.common`); error.InvalidQueryOptions when port i is not
+    /// balanced. The legs and tables are allocated from `gpa`.
+    fn init(gpa: std.mem.Allocator, ports: []const Port, common: [2]bool) !Basis {
+        var n_bal: usize = 0;
+        for (ports) |p| n_bal += @intFromBool(p.balanced != null);
+        const nl = ports.len + n_bal;
+        const legs = try gpa.alloc(Port, nl);
+        errdefer gpa.free(legs);
+        const z0 = try gpa.alloc(f64, nl);
+        errdefer gpa.free(z0);
+        const m = try gpa.alloc(f64, if (n_bal == 0) 0 else nl * nl);
+        errdefer gpa.free(m);
+        @memset(m, 0);
+        var b: Basis = .{ .legs = legs, .m = m, .z0 = z0, .pair = .{ 0, 1 } };
+        var c = ports.len;
+        const r: f64 = std.math.sqrt1_2;
+        for (ports, 0..) |p, k| {
+            legs[k] = p;
+            legs[k].balanced = null;
+            z0[k] = p.z0;
+            const minus = p.balanced orelse {
+                if (m.len != 0) m[k * nl + k] = 1;
+                if (k < 2 and common[k]) return error.InvalidQueryOptions;
+                continue;
+            };
+            legs[c] = legs[k];
+            legs[c].node = minus.node;
+            legs[c].branch = minus.branch;
+            m[k * nl + k] = r;
+            m[k * nl + c] = -r;
+            m[c * nl + k] = r;
+            m[c * nl + c] = r;
+            z0[k] = 2 * p.z0;
+            z0[c] = p.z0 / 2;
+            if (k < 2 and common[k]) b.pair[k] = c;
+            c += 1;
+        }
+        return b;
+    }
+
+    fn deinit(b: *Basis, gpa: std.mem.Allocator) void {
+        gpa.free(b.legs);
+        gpa.free(b.m);
+        gpa.free(b.z0);
+    }
+
+    /// Turns the stacked (re, im) leg S matrix `s` into the mode one in
+    /// place: M·S·Mᵀ. A no-op with no balanced port.
+    fn toModes(b: Basis, s: []f64) !void {
+        if (b.m.len == 0) return;
+        const n = b.legs.len;
+        var tmp: [2 * 16 * 16]f64 = undefined;
+        if (n > 16) return error.InvalidQueryOptions;
+        // ponytail: dense O(n³) on at most 16 legs; M has two nonzeros a row.
+        for (0..n) |i| for (0..n) |j| for (0..2) |c| {
+            var acc: f64 = 0;
+            for (0..n) |k| acc += b.m[i * n + k] * s[(k * n + j) * 2 + c];
+            tmp[(i * n + j) * 2 + c] = acc;
+        };
+        for (0..n) |i| for (0..n) |j| for (0..2) |c| {
+            var acc: f64 = 0;
+            for (0..n) |k| acc += tmp[(i * n + k) * 2 + c] * b.m[j * n + k];
+            s[(i * n + j) * 2 + c] = acc;
+        };
+    }
+
+    /// Weight of leg `l`'s port voltage in mode `q`'s voltage: the mode
+    /// wave's M entry scaled by √(z0_mode / z0_leg), so the noise wave of
+    /// mode q is Σ_l w·v_l / √z0_q.
+    fn voltageWeight(b: Basis, q: usize, l: usize) f64 {
+        const mql = if (b.m.len == 0) @as(f64, @floatFromInt(@intFromBool(q == l))) else b.m[q * b.legs.len + l];
+        return mql * @sqrt(b.z0[q] / b.legs[l].z0);
+    }
+};
+
+/// Modes (published ports) of `ports`: a balanced port counts twice.
+pub fn modeCount(ports: []const Port) usize {
+    var n: usize = @max(ports.len, 1);
+    for (ports) |p| n += @intFromBool(p.balanced != null);
+    return n;
+}
+
 /// Complex entries of S, Y, Z and (two or more ports) H, in that order.
 fn paramCount(n_ports: usize) usize {
     return 3 * n_ports * n_ports + @as(usize, if (n_ports >= 2) 4 else 0);
@@ -143,16 +296,20 @@ fn paramCount(n_ports: usize) usize {
 pub fn columns(n_ports: usize, lin: ?Lin) usize {
     const l = lin orelse return 1 + n_ports * n_ports;
     const m = paramCount(n_ports);
-    return 1 + m * (1 + @as(usize, @intFromBool(l.group_delay))) + if (l.noise and n_ports >= 2) noise_names.len else 0;
+    const two_port = stab_names.len + if (l.noise) noise_names.len else 0;
+    return 1 + m * (1 + @as(usize, @intFromBool(l.group_delay))) + if (n_ports >= 2) two_port else 0;
 }
 
 /// The two-port noise columns, in order.
 const noise_names = [_][]const u8{ "NFMIN", "NF", "RN", "YOPT", "GAMMA_OPT" };
+/// The two-port stability columns (HSPICE's names), in order.
+const stab_names = [_][]const u8{ "K_STABILITY_FACTOR", "MU_STABILITY_FACTOR" };
 
 /// `.lin` column names: `frequency`, then `X(i,j)` for X = S, Y, Z, H
 /// (H over ports 1-2), then the group delays `TD(X(i,j))` in seconds
-/// (HSPICE probes them as `X(i,j)(TD)`) and the two-port noise parameters
-/// (`noise_names`) when asked. Real quantities have a zero imaginary part.
+/// (HSPICE probes them as `X(i,j)(TD)`), the stability factors of ports
+/// 1-2 (`stab_names`) and the two-port noise parameters (`noise_names`)
+/// when asked. Real quantities have a zero imaginary part.
 fn linNames(a: std.mem.Allocator, n_ports: usize, lin: Lin) ![]const []const u8 {
     const m = paramCount(n_ports);
     const noisy = lin.noise and n_ports >= 2;
@@ -171,6 +328,10 @@ fn linNames(a: std.mem.Allocator, n_ports: usize, lin: Lin) ![]const []const u8 
         names[at] = try std.fmt.allocPrint(a, "TD({s})", .{name});
         at += 1;
     };
+    if (n_ports >= 2) {
+        @memcpy(names[at..][0..stab_names.len], &stab_names);
+        at += stab_names.len;
+    }
     if (noisy) @memcpy(names[at..], &noise_names);
     return names;
 }
@@ -179,12 +340,14 @@ fn linNames(a: std.mem.Allocator, n_ports: usize, lin: Lin) ![]const []const u8 
 /// then the group delays (a forward sweep at ω(1 ± gd_step)); then the
 /// noise parameters (an adjoint sweep with one right-hand side per port).
 /// `fs` holds the port terminations and `rhs` the unit port drives.
-fn linColumns(ctx: *const root.RunCtx, fs: *FreqSolver, ports: []const Port, omegas: []const f64, rhs: []const f64, data: []f64, row_len: usize, lin: Lin) !void {
+fn linColumns(ctx: *const root.RunCtx, fs: *FreqSolver, basis: *const Basis, omegas: []const f64, rhs: []const f64, data: []f64, row_len: usize, lin: Lin) !void {
     const scratch = ctx.scratch_allocator;
     const ckt = ctx.circuit;
     const n: usize = ckt.n;
     const nn = 2 * n;
+    const ports = basis.legs;
     const np = ports.len;
+    const pq = basis.pair;
     const m = paramCount(np);
     const n_points = omegas.len;
 
@@ -196,7 +359,7 @@ fn linColumns(ctx: *const root.RunCtx, fs: *FreqSolver, ports: []const Port, ome
     for (0..n_points) |k| {
         const row = data[k * row_len ..][0..row_len];
         readComplex(row[2..][0 .. 2 * np * np], lo[0 .. np * np]);
-        params(ports, lo, tmp);
+        params(basis.z0, pq, lo, tmp);
         writeComplex(lo[np * np ..], row[2 + 2 * np * np ..][0 .. 2 * (m - np * np)]);
     }
     var col: usize = 1 + m;
@@ -214,9 +377,10 @@ fn linColumns(ctx: *const root.RunCtx, fs: *FreqSolver, ports: []const Port, ome
         defer stream.deinit(scratch);
         while (try stream.next(ckt)) |pt| {
             for (0..np) |p| writeColumn(n, ports, pt.x[p * nn ..][0..nn], s_row, p);
+            try basis.toModes(s_row);
             const side = if (pt.k % 2 == 0) lo else hi;
             readComplex(s_row, side[0 .. np * np]);
-            params(ports, side, tmp);
+            params(basis.z0, pq, side, tmp);
             if (pt.k % 2 == 0) continue;
             const k = pt.k / 2;
             const row = data[k * row_len ..][0..row_len];
@@ -231,17 +395,33 @@ fn linColumns(ctx: *const root.RunCtx, fs: *FreqSolver, ports: []const Port, ome
         col += m;
     }
 
+    if (np >= 2) {
+        for (0..n_points) |k| {
+            const row = data[k * row_len ..][0..row_len];
+            readComplex(row[2..][0 .. 2 * np * np], lo[0 .. np * np]);
+            const ks = stability(block(lo, np, pq));
+            for (ks, 0..) |v, i| {
+                row[2 * (col + i)] = v;
+                row[2 * (col + i) + 1] = 0;
+            }
+        }
+        col += stab_names.len;
+    }
+
     if (lin.noise and np >= 2) {
         const srcs = try ckt.collectNoiseSources(ctx.x_op, scratch);
         defer scratch.free(srcs);
-        // Adjoint of each of the first two port voltages v(node) − v(neg).
+        // Adjoint of each two-port mode's voltage, Σ_l w·(v(node) − v(neg))
+        // over its legs (`Basis.voltageWeight`).
         const e = try scratch.alloc(f64, 2 * nn);
         defer scratch.free(e);
         root.zeroSimd(e);
-        for (ports[0..2], 0..) |port, i| {
-            if (port.node != root.GROUND) e[i * nn + port.node] = 1.0;
-            if (port.neg != root.GROUND) e[i * nn + port.neg] = -1.0;
-        }
+        for (pq, 0..) |q, i| for (ports, 0..) |port, l| {
+            const w = basis.voltageWeight(q, l);
+            if (w == 0) continue;
+            if (port.node != root.GROUND) e[i * nn + port.node] += w;
+            if (port.neg != root.GROUND) e[i * nn + port.neg] -= w;
+        };
         var stream = try freq.Stream.init(scratch, fs, ckt, ctx.x_op, omegas, e, true);
         defer stream.deinit(scratch);
         while (try stream.next(ckt)) |pt| {
@@ -263,14 +443,27 @@ fn linColumns(ctx: *const root.RunCtx, fs: *FreqSolver, ports: []const Port, ome
                 c12 = c12.add(y2.mul(.{ .re = y1.re, .im = -y1.im }).scale(psd));
             }
             readComplex(row[2..][0 .. 2 * np * np], lo[0 .. np * np]);
-            const s2 = [4]Complex{ lo[0], lo[1], lo[np], lo[np + 1] };
-            const out = noiseParams(s2, .{ ports[0].z0, ports[1].z0 }, .{ c11, c22 }, c12);
+            const out = noiseParams(block(lo, np, pq), .{ basis.z0[pq[0]], basis.z0[pq[1]] }, .{ c11, c22 }, c12);
             for (out, 0..) |v, i| {
                 row[2 * (col + i)] = v.re;
                 row[2 * (col + i) + 1] = v.im;
             }
         }
     }
+}
+
+/// Rollett's K and Edwards-Sinsky's μ of the 2x2 S block `s` (row-major),
+/// as HSPICE defines them [SA Ch.17]: with Δ = S11·S22 − S12·S21,
+///   K = (1 − |S11|² − |S22|² + |Δ|²) / (2|S12·S21|),
+///   μ = (1 − |S11|²) / (|S22 − Δ·S11*| + |S12·S21|).
+/// A unilateral block (S12·S21 = 0) gives an infinite K.
+fn stability(s: [4]Complex) [stab_names.len]f64 {
+    const p = s[1].mul(s[2]);
+    const delta = s[0].mul(s[3]).sub(p);
+    const k = (1 - s[0].magSq() - s[3].magSq() + delta.magSq()) / (2 * @sqrt(p.magSq()));
+    const d = s[3].sub(delta.mul(.{ .re = s[0].re, .im = -s[0].im }));
+    const mu = (1 - s[0].magSq()) / (@sqrt(d.magSq()) + @sqrt(p.magSq()));
+    return .{ k, mu };
 }
 
 fn readComplex(src: []const f64, dst: []Complex) void {
@@ -284,14 +477,20 @@ fn writeComplex(src: []const Complex, dst: []f64) void {
     }
 }
 
+/// The 2x2 block of rows and columns `pq` of the n×n row-major `s`.
+fn block(s: []const Complex, n: usize, pq: [2]usize) [4]Complex {
+    return .{ s[pq[0] * n + pq[0]], s[pq[0] * n + pq[1]], s[pq[1] * n + pq[0]], s[pq[1] * n + pq[1]] };
+}
+
 /// Given S in `p[0..n²]` (row-major), fills Y, Z and H after it
 /// (`paramCount` entries). With F = diag(√z0):
 ///   Y = F⁻¹ (E + S)⁻¹ (E − S) F⁻¹,   Z = F (E − S)⁻¹ (E + S) F,
-/// and H over ports 1-2 comes from the Z of the 2x2 S block (the other
-/// ports terminated in z0, as HSPICE defines it). A singular E ± S (an
-/// open or a short port) gives non-finite entries. `tmp` holds n² values.
-fn params(ports: []const Port, p: []Complex, tmp: []Complex) void {
-    const n = ports.len;
+/// and H over the two-port `pq` comes from the Z of its 2x2 S block (the
+/// other ports terminated in z0, as HSPICE defines it). A singular E ± S
+/// (an open or a short port) gives non-finite entries. `tmp` holds n²
+/// values.
+fn params(z0: []const f64, pq: [2]usize, p: []Complex, tmp: []Complex) void {
+    const n = z0.len;
     const n2 = n * n;
     const s = p[0..n2];
     const y = p[n2..][0..n2];
@@ -308,17 +507,18 @@ fn params(ports: []const Port, p: []Complex, tmp: []Complex) void {
         };
         solveDense(n, lhs, out);
         for (0..n) |i| for (0..n) |j| {
-            const f = @sqrt(ports[i].z0 * ports[j].z0);
+            const f = @sqrt(z0[i] * z0[j]);
             out[i * n + j] = out[i * n + j].scale(if (which == 0) 1 / f else f);
         };
     }
     if (n < 2) return;
-    // Z of the port 1-2 block: (E − S₂)⁻¹ (E + S₂), scaled as above.
-    var l2 = [4]Complex{ .{ .re = 1 - s[0].re, .im = -s[0].im }, s[1].scale(-1), s[n].scale(-1), .{ .re = 1 - s[n + 1].re, .im = -s[n + 1].im } };
-    var z2 = [4]Complex{ .{ .re = 1 + s[0].re, .im = s[0].im }, s[1], s[n], .{ .re = 1 + s[n + 1].re, .im = s[n + 1].im } };
+    // Z of the two-port block: (E − S₂)⁻¹ (E + S₂), scaled as above.
+    const s2 = block(s, n, pq);
+    var l2 = [4]Complex{ .{ .re = 1 - s2[0].re, .im = -s2[0].im }, s2[1].scale(-1), s2[2].scale(-1), .{ .re = 1 - s2[3].re, .im = -s2[3].im } };
+    var z2 = [4]Complex{ .{ .re = 1 + s2[0].re, .im = s2[0].im }, s2[1], s2[2], .{ .re = 1 + s2[3].re, .im = s2[3].im } };
     solveDense(2, &l2, &z2);
     for (0..2) |i| for (0..2) |j| {
-        z2[i * 2 + j] = z2[i * 2 + j].scale(@sqrt(ports[i].z0 * ports[j].z0));
+        z2[i * 2 + j] = z2[i * 2 + j].scale(@sqrt(z0[pq[i]] * z0[pq[j]]));
     };
     // V1 = h11·I1 + h12·V2, I2 = h21·I1 + h22·V2.
     const h = p[3 * n2 ..][0..4];

@@ -440,6 +440,12 @@ fn cond(c: CondCard) Card {
     return .{ .cond = c };
 }
 
+/// Source keywords that may follow a P card's nodes (`mixedPort`).
+const port_source_words = std.StaticStringMap(void).initComptime(.{
+    .{"dc"},   .{"ac"}, .{"hb"},   .{"hbac"}, .{"pulse"},   .{"sin"},     .{"exp"},
+    .{"pwl"},  .{"sffm"}, .{"am"}, .{"lfsr"}, .{"pat"}, .{"distof1"}, .{"distof2"},
+});
+
 /// Every dot card the three dialects accept, looked up lowercased.
 const cards = std.StaticStringMap(Card).initComptime(.{
     .{ "end", .end },         .{ "ends", .ends },                 .{ "subckt", .subckt },
@@ -462,7 +468,7 @@ const cards = std.StaticStringMap(Card).initComptime(.{
     .{ "tran", an(.tran) },   .{ "trannoise", an(.tran_noise) },  .{ "tran_noise", an(.tran_noise) },
     .{ "lstb", an(.lstb) },   .{ "acxf", an(.acxf) },             .{ "dcxf", an(.dcxf) },
     .{ "dcinc", an(.dcinc) },   .{ "lin", an(.sp) },            .{ "acmatch", an(.acmatch) },
-    .{ "dcsens", an(.dcsens) }, .{ "hblin", an(.hblin) },
+    .{ "dcsens", an(.dcsens) }, .{ "hblin", an(.hblin) },     .{ "net", an(.sp) },
     .{ "if", cond(.@"if") },  .{ "elseif", cond(.elseif) },       .{ "else", cond(.@"else") },
     .{ "endif", cond(.endif) }, .{ "meas", .meas },           .{ "measure", .meas },
     .{ "save", .save },         .{ "dcvolt", .ic },                 .{ "nodeset", .nodeset },
@@ -2138,6 +2144,21 @@ fn Reader(comptime S: type) type {
             return r.intern(try r.joined(&.{ path, ".", node }));
         }
 
+        /// A mixed-mode P card, `P1 n+ n- ref port=1 ...` [SA Ch.17]: a
+        /// third word that is neither a key (`port=`) nor a source keyword.
+        /// The manual writes a P card's DC value as `DC mag`, so a bare
+        /// third word is the reference node, not a value.
+        fn mixedPort(f: F) bool {
+            var p = f;
+            _ = p.next();
+            _ = p.next();
+            const t = p.next() orelse return false;
+            if (!F.isWord(t)) return false;
+            if (p.next()) |u| if (u[0] == '=') return false;
+            var buf: [8]u8 = undefined;
+            return t.len > buf.len or !port_source_words.has(std.ascii.lowerString(&buf, t));
+        }
+
         fn fixedPins(letter: u8) ?usize {
             return switch (letter) {
                 // W n+ n- Vctrl model: Vctrl/model are positional words (ngspice INP2W).
@@ -2196,7 +2217,8 @@ fn Reader(comptime S: type) type {
                 const model = f.next() orelse return error.ParseError;
                 if (!F.isWord(model)) return error.ParseError;
                 try r.positional.append(arena, try r.nameValue(model, frame, false));
-            } else if (fixedPins(letter)) |count| {
+            } else if (fixedPins(letter)) |fixed| {
+                const count = if (port_card and mixedPort(f)) 3 else fixed;
                 try r.nodes.ensureUnusedCapacity(arena, count);
                 for (0..count) |_| {
                     const t = f.next() orelse return error.ParseError;
