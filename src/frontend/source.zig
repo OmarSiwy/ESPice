@@ -1,12 +1,13 @@
-//! `.include`, `.lib` and HSPICE `.load` expansion, before parsing. Paths
-//! resolve against the directory of the file that names them.
+//! `.include`, `.lib`, HSPICE `.load` and external `.data` expansion,
+//! before parsing. Paths resolve against the directory of the file that
+//! names them.
 const std = @import("std");
 const Io = std.Io;
 const Fields = @import("lines.zig").Fields("\"'", false);
-const Directive = enum { include, lib, endl, load };
+const Directive = enum { include, lib, endl, load, data };
 const directives = std.StaticStringMap(Directive).initComptime(.{
     .{ ".include", .include }, .{ ".inc", .include }, .{ ".lib", .lib }, .{ ".endl", .endl },
-    .{ ".load", .load },
+    .{ ".load", .load },       .{ ".data", .data },
 });
 
 /// Reads `path` and expands it (see `expand`). The result is allocated in `arena`.
@@ -219,6 +220,107 @@ fn appendLoad(io: Io, path: []const u8, tokens: *Fields, depth: u8, out: *std.Ar
     };
 }
 
+/// HSPICE external `.data name MER|LAM FILE=f p=col ... .enddata`
+/// [CR .DATA], written out as the inline `.data` table it stands for. Each
+/// `FILE=` is followed by `name=column` (1-based) pairs. MER stacks the
+/// files' rows, and a file inherits the previous file's columns for names
+/// it does not give; LAM puts the files side by side, row for row, each
+/// name from the file that gives it. A missing value is 0. Data files hold
+/// blank- or comma-separated numbers, one row per line. `header` holds the
+/// rest of the `.data` line; `lines` is left after `.enddata`.
+fn appendData(io: Io, path: []const u8, name: []const u8, lam: bool, header: Fields, lines: *std.mem.SplitIterator(u8, .scalar), out: *std.ArrayList(u8)) !void {
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const File = struct { rows: []const []const []const u8, cols: std.ArrayList(u32) };
+    var names: std.ArrayList([]const u8) = .empty;
+    var files: std.ArrayList(File) = .empty;
+    var tokens = header;
+    while (true) {
+        while (tokens.next()) |t| {
+            if (t[0] == '$' or t[0] == ';') break;
+            const key = std.mem.trimStart(u8, t, "+");
+            if (key.len == 0) continue;
+            if (!Fields.isWord(key) or !tokens.takeEq()) return error.InvalidData;
+            const value = (try word(&tokens)) orelse return error.InvalidData;
+            if (std.ascii.eqlIgnoreCase(key, "file")) {
+                const resolved = try std.fs.path.resolve(a, &.{ std.fs.path.dirname(path) orelse ".", value });
+                const text = try Io.Dir.cwd().readFileAlloc(io, resolved, a, .unlimited);
+                var rows: std.ArrayList([]const []const u8) = .empty;
+                var it = std.mem.splitScalar(u8, text, '\n');
+                while (it.next()) |row| {
+                    var cells: std.ArrayList([]const u8) = .empty;
+                    var c = std.mem.tokenizeAny(u8, row, " \t,\r");
+                    while (c.next()) |v| try cells.append(a, v);
+                    if (cells.items.len != 0) try rows.append(a, cells.items);
+                }
+                var cols: std.ArrayList(u32) = .empty;
+                if (!lam and files.items.len != 0) try cols.appendSlice(a, files.items[files.items.len - 1].cols.items);
+                try files.append(a, .{ .rows = rows.items, .cols = cols });
+            } else if (std.ascii.eqlIgnoreCase(key, "out")) {
+                // ponytail: OUT= (write the merged table back) is refused; add when a flow needs the file.
+                std.log.err(".data {s}: OUT= is not supported", .{name});
+                return error.InvalidData;
+            } else {
+                if (files.items.len == 0) return error.InvalidData;
+                const col = std.fmt.parseInt(u32, value, 10) catch return error.InvalidData;
+                if (col == 0) return error.InvalidData;
+                const k = for (names.items, 0..) |n, i| {
+                    if (std.ascii.eqlIgnoreCase(n, key)) break i;
+                } else blk: {
+                    try names.append(a, key);
+                    break :blk names.items.len - 1;
+                };
+                const cols = &files.items[files.items.len - 1].cols;
+                if (cols.items.len <= k) try cols.appendNTimes(a, 0, k + 1 - cols.items.len);
+                cols.items[k] = col;
+            }
+        }
+        const raw = lines.next() orelse break;
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len != 0 and eqlLower(firstWord(line), ".enddata")) break;
+        tokens = Fields.init(if (line.len != 0 and line[0] == '*') "" else line);
+    }
+    if (names.items.len == 0) return error.InvalidData;
+    const gpa = std.heap.page_allocator;
+    try out.print(gpa, ".data {s}", .{name});
+    for (names.items) |n| try out.print(gpa, " {s}", .{n});
+    try out.append(gpa, '\n');
+    if (lam) {
+        // Each name's file: the last that gives it a column.
+        const owner = try a.alloc(?usize, names.items.len);
+        @memset(owner, null);
+        var rows: usize = 0;
+        for (files.items, 0..) |f, fi| {
+            rows = @max(rows, f.rows.len);
+            for (f.cols.items, 0..) |col, k| if (col != 0) {
+                owner[k] = fi;
+            };
+        }
+        for (0..rows) |r| {
+            try out.append(gpa, '+');
+            for (owner, 0..) |fi, k| {
+                const f = if (fi) |i| files.items[i] else null;
+                try out.print(gpa, " {s}", .{if (f) |file| cell(file, r, k) else "0"});
+            }
+            try out.append(gpa, '\n');
+        }
+    } else for (files.items) |f| for (0..f.rows.len) |r| {
+        try out.append(gpa, '+');
+        for (0..names.items.len) |k| try out.print(gpa, " {s}", .{cell(f, r, k)});
+        try out.append(gpa, '\n');
+    };
+    try out.appendSlice(gpa, ".enddata\n");
+}
+
+/// Row `r`, name `k` of an external `.data` file; "0" where it has none.
+fn cell(f: anytype, r: usize, k: usize) []const u8 {
+    if (r >= f.rows.len or k >= f.cols.items.len or f.cols.items[k] == 0) return "0";
+    const row = f.rows[r];
+    const col = f.cols.items[k];
+    return if (col <= row.len) row[col - 1] else "0";
+}
+
 fn appendContents(io: Io, path: []const u8, src: []const u8, section: ?[]const u8, depth: u8, out: *std.ArrayList(u8)) anyerror!void {
     const gpa = std.heap.page_allocator;
     var lines = std.mem.splitScalar(u8, src, '\n');
@@ -236,6 +338,19 @@ fn appendContents(io: Io, path: []const u8, src: []const u8, section: ?[]const u
         }
         if (directiveOf(trimmed)) |kind| {
             _ = try word(&tokens);
+            if (kind == .data) {
+                // An inline table passes through; MER and LAM read files.
+                const name = tokens.next() orelse "";
+                const mode = tokens.next() orelse "";
+                const lam = std.ascii.eqlIgnoreCase(mode, "lam");
+                if (selected and (lam or std.ascii.eqlIgnoreCase(mode, "mer"))) {
+                    try appendData(io, path, name, lam, tokens, &lines, out);
+                } else if (selected) {
+                    try out.appendSlice(gpa, line);
+                    try out.append(gpa, '\n');
+                }
+                continue;
+            }
             if (kind == .load) {
                 if (selected) try appendLoad(io, path, &tokens, depth, out);
                 continue;

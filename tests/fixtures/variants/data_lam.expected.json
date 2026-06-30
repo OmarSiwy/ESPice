@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "analysis": "dc",
+  "purpose": ".data LAM: external files side by side, row for row, missing values 0.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "v(b) = v1 rl / (1k + rl) for each row the files give."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "DC transfer characteristic",
+        "match": "exact",
+        "row_count": 3,
+        "columns": {
+          "rl": {
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 0,
+            "values": [
+              1000,
+              3000,
+              9000
+            ]
+          },
+          "v(b)": {
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09,
+            "values": [
+              0.5,
+              1.5,
+              0.0
+            ]
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "be22cfb20035ac7975bba46dee133edff9957286a7c0dec8bc376ce63ae6b876"
+}

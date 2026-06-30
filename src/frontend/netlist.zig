@@ -87,8 +87,9 @@ pub const StepTarget = union(enum) {
 /// One swept quantity and its points, in sweep order.
 pub const Step = struct { target: StepTarget, values: []const f64 };
 
-/// HSPICE `MONTE=n [FIRSTRUN=k]`: trials `first..first + n - 1`.
-pub const Monte = struct { n: u32, first: u32 = 1 };
+/// HSPICE `MONTE=n [FIRSTRUN=k]`: trials `first..first + n - 1`; or
+/// `MONTE=list(a b:c ...)` [CR .DC]: exactly the trials in `list`.
+pub const Monte = struct { n: u32, first: u32 = 1, list: []const u32 = &.{} };
 
 /// An HSPICE sweep on one analysis card: the card runs once per point.
 /// On a `.dc` card with no sweep of its own (`.dc DATA=d`, `.dc MONTE=n`)
@@ -1265,6 +1266,23 @@ fn Reader(comptime S: type) type {
             var args: std.ArrayList(Value) = .empty;
             while (f.next()) |t| {
                 if (t[0] == ',' or t[0] == '=') continue;
+                const last = if (args.items.len != 0) args.items[args.items.len - 1] else Value{ .num = 0 };
+                if (last == .name and std.mem.eql(u8, last.name, "monte") and std.ascii.eqlIgnoreCase(t, "list")) {
+                    // `MONTE=list(10 20:30)`, parentheses optional: the trial
+                    // numbers follow `list`, each `a:b` range expanded.
+                    try args.append(r.arena, .{ .name = "list" });
+                    while (f.next()) |n| {
+                        if (n[0] == ')') break;
+                        if (n[0] == '(' or n[0] == ',') continue;
+                        const colon = std.mem.indexOfScalar(u8, n, ':') orelse n.len;
+                        const lo = S.parseNum(n[0..colon]) orelse return error.ParseError;
+                        const hi = if (colon == n.len) lo else S.parseNum(n[colon + 1 ..]) orelse return error.ParseError;
+                        if (!(lo >= 1 and hi >= lo and hi <= std.math.maxInt(u32)) or lo != @trunc(lo) or hi != @trunc(hi)) return error.ParseError;
+                        var k = lo;
+                        while (k <= hi) : (k += 1) try args.append(r.arena, .{ .num = k });
+                    }
+                    continue;
+                }
                 try args.append(r.arena, try r.valueAt(t, f, &top, false, false));
             }
             return args.items;
@@ -1474,6 +1492,13 @@ fn Reader(comptime S: type) type {
                 if (tail.len != 2 or tail[1] != .name) return error.ParseError;
                 break :blk .{ .data = tail[1].name };
             } else if (std.mem.eql(u8, head, "monte")) blk: {
+                if (tail[1] == .name and std.mem.eql(u8, tail[1].name, "list")) {
+                    const list = try r.arena.alloc(u32, tail.len - 2);
+                    for (list, 2..) |*t, k| t.* = try positiveCount(tail, k);
+                    if (list.len == 0) return error.ParseError;
+                    r.monte = true;
+                    break :blk .{ .monte = .{ .n = @intCast(list.len), .list = list } };
+                }
                 var m: Monte = .{ .n = try positiveCount(tail, 1) };
                 if (tail.len == 4 and tail[2] == .name and std.mem.eql(u8, tail[2].name, "firstrun")) {
                     m.first = try positiveCount(tail, 3);
