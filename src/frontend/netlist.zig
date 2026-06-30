@@ -1702,7 +1702,10 @@ fn Reader(comptime S: type) type {
             }
             if (param.len == 0) return r.failed(line, error.ParseError);
             const v = try r.percentValue(f) orelse return r.failed(line, error.ParseError);
-            return .{ .per_device = per_device, .dist = dist, .model = model, .param = param, .value = v.value, .relative = v.relative };
+            // A Gaussian's value is its 3-sigma spread [SA Ch.20 "Variations
+            // Specified Using DEV and LOT"]; `Variation.value` holds one sigma.
+            const value = if (dist == .gauss) v.value / 3 else v.value;
+            return .{ .per_device = per_device, .dist = dist, .model = model, .param = param, .value = value, .relative = v.relative };
         }
 
         /// Collects the live values after the device walk: each table value

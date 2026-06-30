@@ -4,7 +4,7 @@
   "purpose": "LOT draws once per model and trial, DEV once per device.",
   "oracle": {
     "kind": "analytic",
-    "derivation": "v = n Vt ln(I/IS) at 25 C (HSPICE TNOM): mean 0.6508 V; first order sigma(v(a)) = Vt sqrt(0.1^2 + 0.02^2) = 2.620 mV, sigma(v(a) - v(b)) = Vt 0.02 sqrt 2 = 0.727 mV."
+    "derivation": "v = n Vt ln(I/IS) at 25 C (HSPICE TNOM): mean 0.6508 V; GAUSS values are 3 sigma (30% and 6% give sigmas of 0.1 and 0.02); first order sigma(v(a)) = Vt sqrt(0.1^2 + 0.02^2) = 2.620 mV, sigma(v(a) - v(b)) = Vt 0.02 sqrt 2 = 0.727 mV."
   },
   "tokenizer": "hspice",
   "expect": {
@@ -43,5 +43,5 @@
   "notes": [
     "Limits are about four standard errors of 4000 trials, plus the second-order log bias."
   ],
-  "netlist_sha256": "5e516bc0f0aa18e2f2d45bf25f48a20e79f2c6c50cbb8a85051b678bb53431a3"
+  "netlist_sha256": "e976c98f0ac48d0ccef2d22965df2cf78d6d1cf423ef4963a306140434c75808"
 }
