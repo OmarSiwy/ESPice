@@ -75,8 +75,11 @@ pub const Problem = struct {
     /// Holds the netlist an HSPICE optimization re-evaluates
     /// (`prepared.tuner`); null for a deck without one.
     parse_arena: ?*std.heap.ArenaAllocator = null,
-    /// The finished optimization, once `optimize` has run.
-    optimization: ?core.lm.Lm = null,
+    /// The finished optimizations, once `optimize` has run, one per
+    /// `Tuner.bases` entry: Levenberg-Marquardt fits or bisections, as the
+    /// `.model OPT` says.
+    optimization: []core.lm.Lm = &.{},
+    bisection: []core.bisect.Bisect = &.{},
 
     /// A variant run's queries and its next result to publish.
     const Run = struct { session: analysis.session.Session, next_output: usize = 0 };
@@ -105,7 +108,8 @@ pub const Problem = struct {
             .bytes => |bytes| bytes.origin,
         });
         self.parse_arena = null;
-        self.optimization = null;
+        self.optimization = &.{};
+        self.bisection = &.{};
         // An optimization keeps the parse arena: its tuner re-evaluates the netlist.
         const parse_arena = try allocator.create(std.heap.ArenaAllocator);
         parse_arena.* = .init(allocator);
@@ -355,7 +359,8 @@ pub const Problem = struct {
     /// cannot be measured are reported on `err`.
     pub fn print_measures(self: *const Problem, out: *std.Io.Writer, err: *std.Io.Writer) !void {
         const measures = self.prepared.deck.measures;
-        if (self.optimization) |*lm| try printOptimization(out, lm, self.prepared.tuner.?, measures);
+        for (self.optimization, 0..) |*lm, k| try printOptimization(out, lm, self.prepared.tuner.?, k, measures);
+        for (self.bisection, 0..) |*b, k| try printBisection(out, b, self.prepared.tuner.?, k, measures);
         if (measures.len == 0) return;
         try printSessionMeasures(&self.session, out, err, measures);
         for (self.runs) |*run| try printSessionMeasures(&run.session, out, err, measures);
@@ -397,47 +402,86 @@ pub const Problem = struct {
         return data.len;
     }
 
-    /// Runs the deck's HSPICE optimization once, before any query advances
-    /// (docs/analysis/optimize.md). Each batch of optimizer points is one
-    /// session of the optimized card's queries, a variant row per point,
-    /// run `max_parallel` at a time. The optimum's writes then fill the
-    /// rows the optimized card and every later card run.
+    /// Runs the deck's HSPICE optimizations once, before any query advances
+    /// (docs/analysis/optimize.md), one per `Tuner.bases` entry in turn.
+    /// Each batch of optimizer points is one session of the optimized
+    /// card's queries, a variant row per point, run `max_parallel` at a
+    /// time. Each optimum's writes then fill the rows its optimized card
+    /// and every later card run.
     fn optimize(self: *Problem) !void {
         const t = self.prepared.tuner orelse return;
-        if (self.optimization != null) return;
+        if (self.optimization.len != 0 or self.bisection.len != 0) return;
         const a = self.arena.allocator();
         const deck = &self.prepared.deck;
+        const n = t.bases.len;
+        if (t.method == .lm) self.optimization = try a.alloc(core.lm.Lm, n) else self.bisection = try a.alloc(core.bisect.Bisect, n);
+        // Rows 0..n and n..2n take each base's optimum; 2n.. keep the plan's.
+        const planned = deck.variants;
+        var starts: std.ArrayList(u32) = .empty;
+        var refs: std.ArrayList(u32) = .empty;
+        var values: std.ArrayList(f64) = .empty;
+        const best = try a.alloc(core.Variants, n);
         var template: std.ArrayList(Query) = .empty;
-        for (deck.queries) |job| switch (job) {
-            inline else => |o| if (o.tol.variant == 0) try template.append(a, job),
-        };
-        var lm = try core.lm.Lm.init(a, t.initial, t.spec.lo, t.spec.hi, t.spec.dels, @intCast(t.results.len), t.options);
-        const residuals = try a.alloc(f64, @as(usize, @max(lm.n, 1)) * lm.m);
-        while (lm.points().len != 0) {
-            const points = lm.points();
-            const out = residuals[0 .. points.len / lm.n * lm.m];
-            try self.evaluatePoints(t, template.items, points, out);
-            try lm.feed(out);
+        for (best, 0..) |*row, base| {
+            template.clearRetainingCapacity();
+            for (deck.queries) |job| switch (job) {
+                inline else => |o| if (o.tol.variant == @as(u32, @intCast(base))) try template.append(a, job),
+            };
+            const x: []const f64 = if (t.method == .lm) blk: {
+                const lm = &self.optimization[base];
+                lm.* = try core.lm.Lm.init(a, t.initial, t.spec.lo, t.spec.hi, t.spec.dels, @intCast(t.results.len), t.options);
+                try self.search(t, template.items, base, lm);
+                break :blk lm.x;
+            } else blk: {
+                const goal = deck.measures[t.results[0]];
+                const c = if (goal.first.goal != null) goal.first else goal.second;
+                const scale = @max(@abs(c.goal.?), c.minval) / c.weight;
+                const b = &self.bisection[base];
+                b.* = core.bisect.Bisect.init(a, t.method, t.spec.lo[0], t.spec.hi[0], scale, t.options);
+                try self.search(t, template.items, base, b);
+                break :blk (&b.x)[0..1];
+            };
+            row.* = try t.rows(a, &self.prepared.circuit, x, base);
         }
-        const best = try t.rows(a, &self.prepared.circuit, lm.x);
-        const refs, const values = best.writes(0);
-        deck.variants.starts = try a.dupe(u32, &.{ 0, @intCast(refs.len), @intCast(2 * refs.len) });
-        deck.variants.refs = try std.mem.concat(a, u32, &.{ refs, refs });
-        deck.variants.values = try std.mem.concat(a, f64, &.{ values, values });
-        self.optimization = lm;
+        try starts.append(a, 0);
+        for (0..planned.starts.len - 1) |v| {
+            const w_refs, const w_values = if (v < 2 * n) best[v % n].writes(0) else planned.writes(@intCast(v));
+            try refs.appendSlice(a, w_refs);
+            try values.appendSlice(a, w_values);
+            try starts.append(a, @intCast(refs.items.len));
+        }
+        deck.variants.starts = starts.items;
+        deck.variants.refs = refs.items;
+        deck.variants.values = values.items;
+    }
+
+    /// Feeds `solver` (`core.lm.Lm` or `core.bisect.Bisect`) the residuals
+    /// of the points it asks for until it stops.
+    fn search(self: *Problem, t: *frontend.Tuner, template: []const Query, base: usize, solver: anytype) !void {
+        const n = t.spec.live.len;
+        const m = t.results.len;
+        var residuals: std.ArrayList(f64) = .empty;
+        defer residuals.deinit(self.allocator);
+        while (solver.points().len != 0) {
+            const points = solver.points();
+            try residuals.resize(self.allocator, points.len / n * m);
+            try self.evaluatePoints(t, template, base, points, residuals.items);
+            try solver.feed(residuals.items);
+        }
     }
 
     /// Residuals of each point of `points` (the optimized parameters'
-    /// values, n per point) into `out`, m per point: the RESULTS cards'
+    /// values, n per point, on top of `t.bases[base]`) into `out`, m per
+    /// point: the RESULTS cards'
     /// goal errors over the `template` queries run at that point, NaN where
     /// a query failed or a card found no value.
-    fn evaluatePoints(self: *Problem, t: *frontend.Tuner, template: []const Query, points: []const f64, out: []f64) !void {
+    fn evaluatePoints(self: *Problem, t: *frontend.Tuner, template: []const Query, base: usize, points: []const f64, out: []f64) !void {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const a = arena.allocator();
         const count = points.len / t.spec.live.len;
         var deck = self.prepared.deck;
-        deck.variants = try t.rows(a, &self.prepared.circuit, points);
+        deck.variants = try t.rows(a, &self.prepared.circuit, points, base);
         const jobs = try a.alloc(Query, count * template.len);
         for (0..count) |p| for (template, jobs[p * template.len ..][0..template.len]) |job, *copy| {
             copy.* = job;
@@ -590,9 +634,9 @@ fn printSessionMeasures(session: *const analysis.session.Session, out: *std.Io.W
 /// The optimizer's summary, after HSPICE's: one line per accepted
 /// iteration, the stop reason, the final figures, the optimized parameters
 /// and each RESULTS card's error at the optimum.
-fn printOptimization(out: *std.Io.Writer, lm: *const core.lm.Lm, t: *const frontend.Tuner, measures: []const core.Measure) !void {
+fn printOptimization(out: *std.Io.Writer, lm: *const core.lm.Lm, t: *const frontend.Tuner, base: usize, measures: []const core.Measure) !void {
     const o = t.options;
-    try out.print("\n  Optimization {s} (Levenberg-Marquardt, model {s})\n\n  iter  evals  residual sum of squares  marquardt param", .{ t.spec.name, t.spec.model });
+    try out.print("\n  Optimization {s} (Levenberg-Marquardt, model {s}){s}{s}\n\n  iter  evals  residual sum of squares  marquardt param", .{ t.spec.name, t.spec.model, if (t.bases[base].label.len != 0) " at " else "", t.bases[base].label });
     for (t.names) |name| try out.print("  {s:>14}", .{name});
     try out.writeAll("\n");
     const h = lm.history;
@@ -633,6 +677,37 @@ fn printOptimization(out: *std.Io.Writer, lm: *const core.lm.Lm, t: *const front
         try out.print("  {s} = {e:.6} $ initial {e:.6}, range {e:.6} to {e:.6}\n", .{ name, x, x0, lo, hi });
     try out.writeAll("\n  goal errors at the optimum (weight * (result - goal) / max(|goal|, minval))\n");
     for (t.results, lm.r) |card, r| try out.print("  error({s}) = {e:.6}\n", .{ measures[card].name, r });
+}
+
+/// The bisection summary: one line per midpoint test with the window it
+/// halved, the stop reason, and the last passing value [SA Ch.19].
+fn printBisection(out: *std.Io.Writer, b: *const core.bisect.Bisect, t: *const frontend.Tuner, base: usize, measures: []const core.Measure) !void {
+    const o = t.options;
+    try out.print("\n  Optimization {s} ({s}, model {s}){s}{s}\n\n  iter             xlo             xhi               x      goal error\n", .{ t.spec.name, @tagName(b.method), t.spec.model, if (t.bases[base].label.len != 0) " at " else "", t.bases[base].label });
+    const h = b.history;
+    for (h.lo.items, h.hi.items, h.x.items, h.r.items, 1..) |lo, hi, x, r, k|
+        try out.print("  {d:>4}  {e:>14.6}  {e:>14.6}  {e:>14.6}  {e:>14.6}\n", .{ k, lo, hi, x, r });
+    try out.writeAll("\n");
+    switch (b.status) {
+        .converged => if (o.absin > 0)
+            try out.print("  optimization completed: ABSIN = {e} satisfied\n", .{o.absin})
+        else if (b.method == .passfail)
+            try out.print("  optimization completed: RELIN = {e} satisfied\n", .{o.relin})
+        else
+            try out.print("  optimization completed: RELIN = {e} and {s} = {e} satisfied\n", .{ o.relin, if (o.absout > 0) "ABSOUT" else "RELOUT", if (o.absout > 0) o.absout else o.relout }),
+        .itropt => try out.print("  optimization incomplete: ITROPT = {d} iterations reached\n", .{o.itropt}),
+        .bounds => try out.print("  optimization failed: both limits of {s} {s}, so they do not bracket the goal\n", .{ t.names[0], if (b.pass_hi) "pass" else "fail" }),
+        .failed, .running => try out.writeAll("  optimization failed: a point could not be simulated or measured\n"),
+    }
+    try out.print(
+        \\  no. of function evaluations   = {d}
+        \\  no. of iterations             = {d}
+        \\
+        \\  optimized parameters {s} -- final values
+        \\  {s} = {e:.6} $ last passing value, range {e:.6} to {e:.6}
+        \\  error({s}) = {e:.6}
+        \\
+    , .{ b.evaluations, b.iterations, t.spec.name, t.names[0], b.x, t.spec.lo[0], t.spec.hi[0], measures[t.results[0]].name, b.r });
 }
 
 /// Prints the time since `start.*` under `label` and restarts the lap.

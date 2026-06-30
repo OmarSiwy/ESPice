@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "METHOD=BISECTION over a transient: MAX v(out) by 1 us passes above its GOAL, which needs a small enough R.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "1 - exp(-1 us / (R 1 nF)) = 0.5 at R = 1e-6 / (1e-9 ln 2) = 1442.695 ohm; the window ends within 1e-6 * 9900 ohm."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "plots": [],
+    "checks": [
+      {
+        "kind": "measure",
+        "name": "rv",
+        "value": 1442.6950408889634,
+        "rtol": 0.001,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "vmax",
+        "value": 0.5,
+        "rtol": 0.001,
+        "atol": 0
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "notes": [
+    "The tolerance covers the transient's truncation error in v(out) at 1 us."
+  ],
+  "netlist_sha256": "d537454a665cbef67947484952be0169a21919ad50b98637cbc96ce63a507198"
+}

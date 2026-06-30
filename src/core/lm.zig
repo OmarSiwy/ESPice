@@ -33,6 +33,11 @@ pub const Options = struct {
     grad: f64 = 1e-6,
     /// Stop when the Marquardt parameter exceeds this.
     max: f64 = 6e5,
+    /// Bisection only (`bisect.zig`): an absolute window width that ends
+    /// the search, overriding RELIN, RELOUT and ITROPT; 0 is unset.
+    absin: f64 = 0,
+    /// Bisection only: an absolute measure tolerance replacing RELOUT; 0 is unset.
+    absout: f64 = 0,
 };
 
 /// Why the optimizer stopped; `running` until it has.

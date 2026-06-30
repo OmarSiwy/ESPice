@@ -1,7 +1,9 @@
 # Optimization: HSPICE `OPTIMIZE=`
 
 HSPICE fits `.param` values to `.meas` goals with a bounded
-Levenberg-Marquardt search [SA Ch.27; CR .MODEL (Optimization)]. This page
+Levenberg-Marquardt search [SA Ch.27; CR .MODEL (Optimization)], or
+bisects one parameter for the value where a `.meas` turns from fail to
+pass [SA Ch.19 "Timing Analysis Using Bisection"]. This page
 covers what ESPice reads, how a point is evaluated, the choices that are
 ours, and what is not supported (hspice-comparison C8).
 
@@ -21,11 +23,17 @@ ours, and what is not supported (hspice-comparison C8).
 | `.param p = OPTRANGE(init, lo, hi[, dels])` | the same, for the deck's one optimization whatever its name |
 | `<card> ... SWEEP OPTIMIZE=NAME RESULTS=m1,m2 MODEL=mod` | any analysis card (`.dc`, `.ac`, `.tran`, ...) fits the parameters to the RESULTS cards |
 | `.meas ... GOAL=g [WEIGHT=w] [MINVAL=v]` | the card's error is `w (result - g) / max(|g|, v)`; MINVAL defaults to 1e-12 |
-| `.model mod OPT` keys | ITROPT (20), RELIN (1e-3), RELOUT (1e-3), CLOSE (1), CUT (2), DIFSIZ (1e-3), PARMIN (0.1), GRAD (1e-6), MAX (6e5), LEVEL=1, METHOD=LM; CENDIF is read and ignored |
+| `.meas ... GOAL < g`, `GOAL > g` [SA Ch.27 "Optimization Statements"] | an inequality: no error while the result is on that side of g, the equality error otherwise (`GOAL=<g` and `GOAL=>g` read the same) |
+| `.model mod OPT` keys | ITROPT (20), RELIN (1e-3), RELOUT (1e-3), CLOSE (1), CUT (2), DIFSIZ (1e-3), PARMIN (0.1), GRAD (1e-6), MAX (6e5), ABSIN, ABSOUT; CENDIF and DYNACC are read and ignored |
+| `METHOD=LM\|BISECTION\|PASSFAIL`, `LEVEL=1\|2\|3` [CR .MODEL] | the search: Levenberg-Marquardt (LEVEL 1, the default), bisection (2) or pass/fail (3); METHOD wins over LEVEL |
+| `RESULT=` | read as `RESULTS=`, as the manual's bisection example writes it [SA Ch.19] |
+| `.step` with `OPTIMIZE=` | one optimization per step point, each from that point's values |
 
 The optimized card, and every analysis card after it, run once more at
-the optimum. Their plots carry the label ` (optimize=NAME)`; cards before
-it run at the initial values. `.meas` then prints over those final runs.
+the optimum. Their plots carry the label ` (optimize=NAME)`, plus the step
+point's label under `.step` (` (optimize=opt1, rt=1000)`); cards before
+it run at the initial values, once per step point. `.meas` then prints
+over those final runs.
 
 ## 2. The algorithm
 
@@ -47,6 +55,27 @@ points run.
    to `max(|x|, PARMIN)`; the sum of squares dropped by less than RELOUT
    relative, or reached zero; the scaled gradient norm is below GRAD; λ
    passed MAX; ITROPT iterations.
+
+### Bisection and pass/fail
+
+`core/bisect.zig` holds the search, with the same `points`/`feed`
+contract as `Lm`. It searches one parameter between its limits; the
+initial value is ignored [SA Ch.19].
+
+1. Both limits are tested in one batch. A BISECTION test passes when the
+   RESULTS card's goal error is positive (measure above GOAL, the
+   manual's "measured value - goal > 0"); a PASSFAIL test passes when the
+   card has a value at all. If both limits pass or both fail, the search
+   stops: they do not bracket the target.
+2. Each iteration tests the window's midpoint and moves the limit on its
+   side. The result is the last passing value.
+3. Stop when the window is at most ABSIN wide, when given (ABSIN
+   overrides RELIN, RELOUT and ITROPT [CR .MODEL]); otherwise when it is
+   at most RELIN times the initial window and, for BISECTION, the last
+   goal error is below RELOUT (or the error in measure units below
+   ABSOUT); or after ITROPT iterations. A BISECTION test that cannot be
+   simulated or measured stops the search as failed; under PASSFAIL that
+   is a fail.
 
 ## 3. How a point is evaluated
 
@@ -79,6 +108,13 @@ When the optimization ends, the optimum's writes fill the rows that the
 optimized card and the cards after it run. The optimization runs once,
 before the first query advances (`run_all`, `advance`, `advance_ready`).
 
+Under `.step` the planner (`Planner.planOptimize`) lays out S step
+points as three blocks of S rows: the optimized card's, the later cards',
+and the earlier cards' (at the initial values). The facade runs one
+optimization per step point in turn, each over rows on top of that
+point's writes (`Tuner.rows(..., base)`), and the optimum of point k
+fills row k of the first two blocks.
+
 ## 4. Output
 
 `print_measures` prints the summary ahead of the `.meas` lines:
@@ -105,6 +141,11 @@ before the first query advances (`run_all`, `advance`, `advance_ready`).
   error(vout) = 1.133169e-6
 ```
 
+A bisection prints one line per midpoint test (the window it halved, the
+value and its goal error), the stop reason, the evaluation and iteration
+counts, and `rx = <value> $ last passing value, range <lo> to <hi>`.
+Under `.step`, each summary's title ends with ` at <step label>`.
+
 A goal outside the ranges ends with `optimization stopped at a limit: the
 goals are not reachable inside the parameter ranges` and a
 `<name> is held at its upper limit <value>` line per parameter held on a
@@ -128,22 +169,35 @@ These are not checked against an HSPICE run.
   add a plain analysis card after the optimizing one for the final run.
   The optimizing card also publishes its own run at the optimum.
 - **OPTRANGE** parameters join the deck's one optimization.
+- **Inequality goals**: the manual gives the syntax, `GOAL = | < | > val`
+  with a space around the operator (E-2010.12 p. 873; the operator glyphs
+  are missing from that PDF), and says to use it when some criteria
+  matter less than others. It does not give the error of a violated
+  inequality; ours is the equality error, so a violated card pulls like
+  `GOAL=`.
+- **`.step` with OPTIMIZE** runs one independent optimization per step
+  point. The manual does not describe the combination.
+- **Bisection reports the last passing value** and its goal error. The
+  RELOUT test reads the goal error, which is relative to max(|GOAL|,
+  MINVAL); ABSOUT reads the same error in measure units.
 
 ## 6. Not supported
 
 Each of these is refused with `UnsupportedCard` or `ParseError`, never
 run another way:
 
-- `METHOD=BISECTION`, `METHOD=PASSFAIL` and `.meas ... pushout=`.
-- `LEVEL` other than 1, and `.model OPT` keys not listed in §1.
+- `.meas ... pushout=`.
+- A bisection over more than one parameter or RESULTS card: the manual
+  does not say how several bisected parameters combine. A bisection on a
+  `GOAL <`/`GOAL >` card, whose error is zero on both sides of a pass.
+- `LEVEL` other than 1 to 3, and `.model OPT` keys not listed in §1.
 - More than one `OPTIMIZE=` card in a deck, and `OPTIMIZE=` together with
-  `.step`, `.alter` or another card's `SWEEP` (`.dc DATA=d OPTIMIZE=` fits
-  to a table and is not read).
+  `.alter` or another card's `SWEEP` (`.dc DATA=d OPTIMIZE=` fits to a
+  table and is not read). A `.step` point that changes the topology.
 - A RESULTS name that is not a `.meas` card of the optimizing card's
   analysis with `GOAL=`.
 - A value that changes the topology (for example, one that crosses zero
   and collapses a node) at an optimizer point.
-- `GOAL` inequalities (`GOAL=>v`, `GOAL=<v`).
 - A `.model` card that reads an optimized parameter, as for `.step`
   (variants.md §4): models are read before the analysis cards that make
   the parameter live.
@@ -157,6 +211,14 @@ run another way:
   (rx = 2k/3 to 1e-5), `rc_delay_fit` (R = 1 µs / (1 nF ln 2) through
   OPTRANGE on a transient), `two_param_ladder` (two parameters, two goals,
   unique solution 2k/2k), `unreachable_goal` (rx held at 10k).
-  `invalid/optimize_bisection` asserts the METHOD=BISECTION refusal.
+  `inequality_goals` (one satisfied and one violated inequality: v =
+  30/13 V), `step_optimize` (one fit per step point, rx = 2 rt / 3, checked
+  through the later `.op` at each optimum), `bisection_divider` (rx =
+  2k/3), `bisection_rc_max` (R = 1 µs / (1 nF ln 2) through MAX on a
+  transient) and `passfail_level3` (LEVEL=3 on whether a WHEN finds its
+  crossing). `invalid/optimize_bisection` asserts the refusal of a
+  two-parameter bisection.
+- `core/bisect.zig` unit tests: a divider bisected from its passing side,
+  and pass/fail with a non-bracketing pair of limits.
 - The output with `--jobs=4` is byte-identical to `--jobs=1` on
   `two_param_ladder` and `rc_delay_fit`.

@@ -235,7 +235,13 @@ fn stdParams(arena: std.mem.Allocator, c: *Clause, analysis: Kind, w: []const Wo
             },
             else => {},
         }
-        const v: f64 = if (std.mem.eql(u8, rhs, "last")) core.measure_last else try ctx.measureValue(rhs);
+        const bound: core.GoalBound = if (key != .goal) .equal else switch (rhs[0]) {
+            '<' => .below,
+            '>' => .above,
+            else => .equal,
+        };
+        const text = if (bound == .equal) rhs else std.mem.trim(u8, rhs[1..], " \t");
+        const v: f64 = if (std.mem.eql(u8, text, "last")) core.measure_last else try ctx.measureValue(text);
         switch (key) {
             .rise, .fall, .cross => {
                 const n = std.math.lossyCast(i32, @floor(v + 0.5));
@@ -247,7 +253,10 @@ fn stdParams(arena: std.mem.Allocator, c: *Clause, analysis: Kind, w: []const Wo
             .minval => c.minval = v,
             .ignor, .ymin => c.ymin = v,
             .ymax => c.ymax = v,
-            .goal => c.goal = v,
+            .goal => {
+                c.goal = v;
+                c.goal_bound = bound;
+            },
             .weight => c.weight = v,
             .print => {},
             .minfreq => c.from = v,
@@ -292,7 +301,17 @@ fn words(arena: std.mem.Allocator, text: []const u8) ![]Word {
             const last = &out.items[out.items.len - 1];
             const value = if (tok[0] == '=') tok[1..] else tok;
             pending_eq = value.len == 0;
-            last.rhs = value;
+            // `goal > v`: the rhs runs from the operator to the value.
+            const op = last.rhs orelse "";
+            last.rhs = if (op.len != 0 and (op[0] == '<' or op[0] == '>')) text[@intFromPtr(op.ptr) - @intFromPtr(text.ptr) .. i] else value;
+            continue;
+        }
+        if ((tok[0] == '<' or tok[0] == '>') and out.items.len > 0 and out.items[out.items.len - 1].rhs == null and
+            std.mem.eql(u8, out.items[out.items.len - 1].lhs, "goal"))
+        {
+            // HSPICE `GOAL < v` / `GOAL > v` [SA Ch.27]: the operator stays in the rhs.
+            out.items[out.items.len - 1].rhs = tok;
+            pending_eq = tok.len == 1;
             continue;
         }
         if (eq) |e| {
@@ -349,6 +368,13 @@ test "meas cards parse like ngspice's word lists" {
     try std.testing.expectEqual(3.0, p.goalError(4).?);
     const g = try parse(a, "dc v find v(out) at=5 goal=0 minval=0.5", Ctx{}, null, false);
     try std.testing.expectEqual(0.4, g.goalError(0.2).?);
+    const above = try parse(a, "dc v find v(out) at=5 goal > 2", Ctx{}, null, false);
+    try std.testing.expectEqual(.above, above.first.goal_bound);
+    try std.testing.expectEqual(0, above.goalError(3).?);
+    try std.testing.expectEqual(-0.5, above.goalError(1).?);
+    const below = try parse(a, "dc v find v(out) at=5 goal <2 weight=2", Ctx{}, null, false);
+    try std.testing.expectEqual(0, below.goalError(1).?);
+    try std.testing.expectEqual(1.0, below.goalError(3).?);
     const s = try parse(a, "tran s derivative v(out) at=1e-9", Ctx{}, null, false);
     try std.testing.expectEqual(.deriv, s.func);
     try std.testing.expectEqual(1e-9, s.first.at);

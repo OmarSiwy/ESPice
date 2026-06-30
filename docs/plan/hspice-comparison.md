@@ -142,14 +142,14 @@ the build-order id in the last column.
 | Feature | What it does | ESPice | VACASK | Value | Build id, size |
 |---|---|---|---|---|---|
 | `AGAUSS GAUSS AUNIF UNIF LIMIT` in `.PARAM` [CR .PARAM] | Monte Carlo distributions; nominal outside Monte Carlo | resolved only when multiplied by zero (`frontend/expr.zig`); S6 otherwise | `gauss agauss unif aunif` | very high: every PDK uses them | A2 (nominal, S), C3 |
-| `SWEEP MONTE=val \| val firstrun=n \| list(...)` on `.DC/.AC/.TRAN` [CR .DC] | Monte Carlo around any analysis | `.mc N var`: Gaussian on each device's primary value, DC only (`sweep/mc.zig`) | `mc ... endmc` around any analysis | very high | C3, L |
-| `.MODEL ... p=v DEV/n/dist=σ LOT/n/dist=σ` [CR .MODEL] | per-device and per-lot draws on model parameters | not parsed | no | high for older PDKs | C3 |
+| `SWEEP MONTE=val \| val firstrun=n \| list(...)` on `.DC/.AC/.TRAN` [CR .DC] | Monte Carlo around any analysis | all three forms, `list(a b:c)` included ([variants.md](../analysis/variants.md)) | `mc ... endmc` around any analysis | very high | C3, L |
+| `.MODEL ... p=v DEV/n/dist=σ LOT/n/dist=σ` [CR .MODEL] | per-device and per-lot draws on model parameters | yes; a GAUSS value is 3 sigma [SA Ch.20], not checked against HSPICE ([variants.md](../analysis/variants.md)); AGAUSS/AUNIF and the blank-separated `dev/2 0.1` form are refused | no | high for older PDKs | C3 |
 | `.VARIATION` with global, local, element and spatial blocks [CR .VARIATION; SA Ch.21-22] | Synopsys's variation block: random variables, per-parameter sigma, the source for MONTE, DCMATCH, ACMATCH and DCSENS | parse error | no | high for Synopsys-format PDKs | C3, part of L |
 | `.OPTION SAMPLING_METHOD=SRS\|LHS\|Factorial\|OFAT\|Sobol\|Niederreiter`, `SEED`, `MODMONTE`, `MONTECON` [CR Ch.3] | sampling plans | seeded Gaussian only | LHS by default | medium | C3 |
 | `.LIB 'f' corner` plus `.ALTER` with `.DEL LIB` [CR .LIB; SA Ch.4] | corners | `.lib` sections work (`frontend/source.zig`); no `.alter` (S2) | `alter` | very high | C1, M |
-| `.DATA` inline, `MER`, `LAM` [CR .DATA] | table-driven sweeps | parse error | no | high for characterization | C1 |
+| `.DATA` inline, `MER`, `LAM` [CR .DATA] | table-driven sweeps | yes; `OUT=` refused ([variants.md](../analysis/variants.md)) | no | high for characterization | C1 |
 | `.DESIGN_EXPLORATION` [CR; SA Ch.26] | design-space sweep block | no | no | low | E8, S after C1 |
-| `.MODEL m OPT [METHOD=BISECTION\|PASSFAIL] ...`, `p=OPTxxx(init,lo,hi)`, `OPTIMIZE= RESULTS= MODEL=` [CR .MODEL; SA Ch.27] | Levenberg-Marquardt fitting of parameters to `.MEASURE GOAL=` targets; bisection and pass/fail searches | LM: yes ([optimize.md](../analysis/optimize.md)); bisection, pass/fail: no | no | medium to high for sizing and model fitting | C8, L |
+| `.MODEL m OPT [METHOD=BISECTION\|PASSFAIL] ...`, `p=OPTxxx(init,lo,hi)`, `OPTIMIZE= RESULTS= MODEL=` [CR .MODEL; SA Ch.27] | Levenberg-Marquardt fitting of parameters to `.MEASURE GOAL=` targets; bisection and pass/fail searches | yes ([optimize.md](../analysis/optimize.md)): LM, bisection and pass/fail (METHOD or LEVEL 1-3), `GOAL <`/`GOAL >`, under `.step`; a bisection searches one parameter | no | medium to high for sizing and model fitting | C8, L |
 | `.MEASURE ... pushout=` [CR .MEASURE (Pushout Bisection); SA Ch.19] | setup/hold search by bisection | no | no | medium for cell characterization | C8 |
 
 ### 2.4 Measurement and output
@@ -180,7 +180,7 @@ the build-order id in the last column.
 | `.SAVE [TYPE=NODESET\|IC] [LEVEL=] [TIME=]`, `.LOAD [FILE=]` [CR] | write and reuse an OP | `.save` is read as ngspice vector selection | `store=`/`nodeset=` | medium | C6, S |
 | `.STORE [time= repeat=]` [CR .STORE] | transient checkpoint and restart | no | no | medium for long runs | C6, M |
 | `.ALTER`, `.DEL LIB` [CR; SA Ch.4] | rerun with edits | S2 | `alter` | very high | C1, M |
-| `.DATA ... .ENDDATA` [CR .DATA] | tables | parse error | no | high | C1 |
+| `.DATA ... .ENDDATA` [CR .DATA] | tables | yes, inline and external | no | high | C1 |
 | `.PARAM` expressions, UDFs `f(a,b)='...'`, `str()` [CR .PARAM] | parameters | reals, about 20 functions | 62 functions | medium | not ranked here |
 | `.LIB`, `.INCLUDE`, `.HDL`, `.IF/.ELSEIF/.ELSE/.ENDIF`, `.SUBCKT` with parameters, `.PROTECT/.UNPROTECT` | library and hierarchy | yes (`frontend/source.zig`, `netlist.zig`); `.protect` is ignored, which is correct for simulation | yes | done | done |
 | `.MACRO/.EOM`, `.ALIAS`, `.MALIAS`, `.SWEEPBLOCK`, `.TITLE` | synonyms, model aliases, sweep unions | no | no | low | A1 then S each |
@@ -493,8 +493,9 @@ applies. Bisection and pass/fail (`METHOD=BISECTION|PASSFAIL`, `pushout=`)
 are a 1-D root find over one parameter on one measure. HSPICE runs these
 serially, as far as its manual describes.
 
-Status: Levenberg-Marquardt landed; see [optimize.md](../analysis/optimize.md).
-Bisection, pass/fail and `pushout=` are refused.
+Status: Levenberg-Marquardt, bisection and pass/fail landed, with
+inequality goals and `.step`; see [optimize.md](../analysis/optimize.md).
+`pushout=` and a bisection over several parameters are refused.
 
 ### D1 to D7. RF
 
@@ -582,7 +583,7 @@ tier, the smaller item with more users goes first.
 | 26 | D2 | Multi-tone sparse HB with lane preconditioner and phasors | L |
 | 27 | D4 | `.phasenoise` (METHOD=0, white sources: done, [phase-noise.md](../analysis/phase-noise.md)), then `.acphasenoise` | M, M |
 | 28 | C7 | HSPICE `.trannoise`, flicker noise, `.jitter` | M |
-| 29 | C8 | Optimization (LM: done, [optimize.md](../analysis/optimize.md); bisection, pass/fail, pushout) | L |
+| 29 | C8 | Optimization (LM, bisection, pass/fail: done, [optimize.md](../analysis/optimize.md); pushout) | L |
 | 30 | B6 | `.disto` SIM2/DIM2/DIM3 and the Rload form | M |
 | 31 | D5 | `.hblin`, `.hblsp` | M each |
 | 32 | D6 | `.ptdnoise`, `.sample` | M, S |

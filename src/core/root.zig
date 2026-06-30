@@ -4,6 +4,7 @@ const std = @import("std");
 pub const numerics = @import("numerics.zig");
 pub const query = @import("query.zig");
 pub const lm = @import("lm.zig");
+pub const bisect = @import("bisect.zig");
 pub const QueryId = query.QueryId;
 
 const deck = @import("deck.zig");
@@ -14,6 +15,7 @@ pub const Variants = deck.Variants;
 pub const QueryBindings = deck.QueryBindings;
 pub const Measure = deck.Measure;
 pub const MeasureClause = deck.MeasureClause;
+pub const GoalBound = deck.GoalBound;
 pub const MeasureFunc = deck.MeasureFunc;
 pub const MeasureOp = deck.MeasureOp;
 pub const MeasureRef = deck.MeasureRef;
@@ -43,4 +45,5 @@ test {
     _ = numerics;
     _ = intern;
     _ = lm;
+    _ = bisect;
 }

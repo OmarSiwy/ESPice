@@ -1525,13 +1525,14 @@ fn Reader(comptime S: type) type {
             return .{ .args = args[0..i], .sweep = sweep };
         }
 
-        /// `OPTIMIZE=name RESULTS=m1,m2 MODEL=optmod`, in any order, and the
+        /// `OPTIMIZE=name RESULTS=m1,m2 MODEL=optmod`, in any order (`RESULT=`
+        /// as in the manual's bisection example [SA Ch.19]), and the
         /// parameters `name(...)` or `OPTRANGE(...)` define, registered live
         /// at their initial values in deck order.
         fn readOptimize(r: *R, tail: []const Value) Error!Optimize {
             var opt: Optimize = .{ .name = "", .results = &.{}, .model = "", .live = &.{}, .lo = &.{}, .hi = &.{}, .dels = &.{} };
             var results: std.ArrayList([]const u8) = .empty;
-            const Key = enum { none, optimize, results, model };
+            const Key = enum { none, optimize, results, result, model };
             var key: Key = .none;
             for (tail) |v| {
                 if (v != .name) return error.ParseError;
@@ -1542,7 +1543,7 @@ fn Reader(comptime S: type) type {
                 switch (key) {
                     .optimize => opt.name = v.name,
                     .model => opt.model = v.name,
-                    .results => try results.append(r.arena, v.name),
+                    .results, .result => try results.append(r.arena, v.name),
                     .none => return error.ParseError,
                 }
             }

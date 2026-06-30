@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "analysis": "dc",
+  "purpose": "LEVEL=3 (PASSFAIL): bisection on whether the RESULTS measure has a value at all.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "WHEN v(out)=2 exists in the 0-5 V sweep iff 5 rx / (1k + rx) >= 2, i.e. rx >= 2k/3; the result is the last passing value, within 1e-4 ohm above."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "plots": [],
+    "checks": [
+      {
+        "kind": "measure",
+        "name": "rx",
+        "value": 666.6666666666666,
+        "rtol": 1e-06,
+        "atol": 0
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "notes": [
+    "The final run measures vcross just below 5 V, since the crossing sits at the sweep's top."
+  ],
+  "netlist_sha256": "076c3b53e96f7879fdf070567d775a24c199f6c1476d4efdf11a6d86ea908866"
+}

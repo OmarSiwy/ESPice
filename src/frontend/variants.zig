@@ -69,7 +69,7 @@ pub fn plan(p: *Planner) !Plan {
         p.card = @intCast(ci);
         switch (a.sweep) {
             .none, .optimize => unreachable,
-            .step => |st| for (st.values) |v| try p.addStep(&.{st}, &.{v}),
+            .step => |st| for (st.values) |v| try p.add(try p.stepPoint(&.{st}, &.{v})),
             .data => |name| {
                 const table = for (deck.data) |d| {
                     if (std.mem.eql(u8, d.name, name)) break d;
@@ -100,7 +100,9 @@ pub fn plan(p: *Planner) !Plan {
     if (deck.steps.len != 0) {
         const values = try p.scratch.alloc(f64, deck.steps.len);
         fanout.global = .{ .first = p.count(), .nominal = false };
-        try p.addGrid(deck.steps, values, 0);
+        var points: std.ArrayList(Point) = .empty;
+        try p.grid(deck.steps, values, 0, &points);
+        for (points.items) |pt| try p.add(pt);
         fanout.global.count = p.count() - fanout.global.first;
     }
     if (deck.alters.len != 0) {
@@ -182,22 +184,46 @@ pub const Planner = struct {
         return error.UnsupportedCard;
     }
 
-    /// HSPICE `OPTIMIZE=`: row 0 is the optimized card's, row 1 every later
-    /// card's. Both start empty (the initial values) and receive the
-    /// optimum's writes once the optimizer has run (`Tuner`).
+    /// HSPICE `OPTIMIZE=`, once per base point (`bases`: each `.step`
+    /// point, or the nominal one). With S of them, rows 0..S are the
+    /// optimized card's and S..2S every later card's: the base point's
+    /// writes, which the optimum's replace once its optimizer has run
+    /// (`Tuner`). Under `.step`, rows 2S..3S run the earlier cards at the
+    /// initial values; without it they run nominal.
     fn planOptimize(p: *Planner) !Plan {
         const deck = p.nl.deck;
+        const bases = try p.basePoints();
+        const n: u32 = @intCast(bases.len);
+        const stepped = deck.steps.len != 0;
         const spans = try p.sim.alloc(analyses.Fanout.Span, deck.analyses.len);
         var card: ?u32 = null;
         for (deck.analyses, spans, 0..) |a, *span, ci| {
             if (a.sweep == .optimize) card = @intCast(ci) else if (a.sweep != .none) return p.refuse(a.line, "OPTIMIZE together with another SWEEP");
-            span.* = if (card) |c| .{ .first = @intFromBool(c != ci), .count = 1, .nominal = false } else .{};
+            const block: ?u32 = if (card) |c| @intFromBool(c != ci) else if (stepped) 2 else null;
+            span.* = if (block) |b| .{ .first = b * n, .count = n, .nominal = false } else .{};
         }
-        if (deck.steps.len != 0 or deck.alters.len != 0) return p.refuse(deck.analyses[card.?].line, "OPTIMIZE together with .step or .alter");
-        const label = try std.fmt.allocPrint(p.sim, "optimize={s}", .{deck.optimize.?.name});
-        try p.closeRow(label, 0, null);
-        try p.closeRow(label, 0, null);
+        if (deck.alters.len != 0) return p.refuse(deck.analyses[card.?].line, "OPTIMIZE together with .alter");
+        for (0..@as(u32, if (stepped) 3 else 2)) |block| for (bases) |pt| {
+            var row = pt;
+            if (block < 2) row.label = if (pt.label.len == 0)
+                try std.fmt.allocPrint(p.scratch, "optimize={s}", .{deck.optimize.?.name})
+            else
+                try std.fmt.allocPrint(p.scratch, "optimize={s}, {s}", .{ deck.optimize.?.name, pt.label });
+            try p.add(row);
+        };
+        if (p.runs.items.len != 0) return p.refuse(deck.analyses[card.?].line, "OPTIMIZE over a .step point that changes the topology");
         return .{ .variants = try p.table(), .fanout = .{ .cards = spans } };
+    }
+
+    /// The points an optimization runs from: each `.step` point, or the
+    /// nominal one.
+    fn basePoints(p: *Planner) ![]const Point {
+        const steps = p.nl.deck.steps;
+        var out: std.ArrayList(Point) = .empty;
+        if (steps.len == 0) {
+            try out.append(p.scratch, .{ .label = "", .axis = 0, .live = p.nl.live.nominal });
+        } else try p.grid(steps, try p.scratch.alloc(f64, steps.len), 0, &out);
+        return out.items;
     }
 
     /// The rows so far, copied into the session arena.
@@ -212,18 +238,18 @@ pub const Planner = struct {
         };
     }
 
-    /// The `.step` cartesian product from card `depth` on; the last card
-    /// varies fastest.
-    fn addGrid(p: *Planner, steps: []const netlist.Step, values: []f64, depth: usize) !void {
-        if (depth == steps.len) return p.addStep(steps, values);
+    /// The `.step` cartesian product from card `depth` on, appended to
+    /// `out`; the last card varies fastest.
+    fn grid(p: *Planner, steps: []const netlist.Step, values: []f64, depth: usize, out: *std.ArrayList(Point)) !void {
+        if (depth == steps.len) return out.append(p.scratch, try p.stepPoint(steps, values));
         for (steps[depth].values) |v| {
             values[depth] = v;
-            try p.addGrid(steps, values, depth + 1);
+            try p.grid(steps, values, depth + 1, out);
         }
     }
 
-    /// One point setting `steps[i]`'s target to `values[i]`.
-    fn addStep(p: *Planner, steps: []const netlist.Step, values: []const f64) !void {
+    /// The point setting `steps[i]`'s target to `values[i]`.
+    fn stepPoint(p: *Planner, steps: []const netlist.Step, values: []const f64) !Point {
         const live = try p.scratch.dupe(f64, p.nl.live.nominal);
         var pt: Point = .{ .label = "", .axis = values[0], .live = live };
         var label: std.ArrayList(u8) = .empty;
@@ -239,7 +265,7 @@ pub const Planner = struct {
         }
         pt.label = label.items;
         pt.cards = cards.items;
-        try p.add(pt);
+        return pt;
     }
 
     /// One `.data` row.
@@ -547,11 +573,16 @@ pub const Tuner = struct {
     initial: []const f64,
     names: []const []const u8,
     options: core.lm.Options,
+    method: core.bisect.Method,
     /// The RESULTS cards' indices in the deck's `.meas` cards.
     results: []const u32,
+    /// The points each optimization starts from (`Planner.basePoints`): one
+    /// optimization per `.step` point.
+    bases: []const Point,
 
     /// A tuner over the planner of the deck's main run.
     pub fn init(planner: Planner) !Tuner {
+        var pl = planner;
         const nl = planner.nl;
         const spec = nl.deck.optimize.?;
         const card: u32 = for (nl.deck.analyses, 0..) |a, ci| {
@@ -570,50 +601,64 @@ pub const Tuner = struct {
                 if (std.mem.eql(u8, m.name, name) and m.analysis == nl.deck.analyses[card].kind and m.goalError(0) != null) break @intCast(i);
             } else return planner.refuse(line, "a RESULTS name that is no .meas card of this analysis with GOAL=");
         }
-        return .{ .planner = planner, .card = card, .spec = spec, .initial = init_values, .names = names, .options = try optOptions(nl, spec.model, line), .results = results };
+        const options, const method = try optOptions(nl, spec.model, line);
+        // ponytail: one parameter and one RESULTS card for a bisection; the
+        // manual's AND over several bisected parameters is not specified.
+        if (method != .lm and (spec.live.len != 1 or results.len != 1)) return planner.refuse(line, "a bisection over more than one parameter or RESULTS card");
+        // A bisection passes on the sign of the goal error, which an inequality goal zeroes.
+        const goal = nl.deck.measures[results[0]];
+        if (method != .lm and (if (goal.first.goal != null) goal.first else goal.second).goal_bound != .equal) return planner.refuse(line, "a bisection on a GOAL < or GOAL > card");
+        return .{ .planner = planner, .card = card, .spec = spec, .initial = init_values, .names = names, .options = options, .method = method, .results = results, .bases = try pl.basePoints() };
     }
 
     /// One row per point of `points` (the optimized parameters' values,
-    /// `spec.live.len` per point), allocated in `arena`. `nominal` is the
-    /// prepared circuit the rows write into.
-    pub fn rows(t: *Tuner, arena: std.mem.Allocator, nominal: *const device.Circuit, points: []const f64) !core.Variants {
+    /// `spec.live.len` per point) on top of `bases[base]`, allocated in
+    /// `arena`. `nominal` is the prepared circuit the rows write into.
+    pub fn rows(t: *Tuner, arena: std.mem.Allocator, nominal: *const device.Circuit, points: []const f64, base: usize) !core.Variants {
         const p = &t.planner;
         p.nominal = nominal;
         p.sim = arena;
         inline for (.{ &p.labels, &p.temps, &p.axes, &p.write_refs, &p.write_values }) |list| list.clearRetainingCapacity();
         p.starts.shrinkRetainingCapacity(1);
-        const live = try arena.dupe(f64, p.nl.live.nominal);
+        const b = t.bases[base];
+        const live = try arena.dupe(f64, b.live);
         const n = t.spec.live.len;
         var at: usize = 0;
         while (at < points.len) : (at += n) {
             for (t.spec.live, points[at..][0..n]) |k, v| live[k] = v;
-            try p.add(.{ .label = "", .axis = 0, .live = live });
+            try p.add(.{ .label = "", .axis = 0, .live = live, .temp = b.temp, .cards = b.cards });
             if (p.runs.items.len != 0) return p.refuse(p.nl.deck.analyses[t.card].line, "an optimized value that changes the topology");
         }
         return p.table();
     }
 };
 
-/// The optimizer options of `.model name OPT` [SA Ch.27]. METHOD other
-/// than LM, LEVEL other than 1 and unknown keys are refused; CENDIF is
+/// The optimizer options of `.model name OPT` [CR .MODEL; SA Ch.19, 27]
+/// and its search: METHOD=BISECTION|PASSFAIL, else LEVEL 1 (LM), 2
+/// (bisection) or 3 (pass/fail); METHOD supersedes LEVEL. Unknown keys are
+/// refused; CENDIF and DYNACC (a speed-up through reduced accuracy) are
 /// accepted and ignored.
-fn optOptions(nl: *const Netlist, name: []const u8, line: []const u8) !core.lm.Options {
+fn optOptions(nl: *const Netlist, name: []const u8, line: []const u8) !struct { core.lm.Options, core.bisect.Method } {
     const model = nl.findModel(name) orelse {
         if (!@import("builtin").is_test) std.log.err("optimize: no .model {s} OPT: {s}", .{ name, line });
         return error.UnsupportedCard;
     };
     var o: core.lm.Options = .{};
-    const Key = enum { itropt, relin, relout, close, cut, difsiz, parmin, grad, max, level, method, cendif };
+    var method: ?core.bisect.Method = null;
+    var level: core.bisect.Method = .lm;
+    const Key = enum { itropt, relin, relout, close, cut, difsiz, parmin, grad, max, level, method, cendif, absin, absout, dynacc };
     const ok = std.mem.eql(u8, model.kind, "opt") and for (model.kv) |kv| {
         const key = std.meta.stringToEnum(Key, kv.key) orelse break false;
         if (key == .method) {
-            if (kv.value != .name or !std.mem.eql(u8, kv.value.name, "lm")) break false;
+            if (kv.value != .name) break false;
+            method = std.meta.stringToEnum(core.bisect.Method, kv.value.name) orelse break false;
             continue;
         }
         const v = switch (kv.value) {
             .num => |v| v,
             else => break false,
         };
+        if (key == .dynacc) continue;
         if (!(v > 0) or !std.math.isFinite(v)) break false;
         switch (key) {
             .itropt => o.itropt = std.math.lossyCast(u32, v),
@@ -625,15 +670,22 @@ fn optOptions(nl: *const Netlist, name: []const u8, line: []const u8) !core.lm.O
             .parmin => o.parmin = v,
             .grad => o.grad = v,
             .max => o.max = v,
-            .level => if (v != 1) break false,
-            .method, .cendif => {},
+            .absin => o.absin = v,
+            .absout => o.absout = v,
+            .level => level = switch (std.math.lossyCast(u8, v)) {
+                1 => .lm,
+                2 => .bisection,
+                3 => .passfail,
+                else => break false,
+            },
+            .method, .cendif, .dynacc => {},
         }
     } else true;
     if (!ok or o.cut <= 1) {
         if (!@import("builtin").is_test) std.log.err("optimize: unsupported .model {s} OPT option: {s}", .{ name, line });
         return error.UnsupportedCard;
     }
-    return o;
+    return .{ o, method orelse level };
 }
 
 fn refKey(a: std.mem.Allocator, t: core.DeviceType, name: []const u8) ![]const u8 {
