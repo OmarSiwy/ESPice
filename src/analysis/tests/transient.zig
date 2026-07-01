@@ -193,7 +193,7 @@ const TranTests = struct {
         try std.testing.expect(!eq(1.0, 1.0 + 1e-12, 100));
     }
 
-    test "waveform: doubling fallback keeps probe-major data intact" {
+    test "waveform: doubling fallback keeps the rows intact" {
         const allocator = testing.allocator;
         var waveform = try Waveform.init(allocator, 2, 2);
         defer waveform.deinit();
@@ -209,16 +209,13 @@ const TranTests = struct {
         try testing.expect(waveform.capacity >= 10);
         for (0..10) |i| {
             const fi: f64 = @floatFromInt(i);
-            try testing.expectApproxEqAbs(fi * 1e-9, waveform.timeSlice()[i], 1e-24);
-            try testing.expectApproxEqAbs(fi, waveform.probeValues(0)[i], 1e-15);
-            try testing.expectApproxEqAbs(100.0 + fi, waveform.probeValues(1)[i], 1e-15);
+            try testing.expectApproxEqAbs(fi * 1e-9, waveform.column(0).at(i), 1e-24);
+            try testing.expectApproxEqAbs(fi, waveform.column(1).at(i), 1e-15);
+            try testing.expectApproxEqAbs(100.0 + fi, waveform.column(2).at(i), 1e-15);
         }
     }
 
-    test "waveform: toRows tiling crosses tile boundaries exactly" {
-        // 70 points over a 32-point tile: two full tiles plus a 6-point remainder,
-        // with more probes than one tile of rows. Exact equality — the tiling only
-        // reorders the copy, never the values.
+    test "waveform: data is the point-major result rows, borrowed" {
         const allocator = testing.allocator;
         const n_probes = 5;
         var waveform = try Waveform.init(allocator, n_probes, 70);
@@ -232,9 +229,9 @@ const TranTests = struct {
         }
 
         const ncols = n_probes + 1;
-        const rows = try waveform.toRows(allocator, ncols);
-        defer allocator.free(rows);
+        const rows = waveform.data();
         try testing.expectEqual(@as(usize, 70 * ncols), rows.len);
+        try testing.expectEqual(@intFromPtr(waveform.rows.ptr), @intFromPtr(rows.ptr));
         for (0..70) |p| {
             try testing.expectEqual(@as(f64, @floatFromInt(p)) * 1e-9, rows[p * ncols]);
             for (0..n_probes) |k| {
@@ -602,11 +599,12 @@ const TranTests = struct {
         try testing.expect(sim.completed);
 
         // Both pulse levels must be reached.
-        const times = wf.timeSlice();
-        const vals = wf.probeValues(0);
+        const times = wf.column(0);
+        const vals = wf.column(1);
         var lo: f64 = std.math.inf(f64);
         var hi: f64 = -std.math.inf(f64);
-        for (vals) |v| {
+        for (0..vals.len) |i| {
+            const v = vals.at(i);
             lo = @min(lo, v);
             hi = @max(hi, v);
         }
@@ -615,7 +613,9 @@ const TranTests = struct {
 
         // At the right times: a stale or off-by-one-step time would still swing
         // 0..5.
-        for (times, vals) |tt, v| {
+        for (0..times.len) |i| {
+            const tt = times.at(i);
+            const v = vals.at(i);
             const want: f64 = if (tt < 2e-9 or tt > 6e-9) 0.0 else 5.0;
             // A sample may land mid-ramp on the 1 ps edges.
             const on_edge = @abs(tt - 2e-9) < 2e-12 or @abs(tt - 6e-9) < 2e-12;
@@ -735,8 +735,8 @@ const TranTests = struct {
         defer wf.deinit();
         const sim = try simulate(&ckt, x, &probes, &wf, .{ .t_stop = 1, .dt_init = 0.1, .uic = true }, gpa);
         try testing.expect(sim.completed);
-        for (wf.timeSlice()) |tt| {
-            if (tt == tc) break;
+        for (0..wf.len) |i| {
+            if (wf.time(i) == tc) break;
         } else return error.TestExpectedLanding;
     }
 };

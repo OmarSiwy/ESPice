@@ -15,6 +15,7 @@ const tran_types = @import("types.zig");
 pub const Method = tran_types.Method;
 pub const Options = tran_types.Options;
 pub const Waveform = tran_types.Waveform;
+pub const Column = tran_types.Column;
 pub const SimResult = tran_types.SimResult;
 pub const initialCapacity = tran_types.initialCapacity;
 
@@ -614,12 +615,16 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     defer scratch.free(x);
     simdCopy(x, x_op);
 
-    var wf = try Waveform.init(scratch, @intCast(ctx.probes.len), initialCapacity(opts));
-    defer wf.deinit();
+    // The recording is the published result, so it lives in the results
+    // arena and `data` is borrowed below. A `.op <time>` snapshot publishes
+    // only x, so its recording stays scratch and dies here.
+    var wf = try Waveform.init(if (opts.snapshot) scratch else a, @intCast(ctx.probes.len), initialCapacity(opts));
+    errdefer wf.deinit();
     const sim = try simulate(ctx.circuit, x, ctx.probes, &wf, opts, scratch);
     if (!sim.completed) return error.TimestepTooSmall;
     // HSPICE `.op <time>`: the state at t_stop, laid out as `.op` lays it out.
     if (opts.snapshot) {
+        wf.deinit();
         const names = try root.probeNames(ctx, null);
         const data = try a.alloc(f64, names.len);
         for (ctx.probes, data) |node, *out| out.* = x[node];
@@ -637,13 +642,12 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         for (names[1..]) |s| a.free(s); // names[0] is the "time" literal
         a.free(names);
     }
-    const data = try wf.toRows(a, names.len);
     return .{
         .plotname = "Transient Analysis",
         .varnames = names,
         .is_complex = false,
         .npoints = wf.len,
-        .data = data,
+        .data = wf.data(),
     };
 }
 

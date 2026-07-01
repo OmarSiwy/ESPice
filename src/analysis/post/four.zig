@@ -39,23 +39,22 @@ pub const Spectrum = struct {
 /// `n_harmonics` is clamped to 1..max_harmonics. Returns
 /// error.InsufficientData when the waveform is shorter than one period or the
 /// period holds fewer than two samples.
+const Column = tran.Column;
+
 pub fn analyze(waveform: *const tran.Waveform, probe_idx: u32, f_fund: f64, n_harmonics: usize, allocator: std.mem.Allocator) !Spectrum {
-    const times = waveform.timeSlice();
-    const values = waveform.probeValues(probe_idx);
+    // Both series are borrowed columns of the recording, never copied.
+    const times = waveform.column(0);
+    const values = waveform.column(probe_idx + 1);
 
     if (times.len < 2) return error.InsufficientData;
 
     const period = 1.0 / f_fund;
-    const t_end = times[times.len - 1];
+    const t_end = times.at(times.len - 1);
     const t_start = t_end - period;
 
-    if (t_start < times[0]) return error.InsufficientData;
+    if (t_start < times.at(0)) return error.InsufficientData;
 
-    const start_idx = std.sort.partitionPoint(f64, times, t_start, struct {
-        fn before(t: f64, time: f64) bool {
-            return time < t;
-        }
-    }.before);
+    const start_idx = times.lowerBound(t_start);
 
     const raw_count = times.len - start_idx;
     if (raw_count < 2) return error.InsufficientData;
@@ -70,8 +69,8 @@ pub fn analyze(waveform: *const tran.Waveform, probe_idx: u32, f_fund: f64, n_ha
 
     // n_fft uniform points on [t_start, t_end). The targets increase, so one
     // cursor walks the window forward: O(window + n_fft), no search per sample.
-    const win_times = times[start_idx..];
-    const win_vals = values[start_idx..];
+    const win_times = times.from(start_idx);
+    const win_vals = values.from(start_idx);
     var cursor: usize = 0;
     for (0..n_fft) |k| {
         const t_target = t_start + period * @as(f64, @floatFromInt(k)) / n_fft_f;
@@ -191,22 +190,22 @@ fn extractSpectrum(re: []const f64, im: []const f64, n_fft: usize, n_harmonics: 
 /// `cursor` to the bracketing index instead of searching for it. Targets must
 /// come in non-decreasing order. tests/four.zig checks it element for element
 /// against a binary-search oracle.
-pub fn interpolateAt(times: []const f64, values: []const f64, t: f64, cursor: *usize) f64 {
+pub fn interpolateAt(times: Column, values: Column, t: f64, cursor: *usize) f64 {
     if (times.len == 0) return 0;
-    if (t <= times[0]) return values[0];
-    if (t >= times[times.len - 1]) return values[values.len - 1];
+    if (t <= times.at(0)) return values.at(0);
+    if (t >= times.at(times.len - 1)) return values.at(values.len - 1);
 
     // Lands on lo = max{i : times[i] <= t}, capped at len - 2, as the binary
     // search does.
     var lo = cursor.*;
-    while (lo + 2 < times.len and times[lo + 1] <= t) lo += 1;
+    while (lo + 2 < times.len and times.at(lo + 1) <= t) lo += 1;
     cursor.* = lo;
     const hi = lo + 1;
 
-    const dt = times[hi] - times[lo];
-    if (dt < 1e-30) return values[lo];
-    const alpha = (t - times[lo]) / dt;
-    return values[lo] * (1.0 - alpha) + values[hi] * alpha;
+    const dt = times.at(hi) - times.at(lo);
+    if (dt < 1e-30) return values.at(lo);
+    const alpha = (t - times.at(lo)) / dt;
+    return values.at(lo) * (1.0 - alpha) + values.at(hi) * alpha;
 }
 
 /// Private implementation access for the analysis test suite.
