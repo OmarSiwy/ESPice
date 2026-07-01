@@ -854,11 +854,31 @@ fn limitRange(comptime D: type, sink: anytype, first: u32, end: u32, lim_active:
     return flag;
 }
 
-/// Allocator for `ProtoStore` staging rows. Not the caller's allocator, which
-/// is usually an arena: an arena keeps every abandoned `MultiArrayList`
-/// capacity alive, measured at 73 MB on a 25,000-MOSFET deck. `finalize`
-/// copies the rows once, at exact size, into the caller's allocator.
+/// Allocator for `ProtoStore` staging columns. Not the caller's allocator,
+/// which is usually an arena: an arena keeps every abandoned list capacity
+/// alive, measured at 73 MB on a 25,000-MOSFET deck. Separate per-column
+/// lists grow by remap, never by copy, and `finalize` moves one column at a
+/// time into the caller's allocator, freeing each staging column at once.
 const staging_gpa = std.heap.smp_allocator;
+
+/// Moves `items[k]` to `items[dst[k]]` for every k by following each cycle
+/// of the permutation, one element in hand at a time. `seen` is scratch of
+/// the same length; its contents on entry do not matter.
+pub fn permuteInPlace(comptime T: type, items: []T, dst: []const u32, seen: []bool) void {
+    @memset(seen, false);
+    for (0..items.len) |start| {
+        if (seen[start]) continue;
+        var held = items[start];
+        var j = start;
+        while (true) {
+            seen[j] = true;
+            const d = dst[j];
+            std.mem.swap(T, &held, &items[d]);
+            j = d;
+            if (j == start) break;
+        }
+    }
+}
 
 /// Construction-time rows for one device type: each instance's Model,
 /// Instance and nodes, staged until `finalize` freezes them into a
@@ -866,14 +886,19 @@ const staging_gpa = std.heap.smp_allocator;
 pub fn ProtoStore(comptime D: type) type {
     const n_u: usize = comptime contract.nU(D);
     return struct {
-        /// One row per instance, owned by `staging_gpa`.
-        rows: std.MultiArrayList(Row) = .empty,
+        /// One entry per instance in each column, owned by `staging_gpa`.
+        models: std.ArrayList(D.Model) = .empty,
+        instances: std.ArrayList(D.Instance) = .empty,
+        nodes: std.ArrayList([n_u]u32) = .empty,
 
         const Self = @This();
-        const Row = struct { model: D.Model, instance: D.Instance, nodes: [n_u]u32 };
 
         pub fn append(self: *Self, model: D.Model, instance: D.Instance, nodes: [n_u]u32) !void {
-            try self.rows.append(staging_gpa, .{ .model = model, .instance = instance, .nodes = nodes });
+            try self.models.append(staging_gpa, model);
+            errdefer _ = self.models.pop();
+            try self.instances.append(staging_gpa, instance);
+            errdefer _ = self.instances.pop();
+            try self.nodes.append(staging_gpa, nodes);
         }
 
         /// `Proto.pattern`: adds every (row, col) the device's structural
@@ -892,10 +917,10 @@ pub fn ProtoStore(comptime D: type) type {
                 for (pat) |m| k += @popCount(m & (std.math.maxInt(u64) >> (63 - (n_u - 1))));
                 break :blk k;
             };
-            try pb.reserve(gpa, self.rows.len * nnz);
+            try pb.reserve(gpa, self.nodes.items.len * nnz);
             // Runtime loops: this runs once per batch, and unrolling n_u^2
             // for every device only costs comptime quota.
-            for (self.rows.items(.nodes)) |nd| {
+            for (self.nodes.items) |nd| {
                 for (0..n_u) |ru| for (0..n_u) |cu| {
                     if ((pat[ru] >> @intCast(cu)) & 1 == 0) continue;
                     if (nd[ru] != GROUND and nd[cu] != GROUND)
@@ -915,7 +940,7 @@ pub fn ProtoStore(comptime D: type) type {
             const has_q = @hasDecl(D, "q");
             const has_attempt_decl = @hasDecl(D, "attempt");
             const self: *Self = @ptrCast(@alignCast(ctx));
-            const count = std.math.cast(u32, self.rows.len) orelse return error.TooManyInstances;
+            const count = std.math.cast(u32, self.nodes.items.len) orelse return error.TooManyInstances;
             const store = try gpa.create(DeviceBatch(D));
 
             store.count = count;
@@ -935,7 +960,11 @@ pub fn ProtoStore(comptime D: type) type {
             // The staged rows can only be reordered before the copies below.
             if (comptime canNarrow(D)) store.narrow_count = try self.partitionCollapsed();
 
-            store.models = try gpa.dupe(D.Model, self.rows.items(.model));
+            // Each column moves to `gpa` at exact size and its staging copy
+            // dies right after, so at most one column exists twice.
+            store.models = try gpa.dupe(D.Model, self.models.items);
+            self.models.deinit(staging_gpa);
+            self.models = .empty;
             if (comptime has_attempt_decl) {
                 store.saved_models = try gpa.alloc(D.Model, count);
                 store.attempt_saved = false;
@@ -953,19 +982,21 @@ pub fn ProtoStore(comptime D: type) type {
                 @memset(store.lim_x, 0);
                 store.lim_active = false;
             }
-            store.instances = try gpa.dupe(D.Instance, self.rows.items(.instance));
+            store.instances = try gpa.dupe(D.Instance, self.instances.items);
+            self.instances.deinit(staging_gpa);
+            self.instances = .empty;
 
             store.gath = try gpa.alloc(u32, count * n_u);
             store.rhs_idx = try gpa.alloc(u32, count * n_u);
             store.slots = try gpa.alloc(u32, count * n_u * n_u);
-            const flat_nodes = @as([*]const u32, @ptrCast(self.rows.items(.nodes).ptr))[0 .. count * n_u];
+            const flat_nodes = @as([*]const u32, @ptrCast(self.nodes.items.ptr))[0 .. count * n_u];
             buildTapes(flat_nodes, n_u, &jacPattern(D), pv, store.gath, store.rhs_idx, store.slots);
             if (comptime has_q) {
                 store.q_tape = try gpa.alloc(f64, count * comptime lteSites(D).len);
                 @memset(store.q_tape, 0);
             }
-            self.rows.deinit(staging_gpa);
-            self.rows = .empty;
+            self.nodes.deinit(staging_gpa);
+            self.nodes = .empty;
 
             // `setup` before `initState`: both read the card, and only the
             // former fills `Instance.su`.
@@ -990,24 +1021,29 @@ pub fn ProtoStore(comptime D: type) type {
         /// so instance order (and slot summation order) only changes in a
         /// genuinely mixed batch.
         fn partitionCollapsed(self: *Self) !u32 {
-            const flags = try staging_gpa.alloc(bool, self.rows.len);
+            const len = self.nodes.items.len;
+            const flags = try staging_gpa.alloc(bool, len);
             defer staging_gpa.free(flags);
             var n: usize = 0;
-            for (self.rows.items(.model), self.rows.items(.instance), flags) |*m, *i, *f| {
+            for (self.models.items, self.instances.items, flags) |*m, *i, *f| {
                 f.* = std.meta.eql(D.collapse(Real, m, i), D.collapse_full);
                 if (f.*) n += 1;
             }
-            if (n != 0 and n != self.rows.len) {
-                var src = try self.rows.clone(staging_gpa);
-                defer src.deinit(staging_gpa);
-                var lo: usize = 0;
-                var hi: usize = n;
-                for (flags, 0..) |f, k| {
-                    const dst = if (f) &lo else &hi;
-                    self.rows.set(dst.*, src.get(k));
-                    dst.* += 1;
-                }
+            if (n == 0 or n == len) return @intCast(n);
+            // Row k moves to dst[k]; each column is permuted in place, so no
+            // row is ever held twice.
+            const dst = try staging_gpa.alloc(u32, len);
+            defer staging_gpa.free(dst);
+            var lo: u32 = 0;
+            var hi: u32 = @intCast(n);
+            for (flags, dst) |f, *d| {
+                const next = if (f) &lo else &hi;
+                d.* = next.*;
+                next.* += 1;
             }
+            permuteInPlace(D.Model, self.models.items, dst, flags);
+            permuteInPlace(D.Instance, self.instances.items, dst, flags);
+            permuteInPlace([n_u]u32, self.nodes.items, dst, flags);
             return @intCast(n);
         }
 
@@ -1015,7 +1051,7 @@ pub fn ProtoStore(comptime D: type) type {
         /// past its end are left alone.
         pub fn applyPerm(ctx: *anyopaque, perm: []const u32) void {
             const self: *Self = @ptrCast(@alignCast(ctx));
-            for (self.rows.items(.nodes)) |*nd| {
+            for (self.nodes.items) |*nd| {
                 inline for (0..n_u) |u| {
                     if (nd[u] < perm.len) nd[u] = perm[nd[u]];
                 }
@@ -1025,7 +1061,9 @@ pub fn ProtoStore(comptime D: type) type {
         /// `Proto.destroy`: frees the staging rows and the store itself.
         pub fn destroy(ctx: *anyopaque, gpa: std.mem.Allocator) void {
             const self: *Self = @ptrCast(@alignCast(ctx));
-            self.rows.deinit(staging_gpa);
+            self.models.deinit(staging_gpa);
+            self.instances.deinit(staging_gpa);
+            self.nodes.deinit(staging_gpa);
             gpa.destroy(self);
         }
     };

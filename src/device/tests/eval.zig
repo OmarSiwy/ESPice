@@ -209,8 +209,8 @@ test "dyn vtable: blob init, param set by name, proto add" {
     const nodes = [2]u32{ 1, 2 };
     try vt.proto_add(proto.ctx, testing.allocator, &mblob, &iblob, &nodes).unwrap();
     const store: *ProtoStore(R) = @ptrCast(@alignCast(proto.ctx));
-    try testing.expectEqual(@as(usize, 1), store.rows.len);
-    try testing.expectEqual(@as(f32, 42), store.rows.items(.model)[0].r);
+    try testing.expectEqual(@as(usize, 1), store.nodes.items.len);
+    try testing.expectEqual(@as(f32, 42), store.models.items[0].r);
     proto.destroy(proto.ctx, testing.allocator);
 }
 
@@ -472,4 +472,21 @@ test "mutable evaluation captures per-instance data without GPU residency" {
     batch.eval(batch.ctx, &planes, 0, 2, &.{ 0, 9, 1 }, 1);
     try std.testing.expectEqual(@as(f64, 3), typed.instances[0].first_value);
     try std.testing.expectEqual(@as(f64, -3), typed.instances[1].first_value);
+}
+
+test "permuteInPlace: moves every row to dst[k], cycles and fixed points alike" {
+    var prng = std.Random.DefaultPrng.init(0x9e37);
+    const r = prng.random();
+    for (1..40) |len| {
+        var dst: [40]u32 = undefined;
+        for (dst[0..len], 0..) |*d, i| d.* = @intCast(i);
+        r.shuffle(u32, dst[0..len]);
+        var items: [40]u64 = undefined;
+        for (items[0..len], 0..) |*v, i| v.* = i * 7 + 1;
+        var want: [40]u64 = undefined;
+        for (0..len) |k| want[dst[k]] = items[k];
+        var seen: [40]bool = undefined;
+        impl.permuteInPlace(u64, items[0..len], dst[0..len], seen[0..len]);
+        try std.testing.expectEqualSlices(u64, want[0..len], items[0..len]);
+    }
 }
