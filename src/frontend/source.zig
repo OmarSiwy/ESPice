@@ -35,6 +35,16 @@ pub fn expand(io: Io, arena: std.mem.Allocator, origin: []const u8, src: []const
     return try arena.dupe(u8, out.items);
 }
 
+/// Whether any line after the title starts with `.alter`.
+fn hasAlter(src: []const u8) bool {
+    var lines = std.mem.splitScalar(u8, src, '\n');
+    _ = lines.first();
+    while (lines.next()) |line| {
+        if (eqlLower(firstWord(std.mem.trim(u8, line, " \t\r")), ".alter")) return true;
+    }
+    return false;
+}
+
 /// HSPICE `.alter` [SA Ch.4]: the deck up to the first `.alter`, then one
 /// full source per `.alter` block. Blocks are cumulative, as HSPICE reads
 /// the input again from the previous run's netlist: block k applies to the
@@ -45,6 +55,8 @@ pub fn expand(io: Io, arena: std.mem.Allocator, origin: []const u8, src: []const
 /// Any other card is appended (`.param`: the last definition wins). A deck
 /// without `.alter` is returned as its single run, unchanged.
 pub fn splitAlters(arena: std.mem.Allocator, src: []const u8) ![]const []const u8 {
+    // Most decks have no `.alter`: borrow `src` whole and index nothing.
+    if (!hasAlter(src)) return try arena.dupe([]const u8, &.{src});
     var cards: std.ArrayList(Card) = .empty;
     var runs: std.ArrayList([]const u8) = .empty;
     var lines = std.mem.splitScalar(u8, src, '\n');
