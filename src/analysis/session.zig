@@ -95,6 +95,10 @@ pub const Session = struct {
     request_arenas: std.ArrayList(std.heap.ArenaAllocator) = .empty,
     /// Round-robin start for `readyQueries`.
     cursor: u32 = 0,
+    /// No other session reads `topology`'s device state after this one, so
+    /// under `config.final_plan` its last root query evaluates the template's
+    /// own batches instead of a copy (`Circuit.instantiateMove`).
+    last_template_reader: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, topology: *const Circuit, deck: *const Deck, config: execution.Config) Session {
         return .{ .allocator = allocator, .io = io, .topology = topology, .deck = deck, .config = config };
@@ -268,8 +272,9 @@ pub const Session = struct {
         }
     }
 
-    /// Whether query `i` is the last that will snapshot prerequisite `dep`:
-    /// every other dependent of `dep` already has its executor.
+    /// Whether query `i` is the last that will snapshot prerequisite `dep`
+    /// (the template for `none`): every other row on `dep` already has its
+    /// executor.
     fn lastReader(self: *const Session, i: usize, dep: QueryId) bool {
         for (self.rows.items(.dependency), self.rows.items(.executor), 0..) |d, e, j| {
             if (j != i and d == dep and e == null) return false;
@@ -289,7 +294,7 @@ pub const Session = struct {
             self.deck,
             self.rows.items(.job)[i],
             initial,
-            self.config.final_plan and dep != none and self.lastReader(i, dep),
+            self.config.final_plan and (dep != none or self.last_template_reader) and self.lastReader(i, dep),
             self.config,
         );
         if (started) |start| {

@@ -65,8 +65,8 @@ pub const Executor = struct {
     /// Builds the executor without starting it. `initial`, when given, must be
     /// a completed `.op` query over the same topology; its device state and
     /// operating point seed this one. With `take`, this is the last query
-    /// that will read `initial`, so its device state moves here instead of
-    /// being copied.
+    /// that will read `initial` (or, without one, the template), so its
+    /// device state moves here instead of being copied.
     pub fn create(allocator: std.mem.Allocator, io: std.Io, topology: *const Circuit, deck: *const Deck, job: requests.Query, initial: ?*Executor, take: bool, config: Config) !*Executor {
         try validateBackend(config);
         if (initial) |source| {
@@ -87,6 +87,8 @@ pub const Executor = struct {
                     try types.Circuit.fromSnapshotMove(topology, &source.circuit, allocator)
                 else
                     try types.Circuit.fromSnapshot(topology, &source.circuit, allocator)
+            else if (take)
+                try types.Circuit.instantiateMove(topology, allocator)
             else
                 try types.Circuit.instantiate(topology, allocator),
             .work = std.heap.ArenaAllocator.init(allocator),

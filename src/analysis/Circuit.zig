@@ -167,6 +167,9 @@ pub const Circuit = struct {
     gpa: std.mem.Allocator,
     /// False when the pattern, tapes and names are borrowed from a template.
     owns_topology: bool = true,
+    /// False when `batches` are the template's own (`instantiateMove`): the
+    /// template frees them.
+    owns_batches: bool = true,
     progress: ?progress_api.Callback = null,
 
     /// "The planes hold the linearization at this x_op." Set by `linearize`,
@@ -274,6 +277,16 @@ pub const Circuit = struct {
         return allocate(template.*, allocator, batches, false);
     }
 
+    /// `instantiate` for the last query that will ever read `template`'s
+    /// device state: the circuit evaluates the template's own batches in
+    /// place instead of copying them. A never-evaluated template already
+    /// holds the state `instantiate` would copy, and it keeps ownership.
+    pub fn instantiateMove(template: *const Prepared, allocator: std.mem.Allocator) !Circuit {
+        var ckt = try allocate(template.*, allocator, template.batches, false);
+        ckt.owns_batches = false;
+        return ckt;
+    }
+
     /// Returns a copy of `source`'s device state over `template`'s topology,
     /// for a query that starts from a completed operating point.
     pub fn fromSnapshot(template: *const Prepared, source: *const Circuit, allocator: std.mem.Allocator) !Circuit {
@@ -294,16 +307,18 @@ pub const Circuit = struct {
 
     /// `fromSnapshot` for the last query that will ever read `source`: the
     /// device state moves instead of being copied, and `source` keeps no
-    /// batches (its `deinit` still frees the rest). Copies when the two
-    /// circuits do not share an allocator.
+    /// batches and frees the rest of its state at once (its `deinit` is then
+    /// a no-op). Copies when the two circuits do not share an allocator.
     pub fn fromSnapshotMove(template: *const Prepared, source: *Circuit, allocator: std.mem.Allocator) !Circuit {
         if (source.n != template.n or source.col_ptr.ptr != template.col_ptr.ptr)
             return error.IncompatibleDependency;
-        if (source.gpa.ptr != allocator.ptr or source.gpa.vtable != allocator.vtable)
+        if (source.owns_batches and (source.gpa.ptr != allocator.ptr or source.gpa.vtable != allocator.vtable))
             return fromSnapshot(template, source, allocator);
         var ckt = try allocate(template.*, allocator, source.batches, false);
-        source.batches = &.{};
+        ckt.owns_batches = source.owns_batches;
         ckt.sim = source.sim;
+        source.batches = &.{};
+        source.release();
         return ckt;
     }
 
@@ -350,20 +365,33 @@ pub const Circuit = struct {
     }
 
     pub fn deinit(self: *Circuit) void {
+        self.release();
+        self.* = undefined;
+    }
+
+    /// Frees all state the circuit owns and leaves an empty one whose
+    /// `release` and `deinit` free nothing more. Nothing may evaluate or
+    /// solve it afterwards.
+    pub fn release(self: *Circuit) void {
         const gpa = self.gpa;
         if (self.ws) |*w| w.deinit(gpa);
+        self.ws = null;
         if (self.load_check) |*lc| lc.deinit(gpa);
+        self.load_check = null;
         if (self.param_refs) |refs| gpa.free(refs);
-        for (self.batches) |b| b.hooks.deinit(b.ctx, gpa);
-        gpa.free(self.batches);
-        gpa.free(self.g_vals);
-        gpa.free(self.c_vals);
-        // Unconditional: a failed computeBaseline can leave these allocated
-        // with has_baseline false.
-        gpa.free(self.g_base);
-        gpa.free(self.c_base);
-        gpa.free(self.rhs);
-        gpa.free(self.q_vec);
+        self.param_refs = null;
+        if (self.owns_batches) {
+            for (self.batches) |b| b.hooks.deinit(b.ctx, gpa);
+            gpa.free(self.batches);
+        }
+        self.batches = &.{};
+        // g_base/c_base unconditionally: a failed computeBaseline can leave
+        // them allocated with has_baseline false.
+        inline for (.{ "g_vals", "c_vals", "g_base", "c_base", "rhs", "q_vec" }) |name| {
+            gpa.free(@field(self, name));
+            @field(self, name) = &.{};
+        }
+        self.has_baseline = false;
         if (self.owns_topology) {
             gpa.free(self.col_ptr);
             gpa.free(self.row_idx);
@@ -374,8 +402,8 @@ pub const Circuit = struct {
             gpa.free(self.ac_dyn_slots);
             gpa.free(self.intern_bytes);
             gpa.free(self.intern_offs);
+            self.owns_topology = false;
         }
-        self.* = undefined;
     }
 
     /// Device state held outside the circuit, one `snapshot` per batch, so
