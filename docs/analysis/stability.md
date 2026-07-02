@@ -162,7 +162,7 @@ against HSPICE (`hspice/meas_lstb`, analytic).
 1. Linearize at the job's operating point (`linearizeAc`), the same
    `FreqSolver.fromCircuit` the `.ac` sweep uses.
 2. One shared rhs: unit injection on the probe's branch row.
-3. `ac/freq.zig` `Stream`: 64-frequency lane chunks of
+3. `ac/freq.zig` `Stream`: W-frequency lane chunks of
    `FreqSolver.solveBatch`; each point gives $T = -V(+)/V(-)$.
 
 Knobs: probe node pair and branch, sweep.
