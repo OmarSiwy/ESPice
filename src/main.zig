@@ -4,6 +4,12 @@
 const std = @import("std");
 const problem = @import("espice");
 
+/// std reserves a 256 KB alternate signal stack per thread for stack-overflow
+/// traces, as zero-filled TLS: every thread of every compilation unit pays it
+/// (1.5 MB per thread across the device objects before this). Kept in Debug,
+/// where the trace is worth it.
+pub const std_options: std.Options = .{ .signal_stack_size = if (@import("builtin").mode == .Debug) 1 << 18 else null };
+
 pub fn main(init: std.process.Init) !u8 {
     var args = init.minimal.args.iterate();
     _ = args.skip();

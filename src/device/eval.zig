@@ -5,6 +5,12 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+
+/// std reserves a 256 KB alternate signal stack per thread for stack-overflow
+/// traces, as zero-filled TLS: every thread of every compilation unit pays it
+/// (1.5 MB per thread across the device objects before this). Kept in Debug,
+/// where the trace is worth it.
+pub const std_options: std.Options = .{ .signal_stack_size = if (@import("builtin").mode == .Debug) 1 << 18 else null };
 const contract = @import("contract");
 const gompute = @import("gompute");
 const ir = @import("device_abi");
