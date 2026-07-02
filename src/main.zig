@@ -86,6 +86,8 @@ pub fn main(init: std.process.Init) !u8 {
                 .solver_threads = @intCast(@min(envThreads("ESPICE_SOLVER_THREADS"), 16)),
                 .device_threads = envThreads("ESPICE_THREADS"),
                 .lu_fast = lu_fast,
+                // One deck, run once: no query is appended later.
+                .final_plan = true,
             },
             .max_parallel = max_parallel,
             .timing_in_depth = timing_in_depth,

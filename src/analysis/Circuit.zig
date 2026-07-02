@@ -292,6 +292,21 @@ pub const Circuit = struct {
         return ckt;
     }
 
+    /// `fromSnapshot` for the last query that will ever read `source`: the
+    /// device state moves instead of being copied, and `source` keeps no
+    /// batches (its `deinit` still frees the rest). Copies when the two
+    /// circuits do not share an allocator.
+    pub fn fromSnapshotMove(template: *const Prepared, source: *Circuit, allocator: std.mem.Allocator) !Circuit {
+        if (source.n != template.n or source.col_ptr.ptr != template.col_ptr.ptr)
+            return error.IncompatibleDependency;
+        if (source.gpa.ptr != allocator.ptr or source.gpa.vtable != allocator.vtable)
+            return fromSnapshot(template, source, allocator);
+        var ckt = try allocate(template.*, allocator, source.batches, false);
+        source.batches = &.{};
+        ckt.sim = source.sim;
+        return ckt;
+    }
+
     fn allocate(data: Prepared, allocator: std.mem.Allocator, batches: []Batch, owns_topology: bool) !Circuit {
         const g_vals = try allocator.alloc(f64, @as(usize, data.nnz) + 1);
         errdefer allocator.free(g_vals);

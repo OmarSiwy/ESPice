@@ -28,6 +28,10 @@ pub const Config = struct {
     timing_in_depth: bool = false,
     /// `direct.Params.fast_mode` for every Newton solve (`--lu-fast`).
     lu_fast: bool = false,
+    /// The caller adds no query after the session is built (the CLI), so a
+    /// completed prerequisite's device state may move into its last
+    /// dependent instead of being copied. Appending callers keep copies.
+    final_plan: bool = false,
 };
 
 /// Rejects a backend this binary cannot serve (printing what it detected)
@@ -60,8 +64,10 @@ pub const Executor = struct {
 
     /// Builds the executor without starting it. `initial`, when given, must be
     /// a completed `.op` query over the same topology; its device state and
-    /// operating point seed this one.
-    pub fn create(allocator: std.mem.Allocator, io: std.Io, topology: *const Circuit, deck: *const Deck, job: requests.Query, initial: ?*const Executor, config: Config) !*Executor {
+    /// operating point seed this one. With `take`, this is the last query
+    /// that will read `initial`, so its device state moves here instead of
+    /// being copied.
+    pub fn create(allocator: std.mem.Allocator, io: std.Io, topology: *const Circuit, deck: *const Deck, job: requests.Query, initial: ?*Executor, take: bool, config: Config) !*Executor {
         try validateBackend(config);
         if (initial) |source| {
             if (source.topology != topology or source.operatingPoint() == null)
@@ -77,7 +83,10 @@ pub const Executor = struct {
             .job = job,
             .config = config,
             .circuit = if (initial) |source|
-                try types.Circuit.fromSnapshot(topology, &source.circuit, allocator)
+                if (take)
+                    try types.Circuit.fromSnapshotMove(topology, &source.circuit, allocator)
+                else
+                    try types.Circuit.fromSnapshot(topology, &source.circuit, allocator)
             else
                 try types.Circuit.instantiate(topology, allocator),
             .work = std.heap.ArenaAllocator.init(allocator),

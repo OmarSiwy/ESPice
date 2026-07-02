@@ -268,6 +268,15 @@ pub const Session = struct {
         }
     }
 
+    /// Whether query `i` is the last that will snapshot prerequisite `dep`:
+    /// every other dependent of `dep` already has its executor.
+    fn lastReader(self: *const Session, i: usize, dep: QueryId) bool {
+        for (self.rows.items(.dependency), self.rows.items(.executor), 0..) |d, e, j| {
+            if (j != i and d == dep and e == null) return false;
+        }
+        return true;
+    }
+
     fn makeExecutor(self: *Session, i: usize) !void {
         if (self.rows.items(.executor)[i] != null) return;
         const started = if (self.config.timing_in_depth) std.Io.Timestamp.now(self.io, .awake) else null;
@@ -280,6 +289,7 @@ pub const Session = struct {
             self.deck,
             self.rows.items(.job)[i],
             initial,
+            self.config.final_plan and dep != none and self.lastReader(i, dep),
             self.config,
         );
         if (started) |start| {
