@@ -133,7 +133,9 @@ takes a few seconds and needs:
 
 Builds are cached by content under `$ESPICE_CACHE/hdl`, else
 `$XDG_CACHE_HOME/espice/hdl`, else `~/.cache/espice/hdl`, so a later run of an
-unchanged model starts at once. VerA's diagnostics (file, line, code) print
+unchanged model starts at once. The key covers the model and every file it
+`include`s, with comments and whitespace stripped, so a comment-only edit
+reuses the build and any code edit recompiles. VerA's diagnostics (file, line, code) print
 when a model does not compile. An instance parameter the module does not
 declare, or a card with the wrong number of nodes, is an error.
 
