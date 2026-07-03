@@ -62,6 +62,8 @@ pub const Problem = struct {
     next_output: usize = 0,
     /// First output failure. Once set, nothing else is published.
     delivery_error: ?anyerror = null,
+    /// The query whose rows stream to the output as it runs (`openStream`).
+    streaming: ?QueryId = null,
     timing_in_depth: bool = false,
     /// Where an HSPICE `.save` writes the operating point; null without one.
     save_path: ?[]const u8 = null,
@@ -141,6 +143,7 @@ pub const Problem = struct {
         self.limits = .{ .max_parallel = options.max_parallel };
         self.next_output = 0;
         self.delivery_error = null;
+        self.streaming = null;
         var execution = options.backend;
         execution.timing_in_depth = options.timing_in_depth;
         self.session = analysis.session.Session.init(self.workerAllocator(), io, &self.prepared.circuit, &self.prepared.deck, execution);
@@ -276,6 +279,7 @@ pub const Problem = struct {
         var lap = if (self.timing_in_depth) std.Io.Timestamp.now(self.io, .awake) else null;
         defer timingLap(self.io, &lap, "run total (analysis, scheduling, output)");
         try self.optimize();
+        try self.openStream();
         const ids = try self.allocator.alloc(QueryId, self.query_count());
         defer self.allocator.free(ids);
         const events = try self.allocator.alloc(Advance, @min(ids.len, self.limits.max_parallel));
@@ -302,6 +306,37 @@ pub const Problem = struct {
         defer timingLap(self.io, &output_lap, "output finish");
         try self.delivery.finish();
         if (self.save_path) |path| try self.saveOperatingPoint(path, self.prepared.deck.save_op.?);
+    }
+
+    /// Under a final plan (the CLI), a transient that publishes first and
+    /// that nothing reads afterwards (no `.meas` over it, no `.save`, no
+    /// optimization) writes its rows straight to a binary raw output, or
+    /// drops them without one, instead of keeping them all in memory. Its
+    /// Result then has empty `data`. Plotname and columns are the ones
+    /// `tran.run` publishes; `endStream` checks the row count.
+    fn openStream(self: *Problem) !void {
+        const deck = &self.prepared.deck;
+        if (!self.session.config.final_plan or self.next_output != 0 or self.streaming != null) return;
+        if (self.save_path != null or self.prepared.tuner != null or deck.probe_labels.len != deck.probes.len) return;
+        for (deck.measures) |m| if (m.analysis == .tran) return;
+        if (self.session.outputs.items.len == 0) return;
+        const id = self.session.outputs.items[0];
+        if ((try self.session.info(id)).status != .pending) return;
+        const job = try self.session.query(id);
+        if (job != .tran or job.tran.snapshot or job.tran.tol.temp_c != null or job.tran.tol.variant != null) return;
+        const names = try self.allocator.alloc([]const u8, deck.probe_labels.len + 1);
+        defer self.allocator.free(names);
+        names[0] = "time";
+        @memcpy(names[1..], deck.probe_labels);
+        const writer = try self.delivery.beginStream(self.io, .{ .title = deck.title, .result = .{
+            .plotname = "Transient Analysis",
+            .varnames = names,
+            .is_complex = false,
+            .npoints = 0,
+            .data = &.{},
+        } }) orelse return;
+        self.session.stream = .{ .id = id, .writer = writer };
+        self.streaming = id;
     }
 
     /// Writes the node voltages of the main session's operating point as
@@ -524,7 +559,16 @@ pub const Problem = struct {
             const id = session.outputs.items[next_output.*];
             const status = (session.info(id) catch unreachable).status;
             if (!status.terminal()) return;
-            if (status == .complete) {
+            if (session == &self.session and self.streaming == id) {
+                self.streaming = null;
+                if (status != .complete) self.delivery.abortStream() else {
+                    const res = session.result(id) catch unreachable;
+                    self.delivery.endStream(self.io, res.npoints, res.varnames.len) catch |err| {
+                        self.delivery_error = err;
+                        return;
+                    };
+                }
+            } else if (status == .complete) {
                 const res = session.result(id) catch unreachable;
                 var lap = if (self.timing_in_depth) std.Io.Timestamp.now(self.io, .awake) else null;
                 defer timingLap(self.io, &lap, "output delivery");

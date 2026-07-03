@@ -99,6 +99,10 @@ pub const Session = struct {
     /// under `config.final_plan` its last root query evaluates the template's
     /// own batches instead of a copy (`Circuit.instantiateMove`).
     last_template_reader: bool = false,
+    /// A transient query that writes its rows to `writer` as it records them
+    /// instead of keeping them; its Result has empty `data`. Set before the
+    /// query starts.
+    stream: ?struct { id: QueryId, writer: *std.Io.Writer } = null,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, topology: *const Circuit, deck: *const Deck, config: execution.Config) Session {
         return .{ .allocator = allocator, .io = io, .topology = topology, .deck = deck, .config = config };
@@ -297,6 +301,9 @@ pub const Session = struct {
             self.config.final_plan and (dep != none or self.last_template_reader) and self.lastReader(i, dep),
             self.config,
         );
+        if (self.stream) |s| if (@intFromEnum(s.id) == i) {
+            self.rows.items(.executor)[i].?.stream = s.writer;
+        };
         if (started) |start| {
             self.rows.items(.executor)[i].?.controller.options.timing_query = @enumFromInt(i);
             const elapsed = start.durationTo(std.Io.Timestamp.now(self.io, .awake)).nanoseconds;

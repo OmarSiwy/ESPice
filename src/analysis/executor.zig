@@ -59,6 +59,8 @@ pub const Executor = struct {
     controller: Controller,
     x: ?[]f64 = null,
     published: ?types.Result = null,
+    /// `RunCtx.stream` for this query.
+    stream: ?*std.Io.Writer = null,
 
     pub const Outcome = Controller.Outcome;
 
@@ -247,6 +249,7 @@ pub const Executor = struct {
             .variants = self.deck.variants,
             .allocator = self.results.allocator(),
             .scratch_allocator = self.allocator,
+            .stream = self.stream,
         };
         var res = try run(&run_ctx, self.job);
         // Copies of one card at several temperatures keep apart by name.
