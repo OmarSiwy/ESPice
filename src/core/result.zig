@@ -27,7 +27,7 @@ pub const Result = struct {
     npoints: usize,
     /// Point-major samples, `npoints * varnames.len` of them; a complex
     /// variable takes two adjacent f64s (real, imaginary). Empty for a
-    /// transient whose rows streamed straight to the output (a final plan
+    /// transient or AC sweep whose rows streamed straight to the output (a final plan
     /// that nothing reads after it, see `analysis.session.Session.stream`).
     data: []const f64,
 };

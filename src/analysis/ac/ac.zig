@@ -46,19 +46,24 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         a.free(names);
     }
     const row_len = names.len * 2;
-    const data = try a.alloc(f64, n_points * row_len);
-    errdefer a.free(data);
+    // A streamed run writes each row to `ctx.stream` and keeps only the one
+    // being built, in scratch; otherwise the rows are the result.
+    const streamed = ctx.stream != null;
+    const data = if (streamed) try scratch.alloc(f64, row_len) else try a.alloc(f64, n_points * row_len);
+    defer if (streamed) scratch.free(data);
+    errdefer if (!streamed) a.free(data);
 
     var stream = try freq.Stream.init(scratch, &fs, ckt, ctx.x_op, omegas, rhs, false);
     defer stream.deinit(scratch);
     while (try stream.next(ckt)) |pt| {
-        const row = data[pt.k * row_len ..][0..row_len];
+        const row = if (streamed) data else data[pt.k * row_len ..][0..row_len];
         row[0] = freqs[pt.k];
         row[1] = 0;
         for (ctx.probes, 1..) |node, col| {
             row[col * 2] = pt.x[node];
             row[col * 2 + 1] = pt.x[n + node];
         }
+        if (ctx.stream) |w| try w.writeAll(std.mem.sliceAsBytes(row));
     }
 
     return .{
@@ -66,6 +71,6 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         .varnames = names,
         .is_complex = true,
         .npoints = n_points,
-        .data = data,
+        .data = if (streamed) &.{} else data,
     };
 }

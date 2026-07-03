@@ -99,7 +99,7 @@ pub const Session = struct {
     /// under `config.final_plan` its last root query evaluates the template's
     /// own batches instead of a copy (`Circuit.instantiateMove`).
     last_template_reader: bool = false,
-    /// A transient query that writes its rows to `writer` as it records them
+    /// A transient or AC query that writes its rows to `writer` as it records them
     /// instead of keeping them; its Result has empty `data`. Set before the
     /// query starts.
     stream: ?struct { id: QueryId, writer: *std.Io.Writer } = null,
