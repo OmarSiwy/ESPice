@@ -208,34 +208,86 @@ fn uCount(comptime D: type) usize {
 // Pattern builder: dedup (row,col) set -> sorted CSC. Compile-time only.
 // ---------------------------------------------------------------------------
 pub const PatternBuilder = struct {
-    set: std.AutoHashMapUnmanaged(u64, void) = .empty,
+    // Duplicates allowed during accumulation; toCsc() sorts and dedups once.
+    // Appending to a flat list is far cheaper than per-entry hash-set puts.
+    keys: std.ArrayList(u64) = .empty,
 
     fn key(row: u32, col: u32) u64 {
         return (@as(u64, col) << 32) | row; // col-major sort order
     }
 
     pub fn add(self: *PatternBuilder, gpa: std.mem.Allocator, row: u32, col: u32) !void {
-        try self.set.put(gpa, key(row, col), {});
+        try self.keys.append(gpa, key(row, col));
+    }
+
+    /// Reserve for a known number of upcoming add() calls.
+    pub fn reserve(self: *PatternBuilder, gpa: std.mem.Allocator, extra: usize) !void {
+        try self.keys.ensureUnusedCapacity(gpa, extra);
     }
 
     pub fn deinit(self: *PatternBuilder, gpa: std.mem.Allocator) void {
-        self.set.deinit(gpa);
+        self.keys.deinit(gpa);
+    }
+
+    /// LSD radix sort (16-bit digits): O(n) on the bounded (col,row) keys,
+    /// several times faster than comparison sort at netlist scale.
+    fn radixSort(gpa: std.mem.Allocator, sort_keys: []u64) !void {
+        if (sort_keys.len < 64) {
+            std.mem.sortUnstable(u64, sort_keys, {}, std.sort.asc(u64));
+            return;
+        }
+        var max_key: u64 = 0;
+        for (sort_keys) |k| max_key = @max(max_key, k);
+
+        const tmp = try gpa.alloc(u64, sort_keys.len);
+        defer gpa.free(tmp);
+        const counts = try gpa.alloc(u32, 1 << 16);
+        defer gpa.free(counts);
+
+        var src: []u64 = sort_keys;
+        var dst: []u64 = tmp;
+        var shift: u6 = 0;
+        while (true) {
+            @memset(counts, 0);
+            for (src) |k| counts[@as(u16, @truncate(k >> shift))] += 1;
+            var sum: u32 = 0;
+            for (counts) |*c| {
+                const c0 = c.*;
+                c.* = sum;
+                sum += c0;
+            }
+            for (src) |k| {
+                const d: u16 = @truncate(k >> shift);
+                dst[counts[d]] = k;
+                counts[d] += 1;
+            }
+            const t = src;
+            src = dst;
+            dst = t;
+            if (shift >= 48 or (max_key >> shift) >> 16 == 0) break;
+            shift += 16;
+        }
+        if (src.ptr != sort_keys.ptr) @memcpy(sort_keys, src);
     }
 
     pub fn toCsc(self: *PatternBuilder, gpa: std.mem.Allocator, n: u32, col_ptr_out: *[]u32, row_idx_out: *[]u32) !u32 {
-        const nnz: u32 = @intCast(self.set.count());
-        const keys = try gpa.alloc(u64, nnz);
-        defer gpa.free(keys);
-        var it = self.set.keyIterator();
-        var i: usize = 0;
-        while (it.next()) |k| : (i += 1) keys[i] = k.*;
-        std.mem.sortUnstable(u64, keys, {}, std.sort.asc(u64));
+        const all = self.keys.items;
+        try radixSort(gpa, all);
+        // In-place dedup of the sorted keys.
+        var m: usize = 0;
+        for (all) |k| {
+            if (m == 0 or all[m - 1] != k) {
+                all[m] = k;
+                m += 1;
+            }
+        }
+        const nnz: u32 = @intCast(m);
 
         const col_ptr = try gpa.alloc(u32, n + 1);
         errdefer gpa.free(col_ptr);
         const row_idx = try gpa.alloc(u32, nnz);
         @memset(col_ptr, 0);
-        for (keys, 0..) |k, p| {
+        for (all[0..m], 0..) |k, p| {
             row_idx[p] = @truncate(k);
             col_ptr[(k >> 32) + 1] += 1;
         }
@@ -273,6 +325,7 @@ pub fn freeze(
 ) !Circuit {
     var pb: PatternBuilder = .{};
     defer pb.deinit(gpa);
+    try pb.reserve(gpa, n);
     for (0..n) |i| try pb.add(gpa, @intCast(i), @intCast(i));
     for (protos) |p| try p.pattern(p.ctx, gpa, &pb);
 
@@ -327,6 +380,7 @@ pub fn ProtoStore(comptime D: type) type {
 
         pub fn addPattern(ctx: *anyopaque, gpa: std.mem.Allocator, pb: *PatternBuilder) anyerror!void {
             const self: *Self = @ptrCast(@alignCast(ctx));
+            try pb.reserve(gpa, self.nodes.items.len * n_u * n_u);
             for (self.nodes.items) |nd| {
                 for (0..n_u) |ru| for (0..n_u) |cu| {
                     if (nd[ru] != GROUND and nd[cu] != GROUND)

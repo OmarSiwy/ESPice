@@ -38,6 +38,32 @@ fn countNewlines(src: []const u8) usize {
     return count;
 }
 
+/// Bump-slab wrapper over the arena: per-device slice copies (nodes,
+/// positional, kv) come out of large chunks so the hot parse loop does a
+/// handful of arena allocations instead of three per device.
+const SlicePool = struct {
+    arena: std.mem.Allocator,
+    buf: []align(16) u8 = &.{},
+    off: usize = 0,
+
+    const chunk_size = 64 * 1024;
+
+    fn dupe(self: *SlicePool, comptime T: type, src: []const T) Error![]T {
+        if (src.len == 0) return &.{};
+        const size = @sizeOf(T) * src.len;
+        comptime std.debug.assert(@alignOf(T) <= 16);
+        var off = std.mem.alignForward(usize, self.off, @alignOf(T));
+        if (off + size > self.buf.len) {
+            self.buf = try self.arena.alignedAlloc(u8, .@"16", @max(size, chunk_size));
+            off = 0;
+        }
+        self.off = off + size;
+        const out: []T = @alignCast(std.mem.bytesAsSlice(T, self.buf[off..self.off]));
+        @memcpy(out, src);
+        return out;
+    }
+};
+
 pub fn Parser(comptime Tok: type) type {
     return struct {
         pub fn parse(arena: std.mem.Allocator, src_in: anytype) Error!ir.Netlist {
@@ -73,6 +99,7 @@ pub fn Parser(comptime Tok: type) type {
 
             var cur_subckt: ?*Subckt = null;
             var sub_devices: std.ArrayList(ir.Device) = .empty;
+            var pool: SlicePool = .{ .arena = arena };
 
             while (try lines.next()) |line| {
                 if (line[0] == '.') {
@@ -84,7 +111,7 @@ pub fn Parser(comptime Tok: type) type {
                     break; // .end
                 }
 
-                const dev = try parseElement(arena, line);
+                const dev = try parseElement(arena, &pool, line);
                 if (cur_subckt != null) {
                     try sub_devices.append(arena, dev);
                 } else {
@@ -372,7 +399,7 @@ pub fn Parser(comptime Tok: type) type {
             return 0;
         }
 
-        fn parseElement(arena: std.mem.Allocator, line: []const u8) Error!ir.Device {
+        fn parseElement(arena: std.mem.Allocator, pool: *SlicePool, line: []const u8) Error!ir.Device {
             var t = Tok.Tokens.init(line);
             const name = (t.next() orelse return error.ParseError).word;
             if (name.len == 0) return error.ParseError;
@@ -439,9 +466,9 @@ pub fn Parser(comptime Tok: type) type {
                     kv_count = 1;
                     return .{
                         .name = name,
-                        .nodes = try arena.dupe([]const u8, node_buf[0..node_count]),
-                        .positional = try arena.dupe(ir.Value, pos_buf[0..pos_count]),
-                        .kv = try arena.dupe(ir.Kv, kv_buf[0..kv_count]),
+                        .nodes = try pool.dupe([]const u8, node_buf[0..node_count]),
+                        .positional = try pool.dupe(ir.Value, pos_buf[0..pos_count]),
+                        .kv = try pool.dupe(ir.Kv, kv_buf[0..kv_count]),
                     };
                 }
             } else {
@@ -540,15 +567,15 @@ pub fn Parser(comptime Tok: type) type {
             const nodes_slice = if (nodes_overflow.items.len > 0)
                 nodes_overflow.items
             else
-                try arena.dupe([]const u8, node_buf[0..node_count]);
+                try pool.dupe([]const u8, node_buf[0..node_count]);
             const pos_slice = if (pos_overflow.items.len > 0)
                 pos_overflow.items
             else
-                try arena.dupe(ir.Value, pos_buf[0..pos_count]);
+                try pool.dupe(ir.Value, pos_buf[0..pos_count]);
             const kv_slice = if (kv_overflow.items.len > 0)
                 kv_overflow.items
             else
-                try arena.dupe(ir.Kv, kv_buf[0..kv_count]);
+                try pool.dupe(ir.Kv, kv_buf[0..kv_count]);
 
             return .{ .name = name, .nodes = nodes_slice, .positional = pos_slice, .kv = kv_slice };
         }

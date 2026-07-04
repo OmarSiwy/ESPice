@@ -65,6 +65,10 @@ pub const Simulation = struct {
         var compiled_ok = false;
         errdefer if (!compiled_ok) b.deinit();
 
+        // Node count is bounded by (and usually close to) device count;
+        // reserving here avoids incremental rehash during interning.
+        try b.reserveNodes(@intCast(@min(nl.devices.len(), std.math.maxInt(u32))));
+
         var nb = try NetBuilder.init(arena, &b, nl);
         try nb.build();
 
@@ -632,17 +636,19 @@ fn collectDcRefs(
     comptime is_instance: bool,
     count: u32,
 ) ![]const *f32 {
-    const type_name = comptime blk: {
-        const full = @typeName(D);
-        const dot = std.mem.lastIndexOfScalar(u8, full, '.') orelse break :blk full;
-        break :blk full[dot + 1 ..];
-    };
-    const refs = try ckt.collectParams(allocator);
-    defer allocator.free(refs);
+    // Collect from the matching batch only — collecting every param of every
+    // device (and doing it twice, for V and I sources) dominated build time
+    // and memory on large netlists.
+    var list: std.ArrayList(analysis.ParamRef) = .empty;
+    defer list.deinit(allocator);
+    for (ckt.batches) |b| {
+        if (!std.mem.eql(u8, b.type_name, @typeName(D))) continue;
+        try b.collect_params(b.ctx, allocator, &list);
+    }
+    const refs = list.items;
     const out = try allocator.alloc(*f32, count);
     for (refs) |ref| {
         if (ref.is_instance != is_instance) continue;
-        if (!std.mem.eql(u8, ref.device_type, type_name)) continue;
         if (!std.mem.eql(u8, ref.param_name, "dc")) continue;
         if (ref.index < count) out[ref.index] = ref.ptr;
     }
