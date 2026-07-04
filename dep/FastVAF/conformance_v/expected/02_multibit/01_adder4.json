@@ -1,0 +1,7 @@
+{
+    "status": "compile_ok",
+    "module_name": "adder4",
+    "input_count": 8,
+    "output_count": 5,
+    "is_sequential": false
+}

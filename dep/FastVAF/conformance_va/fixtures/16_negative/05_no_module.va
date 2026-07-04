@@ -1,0 +1,3 @@
+// Conformance: negative — No module declaration
+// EXPECT: no_module
+parameter real R = 1.0;

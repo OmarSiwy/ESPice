@@ -1,0 +1,14 @@
+// Conformance: 9.12 — $temperature
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module conf_sys_temp(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real IS = 1e-14;
+    parameter real tnom = 300.15;
+    real is_t;
+    analog begin
+        is_t = IS * pow($temperature / tnom, 3);
+        I(p, n) <+ is_t * (limexp(V(p, n) / $vt) - 1);
+    end
+endmodule

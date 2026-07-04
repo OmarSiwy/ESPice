@@ -1,0 +1,17 @@
+// Conformance: 11.2 — `ifdef/`else/`endif
+// EXPECT: compile_ok
+`include "disciplines.vams"
+`define USE_DETAILED
+
+module conf_pp_ifdef(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real IS = 1e-14;
+    analog begin
+`ifdef USE_DETAILED
+        I(p, n) <+ IS * (limexp(V(p, n) / $vt) - 1);
+`else
+        I(p, n) <+ V(p, n) / 1.0k;
+`endif
+    end
+endmodule

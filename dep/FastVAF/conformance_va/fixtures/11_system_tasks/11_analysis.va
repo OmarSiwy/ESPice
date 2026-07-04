@@ -1,0 +1,13 @@
+// Conformance: 4.6.1 — analysis() function
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module conf_sys_analysis(p, n);
+    inout p, n;
+    electrical p, n;
+    analog begin
+        if (analysis("dc"))
+            I(p, n) <+ V(p, n) / 1.0k;
+        else
+            I(p, n) <+ V(p, n) / 2.0k;
+    end
+endmodule

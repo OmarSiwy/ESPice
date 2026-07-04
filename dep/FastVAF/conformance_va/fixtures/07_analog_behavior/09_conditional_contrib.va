@@ -1,0 +1,20 @@
+// Conformance: 5.5.2, 5.8 — Conditional contributions
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module conf_ab_cond_contrib(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter integer mode = 0;
+    parameter real r1 = 1.0k;
+    parameter real r2 = 10.0k;
+    analog begin
+        if (mode == 0)
+            I(p, n) <+ V(p, n) / r1;
+        else if (mode == 1)
+            I(p, n) <+ V(p, n) / r2;
+        else begin
+            I(p, n) <+ V(p, n) / r1;
+            I(p, n) <+ V(p, n) / r2;
+        end
+    end
+endmodule

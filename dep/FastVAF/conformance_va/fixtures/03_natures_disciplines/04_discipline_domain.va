@@ -1,0 +1,26 @@
+// Conformance: 3.6.2.2 — Discipline domain
+// EXPECT: compile_ok
+nature Voltage;
+    units = "V";
+    access = V;
+    abstol = 1u;
+endnature
+
+nature Current;
+    units = "A";
+    access = I;
+    abstol = 1p;
+endnature
+
+discipline electrical;
+    domain continuous;
+    potential Voltage;
+    flow Current;
+enddiscipline
+
+module conf_disc_domain(p, n);
+    inout p, n;
+    electrical p, n;
+    analog
+        I(p, n) <+ V(p, n) / 1.0k;
+endmodule

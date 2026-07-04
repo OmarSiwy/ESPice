@@ -1,0 +1,10 @@
+// Conformance: 4.4, 5.5.1 — Current access I(a,b)
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module conf_sig_current(a, b);
+    inout a, b;
+    electrical a, b;
+    branch (a, b) br;
+    analog
+        V(br) <+ 1.0k * I(br);
+endmodule

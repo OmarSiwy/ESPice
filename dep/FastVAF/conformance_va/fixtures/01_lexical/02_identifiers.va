@@ -1,0 +1,15 @@
+// Conformance: 2.8 — Identifiers
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module conf_lex_identifiers(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real _underscore_start = 1.0;
+    parameter real abc123 = 2.0;
+    parameter real n$dollar = 3.0;
+    real my_var;
+    analog begin
+        my_var = _underscore_start + abc123 + n$dollar;
+        I(p, n) <+ my_var * V(p, n);
+    end
+endmodule

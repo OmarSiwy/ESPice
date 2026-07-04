@@ -1,0 +1,20 @@
+// Conformance: 5.3 — Nested begin/end blocks
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module conf_ab_nested(p, n);
+    inout p, n;
+    electrical p, n;
+    real r;
+    analog begin
+        begin
+            begin
+                begin
+                    r = V(p, n);
+                end
+                r = r * 2.0;
+            end
+            r = r + 1.0;
+        end
+        I(p, n) <+ r;
+    end
+endmodule

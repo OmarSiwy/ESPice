@@ -1,0 +1,17 @@
+// Conformance: 6.3.1 — defparam statement
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module resistor(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real r = 1.0k;
+    analog
+        I(p, n) <+ V(p, n) / r;
+endmodule
+
+module conf_hier_defparam(a, b);
+    inout a, b;
+    electrical a, b;
+    resistor r1(a, b);
+    defparam r1.r = 4.7k;
+endmodule

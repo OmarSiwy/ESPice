@@ -1,0 +1,11 @@
+// Conformance: 3.4.1 — Integer parameters
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module conf_dt_param_int(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter integer N = 4;
+    parameter integer M = 8;
+    analog
+        I(p, n) <+ N * V(p, n) + M;
+endmodule

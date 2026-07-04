@@ -1,0 +1,12 @@
+// Conformance: 11.1.2 — macro use after `undef is an error
+// EXPECT: parse_error
+`include "disciplines.vams"
+`define TEMP_VAL 300.15
+`undef TEMP_VAL
+
+module conf_pp_undef_use(p, n);
+    inout p, n;
+    electrical p, n;
+    analog
+        I(p, n) <+ V(p, n) / `TEMP_VAL;
+endmodule

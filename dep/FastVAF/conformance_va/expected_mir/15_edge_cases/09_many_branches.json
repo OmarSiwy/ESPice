@@ -1,0 +1,11 @@
+{
+    "status": "compile_ok",
+    "openvaf_validated": false,
+    "module_name": "conf_ec_many_branches",
+    "param_count": 1,
+    "contrib_count": 4,
+    "has_ddt": false,
+    "has_idt": false,
+    "has_ddx": false,
+    "has_noise": false
+}

@@ -1,0 +1,12 @@
+// Conformance: 3.6.4 — Ground declaration
+// EXPECT: compile_ok
+`include "disciplines.vams"
+
+module conf_ground(p);
+    inout p;
+    electrical p;
+    electrical gnd;
+    ground gnd;
+    analog
+        V(p, gnd) <+ 1.0;
+endmodule

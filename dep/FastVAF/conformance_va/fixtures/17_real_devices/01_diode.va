@@ -1,0 +1,77 @@
+// Conformance: Real device — PN junction diode
+// Exercises: exponential I-V, junction cap, series R, internal node,
+//            $temperature, $vt, ddt, $limit, limexp, white_noise, flicker_noise,
+//            $param_given, conditional contrib, smoothing functions
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module diode(a, c);
+    inout a, c;
+    electrical a, c;
+    electrical ci;
+
+    parameter real IS   = 1.0e-14 from (0:inf);
+    parameter real N    = 1.0     from (0.1:10];
+    parameter real RS   = 0.0     from [0:inf);
+    parameter real CJ0  = 0.0     from [0:inf);
+    parameter real VJ   = 0.7     from (0:inf);
+    parameter real M    = 0.5     from [0:1);
+    parameter real BV   = 100.0   from (0:inf);
+    parameter real IBV  = 1.0e-3  from (0:inf);
+    parameter real TT   = 0.0     from [0:inf);
+    parameter real KF   = 0.0     from [0:inf);
+    parameter real AF   = 1.0     from (0:inf);
+    parameter real FC   = 0.5     from [0:1);
+    parameter real EG   = 1.11;
+    parameter real XTI  = 3.0;
+    parameter real TNOM = 27.0;
+
+    real vd, id, qd, cd, ist, vt, vdtemp;
+    real f1, f2, f3;
+    real tdev, tnom_k, ratio;
+
+    analog begin
+        tdev = $temperature;
+        tnom_k = TNOM + 273.15;
+        vt = $vt(tdev);
+        ratio = tdev / tnom_k;
+
+        ist = IS * pow(ratio, XTI / N) * limexp(EG / (N * $vt(tnom_k)) * (1.0 - 1.0 / ratio));
+
+        vd = V(ci, c);
+
+        id = ist * (limexp(vd / (N * vt)) - 1.0);
+
+        if (vd < -BV)
+            id = id - IBV * limexp(-(vd + BV) / vt);
+
+        if (CJ0 > 0) begin
+            f1 = (VJ / (1.0 - M)) * (1.0 - pow(1.0 - FC, 1.0 - M));
+            if (vd <= FC * VJ)
+                cd = CJ0 * pow(1.0 - vd / VJ, -M);
+            else begin
+                f2 = pow(1.0 - FC, 1.0 + M);
+                f3 = 1.0 - FC * (1.0 + M);
+                cd = CJ0 / f2 * (f3 + M * vd / VJ);
+            end
+            qd = cd * vd;
+        end else begin
+            qd = 0.0;
+        end
+
+        if (TT > 0)
+            qd = qd + TT * id;
+
+        I(ci, c) <+ id;
+        I(ci, c) <+ ddt(qd);
+
+        if (RS > 0)
+            I(a, ci) <+ V(a, ci) / RS;
+        else
+            V(a, ci) <+ 0.0;
+
+        I(ci, c) <+ white_noise(2.0 * 1.6021766e-19 * abs(id), "shot");
+        I(ci, c) <+ flicker_noise(KF * pow(abs(id), AF), 1.0, "flicker");
+        if (RS > 0)
+            I(a, ci) <+ white_noise(4.0 * 1.3806503e-23 * tdev / RS, "thermal");
+    end
+endmodule

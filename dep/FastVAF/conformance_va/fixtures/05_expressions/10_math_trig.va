@@ -1,0 +1,18 @@
+// Conformance: 4.3.2 — Trigonometric functions
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module conf_expr_trig(p, n);
+    inout p, n;
+    electrical p, n;
+    real r;
+    analog begin
+        r = sin(1.0);
+        r = cos(1.0);
+        r = tan(1.0);
+        r = asin(0.5);
+        r = acos(0.5);
+        r = atan(1.0);
+        r = atan2(1.0, 1.0);
+        I(p, n) <+ r;
+    end
+endmodule

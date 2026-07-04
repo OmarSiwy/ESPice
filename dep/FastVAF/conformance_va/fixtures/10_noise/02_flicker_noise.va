@@ -1,0 +1,13 @@
+// Conformance: 4.6.4 — flicker_noise
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module conf_noise_flicker(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real kf = 1e-24;
+    parameter real af = 1.0;
+    analog begin
+        I(p, n) <+ V(p, n) / 1.0k;
+        I(p, n) <+ flicker_noise(kf, af, "flicker");
+    end
+endmodule

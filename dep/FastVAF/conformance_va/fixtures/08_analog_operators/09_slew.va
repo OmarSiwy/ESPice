@@ -1,0 +1,11 @@
+// Conformance: 4.5.9 — Slew filter
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module conf_op_slew(out, in);
+    input in;
+    output out;
+    electrical out, in;
+    parameter real sr_pos = 1e6, sr_neg = -1e6;
+    analog
+        V(out) <+ slew(V(in), sr_pos, sr_neg);
+endmodule

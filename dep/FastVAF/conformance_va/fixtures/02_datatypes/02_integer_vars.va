@@ -1,0 +1,18 @@
+// Conformance: 3.2 — Integer variables
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module conf_dt_integer(p, n);
+    inout p, n;
+    electrical p, n;
+    integer i;
+    integer j = 0;
+    integer k, l, m;
+    analog begin
+        i = 1;
+        j = i + 2;
+        k = j * 3;
+        l = k / 2;
+        m = l % 3;
+        I(p, n) <+ i + j + k + l + m;
+    end
+endmodule

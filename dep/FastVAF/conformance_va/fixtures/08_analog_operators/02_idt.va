@@ -1,0 +1,9 @@
+// Conformance: 4.5.4 — Time integral idt
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module conf_op_idt(p, n);
+    inout p, n;
+    electrical p, n;
+    analog
+        V(p, n) <+ idt(I(p, n));
+endmodule

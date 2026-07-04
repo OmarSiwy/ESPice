@@ -1,0 +1,112 @@
+// Conformance: Real device — Simplified BSIM-like MOSFET core
+// Exercises: complex parameter chains, analog functions, internal nodes,
+//            $temperature, $vt, $param_given, ddt, limexp,
+//            $simparam, $bound_step, many parameters, clamping patterns
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module bsim_core(d, g, s, b);
+    inout d, g, s, b;
+    electrical d, g, s, b;
+    electrical di, si;
+
+    parameter integer TYPE  = 1      from [-1:1] exclude 0;
+    parameter real TOXE     = 3.0e-9 from (0:inf);
+    parameter real TOXP     = 2.5e-9 from (0:inf);
+    parameter real VTH0     = 0.5    from (-inf:inf);
+    parameter real K1       = 0.5    from [0:inf);
+    parameter real K2       = 0.0;
+    parameter real U0       = 400.0  from (0:inf);
+    parameter real UA       = 1.0e-9;
+    parameter real VSAT     = 1.0e5  from (0:inf);
+    parameter real PCLM     = 1.3    from (0:inf);
+    parameter real PDIBLC1  = 0.39;
+    parameter real PDIBLC2  = 0.0086;
+    parameter real DROUT    = 0.56;
+    parameter real DSUB     = 0.56;
+    parameter real RDSW     = 200.0  from [0:inf);
+    parameter real PRWG     = 0.0;
+    parameter real PRWB     = 0.0;
+    parameter real CGSO     = 0.0    from [0:inf);
+    parameter real CGDO     = 0.0    from [0:inf);
+    parameter real CGBO     = 0.0    from [0:inf);
+    parameter real LEFF     = 1.0e-6 from (0:inf);
+    parameter real WEFF     = 1.0e-6 from (0:inf);
+    parameter real NFACTOR  = 1.0    from (0:inf);
+    parameter real TNOM     = 27.0;
+
+    real vgs, vds, vbs, vth, vgst, ids;
+    real abulk, vdsat, vdsat_eff;
+    real ueff, esat, rds;
+    real cgg, cgd, cgs;
+    real gmin;
+
+    analog function real smooth_max;
+        input a, b, delta;
+        real a, b, delta;
+        real avg, diff;
+        begin
+            avg = 0.5 * (a + b);
+            diff = 0.5 * (a - b);
+            smooth_max = avg + sqrt(diff * diff + delta * delta);
+        end
+    endfunction
+
+    analog function real safe_div;
+        input num, den, lim;
+        real num, den, lim;
+        safe_div = num / max(abs(den), lim);
+    endfunction
+
+    analog begin
+        gmin = $simparam("gmin", 1.0e-12);
+
+        vgs = TYPE * V(g, si);
+        vds = TYPE * V(di, si);
+        vbs = TYPE * V(b, si);
+
+        vth = VTH0 + K1 * (sqrt(abs(0.6 - vbs)) - sqrt(0.6)) - K2 * vbs;
+        vgst = vgs - vth;
+
+        abulk = 1.0 + K1 / (2.0 * sqrt(abs(0.6 - vbs) + 1.0e-20));
+
+        ueff = U0 / (1.0 + UA * abs(vgst));
+        esat = 2.0 * VSAT / ueff;
+
+        rds = RDSW / WEFF;
+        if (PRWG > 0)
+            rds = rds / (1.0 + PRWG * vgst);
+        if (PRWB != 0)
+            rds = rds / (1.0 + PRWB * (sqrt(abs(0.6 - vbs)) - sqrt(0.6)));
+
+        vdsat = smooth_max(vgst / abulk, 0.0, 0.01);
+        vdsat_eff = vdsat - 0.5 * (vdsat - vds - abs(vdsat - vds));
+
+        if (vgst <= 0) begin
+            ids = 0;
+        end else begin
+            ids = WEFF / LEFF * ueff * 8.854e-12 * 3.9 / TOXE
+                  * vgst * vdsat_eff / (vdsat + 1.0e-20)
+                  * (1.0 + vds / (PCLM * esat * LEFF + 1.0e-20));
+        end
+
+        I(di, si) <+ TYPE * ids;
+        I(di, si) <+ gmin * V(di, si);
+
+        if (RDSW > 0) begin
+            I(d, di) <+ V(d, di) / (rds + 1.0e-20);
+            I(s, si) <+ V(s, si) / (rds + 1.0e-20);
+        end else begin
+            V(d, di) <+ 0.0;
+            V(s, si) <+ 0.0;
+        end
+
+        cgg = WEFF * LEFF * 8.854e-12 * 3.9 / TOXE;
+        cgd = CGDO * WEFF;
+        cgs = CGSO * WEFF;
+
+        I(g, di) <+ ddt(cgd * V(g, di));
+        I(g, si) <+ ddt(cgs * V(g, si));
+        if (CGBO > 0)
+            I(g, b)  <+ ddt(CGBO * LEFF * V(g, b));
+    end
+endmodule

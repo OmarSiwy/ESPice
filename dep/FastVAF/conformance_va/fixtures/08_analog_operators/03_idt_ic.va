@@ -1,0 +1,10 @@
+// Conformance: 4.5.4 — idt with initial condition
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module conf_op_idt_ic(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real ic = 0.0;
+    analog
+        V(p, n) <+ idt(I(p, n), ic);
+endmodule

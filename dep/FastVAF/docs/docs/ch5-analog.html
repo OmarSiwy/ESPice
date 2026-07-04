@@ -1,0 +1,1299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chapter 5 &mdash; Analog Behavior | Verilog-A LRM 2.4.0</title>
+<style>
+body { font-family: 'Segoe UI', system-ui, sans-serif; max-width: 900px; margin: 0 auto; padding: 2rem; background: #fafafa; color: #1a1a1a; line-height: 1.6; }
+h1 { border-bottom: 3px solid #2563eb; padding-bottom: 0.5rem; }
+h2 { color: #1e40af; margin-top: 2rem; border-bottom: 1px solid #ddd; padding-bottom: 0.3rem; }
+h3 { color: #374151; }
+h4 { color: #4b5563; }
+code { background: #e5e7eb; padding: 0.15rem 0.4rem; border-radius: 3px; font-size: 0.9em; }
+pre { background: #1e293b; color: #e2e8f0; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; }
+pre code { background: none; padding: 0; color: inherit; }
+table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+th, td { border: 1px solid #d1d5db; padding: 0.5rem 0.75rem; text-align: left; }
+th { background: #2563eb; color: white; }
+tr:nth-child(even) { background: #f3f4f6; }
+.syntax { background: #fffbeb; border-left: 4px solid #f59e0b; padding: 1rem; margin: 1rem 0; font-family: monospace; white-space: pre-wrap; color: #1a1a1a; }
+.note { background: #eff6ff; border-left: 4px solid #2563eb; padding: 0.75rem 1rem; margin: 1rem 0; }
+nav { background: #1e293b; padding: 1rem; border-radius: 6px; margin-bottom: 2rem; }
+nav a { color: #93c5fd; text-decoration: none; margin-right: 1rem; }
+nav a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+
+<nav>
+<a href="index.html">Index</a>
+<a href="ch2-lexical.html">Ch2 Lexical</a>
+<a href="ch3-datatypes.html">Ch3 Data Types</a>
+<a href="ch4-expressions.html">Ch4 Expressions</a>
+<a href="ch5-analog.html">Ch5 Analog</a>
+<a href="ch6-hierarchy.html">Ch6 Hierarchy</a>
+<a href="ch9-system.html">Ch9 System</a>
+<a href="ch10-connectmodules.html">Ch10 Connect Modules</a>
+<a href="ch11-directives.html">Ch11 Directives</a>
+</nav>
+
+<h1>Chapter 5 &mdash; Analog Behavior</h1>
+
+<p>The description of analog behavior consists of setting up contributions for various signals under procedural or timing control.</p>
+
+<!-- ====================================================================== -->
+<h2 id="s5.2">5.2 Analog Procedural Block</h2>
+
+<p>Continuous-time behavioral description is encapsulated within the <code>analog</code> procedural block. The analog block defines behavior as a procedural sequence of statements. Conditional and looping constructs are available. Because this is a continuous-time description, no blocking event control statements (blocking delays, blocking events, or waits) are supported.</p>
+
+<p>All statements within the analog block are executed sequentially at a given point of time; however, the effects on analog variables, nets, and branches are considered concurrently. Analog blocks shall be executed at every point in a simulation. Multiple analog blocks can be used within a module declaration.</p>
+
+<pre class="syntax">analog_construct ::=
+    analog analog_statement
+  | analog initial analog_function_statement
+
+analog_statement ::=
+    { attribute_instance } analog_loop_generate_statement
+  | { attribute_instance } analog_loop_statement
+  | { attribute_instance } analog_case_statement
+  | { attribute_instance } analog_conditional_statement
+  | { attribute_instance } analog_procedural_assignment
+  | { attribute_instance } analog_seq_block
+  | { attribute_instance } analog_system_task_enable
+  | { attribute_instance } contribution_statement
+  | { attribute_instance } indirect_contribution_statement
+  | { attribute_instance } analog_event_control_statement
+
+analog_statement_or_null ::=
+    analog_statement
+  | { attribute_instance } ;</pre>
+
+<h3 id="s5.2.1">5.2.1 Analog Initial Block</h3>
+
+<p>The <code>analog initial</code> block is a special analog block, beginning with the keywords <code>analog initial</code>, for simulation initialization purposes.</p>
+
+<p>Like a regular analog block, an analog initial block is comprised of a procedural sequence of statements. If there are multiple analog initial blocks, they are executed as if concatenated.</p>
+
+<p>Statements in analog initial blocks shall <strong>not</strong> contain:</p>
+<ul>
+<li>Statements with access functions or analog operators</li>
+<li>Contribution statements</li>
+<li>Event control statements</li>
+</ul>
+
+<p>An analog initial block is executed before a matrix solution is available. Digital values cannot be accessed from the analog initial block as they have not yet been assigned.</p>
+
+<p>The analog initial block is executed once for each analysis, and can be executed for each sub-task of parameter sweep analysis (such as dc sweep). If a parameter or variable referenced from an analog initial block is changed during a sub-task of a parameter sweep analysis, the analog initial block shall be re-executed so that the new value is taken into account.</p>
+
+<!-- ====================================================================== -->
+<h2 id="s5.3">5.3 Block Statements</h2>
+
+<p>Block statements (sequential blocks) group procedural statements. Statements within the block are executed in sequence, one after another in the given order. Control passes out of the block after the last statement. Block statements are delimited by <code>begin</code> and <code>end</code>.</p>
+
+<h3 id="s5.3.1">5.3.1 Sequential Blocks</h3>
+
+<pre class="syntax">analog_seq_block ::=
+    begin [ : analog_block_identifier { analog_block_item_declaration } ]
+    { analog_statement } end
+
+analog_block_item_declaration ::=
+    { attribute_instance } parameter_declaration ;
+  | { attribute_instance } integer_declaration
+  | { attribute_instance } real_declaration</pre>
+
+<h3 id="s5.3.2">5.3.2 Block Names</h3>
+
+<p>A sequential block can be named by adding <code>: block_identifier</code> after the keyword <code>begin</code>. Naming a block allows local variables to be declared for that block and provides a means of uniquely identifying all variables at any simulation time.</p>
+
+<p>All named block variables are <strong>static</strong> -- a unique location exists for all variables and leaving or entering the block does not affect the values stored in them. All identifiers declared within a named sequential block can be accessed outside the scope in which they are declared. Named block variables cannot be assigned outside the scope of the block in which they are declared.</p>
+
+<p>Parameters declared within a named block have local scope and cannot be assigned outside the scope. Named and ordered parameter overrides at module instantiation can only affect parameters declared at module scope.</p>
+
+<pre><code>module example;
+    parameter integer p1 = 1;
+    real moduleVar;
+    analog begin
+        begin: myscope
+            parameter real p2 = p1;
+            real localVar = 1.5 * p2;
+        end
+        moduleVar = myscope.localVar;   // allowed
+    end
+endmodule
+
+module top;
+    example #(.p1(4)) inst1();          // allowed
+    example #(.myscope.p2(4)) inst2();  // error
+endmodule</code></pre>
+
+<!-- ====================================================================== -->
+<h2 id="s5.4">5.4 Analog Signals</h2>
+
+<p>Analog signals are distinguished from digital signals in that an analog signal has a discipline with a continuous domain.</p>
+
+<h3 id="s5.4.1">5.4.1 Access Functions</h3>
+
+<p>Flows and potentials on nets, ports, and branches are accessed using access functions. The name of the access function is taken from the discipline of the net, port, or branch associated with the signal.</p>
+
+<p>For a named electrical branch <code>b</code> where <code>electrical</code> has <code>V</code> as the potential access function and <code>I</code> as the flow access function: the potential (voltage) is accessed via <code>V(b)</code> and the flow (current) via <code>I(b)</code>.</p>
+
+<ul>
+<li>There can be any number of named branches between any two signals.</li>
+<li>Unnamed branches are accessed by applying access functions to net or port names rather than branch names.</li>
+<li>If <code>n1</code> and <code>n2</code> are electrical nets or ports, then <code>V(n1, n2)</code> creates an unnamed branch from <code>n1</code> to <code>n2</code> (if it does not already exist) and accesses the branch potential. <code>V(n1)</code> does the same from <code>n1</code> to the global reference node (ground).</li>
+<li>There can only be one unnamed branch between any two nets, or between a net and implicit ground (in addition to any number of named branches).</li>
+<li>An analogous access method is used for flows: <code>I(n1, n2)</code> creates an unnamed branch and accesses the branch flow.</li>
+<li>The flow through a port into a module is accessed using <code>&lt;&gt;</code> delimiters: <code>I(&lt;p1&gt;)</code> accesses the current flow into the module through port <code>p1</code>.</li>
+</ul>
+
+<h3 id="s5.4.2">5.4.2 Probes and Sources</h3>
+
+<h4 id="s5.4.2.1">5.4.2.1 Probes</h4>
+
+<p>If no value is specified for either the potential or the flow, the branch is a <strong>probe</strong>. If the flow of the branch appears in an expression anywhere in the module, the branch is a <em>flow probe</em>; otherwise it is a <em>potential probe</em>. Using both the potential and the flow of a probe branch is illegal.</p>
+
+<ul>
+<li>The branch potential of a flow probe is zero (0).</li>
+<li>The branch flow of a potential probe is zero (0).</li>
+</ul>
+
+<h4 id="s5.4.2.2">5.4.2.2 Sources</h4>
+
+<p>A branch (named or unnamed) is a <strong>source branch</strong> if either the potential or the flow of that branch is assigned a value by a contribution statement anywhere in the module. It is a <em>potential source</em> if the branch potential is specified and a <em>flow source</em> if the branch flow is specified.</p>
+
+<p>A branch cannot simultaneously be both a potential and a flow source, although it can switch between them (a <em>switch branch</em>).</p>
+
+<p>Both the potential and the flow of a source branch are accessible in expressions anywhere in the module.</p>
+
+<h3 id="s5.4.3">5.4.3 Accessing Flow Through a Port</h3>
+
+<p>The port access function accesses the flow into a port of a module. The access function name is derived from the flow nature of the discipline of the port. The port name is delimited with <code>&lt;&gt;</code> instead of <code>()</code>.</p>
+
+<pre><code>module diode (a, c);
+    inout a, c;
+    electrical a, c;
+    branch (a, c) i_diode, junc_cap;
+    parameter real is = 1e-14, tf = 0, cjo = 0, imax = 1, phi = 0.7;
+    analog begin
+        I(i_diode) &lt;+ is*(limexp(V(i_diode)/$vt) - 1);
+        I(junc_cap) &lt;+
+            ddt(tf*I(i_diode) - 2*cjo*sqrt(phi*(phi*V(junc_cap))));
+        if (I(&lt;a&gt;) &gt; imax)
+            $strobe( "Warning: diode is melting!" );
+    end
+endmodule</code></pre>
+
+<p>The expression <code>V(&lt;a&gt;)</code> is invalid for ports and nets where <code>V</code> is a potential access function. The port access function shall not be used on the left side of a contribution operator <code>&lt;+</code>.</p>
+
+<p>An ideal relay (controlled switch):</p>
+
+<pre><code>module relay (p, n, ps, ns);
+    inout p, n, ps, ns;
+    electrical p, n, ps, ns;
+    parameter vth=0.5;
+    integer closed;
+    analog begin
+        closed = (V(ps,ns) &gt; vth ? 1 : 0);
+        if (closed)
+            V(p,n) &lt;+ 0;
+        else
+            I(p,n) &lt;+ 0;
+    end
+endmodule</code></pre>
+
+<p>A discontinuity of order zero (0) is assumed to occur when the branch switches; it is not necessary to use <code>$discontinuity</code> with switch branches.</p>
+
+<h3 id="s5.4.4">5.4.4 Unassigned Sources</h3>
+
+<p>If a value is not assigned to a branch, and it is not a probe branch, the branch flow is set to zero (0).</p>
+
+<pre><code>if (closed)
+    V(p,n) &lt;+ 0;</code></pre>
+
+<p>is equivalent to:</p>
+
+<pre><code>if (closed)
+    V(p,n) &lt;+ 0;
+else
+    I(p,n) &lt;+ 0;</code></pre>
+
+<!-- ====================================================================== -->
+<h2 id="s5.5">5.5 Accessing Net and Branch Signals and Attributes</h2>
+
+<h3 id="s5.5.1">5.5.1 Accessing Net and Branch Signals</h3>
+
+<p>Signals on nets and branches can be accessed only by the access functions of the discipline associated with them or by the generic <code>potential</code> or <code>flow</code> access functions.</p>
+
+<pre class="syntax">nature_access_function ::=
+    nature_attribute_identifier
+  | potential
+  | flow
+
+branch_probe_function_call ::=
+    nature_access_function ( branch_reference )
+  | nature_access_function ( analog_net_reference [ , analog_net_reference ] )
+
+port_probe_function_call ::=
+    nature_access_function ( &lt; analog_port_reference &gt; )
+
+branch_reference ::=
+    hierarchical_branch_identifier
+  | hierarchical_branch_identifier [ constant_expression ]
+  | hierarchical_unnamed_branch_reference
+
+hierarchical_unnamed_branch_reference ::=
+    hierarchical_inst_identifier . branch ( branch_terminal [ , branch_terminal ] )
+  | hierarchical_inst_identifier . branch ( &lt; port_identifier &gt; )
+  | hierarchical_inst_identifier . branch ( &lt; hierarchical_port_identifier &gt; )
+
+analog_net_reference ::=
+    port_identifier
+  | port_identifier [ constant_expression ]
+  | net_identifier
+  | net_identifier [ constant_expression ]
+  | hierarchical_port_identifier
+  | hierarchical_port_identifier [ constant_expression ]
+  | hierarchical_net_identifier
+  | hierarchical_net_identifier [ constant_expression ]
+
+analog_port_reference ::=
+    port_identifier
+  | port_identifier [ constant_expression ]
+  | hierarchical_port_identifier
+  | hierarchical_port_identifier [ constant_expression ]</pre>
+
+<p>Branch or port probe function calls shall only reference nets and ports declared to belong to a continuous discipline. The nature attribute identifier for a branch probe function call must be the access function name for the potential or flow nature defined for the discipline. For a port probe function call, the nature attribute identifier must be the access function name for the flow nature, and the port reference must be a declared port of the module (not hierarchical).</p>
+
+<pre><code>module transamp(out, in);
+    inout out, in;
+    electrical out, in;
+    parameter real gm = 1;
+    analog
+        I(out) &lt;+ gm*V(in);
+endmodule
+
+module resistor(p, n);
+    inout p, n;
+    electrical p, n;
+    branch (p,n) res;
+    parameter real R = 50;
+    analog
+        V(res) &lt;+ R*I(res);
+endmodule</code></pre>
+
+<p>The <code>potential</code> and <code>flow</code> generic access functions can also be used:</p>
+
+<pre><code>module measure1(p);
+    output p;
+    electrical p;
+    parameter real V = 1.1;
+    analog begin
+        $strobe("%M: voltage ratio is %g", potential(p) / V);
+    end
+endmodule</code></pre>
+
+<p>When <code>potential</code> and <code>flow</code> access functions are used on an unnamed branch composed of two nets, the discipline of both nets must be the same.</p>
+
+<h3 id="s5.5.2">5.5.2 Signal Access for Vector Branches</h3>
+
+<p>Ports, nets, and branches can be arranged as vectors; however, access functions can only be applied to scalars or individual elements of a vector. The scalar element is selected with an index, e.g., <code>V(in[1])</code>.</p>
+
+<p>The index must be a constant expression, though it may include genvar variables. Genvar variables can only be assigned as the iteration index of for loops; they allow signal access within looping constructs.</p>
+
+<pre><code>// N-bit DAC example.
+module dac(out, in, clk);
+    parameter integer width = 8 from [2:24];
+    parameter real fullscale = 1.0, vth = 2.5, td = 1n, tt = 1n;
+    output out;
+    input [0:width-1] in;
+    input clk;
+    electrical out;
+    electrical [0:width-1] in;
+    electrical clk;
+    real aout;
+    genvar i;
+    analog begin
+        @(cross(V(clk) - vth, +1)) begin
+            aout = 0;
+            for (i = width - 1; i &gt;= 0; i = i - 1) begin
+                if (V(in[i]) &gt; vth) begin
+                    aout = aout + fullscale/pow(2, width - i);
+                end
+            end
+        end
+        V(out) &lt;+ transition(aout, td, tt);
+    end
+endmodule</code></pre>
+
+<pre><code>// 8-bit fixed-width DAC example.
+module dac8(out, in, clk);
+    parameter real fullscale = 1.0, vth = 2.5, td = 1n, tt = 1n;
+    output out;
+    input [0:7] in;
+    input clk;
+    electrical out;
+    electrical [0:7] in;
+    electrical clk;
+    real aout;
+    analog begin
+        @(cross(V(clk) - 2.5, +1)) begin
+            aout = 0;
+            aout = aout + ((V(in[7]) &gt; vth) ? fullscale/2.0 : 0.0);
+            aout = aout + ((V(in[6]) &gt; vth) ? fullscale/4.0 : 0.0);
+            aout = aout + ((V(in[5]) &gt; vth) ? fullscale/8.0 : 0.0);
+            aout = aout + ((V(in[4]) &gt; vth) ? fullscale/16.0 : 0.0);
+            aout = aout + ((V(in[3]) &gt; vth) ? fullscale/32.0 : 0.0);
+            aout = aout + ((V(in[2]) &gt; vth) ? fullscale/64.0 : 0.0);
+            aout = aout + ((V(in[1]) &gt; vth) ? fullscale/128.0 : 0.0);
+            aout = aout + ((V(in[0]) &gt; vth) ? fullscale/256.0 : 0.0);
+        end
+        V(out) &lt;+ transition(aout, td, tt);
+    end
+endmodule</code></pre>
+
+<h3 id="s5.5.3">5.5.3 Accessing Attributes</h3>
+
+<p>Attributes are attached to the nature of a potential or flow. Attributes for a net or branch are accessed using the hierarchical referencing operator (<code>.</code>) to the potential or flow.</p>
+
+<pre class="syntax">nature_attribute_reference ::=
+    net_identifier . potential_or_flow . nature_attribute_identifier
+
+potential_or_flow ::= potential | flow</pre>
+
+<p>This syntax shall not be used for the <code>access</code>, <code>ddt_nature</code>, or <code>idt_nature</code> attributes of a nature, nor any other attribute whose value is not a constant expression.</p>
+
+<pre><code>module twocap(a, b, n1, n2);
+    inout a, b, n1, n2;
+    electrical a, b, n1, n2;
+    branch (n1, n2) cap;
+    parameter real c= 1p;
+    analog begin
+        I(a,b) &lt;+ c*ddt(V(a,b), a.potential.abstol);
+        I(cap) &lt;+ c*ddt(V(cap), n1.potential.abstol);
+    end
+endmodule</code></pre>
+
+<p>The <code>abstol</code> attribute of a nature may also be accessed by using the nature's identifier as the appropriate argument to <code>ddt()</code>, <code>idt()</code>, or <code>idtmod()</code> operators.</p>
+
+<h3 id="s5.5.4">5.5.4 Creating Unnamed Branches Using Hierarchical Net References</h3>
+
+<p>An access function in a module can have one or more hierarchical net references to nets in other module instances. In these cases, a new unnamed branch is created in the module containing the access function call.</p>
+
+<pre><code>module signal_monitor;
+    parameter refv = 2.3;
+    electrical a;
+    analog begin
+        V(a) &lt;+ refv;
+        // Creates an unnamed branch between top.drv.a and implicit ground.
+        $strobe("voltage at top.drv.a = %g volts", V(top.drv.a));
+        // Creates an unnamed branch between top.drv.a and top.drv.b
+        $strobe("voltage diff in top.drv = %g volts", V(top.drv.a, top.drv.b));
+        // Creates an unnamed branch between local net a and top.drv.a
+        $strobe("voltage diff from ref in top.drv = %g volts", V(a,top.drv.a));
+        // References the unnamed branch created in the first $strobe
+        if(V(top.drv.a) &gt; 10.0) $strobe("voltage limit exceeded at top.drv.a");
+    end
+endmodule</code></pre>
+
+<p>Even if the instance <code>top.drv</code> already has an unnamed branch between nodes <code>a</code> and ground and <code>a</code> and <code>b</code>, the new unnamed branches are created in the module <code>signal_monitor</code>.</p>
+
+<h3 id="s5.5.5">5.5.5 Accessing Nets and Branch Signals Hierarchically</h3>
+
+<p>A module is allowed to access the potential and flow of a branch in another module instance using an access function, provided that value is available in the other instance. An error shall be reported if unavailable. Reasons for unavailability:</p>
+<ul>
+<li>The branch does not exist in the other instance</li>
+<li>The access function is not the valid access function for that named branch</li>
+</ul>
+
+<pre><code>module top;
+    A a1();
+    B b1();
+endmodule
+
+module A;
+    electrical n,p;
+    branch (n,p) b;
+    analog V(b) &lt;+ 1.34;
+endmodule
+
+module B;
+    analog $strobe("voltage == %g", V(top.a1.b));
+endmodule</code></pre>
+
+<p>To access an existing unnamed branch in another module instance, use the <code>hierarchical_unnamed_branch_reference</code> syntax:</p>
+
+<pre><code>analog begin
+    // Voltage of unnamed branch between nets a and b in top.drv.
+    $strobe("Voltage == %g", V(top.drv.branch(a,b)));
+    // Current through unnamed port branch for port p in top.drv
+    $strobe("Current == %g", I(top.drv.branch(&lt;p&gt;)));
+end</code></pre>
+
+<!-- ====================================================================== -->
+<h2 id="s5.6">5.6 Contribution Statements</h2>
+
+<p>The branch contribution statement is used in the analog block to describe continuous-time behavior between a module's analog nets and ports. Contribution statements may be described in direct or indirect form.</p>
+
+<h3 id="s5.6.1">5.6.1 Direct Branch Contribution Statements</h3>
+
+<p>The direct contribution statement uses the branch contribution operator <code>&lt;+</code> to describe the mathematical relationship between one or more analog nets within the module.</p>
+
+<pre class="syntax">contribution_statement ::= branch_lvalue &lt;+ analog_expression ;
+
+branch_lvalue ::= branch_probe_function_call
+
+branch_probe_function_call ::=
+    nature_access_function ( branch_reference )
+  | nature_access_function ( analog_net_reference [ , analog_net_reference ] )</pre>
+
+<p>The right-hand side can be any combination of linear, nonlinear, or differential expressions of module signals, constants, and parameters which evaluates to or can be promoted to a real value. The left-hand side specifies the source branch signal and shall consist of a signal access function applied to a branch.</p>
+
+<p>If the contribution statement is conditionally executed, the expression shall not include an analog filter function unless the conditional expression is a constant expression.</p>
+
+<p>Contributions cannot be made to an analog port declared with an <code>input</code> direction, but an <code>output</code> port can be accessed. There shall be no contributions to an implicit net; contributions shall be done only on analog nets declared with a continuous discipline.</p>
+
+<pre><code>module resistor(p, n);
+    inout p, n;
+    electrical p, n;
+    branch (p,n) path;          // named branch
+    parameter real r = 0;
+    analog
+        V(path) &lt;+ r*I(path);
+endmodule
+
+module capacitor(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real c = 0;
+    analog
+        I(p,n) &lt;+ c*ddt(V(p, n)); // unnamed branch p,n
+endmodule</code></pre>
+
+<p>The <code>potential</code> and <code>flow</code> generic access functions can also be used for contributions:</p>
+
+<pre><code>module measure2(p);
+    output p;
+    electrical p;
+    parameter real V = 1.1;
+    parameter real I = 1u;
+    parameter real R = 10k;
+    analog begin
+        potential(p) &lt;+ flow(p) * R;   // create a resistor
+        $strobe("voltage ratio at port 'p' is %g", potential(p) / V);
+        $strobe("current ratio through port 'p' is %g", flow(&lt;p&gt;) / I);
+    end
+endmodule</code></pre>
+
+<h4 id="s5.6.1.1">5.6.1.1 Relations</h4>
+
+<p>Branch contribution statements implicitly define source branch relations. The branch is directed from the first net of the access function to the second net. If the second net is not specified, the global reference node (ground) is used.</p>
+
+<p>Each net has two quantities: potential and flow. Each branch has two quantities: potential across and flow through.</p>
+
+<pre><code>module amp(out, in);
+    input in;
+    output out;
+    electrical out, in;
+    parameter real Gain = 1;
+    analog
+        V(out) &lt;+ Gain*V(in);
+endmodule</code></pre>
+
+<h4 id="s5.6.1.2">5.6.1.2 Evaluation</h4>
+
+<p>A statement is evaluated as follows for source branch contributions:</p>
+<ol>
+<li>The simulator evaluates the right-hand side.</li>
+<li>The simulator adds the value of the right-hand side to any previously retained value of the branch for later assignment. If there are no previously retained values, the value itself is retained.</li>
+<li>At the end of the simulation cycle, the simulator assigns the retained value to the source branch.</li>
+</ol>
+
+<p>Parasitics are added by simply adding additional contribution statements:</p>
+
+<pre><code>module amp(out, in);
+    inout out, in;
+    electrical out, in;
+    parameter real Gain = 1, Rin = 1, Cin = 1, Rout = 1, Lout = 1;
+    analog begin
+        // gain of amplifier
+        V(out) &lt;+ Gain*V(in);
+        // model input admittance
+        I(in) &lt;+ V(in)/Rin;
+        I(in) &lt;+ Cin*ddt(V(in));
+        // model output impedance
+        V(out) &lt;+ Rout*I(out);
+        V(out) &lt;+ Lout*ddt(I(out));
+    end
+endmodule</code></pre>
+
+<h4 id="s5.6.1.3">5.6.1.3 Value Retention</h4>
+
+<p>Multiple contributions to the same potential branch or same flow branch will be <strong>additive</strong>. However:</p>
+<ul>
+<li>Contributing a flow to a branch which already has a value retained for the potential results in the potential being discarded and the branch being converted to a flow source.</li>
+<li>Contributing a potential to a branch which already has a value retained for the flow results in the flow being discarded and the branch being converted to a potential source.</li>
+</ul>
+
+<p>Unlike variables, the contributed value for a branch is only valid for the current iteration. If a branch is not contributed to (directly or indirectly) for any particular iteration, and it is not a branch probe, it shall be treated as a flow source with a value of 0.</p>
+
+<pre><code>// Value retention: equivalent forms
+if (closed)
+    V(p,n) &lt;+ 0;
+
+// is equivalent to:
+if (closed)
+    V(p,n) &lt;+ 0;
+else
+    I(p,n) &lt;+ 0;</code></pre>
+
+<pre><code>// Value retention rules: result is V(p,n) = 7.0
+module value_ret(p, n);
+    inout p, n;
+    electrical p, n;
+    analog begin
+        V(p,n) &lt;+ 1.0; // no previously-retained value, 1 is retained
+        I(p,n) &lt;+ 2.0; // potential discarded; flow of 2 retained
+        V(p,n) &lt;+ 3.0; // flow discarded; potential of 3 retained
+        V(p,n) &lt;+ 4.0; // 4 added to previously-retained 3
+    end
+endmodule</code></pre>
+
+<pre><code>// Current-controlled current source: I(ps,ns) is a flow probe (potential is zero)
+module cccs (p, n, ps, ns);
+    inout p, n, ps, ns;
+    electrical p, n, ps, ns;
+    parameter real A = 1.0;
+    analog begin
+        I(p,n) &lt;+ A * I(ps,ns);
+    end
+endmodule</code></pre>
+
+<h3 id="s5.6.2">5.6.2 Examples: Four Controlled Sources</h3>
+
+<pre><code>module control_source (p, n, ps, ns);
+    inout p, n, ps, ns;
+    electrical p, n, ps, ns;
+    parameter A=1;
+    branch (ps,ns) in;
+    branch (p,n) out;
+    analog begin
+        // add one behavioral statement from below
+    end
+endmodule</code></pre>
+
+<table>
+<tr><th>Source Type</th><th>Contribution Statement</th></tr>
+<tr><td>Voltage Controlled Voltage Source (VCVS)</td><td><code>V(out) &lt;+ A * V(in);</code></td></tr>
+<tr><td>Voltage Controlled Current Source (VCCS)</td><td><code>I(out) &lt;+ A * V(in);</code></td></tr>
+<tr><td>Current Controlled Voltage Source (CCVS)</td><td><code>V(out) &lt;+ A * I(in);</code></td></tr>
+<tr><td>Current Controlled Current Source (CCCS)</td><td><code>I(out) &lt;+ A * I(in);</code></td></tr>
+</table>
+
+<h3 id="s5.6.3">5.6.3 Resistor and Conductor</h3>
+
+<pre><code>// Linear conductor
+module my_conductor(p,n);
+    inout p, n;
+    electrical p,n;
+    parameter real G=1;
+    branch (p,n) cond;
+    analog begin
+        I(cond) &lt;+ G * V(cond);
+    end
+endmodule</code></pre>
+
+<p>The assignment to <code>I(cond)</code> makes <code>cond</code> a current source branch; <code>V(cond)</code> accesses the potential probe built into the current source branch.</p>
+
+<pre><code>// Linear resistor
+module my_resistor(p,n);
+    inout p,n;
+    electrical p,n;
+    parameter real R=1;
+    branch (p,n) res;
+    analog begin
+        V(res) &lt;+ R * I(res);
+    end
+endmodule</code></pre>
+
+<p>The assignment to <code>V(res)</code> makes <code>res</code> a potential source branch; <code>I(res)</code> accesses the flow probe built into the potential source branch.</p>
+
+<h3 id="s5.6.4">5.6.4 RLC Circuits</h3>
+
+<p>Series RLC circuit (summing voltages):</p>
+<pre><code>V(p, n) &lt;+ R*I(p, n) + L*ddt(I(p, n)) + idt(I(p, n))/C;</code></pre>
+
+<p>Parallel RLC circuit (summing currents):</p>
+<pre><code>I(p, n) &lt;+ V(p, n)/R + C*ddt(V(p, n)) + idt(V(p, n))/L;</code></pre>
+
+<h3 id="s5.6.5">5.6.5 Switch Branches</h3>
+
+<p>Contribution to a branch may be switched between potential and flow during a simulation. This is useful for modeling ideal switches and mechanical stops.</p>
+
+<p>Contribution statements are allowed within conditional statements but are <strong>not</strong> allowed within event control statements. The contribution statements shall not use analog operators when the condition can change during the course of a simulation.</p>
+
+<pre><code>module relay (p, n, cp, cn);
+    inout p, n, cp, cn;
+    electrical p, n, cp, cn;
+    branch (p,n) out;
+    branch (cp,cn) ctrl;
+    parameter real thresh = 0;
+    analog begin
+        @(cross(V(ctrl) - thresh, 0))
+            ; // acts only to resolve threshold crossings
+        if (V(ctrl) &gt; thresh)
+            V(out) &lt;+ 0;
+        else
+            I(out) &lt;+ 0; // optional due to value retention
+    end
+endmodule</code></pre>
+
+<p>A discontinuity of order zero (0) is assumed to occur when the branch switches; it is not necessary to use <code>$discontinuity</code> with switch branches. Contribution statements inside event control statements are disallowed because they may not be executed at every timepoint.</p>
+
+<h3 id="s5.6.6">5.6.6 Implicit Contributions</h3>
+
+<p>The value of the target may be expressed in terms of itself. This is referred to as an <em>implicit</em> or <em>fixed-point</em> formulation.</p>
+
+<pre><code>I(diode) &lt;+ is*(limexp((V(diode) - r*I(diode))/$vt) - 1);</code></pre>
+
+<p><code>I(diode)</code> appears on both sides of the contribution operator. The simulator will find the value of <code>I(diode)</code> that equals the sum of the contributions made to it, even if the contributions are a function of <code>I(diode)</code> itself.</p>
+
+<h3 id="s5.6.7">5.6.7 Indirect Branch Contribution Statements</h3>
+
+<p>Indirect branch contributions provide an alternative to direct contributions, useful when direct contributions do not behave as needed. The syntax reads as "drive <em>target</em> so that <em>equation</em> == <em>value</em>".</p>
+
+<p>For the ideal opamp (nullor), the constitutive equation is <em>v<sub>in</sub> = 0</em>:</p>
+
+<pre><code>V(out) : V(pin,nin) == 0;</code></pre>
+
+<p>This indicates <code>out</code> is driven with a voltage source, and the source voltage must be adjusted so that <code>V(pin,nin) == 0</code>. Any branches referenced in the equation are only probed, not driven.</p>
+
+<p>The tolerance for the equation is taken from the argument on the left side of the equality operator (in this case <code>V(pin,nin)</code>).</p>
+
+<pre class="syntax">indirect_contribution_statement ::=
+    branch_lvalue : indirect_expression == analog_expression ;
+
+indirect_expression ::=
+    branch_probe_function_call
+  | port_probe_function_call
+  | ddt ( branch_probe_function_call [ , abstol_expression ] )
+  | ddt ( port_probe_function_call [ , abstol_expression ] )
+  | idt ( branch_probe_function_call [ , analog_expression
+        [ , analog_expression [ , abstol_expression ] ] ] )
+  | idt ( port_probe_function_call [ , analog_expression [ , analog_expression
+        [ , abstol_expression ] ] ] )
+  | idtmod ( branch_probe_function_call [ , analog_expression [ , analog_expression
+        [ , analog_expression [ , abstol_expression ] ] ] ] )
+  | idtmod ( port_probe_function_call [ , analog_expression [ , analog_expression
+        [ , analog_expression [ , abstol_expression ] ] ] ] )
+
+branch_lvalue ::= branch_probe_function_call</pre>
+
+<p>The left-hand side of the equality operator must be an access function, or <code>ddt</code>, <code>idt</code>, or <code>idtmod</code> applied to an access function.</p>
+
+<p>Indirect branch contributions shall not be used in conditional or looping statements unless the conditional expression is a constant expression. The constant expression shall not include the <code>analysis()</code> function with an argument that can result in different return values during a single analysis (such as "ic" or "nodeset").</p>
+
+<pre><code>module opamp(out, pin, nin);
+    inout out, pin, nin;
+    electrical out, pin, nin;
+    analog
+        V(out) : V(pin,nin) == 0;
+endmodule</code></pre>
+
+<h4 id="s5.6.7.1">5.6.7.1 Multiple Indirect Contributions</h4>
+
+<p>For multiple indirect contribution statements, the targets frequently can be paired with any equation:</p>
+
+<pre><code>V(x) : ddt(V(x)) == f(V(x), V(y), V(z));
+V(y) : ddt(V(y)) == g(V(x), V(y), V(z));
+V(z) : ddt(V(z)) == h(V(x), V(y), V(z));</code></pre>
+
+<p>The pairing of targets to equations can be rearranged without affecting the results:</p>
+
+<pre><code>V(y) : ddt(V(x)) == f(V(x), V(y), V(z));
+V(z) : ddt(V(y)) == g(V(x), V(y), V(z));
+V(x) : ddt(V(z)) == h(V(x), V(y), V(z));</code></pre>
+
+<h4 id="s5.6.7.2">5.6.7.2 Indirect and Direct Contribution</h4>
+
+<p>Indirect contribution statements are incompatible with direct contribution statements across the same pair of analog nets (or any of its parallel branches). Once a value is indirectly assigned to a branch, it cannot be contributed to using the branch contribution operator <code>&lt;+</code>.</p>
+
+<h3 id="s5.6.8">5.6.8 Contributing Hierarchically</h3>
+
+<h4 id="s5.6.8.1">5.6.8.1 Contributions to Branches Between Hierarchical Nets</h4>
+
+<p>Direct contribution statements can contribute to a branch between combinations of local and hierarchical nets. A new unnamed branch is created in the module containing the direct contribution statements.</p>
+
+<pre><code>module source_driver();
+    electrical m;
+    parameter real vref = 0.0;
+    analog begin
+        V(m) &lt;+ vref;
+        // Creates unnamed voltage source branch of 1.8V
+        // between top.drv.x and implicit ground.
+        V(top.drv.x) &lt;+ 1.8;
+        // Creates unnamed voltage source branch of 1.2V
+        // between top.drv.x and top.drv.y
+        V(top.drv.x, top.drv.y) &lt;+ 1.2;
+        // Creates unnamed voltage source branch of 0.9V
+        // between local net m and top.drv.y
+        V(m, top.drv.y) &lt;+ 0.9;
+    end
+endmodule</code></pre>
+
+<p>The simulator shall check if the contribution produces a solvable set of equations (e.g., no voltage source loops).</p>
+
+<h4 id="s5.6.8.2">5.6.8.2 Hierarchical Direct Contributions to Branches</h4>
+
+<p>Hierarchical direct contributions to named and unnamed branches are allowed provided the branch is suitable. Reasons a hierarchical branch contribution would not be allowed:</p>
+<ul>
+<li>Invalid access function used for the contribution to the particular branch</li>
+<li>The hierarchical contribution changes the branch into a switch branch</li>
+</ul>
+
+<pre><code>module source_driver();
+    analog begin
+        // Contributes 1.8 volts to the named branch br_v in top.drv
+        V(top.drv.br_v) &lt;+ 1.8;
+        // Contributes 1.2 volts to unnamed branch between x and y in top.drv
+        V(top.drv.branch(x,y)) &lt;+ 1.2;
+        // Contributes 1mA to the named branch br_i in top.drv
+        I(top.drv.br_i) &lt;+ 1m;
+    end
+endmodule</code></pre>
+
+<p>Hierarchical contributions are not allowed to branches that have been indirectly contributed to.</p>
+
+<!-- ====================================================================== -->
+<h2 id="s5.7">5.7 Analog Procedural Assignments</h2>
+
+<p>Analog procedural assignments modify analog <code>integer</code>, <code>real</code>, and <code>string</code> variables including array variables.</p>
+
+<pre class="syntax">analog_procedural_assignment ::= analog_variable_assignment ;
+
+analog_variable_assignment ::=
+    scalar_analog_variable_assignment
+  | array_analog_variable_assignment
+
+scalar_analog_variable_assignment ::=
+    scalar_analog_variable_lvalue = analog_expression
+
+analog_variable_lvalue ::=
+    variable_identifier
+  | variable_identifier [ analog_expression ] { [ analog_expression ] }
+
+array_analog_variable_assignment ::=
+    array_analog_variable_lvalue = array_analog_variable_rvalue ;
+
+array_analog_variable_rvalue ::=
+    array_variable_identifier
+  | array_variable_identifier [ analog_expression ] { [ analog_expression ] }
+  | assignment_pattern</pre>
+
+<p>Rules for scalar variable assignments:</p>
+<ul>
+<li>The left-hand side shall be scalar: an <code>integer</code>, <code>real</code>, or <code>string</code> identifier, or an element of such an array.</li>
+<li>The right-hand side can be any arbitrary expression from legal operands and operators that evaluates to a scalar.</li>
+<li>Concatenation expressions cannot be used as part of the analog expression.</li>
+<li>Analog filter functions cannot be used if the statement is conditionally executed during simulation.</li>
+<li>Hierarchical assignment of a variable from another scope/module is not allowed.</li>
+</ul>
+
+<p>Rules for unpacked array variable assignments:</p>
+<ul>
+<li>The array on the LHS shall be an array variable, a slice, or an array parameter (when the default value is assigned).</li>
+<li>Both LHS and RHS must be unpacked.</li>
+<li>Array assignments shall only be done with compatible arrays: element types must be equivalent and every dimension must have the same number of elements.</li>
+</ul>
+
+<!-- ====================================================================== -->
+<h2 id="s5.8">5.8 Analog Conditional Statements</h2>
+
+<h3 id="s5.8.1">5.8.1 if-else-if Statement</h3>
+
+<p>The <code>if-else</code> statement determines whether a statement is executed. If any conditionally-executed statement contains an analog operator, the conditional expression shall be an <code>analysis_or_constant_expression</code>.</p>
+
+<pre class="syntax">analog_conditional_statement ::=
+    if ( analog_expression ) analog_statement_or_null
+    { else if ( analog_expression ) analog_statement_or_null }
+    [ else analog_statement_or_null ]</pre>
+
+<p>If the expression evaluates to true (non-zero), the true-branch statements execute. If it evaluates to false (zero), the else-branch statements execute (if present).</p>
+
+<p>The following two statements express the same logic:</p>
+<pre><code>if (expression)
+if (expression != 0)</code></pre>
+
+<p>Since the <code>else</code> part is optional, an omitted <code>else</code> in a nested <code>if</code> sequence is resolved by always associating the <code>else</code> with the closest previous <code>if</code> which lacks an <code>else</code>:</p>
+
+<pre><code>if (index &gt; 0)
+    if (i &gt; j)
+        result = i;
+    else             // else applies to inner if
+        result = j;</code></pre>
+
+<p>To force a different association, use <code>begin-end</code>:</p>
+
+<pre><code>if (index &gt; 0) begin
+    if (i &gt; j)
+        result = i;
+end
+else result = j;</code></pre>
+
+<h3 id="s5.8.3">5.8.3 Case Statement</h3>
+
+<p>The <code>case</code> statement tests if an expression matches one of a number of other expressions and branches accordingly.</p>
+
+<pre class="syntax">analog_case_statement ::=
+    case ( analog_expression ) analog_case_item { analog_case_item } endcase
+  | casex ( analog_expression ) analog_case_item { analog_case_item } endcase
+  | casez ( analog_expression ) analog_case_item { analog_case_item } endcase
+
+analog_case_item ::=
+    analog_expression { , analog_expression } : analog_statement_or_null
+  | default [ : ] analog_statement_or_null</pre>
+
+<ul>
+<li>The <code>default</code> statement is optional. Multiple <code>default</code> statements in one case statement is illegal.</li>
+<li>Neither the case expression nor the case item expressions are required to be constant.</li>
+<li>Case item expressions are evaluated and compared in the exact order given. The first match triggers execution.</li>
+<li>If all comparisons fail and a <code>default</code> item is given, the default item statement executes; otherwise none execute.</li>
+</ul>
+
+<h3 id="s5.8.4">5.8.4 Restrictions on Conditional Statements</h3>
+
+<ul>
+<li>Analog filter functions are restricted inside conditional statements (<code>if-else-if</code> and <code>case</code>) unless the conditional expression is a constant expression.</li>
+<li>For analog filter functions, the conditional statements cannot be nested conditionally.</li>
+<li>Contribution statements are allowed as part of conditional analog statements (switch branches).</li>
+<li>Event control statements (<code>timer</code>, <code>cross</code>, etc.) cannot be used inside conditional statements unless the conditional expression is a constant expression.</li>
+</ul>
+
+<!-- ====================================================================== -->
+<h2 id="s5.9">5.9 Looping Statements</h2>
+
+<p>Three types of looping statements: <code>repeat</code>, <code>while</code>, and <code>for</code>.</p>
+
+<p>The following restrictions apply to <code>repeat</code>, <code>while</code>, and <code>for</code> loops (but <strong>not</strong> to <code>analog for</code> statements):</p>
+<ul>
+<li>Analog filter functions are not allowed</li>
+<li>Event control statements are not allowed</li>
+<li>Contribution statements are not allowed</li>
+</ul>
+
+<h3 id="s5.9.1">5.9.1 Repeat and While Statements</h3>
+
+<p><code>repeat()</code> executes a statement a fixed number of times. The expression determines how many times.</p>
+
+<p><code>while()</code> executes a statement until an expression becomes false. If the expression starts out false, the statement is not executed at all.</p>
+
+<p>The <code>repeat</code> and <code>while</code> expressions shall be evaluated once before the execution of any statement to determine the number of times the statements are executed.</p>
+
+<pre class="syntax">analog_loop_statement ::=
+    repeat ( analog_expression ) analog_statement
+  | while ( analog_expression ) analog_statement
+  ...</pre>
+
+<h3 id="s5.9.2">5.9.2 For Statements</h3>
+
+<pre class="syntax">analog_loop_statement ::=
+    ...
+  | for ( analog_variable_assignment ; analog_expression ; analog_variable_assignment )
+        analog_statement</pre>
+
+<p>The <code>for()</code> statement controls execution via a three-step process:</p>
+<ol>
+<li>It executes an assignment normally used to initialize an integer which controls the number of loops.</li>
+<li>It evaluates an expression -- if the result is zero (0), the for-loop exits; otherwise, it executes its associated statement(s) and then performs Step 3.</li>
+<li>It executes an assignment normally used to modify the loop-control variable, then repeats Step 2.</li>
+</ol>
+
+<h3 id="s5.9.3">5.9.3 Analog For Statements</h3>
+
+<p>The <code>analog for</code> statements are syntactically equivalent to <code>for()</code> statements except the associated analog statement <strong>can</strong> contain analog operators. The additional restriction is that the procedural assignment and conditional expressions must be statically evaluatable. Verilog-AMS HDL provides genvar-derived expressions for this purpose.</p>
+
+<pre class="syntax">analog_loop_generate_statement ::=
+    for ( genvar_initialization ; genvar_expression ; genvar_iteration )
+        analog_statement</pre>
+
+<pre><code>module genvarexp(out, dt);
+    parameter integer width = 1;
+    output out;
+    input [1:width] dt;
+    electrical out;
+    electrical [1:width] dt;
+    genvar k;
+    real tmp;
+    analog begin
+        tmp = 0.0;
+        for (k = 1; k &lt;= width; k = k + 1) begin
+            tmp = tmp + V(dt[k]);
+            V(out) &lt;+ ddt(V(dt[k]));
+        end
+    end
+endmodule</code></pre>
+
+<!-- ====================================================================== -->
+<h2 id="s5.10">5.10 Analog Event Control Statements</h2>
+
+<p>Analog behavior can be controlled using events. Events have the following characteristics:</p>
+<ul>
+<li>Events have no time duration</li>
+<li>Events can be triggered and detected in different parts of the behavioral model</li>
+<li>Events do not block the execution of an analog block</li>
+<li>Events can be detected using the <code>@</code> operator</li>
+<li>Events do not hold any data</li>
+<li>There can be both digital and analog events</li>
+</ul>
+
+<p>Three types of analog events: global events (<a href="#s5.10.2">5.10.2</a>), monitored events (<a href="#s5.10.3">5.10.3</a>), and named events (<a href="#s5.10.4">5.10.4</a>). Null arguments are not allowed in analog events.</p>
+
+<pre class="syntax">analog_event_control_statement ::=
+    analog_event_control analog_event_statement
+
+analog_event_control ::=
+    @ hierarchical_event_identifier
+  | @ ( analog_event_expression )
+
+analog_event_expression ::=
+    expression
+  | posedge expression
+  | negedge expression
+  | hierarchical_event_identifier
+  | initial_step [ ( " analysis_identifier " { , " analysis_identifier " } ) ]
+  | final_step [ ( " analysis_identifier " { , " analysis_identifier " } ) ]
+  | analog_event_functions
+  | analog_event_expression or analog_event_expression
+  | analog_event_expression , analog_event_expression
+
+analog_event_functions ::=
+    cross ( analog_expression [ , analog_expression_or_null
+        [ , constant_expression_or_null
+            [ , constant_expression_or_null [ , analog_expression ] ] ] ] )
+  | above ( analog_expression [ , constant_expression_or_null
+        [ , constant_expression_or_null [ , analog_expression ] ] ] )
+  | timer ( analog_expression [ , analog_expression_or_null
+        [ , constant_expression_or_null [ , analog_expression ] ] ] )
+  | absdelta ( analog_expression , analog_expression
+        [ , constant_expression_or_null
+            [ , constant_expression_or_null [ , analog_expression ] ] ] )
+
+analog_event_statement ::=
+    { attribute_instance } analog_loop_statement
+  | { attribute_instance } analog_case_statement
+  | { attribute_instance } analog_conditional_statement
+  | { attribute_instance } analog_procedural_assignment
+  | { attribute_instance } analog_event_seq_block
+  | { attribute_instance } analog_system_task_enable
+  | { attribute_instance } disable_statement
+  | { attribute_instance } event_trigger
+  | { attribute_instance } ;</pre>
+
+<p>The procedural statement following the event expression is executed whenever the event occurs. Analog event detection is <strong>non-blocking</strong>: execution of the procedural statement is skipped unless the analog event has occurred.</p>
+
+<p>Restrictions on statements within an event control block:</p>
+<ul>
+<li>Analog filter functions cannot be used (the statement cannot maintain its internal state since it is only executed intermittently)</li>
+<li>Contribution statements cannot be used (they can generate discontinuity in analog signals)</li>
+<li>Nested event control statements are not allowed</li>
+</ul>
+
+<p>The parentheses around the event expression are required.</p>
+
+<div class="note">
+<strong>Verilog-AMS mixed-signal note:</strong> Analog events can also be detected within digital blocks using <code>analog_event_functions</code> in the digital <code>event_expression</code>. The usage of <code>initial_step</code> and <code>final_step</code> analog events is not allowed in the digital context.
+</div>
+
+<h3 id="s5.10.1">5.10.1 Event OR Operator</h3>
+
+<p>The OR-ing of events indicates the occurrence of any one of the specified events shall trigger the execution of the procedural statement. The keyword <code>or</code> is used as the event OR operator. A comma (<code>,</code>) can be used interchangeably with <code>or</code>.</p>
+
+<pre><code>analog begin
+    @(initial_step or cross(V(smpl)-2.5,+1)) begin
+        vout = (V(in) &gt; 2.5);
+    end
+    V(out) &lt;+ vout;
+end</code></pre>
+
+<p>Here, <code>initial_step</code> is a global event and <code>cross()</code> returns a monitored event. The variable <code>vout</code> is set to zero or one whenever either event occurs.</p>
+
+<h3 id="s5.10.2">5.10.2 Global Events</h3>
+
+<p>Global events are generated by a simulator at various stages of simulation. The user model cannot generate these events. They are detected by using the name of the global event in an event expression with the <code>@</code> operator. Global events are pre-defined and cannot be redefined.</p>
+
+<pre class="syntax">analog_event_expression ::=
+    ...
+  | initial_step [ ( " analysis_identifier " { , " analysis_identifier " } ) ]
+  | final_step [ ( " analysis_identifier " { , " analysis_identifier " } ) ]
+  ...</pre>
+
+<p><code>initial_step</code> and <code>final_step</code> generate global events on the first and last point in an analysis, respectively. <code>final_step</code> will also generate a global event upon termination of simulation due to <code>$finish()</code>. Both can take an optional argument consisting of an analysis list.</p>
+
+<pre><code>@(initial_step("ac", "dc"))  // active for dc and ac only
+@(initial_step("tran"))      // active for transient only</code></pre>
+
+<p>If no analysis list is specified, <code>initial_step</code> is active during the first point (or initial DC analysis) of every analysis. <code>final_step</code> without an analysis list is active during the last point of every analysis.</p>
+
+<table>
+<tr>
+<th>Event</th>
+<th>DCOP</th>
+<th>Sweep d1</th>
+<th>Sweep d2..dN</th>
+<th>TRAN OP</th>
+<th>TRAN p1</th>
+<th>TRAN pN</th>
+<th>AC OP</th>
+<th>AC p1</th>
+<th>AC pN</th>
+<th>NOISE OP</th>
+<th>NOISE p1</th>
+<th>NOISE pN</th>
+</tr>
+<tr><td><code>initial_step</code></td><td>1</td><td>1</td><td>0</td><td>0</td><td>1</td><td>0</td><td>0</td><td>1</td><td>0</td><td>0</td><td>1</td><td>0</td></tr>
+<tr><td><code>initial_step("ac")</code></td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>1</td><td>0</td><td>0</td><td>0</td><td>0</td></tr>
+<tr><td><code>initial_step("noise")</code></td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>1</td><td>0</td></tr>
+<tr><td><code>initial_step("tran")</code></td><td>0</td><td>0</td><td>0</td><td>0</td><td>1</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td></tr>
+<tr><td><code>initial_step("dc")</code></td><td>1</td><td>1</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td></tr>
+<tr><td><code>initial_step(unknown)</code></td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td></tr>
+<tr><td><code>final_step</code></td><td>1</td><td>0</td><td>1</td><td>0</td><td>0</td><td>1</td><td>0</td><td>0</td><td>1</td><td>0</td><td>0</td><td>1</td></tr>
+<tr><td><code>final_step("ac")</code></td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>1</td><td>0</td><td>0</td><td>0</td></tr>
+<tr><td><code>final_step("noise")</code></td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>1</td></tr>
+<tr><td><code>final_step("tran")</code></td><td>0</td><td>0</td><td>1</td><td>0</td><td>0</td><td>1</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td></tr>
+<tr><td><code>final_step("dc")</code></td><td>1</td><td>0</td><td>1</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td></tr>
+<tr><td><code>final_step(unknown)</code></td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td></tr>
+</table>
+
+<p>Sweep refers to a dc analysis in which a parameter is swept through multiple values and an operating point analysis is performed for each value. d1 is the first point; d2 through dN are subsequent points.</p>
+
+<pre><code>module bitErrorRate (in, ref);
+    input in, ref;
+    electrical in, ref;
+    parameter real period=1, thresh=0.5;
+    integer bits, errors;
+    analog begin
+        @(initial_step) begin
+            bits = 0;
+            errors = 0;
+        end
+        @(timer(0, period)) begin
+            if ((V(in) &gt; thresh) != (V(ref) &gt; thresh))
+                errors = errors + 1;
+            bits = bits + 1;
+        end
+        @(final_step)
+            $strobe("bit error rate = %f%%", 100.0 * errors / bits );
+    end
+endmodule</code></pre>
+
+<h3 id="s5.10.3">5.10.3 Monitored Events</h3>
+
+<p>Monitored events are detected using event functions with the <code>@</code> operator. Triggering is implicit due to change in signals, simulation time, or other runtime conditions.</p>
+
+<h4 id="s5.10.3.1">5.10.3.1 cross Function</h4>
+
+<p>The <code>cross()</code> function generates a monitored analog event to detect threshold crossings when the expression crosses zero (0) in the specified direction. It also controls the timestep to accurately resolve the crossing.</p>
+
+<pre class="syntax">cross ( expr [ , dir [ , time_tol [ , expr_tol [ , enable ] ] ] ] )</pre>
+
+<table>
+<tr><th>Argument</th><th>Type</th><th>Required</th><th>Description</th></tr>
+<tr><td><code>expr</code></td><td>analog_expression</td><td>Yes</td><td>Expression to monitor for zero crossings</td></tr>
+<tr><td><code>dir</code></td><td>analog_expression (integer)</td><td>No</td><td>Direction: 0 = both, +1 = rising, -1 = falling. Other values disable the function.</td></tr>
+<tr><td><code>time_tol</code></td><td>constant_expression</td><td>No</td><td>Maximum time error at crossing. Non-negative.</td></tr>
+<tr><td><code>expr_tol</code></td><td>constant_expression</td><td>No</td><td>Maximum expression error at crossing. Non-negative.</td></tr>
+<tr><td><code>enable</code></td><td>analog_expression</td><td>No</td><td>If specified and zero, cross() is inactive.</td></tr>
+</table>
+
+<p>If <code>dir</code> is 0 or not specified, the event and timestep control occur on both positive and negative crossings. If <code>dir</code> is +1, only rising edges. If <code>dir</code> is -1, only falling edges. For any other value of <code>dir</code>, the function does not generate an event and does not control the timestep.</p>
+
+<p>If <code>expr_tol</code> is specified, <code>time_tol</code> shall also be specified and both tolerances shall be satisfied at the crossing. If tolerances are not specified, the tool sets them. If either or both tolerances are defined, then <code>dir</code> shall also be defined.</p>
+
+<p>The event shall occur after the threshold crossing and while the signal remains in the box defined by the actual crossing, <code>expr_tol</code>, and <code>time_tol</code>.</p>
+
+<p>Analog filter functions cannot be used for <code>dir</code> or <code>enable</code> arguments.</p>
+
+<pre><code>module sh (in, out, smpl);
+    parameter real thresh = 0.0;
+    parameter integer dir = +1 from [-1:+1] exclude 0;
+    output out;
+    input in, smpl;
+    electrical in, out, smpl;
+    real state;
+    analog begin
+        @(cross(V(smpl) - thresh, dir))
+            state = V(in);
+        V(out) &lt;+ transition(state, 0, 10n);
+    end
+endmodule</code></pre>
+
+<p>There are two ways to disable the cross function: set <code>enable</code> to 0, or give a value other than -1, 0, or 1 to <code>dir</code>:</p>
+
+<pre><code>module sh (in, out, smpl, en);
+    parameter real thresh = 0.0;
+    parameter integer dir = +1 from [-1:+1] exclude 0;
+    output out;
+    input in, smpl, en;
+    electrical in, out, smpl;
+    real state;
+    analog begin
+        @(cross(V(smpl) - thresh, dir, , , en === 1'b1))
+            state = V(in);
+        V(out) &lt;+ transition(state, 0, 10n);
+    end
+endmodule</code></pre>
+
+<p><code>cross()</code> maintains its internal state and has the same restrictions as analog operators. It shall not be used inside <code>if</code>, <code>case</code>, <code>casex</code>, or <code>casez</code> unless the conditional expression is a genvar expression. It is not allowed in <code>repeat</code> and <code>while</code> loops but is allowed in <code>analog for</code> statements.</p>
+
+<h4 id="s5.10.3.2">5.10.3.2 above Function</h4>
+
+<p>The <code>above()</code> function is almost identical to <code>cross()</code>, except it also triggers during initialization or dc analysis. It generates a monitored analog event to detect when the expression crosses zero from below. It controls the timestep to accurately resolve the crossing during transient analysis.</p>
+
+<pre class="syntax">above ( expr [ , time_tol [ , expr_tol [ , enable ] ] ] )</pre>
+
+<table>
+<tr><th>Argument</th><th>Type</th><th>Required</th><th>Description</th></tr>
+<tr><td><code>expr</code></td><td>analog_expression</td><td>Yes</td><td>Expression to monitor</td></tr>
+<tr><td><code>time_tol</code></td><td>constant_expression</td><td>No</td><td>Maximum time error. Non-negative.</td></tr>
+<tr><td><code>expr_tol</code></td><td>constant_expression</td><td>No</td><td>Maximum expression error. Non-negative.</td></tr>
+<tr><td><code>enable</code></td><td>analog_expression</td><td>No</td><td>If specified and zero, above() is inactive.</td></tr>
+</table>
+
+<p>Key differences from <code>cross()</code>:</p>
+<ul>
+<li><code>above()</code> can generate an event during initialization. If the expression is positive at the conclusion of the initial condition analysis that precedes a transient analysis, it shall generate an event.</li>
+<li><code>cross()</code> can only generate an event after simulation time has advanced from zero.</li>
+<li><code>cross()</code> will not generate events for non-transient analyses (ac, dc, noise), but <code>above()</code> can.</li>
+<li>During a dc sweep, <code>above()</code> shall also generate an event when the expression crosses zero from below; however, the step size of the dc sweep is not controlled.</li>
+</ul>
+
+<pre><code>module sh (in, out, smpl);
+    output out;
+    input in, smpl;
+    electrical in, out, smpl;
+    real state;
+    analog begin
+        @(above(V(smpl) - 2.5))
+            state = V(in);
+        V(out) &lt;+ transition(state, 0, 10n);
+    end
+endmodule</code></pre>
+
+<p><code>above()</code> maintains its internal state and has the same restrictions on its use as <code>cross()</code>.</p>
+
+<h4 id="s5.10.3.3">5.10.3.3 timer Function</h4>
+
+<p>The <code>timer()</code> function generates analog events to detect specific points in time.</p>
+
+<pre class="syntax">timer ( start_time [ , period [ , time_tol [ , enable ] ] ] )</pre>
+
+<table>
+<tr><th>Argument</th><th>Type</th><th>Required</th><th>Description</th></tr>
+<tr><td><code>start_time</code></td><td>analog_expression</td><td>Yes</td><td>Absolute time of first event</td></tr>
+<tr><td><code>period</code></td><td>analog_expression</td><td>No</td><td>Period of subsequent events. If &le; 0, triggers only once.</td></tr>
+<tr><td><code>time_tol</code></td><td>constant_expression</td><td>No</td><td>Maximum time error. Non-negative.</td></tr>
+<tr><td><code>enable</code></td><td>analog_expression</td><td>No</td><td>If specified and zero, timer() is inactive.</td></tr>
+</table>
+
+<p>The <code>timer()</code> function schedules an event at an absolute time (<code>start_time</code>). The simulator places a time point within <code>time_tol</code> of the event. If <code>time_tol</code> is not specified, the default time point is at, or just beyond, the time of the event.</p>
+
+<p>If <code>period</code> is greater than zero, the timer schedules subsequent events at multiples of period. If <code>period</code> evaluates to a value less than or equal to 0.0, the timer triggers only once at the specified <code>start_time</code> (if the <code>start_time</code> is in the future).</p>
+
+<p>If <code>start_time</code> or <code>period</code> expressions change value during evaluation of the analog block, the next event will be scheduled based on the latest value.</p>
+
+<p>If <code>enable</code> is specified and zero, <code>timer()</code> is inactive and does not generate events as long as <code>enable</code> is zero. It will start generating events once <code>enable</code> returns to nonzero as if it had never been disabled.</p>
+
+<p>Analog filter functions cannot be used for the <code>start_time</code> and <code>period</code> arguments.</p>
+
+<pre><code>module bitStream (out);
+    output out;
+    electrical out;
+    parameter period = 1.0;
+    integer x;
+    analog begin
+        @(timer(0, period))
+            x = $random + 0.5;
+        V(out) &lt;+ transition( x, 0.0, period/100.0 );
+    end
+endmodule</code></pre>
+
+<h4 id="s5.10.3.4">5.10.3.4 absdelta Function</h4>
+
+<p>The <code>absdelta</code> event function generates an event when an analog expression changes more than a specified amount. It is particularly useful for discretizing analog signals.</p>
+
+<div class="note">
+<strong>Verilog-AMS note:</strong> The <code>absdelta</code> function is only allowed in an <code>initial</code> or <code>always</code> block of a Verilog-AMS module (digital context).
+</div>
+
+<pre class="syntax">absdelta ( expr , delta [ , time_tol [ , expr_tol [ , enable ] ] ] )</pre>
+
+<table>
+<tr><th>Argument</th><th>Type</th><th>Required</th><th>Description</th></tr>
+<tr><td><code>expr</code></td><td>analog_expression</td><td>Yes</td><td>Expression to monitor</td></tr>
+<tr><td><code>delta</code></td><td>analog_expression</td><td>Yes</td><td>Change threshold. Non-negative.</td></tr>
+<tr><td><code>time_tol</code></td><td>constant_expression</td><td>No</td><td>Maximum time error. Non-negative.</td></tr>
+<tr><td><code>expr_tol</code></td><td>constant_expression</td><td>No</td><td>Largest negligible difference. Non-negative.</td></tr>
+<tr><td><code>enable</code></td><td>analog_expression (integer)</td><td>No</td><td>If specified and zero, absdelta() is inactive.</td></tr>
+</table>
+
+<p><code>absdelta()</code> does not force timesteps in the analog solver; it observes the <code>expr</code> argument and generates events at appropriate times. It may interpolate event times to avoid forcing analog timesteps.</p>
+
+<p><code>absdelta()</code> generates events for:</p>
+<ul>
+<li>During initialization or dc sweep analysis</li>
+<li>When the <code>enable</code> argument changes from zero to non-zero</li>
+<li>When the <code>expr</code> value changes in absolute value by more than <code>delta</code>, relative to the previous <code>absdelta()</code> event (but not when the current time is within <code>time_tol</code> of the previous event). The event may be scheduled at any time between the interpolated absolute change of <code>(delta - expr_tol)</code> and <code>(delta + expr_tol)</code>.</li>
+<li>When <code>expr</code> changes direction (but not when the change amount is less than <code>expr_tol</code>)</li>
+</ul>
+
+<p>If <code>delta</code> is set to zero, an event is generated every timestep the expression value changes, with zero tolerances. <code>expr_tol</code> and <code>time_tol</code>, if specified, will be ignored. No events are generated by interpolation. Setting <code>delta</code> to zero should be done with great care as it may severely impact simulation performance.</p>
+
+<p>A <code>time_tol</code> smaller than the time precision is ignored and the time precision is used instead.</p>
+
+<pre><code>`include "disciplines.vams"
+`timescale 1ns / 100ps
+module electrical_sampler (e_in, r_out);
+    input e_in;
+    output r_out;
+    electrical e_in;
+    wreal r_out;
+    parameter real vdelta=0.1 from (0:inf);   // voltage delta
+    parameter real ttol=1n from (0:1m];       // time tolerance
+    parameter real vtol=0.01 from (0:inf);    // voltage tolerance
+    real sampled;
+    assign r_out = sampled;
+    always @(absdelta(V(e_in), vdelta, ttol, vtol))
+        sampled = V(e_in);
+endmodule</code></pre>
+
+<h3 id="s5.10.4">5.10.4 Named Events</h3>
+
+<p>An identifier declared as an event data type is called a <em>named event</em>. A named event is triggered explicitly and used in an event expression to control the execution of procedural statements.</p>
+
+<p>Named events can be triggered from <code>always</code> and <code>initial</code> blocks, or from an analog event statement.</p>
+
+<p>An event name shall be declared explicitly before use:</p>
+
+<pre class="syntax">event_declaration ::= event list_of_event_identifiers ;
+
+list_of_event_identifiers ::=
+    event_identifier { dimension } { , event_identifier { dimension } }
+
+dimension ::=
+    [ dimension_constant_expression : dimension_constant_expression ]</pre>
+
+<p>A declared event is triggered with the event triggering statement:</p>
+
+<pre class="syntax">event_trigger ::=
+    -&gt; hierarchical_event_identifier { [ expression ] } ;</pre>
+
+<p>An event-controlled statement (e.g., <code>@trig rega = regb;</code>) causes simulation of its containing procedure to wait until some other procedure executes the appropriate event-triggering statement (e.g., <code>-&gt; trig</code>).</p>
+
+<h3 id="s5.10.5">5.10.5 Digital Events in Analog Behavior</h3>
+
+<div class="note">
+<strong>Verilog-AMS mixed-signal feature:</strong> To model mixed-signal functionality, analog behavior can be made sensitive to digital events, including <code>posedge</code> events, <code>negedge</code> events, state change events, and named events. This is a Verilog-AMS mixed-signal capability and is not part of the pure Verilog-A subset.
+</div>
+
+</body>
+</html>

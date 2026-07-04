@@ -1,0 +1,30 @@
+// Conformance: 3.6.1.1 — Derived natures
+// EXPECT: compile_ok
+nature Voltage;
+    units = "V";
+    access = V;
+    abstol = 1u;
+endnature
+
+nature HighVoltage : Voltage;
+    abstol = 1;
+endnature
+
+nature Current;
+    units = "A";
+    access = I;
+    abstol = 1p;
+endnature
+
+discipline highvolt;
+    potential HighVoltage;
+    flow Current;
+enddiscipline
+
+module conf_nat_derived(p, n);
+    inout p, n;
+    highvolt p, n;
+    parameter real R = 1.0k;
+    analog
+        I(p, n) <+ V(p, n) / R;
+endmodule

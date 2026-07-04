@@ -1,0 +1,17 @@
+// Conformance: 9.15 — $param_given
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module conf_sys_paramgiven(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real R = 1.0k;
+    parameter real G = 0;
+    real conductance;
+    analog begin
+        if ($param_given(G))
+            conductance = G;
+        else
+            conductance = 1.0 / R;
+        I(p, n) <+ conductance * V(p, n);
+    end
+endmodule

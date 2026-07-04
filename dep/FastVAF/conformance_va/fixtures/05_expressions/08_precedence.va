@@ -1,0 +1,18 @@
+// Conformance: 4.2.2 — Operator precedence
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module conf_expr_prec(p, n);
+    inout p, n;
+    electrical p, n;
+    real a, b, c, r;
+    integer ia, ib, ir;
+    analog begin
+        a = 2.0; b = 3.0; c = 4.0;
+        r = a + b * c;
+        r = (a + b) * c;
+        r = a ** b * c;
+        ia = 1; ib = 0;
+        ir = ia || ib && ia;
+        I(p, n) <+ r;
+    end
+endmodule

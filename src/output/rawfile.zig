@@ -1,0 +1,284 @@
+const std = @import("std");
+const Io = std.Io;
+
+pub const Plot = struct {
+    title: []const u8,
+    plotname: []const u8,
+    varnames: []const []const u8,
+    is_complex: bool,
+    npoints: usize,
+    /// Column-major: all vars for point 0, then all vars for point 1, ...
+    /// For real data: length = npoints * nvars
+    /// For complex data: length = npoints * nvars * 2 (re,im pairs per variable)
+    data: []const f64,
+};
+
+/// Infer the ngspice type string for a variable name.
+/// "time" -> "time", "frequency" -> "frequency",
+/// names containing "#branch" or starting with "i(" -> "current",
+/// everything else -> "voltage".
+pub fn varType(name: []const u8) []const u8 {
+    if (std.mem.eql(u8, name, "time")) return "time";
+    if (std.mem.eql(u8, name, "frequency")) return "frequency";
+    if (std.mem.startsWith(u8, name, "i(")) return "current";
+    if (std.mem.indexOf(u8, name, "#branch") != null) return "current";
+    return "voltage";
+}
+
+/// Write an ngspice-compatible binary raw file to `path`.
+pub fn write(io: Io, path: []const u8, plot: Plot) !void {
+    const nvars = plot.varnames.len;
+    const per: usize = if (plot.is_complex) 2 else 1;
+    const expected_len = plot.npoints * nvars * per;
+    if (plot.data.len != expected_len) return error.DataLengthMismatch;
+
+    const file = try Io.Dir.cwd().createFile(io, path, .{});
+    defer file.close(io);
+
+    var buf: [4096]u8 = undefined;
+    var fw = file.writer(io, &buf);
+    const w = &fw.interface;
+
+    // --- ASCII header ---
+    try w.print("Title: {s}\n", .{plot.title});
+    try w.writeAll("Date: Thu Jan  1 00:00:00 1970\n");
+    try w.print("Plotname: {s}\n", .{plot.plotname});
+    if (plot.is_complex) {
+        try w.writeAll("Flags: complex\n");
+    } else {
+        try w.writeAll("Flags: real\n");
+    }
+    try w.print("No. Variables: {d}\n", .{nvars});
+    try w.print("No. Points: {d}\n", .{plot.npoints});
+    try w.writeAll("Variables:\n");
+    for (plot.varnames, 0..) |name, i| {
+        try w.print("\t{d}\t{s}\t{s}\n", .{ i, name, varType(name) });
+    }
+    try w.writeAll("Binary:\n");
+
+    // Flush the text header before writing binary data.
+    try w.flush();
+
+    // --- Binary data ---
+    // Write f64 values as raw bytes in native endian (ngspice uses host endian).
+    const bytes = std.mem.sliceAsBytes(plot.data);
+    try w.writeAll(bytes);
+    try w.flush();
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+test "write and read back real .op raw file" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+
+    const varnames = [_][]const u8{ "v(out)", "v(in)", "i(v1)#branch" };
+    const data = [_]f64{ 1.5, 3.3, -0.001 }; // 1 point, 3 vars
+
+    const plot: Plot = .{
+        .title = "test op",
+        .plotname = "Operating Point",
+        .varnames = &varnames,
+        .is_complex = false,
+        .npoints = 1,
+        .data = &data,
+    };
+
+    const path = "zig-out/test_op.raw";
+
+    // Ensure the output directory exists.
+    Io.Dir.cwd().createDirPath(io, "zig-out") catch {};
+
+    try write(io, path, plot);
+    defer Io.Dir.cwd().deleteFile(io, path) catch {};
+
+    // Read back and verify.
+    const blob = try Io.Dir.cwd().readFileAlloc(io, path, allocator, .unlimited);
+    defer allocator.free(blob);
+
+    // Find "Binary:\n" marker.
+    const marker = "Binary:\n";
+    const marker_pos = std.mem.indexOf(u8, blob, marker) orelse return error.MarkerNotFound;
+    const header = blob[0..marker_pos];
+    const bin_start = marker_pos + marker.len;
+
+    // Verify header fields.
+    try std.testing.expect(std.mem.indexOf(u8, header, "Title: test op\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, header, "Plotname: Operating Point\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, header, "Flags: real\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, header, "No. Variables: 3\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, header, "No. Points: 1\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, header, "\t0\tv(out)\tvoltage\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, header, "\t1\tv(in)\tvoltage\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, header, "\t2\ti(v1)#branch\tcurrent\n") != null);
+
+    // Verify binary data.
+    const nvars = 3;
+    const npoints = 1;
+    const expected_bytes = nvars * npoints * @sizeOf(f64);
+    try std.testing.expectEqual(expected_bytes, blob.len - bin_start);
+
+    const read_data: [*]align(1) const f64 = @ptrCast(blob[bin_start..].ptr);
+    try std.testing.expectApproxEqAbs(1.5, read_data[0], 1e-15);
+    try std.testing.expectApproxEqAbs(3.3, read_data[1], 1e-15);
+    try std.testing.expectApproxEqAbs(-0.001, read_data[2], 1e-15);
+}
+
+test "write and read back real .tran raw file" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+
+    const varnames = [_][]const u8{ "time", "v(out)" };
+    // 3 points, 2 vars each, column-major:
+    //   point 0: time=0.0, v(out)=0.0
+    //   point 1: time=0.5, v(out)=1.0
+    //   point 2: time=1.0, v(out)=2.0
+    const data = [_]f64{
+        0.0, 0.0, // point 0
+        0.5, 1.0, // point 1
+        1.0, 2.0, // point 2
+    };
+
+    const plot: Plot = .{
+        .title = "test tran",
+        .plotname = "Transient Analysis",
+        .varnames = &varnames,
+        .is_complex = false,
+        .npoints = 3,
+        .data = &data,
+    };
+
+    const path = "zig-out/test_tran.raw";
+    Io.Dir.cwd().createDirPath(io, "zig-out") catch {};
+
+    try write(io, path, plot);
+    defer Io.Dir.cwd().deleteFile(io, path) catch {};
+
+    const blob = try Io.Dir.cwd().readFileAlloc(io, path, allocator, .unlimited);
+    defer allocator.free(blob);
+
+    const marker = "Binary:\n";
+    const marker_pos = std.mem.indexOf(u8, blob, marker) orelse return error.MarkerNotFound;
+    const header = blob[0..marker_pos];
+    const bin_start = marker_pos + marker.len;
+
+    try std.testing.expect(std.mem.indexOf(u8, header, "Plotname: Transient Analysis\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, header, "No. Variables: 2\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, header, "No. Points: 3\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, header, "\t0\ttime\ttime\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, header, "\t1\tv(out)\tvoltage\n") != null);
+
+    const nvars = 2;
+    const npoints = 3;
+    const expected_bytes = nvars * npoints * @sizeOf(f64);
+    try std.testing.expectEqual(expected_bytes, blob.len - bin_start);
+
+    // Verify column-major layout: data[p * nvars + col]
+    const read_data: [*]align(1) const f64 = @ptrCast(blob[bin_start..].ptr);
+    // point 0
+    try std.testing.expectApproxEqAbs(0.0, read_data[0], 1e-15); // time
+    try std.testing.expectApproxEqAbs(0.0, read_data[1], 1e-15); // v(out)
+    // point 1
+    try std.testing.expectApproxEqAbs(0.5, read_data[2], 1e-15); // time
+    try std.testing.expectApproxEqAbs(1.0, read_data[3], 1e-15); // v(out)
+    // point 2
+    try std.testing.expectApproxEqAbs(1.0, read_data[4], 1e-15); // time
+    try std.testing.expectApproxEqAbs(2.0, read_data[5], 1e-15); // v(out)
+}
+
+test "write and read back complex .ac raw file" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+
+    const varnames = [_][]const u8{ "frequency", "v(out)" };
+    // 2 points, 2 vars, complex: each variable is (re, im) pair
+    // Column-major: for each point, iterate vars; for each var, write (re, im)
+    // point 0: freq=(1.0, 0.0), v(out)=(0.5, -0.5)
+    // point 1: freq=(10.0, 0.0), v(out)=(0.1, -0.9)
+    const data = [_]f64{
+        // point 0
+        1.0,  0.0,  // frequency re, im
+        0.5,  -0.5, // v(out) re, im
+        // point 1
+        10.0, 0.0,  // frequency re, im
+        0.1,  -0.9, // v(out) re, im
+    };
+
+    const plot: Plot = .{
+        .title = "test ac",
+        .plotname = "AC Analysis",
+        .varnames = &varnames,
+        .is_complex = true,
+        .npoints = 2,
+        .data = &data,
+    };
+
+    const path = "zig-out/test_ac.raw";
+    Io.Dir.cwd().createDirPath(io, "zig-out") catch {};
+
+    try write(io, path, plot);
+    defer Io.Dir.cwd().deleteFile(io, path) catch {};
+
+    const blob = try Io.Dir.cwd().readFileAlloc(io, path, allocator, .unlimited);
+    defer allocator.free(blob);
+
+    const marker = "Binary:\n";
+    const marker_pos = std.mem.indexOf(u8, blob, marker) orelse return error.MarkerNotFound;
+    const header = blob[0..marker_pos];
+    const bin_start = marker_pos + marker.len;
+
+    try std.testing.expect(std.mem.indexOf(u8, header, "Flags: complex\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, header, "No. Variables: 2\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, header, "No. Points: 2\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, header, "\t0\tfrequency\tfrequency\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, header, "\t1\tv(out)\tvoltage\n") != null);
+
+    // Complex: 2 f64 per variable per point
+    const nvars = 2;
+    const npoints = 2;
+    const expected_bytes = nvars * npoints * 2 * @sizeOf(f64);
+    try std.testing.expectEqual(expected_bytes, blob.len - bin_start);
+
+    const read_data: [*]align(1) const f64 = @ptrCast(blob[bin_start..].ptr);
+    // point 0, frequency (re, im)
+    try std.testing.expectApproxEqAbs(1.0, read_data[0], 1e-15);
+    try std.testing.expectApproxEqAbs(0.0, read_data[1], 1e-15);
+    // point 0, v(out) (re, im)
+    try std.testing.expectApproxEqAbs(0.5, read_data[2], 1e-15);
+    try std.testing.expectApproxEqAbs(-0.5, read_data[3], 1e-15);
+    // point 1, frequency (re, im)
+    try std.testing.expectApproxEqAbs(10.0, read_data[4], 1e-15);
+    try std.testing.expectApproxEqAbs(0.0, read_data[5], 1e-15);
+    // point 1, v(out) (re, im)
+    try std.testing.expectApproxEqAbs(0.1, read_data[6], 1e-15);
+    try std.testing.expectApproxEqAbs(-0.9, read_data[7], 1e-15);
+}
+
+test "data length mismatch returns error" {
+    const io = std.testing.io;
+    const varnames = [_][]const u8{ "v(a)", "v(b)" };
+    const data = [_]f64{ 1.0, 2.0, 3.0 }; // 3 values but 2 vars * 2 points = 4 expected
+
+    const plot: Plot = .{
+        .title = "bad",
+        .plotname = "bad",
+        .varnames = &varnames,
+        .is_complex = false,
+        .npoints = 2,
+        .data = &data,
+    };
+
+    const result = write(io, "zig-out/should_not_exist.raw", plot);
+    try std.testing.expectError(error.DataLengthMismatch, result);
+}
+
+test "varType inference" {
+    try std.testing.expectEqualStrings("time", varType("time"));
+    try std.testing.expectEqualStrings("frequency", varType("frequency"));
+    try std.testing.expectEqualStrings("current", varType("i(v1)"));
+    try std.testing.expectEqualStrings("current", varType("vdd#branch"));
+    try std.testing.expectEqualStrings("voltage", varType("v(out)"));
+    try std.testing.expectEqualStrings("voltage", varType("v(1)"));
+}

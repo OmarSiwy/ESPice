@@ -1,0 +1,11 @@
+// Conformance: 11.1 — Simple `define
+// EXPECT: compile_ok
+`include "disciplines.vams"
+`define RESISTANCE 1.0e3
+
+module conf_pp_define(p, n);
+    inout p, n;
+    electrical p, n;
+    analog
+        I(p, n) <+ V(p, n) / `RESISTANCE;
+endmodule

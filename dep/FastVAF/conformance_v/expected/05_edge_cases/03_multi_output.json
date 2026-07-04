@@ -1,0 +1,7 @@
+{
+    "status": "compile_ok",
+    "module_name": "multi_out",
+    "input_count": 2,
+    "output_count": 3,
+    "is_sequential": false
+}

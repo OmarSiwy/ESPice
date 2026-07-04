@@ -1,0 +1,11 @@
+// Conformance: 4.5.11 — Laplace numerator-denominator
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module conf_op_laplace(out, in);
+    input in;
+    output out;
+    electrical out, in;
+    parameter real wp = 6.28e6;
+    analog
+        V(out) <+ laplace_nd(V(in), '{1.0}, '{1.0, 1.0/wp});
+endmodule

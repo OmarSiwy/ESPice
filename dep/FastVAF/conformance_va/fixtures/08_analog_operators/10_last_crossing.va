@@ -1,0 +1,13 @@
+// Conformance: 4.5.10 — last_crossing
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module conf_op_lastcross(out, in);
+    input in;
+    output out;
+    electrical out, in;
+    real tlc;
+    analog begin
+        tlc = last_crossing(V(in), +1);
+        V(out) <+ tlc;
+    end
+endmodule

@@ -1,0 +1,14 @@
+// Conformance: 11.1 — Multi-line `define
+// EXPECT: compile_ok
+`include "disciplines.vams"
+`define RESISTOR(p, n, r) \
+    I(p, n) <+ V(p, n) / r
+
+module conf_pp_multiline(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real R = 1.0k;
+    analog begin
+        `RESISTOR(p, n, R);
+    end
+endmodule

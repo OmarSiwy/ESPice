@@ -1,0 +1,11 @@
+// Conformance: 3.4.5 — Local parameters
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module conf_dt_localparam(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real R = 1.0k;
+    localparam real G = 1.0 / R;
+    analog
+        I(p, n) <+ G * V(p, n);
+endmodule

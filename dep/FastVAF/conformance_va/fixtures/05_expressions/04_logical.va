@@ -1,0 +1,18 @@
+// Conformance: 4.2.8 — Logical operators with short-circuit
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module conf_expr_logic(p, n);
+    inout p, n;
+    electrical p, n;
+    real a, b;
+    integer r;
+    analog begin
+        a = 1.0; b = 0.0;
+        r = (a && b);
+        r = (a || b);
+        r = !a;
+        r = (a > 0 && b > 0);
+        r = (a > 0 || b > 0);
+        I(p, n) <+ r;
+    end
+endmodule

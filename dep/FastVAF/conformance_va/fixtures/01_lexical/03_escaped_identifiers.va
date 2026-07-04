@@ -1,0 +1,10 @@
+// Conformance: 2.8.1 — Escaped identifiers
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module conf_lex_escaped(\p+ , \n- );
+    inout \p+ , \n- ;
+    electrical \p+ , \n- ;
+    parameter real \my-param = 1.0;
+    analog
+        I(\p+ , \n- ) <+ V(\p+ , \n- ) / \my-param ;
+endmodule

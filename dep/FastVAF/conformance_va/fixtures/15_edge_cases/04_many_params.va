@@ -1,0 +1,13 @@
+// Conformance: edge — Module with many parameters
+// EXPECT: compile_ok
+`include "disciplines.vams"
+module conf_edge_params(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real p01=1, p02=2, p03=3, p04=4, p05=5;
+    parameter real p06=6, p07=7, p08=8, p09=9, p10=10;
+    parameter real p11=11, p12=12, p13=13, p14=14, p15=15;
+    parameter real p16=16, p17=17, p18=18, p19=19, p20=20;
+    analog
+        I(p, n) <+ V(p, n) / (p01+p02+p03+p04+p05+p06+p07+p08+p09+p10+p11+p12+p13+p14+p15+p16+p17+p18+p19+p20);
+endmodule

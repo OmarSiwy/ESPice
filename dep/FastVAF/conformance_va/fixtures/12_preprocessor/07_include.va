@@ -1,0 +1,11 @@
+// Conformance: 11.3 — `include
+// EXPECT: compile_ok
+`include "constants.vams"
+`include "disciplines.vams"
+
+module conf_pp_include(p, n);
+    inout p, n;
+    electrical p, n;
+    analog
+        I(p, n) <+ V(p, n) * `P_Q / (`P_K * $temperature);
+endmodule
