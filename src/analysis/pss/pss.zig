@@ -518,10 +518,6 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const x_op = ctx.x_op;
 
     const names = try root.probeNames(ctx, "time");
-    errdefer {
-        for (names[1..]) |s| a.free(s); // names[0] is the "time" literal
-        a.free(names);
-    }
     const ncols = names.len;
     const npoints: usize = @as(usize, opts.n_samples) + 1;
     const data = try a.alloc(f64, npoints * ncols);

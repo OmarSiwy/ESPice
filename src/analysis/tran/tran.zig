@@ -646,10 +646,6 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     }
 
     const names = try root.probeNames(ctx, "time");
-    errdefer {
-        for (names[1..]) |s| a.free(s); // names[0] is the "time" literal
-        a.free(names);
-    }
     return .{
         .plotname = "Transient Analysis",
         .varnames = names,

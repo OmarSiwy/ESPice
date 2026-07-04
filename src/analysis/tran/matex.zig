@@ -602,10 +602,6 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     }
 
     const names = try root.probeNames(ctx, "time");
-    errdefer {
-        for (names[1..]) |s_val| a.free(s_val);
-        a.free(names);
-    }
     return .{
         .plotname = "MATEX Transient Analysis",
         .varnames = names,

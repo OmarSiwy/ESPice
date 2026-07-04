@@ -647,10 +647,6 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     if (harmonic) {
         const names = try root.probeNames(ctx, "frequency");
-        errdefer {
-            for (names[1..]) |s| a.free(s); // names[0] is the "frequency" literal
-            a.free(names);
-        }
         const ncols = names.len;
         const data = try a.alloc(f64, n_points * ncols * 2);
         for (0..n_points) |i| {

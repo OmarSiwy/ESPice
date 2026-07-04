@@ -134,10 +134,6 @@ fn publish(ctx: *const root.RunCtx, plotname: []const u8, first: []const u8, x_l
         for (results) |r| n_conv += @intFromBool(r.converged);
     }
     const names = try root.probeNames(ctx, first);
-    errdefer {
-        for (names[1..]) |s| a.free(s);
-        a.free(names);
-    }
     const ncols = names.len;
     const data = try a.alloc(f64, n_conv * ncols);
     if (n_conv > 0) {
