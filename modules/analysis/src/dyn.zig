@@ -101,6 +101,7 @@ pub const DynProtoStore = struct {
     pub fn addPattern(ctx: *anyopaque, gpa: std.mem.Allocator, pb: *PatternBuilder) anyerror!void {
         const self: *DynProtoStore = @ptrCast(@alignCast(ctx));
         const n_u: usize = self.dyn.n_u;
+        try pb.reserve(gpa, @as(usize, self.count) * n_u * n_u);
         for (0..self.count) |id| {
             const nd = self.nodes[id * n_u ..][0..n_u];
             for (nd) |r| for (nd) |c| {
