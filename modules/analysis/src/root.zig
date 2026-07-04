@@ -2,6 +2,7 @@ const std = @import("std");
 
 const contract = @import("contract.zig");
 pub const batch = @import("batch.zig");
+pub const converger = @import("converger.zig");
 pub const dyn = @import("dyn.zig");
 pub const par = @import("par.zig");
 
@@ -596,5 +597,7 @@ test {
     _ = batch;
     _ = dyn;
     _ = @import("newton.zig");
+    _ = @import("converger.zig");
+    _ = @import("gpu_newton.zig");
     _ = @import("meas.zig");
 }
