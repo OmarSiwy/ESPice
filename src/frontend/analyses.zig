@@ -943,6 +943,7 @@ fn hbTones(arena: std.mem.Allocator, args: []const Value) !requests.Hb {
         .extra_tones = tones.items[1..],
         .extra_harmonics = nharms.items[1..],
         .intmodmax = intmod orelse std.mem.max(u16, nharms.items),
+        .phasors = true,
     };
 }
 

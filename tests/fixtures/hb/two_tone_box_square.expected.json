@@ -4,7 +4,7 @@
   "purpose": "Box truncation over incommensurate tones: a square law needs no period",
   "oracle": {
     "kind": "analytic",
-    "derivation": "(sin w1t + 0.5 sin w2t)^2 = 0.625 - 0.5 cos 2w1t - 0.125 cos 2w2t + 0.5 cos(w2-w1)t - 0.5 cos(w1+w2)t; the other 7 box lines are 0. INTMODMAX = H1 + H2 keeps the whole 5x5 box."
+    "derivation": "(sin w1t + 0.5 sin w2t)^2 = 0.625 - 0.5 cos 2w1t - 0.125 cos 2w2t + 0.5 cos(w2-w1)t - 0.5 cos(w1+w2)t; the other 7 box lines are 0. INTMODMAX = H1 + H2 keeps the whole 5x5 box. Values are the complex phasors X, x(t) = Re{X exp(jwt)}, so A sin wt is -jA and A cos wt is A."
   },
   "expect": {
     "status": "success",
@@ -18,19 +18,58 @@
             "rtol": 1e-09,
             "atol": 1e-09,
             "values": [
-              0.625,
-              0.5,
-              0.0,
-              0.0,
-              0.0,
-              0.0,
-              0.0,
-              0.5,
-              0.5,
-              0.125,
-              0.0,
-              0.0,
-              0.0
+              [
+                0.625,
+                0.0
+              ],
+              [
+                0.5,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                -0.5,
+                0.0
+              ],
+              [
+                -0.5,
+                0.0
+              ],
+              [
+                -0.125,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ]
             ]
           }
         },

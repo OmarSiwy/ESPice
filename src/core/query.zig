@@ -371,6 +371,10 @@ pub const Hb = struct {
     /// harmonics are kept up to its count regardless, and every |k_i| stays
     /// within tone i's count. 0 keeps that whole box.
     intmodmax: u16 = 0,
+    /// Publish complex phasors X = c - j·s per line, x(t) = Re{X·e^(jωt)},
+    /// instead of magnitudes: HSPICE's `.hb TONES=` form [CR .HB]. The
+    /// positional `.hb f0 K` keeps magnitudes.
+    phasors: bool = false,
 };
 
 /// Periodic AC (`.pac`) and periodic transfer function (`.pxf`) options.

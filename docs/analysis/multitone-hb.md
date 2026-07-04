@@ -160,11 +160,18 @@ layout nor its card.
   VACASK's default reltol=1e-3 and vntol=1e-6 its lines move by up to
   6.5e-7 V (0.75% on the 42 µV IM3). Lines of order 6 and 7, below 2e-8 V,
   differ by the aliasing of the two solvers' different collocation instants.
+- The two diode oracles hold magnitudes only, so their columns set
+  `"magnitude": true` and the harness compares |X|. The analytic decks
+  check the full phasors.
 
 ## Divergences
 
-- Output is magnitudes per line with a signed DC, the shape of the
-  single-tone `.hb`. VACASK writes complex phasors.
+- Output of the `TONES=` form, one tone or several, is a complex plot:
+  per line the peak phasor X = c - j·s, x(t) = Re{X·e^(jωt)}, with DC
+  real. VACASK writes the same phasors. The positional `.hb f0 K` card
+  keeps its magnitudes with a signed DC. HSPICE's own `.hb` output
+  layout (its `.printhb` forms and the `.hb0` file) has not been checked
+  against a real run.
 - The HB small-signal analyses (`.hbac`, `.hbxf`, `.hbnoise`, `.hblin`) linearize
   about one tone; with a multi-tone `.hb` card they are an argument error.
 - SUBHARMS, SS_TONE and SWEEP are not taken.

@@ -205,14 +205,17 @@ test "multi-tone hb in a box is qpss's two-sided spectrum folded onto one side" 
     const col = findNameIndex(hb.varnames, "v(out)").?;
     try std.testing.expectEqual(@as(usize, 13), hb.npoints);
     try std.testing.expectEqual(@as(usize, 25), qpss.npoints);
+    // `.hb TONES=` rows are complex phasors; QPSS's are magnitudes.
+    try std.testing.expect(hb.is_complex);
     const w = hb.varnames.len;
     for (0..hb.npoints) |i| {
-        const f = hb.data[i * w];
+        const f = hb.data[i * 2 * w];
         const q = for (0..qpss.npoints) |k| {
             if (@abs(qpss.data[k * w] - f) < 1e-6) break qpss.data[k * w + col];
         } else return error.TestUnexpectedResult;
         const want = if (f == 0) q else 2 * q;
-        try std.testing.expectApproxEqAbs(want, hb.data[i * w + col], 1e-8);
+        const x = hb.data[(i * w + col) * 2 ..][0..2];
+        try std.testing.expectApproxEqAbs(want, if (f == 0) x[0] else std.math.hypot(x[0], x[1]), 1e-8);
     }
 }
 

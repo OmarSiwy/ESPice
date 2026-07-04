@@ -19,7 +19,9 @@ const expected_outputs = catalog.expected_outputs;
 
 // Oracle schema (.expected.json, schema_version 1). Counts fit u32; byte
 // offsets use usize.
-const Column = struct { values: []const Json, rtol: f64, atol: f64 };
+/// `magnitude`: compare |actual| with |expected|, for a complex column whose
+/// oracle only knows amplitudes.
+const Column = struct { values: []const Json, rtol: f64, atol: f64, magnitude: bool = false };
 const Axis = struct { name: []const u8, values: []const f64, rtol: f64, atol: f64 };
 const ExpectedPlot = struct {
     name: []const u8,
@@ -518,7 +520,10 @@ fn comparePlot(a: Allocator, expected: ExpectedPlot, actual: Plot) !void {
                 const axis = expected.axis.?;
                 break :blk try sample(actual, try actual.column(axis.name), c, axis.values[j], axis.rtol, axis.atol);
             } else actual.value(row, c);
-            try checkValue(name, row, got, try scalar(v), col.rtol, col.atol);
+            const want = try scalar(v);
+            if (col.magnitude) {
+                try checkValue(name, row, .init(got.magnitude(), 0), .init(want.magnitude(), 0), col.rtol, col.atol);
+            } else try checkValue(name, row, got, want, col.rtol, col.atol);
         }
     }
 }
