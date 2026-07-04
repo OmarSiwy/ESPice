@@ -39,6 +39,17 @@
         };
       in
       {
+        # Default dev shell: everything the build needs, plus llc for the
+        # nvptx kernel pipeline (zig emits LLVM IR, llc lowers it to PTX).
+        devShells.default = pkgs.mkShell (
+          commonEnv
+          // {
+            packages = commonInputs ++ [
+              pkgs.llvmPackages_21.llvm
+            ];
+          }
+        );
+
         # For !! benchmarking ONLY
         devShells.benchmarking = pkgs.mkShell (
           commonEnv
