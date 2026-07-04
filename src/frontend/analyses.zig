@@ -100,15 +100,21 @@ pub fn queries(arena: std.mem.Allocator, cards: []const netlist.Analysis, append
         const first = n;
         var job = (buildJob(c, sources, card_refs, ctx) catch |err| return cardError(c.line, err)) orelse continue;
         switch (job) {
-            inline .hbac, .hbxf, .hbnoise, .hblin => |*o| if (o.f0 == 0) {
+            inline .hbac, .hbxf, .hbnoise, .hblin => |*o, kind| if (o.f0 == 0) {
                 const tone = hb orelse return cardError(c.line, error.InvalidAnalysisArguments);
-                // ponytail: the HB small-signal analyses linearize about one
-                // tone; a multi-tone orbit needs the conversion matrix over
-                // mixing products (VACASK `hbac`).
-                if (tone.extra_tones.len != 0) return cardError(c.line, error.InvalidAnalysisArguments);
                 o.f0 = tone.f0;
                 o.n_harmonics = tone.n_harmonics;
                 o.n_sidebands = tone.n_harmonics;
+                if (kind == .hblin) {
+                    // ponytail: `.hblin` reads one tone's port bands; several
+                    // tones need a band per mixing product.
+                    if (tone.extra_tones.len != 0) return cardError(c.line, error.InvalidAnalysisArguments);
+                } else {
+                    o.extra_tones = tone.extra_tones;
+                    o.extra_harmonics = tone.extra_harmonics;
+                    o.intmodmax = tone.intmodmax;
+                    o.subharms = tone.subharms;
+                }
             },
             .phasenoise => |*o| if (o.f0 == 0) {
                 const tone = hb orelse return cardError(c.line, error.InvalidAnalysisArguments);
@@ -906,15 +912,19 @@ fn hspiceTranNoise(ctx: CardContext, args: []const Value) !requests.TranNoise {
     return o;
 }
 
-/// HSPICE `.hb TONES=f0 [f1 ...] [NHARMS=h0 [h1 ...]] [INTMODMAX=n]`
-/// [CR .HB]. NHARMS takes one count per tone and defaults every tone to
-/// INTMODMAX; INTMODMAX defaults to the largest NHARMS. One of them is
-/// required. SUBHARMS, SS_TONE and SWEEP are not taken.
+/// HSPICE `.hb TONES=f0 [f1 ...] [NHARMS=h0 [h1 ...]] [INTMODMAX=n]
+/// [SUBHARMS=s] [SS_TONE=i]` [CR .HB]. NHARMS takes one count per tone and
+/// defaults every tone to INTMODMAX; INTMODMAX defaults to the largest
+/// NHARMS. One of them is required. SUBHARMS=s puts the lowest tone f's
+/// lines at multiples of f/s up to its NHARMS·f; that tone becomes `f0`,
+/// the first of the list. SS_TONE=i (from 1) takes tone
+/// i out of the large-signal spectrum: it is the small-signal tone, whose
+/// frequency the `.hbac`, `.hbxf` or `.hbnoise` sweep supplies.
 fn hbTones(arena: std.mem.Allocator, args: []const Value) !requests.Hb {
-    const Key = enum { tones, nharms, intmodmax };
+    const Key = enum { tones, nharms, intmodmax, subharms, ss_tone };
     var tones: std.ArrayList(f64) = .empty;
     var nharms: std.ArrayList(u16) = .empty;
-    var intmod: ?u16 = null;
+    var single: [3]?u16 = @splat(null); // INTMODMAX, SUBHARMS, SS_TONE
     var key: ?Key = null;
     for (args, 0..) |v, i| switch (v) {
         .name => {
@@ -924,25 +934,39 @@ fn hbTones(arena: std.mem.Allocator, args: []const Value) !requests.Hb {
         .num => switch (key orelse return error.InvalidAnalysisArguments) {
             .tones => try tones.append(arena, try positive(args, i)),
             .nharms => try nharms.append(arena, try count(u16, args, i, 0)),
-            .intmodmax => {
-                if (intmod != null) return error.InvalidAnalysisArguments;
-                intmod = try count(u16, args, i, 0);
+            inline .intmodmax, .subharms, .ss_tone => |k| {
+                const slot = &single[@intFromEnum(k) - @intFromEnum(Key.intmodmax)];
+                if (slot.* != null) return error.InvalidAnalysisArguments;
+                slot.* = try count(u16, args, i, 0);
             },
         },
         else => return error.InvalidAnalysisArguments,
     };
+    const intmod, const sub, const ss = single;
     const n = tones.items.len;
     if (n == 0 or (nharms.items.len != 0 and nharms.items.len != n)) return error.InvalidAnalysisArguments;
     if (nharms.items.len == 0) {
         const h = intmod orelse return error.InvalidAnalysisArguments;
         try nharms.appendNTimes(arena, h, n);
     }
+    if (ss) |i| {
+        if (i > n or n == 1) return error.InvalidAnalysisArguments;
+        _ = tones.orderedRemove(i - 1);
+        _ = nharms.orderedRemove(i - 1);
+    }
+    const s = sub orelse 1;
+    if (s != 1) {
+        const lo = std.mem.indexOfMin(f64, tones.items);
+        std.mem.swap(f64, &tones.items[0], &tones.items[lo]);
+        std.mem.swap(u16, &nharms.items[0], &nharms.items[lo]);
+    }
     return .{
-        .f0 = tones.items[0],
-        .n_harmonics = nharms.items[0],
+        .f0 = tones.items[0] / @as(f64, @floatFromInt(s)),
+        .n_harmonics = std.math.mul(u16, nharms.items[0], s) catch return error.InvalidAnalysisArguments,
         .extra_tones = tones.items[1..],
         .extra_harmonics = nharms.items[1..],
         .intmodmax = intmod orelse std.mem.max(u16, nharms.items),
+        .subharms = s,
         .phasors = true,
     };
 }

@@ -55,12 +55,13 @@ pub const max_tones = 8;
 pub const max_box: usize = 1 << 22;
 
 /// The spectrum of `tones` Hz with `nharms[i]` harmonics each and
-/// INTMODMAX `intmodmax` (0: the whole box). A product whose frequency
+/// INTMODMAX `intmodmax` (0: the whole box), where `sub` steps of the
+/// first tone count as one order (HSPICE SUBHARMS; 1 for none). A product whose frequency
 /// matches a kept one to 1e-14 relative is the same line: the lower order
 /// wins, then a single tone's harmonic, then the earlier product, as in
 /// VACASK `lib/spurs.cpp`. error.InvalidQueryOptions past `max_tones` or
 /// `max_box`.
-pub fn spectrum(gpa: std.mem.Allocator, tones: []const f64, nharms: []const u16, intmodmax: u16) !Spectrum {
+pub fn spectrum(gpa: std.mem.Allocator, tones: []const f64, nharms: []const u16, intmodmax: u16, sub: u16) !Spectrum {
     std.debug.assert(tones.len == nharms.len);
     const nt = tones.len;
     if (nt == 0 or nt > max_tones) return error.InvalidQueryOptions;
@@ -84,7 +85,7 @@ pub fn spectrum(gpa: std.mem.Allocator, tones: []const f64, nharms: []const u16,
         var f: f64 = 0;
         var scale: f64 = 0;
         for (0..nt) |i| {
-            order += @abs(k[i]);
+            order += if (i == 0) std.math.divCeil(u32, @abs(k[i]), sub) catch unreachable else @abs(k[i]);
             nnz += @intFromBool(k[i] != 0);
             const term = @as(f64, @floatFromInt(k[i])) * tones[i];
             f += term;
@@ -371,6 +372,35 @@ const Operator = struct {
     }
 };
 
+/// The sampled planes: x, residual f and charge q node-major, G and C
+/// slot-major, `nt` samples contiguous in each.
+const Planes = struct { x: []f64, f: []f64, q: []f64, g: []f64, c: []f64 };
+
+/// Evaluates the circuit at every instant of `tr` on `x_hat`'s waveform
+/// into `p`; `p.c` is left alone without charge. `x_sample` (n) is scratch.
+fn sample(ckt: *root.Circuit, tr: Transform, nf: usize, dt: f64, x_hat: []const f64, x_sample: []f64, p: Planes) void {
+    const n: usize = ckt.n;
+    const nnz: usize = ckt.nnz;
+    const nt = tr.nt;
+    idft(tr, nf, x_hat, p.x);
+    // Sample s is the circuit at t_s in the transient phase, the only
+    // phase in which a source follows its waveform (§4.6.1).
+    // ponytail: the nt evals are independent; batch them on the GPU
+    // when HB profiles eval-bound.
+    for (0..nt) |s| {
+        const t = tr.times[s];
+        for (0..n) |node| x_sample[node] = p.x[node * nt + s];
+        ckt.setSimState(.{ .t = t, .dt = dt, .kind = .tran });
+        ckt.eval(x_sample, t);
+        for (0..n) |node| p.f[node * nt + s] = ckt.rhs[node];
+        for (0..n) |node| p.q[node * nt + s] = ckt.q_vec[node];
+        for (ckt.g_vals[0..nnz], 0..) |g, slot| p.g[slot * nt + s] = g;
+        if (ckt.has_charge) for (ckt.c_vals[0..nnz], 0..) |c, slot| {
+            p.c[slot * nt + s] = c;
+        };
+    }
+}
+
 /// The shortest step the line search takes before it stops shortening.
 const min_step: f64 = 1.0 / 1024.0;
 
@@ -477,23 +507,7 @@ pub fn solve(ckt: *root.Circuit, x_hat: []f64, spec: Spectrum, tones: []const f6
     var iter: u16 = 0;
     while (iter < options.max_iter) : (iter += 1) {
         if (iter != 0) try ckt.checkpoint(.{ .phase = .harmonic, .completed = iter });
-        idft(tr, nf, x_hat, x_td);
-        // Sample s is the circuit at t_s in the transient phase, the only
-        // phase in which a source follows its waveform (§4.6.1).
-        // ponytail: the nt evals are independent; batch them on the GPU
-        // when HB profiles eval-bound.
-        for (0..nt) |s| {
-            const t = tr.times[s];
-            for (0..n) |node| x_sample[node] = x_td[node * nt + s];
-            ckt.setSimState(.{ .t = t, .dt = dt, .kind = .tran });
-            ckt.eval(x_sample, t);
-            for (0..n) |node| f_td[node * nt + s] = ckt.rhs[node];
-            for (0..n) |node| q_td[node * nt + s] = ckt.q_vec[node];
-            for (ckt.g_vals[0..nnz], 0..) |g, slot| g_td[slot * nt + s] = g;
-            if (ckt.has_charge) for (ckt.c_vals[0..nnz], 0..) |c, slot| {
-                c_td[slot * nt + s] = c;
-            };
-        }
+        sample(ckt, tr, nf, dt, x_hat, x_sample, .{ .x = x_td, .f = f_td, .q = q_td, .g = g_td, .c = c_td });
         dft(tr, nf, f_td, f_hat);
         if (ckt.has_charge) {
             dft(tr, nf, q_td, q_hat);
@@ -561,7 +575,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     var tones: [max_tones]f64 = undefined;
     var nharms: [max_tones]u16 = undefined;
     const count = try toneList(opts, &tones, &nharms);
-    const spec = try spectrum(scratch, tones[0..count], nharms[0..count], opts.intmodmax);
+    const spec = try spectrum(scratch, tones[0..count], nharms[0..count], opts.intmodmax, opts.subharms);
     defer spec.deinit(scratch);
     if (spec.freqs.len < 2) return error.InvalidQueryOptions;
     const nf = 2 * spec.freqs.len - 1;
@@ -598,11 +612,74 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     };
 }
 
+/// A converged multi-tone solution sampled for linearization: the
+/// spectrum, its transform, and x, G and C at every collocation instant.
+pub const Orbit = struct {
+    spec: Spectrum,
+    tr: Transform,
+    /// Node-major, `tr.nt` samples each.
+    x_td: []const f64,
+    /// Slot-major over the circuit's pattern, `tr.nt` samples each.
+    g_td: []const f64,
+    c_td: []const f64,
+    buf: []f64,
+
+    /// Frees the orbit; `gpa` is the allocator `orbit` took.
+    pub fn deinit(self: Orbit, gpa: std.mem.Allocator) void {
+        self.spec.deinit(gpa);
+        gpa.free(self.buf);
+    }
+};
+
+/// Solves `opts`' harmonic balance and samples the solution for
+/// linearization. error.HbDidNotConverge when Newton stops short, and as
+/// `solve` and `spectrum` otherwise. Free with `Orbit.deinit` on `allocator`.
+pub fn orbit(ckt: *root.Circuit, opts: Options, allocator: std.mem.Allocator) !Orbit {
+    var tones: [max_tones]f64 = undefined;
+    var nharms: [max_tones]u16 = undefined;
+    const count = try toneList(opts, &tones, &nharms);
+    const spec = try spectrum(allocator, tones[0..count], nharms[0..count], opts.intmodmax, opts.subharms);
+    errdefer spec.deinit(allocator);
+    if (spec.freqs.len < 2) return error.InvalidQueryOptions;
+    const n: usize = ckt.n;
+    const nnz: usize = ckt.nnz;
+    const nf = 2 * spec.freqs.len - 1;
+    const nt = transformSamples(spec);
+    const buf = try allocator.alloc(f64, n * nf + nt + 2 * nt * nf + 3 * n * nt + 2 * nnz * nt + n);
+    errdefer allocator.free(buf);
+    const x_hat = buf[0 .. n * nf];
+    const tr_buf = buf[n * nf ..][0 .. nt + 2 * nt * nf];
+    const td = buf[n * nf + tr_buf.len ..];
+    const p: Planes = .{
+        .x = td[0 .. n * nt],
+        .f = td[n * nt ..][0 .. n * nt],
+        .q = td[2 * n * nt ..][0 .. n * nt],
+        .g = td[3 * n * nt ..][0 .. nnz * nt],
+        .c = td[3 * n * nt + nnz * nt ..][0 .. nnz * nt],
+    };
+    const st = try solve(ckt, x_hat, spec, tones[0..count], opts, allocator);
+    if (!st.converged) return error.HbDidNotConverge;
+    const tr = try transform(spec, tones[0..count], tr_buf, allocator);
+    root.zeroSimd(p.c);
+    sample(ckt, tr, nf, 1 / (spec.freqs[1] * @as(f64, @floatFromInt(nt))), x_hat, td[3 * n * nt + 2 * nnz * nt ..], p);
+    return .{ .spec = spec, .tr = tr, .x_td = p.x, .g_td = p.g, .c_td = p.c, .buf = buf };
+}
+
+/// Spectral lines of `opts`' spectrum, DC included. As `spectrum` fails.
+pub fn lineCount(gpa: std.mem.Allocator, opts: Options) !usize {
+    var tones: [max_tones]f64 = undefined;
+    var nharms: [max_tones]u16 = undefined;
+    const count = try toneList(opts, &tones, &nharms);
+    const spec = try spectrum(gpa, tones[0..count], nharms[0..count], opts.intmodmax, opts.subharms);
+    defer spec.deinit(gpa);
+    return spec.freqs.len;
+}
+
 /// Solves one tone at f0 with K = `options.n_harmonics` through `solve`;
 /// `x_hat` in `hb.solveSpectrum`'s layout.
 pub fn solveOneTone(ckt: *root.Circuit, x_hat: []f64, options: Options, allocator: std.mem.Allocator) !SolveResult {
     const tones = [_]f64{options.f0};
-    const spec = try spectrum(allocator, &tones, &.{options.n_harmonics}, 0);
+    const spec = try spectrum(allocator, &tones, &.{options.n_harmonics}, 0, 1);
     defer spec.deinit(allocator);
     return solve(ckt, x_hat, spec, &tones, options, allocator);
 }

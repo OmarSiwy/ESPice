@@ -193,7 +193,7 @@ pub fn validate(query: requests.Query, n: u32) !void {
             try frequency(o.sweep.f_stop + @as(f64, @floatFromInt(o.n_sidebands)) * o.f_fundamental);
         },
         .hb => |o| {
-            if (o.n_harmonics == 0) return error.InvalidQueryOptions;
+            if (o.n_harmonics == 0 or o.subharms == 0) return error.InvalidQueryOptions;
             if (o.extra_tones.len != 0) {
                 const mhb = @import("pss/mhb.zig");
                 if (o.osc_node != 0 or o.extra_harmonics.len != o.extra_tones.len or o.extra_tones.len >= mhb.max_tones)

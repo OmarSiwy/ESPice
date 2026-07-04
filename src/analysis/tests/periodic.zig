@@ -609,19 +609,37 @@ const MhbTests = struct {
         };
         inline for (cases) |c| {
             const nh = c[0];
-            const spec = try impl.spectrum(a, &tones, &nh, c[1]);
+            const spec = try impl.spectrum(a, &tones, &nh, c[1], 1);
             defer spec.deinit(a);
             try expectLines(spec, c[2]);
         }
         // Box: every |k_i| <= 2, 12 lines on the positive half plus DC.
-        const box = try impl.spectrum(a, &tones, &.{ 2, 2 }, 0);
+        const box = try impl.spectrum(a, &tones, &.{ 2, 2 }, 0, 1);
         defer box.deinit(a);
         try testing.expectEqual(@as(usize, 13), box.freqs.len);
     }
 
+    test "mhb spectrum: SUBHARMS steps of the first tone count one order" {
+        const a = testing.allocator;
+        // `.hb tones=1k 1.3k nharms=3 3 intmodmax=3 subharms=2`.
+        const spec = try impl.spectrum(a, &.{ 500, 1300 }, &.{ 6, 3 }, 3, 2);
+        defer spec.deinit(a);
+        const has = struct {
+            fn f(sp: impl.Spectrum, hz: f64) bool {
+                return for (sp.freqs) |x| {
+                    if (@abs(x - hz) < 1e-9) break true;
+                } else false;
+            }
+        }.f;
+        try testing.expect(has(spec, 500)); // a subharmonic
+        try testing.expect(has(spec, 3000)); // the tone's own 6th step
+        try testing.expect(has(spec, 3300)); // 4·500 + 1300, order 2 + 1
+        try testing.expect(!has(spec, 3800)); // 5·500 + 1300, order 3 + 1
+    }
+
     test "mhb spectrum: commensurate products merge onto the lowest order" {
         const a = testing.allocator;
-        const spec = try impl.spectrum(a, &.{ 1000, 2000 }, &.{ 2, 2 }, 0);
+        const spec = try impl.spectrum(a, &.{ 1000, 2000 }, &.{ 2, 2 }, 0, 1);
         defer spec.deinit(a);
         try testing.expectEqual(@as(usize, 7), spec.freqs.len);
         for (spec.freqs, 0..) |f, j| try testing.expectEqual(1000 * @as(f64, @floatFromInt(j)), f);
@@ -632,7 +650,7 @@ const MhbTests = struct {
     test "mhb transform: the APFT inverts its own instants, one tone projects" {
         const a = testing.allocator;
         inline for (.{ .{ &[_]f64{ f1, f2 }, &[_]u16{ 5, 5 }, 3 }, .{ &[_]f64{ f1, f2, 1710 }, &[_]u16{ 2, 2, 2 }, 3 }, .{ &[_]f64{f1}, &[_]u16{7}, 0 } }) |c| {
-            const spec = try impl.spectrum(a, c[0], c[1], c[2]);
+            const spec = try impl.spectrum(a, c[0], c[1], c[2], 1);
             defer spec.deinit(a);
             const nf = 2 * spec.freqs.len - 1;
             const nt = impl.test_access.transformSamples(spec);

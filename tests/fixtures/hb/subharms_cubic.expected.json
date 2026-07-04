@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "analysis": "hb",
+  "purpose": "SUBHARMS=2 adds the half-tone lines",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "sin^3(w t) = (3 sin wt - sin 3wt)/4 with w the 500 Hz subharmonic of the 1 kHz tone. SUBHARMS=2, NHARMS=2 keeps multiples of 500 Hz to 2 kHz. Phasors X, x(t) = Re{X exp(jwt)}: A sin wt is -jA."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Harmonic Balance",
+        "match": "exact",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 1e-09,
+            "atol": 1e-09,
+            "values": [
+              [
+                0.0,
+                0.0
+              ],
+              [
+                -0.0,
+                -0.75
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.25
+              ],
+              [
+                0.0,
+                0.0
+              ]
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            0.0,
+            500,
+            1000,
+            1500,
+            2000
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-09
+        },
+        "row_count": 5
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "19754b4491620b642cf41c12f9664e667e481f11e240813af5906ef1beef8a40"
+}

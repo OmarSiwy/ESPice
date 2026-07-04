@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "analysis": "hbxf",
+  "purpose": "HB XF on a linear RC under two large tones is the plain impedance on sideband 0",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Linear and time-invariant: a current injected at out at f gives v(out) = 1/(G1 + G2 + j w C) on sideband 0, G = 1/1k, C = 1u; other sidebands are 0."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Harmonic Balance Transfer Function Analysis",
+        "match": "exact",
+        "columns": {
+          "pxf_h[0,0](out)": {
+            "unit": "V/A",
+            "rtol": 1e-06,
+            "atol": 1e-09,
+            "values": [
+              [
+                455.0849188231377,
+                -142.96914377342767
+              ],
+              [
+                358.4784001624489,
+                -225.23862168419433
+              ],
+              [
+                264.7934267220273,
+                -249.56192523263644
+              ]
+            ]
+          },
+          "pxf_h[1,0](out)": {
+            "unit": "V/A",
+            "rtol": 1e-06,
+            "atol": 1e-09,
+            "values": [
+              [
+                0,
+                0
+              ],
+              [
+                0,
+                0
+              ],
+              [
+                0,
+                0
+              ]
+            ]
+          },
+          "pxf_h[-1,-1](out)": {
+            "unit": "V/A",
+            "rtol": 1e-06,
+            "atol": 1e-09,
+            "values": [
+              [
+                0,
+                0
+              ],
+              [
+                0,
+                0
+              ],
+              [
+                0,
+                0
+              ]
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            100,
+            200,
+            300
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-09
+        },
+        "row_count": 3
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "a9ede38a86fa3d17fd66b5ea068087072dc5ff92d5f60bd62631f5d9beddd4da"
+}

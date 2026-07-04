@@ -24,7 +24,7 @@ pub const SweepStatus = struct {
 
 /// S(f) = white + flicker/|f|^ef at one sideband, from one time sample's
 /// coefficients.
-inline fn sourcePsd(white: f64, flicker: f64, ef: f64, f_sideband: f64) f64 {
+pub inline fn sourcePsd(white: f64, flicker: f64, ef: f64, f_sideband: f64) f64 {
     if (flicker == 0) return white;
     // ponytail: 1/f diverges at the DC sideband, so |f| is floored at 1e-30.
     // Upgrade to the analytic band integral if it ever matters.
@@ -267,7 +267,7 @@ fn strobed(
 }
 
 /// sign(d)*sqrt(|d|): a source amplitude whose square is the density d.
-inline fn signedSqrt(d: f64) f64 {
+pub inline fn signedSqrt(d: f64) f64 {
     return std.math.copysign(@sqrt(@abs(d)), d);
 }
 

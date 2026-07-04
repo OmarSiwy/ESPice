@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "analysis": "hbnoise",
+  "purpose": "RC noise folded through a multiplier pumped by two tones",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "For y = x (cos w1 t + cos w2 t) with x stationary, the time-averaged one-sided PSD is Sy(f) = 1/4 sum over fLO in {1k, 1.3k} of [Sx(|f - fLO|) + Sx(f + fLO)], Sx = 4 kB T R/(1 + (2 pi f R C)^2), T = 300.15 K. The two pumps' cross terms land at f +/- 300 Hz offsets of uncorrelated input noise and add no power."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Harmonic Balance Noise Analysis",
+        "match": "exact",
+        "columns": {
+          "hbnoise_density": {
+            "unit": "V^2/Hz",
+            "rtol": 0.001,
+            "atol": 1e-25,
+            "values": [
+              3.2722039585283256e-19,
+              3.2750800537532886e-19,
+              3.28846716252365e-19,
+              3.3514208403177653e-19
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            10.0,
+            21.54434690031884,
+            46.415888336127786,
+            100.0
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-09
+        },
+        "row_count": 4
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "8ec03d2b37f60cb2f355b6be314570c5e56d62a5635a28456b7062730af8324f"
+}
