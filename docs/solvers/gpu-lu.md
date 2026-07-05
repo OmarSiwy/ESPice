@@ -7,11 +7,13 @@ host threads (`HostRefactor`, picked by `direct.Solver`). Both are bitwise
 `SparseLu.refactor` (plus `solve` on the device). The host form runs
 whenever the query has more than one thread (`ESPICE_THREADS`, or
 `ESPICE_SOLVER_THREADS`) and its flop-count model admits the epoch; see
-"Multicore host refactor" in §5. The device form is `auto` only on a card
-whose FP64 runs at 1/4 of FP32 or better (gompute's `fp64Ratio` at most 4)
-and n of 10k or more; `ESPICE_GPU_LU=1` forces it on and `=0` off. On this
-RTX 4060 (ratio 64) it lost to 8 host threads on every E2 deck, so stage 2
-was not started. The GPU otherwise only evaluates device
+"Multicore host refactor" in §5. The device form is `auto` under a GPU backend at n of 10k or more, on
+every pivot epoch with at least 500 flops per column (`GpuLu.min_per_col`),
+whatever the card's FP64 rate; `ESPICE_GPU_LU=1` forces it on and `=0` off.
+On this RTX 4060 (FP64 at 1/64) its kernels lost to 8 host threads in
+isolation (E2), but end to end it wins 2-4x over the host LU that `cuda`
+runs by default ("E3, host"), so stage 2 was not started and stage 1
+ships. The GPU otherwise only evaluates device
 planes (`docs/devices/gpu-evaluation.md`). This page answers one question:
 if the host sparse LU dominates on post-layout netlists (extracted RC plus
 many transistors), how should espice factor and solve on the GPU? The
@@ -948,10 +950,32 @@ construction, so any difference is a bug).
   remaining wait per iteration is still at least 20% of the iteration on
   the decks that motivate it.
 
-**E3, host.** End-to-end wall time is not measured yet: every attempt so
-far ran at a 1-minute load of 100 to 350 from other builds. The
-factor-time table above is the evidence for admitting the kernel body by
-default; its wall-time gate is still open.
+**E3, host.** Wall time, one run each (the 1k rows: three, all within
+5%), 2026-10-01, i9-14900HX and RTX 4060 Laptop, load average in brackets.
+`serial` is `--backend cpu`; `lu8` adds `ESPICE_SOLVER_THREADS=8` (the
+multicore refactor); `cuda` evaluates on the GPU with the host LU on one
+thread, `cuda8` with it on 8; `cudalu` adds `ESPICE_GPU_LU=1`.
+
+| deck | F/n | serial | lu8 | cuda | cuda8 | cudalu |
+|---|---:|---:|---:|---:|---:|---:|
+| sram_bsim4_1k | 450 | 1.71 (2) | 1.60 (2) | 1.62 (3) | | 2.35 (3) |
+| logic_bsim4_1k | 445 | 5.05 (3) | 4.00 (4) | 4.38 (5) | | 5.25 (5) |
+| sram_bsim4_10k | 2,400 | 38.6 (4) | 27.3 (4) | 32.9-52.2 (5-9) | 26.0 (7) | 19.8-26.1 (6-10) |
+| logic_bsim4_10k | 4,400 | 183.6 (9) | 85.7 (6) | 228-237 (8-15) | 114.9 (8) | 51.9-63.1 (5-12) |
+| logic_psp103_10k | 1,600 | | | 357.2 (15) | 217.7 (5) | 86.1 (18) |
+| chain_bsim4_10k | 63 | | 21.7 (5) | 9.9 (7) | 9.3 (6) | 11.6 (7) |
+| ring_bsim4_10k | 87 | | 36.2 (7) | 20.1 (6) | 17.8 (6) | 24.4 (6) |
+
+- The multicore host refactor pays end to end on every deck its bar
+  admits: 1.07x on sram_bsim4_1k, 1.26x on logic_bsim4_1k, 1.41x on
+  sram_bsim4_10k, 2.14x on logic_bsim4_10k.
+- The device LU wins where the factor is thick: 2.0-4.1x over `cuda`'s
+  default host LU and 1.0-2.5x over `cuda8`, on the three decks with F/n
+  of 1,600 and up. It loses on the chain and the ring (F/n under 100),
+  and on the E2 100k decks (about 160), so `auto` takes it from F/n 500.
+  No deck between 166 and 1,600 has been measured.
+- The 1k decks sit under `gpu_lu_min_n`; forced on, the device LU loses
+  there (2.35 against 1.62 s).
 
 ### fast_mode (opt-in, not bit-identical)
 
@@ -999,8 +1023,25 @@ The Graetz bridge's diodes swing the matrix across many decades each step,
 so f32 refinement contracts slowly there and a third of its solves fall
 back.
 
-Wall time is unmeasured for the same reason as E3, host, so fast_mode
-stays opt-in with no speed claim until it is.
+Wall time (same runs and columns as "E3, host"; `fast1` is `--lu-fast`
+on one thread, `fast8` with `ESPICE_SOLVER_THREADS=8`):
+
+| deck | serial | fast1 | lu8 | fast8 |
+|---|---:|---:|---:|---:|
+| sram_bsim4_1k | 1.71 | 2.25 | 1.60 | 1.94 |
+| logic_bsim4_1k | 5.05 | 6.32 | 4.00 | 4.64 |
+| sram_bsim4_10k | 38.6 | 46.0 | 27.3 | 28.4 |
+| logic_bsim4_10k | 183.6 | 186.6 | 85.7 | 183.8 |
+
+fast_mode loses on every deck, 2-32% against the f64 path at the same
+thread count and 2.1x on logic_bsim4_10k at 8 threads. On
+stress/vacask_graetz (n = 6) it costs 212.4G instructions against 15.8G
+(callgrind, 13.5x): 1,990,100 of 1,993,548 solves fell to GMRES-IR and
+698,182 of them to the f64 fallback. The refinement steps cost more than
+the f32 refactor saves, even where the refactor dominates. **Retired as a
+speed option**: it stays opt-in for now, has no deck where it pays, and is
+a candidate for deletion (`fast_lu.zig`, the `_f32` device kernels,
+`--lu-fast` and the C API's `lu_fast`).
 
 ## 6. Rejected and deferred
 

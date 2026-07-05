@@ -259,11 +259,10 @@ pub const Executor = struct {
     }
 
     /// The device LU: `ESPICE_GPU_LU=1` forces it on under a GPU backend,
-    /// `=0` off; otherwise it runs only where the card's FP64 is fast
-    /// (`GpuLu.fp64Fast`) and the matrix is big enough to be worth asking
-    /// the driver. On a consumer card it lost to 8 host threads on every
-    /// E2 deck (docs/solvers/gpu-lu.md). A driver that refuses leaves the
-    /// host LU.
+    /// `=0` off; otherwise it runs where the matrix is big enough to be
+    /// worth asking the driver, on every pivot epoch with enough flops per
+    /// column (`GpuLu.min_per_col`), whatever the card's FP64 rate. A
+    /// driver that refuses leaves the host LU.
     fn prepareGpuLu(self: *Executor) ?*gpu_lu.GpuLu {
         if (self.config.backend == .cpu) return null;
         var forced = false;
@@ -275,10 +274,7 @@ pub const Executor = struct {
             if (forced) std.debug.print("warning: device LU unavailable ({s})\n", .{@errorName(err)});
             return null;
         };
-        if (!forced and !context.fp64Fast()) {
-            context.deinit();
-            return null;
-        }
+        context.forced = forced;
         self.circuit.lu_hook = .{ .ctx = context, .solve = gpu_lu.GpuLu.solve };
         return context;
     }
