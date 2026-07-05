@@ -187,6 +187,10 @@ pub const Circuit = struct {
     /// The earliest rejection time the last `updateStates` recorded under
     /// `land_rejects`, or null.
     reject_at: ?f64 = null,
+    /// `q_vec` and the q tapes hold the charges at the x the last
+    /// `updateStates` staged, which computed them on the way (`acceptStates`).
+    /// Cleared by every plane reset.
+    q_fresh: bool = false,
 
     /// Symbolic LU and Newton scratch, built on first use and shared by every
     /// analysis. The pattern is frozen, so it stays valid for the lifetime.
@@ -517,6 +521,7 @@ pub const Circuit = struct {
     /// `.newton`. The one plane reset shared by the serial path, ParEval and
     /// the GPU's host half.
     pub fn clearPlanes(self: *Circuit, comptime mode: par_eval.Mode) void {
+        self.q_fresh = false;
         switch (mode) {
             .charge => zeroSimd(self.q_vec),
             .newton => {
@@ -834,10 +839,35 @@ pub const Circuit = struct {
     pub fn updateStates(self: *Circuit, x: []const f64) ?f64 {
         if (self.state_staged) _ = self.stateCtl(.revert);
         self.state_staged = true;
-        const tr = if (self.gpu_hook) |gh| gh.update_states(gh.ctx, x) else updateBatches(self.batches, x);
+        // The transient reads q at the converged point next, so get it from
+        // the staging pass's core run. ponytail: serial; a ParEval `.accept`
+        // mode would keep it threaded when lanes are on.
+        const fuse = self.land_rejects and self.has_charge and self.gpu_hook == null and self.par_eval == null;
+        const tr = if (self.gpu_hook) |gh| gh.update_states(gh.ctx, x) else if (fuse) self.acceptStates(x) else updateBatches(self.batches, x);
         if (!self.land_rejects) return tr;
         self.reject_at = tr;
         return null;
+    }
+
+    /// `updateBatches` plus `evalQ` at x and the published time: `accept_q`
+    /// where the batch has it, so its model core runs once for both.
+    fn acceptStates(self: *Circuit, x: []const f64) ?f64 {
+        self.lin.valid = false;
+        self.clearPlanes(.charge);
+        const pl = self.ownPlanes();
+        var min_reject: ?f64 = null;
+        for (self.batches) |b| {
+            if (b.hooks.accept_q) |f| {
+                f(b.ctx, &pl, 0, b.count, x);
+                continue;
+            }
+            if (b.hooks.eval_q) |f| f(b.ctx, &pl, 0, b.count, x, self.sim.t);
+            if (b.hooks.update_state) |f| if (f(b.ctx, x)) |tr| {
+                min_reject = if (min_reject) |cur| @min(cur, tr) else tr;
+            };
+        }
+        self.q_fresh = true;
+        return min_reject;
     }
 
     /// Accepted-point half of `updateStates`, for delay-line history no

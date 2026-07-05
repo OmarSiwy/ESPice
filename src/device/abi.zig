@@ -221,6 +221,12 @@ pub const Hooks = struct {
     /// Restamps `q_vec` and `q_tape` for instances `[first, last)` at x,
     /// leaving the other planes alone. Null when the device has no `q`.
     eval_q: ?*const fn (*anyopaque, *const Planes, u32, u32, []const f64, f64) void = null,
+    /// `eval_q` and `update_state` at a converged point from one model-core
+    /// run per instance (VerA's `acceptQ`), over instances `[first, last)`.
+    /// The time is the published sim state's. Null when the device has no
+    /// `acceptQ`: no charge, or it calls `$vera_reject_step`, whose request
+    /// a charge return cannot carry. The host then calls the two hooks.
+    accept_q: ?*const fn (*anyopaque, *const Planes, u32, u32, []const f64) void = null,
     collect_params: *const fn (*anyopaque, std.mem.Allocator, *std.ArrayList(ParamRef)) DeviceResult(void),
     /// Appends every declared noise generator with its PSD at x. Temperature
     /// is the instance's own, already applied by the device.
@@ -436,8 +442,9 @@ pub const GpuPayload = struct {
 // 15: `Hooks.collect_ac_dyn`/`ac_dyn`, VerA's frequency-dependent entries.
 // 16: `Hooks.copy_state`, `Batch.digital`.
 // 17: `Hooks.predict_first_iterate`, `Hooks.mark_load_check_rows`.
-// GPU planes, Model/Instance PODs and scatter tapes are unchanged by 10 to 17.
-pub const abi_version: u32 = 17;
+// 18: `Hooks.accept_q`.
+// GPU planes, Model/Instance PODs and scatter tapes are unchanged by 10 to 18.
+pub const abi_version: u32 = 18;
 
 /// A device type's construction entry points, exported by each device object
 /// and by runtime-loaded `.so` devices.
