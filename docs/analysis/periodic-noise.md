@@ -247,6 +247,7 @@ implemented (design notes):
 
 - `src/analysis/pss/pnoise.zig`: `sweep` (shooting orbit) and `orbitSweep`.
 - `src/analysis/pss/hb_lptv.zig`: `.hbnoise`, `.hbac`, `.hbxf` on the HB orbit.
+- `src/analysis/pss/mhb_lptv.zig`: the same three about a multi-tone `.hb` solution ([multitone-hb.md](multitone-hb.md#small-signal)).
 - `src/analysis/pss/pss.zig`: full shooting-Newton PSS.
 - `src/analysis/ac/noise.zig`: the LTI limit it must reduce to.
 - Fixtures: `tests/fixtures/pnoise/`, `tests/fixtures/hbnoise/`,
