@@ -2036,11 +2036,14 @@ fn isVera(comptime D: type) bool {
 /// - held variables (`holdsOnlyHeld`) together with `limit`: the launcher
 ///   runs a held device's `StateKernel` once per converged solve, not fused
 ///   into the per-iterate limit pass, which would latch Newton iterates;
-/// - otherwise, `State` without `limit` (sources and FSMs whose eval reads
-///   host-owned per-attempt state).
-/// `State` with `limit` is the path-latch pattern that `StateKernel` and
-/// `CtlKernel` run on the device; a held device's `State` is that latch plus
-/// its held variables, all in the resident Instance. `SimState` is a kernel
+/// - otherwise, `State` without `limit` that VerA does not declare
+///   `.path_latch` (sources and FSMs whose eval reads host-owned
+///   per-attempt state).
+/// A path latch (`state_class == .path_latch`, or `State` with `limit`) is
+/// what `StateKernel` and `CtlKernel` run on the device: `updateState`
+/// stages `wb__/wq__`, `stateCtl` commits them into the `pb__/pq__` latches
+/// eval reads. A held device's `State` is that latch plus its held
+/// variables, all in the resident Instance. `SimState` is a kernel
 /// argument, so a core that reads `analysis()` or `$abstime` (the Meyer MOS
 /// models, jfet2) runs resident too.
 // ponytail: the State-with-limit rule is decl correlation, not proof;
@@ -2052,7 +2055,8 @@ fn gpuEligible(comptime D: type) bool {
     // ponytail: vbic13_4t holds variables and limits, so it stays on the
     // host; split `StateKernel` into its two halves to bring it over.
     if (holdsOnlyHeld(D)) return !@hasDecl(D, "limit");
-    return @hasDecl(D, "limit") or !@hasDecl(D, "State");
+    return @hasDecl(D, "limit") or !@hasDecl(D, "State") or
+        (@hasDecl(D, "state_class") and D.state_class == .path_latch);
 }
 
 /// Whether D's GPU eval kernel is paired with a `StateKernel`.

@@ -17,9 +17,12 @@ model has a kernel image in this build. Everything else stamps on the host,
 on top of the downloaded planes.
 
 - `gpuEligible` refuses `mutable_eval`, Newton-history hooks and `State`
-  without `limit`. It admits held-variable devices without `limit` (bsim4va,
-  psp103; vbic13_4t limits and stays on the host). Their state kernel runs
-  once per converged solve, from `GpuHook.update_states`, never fused into
+  without `limit`, unless VerA declares that state `.path_latch` (the
+  §5.6.1.2 latches alone: b3soidd, b3soifd, hicumL2, hisim2, kinduc, mes),
+  which is what the state and control kernels carry. It admits
+  held-variable devices without `limit` (bsim4va, psp103; vbic13_4t
+  limits and stays on the host). Their state kernel runs once per
+  converged solve, from `GpuHook.update_states`, never fused into
   the per-iterate limit pass, and `stateCtl(.revert)` takes it back on a
   rejected step.
 - VerA ABI 5 passes `SimState` to every kernel by value (eval, state, charge
@@ -431,5 +434,3 @@ Against E1's rules:
   upgrade.
 - The host batches stamp after the download instead of beside it. That is
   free for sources and costs their eval time for a heavy ineligible batch.
-- hisim2_va (`State` history), hicumL2_va and b3soi (`State` without
-  `limit`) have no kernel.
