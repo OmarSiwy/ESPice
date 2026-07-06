@@ -362,8 +362,9 @@ PSP evaluation is not the problem: 1,607 ms over 1.21 million evaluations
 is 1.3 µs each, while VACASK's 1,905 ms of eval-and-load over 1.01 million
 is 1.9 µs each (both taken under load). Per LU call ESPice looks slower,
 4.9 µs per refactor and 1.9 µs per solve against KLU's 1.3 µs and 0.5 µs, at
-n = 156 and 1,200 nonzeros. That comparison is also under load and needs a
-callgrind check before anyone acts on it.
+n = 156 and 1,200 nonzeros. That comparison was under load, and it does
+not hold up: on the same matrices in isolation ESPice is the faster one
+(see item 3 below).
 
 ### How VACASK gets its speed
 
@@ -450,13 +451,26 @@ as a divergence if it becomes the default.
    instead of zero in `lanes.solveLanes`, and bypass the first evaluation
    as in item 1. Monte Carlo and temperature lanes move the solution only
    slightly per lane.
-3. Small-matrix LU overhead. The per-call figures above say ESPice's
-   refactor and solve cost 3 to 4 times KLU's on a 156-unknown matrix.
-   Confirm with callgrind on `vacask_ring`. The likely candidates are the
-   passes that run before or after the numeric work: the value comparison
-   for the unchanged-matrix skip (`direct.zig:106-110`), the growth
-   monitor, and per-block dispatch if BTF splits the matrix into many
-   small blocks.
+3. Small-matrix LU overhead: refuted (2026-10-01). 400 consecutive
+   Newton matrices dumped from each deck, then `SparseLu.refactor` plus
+   `solve` against KLU 1.3.8's `klu_refactor` plus `klu_solve` (SuiteSparse
+   5.13, defaults, one `klu_analyze` and `klu_factor` first), the same
+   values in the same order, no refactor failures on either side:
+
+   | deck | n | nnz | ESPice µs | KLU µs | ESPice Ir | KLU Ir |
+   |---|---:|---:|---:|---:|---:|---:|
+   | vacask_graetz | 10 | 32 | 0.23 | 0.25 | 2,200 | 4,440 |
+   | vacask_mul | 12 | 36 | 0.27 | 0.37 | | |
+   | vacask_ring | 156 | 878 | 3.76 | 5.09 | 51,600 | 93,500 |
+   | bench_tran_fourbitadder | 451 | 2,475 | 10.5 | 14.3 | | |
+
+   Wall time is the mean of 200 passes at a load of 3; Ir is per call
+   from callgrind, setup subtracted. ESPice's small-matrix tape (one flat
+   multiply-subtract list, `refactorTape`) takes about half KLU's
+   instructions, and the column path (fourbitadder, no tape) still wins
+   by 1.36x. The 4.9 µs above was load. What the tiny decks did pay was
+   the plane reset: a `memset`/`memcpy` call per plane per evaluation,
+   now inline stores up to 64 entries (`numerics.zeroSimd`).
 4. Sparse block HB with a lane preconditioner (G4 phase B). This is a
    scalability item for HB and the periodic small-signal family more than a
    speed item on today's decks.

@@ -424,6 +424,23 @@ Against E1's rules:
    three runs before and none after; wall time is otherwise flat. Eval
    is faster at 4 threads (1.5 s) than at 8: a worker lane stamps PSP103
    about 2x slower than lane 0, likely E-cores or the shared L3.
+   Settled 2026-10-01 (load 5-7, transient eval time from
+   `--timing-in-depth`, `ESPICE_THREADS`, `taskset`; the 14900HX's
+   P-cores are CPUs 0-15, two per core, the E-cores 16-31):
+
+   | deck | 1 P | 4 P | 1 P + 3 E | 8 P | 1 P + 7 E | 4 any | 8 any |
+   |---|---:|---:|---:|---:|---:|---:|---:|
+   | logic_psp103_1k eval | 2.61 | 1.75 | 2.36 | 4.15 | 2.13 | 1.79 | 1.87 |
+   | chain_psp103_10k eval | 8.60 | 6.56 | 9.08 | 6.95 | 8.06 | 8.23 | 7.72 |
+
+   E-core lanes are the cause: four lanes on P-cores beat four with three
+   on E-cores by 1.35x and 1.38x. Unpinned, 4 and 8 threads tie (the
+   scheduler fills E-cores either way), and eval is a fifth of the wall
+   time here (logic_psp103_1k: 8.75 s at 4 threads, 8.88 s at 8), so the
+   thread count is not worth a default. The `8 P` cell on logic ran
+   beside a build on the same cores. ParEval cuts by weight, not by
+   measured lane speed; a work-stealing split is the fix if a deck's eval
+   ever dominates on a hybrid CPU.
 
 ## Limits
 

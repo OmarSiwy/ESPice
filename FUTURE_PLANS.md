@@ -188,15 +188,17 @@ To land it:
 - Refresh the benchmarks on a quiet machine and update the README table,
   which is stale. The last run beat ngspice on 437 of 445 decks, with a median
   time ratio of 0.53.
-- Measure wall time for the multicore LU, the GPU LU and `--lu-fast`. The
-  runners are in `zig-out/gl`.
-- `vacask_graetz` falls back from fast mode on 35% of its solves.
-- Wire GPU graph replay into Newton.
+- Delete `--lu-fast` (`fast_lu.zig`, the `_f32` device LU kernels, the C
+  API's `lu_fast`): measured slower than the f64 path on every deck, 13.5x the
+  instructions on `vacask_graetz` (`docs/solvers/gpu-lu.md`, fast_mode). Owner's call,
+  since it is in the C ABI.
+- The device LU's `auto` bar (F/n 500) sits in an unmeasured gap between
+  166 and 1,600; time a deck that lands there.
+- Wire GPU graph replay into Newton. Blocked on gompute graphs
+  (`docs/solvers/gpu-lu.md` §7 R2); the pinned gompute has none.
 - Host-first device bypass. The census is in
   `docs/solvers/gpu-convergence.md` §9.
 - Continuation bypass, the VACASK technique, as an opt-in.
-- LU overhead on small matrices compared with KLU. This is unconfirmed.
-- PSP worker lanes run 2x slower on E-cores. Compare 8 threads with 4.
 - The GPU-native convergence research program is in
   `docs/solvers/gpu-convergence*.md`. Modified Newton has been retired (§10).
 - Gompute: the AMD agent-scope asm is missing, and HIP has never run on
