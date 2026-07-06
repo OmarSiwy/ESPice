@@ -146,6 +146,10 @@ pub const Planner = struct {
     by_name: std.StringHashMapUnmanaged(u32) = .empty,
     /// Each live slot's value in the nominal circuit.
     nominal_slots: []const f64 = &.{},
+    /// Each pool row's value when the planner opened (`Live.pool_rows`). A
+    /// run rebuilt at a point opens with that point's values here, not the
+    /// deck's, so its own row does not read as moved and rebuild again.
+    nominal_pool: []const f64 = &.{},
     fast: Fast = .untested,
     /// Rebuild every moved point; the differential test's oracle.
     force_rebuild: bool = false,
@@ -171,6 +175,9 @@ pub const Planner = struct {
         const nominal_slots = try scratch.alloc(f64, nl.live.slots.len);
         for (nominal_slots, nl.live.slots) |*v, slot| v.* = slot.num;
         p.nominal_slots = nominal_slots;
+        const nominal_pool = try scratch.alloc(f64, nl.live.pool_rows.len);
+        for (nominal_pool, nl.live.pool_rows) |*v, row| v.* = if (row == netlist.none) 0 else nl.consts[row];
+        p.nominal_pool = nominal_pool;
         return p;
     }
 
@@ -336,7 +343,7 @@ pub const Planner = struct {
             moved = moved or slot.num != nominal;
             crossed = crossed or (slot.num == 0) != (nominal == 0) or (slot.num < 0) != (nominal < 0);
         }
-        for (p.nl.live.pool_rows, pt.live, p.nl.live.nominal) |row, v, nominal| {
+        for (p.nl.live.pool_rows, pt.live, p.nominal_pool) |row, v, nominal| {
             if (row != netlist.none) moved = moved or v != nominal;
         }
         if (moved) {
