@@ -525,9 +525,9 @@ pub const Circuit = struct {
         switch (mode) {
             .charge => zeroSimd(self.q_vec),
             .newton => {
-                @memcpy(self.g_vals, self.g_base);
+                copySimd(self.g_vals, self.g_base);
                 if (self.has_charge) {
-                    @memcpy(self.c_vals, self.c_base);
+                    copySimd(self.c_vals, self.c_base);
                     zeroSimd(self.q_vec);
                 }
                 zeroSimd(self.rhs);
