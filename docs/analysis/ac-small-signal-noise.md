@@ -71,7 +71,11 @@ Host path:
   blocks, +im to the lower-left and -im to the upper-right, after G + jωC;
   the scalar fill does the same adds in the same order, so each lane is
   bitwise its scalar fill (`src/solver/tests.zig`, the sparse lane-path
-  test). One LaneLu pivot tape still serves all lanes, and a lane whose
+  test). The lane fill runs inside `LaneLu.refactor` (`freq_solve.zig
+  Stacked`), one column as the refactor reads it, with the `Dyn` entries
+  grouped by column once per call: no W-lane value plane exists. That
+  plane was one vector per stacked entry, 14.7 MB on
+  stress/sweep_opamp_wl_5000, whose peak went 142.6 -> 131.2 MB. One LaneLu pivot tape still serves all lanes, and a lane whose
   pivot degrades peels to the scalar path as before. ac, noise, stb and sp
   all run through it; the dense strategy adds the same terms by (row, col).
 - disto adds `acDyn` at ω, 2ω and 3ω to each dense A. Its second- and

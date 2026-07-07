@@ -368,7 +368,11 @@ pub fn main() void {
     // via `zig run` and cannot import the solver module (SparseLu, the oracle).
     // Run it under `zig build test-solver`. FreqSolver.solveBatch, which feeds
     // LaneLu one frequency per lane, is checked against its per-frequency
-    // loop in the same file (FreqSolveTests).
+    // loop in the same file (FreqSolveTests). The stacked-real fill reaches
+    // LaneLu.refactor fused, as a column source (freq_solve.zig `Stacked`), with
+    // no lane value plane; FreqSolveTests checks it per entry against the
+    // scalar `setOmegaSparse` fill and, through LaneLu(W) and LaneLu(1)
+    // refactors, against a scalar SparseLu refactor of those values.
 
     // SparseLu.refactor stays SCALAR — measured, not assumed. The active-set
     // -local u16 replay tape (dense front, vector zero/normalize, run-split

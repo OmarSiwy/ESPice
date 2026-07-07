@@ -11,7 +11,7 @@ sides compile the same ABI source.
 
 `layoutHash()` hashes the size, alignment and field offsets of every
 boundary type, the Zig version, backend and optimize mode, whether error
-return tracing is on, and `abi_version` (14). Each device object exports it
+return tracing is on, and `abi_version` (21). Each device object exports it
 as `arp_layout_hash`. The runtime loader (`src/device/loader.zig`) refuses a
 shared library whose hash differs (`error.LayoutMismatch`), and the hash keys
 the runtime build cache, so a bump rebuilds every cached device once.
@@ -19,8 +19,29 @@ the runtime build cache, so a bump rebuilds every cached device once.
 `hashType` sees only layout, so a change that moves no field (a tape's
 meaning, a function signature) must bump `abi_version`. The version history
 is the comment above `abi_version`. The GPU planes, Model/Instance PODs and
-scatter tapes did not change from version 10 to 14; they are frozen at the GPU
+scatter tapes did not change from version 10 to 18; they are frozen at the GPU
 boundary (see AGENTS.md).
+
+## Shared Models (19)
+
+A batch's `models` holds one row per distinct Model and `model_of` (one u32
+per instance, owned per batch) names each instance's row; every host hook and
+GPU kernel reads `models[model_of[id]]`. `ProtoStore.finalize` merges rows
+that are bit-equal field by field (each is rebuilt over zeroed bytes first,
+so padding cannot hide a match). Only VerA devices without breakpoint caches
+or `attempt` share (`DeviceBatch.shares_models`): their Model is const to
+every device entry point, so only host parameter writes change it.
+`collect_params` first gives every instance its own row (`unshareModels`,
+on `smp_allocator`, since the caller may be a worker thread borrowing a
+template on the Problem arena), so a `ParamRef` write reaches one instance,
+as before; the GPU launcher regrows its model buffer on the next `repack`.
+Peak RSS, 2026-10-02 (default build, CPU backend): scaling_rc_ladder_100k
+275.0 -> 265.4 MB, sweep_opamp_wl_5000 128.6 -> 119.8 MB,
+scaling_inverter_chain_4k 90.9 -> 86.2 MB. Device eval costs one more load
+per instance: callgrind on the inverter chain (0.1n..2n) 4.637G -> 4.678G Ir
+(+0.9%). CPU and CUDA outputs are byte-identical to ABI 18 on the opamp,
+inverter chain, vacask_ring (psp103), bsim4, hfet and the .sens/.dcmatch/.mc
+decks checked.
 
 ## Analysis state
 
@@ -98,3 +119,29 @@ narrow basis the sparse layout lost up to 2.8% (bsim1, mos2/3/9), so it stays
 dense there. Unpadded widths that are not powers of two (12, 26) cost up to
 2x: LLVM splits them into shuffles and spills. Every layout gives
 byte-identical corpus output.
+
+## Pattern-only slot tape (20)
+
+The slot tape holds one CSC slot per entry the device's combined
+`jac_pattern | q_pattern` sets, row-major, the same `SlotMap(D).k` per
+instance, instead of the full `n_u * n_u` square with structural zeros
+pointing at the trash slot. Stamps take (ru, cu) at comptime and
+`SlotMap.at` turns them into a tape position; an entry outside the pattern
+is a compile error. A structural zero never had a stamp, so the host planes
+and the GPU staging order (contributions in tape order, trash ones dropped)
+are unchanged. mos1 (n_u = 8) keeps 32 of 64 entries: peak RSS of
+sweep_opamp_wl_5000 (25,000 mos1) 122.8 -> 119.7 MB, outputs byte-identical
+on the CPU and under CUDA.
+
+## Written-only lim plane (21)
+
+The lim plane holds one value per instance and unknown `limit` writes
+(`LimMap(D)`, from `contract.limitWrites`), not the full `n_u` stride: no
+reader ever looked at the others. A MOS model writes 2 of its 8.
+
+Retired 2026-10-02: deriving the residual row from `gath` (ground to the
+trash row by a compare and select per stamped row) instead of storing
+`rhs_idx`. It saved 4 bytes per unknown per instance (ladder 264.8 -> 263.4
+MB, opamp 115.6 -> 115.2 MB, medians of 7) but cost 4.695G -> 4.845G Ir
+(+3.2%) on the inverter chain to 2 ns, so `rhs_idx` stays.
+

@@ -449,12 +449,13 @@ fn tapeBounds(slots: []const u32, rhs_idx: []const u32, trash_slot: u32, trash_r
 }
 
 /// Fills the gather, residual-row and Jacobian-slot tapes from the flat node
-/// list (`[id * n_u + u]`). Ground rows go to row `pv.n`; ground entries and
-/// the structural zeros `pat` clears go to `pv.trash_slot`, which keeps the
-/// frozen `[id][ru][cu]` tape shape without reserving matrix entries.
-/// Asserts every other (row, col) is in the pattern.
+/// list (`[id * n_u + u]`). Ground rows go to row `pv.n`. The slot tape holds
+/// only the entries `pat` sets, row-major, `slots.len / count` per instance
+/// (`SlotMap`); a ground one goes to `pv.trash_slot`. Asserts every other
+/// (row, col) is in the pattern.
 fn buildTapes(nodes: []const u32, n_u: usize, pat: []const u64, pv: PatternView, gath: []u32, rhs_idx: []u32, slots: []u32) void {
     const count = nodes.len / n_u;
+    var k: usize = 0;
     for (0..count) |id| {
         const nd = nodes[id * n_u ..][0..n_u];
         for (nd, 0..) |node, u| {
@@ -462,11 +463,54 @@ fn buildTapes(nodes: []const u32, n_u: usize, pat: []const u64, pv: PatternView,
             rhs_idx[id * n_u + u] = if (node == GROUND) pv.n else node;
         }
         for (nd, 0..) |r, ru| for (nd, 0..) |c, cu| {
-            const live = (pat[ru] >> @intCast(cu)) & 1 != 0;
-            slots[(id * n_u + ru) * n_u + cu] =
-                if (r == GROUND or c == GROUND or !live) pv.trash_slot else pv.findSlot(r, c).?;
+            if ((pat[ru] >> @intCast(cu)) & 1 == 0) continue;
+            slots[k] = if (r == GROUND or c == GROUND) pv.trash_slot else pv.findSlot(r, c).?;
+            k += 1;
         };
     }
+    std.debug.assert(k == slots.len);
+}
+
+/// D's slot tape layout: `k` entries per instance, one per set bit of
+/// `jacPattern(D)` in row-major order, and `at[ru * n_u + cu]` the position of
+/// entry (ru, cu) among them. A structural zero has no slot, so no stamp, no
+/// tape entry and no GPU staging cell exists for it.
+fn SlotMap(comptime D: type) type {
+    const n_u = contract.nU(D);
+    return struct {
+        pub const k: usize = blk: {
+            var n: usize = 0;
+            for (jacPattern(D)) |row| n += @popCount(row & (std.math.maxInt(u64) >> @intCast(64 - n_u)));
+            break :blk n;
+        };
+        /// Entry (ru, cu)'s position; a compile error for a structural zero.
+        pub fn at(comptime ru: usize, comptime cu: usize) usize {
+            comptime {
+                const pat = jacPattern(D);
+                if ((pat[ru] >> cu) & 1 == 0) @compileError(@typeName(D) ++ " stamps an entry outside its jac/q pattern");
+                var n: usize = 0;
+                for (0..ru) |r| n += @popCount(pat[r] & (std.math.maxInt(u64) >> @intCast(64 - n_u)));
+                n += @popCount(pat[ru] & ((@as(u64, 1) << cu) - 1));
+                return n;
+            }
+        }
+    };
+}
+
+/// D's lim plane layout: `k` values per instance, one per unknown `limit`
+/// writes (`contract.limitWrites`), and `at(u)` unknown u's position among
+/// them. Nothing reads a lim value `limit` does not write.
+fn LimMap(comptime D: type) type {
+    const writes = contract.limitWrites(D) & (std.math.maxInt(u64) >> @intCast(64 - contract.nU(D)));
+    return struct {
+        pub const k: usize = @popCount(writes);
+        pub fn at(comptime u: usize) usize {
+            comptime {
+                if ((writes >> u) & 1 == 0) @compileError(@typeName(D) ++ " reads a lim value its `limit` does not write");
+                return @popCount(writes & ((@as(u64, 1) << u) - 1));
+            }
+        }
+    };
 }
 
 /// D's structural Jacobian, resistive and reactive combined: bit `cu` of row
@@ -680,11 +724,11 @@ fn evalRange(comptime D: type, comptime narrow: bool, comptime F: type, comptime
             lx[u] = xg;
             // Only unknowns `limit` writes have a limited image; the other
             // lanes of `corr` stay zero.
-            if (use_lim and comptime (lim_writes >> u) & 1 != 0) {
+            if (comptime (lim_writes >> u) & 1 != 0) if (use_lim) {
                 const l = sink.lim(id, u);
                 lx[u] = l;
                 corr[lane[u]] = xg - l;
-            }
+            };
         }
         // Near convergence the limiter leaves almost every instance alone, so
         // one test skips the correction dot products.
@@ -850,7 +894,9 @@ fn limitRange(comptime D: type, sink: anytype, first: u32, end: u32, lim_active:
         inline for (0..n_u) |u| if (comptime (reads >> u) & 1 != 0) {
             const gi = sink.gath(id, u);
             cur[u] = sink.x(gi);
-            old[u] = if (lim_active and comptime (writes >> u) & 1 != 0)
+            old[u] = if (comptime (writes >> u) & 1 == 0)
+                sink.xOld(gi)
+            else if (lim_active)
                 sink.lim(id, u)
             else
                 sink.xOld(gi);
@@ -958,7 +1004,10 @@ pub fn ProtoStore(comptime D: type) type {
             store.count = count;
             store.sim = .{};
             store.owns_tapes = true;
+            store.unshared = false;
+            store.models_shared = &.{};
             store.models = &.{};
+            store.model_of = &.{};
             store.instances = &.{};
             store.gath = &.{};
             store.rhs_idx = &.{};
@@ -974,7 +1023,12 @@ pub fn ProtoStore(comptime D: type) type {
 
             // Each column moves to `gpa` at exact size and its staging copy
             // dies right after, so at most one column exists twice.
-            store.models = try gpa.dupe(D.Model, self.models.items);
+            store.model_of = try gpa.alloc(u32, count);
+            const rows = if (comptime DeviceBatch(D).shares_models) try self.dedupModels(store.model_of) else blk: {
+                for (store.model_of, 0..) |*row, id| row.* = @intCast(id);
+                break :blk self.models.items;
+            };
+            store.models = try gpa.dupe(D.Model, rows);
             self.models.deinit(staging_gpa);
             self.models = .empty;
             if (comptime has_attempt_decl) {
@@ -987,10 +1041,7 @@ pub fn ProtoStore(comptime D: type) type {
                 @memset(store.src_brk, .{});
             }
             if (comptime @hasDecl(D, "limit")) {
-                // Full n_u stride and zeroed, although only `limitWrites`
-                // slots are used: the GPU uploads the whole plane, and the
-                // stride is part of the frozen tape layout.
-                store.lim_x = try gpa.alloc(f64, count * n_u);
+                store.lim_x = try gpa.alloc(f64, count * LimMap(D).k);
                 @memset(store.lim_x, 0);
                 store.lim_active = false;
             }
@@ -1000,7 +1051,7 @@ pub fn ProtoStore(comptime D: type) type {
 
             store.gath = try gpa.alloc(u32, count * n_u);
             store.rhs_idx = try gpa.alloc(u32, count * n_u);
-            store.slots = try gpa.alloc(u32, count * n_u * n_u);
+            store.slots = try gpa.alloc(u32, count * SlotMap(D).k);
             const flat_nodes = @as([*]const u32, @ptrCast(self.nodes.items.ptr))[0 .. count * n_u];
             buildTapes(flat_nodes, n_u, &jacPattern(D), pv, store.gath, store.rhs_idx, store.slots);
             if (comptime has_q) {
@@ -1013,18 +1064,61 @@ pub fn ProtoStore(comptime D: type) type {
             // `setup` before `initState`: both read the card, and only the
             // former fills `Instance.su`.
             if (comptime @hasDecl(D, "setup")) {
-                for (0..count) |i| D.setup(Real, &store.models[i], &store.instances[i]);
+                for (0..count) |i| D.setup(Real, store.model(i), &store.instances[i]);
             }
             if (comptime @hasDecl(D, "State")) {
                 store.states = try gpa.alloc(D.State, count);
-                for (0..count) |i| store.states[i] = D.initState(&store.models[i], &store.instances[i]);
+                for (0..count) |i| store.states[i] = D.initState(store.model(i), &store.instances[i]);
                 store.commitBirth();
             }
             if (comptime @hasDecl(D, "precompute")) {
-                for (0..count) |i| D.precompute(&store.instances[i], &store.models[i]);
+                for (0..count) |i| D.precompute(&store.instances[i], store.model(i));
             }
 
             return DeviceBatch(D).binding(store);
+        }
+
+        /// Compacts the staged Models to their distinct values, in order of
+        /// first use, writing each instance's row to `model_of`, and returns
+        /// the distinct rows (a prefix of the staging column). Equal means
+        /// bit-equal field by field: every row is first rebuilt from its
+        /// fields over zeroed bytes, so padding cannot hide a match.
+        fn dedupModels(self: *Self, model_of: []u32) error{OutOfMemory}![]D.Model {
+            const items = self.models.items;
+            for (items) |*m| canonicalize(m);
+            const Ctx = struct {
+                rows: []const D.Model,
+                pub fn hash(_: @This(), m: *const D.Model) u32 {
+                    return @truncate(std.hash.Wyhash.hash(0, std.mem.asBytes(m)));
+                }
+                pub fn eql(c: @This(), m: *const D.Model, row: u32, _: usize) bool {
+                    return std.mem.eql(u8, std.mem.asBytes(m), std.mem.asBytes(&c.rows[row]));
+                }
+            };
+            var seen: std.ArrayHashMapUnmanaged(u32, void, void, true) = .empty;
+            defer seen.deinit(staging_gpa);
+            try seen.ensureTotalCapacity(staging_gpa, items.len);
+            var n: u32 = 0;
+            for (items, model_of) |*m, *row| {
+                const gop = seen.getOrPutAssumeCapacityAdapted(m, Ctx{ .rows = items[0..n] });
+                if (!gop.found_existing) {
+                    // Bytes, padding included; n <= this row, so no row
+                    // still to be read is overwritten.
+                    @memcpy(std.mem.asBytes(&items[n]), std.mem.asBytes(m));
+                    gop.key_ptr.* = n;
+                    n += 1;
+                }
+                row.* = gop.key_ptr.*;
+            }
+            return items[0..n];
+        }
+
+        /// Rewrites `m` field by field over zeroed bytes.
+        fn canonicalize(m: *D.Model) void {
+            @setEvalBranchQuota(10 * @typeInfo(D.Model).@"struct".fields.len + 1000);
+            const copy = m.*;
+            @memset(std.mem.asBytes(m), 0);
+            inline for (@typeInfo(D.Model).@"struct".fields) |f| @field(m, f.name) = @field(copy, f.name);
         }
 
         /// Stable-partitions the rows so maximally collapsed instances come
@@ -1344,13 +1438,29 @@ pub fn DeviceBatch(comptime D: type) type {
     const has_ac_dyn = @hasDecl(D, "ac_dyn_slots");
 
     return struct {
+        /// Instances whose cards bind bit-identical Models share one row of
+        /// `models`. Only VerA devices, whose Model nothing but the host's
+        /// parameter writes changes after `derive`; a model that caches
+        /// per-instance breakpoints or rewrites itself keeps one row each.
+        pub const shares_models = isVera(D) and !has_attempt and !has_bp and !has_src_brk and !@hasDecl(D, "nextBreakpoint");
+
         count: u32,
         /// Prepared templates own the tapes; instances made from them borrow.
         owns_tapes: bool = true,
         /// Instances `[0, narrow_count)` collapse maximally and run on the
         /// narrow basis; `ProtoStore.finalize` sorted them to the front.
         narrow_count: if (narrowable) u32 else void,
+        /// One row per distinct Model (`shares_models`), else per instance.
         models: []D.Model,
+        /// Per instance, its row of `models`. Owned per batch, unlike the
+        /// tapes: `unshareModels` rewrites it.
+        model_of: []u32,
+        /// `unshareModels` replaced `models` with a `staging_gpa` copy and
+        /// parked the shared rows here until `destroy`. It cannot use the
+        /// batch's allocator, which the worker thread that unshares may not
+        /// own (a template's is the Problem arena).
+        unshared: bool,
+        models_shared: []D.Model,
         saved_models: if (has_attempt) []D.Model else void,
         attempt_saved: if (has_attempt) bool else void,
         /// `nextBreakpointFn` returned `hi` (inf for none) at `lo`. That
@@ -1437,6 +1547,25 @@ pub fn DeviceBatch(comptime D: type) type {
             evalInner(ctx, pl, first, last, x, t, false);
         }
 
+        /// Instance `id`'s Model.
+        inline fn model(self: *const Self, id: usize) *D.Model {
+            return &self.models[self.model_of[id]];
+        }
+
+        /// Gives every instance its own Model row, so a write through one
+        /// instance's `ParamRef` reaches that instance alone.
+        fn unshareModels(self: *Self) error{OutOfMemory}!void {
+            if (self.unshared or self.models.len == self.count) return;
+            const own = try staging_gpa.alloc(D.Model, self.count);
+            for (own, self.model_of, 0..) |*m, row, id| {
+                m.* = self.models[row];
+                self.model_of[id] = @intCast(id);
+            }
+            self.models_shared = self.models;
+            self.models = own;
+            self.unshared = true;
+        }
+
         fn evalNewton(ctx: *anyopaque, pl: *const Planes, first: u32, last: u32, x: []const f64, t: f64) void {
             evalInner(ctx, pl, first, last, x, t, true);
         }
@@ -1459,7 +1588,8 @@ pub fn DeviceBatch(comptime D: type) type {
 
         fn scatterBounds(ctx: *anyopaque, first: u32, last: u32, trash_slot: u32, trash_row: u32) [4]u32 {
             const self: *Self = @ptrCast(@alignCast(ctx));
-            return tapeBounds(self.slots[first * n_u * n_u .. last * n_u * n_u], self.rhs_idx[first * n_u .. last * n_u], trash_slot, trash_row);
+            const k = SlotMap(D).k;
+            return tapeBounds(self.slots[first * k .. last * k], self.rhs_idx[first * n_u .. last * n_u], trash_slot, trash_row);
         }
 
         fn qTape(ctx: *anyopaque) []const f64 {
@@ -1499,13 +1629,13 @@ pub fn DeviceBatch(comptime D: type) type {
         fn advanceIteration(ctx: *anyopaque, previous_x: []const f64) void {
             const self: *Self = @ptrCast(@alignCast(ctx));
             for (0..self.count) |id|
-                D.advanceIteration(Real, &self.models[id], &self.instances[id], self.localX(previous_x, id), self.sim);
+                D.advanceIteration(Real, self.model(id), &self.instances[id], self.localX(previous_x, id), self.sim);
         }
 
         fn checkConvergence(ctx: *anyopaque, x: []const f64) bool {
             const self: *Self = @ptrCast(@alignCast(ctx));
             for (0..self.count) |id| {
-                if (!D.checkConvergence(Real, &self.models[id], &self.instances[id], self.localX(x, id), self.sim)) return false;
+                if (!D.checkConvergence(Real, self.model(id), &self.instances[id], self.localX(x, id), self.sim)) return false;
             }
             return true;
         }
@@ -1536,9 +1666,9 @@ pub fn DeviceBatch(comptime D: type) type {
                 // Only the slots `limitRange` maintains are ever read back.
                 const writes = comptime contract.limitWrites(D);
                 for (0..self.count) |id| {
-                    const sv = D.seed(Real, &self.models[id], &self.instances[id], self.sim);
+                    const sv = D.seed(Real, self.model(id), &self.instances[id], self.sim);
                     inline for (0..n_u) |u| if (comptime (writes >> u) & 1 != 0) {
-                        self.lim_x[id * n_u + u] = sv[u] orelse x[self.gath[id * n_u + u]];
+                        self.lim_x[id * LimMap(D).k + comptime LimMap(D).at(u)] = sv[u] orelse x[self.gath[id * n_u + u]];
                     };
                 }
                 self.lim_active = true;
@@ -1555,9 +1685,9 @@ pub fn DeviceBatch(comptime D: type) type {
                     // 1) and does not read s otherwise (slope 0). One exact
                     // Newton step on the row lands s on ic.
                     var lx = self.localX(x, id);
-                    const r0 = D.eval(R, &lx, &self.models[id], &self.instances[id], self.sim)[u].v;
+                    const r0 = D.eval(R, &lx, self.model(id), &self.instances[id], self.sim)[u].v;
                     lx[u] += 1.0;
-                    const slope = D.eval(R, &lx, &self.models[id], &self.instances[id], self.sim)[u].v - r0;
+                    const slope = D.eval(R, &lx, self.model(id), &self.instances[id], self.sim)[u].v - r0;
                     if (slope != 0) x[gi] -= r0 / slope;
                 }
             };
@@ -1609,7 +1739,7 @@ pub fn DeviceBatch(comptime D: type) type {
             var min_reject: ?f64 = null;
             for (0..self.count) |id| {
                 const lx = self.localX(x, id);
-                switch (D.updateState(Real, &self.models[id], &self.instances[id], lx, &self.states[id], self.sim)) {
+                switch (D.updateState(Real, self.model(id), &self.instances[id], lx, &self.states[id], self.sim)) {
                     .ok => {},
                     .request_reject_at => |tr| {
                         min_reject = if (min_reject) |cur| @min(cur, tr) else tr;
@@ -1638,7 +1768,7 @@ pub fn DeviceBatch(comptime D: type) type {
             const self: *Self = @ptrCast(@alignCast(ctx));
             var dirty = false;
             for (0..self.count) |id| {
-                if (D.stateCtl(&self.models[id], &self.instances[id], &self.states[id], @enumFromInt(@intFromEnum(op)))) dirty = true;
+                if (D.stateCtl(self.model(id), &self.instances[id], &self.states[id], @enumFromInt(@intFromEnum(op)))) dirty = true;
             }
             return dirty;
         }
@@ -1683,6 +1813,7 @@ pub fn DeviceBatch(comptime D: type) type {
                 .count = self.count,
                 .n_u = n_u,
                 .models = std.mem.sliceAsBytes(self.models),
+                .model_of = self.model_of,
                 .instances = std.mem.sliceAsBytes(self.instances),
                 .gath = self.gath,
                 .rhs_idx = self.rhs_idx,
@@ -1702,8 +1833,8 @@ pub fn DeviceBatch(comptime D: type) type {
             const self: *Self = @ptrCast(@alignCast(ctx));
             self.reprep();
             if (comptime @hasDecl(D, "collapse")) {
-                for (self.models, self.instances, 0..) |*model, *inst, id| {
-                    const col = D.collapse(Real, model, inst);
+                for (self.instances, 0..) |*inst, id| {
+                    const col = D.collapse(Real, self.model(id), inst);
                     const nd = self.gath[id * n_u ..][0..n_u];
                     inline for (D.num_ports..n_u) |u| {
                         if (col[u]) |target| {
@@ -1722,10 +1853,10 @@ pub fn DeviceBatch(comptime D: type) type {
             if (comptime has_bp) self.bp.lo = std.math.inf(f64);
             if (comptime has_src_brk) @memset(self.src_brk, .{});
             if (comptime @hasDecl(D, "setup")) {
-                for (self.instances, self.models) |*inst, *mdl| D.setup(Real, mdl, inst);
+                for (self.instances, 0..) |*inst, id| D.setup(Real, self.model(id), inst);
             }
             if (comptime @hasDecl(D, "precompute")) {
-                for (self.instances, self.models) |*inst, *mdl| D.precompute(inst, mdl);
+                for (self.instances, 0..) |*inst, id| D.precompute(inst, self.model(id));
             }
         }
 
@@ -1781,6 +1912,7 @@ pub fn DeviceBatch(comptime D: type) type {
             // `paramField` runs per field; txl's history has ~10k fields.
             @setEvalBranchQuota(100_000 + 100 * (@typeInfo(D.Instance).@"struct".fields.len + @typeInfo(D.Model).@"struct".fields.len));
             const self: *Self = @ptrCast(@alignCast(ctx));
+            try self.unshareModels();
             try appendParams(D.Instance, self.instances, true, gpa, list);
             try appendParams(D.Model, self.models, false, gpa, list);
         }
@@ -1844,7 +1976,7 @@ pub fn DeviceBatch(comptime D: type) type {
         fn collectNoiseLocal(ctx: *anyopaque, x: []const f64, gpa: std.mem.Allocator, list: *std.ArrayList(NoiseSource)) error{OutOfMemory}!void {
             const self: *Self = @ptrCast(@alignCast(ctx));
             for (0..self.count) |id| {
-                const terms = D.noisePsd(Real, self.localX(x, id), &self.models[id], &self.instances[id], self.sim);
+                const terms = D.noisePsd(Real, self.localX(x, id), self.model(id), &self.instances[id], self.sim);
                 inline for (D.noise_gens, 0..) |gen, k| {
                     // Term k belongs to generator k (noise-contract.md §3).
                     // `@abs` matches ngspice nevalsrc.c:106. Correlation is
@@ -1866,8 +1998,9 @@ pub fn DeviceBatch(comptime D: type) type {
         fn collectAcDyn(ctx: *anyopaque, gpa: std.mem.Allocator, list: *std.ArrayList(u32)) ir.DeviceResult(void) {
             const self: *Self = @ptrCast(@alignCast(ctx));
             list.ensureUnusedCapacity(gpa, self.count * D.ac_dyn_slots.len) catch return .out_of_memory;
+            const k = SlotMap(D).k;
             for (0..self.count) |id| {
-                for (D.ac_dyn_slots) |s| list.appendAssumeCapacity(self.slots[id * n_u * n_u + s]);
+                inline for (D.ac_dyn_slots) |s| list.appendAssumeCapacity(self.slots[id * k + comptime SlotMap(D).at(s / n_u, s % n_u)]);
             }
             return .{ .ok = {} };
         }
@@ -1889,7 +2022,7 @@ pub fn DeviceBatch(comptime D: type) type {
                     var ow: [LW]f64 = undefined;
                     for (0..LW) |l| ow[l] = omegas[j + @min(l, cnt - 1)];
                     var out: [K]std.math.Complex(V) = undefined;
-                    D.acDyn(V, &self.models[id], &self.instances[id], &lx, sim, ow, &out);
+                    D.acDyn(V, self.model(id), &self.instances[id], &lx, sim, ow, &out);
                     for (out, 0..) |o, k| {
                         const e = (id * K + k) * nw + j;
                         const r: [LW]f64 = o.re;
@@ -1929,7 +2062,12 @@ pub fn DeviceBatch(comptime D: type) type {
         fn copyState(dst_ctx: *anyopaque, src_ctx: *const anyopaque) void {
             const dst: *Self = @ptrCast(@alignCast(dst_ctx));
             const src: *const Self = @ptrCast(@alignCast(src_ctx));
-            @memcpy(dst.models, src.models);
+            // Either side may have been unshared since the copy was made.
+            if (dst.models.len == src.models.len) {
+                @memcpy(dst.models, src.models);
+            } else for (0..dst.count) |id| {
+                dst.model(id).* = src.model(id).*;
+            }
             @memcpy(dst.instances, src.instances);
             if (comptime has_state) @memcpy(dst.states, src.states);
             if (comptime has_q) @memcpy(dst.q_tape, src.q_tape);
@@ -1958,7 +2096,10 @@ pub fn DeviceBatch(comptime D: type) type {
             const self = try gpa.create(Self);
             self.* = template.*;
             self.owns_tapes = false;
+            self.unshared = false;
+            self.models_shared = &.{};
             self.models = &.{};
+            self.model_of = &.{};
             self.instances = &.{};
             if (comptime has_state) self.states = &.{};
             if (comptime has_q) self.q_tape = &.{};
@@ -1975,6 +2116,7 @@ pub fn DeviceBatch(comptime D: type) type {
 
             // Model/Instance are POD, so a byte copy is a deep copy.
             self.models = try gpa.dupe(D.Model, template.models);
+            self.model_of = try gpa.dupe(u32, template.model_of);
             self.instances = try gpa.dupe(D.Instance, template.instances);
             if (comptime has_src_brk) self.src_brk = try gpa.dupe(SrcBrk, template.src_brk);
             if (comptime has_attempt) {
@@ -1982,7 +2124,7 @@ pub fn DeviceBatch(comptime D: type) type {
                 if (accepted and template.attempt_saved) @memcpy(self.saved_models, template.saved_models);
             }
             if (comptime has_limit) {
-                self.lim_x = try gpa.alloc(f64, self.count * n_u);
+                self.lim_x = try gpa.alloc(f64, self.count * LimMap(D).k);
                 if (accepted) @memcpy(self.lim_x, template.lim_x) else @memset(self.lim_x, 0);
             }
             if (comptime has_q) {
@@ -1994,8 +2136,8 @@ pub fn DeviceBatch(comptime D: type) type {
                 if (accepted) {
                     @memcpy(self.states, template.states);
                 } else {
-                    for (self.states, self.models, self.instances) |*state, *model, *instance|
-                        state.* = D.initState(model, instance);
+                    for (self.states, self.instances, 0..) |*state, *instance, id|
+                        state.* = D.initState(self.model(id), instance);
                     self.commitBirth();
                 }
             }
@@ -2004,7 +2146,11 @@ pub fn DeviceBatch(comptime D: type) type {
 
         fn destroy(ctx: *anyopaque, gpa: std.mem.Allocator) void {
             const self: *Self = @ptrCast(@alignCast(ctx));
-            gpa.free(self.models);
+            if (self.unshared) {
+                staging_gpa.free(self.models);
+                gpa.free(self.models_shared);
+            } else gpa.free(self.models);
+            gpa.free(self.model_of);
             if (comptime has_attempt) gpa.free(self.saved_models);
             if (comptime has_limit) gpa.free(self.lim_x);
             if (comptime has_src_brk) gpa.free(self.src_brk);
@@ -2121,6 +2267,7 @@ fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool) type
         rhs_idx_: gompute.GlobalPtr(u32),
         slots_: gompute.GlobalPtr(u32),
         models_: gompute.GlobalPtr(D.Model),
+        model_of_: gompute.GlobalPtr(u32),
         instances_: gompute.GlobalPtr(D.Instance),
         g_vals: gompute.GlobalPtr(f64),
         c_vals: gompute.GlobalPtr(f64),
@@ -2159,23 +2306,23 @@ fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool) type
         pub inline fn rhsRow(s: *const Sk, id: u32, ru: usize) u32 {
             return s.rhs_idx_[@as(usize, id) * n_u + ru];
         }
-        pub inline fn lim(s: *const Sk, id: u32, u: usize) f64 {
-            return s.lim_[@as(usize, id) * n_u + u];
+        pub inline fn lim(s: *const Sk, id: u32, comptime u: usize) f64 {
+            return s.lim_[@as(usize, id) * LimMap(D).k + comptime LimMap(D).at(u)];
         }
-        pub inline fn setLim(s: *const Sk, id: u32, u: usize, v: f64) void {
-            s.lim_[@as(usize, id) * n_u + u] = v;
+        pub inline fn setLim(s: *const Sk, id: u32, comptime u: usize, v: f64) void {
+            s.lim_[@as(usize, id) * LimMap(D).k + comptime LimMap(D).at(u)] = v;
         }
         // An address-space cast, not a copy: a compact model's Model has
         // hundreds of fields and would not fit in GPU registers. A no-op on
         // the host.
         pub inline fn model(s: *const Sk, id: u32) *const D.Model {
-            return @addrSpaceCast(&s.models_[id]);
+            return @addrSpaceCast(&s.models_[s.model_of_[id]]);
         }
         pub inline fn inst(s: *const Sk, id: u32) if (@hasDecl(D, "mutable_eval") and D.mutable_eval) *D.Instance else *const D.Instance {
             return @addrSpaceCast(&s.instances_[id]);
         }
-        inline fn slot(s: *const Sk, id: u32, ru: usize, cu: usize) u32 {
-            return s.slots_[(@as(usize, id) * n_u + ru) * n_u + cu];
+        inline fn slot(s: *const Sk, id: u32, comptime ru: usize, comptime cu: usize) u32 {
+            return s.slots_[@as(usize, id) * SlotMap(D).k + comptime SlotMap(D).at(ru, cu)];
         }
         // Plain `+=` on the GPU too. There the tape indexes a staging cell
         // only this thread writes, and `ReduceKernel` sums each plane cell's
@@ -2188,7 +2335,7 @@ fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool) type
         pub inline fn scatterRes(s: *const Sk, row: u32, val: f64) void {
             add(s.rhs, row, val);
         }
-        pub inline fn scatterJac(s: *const Sk, id: u32, ru: usize, cu: usize, val: f64) void {
+        pub inline fn scatterJac(s: *const Sk, id: u32, comptime ru: usize, comptime cu: usize, val: f64) void {
             add(s.g_vals, s.slot(id, ru, cu), val);
         }
         pub inline fn scatterQ(s: *const Sk, row: u32, qv: f64) void {
@@ -2198,7 +2345,7 @@ fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool) type
         pub inline fn tapeQ(s: *const Sk, id: u32, j: usize, qv: f64) void {
             s.q_tape[@as(usize, id) * (comptime lteSites(D).len) + j] = qv;
         }
-        pub inline fn scatterQJac(s: *const Sk, id: u32, ru: usize, cu: usize, val: f64) void {
+        pub inline fn scatterQJac(s: *const Sk, id: u32, comptime ru: usize, comptime cu: usize, val: f64) void {
             add(s.c_vals, s.slot(id, ru, cu), val);
         }
 
@@ -2211,6 +2358,7 @@ fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool) type
                 .rhs_idx_ = b.rhs_idx.ptr,
                 .slots_ = b.slots.ptr,
                 .models_ = b.models.ptr,
+                .model_of_ = b.model_of.ptr,
                 .instances_ = b.instances.ptr,
                 .g_vals = pl.g_vals.ptr,
                 .c_vals = pl.c_vals.ptr,
@@ -2236,6 +2384,7 @@ fn DeviceKernel(comptime D: type, comptime block_size: u32) type {
             rhs_idx: gompute.GlobalPtr(u32),
             slots: gompute.GlobalPtr(u32),
             models: gompute.GlobalPtr(D.Model),
+            model_of: gompute.GlobalPtr(u32),
             instances: gompute.GlobalPtr(D.Instance),
             g_vals: gompute.GlobalPtr(f64),
             c_vals: gompute.GlobalPtr(f64),
@@ -2252,6 +2401,7 @@ fn DeviceKernel(comptime D: type, comptime block_size: u32) type {
                 .rhs_idx_ = rhs_idx,
                 .slots_ = slots,
                 .models_ = models,
+                .model_of_ = model_of,
                 .instances_ = instances,
                 .g_vals = g_vals,
                 .c_vals = c_vals,
@@ -2289,6 +2439,7 @@ fn StateKernel(comptime D: type, comptime block_size: u32) type {
             x_old: gompute.GlobalPtr(f64),
             gath: gompute.GlobalPtr(u32),
             models: gompute.GlobalPtr(D.Model),
+            model_of: gompute.GlobalPtr(u32),
             instances: gompute.GlobalPtr(D.Instance),
             lim: gompute.GlobalPtr(f64),
             states: gompute.GlobalPtr(StateT),
@@ -2299,7 +2450,7 @@ fn StateKernel(comptime D: type, comptime block_size: u32) type {
             const tid = gompute.globalIdX(block_size);
             if (tid >= count) return;
             const id: usize = @intCast(tid);
-            const model: *const D.Model = @addrSpaceCast(&models[id]);
+            const model: *const D.Model = @addrSpaceCast(&models[model_of[id]]);
             var flag: u32 = 0;
             var cur: [n_u]f64 = undefined;
             inline for (0..n_u) |u| cur[u] = xs[gath[id * n_u + u]];
@@ -2310,14 +2461,14 @@ fn StateKernel(comptime D: type, comptime block_size: u32) type {
                 const inst_c: *const D.Instance = @addrSpaceCast(&instances[id]);
                 var old: [n_u]f64 = undefined;
                 inline for (0..n_u) |u| if (comptime (writes >> u) & 1 != 0) {
-                    old[u] = if (lim_active != 0) lim[id * n_u + u] else x_old[gath[id * n_u + u]];
+                    old[u] = if (lim_active != 0) lim[id * LimMap(D).k + comptime LimMap(D).at(u)] else x_old[gath[id * n_u + u]];
                 } else {
                     old[u] = x_old[gath[id * n_u + u]];
                 };
                 const lm = D.limit(Real, model, inst_c, cur, old, sim);
                 if (!lm.converged) flag |= 1;
                 inline for (0..n_u) |u| if (comptime (writes >> u) & 1 != 0) {
-                    lim[id * n_u + u] = lm.x[u];
+                    lim[id * LimMap(D).k + comptime LimMap(D).at(u)] = lm.x[u];
                 };
             }
             if (comptime has_state) {
@@ -2387,6 +2538,7 @@ fn QTapeKernel(comptime D: type, comptime block_size: u32) type {
             xs: gompute.GlobalPtr(f64),
             gath: gompute.GlobalPtr(u32),
             models: gompute.GlobalPtr(D.Model),
+            model_of: gompute.GlobalPtr(u32),
             instances: gompute.GlobalPtr(D.Instance),
             tape: gompute.GlobalPtr(f64),
         ) callconv(gompute.kernel_callconv) void {
@@ -2397,7 +2549,7 @@ fn QTapeKernel(comptime D: type, comptime block_size: u32) type {
             const S = RealFor(@hasDecl(D, "collapse"));
             var lx: [n_u]f64 = undefined;
             inline for (0..n_u) |u| lx[u] = xs[gath[id * n_u + u]];
-            const qs = D.q(S, &lx, @addrSpaceCast(&models[id]), @addrSpaceCast(&instances[id]), sim);
+            const qs = D.q(S, &lx, @addrSpaceCast(&models[model_of[id]]), @addrSpaceCast(&instances[id]), sim);
             inline for (sites, 0..) |k, j| tape[id * sites.len + j] = qs[k].v;
         }
     };
@@ -2412,6 +2564,7 @@ fn CtlKernel(comptime D: type, comptime block_size: u32) type {
         pub fn run(
             count: u64,
             models: gompute.GlobalPtr(D.Model),
+            model_of: gompute.GlobalPtr(u32),
             instances: gompute.GlobalPtr(D.Instance),
             states: gompute.GlobalPtr(StateT),
             op: u64,
@@ -2420,7 +2573,7 @@ fn CtlKernel(comptime D: type, comptime block_size: u32) type {
             const tid = gompute.globalIdX(block_size);
             if (tid >= count) return;
             const id: usize = @intCast(tid);
-            const model: *const D.Model = @addrSpaceCast(&models[id]);
+            const model: *const D.Model = @addrSpaceCast(&models[model_of[id]]);
             const inst: *D.Instance = @addrSpaceCast(&instances[id]);
             const st: *StateT = @addrSpaceCast(&states[id]);
             const sop: StateCtlOp = @enumFromInt(@as(u8, @truncate(op)));
@@ -2595,4 +2748,5 @@ pub const test_access = if (@import("builtin").is_test) .{
     .Sparse = DualFor(f64, &.{ 0, 1 }, hostLayout(false), false),
     .SparseF32 = DualFor(f32, &.{ 0, 1 }, hostLayout(false), false),
     .anyNonzero = anyNonzero,
+    .ParamRef = ParamRef,
 } else {};

@@ -121,8 +121,11 @@ evaluates device planes (`Circuit.gpu_hook.eval_planes`); every solve runs on
 the host.
 
 FROZEN at the GPU boundary (ABI + layout_hash): scatter tapes
-(gath/rhs_idx/slots u32 layout), Model/Instance PODs, pattern CSC and plane
-`[]f64` layout. Redesign host tables around them, never through them.
+(gath/rhs_idx/slots u32 layout), Model/Instance PODs, the `model_of` row
+tape (instances with bit-identical Models share one row; ABI 19), pattern
+CSC and plane `[]f64` layout. Redesign host tables around them, never through
+them; a change through them bumps `abi_version` and must keep the default
+build, `zig build test-gpu` and CUDA-vs-CPU results as they were.
 
 ## Call conventions (zero-cost by choice)
 

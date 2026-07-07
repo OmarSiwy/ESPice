@@ -65,11 +65,27 @@ pub fn LaneLu(comptime W: usize) type {
             self.* = undefined;
         }
 
-        /// SparseLu.refactor for W lanes; `vals[p][l]` is entry p of lane l.
-        /// Returns the mask of lanes whose pivot was zero, non-finite or
-        /// below `growth_limit` times its column max (bit l = lane l); their
-        /// factors are garbage. A void pivot in the base fails every lane.
-        pub fn refactor(self: *Self, col_ptr: []const u32, vals: []const V, growth_limit: f64) u64 {
+        /// A W-lane matrix stored whole: `vals[p][l]` is CSC entry p of lane
+        /// l. The `refactor` source for callers that already hold the values.
+        pub const Plane = struct {
+            col_ptr: []const u32,
+            vals: []const V,
+
+            /// Writes column `c`'s entries to `w`, entry p at row `prow[p]`.
+            pub inline fn load(self: Plane, c: usize, w: []V, prow: []const u32) void {
+                for (self.col_ptr[c]..self.col_ptr[c + 1]) |p| w[prow[p]] = self.vals[p];
+            }
+        };
+
+        /// SparseLu.refactor for W lanes. `src` hands over one column at a
+        /// time through `load(c, w, prow)`, which must write column c's
+        /// entries into `w` exactly as `Plane.load` would; a source that
+        /// computes them on the fly (freq_solve.zig `Stacked`) holds no
+        /// value plane. Returns the mask of lanes whose pivot was zero,
+        /// non-finite or below `growth_limit` times its column max (bit l =
+        /// lane l); their factors are garbage. A void pivot in the base fails
+        /// every lane.
+        pub fn refactor(self: *Self, src: anytype, growth_limit: f64) u64 {
             const b = self.base;
             const li = b.li.items;
             const ui = b.ui.items;
@@ -88,8 +104,7 @@ pub fn LaneLu(comptime W: usize) type {
             var bad: u64 = 0;
 
             for (0..self.n) |k| {
-                const c = b.q[k];
-                for (col_ptr[c]..col_ptr[c + 1]) |p| w[prow[p]] = vals[p];
+                src.load(b.q[k], w, prow);
 
                 // Triangular solve in stored topological order; each slot is
                 // zeroed as it is consumed.

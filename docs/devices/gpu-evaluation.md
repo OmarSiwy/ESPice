@@ -7,8 +7,11 @@ bit for bit what the device kernels computed, with the ground pin added. The
 sparse LU, the Newton update, the gates and the transient's LTE all stay on
 the host (AGENTS.md, CPU/GPU sharing). The kernels are the host's `evalRange`
 compiled for the device through `Sink(D, true, ...)`. The GPU boundary
-(tapes, Model/Instance PODs, pattern CSC, plane layout) is frozen, so every
-table here is built beside it.
+(tapes, Model/Instance PODs, the `model_of` row tape, pattern CSC, plane
+layout) is frozen, so every table here is built beside it. Each kernel reads
+an instance's Model as `models[model_of[id]]`: instances whose cards bind
+equal Models share a row on the device as on the host (docs/devices/abi.md,
+Shared Models).
 
 ## Which batches go to the device
 

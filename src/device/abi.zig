@@ -398,14 +398,19 @@ pub const GpuPayload = struct {
     /// Unknowns per instance; the tape stride.
     n_u: u32,
     /// `[]D.Model` and `[]D.Instance` as bytes. POD by contract, so a byte
-    /// copy is the whole upload.
+    /// copy is the whole upload. `models` holds one row per distinct Model,
+    /// fewer than `count` when instances share one.
     models: []const u8,
+    /// count: instance i's row of `models`. Every kernel reads its Model
+    /// through it.
+    model_of: []const u32,
     instances: []const u8,
     /// count * n_u: the global row each local unknown gathers x from.
     gath: []const u32,
     /// count * n_u: the residual row each local unknown scatters to.
     rhs_idx: []const u32,
-    /// count * n_u * n_u: the CSC slot each local Jacobian entry scatters to.
+    /// The CSC slot each local Jacobian entry the device's jac/q pattern sets
+    /// scatters to, row-major, the same number per instance.
     slots: []const u32,
     /// `arp_lim_<model>`, or "" when the device has no state kernel.
     lim_kernel: []const u8,
@@ -413,8 +418,9 @@ pub const GpuPayload = struct {
     ctl_kernel: []const u8,
     /// `arp_reduce_<model>`, the segmented sum from staging cells to planes.
     reduce_kernel: []const u8,
-    /// Host lim plane (count * n_u) for the initial upload, empty without
-    /// `limit`. Stale once the device-side state kernel has run.
+    /// Host lim plane for the initial upload, one value per instance and
+    /// unknown `limit` writes, empty without `limit`. Stale once the
+    /// device-side state kernel has run.
     lim_x: []const f64,
     /// `[]D.State` as bytes, uploaded once; empty without `State`.
     states: []const u8,
@@ -444,7 +450,11 @@ pub const GpuPayload = struct {
 // 17: `Hooks.predict_first_iterate`, `Hooks.mark_load_check_rows`.
 // 18: `Hooks.accept_q`.
 // GPU planes, Model/Instance PODs and scatter tapes are unchanged by 10 to 18.
-pub const abi_version: u32 = 18;
+// 19: instances share bit-identical Models: `GpuPayload.model_of`, and every
+//    kernel takes `model_of` after `models`.
+// 20: the slot tape holds only the device's pattern entries, not n_u^2.
+// 21: the lim plane holds only the unknowns `limit` writes, not n_u.
+pub const abi_version: u32 = 21;
 
 /// A device type's construction entry points, exported by each device object
 /// and by runtime-loaded `.so` devices.

@@ -1298,24 +1298,84 @@ const FreqSolveTests = struct {
         }
         const dyn: impl.Dyn = .{ .slots = &dyn_slots, .re = &dyn_re, .im = &dyn_im };
 
-        // The W-lane fill is bitwise W scalar fills, ragged tail included.
+        // The W-lane fill is bitwise W scalar fills, ragged tail included:
+        // `Stacked` loads every column through the identity row map (each
+        // stacked column's rows are distinct) and lane l must equal
+        // `setOmegaSparse` at ω index base + l, entry by entry.
         const ta = @TypeOf(fs).test_access;
         const W = ta.W;
         const sp = &fs.strategy.sp;
-        const lanes = try allocator.alloc(@Vector(W, f64), sp.vals.len);
-        defer allocator.free(lanes);
+        try ta.indexDyn(allocator, sp, dyn);
+        const nn2: usize = 2 * n;
+        const w_rows = try allocator.alloc(@Vector(W, f64), nn2);
+        defer allocator.free(w_rows);
         var base: usize = 0;
         while (base < omegas.len) : (base += W) {
             const cnt = @min(W, omegas.len - base);
             var ow: [W]f64 = undefined;
             for (0..W) |l| ow[l] = omegas[base + @min(l, cnt - 1)];
-            ta.fillLanePlane(n, sp, ow, lanes);
-            ta.addDynLanes(sp.src_col_ptr, dyn, base, cnt, lanes);
+            const src = impl.Stacked(W).of(sp, ow, dyn, base, cnt);
             for (0..cnt) |l| {
                 try ta.setOmegaSparse(n, sp, omegas[base + l], dyn, base + l);
-                for (sp.vals, lanes) |scalar, lane| {
-                    const row: [W]f64 = lane;
-                    try testing.expectEqual(@as(u64, @bitCast(scalar)), @as(u64, @bitCast(row[l])));
+                for (0..nn2) |col| {
+                    src.load(col, w_rows, sp.row_idx);
+                    for (sp.col_ptr[col]..sp.col_ptr[col + 1]) |p| {
+                        const row: [W]f64 = w_rows[sp.row_idx[p]];
+                        try testing.expectEqual(@as(u64, @bitCast(sp.vals[p])), @as(u64, @bitCast(row[l])));
+                    }
+                }
+            }
+        }
+
+        // Fused into the refactor, the fill gives the factors of a scalar
+        // SparseLu refactor of `setOmegaSparse`'s values, lane by lane, and
+        // so does its W = 1 instantiation: the solves agree exactly (equal
+        // as values; a zero may differ in sign, see `LaneLu.solve`).
+        const lane_lu = @import("root.zig").lane_lu;
+        const b_lane = try allocator.alloc(@Vector(W, f64), nn2);
+        defer allocator.free(b_lane);
+        const x_lane = try allocator.alloc(@Vector(W, f64), nn2);
+        defer allocator.free(x_lane);
+        const b_one = try allocator.alloc(@Vector(1, f64), nn2);
+        defer allocator.free(b_one);
+        const x_one = try allocator.alloc(@Vector(1, f64), nn2);
+        defer allocator.free(x_one);
+        const x_scalar = try allocator.alloc(f64, nn2);
+        defer allocator.free(x_scalar);
+        for (rhs, b_lane, b_one) |v, *bw, *b1| {
+            bw.* = @splat(v);
+            b1.* = @splat(v);
+        }
+        base = 0;
+        while (base < omegas.len) : (base += W) {
+            const cnt = @min(W, omegas.len - base);
+            var scalar_vals: [W][]f64 = undefined;
+            for (0..cnt) |l| {
+                try ta.setOmegaSparse(n, sp, omegas[base + l], dyn, base + l);
+                scalar_vals[l] = try allocator.dupe(f64, sp.vals);
+            }
+            defer for (scalar_vals[0..cnt]) |v| allocator.free(v);
+            const lu = &sp.slv.lu.?;
+            var ow: [W]f64 = undefined;
+            for (0..W) |l| ow[l] = omegas[base + @min(l, cnt - 1)];
+            var lw = try lane_lu.LaneLu(W).init(allocator, lu);
+            defer lw.deinit(allocator);
+            const mask_w = lw.refactor(impl.Stacked(W).of(sp, ow, dyn, base, cnt), 1e-12);
+            lw.solve(b_lane, x_lane);
+            for (0..cnt) |l| {
+                var l1 = try lane_lu.LaneLu(1).init(allocator, lu);
+                defer l1.deinit(allocator);
+                const mask_1 = l1.refactor(impl.Stacked(1).of(sp, .{omegas[base + l]}, dyn, base + l, 1), 1e-12);
+                const failed = if (lu.refactor(sp.col_ptr, scalar_vals[l], 1e-12)) |_| false else |_| true;
+                try testing.expectEqual(failed, mask_1 != 0);
+                try testing.expectEqual(failed, (mask_w >> @intCast(l)) & 1 != 0);
+                if (failed) continue;
+                lu.solve(rhs, x_scalar);
+                l1.solve(b_one, x_one);
+                for (x_scalar, x_one, x_lane) |xs, x1, xw| {
+                    const lanes_w: [W]f64 = xw;
+                    try testing.expectEqual(xs, x1[0]);
+                    try testing.expectEqual(xs, lanes_w[l]);
                 }
             }
         }
@@ -1640,7 +1700,7 @@ const LaneLuTests = struct {
         defer ll.deinit(gpa);
         var lvals: [16]L1.V = undefined;
         for (csc.vals[0..csc.nnz()], 0..) |v, i| lvals[i] = .{v};
-        const mask = ll.refactor(&csc.col_ptr, lvals[0..csc.nnz()], 1e-12);
+        const mask = ll.refactor(L1.Plane{ .col_ptr = &csc.col_ptr, .vals = lvals[0..csc.nnz()] }, 1e-12);
         try testing.expectEqual(@as(u64, 0), mask);
 
         var lb: [4]L1.V = undefined;
@@ -1696,7 +1756,7 @@ const LaneLuTests = struct {
 
             var ll = try LW.init(gpa, &base);
             defer ll.deinit(gpa);
-            const mask = ll.refactor(&base_csc.col_ptr, lvals[0..nnz], 1e-12);
+            const mask = ll.refactor(LW.Plane{ .col_ptr = &base_csc.col_ptr, .vals = lvals[0..nnz] }, 1e-12);
 
             const b_scalar = [4]f64{ 1, 2, 3, 4 };
             var lb: [4]LW.V = undefined;
@@ -1755,7 +1815,7 @@ const LaneLuTests = struct {
 
         var ll = try LW.init(gpa, &base);
         defer ll.deinit(gpa);
-        const mask = ll.refactor(&csc.col_ptr, lvals[0..nnz], 0); // growth off; catch singular only
+        const mask = ll.refactor(LW.Plane{ .col_ptr = &csc.col_ptr, .vals = lvals[0..nnz] }, 0); // growth off; catch singular only
 
         try testing.expect((mask & (@as(u64, 1) << 1)) != 0); // lane 1 flagged
 
@@ -1817,7 +1877,7 @@ const LaneLuTests = struct {
                 for (0..W) |l| v[l] = lane_vals[l][p];
                 lvals[p] = v;
             }
-            try testing.expectEqual(@as(u64, 0), ll.refactor(&csc.col_ptr, lvals[0..nnz], 1e-12));
+            try testing.expectEqual(@as(u64, 0), ll.refactor(LW.Plane{ .col_ptr = &csc.col_ptr, .vals = lvals[0..nnz] }, 1e-12));
             try expectZero(W, ll.w);
 
             const b_scalar = [5]f64{ 1, -2, 3, -4, 5 };
@@ -1857,7 +1917,7 @@ const LaneLuTests = struct {
         var lvals: [5]LW.V = undefined;
         for (&lvals, vals) |*o, v| o.* = @splat(v);
         const all: u64 = std.math.maxInt(std.meta.Int(.unsigned, W));
-        try testing.expectEqual(all, ll.refactor(&col_ptr, &lvals, 1e-12));
+        try testing.expectEqual(all, ll.refactor(LW.Plane{ .col_ptr = &col_ptr, .vals = &lvals }, 1e-12));
         try expectZero(W, ll.w);
     }
 };

@@ -133,11 +133,12 @@ pub const Solver = struct {
     /// the values equal the last factored ones, which is common on linear
     /// circuits between timestep changes. Otherwise refactors on the
     /// existing pivot sequence and falls back to a full factor if the
-    /// replay fails. The solver keeps its own copy of `vals`. `execution`
-    /// schedules the BBD block factors; `.{}` runs them serially.
+    /// replay fails. The solver keeps its own copy of `vals` unless
+    /// `dropBypass` ran. `execution` schedules the BBD block factors; `.{}`
+    /// runs them serially.
     pub fn factor(self: *Self, vals: []const f64, execution: root.Execution) !void {
         const nnz = self.vcopy.len;
-        if (self.factored and !self.host_stale and simdEql(self.vcopy, vals[0..nnz])) return;
+        if (nnz != 0 and self.factored and !self.host_stale and simdEql(self.vcopy, vals[0..nnz])) return;
         try self.factorInner(vals, execution);
         self.host_stale = false;
         root.copySimd(self.vcopy, vals[0..nnz]);
@@ -146,7 +147,16 @@ pub const Solver = struct {
 
     /// True when `vals` equal the last factored values (the bypass test).
     pub fn unchanged(self: *const Self, vals: []const f64) bool {
-        return self.factored and simdEql(self.vcopy, vals[0..self.vcopy.len]);
+        return self.vcopy.len != 0 and self.factored and simdEql(self.vcopy, vals[0..self.vcopy.len]);
+    }
+
+    /// Frees the copy behind the unchanged-matrix bypass, for a caller whose
+    /// values never repeat (a frequency sweep): every `factor` then factors.
+    /// Not for a solver a device LU (`gpu_lu.zig`) shares, which syncs
+    /// through the copy.
+    pub fn dropBypass(self: *Self) void {
+        self.gpa.free(self.vcopy);
+        self.vcopy = &.{};
     }
 
     /// Brings `lu` up to `vcopy` after a device factor. The device ran
@@ -241,7 +251,7 @@ pub const Solver = struct {
             if (threads > 1 and execution.io != null and parWorthIt(lu)) self.fast.?.threads = threads;
         }
         const f = &self.fast.?;
-        const nnz = self.vcopy.len;
+        const nnz = self.col_ptr[self.n];
         if (!f.valid or (need and !simdEql(f.ref.fa, vals[0..nnz]))) {
             if (!f.refactor(lu, vals, execution.io)) return false;
         }
