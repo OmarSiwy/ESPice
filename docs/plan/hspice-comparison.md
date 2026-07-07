@@ -203,7 +203,7 @@ the build-order id in the last column.
 
 | Card | What it does | ESPice | VACASK | Value | Build id, size |
 |---|---|---|---|---|---|
-| `.MOSRA`, `.MODEL ... MOSRA`, `.APPENDMODEL`, `.MOSRAPRINT`, `.MOSRA_SUBCKT_PIN_VOLT` [CR; SA Ch.29] | HCI/BTI aging: integrate stress in a fresh run, extrapolate to `RelTotalTime`, rerun with degraded models | no | no | medium for automotive and long-life designs | E6, L |
+| `.MOSRA`, `.MODEL ... MOSRA`, `.APPENDMODEL`, `.MOSRAPRINT`, `.MOSRA_SUBCKT_PIN_VOLT` [CR; SA Ch.29] | HCI/BTI aging: integrate stress in a fresh run, extrapolate to `RelTotalTime`, rerun with degraded models | level 1 (ESPice's equations), SimMode 0 and 2, `.appendmodel`; `.mosraprint`, `.mosra_subckt_pin_volt` refused ([mosra.md](../analysis/mosra.md)) | no | medium for automotive and long-life designs | E6, landed |
 | Electromigration | `.MEASURE ... EM_AVG` with `.OPTION EM_RECOVERY`; no separate analysis [CR .MEASURE; SA "Measuring Recovered Electromigration"] | no | no | low to medium | C9, S |
 
 ## 3. Implementation sketches
@@ -542,10 +542,10 @@ G₀ + jkω₀C₀ are `LaneLu` frequency lanes, and complex phasor output.
   with one exception: `.biaschk` region checks need device
   operating-point values, which are blocked on VerA the same way
   vacask-comparison G5 is.
-- E6, MOSRA: a fresh transient integrates stress per device, which is
-  extrapolated to the lifetime. The degraded parameters then go back in
-  through C2 for the aged run. The aging model itself (HSPICE MOSRA
-  level 1) has to be written, which makes this L.
+- E6, MOSRA: landed; see [mosra.md](../analysis/mosra.md). A fresh
+  transient integrates stress per device, extrapolated to each
+  reliability time, and the degraded `delvto`/`mulu0` go back in as
+  variant rows (C2) for the aged runs.
 
 ## 4. Build order
 

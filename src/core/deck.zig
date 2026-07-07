@@ -1,5 +1,6 @@
 //! Everything a deck says besides its topology: probes, sources, options,
 //! queries and the bindings later directives resolve against.
+const std = @import("std");
 const requests = @import("query.zig");
 const numerics = @import("numerics.zig");
 
@@ -61,6 +62,74 @@ pub const Variants = struct {
         const hi = self.starts[v + 1];
         return .{ self.refs[lo..hi], self.values[lo..hi] };
     }
+};
+
+/// HSPICE MOSRA [SA Ch.29] (docs/analysis/mosra.md): the transient that
+/// stresses the bound MOSFETs, the reliability times the aged runs extrapolate
+/// to, and one SoA row per stressed instance. Aged time `k` is row `k` of
+/// `Deck.variants`; each row writes `delvto` then, where the device has
+/// one, `mulu0`, device by device: the device's own value shifted by the
+/// aged ΔVth, and scaled by the mobility factor.
+pub const Mosra = struct {
+    /// The stress transient: the deck's first nominal `.tran`.
+    tran: requests.Tran,
+    /// Reliability times of the aged runs, seconds, ascending.
+    rel_times: []const f64,
+    /// SimMode 2 runs the aged rows; SimMode 0 only reports degradation.
+    aged_runs: bool,
+    /// RelMode: which mechanisms age the devices.
+    hci: bool = true,
+    bti: bool = true,
+    /// Stress window within the transient (AgingStart, AgingStop), seconds.
+    aging_start: f64 = 0,
+    aging_stop: f64 = std.math.inf(f64),
+    /// Vgs (polarity-corrected) at or below which a mechanism sees no
+    /// stress, volts.
+    hci_threshold: f64 = 0,
+    bti_threshold: f64 = 0,
+    /// DegF: the |ΔVth| that ends a device's life; adds `life(m)` columns.
+    deg_f: ?f64 = null,
+    /// Circuit temperature of the stress run, kelvin.
+    temp_k: f64,
+    /// The `.model ... MOSRA` cards `model` indexes.
+    models: []const MosraModel,
+    /// Card name of each stressed instance, for the table's columns.
+    names: []const []const u8,
+    /// Circuit rows of drain, gate and source.
+    terminals: []const [3]u32,
+    pmos: []const bool,
+    /// Row of `models` aging the instance.
+    model: []const u16,
+    /// Indices into the circuit's `collectParams` list; `mulu0` is
+    /// `no_param` on a device without one.
+    delvto: []const u32,
+    mulu0: []const u32,
+    /// The fresh values the aged ones start from; `mulu0_fresh` is 1 where
+    /// the device has no `mulu0`.
+    delvto_fresh: []const f64,
+    mulu0_fresh: []const f64,
+
+    /// `mulu0` of a device without that parameter.
+    pub const no_param = std.math.maxInt(u32);
+};
+
+/// One `.model name MOSRA LEVEL=1` card: a power law per mechanism,
+/// ΔVth = A·t^n for constant stress, with A = a0·exp(fd·v)·exp(-td/T).
+/// Parameter names are ESPice's choice (docs/analysis/mosra.md).
+pub const MosraModel = struct {
+    /// BTI: v is Vgs.
+    tit0: f64 = 0,
+    titfd: f64 = 0,
+    tittd: f64 = 0,
+    tn: f64 = 0.25,
+    /// HCI: v is Vds while Vgs is above the threshold.
+    hci0: f64 = 0,
+    hcifd: f64 = 0,
+    hcitd: f64 = 0,
+    hcin: f64 = 0.5,
+    /// Mobility loss per volt of each mechanism's ΔVth: mulu0 = 1/(1 + Σ mu·Δ).
+    titmu: f64 = 0,
+    hcimu: f64 = 0,
 };
 
 /// Source bindings kept from construction so later analysis directives can
@@ -126,6 +195,8 @@ pub const Deck = struct {
     variants: Variants = .{},
     /// HSPICE `.save`, when the deck has one.
     save_op: ?SaveOp = null,
+    /// HSPICE `.mosra`, when the deck has one.
+    mosra: ?Mosra = null,
 };
 
 /// What a `.meas` card computes, after ngspice com_measure2.c, plus the

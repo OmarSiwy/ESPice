@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "MOSRA level 1 degradation table of one NMOS under constant DC stress.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Constant stress: BTI dVth = 1e-4*exp(0.5*1.2)*t^0.25, HCI dVth = 2e-6*t^0.5; delvto = BTI + HCI, mulu0 = 1/(1 + 0.1*HCI); life solves BTI(t) + HCI(t) = DegF = 0.05 V. Equations are ESPice's level 1 choice (docs/analysis/mosra.md)."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "MOSRA Degradation",
+        "match": "exact",
+        "row_count": 2,
+        "columns": {
+          "reltime": {
+            "values": [
+              50000000.0,
+              100000000.0
+            ],
+            "rtol": 1e-12,
+            "atol": 0
+          },
+          "delvto(m1)": {
+            "values": [
+              0.029464267297878724,
+              0.03822118800390509
+            ],
+            "rtol": 1e-09,
+            "atol": 0
+          },
+          "mulu0(m1)": {
+            "values": [
+              0.9985877836131941,
+              0.998003992015968
+            ],
+            "rtol": 1e-09,
+            "atol": 0
+          },
+          "life(m1)": {
+            "values": [
+              200480532.1778591,
+              200480532.1778591
+            ],
+            "rtol": 1e-06,
+            "atol": 0
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "5b9496aeaa6f4e7eaad4ae596bae4501f1828c58c37478610c5dea81ea36c84e"
+}
