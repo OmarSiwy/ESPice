@@ -515,11 +515,11 @@ const variant_cards = std.StaticStringMap(Card).initComptime(.{
 
 /// A behavioural E/F/G/H form, named by the word in the first control-node
 /// slot (ngspice inpcom.c, HSPICE's E/G element keywords).
-const Form = enum { value, poly, table, pwl, laplace, delay, vcr, vccap, kind, refused };
+const Form = enum { value, poly, table, pwl, laplace, pole, delay, vcr, vccap, kind, refused };
 
 const behavioural = std.StaticStringMap(Form).initComptime(.{
     .{ "poly", .poly },       .{ "value", .value },   .{ "vol", .value },      .{ "cur", .value },
-    .{ "table", .table },     .{ "laplace", .laplace }, .{ "pole", .refused }, .{ "freq", .refused },
+    .{ "table", .table },     .{ "laplace", .laplace }, .{ "pole", .pole }, .{ "freq", .refused },
     .{ "vcr", .vcr },         .{ "vccap", .vccap },   .{ "delay", .delay },    .{ "opamp", .refused },
     .{ "npwl", .refused },    .{ "ppwl", .refused },  .{ "pwl", .pwl },        .{ "and", .refused },
     .{ "nand", .refused },    .{ "or", .refused },    .{ "nor", .refused },    .{ "vcvs", .kind },
@@ -2365,8 +2365,10 @@ fn Reader(comptime S: type) type {
         /// An E/F/G/H card in a behavioural form, `f` just past the name. Value,
         /// POLY, TABLE and PWL(1) forms, and HSPICE's VCR and VCCAP, become a
         /// B card over one expression (`i=`, `v=`, or `q=` for the charge of
-        /// VCCAP); LAPLACE and DELAY keep their letter and carry the form in
-        /// `laplace=<numerator count>` or `td=`. Anything else is refused.
+        /// VCCAP); LAPLACE, POLE and DELAY keep their letter and carry the
+        /// form in `laplace=` or `pole=<numerator count>`, or `td=`. A POLE
+        /// side is a constant and (re, im) root pairs, so both counts are
+        /// odd. Anything else is refused.
         fn behaviouralCard(r: *R, line: []const u8, head: []const u8, letter: u8, f_in: F, frame: *const Frame, form: Form) Error!void {
             const arena = r.arena;
             var f = f_in;
@@ -2379,21 +2381,23 @@ fn Reader(comptime S: type) type {
             var w: std.ArrayList(u8) = .empty;
             switch (form) {
                 .refused, .kind => return r.unsupported(line, "unsupported controlled-source form"),
-                .laplace, .delay => {
+                .laplace, .pole, .delay => {
                     if (by_current) return r.unsupported(line, "unsupported controlled-source form");
                     for (0..2) |_| try r.nodes.append(arena, try r.word(&f));
                     var n_num: usize = 0;
                     while (f.next()) |t| {
                         if (t[0] == ',' or t[0] == '(' or t[0] == ')') continue;
-                        if (form == .laplace and std.mem.eql(u8, t, "/")) {
+                        if (form != .delay and std.mem.eql(u8, t, "/")) {
                             n_num = r.positional.items.len;
                         } else if (F.isWord(t) and f.takeEq()) {
                             try r.card_kv.append(arena, .{ .key = t, .value = try r.kvValue(&f, frame, false) });
                         } else try r.positional.append(arena, .{ .num = try r.numberAt(t, &f, frame) });
                     }
-                    if (form == .laplace) {
-                        if (n_num == 0 or n_num == r.positional.items.len) return error.ParseError;
-                        try r.card_kv.append(arena, .{ .key = "laplace", .value = .{ .num = @floatFromInt(n_num) } });
+                    if (form != .delay) {
+                        const n_den = r.positional.items.len - n_num;
+                        if (n_num == 0 or n_den == 0) return error.ParseError;
+                        if (form == .pole and (n_num % 2 == 0 or n_den % 2 == 0)) return error.ParseError;
+                        try r.card_kv.append(arena, .{ .key = @tagName(form), .value = .{ .num = @floatFromInt(n_num) } });
                     } else if (r.positional.items.len != 0 or kvIndex(r.card_kv.items, "td") == null) return error.ParseError;
                     return r.commit(head, letter, frame);
                 },

@@ -530,8 +530,9 @@ G₀ + jkω₀C₀ are `LaneLu` frequency lanes, and complex phasor output.
   - `VOL=` and `CUR=` compile to the B-source tape (`bsource.zig`).
   - `VCR` and `VCCAP` are controlled R and C, S each.
   - `DELAY` reuses the ideal line.
-  - `LAPLACE` and `POLE` are exact in AC; transient needs a
-    controllable-canonical state-space realization on internal nodes (M).
+  - `LAPLACE` and `POLE` run on VerA's `laplace_nd` and `laplace_zp`
+    (state-space sections in transient); POLE's limits are in
+    docs/frontend.md "Pole-zero sources".
   - `FREQ` tables need convolution in transient (L).
 - E2: the W-element's RLGC matrices map onto the native coupled line
   (CPL), which already takes per-length R, L, G and C matrices. Skin

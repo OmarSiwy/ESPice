@@ -1,0 +1,4 @@
+// vcvs_pole: the E-card POLE source, V(p,n) = gain * H(s) V(cp,cn) with
+// H(s) from laplace_zp. Same body as vcvs_laplace.va.
+`define LAPLACE_ZP
+`include "vcvs_laplace.va"

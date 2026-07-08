@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "E POLE step responses, real and complex poles (HSPICE)",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "v(b) = 1 - exp(-1e3 t); v(c) = K (1 - exp(-500 t)(cos(wd t) + 500/wd sin(wd t))), K = 1.25e6/(500^2 + wd^2), wd = 2 pi 159.154943091895."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "axis": {
+          "name": "time",
+          "values": [
+            0.0005,
+            0.001,
+            0.002,
+            0.003,
+            0.005,
+            0.008,
+            0.01
+          ],
+          "atol": 1e-15,
+          "rtol": 1e-08
+        },
+        "columns": {
+          "v(b)": {
+            "values": [
+              0.3934693402873666,
+              0.6321205588285577,
+              0.8646647167633873,
+              0.950212931632136,
+              0.9932620530009145,
+              0.9996645373720975,
+              0.9999546000702375
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 1e-05
+          },
+          "v(c)": {
+            "values": [
+              0.12984952114527648,
+              0.4171011102052538,
+              0.9858359510545964,
+              1.2051531193129315,
+              1.0160722387796768,
+              0.9936045618891676,
+              1.00748641219714
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 1e-05
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "18d37d132e7d5df2dc0f2221816b51f067f4d8674345db15ef325739243d47d8"
+}

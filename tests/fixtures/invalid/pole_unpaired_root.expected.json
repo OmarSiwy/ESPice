@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "A POLE complex root without its conjugate is refused at build, not run as NaN.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "A POLE complex root without its conjugate is refused at build, not run as NaN."
+  },
+  "expect": {
+    "status": "error",
+    "category": "unsupported_input",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "3c8d9ef264e7a4fad75e083dfe225aec35c1cea09aea4545efbd40e7d957efff"
+}
