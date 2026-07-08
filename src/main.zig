@@ -10,6 +10,10 @@ const problem = @import("espice");
 /// where the trace is worth it.
 pub const std_options: std.Options = .{ .signal_stack_size = if (@import("builtin").mode == .Debug) 1 << 18 else null };
 
+/// VerA's device/host contract checks (`contract.validating`), on in Debug
+/// only: off, a device build spends 0.4-1.8% fewer instructions.
+pub const vera_validate_contract = @import("builtin").mode == .Debug;
+
 /// glibc's `mallopt` (malloc.h); M_MMAP_THRESHOLD is -3.
 extern "c" fn mallopt(param: c_int, value: c_int) c_int;
 

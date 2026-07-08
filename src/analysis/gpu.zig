@@ -305,6 +305,9 @@ const BatchGpu = struct {
     /// device only without `limit`, so skipping the fused launch skips no
     /// clamp.
     held: bool,
+    /// The host batch has `Hooks.status`: eval latches `vera_status__` in
+    /// the resident Instance, which `syncStatus` brings home.
+    has_status: bool,
     /// The device lim plane holds live clamp state (after a seed upload or a
     /// limit launch). Mirrors the host batch's `lim_active`.
     lim_active: bool = false,
@@ -752,6 +755,7 @@ pub const GpuContext = struct {
             .block = block,
             .has_lim = p.lim_x.len > 0,
             .held = lim_kernel != null and b.hooks.apply_limits == null,
+            .has_status = b.hooks.status != null,
         };
         return true;
     }
@@ -1606,6 +1610,20 @@ pub const GpuContext = struct {
             "warning: GPU limit/state pass failed; falling back to the CPU walk\n",
             .{},
         );
+    }
+
+    /// Downloads the resident instances when a batch can latch a VerA
+    /// `$fatal`/`$error` (`Hooks.status`), so the host reads and formats it
+    /// as it would for a host batch. The device stores the latch with the
+    /// same arithmetic as the host. Nothing to do after a fallback: the host
+    /// walk then evaluated, and latched, on its own instances.
+    pub fn syncStatus(self: *Self) void {
+        if (comptime backend == null) return;
+        if (self.poisoned or self.warned_eval) return;
+        for (self.batches) |bg| if (bg.has_status) {
+            self.pullInstances() catch {};
+            return;
+        };
     }
 
     /// Downloads the resident instance, state and lim data into the host

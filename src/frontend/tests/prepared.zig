@@ -105,7 +105,7 @@ test "analysis directives dispatch every implemented capability and reject malfo
 
 test "deck temperature and tolerances reach statistical and noise jobs" {
     // `.temp` reaches noise through the devices (Circuit.setCircuitTemp ->
-    // Instance.temperature -> the model's own `noisePsd`), not through an
+    // Model.temperature__ -> the model's own `noisePsd`), not through an
     // analysis-card copy: ngspice's NevalSrc multiplies by `ckt->CKTtemp`
     // (nevalsrc.c:111) because its devices hand over a bare conductance,
     // and ours hand over a finished density.
@@ -434,7 +434,7 @@ test "prepared bindings retain model fields and exclude runtime state from param
         }
         if (ref.type != device.Library.builtin("resistor")) continue;
         if (ref.is_instance) {
-            try std.testing.expect(std.mem.eql(u8, ref.param_name, "temperature") or std.mem.eql(u8, ref.param_name, "mfactor"));
+            try std.testing.expectEqualStrings("mfactor", ref.param_name);
             try std.testing.expect(!ref.primary);
         }
         if (std.mem.eql(u8, ref.param_name, "r")) {

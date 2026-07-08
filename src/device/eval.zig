@@ -11,6 +11,10 @@ const builtin = @import("builtin");
 /// (1.5 MB per thread across the device objects before this). Kept in Debug,
 /// where the trace is worth it.
 pub const std_options: std.Options = .{ .signal_stack_size = if (@import("builtin").mode == .Debug) 1 << 18 else null };
+
+/// VerA's device/host contract checks (`contract.validating`), on in Debug
+/// only: off, a device build spends 0.4-1.8% fewer instructions.
+pub const vera_validate_contract = @import("builtin").mode == .Debug;
 const contract = @import("contract");
 const gompute = @import("gompute");
 const ir = @import("device_abi");
@@ -1062,10 +1066,8 @@ pub fn ProtoStore(comptime D: type) type {
             self.nodes = .empty;
 
             // `setup` before `initState`: both read the card, and only the
-            // former fills `Instance.su`.
-            if (comptime @hasDecl(D, "setup")) {
-                for (0..count) |i| D.setup(Real, store.model(i), &store.instances[i]);
-            }
+            // former fills the row's `Model.su` (VerA device ABI 6).
+            store.setupRows();
             if (comptime @hasDecl(D, "State")) {
                 store.states = try gpa.alloc(D.State, count);
                 for (0..count) |i| store.states[i] = D.initState(store.model(i), &store.instances[i]);
@@ -1477,6 +1479,10 @@ pub fn DeviceBatch(comptime D: type) type {
         /// The analysis state every device call receives; `eval` takes `t`
         /// from its own argument.
         sim: SimState = .{},
+        /// `updateState` has latched the §5.2.1 `analog initial` results
+        /// (held, §5.10), so later calls run with `analog_initial` false and
+        /// skip the block. `reprep` (new parameters or temperature) clears it.
+        held_initial: bool = false,
         instances: []D.Instance,
         states: if (has_state) []D.State else void,
         gath: []u32,
@@ -1522,10 +1528,11 @@ pub fn DeviceBatch(comptime D: type) type {
             .state_ctl = if (@hasDecl(D, "stateCtl") and !skipsTimerState(D)) stateCtl else null,
             // Only `updateState` writes `bound_step`.
             .bound_step = if (@hasDecl(D, "updateState") and @hasField(D.Instance, "bound_step") and !skipsTimerState(D)) boundStep else null,
-            .set_temp = if (@hasField(D.Instance, "temperature")) setTemp else null,
+            .set_temp = if (@hasField(D.Model, "temperature__")) setTemp else null,
             .set_sim_state = setSimState,
             .min_delay = if (@hasDecl(D, "delays")) minDelay else null,
             .next_breakpoint = if (@hasDecl(D, "nextBreakpoint") or walksPending(D)) nextBreakpointFn else null,
+            .status = if (@hasDecl(D, "status_sites")) statusFn else null,
             .collect_params = collectParams,
             // A generator is only priced by the device's own `noisePsd`.
             .collect_noise = if (@hasDecl(D, "noise_gens")) blk: {
@@ -1746,7 +1753,22 @@ pub fn DeviceBatch(comptime D: type) type {
                     },
                 }
             }
+            self.held_initial = true;
+            self.sim.analog_initial = false;
             return min_reject;
+        }
+
+        /// `Hooks.status`. Reads the host Instance copy; for a resident batch
+        /// the GPU launcher downloads it first (`GpuContext.syncStatus`).
+        fn statusFn(ctx: *anyopaque, msg: []u8) ?ir.StatusHit {
+            const self: *Self = @ptrCast(@alignCast(ctx));
+            for (self.instances[0..self.count], 0..) |*inst, i| {
+                if (inst.vera_status__ == 0) continue;
+                var w: std.Io.Writer = .fixed(msg);
+                contract.formatStatus(D, inst, &w) catch {}; // a full buffer truncates
+                return .{ .index = @intCast(i), .len = @intCast(w.end) };
+            }
+            return null;
         }
 
         /// Tightest `$bound_step` across this batch's instances. Read after an
@@ -1773,17 +1795,19 @@ pub fn DeviceBatch(comptime D: type) type {
             return dirty;
         }
 
-        /// Sets every instance's temperature from Celsius (`.temp`) to the
-        /// Kelvin `$temperature` reads (LRM §9.10), then reruns `setup` and `precompute`.
+        /// Sets every Model row's temperature from Celsius (`.temp`) to the
+        /// Kelvin `$temperature` reads (LRM §9.10), then reruns `setup` and
+        /// `precompute`. Rows stay rows: every one gets the same value.
         fn setTemp(ctx: *anyopaque, temp_c: f32) void {
             const self: *Self = @ptrCast(@alignCast(ctx));
-            for (self.instances) |*inst| inst.temperature = @as(f64, temp_c) + 273.15;
+            for (self.models) |*m| m.temperature__ = @as(f64, temp_c) + 273.15;
             self.reprep();
         }
 
         fn setSimState(ctx: *anyopaque, st: SimState) void {
             const self: *Self = @ptrCast(@alignCast(ctx));
             self.sim = st;
+            if (self.held_initial) self.sim.analog_initial = false;
         }
 
         fn applyAttempt(ctx: *anyopaque, lambda: f64) void {
@@ -1850,14 +1874,22 @@ pub fn DeviceBatch(comptime D: type) type {
         }
 
         fn reprep(self: *Self) void {
+            self.held_initial = false;
+            self.sim.analog_initial = true;
             if (comptime has_bp) self.bp.lo = std.math.inf(f64);
             if (comptime has_src_brk) @memset(self.src_brk, .{});
-            if (comptime @hasDecl(D, "setup")) {
-                for (self.instances, 0..) |*inst, id| D.setup(Real, self.model(id), inst);
-            }
+            self.setupRows();
             if (comptime @hasDecl(D, "precompute")) {
                 for (self.instances, 0..) |*inst, id| D.precompute(inst, self.model(id));
             }
+        }
+
+        /// VerA's `setup` once per Model row (the solve-invariant cache and
+        /// the temperature live on the row, device ABI 6), then
+        /// `setupInstance` for every instance that caches from its row.
+        fn setupRows(self: *Self) void {
+            if (comptime @hasDecl(D, "setup")) for (self.models) |*m| D.setup(Real, m);
+            if (comptime @hasDecl(D, "setupInstance")) for (self.instances, 0..) |*inst, id| D.setupInstance(self.model(id), inst);
         }
 
         fn minDelay(ctx: *anyopaque) f64 {
@@ -1955,12 +1987,10 @@ pub fn DeviceBatch(comptime D: type) type {
             if (comptime std.mem.endsWith(u8, field.name, "__") or
                 std.mem.endsWith(u8, field.name, "__retained")) return false;
             if (isVera(D) and T == D.Instance) {
-                // A VerA Instance holds runtime state; only these two are
-                // parameters.
-                const knobs = std.StaticStringMap(void).initComptime(.{
-                    .{ "temperature", {} }, .{ "mfactor", {} },
-                });
-                if (!knobs.has(field.name)) return false;
+                // A VerA Instance holds runtime state; only `mfactor` is a
+                // parameter (the temperature is the Model row's
+                // `temperature__`, device ABI 6).
+                if (!std.mem.eql(u8, field.name, "mfactor")) return false;
             }
             const dflt = @field(T{}, field.name);
             return dflt > -1e30 and dflt < 1e30;
@@ -2176,7 +2206,8 @@ fn isVera(comptime D: type) bool {
 
 /// Whether D gets GPU kernels. Excluded, and kept on the host:
 /// - `mutable_eval` devices, whose first-call snapshots need exclusive
-///   evaluation;
+///   evaluation, unless the status latch is their only eval write
+///   (`statusOnlyMutable`);
 /// - Newton-history devices (`advanceIteration`/`checkConvergence`), whose
 ///   `limiter_previous` the host advances on its own Instance copy;
 /// - held variables (`holdsOnlyHeld`) together with `limit`: the launcher
@@ -2196,13 +2227,22 @@ fn isVera(comptime D: type) bool {
 // `StateKernel` flags any non-`.ok` `updateState` so a device that breaks it
 // falls back to the CPU instead of running wrong.
 fn gpuEligible(comptime D: type) bool {
-    if (@hasDecl(D, "mutable_eval") and D.mutable_eval) return false;
+    if (@hasDecl(D, "mutable_eval") and D.mutable_eval and !statusOnlyMutable(D)) return false;
     if (@hasDecl(D, "advanceIteration") or @hasDecl(D, "checkConvergence")) return false;
     // ponytail: vbic13_4t holds variables and limits, so it stays on the
     // host; split `StateKernel` into its two halves to bring it over.
     if (holdsOnlyHeld(D)) return !@hasDecl(D, "limit");
     return @hasDecl(D, "limit") or !@hasDecl(D, "State") or
         (@hasDecl(D, "state_class") and D.state_class == .path_latch);
+}
+
+/// Whether D is `mutable_eval` only for VerA's §9.7.3 status latch: eval
+/// writes `vera_status__` of its own instance and nothing else, which a
+/// device thread does on its resident Instance as the host does. A
+/// `vera_timepoint` cache (`tp0_t`) or §9.21.1 table state (`table_ready`)
+/// keeps the device on the host.
+fn statusOnlyMutable(comptime D: type) bool {
+    return @hasDecl(D, "status_sites") and !@hasField(D.Instance, "tp0_t") and !@hasField(D.Instance, "table_ready");
 }
 
 /// Whether D's GPU eval kernel is paired with a `StateKernel`.

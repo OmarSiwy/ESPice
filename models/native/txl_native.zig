@@ -27,8 +27,8 @@ const inf = std.math.inf(f64);
 
 pub const U = enum(u8) { p1, p2, br1, br2 };
 pub const num_ports: usize = 2;
-/// Hand-written against VerA's device ABI 5 (`contract.abi_version`); review on a bump.
-pub const contract_abi: u32 = 5;
+/// Hand-written against VerA's device ABI 6 (`contract.abi_version`); review on a bump.
+pub const contract_abi: u32 = 6;
 const n_u = contract.nU(Self);
 
 pub const u_kinds = [n_u]contract.UnknownKind{ .voltage, .voltage, .current, .current };

@@ -19,8 +19,10 @@ A batch is resident when it has a GPU payload (`eval.gpuEligible`) and its
 model has a kernel image in this build. Everything else stamps on the host,
 on top of the downloaded planes.
 
-- `gpuEligible` refuses `mutable_eval`, Newton-history hooks and `State`
-  without `limit`, unless VerA declares that state `.path_latch` (the
+- `gpuEligible` refuses `mutable_eval` (except a device whose only eval
+  write is VerA's `vera_status__` latch, which `GpuContext.syncStatus`
+  downloads for `Hooks.status` at the end of the query), Newton-history
+  hooks and `State` without `limit`, unless VerA declares that state `.path_latch` (the
   §5.6.1.2 latches alone: b3soidd, b3soifd, hicumL2, hisim2, kinduc, mes),
   which is what the state and control kernels carry. It admits
   held-variable devices without `limit` (bsim4va, psp103; vbic13_4t

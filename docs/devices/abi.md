@@ -11,7 +11,7 @@ sides compile the same ABI source.
 
 `layoutHash()` hashes the size, alignment and field offsets of every
 boundary type, the Zig version, backend and optimize mode, whether error
-return tracing is on, and `abi_version` (21). Each device object exports it
+return tracing is on, and `abi_version` (22). Each device object exports it
 as `arp_layout_hash`. The runtime loader (`src/device/loader.zig`) refuses a
 shared library whose hash differs (`error.LayoutMismatch`), and the hash keys
 the runtime build cache, so a bump rebuilds every cached device once.
@@ -144,4 +144,35 @@ trash row by a compare and select per stamped row) instead of storing
 `rhs_idx`. It saved 4 bytes per unknown per instance (ladder 264.8 -> 263.4
 MB, opamp 115.6 -> 115.2 MB, medians of 7) but cost 4.695G -> 4.845G Ir
 (+3.2%) on the inverter chain to 2 ns, so `rhs_idx` stays.
+
+## Status channel (22)
+
+VerA latches the first `$fatal`/`$error` an instance's evaluation reaches
+in `Instance.vera_status__` (with up to four arguments) and stamps zero
+rows from then on. `Hooks.status` finds a batch's first latched instance
+and writes `contract.formatStatus` into a host buffer (`StatusHit` is in
+the layout hash). `Executor.execute` checks every batch after a query,
+failed or not, logs `<card>: <file>:<line>: fatal|error: <message>` as a
+warning and returns `error.DeviceRefused`. A device whose only eval write
+is that latch (hisim2_va, hisimhv_va and lossy_tline today) stays
+GPU-eligible (`statusOnlyMutable`): the device stores the latch exactly as
+the host does, and `GpuContext.syncStatus` downloads the resident instances before
+the context goes away.
+
+## VerA device ABI 6 (host side)
+
+VerA's ABI 6 moves the solve-invariant cache `su` and the temperature
+(`Model.temperature__`, kelvin, host-written) from `Instance` to `Model`.
+The host runs `setup(V, *Model)` once per Model row and `setupInstance`
+for every instance after it (`DeviceBatch.setupRows`); `set_temp` writes
+every row's `temperature__`. A row is still a bit-identical Model
+(`model_of`), so instances at different temperatures, on different cards
+or with a different `$port_connected` mask get different rows, and
+instances on one card share the cache: Instance bytes mos1 744 -> 368,
+bsim4va 3,520 -> 200, psp103 3,872 -> 104. The builder clears
+`Model.port_connected__` bit p for each port the card omits, before
+`derive` (a 4-terminal card on HiSIM_HV's 6-port module).
+The per-instance `temperature` parameter is gone, so `.sens` and
+`.dcmatch` lose their `<device>.temperature` columns; a DC temperature
+sweep restores `Circuit.temp_c` instead of each instance's value.
 
