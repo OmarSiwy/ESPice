@@ -102,11 +102,11 @@ fn integrands(m: core.Mosra, v: []const f64, out: []f64) void {
             vgs = pol * (g - d);
         }
         out[i] = if (m.hci and vgs > m.hci_threshold and vds > 0)
-            std.math.pow(f64, md.hci0 * @exp(md.hcifd * vds - md.hcitd / m.temp_k), 1 / md.hcin)
+            std.math.pow(f64, md.hci0 * @exp(md.hcifd * vds - md.hcitd / m.temp_k[i]), 1 / md.hcin)
         else
             0;
         out[n + i] = if (m.bti and vgs > m.bti_threshold)
-            std.math.pow(f64, md.tit0 * @exp(md.titfd * vgs - md.tittd / m.temp_k), 1 / md.tn)
+            std.math.pow(f64, md.tit0 * @exp(md.titfd * vgs - md.tittd / m.temp_k[i]), 1 / md.tn)
         else
             0;
     }
@@ -140,11 +140,11 @@ test "age: constant stress is A t^n, and DegF inverts it" {
         .rel_times = &.{ 1e6, 1e8 },
         .aged_runs = true,
         .deg_f = 0.05,
-        .temp_k = 300,
         .models = &.{md},
         .names = &.{"m1"},
         .terminals = &.{.{ 1, 2, 0 }},
         .pmos = &.{false},
+        .temp_k = &.{300},
         .model = &.{0},
         .delvto = &.{7},
         .mulu0 = &.{8},

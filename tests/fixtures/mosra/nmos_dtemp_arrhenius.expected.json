@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "MOSRA BTI Arrhenius factor at each device's own temperature (circuit + dtemp, or an explicit temp).",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "dVth = 1e-2*exp(-3000/T)*(1e8)^0.25 with T = 298.15, 348.15 and 373.15 K (HSPICE's 25 C; 25 + dtemp 50; temp=100 overriding dtemp). The m2/m1 ratio is exp(3000*(1/298.15 - 1/348.15)) = 4.24216546786."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "MOSRA Degradation",
+        "match": "exact",
+        "row_count": 1,
+        "columns": {
+          "reltime": {
+            "values": [
+              100000000.0
+            ],
+            "rtol": 1e-12,
+            "atol": 0
+          },
+          "delvto(m1)": {
+            "values": [
+              4.266851326326236e-05
+            ],
+            "rtol": 1e-10,
+            "atol": 0
+          },
+          "mulu0(m1)": {
+            "values": [
+              1.0
+            ],
+            "rtol": 0,
+            "atol": 1e-15
+          },
+          "delvto(m2)": {
+            "values": [
+              0.00018100689353047007
+            ],
+            "rtol": 1e-10,
+            "atol": 0
+          },
+          "mulu0(m2)": {
+            "values": [
+              1.0
+            ],
+            "rtol": 0,
+            "atol": 1e-15
+          },
+          "delvto(m3)": {
+            "values": [
+              0.00032241780121093286
+            ],
+            "rtol": 1e-10,
+            "atol": 0
+          },
+          "mulu0(m3)": {
+            "values": [
+              1.0
+            ],
+            "rtol": 0,
+            "atol": 1e-15
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "a3225d37830624579c6c0c81fc4e3c859ec269c3413654c8241cf4a5f03da7cd"
+}

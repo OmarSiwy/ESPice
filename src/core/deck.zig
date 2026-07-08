@@ -89,8 +89,6 @@ pub const Mosra = struct {
     bti_threshold: f64 = 0,
     /// DegF: the |ΔVth| that ends a device's life; adds `life(m)` columns.
     deg_f: ?f64 = null,
-    /// Circuit temperature of the stress run, kelvin.
-    temp_k: f64,
     /// The `.model ... MOSRA` cards `model` indexes.
     models: []const MosraModel,
     /// Card name of each stressed instance, for the table's columns.
@@ -98,6 +96,9 @@ pub const Mosra = struct {
     /// Circuit rows of drain, gate and source.
     terminals: []const [3]u32,
     pmos: []const bool,
+    /// Device temperature during the stress run, kelvin: the instance's
+    /// `temp` where the card gives one, else the circuit's plus its `dtemp`.
+    temp_k: []const f64,
     /// Row of `models` aging the instance.
     model: []const u16,
     /// Indices into the circuit's `collectParams` list; `mulu0` is

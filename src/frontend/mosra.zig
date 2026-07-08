@@ -44,20 +44,33 @@ pub fn plan(sim: std.mem.Allocator, scratch: std.mem.Allocator, nl: *const Netli
 
     var by_name: std.StringHashMapUnmanaged(core.query.CardRef) = .empty;
     for (cards) |c| try by_name.put(scratch, c.name, c);
-    // `delvto` and `mulu0` of each device, by (type, instance). A VerA
-    // device keeps every parameter in its Model, one copy per instance.
+    // `delvto`, `mulu0`, `dtemp` and `temp` of each device, by (type,
+    // instance). A VerA device keeps every parameter in its Model, one copy
+    // per instance.
     var delvto: std.AutoHashMapUnmanaged(u64, u32) = .empty;
     var mulu0: std.AutoHashMapUnmanaged(u64, u32) = .empty;
+    var dtemp: std.AutoHashMapUnmanaged(u64, u32) = .empty;
+    var temp_param: std.AutoHashMapUnmanaged(u64, u32) = .empty;
     const params = try variants.collect(scratch, circuit);
     for (params, 0..) |ref, k| {
         const key = refKey(ref.type, ref.index);
-        if (std.mem.eql(u8, ref.param_name, "delvto")) try delvto.put(scratch, key, @intCast(k));
-        if (std.mem.eql(u8, ref.param_name, "mulu0")) try mulu0.put(scratch, key, @intCast(k));
+        const map = if (std.mem.eql(u8, ref.param_name, "delvto"))
+            &delvto
+        else if (std.mem.eql(u8, ref.param_name, "mulu0"))
+            &mulu0
+        else if (std.mem.eql(u8, ref.param_name, "dtemp"))
+            &dtemp
+        else if (std.mem.eql(u8, ref.param_name, "temp"))
+            &temp_param
+        else
+            continue;
+        try map.put(scratch, key, @intCast(k));
     }
 
     var names: std.ArrayList([]const u8) = .empty;
     var terminals: std.ArrayList([3]u32) = .empty;
     var pmos: std.ArrayList(bool) = .empty;
+    var temp_k: std.ArrayList(f64) = .empty;
     var model: std.ArrayList(u16) = .empty;
     var delvto_refs: std.ArrayList(u32) = .empty;
     var mulu0_refs: std.ArrayList(u32) = .empty;
@@ -74,7 +87,8 @@ pub fn plan(sim: std.mem.Allocator, scratch: std.mem.Allocator, nl: *const Netli
         const dv = delvto.get(key) orelse return refuse(line, "a bound MOSFET whose model has no delvto parameter (bsim3, bsim4, BSIM-SOI, mos3 and mos9 have one)");
         const mu = mulu0.get(key) orelse core.Mosra.no_param;
         const md = models.items[src[k]];
-        if (mu == core.Mosra.no_param and (md.titmu != 0 or md.hcimu != 0)) return refuse(line, "mobility aging (titmu, hcimu) on a model without mulu0 (only bsim3 has one)");
+        if (mu == core.Mosra.no_param and (md.titmu != 0 or md.hcimu != 0))
+            return refuse(line, try std.fmt.allocPrint(scratch, "mobility aging (titmu, hcimu) on {s}, whose model {s} has no mulu0 (only bsim3 has one)", .{ d.name, mm.name }));
         if (d.pins.len < 3) return refuse(line, "a bound MOSFET with fewer than three terminals");
         var t: [3]u32 = undefined;
         for (&t, d.pins[0..3]) |*row, pin| {
@@ -84,6 +98,12 @@ pub fn plan(sim: std.mem.Allocator, scratch: std.mem.Allocator, nl: *const Netli
         try names.append(sim, try sim.dupe(u8, d.name));
         try terminals.append(sim, t);
         try pmos.append(sim, std.ascii.eqlIgnoreCase(mm.kind, "pmos"));
+        // The device's own rule (mos3.va, ngspice): an explicit `temp`
+        // wins, else the circuit temperature plus `dtemp`.
+        const own = for (d.kv) |kv| {
+            if (std.mem.eql(u8, kv.key, "temp")) break temp_param.get(key);
+        } else null;
+        try temp_k.append(sim, 273.15 + if (own) |r| params[r].get() else temp_c + if (dtemp.get(key)) |r| params[r].get() else 0);
         try model.append(sim, src[k]);
         try delvto_refs.append(sim, dv);
         try mulu0_refs.append(sim, mu);
@@ -115,11 +135,11 @@ pub fn plan(sim: std.mem.Allocator, scratch: std.mem.Allocator, nl: *const Netli
         .hci_threshold = card.hci_threshold,
         .bti_threshold = card.nbti_threshold,
         .deg_f = card.deg_f,
-        .temp_k = temp_c + 273.15,
         .models = models.items,
         .names = names.items,
         .terminals = terminals.items,
         .pmos = pmos.items,
+        .temp_k = temp_k.items,
         .model = model.items,
         .delvto = delvto_refs.items,
         .mulu0 = mulu0_refs.items,
