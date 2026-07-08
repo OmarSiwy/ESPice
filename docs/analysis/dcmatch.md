@@ -93,6 +93,12 @@ variance $\sum_g (dy/d\sigma_g)^2$. Without a variation block every
 collected parameter is its own group and its column stays $dy/dp$, as
 before, so existing decks are unchanged.
 
+Since VerA device ABI 6 (2026-10-02) the temperature is the Model row's
+`temperature__`, not an instance parameter, so the `<device>#k.temperature`
+groups are gone from `.dcmatch`/`.dcsens` output; every other group keeps
+its value. ponytail: a temperature group, if wanted, belongs at Model-row
+level; not built.
+
 HSPICE splits `.dcmatch` into global, local and spatial tables, with a
 matched-pair guess; ESPice publishes one list over every group, local and
 global together, 3-sigma total first. `.dcsens` publishes each group's

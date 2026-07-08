@@ -7,7 +7,7 @@ the O, Y and P cards still route to the native Zig devices. Each gap is
 labelled `VERA-GAP:` in the .va file, in the header and at the construct that
 needs it.
 
-`build.zig.zon` pins VerA at `0cf8f5a5` (device ABI 6), which carries the
+`build.zig.zon` pins VerA at `ae44118d` (device ABI 6), which carries the
 fixes marked below. Since `b56b06cb` it warns W0853 at every `$limit` it
 declines (none left in `models/`) and reads `absdelay` through a 3-point
 quadratic under `(* vera_interp = 2 *)`. The `VERA-GAP:` labels for the
