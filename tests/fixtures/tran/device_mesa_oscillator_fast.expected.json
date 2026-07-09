@@ -1,0 +1,34 @@
+{
+ "schema_version": 1,
+ "analysis": "tran",
+ "purpose": "MESA ring oscillator period and swing at default options (fast companion of device_mesa_oscillator)",
+ "oracle": {
+  "kind": "ngspice-44.2",
+  "derivation": "ngspice-44.2 batch run of this deck (wrdata v(8)): the rising 0.34 V crossings of v(8) in [1 ns, 6 ns], linearly interpolated, are 6 crossings with mean spacing 8.912230e-10 s; swing max-min 0.4463106 V. The converged period (device_mesa_oscillator's options, reltol=1e-7 tmax 20 ps) is 8.81537e-10 s: default options run 1.1% slow in both simulators. espice at the time of writing: 8.912195e-10 s, swing 0.4463610 V.",
+  "command": "ngspice -b (deck + .control run; wrdata v(8))"
+ },
+ "origin": "benchmark/fixtures/devices/mesa_oscillator/circuit.sp",
+ "expect": {
+  "status": "success",
+  "plots": [],
+  "checks": [
+   {
+    "kind": "oscillation",
+    "plot": "Transient Analysis",
+    "column": "v(8)",
+    "level": 0.34,
+    "time_window": [
+     1e-09,
+     6e-09
+    ],
+    "period": 8.91223e-10,
+    "period_rtol": 0.002,
+    "swing": 0.4463106,
+    "swing_rtol": 0.01
+   }
+  ],
+  "finite_values_required": true,
+  "all_requested_analyses_must_complete": true
+ },
+ "netlist_sha256": "3af3eec2087169a78683cd34b1593de4690d7a588da9994bba13843b7f40f1de"
+}

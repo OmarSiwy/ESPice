@@ -1,0 +1,60 @@
+{
+ "schema_version": 1,
+ "analysis": "dc",
+ "purpose": "DC sweep applies .nodeset at its first (cold) point",
+ "oracle": {
+  "kind": "analytic",
+  "derivation": "The latch's stable fixed point on the branch the nodeset picks: x = -tanh(3(y + vin)), y = -tanh(3x), iterated from x = 1 (a contraction there). rtol 1e-3 covers the warm points' Newton stopping at reltol; ngspice-44.2 (ngspice -n -b) gives the same branch to 3.4e-4, while the metastable x = y = 0 a nodeset-blind sweep reports fails outright."
+ },
+ "expect": {
+  "status": "success",
+  "plots": [
+   {
+    "name": "DC transfer characteristic",
+    "match": "exact",
+    "columns": {
+     "v(x)": {
+      "unit": "V",
+      "values": [
+       0.9949015284526289,
+       0.9931216707219275,
+       0.9907222563456065,
+       0.9874890321868619,
+       0.9831347282905646
+      ],
+      "rtol": 0.001,
+      "atol": 1e-09
+     },
+     "v(y)": {
+      "unit": "V",
+      "values": [
+       -0.9949015284526289,
+       -0.9948469304026613,
+       -0.9947724030356135,
+       -0.9946702739116252,
+       -0.9945295814383815
+      ],
+      "rtol": 0.001,
+      "atol": 1e-09
+     }
+    },
+    "axis": {
+     "name": "v(v-sweep)",
+     "values": [
+      0,
+      0.05,
+      0.1,
+      0.15,
+      0.2
+     ],
+     "rtol": 1e-09,
+     "atol": 1e-15
+    },
+    "row_count": 5
+   }
+  ],
+  "finite_values_required": true,
+  "all_requested_analyses_must_complete": true
+ },
+ "netlist_sha256": "2e9f5c819a029cb2560caa64dff89f455543cb6d828cd4d06783c78c796f519f"
+}

@@ -180,6 +180,13 @@ only.
 
 ### G3. `.nodeset` (S)
 
+Status: landed with ngspice's semantics rather than VACASK's row-norm
+scaling: the guess is seeded (`CKTic`), the rows are held by 1e10 S for one
+Newton, then released. It applies at the operating point and at every cold
+`.dc` point; see
+[operating-point-homotopy.md](../analysis/operating-point-homotopy.md). The
+original sketch follows.
+
 `.nodeset` is standard SPICE and ESPice drops it without a message, which
 can send a bistable circuit to the wrong operating point with no warning.
 VACASK forces nodesets through diagonal terms scaled by the row norm

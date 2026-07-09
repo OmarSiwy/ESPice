@@ -36,6 +36,9 @@ pub const RunCtx = struct {
     probe_labels: []const []const u8 = &.{},
     source_node: u32,
     source_branch: u32,
+    /// The deck's `.nodeset` rows; the DC sweep forces them at each cold
+    /// point as the operating point does.
+    nodeset: []const @import("core").Ic = &.{},
     /// Composite AC excitation `[re(0..n), im(0..n)]`, length `2 * circuit.n`,
     /// summed over every source card with an `AC mag [phase]`. An .ac sweep is
     /// one solve per frequency against this drive. Empty means no AC source,

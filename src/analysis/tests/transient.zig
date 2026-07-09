@@ -322,10 +322,17 @@ const TranTests = struct {
 
     test "coeffs: BE 1/dt, trap 2/dt, gear-2 variable-step BDF2" {
         const dt: f64 = 1e-9;
-        try testing.expectApproxEqRel(@as(f64, 1e9), integrator.coeffs(.backward_euler, dt, dt).ag0, 1e-12);
-        try testing.expectApproxEqRel(@as(f64, 2e9), integrator.coeffs(.trapezoidal, dt, dt).ag0, 1e-12);
+        try testing.expectApproxEqRel(@as(f64, 1e9), integrator.coeffs(.backward_euler, dt, dt, 0.5).ag0, 1e-12);
+        // xmu = 0.5 is the plain trapezoid bit for bit: 2/dt and a unit
+        // history weight. xmu = 0 is backward Euler.
+        for ([_]f64{ 1e-9, 3.7e-13, 0.1 }) |h| {
+            const t = integrator.coeffs(.trapezoidal, h, h, 0.5);
+            try testing.expectEqual(2.0 / h, t.ag0);
+            try testing.expectEqual(@as(f64, 1), t.ag1);
+        }
+        try testing.expectEqual(@as(f64, 0), integrator.coeffs(.trapezoidal, dt, dt, 0).ag1);
         // r == 1 must reproduce the uniform-step BDF2 triple.
-        const u = integrator.coeffs(.gear_2, dt, dt);
+        const u = integrator.coeffs(.gear_2, dt, dt, 0.5);
         try testing.expectApproxEqRel(@as(f64, 1.5e9), u.ag0, 1e-12);
         try testing.expectApproxEqRel(@as(f64, 0.5e9), u.ag2, 1e-12);
         // On a non-uniform grid the corrector must be exact on constants (sum of
@@ -333,7 +340,7 @@ const TranTests = struct {
         // the node spacing 0, dt1, dt1+dt.
         for ([_]f64{ 0.25, 0.5, 1.0, 2.0, 4.0 }) |r| {
             const dt1 = dt / r;
-            const c = integrator.coeffs(.gear_2, dt, dt1);
+            const c = integrator.coeffs(.gear_2, dt, dt1, 0.5);
             const ag1 = -(c.ag0 + c.ag2);
             // q0 = 0, q1 = -dt, q2 = -(dt+dt1) as offsets from t_n: dq/dt == 1.
             const dqdt = c.ag0 * 0.0 + ag1 * (-dt) + c.ag2 * (-(dt + dt1));

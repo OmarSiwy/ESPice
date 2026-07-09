@@ -176,7 +176,7 @@ the build-order id in the last column.
 | `.GLOBAL` [CR .GLOBAL] | global nets | ignored (S1) | global nodes | very high | A3, S |
 | `.CONNECT n1 n2` [CR .CONNECT] | merge two nets | ignored (S8) | no | medium | A8, S |
 | `.IC`, `.DCVOLT` [CR] | initial conditions | `.ic` yes; `.dcvolt` ignored | `ic=` | high | A8, S |
-| `.NODESET` [CR] | OP initial guess | ignored | yes | high | A8, S (vacask-comparison G3) |
+| `.NODESET` [CR] | OP initial guess | yes, ngspice semantics: seeds the guess and holds the nodes for one Newton, at the operating point and at every cold `.dc` point (`dc/nodeset_sweep_latch`) | yes | high | done |
 | `.SAVE [TYPE=NODESET\|IC] [LEVEL=] [TIME=]`, `.LOAD [FILE=]` [CR] | write and reuse an OP | `.save` is read as ngspice vector selection | `store=`/`nodeset=` | medium | C6, S |
 | `.STORE [time= repeat=]` [CR .STORE] | transient checkpoint and restart | no | no | medium for long runs | C6, M |
 | `.ALTER`, `.DEL LIB` [CR; SA Ch.4] | rerun with edits | S2 | `alter` | very high | C1, M |

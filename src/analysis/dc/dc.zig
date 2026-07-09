@@ -58,6 +58,9 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const hist = try scratch.alloc(f64, 2 * ckt.n);
     defer scratch.free(hist);
     @memset(hist, 0);
+    const force = try scratch.alloc(converger.Force, ctx.nodeset.len);
+    defer scratch.free(force);
+    for (force, ctx.nodeset) |*f, ns| f.* = .{ .slot = ckt.diag_slots[ns.node], .row = ns.node, .value = ns.value };
 
     // ngspice's second variable is the outer loop: the whole inner sweep
     // replays for each src2 value and the raw file concatenates the blocks.
@@ -82,10 +85,10 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
             if (opts.points2.len > 0) v2 = opts.points2[po];
             if (t2) |r| r.set(v2) else ckt.setCircuitTemp(@floatCast(v2));
             const block = data[po * n_inner * ncols ..][0 .. n_inner * ncols];
-            try runSerial(ctx, ckt, hist, t, opts, n_inner, ncols, block, po == 0);
+            try runSerial(ctx, ckt, hist, force, t, opts, n_inner, ncols, block, po == 0);
         }
     } else {
-        try runSerial(ctx, ckt, hist, t, opts, npoints, ncols, data, true);
+        try runSerial(ctx, ckt, hist, force, t, opts, npoints, ncols, data, true);
     }
 
     return .{
@@ -127,7 +130,8 @@ fn findTarget(refs: []const root.ParamRef, want: Options.SweepTarget.Param) ?roo
 /// Sweeps `t` over `npoints` values into `data` (row-major, `ncols` wide);
 /// a null `t` sweeps the circuit temperature.
 /// Each point warm-starts from the previous solution; the first point, and
-/// any point whose warm Newton fails, cold-starts through the full OP ladder.
+/// any point whose warm Newton fails, cold-starts through the `.nodeset`
+/// step (`nodeset`) and the full OP ladder, as dctrcurv.c's CKTop calls do.
 /// `hist` (2 * n) holds the last two points and is left holding this block's
 /// last two, for the next block's predictor. `first_block` marks the
 /// analysis' first block, whose first point also fills the older slot.
@@ -135,6 +139,7 @@ fn runSerial(
     ctx: *const root.RunCtx,
     ckt: *root.Circuit,
     hist: []f64,
+    nodeset: []const converger.Force,
     t: ?root.ParamRef,
     opts: Options,
     npoints: usize,
@@ -193,7 +198,7 @@ fn runSerial(
         }
         if (!converged) {
             op.coldStart(ckt, x);
-            const lr = try op.solveLadder(ckt, ws, x, .{ .tol = opts.tol }, &.{});
+            const lr = try op.nodesetLadder(ckt, ws, x, .{ .tol = opts.tol }, nodeset, 0);
             converged = lr.converged;
         }
 

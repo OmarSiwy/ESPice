@@ -12,30 +12,16 @@ says where to start.
   gap is a difference between model versions and should not be force-matched.
   The decks stay marked `KNOWN GAP`.
 - `tran/bench_ngspice_mosamp` and `tran/device_mesa_oscillator` now pass
-  against converged references. Follow-ups:
-  - At mosamp's original options (abstol=10n, vntol=10n), espice is less
-    accurate than ngspice: 4.9e3x off on v(66) against ngspice's 1.3e3x.
-    espice takes 169 steps where ngspice takes 2316, because ngspice cuts
-    dt/8 while the MOS2 slews. Compare our LTE estimate with ngspice's
-    `CKTterr` on the 5.0–5.7 µs settling tail (issues.md F1, group 14).
-  - Trapezoidal integration rings on currents through sources that see only
-    capacitance, in both simulators, and the ringing does not shrink with
-    reltol. A damping option (xmu-style, or a damped step after breakpoints)
-    would let espice beat ngspice at default settings.
-  - The MESA deck now runs at reltol=1e-7 and takes about 7 s instead of
-    0.1 s, and its i(vnoise) tolerance was widened to rtol 1e-2, atol 1e-9.
-    Wrong answers still fail it by 3.6x to 300x. Add a separate fast deck
-    that checks the period at default options.
+  against converged references. Follow-up: at mosamp's original options
+  (abstol=10n, vntol=10n) espice is less accurate than ngspice because
+  ngspice's Newton fails ITL4 in the MOS2 slew and its h/8 cuts take 2316
+  steps to our 169. The LTE agrees (docs/analysis/transient-integration.md);
+  matching it means matching the MOS2 Newton behaviour.
 
 ### Semantics that are still off
-- `.ic` holds are not scaled during source stepping.
 - hfet1 keeps ngspice's `cdhat` / `ggdpp` quirk only in part. See
   `docs/devices/models.md`.
 - The f32 GPU Jacobian is off by default because 4 decks fail with it on.
-- Errors from option cards do not name their line.
-- The DC sweep ignores `.nodeset`.
-- PWL current sources do not round their breakpoints like VSRCaccept does.
-- The autonomous Krylov path (50 or more unknowns) has no test deck.
 
 ## HSPICE and VACASK features
 

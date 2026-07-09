@@ -279,6 +279,7 @@ pub const Executor = struct {
             .probe_labels = self.deck.probe_labels,
             .source_node = self.deck.source_node,
             .source_branch = self.deck.source_branch,
+            .nodeset = self.deck.nodeset,
             .ac_drive = self.deck.ac_drive,
             .variants = self.deck.variants,
             .allocator = self.results.allocator(),
