@@ -323,6 +323,189 @@ fn words(arena: std.mem.Allocator, text: []const u8) ![]Word {
     return out.items;
 }
 
+/// Logic thresholds of `.check` cards: low at or below `lo`, high at or
+/// above `hi`.
+pub const Levels = struct { lo: f64, hi: f64 };
+
+/// Appends the measures an HSPICE `.check`, `.dout` or `.biaschk` card
+/// expands to, one per node, to `out` [CR .CHECK, .DOUT, .BIASCHK]. `card`
+/// is the card name without its dot and `text` the rest, lowercased.
+/// `.check global_level` only sets `global`, which later cards default to.
+/// `serial` numbers the card in its measures' names (`setup2_v1`).
+/// ParseError for a form ESPice does not read: a node wildcard, an element
+/// or region `.biaschk`, a `.biaschk` outside the transient.
+pub fn parseCheck(arena: std.mem.Allocator, card: []const u8, text: []const u8, ctx: anytype, global: *?Levels, serial: u32, out: *std.ArrayList(core.Measure)) !void {
+    const w = try words(arena, text);
+    if (w.len == 0) return error.ParseError;
+    var m: core.Measure = .{ .analysis = .tran, .name = "", .func = .check_slew, .first = .{}, .second = .{} };
+    var nodes = w;
+    if (std.mem.eql(u8, card, "biaschk")) {
+        // `'expr' [limit=] [max=] [min=] [simulation=tr] [tstart=] [tstop=] ...`
+        if (w[0].lhs[0] != '\'' and w[0].lhs[0] != '"') return error.ParseError;
+        m.func = .check_level;
+        m.first.ops = try ctx.measureExpr(w[0].lhs);
+        m.first.vec = w[0].lhs;
+        for (w[1..]) |x| {
+            const rhs = x.rhs orelse continue; // `autostop`
+            if (std.mem.eql(u8, x.lhs, "simulation")) {
+                if (!std.mem.eql(u8, rhs, "tr")) return error.ParseError;
+            } else if (std.mem.eql(u8, x.lhs, "limit") or std.mem.eql(u8, x.lhs, "max")) {
+                m.check.max = try ctx.measureValue(rhs);
+            } else if (std.mem.eql(u8, x.lhs, "min")) {
+                m.check.min = try ctx.measureValue(rhs);
+            } else if (std.mem.eql(u8, x.lhs, "tstart")) {
+                m.first.from = try ctx.measureValue(rhs);
+            } else if (std.mem.eql(u8, x.lhs, "tstop")) {
+                m.first.to = try ctx.measureValue(rhs);
+            } else if (!std.mem.eql(u8, x.lhs, "noise") and !std.mem.eql(u8, x.lhs, "interval")) return error.ParseError;
+        }
+        m.name = try std.fmt.allocPrint(arena, "biaschk{d}", .{serial});
+        return out.append(arena, m);
+    }
+    if (std.mem.eql(u8, card, "dout")) {
+        // `nd [nd ...] [VTH | VLO VHI] (time state [state ...] ...)`; the
+        // group may touch the last word (`vth(0n 1 ...)`).
+        var last = w[w.len - 1].lhs;
+        const open = std.mem.indexOfScalar(u8, last, '(') orelse return error.ParseError;
+        const head = last[0..open];
+        last = last[open..];
+        var names: std.ArrayList([]const u8) = .empty;
+        var levels: std.ArrayList(f64) = .empty;
+        for (w[0 .. w.len - 1]) |x| try names.append(arena, x.lhs);
+        if (head.len > 0) try names.append(arena, head);
+        // The first word is a node; values after it are thresholds.
+        while (names.items.len > 1) {
+            const v = ctx.measureValue(names.items[names.items.len - 1]) catch break;
+            try levels.insert(arena, 0, v);
+            _ = names.pop();
+        }
+        // ponytail: no threshold given reads the .vec VTH default, 1.65 V.
+        const lo, const hi = switch (levels.items.len) {
+            0 => .{ 1.65, 1.65 },
+            1 => .{ levels.items[0], levels.items[0] },
+            2 => .{ levels.items[0], levels.items[1] },
+            else => return error.ParseError,
+        };
+        const row = try words(arena, last[1 .. last.len - 1]);
+        const width = names.items.len + 1;
+        if (row.len == 0 or row.len % width != 0) return error.ParseError;
+        for (names.items, 0..) |node, k| {
+            var expect: std.ArrayList([2]f64) = .empty;
+            var r: usize = 0;
+            while (r < row.len) : (r += width) {
+                const state = row[r + 1 + k].lhs;
+                if (std.mem.eql(u8, state, "0") or std.mem.eql(u8, state, "1"))
+                    try expect.append(arena, .{ try ctx.measureValue(row[r].lhs), if (state[0] == '1') 1 else 0 });
+            }
+            var d = m;
+            d.func = .dout;
+            d.check = .{ .lo = lo, .hi = hi, .expect = expect.items };
+            try appendNode(arena, d, "dout", serial, node, out);
+        }
+        return;
+    }
+    if (!std.mem.eql(u8, card, "check") or w.len < 2) return error.ParseError;
+    const Kind_ = enum { global_level, rise, fall, slew, setup, hold, edge, irdrop };
+    const kind = std.meta.stringToEnum(Kind_, w[0].lhs) orelse return error.ParseError;
+    const spec = try groupWords(arena, w[1].lhs);
+    nodes = w[2..];
+    var levels = global.*;
+    if (nodes.len > 0 and nodes[nodes.len - 1].lhs[0] == '(') {
+        levels = try parseLevels(arena, nodes[nodes.len - 1].lhs, ctx);
+        nodes = nodes[0 .. nodes.len - 1];
+    }
+    if (kind == .global_level) {
+        global.* = try parseLevels(arena, w[1].lhs, ctx);
+        return;
+    }
+    if (nodes.len == 0) return error.ParseError;
+    switch (kind) {
+        .global_level => unreachable,
+        // `(min max)`
+        .rise, .fall, .slew => {
+            if (spec.len != 2) return error.ParseError;
+            m.check.min = try ctx.measureValue(spec[0].lhs);
+            m.check.max = try ctx.measureValue(spec[1].lhs);
+            m.check.edge = switch (kind) {
+                .rise => .rise,
+                .fall => .fall,
+                else => .both,
+            };
+        },
+        // `(ref RISE|FALL duration RISE|FALL)`, `(ref RISE|FALL min max RISE|FALL)`
+        .setup, .hold, .edge => {
+            if (spec.len != @as(usize, if (kind == .edge) 5 else 4)) return error.ParseError;
+            m.second.vec = try nodeVector(arena, spec[0].lhs);
+            m.check.ref_edge = try edgeOf(spec[1].lhs);
+            m.check.edge = try edgeOf(spec[spec.len - 1].lhs);
+            const a = try ctx.measureValue(spec[2].lhs);
+            m.func = if (kind == .edge) .check_require else .check_forbid;
+            m.check.min, m.check.max = switch (kind) {
+                .setup => .{ -a, 0 },
+                .hold => .{ 0, a },
+                else => .{ a, try ctx.measureValue(spec[3].lhs) },
+            };
+        },
+        // `(volt duration)`: below a negative level, above a positive one.
+        .irdrop => {
+            if (spec.len != 2) return error.ParseError;
+            const v = try ctx.measureValue(spec[0].lhs);
+            m.func = .check_level;
+            m.check.dur = try ctx.measureValue(spec[1].lhs);
+            if (v < 0) m.check.min = v else m.check.max = v;
+        },
+    }
+    if (m.func != .check_level) {
+        const l = levels orelse return error.ParseError;
+        m.check.lo = l.lo;
+        m.check.hi = l.hi;
+    }
+    for (nodes) |x| try appendNode(arena, m, @tagName(kind), serial, x.lhs, out);
+}
+
+/// `m` reading node `node`, named `<kind><serial>_<node>`.
+fn appendNode(arena: std.mem.Allocator, m: core.Measure, kind: []const u8, serial: u32, node: []const u8, out: *std.ArrayList(core.Measure)) !void {
+    var one = m;
+    one.first.vec = try nodeVector(arena, node);
+    one.name = try std.fmt.allocPrint(arena, "{s}{d}_{s}", .{ kind, serial, node });
+    try out.append(arena, one);
+}
+
+/// A bare node name as its result label, `v(node)`; a `v(..)` or `i(..)`
+/// stays as written.
+fn nodeVector(arena: std.mem.Allocator, node: []const u8) ![]const u8 {
+    if (std.mem.indexOfScalar(u8, node, '*') != null) return error.ParseError;
+    if (std.mem.indexOfScalar(u8, node, '(') != null) return node;
+    return std.fmt.allocPrint(arena, "v({s})", .{node});
+}
+
+fn edgeOf(word: []const u8) !core.Check.Edge {
+    if (std.mem.eql(u8, word, "rise")) return .rise;
+    if (std.mem.eql(u8, word, "fall")) return .fall;
+    return error.ParseError;
+}
+
+/// The words inside a `( ... )` group.
+fn groupWords(arena: std.mem.Allocator, group: []const u8) ![]Word {
+    if (group.len < 2 or group[0] != '(' or group[group.len - 1] != ')') return error.ParseError;
+    return words(arena, group[1 .. group.len - 1]);
+}
+
+/// `(hi lo hi_th lo_th)`; a threshold ending in `%` is that share of the
+/// swing above `lo`.
+fn parseLevels(arena: std.mem.Allocator, group: []const u8, ctx: anytype) !Levels {
+    const g = try groupWords(arena, group);
+    if (g.len != 4) return error.ParseError;
+    const hi = try ctx.measureValue(g[0].lhs);
+    const lo = try ctx.measureValue(g[1].lhs);
+    var th: [2]f64 = undefined;
+    for (g[2..], &th) |x, *t| {
+        const s = x.lhs;
+        t.* = if (s[s.len - 1] == '%') lo + (hi - lo) * try ctx.measureValue(s[0 .. s.len - 1]) / 100 else try ctx.measureValue(s);
+    }
+    return .{ .lo = th[1], .hi = th[0] };
+}
+
 test "meas cards parse like ngspice's word lists" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -406,4 +589,17 @@ test "meas cards parse like ngspice's word lists" {
     try std.testing.expectEqual(core.measure_no_at, dm.first.at);
     try std.testing.expectError(error.ParseError, parse(a, "ac s find v(out)", Ctx{}, null, true));
     try std.testing.expectEqual(.pnoise, (try parse(a, "ptdnoise n find ptdnoise_density at=1e3", Ctx{}, null, true)).analysis);
+    // HSPICE .check: GLOBAL_LEVEL thresholds, one measure per node.
+    var checks: std.ArrayList(core.Measure) = .empty;
+    var global: ?Levels = null;
+    try parseCheck(a, "check", "global_level (1 0 80% 20%)", Ctx{}, &global, 1, &checks);
+    try std.testing.expectEqual(0, checks.items.len);
+    try parseCheck(a, "check", "setup (clk rise 2 fall) a b", Ctx{}, &global, 1, &checks);
+    try std.testing.expectEqualStrings("setup1_b", checks.items[1].name);
+    try std.testing.expectEqualStrings("v(clk)", checks.items[0].second.vec);
+    try std.testing.expectEqual(core.Check{ .lo = 0.2, .hi = 0.8, .min = -2, .max = 0, .edge = .fall, .ref_edge = .rise }, checks.items[0].check);
+    try parseCheck(a, "dout", "b c 0.5 (1 1 x 2 0 1)", Ctx{}, &global, 2, &checks);
+    try std.testing.expectEqualSlices([2]f64, &.{ .{ 1, 1 }, .{ 2, 0 } }, checks.items[2].check.expect);
+    try std.testing.expectEqualSlices([2]f64, &.{.{ 2, 1 }}, checks.items[3].check.expect);
+    try std.testing.expectError(error.ParseError, parseCheck(a, "check", "rise (1 2) a*", Ctx{}, &global, 3, &checks));
 }

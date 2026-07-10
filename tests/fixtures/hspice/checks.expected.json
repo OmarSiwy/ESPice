@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": ".check RISE/FALL/SLEW/SETUP/HOLD/EDGE/IRDROP, .dout and expression .biaschk count violations.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "PWL corners: thresholds 0.2/0.8 V from GLOBAL_LEVEL (1 0 80% 20%). a rises in 0.6 ns and falls in 0.3 ns against a (0.5n 1n) window; d rises at 2.55 ns (1 ns before clk's 3.05 ns rise: setup) and falls at 3.55 ns (hold, and inside EDGE's 0.2n..1n window); n stays below -0.5 V for 2.1 ns, then 0.15 ns; d is low at 4 ns where .dout expects 1; v(a)-v(d) exceeds 0.9 V over 1.9..2.51 ns and 3.59..5.05 ns."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "checks": [
+      {
+        "kind": "measure",
+        "name": "rise1_a",
+        "value": 0,
+        "rtol": 0,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "fall2_a",
+        "value": 1,
+        "rtol": 0,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "slew3_a",
+        "value": 1,
+        "rtol": 0,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "setup4_d",
+        "value": 1,
+        "rtol": 0,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "hold5_d",
+        "value": 1,
+        "rtol": 0,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "edge6_d",
+        "value": 0,
+        "rtol": 0,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "irdrop7_n",
+        "value": 1,
+        "rtol": 0,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "dout8_d",
+        "value": 1,
+        "rtol": 0,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "biaschk9",
+        "value": 2,
+        "rtol": 0,
+        "atol": 0
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "b0de95154ddfeed823885e74a275ad923808e541b5ed72f9964c24ce1675b397"
+}

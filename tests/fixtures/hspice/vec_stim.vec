@@ -1,0 +1,15 @@
+; Digital vector file for vec_stim.sp: a and the 2-bit b[[1:0]] are
+; inputs, y is an output compared against the expected states.
+radix 1 2 1
+vname a b[[1:0]] y
+io i i o
+tunit ns
+slope 0.5
+vih 2.5 1 0 0   ; a swings to 2.5 V, b keeps the 3.3 V default
+tdelay 1 0 3 0  ; both b bits switch 1 ns after their rows
+odelay 2 0 0 1  ; y is compared 2 ns after its rows
+vth 1.25
+10 1 2 1
+20 0 1 0
+30 1 3 x
+35 1 3 0

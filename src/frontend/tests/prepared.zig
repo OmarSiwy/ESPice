@@ -141,6 +141,16 @@ test "deck options reject invalid numeric conversions before construction" {
     try std.testing.expectEqual(@as(u16, 2), r.tol.itl4);
     try std.testing.expectEqual(@as(u16, 99), r.tol.itl1);
     try std.testing.expectEqual(@as(u16, 3), r.tol.itl2);
+    // RUNLVL picks trtol whatever TRTOL says; ACCURATE lifts it to 5, FAST
+    // alone is 1, RUNLVL=0 turns both off.
+    for ([_]struct { []const u8, ?f64 }{
+        .{ "runlvl=6 trtol=7", 0.875 }, .{ "runlvl", 7 },         .{ "accurate runlvl=2", 1.75 },
+        .{ "accurate", 1.75 },          .{ "fast", 28 },          .{ "runlvl=0 accurate", null },
+        .{ "fast accurate=1", 1.75 },   .{ "accurate=0", null },
+    }) |case| {
+        const source = try std.fmt.allocPrint(arena.allocator(), "runlvl\n.options {s}\n.end\n", .{case[0]});
+        try std.testing.expectEqual(case[1], (try analyses.deckOptions((try parse(arena.allocator(), source)).deck.config, .hspice)).trtol);
+    }
 }
 
 test "nonfinite model parameter cannot become its default" {

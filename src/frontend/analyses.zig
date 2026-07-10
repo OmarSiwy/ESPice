@@ -307,9 +307,19 @@ pub const DeckOptions = struct {
     /// from cktntask.c:127). Unlike `temp`, where the circuit runs, it reaches
     /// the devices at build time, so no sweep can move it.
     tnom_c: f64 = 27.0,
+    /// HSPICE `.options runlvl`, `accurate` or `fast`: the transient's LTE
+    /// factor `trtol` (see `runlvl_trtol`); null when none is set or
+    /// `runlvl=0`.
+    trtol: ?f64 = null,
     /// The variation block as `.dcmatch`, `.acmatch` and `.dcsens` groups.
     variations: requests.Variations = .{},
 };
+
+/// `trtol` at HSPICE RUNLVL 1..6 [CR .OPTION RUNLVL]. HSPICE scales its
+/// tolerances by level without publishing the factors, so these are
+/// ESPice's: level 3 is the default 7 and each level halves or doubles the
+/// LTE bound (docs/analysis/tolerance-system.md has the measurements).
+const runlvl_trtol = [6]f64{ 28, 14, 7, 3.5, 1.75, 0.875 };
 
 /// Option names outside this list are not simulated; the HSPICE dialect
 /// warns about each. `gshunt` and `cshunt` are read by the netlist.
@@ -339,6 +349,9 @@ pub fn deckOptions(config: []const netlist.Config, dialect: netlist.Dialect) !De
     var line: []const u8 = "";
     // The test runner fails any test that logs an error.
     errdefer |err| if (!@import("builtin").is_test) std.log.err("options: {s}: {s}", .{ line, @errorName(err) });
+    var runlvl: ?f64 = null;
+    var accurate = false;
+    var fast = false;
     for (config) |card| {
         line = card.line;
         const args = card.args;
@@ -358,8 +371,23 @@ pub fn deckOptions(config: []const netlist.Config, dialect: netlist.Dialect) !De
             if (key.len > lower.len) continue;
             // Monte Carlo draws read these (frontend/variants.zig), EM_AVG
             // measures the last (frontend/measure.zig).
-            if (std.ascii.eqlIgnoreCase(key, "seed") or std.ascii.eqlIgnoreCase(key, "sampling_method") or std.ascii.eqlIgnoreCase(key, "em_recovery")) {
+            // `search` is read by frontend/source.zig.
+            if (std.ascii.eqlIgnoreCase(key, "seed") or std.ascii.eqlIgnoreCase(key, "sampling_method") or std.ascii.eqlIgnoreCase(key, "em_recovery") or std.ascii.eqlIgnoreCase(key, "search")) {
                 i += 1;
+                continue;
+            }
+            // RUNLVL alone is level 3; ACCURATE and FAST are flags with an
+            // optional 0|1.
+            const preset = std.ascii.eqlIgnoreCase(key, "runlvl") or std.ascii.eqlIgnoreCase(key, "accurate") or std.ascii.eqlIgnoreCase(key, "fast");
+            if (preset) {
+                const given = numberAt(args, i + 1);
+                if (given != null) i += 1;
+                const on = (given orelse 1) != 0;
+                if (std.ascii.eqlIgnoreCase(key, "accurate")) accurate = on else if (std.ascii.eqlIgnoreCase(key, "fast")) fast = on else {
+                    const level = @floor(0.5 + (given orelse 3));
+                    if (level < 0 or level > 6) return error.InvalidAnalysisArguments;
+                    runlvl = level;
+                }
                 continue;
             }
             const option = names.get(std.ascii.lowerString(lower[0..key.len], key)) orelse {
@@ -417,6 +445,11 @@ pub fn deckOptions(config: []const netlist.Config, dialect: netlist.Dialect) !De
         }
     }
     if (o.method == .gear_2 and maxord != null and maxord.? < 2) o.method = .backward_euler;
+    // ACCURATE lifts any level to at least 5; FAST is level 1 when no
+    // RUNLVL is given; RUNLVL=0 turns the presets off.
+    var level = runlvl orelse if (fast and !accurate) @as(f64, 1) else 0;
+    if (accurate and runlvl != 0) level = @max(level, 5);
+    if (level != 0) o.trtol = runlvl_trtol[@as(usize, @intFromFloat(level)) - 1];
     if (dialect == .hspice and o.temp_c == null and o.temp_list.len == 0) o.temp_c = o.tnom_c;
     return o;
 }
@@ -434,6 +467,8 @@ pub fn applyDeckOptions(job: *Job, o: DeckOptions) void {
         const t = &job.tran;
         if (o.method) |m| t.method = m;
         if (o.xmu) |x| t.xmu = x;
+        // RUNLVL overrides TRTOL wherever it sits [CR .OPTION RUNLVL].
+        if (o.trtol) |trtol| t.tol.trtol = trtol;
         // ngspice's default tmax, min(tstep, tstop / 50).
         t.dt_max = t.dt_max orelse o.delmax orelse @min(t.dt_init, t.t_stop / 50);
     }

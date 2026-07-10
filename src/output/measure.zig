@@ -71,6 +71,25 @@ pub fn evaluateAll(measures: []const core.Measure, analysis: Kind, result: core.
     };
 }
 
+/// Clause `c`'s waveform over transient `result` at each time in `at`,
+/// interpolated linearly and held flat past either end.
+pub fn sample(c: Clause, result: core.Result, at: []const f64, out: []f64) error{NoSuchVector}!void {
+    const w: Wave = .{ .result = result, .analysis = .tran };
+    const x = w.scale();
+    const y = try w.waveform(c.vec, c.ops, c.vectype);
+    const n = w.len();
+    for (at, out) |t, *v| {
+        // The first sample at or after t.
+        var lo: usize = 0;
+        var hi: usize = n;
+        while (lo < hi) {
+            const mid = (lo + hi) / 2;
+            if (x.get(mid) < t) lo = mid + 1 else hi = mid;
+        }
+        v.* = if (lo == 0) y.get(0) else if (lo == n) y.get(n - 1) else interpolate(x, y, lo - 1, lo, t);
+    }
+}
+
 /// Whether card `m` reads `result`. Each `.fft` card has its own plot, and
 /// `.lstb` and `.ptdnoise` publish two kinds under one analysis, so those
 /// cards read the plot holding their vector.
@@ -207,7 +226,81 @@ fn evaluate(out: *Writer, m: core.Measure, w: Wave) EvalError!f64 {
             try out.print("{s:<20}=  {f}\n", .{ m.name, sci(v, 6) });
             return v;
         },
+        .check_slew, .check_forbid, .check_require, .check_level, .dout => {
+            const n = try w.violations(out, m.name, a, b, m.func, m.check);
+            try out.print("{s:<20}=  {d}\n", .{ m.name, n });
+            return @floatFromInt(n);
+        },
     }
+}
+
+/// Logic transitions of a waveform between thresholds `lo` and `hi`.
+const Edges = struct {
+    x: Column,
+    y: Column,
+    n: usize,
+    lo: f64,
+    hi: f64,
+    i: usize = 1,
+    state: enum { low, high, rising, falling, unknown } = .unknown,
+    start: f64 = 0,
+
+    const Edge = struct {
+        rise: bool,
+        start: f64,
+        end: f64,
+
+        fn at(e: Edge) f64 {
+            return 0.5 * (e.start + e.end);
+        }
+
+        fn is(e: Edge, want: core.Check.Edge) bool {
+            return want == .both or e.rise == (want == .rise);
+        }
+    };
+
+    fn next(e: *Edges) ?Edge {
+        if (e.i == 1 and e.n > 0) {
+            const y0 = e.y.get(0);
+            e.state = if (y0 <= e.lo) .low else if (y0 >= e.hi) .high else .unknown;
+        }
+        while (e.i < e.n) {
+            const x0 = e.x.get(e.i - 1);
+            const x1 = e.x.get(e.i);
+            const y0 = e.y.get(e.i - 1);
+            const y1 = e.y.get(e.i);
+            e.i += 1;
+            if (e.state == .low and y1 > e.lo) {
+                e.state = .rising;
+                e.start = crossing(x0, y0, x1, y1, e.lo);
+            } else if (e.state == .high and y1 < e.hi) {
+                e.state = .falling;
+                e.start = crossing(x0, y0, x1, y1, e.hi);
+            }
+            switch (e.state) {
+                .rising => if (y1 >= e.hi) {
+                    e.state = .high;
+                    return .{ .rise = true, .start = e.start, .end = crossing(x0, y0, x1, y1, e.hi) };
+                } else if (y1 <= e.lo) {
+                    e.state = .low;
+                },
+                .falling => if (y1 <= e.lo) {
+                    e.state = .low;
+                    return .{ .rise = false, .start = e.start, .end = crossing(x0, y0, x1, y1, e.lo) };
+                } else if (y1 >= e.hi) {
+                    e.state = .high;
+                },
+                .unknown => e.state = if (y1 <= e.lo) .low else if (y1 >= e.hi) .high else .unknown,
+                else => {},
+            }
+        }
+        return null;
+    }
+};
+
+/// Where the segment (x0, y0)-(x1, y1) meets `level`.
+fn crossing(x0: f64, y0: f64, x1: f64, y1: f64, level: f64) f64 {
+    return if (y1 == y0) x1 else x0 + (level - y0) * (x1 - x0) / (y1 - y0);
 }
 
 /// `c` with its refs to earlier results applied; OutOfInterval when one
@@ -530,6 +623,76 @@ const Wave = struct {
             prev_x = xv;
         }
         return last;
+    }
+
+    /// Violations of check `k` on `c`'s waveform (`ref`'s is the reference
+    /// edge), one line each on `out`, after HSPICE's `.check`, `.dout` and
+    /// `.biaschk` [CR .CHECK, .DOUT, .BIASCHK].
+    // ponytail: SETUP/HOLD/EDGE rescan the node per reference edge,
+    // O(edges x samples); merge the two edge streams if decks get long.
+    fn violations(w: Wave, out: *Writer, name: []const u8, c: Clause, ref: Clause, func: core.MeasureFunc, k: core.Check) EvalError!u32 {
+        const x = w.scale();
+        const y = try w.waveform(c.vec, c.ops, c.vectype);
+        const node: Edges = .{ .x = x, .y = y, .n = w.len(), .lo = k.lo, .hi = k.hi };
+        var n: u32 = 0;
+        switch (func) {
+            .check_slew => {
+                var it = node;
+                while (it.next()) |e| if (e.is(k.edge)) {
+                    const d = e.end - e.start;
+                    if (d >= k.min and d <= k.max) continue;
+                    n += 1;
+                    try out.print("  {s} violation: {s} at {f} took {f}\n", .{ name, if (e.rise) "rise" else "fall", sci(e.at(), 6), sci(d, 6) });
+                };
+            },
+            .check_forbid, .check_require => {
+                var refs: Edges = .{ .x = x, .y = try w.waveform(ref.vec, ref.ops, ref.vectype), .n = w.len(), .lo = k.lo, .hi = k.hi };
+                while (refs.next()) |r| if (r.is(k.ref_edge)) {
+                    var hits: u32 = 0;
+                    var it = node;
+                    while (it.next()) |e| if (e.is(k.edge) and e.at() >= r.at() + k.min and e.at() <= r.at() + k.max) {
+                        hits += 1;
+                        if (func == .check_forbid) try out.print("  {s} violation: {s} at {f}, reference edge at {f}\n", .{ name, if (e.rise) "rise" else "fall", sci(e.at(), 6), sci(r.at(), 6) });
+                    };
+                    if (func == .check_forbid) n += hits else if (hits == 0) {
+                        n += 1;
+                        try out.print("  {s} violation: no edge after reference edge at {f}\n", .{ name, sci(r.at(), 6) });
+                    }
+                };
+            },
+            .check_level => {
+                var entered: ?f64 = null;
+                for (0..w.len()) |i| {
+                    const v = y.get(i);
+                    const live = x.get(i) >= c.from and (c.to == 0 or x.get(i) <= c.to);
+                    const outside = live and (v < k.min or v > k.max);
+                    if (outside and entered == null) {
+                        entered = if (i == 0) x.get(0) else crossing(x.get(i - 1), y.get(i - 1), x.get(i), v, if (v > k.max) k.max else k.min);
+                    } else if (!outside and entered != null) {
+                        const left = crossing(x.get(i - 1), y.get(i - 1), x.get(i), v, if (y.get(i - 1) > k.max) k.max else k.min);
+                        if (left - entered.? > k.dur or k.dur == 0) {
+                            n += 1;
+                            try out.print("  {s} violation: from {f} to {f}\n", .{ name, sci(entered.?, 6), sci(left, 6) });
+                        }
+                        entered = null;
+                    }
+                }
+                if (entered) |t| if (x.get(w.len() - 1) - t > k.dur or k.dur == 0) {
+                    n += 1;
+                    try out.print("  {s} violation: from {f} to the end\n", .{ name, sci(t, 6) });
+                };
+            },
+            .dout => for (k.expect) |e| {
+                const v = try w.valueAt(c, e[0]);
+                const one = if (k.lo == k.hi) v > k.hi else v >= k.hi;
+                const zero = if (k.lo == k.hi) !one else v <= k.lo;
+                if (if (e[1] == 1) one else zero) continue;
+                n += 1;
+                try out.print("  {s} violation: expected {d} at {f}, got {f}\n", .{ name, @as(u8, @intFromFloat(e[1])), sci(e[0], 6), sci(v, 6) });
+            },
+            else => unreachable,
+        }
+        return n;
     }
 
     /// The vector interpolated at scale value `at`; NaN outside the sweep

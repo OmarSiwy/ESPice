@@ -23,7 +23,9 @@ numbers as they are read.
 | `expr.zig` | Expressions as postfix: compile, fold, subtree walks |
 | `csr.zig` | The bipartite hypergraph (adapted from cktImg) |
 | `netlist.zig` | Lines to nets × devices, models and analysis cards; parameter scopes, subcircuit frames, model bins |
-| `measure.zig` | `.meas` card text to `core.Measure` |
+| `measure.zig` | `.meas` card text to `core.Measure`; HSPICE `.check`, `.dout` and `.biaschk` to violation-counting measures |
+| `pattern.zig` | HSPICE PAT sources rewritten to PWL before parsing |
+| `vec.zig` | HSPICE `.vec` files to PWL sources and `.dout` cards, during expansion |
 | `analyses.zig` | Analysis cards and `.options` to queries |
 | `spice.zig` | SPICE device selection: card letter and `.model` LEVEL to a device name, following ngspice |
 | `builder.zig` | `NetBuilder`: card binding, net-to-row mapping and circuit topology |
@@ -197,8 +199,19 @@ in MODEINITJCT/INITFIX (the DC sweep's own points do not read it yet).
 (`r.gshunt.<net>`, `c.cshunt.<net>`), `delmax` caps the transient step when
 the `.tran` card gives no tmax, and `gmindc`, `absv`, `relv`, `absi` and
 `method=bdf` alias `gmin`, `vntol`, `reltol`, `abstol` and Gear.
-Divergence: ESPice's `.tran` segments share the finest segment's step cap;
-HSPICE's `RUNLVL`, `ACCURATE` and `SEARCH` are not read.
+Divergence: ESPice's `.tran` segments share the finest segment's step cap.
+`.option runlvl`, `accurate` and `fast` set the transient's `trtol`
+(docs/analysis/tolerance-system.md, "HSPICE RUNLVL").
+
+`.option search='dir'` [CR .OPTION SEARCH] adds a directory where
+`.include`, `.lib` and `.load` look for a file not found beside the file
+naming it; each `search=` adds one, tried in deck order, and a relative
+one resolves against the deck's directory. Only the top-level deck's
+`.option` lines are read, and only their first physical line (a `search=`
+on a `+` continuation is missed). Not done: HSPICE's lookup of an
+undefined subcircuit `name` as `name.inc` in the search path, and
+`$installdir` expansion. Follows the manual; unconfirmed against HSPICE.
+Fixture: `tests/fixtures/hspice/search_lib.sp`.
 
 ### HSPICE analysis forms
 
@@ -256,6 +269,101 @@ usual forms. LSTB's margin keywords and `lstb(db)` are in
 output variables (`DCm_*` and the like), which we do not have; these are
 our columns, unconfirmed against HSPICE (`hspice/meas_match`,
 `hspice/meas_lstb`, `hspice/meas_ptdnoise`, `phasenoise/meas_phasenoise`).
+
+### HSPICE digital stimuli
+
+A V or I card's `PAT (vhi vlo td tr tf tsample data)` [SA Ch.9 "Pattern
+Source"; CR .PAT] is rewritten into the PWL that draws it before the line
+is parsed (`frontend/pattern.zig`). `data` is b-strings of 0, 1 and M,
+`[...]` nested structures and `.pat` names, each followed by optional R=
+and RB=, which apply to the component just before them (so a name's own
+R/RB can be overridden where it is used). Each bit holds for tsample from
+td on, the first bit also through the delay; a change ramps over tr
+(rising) or tf (falling) centred on the bit boundary, which gives the
+manual's first transition at td + N·tsample − tr/2. vhi, vlo and the times
+may be parameter expressions. Not read: Z states (no high-impedance
+source), K-strings and ENCODE=DW8b10b, R=−1 (forever), and LFSR. A pattern
+needs at most 31 level changes: the source models hold 64 PWL points.
+These fail the deck with a warning naming the card. Fixture:
+`hspice/pattern_source.sp`; unconfirmed against HSPICE.
+
+`.vec 'file'` [CR .VEC; SA Ch.9 "Specifying a Digital Vector File"] is
+expanded with the includes (`frontend/vec.zig`, found through SEARCH like
+them): each input bit becomes `vvec_<bit> <bit> <vref> pwl(...)` and each
+output bit a `.dout <bit> VTH (...)` card, or `VOL VOH` when the file sets
+no VTH, as HSPICE converts them. Read: RADIX (1 to 4 bits per digit),
+VNAME (`a`, `b[3:0]` naming `b3`..`b0`, `c[[1:0]]` naming `c[1]`, `c[0]`),
+IO `i`/`o`, TUNIT, PERIOD, TDELAY, IDELAY, ODELAY, SLOPE, TRISE, TFALL,
+VIH, VIL, VOH, VOL, VTH, VREF and OUT 0, each with a hex mask over the
+digits, `;` comments and `+` continuations. Tabular states 0 and 1 drive
+VIL and VIH, X and U drive VIL as the manual's table says; an input holds
+its first row's state from t = 0 and starts each ramp at row time + delay.
+Not read: bidirectional signals (IO `b`, ENABLE, OPTION CBC), Z, L and H
+inputs (they need TRIZ/OUT resistances), a nonzero OUT, Verilog-sized
+values, and `.param` names inside the file. Divergence: the manual gives
+no default edge rate; ESPice uses 0.1 time units (0.1 ns). Fixture:
+`hspice/vec_stim.sp`; unconfirmed against HSPICE.
+
+### HSPICE checks and power reports
+
+`.check`, `.dout`, `.biaschk` and `.power` become transient measures
+(`frontend/measure.zig parseCheck`, `netlist.zig readPower`), printed with
+the `.meas` results. A check prints its violation count, `<kind><N>_<node>`
+(`setup4_d = 1`; N counts the check cards), with one indented line per
+violation before it. HSPICE writes violations to the `.err` file; it has no
+count. These follow the manual [CR .CHECK, .DOUT, .BIASCHK, .POWER] and are
+unconfirmed against HSPICE. Fixtures: `hspice/checks.sp`, `hspice/power.sp`.
+
+A transition is read between the logic thresholds `hi_th` and `lo_th` of
+the card's `(hi lo hi_th lo_th)`, else of the last `.check GLOBAL_LEVEL`
+before it (a threshold ending in `%` is that share of hi - lo above lo). A
+rise leaves `lo_th` and reaches `hi_th` without falling back; its time is
+the midpoint of the two crossings, its duration their distance.
+
+| Card | Violation |
+|---|---|
+| `.check rise\|fall\|slew (min max) nodes` | a rise, fall, or either, whose duration is outside [min, max] (SLEW's rate limits are the same window) |
+| `.check setup (ref RISE\|FALL d RISE\|FALL) nodes` | a node edge of the second kind in [t − d, t] of a reference edge at t |
+| `.check hold (...)` | a node edge in [t, t + d] |
+| `.check edge (ref RISE\|FALL min max RISE\|FALL) nodes` | a reference edge with no node edge in [t + min, t + max] |
+| `.check irdrop (v d) nodes` | each stretch below v (v < 0) or above v (v ≥ 0) longer than d; d = 0 counts every one |
+| `.dout nd... [VTH \| VLO VHI] (t s ...)` | a state 0 or 1 the node does not hold at t: above VTH is 1, else 0; with VLO VHI, at or below VLO is 0, at or above VHI is 1. X, U and Z are don't-care |
+| `.biaschk 'expr' [max=\|limit=] [min=] [tstart=] [tstop=]` | each stretch of the expression outside [min, max], named `biaschk<N>` |
+
+Divergences: IRDROP's volt_val is read as an absolute level, as the
+manual's example (`-2` means below −2 V) reads; its "VDD drop" wording may
+mean relative to the supply. `.dout` without a threshold uses 1.65 V, the
+`.vec` VTH default. Not read: node wildcards (`vin*`), the element, region
+and size forms of `.biaschk` (they need device terminal voltages and
+operating regions, which no result carries), `simulation=op|dc`, NOISE=
+and AUTOSTOP. `.powerdc` is refused: its per-instance port currents are
+not in any result.
+
+`.power signal [REF=] [FROM=] [TO=]` prints `power<N>_avg`, `_rms`, `_max`
+and `_min` over the window (the whole run by default). A bare name is a
+top-level voltage source, and its signal is the power it absorbs,
+v(n+, n−)·i(source), negative while it delivers; any other signal
+(`i(v1)`, `par('...')`) is read as written. REF= only labels HSPICE's
+table and is dropped. Divergence: HSPICE's `x1.in` port signals (an
+instance's port power) are not read.
+
+`.stim [tran] pwl|data` [CR .STIM; SA Ch.11 "Reusing Simulation Output as
+Input Stimuli"] writes the first transient's signals, after the run, to
+`<filename>.pwl<N>_tr0` (one PWL source per signal) or `.dat<N>_tr0` (one
+`.data dataname` table, with a `time` column under INDEPOUT), beside the
+output file like `.save`; N counts the cards of each form from 0, and
+FILENAME= defaults to the deck's stem. Signals are any `.meas` output
+variable, sampled at the INDEPVAR= times, at NPOINTS evenly spaced times
+over FROM..TO, or at every transient point in FROM..TO, interpolated
+linearly. A signal with no `name=` is named after its variable (`v(a)` is
+`v_a`); a `par()` signal must be named, and a PWL source's name must start
+with V or I. A PWL source of `v(a,b)` defaults to terminals a and b (b = 0
+for `v(a)`); others need NODE1=. Not read: the AC, DC and VEC forms,
+`.option numdgt` and INGOLD (values print in full precision), and sweep
+numbers past `_tr0`. ESPice's PWL sources hold 64 points, so a file read
+back by a later ESPice run needs NPOINTS or INDEPVAR at or under 64.
+Test: `src/tests/espice.zig` (".stim writes PWL sources and a .data
+table"); unconfirmed against HSPICE.
 
 ## PDK conveniences
 
