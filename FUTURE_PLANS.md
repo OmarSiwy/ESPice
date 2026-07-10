@@ -1,19 +1,20 @@
 # Future plans
 
-Work left over from the production-readiness session. The state at the time of
-writing is 717 of 719 corpus decks passing and 390 unit tests green. Each item
-says where to start.
+Open work on `main`, each item with where to start. Every corpus deck on
+main passes except the two VBIC model-version decks, which the harness
+reports as XFAIL. Work sitting on a feature branch is named with its
+branch and is not on main until that branch merges.
 
 ## Conformance
 
 ### Failing decks
-- `dc/device_vbic_forced_output` and `noise/device_vbic_noise_scale`: known
-  gaps. We keep VBIC 1.3 physics, while ngspice ships an older VBIC, so the
-  gap is a difference between model versions and should not be force-matched.
-  The decks stay marked `KNOWN GAP`.
-- `tran/bench_ngspice_mosamp` and `tran/device_mesa_oscillator` now pass
-  against converged references. Follow-up: at mosamp's original options
-  (abstol=10n, vntol=10n) espice is less accurate than ngspice because
+- `dc/device_vbic_forced_output` and `noise/device_vbic_noise_scale` are
+  known gaps. We keep VBIC 1.3 physics and ngspice ships an older VBIC, so
+  the difference is between model versions and should not be force-matched.
+  Both decks stay marked `KNOWN GAP`.
+- `tran/bench_ngspice_mosamp` and `tran/device_mesa_oscillator` pass
+  against converged references. At mosamp's original options
+  (abstol=10n, vntol=10n) espice is less accurate than ngspice, because
   ngspice's Newton fails ITL4 in the MOS2 slew and its h/8 cuts take 2316
   steps to our 169. The LTE agrees (docs/analysis/transient-integration.md);
   matching it means matching the MOS2 Newton behaviour.
@@ -21,152 +22,66 @@ says where to start.
 ### Semantics that are still off
 - hfet1 keeps ngspice's `cdhat` / `ggdpp` quirk only in part. See
   `docs/devices/models.md`.
-- The f32 GPU Jacobian is off by default because 4 decks fail with it on.
+- The f32 GPU Jacobian is off by default (`-Djac-f32-gpu`, build.zig):
+  with it on, four corpus decks fail under `--backend cuda`.
 
 ## HSPICE and VACASK features
 
 `docs/plan/hspice-comparison.md` and `docs/plan/vacask-comparison.md` track
-the full matrix. Open items:
+the full matrix. Behavioural E/F/G/H sources (VALUE, POLY, TABLE, PWL, VCR,
+VCCAP, DELAY, LAPLACE, `i()` probes) are on main, all in Verilog-A. Open
+items:
 
-- **Behavioural sources (WIP, not landed).** Branch
-  `worktree-agent-a625f5c142f0914fa`, commit `0d7e3e0e`. It holds:
-  - a shared expression tape (`models/native/btape.zig`) with `time`, `temper`
-    and a smoothed TABLE;
-  - `i()` probes;
-  - E/F/G/H VALUE/POLY/TABLE/PWL/VCR/VCCAP lowered to B cards;
-  - LAPLACE (state space), a charge-output B source, and DELAY.
-
-  It does not build: `models/native/laplace.zig` still fails. To land it:
-  1. Get the build passing, run `zig build test`, and snapshot-compare it
-     against main. Existing B-source decks are at risk because probes now
-     dedupe by matrix row.
-  2. Write oracle decks: ngspice for VALUE/POLY/TABLE/`i()`/`time`/`temper`
-     and for noise with a current-source input, analytic for LAPLACE, DELAY,
-     VCR and VCCAP. Make `hspice/laplace_source` run instead of expecting an
-     error.
-  3. VCR (factor read as a resistance) and VCCAP (Q = C·V) come from reading
-     the manual. Check them against HSPICE and record them in `docs/`.
-  4. FREQ, OPAMP, NPWL/PPWL, the logic gates and TRANSFORMER are still
-     refused. POLE has landed on main (`laplace_zp`, docs/frontend.md).
-- **W and S elements (WIP, not landed).** Branch
-  `worktree-agent-a88282e1f6b249fdd`, commit `7accb00d`. Only its three
-  standalone `zig test` files have been run: `wline.zig`, `ydata.zig` and
-  `sparam.zig`.
-  - The W element (`models/native/wline.zig`) supports RLGCMODEL and
-    RLGCFILE for N up to 4.
-    - DC, AC and noise are exact, including Rs·√f and Gd. The `fgd` formula
-      is a guess from a garbled manual equation.
-    - Transient reuses TXL (N=1) or CPL (N=2..4) on R0/L0/G0/C0.
-  - The S element (`src/frontend/sparam.zig`, `models/native/ydata.zig`)
-    reads Touchstone 1.0.
-    - Transient uses vector fitting plus passivity enforcement, which is
-      HSPICE's `RATIONAL_FUNC=1`, not its IFFT default.
-    - In `.ac` it is exact at the data points.
-  - The dense QR eigen solver moved to `core.eigen`, which changes a public
-    API.
-
-  To land it:
-  1. Build, run the unit suites and the corpus, and compare snapshots.
-     `hspice/w_element.sp` still expects the old error and has to be
-     rewritten.
-  2. Add oracle decks:
-     - RLGC with Rs/Gd in `.ac` against the closed-form ABCD;
-     - a matched lossless line as a pure delay;
-     - `device_coupled_tlines` rewritten as a W card, reusing its ngspice CPL
-       oracle;
-     - an N=1 W line against an ngspice TXL run;
-     - an S element built from an analytic network.
-  3. Build a transient model for Rs/Gd by fitting Yc and the propagation term
-     with delay extracted. Until then Rs/Gd are refused in time-domain decks.
-
-  Other gaps:
-  - tabular W models, FQMODEL, CITI and Touchstone 2.0;
-  - noise from lossy W lines and S elements;
-  - DELAYHANDLE;
-  - interpolation in magnitude/angle (we interpolate Y in real/imaginary);
-  - data files named inside an `.include` resolve against the top deck's
-    directory;
-  - IBIS was only scoped, never built;
-  - a docs page for W/S, and the E2/E3 status in hspice-comparison.
-- **`.hblsp`:** large-signal S over a power sweep. P elements now carry z0
-  in HB; what is missing is driving a port's sine amplitude and frequency
-  per point and a confirmed HSPICE definition of S12/S22.
-- **`.meas` over NOISE:** not read yet.
-- **Noise:**
-  - trannoise `SAMPLES>1`, SDE and TIME;
-  - a `.ptdnoise` TIME sweep;
-  - `.sample BETA`;
-  - phase-noise flicker, METHOD 1 and 2, and `.acphasenoise`.
-- **Optimization** (bisection, pass/fail, LEVEL 1-3, inequality goals and
-  `.step` landed; docs/analysis/optimize.md): still refused are a bisection
-  over several parameters or RESULTS cards, a bisection on a `GOAL <`/`>`
-  card, OPTIMIZE with `.alter`, and `.measure ... pushout=`.
-- **Variants** (external `.data` MER/LAM and `MONTE=list` landed;
-  docs/analysis/variants.md): `.data OUT=`, DEV/LOT AGAUSS/AUNIF and the
-  blank-separated `dev/2 0.1` form, and `SWEEP` together with `.step`.
-- **Unconfirmed against HSPICE:** each of these follows the manual and has
-  never been run against real HSPICE:
+- **Controlled-source forms still refused** (`src/frontend/netlist.zig`):
+  FREQ, OPAMP, NPWL/PPWL, the logic gates and TRANSFORMER. POLE is on main
+  (`laplace_zp`, docs/frontend.md).
+- **W and S elements:** on `feat/ws` (W and S in Verilog-A) and
+  `feat/lines` (TXL/CPL fits). Main still refuses W, and
+  `hspice/w_element.sp` expects that error.
+- **IBIS:** `feat/ibis`, not started on main.
+- **`.hblsp`:** large-signal S over a power sweep. P elements carry z0 in
+  HB; missing are driving a port's sine amplitude and frequency per point
+  and a confirmed HSPICE definition of S12/S22.
+- **`.meas` over NOISE:** not read yet. The other new analyses are.
+- **Noise** (all on `feat/noise`): trannoise `SAMPLES>1`, SDE and TIME;
+  a `.ptdnoise` TIME sweep; `.sample BETA`; phase-noise flicker, METHOD 1
+  and 2, and `.acphasenoise`.
+- **Optimization** (docs/analysis/optimize.md): still refused are a
+  bisection over several parameters or RESULTS cards, a bisection on a
+  `GOAL <`/`>` card, OPTIMIZE with `.alter`, and `.measure ... pushout=`.
+- **Variants** (docs/analysis/variants.md): `.data OUT=`, DEV/LOT
+  AGAUSS/AUNIF and the blank-separated `dev/2 0.1` form, and `SWEEP`
+  together with `.step`.
+- **Unconfirmed against HSPICE.** Each follows the manual and has never run
+  against real HSPICE:
   - `.alter` being cumulative;
   - the `.lstb` sign;
   - `.measure` over DCMATCH, ACMATCH, LSTB, PHASENOISE and PTDNOISE
     (our column names, not HSPICE's output variables);
   - `.dcxf` leaving out F/H-sensed sources;
   - DEV/LOT GAUSS values read as 3 sigma (SA Ch.20 p. 694);
-  - an inequality goal adds no error while it holds (the manual gives only
-    the syntax);
+  - an inequality goal adding no error while it holds (the manual gives
+    only the syntax);
   - `MONTE=list(...)`, where the manual's two examples disagree;
   - VCR and VCCAP.
-- **Long tail:** digital vector cards, `.check` cards, SEARCH, RUNLVL and
-  ACCURATE, MOSRA, design exploration, IBIS and W/S details beyond what landed
-  in this session (see the W and S entry above).
+- **Long tail:** digital vector files, `.check` cards, `.stim`, SEARCH and
+  RUNLVL/ACCURATE are on `feat/tail`. MOSRA level 1 is on main
+  (docs/analysis/mosra.md). Design exploration has no branch.
 
-## Runtime `.hdl` models (WIP, not landed)
+## Runtime `.hdl` models
 
-Branch `worktree-agent-aa8d73f15dbb06acd`, commit `da324431`. The
-TinyTapeout_Flows session reported these problems and is waiting for this
-work. It has never been built.
-- The cache moves to `$ESPICE_CACHE`, `$XDG_CACHE_HOME/espice/hdl`,
-  `~/.cache/espice/hdl` or `$TMPDIR`, and the `src_root` build option is
-  gone.
-- `zig build` installs the runtime build's sources into `share/espice/`. The
-  compiler comes from `$ZIG` or PATH, and a Debug build or a wrong zig
-  version now gets a clear error.
-- VerA's diagnostics now print. If VerA refuses to generate code, the load
-  fails with `HdlCodegenRefused`.
-- `UnknownParameter` and `WrongNodeCount` are now errors.
-- `pre_osdi` loads the `.va` sitting next to the `.osdi` if there is one.
-  Otherwise it falls back to a built-in model with a warning, and failing
-  that it errors.
-- The README gets a section on using your own Verilog-A models.
+Runtime `.hdl` loading works from an installed espice (d9f1a7c9). Still
+unchecked:
+- The GPU build under HIP, which once failed with "capacitor.zig: 'V' is
+  not marked 'pub'".
+- The static musl nix build loading a model `.so` with Zig's own loader.
+- Programs that embed libespice look for `share/espice` next to their own
+  executable, not next to the library (`src/device/Library.zig`).
+- Debug hosts refuse to build `.hdl` models with a named error, since Zig's
+  self-hosted backend is untested for the model library.
 
-To land it:
-1. Build, run the tests and compare snapshots. The two new errors might
-   break an existing deck in `tests/fixtures/hdl/*` or
-   `qpss/idt_lowpass_two_tone`.
-2. Rerun the reporter's decks (`t.sp`, `t2.sp`, `twotr.sp`, realvar/thev/`r.sp`)
-   with an empty cache. They are the acceptance tests. `twotr.va` hit "local
-   variable shadows declaration of 'h'" on an older build pinned to VerA
-   297e97dc. The current pin, c964f644, is the same code as v0.9.0 and
-   includes the fix (f4b44c69).
-3. Check that the GPU build no longer fails with HIP "capacitor.zig: 'V' is not
-   marked 'pub'".
-4. Try the static musl nix build. It should load the model `.so` with Zig's
-   own loader.
-5. Check whether a bare `pre_osdi` inside `.control` reaches the list of
-   external models.
-6. Programs that embed libespice look for `share/espice` next to their own
-   executable, not next to the library.
-7. Debug builds cannot load `.hdl`. Zig's self-hosted backend is untested for
-   building the model library.
+## Oracles
 
-## VerA (../VerA)
-
-- VerA still has to ship two items: (b) rejecting a step from inside eval and
-  (c) `$simparam` for reltol, abstol and vntol. Once both are in, re-pin
-  `build.zig.zon` and wire them up.
-- `.v` digital devices are expensive. The fixes are edge sensitivity, taking
-  ttol from the ramp, and room for 256 pins. Also write docs for `.v` support
-  and its ttol cost.
 - We need a newer VACASK binary to regenerate the hbnoise and PSS oracles.
 
 ## Performance
@@ -174,14 +89,11 @@ To land it:
 - Refresh the benchmarks on a quiet machine and update the README table,
   which is stale. The last run beat ngspice on 437 of 445 decks, with a median
   time ratio of 0.53.
-- Delete `--lu-fast` (`fast_lu.zig`, the `_f32` device LU kernels, the C
-  API's `lu_fast`): measured slower than the f64 path on every deck, 13.5x the
-  instructions on `vacask_graetz` (`docs/solvers/gpu-lu.md`, fast_mode). Owner's call,
-  since it is in the C ABI.
 - The device LU's `auto` bar (F/n 500) sits in an unmeasured gap between
   166 and 1,600; time a deck that lands there.
-- Wire GPU graph replay into Newton. Blocked on gompute graphs
-  (`docs/solvers/gpu-lu.md` §7 R2); the pinned gompute has none.
+- Wire GPU graph replay into Newton (`docs/solvers/gpu-lu.md` §4.3).
+  Unblocked: the pinned gompute has capture, instantiate, launch and
+  update (§7 R2, gompute 96cc593).
 - Host-first device bypass. The census is in
   `docs/solvers/gpu-convergence.md` §9.
 - Continuation bypass, the VACASK technique, as an opt-in.
@@ -192,27 +104,15 @@ To land it:
 
 ## Cleanup
 
-- Make the harness report XFAIL/XPASS for `KNOWN GAP` decks instead of plain
-  FAIL.
-- Re-index `issues.md`.
-- Update AGENTS.md: the baseline numbers, and the lane table (pac, pxf and
-  pnoise now use GMRES).
-- A final `/code-review`, `/simplify`, ponytail audit and doc-comment pass
-  over what landed this session.
-- Two branches predate the attribution rewrite and are not on main. Each tip
-  has a `wip:` commit holding changes that were never committed:
-  - `worktree-agent-a8390ff5b475622c8` adds GPU admission for `.path_latch`
-    devices.
-  - `stream-h-threads` makes ParEval bit-identical to serial and adds
-    `--threads`.
-
-  Check whether main already covers them, then either port what is missing
-  or delete the branch.
+- A `/code-review`, `/simplify`, ponytail audit and doc-comment pass over
+  what landed since the last one.
 
 ## Before publishing
 
-- Gompute is a local `.path` dependency (`../Gompute`) with local-only
-  commits. Push those commits and restore a git pin; the owner decides when.
-- ARPice `main` is 350+ commits ahead of `origin` and has not been pushed.
-- One commit already on `origin` still carries an attribution line. It was
-  left alone because fixing it means rewriting published history.
+- stdpp is a frozen snapshot at `../stdpp-pin1` (a `.path` dependency in
+  `build.zig.zon`) until it has a git remote. Then pin it by URL; the
+  owner decides when.
+- `main` has not been pushed since the V1.0.0 release (`origin/main`).
+- One commit already on `origin` (the V1.0.0 release) still carries an
+  attribution line. It was left alone because fixing it means rewriting
+  published history.

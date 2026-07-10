@@ -159,8 +159,6 @@ pub const Circuit = struct {
     gpu_hook: ?GpuHook = null,
     /// Executor-owned device LU; null means the host factors.
     lu_hook: ?LuHook = null,
-    /// `direct.Params.fast_mode` of the workspace's solver.
-    lu_fast: bool = false,
     /// The temperature `setCircuitTemp` last installed, in degrees Celsius;
     /// the devices' own 27 until then. A sweep restores it from here.
     temp_c: f32 = 27,
@@ -220,7 +218,6 @@ pub const Circuit = struct {
             self.load_check = try LoadCheck.init(self.gpa, self.batches, self.col_ptr, self.row_idx[0..self.nnz]);
             errdefer if (self.load_check) |*lc| lc.deinit(self.gpa);
             self.ws = try converger.Workspace.init(self.gpa, self.n, self.col_ptr, self.row_idx, self.bbd);
-            self.ws.?.slv.params.fast_mode = self.lu_fast;
         }
         return &self.ws.?;
     }

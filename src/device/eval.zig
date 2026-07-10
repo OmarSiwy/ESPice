@@ -19,9 +19,10 @@ const contract = @import("contract");
 const gompute = @import("gompute");
 const ir = @import("device_abi");
 // NVPTX/AMDGCN have no libm, so `@exp`/`@log`/`@sin` and std's pow/sinh/cosh
-// do not compile there; gompute.math forwards to libm on the host instead.
-// `expm1` and `atan` also come from it: std's versions use
-// `doNotOptimizeAway`, which AMDGCN cannot lower.
+// do not compile there; gompute.math replaces them. exp, exp2, log, log2,
+// log10 and pow run one body on host and device (no libm forwarding);
+// tanh, sinh, cosh and atan still call std.math on the host. `expm1` comes
+// from it too: std's uses `doNotOptimizeAway`, which AMDGCN cannot lower.
 const dmath = gompute.math;
 
 /// Whether `@mulAdd` is a native instruction. Without the feature it lowers to

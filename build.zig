@@ -430,15 +430,6 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_gpu_corpus.addArgs(args);
     b.step("test-gpu", "Run the numeric SPICE fixtures with --backend cuda").dependOn(&run_gpu_corpus.step);
 
-    // The corpus under `--lu-fast` (f32 refactor, refined solves): not
-    // bit-identical, so each deck's tolerance is the gate.
-    const run_fast_corpus = b.addRunArtifact(correctness);
-    run_fast_corpus.setCwd(b.path("."));
-    run_fast_corpus.addArtifactArg(exe);
-    run_fast_corpus.addArg("--lu-fast");
-    if (b.args) |args| run_fast_corpus.addArgs(args);
-    b.step("test-fast", "Run the numeric SPICE fixtures with --lu-fast").dependOn(&run_fast_corpus.step);
-
     const run_harness_tests = t.run(M.make(b.path("tests/test_correctness.zig"), fixture_imports), &.{}, false);
     run_harness_tests.setCwd(b.path("."));
     run_correctness.step.dependOn(&run_harness_tests.step);

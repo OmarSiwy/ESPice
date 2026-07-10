@@ -977,12 +977,13 @@ thread, `cuda8` with it on 8; `cudalu` adds `ESPICE_GPU_LU=1`.
 - The 1k decks sit under `gpu_lu_min_n`; forced on, the device LU loses
   there (2.35 against 1.62 s).
 
-### fast_mode (opt-in, not bit-identical)
+### fast_mode (retired, deleted)
 
 `direct.Params.fast_mode` (`--lu-fast`, C API `espice_create_options.lu_fast`,
-default off) runs Newton's refactor in f32 and refines each solve back to
-f64 accuracy (`src/solver/fast_lu.zig`). Off, nothing changes: the corpus
-is byte-identical to the default path.
+default off) ran Newton's refactor in f32 and refined each solve back to
+f64 accuracy (`src/solver/fast_lu.zig`). Off, nothing changed: the corpus
+was byte-identical to the default path. The record below is what it
+measured before it was deleted.
 
 - The full factor, and so every pivot decision, stays f64 (`SparseLu.factor`).
   The f32 refactor replays its tape with the same kernel body, `T = f32`:
@@ -999,9 +1000,9 @@ is byte-identical to the default path.
   backward error at f64 roundoff, infinity norms). A step that shrinks the
   backward error by less than half switches to GMRES-IR (Carson and Higham
   2017): up to 3 outer steps of GMRES(30) in f64, right-preconditioned by
-  the f32 factors. Past 8 plain steps or 3 GMRES-IR steps the solve gives
-  up and the exact f64 factor and solve run for that Newton iteration, so
-  no answer is worse than the f64 path's.
+  the f32 factors. Past 8 plain steps or 3 GMRES-IR steps the solve gave
+  up and the exact f64 factor and solve ran for that Newton iteration, so
+  no answer was worse than the f64 path's.
 
 Corpus (`zig build test-fast`, 622 decks, `--backend cpu`): 613 pass and 9
 fail, the same 9 as the default path, so no deck changes pass/fail. The
@@ -1038,10 +1039,15 @@ thread count and 2.1x on logic_bsim4_10k at 8 threads. On
 stress/vacask_graetz (n = 6) it costs 212.4G instructions against 15.8G
 (callgrind, 13.5x): 1,990,100 of 1,993,548 solves fell to GMRES-IR and
 698,182 of them to the f64 fallback. The refinement steps cost more than
-the f32 refactor saves, even where the refactor dominates. **Retired as a
-speed option**: it stays opt-in for now, has no deck where it pays, and is
-a candidate for deletion (`fast_lu.zig`, the `_f32` device kernels,
-`--lu-fast` and the C API's `lu_fast`).
+the f32 refactor saves, even where the refactor dominates. **Retired and
+deleted**, since no deck paid for it: `fast_lu.zig`, the `_f32`
+device kernels, `HostFactor(f32)`, `--lu-fast`, `zig build test-fast`
+and the C API's `lu_fast` field are gone. Removing the field (and its `reserved` pad) shrank
+`espice_create_options` back to its ABI 1 size. Callers that set
+`lu_fast` must drop it; binaries built against the longer struct still
+load, because `espice_create` reads only the prefix it knows.
+Restarting the idea means starting from git history and beating the f64
+path on a deck first.
 
 ## 6. Rejected and deferred
 
@@ -1066,13 +1072,16 @@ gompute lacks at `67f1983`, per the gompute session's inventory and a read
 of `src/runtime/cuda.zig`, `src/host/raw.zig` and `src/device/builtins.zig`.
 gompute already has streams (`createStream`, flags 0), `launchOn`, async
 upload, download and fill on the per-backend `Buffer`, pinned host memory,
-the block `barrier()` and `addrspace(.shared)` scratch. It has no graphs,
-events, async device-to-device copy, stream query or device atomics.
+the block `barrier()` and `addrspace(.shared)` scratch. It had no graphs,
+events, async device-to-device copy, stream query or device atomics; R1,
+R6 and R2 to R5 below have since landed, and our pin (a91b9b1) carries
+them all.
 
 Every host-side shape below goes into `runtime/cuda.zig` and
 `runtime/hip.zig` with identical signatures, and is re-exported through
 `RawByName(be)` beside `Buffer` and `Stream`. The driver entry points join
-the existing dlsym table. Priority order:
+the existing dlsym table. Priority order, kept as the record of what was
+asked:
 
 **R1. Device atomics and memory order** (`src/device/builtins.zig`). This
 blocks the sync-free kernels; plan B (§3a) avoids it at a span cost.
@@ -1191,7 +1200,7 @@ phases with events instead of synchronizing the stream after each one.
 pub fn copyFromAsync(self: *Buffer, src: *const Buffer, src_offset: usize, dst_offset: usize, n: usize, stream: *Stream) Error!void;
 ```
 
-`cuMemcpyDtoDAsync_v2` / `hipMemcpyDtoDAsync`. Today's `copyFrom` is
+`cuMemcpyDtoDAsync_v2` / `hipMemcpyDtoDAsync`. The plain `copyFrom` is
 synchronous and cannot sit in a graph. Use: snapshotting the factored A
 for the value bypass inside the graph.
 
@@ -1204,6 +1213,12 @@ pub fn query(self: *Stream) Error!bool;
 
 `cuStreamQuery` / `hipStreamQuery`. Lets the host stamp overlay batches
 while it polls, instead of blocking in `synchronize`. Lowest priority.
+
+R2 to R5 were delivered in gompute 96cc593 ("runtime: graph capture and
+replay, events, async DtoD, stream query"), with these signatures on CUDA
+and HIP. The device LU already times with R3's events (`Bench` in
+`analysis/gpu_lu.zig`); nothing captures a graph yet, so graph replay in
+Newton is open and unblocked.
 
 Not requested: device-resident reductions. The design's reductions (status
 min, bypass equality, stage 4's norms) are ordinary kernels built from

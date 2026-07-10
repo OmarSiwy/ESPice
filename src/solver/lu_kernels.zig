@@ -119,9 +119,8 @@ pub const Tab = extern struct {
 /// stamps' `Sy.acquire`/`Sy.release`. `sh` is
 /// the block's shared scratch (a `*Shared`, in the shared address space on
 /// the device); `tid`/`nt` are the lane and lane count (0 and 1 on the
-/// host), `nt` at most `lanes`. `T` is the factor's scalar: f64 replays
-/// `SparseLu.refactor` bitwise, f32 is `fast_mode`'s working precision.
-pub fn Kernels(comptime Sy: type, comptime T: type, comptime cap: u32, comptime lanes: u32) type {
+/// host), `nt` at most `lanes`.
+pub fn Kernels(comptime Sy: type, comptime cap: u32, comptime lanes: u32) type {
     return struct {
         const P = Sy.P;
 
@@ -129,9 +128,9 @@ pub fn Kernels(comptime Sy: type, comptime T: type, comptime cap: u32, comptime 
         /// unfinished step (two, alternating), the column max per lane, and
         /// the column's working slots (plus a discard slot) when it has at
         /// most `cap`.
-        pub const Shared = struct { k: u32, first: [2]u32, red: [lanes]T, w: [cap + 1]T };
+        pub const Shared = struct { k: u32, first: [2]u32, red: [lanes]f64, w: [cap + 1]f64 };
         /// Solve block scratch: the tail's y.
-        pub const SolveShared = struct { y: [tail_max]T };
+        pub const SolveShared = struct { y: [tail_max]f64 };
 
         inline fn wait(p: anytype, stamp: u32) void {
             var spins: u32 = 0;
@@ -148,7 +147,7 @@ pub fn Kernels(comptime Sy: type, comptime T: type, comptime cap: u32, comptime 
         /// A's column, replay the flops, test and scale the pivot, publish.
         /// Returns false once the tickets run out, so a host thread loops on
         /// it and a device block calls it once.
-        pub fn refactor(t: Tab, x: P(u32), val: P(T), a: P(T), sy: P(u32), stamp: u32, sh: anytype, tid: u32, nt: u32) bool {
+        pub fn refactor(t: Tab, x: P(u32), val: P(f64), a: P(f64), sy: P(u32), stamp: u32, sh: anytype, tid: u32, nt: u32) bool {
             const k = takeTicket(sy, 0, sh, tid);
             if (k >= t.n) return false;
             const width = x[t.coff + k + 1] - x[t.coff + k];
@@ -182,7 +181,7 @@ pub fn Kernels(comptime Sy: type, comptime T: type, comptime cap: u32, comptime 
         /// Column k's replay on `w`: the block's scratch (`local`, indexed
         /// from the column's first slot, discard slot last) or `val` itself.
         /// Returns whether a pivot test failed.
-        inline fn column(comptime local: bool, w: anytype, t: Tab, x: P(u32), val: P(T), a: P(T), sy: P(u32), stamp: u32, sh: anytype, tid: u32, nt: u32, k: u32) bool {
+        inline fn column(comptime local: bool, w: anytype, t: Tab, x: P(u32), val: P(f64), a: P(f64), sy: P(u32), stamp: u32, sh: anytype, tid: u32, nt: u32, k: u32) bool {
             const done = sy + sync_header;
             const base = x[t.coff + k];
             const width = x[t.coff + k + 1] - base;
@@ -235,8 +234,8 @@ pub fn Kernels(comptime Sy: type, comptime T: type, comptime cap: u32, comptime 
                     var j = tid;
                     while (j + (U - 1) * nt < len) : (j += U * nt) {
                         var dst: [U]u32 = undefined;
-                        var lv: [U]T = undefined;
-                        var wv: [U]T = undefined;
+                        var lv: [U]f64 = undefined;
+                        var wv: [U]f64 = undefined;
                         inline for (0..U) |m| {
                             dst[m] = S.at(x[t.dmap + d + j + m * nt], base, width);
                             lv[m] = val[l0 + j + m * nt];
@@ -278,8 +277,8 @@ pub fn Kernels(comptime Sy: type, comptime T: type, comptime cap: u32, comptime 
                         // Eight contributions' loads, then their chain.
                         const U = 8;
                         while (g + U <= g1) : (g += U) {
-                            var lv: [U]T = undefined;
-                            var uv: [U]T = undefined;
+                            var lv: [U]f64 = undefined;
+                            var uv: [U]f64 = undefined;
                             inline for (0..U) |m| {
                                 lv[m] = val[x[t.g_l + g + m]];
                                 uv[m] = w[S.at(x[t.g_u + g + m], base, width)];
@@ -308,7 +307,7 @@ pub fn Kernels(comptime Sy: type, comptime T: type, comptime cap: u32, comptime 
                     bad = true;
                 } else {
                     // cmax is a max: exact in any order, NaN ignored alike.
-                    var cm: T = @abs(dv);
+                    var cm: f64 = @abs(dv);
                     var l = diag + 1 + tid;
                     while (l < end) : (l += nt) {
                         const v = w[l];
@@ -325,7 +324,7 @@ pub fn Kernels(comptime Sy: type, comptime T: type, comptime cap: u32, comptime 
                             if (tid < h) sh.red[tid] = @max(sh.red[tid], sh.red[tid + h]);
                             Sy.barrier();
                         }
-                        bad = @abs(dv) < @as(T, @floatCast(t.growth)) * sh.red[0];
+                        bad = @abs(dv) < t.growth * sh.red[0];
                     }
                 }
             }
@@ -341,7 +340,7 @@ pub fn Kernels(comptime Sy: type, comptime T: type, comptime cap: u32, comptime 
         /// each row's subtractions in ascending k, skipping y[k] == 0 as
         /// `SparseLu.solve` does. `sh` is a `*SolveShared`. Does nothing
         /// when the refactor failed.
-        pub fn lsolve(t: Tab, x: P(u32), val: P(T), rhs: P(T), y: P(T), sy: P(u32), sh: anytype, tid: u32, nt: u32) void {
+        pub fn lsolve(t: Tab, x: P(u32), val: P(f64), rhs: P(f64), y: P(f64), sy: P(u32), sh: anytype, tid: u32, nt: u32) void {
             if (sy[1] != 0) return;
             var v: u32 = 0;
             while (v < t.l_levels) : (v += 1) {
@@ -379,7 +378,7 @@ pub fn Kernels(comptime Sy: type, comptime T: type, comptime cap: u32, comptime 
         /// descending k, and dx[q[i]] = z[i]; y ends holding z. The tail
         /// sweeps its own rows in shared memory; head rows gather their tail
         /// entries afterwards, which is still the host's descending order.
-        pub fn usolve(t: Tab, x: P(u32), val: P(T), y: P(T), dx: P(T), sy: P(u32), sh: anytype, tid: u32, nt: u32) void {
+        pub fn usolve(t: Tab, x: P(u32), val: P(f64), y: P(f64), dx: P(f64), sy: P(u32), sh: anytype, tid: u32, nt: u32) void {
             if (sy[1] != 0) return;
             // Pipelined like the forward sweep; one lane divides (a strict
             // divide is dozens of instructions on a narrow unit) and
@@ -389,13 +388,13 @@ pub fn Kernels(comptime Sy: type, comptime T: type, comptime cap: u32, comptime 
             var mb: Meta = if (tn > 1) metaU(t, x, tn - 2) else .{};
             var ma: Meta = if (tn > 0) metaU(t, x, tn - 1) else .{};
             var cur = fetch(x, val, t.ui, t.t0, ma, tid, nt);
-            var d: T = if (tn > 0) val[ma.diag] else 0;
+            var d: f64 = if (tn > 0) val[ma.diag] else 0;
             var c = tn;
             while (c > 0) {
                 c -= 1;
                 const mc: Meta = if (c >= 2) metaU(t, x, c - 2) else .{};
                 const nxt = fetch(x, val, t.ui, t.t0, mb, tid, nt);
-                const dn: T = if (c >= 1) val[mb.diag] else 0;
+                const dn: f64 = if (c >= 1) val[mb.diag] else 0;
                 if (tid == 0) {
                     const zc = sh.y[c] / d;
                     sh.y[c] = zc;
@@ -428,7 +427,7 @@ pub fn Kernels(comptime Sy: type, comptime T: type, comptime cap: u32, comptime 
         }
 
         /// Copies the tail's y into the block's scratch.
-        inline fn stage(sh: anytype, ytail: P(T), tn: u32, tid: u32, nt: u32) void {
+        inline fn stage(sh: anytype, ytail: P(f64), tn: u32, tid: u32, nt: u32) void {
             var j = tid;
             while (j < tn) : (j += nt) sh.y[j] = ytail[j];
             Sy.barrier();
@@ -439,7 +438,7 @@ pub fn Kernels(comptime Sy: type, comptime T: type, comptime cap: u32, comptime 
         const Meta = struct { e0: u32 = 0, e1: u32 = 0, base: u32 = 0, diag: u32 = 0, q: u32 = 0 };
         /// Entries per lane loaded a step ahead; any beyond wait for memory.
         const pf = 2;
-        const Ent = struct { row: [pf]u32 = undefined, v: [pf]T = undefined };
+        const Ent = struct { row: [pf]u32 = undefined, v: [pf]f64 = undefined };
 
         inline fn metaL(t: Tab, x: P(u32), c: u32) Meta {
             return .{ .e0 = x[t.lp + t.t0 + c], .e1 = x[t.lp + t.t0 + c + 1], .base = x[t.t_lb + c] };
@@ -451,7 +450,7 @@ pub fn Kernels(comptime Sy: type, comptime T: type, comptime cap: u32, comptime 
 
         /// This lane's first `pf` entries of column m: rows relative to t0
         /// (a head row wraps past the tail) and values.
-        inline fn fetch(x: P(u32), val: P(T), rows: u32, t0: u32, m: Meta, tid: u32, nt: u32) Ent {
+        inline fn fetch(x: P(u32), val: P(f64), rows: u32, t0: u32, m: Meta, tid: u32, nt: u32) Ent {
             var en: Ent = .{};
             inline for (0..pf) |i| {
                 const e = m.e0 + tid + i * nt;
@@ -465,7 +464,7 @@ pub fn Kernels(comptime Sy: type, comptime T: type, comptime cap: u32, comptime 
 
         /// sh.y[row] -= v * f over column m's entries whose row is a tail
         /// row: the prefetched ones, then the rest.
-        inline fn apply(sh: anytype, x: P(u32), val: P(T), rows: u32, t0: u32, tn: u32, m: Meta, en: Ent, f: T, tid: u32, nt: u32) void {
+        inline fn apply(sh: anytype, x: P(u32), val: P(f64), rows: u32, t0: u32, tn: u32, m: Meta, en: Ent, f: f64, tid: u32, nt: u32) void {
             inline for (0..pf) |i| {
                 if (m.e0 + tid + i * nt < m.e1 and en.row[i] < tn) sh.y[en.row[i]] -= en.v[i] * f;
             }
@@ -479,13 +478,13 @@ pub fn Kernels(comptime Sy: type, comptime T: type, comptime cap: u32, comptime 
         /// acc minus val[slot[e]] * y[col[e]] for e in e0..e1 in order,
         /// skipping y == 0. Eight entries' loads go out before their
         /// subtractions, so a long row waits on memory once per eight.
-        inline fn gather(acc0: T, x: P(u32), val: P(T), y: P(T), col: u32, slot: u32, e0: u32, e1: u32) T {
+        inline fn gather(acc0: f64, x: P(u32), val: P(f64), y: P(f64), col: u32, slot: u32, e0: u32, e1: u32) f64 {
             const U = 8;
             var acc = acc0;
             var e = e0;
             while (e + U <= e1) : (e += U) {
-                var yv: [U]T = undefined;
-                var lv: [U]T = undefined;
+                var yv: [U]f64 = undefined;
+                var lv: [U]f64 = undefined;
                 inline for (0..U) |u| {
                     yv[u] = y[x[col + e + u]];
                     lv[u] = val[x[slot + e + u]];
@@ -544,7 +543,7 @@ pub fn runHost(t: Tab, b: HostBufs, stamp: u32, threads: u32) !?u32 {
 /// `runHost` with the refactor's scratch capped at `cap` slots; 0 runs
 /// every column in `val`, the path the device takes past `col_max`.
 pub fn runHostCap(comptime cap: u32, t: Tab, b: HostBufs, stamp: u32, threads: u32) !?u32 {
-    const H = Kernels(HostSy, f64, cap, 1);
+    const H = Kernels(HostSy, cap, 1);
     @memset(b.sync[0..sync_header], 0);
     const x = @constCast(b.idx.ptr);
     const Worker = struct {
@@ -571,106 +570,65 @@ pub fn runHostCap(comptime cap: u32, t: Tab, b: HostBufs, stamp: u32, threads: u
 
 const SparseLu = @import("sparse_lu.zig").SparseLu;
 
-/// The kernel bodies on host threads over scalar `T`: one pivot epoch's
-/// tables and buffers. `HostRefactor` is the f64 instance that feeds
-/// `SparseLu`; `fast_lu` runs the f32 one.
-pub fn HostFactor(comptime T: type) type {
-    return struct {
-        const Self = @This();
-        const H = Kernels(HostSy, T, col_max, 1);
-        /// The solves' block scratch (the tail's y), `SolveShared`.
-        pub const Scratch = H.SolveShared;
+/// The refactor kernel body on host threads: one pivot epoch's tables and
+/// buffers.
+const HostFactor = struct {
+    const Self = @This();
+    const H = Kernels(HostSy, col_max, 1);
 
-        /// `SparseLu.pattern_epoch` the tables were built from.
-        epoch: u32,
-        tb: Tables,
-        val: []T,
-        sync: []u32,
-        stamp: u32 = 0,
+    /// `SparseLu.pattern_epoch` the tables were built from.
+    epoch: u32,
+    tb: Tables,
+    val: []f64,
+    sync: []u32,
+    stamp: u32 = 0,
 
-        /// Builds the tables for `lu`'s current factor (4 bytes per flop).
-        /// Caller owns the result; free with `deinit`.
-        pub fn init(gpa: std.mem.Allocator, lu: *const SparseLu, col_ptr: []const u32, growth: f64) !Self {
-            var tb = try build(gpa, lu, col_ptr, growth, .{});
-            errdefer tb.deinit(gpa);
-            const val = try gpa.alloc(T, tb.tab.n_val);
-            errdefer gpa.free(val);
-            const sync = try gpa.alloc(u32, tb.tab.syncLen());
-            @memset(sync, 0);
-            return .{ .epoch = lu.pattern_epoch, .tb = tb, .val = val, .sync = sync };
-        }
+    /// Builds the tables for `lu`'s current factor (4 bytes per flop).
+    /// Caller owns the result; free with `deinit`.
+    pub fn init(gpa: std.mem.Allocator, lu: *const SparseLu, col_ptr: []const u32, growth: f64) !Self {
+        var tb = try build(gpa, lu, col_ptr, growth, .{});
+        errdefer tb.deinit(gpa);
+        const val = try gpa.alloc(f64, tb.tab.n_val);
+        errdefer gpa.free(val);
+        const sync = try gpa.alloc(u32, tb.tab.syncLen());
+        @memset(sync, 0);
+        return .{ .epoch = lu.pattern_epoch, .tb = tb, .val = val, .sync = sync };
+    }
 
-        pub fn deinit(self: *Self, gpa: std.mem.Allocator) void {
-            self.tb.deinit(gpa);
-            gpa.free(self.val);
-            gpa.free(self.sync);
-            self.* = undefined;
-        }
+    pub fn deinit(self: *Self, gpa: std.mem.Allocator) void {
+        self.tb.deinit(gpa);
+        gpa.free(self.val);
+        gpa.free(self.sync);
+        self.* = undefined;
+    }
 
-        /// Refactors `a` (A's values in CSC order) on the caller plus
-        /// `threads - 1` tasks of `io` (none when null). False when a pivot
-        /// test fails; the factors are then unusable.
-        pub fn refactor(self: *Self, a: []const T, io: ?std.Io, threads: u32) bool {
-            const W = struct {
-                fn work(t: Tab, x: [*]u32, val: [*]T, av: [*]T, sy: [*]u32, stamp: u32) void {
-                    var sh: H.Shared = undefined;
-                    while (H.refactor(t, x, val, av, sy, stamp, &sh, 0, 1)) {}
-                }
-            };
-            self.stamp +%= 1;
-            @memset(self.sync[0..sync_header], 0);
-            const args = .{ self.tb.tab, self.tb.idx.ptr, self.val.ptr, @constCast(a.ptr), self.sync.ptr, self.stamp };
-            var futures: [15]std.Io.Future(void) = undefined;
-            const extra = if (io != null) @min(@max(threads, 1) - 1, futures.len) else 0;
-            for (futures[0..extra]) |*f| f.* = io.?.async(W.work, args);
-            @call(.auto, W.work, args);
-            for (futures[0..extra]) |*f| f.await(io.?);
-            return self.sync[1] == 0;
-        }
-
-        /// dx = -A^-1 rhs with the last factors by column sweeps, as
-        /// `SparseLu.solve` does it: on one host thread this beats the
-        /// kernels' level schedule 3-10x. `y` is n long scratch.
-        pub fn solveNegSerial(self: *const Self, rhs: []const T, y: []T, dx: []T) void {
-            const t = self.tb.tab;
-            const x = self.tb.idx;
-            const val = self.val;
-            for (0..t.n) |r| y[r] = -rhs[x[t.perm_in + r]];
-            for (0..t.n) |k| {
-                const yk = y[k];
-                if (yk == 0) continue;
-                const q0 = x[t.lp + k];
-                const l0 = x[t.coff + k] + x[t.up + k + 1] - x[t.up + k] + 1;
-                for (q0..x[t.lp + k + 1]) |q| y[x[t.li + q]] -= val[l0 + q - q0] * yk;
+    /// Refactors `a` (A's values in CSC order) on the caller plus
+    /// `threads - 1` tasks of `io` (none when null). False when a pivot
+    /// test fails; the factors are then unusable.
+    pub fn refactor(self: *Self, a: []const f64, io: ?std.Io, threads: u32) bool {
+        const W = struct {
+            fn work(t: Tab, x: [*]u32, val: [*]f64, av: [*]f64, sy: [*]u32, stamp: u32) void {
+                var sh: H.Shared = undefined;
+                while (H.refactor(t, x, val, av, sy, stamp, &sh, 0, 1)) {}
             }
-            var k = t.n;
-            while (k > 0) {
-                k -= 1;
-                const p0 = x[t.up + k];
-                const base = x[t.coff + k];
-                const z = y[k] / val[base + x[t.up + k + 1] - p0];
-                y[k] = z;
-                if (z == 0) continue;
-                for (p0..x[t.up + k + 1]) |p| y[x[t.ui + p]] -= val[base + p - p0] * z;
-            }
-            for (0..t.n) |j| dx[x[t.q + j]] = y[j];
-        }
-
-        /// dx = -A^-1 rhs with the last factors, on this thread, through
-        /// the kernel bodies (their oracle test). `y` is n long scratch.
-        pub fn solveNeg(self: *Self, rhs: []const T, y: []T, dx: []T, sh: *Scratch) void {
-            const x: [*]u32 = self.tb.idx.ptr;
-            H.lsolve(self.tb.tab, x, self.val.ptr, @constCast(rhs.ptr), y.ptr, self.sync.ptr, sh, 0, 1);
-            H.usolve(self.tb.tab, x, self.val.ptr, y.ptr, dx.ptr, self.sync.ptr, sh, 0, 1);
-        }
-    };
-}
+        };
+        self.stamp +%= 1;
+        @memset(self.sync[0..sync_header], 0);
+        const args = .{ self.tb.tab, self.tb.idx.ptr, self.val.ptr, @constCast(a.ptr), self.sync.ptr, self.stamp };
+        var futures: [15]std.Io.Future(void) = undefined;
+        const extra = if (io != null) @min(@max(threads, 1) - 1, futures.len) else 0;
+        for (futures[0..extra]) |*f| f.* = io.?.async(W.work, args);
+        @call(.auto, W.work, args);
+        for (futures[0..extra]) |*f| f.await(io.?);
+        return self.sync[1] == 0;
+    }
+};
 
 /// The refactor kernel body as a multicore host refactor (docs/solvers/
 /// gpu-lu.md option 3). Its factors are bitwise `SparseLu.refactor`'s, so
 /// callers may pick it by speed.
 pub const HostRefactor = struct {
-    f: HostFactor(f64),
+    f: HostFactor,
 
     /// Builds the tables for `lu`'s current factor (4 bytes per flop).
     /// Caller owns the result; free with `deinit`.
