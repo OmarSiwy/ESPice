@@ -156,8 +156,16 @@ pub fn Parser(comptime Tok: type) type {
             const expanded_hint = countExpanded(devices.items, &subckts, 0);
             var flat: std.ArrayList(ir.Device) = .empty;
             try flat.ensureTotalCapacity(arena, expanded_hint);
+            // Global .param environment. ponytail: .param inside .subckt bodies
+            // also lands here (leaks to global) — benign, since instance kv and
+            // subckt defaults shadow globals during expansion.
+            var genv: Env = .empty;
+            for (params.items) |kvp| try genv.put(arena, kvp.key, kvp.value);
             var instance_counter: u32 = 1; // 0 = top-level
-            for (devices.items) |d| try expandInto(arena, &flat, d, &subckts, 0, 0, 0, &subckt_type_map, &instance_counter);
+            for (devices.items) |d| {
+                const td = if (genv.size > 0) try substDevice(arena, d, &genv) else d;
+                try expandInto(arena, &flat, td, &subckts, 0, 0, 0, &subckt_type_map, &instance_counter, &genv);
+            }
 
             var dl = try ir.DeviceList.fromUnsorted(arena, flat.items);
             dl.subckt_types = subckt_type_list.items;
@@ -496,21 +504,18 @@ pub fn Parser(comptime Tok: type) type {
                 }
                 const total = if (nodes_overflow.items.len > 0) nodes_overflow.items.len else word_count;
                 if (total < 1) return error.ParseError;
-                if (nodes_overflow.items.len > 0) {
-                    // Rare: >32 words on an unknown-count line
-                    for (nodes_overflow.items[0 .. total - 1]) |w| {
-                        if (node_count < node_buf.len) {
-                            node_buf[node_count] = w;
-                            node_count += 1;
-                        }
-                    }
-                    pos_buf[0] = .{ .name = nodes_overflow.items[total - 1] };
-                    pos_count = 1;
+                // Last word is the device/subckt name; the rest are nodes.
+                const words = if (nodes_overflow.items.len > 0) nodes_overflow.items else word_buf[0..word_count];
+                pos_buf[0] = .{ .name = words[total - 1] };
+                pos_count = 1;
+                if (total - 1 <= node_buf.len) {
+                    @memcpy(node_buf[0 .. total - 1], words[0 .. total - 1]);
+                    node_count = total - 1;
+                    nodes_overflow.clearRetainingCapacity();
+                } else if (nodes_overflow.items.len > 0) {
+                    nodes_overflow.shrinkRetainingCapacity(total - 1);
                 } else {
-                    @memcpy(node_buf[0 .. word_count - 1], word_buf[0 .. word_count - 1]);
-                    node_count = word_count - 1;
-                    pos_buf[0] = .{ .name = word_buf[word_count - 1] };
-                    pos_count = 1;
+                    try nodes_overflow.appendSlice(arena, word_buf[0 .. total - 1]);
                 }
             }
 
@@ -845,6 +850,7 @@ pub fn Parser(comptime Tok: type) type {
             instance_id: u32,
             type_map: *const std.StringHashMapUnmanaged(u16),
             instance_counter: *u32,
+            genv: *const Env,
         ) Error!void {
             if (d.letter() != 'x') {
                 var tagged = d;
@@ -866,12 +872,13 @@ pub fn Parser(comptime Tok: type) type {
             const this_instance = instance_counter.*;
             instance_counter.* += 1;
 
-            var env: Env = .empty;
+            // Shadow order: instance kv > subckt defaults > global .param.
+            var env: Env = try genv.clone(arena);
             for (sub.defaults) |kvp| try env.put(arena, kvp.key, kvp.value);
             for (d.kv) |kvp| try env.put(arena, kvp.key, kvp.value);
 
             for (sub.devices) |sd| {
-                var nd = sd;
+                var nd = try substDevice(arena, sd, &env);
                 nd.name = try concatDot(arena, sd.name, d.name);
                 const dev_nodes = try arena.alloc([]const u8, sd.nodes.len);
                 for (sd.nodes, dev_nodes) |n, *o| {
@@ -885,25 +892,61 @@ pub fn Parser(comptime Tok: type) type {
                     }
                 }
                 nd.nodes = dev_nodes;
-                if (sd.positional.len > 0) {
-                    const pos = try arena.alloc(ir.Value, sd.positional.len);
-                    for (sd.positional, pos) |v, *o| o.* = try substValue(arena, v, &env);
-                    nd.positional = pos;
-                }
-                if (sd.kv.len > 0) {
-                    const dev_kv = try arena.alloc(ir.Kv, sd.kv.len);
-                    for (sd.kv, dev_kv) |kvp, *o| o.* = .{ .key = kvp.key, .value = try substValue(arena, kvp.value, &env) };
-                    nd.kv = dev_kv;
-                }
-                try expandInto(arena, out, nd, subckts, depth + 1, this_type, this_instance, type_map, instance_counter);
+                try expandInto(arena, out, nd, subckts, depth + 1, this_type, this_instance, type_map, instance_counter, genv);
             }
+        }
+
+        /// Constant-fold a fully-substituted expression; null if any ident/call remains.
+        fn foldExpr(e: *const ir.Expr) ?f64 {
+            return switch (e.*) {
+                .num => |n| n,
+                .ident, .call => null,
+                .unop => |u| switch (u.op) {
+                    '-' => if (foldExpr(u.a)) |a| -a else null,
+                    '+' => foldExpr(u.a),
+                    else => null,
+                },
+                .binop => |b| blk: {
+                    const a = foldExpr(b.a) orelse break :blk null;
+                    const c = foldExpr(b.b) orelse break :blk null;
+                    break :blk switch (b.op) {
+                        '+' => a + c,
+                        '-' => a - c,
+                        '*' => a * c,
+                        '/' => a / c,
+                        '^' => std.math.pow(f64, a, c),
+                        else => null,
+                    };
+                },
+            };
+        }
+
+        /// Substitute env params into a device's positional and kv values.
+        fn substDevice(arena: std.mem.Allocator, d: ir.Device, env: *const Env) Error!ir.Device {
+            var nd = d;
+            if (d.positional.len > 0) {
+                const pos = try arena.alloc(ir.Value, d.positional.len);
+                for (d.positional, pos) |v, *o| o.* = try substValue(arena, v, env);
+                nd.positional = pos;
+            }
+            if (d.kv.len > 0) {
+                const kv = try arena.alloc(ir.Kv, d.kv.len);
+                for (d.kv, kv) |kvp, *o| o.* = .{ .key = kvp.key, .value = try substValue(arena, kvp.value, env) };
+                nd.kv = kv;
+            }
+            return nd;
         }
 
         fn substValue(arena: std.mem.Allocator, v: ir.Value, env: *const Env) Error!ir.Value {
             return switch (v) {
                 .num => v,
                 .name => |nm| if (env.get(nm)) |sv| sv else v,
-                .expr => |e| .{ .expr = try substExpr(arena, e, env) },
+                .expr => |e| blk: {
+                    const se = try substExpr(arena, e, env);
+                    // Fold to a plain number when possible: downstream lowering
+                    // (engine valueNumber) only understands .num.
+                    break :blk if (foldExpr(se)) |n| ir.Value{ .num = n } else ir.Value{ .expr = se };
+                },
                 .group => |g| blk: {
                     const args = try arena.alloc(ir.Value, g.args.len);
                     for (g.args, args) |a, *o| o.* = try substValue(arena, a, env);
