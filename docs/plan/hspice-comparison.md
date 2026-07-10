@@ -110,11 +110,11 @@ the build-order id in the last column.
 | `.LIN [sparcalc noisecalc gdcalc mixedmode2port format dataformat ...]` [CR .LIN; SA Ch.17] | S/Y/Z/H, mixed-mode S, group delay, stability factors, 2-port and N-port noise parameters; writes `.sc#`, Touchstone 1/2, CITI | S/Y/Z/H, mixed-mode S, group delay, K and MU, two-port noise; Touchstone 1.0, or 2.0 when port impedances differ (`ac/sp.zig`) | `acsp` (S) | high for RF | C4, landed |
 | `.NET` (obsolete, App.A) | Z/Y/H/S of a 1- or 2-port inside `.AC` | yes, ideal V/I ports, S against RIN/ROUT (`ac/sp.zig`) | no | low | C4, landed |
 | `.LSTB mode=single\|diff\|comm vsource=v[,v]` [CR .LSTB] | loop gain by Middlebrook injection; GM, PM, unity-gain frequency and low-frequency gain in the listing | `.lstb` (`ac/lstb.zig`): Tian double injection as VACASK's `acstb`, single/diff/comm, `localgnd`, margins plot refined on the circuit, `.measure lstb`; `.stb` stays single injection | `acstb`: current and voltage injection, both directions, DUT y-parameters | high | done |
-| `.SAMPLE FS= [TOL NUMF MAXFLD BETA]` [CR .SAMPLE] | noise folded by a sampler | no | no | low to medium | D6, S |
+| `.SAMPLE FS= [TOL NUMF MAXFLD BETA]` [CR .SAMPLE] | noise folded by a sampler | `onoise_sampled` on every `.noise` spectrum (`ac/noise.zig`); BETA is a BETA/FS averaging window, ESPice's unconfirmed reading; TOL, NUMF checked and unused | no | low to medium | done |
 | `.ACMATCH outvar ...` [CR .ACMATCH; SA Ch.23] | AC mismatch per device from the variation block | no | no | medium | C5, M |
 | `.DCMATCH outvar ...` [CR .DCMATCH; SA Ch.23] | DC mismatch per device | Pelgrom from W·L, not from a variation block (`dc/dcmatch.zig`) | no | medium | C5, S |
 | `.TEMP t1 [t2 ...]` [CR .TEMP] | every analysis at each temperature | three-number sweep, DC OP only (`sweep/temp_sweep.zig`); S3 | `sweep option="temp"` | high | A5, S |
-| `.TRANNOISE out METHOD=MC\|SDE SAMPLES= SEED= FMIN FMAX SCALE` [CR .TRANNOISE; RF Ch.9] | transient noise, sampled or SDE | `.trannoise`: white, BE, own syntax (`tran/tran_noise.zig`) | white and flicker | medium | C7, M |
+| `.TRANNOISE out METHOD=MC\|SDE SAMPLES= SEED= FMIN FMAX SCALE` [CR .TRANNOISE; RF Ch.9] | transient noise, sampled or SDE | white and flicker, BE (`tran/tran_noise.zig`): MC with SAMPLES (a plot per index, index 1 noiseless), SDE as exact covariance propagation of the same steps (dense, sources at the OP), TIME= landing; ESPice's own `.trannoise tstep tstop` too | white and flicker | medium | done |
 | `.JITTER TRANNOISE\|TRAN TRIG ov VAL= TD=` [CR .JITTER] | time-interval-error jitter from transient noise | no | no | medium | C7 |
 | (VACASK) `dcinc` | DC small-signal response to the sources' increments | `.dcinc` (`dc/xf.zig`) | yes | low | done |
 
@@ -127,14 +127,14 @@ the build-order id in the last column.
 | `.HBNOISE out src sweep [sidebands]` [CR .HBNOISE; RF Ch.8] | cyclostationary noise on the HB orbit | `.pnoise` on the shooting orbit (`pss/pnoise.zig`); multi-tone (`pss/mhb_lptv.zig`) | `hbnoise` | high for RF | D1, M (vacask-comparison G4) |
 | `.HBXF out sweep` [CR .HBXF] | periodic transfer function | `.pxf` on the shooting orbit (`pss/pxf.zig`); multi-tone (`pss/mhb_lptv.zig`) | no | medium | D1, S |
 | `.HBOSC`, `.SNOSC` [CR; RF Ch.7] | oscillator steady state, period solved | no (`.pss` is driven only) | `pss` autonomous | high for RF | D3, M |
-| `.PHASENOISE out sweep method=0\|1\|2` [CR .PHASENOISE; RF Ch.7] | oscillator phase noise: nonlinear perturbation, periodic AC, broadband | no | no | high for RF | D4, M |
-| `.ACPHASENOISE out in carrier=` [CR .ACPHASENOISE] | phase-domain noise and jitter of a closed-loop PLL model | no | no | low | D4, M |
+| `.PHASENOISE out sweep method=0\|1\|2` [CR .PHASENOISE; RF Ch.7] | oscillator phase noise: nonlinear perturbation, periodic AC, broadband | METHOD=0 (white and flicker), 1, 2 and CARRIERINDEX on the autonomous HB orbit ([phase-noise.md](../analysis/phase-noise.md)); no listing, jitter or SPURIOUS | no | high for RF | D4 done |
+| `.ACPHASENOISE out in carrier=` [CR .ACPHASENOISE] | phase-domain noise and jitter of a closed-loop PLL model | `.noise` over the `.ac` sweep read as L = S/2 dBc/Hz (factor unconfirmed); no jitter | no | low | D4 done |
 | `.HBLIN sweep [NOISECALC=]` [CR .HBLIN; RF Ch.10] | frequency-translating S-parameters and noise figure (mixers) | S and SSB noise figure, single tone (`pss/hb_lptv.zig`) | no | medium | D5, landed |
 | `.HBLSP NHARMS= FREQSWEEP POWERSWEEP` [CR .HBLSP; RF Ch.10] | large-signal, power-dependent S-parameters | no | no | medium | D5, M |
 | `.SN TRES= PERIOD=` or `.SN TONE= NHARMS=` [CR .SN; RF Ch.6] | shooting-Newton PSS | `.pss` (`pss/pss.zig`) | `pss` | done | syntax alias, S |
 | `.SNAC`, `.SNNOISE`, `.SNXF` [CR] | periodic AC, noise, transfer on the shooting orbit | `.pac`, `.pnoise`, `.pxf` | `pac` | done | syntax aliases, S |
 | `.SNFT ov [FFT keywords]` [CR .SNFT] | FFT of the shooting result | no | no | medium | B5, S |
-| `.PTDNOISE out TIME= sweep` [CR .PTDNOISE] | noise at a time point of the period, strobed jitter | no | no | medium | D6, M |
+| `.PTDNOISE out TIME= sweep` [CR .PTDNOISE] | noise at a time point of the period, strobed jitter | `.ptdnoise` over `.sn` (`pss/pnoise.zig` `strobed`): one time or a LIN/DEC/OCT/POI TIME sweep, a plot per time; TIME=meas and `.MEASURE PTDNOISE` refused | no | medium | done |
 | `.ENV`, `.ENVOSC`, `.ENVFFT` [CR; RF Ch.11] | HB envelope with time-varying phasors, oscillator start-up, FFT of the envelope | `.envelope` is sample-envelope following, a different method (`tran/envelope.zig`) | no | medium | D7, L |
 
 ### 2.3 Statistics, corners and optimization
@@ -582,7 +582,7 @@ tier, the smaller item with more users goes first.
 | 24 | D1 | HB orbit adapter, `.hbnoise`, `.hbac`, `.hbxf` (done: [periodic-noise.md](../analysis/periodic-noise.md)) | M |
 | 25 | D3 | Oscillator PSS (`.snosc`, `.hbosc`) (done: [pss-shooting-harmonic-balance.md](../analysis/pss-shooting-harmonic-balance.md)) | M |
 | 26 | D2 | Multi-tone sparse HB with lane preconditioner and phasors | L |
-| 27 | D4 | `.phasenoise` (METHOD=0, white sources: done, [phase-noise.md](../analysis/phase-noise.md)), then `.acphasenoise` | M, M |
+| 27 | D4 | `.phasenoise` (METHOD=0/1/2, flicker, CARRIERINDEX) and `.acphasenoise`: done, [phase-noise.md](../analysis/phase-noise.md) | M, M |
 | 28 | C7 | HSPICE `.trannoise`, flicker noise, `.jitter` | M |
 | 29 | C8 | Optimization (LM, bisection, pass/fail: done, [optimize.md](../analysis/optimize.md); pushout) | L |
 | 30 | B6 | `.disto` SIM2/DIM2/DIM3 and the Rload form | M |

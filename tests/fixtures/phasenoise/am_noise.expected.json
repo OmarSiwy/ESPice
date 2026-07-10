@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "analysis": "phasenoise",
+  "purpose": "Periodic-noise phase noise (METHOD=1) includes amplitude noise; METHOD=2 stitches METHOD=0 to it.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Weakly nonlinear Van der Pol LC, A = 1 V, amplitude relaxation gamma = (g1 - 1/R)/C = 6e4/s; narrowband envelope: L(fm) = kT/(R C^2 A^2) [1/w^2 + 1/(gamma^2 + w^2)], w = 2 pi fm, 27 degC; O(fm/f0) and O(eps = 0.01) model error, inside 0.1 dB."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Phase Noise Analysis",
+        "match": "exact",
+        "columns": {
+          "phnoise": {
+            "unit": "dBc/Hz",
+            "rtol": 0,
+            "atol": 0.1,
+            "values": [
+              -139.74252562336858,
+              -149.38009611223694,
+              -157.96226093952822
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            1000.0,
+            3162.2776601683795,
+            10000.0
+          ],
+          "atol": 0,
+          "rtol": 1e-09
+        },
+        "row_count": 3
+      },
+      {
+        "name": "Phase Noise Analysis",
+        "match": "exact",
+        "columns": {
+          "phnoise": {
+            "unit": "dBc/Hz",
+            "rtol": 0,
+            "atol": 0.1,
+            "values": [
+              -139.74252562336858,
+              -149.38009611223694,
+              -157.96226093952822
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            1000.0,
+            3162.2776601683795,
+            10000.0
+          ],
+          "atol": 0,
+          "rtol": 1e-09
+        },
+        "row_count": 3
+      }
+    ],
+    "checks": [],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "082951c8f10103ae8d8a4ceea1b0d420214ec3da6f1f2a97d7e5d0a077d33660"
+}

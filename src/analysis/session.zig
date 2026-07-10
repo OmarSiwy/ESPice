@@ -565,6 +565,7 @@ pub fn schemaOf(allocator: std.mem.Allocator, topology: *const Circuit, deck: *c
         .op, .dcinc => deck.probes.len,
         // HSPICE `.op <time>` publishes the `.op` layout, with no time column.
         .tran => |o| deck.probes.len + @intFromBool(!o.snapshot),
+        .tran_noise => |o| deck.probes.len + 1 + @intFromBool(o.sde),
         .tf => 3,
         .lstb => |o| if (o.margins) 5 else 8,
         .dcxf => |o| (if (o.tf_only) @as(usize, 1) else 3) * o.sources.len,

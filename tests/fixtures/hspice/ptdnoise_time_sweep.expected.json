@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "analysis": "pnoise",
+  "purpose": "HSPICE .ptdnoise TIME=<sweep> reports the strobed noise density at each time of the sweep.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Memoryless diode driven by I(t) = 1m + 0.5m sin(2 pi 1MHz t): 2 q Vt^2 / I(t) V^2/Hz at every frequency; I = 1.5, 1 and 0.5 mA at 250, 500 and 750 ns; Vt at 25 degC. The 7-sideband conversion matrix leaves 0.15 % at 500 ns, where I(t) is steepest (rtol 3e-3 there, 1e-3 at the extremes)."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Periodic Time-Dependent Noise Analysis (time=2.5000000000000004e-7)",
+        "match": "samples",
+        "columns": {
+          "ptdnoise_density": {
+            "unit": "V^2/Hz",
+            "rtol": 0.001,
+            "atol": 0,
+            "values": [
+              1.410147479865755e-19,
+              1.410147479865755e-19,
+              1.410147479865755e-19
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            1000.0,
+            10000.0,
+            100000.0
+          ],
+          "atol": 0,
+          "rtol": 1e-09
+        }
+      },
+      {
+        "name": "Periodic Time-Dependent Noise Analysis (time=5.000000000000001e-7)",
+        "match": "samples",
+        "columns": {
+          "ptdnoise_density": {
+            "unit": "V^2/Hz",
+            "rtol": 0.003,
+            "atol": 0,
+            "values": [
+              2.1152212197986326e-19,
+              2.1152212197986326e-19,
+              2.1152212197986326e-19
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            1000.0,
+            10000.0,
+            100000.0
+          ],
+          "atol": 0,
+          "rtol": 1e-09
+        }
+      },
+      {
+        "name": "Periodic Time-Dependent Noise Analysis (time=7.5e-7)",
+        "match": "samples",
+        "columns": {
+          "ptdnoise_density": {
+            "unit": "V^2/Hz",
+            "rtol": 0.001,
+            "atol": 0,
+            "values": [
+              4.230442439597265e-19,
+              4.230442439597265e-19,
+              4.230442439597265e-19
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            1000.0,
+            10000.0,
+            100000.0
+          ],
+          "atol": 0,
+          "rtol": 1e-09
+        }
+      }
+    ],
+    "checks": [],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "cf06928231e21c7e87b4cfe0d7b3813901a1236fd665ffa4a349f0d90a43aeb6"
+}

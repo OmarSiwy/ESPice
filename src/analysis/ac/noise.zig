@@ -275,6 +275,18 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     // are amplitude spectra (V/sqrt(Hz)) and the totals are V rms. `inoise`
     // is the same noise referred to the input source's terminals.
     const n_cols = columns.labels.len;
+    // `.acphasenoise`: the output PSD is in rad^2/Hz, and phase noise is
+    // the single-sideband L(f) = S(f)/2 (IEEE 1139; the HSPICE manual gives
+    // no formula, unconfirmed).
+    if (opts.phase) {
+        const names = try a.dupe([]const u8, &.{ "frequency", "phnoise" });
+        const data = try a.alloc(f64, 2 * @as(usize, n_points));
+        for (freqs, density, 0..) |f, d, i| {
+            data[2 * i] = f;
+            data[2 * i + 1] = 10 * std.math.log10(d / 2);
+        }
+        return .{ .plotname = "AC Phase Noise Analysis", .varnames = names, .is_complex = false, .npoints = n_points, .data = data };
+    }
     if (opts.integrated) {
         const names = try a.alloc([]const u8, 2 * n_cols + 2);
         const data = try a.alloc(f64, names.len);

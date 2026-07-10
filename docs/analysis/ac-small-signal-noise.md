@@ -196,10 +196,12 @@ $$
 
 where the sinc² is an integrator over $\beta / F_S$ seconds ahead of the
 sampler (none at BETA=0). The manual names BETA a duty-cycle integrator
-without giving its transfer; the averaging window is ESPice's reading of
-it. TOL and NUMF size HSPICE's adaptive fold count, which MAXFLD bounds
+(BETA=1, the default, a simple integrator; a clocked one takes its duty
+cycle) without giving its transfer. The unit-gain averaging window is
+ESPice's reading of it and is unconfirmed against HSPICE. TOL and NUMF size HSPICE's adaptive fold count, which MAXFLD bounds
 here; they are checked and unused. The folded frequencies are one extra
-`.noise` sweep over a POI list. `hspice/sample_rc` checks an RC at BETA=0.
+`.noise` sweep over a POI list. `hspice/sample_rc` checks an RC at BETA=0
+and `hspice/sample_rc_beta` the same RC at BETA=0.5.
 
 ## 2. Flow explanation
 

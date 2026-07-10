@@ -71,6 +71,11 @@ pub fn queries(arena: std.mem.Allocator, cards: []const netlist.Analysis, append
             if (buildJob(c, sources, card_refs, ctx)) |job| ctx.sn_f0 = 1 / job.?.pss.period else |_| {}
         },
         .op => fan = @max(fan, c.args.len),
+        .tran_noise => fan = @max(fan, tranNoiseSamples(c.args)),
+        .pnoise => if (c.sn and std.ascii.startsWithIgnoreCase(c.line, ".ptdnoise")) {
+            var k: usize = 2;
+            if (ptdTimes(arena, c.args, &k)) |times| fan = @max(fan, times.len) else |_| {}
+        },
         else => {},
     };
     const temps = @max(deck_opts.temp_list.len, 1);
@@ -145,6 +150,35 @@ pub fn queries(arena: std.mem.Allocator, cards: []const netlist.Analysis, append
             if (span.count != 0) n = first + copyVariants(jobs[first..], n - first, span);
             continue;
         }
+        // HSPICE `.trannoise ... SAMPLES=n`: one run per Monte Carlo index
+        // from SEED on; index 1 is noiseless [RF Ch.9].
+        if (job == .tran_noise and c.args.len > 0 and c.args[0] != .num) {
+            const runs = tranNoiseSamples(c.args);
+            const base = job.tran_noise;
+            for (0..runs) |k| {
+                var o = base;
+                o.seed = base.seed + k;
+                if (o.seed == 1) o.scale = 0;
+                if (runs > 1) o.sample = @intCast(o.seed);
+                jobs[n] = .{ .tran_noise = o };
+                n += 1;
+            }
+            if (span.count != 0) n = first + copyVariants(jobs[first..], n - first, span);
+            continue;
+        }
+        // HSPICE `.ptdnoise TIME=<sweep>`: one strobed noise query per time.
+        // ponytail: each query shoots its own PSS; one orbit serving every
+        // strobe is the upgrade if long time sweeps get slow.
+        if (job == .pnoise and job.pnoise.strobe != null) {
+            var k: usize = 2;
+            for (try ptdTimes(arena, c.args, &k)) |t| {
+                jobs[n] = job;
+                jobs[n].pnoise.strobe = t;
+                n += 1;
+            }
+            if (span.count != 0) n = first + copyVariants(jobs[first..], n - first, span);
+            continue;
+        }
         jobs[n] = job;
         n += 1;
         // `.lstb` also reports its margins.
@@ -155,7 +189,7 @@ pub fn queries(arena: std.mem.Allocator, cards: []const netlist.Analysis, append
         }
         // The "Integrated Noise" plot always exists; a degenerate band
         // integrates to zero and ngspice still prints the row.
-        if (job == .noise) {
+        if (job == .noise and !job.noise.phase) {
             job.noise.integrated = true;
             jobs[n] = job;
             n += 1;
@@ -867,19 +901,18 @@ fn lin(args: []const Value, ports: []const requests.Port) !requests.Sp.Lin {
     return o;
 }
 
-/// HSPICE `.ptdnoise v(out) TIME=t [TDELTA=dt] <sweep> [LISTFREQ= LISTCOUNT=
-/// LISTFLOOR= LISTSOURCES=]` [CR .PTDNOISE] at the `.sn` fundamental: the
-/// noise density at time t of the period. A TIME sweep or a `.meas` name is
-/// `UnsupportedAnalysisOutput`; TDELTA only feeds HSPICE's strobed-jitter
-/// measure and the LIST keywords its listing, so they are checked and unused.
+/// HSPICE `.ptdnoise v(out) TIME=t|<sweep> [TDELTA=dt] <sweep> [LISTFREQ=
+/// LISTCOUNT= LISTFLOOR= LISTSOURCES=]` [CR .PTDNOISE] at the `.sn`
+/// fundamental: the noise density at time t of the period, with `strobe`
+/// set to the first time (`ptdTimes` lists them all). A `.meas` name for
+/// TIME is `UnsupportedAnalysisOutput`; TDELTA only feeds HSPICE's
+/// strobed-jitter measure and the LIST keywords its listing, so they are
+/// checked and unused.
 fn ptdNoise(ctx: CardContext, args: []const Value, pos: u32, neg: u32) !requests.Pnoise {
     const f0 = ctx.sn_f0 orelse return error.MissingAnalysisCard;
     var lower: [16]u8 = undefined;
-    if (args.len < 3 or args[0] != .group or !std.mem.eql(u8, try keyword(args, 1, &lower), "time")) return error.InvalidAnalysisArguments;
-    if (args[2] != .num) return error.UnsupportedAnalysisOutput;
-    const t = try number(args, 2);
-    if (!(t >= 0)) return error.InvalidAnalysisArguments;
-    var k: usize = 3;
+    var k: usize = 2;
+    const t = (try ptdTimes(ctx.arena, args, &k))[0];
     if (k < args.len and args[k] == .name and std.mem.eql(u8, try keyword(args, k, &lower), "tdelta")) {
         _ = try positive(args, k + 1);
         k += 2;
@@ -891,16 +924,36 @@ fn ptdNoise(ctx: CardContext, args: []const Value, pos: u32, neg: u32) !requests
     return .{ .out_node = try outputNode(pos), .out_neg = try outputNeg(neg), .sweep = grid.sweep, .f_fundamental = f0, .strobe = t };
 }
 
-/// HSPICE `.trannoise out [METHOD=MC] [SEED=] [SAMPLES=1] [AUTOCORRELATION=]
-/// [FMIN=] [FMAX=] [SCALE=]` [CR .TRANNOISE] over the deck's `.tran`: one
-/// Monte Carlo sample stepped at 1/(2 FMAX), the bandwidth that carries the
-/// white noise up to FMAX (default 1/TSTEP). METHOD=SDE, TIME= and more
-/// than one sample are `UnsupportedAnalysisOutput`. The output only names
-/// what HSPICE's ONOISE refers to; every probe is recorded.
-fn hspiceTranNoise(ctx: CardContext, args: []const Value) !requests.TranNoise {
+/// The TIME values of a `.ptdnoise` card, one number or a LIN/DEC/OCT/POI
+/// sweep starting at `args[k.*]`, `k` advanced past them. Allocated in
+/// `arena`; never empty.
+fn ptdTimes(arena: std.mem.Allocator, args: []const Value, k: *usize) ![]const f64 {
+    var lower: [16]u8 = undefined;
+    if (args.len < 3 or args[0] != .group or !std.mem.eql(u8, try keyword(args, 1, &lower), "time")) return error.InvalidAnalysisArguments;
+    const times = if (args[2] == .num) blk: {
+        k.* = 3;
+        break :blk try arena.dupe(f64, &.{try number(args, 2)});
+    } else blk: {
+        const sweeps = std.StaticStringMap(void).initComptime(.{ .{"lin"}, .{"dec"}, .{"oct"}, .{"poi"} });
+        if (!sweeps.has(try keyword(args, 2, &lower))) return error.UnsupportedAnalysisOutput;
+        k.* = 2;
+        break :blk (try dcAxis(arena, args, k)).points;
+    };
+    for (times) |t| if (!(t >= 0)) return error.InvalidAnalysisArguments;
+    return times;
+}
+
+/// HSPICE `.trannoise out [METHOD=MC|SDE] [SEED=] [SAMPLES=] [TIME=all|t]
+/// [AUTOCORRELATION=] [FMIN=] [FMAX=] [SCALE=]` [CR .TRANNOISE] over the
+/// deck's `.tran`, stepped at 1/(2 FMAX), the bandwidth that carries the
+/// white noise up to FMAX (default 1/TSTEP). SEED is the Monte Carlo index
+/// of the first run (default 2); `queries` turns the SAMPLES runs into one
+/// query each and index 1 into the noiseless run. The output
+/// names v(out) for SDE's `onoise`; a sampled run records every probe.
+fn hspiceTranNoise(ctx: CardContext, args: []const Value, pos: u32, neg: u32) !requests.TranNoise {
     const tran = ctx.tran orelse return error.MissingAnalysisCard;
     if (args[0] != .group) return error.InvalidAnalysisArguments;
-    var o: requests.TranNoise = .{ .tol = tran.tol, .t_stop = tran.t_stop };
+    var o: requests.TranNoise = .{ .tol = tran.tol, .t_stop = tran.t_stop, .seed = 2 };
     var f_max = 1 / tran.dt_init;
     const Key = enum { method, seed, samples, autocorrelation, fmin, fmax, scale, time };
     var i: usize = 1;
@@ -909,19 +962,40 @@ fn hspiceTranNoise(ctx: CardContext, args: []const Value) !requests.TranNoise {
         const key = std.meta.stringToEnum(Key, try keyword(args, i, &lower)) orelse return error.InvalidAnalysisArguments;
         if (i + 1 >= args.len) return error.InvalidAnalysisArguments;
         switch (key) {
-            .method => if (!std.mem.eql(u8, try keyword(args, i + 1, &lower), "mc")) return error.UnsupportedAnalysisOutput,
-            .seed => o.seed = @intFromFloat(@min(@abs(try number(args, i + 1)), 0x1p63)),
-            .samples => if (try number(args, i + 1) != 1) return error.UnsupportedAnalysisOutput,
+            .method => {
+                const m = try keyword(args, i + 1, &lower);
+                if (std.mem.eql(u8, m, "sde")) o.sde = true else if (!std.mem.eql(u8, m, "mc")) return error.InvalidAnalysisArguments;
+            },
+            .seed => o.seed = try count(u32, args, i + 1, 1),
+            .samples => _ = try count(u32, args, i + 1, 1),
             .autocorrelation => {},
             .fmin => o.f_min = try positive(args, i + 1),
             .fmax => f_max = try positive(args, i + 1),
             .scale => o.scale = try positive(args, i + 1),
-            .time => return error.UnsupportedAnalysisOutput,
+            .time => if (args[i + 1] == .num) {
+                o.t_break = try positive(args, i + 1);
+            } else if (!std.mem.eql(u8, try keyword(args, i + 1, &lower), "all")) return error.InvalidAnalysisArguments,
         }
+    }
+    if (o.sde) {
+        if (tranNoiseSamples(args) != 1) return error.InvalidAnalysisArguments;
+        o.out_node = try outputNode(pos);
+        o.out_neg = try outputNeg(neg);
     }
     o.dt_max = 0.5 / f_max;
     o.dt_init = o.dt_max;
     return o;
+}
+
+/// SAMPLES= of an HSPICE `.trannoise` card, 1 when absent or malformed
+/// (`hspiceTranNoise` reports the malformed card).
+fn tranNoiseSamples(args: []const Value) u32 {
+    var i: usize = 1;
+    while (i + 1 < args.len) : (i += 2) {
+        var lower: [16]u8 = undefined;
+        if (std.mem.eql(u8, keyword(args, i, &lower) catch return 1, "samples")) return count(u32, args, i + 1, 1) catch 1;
+    }
+    return 1;
 }
 
 /// HSPICE `.hb TONES=f0 [f1 ...] [NHARMS=h0 [h1 ...]] [INTMODMAX=n]
@@ -1081,7 +1155,7 @@ fn outputLabel(arena: std.mem.Allocator, value: Value) ![]const u8 {
 /// `UnsupportedAnalysisOutput`, and `MissingAnalysisCard` for an HSPICE form
 /// whose deck lacks the card it reads (`ctx`).
 pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const requests.CardRef, ctx: CardContext) !?Job {
-    const args = a.args;
+    var args = a.args;
     const id = a.kind;
     const node_id = a.pos;
     const node_neg = a.neg;
@@ -1103,7 +1177,7 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
         },
         .tran, .tran_noise, .matex => {
             if (id == .tran and a.dialect == .hspice) return .{ .tran = try hspiceTran(args) };
-            if (id == .tran_noise and args.len > 0 and args[0] != .num) return .{ .tran_noise = try hspiceTranNoise(ctx, args) };
+            if (id == .tran_noise and args.len > 0 and args[0] != .num) return .{ .tran_noise = try hspiceTranNoise(ctx, args, node_id, node_neg) };
             try arity(args, 2, if (id == .tran) 5 else 2);
             const step = try positive(args, 0);
             const stop = try positive(args, 1);
@@ -1179,6 +1253,28 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
             // nonzero pts or inter asks for the per-device contributions.
             // The input reference source does not drive the noise solve, but
             // a name no card carries is still an error, not a silent success.
+            // HSPICE `.acphasenoise out in [interval] carrier= [LIST...=]`
+            // [CR .ACPHASENOISE] is the same solve read as phase noise; the
+            // carrier only scales HSPICE's jitter listing, unused here.
+            const phase = std.ascii.startsWithIgnoreCase(a.line, ".acphasenoise");
+            if (phase) {
+                const keys = std.StaticStringMap(void).initComptime(.{ .{"carrier"}, .{"listfreq"}, .{"listcount"}, .{"listfloor"}, .{"listsources"} });
+                var k: usize = 2;
+                while (k < args.len and args[k] == .num) k += 1;
+                var carrier = false;
+                var kw: [16]u8 = undefined;
+                var j = k;
+                while (j < args.len) : (j += 2) {
+                    const key = try keyword(args, j, &kw);
+                    if (!keys.has(key) or j + 1 >= args.len) return error.InvalidAnalysisArguments;
+                    if (std.mem.eql(u8, key, "carrier")) {
+                        _ = try positive(args, j + 1);
+                        carrier = true;
+                    }
+                }
+                if (!carrier) return error.InvalidAnalysisArguments;
+                args = args[0..k];
+            }
             var i: usize = 1;
             var in_branch: ?u32 = null;
             const grid_words = std.StaticStringMap(void).initComptime(.{ .{"dec"}, .{"oct"}, .{"lin"}, .{"poi"} });
@@ -1215,8 +1311,9 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
                 .in_branch = in_branch,
                 .in_nodes = in_nodes,
                 .sweep = sweep,
-                .contributions = contributions,
+                .contributions = contributions and !phase,
                 .cards = cards,
+                .phase = phase,
             } };
         },
         .pnoise => {
@@ -1438,13 +1535,36 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
             return .{ .hblin = .{ .f0 = 0, .sweep = grid.sweep, .ports = sources.ports, .noise = noise } };
         },
         .phasenoise => {
-            // `.phasenoise v(out) sweep [f0 [K]]`: without f0 the oscillator
-            // is the deck's `.hbosc`; with it, v(out) is the phase node.
+            // `.phasenoise v(out) sweep [f0 [K]] [METHOD=0|1|2]
+            // [CARRIERINDEX=k] [LIST...=] [SPURIOUS=0]` [RF Ch.7]: without
+            // f0 the oscillator is the deck's `.hbosc`; with it, v(out) is
+            // the phase node. The LIST keywords shape HSPICE's listing and
+            // are checked and unused.
             const out = try outputNode(node_id);
-            const grid = try frequencySweep(args, 1);
-            try arity(args, 5, 7);
-            if (args.len == 5) return .{ .phasenoise = .{ .f0 = 0, .osc_node = out, .sweep = grid } };
-            return .{ .phasenoise = .{ .f0 = try positive(args, 5), .n_harmonics = try count(u16, args, 6, 8), .osc_node = out, .sweep = grid } };
+            var o: requests.PhaseNoise = .{ .f0 = 0, .osc_node = out, .sweep = try frequencySweep(args, 1) };
+            var i: usize = 5;
+            if (i < args.len and args[i] == .num) {
+                o.f0 = try positive(args, i);
+                o.n_harmonics = try count(u16, args, i + 1, 8);
+                i += if (i + 1 < args.len and args[i + 1] == .num) 2 else 1;
+            }
+            const Key = enum { method, carrierindex, listfreq, listcount, listfloor, listsources, spurious };
+            while (i < args.len) : (i += 2) {
+                var lower: [16]u8 = undefined;
+                const key = std.meta.stringToEnum(Key, try keyword(args, i, &lower)) orelse return error.InvalidAnalysisArguments;
+                if (i + 1 >= args.len) return error.InvalidAnalysisArguments;
+                switch (key) {
+                    .method => {
+                        const m = try number(args, i + 1);
+                        if (m != 0 and m != 1 and m != 2) return error.InvalidAnalysisArguments;
+                        o.method = @enumFromInt(@as(u2, @intFromFloat(m)));
+                    },
+                    .carrierindex => o.carrier = try count(u16, args, i + 1, 1),
+                    .spurious => if (try number(args, i + 1) != 0) return error.UnsupportedAnalysisOutput,
+                    .listfreq, .listcount, .listfloor, .listsources => {},
+                }
+            }
+            return .{ .phasenoise = o };
         },
         .pac, .pxf => {
             // HSPICE `.snac <sweep>` and `.snxf v(out) <sweep>` [CR .SNAC,
