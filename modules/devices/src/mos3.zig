@@ -648,8 +648,8 @@ fn junctionCharge(comptime S: type, v: S, cj0: f64, p: QPrep) S {
     const q_dep = x_dep.log().scale(p.one_minus_mj).exp().neg().addC(1.0).scale(cj0 * p.pb_safe / p.one_minus_mj);
 
     // Forward-bias extension coefficients
-    const f1 = (cj0 * p.pb_safe / p.one_minus_mj) * (1.0 - @exp(p.one_minus_mj * @log(p.one_minus_fc)));
-    const f2 = @exp((1.0 + p.mj) * @log(p.one_minus_fc));
+    const f1 = (cj0 * p.pb_safe / p.one_minus_mj) * (1.0 - contract.fmath.exp(p.one_minus_mj * contract.fmath.log(p.one_minus_fc)));
+    const f2 = contract.fmath.exp((1.0 + p.mj) * contract.fmath.log(p.one_minus_fc));
     const f3 = 1.0 - (p.fc_pb / p.pb_safe) * (1.0 + p.mj);
     const q_fwd = v.addC(-p.fc_pb).scale(f3)
         .add(v.mul(v).addC(-(p.fc_pb * p.fc_pb)).scale(p.mj / (2.0 * p.pb_safe)))
@@ -779,7 +779,7 @@ pub fn limit(model: *const Model, instance: *const Instance, x_new: [n_u]f64, x_
     const vt: f64 = 8.617333e-5 * (temp + 273.15);
 
     // Critical voltage for pnjlim
-    const v_crit = vt * @log(vt / (@sqrt(2.0) * is_val));
+    const v_crit = vt * contract.fmath.log(vt / (@sqrt(2.0) * is_val));
 
     var result = x_new;
 
@@ -795,12 +795,12 @@ pub fn limit(model: *const Model, instance: *const Instance, x_new: [n_u]f64, x_
             if (vbs_old > 0.0) {
                 const arg = (vbs_new - vbs_old) / vt;
                 if (arg > 0.0) {
-                    vbs_limited = vbs_old + vt * (2.0 + @log(@max(arg - 2.0, 1e-30)));
+                    vbs_limited = vbs_old + vt * (2.0 + contract.fmath.log(@max(arg - 2.0, 1e-30)));
                 } else {
                     vbs_limited = v_crit;
                 }
             } else if (vbs_new > 0.0) {
-                vbs_limited = vt * @log(@max(vbs_new / vt, 1e-30));
+                vbs_limited = vt * contract.fmath.log(@max(vbs_new / vt, 1e-30));
             } else {
                 vbs_limited = v_crit;
             }
@@ -822,12 +822,12 @@ pub fn limit(model: *const Model, instance: *const Instance, x_new: [n_u]f64, x_
             if (vbd_old > 0.0) {
                 const arg = (vbd_new - vbd_old) / vt;
                 if (arg > 0.0) {
-                    vbd_limited = vbd_old + vt * (2.0 + @log(@max(arg - 2.0, 1e-30)));
+                    vbd_limited = vbd_old + vt * (2.0 + contract.fmath.log(@max(arg - 2.0, 1e-30)));
                 } else {
                     vbd_limited = v_crit;
                 }
             } else if (vbd_new > 0.0) {
-                vbd_limited = vt * @log(@max(vbd_new / vt, 1e-30));
+                vbd_limited = vt * contract.fmath.log(@max(vbd_new / vt, 1e-30));
             } else {
                 vbd_limited = v_crit;
             }

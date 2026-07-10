@@ -3,18 +3,15 @@
 //! Construction policy lives here with the app: node interning, subcircuit
 //! tagging + BBD permutation, device accumulation. The batch mechanism
 //! (ProtoStore/DeviceBatch, pattern freeze) is analysis-owned — see
-//! modules/analysis/src/batch.zig; dlopen'd devices live in dyn.zig there.
+//! modules/analysis/src/problem.zig.
 
 const std = @import("std");
 const analysis = @import("analysis");
-const batch = analysis.batch;
-const dyn = analysis.dyn;
+const batch = analysis.problem;
 
 const GROUND = analysis.GROUND;
 const Circuit = analysis.Circuit;
 const Proto = batch.Proto;
-const DynDevice = dyn.DynDevice;
-const DynKv = dyn.DynKv;
 
 fn uCount(comptime D: type) usize {
     return @typeInfo(D.U).@"enum".fields.len;
@@ -205,12 +202,36 @@ pub const Builder = struct {
         const n_u = comptime uCount(D);
         var all: [n_u]u32 = undefined;
         inline for (0..D.num_ports) |p| all[p] = nodes[p];
-        inline for (D.num_ports..n_u) |u| all[u] = self.addNode();
+        // Zero-parasitic internal nodes collapse onto their port (ngspice
+        // DIOsetup: posPrimeNode = posNode when RS=0). Keeping them separate
+        // behind a 1e12 short makes elimination cancel catastrophically
+        // (1e12 − 1e12·(1−ε) = float noise) and the Newton dx explodes.
+        // The g_short stamps of a collapsed pair land on one slot and cancel
+        // exactly, so device evals need no change.
+        if (comptime @hasDecl(D, "collapse")) {
+            const col = D.collapse(&model, &instance);
+            inline for (D.num_ports..n_u) |u|
+                all[u] = if (col[u]) |p| all[p] else self.addNode();
+        } else {
+            inline for (D.num_ports..n_u) |u| all[u] = self.addNode();
+        }
 
         const store = try self.protoStore(D);
         try store.models.append(self.gpa, model);
         try store.instances.append(self.gpa, instance);
         try store.nodes.append(self.gpa, all);
+    }
+
+    /// Find-or-create the type-erased proto for a runtime (dlopen'd) device.
+    /// Identity: the vtable's static name pointer — same trick as
+    /// protoStore's @typeName pointer identity for comptime devices.
+    pub fn dynProto(self: *Builder, vt: *const batch.dyn.DeviceVtable) !Proto {
+        for (self.protos.items) |p| {
+            if (p.type_name.ptr == vt.name.ptr) return p;
+        }
+        const proto = try vt.proto_create(self.gpa);
+        try self.protos.append(self.gpa, proto);
+        return proto;
     }
 
     fn protoStore(self: *Builder, comptime D: type) !*batch.ProtoStore(D) {
@@ -231,64 +252,8 @@ pub const Builder = struct {
         return store;
     }
 
-    /// Add all instances of one dlopen'd generated device. Takes ownership
-    /// of `dyn_dev` (closed at circuit deinit; closed here on error). Internal
-    /// unknowns (n_u - num_ports per instance) are assigned like addDevice.
-    pub fn addDynDevice(
-        self: *Builder,
-        dyn_dev: DynDevice,
-        name: []const u8,
-        node_sets: []const []const u32,
-        model_kvs: []const []const DynKv,
-        instance_kvs: []const []const DynKv,
-    ) !void {
-        var dyn_owned = dyn_dev;
-        errdefer dyn_owned.close();
-        const gpa = self.gpa;
-        const n_u: usize = dyn_dev.n_u;
-        const count = node_sets.len;
-        std.debug.assert(model_kvs.len == count and instance_kvs.len == count);
-
-        const store = try gpa.create(dyn.DynProtoStore);
-        errdefer gpa.destroy(store);
-        store.* = .{
-            .dyn = dyn_owned,
-            .name = try gpa.dupe(u8, name),
-            .count = @intCast(count),
-            .nodes = try gpa.alloc(u32, count * n_u),
-            .models = try gpa.alignedAlloc(u8, .@"16", count * dyn_dev.model_size),
-            .instances = try gpa.alignedAlloc(u8, .@"16", count * dyn_dev.instance_size),
-        };
-
-        for (node_sets, 0..) |ports, id| {
-            for (0..n_u) |u| {
-                store.nodes[id * n_u + u] = if (u < dyn_dev.num_ports)
-                    (if (u < ports.len) ports[u] else GROUND)
-                else
-                    self.addNode();
-            }
-            const m_ptr = store.models.ptr + id * dyn_dev.model_size;
-            const i_ptr = store.instances.ptr + id * dyn_dev.instance_size;
-            dyn_dev.init_model(m_ptr);
-            dyn_dev.init_instance(i_ptr);
-            // Unknown keys are ignored (bool result), matching kv handling
-            // for static devices.
-            for (model_kvs[id]) |kv| _ = dyn_dev.set_model_param(m_ptr, kv.key.ptr, kv.key.len, kv.value);
-            for (instance_kvs[id]) |kv| _ = dyn_dev.set_instance_param(i_ptr, kv.key.ptr, kv.key.len, kv.value);
-        }
-
-        try self.protos.append(gpa, .{
-            .ctx = store,
-            .type_name = store.name,
-            .pattern = dyn.DynProtoStore.addPattern,
-            .finalize = dyn.DynProtoStore.finalize,
-            .destroy = dyn.DynProtoStore.destroy,
-            .apply_perm = dyn.DynProtoStore.applyPerm,
-        });
-    }
-
     /// Freeze: apply the BBD permutation, then hand the accumulated protos
-    /// to analysis.batch.freeze() which builds the union sparsity pattern,
+    /// to analysis.problem.freeze() which builds the union sparsity pattern,
     /// allocates planes and precomputes every slot tape. The Builder is
     /// consumed.
     pub fn compile(self: *Builder) !Circuit {

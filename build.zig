@@ -3,6 +3,8 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    // ponytail: default to Zig backend (17s vs 3m13s). -Dno-llvm=false for LLVM (bench/release).
+    const no_llvm = b.option(bool, "no-llvm", "Use Zig's native backend instead of LLVM (default: true)") orelse true;
 
     const devices_dep = b.dependency("devices", .{
         .target = target,
@@ -20,6 +22,51 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const compute_dep = b.dependency("compute", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // -----------------------------------------------------------------------
+    // Verilog-A / Verilog device models, baked in at BUILD time. The model
+    // list lives with the app source: benchmark/va_models.zon (a zon list of .va/
+    // .v/.sv paths). vagen runs fastvaf codegen over each and emits one
+    // contract-shaped module per device plus va_root.zig re-exporting them.
+    // The engine registry and the GPU megakernel both dispatch over this
+    // module, so VA devices ride the same comptime path as builtin ones.
+    // Editing a model or the list reruns only vagen + this module + link —
+    // everything else stays cached. Empty list ⇒ both loops compile to nothing.
+    // -----------------------------------------------------------------------
+    const va_files = listVaModels(b);
+    const va_root: std.Build.LazyPath = blk: {
+        if (va_files.len > 0) {
+            const vagen_exe = b.addExecutable(.{
+                .name = "vagen",
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("tools/vagen.zig"),
+                    .target = b.graph.host,
+                    .optimize = .Debug,
+                    .imports = &.{
+                        .{ .name = "fastvaf", .module = fastvaf_dep.module("fastvaf") },
+                    },
+                }),
+            });
+            const run = b.addRunArtifact(vagen_exe);
+            const out = run.addOutputDirectoryArg("va");
+            for (va_files) |file_path| run.addFileArg(file_path);
+            break :blk out.path(b, "va_root.zig");
+        }
+        const wf = b.addWriteFiles();
+        break :blk wf.add("va_root.zig", "//! no VA models baked in (benchmark/va_models.zon empty)\n");
+    };
+    const va_mod = b.createModule(.{
+        .root_source_file = va_root,
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "contract", .module = devices_dep.module("contract") },
+        },
+    });
 
     const exe = b.addExecutable(.{
         .name = "zpicey",
@@ -31,11 +78,23 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "devices", .module = devices_dep.module("devices") },
                 .{ .name = "analysis", .module = analysis_dep.module("analysis") },
                 .{ .name = "solvers", .module = solvers_dep.module("solvers") },
+                .{ .name = "compute", .module = compute_dep.module("compute") },
                 .{ .name = "fastvaf", .module = fastvaf_dep.module("fastvaf") },
+                .{ .name = "va_devices", .module = va_mod },
             },
         }),
     });
     exe.root_module.link_libc = true;
+    // Runtime .hdl loading compiles model .so's against these sources.
+    // ponytail: baked build root works for repo-run dev; ARPICE_SRC overrides,
+    // installable share/ dir when distribution matters.
+    const bopts = b.addOptions();
+    bopts.addOption([]const u8, "src_root", b.build_root.path orelse ".");
+    exe.root_module.addOptions("build_options", bopts);
+    if (no_llvm) {
+        exe.use_llvm = false;
+        exe.use_lld = false;
+    }
     b.installArtifact(exe);
 
     // Top-level tests: circuit construction (Builder) + every analysis
@@ -61,6 +120,10 @@ pub fn build(b: *std.Build) void {
         },
     });
     const tests = b.addTest(.{ .root_module = tests_mod });
+    if (no_llvm) {
+        tests.use_llvm = false;
+        tests.use_lld = false;
+    }
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run top-level tests");
     test_step.dependOn(&run_tests.step);
@@ -80,6 +143,10 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    if (no_llvm) {
+        bench_runner.use_llvm = false;
+        bench_runner.use_lld = false;
+    }
     b.installArtifact(bench_runner);
 
     const run_bench = b.addRunArtifact(bench_runner);
@@ -92,42 +159,33 @@ pub fn build(b: *std.Build) void {
     bench_step.dependOn(&run_bench.step);
 
     // -----------------------------------------------------------------------
-    // GPU compute (phase 1): host runtime + PTX kernel pipeline + smoke test.
-    // Nothing here touches the simulator; with -Dgpu=false (the default) the
-    // main build graph is unchanged and test-gpu just prints "skipped".
+    // GPU compute: analysis megakernel (modules/devices/src/kernel.zig).
+    // With -Dgpu=false (the default) the kernels module holds an empty stub
+    // and GPU init just declines at runtime.
     // -----------------------------------------------------------------------
-    const gpu = b.option(bool, "gpu", "Build nvptx GPU kernels and enable the GPU smoke test") orelse false;
-    const gpu_nv_arch = b.option([]const u8, "gpu-nv-arch", "NVIDIA SM architecture for PTX codegen") orelse "sm_89";
+    const GpuBackend = enum { none, nvidia, amd };
+    const gpu_backend = b.option(GpuBackend, "gpu", "GPU backend: nvidia (cubin via ptxas), amd (hsaco via llc), or none") orelse .none;
+    // Legacy compat: -Dgpu=true maps to nvidia
+    const gpu_nv_arch = b.option([]const u8, "gpu-nv-arch", "NVIDIA SM architecture (default sm_89)") orelse "sm_89";
+    const gpu_amd_arch = b.option([]const u8, "gpu-amd-arch", "AMD GFX architecture (default gfx1100)") orelse "gfx1100";
 
-    const compute_dep = b.dependency("compute", .{
-        .target = target,
-        .optimize = optimize,
-    });
-
-    const gpu_opts = b.addOptions();
-    gpu_opts.addOption(bool, "gpu", gpu);
-
-    // Generated "kernels" module: one `pub const <name> = @embedFile("<name>.ptx")`
-    // per kernel in modules/compute/kernels/, or empty stubs when -Dgpu=false so
-    // the smoke test still compiles (and skips at runtime).
     const kernels_wf = b.addWriteFiles();
     var kernels_src: std.ArrayList(u8) = .empty;
-    kernels_src.appendSlice(b.allocator, "//! Generated by build.zig — embedded PTX kernel images.\n") catch @panic("OOM");
-
-    for (listKernels(b)) |name| {
-        if (gpu) {
-            const ptx = buildPtxKernel(b, name, gpu_nv_arch);
-            _ = kernels_wf.addCopyFile(ptx, b.fmt("{s}.ptx", .{name}));
-            kernels_src.appendSlice(b.allocator, b.fmt(
-                "pub const {s} = @embedFile(\"{s}.ptx\");\n",
-                .{ name, name },
-            )) catch @panic("OOM");
-        } else {
-            kernels_src.appendSlice(b.allocator, b.fmt(
-                "pub const {s} = \"\"; // -Dgpu=false: kernel not built\n",
-                .{name},
-            )) catch @panic("OOM");
-        }
+    kernels_src.appendSlice(b.allocator, "//! Generated by build.zig — embedded GPU kernel images.\n") catch @panic("OOM");
+    switch (gpu_backend) {
+        .nvidia => {
+            const cubin = buildMegaKernelNvidia(b, gpu_nv_arch, devices_dep, va_mod, optimize);
+            _ = kernels_wf.addCopyFile(cubin, "megakernel.bin");
+            kernels_src.appendSlice(b.allocator, "pub const megakernel = @embedFile(\"megakernel.bin\");\n") catch @panic("OOM");
+        },
+        .amd => {
+            const hsaco = buildMegaKernelAmd(b, gpu_amd_arch, devices_dep, va_mod, optimize);
+            _ = kernels_wf.addCopyFile(hsaco, "megakernel.bin");
+            kernels_src.appendSlice(b.allocator, "pub const megakernel = @embedFile(\"megakernel.bin\");\n") catch @panic("OOM");
+        },
+        .none => {
+            kernels_src.appendSlice(b.allocator, "pub const megakernel = \"\";\n") catch @panic("OOM");
+        },
     }
     const kernels_root = kernels_wf.add("kernels.zig", kernels_src.items);
     const kernels_mod = b.createModule(.{
@@ -135,66 +193,42 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-
-    // e2e smoke test: probe -> load PTX -> saxpy over 1M floats -> verify.
-    const test_gpu_exe = b.addExecutable(.{
-        .name = "test-gpu",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("modules/compute/tests/test_saxpy_e2e.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "compute", .module = compute_dep.module("compute") },
-                .{ .name = "kernels", .module = kernels_mod },
-                .{ .name = "gpu_config", .module = gpu_opts.createModule() },
-            },
-        }),
-    });
-    test_gpu_exe.root_module.link_libc = true;
-
-    const run_test_gpu = b.addRunArtifact(test_gpu_exe);
-    run_test_gpu.stdio = .inherit;
-    b.step("test-gpu", "Run the GPU saxpy smoke test (skips cleanly without -Dgpu=true or a device)")
-        .dependOn(&run_test_gpu.step);
+    exe.root_module.addImport("kernels", kernels_mod);
 }
 
-/// Kernel sources are modules/compute/kernels/<name>.zig; each must export its
-/// entry point(s) with the PTX-visible name(s) the host looks up.
-fn listKernels(b: *std.Build) []const []const u8 {
-    const io = b.graph.io;
-    var names: std.ArrayList([]const u8) = .empty;
-    var dir = b.build_root.handle.openDir(io, "modules/compute/kernels", .{ .iterate = true }) catch
-        @panic("cannot open modules/compute/kernels");
-    defer dir.close(io);
-    var it = dir.iterate();
-    while (it.next(io) catch @panic("cannot list modules/compute/kernels")) |entry| {
-        if (entry.kind != .file) continue;
-        if (!std.mem.endsWith(u8, entry.name, ".zig")) continue;
-        names.append(b.allocator, b.dupe(entry.name[0 .. entry.name.len - 4])) catch @panic("OOM");
-    }
-    std.mem.sort([]const u8, names.items, {}, struct {
-        fn lt(_: void, a: []const u8, c: []const u8) bool {
-            return std.mem.lessThan(u8, a, c);
-        }
-    }.lt);
-    return names.items;
-}
-
-/// Zig 0.16's LLVM backend can't emit nvptx objects directly ("NVPTX aliasee
-/// must be a non-kernel function definition"), so each kernel goes through:
-///   1. zig build-obj -femit-llvm-ir   (kernel Zig -> LLVM IR)
-///   2. ptx_rewrite                    (drop @export aliases, rename defines)
-///   3. llc -march=nvptx64             (IR -> PTX text; llc from the dev shell)
-fn buildPtxKernel(b: *std.Build, name: []const u8, nv_arch: []const u8) std.Build.LazyPath {
-    const emit_ir = b.addSystemCommand(&.{
-        b.graph.zig_exe,                "build-obj",
-        "-target",                      "nvptx64-cuda-none",
-        b.fmt("-mcpu={s}", .{nv_arch}), "-fno-emit-bin",
-        "-fno-ubsan-rt",                "-fstrip",
-        "-O",                           "ReleaseFast",
+/// Analysis megakernel: whole Newton solve per launch. Same IR→rewrite→llc
+/// pipeline as the devices unit, plus the dependency-free gpu_abi module
+/// (blob layout shared with the host packer in analysis/problem.zig).
+fn buildMegaKernelNvidia(b: *std.Build, nv_arch: []const u8, dev_dep: *std.Build.Dependency, va_mod: *std.Build.Module, optimize: std.builtin.OptimizeMode) std.Build.LazyPath {
+    const nvptx_target = b.resolveTargetQuery(.{
+        .cpu_arch = .nvptx64,
+        .os_tag = .cuda,
+        .abi = .none,
     });
-    const ll = emit_ir.addPrefixedOutputFileArg("-femit-llvm-ir=", b.fmt("{s}.ll", .{name}));
-    emit_ir.addFileArg(b.path(b.fmt("modules/compute/kernels/{s}.zig", .{name})));
+    _ = nv_arch;
+
+    const gpu_opt: std.builtin.OptimizeMode = if (optimize == .Debug) .Debug else .ReleaseFast;
+    const llc_opt: []const u8 = if (optimize == .Debug) "-O0" else "-O3";
+    const ptxas_opt: []const u8 = if (optimize == .Debug) "-O0" else "-O3";
+
+    const abi_mod = b.createModule(.{
+        .root_source_file = b.path("modules/analysis/src/gpu_abi.zig"),
+        .target = nvptx_target,
+        .optimize = gpu_opt,
+    });
+    const kernel_mod = b.createModule(.{
+        .root_source_file = b.path("modules/devices/src/kernel.zig"),
+        .target = nvptx_target,
+        .optimize = gpu_opt,
+        .imports = &.{
+            .{ .name = "dev_models", .module = dev_dep.module("devices") },
+            .{ .name = "va_devices", .module = va_mod },
+            .{ .name = "gpu_abi", .module = abi_mod },
+        },
+    });
+
+    const obj = b.addObject(.{ .name = "megakernel", .root_module = kernel_mod });
+    const ll = obj.getEmittedLlvmIr();
 
     const rewrite_exe = b.addExecutable(.{
         .name = "ptx_rewrite",
@@ -206,15 +240,67 @@ fn buildPtxKernel(b: *std.Build, name: []const u8, nv_arch: []const u8) std.Buil
     });
     const rewrite = b.addRunArtifact(rewrite_exe);
     rewrite.addFileArg(ll);
-    const ll_fixed = rewrite.addOutputFileArg(b.fmt("{s}.fixed.ll", .{name}));
+    const ll_fixed = rewrite.addOutputFileArg("megakernel.fixed.ll");
 
-    const llc = b.addSystemCommand(&.{
-        "llc",
-        "-march=nvptx64",
-        b.fmt("-mcpu={s}", .{nv_arch}),
-        "-O3",
-    });
+    const llc = b.addSystemCommand(&.{ "llc", "-march=nvptx64", "-mcpu=sm_89", llc_opt });
     llc.addFileArg(ll_fixed);
     llc.addArg("-o");
-    return llc.addOutputFileArg(b.fmt("{s}.ptx", .{name}));
+    const ptx = llc.addOutputFileArg("megakernel.ptx");
+
+    const ptxas = b.addSystemCommand(&.{ "ptxas", "-arch=sm_89", ptxas_opt });
+    ptxas.addFileArg(ptx);
+    ptxas.addArg("-o");
+    return ptxas.addOutputFileArg("megakernel.cubin");
 }
+
+/// AMD path: Zig → LLVM IR → rewrite → llc -march=amdgcn → HSACO.
+/// No ptxas equivalent needed — llc emits a ready-to-load code object.
+fn buildMegaKernelAmd(b: *std.Build, amd_arch: []const u8, dev_dep: *std.Build.Dependency, va_mod: *std.Build.Module, optimize: std.builtin.OptimizeMode) std.Build.LazyPath {
+    const amdgcn_target = b.resolveTargetQuery(.{
+        .cpu_arch = .amdgcn,
+        .os_tag = .amdhsa,
+        .abi = .none,
+    });
+
+    const gpu_opt: std.builtin.OptimizeMode = if (optimize == .Debug) .Debug else .ReleaseFast;
+
+    const abi_mod = b.createModule(.{
+        .root_source_file = b.path("modules/analysis/src/gpu_abi.zig"),
+        .target = amdgcn_target,
+        .optimize = gpu_opt,
+    });
+    const kernel_mod = b.createModule(.{
+        .root_source_file = b.path("modules/devices/src/kernel.zig"),
+        .target = amdgcn_target,
+        .optimize = gpu_opt,
+        .imports = &.{
+            .{ .name = "dev_models", .module = dev_dep.module("devices") },
+            .{ .name = "va_devices", .module = va_mod },
+            .{ .name = "gpu_abi", .module = abi_mod },
+        },
+    });
+
+    // AMDGCN: no alias rewrite needed — LLVM's AMDGPU backend handles
+    // kernel exports directly. Zig → obj → ready-to-load code object.
+    const obj = b.addObject(.{ .name = "megakernel", .root_module = kernel_mod });
+    _ = amd_arch;
+    return obj.getEmittedBin();
+}
+
+/// Baked va/v model paths from benchmark/va_models.zon (repo-relative or absolute).
+/// Missing manifest == empty list.
+fn listVaModels(b: *std.Build) []const std.Build.LazyPath {
+    const io = b.graph.io;
+    const data = b.build_root.handle.readFileAlloc(io, "benchmark/va_models.zon", b.allocator, .unlimited) catch
+        return &.{};
+    const src = b.allocator.dupeZ(u8, data) catch @panic("OOM");
+    const files = std.zon.parse.fromSliceAlloc([]const []const u8, b.allocator, src, null, .{}) catch
+        std.debug.panic("benchmark/va_models.zon: expected a zon list of .va/.v/.sv paths", .{});
+    var paths: std.ArrayList(std.Build.LazyPath) = .empty;
+    for (files) |p| {
+        const lp: std.Build.LazyPath = if (std.fs.path.isAbsolute(p)) .{ .cwd_relative = p } else b.path(p);
+        paths.append(b.allocator, lp) catch @panic("OOM");
+    }
+    return paths.items;
+}
+

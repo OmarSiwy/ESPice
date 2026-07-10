@@ -249,7 +249,7 @@ inline fn juncapComponent(
     _ = frev_unused;
     _ = imax_unused;
     // ---- Junction charge (Eq. 4.33-4.35) ----
-    const cjo = cjor * @exp(p * @log(@max(vbir / @max(vbi, 1.0e-30), 1.0e-30)));
+    const cjo = cjor * contract.fmath.exp(p * contract.fmath.log(@max(vbir / @max(vbi, 1.0e-30), 1.0e-30)));
     const vj = hyp5(S, v_ak, vf_min, v_ch);
     const one_minus_p = 1.0 - p;
     // vj_over_vbi = vj / max(vbi, 1e-30)
@@ -267,7 +267,7 @@ inline fn juncapComponent(
     const arg_id = v_ak.scale(1.0 / phi_td);
     const m_id_fwd = arg_id.minC(80.0).exp();
     // m_id_lin = (1 + (v_ak - v_max)/phi_td) * exp(min(v_max/phi_td, 80))
-    const m_id_lin = v_ak.addC(-v_max).scale(1.0 / phi_td).addC(1.0).scale(@exp(@min(v_max / phi_td, 80.0)));
+    const m_id_lin = v_ak.addC(-v_max).scale(1.0 / phi_td).addC(1.0).scale(contract.fmath.exp(@min(v_max / phi_td, 80.0)));
     const m_id = if (v_ak.val() < v_max) m_id_fwd else m_id_lin;
     // i_d = (m_id - 1) * idsat
     const i_d = m_id.addC(-1.0).scale(idsat);
@@ -405,9 +405,9 @@ inline fn juncapComponent(
     const v_av = hyp2(S, v_ak, 0.0, EPS_AV);
 
     // f_stop, s_f (Eq. 4.70-4.71) -- alpha_av is f64, so these are f64
-    const alpha_av_pbr = @exp(@min(pbr * @log(@max(@abs(alpha_av), 1.0e-30)), 80.0));
+    const alpha_av_pbr = contract.fmath.exp(@min(pbr * contract.fmath.log(@max(@abs(alpha_av), 1.0e-30)), 80.0));
     const f_stop = 1.0 / @max(1.0 - alpha_av_pbr, 1.0e-30);
-    const alpha_av_pbr_m1 = @exp(@min((pbr - 1.0) * @log(@max(@abs(alpha_av), 1.0e-30)), 80.0));
+    const alpha_av_pbr_m1 = contract.fmath.exp(@min((pbr - 1.0) * contract.fmath.log(@max(@abs(alpha_av), 1.0e-30)), 80.0));
     const s_f = -f_stop * f_stop * alpha_av_pbr_m1 * pbr / @max(vbr, 1.0e-30);
 
     // f_breakdown (Eq. 4.72)
@@ -609,9 +609,9 @@ fn prep(model: *const Model, instance: *const Instance) Prep {
     const t_ratio = tkd / tkr;
     const t_ratio_1_5 = t_ratio * @sqrt(@max(t_ratio, 1.0e-30));
 
-    const ftd_bot = t_ratio_1_5 * @exp(@min(phi_gr_bot / (2.0 * phi_tr) - phi_gd_bot / (2.0 * phi_td), 80.0));
-    const ftd_sti = t_ratio_1_5 * @exp(@min(phi_gr_sti / (2.0 * phi_tr) - phi_gd_sti / (2.0 * phi_td), 80.0));
-    const ftd_gat = t_ratio_1_5 * @exp(@min(phi_gr_gat / (2.0 * phi_tr) - phi_gd_gat / (2.0 * phi_td), 80.0));
+    const ftd_bot = t_ratio_1_5 * contract.fmath.exp(@min(phi_gr_bot / (2.0 * phi_tr) - phi_gd_bot / (2.0 * phi_td), 80.0));
+    const ftd_sti = t_ratio_1_5 * contract.fmath.exp(@min(phi_gr_sti / (2.0 * phi_tr) - phi_gd_sti / (2.0 * phi_td), 80.0));
+    const ftd_gat = t_ratio_1_5 * contract.fmath.exp(@min(phi_gr_gat / (2.0 * phi_tr) - phi_gd_gat / (2.0 * phi_td), 80.0));
 
     // ---- Saturation current density at device temperature (Eq. 4.16-4.18) ----
     const idsat_bot = idsatrbot * ftd_bot * ftd_bot;
@@ -619,20 +619,20 @@ fn prep(model: *const Model, instance: *const Instance) Prep {
     const idsat_gat = idsatrgat * ftd_gat * ftd_gat;
 
     // ---- V_max (Eq. 4.19-4.22) ----
-    const vmax_bot = if (idsat_bot * ab == 0.0) VMAX_LARGE else phi_td * @log(imax / (idsat_bot * ab) + 1.0);
-    const vmax_sti = if (idsat_sti * ls == 0.0) VMAX_LARGE else phi_td * @log(imax / (idsat_sti * ls) + 1.0);
-    const vmax_gat = if (idsat_gat * lg == 0.0) VMAX_LARGE else phi_td * @log(imax / (idsat_gat * lg) + 1.0);
+    const vmax_bot = if (idsat_bot * ab == 0.0) VMAX_LARGE else phi_td * contract.fmath.log(imax / (idsat_bot * ab) + 1.0);
+    const vmax_sti = if (idsat_sti * ls == 0.0) VMAX_LARGE else phi_td * contract.fmath.log(imax / (idsat_sti * ls) + 1.0);
+    const vmax_gat = if (idsat_gat * lg == 0.0) VMAX_LARGE else phi_td * contract.fmath.log(imax / (idsat_gat * lg) + 1.0);
     const v_max = @min(vmax_bot, @min(vmax_sti, vmax_gat));
 
     // ---- Built-in voltages (Eq. 4.23-4.28) ----
-    const ubi_bot = vbirbot * t_ratio - 2.0 * phi_td * @log(@max(ftd_bot, 1.0e-30));
-    const vbi_bot = ubi_bot + phi_td * @log(1.0 + @exp(@min((VBI_LOW - ubi_bot) / phi_td, 80.0)));
+    const ubi_bot = vbirbot * t_ratio - 2.0 * phi_td * contract.fmath.log(@max(ftd_bot, 1.0e-30));
+    const vbi_bot = ubi_bot + phi_td * contract.fmath.log(1.0 + contract.fmath.exp(@min((VBI_LOW - ubi_bot) / phi_td, 80.0)));
 
-    const ubi_sti = vbirsti * t_ratio - 2.0 * phi_td * @log(@max(ftd_sti, 1.0e-30));
-    const vbi_sti = ubi_sti + phi_td * @log(1.0 + @exp(@min((VBI_LOW - ubi_sti) / phi_td, 80.0)));
+    const ubi_sti = vbirsti * t_ratio - 2.0 * phi_td * contract.fmath.log(@max(ftd_sti, 1.0e-30));
+    const vbi_sti = ubi_sti + phi_td * contract.fmath.log(1.0 + contract.fmath.exp(@min((VBI_LOW - ubi_sti) / phi_td, 80.0)));
 
-    const ubi_gat = vbirgat * t_ratio - 2.0 * phi_td * @log(@max(ftd_gat, 1.0e-30));
-    const vbi_gat = ubi_gat + phi_td * @log(1.0 + @exp(@min((VBI_LOW - ubi_gat) / phi_td, 80.0)));
+    const ubi_gat = vbirgat * t_ratio - 2.0 * phi_td * contract.fmath.log(@max(ftd_gat, 1.0e-30));
+    const vbi_gat = ubi_gat + phi_td * contract.fmath.log(1.0 + contract.fmath.exp(@min((VBI_LOW - ubi_gat) / phi_td, 80.0)));
 
     // ---- V_F,min and V_ch (Eq. 4.29-4.31) ----
     const vbi_bot_eff = if (ab > 0.0) vbi_bot else 1.0e30;
@@ -642,7 +642,7 @@ fn prep(model: *const Model, instance: *const Instance) Prep {
     const vbi_min = if (vbi_min_raw > 1.0e29) vbi_bot else vbi_min_raw;
 
     const p_for_vfmin = if (ab > 0.0 and vbi_min == vbi_bot) pbot else if (ls > 0.0 and vbi_min == vbi_sti) psti else pgat;
-    const vf_min = vbi_min * (1.0 - @exp(-1.0 / p_for_vfmin * @log(CAP_A)));
+    const vf_min = vbi_min * (1.0 - contract.fmath.exp(-1.0 / p_for_vfmin * contract.fmath.log(CAP_A)));
     const v_ch = EPS_CH * vbi_min;
 
     // ---- alpha_av (Eq. 4.32) ----
@@ -830,39 +830,39 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
 
             // g(V, I0, m) = I0 * (exp(V*m/phi_td) - 1)
             // Non-ideal forward (Eq. 4.93-4.97)
-            const g_v4_for1 = i_satfor1 * (@exp(@min(v4 * m_for1 / phi_td, 80.0)) - 1.0);
-            const g_v5_for1 = i_satfor1 * (@exp(@min(v5 * m_for1 / phi_td, 80.0)) - 1.0);
+            const g_v4_for1 = i_satfor1 * (contract.fmath.exp(@min(v4 * m_for1 / phi_td, 80.0)) - 1.0);
+            const g_v5_for1 = i_satfor1 * (contract.fmath.exp(@min(v5 * m_for1 / phi_td, 80.0)) - 1.0);
             const i4_cor = curr4 - g_v4_for1;
             const i5_cor = curr5 - g_v5_for1;
             const alpha_for = i4_cor / @max(@abs(i5_cor), 1.0e-30) * (if (i5_cor >= 0.0) @as(f64, 1.0) else @as(f64, -1.0));
-            const m_for2 = phi_td * @log(@max(@abs(alpha_for), 1.0e-30)) / (v4 - v5);
-            const i_satfor2 = i4_cor / @max(@abs(@exp(@min(v4 * m_for2 / phi_td, 80.0)) - 1.0), 1.0e-30);
+            const m_for2 = phi_td * contract.fmath.log(@max(@abs(alpha_for), 1.0e-30)) / (v4 - v5);
+            const i_satfor2 = i4_cor / @max(@abs(contract.fmath.exp(@min(v4 * m_for2 / phi_td, 80.0)) - 1.0), 1.0e-30);
 
             // Reverse current (Eq. 4.98-4.105)
-            const g_v1_for1 = i_satfor1 * (@exp(@min(v1 * m_for1 / phi_td, 80.0)) - 1.0);
-            const g_v1_for2 = i_satfor2 * (@exp(@min(v1 * m_for2 / phi_td, 80.0)) - 1.0);
-            const g_v2_for1 = i_satfor1 * (@exp(@min(v2 * m_for1 / phi_td, 80.0)) - 1.0);
-            const g_v2_for2 = i_satfor2 * (@exp(@min(v2 * m_for2 / phi_td, 80.0)) - 1.0);
-            const g_v3_for1 = i_satfor1 * (@exp(@min(v3 * m_for1 / phi_td, 80.0)) - 1.0);
-            const g_v3_for2 = i_satfor2 * (@exp(@min(v3 * m_for2 / phi_td, 80.0)) - 1.0);
+            const g_v1_for1 = i_satfor1 * (contract.fmath.exp(@min(v1 * m_for1 / phi_td, 80.0)) - 1.0);
+            const g_v1_for2 = i_satfor2 * (contract.fmath.exp(@min(v1 * m_for2 / phi_td, 80.0)) - 1.0);
+            const g_v2_for1 = i_satfor1 * (contract.fmath.exp(@min(v2 * m_for1 / phi_td, 80.0)) - 1.0);
+            const g_v2_for2 = i_satfor2 * (contract.fmath.exp(@min(v2 * m_for2 / phi_td, 80.0)) - 1.0);
+            const g_v3_for1 = i_satfor1 * (contract.fmath.exp(@min(v3 * m_for1 / phi_td, 80.0)) - 1.0);
+            const g_v3_for2 = i_satfor2 * (contract.fmath.exp(@min(v3 * m_for2 / phi_td, 80.0)) - 1.0);
 
             const i1_cor = curr1 - g_v1_for1 - g_v1_for2;
             const i2_cor = curr2 - g_v2_for1 - g_v2_for2;
             const i3_cor = curr3 - g_v3_for1 - g_v3_for2;
 
             const alpha_rev = i1_cor / @max(@abs(i2_cor), 1.0e-30) * (if (i2_cor >= 0.0) @as(f64, 1.0) else @as(f64, -1.0));
-            const m0_rev = phi_td * @log(@max(@abs(alpha_rev), 1.0e-30)) / (v2 - v1);
+            const m0_rev = phi_td * contract.fmath.log(@max(@abs(alpha_rev), 1.0e-30)) / (v2 - v1);
 
             // delta_m (Eq. 4.103)
             const alpha_rev_abs = @max(@abs(alpha_rev), 1.0e-30);
-            const alpha_rev_v2_dv = @exp(@min(v2 / (v2 - v1) * @log(alpha_rev_abs), 80.0));
-            const alpha_rev_v1_dv = @exp(@min(v1 / (v1 - v2) * @log(alpha_rev_abs), 80.0));
+            const alpha_rev_v2_dv = contract.fmath.exp(@min(v2 / (v2 - v1) * contract.fmath.log(alpha_rev_abs), 80.0));
+            const alpha_rev_v1_dv = contract.fmath.exp(@min(v1 / (v1 - v2) * contract.fmath.log(alpha_rev_abs), 80.0));
             const delta_m_num = (alpha_rev - 1.0) * alpha_rev_v2_dv - 1.0;
             const delta_m_den = alpha_rev * v1 - v2 + (v2 - v1) * alpha_rev_v1_dv;
             const delta_m = phi_td * delta_m_num / @max(@abs(delta_m_den), 1.0e-30) * (if (delta_m_den >= 0.0) @as(f64, 1.0) else @as(f64, -1.0));
 
             const m_rev = m0_rev + delta_m;
-            const i_satrev = -i3_cor / @max(@abs(@exp(@min(-v3 * m_rev / phi_td, 80.0)) - 1.0), 1.0e-30);
+            const i_satrev = -i3_cor / @max(@abs(contract.fmath.exp(@min(-v3 * m_rev / phi_td, 80.0)) - 1.0), 1.0e-30);
 
             // --- Express bias-dependent (Eq. 4.113-4.116) -- uses v_ak (S) ---
             // i_for1 = i_satfor1 * (exp(min(v_ak*m_for1/phi_td, 80)) - 1)
@@ -902,9 +902,9 @@ pub fn qFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *cons
     const v_ak = x[@intFromEnum(U.A)].sub(x[@intFromEnum(U.K)]).scale(pp.type_f);
 
     // ---- Cjo per component (Eq. 4.33) -- x-independent f64 ----
-    const cjo_bot = pp.cjorbot * @exp(pp.pbot * @log(@max(pp.vbirbot / @max(pp.vbi_bot, 1.0e-30), 1.0e-30)));
-    const cjo_sti = pp.cjorsti * @exp(pp.psti * @log(@max(pp.vbirsti / @max(pp.vbi_sti, 1.0e-30), 1.0e-30)));
-    const cjo_gat = pp.cjorgat * @exp(pp.pgat * @log(@max(pp.vbirgat / @max(pp.vbi_gat, 1.0e-30), 1.0e-30)));
+    const cjo_bot = pp.cjorbot * contract.fmath.exp(pp.pbot * contract.fmath.log(@max(pp.vbirbot / @max(pp.vbi_bot, 1.0e-30), 1.0e-30)));
+    const cjo_sti = pp.cjorsti * contract.fmath.exp(pp.psti * contract.fmath.log(@max(pp.vbirsti / @max(pp.vbi_sti, 1.0e-30), 1.0e-30)));
+    const cjo_gat = pp.cjorgat * contract.fmath.exp(pp.pgat * contract.fmath.log(@max(pp.vbirgat / @max(pp.vbi_gat, 1.0e-30), 1.0e-30)));
 
     // ---- Vj (Eq. 4.34) ----
     const vj = hyp5(S, v_ak, pp.vf_min, pp.v_ch);
@@ -983,7 +983,7 @@ pub fn limit(model: *const Model, instance: *const Instance, x_new: [n_u]f64, x_
     // V_crit = phi_td * ln(phi_td / (sqrt(2) * IS))
     // Using IS ~ 1e-14 as representative saturation current
     const is_eff: f64 = 1.0e-14;
-    const v_crit = phi_td * @log(phi_td / (1.4142135623730951 * is_eff));
+    const v_crit = phi_td * contract.fmath.log(phi_td / (1.4142135623730951 * is_eff));
 
     var vak_limited = vak_new;
 
@@ -995,7 +995,7 @@ pub fn limit(model: *const Model, instance: *const Instance, x_new: [n_u]f64, x_
                 // Limit positive step
                 const max_step = 2.0 * phi_td;
                 if (dv > max_step) {
-                    vak_limited = vak_old + phi_td * (1.0 + @log(@max(dv / phi_td, 1.0e-30)));
+                    vak_limited = vak_old + phi_td * (1.0 + contract.fmath.log(@max(dv / phi_td, 1.0e-30)));
                 }
             }
         } else {
@@ -1006,7 +1006,7 @@ pub fn limit(model: *const Model, instance: *const Instance, x_new: [n_u]f64, x_
 
     // Also limit large reverse steps to prevent avalanche overshoot
     if (vak_new < -5.0 and (vak_new - vak_old) < -2.0 * phi_td) {
-        vak_limited = vak_old - phi_td * (1.0 + @log(@max(@abs(vak_new - vak_old) / phi_td, 1.0e-30)));
+        vak_limited = vak_old - phi_td * (1.0 + contract.fmath.log(@max(@abs(vak_new - vak_old) / phi_td, 1.0e-30)));
     }
 
     // Reconstruct voltages from limited vak

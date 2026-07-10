@@ -53,6 +53,12 @@ const Api = struct {
         ?[*]iface.Arg,
     ) callconv(.c) hipError_t,
     hipMemcpyDtoD: *const fn (hipDeviceptr_t, hipDeviceptr_t, usize) callconv(.c) hipError_t,
+    hipLaunchCooperativeKernel: *const fn (hipFunction_t, c_uint, c_uint, c_uint, c_uint, c_uint, c_uint, c_uint, hipStream_t, ?[*]iface.Arg) callconv(.c) hipError_t,
+    hipOccupancyMaxActiveBlocksPerMultiprocessor: *const fn (*c_int, hipFunction_t, c_int, usize) callconv(.c) hipError_t,
+    hipDeviceGetAttribute: *const fn (*c_int, c_int, hipDevice_t) callconv(.c) hipError_t,
+    hipStreamCreate: *const fn (*hipStream_t, c_uint) callconv(.c) hipError_t,
+    hipStreamDestroy: *const fn (hipStream_t) callconv(.c) hipError_t,
+    hipStreamSynchronize: *const fn (hipStream_t) callconv(.c) hipError_t,
 };
 
 var g: Api = undefined;
@@ -121,6 +127,31 @@ pub const Context = struct {
         try check(g.hipModuleLoadData(&m.module, image.ptr), error.ModuleLoadFailed);
         return m;
     }
+
+    pub fn createStream(_: *Context) Error!Stream {
+        var s: Stream = .{};
+        try check(g.hipStreamCreate(&s.stream, 0), error.SyncFailed);
+        return s;
+    }
+
+    // hipDeviceAttributeMultiprocessorCount = 16, hipDeviceAttributeCooperativeLaunch = 97
+    pub const attr_multiprocessor_count: c_int = 16;
+    pub const attr_cooperative_launch: c_int = 97;
+
+    pub fn deviceAttribute(self: *Context, attrib: c_int) Error!c_int {
+        var v: c_int = 0;
+        try check(g.hipDeviceGetAttribute(&v, attrib, self.device), error.NoDevice);
+        return v;
+    }
+
+    pub fn maxCoopBlocks(self: *Context, k: Kernel, block_dim: u32, shared_bytes: usize) Error!u32 {
+        const coop = self.deviceAttribute(attr_cooperative_launch) catch 0;
+        if (coop == 0) return 0;
+        var per_sm: c_int = 0;
+        try check(g.hipOccupancyMaxActiveBlocksPerMultiprocessor(&per_sm, k.func, @intCast(block_dim), shared_bytes), error.LaunchFailed);
+        const sms = try self.deviceAttribute(attr_multiprocessor_count);
+        return @intCast(per_sm * sms);
+    }
 };
 
 pub const Buffer = struct {
@@ -149,6 +180,16 @@ pub const Buffer = struct {
         const dp: usize = @intFromPtr(self.handle.?) + dst_offset;
         try check(g.hipMemcpyDtoD(@ptrFromInt(dp), @ptrFromInt(sp), n), error.CopyFailed);
     }
+
+    pub fn downloadAt(self: *Buffer, host: *anyopaque, offset: usize, n: usize) Error!void {
+        const src: usize = @intFromPtr(self.handle.?) + offset;
+        try check(g.hipMemcpyDtoH(host, @ptrFromInt(src), n), error.CopyFailed);
+    }
+
+    pub fn uploadAt(self: *Buffer, host: *const anyopaque, offset: usize, n: usize) Error!void {
+        const dst: usize = @intFromPtr(self.handle.?) + offset;
+        try check(g.hipMemcpyHtoD(@ptrFromInt(dst), host, n), error.CopyFailed);
+    }
 };
 
 pub const Module = struct {
@@ -170,6 +211,10 @@ pub const Kernel = struct {
     func: hipFunction_t = null,
 
     pub fn launch(self: Kernel, grid: Dim3, block: Dim3, shared_bytes: u32, args: []const iface.Arg) Error!void {
+        try self.launchOnStream(grid, block, shared_bytes, args, null);
+    }
+
+    pub fn launchOnStream(self: Kernel, grid: Dim3, block: Dim3, shared_bytes: u32, args: []const iface.Arg, stream: hipStream_t) Error!void {
         try check(g.hipModuleLaunchKernel(
             self.func,
             grid.x,
@@ -179,9 +224,37 @@ pub const Kernel = struct {
             block.y,
             block.z,
             shared_bytes,
-            null,
+            stream,
             @constCast(args.ptr),
             null,
         ), error.LaunchFailed);
+    }
+
+    pub fn launchCooperative(self: Kernel, grid: Dim3, block: Dim3, shared_bytes: u32, args: []const iface.Arg, stream: hipStream_t) Error!void {
+        try check(g.hipLaunchCooperativeKernel(
+            self.func,
+            grid.x,
+            grid.y,
+            grid.z,
+            block.x,
+            block.y,
+            block.z,
+            shared_bytes,
+            stream,
+            @constCast(args.ptr),
+        ), error.LaunchFailed);
+    }
+};
+
+pub const Stream = struct {
+    stream: hipStream_t = null,
+
+    pub fn synchronize(self: *Stream) Error!void {
+        try check(g.hipStreamSynchronize(self.stream), error.SyncFailed);
+    }
+
+    pub fn deinit(self: *Stream) void {
+        _ = g.hipStreamDestroy(self.stream);
+        self.* = .{};
     }
 };

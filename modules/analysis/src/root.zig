@@ -1,36 +1,48 @@
 const std = @import("std");
 
 const contract = @import("contract.zig");
-pub const batch = @import("batch.zig");
-pub const converger = @import("converger.zig");
-pub const dyn = @import("dyn.zig");
-pub const par = @import("par.zig");
+pub const problem = @import("problem/problem.zig");
+pub const converger = @import("helper/converger.zig");
+pub const gpu_abi = @import("gpu_abi.zig");
 
-pub const ac = @import("ac.zig");
-pub const dc = @import("dc.zig");
-pub const disto = @import("disto.zig");
-pub const envelope = @import("envelope.zig");
-pub const four = @import("four.zig");
-pub const freq = @import("freq.zig");
-pub const hb = @import("hb.zig");
-pub const mc = @import("mc.zig");
-const meas = @import("meas.zig");
-const newton = @import("newton.zig");
-pub const noise = @import("noise.zig");
-pub const op = @import("op.zig");
-pub const pac = @import("pac.zig");
-pub const pnoise = @import("pnoise.zig");
-pub const pss = @import("pss.zig");
-pub const pz = @import("pz.zig");
-pub const sens = @import("sens.zig");
+// -- DC / Operating Point --
+pub const op = @import("dc/op.zig");
+pub const dc = @import("dc/dc.zig");
+pub const tf = @import("dc/tf.zig");
+
+// -- Frequency-domain (small-signal AC) --
+pub const ac = @import("ac/ac.zig");
+pub const noise = @import("ac/noise.zig");
+pub const sp = @import("ac/sp.zig");
+pub const stb = @import("ac/stb.zig");
+
+// -- Time-domain --
+pub const tran = @import("tran/tran.zig");
+pub const tran_noise = @import("tran/tran_noise.zig");
+pub const envelope = @import("tran/envelope.zig");
+
+// -- Periodic steady-state / LPTV --
+pub const pss = @import("pss/pss.zig");
+pub const pac = @import("pss/pac.zig");
+pub const pnoise = @import("pss/pnoise.zig");
+pub const hb = @import("pss/hb.zig");
+
+// -- Time→Frequency post-processing --
+pub const four = @import("post/four.zig");
+pub const disto = @import("post/disto.zig");
+
+// -- Parameter sweep / statistical --
+pub const sens = @import("sweep/sens.zig");
+pub const mc = @import("sweep/mc.zig");
+pub const temp_sweep = @import("sweep/temp_sweep.zig");
+
+// -- Eigenvalue --
+pub const pz = @import("eigen/pz.zig");
+
+// -- Shared utilities --
+pub const freq = @import("helper/freq.zig");
+const meas = @import("helper/meas.zig");
 pub const solvers = @import("solvers");
-pub const sp = @import("sp.zig");
-pub const stb = @import("stb.zig");
-pub const temp_sweep = @import("temp_sweep.zig");
-pub const testdev = @import("testdev.zig");
-pub const tf = @import("tf.zig");
-pub const tran = @import("tran.zig");
-pub const tran_noise = @import("tran_noise.zig");
 
 // ---------------------------------------------------------------------------
 // Analysis dispatch: SPICE keyword → AnalysisId → module.run()
@@ -240,37 +252,73 @@ pub const Planes = struct {
 /// eval/eval_newton stamp instances [first..last) into `pl`; `lane` selects
 /// the per-lane dedup cache (0 on the serial path).
 pub const Batch = struct {
+    // -- hot: the only fields the eval dispatch loop reads --
     ctx: *anyopaque,
-    type_name: []const u8,
+    eval: *const fn (*anyopaque, *const Planes, lane: u32, first: u32, last: u32, []const f64, f64) void,
+    eval_newton: *const fn (*anyopaque, *const Planes, lane: u32, first: u32, last: u32, []const f64, f64) void,
     count: u32,
     /// Terminals per instance; per-instance eval cost scales ~n_u².
     n_u: u32,
     has_charge: bool,
     has_const_jacobian: bool,
-    /// False when eval uses shared per-batch scratch (DynBatch) — such a
-    /// batch must run whole on one lane.
+    /// False when eval uses shared per-batch scratch — such a batch must run
+    /// whole on one lane.
     thread_safe: bool,
-    eval: *const fn (*anyopaque, *const Planes, lane: u32, first: u32, last: u32, []const f64, f64) void,
-    eval_newton: *const fn (*anyopaque, *const Planes, lane: u32, first: u32, last: u32, []const f64, f64) void,
+
+    // -- cold --
+    type_name: []const u8,
+    /// GPU kind (0 ⇒ not GPU-eligible); must match the megakernel's
+    /// comptime dispatch.
+    gpu_kind_id: u32 = 0,
+    /// Everything dispatched outside the eval loop: one static table per
+    /// device TYPE (comptime const in DeviceBatch(D)), zero per-batch bytes.
+    hooks: *const Hooks,
+};
+
+/// Cold per-device-type vtable. Null entry ⇒ device type lacks the hook.
+pub const Hooks = struct {
     /// Grow per-lane dedup caches to n_lanes. Null when the batch has none.
-    set_lanes: ?*const fn (*anyopaque, std.mem.Allocator, u32) anyerror!void,
+    set_lanes: ?*const fn (*anyopaque, std.mem.Allocator, u32) anyerror!void = null,
     /// Scatter footprint of instances [first..last): {slot_lo, slot_hi_excl,
     /// row_lo, row_hi_excl}, entries equal to the passed trash slot/row
     /// (ground writes) excluded. Lets parallel eval zero and reduce only the
     /// touched window of a lane's private planes.
     scatter_bounds: *const fn (*anyopaque, first: u32, last: u32, trash_slot: u32, trash_row: u32) [4]u32,
-    apply_limits: ?*const fn (*anyopaque, []f64, []const f64) void,
-    update_state: ?*const fn (*anyopaque, []const f64) ?f64,
-    set_temp: ?*const fn (*anyopaque, f32) void,
-    record_history: ?*const fn (*anyopaque, []const f64, f64) void,
-    inject_history: ?*const fn (*anyopaque, f64, []f64) void,
-    min_delay: ?*const fn (*anyopaque) f64,
+    apply_limits: ?*const fn (*anyopaque, []f64, []const f64) bool = null,
+    /// Reset private limiting state after a Newton solve finishes.
+    clear_limits: ?*const fn (*anyopaque) void = null,
+    /// SPICE MODEINITJCT: write junction seed voltages into a cold-started x.
+    seed: ?*const fn (*anyopaque, []f64) void = null,
+    /// Mark unknowns that are MNA branch currents (not node voltages) so the
+    /// converger can apply abstol vs vntol per row (ngspice NIconvTest).
+    mark_current_rows: ?*const fn (*anyopaque, []bool) void = null,
+    update_state: ?*const fn (*anyopaque, []const f64) ?f64 = null,
+    set_temp: ?*const fn (*anyopaque, f32) void = null,
+    record_history: ?*const fn (*anyopaque, []const f64, f64) void = null,
+    inject_history: ?*const fn (*anyopaque, f64, []f64) void = null,
+    min_delay: ?*const fn (*anyopaque) f64 = null,
+    next_breakpoint: ?*const fn (*anyopaque, f64) ?f64 = null,
     collect_params: *const fn (*anyopaque, std.mem.Allocator, *std.ArrayList(ParamRef)) anyerror!void,
-    collect_noise: ?*const fn (*anyopaque, []const f64, std.mem.Allocator, *std.ArrayList(NoiseSource)) anyerror!void,
-    recompute: ?*const fn (*anyopaque) void,
-    apply_attempt: ?*const fn (*anyopaque, f64) void,
-    restore_models: ?*const fn (*anyopaque) void,
+    collect_noise: ?*const fn (*anyopaque, []const f64, std.mem.Allocator, *std.ArrayList(NoiseSource)) anyerror!void = null,
+    recompute: ?*const fn (*anyopaque) void = null,
+    apply_attempt: ?*const fn (*anyopaque, f64) void = null,
+    restore_models: ?*const fn (*anyopaque) void = null,
+    gpu_pack_size: ?*const fn (*anyopaque) usize = null,
+    /// Serialize tapes+params into `dest` (blob-relative base at `base_off`),
+    /// returning the filled BatchDesc.
+    gpu_pack: ?*const fn (*anyopaque, dest: []u8, base_off: u32, n: u32) gpu_abi.BatchDesc = null,
     deinit: *const fn (*anyopaque, std.mem.Allocator) void,
+};
+
+/// Engine-owned GPU solve surface: one whole Newton solve per call —
+/// 1 kernel launch + 1 readback. Errors fall back to the CPU path.
+pub const GpuHook = struct {
+    ctx: *anyopaque,
+    solve_newton: *const fn (*anyopaque, x: []f64, t: f64, opts: converger.Options) anyerror!converger.Result,
+    /// Whole transient analysis on-device (chunked cooperative launches).
+    /// Appends accepted points into `waveform`; on error the caller truncates
+    /// the waveform back and falls through to the CPU integrator.
+    simulate_tran: ?*const fn (*anyopaque, x: []f64, probes: []const u32, waveform: *tran.Waveform, options: tran.Options) anyerror!tran.SimResult = null,
 };
 
 // ---------------------------------------------------------------------------
@@ -301,10 +349,20 @@ pub const Circuit = struct {
     diag_slots: []u32,
     batches: []Batch,
 
+    /// true ⇒ unknown i is an MNA branch current (KVL row); false ⇒ node
+    /// voltage (KCL row). Read by the converger's per-row tolerance.
+    current_row: []bool,
+
     // -- flags --
     has_charge: bool,
     has_history: bool,
     has_baseline: bool,
+    /// Set by engine when --gpu is active and circuit is GPU-eligible.
+    /// converger.run reads this to pick JFNK.
+    gpu_active: bool,
+    /// Engine-owned whole-solve GPU hook (mechanism in src/gpu_solver.zig,
+    /// same ownership pattern as par_eval). Null ⇒ CPU paths only.
+    gpu_hook: ?GpuHook = null,
 
     // -- cold: constant-Jacobian baseline --
     g_base: []f64,
@@ -318,12 +376,28 @@ pub const Circuit = struct {
     bbd: ?BbdInfo = null,
     /// Reference to the engine-owned parallel eval context (mechanism lives
     /// in par.zig, ownership in src/engine.zig). Null ⇒ serial eval.
-    par_eval: ?*par.ParEval = null,
+    par_eval: ?*problem.ParEval = null,
     gpa: std.mem.Allocator,
+
+    // -- cold: lazily-built shared solve state --
+    /// One symbolic LU + Newton scratch per circuit; every analysis shares it.
+    ws: ?converger.Workspace = null,
+    /// Memoized collectParams — ParamRef.ptr point into frozen batch
+    /// instance storage, stable until deinit. No invalidation needed.
+    param_refs: ?[]ParamRef = null,
+
+    /// Shared Newton/JFNK workspace, built on first use. Pattern is frozen,
+    /// so the symbolic LU stays valid for the circuit's lifetime.
+    pub fn workspace(self: *Circuit) !*converger.Workspace {
+        if (self.ws == null) self.ws = try converger.Workspace.init(self.gpa, self);
+        return &self.ws.?;
+    }
 
     pub fn deinit(self: *Circuit) void {
         const gpa = self.gpa;
-        for (self.batches) |b| b.deinit(b.ctx, gpa);
+        if (self.ws) |*w| w.deinit(gpa);
+        if (self.param_refs) |refs| gpa.free(refs);
+        for (self.batches) |b| b.hooks.deinit(b.ctx, gpa);
         gpa.free(self.batches);
         gpa.free(self.col_ptr);
         gpa.free(self.row_idx);
@@ -336,6 +410,7 @@ pub const Circuit = struct {
         gpa.free(self.rhs);
         gpa.free(self.q_vec);
         gpa.free(self.diag_slots);
+        gpa.free(self.current_row);
         if (self.bbd) |bbd| gpa.free(bbd.blocks);
         for (self.node_labels) |label| {
             if (!std.mem.eql(u8, label, "0")) gpa.free(label);
@@ -488,14 +563,31 @@ pub const Circuit = struct {
         return null;
     }
 
-    pub fn applyLimits(self: *const Circuit, x: []f64, x_old: []const f64) void {
-        for (self.batches) |b| if (b.apply_limits) |f| f(b.ctx, x, x_old);
+    pub fn applyLimits(self: *const Circuit, x: []f64, x_old: []const f64) bool {
+        var any_limited = false;
+        for (self.batches) |b| if (b.hooks.apply_limits) |f| {
+            if (f(b.ctx, x, x_old)) any_limited = true;
+        };
+        return any_limited;
+    }
+
+    /// SPICE MODEINITJCT equivalent: devices write junction seed voltages
+    /// into a freshly zeroed x so iteration 1 linearizes at vcrit/vto instead
+    /// of 0, and pnjlim/fetlim limit against the seed. Cold starts only.
+    pub fn seedJunctions(self: *const Circuit, x: []f64) void {
+        for (self.batches) |b| if (b.hooks.seed) |f| f(b.ctx, x);
+    }
+
+    /// Reset device-private limiting state; called when a Newton solve
+    /// finishes so later evals (waveform, AC, noise) see the node vector.
+    pub fn clearLimits(self: *const Circuit) void {
+        for (self.batches) |b| if (b.hooks.clear_limits) |f| f(b.ctx);
     }
 
     pub fn updateStates(self: *const Circuit, x: []const f64) ?f64 {
         var min_reject: ?f64 = null;
         for (self.batches) |b| {
-            if (b.update_state) |f| if (f(b.ctx, x)) |tr| {
+            if (b.hooks.update_state) |f| if (f(b.ctx, x)) |tr| {
                 min_reject = if (min_reject) |cur| @min(cur, tr) else tr;
             };
         }
@@ -503,48 +595,61 @@ pub const Circuit = struct {
     }
 
     pub fn recordHistory(self: *Circuit, x: []const f64, t: f64) void {
-        for (self.batches) |b| if (b.record_history) |f| f(b.ctx, x, t);
+        for (self.batches) |b| if (b.hooks.record_history) |f| f(b.ctx, x, t);
     }
 
     pub fn injectHistory(self: *Circuit, t: f64) void {
-        for (self.batches) |b| if (b.inject_history) |f| f(b.ctx, t, self.rhs);
+        for (self.batches) |b| if (b.hooks.inject_history) |f| f(b.ctx, t, self.rhs);
     }
 
     pub fn minDelay(self: *const Circuit) ?f64 {
         var min_td = std.math.inf(f64);
-        for (self.batches) |b| if (b.min_delay) |f| {
+        for (self.batches) |b| if (b.hooks.min_delay) |f| {
             min_td = @min(min_td, f(b.ctx));
         };
         return if (min_td == std.math.inf(f64)) null else min_td;
     }
 
+    pub fn nextBreakpoint(self: *const Circuit, t: f64) ?f64 {
+        var best = std.math.inf(f64);
+        for (self.batches) |b| if (b.hooks.next_breakpoint) |f| {
+            if (f(b.ctx, t)) |bp| best = @min(best, bp);
+        };
+        return if (best == std.math.inf(f64)) null else best;
+    }
+
     pub fn setCircuitTemp(self: *const Circuit, temp_c: f32) void {
-        for (self.batches) |b| if (b.set_temp) |f| f(b.ctx, temp_c);
+        for (self.batches) |b| if (b.hooks.set_temp) |f| f(b.ctx, temp_c);
     }
 
     pub fn recompute(self: *const Circuit) void {
-        for (self.batches) |b| if (b.recompute) |f| f(b.ctx);
+        for (self.batches) |b| if (b.hooks.recompute) |f| f(b.ctx);
     }
 
     pub fn applyAttempt(self: *const Circuit, lambda: f64) void {
-        for (self.batches) |b| if (b.apply_attempt) |f| f(b.ctx, lambda);
+        for (self.batches) |b| if (b.hooks.apply_attempt) |f| f(b.ctx, lambda);
     }
 
     pub fn restoreModels(self: *const Circuit) void {
-        for (self.batches) |b| if (b.restore_models) |f| f(b.ctx);
+        for (self.batches) |b| if (b.hooks.restore_models) |f| f(b.ctx);
     }
 
-    pub fn collectParams(self: *const Circuit, gpa: std.mem.Allocator) ![]ParamRef {
+    /// Memoized — built once on first call, freed by deinit. Refs point
+    /// into frozen batch instance storage, stable for the circuit lifetime.
+    pub fn collectParams(self: *Circuit) ![]const ParamRef {
+        if (self.param_refs) |refs| return refs;
+        const gpa = self.gpa;
         var list: std.ArrayList(ParamRef) = .empty;
         errdefer list.deinit(gpa);
-        for (self.batches) |b| try b.collect_params(b.ctx, gpa, &list);
-        return try list.toOwnedSlice(gpa);
+        for (self.batches) |b| try b.hooks.collect_params(b.ctx, gpa, &list);
+        self.param_refs = try list.toOwnedSlice(gpa);
+        return self.param_refs.?;
     }
 
     pub fn collectNoiseSources(self: *const Circuit, x_op: []const f64, gpa: std.mem.Allocator) ![]NoiseSource {
         var list: std.ArrayList(NoiseSource) = .empty;
         errdefer list.deinit(gpa);
-        for (self.batches) |b| if (b.collect_noise) |f| try f(b.ctx, x_op, gpa, &list);
+        for (self.batches) |b| if (b.hooks.collect_noise) |f| try f(b.ctx, x_op, gpa, &list);
         return try list.toOwnedSlice(gpa);
     }
 
@@ -594,10 +699,7 @@ fn refAllDeclsRecursive(comptime T: type) void {
 
 test {
     refAllDeclsRecursive(@This());
-    _ = batch;
-    _ = dyn;
-    _ = @import("newton.zig");
-    _ = @import("converger.zig");
-    _ = @import("gpu_newton.zig");
-    _ = @import("meas.zig");
+    _ = problem;
+    _ = @import("helper/converger.zig");
+    _ = @import("helper/meas.zig");
 }

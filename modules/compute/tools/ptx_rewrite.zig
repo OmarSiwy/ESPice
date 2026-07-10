@@ -33,7 +33,12 @@ fn parseAlias(line: []const u8) ?Alias {
     const at = std.mem.lastIndexOfScalar(u8, line, '@') orelse return null;
     if (at == 0) return null;
     const rest = line[at + 1 ..];
-    const aliasee = rest[0..identEnd(rest)];
+    // Quoted identifiers (@"ns.Fn(arg).entry") keep their quotes so the
+    // define-line marker `@<aliasee>(` matches verbatim.
+    const aliasee = if (rest.len > 0 and rest[0] == '"') blk: {
+        const close = std.mem.indexOfScalarPos(u8, rest, 1, '"') orelse return null;
+        break :blk rest[0 .. close + 1];
+    } else rest[0..identEnd(rest)];
     if (name.len == 0 or aliasee.len == 0) return null;
     return .{ .name = name, .aliasee = aliasee };
 }

@@ -87,7 +87,7 @@ pub const Model = struct {
     u0: f32 = 0.067, // Low-field mobility at Tnom (m^2/Vs)
     ute: f32 = -1.5, // Temperature coefficient of mobility
     voff: f32 = -0.08, // Threshold voltage offset (V)
-    tnom: f32 = 300.15, // Parameter measurement temperature (K)
+    tnom: f32 = 298.15, // Parameter measurement temperature (K)
     cgso: f32 = 2.07188e-10, // Gate-source overlap cap per width (F/m)
     cgdo: f32 = 2.07188e-10, // Gate-drain overlap cap per width (F/m)
     cgbo: f32 = 0, // Gate-bulk overlap cap per length (F/m)
@@ -651,7 +651,10 @@ fn iPrep(model: *const Model, instance: *const Instance) IPrep {
     const is_src = p_js * a_jct + 1.0e-14;
     const is_drn = p_js * a_jct + 1.0e-14;
 
-    const phi = 2.0 * vtm * @log(p_nch / NI_SI);
+    const vtm0 = KB_OVER_Q * p_tnom;
+    const eg0 = 1.16 - 7.02e-4 * p_tnom * p_tnom / (p_tnom + 1108.0);
+    const ni = 1.45e10 * (p_tnom / 300.15) * @sqrt(p_tnom / 300.15) * contract.fmath.exp(21.5565981 - eg0 / (2.0 * vtm0));
+    const phi = 2.0 * vtm0 * contract.fmath.log(p_nch / ni);
     const sqrt_phi = @sqrt(@max(phi, 1.0e-30));
     const vbsc = -0.9 * phi;
 
@@ -663,29 +666,37 @@ fn iPrep(model: *const Model, instance: *const Instance) IPrep {
 
     const factor1 = @sqrt(EPS_SI / EPS_OX * tox);
 
-    const vbi = vtm * @log(1.0e20 * p_nch / (NI_SI * NI_SI));
+    const vbi = vtm * contract.fmath.log(1.0e20 * p_nch / (ni * ni));
     const v0 = vbi - phi;
 
     const t1_nom = @sqrt(EPS_SI / EPS_OX * tox * xdep0);
     const t1_nom_safe = @max(t1_nom, 1.0e-30);
 
     const t0_dsub_arg = @max(-0.5 * p_dsub * l_eff / t1_nom_safe, -34.0);
-    const t0_dsub = @exp(t0_dsub_arg);
+    const t0_dsub = contract.fmath.exp(t0_dsub_arg);
     const theta0vb0 = t0_dsub * (1.0 + 2.0 * t0_dsub);
 
     const nlx_term = k1_ox * (@sqrt(1.0 + p_nlx / l_eff) - 1.0) * sqrt_phi;
     const t_ratio = temp / p_tnom - 1.0;
+    const t_ratio_abs = temp / p_tnom;
+
+    // Temperature-corrected mobility and velocity parameters
+    const p_ua_t = @as(f64, model.ua) + @as(f64, model.ua1) * t_ratio;
+    const p_ub_t = @as(f64, model.ub) + @as(f64, model.ub1) * t_ratio;
+    const p_uc_t = @as(f64, model.uc) + @as(f64, model.uc1) * t_ratio;
+    const p_u0_t = @as(f64, model.u0) * contract.fmath.pow(t_ratio_abs, @as(f64, model.ute));
+    const p_vsat_t = @as(f64, model.vsat) - @as(f64, model.at) * t_ratio;
 
     const tmp2_w = tox * phi / (w_eff + @as(f64, model.w0));
 
     const t0_drout_arg = @max(-0.5 * p_drout * l_eff / t1_nom_safe, -34.0);
-    const t0_drout = @exp(t0_drout_arg);
+    const t0_drout = contract.fmath.exp(t0_drout_arg);
     const theta_rout = p_pdiblc1 * t0_drout * (1.0 + 2.0 * t0_drout) + p_pdiblc2;
 
     const litl = @sqrt(3.0 * p_xj * tox);
     const litl_safe = @max(litl, 1.0e-30);
 
-    const rds0 = p_rdsw / @exp(p_wr * @log(@max(w_eff * 1.0e6, 1.0e-30)));
+    const rds0 = p_rdsw / contract.fmath.exp(p_wr * contract.fmath.log(@max(w_eff * 1.0e6, 1.0e-30)));
 
     const alpha_eff = p_alpha0 + p_alpha1 * l_eff;
 
@@ -725,7 +736,7 @@ fn iPrep(model: *const Model, instance: *const Instance) IPrep {
         .p_vth0 = @as(f64, model.vth0),
         .p_nch = p_nch,
         .p_xj = p_xj,
-        .p_vsat = @as(f64, model.vsat),
+        .p_vsat = p_vsat_t,
         .p_a0 = @as(f64, model.a0),
         .p_ags = @as(f64, model.ags),
         .p_a1 = @as(f64, model.a1),
@@ -742,10 +753,10 @@ fn iPrep(model: *const Model, instance: *const Instance) IPrep {
         .p_dvt1w = @as(f64, model.dvt1w),
         .p_dvt2w = @as(f64, model.dvt2w),
         .p_dsub = p_dsub,
-        .p_ua = @as(f64, model.ua),
-        .p_ub = @as(f64, model.ub),
-        .p_uc = @as(f64, model.uc),
-        .p_u0 = @as(f64, model.u0),
+        .p_ua = p_ua_t,
+        .p_ub = p_ub_t,
+        .p_uc = p_uc_t,
+        .p_u0 = p_u0_t,
         .p_voff = @as(f64, model.voff),
         .p_delta = @as(f64, model.delta),
         .p_prwg = @as(f64, model.prwg),
@@ -922,8 +933,11 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     const delta_vds = vds.sub(vds_eff);
 
     // ---- Channel length modulation (VACLM) ----
+    // VACLM = Leff * (Abulk + Vgsteff/EsatL) / (pclm * Abulk * litl) * diffVds
     const va_clm: S = if (P.p_pclm == 0.0) S.con(MAX_EXP_VAL) else abulk.add(vgst_eff.div(esat_l))
-        .scale(P.l_eff / (P.p_pclm * P.litl_safe / P.l_eff))
+        .scale(P.l_eff / (P.p_pclm * P.litl_safe))
+        .div(abulk)
+        .mul(delta_vds.maxC(1.0e-20))
         .maxC(1.0e-20);
 
     // ---- DIBL output resistance (VADIBL) ----
@@ -942,9 +956,9 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     const va_sat_num = esat_l.add(vdsat)
         .add(wvcox_rds.mul(vgst_eff).scale(2.0).mul(abulk.mul(vdsat).div(vgst2vtm.scale(2.0)).neg().addC(1.0)));
     const va_sat = va_sat_num.div(tolm1.add(wvcox_rds.mul(abulk)));
-    // inv_va = 1/va_sat + 1/va_clm + 1/va_dibl; va = max(va_pvag/inv_va, 1e-20)
-    const inv_va = S.con(1.0).div(va_sat).add(S.con(1.0).div(va_clm)).add(S.con(1.0).div(va_dibl));
-    const va = va_pvag.div(inv_va).maxC(1.0e-20);
+    // Va = Vasat + pvag_factor * (VACLM || VADIBL)
+    const va_clm_dibl = va_clm.mul(va_dibl).div(va_clm.add(va_dibl).maxC(1.0e-20));
+    const va = va_sat.add(va_pvag.mul(va_clm_dibl)).maxC(1.0e-20);
 
     // ---- Substrate current body effect (VASCBE) ----
     const va_scbe: S = if (P.p_pscbe2 == 0.0) S.con(MAX_EXP_VAL) else S.con(P.p_pscbe1 * P.litl_safe).div(delta_vds.addC(1.0e-20)).minC(80.0).exp().scale(P.l_eff / P.p_pscbe2).addC(1.0e-20);
@@ -1027,6 +1041,7 @@ const QPrep = struct {
 fn qPrep(model: *const Model, instance: *const Instance) QPrep {
     const tox: f64 = @as(f64, model.tox);
     const p_nch: f64 = @as(f64, model.nch);
+    const p_tnom: f64 = @as(f64, model.tnom);
     const p_k1: f64 = if (@as(f64, model.k1) == 0.0)
         @sqrt(2.0 * EPS_SI * Q_ELEC * @as(f64, model.nch) * 1.0e6) / (EPS_OX / tox)
     else
@@ -1046,7 +1061,10 @@ fn qPrep(model: *const Model, instance: *const Instance) QPrep {
     const c_ox = EPS_OX / tox;
     const l_eff = @max(l - 2.0 * p_lint, 1.0e-9);
     const w_eff = @max(w - 2.0 * p_wint, 1.0e-9);
-    const phi = 2.0 * vtm * @log(p_nch / NI_SI);
+    const vtm0 = KB_OVER_Q * p_tnom;
+    const eg0 = 1.16 - 7.02e-4 * p_tnom * p_tnom / (p_tnom + 1108.0);
+    const ni = 1.45e10 * (p_tnom / 300.15) * @sqrt(p_tnom / 300.15) * contract.fmath.exp(21.5565981 - eg0 / (2.0 * vtm0));
+    const phi = 2.0 * vtm0 * contract.fmath.log(p_nch / ni);
 
     return .{
         .type_f = @floatFromInt(model.type_),
@@ -1228,7 +1246,7 @@ pub fn limit(model: *const Model, instance: *const Instance, x_new: [n_u]f64, x_
 
     // Critical voltage for pnjlim
     const is_jct = p_js * w_eff * 1.0e-6 + 1.0e-14;
-    const v_crit = vt * @log(vt / (@sqrt(2.0) * is_jct));
+    const v_crit = vt * contract.fmath.log(vt / (@sqrt(2.0) * is_jct));
 
     var result = x_new;
 
@@ -1313,12 +1331,12 @@ pub fn limit(model: *const Model, instance: *const Instance, x_new: [n_u]f64, x_
             if (vbs_old > 0.0) {
                 const arg = (vbs_new - vbs_old) / vt;
                 if (arg > 0.0) {
-                    vbs_limited = vbs_old + vt * (2.0 + @log(@max(arg - 2.0, 1.0e-30)));
+                    vbs_limited = vbs_old + vt * (2.0 + contract.fmath.log(@max(arg - 2.0, 1.0e-30)));
                 } else {
-                    vbs_limited = vbs_old - vt * (2.0 + @log(@max(2.0 - arg, 1.0e-30)));
+                    vbs_limited = vbs_old - vt * (2.0 + contract.fmath.log(@max(2.0 - arg, 1.0e-30)));
                 }
             } else {
-                vbs_limited = vt * @log(@max(vbs_new / vt, 1.0e-30));
+                vbs_limited = vt * contract.fmath.log(@max(vbs_new / vt, 1.0e-30));
             }
         }
 
@@ -1338,12 +1356,12 @@ pub fn limit(model: *const Model, instance: *const Instance, x_new: [n_u]f64, x_
             if (vbd_old > 0.0) {
                 const arg = (vbd_new - vbd_old) / vt;
                 if (arg > 0.0) {
-                    vbd_limited = vbd_old + vt * (2.0 + @log(@max(arg - 2.0, 1.0e-30)));
+                    vbd_limited = vbd_old + vt * (2.0 + contract.fmath.log(@max(arg - 2.0, 1.0e-30)));
                 } else {
-                    vbd_limited = vbd_old - vt * (2.0 + @log(@max(2.0 - arg, 1.0e-30)));
+                    vbd_limited = vbd_old - vt * (2.0 + contract.fmath.log(@max(2.0 - arg, 1.0e-30)));
                 }
             } else {
-                vbd_limited = vt * @log(@max(vbd_new / vt, 1.0e-30));
+                vbd_limited = vt * contract.fmath.log(@max(vbd_new / vt, 1.0e-30));
             }
         }
 

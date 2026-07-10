@@ -879,8 +879,8 @@ const Prep = struct {
 
         const eg_nom: f64 = eg0 - 90.25e-6 * tnom_c - 1.0e-7 * tnom_c * tnom_c;
         const eg: f64 = eg_nom - bgtmp1 * tdiff - bgtmp2 * tdiff * tdiff;
-        const ni_ratio: f64 = @exp(eg_nom * beta * 0.5) * @exp(-eg * beta * 0.5);
-        const ni_factor: f64 = ni_ratio * @exp(1.5 * @log(@max(t_ratio, 1e-30)));
+        const ni_ratio: f64 = contract.fmath.exp(eg_nom * beta * 0.5) * contract.fmath.exp(-eg * beta * 0.5);
+        const ni_factor: f64 = ni_ratio * contract.fmath.exp(1.5 * contract.fmath.log(@max(t_ratio, 1e-30)));
 
         // --- Geometry ---
         const l_gate: f64 = l_drawn + xl;
@@ -888,9 +888,9 @@ const Prep = struct {
         const l_gate_um: f64 = l_gate * 1e6;
         const w_gate_um: f64 = w_gate * 1e6;
         const ll_denom: f64 = @max(@abs(l_gate + lld), 1e-30);
-        const l_poly: f64 = l_gate - 2.0 * ll / @exp(lln * @log(ll_denom));
+        const l_poly: f64 = l_gate - 2.0 * ll / contract.fmath.exp(lln * contract.fmath.log(ll_denom));
         const wl_denom: f64 = @max(@abs(w_gate + wld), 1e-30);
-        const w_poly: f64 = w_gate - 2.0 * wl / @exp(wln * @log(wl_denom));
+        const w_poly: f64 = w_gate - 2.0 * wl / contract.fmath.exp(wln * contract.fmath.log(wl_denom));
         const l_eff: f64 = @max(l_poly - xld_p - xldld, 1e-9);
         const w_eff: f64 = @max(w_poly - 2.0 * xwd, 1e-9);
         const w_eff_ld: f64 = @max(w_poly - 2.0 * xwdld, 1e-9);
@@ -903,8 +903,8 @@ const Prep = struct {
         const cox: f64 = eps_ox / tox;
 
         // --- Width-dependent doping ---
-        const nsubc_w: f64 = nsubc * (1.0 + nsubcw / @exp(nsubcwp * @log(w_gate_um_safe)));
-        const nsubp_w: f64 = nsubp * (1.0 + nsubp0 / @exp(nsubwp * @log(w_gate_um_safe)));
+        const nsubc_w: f64 = nsubc * (1.0 + nsubcw / contract.fmath.exp(nsubcwp * contract.fmath.log(w_gate_um_safe)));
+        const nsubp_w: f64 = nsubp * (1.0 + nsubp0 / contract.fmath.exp(nsubwp * contract.fmath.log(w_gate_um_safe)));
 
         // --- LOD/STI stress ---
         var nsubp_eff: f64 = nsubp_w;
@@ -913,13 +913,13 @@ const Prep = struct {
         const sb_eff: f64 = if (sb_i > 0) sb_i else sbref;
         const lod_half: f64 = 0.5 * (sa_eff + sb_eff);
         const lod_half_ref: f64 = 0.5 * (saref + sbref);
-        const nsubpsti1_pow: f64 = @exp(nsubpsti3 * @log(@max(nsubpsti1, 1e-30)));
+        const nsubpsti1_pow: f64 = contract.fmath.exp(nsubpsti3 * contract.fmath.log(@max(nsubpsti1, 1e-30)));
         const t1_lod_n: f64 = 1.0 / (1.0 + nsubpsti2);
         const t2_lod_n: f64 = nsubpsti1_pow / @max(lod_half, 1e-30);
         const t3_lod_n: f64 = nsubpsti1_pow / @max(lod_half_ref, 1e-30);
         const nsubsti_ratio: f64 = (1.0 + t1_lod_n * t2_lod_n) / @max(1.0 + t1_lod_n * t3_lod_n, 1e-30);
         nsubp_eff = nsubp_eff * nsubsti_ratio;
-        const muesti1_pow: f64 = @exp(muesti3 * @log(@max(muesti1, 1e-30)));
+        const muesti1_pow: f64 = contract.fmath.exp(muesti3 * contract.fmath.log(@max(muesti1, 1e-30)));
         const t1_lod_m: f64 = 1.0 / (1.0 + muesti2);
         const t2_lod_m: f64 = muesti1_pow / @max(lod_half, 1e-30);
         const t3_lod_m: f64 = muesti1_pow / @max(lod_half_ref, 1e-30);
@@ -935,8 +935,8 @@ const Prep = struct {
         const nsub_safe: f64 = @max(nsub, 1e10);
 
         // --- 2*Phi_B ---
-        const phi_bc: f64 = @log(@max(nsubc_w, 1e10) / @max(NI_300 * ni_factor, 1e-30)) / beta;
-        const phi_b: f64 = @log(@max(nsub_safe, 1e10) / @max(NI_300 * ni_factor, 1e-30)) / beta;
+        const phi_bc: f64 = contract.fmath.log(@max(nsubc_w, 1e10) / @max(NI_300 * ni_factor, 1e-30)) / beta;
+        const phi_b: f64 = contract.fmath.log(@max(nsub_safe, 1e10) / @max(NI_300 * ni_factor, 1e-30)) / beta;
         const two_phi_b: f64 = 2.0 * phi_b;
 
         const const0: f64 = @sqrt(@max(2.0 * EPS_SI * Q_ELECTRON * nsub_safe / beta, 1e-30));
@@ -953,7 +953,7 @@ const Prep = struct {
         const cef: f64 = wfc * 0.5 * l_eff;
 
         // small geometry dvth
-        const dvth_sm: f64 = wl2 / @exp(wl2p * @log(wl_prod));
+        const dvth_sm: f64 = wl2 / contract.fmath.exp(wl2p * contract.fmath.log(wl_prod));
 
         // qme x-indep base (vth_for_qme uses sqrt(sqrt_arg_vth0)/cox at vbs=0? no --
         // it depends on vbs_eff; the x-dependent piece is recomputed in eval).
@@ -972,23 +972,23 @@ const Prep = struct {
         const delta_safe: f64 = @max(delta_ddlt, 1.01);
 
         // --- Mobility x-indep ---
-        const ndep_eff: f64 = ndep_p / (1.0 + ndepl / @exp(ndeplp * @log(l_gate_um_safe)));
-        var ninvd_eff: f64 = ninvd_p * (1.0 + ninvdl / @exp(ninvdlp * @log(l_gate_um_safe)));
-        ninvd_eff = ninvd_eff * (1.0 + ninvdw / @exp(ninvdwp * @log(w_gate_um_safe)));
+        const ndep_eff: f64 = ndep_p / (1.0 + ndepl / contract.fmath.exp(ndeplp * contract.fmath.log(l_gate_um_safe)));
+        var ninvd_eff: f64 = ninvd_p * (1.0 + ninvdl / contract.fmath.exp(ninvdlp * contract.fmath.log(l_gate_um_safe)));
+        ninvd_eff = ninvd_eff * (1.0 + ninvdw / contract.fmath.exp(ninvdwp * contract.fmath.log(w_gate_um_safe)));
         ninvd_eff = ninvd_eff * (1.0 + ninvdt1 * tdiff + ninvdt2 * tdiff2);
 
-        var muephonon: f64 = mueph1_p * (1.0 + muephl / @exp(mueplp * @log(l_gate_um_safe)));
-        muephonon = muephonon * (1.0 + muephw / @exp(muepwp * @log(w_gate_um_safe)));
-        muephonon = muephonon * (1.0 + muephs / @exp(muepsp * @log(wl_prod)));
+        var muephonon: f64 = mueph1_p * (1.0 + muephl / contract.fmath.exp(mueplp * contract.fmath.log(l_gate_um_safe)));
+        muephonon = muephonon * (1.0 + muephw / contract.fmath.exp(muepwp * contract.fmath.log(w_gate_um_safe)));
+        muephonon = muephonon * (1.0 + muephs / contract.fmath.exp(muepsp * contract.fmath.log(wl_prod)));
         muephonon = muephonon * muesti_factor;
         // mu_ph = muephonon / (t_ratio^muetmp * eeff^mueph0); split out t_ratio part
-        const mu_ph_tmp: f64 = muephonon / @exp(muetmp * @log(@max(t_ratio, 1e-30)));
+        const mu_ph_tmp: f64 = muephonon / contract.fmath.exp(muetmp * contract.fmath.log(@max(t_ratio, 1e-30)));
 
-        var muesurface: f64 = muesr1 * (1.0 + muesrl / @exp(mueslp * @log(l_gate_um_safe)));
-        muesurface = muesurface * (1.0 + muesrw / @exp(mueswp * @log(w_gate_um_safe)));
+        var muesurface: f64 = muesr1 * (1.0 + muesrl / contract.fmath.exp(mueslp * contract.fmath.log(l_gate_um_safe)));
+        muesurface = muesurface * (1.0 + muesrw / contract.fmath.exp(mueswp * contract.fmath.log(w_gate_um_safe)));
 
-        var vmax_eff: f64 = vmax_p * (1.0 + vover / @exp(voverp * @log(l_gate_um_safe)));
-        vmax_eff = vmax_eff * (1.0 + vovers_p / @exp(voversp * @log(wl_prod)));
+        var vmax_eff: f64 = vmax_p * (1.0 + vover / contract.fmath.exp(voverp * contract.fmath.log(l_gate_um_safe)));
+        vmax_eff = vmax_eff * (1.0 + vovers_p / contract.fmath.exp(voversp * contract.fmath.log(wl_prod)));
         const vmax_tmp_denom: f64 = 1.8 + 0.4 * t_ratio + 0.1 * t_ratio * t_ratio - vtmp * (1.0 - t_ratio);
         vmax_eff = vmax_eff / @max(vmax_tmp_denom, 1e-30);
         vmax_eff = vmax_eff * (1.0 + @as(f64, model.vmaxt1) * tdiff + @as(f64, model.vmaxt2) * tdiff2);
@@ -1332,7 +1332,7 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     // Pocket implant effect
     const two_phi_bc: f64 = 2.0 * phi_bc;
     // vth_r = vfbc + 2phiB + qb_mod/cox + log(nsubb/nsubc_w)/beta
-    const vth_r = qb_mod.scale(1.0 / cox).addC(vfbc + two_phi_b + @log(@max(nsubb / nsubc_w, 1e-30)) / beta);
+    const vth_r = qb_mod.scale(1.0 / cox).addC(vfbc + two_phi_b + contract.fmath.log(@max(nsubb / nsubc_w, 1e-30)) / beta);
     // vth0 = vfbc + 2phiBc + sqrt(2 q nsubc_w epsSi (2phiBc - vbs_eff))/cox
     const sqrt_arg_vth0 = vbs_eff.neg().addC(two_phi_bc).scale(2.0 * Q_ELECTRON * nsubc_w * EPS_SI).maxC(1e-30);
     const vth0 = sqrt_arg_vth0.sqrt().scale(1.0 / cox).addC(vfbc + two_phi_bc);
@@ -1348,7 +1348,7 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
 
     // Poly-Si gate depletion (Eq. 64)
     const phi_spg = vgs_eff.addC(-pgd2).scale(1.0 / @max(beta_inv, 1e-30)).minC(80.0).exp()
-        .scale(pgd1 * @exp(pgd4 * @log(@max(1.0 + 1.0 / (l_gate * 1e6), 1e-30))));
+        .scale(pgd1 * contract.fmath.exp(pgd4 * contract.fmath.log(@max(1.0 + 1.0 / (l_gate * 1e6), 1e-30))));
 
     // Quantum mechanical correction to Tox (Eqs 65-66)
     // vth_for_qme = vfbc + 2phiB + sqrt(sqrt_arg_vth0)/cox
@@ -1469,7 +1469,7 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     const dl_inner = clm_arg1.scale(1.0 / @max(l_eff, 1e-9));
     const dl_raw = dl_inner.mul(dl_inner).add(clm_arg2.scale(4.0)).maxC(0.0).sqrt().sub(dl_inner).scale(0.5);
 
-    const dl_mod = dl_raw.scale(1.0 + clm6 * @exp(clm5 * @log(@max(l_gate_um, 1e-30))));
+    const dl_mod = dl_raw.scale(1.0 + clm6 * contract.fmath.exp(clm5 * contract.fmath.log(@max(l_gate_um, 1e-30))));
     const dl_eff = dl_mod.minC(0.5 * l_eff);
     const l_eff_clm = dl_eff.neg().addC(l_eff).maxC(1e-9);
 
@@ -1480,15 +1480,15 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     // ========================================================================
     // potential_pt = (vbi - phi_s0)^ptp
     const potential_pt_s = phi_s0.neg().addC(vbi_p).maxC(1e-30).log().scale(ptp).exp();
-    const pt_term: f64 = ptl / @exp(ptlp * @log(@max(l_gate_um, 1e-30)));
+    const pt_term: f64 = ptl / contract.fmath.exp(ptlp * contract.fmath.log(@max(l_gate_um, 1e-30)));
     // pt_bracket = 1 + pt2*vds_eff_raw + pt4*(phi_s0 - vbs_eff)/l_gate_um^pt4p
-    const pt_bracket = vds_eff_raw.scale(pt2).add(phi_s0.sub(vbs_eff).scale(pt4 / @exp(pt4p * @log(@max(l_gate_um, 1e-30))))).addC(1.0);
+    const pt_bracket = vds_eff_raw.scale(pt2).add(phi_s0.sub(vbs_eff).scale(pt4 / contract.fmath.exp(pt4p * contract.fmath.log(@max(l_gate_um, 1e-30))))).addC(1.0);
     // ids_pt = (w_eff*nf/l_eff) * mu/beta * dphi * cox_eff * beta * pt_term * potential_pt * pt_bracket
     const ids_pt_s = dphi_sl_s0.mul(cox_eff).mul(potential_pt_s).mul(pt_bracket).mul(mu).scale((w_eff * nf / l_eff) / beta * beta * pt_term);
     ids = ids.add(ids_pt_s);
 
     // High-field conductance (Eq. 63)
-    const gdl_factor: f64 = gdl / @exp(gdlp * @log(@max(l_gate_um + gdld_p * 1e6, 1e-30)));
+    const gdl_factor: f64 = gdl / contract.fmath.exp(gdlp * contract.fmath.log(@max(l_gate_um + gdld_p * 1e6, 1e-30)));
     const ids_gdl = dphi_sl_s0.mul(cox_eff).mul(vds_eff_raw).mul(mu).scale((w_eff * nf / l_eff) / beta * beta * gdl_factor);
     ids = ids.add(ids_gdl);
 
@@ -1498,8 +1498,8 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     const coisti_f: f64 = @floatFromInt(@min(coisti, 1));
     var ids_sti = S.con(0.0);
     {
-        const l_gate_sm: f64 = l_gate + wl1 / @exp(wl1p * @log(wl_prod));
-        const two_phi_b_sti: f64 = 2.0 * @log(@max(nsti, 1e10) / @max(NI_300 * ni_factor, 1e-30)) / beta;
+        const l_gate_sm: f64 = l_gate + wl1 / contract.fmath.exp(wl1p * contract.fmath.log(wl_prod));
+        const two_phi_b_sti: f64 = 2.0 * contract.fmath.log(@max(nsti, 1e10) / @max(NI_300 * ni_factor, 1e-30)) / beta;
         // wd_sti = sqrt(2 epsSi (2phiB_sti - vbs_eff)/(q nsti))
         const wd_sti = vbs_eff.neg().addC(two_phi_b_sti).scale(2.0 * EPS_SI / (Q_ELECTRON * nsti)).maxC(1e-30).sqrt();
         const l_sm_parl2: f64 = @max(l_gate_sm - @as(f64, model.parl2), 1e-9);
@@ -1515,8 +1515,8 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
         const qi_sti = vgs_sti.sub(phi_s_sti).maxC(0.0).scale(cox).maxC(0.0);
         const l_sm_um: f64 = @max(l_gate_sm * 1e6, 1e-20);
         const w_gm_um: f64 = @max(w_gate * 1e6, 1e-20);
-        const wsti_eff: f64 = wsti_p * (1.0 + wstil / @exp(wstilp * @log(l_sm_um))) *
-            (1.0 + wstiw / @exp(wstiwp * @log(w_gm_um)));
+        const wsti_eff: f64 = wsti_p * (1.0 + wstil / contract.fmath.exp(wstilp * contract.fmath.log(l_sm_um))) *
+            (1.0 + wstiw / contract.fmath.exp(wstiwp * contract.fmath.log(w_gm_um)));
         // ids_sti = 2*wsti_eff/l_eff_clm * mu * qi_sti/beta * (1 - exp(-beta*vds_eff_raw))
         const one_m_exp = vds_eff_raw.scale(-beta).minC(80.0).exp().neg().addC(1.0);
         ids_sti = mu.mul(qi_sti).div(l_eff_clm).mul(one_m_exp).scale(2.0 * wsti_eff / beta);
@@ -1537,9 +1537,9 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     var isub = S.con(0.0);
     {
         const xsub_tmp: f64 = 1.0 + subtmp * tdiff;
-        const xsub1: f64 = sub1_p * (1.0 + sub1l / @exp(sub1lp * @log(@max(l_gate, 1e-30)))) * xsub_tmp;
+        const xsub1: f64 = sub1_p * (1.0 + sub1l / contract.fmath.exp(sub1lp * contract.fmath.log(@max(l_gate, 1e-30)))) * xsub_tmp;
         const xsub2: f64 = sub2_p * (1.0 + sub2l / @max(l_gate, 1e-30)) / @max(xsub_tmp, 1e-30);
-        const xgate: f64 = slg * (1.0 + slgl / @exp(slglp * @log(@max(l_gate, 1e-30))));
+        const xgate: f64 = slg * (1.0 + slgl / contract.fmath.exp(slglp * contract.fmath.log(@max(l_gate, 1e-30))));
         const psi_slsat = phi_s0.maxC(0.0);
 
         const svbs_p: f64 = @as(f64, model.svbs);
@@ -1550,9 +1550,9 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
         const svgslp_p: f64 = @as(f64, model.svgslp);
         const svgsw_p: f64 = @as(f64, model.svgsw);
         const svgswp_p: f64 = @as(f64, model.svgswp);
-        const svbs_eff: f64 = svbs_p * (1.0 + svbsl_p / @exp(svbslp_p * @log(@max(l_gate, 1e-30))));
-        const svgs_eff: f64 = svgs_p * (1.0 + svgsl_p / @exp(svgslp_p * @log(@max(l_gate, 1e-30)))) *
-            (1.0 + svgsw_p / @exp(svgswp_p * @log(@max(w_gate, 1e-30))));
+        const svbs_eff: f64 = svbs_p * (1.0 + svbsl_p / contract.fmath.exp(svbslp_p * contract.fmath.log(@max(l_gate, 1e-30))));
+        const svgs_eff: f64 = svgs_p * (1.0 + svgsl_p / contract.fmath.exp(svgslp_p * contract.fmath.log(@max(l_gate, 1e-30)))) *
+            (1.0 + svgsw_p / contract.fmath.exp(svgswp_p * contract.fmath.log(@max(w_gate, 1e-30))));
 
         // psi_subsat = max(svds*vds_eff_raw + svbs_eff*vbs_eff + svgs_eff*vgs_eff + phi_s0 - l_gate*psi_slsat/(xgate+l_gate), 1e-30)
         const psi_subsat = vds_eff_raw.scale(svds)
@@ -1571,7 +1571,7 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
         const subld1l_p: f64 = @as(f64, model.subld1l);
         const subld1lp_p: f64 = @as(f64, model.subld1lp);
         const subld2_p: f64 = @as(f64, model.subld2);
-        const subld1_eff: f64 = subld1_p * (1.0 + subld1l_p / @exp(subld1lp_p * @log(@max(l_gate, 1e-30))));
+        const subld1_eff: f64 = subld1_p * (1.0 + subld1l_p / contract.fmath.exp(subld1lp_p * contract.fmath.log(@max(l_gate, 1e-30))));
         const ey_drift = ey.maxC(1e-30);
         const vgvt_drift = vg_prime.sub(phi_s0).maxC(1e-30);
         const l_drift_isub: f64 = @max(ldrift1 + ldrift2, 1e-9);
@@ -1666,11 +1666,11 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     const nvtm_d: f64 = njd * beta_inv;
     const nvtm_d_safe: f64 = @max(nvtm_d, 1e-30);
     const isbd: f64 = @max(js0d * ad_i + @as(f64, model.js0swd) * pd_i + @as(f64, model.js0swgd) * w_eff * nf, 1e-30);
-    const v1_d: f64 = nvtm_d * @log(@max(vdiffjd / isbd + 1.0, 1e-30));
+    const v1_d: f64 = nvtm_d * contract.fmath.log(@max(vdiffjd / isbd + 1.0, 1e-30));
     const vbd_lim = vbd.minC(v1_d);
     const exp_d = vbd_lim.scale(1.0 / nvtm_d_safe).minC(80.0).exp();
     var ibd = exp_d.addC(-1.0).scale(isbd);
-    const ibd_lin = vbd.addC(-v1_d).maxC(0.0).scale(isbd / nvtm_d_safe * @exp(@min(v1_d / nvtm_d_safe, 80.0)));
+    const ibd_lin = vbd.addC(-v1_d).maxC(0.0).scale(isbd / nvtm_d_safe * contract.fmath.exp(@min(v1_d / nvtm_d_safe, 80.0)));
     ibd = ibd.add(ibd_lin);
     ibd = ibd.add(vbd.scale(-cvbd / nvtm_d_safe).minC(80.0).exp().addC(-1.0).scale(cisbd * isbd));
     ibd = ibd.add(vbd.scale(-cvbd / nvtm_d_safe).minC(80.0).exp().addC(-1.0).scale(cisbkd));
@@ -1681,11 +1681,11 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     const nvtm_s: f64 = njs * beta_inv;
     const nvtm_s_safe: f64 = @max(nvtm_s, 1e-30);
     const isbs: f64 = @max(js0s * as_i + @as(f64, model.js0sws) * ps_i + @as(f64, model.js0swgs) * w_eff * nf, 1e-30);
-    const v1_s: f64 = nvtm_s * @log(@max(vdiffjs / isbs + 1.0, 1e-30));
+    const v1_s: f64 = nvtm_s * contract.fmath.log(@max(vdiffjs / isbs + 1.0, 1e-30));
     const vbs_lim = vbs_junc.minC(v1_s);
     const exp_s = vbs_lim.scale(1.0 / nvtm_s_safe).minC(80.0).exp();
     var ibs = exp_s.addC(-1.0).scale(isbs);
-    const ibs_lin = vbs_junc.addC(-v1_s).maxC(0.0).scale(isbs / nvtm_s_safe * @exp(@min(v1_s / nvtm_s_safe, 80.0)));
+    const ibs_lin = vbs_junc.addC(-v1_s).maxC(0.0).scale(isbs / nvtm_s_safe * contract.fmath.exp(@min(v1_s / nvtm_s_safe, 80.0)));
     ibs = ibs.add(ibs_lin);
     ibs = ibs.add(vbs_junc.scale(-cvbs / nvtm_s_safe).minC(80.0).exp().addC(-1.0).scale(cisbs * isbs));
     ibs = ibs.add(vbs_junc.scale(-cvbs / nvtm_s_safe).minC(80.0).exp().addC(-1.0).scale(cisbks));
@@ -1720,9 +1720,9 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
         const sub2snp_p: f64 = @as(f64, model.sub2snp);
         const svdssnp_p: f64 = @as(f64, model.svdssnp);
         const xsub_tmp_snp: f64 = 1.0 + subtmp * tdiff;
-        const xsub1_snp: f64 = sub1snp_p * (1.0 + sub1l / @exp(sub1lp * @log(@max(l_gate, 1e-30)))) * xsub_tmp_snp;
+        const xsub1_snp: f64 = sub1snp_p * (1.0 + sub1l / contract.fmath.exp(sub1lp * contract.fmath.log(@max(l_gate, 1e-30)))) * xsub_tmp_snp;
         const xsub2_snp: f64 = sub2snp_p * (1.0 + sub2l / @max(l_gate, 1e-30)) / @max(xsub_tmp_snp, 1e-30);
-        const xgate_snp: f64 = slg * (1.0 + slgl / @exp(slglp * @log(@max(l_gate, 1e-30))));
+        const xgate_snp: f64 = slg * (1.0 + slgl / contract.fmath.exp(slglp * contract.fmath.log(@max(l_gate, 1e-30))));
         const psi_slsat_snp = phi_s0.maxC(0.0);
         const psi_subsat_snp = vds_eff_raw.scale(svdssnp_p).add(phi_s0).sub(psi_slsat_snp.scale(l_gate / @max(xgate_snp + l_gate, 1e-30))).maxC(1e-30);
         const beta_snp = psi_subsat_snp.mul(psi_subsat_snp.pow(-1.0).scale(-xsub2_snp).minC(80.0).exp()).scale(xsub1_snp);
@@ -1738,12 +1738,12 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
 
     const l_drift: f64 = ldrift1 + ldrift2;
     const l_drift_safe: f64 = @max(l_drift, 1e-9);
-    const mu_drift0_temp: f64 = rdrmue_p / @exp(rdrmuetmp * @log(@max(t_ratio, 1e-30)));
-    const mu_drift0: f64 = mu_drift0_temp * (1.0 + rdrmuel / @exp(rdrmuelp * @log(l_gate_um_safe)));
+    const mu_drift0_temp: f64 = rdrmue_p / contract.fmath.exp(rdrmuetmp * contract.fmath.log(@max(t_ratio, 1e-30)));
+    const mu_drift0: f64 = mu_drift0_temp * (1.0 + rdrmuel / contract.fmath.exp(rdrmuelp * contract.fmath.log(l_gate_um_safe)));
     const vmax_drift_temp: f64 = rdrvmax_p / @max(1.8 + 0.4 * t_ratio + 0.1 * t_ratio * t_ratio - rdrvtmp * (1.0 - t_ratio), 1e-30);
     const vmax_drift: f64 = vmax_drift_temp *
-        (1.0 + rdrvmaxl / @exp(rdrvmaxlp * @log(l_gate_um_safe))) *
-        (1.0 + rdrvmaxw / @exp(rdrvmaxwp * @log(w_gate_um_safe)));
+        (1.0 + rdrvmaxl / contract.fmath.exp(rdrvmaxlp * contract.fmath.log(l_gate_um_safe))) *
+        (1.0 + rdrvmaxw / contract.fmath.exp(rdrvmaxwp * contract.fmath.log(w_gate_um_safe)));
     const rdrbb: f64 = rdrbb_p + rdrbbtmp * tdiff;
     const rdrbb_safe: f64 = @max(rdrbb, 0.01);
 
@@ -1795,12 +1795,12 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
         const ldrift1s_f: f64 = @as(f64, model.ldrift1s);
         const ldrift2s_f: f64 = @as(f64, model.ldrift2s);
         const l_drifts: f64 = @max(ldrift1s_f + ldrift2s_f, 1e-9);
-        const mu_drifts0_temp: f64 = rdrmues_f / @exp(rdrmuetmp * @log(@max(t_ratio, 1e-30)));
-        const mu_drifts0: f64 = mu_drifts0_temp * (1.0 + rdrmuel / @exp(rdrmuelp * @log(l_gate_um_safe)));
+        const mu_drifts0_temp: f64 = rdrmues_f / contract.fmath.exp(rdrmuetmp * contract.fmath.log(@max(t_ratio, 1e-30)));
+        const mu_drifts0: f64 = mu_drifts0_temp * (1.0 + rdrmuel / contract.fmath.exp(rdrmuelp * contract.fmath.log(l_gate_um_safe)));
         const vmax_drifts_temp: f64 = rdrvmaxs_f / @max(1.8 + 0.4 * t_ratio + 0.1 * t_ratio * t_ratio - rdrvtmp * (1.0 - t_ratio), 1e-30);
         const vmax_drifts: f64 = vmax_drifts_temp *
-            (1.0 + rdrvmaxl / @exp(rdrvmaxlp * @log(l_gate_um_safe))) *
-            (1.0 + rdrvmaxw / @exp(rdrvmaxwp * @log(w_gate_um_safe)));
+            (1.0 + rdrvmaxl / contract.fmath.exp(rdrvmaxlp * contract.fmath.log(l_gate_um_safe))) *
+            (1.0 + rdrvmaxw / contract.fmath.exp(rdrvmaxwp * contract.fmath.log(w_gate_um_safe)));
         const rdrbbs_safe: f64 = @max(rdrbbs_f, 0.01);
         const vssp_abs = vssp.abs();
         const e_drifts = vssp_abs.scale(1.0 / l_drifts);
@@ -1834,9 +1834,9 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     {
         const rth0_val: f64 = rth0_p + rthtemp1 * tdiff + rthtemp2 * tdiff2;
         const rth: f64 = rth0_val / @max(w_eff, 1e-9) /
-            @exp(rth0nf * @log(@max(nf, 1.0))) *
-            (1.0 + rth0l / @exp(rth0lp * @log(l_gate_um_safe))) *
-            (1.0 + rth0w / @exp(rth0wp * @log(w_gate_um_safe)));
+            contract.fmath.exp(rth0nf * contract.fmath.log(@max(nf, 1.0))) *
+            (1.0 + rth0l / contract.fmath.exp(rth0lp * contract.fmath.log(l_gate_um_safe))) *
+            (1.0 + rth0w / contract.fmath.exp(rth0wp * contract.fmath.log(w_gate_um_safe)));
 
         const prattemp1_p: f64 = @as(f64, model.prattemp1);
         const prattemp2_p: f64 = @as(f64, model.prattemp2);
@@ -2035,9 +2035,9 @@ pub fn qFromPrep(comptime S: type, x: [n_u]S, _: *const PrepCache, model: *const
     const l_gate: f64 = l_drawn + xl;
     const w_gate: f64 = w_drawn / nf + xw;
     const ll_denom: f64 = @max(@abs(l_gate + lld), 1e-30);
-    const l_poly: f64 = l_gate - 2.0 * ll / @exp(lln * @log(ll_denom));
+    const l_poly: f64 = l_gate - 2.0 * ll / contract.fmath.exp(lln * contract.fmath.log(ll_denom));
     const wl_denom: f64 = @max(@abs(w_gate + wld), 1e-30);
-    const w_poly: f64 = w_gate - 2.0 * wl / @exp(wln * @log(wl_denom));
+    const w_poly: f64 = w_gate - 2.0 * wl / contract.fmath.exp(wln * contract.fmath.log(wl_denom));
     const l_eff: f64 = @max(l_poly - xld_p - xldld, 1e-9);
     const w_eff: f64 = @max(w_poly - 2.0 * @as(f64, model.xwd), 1e-9);
 
@@ -2052,8 +2052,8 @@ pub fn qFromPrep(comptime S: type, x: [n_u]S, _: *const PrepCache, model: *const
     const npext_q: f64 = @as(f64, model.npext);
     const lpext_q: f64 = @as(f64, model.lpext);
     const w_gate_um_q: f64 = @max(w_gate * 1e6, 1e-20);
-    const nsubc_w: f64 = nsubc * (1.0 + nsubcw_q / @exp(nsubcwp_q * @log(w_gate_um_q)));
-    const nsubp_w: f64 = nsubp * (1.0 + nsubp0_q / @exp(nsubwp_q * @log(w_gate_um_q)));
+    const nsubc_w: f64 = nsubc * (1.0 + nsubcw_q / contract.fmath.exp(nsubcwp_q * contract.fmath.log(w_gate_um_q)));
+    const nsubp_w: f64 = nsubp * (1.0 + nsubp0_q / contract.fmath.exp(nsubwp_q * contract.fmath.log(w_gate_um_q)));
     const lp_eff: f64 = @min(lp_p, l_gate);
     const nsub_avg_q: f64 = (nsubc_w * (l_gate - lp_eff) + nsubp_w * lp_eff) / l_gate;
     const xx_pt_q: f64 = @max(0.5 * l_gate - lp_eff, 1e-30);
@@ -2064,10 +2064,10 @@ pub fn qFromPrep(comptime S: type, x: [n_u]S, _: *const PrepCache, model: *const
 
     const t_ratio_q: f64 = temp_k / tnom_k;
     const eg_q: f64 = eg_nom - bgtmp1 * (temp_k - tnom_k) - bgtmp2 * (temp_k - tnom_k) * (temp_k - tnom_k);
-    const ni_ratio_q: f64 = @exp(eg_nom * beta * 0.5) * @exp(-eg_q * beta * 0.5);
-    const ni_factor_q: f64 = ni_ratio_q * @exp(1.5 * @log(@max(t_ratio_q, 1e-30)));
+    const ni_ratio_q: f64 = contract.fmath.exp(eg_nom * beta * 0.5) * contract.fmath.exp(-eg_q * beta * 0.5);
+    const ni_factor_q: f64 = ni_ratio_q * contract.fmath.exp(1.5 * contract.fmath.log(@max(t_ratio_q, 1e-30)));
 
-    const phi_b: f64 = @log(@max(nsub_safe, 1e10) / @max(NI_300 * ni_factor_q, 1e-30)) / beta;
+    const phi_b: f64 = contract.fmath.log(@max(nsub_safe, 1e10) / @max(NI_300 * ni_factor_q, 1e-30)) / beta;
     const two_phi_b: f64 = 2.0 * phi_b;
 
     const const0: f64 = @sqrt(@max(2.0 * EPS_SI * Q_ELECTRON * nsub_safe / beta, 1e-30));
@@ -2216,7 +2216,7 @@ pub fn qFromPrep(comptime S: type, x: [n_u]S, _: *const PrepCache, model: *const
     const q_cgbo = vgs_eff.sub(vbs_eff).scale(-cgbo * l_gate);
 
     // Fringing capacitance (Eq. 195)
-    const cf: f64 = eps_ox / (1.5708) * w_gate * nf * @log(@max(1.0 + tpoly / tox, 1.0));
+    const cf: f64 = eps_ox / (1.5708) * w_gate * nf * contract.fmath.log(@max(1.0 + tpoly / tox, 1.0));
     const q_fringe_d = vgs_eff.sub(vds_eff_raw).scale(cf);
     const q_fringe_s = vgs_eff.scale(cf);
 
@@ -2224,7 +2224,7 @@ pub fn qFromPrep(comptime S: type, x: [n_u]S, _: *const PrepCache, model: *const
     const wd = vbs_eff.neg().addC(two_phi_b).scale(2.0 * EPS_SI / (Q_ELECTRON * nsub_safe)).maxC(1e-30).sqrt();
     const xqy_eff: f64 = @max(xqy_p, 1e-12);
     // q_y = epsSi*w_eff*nf*wd*((phi_s0 + vds_eff_raw - phi_sl)/xqy_eff + xqy1/l_gate^xqy2 * vbs_eff)
-    const q_y = wd.mul(phi_s0.add(vds_eff_raw).sub(phi_sl).scale(1.0 / xqy_eff).add(vbs_eff.scale(xqy1 / @exp(xqy2 * @log(@max(l_gate, 1e-30)))))).scale(EPS_SI * w_eff * nf);
+    const q_y = wd.mul(phi_s0.add(vds_eff_raw).sub(phi_sl).scale(1.0 / xqy_eff).add(vbs_eff.scale(xqy1 / contract.fmath.exp(xqy2 * contract.fmath.log(@max(l_gate, 1e-30)))))).scale(EPS_SI * w_eff * nf);
 
     // ========================================================================
     // Junction depletion charges (Sec. 18.2)
@@ -2346,10 +2346,10 @@ pub fn limit(model: *const Model, instance: *const Instance, x_new: [n_u]f64, x_
 
 /// PN junction voltage limiting (DEVpnjlim)
 inline fn pnjLim(vnew: f64, vold: f64, vt: f64, is_val: f64) f64 {
-    const vcrit: f64 = vt * @log(vt / (@sqrt(2.0) * is_val));
+    const vcrit: f64 = vt * contract.fmath.log(vt / (@sqrt(2.0) * is_val));
     const vlim: f64 = if (vnew > vcrit and @abs(vnew - vold) > 2.0 * vt)
         if (vold > 0)
-            vold + 2.0 * vt * @log(@max(1.0 + (vnew - vold) / (2.0 * vt), 1e-30))
+            vold + 2.0 * vt * contract.fmath.log(@max(1.0 + (vnew - vold) / (2.0 * vt), 1e-30))
         else
             vcrit
     else
@@ -2481,11 +2481,11 @@ test "hisim_hv: source-bulk diode isolated via body network" {
     const isbs: f64 = 0.5e-6 * 1e-9;
     const nvtm_s: f64 = 1.0 * beta_inv;
     const vdiffjs: f64 = 0.6e-3;
-    const v1_s: f64 = nvtm_s * @log(vdiffjs / isbs + 1.0);
+    const v1_s: f64 = nvtm_s * contract.fmath.log(vdiffjs / isbs + 1.0);
     const vbs: f64 = 0.6;
     const vbs_lim: f64 = @min(vbs, v1_s);
-    var ibs: f64 = isbs * (@exp(vbs_lim / nvtm_s) - 1.0);
-    ibs += isbs / nvtm_s * @exp(@min(v1_s / nvtm_s, 80.0)) * @max(vbs - v1_s, 0.0);
+    var ibs: f64 = isbs * (contract.fmath.exp(vbs_lim / nvtm_s) - 1.0);
+    ibs += isbs / nvtm_s * contract.fmath.exp(@min(v1_s / nvtm_s, 80.0)) * @max(vbs - v1_s, 0.0);
     ibs += vbs * @as(f64, 1e-12); // gbmin
     // Network term on SP: i_bp_sp = (v_bp - v_sp)*g_rbps = 0.6*1e-12 = 6e-13, added.
     const i_bp_sp: f64 = 0.6 * (1.0 / 1e12);

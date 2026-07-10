@@ -485,15 +485,15 @@ fn qPrep(model: *const Model, instance: *const Instance) QPrep {
     // B-E depletion constants
     const one_minus_mje = 1.0 - mje;
     const fc_vje = fc * vje;
-    const q_be_fc = (cje * vje / one_minus_mje) * (1.0 - @exp(one_minus_mje * @log(one_minus_fc)));
-    const f2_be = @exp((1.0 + mje) * @log(one_minus_fc));
+    const q_be_fc = (cje * vje / one_minus_mje) * (1.0 - contract.fmath.exp(one_minus_mje * contract.fmath.log(one_minus_fc)));
+    const f2_be = contract.fmath.exp((1.0 + mje) * contract.fmath.log(one_minus_fc));
     const f3_be = 1.0 - fc * (1.0 + mje);
 
     // B-C depletion constants
     const one_minus_mjc = 1.0 - mjc;
     const fc_vjc = fc * vjc;
-    const q_bc_fc = (cjc * vjc / one_minus_mjc) * (1.0 - @exp(one_minus_mjc * @log(one_minus_fc)));
-    const f2_bc = @exp((1.0 + mjc) * @log(one_minus_fc));
+    const q_bc_fc = (cjc * vjc / one_minus_mjc) * (1.0 - contract.fmath.exp(one_minus_mjc * contract.fmath.log(one_minus_fc)));
+    const f2_bc = contract.fmath.exp((1.0 + mjc) * contract.fmath.log(one_minus_fc));
     const f3_bc = 1.0 - fc * (1.0 + mjc);
 
     // Substrate constants
@@ -540,8 +540,8 @@ fn qPrep(model: *const Model, instance: *const Instance) QPrep {
         .fc_vjs = fc_vjs,
         .one_minus_mjs = one_minus_mjs,
         .cjs_vjs_over_omjs = cjs * vjs / one_minus_mjs,
-        .q_sub_fc = (cjs * vjs / one_minus_mjs) * (1.0 - @exp(one_minus_mjs * @log(one_minus_fc))),
-        .c_sub_fc = cjs / @exp(mjs * @log(one_minus_fc)),
+        .q_sub_fc = (cjs * vjs / one_minus_mjs) * (1.0 - contract.fmath.exp(one_minus_mjs * contract.fmath.log(one_minus_fc))),
+        .c_sub_fc = cjs / contract.fmath.exp(mjs * contract.fmath.log(one_minus_fc)),
     };
 }
 
@@ -707,14 +707,17 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     // =======================================================================
     // KCL Node Stamps
     // =======================================================================
+    // Convention: out[u] = current LEAVING node u through the device
+    // (same as resistor/diode). NPN active: collector draws i_c from c,
+    // emitter emits i_c+i_b into e.
     var out: [n_u]S = undefined;
-    out[c] = i_rc.neg();
-    out[b] = i_rb.neg();
-    out[e] = i_re.neg();
-    out[s] = i_sub.scale(-p.type_f);
-    out[cp] = i_rc.add(i_c_scaled.scale(p.type_f)).add(i_sub.scale(p.type_f));
-    out[bp] = i_rb.sub(i_b_scaled.scale(p.type_f));
-    out[ep] = i_re.sub(i_c_scaled.add(i_b_scaled).scale(p.type_f));
+    out[c] = i_rc;
+    out[b] = i_rb;
+    out[e] = i_re;
+    out[s] = i_sub.scale(p.type_f);
+    out[cp] = i_c_scaled.scale(p.type_f).sub(i_rc).sub(i_sub.scale(p.type_f));
+    out[bp] = i_b_scaled.scale(p.type_f).sub(i_rb);
+    out[ep] = i_re.add(i_c_scaled.add(i_b_scaled).scale(p.type_f)).neg();
     return out;
 }
 
@@ -827,19 +830,17 @@ pub fn qFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *cons
     // ===================================================================
     // Charge KCL Stamps
     // ===================================================================
-    // Q[B'] += Q_BE * type + Q_BC * type
-    // Q[E'] -= Q_BE * type
-    // Q[C'] -= Q_BC * type - Q_sub * type
-    // Q[S]  -= Q_sub * type (note: sign convention, substrate diode S->C')
-
+    // Same leaving convention as eval(): + plate of Q_BE/Q_BC at B',
+    // − plates at E'/C'; + plate of Q_sub at S (v_sub = (S − C')·type),
+    // − plate at C'.
     var out: [n_u]S = undefined;
     out[c] = S.con(0.0);
     out[b] = S.con(0.0);
     out[e] = S.con(0.0);
     out[bp] = q_be.add(q_bc).scale(p.type_f);
     out[ep] = q_be.scale(-p.type_f);
-    out[cp] = q_sub.sub(q_bc).scale(p.type_f);
-    out[s] = q_sub.scale(-p.type_f);
+    out[cp] = q_bc.add(q_sub).scale(-p.type_f);
+    out[s] = q_sub.scale(p.type_f);
     return out;
 }
 
@@ -861,7 +862,7 @@ pub fn limit(model: *const Model, instance: *const Instance, x_new: [n_u]f64, x_
     const vt: f64 = 8.617333262145e-5 * t_dev;
 
     // Critical voltage
-    const v_crit = vt * @log(vt / (@sqrt(2.0) * is_val));
+    const v_crit = vt * contract.fmath.log(vt / (@sqrt(2.0) * is_val));
 
     var result = x_new;
 
@@ -877,13 +878,13 @@ pub fn limit(model: *const Model, instance: *const Instance, x_new: [n_u]f64, x_
         if (vbe_old > 0.0) {
             const ratio = 1.0 + (vbe_new - vbe_old) / vt;
             if (ratio > 2.0) {
-                vbe_limited = vbe_old + vt * @log(ratio);
+                vbe_limited = vbe_old + vt * contract.fmath.log(ratio);
             } else {
                 vbe_limited = v_crit;
             }
         } else {
             if (vbe_new / vt > 0.0) {
-                vbe_limited = vt * @log(vbe_new / vt);
+                vbe_limited = vt * contract.fmath.log(vbe_new / vt);
             } else {
                 vbe_limited = v_crit;
             }
@@ -906,13 +907,13 @@ pub fn limit(model: *const Model, instance: *const Instance, x_new: [n_u]f64, x_
         if (vbc_old > 0.0) {
             const ratio = 1.0 + (vbc_new - vbc_old) / vt;
             if (ratio > 2.0) {
-                vbc_limited = vbc_old + vt * @log(ratio);
+                vbc_limited = vbc_old + vt * contract.fmath.log(ratio);
             } else {
                 vbc_limited = v_crit;
             }
         } else {
             if (vbc_new / vt > 0.0) {
-                vbc_limited = vt * @log(vbc_new / vt);
+                vbc_limited = vt * contract.fmath.log(vbc_new / vt);
             } else {
                 vbc_limited = v_crit;
             }
@@ -924,6 +925,39 @@ pub fn limit(model: *const Model, instance: *const Instance, x_new: [n_u]f64, x_
     result[bp] = result[bp] + delta_bc;
 
     return result;
+}
+
+// ============================================================================
+// Node Collapse (ngspice BJTsetup: prime = port when parasitic R = 0)
+// ============================================================================
+
+pub fn collapse(model: *const Model, _: *const Instance) [n_u]?u8 {
+    var out: [n_u]?u8 = @splat(null);
+    if (model.rc == 0) out[@intFromEnum(U.c_prime)] = @intFromEnum(U.c);
+    if (model.rb == 0) out[@intFromEnum(U.b_prime)] = @intFromEnum(U.b);
+    if (model.re == 0) out[@intFromEnum(U.e_prime)] = @intFromEnum(U.e);
+    return out;
+}
+
+// ============================================================================
+// Cold-Start Seeding (SPICE MODEINITJCT)
+// ============================================================================
+// bjtload.c: at MODEINITJCT vbe = vcrit, vbc = 0. Node-write equivalent on a
+// zeroed x (e' = 0): b' = type·vcrit, c' = b' (so vbc = 0).
+
+pub fn seed(model: *const Model, instance: *const Instance) [n_u]?f64 {
+    const is_val: f64 = @as(f64, model.is);
+    const tnom: f64 = @as(f64, model.tnom);
+    const type_f: f64 = @floatFromInt(model.type_);
+    const inst_temp: f64 = @as(f64, instance.temp);
+    const inst_dtemp: f64 = @as(f64, instance.dtemp);
+    const t_dev: f64 = if (inst_temp != 0.0) inst_temp + 273.15 else tnom + 273.15 + inst_dtemp;
+    const vt: f64 = 8.617333262145e-5 * t_dev;
+    const v_crit = vt * contract.fmath.log(vt / (@sqrt(2.0) * is_val));
+    var out: [n_u]?f64 = @splat(null);
+    out[@intFromEnum(U.b_prime)] = type_f * v_crit;
+    out[@intFromEnum(U.c_prime)] = type_f * v_crit;
+    return out;
 }
 
 // ============================================================================
@@ -964,7 +998,8 @@ test "bjt: NPN forward-active residual (default model)" {
     //   i_b   = c_be/100 + c_bc + gmin*0.65 + gmin*(-1.0) = 8.204658788404186e-8
     //   rb=rc=re=0 and V(c)=V(c'), V(b)=V(b'), V(e)=V(e') -> parasitic
     //   currents are 0; iss=0 -> i_sub=0.
-    //   out[c']=i_c, out[b']=-i_b, out[e']=-(i_c+i_b), rest 0.
+    //   Leaving convention: out[c']=i_c (collector draws), out[b']=i_b,
+    //   out[e']=-(i_c+i_b) (emitter emits), rest 0.
     const model: Model = .{};
     const inst: Instance = .{};
     const out = contract.evalValues(Self, .{ 1.65, 0.65, 0.0, 0.0, 1.65, 0.65, 0.0 }, &model, &inst, 0);
@@ -973,7 +1008,7 @@ test "bjt: NPN forward-active residual (default model)" {
     try testing.expectApproxEqAbs(@as(f64, 0.0), out[@intFromEnum(U.e)], 1e-30);
     try testing.expectApproxEqAbs(@as(f64, 0.0), out[@intFromEnum(U.s)], 1e-30);
     try testing.expectApproxEqRel(@as(f64, 8.204694798604186e-6), out[@intFromEnum(U.c_prime)], 1e-9);
-    try testing.expectApproxEqRel(@as(f64, -8.204658788404186e-8), out[@intFromEnum(U.b_prime)], 1e-9);
+    try testing.expectApproxEqRel(@as(f64, 8.204658788404186e-8), out[@intFromEnum(U.b_prime)], 1e-9);
     try testing.expectApproxEqRel(@as(f64, -8.286741386488227e-6), out[@intFromEnum(U.e_prime)], 1e-9);
 }
 
@@ -990,11 +1025,11 @@ test "bjt: PNP polarity flips residual sign" {
 test "bjt: constant base resistance (case 2)" {
     // rb=100 (rbm=0 -> rbm_eff=rb -> constant case): g_b = area*m/rb = 0.01.
     // v_bb = V(b) - V(b') = 0.75 - 0.65 = 0.09999999999999998 (f64)
-    // i_rb = v_bb * 0.01 = 9.999999999999998e-4; out[b] = -i_rb.
+    // i_rb = v_bb * 0.01 = 9.999999999999998e-4; out[b] = +i_rb (leaving b).
     const model: Model = .{ .rb = 100.0 };
     const inst: Instance = .{};
     const out = contract.evalValues(Self, .{ 1.65, 0.75, 0.0, 0.0, 1.65, 0.65, 0.0 }, &model, &inst, 0);
-    try testing.expectApproxEqRel(@as(f64, -9.999999999999998e-4), out[@intFromEnum(U.b)], 1e-12);
+    try testing.expectApproxEqRel(@as(f64, 9.999999999999998e-4), out[@intFromEnum(U.b)], 1e-12);
 }
 
 test "bjt: charges (depletion + diffusion + linear substrate)" {
@@ -1015,10 +1050,10 @@ test "bjt: charges (depletion + diffusion + linear substrate)" {
     //          = -1.710864842226113e-12
     //   v_sub = -1.65, mjs=0 -> linear: q_sub = cjs*(-1.65)
     //          = -1.6499999934069253e-12
-    //   out[b'] = q_be+q_bc = -8.993036236953676e-13
-    //   out[e'] = -q_be     = -8.115612185307454e-13
-    //   out[c'] = -q_bc+q_sub = 6.086484881918774e-14
-    //   out[s]  = -q_sub    = 1.6499999934069253e-12
+    //   out[b'] = q_be+q_bc    = -8.993036236953676e-13
+    //   out[e'] = -q_be        = -8.115612185307454e-13
+    //   out[c'] = -(q_bc+q_sub) = 3.3608648356330383e-12
+    //   out[s]  = q_sub        = -1.6499999934069253e-12
     const model: Model = .{ .cje = 1e-12, .cjc = 2e-12, .cjs = 1e-12, .tf = 1e-9 };
     const inst: Instance = .{};
     const out = contract.qValues(Self, .{ 1.65, 0.65, 0.0, 0.0, 1.65, 0.65, 0.0 }, &model, &inst, 0);
@@ -1027,6 +1062,6 @@ test "bjt: charges (depletion + diffusion + linear substrate)" {
     try testing.expectApproxEqAbs(@as(f64, 0.0), out[@intFromEnum(U.e)], 1e-30);
     try testing.expectApproxEqRel(@as(f64, -8.993036236953676e-13), out[@intFromEnum(U.b_prime)], 1e-9);
     try testing.expectApproxEqRel(@as(f64, -8.115612185307454e-13), out[@intFromEnum(U.e_prime)], 1e-9);
-    try testing.expectApproxEqRel(@as(f64, 6.086484881918774e-14), out[@intFromEnum(U.c_prime)], 1e-9);
-    try testing.expectApproxEqRel(@as(f64, 1.6499999934069253e-12), out[@intFromEnum(U.s)], 1e-9);
+    try testing.expectApproxEqRel(@as(f64, 3.3608648356330383e-12), out[@intFromEnum(U.c_prime)], 1e-9);
+    try testing.expectApproxEqRel(@as(f64, -1.6499999934069253e-12), out[@intFromEnum(U.s)], 1e-9);
 }

@@ -232,11 +232,11 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, _: *const
 
     // --- Gate junction diode currents ---
     // igs = IS * (exp(min(vgs/nvt, 80)) - 1) + GMIN * vgs
-    const arg_gs = vgs_eff.scale(1.0 / p.nvt).minC(80.0);
-    const igs_raw = arg_gs.exp().addC(-1.0).scale(p.is_val).add(vgs_eff.scale(p.gmin));
+    const arg_gs = vgs_raw.scale(1.0 / p.nvt).minC(80.0);
+    const igs_raw = arg_gs.exp().addC(-1.0).scale(p.is_val).add(vgs_raw.scale(p.gmin));
 
-    const arg_gd = vgd_eff.scale(1.0 / p.nvt).minC(80.0);
-    const igd_raw = arg_gd.exp().addC(-1.0).scale(p.is_val).add(vgd_eff.scale(p.gmin));
+    const arg_gd = vgd_raw.scale(1.0 / p.nvt).minC(80.0);
+    const igd_raw = arg_gd.exp().addC(-1.0).scale(p.is_val).add(vgd_raw.scale(p.gmin));
 
     // --- Shichman-Hodges channel current ---
     const vgst = vgs_eff.addC(-p.vto);
@@ -348,7 +348,7 @@ pub fn qFromPrep(comptime S: type, x: [n_u]S, _: *const PrepCache, model: *const
 
     // Forward-bias extension
     const f1_gs = (cgs0 * pb / one_minus_m) * (1.0 - @sqrt(one_minus_fc));
-    const f2_gs = @exp((1.0 + m_grad) * @log(one_minus_fc)); // (1-FC)^1.5
+    const f2_gs = contract.fmath.exp((1.0 + m_grad) * contract.fmath.log(one_minus_fc)); // (1-FC)^1.5
     const f3_gs = 1.0 - fc * (1.0 + m_grad);
     const q_fwd_gs = vgs.addC(-fc_pb).scale(f3_gs)
         .add(vgs.mul(vgs).addC(-(fc_pb * fc_pb)).scale(m_grad / (2.0 * pb)))
@@ -365,7 +365,7 @@ pub fn qFromPrep(comptime S: type, x: [n_u]S, _: *const PrepCache, model: *const
 
     // Forward-bias extension
     const f1_gd = (cgd0 * pb / one_minus_m) * (1.0 - @sqrt(one_minus_fc));
-    const f2_gd = @exp((1.0 + m_grad) * @log(one_minus_fc));
+    const f2_gd = contract.fmath.exp((1.0 + m_grad) * contract.fmath.log(one_minus_fc));
     const f3_gd = 1.0 - fc * (1.0 + m_grad);
     const q_fwd_gd = vgd.addC(-fc_pb).scale(f3_gd)
         .add(vgd.mul(vgd).addC(-(fc_pb * fc_pb)).scale(m_grad / (2.0 * pb)))
@@ -410,7 +410,7 @@ pub fn limit(model: *const Model, _: *const Instance, x_new: [n_u]f64, x_old: [n
     const nvt = n_em * vt;
 
     // Critical voltage for pnjlim
-    const v_crit = nvt * @log(nvt / (@sqrt(2.0) * is_val));
+    const v_crit = nvt * contract.fmath.log(nvt / (@sqrt(2.0) * is_val));
 
     var result = x_new;
 
@@ -424,14 +424,14 @@ pub fn limit(model: *const Model, _: *const Instance, x_new: [n_u]f64, x_old: [n
         var vgs_limited = vgs_new;
         if (vgs_new > v_crit and @abs(vgs_new - vgs_old) > 2.0 * nvt) {
             if (vgs_old > 0.0) {
-                const arg = (vgs_new - vgs_old) / nvt;
-                if (arg > 2.0) {
-                    vgs_limited = vgs_old + nvt * (2.0 + @log(arg - 2.0));
+                const arg = 1.0 + (vgs_new - vgs_old) / nvt;
+                if (arg > 0.0) {
+                    vgs_limited = vgs_old + nvt * (2.0 + contract.fmath.log(arg));
                 } else {
-                    vgs_limited = vgs_old + 2.0 * nvt;
+                    vgs_limited = v_crit;
                 }
             } else if (vgs_new > 0.0) {
-                vgs_limited = nvt * @log(vgs_new / nvt);
+                vgs_limited = nvt * contract.fmath.log(vgs_new / nvt);
             } else {
                 vgs_limited = v_crit;
             }
@@ -453,14 +453,14 @@ pub fn limit(model: *const Model, _: *const Instance, x_new: [n_u]f64, x_old: [n
         var vgd_limited = vgd_new;
         if (vgd_new > v_crit and @abs(vgd_new - vgd_old) > 2.0 * nvt) {
             if (vgd_old > 0.0) {
-                const arg = (vgd_new - vgd_old) / nvt;
-                if (arg > 2.0) {
-                    vgd_limited = vgd_old + nvt * (2.0 + @log(arg - 2.0));
+                const arg = 1.0 + (vgd_new - vgd_old) / nvt;
+                if (arg > 0.0) {
+                    vgd_limited = vgd_old + nvt * (2.0 + contract.fmath.log(arg));
                 } else {
-                    vgd_limited = vgd_old + 2.0 * nvt;
+                    vgd_limited = v_crit;
                 }
             } else if (vgd_new > 0.0) {
-                vgd_limited = nvt * @log(vgd_new / nvt);
+                vgd_limited = nvt * contract.fmath.log(vgd_new / nvt);
             } else {
                 vgd_limited = v_crit;
             }

@@ -1379,8 +1379,8 @@ fn prep(model: *const Model, instance: *const Instance) Prep {
     const l_new_c = @max(l_new, 1e-20);
     const w_new_c = @max(w_new, 1e-20);
 
-    const dl_iv = lint + ll_m / @exp(lln * @log(@max(l_new_c, 1e-30))) + lw_m / @exp(lwn * @log(@max(w_new_c, 1e-30))) + lwl / (@exp(lln * @log(@max(l_new_c, 1e-30))) * @exp(lwn * @log(@max(w_new_c, 1e-30))));
-    const dw_iv = wint + wl_m / @exp(wln * @log(@max(l_new_c, 1e-30))) + ww_m / @exp(wwn * @log(@max(w_new_c, 1e-30))) + wwl / (@exp(wln * @log(@max(l_new_c, 1e-30))) * @exp(wwn * @log(@max(w_new_c, 1e-30))));
+    const dl_iv = lint + ll_m / contract.fmath.exp(lln * contract.fmath.log(@max(l_new_c, 1e-30))) + lw_m / contract.fmath.exp(lwn * contract.fmath.log(@max(w_new_c, 1e-30))) + lwl / (contract.fmath.exp(lln * contract.fmath.log(@max(l_new_c, 1e-30))) * contract.fmath.exp(lwn * contract.fmath.log(@max(w_new_c, 1e-30))));
+    const dw_iv = wint + wl_m / contract.fmath.exp(wln * contract.fmath.log(@max(l_new_c, 1e-30))) + ww_m / contract.fmath.exp(wwn * contract.fmath.log(@max(w_new_c, 1e-30))) + wwl / (contract.fmath.exp(wln * contract.fmath.log(@max(l_new_c, 1e-30))) * contract.fmath.exp(wwn * contract.fmath.log(@max(w_new_c, 1e-30))));
 
     const leff = @max(l_inst * lmlt + xl_m - 2.0 * dl_iv, 1e-9);
     const weff = @max(w_inst * wmlt + xw_m - 2.0 * dw_iv, 1e-9);
@@ -1403,17 +1403,17 @@ fn prep(model: *const Model, instance: *const Instance) Prep {
     const eg = bg0sub - tbgasub * temp_k * temp_k / (temp_k + tbgbsub);
 
     // Intrinsic carrier concentration
-    const ni = ni0sub * @exp(1.5 * @log(t_ratio)) * @exp(@min(eg0 / (2.0 * vt_nom) - eg / (2.0 * vt), 80.0));
+    const ni = ni0sub * contract.fmath.exp(1.5 * contract.fmath.log(t_ratio)) * contract.fmath.exp(@min(eg0 / (2.0 * vt_nom) - eg / (2.0 * vt), 80.0));
 
     // --- Temperature-dependent parameters ---
-    const mu0_t = mu0_m * mulu0 * @exp(ute_m * @log(t_ratio));
+    const mu0_t = mu0_m * mulu0 * contract.fmath.exp(ute_m * contract.fmath.log(t_ratio));
     const ua_t = ua_m * (1.0 + ua1_m * (temp_k - tnom_k));
     const uc_t = uc_m * (1.0 + uc1_m * (temp_k - tnom_k));
-    const ud_t = ud_m * @exp(ud1_m * @log(t_ratio));
-    const ucs_t = ucs_m * @exp(ucste * @log(t_ratio));
+    const ud_t = ud_m * contract.fmath.exp(ud1_m * contract.fmath.log(t_ratio));
+    const ucs_t = ucs_m * contract.fmath.exp(ucste * contract.fmath.log(t_ratio));
     const eu_t = eu_m * (1.0 + eu1 * (t_ratio - 1.0));
-    const vsat_t = vsat_m * @exp(-at_m * @log(t_ratio));
-    const rdsw_t = rdsw * @exp(prt_m * @log(t_ratio));
+    const vsat_t = vsat_m * contract.fmath.exp(-at_m * contract.fmath.log(t_ratio));
+    const rdsw_t = rdsw * contract.fmath.exp(prt_m * contract.fmath.log(t_ratio));
     const kt1exp_m: f64 = @as(f64, model.kt1exp);
 
     // Temperature-dependent NFACTOR
@@ -1445,17 +1445,17 @@ fn prep(model: *const Model, instance: *const Instance) Prep {
     const xtun_m: f64 = @as(f64, model.xtun);
     const xtund_m: f64 = @as(f64, model.xtund);
     const eg_vt_ratio = eg0 / vt_nom - eg / vt;
-    const isbjt_t = isbjt * @exp(@min((eg_vt_ratio + xbjt_m * @log(t_ratio)) / @max(ndiode, 1.0), 80.0));
-    const idbjt_t: f64 = @as(f64, model.idbjt) * @exp(@min((eg_vt_ratio + xbjt_m * @log(t_ratio)) / @max(ndiode, 1.0), 80.0));
-    const isdif_t = isdif * @exp(@min((eg_vt_ratio + xdif_m * @log(t_ratio)) / @max(ndiode, 1.0), 80.0));
-    const iddif_t = iddif * @exp(@min((eg_vt_ratio + xdif_m * @log(t_ratio)) / @max(ndiode, 1.0), 80.0));
-    const isrec_t = isrec * @exp(@min((eg_vt_ratio + xrec_m * @log(t_ratio)) / @max(nrecf0, 1.0), 80.0));
-    const idrec_t = idrec * @exp(@min((eg_vt_ratio + xrec_m * @log(t_ratio)) / @max(nrecf0, 1.0), 80.0));
-    const istun_t = istun * @exp(@min((eg_vt_ratio + xtun_m * @log(t_ratio)) / @max(ntun, 1.0), 80.0));
-    const idtun_t = idtun * @exp(@min((eg_vt_ratio + xtund_m * @log(t_ratio)) / @max(ntund, 1.0), 80.0));
+    const isbjt_t = isbjt * contract.fmath.exp(@min((eg_vt_ratio + xbjt_m * contract.fmath.log(t_ratio)) / @max(ndiode, 1.0), 80.0));
+    const idbjt_t: f64 = @as(f64, model.idbjt) * contract.fmath.exp(@min((eg_vt_ratio + xbjt_m * contract.fmath.log(t_ratio)) / @max(ndiode, 1.0), 80.0));
+    const isdif_t = isdif * contract.fmath.exp(@min((eg_vt_ratio + xdif_m * contract.fmath.log(t_ratio)) / @max(ndiode, 1.0), 80.0));
+    const iddif_t = iddif * contract.fmath.exp(@min((eg_vt_ratio + xdif_m * contract.fmath.log(t_ratio)) / @max(ndiode, 1.0), 80.0));
+    const isrec_t = isrec * contract.fmath.exp(@min((eg_vt_ratio + xrec_m * contract.fmath.log(t_ratio)) / @max(nrecf0, 1.0), 80.0));
+    const idrec_t = idrec * contract.fmath.exp(@min((eg_vt_ratio + xrec_m * contract.fmath.log(t_ratio)) / @max(nrecf0, 1.0), 80.0));
+    const istun_t = istun * contract.fmath.exp(@min((eg_vt_ratio + xtun_m * contract.fmath.log(t_ratio)) / @max(ntun, 1.0), 80.0));
+    const idtun_t = idtun * contract.fmath.exp(@min((eg_vt_ratio + xtund_m * contract.fmath.log(t_ratio)) / @max(ntund, 1.0), 80.0));
 
     // --- Physical quantities (Sec. 5.6) ---
-    const phi_b = @log(@max(ndep / ni, 1.0));
+    const phi_b = contract.fmath.log(@max(ndep / ni, 1.0));
     const phi_st = 2.0 * vt * phi_b + phin;
 
     const cb = eps_sub / @max(tsi, 1e-30);
@@ -1513,9 +1513,9 @@ fn prep(model: *const Model, instance: *const Instance) Prep {
     const mob_u0l: f64 = @as(f64, model.u0l);
     const mob_u0lexp: f64 = @as(f64, model.u0lexp);
     const mu0_scaled = if (model.mobscale == 1)
-        mu0_t * (1.0 - up1_m * @exp(-leff / @max(lp1_m, 1e-30)) - up2_m * @exp(-leff / @max(lp2_m, 1e-30)))
+        mu0_t * (1.0 - up1_m * contract.fmath.exp(-leff / @max(lp1_m, 1e-30)) - up2_m * contract.fmath.exp(-leff / @max(lp2_m, 1e-30)))
     else if (mob_u0lexp > 0)
-        mu0_t * (1.0 - mob_u0l * @exp(-mob_u0lexp * @log(@max(leff, 1e-30))))
+        mu0_t * (1.0 - mob_u0l * contract.fmath.exp(-mob_u0lexp * contract.fmath.log(@max(leff, 1e-30))))
     else
         mu0_t * (1.0 - mob_u0l);
 
@@ -1777,7 +1777,7 @@ pub fn computePrep(model: *const Model, instance: *const Instance) PrepCache {
 fn vdsxOf(comptime SS: type, vds: SS, avdsx: f64) SS {
     const a2 = avdsx * 0.5;
     return vds.scale(a2).minC(80.0).exp().addC(1.0).log().scale(2.0 / avdsx)
-        .sub(vds).addC(-2.0 / avdsx * @log(2.0));
+        .sub(vds).addC(-2.0 / avdsx * contract.fmath.log(2.0));
 }
 
 pub fn eval(comptime S: type, x: [n_u]S, model: *const Model, instance: *const Instance, t: f64) [n_u]S {
@@ -1849,7 +1849,7 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, _: *const
     const dv_dits = dv_dits_a.sub(dits_term);
 
     // Vth temperature shift: (kt1 + kt2*vbs_eff)*((t_ratio)^kt1exp - 1)
-    const kt_pow = @exp(p.kt1exp_m * @log(p.t_ratio)) - 1.0;
+    const kt_pow = contract.fmath.exp(p.kt1exp_m * contract.fmath.log(p.t_ratio)) - 1.0;
     const vth_shift_t = vbs_eff.scale(p.kt2_m).addC(p.kt1_m).scale(kt_pow);
 
     const dv_th_all = dv_vnud.add(dv_dibl).add(dv_dits).add(vth_shift_t).addC(p.delvto);
@@ -2005,7 +2005,7 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, _: *const
     const wdios = weff_prime + p.psbcp;
     const wdiod = weff_prime + p.pdbcp;
 
-    const alpha_bjt = @exp(-0.5 * (leff / @max(p.ln_m, 1e-30)) * (leff / @max(p.ln_m, 1e-30)));
+    const alpha_bjt = contract.fmath.exp(-0.5 * (leff / @max(p.ln_m, 1e-30)) * (leff / @max(p.ln_m, 1e-30)));
 
     const vbs_junc = vbs_eff;
     const vbd_junc = vbs_eff.sub(vds);
@@ -2048,14 +2048,14 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, _: *const
     const ibd4 = exp_tun_d.mul(vtun0_term_d).neg().addC(1.0).scale(wdiod * p.tsi * p.idtun_t);
 
     // BJT collector injection
-    const ien_pre = @exp(p.nbjt_m * @log(@max(1.0 / @max(leff, 1e-30) + 1.0 / @max(p.ln_m, 1e-30), 1e-30)));
+    const ien_pre = contract.fmath.exp(p.nbjt_m * contract.fmath.log(@max(1.0 / @max(leff, 1e-30) + 1.0 / @max(p.ln_m, 1e-30), 1e-30)));
     const ien_base_s = weff_prime * p.tsi * p.isbjt_t * p.lbjt0 * ien_pre;
     const ehlis = exp_bs.addC(-1.0).maxC(0.0).scale(p.ahli);
     const ehlid = exp_bd.addC(-1.0).maxC(0.0).scale(p.ahlid);
     const ehli = ehlis.add(ehlid).maxC(0.0);
     const ely = vbs_junc.add(vbd_junc).scale(1.0 / @max(p.vabjt + p.aely * leff, 1e-30)).addC(1.0);
     const e2nd = ely.add(ely.mul(ely).add(ehli.scale(4.0)).sqrt()).scale(0.5);
-    const e2nd_c = e2nd.maxC(1e-30);
+    const e2nd_c = e2nd.maxC(0.1);
 
     const ic_bjt = if (p.bjtoff == 0)
         exp_bs.sub(exp_bd).scale(alpha_bjt * ien_base_s).div(e2nd_c)
@@ -2063,8 +2063,11 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, _: *const
         S.con(0.0);
     const i_bjt_s = exp_bs.addC(-1.0).scale((1.0 - alpha_bjt) * ien_base_s).div(ehlis.addC(1.0).maxC(1.0).sqrt());
 
+    const ien_base_d = weff_prime * p.tsi * p.idbjt_t * p.lbjt0 * ien_pre;
+    const i_bjt_d = exp_bd.addC(-1.0).scale((1.0 - alpha_bjt) * ien_base_d).div(ehlid.addC(1.0).maxC(1.0).sqrt());
+
     const ibs_total = ibs1.add(ibs2).add(i_bjt_s).add(ibs4);
-    const ibd_total = ibd1.add(ibd2).add(ibd4);
+    const ibd_total = ibd1.add(ibd2).add(i_bjt_d).add(ibd4);
 
     // --- Impact ionization (Sec. 3.2) ---
     const iii = blk: {
@@ -2145,8 +2148,8 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, _: *const
         const vox_acc = vox_raw.neg().add(vox_raw.mul(vox_raw).addC(1e-4).sqrt()).scale(0.5);
         const vox_depinv = vox_raw.add(vox_raw.mul(vox_raw).addC(1e-4).sqrt()).scale(0.5);
 
-        const tox_ratio = @exp(p.ntox * @log(@max(p.toxref / toxe, 1e-30)));
-        const tox_ratio_edge = tox_ratio * @exp(p.ntox * @log(@max(p.poxedge, 1e-30)));
+        const tox_ratio = contract.fmath.exp(p.ntox * contract.fmath.log(@max(p.toxref / toxe, 1e-30)));
+        const tox_ratio_edge = tox_ratio * contract.fmath.exp(p.ntox * contract.fmath.log(@max(p.poxedge, 1e-30)));
 
         if (p.igbmod != 0) {
             const vaux_inv = vgst_eff.addC(-p.vecb * p.eigbinv).scale(1.0 / p.vecb).minC(40.0).exp().addC(1.0).log().scale(p.vecb);
@@ -2317,9 +2320,9 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, _: *const
     out[S_i] = i_rs;
     out[E] = S.con(0.0);
     out[B] = i_rb;
-    out[DP] = ids_with_bjt.sub(i_rd).add(i_bd).add(i_gidl).add(i_ii).add(i_gd_g).add(vbd_junc.scale(GMIN * type_f));
-    out[SP] = ids_with_bjt.neg().sub(i_rs).add(i_bs).add(i_gisl).add(i_gs_g).add(vbs_junc.scale(GMIN * type_f));
-    out[BP] = i_bs.add(i_bd).neg().sub(i_rb).sub(i_ii).sub(i_gidl.add(i_gisl)).sub(i_gb_g);
+    out[DP] = ids_with_bjt.sub(i_rd).sub(i_bd).add(i_gidl).add(i_ii).add(i_gd_g).add(vbd_junc.scale(GMIN * type_f));
+    out[SP] = ids_with_bjt.neg().sub(i_rs).sub(i_bs).add(i_gisl).add(i_gs_g).add(vbs_junc.scale(GMIN * type_f));
+    out[BP] = i_bs.add(i_bd).sub(i_rb).sub(i_ii).sub(i_gidl.add(i_gisl)).sub(i_gb_g);
     out[T] = i_th;
     out[GP] = i_rg.neg().add(i_gs_g).add(i_gd_g).add(i_gb_g);
     return out;
@@ -2334,7 +2337,7 @@ fn expGidl(comptime SS: type, drive: SS, coef: f64) SS {
     if (drive.val() > 1e-10) {
         return SS.con(coef).div(drive).maxC(-80.0).exp();
     } else {
-        return SS.con(@exp(-80.0));
+        return SS.con(contract.fmath.exp(-80.0));
     }
 }
 
@@ -2542,9 +2545,9 @@ fn qprep(model: *const Model, instance: *const Instance) QPrep {
     const eg0 = bg0sub - tbgasub * tnom_k * tnom_k / (tnom_k + tbgbsub);
     const eg = bg0sub - tbgasub * temp_k * temp_k / (temp_k + tbgbsub);
     const vt_nom = k_B * tnom_k / q_e;
-    const ni = ni0sub * @exp(1.5 * @log(t_ratio)) * @exp(@min(eg0 / (2.0 * vt_nom) - eg / (2.0 * vt), 80.0));
+    const ni = ni0sub * contract.fmath.exp(1.5 * contract.fmath.log(t_ratio)) * contract.fmath.exp(@min(eg0 / (2.0 * vt_nom) - eg / (2.0 * vt), 80.0));
 
-    const cf_eff = if (cf > 0) cf else 2.0 * epsrox * eps0 / 3.14159 * @log(@max(cfrcoeff * (1.0 + 0.4e-6 / toxe), 1.0));
+    const cf_eff = if (cf > 0) cf else 2.0 * epsrox * eps0 / 3.14159 * contract.fmath.log(@max(cfrcoeff * (1.0 + 0.4e-6 / toxe), 1.0));
 
     const as_eff = @max(as_j, weff_cj * nf * 1e-7);
     const ps_eff = @max(ps_j, 2.0 * weff_cj * nf);
@@ -2660,7 +2663,7 @@ pub fn qFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *cons
     const vdsx = vdsxOf(S, vds, p.avdsx);
     const vbsx = vds.sub(vdsx).scale(-0.5);
 
-    const phi_b = @log(@max(p.ndep / p.ni, 1.0));
+    const phi_b = contract.fmath.log(@max(p.ndep / p.ni, 1.0));
     const phi_st = 2.0 * vt * phi_b + p.phin;
 
     // Subthreshold slope for CV: n = 1 + (cit+nfactor+cdscd*vdsx-cdscb*vbsx)/cox
@@ -2801,8 +2804,8 @@ fn juncCharge(comptime SS: type, v: SS, pb: f64, mj: f64, cj0: f64, fc: f64) SS 
 
     // Forward (quadratic extension beyond FC*PB)
     const fc_base = @max(1.0 - fc, 1e-30);
-    const fc_pow_inv = @exp(-mj * @log(fc_base));
-    const q_fc = pb_c * cj0 / one_minus_mj_c * (1.0 - @exp(one_minus_mj_c * @log(fc_base)));
+    const fc_pow_inv = contract.fmath.exp(-mj * contract.fmath.log(fc_base));
+    const q_fc = pb_c * cj0 / one_minus_mj_c * (1.0 - contract.fmath.exp(one_minus_mj_c * contract.fmath.log(fc_base)));
     const dv = v.addC(-v_fc);
     const q_fwd = dv.add(dv.mul(dv).scale(0.5 * mj / pb_c / @max(fc_base, 1e-30))).scale(cj0 * fc_pow_inv).addC(q_fc);
 
@@ -2855,10 +2858,10 @@ pub fn limit(model: *const Model, _: *const Instance, x_new: [n_u]f64, x_old: [n
 
 // DEVpnjlim: PN junction voltage limiting
 inline fn pnjlim(vnew: f64, vold: f64, vt: f64, is_j: f64) f64 {
-    const vcrit = vt * @log(vt / (1.4142 * @max(is_j, 1e-30)));
+    const vcrit = vt * contract.fmath.log(vt / (1.4142 * @max(is_j, 1e-30)));
     const vlim = if (vnew > vcrit and @abs(vnew - vold) > 2.0 * vt)
         (if (vold > 0)
-            vold + vt * (@log(@max(1.0 + (vnew - vold) / vt, 1e-30)))
+            vold + vt * (contract.fmath.log(@max(1.0 + (vnew - vold) / vt, 1e-30)))
         else
             vcrit)
     else

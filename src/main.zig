@@ -1,6 +1,6 @@
 const std = @import("std");
 const engine = @import("engine.zig");
-const fastvaf = @import("fastvaf");
+const vaload = @import("vaload.zig");
 const rawfile = @import("output/rawfile.zig");
 const ascii_raw = @import("output/ascii_raw.zig");
 const csv = @import("output/csv.zig");
@@ -49,6 +49,7 @@ const Options = struct {
     log_path: ?[]const u8 = null,
     no_spiceinit: bool = false,
     autorun: bool = false,
+    gpu: bool = false,
     defines: [16]?Define = .{null} ** 16,
     n_defines: usize = 0,
     deck_paths: [16]?[]const u8 = .{null} ** 16,
@@ -76,6 +77,8 @@ pub fn main(init: std.process.Init) !u8 {
                 opts.autorun = true;
             } else if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--no-spiceinit")) {
                 opts.no_spiceinit = true;
+            } else if (std.mem.eql(u8, arg, "--gpu")) {
+                opts.gpu = true;
             } else if (optionValue(arg, "-r", "--rawfile", &it)) |oa| {
                 opts.raw_path = valueOrUsage(oa, io) orelse return 2;
             } else if (optionValue(arg, "-o", "--output", &it)) |oa| {
@@ -148,13 +151,19 @@ pub fn main(init: std.process.Init) !u8 {
             .spectre => Parser(spectre).parse(arena, src),
         } catch return skip(io, "parse error");
 
-        nl.generated_devices = compileGeneratedDevices(io, arena, path, nl.foreign) catch |err| {
-            std.debug.print("Foreign HDL error: {s}\n", .{@errorName(err)});
-            return skip(io, @errorName(err));
+        // Foreign HDL (.hdl cards): compile + dlopen at runtime (cached by
+        // content hash — first load pays a model compile, never again).
+        // Models baked at build time (-Dva-models) still take precedence.
+        for (nl.foreign) |f| switch (f.kind) {
+            .verilog_a, .verilog => vaload.ensureLoaded(arena, io, f.path) catch |e| {
+                std.debug.print("Error: '{s}': runtime HDL load failed: {s}\n", .{ f.path, @errorName(e) });
+                return skip(io, "hdl load error");
+            },
+            else => {},
         };
 
         if (opts.mode == .batch) {
-            var sim = engine.Simulation.fromNetlist(arena, nl, io) catch |e| {
+            var sim = engine.Simulation.fromNetlist(arena, nl, io, .{ .gpu = opts.gpu }) catch |e| {
                 std.debug.print("Engine error: {s}\n", .{@errorName(e)});
                 return skip(io, @errorName(e));
             };
@@ -321,138 +330,3 @@ fn printHelp(io: std.Io) void {
     , .{});
 }
 
-// ---------------------------------------------------------------------------
-// Foreign HDL compilation (Verilog-A / Verilog → GeneratedDevice)
-// ---------------------------------------------------------------------------
-
-fn compileGeneratedDevices(
-    io: std.Io,
-    arena: std.mem.Allocator,
-    deck_path: []const u8,
-    foreign: []const types.Foreign,
-) ![]const types.GeneratedDevice {
-    // Two-pass: count compileable, alloc, fill
-    var n_compileable: usize = 0;
-    for (foreign) |f| switch (f.kind) {
-        .verilog_a, .verilog => n_compileable += 1,
-        else => {},
-    };
-    if (n_compileable == 0) return &.{};
-
-    const out = try arena.alloc(types.GeneratedDevice, n_compileable);
-    var n: usize = 0;
-    for (foreign) |f| switch (f.kind) {
-        .verilog_a => {
-            out[n] = try compileVerilogA(io, arena, deck_path, f.path);
-            n += 1;
-        },
-        .verilog => {
-            out[n] = try compileVerilog(io, arena, deck_path, f.path);
-            n += 1;
-        },
-        else => {},
-    };
-    return out[0..n];
-}
-
-fn compileVerilogA(
-    io: std.Io,
-    arena: std.mem.Allocator,
-    deck_path: []const u8,
-    source_path: []const u8,
-) !types.GeneratedDevice {
-    const resolved_path = try resolveRelativePath(arena, deck_path, source_path);
-    const source = std.Io.Dir.cwd().readFileAlloc(io, resolved_path, arena, .unlimited) catch return error.ForeignFileNotFound;
-
-    var result = fastvaf.compileSource(arena, source, null) catch return error.VerilogACompileFailed;
-    defer result.deinit();
-
-    const zig_source = fastvaf.va.codegen.generate(arena, &result.mir, &result.lower) catch return error.VerilogACodegenFailed;
-
-    // ponytail: fixed-size port buf + linear dedup. 32 ports covers any real device.
-    var port_buf: [32][]const u8 = undefined;
-    var n_ports: usize = 0;
-    for (result.lower.contributions.slice()) |contrib| {
-        for (contrib.nodes) |node| {
-            var seen = false;
-            for (port_buf[0..n_ports]) |existing| {
-                if (std.mem.eql(u8, existing, node)) {
-                    seen = true;
-                    break;
-                }
-            }
-            if (!seen and n_ports < port_buf.len) {
-                port_buf[n_ports] = try arena.dupe(u8, node);
-                n_ports += 1;
-            }
-        }
-    }
-    const ports = try arena.alloc([]const u8, n_ports);
-    @memcpy(ports, port_buf[0..n_ports]);
-
-    const params = try arena.alloc([]const u8, result.lower.params.len);
-    for (result.lower.params.slice(), params) |param, *p| p.* = try arena.dupe(u8, param.name);
-
-    return .{
-        .language = .verilog_a,
-        .source_path = resolved_path,
-        .name = try arena.dupe(u8, result.mir.name),
-        .ports = ports,
-        .params = params,
-        .zig_source = zig_source,
-    };
-}
-
-fn compileVerilog(
-    io: std.Io,
-    arena: std.mem.Allocator,
-    deck_path: []const u8,
-    source_path: []const u8,
-) !types.GeneratedDevice {
-    const resolved_path = try resolveRelativePath(arena, deck_path, source_path);
-    const source = std.Io.Dir.cwd().readFileAlloc(io, resolved_path, arena, .unlimited) catch return error.ForeignFileNotFound;
-
-    const zig_source = fastvaf.fromVerilog(arena, io, source) catch return error.VerilogCodegenFailed;
-
-    var port_buf: [32][]const u8 = undefined;
-    var n_ports: usize = 0;
-    var name: []const u8 = std.fs.path.stem(source_path);
-
-    if (std.mem.indexOf(u8, source, "(")) |paren_start| {
-        if (std.mem.indexOf(u8, source, ")")) |paren_end| {
-            if (paren_end > paren_start) {
-                var it = std.mem.tokenizeScalar(u8, source[paren_start + 1 .. paren_end], ',');
-                while (it.next()) |tok| {
-                    const trimmed = std.mem.trim(u8, tok, " \t\n\r");
-                    if (trimmed.len > 0 and n_ports < port_buf.len) {
-                        port_buf[n_ports] = trimmed;
-                        n_ports += 1;
-                    }
-                }
-            }
-        }
-        if (std.mem.indexOf(u8, source, "module ")) |mod_start| {
-            const name_start = mod_start + 7;
-            if (name_start < paren_start)
-                name = std.mem.trim(u8, source[name_start..paren_start], " \t\n\r");
-        }
-    }
-
-    const ports = try arena.alloc([]const u8, n_ports);
-    @memcpy(ports, port_buf[0..n_ports]);
-
-    return .{
-        .language = .verilog,
-        .source_path = resolved_path,
-        .name = try arena.dupe(u8, name),
-        .ports = ports,
-        .params = &.{},
-        .zig_source = zig_source,
-    };
-}
-
-fn resolveRelativePath(arena: std.mem.Allocator, deck_path: []const u8, source_path: []const u8) ![]const u8 {
-    if (std.fs.path.isAbsolute(source_path)) return source_path;
-    const deck_dir = std.fs.path.dirname(deck_path) orelse ".";
-    return std.fs.path.join(arena, &.{ deck_dir, source_path });
-}

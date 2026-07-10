@@ -357,7 +357,7 @@ inline fn phiS(
     } else if (xgv > xmrg) {
         // Case 3: Depletion/Inversion (xg > xmrg)
         // xg1_hat = x1 + g*sqrt(max(exp(-x1)+x1-1, 1e-300))
-        const xg1_hat = g_val.scale(@sqrt(@max(@exp(-x1) + x1 - 1.0, 1e-300))).addC(x1);
+        const xg1_hat = g_val.scale(@sqrt(@max(contract.fmath.exp(-x1) + x1 - 1.0, 1e-300))).addC(x1);
         // xbar = (xg/xi)*(1 + xg*(xi*x1 - xg1_hat)/(xg1_hat^2))
         const xbar = xg.div(xi).mul(xg.mul(xi.scale(x1).sub(xg1_hat)).div(xg1_hat.mul(xg1_hat)).addC(1.0));
         const expllow_neg_xbar = expllow(S, xbar.neg());
@@ -644,7 +644,7 @@ inline fn precompute(model: *const Model, instance: *const Instance) Precomp {
     const gamma_p = @sqrt(2.0 * QE * EPS_SI * npo) / c_ox;
     const gamma_ov_s = @sqrt(2.0 * QE * EPS_SI * novo) / c_ox;
 
-    const c_ox_23 = @exp(2.0 / 3.0 * @log(@max(c_ox, 1e-300)));
+    const c_ox_23 = contract.fmath.exp(2.0 / 3.0 * contract.fmath.log(@max(c_ox, 1e-300)));
     const qq = if (qmc_val > 0.0)
         (if (type_f > 0.0) 0.4 * QMN_CONST * qmc_val * c_ox_23 else 0.4 * QMP_CONST * qmc_val * c_ox_23)
     else
@@ -661,8 +661,8 @@ inline fn precompute(model: *const Model, instance: *const Instance) Precomp {
 
     const eg = 1.179 - tkd * (9.025e-5 + 3.05e-7 * tkd);
     const r_t = (1.045 + 4.5e-4 * tkd) * (0.523 + 1.4e-3 * tkd - 1.48e-6 * tkd * tkd) * (tkd * tkd / 90000.0);
-    const inv_ni = 4e-26 * @exp(-0.75 * @log(@max(r_t, 1e-300)));
-    const phi_b_base = eg + 2.0 * phi_t * @log(@max(nsubo * inv_ni, 1e-300));
+    const inv_ni = 4e-26 * contract.fmath.exp(-0.75 * contract.fmath.log(@max(r_t, 1e-300)));
+    const phi_b_base = eg + 2.0 * phi_t * contract.fmath.log(@max(nsubo * inv_ni, 1e-300));
 
     const tkr_over_tkd = tkr / tkd;
     const tkd_over_tkr = tkd / tkr;
@@ -672,10 +672,10 @@ inline fn precompute(model: *const Model, instance: *const Instance) Precomp {
     const g_p = gamma_p / @sqrt(phi_t);
     const xi_p = 1.0 + g_p / @sqrt(2.0);
     const xmrg_p = 1e-5 * xi_p;
-    const phi_p_val = eg + 2.0 * phi_t * @log(@max(npo * inv_ni, 1e-300));
+    const phi_p_val = eg + 2.0 * phi_t * contract.fmath.log(@max(npo * inv_ni, 1e-300));
     const xnp = phi_p_val / phi_t;
     const delta_np = if (xnp < KSE2)
-        @exp(@min(@max(-xnp, -80.0), 80.0))
+        contract.fmath.exp(@min(@max(-xnp, -80.0), 80.0))
     else
         1e-200 / p3f(xnp - KSE2);
 
@@ -685,7 +685,7 @@ inline fn precompute(model: *const Model, instance: *const Instance) Precomp {
     const xmrg_ov_s = 1e-5 * xi_ov_s;
     const phi_b_ov = eg + 6.0 * phi_t;
     const x1: f64 = 1.25;
-    const xg1_ov = x1 + g_ov_s * @sqrt(@max(@exp(-x1) + x1 - 1.0, 1e-300));
+    const xg1_ov = x1 + g_ov_s * @sqrt(@max(contract.fmath.exp(-x1) + x1 - 1.0, 1e-300));
 
     // Fringing capacitance
     const c_fr = 2.0 * ((@as(f64, model.cfrw)) * inst_w + (@as(f64, model.cfrl)) * inst_l);
@@ -793,7 +793,7 @@ inline fn computeBiasDep(
     if (qmc_val > 0.0) {
         const qb0 = pc.gamma_s_base * pc.gamma_s_base * pc.phi_b_base;
         const qb0_sqrt = @sqrt(@max(qb0, 1e-300));
-        const dphi_bq = 0.75 * pc.qq * @exp(2.0 / 3.0 * @log(@max(qb0_sqrt, 1e-300)));
+        const dphi_bq = 0.75 * pc.qq * contract.fmath.exp(2.0 / 3.0 * contract.fmath.log(@max(qb0_sqrt, 1e-300)));
         phi_b = phi_b1.addC(dphi_bq);
         gamma_s = gamma_s1.scale(1.0 + (4.0 / 3.0) * dphi_bq / qb0_sqrt);
     }
@@ -812,7 +812,7 @@ inline fn computeBiasDep(
 
     const x1_val: f64 = 1.25;
     // xg1_ch = x1 + g_s*sqrt(max(exp(-x1)+x1-1, 1e-300))
-    const xg1_ch = g_s.scale(@sqrt(@max(@exp(-x1_val) + x1_val - 1.0, 1e-300))).addC(x1_val);
+    const xg1_ch = g_s.scale(@sqrt(@max(contract.fmath.exp(-x1_val) + x1_val - 1.0, 1e-300))).addC(x1_val);
 
     // Section 4.4: Surface potential without poly effect
     // v_gb1 = type_f*(v_c - vfb_t)
@@ -938,7 +938,7 @@ inline fn computeTimeDep(
     // epsilon_qm is x-dependent via normnsub -> compute in S
     // epsilon_qm = 1.62*((1+normnsub)*(1+0.37*normtox))^2 * (tkr/tkd)^1.5 * phi_t^2
     const norm_factor = br.normnsub.addC(1.0).scale(1.0 + 0.37 * pc.normtox);
-    const eps_const = 1.62 * @exp(1.5 * @log(@max(pc.tkr_over_tkd, 1e-300))) * pc.phi_t * pc.phi_t;
+    const eps_const = 1.62 * contract.fmath.exp(1.5 * contract.fmath.log(@max(pc.tkr_over_tkd, 1e-300))) * pc.phi_t * pc.phi_t;
     const epsilon_qm = norm_factor.mul(norm_factor).scale(eps_const);
     // NOTE: maxa's smoothing arg `a` is x-dependent here (epsilon_qm). The op set
     // only provides maxa with a CONSTANT smoothing width; we evaluate it about
@@ -1006,7 +1006,7 @@ inline fn gateParams(model: *const Model, pc: Precomp) GateParams {
     const gcohvo: f64 = @as(f64, model.gcohvo);
     const stig: f64 = @as(f64, model.stig);
 
-    const t_ratio_stig = @exp(stig * @log(@max(pc.tkd_over_tkr, 1e-300)));
+    const t_ratio_stig = contract.fmath.exp(stig * contract.fmath.log(@max(pc.tkd_over_tkr, 1e-300)));
     var gp: GateParams = .{};
     gp.i_ginv = iginvlw * pc.w_eff * pc.l_eff * 1e12 * t_ratio_stig;
     gp.i_gov = 2.0 * igovw * lov * pc.w_eff * 1e12 * t_ratio_stig;
@@ -1058,11 +1058,11 @@ inline fn resParams(model: *const Model, instance: *const Instance, pc: Precomp)
     const inst_w: f64 = @as(f64, instance.w);
     const ngcon: f64 = @as(f64, instance.ngcon);
 
-    const rshg_t = rshg * @exp(strshg * @log(@max(pc.tkr_over_tkd, 1e-300)));
-    const rpv_t = rpv * @exp(strpv * @log(@max(pc.tkr_over_tkd, 1e-300)));
-    const rend_t = rend_p * @exp(strend * @log(@max(pc.tkr_over_tkd, 1e-300)));
-    const rshs_t = rshs * @exp(strshs * @log(@max(pc.tkr_over_tkd, 1e-300)));
-    const uac_t_raw = uac * @exp(stuac * @log(@max(pc.tkd_over_tkr, 1e-300)));
+    const rshg_t = rshg * contract.fmath.exp(strshg * contract.fmath.log(@max(pc.tkr_over_tkd, 1e-300)));
+    const rpv_t = rpv * contract.fmath.exp(strpv * contract.fmath.log(@max(pc.tkr_over_tkd, 1e-300)));
+    const rend_t = rend_p * contract.fmath.exp(strend * contract.fmath.log(@max(pc.tkr_over_tkd, 1e-300)));
+    const rshs_t = rshs * contract.fmath.exp(strshs * contract.fmath.log(@max(pc.tkr_over_tkd, 1e-300)));
+    const uac_t_raw = uac * contract.fmath.exp(stuac * contract.fmath.log(@max(pc.tkd_over_tkr, 1e-300)));
     const uac_t = clipBothF(uac_t_raw, 1e-3, 20.0);
 
     const r_gsal_v = clipBothF(rshg_t * inst_w / (inst_l * (3.0 + 9.0 * (ngcon - 1.0))), 1e-3, 10.0);
@@ -1205,7 +1205,7 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     // ========================================================================
     // frac = phi_t*exp(min(-xs0, ...)) with the xs0>10 branch capping at exp(-10)
     const frac = if (br.xs0.val() > 10.0)
-        S.con(pc.phi_t * @exp(-10.0))
+        S.con(pc.phi_t * contract.fmath.exp(-10.0))
     else
         br.xs0.neg().maxC(-80.0).minC(80.0).exp().scale(pc.phi_t);
 
