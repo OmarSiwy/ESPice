@@ -560,12 +560,13 @@ pub fn limit(model: *const Model, _: *const Instance, x_new: [n_u]f64, x_old: [n
                 // Jumped from forward to deep reverse — clamp to -BV
                 vd_limited = -bv;
             } else {
-                // Already in reverse — log-compress the step
+                // Already in reverse — log-compress the step. Only valid
+                // for arg > 2 (log(arg - 2) is NaN below that); ngspice's
+                // pnjlim on -(vd + bv) takes the plain step below the
+                // log-form threshold.
                 const arg = -(vd_limited + bv) / vte;
-                if (arg > 0.0) {
+                if (arg > 2.0) {
                     vd_limited = -(bv + vte * (2.0 + contract.fmath.log(arg - 2.0)));
-                } else {
-                    vd_limited = vd_old;
                 }
             }
         }
