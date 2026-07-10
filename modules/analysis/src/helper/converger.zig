@@ -160,7 +160,7 @@ pub fn newton(
         dampStep(dx[0..ckt.n], opts.dx_clamp);
         // ckt.rhs still holds F(x) + gmin·x — solveNeg takes rhs as const;
         // v still holds the assembled matrix (factor copies internally).
-        const st = finalizeStep(ckt, x, dx, x_old, ckt.rhs, v, iter, opts, true);
+        const st = finalizeStep(ckt, x, dx, x_old, ckt.rhs, v, iter, opts);
         if (st.converged)
             return .{ .converged = true, .iterations = iter + 1, .max_dx = st.scaled };
     }
@@ -210,15 +210,15 @@ fn finalizeStep(
     vals: []const f64,
     iter: u16,
     opts: Options,
-    use_limits: bool,
 ) Step {
     const n = ckt.n;
     @memcpy(x_old[0..n], x[0..n]);
     const scaled = updateAndNorm(x[0..n], dx[0..n], x_old[0..n], ckt.current_row, opts.reltol, opts.abstol, opts.vntol);
-    // JFNK passes false: its finite-difference J·v needs F to track x, so
-    // device-private limiting must stay inactive on that path (damping and
-    // the residual safeguard do the globalization there).
-    const limited = use_limits and ckt.applyLimits(x, x_old);
+    // Limiting is safe on the JFNK path too: while lim_x is frozen, the
+    // batch eval stamps i(lx) + J(lx)·(x_node − lx) (companion correction,
+    // batch.zig corrDot), so F is piecewise LINEAR in x through limited
+    // devices — finite-difference J·v is exact, not merely approximate.
+    const limited = ckt.applyLimits(x, x_old);
     if (ckt.updateStates(x)) |_| return .{ .converged = false, .scaled = scaled };
     if (limited) return .{ .converged = false, .scaled = scaled };
     if (iter == 0) return .{ .converged = false, .scaled = scaled };
@@ -299,6 +299,9 @@ pub fn jfnk(
         for (0..n) |i| norm_f = @max(norm_f, @abs(ckt.rhs[i]));
         if (norm_f > 10.0 * prev_norm and backtracks < 16) {
             for (0..n) |i| x[i] = 0.5 * (x[i] + x_old[i]);
+            // Keep device-private limiting state tracking the retreated x —
+            // same as the newton path.
+            _ = ckt.applyLimits(x, x_old);
             backtracks += 1;
             continue;
         }
@@ -426,7 +429,7 @@ pub fn jfnk(
         // Update x — same acceptance gates as newton(); f0 is F(x)+gmin·x.
         // hook.vals was clobbered by jvProduct's perturbed assembles, but
         // the diagonal magnitudes (residual-gate scale) are unaffected.
-        const st = finalizeStep(ckt, x, dx, x_old, f0, hook.vals(ckt), iter, opts, false);
+        const st = finalizeStep(ckt, x, dx, x_old, f0, hook.vals(ckt), iter, opts);
         if (st.converged)
             return .{ .converged = true, .iterations = iter + 1, .max_dx = st.scaled };
     }
