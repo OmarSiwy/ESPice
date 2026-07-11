@@ -201,6 +201,10 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, _: *const PrepCache, _: *const 
 // Flux / Charge contributions
 // ============================================================================
 
+// The solver forms F = eval + dq/dt, so the branch KVL row
+//   V(p) − V(n) − L·dI/dt = 0   (ngspice INDload companion)
+// requires q_br = −L·I_br. A positive flux here flips the inductor into an
+// anti-damped negative inductance (unstable RL poles, conjugate AC phase).
 pub fn q(comptime S: type, x: [n_u]S, model: *const Model, instance: *const Instance, t: f64) [n_u]S {
     @setFloatMode(.optimized);
     _ = t;
@@ -214,7 +218,7 @@ pub fn q(comptime S: type, x: [n_u]S, model: *const Model, instance: *const Inst
     var out: [n_u]S = undefined;
     out[p] = S.con(0.0);
     out[n_] = S.con(0.0);
-    out[br] = x[br].scale(l_final);
+    out[br] = x[br].scale(-l_final);
     return out;
 }
 
@@ -228,7 +232,7 @@ pub fn qFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, _: *const Mo
     var out: [n_u]S = undefined;
     out[p] = S.con(0.0);
     out[n_] = S.con(0.0);
-    out[br] = x[br].scale(pc.l);
+    out[br] = x[br].scale(-pc.l);
     return out;
 }
 
@@ -260,7 +264,7 @@ test "inductor: residual (KCL/KVL stamp)" {
 test "inductor: flux from instance inductance" {
     // L = 1e-3 H, I_br = 2 A, defaults: temp_given=false -> T = 300.15 K,
     // tnom = 27 degC -> 300.15 K, dt = 0 -> f_t = 1; scale = 1, m = 1
-    // q_br = L * I = 1e-3 * 2 = 2e-3 Wb
+    // q_br = -L * I = -1e-3 * 2 = -2e-3 Wb
     // (1e-9 tolerance: f32 storage of inductance)
     const model: Model = .{};
     var inst: Instance = .{ .inductance = 1e-3 };
@@ -268,31 +272,31 @@ test "inductor: flux from instance inductance" {
     const out = contract.qValues(Self, .{ 0.0, 0.0, 2.0 }, &model, &inst, 0);
     try testing.expectApproxEqAbs(@as(f64, 0.0), out[0], 1e-12);
     try testing.expectApproxEqAbs(@as(f64, 0.0), out[1], 1e-12);
-    try testing.expectApproxEqAbs(@as(f64, 2e-3), out[2], 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, -2e-3), out[2], 1e-9);
 }
 
 test "inductor: geometry-derived inductance" {
     // csect = 1e-4 m^2, length = 0.1 m, nt = 100 turns, mu = 0 -> mu_eff = MU_0
     // L = MU_0 * 1e-4 * 100^2 / (0.1 + 1e-30)
     //   = 1.2566370614359e-6 * 1e-4 * 1e4 / 0.1 = 1.2566370614359e-5 H
-    // I_br = 1 A -> q_br = 1.2566370614359e-5 Wb
+    // I_br = 1 A -> q_br = -1.2566370614359e-5 Wb
     // (1e-9 tolerance: f32 storage of csect/length/nt)
     const model: Model = .{ .csect = 1e-4, .length = 0.1, .nt = 100 };
     var inst: Instance = .{};
     precompute(&inst, &model);
     const out = contract.qValues(Self, .{ 0.0, 0.0, 1.0 }, &model, &inst, 0);
-    try testing.expectApproxEqAbs(@as(f64, 1.2566370614359e-5), out[2], 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, -1.2566370614359e-5), out[2], 1e-9);
 }
 
 test "inductor: temperature coefficient and parallel multiplier" {
     // L = 1e-3 H, model tc1 = 0.01, tnom = 27 degC, instance temp = 127 degC
     // (temp_given) -> dt = (127+273.15) - (27+273.15) = 100 K
     // f_t = 1 + 0.01*100 = 2; m = 4 -> L_final = 1e-3 * 2 / 4 = 5e-4 H
-    // I_br = 1 A -> q_br = 5e-4 Wb
+    // I_br = 1 A -> q_br = -5e-4 Wb
     // (1e-9 tolerance: f32 param storage)
     const model: Model = .{ .tc1 = 0.01, .tnom = 27 };
     var inst: Instance = .{ .inductance = 1e-3, .temp = 127, .temp_given = true, .m = 4 };
     precompute(&inst, &model);
     const out = contract.qValues(Self, .{ 0.0, 0.0, 1.0 }, &model, &inst, 0);
-    try testing.expectApproxEqAbs(@as(f64, 5e-4), out[2], 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, -5e-4), out[2], 1e-9);
 }

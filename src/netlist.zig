@@ -298,7 +298,68 @@ pub const NetBuilder = struct {
             },
             'b' => try addBsource(self.b, dev, self.nl.models),
             'p' => try self.addCpl(dev),
+            'o' => try self.addLossyLine(dev),
             else => try self.addByLetter(letter, dev),
+        }
+    }
+
+    /// LTRA (O card). ngspice solves RLC lines by convolution with the exact
+    /// impulse response; our lossy_tline device is a single lumped pi that
+    /// cannot delay. For LC lines (G = 0) expand into N cascaded Bergeron
+    /// sections [R/2N — ideal T(z0, td/N) — R/2N]: delay is exact, and the
+    /// lumped-loss error falls as R_total/(2*Z0*N). N is picked for ~3e-4
+    /// rms vs ngspice, capped at 48 (beyond that the residual difference is
+    /// ngspice's own history compaction, not segmentation).
+    /// RC / degenerate lines keep the single-pi lossy_tline device.
+    fn addLossyLine(self: *NetBuilder, dev: types.Device) !void {
+        var model: devices.lossy_tline.Model = .{};
+        if (modelName(dev)) |name| {
+            if (findModel(self.nl.models, name)) |m| try applyKv(&model, m.kv);
+        }
+        try applyKv(&model, dev.kv);
+
+        const len: f64 = @as(f64, model.len);
+        const r_t: f64 = @as(f64, model.r) * len;
+        const l_t: f64 = @as(f64, model.l) * len;
+        const c_t: f64 = @as(f64, model.c) * len;
+        const g_t: f64 = @as(f64, model.g) * len;
+
+        if (l_t <= 0 or c_t <= 0 or g_t != 0) return self.addByLetter('o', dev);
+
+        const z0 = @sqrt(l_t / c_t);
+        const td = @sqrt(l_t * c_t);
+        const n_sec: u32 = @intFromFloat(std.math.clamp(@ceil(r_t / (z0 * 0.005)), 1, 48));
+        const r_half = r_t / (2.0 * @as(f64, @floatFromInt(n_sec)));
+
+        const pos1 = if (dev.nodes.len > 0) try self.b.internNode(dev.nodes[0]) else GROUND;
+        const neg1 = if (dev.nodes.len > 1) try self.b.internNode(dev.nodes[1]) else GROUND;
+        const pos2 = if (dev.nodes.len > 2) try self.b.internNode(dev.nodes[2]) else GROUND;
+        const neg2 = if (dev.nodes.len > 3) try self.b.internNode(dev.nodes[3]) else GROUND;
+
+        const t_model: devices.tline.Model = .{
+            .z0 = @floatCast(z0),
+            .td = @floatCast(td / @as(f64, @floatFromInt(n_sec))),
+        };
+        var prev: u32 = pos1;
+        for (0..n_sec) |i| {
+            const last = i == n_sec - 1;
+            // Series R/2N lump on the near side (skip for lossless lines).
+            const t_in = if (r_half > 0) blk: {
+                const nn = self.b.addNode();
+                try self.b.addDevice(devices.resistor, .{}, .{ .resist = @floatCast(r_half) }, [2]u32{ prev, nn });
+                break :blk nn;
+            } else prev;
+            const t_out = if (r_half > 0 or !last) self.b.addNode() else pos2;
+            // Intermediate sections reference neg1; only the last section's
+            // far port sits on neg2 (identical when both are ground).
+            try self.b.addDevice(devices.tline, t_model, .{}, [4]u32{ t_in, neg1, t_out, if (last) neg2 else neg1 });
+            if (r_half > 0) {
+                const nxt = if (last) pos2 else self.b.addNode();
+                try self.b.addDevice(devices.resistor, .{}, .{ .resist = @floatCast(r_half) }, [2]u32{ t_out, nxt });
+                prev = nxt;
+            } else {
+                prev = t_out;
+            }
         }
     }
 
@@ -500,6 +561,9 @@ fn addSingleDevice(b: *Builder, comptime D: type, dev: types.Device, spice_model
     }
     if (comptime @hasField(D.Instance, "gain"))
         instance.gain = castField(@TypeOf(instance.gain), positionalNumber(dev, 0) orelse 0);
+    // Model-less cards (T line: "T1 a 0 b 0 Z0=50 TD=2n") carry their model
+    // parameters inline on the device card — route kv to the model too.
+    if (modelName(dev) == null) try applyKv(&model, dev.kv);
     try applyKv(&instance, dev.kv);
     try b.addDevice(D, model, instance, try deviceNodes(b, D, dev));
 }

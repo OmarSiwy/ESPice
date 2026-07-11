@@ -274,6 +274,7 @@ pub fn DeviceBatch(comptime D: type) type {
             .seed = if (@hasDecl(D, "seed")) seedFn else null,
             .mark_current_rows = if (@hasDecl(D, "u_kinds")) markCurrentRows else null,
             .update_state = if (@hasDecl(D, "updateState")) updateState else null,
+            .state_ctl = if (@hasDecl(D, "stateCtl")) stateCtl else null,
             .set_temp = if (@hasField(D.Instance, "temp")) setTemp else null,
             .record_history = if (has_hist) recordHistory else null,
             .inject_history = if (has_hist) injectHistory else null,
@@ -560,6 +561,15 @@ pub fn DeviceBatch(comptime D: type) type {
                 }
             }
             return min_reject;
+        }
+
+        fn stateCtl(ctx: *anyopaque, op: root.StateCtlOp) bool {
+            const self: *Self = @ptrCast(@alignCast(ctx));
+            var dirty = false;
+            for (0..self.count) |id| {
+                if (D.stateCtl(&self.models[id], &self.instances[id], &self.states[id], @enumFromInt(@intFromEnum(op)))) dirty = true;
+            }
+            return dirty;
         }
 
         fn setTemp(ctx: *anyopaque, temp_c: f32) void {

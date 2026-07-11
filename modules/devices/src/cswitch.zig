@@ -71,6 +71,9 @@ pub const Instance = struct {
 pub const State = struct {
     // 0 = REALLY_OFF, 1 = REALLY_ON, 2 = HYST_OFF, 3 = HYST_ON
     state: u8 = 0,
+    // Last ACCEPTED timepoint's state (see contract.StateCtlOp).
+    accepted_state: u8 = 0,
+    accepted_on: bool = false,
 };
 
 const REALLY_OFF: u8 = 0;
@@ -88,7 +91,26 @@ const HYST_ON: u8 = 3;
 pub fn initState(_: *const Model, instance: *Instance) State {
     return .{
         .state = if (instance.ic_on) HYST_ON else REALLY_OFF,
+        .accepted_state = if (instance.ic_on) HYST_ON else REALLY_OFF,
+        .accepted_on = instance.ic_on,
     };
+}
+
+/// Accepted-state bookkeeping (see contract.StateCtlOp): lets the transient
+/// loop reject/retry a step whose converged solution flipped the switch.
+pub fn stateCtl(_: *const Model, instance: *Instance, state: *State, op: contract.StateCtlOp) bool {
+    switch (op) {
+        .query => return state.state != state.accepted_state or instance.on != state.accepted_on,
+        .commit => {
+            state.accepted_state = state.state;
+            state.accepted_on = instance.on;
+        },
+        .revert => {
+            state.state = state.accepted_state;
+            instance.on = state.accepted_on;
+        },
+    }
+    return false;
 }
 
 // ---------------------------------------------------------------------------

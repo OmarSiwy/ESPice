@@ -38,7 +38,11 @@ pub fn solve(
 
     const ws = try ckt.workspace();
 
-    return solveLadder(ckt, ws, x, options);
+    const r = try solveLadder(ckt, ws, x, options);
+    // Operating point accepted: sync FSM devices (switches) so a following
+    // transient starts from a committed state.
+    if (r.converged) _ = ckt.stateCtl(.commit);
+    return r;
 }
 
 /// The three-strategy continuation ladder: plain Newton → gmin stepping →
