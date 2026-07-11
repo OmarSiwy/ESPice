@@ -33,6 +33,26 @@ const bbd_mod = @import("bbd.zig");
 const Allocator = std.mem.Allocator;
 const NONE: u32 = std.math.maxInt(u32);
 
+/// Tuning knobs (KLU-style). Defaults reproduce the established behavior;
+/// accuracy <-> speed is traded here, not by editing the kernel.
+pub const Params = struct {
+    /// Threshold partial pivoting: keep the diagonal when
+    /// |diag| >= pivot_tol * colmax (KLU default 0.001).
+    pivot_tol: f64 = 1e-3,
+    /// Refactor pivot monitor: a reused pivot that decays below
+    /// refactor_growth_limit * (max |entry| in its column) fails the
+    /// refactor, forcing a full re-pivoting factor. 0 disables.
+    refactor_growth_limit: f64 = 1e-12,
+    /// Iterative refinement steps applied after each solve (0/1/2).
+    /// Needs the factored values slice to stay alive (it does: vals live
+    /// on the compiled circuit).
+    iter_refine_steps: u2 = 0,
+    /// Column ordering strategy. .natural = identity (no fill reduction).
+    ordering: enum { amd, natural } = .amd,
+    /// Block triangular form (Tarjan SCC) before per-block AMD.
+    btf: bool = true,
+};
+
 /// Sparse direct solver over element type T (f32 or f64). `Solver` below
 /// is the f64 instantiation (existing callers).
 pub fn SolverT(comptime T: type) type {
@@ -48,8 +68,29 @@ pub fn SolverT(comptime T: type) type {
         gpa: std.mem.Allocator,
         factored: bool = false,
         bbd: ?root.BbdInfo = null,
+        params: Params = .{},
+        // iterative-refinement scratch ([r | saved b], 2n) + the values the
+        // current factorization was built from; empty when steps == 0.
+        rbuf: []T = &.{},
+        ref_vals: []const T = &.{},
+        // copy of the last-factored values: factor() is a no-op when the
+        // matrix didn't change (linear circuits between dt changes).
+        vcopy: []T = &.{},
 
         pub fn init(gpa: std.mem.Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32, bbd: ?root.BbdInfo) !Self {
+            return initParams(gpa, n, col_ptr, row_idx, bbd, .{});
+        }
+
+        pub fn initParams(gpa: std.mem.Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32, bbd: ?root.BbdInfo, params: Params) !Self {
+            var self = try initInner(gpa, n, col_ptr, row_idx, bbd, params);
+            self.params = params;
+            if (params.iter_refine_steps > 0)
+                self.rbuf = try gpa.alloc(T, 2 * @as(usize, n));
+            self.vcopy = try gpa.alloc(T, col_ptr[n]);
+            return self;
+        }
+
+        fn initInner(gpa: std.mem.Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32, bbd: ?root.BbdInfo, params: Params) !Self {
             // Dispatch precedence: tridiag > BBD > flat. The BBD engine
             // (bbd.zig) re-factors every block dense per Newton iteration —
             // blocks share STRUCTURE, not values (W/L vary per instance),
@@ -91,7 +132,7 @@ pub fn SolverT(comptime T: type) type {
                 .n = n,
                 .col_ptr = col_ptr,
                 .row_idx = row_idx,
-                .lu = try Lu(T).init(gpa, n, col_ptr, row_idx),
+                .lu = try Lu(T).init(gpa, n, col_ptr, row_idx, params),
                 .tri = null,
                 .gpa = gpa,
                 .bbd = bbd,
@@ -102,10 +143,24 @@ pub fn SolverT(comptime T: type) type {
             if (self.lu) |*lu| lu.deinit(self.gpa);
             if (self.tri) |*tri| tri.deinit(self.gpa);
             if (self.bbd_eng) |*eng| eng.deinit();
+            self.gpa.free(self.rbuf);
+            self.gpa.free(self.vcopy);
             self.* = undefined;
         }
 
         pub fn factor(self: *Self, vals: []const T) !void {
+            self.ref_vals = vals;
+            // Bypass: identical matrix (linear circuit, unchanged dt) —
+            // the factorization is already exact. One O(nnz) compare.
+            // vals may be longer than the pattern (plane slices) — only the
+            // first nnz entries are addressed through col_ptr.
+            const nnz = self.vcopy.len;
+            if (self.factored and std.mem.eql(T, self.vcopy, vals[0..nnz])) return;
+            try self.factorInner(vals);
+            @memcpy(self.vcopy, vals[0..nnz]);
+        }
+
+        fn factorInner(self: *Self, vals: []const T) !void {
             if (self.tri) |*tri| {
                 try tri.factor(vals);
                 self.factored = true;
@@ -126,49 +181,66 @@ pub fn SolverT(comptime T: type) type {
                 }
             }
             if (self.lu == null)
-                self.lu = try Lu(T).init(self.gpa, self.n, self.col_ptr, self.row_idx);
+                self.lu = try Lu(T).init(self.gpa, self.n, self.col_ptr, self.row_idx, self.params);
             var lu = &self.lu.?;
+            const ptol: T = @floatCast(self.params.pivot_tol);
+            const growth: T = @floatCast(self.params.refactor_growth_limit);
             if (self.factored) {
-                lu.refactor(self.col_ptr, vals) catch {
+                lu.refactor(self.col_ptr, vals, growth) catch {
                     // Full re-factor resets Lu.factored; mirror that here so a
                     // FAILED re-factor can't leave us replaying poisoned state
                     // on the next call (gmin retry paths catch the error).
                     self.factored = false;
-                    try lu.factor(self.gpa, self.col_ptr, self.row_idx, vals, 1e-3);
+                    try lu.factor(self.gpa, self.col_ptr, self.row_idx, vals, ptol);
                     self.factored = true;
                 };
             } else {
-                try lu.factor(self.gpa, self.col_ptr, self.row_idx, vals, 1e-3);
+                try lu.factor(self.gpa, self.col_ptr, self.row_idx, vals, ptol);
                 self.factored = true;
             }
         }
 
-        pub fn solveNeg(self: *Self, rhs: []const T, x: []T) void {
-            if (self.tri) |*tri| {
-                negateSimd(T, rhs[0..self.n], x[0..self.n]);
-                tri.solve(x[0..self.n]);
-                return;
-            }
-            negateSimd(T, rhs[0..self.n], x[0..self.n]);
-            if (self.bbd_eng) |*eng| {
-                eng.solveInPlace(x[0..self.n]);
-                return;
-            }
+        /// In-place engine dispatch (no refinement).
+        fn rawSolve(self: *Self, x: []T) void {
+            if (self.tri) |*tri| return tri.solve(x[0..self.n]);
+            if (self.bbd_eng) |*eng| return eng.solveInPlace(x[0..self.n]);
             self.lu.?.solve(x[0..self.n], x[0..self.n]);
         }
 
+        /// Iterative refinement: rbuf[n..2n] holds the effective b (sign
+        /// applied); each step solves A d = b - A x and adds d. Zero alloc.
+        fn refine(self: *Self, x: []T) void {
+            const n = self.n;
+            const b = self.rbuf[n .. 2 * @as(usize, n)];
+            const r = self.rbuf[0..n];
+            var step: u2 = 0;
+            while (step < self.params.iter_refine_steps) : (step += 1) {
+                @memcpy(r, b);
+                for (0..n) |j| { // r -= A x (CSC SpMV)
+                    const xj = x[j];
+                    if (xj == 0) continue;
+                    for (self.col_ptr[j]..self.col_ptr[j + 1]) |p|
+                        r[self.row_idx[p]] -= self.ref_vals[p] * xj;
+                }
+                self.rawSolve(r);
+                for (x[0..n], r) |*xi, di| xi.* += di;
+            }
+        }
+
+        pub fn solveNeg(self: *Self, rhs: []const T, x: []T) void {
+            negateSimd(T, rhs[0..self.n], x[0..self.n]);
+            const do_refine = self.params.iter_refine_steps > 0;
+            if (do_refine) @memcpy(self.rbuf[self.n..], x[0..self.n]); // b = -rhs
+            self.rawSolve(x);
+            if (do_refine) self.refine(x);
+        }
+
         pub fn solve(self: *Self, rhs: []const T, x: []T) void {
-            if (self.tri) |*tri| {
-                if (rhs.ptr != x.ptr) @memcpy(x[0..self.n], rhs[0..self.n]);
-                tri.solve(x[0..self.n]);
-                return;
-            }
             if (rhs.ptr != x.ptr) @memcpy(x[0..self.n], rhs[0..self.n]);
-            if (self.bbd_eng) |*eng| {
-                eng.solveInPlace(x[0..self.n]);
-                return;
-            }
-            self.lu.?.solve(x[0..self.n], x[0..self.n]);
+            const do_refine = self.params.iter_refine_steps > 0;
+            if (do_refine) @memcpy(self.rbuf[self.n..], x[0..self.n]);
+            self.rawSolve(x);
+            if (do_refine) self.refine(x);
         }
 
         pub fn solveT(self: *Self, rhs: []const T, x: []T) void {
@@ -232,8 +304,8 @@ fn Lu(comptime T: type) type {
         pub const FactorError = error{ OutOfMemory, SingularMatrix };
 
         /// Allocates workspace and computes the fill-reducing column order
-        /// (BTF + AMD over the merged pattern).
-        pub fn init(gpa: Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32) !Self {
+        /// (BTF + AMD over the merged pattern; `params.ordering`/`.btf`).
+        pub fn init(gpa: Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32, params: Params) !Self {
             // ponytail: pre-size L/U arrays to nnz estimate — avoids ArrayList
             // growth memset during first factor. Typical fill ~2-4x nnz for SPICE.
             const nnz = col_ptr[n];
@@ -259,10 +331,20 @@ fn Lu(comptime T: type) type {
             try self.ux.ensureTotalCapacity(gpa, est_lu);
             @memset(self.w, 0);
             @memset(self.flag, 0);
-            const ws_buf = try gpa.alloc(u32, order_mod.wsSize(n, col_ptr[n]));
-            defer gpa.free(ws_buf);
-            var ws = order_mod.Ws.init(ws_buf);
-            try order_mod.order(n, col_ptr, row_idx, self.q, &ws);
+            switch (params.ordering) {
+                .natural => for (self.q, 0..) |*qi, i| {
+                    qi.* = @intCast(i);
+                },
+                .amd => {
+                    const ws_buf = try gpa.alloc(u32, order_mod.wsSize(n, col_ptr[n]));
+                    defer gpa.free(ws_buf);
+                    var ws = order_mod.Ws.init(ws_buf);
+                    if (params.btf)
+                        try order_mod.order(n, col_ptr, row_idx, self.q, &ws)
+                    else
+                        try order_mod.amd(n, col_ptr, row_idx, self.q, &ws);
+                },
+            }
             return self;
         }
 
@@ -389,10 +471,13 @@ fn Lu(comptime T: type) type {
 
         /// Numeric refactorization: same pattern, same pivot sequence, new
         /// values. Fails when a reused pivot collapses (caller re-factors).
+        /// `growth_limit` > 0 additionally fails a pivot that decays below
+        /// growth_limit * (column max) — the pivot-growth monitor.
         pub fn refactor(
             self: *Self,
             col_ptr: []const u32,
             vals: []const T,
+            growth_limit: T,
         ) error{SingularMatrix}!void {
             std.debug.assert(self.factored);
             const li = self.li.items;
@@ -416,7 +501,17 @@ fn Lu(comptime T: type) type {
                 const d = self.w[k];
                 if (d == 0 or !std.math.isFinite(d)) return error.SingularMatrix;
                 self.udiag[k] = d;
-                for (self.lp[k]..self.lp[k + 1]) |p| lx[p] = self.w[li[p]] / d;
+                if (growth_limit > 0) {
+                    var cmax: T = @abs(d);
+                    for (self.lp[k]..self.lp[k + 1]) |p| {
+                        const v = self.w[li[p]];
+                        cmax = @max(cmax, @abs(v));
+                        lx[p] = v / d;
+                    }
+                    if (@abs(d) < growth_limit * cmax) return error.SingularMatrix;
+                } else {
+                    for (self.lp[k]..self.lp[k + 1]) |p| lx[p] = self.w[li[p]] / d;
+                }
             }
         }
 
@@ -718,7 +813,7 @@ test "factor + solve on an MNA-like system with a structural zero diagonal" {
     const b = [3]f64{ 0, 0, 5 };
     const csc = DenseCsc(3).from(a);
     const gpa = testing.allocator;
-    var lu = try Lu(f64).init(gpa, 3, &csc.col_ptr, csc.row_idx[0..csc.nnz()]);
+    var lu = try Lu(f64).init(gpa, 3, &csc.col_ptr, csc.row_idx[0..csc.nnz()], .{});
     defer lu.deinit(gpa);
     try lu.factor(gpa, &csc.col_ptr, csc.row_idx[0..csc.nnz()], csc.vals[0..csc.nnz()], 1e-3);
     try checkSolve(3, a, b, &lu);
@@ -733,7 +828,7 @@ test "refactor: same pattern, new values, no allocation" {
     };
     const gpa = testing.allocator;
     var csc = DenseCsc(4).from(a);
-    var lu = try Lu(f64).init(gpa, 4, &csc.col_ptr, csc.row_idx[0..csc.nnz()]);
+    var lu = try Lu(f64).init(gpa, 4, &csc.col_ptr, csc.row_idx[0..csc.nnz()], .{});
     defer lu.deinit(gpa);
     try lu.factor(gpa, &csc.col_ptr, csc.row_idx[0..csc.nnz()], csc.vals[0..csc.nnz()], 1e-3);
     try checkSolve(4, a, .{ 1, 2, 3, 4 }, &lu);
@@ -742,7 +837,7 @@ test "refactor: same pattern, new values, no allocation" {
     a[1][1] = 9;
     a[2][3] = 1;
     csc = DenseCsc(4).from(a);
-    try lu.refactor(&csc.col_ptr, csc.vals[0..csc.nnz()]);
+    try lu.refactor(&csc.col_ptr, csc.vals[0..csc.nnz()], 1e-12);
     try checkSolve(4, a, .{ 4, 3, 2, 1 }, &lu);
 }
 
@@ -750,7 +845,7 @@ test "singular matrix reported, refactor pivot collapse reported" {
     const a = [2][2]f64{ .{ 1, 1 }, .{ 1, 1 } };
     const csc = DenseCsc(2).from(a);
     const gpa = testing.allocator;
-    var lu = try Lu(f64).init(gpa, 2, &csc.col_ptr, csc.row_idx[0..csc.nnz()]);
+    var lu = try Lu(f64).init(gpa, 2, &csc.col_ptr, csc.row_idx[0..csc.nnz()], .{});
     defer lu.deinit(gpa);
     try testing.expectError(
         error.SingularMatrix,
@@ -769,7 +864,7 @@ test "solveT: transpose solve matches A^T \\ b" {
     const b = [3]f64{ 1, 2, 3 };
     const csc = DenseCsc(3).from(a);
     const gpa = testing.allocator;
-    var lu = try Lu(f64).init(gpa, 3, &csc.col_ptr, csc.row_idx[0..csc.nnz()]);
+    var lu = try Lu(f64).init(gpa, 3, &csc.col_ptr, csc.row_idx[0..csc.nnz()], .{});
     defer lu.deinit(gpa);
     try lu.factor(gpa, &csc.col_ptr, csc.row_idx[0..csc.nnz()], csc.vals[0..csc.nnz()], 1e-3);
     // reference: A^T dense solve
@@ -791,9 +886,9 @@ test "determinism: two factorizations of the same values are byte-identical" {
     };
     const csc = DenseCsc(3).from(a);
     const gpa = testing.allocator;
-    var lu1 = try Lu(f64).init(gpa, 3, &csc.col_ptr, csc.row_idx[0..csc.nnz()]);
+    var lu1 = try Lu(f64).init(gpa, 3, &csc.col_ptr, csc.row_idx[0..csc.nnz()], .{});
     defer lu1.deinit(gpa);
-    var lu2 = try Lu(f64).init(gpa, 3, &csc.col_ptr, csc.row_idx[0..csc.nnz()]);
+    var lu2 = try Lu(f64).init(gpa, 3, &csc.col_ptr, csc.row_idx[0..csc.nnz()], .{});
     defer lu2.deinit(gpa);
     try lu1.factor(gpa, &csc.col_ptr, csc.row_idx[0..csc.nnz()], csc.vals[0..csc.nnz()], 1e-3);
     try lu2.factor(gpa, &csc.col_ptr, csc.row_idx[0..csc.nnz()], csc.vals[0..csc.nnz()], 1e-3);

@@ -10,7 +10,10 @@ const std = @import("std");
 const dense_lu = @import("dense_lu.zig");
 const direct = @import("direct.zig");
 
-const DENSE_THRESHOLD: usize = 128;
+// ponytail: crossover measured on medium/ladder_filter (n=41: dense 82^3/3
+// per omega was 90% of the run; the sparse path refactors in O(nnz) per
+// omega). Dense only wins for tiny systems where SIMD row ops beat scatter.
+const DENSE_THRESHOLD: usize = 16;
 
 pub const Error = error{Singular};
 

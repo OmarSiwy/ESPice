@@ -438,8 +438,12 @@ pub fn jfnk(
 
 /// Main entry point. Auto-picks strategy:
 ///   GPU requested → JFNK (matrix-free, device-native)
-///   n > 5000      → JFNK (sparse factor too expensive)
 ///   otherwise     → direct Newton (LU)
+///
+/// No CPU size gate: the KLU-style solver factors once (BTF+AMD +
+/// Gilbert-Peierls) and numerically refactors on the frozen pattern per
+/// iteration — O(nnz(L+U)), far cheaper than JFNK's per-Krylov-vector
+/// circuit evals at any bench size (rc_ladder_100k included).
 ///
 /// When GPU is active, the device eval kernels run on-device and JFNK's J·v
 /// finite-difference uses those kernel launches (wired in Phase 5). CPU JFNK
@@ -467,12 +471,12 @@ pub fn run(
             } else |_| {}
         }
     }
-    if (ckt.gpu_active or ckt.n > 5000) {
+    if (ckt.gpu_active) {
         const r = try jfnk(ckt, ws, x, t, opts, hook);
         // GPU-mode fallback: after kernel + JFNK both fail, direct Newton is
         // still the strongest strategy for factorable systems — don't leave
         // it unreachable just because --gpu was requested.
-        if (r.converged or ckt.n > 5000) return r;
+        if (r.converged) return r;
     }
     return newton(ckt, ws, x, t, opts, hook);
 }
