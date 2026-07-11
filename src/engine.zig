@@ -103,6 +103,8 @@ pub const Simulation = struct {
             sim.circuit.gpu_active = true;
         }
         errdefer sim.circuit.deinit();
+        // Function scope, not inside gpu_init: must fire on any later failure.
+        errdefer if (sim.gpu_compute) |*gc| gc.deinit();
 
         // Sources: convert builder arrays to frozen slices
         sim.source_node = nb.source_node;

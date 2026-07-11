@@ -9,8 +9,9 @@
 // The solver time-differentiates these to produce k * dI_br2/dt and
 // k * dI_br1/dt voltage terms in each inductor's KVL equation.
 //
-// The raw coupling coefficient k is stored here. Resolution to physical mutual
-// inductance M = k * sqrt(L1 * L2) occurs at a higher level in the simulator.
+// Model.k holds the PHYSICAL mutual inductance M = k*sqrt(L1*L2); the netlist
+// layer resolves the card's coupling coefficient at build time (netlist.zig
+// addKinduc), since only it knows the coupled inductors' values.
 
 const std = @import("std");
 const contract = @import("contract");
@@ -27,7 +28,7 @@ pub const u_kinds = [n_u]contract.UnknownKind{ .current, .current };
 
 /// Model parameters.
 pub const Model = struct {
-    /// Mutual inductance coupling coefficient. Range: (-1, 1).
+    /// Mutual inductance M = k*sqrt(L1*L2) [H] (resolved by netlist layer).
     k: f32 = 0.00099,
 };
 

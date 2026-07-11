@@ -58,10 +58,11 @@ pub fn FreqSolverT(comptime T: type) type {
 
             if (n <= DENSE_THRESHOLD) {
                 const g = try allocator.alloc(T, n * n);
-                errdefer allocator.free(g);
                 ckt.denseG(g);
-                const c = try allocator.alloc(T, n * n);
-                errdefer allocator.free(c);
+                const c = allocator.alloc(T, n * n) catch |err| {
+                    allocator.free(g);
+                    return err;
+                };
                 ckt.denseC(c);
                 return initDense(allocator, @intCast(n), g, c);
             }
@@ -119,15 +120,20 @@ pub fn FreqSolverT(comptime T: type) type {
             errdefer allocator.free(c);
             const nu: usize = n;
             const nn = 2 * nu;
+            const a_work = try allocator.alloc(T, nn * nn);
+            errdefer allocator.free(a_work);
+            const a_lu = try allocator.alloc(T, nn * nn);
+            errdefer allocator.free(a_lu);
+            const piv = try allocator.alloc(u32, nn);
             return .{
                 .n = nu,
                 .nn = nn,
                 .strategy = .{ .dense = .{
                     .g_dense = g,
                     .c_mat = c,
-                    .a_work = try allocator.alloc(T, nn * nn),
-                    .a_lu = try allocator.alloc(T, nn * nn),
-                    .piv = try allocator.alloc(u32, nn),
+                    .a_work = a_work,
+                    .a_lu = a_lu,
+                    .piv = piv,
                 } },
             };
         }

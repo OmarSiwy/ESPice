@@ -287,17 +287,23 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     const ncols = 1 + 2 * ctx.probes.len;
     const data = try a.alloc(f64, @as(usize, maxPoints(opts)) * ncols);
+    errdefer a.free(data);
     const st = try simulate(ctx.circuit, x, ctx.probes, data, opts, a);
     if (!st.completed)
         std.debug.print("Warning: envelope stopped early at t={e}\n", .{st.t_final});
 
     const names = try a.alloc([]const u8, ncols);
+    errdefer a.free(names);
     names[0] = "time";
+    var done: usize = 0; // allocated entries after the "time" literal
+    errdefer for (names[1..][0..done]) |s| a.free(s);
     for (ctx.probes, 0..) |node, p| {
         const label = ctx.circuit.nodeName(node);
         const l = if (label.len == 0) "?" else label;
         names[1 + p * 2] = try std.fmt.allocPrint(a, "peak(v({s}))", .{l});
+        done += 1;
         names[2 + p * 2] = try std.fmt.allocPrint(a, "rms(v({s}))", .{l});
+        done += 1;
     }
 
     const npoints: usize = st.n_points;

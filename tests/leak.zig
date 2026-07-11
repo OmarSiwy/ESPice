@@ -245,6 +245,46 @@ test "leak: envelope" {
     freeResult(a, res);
 }
 
+/// Injection target: run analyses through a failing allocator. Every alloc
+/// site fails once; any error path that leaks (or double-frees) fails the test.
+fn runInjected(a: std.mem.Allocator, d: *Divider, x: []f64) !void {
+    const probes = [_]u32{d.n2};
+    const ctx: analysis.RunCtx = .{
+        .circuit = &d.ckt,
+        .x_op = x,
+        .probes = &probes,
+        .source_node = d.n1,
+        .source_branch = d.vbranch,
+        .allocator = a,
+    };
+    const dt: f64 = 0x1p-30;
+    const jobs = [_]analysis.Job{
+        .{ .dc = .{ .start = 5, .stop = 5, .step = 1 } },
+        .{ .ac = .{ .f_start = 1e3, .f_stop = 1e6, .points_per_decade = 3 } },
+        .{ .noise = .{ .f_start = 1e3, .f_stop = 1e6, .points_per_decade = 3, .out_node = 2 } },
+        .{ .sens = .{ .output_node = 2 } },
+        .{ .tf = .{ .input_branch = d.vbranch, .output_node = d.n2 } },
+        .{ .stb = .{ .f_start = 1e3, .f_stop = 1e6, .points_per_decade = 3, .probe_p = 1, .probe_n = 2 } },
+        .{ .disto = .{ .f_start = 1e3, .f_stop = 1e6, .points_per_decade = 3, .ac_source_node = 2, .ac_magnitude = 1.0, .output_node = 2 } },
+        .{ .pss = .{ .period = 1e-3, .max_shooting_iter = 5, .shooting_tol = 1e-4, .fd_epsilon = 1e-6, .newton_tol = 1e-9, .max_newton_iter = 20, .n_samples = 8 } },
+        .{ .envelope = .{ .t_carrier = 1e-6, .t_stop = 4e-6, .carrier_steps_per_period = 16, .periods_per_outer_step = 1, .max_periods_per_step = 2 } },
+        .{ .tran_noise = .{ .t_stop = dt * 20, .dt_init = dt, .dt_min = dt, .dt_max = dt, .max_steps = 30, .temp_k = 300.15, .seed = 12345 } },
+    };
+    for (jobs) |job| {
+        const res = try analysis.run(&ctx, job);
+        freeResult(a, res);
+    }
+}
+
+test "leak: alloc-failure injection over analysis error paths" {
+    const a = testing.allocator;
+    var d = try buildDivider(a);
+    defer d.ckt.deinit();
+    const x = try solveOp(&d.ckt, a);
+    defer a.free(x);
+    try testing.checkAllAllocationFailures(a, runInjected, .{ &d, x });
+}
+
 test "leak: tran_noise" {
     const a = testing.allocator;
     var b = Builder.init(a);

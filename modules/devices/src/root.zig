@@ -93,6 +93,7 @@ pub const letter_map = std.StaticStringMap(DeviceId).initComptime(.{
     .{ "b", .bsource },
     .{ "z", .mesfet },
     .{ "u", .urc },
+    .{ "p", .coupled_tlines },
 });
 
 pub fn mosfetDeviceId(level: u16) DeviceId {

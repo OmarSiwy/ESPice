@@ -102,20 +102,29 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const refs = try ctx.circuit.collectParams();
     const params = try a.alloc(SensParam, refs.len);
     defer a.free(params);
-    for (refs, params) |ref, *p| p.* = .{
-        .ptr = ref.ptr,
-        .device_name = try std.fmt.allocPrint(a, "{s}#{d}", .{ ref.device_type, ref.index }),
-        .param_name = ref.param_name,
-    };
-    defer for (params) |p| a.free(p.device_name);
+    var n_named: usize = 0; // registered before the loop: frees the prefix on mid-loop failure
+    defer for (params[0..n_named]) |p| a.free(p.device_name);
+    for (refs, params) |ref, *p| {
+        p.* = .{
+            .ptr = ref.ptr,
+            .device_name = try std.fmt.allocPrint(a, "{s}#{d}", .{ ref.device_type, ref.index }),
+            .param_name = ref.param_name,
+        };
+        n_named += 1;
+    }
 
     var res = try solve(ctx.circuit, params, output_node, opts.dc_opts, a);
     defer res.deinit(a);
 
     const names = try a.alloc([]const u8, res.entries.len);
+    errdefer a.free(names);
     const data = try a.alloc(f64, res.entries.len);
+    errdefer a.free(data);
+    var done: usize = 0;
+    errdefer for (names[0..done]) |s| a.free(s);
     for (res.entries, names, data) |e, *name, *out| {
         name.* = try std.fmt.allocPrint(a, "{s}.{s}", .{ e.device_name, e.param_name });
+        done += 1;
         out.* = e.sensitivity;
     }
     return .{

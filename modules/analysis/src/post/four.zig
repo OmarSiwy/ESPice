@@ -147,6 +147,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const n_harm: usize = @min(opts.n_harmonics, spec.harmonics.len);
     const npoints = 1 + n_harm;
     const names = try a.dupe([]const u8, &.{ "harmonic", "frequency", "magnitude", "phase_deg" });
+    errdefer a.free(names); // entries are literals
     const data = try a.alloc(f64, npoints * 4);
     data[0..4].* = .{ 0, 0, spec.dc, 0 };
     for (0..n_harm) |h| {

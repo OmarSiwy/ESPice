@@ -52,9 +52,35 @@ pub fn ProtoStore(comptime D: type) type {
             const self: *Self = @ptrCast(@alignCast(ctx));
             const count = self.models.items.len;
             const store = try gpa.create(DeviceBatch(D));
-            errdefer gpa.destroy(store);
 
+            // Empty-init every field destroy() frees, then let destroy() be
+            // the single error cleanup: free(&.{}) is a no-op, so a failure
+            // anywhere below releases exactly what was allocated so far.
             store.count = count;
+            store.models = &.{};
+            store.instances = &.{};
+            store.gath = &.{};
+            store.rhs_idx = &.{};
+            store.slots = &.{};
+            if (comptime has_attempt_decl) store.saved_models = &.{};
+            if (comptime @hasDecl(D, "limit")) store.lim_x = &.{};
+            if (comptime @hasDecl(D, "State")) store.states = &.{};
+            if (comptime hasHistoryDecl(D)) store.history_bufs = &.{};
+            if (comptime has_prep_cache) {
+                store.prep_cache = &.{};
+                store.prep_group = &.{};
+            }
+            if (comptime canDedup(D)) {
+                store.eval_cache_hash = &.{};
+                store.eval_cache_rhs = &.{};
+                store.eval_cache_jac = &.{};
+                if (comptime canDedupQ(D)) {
+                    store.eval_cache_q_rhs = &.{};
+                    store.eval_cache_q_jac = &.{};
+                }
+            }
+            errdefer DeviceBatch(D).hooks.deinit(store, gpa);
+
             store.models = try self.models.toOwnedSlice(gpa);
             if (comptime has_attempt_decl) {
                 store.saved_models = try gpa.alloc(D.Model, count);
@@ -81,6 +107,10 @@ pub fn ProtoStore(comptime D: type) type {
             }
             if (comptime hasHistoryDecl(D)) {
                 store.history_bufs = try gpa.alloc(HistoryBuffer, count);
+                // Empty-init so a mid-loop init failure leaves destroy() a
+                // fully defined (freeable) array, not undefined tails.
+                for (store.history_bufs) |*b|
+                    b.* = .{ .times = &.{}, .values = &.{}, .n_signals = 0, .capacity = 0, .head = 0, .len = 0 };
                 for (0..count) |i|
                     store.history_bufs[i] = try HistoryBuffer.init(gpa, D.n_hist_signals, 8192);
             }

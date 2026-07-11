@@ -195,10 +195,14 @@ pub const GROUND: u32 = 0;
 pub fn probeNames(ctx: *const RunCtx, first: ?[]const u8) ![]const []const u8 {
     const extra: usize = if (first == null) 0 else 1;
     const names = try ctx.allocator.alloc([]const u8, ctx.probes.len + extra);
+    errdefer ctx.allocator.free(names);
     if (first) |name| names[0] = name;
+    var done: usize = 0;
+    errdefer for (names[extra..][0..done]) |s| ctx.allocator.free(s);
     for (ctx.probes, names[extra..]) |node, *out| {
         const label = ctx.circuit.nodeName(node);
         out.* = try std.fmt.allocPrint(ctx.allocator, "v({s})", .{if (label.len == 0) "?" else label});
+        done += 1;
     }
     return names;
 }
@@ -403,10 +407,10 @@ pub const Circuit = struct {
         gpa.free(self.row_idx);
         gpa.free(self.g_vals);
         gpa.free(self.c_vals);
-        if (self.has_baseline) {
-            gpa.free(self.g_base);
-            gpa.free(self.c_base);
-        }
+        // Unconditional: computeBaseline can fail mid-way leaving buffers
+        // allocated with has_baseline=false; free is a no-op on &.{}.
+        gpa.free(self.g_base);
+        gpa.free(self.c_base);
         gpa.free(self.rhs);
         gpa.free(self.q_vec);
         gpa.free(self.diag_slots);

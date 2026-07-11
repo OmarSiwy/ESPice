@@ -247,6 +247,10 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     const npoints: usize = if (ctx.probes.len > 0) n_conv else 0;
     const names = try root.probeNames(ctx, "run");
+    errdefer {
+        for (names[1..]) |s| a.free(s); // names[0] is the "run" literal
+        a.free(names);
+    }
     const ncols = names.len;
     const data = try a.alloc(f64, npoints * ncols);
     for (0..npoints) |k| {

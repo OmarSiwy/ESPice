@@ -122,6 +122,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     const n = res.poles.len;
     const names = try a.dupe([]const u8, &.{ "index", "pole" });
+    errdefer a.free(names); // entries are literals
     const data = try a.alloc(f64, n * 4);
     for (res.poles, 0..) |pole, i| {
         data[i * 4] = @floatFromInt(i);

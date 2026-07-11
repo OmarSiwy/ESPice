@@ -511,13 +511,23 @@ fn TriDiag(comptime T: type) type {
         pub const FactorError = error{SingularMatrix};
 
         fn init(gpa: Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32) !Self {
+            const a_pos = try gpa.alloc(u32, n);
+            errdefer gpa.free(a_pos);
+            const b_pos = try gpa.alloc(u32, n);
+            errdefer gpa.free(b_pos);
+            const c_pos = try gpa.alloc(u32, n);
+            errdefer gpa.free(c_pos);
+            const bp = try gpa.alloc(T, n);
+            errdefer gpa.free(bp);
+            const mul = try gpa.alloc(T, n);
+            errdefer gpa.free(mul);
             var self = Self{
                 .n = n,
-                .a_pos = try gpa.alloc(u32, n),
-                .b_pos = try gpa.alloc(u32, n),
-                .c_pos = try gpa.alloc(u32, n),
-                .bp = try gpa.alloc(T, n),
-                .mul = try gpa.alloc(T, n),
+                .a_pos = a_pos,
+                .b_pos = b_pos,
+                .c_pos = c_pos,
+                .bp = bp,
+                .mul = mul,
                 .cv = try gpa.alloc(T, n),
             };
             @memset(self.a_pos, NONE);

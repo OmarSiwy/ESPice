@@ -18,8 +18,10 @@ pub const HistoryBuffer = struct {
 
     pub fn init(allocator: std.mem.Allocator, n_signals: u32, capacity: u32) !HistoryBuffer {
         const cap = @max(capacity, 4);
+        const times = try allocator.alloc(f64, cap);
+        errdefer allocator.free(times);
         return .{
-            .times = try allocator.alloc(f64, cap),
+            .times = times,
             .values = try allocator.alloc(f64, @as(usize, cap) * n_signals),
             .n_signals = n_signals,
             .capacity = cap,

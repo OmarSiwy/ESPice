@@ -199,6 +199,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const st = try sweep(ctx.circuit, x_op, srcs, freqs, density, opts, a);
 
     const names = try a.dupe([]const u8, &.{ "frequency", "pnoise_density" });
+    errdefer a.free(names); // entries are literals
     const data = try a.alloc(f64, @as(usize, n_points) * 2);
     for (0..n_points) |i| {
         data[i * 2] = freqs[i];

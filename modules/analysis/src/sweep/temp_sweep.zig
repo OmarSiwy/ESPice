@@ -150,6 +150,10 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     const npoints: usize = st.points;
     const names = try root.probeNames(ctx, "temp");
+    errdefer {
+        for (names[1..]) |s| a.free(s); // names[0] is the "temp" literal
+        a.free(names);
+    }
     const ncols = names.len;
     const data = try a.alloc(f64, npoints * ncols);
     for (0..npoints) |i| {

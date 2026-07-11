@@ -66,6 +66,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const npoints = sweepCount(opts.start, opts.stop, opts.step);
     const ncols = ctx.probes.len + 1;
     const data = try a.alloc(f64, npoints * ncols);
+    errdefer a.free(data);
     const x = try a.alloc(f64, ckt.n);
     defer a.free(x);
     @memset(x, 0);
