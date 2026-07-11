@@ -1,0 +1,12 @@
+// Verilog-A linear resistor, 100 ohm default.
+`include "disciplines.vams"
+module va_res(p, n);
+    inout p, n;
+    electrical p, n;
+
+    parameter real R = 100.0 from (0:inf);
+
+    analog begin
+        I(p, n) <+ V(p, n) / R;
+    end
+endmodule

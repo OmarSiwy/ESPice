@@ -90,6 +90,9 @@ pub const letter_map = std.StaticStringMap(DeviceId).initComptime(.{
     .{ "w", .cswitch },
     .{ "t", .tline },
     .{ "o", .lossy_tline },
+    // ngspice TXL (Pade RLGC line) lowers onto the same lumped RLGC device;
+    // the txl model card's `length=` is aliased to `len` in netlist.zig.
+    .{ "y", .lossy_tline },
     .{ "b", .bsource },
     .{ "z", .mesfet },
     .{ "u", .urc },

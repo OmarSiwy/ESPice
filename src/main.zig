@@ -153,11 +153,17 @@ pub fn main(init: std.process.Init) !u8 {
 
         // Foreign HDL (.hdl cards): compile + dlopen at runtime (cached by
         // content hash — first load pays a model compile, never again).
-        // Models baked at build time (-Dva-models) still take precedence.
+        // Relative paths resolve against the netlist file's dir (HSPICE).
         for (nl.foreign) |f| switch (f.kind) {
-            .verilog_a, .verilog => vaload.ensureLoaded(arena, io, f.path) catch |e| {
-                std.debug.print("Error: '{s}': runtime HDL load failed: {s}\n", .{ f.path, @errorName(e) });
-                return skip(io, "hdl load error");
+            .verilog_a, .verilog => {
+                const hdl_path = if (std.fs.path.isAbsolute(f.path))
+                    f.path
+                else
+                    try std.fs.path.join(arena, &.{ std.fs.path.dirname(path) orelse ".", f.path });
+                vaload.ensureLoaded(arena, io, hdl_path) catch |e| {
+                    std.debug.print("Error: '{s}': runtime HDL load failed: {s}\n", .{ hdl_path, @errorName(e) });
+                    return skip(io, "hdl load error");
+                };
             },
             else => {},
         };
