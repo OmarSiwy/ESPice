@@ -213,8 +213,8 @@ const kb_q: f64 = 8.617333e-5; // k_B / q in V/K
 
 /// Temperature-adjusted body diode saturation current. Pure f64 — no x.
 fn isTemp(is_val: f64, xti: f64, eg: f64, t_ratio: f64, vt_nom: f64) f64 {
-    return is_val * @exp(xti * @log(@max(t_ratio, 1e-30))) *
-        @exp(@min((eg / vt_nom) * (1.0 - 1.0 / t_ratio), 80.0));
+    return is_val * contract.fmath.exp(xti * contract.fmath.log(@max(t_ratio, 1e-30))) *
+        contract.fmath.exp(@min((eg / vt_nom) * (1.0 - 1.0 / t_ratio), 80.0));
 }
 
 /// DC prep: everything eval() needs that does not depend on x.
@@ -293,7 +293,7 @@ fn dcPrep(model: *const Model, instance: *const Instance) DcPrep {
 
     // Temperature-adjusted transconductance
     const t_ratio: f64 = t_dev / t_nom_k;
-    const kp_t: f64 = kp * @exp(mu_p * @log(@max(t_ratio, 1e-30)));
+    const kp_t: f64 = kp * contract.fmath.exp(mu_p * contract.fmath.log(@max(t_ratio, 1e-30)));
 
     // Temperature-adjusted subthreshold slope
     const ksubthres_t: f64 = ksubthres_p * (1.0 + tksubthres1_p * delta_t + tksubthres2_p * delta_t * delta_t);
@@ -305,7 +305,7 @@ fn dcPrep(model: *const Model, instance: *const Instance) DcPrep {
 
     // Temperature-adjusted resistances
     // Drain resistance: polynomial (trd1/trd2) * exponential (texp0) temperature models
-    const rd_exp_factor: f64 = @exp(texp0_p * @log(@max(t_ratio, 1e-30)));
+    const rd_exp_factor: f64 = contract.fmath.exp(texp0_p * contract.fmath.log(@max(t_ratio, 1e-30)));
     const rd_t: f64 = rd * (1.0 + trd1 * delta_t + trd2 * delta_t * delta_t) * rd_exp_factor;
     const rs_t: f64 = rs * (1.0 + trs1 * delta_t + trs2 * delta_t * delta_t);
     const rg_t: f64 = rg * (1.0 + trg1 * delta_t + trg2 * delta_t * delta_t);
@@ -591,8 +591,8 @@ fn qPrep(model: *const Model, instance: *const Instance) QPrep {
     // Depletion charge constants
     const one_minus_mj: f64 = 1.0 - mj;
     const one_minus_fc: f64 = 1.0 - fc;
-    const f1: f64 = (cjo * vj / one_minus_mj) * (1.0 - @exp(one_minus_mj * @log(@max(one_minus_fc, 1e-30))));
-    const f2: f64 = @exp((1.0 + mj) * @log(@max(one_minus_fc, 1e-30)));
+    const f1: f64 = (cjo * vj / one_minus_mj) * (1.0 - contract.fmath.exp(one_minus_mj * contract.fmath.log(@max(one_minus_fc, 1e-30))));
+    const f2: f64 = contract.fmath.exp((1.0 + mj) * contract.fmath.log(@max(one_minus_fc, 1e-30)));
     const f3: f64 = 1.0 - fc * (1.0 + mj);
 
     return .{
@@ -745,7 +745,7 @@ pub fn limit(model: *const Model, _: *const Instance, x_new: [n_u]f64, x_old: [n
     const vsd_new: f64 = (x_new[sp] - x_new[bp]) * type_f;
     const vsd_old: f64 = (x_old[sp] - x_old[bp]) * type_f;
 
-    const v_crit: f64 = nvt * @log(nvt / (@sqrt(2.0) * is_val));
+    const v_crit: f64 = nvt * contract.fmath.log(nvt / (@sqrt(2.0) * is_val));
 
     var vsd_limited = vsd_new;
 
@@ -753,12 +753,12 @@ pub fn limit(model: *const Model, _: *const Instance, x_new: [n_u]f64, x_old: [n
         if (vsd_old > 0.0) {
             const arg = (vsd_new - vsd_old) / nvt;
             if (arg > 0.0) {
-                vsd_limited = vsd_old + nvt * (2.0 + @log(arg - 2.0));
+                vsd_limited = vsd_old + nvt * (2.0 + contract.fmath.log(arg - 2.0));
             } else {
                 vsd_limited = v_crit;
             }
         } else {
-            vsd_limited = nvt * @log(vsd_new / nvt);
+            vsd_limited = nvt * contract.fmath.log(vsd_new / nvt);
         }
     }
 

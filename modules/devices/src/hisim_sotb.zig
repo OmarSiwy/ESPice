@@ -474,11 +474,11 @@ pub const noise_gens = [_]contract.NoiseGen(Self){
 // ============================================================================
 
 inline fn safe_log(x: f64) f64 {
-    return @log(@max(x, 1e-300));
+    return contract.fmath.log(@max(x, 1e-300));
 }
 
 inline fn safe_pow(base: f64, exp_val: f64) f64 {
-    return @exp(exp_val * safe_log(@abs(base) + 1e-300));
+    return contract.fmath.exp(exp_val * safe_log(@abs(base) + 1e-300));
 }
 
 inline fn safe_sqrt(x: f64) f64 {
@@ -1048,7 +1048,7 @@ fn prepI(model: *const Model, instance: *const Instance) ParamsI {
     const eg = eg_tnom - bgtmp1_p * (temp_c - tnom_p) - bgtmp2_p * (temp_c * temp_c - tnom_p * tnom_p);
 
     // Intrinsic carrier concentration (eq 178)
-    const ni = NI_300 * safe_pow(t_ratio, 1.5) * @exp(@min(-(eg * Q_ELECTRON) / (2.0 * K_BOLTZ * temp_k), 80.0));
+    const ni = NI_300 * safe_pow(t_ratio, 1.5) * contract.fmath.exp(@min(-(eg * Q_ELECTRON) / (2.0 * K_BOLTZ * temp_k), 80.0));
     const ni2 = ni * ni;
 
     // ===== DEVICE GEOMETRY (Eq. 1-7) =====
@@ -1966,7 +1966,7 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     const eg2 = @max(eg, 1.0e-6);
     const eg2_32 = safe_pow(eg2, 1.5);
     const t1_gidl = sExpClamp(S, vds_raw.scale(-beta)).addC(1.0).pow(-1.0); // Eq 252
-    const gidl_t_factor = 1.0 / @max(1.0 - @exp(@min(-l_eff / @max(p.gidlbpl1_p * safe_pow(p.t_ratio, p.gidlbplt_p), 1.0e-30), 80.0)), 1.0e-30);
+    const gidl_t_factor = 1.0 / @max(1.0 - contract.fmath.exp(@min(-l_eff / @max(p.gidlbpl1_p * safe_pow(p.t_ratio, p.gidlbplt_p), 1.0e-30), 80.0)), 1.0e-30);
     const igidl_raw = if (e_gidl_d.val() > 0.0)
         e_gidl_d.mul(e_gidl_d).scale(Q_ELECTRON * p.gidl1_p / eg2)
             .mul(sExpClamp(S, e_gidl_d.maxC(1.0e-6).pow(-1.0).scale(-p.gidl2_p * eg2_32)))
@@ -2009,7 +2009,7 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
         const nd_fbe: f64 = 1.0e20;
         const ln_fbe = safe_sqrt(dn * 1.0e-7);
         const lp_fbe = safe_sqrt(dp_fbe * 1.0e-7);
-        const denom_fbe = Q_ELECTRON * p.tsoi_p * w_eff * @exp(@min(-beta * p.qhe2_p, 80.0)) *
+        const denom_fbe = Q_ELECTRON * p.tsoi_p * w_eff * contract.fmath.exp(@min(-beta * p.qhe2_p, 80.0)) *
             (dn * nd_fbe * lp_fbe + dp_fbe * nd_fbe * ln_fbe);
         // dvsb = qhe1*vt*log(1 + (isub+ievb)*lp_fbe*ln_fbe/max(denom_fbe,1e-60))
         const dvsb = sLog(S, isub.add(ievb).scale(lp_fbe * ln_fbe / @max(denom_fbe, 1.0e-60)).addC(1.0)).scale(p.qhe1_p * p.vt);
@@ -2196,7 +2196,7 @@ fn prepQ(model: *const Model, instance: *const Instance) ParamsQ {
     // Bandgap
     const eg_tnom = eg0_p - 90.25e-6 * tnom_p - 1.0e-7 * tnom_p * tnom_p;
     const eg = eg_tnom - bgtmp1_p * (temp_c - tnom_p) - bgtmp2_p * (temp_c * temp_c - tnom_p * tnom_p);
-    _ = NI_300 * safe_pow(t_ratio, 1.5) * @exp(@min(-(eg * Q_ELECTRON) / (2.0 * K_BOLTZ * temp_k), 80.0));
+    _ = NI_300 * safe_pow(t_ratio, 1.5) * contract.fmath.exp(@min(-(eg * Q_ELECTRON) / (2.0 * K_BOLTZ * temp_k), 80.0));
 
     // Geometry
     const l_gate = l_drawn;
@@ -2502,7 +2502,7 @@ fn limvds(vnew: f64, vold: f64) f64 {
 
 /// Flicker (1/f) noise PSD * f (Eq 268-270): N_flick = S_Ids * f
 /// Returns the value to be divided by f in the noise analysis.
-pub inline fn noise_flicker_psd(
+inline fn noise_flicker_psd(
     ids: f64,
     nftrp: f64,
     nfalp: f64,
@@ -2533,7 +2533,7 @@ pub inline fn noise_flicker_psd(
 }
 
 /// Thermal noise PSD (Eq 271-276): N_thrml = S_id / (4kT)
-pub inline fn noise_thermal_psd(
+inline fn noise_thermal_psd(
     w_eff: f64,
     nf_val: f64,
     cfox: f64,

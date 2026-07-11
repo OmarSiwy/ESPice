@@ -978,7 +978,7 @@ pub fn limit(model: *const Model, instance: *const Instance, x_new: [n_u]f64, x_
     // 3. PN Junction Limiting (pnjlim) for V_BS
     // ========================================================================
     {
-        const v_crit = vt * @log(vt / (@sqrt(2.0) * i_s));
+        const v_crit = vt * contract.fmath.log(vt / (@sqrt(2.0) * i_s));
         const vbs_new = result[b] - result[sp];
         const vbs_old = x_old[b] - x_old[sp];
         var vbs_limited = vbs_new;
@@ -987,12 +987,12 @@ pub fn limit(model: *const Model, instance: *const Instance, x_new: [n_u]f64, x_
             if (vbs_old > 0.0) {
                 const arg = (vbs_new - vbs_old) / vt;
                 if (arg > 0.0) {
-                    vbs_limited = vbs_old + vt * (2.0 + @log(@max(arg - 2.0, 1.0e-30)));
+                    vbs_limited = vbs_old + vt * (2.0 + contract.fmath.log(@max(arg - 2.0, 1.0e-30)));
                 } else {
                     vbs_limited = v_crit;
                 }
             } else {
-                vbs_limited = vt * @log(@max(vbs_new / vt, 1.0e-30));
+                vbs_limited = vt * contract.fmath.log(@max(vbs_new / vt, 1.0e-30));
             }
         }
 
@@ -1005,7 +1005,7 @@ pub fn limit(model: *const Model, instance: *const Instance, x_new: [n_u]f64, x_
     //    (after V_BS and V_DS are limited, so use updated result)
     // ========================================================================
     {
-        const v_crit = vt * @log(vt / (@sqrt(2.0) * i_s));
+        const v_crit = vt * contract.fmath.log(vt / (@sqrt(2.0) * i_s));
         const vbd_new = result[b] - result[dp];
         const vbd_old = x_old[b] - x_old[dp];
         var vbd_limited = vbd_new;
@@ -1014,12 +1014,12 @@ pub fn limit(model: *const Model, instance: *const Instance, x_new: [n_u]f64, x_
             if (vbd_old > 0.0) {
                 const arg = (vbd_new - vbd_old) / vt;
                 if (arg > 0.0) {
-                    vbd_limited = vbd_old + vt * (2.0 + @log(@max(arg - 2.0, 1.0e-30)));
+                    vbd_limited = vbd_old + vt * (2.0 + contract.fmath.log(@max(arg - 2.0, 1.0e-30)));
                 } else {
                     vbd_limited = v_crit;
                 }
             } else {
-                vbd_limited = vt * @log(@max(vbd_new / vt, 1.0e-30));
+                vbd_limited = vt * contract.fmath.log(@max(vbd_new / vt, 1.0e-30));
             }
         }
 

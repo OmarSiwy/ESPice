@@ -1,12 +1,13 @@
 const root = @import("root.zig");
+const converger = @import("helper/converger.zig");
 
 /// Comptime validation: every analysis module is one pure transformation,
 ///
 ///   run: (*const root.RunCtx, T.Options) !root.Result
 ///
-/// Options in, Result out, no other entry points required. Checked by shape
-/// so a drifted signature fails here with a readable error instead of deep
-/// in root.zig's dispatch switch.
+/// Options must carry a `tol: converger.Tolerances` field so the engine can
+/// set accuracy profiles uniformly. Checked by shape so a drifted signature
+/// fails here with a readable error instead of deep in root.zig's dispatch.
 pub fn validate(comptime T: type) void {
     const name = @typeName(T);
 
@@ -14,6 +15,11 @@ pub fn validate(comptime T: type) void {
         @compileError(name ++ ": contract requires `pub const Options`");
     if (@typeInfo(T.Options) != .@"struct")
         @compileError(name ++ ".Options must be a struct");
+
+    if (!@hasField(T.Options, "tol"))
+        @compileError(name ++ ".Options must have field `tol: converger.Tolerances`");
+    if (@FieldType(T.Options, "tol") != converger.Tolerances)
+        @compileError(name ++ ".Options.tol must be converger.Tolerances");
 
     if (!@hasDecl(T, "run"))
         @compileError(name ++ ": contract requires `pub fn run(*const root.RunCtx, T.Options) !root.Result`");

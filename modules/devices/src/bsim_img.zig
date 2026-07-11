@@ -682,13 +682,13 @@ fn prepI(model: *const Model, instance: *const Instance) PrepI {
     const wln_val: f64 = @as(f64, model.wln);
     const wwn_val: f64 = @as(f64, model.wwn);
 
-    const l_lln = @exp(-lln * @log(@max(l_new, 1.0e-30)));
-    const l_wln = @exp(-lwn_val * @log(@max(l_new, 1.0e-30)));
+    const l_lln = contract.fmath.exp(-lln * contract.fmath.log(@max(l_new, 1.0e-30)));
+    const l_wln = contract.fmath.exp(-lwn_val * contract.fmath.log(@max(l_new, 1.0e-30)));
 
     const w_new: f64 = if (model.nfmod == 0) w_raw / nf else w_raw + xw;
 
-    const w_lwn = @exp(-wln_val * @log(@max(w_new, 1.0e-30)));
-    const w_wwn = @exp(-wwn_val * @log(@max(w_new, 1.0e-30)));
+    const w_lwn = contract.fmath.exp(-wln_val * contract.fmath.log(@max(w_new, 1.0e-30)));
+    const w_wwn = contract.fmath.exp(-wwn_val * contract.fmath.log(@max(w_new, 1.0e-30)));
 
     const l_wlln_lwn = l_lln * w_lwn;
     const l_wwln_wwn = l_wln * w_wwn;
@@ -703,13 +703,13 @@ fn prepI(model: *const Model, instance: *const Instance) PrepI {
     const tbgasub: f64 = @as(f64, model.tbgasub);
     const tbgbsub: f64 = @as(f64, model.tbgbsub);
     const eg = bg0sub - tbgasub * t_dev * t_dev / (t_dev + tbgbsub);
-    const ni = ni0sub * @exp(1.5 * @log(t_dev / 300.15)) * @exp(@min((bg0sub * Q_ELEC / (2.0 * K_BOLT * 300.15)) - (eg * Q_ELEC / (2.0 * K_BOLT * t_dev)), 80.0));
-    const nc = nc0sub * @exp(1.5 * @log(t_dev / 300.15));
+    const ni = ni0sub * contract.fmath.exp(1.5 * contract.fmath.log(t_dev / 300.15)) * contract.fmath.exp(@min((bg0sub * Q_ELEC / (2.0 * K_BOLT * 300.15)) - (eg * Q_ELEC / (2.0 * K_BOLT * t_dev)), 80.0));
+    const nc = nc0sub * contract.fmath.exp(1.5 * contract.fmath.log(t_dev / 300.15));
     _ = nc;
 
-    const vbi = vtm * @log(@max(nsd_val * nbody / (ni * ni), 1.0e-30));
-    const phi_b = vtm * @log(@max(nbody / ni, 1.0e-30));
-    const phi_sub = vtm * @log(@max(nbg_val / ni, 1.0e-30));
+    const vbi = vtm * contract.fmath.log(@max(nsd_val * nbody / (ni * ni), 1.0e-30));
+    const phi_b = vtm * contract.fmath.log(@max(nbody / ni, 1.0e-30));
+    const phi_sub = vtm * contract.fmath.log(@max(nbg_val / ni, 1.0e-30));
 
     // 3.1.6 workfunction
     const phig1_i: f64 = @as(f64, model.phig1);
@@ -727,7 +727,7 @@ fn prepI(model: *const Model, instance: *const Instance) PrepI {
     const dphi1 = devsign * (phig1_i - phi_ref);
 
     // Phi_sd (eq 3.98)
-    const phi_sd_t = @min(eg / 2.0, vtm * @log(@max(nsd_val / ni, 1.0e-30)));
+    const phi_sd_t = @min(eg / 2.0, vtm * contract.fmath.log(@max(nsd_val / ni, 1.0e-30)));
     const phi_sd = easub + eg / 2.0 - devsign * phi_sd_t;
     const vfbsd = devsign * (phig1_i - phi_sd);
     const vfbsd_bg = devsign * (phig2_i - phi_sd);
@@ -739,54 +739,54 @@ fn prepI(model: *const Model, instance: *const Instance) PrepI {
     const mob0_base: f64 = @as(f64, model.u0);
     const lpa_val: f64 = @as(f64, model.lpa);
     const up_val: f64 = @as(f64, model.up);
-    const mob0_l: f64 = if (lpa_val > 0) mob0_base * (1.0 - up_val * @exp(-lpa_val * @log(@max(l_eff, 1.0e-30)))) else mob0_base * (1.0 - up_val);
+    const mob0_l: f64 = if (lpa_val > 0) mob0_base * (1.0 - up_val * contract.fmath.exp(-lpa_val * contract.fmath.log(@max(l_eff, 1.0e-30)))) else mob0_base * (1.0 - up_val);
 
     const mob02_base: f64 = @as(f64, model.u02);
     const lpa2_val: f64 = @as(f64, model.lpa2);
     const up2_val: f64 = @as(f64, model.up2);
-    const mob02_l: f64 = if (lpa2_val > 0) mob02_base * (1.0 - up2_val * @exp(-lpa2_val * @log(@max(l_eff, 1.0e-30)))) else mob02_base * (1.0 - up2_val);
+    const mob02_l: f64 = if (lpa2_val > 0) mob02_base * (1.0 - up2_val * contract.fmath.exp(-lpa2_val * contract.fmath.log(@max(l_eff, 1.0e-30)))) else mob02_base * (1.0 - up2_val);
 
-    const ua_l = @as(f64, model.ua) + @as(f64, model.aua) * @exp(-l_eff / @as(f64, model.bua));
-    const ua2_l = @as(f64, model.ua2) + @as(f64, model.aua2) * @exp(-l_eff / @as(f64, model.bua2));
-    const eu_l = @as(f64, model.eu) + @as(f64, model.aeu) * @exp(-l_eff / @as(f64, model.beu));
-    const eu2_l = @as(f64, model.eu2) + @as(f64, model.aeu2) * @exp(-l_eff / @as(f64, model.beu2));
-    const eub_l = @as(f64, model.eub) + @as(f64, model.aeub) * @exp(-l_eff / @as(f64, model.beub));
-    const eub2_l = @as(f64, model.eub2) + @as(f64, model.aeub2) * @exp(-l_eff / @as(f64, model.beub2));
-    const ud_l = @as(f64, model.ud) + @as(f64, model.aud) * @exp(-l_eff / @as(f64, model.bud));
-    const ud2_l = @as(f64, model.ud2) + @as(f64, model.aud2) * @exp(-l_eff / @as(f64, model.bud2));
-    const udb_l: f64 = @as(f64, model.udb) + @as(f64, model.audb) * @exp(-l_eff / @as(f64, model.budb));
-    const udb2_l: f64 = @as(f64, model.udb2) + @as(f64, model.audb2) * @exp(-l_eff / @as(f64, model.budb2));
-    const uc_l = @as(f64, model.uc) + @as(f64, model.auc) * @exp(-l_eff / @as(f64, model.buc));
-    const uc2_l = @as(f64, model.uc2) + @as(f64, model.auc2) * @exp(-l_eff / @as(f64, model.buc2));
+    const ua_l = @as(f64, model.ua) + @as(f64, model.aua) * contract.fmath.exp(-l_eff / @as(f64, model.bua));
+    const ua2_l = @as(f64, model.ua2) + @as(f64, model.aua2) * contract.fmath.exp(-l_eff / @as(f64, model.bua2));
+    const eu_l = @as(f64, model.eu) + @as(f64, model.aeu) * contract.fmath.exp(-l_eff / @as(f64, model.beu));
+    const eu2_l = @as(f64, model.eu2) + @as(f64, model.aeu2) * contract.fmath.exp(-l_eff / @as(f64, model.beu2));
+    const eub_l = @as(f64, model.eub) + @as(f64, model.aeub) * contract.fmath.exp(-l_eff / @as(f64, model.beub));
+    const eub2_l = @as(f64, model.eub2) + @as(f64, model.aeub2) * contract.fmath.exp(-l_eff / @as(f64, model.beub2));
+    const ud_l = @as(f64, model.ud) + @as(f64, model.aud) * contract.fmath.exp(-l_eff / @as(f64, model.bud));
+    const ud2_l = @as(f64, model.ud2) + @as(f64, model.aud2) * contract.fmath.exp(-l_eff / @as(f64, model.bud2));
+    const udb_l: f64 = @as(f64, model.udb) + @as(f64, model.audb) * contract.fmath.exp(-l_eff / @as(f64, model.budb));
+    const udb2_l: f64 = @as(f64, model.udb2) + @as(f64, model.audb2) * contract.fmath.exp(-l_eff / @as(f64, model.budb2));
+    const uc_l = @as(f64, model.uc) + @as(f64, model.auc) * contract.fmath.exp(-l_eff / @as(f64, model.buc));
+    const uc2_l = @as(f64, model.uc2) + @as(f64, model.auc2) * contract.fmath.exp(-l_eff / @as(f64, model.buc2));
 
-    const mexp_l = @as(f64, model.mexp) + @as(f64, model.amexp) * @exp(-@as(f64, model.bmexp) * @log(@max(l_eff, 1.0e-30)));
-    const pclm_l = @as(f64, model.pclm) + @as(f64, model.apclm) * @exp(-l_eff / @as(f64, model.bpclm));
-    const ptwg_l = @as(f64, model.ptwg) + @as(f64, model.aptwg) * @exp(-l_eff / @as(f64, model.bptwg));
-    const ptwgb_l = @as(f64, model.ptwgb) + @as(f64, model.aptwgb) * @exp(-l_eff / @as(f64, model.bptwgb));
-    const ptwgb2_l = @as(f64, model.ptwgb2) + @as(f64, model.aptwgb2) * @exp(-l_eff / @as(f64, model.bptwgb2));
+    const mexp_l = @as(f64, model.mexp) + @as(f64, model.amexp) * contract.fmath.exp(-@as(f64, model.bmexp) * contract.fmath.log(@max(l_eff, 1.0e-30)));
+    const pclm_l = @as(f64, model.pclm) + @as(f64, model.apclm) * contract.fmath.exp(-l_eff / @as(f64, model.bpclm));
+    const ptwg_l = @as(f64, model.ptwg) + @as(f64, model.aptwg) * contract.fmath.exp(-l_eff / @as(f64, model.bptwg));
+    const ptwgb_l = @as(f64, model.ptwgb) + @as(f64, model.aptwgb) * contract.fmath.exp(-l_eff / @as(f64, model.bptwgb));
+    const ptwgb2_l = @as(f64, model.ptwgb2) + @as(f64, model.aptwgb2) * contract.fmath.exp(-l_eff / @as(f64, model.bptwgb2));
 
-    const vsat_l = @as(f64, model.vsat) + @as(f64, model.avsat) * @exp(-l_eff / @as(f64, model.bvsat));
-    const vsatb_l = @as(f64, model.vsatb) + @as(f64, model.avsatb) * @exp(-l_eff / @as(f64, model.bvsatb));
+    const vsat_l = @as(f64, model.vsat) + @as(f64, model.avsat) * contract.fmath.exp(-l_eff / @as(f64, model.bvsat));
+    const vsatb_l = @as(f64, model.vsatb) + @as(f64, model.avsatb) * contract.fmath.exp(-l_eff / @as(f64, model.bvsatb));
     const vsat1_base: f64 = if (model.vsat1 == 0) @as(f64, model.vsat) else @as(f64, model.vsat1);
     const avsat1_val: f64 = if (model.avsat1 == 0) @as(f64, model.avsat) else @as(f64, model.avsat1);
     const bvsat1_val: f64 = if (model.bvsat1 == 0) @as(f64, model.bvsat) else @as(f64, model.bvsat1);
-    const vsat1_l = vsat1_base + avsat1_val * @exp(-l_eff / bvsat1_val);
+    const vsat1_l = vsat1_base + avsat1_val * contract.fmath.exp(-l_eff / bvsat1_val);
 
-    const dvtp0_l = @as(f64, model.dvtp0) + @as(f64, model.advtp0) * @exp(-l_eff / @as(f64, model.bdvtp0));
-    const dvtp1_l = @as(f64, model.dvtp1) + @as(f64, model.advtp1) * @exp(-l_eff / @as(f64, model.bdvtp1));
+    const dvtp0_l = @as(f64, model.dvtp0) + @as(f64, model.advtp0) * contract.fmath.exp(-l_eff / @as(f64, model.bdvtp0));
+    const dvtp1_l = @as(f64, model.dvtp1) + @as(f64, model.advtp1) * contract.fmath.exp(-l_eff / @as(f64, model.bdvtp1));
 
     // RDSMOD=0 length scaling
-    const rdsw_l = @as(f64, model.rdsw) + @as(f64, model.ardsw) * @exp(-l_eff / @as(f64, model.brdsw));
+    const rdsw_l = @as(f64, model.rdsw) + @as(f64, model.ardsw) * contract.fmath.exp(-l_eff / @as(f64, model.brdsw));
     // RDSMOD=1 length scaling
-    const rsw_l = @as(f64, model.rsw) + @as(f64, model.arsw) * @exp(-l_eff / @as(f64, model.brsw));
+    const rsw_l = @as(f64, model.rsw) + @as(f64, model.arsw) * contract.fmath.exp(-l_eff / @as(f64, model.brsw));
     const rdw_base: f64 = if (model.rdw == 0) @as(f64, model.rsw) else @as(f64, model.rdw);
     const ardw_val: f64 = if (model.ardw == 0) @as(f64, model.arsw) else @as(f64, model.ardw);
     const brdw_val: f64 = if (model.brdw == 0) @as(f64, model.brsw) else @as(f64, model.brdw);
-    const rdw_l = rdw_base + ardw_val * @exp(-l_eff / brdw_val);
+    const rdw_l = rdw_base + ardw_val * contract.fmath.exp(-l_eff / brdw_val);
 
     const dvth_temp = (@as(f64, model.kt1) + @as(f64, model.kt1l) / l_eff) * (t_ratio - 1.0);
-    const mu0_t = mob0_l * @exp(@as(f64, model.ute) * @log(t_ratio)) + @as(f64, model.utl) * (t_dev - tnom_k);
-    const mu02_t = mob02_l * @exp(@as(f64, model.ute) * @log(t_ratio)) + @as(f64, model.utl) * (t_dev - tnom_k);
+    const mu0_t = mob0_l * contract.fmath.exp(@as(f64, model.ute) * contract.fmath.log(t_ratio)) + @as(f64, model.utl) * (t_dev - tnom_k);
+    const mu02_t = mob02_l * contract.fmath.exp(@as(f64, model.ute) * contract.fmath.log(t_ratio)) + @as(f64, model.utl) * (t_dev - tnom_k);
     const mexp_t = mexp_l * (1.0 + @as(f64, model.tmexp) * (t_dev - tnom_k));
     const etamob_t: f64 = @as(f64, model.etamob) * (1.0 + @as(f64, model.emobt) * (t_dev - tnom_k));
     const etamob2_t: f64 = @as(f64, model.etamob2) * (1.0 + @as(f64, model.emobt) * (t_dev - tnom_k));
@@ -795,10 +795,10 @@ fn prepI(model: *const Model, instance: *const Instance) PrepI {
     const ua2_t = ua2_l + @as(f64, model.ua1) * (t_dev - tnom_k);
     const uc_t = uc_l + @as(f64, model.uc1) * (t_dev - tnom_k);
     const uc2_t = uc2_l + @as(f64, model.uc1) * (t_dev - tnom_k);
-    const ud_t = ud_l * @exp(@as(f64, model.ud1) * @log(t_ratio));
-    const ud2_t = ud2_l * @exp(@as(f64, model.ud1) * @log(t_ratio));
-    const ucs_t = @as(f64, model.ucs) * @exp(@as(f64, model.ucste) * @log(t_ratio));
-    const ucs2_t = @as(f64, model.ucs2) * @exp(@as(f64, model.ucste) * @log(t_ratio));
+    const ud_t = ud_l * contract.fmath.exp(@as(f64, model.ud1) * contract.fmath.log(t_ratio));
+    const ud2_t = ud2_l * contract.fmath.exp(@as(f64, model.ud1) * contract.fmath.log(t_ratio));
+    const ucs_t = @as(f64, model.ucs) * contract.fmath.exp(@as(f64, model.ucste) * contract.fmath.log(t_ratio));
+    const ucs2_t = @as(f64, model.ucs2) * contract.fmath.exp(@as(f64, model.ucste) * contract.fmath.log(t_ratio));
 
     const eta0_t = @as(f64, model.eta0) * (1.0 + @as(f64, model.teta0) * (t_dev - tnom_k));
 
@@ -811,7 +811,7 @@ fn prepI(model: *const Model, instance: *const Instance) PrepI {
 
     const ptwg_t = ptwg_l * (1.0 - @as(f64, model.ptwgt) * (t_dev - tnom_k));
 
-    const beta0_t = @as(f64, model.beta0) * @exp(@as(f64, model.iit) * @log(t_ratio));
+    const beta0_t = @as(f64, model.beta0) * contract.fmath.exp(@as(f64, model.iit) * contract.fmath.log(t_ratio));
 
     const k0_t = @as(f64, model.k0) + @as(f64, model.k01) * (t_dev - tnom_k);
     const k0si_t = @as(f64, model.k0si) + @as(f64, model.k0si1) * (t_dev - tnom_k);
@@ -830,7 +830,7 @@ fn prepI(model: *const Model, instance: *const Instance) PrepI {
     const rsw_t = rsw_l * (1.0 + prt_val * (t_dev - tnom_k));
     const rdw_t = rdw_l * (1.0 + prt_val * (t_dev - tnom_k));
 
-    const ig_temp = @exp(@as(f64, model.igt) * @log(t_ratio));
+    const ig_temp = contract.fmath.exp(@as(f64, model.igt) * contract.fmath.log(t_ratio));
 
     const rs_geo = @as(f64, instance.nrs) * @as(f64, model.rshs) * (1.0 + prt_val * (t_dev - tnom_k));
     const rshd_val: f64 = if (model.rshd == 0) @as(f64, model.rshs) else @as(f64, model.rshd);
@@ -869,7 +869,7 @@ fn prepI(model: *const Model, instance: *const Instance) PrepI {
     const kt2_l = (@as(f64, model.kt2) + @as(f64, model.kt2l) / l_eff) * (t_ratio - 1.0);
 
     const wr_val: f64 = @as(f64, model.wr);
-    const w_eff_wr = @exp(wr_val * @log(@max(w_eff, 1.0e-30)));
+    const w_eff_wr = contract.fmath.exp(wr_val * contract.fmath.log(@max(w_eff, 1.0e-30)));
 
     // gate resistance
     const g_gate: f64 = blk: {
@@ -898,7 +898,7 @@ fn prepI(model: *const Model, instance: *const Instance) PrepI {
 
     // gate tunneling constants
     const toxp_val: f64 = if (model.toxp == 0) eot1 else @as(f64, model.toxp);
-    const tox_ratio = (1.0 / (toxp_val * toxp_val)) * @exp(@as(f64, model.ntox) * @log(@as(f64, model.toxref) / toxp_val));
+    const tox_ratio = (1.0 / (toxp_val * toxp_val)) * contract.fmath.exp(@as(f64, model.ntox) * contract.fmath.log(@as(f64, model.toxref) / toxp_val));
 
     return .{
         .devsign = devsign,
@@ -1313,7 +1313,7 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     const q_fronttot = q_fronts.add(q_frontd).scale(0.5 / cox1);
     const dq_front = q_fronts.sub(q_frontd).scale(1.0 / cox1);
     const a_chargewf = 2.0 * w_eff * @max(p.vsat_t, 1.0) * cox1 * rds_v.val();
-    const chargewf_factor: f64 = if (p.chargewf != 0) p.chargewf * (1.0 - @exp(-a_chargewf / 2.0)) * 0.5 else 0.0;
+    const chargewf_factor: f64 = if (p.chargewf != 0) p.chargewf * (1.0 - contract.fmath.exp(-a_chargewf / 2.0)) * 0.5 else 0.0;
     const q_ia2 = q_fronttot.add(dq_front.scale(chargewf_factor));
 
     const t2_m = q_ia2.scale(eta_mob).addC(q_ba);
@@ -1330,7 +1330,7 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     // back side
     const q_backtot = q_backs.add(q_backd).scale(0.5 / cox2);
     const dq_back = q_backs.sub(q_backd).scale(1.0 / cox2);
-    const chargewf2_factor: f64 = if (p.chargewf2 != 0) p.chargewf2 * (1.0 - @exp(-a_chargewf / 2.0)) * 0.5 else 0.0;
+    const chargewf2_factor: f64 = if (p.chargewf2 != 0) p.chargewf2 * (1.0 - contract.fmath.exp(-a_chargewf / 2.0)) * 0.5 else 0.0;
     const q_ib2 = q_backtot.add(dq_back.scale(chargewf2_factor));
 
     const t2_m2 = q_ib2.scale(eta_mob2).addC(q_ba);
@@ -1436,7 +1436,7 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
         const vgs_eff_r = vgs_m.mul(vgs_m).addC(1.0e-4).sqrt().add(vgs_m).scale(0.5);
         const vgd_eff_r = vgd_m.mul(vgd_m).addC(1.0e-4).sqrt().add(vgd_m).scale(0.5);
 
-        const w_new_wr = @exp(p.wr * @log(@max(p.w_new, 1.0e-30)));
+        const w_new_wr = contract.fmath.exp(p.wr * contract.fmath.log(@max(p.w_new, 1.0e-30)));
         const inv_wnf = 1.0 / (w_new_wr * nf);
         // r_source = inv_wnf*(rswmin_t + rsw_t/(1+prwg*vgs_eff_r)) + rs_geo
         const r_source = vgs_eff_r.scale(p.prwg).addC(1.0).pow(-1.0).scale(p.rsw_t).addC(p.rswmin_t).scale(inv_wnf).addC(p.rs_geo);
@@ -1585,7 +1585,7 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
         const vgs_prime = gs_inner.mul(gs_inner).addC(1.0e-4).sqrt();
         const vgd_prime = gd_inner.mul(gd_inner).addC(1.0e-4).sqrt();
 
-        const igsd_mult = p.ig_temp * p.w_new * a_gsd / (p.toxp_val * p.poxedge) * @exp(p.ntox * @log(p.toxref / (p.toxp_val * p.poxedge)));
+        const igsd_mult = p.ig_temp * p.w_new * a_gsd / (p.toxp_val * p.poxedge) * contract.fmath.exp(p.ntox * contract.fmath.log(p.toxref / (p.toxp_val * p.poxedge)));
 
         const eterm_gs = vgs_prime.scale(-p.bigs).addC(p.aigs).mul(vgs_prime.scale(p.cigs).addC(1.0)).scale(-b_gsd * p.toxp_val * p.poxedge).minC(80.0).exp();
         const eterm_gd = vgd_prime.scale(-p.bigd).addC(p.aigd).mul(vgd_prime.scale(p.cigd).addC(1.0)).scale(-b_gsd * p.toxp_val * p.poxedge).minC(80.0).exp();
@@ -1715,11 +1715,11 @@ fn prepQ(model: *const Model, instance: *const Instance) PrepQ {
     const lwn_val: f64 = @as(f64, model.lwn);
     const wln_val: f64 = @as(f64, model.wln);
     const wwn_val: f64 = @as(f64, model.wwn);
-    const l_lln = @exp(-lln * @log(@max(l_new, 1.0e-30)));
-    const l_wln = @exp(-lwn_val * @log(@max(l_new, 1.0e-30)));
+    const l_lln = contract.fmath.exp(-lln * contract.fmath.log(@max(l_new, 1.0e-30)));
+    const l_wln = contract.fmath.exp(-lwn_val * contract.fmath.log(@max(l_new, 1.0e-30)));
     const w_new: f64 = if (model.nfmod == 0) w_raw / nf else w_raw + xw;
-    const w_lwn = @exp(-wln_val * @log(@max(w_new, 1.0e-30)));
-    const w_wwn = @exp(-wwn_val * @log(@max(w_new, 1.0e-30)));
+    const w_lwn = contract.fmath.exp(-wln_val * contract.fmath.log(@max(w_new, 1.0e-30)));
+    const w_wwn = contract.fmath.exp(-wwn_val * contract.fmath.log(@max(w_new, 1.0e-30)));
     const l_wlln_lwn = l_lln * w_lwn;
     const l_wwln_wwn = l_wln * w_wwn;
 
@@ -1735,9 +1735,9 @@ fn prepQ(model: *const Model, instance: *const Instance) PrepQ {
     const tbgasub: f64 = @as(f64, model.tbgasub);
     const tbgbsub: f64 = @as(f64, model.tbgbsub);
     const eg = bg0sub - tbgasub * t_dev * t_dev / (t_dev + tbgbsub);
-    const ni = ni0sub * @exp(1.5 * @log(t_dev / 300.15)) * @exp(@min((bg0sub * Q_ELEC / (2.0 * K_BOLT * 300.15)) - (eg * Q_ELEC / (2.0 * K_BOLT * t_dev)), 80.0));
-    const phi_b = vtm * @log(@max(nbody / ni, 1.0e-30));
-    const phi_sub = vtm * @log(@max(nbg_val / ni, 1.0e-30));
+    const ni = ni0sub * contract.fmath.exp(1.5 * contract.fmath.log(t_dev / 300.15)) * contract.fmath.exp(@min((bg0sub * Q_ELEC / (2.0 * K_BOLT * 300.15)) - (eg * Q_ELEC / (2.0 * K_BOLT * t_dev)), 80.0));
+    const phi_b = vtm * contract.fmath.log(@max(nbody / ni, 1.0e-30));
+    const phi_sub = vtm * contract.fmath.log(@max(nbg_val / ni, 1.0e-30));
 
     const phig1_i: f64 = @as(f64, model.phig1);
     var phig2_raw: f64 = @as(f64, model.phig2);
@@ -1752,7 +1752,7 @@ fn prepQ(model: *const Model, instance: *const Instance) PrepQ {
     const phi_ref: f64 = if (is_nmos) easub else easub + eg;
     const dphi1 = devsign * (phig1_i - phi_ref);
 
-    const phi_sd_t = @min(eg / 2.0, vtm * @log(@max(nsd_val / ni, 1.0e-30)));
+    const phi_sd_t = @min(eg / 2.0, vtm * contract.fmath.log(@max(nsd_val / ni, 1.0e-30)));
     const phi_sd = easub + eg / 2.0 - devsign * phi_sd_t;
     const vfbsd = devsign * (phig1_i - phi_sd);
     const vfbsd_bg = devsign * (phig2_i - phi_sd);
@@ -1763,9 +1763,9 @@ fn prepQ(model: *const Model, instance: *const Instance) PrepQ {
     const lambda_f = @sqrt(tsi * ratio * eot1);
     const lambda_s = @sqrt(tsi * ratio * eot1 + 0.375 * tsi);
     const lambda_val = 0.5 * (lambda_f + lambda_s);
-    const csh_dvt = std.math.cosh(@min(@as(f64, model.dvt1) * l_eff / lambda_val, 80.0));
+    const csh_dvt = contract.fmath.cosh(@min(@as(f64, model.dvt1) * l_eff / lambda_val, 80.0));
     const t_ratio = t_dev / tnom_k;
-    const vbi = vtm * @log(@max(nsd_val * nbody / (ni * ni), 1.0e-30));
+    const vbi = vtm * contract.fmath.log(@max(nsd_val * nbody / (ni * ni), 1.0e-30));
     const phin_val: f64 = @as(f64, model.phin);
     const phi_st = 0.4 + phi_b + phin_val;
     const dvth_sce = -0.5 * @as(f64, model.dvt0) / @max(csh_dvt - 1.0, 1.0e-30) * (vbi - phi_st);
@@ -1778,7 +1778,7 @@ fn prepQ(model: *const Model, instance: *const Instance) PrepQ {
     const pclmcv_val: f64 = @as(f64, model.pclmcv);
     const m_clm_cv: f64 = if (pclmcv_val > 0) @max(1.0 + pclmcv_val, 1.0) else 1.0;
 
-    const csdbgsw0 = @as(f64, model.csdbgsw) * @log(@max(1.0 + tsi / eot2, 1.0e-30));
+    const csdbgsw0 = @as(f64, model.csdbgsw) * contract.fmath.log(@max(1.0 + tsi / eot2, 1.0e-30));
 
     const c_th: f64 = if (model.shmod == 1)
         @as(f64, model.cth0) * (@as(f64, model.wth0) + w_eff) * nf

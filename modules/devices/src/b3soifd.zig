@@ -827,12 +827,12 @@ fn prepEval(model: *const Model, instance: *const Instance) EvalPrep {
     // Pre-computed physical quantities
     const cox = EPS_OX / tox;
     const vtm_nom = KB_Q * tnom;
-    const phi_raw = 2.0 * vtm_nom * @log(@max(nch_cm3 / NI_300, 1.0));
+    const phi_raw = 2.0 * vtm_nom * contract.fmath.log(@max(nch_cm3 / NI_300, 1.0));
     const phi = @max(phi_raw, 0.7);
     const sqrt_phi = @sqrt(phi);
     const xdep0 = @sqrt(2.0 * EPS_SI / (CHARGE * nch_cm3 * 1.0e6)) * sqrt_phi;
-    const vbi = vtm_nom * @log(@max(1.0e20 * nch_cm3 / (NI_300 * NI_300), 1.0));
-    const vfbb = if (nsub_cm3 > 0.0) -vtm_nom * @log(@max(nch_cm3 / nsub_cm3, 1.0e-30)) else -0.9;
+    const vbi = vtm_nom * contract.fmath.log(@max(1.0e20 * nch_cm3 / (NI_300 * NI_300), 1.0));
+    const vfbb = if (nsub_cm3 > 0.0) -vtm_nom * contract.fmath.log(@max(nch_cm3 / nsub_cm3, 1.0e-30)) else -0.9;
     const factor1 = @sqrt(EPS_SI / EPS_OX * tox);
     const e_k1 = if (e_k1_raw == 0.0) (2.0 * @sqrt(2.0 * EPS_SI * CHARGE * nch_cm3 * 1.0e6 * phi)) / cox else e_k1_raw;
 
@@ -840,7 +840,7 @@ fn prepEval(model: *const Model, instance: *const Instance) EvalPrep {
     const delta_t = inst_temp - tnom;
     const temp_ratio = delta_t / tnom;
     const vtm = KB_Q * inst_temp;
-    const mu0_temp = if (m_ute != 0.0) e_u0 * @exp(m_ute * @log(inst_temp / tnom)) else e_u0;
+    const mu0_temp = if (m_ute != 0.0) e_u0 * contract.fmath.exp(m_ute * contract.fmath.log(inst_temp / tnom)) else e_u0;
     const vsat_t = @max(e_vsat - m_at * delta_t, 1.0);
     const ua_t = e_ua + @as(f64, model.ua1) * delta_t;
     const ub_t = e_ub + @as(f64, model.ub1) * delta_t;
@@ -852,7 +852,7 @@ fn prepEval(model: *const Model, instance: *const Instance) EvalPrep {
     const csi_eff = EPS_SI / tsi;
     const litl = @sqrt(EPS_SI * tsi * tox / EPS_OX);
     const f_dvbd1 = -e_dvbd1 * leff / litl;
-    const dvbd_t = e_dvbd0 * (@exp(@min(f_dvbd1 * 0.5, EXP_GUARD)) + 2.0 * @exp(@min(f_dvbd1, EXP_GUARD)));
+    const dvbd_t = e_dvbd0 * (contract.fmath.exp(@min(f_dvbd1 * 0.5, EXP_GUARD)) + 2.0 * contract.fmath.exp(@min(f_dvbd1, EXP_GUARD)));
     const qsi = CHARGE * nch_cm3 * 1.0e6 * tsi;
     const v0 = vbi - phi;
     const vbs0t = phi - qsi / csi + e_vbsa + dvbd_t * v0;
@@ -1354,13 +1354,13 @@ fn prepQ(model: *const Model, instance: *const Instance) QPrep {
     const vtm_nom = KB_Q * tnom;
     const vtm = KB_Q * inst_temp;
 
-    const phi_raw = 2.0 * vtm_nom * @log(@max(nch_cm3 / NI_300, 1.0));
+    const phi_raw = 2.0 * vtm_nom * contract.fmath.log(@max(nch_cm3 / NI_300, 1.0));
     const phi = @max(phi_raw, 0.7);
     const sqrt_phi = @sqrt(phi);
 
     const xdep0 = @sqrt(2.0 * EPS_SI / (CHARGE * nch_cm3 * 1.0e6)) * sqrt_phi;
 
-    const vfbb = if (nsub_cm3 > 0.0) -vtm_nom * @log(@max(nch_cm3 / nsub_cm3, 1.0e-30)) else -0.9;
+    const vfbb = if (nsub_cm3 > 0.0) -vtm_nom * contract.fmath.log(@max(nch_cm3 / nsub_cm3, 1.0e-30)) else -0.9;
 
     const e_k1_raw = binParam(m_k1, @as(f64, model.lk1), @as(f64, model.wk1), @as(f64, model.pk1), leff, weff);
     const e_k1 = if (e_k1_raw == 0.0) (2.0 * @sqrt(2.0 * EPS_SI * CHARGE * nch_cm3 * 1.0e6 * phi)) / cox else e_k1_raw;

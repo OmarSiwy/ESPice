@@ -7,7 +7,6 @@ pub const Netlist = struct {
     directives: []const Directive,
     params: []const Kv,
     foreign: []const Foreign,
-    generated_devices: []const GeneratedDevice = &.{},
 };
 
 pub const Device = struct {
@@ -205,11 +204,3 @@ pub const Foreign = struct {
 
 pub const ForeignKind = enum { osdi_include, pre_osdi, verilog_a, verilog };
 
-pub const GeneratedDevice = struct {
-    language: enum { verilog_a, verilog },
-    source_path: []const u8,
-    name: []const u8,
-    ports: []const []const u8,
-    params: []const []const u8,
-    zig_source: []const u8,
-};

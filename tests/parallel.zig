@@ -12,7 +12,7 @@ const analysis = @import("analysis");
 const builder = @import("builder");
 
 const Builder = builder.Builder;
-const td = analysis.testdev;
+const td = @import("testdev.zig");
 const GROUND = analysis.GROUND;
 
 const N_LANES = 4;
@@ -105,7 +105,7 @@ fn serialVsParallel(ckt: *analysis.Circuit, arena: std.mem.Allocator, comptime n
     const want = try Snapshot.take(arena, ckt);
 
     // Parallel, twice: close to serial, bit-identical to itself.
-    var par = try analysis.par.ParEval.init(testing.allocator, io, ckt, N_LANES);
+    var par = try analysis.problem.ParEval.init(testing.allocator, io, ckt, N_LANES);
     defer par.deinit();
     ckt.par_eval = &par;
     defer ckt.par_eval = null;
@@ -189,7 +189,7 @@ test "par: lane count 1 falls through cleanly" {
     ckt.eval(x, 0.0);
     const want = try Snapshot.take(arena, &ckt);
 
-    var par = try analysis.par.ParEval.init(testing.allocator, threaded.io(), &ckt, 1);
+    var par = try analysis.problem.ParEval.init(testing.allocator, threaded.io(), &ckt, 1);
     defer par.deinit();
     ckt.par_eval = &par;
     defer ckt.par_eval = null;

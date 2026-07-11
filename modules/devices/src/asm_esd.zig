@@ -434,7 +434,7 @@ const ModelP = struct {
 /// le(arg) = (1 + arg - 80)*exp(80) if arg > 80, else exp(arg).
 fn le(comptime S: type, arg: S) S {
     if (arg.val() > 80.0) {
-        return arg.addC(-80.0).addC(1.0).scale(@exp(80.0));
+        return arg.addC(-80.0).addC(1.0).scale(contract.fmath.exp(80.0));
     }
     return arg.exp();
 }
@@ -448,7 +448,7 @@ fn lep1(comptime S: type, arg: S) S {
 }
 
 /// x^p with variable base b (b>0 guaranteed by callers via maxC) and constant
-/// exponent p: composed as exp(p*log(b)). Matches original @exp(p*@log(...)).
+/// exponent p: composed as exp(p*log(b)). Matches original contract.fmath.exp(p*contract.fmath.log(...)).
 fn powVarBase(comptime S: type, b: S, p: f64) S {
     return b.log().scale(p).exp();
 }
@@ -1078,9 +1078,9 @@ pub fn q(comptime S: type, x: [n_u]S, model: *const Model, instance: *const Inst
     const dvh_be = v_bei.sub(vje_t.scale(p.fc));
 
     // pwq is constant-exponent power of a constant -> f64
-    const pwq_be: f64 = std.math.pow(f64, one_minus_fc, -1.0 - p.mje);
+    const pwq_be: f64 = contract.fmath.pow(one_minus_fc, -1.0 - p.mje);
     // q_lo_fwd_be = vje_t*(1 - (1-fc)^(1-mje))/(1-mje)
-    const olf: f64 = (1.0 - std.math.pow(f64, one_minus_fc, one_minus_mje)) / one_minus_mje;
+    const olf: f64 = (1.0 - contract.fmath.pow(one_minus_fc, one_minus_mje)) / one_minus_mje;
     const q_lo_fwd_be = vje_t.scale(olf);
     // q_hi_be = dvh*(1 - fc + mje*dvh/(2*vje_t))*pwq
     const q_hi_be = dvh_be.mul(dvh_be.scale(p.mje).div(vje_t.scale(2.0)).addC(1.0 - p.fc)).scale(pwq_be);
@@ -1108,8 +1108,8 @@ pub fn q(comptime S: type, x: [n_u]S, model: *const Model, instance: *const Inst
     const cjci = cjc_final.scale(p.xcjc); // xcjc*cjc_final
     const dvh_bci = v_bci.sub(vjc_t.scale(p.fc));
 
-    const pwq_bc: f64 = std.math.pow(f64, one_minus_fc, -1.0 - p.mjc);
-    const olf_c: f64 = (1.0 - std.math.pow(f64, one_minus_fc, one_minus_mjc)) / one_minus_mjc;
+    const pwq_bc: f64 = contract.fmath.pow(one_minus_fc, -1.0 - p.mjc);
+    const olf_c: f64 = (1.0 - contract.fmath.pow(one_minus_fc, one_minus_mjc)) / one_minus_mjc;
     const q_lo_fwd_bci = vjc_t.scale(olf_c);
     const q_hi_bci = dvh_bci.mul(dvh_bci.scale(p.mjc).div(vjc_t.scale(2.0)).addC(1.0 - p.fc)).scale(pwq_bc);
 
@@ -1227,7 +1227,7 @@ pub fn limit(model: *const Model, _: *const Instance, x_new: [n_u]f64, x_old: [n
     const vt: f64 = KB_Q * tnom_k;
 
     // Critical voltage for PN junction limiting
-    const v_crit = vt * @log(vt / (@sqrt(2.0) * @max(is_val, 1.0e-30)));
+    const v_crit = vt * contract.fmath.log(vt / (@sqrt(2.0) * @max(is_val, 1.0e-30)));
 
     var result = x_new;
 
@@ -1243,13 +1243,13 @@ pub fn limit(model: *const Model, _: *const Instance, x_new: [n_u]f64, x_old: [n
         if (vbe_old > 0.0) {
             const ratio = 1.0 + (vbe_new - vbe_old) / vt;
             if (ratio > 2.0) {
-                vbe_limited = vbe_old + vt * @log(ratio);
+                vbe_limited = vbe_old + vt * contract.fmath.log(ratio);
             } else {
                 vbe_limited = v_crit;
             }
         } else {
             if (vbe_new / vt > 0.0) {
-                vbe_limited = vt * @log(vbe_new / vt);
+                vbe_limited = vt * contract.fmath.log(vbe_new / vt);
             } else {
                 vbe_limited = v_crit;
             }
@@ -1271,13 +1271,13 @@ pub fn limit(model: *const Model, _: *const Instance, x_new: [n_u]f64, x_old: [n
         if (vbc_old > 0.0) {
             const ratio = 1.0 + (vbc_new - vbc_old) / vt;
             if (ratio > 2.0) {
-                vbc_limited = vbc_old + vt * @log(ratio);
+                vbc_limited = vbc_old + vt * contract.fmath.log(ratio);
             } else {
                 vbc_limited = v_crit;
             }
         } else {
             if (vbc_new / vt > 0.0) {
-                vbc_limited = vt * @log(vbc_new / vt);
+                vbc_limited = vt * contract.fmath.log(vbc_new / vt);
             } else {
                 vbc_limited = v_crit;
             }
@@ -1340,7 +1340,7 @@ test "asm_esd: forward-bias B-E residual (diode-like on-state)" {
     // Recompute expected i_be_scaled contribution to E_i row.
     const vt = KB_Q * 298.15;
     const arg = 0.7 / vt;
-    const i1_val = 1.0e-17 * (@exp(arg) - 1.0);
+    const i1_val = 1.0e-17 * (contract.fmath.exp(arg) - 1.0);
     // i2 (breakdown) at forward bias: arg_bv = (-0.7 - bvr_t)/(nbv*vt),
     // very negative => lep1(arg_bv) ~ exp(arg_bv) ~ 0; lep1(arg_bv_vt) also
     // ~0 (bvr_t=10, nbv=10 => arg ~ -39 => exp ~ tiny). i2 negligible.

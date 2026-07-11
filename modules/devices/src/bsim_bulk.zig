@@ -859,7 +859,7 @@ fn prep(model: *const Model, instance: *const Instance) Prep {
     const eg: f64 = bg0sub - tbgasub * temp_k * temp_k / (temp_k + tbgbsub);
 
     // --- Intrinsic carrier concentration ---
-    const ni: f64 = ni0sub * @exp(1.5 * @log(t_ratio)) * @exp(eg_nom / (2.0 * vt_nom) - eg / (2.0 * vt));
+    const ni: f64 = ni0sub * contract.fmath.exp(1.5 * contract.fmath.log(t_ratio)) * contract.fmath.exp(eg_nom / (2.0 * vt_nom) - eg / (2.0 * vt));
 
     // --- Instance geometry ---
     const nf_f: f64 = @as(f64, instance.nf);
@@ -884,21 +884,21 @@ fn prep(model: *const Model, instance: *const Instance) Prep {
 
     // NDEP scaling
     const ndep_nom: f64 = @as(f64, model.ndep);
-    const ndep_i: f64 = ndep_nom * (1.0 + @as(f64, model.ndepl1) * @exp(-@as(f64, model.ndeplexp1) * @log(@max(leff, 1.0e-30))) + @as(f64, model.ndepl2) * @exp(-@as(f64, model.ndeplexp2) * @log(@max(leff, 1.0e-30))) + @as(f64, model.ndepw) * @exp(-@as(f64, model.ndepwexp) * @log(@max(weff, 1.0e-30))) + @as(f64, model.ndepwl) * @exp(-@as(f64, model.ndepwlexp) * @log(@max(leff * weff, 1.0e-30))));
+    const ndep_i: f64 = ndep_nom * (1.0 + @as(f64, model.ndepl1) * contract.fmath.exp(-@as(f64, model.ndeplexp1) * contract.fmath.log(@max(leff, 1.0e-30))) + @as(f64, model.ndepl2) * contract.fmath.exp(-@as(f64, model.ndeplexp2) * contract.fmath.log(@max(leff, 1.0e-30))) + @as(f64, model.ndepw) * contract.fmath.exp(-@as(f64, model.ndepwexp) * contract.fmath.log(@max(weff, 1.0e-30))) + @as(f64, model.ndepwl) * contract.fmath.exp(-@as(f64, model.ndepwlexp) * contract.fmath.log(@max(leff * weff, 1.0e-30))));
 
     // U0 scaling
     const mob0_nom: f64 = @as(f64, model.u0) * @as(f64, model.mulu0) * @as(f64, instance.mulu0);
     const mob_lexp: f64 = @as(f64, model.u0lexp);
     const mob0_i: f64 = if (@as(f64, model.mobscale) < 0.5)
         (if (mob_lexp > 0.0)
-            mob0_nom * (1.0 - @as(f64, model.u0l) * @exp(-mob_lexp * @log(@max(leff, 1.0e-30))))
+            mob0_nom * (1.0 - @as(f64, model.u0l) * contract.fmath.exp(-mob_lexp * contract.fmath.log(@max(leff, 1.0e-30))))
         else
             mob0_nom * (1.0 - @as(f64, model.u0l)))
     else
-        mob0_nom * (1.0 - @as(f64, model.up1) * @exp(-leff / @max(@as(f64, model.lp1), 1.0e-30)) - @as(f64, model.up2) * @exp(-leff / @max(@as(f64, model.lp2), 1.0e-30)));
+        mob0_nom * (1.0 - @as(f64, model.up1) * contract.fmath.exp(-leff / @max(@as(f64, model.lp1), 1.0e-30)) - @as(f64, model.up2) * contract.fmath.exp(-leff / @max(@as(f64, model.lp2), 1.0e-30)));
 
     const ute: f64 = @as(f64, model.ute);
-    const mob0_t: f64 = mob0_i * @exp(ute * @log(t_ratio));
+    const mob0_t: f64 = mob0_i * contract.fmath.exp(ute * contract.fmath.log(t_ratio));
 
     const ua_nom: f64 = @as(f64, model.ua);
     const ua1: f64 = @as(f64, model.ua1);
@@ -910,7 +910,7 @@ fn prep(model: *const Model, instance: *const Instance) Prep {
 
     const ud_nom: f64 = @as(f64, model.ud);
     const ud1: f64 = @as(f64, model.ud1);
-    const ud_t: f64 = ud_nom * @exp(ud1 * @log(t_ratio));
+    const ud_t: f64 = ud_nom * contract.fmath.exp(ud1 * contract.fmath.log(t_ratio));
 
     const eu_nom: f64 = @as(f64, model.eu);
     const eu1: f64 = @as(f64, model.eu1);
@@ -918,15 +918,15 @@ fn prep(model: *const Model, instance: *const Instance) Prep {
 
     const ucs_nom: f64 = @as(f64, model.ucs);
     const ucste: f64 = @as(f64, model.ucste);
-    const ucs_t: f64 = ucs_nom * @exp(ucste * @log(t_ratio));
+    const ucs_t: f64 = ucs_nom * contract.fmath.exp(ucste * contract.fmath.log(t_ratio));
 
     const vsat_nom: f64 = @as(f64, model.vsat);
     const at: f64 = @as(f64, model.at);
-    const vsat_t: f64 = vsat_nom * @exp(-at * @log(t_ratio));
+    const vsat_t: f64 = vsat_nom * contract.fmath.exp(-at * contract.fmath.log(t_ratio));
 
     const dsub: f64 = @as(f64, model.dsub);
     const eta0_nom: f64 = @as(f64, model.eta0);
-    const eta0_i: f64 = eta0_nom * @exp(-dsub * @log(@max(leff, 1.0e-30)));
+    const eta0_i: f64 = eta0_nom * contract.fmath.exp(-dsub * contract.fmath.log(@max(leff, 1.0e-30)));
     const teta0: f64 = @as(f64, model.teta0);
     const eta0_t: f64 = eta0_i + teta0 * (t_ratio - 1.0);
 
@@ -938,7 +938,7 @@ fn prep(model: *const Model, instance: *const Instance) Prep {
 
     const rdsw_nom: f64 = @as(f64, model.rdsw);
     const prt: f64 = @as(f64, model.prt);
-    const rdsw_t: f64 = rdsw_nom * @exp(prt * @log(t_ratio));
+    const rdsw_t: f64 = rdsw_nom * contract.fmath.exp(prt * contract.fmath.log(t_ratio));
 
     const kt1: f64 = @as(f64, model.kt1);
     const kt1l: f64 = @as(f64, model.kt1l);
@@ -951,10 +951,10 @@ fn prep(model: *const Model, instance: *const Instance) Prep {
     const delvto_i: f64 = @as(f64, instance.delvto);
     // NOTE: original folded the (kt1+kt2*vbs_eff) temperature shift into vfb_t;
     // the kt2*vbs_eff part is x-dependent and is re-added in the S tail.
-    const vfb_t: f64 = vfb_nom + delvto_m + delvto_i + kt1_i * (@exp(kt1exp * @log(t_ratio)) - 1.0);
+    const vfb_t: f64 = vfb_nom + delvto_m + delvto_i + kt1_i * (contract.fmath.exp(kt1exp * contract.fmath.log(t_ratio)) - 1.0);
 
     // --- Surface potential (phi_b) ---
-    const phi_b: f64 = @log(@max(ndep_i / ni, 1.0));
+    const phi_b: f64 = contract.fmath.log(@max(ndep_i / ni, 1.0));
 
     // --- Pinch-off potential ---
     const ngate: f64 = @as(f64, model.ngate);
@@ -965,7 +965,7 @@ fn prep(model: *const Model, instance: *const Instance) Prep {
 
     // --- Depletion width ---
     const phin: f64 = @as(f64, model.phin);
-    const psi_st: f64 = 0.4 + phin + vt * @log(@max(ndep_i / ni, 1.0));
+    const psi_st: f64 = 0.4 + phin + vt * contract.fmath.log(@max(ndep_i / ni, 1.0));
     const xj_val: f64 = @as(f64, model.xj);
     const xdep: f64 = @sqrt(@max(2.0 * eps_sub * psi_st / (q_e * ndep_i), 1.0e-30));
 
@@ -1101,13 +1101,13 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
 
     // Smooth |Vds|
     const avdsx = p.avdsx;
-    const vdsx = vds_eff_use.scale(avdsx / 2.0).minC(80.0).exp().addC(1.0).log().scale(2.0 / avdsx).sub(vds_eff_use).addC(-2.0 / avdsx * @log(2.0));
+    const vdsx = vds_eff_use.scale(avdsx / 2.0).minC(80.0).exp().addC(1.0).log().scale(2.0 / avdsx).sub(vds_eff_use).addC(-2.0 / avdsx * contract.fmath.log(2.0));
     const vbsx = vbs_eff.sub(vds_eff_use.sub(vdsx).scale(0.5));
 
     const phi_b = p.phi_b;
 
     // Threshold voltage x-dependent temperature part (kt2*vbs_eff term)
-    const vth_temp_shift_x = vbs_eff.scale(p.kt2).scale(@exp(p.kt1exp * @log(p.t_ratio)) - 1.0);
+    const vth_temp_shift_x = vbs_eff.scale(p.kt2).scale(contract.fmath.exp(p.kt1exp * contract.fmath.log(p.t_ratio)) - 1.0);
     const vfb_t_s = vth_temp_shift_x.addC(p.vfb_t);
 
     // Normalized gate voltage
@@ -1275,7 +1275,7 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     const rdswmin: f64 = @as(f64, model.rdswmin);
     const rdsw_t = p.rdsw_t;
 
-    const weff_wr: f64 = @exp(wr * @log(@max(nf_f * weff, 1.0e-30)));
+    const weff_wr: f64 = contract.fmath.exp(wr * contract.fmath.log(@max(nf_f * weff, 1.0e-30)));
 
     // t0_rds = max(1 + prwg*q_ia, 0.01)
     const t0_rds = q_ia.scale(prwg_p).addC(1.0).maxC(0.01);
@@ -1466,9 +1466,9 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     const igbmod: i32 = model.igbmod;
     const toxref: f64 = @as(f64, model.toxref);
     const ntox: f64 = @as(f64, model.ntox);
-    const tox_ratio: f64 = @exp(ntox * @log(@max(toxref / toxe, 1.0e-30))) / (toxe * toxe);
+    const tox_ratio: f64 = contract.fmath.exp(ntox * contract.fmath.log(@max(toxref / toxe, 1.0e-30))) / (toxe * toxe);
     const igt_p: f64 = @as(f64, model.igt);
-    const igtemp: f64 = @exp(igt_p * @log(p.t_ratio));
+    const igtemp: f64 = contract.fmath.exp(igt_p * contract.fmath.log(p.t_ratio));
 
     // Vox = n_eff*vt*(vg_norm - vfb_norm - psi_p + q_s + q_deff)
     const vox = n_eff.scale(vt).mul(vg_norm.sub(vfb_norm).sub(psi_p).add(q_s).add(q_deff));
@@ -1561,7 +1561,7 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     const bvs: f64 = @as(f64, model.bvs);
     const xjbvs: f64 = @as(f64, model.xjbvs);
     const xtis: f64 = @as(f64, model.xtis);
-    const j_temp_s: f64 = @exp((eg_nom / vt_nom - eg / vt + xtis * @log(t_ratio)) / njs);
+    const j_temp_s: f64 = contract.fmath.exp((eg_nom / vt_nom - eg / vt + xtis * contract.fmath.log(t_ratio)) / njs);
     const jss_t: f64 = jss * j_temp_s;
     const jsws_t: f64 = jsws * j_temp_s;
     const jswgs_t: f64 = jswgs * j_temp_s;
@@ -1587,7 +1587,7 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     const bvd: f64 = @as(f64, model.bvd);
     const xjbvd: f64 = @as(f64, model.xjbvd);
     const xtid: f64 = @as(f64, model.xtid);
-    const j_temp_d: f64 = @exp((eg_nom / vt_nom - eg / vt + xtid * @log(t_ratio)) / njd);
+    const j_temp_d: f64 = contract.fmath.exp((eg_nom / vt_nom - eg / vt + xtid * contract.fmath.log(t_ratio)) / njd);
     const jsd_t: f64 = jsd * j_temp_d;
     const jswd_t: f64 = jswd * j_temp_d;
     const jswgd_t: f64 = jswgd * j_temp_d;
@@ -1925,8 +1925,8 @@ pub fn qFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *cons
                 // pb*cj/(1-mj)*(1 - (1 - vj/pb)^(1-mj))
                 return vratio.neg().addC(1.0).maxC(1.0e-30).pow(1.0 - mj).neg().addC(1.0).scale(pb * cj / (1.0 - mj));
             } else {
-                const base = pb * cj / (1.0 - mj) * (1.0 - std.math.pow(f64, @max(1.0 - fc, 1.0e-30), 1.0 - mj));
-                const slope = cj / std.math.pow(f64, @max(1.0 - fc, 1.0e-30), mj);
+                const base = pb * cj / (1.0 - mj) * (1.0 - contract.fmath.pow(@max(1.0 - fc, 1.0e-30), 1.0 - mj));
+                const slope = cj / contract.fmath.pow(@max(1.0 - fc, 1.0e-30), mj);
                 return vj.addC(-fc * pb).scale(slope).addC(base);
             }
         }
@@ -2029,7 +2029,7 @@ pub fn limit(model: *const Model, instance: *const Instance, x_new: [n_u]f64, x_
     const is_val: f64 = @max(jss * 1.0e-12, 1.0e-30); // approximate Is
     const njs: f64 = @as(f64, model.njs);
     const nvt: f64 = njs * vt;
-    const v_crit: f64 = nvt * @log(nvt / (1.4142135 * is_val));
+    const v_crit: f64 = nvt * contract.fmath.log(nvt / (1.4142135 * is_val));
 
     // Source junction: V(bp) - V(sp)
     const vbs_new: f64 = (x_new[BP] - x_new[SP]) * type_f;
@@ -2074,9 +2074,9 @@ fn pnjlim(vnew: f64, vold: f64, vt_val: f64, vcrit: f64) f64 {
     // If voltage is above critical and step is large, apply logarithmic damping
     const result: f64 = if (vnew > vcrit and abs_dv > 2.0 * vt_val)
         (if (vold > 0.0)
-            vold + vt_val * @log(@max(1.0 + dv / vt_val, 1.0e-30))
+            vold + vt_val * contract.fmath.log(@max(1.0 + dv / vt_val, 1.0e-30))
         else
-            vt_val * @log(@max(vnew / vt_val, 1.0e-30)))
+            vt_val * contract.fmath.log(@max(vnew / vt_val, 1.0e-30)))
     else
         vnew;
     return result;

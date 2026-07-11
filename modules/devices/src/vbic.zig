@@ -529,6 +529,7 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     const v_rbp = x[bp].sub(x[cx]).scale(type_f);
     const v_rs = x[s].sub(x[si]).scale(type_f);
     const v_cei = x[ci].sub(x[ei]).scale(type_f);
+    const v_cep = x[bx].sub(x[si]).scale(type_f);
 
     // ========================================================================
     // Forward and Reverse Transport Currents
@@ -764,7 +765,7 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
         .add(i_re.mul(v_re))
         .add(i_rbp.mul(v_rbp))
         .add(i_bcp_s.mul(v_bcp))
-        .add(i_ccp_s.mul(v_bep.sub(v_bci)))
+        .add(i_ccp_s.mul(v_cep))
         .add(i_rs.mul(v_rs));
 
     const g_rth: f64 = if (RTH > 0.0) 1.0 / RTH else 1.0e12;
@@ -1179,10 +1180,10 @@ inline fn depletionCharge(comptime S: type, v: S, p: S, m: f64, fc: f64, aj: f64
         // x_fc = max(1 - fc, 1e-30) (f64 constant)
         const x_fc: f64 = @max(1.0 - fc, 1e-30);
         // qlo_at_fc = (p/one_m_m)*(1 - exp(one_m_m*log(x_fc)))
-        const x_fc_pow = std.math.pow(f64, x_fc, one_m_m); // constant
+        const x_fc_pow = contract.fmath.pow(x_fc, one_m_m); // constant
         const qlo_at_fc = p.scale((1.0 / one_m_m) * (1.0 - x_fc_pow));
         // pwq = exp((-1-m)*log(x_fc))  (constant)
-        const pwq: f64 = std.math.pow(f64, x_fc, -1.0 - m);
+        const pwq: f64 = contract.fmath.pow(x_fc, -1.0 - m);
         // dv_fwd = v - fc_p
         const dv_fwd = v.sub(fc_p);
         // qhi = dv_fwd*(1 - fc + m*dv_fwd/(2*p))*pwq
@@ -1258,7 +1259,7 @@ inline fn depletionCharge(comptime S: type, v: S, p: S, m: f64, fc: f64, aj: f64
     const qlo = vl.div(p).neg().addC(1.0).maxC(1e-30).log().scale(one_m_m).exp().mul(p.scale(-1.0 / one_m_m));
 
     // one_m_fc_pow = exp(-m*log(max(1 - fc, 1e-30)))  (constant)
-    const one_m_fc_pow: f64 = std.math.pow(f64, @max(1.0 - fc, 1e-30), -m);
+    const one_m_fc_pow: f64 = contract.fmath.pow(@max(1.0 - fc, 1e-30), -m);
     // return qlo + one_m_fc_pow*(v - vl + vl0) - q0
     return qlo.add(v.sub(vl).add(vl0).scale(one_m_fc_pow)).sub(q0);
 }
@@ -1269,7 +1270,7 @@ inline fn depletionCharge(comptime S: type, v: S, p: S, m: f64, fc: f64, aj: f64
 
 inline fn pnjlim(x_new: [n_u]f64, x_old: [n_u]f64, pos: usize, neg: usize, is_val: f64, n_em: f64, vtv: f64, type_f: f64) [n_u]f64 {
     const nvt = n_em * vtv;
-    const v_crit = nvt * @log(nvt / (@sqrt(2.0) * @max(is_val, 1e-30)));
+    const v_crit = nvt * contract.fmath.log(nvt / (@sqrt(2.0) * @max(is_val, 1e-30)));
 
     const vd_new = (x_new[pos] - x_new[neg]) * type_f;
     const vd_old = (x_old[pos] - x_old[neg]) * type_f;
@@ -1280,12 +1281,12 @@ inline fn pnjlim(x_new: [n_u]f64, x_old: [n_u]f64, pos: usize, neg: usize, is_va
         if (vd_old > 0.0) {
             const arg = (vd_new - vd_old) / nvt;
             if (arg > 0.0) {
-                vd_limited = vd_old + nvt * (2.0 + @log(@max(arg - 2.0, 1e-30)));
+                vd_limited = vd_old + nvt * (2.0 + contract.fmath.log(@max(arg - 2.0, 1e-30)));
             } else {
-                vd_limited = vd_old - nvt * (2.0 + @log(@max(2.0 - arg, 1e-30)));
+                vd_limited = vd_old - nvt * (2.0 + contract.fmath.log(@max(2.0 - arg, 1e-30)));
             }
         } else {
-            vd_limited = nvt * @log(@max(vd_new / nvt, 1e-30));
+            vd_limited = nvt * contract.fmath.log(@max(vd_new / nvt, 1e-30));
         }
     }
 
@@ -1326,7 +1327,7 @@ test "vbic: forward-active B-E transport current (isothermal, default NPN)" {
     // vtv @ 300.15K = 8.617333e-5 * 300.15 = 0.025865...
     const vtv = 8.617333e-5 * 300.15;
     // i_be ideal = IBEI*(exp(0.7/vtv)-1) with IBEI=1e-18:
-    const ibe_ideal = 1e-18 * (@exp(0.7 / vtv) - 1.0);
+    const ibe_ideal = 1e-18 * (contract.fmath.exp(0.7 / vtv) - 1.0);
     // WBE=1 -> i_be = ibe_ideal + gmin*0.7 ; scale=1 -> i_be_s = same.
     const i_be_s_expect = 1.0 * ibe_ideal + 1e-12 * 0.7;
     // The bi row = i_rbi - i_be_s - i_bc_s; RBI=0 -> i_rbi shorts (1e12*v_rbi),

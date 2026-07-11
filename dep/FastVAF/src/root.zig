@@ -19,17 +19,14 @@ pub const CompileError = va.CompileError;
 pub const fromVerilog = v.fromVerilog;
 pub const fromSystemVerilog = v.fromSystemVerilog;
 
-// --- File → compiled shared object ---
+// --- Source → dlopen-ready shared object (runtime device loading) ---
 const compile = @import("compile.zig");
 pub const Options = compile.Options;
 pub const CompiledLibrary = compile.CompiledLibrary;
-pub const Language = compile.Language;
-/// Verilog-A file → codegen → compiled `.so`.
-pub const compileVerilogAFile = compile.compileVerilogAFile;
-/// Verilog file → codegen → compiled `.so`.
-pub const compileVerilogFile = compile.compileVerilogFile;
-/// Already-generated Zig → compiled `.so` (codegen run separately).
+pub const compileVerilogA = compile.compileVerilogA;
+pub const compileVerilog = compile.compileVerilog;
 pub const compileGenerated = compile.compileGenerated;
+pub const moduleName = compile.moduleName;
 
 test {
     _ = va;

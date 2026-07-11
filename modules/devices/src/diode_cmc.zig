@@ -259,7 +259,7 @@ pub const noise_gens = [_]contract.NoiseGen(Self){
 
 /// Clamped exponential -- clamps argument to [-230, +80] to prevent overflow
 inline fn expc(x: f64) f64 {
-    return @exp(@max(@min(x, 80.0), -230.0));
+    return contract.fmath.exp(@max(@min(x, 80.0), -230.0));
 }
 
 // Safe exponential constants for expl
@@ -278,7 +278,7 @@ inline fn p3(u: f64) f64 {
 ///   x > s_e05:   (1/k_e05) * P3(x - s_e05)
 inline fn expl(x: f64) f64 {
     const low = K_E05 / @max(p3(-S_E05 - x), 1.0e-300);
-    const mid = @exp(@max(@min(x, S_E05), -S_E05));
+    const mid = contract.fmath.exp(@max(@min(x, S_E05), -S_E05));
     const high = p3(x - S_E05) / K_E05;
     const val_mid_or_high = if (x > S_E05) high else mid;
     return if (x < -S_E05) low else val_mid_or_high;
@@ -393,7 +393,7 @@ inline fn computeTemps(trj: f64, dta: f64) Temps {
         .phi_tr = phi_tr,
         .phi_td = phi_td,
         .dt = tkd - tkr,
-        .ln_ratio = @log(@max(ratio, 1.0e-30)),
+        .ln_ratio = contract.fmath.log(@max(ratio, 1.0e-30)),
         .ratio = ratio,
     };
 }
@@ -423,8 +423,8 @@ inline fn computeComponentTemps(
     const ftd2 = expc((xti / (2.0 * nfa)) * t.ln_ratio + (phi_gr / t.phi_tr - phi_gd / t.phi_td) / (2.0 * nfa));
     const idsat = idsatr * ftd2 * ftd2;
 
-    const ubi = vbir * t.ratio - 2.0 * t.phi_td * @log(@max(ftd, 1.0e-30));
-    const vbi = ubi + t.phi_td * @log(1.0 + expc((VBI_LOW - ubi) / t.phi_td));
+    const ubi = vbir * t.ratio - 2.0 * t.phi_td * contract.fmath.log(@max(ftd, 1.0e-30));
+    const vbi = ubi + t.phi_td * contract.fmath.log(1.0 + expc((VBI_LOW - ubi) / t.phi_td));
 
     return .{
         .ftd = ftd,
@@ -476,7 +476,7 @@ inline fn componentCurrent(
     expceil_val: f64,
 ) S {
     const nfa_njh = nfa * njh;
-    const ceil_log = @log(@max(expceil_val, 1.0));
+    const ceil_log = contract.fmath.log(@max(expceil_val, 1.0));
 
     // ---- Ideal current with bias-dependent emission coefficient ----
     const nj_a = clampNjS(S, v_ak.addC(-vha).scale(njdv).addC(nfa), nfa, njh); // njdv*(v_ak-vha)+nfa
@@ -570,9 +570,9 @@ inline fn componentCurrent(
 
     // ---- Avalanche / breakdown (4.69-4.72) ----
     const bv_on = swbv > 0.5 and vbr < VBR_MAX;
-    const alpha_pbr = expc(pbr * @log(@max(alpha_av, 1.0e-30))); // f64
+    const alpha_pbr = expc(pbr * contract.fmath.log(@max(alpha_av, 1.0e-30))); // f64
     const f_stop = 1.0 / @max(1.0 - alpha_pbr, 1.0e-30); // f64
-    const alpha_pbr_m1 = expc((pbr - 1.0) * @log(@max(alpha_av, 1.0e-30))); // f64
+    const alpha_pbr_m1 = expc((pbr - 1.0) * contract.fmath.log(@max(alpha_av, 1.0e-30))); // f64
     const s_f = -f_stop * f_stop * alpha_pbr_m1 * pbr / @max(vbr, 1.0e-30); // f64
     // ratio_av = |v_av| / max(vbr,1e-30)
     const ratio_av = v_av.abs().scale(1.0 / @max(vbr, 1.0e-30));
@@ -615,7 +615,7 @@ inline fn componentIdealCurrent(
     expceil_val: f64,
 ) S {
     const nfa_njh = nfa * njh;
-    const ceil_log = @log(@max(expceil_val, 1.0));
+    const ceil_log = contract.fmath.log(@max(expceil_val, 1.0));
 
     const nj = clampNjS(S, v_ak.addC(-vha).scale(njdv).addC(nfa), nfa, njh);
     const exp_arg = v_ak.div(nj).add(nj.addC(-nfa).scale(vha / @max(nfa_njh, 1.0e-30))).scale(1.0 / phi_td);
@@ -634,7 +634,7 @@ inline fn componentIdealCurrent(
 inline fn computeVHA(phi_td: f64, nfa: f64, ndi: f64, ftd2: f64) f64 {
     const n_in = NI0 * ftd2;
     const pn0 = n_in * n_in / @max(ndi, 1.0e-30);
-    return phi_td * nfa * @log(@max(ndi / @max(pn0, 1.0e-30), 1.0));
+    return phi_td * nfa * contract.fmath.log(@max(ndi / @max(pn0, 1.0e-30), 1.0));
 }
 
 // ============================================================================
@@ -756,10 +756,10 @@ inline fn computeExpressParams(
     inline for (0..5) |vi| {
         const vv = voltages[vi];
         const ha = @min(vv / (2.0 * phi_td), 40.0);
-        const zi = @exp(ha);
-        const zz = @exp(-ha);
-        const pp = phi_td * @log(@max(zz + 2.0 + @sqrt(@max((zz + 1.0) * (zz + 3.0), 1.0e-30)), 1.0e-30));
-        const pn = -vv + phi_td * @log(@max(1.0 + 2.0 * zi + @sqrt(@max((1.0 + zi) * (1.0 + 3.0 * zi), 1.0e-30)), 1.0e-30));
+        const zi = contract.fmath.exp(ha);
+        const zz = contract.fmath.exp(-ha);
+        const pp = phi_td * contract.fmath.log(@max(zz + 2.0 + @sqrt(@max((zz + 1.0) * (zz + 3.0), 1.0e-30)), 1.0e-30));
+        const pn = -vv + phi_td * contract.fmath.log(@max(1.0 + 2.0 * zi + @sqrt(@max((1.0 + zi) * (1.0 + 3.0 * zi), 1.0e-30)), 1.0e-30));
         const ps = if (vv > 0.0) pp else pn;
         const vjl = vbi_min - 2.0 * ps;
         const vjs = hyp2S(V, V.con(vv), vjl, phi_td).val();
@@ -782,7 +782,7 @@ inline fn computeExpressParams(
     const i4_cor = currents[3] - gExpFit(v4, i_satfor1, m_for1, phi_td);
     const i5_cor = currents[4] - gExpFit(v5, i_satfor1, m_for1, phi_td);
     const alpha_for = i4_cor / @max(@abs(i5_cor), 1.0e-300) * (if (i5_cor < 0.0) @as(f64, -1.0) else 1.0);
-    const m_for2 = phi_td * @log(@max(@abs(alpha_for), 1.0e-300)) / (v4 - v5);
+    const m_for2 = phi_td * contract.fmath.log(@max(@abs(alpha_for), 1.0e-300)) / (v4 - v5);
     const i_satfor2 = i4_cor / @max(expll(v4 * m_for2 / phi_td, 80.0) - 1.0, 1.0e-300);
 
     // Reverse current parameters (4.98-4.105)
@@ -791,10 +791,10 @@ inline fn computeExpressParams(
     const i3_cor = currents[2] - gExpFit(v3, i_satfor1, m_for1, phi_td) - gExpFit(v3, i_satfor2, m_for2, phi_td);
 
     const alpha_rev = i1_cor / @max(@abs(i2_cor), 1.0e-300) * (if (i2_cor < 0.0) @as(f64, -1.0) else 1.0);
-    const m0_rev = phi_td * @log(@max(@abs(alpha_rev), 1.0e-300)) / (v2 - v1); // eq 4.102
+    const m0_rev = phi_td * contract.fmath.log(@max(@abs(alpha_rev), 1.0e-300)) / (v2 - v1); // eq 4.102
     // Delta m (eq 4.103)
-    const ar_v2 = expc(v2 / (v2 - v1) * @log(@max(@abs(alpha_rev), 1.0e-300)));
-    const ar_v1_inv = expc(v1 / (v1 - v2) * @log(@max(@abs(alpha_rev), 1.0e-300)));
+    const ar_v2 = expc(v2 / (v2 - v1) * contract.fmath.log(@max(@abs(alpha_rev), 1.0e-300)));
+    const ar_v1_inv = expc(v1 / (v1 - v2) * contract.fmath.log(@max(@abs(alpha_rev), 1.0e-300)));
     const delta_m = phi_td * (alpha_rev - 1.0) * (ar_v2 - 1.0) / @max(@abs(ar_v1_inv * (v2 - v1) + alpha_rev * v1 - v2), 1.0e-300) * (if ((ar_v1_inv * (v2 - v1) + alpha_rev * v1 - v2) < 0.0) @as(f64, -1.0) else 1.0);
     const m_rev = m0_rev + delta_m;
     const i_satrev = -i3_cor / @max(expll(-v3 * m_rev / phi_td, 80.0) - 1.0, 1.0e-300);
@@ -1021,9 +1021,9 @@ fn cmcPrep(model: *const Model, instance: *const Instance) CmcPrep {
     const ig_bot = ct_bot.idsat * AB;
     const ig_sti = ct_sti.idsat * LS;
     const ig_gat = ct_gat.idsat * LG;
-    const vmax_bot = if (ig_bot == 0.0) VMAX_LARGE else t_val.phi_td * nfabot * @log(imax / ig_bot + 1.0);
-    const vmax_sti = if (ig_sti == 0.0) VMAX_LARGE else t_val.phi_td * nfasti * @log(imax / ig_sti + 1.0);
-    const vmax_gat = if (ig_gat == 0.0) VMAX_LARGE else t_val.phi_td * nfagat * @log(imax / ig_gat + 1.0);
+    const vmax_bot = if (ig_bot == 0.0) VMAX_LARGE else t_val.phi_td * nfabot * contract.fmath.log(imax / ig_bot + 1.0);
+    const vmax_sti = if (ig_sti == 0.0) VMAX_LARGE else t_val.phi_td * nfasti * contract.fmath.log(imax / ig_sti + 1.0);
+    const vmax_gat = if (ig_gat == 0.0) VMAX_LARGE else t_val.phi_td * nfagat * contract.fmath.log(imax / ig_gat + 1.0);
     const vmax = @min(vmax_bot, @min(vmax_sti, vmax_gat));
 
     // ---- Forward voltage limits (4.29-4.31) ----
@@ -1084,18 +1084,18 @@ fn cmcPrep(model: *const Model, instance: *const Instance) CmcPrep {
         const da = 2.0 * dn * dp / @max(dn + dp, 1.0e-30);
         const tau_hl = tau_val * expc(taut * t_val.ln_ratio);
         la = @sqrt(@max(tau_hl * da, 1.0e-30));
-        vhk = t_val.phi_td * nfabot * (@log(@max(ndibot / @max(pn0_bot, 1.0e-30), 1.0)) + wi / la);
+        vhk = t_val.phi_td * nfabot * (contract.fmath.log(@max(ndibot / @max(pn0_bot, 1.0e-30), 1.0)) + wi / la);
         tkr_tkd_injt = expc(-injt * t_val.ln_ratio);
     }
 
     // ---- Charge: cjo at device temp (4.33) ----
-    const cjo_bot = cjorbot * expc(pbot * @log(@max(vbirbot / @max(ct_bot.vbi, 1.0e-30), 1.0e-30)));
-    const cjo_sti = cjorsti * expc(psti * @log(@max(vbirsti / @max(ct_sti.vbi, 1.0e-30), 1.0e-30)));
-    const cjo_gat = cjorgat * expc(pgat * @log(@max(vbirgat / @max(ct_gat.vbi, 1.0e-30), 1.0e-30)));
+    const cjo_bot = cjorbot * expc(pbot * contract.fmath.log(@max(vbirbot / @max(ct_bot.vbi, 1.0e-30), 1.0e-30)));
+    const cjo_sti = cjorsti * expc(psti * contract.fmath.log(@max(vbirsti / @max(ct_sti.vbi, 1.0e-30), 1.0e-30)));
+    const cjo_gat = cjorgat * expc(pgat * contract.fmath.log(@max(vbirgat / @max(ct_gat.vbi, 1.0e-30), 1.0e-30)));
 
     // ---- Charge: forward voltage limits ----
     const p_max = if (@abs(vbi_min - ct_bot.vbi) < 1.0e-20) pbot else if (@abs(vbi_min - ct_sti.vbi) < 1.0e-20) psti else pgat;
-    const vf_min = vbi_min * (1.0 - expc(-@log(CAP_A) / p_max));
+    const vf_min = vbi_min * (1.0 - expc(-contract.fmath.log(CAP_A) / p_max));
     const vch = EPS_CH * vbi_min;
 
     // ---- Charge: Express filtering ----
@@ -1292,7 +1292,7 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
         // exp_A (recompute M_ID_bot)  -- S
         const nj_a = clampNjS(S, v_ak.addC(-p.vha_bot).scale(p.njdv).addC(p.nfabot), p.nfabot, p.njh);
         const exp_a_arg = v_ak.div(nj_a).add(nj_a.addC(-p.nfabot).scale(p.vha_bot / @max(p.nfabot * p.njh, 1.0e-30))).scale(1.0 / p.t.phi_td);
-        const exp_a = expcS(S, exp_a_arg.minC(@log(@max(p.expceil_val, 1.0))));
+        const exp_a = expcS(S, exp_a_arg.minC(contract.fmath.log(@max(p.expceil_val, 1.0))));
 
         // exp_K (23)  -- S
         const nj_k = clampNjS(S, v_ak.addC(-p.vhk).scale(p.njdv).addC(p.nfabot), p.nfabot, p.njh);
@@ -1301,7 +1301,7 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
             .sub(nj_k.pow(-1.0).scale(p.vhk - p.vha_bot))
             .add(nj_k.addC(-p.nfabot).scale(p.vhk / @max(p.nfabot * p.njh, 1.0e-30)))
             .scale(1.0 / p.t.phi_td);
-        const exp_k = expcS(S, exp_k_arg.minC(@log(@max(p.expceil_val, 1.0))));
+        const exp_k = expcS(S, exp_k_arg.minC(contract.fmath.log(@max(p.expceil_val, 1.0))));
 
         // Injected carrier densities (20-21)  -- S
         const dvha = v_ak.addC(-p.vha_bot);
@@ -1406,7 +1406,7 @@ pub fn qFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *cons
         const qpex_a_nqs = if (p.nqs_tau > 0.0) x[CHA].scale(1.0 / p.q_scale) else blk: {
             const nj_a = clampNjS(S, v_ak.addC(-p.vha_bot).scale(p.njdv).addC(p.nfabot), p.nfabot, p.njh);
             const ea_arg = v_ak.div(nj_a).add(nj_a.addC(-p.nfabot).scale(p.vha_bot / @max(p.nfabot * p.njh, 1.0e-30))).scale(1.0 / p.t.phi_td);
-            const ea = expcS(S, ea_arg.minC(@log(@max(p.expceil_val, 1.0))));
+            const ea = expcS(S, ea_arg.minC(contract.fmath.log(@max(p.expceil_val, 1.0))));
             // QQ*AB*(pn0*min(ea, expceil) - pn0)
             break :blk ea.minC(p.expceil_val).scale(p.pn0_bot).addC(-p.pn0_bot).scale(QQ * p.AB);
         };
@@ -1463,7 +1463,7 @@ pub fn limit(model: *const Model, instance: *const Instance, x_new: [n_u]f64, x_
     const tkd = T0 + @max(trj + dta, TMIN);
     const phi_td = KB * tkd / QQ;
     const vt = phi_td * nfabot;
-    const v_crit = vt * @log(vt / (1.4142135623730951 * @max(idsatrbot, 1.0e-30)));
+    const v_crit = vt * contract.fmath.log(vt / (1.4142135623730951 * @max(idsatrbot, 1.0e-30)));
 
     const ai = @intFromEnum(U.a);
     const aiki = @intFromEnum(U.aik);
@@ -1478,7 +1478,7 @@ pub fn limit(model: *const Model, instance: *const Instance, x_new: [n_u]f64, x_
             const dv = v_new - v_old;
             if (dv > 0.0) {
                 const arg = @min(dv / vt, 80.0);
-                v_lim = v_old + vt * @log(@max(1.0 + arg, 1.0e-30));
+                v_lim = v_old + vt * contract.fmath.log(@max(1.0 + arg, 1.0e-30));
             }
         } else {
             v_lim = v_crit;

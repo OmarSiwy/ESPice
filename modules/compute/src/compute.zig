@@ -75,9 +75,16 @@ pub const Compute = struct {
     pub fn createStream(self: *Compute) Error!Stream {
         return switch (self.backend) {
             .cuda => .{ .cuda = try self.cuda_ctx.createStream() },
-            // ponytail: HIP streams not ported yet — add when an AMD box exists to test on.
-            .hip => error.InitFailed,
+            .hip => .{ .hip = try self.hip_ctx.createStream() },
             .cpu => error.InitFailed,
+        };
+    }
+
+    pub fn maxCoopBlocks(self: *Compute, k: Kernel, block_dim: u32, shared_bytes: usize) Error!u32 {
+        return switch (self.backend) {
+            .cuda => self.cuda_ctx.maxCoopBlocks(k.cuda, block_dim, shared_bytes),
+            .hip => self.hip_ctx.maxCoopBlocks(k.hip, block_dim, shared_bytes),
+            .cpu => 0,
         };
     }
 };
@@ -99,6 +106,22 @@ pub const Buffer = union(Backend) {
         switch (self.*) {
             .cuda => |*b| try b.download(host, n),
             .hip => |*b| try b.download(host, n),
+            .cpu => unreachable,
+        }
+    }
+
+    pub fn downloadAt(self: *Buffer, host: *anyopaque, offset: usize, n: usize) Error!void {
+        switch (self.*) {
+            .cuda => |*b| try b.downloadAt(host, offset, n),
+            .hip => |*b| try b.downloadAt(host, offset, n),
+            .cpu => unreachable,
+        }
+    }
+
+    pub fn uploadAt(self: *Buffer, host: *const anyopaque, offset: usize, n: usize) Error!void {
+        switch (self.*) {
+            .cuda => |*b| try b.uploadAt(host, offset, n),
+            .hip => |*b| try b.uploadAt(host, offset, n),
             .cpu => unreachable,
         }
     }
@@ -166,7 +189,15 @@ pub const Kernel = union(Backend) {
     pub fn launchOnStream(self: Kernel, grid: Dim3, block: Dim3, shared_bytes: u32, args: []const Arg, stream: *Stream) Error!void {
         switch (self) {
             .cuda => |k| try k.launchOnStream(grid, block, shared_bytes, args, stream.cuda.stream),
-            .hip => unreachable, // no HIP stream support yet
+            .hip => |k| try k.launchOnStream(grid, block, shared_bytes, args, stream.hip.stream),
+            .cpu => unreachable,
+        }
+    }
+
+    pub fn launchCooperative(self: Kernel, grid: Dim3, block: Dim3, shared_bytes: u32, args: []const Arg) Error!void {
+        switch (self) {
+            .cuda => |k| try k.launchCooperative(grid, block, shared_bytes, args, null),
+            .hip => |k| try k.launchCooperative(grid, block, shared_bytes, args, null),
             .cpu => unreachable,
         }
     }
@@ -175,12 +206,12 @@ pub const Kernel = union(Backend) {
 pub const Stream = union(Backend) {
     cpu: void,
     cuda: cuda.Stream,
-    hip: void,
+    hip: hip.Stream,
 
     pub fn synchronize(self: *Stream) Error!void {
         switch (self.*) {
             .cuda => |*s| try s.synchronize(),
-            .hip => unreachable,
+            .hip => |*s| try s.synchronize(),
             .cpu => unreachable,
         }
     }
@@ -188,7 +219,7 @@ pub const Stream = union(Backend) {
     pub fn deinit(self: *Stream) void {
         switch (self.*) {
             .cuda => |*s| s.deinit(),
-            .hip => {},
+            .hip => |*s| s.deinit(),
             .cpu => {},
         }
     }

@@ -23,9 +23,11 @@ const Config = struct {
     iters: u32 = 10,
     filters: std.ArrayList([]const u8) = .empty,
     use_ngspice: bool = true,
+    use_xyce: bool = true,
     list_only: bool = false,
     out_path: []const u8 = "benchmark/RESULTS.md",
     rtol: f64 = 1e-3,
+    timeout: []const u8 = "300",
 };
 
 const Fixture = struct {
@@ -44,10 +46,15 @@ const Result = struct {
     name: []const u8,
     zp_cpu_median_ns: ?u64 = null,
     zp_cpu_skip: []const u8 = "",
+    zp_cpu_rss_kb: u64 = 0,
     zp_gpu_median_ns: ?u64 = null,
     zp_gpu_skip: []const u8 = "",
     ng_median_ns: ?u64 = null,
     ng_skip: []const u8 = "",
+    ng_rss_kb: u64 = 0,
+    xyce_median_ns: ?u64 = null,
+    xyce_skip: []const u8 = "",
+    xyce_rss_kb: u64 = 0,
     cpu_accuracy: ?Accuracy = null,
     gpu_accuracy: ?Accuracy = null,
 };
@@ -98,6 +105,10 @@ pub fn main(init: std.process.Init) !void {
     if (cfg.use_ngspice and !ngspice_ok)
         try out.writeAll("note: ngspice not found — comparison disabled\n\n");
 
+    const xyce_ok = cfg.use_xyce and probeXyce(io);
+    if (cfg.use_xyce and !xyce_ok)
+        try out.writeAll("note: xyce not found — comparison disabled\n\n");
+
     try reportHeader(out);
     try out.flush();
 
@@ -106,17 +117,23 @@ pub fn main(init: std.process.Init) !void {
     for (fixtures) |fx| {
         if (!matchesFilter(&cfg, fx.category, fx.name)) continue;
 
+        // per-fixture arena: raw-file parses are 100s of MB across the suite;
+        // retaining them in the run arena OOMs the host on long runs
+        var fx_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer fx_arena.deinit();
+        const fxa = fx_arena.allocator();
+
         var res: Result = .{ .category = fx.category, .name = fx.name };
-        const netlist = try std.fmt.allocPrint(gpa, "{s}/{s}/{s}/circuit.sp", .{ cfg.fixtures_dir, fx.category, fx.name });
+        const netlist = try std.fmt.allocPrint(fxa, "{s}/{s}/{s}/circuit.sp", .{ cfg.fixtures_dir, fx.category, fx.name });
 
         // zpicey CPU
         var zp_cpu_raw_path: []const u8 = "";
         if (engine_ok) {
-            zp_cpu_raw_path = try std.fmt.allocPrint(gpa, "{s}/{s}--{s}.zp-cpu.raw", .{ out_dir, fx.category, fx.name });
+            zp_cpu_raw_path = try std.fmt.allocPrint(fxa, "{s}/{s}--{s}.zp-cpu.raw", .{ out_dir, fx.category, fx.name });
             const zp_cpu_argv: []const []const u8 = &.{ cfg.engine_bin, "-b", "-r", zp_cpu_raw_path, netlist };
-            const cap = runCapture(io, gpa, zp_cpu_argv);
+            const cap = runCapture(io, fxa, zp_cpu_argv);
             if (cap.ok and !std.mem.startsWith(u8, cap.text, "{\"skip\"")) {
-                res.zp_cpu_median_ns = try timedMedian(io, gpa, zp_cpu_argv, 1);
+                res.zp_cpu_median_ns = try timedMedian(io, fxa, zp_cpu_argv, cfg.timeout, 1);
             } else if (skipReason(cap.text)) |reason| {
                 res.zp_cpu_skip = reason;
             } else {
@@ -129,11 +146,11 @@ pub fn main(init: std.process.Init) !void {
         // zpicey GPU
         var zp_gpu_raw_path: []const u8 = "";
         if (engine_ok) {
-            zp_gpu_raw_path = try std.fmt.allocPrint(gpa, "{s}/{s}--{s}.zp-gpu.raw", .{ out_dir, fx.category, fx.name });
+            zp_gpu_raw_path = try std.fmt.allocPrint(fxa, "{s}/{s}--{s}.zp-gpu.raw", .{ out_dir, fx.category, fx.name });
             const zp_gpu_argv: []const []const u8 = &.{ cfg.engine_bin, "-b", "--gpu", "-r", zp_gpu_raw_path, netlist };
-            const cap = runCapture(io, gpa, zp_gpu_argv);
+            const cap = runCapture(io, fxa, zp_gpu_argv);
             if (cap.ok and !std.mem.startsWith(u8, cap.text, "{\"skip\"")) {
-                res.zp_gpu_median_ns = try timedMedian(io, gpa, zp_gpu_argv, 1);
+                res.zp_gpu_median_ns = try timedMedian(io, fxa, zp_gpu_argv, cfg.timeout, 1);
             } else if (skipReason(cap.text)) |reason| {
                 res.zp_gpu_skip = reason;
             } else {
@@ -146,21 +163,49 @@ pub fn main(init: std.process.Init) !void {
         // ngspice
         var ng_raw_path: []const u8 = "";
         if (ngspice_ok) {
-            ng_raw_path = try std.fmt.allocPrint(gpa, "{s}/{s}--{s}.ng.raw", .{ out_dir, fx.category, fx.name });
+            ng_raw_path = try std.fmt.allocPrint(fxa, "{s}/{s}--{s}.ng.raw", .{ out_dir, fx.category, fx.name });
             const ng_argv: []const []const u8 = &.{ "ngspice", "-b", "-r", ng_raw_path, netlist };
             if (runOk(io, ng_argv)) {
-                res.ng_median_ns = try timedMedian(io, gpa, ng_argv, 1);
+                res.ng_median_ns = try timedMedian(io, fxa, ng_argv, cfg.timeout, 1);
             } else {
                 res.ng_skip = "preflight failed";
             }
         }
 
+        // xyce
+        if (xyce_ok) {
+            const xyce_argv: []const []const u8 = &.{ "xyce", "-b", netlist };
+            if (runOk(io, xyce_argv)) {
+                res.xyce_median_ns = try timedMedian(io, fxa, xyce_argv, cfg.timeout, 1);
+            } else {
+                res.xyce_skip = "preflight failed";
+            }
+        }
+
+        // peak RSS (one extra run each, only for fixtures that succeeded)
+        if (res.zp_cpu_median_ns != null) {
+            const zp_cpu_argv: []const []const u8 = &.{ cfg.engine_bin, "-b", "-r", zp_cpu_raw_path, netlist };
+            res.zp_cpu_rss_kb = measurePeakRss(io, fxa, zp_cpu_argv, cfg.timeout);
+        }
+        if (res.ng_median_ns != null) {
+            const ng_argv: []const []const u8 = &.{ "ngspice", "-b", "-r", ng_raw_path, netlist };
+            res.ng_rss_kb = measurePeakRss(io, fxa, ng_argv, cfg.timeout);
+        }
+        if (res.xyce_median_ns != null) {
+            const xyce_argv: []const []const u8 = &.{ "xyce", "-b", netlist };
+            res.xyce_rss_kb = measurePeakRss(io, fxa, xyce_argv, cfg.timeout);
+        }
+
         if (res.zp_cpu_median_ns != null and res.ng_median_ns != null) {
-            res.cpu_accuracy = compareRawFiles(io, gpa, ng_raw_path, zp_cpu_raw_path, cfg.rtol);
+            res.cpu_accuracy = compareRawFiles(io, fxa, ng_raw_path, zp_cpu_raw_path, cfg.rtol);
         }
         if (res.zp_gpu_median_ns != null and res.ng_median_ns != null) {
-            res.gpu_accuracy = compareRawFiles(io, gpa, ng_raw_path, zp_gpu_raw_path, cfg.rtol);
+            res.gpu_accuracy = compareRawFiles(io, fxa, ng_raw_path, zp_gpu_raw_path, cfg.rtol);
         }
+
+        // skip strings may slice fixture-arena memory; dupe survivors
+        if (res.zp_cpu_skip.len > 0) res.zp_cpu_skip = try gpa.dupe(u8, res.zp_cpu_skip);
+        if (res.zp_gpu_skip.len > 0) res.zp_gpu_skip = try gpa.dupe(u8, res.zp_gpu_skip);
 
         try reportRow(out, res, &prev_cat);
         try out.flush();
@@ -413,11 +458,10 @@ fn lessThanFixture(_: void, a: Fixture, b: Fixture) bool {
 // Child process
 // ============================================================================
 
-// ponytail: 30s timeout via coreutils, upgrade to per-fixture config if needed
-fn spawnQuiet(io: Io, argv: []const []const u8, stdout: std.process.SpawnOptions.StdIo) !std.process.Child {
+fn spawnQuiet(io: Io, argv: []const []const u8, timeout: []const u8, stdout: std.process.SpawnOptions.StdIo) !std.process.Child {
     var buf: [64][]const u8 = undefined;
     buf[0] = "timeout";
-    buf[1] = "30";
+    buf[1] = timeout;
     @memcpy(buf[2..][0..argv.len], argv);
     return std.process.spawn(io, .{
         .argv = buf[0 .. argv.len + 2],
@@ -438,7 +482,7 @@ fn waitOk(child: *std.process.Child, io: Io) bool {
 const Capture = struct { ok: bool, text: []const u8 };
 
 fn runCapture(io: Io, gpa: std.mem.Allocator, argv: []const []const u8) Capture {
-    var child = spawnQuiet(io, argv, .pipe) catch return .{ .ok = false, .text = "" };
+    var child = spawnQuiet(io, argv, "30", .pipe) catch return .{ .ok = false, .text = "" };
     var rbuf: [4096]u8 = undefined;
     var fr = child.stdout.?.reader(io, &rbuf);
     const text = fr.interface.allocRemaining(gpa, .limited(1 << 20)) catch {
@@ -458,7 +502,7 @@ fn skipReason(text: []const u8) ?[]const u8 {
 }
 
 fn runOk(io: Io, argv: []const []const u8) bool {
-    var child = spawnQuiet(io, argv, .ignore) catch return false;
+    var child = spawnQuiet(io, argv, "30", .ignore) catch return false;
     return waitOk(&child, io);
 }
 
@@ -466,11 +510,15 @@ fn probeNgspice(io: Io) bool {
     return runOk(io, &.{ "ngspice", "--version" });
 }
 
-fn timedMedian(io: Io, gpa: std.mem.Allocator, argv: []const []const u8, iters: u32) !u64 {
+fn probeXyce(io: Io) bool {
+    return runOk(io, &.{ "xyce", "--version" });
+}
+
+fn timedMedian(io: Io, gpa: std.mem.Allocator, argv: []const []const u8, timeout: []const u8, iters: u32) !u64 {
     const samples = try gpa.alloc(u64, iters);
     for (samples) |*s| {
         const t0 = Io.Timestamp.now(io, .awake);
-        var child = try spawnQuiet(io, argv, .ignore);
+        var child = try spawnQuiet(io, argv, timeout, .ignore);
         const ok = waitOk(&child, io);
         const t1 = Io.Timestamp.now(io, .awake);
         if (!ok) return error.BenchRunFailed;
@@ -480,16 +528,51 @@ fn timedMedian(io: Io, gpa: std.mem.Allocator, argv: []const []const u8, iters: 
     return samples[samples.len / 2];
 }
 
+// Peak RSS in KB from /proc/[pid]/status — returns 0 if unavailable
+fn measurePeakRss(io: Io, gpa: std.mem.Allocator, argv: []const []const u8, timeout: []const u8) u64 {
+    // Use /usr/bin/time -v to capture peak RSS
+    var buf: [70][]const u8 = undefined;
+    buf[0] = "/usr/bin/time";
+    buf[1] = "-v";
+    buf[2] = "timeout";
+    buf[3] = timeout;
+    @memcpy(buf[4..][0..argv.len], argv);
+    var child = std.process.spawn(io, .{
+        .argv = buf[0 .. argv.len + 4],
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .pipe,
+    }) catch return 0;
+    var rbuf: [8192]u8 = undefined;
+    var fr = child.stderr.?.reader(io, &rbuf);
+    const text = fr.interface.allocRemaining(gpa, .limited(1 << 16)) catch {
+        _ = child.wait(io) catch {};
+        return 0;
+    };
+    _ = child.wait(io) catch {};
+    // Parse "Maximum resident set size (kbytes): NNN"
+    const needle = "Maximum resident set size";
+    if (std.mem.indexOf(u8, text, needle)) |pos| {
+        const rest = text[pos..];
+        if (std.mem.indexOf(u8, rest, ": ")) |colon| {
+            const num_start = rest[colon + 2 ..];
+            const end = std.mem.indexOfScalar(u8, num_start, '\n') orelse num_start.len;
+            return std.fmt.parseInt(u64, std.mem.trim(u8, num_start[0..end], " \t\r"), 10) catch 0;
+        }
+    }
+    return 0;
+}
+
 // ============================================================================
 // Reporting
 // ============================================================================
 
 fn reportHeader(out: *Io.Writer) !void {
-    try out.print("{s:<34} {s:>12} {s:>12} {s:>12} {s:>7} {s:>7}  {s:>10} {s:>10} {s:>5}  {s:>10} {s:>10} {s:>5}\n", .{
-        "fixture", "zp-cpu", "zp-gpu", "ngspice", "cpu/ng", "gpu/ng", "cpu-max", "cpu-rms", "cpu", "gpu-max", "gpu-rms", "gpu",
+    try out.print("{s:<34} {s:>12} {s:>12} {s:>12} {s:>12} {s:>7} {s:>7}  {s:>8} {s:>8} {s:>8}  {s:>10} {s:>10} {s:>5}  {s:>10} {s:>10} {s:>5}\n", .{
+        "fixture", "zp-cpu", "zp-gpu", "ngspice", "xyce", "cpu/ng", "gpu/ng", "zp-MB", "ng-MB", "xy-MB", "cpu-max", "cpu-rms", "cpu", "gpu-max", "gpu-rms", "gpu",
     });
-    try out.print("{s:-<34} {s:->12} {s:->12} {s:->12} {s:->7} {s:->7}  {s:->10} {s:->10} {s:->5}  {s:->10} {s:->10} {s:->5}\n", .{
-        "", "", "", "", "", "", "", "", "", "", "", "",
+    try out.print("{s:-<34} {s:->12} {s:->12} {s:->12} {s:->12} {s:->7} {s:->7}  {s:->8} {s:->8} {s:->8}  {s:->10} {s:->10} {s:->5}  {s:->10} {s:->10} {s:->5}\n", .{
+        "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
     });
 }
 
@@ -524,6 +607,13 @@ fn reportRow(out: *Io.Writer, r: Result, prev_cat: *[]const u8) !void {
     }
     try out.writeAll(" ");
 
+    if (r.xyce_median_ns) |ns| {
+        try printDur(out, ns);
+    } else {
+        try out.print("{s:>12}", .{if (r.xyce_skip.len > 0) "skip" else "-"});
+    }
+    try out.writeAll(" ");
+
     if (r.zp_cpu_median_ns != null and r.ng_median_ns != null) {
         const ratio = @as(f64, @floatFromInt(r.ng_median_ns.?)) / @as(f64, @floatFromInt(r.zp_cpu_median_ns.?));
         try out.print("{d:>6.1}x", .{ratio});
@@ -537,6 +627,26 @@ fn reportRow(out: *Io.Writer, r: Result, prev_cat: *[]const u8) !void {
         try out.print("{d:>6.1}x", .{ratio});
     } else {
         try out.print("{s:>7}", .{"-"});
+    }
+    try out.writeAll("  ");
+
+    // memory columns
+    if (r.zp_cpu_rss_kb > 0) {
+        try out.print("{d:>7.1}", .{@as(f64, @floatFromInt(r.zp_cpu_rss_kb)) / 1024.0});
+    } else {
+        try out.print("{s:>8}", .{"-"});
+    }
+    try out.writeAll(" ");
+    if (r.ng_rss_kb > 0) {
+        try out.print("{d:>7.1}", .{@as(f64, @floatFromInt(r.ng_rss_kb)) / 1024.0});
+    } else {
+        try out.print("{s:>8}", .{"-"});
+    }
+    try out.writeAll(" ");
+    if (r.xyce_rss_kb > 0) {
+        try out.print("{d:>7.1}", .{@as(f64, @floatFromInt(r.xyce_rss_kb)) / 1024.0});
+    } else {
+        try out.print("{s:>8}", .{"-"});
     }
     try out.writeAll("  ");
 
@@ -588,10 +698,10 @@ fn writeResultsMd(io: Io, gpa: std.mem.Allocator, path: []const u8, results: []c
     var aw: std.Io.Writer.Allocating = .init(gpa);
     const w = &aw.writer;
 
-    w.print("# Benchmark results — zpicey vs ngspice\n\n", .{}) catch return;
+    w.print("# Benchmark results — zpicey vs ngspice vs xyce\n\n", .{}) catch return;
     w.print("Pass: per-variable RMS ≤ {e:.0}, max ≤ {e:.0}\n\n", .{ rtol, 10 * rtol }) catch return;
-    w.print("| fixture | zp-cpu | zp-gpu | ngspice | cpu/ng | gpu/ng | cpu-max | cpu-rms | cpu | gpu-max | gpu-rms | gpu |\n", .{}) catch return;
-    w.print("|---|---|---|---|---|---|---|---|---|---|---|---|\n", .{}) catch return;
+    w.print("| fixture | zp-cpu | zp-gpu | ngspice | xyce | cpu/ng | gpu/ng | zp-MB | ng-MB | xy-MB | cpu-max | cpu-rms | cpu | gpu-max | gpu-rms | gpu |\n", .{}) catch return;
+    w.print("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n", .{}) catch return;
 
     for (results) |r| {
         var namebuf: [64]u8 = undefined;
@@ -606,6 +716,9 @@ fn writeResultsMd(io: Io, gpa: std.mem.Allocator, path: []const u8, results: []c
         var ng_buf: [32]u8 = undefined;
         const ng_str = if (r.ng_median_ns) |ns| fmtDur(&ng_buf, ns) else "skip";
 
+        var xyce_buf: [32]u8 = undefined;
+        const xyce_str = if (r.xyce_median_ns) |ns| fmtDur(&xyce_buf, ns) else "skip";
+
         var cpu_ratio_buf: [16]u8 = undefined;
         const cpu_ratio_str = if (r.zp_cpu_median_ns != null and r.ng_median_ns != null)
             std.fmt.bufPrint(&cpu_ratio_buf, "{d:.1}x", .{@as(f64, @floatFromInt(r.ng_median_ns.?)) / @as(f64, @floatFromInt(r.zp_cpu_median_ns.?))}) catch "-"
@@ -615,6 +728,22 @@ fn writeResultsMd(io: Io, gpa: std.mem.Allocator, path: []const u8, results: []c
         var gpu_ratio_buf: [16]u8 = undefined;
         const gpu_ratio_str = if (r.zp_gpu_median_ns != null and r.ng_median_ns != null)
             std.fmt.bufPrint(&gpu_ratio_buf, "{d:.1}x", .{@as(f64, @floatFromInt(r.ng_median_ns.?)) / @as(f64, @floatFromInt(r.zp_gpu_median_ns.?))}) catch "-"
+        else
+            "-";
+
+        var zp_mb_buf: [16]u8 = undefined;
+        const zp_mb_str = if (r.zp_cpu_rss_kb > 0)
+            std.fmt.bufPrint(&zp_mb_buf, "{d:.1}", .{@as(f64, @floatFromInt(r.zp_cpu_rss_kb)) / 1024.0}) catch "-"
+        else
+            "-";
+        var ng_mb_buf: [16]u8 = undefined;
+        const ng_mb_str = if (r.ng_rss_kb > 0)
+            std.fmt.bufPrint(&ng_mb_buf, "{d:.1}", .{@as(f64, @floatFromInt(r.ng_rss_kb)) / 1024.0}) catch "-"
+        else
+            "-";
+        var xy_mb_buf: [16]u8 = undefined;
+        const xy_mb_str = if (r.xyce_rss_kb > 0)
+            std.fmt.bufPrint(&xy_mb_buf, "{d:.1}", .{@as(f64, @floatFromInt(r.xyce_rss_kb)) / 1024.0}) catch "-"
         else
             "-";
 
@@ -630,9 +759,10 @@ fn writeResultsMd(io: Io, gpa: std.mem.Allocator, path: []const u8, results: []c
         const gpu_rms_str = if (r.gpu_accuracy) |a| std.fmt.bufPrint(&gpu_rms_buf, "{e:.2}", .{a.rms_rel}) catch "-" else "-";
         const gpu_status: []const u8 = if (r.gpu_accuracy) |a| (if (a.pass) "PASS" else "FAIL") else if (r.zp_gpu_skip.len > 0) "SKIP" else "-";
 
-        w.print("| {s} | {s} | {s} | {s} | {s} | {s} | {s} | {s} | {s} | {s} | {s} | {s} |\n", .{
-            label, zp_cpu_str, zp_gpu_str, ng_str, cpu_ratio_str, gpu_ratio_str,
-            cpu_mx_str, cpu_rms_str, cpu_status, gpu_mx_str, gpu_rms_str, gpu_status,
+        w.print("| {s} | {s} | {s} | {s} | {s} | {s} | {s} | {s} | {s} | {s} | {s} | {s} | {s} | {s} | {s} | {s} |\n", .{
+            label, zp_cpu_str, zp_gpu_str, ng_str, xyce_str, cpu_ratio_str, gpu_ratio_str,
+            zp_mb_str, ng_mb_str, xy_mb_str, cpu_mx_str, cpu_rms_str, cpu_status,
+            gpu_mx_str, gpu_rms_str, gpu_status,
         }) catch return;
     }
 
@@ -661,7 +791,7 @@ fn fmtDur(buf: []u8, ns: u64) []const u8 {
 // ============================================================================
 
 fn parseArgs(gpa: std.mem.Allocator, init: std.process.Init) !Config {
-    const usage = "usage: bench-runner ZPICEY_BIN FIXTURES_DIR [--iters N] [--filter CAT[/NAME]] [--no-ngspice] [--list] [--out PATH] [--rtol N]\n";
+    const usage = "usage: bench-runner ZPICEY_BIN FIXTURES_DIR [--iters N] [--filter CAT[/NAME]] [--no-ngspice] [--no-xyce] [--timeout S] [--list] [--out PATH] [--rtol N]\n";
     var it = init.minimal.args.iterate();
     _ = it.skip();
     const engine_bin = it.next() orelse {
@@ -682,6 +812,10 @@ fn parseArgs(gpa: std.mem.Allocator, init: std.process.Init) !Config {
             try cfg.filters.append(gpa, it.next() orelse return error.BadUsage);
         } else if (std.mem.eql(u8, arg, "--no-ngspice")) {
             cfg.use_ngspice = false;
+        } else if (std.mem.eql(u8, arg, "--no-xyce")) {
+            cfg.use_xyce = false;
+        } else if (std.mem.eql(u8, arg, "--timeout")) {
+            cfg.timeout = it.next() orelse return error.BadUsage;
         } else if (std.mem.eql(u8, arg, "--list")) {
             cfg.list_only = true;
         } else if (std.mem.eql(u8, arg, "--out")) {
