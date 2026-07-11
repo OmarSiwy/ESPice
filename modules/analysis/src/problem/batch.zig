@@ -291,10 +291,12 @@ pub fn DeviceBatch(comptime D: type) type {
         }
 
         fn hashVoltages(lx: *const [n_u]f64) u64 {
+            // Full f64 bits: JFNK's ε-perturbed voltages (~1e-8 apart) alias
+            // under an f32 hash, turning distinct evals into stale cache hits
+            // and poisoning the finite-difference J·v.
             var h: u64 = 0x517cc1b727220a95;
             inline for (0..n_u) |u| {
-                const v: f32 = @floatCast(lx[u]);
-                h ^= @as(u64, @as(u32, @bitCast(v)));
+                h ^= @as(u64, @bitCast(lx[u]));
                 h *%= 0x9e3779b97f4a7c15;
             }
             return h | 1; // ensure non-zero so 0 = empty
