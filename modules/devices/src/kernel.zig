@@ -84,6 +84,52 @@ fn assemble(comptime with_diag: bool, g: *const G, hdr: *addrspace(.global) cons
     g.sync();
 }
 
+/// Device limiting pass for one batch — the GPU port of batch.zig
+/// applyLimits: cur = local(x); old = lim_x (once engaged) else local(x_old);
+/// lim_x = D.limit(cur, old). Returns 1.0 if any component was limited
+/// (thread-local partial; caller reduces grid-wide).
+fn limitBatch(
+    comptime D: type,
+    g: *const G,
+    desc: *addrspace(.global) const abi.BatchDesc,
+    blob: [*]addrspace(.global) u8,
+    x: [*]addrspace(.global) const f64,
+    x_old: [*]addrspace(.global) const f64,
+    lim_active: bool,
+) f64 {
+    const n_u = comptime contract.nU(D);
+    const gath: [*]addrspace(.global) const u32 = @ptrCast(@alignCast(blob + desc.off_gath));
+    const models: [*]addrspace(.global) const D.Model = @ptrCast(@alignCast(blob + desc.off_models));
+    const instances: [*]addrspace(.global) const D.Instance = @ptrCast(@alignCast(blob + desc.off_instances));
+    const lim: [*]addrspace(.global) f64 = @ptrCast(@alignCast(blob + desc.off_lim));
+
+    var flag: f64 = 0;
+    var id: u32 = g.tid;
+    while (id < desc.count) : (id += g.stride) {
+        var cur: [n_u]f64 = undefined;
+        var old: [n_u]f64 = undefined;
+        inline for (0..n_u) |u| {
+            cur[u] = x[gath[id * n_u + u]];
+            old[u] = if (lim_active) lim[id * n_u + u] else x_old[gath[id * n_u + u]];
+        }
+        const lm = D.limit(@addrSpaceCast(&models[id]), @addrSpaceCast(&instances[id]), cur, old);
+        inline for (0..n_u) |u| {
+            // Mirror batch.zig: only junction-limited unknowns
+            // (limit_flag_unknowns) force another Newton iteration.
+            const flags: bool = comptime blk: {
+                if (!@hasDecl(D, "limit_flag_unknowns")) break :blk true;
+                for (D.limit_flag_unknowns) |fu| {
+                    if (@intFromEnum(fu) == u) break :blk true;
+                }
+                break :blk false;
+            };
+            if (flags and lm[u] != cur[u]) flag = 1;
+            lim[id * n_u + u] = lm[u];
+        }
+    }
+    return flag;
+}
+
 /// Run the limiting pass over every limited batch. Same comptime dispatch
 /// as assemble(). Caller syncs + reduces the returned partial.
 fn limitPass(

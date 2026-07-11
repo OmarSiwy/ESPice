@@ -216,7 +216,9 @@ fn evalPrep(model: *const Model, instance: *const Instance) EvalPrep {
         .ikf = @as(f64, model.ikf),
         .ikr = @as(f64, model.ikr),
         .area_m = area_m,
-        .g_rs = if (rs != 0.0) area_m / rs else 1.0e12,
+        // Collapsed p_prime (rs = 0, see collapse()) carries no tie
+        // conductance — a 1e12 short absorbs real gd into its ulp (1.22e-4).
+        .g_rs = if (rs != 0.0) area_m / rs else 0.0,
         .inv_n_vt = 1.0 / (n_em * vt),
         .inv_nr_vt = 1.0 / (nr * vt),
         .inv_ns_vt = 1.0 / (ns * vt),
