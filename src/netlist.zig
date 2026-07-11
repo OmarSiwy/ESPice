@@ -512,6 +512,7 @@ fn resolveDeviceId(letter: u8, dev: types.Device, spice_models: []const types.Mo
         'q' => devices.bjtDeviceId(level),
         'd' => devices.diodeDeviceId(level),
         'j' => devices.jfetDeviceId(level),
+        'z' => devices.mesDeviceId(level),
         else => devices.letter_map.get(&.{letter}) orelse
             inferDeviceFromModel(dev, spice_models) orelse .resistor,
     };
@@ -530,6 +531,8 @@ fn inferDeviceFromModel(dev: types.Device, spice_models: []const types.Model) ?d
         return devices.diodeDeviceId(l);
     if (eqlAny(m.kind, &.{ "njf", "pjf" }))
         return devices.jfetDeviceId(l);
+    if (eqlAny(m.kind, &.{ "nmf", "pmf", "nhfet", "phfet" }))
+        return devices.mesDeviceId(l);
     return null;
 }
 
@@ -554,7 +557,7 @@ fn addSingleDevice(b: *Builder, comptime D: type, dev: types.Device, spice_model
             // model card parameter — applyKv never sees it. Without this,
             // every P-type device runs with N-type polarity.
             if (comptime @hasField(D.Model, "type_")) {
-                if (eqlAny(m.kind, &.{ "pmos", "pnp", "pjf", "pmf" }))
+                if (eqlAny(m.kind, &.{ "pmos", "pnp", "pjf", "pmf", "phfet" }))
                     model.type_ = -1;
             }
         }
@@ -955,7 +958,15 @@ fn applyKv(target: anytype, kv: []const types.Kv) !void {
     inline for (@typeInfo(T).@"struct".fields) |field| {
         if (comptime isScalarAssignable(field.type)) {
             if (kvNumber(kv, field.name)) |num|
-                @field(target.*, field.name) = castField(field.type, num);
+                @field(target.*, field.name) = castField(field.type, num)
+            else if (comptime std.mem.eql(u8, field.name, "vt0")) {
+                // ngspice accepts both "vt0" and "vto" spellings (IOPR).
+                if (kvNumber(kv, "vto")) |num|
+                    @field(target.*, field.name) = castField(field.type, num);
+            } else if (comptime std.mem.eql(u8, field.name, "vto")) {
+                if (kvNumber(kv, "vt0")) |num|
+                    @field(target.*, field.name) = castField(field.type, num);
+            }
         }
     }
 }

@@ -321,9 +321,11 @@ fn prep(model: *const Model, instance: *const Instance) Prep {
     const r_factor = 1.0 + rtc1 * dt_r + rtc2 * dt_r * dt_r;
 
     // --- Series resistance conductances ---
-    const g_rd: f64 = if (rd_m != 0.0) 1.0 / (rd_m * r_factor) else GSHORT;
-    const g_rs: f64 = if (rs_m != 0.0) 1.0 / (rs_m * r_factor) else GSHORT;
-    const g_rg: f64 = if (rg_m != 0.0) 1.0 / (rg_m * r_factor) else GSHORT;
+    // Zero resistance ⇒ prime node collapsed onto its port (collapse()
+    // below); g must be 0, not a 1e12 short — see mos1.zig dcParams.
+    const g_rd: f64 = if (rd_m != 0.0) 1.0 / (rd_m * r_factor) else 0.0;
+    const g_rs: f64 = if (rs_m != 0.0) 1.0 / (rs_m * r_factor) else 0.0;
+    const g_rg: f64 = if (rg_m != 0.0) 1.0 / (rg_m * r_factor) else 0.0;
 
     // --- Schottky Gate Diode saturation / recombination scales ---
     // Saturation currents: Isat = 0.5 * A* * T^2 * exp(-phib*q / (kB*T)) * W * L
@@ -701,14 +703,16 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     const i_rg = v_gate.sub(v_gp).scale(p.g_rg);
     const i_rs = v_source.sub(v_sp).scale(p.g_rs);
 
-    // --- KCL Node Stamping ---
+    // --- KCL Node Stamping (current leaving each node, jfet/mos1 convention) ---
+    // i_rd: d→d', i_rg: g→g', i_rs: s→s', i_gs: g'→s', i_gd: g'→d',
+    // id_signed: d'→s'.
     var out: [n_u]S = undefined;
-    out[dr] = i_rd.neg();
-    out[ga] = i_rg.neg();
-    out[sr] = i_rs.neg();
-    out[gp] = i_rg.sub(i_gs).sub(i_gd);
-    out[dp] = i_rd.add(id_signed).add(i_gd);
-    out[sp] = i_rs.sub(id_signed).add(i_gs);
+    out[dr] = i_rd;
+    out[ga] = i_rg;
+    out[sr] = i_rs;
+    out[gp] = i_gs.add(i_gd).sub(i_rg);
+    out[dp] = id_signed.sub(i_gd).sub(i_rd);
+    out[sp] = id_signed.neg().sub(i_gs).sub(i_rs);
     return out;
 }
 
@@ -1071,6 +1075,18 @@ pub fn limit(model: *const Model, instance: *const Instance, x_new: [n_u]f64, x_
 // Gmin stepping: at lambda=0, add large gmin to diode conductance for easy
 // convergence; at lambda=1, use original model parameters.
 
+// ============================================================================
+// Node Collapse (ngspice MESAsetup: primeNode = node when R = 0)
+// ============================================================================
+
+pub fn collapse(model: *const Model, _: *const Instance) [n_u]?u8 {
+    var out: [n_u]?u8 = @splat(null);
+    if (model.rd == 0) out[@intFromEnum(U.drain_prime)] = @intFromEnum(U.drain);
+    if (model.rs == 0) out[@intFromEnum(U.source_prime)] = @intFromEnum(U.source);
+    if (model.rg == 0) out[@intFromEnum(U.gate_prime)] = @intFromEnum(U.gate);
+    return out;
+}
+
 pub fn attempt(model: Model, lambda: f64) Model {
     var m = model;
     const gmin_step: f64 = 1.0e-12;
@@ -1136,10 +1152,10 @@ test "mesa: forward-biased gate Schottky diode current (g'-s')" {
     // gate_prime high, source_prime = drain_prime = 0.
     const out = contract.evalValues(Self, .{ 0.0, 0.5, 0.0, 0.0, 0.5, 0.0 }, &model, &inst, 0);
 
-    // out[gp] = i_rg - i_gs - i_gd. i_rg here pushes gate current in; the diode
-    // terms subtract. With strong forward bias i_gs+i_gd dominates so the gate
-    // node residual is strongly negative (diodes conducting away from gp).
-    try testing.expect(out[@intFromEnum(U.gate_prime)] < 0.0);
+    // out[gp] = i_gs + i_gd - i_rg (current LEAVING gate_prime). With strong
+    // forward bias the diodes conduct away from gp, so the residual is
+    // strongly positive.
+    try testing.expect(out[@intFromEnum(U.gate_prime)] > 0.0);
 
     // KCL residuals sum to zero.
     var sum: f64 = 0;
