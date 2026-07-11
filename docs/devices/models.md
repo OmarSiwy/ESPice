@@ -7,9 +7,10 @@ letter and LEVEL policy that picks a model for a card is
 `src/frontend/spice.zig`; card binding is `src/frontend/builder.zig` and
 `src/device/bind.zig`.
 
-The native transmission lines (LTRA, TXL, CPL) are the exception: they are
-Zig devices in `models/native/` built through the same evaluator. Their
-Verilog-A ports sit beside them and are not built; see
+The transmission lines are Verilog-A too: `ltra.va`, `txl.va` and
+`coupled_ltra.va` replaced native Zig devices. One divergence came with them:
+a TXL or CPL card whose fit fails is refused at its first evaluation (the
+model's `$fatal`, `error.DeviceRefused`), not at construction as before. See
 [native-transmission-line-migration.md](../native-transmission-line-migration.md)
 and [vera-gaps.md](../vera-gaps.md).
 

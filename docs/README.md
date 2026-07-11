@@ -36,7 +36,7 @@ retired paths and their replacements.
 | Analyses | [analysis/](analysis/README.md): one page per analysis |
 | Solvers | [solvers/](solvers/README.md): sparse LU, ordering, Newton, continuation, measured performance |
 | Conformance | [conformance-phase2.md](conformance-phase2.md): root causes and fix recipes behind `issues.md` section F; [verilog-ams-conformance-plan.md](verilog-ams-conformance-plan.md): the Verilog-AMS audit checklist |
-| Transmission lines | [vera-gaps.md](vera-gaps.md): what VerA still needs before the native lines move to Verilog-A; [native-transmission-line-migration.md](native-transmission-line-migration.md): the migration audit |
+| Transmission lines | [vera-gaps.md](vera-gaps.md): the VerA features the Verilog-A lines needed, and what is still open; [native-transmission-line-migration.md](native-transmission-line-migration.md): the migration audit |
 | Plans | [plan/optimize.md](plan/optimize.md): open work streams; [plan/vacask-comparison.md](plan/vacask-comparison.md): feature and speed comparison with VACASK, ranked gaps |
 
 Model sources live in `models/`. Shared data lives in `src/core/`, devices

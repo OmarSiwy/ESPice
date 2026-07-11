@@ -1487,6 +1487,9 @@ pub fn DeviceBatch(comptime D: type) type {
         /// (held, §5.10), so later calls run with `analog_initial` false and
         /// skip the block. `reprep` (new parameters or temperature) clears it.
         held_initial: bool = false,
+        /// `held_initial` at the last `stateCtl(.commit)`, which a
+        /// `.revert` restores along with the held values it rolls back.
+        committed_initial: bool = false,
         instances: []D.Instance,
         states: if (has_state) []D.State else void,
         gath: []u32,
@@ -1795,6 +1798,14 @@ pub fn DeviceBatch(comptime D: type) type {
             var dirty = false;
             for (0..self.count) |id| {
                 if (D.stateCtl(self.model(id), &self.instances[id], &self.states[id], @enumFromInt(@intFromEnum(op)))) dirty = true;
+            }
+            switch (op) {
+                .commit => self.committed_initial = self.held_initial,
+                .revert => {
+                    self.held_initial = self.committed_initial;
+                    self.sim.analog_initial = !self.held_initial;
+                },
+                else => {},
             }
             return dirty;
         }
@@ -2115,6 +2126,9 @@ pub fn DeviceBatch(comptime D: type) type {
             }
             if (comptime has_bp) dst.bp = src.bp;
             if (comptime has_src_brk) @memcpy(dst.src_brk, src.src_brk);
+            dst.held_initial = src.held_initial;
+            dst.committed_initial = src.committed_initial;
+            dst.sim.analog_initial = !dst.held_initial;
         }
 
         fn setLimitActive(ctx: *anyopaque, active: bool) void {
@@ -2132,6 +2146,11 @@ pub fn DeviceBatch(comptime D: type) type {
             self.owns_tapes = false;
             self.unshared = false;
             self.models_shared = &.{};
+            if (!accepted) {
+                self.held_initial = false;
+                self.committed_initial = false;
+                self.sim.analog_initial = true;
+            }
             self.models = &.{};
             self.model_of = &.{};
             self.instances = &.{};

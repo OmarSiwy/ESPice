@@ -6,8 +6,8 @@
 //   ngspice: Copyright Regents of the University of California and others,
 //   modified BSD license.
 //
-// Approximate model kept for comparison; P cards use the native CPL model
-// (models/native/coupled_ltra.zig). See
+// Approximate model kept for comparison; P cards use the exact CPL model
+// (models/coupled_ltra.va). See
 // docs/native-transmission-line-migration.md. It omits the native modal
 // fitting and recursive convolution, so it is not exact even for two
 // conductors.

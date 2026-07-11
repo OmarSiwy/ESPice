@@ -924,8 +924,9 @@ pub const NetBuilder = struct {
         }
     }
 
-    /// TXL (Y card) on the native Pade/history line. The RC case inp2y
-    /// expands into 3-pi sections (r/l > 1.6e10) is refused, not approximated.
+    /// TXL (Y card) on txl.va's Pade/history line. The RC case inp2y
+    /// expands into 3-pi sections (r/l > 1.6e10) is refused, not approximated;
+    /// a failed fit refuses the run (txl.va $fatal).
     fn addTxl(self: *NetBuilder, dev: Device) !void {
         if (dev.pins.len != 4) return error.InvalidTransmissionLinePorts;
         var r: f64 = 0;
@@ -945,21 +946,20 @@ pub const NetBuilder = struct {
         if (g < 0 or r <= 0 or l <= 0 or c <= 0 or len <= 0 or r / l > 1.6e10 or
             !std.math.isFinite(r * len) or r * len <= 0)
             return error.UnsupportedTransmissionLineParameters;
-        const fit = devices.txl_native.fitLine(r, l, g, c, len);
-        if (!fit.ok or fit.taul <= 0 or fit.sqtCdL <= 0 or !finiteLineCoefficients(fit))
-            return error.UnsupportedTransmissionLineParameters;
-        const nm: devices.txl_native.Model = .{ .r = r, .l = l, .g = g, .c = c, .len = len };
+        var nm: devices.txl.Model = .{ .r = r, .l = l, .g = g, .c = c, .len = len };
+        deriveModel(devices.txl, &nm, self.b, dev.pins.len);
+        // ngspice's inp2y binds the signal nodes and ignores the references.
         const n1 = try self.rowOf(dev.pins[0]);
         const n2 = try self.rowOf(dev.pins[2]);
-        try self.b.addDevice(devices.txl_native, dev.name, nm, .{}, [2]u32{ n1, n2 });
+        try self.b.addDevice(devices.txl, dev.name, nm, .{}, [4]u32{ n1, GROUND, n2, GROUND });
         // ngspice writes duplicate i(Y) names; the oracle keeps the last
         // (far-end) branch, as for CPL.
         try self.addBranchProbe(dev.name, self.b.n - 1);
     }
 
     /// LTRA (O card), routed as ngspice LTRAsetup does:
-    /// RLC (r,l,c > 0, g = 0) and RC (r,c > 0, l = g = 0) go to the native
-    /// recursive-convolution device (ltra_native: history, coefficients, chop,
+    /// RLC (r,l,c > 0, g = 0) and RC (r,c > 0, l = g = 0) go to the
+    /// recursive-convolution device (ltra.va: history, coefficients, chop,
     /// step limit); LC (r = g = 0) to one exact Bergeron line (tline.va); a
     /// static RG line to lossy_tline.va's exact two-port. Anything else is refused.
     fn addLossyLine(self: *NetBuilder, dev: Device) !void {
@@ -1023,7 +1023,7 @@ pub const NetBuilder = struct {
         for (&ports, dev.pins) |*port, pin| port.* = try self.rowOf(pin);
 
         if (rc or r_t > 0) {
-            const nm: devices.ltra_native.Model = .{
+            var nm: devices.ltra.Model = .{
                 .r = model.r,
                 .l = model.l,
                 .g = model.g,
@@ -1033,9 +1033,10 @@ pub const NetBuilder = struct {
                 .compactabs = model.compactabs,
                 .rel = model.rel,
                 .steplimit = if (model.nosteplimit != 0) 0 else 1,
-                .truncdontcut = @floatFromInt(model.truncdontcut),
+                .truncdontcut = model.truncdontcut,
             };
-            return self.b.addDevice(devices.ltra_native, dev.name, nm, .{}, ports);
+            deriveModel(devices.ltra, &nm, self.b, dev.pins.len);
+            return self.b.addDevice(devices.ltra, dev.name, nm, .{}, ports);
         }
 
         // Lossless LC: one exact Bergeron ideal line.
@@ -1298,8 +1299,9 @@ pub const NetBuilder = struct {
         for (self.deferred.items) |dev| if (dev.kind == 'b') try self.addB(dev);
     }
 
-    /// CPL (P card) on the native modal-fit, accepted-step convolution line,
-    /// for 2 to 4 conductors. Anything else is refused, never approximated.
+    /// CPL (P card) on coupled_ltra.va's modal-fit, accepted-step convolution
+    /// line, for 2 to 4 conductors. Anything else is refused, never
+    /// approximated; a failed modal fit refuses the run ($fatal).
     fn addCpl(self: *NetBuilder, dev: Device) !void {
         if (dev.pins.len < 6 or dev.pins.len % 2 != 0) return error.UnsupportedCoupledLineDimension;
         const n_lines = (dev.pins.len - 2) / 2;
@@ -1317,23 +1319,22 @@ pub const NetBuilder = struct {
         const tri = n_lines * (n_lines + 1) / 2;
         if (nr != tri or nl != tri or nc != tri or (ng != 0 and ng != tri) or !std.math.isFinite(length) or length <= 0)
             return error.UnsupportedTransmissionLineParameters;
-        inline for (.{ device.models.cpl_native_2, device.models.cpl_native_3, device.models.cpl_native_4 }) |D| {
-            const N = D.num_ports / 2;
+        inline for (.{ devices.coupled_ltra, devices.coupled_ltra3, devices.coupled_ltra4 }) |D| {
+            const N = (D.num_ports - 2) / 2;
             if (n_lines == N) {
                 var model: D.Model = .{ .length = length };
-                @memcpy(&model.rr, rr[0..tri]);
-                @memcpy(&model.ll, ll[0..tri]);
-                @memcpy(&model.cc, cc[0..tri]);
-                @memcpy(&model.gg, gg[0..tri]);
-                // Declined or nonfinite modal fits must not become DC-only lines.
-                var instance: D.Instance = .{};
-                D.precompute(&instance, &model);
-                if (!model.ok or model.min_tau_s <= 0 or !finiteLineCoefficients(model)) return error.UnsupportedTransmissionLineParameters;
+                inline for (0..10) |k| if (k < tri) {
+                    @field(model, pwlSlot("r", k)) = rr[k];
+                    @field(model, pwlSlot("l", k)) = ll[k];
+                    @field(model, pwlSlot("c", k)) = cc[k];
+                    @field(model, pwlSlot("g", k)) = gg[k];
+                };
+                deriveModel(D, &model, self.b, dev.pins.len);
                 // ngspice cplsetup binds conductor nodes and ignores references.
-                var nodes: [2 * N]u32 = undefined;
+                var nodes: [2 * N + 2]u32 = @splat(GROUND);
                 for (0..N) |i| nodes[i] = try self.rowOf(dev.pins[i]);
-                for (0..N) |i| nodes[N + i] = try self.rowOf(dev.pins[N + 1 + i]);
-                try self.b.addDevice(D, dev.name, model, instance, nodes);
+                for (0..N) |i| nodes[N + 1 + i] = try self.rowOf(dev.pins[N + 1 + i]);
+                try self.b.addDevice(D, dev.name, model, .{}, nodes);
                 try self.addBranchProbe(dev.name, self.b.n - 1);
                 return;
             }
@@ -1924,9 +1925,44 @@ const tape = struct {
     const max_consts = 32;
     const max_probes = 8;
     const Code = enum(u8) {
-        num, v, vd, neg, not, add, sub, mul, div, powi, powc, pow, lt, gt, le, ge, eq, ne,
-        @"and", @"or", sel, sqrt, abs, min, max, exp, ln, log10, sin, cos, tan, atan, tanh,
-        floor, ceil, time, temper, pwl,
+        num,
+        v,
+        vd,
+        neg,
+        not,
+        add,
+        sub,
+        mul,
+        div,
+        powi,
+        powc,
+        pow,
+        lt,
+        gt,
+        le,
+        ge,
+        eq,
+        ne,
+        @"and",
+        @"or",
+        sel,
+        sqrt,
+        abs,
+        min,
+        max,
+        exp,
+        ln,
+        log10,
+        sin,
+        cos,
+        tan,
+        atan,
+        tanh,
+        floor,
+        ceil,
+        time,
+        temper,
+        pwl,
     };
 };
 

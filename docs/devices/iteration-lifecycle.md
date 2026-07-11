@@ -40,7 +40,7 @@ rules the host keeps:
   reverts first when it already staged since the last commit or revert: a
   flip that forces another iterate, or the next rung of the OP ladder.
 
-Delay-line history (`absdelay`, the native lines) still stages only at
+Delay-line history (`absdelay`) still stages only at
 accepted transient points (`Hooks.commit_state`), since a push at the
 operating point seeds the ring with a static solve. The
 `hdl/veriloga_transition_reject` fixture checks a cross-started `transition`

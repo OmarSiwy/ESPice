@@ -98,13 +98,12 @@ factor.
 | Passives | resistor, capacitor, inductor, coupled inductor, diode |
 | Sources | independent V and I, VCVS, VCCS, CCVS, CCCS, behavioural B-source |
 | Switches | voltage- and current-controlled |
-| Transmission lines | `tline`, `lossy_tline`, `coupled_tlines`, and native LTRA, TXL and coupled-LTRA |
+| Transmission lines | `tline`, `lossy_tline`, `ltra` (O), `txl` (Y), `coupled_ltra` (P, 2 to 4 conductors), `coupled_tlines` |
 
-Transmission lines are the one place native Zig still beats the Verilog-A
-route. The O, Y and P cards (LTRA, TXL, CPL) run native Zig devices, because
-`lossy_tline.va` and `coupled_tlines.va` approximate them. Full Verilog-A
-transcriptions sit in `models/native/` and wait on VerA features; see
-[docs/vera-gaps.md](docs/vera-gaps.md).
+Every device is Verilog-A. The O, Y and P cards run exact transcriptions of
+ngspice's LTRA, TXL and CPL; `lossy_tline.va` and `coupled_tlines.va`
+approximate them and no card routes there except the static RG line. See
+[docs/native-transmission-line-migration.md](docs/native-transmission-line-migration.md).
 
 ### Your own Verilog-A models
 
@@ -248,7 +247,6 @@ Per-area steps, each part of `zig build test`:
 | `test-frontend` | netlist parsing, builder, prepared circuits |
 | `test-analysis` | every analysis driver |
 | `test-output` | waveform writers |
-| `test-native-lines` | native transmission-line oracles |
 | `test-espice` | the Problem facade, the analysis contract and the C ABI (`test-c-api` alone) |
 
 Outside `zig build test`: `zig build test-benchmark` tests the reference

@@ -119,10 +119,10 @@ pub fn build(b: *std.Build) void {
 
     const dev_mods = b.allocator.alloc(*std.Build.Module, models.len) catch @panic("OOM");
     const one_models = b.allocator.alloc(*std.Build.Module, models.len) catch @panic("OOM");
-    // One host object per model (plus the native lines), so a solver edit
+    // One host object per model, so a solver edit
     // does not recompile every device eval as one single-threaded unit.
     // See docs/perf/build-split-2026-09-10.md.
-    const host_objs = b.allocator.alloc(*std.Build.Step.Compile, models.len + 1) catch @panic("OOM");
+    const host_objs = b.allocator.alloc(*std.Build.Step.Compile, models.len) catch @panic("OOM");
     for (models, 0..) |m, i| {
         const run = b.addRunArtifact(vera_exe);
         // The catalog keys on the file stem, the generated type on the module
@@ -177,25 +177,7 @@ pub fn build(b: *std.Build) void {
         host_objs[i].use_llvm = optimize != .Debug; // see exe.use_llvm
     }
 
-    // The native devices (transmission lines with their own accepted-step
-    // history, the expression-tape B source) export neutral vtables from a
-    // CPU object, like the generated models.
-    const native_models_mod = M.make(b.path("models/native/root.zig"), &.{.{ .name = "contract", .module = contract_mod }});
-    inline for (.{ "ltra_native", "txl_native", "cpl_native_2", "cpl_native_3", "cpl_native_4" }) |name|
-        agg_src.appendSlice(b.allocator, b.fmt("pub const {s} = @import(\"native_models\").{s};\n", .{ name, name })) catch @panic("OOM");
-    const native_host_mod = M.make(b.path("src/device/eval.zig"), &.{
-        .{ .name = "contract", .module = contract_mod },
-        .{ .name = "models", .module = native_models_mod },
-        .{ .name = "device_abi", .module = device_abi_mod },
-        .{ .name = "gompute", .module = gompute.module("gompute") },
-    });
-    native_host_mod.link_libc = true;
-    native_host_mod.error_tracing = optimize == .Debug; // see host_mod
-    host_objs[models.len] = b.addObject(.{ .name = "dev_native_lines", .root_module = native_host_mod });
-    host_objs[models.len].use_llvm = optimize != .Debug;
-
     const models_mod = M.make(wf.add("models.zig", agg_src.items), &.{});
-    models_mod.addImport("native_models", native_models_mod);
     for (models, dev_mods) |m, dev_mod| models_mod.addImport(m.name, dev_mod);
 
     const device_mod = M.make(b.path("src/device/root.zig"), &.{
@@ -393,7 +375,6 @@ pub fn build(b: *std.Build) void {
         .{ "test-core", "Run shared data and numerics tests", &.{t.run(core_mod, &.{}, false)} },
         .{ "test-solver", "Run solver tests", &.{t.run(solver_mod, &.{}, false)} },
         .{ "test-output", "Run waveform writer tests", &.{t.run(output_mod, &.{}, false)} },
-        .{ "test-native-lines", "Run native transmission-line oracle tests", &.{t.run(native_models_mod, &.{}, false)} },
         .{ "test-device", "Run device catalog, evaluator and ABI tests", &.{
             t.run(device_mod, &.{}, true),
             t.run(device_abi_mod, &.{}, false),
@@ -528,6 +509,8 @@ const model_includes = [_]struct { name: []const u8, file: []const u8 }{
     .{ .name = "wline_2", .file = "wline_1.va" },
     .{ .name = "wline_3", .file = "wline_1.va" },
     .{ .name = "wline_4", .file = "wline_1.va" },
+    .{ .name = "coupled_ltra3", .file = "coupled_ltra.va" },
+    .{ .name = "coupled_ltra4", .file = "coupled_ltra.va" },
 };
 
 /// Whether `name` is one of the comma-separated entries of `csv`.
