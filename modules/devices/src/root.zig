@@ -143,6 +143,18 @@ pub fn jfetDeviceId(level: u16) DeviceId {
     };
 }
 
+/// ngspice inpdomod.c: nmf/pmf/nhfet/phfet models dispatch on LEVEL only —
+/// 0,1 → MES (Statz), 2-4 → MESA (Ytterdal), 5 → HFET1, 6 → HFET2.
+pub fn mesDeviceId(level: u16) DeviceId {
+    return switch (level) {
+        0, 1 => .mesfet,
+        2, 3, 4 => .mesa,
+        5 => .hfet1,
+        6 => .hfet2,
+        else => .mesfet,
+    };
+}
+
 pub const DeviceId = enum {
     asm_esd,
     asm_hemt,
