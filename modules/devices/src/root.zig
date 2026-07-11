@@ -103,9 +103,13 @@ pub fn mosfetDeviceId(level: u16) DeviceId {
         4 => .bsim1,
         5 => .bsim2,
         6 => .mos6,
-        8, 11, 49 => .bsim3,
+        8, 49 => .bsim3,
         9 => .mos9,
-        10, 55 => .bsim_soi,
+        // ponytail: 58 is ngspice B4SOI 4.4; b3soipd (BSIMPD 2.x) is the closest
+        // cognate we have (floating-body PD SOI). Upgrade path: dedicated b4soi.
+        10, 57, 58 => .b3soipd,
+        11, 55 => .b3soifd,
+        12, 56 => .b3soidd,
         14, 54 => .bsim4,
         44 => .ekv,
         72, 107 => .bsim_cmg,

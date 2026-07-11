@@ -42,6 +42,7 @@ pub const Model = struct {
 
     // --- Geometry & Process ---
     tox: f32 = 1.0e-8,
+    toxe: f32 = 0, // B4SOI-style alias; >0 overrides tox (level 58 cards)
     dtoxcv: f32 = 0.0,
     tbox: f32 = 3.0e-7,
     tsi: f32 = 1.0e-7,
@@ -50,7 +51,7 @@ pub const Model = struct {
     nch: f32 = 1.7e17,
     ngate: f32 = 0.0,
     xt: f32 = 1.55e-7,
-    tnom: f32 = 300.15,
+    tnom: f32 = 27.0, // deg C (ngspice card semantics)
     toxqm: f32 = 1.0e-8,
     toxref: f32 = 2.5e-9,
 
@@ -566,7 +567,12 @@ pub const Instance = struct {
 // L/W/P Parameter Extraction Helper
 // ============================================================================
 
-inline fn lwpParam(base: f64, l_dep: f64, w_dep: f64, p_dep: f64, l_inv: f64, w_inv: f64) f64 {
+inline // b3soipdtemp.c: u0 > 1 is in cm^2/(V*s) -> convert to m^2/(V*s)
+fn convMobilityUnits(u: f64) f64 {
+    return if (u > 1.0) u / 1.0e4 else u;
+}
+
+fn lwpParam(base: f64, l_dep: f64, w_dep: f64, p_dep: f64, l_inv: f64, w_inv: f64) f64 {
     return base + l_dep * l_inv + w_dep * w_inv + p_dep * l_inv * w_inv;
 }
 
@@ -825,9 +831,9 @@ fn evalParams(model: *const Model, instance: *const Instance) EvalParams {
     const GSHORT: f64 = 1.0e3;
 
     const type_f: f64 = @floatFromInt(model.type_);
-    const m_tox: f64 = @as(f64, model.tox);
+    const m_tox: f64 = if (model.toxe > 0.0) @as(f64, model.toxe) else @as(f64, model.tox);
     const m_tsi: f64 = @as(f64, model.tsi);
-    const m_tnom: f64 = @as(f64, model.tnom);
+    const m_tnom: f64 = @as(f64, model.tnom) + 273.15; // card TNOM is Celsius
     const m_nch: f64 = @as(f64, model.nch);
     const m_rsh: f64 = @as(f64, model.rsh);
     const m_rbody: f64 = @as(f64, model.rbody);
@@ -907,7 +913,7 @@ fn evalParams(model: *const Model, instance: *const Instance) EvalParams {
         .e_pdiblcb = lwpParam(@as(f64, model.pdiblcb), @as(f64, model.lpdiblcb), @as(f64, model.wpdiblcb), @as(f64, model.ppdiblcb), l_inv, w_inv),
         .e_pclm = lwpParam(@as(f64, model.pclm), @as(f64, model.lpclm), @as(f64, model.wpclm), @as(f64, model.ppclm), l_inv, w_inv),
         .e_pvag = lwpParam(@as(f64, model.pvag), @as(f64, model.lpvag), @as(f64, model.wpvag), @as(f64, model.ppvag), l_inv, w_inv),
-        .e_u0 = lwpParam(@as(f64, model.u0), @as(f64, model.lu0), @as(f64, model.wu0), @as(f64, model.pu0), l_inv, w_inv),
+        .e_u0 = convMobilityUnits(lwpParam(@as(f64, model.u0), @as(f64, model.lu0), @as(f64, model.wu0), @as(f64, model.pu0), l_inv, w_inv)),
         .e_ua = lwpParam(@as(f64, model.ua), @as(f64, model.lua), @as(f64, model.wua), @as(f64, model.pua), l_inv, w_inv),
         .e_ub = lwpParam(@as(f64, model.ub), @as(f64, model.lub), @as(f64, model.wub), @as(f64, model.pub_), l_inv, w_inv),
         .e_uc = lwpParam(@as(f64, model.uc), @as(f64, model.luc), @as(f64, model.wuc), @as(f64, model.puc), l_inv, w_inv),
@@ -1572,10 +1578,10 @@ pub fn qFromPrep(comptime S: type, x: [n_u]S, _: *const PrepCache, model: *const
 
     // --- Cast model parameters (x-independent) ---
     const type_f: f64 = @floatFromInt(model.type_);
-    const m_tox: f64 = @as(f64, model.tox);
+    const m_tox: f64 = if (model.toxe > 0.0) @as(f64, model.toxe) else @as(f64, model.tox);
     const m_tbox: f64 = @as(f64, model.tbox);
     const m_tsi: f64 = @as(f64, model.tsi);
-    const m_tnom: f64 = @as(f64, model.tnom);
+    const m_tnom: f64 = @as(f64, model.tnom) + 273.15; // card TNOM is Celsius
     const m_nch: f64 = @as(f64, model.nch);
     const m_nsub: f64 = @as(f64, model.nsub);
     const m_lint: f64 = @as(f64, model.lint);
