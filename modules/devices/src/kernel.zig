@@ -292,8 +292,8 @@ fn assemble(comptime with_diag: bool, g: *const G, hdr: *addrspace(.global) cons
     const table: [*]addrspace(.global) const abi.BatchDesc = @ptrCast(@alignCast(blob + hdr.off_batch_table));
     for (0..hdr.n_batches) |bi| {
         const desc = &table[bi];
-        // Builtin models + build-time-baked Verilog-A/Verilog models
-        // (-Dva-models) dispatch identically: same contract, same kindId.
+        // Builtin models + va_devices decls (permanently-empty stub)
+        // dispatch identically: same contract, same kindId.
         inline for (.{ devices, va_devices }) |M| {
             inline for (@typeInfo(M).@"struct".decls) |decl| {
                 if (comptime @TypeOf(@field(M, decl.name)) == type) {
