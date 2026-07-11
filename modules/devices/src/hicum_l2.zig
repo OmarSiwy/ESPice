@@ -228,6 +228,7 @@ pub const Model = struct {
 
 pub const Instance = struct {
     m: f32 = 1.0, // Multiplier
+    temp: f32 = 27.0, // Ambient/circuit temperature (degC)
     dtemp: f32 = 0.0, // Instance temperature offset (degC)
 };
 
@@ -425,9 +426,11 @@ fn tempParams(model: *const Model, instance: *const Instance, dt_sh: f64) TempPa
     const VGS: f64 = @as(f64, model.vgs);
 
     // -- Temperature mapping --
+    // Device temperature = ambient (instance.temp) + offsets; TNOM is only
+    // the reference for the T-scaling below.
     const t_nom_k = 273.15 + TNOM;
     const vt_nom = k_b * t_nom_k;
-    const t_dev = t_nom_k + DT_M + dtemp_i + dt_sh;
+    const t_dev = 273.15 + @as(f64, instance.temp) + DT_M + dtemp_i + dt_sh;
     const vt = k_b * t_dev;
     const r_t = t_dev / t_nom_k;
     const delta_t = t_dev - t_nom_k;

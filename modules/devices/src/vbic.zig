@@ -775,18 +775,20 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
     // ========================================================================
     // KCL Node Stamping (with type factor for output)
     // ========================================================================
+    // Convention: out[u] = current LEAVING node u through the device
+    // (matches bjt.zig / diode.zig; the q() stamps below already follow it).
     var out: [n_u]S = undefined;
-    out[c] = i_rcx.neg().scale(type_f);
-    out[b] = i_rbx.neg().scale(type_f);
-    out[e] = i_re.neg().scale(type_f);
-    out[s] = i_rs.neg().scale(type_f);
-    out[cx] = i_rcx.sub(i_rci).add(i_rbp).scale(type_f);
-    out[ci] = i_rci.sub(i_cei).add(i_bc_s).scale(type_f);
-    out[bx] = i_rbx.sub(i_rbi).sub(i_bex_s).sub(i_bep_s).sub(i_ccp_s).scale(type_f);
-    out[bi] = i_rbi.sub(i_be_s).sub(i_bc_s).scale(type_f);
-    out[bp] = i_bep_s.sub(i_rbp).add(i_bcp_s).scale(type_f);
-    out[ei] = i_re.add(i_be_s).add(i_bex_s).add(i_cei).scale(type_f);
-    out[si] = i_rs.sub(i_bcp_s).add(i_ccp_s).scale(type_f);
+    out[c] = i_rcx.scale(type_f);
+    out[b] = i_rbx.scale(type_f);
+    out[e] = i_re.scale(type_f);
+    out[s] = i_rs.scale(type_f);
+    out[cx] = i_rci.sub(i_rcx).sub(i_rbp).scale(type_f);
+    out[ci] = i_cei.sub(i_rci).sub(i_bc_s).scale(type_f);
+    out[bx] = i_rbi.add(i_bex_s).add(i_bep_s).add(i_ccp_s).sub(i_rbx).scale(type_f);
+    out[bi] = i_be_s.add(i_bc_s).sub(i_rbi).scale(type_f);
+    out[bp] = i_rbp.sub(i_bep_s).sub(i_bcp_s).scale(type_f);
+    out[ei] = i_re.add(i_be_s).add(i_bex_s).add(i_cei).neg().scale(type_f);
+    out[si] = i_bcp_s.sub(i_rs).sub(i_ccp_s).scale(type_f);
 
     // Excess phase nodes
     out[xf1] = if (use_excess_phase) i_xf1 else v_xf1.scale(1.0e12);
@@ -1330,10 +1332,10 @@ test "vbic: forward-active B-E transport current (isothermal, default NPN)" {
     const ibe_ideal = 1e-18 * (contract.fmath.exp(0.7 / vtv) - 1.0);
     // WBE=1 -> i_be = ibe_ideal + gmin*0.7 ; scale=1 -> i_be_s = same.
     const i_be_s_expect = 1.0 * ibe_ideal + 1e-12 * 0.7;
-    // The bi row = i_rbi - i_be_s - i_bc_s; RBI=0 -> i_rbi shorts (1e12*v_rbi),
-    // v_rbi = x[bx]-x[bi] = -0.7 -> i_rbi = -0.7e12. This dominates bi row.
-    // Instead verify ei row lower-bounded by i_be_s (transport adds more).
-    try testing.expect(out[@intFromEnum(U.ei)] > i_be_s_expect * 0.5);
+    // The bi row is dominated by the RBI=0 short (1e12*v_rbi), so verify the
+    // ei row instead: current LEAVES the device into node ei (junction + transport
+    // currents arrive at ei), so out[ei] is strongly negative.
+    try testing.expect(out[@intFromEnum(U.ei)] < -i_be_s_expect * 0.5);
     // Finite everywhere.
     for (out) |o| try testing.expect(std.math.isFinite(o));
 }
