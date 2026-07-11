@@ -1,0 +1,51 @@
+// HSPICE S element: an N-port given by Touchstone data, as the rational
+// admittance the frontend fits to it (src/frontend/sparam.zig):
+//
+//   I_i = sum_j ( d_ij + sum_k (b1_ijk s + b0_ijk) / (a2_k s^2 + a1_k s + a0_k) ) V_j
+//
+// with V_j = V(p[j], r) and I_i flowing into port i. Poles are common to
+// every entry; each complex pair, or two real poles, is one section, run as
+// its own laplace_nd (one high-degree polynomial would be ill-conditioned).
+// Unused sections are 0/1.
+//
+// Verilog-A implementation: Omar El-Sawy, University of Waterloo.
+// Based on: HSPICE S element [HSPICE Signal Integrity User Guide, S-parameter
+//   modeling using the S element]; VAMS-2023 §4.5.11.4.
+//
+// sparam_2..4 define SP_N and include this file.
+`include "disciplines.vams"
+
+`ifndef SP_N
+`define SP_N 1
+module sparam_1(p, r);
+`elsif SP_2
+module sparam_2(p, r);
+`elsif SP_3
+module sparam_3(p, r);
+`else
+module sparam_4(p, r);
+`endif
+    // Sections (pole pairs) per port.
+    `define SP_K 16
+    inout [0:`SP_N-1] p;
+    inout r;
+    electrical [0:`SP_N-1] p;
+    electrical r;
+
+    parameter real d[0:`SP_N*`SP_N-1] = '{`SP_N*`SP_N{0.0}};            // S, entry i*N+j
+    parameter real den[0:3*`SP_K-1] = '{`SP_K{1.0, 0.0, 0.0}};          // section k: a0 a1 a2
+    parameter real num[0:2*`SP_N*`SP_N*`SP_K-1] = '{2*`SP_N*`SP_N*`SP_K{0.0}}; // entry e, section k: b0 b1 at 2*(e*K+k)
+
+    genvar i, j, k;
+
+    analog begin
+        for (i = 0; i < `SP_N; i = i + 1)
+            for (j = 0; j < `SP_N; j = j + 1) begin
+                I(p[i], r) <+ d[i*`SP_N+j] * V(p[j], r);
+                for (k = 0; k < `SP_K; k = k + 1)
+                    I(p[i], r) <+ laplace_nd(V(p[j], r),
+                        '{num[2*((i*`SP_N+j)*`SP_K+k)], num[2*((i*`SP_N+j)*`SP_K+k)+1]},
+                        '{den[3*k], den[3*k+1], den[3*k+2]});
+            end
+    end
+endmodule

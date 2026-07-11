@@ -1,0 +1,4 @@
+// sparam_3: the 3-port S element; body in sparam_1.va.
+`define SP_N 3
+`define SP_3
+`include "sparam_1.va"

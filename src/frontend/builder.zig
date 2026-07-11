@@ -9,6 +9,8 @@ const z = @import("stdpp");
 const requests = core.query;
 const numerics = @import("core").numerics;
 const devices = @import("spice.zig");
+const sparam = @import("sparam.zig");
+const wfit = @import("wfit.zig");
 const device = @import("device");
 /// SPICE letter/LEVEL dispatch, re-exported for the frontend tests.
 pub const spice = devices;
@@ -899,7 +901,9 @@ pub const NetBuilder = struct {
                 if (sourceAc(dev)) |ac| try self.ac.append(self.arena, .{ .pos = nodes[0], .neg = nodes[1], .re = ac.re, .im = ac.im });
                 try self.i.append(self.arena, .{ .name = dev.name, .pos = nodes[0], .neg = if (nodes.len > 1) nodes[1] else GROUND });
             },
-            'f', 'h', 'w', 'k' => try self.deferred.append(self.arena, dev),
+            'w' => if (self.nl.deck.dialect == .hspice) try self.addWline(dev) else try self.deferred.append(self.arena, dev),
+            's' => if (self.nl.deck.dialect == .hspice) try self.addSparam(dev) else try self.addByLetter(letter, dev),
+            'f', 'h', 'k' => try self.deferred.append(self.arena, dev),
             // A tape that reads i() waits until every branch row exists.
             'b' => if (readsCurrent(self.nl, dev)) try self.deferred.append(self.arena, dev) else try self.addB(dev),
             'p' => try self.addCpl(dev),
@@ -1334,6 +1338,152 @@ pub const NetBuilder = struct {
                 return;
             }
         }
+        unreachable;
+    }
+
+    /// HSPICE W element [SI Ch.3]: `Wx i1..iN iR o1..oN oR N= L=` with
+    /// `RLGCMODEL=` (a `.model m W MODELTYPE=RLGC`) or `RLGCFILE=`, on
+    /// models/wline_N.va: the modal rational fit of wfit.zig run by the
+    /// method of characteristics. Refused: other model forms and N > 4.
+    fn addWline(self: *NetBuilder, dev: Device) !void {
+        var m: WMatrices = .{};
+        var n: usize = 0;
+        if (kvName(dev.kv, "rlgcmodel")) |name| {
+            const card = self.nl.findModel(name) orelse return refuseW(dev, "no .model named by RLGCMODEL");
+            if (!std.mem.eql(u8, card.kind, "w")) return refuseW(dev, "RLGCMODEL names a model that is not type W");
+            if (kvName(card.kv, "modeltype")) |t| if (!std.mem.eql(u8, t, "rlgc")) return refuseW(dev, "only MODELTYPE=RLGC is supported");
+            n = @intFromFloat(@max(0, (try numericParameter(card.kv, "n")) orelse 0));
+            if (n == 0 or n > wfit.max_n) return refuseW(dev, "N must be 1 to 4");
+            const tri = n * (n + 1) / 2;
+            const keys = [_][2][]const u8{ .{ "lo", "l" }, .{ "co", "c" }, .{ "ro", "r" }, .{ "go", "g" }, .{ "rs", "" }, .{ "gd", "" } };
+            for (keys, 0..) |k, which| {
+                var got = try cplVector(card.kv, k[0], m.tri[which][0..tri]);
+                if (got == 0 and k[1].len != 0) got = try cplVector(card.kv, k[1], m.tri[which][0..tri]);
+                if (got != 0 and got != tri) return refuseW(dev, "a matrix does not hold N(N+1)/2 lower-triangle entries");
+                if (got == 0 and which < 2) return refuseW(dev, "Lo and Co are required");
+            }
+        } else if (kvName(dev.kv, "rlgcfile")) |path| {
+            const bytes = self.nl.dataFile(path) orelse return refuseW(dev, "RLGCFILE was not read");
+            n = parseRlgcFile(bytes, &m) catch return refuseW(dev, "malformed RLGC file");
+        } else return refuseW(dev, "only RLGCMODEL= and RLGCFILE= are supported (TABLEMODEL, UMODEL, FSMODEL and SMODEL are not)");
+        if (try numericParameter(dev.kv, "n")) |nn| if (nn != @as(f64, @floatFromInt(n))) return refuseW(dev, "N differs from the model's");
+        if (dev.pins.len != 2 * n + 2) return refuseW(dev, "the node count is not 2N+2");
+        const length = (try numericParameter(dev.kv, "l")) orelse return refuseW(dev, "L= (length) is required");
+        if (!(length > 0)) return refuseW(dev, "L must be positive");
+        var p: wfit.Rlgc = .{
+            .n = n,
+            .length = length,
+            .fgd = (try numericParameter(dev.kv, "fgd")) orelse 0,
+            .rs_imag = if (kvName(dev.kv, "includersimag")) |v| !std.mem.eql(u8, v, "no") else (kvNumber(dev.kv, "includersimag") orelse 1) != 0,
+        };
+        for ([_]*[wfit.max_n][wfit.max_n]f64{ &p.l, &p.c, &p.r, &p.g, &p.rs, &p.gd }, m.tri) |dst, tri| {
+            var idx: usize = 0;
+            for (0..n) |i| for (0..i + 1) |j| {
+                dst[i][j] = tri[idx];
+                dst[j][i] = tri[idx];
+                idx += 1;
+            };
+        }
+        var nodes: [2 * wfit.max_n + 2]u32 = undefined;
+        for (dev.pins, nodes[0..dev.pins.len]) |pin, *row| row.* = try self.rowOf(pin);
+        inline for (.{ devices.wline_1, devices.wline_2, devices.wline_3, devices.wline_4 }, 1..) |D, N| if (n == N) {
+            if (comptime !@hasDecl(D, "eval")) return error.UnsupportedDevice;
+            const k = comptime slotCount(D.Model, "ycp") / (3 * N);
+            const line = wfit.fitLine(self.arena, p, k) catch |err| return refuseW(dev, @errorName(err));
+            var model: D.Model = .{};
+            var tv: [N * N]f64 = undefined;
+            var ti: [N * N]f64 = undefined;
+            var rdc: [N * N]f64 = undefined;
+            var gdc: [N * N]f64 = undefined;
+            for (0..N) |i| for (0..N) |j| {
+                tv[i * N + j] = line.tv[i][j];
+                ti[i * N + j] = line.ti[i][j];
+                rdc[i * N + j] = p.r[i][j] * length;
+                gdc[i * N + j] = p.g[i][j] * length / 2;
+            };
+            var z0: [N]f64 = undefined;
+            var td: [N]f64 = undefined;
+            var ycd: [N]f64 = undefined;
+            var hd: [N]f64 = undefined;
+            var ycn: [2 * N * k]f64 = @splat(0);
+            var hn: [2 * N * k]f64 = @splat(0);
+            var ycp: [3 * N * k]f64 = undefined;
+            var hp: [3 * N * k]f64 = undefined;
+            for (0..N * k) |s| {
+                ycp[3 * s ..][0..3].* = .{ 1, 0, 0 };
+                hp[3 * s ..][0..3].* = .{ 1, 0, 0 };
+            }
+            for (line.modes[0..N], 0..) |md, mi| {
+                z0[mi] = md.z0;
+                td[mi] = md.tau;
+                ycd[mi] = md.yc.d;
+                hd[mi] = md.h.d;
+                for (md.yc.num, md.yc.den, 0..) |nm, dn, s| {
+                    ycn[2 * (mi * k + s) ..][0..2].* = nm;
+                    ycp[3 * (mi * k + s) ..][0..3].* = dn;
+                }
+                for (md.h.num, md.h.den, 0..) |nm, dn, s| {
+                    hn[2 * (mi * k + s) ..][0..2].* = nm;
+                    hp[3 * (mi * k + s) ..][0..3].* = dn;
+                }
+                const err = @max(md.yc.rel_err, md.h.rel_err);
+                if (err > 1e-2 and !@import("builtin").is_test)
+                    std.log.warn("W element '{s}': mode {d} rational fit error {e:.2}", .{ dev.name, mi, err });
+            }
+            inline for (.{ "tv", "ti", "rdc", "gdc", "z0", "td", "ycd", "hd", "ycn", "hn", "ycp", "hp" }, .{ &tv, &ti, &rdc, &gdc, &z0, &td, &ycd, &hd, &ycn, &hn, &ycp, &hp }) |base, values|
+                setArray(D.Model, &model, base, values);
+            return self.b.addDevice(D, dev.name, model, .{}, nodes[0 .. 2 * N + 2].*);
+        };
+        unreachable;
+    }
+
+    /// HSPICE S element [SI Ch.2]: `Sx nd1..ndN [ndR] MNAME=m`, `.model m S
+    /// TSTONEFILE=f.sNp`, on models/sparam_N.va: the file's admittance
+    /// vector fitted with common poles and made passive (sparam.zig), every
+    /// entry a sum of second-order sections. Refused: FQMODEL/CITIFILE/
+    /// RFMFILE data, mixed mode, N > 4, and a fit that cannot be made
+    /// passive.
+    fn addSparam(self: *NetBuilder, dev: Device) !void {
+        const model_name = kvName(dev.kv, "mname") orelse return refuseS(dev, "MNAME= is required (FQMODEL is not supported)");
+        const card = self.nl.findModel(model_name) orelse return refuseS(dev, "no .model named by MNAME");
+        if (!std.mem.eql(u8, card.kind, "s")) return refuseS(dev, "MNAME names a model that is not type S");
+        for ([_][]const u8{ "fqmodel", "citifile", "rfmfile" }) |k| if (kvName(card.kv, k) != null or kvName(dev.kv, k) != null)
+            return refuseS(dev, "only TSTONEFILE data is supported");
+        if ((kvNumber(card.kv, "mixedmode") orelse 0) != 0 or (kvNumber(dev.kv, "mixedmode") orelse 0) != 0)
+            return refuseS(dev, "mixed-mode data is not supported");
+        const path = kvName(card.kv, "tstonefile") orelse return refuseS(dev, "TSTONEFILE= is required");
+        const ext = std.fs.path.extension(path);
+        const from_ext: ?usize = if (ext.len >= 4 and std.ascii.toLower(ext[1]) == 's' and std.ascii.toLower(ext[ext.len - 1]) == 'p')
+            std.fmt.parseInt(usize, ext[2 .. ext.len - 1], 10) catch null
+        else
+            null;
+        const p: usize = if (try numericParameter(card.kv, "n")) |n| @intFromFloat(@max(0, n)) else from_ext orelse return refuseS(dev, "the port count is neither N= nor a .sNp extension");
+        if (p == 0 or p > 4) return refuseS(dev, "1 to 4 ports are supported");
+        if (dev.pins.len != p and dev.pins.len != p + 1) return refuseS(dev, "the node count is not N or N+1");
+        const bytes = self.nl.dataFile(path) orelse return refuseS(dev, "TSTONEFILE was not read");
+        const net = sparam.parseTouchstone(self.arena, bytes, p) catch |err| return refuseS(dev, @errorName(err));
+        var nodes: [5]u32 = @splat(GROUND);
+        for (dev.pins, nodes[0..dev.pins.len]) |pin, *row| row.* = try self.rowOf(pin);
+        inline for (.{ devices.sparam_1, devices.sparam_2, devices.sparam_3, devices.sparam_4 }, 1..) |D, N| if (p == N) {
+            if (comptime !@hasDecl(D, "eval")) return error.UnsupportedDevice;
+            const k = comptime slotCount(D.Model, "den") / 3;
+            var fit = try sparam.fit(self.arena, net, .{ .max_order = 2 * k });
+            if (!try sparam.enforcePassivity(self.arena, net, &fit)) return refuseS(dev, "the rational fit could not be made passive");
+            if (fit.rel_err > 1e-3 and !@import("builtin").is_test)
+                std.log.warn("S element '{s}': rational fit error {e:.2} of max |Y|", .{ dev.name, fit.rel_err });
+            const sec = try sparam.sections(self.arena, fit);
+            var model: D.Model = .{};
+            var d: [N * N]f64 = undefined;
+            @memcpy(&d, fit.d);
+            var den: [3 * k]f64 = undefined;
+            var num: [2 * N * N * k]f64 = @splat(0);
+            for (0..k) |s| den[3 * s ..][0..3].* = if (s < sec.den.len) sec.den[s] else .{ 1, 0, 0 };
+            for (0..N * N) |e| for (sec.num[e * sec.den.len ..][0..sec.den.len], 0..) |nm, s| {
+                num[2 * (e * k + s) ..][0..2].* = nm;
+            };
+            inline for (.{ "d", "den", "num" }, .{ &d, &den, &num }) |base, values| setArray(D.Model, &model, base, values);
+            return self.b.addDevice(D, dev.name, model, .{}, nodes[0 .. N + 1].*);
+        };
         unreachable;
     }
 
@@ -1958,9 +2108,19 @@ fn pwlCapacity(comptime T: type) usize {
 
 /// Slots of the flattened Verilog-A array `base` in `T`.
 fn slotCount(comptime T: type, comptime base: []const u8) usize {
+    // The S and W templates hold arrays of a few hundred slots.
+    @setEvalBranchQuota(10_000_000);
     comptime var n: usize = 0;
     inline while (@hasField(T, pwlSlot(base, n))) : (n += 1) {}
     return n;
+}
+
+/// Writes `values` over VerA array parameter `base` (fields `base[k]`),
+/// whose slot count must equal `values.len`.
+fn setArray(comptime T: type, model: *T, comptime base: []const u8, values: anytype) void {
+    comptime std.debug.assert(slotCount(T, base) == values.len);
+    @setEvalBranchQuota(10_000_000);
+    inline for (0..values.len) |k| @field(model, pwlSlot(base, k)) = values[k];
 }
 
 /// Writes the card's waveform (group or parenless spelling) into `target`,
@@ -2301,6 +2461,53 @@ fn cplVector(kv: []const Kv, key: []const u8, out: []f64) !usize {
         return n;
     }
     return 0;
+}
+
+/// A W element's lower-triangle matrices in RLGC-file order: L, C, R, G, Rs, Gd.
+const WMatrices = struct { tri: [6][10]f64 = @splat(@splat(0)) };
+
+fn refuseW(dev: Device, why: []const u8) error{UnsupportedCard} {
+    if (!@import("builtin").is_test) std.log.err("W element '{s}': {s}", .{ dev.name, why });
+    return error.UnsupportedCard;
+}
+
+fn refuseS(dev: Device, why: []const u8) error{UnsupportedCard} {
+    if (!@import("builtin").is_test) std.log.err("S element '{s}': {s}", .{ dev.name, why });
+    return error.UnsupportedCard;
+}
+
+/// An HSPICE RLGC file [SI Ch.3, Table 4]: N, then the lower triangles of
+/// L, C and optionally Ro, Go, Rs, Gd, as plain numbers (no scale
+/// suffixes). `*` comments to end of line; any of ` \t\n,;()[]{}`
+/// separates. Returns N.
+fn parseRlgcFile(bytes: []const u8, m: *WMatrices) !usize {
+    var nums: [1 + 6 * 10]f64 = undefined;
+    var count: usize = 0;
+    var lines_it = std.mem.splitScalar(u8, bytes, '\n');
+    while (lines_it.next()) |raw| {
+        const line = raw[0 .. std.mem.indexOfScalar(u8, raw, '*') orelse raw.len];
+        var it = std.mem.tokenizeAny(u8, line, " \t\r,;()[]{}");
+        while (it.next()) |t| {
+            if (count == nums.len) return error.InvalidParameterValue;
+            nums[count] = try std.fmt.parseFloat(f64, t);
+            count += 1;
+        }
+    }
+    if (count == 0) return error.InvalidParameterValue;
+    const n: usize = if (nums[0] >= 1 and nums[0] <= 4 and @floor(nums[0]) == nums[0]) @intFromFloat(nums[0]) else return error.InvalidParameterValue;
+    const tri = n * (n + 1) / 2;
+    const mats = (count - 1) / tri;
+    if ((count - 1) % tri != 0 or mats < 2 or mats > 6) return error.InvalidParameterValue;
+    for (0..mats) |k| @memcpy(m.tri[k][0..tri], nums[1 + k * tri ..][0..tri]);
+    return n;
+}
+
+fn kvName(kv: []const Kv, key: []const u8) ?[]const u8 {
+    for (kv) |item| if (std.mem.eql(u8, item.key, key)) return switch (item.value) {
+        .name => |n| n,
+        else => null,
+    };
+    return null;
 }
 
 fn valueNumber(value: Value) ?f64 {

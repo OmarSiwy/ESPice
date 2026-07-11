@@ -1,0 +1,4 @@
+// wline_2: the 2-conductor W element; body in wline_1.va.
+`define W_N 2
+`define W_2
+`include "wline_1.va"

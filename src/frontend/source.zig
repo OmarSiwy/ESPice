@@ -229,7 +229,9 @@ fn word(fields: *Fields) !?[]const u8 {
 }
 
 /// A model file the netlist includes but does not parse.
-pub const ForeignKind = enum { osdi_include, pre_osdi, verilog_a, verilog };
+/// What a non-netlist file a deck names holds: an HDL module, or `data`
+/// that a card reads (an HSPICE RLGC or Touchstone file).
+pub const ForeignKind = enum { osdi_include, pre_osdi, verilog_a, verilog, data };
 
 /// The HDL kind a path's extension names; null for a netlist include.
 pub fn foreignKindForPath(path: []const u8) ?ForeignKind {

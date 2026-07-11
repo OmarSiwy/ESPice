@@ -14,7 +14,7 @@
 //! surviving as a spurious root.
 //!
 //! Poles are s = 1/λ for the eigenvalues λ of A = −G⁻¹C, found by dense
-//! Hessenberg reduction and Francis double-shift QR (qr.zig). Zeros are the
+//! Hessenberg reduction and Francis double-shift QR (core/eigen.zig). Zeros are the
 //! finite generalized eigenvalues of the numerator pencil itself, by QZ
 //! (qz.zig). That pencil is singular at s = 0 whenever the transfer has a
 //! zero there, and its roots at infinity form a defective block. Through A
@@ -26,7 +26,7 @@ const root = @import("../types.zig");
 const types = @import("core").numerics;
 const dense_lu = @import("solver").dense_lu;
 const freq_solve = @import("solver").freq_solve;
-const qr = @import("qr.zig");
+const qr = @import("core").eigen;
 const qz = @import("qz.zig");
 
 const Complex = types.Complex;

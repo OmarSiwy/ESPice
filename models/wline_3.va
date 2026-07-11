@@ -1,0 +1,4 @@
+// wline_3: the 3-conductor W element; body in wline_1.va.
+`define W_N 3
+`define W_3
+`include "wline_1.va"

@@ -1,0 +1,130 @@
+// HSPICE W element: N coupled lossy lines (RLGC, with skin effect Rs and
+// dielectric loss Gd), by the method of characteristics on the rational,
+// delay-extracted model the frontend fits (src/frontend/wfit.zig).
+//
+// Ports: near-end conductors p[0..N-1] and reference rn, far-end q[0..N-1]
+// and rf. Modal voltages vm = Tv^-1 v, phase currents i = Ti im. Per mode,
+// with Yc(s) = yc(s)/z0 and P(s) the propagation e^(-gamma l + s td):
+//
+//   w1 = P * delay_td(2 yc*vm2 - w2),  w2 = P * delay_td(2 yc*vm1 - w1)
+//   im1 = (yc*vm1 - w1) / z0,          im2 = (yc*vm2 - w2) / z0
+//
+// w1, w2 are the incident waves (scaled by z0, so in volts) on internal
+// nodes. yc and P are d + sections (b1 s + b0)/(a2 s^2 + a1 s + a0), each
+// its own laplace_nd (one high-degree polynomial would be ill-conditioned);
+// unused sections are 0/1.
+//
+// DC (analysis "static"): the exact resistive line, series R0*l (mutual
+// included) from p[k] to q[k] and G0*l/2 shunts at each end; the waves take
+// the values the transient's first step expects, so it starts at rest.
+//
+// Verilog-A implementation: Omar El-Sawy, University of Waterloo.
+// Based on: HSPICE W element [HSPICE Signal Integrity User Guide, Modeling
+//   coupled transmission lines using the W element]; VAMS-2023 §4.5.11.4.
+//
+// wline_2..4 define W_N and include this file.
+`include "disciplines.vams"
+
+`ifndef W_N
+`define W_N 1
+module wline_1(p, rn, q, rf);
+`elsif W_2
+module wline_2(p, rn, q, rf);
+`elsif W_3
+module wline_3(p, rn, q, rf);
+`else
+module wline_4(p, rn, q, rf);
+`endif
+    // Sections per fitted function.
+    `define W_K 12
+    // Section k of mode m: numerator b0 b1 at c[2*(m*K+k)], denominator
+    // a0 a1 a2 at cp[3*(m*K+k)].
+    `define SECTION(c, cp, i, u) laplace_nd(u, '{c[2*(i)], c[2*(i)+1]}, '{cp[3*(i)], cp[3*(i)+1], cp[3*(i)+2]})
+    // absdelay's maxdelay: a constant sizes VerA's history ring (to its
+    // 16384-sample cap) and never clamps a modal delay.
+    `define W_TDMAX 1.0
+    inout [0:`W_N-1] p, q;
+    inout rn, rf;
+    electrical [0:`W_N-1] p, q;
+    electrical rn, rf;
+    electrical [0:`W_N-1] w1, w2;
+
+    // Ti = Tv^-T, so vm = Ti^T v and im = Tv^T i.
+    parameter real tv[0:`W_N*`W_N-1] = '{`W_N*`W_N{0.0}};   // Tv, row-major
+    parameter real ti[0:`W_N*`W_N-1] = '{`W_N*`W_N{0.0}};   // Ti, row-major
+    parameter real rdc[0:`W_N*`W_N-1] = '{`W_N*`W_N{0.0}};  // ohm   R0*l
+    parameter real gdc[0:`W_N*`W_N-1] = '{`W_N*`W_N{0.0}};  // S     G0*l/2
+    parameter real z0[0:`W_N-1] = '{`W_N{50.0}};            // ohm   modal lossless Z0
+    parameter real td[0:`W_N-1] = '{`W_N{1e-9}};            // s     modal lossless delay
+    parameter real ycd[0:`W_N-1] = '{`W_N{1.0}};            // direct terms
+    parameter real hd[0:`W_N-1] = '{`W_N{1.0}};
+    parameter real ycn[0:2*`W_N*`W_K-1] = '{2*`W_N*`W_K{0.0}};
+    parameter real ycp[0:3*`W_N*`W_K-1] = '{`W_N*`W_K{1.0, 0.0, 0.0}};
+    parameter real hn[0:2*`W_N*`W_K-1] = '{2*`W_N*`W_K{0.0}};
+    parameter real hp[0:3*`W_N*`W_K-1] = '{`W_N*`W_K{1.0, 0.0, 0.0}};
+
+    real vm1[0:`W_N-1], vm2[0:`W_N-1], y1[0:`W_N-1], y2[0:`W_N-1];
+    real b1[0:`W_N-1], b2[0:`W_N-1], h1[0:`W_N-1], h2[0:`W_N-1];
+    real i1[0:`W_N-1], i2[0:`W_N-1];
+    genvar m, k, j;
+
+    analog begin
+        for (m = 0; m < `W_N; m = m + 1) begin
+            vm1[m] = 0.0;
+            vm2[m] = 0.0;
+            for (k = 0; k < `W_N; k = k + 1) begin
+                vm1[m] = vm1[m] + ti[k*`W_N+m] * V(p[k], rn);
+                vm2[m] = vm2[m] + ti[k*`W_N+m] * V(q[k], rf);
+            end
+            y1[m] = ycd[m] * vm1[m];
+            y2[m] = ycd[m] * vm2[m];
+            for (k = 0; k < `W_K; k = k + 1) begin
+                y1[m] = y1[m] + `SECTION(ycn, ycp, m*`W_K+k, vm1[m]);
+                y2[m] = y2[m] + `SECTION(ycn, ycp, m*`W_K+k, vm2[m]);
+            end
+            b1[m] = absdelay(2.0 * y2[m] - V(w2[m]), td[m], `W_TDMAX);
+            b2[m] = absdelay(2.0 * y1[m] - V(w1[m]), td[m], `W_TDMAX);
+            h1[m] = hd[m] * b1[m];
+            h2[m] = hd[m] * b2[m];
+            for (k = 0; k < `W_K; k = k + 1) begin
+                h1[m] = h1[m] + `SECTION(hn, hp, m*`W_K+k, b1[m]);
+                h2[m] = h2[m] + `SECTION(hn, hp, m*`W_K+k, b2[m]);
+            end
+        end
+        if (analysis("static")) begin
+            for (k = 0; k < `W_N; k = k + 1) begin
+                // Phase currents into the line at each end.
+                i1[k] = I(p[k], q[k]);
+                i2[k] = -I(p[k], q[k]);
+                for (j = 0; j < `W_N; j = j + 1) begin
+                    V(p[k], q[k]) <+ rdc[k*`W_N+j] * I(p[j], q[j]);
+                    I(p[k], rn) <+ gdc[k*`W_N+j] * V(p[j], rn);
+                    I(q[k], rf) <+ gdc[k*`W_N+j] * V(q[j], rf);
+                    i1[k] = i1[k] + gdc[k*`W_N+j] * V(p[j], rn);
+                    i2[k] = i2[k] + gdc[k*`W_N+j] * V(q[j], rf);
+                end
+            end
+            // Waves consistent with those currents: w = yc*vm - z0 im.
+            for (m = 0; m < `W_N; m = m + 1) begin
+                V(w1[m]) <+ y1[m];
+                V(w2[m]) <+ y2[m];
+                for (k = 0; k < `W_N; k = k + 1) begin
+                    V(w1[m]) <+ -z0[m] * tv[k*`W_N+m] * i1[k];
+                    V(w2[m]) <+ -z0[m] * tv[k*`W_N+m] * i2[k];
+                end
+            end
+        end else begin
+            for (k = 0; k < `W_N; k = k + 1) begin
+                I(p[k], q[k]) <+ 0.0;
+                for (m = 0; m < `W_N; m = m + 1) begin
+                    I(p[k], rn) <+ ti[k*`W_N+m] * (y1[m] - V(w1[m])) / z0[m];
+                    I(q[k], rf) <+ ti[k*`W_N+m] * (y2[m] - V(w2[m])) / z0[m];
+                end
+            end
+            for (m = 0; m < `W_N; m = m + 1) begin
+                V(w1[m]) <+ h1[m];
+                V(w2[m]) <+ h2[m];
+            end
+        end
+    end
+endmodule

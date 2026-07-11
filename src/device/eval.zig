@@ -491,6 +491,9 @@ fn SlotMap(comptime D: type) type {
         /// Entry (ru, cu)'s position; a compile error for a structural zero.
         pub fn at(comptime ru: usize, comptime cu: usize) usize {
             comptime {
+                // One row scan per call; a wide device (wline_4's laplace
+                // sections, every one an `ac_dyn_slots` entry) passes 1000.
+                @setEvalBranchQuota(100_000);
                 const pat = jacPattern(D);
                 if ((pat[ru] >> cu) & 1 == 0) @compileError(@typeName(D) ++ " stamps an entry outside its jac/q pattern");
                 var n: usize = 0;

@@ -40,7 +40,7 @@ pub fn roots(n: usize, a: []f64, b: []f64, out: []Complex, tol: f64, max_iter: u
     while (hi > 0) {
         const l = hi - 1;
         // Top of the active block: the largest f whose subdiagonal entry is
-        // negligible, as in qr.zig's Francis loop.
+        // negligible, as in core/eigen.zig's Francis loop.
         var f = l;
         while (f > 0) : (f -= 1) {
             const sub = @abs(a[f * m + f - 1]);
@@ -268,7 +268,7 @@ fn quadraticRoots(tr: f64, det: f64, out: *[2]Complex) void {
 fn qzStep(m: usize, a: []f64, b: []f64, f: usize, l: usize, iter: u32, tr_in: f64, det_in: f64) void {
     var tr = tr_in;
     var det = det_in;
-    // EISPACK's exceptional shift, as in qr.zig: after ten sweeps the
+    // EISPACK's exceptional shift, as in core/eigen.zig: after ten sweeps the
     // trailing block has stopped steering the iteration.
     if (iter > 0 and iter % 10 == 0) {
         const mag = @abs(a[l * m + l - 1] / b[(l - 1) * m + l - 1]) +

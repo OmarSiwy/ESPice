@@ -140,6 +140,14 @@ pub const vccs_pole = byName("vccs_pole");
 pub const vcvs_delay = byName("vcvs_delay");
 pub const vccs_delay = byName("vccs_delay");
 pub const txl_native = byName("txl_native");
+pub const wline_1 = byName("wline_1");
+pub const wline_2 = byName("wline_2");
+pub const wline_3 = byName("wline_3");
+pub const wline_4 = byName("wline_4");
+pub const sparam_1 = byName("sparam_1");
+pub const sparam_2 = byName("sparam_2");
+pub const sparam_3 = byName("sparam_3");
+pub const sparam_4 = byName("sparam_4");
 
 /// `.model` LEVEL tables, per ngspice src/spicelib/parser/inpdomod.c.
 const Level = struct { level: u16, model: DeviceId };

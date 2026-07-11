@@ -1,6 +1,6 @@
 //! QR and QZ eigenvalue unit tests behind the pole-zero analysis.
 
-const qr = @import("../eigen/qr.zig");
+const qr = @import("core").eigen;
 const qz = @import("../eigen/qz.zig");
 const Complex = @import("core").numerics.Complex;
 const eigenvalues = qr.eigenvalues;
