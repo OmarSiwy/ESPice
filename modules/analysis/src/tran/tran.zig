@@ -131,7 +131,8 @@ pub const Options = struct {
     t_stop: f64,
     dt_init: f64 = 1e-9,
     dt_min: f64 = 1e-18,
-    dt_max: f64 = 1e-3,
+    /// ngspice tmax: default is t_stop/50; an explicit value replaces it.
+    dt_max: ?f64 = null,
     method: Method = .trapezoidal,
     max_steps: u32 = 1_000_000,
     /// Invoked after each accepted step (envelope/pnoise/pac build on this).
@@ -354,37 +355,52 @@ pub fn simulate(
         @memset(i_prev, 0);
         for (&q_hist) |*q| q.* = try allocator.alloc(f64, n);
         ckt.eval(x, 0);
-        @memcpy(q_hist[1], ckt.q_vec[0..n]); // q_prev at t=0
+        // Seed the whole history with q(0): divided differences over the
+        // flat history vanish, so LTE control runs from the first step.
+        @memcpy(q_hist[1], ckt.q_vec[0..n]);
+        @memcpy(q_hist[2], ckt.q_vec[0..n]);
+        @memcpy(q_hist[3], ckt.q_vec[0..n]);
     }
-    var q_levels: u2 = 0; // valid history levels beyond q_prev
-    var dt_prev: f64 = 0;
-    var dt_prev2: f64 = 0;
 
     if (has_history) ckt.recordHistory(x, 0);
 
-    // Clamp dt_max to minimum delay for history-aware timestep control
-    var effective_dt_max = options.dt_max;
+    // ngspice tmax default is (tstop-tstart)/50; explicit tmax replaces it.
+    // Clamp to minimum delay for history-aware timestep control.
+    var effective_dt_max = options.dt_max orelse options.t_stop / 50.0;
     if (ckt.minDelay()) |td_min| effective_dt_max = @min(effective_dt_max, td_min);
-    // SPICE2 heuristic: never exceed 2% of simulation interval
-    effective_dt_max = @min(effective_dt_max, options.t_stop / 50.0);
+    // ngspice CKTminBreak: breakpoints closer than this to the current time
+    // (or to each other) are merged/skipped.
+    const min_break = 5e-5 * effective_dt_max;
 
     try waveform.record(0, x, probes);
 
     var cur: []f64 = x;
     var trial: []f64 = x_try;
     var t: f64 = 0;
-    var dt: f64 = options.dt_init;
+    // spice3 dctran first step: min(tstep, tmax)/10, and never past the
+    // first breakpoint — a 1ns pulse edge at t~0 must not be skipped.
+    var dt: f64 = @min(options.dt_init, effective_dt_max) / 10.0;
+    if (ckt.nextBreakpoint(min_break)) |bp0| {
+        if (bp0 < dt) dt = bp0 / 10.0;
+    }
+    var dt_prev: f64 = dt;
+    var dt_prev2: f64 = dt;
     var steps: u32 = 0;
     // Order control (ngspice-style): start at BE, promote to configured
     // method when LTE says it's safe. Drop back to BE at breakpoints to
     // suppress trap companion ringing after source-edge discontinuities.
     var use_be: bool = true;
-    var bp_landing: bool = false;
+    // Breakpoint we clamped dt_next toward; landing is |t - bp| <= min_break
+    // checked after the step is ACCEPTED (a rejected clamped step must not
+    // leave a stale landing flag behind). bp_save_dt is spice3's CKTsaveDelta:
+    // the dt the LTE wanted before the breakpoint clamp shortened it.
+    var bp_target: ?f64 = null;
+    var bp_save_dt: f64 = 0;
 
     while (t < options.t_stop and steps < options.max_steps) {
-        const use_gear = gear and !use_be and q_levels >= 1;
+        const use_gear = gear and !use_be;
         const use_trap = trap and !use_be;
-        const eff_method: Method = if (use_be or (gear and !use_gear)) .backward_euler else options.method;
+        const eff_method: Method = if (use_be) .backward_euler else options.method;
         const alpha = integrator.alpha(eff_method, dt);
         const hook = TranHook{
             .alpha = alpha,
@@ -404,18 +420,24 @@ pub fn simulate(
         const nr = converger.run(ckt, ws, trial, t + dt, nr_opts, hook) catch converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 };
 
         if (!nr.converged) {
+            // Order drop first: a discontinuity rejects trap long before dt
+            // is the problem. Retry at order 1 at the SAME dt; only halve
+            // when the retry already ran order 1 (ngspice-style).
+            if (!use_be and (trap or gear)) {
+                use_be = true;
+                continue;
+            }
             dt *= 0.5;
             if (dt < options.dt_min) return .{ .completed = false, .steps = steps, .t_final = t };
             continue;
         }
 
-        var dt_next = @min(dt * 1.5, effective_dt_max);
+        var dt_next = @min(dt * 2.0, effective_dt_max);
 
         if (has_charge) {
             @memcpy(q_hist[0], q_snap);
 
-            const need: u2 = if (trap or gear) 2 else 1;
-            if (q_levels >= need) {
+            {
                 const order2 = eff_method != .backward_euler;
                 const del = integrator.stepBound(
                     order2, q_hist[0], q_hist[1], q_hist[2], q_hist[3],
@@ -423,16 +445,23 @@ pub fn simulate(
                     options.tol.reltol, options.tol.abstol, options.tol.chgtol, options.tol.trtol,
                 );
                 if (del < 0.9 * dt) {
+                    if (!use_be and (trap or gear)) {
+                        use_be = true;
+                        continue;
+                    }
                     dt *= 0.5;
                     if (dt < options.dt_min) return .{ .completed = false, .steps = steps, .t_final = t };
                     continue;
                 }
-                dt_next = @min(@max(del, options.dt_min), effective_dt_max);
+                // ngspice caps growth at 2x per accepted step — without it a
+                // post-breakpoint shrink jumps straight back to a huge dt and
+                // starves edge ramps of points.
+                dt_next = @min(@max(del, options.dt_min), 2.0 * dt, effective_dt_max);
             }
 
             // Promote BE → configured method when LTE-based dt is stable.
             // ngspice promotes when trap dt_next > 1.05 * current dt.
-            if (use_be and q_levels >= need) {
+            if (use_be) {
                 const trial_order2 = options.method != .backward_euler;
                 const trial_del = integrator.stepBound(
                     trial_order2, q_hist[0], q_hist[1], q_hist[2], q_hist[3],
@@ -469,7 +498,6 @@ pub fn simulate(
             q_hist[0] = tail;
             dt_prev2 = dt_prev;
             dt_prev = dt;
-            if (q_levels < 2) q_levels += 1;
         }
 
         // ponytail: pointer swap instead of memcpy on accept
@@ -479,11 +507,19 @@ pub fn simulate(
         t += dt;
         steps += 1;
 
-        // If we just landed on a breakpoint, drop to BE + shrink dt.
-        if (bp_landing) {
-            use_be = true;
-            dt_next = @min(dt_next, dt * 0.1);
-            bp_landing = false;
+        // If we just landed on a breakpoint, drop to BE + resume with
+        // 0.1*min(saveDelta, gap to next break) — spice3 dctran's resume
+        // rule, which resolves a paired edge (rise start/end 1ns apart)
+        // instead of stepping over it. The history is NOT flushed — the
+        // promotion check above re-promotes to trap on the next accepted step.
+        if (bp_target) |bp| {
+            if (@abs(t - bp) <= min_break) {
+                use_be = true;
+                var shrink = bp_save_dt;
+                if (ckt.nextBreakpoint(t + min_break)) |nb| shrink = @min(shrink, nb - t);
+                dt_next = @min(dt_next, 0.1 * shrink);
+            }
+            bp_target = null;
         }
 
         if (has_history) ckt.recordHistory(cur, t);
@@ -491,13 +527,15 @@ pub fn simulate(
         try waveform.record(t, cur, probes);
         if (options.step_fn) |f| f(options.step_ctx, t, cur);
 
-        // Breakpoint handling: clamp dt to reach the next breakpoint.
-        // Flag that the step after landing needs BE to suppress trap ringing.
-        if (ckt.nextBreakpoint(t)) |bp| {
+        // Breakpoint handling: clamp dt to land on the next breakpoint,
+        // skipping breaks within min_break of the current time (ngspice
+        // CKTminBreak merge of near-coincident breakpoints).
+        if (ckt.nextBreakpoint(t + min_break)) |bp| {
             const dt_to_bp = bp - t;
-            if (dt_to_bp > 1e-18 and dt_to_bp < dt_next) {
+            if (dt_to_bp < dt_next) {
+                bp_save_dt = dt_next;
                 dt_next = dt_to_bp;
-                bp_landing = true;
+                bp_target = bp;
             }
         }
 
@@ -520,8 +558,10 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     var wf = try Waveform.init(a, @intCast(ctx.probes.len), initialCapacity(opts));
     defer wf.deinit();
-    // Early stop keeps the partial waveform, matching the old engine.
-    _ = try simulate(ctx.circuit, x, ctx.probes, &wf, opts, a);
+    // ngspice treats a truncated transient as a hard failure ("timestep too
+    // small") — never return a silently-truncated waveform.
+    const sim = try simulate(ctx.circuit, x, ctx.probes, &wf, opts, a);
+    if (!sim.completed) return error.TimestepTooSmall;
 
     const names = try root.probeNames(ctx, "time");
     const ncols = names.len;
