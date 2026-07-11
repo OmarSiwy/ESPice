@@ -402,9 +402,10 @@ pub fn Parser(comptime Tok: type) type {
         };
 
         const element_shapes = [_]ElementShape{
-            .{ .letters = "rclvidbfh", .nodes = 2 },
+            // W (current-controlled switch) is 2 nodes + Vname + model.
+            .{ .letters = "rclvidbfhw", .nodes = 2 },
             .{ .letters = "qzj", .nodes = 3 },
-            .{ .letters = "egsmtow", .nodes = 4 },
+            .{ .letters = "egsmto", .nodes = 4 },
             .{ .letters = "k", .nodes = 0 },
             .{ .letters = "px", .nodes = null },
         };

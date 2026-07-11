@@ -158,6 +158,7 @@ pub const NetBuilder = struct {
     // Pre-allocated to bucket('l').size()
     l_names: [][]const u8,
     l_branches: []u32,
+    l_values: []f64,
     n_l: u32,
 
     // Pre-allocated to sum of f/h/w/k bucket sizes
@@ -190,6 +191,7 @@ pub const NetBuilder = struct {
             .n_i = 0,
             .l_names = try arena.alloc([]const u8, nl_),
             .l_branches = try arena.alloc(u32, nl_),
+            .l_values = try arena.alloc(f64, nl_),
             .n_l = 0,
             .deferred = try arena.alloc(Deferred, n_def),
             .n_deferred = 0,
@@ -257,6 +259,7 @@ pub const NetBuilder = struct {
                 const br = try self.addPassive(devices.inductor, dev, "inductance", "l");
                 self.l_names[self.n_l] = dev.name;
                 self.l_branches[self.n_l] = br;
+                self.l_values[self.n_l] = positionalNumber(dev, 0) orelse kvNumber(dev.kv, "inductance") orelse kvNumber(dev.kv, "l") orelse 0;
                 self.n_l += 1;
             },
             'v' => {
@@ -295,7 +298,68 @@ pub const NetBuilder = struct {
                 self.n_deferred += 1;
             },
             'b' => try addBsource(self.b, dev, self.nl.models),
+            'o' => try self.addLossyLine(dev),
             else => try self.addByLetter(letter, dev),
+        }
+    }
+
+    /// LTRA (O card). ngspice solves RLC lines by convolution with the exact
+    /// impulse response; our lossy_tline device is a single lumped pi that
+    /// cannot delay. For LC lines (G = 0) expand into N cascaded Bergeron
+    /// sections [R/2N — ideal T(z0, td/N) — R/2N]: delay is exact, and the
+    /// lumped-loss error falls as R_total/(2*Z0*N). N is picked for ~3e-4
+    /// rms vs ngspice, capped at 48 (beyond that the residual difference is
+    /// ngspice's own history compaction, not segmentation).
+    /// RC / degenerate lines keep the single-pi lossy_tline device.
+    fn addLossyLine(self: *NetBuilder, dev: types.Device) !void {
+        var model: devices.lossy_tline.Model = .{};
+        if (modelName(dev)) |name| {
+            if (findModel(self.nl.models, name)) |m| try applyKv(&model, m.kv);
+        }
+        try applyKv(&model, dev.kv);
+
+        const len: f64 = @as(f64, model.len);
+        const r_t: f64 = @as(f64, model.r) * len;
+        const l_t: f64 = @as(f64, model.l) * len;
+        const c_t: f64 = @as(f64, model.c) * len;
+        const g_t: f64 = @as(f64, model.g) * len;
+
+        if (l_t <= 0 or c_t <= 0 or g_t != 0) return self.addByLetter('o', dev);
+
+        const z0 = @sqrt(l_t / c_t);
+        const td = @sqrt(l_t * c_t);
+        const n_sec: u32 = @intFromFloat(std.math.clamp(@ceil(r_t / (z0 * 0.005)), 1, 48));
+        const r_half = r_t / (2.0 * @as(f64, @floatFromInt(n_sec)));
+
+        const pos1 = if (dev.nodes.len > 0) try self.b.internNode(dev.nodes[0]) else GROUND;
+        const neg1 = if (dev.nodes.len > 1) try self.b.internNode(dev.nodes[1]) else GROUND;
+        const pos2 = if (dev.nodes.len > 2) try self.b.internNode(dev.nodes[2]) else GROUND;
+        const neg2 = if (dev.nodes.len > 3) try self.b.internNode(dev.nodes[3]) else GROUND;
+
+        const t_model: devices.tline.Model = .{
+            .z0 = @floatCast(z0),
+            .td = @floatCast(td / @as(f64, @floatFromInt(n_sec))),
+        };
+        var prev: u32 = pos1;
+        for (0..n_sec) |i| {
+            const last = i == n_sec - 1;
+            // Series R/2N lump on the near side (skip for lossless lines).
+            const t_in = if (r_half > 0) blk: {
+                const nn = self.b.addNode();
+                try self.b.addDevice(devices.resistor, .{}, .{ .resist = @floatCast(r_half) }, [2]u32{ prev, nn });
+                break :blk nn;
+            } else prev;
+            const t_out = if (r_half > 0 or !last) self.b.addNode() else pos2;
+            // Intermediate sections reference neg1; only the last section's
+            // far port sits on neg2 (identical when both are ground).
+            try self.b.addDevice(devices.tline, t_model, .{}, [4]u32{ t_in, neg1, t_out, if (last) neg2 else neg1 });
+            if (r_half > 0) {
+                const nxt = if (last) pos2 else self.b.addNode();
+                try self.b.addDevice(devices.resistor, .{}, .{ .resist = @floatCast(r_half) }, [2]u32{ t_out, nxt });
+                prev = nxt;
+            } else {
+                prev = t_out;
+            }
         }
     }
 
@@ -349,9 +413,9 @@ pub const NetBuilder = struct {
         return null;
     }
 
-    fn findLBranch(self: *const NetBuilder, name: []const u8) ?u32 {
-        for (self.l_names[0..self.n_l], self.l_branches[0..self.n_l]) |n, br| {
-            if (std.mem.eql(u8, n, name)) return br;
+    fn findLIndex(self: *const NetBuilder, name: []const u8) ?usize {
+        for (self.l_names[0..self.n_l], 0..) |n, i| {
+            if (std.mem.eql(u8, n, name)) return i;
         }
         return null;
     }
@@ -362,7 +426,10 @@ pub const NetBuilder = struct {
         const ctrl_br = self.findVBranch(ctrl_name) orelse return error.UnknownControlSource;
 
         var model: D.Model = .{};
-        if (modelName(dev)) |name| {
+        // Card shape is "X n+ n- Vname [gain|model]": the model name (W
+        // switch) sits at positional 1; F/H have a numeric gain there, which
+        // positionalName skips.
+        if (positionalName(dev, 1)) |name| {
             if (findModel(self.nl.models, name)) |m| try applyKv(&model, m.kv);
         }
         var instance: D.Instance = .{};
@@ -382,15 +449,19 @@ pub const NetBuilder = struct {
         if (comptime !isValueForm(devices.kinduc)) return error.UnsupportedDevice;
         const l1_name = positionalName(dev, 0) orelse return error.KinducMissingInductor;
         const l2_name = positionalName(dev, 1) orelse return error.KinducMissingInductor;
-        const ibr1 = self.findLBranch(l1_name) orelse return error.KinducUnknownInductor;
-        const ibr2 = self.findLBranch(l2_name) orelse return error.KinducUnknownInductor;
+        const il1 = self.findLIndex(l1_name) orelse return error.KinducUnknownInductor;
+        const il2 = self.findLIndex(l2_name) orelse return error.KinducUnknownInductor;
         var model: devices.kinduc.Model = .{};
         if (positionalNumber(dev, 2)) |k| model.k = castField(f32, k);
         if (modelName(dev)) |name| {
             if (findModel(self.nl.models, name)) |m| try applyKv(&model, m.kv);
         }
         try applyKv(&model, dev.kv);
-        try self.b.addDevice(devices.kinduc, model, .{}, [2]u32{ ibr1, ibr2 });
+        // The device stamps model.k directly as the mutual flux coefficient:
+        // resolve the coupling coefficient to M = k * sqrt(L1 * L2) here
+        // (ngspice MUTsetup does the same at setup time).
+        model.k = castField(f32, @as(f64, model.k) * @sqrt(self.l_values[il1] * self.l_values[il2]));
+        try self.b.addDevice(devices.kinduc, model, .{}, [2]u32{ self.l_branches[il1], self.l_branches[il2] });
     }
 };
 
@@ -464,6 +535,9 @@ fn addSingleDevice(b: *Builder, comptime D: type, dev: types.Device, spice_model
     }
     if (comptime @hasField(D.Instance, "gain"))
         instance.gain = castField(@TypeOf(instance.gain), positionalNumber(dev, 0) orelse 0);
+    // Model-less cards (T line: "T1 a 0 b 0 Z0=50 TD=2n") carry their model
+    // parameters inline on the device card — route kv to the model too.
+    if (modelName(dev) == null) try applyKv(&model, dev.kv);
     try applyKv(&instance, dev.kv);
     try b.addDevice(D, model, instance, try deviceNodes(b, D, dev));
 }

@@ -531,6 +531,30 @@ pub fn qFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *cons
 // Voltage Limiting (DEVpnjlim)
 // ============================================================================
 
+/// Exact port of ngspice DEVpnjlim (devsup.c): STEP-based junction limiting.
+/// Log-compresses the Newton step past vcrit; for negative excursions limits
+/// to a doubling walk (2*vold-1). Position-based clamps re-fire every
+/// iteration and deadlock NR — this is relative to vold, so it settles.
+fn pnjlim(vnew_in: f64, vold: f64, vt_: f64, vcrit: f64) f64 {
+    var vnew = vnew_in;
+    if (vnew > vcrit and @abs(vnew - vold) > 2.0 * vt_) {
+        if (vold > 0.0) {
+            const arg = (vnew - vold) / vt_;
+            if (arg > 0.0) {
+                vnew = vold + vt_ * (2.0 + contract.fmath.log(arg - 2.0));
+            } else {
+                vnew = vold - vt_ * (2.0 + contract.fmath.log(2.0 - arg));
+            }
+        } else {
+            vnew = vt_ * contract.fmath.log(vnew / vt_);
+        }
+    } else if (vnew < 0.0) {
+        const floor_arg = if (vold > 0.0) -vold - 1.0 else 2.0 * vold - 1.0;
+        if (vnew < floor_arg) vnew = floor_arg;
+    }
+    return vnew;
+}
+
 pub fn limit(model: *const Model, _: *const Instance, x_new: [n_u]f64, x_old: [n_u]f64) [n_u]f64 {
     const pp = @intFromEnum(U.p_prime);
     const n_ = @intFromEnum(U.n);
@@ -541,54 +565,23 @@ pub fn limit(model: *const Model, _: *const Instance, x_new: [n_u]f64, x_old: [n
     const vt: f64 = 8.617333e-5 * (tnom + 273.15);
     const nvt = n_em * vt;
 
-    // Critical voltage
+    // Critical voltage (ngspice DIOtVcrit)
     const v_crit = nvt * contract.fmath.log(nvt / (@sqrt(2.0) * is_val));
 
     // Junction voltages
     const vd_new = x_new[pp] - x_new[n_];
     const vd_old = x_old[pp] - x_old[n_];
 
-    var vd_limited = vd_new;
-
-    // --- Reverse breakdown voltage limiting (DEVpnjlim) ---
+    // ngspice dioload.c: in the breakdown region, pnjlim runs on the
+    // MIRRORED voltage -(vd + BV) so the breakdown exponential is limited
+    // exactly like a forward junction.
     const bv: f64 = @as(f64, model.bv);
     const nbv: f64 = @as(f64, model.nbv);
-    if (bv > 0.0) {
-        const vte = nbv * vt;
-        if (vd_limited < @min(0.0, -bv + 10.0 * vte)) {
-            if (vd_old > 0.0) {
-                // Jumped from forward to deep reverse — clamp to -BV
-                vd_limited = -bv;
-            } else {
-                // Already in reverse — log-compress the step. Only valid
-                // for arg > 2 (log(arg - 2) is NaN below that); ngspice's
-                // pnjlim on -(vd + bv) takes the plain step below the
-                // log-form threshold.
-                const arg = -(vd_limited + bv) / vte;
-                if (arg > 2.0) {
-                    vd_limited = -(bv + vte * (2.0 + contract.fmath.log(arg - 2.0)));
-                }
-            }
-        }
-    }
-
-    // --- Forward bias limiting ---
-    // Apply limiting when vd_limited > v_crit and step is large
-    if (vd_limited > v_crit and @abs(vd_limited - vd_old) > 2.0 * nvt) {
-        if (vd_old > 0.0) {
-            const arg = (vd_limited - vd_old) / nvt;
-            if (arg > 0.0) {
-                // Case 1: positive old, positive step
-                vd_limited = vd_old + nvt * (2.0 + contract.fmath.log(arg - 2.0));
-            } else {
-                // Case 2: positive old, negative step
-                vd_limited = vd_old - nvt * (2.0 + contract.fmath.log(2.0 - arg));
-            }
-        } else {
-            // Case 3: old <= 0
-            vd_limited = nvt * contract.fmath.log(vd_limited / nvt);
-        }
-    }
+    const vtebrk = nbv * vt;
+    const vd_limited = if (bv > 0.0 and vd_new < @min(0.0, -bv + 10.0 * vtebrk)) blk: {
+        const vdtemp = pnjlim(-(vd_new + bv), -(vd_old + bv), vtebrk, v_crit);
+        break :blk -(vdtemp + bv);
+    } else pnjlim(vd_new, vd_old, nvt, v_crit);
 
     // Apply correction to p' only
     const delta = vd_limited - vd_new;
