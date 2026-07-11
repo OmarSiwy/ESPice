@@ -216,7 +216,9 @@ fn evalPrep(model: *const Model, instance: *const Instance) EvalPrep {
         .ikf = @as(f64, model.ikf),
         .ikr = @as(f64, model.ikr),
         .area_m = area_m,
-        .g_rs = if (rs != 0.0) area_m / rs else 1.0e12,
+        // Collapsed p_prime (rs = 0, see collapse()) carries no tie
+        // conductance — a 1e12 short absorbs real gd into its ulp (1.22e-4).
+        .g_rs = if (rs != 0.0) area_m / rs else 0.0,
         .inv_n_vt = 1.0 / (n_em * vt),
         .inv_nr_vt = 1.0 / (nr * vt),
         .inv_ns_vt = 1.0 / (ns * vt),
@@ -574,18 +576,13 @@ pub fn limit(model: *const Model, _: *const Instance, x_new: [n_u]f64, x_old: [n
 
     // --- Forward bias limiting ---
     // Apply limiting when vd_limited > v_crit and step is large
+    // ngspice DEVpnjlim: arg = 1 + delta/nvt, vnew = vold + nvt*log(arg).
+    // (The SPICE2 2+log(arg-2) form diverges to -inf as delta -> 2nvt+.)
     if (vd_limited > v_crit and @abs(vd_limited - vd_old) > 2.0 * nvt) {
         if (vd_old > 0.0) {
-            const arg = (vd_limited - vd_old) / nvt;
-            if (arg > 0.0) {
-                // Case 1: positive old, positive step
-                vd_limited = vd_old + nvt * (2.0 + contract.fmath.log(arg - 2.0));
-            } else {
-                // Case 2: positive old, negative step
-                vd_limited = vd_old - nvt * (2.0 + contract.fmath.log(2.0 - arg));
-            }
+            const arg = 1.0 + (vd_limited - vd_old) / nvt;
+            vd_limited = if (arg > 0.0) vd_old + nvt * contract.fmath.log(arg) else v_crit;
         } else {
-            // Case 3: old <= 0
             vd_limited = nvt * contract.fmath.log(vd_limited / nvt);
         }
     }

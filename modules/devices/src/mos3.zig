@@ -260,8 +260,10 @@ fn dcPrep(model: *const Model, instance: *const Instance) DcPrep {
     const cox_prime = eps_ox / tox;
 
     // --- Series conductances ---
-    const g_rd: f64 = if (rd != 0.0) 1.0 / rd else 1.0e12;
-    const g_rs: f64 = if (rs != 0.0) 1.0 / rs else 1.0e12;
+    // Collapsed prime nodes (see collapse()) carry no tie conductance:
+    // a 1e12 short absorbs real conductances into its ulp (1.22e-4).
+    const g_rd: f64 = if (rd != 0.0) 1.0 / rd else 0.0;
+    const g_rs: f64 = if (rs != 0.0) 1.0 / rs else 0.0;
 
     // --- Depletion layer coefficient ---
     const nsub_m3 = nsub * 1.0e6; // cm^-3 to m^-3
@@ -905,6 +907,14 @@ pub fn attempt(model: Model, lambda: f64) Model {
     const is_stepped = is_orig + (gmin_step - is_orig) * (1.0 - lambda);
     m.is_ = @floatCast(is_stepped);
     return m;
+}
+
+/// ngspice MOS3setup: prime nodes collapse onto ports when parasitic R = 0.
+pub fn collapse(model: *const Model, _: *const Instance) [n_u]?u8 {
+    var out: [n_u]?u8 = @splat(null);
+    if (@as(f64, model.rd) == 0.0) out[@intFromEnum(U.d_prime)] = @intFromEnum(U.drain);
+    if (@as(f64, model.rs) == 0.0) out[@intFromEnum(U.s_prime)] = @intFromEnum(U.source);
+    return out;
 }
 
 comptime {

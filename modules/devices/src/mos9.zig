@@ -500,8 +500,10 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, _: *const
     // ========================================================================
     // Parasitic resistance currents (x-dependent through node voltages)
     // ========================================================================
-    const g_d: f64 = if (p.rd > 0.0) 1.0 / p.rd else 1.0e12;
-    const g_s: f64 = if (p.rs > 0.0) 1.0 / p.rs else 1.0e12;
+    // Collapsed prime nodes (see collapse()) carry no tie conductance:
+    // a 1e12 short absorbs real conductances into its ulp (1.22e-4).
+    const g_d: f64 = if (p.rd > 0.0) 1.0 / p.rd else 0.0;
+    const g_s: f64 = if (p.rs > 0.0) 1.0 / p.rs else 0.0;
 
     const i_rd = x[d].sub(x[dp]).scale(g_d);
     const i_rs = x[s].sub(x[sp]).scale(g_s);
@@ -855,6 +857,14 @@ pub fn attempt(model: Model, lambda: f64) Model {
     const is_stepped = is_orig + gmin_step * (1.0 - lambda);
     m.is_ = @floatCast(is_stepped);
     return m;
+}
+
+/// ngspice MOS9setup: prime nodes collapse onto ports when parasitic R = 0.
+pub fn collapse(model: *const Model, _: *const Instance) [n_u]?u8 {
+    var out: [n_u]?u8 = @splat(null);
+    if (!(@as(f64, model.rd) > 0.0)) out[@intFromEnum(U.drain_prime)] = @intFromEnum(U.drain);
+    if (!(@as(f64, model.rs) > 0.0)) out[@intFromEnum(U.source_prime)] = @intFromEnum(U.source);
+    return out;
 }
 
 comptime {
