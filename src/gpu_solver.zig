@@ -186,7 +186,14 @@ pub const GpuSolver = struct {
         const dl_off = hdr_ptr.off_x;
         const dl_len = hdr_ptr.off_ws - dl_off;
         try self.blob.downloadAt(self.prob.stage.ptr + dl_off, dl_off, dl_len);
-        @memcpy(std.mem.sliceAsBytes(x), self.prob.xBytes());
+        // A failed solve can leave NaN/inf in the last iterate; copying that
+        // back would poison the CPU fallback's warm start. Only finite
+        // iterates come home.
+        const xr: []align(1) const f64 = std.mem.bytesAsSlice(f64, self.prob.xBytes());
+        const finite = for (xr) |v| {
+            if (!std.math.isFinite(v)) break false;
+        } else true;
+        if (finite) @memcpy(std.mem.sliceAsBytes(x), self.prob.xBytes());
         const res: *const abi.ResultHeader = @ptrCast(@alignCast(self.prob.stage.ptr + res_off));
         return .{
             .converged = res.status == 1,
