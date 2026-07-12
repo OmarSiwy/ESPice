@@ -134,7 +134,7 @@
               pkgs.coreutils
               pkgs.time
               pkgs.gnucap
-              pkgs.python3 # tests/benchmark/postlayout/gen.py
+              (pkgs.python3.withPackages (ps: [ ps.matplotlib ])) # postlayout/gen.py, tools/bench_plot.py
               openvafPkg
               vacaskPkg
               pkgs.perf

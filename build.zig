@@ -39,6 +39,8 @@ pub fn build(b: *std.Build) void {
     bopts.addOption([]const u8, "dyn_path", pathFromRoot(b, b, "src/device/eval.zig"));
     bopts.addOption([]const u8, "device_abi_path", pathFromRoot(b, b, "src/device/abi.zig"));
     bopts.addOption([]const u8, "core_path", pathFromRoot(b, b, "src/core/root.zig"));
+    const stdpp_dep = b.dependency("stdpp", .{ .target = target, .optimize = optimize });
+    bopts.addOption([]const u8, "stdpp_path", pathFromRoot(b, stdpp_dep.builder, "src/root.zig"));
     bopts.addOption([]const u8, "gompute_path", pathFromRoot(b, gompute.builder, "src/root.zig"));
 
     // Release strips DWARF: debug info was ~2/3 of LLVM time, superlinear in
@@ -49,30 +51,36 @@ pub fn build(b: *std.Build) void {
     // `-Dgpu=false` is the CPU iteration build, not a shipping or bench one.
     const gpu_kernels = b.option(bool, "gpu", "Compile the GPU device kernels (default true)") orelse true;
     // Every module here is (root, target, optimize, strip) plus imports.
+    // stdpp (vectorizing iterators) is a std extension: every host module
+    // gets it. GPU device modules do not; eval.zig must not import it.
+    const stdpp_mod = stdpp_dep.module("stdpp");
     const M = struct {
         b: *std.Build,
         target: std.Build.ResolvedTarget,
         optimize: std.lang.Optimize,
         strip: bool,
+        stdpp: ?*std.Build.Module,
         fn make(
             self: @This(),
             root: std.Build.LazyPath,
             imports: []const std.Build.Module.Import,
         ) *std.Build.Module {
-            return self.b.createModule(.{
+            const mod = self.b.createModule(.{
                 .root_source_file = root,
                 .target = self.target,
                 .optimize = self.optimize,
                 .strip = self.strip,
                 .imports = imports,
             });
+            if (self.stdpp) |sp| mod.addImport("stdpp", sp);
+            return mod;
         }
-    }{ .b = b, .target = target, .optimize = optimize, .strip = optimize != .debug and !debug_info };
+    }{ .b = b, .target = target, .optimize = optimize, .strip = optimize != .debug and !debug_info, .stdpp = stdpp_mod };
     // Strip pinned on, `-Ddebug-info` or not, for device code: DWARF over
     // generated models is superlinear and maps to cache files nobody reads,
     // and with DI on, the NVPTX backend and the host device objects SEGV'd
     // the compiler (mos2, vdmos). Symbols survive; only line tables go.
-    const GPU = @TypeOf(M){ .b = b, .target = target, .optimize = optimize, .strip = true };
+    const GPU = @TypeOf(M){ .b = b, .target = target, .optimize = optimize, .strip = true, .stdpp = null };
 
     const build_options_mod = bopts.createModule();
 
@@ -231,6 +239,7 @@ pub fn build(b: *std.Build) void {
         .{ b.path("src/core"), "core" },
         .{ b.path("src/device"), "device" },
         .{ gompute.path("src"), "gompute" },
+        .{ stdpp_dep.path("src"), "stdpp" },
         .{ vera.path("lib"), "vera/lib" },
         .{ vera.path("src/sim"), "vera/src/sim" },
     }) |dir| b.installDirectory(.{

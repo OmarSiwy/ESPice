@@ -13,10 +13,44 @@ pub const Execution = struct {
     lu_threads: u8 = 1,
 };
 
-// Plain loops stand in for stdpp's pipelines until stdpp supports Zig 0.17.
-// `dot` and `sum` fold in index order, so every caller rounds the same way.
-// ponytail: scalar folds; LLVM vectorizes the elementwise loops, not the
-// ordered sums. Restore stdpp `foldAssoc` once it builds on 0.17.
+// Elementwise helpers are exact at any width. `dot` and `sum` reassociate
+// (stdpp `foldAssoc`: fixed lane accumulators, one fixed combine order), so
+// every caller rounds the same way, but not like an ordered scalar fold.
+// Zig 0.17 ships with LLVM's loop vectorizer off, so a plain `for` stays
+// scalar; stdpp pipelines are what emit the vector code.
+const z = @import("stdpp");
+
+/// Lanewise float add; stdpp's `ops.add` wraps, which floats reject.
+pub const add = z.lanewise(addFn);
+fn addFn(a: anytype, b: anytype) @TypeOf(a) {
+    return a + b;
+}
+const mul = z.lanewise(mulFn);
+fn mulFn(p: anytype) @TypeOf(p.left) {
+    return p.left * p.right;
+}
+const diff = z.lanewise(diffFn);
+fn diffFn(p: anytype) @TypeOf(p.left) {
+    return p.left - p.right;
+}
+const absMax = z.lanewise(absMaxFn);
+fn absMaxFn(a: anytype, b: anytype) @TypeOf(a) {
+    return @max(a, @abs(b));
+}
+const Axpy = struct {
+    pub const lanewise = true;
+    a: f64,
+    pub fn call(self: *@This(), p: anytype) @TypeOf(p.left) {
+        return p.left + z.splat(@TypeOf(p.left), self.a) * p.right;
+    }
+};
+const Scale = struct {
+    pub const lanewise = true;
+    a: f64,
+    pub fn call(self: *@This(), x: anytype) @TypeOf(x) {
+        return z.splat(@TypeOf(x), self.a) * x;
+    }
+};
 
 /// Up to this length `zeroSimd` and `copySimd` store vectors inline. A
 /// `memset` or `memcpy` call costs 70 to 140 Ir at any length, most of a
@@ -49,38 +83,50 @@ pub fn copySimd(dst: []f64, src: []const f64) void {
 
 /// dst[i] += a * src[i] over dst.len; src may alias dst.
 pub fn axpy(dst: []f64, a: f64, src: []const f64) void {
-    for (dst, src[0..dst.len]) |*d, x| d.* += a * x;
+    var it = z.fromSlice(f64, dst).zip(z.fromSlice(f64, src[0..dst.len])).map(Axpy{ .a = a });
+    _ = it.writeInto(dst);
 }
 
 /// dst[i] = a * src[i] over dst.len; src may alias dst.
 pub fn scale(dst: []f64, a: f64, src: []const f64) void {
-    for (dst, src[0..dst.len]) |*d, x| d.* = a * x;
+    var it = z.fromSlice(f64, src[0..dst.len]).map(Scale{ .a = a });
+    _ = it.writeInto(dst);
 }
 
 /// dst[i] = a[i] - b[i] over dst.len; either input may alias dst.
 pub fn sub(dst: []f64, a: []const f64, b: []const f64) void {
-    for (dst, a[0..dst.len], b[0..dst.len]) |*d, x, y| d.* = x - y;
+    var it = z.fromSlice(f64, a[0..dst.len]).zip(z.fromSlice(f64, b[0..dst.len])).map(diff);
+    _ = it.writeInto(dst);
 }
 
-/// Σ a[i]·b[i] over a.len, in index order.
+/// Σ a[i]·b[i] over a.len.
 pub fn dot(a: []const f64, b: []const f64) f64 {
-    var acc: f64 = 0;
-    for (a, b[0..a.len]) |x, y| acc += x * y;
-    return acc;
+    var it = z.fromSlice(f64, a).zip(z.fromSlice(f64, b[0..a.len])).map(mul);
+    return it.foldAssoc(@as(f64, 0), add);
 }
 
-/// Σ buf[i], in index order.
+/// Σ buf[i], reassociated like `dot`.
 pub fn sum(buf: []const f64) f64 {
-    var acc: f64 = 0;
-    for (buf) |x| acc += x;
-    return acc;
+    var it = z.fromSlice(f64, buf);
+    return it.foldAssoc(@as(f64, 0), add);
 }
 
 /// max |buf[i]|, 0 for an empty slice; NaN entries are skipped like @max does.
 pub fn normInf(buf: []const f64) f64 {
-    var m: f64 = 0;
-    for (buf) |x| m = @max(m, @abs(x));
-    return m;
+    // Max is exact, so any lane grouping equals the scalar fold bit for bit.
+    var it = z.fromSlice(f64, buf);
+    return it.foldAssoc(@as(f64, 0), absMax);
+}
+
+test "vector helpers run on stdpp's SIMD path" {
+    // lane_count is null when a callback is not lanewise or the backend has
+    // no vector form; other self-hosted backends run the scalar fallback.
+    const builtin = @import("builtin");
+    if (builtin.zig_backend != .stage2_llvm and builtin.zig_backend != .stage2_x86_64) return;
+    const s: []const f64 = &.{};
+    const pair = z.fromSlice(f64, s).zip(z.fromSlice(f64, s));
+    inline for (.{ @TypeOf(pair.map(Axpy{ .a = 0 })), @TypeOf(z.fromSlice(f64, s).map(Scale{ .a = 0 })), @TypeOf(pair.map(diff)), @TypeOf(pair.map(mul)), @TypeOf(z.fromSlice(f64, s)) }) |T|
+        comptime std.debug.assert(T.lane_count != null);
 }
 
 test "vector helpers match their per-element formulas" {

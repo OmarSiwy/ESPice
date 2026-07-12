@@ -12,6 +12,7 @@ const root = @import("../types.zig");
 const dcmatch = @import("../dc/dcmatch.zig");
 const num = @import("core").numerics;
 const Complex = num.Complex;
+const z = @import("stdpp");
 const FreqSolver = @import("solver").freq_solve.FreqSolver;
 
 /// Query options, defined in core/query.zig.
@@ -183,5 +184,13 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
 /// dst[i] = (v[i] − v0[i]) / delta over dst.len.
 fn diffQuot(dst: []f64, v: []const f64, v0: []const f64, delta: f64) void {
-    for (dst, v[0..dst.len], v0[0..dst.len]) |*d, a, b| d.* = (a - b) / delta;
+    var it = z.fromSlice(f64, v[0..dst.len]).zip(z.fromSlice(f64, v0[0..dst.len])).map(DiffQuot{ .delta = delta });
+    _ = it.writeInto(dst);
 }
+const DiffQuot = struct {
+    pub const lanewise = true;
+    delta: f64,
+    pub fn call(self: *@This(), p: anytype) @TypeOf(p.left) {
+        return (p.left - p.right) / z.splat(@TypeOf(p.left), self.delta);
+    }
+};
