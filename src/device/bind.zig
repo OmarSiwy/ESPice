@@ -49,24 +49,25 @@ fn applyKv(target: anytype, params: []const Param) !void {
     // card binds a dozen pairs against BSIM4's ~1000 fields.
     var seen: u64 = 0;
     for (params) |p| seen |= keyBit(p.key);
-    inline for (@typeInfo(T).@"struct".fields) |field| {
-        if (comptime isScalar(field.type)) {
+    const info = @typeInfo(T).@"struct";
+    inline for (info.field_names, info.field_types) |field_name, field_type| {
+        if (comptime isScalar(field_type)) {
             // Card keys are lowercased at parse; VA fields keep their spec
             // spelling (BSIMSOI `VTH0`).
             const key = comptime blk: {
-                var buf: [field.name.len]u8 = undefined;
-                for (field.name, 0..) |c, i| buf[i] = std.ascii.toLower(c);
+                var buf: [field_name.len]u8 = undefined;
+                for (field_name, 0..) |c, i| buf[i] = std.ascii.toLower(c);
                 const frozen = buf;
                 break :blk frozen;
             };
             if (try number(params, seen, &key)) |num| {
-                @field(target.*, field.name) = try castField(field.type, num);
-                markGiven(target, field.name);
+                @field(target.*, field_name) = try castField(field_type, num);
+                markGiven(target, field_name);
             } else {
-                inline for (comptime aliasesOf(field.name)) |alias| {
+                inline for (comptime aliasesOf(field_name)) |alias| {
                     if (try number(params, seen, alias)) |num| {
-                        @field(target.*, field.name) = try castField(field.type, num);
-                        markGiven(target, field.name);
+                        @field(target.*, field_name) = try castField(field_type, num);
+                        markGiven(target, field_name);
                     }
                 }
             }

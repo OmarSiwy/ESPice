@@ -15,7 +15,7 @@ fn createLimited(source: []const u8, max_parallel: u16) !*api.Problem {
 
 fn find(p: *api.Problem, kind: api.requests.Kind) !api.QueryId {
     for (0..p.query_count()) |i| {
-        const id: api.QueryId = @enumFromInt(i);
+        const id: api.QueryId = @fromBackingInt(@intCast(i));
         if ((try p.query_info(id)).kind == kind) return id;
     }
     return error.MissingQuery;
@@ -143,7 +143,7 @@ test "Problem: invalid frontier does not start work" {
     try t.expectError(error.InvalidConcurrency, p.advance_ready(ids[0..n], .{ .max_parallel = 0 }, &events));
     try t.expectError(error.BufferTooSmall, p.advance_ready(ids[0..n], .{}, events[0 .. n - 1]));
     try t.expectError(error.InvalidQuery, p.advance_ready(&.{ ids[0], api.requests.invalid_query }, .{}, &events));
-    for (0..p.query_count()) |i| try t.expectEqual(api.Status.pending, (try p.query_info(@enumFromInt(i))).status);
+    for (0..p.query_count()) |i| try t.expectEqual(api.Status.pending, (try p.query_info(@fromBackingInt(@intCast(i)))).status);
 }
 
 test "Problem: short copy-out buffers and invalid scopes leave caller storage untouched" {
@@ -318,7 +318,7 @@ test "Problem: output validation rejects an entire append before publishing IDs"
         };
         // Sizing does not validate or commit; rejection leaves both IDs untouched.
         try t.expectEqual(jobs.len, try p.append_queries(&jobs, &.{}));
-        var ids = [_]api.QueryId{sp} ** jobs.len;
+        var ids = @as([jobs.len]api.QueryId, @splat(sp));
         try t.expectError(error.NotSParameterData, p.append_queries(&jobs, &ids));
         try t.expectEqualSlices(api.QueryId, &.{ sp, sp }, &ids);
         try t.expectEqual(count, p.query_count());
@@ -388,7 +388,7 @@ test "device noise needs no input source and retains its thermal PSD" {
     var spectra: u8 = 0;
     var totals: u8 = 0;
     for (0..p.query_count()) |i| {
-        const id: api.QueryId = @enumFromInt(i);
+        const id: api.QueryId = @fromBackingInt(@intCast(i));
         const kind = (try p.query_info(id)).kind;
         if (kind != .noise and kind != .pnoise) continue;
         const result = try p.result(id);
@@ -507,5 +507,5 @@ test "HSPICE .op <time> counts its columns as .op does" {
     });
     defer p.deinit();
     try p.run_all();
-    try t.expectEqual(@as(usize, 64), (try p.result(@enumFromInt(0))).varnames.len);
+    try t.expectEqual(@as(usize, 64), (try p.result(@fromBackingInt(@intCast(0)))).varnames.len);
 }

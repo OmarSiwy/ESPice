@@ -164,7 +164,7 @@ const Linear = struct {
             for (spec.mix[line * nt ..][0..nt], 0..) |mx, i| w.print("{s}{d}", .{ if (i == 0) "" else ",", sign * mx }) catch unreachable;
             w.writeByte(']') catch unreachable;
             for (names[1 + k * stride ..][0..stride]) |*name| {
-                const tail = name.*[std.mem.indexOfScalar(u8, name.*, '(') orelse name.*.len..];
+                const tail = name.*[std.mem.indexOfScalar(u8, name.*, '(') orelse name.*.len ..];
                 const renamed = try std.fmt.allocPrint(a, "{s}{s}{s}", .{ prefix, w.buffered(), tail });
                 a.free(name.*);
                 name.* = renamed;

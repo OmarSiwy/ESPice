@@ -696,7 +696,7 @@ fn optOptions(nl: *const Netlist, name: []const u8, line: []const u8) !struct { 
 }
 
 fn refKey(a: std.mem.Allocator, t: core.DeviceType, name: []const u8) ![]const u8 {
-    return std.fmt.allocPrint(a, "{d}:{s}", .{ @intFromEnum(t), name });
+    return std.fmt.allocPrint(a, "{d}:{s}", .{ @backingInt(t), name });
 }
 
 fn targetName(nl: *const Netlist, t: netlist.StepTarget) []const u8 {

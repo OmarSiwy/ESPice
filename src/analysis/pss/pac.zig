@@ -161,7 +161,7 @@ fn sweepKrylov(
     defer allocator.free(work);
     const g0 = work[0..nnz];
     const c0 = work[nnz..][0..nnz];
-    const rhs = work[2 * nnz..][0 .. 2 * nn];
+    const rhs = work[2 * nnz ..][0 .. 2 * nn];
     const p_rhs = work[2 * nnz + 2 * nn ..][0 .. 2 * nn];
     const p_x = work[2 * nnz + 4 * nn ..][0 .. 2 * nn];
     const omegas = work[2 * nnz + 6 * nn ..][0..n_sb];

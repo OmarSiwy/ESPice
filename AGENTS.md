@@ -39,7 +39,7 @@ code we write, never what shape the data takes.
 A module can only import what build.zig hands it, so the wiring is the DAG:
 
 ```
-core     src/core/          std + stdpp only: ids (DeviceType, QueryId, Name), InternPool,
+core     src/core/          std only: ids (DeviceType, QueryId, Name), InternPool,
                             numerics, query requests, Deck, Result/Schema, GROUND
 solver   src/solver/        core
 device   src/device/        core, device_abi (abi.zig), models, fastvaf (VerA),
@@ -52,16 +52,11 @@ espice   src/espice.zig     core, frontend, analysis, output (the Problem facade
 main     src/main.zig       espice only; src/c_api.zig likewise
 ```
 
-**stdpp** (vectorizing iterators, `build.zig.zon` `.path` until it has a git
-remote) is a std extension that every host module gets through `M.make`. GPU
-device modules do not get it, so `device/eval.zig`, `device/abi.zig` and
-anything only a kernel root reaches (`solver/sparse_lu.zig`,
-`lu_kernels.zig`) must not import it. Its SIMD paths need the LLVM backend; a
-self-hosted Debug build silently takes the scalar path. Loop rule: a
-contiguous, pure, per-element loop (elementwise, reduction, search) goes
-through `core.numerics` or a stdpp pipeline; gathers, sparse walks, chains and
-parsers stay plain loops. Float sums through `foldAssoc` reassociate, so
-order-documented sums stay scalar.
+**stdpp** (vectorizing iterators) is removed until it supports Zig 0.17;
+plain loops and `core.numerics` stand in, and `numerics.dot`/`sum` fold in
+index order. Loop rule: a contiguous, pure, per-element loop (elementwise,
+reduction, search) goes through `core.numerics` or a plain `for`; gathers,
+sparse walks, chains and parsers stay plain loops.
 
 **Only `analysis` imports `solver`.** build.zig wires `solver` into the
 analysis module and its test root and nowhere else, so an import from any
@@ -193,7 +188,7 @@ into the topical page before the branch merges.
 - New SIMD kernels: a differential test against the scalar oracle (see the
   skills list), plus an asm spot-check that the expected vector instruction
   is emitted. Read the asm off a direct invocation:
-  `zig build-obj -OReleaseFast -fllvm -femit-asm=/tmp/k.s --dep core -Mroot=src/solver/direct.zig -Mcore=src/core/root.zig`.
+  `zig build-obj -Ofast -fllvm -femit-asm=/tmp/k.s --dep core -Mroot=src/solver/direct.zig -Mcore=src/core/root.zig`.
 
 ## Git rules
 

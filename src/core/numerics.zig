@@ -13,43 +13,10 @@ pub const Execution = struct {
     lu_threads: u8 = 1,
 };
 
-// Elementwise helpers are exact at any width. `dot` and `sum` reassociate
-// (stdpp `foldAssoc`: fixed lane accumulators, one fixed combine order), so
-// every caller rounds the same way, but not like an ordered scalar fold.
-const z = @import("stdpp");
-const vw = z.lanes.width(f64) orelse 1; // test sizing only
-
-/// Lanewise float add; stdpp's `ops.add` wraps, which floats reject.
-pub const add = z.lanewise(addFn);
-fn addFn(a: anytype, b: anytype) @TypeOf(a) {
-    return a + b;
-}
-const mul = z.lanewise(mulFn);
-fn mulFn(p: anytype) @TypeOf(p.left) {
-    return p.left * p.right;
-}
-const diff = z.lanewise(diffFn);
-fn diffFn(p: anytype) @TypeOf(p.left) {
-    return p.left - p.right;
-}
-const absMax = z.lanewise(absMaxFn);
-fn absMaxFn(a: anytype, b: anytype) @TypeOf(a) {
-    return @max(a, @abs(b));
-}
-const Axpy = struct {
-    pub const lanewise = true;
-    a: f64,
-    pub fn call(self: *@This(), p: anytype) @TypeOf(p.left) {
-        return p.left + z.splat(@TypeOf(p.left), self.a) * p.right;
-    }
-};
-const Scale = struct {
-    pub const lanewise = true;
-    a: f64,
-    pub fn call(self: *@This(), x: anytype) @TypeOf(x) {
-        return z.splat(@TypeOf(x), self.a) * x;
-    }
-};
+// Plain loops stand in for stdpp's pipelines until stdpp supports Zig 0.17.
+// `dot` and `sum` fold in index order, so every caller rounds the same way.
+// ponytail: scalar folds; LLVM vectorizes the elementwise loops, not the
+// ordered sums. Restore stdpp `foldAssoc` once it builds on 0.17.
 
 /// Up to this length `zeroSimd` and `copySimd` store vectors inline. A
 /// `memset` or `memcpy` call costs 70 to 140 Ir at any length, most of a
@@ -82,46 +49,45 @@ pub fn copySimd(dst: []f64, src: []const f64) void {
 
 /// dst[i] += a * src[i] over dst.len; src may alias dst.
 pub fn axpy(dst: []f64, a: f64, src: []const f64) void {
-    var it = z.fromSlice(f64, dst).zip(z.fromSlice(f64, src[0..dst.len])).map(Axpy{ .a = a });
-    _ = it.writeInto(dst);
+    for (dst, src[0..dst.len]) |*d, x| d.* += a * x;
 }
 
 /// dst[i] = a * src[i] over dst.len; src may alias dst.
 pub fn scale(dst: []f64, a: f64, src: []const f64) void {
-    var it = z.fromSlice(f64, src[0..dst.len]).map(Scale{ .a = a });
-    _ = it.writeInto(dst);
+    for (dst, src[0..dst.len]) |*d, x| d.* = a * x;
 }
 
 /// dst[i] = a[i] - b[i] over dst.len; either input may alias dst.
 pub fn sub(dst: []f64, a: []const f64, b: []const f64) void {
-    var it = z.fromSlice(f64, a[0..dst.len]).zip(z.fromSlice(f64, b[0..dst.len])).map(diff);
-    _ = it.writeInto(dst);
+    for (dst, a[0..dst.len], b[0..dst.len]) |*d, x, y| d.* = x - y;
 }
 
-/// Σ a[i]·b[i] over a.len.
+/// Σ a[i]·b[i] over a.len, in index order.
 pub fn dot(a: []const f64, b: []const f64) f64 {
-    var it = z.fromSlice(f64, a).zip(z.fromSlice(f64, b[0..a.len])).map(mul);
-    return it.foldAssoc(@as(f64, 0), add);
+    var acc: f64 = 0;
+    for (a, b[0..a.len]) |x, y| acc += x * y;
+    return acc;
 }
 
-/// Σ buf[i], reassociated like `dot`.
+/// Σ buf[i], in index order.
 pub fn sum(buf: []const f64) f64 {
-    var it = z.fromSlice(f64, buf);
-    return it.foldAssoc(@as(f64, 0), add);
+    var acc: f64 = 0;
+    for (buf) |x| acc += x;
+    return acc;
 }
 
 /// max |buf[i]|, 0 for an empty slice; NaN entries are skipped like @max does.
 pub fn normInf(buf: []const f64) f64 {
-    // Max is exact, so any lane grouping equals the scalar fold bit for bit.
-    var it = z.fromSlice(f64, buf);
-    return it.foldAssoc(@as(f64, 0), absMax);
+    var m: f64 = 0;
+    for (buf) |x| m = @max(m, @abs(x));
+    return m;
 }
 
 test "vector helpers match their per-element formulas" {
     var prng = std.Random.DefaultPrng.init(0x5eed);
     const r = prng.random();
-    var x: [3 * 8 * vw + 1]f64 = undefined;
-    var y: [3 * 8 * vw + 1]f64 = undefined;
+    var x: [3 * 8 * vec_len + 1]f64 = undefined;
+    var y: [3 * 8 * vec_len + 1]f64 = undefined;
     for (0..x.len + 1) |len| {
         for (x[0..len], y[0..len]) |*u, *v| {
             u.* = r.float(f64) - 0.5;
@@ -145,10 +111,10 @@ test "vector helpers match their per-element formulas" {
         try std.testing.expectApproxEqAbs(acc, sum(x[0..len]), 1e-12);
     }
     // NaN lanes are skipped in the vector body and the tail alike.
-    var with_nan: [2 * vw + 1]f64 = @splat(1);
+    var with_nan: [2 * vec_len + 1]f64 = @splat(1);
     with_nan[1] = std.math.nan(f64);
-    with_nan[2 * vw] = std.math.nan(f64);
-    with_nan[vw] = -4;
+    with_nan[2 * vec_len] = std.math.nan(f64);
+    with_nan[vec_len] = -4;
     try std.testing.expectEqual(@as(f64, 4), normInf(&with_nan));
 }
 

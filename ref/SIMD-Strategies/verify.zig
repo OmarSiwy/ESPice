@@ -15,16 +15,16 @@ extern fn @"llvm.x86.ssse3.pshuf.b.128"(V16, V16) V16;
 extern fn @"llvm.aarch64.neon.tbl1"(V16, V16) V16;
 extern fn @"llvm.x86.pclmulqdq"(@Vector(2, u64), @Vector(2, u64), i8) @Vector(2, u64);
 
-const has_ssse3 = builtin.cpu.arch.isX86() and
-    std.Target.x86.featureSetHas(builtin.cpu.features, .ssse3);
-const has_pclmul = builtin.cpu.arch.isX86() and
-    std.Target.x86.featureSetHas(builtin.cpu.features, .pclmul);
+const has_ssse3 = builtin.target.cpu.arch.isX86() and
+    std.Target.x86.featureSetHas(builtin.target.cpu.features, .ssse3);
+const has_pclmul = builtin.target.cpu.arch.isX86() and
+    std.Target.x86.featureSetHas(builtin.target.cpu.features, .pclmul);
 
 /// out[i] = tbl[idx[i] & 15]. One instruction on x86 SSSE3 and on aarch64.
 inline fn lookup16(tbl: V16, idx: V16) V16 {
     const lo = idx & @as(V16, @splat(0x0F));
     if (comptime has_ssse3) return @"llvm.x86.ssse3.pshuf.b.128"(tbl, lo);
-    if (comptime builtin.cpu.arch == .aarch64) return @"llvm.aarch64.neon.tbl1"(tbl, lo);
+    if (comptime builtin.target.cpu.arch == .aarch64) return @"llvm.aarch64.neon.tbl1"(tbl, lo);
     return lookup16Scalar(tbl, lo);
 }
 
@@ -572,7 +572,7 @@ fn normalize(comptime W: comptime_int, dst: []u8, src: []const u8) usize {
         const v: V = src[i..][0..W].*;
         const upper = (v >= @as(V, @splat('A'))) & (v <= @as(V, @splat('Z')));
         dst[i..][0..W].* = v | @select(u8, upper, @as(V, @splat(0x20)), @as(V, @splat(0)));
-        const newlines: std.meta.Int(.unsigned, W) = @bitCast(v == @as(V, @splat('\n')));
+        const newlines: @Int(.unsigned, W) = @bitCast(v == @as(V, @splat('\n')));
         lines += @popCount(newlines);
     }
     if (W > 1) lines += normalize(1, dst[i..], src[i..]);

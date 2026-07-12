@@ -1,8 +1,6 @@
 //! C ABI contract through include/espice.h, linked against libespice.a.
 const std = @import("std");
-const c = @cImport({
-    @cInclude("espice.h");
-});
+const c = @import("espice_h");
 
 test "C creation validates versions, tags and pointer lengths" {
     var options: c.espice_create_options = undefined;
@@ -148,7 +146,7 @@ test "C short buffers and invalid frontiers do not modify IDs, events or query s
     try std.testing.expectEqualSlices(u32, &.{ c.ESPICE_NO_QUERY, c.ESPICE_NO_QUERY }, &ids);
     try std.testing.expectEqual(@as(u32, c.ESPICE_INVALID_ARGUMENT), c.espice_ready_queries(handle, all, null, 2, &required));
     try std.testing.expectEqual(@as(u32, c.ESPICE_OK), c.espice_ready_queries(handle, all, &ids, ids.len, &required));
-    var events = [_]c.espice_advance_event{std.mem.zeroes(c.espice_advance_event)} ** 2;
+    var events = @as([2]c.espice_advance_event, @splat(std.mem.zeroes(c.espice_advance_event)));
     events[0].reserved = 123;
     const before = events;
     try std.testing.expectEqual(@as(u32, c.ESPICE_BUFFER_TOO_SMALL), c.espice_advance_ready(handle, &ids, ids.len, 2, &events, 1, &required));

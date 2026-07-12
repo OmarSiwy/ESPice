@@ -103,7 +103,7 @@ pub fn main(init: std.process.Init) !void {
                 const v = cfg.variants[i];
                 const raw = try std.fmt.allocPrint(fa, "{s}/{s}.raw", .{ absolute, label });
                 const argv = try std.mem.concat(fa, []const u8, &.{
-                    if (v.env.len > 0) &.{"env"} else &.{}, v.env,                     &.{cfg.espice},
+                    if (v.env.len > 0) &.{"env"} else &.{}, v.env,                                            &.{cfg.espice},
                     v.flags,                                &.{ "--format=binary", "-b", "-r", raw, source },
                 });
                 break :blk .{ .argv = argv, .cwd = .{ .path = std.fs.path.dirname(source).? }, .raw = raw };
@@ -178,9 +178,9 @@ fn arguments(a: Allocator, io: Io, init: std.process.Init) !Config {
     var variants: std.ArrayList(Variant) = .empty;
     const Flag = enum(u8) { list, klu, filter, iters, timeout, rtol, out, ngspice, vacask, espice };
     const flags = std.StaticStringMap(Flag).initComptime(.{
-        .{ "--list", .list },   .{ "--ngspice-klu", .klu }, .{ "--filter", .filter },
-        .{ "--iters", .iters }, .{ "--timeout", .timeout }, .{ "--rtol", .rtol },
-        .{ "--out", .out },     .{ "--ngspice", .ngspice }, .{ "--vacask", .vacask },
+        .{ "--list", .list },     .{ "--ngspice-klu", .klu }, .{ "--filter", .filter },
+        .{ "--iters", .iters },   .{ "--timeout", .timeout }, .{ "--rtol", .rtol },
+        .{ "--out", .out },       .{ "--ngspice", .ngspice }, .{ "--vacask", .vacask },
         .{ "--espice", .espice },
     });
     while (args.next()) |arg| {

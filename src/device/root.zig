@@ -14,9 +14,9 @@ pub const Entry = struct { name: []const u8, type: type };
 /// Every decl of `models`, reflected at comptime; a new models/NAME.va
 /// appears here without a hand-kept list.
 pub const catalog: []const Entry = blk: {
-    const decls = @typeInfo(models).@"struct".decls;
+    const decls = @typeInfo(models).@"struct".decl_names;
     var list: [decls.len]Entry = undefined;
-    for (decls, 0..) |d, i| list[i] = .{ .name = d.name, .type = @field(models, d.name) };
+    for (decls, 0..) |d, i| list[i] = .{ .name = d, .type = @field(models, d) };
     const frozen = list;
     break :blk &frozen;
 };

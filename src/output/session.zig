@@ -322,6 +322,6 @@ test "session: a streamed plot matches the whole-plot encoding but for the padde
     const field = "No. Points: 2";
     const at = std.mem.indexOf(u8, streamed, field).? + field.len;
     try std.testing.expectEqualStrings(whole.written()[0..at], streamed[0..at]);
-    try std.testing.expectEqualStrings(" " ** (Session.count_width - 1), streamed[at..][0 .. Session.count_width - 1]);
+    try std.testing.expectEqualStrings(&@as([Session.count_width - 1]u8, @splat(' ')), streamed[at..][0 .. Session.count_width - 1]);
     try std.testing.expectEqualSlices(u8, whole.written()[at..], streamed[at + Session.count_width - 1 ..]);
 }

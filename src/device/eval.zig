@@ -10,11 +10,11 @@ const builtin = @import("builtin");
 /// traces, as zero-filled TLS: every thread of every compilation unit pays it
 /// (1.5 MB per thread across the device objects before this). Kept in Debug,
 /// where the trace is worth it.
-pub const std_options: std.Options = .{ .signal_stack_size = if (@import("builtin").mode == .Debug) 1 << 18 else null };
+pub const std_options: std.Options = .{ .signal_stack_size = if (@import("builtin").mode == .debug) 1 << 18 else null };
 
 /// VerA's device/host contract checks (`contract.validating`), on in Debug
 /// only: off, a device build spends 0.4-1.8% fewer instructions.
-pub const vera_validate_contract = @import("builtin").mode == .Debug;
+pub const vera_validate_contract = @import("builtin").mode == .debug;
 const contract = @import("contract");
 const gompute = @import("gompute");
 const ir = @import("device_abi");
@@ -33,8 +33,8 @@ const dmath = gompute.math;
 /// catch the result.
 // ponytail: an arch switch covers every shipped target; add a `-Dfma` option
 // only when a target needs to override it.
-const fma_ok = switch (builtin.cpu.arch) {
-    .x86_64 => std.Target.x86.featureSetHas(builtin.cpu.features, .fma),
+const fma_ok = switch (builtin.target.cpu.arch) {
+    .x86_64 => std.Target.x86.featureSetHas(builtin.target.cpu.features, .fma),
     .aarch64, .aarch64_be => true,
     .nvptx64, .amdgcn => true,
     else => false,
@@ -238,8 +238,10 @@ fn DualFor(comptime F: type, comptime lane: []const u8, comptime layout: Layout,
                 pub fn expm1(a: T) T {
                     return map(a, dmath.expm1(a.v), dmath.exp(a.v));
                 }
+                /// gompute's port: Zig 0.17's `std.math.log1p` emits an asm
+                /// operand AMDGCN cannot select. Bit-identical to std.
                 pub fn log1p(a: T) T {
-                    return map(a, std.math.log1p(a.v), 1.0 / (1.0 + a.v));
+                    return map(a, dmath.log1p(a.v), 1.0 / (1.0 + a.v));
                 }
                 pub fn sqrt(a: T) T {
                     const s = @sqrt(a.v);
@@ -360,7 +362,7 @@ fn RealFor(comptime collapsed: bool) type {
             return .{ .v = dmath.expm1(a.v) };
         }
         pub fn log1p(a: Self) Self {
-            return .{ .v = std.math.log1p(a.v) };
+            return .{ .v = dmath.log1p(a.v) };
         }
         pub fn sqrt(a: Self) Self {
             return .{ .v = @sqrt(a.v) };
@@ -638,7 +640,7 @@ fn repMask(comptime n_u: usize, comptime lane: [n_u]u8, comptime alias: [n_u]boo
 /// The `jac_const` entry for local (row `ru`, column `cu`), if any.
 fn constEntry(comptime D: type, comptime ru: usize, comptime cu: usize) ?contract.JacConst(D.U) {
     for (contract.jacConst(D)) |e| {
-        if (@intFromEnum(e.row) == ru and @intFromEnum(e.col) == cu) return e;
+        if (@backingInt(e.row) == ru and @backingInt(e.col) == cu) return e;
     }
     return null;
 }
@@ -1121,10 +1123,10 @@ pub fn ProtoStore(comptime D: type) type {
 
         /// Rewrites `m` field by field over zeroed bytes.
         fn canonicalize(m: *D.Model) void {
-            @setEvalBranchQuota(10 * @typeInfo(D.Model).@"struct".fields.len + 1000);
+            @setEvalBranchQuota(10 * @typeInfo(D.Model).@"struct".field_names.len + 1000);
             const copy = m.*;
             @memset(std.mem.asBytes(m), 0);
-            inline for (@typeInfo(D.Model).@"struct".fields) |f| @field(m, f.name) = @field(copy, f.name);
+            inline for (@typeInfo(D.Model).@"struct".field_names) |name| @field(m, name) = @field(copy, name);
         }
 
         /// Stable-partitions the rows so maximally collapsed instances come
@@ -1199,14 +1201,14 @@ const timer_only_state = std.StaticStringMap(void).initComptime(.{
 fn skipsTimerState(comptime D: type) bool {
     if (timer_only_state.get(comptime baseName(D)) == null) return false;
     // Two substring scans per field name; VerA emits one field per timer.
-    @setEvalBranchQuota(200_000 + 2_000 * @typeInfo(D.Instance).@"struct".fields.len);
-    for (@typeInfo(D.State).@"struct".fields) |f| {
-        if (!@hasField(D.Instance, f.name))
-            @compileError(@typeName(D) ++ " carries State beyond stateCtl twins (" ++ f.name ++ "); drop it from timer_only_state");
+    @setEvalBranchQuota(200_000 + 2_000 * @typeInfo(D.Instance).@"struct".field_names.len);
+    for (@typeInfo(D.State).@"struct".field_names) |name| {
+        if (!@hasField(D.Instance, name))
+            @compileError(@typeName(D) ++ " carries State beyond stateCtl twins (" ++ name ++ "); drop it from timer_only_state");
     }
-    for (@typeInfo(D.Instance).@"struct".fields) |f| {
-        if (std.mem.indexOf(u8, f.name, "__") != null and std.mem.indexOf(u8, f.name, "__analog_op__timer") == null)
-            @compileError(@typeName(D) ++ " holds non-timer state (" ++ f.name ++ "); drop it from timer_only_state");
+    for (@typeInfo(D.Instance).@"struct".field_names) |name| {
+        if (std.mem.indexOf(u8, name, "__") != null and std.mem.indexOf(u8, name, "__analog_op__timer") == null)
+            @compileError(@typeName(D) ++ " holds non-timer state (" ++ name ++ "); drop it from timer_only_state");
     }
     return true;
 }
@@ -1391,8 +1393,8 @@ fn hasAbsdelayState(comptime D: type) bool {
 fn idtUnknowns(comptime D: type) []const u32 {
     comptime {
         var out: []const u32 = &.{};
-        if (@hasDecl(D, "U")) for (@typeInfo(D.U).@"enum".fields) |f| {
-            if (std.mem.startsWith(u8, f.name, "idtZ24")) out = out ++ [_]u32{f.value};
+        if (@hasDecl(D, "U")) for (@typeInfo(D.U).@"enum".field_names, @typeInfo(D.U).@"enum".field_values) |name, value| {
+            if (std.mem.startsWith(u8, name, "idtZ24")) out = out ++ [_]u32{value};
         };
         const final = out[0..out.len].*;
         return &final;
@@ -1418,8 +1420,8 @@ fn hasInstanceField(comptime D: type, comptime infix: []const u8) bool {
     if (!@hasDecl(D, "Instance")) return false;
     // hisim Instances have hundreds of long field names.
     @setEvalBranchQuota(2_000_000);
-    inline for (@typeInfo(D.Instance).@"struct".fields) |f| {
-        if (std.mem.indexOf(u8, f.name, infix) != null) return true;
+    inline for (@typeInfo(D.Instance).@"struct".field_names) |name| {
+        if (std.mem.indexOf(u8, name, infix) != null) return true;
     }
     return false;
 }
@@ -1797,7 +1799,7 @@ pub fn DeviceBatch(comptime D: type) type {
             const self: *Self = @ptrCast(@alignCast(ctx));
             var dirty = false;
             for (0..self.count) |id| {
-                if (D.stateCtl(self.model(id), &self.instances[id], &self.states[id], @enumFromInt(@intFromEnum(op)))) dirty = true;
+                if (D.stateCtl(self.model(id), &self.instances[id], &self.states[id], @fromBackingInt(@intCast(@backingInt(op))))) dirty = true;
             }
             switch (op) {
                 .commit => self.committed_initial = self.held_initial,
@@ -1957,7 +1959,7 @@ pub fn DeviceBatch(comptime D: type) type {
 
         fn collectParamsLocal(ctx: *anyopaque, gpa: std.mem.Allocator, list: *std.ArrayList(ParamRef)) error{OutOfMemory}!void {
             // `paramField` runs per field; txl's history has ~10k fields.
-            @setEvalBranchQuota(100_000 + 100 * (@typeInfo(D.Instance).@"struct".fields.len + @typeInfo(D.Model).@"struct".fields.len));
+            @setEvalBranchQuota(100_000 + 100 * (@typeInfo(D.Instance).@"struct".field_names.len + @typeInfo(D.Model).@"struct".field_names.len));
             const self: *Self = @ptrCast(@alignCast(ctx));
             try self.unshareModels();
             try appendParams(D.Instance, self.instances, true, gpa, list);
@@ -1966,21 +1968,21 @@ pub fn DeviceBatch(comptime D: type) type {
 
         fn appendParams(comptime T: type, items: anytype, comptime is_instance: bool, gpa: std.mem.Allocator, list: *std.ArrayList(ParamRef)) error{OutOfMemory}!void {
             comptime var field_idx: usize = 0;
-            inline for (@typeInfo(T).@"struct".fields) |field| {
-                if (comptime paramField(T, field)) {
+            inline for (@typeInfo(T).@"struct".field_names) |field_name| {
+                if (comptime paramField(T, field_name)) {
                     const primary = comptime if (@hasDecl(D, "mc_param"))
-                        std.mem.eql(u8, field.name, D.mc_param)
+                        std.mem.eql(u8, field_name, D.mc_param)
                     else if (isVera(D))
                         !is_instance and field_idx == 0
                     else
                         is_instance and field_idx == 0;
                     for (items, 0..) |*it, idx| {
                         try list.append(gpa, .{
-                            .ptr = if (field.type == f32)
-                                .{ .f32 = &@field(it, field.name) }
+                            .ptr = if (@FieldType(T, field_name) == f32)
+                                .{ .f32 = &@field(it, field_name) }
                             else
-                                .{ .f64 = &@field(it, field.name) },
-                            .param_name = field.name,
+                                .{ .f64 = &@field(it, field_name) },
+                            .param_name = field_name,
                             .index = @intCast(idx),
                             .is_instance = is_instance,
                             .primary = primary,
@@ -1991,23 +1993,23 @@ pub fn DeviceBatch(comptime D: type) type {
             }
         }
 
-        /// Whether `field` of T is a sweepable parameter: a float with a
+        /// Whether field `field_name` of T is a sweepable parameter: a float with a
         /// finite default that is not a VerA-internal or runtime-state field.
-        fn paramField(comptime T: type, comptime field: std.builtin.Type.StructField) bool {
-            if (field.type != f32 and field.type != f64) return false;
+        fn paramField(comptime T: type, comptime field_name: []const u8) bool {
+            if (@FieldType(T, field_name) != f32 and @FieldType(T, field_name) != f64) return false;
             // A trailing `__` is VerA's own namespace (no escaped Verilog-A
             // name ends in `_`), e.g. `nom_temp__` from `.options tnom`,
             // which `.mc`/`.sens` must not perturb. So is `<flow>__retained`,
             // the retention flag `derive` writes (contract `JacWhen`).
-            if (comptime std.mem.endsWith(u8, field.name, "__") or
-                std.mem.endsWith(u8, field.name, "__retained")) return false;
+            if (comptime std.mem.endsWith(u8, field_name, "__") or
+                std.mem.endsWith(u8, field_name, "__retained")) return false;
             if (isVera(D) and T == D.Instance) {
                 // A VerA Instance holds runtime state; only `mfactor` is a
                 // parameter (the temperature is the Model row's
                 // `temperature__`, device ABI 6).
-                if (!std.mem.eql(u8, field.name, "mfactor")) return false;
+                if (!std.mem.eql(u8, field_name, "mfactor")) return false;
             }
-            const dflt = @field(T{}, field.name);
+            const dflt = @field(T{}, field_name);
             return dflt > -1e30 and dflt < 1e30;
         }
 
@@ -2639,7 +2641,7 @@ fn CtlKernel(comptime D: type, comptime block_size: u32) type {
             const model: *const D.Model = @addrSpaceCast(&models[model_of[id]]);
             const inst: *D.Instance = @addrSpaceCast(&instances[id]);
             const st: *StateT = @addrSpaceCast(&states[id]);
-            const sop: StateCtlOp = @enumFromInt(@as(u8, @truncate(op)));
+            const sop: StateCtlOp = @fromBackingInt(@intCast(@as(u8, @truncate(op))));
             if (D.stateCtl(model, inst, st, sop))
                 _ = @atomicRmw(u32, &flags[0], .Or, 1, .monotonic);
         }
@@ -2778,8 +2780,8 @@ fn placeholder(_: u64) callconv(gompute.kernel_callconv) void {}
 // its `arp_device_<name>` vtable getter on the host.
 comptime {
     if (@import("root") == @This() and !builtin.is_test) {
-        for (@typeInfo(@import("models")).@"struct".decls) |decl| {
-            const D = @field(@import("models"), decl.name);
+        for (@typeInfo(@import("models")).@"struct".decl_names) |decl_name| {
+            const D = @field(@import("models"), decl_name);
             if (gompute.is_device) {
                 const block_size = ir.gpu_block_size;
                 if (gpuEligible(D)) {
@@ -2788,7 +2790,7 @@ comptime {
                     if (hasCtlKernel(D)) gompute.exportRaw(ctlKernelName(D), &CtlKernel(D, block_size).run);
                     if (@hasDecl(D, "q")) gompute.exportRaw(qTapeKernelName(D), &QTapeKernel(D, block_size).run);
                     gompute.exportRaw(reduceKernelName(D), &ReduceKernel(D, block_size).run);
-                } else gompute.exportRaw("arp_nop_" ++ decl.name, &placeholder);
+                } else gompute.exportRaw("arp_nop_" ++ decl_name, &placeholder);
             } else {
                 checkHost(D);
                 if (@hasDecl(D, "eval")) {
@@ -2797,7 +2799,7 @@ comptime {
                             return deviceVtable(D, @typeName(D));
                         }
                     };
-                    @export(&Export.get, .{ .name = "arp_device_" ++ decl.name });
+                    @export(&Export.get, .{ .name = "arp_device_" ++ decl_name });
                 }
             }
         }

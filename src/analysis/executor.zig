@@ -432,8 +432,8 @@ fn run(ctx: *const types.RunCtx, job: requests.Query) !types.Result {
 const Tolerances = @import("core").numerics.Tolerances;
 
 comptime {
-    for (@typeInfo(requests.Kind).@"enum".fields) |field|
-        validate(module(@field(requests.Kind, field.name)));
+    for (@typeInfo(requests.Kind).@"enum".field_names) |name|
+        validate(module(@field(requests.Kind, name)));
 }
 
 /// Checks at comptime that analysis module `T` exposes
@@ -460,9 +460,9 @@ fn validate(comptime T: type) void {
     if (info != .@"fn")
         @compileError(name ++ ".run must be a function");
     const f = info.@"fn";
-    if (f.params.len != 2 or
-        f.params[0].type != *const types.RunCtx or
-        f.params[1].type != T.Options)
+    if (f.param_types.len != 2 or
+        f.param_types[0] != *const types.RunCtx or
+        f.param_types[1] != T.Options)
         @compileError(name ++ ".run: expected params (*const types.RunCtx, " ++ name ++ ".Options)");
 
     const ret = @typeInfo(f.return_type.?);

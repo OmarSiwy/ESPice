@@ -7,7 +7,7 @@ device is left under `models/`. Parity with the retired native devices is
 measured in
 [native-transmission-line-migration.md](native-transmission-line-migration.md).
 
-`build.zig.zon` pins VerA at `ae44118d` (device ABI 6).
+`build.zig.zon` pins VerA to `../vera-pin1`, a snapshot of its zig-0.17 branch at `039717bc` (device ABI 6).
 
 ## Status
 

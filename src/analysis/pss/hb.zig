@@ -137,7 +137,7 @@ pub fn solveSpectrum(
     off += total_unknowns;
     const g_td = arena[off..][0 .. nt * nnz];
     off += nt * nnz;
-    const c_td = arena[off..][0 .. if (ppv.len != 0) nt * nnz else 0];
+    const c_td = arena[off..][0..if (ppv.len != 0) nt * nnz else 0];
     off += c_td.len;
     const basis_cos = arena[off..][0 .. nt * 2 * nh];
     off += nt * 2 * nh;

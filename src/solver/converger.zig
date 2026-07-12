@@ -15,20 +15,6 @@ const direct = @import("direct.zig");
 const BbdInfo = @import("core").numerics.BbdInfo;
 const Execution = @import("core").numerics.Execution;
 const num = @import("core").numerics;
-const z = @import("stdpp");
-
-const mul = z.lanewise(mulFn);
-fn mulFn(p: anytype) @TypeOf(p.left) {
-    return p.left * p.right;
-}
-/// (left - right) * inv: the finite-difference Jacobian product.
-const FdQuot = struct {
-    pub const lanewise = true;
-    inv: f64,
-    pub fn call(self: *@This(), p: anytype) @TypeOf(p.left) {
-        return (p.left - p.right) * z.splat(@TypeOf(p.left), self.inv);
-    }
-};
 
 /// `ESPICE_SOLVER` overrides `run`'s choice: direct, jfnk (LU-preconditioned
 /// GMRES) or jfnk-nolu (Jacobi-preconditioned, no factorization at all).
@@ -39,14 +25,14 @@ var solver_pin_cache: std.atomic.Value(u8) = .init(std.math.maxInt(u8));
 
 fn solverPin() SolverPin {
     const cached = solver_pin_cache.load(.monotonic);
-    if (cached != std.math.maxInt(u8)) return @enumFromInt(cached);
+    if (cached != std.math.maxInt(u8)) return @fromBackingInt(@intCast(cached));
     const p: SolverPin = blk: {
         const s = std.c.getenv("ESPICE_SOLVER") orelse break :blk .auto;
         break :blk std.StaticStringMap(SolverPin).initComptime(.{
             .{ "direct", .direct }, .{ "jfnk", .jfnk }, .{ "jfnk-nolu", .jfnk_nolu },
         }).get(std.mem.span(s)) orelse .auto;
     };
-    solver_pin_cache.store(@intFromEnum(p), .monotonic);
+    solver_pin_cache.store(@backingInt(p), .monotonic);
     return p;
 }
 
@@ -428,8 +414,7 @@ pub fn jfnk(
             num.axpy(x_pert, eps, vj);
             assembleShifted(sys, x_pert, t, opts, hook);
             const inv_eps = 1.0 / eps;
-            var fd = z.fromSlice(f64, sys.rhs[0..n]).zip(z.fromSlice(f64, f0)).map(FdQuot{ .inv = inv_eps });
-            _ = fd.writeInto(w);
+            for (w, sys.rhs[0..n], f0) |*wi, rh, f| wi.* = (rh - f) * inv_eps;
             applyPreconditioner(w, diag, slv);
 
             // Modified Gram-Schmidt, sequential dot products.
@@ -579,8 +564,7 @@ fn applyPreconditioner(r: []f64, diag: []const f64, slv: ?*direct.Solver) void {
             return;
         }
     }
-    var it = z.fromSlice(f64, r).zip(z.fromSlice(f64, diag[0..r.len])).map(mul);
-    _ = it.writeInto(r);
+    for (r, diag[0..r.len]) |*ri, d| ri.* *= d;
 }
 
 fn applyLimits(sys: anytype, x: []f64, x_old: []f64) bool {
@@ -672,7 +656,7 @@ pub const Prof = struct {
     fn lap(p: *Prof, phase: Phase) void {
         const io = p.io orelse return;
         const now: std.Io.Timestamp = .now(io, .awake);
-        p.ns[@intFromEnum(phase)] += @intCast(p.last.durationTo(now).nanoseconds);
+        p.ns[@backingInt(phase)] += @intCast(p.last.durationTo(now).nanoseconds);
         p.last = now;
         if (phase == .factor) p.counts[1] += 1;
     }

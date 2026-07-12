@@ -498,7 +498,7 @@ test "the raw parser reads every plot, and still refuses a truncated one" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const raw = "Plotname: Operating Point\nNo. Variables: 1\nNo. Points: 1\nVariables:\n\t0\tv(out)\tvoltage\nBinary:\n" ++ "\x00" ** 8;
+    const raw = "Plotname: Operating Point\nNo. Variables: 1\nNo. Points: 1\nVariables:\n\t0\tv(out)\tvoltage\nBinary:\n" ++ &@as([8]u8, @splat(0));
     try std.testing.expectEqual(@as(usize, 1), parseRawBlob(a, raw).?.len);
     try std.testing.expectEqual(@as(usize, 2), parseRawBlob(a, raw ++ raw).?.len);
     try std.testing.expect(parseRawBlob(a, raw[0 .. raw.len - 1]) == null);

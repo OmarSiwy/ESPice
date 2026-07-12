@@ -15,9 +15,9 @@ const Clause = core.MeasureClause;
 const Word = struct { lhs: []const u8, rhs: ?[]const u8 = null };
 
 const analyses = std.StaticStringMap(Kind).initComptime(.{
-    .{ "tran", .tran },         .{ "ac", .ac },                 .{ "dc", .dc },
-    .{ "fft", .fft },           .{ "trannoise", .tran_noise },  .{ "dcmatch", .dcmatch },
-    .{ "acmatch", .acmatch },   .{ "lstb", .lstb },             .{ "phasenoise", .phasenoise },
+    .{ "tran", .tran },       .{ "ac", .ac },                .{ "dc", .dc },
+    .{ "fft", .fft },         .{ "trannoise", .tran_noise }, .{ "dcmatch", .dcmatch },
+    .{ "acmatch", .acmatch }, .{ "lstb", .lstb },            .{ "phasenoise", .phasenoise },
     .{ "ptdnoise", .pnoise },
 });
 /// `.lstb`'s margins-plot columns, each a measure of its own:
@@ -29,15 +29,15 @@ const lstb_types = std.StaticStringMap(u8).initComptime(.{ .{ "db", 'd' }, .{ "m
 const cont_analyses = std.StaticStringMap(Kind).initComptime(.{ .{ "tran_cont", .tran }, .{ "ac_cont", .ac }, .{ "dc_cont", .dc } });
 
 const funcs = std.StaticStringMap(core.MeasureFunc).initComptime(.{
-    .{ "trig", .trig_targ }, .{ "delay", .trig_targ }, .{ "targ", .trig_targ },
-    .{ "find", .find },      .{ "when", .when },       .{ "avg", .avg },
-    .{ "min", .min },        .{ "max", .max },         .{ "min_at", .min_at },
-    .{ "max_at", .max_at },  .{ "rms", .rms },         .{ "pp", .pp },
-    .{ "integ", .integ },    .{ "deriv", .deriv },      .{ "integral", .integ },
-    .{ "derivative", .deriv }, .{ "param", .param },    .{ "err", .err },
-    .{ "err1", .err1 },      .{ "err2", .err2 },       .{ "err3", .err3 },
-    .{ "thd", .thd },        .{ "snr", .snr },         .{ "sndr", .sndr },
-    .{ "enob", .enob },      .{ "sfdr", .sfdr },       .{ "em_avg", .em_avg },
+    .{ "trig", .trig_targ },   .{ "delay", .trig_targ }, .{ "targ", .trig_targ },
+    .{ "find", .find },        .{ "when", .when },       .{ "avg", .avg },
+    .{ "min", .min },          .{ "max", .max },         .{ "min_at", .min_at },
+    .{ "max_at", .max_at },    .{ "rms", .rms },         .{ "pp", .pp },
+    .{ "integ", .integ },      .{ "deriv", .deriv },     .{ "integral", .integ },
+    .{ "derivative", .deriv }, .{ "param", .param },     .{ "err", .err },
+    .{ "err1", .err1 },        .{ "err2", .err2 },       .{ "err3", .err3 },
+    .{ "thd", .thd },          .{ "snr", .snr },         .{ "sndr", .sndr },
+    .{ "enob", .enob },        .{ "sfdr", .sfdr },       .{ "em_avg", .em_avg },
     .{ "jitter", .jitter },
 });
 

@@ -15,7 +15,7 @@ fn runDeck(source: []const u8) !*api.Problem {
 fn requestedResult(problem: *const api.Problem, ordinal: usize) !Result {
     var found: usize = 0;
     for (0..problem.query_count()) |i| {
-        const id: api.QueryId = @enumFromInt(i);
+        const id: api.QueryId = @fromBackingInt(@intCast(i));
         const info = try problem.query_info(id);
         if (!info.requested) continue;
         if (found == ordinal) return problem.result(id);

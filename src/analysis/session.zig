@@ -145,10 +145,10 @@ pub const Session = struct {
             var dependency = none;
             if (prerequisite(owned)) |op| {
                 dependency = findOp(candidate, op) orelse blk: {
-                    const dep: QueryId = @enumFromInt(candidate.len);
+                    const dep: QueryId = @fromBackingInt(@intCast(candidate.len));
                     candidate.appendAssumeCapacity(.{
                         .job = .{ .op = op },
-                        .component = @intFromEnum(dep),
+                        .component = @backingInt(dep),
                         .requested = false,
                     });
                     break :blk dep;
@@ -157,16 +157,16 @@ pub const Session = struct {
             // An explicit OP can expose an already shared prerequisite product.
             if (owned == .op) {
                 if (findOp(candidate, owned.op)) |existing| {
-                    candidate.items(.requested)[@intFromEnum(existing)] = true;
+                    candidate.items(.requested)[@backingInt(existing)] = true;
                     id.* = existing;
                     continue;
                 }
             }
-            id.* = @enumFromInt(candidate.len);
+            id.* = @fromBackingInt(@intCast(candidate.len));
             candidate.appendAssumeCapacity(.{
                 .job = owned,
                 .dependency = dependency,
-                .component = if (dependency == none) @intFromEnum(id.*) else candidate.items(.component)[@intFromEnum(dependency)],
+                .component = if (dependency == none) @backingInt(id.*) else candidate.items(.component)[@backingInt(dependency)],
                 .requested = true,
             });
         }
@@ -188,7 +188,7 @@ pub const Session = struct {
     }
 
     fn index(self: *const Session, id: QueryId) !usize {
-        const i = @intFromEnum(id);
+        const i = @backingInt(id);
         if (i >= self.rows.len) return error.InvalidQuery;
         return i;
     }
@@ -198,7 +198,7 @@ pub const Session = struct {
         if (status.terminal()) return status;
         const dep = self.rows.items(.dependency)[i];
         if (dep != none) {
-            const ds = self.rows.items(.status)[@intFromEnum(dep)];
+            const ds = self.rows.items(.status)[@backingInt(dep)];
             if (ds.terminal() and ds != .complete) return .dependency_failed;
         }
         return status;
@@ -237,14 +237,14 @@ pub const Session = struct {
         return switch (scope) {
             .all => true,
             .component => |component| self.rows.items(.component)[i] == component,
-            .query => |id| @intFromEnum(id) == i or self.rows.items(.dependency)[@intFromEnum(id)] == @as(QueryId, @enumFromInt(i)),
+            .query => |id| @backingInt(id) == i or self.rows.items(.dependency)[@backingInt(id)] == @as(QueryId, @fromBackingInt(@intCast(i))),
         };
     }
 
     fn ready(self: *const Session, i: usize) bool {
         if (self.effectiveStatus(i).terminal()) return false;
         const dep = self.rows.items(.dependency)[i];
-        return dep == none or self.rows.items(.status)[@intFromEnum(dep)] == .complete;
+        return dep == none or self.rows.items(.status)[@backingInt(dep)] == .complete;
     }
 
     /// Copies the ready queries in `scope` into `ids` in scheduler order and
@@ -261,7 +261,7 @@ pub const Session = struct {
         for (0..self.rows.len) |offset| {
             const i = (offset + self.cursor) % self.rows.len;
             if (!self.contains(scope, i) or !self.ready(i)) continue;
-            ids[out] = @enumFromInt(i);
+            ids[out] = @fromBackingInt(@intCast(i));
             out += 1;
         }
         return n;
@@ -290,7 +290,7 @@ pub const Session = struct {
         if (self.rows.items(.executor)[i] != null) return;
         const started = if (self.config.timing_in_depth) std.Io.Timestamp.now(self.io, .awake) else null;
         const dep = self.rows.items(.dependency)[i];
-        const initial = if (dep == none) null else self.rows.items(.executor)[@intFromEnum(dep)];
+        const initial = if (dep == none) null else self.rows.items(.executor)[@backingInt(dep)];
         self.rows.items(.executor)[i] = try execution.Executor.create(
             self.allocator,
             self.io,
@@ -301,11 +301,11 @@ pub const Session = struct {
             self.config.final_plan and (dep != none or self.last_template_reader) and self.lastReader(i, dep),
             self.config,
         );
-        if (self.stream) |s| if (@intFromEnum(s.id) == i) {
+        if (self.stream) |s| if (@backingInt(s.id) == i) {
             self.rows.items(.executor)[i].?.stream = s.writer;
         };
         if (started) |start| {
-            self.rows.items(.executor)[i].?.controller.options.timing_query = @enumFromInt(i);
+            self.rows.items(.executor)[i].?.controller.options.timing_query = @fromBackingInt(@intCast(i));
             const elapsed = start.durationTo(std.Io.Timestamp.now(self.io, .awake)).nanoseconds;
             std.debug.print("timing: query {d} {s} setup: {d:.6}ms\n", .{
                 i, @tagName(self.rows.items(.job)[i]), @as(f64, @floatFromInt(elapsed)) / 1e6,
@@ -323,7 +323,7 @@ pub const Session = struct {
         while (offset < ids.len) {
             const end = @min(ids.len, offset + limits.max_parallel);
             for (ids[offset..end]) |id| {
-                const i = @intFromEnum(id);
+                const i = @backingInt(id);
                 self.makeExecutor(i) catch |err| {
                     self.rows.items(.status)[i] = .failed;
                     self.rows.items(.failure)[i] = err;
@@ -335,7 +335,7 @@ pub const Session = struct {
                 };
             }
             for (ids[offset..end], events[offset..end]) |id, *event| {
-                const i = @intFromEnum(id);
+                const i = @backingInt(id);
                 if (self.rows.items(.status)[i] != .failed) {
                     const outcome = try self.rows.items(.executor)[i].?.wait();
                     switch (outcome) {
@@ -391,7 +391,7 @@ pub const Session = struct {
 
     /// True when every requested query is terminal.
     pub fn finished(self: *const Session) bool {
-        for (self.outputs.items) |id| if (!self.effectiveStatus(@intFromEnum(id)).terminal()) return false;
+        for (self.outputs.items) |id| if (!self.effectiveStatus(@backingInt(id)).terminal()) return false;
         return true;
     }
 
@@ -399,7 +399,7 @@ pub const Session = struct {
     /// result, or null.
     pub fn failure(self: *const Session) ?anyerror {
         for (self.outputs.items) |id| {
-            const i = @intFromEnum(id);
+            const i = @backingInt(id);
             const status = self.effectiveStatus(i);
             if (status == .complete or !status.terminal()) continue;
             return self.rows.items(.failure)[i] orelse if (status == .cancelled) error.QueryCancelled else error.DependencyFailed;
@@ -470,7 +470,7 @@ pub const Session = struct {
             }
             // A scope naming an implicit prerequisite still shows that query.
             if (options.scope == .query) {
-                const j = @intFromEnum(options.scope.query);
+                const j = @backingInt(options.scope.query);
                 if (!seen[j]) try self.printQuery(writer, j, 1, j == last_query, continuations, next[0..n_next], seen, options.ascii);
             }
         }
@@ -480,12 +480,12 @@ pub const Session = struct {
         return switch (scope) {
             .all => true,
             .component => |c| component == c,
-            .query => |q| component == self.rows.items(.component)[@intFromEnum(q)],
+            .query => |q| component == self.rows.items(.component)[@backingInt(q)],
         };
     }
 
     fn printQuery(self: *const Session, writer: *std.Io.Writer, i: usize, depth: usize, last: bool, continuations: []bool, next: []const QueryId, seen: []bool, ascii: bool) !void {
-        const q = try self.info(@enumFromInt(i));
+        const q = try self.info(@fromBackingInt(@intCast(i)));
         for (continuations[0..depth]) |continues|
             try writer.writeAll(if (!continues) "    " else if (ascii) "|   " else "│   ");
         try writer.print("{s} {s}q{d} {s} [{s}", .{
@@ -496,22 +496,22 @@ pub const Session = struct {
             if (q.status == .pending and self.ready(i)) "ready" else @tagName(q.status),
         });
         if (seen[i]) try writer.writeAll("; shared");
-        const selected = std.mem.indexOfScalar(QueryId, next, @enumFromInt(i)) != null;
+        const selected = std.mem.indexOfScalar(QueryId, next, @fromBackingInt(@intCast(i))) != null;
         if (selected) try writer.writeAll("; NEXT") else if (self.ready(i)) try writer.writeAll("; deferred by selection");
         if (q.dependency) |dep| if (!self.ready(i) and !q.status.terminal())
-            try writer.print("; waiting for q{d}", .{@intFromEnum(dep)});
+            try writer.print("; waiting for q{d}", .{@backingInt(dep)});
         if (q.progress) |p| try writer.print("; {s} {d}/{d}", .{ @tagName(p.phase), p.completed, p.total });
         if (q.failure) |err| try writer.print("; {s}", .{@errorName(err)});
         try writer.writeAll("]\n");
         if (seen[i]) return;
         seen[i] = true;
         continuations[depth] = !last;
-        if (q.dependency) |dep| try self.printQuery(writer, @intFromEnum(dep), depth + 1, true, continuations, next, seen, ascii);
+        if (q.dependency) |dep| try self.printQuery(writer, @backingInt(dep), depth + 1, true, continuations, next, seen, ascii);
     }
 };
 
 fn findOp(rows: std.MultiArrayList(Row), op: requests.Op) ?QueryId {
-    for (rows.items(.job), 0..) |job, i| if (job == .op and std.meta.eql(job.op, op)) return @enumFromInt(i);
+    for (rows.items(.job), 0..) |job, i| if (job == .op and std.meta.eql(job.op, op)) return @fromBackingInt(@intCast(i));
     return null;
 }
 
@@ -534,7 +534,7 @@ fn copyValue(allocator: std.mem.Allocator, value: anytype) std.mem.Allocator.Err
     switch (@typeInfo(T)) {
         .@"struct" => |s| {
             var result = value;
-            inline for (s.fields) |field| @field(result, field.name) = try copyValue(allocator, @field(value, field.name));
+            inline for (s.field_names) |name| @field(result, name) = try copyValue(allocator, @field(value, name));
             return result;
         },
         .@"union" => switch (value) {

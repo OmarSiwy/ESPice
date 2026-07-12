@@ -8,11 +8,11 @@ const problem = @import("espice");
 /// traces, as zero-filled TLS: every thread of every compilation unit pays it
 /// (1.5 MB per thread across the device objects before this). Kept in Debug,
 /// where the trace is worth it.
-pub const std_options: std.Options = .{ .signal_stack_size = if (@import("builtin").mode == .Debug) 1 << 18 else null };
+pub const std_options: std.Options = .{ .signal_stack_size = if (@import("builtin").mode == .debug) 1 << 18 else null };
 
 /// VerA's device/host contract checks (`contract.validating`), on in Debug
 /// only: off, a device build spends 0.4-1.8% fewer instructions.
-pub const vera_validate_contract = @import("builtin").mode == .Debug;
+pub const vera_validate_contract = @import("builtin").mode == .debug;
 
 /// glibc's `mallopt` (malloc.h); M_MMAP_THRESHOLD is -3.
 extern "c" fn mallopt(param: c_int, value: c_int) c_int;
@@ -136,7 +136,7 @@ pub fn main(init: std.process.Init) !u8 {
         }
         std.debug.print("{s}: {d} devices\n", .{ p.title(), p.device_count() });
         for (0..p.query_count()) |i| {
-            const id: problem.QueryId = @enumFromInt(i);
+            const id: problem.QueryId = @fromBackingInt(@intCast(i));
             if (!(try p.query_info(id)).requested) continue;
             const result = try p.result(id);
             std.debug.print("  {s}: {d} points, {d} variables\n", .{ result.plotname, result.npoints, result.varnames.len });

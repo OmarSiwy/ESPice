@@ -54,36 +54,34 @@ test "analysis directives dispatch every implemented capability and reject malfo
     // `.fft` reads the deck's `.tran`, `.acmatch` its `.ac`.
     const ctx: analyses.CardContext = .{ .arena = a, .tran = .{ .t_stop = 10e-6, .dt_init = 1e-6 }, .ac = .{ .f_start = 10, .f_stop = 100 } };
     const directives = [_][]const u8{
-        ".ac dec 2 10 100",                     ".dc vin 0 1 0.1",       ".dcmatch v(out)",
-        ".disto dec 2 10 100",                  ".envelope 1m 5m",       ".four 1k v(out)",
-        ".hb 1k",                               ".matex 1u 10u",         ".mc 4",
-        ".noise v(out) vin dec 2 10 100",       ".op",                   ".pac 1k dec 2 10 100",
-        ".pnoise v(out) vin dec 2 10 100 1k 0", ".pss 1k 128",           ".pxf 1k dec 2 10 100",
-        ".pz",                                  ".qpss 1k 1414 1 1",     ".sens v(out)",
-        ".sp dec 2 10 100",                     ".stb vin dec 2 10 100", ".temp -40 125 55",
-        ".tf v(out) vin",                       ".tran 1u 10u",          ".tran_noise 1u 10u",
-        ".hbac dec 2 10 100 1k",                ".hbnoise v(out) vin dec 2 10 100 1k 4 2",
-        ".hbxf v(out) dec 2 10 100 1k",         ".phasenoise v(out) dec 2 10 100 1meg",
-        ".lstb mode=single vsource=vin dec 2 10 100", ".acxf v(out) dec 2 10 100",
-        ".dcxf v(out) tf",                      ".dcinc",
-        ".fft v(out)",                          ".acmatch v(out)",      ".dcsens v(out)",
-        ".hblin dec 2 10 100",
+        ".ac dec 2 10 100",                     ".dc vin 0 1 0.1",                            ".dcmatch v(out)",
+        ".disto dec 2 10 100",                  ".envelope 1m 5m",                            ".four 1k v(out)",
+        ".hb 1k",                               ".matex 1u 10u",                              ".mc 4",
+        ".noise v(out) vin dec 2 10 100",       ".op",                                        ".pac 1k dec 2 10 100",
+        ".pnoise v(out) vin dec 2 10 100 1k 0", ".pss 1k 128",                                ".pxf 1k dec 2 10 100",
+        ".pz",                                  ".qpss 1k 1414 1 1",                          ".sens v(out)",
+        ".sp dec 2 10 100",                     ".stb vin dec 2 10 100",                      ".temp -40 125 55",
+        ".tf v(out) vin",                       ".tran 1u 10u",                               ".tran_noise 1u 10u",
+        ".hbac dec 2 10 100 1k",                ".hbnoise v(out) vin dec 2 10 100 1k 4 2",    ".hbxf v(out) dec 2 10 100 1k",
+        ".phasenoise v(out) dec 2 10 100 1meg", ".lstb mode=single vsource=vin dec 2 10 100", ".acxf v(out) dec 2 10 100",
+        ".dcxf v(out) tf",                      ".dcinc",                                     ".fft v(out)",
+        ".acmatch v(out)",                      ".dcsens v(out)",                             ".hblin dec 2 10 100",
     };
-    try std.testing.expectEqual(std.meta.fields(requests.Kind).len, directives.len);
-    inline for (directives, std.meta.fields(requests.Kind)) |directive, field| {
-        const id = @field(requests.Kind, field.name);
+    const kinds = @typeInfo(requests.Kind).@"enum".field_names;
+    try std.testing.expectEqual(kinds.len, directives.len);
+    inline for (directives, kinds) |directive, name| {
+        const id = @field(requests.Kind, name);
         const job = (try analyses.buildJob(try card(a, directive), sources, cards, ctx)).?;
         try std.testing.expectEqual(id, std.meta.activeTag(job));
         if (job == .pss) try std.testing.expectEqual(@as(f64, 1e-3), job.pss.period);
     }
     const malformed = [_][]const u8{
-        ".ac dec 0 1 10",                ".ac dec -1 1 10",     ".ac dec 2.5 1 10",                      ".ac dec 2 10 1",
-        ".ac lin 2 -1 10",               ".dc missing 0 1 0.1", ".dc vin 0 1 0",                         ".dc vin 0 1 -1",
-        ".dc vin 0 1 1 missing 0 1 1",   ".tran 0 1u",          ".tran 1u 2u 2u",                        ".pss 0",
-        ".pss 1k 2m v(out) 128 4 50 1m", ".mc 65536",           ".pnoise v(out) vin dec 2 10 100 1k -1", ".pz in 0 out 0 vol pz",
-        ".tf v(out) missing",            ".temp -300 125 55",
-        ".lstb mode=diff vsource=vin",   ".lstb mode=single vsource=vin,vin",   ".lstb mode=sideways vsource=vin",
-        ".dcxf v(out) zin",              ".acxf v(out) dec 2 10 100 tf extra",
+        ".ac dec 0 1 10",                  ".ac dec -1 1 10",     ".ac dec 2.5 1 10",                      ".ac dec 2 10 1",
+        ".ac lin 2 -1 10",                 ".dc missing 0 1 0.1", ".dc vin 0 1 0",                         ".dc vin 0 1 -1",
+        ".dc vin 0 1 1 missing 0 1 1",     ".tran 0 1u",          ".tran 1u 2u 2u",                        ".pss 0",
+        ".pss 1k 2m v(out) 128 4 50 1m",   ".mc 65536",           ".pnoise v(out) vin dec 2 10 100 1k -1", ".pz in 0 out 0 vol pz",
+        ".tf v(out) missing",              ".temp -300 125 55",   ".lstb mode=diff vsource=vin",           ".lstb mode=single vsource=vin,vin",
+        ".lstb mode=sideways vsource=vin", ".dcxf v(out) zin",    ".acxf v(out) dec 2 10 100 tf extra",
     };
     for (malformed) |directive| {
         if (analyses.buildJob(try card(a, directive), sources, cards, ctx)) |_| {
@@ -144,8 +142,8 @@ test "deck options reject invalid numeric conversions before construction" {
     // RUNLVL picks trtol whatever TRTOL says; ACCURATE lifts it to 5, FAST
     // alone is 1, RUNLVL=0 turns both off.
     for ([_]struct { []const u8, ?f64 }{
-        .{ "runlvl=6 trtol=7", 0.875 }, .{ "runlvl", 7 },         .{ "accurate runlvl=2", 1.75 },
-        .{ "accurate", 1.75 },          .{ "fast", 28 },          .{ "runlvl=0 accurate", null },
+        .{ "runlvl=6 trtol=7", 0.875 }, .{ "runlvl", 7 },        .{ "accurate runlvl=2", 1.75 },
+        .{ "accurate", 1.75 },          .{ "fast", 28 },         .{ "runlvl=0 accurate", null },
         .{ "fast accurate=1", 1.75 },   .{ "accurate=0", null },
     }) |case| {
         const source = try std.fmt.allocPrint(arena.allocator(), "runlvl\n.options {s}\n.end\n", .{case[0]});

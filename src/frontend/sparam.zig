@@ -676,7 +676,7 @@ pub fn enforcePassivity(arena: Allocator, net: Network, f: *Fit) Error!bool {
         // Δ_e = R⁻¹·z_e, z = Mᵀλ.
         const z = try arena.alloc(f64, npar);
         const delta = try arena.alloc(f64, npar);
-    _ = try minEig(arena, p, g, q);
+        _ = try minEig(arena, p, g, q);
         for (0..ne) |e| {
             @memset(z, 0);
             for (0..nc) |ci| for (0..npar) |c| {

@@ -8,13 +8,17 @@ const std = @import("std");
 /// `.expected.json` or on an empty fixture tree.
 pub fn create(b: *std.Build) *std.Build.Module {
     const io = b.graph.io;
-    var dir = b.build_root.handle.openDir(io, "tests/fixtures", .{ .iterate = true }) catch
+    // 0.17 caches the configuration: every walked directory is declared so a
+    // deck added or removed anywhere under tests/fixtures re-runs it.
+    b.dependOnDirectoryContents(b.path("tests/fixtures"));
+    var dir = b.root.openDir(io, "tests/fixtures", .{ .iterate = true }) catch
         @panic("cannot open tests/fixtures");
     defer dir.close(io);
     var walker = dir.walk(b.allocator) catch @panic("cannot walk tests/fixtures");
     defer walker.deinit();
     var paths: std.ArrayList([]const u8) = .empty;
     while (walker.next(io) catch @panic("fixture traversal failed")) |entry| {
+        if (entry.kind == .directory) b.dependOnDirectoryContents(b.path(b.fmt("tests/fixtures/{s}", .{entry.path})));
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".sp")) continue;
         paths.append(b.allocator, b.dupe(entry.path)) catch @panic("OOM");
     }

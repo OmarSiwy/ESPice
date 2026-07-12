@@ -8,18 +8,18 @@ const api = @import("espice");
 /// traces, as zero-filled TLS: every thread of every compilation unit pays it
 /// (1.5 MB per thread across the device objects before this). Kept in Debug,
 /// where the trace is worth it.
-pub const std_options: std.Options = .{ .signal_stack_size = if (@import("builtin").mode == .Debug) 1 << 18 else null };
+pub const std_options: std.Options = .{ .signal_stack_size = if (@import("builtin").mode == .debug) 1 << 18 else null };
 
 /// VerA's device/host contract checks (`contract.validating`), on in Debug
 /// only: off, a device build spends 0.4-1.8% fewer instructions.
-pub const vera_validate_contract = @import("builtin").mode == .Debug;
+pub const vera_validate_contract = @import("builtin").mode == .debug;
 const allocator = std.heap.smp_allocator;
 /// Bumped on any layout or semantics change; `espice_create` rejects a mismatch.
 const abi_version = 1;
 /// ESPICE_NO_QUERY, "no dependency" in `QueryInfo`, and ESPICE_PLOT_TITLE,
 /// "plot title" in `espice_copy_result_name`.
 const no_query = std.math.maxInt(u32);
-const header = @cImport(@cInclude("espice.h"));
+const header = @import("espice_h");
 comptime {
     if (header.ESPICE_NO_QUERY != no_query or header.ESPICE_PLOT_TITLE != no_query) @compileError("include/espice.h sentinels drifted");
 }
@@ -40,10 +40,11 @@ comptime {
 /// maps a tag to its header name where the upper-cased tag would clash.
 fn pin(comptime E: type, comptime rename: anytype) void {
     @setEvalBranchQuota(20_000);
-    for (@typeInfo(E).@"enum".fields) |f| {
-        var upper: [f.name.len]u8 = undefined;
-        const name = if (@hasField(@TypeOf(rename), f.name)) @field(rename, f.name) else std.ascii.upperString(&upper, f.name);
-        if (@field(header, "ESPICE_" ++ name) != f.value) @compileError("include/espice.h ESPICE_" ++ name ++ " != " ++ @typeName(E) ++ "." ++ f.name);
+    const info = @typeInfo(E).@"enum";
+    for (info.field_names, info.field_values) |field, value| {
+        var upper: [field.len]u8 = undefined;
+        const name = if (@hasField(@TypeOf(rename), field)) @field(rename, field) else std.ascii.upperString(&upper, field);
+        if (@field(header, "ESPICE_" ++ name) != value) @compileError("include/espice.h ESPICE_" ++ name ++ " != " ++ @typeName(E) ++ "." ++ field);
     }
 }
 
@@ -207,12 +208,12 @@ export fn espice_query_count(handle: ?*Handle, out: ?*u32) u32 {
 export fn espice_get_query_info(handle: ?*Handle, id: u32, out: ?*QueryInfo) u32 {
     const h = handle orelse return status(error.InvalidArgument);
     const destination = out orelse return h.fail(error.InvalidArgument);
-    const q = h.problem.query_info(@enumFromInt(id)) catch |err| return h.fail(err);
+    const q = h.problem.query_info(@fromBackingInt(@intCast(id))) catch |err| return h.fail(err);
     destination.* = .{
-        .id = @intFromEnum(q.id),
-        .kind = @intFromEnum(q.kind),
-        .status = @intFromEnum(q.status),
-        .dependency = if (q.dependency) |dep| @intFromEnum(dep) else no_query,
+        .id = @backingInt(q.id),
+        .kind = @backingInt(q.kind),
+        .status = @backingInt(q.status),
+        .dependency = if (q.dependency) |dep| @backingInt(dep) else no_query,
         .component = q.component,
         .requested = @intFromBool(q.requested),
         .has_progress = @intFromBool(q.progress != null),
@@ -235,7 +236,7 @@ export fn espice_ready_queries(handle: ?*Handle, scope: Scope, ids: ?[*]u32, cap
 export fn espice_advance(handle: ?*Handle, id: u32, out: ?*Advance) u32 {
     const h = handle orelse return status(error.InvalidArgument);
     const destination = out orelse return h.fail(error.InvalidArgument);
-    const event = h.problem.advance(@enumFromInt(id)) catch |err| return h.fail(err);
+    const event = h.problem.advance(@fromBackingInt(@intCast(id))) catch |err| return h.fail(err);
     destination.* = packAdvance(h, event);
     return 0;
 }
@@ -274,7 +275,7 @@ export fn espice_append_directives(handle: ?*Handle, directives: Bytes, ids: ?[*
 export fn espice_get_result_info(handle: ?*Handle, id: u32, out: ?*ResultInfo) u32 {
     const h = handle orelse return status(error.InvalidArgument);
     const destination = out orelse return h.fail(error.InvalidArgument);
-    const result = h.problem.result(@enumFromInt(id)) catch |err| return h.fail(err);
+    const result = h.problem.result(@fromBackingInt(@intCast(id))) catch |err| return h.fail(err);
     destination.* = .{
         .variable_count = std.math.cast(u32, result.varnames.len) orelse return h.fail(error.Overflow),
         .is_complex = @intFromBool(result.is_complex),
@@ -289,7 +290,7 @@ export fn espice_copy_result(handle: ?*Handle, id: u32, values: ?[*]f64, capacit
     const count = required orelse return h.fail(error.InvalidArgument);
     count.* = 0;
     const buffer = mutableSlice(f64, values, capacity) catch |err| return h.fail(err);
-    count.* = h.problem.copy_result(@enumFromInt(id), buffer) catch |err| return h.fail(err);
+    count.* = h.problem.copy_result(@fromBackingInt(@intCast(id)), buffer) catch |err| return h.fail(err);
     return if (count.* > capacity) h.fail(error.BufferTooSmall) else 0;
 }
 
@@ -299,7 +300,7 @@ export fn espice_result_view(handle: ?*Handle, id: u32, data: ?*?[*]const f64, l
     const count = len orelse return h.fail(error.InvalidArgument);
     view.* = null;
     count.* = 0;
-    const values = (h.problem.result(@enumFromInt(id)) catch |err| return h.fail(err)).data;
+    const values = (h.problem.result(@fromBackingInt(@intCast(id))) catch |err| return h.fail(err)).data;
     view.* = values.ptr;
     count.* = values.len;
     return 0;
@@ -307,7 +308,7 @@ export fn espice_result_view(handle: ?*Handle, id: u32, data: ?*?[*]const f64, l
 
 export fn espice_copy_result_name(handle: ?*Handle, id: u32, variable: u32, buffer: ?[*]u8, capacity: usize, required: ?*usize) u32 {
     const h = handle orelse return status(error.InvalidArgument);
-    const result = h.problem.result(@enumFromInt(id)) catch |err| return h.fail(err);
+    const result = h.problem.result(@fromBackingInt(@intCast(id))) catch |err| return h.fail(err);
     const name = if (variable == no_query) result.plotname else if (variable < result.varnames.len) result.varnames[variable] else return h.fail(error.InvalidArgument);
     return copyString(h, name, buffer, capacity, required);
 }
@@ -323,7 +324,7 @@ export fn espice_print(handle: ?*Handle, options: ?*const PrintOptions, buffer: 
         if (o.max_parallel != 0) config.limits = .{ .max_parallel = concurrency(o.max_parallel) catch |err| return h.fail(err) };
         config.preview = switch (o.preview) {
             0 => .run_all,
-            1 => .{ .advance = @enumFromInt(o.query) },
+            1 => .{ .advance = @fromBackingInt(@intCast(o.query)) },
             2 => .{ .advance_ready = @ptrCast(constSlice(u32, o.ready_ids, o.ready_count) catch |err| return h.fail(err)) },
             else => return h.fail(error.InvalidArgument),
         };
@@ -344,7 +345,7 @@ export fn espice_error_message(handle: ?*Handle, buffer: ?[*]u8, capacity: usize
 
 export fn espice_query_error_message(handle: ?*Handle, id: u32, buffer: ?[*]u8, capacity: usize, required: ?*usize) u32 {
     const h = handle orelse return status(error.InvalidArgument);
-    const q = h.problem.query_info(@enumFromInt(id)) catch |err| return h.fail(err);
+    const q = h.problem.query_info(@fromBackingInt(@intCast(id))) catch |err| return h.fail(err);
     return copyString(h, if (q.failure) |err| @errorName(err) else "", buffer, capacity, required);
 }
 
@@ -368,7 +369,7 @@ fn concurrency(n: u32) !u16 {
 fn decodeScope(scope: Scope) !api.Scope {
     return switch (scope.kind) {
         0 => .all,
-        1 => .{ .query = @enumFromInt(scope.id) },
+        1 => .{ .query = @fromBackingInt(@intCast(scope.id)) },
         2 => .{ .component = scope.id },
         else => error.InvalidArgument,
     };
@@ -397,7 +398,7 @@ fn writeTruncated(buffer: []u8, text: []const u8) void {
 fn packProgress(p: anytype) Progress {
     const event = p orelse return .{ .phase = 0, .completed = 0, .total = 0 };
     return .{
-        .phase = @intFromEnum(event.phase),
+        .phase = @backingInt(event.phase),
         .completed = event.completed,
         .total = event.total,
     };
@@ -406,10 +407,10 @@ fn packProgress(p: anytype) Progress {
 /// An output failure carried by the event also becomes the handle's last error.
 fn packAdvance(h: *Handle, event: api.Advance) Advance {
     var out: Advance = .{
-        .requested = @intFromEnum(event.requested),
-        .advanced = @intFromEnum(event.advanced),
-        .status = @intFromEnum(event.status),
-        .target_status = @intFromEnum(event.target_status),
+        .requested = @backingInt(event.requested),
+        .advanced = @backingInt(event.advanced),
+        .status = @backingInt(event.status),
+        .target_status = @backingInt(event.target_status),
         .has_progress = @intFromBool(event.progress != null),
         .failure_code = if (event.failure) |err| status(err) else 0,
         .output_error = if (event.delivery_error) |err| status(err) else 0,
@@ -435,5 +436,5 @@ fn status(err: anyerror) u32 {
         error.AbiMismatch => .abi_mismatch,
         else => .failed,
     };
-    return @intFromEnum(code);
+    return @backingInt(code);
 }
