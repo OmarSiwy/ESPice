@@ -261,11 +261,6 @@ pub fn Entry(comptime n: usize) type {
     };
 }
 
-pub const HistoryReq = struct {
-    max_delay: f64,
-    interp_order: u8 = 1,
-};
-
 pub fn NoiseGen(comptime D: type) type {
     const n = nU(D);
     return struct {
@@ -274,6 +269,20 @@ pub fn NoiseGen(comptime D: type) type {
         kind: enum { thermal, shot, flicker },
     };
 }
+
+/// One generator's PSD at a given state vector, returned by the optional
+/// device `noisePsd` hook (position k = noise_gens[k]):
+///   S(f) = white + flicker / f^ef   [A²/Hz]
+/// white: thermal 4kT·g, shot 2q|I| — the DEVICE computes it from its own
+/// currents/conductances. corr_with pairs correlated generators (BSIM4
+/// tnoiMod, PSP igid); real coefficient until a reference demands complex.
+pub const PsdTerm = struct {
+    white: f64,
+    flicker: f64 = 0,
+    ef: f64 = 1,
+    corr_with: ?u8 = null,
+    corr: f64 = 0,
+};
 
 pub fn nU(comptime D: type) comptime_int {
     return @typeInfo(D.U).@"enum".fields.len;
@@ -580,14 +589,10 @@ pub fn validate(comptime D: type) void {
             @compileError(name ++ ".histInject: expected fn (*const Model, lookup: anytype, t: f64) [n_u]f64");
     }
 
-    // Convergence aids.
-    if (@hasDecl(D, "attempt")) {
-        const T = @TypeOf(D.attempt);
-        if (T != fn (D.Model, f64) D.Model and T != fn (D.Model, D.Instance, f64) D.Model)
-            @compileError(name ++ ".attempt: expected fn (Model, f64) Model or fn (Model, Instance, f64) Model");
-    }
-    if (@hasDecl(D, "limit"))
-        expectFn(D, "limit", fn (*const D.Model, *const D.Instance, [n]f64, [n]f64) [n]f64);
+    // Convergence aids. Only the 2-arg attempt form exists — batch.zig:616
+    // calls it unconditionally; a 3-arg variant would never be invoked.
+    if (@hasDecl(D, "attempt"))
+        expectFn(D, "attempt", fn (D.Model, f64) D.Model);
 
     // Optional metadata.
     if (@hasDecl(D, "u_kinds") and @TypeOf(D.u_kinds) != [n]UnknownKind)
@@ -598,6 +603,20 @@ pub fn validate(comptime D: type) void {
         const info = @typeInfo(@TypeOf(D.noise_gens));
         if (info != .array or info.array.child != NoiseGen(D))
             @compileError(name ++ ".noise_gens must be [k]NoiseGen(Self)");
+    }
+    // In-device noise PSDs: pure fn of ANY state vector (AC noise calls it
+    // once at x_op, pnoise per PSS sample, tran-noise per step). Requires
+    // noise_gens: return position k describes generator k. Devices without
+    // it keep the thermal-off-the-Jacobian collectNoise fallback.
+    if (@hasDecl(D, "noisePsd")) {
+        if (!@hasDecl(D, "noise_gens"))
+            @compileError(name ++ ".noisePsd requires pub const noise_gens");
+        expectFn(D, "noisePsd", fn ([n]f64, *const D.Model, *const D.Instance) [D.noise_gens.len]PsdTerm);
+    }
+    if (@hasDecl(D, "limit_flag_unknowns")) {
+        const info = @typeInfo(@TypeOf(D.limit_flag_unknowns));
+        if (info != .array or info.array.child != D.U)
+            @compileError(name ++ ".limit_flag_unknowns must be [k]U");
     }
     validateMcParam(D);
 
@@ -675,6 +694,7 @@ const allowed_pub_decls = std.StaticStringMap(void).initComptime(.{
     .{ "g_pattern_override", {} },
     .{ "c_pattern_override", {} },
     .{ "noise_gens", {} },
+    .{ "noisePsd", {} },
     .{ "mc_param", {} },
     .{ "PrepCache", {} },
     .{ "computePrep", {} },
