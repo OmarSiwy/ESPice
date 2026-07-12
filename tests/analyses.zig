@@ -2455,21 +2455,21 @@ test "jfnk vs newton: divider OP agrees to 1e-9" {
     try ckt.computeBaseline();
 
     // Newton (direct)
-    var ws_n = try converger.Workspace.init(testing.allocator, &ckt);
+    var ws_n = try converger.Workspace.init(testing.allocator, ckt.n, ckt.col_ptr, ckt.row_idx, ckt.bbd);
     defer ws_n.deinit(testing.allocator);
     const x_n = try testing.allocator.alloc(f64, ckt.n);
     defer testing.allocator.free(x_n);
     @memset(x_n, 0);
-    const nr = try converger.newton(&ckt, &ws_n, x_n, 0, .{}, converger.EvalHook{});
+    const nr = try converger.newton(&ckt, &ws_n, x_n, 0, .{}, analysis.EvalHook{});
     try testing.expect(nr.converged);
 
     // JFNK
-    var ws_j = try converger.Workspace.init(testing.allocator, &ckt);
+    var ws_j = try converger.Workspace.init(testing.allocator, ckt.n, ckt.col_ptr, ckt.row_idx, ckt.bbd);
     defer ws_j.deinit(testing.allocator);
     const x_j = try testing.allocator.alloc(f64, ckt.n);
     defer testing.allocator.free(x_j);
     @memset(x_j, 0);
-    const jr = try converger.jfnk(&ckt, &ws_j, x_j, 0, .{}, converger.EvalHook{});
+    const jr = try converger.jfnk(&ckt, &ws_j, x_j, 0, .{}, analysis.EvalHook{});
     try testing.expect(jr.converged);
 
     // Compare solutions
@@ -2499,7 +2499,7 @@ test "jfnk: 100-diode ladder converges" {
     defer ckt.deinit();
     try ckt.computeBaseline();
 
-    var ws = try converger.Workspace.init(testing.allocator, &ckt);
+    var ws = try converger.Workspace.init(testing.allocator, ckt.n, ckt.col_ptr, ckt.row_idx, ckt.bbd);
     defer ws.deinit(testing.allocator);
     const x = try testing.allocator.alloc(f64, ckt.n);
     defer testing.allocator.free(x);
@@ -2508,7 +2508,7 @@ test "jfnk: 100-diode ladder converges" {
     const r = try converger.jfnk(&ckt, &ws, x, 0, .{
         .max_iter = 200,
         .abstol = 1e-9,
-    }, converger.EvalHook{});
+    }, analysis.EvalHook{});
     try testing.expect(r.converged);
 
     // Sanity: first node should be near 5V (source), diode nodes between 0 and 1V
