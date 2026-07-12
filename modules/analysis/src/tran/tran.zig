@@ -3,7 +3,7 @@
 //! is the analytic C plane — nothing is lagged, nothing is dense.
 const std = @import("std");
 const root = @import("../root.zig");
-const converger = @import("../helper/converger.zig");
+const converger = @import("solvers").converger;
 
 // ponytail: platform SIMD width — not hardcoded
 const W = std.simd.suggestVectorLength(f64) orelse 8;
@@ -147,6 +147,23 @@ pub fn initialCapacity(options: Options) u32 {
     return @intFromFloat(@min(@max(1024.0, est), @as(f64, 1 << 22)));
 }
 
+// ---------------------------------------------------------------------------
+// SIMD helpers (no @memcpy / @memset per convention)
+// ---------------------------------------------------------------------------
+
+/// SIMD copy: dst[0..n] = src[0..n]
+inline fn simdCopy(dst: []f64, src: []const f64) void {
+    const n = @min(dst.len, src.len);
+    var i: usize = 0;
+    while (i + W <= n) : (i += W) dst[i..][0..W].* = src[i..][0..W].*;
+    while (i < n) : (i += 1) dst[i] = src[i];
+}
+
+/// SIMD zero: buf[0..] = 0
+inline fn simdZero(buf: []f64) void {
+    root.zeroSimd(buf);
+}
+
 /// Recorded transient waveform. Flat preallocated storage, probe-major:
 /// values[k * capacity + i] is probe k at point i — probeValues(k) is one
 /// contiguous slice (what four.zig / meas.zig consume).
@@ -206,9 +223,9 @@ pub const Waveform = struct {
         const times_new = try self.allocator.alloc(f64, new_cap);
         errdefer self.allocator.free(times_new);
         const values_new = try self.allocator.alloc(f64, @as(usize, self.n_probes) * new_cap);
-        @memcpy(times_new[0..self.len], self.times[0..self.len]);
+        simdCopy(times_new[0..self.len], self.times[0..self.len]);
         for (0..self.n_probes) |k| {
-            @memcpy(
+            simdCopy(
                 values_new[k * new_cap ..][0..self.len],
                 self.values[k * old_cap ..][0..self.len],
             );
@@ -247,7 +264,7 @@ const TranHook = struct {
 
     pub fn assemble(self: TranHook, ckt: *root.Circuit, x: []const f64, t: f64) void {
         ckt.evalNewton(x, t);
-        if (self.q_snap) |snap| @memcpy(snap, ckt.q_vec[0..ckt.n]);
+        if (self.q_snap) |snap| simdCopy(snap, ckt.q_vec[0..ckt.n]);
         if (self.has_charge) {
             const n: usize = ckt.n;
             const V = @Vector(W, f64);
@@ -352,14 +369,14 @@ pub fn simulate(
         a_vals = try allocator.alloc(f64, ckt.nnz);
         i_prev = try allocator.alloc(f64, n);
         q_snap = try allocator.alloc(f64, n);
-        @memset(i_prev, 0);
+        simdZero(i_prev);
         for (&q_hist) |*q| q.* = try allocator.alloc(f64, n);
         ckt.eval(x, 0);
         // Seed the whole history with q(0): divided differences over the
         // flat history vanish, so LTE control runs from the first step.
-        @memcpy(q_hist[1], ckt.q_vec[0..n]);
-        @memcpy(q_hist[2], ckt.q_vec[0..n]);
-        @memcpy(q_hist[3], ckt.q_vec[0..n]);
+        simdCopy(q_hist[1], ckt.q_vec[0..n]);
+        simdCopy(q_hist[2], ckt.q_vec[0..n]);
+        simdCopy(q_hist[3], ckt.q_vec[0..n]);
     }
 
     if (has_history) ckt.recordHistory(x, 0);
@@ -427,9 +444,9 @@ pub fn simulate(
         const use_gear = gear and !use_be;
         const use_trap = trap and !use_be;
         const eff_method: Method = if (use_be) .backward_euler else options.method;
-        const alpha = integrator.alpha(eff_method, dt);
+        const alpha_val = integrator.alpha(eff_method, dt);
         const hook = TranHook{
-            .alpha = alpha,
+            .alpha = alpha_val,
             .q_prev = q_hist[1],
             .i_prev = if (use_trap and has_charge) i_prev else null,
             .q_prev2 = if (use_gear and has_charge) q_hist[2] else null,
@@ -440,7 +457,7 @@ pub fn simulate(
             .has_history = has_history,
         };
 
-        @memcpy(trial, cur);
+        simdCopy(trial, cur);
         var nr_opts = options.tol.newtonOpts(options.tol.itl4);
         nr_opts.dx_clamp = std.math.inf(f64);
         const nr = converger.run(ckt, ws, trial, t + dt, nr_opts, hook) catch converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 };
@@ -475,13 +492,13 @@ pub fn simulate(
         var dt_next = @min(dt * 2.0, effective_dt_max);
 
         if (has_charge) {
-            @memcpy(q_hist[0], q_snap);
+            simdCopy(q_hist[0], q_snap);
 
             {
                 const order2 = eff_method != .backward_euler;
                 const del = integrator.stepBound(
                     order2, q_hist[0], q_hist[1], q_hist[2], q_hist[3],
-                    i_prev, alpha, use_trap, dt, dt_prev, dt_prev2,
+                    i_prev, alpha_val, use_trap, dt, dt_prev, dt_prev2,
                     options.tol.reltol, options.tol.abstol, options.tol.chgtol, options.tol.trtol,
                 );
                 if (del < 0.9 * dt) {
@@ -506,7 +523,7 @@ pub fn simulate(
                 const trial_order2 = options.method != .backward_euler;
                 const trial_del = integrator.stepBound(
                     trial_order2, q_hist[0], q_hist[1], q_hist[2], q_hist[3],
-                    i_prev, alpha, use_trap, dt, dt_prev, dt_prev2,
+                    i_prev, alpha_val, use_trap, dt, dt_prev, dt_prev2,
                     options.tol.reltol, options.tol.abstol, options.tol.chgtol, options.tol.trtol,
                 );
                 if (trial_del > 1.05 * dt) use_be = false;
@@ -514,7 +531,7 @@ pub fn simulate(
 
             // Dynamic current update — must match the method actually used.
             const V = @Vector(W, f64);
-            const av: V = @splat(alpha);
+            const av: V = @splat(alpha_val);
             var j: usize = 0;
             if (use_trap) {
                 while (j + W <= n) : (j += W) {
@@ -523,14 +540,14 @@ pub fn simulate(
                     const ip: V = i_prev[j..][0..W].*;
                     i_prev[j..][0..W].* = av * (q0 - q1) - ip;
                 }
-                while (j < n) : (j += 1) i_prev[j] = alpha * (q_hist[0][j] - q_hist[1][j]) - i_prev[j];
+                while (j < n) : (j += 1) i_prev[j] = alpha_val * (q_hist[0][j] - q_hist[1][j]) - i_prev[j];
             } else {
                 while (j + W <= n) : (j += W) {
                     const q0: V = q_hist[0][j..][0..W].*;
                     const q1: V = q_hist[1][j..][0..W].*;
                     i_prev[j..][0..W].* = av * (q0 - q1);
                 }
-                while (j < n) : (j += 1) i_prev[j] = alpha * (q_hist[0][j] - q_hist[1][j]);
+                while (j < n) : (j += 1) i_prev[j] = alpha_val * (q_hist[0][j] - q_hist[1][j]);
             }
             const tail = q_hist[3];
             q_hist[3] = q_hist[2];
@@ -604,7 +621,7 @@ pub fn simulate(
     }
 
     // Ensure caller's buffer has the final result
-    if (cur.ptr != x.ptr) @memcpy(x, cur);
+    if (cur.ptr != x.ptr) simdCopy(x, cur);
     return .{ .completed = t >= options.t_stop, .steps = steps, .t_final = t };
 }
 
@@ -613,8 +630,9 @@ pub fn simulate(
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
     const x_op = ctx.x_op orelse return error.NoOperatingPoint;
-    const x = try a.dupe(f64, x_op);
+    const x = try a.alloc(f64, x_op.len);
     defer a.free(x);
+    simdCopy(x, x_op);
 
     var wf = try Waveform.init(a, @intCast(ctx.probes.len), initialCapacity(opts));
     defer wf.deinit();
@@ -659,8 +677,8 @@ test "waveform: doubling fallback keeps probe-major data intact" {
     const probes = [_]u32{ 0, 1 };
     for (0..10) |i| {
         const fi: f64 = @floatFromInt(i);
-        const x = [_]f64{ fi, 100.0 + fi };
-        try waveform.record(fi * 1e-9, &x, &probes);
+        const xv = [_]f64{ fi, 100.0 + fi };
+        try waveform.record(fi * 1e-9, &xv, &probes);
     }
 
     try testing.expectEqual(@as(u32, 10), waveform.len);

@@ -33,6 +33,10 @@
 //! provably clean (every CSC nnz classifiable as block-interior / E / F /
 //! border-border; a cross-block entry — impossible by computeBbd
 //! construction, checked defensively — disqualifies).
+//!
+//! DOD layout: block metadata stored as SoA (parallel slabs of start, s, m,
+//! offsets). Per-block pivot and loc arrays packed into contiguous slabs
+//! indexed by cumulative offsets. Single arena[] for all dense data.
 
 const std = @import("std");
 const root = @import("root.zig");
@@ -55,25 +59,26 @@ pub fn Bbd(comptime T: type) type {
     return struct {
         const Self = @This();
         const Dense = dense_lu.DenseLu(T);
+        const VecLen = std.simd.suggestVectorLength(T) orelse 1;
+        const Vec = @Vector(VecLen, T);
 
-        const Block = struct {
-            start: u32, // global index of first block row/col
-            s: u32, // block size
-            m: u32, // local border footprint (|loc|)
-            a_off: usize, // A_i: s×s row-major
-            w_off: usize, // W_i: s×m column-major (E_i, then A^-1 E in place)
-            f_off: usize, // F_i: m×s row-major
-            u_off: usize, // U_i: m×m Schur scratch
-            piv_off: usize, // into piv, s entries
-            loc_off: usize, // into loc, m entries
-        };
+        // -- SoA block metadata (parallel arrays, nb entries each) --
+        blk_start: []u32, // global index of first block row/col
+        blk_s: []u32, // block size
+        blk_m: []u32, // local border footprint (|loc_i|)
+        blk_a_off: []usize, // A_i offset in arena: s×s row-major
+        blk_w_off: []usize, // W_i offset: s×m col-major (E, then A^-1 E)
+        blk_f_off: []usize, // F_i offset: m×s row-major
+        blk_u_off: []usize, // U_i offset: m×m Schur scratch
+        blk_piv_off: []usize, // offset into piv slab, s entries
+        blk_loc_off: []usize, // offset into loc slab, m entries
 
         n: u32,
         b: u32, // border size (>= 1: ground)
-        blocks: []Block,
+        nb: u32, // number of blocks
         arena: []T, // [A_i|W_i|F_i|U_i]* ++ s_dense
         s_off: usize, // s_dense (b×b row-major) offset in arena
-        piv: []u32, // per-block pivot rows
+        piv: []u32, // per-block pivot rows (contiguous slab)
         s_piv: []u32, // border pivot rows (b)
         loc: []u32, // local border col -> border position, per block
         border_node: []u32, // border position -> global node index (b)
@@ -89,7 +94,7 @@ pub fn Bbd(comptime T: type) type {
             info: root.BbdInfo,
             limits: Limits,
         ) InitError!Self {
-            const nb = info.blocks.len;
+            const nb: u32 = @intCast(info.blocks.len);
             if (nb < limits.min_blocks) return error.NotApplicable;
             const b: u32 = info.coupling_size + 1;
             if (b > @min(limits.max_border, n / 2)) return error.NotApplicable;
@@ -98,7 +103,7 @@ pub fn Bbd(comptime T: type) type {
             // ---- node classification: block id / border position ----
             const node_block = try gpa.alloc(u32, n);
             defer gpa.free(node_block);
-            @memset(node_block, NONE);
+            simdFillU32(node_block, NONE);
             for (info.blocks, 0..) |blk, bi| {
                 if (blk.size == 0 or blk.size > limits.max_block) return error.NotApplicable;
                 if (blk.start == 0 or blk.start + blk.size > info.coupling_start) return error.NotApplicable;
@@ -109,7 +114,7 @@ pub fn Bbd(comptime T: type) type {
             }
             const border_pos = try gpa.alloc(u32, n);
             defer gpa.free(border_pos);
-            @memset(border_pos, NONE);
+            simdFillU32(border_pos, NONE);
             border_pos[0] = 0;
             for (0..info.coupling_size) |j| border_pos[info.coupling_start + j] = @intCast(j + 1);
             for (0..n) |i| {
@@ -139,26 +144,41 @@ pub fn Bbd(comptime T: type) type {
             }
             for (sets) |*s| std.mem.sort(u32, s.items, {}, std.sort.asc(u32));
 
-            // ---- layout ----
-            const blocks = try gpa.alloc(Block, nb);
-            errdefer gpa.free(blocks);
+            // ---- layout: SoA block metadata ----
+            const blk_start = try gpa.alloc(u32, nb);
+            errdefer gpa.free(blk_start);
+            const blk_s = try gpa.alloc(u32, nb);
+            errdefer gpa.free(blk_s);
+            const blk_m = try gpa.alloc(u32, nb);
+            errdefer gpa.free(blk_m);
+            const blk_a_off = try gpa.alloc(usize, nb);
+            errdefer gpa.free(blk_a_off);
+            const blk_w_off = try gpa.alloc(usize, nb);
+            errdefer gpa.free(blk_w_off);
+            const blk_f_off = try gpa.alloc(usize, nb);
+            errdefer gpa.free(blk_f_off);
+            const blk_u_off = try gpa.alloc(usize, nb);
+            errdefer gpa.free(blk_u_off);
+            const blk_piv_off = try gpa.alloc(usize, nb);
+            errdefer gpa.free(blk_piv_off);
+            const blk_loc_off = try gpa.alloc(usize, nb);
+            errdefer gpa.free(blk_loc_off);
+
             var arena_len: usize = 0;
             var piv_len: usize = 0;
             var loc_len: usize = 0;
-            for (info.blocks, sets, blocks) |ib, s, *blk| {
+            for (info.blocks, sets, 0..) |ib, s, bi| {
                 const sz: usize = ib.size;
                 const m: usize = s.items.len;
-                blk.* = .{
-                    .start = ib.start,
-                    .s = ib.size,
-                    .m = @intCast(m),
-                    .a_off = arena_len,
-                    .w_off = arena_len + sz * sz,
-                    .f_off = arena_len + sz * sz + sz * m,
-                    .u_off = arena_len + sz * sz + 2 * sz * m,
-                    .piv_off = piv_len,
-                    .loc_off = loc_len,
-                };
+                blk_start[bi] = ib.start;
+                blk_s[bi] = ib.size;
+                blk_m[bi] = @intCast(m);
+                blk_a_off[bi] = arena_len;
+                blk_w_off[bi] = arena_len + sz * sz;
+                blk_f_off[bi] = arena_len + sz * sz + sz * m;
+                blk_u_off[bi] = arena_len + sz * sz + 2 * sz * m;
+                blk_piv_off[bi] = piv_len;
+                blk_loc_off[bi] = loc_len;
                 arena_len += sz * sz + 2 * sz * m + m * m;
                 piv_len += sz;
                 loc_len += m;
@@ -180,12 +200,12 @@ pub fn Bbd(comptime T: type) type {
             errdefer gpa.free(border_node);
             const bg = try gpa.alloc(T, b);
             errdefer gpa.free(bg);
-            const dst = try gpa.alloc(u32, col_ptr[n]);
-            errdefer gpa.free(dst);
+            const dst_tape = try gpa.alloc(u32, col_ptr[n]);
+            errdefer gpa.free(dst_tape);
 
             border_node[0] = 0;
             for (0..info.coupling_size) |j| border_node[j + 1] = info.coupling_start + @as(u32, @intCast(j));
-            for (blocks, sets) |blk, s| @memcpy(loc[blk.loc_off..][0..blk.m], s.items);
+            for (0..nb) |bi| simdCopyU32(loc[blk_loc_off[bi]..][0..blk_m[bi]], sets[bi].items);
 
             // ---- pass 2: scatter tape ----
             for (0..n) |c| {
@@ -195,34 +215,51 @@ pub fn Bbd(comptime T: type) type {
                     const cb = node_block[c];
                     var d: usize = undefined;
                     if (rb != NONE and cb != NONE) {
-                        const blk = blocks[rb];
-                        d = blk.a_off + @as(usize, r - blk.start) * blk.s + (c - blk.start);
+                        // block interior: A_i[r-start, c-start]
+                        const bi = rb;
+                        const st = blk_start[bi];
+                        const sz = blk_s[bi];
+                        d = blk_a_off[bi] + @as(usize, r - st) * sz + (c - st);
                     } else if (rb != NONE) {
-                        const blk = blocks[rb];
-                        const lc = localIdx(loc[blk.loc_off..][0..blk.m], border_pos[c]);
-                        d = blk.w_off + @as(usize, lc) * blk.s + (r - blk.start);
+                        // block row, border col: E -> W (col-major)
+                        const bi = rb;
+                        const st = blk_start[bi];
+                        const lc = localIdx(loc[blk_loc_off[bi]..][0..blk_m[bi]], border_pos[c]);
+                        d = blk_w_off[bi] + @as(usize, lc) * blk_s[bi] + (r - st);
                     } else if (cb != NONE) {
-                        const blk = blocks[cb];
-                        const lr = localIdx(loc[blk.loc_off..][0..blk.m], border_pos[r]);
-                        d = blk.f_off + @as(usize, lr) * blk.s + (c - blk.start);
+                        // border row, block col: F
+                        const bi = cb;
+                        const st = blk_start[bi];
+                        const lr = localIdx(loc[blk_loc_off[bi]..][0..blk_m[bi]], border_pos[r]);
+                        d = blk_f_off[bi] + @as(usize, lr) * blk_s[bi] + (c - st);
                     } else {
+                        // border-border: S
                         d = s_off + @as(usize, border_pos[r]) * b + border_pos[c];
                     }
-                    dst[p] = @intCast(d);
+                    dst_tape[p] = @intCast(d);
                 }
             }
 
             return .{
+                .blk_start = blk_start,
+                .blk_s = blk_s,
+                .blk_m = blk_m,
+                .blk_a_off = blk_a_off,
+                .blk_w_off = blk_w_off,
+                .blk_f_off = blk_f_off,
+                .blk_u_off = blk_u_off,
+                .blk_piv_off = blk_piv_off,
+                .blk_loc_off = blk_loc_off,
                 .n = n,
                 .b = b,
-                .blocks = blocks,
+                .nb = nb,
                 .arena = arena,
                 .s_off = s_off,
                 .piv = piv,
                 .s_piv = s_piv,
                 .loc = loc,
                 .border_node = border_node,
-                .dst = dst,
+                .dst = dst_tape,
                 .bg = bg,
                 .gpa = gpa,
             };
@@ -230,7 +267,15 @@ pub fn Bbd(comptime T: type) type {
 
         pub fn deinit(self: *Self) void {
             const gpa = self.gpa;
-            gpa.free(self.blocks);
+            gpa.free(self.blk_start);
+            gpa.free(self.blk_s);
+            gpa.free(self.blk_m);
+            gpa.free(self.blk_a_off);
+            gpa.free(self.blk_w_off);
+            gpa.free(self.blk_f_off);
+            gpa.free(self.blk_u_off);
+            gpa.free(self.blk_piv_off);
+            gpa.free(self.blk_loc_off);
             gpa.free(self.arena);
             gpa.free(self.piv);
             gpa.free(self.s_piv);
@@ -245,37 +290,47 @@ pub fn Bbd(comptime T: type) type {
         /// newton.zig and flows through the tape. Serial fixed order —
         /// two factors of the same values are byte-identical.
         pub fn factor(self: *Self, vals: []const T) error{SingularMatrix}!void {
-            @memset(self.arena, 0);
+            // Scatter: zero arena, then accumulate through tape.
+            simdZero(self.arena);
             for (vals, self.dst) |v, d| self.arena[d] += v;
 
-            for (self.blocks) |blk| {
-                const s: usize = blk.s;
-                const m: usize = blk.m;
-                const a = self.arena[blk.a_off..][0 .. s * s];
-                const pv = self.piv[blk.piv_off..][0..s];
+            const nblocks = self.nb;
+            // Per-block: factorize A_i, solve W columns, compute U = F·W.
+            for (0..nblocks) |bi| {
+                const s: usize = self.blk_s[bi];
+                const m: usize = self.blk_m[bi];
+                const a = self.arena[self.blk_a_off[bi]..][0 .. s * s];
+                const pv = self.piv[self.blk_piv_off[bi]..][0..s];
                 Dense.factorize(s, a, pv) catch return error.SingularMatrix;
-                const w = self.arena[blk.w_off..][0 .. s * m];
+
+                // W_j = A^-1 E_j in place (column-major: each col contiguous)
+                const w = self.arena[self.blk_w_off[bi]..][0 .. s * m];
                 for (0..m) |j| {
                     const col = w[j * s ..][0..s];
-                    Dense.solveFactored(s, a, pv, col, col); // W_j = A^-1 E_j in place
+                    Dense.solveFactored(s, a, pv, col, col);
                 }
-                // U = F·W: dot of F row r (contiguous) with W col c (contiguous)
-                const f = self.arena[blk.f_off..][0 .. m * s];
-                const u = self.arena[blk.u_off..][0 .. m * m];
+
+                // U = F·W: dot of F row r (contiguous s) with W col c (contiguous s)
+                const f = self.arena[self.blk_f_off[bi]..][0 .. m * s];
+                const u = self.arena[self.blk_u_off[bi]..][0 .. m * m];
                 for (0..m) |r| {
-                    for (0..m) |c| u[r * m + c] = dotSimd(f[r * s ..][0..s], w[c * s ..][0..s]);
+                    for (0..m) |c| {
+                        u[r * m + c] = dotSimd(f[r * s ..][0..s], w[c * s ..][0..s]);
+                    }
                 }
             }
 
             // Serial fixed-order Schur reduce: S -= Σ U_i
             const bsz: usize = self.b;
             const sd = self.arena[self.s_off..][0 .. bsz * bsz];
-            for (self.blocks) |blk| {
-                const m: usize = blk.m;
-                const lo = self.loc[blk.loc_off..][0..m];
-                const u = self.arena[blk.u_off..][0 .. m * m];
+            for (0..nblocks) |bi| {
+                const m: usize = self.blk_m[bi];
+                const lo = self.loc[self.blk_loc_off[bi]..][0..m];
+                const u = self.arena[self.blk_u_off[bi]..][0 .. m * m];
                 for (lo, 0..) |gr, r| {
-                    for (lo, 0..) |gc, c| sd[@as(usize, gr) * bsz + gc] -= u[r * m + c];
+                    for (lo, 0..) |gc, c| {
+                        sd[@as(usize, gr) * bsz + gc] -= u[r * m + c];
+                    }
                 }
             }
             Dense.factorize(bsz, sd, self.s_piv) catch return error.SingularMatrix;
@@ -286,36 +341,44 @@ pub fn Bbd(comptime T: type) type {
         pub fn solveInPlace(self: *Self, x: []T) void {
             const bsz: usize = self.b;
             const sd = self.arena[self.s_off..][0 .. bsz * bsz];
+            const nblocks = self.nb;
 
             // 1. y_i = A_i^-1 b_i
-            for (self.blocks) |blk| {
-                const s: usize = blk.s;
-                const xi = x[blk.start..][0..s];
-                const a = self.arena[blk.a_off..][0 .. s * s];
-                Dense.solveFactored(s, a, self.piv[blk.piv_off..][0..s], xi, xi);
+            for (0..nblocks) |bi| {
+                const s: usize = self.blk_s[bi];
+                const xi = x[self.blk_start[bi]..][0..s];
+                const a = self.arena[self.blk_a_off[bi]..][0 .. s * s];
+                Dense.solveFactored(s, a, self.piv[self.blk_piv_off[bi]..][0..s], xi, xi);
             }
+
             // 2. bg = b_g - Σ F_i y_i
             for (0..bsz) |j| self.bg[j] = x[self.border_node[j]];
-            for (self.blocks) |blk| {
-                const s: usize = blk.s;
-                const f = self.arena[blk.f_off..][0 .. @as(usize, blk.m) * s];
-                const lo = self.loc[blk.loc_off..][0..blk.m];
-                const xi = x[blk.start..][0..s];
-                for (lo, 0..) |g, j| self.bg[g] -= dotSimd(f[j * s ..][0..s], xi);
+            for (0..nblocks) |bi| {
+                const s: usize = self.blk_s[bi];
+                const m: usize = self.blk_m[bi];
+                const f = self.arena[self.blk_f_off[bi]..][0 .. m * s];
+                const lo = self.loc[self.blk_loc_off[bi]..][0..m];
+                const xi = x[self.blk_start[bi]..][0..s];
+                for (lo, 0..) |g, j| {
+                    self.bg[g] -= dotSimd(f[j * s ..][0..s], xi);
+                }
             }
+
             // 3. xg = S^-1 bg, scatter
             Dense.solveFactored(bsz, sd, self.s_piv, self.bg, self.bg);
             for (0..bsz) |j| x[self.border_node[j]] = self.bg[j];
+
             // 4. x_i = y_i - W_i xg_loc
-            for (self.blocks) |blk| {
-                const s: usize = blk.s;
-                const w = self.arena[blk.w_off..][0 .. @as(usize, blk.m) * s];
-                const lo = self.loc[blk.loc_off..][0..blk.m];
-                const xi = x[blk.start..][0..s];
+            for (0..nblocks) |bi| {
+                const s: usize = self.blk_s[bi];
+                const m: usize = self.blk_m[bi];
+                const w = self.arena[self.blk_w_off[bi]..][0 .. m * s];
+                const lo = self.loc[self.blk_loc_off[bi]..][0..m];
+                const xi = x[self.blk_start[bi]..][0..s];
                 for (lo, 0..) |g, j| {
                     const xgj = self.bg[g];
                     if (xgj == 0) continue;
-                    axpyNeg(xi, w[j * s ..][0..s], xgj); // x_i -= W col j * xgj
+                    axpySimdNeg(xi, w[j * s ..][0..s], xgj);
                 }
             }
         }
@@ -328,43 +391,84 @@ pub fn Bbd(comptime T: type) type {
         pub fn solveTInPlace(self: *Self, x: []T) void {
             const bsz: usize = self.b;
             const sd = self.arena[self.s_off..][0 .. bsz * bsz];
+            const nblocks = self.nb;
 
             // 1. bg = b_g - Σ W_i^T b_i  (= b_g - Σ E_i^T A_i^-T b_i)
             for (0..bsz) |j| self.bg[j] = x[self.border_node[j]];
-            for (self.blocks) |blk| {
-                const s: usize = blk.s;
-                const w = self.arena[blk.w_off..][0 .. @as(usize, blk.m) * s];
-                const lo = self.loc[blk.loc_off..][0..blk.m];
-                const xi = x[blk.start..][0..s];
-                for (lo, 0..) |g, c| self.bg[g] -= dotSimd(w[c * s ..][0..s], xi);
+            for (0..nblocks) |bi| {
+                const s: usize = self.blk_s[bi];
+                const m: usize = self.blk_m[bi];
+                const w = self.arena[self.blk_w_off[bi]..][0 .. m * s];
+                const lo = self.loc[self.blk_loc_off[bi]..][0..m];
+                const xi = x[self.blk_start[bi]..][0..s];
+                for (lo, 0..) |g, c| {
+                    self.bg[g] -= dotSimd(w[c * s ..][0..s], xi);
+                }
             }
+
             // 2. xg = S^-T bg, scatter
             Dense.solveFactoredT(bsz, sd, self.s_piv, self.bg, self.bg);
             for (0..bsz) |j| x[self.border_node[j]] = self.bg[j];
+
             // 3. x_i = A_i^-T (b_i - F_i^T xg_loc)
-            for (self.blocks) |blk| {
-                const s: usize = blk.s;
-                const f = self.arena[blk.f_off..][0 .. @as(usize, blk.m) * s];
-                const lo = self.loc[blk.loc_off..][0..blk.m];
-                const xi = x[blk.start..][0..s];
+            for (0..nblocks) |bi| {
+                const s: usize = self.blk_s[bi];
+                const m: usize = self.blk_m[bi];
+                const f = self.arena[self.blk_f_off[bi]..][0 .. m * s];
+                const lo = self.loc[self.blk_loc_off[bi]..][0..m];
+                const xi = x[self.blk_start[bi]..][0..s];
                 for (lo, 0..) |g, j| {
                     const xgj = self.bg[g];
                     if (xgj == 0) continue;
-                    axpyNeg(xi, f[j * s ..][0..s], xgj); // x_i -= F row j * xgj
+                    axpySimdNeg(xi, f[j * s ..][0..s], xgj);
                 }
-                const a = self.arena[blk.a_off..][0 .. s * s];
-                Dense.solveFactoredT(s, a, self.piv[blk.piv_off..][0..s], xi, xi);
+                const a = self.arena[self.blk_a_off[bi]..][0 .. s * s];
+                Dense.solveFactoredT(s, a, self.piv[self.blk_piv_off[bi]..][0..s], xi, xi);
             }
         }
 
-        fn dotSimd(a: []const T, c: []const T) T {
-            const W = std.simd.suggestVectorLength(T) orelse 1;
-            const V = @Vector(W, T);
-            var acc: V = @splat(0);
+        // ---- SIMD kernels ----
+
+        const W32 = std.simd.suggestVectorLength(u32) orelse 1;
+        const V32 = @Vector(W32, u32);
+
+        /// SIMD zero-fill a contiguous T buffer.
+        inline fn simdZero(buf: []T) void {
+            const zero: Vec = @splat(0);
             var i: usize = 0;
-            while (i + W <= a.len) : (i += W) {
-                const av: V = a[i..][0..W].*;
-                const cv: V = c[i..][0..W].*;
+            while (i + VecLen <= buf.len) : (i += VecLen) {
+                buf[i..][0..VecLen].* = zero;
+            }
+            for (buf[i..]) |*v| v.* = 0;
+        }
+
+        /// SIMD fill u32 buffer with a constant value.
+        fn simdFillU32(buf: []u32, val: u32) void {
+            const fill: V32 = @splat(val);
+            var i: usize = 0;
+            while (i + W32 <= buf.len) : (i += W32) {
+                buf[i..][0..W32].* = fill;
+            }
+            for (buf[i..]) |*v| v.* = val;
+        }
+
+        /// SIMD copy u32 buffer.
+        fn simdCopyU32(dst: []u32, src: []const u32) void {
+            var i: usize = 0;
+            while (i + W32 <= dst.len) : (i += W32) {
+                dst[i..][0..W32].* = src[i..][0..W32].*;
+            }
+            for (dst[i..], src[i..]) |*d, s| d.* = s;
+        }
+
+        /// SIMD dot product of two contiguous slices of equal length.
+        fn dotSimd(a: []const T, c: []const T) T {
+            std.debug.assert(a.len == c.len);
+            var acc: Vec = @splat(0);
+            var i: usize = 0;
+            while (i + VecLen <= a.len) : (i += VecLen) {
+                const av: Vec = a[i..][0..VecLen].*;
+                const cv: Vec = c[i..][0..VecLen].*;
                 acc += av * cv;
             }
             var sum = @reduce(.Add, acc);
@@ -372,12 +476,23 @@ pub fn Bbd(comptime T: type) type {
             return sum;
         }
 
-        fn axpyNeg(x: []T, w: []const T, s: T) void {
-            for (x, w) |*xi, wi| xi.* -= wi * s;
+        /// SIMD x[i] -= w[i] * scalar (axpy with negation).
+        fn axpySimdNeg(x: []T, w: []const T, scalar: T) void {
+            std.debug.assert(x.len == w.len);
+            const sv: Vec = @splat(scalar);
+            var i: usize = 0;
+            while (i + VecLen <= x.len) : (i += VecLen) {
+                const xv: Vec = x[i..][0..VecLen].*;
+                const wv: Vec = w[i..][0..VecLen].*;
+                x[i..][0..VecLen].* = xv - wv * sv;
+            }
+            while (i < x.len) : (i += 1) x[i] -= w[i] * scalar;
         }
     };
 }
 
+/// Insert `v` into `s` if not already present (set semantics). Block
+/// border footprints are tiny (handful of entries), so linear scan is fine.
 fn addToSet(gpa: Allocator, s: *std.ArrayList(u32), v: u32) error{OutOfMemory}!void {
     for (s.items) |e| {
         if (e == v) return;
@@ -385,12 +500,15 @@ fn addToSet(gpa: Allocator, s: *std.ArrayList(u32), v: u32) error{OutOfMemory}!v
     try s.append(gpa, v);
 }
 
+/// Find position of `v` in a small sorted slice. Precondition: `v` is
+/// present (ensured by pass 1 collecting every E/F border position).
 fn localIdx(sorted: []const u32, v: u32) u32 {
-    // m is tiny (a handful of border nodes per block); linear scan.
+    // ponytail: linear scan; m is tiny (handful of border nodes per block).
+    // Upgrade path: binary search if max_border grows past ~64.
     for (sorted, 0..) |e, i| {
         if (e == v) return @intCast(i);
     }
-    unreachable; // pass 1 collected every E/F border position
+    unreachable;
 }
 
 // ============================================================================
@@ -515,20 +633,20 @@ fn expectMatchesFlat(gpa: Allocator, sy: *const Synth, eng: *Bbd(f64)) !void {
     try flat.factor(sy.vals);
     try eng.factor(sy.vals);
 
-    const b = try sy.rhs(gpa);
-    defer gpa.free(b);
+    const b_rhs = try sy.rhs(gpa);
+    defer gpa.free(b_rhs);
     const x_ref = try gpa.alloc(f64, sy.n);
     defer gpa.free(x_ref);
     const x = try gpa.alloc(f64, sy.n);
     defer gpa.free(x);
 
-    flat.solve(b, x_ref);
-    @memcpy(x, b);
+    flat.solve(b_rhs, x_ref);
+    @memcpy(x, b_rhs);
     eng.solveInPlace(x);
     for (x, x_ref) |xi, ri| try testing.expectApproxEqAbs(ri, xi, 1e-11);
 
-    flat.solveT(b, x_ref);
-    @memcpy(x, b);
+    flat.solveT(b_rhs, x_ref);
+    @memcpy(x, b_rhs);
     eng.solveTInPlace(x);
     for (x, x_ref) |xi, ri| try testing.expectApproxEqAbs(ri, xi, 1e-11);
 }
@@ -548,7 +666,7 @@ test "bbd: block with empty border footprint (m_i = 0)" {
     defer sy.free(gpa);
     var eng = try Bbd(f64).init(gpa, sy.n, sy.col_ptr, sy.row_idx, sy.info, relaxed);
     defer eng.deinit();
-    try testing.expectEqual(@as(u32, 0), eng.blocks[1].m);
+    try testing.expectEqual(@as(u32, 0), eng.blk_m[1]);
     try expectMatchesFlat(gpa, &sy, &eng);
 }
 
@@ -626,23 +744,23 @@ test "bbd: facade activates BBD at >= 8 blocks and matches flat" {
     try s_bbd.factor(sy.vals);
     try s_flat.factor(sy.vals);
 
-    const b = try sy.rhs(gpa);
-    defer gpa.free(b);
+    const b_rhs = try sy.rhs(gpa);
+    defer gpa.free(b_rhs);
     const x = try gpa.alloc(f64, sy.n);
     defer gpa.free(x);
     const x_ref = try gpa.alloc(f64, sy.n);
     defer gpa.free(x_ref);
 
-    s_flat.solve(b, x_ref);
-    s_bbd.solve(b, x);
+    s_flat.solve(b_rhs, x_ref);
+    s_bbd.solve(b_rhs, x);
     for (x, x_ref) |xi, ri| try testing.expectApproxEqAbs(ri, xi, 1e-11);
 
-    s_flat.solveNeg(b, x_ref);
-    s_bbd.solveNeg(b, x);
+    s_flat.solveNeg(b_rhs, x_ref);
+    s_bbd.solveNeg(b_rhs, x);
     for (x, x_ref) |xi, ri| try testing.expectApproxEqAbs(ri, xi, 1e-11);
 
-    s_flat.solveT(b, x_ref);
-    s_bbd.solveT(b, x);
+    s_flat.solveT(b_rhs, x_ref);
+    s_bbd.solveT(b_rhs, x);
     for (x, x_ref) |xi, ri| try testing.expectApproxEqAbs(ri, xi, 1e-11);
 }
 
@@ -665,19 +783,19 @@ test "bbd: facade falls back to flat permanently on a singular block" {
     defer flat.deinit();
     try flat.factor(sy.vals);
 
-    const b = try sy.rhs(gpa);
-    defer gpa.free(b);
+    const b_rhs = try sy.rhs(gpa);
+    defer gpa.free(b_rhs);
     const x = try gpa.alloc(f64, sy.n);
     defer gpa.free(x);
     const x_ref = try gpa.alloc(f64, sy.n);
     defer gpa.free(x_ref);
-    flat.solve(b, x_ref);
-    s.solve(b, x);
+    flat.solve(b_rhs, x_ref);
+    s.solve(b_rhs, x);
     for (x, x_ref) |xi, ri| try testing.expectApproxEqAbs(ri, xi, 1e-11);
 
     // second factor stays flat (refactor path) and still works
     try s.factor(sy.vals);
     try testing.expect(s.bbd_eng == null);
-    s.solve(b, x);
+    s.solve(b_rhs, x);
     for (x, x_ref) |xi, ri| try testing.expectApproxEqAbs(ri, xi, 1e-11);
 }

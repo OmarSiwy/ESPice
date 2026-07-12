@@ -6,9 +6,12 @@
 //! carry builtin noise generators, this analysis never re-derives them.
 const std = @import("std");
 const root = @import("../root.zig");
-const converger = @import("../helper/converger.zig");
+const converger = @import("solvers").converger;
 
 const k_boltzmann = 1.380649e-23; // J/K
+
+const W = std.simd.suggestVectorLength(f64) orelse 8;
+const V = @Vector(W, f64);
 
 pub const NoiseSource = root.NoiseSource;
 
@@ -33,6 +36,17 @@ pub const SimResult = struct {
     npoints: u32,
     rows: []f64,
 };
+
+// ============================================================================
+// SIMD copy (mandatory convention — no @memcpy)
+// ============================================================================
+
+inline fn simdCopy(dst: []f64, src: []const f64) void {
+    const n = @min(dst.len, src.len);
+    var i: usize = 0;
+    while (i + W <= n) : (i += W) dst[i..][0..W].* = src[i..][0..W].*;
+    while (i < n) : (i += 1) dst[i] = src[i];
+}
 
 // ============================================================================
 // Xorshift64 PRNG
@@ -151,7 +165,7 @@ pub fn simulate(
         a_vals = try allocator.alloc(f64, ckt.nnz);
         q_prev = try allocator.alloc(f64, n);
         ckt.eval(x, 0);
-        @memcpy(q_prev, ckt.q_vec[0..n]);
+        simdCopy(q_prev, ckt.q_vec[0..n]);
     }
 
     var rng = Xorshift64.init(options.seed);
@@ -194,7 +208,7 @@ pub fn simulate(
             .noise_currents = noise_currents,
         };
 
-        @memcpy(x_try, x);
+        simdCopy(x_try, x);
         var tn_nr_opts = options.tol.newtonOpts(options.tol.itl4);
         tn_nr_opts.dx_clamp = std.math.inf(f64);
         const nr = converger.run(ckt, ws, x_try, t + dt, tn_nr_opts, hook) catch converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 };
@@ -210,10 +224,10 @@ pub fn simulate(
         if (has_charge) {
             // exact q at the converged point (planes are one iterate stale)
             ckt.eval(x_try, t + dt);
-            @memcpy(q_prev, ckt.q_vec[0..n]);
+            simdCopy(q_prev, ckt.q_vec[0..n]);
         }
 
-        @memcpy(x, x_try);
+        simdCopy(x, x_try);
         t += dt;
         steps += 1;
 
@@ -238,8 +252,9 @@ pub fn simulate(
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
     const x_op = ctx.x_op orelse return error.NoOperatingPoint;
-    const x = try a.dupe(f64, x_op);
+    const x = try a.alloc(f64, x_op.len);
     defer a.free(x);
+    simdCopy(x, x_op);
 
     const srcs = try ctx.circuit.collectNoiseSources(x_op, a);
     defer a.free(srcs);
@@ -295,4 +310,11 @@ test "tran_noise: randn distribution has zero mean and unit variance" {
 
     try testing.expectApproxEqAbs(@as(f64, 0.0), mean, 0.02);
     try testing.expectApproxEqAbs(@as(f64, 1.0), variance, 0.02);
+}
+
+test "tran_noise: simdCopy matches element-wise" {
+    const src = [_]f64{ 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0 };
+    var dst: [11]f64 = undefined;
+    simdCopy(&dst, &src);
+    for (src, dst) |s, d| try testing.expectEqual(s, d);
 }

@@ -65,6 +65,8 @@ const Api = struct {
         ?[*]iface.Arg,
     ) callconv(.c) CUresult,
     cuMemcpyDtoD_v2: *const fn (CUdeviceptr, CUdeviceptr, usize) callconv(.c) CUresult,
+    cuMemcpyHtoDAsync_v2: *const fn (CUdeviceptr, *const anyopaque, usize, CUstream) callconv(.c) CUresult,
+    cuMemcpyDtoHAsync_v2: *const fn (*anyopaque, CUdeviceptr, usize, CUstream) callconv(.c) CUresult,
     // Cooperative launch: all blocks co-resident (required for the software
     // grid barrier in the analysis megakernel). No `extra` param on this one.
     cuLaunchCooperativeKernel: *const fn (CUfunction, c_uint, c_uint, c_uint, c_uint, c_uint, c_uint, c_uint, CUstream, ?[*]iface.Arg) callconv(.c) CUresult,
@@ -218,6 +220,14 @@ pub const Buffer = struct {
 
     pub fn copyFrom(self: *Buffer, src: *const Buffer, src_offset: usize, dst_offset: usize, n: usize) Error!void {
         try check(g.cuMemcpyDtoD_v2(self.handle + dst_offset, src.handle + src_offset, n), error.CopyFailed);
+    }
+
+    pub fn downloadAtAsync(self: *Buffer, host: *anyopaque, offset: usize, n: usize, stream: CUstream) Error!void {
+        try check(g.cuMemcpyDtoHAsync_v2(host, self.handle + offset, n, stream), error.CopyFailed);
+    }
+
+    pub fn uploadAtAsync(self: *Buffer, host: *const anyopaque, offset: usize, n: usize, stream: CUstream) Error!void {
+        try check(g.cuMemcpyHtoDAsync_v2(self.handle + offset, host, n, stream), error.CopyFailed);
     }
 };
 

@@ -4,8 +4,9 @@
 //! computes the linear periodically-time-varying (LPTV) transfer function.
 //!
 //! Algorithm:
-//!   1. Obtain the PSS solution x_pss(t) by shooting Newton (simplified:
-//!      run transient until steady-state, then extract one period).
+//!   1. Obtain the PSS solution x_pss(t) by brute-force settling — run
+//!      (pss_periods − 1) full periods of frozen-time quasi-static Newton
+//!      solves at n_time_samples per period.
 //!   2. Sample G(t_k) and C(t_k) (conductance and capacitance Jacobians) at
 //!      N uniformly-spaced points within one LO period — one ckt.eval per
 //!      sample fills both planes, denseG/denseC capture them.
@@ -15,12 +16,15 @@
 //!   5. Result: complex transfer (gain + phase) at each sideband frequency.
 const std = @import("std");
 const root = @import("../root.zig");
-const converger = @import("../helper/converger.zig");
-const freq = @import("../helper/freq.zig");
-const fft_mod = root.solvers.fft;
-const dense_lu = root.solvers.dense_lu;
+const converger = @import("solvers").converger;
+const types = @import("solvers").types;
+const solvers = @import("solvers");
+const fft_mod = solvers.fft;
+const dense_lu = solvers.dense_lu;
 
-pub const Complex = freq.Complex;
+pub const Complex = types.Complex;
+
+const W = std.simd.suggestVectorLength(f64) orelse 8;
 
 pub const Options = struct {
     tol: converger.Tolerances = .{},
@@ -46,7 +50,7 @@ pub const Options = struct {
 /// `ac_source_node` is the node where the small-signal AC excitation is applied.
 /// `probe_node` is the output node to observe.
 ///
-/// Caller owns the output: freqs[n_freqs] (n_freqs = freq.logSweepCount of the
+/// Caller owns the output: freqs[n_freqs] (n_freqs = types.logSweepCount of the
 /// sweep), transfer[n_freqs * n_sb] flat, point-major — transfer[fi*n_sb + p]
 /// is the sideband at harmonic m = p - n_harmonics (output f = f_in + m*f_LO).
 pub fn analyze(
@@ -65,7 +69,7 @@ pub fn analyze(
     const n_harm: usize = options.n_harmonics;
     const n_sb: usize = 2 * n_harm + 1;
 
-    const n_freqs = freq.logSweepCount(options.f_start, options.f_stop, options.points_per_decade);
+    const n_freqs = types.logSweepCount(options.f_start, options.f_stop, options.points_per_decade);
     std.debug.assert(freqs.len == n_freqs);
     std.debug.assert(transfer.len == @as(usize, n_freqs) * n_sb);
 
@@ -78,11 +82,14 @@ pub fn analyze(
     };
 
     // -- Step 1: PSS via brute-force settling (frozen-time quasi-static) ----
-    // Run (pss_periods - 1) full periods of per-sample Newton solves, then
-    // capture G/C over the final period — one eval per sample fills both.
     const x_cur = try allocator.alloc(f64, n);
     defer allocator.free(x_cur);
-    @memcpy(x_cur, x_init[0..n]);
+    // ponytail: SIMD copy instead of @memcpy
+    {
+        var i: usize = 0;
+        while (i + W <= n) : (i += W) x_cur[i..][0..W].* = x_init[i..][0..W].*;
+        while (i < n) : (i += 1) x_cur[i] = x_init[i];
+    }
 
     try ckt.computeBaseline();
     const ws = try ckt.workspace();
@@ -96,14 +103,14 @@ pub fn analyze(
     const settle_steps = (@as(usize, options.pss_periods) - 1) * n_samples;
     for (0..settle_steps) |_| {
         t += dt;
-        _ = converger.run(ckt, ws, x_cur, t, nr_opts, converger.EvalHook{}) catch
+        _ = converger.run(ckt, ws, x_cur, t, nr_opts, root.EvalHook{}) catch
             converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 };
     }
 
     // -- Step 2: capture dense G(t_k), C(t_k) over the final period ---------
     for (0..n_samples) |k| {
         t += dt;
-        _ = converger.run(ckt, ws, x_cur, t, nr_opts, converger.EvalHook{}) catch
+        _ = converger.run(ckt, ws, x_cur, t, nr_opts, root.EvalHook{}) catch
             converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 };
         ckt.eval(x_cur, t);
         ckt.denseG(g_mats[k * n * n ..][0 .. n * n]);
@@ -112,7 +119,6 @@ pub fn analyze(
 
     // -- Step 3: FFT each matrix element across time samples ----------------
     // G_hat[m][row][col] and C_hat[m][row][col] as complex Fourier coefficients.
-    // We store these as flat arrays of Complex.
     const g_hat = try allocator.alloc(Complex, n_samples * n * n);
     defer allocator.free(g_hat);
     const c_hat = try allocator.alloc(Complex, n_samples * n * n);
@@ -124,18 +130,21 @@ pub fn analyze(
     const fft_im = try allocator.alloc(f64, n_samples);
     defer allocator.free(fft_im);
 
+    const inv_n = 1.0 / @as(f64, @floatFromInt(n_samples));
+
     for (0..n) |row| {
         for (0..n) |col| {
+            const elem_off = row * n + col;
+
             // G: extract time series for this element, FFT it.
             for (0..n_samples) |k| {
-                fft_re[k] = g_mats[k * n * n + row * n + col];
+                fft_re[k] = g_mats[k * n * n + elem_off];
                 fft_im[k] = 0;
             }
             fft_mod.fft(fft_re, fft_im);
             // Normalise by N (standard DFT normalisation for coefficients).
-            const inv_n = 1.0 / @as(f64, @floatFromInt(n_samples));
             for (0..n_samples) |m| {
-                g_hat[m * n * n + row * n + col] = .{
+                g_hat[m * n * n + elem_off] = .{
                     .re = fft_re[m] * inv_n,
                     .im = fft_im[m] * inv_n,
                 };
@@ -143,12 +152,12 @@ pub fn analyze(
 
             // C: same procedure.
             for (0..n_samples) |k| {
-                fft_re[k] = c_mats[k * n * n + row * n + col];
+                fft_re[k] = c_mats[k * n * n + elem_off];
                 fft_im[k] = 0;
             }
             fft_mod.fft(fft_re, fft_im);
             for (0..n_samples) |m| {
-                c_hat[m * n * n + row * n + col] = .{
+                c_hat[m * n * n + elem_off] = .{
                     .re = fft_re[m] * inv_n,
                     .im = fft_im[m] * inv_n,
                 };
@@ -166,6 +175,12 @@ pub fn analyze(
     //
     // where G_{m}, C_{m} are the m-th Fourier coefficients and X_q is the
     // unknown complex amplitude at sideband q.
+    //
+    // ponytail: GPU batch dispatch — Phase 4. The per-frequency solve here is a
+    // dense (2M+1)n × (2M+1)n real system (conversion matrix), not the sparse
+    // G+jωC that freq_solve_batch handles. A batched dense LU kernel
+    // (gh.dense_solve_batch) would cover this — pack all n_freqs matrices and
+    // RHS vectors, dispatch one call. Until that kernel exists, CPU-serial.
 
     const nn = n_sb * n;
     const nn2 = 2 * nn; // real expansion of the complex system
@@ -177,11 +192,11 @@ pub fn analyze(
     const x_work = try allocator.alloc(f64, nn2);
     defer allocator.free(x_work);
 
-    var sw = freq.logSweep(options.f_start, options.f_stop, options.points_per_decade);
+    var sw = types.logSweep(options.f_start, options.f_stop, options.points_per_decade);
     var fi: usize = 0;
     while (sw.next()) |f_in| : (fi += 1) {
-        @memset(a_work, 0);
-        @memset(rhs_work, 0);
+        root.zeroSimd(a_work);
+        root.zeroSimd(rhs_work);
 
         // Build conversion matrix.
         for (0..n_sb) |p| {
@@ -256,7 +271,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     if (ctx.probes.len == 0) return error.NoProbe;
     const probe = ctx.probes[ctx.probes.len - 1];
 
-    const n_freqs: usize = freq.logSweepCount(opts.f_start, opts.f_stop, opts.points_per_decade);
+    const n_freqs: usize = types.logSweepCount(opts.f_start, opts.f_stop, opts.points_per_decade);
     const n_sb: usize = 2 * @as(usize, opts.n_harmonics) + 1;
     const freqs = try a.alloc(f64, n_freqs);
     defer a.free(freqs);
@@ -325,27 +340,27 @@ test "PAC: mapHarmonicToFftBin" {
 }
 
 test "PAC: Complex arithmetic" {
-    const a = Complex{ .re = 3.0, .im = 4.0 };
+    const ca = Complex{ .re = 3.0, .im = 4.0 };
     const b = Complex{ .re = 1.0, .im = -2.0 };
 
-    const sum = Complex.add(a, b);
+    const sum = Complex.add(ca, b);
     try testing.expectApproxEqAbs(@as(f64, 4.0), sum.re, 1e-15);
     try testing.expectApproxEqAbs(@as(f64, 2.0), sum.im, 1e-15);
 
-    const prod = Complex.mul(a, b);
+    const prod = Complex.mul(ca, b);
     // (3+4j)(1-2j) = 3 - 6j + 4j - 8j^2 = 11 - 2j
     try testing.expectApproxEqAbs(@as(f64, 11.0), prod.re, 1e-15);
     try testing.expectApproxEqAbs(@as(f64, -2.0), prod.im, 1e-15);
 
-    try testing.expectApproxEqAbs(@as(f64, 5.0), a.mag(), 1e-15);
+    try testing.expectApproxEqAbs(@as(f64, 5.0), ca.mag(), 1e-15);
 }
 
 test "PAC: solveDense matches known solution" {
     // 2x2 system: [2 1; 1 3] * x = [5; 7] => x = [1.6, 1.8]
-    var a = [_]f64{ 2, 1, 1, 3 };
+    var ma = [_]f64{ 2, 1, 1, 3 };
     const b = [_]f64{ 5, 7 };
     var x: [2]f64 = undefined;
-    try dense_lu.factorizeSolve(2, &a, &b, &x);
+    try dense_lu.factorizeSolve(2, &ma, &b, &x);
     try testing.expectApproxEqAbs(@as(f64, 1.6), x[0], 1e-12);
     try testing.expectApproxEqAbs(@as(f64, 1.8), x[1], 1e-12);
 }
@@ -377,14 +392,27 @@ test "PAC: RC mixer with single tone — verify frequency translation" {
 
     var g_time: [n_samples]f64 = undefined;
     for (0..n_samples) |k| {
-        const t = @as(f64, @floatFromInt(k)) * dt;
-        g_time[k] = g0 * (1.0 + mod_depth * @cos(2.0 * std.math.pi * f_lo * t));
+        const tk = @as(f64, @floatFromInt(k)) * dt;
+        g_time[k] = g0 * (1.0 + mod_depth * @cos(2.0 * std.math.pi * f_lo * tk));
     }
 
     // FFT of G(t) to get G_hat[m].
     var fft_re: [n_samples]f64 = undefined;
-    var fft_im: [n_samples]f64 = [_]f64{0} ** n_samples;
-    @memcpy(&fft_re, &g_time);
+    var fft_im: [n_samples]f64 = undefined;
+    // SIMD copy + zero
+    {
+        const V = @Vector(W, f64);
+        const zero: V = @splat(0.0);
+        var i: usize = 0;
+        while (i + W <= n_samples) : (i += W) {
+            fft_re[i..][0..W].* = g_time[i..][0..W].*;
+            fft_im[i..][0..W].* = zero;
+        }
+        while (i < n_samples) : (i += 1) {
+            fft_re[i] = g_time[i];
+            fft_im[i] = 0;
+        }
+    }
     fft_mod.fft(&fft_re, &fft_im);
     const inv_n = 1.0 / @as(f64, @floatFromInt(n_samples));
 
@@ -410,8 +438,8 @@ test "PAC: RC mixer with single tone — verify frequency translation" {
     const x_work = try allocator.alloc(f64, nn2);
     defer allocator.free(x_work);
 
-    @memset(a_work, 0);
-    @memset(rhs_buf, 0);
+    root.zeroSimd(a_work);
+    root.zeroSimd(rhs_buf);
 
     for (0..n_sb) |p| {
         for (0..n_sb) |q| {

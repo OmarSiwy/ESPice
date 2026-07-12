@@ -149,6 +149,30 @@ pub const Buffer = union(Backend) {
             .cpu => unreachable,
         }
     }
+
+    pub fn downloadAtAsync(self: *Buffer, host: *anyopaque, offset: usize, n: usize, stream: *Stream) Error!void {
+        switch (self.*) {
+            .cuda => |*b| try b.downloadAtAsync(host, offset, n, stream.cuda.stream),
+            .hip => |*b| try b.downloadAt(host, offset, n), // HIP fallback: sync
+            .cpu => unreachable,
+        }
+    }
+
+    pub fn uploadAtAsync(self: *Buffer, host: *const anyopaque, offset: usize, n: usize, stream: *Stream) Error!void {
+        switch (self.*) {
+            .cuda => |*b| try b.uploadAtAsync(host, offset, n, stream.cuda.stream),
+            .hip => |*b| try b.uploadAt(host, offset, n), // HIP fallback: sync
+            .cpu => unreachable,
+        }
+    }
+
+    pub fn deviceAddr(self: *const Buffer) u64 {
+        return switch (self.*) {
+            .cuda => |b| b.handle,
+            .hip => |b| @intFromPtr(b.handle),
+            .cpu => unreachable,
+        };
+    }
 };
 
 pub const Module = union(Backend) {

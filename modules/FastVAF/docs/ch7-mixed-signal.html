@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chapter 7 &mdash; Mixed-Signal | Verilog-A LRM 2.4.0</title>
+<style>
+body { font-family: 'Segoe UI', system-ui, sans-serif; max-width: 900px; margin: 0 auto; padding: 2rem; background: #fafafa; color: #1a1a1a; line-height: 1.6; }
+h1 { border-bottom: 3px solid #2563eb; padding-bottom: 0.5rem; }
+h2 { color: #1e40af; margin-top: 2rem; border-bottom: 1px solid #ddd; padding-bottom: 0.3rem; }
+h3 { color: #374151; }
+h4 { color: #4b5563; }
+code { background: #e5e7eb; padding: 0.15rem 0.4rem; border-radius: 3px; font-size: 0.9em; }
+pre { background: #1e293b; color: #e2e8f0; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; }
+pre code { background: none; padding: 0; color: inherit; }
+table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+th, td { border: 1px solid #d1d5db; padding: 0.5rem 0.75rem; text-align: left; }
+th { background: #2563eb; color: white; }
+tr:nth-child(even) { background: #f3f4f6; }
+.syntax { background: #fffbeb; border-left: 4px solid #f59e0b; padding: 1rem; margin: 1rem 0; font-family: monospace; white-space: pre-wrap; color: #1a1a1a; }
+.note { background: #eff6ff; border-left: 4px solid #2563eb; padding: 0.75rem 1rem; margin: 1rem 0; }
+nav { background: #1e293b; padding: 1rem; border-radius: 6px; margin-bottom: 2rem; }
+nav a { color: #93c5fd; text-decoration: none; margin-right: 1rem; }
+nav a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+
+<nav>
+<a href="index.html">Index</a>
+<a href="ch2-lexical.html">Ch2 Lexical</a>
+<a href="ch3-datatypes.html">Ch3 Data Types</a>
+<a href="ch4-expressions.html">Ch4 Expressions</a>
+<a href="ch5-analog.html">Ch5 Analog</a>
+<a href="ch6-hierarchy.html">Ch6 Hierarchy</a>
+<a href="ch7-mixed-signal.html">Ch7 Mixed-Signal</a>
+<a href="ch8-scheduling.html">Ch8 Scheduling</a>
+<a href="ch9-system.html">Ch9 System</a>
+<a href="ch10-connectmodules.html">Ch10 Directives</a>
+<a href="ch11-directives.html">Ch11 Directives Ext</a>
+</nav>
+
+<h1>Chapter 7: Mixed-Signal</h1>
+
+<!-- 7.1 Overview -->
+<h2 id="s7.1">7.1 Overview</h2>
+
+<p>Mixed-signal design involves analog and digital domains coexisting within the same system. Verilog-AMS provides mechanisms for cross-domain interaction, allowing analog modules described with continuous-time behavioral equations to interoperate with digital modules described with event-driven logic.</p>
+
+<p>The key challenges in mixed-signal simulation are:</p>
+
+<ul>
+<li>Bridging the fundamentally different representations: continuous waveforms (analog) vs. discrete logic states (digital).</li>
+<li>Synchronizing two different simulation engines: an analog solver (e.g., Newton-Raphson with adaptive timestep) and a digital event scheduler.</li>
+<li>Resolving the discipline of interconnect nets when analog and digital ports meet.</li>
+</ul>
+
+<p>Verilog-AMS addresses these challenges through <em>connect modules</em>, <em>discipline resolution</em>, and <em>connect rules</em>, which together automate the insertion of interface elements at domain boundaries.</p>
+
+<div class="note">The mechanisms described in this chapter apply to full Verilog-AMS designs. Pure Verilog-A (analog-only) modules do not require connect modules or discipline resolution, but understanding these concepts is essential when Verilog-A modules are instantiated within a mixed-signal hierarchy.</div>
+
+<!-- 7.2 Connect Modules -->
+<h2 id="s7.2">7.2 Connect Modules</h2>
+
+<p>A connect module is a special-purpose module that bridges analog and digital domains. Connect modules are declared using the <code>connectmodule</code> keyword and are automatically inserted by the simulator at points where nets of incompatible disciplines meet (see <a href="#s7.5">7.5</a>).</p>
+
+<p>A connect module has exactly two ports: one in each domain. It contains behavioral code that converts signals between the two disciplines.</p>
+
+<h3>Syntax 7-1 -- Connect Module Declaration</h3>
+
+<pre class="syntax">connectmodule_declaration ::=
+    { attribute_instance } connectmodule connectmodule_identifier
+        ( port_declaration , port_declaration ) ;
+        { module_item }
+    endmodule</pre>
+
+<p>A connect module shall have exactly two ports. One port shall be of a continuous (analog) discipline and the other shall be of a discrete (digital) discipline. The direction of signal conversion is determined by the port directions (<code>input</code>, <code>output</code>, or <code>inout</code>).</p>
+
+<h4>Example: Analog-to-Digital Connect Module</h4>
+
+<pre><code>connectmodule a2d (input electrical ain, output logic dout);
+    parameter real vh = 2.7;    // voltage threshold for logic high
+    parameter real vl = 0.5;    // voltage threshold for logic low
+    parameter real tr = 10n;    // rise time for cross detection
+
+    reg dout_val;
+
+    initial dout_val = 1'bx;
+
+    always begin
+        @(cross(V(ain) - vh, +1))
+            dout_val = 1'b1;
+        @(cross(V(ain) - vl, -1))
+            dout_val = 1'b0;
+    end
+
+    assign dout = dout_val;
+endmodule</code></pre>
+
+<h4>Example: Digital-to-Analog Connect Module</h4>
+
+<pre><code>connectmodule d2a (input logic din, output electrical aout);
+    parameter real v0 = 0.0;    // voltage for logic 0
+    parameter real v1 = 3.3;    // voltage for logic 1
+    parameter real vx = 1.65;   // voltage for logic x
+    parameter real tr = 1n;     // transition rise time
+    parameter real tf = 1n;     // transition fall time
+    parameter real r0 = 100.0;  // output resistance
+
+    real vout;
+
+    always @(din) begin
+        case (din)
+            1'b0:    vout = v0;
+            1'b1:    vout = v1;
+            default: vout = vx;
+        endcase
+    end
+
+    analog
+        V(aout) <+ transition(vout, 0, tr, tf) + I(aout) * r0;
+endmodule</code></pre>
+
+<div class="note">Connect modules may contain both <code>analog</code> blocks and digital <code>always</code>/<code>initial</code> blocks, as they inherently straddle both domains. The simulator treats them as mixed-signal modules regardless of their content.</div>
+
+<!-- 7.3 Discipline Resolution -->
+<h2 id="s7.3">7.3 Discipline Resolution</h2>
+
+<p>When multiple ports of different disciplines connect to the same net, the simulator must determine the net's discipline. This process is called <em>discipline resolution</em> and occurs during elaboration, after all generate constructs have been evaluated and paramsets selected (see <a href="ch6-hierarchy.html#s6.9">6.9</a>).</p>
+
+<h3 id="s7.3.1">7.3.1 Compatibility</h3>
+
+<p>Two disciplines are <em>compatible</em> if they share the same domain (continuous or discrete) and their natures are compatible (see <a href="ch3-datatypes.html">3.11</a>). Two natures are compatible if they have the same <code>units</code> and <code>access</code> function name, or if one is derived from the other.</p>
+
+<table>
+<tr><th>Connection</th><th>Compatible?</th><th>Action</th></tr>
+<tr><td>electrical &ndash; electrical</td><td>Yes</td><td>Direct connection, no conversion needed</td></tr>
+<tr><td>electrical &ndash; voltage</td><td>Yes</td><td>Compatible natures, resolved by algorithm</td></tr>
+<tr><td>electrical &ndash; logic</td><td>No</td><td>Connect module required</td></tr>
+<tr><td>logic &ndash; logic</td><td>Yes</td><td>Direct connection</td></tr>
+<tr><td>electrical &ndash; rotational</td><td>No</td><td>Incompatible analog disciplines, error</td></tr>
+</table>
+
+<h3 id="s7.3.2">7.3.2 Resolution Algorithm</h3>
+
+<p>The discipline resolution algorithm processes each net in the design:</p>
+
+<ol>
+<li>Collect all disciplines of all ports connected to the net.</li>
+<li>If all disciplines are compatible, select the most specific discipline (the one that declares both potential and flow natures, or the one with the tightest <code>abstol</code>).</li>
+<li>If disciplines are from different domains (continuous vs. discrete), mark the net as a <em>mixed-signal boundary</em>. The net is split, and a connect module is inserted at the boundary.</li>
+<li>If disciplines are from the same domain but incompatible (e.g., <code>electrical</code> and <code>rotational</code>), it shall be an error.</li>
+</ol>
+
+<h3 id="s7.3.3">7.3.3 Precedence Rules</h3>
+
+<p>When multiple compatible disciplines are candidates, the following precedence applies:</p>
+
+<ul>
+<li>An explicitly declared discipline on the net takes highest precedence.</li>
+<li>A discipline with both potential and flow natures takes precedence over one with only a potential nature.</li>
+<li>Among equally qualified disciplines, the discipline with the smallest <code>abstol</code> is selected.</li>
+<li>If resolution is still ambiguous, the simulator shall issue a warning and select the discipline of the first port encountered in source order.</li>
+</ul>
+
+<!-- 7.4 Connect Rules -->
+<h2 id="s7.4">7.4 Connect Rules</h2>
+
+<p>Connect rules specify which connect modules the simulator shall insert at domain boundaries. They are declared using a <code>connectrules</code> block, which contains one or more <code>connect</code> statements.</p>
+
+<h3>Syntax 7-2 -- Connect Rules</h3>
+
+<pre class="syntax">connectrules_declaration ::=
+    connectrules connectrules_identifier ;
+        { connect_statement }
+    endconnectrules
+
+connect_statement ::=
+    connect connectmodule_identifier
+        [ #( list_of_parameter_assignments ) ]
+        discipline_identifier , discipline_identifier ;
+  | connect connectmodule_identifier
+        [ #( list_of_parameter_assignments ) ]
+        discipline_identifier , discipline_identifier
+        { , discipline_identifier , discipline_identifier } ;
+  | connect discipline_identifier , discipline_identifier
+        merged ;</pre>
+
+<p>Each <code>connect</code> statement associates a connect module with a pair of disciplines. When the simulator encounters a net at the boundary of those two disciplines, it instantiates the specified connect module.</p>
+
+<pre><code>connectrules default_rules;
+    connect a2d                         electrical, logic;
+    connect d2a                         logic, electrical;
+    connect bidir #(.vh(2.7), .vl(0.5)) electrical, logic;
+endconnectrules</code></pre>
+
+<h4>Parameter Overrides</h4>
+
+<p>Connect rules may override the default parameter values of the connect module using the standard parameter override syntax. This allows a single connect module definition to be reused with different threshold voltages, transition times, or output impedances for different discipline pairs.</p>
+
+<pre><code>connectrules cmos33_rules;
+    connect a2d #(.vh(2.0), .vl(0.8))   electrical, logic;
+    connect d2a #(.v1(3.3), .v0(0.0))   logic, electrical;
+endconnectrules
+
+connectrules cmos18_rules;
+    connect a2d #(.vh(1.2), .vl(0.4))   electrical, logic;
+    connect d2a #(.v1(1.8), .v0(0.0))   logic, electrical;
+endconnectrules</code></pre>
+
+<h4>Merged Connect</h4>
+
+<p>The <code>merged</code> keyword in a connect statement indicates that the two disciplines are compatible and shall be treated as a single merged net without inserting a connect module. This is used to override the default resolution when the user knows the disciplines are interchangeable in context.</p>
+
+<pre><code>connectrules merged_example;
+    connect electrical, voltage merged;
+endconnectrules</code></pre>
+
+<!-- 7.5 Automatic Insertion -->
+<h2 id="s7.5">7.5 Automatic Insertion</h2>
+
+<p>The simulator automatically inserts connect modules during elaboration when it detects a domain boundary on a net. The process occurs after discipline resolution (see <a href="#s7.3">7.3</a>) and after connect rules have been parsed.</p>
+
+<h3 id="s7.5.1">7.5.1 Insertion Process</h3>
+
+<ol>
+<li>For each net in the design, collect all connected port disciplines.</li>
+<li>Perform discipline resolution. If the net has ports from both continuous and discrete domains, it is a mixed-signal boundary.</li>
+<li>At each boundary, determine the direction of conversion from the port directions:
+    <ul>
+    <li>An analog <code>output</code> driving a digital <code>input</code> requires an A/D connect module.</li>
+    <li>A digital <code>output</code> driving an analog <code>input</code> requires a D/A connect module.</li>
+    <li><code>inout</code> ports require a bidirectional connect module.</li>
+    </ul>
+</li>
+<li>Search the active connect rules for a matching connect module.</li>
+<li>Instantiate the connect module with a unique instance name generated by the simulator.</li>
+</ol>
+
+<h3 id="s7.5.2">7.5.2 Port Compatibility and Direction</h3>
+
+<table>
+<tr><th>Analog Port</th><th>Digital Port</th><th>Required Connect Module</th></tr>
+<tr><td><code>output</code></td><td><code>input</code></td><td>A/D (analog-to-digital)</td></tr>
+<tr><td><code>input</code></td><td><code>output</code></td><td>D/A (digital-to-analog)</td></tr>
+<tr><td><code>inout</code></td><td><code>input</code></td><td>A/D</td></tr>
+<tr><td><code>input</code></td><td><code>inout</code></td><td>D/A</td></tr>
+<tr><td><code>inout</code></td><td><code>inout</code></td><td>Bidirectional</td></tr>
+</table>
+
+<div class="note">If no matching connect rule is found for a given discipline pair, the simulator shall issue an error. The design must provide connect rules for all domain crossings that occur in the elaborated hierarchy.</div>
+
+<h3 id="s7.5.3">7.5.3 Example: Full Mixed-Signal Hierarchy</h3>
+
+<pre><code>// Top-level mixed-signal testbench
+module top;
+    electrical ana_sig;
+    wire dig_sig;
+    logic dig_out;
+
+    // Analog VCO drives a digital counter
+    vco #(.freq(1e6)) osc (.out(ana_sig));
+    counter #(.bits(8)) cnt (.clk(ana_sig), .q(dig_out));
+    //                             ^--- domain boundary: electrical -> logic
+    //                             simulator inserts a2d here
+
+    // Digital PWM drives an analog filter
+    pwm_gen pwm (.in(dig_out), .out(dig_sig));
+    lpf #(.fc(10e3)) filt (.in(dig_sig), .out(filtered));
+    //                           ^--- domain boundary: logic -> electrical
+    //                           simulator inserts d2a here
+endmodule</code></pre>
+
+<!-- 7.6 Signal Access Across Domains -->
+<h2 id="s7.6">7.6 Signal Access Across Domains</h2>
+
+<p>Verilog-AMS provides several mechanisms for accessing signals across domain boundaries without explicit connect modules.</p>
+
+<h3 id="s7.6.1">7.6.1 Accessing Analog Signals from Digital Blocks</h3>
+
+<p>Digital blocks cannot directly probe analog node voltages or branch currents. To access analog values from a digital context, use one of the following approaches:</p>
+
+<ul>
+<li><strong><code>wreal</code> nets:</strong> A continuous-valued wire in the digital domain (see <a href="ch6-hierarchy.html#s6.5.3">6.5.3</a>). A <code>wreal</code> net carries a real-valued signal without quantization, but is scheduled by the digital event engine.</li>
+<li><strong>Connect modules:</strong> The A/D connect module samples the analog signal and drives a digital output.</li>
+<li><strong><code>$realtime</code>:</strong> Returns the current simulation time as a real value, usable in both domains.</li>
+</ul>
+
+<pre><code>// Using wreal to pass analog values into digital logic
+module sampler (input electrical ain, input wire clk, output wreal dout);
+    real sampled;
+
+    always @(posedge clk) begin
+        sampled = V(ain);   // V() probe within an analog-aware context
+    end
+
+    assign dout = sampled;
+endmodule</code></pre>
+
+<div class="note">The <code>V()</code> and <code>I()</code> access functions are only valid inside <code>analog</code> blocks or connect modules. Accessing them from purely digital <code>always</code> or <code>initial</code> blocks requires a mixed-signal simulator that supports cross-domain probing, which is implementation-defined.</div>
+
+<h3 id="s7.6.2">7.6.2 Accessing Digital Signals from Analog Blocks</h3>
+
+<p>Analog blocks can detect digital events and read digital state through connect modules. The D/A connect module converts logic levels to continuous voltages or currents that the analog solver can process.</p>
+
+<pre><code>// Analog block responding to a converted digital signal
+module dac_filter (input electrical d_converted, output electrical filtered);
+    parameter real fc = 1e3;
+    parameter real r = 1.0 / (6.2832 * fc * 1e-12);
+
+    analog begin
+        // d_converted arrives from a d2a connect module as a voltage
+        I(filtered) <+ (V(d_converted) - V(filtered)) / r;
+        I(filtered) <+ 1e-12 * ddt(V(filtered));
+    end
+endmodule</code></pre>
+
+<h3 id="s7.6.3">7.6.3 Driver Resolution for wreal</h3>
+
+<p>Unlike multi-valued digital nets, a <code>wreal</code> net shall have at most one driver. If multiple drivers are connected to a <code>wreal</code> net, the simulator shall issue an error. This restriction exists because real-valued signals have no natural resolution function analogous to digital wire-AND or wire-OR.</p>
+
+<table>
+<tr><th>Net Type</th><th>Multiple Drivers</th><th>Resolution</th></tr>
+<tr><td><code>wire</code></td><td>Allowed</td><td>Strength-based resolution</td></tr>
+<tr><td><code>wreal</code></td><td>Not allowed</td><td>Error: no resolution function</td></tr>
+<tr><td><code>wor</code></td><td>Allowed</td><td>Wired-OR</td></tr>
+<tr><td><code>wand</code></td><td>Allowed</td><td>Wired-AND</td></tr>
+</table>
+
+<!-- 7.7 Mixed-Signal Restrictions -->
+<h2 id="s7.7">7.7 Mixed-Signal Restrictions</h2>
+
+<p>The following restrictions apply to mixed-signal designs:</p>
+
+<h3 id="s7.7.1">7.7.1 Contribution Restrictions</h3>
+
+<ul>
+<li>Contribution statements (<code>&lt;+</code>) are only permitted inside <code>analog</code> blocks. They cannot appear in digital <code>always</code>, <code>initial</code>, or <code>assign</code> statements.</li>
+<li>A contribution shall only target branches whose nets are of a continuous discipline. Contributing to a net of discrete discipline is an error.</li>
+<li>Indirect contributions (via hierarchical branch references) across a domain boundary are not permitted.</li>
+</ul>
+
+<h3 id="s7.7.2">7.7.2 Event Interaction Restrictions</h3>
+
+<ul>
+<li>Analog event functions (<code>@(cross(...))</code>, <code>@(above(...))</code>, <code>@(timer(...))</code>) are only valid within <code>analog</code> blocks.</li>
+<li>Digital event controls (<code>@(posedge ...)</code>, <code>@(negedge ...)</code>) are only valid within digital procedural blocks.</li>
+<li>An <code>analog</code> block shall not use <code>@(posedge ...)</code> or <code>@(negedge ...)</code>. Use <code>@(cross(...))</code> with the appropriate edge argument instead.</li>
+<li>A digital block shall not use <code>@(cross(...))</code>, <code>@(above(...))</code>, or <code>@(timer(...))</code>.</li>
+</ul>
+
+<h3 id="s7.7.3">7.7.3 Structural Restrictions</h3>
+
+<ul>
+<li>A net connecting ports of incompatible disciplines from different domains requires a connect rule. If no applicable connect rule exists, it is an elaboration error.</li>
+<li>A net connecting ports of incompatible disciplines within the same domain (e.g., <code>electrical</code> and <code>rotational</code>) is always an error; no connect module can bridge same-domain incompatible disciplines.</li>
+<li>Connect modules shall not be instantiated explicitly by the user. They are inserted only by the simulator during elaboration.</li>
+<li>A connect module shall have exactly two ports. Declaring a connect module with fewer or more ports is an error.</li>
+</ul>
+
+<h3 id="s7.7.4">7.7.4 Timing and Synchronization</h3>
+
+<p>The analog and digital simulation engines operate with different notions of time advancement. The analog engine uses adaptive timestepping controlled by local truncation error estimates; the digital engine advances to the next scheduled event. The mixed-signal simulator must synchronize these two engines at domain boundaries.</p>
+
+<ul>
+<li>Analog-to-digital transitions generate digital events. The <code>cross()</code> function in an A/D connect module forces the analog solver to locate the threshold crossing precisely.</li>
+<li>Digital-to-analog transitions are smoothed by the <code>transition()</code> filter in the D/A connect module to provide a continuous waveform to the analog solver.</li>
+<li>The simulator shall ensure that analog breakpoints coincide with digital events at domain boundaries, so that connect module outputs are always current.</li>
+</ul>
+
+<div class="note">The details of analog-digital synchronization are implementation-defined. The LRM specifies the semantic contract (connect modules see consistent signal values) but not the synchronization algorithm.</div>
+
+</body>
+</html>

@@ -1,0 +1,11 @@
+{
+    "status": "compile_ok",
+    "openvaf_validated": false,
+    "module_name": "rlc_series",
+    "param_count": 3,
+    "contrib_count": 2,
+    "has_ddt": true,
+    "has_idt": true,
+    "has_ddx": false,
+    "has_noise": false
+}

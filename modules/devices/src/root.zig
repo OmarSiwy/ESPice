@@ -1,71 +1,88 @@
 const std = @import("std");
 
 pub const contract = @import("contract");
+pub const batch = @import("batch.zig");
+pub const par = @import("par.zig");
+pub const dyn = @import("dyn.zig");
+pub const vaload = @import("load.zig");
 
 // ---------------------------------------------------------------------------
 // Devices that follow the contract above
 // ---------------------------------------------------------------------------
 
-pub const asm_esd = @import("asm_esd.zig");
-pub const asm_hemt = @import("asm_hemt.zig");
-pub const b3soidd = @import("b3soidd.zig");
-pub const b3soifd = @import("b3soifd.zig");
-pub const b3soipd = @import("b3soipd.zig");
-pub const bjt = @import("bjt.zig");
-pub const bsim1 = @import("bsim1.zig");
-pub const bsim2 = @import("bsim2.zig");
-pub const bsim3 = @import("bsim3.zig");
-pub const bsim4 = @import("bsim4.zig");
-pub const bsim_bulk = @import("bsim_bulk.zig");
-pub const bsim_cmg = @import("bsim_cmg.zig");
-pub const bsim_img = @import("bsim_img.zig");
-pub const bsim_soi = @import("bsim_soi.zig");
-pub const bsource = @import("bsource.zig");
-pub const capacitor = @import("capacitor.zig");
-pub const cccs = @import("cccs.zig");
-pub const ccvs = @import("ccvs.zig");
-pub const coupled_tlines = @import("coupled_tlines.zig");
-pub const cswitch = @import("cswitch.zig");
-pub const diode = @import("diode.zig");
-pub const diode_cmc = @import("diode_cmc.zig");
-pub const ekv = @import("ekv.zig");
-pub const hfet1 = @import("hfet1.zig");
-pub const hfet2 = @import("hfet2.zig");
-pub const hicum_l0 = @import("hicum_l0.zig");
-pub const hicum_l2 = @import("hicum_l2.zig");
-pub const hisim2 = @import("hisim2.zig");
-pub const hisim_hv = @import("hisim_hv.zig");
-pub const hisim_soi = @import("hisim_soi.zig");
-pub const hisim_sotb = @import("hisim_sotb.zig");
-pub const inductor = @import("inductor.zig");
-pub const isource = @import("isource.zig");
-pub const jfet = @import("jfet.zig");
-pub const jfet2 = @import("jfet2.zig");
-pub const juncap = @import("juncap.zig");
-pub const kinduc = @import("kinduc.zig");
-pub const lossy_tline = @import("lossy_tline.zig");
-pub const lutsoi = @import("lutsoi.zig");
-pub const mesa = @import("mesa.zig");
-pub const mesfet = @import("mesfet.zig");
-pub const mextram = @import("mextram.zig");
-pub const mos1 = @import("mos1.zig");
-pub const mos2 = @import("mos2.zig");
-pub const mos3 = @import("mos3.zig");
-pub const mos6 = @import("mos6.zig");
-pub const mos9 = @import("mos9.zig");
-pub const mosvar = @import("mosvar.zig");
-pub const mvsg = @import("mvsg.zig");
-pub const psp = @import("psp.zig");
-pub const r3_cmc = @import("r3_cmc.zig");
-pub const resistor = @import("resistor.zig");
-pub const @"switch" = @import("switch.zig");
-pub const tline = @import("tline.zig");
-pub const urc = @import("urc.zig");
-pub const vbic = @import("vbic.zig");
-pub const vccs = @import("vccs.zig");
-pub const vcvs = @import("vcvs.zig");
-pub const vdmos = @import("vdmos.zig");
-pub const vsource = @import("vsource.zig");
+// -- MOS --
+pub const mos1 = @import("mos/mos1.zig");
+pub const mos2 = @import("mos/mos2.zig");
+pub const mos3 = @import("mos/mos3.zig");
+pub const mos6 = @import("mos/mos6.zig");
+pub const mos9 = @import("mos/mos9.zig");
+pub const bsim1 = @import("mos/bsim1.zig");
+pub const bsim2 = @import("mos/bsim2.zig");
+pub const bsim3 = @import("mos/bsim3.zig");
+pub const bsim4 = @import("mos/bsim4.zig");
+pub const bsim_bulk = @import("mos/bsim_bulk.zig");
+pub const bsim_cmg = @import("mos/bsim_cmg.zig");
+pub const bsim_img = @import("mos/bsim_img.zig");
+pub const bsim_soi = @import("mos/bsim_soi.zig");
+pub const b3soidd = @import("mos/b3soidd.zig");
+pub const b3soifd = @import("mos/b3soifd.zig");
+pub const b3soipd = @import("mos/b3soipd.zig");
+pub const hisim2 = @import("mos/hisim2.zig");
+pub const hisim_hv = @import("mos/hisim_hv.zig");
+pub const hisim_soi = @import("mos/hisim_soi.zig");
+pub const hisim_sotb = @import("mos/hisim_sotb.zig");
+pub const lutsoi = @import("mos/lutsoi.zig");
+pub const psp = @import("mos/psp.zig");
+pub const ekv = @import("mos/ekv.zig");
+pub const vdmos = @import("mos/vdmos.zig");
+pub const mvsg = @import("mos/mvsg.zig");
+pub const mosvar = @import("mos/mosvar.zig");
+
+// -- BJT --
+pub const bjt = @import("bjt/bjt.zig");
+pub const vbic = @import("bjt/vbic.zig");
+pub const hicum_l0 = @import("bjt/hicum_l0.zig");
+pub const hicum_l2 = @import("bjt/hicum_l2.zig");
+pub const mextram = @import("bjt/mextram.zig");
+
+// -- Diode --
+pub const diode = @import("diode/diode.zig");
+pub const diode_cmc = @import("diode/diode_cmc.zig");
+pub const juncap = @import("diode/juncap.zig");
+pub const asm_esd = @import("diode/asm_esd.zig");
+
+// -- JFET / MESFET / HEMT --
+pub const jfet = @import("jfet/jfet.zig");
+pub const jfet2 = @import("jfet/jfet2.zig");
+pub const mesfet = @import("jfet/mesfet.zig");
+pub const mesa = @import("jfet/mesa.zig");
+pub const hfet1 = @import("jfet/hfet1.zig");
+pub const hfet2 = @import("jfet/hfet2.zig");
+pub const asm_hemt = @import("jfet/asm_hemt.zig");
+
+// -- Passive --
+pub const resistor = @import("passive/resistor.zig");
+pub const capacitor = @import("passive/capacitor.zig");
+pub const inductor = @import("passive/inductor.zig");
+pub const kinduc = @import("passive/kinduc.zig");
+pub const tline = @import("passive/tline.zig");
+pub const lossy_tline = @import("passive/lossy_tline.zig");
+pub const coupled_tlines = @import("passive/coupled_tlines.zig");
+pub const urc = @import("passive/urc.zig");
+pub const r3_cmc = @import("passive/r3_cmc.zig");
+
+// -- Source --
+pub const vsource = @import("source/vsource.zig");
+pub const isource = @import("source/isource.zig");
+pub const bsource = @import("source/bsource.zig");
+pub const cccs = @import("source/cccs.zig");
+pub const ccvs = @import("source/ccvs.zig");
+pub const vccs = @import("source/vccs.zig");
+pub const vcvs = @import("source/vcvs.zig");
+
+// -- Switch --
+pub const @"switch" = @import("switch/switch.zig");
+pub const cswitch = @import("switch/cswitch.zig");
 
 // ---------------------------------------------------------------------------
 // SPICE letter → device dispatch

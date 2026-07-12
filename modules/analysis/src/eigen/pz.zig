@@ -3,11 +3,12 @@
 //! The planes are the linearization — one eval() at the op.
 const std = @import("std");
 const root = @import("../root.zig");
-const converger = @import("../helper/converger.zig");
-const dense_lu = root.solvers.dense_lu;
-const freq = @import("../helper/freq.zig");
+const converger = @import("solvers").converger;
+const types = @import("solvers").types;
+const solvers = @import("solvers");
+const dense_lu = solvers.dense_lu;
 
-const Complex = freq.Complex;
+const Complex = types.Complex;
 
 // ponytail: platform SIMD width — not hardcoded
 const W = std.simd.suggestVectorLength(f64) orelse 8;
@@ -67,13 +68,16 @@ pub fn solve(
 
     try dense_lu.factorize(n, g_lu, piv);
 
+    // A = −G⁻¹C: one back-substitution per column of C.
     for (0..n) |j| {
+        // Extract column j of C into col_rhs.
         for (0..n) |row| {
             col_rhs[row] = c_mat[row * n + j];
         }
 
         dense_lu.solveFactored(n, g_lu, piv, col_rhs, col_sol);
 
+        // Negate into column j of A.
         for (0..n) |row| {
             a_mat[row * n + j] = -col_sol[row];
         }
@@ -165,6 +169,7 @@ fn eigenvaluesQR(n: usize, a: []f64, out: []Complex, options: Options) Eigs {
     while (nn > 2) {
         if (iter >= options.qr_max_iter) return .{ .count = count, .converged = false };
 
+        // Check for 1x1 deflation at bottom.
         const sub = @abs(a[(nn - 1) * n + (nn - 2)]);
         const diag_sum = @abs(a[(nn - 1) * n + (nn - 1)]) + @abs(a[(nn - 2) * n + (nn - 2)]);
         if (sub <= options.qr_tol * @max(diag_sum, 1e-30)) {
@@ -175,6 +180,7 @@ fn eigenvaluesQR(n: usize, a: []f64, out: []Complex, options: Options) Eigs {
             continue;
         }
 
+        // Check for 2x2 deflation at bottom.
         if (nn > 2) {
             const sub2 = @abs(a[(nn - 2) * n + (nn - 3)]);
             const diag_sum2 = @abs(a[(nn - 2) * n + (nn - 2)]) + @abs(a[(nn - 3) * n + (nn - 3)]);
@@ -191,6 +197,7 @@ fn eigenvaluesQR(n: usize, a: []f64, out: []Complex, options: Options) Eigs {
         iter += 1;
     }
 
+    // Handle remaining 2x2 or 1x1 block.
     if (nn == 2) {
         extract2x2(a, n, 0, out[count..][0..2]);
         count += 2;
@@ -201,6 +208,7 @@ fn eigenvaluesQR(n: usize, a: []f64, out: []Complex, options: Options) Eigs {
     return .{ .count = count, .converged = true };
 }
 
+/// Extract eigenvalues of the 2x2 block at (offset, offset).
 fn extract2x2(a: []const f64, n: usize, offset: usize, out: *[2]Complex) void {
     const a11 = a[offset * n + offset];
     const a12 = a[offset * n + offset + 1];
@@ -233,6 +241,7 @@ fn hessenbergReduce(n: usize, a: []f64) void {
         const len = n - k - 1;
         if (len == 0) continue;
 
+        // Compute norm of sub-column a[k+1..n, k].
         var sigma: f64 = 0;
         for (k + 1..n) |row| {
             const v = a[row * n + k];
@@ -254,9 +263,9 @@ fn hessenbergReduce(n: usize, a: []f64) void {
             while (row + W <= n) : (row += W) {
                 var vv: V = undefined;
                 var av: V = undefined;
-                inline for (0..W) |w| {
-                    vv[w] = a[(row + w) * n + k];
-                    av[w] = a[(row + w) * n + j];
+                inline for (0..W) |wi| {
+                    vv[wi] = a[(row + wi) * n + k];
+                    av[wi] = a[(row + wi) * n + j];
                 }
                 dot_acc += vv * av;
             }
@@ -278,9 +287,9 @@ fn hessenbergReduce(n: usize, a: []f64) void {
             while (col + W <= n) : (col += W) {
                 var vv: V = undefined;
                 var av: V = undefined;
-                inline for (0..W) |w| {
-                    vv[w] = a[(col + w) * n + k];
-                    av[w] = a[row * n + (col + w)];
+                inline for (0..W) |wi| {
+                    vv[wi] = a[(col + wi) * n + k];
+                    av[wi] = a[row * n + (col + wi)];
                 }
                 dot_acc += av * vv;
             }
@@ -292,11 +301,11 @@ fn hessenbergReduce(n: usize, a: []f64) void {
             col = k + 1;
             while (col + W <= n) : (col += W) {
                 var vv: V = undefined;
-                inline for (0..W) |w| {
-                    vv[w] = a[(col + w) * n + k];
+                inline for (0..W) |wi| {
+                    vv[wi] = a[(col + wi) * n + k];
                 }
-                inline for (0..W) |w| {
-                    a[row * n + (col + w)] -= dot * vv[w];
+                inline for (0..W) |wi| {
+                    a[row * n + (col + wi)] -= dot * vv[wi];
                 }
             }
             while (col < n) : (col += 1) {
@@ -304,6 +313,7 @@ fn hessenbergReduce(n: usize, a: []f64) void {
             }
         }
 
+        // Write sub-diagonal entry and zero below.
         a[(k + 1) * n + k] = -sigma;
         // The reflector maps its own storage v to -v (Hv = -v), leaving
         // nonzeros below the subdiagonal; francisStep reads those slots as
@@ -317,14 +327,16 @@ fn hessenbergReduce(n: usize, a: []f64) void {
 // ============================================================================
 
 fn francisStep(n: usize, a: []f64, nn: usize) void {
+    // Shift polynomial from trailing 2x2 block.
     const am = a[(nn - 2) * n + (nn - 2)];
     const bm = a[(nn - 2) * n + (nn - 1)];
     const cm = a[(nn - 1) * n + (nn - 2)];
     const dm = a[(nn - 1) * n + (nn - 1)];
 
-    const s = am + dm;
-    const t = am * dm - bm * cm;
+    const s = am + dm; // trace
+    const t = am * dm - bm * cm; // determinant
 
+    // First column of the implicit double-shift polynomial (H - sigma*I)(H - conj(sigma)*I).
     var x = a[0] * a[0] + a[0 * n + 1] * a[1 * n + 0] - s * a[0] + t;
     var y = a[1 * n + 0] * (a[0] + a[1 * n + 1] - s);
     var z: f64 = if (nn > 2) a[2 * n + 0] * a[1 * n + 0] else 0;
@@ -386,6 +398,7 @@ fn applyReflector3(n: usize, a: []f64, nn: usize, k: usize, x_in: f64, y_in: f64
         p1.* = r1 - tv * v1v;
         p2.* = r2 - tv * v2v;
     }
+    // Scalar tail for non-W-aligned columns.
     while (j < nn) : (j += 1) {
         const dot = v0 * a[k * n + j] + v1 * a[(k + 1) * n + j] + v2 * a[(k + 2) * n + j];
         const tv = beta * dot;
@@ -432,6 +445,7 @@ fn applyReflector2(n: usize, a: []f64, nn: usize, k: usize, x_in: f64, y_in: f64
         p0.* = r0 - tv * v0v;
         p1.* = r1 - tv * v1v;
     }
+    // Scalar tail.
     while (j < nn) : (j += 1) {
         const dot = v0 * a[k * n + j] + v1 * a[(k + 1) * n + j];
         const tv = beta * dot;

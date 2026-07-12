@@ -1,10 +1,26 @@
-//! Brute-force DC sensitivity: perturb one parameter, re-solve, finite-
-//! difference the output node. One Workspace serves the nominal solve and
-//! every perturbed solve — the pattern is frozen.
+//! Adjoint DC sensitivity: one nominal OP solve + one transpose solve →
+//! per-parameter cost is a single RHS eval + dot product, not a full Newton.
+//!
+//! Algorithm:
+//!   1. Nominal OP solve → x_op, Jacobian J stays factored in workspace
+//!   2. Adjoint solve: J^T · λ = e_out  (one transpose back-sub)
+//!   3. Per parameter p:
+//!      a. perturb p, re-eval F(x_op) → rhs_pert
+//!      b. dF/dp ≈ (rhs_pert - rhs_nom) / delta   (FD on RHS only)
+//!      c. dy/dp = -λ^T · dF/dp                    (one dot product)
+//!
+//! Cost: O(nnz + N_params * n) vs old O(N_params * Newton_iters * nnz).
 const std = @import("std");
 const root = @import("../root.zig");
-const dc = @import("../dc/dc.zig");
-const converger = @import("../helper/converger.zig");
+const converger = @import("solvers").converger;
+const types = @import("solvers").types;
+const solvers = @import("solvers");
+
+const W = std.simd.suggestVectorLength(f64) orelse 8;
+
+// ---------------------------------------------------------------------------
+// Public types
+// ---------------------------------------------------------------------------
 
 pub const SensParam = struct {
     ptr: *f32,
@@ -22,7 +38,6 @@ pub const Options = struct {
     tol: converger.Tolerances = .{},
     /// null → the last probe node.
     output_node: ?u32 = null,
-    dc_opts: dc.Options = .{},
 };
 
 pub const SolveResult = struct {
@@ -34,64 +49,150 @@ pub const SolveResult = struct {
     }
 };
 
+// ---------------------------------------------------------------------------
+// SIMD helpers (no @memset/@memcpy per convention)
+// ---------------------------------------------------------------------------
+
+inline fn copySimd(dst: []f64, src: []const f64) void {
+    const n = @min(dst.len, src.len);
+    var i: usize = 0;
+    while (i + W <= n) : (i += W) dst[i..][0..W].* = src[i..][0..W].*;
+    while (i < n) : (i += 1) dst[i] = src[i];
+}
+
+/// SIMD dot product: λ^T · v
+inline fn dotSimd(a: []const f64, b: []const f64) f64 {
+    const n = @min(a.len, b.len);
+    const V = @Vector(W, f64);
+    var acc: V = @splat(0.0);
+    var i: usize = 0;
+    while (i + W <= n) : (i += W) {
+        const av: V = a[i..][0..W].*;
+        const bv: V = b[i..][0..W].*;
+        acc += av * bv;
+    }
+    // ponytail: reduce SIMD accumulator to scalar via array extract
+    // (@reduce would work but this is explicit and portable)
+    const arr: [W]f64 = acc;
+    var s: f64 = 0;
+    for (arr) |v| s += v;
+    // scalar tail
+    while (i < n) : (i += 1) s += a[i] * b[i];
+    return s;
+}
+
+// ---------------------------------------------------------------------------
+// Core solver — adjoint method
+// ---------------------------------------------------------------------------
+
+/// Adjoint DC sensitivity: nominal solve → transpose solve → per-parameter
+/// RHS perturbation + dot product.
+///
+/// No `computeBaseline()`: the baseline would freeze const-Jacobian stamps
+/// (resistors) and mask the very perturbations being measured.
+///
+/// GPU batch note: solve_batch doesn't help here — the nominal OP is a single
+/// solve (already GPU-accelerated via converger.run), and the per-parameter
+/// perturbation loop is eval-only (ckt.evalNewton, no Newton iteration), so
+/// there are no N independent Newton solves to batch.
 pub fn solve(
     ckt: *root.Circuit,
     params: []const SensParam,
     output_node: u32,
-    dc_opts: dc.Options,
+    tol: converger.Tolerances,
     allocator: std.mem.Allocator,
 ) !SolveResult {
     const n: usize = ckt.n;
-
-    // No computeBaseline() here: baseline would freeze const-Jacobian G
-    // stamps (e.g. resistors) and mask the very perturbations we measure.
     const ws = try ckt.workspace();
-    const nopts = dc_opts.tol.newtonOpts(dc_opts.tol.itl2);
+    const nopts = tol.newtonOpts(tol.itl2);
 
+    // -- 1. Nominal OP solve (cold start) --
+    // After convergence, ws.slv holds the factored Jacobian at x_op.
     const x_op = try allocator.alloc(f64, n);
     defer allocator.free(x_op);
+    root.zeroSimd(x_op);
+    ckt.seedJunctions(x_op);
 
-    @memset(x_op, 0);
-    const dc_result = try converger.run(ckt, ws, x_op, 0, nopts, converger.EvalHook{});
+    const dc_result = try converger.run(ckt, ws, x_op, 0, nopts, root.EvalHook{});
     if (!dc_result.converged) return error.DcNotConverged;
 
     const v0 = x_op[output_node];
 
-    const x_pert = try allocator.alloc(f64, n);
-    defer allocator.free(x_pert);
+    // -- Capture nominal RHS at the operating point --
+    // Re-eval at x_op to get the nominal F(x_op) residual in ckt.rhs.
+    ckt.evalNewton(x_op, 0);
+    const rhs_nom = try allocator.alloc(f64, n);
+    defer allocator.free(rhs_nom);
+    copySimd(rhs_nom, ckt.rhs[0..n]);
 
+    // -- 2. Adjoint solve: J^T · λ = e_out --
+    const lambda = try allocator.alloc(f64, n);
+    defer allocator.free(lambda);
+    // Build e_out: unit vector at output_node
+    root.zeroSimd(lambda);
+    lambda[output_node] = 1.0;
+    ws.slv.solveT(lambda, lambda);
+
+    // -- 3. Per-parameter: perturb, re-eval RHS, FD + adjoint dot --
     const entries = try allocator.alloc(SensEntry, params.len);
     errdefer allocator.free(entries);
+
+    // Scratch for dF/dp = (rhs_pert - rhs_nom) / delta
+    const dfdp = try allocator.alloc(f64, n);
+    defer allocator.free(dfdp);
 
     for (params, entries) |p, *entry| {
         const orig: f64 = p.ptr.*;
         const delta_req = 1e-6 * @abs(orig) + 1e-12;
 
+        // Write perturbed value as f32, read back actual delta.
         p.ptr.* = @floatCast(orig + delta_req);
-        defer p.ptr.* = @floatCast(orig);
+        defer {
+            p.ptr.* = @floatCast(orig);
+            ckt.recompute();
+        }
         ckt.recompute();
+
         // FD against the step the f32 actually took, not the requested one.
         const delta = @as(f64, p.ptr.*) - orig;
+        if (delta == 0) return error.ZeroDelta;
 
-        @memset(x_pert, 0);
-        const pert_result = try converger.run(ckt, ws, x_pert, 0, nopts, converger.EvalHook{});
-        if (!pert_result.converged) return error.PerturbedDcNotConverged;
+        // Evaluate F(x_op) with perturbed parameter (RHS only, no Newton).
+        ckt.evalNewton(x_op, 0);
+        const inv_delta = 1.0 / delta;
 
-        const v_pert = x_pert[output_node];
+        // dF/dp = (rhs_pert - rhs_nom) / delta  (SIMD)
+        {
+            const V = @Vector(W, f64);
+            const id: V = @splat(inv_delta);
+            var i: usize = 0;
+            while (i + W <= n) : (i += W) {
+                const rp: V = ckt.rhs[i..][0..W].*;
+                const rn: V = rhs_nom[i..][0..W].*;
+                dfdp[i..][0..W].* = (rp - rn) * id;
+            }
+            while (i < n) : (i += 1) {
+                dfdp[i] = (ckt.rhs[i] - rhs_nom[i]) * inv_delta;
+            }
+        }
+
+        // dy/dp = -λ^T · dF/dp
         entry.* = .{
             .device_name = p.device_name,
             .param_name = p.param_name,
-            .sensitivity = if (delta != 0) (v_pert - v0) / delta else 0,
+            .sensitivity = -dotSimd(lambda[0..n], dfdp[0..n]),
         };
     }
 
-    ckt.recompute();
     return .{ .entries = entries, .op_value = v0 };
 }
 
-/// Contract entry: every collected device parameter becomes one column
-/// ("<type>#<index>.<param>"), one row of dVout/dp. Name strings live on
-/// the run arena.
+// ---------------------------------------------------------------------------
+// Contract entry: run(*const RunCtx, Options) !Result
+// ---------------------------------------------------------------------------
+
+/// Every collected device parameter becomes one column ("<type>#<index>.<param>"),
+/// one row of dVout/dp. Name strings live on the run arena.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
     const output_node = opts.output_node orelse blk: {
@@ -102,8 +203,11 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const refs = try ctx.circuit.collectParams();
     const params = try a.alloc(SensParam, refs.len);
     defer a.free(params);
-    var n_named: usize = 0; // registered before the loop: frees the prefix on mid-loop failure
+
+    // Track formatted names so we can free on mid-loop failure.
+    var n_named: usize = 0;
     defer for (params[0..n_named]) |p| a.free(p.device_name);
+
     for (refs, params) |ref, *p| {
         p.* = .{
             .ptr = ref.ptr,
@@ -113,13 +217,15 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         n_named += 1;
     }
 
-    var res = try solve(ctx.circuit, params, output_node, opts.dc_opts, a);
+    var res = try solve(ctx.circuit, params, output_node, opts.tol, a);
     defer res.deinit(a);
 
+    // Build result arrays: one name and one sensitivity value per parameter.
     const names = try a.alloc([]const u8, res.entries.len);
     errdefer a.free(names);
     const data = try a.alloc(f64, res.entries.len);
     errdefer a.free(data);
+
     var done: usize = 0;
     errdefer for (names[0..done]) |s| a.free(s);
     for (res.entries, names, data) |e, *name, *out| {
@@ -127,6 +233,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         done += 1;
         out.* = e.sensitivity;
     }
+
     return .{
         .plotname = "DC Sensitivity",
         .varnames = names,
@@ -134,4 +241,41 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         .npoints = 1,
         .data = data,
     };
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+const testing = std.testing;
+
+test "dotSimd: basic inner product" {
+    const a = [_]f64{ 1.0, 2.0, 3.0, 4.0 };
+    const b = [_]f64{ 5.0, 6.0, 7.0, 8.0 };
+    try testing.expectApproxEqAbs(@as(f64, 70.0), dotSimd(&a, &b), 1e-15);
+}
+
+test "dotSimd: length not multiple of W" {
+    const a = [_]f64{ 1.0, 2.0, 3.0 };
+    const b = [_]f64{ 4.0, 5.0, 6.0 };
+    try testing.expectApproxEqAbs(@as(f64, 32.0), dotSimd(&a, &b), 1e-15);
+}
+
+test "dotSimd: single element" {
+    const a = [_]f64{7.0};
+    const b = [_]f64{3.0};
+    try testing.expectApproxEqAbs(@as(f64, 21.0), dotSimd(&a, &b), 1e-15);
+}
+
+test "dotSimd: empty" {
+    const a = [_]f64{};
+    const b = [_]f64{};
+    try testing.expectApproxEqAbs(@as(f64, 0.0), dotSimd(&a, &b), 1e-15);
+}
+
+test "copySimd: round-trip" {
+    var dst: [5]f64 = undefined;
+    const src = [_]f64{ 1.0, 2.0, 3.0, 4.0, 5.0 };
+    copySimd(&dst, &src);
+    for (dst, src) |d, s| try testing.expectEqual(s, d);
 }

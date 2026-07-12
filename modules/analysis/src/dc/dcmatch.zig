@@ -1,0 +1,340 @@
+//! DC mismatch analysis (Spectre `dcmatch`): Pelgrom-model random offset at
+//! the operating point via adjoint sensitivity.
+//!
+//!   1. OP solve (reuse or cold-start) — keeps the factored J in the workspace.
+//!   2. Adjoint solve J^T * lambda = e_out  (one transpose back-substitution).
+//!   3. Per-parameter FD stamp: perturb p_d, re-eval F(x_op), finite-difference
+//!      dF/dp_d, dot with lambda -> dy/dp_d.
+//!   4. Accumulate sigma^2(y) = sum (dy/dp_d)^2 * sigma^2(dp_d).
+//!   5. Report 3-sigma offset + ranked contribution table.
+//!
+//! Pelgrom sigma^2(dp) = A_P^2 / (W*L).  When a ParamRef carries nonzero
+//! pelgrom_ap and area_wl the real coefficient is used; otherwise falls back
+//! to unit variance.
+const std = @import("std");
+const root = @import("../root.zig");
+const converger = @import("solvers").converger;
+const types = @import("solvers").types;
+const solvers = @import("solvers");
+
+const W = std.simd.suggestVectorLength(f64) orelse 8;
+
+pub const Options = struct {
+    tol: converger.Tolerances = .{},
+    /// null -> the last probe node.
+    output_node: ?u32 = null,
+};
+
+pub const Contribution = struct {
+    device_name: []const u8,
+    param_name: []const u8,
+    sensitivity: f64,
+    sigma_param: f64,
+    variance_contrib: f64,
+};
+
+pub const MismatchResult = struct {
+    contributions: []Contribution,
+    total_sigma: f64,
+    op_value: f64,
+};
+
+// -------------------------------------------------------------------------
+// Pelgrom variance
+// -------------------------------------------------------------------------
+
+/// Compute per-parameter mismatch sigma from Pelgrom coefficients.
+/// Returns sigma (not sigma^2).
+inline fn pelgromSigma(ref: root.ParamRef) f64 {
+    if (ref.pelgrom_ap > 0 and ref.area_wl > 0) {
+        // sigma^2 = A_P^2 / (W*L)  =>  sigma = A_P / sqrt(W*L)
+        return ref.pelgrom_ap / @sqrt(ref.area_wl);
+    }
+    // ponytail: unit variance fallback — no Pelgrom data on this param
+    return 1.0;
+}
+
+// -------------------------------------------------------------------------
+// Adjoint solve: reuse the factored J from the OP Newton
+// -------------------------------------------------------------------------
+
+/// Solve J^T * lambda = e_out using the already-factored workspace.
+/// `e_out` is a unit vector with 1.0 at `output_node`.
+fn adjointSolve(
+    ws: *converger.Workspace,
+    n: usize,
+    output_node: u32,
+    lambda: []f64,
+    e_out: []f64,
+) void {
+    // Build e_out
+    root.zeroSimd(e_out[0..n]);
+    e_out[output_node] = 1.0;
+
+    // Transpose solve on the existing factors
+    ws.slv.solveT(e_out[0..n], lambda[0..n]);
+}
+
+// -------------------------------------------------------------------------
+// FD parameter-derivative stamps
+// -------------------------------------------------------------------------
+
+/// Finite-difference dF/dp: perturb p, re-eval F(x_op), compute
+/// (F_pert - F_nom) / delta. Returns the adjoint dot -lambda^T * dF/dp.
+fn fdSensitivity(
+    ckt: *root.Circuit,
+    x_op: []const f64,
+    lambda: []const f64,
+    rhs_nom: []const f64,
+    rhs_work: []f64,
+    param_ptr: *f32,
+) f64 {
+    const n: usize = ckt.n;
+    const orig: f64 = param_ptr.*;
+    const delta_req = 1e-6 * @abs(orig) + 1e-12;
+
+    param_ptr.* = @floatCast(orig + delta_req);
+    // Actual delta the f32 took
+    const delta = @as(f64, param_ptr.*) - orig;
+    defer {
+        param_ptr.* = @floatCast(orig);
+        ckt.recompute();
+    }
+    ckt.recompute();
+
+    // Eval at x_op with perturbed parameter — fills rhs
+    ckt.eval(x_op, 0);
+
+    // dF/dp = (rhs_pert - rhs_nom) / delta, then dot with -lambda
+    // Sensitivity = -lambda^T * dF/dp
+    if (delta == 0) return 0;
+
+    const inv_delta = 1.0 / delta;
+    const V = @Vector(W, f64);
+    const inv_v: V = @splat(inv_delta);
+    var dot: f64 = 0;
+    var i: usize = 0;
+    while (i + W <= n) : (i += W) {
+        const rp: V = ckt.rhs[i..][0..W].*;
+        const rn: V = rhs_nom[i..][0..W].*;
+        const lv: V = lambda[i..][0..W].*;
+        const df: V = (rp - rn) * inv_v;
+        // Store dF/dp into rhs_work for potential later use
+        rhs_work[i..][0..W].* = df;
+        dot += @reduce(.Add, lv * df);
+    }
+    while (i < n) : (i += 1) {
+        const df = (ckt.rhs[i] - rhs_nom[i]) * inv_delta;
+        rhs_work[i] = df;
+        dot += lambda[i] * df;
+    }
+
+    return -dot;
+}
+
+// -------------------------------------------------------------------------
+// Core solve
+// -------------------------------------------------------------------------
+
+// GPU batch dispatch: not beneficial here. The inner loop is N FD parameter
+// perturbations (re-eval + adjoint dot), not N independent Newton solves.
+// The single OP solve and single adjoint solve are already covered by the
+// scalar GPU path. Batch Newton (solve_batch) has no leverage.
+
+pub fn solve(
+    ckt: *root.Circuit,
+    x_op: []const f64,
+    output_node: u32,
+    allocator: std.mem.Allocator,
+) !MismatchResult {
+    const n: usize = ckt.n;
+    const refs = try ckt.collectParams();
+    if (refs.len == 0) return .{
+        .contributions = &.{},
+        .total_sigma = 0,
+        .op_value = x_op[output_node],
+    };
+
+    // ponytail: one bulk alloc for all work buffers (lambda + e_out + rhs_nom + rhs_work)
+    const arena = try allocator.alloc(f64, 4 * n);
+    defer allocator.free(arena);
+    const lambda = arena[0..n];
+    const e_out = arena[n .. 2 * n];
+    const rhs_nom = arena[2 * n .. 3 * n];
+    const rhs_work = arena[3 * n .. 4 * n];
+
+    // Evaluate at x_op to get the nominal Jacobian + rhs and factor it
+    const ws = try ckt.workspace();
+    ckt.eval(x_op, 0);
+
+    // Save nominal rhs before factoring (factor clobbers g_vals, not rhs)
+    {
+        var i: usize = 0;
+        while (i + W <= n) : (i += W) rhs_nom[i..][0..W].* = ckt.rhs[i..][0..W].*;
+        while (i < n) : (i += 1) rhs_nom[i] = ckt.rhs[i];
+    }
+
+    // Factor the Jacobian (G matrix)
+    try ws.slv.factor(ckt.g_vals);
+
+    // Adjoint solve: J^T * lambda = e_out
+    adjointSolve(ws, n, output_node, lambda, e_out);
+
+    // Per-parameter FD sensitivity + mismatch accumulation
+    const contributions = try allocator.alloc(Contribution, refs.len);
+    errdefer allocator.free(contributions);
+
+    var total_var: f64 = 0;
+    for (refs, contributions) |ref, *contrib| {
+        const sens = fdSensitivity(ckt, x_op, lambda, rhs_nom, rhs_work, ref.ptr);
+
+        const sigma_p = pelgromSigma(ref);
+        const var_contrib = sens * sens * sigma_p * sigma_p;
+        total_var += var_contrib;
+
+        contrib.* = .{
+            .device_name = ref.device_type,
+            .param_name = ref.param_name,
+            .sensitivity = sens,
+            .sigma_param = sigma_p,
+            .variance_contrib = var_contrib,
+        };
+    }
+
+    // Sort contributions descending by variance_contrib (design-actionable ranking)
+    std.mem.sort(Contribution, contributions, {}, struct {
+        fn lessThan(_: void, a: Contribution, b: Contribution) bool {
+            return b.variance_contrib < a.variance_contrib;
+        }
+    }.lessThan);
+
+    return .{
+        .contributions = contributions,
+        .total_sigma = @sqrt(total_var),
+        .op_value = x_op[output_node],
+    };
+}
+
+// -------------------------------------------------------------------------
+// Contract entry point
+// -------------------------------------------------------------------------
+
+pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
+    const a = ctx.allocator;
+    const ckt = ctx.circuit;
+
+    // Resolve output node
+    const output_node = opts.output_node orelse blk: {
+        if (ctx.probes.len == 0) return error.NoOutputNode;
+        break :blk ctx.probes[ctx.probes.len - 1];
+    };
+
+    // Ensure we have an operating point
+    const x_op = ctx.x_op orelse blk: {
+        const x = try a.alloc(f64, ckt.n);
+        errdefer a.free(x);
+        const r = try root.op.solve(ckt, x, .{ .tol = opts.tol });
+        if (!r.converged) return error.OpDidNotConverge;
+        break :blk x;
+    };
+    defer if (ctx.x_op == null) a.free(x_op);
+
+    const res = try solve(ckt, x_op, output_node, a);
+    defer a.free(res.contributions);
+
+    // Format output: one row per contribution + summary row
+    // Columns: "parameter", "sensitivity", "sigma_param", "variance_pct", "3sigma_contrib"
+    // npoints = contributions.len, each point has the sensitivity value
+    // Simple flat layout: first varname is "parameter" (dummy scale), then one
+    // value per contribution = its sensitivity.
+    //
+    // Actually, the Result contract is numeric. Pack as:
+    //   varnames = ["total_3sigma", "<dev>#<idx>.<param>", ...]
+    //   npoints = 1
+    //   data = [3*sigma_total, sens_0, sens_1, ...]
+    const n_contribs = res.contributions.len;
+    const ncols = 1 + n_contribs;
+    const names = try a.alloc([]const u8, ncols);
+    errdefer a.free(names);
+    names[0] = "total_3sigma";
+
+    var done: usize = 0;
+    errdefer for (names[1..][0..done]) |s| a.free(s);
+    for (res.contributions, names[1..]) |c, *name| {
+        name.* = try std.fmt.allocPrint(a, "{s}.{s}", .{ c.device_name, c.param_name });
+        done += 1;
+    }
+
+    const data = try a.alloc(f64, ncols);
+    errdefer a.free(data);
+    data[0] = 3.0 * res.total_sigma;
+    for (res.contributions, data[1..]) |c, *out| out.* = c.sensitivity;
+
+    return .{
+        .plotname = "DC Mismatch",
+        .varnames = names,
+        .is_complex = false,
+        .npoints = 1,
+        .data = data,
+    };
+}
+
+// -------------------------------------------------------------------------
+// Tests
+// -------------------------------------------------------------------------
+
+test "pelgromSigma — real coefficients" {
+    const ref = root.ParamRef{
+        .ptr = undefined,
+        .device_type = "nmos",
+        .param_name = "vth0",
+        .index = 0,
+        .is_instance = false,
+        .primary = false,
+        .pelgrom_ap = 4e-3, // 4 mV·um
+        .area_wl = 1e-12, // 1 um^2
+    };
+    const sigma = pelgromSigma(ref);
+    // sigma = 4e-3 / sqrt(1e-12) = 4e-3 / 1e-6 = 4000
+    try std.testing.expectApproxEqRel(sigma, 4e3, 1e-12);
+}
+
+test "pelgromSigma — unit fallback when pelgrom_ap is zero" {
+    const ref = root.ParamRef{
+        .ptr = undefined,
+        .device_type = "nmos",
+        .param_name = "vth0",
+        .index = 0,
+        .is_instance = false,
+        .primary = false,
+        .pelgrom_ap = 0,
+        .area_wl = 1e-12,
+    };
+    try std.testing.expectEqual(pelgromSigma(ref), 1.0);
+}
+
+test "pelgromSigma — unit fallback when area_wl is zero" {
+    const ref = root.ParamRef{
+        .ptr = undefined,
+        .device_type = "nmos",
+        .param_name = "vth0",
+        .index = 0,
+        .is_instance = false,
+        .primary = false,
+        .pelgrom_ap = 4e-3,
+        .area_wl = 0,
+    };
+    try std.testing.expectEqual(pelgromSigma(ref), 1.0);
+}
+
+test "pelgromSigma — both zero gives unit fallback" {
+    const ref = root.ParamRef{
+        .ptr = undefined,
+        .device_type = "nmos",
+        .param_name = "vth0",
+        .index = 0,
+        .is_instance = false,
+        .primary = false,
+    };
+    try std.testing.expectEqual(pelgromSigma(ref), 1.0);
+}

@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chapter 8 &mdash; Scheduling Semantics | Verilog-A LRM 2.4.0</title>
+<style>
+body { font-family: 'Segoe UI', system-ui, sans-serif; max-width: 900px; margin: 0 auto; padding: 2rem; background: #fafafa; color: #1a1a1a; line-height: 1.6; }
+h1 { border-bottom: 3px solid #2563eb; padding-bottom: 0.5rem; }
+h2 { color: #1e40af; margin-top: 2rem; border-bottom: 1px solid #ddd; padding-bottom: 0.3rem; }
+h3 { color: #374151; }
+h4 { color: #4b5563; }
+code { background: #e5e7eb; padding: 0.15rem 0.4rem; border-radius: 3px; font-size: 0.9em; }
+pre { background: #1e293b; color: #e2e8f0; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; }
+pre code { background: none; padding: 0; color: inherit; }
+table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+th, td { border: 1px solid #d1d5db; padding: 0.5rem 0.75rem; text-align: left; }
+th { background: #2563eb; color: white; }
+tr:nth-child(even) { background: #f3f4f6; }
+.syntax { background: #fffbeb; border-left: 4px solid #f59e0b; padding: 1rem; margin: 1rem 0; font-family: monospace; white-space: pre-wrap; color: #1a1a1a; }
+.note { background: #eff6ff; border-left: 4px solid #2563eb; padding: 0.75rem 1rem; margin: 1rem 0; }
+nav { background: #1e293b; padding: 1rem; border-radius: 6px; margin-bottom: 2rem; }
+nav a { color: #93c5fd; text-decoration: none; margin-right: 1rem; }
+nav a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+
+<nav>
+<a href="index.html">Index</a>
+<a href="ch2-lexical.html">Ch2 Lexical</a>
+<a href="ch3-datatypes.html">Ch3 Data Types</a>
+<a href="ch4-expressions.html">Ch4 Expressions</a>
+<a href="ch5-analog.html">Ch5 Analog</a>
+<a href="ch6-hierarchy.html">Ch6 Hierarchy</a>
+<a href="ch7-mixed-signal.html">Ch7 Mixed-Signal</a>
+<a href="ch8-scheduling.html">Ch8 Scheduling</a>
+<a href="ch9-system.html">Ch9 System</a>
+<a href="ch10-connectmodules.html">Ch10 Directives</a>
+<a href="ch11-directives.html">Ch11 Directives Ext</a>
+</nav>
+
+<h1>Chapter 8 &mdash; Scheduling Semantics</h1>
+
+<p>This chapter describes how the simulation kernel manages time advancement, convergence, and the interaction between analog and digital solvers. Understanding the scheduling semantics is essential for writing models that converge reliably and simulate efficiently.</p>
+
+<!-- ====================================================================== -->
+<h2 id="s8.1">8.1 Overview</h2>
+
+<p>A Verilog-AMS simulator contains two cooperating engines: the <strong>analog solver</strong>, which handles continuous-time behavior, and the <strong>digital event scheduler</strong>, which handles discrete-event behavior. In a pure Verilog-A context only the analog solver is active.</p>
+
+<p>The analog solver is responsible for:</p>
+<ul>
+<li>Selecting timepoints at which the circuit is evaluated</li>
+<li>Formulating and solving the system of nonlinear equations at each timepoint</li>
+<li>Iterating until convergence criteria are satisfied</li>
+<li>Advancing simulation time after a converged solution is accepted</li>
+<li>Scheduling breakpoints requested by analog event functions</li>
+</ul>
+
+<p>The simulation flow at each timepoint follows a evaluate-check-accept cycle:</p>
+
+<pre class="syntax">for each timepoint:
+    repeat
+        evaluate all analog blocks          // builds the equation system
+        solve the linearized system         // Newton-Raphson update
+        check convergence                   // compare against tolerances
+    until converged or iteration limit exceeded
+    if converged:
+        accept the solution
+        advance time (select next timepoint)
+    else:
+        reject the timepoint
+        reduce timestep and retry</pre>
+
+<!-- ====================================================================== -->
+<h2 id="s8.2">8.2 Analog Simulation Kernel</h2>
+
+<p>The analog kernel uses <strong>Newton-Raphson iteration</strong> to solve the system of nonlinear algebraic-differential equations generated from the circuit topology and the behavioral descriptions in all <code>analog</code> blocks.</p>
+
+<h3 id="s8.2.1">8.2.1 Newton-Raphson Iteration</h3>
+
+<p>At each timepoint the simulator constructs a system of equations of the form <em>F(x) = 0</em>, where <em>x</em> is the vector of unknown node voltages and branch currents. The Newton-Raphson method linearizes this system around the current estimate <em>x<sub>k</sub></em>:</p>
+
+<pre class="syntax">J(x_k) * delta_x = -F(x_k)
+x_{k+1} = x_k + delta_x</pre>
+
+<p>where <em>J</em> is the Jacobian matrix of partial derivatives. The simulator evaluates all <code>analog</code> blocks to compute <em>F(x<sub>k</sub>)</em> and the entries of <em>J</em>. This process repeats until convergence or until the iteration limit is reached.</p>
+
+<h3 id="s8.2.2">8.2.2 Iteration Loop</h3>
+
+<p>Each Newton-Raphson iteration proceeds as follows:</p>
+
+<ol>
+<li><strong>Evaluate:</strong> All <code>analog</code> blocks are executed with current node voltage and branch current estimates. Contribution statements populate the right-hand side vector and Jacobian matrix entries.</li>
+<li><strong>Solve:</strong> The linearized matrix equation is solved to produce a correction vector <em>delta_x</em>.</li>
+<li><strong>Update:</strong> The solution vector is updated: <em>x<sub>k+1</sub> = x<sub>k</sub> + delta_x</em>.</li>
+<li><strong>Check:</strong> Convergence tests are applied (see <a href="#s8.3">8.3</a>). If all tests pass, the solution is accepted. Otherwise, iteration continues from step 1.</li>
+</ol>
+
+<div class="note">
+<strong>Note:</strong> Because all analog blocks are re-evaluated at every iteration, expressions must not have side effects that accumulate across iterations. Contribution statements use the <code>&lt;+</code> operator which resets the accumulated value at the start of each iteration.
+</div>
+
+<h3 id="s8.2.3">8.2.3 Iteration Limit</h3>
+
+<p>Simulators impose a maximum iteration count (typically 25-150 iterations). If convergence is not achieved within this limit, the simulator may:</p>
+<ul>
+<li>Reduce the timestep and retry (in transient analysis)</li>
+<li>Report a non-convergence error (in DC analysis)</li>
+<li>Apply source stepping or Gmin stepping to aid convergence</li>
+</ul>
+
+<!-- ====================================================================== -->
+<h2 id="s8.3">8.3 Convergence</h2>
+
+<p>The simulator determines that a solution has converged when the correction at every node and branch is negligibly small relative to the solution values and the applicable tolerances.</p>
+
+<h3 id="s8.3.1">8.3.1 Convergence Criteria</h3>
+
+<p>Two tests are applied at each node voltage <em>v</em> and branch current <em>i</em>:</p>
+
+<table>
+<tr><th>Test</th><th>Criterion</th><th>Description</th></tr>
+<tr><td>Node voltage</td><td><code>|delta_v| &lt; reltol * |v| + vntol</code></td><td>Change in node voltage is small</td></tr>
+<tr><td>Branch current</td><td><code>|delta_i| &lt; reltol * |i| + abstol</code></td><td>Change in branch current is small</td></tr>
+<tr><td>KCL residual</td><td><code>|F_node| &lt; reltol * max_current + abstol</code></td><td>KCL error at each node is small</td></tr>
+</table>
+
+<p>Here <code>reltol</code> is the relative tolerance (typically 1e-3), <code>vntol</code> is the absolute voltage tolerance, and <code>abstol</code> is the absolute current tolerance derived from the nature definition.</p>
+
+<h3 id="s8.3.2">8.3.2 Tolerances from Nature Definitions</h3>
+
+<p>The <code>abstol</code> attribute in a nature definition provides the absolute tolerance for convergence testing. For the standard electrical discipline:</p>
+
+<pre><code>nature Current;
+    units      = "A";
+    access     = I;
+    abstol     = 1e-12;   // 1 pA
+endnature
+
+nature Voltage;
+    units      = "V";
+    access     = V;
+    abstol     = 1e-6;    // 1 uV
+endnature</code></pre>
+
+<p>The tolerance for a branch is derived from the nature of the flow through that branch. For the <code>ddt()</code> and <code>idt()</code> operators, an explicit tolerance argument can override the nature-derived value.</p>
+
+<h3 id="s8.3.3">8.3.3 Convergence Aids</h3>
+
+<p>Verilog-A provides several constructs to help the simulator converge on difficult circuits.</p>
+
+<h4 id="s8.3.3.1">8.3.3.1 The $limit Function</h4>
+
+<p>The <code>$limit()</code> function restricts how much a signal can change between Newton-Raphson iterations, preventing the solver from overshooting into non-physical regions.</p>
+
+<pre class="syntax">$limit ( access_function_reference , limiter_function
+    [ , arg_list ] )</pre>
+
+<p>The most common usage is with the built-in <code>"pnjlim"</code> limiter for PN junction voltages:</p>
+
+<pre><code>module diode(a, c);
+    inout a, c;
+    electrical a, c;
+    parameter real is = 1e-14;
+    real vd_lim;
+    analog begin
+        // Limit the junction voltage to prevent Newton overshoot
+        vd_lim = $limit(V(a,c), "pnjlim", $vt, is*V(a,c));
+        I(a,c) &lt;+ is * (limexp(vd_lim / $vt) - 1);
+    end
+endmodule</code></pre>
+
+<div class="note">
+<strong>Note:</strong> Without <code>$limit()</code>, the exponential I-V characteristic of a diode can cause Newton-Raphson to oscillate or diverge. The limiter restricts the voltage step to a safe range each iteration while still converging to the true solution.
+</div>
+
+<h4 id="s8.3.3.2">8.3.3.2 The limexp Function</h4>
+
+<p>The <code>limexp()</code> function is a convergence-friendly replacement for <code>exp()</code>. It behaves identically to <code>exp()</code> at the converged solution but internally limits the argument change between iterations.</p>
+
+<pre><code>// Without limexp -- may fail to converge
+I(a,c) &lt;+ is * (exp(V(a,c) / $vt) - 1);
+
+// With limexp -- much better convergence
+I(a,c) &lt;+ is * (limexp(V(a,c) / $vt) - 1);</code></pre>
+
+<p><code>limexp()</code> is an analog operator; it maintains internal state across iterations. It shall not be used inside conditional statements unless the condition is a constant expression.</p>
+
+<h4 id="s8.3.3.3">8.3.3.3 The $bound_step Function</h4>
+
+<p>The <code>$bound_step()</code> function limits the size of the next timestep. It does not force a specific timestep but provides an upper bound.</p>
+
+<pre class="syntax">$bound_step ( max_step )</pre>
+
+<p>The <code>max_step</code> argument shall be a positive-valued expression. The simulator shall ensure the next timestep does not exceed <code>max_step</code>. Multiple calls to <code>$bound_step()</code> within a single evaluation cycle are cumulative -- the smallest bound wins.</p>
+
+<pre><code>// Ensure at least 100 points per cycle of a VCO
+module vco(out, in);
+    inout out, in;
+    electrical out, in;
+    parameter real fc = 1e6, kv = 1e6;
+    real freq, phase;
+    analog begin
+        freq = fc + kv * V(in);
+        $bound_step(1.0 / (100.0 * freq));
+        phase = idt(2.0 * `M_PI * freq);
+        V(out) &lt;+ sin(phase);
+    end
+endmodule</code></pre>
+
+<div class="note">
+<strong>Note:</strong> <code>$bound_step()</code> is critical for models that generate signals whose frequency is not visible to the simulator's automatic timestep control. Without it, the solver may take steps that are too large and miss oscillation cycles entirely.
+</div>
+
+<!-- ====================================================================== -->
+<h2 id="s8.4">8.4 Timestep Control</h2>
+
+<p>The analog solver selects timesteps to balance accuracy against simulation speed. The timestep selection algorithm considers multiple constraints simultaneously.</p>
+
+<h3 id="s8.4.1">8.4.1 Local Truncation Error</h3>
+
+<p>The primary mechanism for timestep control is <strong>local truncation error (LTE)</strong> estimation. The simulator estimates the error introduced by the numerical integration method (<code>ddt()</code>, <code>idt()</code>) and adjusts the timestep to keep this error within tolerance.</p>
+
+<p>The LTE depends on the integration order and the higher-order derivatives of the solution. For a method of order <em>p</em>, the LTE is proportional to <em>h<sup>p+1</sup></em>, where <em>h</em> is the timestep. The simulator estimates LTE and selects <em>h</em> such that:</p>
+
+<pre class="syntax">LTE &lt; reltol * |solution| + abstol</pre>
+
+<h3 id="s8.4.2">8.4.2 Breakpoints</h3>
+
+<p>Breakpoints are specific times at which the simulator must place a timepoint. They are generated by:</p>
+
+<table>
+<tr><th>Source</th><th>Description</th></tr>
+<tr><td><code>cross()</code></td><td>Schedules a breakpoint near a detected threshold crossing</td></tr>
+<tr><td><code>above()</code></td><td>Schedules a breakpoint near a detected threshold crossing from below</td></tr>
+<tr><td><code>timer()</code></td><td>Schedules breakpoints at specified absolute times</td></tr>
+<tr><td><code>$bound_step()</code></td><td>Constrains maximum step size (not a breakpoint per se, but limits advancement)</td></tr>
+<tr><td><code>$discontinuity()</code></td><td>Informs the simulator of a known discontinuity, triggering a breakpoint</td></tr>
+<tr><td>Simulator</td><td>Start time, stop time, print intervals, and output times</td></tr>
+</table>
+
+<p>At a breakpoint, the simulator places a timepoint at or very near the requested time. The integration order may be reduced at breakpoints to maintain accuracy across potential discontinuities.</p>
+
+<h3 id="s8.4.3">8.4.3 Timestep Bounds</h3>
+
+<p>The effective timestep is bounded by:</p>
+
+<pre class="syntax">h_min &lt;= h &lt;= min(h_lte, h_bound_step, h_breakpoint, h_max)
+
+where:
+    h_min          = simulator minimum timestep
+    h_lte          = timestep from LTE control
+    h_bound_step   = smallest $bound_step() value from current evaluation
+    h_breakpoint   = distance to the next scheduled breakpoint
+    h_max          = simulator maximum timestep (user-configurable)</pre>
+
+<h3 id="s8.4.4">8.4.4 Timestep Rejection</h3>
+
+<p>If Newton-Raphson fails to converge at a timepoint, the simulator rejects the timepoint, reduces the timestep, and retries. Repeated rejections with progressively smaller timesteps indicate a modeling problem (infinite slope, missing <code>$discontinuity()</code> call, or incorrect limiting).</p>
+
+<!-- ====================================================================== -->
+<h2 id="s8.5">8.5 DC Analysis</h2>
+
+<p>DC analysis computes the operating point of the circuit -- the steady-state solution with all time derivatives set to zero. This is the starting point for transient, AC, and noise analyses.</p>
+
+<h3 id="s8.5.1">8.5.1 Operating Point Computation</h3>
+
+<p>During DC analysis, the simulator solves <em>F(x) = 0</em> with all <code>ddt()</code> operators returning zero and all <code>idt()</code> operators returning their initial condition (or zero if none is specified). The <code>analysis()</code> function can be used to detect DC context:</p>
+
+<pre><code>analog begin
+    if (analysis("dc"))
+        $strobe("DC operating point: V(b,e) = %g", V(b,e));
+end</code></pre>
+
+<h3 id="s8.5.2">8.5.2 Analysis Identifiers for DC</h3>
+
+<p>Several <code>analysis()</code> identifiers relate to the DC operating point:</p>
+
+<table>
+<tr><th>Identifier</th><th>Returns 1 when</th></tr>
+<tr><td><code>"dc"</code></td><td>A standalone DC analysis or a DC sweep is active</td></tr>
+<tr><td><code>"static"</code></td><td>Any DC solution is being computed, including the initial operating point before transient or AC</td></tr>
+<tr><td><code>"ic"</code></td><td>The simulator is applying initial conditions (the <code>.ic</code> phase of the DC solve)</td></tr>
+<tr><td><code>"nodeset"</code></td><td>The simulator is applying nodeset values as initial guesses</td></tr>
+</table>
+
+<div class="note">
+<strong>Note:</strong> <code>analysis("static")</code> is true during all DC solves, including the operating point that precedes a transient or AC analysis. <code>analysis("dc")</code> is true only during a standalone DC or DC sweep analysis. This distinction matters for models that need different behavior during transient initialization versus a true DC sweep.
+</div>
+
+<h3 id="s8.5.3">8.5.3 Nodeset and Initial Conditions</h3>
+
+<p>The simulator supports two mechanisms to aid DC convergence:</p>
+<ul>
+<li><strong>Nodeset values</strong> provide initial guesses for node voltages. They are applied during the first iteration(s) and then released, allowing the solver to find the true solution. Detected via <code>analysis("nodeset")</code>.</li>
+<li><strong>Initial conditions</strong> force node voltages to specified values during the DC solve. They override the solver for those nodes. Detected via <code>analysis("ic")</code>.</li>
+</ul>
+
+<pre><code>// Apply different behavior during nodeset phase
+analog begin
+    if (analysis("nodeset"))
+        V(internal) &lt;+ 0.7;  // guide solver toward forward-bias
+    else
+        I(a,c) &lt;+ is * (limexp(V(a,c)/$vt) - 1);
+end</code></pre>
+
+<h3 id="s8.5.4">8.5.4 DC Sweep</h3>
+
+<p>In a DC sweep, the simulator performs a sequence of operating point analyses while varying one or more parameters or source values. At each sweep point:</p>
+<ol>
+<li>The swept parameter is updated</li>
+<li>The previous solution is used as the initial guess</li>
+<li>Newton-Raphson iteration is performed until convergence</li>
+<li>The converged solution is recorded</li>
+</ol>
+
+<p>The <code>initial_step("dc")</code> event fires at the first sweep point. The <code>final_step("dc")</code> event fires at the last sweep point.</p>
+
+<!-- ====================================================================== -->
+<h2 id="s8.6">8.6 Transient Analysis</h2>
+
+<p>Transient analysis computes the time-domain response of the circuit. The simulator advances through time, solving the full nonlinear algebraic-differential system at each timepoint.</p>
+
+<h3 id="s8.6.1">8.6.1 Integration Methods</h3>
+
+<p>The simulator discretizes continuous-time derivatives and integrals using numerical integration methods. The two most common methods are:</p>
+
+<table>
+<tr><th>Method</th><th>Order</th><th>Formula</th><th>Properties</th></tr>
+<tr><td>Backward Euler (BE)</td><td>1</td><td><code>ddt(x) ~ (x_n - x_{n-1}) / h</code></td><td>Unconditionally stable, first-order accurate, high numerical damping</td></tr>
+<tr><td>Trapezoidal (TRAP)</td><td>2</td><td><code>ddt(x) ~ 2*(x_n - x_{n-1})/h - ddt_prev</code></td><td>Second-order accurate, no numerical damping, may produce ringing</td></tr>
+</table>
+
+<p>Most simulators use trapezoidal integration by default and fall back to backward Euler at breakpoints or when ringing is detected. Higher-order methods (Gear's BDF methods) are also available in some simulators for stiff systems.</p>
+
+<h3 id="s8.6.2">8.6.2 The ddt() Operator in Transient</h3>
+
+<p>The <code>ddt()</code> operator computes the time derivative of its argument using the current integration method. In transient analysis it produces a non-zero result; in DC analysis it returns zero.</p>
+
+<pre><code>// Capacitor: I = C * dV/dt
+I(p,n) &lt;+ c * ddt(V(p,n));</code></pre>
+
+<h3 id="s8.6.3">8.6.3 The idt() Operator in Transient</h3>
+
+<p>The <code>idt()</code> operator computes the time integral of its argument. The optional second argument provides the initial condition for DC analysis.</p>
+
+<pre><code>// Inductor: V = L * dI/dt  (equivalent: I = (1/L) * integral(V))
+I(p,n) &lt;+ idt(V(p,n), 0) / L;</code></pre>
+
+<h3 id="s8.6.4">8.6.4 Charge-Based Formulation</h3>
+
+<p>For better numerical accuracy, capacitances should be formulated in terms of charge rather than capacitance times <code>ddt()</code> of voltage. The charge-based formulation avoids errors when capacitance is voltage-dependent:</p>
+
+<pre><code>// Voltage-dependent capacitor -- CORRECT charge-based formulation
+real q_junc;
+analog begin
+    q_junc = -2 * cjo * sqrt(phi * (phi - V(a,c)));
+    I(a,c) &lt;+ ddt(q_junc);
+end
+
+// INCORRECT: loses dC/dV term when C depends on voltage
+// I(a,c) &lt;+ C(V(a,c)) * ddt(V(a,c));  // WRONG</code></pre>
+
+<div class="note">
+<strong>Note:</strong> The charge-based formulation <code>I &lt;+ ddt(Q(V))</code> automatically produces the correct <code>dQ/dV * dV/dt</code> via the chain rule when the simulator differentiates. The direct <code>C*ddt(V)</code> formulation misses the <code>dC/dV * dV/dt</code> term, which can cause charge non-conservation and inaccurate results in circuits with nonlinear capacitances.
+</div>
+
+<h3 id="s8.6.5">8.6.5 Initial Conditions from DC</h3>
+
+<p>Transient analysis begins from the operating point computed by DC analysis. All node voltages, branch currents, and internal states of analog operators (<code>idt()</code>, <code>transition()</code>, <code>laplace_*</code>, etc.) are initialized from the DC solution. The <code>initial_step("tran")</code> event fires at the first transient timepoint after DC initialization.</p>
+
+<!-- ====================================================================== -->
+<h2 id="s8.7">8.7 AC and Small-Signal Analysis</h2>
+
+<p>AC analysis linearizes the circuit around the DC operating point and computes the small-signal frequency response. The analog block is not re-evaluated during AC analysis; instead, the Jacobian from the operating point is used.</p>
+
+<h3 id="s8.7.1">8.7.1 Linearization</h3>
+
+<p>During AC analysis, each nonlinear element is replaced by its small-signal equivalent. Contribution statements of the form:</p>
+
+<pre><code>I(a,c) &lt;+ f(V(a,c));</code></pre>
+
+<p>are linearized to produce a small-signal conductance <em>g = df/dV</em> evaluated at the operating point.</p>
+
+<h3 id="s8.7.2">8.7.2 Frequency-Domain Interpretation of Operators</h3>
+
+<p>In AC analysis, time-domain operators acquire frequency-domain meaning:</p>
+
+<table>
+<tr><th>Operator</th><th>Transient</th><th>AC (small-signal)</th></tr>
+<tr><td><code>ddt(x)</code></td><td>Time derivative dx/dt</td><td>Multiplied by <em>j&omega;</em></td></tr>
+<tr><td><code>idt(x)</code></td><td>Time integral</td><td>Divided by <em>j&omega;</em></td></tr>
+<tr><td><code>laplace_zp()</code></td><td>Laplace-domain filter (time convolution)</td><td>Transfer function H(j&omega;) evaluated directly</td></tr>
+<tr><td><code>laplace_nd()</code></td><td>Laplace-domain filter</td><td>N(j&omega;)/D(j&omega;)</td></tr>
+<tr><td><code>zi_zp()</code>, <code>zi_nd()</code></td><td>Z-domain filter</td><td>H(e<sup>j&omega;T</sup>)</td></tr>
+</table>
+
+<h3 id="s8.7.3">8.7.3 AC Stimulus</h3>
+
+<p>The <code>ac_stim()</code> function provides the small-signal excitation source for AC analysis. It returns zero in all other analyses.</p>
+
+<pre class="syntax">ac_stim ( [ analysis_name [ , mag [ , phase ] ] ] )</pre>
+
+<pre><code>// AC voltage source with 1V magnitude, 0 phase
+module ac_source(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real dc_val = 0;
+    analog begin
+        V(p,n) &lt;+ dc_val + ac_stim("ac", 1.0, 0);
+    end
+endmodule</code></pre>
+
+<p>In DC analysis, <code>ac_stim()</code> returns zero, so the source contributes only <code>dc_val</code>. In AC analysis, it provides the stimulus at the specified magnitude and phase.</p>
+
+<!-- ====================================================================== -->
+<h2 id="s8.8">8.8 Noise Analysis</h2>
+
+<p>Noise analysis is a small-signal analysis that computes the spectral density of noise at specified output nodes. Like AC analysis, it operates on the linearized circuit at the DC operating point.</p>
+
+<h3 id="s8.8.1">8.8.1 Noise Source Functions</h3>
+
+<p>Noise contributions are specified using dedicated noise functions within contribution statements:</p>
+
+<table>
+<tr><th>Function</th><th>Spectral Density</th><th>Typical Use</th></tr>
+<tr><td><code>white_noise(pwr)</code></td><td>Constant: <em>S(f) = pwr</em></td><td>Thermal noise, shot noise</td></tr>
+<tr><td><code>white_noise(pwr, name)</code></td><td>Constant, named for reporting</td><td>Named noise contributors</td></tr>
+<tr><td><code>flicker_noise(pwr, exp)</code></td><td><em>S(f) = pwr / f<sup>exp</sup></em></td><td>1/f noise (typically exp=1)</td></tr>
+<tr><td><code>flicker_noise(pwr, exp, name)</code></td><td>Named flicker noise</td><td>Named 1/f contributors</td></tr>
+<tr><td><code>noise_table(vector)</code></td><td>Piecewise-linear from table</td><td>Measured or tabulated noise data</td></tr>
+<tr><td><code>noise_table(vector, name)</code></td><td>Named table noise</td><td>Named tabulated contributors</td></tr>
+</table>
+
+<pre><code>// Resistor with thermal noise
+module resistor(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real r = 1k from (0:inf);
+    analog begin
+        V(p,n) &lt;+ r * I(p,n);
+        I(p,n) &lt;+ white_noise(4 * `P_K * $temperature / r, "thermal");
+    end
+endmodule
+
+// MOSFET with channel noise and 1/f noise
+I(d,s) &lt;+ white_noise(4 * `P_K * $temperature * gm * 2/3, "channel");
+I(d,s) &lt;+ flicker_noise(kf * ids / (cox * leff * leff), af, "flicker");</code></pre>
+
+<h3 id="s8.8.2">8.8.2 Noise Computation</h3>
+
+<p>During noise analysis, the simulator:</p>
+<ol>
+<li>Computes the DC operating point</li>
+<li>Linearizes the circuit (same as AC)</li>
+<li>At each frequency point, evaluates the noise spectral density of each noise source</li>
+<li>Propagates each noise contribution through the linearized network to the output</li>
+<li>Sums all contributions (noise powers add, not amplitudes) to produce the total output noise spectral density</li>
+</ol>
+
+<h3 id="s8.8.3">8.8.3 Input-Referred Noise and Noise Figure</h3>
+
+<p>The simulator can report noise referred to the input by dividing the output noise spectral density by the squared magnitude of the transfer function from input to output. Noise figure is computed as:</p>
+
+<pre class="syntax">NF = 10 * log10(total_input_noise / source_noise)</pre>
+
+<p>The optional <code>name</code> argument in noise functions allows the simulator to report the contribution of individual noise sources to the total, enabling noise budgeting and optimization.</p>
+
+<!-- ====================================================================== -->
+<h2 id="s8.9">8.9 Mixed-Signal Scheduling</h2>
+
+<p>In a Verilog-AMS environment, the analog solver and the digital event scheduler must be synchronized. The analog solver runs in continuous time while the digital scheduler runs in discrete event time.</p>
+
+<h3 id="s8.9.1">8.9.1 Synchronization Points</h3>
+
+<p>The two solvers synchronize at specific points:</p>
+<ul>
+<li><strong>Analog-to-digital events:</strong> When an analog event function (<code>cross()</code>, <code>above()</code>, <code>timer()</code>) generates an event that triggers digital behavior</li>
+<li><strong>Digital-to-analog updates:</strong> When a digital signal change affects an analog expression (e.g., via <code>transition()</code> or <code>slew()</code> filters)</li>
+<li><strong>Connect module evaluations:</strong> When connect modules convert between analog and digital domains</li>
+</ul>
+
+<h3 id="s8.9.2">8.9.2 Analog Event Detection Resolution</h3>
+
+<p>Analog events detected by <code>cross()</code> and <code>above()</code> are resolved to within the specified time and expression tolerances. The simulator iterates on the timestep to place a timepoint near the crossing. The event is then injected into the digital event queue at the resolved time.</p>
+
+<pre><code>// Clock recovery: analog cross triggers digital sampling
+module clk_recovery(data_in, clk_out);
+    input data_in;
+    output clk_out;
+    electrical data_in;
+    reg clk_out;
+    parameter real threshold = 0.0;
+
+    analog begin
+        @(cross(V(data_in) - threshold, +1, 1e-12, 1e-6))
+            ;  // timestep control only
+    end
+
+    always @(above(V(data_in) - threshold))
+        clk_out = ~clk_out;
+endmodule</code></pre>
+
+<h3 id="s8.9.3">8.9.3 Causal vs. Non-Causal Interaction</h3>
+
+<p>Analog-to-digital and digital-to-analog interactions must be causal: the effect cannot precede the cause. The <code>transition()</code> and <code>slew()</code> filters introduce a delay to ensure causality when a digital signal drives an analog expression. Similarly, analog event functions detect crossings and schedule digital events at or after the crossing time.</p>
+
+<div class="note">
+<strong>Verilog-AMS note:</strong> Pure Verilog-A modules do not use mixed-signal scheduling. The content of this section applies only when analog and digital domains coexist in a Verilog-AMS simulation.
+</div>
+
+<!-- ====================================================================== -->
+<h2 id="s8.10">8.10 Tolerances and Accuracy</h2>
+
+<p>Tolerances appear in multiple contexts throughout the simulation. This section summarizes their relationships.</p>
+
+<h3 id="s8.10.1">8.10.1 Summary of Tolerance Sources</h3>
+
+<table>
+<tr><th>Tolerance</th><th>Source</th><th>Typical Value</th><th>Affects</th></tr>
+<tr><td><code>reltol</code></td><td>Simulator option</td><td>1e-3</td><td>Convergence, LTE, all relative tests</td></tr>
+<tr><td><code>abstol</code> (current)</td><td>Nature definition</td><td>1e-12 A</td><td>KCL convergence, branch current convergence</td></tr>
+<tr><td><code>abstol</code> (voltage)</td><td>Nature definition</td><td>1e-6 V</td><td>Node voltage convergence</td></tr>
+<tr><td><code>abstol</code> (charge)</td><td>Nature definition or operator arg</td><td>1e-14 C</td><td><code>ddt()</code> of charge, <code>idt()</code> of current</td></tr>
+<tr><td><code>time_tol</code></td><td><code>cross()</code>, <code>timer()</code>, <code>above()</code></td><td>Simulator-dependent</td><td>Timing accuracy of analog events</td></tr>
+<tr><td><code>expr_tol</code></td><td><code>cross()</code>, <code>above()</code></td><td>Simulator-dependent</td><td>Expression accuracy at crossings</td></tr>
+</table>
+
+<h3 id="s8.10.2">8.10.2 Explicit Tolerance in Operators</h3>
+
+<p>The <code>ddt()</code> and <code>idt()</code> operators accept an optional tolerance argument that overrides the nature-derived tolerance. This is important when the operator acts on a quantity whose natural tolerance differs from the branch tolerance:</p>
+
+<pre><code>// Explicit tolerance on ddt -- use the abstol of the charge nature
+I(a,c) &lt;+ ddt(q_junc, abstol_charge);
+
+// Using nature attribute reference for tolerance
+I(a,c) &lt;+ ddt(q_junc, a.potential.abstol);</code></pre>
+
+<h3 id="s8.10.3">8.10.3 Relationship Between Tolerances</h3>
+
+<p>The convergence criterion at each node combines relative and absolute tolerances:</p>
+
+<pre class="syntax">converged if: |delta| &lt; reltol * |value| + abstol</pre>
+
+<p>The relative tolerance <code>reltol</code> dominates when signal magnitudes are large. The absolute tolerance <code>abstol</code> dominates when signal magnitudes are near zero, preventing the simulator from iterating to achieve meaningless precision on negligible signals.</p>
+
+<p>Choosing tolerances involves tradeoffs:</p>
+<ul>
+<li><strong>Too tight:</strong> Excessive iterations, slow simulation, possible non-convergence</li>
+<li><strong>Too loose:</strong> Inaccurate results, charge non-conservation, missed events</li>
+<li><strong>Mismatched:</strong> A current <code>abstol</code> inconsistent with the voltage <code>abstol</code> and typical impedance levels can cause the solver to over-refine one domain while under-refining another</li>
+</ul>
+
+<div class="note">
+<strong>Practical guideline:</strong> For most circuits, the default tolerances from the standard discipline definitions work well. Override only when modeling circuits with unusual signal ranges (e.g., sensor interfaces with picoamp currents may need a tighter current <code>abstol</code>).
+</div>
+
+</body>
+</html>

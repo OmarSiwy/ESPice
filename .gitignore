@@ -1,5 +1,35 @@
-.zig-cache/
-zig-out/
-.claude/
-*.log
+# Zig
+**/.zig-cache/
+**/zig-out/
+
+# Build artifacts
 obj_dir/
+*.o
+*.a
+*.so
+*.dylib
+
+# CUDA
+*.ptx
+*.cubin
+*.fatbin
+
+# Logs / dumps
+*.log
+core
+*.dump
+
+# Claude Code
+.claude/
+
+# Editor / OS
+*.swp
+*.swo
+*~
+.DS_Store
+.vscode/
+.idea/
+
+# Nix
+result
+result-*

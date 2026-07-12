@@ -1,9 +1,11 @@
-//! Operating point: plain Newton, then gmin stepping. One Workspace for the
-//! whole continuation — the pattern is frozen, so ordering/symbolic work
-//! happens exactly once.
+//! Operating point: 4-rung Newton ladder (plain → gmin → source → JFNK).
+//! One Workspace for the whole continuation — the pattern is frozen, so
+//! ordering/symbolic work happens exactly once.
 const std = @import("std");
 const root = @import("../root.zig");
-const converger = @import("../helper/converger.zig");
+const converger = @import("solvers").converger;
+
+const W = std.simd.suggestVectorLength(f64) orelse 8;
 
 pub const Method = enum { plain, gmin, source, jfnk };
 
@@ -19,10 +21,20 @@ pub const SolveResult = struct {
     method_used: Method,
 };
 
+// -- SIMD helpers (no @memset/@memcpy) ----------------------------------------
+
+/// SIMD copy: dst[0..n] = src[0..n].
+inline fn copySimd(dst: []f64, src: []const f64) void {
+    const n = @min(dst.len, src.len);
+    var i: usize = 0;
+    while (i + W <= n) : (i += W) dst[i..][0..W].* = src[i..][0..W].*;
+    while (i < n) : (i += 1) dst[i] = src[i];
+}
+
 /// Cold-start: zero x, then apply SPICE MODEINITJCT junction seeds so
 /// iteration 1 linearizes at vcrit/vto instead of 0.
 pub fn coldStart(ckt: *root.Circuit, x: []f64) void {
-    @memset(x, 0);
+    root.zeroSimd(x);
     ckt.seedJunctions(x);
 }
 
@@ -45,16 +57,16 @@ pub fn solve(
     return r;
 }
 
-/// The three-strategy continuation ladder: plain Newton → gmin stepping →
-/// source stepping. Takes a caller-owned Workspace so dc.run can reuse its
-/// sweep workspace for fallback solves.
+/// The four-strategy continuation ladder: plain Newton → dynamic gmin
+/// stepping → source stepping → JFNK guarantee rung. Takes a caller-owned
+/// Workspace so dc.run can reuse its sweep workspace for fallback solves.
 pub fn solveLadder(
     ckt: *root.Circuit,
     ws: *converger.Workspace,
     x: []f64,
     options: Options,
 ) !SolveResult {
-    // Strategy 1: plain Newton
+    // Rung 1: plain Newton
     const plain = newtonRun(ckt, ws, x, options.tol, options.tol.gmin) catch |e| switch (e) {
         error.SingularMatrix => null,
         else => return e,
@@ -72,11 +84,10 @@ pub fn solveLadder(
     defer gpa.free(x_good);
     var total_iter: u16 = 0;
 
-    // Strategy 2: dynamic gmin stepping (ngspice op.c dynamic_gmin).
+    // Rung 2: dynamic gmin stepping (ngspice cktop.c dynamic_gmin).
     // Descend gmin by `factor`; on a failed rung back gmin up toward the
     // last good value with a gentler factor (4th root) and retry from the
-    // last converged x; give up when factor ≈ 1. A failed rung is a plain
-    // failure, not an abort — SingularMatrix (NaN stamps) included.
+    // last converged x; give up when factor ~ 1.
     {
         coldStart(ckt, x);
         const gtarget = options.tol.gmin;
@@ -96,13 +107,12 @@ pub fn solveLadder(
             if (r.converged) {
                 if (gmin_val <= gtarget)
                     return .{ .converged = true, .iterations = total_iter, .max_dx = r.max_dx, .method_used = .gmin };
-                @memcpy(x_good, x);
+                copySimd(x_good, x);
                 have_good = true;
                 good_gmin = gmin_val;
-                // Easy rung → accelerate the descent (capped at the start
-                // factor); hard rung (> 3/4 of the budget) → slow down BEFORE
-                // failing so folds are approached with shrinking steps
-                // (ngspice dynamic_gmin does both).
+                // Easy rung -> accelerate (cap at start factor);
+                // hard rung (> 3/4 budget) -> slow down BEFORE failing so
+                // folds are approached with shrinking steps.
                 if (r.iterations <= options.tol.itl1 / 4) {
                     factor = @min(factor * @sqrt(factor), 10.0);
                 } else if (r.iterations > 3 * (options.tol.itl1 / 4)) {
@@ -113,14 +123,14 @@ pub fn solveLadder(
                 if (factor < 1.00005) break; // wedged against the last good rung
                 factor = @sqrt(@sqrt(factor));
                 gmin_val = good_gmin / factor;
-                if (have_good) @memcpy(x, x_good) else coldStart(ckt, x);
+                if (have_good) copySimd(x, x_good) else coldStart(ckt, x);
             }
         }
     }
 
-    // Strategy 3: source stepping via device attempt(lambda), adaptive
-    // delta: grow 1.5× on success, halve on failure and retry from the
-    // last good lambda/x (ngspice src stepping flavor).
+    // Rung 3: source stepping via device attempt(lambda), adaptive delta:
+    // grow 1.5x on success, halve on failure and retry from the last good
+    // lambda/x (ngspice src stepping flavor).
     coldStart(ckt, x);
     total_iter = 0;
     {
@@ -147,14 +157,14 @@ pub fn solveLadder(
             if (sr.converged) {
                 if (lambda >= 1.0) break; // full sources reached
                 lambda_good = lambda;
-                @memcpy(x_good, x);
+                copySimd(x_good, x);
                 delta *= 1.5;
                 lambda = @min(lambda + delta, 1.0);
             } else {
                 delta *= 0.5;
                 if (delta < 1e-4) break;
                 if (lambda_good >= 0.0) {
-                    @memcpy(x, x_good);
+                    copySimd(x, x_good);
                     lambda = @min(lambda_good + delta, 1.0);
                 } else {
                     coldStart(ckt, x);
@@ -167,7 +177,7 @@ pub fn solveLadder(
     ckt.has_baseline = false;
     try ckt.computeBaseline();
 
-    // Final solve at true parameters
+    // Final solve at true parameters after source stepping
     const final = newtonRun(ckt, ws, x, options.tol, options.tol.gmin) catch |e| switch (e) {
         error.SingularMatrix => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 },
         else => return e,
@@ -181,7 +191,7 @@ pub fn solveLadder(
             .method_used = .source,
         };
 
-    // Strategy 4: JFNK guarantee rung — the same algorithm the GPU kernel
+    // Rung 4: JFNK guarantee rung — the same algorithm the GPU kernel
     // runs, so CPU convergence is a superset of GPU convergence by
     // construction. Damping + residual backtracking globalize differently
     // than direct Newton and catch circuits where the factored step wedges.
@@ -191,7 +201,7 @@ pub fn solveLadder(
     // converger.run clears device limiting state on exit; a direct jfnk
     // call must do the same so post-solve evals see clean state.
     defer ckt.clearLimits();
-    const jr = try converger.jfnk(ckt, ws, x, 0, copts, converger.EvalHook{});
+    const jr = try converger.jfnk(ckt, ws, x, 0, copts, root.EvalHook{});
     total_iter +|= jr.iterations;
     return .{
         .converged = jr.converged,
@@ -230,5 +240,5 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 fn newtonRun(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, tol: converger.Tolerances, gmin: f64) !converger.Result {
     var copts = tol.newtonOpts(null);
     copts.gmin = gmin;
-    return converger.run(ckt, ws, x, 0, copts, converger.EvalHook{});
+    return converger.run(ckt, ws, x, 0, copts, root.EvalHook{});
 }

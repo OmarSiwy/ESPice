@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chapter 10 &mdash; Compiler Directives | Verilog-A LRM 2.4.0 Reference</title>
+<style>
+body { font-family: 'Segoe UI', system-ui, sans-serif; max-width: 900px; margin: 0 auto; padding: 2rem; background: #fafafa; color: #1a1a1a; line-height: 1.6; }
+h1 { border-bottom: 3px solid #2563eb; padding-bottom: 0.5rem; }
+h2 { color: #1e40af; margin-top: 2rem; border-bottom: 1px solid #ddd; padding-bottom: 0.3rem; }
+h3 { color: #374151; }
+code { background: #e5e7eb; padding: 0.15rem 0.4rem; border-radius: 3px; font-size: 0.9em; }
+pre { background: #1e293b; color: #e2e8f0; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; }
+pre code { background: none; padding: 0; color: inherit; }
+table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+th, td { border: 1px solid #d1d5db; padding: 0.5rem 0.75rem; text-align: left; }
+th { background: #2563eb; color: white; }
+tr:nth-child(even) { background: #f3f4f6; }
+.syntax { background: #fffbeb; border-left: 4px solid #f59e0b; padding: 1rem; margin: 1rem 0; font-family: monospace; white-space: pre-wrap; }
+.note { background: #eff6ff; border-left: 4px solid #2563eb; padding: 0.75rem 1rem; margin: 1rem 0; }
+nav { background: #1e293b; padding: 1rem; border-radius: 6px; margin-bottom: 2rem; }
+nav a { color: #93c5fd; text-decoration: none; margin-right: 1rem; }
+nav a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+
+<nav>
+<a href="index.html">Index</a>
+<a href="ch2-lexical.html">Ch2 Lexical</a>
+<a href="ch3-datatypes.html">Ch3 Data Types</a>
+<a href="ch4-expressions.html">Ch4 Expressions</a>
+<a href="ch5-analog.html">Ch5 Analog</a>
+<a href="ch6-hierarchy.html">Ch6 Hierarchy</a>
+<a href="ch7-mixed-signal.html">Ch7 Mixed-Signal</a>
+<a href="ch8-scheduling.html">Ch8 Scheduling</a>
+<a href="ch9-system.html">Ch9 System</a>
+<a href="ch10-connectmodules.html">Ch10 Directives</a>
+<a href="ch11-directives.html">Ch11 Directives Ext</a>
+</nav>
+
+<h1>Chapter 10 &mdash; Compiler Directives</h1>
+
+<h2 id="s10.1">10.1 Overview</h2>
+
+<p>All Verilog-AMS HDL compiler directives are preceded by the <code>`</code> character (accent grave, ASCII 0x60). This is distinct from the apostrophe character <code>'</code> (ASCII 0x27). The scope of compiler directives extends from the point where it is processed, across all files processed, to the point where another compiler directive supersedes it or the processing completes.</p>
+
+<p>The following compiler directives are supported:</p>
+
+<table>
+<tr><th>Directive</th><th>Reference</th></tr>
+<tr><td><code>`begin_keywords</code></td><td>IEEE 1364-2005</td></tr>
+<tr><td><code>`celldefine</code></td><td>IEEE 1364-2005</td></tr>
+<tr><td><code>`default_discipline</code></td><td>10.2</td></tr>
+<tr><td><code>`default_nettype</code></td><td>IEEE 1364-2005</td></tr>
+<tr><td><code>`default_transition</code></td><td>10.3</td></tr>
+<tr><td><code>`define</code></td><td>10.4</td></tr>
+<tr><td><code>`else</code></td><td>IEEE 1364-2005</td></tr>
+<tr><td><code>`elsif</code></td><td>IEEE 1364-2005</td></tr>
+<tr><td><code>`end_keywords</code></td><td>IEEE 1364-2005</td></tr>
+<tr><td><code>`endcelldefine</code></td><td>IEEE 1364-2005</td></tr>
+<tr><td><code>`endif</code></td><td>IEEE 1364-2005</td></tr>
+<tr><td><code>`ifdef</code></td><td>IEEE 1364-2005</td></tr>
+<tr><td><code>`ifndef</code></td><td>IEEE 1364-2005</td></tr>
+<tr><td><code>`include</code></td><td>IEEE 1364-2005</td></tr>
+<tr><td><code>`line</code></td><td>IEEE 1364-2005</td></tr>
+<tr><td><code>`nounconnected_drive</code></td><td>IEEE 1364-2005</td></tr>
+<tr><td><code>`pragma</code></td><td>IEEE 1364-2005</td></tr>
+<tr><td><code>`resetall</code></td><td>IEEE 1364-2005</td></tr>
+<tr><td><code>`timescale</code></td><td>IEEE 1364-2005</td></tr>
+<tr><td><code>`unconnected_drive</code></td><td>IEEE 1364-2005</td></tr>
+<tr><td><code>`undef</code></td><td>10.4</td></tr>
+</table>
+
+<h2 id="s10.2">10.2 <code>`default_discipline</code></h2>
+
+<p>The default discipline is applied by discipline resolution (see LRM 7.4 and Annex F) to all discrete signals without a discipline declaration that appear in the text stream following the use of the <code>`default_discipline</code> directive, until either the end of the text stream or another <code>`default_discipline</code> directive with the qualifier (if applicable) is found in the subsequent text, even across source file boundaries. More than one <code>`default_discipline</code> directive can be in force simultaneously, provided each differs in qualifier.</p>
+
+<p>In addition to <code>`resetall</code>, if this directive is used without a discipline name, discipline resolution will not use a default discipline for nets declared after this directive is encountered in the text stream.</p>
+
+<pre class="syntax">default_discipline_directive ::=
+    `default_discipline [ discipline_identifier [ qualifier ] ]
+
+qualifier ::=
+    integer | real | reg | wreal | wire | tri | wand | triand
+    | wor | trior | trireg | tri0 | tri1 | supply0 | supply1</pre>
+
+<p>Example:</p>
+
+<pre><code>`default_discipline ddiscrete
+module behavnand(in1, in2, out);
+    input in1, in2;
+    output out;
+    reg out;
+    always begin
+        out = ~(in1 && in2);
+    end
+endmodule</code></pre>
+
+<p>The nets <code>in1</code>, <code>in2</code>, and <code>out</code> all have discipline <code>ddiscrete</code> by default.</p>
+
+<p>There is a precedence of compiler directives: more specific directives have higher precedence over general directives.</p>
+
+<div class="note">
+<strong>Verilog-A note:</strong> The <code>`default_discipline</code> directive is primarily relevant in mixed-signal (Verilog-AMS) contexts where discrete signals coexist with analog signals. In pure Verilog-A, all signals are continuous and declared with explicit disciplines (e.g., <code>electrical</code>).
+</div>
+
+<h2 id="s10.3">10.3 <code>`default_transition</code></h2>
+
+<p>This directive specifies the default value for rise and fall time for the <code>transition</code> filter (see <a href="ch4-expressions.html#s4.5.8">4.5.8</a>). It can only be used outside of module definitions.</p>
+
+<pre class="syntax">default_transition_compiler_directive ::=
+    `default_transition transition_time
+
+transition_time ::=
+    constant_expression</pre>
+
+<p><code>transition_time</code> is a real value.</p>
+
+<p>For all <code>transition</code> filters which follow this directive and do not have rise time and fall time arguments specified, <code>transition_time</code> is used as the default rise and fall time values. If another <code>`default_transition</code> directive is encountered in the subsequent source description, the <code>transition</code> filters following the newly encountered directive derive their default rise and fall times from the transition time value of the newly encountered directive.</p>
+
+<p>If a <code>`default_transition</code> directive is not used in the description, <code>transition_time</code> is controlled by the simulator.</p>
+
+<h2 id="s10.4">10.4 <code>`define</code> and <code>`undef</code></h2>
+
+<p>The <code>`define</code> and <code>`undef</code> compiler directives are described in IEEE Std 1364-2005 Verilog HDL.</p>
+
+<p>To avoid conflicts with predefined Verilog-AMS macros (10.5), the <code>`define</code> compiler directive's macro text shall not begin with <code>__VAMS_</code>. The <code>`undef</code> compiler directive shall have no effect on predefined Verilog-AMS macros; the simulator may issue a warning for an attempt to undefine one of these macros.</p>
+
+<pre class="syntax">text_macro_definition ::=
+    `define text_macro_name macro_text
+
+text_macro_name ::=
+    text_macro_identifier [ ( list_of_formal_arguments ) ]
+
+list_of_formal_arguments ::=
+    formal_argument_identifier { , formal_argument_identifier }
+
+formal_argument_identifier ::=
+    simple_identifier
+
+text_macro_identifier ::=
+    identifier</pre>
+
+<h2 id="s10.5">10.5 Predefined Macros</h2>
+
+<h3><code>__VAMS_ENABLE__</code></h3>
+
+<p>This macro shall always be defined during the parsing of Verilog-AMS source text. Its purpose is to support the creation of modules which are both legal Verilog and Verilog-AMS.</p>
+
+<pre><code>module not_gate(in, out);
+    input in;
+    output out;
+    reg out;
+    `ifdef __VAMS_ENABLE__
+    parameter integer del = 1 from [1:100];
+    `else
+    parameter del = 1;
+    `endif
+    always @ in
+        out = #del !in;
+endmodule</code></pre>
+
+<h3><code>__VAMS_COMPACT_MODELING__</code></h3>
+
+<p>Verilog-AMS HDL version 2.2 introduced extensions to support compact modeling. This predefined macro shall be defined during parsing of Verilog-AMS source text if and only if all compact modeling extensions are supported by the simulator.</p>
+
+<pre><code>module nonlin_res(a, b);
+    input a, b;
+    electrical a, b;
+    parameter real rnom = 1;
+    parameter real vc1 = 0;
+    real reff, iab;
+    analog begin
+        iab = V(a,b) / (rnom * (1.0 + vc1 * V(a,b)));
+        I(a,b) <+ iab;
+        `ifdef __VAMS_COMPACT_MODELING__
+        reff = ddx(iab, V(a));
+        I(a,b) <+ white_noise(4.0*`P_K*$temperature*reff, "thermal");
+        `else
+        if (analysis("noise"))
+            $strobe("Noise not computed.");
+        `endif
+    end
+endmodule</code></pre>
+
+<p>Verilog-AMS simulators shall also provide a simulator-specific predefined macro so that modules can conditionally include or exclude portions of source text specific to a particular simulator.</p>
+
+<h2 id="s10.6">10.6 <code>`begin_keywords</code> and <code>`end_keywords</code></h2>
+
+<p>Verilog-AMS HDL extends the <code>`begin_keywords</code> and <code>`end_keywords</code> compiler directives from IEEE Std 1364-2005 by adding a <code>"VAMS-2.3"</code> version specifier.</p>
+
+<p>The <code>version_specifier</code> specifies the valid set of reserved keywords in effect when a design unit is parsed. These directives can only be specified outside of a design element (module, primitive, configuration, paramset, connectrules, or connectmodule). The <code>`begin_keywords</code> directive affects all source code that follows it, even across source code file boundaries, until the matching <code>`end_keywords</code> directive is encountered.</p>
+
+<p>Supported version specifiers:</p>
+
+<table>
+<tr><th>Version Specifier</th><th>Keyword Set</th></tr>
+<tr><td><code>"1364-1995"</code></td><td>Keywords for IEEE Std 1364-1995</td></tr>
+<tr><td><code>"1364-2001"</code></td><td>Keywords for IEEE Std 1364-2001</td></tr>
+<tr><td><code>"1364-2005"</code></td><td>Keywords for IEEE Std 1364-2005 Verilog HDL</td></tr>
+<tr><td><code>"VAMS-2.3"</code></td><td>Keywords for Verilog-AMS HDL (listed in Annex B)</td></tr>
+</table>
+
+<p>The directives only specify the set of identifiers that are reserved as keywords. They do not affect the semantics, tokens, or other aspects of the Verilog-AMS language.</p>
+
+<p>Example without <code>`begin_keywords</code> directive (uses the implementation's default keyword set):</p>
+
+<pre><code>module m1; // module definition with no `begin_keywords directive
+    ...
+endmodule</code></pre>
+
+<p>Example using <code>"1364-2005"</code> to allow <code>sin</code> as a port name (since <code>sin</code> is a reserved keyword in Verilog-AMS but not in IEEE 1364-2005):</p>
+
+<pre><code>`begin_keywords "1364-2005" // use IEEE Std 1364-2005 Verilog keywords
+module m2 (sin, ...);
+    input sin; // OK since sin is not a keyword in 1364-2005
+    ...
+endmodule
+`end_keywords</code></pre>
+
+<p>Using <code>"VAMS-2.3"</code> with the same code results in an error because <code>sin</code> is a reserved keyword:</p>
+
+<pre><code>`begin_keywords "VAMS-2.3" // use Verilog-AMS LRM2.3 keywords
+module m2 (sin, ...); // ERROR: "sin" is a keyword in Verilog-AMS
+    input sin;
+    ...
+endmodule
+`end_keywords</code></pre>
+
+<p>Example using Verilog-AMS constructs with the <code>"VAMS-2.3"</code> keyword set. Note that <code>logic</code> is not a keyword in Verilog-AMS 2.3 (whereas it is a keyword in IEEE Std 1800-2012 SystemVerilog):</p>
+
+<pre><code>`begin_keywords "VAMS-2.3"
+discipline logic;
+    domain discrete;
+enddiscipline
+
+module a2d(dnet, anet);
+    input dnet;
+    wire dnet;
+    logic dnet;
+    output anet;
+    electrical anet;
+    real avar;
+    analog begin
+        if (dnet === 1'b1)
+            avar = 5;
+        else if (dnet === 1'bx)
+            avar = avar;       // hold value
+        else if (dnet === 1'b0)
+            avar = 0;
+        else if (dnet === 1'bz)
+            avar = 2.5;        // high impedance - float value
+        V(anet) <+ avar;
+    end
+endmodule
+`end_keywords</code></pre>
+
+<div class="note">
+<strong>Connect Modules and Discipline Resolution:</strong> Connect modules and discipline resolution rules are Verilog-AMS mixed-signal features (see LRM Chapter 7, sections 7.3 and 7.4, and Annex F). They govern automatic insertion of interface modules between analog and digital domains. These features are not part of the Verilog-A analog subset.
+</div>
+
+</body>
+</html>

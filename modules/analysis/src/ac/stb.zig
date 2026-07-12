@@ -1,15 +1,19 @@
-//! Loop-gain stability (Tian probe row): augment the dense linearized G/C
-//! into (n+1)² with a 0V probe source between probe_p and probe_n, then
-//! sweep. The planes are the linearization — one eval() at the op.
+//! Loop-gain stability (STB): augment the dense linearized G/C with a 0 V
+//! probe source between probe_p and probe_n to form (n+1)², then sweep.
+//! T(ω) = −i_br(ω). Phase unwrap mandatory for gain-margin extraction.
 const std = @import("std");
 const root = @import("../root.zig");
-const converger = @import("../helper/converger.zig");
+const converger = @import("solvers").converger;
+const types = @import("solvers").types;
+const solvers = @import("solvers");
 const GROUND = root.GROUND;
-const FreqSolver = root.solvers.freq_solve.FreqSolver;
-const freq = @import("../helper/freq.zig");
+const FreqSolver = solvers.freq_solve.FreqSolver;
 const dc = @import("../dc/dc.zig");
 
-const Complex = freq.Complex;
+const Complex = types.Complex;
+
+const W = std.simd.suggestVectorLength(f64) orelse 8;
+const V = @Vector(W, f64);
 
 pub const Options = struct {
     tol: converger.Tolerances = .{},
@@ -46,6 +50,7 @@ pub const SolveResult = struct {
     }
 };
 
+/// Low-level solve: DC bias → linearize → augment → sweep → margins.
 pub fn solve(
     ckt: *root.Circuit,
     probe_p: u32,
@@ -57,6 +62,7 @@ pub fn solve(
     const n_aug = n + 1;
     const branch_idx = n;
 
+    // --- DC solve (own call — stability wants its exact bias) ----------------
     const x_op = try allocator.alloc(f64, n);
     defer allocator.free(x_op);
     const dc_result = try dc.solve(ckt, x_op, .{
@@ -64,7 +70,7 @@ pub fn solve(
     });
     if (!dc_result.converged) return error.DcNotConverged;
 
-    // Linearize at the op: one eval, the planes are G and C (ground row included).
+    // --- Linearize at the operating point ------------------------------------
     ckt.eval(x_op, 0);
     const lin = try allocator.alloc(f64, 2 * n * n);
     defer allocator.free(lin);
@@ -73,28 +79,95 @@ pub fn solve(
     ckt.denseG(g_lin);
     ckt.denseC(c_lin);
 
-    // Augment with the probe branch row/column. FreqSolver.initDense takes
-    // ownership of both matrices (frees them on its own failure too).
+    // --- Augment to (n+1)² with probe branch ---------------------------------
+    // FreqSolver.initDense takes ownership of both arrays.
     const g_aug = try allocator.alloc(f64, n_aug * n_aug);
     const c_aug = allocator.alloc(f64, n_aug * n_aug) catch |err| {
         allocator.free(g_aug);
         return err;
     };
-    @memset(g_aug, 0);
-    @memset(c_aug, 0);
+    root.zeroSimd(g_aug);
+    root.zeroSimd(c_aug);
 
+    // Copy original G/C into upper-left n×n block of augmented matrices.
     for (0..n) |row| {
-        for (0..n) |col| {
-            g_aug[row * n_aug + col] = g_lin[row * n + col];
-            c_aug[row * n_aug + col] = c_lin[row * n + col];
+        const src_off = row * n;
+        const dst_off = row * n_aug;
+        // SIMD copy of one row
+        var i: usize = 0;
+        while (i + W <= n) : (i += W) {
+            g_aug[dst_off + i ..][0..W].* = g_lin[src_off + i ..][0..W].*;
+            c_aug[dst_off + i ..][0..W].* = c_lin[src_off + i ..][0..W].*;
+        }
+        while (i < n) : (i += 1) {
+            g_aug[dst_off + i] = g_lin[src_off + i];
+            c_aug[dst_off + i] = c_lin[src_off + i];
         }
     }
 
-    if (probe_p != GROUND) g_aug[probe_p * n_aug + branch_idx] += 1.0;
-    if (probe_n != GROUND) g_aug[probe_n * n_aug + branch_idx] -= 1.0;
-    if (probe_p != GROUND) g_aug[branch_idx * n_aug + probe_p] += 1.0;
-    if (probe_n != GROUND) g_aug[branch_idx * n_aug + probe_n] -= 1.0;
+    // Stamp 0 V probe source: ±1 couplings, zero diagonal.
+    if (probe_p != GROUND) {
+        g_aug[probe_p * n_aug + branch_idx] += 1.0;
+        g_aug[branch_idx * n_aug + probe_p] += 1.0;
+    }
+    if (probe_n != GROUND) {
+        g_aug[probe_n * n_aug + branch_idx] -= 1.0;
+        g_aug[branch_idx * n_aug + probe_n] -= 1.0;
+    }
 
+    // --- Frequency sweep ------------------------------------------------------
+    const n_points = types.logSweepCount(options.f_start, options.f_stop, options.points_per_decade);
+
+    // --- GPU batch path: all freq points in one launch ----------------------
+    // ponytail: augmented dense G/C passed as flat arrays; GPU kernel treats
+    // them as n_aug×n_aug dense. Falls through to CPU on error or if absent.
+    if (ckt.gpu_hook) |gh| if (gh.freq_solve_batch) |fsb| {
+        const nn_aug = 2 * n_aug;
+        const rhs_gpu = try allocator.alloc(f64, nn_aug);
+        defer allocator.free(rhs_gpu);
+        root.zeroSimd(rhs_gpu);
+        rhs_gpu[branch_idx] = 1.0; // unit voltage on probe branch
+
+        const omegas = try allocator.alloc(f64, n_points);
+        defer allocator.free(omegas);
+        {
+            var sw = types.logSweep(options.f_start, options.f_stop, options.points_per_decade);
+            var ki: usize = 0;
+            while (sw.next()) |f| : (ki += 1) omegas[ki] = 2.0 * std.math.pi * f;
+        }
+
+        // Allocate per-point solution vectors (contiguous backing + slice array).
+        const x_backing = try allocator.alloc(f64, n_points * nn_aug);
+        defer allocator.free(x_backing);
+        const x_out = try allocator.alloc([]f64, n_points);
+        defer allocator.free(x_out);
+        for (x_out, 0..) |*slot, idx| slot.* = x_backing[idx * nn_aug ..][0..nn_aug];
+
+        if (fsb(gh.ctx, g_aug, c_aug, omegas, rhs_gpu, x_out, @intCast(n_aug))) {
+            // GPU owns nothing — free the augmented matrices ourselves.
+            allocator.free(g_aug);
+            allocator.free(c_aug);
+
+            var result = try SolveResult.init(allocator, n_points);
+            errdefer result.deinit(allocator);
+
+            var sw = types.logSweep(options.f_start, options.f_stop, options.points_per_decade);
+            var k: usize = 0;
+            while (sw.next()) |f| : (k += 1) {
+                result.freqs[k] = f;
+                result.loop_gain[k] = .{
+                    .re = -x_out[k][branch_idx],
+                    .im = -x_out[k][n_aug + branch_idx],
+                };
+            }
+
+            computeMargins(&result);
+            return result;
+        } else |_| {} // GPU failed — fall through to CPU
+    };
+
+    // --- CPU fallback: FreqSolver on the augmented system --------------------
+    // initDense takes ownership of g_aug, c_aug.
     var fs = try FreqSolver.initDense(allocator, @intCast(n_aug), g_aug, c_aug);
     defer fs.deinit(allocator);
 
@@ -104,19 +177,23 @@ pub fn solve(
     const rhs = work[0..nn];
     const x_work = work[nn..];
 
-    @memset(rhs, 0);
-    rhs[branch_idx] = 1.0;
+    root.zeroSimd(rhs);
+    rhs[branch_idx] = 1.0; // unit voltage on probe branch
 
-    const n_points = freq.logSweepCount(options.f_start, options.f_stop, options.points_per_decade);
     var result = try SolveResult.init(allocator, n_points);
     errdefer result.deinit(allocator);
 
-    for (0..n_points) |k| {
-        const f = freq.logSweepFreq(options.f_start, options.f_stop, n_points, @intCast(k));
+    var sw = types.logSweep(options.f_start, options.f_stop, options.points_per_decade);
+    var k: usize = 0;
+    while (sw.next()) |f| : (k += 1) {
         try fs.solve(2.0 * std.math.pi * f, rhs, x_work);
 
         result.freqs[k] = f;
-        result.loop_gain[k] = .{ .re = -x_work[branch_idx], .im = -x_work[n_aug + branch_idx] };
+        // T(f) = −(x_re[branch] + j·x_im[branch])
+        result.loop_gain[k] = .{
+            .re = -x_work[branch_idx],
+            .im = -x_work[n_aug + branch_idx],
+        };
     }
 
     computeMargins(&result);
@@ -151,14 +228,23 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     };
 }
 
+// ============================================================================
+// Margin extraction
+// ============================================================================
+
+/// Phase margin: interpolated phase at the first 0 dB down-crossing of |T|.
+/// Gain margin: interpolated magnitude at the −180° crossing of the unwrapped
+/// phase. NaN when the crossing doesn't exist in-band.
 fn computeMargins(result: *SolveResult) void {
     const n: usize = result.n_points;
     if (n < 2) return;
 
+    // --- Phase margin: find |T| = 0 dB crossing -----------------------------
+    // Prefer first strict down-crossing (gain going below 0 dB).
     var pm_found = false;
     for (1..n) |k| {
-        const db_prev = 20.0 * @log10(result.loop_gain[k - 1].mag());
-        const db_curr = 20.0 * @log10(result.loop_gain[k].mag());
+        const db_prev = result.loop_gain[k - 1].magDb();
+        const db_curr = result.loop_gain[k].magDb();
 
         if (db_prev >= 0 and db_curr < 0) {
             const frac = db_prev / (db_prev - db_curr);
@@ -170,10 +256,11 @@ fn computeMargins(result: *SolveResult) void {
         }
     }
 
+    // Fallback: any crossing direction.
     if (!pm_found) {
         for (1..n) |k| {
-            const db_prev = 20.0 * @log10(result.loop_gain[k - 1].mag());
-            const db_curr = 20.0 * @log10(result.loop_gain[k].mag());
+            const db_prev = result.loop_gain[k - 1].magDb();
+            const db_curr = result.loop_gain[k].magDb();
 
             if ((db_prev >= 0 and db_curr < 0) or (db_prev < 0 and db_curr >= 0)) {
                 const frac = @abs(db_prev) / (@abs(db_prev) + @abs(db_curr));
@@ -185,9 +272,9 @@ fn computeMargins(result: *SolveResult) void {
         }
     }
 
-    // Gain margin: atan2 phase wraps to (-180, 180], so a raw comparison can
-    // never see the -180 crossing — unwrap the phase and scan the continuous
-    // sequence instead.
+    // --- Gain margin: unwrapped phase, find −180° crossing -------------------
+    // atan2 wraps to (−180°, 180°] so a raw comparison misses the −180°
+    // crossing; unwrap the phase sequence first.
     var phase_uw = result.loop_gain[0].phaseDeg();
     for (1..n) |k| {
         const phase_prev = phase_uw;
@@ -201,8 +288,8 @@ fn computeMargins(result: *SolveResult) void {
             (phase_prev < -180.0 and phase_curr >= -180.0))
         {
             const frac = @abs(phase_prev + 180.0) / (@abs(phase_prev + 180.0) + @abs(phase_curr + 180.0));
-            const db_prev = 20.0 * @log10(result.loop_gain[k - 1].mag());
-            const db_curr = 20.0 * @log10(result.loop_gain[k].mag());
+            const db_prev = result.loop_gain[k - 1].magDb();
+            const db_curr = result.loop_gain[k].magDb();
             result.gain_margin_db = -(db_prev + frac * (db_curr - db_prev));
             break;
         }
@@ -214,6 +301,7 @@ fn computeMargins(result: *SolveResult) void {
 // ============================================================================
 
 const testing = std.testing;
+
 test "STB: margin computation with synthetic data" {
     const allocator = testing.allocator;
 
@@ -240,11 +328,12 @@ test "STB: margin computation with synthetic data" {
 
     try testing.expect(!std.math.isNan(result.phase_margin_deg));
     try testing.expectApproxEqAbs(95.7, result.phase_margin_deg, 2.0);
+    // Single-pole: phase never reaches −180° → gain margin is NaN (correct).
     try testing.expect(std.math.isNan(result.gain_margin_db));
 }
 
 test "STB: three-pole margin computation" {
-    // Two poles only approach -180 deg asymptotically and never cross it
+    // Two poles only approach −180° asymptotically and never cross it
     // (gain margin is then rightly NaN); three poles give a real crossing.
     const allocator = testing.allocator;
 
