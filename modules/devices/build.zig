@@ -40,6 +40,9 @@ pub const GpuKernelInputs = struct {
     b: *std.Build,
     devices_dep: *std.Build.Dependency,
     ptx_rewrite_path: std.Build.LazyPath,
+    /// modules/solvers/src/newton_core.zig — dependency-free solver core
+    /// shared with the CPU converger; the driver TU imports it as a module.
+    newton_core_path: std.Build.LazyPath,
     optimize: std.builtin.OptimizeMode,
 };
 
@@ -72,6 +75,11 @@ pub fn buildMegaKernelNvidia(inp: GpuKernelInputs) std.Build.LazyPath {
         .imports = &.{
             .{ .name = "dev_models", .module = inp.devices_dep.module("devices") },
             .{ .name = "gpu_abi", .module = abi_mod },
+            .{ .name = "newton_core", .module = b.createModule(.{
+                .root_source_file = inp.newton_core_path,
+                .target = nvptx_target,
+                .optimize = gpu_opt,
+            }) },
         },
     });
     nvlink.addFileArg(ctx.add("megakernel", kernel_mod));
@@ -109,6 +117,11 @@ pub fn buildMegaKernelAmd(inp: GpuKernelInputs) std.Build.LazyPath {
             .imports = &.{
                 .{ .name = "dev_models", .module = inp.devices_dep.module("devices") },
                 .{ .name = "gpu_abi", .module = abi_mod },
+                .{ .name = "newton_core", .module = b.createModule(.{
+                    .root_source_file = inp.newton_core_path,
+                    .target = amdgcn_target,
+                    .optimize = gpu_opt,
+                }) },
             },
         }),
     });
