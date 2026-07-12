@@ -128,49 +128,10 @@ pub const Instance = struct {
 // Gate junction GD: gate_prime -- drain_prime
 // Channel: drain_prime -- source_prime
 
-pub const g_pattern_override = [_]contract.Entry(n_u){
-    // RD branch: drain -- drain_prime
-    .{ .row = @intFromEnum(U.drain), .col = @intFromEnum(U.drain) },
-    .{ .row = @intFromEnum(U.drain), .col = @intFromEnum(U.drain_prime) },
-    .{ .row = @intFromEnum(U.drain_prime), .col = @intFromEnum(U.drain) },
-    // RG branch: gate -- gate_prime
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.gate) },
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.gate_prime) },
-    .{ .row = @intFromEnum(U.gate_prime), .col = @intFromEnum(U.gate) },
-    // RS branch: source -- source_prime
-    .{ .row = @intFromEnum(U.source), .col = @intFromEnum(U.source) },
-    .{ .row = @intFromEnum(U.source), .col = @intFromEnum(U.source_prime) },
-    .{ .row = @intFromEnum(U.source_prime), .col = @intFromEnum(U.source) },
-    // Gate junction GD: gate_prime -- drain_prime
-    .{ .row = @intFromEnum(U.gate_prime), .col = @intFromEnum(U.gate_prime) },
-    .{ .row = @intFromEnum(U.gate_prime), .col = @intFromEnum(U.drain_prime) },
-    .{ .row = @intFromEnum(U.drain_prime), .col = @intFromEnum(U.gate_prime) },
-    // Gate junction GS: gate_prime -- source_prime
-    .{ .row = @intFromEnum(U.gate_prime), .col = @intFromEnum(U.source_prime) },
-    .{ .row = @intFromEnum(U.source_prime), .col = @intFromEnum(U.gate_prime) },
-    // Channel + self-terms on drain_prime and source_prime
-    .{ .row = @intFromEnum(U.drain_prime), .col = @intFromEnum(U.drain_prime) },
-    .{ .row = @intFromEnum(U.drain_prime), .col = @intFromEnum(U.source_prime) },
-    .{ .row = @intFromEnum(U.source_prime), .col = @intFromEnum(U.drain_prime) },
-    .{ .row = @intFromEnum(U.source_prime), .col = @intFromEnum(U.source_prime) },
-};
-
 // ============================================================================
 // Sparse Capacitance Stamp Pattern
 // ============================================================================
 // Charge Q_GS on gate_prime -- source_prime, Q_GD on gate_prime -- drain_prime
-
-pub const c_pattern_override = [_]contract.Entry(n_u){
-    // Q_GD: gate_prime -- drain_prime
-    .{ .row = @intFromEnum(U.gate_prime), .col = @intFromEnum(U.gate_prime) },
-    .{ .row = @intFromEnum(U.gate_prime), .col = @intFromEnum(U.drain_prime) },
-    .{ .row = @intFromEnum(U.drain_prime), .col = @intFromEnum(U.gate_prime) },
-    .{ .row = @intFromEnum(U.drain_prime), .col = @intFromEnum(U.drain_prime) },
-    // Q_GS: gate_prime -- source_prime
-    .{ .row = @intFromEnum(U.gate_prime), .col = @intFromEnum(U.source_prime) },
-    .{ .row = @intFromEnum(U.source_prime), .col = @intFromEnum(U.gate_prime) },
-    .{ .row = @intFromEnum(U.source_prime), .col = @intFromEnum(U.source_prime) },
-};
 
 // ============================================================================
 // Noise Sources

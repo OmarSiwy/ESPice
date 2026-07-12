@@ -300,51 +300,6 @@ pub fn evalFromPrep(comptime S: type, x: [n_u]S, pc: *const PrepCache, model: *c
 // Signal nodes at port B: b1, b2 (couple to each other and to gnd_b)
 // Series resistance couples A-side to B-side nodes.
 
-pub const g_pattern_override = [_]contract.Entry(n_u){
-    // a1 row: couples to a1, a2, gnd_a, b1, b2, gnd_b (via series R and modal transform)
-    .{ .row = 0, .col = 0 }, // a1,a1
-    .{ .row = 0, .col = 1 }, // a1,a2
-    .{ .row = 0, .col = 2 }, // a1,gnd_a
-    .{ .row = 0, .col = 3 }, // a1,b1
-    .{ .row = 0, .col = 4 }, // a1,b2
-    .{ .row = 0, .col = 5 }, // a1,gnd_b
-    // a2 row
-    .{ .row = 1, .col = 0 }, // a2,a1
-    .{ .row = 1, .col = 1 }, // a2,a2
-    .{ .row = 1, .col = 2 }, // a2,gnd_a
-    .{ .row = 1, .col = 3 }, // a2,b1
-    .{ .row = 1, .col = 4 }, // a2,b2
-    .{ .row = 1, .col = 5 }, // a2,gnd_b
-    // gnd_a row: sum of a1 and a2 negated
-    .{ .row = 2, .col = 0 }, // gnd_a,a1
-    .{ .row = 2, .col = 1 }, // gnd_a,a2
-    .{ .row = 2, .col = 2 }, // gnd_a,gnd_a
-    .{ .row = 2, .col = 3 }, // gnd_a,b1
-    .{ .row = 2, .col = 4 }, // gnd_a,b2
-    .{ .row = 2, .col = 5 }, // gnd_a,gnd_b
-    // b1 row
-    .{ .row = 3, .col = 0 }, // b1,a1
-    .{ .row = 3, .col = 1 }, // b1,a2
-    .{ .row = 3, .col = 2 }, // b1,gnd_a
-    .{ .row = 3, .col = 3 }, // b1,b1
-    .{ .row = 3, .col = 4 }, // b1,b2
-    .{ .row = 3, .col = 5 }, // b1,gnd_b
-    // b2 row
-    .{ .row = 4, .col = 0 }, // b2,a1
-    .{ .row = 4, .col = 1 }, // b2,a2
-    .{ .row = 4, .col = 2 }, // b2,gnd_a
-    .{ .row = 4, .col = 3 }, // b2,b1
-    .{ .row = 4, .col = 4 }, // b2,b2
-    .{ .row = 4, .col = 5 }, // b2,gnd_b
-    // gnd_b row: sum of b1 and b2 negated
-    .{ .row = 5, .col = 0 }, // gnd_b,a1
-    .{ .row = 5, .col = 1 }, // gnd_b,a2
-    .{ .row = 5, .col = 2 }, // gnd_b,gnd_a
-    .{ .row = 5, .col = 3 }, // gnd_b,b1
-    .{ .row = 5, .col = 4 }, // gnd_b,b2
-    .{ .row = 5, .col = 5 }, // gnd_b,gnd_b
-};
-
 // ============================================================================
 // Noise sources: thermal noise from series resistance and shunt conductance
 // ============================================================================

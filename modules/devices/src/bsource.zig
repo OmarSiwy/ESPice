@@ -67,15 +67,6 @@ pub const Instance = struct {
 //   F_branch    depends on V(n)            -> (branch, n)
 //   F_branch    depends on V(ctrl_p)       -> (branch, ctrl_p)
 //   F_branch    depends on V(ctrl_n)       -> (branch, ctrl_n)
-pub const g_pattern_override = [_]contract.Entry(n_u){
-    .{ .row = @intFromEnum(U.branch), .col = @intFromEnum(U.branch) }, // current mode: F_branch depends on I_branch
-    .{ .row = @intFromEnum(U.p), .col = @intFromEnum(U.branch) },
-    .{ .row = @intFromEnum(U.n), .col = @intFromEnum(U.branch) },
-    .{ .row = @intFromEnum(U.branch), .col = @intFromEnum(U.p) },
-    .{ .row = @intFromEnum(U.branch), .col = @intFromEnum(U.n) },
-    .{ .row = @intFromEnum(U.branch), .col = @intFromEnum(U.ctrl_p) },
-    .{ .row = @intFromEnum(U.branch), .col = @intFromEnum(U.ctrl_n) },
-};
 
 // ---------------------------------------------------------------------------
 // Physics function: KCL/KVL residuals (value-form)

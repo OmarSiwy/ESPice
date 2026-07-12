@@ -2105,73 +2105,7 @@ pub fn attempt(model: Model, lambda: f64) Model {
 // Sparse conductance stamp pattern
 // ============================================================================
 
-pub const g_pattern_override = [_]contract.Entry(n_u){
-    // External drain <-> DP
-    .{ .row = @intFromEnum(U.drain), .col = @intFromEnum(U.drain) },
-    .{ .row = @intFromEnum(U.drain), .col = @intFromEnum(U.dp) },
-    .{ .row = @intFromEnum(U.dp), .col = @intFromEnum(U.drain) },
-    // External source <-> SP
-    .{ .row = @intFromEnum(U.source), .col = @intFromEnum(U.source) },
-    .{ .row = @intFromEnum(U.source), .col = @intFromEnum(U.sp) },
-    .{ .row = @intFromEnum(U.sp), .col = @intFromEnum(U.source) },
-    // External gate <-> GP
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.gate) },
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.gp) },
-    .{ .row = @intFromEnum(U.gp), .col = @intFromEnum(U.gate) },
-    // DP diagonal
-    .{ .row = @intFromEnum(U.dp), .col = @intFromEnum(U.dp) },
-    // SP diagonal
-    .{ .row = @intFromEnum(U.sp), .col = @intFromEnum(U.sp) },
-    // GP diagonal
-    .{ .row = @intFromEnum(U.gp), .col = @intFromEnum(U.gp) },
-    // Channel: DP <-> SP
-    .{ .row = @intFromEnum(U.dp), .col = @intFromEnum(U.sp) },
-    .{ .row = @intFromEnum(U.sp), .col = @intFromEnum(U.dp) },
-    // Gate-channel: GP <-> DP, GP <-> SP
-    .{ .row = @intFromEnum(U.gp), .col = @intFromEnum(U.dp) },
-    .{ .row = @intFromEnum(U.gp), .col = @intFromEnum(U.sp) },
-    .{ .row = @intFromEnum(U.dp), .col = @intFromEnum(U.gp) },
-    .{ .row = @intFromEnum(U.sp), .col = @intFromEnum(U.gp) },
-    // Body <-> DP, Body <-> SP (junction diodes)
-    .{ .row = @intFromEnum(U.body), .col = @intFromEnum(U.body) },
-    .{ .row = @intFromEnum(U.body), .col = @intFromEnum(U.dp) },
-    .{ .row = @intFromEnum(U.body), .col = @intFromEnum(U.sp) },
-    .{ .row = @intFromEnum(U.dp), .col = @intFromEnum(U.body) },
-    .{ .row = @intFromEnum(U.sp), .col = @intFromEnum(U.body) },
-    // Substrate <-> Body (substrate current)
-    .{ .row = @intFromEnum(U.sub), .col = @intFromEnum(U.sub) },
-    .{ .row = @intFromEnum(U.sub), .col = @intFromEnum(U.body) },
-    .{ .row = @intFromEnum(U.body), .col = @intFromEnum(U.sub) },
-    // GP <-> Body (gate-body leakage)
-    .{ .row = @intFromEnum(U.gp), .col = @intFromEnum(U.body) },
-    .{ .row = @intFromEnum(U.body), .col = @intFromEnum(U.gp) },
-};
-
 // Sparse capacitance stamp pattern
-pub const c_pattern_override = [_]contract.Entry(n_u){
-    // Intrinsic gate charge: GP <-> DP, GP <-> SP
-    .{ .row = @intFromEnum(U.gp), .col = @intFromEnum(U.gp) },
-    .{ .row = @intFromEnum(U.gp), .col = @intFromEnum(U.dp) },
-    .{ .row = @intFromEnum(U.gp), .col = @intFromEnum(U.sp) },
-    .{ .row = @intFromEnum(U.gp), .col = @intFromEnum(U.body) },
-    .{ .row = @intFromEnum(U.dp), .col = @intFromEnum(U.gp) },
-    .{ .row = @intFromEnum(U.sp), .col = @intFromEnum(U.gp) },
-    .{ .row = @intFromEnum(U.body), .col = @intFromEnum(U.gp) },
-    // DP diagonal (drain junction cap)
-    .{ .row = @intFromEnum(U.dp), .col = @intFromEnum(U.dp) },
-    // SP diagonal (source junction cap)
-    .{ .row = @intFromEnum(U.sp), .col = @intFromEnum(U.sp) },
-    // Body diagonal
-    .{ .row = @intFromEnum(U.body), .col = @intFromEnum(U.body) },
-    // Body <-> DP, Body <-> SP (junction caps)
-    .{ .row = @intFromEnum(U.body), .col = @intFromEnum(U.dp) },
-    .{ .row = @intFromEnum(U.body), .col = @intFromEnum(U.sp) },
-    .{ .row = @intFromEnum(U.dp), .col = @intFromEnum(U.body) },
-    .{ .row = @intFromEnum(U.sp), .col = @intFromEnum(U.body) },
-    // DP <-> SP (channel charge)
-    .{ .row = @intFromEnum(U.dp), .col = @intFromEnum(U.sp) },
-    .{ .row = @intFromEnum(U.sp), .col = @intFromEnum(U.dp) },
-};
 
 // ============================================================================
 // Contract validation

@@ -33,13 +33,6 @@ pub const Instance = struct {
 ///   G[br,   n]       = -1
 ///   G[br,   ctrl_br] = -H
 ///
-pub const g_pattern_override = [_]contract.Entry(n_u){
-    .{ .row = @intFromEnum(U.p), .col = @intFromEnum(U.br) },
-    .{ .row = @intFromEnum(U.n), .col = @intFromEnum(U.br) },
-    .{ .row = @intFromEnum(U.br), .col = @intFromEnum(U.p) },
-    .{ .row = @intFromEnum(U.br), .col = @intFromEnum(U.n) },
-    .{ .row = @intFromEnum(U.br), .col = @intFromEnum(U.ctrl_br) },
-};
 
 // ---------------------------------------------------------------------------
 // PrepCache: hot eval data in contiguous array (SoA over devices)

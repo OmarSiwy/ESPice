@@ -93,35 +93,6 @@ pub const Instance = struct {
 // Junction BD: bulk -- d_prime
 // GMIN: d_prime--s_prime, gate--s_prime, gate--d_prime
 
-pub const g_pattern_override = [_]contract.Entry(n_u){
-    // RD branch: drain -- d_prime
-    .{ .row = @intFromEnum(U.drain), .col = @intFromEnum(U.drain) },
-    .{ .row = @intFromEnum(U.drain), .col = @intFromEnum(U.d_prime) },
-    .{ .row = @intFromEnum(U.d_prime), .col = @intFromEnum(U.drain) },
-    // RS branch: source -- s_prime
-    .{ .row = @intFromEnum(U.source), .col = @intFromEnum(U.source) },
-    .{ .row = @intFromEnum(U.source), .col = @intFromEnum(U.s_prime) },
-    .{ .row = @intFromEnum(U.s_prime), .col = @intFromEnum(U.source) },
-    // Gate GMIN: gate -- d_prime, gate -- s_prime
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.gate) },
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.d_prime) },
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.s_prime) },
-    // Bulk junctions: bulk -- d_prime, bulk -- s_prime
-    .{ .row = @intFromEnum(U.bulk), .col = @intFromEnum(U.bulk) },
-    .{ .row = @intFromEnum(U.bulk), .col = @intFromEnum(U.d_prime) },
-    .{ .row = @intFromEnum(U.bulk), .col = @intFromEnum(U.s_prime) },
-    // d_prime self + cross terms
-    .{ .row = @intFromEnum(U.d_prime), .col = @intFromEnum(U.d_prime) },
-    .{ .row = @intFromEnum(U.d_prime), .col = @intFromEnum(U.s_prime) },
-    .{ .row = @intFromEnum(U.d_prime), .col = @intFromEnum(U.gate) },
-    .{ .row = @intFromEnum(U.d_prime), .col = @intFromEnum(U.bulk) },
-    // s_prime self + cross terms
-    .{ .row = @intFromEnum(U.s_prime), .col = @intFromEnum(U.s_prime) },
-    .{ .row = @intFromEnum(U.s_prime), .col = @intFromEnum(U.d_prime) },
-    .{ .row = @intFromEnum(U.s_prime), .col = @intFromEnum(U.gate) },
-    .{ .row = @intFromEnum(U.s_prime), .col = @intFromEnum(U.bulk) },
-};
-
 // ============================================================================
 // Sparse Capacitance Stamp Pattern
 // ============================================================================
@@ -130,31 +101,6 @@ pub const g_pattern_override = [_]contract.Entry(n_u){
 // Q_GB: gate -- bulk
 // Q_BS: bulk -- s_prime
 // Q_BD: bulk -- d_prime
-
-pub const c_pattern_override = [_]contract.Entry(n_u){
-    // Q_GS: gate -- s_prime
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.gate) },
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.s_prime) },
-    .{ .row = @intFromEnum(U.s_prime), .col = @intFromEnum(U.gate) },
-    .{ .row = @intFromEnum(U.s_prime), .col = @intFromEnum(U.s_prime) },
-    // Q_GD: gate -- d_prime
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.d_prime) },
-    .{ .row = @intFromEnum(U.d_prime), .col = @intFromEnum(U.gate) },
-    .{ .row = @intFromEnum(U.d_prime), .col = @intFromEnum(U.d_prime) },
-    // Q_GB: gate -- bulk
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.bulk) },
-    .{ .row = @intFromEnum(U.bulk), .col = @intFromEnum(U.gate) },
-    .{ .row = @intFromEnum(U.bulk), .col = @intFromEnum(U.bulk) },
-    // Q_BS: bulk -- s_prime
-    .{ .row = @intFromEnum(U.bulk), .col = @intFromEnum(U.s_prime) },
-    .{ .row = @intFromEnum(U.s_prime), .col = @intFromEnum(U.bulk) },
-    // Q_BD: bulk -- d_prime
-    .{ .row = @intFromEnum(U.bulk), .col = @intFromEnum(U.d_prime) },
-    .{ .row = @intFromEnum(U.d_prime), .col = @intFromEnum(U.bulk) },
-    // Meyer channel charges couple d_prime and s_prime (mode-swapped vgd/vgs)
-    .{ .row = @intFromEnum(U.d_prime), .col = @intFromEnum(U.s_prime) },
-    .{ .row = @intFromEnum(U.s_prime), .col = @intFromEnum(U.d_prime) },
-};
 
 // ============================================================================
 // Noise Sources

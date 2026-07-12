@@ -129,54 +129,10 @@ pub const Instance = struct {
 // ============================================================================
 // Sparse Conductance Stamp Pattern
 // ============================================================================
-pub const g_pattern_override = [_]contract.Entry(n_u){
-    // Rgsal: g -- gii
-    .{ .row = @intFromEnum(U.g), .col = @intFromEnum(U.g) },
-    .{ .row = @intFromEnum(U.g), .col = @intFromEnum(U.gii) },
-    .{ .row = @intFromEnum(U.gii), .col = @intFromEnum(U.g) },
-    .{ .row = @intFromEnum(U.gii), .col = @intFromEnum(U.gii) },
-    // Rgpv: gii -- gi
-    .{ .row = @intFromEnum(U.gii), .col = @intFromEnum(U.gi) },
-    .{ .row = @intFromEnum(U.gi), .col = @intFromEnum(U.gii) },
-    .{ .row = @intFromEnum(U.gi), .col = @intFromEnum(U.gi) },
-    // Rac: gi -- ci (accumulation channel resistance)
-    .{ .row = @intFromEnum(U.gi), .col = @intFromEnum(U.ci) },
-    .{ .row = @intFromEnum(U.ci), .col = @intFromEnum(U.gi) },
-    .{ .row = @intFromEnum(U.ci), .col = @intFromEnum(U.ci) },
-    // Rend: ci -- bi
-    .{ .row = @intFromEnum(U.ci), .col = @intFromEnum(U.bi) },
-    .{ .row = @intFromEnum(U.bi), .col = @intFromEnum(U.ci) },
-    .{ .row = @intFromEnum(U.bi), .col = @intFromEnum(U.bi) },
-    // Rsub: bi -- b
-    .{ .row = @intFromEnum(U.bi), .col = @intFromEnum(U.b) },
-    .{ .row = @intFromEnum(U.b), .col = @intFromEnum(U.bi) },
-    .{ .row = @intFromEnum(U.b), .col = @intFromEnum(U.b) },
-    // Gate current Igc: gi -- ci
-    // (shares stamp positions with Rac above)
-    // Gate current Igov: gi -- bi
-    .{ .row = @intFromEnum(U.gi), .col = @intFromEnum(U.bi) },
-    .{ .row = @intFromEnum(U.bi), .col = @intFromEnum(U.gi) },
-    // RC node: R=1 between ci and n
-    .{ .row = @intFromEnum(U.ci), .col = @intFromEnum(U.n) },
-    .{ .row = @intFromEnum(U.n), .col = @intFromEnum(U.ci) },
-    .{ .row = @intFromEnum(U.n), .col = @intFromEnum(U.n) },
-};
 
 // ============================================================================
 // Sparse Capacitance Stamp Pattern
 // ============================================================================
-pub const c_pattern_override = [_]contract.Entry(n_u){
-    // Q_g on gi, Q_b on ci (main gate-channel charge)
-    .{ .row = @intFromEnum(U.gi), .col = @intFromEnum(U.gi) },
-    .{ .row = @intFromEnum(U.gi), .col = @intFromEnum(U.ci) },
-    .{ .row = @intFromEnum(U.gi), .col = @intFromEnum(U.n) },
-    .{ .row = @intFromEnum(U.ci), .col = @intFromEnum(U.gi) },
-    .{ .row = @intFromEnum(U.ci), .col = @intFromEnum(U.ci) },
-    .{ .row = @intFromEnum(U.ci), .col = @intFromEnum(U.n) },
-    // RC node capacitance TAU
-    .{ .row = @intFromEnum(U.n), .col = @intFromEnum(U.n) },
-    .{ .row = @intFromEnum(U.n), .col = @intFromEnum(U.ci) },
-};
 
 // ============================================================================
 // Noise Sources

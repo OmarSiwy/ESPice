@@ -148,51 +148,9 @@ pub const Instance = struct {
 // Impact ionization: drain -- bulk or source -- bulk
 // Junction: drain -- bulk, source -- bulk
 
-pub const g_pattern_override = [_]contract.Entry(n_u){
-    // Channel: drain -- source
-    .{ .row = @intFromEnum(U.drain), .col = @intFromEnum(U.drain) },
-    .{ .row = @intFromEnum(U.drain), .col = @intFromEnum(U.source) },
-    .{ .row = @intFromEnum(U.source), .col = @intFromEnum(U.drain) },
-    .{ .row = @intFromEnum(U.source), .col = @intFromEnum(U.source) },
-    // Channel dependence on gate
-    .{ .row = @intFromEnum(U.drain), .col = @intFromEnum(U.gate) },
-    .{ .row = @intFromEnum(U.source), .col = @intFromEnum(U.gate) },
-    // Channel dependence on bulk (body effect)
-    .{ .row = @intFromEnum(U.drain), .col = @intFromEnum(U.bulk) },
-    .{ .row = @intFromEnum(U.source), .col = @intFromEnum(U.bulk) },
-    // Junction BD: bulk -- drain
-    .{ .row = @intFromEnum(U.bulk), .col = @intFromEnum(U.bulk) },
-    .{ .row = @intFromEnum(U.bulk), .col = @intFromEnum(U.drain) },
-    // Junction BS: bulk -- source
-    .{ .row = @intFromEnum(U.bulk), .col = @intFromEnum(U.source) },
-    // Gate row (zero DC current but needed for completeness)
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.gate) },
-};
-
 // ============================================================================
 // Sparse Capacitance Stamp Pattern
 // ============================================================================
-
-pub const c_pattern_override = [_]contract.Entry(n_u){
-    // Intrinsic charges: QD on drain, QS on source, QG on gate, QB on bulk
-    // All depend on all four terminals
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.gate) },
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.drain) },
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.source) },
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.bulk) },
-    .{ .row = @intFromEnum(U.drain), .col = @intFromEnum(U.gate) },
-    .{ .row = @intFromEnum(U.drain), .col = @intFromEnum(U.drain) },
-    .{ .row = @intFromEnum(U.drain), .col = @intFromEnum(U.source) },
-    .{ .row = @intFromEnum(U.drain), .col = @intFromEnum(U.bulk) },
-    .{ .row = @intFromEnum(U.source), .col = @intFromEnum(U.gate) },
-    .{ .row = @intFromEnum(U.source), .col = @intFromEnum(U.drain) },
-    .{ .row = @intFromEnum(U.source), .col = @intFromEnum(U.source) },
-    .{ .row = @intFromEnum(U.source), .col = @intFromEnum(U.bulk) },
-    .{ .row = @intFromEnum(U.bulk), .col = @intFromEnum(U.gate) },
-    .{ .row = @intFromEnum(U.bulk), .col = @intFromEnum(U.drain) },
-    .{ .row = @intFromEnum(U.bulk), .col = @intFromEnum(U.source) },
-    .{ .row = @intFromEnum(U.bulk), .col = @intFromEnum(U.bulk) },
-};
 
 // ============================================================================
 // y_fv interpolation function (EKV normalized current from pinch-off voltage)

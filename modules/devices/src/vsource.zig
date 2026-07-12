@@ -24,13 +24,6 @@ pub const u_kinds = [n_u]contract.UnknownKind{ .voltage, .voltage, .current };
 //   dF_branch / dV_n     = -1
 // ---------------------------------------------------------------------------
 
-pub const g_pattern_override = [_]contract.Entry(n_u){
-    .{ .row = @intFromEnum(U.p), .col = @intFromEnum(U.branch) },
-    .{ .row = @intFromEnum(U.n), .col = @intFromEnum(U.branch) },
-    .{ .row = @intFromEnum(U.branch), .col = @intFromEnum(U.p) },
-    .{ .row = @intFromEnum(U.branch), .col = @intFromEnum(U.n) },
-};
-
 // ---------------------------------------------------------------------------
 // Waveform type constants (i32, matches isource convention)
 // ---------------------------------------------------------------------------

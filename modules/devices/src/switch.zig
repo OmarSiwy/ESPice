@@ -26,13 +26,6 @@ pub const num_ports: usize = 4;
 // conductance is piecewise-constant, no derivative through the switching
 // decision). Matches ngspice swload.c stamp.
 
-pub const g_pattern_override = [_]contract.Entry(n_u){
-    .{ .row = 0, .col = 0 }, // dI_p / dV_p  =  +G_eff
-    .{ .row = 0, .col = 1 }, // dI_p / dV_n  =  -G_eff
-    .{ .row = 1, .col = 0 }, // dI_n / dV_p  =  -G_eff
-    .{ .row = 1, .col = 1 }, // dI_n / dV_n  =  +G_eff
-};
-
 // ============================================================================
 // Noise sources -- thermal noise of the switch resistance
 // ============================================================================

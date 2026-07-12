@@ -202,53 +202,10 @@ pub const Instance = struct {
 // ============================================================================
 // Connections: n1-i1 (end resistance), i1-i2 (body), i2-n2 (end resistance),
 //              nc-i1 (diode 1), nc-i2 (diode 2), dt self-heating
-pub const g_pattern_override = [_]contract.Entry(n_u){
-    // End resistance 1: n1 <-> i1
-    .{ .row = @intFromEnum(U.n1), .col = @intFromEnum(U.n1) },
-    .{ .row = @intFromEnum(U.n1), .col = @intFromEnum(U.int1) },
-    .{ .row = @intFromEnum(U.int1), .col = @intFromEnum(U.n1) },
-    .{ .row = @intFromEnum(U.int1), .col = @intFromEnum(U.int1) },
-    // Resistor body: i1 <-> i2
-    .{ .row = @intFromEnum(U.int1), .col = @intFromEnum(U.int2) },
-    .{ .row = @intFromEnum(U.int2), .col = @intFromEnum(U.int1) },
-    .{ .row = @intFromEnum(U.int2), .col = @intFromEnum(U.int2) },
-    // End resistance 2: i2 <-> n2
-    .{ .row = @intFromEnum(U.int2), .col = @intFromEnum(U.n2) },
-    .{ .row = @intFromEnum(U.n2), .col = @intFromEnum(U.int2) },
-    .{ .row = @intFromEnum(U.n2), .col = @intFromEnum(U.n2) },
-    // Parasitic diode 1: nc <-> i1
-    .{ .row = @intFromEnum(U.nc), .col = @intFromEnum(U.nc) },
-    .{ .row = @intFromEnum(U.nc), .col = @intFromEnum(U.int1) },
-    .{ .row = @intFromEnum(U.int1), .col = @intFromEnum(U.nc) },
-    // Parasitic diode 2: nc <-> i2
-    .{ .row = @intFromEnum(U.nc), .col = @intFromEnum(U.int2) },
-    .{ .row = @intFromEnum(U.int2), .col = @intFromEnum(U.nc) },
-    // Self-heating: dt depends on i1, i2, nc, dt
-    .{ .row = @intFromEnum(U.dt), .col = @intFromEnum(U.dt) },
-    .{ .row = @intFromEnum(U.dt), .col = @intFromEnum(U.int1) },
-    .{ .row = @intFromEnum(U.dt), .col = @intFromEnum(U.int2) },
-    .{ .row = @intFromEnum(U.dt), .col = @intFromEnum(U.nc) },
-    // Body depends on dt (temperature feedback)
-    .{ .row = @intFromEnum(U.int1), .col = @intFromEnum(U.dt) },
-    .{ .row = @intFromEnum(U.int2), .col = @intFromEnum(U.dt) },
-};
 
 // ============================================================================
 // Capacitance stamp pattern (parasitic junction + thermal capacitance)
 // ============================================================================
-pub const c_pattern_override = [_]contract.Entry(n_u){
-    // Junction cap 1: nc <-> i1
-    .{ .row = @intFromEnum(U.nc), .col = @intFromEnum(U.nc) },
-    .{ .row = @intFromEnum(U.nc), .col = @intFromEnum(U.int1) },
-    .{ .row = @intFromEnum(U.int1), .col = @intFromEnum(U.nc) },
-    .{ .row = @intFromEnum(U.int1), .col = @intFromEnum(U.int1) },
-    // Junction cap 2: nc <-> i2
-    .{ .row = @intFromEnum(U.nc), .col = @intFromEnum(U.int2) },
-    .{ .row = @intFromEnum(U.int2), .col = @intFromEnum(U.nc) },
-    .{ .row = @intFromEnum(U.int2), .col = @intFromEnum(U.int2) },
-    // Thermal capacitance: dt self
-    .{ .row = @intFromEnum(U.dt), .col = @intFromEnum(U.dt) },
-};
 
 // ============================================================================
 // Noise generators

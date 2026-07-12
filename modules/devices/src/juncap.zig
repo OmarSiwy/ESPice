@@ -144,20 +144,6 @@ pub const noise_gens = [_]contract.NoiseGen(Self){
 // Sparse stamp patterns -- 2x2 dense (A-K junction)
 // ============================================================================
 
-pub const g_pattern_override = [_]contract.Entry(n_u){
-    .{ .row = 0, .col = 0 },
-    .{ .row = 0, .col = 1 },
-    .{ .row = 1, .col = 0 },
-    .{ .row = 1, .col = 1 },
-};
-
-pub const c_pattern_override = [_]contract.Entry(n_u){
-    .{ .row = 0, .col = 0 },
-    .{ .row = 0, .col = 1 },
-    .{ .row = 1, .col = 0 },
-    .{ .row = 1, .col = 1 },
-};
-
 // ============================================================================
 // Auxiliary functions (hyp-functions) -- value-form (generic over S)
 // ============================================================================

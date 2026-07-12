@@ -237,7 +237,7 @@ test "codegen reactive produces q" {
     const zig_src = try zvaf.codegen.generate(std.testing.allocator, &result.mir, &result.lower);
     defer std.testing.allocator.free(zig_src);
     try std.testing.expect(std.mem.indexOf(u8, zig_src, "pub fn q(") != null);
-    try std.testing.expect(std.mem.indexOf(u8, zig_src, "c_pattern_override") != null);
+    try std.testing.expect(std.mem.indexOf(u8, zig_src, "c_pattern_override") == null);
     try std.testing.expect(std.mem.indexOf(u8, zig_src, "@compileError") == null);
 }
 

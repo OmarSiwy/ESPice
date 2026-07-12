@@ -15,7 +15,7 @@ const isIdentChar = emit.isIdentChar;
 const reserved_idents = std.StaticStringMap(void).initComptime(.{
     .{"U"},          .{"Model"},           .{"Instance"},        .{"State"},
     .{"Self"},       .{"contract"},        .{"n_u"},             .{"num_ports"},
-    .{"u_kinds"},    .{"g_pattern_override"}, .{"initState"},    .{"updateState"},
+    .{"u_kinds"},    .{"initState"},       .{"updateState"},
     .{"eval"},       .{"evalBits"},        .{"threshold"},       .{"changed"},
     .{"applyDrive"}, .{"shl64"},           .{"shr64"},           .{"sar64"},
     .{"inputs"},     .{"outputs"},         .{"cur_outputs"},     .{"next_inputs"},
@@ -154,28 +154,6 @@ pub fn generateDevice(allocator: std.mem.Allocator, spec: DeviceSpec) Error![]u8
     try w.writeAll("pub const u_kinds = [n_u]contract.UnknownKind{\n");
     for (0..total_in + total_out) |_| try w.writeAll("    .voltage,\n");
     for (0..total_out) |_| try w.writeAll("    .current,\n");
-    try w.writeAll("};\n\n");
-
-    try w.writeAll("pub const g_pattern_override = [_]contract.Entry(n_u){\n");
-    for (spec.ports) |p| {
-        if (p.direction != .output) continue;
-        for (0..p.width) |bit| {
-            const pairs = [_][2][]const u8{
-                .{ "", "_branch" },
-                .{ "_branch", "" },
-                .{ "_branch", "_branch" },
-            };
-            for (pairs) |pair| {
-                try w.writeAll("    .{ .row = @intFromEnum(U.");
-                try emitPinName(w, p.name, p.width, @intCast(bit));
-                try w.writeAll(pair[0]);
-                try w.writeAll("), .col = @intFromEnum(U.");
-                try emitPinName(w, p.name, p.width, @intCast(bit));
-                try w.writeAll(pair[1]);
-                try w.writeAll(") },\n");
-            }
-        }
-    }
     try w.writeAll("};\n\n");
 
     // ── Model + Instance ───────────────────────────────────────────────────

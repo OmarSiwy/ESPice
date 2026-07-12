@@ -749,74 +749,9 @@ pub const noise_gens = [_]contract.NoiseGen(Self){
 // Sparse Conductance Stamp Pattern
 // ============================================================================
 
-pub const g_pattern_override = [_]contract.Entry(n_u){
-    // RD: drain -- di
-    .{ .row = @intFromEnum(U.drain), .col = @intFromEnum(U.drain) },
-    .{ .row = @intFromEnum(U.drain), .col = @intFromEnum(U.di) },
-    .{ .row = @intFromEnum(U.di), .col = @intFromEnum(U.drain) },
-    // RS: source -- si
-    .{ .row = @intFromEnum(U.source), .col = @intFromEnum(U.source) },
-    .{ .row = @intFromEnum(U.source), .col = @intFromEnum(U.si) },
-    .{ .row = @intFromEnum(U.si), .col = @intFromEnum(U.source) },
-    // RG: gate -- gi
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.gate) },
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.gi) },
-    .{ .row = @intFromEnum(U.gi), .col = @intFromEnum(U.gate) },
-    // Channel: di -- si (controlled by gi, body)
-    .{ .row = @intFromEnum(U.di), .col = @intFromEnum(U.di) },
-    .{ .row = @intFromEnum(U.di), .col = @intFromEnum(U.si) },
-    .{ .row = @intFromEnum(U.si), .col = @intFromEnum(U.di) },
-    .{ .row = @intFromEnum(U.si), .col = @intFromEnum(U.si) },
-    // Channel dependence on gi (gate)
-    .{ .row = @intFromEnum(U.di), .col = @intFromEnum(U.gi) },
-    .{ .row = @intFromEnum(U.si), .col = @intFromEnum(U.gi) },
-    // Channel dependence on body
-    .{ .row = @intFromEnum(U.di), .col = @intFromEnum(U.body) },
-    .{ .row = @intFromEnum(U.si), .col = @intFromEnum(U.body) },
-    // Junction: body -- di, body -- si
-    .{ .row = @intFromEnum(U.body), .col = @intFromEnum(U.body) },
-    .{ .row = @intFromEnum(U.body), .col = @intFromEnum(U.di) },
-    .{ .row = @intFromEnum(U.body), .col = @intFromEnum(U.si) },
-    // Gate current: gi -- di, gi -- si
-    .{ .row = @intFromEnum(U.gi), .col = @intFromEnum(U.gi) },
-    .{ .row = @intFromEnum(U.gi), .col = @intFromEnum(U.di) },
-    .{ .row = @intFromEnum(U.gi), .col = @intFromEnum(U.si) },
-    // Self-heating node
-    .{ .row = @intFromEnum(U.dt), .col = @intFromEnum(U.dt) },
-};
-
 // ============================================================================
 // Sparse Capacitance Stamp Pattern
 // ============================================================================
-
-pub const c_pattern_override = [_]contract.Entry(n_u){
-    // Intrinsic charges: gi -- di, gi -- si, gi -- body
-    .{ .row = @intFromEnum(U.gi), .col = @intFromEnum(U.gi) },
-    .{ .row = @intFromEnum(U.gi), .col = @intFromEnum(U.di) },
-    .{ .row = @intFromEnum(U.di), .col = @intFromEnum(U.gi) },
-    .{ .row = @intFromEnum(U.di), .col = @intFromEnum(U.di) },
-    .{ .row = @intFromEnum(U.gi), .col = @intFromEnum(U.si) },
-    .{ .row = @intFromEnum(U.si), .col = @intFromEnum(U.gi) },
-    .{ .row = @intFromEnum(U.si), .col = @intFromEnum(U.si) },
-    .{ .row = @intFromEnum(U.gi), .col = @intFromEnum(U.body) },
-    .{ .row = @intFromEnum(U.body), .col = @intFromEnum(U.gi) },
-    .{ .row = @intFromEnum(U.body), .col = @intFromEnum(U.body) },
-    // Overlap: gate -- drain, gate -- source (external)
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.gate) },
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.drain) },
-    .{ .row = @intFromEnum(U.drain), .col = @intFromEnum(U.gate) },
-    .{ .row = @intFromEnum(U.drain), .col = @intFromEnum(U.drain) },
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.source) },
-    .{ .row = @intFromEnum(U.source), .col = @intFromEnum(U.gate) },
-    .{ .row = @intFromEnum(U.source), .col = @intFromEnum(U.source) },
-    // Junction: body -- di, body -- si
-    .{ .row = @intFromEnum(U.body), .col = @intFromEnum(U.di) },
-    .{ .row = @intFromEnum(U.di), .col = @intFromEnum(U.body) },
-    .{ .row = @intFromEnum(U.body), .col = @intFromEnum(U.si) },
-    .{ .row = @intFromEnum(U.si), .col = @intFromEnum(U.body) },
-    // Self-heating thermal capacitance
-    .{ .row = @intFromEnum(U.dt), .col = @intFromEnum(U.dt) },
-};
 
 // ============================================================================
 // Helper: cosh approximation (branchless, no std) — x-independent, f64.

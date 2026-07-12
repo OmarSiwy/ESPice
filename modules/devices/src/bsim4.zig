@@ -540,81 +540,9 @@ pub const Instance = struct {
 // Sparse Conductance Stamp Pattern
 // ============================================================================
 
-pub const g_pattern_override = [_]contract.Entry(n_u){
-    // Rd: drain -- drain_prime
-    .{ .row = @intFromEnum(U.drain), .col = @intFromEnum(U.drain) },
-    .{ .row = @intFromEnum(U.drain), .col = @intFromEnum(U.drain_prime) },
-    .{ .row = @intFromEnum(U.drain_prime), .col = @intFromEnum(U.drain) },
-    // Rs: source -- source_prime
-    .{ .row = @intFromEnum(U.source), .col = @intFromEnum(U.source) },
-    .{ .row = @intFromEnum(U.source), .col = @intFromEnum(U.source_prime) },
-    .{ .row = @intFromEnum(U.source_prime), .col = @intFromEnum(U.source) },
-    // Rg: gate -- gate_prime
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.gate) },
-    .{ .row = @intFromEnum(U.gate), .col = @intFromEnum(U.gate_prime) },
-    .{ .row = @intFromEnum(U.gate_prime), .col = @intFromEnum(U.gate) },
-    // Rbpb: bulk -- body_prime
-    .{ .row = @intFromEnum(U.bulk), .col = @intFromEnum(U.bulk) },
-    .{ .row = @intFromEnum(U.bulk), .col = @intFromEnum(U.body_prime) },
-    .{ .row = @intFromEnum(U.body_prime), .col = @intFromEnum(U.bulk) },
-    // Rbpd: body_prime -- db_node
-    .{ .row = @intFromEnum(U.body_prime), .col = @intFromEnum(U.body_prime) },
-    .{ .row = @intFromEnum(U.body_prime), .col = @intFromEnum(U.db_node) },
-    .{ .row = @intFromEnum(U.db_node), .col = @intFromEnum(U.body_prime) },
-    // Rbps: body_prime -- sb_node
-    .{ .row = @intFromEnum(U.body_prime), .col = @intFromEnum(U.sb_node) },
-    .{ .row = @intFromEnum(U.sb_node), .col = @intFromEnum(U.body_prime) },
-    // Rbdb: db_node -- bulk
-    .{ .row = @intFromEnum(U.db_node), .col = @intFromEnum(U.db_node) },
-    .{ .row = @intFromEnum(U.db_node), .col = @intFromEnum(U.bulk) },
-    .{ .row = @intFromEnum(U.bulk), .col = @intFromEnum(U.db_node) },
-    // Rbsb: sb_node -- bulk
-    .{ .row = @intFromEnum(U.sb_node), .col = @intFromEnum(U.sb_node) },
-    .{ .row = @intFromEnum(U.sb_node), .col = @intFromEnum(U.bulk) },
-    .{ .row = @intFromEnum(U.bulk), .col = @intFromEnum(U.sb_node) },
-    // Channel: dp -- sp (controlled by gp, bp)
-    .{ .row = @intFromEnum(U.drain_prime), .col = @intFromEnum(U.drain_prime) },
-    .{ .row = @intFromEnum(U.drain_prime), .col = @intFromEnum(U.source_prime) },
-    .{ .row = @intFromEnum(U.drain_prime), .col = @intFromEnum(U.gate_prime) },
-    .{ .row = @intFromEnum(U.drain_prime), .col = @intFromEnum(U.body_prime) },
-    .{ .row = @intFromEnum(U.source_prime), .col = @intFromEnum(U.drain_prime) },
-    .{ .row = @intFromEnum(U.source_prime), .col = @intFromEnum(U.source_prime) },
-    .{ .row = @intFromEnum(U.source_prime), .col = @intFromEnum(U.gate_prime) },
-    .{ .row = @intFromEnum(U.source_prime), .col = @intFromEnum(U.body_prime) },
-    // Gate tunneling: gp to dp, sp, bp
-    .{ .row = @intFromEnum(U.gate_prime), .col = @intFromEnum(U.gate_prime) },
-    .{ .row = @intFromEnum(U.gate_prime), .col = @intFromEnum(U.drain_prime) },
-    .{ .row = @intFromEnum(U.gate_prime), .col = @intFromEnum(U.source_prime) },
-    .{ .row = @intFromEnum(U.gate_prime), .col = @intFromEnum(U.body_prime) },
-    // Impact ionization + GIDL/GISL: body_prime <-> dp, sp
-    .{ .row = @intFromEnum(U.body_prime), .col = @intFromEnum(U.drain_prime) },
-    .{ .row = @intFromEnum(U.body_prime), .col = @intFromEnum(U.source_prime) },
-    .{ .row = @intFromEnum(U.body_prime), .col = @intFromEnum(U.gate_prime) },
-};
-
 // ============================================================================
 // Sparse Capacitance Stamp Pattern
 // ============================================================================
-
-pub const c_pattern_override = [_]contract.Entry(n_u){
-    // Intrinsic capacitances: gp, dp, sp, bp
-    .{ .row = @intFromEnum(U.gate_prime), .col = @intFromEnum(U.gate_prime) },
-    .{ .row = @intFromEnum(U.gate_prime), .col = @intFromEnum(U.drain_prime) },
-    .{ .row = @intFromEnum(U.gate_prime), .col = @intFromEnum(U.source_prime) },
-    .{ .row = @intFromEnum(U.gate_prime), .col = @intFromEnum(U.body_prime) },
-    .{ .row = @intFromEnum(U.drain_prime), .col = @intFromEnum(U.drain_prime) },
-    .{ .row = @intFromEnum(U.drain_prime), .col = @intFromEnum(U.gate_prime) },
-    .{ .row = @intFromEnum(U.drain_prime), .col = @intFromEnum(U.body_prime) },
-    .{ .row = @intFromEnum(U.drain_prime), .col = @intFromEnum(U.source_prime) },
-    .{ .row = @intFromEnum(U.source_prime), .col = @intFromEnum(U.source_prime) },
-    .{ .row = @intFromEnum(U.source_prime), .col = @intFromEnum(U.gate_prime) },
-    .{ .row = @intFromEnum(U.source_prime), .col = @intFromEnum(U.body_prime) },
-    .{ .row = @intFromEnum(U.source_prime), .col = @intFromEnum(U.drain_prime) },
-    .{ .row = @intFromEnum(U.body_prime), .col = @intFromEnum(U.body_prime) },
-    .{ .row = @intFromEnum(U.body_prime), .col = @intFromEnum(U.gate_prime) },
-    .{ .row = @intFromEnum(U.body_prime), .col = @intFromEnum(U.drain_prime) },
-    .{ .row = @intFromEnum(U.body_prime), .col = @intFromEnum(U.source_prime) },
-};
 
 // ============================================================================
 // Noise Sources

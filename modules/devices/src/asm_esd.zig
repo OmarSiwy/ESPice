@@ -177,82 +177,9 @@ pub const Instance = struct {
 //   DT1: self + DT coupling
 //   TT: self + B_i, E_i coupling
 
-pub const g_pattern_override = [_]contract.Entry(n_u){
-    // RB branch: B -- B_i
-    .{ .row = @intFromEnum(U.b), .col = @intFromEnum(U.b) },
-    .{ .row = @intFromEnum(U.b), .col = @intFromEnum(U.b_i) },
-    .{ .row = @intFromEnum(U.b_i), .col = @intFromEnum(U.b) },
-    // RE branch: E -- E_i
-    .{ .row = @intFromEnum(U.e), .col = @intFromEnum(U.e) },
-    .{ .row = @intFromEnum(U.e), .col = @intFromEnum(U.e_i) },
-    .{ .row = @intFromEnum(U.e_i), .col = @intFromEnum(U.e) },
-    // RC branch: C -- C_i
-    .{ .row = @intFromEnum(U.c), .col = @intFromEnum(U.c) },
-    .{ .row = @intFromEnum(U.c), .col = @intFromEnum(U.c_i) },
-    .{ .row = @intFromEnum(U.c_i), .col = @intFromEnum(U.c) },
-    // Intrinsic transistor: B_i -- E_i, B_i -- C_i, C_i -- E_i (and diagonals)
-    .{ .row = @intFromEnum(U.b_i), .col = @intFromEnum(U.b_i) },
-    .{ .row = @intFromEnum(U.b_i), .col = @intFromEnum(U.e_i) },
-    .{ .row = @intFromEnum(U.b_i), .col = @intFromEnum(U.c_i) },
-    .{ .row = @intFromEnum(U.e_i), .col = @intFromEnum(U.e_i) },
-    .{ .row = @intFromEnum(U.e_i), .col = @intFromEnum(U.b_i) },
-    .{ .row = @intFromEnum(U.e_i), .col = @intFromEnum(U.c_i) },
-    .{ .row = @intFromEnum(U.c_i), .col = @intFromEnum(U.c_i) },
-    .{ .row = @intFromEnum(U.c_i), .col = @intFromEnum(U.b_i) },
-    .{ .row = @intFromEnum(U.c_i), .col = @intFromEnum(U.e_i) },
-    // B -- C_i (external B-C partitioned capacitance path)
-    .{ .row = @intFromEnum(U.b), .col = @intFromEnum(U.c_i) },
-    .{ .row = @intFromEnum(U.c_i), .col = @intFromEnum(U.b) },
-    // E -- C_i (substrate junction)
-    .{ .row = @intFromEnum(U.e), .col = @intFromEnum(U.c_i) },
-    .{ .row = @intFromEnum(U.c_i), .col = @intFromEnum(U.e) },
-    // DT self-heating (DT self, DT--DT1)
-    .{ .row = @intFromEnum(U.dt), .col = @intFromEnum(U.dt) },
-    .{ .row = @intFromEnum(U.dt), .col = @intFromEnum(U.dt1) },
-    .{ .row = @intFromEnum(U.dt1), .col = @intFromEnum(U.dt) },
-    .{ .row = @intFromEnum(U.dt1), .col = @intFromEnum(U.dt1) },
-    // TT filter node (charge modulation, TT self + coupling to B_i, E_i)
-    .{ .row = @intFromEnum(U.tt), .col = @intFromEnum(U.tt) },
-    .{ .row = @intFromEnum(U.tt), .col = @intFromEnum(U.b_i) },
-    .{ .row = @intFromEnum(U.tt), .col = @intFromEnum(U.e_i) },
-    // TBB delayed BJT filter node (TBB self + coupling to B_i, E_i)
-    .{ .row = @intFromEnum(U.tbb), .col = @intFromEnum(U.tbb) },
-    .{ .row = @intFromEnum(U.tbb), .col = @intFromEnum(U.b_i) },
-    .{ .row = @intFromEnum(U.tbb), .col = @intFromEnum(U.e_i) },
-};
-
 // ============================================================================
 // Sparse Capacitance Stamp Pattern
 // ============================================================================
-
-pub const c_pattern_override = [_]contract.Entry(n_u){
-    // Q_BE: B_i -- E_i
-    .{ .row = @intFromEnum(U.b_i), .col = @intFromEnum(U.b_i) },
-    .{ .row = @intFromEnum(U.b_i), .col = @intFromEnum(U.e_i) },
-    .{ .row = @intFromEnum(U.e_i), .col = @intFromEnum(U.b_i) },
-    .{ .row = @intFromEnum(U.e_i), .col = @intFromEnum(U.e_i) },
-    // Q_BC internal: B_i -- C_i
-    .{ .row = @intFromEnum(U.b_i), .col = @intFromEnum(U.c_i) },
-    .{ .row = @intFromEnum(U.c_i), .col = @intFromEnum(U.b_i) },
-    .{ .row = @intFromEnum(U.c_i), .col = @intFromEnum(U.c_i) },
-    // Q_BC external: B -- C_i
-    .{ .row = @intFromEnum(U.b), .col = @intFromEnum(U.b) },
-    .{ .row = @intFromEnum(U.b), .col = @intFromEnum(U.c_i) },
-    .{ .row = @intFromEnum(U.c_i), .col = @intFromEnum(U.b) },
-    // Q_sub: E -- C_i
-    .{ .row = @intFromEnum(U.e), .col = @intFromEnum(U.e) },
-    .{ .row = @intFromEnum(U.e), .col = @intFromEnum(U.c_i) },
-    .{ .row = @intFromEnum(U.c_i), .col = @intFromEnum(U.e) },
-    // DT thermal capacitance
-    .{ .row = @intFromEnum(U.dt), .col = @intFromEnum(U.dt) },
-    .{ .row = @intFromEnum(U.dt), .col = @intFromEnum(U.dt1) },
-    .{ .row = @intFromEnum(U.dt1), .col = @intFromEnum(U.dt) },
-    .{ .row = @intFromEnum(U.dt1), .col = @intFromEnum(U.dt1) },
-    // TT filter node capacitance (Tf * dVtt/dt for charge modulation)
-    .{ .row = @intFromEnum(U.tt), .col = @intFromEnum(U.tt) },
-    // TBB delayed BJT filter capacitance (CTHBB * dVtbb/dt)
-    .{ .row = @intFromEnum(U.tbb), .col = @intFromEnum(U.tbb) },
-};
 
 // ============================================================================
 // Noise Sources

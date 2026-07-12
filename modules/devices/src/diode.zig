@@ -126,29 +126,10 @@ pub const Instance = struct {
 //   p',p'  p',n  n,p'  n,n   (junction)
 // Combined unique entries:
 
-pub const g_pattern_override = [_]contract.Entry(n_u){
-    // RS branch: p -- p'
-    .{ .row = @intFromEnum(U.p), .col = @intFromEnum(U.p) },
-    .{ .row = @intFromEnum(U.p), .col = @intFromEnum(U.p_prime) },
-    .{ .row = @intFromEnum(U.p_prime), .col = @intFromEnum(U.p) },
-    // Junction branch: p' -- n
-    .{ .row = @intFromEnum(U.p_prime), .col = @intFromEnum(U.p_prime) },
-    .{ .row = @intFromEnum(U.p_prime), .col = @intFromEnum(U.n) },
-    .{ .row = @intFromEnum(U.n), .col = @intFromEnum(U.p_prime) },
-    .{ .row = @intFromEnum(U.n), .col = @intFromEnum(U.n) },
-};
-
 // ============================================================================
 // Sparse Capacitance Stamp Pattern
 // ============================================================================
 // Charge is on p' and n only (junction capacitance).
-
-pub const c_pattern_override = [_]contract.Entry(n_u){
-    .{ .row = @intFromEnum(U.p_prime), .col = @intFromEnum(U.p_prime) },
-    .{ .row = @intFromEnum(U.p_prime), .col = @intFromEnum(U.n) },
-    .{ .row = @intFromEnum(U.n), .col = @intFromEnum(U.p_prime) },
-    .{ .row = @intFromEnum(U.n), .col = @intFromEnum(U.n) },
-};
 
 // ============================================================================
 // Noise Sources

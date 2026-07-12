@@ -500,73 +500,9 @@ pub const Instance = struct {
 // Sparse Conductance Stamp Pattern
 // ============================================================================
 
-pub const g_pattern_override = [_]contract.Entry(n_u){
-    // External D <-> dp resistance
-    .{ .row = @intFromEnum(U.d), .col = @intFromEnum(U.d) },
-    .{ .row = @intFromEnum(U.d), .col = @intFromEnum(U.dp) },
-    .{ .row = @intFromEnum(U.dp), .col = @intFromEnum(U.d) },
-    // External S <-> sp resistance
-    .{ .row = @intFromEnum(U.s), .col = @intFromEnum(U.s) },
-    .{ .row = @intFromEnum(U.s), .col = @intFromEnum(U.sp) },
-    .{ .row = @intFromEnum(U.sp), .col = @intFromEnum(U.s) },
-    // Channel dp <-> sp with gate and body dependencies
-    .{ .row = @intFromEnum(U.dp), .col = @intFromEnum(U.dp) },
-    .{ .row = @intFromEnum(U.dp), .col = @intFromEnum(U.sp) },
-    .{ .row = @intFromEnum(U.dp), .col = @intFromEnum(U.g) },
-    .{ .row = @intFromEnum(U.dp), .col = @intFromEnum(U.b) },
-    .{ .row = @intFromEnum(U.sp), .col = @intFromEnum(U.dp) },
-    .{ .row = @intFromEnum(U.sp), .col = @intFromEnum(U.sp) },
-    .{ .row = @intFromEnum(U.sp), .col = @intFromEnum(U.g) },
-    .{ .row = @intFromEnum(U.sp), .col = @intFromEnum(U.b) },
-    // Body node: b <-> p (body contact resistance)
-    .{ .row = @intFromEnum(U.b), .col = @intFromEnum(U.b) },
-    .{ .row = @intFromEnum(U.b), .col = @intFromEnum(U.p) },
-    .{ .row = @intFromEnum(U.p), .col = @intFromEnum(U.b) },
-    .{ .row = @intFromEnum(U.p), .col = @intFromEnum(U.p) },
-    // p <-> e (body sheet resistance)
-    .{ .row = @intFromEnum(U.p), .col = @intFromEnum(U.e) },
-    .{ .row = @intFromEnum(U.e), .col = @intFromEnum(U.p) },
-    .{ .row = @intFromEnum(U.e), .col = @intFromEnum(U.e) },
-    // Thermal node
-    .{ .row = @intFromEnum(U.temp), .col = @intFromEnum(U.temp) },
-    .{ .row = @intFromEnum(U.temp), .col = @intFromEnum(U.dp) },
-    .{ .row = @intFromEnum(U.temp), .col = @intFromEnum(U.sp) },
-    // Gate row
-    .{ .row = @intFromEnum(U.g), .col = @intFromEnum(U.g) },
-};
-
 // ============================================================================
 // Sparse Capacitance Stamp Pattern
 // ============================================================================
-
-pub const c_pattern_override = [_]contract.Entry(n_u){
-    // Gate charges: G -- dp, G -- sp, G -- b, G -- e, G -- G
-    .{ .row = @intFromEnum(U.g), .col = @intFromEnum(U.g) },
-    .{ .row = @intFromEnum(U.g), .col = @intFromEnum(U.dp) },
-    .{ .row = @intFromEnum(U.g), .col = @intFromEnum(U.sp) },
-    .{ .row = @intFromEnum(U.g), .col = @intFromEnum(U.b) },
-    .{ .row = @intFromEnum(U.g), .col = @intFromEnum(U.e) },
-    // dp charges
-    .{ .row = @intFromEnum(U.dp), .col = @intFromEnum(U.dp) },
-    .{ .row = @intFromEnum(U.dp), .col = @intFromEnum(U.g) },
-    .{ .row = @intFromEnum(U.dp), .col = @intFromEnum(U.b) },
-    // sp charges
-    .{ .row = @intFromEnum(U.sp), .col = @intFromEnum(U.sp) },
-    .{ .row = @intFromEnum(U.sp), .col = @intFromEnum(U.g) },
-    .{ .row = @intFromEnum(U.sp), .col = @intFromEnum(U.b) },
-    // Body charges: b -- b, b -- e
-    .{ .row = @intFromEnum(U.b), .col = @intFromEnum(U.b) },
-    .{ .row = @intFromEnum(U.b), .col = @intFromEnum(U.e) },
-    .{ .row = @intFromEnum(U.b), .col = @intFromEnum(U.dp) },
-    .{ .row = @intFromEnum(U.b), .col = @intFromEnum(U.sp) },
-    .{ .row = @intFromEnum(U.b), .col = @intFromEnum(U.g) },
-    // Substrate charges
-    .{ .row = @intFromEnum(U.e), .col = @intFromEnum(U.e) },
-    .{ .row = @intFromEnum(U.e), .col = @intFromEnum(U.b) },
-    .{ .row = @intFromEnum(U.e), .col = @intFromEnum(U.g) },
-    // Thermal capacitance
-    .{ .row = @intFromEnum(U.temp), .col = @intFromEnum(U.temp) },
-};
 
 // ============================================================================
 // Noise Sources

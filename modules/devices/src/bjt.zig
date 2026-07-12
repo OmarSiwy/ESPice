@@ -225,55 +225,10 @@ pub const Instance = struct {
 //   Intrinsic transistor: B', C', E'
 //   Substrate diode: S, C'
 
-pub const g_pattern_override = [_]contract.Entry(n_u){
-    // RC branch: C -- C'
-    .{ .row = @intFromEnum(U.c), .col = @intFromEnum(U.c) },
-    .{ .row = @intFromEnum(U.c), .col = @intFromEnum(U.c_prime) },
-    .{ .row = @intFromEnum(U.c_prime), .col = @intFromEnum(U.c) },
-    // RB branch: B -- B'
-    .{ .row = @intFromEnum(U.b), .col = @intFromEnum(U.b) },
-    .{ .row = @intFromEnum(U.b), .col = @intFromEnum(U.b_prime) },
-    .{ .row = @intFromEnum(U.b_prime), .col = @intFromEnum(U.b) },
-    // RE branch: E -- E'
-    .{ .row = @intFromEnum(U.e), .col = @intFromEnum(U.e) },
-    .{ .row = @intFromEnum(U.e), .col = @intFromEnum(U.e_prime) },
-    .{ .row = @intFromEnum(U.e_prime), .col = @intFromEnum(U.e) },
-    // Intrinsic transistor: B' -- C', B' -- E', C' -- E' (and diagonals)
-    .{ .row = @intFromEnum(U.b_prime), .col = @intFromEnum(U.b_prime) },
-    .{ .row = @intFromEnum(U.b_prime), .col = @intFromEnum(U.c_prime) },
-    .{ .row = @intFromEnum(U.b_prime), .col = @intFromEnum(U.e_prime) },
-    .{ .row = @intFromEnum(U.c_prime), .col = @intFromEnum(U.c_prime) },
-    .{ .row = @intFromEnum(U.c_prime), .col = @intFromEnum(U.b_prime) },
-    .{ .row = @intFromEnum(U.c_prime), .col = @intFromEnum(U.e_prime) },
-    .{ .row = @intFromEnum(U.e_prime), .col = @intFromEnum(U.e_prime) },
-    .{ .row = @intFromEnum(U.e_prime), .col = @intFromEnum(U.b_prime) },
-    .{ .row = @intFromEnum(U.e_prime), .col = @intFromEnum(U.c_prime) },
-    // Substrate diode: S -- C'
-    .{ .row = @intFromEnum(U.s), .col = @intFromEnum(U.s) },
-    .{ .row = @intFromEnum(U.s), .col = @intFromEnum(U.c_prime) },
-    .{ .row = @intFromEnum(U.c_prime), .col = @intFromEnum(U.s) },
-};
-
 // ============================================================================
 // Sparse Capacitance Stamp Pattern
 // ============================================================================
 // Charges are on B', C', E', S nodes
-
-pub const c_pattern_override = [_]contract.Entry(n_u){
-    // Q_BE: B' -- E'
-    .{ .row = @intFromEnum(U.b_prime), .col = @intFromEnum(U.b_prime) },
-    .{ .row = @intFromEnum(U.b_prime), .col = @intFromEnum(U.e_prime) },
-    .{ .row = @intFromEnum(U.e_prime), .col = @intFromEnum(U.b_prime) },
-    .{ .row = @intFromEnum(U.e_prime), .col = @intFromEnum(U.e_prime) },
-    // Q_BC: B' -- C'
-    .{ .row = @intFromEnum(U.b_prime), .col = @intFromEnum(U.c_prime) },
-    .{ .row = @intFromEnum(U.c_prime), .col = @intFromEnum(U.b_prime) },
-    .{ .row = @intFromEnum(U.c_prime), .col = @intFromEnum(U.c_prime) },
-    // Q_sub: S -- C'
-    .{ .row = @intFromEnum(U.s), .col = @intFromEnum(U.s) },
-    .{ .row = @intFromEnum(U.s), .col = @intFromEnum(U.c_prime) },
-    .{ .row = @intFromEnum(U.c_prime), .col = @intFromEnum(U.s) },
-};
 
 // ============================================================================
 // Noise Sources
