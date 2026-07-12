@@ -24,14 +24,26 @@ pub fn generate(allocator: std.mem.Allocator, mir: *const Mir, lower: *const Low
     defer allocator.free(loop_headers);
     @memset(loop_headers, false);
 
+    const pred_count = try allocator.alloc(u8, n_blocks);
+    defer allocator.free(pred_count);
+    @memset(pred_count, 0);
+    const bump = struct {
+        fn f(counts: []u8, b: Block) void {
+            if (counts[b.id()] != 255) counts[b.id()] += 1;
+        }
+    }.f;
+
     var block_it = mir.blockIter();
     while (block_it.next()) |block| {
         var inst_it = mir.blockInsts(block);
         while (inst_it.next()) |inst| {
             switch (mir.instData(inst)) {
-                .branch => |br| if (br.loop_entry) {
-                    loop_headers[block.id()] = true;
+                .branch => |br| {
+                    if (br.loop_entry) loop_headers[block.id()] = true;
+                    bump(pred_count, br.then_dst);
+                    bump(pred_count, br.else_dst);
                 },
+                .jump => |j| bump(pred_count, j.destination),
                 else => {},
             }
         }
@@ -44,9 +56,11 @@ pub fn generate(allocator: std.mem.Allocator, mir: *const Mir, lower: *const Low
         .allocator = allocator,
         .block_emitted = block_emitted,
         .loop_headers = loop_headers,
+        .pred_count = pred_count,
     };
     defer cg.out.deinit();
     defer cg.top_vals.deinit(allocator);
+    defer cg.scope_starts.deinit(allocator);
 
     try cg.emitModule();
     return cg.out.toOwnedSlice();
@@ -59,10 +73,14 @@ const Codegen = struct {
     allocator: std.mem.Allocator,
     block_emitted: []bool,
     loop_headers: []const bool,
-    // Top-level (function-scope) instruction results emitted this function.
-    // Some are dead in a given eval/q (the other contribution's chain), so
-    // they get a discard before return to satisfy the unused-local check.
+    pred_count: []const u8,
+    // Instruction results emitted in the current function, segmented into
+    // lexical scopes (function body, each if/else body, loop body). Some are
+    // dead in a given eval/q variant or only used in another scope's phi
+    // update, so each scope discards its values before closing to satisfy
+    // the unused-local check.
     top_vals: Buf(Value) = .{},
+    scope_starts: Buf(u32) = .{},
     indent: u8 = 0,
     current_block: ?Block = null,
 
@@ -266,6 +284,19 @@ const Codegen = struct {
         // always emit "" so the generated field stays type-correct.
         if (p.ty == .string) return self.w().writeAll("\"\"");
         if (p.default) |val| {
+            // Defaults are expressions (`-2.0`, `2*PI/3`, `TNOM+273.15`);
+            // fold them, or negative/derived defaults silently become 0.
+            if (self.constFold(val, 0)) |f| {
+                switch (p.ty) {
+                    .real => if (std.math.isInf(f))
+                        try self.w().writeAll(if (f > 0) "inf_" else "-inf_")
+                    else
+                        try self.w().print("{e}", .{f}),
+                    .integer => try self.w().print("{d}", .{std.math.lossyCast(i32, f)}),
+                    .string => unreachable,
+                }
+                return;
+            }
             try self.emitConstValue(val);
         } else {
             switch (p.ty) {
@@ -273,6 +304,72 @@ const Codegen = struct {
                 .integer => try self.w().writeAll("0"),
                 .string => try self.w().writeAll("\"\""),
             }
+        }
+    }
+
+    /// Best-effort compile-time evaluation over the value graph. Parameter
+    /// defaults may reference other parameters (their defaults), literals and
+    /// pure math; anything touching runtime state returns null.
+    fn constFold(self: *const Codegen, val: Value, depth: u32) ?f64 {
+        if (depth > 64) return null;
+        const v = self.mir.resolveAlias(val);
+        switch (v) {
+            .undef => return null,
+            .f_zero, .zero, .false_ => return 0,
+            .one, .f_one, .true_ => return 1,
+            .f_neg_one, .neg_one => return -1,
+            .f_two => return 2,
+            .f_ten => return 10,
+            .f_inf => return std.math.inf(f64),
+            _ => switch (self.mir.valueDef(v)) {
+                .f_const => |c| return c,
+                .i_const => |c| return @floatFromInt(c),
+                .param_ref => |idx| {
+                    const p = self.lower.params.slice()[idx];
+                    return self.constFold(p.default orelse return null, depth + 1);
+                },
+                .inst_result => |inst| switch (self.mir.instData(inst)) {
+                    .unary => |u| {
+                        const a = self.constFold(u.arg, depth + 1) orelse return null;
+                        return switch (u.opcode) {
+                            .fneg, .ineg => -a,
+                            .sqrt => @sqrt(a),
+                            .exp => @exp(a),
+                            .ln => @log(a),
+                            .log => @log10(a),
+                            .floor => @floor(a),
+                            .ceil => @ceil(a),
+                            .fi_cast, .if_cast, .opt_barrier, .bi_cast, .ib_cast, .fb_cast, .bf_cast => a,
+                            .inot, .bnot => if (a == 0) 1.0 else 0.0,
+                            else => null,
+                        };
+                    },
+                    .binary => |b| {
+                        const a = self.constFold(b.args[0], depth + 1) orelse return null;
+                        const c = self.constFold(b.args[1], depth + 1) orelse return null;
+                        return switch (b.opcode) {
+                            .fadd, .iadd => a + c,
+                            .fsub, .isub => a - c,
+                            .fmul, .imul => a * c,
+                            .fdiv => a / c,
+                            .pow => std.math.pow(f64, a, c),
+                            .flt, .ilt => if (a < c) 1.0 else 0.0,
+                            .fgt, .igt => if (a > c) 1.0 else 0.0,
+                            .fle, .ile => if (a <= c) 1.0 else 0.0,
+                            .fge, .ige => if (a >= c) 1.0 else 0.0,
+                            .feq, .ieq => if (a == c) 1.0 else 0.0,
+                            .fne, .ine => if (a != c) 1.0 else 0.0,
+                            else => null,
+                        };
+                    },
+                    .ternary => |t| {
+                        const c = self.constFold(t.args[0], depth + 1) orelse return null;
+                        return self.constFold(t.args[if (c != 0.0) @as(usize, 1) else 2], depth + 1);
+                    },
+                    else => return null,
+                },
+                else => return null,
+            },
         }
     }
 
@@ -285,6 +382,8 @@ const Codegen = struct {
         // Reset per-function block/phi state so eval and q each get a full walk.
         @memset(self.block_emitted, false);
         self.top_vals.clearRetainingCapacity();
+        self.scope_starts.clearRetainingCapacity();
+        try self.pushScope();
 
         try self.w().print(
             \\pub fn {s}(comptime S: type, x: [n_u]S, model: *const Model, inst: *const Instance, t: f64) [n_u]S {{
@@ -310,6 +409,9 @@ const Codegen = struct {
 
         // Accumulate contributions into an S result vector, then return it.
         try self.w().writeAll("\n    var res = [_]S{S.con(0.0)} ** n_u;\n");
+        // A model can end up with no live contributions in one variant; keep
+        // `var` legal either way.
+        try self.w().writeAll("    _ = &res;\n");
         for (contribs) |c| {
             const val = if (reactive) c.react_val else c.resist_val;
             if (val == .f_zero or val == .undef) continue;
@@ -330,14 +432,7 @@ const Codegen = struct {
 
         // Discard any function-scope results that are dead in this variant
         // (e.g. the resistive chain when emitting q, or vice versa).
-        if (self.top_vals.len > 0) {
-            try self.w().writeAll("    _ = .{ ");
-            for (self.top_vals.slice(), 0..) |v, k| {
-                if (k != 0) try self.w().writeAll(", ");
-                try self.emitValueRef(v);
-            }
-            try self.w().writeAll(" };\n");
-        }
+        try self.popScope();
 
         try self.w().writeAll("    return res;\n}\n");
         self.indent = 0;
@@ -365,32 +460,61 @@ const Codegen = struct {
         }
     }
 
-    fn emitBlock(self: *Codegen, block: Block) !void {
+    fn emitBlock(self: *Codegen, block: Block) Error!void {
         if (self.block_emitted[block.id()]) return;
-        self.block_emitted[block.id()] = true;
 
         if (self.loop_headers[block.id()]) {
-            try self.emitWhileLoop(block);
+            _ = try self.emitWhileLoop(block);
             return;
         }
 
-        const prev = self.current_block;
-        self.current_block = block;
-        var inst_it = self.mir.blockInsts(block);
-        while (inst_it.next()) |inst| {
-            try self.emitInst(inst);
-        }
-        self.current_block = prev;
+        // Walk the chain from here: handles branch diamonds, join blocks and
+        // their phi assignments uniformly (there are no back-edges outside
+        // loops, so passing `block` as the never-matching header is safe).
+        var cont: ?Block = block;
+        while (cont) |c| cont = try self.emitChain(c, block);
     }
 
-    fn emitWhileLoop(self: *Codegen, header: Block) !void {
+    /// Emit a loop rooted at `header` (its br_loop picks body/exit).
+    /// Returns the exit block so a caller mid-chain can continue after it.
+    fn emitWhileLoop(self: *Codegen, header: Block) Error!Block {
+        self.block_emitted[header.id()] = true;
+
+        // Loop-carried values enter through header phis. Assign the entry
+        // edge's value BEFORE the loop: the pre-header block was created
+        // before the header, back-edge sources after, so the entry pair is
+        // the one with the smaller block id.
+        var phi_it = self.mir.blockInsts(header);
+        while (phi_it.next()) |inst| {
+            switch (self.mir.instData(inst)) {
+                .phi => |p| {
+                    const result = self.mir.instResult(inst);
+                    if (self.mir.resolveAlias(result) != result) continue;
+                    for (0..p.len) |i| {
+                        const pair = self.mir.phiPair(p.pairs_start, @intCast(i));
+                        if (pair.block.id() < header.id()) {
+                            try self.writeIndent();
+                            try self.emitValueRef(result);
+                            try self.w().writeAll(" = ");
+                            try self.emitValueRef(pair.value);
+                            try self.w().writeAll(";\n");
+                            break;
+                        }
+                    }
+                },
+                else => {},
+            }
+        }
+
         try self.writeIndent();
         try self.w().writeAll("while (true) {\n");
         self.indent += 1;
+        try self.pushScope();
 
         const prev = self.current_block;
         self.current_block = header;
 
+        var exit: Block = header; // overwritten by the br_loop below
         var inst_it = self.mir.blockInsts(header);
         while (inst_it.next()) |inst| {
             switch (self.mir.instData(inst)) {
@@ -400,9 +524,13 @@ const Codegen = struct {
                     try self.w().writeAll("if (");
                     try self.emitValueRef(br.cond);
                     try self.w().writeAll(".val() == 0.0) break;\n");
+                    exit = br.else_dst;
 
-                    // Emit body blocks
-                    try self.emitLoopBody(br.then_dst, header);
+                    // Body: a chain of blocks ending at the back-edge. Joins
+                    // the chain does not own bubble up; at this level we own
+                    // everything, so keep emitting until the back-edge.
+                    var cont: ?Block = br.then_dst;
+                    while (cont) |c| cont = try self.emitChain(c, header);
                 },
                 .phi => {},
                 else => try self.emitInst(inst),
@@ -410,85 +538,82 @@ const Codegen = struct {
         }
 
         self.current_block = prev;
+        try self.popScope();
         self.indent -= 1;
         try self.writeIndent();
         try self.w().writeAll("}\n");
+        return exit;
     }
 
-    fn emitLoopBody(self: *Codegen, start: Block, header: Block) Error!void {
+    /// Emit the chain of blocks starting at (and owning) `start`, inside the
+    /// loop rooted at `header`. Stops at:
+    ///  - the back-edge jump to `header`: phi updates, returns null;
+    ///  - a jump to a join block (pred_count >= 2): returns it UNEMITTED so
+    ///    the branch level that owns it emits it exactly once;
+    ///  - a block with no terminator: returns null.
+    /// if/else diamonds recurse: each arm is its own chain; the join the
+    /// arms report back is owned (continued) at this level. Nested loops are
+    /// emitted whole and the chain continues at their exit block.
+    fn emitChain(self: *Codegen, start: Block, header: Block) Error!?Block {
+        const prev = self.current_block;
+        defer self.current_block = prev;
+
         var current = start;
         while (true) {
             self.block_emitted[current.id()] = true;
-
-            const prev = self.current_block;
             self.current_block = current;
 
             var inst_it = self.mir.blockInsts(current);
             var next_block: ?Block = null;
             while (inst_it.next()) |inst| {
                 switch (self.mir.instData(inst)) {
+                    .phi => {},
                     .jump => |j| {
                         if (j.destination == header) {
-                            // Back-edge: emit phi updates then stop
                             try self.emitPhiUpdates(header, current);
-                            self.current_block = prev;
-                            return;
+                            return null;
                         }
-                        next_block = j.destination;
+                        try self.emitPhiAssigns(j.destination);
+                        if (self.loop_headers[j.destination.id()]) {
+                            // Nested loop: emit it whole, continue at exit.
+                            next_block = try self.emitWhileLoop(j.destination);
+                        } else if (self.pred_count[j.destination.id()] >= 2) {
+                            return j.destination;
+                        } else {
+                            next_block = j.destination;
+                        }
                     },
                     .branch => |br| {
-                        // Nested if/else inside loop
                         try self.writeIndent();
                         try self.w().writeAll("if (");
                         try self.emitValueRef(br.cond);
                         try self.w().writeAll(".val() != 0.0) {\n");
                         self.indent += 1;
-                        try self.emitBranchBodyLoop(br.then_dst, header);
+                        try self.pushScope();
+                        try self.emitPhiAssigns(br.then_dst);
+                        const jt = try self.emitChain(br.then_dst, header);
+                        try self.popScope();
                         self.indent -= 1;
                         try self.writeIndent();
                         try self.w().writeAll("} else {\n");
                         self.indent += 1;
-                        try self.emitBranchBodyLoop(br.else_dst, header);
+                        try self.pushScope();
+                        self.current_block = current;
+                        try self.emitPhiAssigns(br.else_dst);
+                        const je = try self.emitChain(br.else_dst, header);
+                        try self.popScope();
                         self.indent -= 1;
                         try self.writeIndent();
                         try self.w().writeAll("}\n");
-                        self.current_block = prev;
-                        return;
+                        const join = jt orelse je orelse return null;
+                        // Own the join: keep emitting at this level.
+                        next_block = join;
                     },
-                    .phi => {},
                     else => try self.emitInst(inst),
                 }
             }
 
-            self.current_block = prev;
-
-            if (next_block) |nb| {
-                current = nb;
-            } else {
-                return;
-            }
-        }
-    }
-
-    fn emitBranchBodyLoop(self: *Codegen, target: Block, header: Block) Error!void {
-        try self.emitPhiAssigns(target);
-
-        // Emit non-phi instructions, then follow jumps
-        var inst_it = self.mir.blockInsts(target);
-        while (inst_it.next()) |inst| {
-            switch (self.mir.instData(inst)) {
-                .phi => {},
-                .jump => |j| {
-                    if (j.destination == header) {
-                        try self.emitPhiUpdates(header, target);
-                        return;
-                    }
-                    // Continue to next block in loop
-                    try self.emitLoopBody(j.destination, header);
-                    return;
-                },
-                else => try self.emitInst(inst),
-            }
+            current = next_block orelse return null;
         }
     }
 
@@ -501,6 +626,11 @@ const Codegen = struct {
             switch (self.mir.instData(inst)) {
                 .phi => |p| {
                     const result = self.mir.instResult(inst);
+                    // Aliased phis were folded away (trivial-phi removal):
+                    // no `var` was declared for them, and emitting the alias
+                    // target as an assignment LHS is invalid (it may be a
+                    // constant). Their value flows through the alias.
+                    if (self.mir.resolveAlias(result) != result) continue;
                     var matched: ?Value = null;
                     for (0..p.len) |i| {
                         const pair = self.mir.phiPair(p.pairs_start, @intCast(i));
@@ -530,6 +660,8 @@ const Codegen = struct {
             switch (self.mir.instData(inst)) {
                 .phi => |p| {
                     const result = self.mir.instResult(inst);
+                    // Same aliased-phi skip as emitPhiAssigns (see there).
+                    if (self.mir.resolveAlias(result) != result) continue;
                     var matched: ?Value = null;
                     for (0..p.len) |i| {
                         const pair = self.mir.phiPair(p.pairs_start, @intCast(i));
@@ -551,10 +683,30 @@ const Codegen = struct {
         }
     }
 
-    /// Record a function-scope (indent==1) result so it can be discarded at
-    /// the end if it turns out dead in this eval/q variant.
+    /// Record a result in the current lexical scope so the scope can discard
+    /// it on close if it turns out dead (unused values are hard errors).
     fn recordTop(self: *Codegen, result: Value) !void {
-        if (self.indent == 1) try self.top_vals.append(self.allocator, result);
+        try self.top_vals.append(self.allocator, result);
+    }
+
+    fn pushScope(self: *Codegen) !void {
+        try self.scope_starts.append(self.allocator, self.top_vals.len);
+    }
+
+    /// Close a scope: discard every value it declared (a discard is a use;
+    /// discarding live values is harmless), then forget them.
+    fn popScope(self: *Codegen) !void {
+        const start = self.scope_starts.pop().?;
+        if (self.top_vals.len > start) {
+            try self.writeIndent();
+            try self.w().writeAll("_ = .{ ");
+            for (self.top_vals.slice()[start..], 0..) |v, k| {
+                if (k != 0) try self.w().writeAll(", ");
+                try self.emitValueRef(v);
+            }
+            try self.w().writeAll(" };\n");
+            self.top_vals.len = start;
+        }
     }
 
     fn emitInst(self: *Codegen, inst: Mir.Inst) Error!void {
@@ -599,12 +751,16 @@ const Codegen = struct {
                 try self.emitValueRef(br.cond);
                 try self.w().writeAll(".val() != 0.0) {\n");
                 self.indent += 1;
+                try self.pushScope();
                 try self.emitBranchBody(br.then_dst);
+                try self.popScope();
                 self.indent -= 1;
                 try self.writeIndent();
                 try self.w().writeAll("} else {\n");
                 self.indent += 1;
+                try self.pushScope();
                 try self.emitBranchBody(br.else_dst);
+                try self.popScope();
                 self.indent -= 1;
                 try self.writeIndent();
                 try self.w().writeAll("}\n");
@@ -642,6 +798,12 @@ const Codegen = struct {
 
     fn emitBranchBody(self: *Codegen, target: Block) !void {
         try self.emitPhiAssigns(target);
+        self.block_emitted[target.id()] = true;
+
+        const prev = self.current_block;
+        self.current_block = target;
+        defer self.current_block = prev;
+
         var inst_it = self.mir.blockInsts(target);
         while (inst_it.next()) |inst| {
             switch (self.mir.instData(inst)) {
@@ -682,7 +844,7 @@ const Codegen = struct {
         } else {
             try self.w().writeAll("@as(i64, @intFromFloat(");
             try self.emitValueRef(b);
-            try self.w().writeAll(".val())))))");
+            try self.w().writeAll(".val()))))");
         }
     }
 

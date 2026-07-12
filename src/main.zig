@@ -175,10 +175,27 @@ pub fn main(init: std.process.Init) !u8 {
             };
             defer sim.deinit();
 
-            sim.run() catch |e| {
+            // Big runtime-VA models (PSP103: ~24k dual-number locals) need
+            // multi-MB eval frames; the default 8 MB main stack overflows.
+            // ponytail: run the solve on a fat-stack thread; a stackless
+            // eval would need codegen-level local reuse.
+            const Runner = struct {
+                fn run(sm: *engine.Simulation, out: *?anyerror) void {
+                    sm.run() catch |e| {
+                        out.* = e;
+                    };
+                }
+            };
+            var run_err: ?anyerror = null;
+            if (std.Thread.spawn(.{ .stack_size = 512 * 1024 * 1024 }, Runner.run, .{ &sim, &run_err })) |th| {
+                th.join();
+            } else |_| {
+                Runner.run(&sim, &run_err);
+            }
+            if (run_err) |e| {
                 std.debug.print("Engine error: {s}\n", .{@errorName(e)});
                 return skip(io, @errorName(e));
-            };
+            }
 
             const results = sim.getResults();
             if (opts.raw_path) |raw_path| {

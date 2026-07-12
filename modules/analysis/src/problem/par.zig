@@ -306,7 +306,8 @@ pub const ParEval = struct {
         // seen and wait forever (4-thread spin livelock).
         const epoch0 = self.epoch.load(.acquire);
         for (self.threads, 1..) |*th, lane| {
-            th.* = std.Thread.spawn(.{}, workerMain, .{ self, @as(u32, @intCast(lane)), epoch0 }) catch
+            // Fat stacks: runtime-VA evals (PSP103+) carry multi-MB frames.
+            th.* = std.Thread.spawn(.{ .stack_size = 512 * 1024 * 1024 }, workerMain, .{ self, @as(u32, @intCast(lane)), epoch0 }) catch
                 @panic("ParEval: worker spawn failed");
         }
         self.started = true;

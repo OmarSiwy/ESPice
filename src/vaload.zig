@@ -19,7 +19,11 @@ const dyn = analysis.problem.dyn;
 var registry: std.StringHashMapUnmanaged(dyn.LoadedDevice) = .empty;
 
 pub fn get(name: []const u8) ?*const dyn.DeviceVtable {
-    const dev = registry.get(name) orelse return null;
+    // Keys are stored lowercased; the netlist tokenizer lowercases names
+    // while VA module names keep their case (PSP103VA).
+    var buf: [128]u8 = undefined;
+    if (name.len > buf.len) return null;
+    const dev = registry.get(std.ascii.lowerString(&buf, name)) orelse return null;
     return dev.vt;
 }
 
@@ -39,7 +43,13 @@ pub fn ensureLoaded(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !void 
     defer gpa.free(name_buf);
     var zig_source: []const u8 = undefined;
     if (std.mem.endsWith(u8, path, ".va")) {
-        var result = try fastvaf.compileSource(gpa, source, null);
+        // Local `include paths resolve relative to the .va file (same policy
+        // as the .hdl card's own path resolution).
+        const va_dir = std.fs.path.dirname(path) orelse ".";
+        var result = try fastvaf.compileSourceOpts(gpa, source, null, .{
+            .io = io,
+            .include_dirs = &.{va_dir},
+        });
         defer result.deinit();
         zig_source = try fastvaf.va.codegen.generate(gpa, &result.mir, &result.lower);
         name_buf = try gpa.dupe(u8, result.mir.name);
@@ -49,7 +59,10 @@ pub fn ensureLoaded(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !void 
     } else return error.UnknownHdlExtension;
     defer gpa.free(zig_source);
 
-    if (registry.contains(name_buf)) return;
+    var lower_buf: [128]u8 = undefined;
+    if (name_buf.len > lower_buf.len) return error.NameTooLong;
+    const lower_name = std.ascii.lowerString(&lower_buf, name_buf);
+    if (registry.contains(lower_name)) return;
 
     // Key: generated source ⊕ boundary layout (layoutHash covers the zig
     // version). Any change to either lands in a fresh cache slot.
@@ -96,7 +109,7 @@ pub fn ensureLoaded(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !void 
     const loaded = try dyn.LoadedDevice.open(so_path);
 
     // Key string owned by the registry (process lifetime).
-    const owned_name = try gpa.dupe(u8, name_buf);
+    const owned_name = try gpa.dupe(u8, lower_name);
     errdefer gpa.free(owned_name);
     try registry.put(gpa, owned_name, loaded);
 }

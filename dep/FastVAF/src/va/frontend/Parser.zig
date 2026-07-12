@@ -311,7 +311,8 @@ pub fn parseSourceFile(self: *Parser) !Ast.SourceFile {
 fn parseDiscipline(self: *Parser) !Ast.DisciplineDecl {
     _ = try self.expect(.kw_discipline);
     const name_idx = try self.expectIdentOrKeyword();
-    _ = try self.expect(.semicolon);
+    // Semicolon optional: pre-LRM inline declarations (EKV) omit it.
+    _ = self.eat(.semicolon);
 
     var attrs: Buf(Ast.DisciplineAttr) = .empty;
     var potential_nature: ?[]const u8 = null;
@@ -404,7 +405,8 @@ fn parseNature(self: *Parser) !Ast.NatureDecl {
         const p = try self.expectIdentOrKeyword();
         parent = self.tokenText(p);
     }
-    _ = try self.expect(.semicolon);
+    // Semicolon optional: pre-LRM inline declarations (EKV) omit it.
+    _ = self.eat(.semicolon);
 
     var attrs: Buf(Ast.NatureAttr) = .empty;
     while (self.peek() != .kw_endnature and self.peek() != .eof) {
