@@ -315,7 +315,16 @@ pub fn limitBatch(
         }
         const lm = D.limit(@addrSpaceCast(&models[id]), @addrSpaceCast(&instances[id]), cur, old);
         inline for (0..n_u) |u| {
-            if (lm[u] != cur[u]) flag = 1;
+            // Mirror batch.zig: only junction-limited unknowns
+            // (limit_flag_unknowns) force another Newton iteration.
+            const flags: bool = comptime blk: {
+                if (!@hasDecl(D, "limit_flag_unknowns")) break :blk true;
+                for (D.limit_flag_unknowns) |fu| {
+                    if (@intFromEnum(fu) == u) break :blk true;
+                }
+                break :blk false;
+            };
+            if (flags and lm[u] != cur[u]) flag = 1;
             lim[id * n_u + u] = lm[u];
         }
     }
