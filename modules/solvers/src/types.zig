@@ -103,6 +103,16 @@ pub fn logSweep(f_start: f64, f_stop: f64, points_per_decade: u16) LogSweep {
     return .{ .f_start = f_start, .f_stop = f_stop, .n = logSweepCount(f_start, f_stop, points_per_decade) };
 }
 
+/// Fill omegas (and optionally freqs) for a log sweep — both logSweepCount long.
+pub fn fillLogSweep(f_start: f64, f_stop: f64, points_per_decade: u16, freqs: ?[]f64, omegas: []f64) void {
+    var sw = logSweep(f_start, f_stop, points_per_decade);
+    var i: usize = 0;
+    while (sw.next()) |f| : (i += 1) {
+        if (freqs) |fr| fr[i] = f;
+        omegas[i] = 2.0 * std.math.pi * f;
+    }
+}
+
 // ============================================================================
 // Waveform measurement
 // ============================================================================

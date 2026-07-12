@@ -53,12 +53,7 @@ pub const SolveResult = struct {
 // SIMD helpers (no @memset/@memcpy per convention)
 // ---------------------------------------------------------------------------
 
-inline fn copySimd(dst: []f64, src: []const f64) void {
-    const n = @min(dst.len, src.len);
-    var i: usize = 0;
-    while (i + W <= n) : (i += W) dst[i..][0..W].* = src[i..][0..W].*;
-    while (i < n) : (i += 1) dst[i] = src[i];
-}
+const copySimd = root.copySimd;
 
 /// SIMD dot product: λ^T · v
 inline fn dotSimd(a: []const f64, b: []const f64) f64 {

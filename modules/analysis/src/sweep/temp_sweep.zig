@@ -142,117 +142,101 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const ckt = ctx.circuit;
     const a = ctx.allocator;
     const max_points: usize = numPoints(opts);
+    const ncols = ctx.probes.len + 1;
 
-    // -- GPU batch path: all temp points are independent Newton solves --
-    // ponytail: batch all temps in one GPU launch; serial fallback below
-    if (ckt.gpu_hook) |gh| if (gh.solve_batch) |sb| gpu_batch: {
-        const repack_fn = gh.repack orelse break :gpu_batch;
+    // Both paths land here: point-major (temp, probes...) data table.
+    var data: []f64 = &.{};
+    var npoints: usize = 0;
 
-        // Allocate per-lane x-vectors and results
-        const x_lanes = a.alloc([]f64, max_points) catch break :gpu_batch;
-        defer a.free(x_lanes);
-        const results = a.alloc(converger.Result, max_points) catch break :gpu_batch;
-        defer a.free(results);
-        const temp_vals = a.alloc(f64, max_points) catch break :gpu_batch;
-        defer a.free(temp_vals);
+    fill: {
+        // -- GPU batch path: all temp points are independent Newton solves --
+        // ponytail: batch all temps in one GPU launch; serial fallback below
+        if (ckt.gpu_hook) |gh| if (gh.solve_batch) |sb| gpu_batch: {
+            const repack_fn = gh.repack orelse break :gpu_batch;
 
-        var n_lanes: usize = 0;
-        errdefer for (x_lanes[0..n_lanes]) |lane| a.free(lane);
+            // Allocate per-lane x-vectors and results
+            const x_lanes = a.alloc([]f64, max_points) catch break :gpu_batch;
+            defer a.free(x_lanes);
+            const results = a.alloc(converger.Result, max_points) catch break :gpu_batch;
+            defer a.free(results);
+            const temp_vals = a.alloc(f64, max_points) catch break :gpu_batch;
+            defer a.free(temp_vals);
 
-        const nopts = opts.dc_options.tol.newtonOpts(opts.dc_options.tol.itl2);
+            var n_lanes: usize = 0;
+            errdefer for (x_lanes[0..n_lanes]) |lane| a.free(lane);
 
-        // Prepare each lane: set temp, recompute, repack to GPU, seed x
-        var temp = opts.t_start;
-        while (temp <= opts.t_stop + opts.t_step * 0.5) : (temp += opts.t_step) {
-            const xl = a.alloc(f64, ckt.n) catch break :gpu_batch;
-            ckt.setCircuitTemp(@floatCast(temp));
-            ckt.recompute();
-            repack_fn(gh.ctx) catch {
-                a.free(xl);
-                break :gpu_batch;
-            };
-            root.zeroSimd(xl);
-            ckt.seedJunctions(xl);
-            temp_vals[n_lanes] = temp;
-            x_lanes[n_lanes] = xl;
-            n_lanes += 1;
-        }
-        defer for (x_lanes[0..n_lanes]) |lane| a.free(lane);
+            const nopts = opts.dc_options.tol.newtonOpts(opts.dc_options.tol.itl2);
 
-        // Batch solve — on error, fall through to serial
-        sb(gh.ctx, x_lanes[0..n_lanes], 0, nopts, results[0..n_lanes]) catch break :gpu_batch;
-
-        // Restore circuit temp before formatting results
-        ckt.setCircuitTemp(@floatCast(opts.t_nom));
-        ckt.recompute();
-
-        // Collect converged results
-        const names = try root.probeNames(ctx, "temp");
-        errdefer {
-            for (names[1..]) |s| a.free(s);
-            a.free(names);
-        }
-        const ncols = names.len;
-        var npoints: usize = 0;
-
-        // Count converged to size the output
-        for (results[0..n_lanes]) |r| {
-            if (r.converged) npoints += 1;
-        }
-
-        const data = try a.alloc(f64, npoints * ncols);
-        var pt: usize = 0;
-        for (0..n_lanes) |i| {
-            if (!results[i].converged) continue;
-            const row = data[pt * ncols ..][0..ncols];
-            row[0] = temp_vals[i];
-            for (ctx.probes, 0..) |node, p| {
-                row[1 + p] = x_lanes[i][node];
+            // Prepare each lane: set temp, recompute, repack to GPU, seed x
+            var temp = opts.t_start;
+            while (temp <= opts.t_stop + opts.t_step * 0.5) : (temp += opts.t_step) {
+                const xl = a.alloc(f64, ckt.n) catch break :gpu_batch;
+                ckt.setCircuitTemp(@floatCast(temp));
+                ckt.recompute();
+                repack_fn(gh.ctx) catch {
+                    a.free(xl);
+                    break :gpu_batch;
+                };
+                root.zeroSimd(xl);
+                ckt.seedJunctions(xl);
+                temp_vals[n_lanes] = temp;
+                x_lanes[n_lanes] = xl;
+                n_lanes += 1;
             }
-            pt += 1;
-        }
+            defer for (x_lanes[0..n_lanes]) |lane| a.free(lane);
 
-        return .{
-            .plotname = "Temperature Sweep",
-            .varnames = names,
-            .is_complex = false,
-            .npoints = npoints,
-            .data = data,
+            // Batch solve — on error, fall through to serial
+            sb(gh.ctx, x_lanes[0..n_lanes], 0, nopts, results[0..n_lanes]) catch break :gpu_batch;
+
+            // Restore circuit temp before formatting results
+            ckt.setCircuitTemp(@floatCast(opts.t_nom));
+            ckt.recompute();
+
+            // Collect converged results
+            for (results[0..n_lanes]) |r| {
+                if (r.converged) npoints += 1;
+            }
+            data = try a.alloc(f64, npoints * ncols);
+            var pt: usize = 0;
+            for (0..n_lanes) |i| {
+                if (!results[i].converged) continue;
+                const row = data[pt * ncols ..][0..ncols];
+                row[0] = temp_vals[i];
+                for (ctx.probes, 0..) |node, p| {
+                    row[1 + p] = x_lanes[i][node];
+                }
+                pt += 1;
+            }
+            break :fill;
         };
-    };
 
-    // -- Serial CPU fallback --
-    const temps = try a.alloc(f64, max_points);
-    defer a.free(temps);
-    const values = try a.alloc(f64, ctx.probes.len * max_points);
-    defer a.free(values);
-    const x = try a.alloc(f64, ckt.n);
-    defer a.free(x);
+        // -- Serial CPU fallback --
+        const temps = try a.alloc(f64, max_points);
+        defer a.free(temps);
+        const values = try a.alloc(f64, ctx.probes.len * max_points);
+        defer a.free(values);
+        const x = try a.alloc(f64, ckt.n);
+        defer a.free(x);
 
-    // sweep() restores on success; this covers early-error paths too.
-    defer {
-        ckt.setCircuitTemp(@floatCast(opts.t_nom));
-        ckt.recompute();
-    }
-    const st = try sweep(ckt, x, ctx.probes, &.{}, temps, values, opts);
+        // sweep() restores on success; this covers early-error paths too.
+        defer {
+            ckt.setCircuitTemp(@floatCast(opts.t_nom));
+            ckt.recompute();
+        }
+        const st = try sweep(ckt, x, ctx.probes, &.{}, temps, values, opts);
 
-    const npoints: usize = st.points;
-    const names = try root.probeNames(ctx, "temp");
-    errdefer {
-        for (names[1..]) |s| a.free(s);
-        a.free(names);
-    }
-    const ncols = names.len;
-    const data = try a.alloc(f64, npoints * ncols);
-    for (0..npoints) |i| {
-        const row = data[i * ncols ..][0..ncols];
-        row[0] = temps[i];
-        for (0..ctx.probes.len) |p| row[1 + p] = values[p * max_points + i];
+        npoints = st.points;
+        data = try a.alloc(f64, npoints * ncols);
+        for (0..npoints) |i| {
+            const row = data[i * ncols ..][0..ncols];
+            row[0] = temps[i];
+            for (0..ctx.probes.len) |p| row[1 + p] = values[p * max_points + i];
+        }
     }
 
     return .{
         .plotname = "Temperature Sweep",
-        .varnames = names,
+        .varnames = try root.probeNames(ctx, "temp"),
         .is_complex = false,
         .npoints = npoints,
         .data = data,

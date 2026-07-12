@@ -55,32 +55,13 @@ pub fn sweep(
 
     // ponytail: GPU batch path — all freq points are independent (G+jωC) solves.
     // Falls through to serial on error or when hook is absent.
-    if (ckt.gpu_hook) |gh| if (gh.freq_solve_batch) |fsb| gpu: {
+    if (ckt.gpu_hook != null) gpu: {
         const omegas = allocator.alloc(f64, n_points) catch break :gpu;
         defer allocator.free(omegas);
+        types.fillLogSweep(options.f_start, options.f_stop, options.points_per_decade, freqs, omegas);
 
-        var sw_gpu = types.logSweep(options.f_start, options.f_stop, options.points_per_decade);
-        for (0..n_points) |i| {
-            freqs[i] = sw_gpu.next().?;
-            omegas[i] = 2.0 * std.math.pi * freqs[i];
-        }
-
-        const x_out = allocator.alloc([]f64, n_points) catch break :gpu;
-        var n_alloc: usize = 0;
-        for (x_out) |*slot| {
-            slot.* = allocator.alloc(f64, nn) catch {
-                for (x_out[0..n_alloc]) |buf| allocator.free(buf);
-                allocator.free(x_out);
-                break :gpu;
-            };
-            n_alloc += 1;
-        }
-        defer {
-            for (x_out) |buf| allocator.free(buf);
-            allocator.free(x_out);
-        }
-
-        fsb(gh.ctx, ckt.g_vals, ckt.c_vals, omegas, rhs, x_out, @intCast(n)) catch break :gpu;
+        const x_out = ckt.gpuFreqBatch(allocator, ckt.g_vals, ckt.c_vals, omegas, rhs, @intCast(n), false) orelse break :gpu;
+        defer root.freeFreqLanes(allocator, x_out);
 
         for (0..n_points) |k| {
             for (probes, 0..) |node, p| {
@@ -91,7 +72,7 @@ pub fn sweep(
             }
         }
         return;
-    };
+    }
 
     // Serial fallback
     var sw = types.logSweep(options.f_start, options.f_stop, options.points_per_decade);

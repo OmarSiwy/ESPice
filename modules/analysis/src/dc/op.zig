@@ -5,8 +5,6 @@ const std = @import("std");
 const root = @import("../root.zig");
 const converger = @import("solvers").converger;
 
-const W = std.simd.suggestVectorLength(f64) orelse 8;
-
 pub const Method = enum { plain, gmin, source, jfnk };
 
 pub const Options = struct {
@@ -21,15 +19,7 @@ pub const SolveResult = struct {
     method_used: Method,
 };
 
-// -- SIMD helpers (no @memset/@memcpy) ----------------------------------------
-
-/// SIMD copy: dst[0..n] = src[0..n].
-inline fn copySimd(dst: []f64, src: []const f64) void {
-    const n = @min(dst.len, src.len);
-    var i: usize = 0;
-    while (i + W <= n) : (i += W) dst[i..][0..W].* = src[i..][0..W].*;
-    while (i < n) : (i += 1) dst[i] = src[i];
-}
+const copySimd = root.copySimd;
 
 /// Cold-start: zero x, then apply SPICE MODEINITJCT junction seeds so
 /// iteration 1 linearizes at vcrit/vto instead of 0.

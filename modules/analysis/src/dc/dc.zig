@@ -74,15 +74,23 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     // ponytail: cold-start-only batch; chunked warm-start is future work —
     // add when profiling shows serial warm-march dominates a large sweep.
     // -----------------------------------------------------------------------
-    if (ckt.gpu_hook) |gh| if (gh.solve_batch) |sb| {
-        return runBatchGpu(ctx, ckt, a, t, gh, sb, opts, npoints, ncols, data) catch |e| switch (e) {
-            // GPU errors fall through to serial path.
-            error.OutOfMemory => return e,
-            else => runSerial(ctx, ckt, a, t, opts, npoints, ncols, data),
+    fill: {
+        if (ckt.gpu_hook) |gh| if (gh.solve_batch) |sb| {
+            if (runBatchGpu(ctx, ckt, a, t, gh, sb, opts, npoints, ncols, data)) |_|
+                break :fill
+            else |e| if (e == error.OutOfMemory) return e;
+            // Other GPU errors fall through to the serial path.
         };
-    };
+        try runSerial(ctx, ckt, a, t, opts, npoints, ncols, data);
+    }
 
-    return runSerial(ctx, ckt, a, t, opts, npoints, ncols, data);
+    return .{
+        .plotname = "DC transfer characteristic",
+        .varnames = try root.probeNames(ctx, "v-sweep"),
+        .is_complex = false,
+        .npoints = npoints,
+        .data = data,
+    };
 }
 
 /// GPU batch: cold-start every sweep point, launch one batched Newton.
@@ -97,7 +105,7 @@ fn runBatchGpu(
     npoints: usize,
     ncols: usize,
     data: []f64,
-) !root.Result {
+) !void {
     // Allocate per-lane x-vectors and result slots.
     const x_lanes = try a.alloc([]f64, npoints);
     defer {
@@ -139,14 +147,6 @@ fn runBatchGpu(
             for (row[1..]) |*out| out.* = std.math.nan(f64);
         }
     }
-
-    return .{
-        .plotname = "DC transfer characteristic",
-        .varnames = try root.probeNames(ctx, "v-sweep"),
-        .is_complex = false,
-        .npoints = npoints,
-        .data = data,
-    };
 }
 
 /// Serial sweep: warm-start from previous point, cold-restart on failure.
@@ -159,7 +159,7 @@ fn runSerial(
     npoints: usize,
     ncols: usize,
     data: []f64,
-) !root.Result {
+) !void {
     const x = try a.alloc(f64, ckt.n);
     defer a.free(x);
     root.zeroSimd(x);
@@ -212,14 +212,6 @@ fn runSerial(
             cold = true;
         }
     }
-
-    return .{
-        .plotname = "DC transfer characteristic",
-        .varnames = try root.probeNames(ctx, "v-sweep"),
-        .is_complex = false,
-        .npoints = npoints,
-        .data = data,
-    };
 }
 
 fn sweepCount(start: f64, stop: f64, step: f64) usize {
