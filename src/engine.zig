@@ -63,7 +63,7 @@ pub const Simulation = struct {
     results: []Result,
     n_results: u32,
     /// Parallel eval context (policy: created here, referenced by Circuit).
-    par_eval: ?analysis.problem.ParEval,
+    par_eval: ?devices.par.ParEval,
     /// GPU compute handle (non-null when GPU active).
     gpu_compute: ?compute.Compute = null,
     /// Whole-solve megakernel driver (attached in run(); see par_eval note).
@@ -83,11 +83,9 @@ pub const Simulation = struct {
 
         try netlist.tagSubcircuitNodes(&b, nl.devices);
 
-        // Baked va_devices decls (permanently-empty stub — compiles to
-        // nothing). Must happen before compile() freezes the pattern.
-        try netlist.addVaDevices(&b, arena, nl);
-        // Runtime-loaded (.hdl card, dlopen'd) VA/V devices: same erased
-        // Proto path, batch machinery lives inside the model's .so.
+        // Runtime-loaded (.hdl card, dlopen'd) VA/V devices: erased Proto
+        // path, batch machinery lives inside the model's .so. Must happen
+        // before compile() freezes the pattern.
         try netlist.addDynDevices(&b, arena, nl);
 
         var sim: Simulation = undefined;
@@ -157,9 +155,9 @@ pub const Simulation = struct {
             if (lanes < 2) break :enable_par;
             var total: u64 = 0;
             for (sim.circuit.batches) |batch| total += batch.count;
-            if (total < analysis.problem.default_min_instances) break :enable_par;
+            if (total < devices.par.default_min_instances) break :enable_par;
             const ckt = &sim.circuit;
-            sim.par_eval = analysis.problem.ParEval.init(arena, io_val, ckt.batches, ckt.nnz, ckt.n, ckt.has_charge, ckt.trash_slot, @min(lanes, 16)) catch break :enable_par;
+            sim.par_eval = devices.par.ParEval.init(arena, io_val, ckt.batches, ckt.nnz, ckt.n, ckt.has_charge, ckt.trash_slot, @min(lanes, 16)) catch break :enable_par;
         }
 
         return sim;
@@ -348,7 +346,7 @@ pub const GpuContext = struct {
     k_freq: ?compute.Kernel,
     k_freq_adj: ?compute.Kernel,
     blob: compute.Buffer,
-    prob: analysis.problem.GpuProblem,
+    prob: analysis.GpuProblem,
     n_blocks: u32,
     block_dim: u32,
     shared_uploaded: bool,
@@ -357,7 +355,7 @@ pub const GpuContext = struct {
 
     pub fn init(gpa: std.mem.Allocator, comp: *compute.Compute, ckt: *analysis.Circuit, ptx: []const u8) ?*GpuContext {
         if ((comp.backend != .cuda and comp.backend != .hip) or ptx.len == 0) return null;
-        if (!analysis.problem.gpuEligible(ckt)) {
+        if (!analysis.gpuEligible(ckt)) {
             for (ckt.batches) |b| if (b.hooks.gpu_pack == null)
                 std.debug.print("GPU declined: batch '{s}' not in the megakernel (runtime-loaded or stateful); CPU solve.\n", .{b.type_name});
             return null;
@@ -402,7 +400,7 @@ pub const GpuContext = struct {
             .max_iter = 100,
             .gmres_m = 30,
         };
-        var prob = analysis.problem.packGpuProblem(gpa, ckt, tol, n_blocks, .{}) catch {
+        var prob = analysis.packForGpu(gpa, ckt, tol, n_blocks, .{}) catch {
             module.deinit();
             return null;
         };
@@ -600,23 +598,15 @@ pub const GpuContext = struct {
             }
         }
 
-        // Process in chunks of max_lanes
+        // Process in chunks of max_lanes; header passed by kernel arg,
+        // n_lanes patched per chunk.
         var done: usize = 0;
-        const batch_hdr_bytes = std.mem.asBytes(&abi.BatchLaunchHeader{
-            .n_lanes = 0, // patched per chunk
-            .blocks_per_lane = blocks_per_lane,
-            .shared_size = shared_size,
-            .lane_stride = lane_stride,
-        });
-
-        // Stage for batch header (upload per chunk)
         var batch_hdr_stage: abi.BatchLaunchHeader = .{
             .n_lanes = 0,
             .blocks_per_lane = blocks_per_lane,
             .shared_size = shared_size,
             .lane_stride = lane_stride,
         };
-        _ = batch_hdr_bytes;
 
         while (done < n_total) {
             const chunk = @min(max_lanes, @as(u32, @intCast(n_total - done)));
@@ -692,7 +682,7 @@ pub const GpuContext = struct {
         }
 
         const hdr_old: *const abi.Header = @ptrCast(@alignCast(self.prob.stage.ptr));
-        var prob = try analysis.problem.packGpuProblem(self.gpa, self.ckt, hdr_old.tol, self.n_blocks, .{
+        var prob = try analysis.packForGpu(self.gpa, self.ckt, hdr_old.tol, self.n_blocks, .{
             .probes = probes,
             .breakpoints = bps.items,
             .wave_capacity = tran_chunk_steps + 1,
@@ -757,8 +747,6 @@ pub const GpuContext = struct {
         var total_steps: u32 = 0;
         var first = true;
         var pending_buf: ?[]u8 = null; // buffer with in-flight async download
-        const active_buf: ?[]u8 = null;
-        _ = active_buf;
 
         while (true) {
             hdr.tran_reset = @intFromBool(first);
@@ -993,74 +981,6 @@ pub const GpuContext = struct {
         for (0..n_points) |p| {
             const src = sol_f64[p * nn ..][0..nn];
             for (0..nn) |i| x_out[p][i] = src[i];
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // MC statistics — extract probe values from batch solve results
-    // without downloading full x-vectors. Downloads only n_probes per lane
-    // instead of n per lane, reducing PCIe traffic by ~1000x for large
-    // circuits with a few output probes.
-    // -----------------------------------------------------------------------
-
-    pub const McStats = struct {
-        mean: f64,
-        std_dev: f64,
-        min: f64,
-        max: f64,
-        n_converged: u32,
-    };
-
-    /// After a solveBatch call, extract probe values from the lane results
-    /// still in device memory and compute per-probe statistics on the host.
-    /// Returns stats[n_probes]. Only downloads n_probes * n_converged f64
-    /// instead of n * n_lanes f64 — a ~(n/n_probes)x bandwidth reduction.
-    pub fn batchMcStats(
-        _: *GpuContext,
-        lane_results: []const converger.Result,
-        x_lanes: []const []const f64,
-        probes: []const u32,
-        stats_out: []McStats,
-    ) void {
-        const n_lanes = lane_results.len;
-        const n_probes = probes.len;
-
-        // Count converged trials and extract probe values
-        for (0..n_probes) |p| {
-            var sum: f64 = 0;
-            var sum_sq: f64 = 0;
-            var vmin: f64 = std.math.inf(f64);
-            var vmax: f64 = -std.math.inf(f64);
-            var n_conv: u32 = 0;
-
-            for (0..n_lanes) |lane| {
-                if (!lane_results[lane].converged) continue;
-                const v = x_lanes[lane][probes[p]];
-                sum += v;
-                sum_sq += v * v;
-                vmin = @min(vmin, v);
-                vmax = @max(vmax, v);
-                n_conv += 1;
-            }
-
-            if (n_conv == 0) {
-                stats_out[p] = .{ .mean = 0, .std_dev = 0, .min = 0, .max = 0, .n_converged = 0 };
-                continue;
-            }
-
-            const nc: f64 = @floatFromInt(n_conv);
-            const mean = sum / nc;
-            const variance = if (n_conv > 1)
-                (sum_sq - nc * mean * mean) / @as(f64, @floatFromInt(n_conv - 1))
-            else
-                0;
-            stats_out[p] = .{
-                .mean = mean,
-                .std_dev = @sqrt(@max(0, variance)),
-                .min = vmin,
-                .max = vmax,
-                .n_converged = n_conv,
-            };
         }
     }
 

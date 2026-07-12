@@ -442,7 +442,7 @@ test "codegen last_crossing emits Instance field" {
     try std.testing.expect(std.mem.indexOf(u8, zig_src, "@compileError") == null);
 }
 
-test "codegen absdelay passes through at DC" {
+test "codegen absdelay uses ring buffer state" {
     const source =
         \\`include "disciplines.vams"
         \\module delay_test(p, n);
@@ -457,10 +457,9 @@ test "codegen absdelay passes through at DC" {
     defer result.deinit();
     const zig_src = try zvaf.codegen.generate(std.testing.allocator, &result.mir, &result.lower);
     defer std.testing.allocator.free(zig_src);
-    // absdelay should pass through the input (x[...] reference), no instance field
-    try std.testing.expect(std.mem.indexOf(u8, zig_src, "_absdelay_") == null);
-    // No state machine needed for absdelay-only devices
-    try std.testing.expect(std.mem.indexOf(u8, zig_src, "pub const State") == null);
+    // absdelay is now stateful with ring buffer instance fields
+    try std.testing.expect(std.mem.indexOf(u8, zig_src, "_absdelay_") != null);
+    try std.testing.expect(std.mem.indexOf(u8, zig_src, "pub const State") != null);
     try std.testing.expect(std.mem.indexOf(u8, zig_src, "@compileError") == null);
 }
 
@@ -482,8 +481,10 @@ test "codegen cross/above/timer return 0 (event condition)" {
     defer result.deinit();
     const zig_src = try zvaf.codegen.generate(std.testing.allocator, &result.mir, &result.lower);
     defer std.testing.allocator.free(zig_src);
-    // cross is an event — no instance field, no state machine for events alone
-    try std.testing.expect(std.mem.indexOf(u8, zig_src, "_cross_") == null);
+    // cross is an event — Instance tracks prev/fired for crossing detection
+    try std.testing.expect(std.mem.indexOf(u8, zig_src, "_cross_0_fired") != null);
+    try std.testing.expect(std.mem.indexOf(u8, zig_src, "_cross_0_prev") != null);
+    try std.testing.expect(std.mem.indexOf(u8, zig_src, "updateState") != null);
     try std.testing.expect(std.mem.indexOf(u8, zig_src, "@compileError") == null);
 }
 
@@ -504,6 +505,8 @@ test "codegen laplace_nd emits Instance + State" {
     defer std.testing.allocator.free(zig_src);
     try std.testing.expect(std.mem.indexOf(u8, zig_src, "_laplace_nd_0_val") != null);
     try std.testing.expect(std.mem.indexOf(u8, zig_src, "pub const State = struct") != null);
+    // State-space update should use _x state and backward Euler
+    try std.testing.expect(std.mem.indexOf(u8, zig_src, "_laplace_nd_0_x") != null);
     try std.testing.expect(std.mem.indexOf(u8, zig_src, "@compileError") == null);
 }
 

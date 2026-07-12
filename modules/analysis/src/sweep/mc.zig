@@ -73,20 +73,6 @@ pub const YieldSpec = struct {
 };
 
 // ============================================================================
-// SIMD helpers (no @memset/@memcpy)
-// ============================================================================
-
-/// SIMD zero: buf[0..n] = 0.
-inline fn zeroSlice(buf: anytype) void {
-    root.zeroSimd(buf);
-}
-
-/// Zero a u32 slice (scalar — u32 is cold path).
-inline fn zeroU32(buf: []u32) void {
-    for (buf) |*v| v.* = 0;
-}
-
-// ============================================================================
 // Monte Carlo analysis entry point
 // ============================================================================
 
@@ -121,7 +107,7 @@ pub fn analyze(
     // Track yield counts per spec
     const yield_counts = try allocator.alloc(u32, yield_specs.len);
     defer allocator.free(yield_counts);
-    zeroU32(yield_counts);
+    for (yield_counts) |*v| v.* = 0;
 
     // Initialize stats
     for (stats) |*st| {

@@ -17,7 +17,6 @@
 //! sections idle the grid for O(m²) flops (irrelevant next to evals).
 
 const devices = @import("dev_models");
-const va_devices = @import("va_devices");
 const abi = @import("gpu_abi");
 
 // Driver TU imports the models ONLY for decl names + kindId hashes; the
@@ -52,19 +51,15 @@ fn assemble(comptime with_diag: bool, g: *const G, hdr: *addrspace(.global) cons
     const table: [*]addrspace(.global) const abi.BatchDesc = @ptrCast(@alignCast(blob + hdr.off_batch_table));
     for (0..hdr.n_batches) |bi| {
         const desc = &table[bi];
-        // Builtin models + va_devices decls (permanently-empty stub)
-        // dispatch identically: same contract, same kindId.
-        inline for (.{ devices, va_devices }) |M| {
-            inline for (@typeInfo(M).@"struct".decls) |decl| {
-                if (comptime @TypeOf(@field(M, decl.name)) == type) {
-                    const D = @field(M, decl.name);
-                    if (comptime isDevice(D)) {
-                        if (desc.kind_id == comptime abi.kindId(D)) {
-                            // Physics lives in the model's stub TU; resolved by nvlink.
-                            const suffix = if (with_diag) "_d" else "_r";
-                            const f = @extern(common.EbFn, .{ .name = "arp_eb_" ++ decl.name ++ suffix });
-                            f(g, desc, blob, x, t, &env, limiting, x_base);
-                        }
+        inline for (@typeInfo(devices).@"struct".decls) |decl| {
+            if (comptime @TypeOf(@field(devices, decl.name)) == type) {
+                const D = @field(devices, decl.name);
+                if (comptime isDevice(D)) {
+                    if (desc.kind_id == comptime abi.kindId(D)) {
+                        // Physics lives in the model's stub TU; resolved by nvlink.
+                        const suffix = if (with_diag) "_d" else "_r";
+                        const f = @extern(common.EbFn, .{ .name = "arp_eb_" ++ decl.name ++ suffix });
+                        f(g, desc, blob, x, t, &env, limiting, x_base);
                     }
                 }
             }
@@ -99,15 +94,13 @@ fn limitPass(
     for (0..hdr.n_batches) |bi| {
         const desc = &table[bi];
         if (desc.off_lim == 0) continue;
-        inline for (.{ devices, va_devices }) |M| {
-            inline for (@typeInfo(M).@"struct".decls) |decl| {
-                if (comptime @TypeOf(@field(M, decl.name)) == type) {
-                    const D = @field(M, decl.name);
-                    if (comptime isDevice(D) and @hasDecl(D, "limit")) {
-                        if (desc.kind_id == comptime abi.kindId(D)) {
-                            const f = @extern(common.LbFn, .{ .name = "arp_lb_" ++ decl.name });
-                            flag = @max(flag, f(g, desc, blob, x, x_old, lim_active));
-                        }
+        inline for (@typeInfo(devices).@"struct".decls) |decl| {
+            if (comptime @TypeOf(@field(devices, decl.name)) == type) {
+                const D = @field(devices, decl.name);
+                if (comptime isDevice(D) and @hasDecl(D, "limit")) {
+                    if (desc.kind_id == comptime abi.kindId(D)) {
+                        const f = @extern(common.LbFn, .{ .name = "arp_lb_" ++ decl.name });
+                        flag = @max(flag, f(g, desc, blob, x, x_old, lim_active));
                     }
                 }
             }
