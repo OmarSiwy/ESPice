@@ -11,6 +11,7 @@ pub const v = @import("zvf");
 
 // --- Verilog-A entry points ---
 pub const compileSource = va.compileSource;
+pub const compileSourceOpts = va.compileSourceOpts;
 pub const CompileResult = va.CompileResult;
 pub const Diagnostic = va.Diagnostic;
 pub const CompileError = va.CompileError;

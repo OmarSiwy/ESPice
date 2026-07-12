@@ -74,18 +74,38 @@ fn reportErrors(parser: *Parser, preprocessed: []const u8, allocator: std.mem.Al
     }
 }
 
+pub const CompileOpts = struct {
+    /// Needed to resolve non-standard `` `include `` files.
+    io: ?std.Io = null,
+    /// Directories local `` `include `` paths resolve against (typically the
+    /// dir of the .va file itself).
+    include_dirs: []const []const u8 = &.{},
+};
+
 pub fn compileSource(
     allocator: std.mem.Allocator,
     source: []const u8,
     errors_out: ?*DiagnosticList,
 ) CompileError!CompileResult {
+    return compileSourceOpts(allocator, source, errors_out, .{});
+}
+
+pub fn compileSourceOpts(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    errors_out: ?*DiagnosticList,
+    opts: CompileOpts,
+) CompileError!CompileResult {
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
     const arena_alloc = arena.allocator();
 
-    const preprocessed = Preprocessor.process(arena_alloc, source) catch |err| switch (err) {
+    const preprocessed = Preprocessor.processWithIncludes(arena_alloc, source, opts.io, opts.include_dirs) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        else => return error.ParseError,
+        else => {
+            std.debug.print("zvaf: preprocessor error: {t}\n", .{err});
+            return error.ParseError;
+        },
     };
 
     var parser = try Parser.init(arena_alloc, preprocessed);

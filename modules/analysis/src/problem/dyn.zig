@@ -148,6 +148,8 @@ fn Impl(comptime D: type, comptime device_name: []const u8) type {
         }
 
         /// Same field walk as netlist applyKv, addressed by name at runtime.
+        /// Case-insensitive: the netlist tokenizer lowercases keys while
+        /// generated Model fields keep their Verilog-A spelling (R, VOFF).
         fn setParam(comptime T: type) *const fn ([*]u8, []const u8, f64) bool {
             return struct {
                 fn f(dest: [*]u8, param: []const u8, value: f64) bool {
@@ -155,15 +157,15 @@ fn Impl(comptime D: type, comptime device_name: []const u8) type {
                     const p: *T = @ptrCast(@alignCast(dest));
                     inline for (@typeInfo(T).@"struct".fields) |field| {
                         switch (@typeInfo(field.type)) {
-                            .float => if (std.mem.eql(u8, param, field.name)) {
+                            .float => if (std.ascii.eqlIgnoreCase(param, field.name)) {
                                 @field(p, field.name) = @floatCast(value);
                                 return true;
                             },
-                            .int => if (std.mem.eql(u8, param, field.name)) {
+                            .int => if (std.ascii.eqlIgnoreCase(param, field.name)) {
                                 @field(p, field.name) = @intFromFloat(value);
                                 return true;
                             },
-                            .bool => if (std.mem.eql(u8, param, field.name)) {
+                            .bool => if (std.ascii.eqlIgnoreCase(param, field.name)) {
                                 @field(p, field.name) = value != 0;
                                 return true;
                             },

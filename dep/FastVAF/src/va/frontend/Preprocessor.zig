@@ -24,6 +24,11 @@ ifdef_stack: [max_ifdef_depth]IfState = undefined,
 ifdef_depth: u8 = 0,
 output: Buf(u8) = .empty,
 include_depth: u32 = 0,
+/// Non-standard `` `include `` files resolve against these (netlist-relative
+/// dirs, threaded from compileSource). Requires `io`.
+include_dirs: []const []const u8 = &.{},
+io: ?std.Io = null,
+expand_depth: u32 = 0,
 
 pub fn init(allocator: Allocator) Preprocessor {
     return .{ .allocator = allocator };
@@ -35,15 +40,71 @@ pub fn deinit(self: *Preprocessor) void {
 }
 
 pub fn process(allocator: Allocator, source: []const u8) ![]const u8 {
+    return processWithIncludes(allocator, source, null, &.{});
+}
+
+pub fn processWithIncludes(
+    allocator: Allocator,
+    source: []const u8,
+    io: ?std.Io,
+    include_dirs: []const []const u8,
+) ![]const u8 {
     var pp = init(allocator);
     defer pp.deinit();
+    pp.io = io;
+    pp.include_dirs = include_dirs;
     try pp.processSource(source);
     return try pp.output.toOwnedSlice(allocator);
 }
 
-const PpError = Allocator.Error || error{ UndefinedMacro, IfdefTooDeep };
+const PpError = Allocator.Error || error{ UndefinedMacro, IfdefTooDeep, IncludeNotFound, MacroRecursion };
 
 fn processSource(self: *Preprocessor, source: []const u8) PpError!void {
+    // Comments die before directives: EKV keeps dead `include lines inside
+    // /* */ blocks, and `//` in macro text must never poison expansion.
+    const stripped = try stripComments(self.allocator, source);
+    defer self.allocator.free(stripped);
+    try self.processStripped(stripped);
+}
+
+/// Blank out `//` and `/* */` comments (quote-aware), preserving newlines so
+/// diagnostics keep their line numbers.
+fn stripComments(allocator: Allocator, source: []const u8) ![]u8 {
+    const out = try allocator.dupe(u8, source);
+    var i: usize = 0;
+    while (i < out.len) {
+        switch (out[i]) {
+            '"' => {
+                i += 1;
+                while (i < out.len and out[i] != '"' and out[i] != '\n') {
+                    i += if (out[i] == '\\' and i + 1 < out.len) @as(usize, 2) else 1;
+                }
+                if (i < out.len and out[i] == '"') i += 1;
+            },
+            '/' => {
+                if (i + 1 < out.len and out[i + 1] == '/') {
+                    while (i < out.len and out[i] != '\n') : (i += 1) out[i] = ' ';
+                } else if (i + 1 < out.len and out[i + 1] == '*') {
+                    out[i] = ' ';
+                    out[i + 1] = ' ';
+                    i += 2;
+                    while (i < out.len and !(out[i] == '*' and i + 1 < out.len and out[i + 1] == '/')) : (i += 1) {
+                        if (out[i] != '\n') out[i] = ' ';
+                    }
+                    if (i + 1 < out.len) {
+                        out[i] = ' ';
+                        out[i + 1] = ' ';
+                        i += 2;
+                    } else i = out.len;
+                } else i += 1;
+            },
+            else => i += 1,
+        }
+    }
+    return out;
+}
+
+fn processStripped(self: *Preprocessor, source: []const u8) PpError!void {
     try self.output.ensureTotalCapacity(self.allocator, self.output.len + source.len + source.len / 64);
     var pos: usize = 0;
     while (pos < source.len) {
@@ -63,14 +124,22 @@ fn processSource(self: *Preprocessor, source: []const u8) PpError!void {
                 if (self.isActive()) {
                     var full_line: Buf(u8) = .empty;
                     defer full_line.deinit(self.allocator);
-                    try full_line.appendSlice(self.allocator, trimmed);
+                    // Per LRM, `//` comments are not part of the macro text:
+                    // strip each physical line (quote-aware) BEFORE checking
+                    // for `\` continuation, or the comment poisons every
+                    // expansion site (and a commented-out `\` must not join).
+                    try full_line.appendSlice(self.allocator, stripLineComment(trimmed));
                     var scan = newline_pos;
-                    while (full_line.len > 0 and full_line.slice()[full_line.len - 1] == '\\') {
+                    while (blk: {
+                        const s = std.mem.trimEnd(u8, full_line.slice(), " \t\r");
+                        full_line.len = @intCast(s.len);
+                        break :blk s.len > 0 and s[s.len - 1] == '\\';
+                    }) {
                         full_line.len -= 1;
                         if (scan < source.len and source[scan] == '\n') scan += 1;
                         const cont_start = scan;
                         while (scan < source.len and source[scan] != '\n') : (scan += 1) {}
-                        try full_line.appendSlice(self.allocator, source[cont_start..scan]);
+                        try full_line.appendSlice(self.allocator, stripLineComment(source[cont_start..scan]));
                     }
                     line_end = scan;
                     if (line_end < source.len and source[line_end] == '\n') line_end += 1;
@@ -164,13 +233,64 @@ fn processSource(self: *Preprocessor, source: []const u8) PpError!void {
         }
 
         if (self.isActive()) {
-            try self.expandAndAppend(line);
-            try self.output.append(self.allocator, '\n');
+            // Expand a CHUNK of consecutive active non-directive lines as one
+            // unit so macro invocations with arg lists spanning lines work;
+            // the arg scanner treats '\n' like any other whitespace char.
+            var chunk_end = line_end;
+            while (chunk_end < source.len) {
+                var le = chunk_end;
+                while (le < source.len and source[le] != '\n') : (le += 1) {}
+                const t = std.mem.trimStart(u8, source[chunk_end..le], " \t");
+                if (t.len > 1 and t[0] == '`' and isDirectiveText(t[1..])) break;
+                chunk_end = if (le < source.len) le + 1 else le;
+            }
+            try self.expandAndAppend(source[line_start..chunk_end]);
+            if (chunk_end == source.len and source[chunk_end - 1] != '\n')
+                try self.output.append(self.allocator, '\n');
+            pos = chunk_end;
         } else {
             try self.output.append(self.allocator, '\n');
+            pos = line_end;
         }
-        pos = line_end;
     }
+}
+
+/// True when `text` (the part after a leading backtick) names a preprocessor
+/// directive — chunk gathering must stop so the line dispatcher sees it.
+fn isDirectiveText(text: []const u8) bool {
+    var name_end: usize = 0;
+    while (name_end < text.len and isIdentChar(text[name_end])) : (name_end += 1) {}
+    const name = text[0..name_end];
+    const directives = [_][]const u8{
+        "define", "undef", "ifdef", "ifndef", "elsif", "else",
+        "endif",  "include", "resetall",
+    };
+    for (directives) |d| {
+        if (std.mem.eql(u8, name, d)) return true;
+    }
+    return isIgnoredDirective(text);
+}
+
+/// Slice off a trailing `//` comment (quote-aware).
+fn stripLineComment(line: []const u8) []const u8 {
+    var i: usize = 0;
+    while (i < line.len) {
+        switch (line[i]) {
+            '"' => {
+                i += 1;
+                while (i < line.len and line[i] != '"') {
+                    i += if (line[i] == '\\' and i + 1 < line.len) @as(usize, 2) else 1;
+                }
+                if (i < line.len) i += 1;
+            },
+            '/' => {
+                if (i + 1 < line.len and line[i + 1] == '/') return line[0..i];
+                i += 1;
+            },
+            else => i += 1,
+        }
+    }
+    return line;
 }
 
 fn isActive(self: *const Preprocessor) bool {
@@ -277,8 +397,13 @@ fn expandAndAppend(self: *Preprocessor, line: []const u8) PpError!void {
         }
 
         if (line[i] == '/' and i + 1 < line.len and line[i + 1] == '/') {
-            try self.output.appendSlice(self.allocator, line[i..]);
-            return;
+            // Copy the comment up to end-of-line only — the chunk may hold
+            // more lines that still need expansion.
+            var ce = i;
+            while (ce < line.len and line[ce] != '\n') : (ce += 1) {}
+            try self.output.appendSlice(self.allocator, line[i..ce]);
+            i = ce;
+            continue;
         }
 
         if (line[i] == '`') {
@@ -292,35 +417,23 @@ fn expandAndAppend(self: *Preprocessor, line: []const u8) PpError!void {
                     var arg_start = name_end;
                     while (arg_start < line.len and (line[arg_start] == ' ' or line[arg_start] == '\t')) : (arg_start += 1) {}
                     if (arg_start < line.len and line[arg_start] == '(') {
-                        arg_start += 1;
                         var args: Buf([]const u8) = .empty;
                         defer args.deinit(self.allocator);
-                        var depth: u32 = 1;
-                        var current_start = arg_start;
-                        var k = arg_start;
-                        while (k < line.len and depth > 0) {
-                            if (line[k] == '(') {
-                                depth += 1;
-                            } else if (line[k] == ')') {
-                                depth -= 1;
-                                if (depth == 0) {
-                                    const arg = std.mem.trim(u8, line[current_start..k], " \t");
-                                    try args.append(self.allocator, arg);
-                                    break;
-                                }
-                            } else if (line[k] == ',' and depth == 1) {
-                                const arg = std.mem.trim(u8, line[current_start..k], " \t");
-                                try args.append(self.allocator, arg);
-                                current_start = k + 1;
-                            }
-                            k += 1;
-                        }
-                        i = k + 1;
+                        const close = try self.scanArgs(line, arg_start + 1, &args);
+                        const after = @min(close + 1, line.len);
+                        // Keep the line count intact: newlines swallowed by a
+                        // multi-line invocation are re-emitted after it.
+                        const consumed_nl = std.mem.count(u8, line[i..after], "\n");
+                        i = after;
                         try self.substituteAndExpand(macro.body, params, args.slice());
+                        for (0..consumed_nl) |_| try self.output.append(self.allocator, '\n');
                         continue;
                     }
                 }
                 i = name_end;
+                if (self.expand_depth >= 64) return error.MacroRecursion;
+                self.expand_depth += 1;
+                defer self.expand_depth -= 1;
                 try self.expandAndAppend(macro.body);
                 continue;
             }
@@ -333,7 +446,53 @@ fn expandAndAppend(self: *Preprocessor, line: []const u8) PpError!void {
     }
 }
 
+/// Scan a macro invocation's argument list starting just past the '('.
+/// Paren-depth aware, string-aware (commas/parens inside quotes do not
+/// split), and newline-transparent (multi-line invocations). Appends the
+/// trimmed arg slices; returns the index of the closing ')' (or text.len).
+fn scanArgs(self: *Preprocessor, text: []const u8, start: usize, args: *Buf([]const u8)) !usize {
+    var depth: u32 = 1;
+    var cur = start;
+    var k = start;
+    while (k < text.len) {
+        switch (text[k]) {
+            '"' => {
+                k += 1;
+                while (k < text.len and text[k] != '"') {
+                    k += if (text[k] == '\\' and k + 1 < text.len) @as(usize, 2) else 1;
+                }
+                if (k < text.len) k += 1;
+                continue;
+            },
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if (depth == 0) {
+                    try args.append(self.allocator, std.mem.trim(u8, text[cur..k], " \t\r\n"));
+                    return k;
+                }
+            },
+            ',' => if (depth == 1) {
+                try args.append(self.allocator, std.mem.trim(u8, text[cur..k], " \t\r\n"));
+                cur = k + 1;
+            },
+            else => {},
+        }
+        k += 1;
+    }
+    return k;
+}
+
+/// Two-phase function-macro expansion: textually substitute params → args
+/// into a scratch buffer (strings untouched), then run the normal expander
+/// over the result. This makes nested macro calls in the body see fully
+/// substituted argument text (`` `Inner(outer_param, …) `` works), and lets
+/// macro uses inside arguments expand for free.
 fn substituteAndExpand(self: *Preprocessor, body: []const u8, params: []const []const u8, args: []const []const u8) PpError!void {
+    var tmp: Buf(u8) = .empty;
+    defer tmp.deinit(self.allocator);
+    try tmp.ensureTotalCapacity(self.allocator, body.len + body.len / 4);
+
     var i: usize = 0;
     while (i < body.len) {
         if (isIdentStart(body[i])) {
@@ -345,72 +504,42 @@ fn substituteAndExpand(self: *Preprocessor, body: []const u8, params: []const []
             for (params, 0..) |param, idx| {
                 if (std.mem.eql(u8, ident, param)) {
                     if (idx < args.len) {
-                        try self.output.appendSlice(self.allocator, args[idx]);
+                        try tmp.appendSlice(self.allocator, args[idx]);
                     }
                     found = true;
                     break;
                 }
             }
-            if (!found) {
-                try self.output.appendSlice(self.allocator, ident);
-            }
+            if (!found) try tmp.appendSlice(self.allocator, ident);
             i = end;
-        } else if (body[i] == '`') {
-            const name_start = i + 1;
-            var name_end = name_start;
-            while (name_end < body.len and isIdentChar(body[name_end])) : (name_end += 1) {}
-            const name = body[name_start..name_end];
-
-            if (self.defines.get(name)) |nested| {
-                if (nested.params == null) {
-                    try self.expandAndAppend(nested.body);
-                    i = name_end;
-                    continue;
-                }
-                var arg_start = name_end;
-                while (arg_start < body.len and (body[arg_start] == ' ' or body[arg_start] == '\t')) : (arg_start += 1) {}
-                if (arg_start < body.len and body[arg_start] == '(') {
-                    arg_start += 1;
-                    var nested_args: Buf([]const u8) = .empty;
-                    defer nested_args.deinit(self.allocator);
-                    var depth: u32 = 1;
-                    var current_start = arg_start;
-                    var j = arg_start;
-                    while (j < body.len and depth > 0) {
-                        if (body[j] == '(') {
-                            depth += 1;
-                        } else if (body[j] == ')') {
-                            depth -= 1;
-                            if (depth == 0) {
-                                const arg = std.mem.trim(u8, body[current_start..j], " \t");
-                                try nested_args.append(self.allocator, arg);
-                                break;
-                            }
-                        } else if (body[j] == ',' and depth == 1) {
-                            const arg = std.mem.trim(u8, body[current_start..j], " \t");
-                            try nested_args.append(self.allocator, arg);
-                            current_start = j + 1;
-                        }
-                        j += 1;
-                    }
-                    try self.substituteAndExpand(nested.body, nested.params.?, nested_args.slice());
-                    i = j + 1;
-                    continue;
-                }
+        } else if (body[i] == '"') {
+            // No substitution inside string literals.
+            var end = i + 1;
+            while (end < body.len and body[end] != '"') {
+                end += if (body[end] == '\\' and end + 1 < body.len) @as(usize, 2) else 1;
             }
-            return error.UndefinedMacro;
+            if (end < body.len) end += 1;
+            try tmp.appendSlice(self.allocator, body[i..end]);
+            i = end;
         } else {
-            // ponytail: bulk copy non-ident, non-backtick spans
-            var end = i;
-            while (end < body.len and !isIdentStart(body[end]) and body[end] != '`') : (end += 1) {}
-            try self.output.appendSlice(self.allocator, body[i..end]);
+            var end = i + 1;
+            while (end < body.len and !isIdentStart(body[end]) and body[end] != '"') : (end += 1) {}
+            try tmp.appendSlice(self.allocator, body[i..end]);
             i = end;
         }
     }
+
+    if (self.expand_depth >= 64) return error.MacroRecursion;
+    self.expand_depth += 1;
+    defer self.expand_depth -= 1;
+    try self.expandAndAppend(tmp.slice());
 }
 
-fn handleInclude(self: *Preprocessor, text: []const u8) !void {
-    if (self.include_depth > 10) return;
+fn handleInclude(self: *Preprocessor, text: []const u8) PpError!void {
+    if (self.include_depth > 10) {
+        std.debug.print("zvaf: `include nesting deeper than 10 — cycle? ({s})\n", .{text});
+        return error.IncludeNotFound;
+    }
 
     const trimmed = std.mem.trim(u8, text, " \t\r\"<>");
     if (trimmed.len == 0) return;
@@ -427,8 +556,28 @@ fn handleInclude(self: *Preprocessor, text: []const u8) !void {
         try self.processSource(disciplines_vams);
         return;
     }
-    try self.output.appendSlice(self.allocator, "// [zvaf] skipped include: ");
-    try self.output.appendSlice(self.allocator, trimmed);
+
+    // Local include: resolve against the caller-provided include dirs.
+    // Anything unresolvable is a LOUD error — a silently skipped include
+    // compiles to an empty device.
+    if (self.io) |io| {
+        const basename = std.fs.path.basename(trimmed);
+        for (self.include_dirs) |dir| {
+            // Try the path as written, then its basename (flat model dirs).
+            for ([_][]const u8{ trimmed, basename }) |rel| {
+                const full = std.fs.path.join(self.allocator, &.{ dir, rel }) catch return error.OutOfMemory;
+                defer self.allocator.free(full);
+                const content = std.Io.Dir.cwd().readFileAlloc(io, full, self.allocator, .limited(64 * 1024 * 1024)) catch continue;
+                defer self.allocator.free(content);
+                self.include_depth += 1;
+                defer self.include_depth -= 1;
+                try self.processSource(content);
+                return;
+            }
+        }
+    }
+    std.debug.print("zvaf: cannot resolve `include \"{s}\" (searched {d} dir(s))\n", .{ trimmed, self.include_dirs.len });
+    return error.IncludeNotFound;
 }
 
 const constants_vams =
@@ -502,6 +651,91 @@ test "preprocessor supports elsif" {
     try std.testing.expect(std.mem.indexOf(u8, out, "two") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "one") == null);
     try std.testing.expect(std.mem.indexOf(u8, out, "three") == null);
+}
+
+test "macro args: commas inside string literals do not split (P1)" {
+    const source =
+        \\`define MPI(nam,dsc) parameter real nam = 0 (* desc = dsc *);
+        \\`MPI(noisemod, "Flag, 0=off, 1=on")
+    ;
+    const out = try process(std.testing.allocator, source);
+    defer std.testing.allocator.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "parameter real noisemod = 0 (* desc = \"Flag, 0=off, 1=on\" *);") != null);
+}
+
+test "macro invocation args spanning lines (P2)" {
+    const source =
+        \\`define PA(a, b, c) T0 = a + b + c;
+        \\`PA(DMCG,
+        \\    DMCI, DMDG)
+        \\x = 1;
+    ;
+    const out = try process(std.testing.allocator, source);
+    defer std.testing.allocator.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "T0 = DMCG + DMCI + DMDG;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "x = 1;") != null);
+    // Line count preserved despite the invocation spanning two lines.
+    try std.testing.expectEqual(std.mem.count(u8, source, "\n"), std.mem.count(u8, out, "\n") - 1);
+}
+
+test "trailing // comment stripped from define body (P3)" {
+    const source =
+        \\`define REFTEMP 300.15 // 27 deg C
+        \\x = `REFTEMP - 273.15;
+    ;
+    const out = try process(std.testing.allocator, source);
+    defer std.testing.allocator.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "x = 300.15 - 273.15;") != null);
+}
+
+test "multi-line define with per-line // comments (P3)" {
+    const source =
+        \\`define GMIN 1e-12 // comment \
+        \\x = `GMIN*2;
+    ;
+    // The comment swallows the continuation backslash: body is just 1e-12.
+    const out = try process(std.testing.allocator, source);
+    defer std.testing.allocator.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "x = 1e-12*2;") != null);
+}
+
+test "nested macro call in body sees substituted outer params" {
+    const source =
+        \\`define INNER(p, q) p * q
+        \\`define OUTER(nf, m) y = `INNER(nf, m) + nf;
+        \\`OUTER(3, 4)
+    ;
+    const out = try process(std.testing.allocator, source);
+    defer std.testing.allocator.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "y = 3 * 4 + 3;") != null);
+}
+
+test "macro use inside argument expands" {
+    const source =
+        \\`define TWO 2
+        \\`define SQ(x) (x)*(x)
+        \\z = `SQ(`TWO);
+    ;
+    const out = try process(std.testing.allocator, source);
+    defer std.testing.allocator.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "z = (2)*(2);") != null);
+}
+
+test "self-recursive macro is a loud error, not a hang" {
+    const source =
+        \\`define A `B
+        \\`define B `A
+        \\x = `A;
+    ;
+    try std.testing.expectError(error.MacroRecursion, process(std.testing.allocator, source));
+}
+
+test "unresolvable local include is a loud error (P0)" {
+    const source =
+        \\`include "not_there.inc"
+        \\module m; endmodule
+    ;
+    try std.testing.expectError(error.IncludeNotFound, process(std.testing.allocator, source));
 }
 
 test "preprocessor rejects undefined macro use" {

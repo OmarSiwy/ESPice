@@ -32,14 +32,18 @@ fn isVaDevice(dev: types.Device) bool {
 }
 
 /// First positional token names a runtime-loaded (.hdl card) device?
-/// Baked decls win when both exist.
-fn isDynDevice(dev: types.Device) bool {
+/// Baked decls win when both exist. A .model card whose kind is a loaded
+/// module counts too (`.model psp103n psp103va ...`).
+fn isDynDevice(dev: types.Device, models: []const types.Model) bool {
     if (vaload.isEmpty() or dev.positional.len == 0) return false;
     const model_name = switch (dev.positional[0]) {
         .name => |nm| nm,
         else => return false,
     };
-    return !isBakedVaName(model_name) and vaload.get(model_name) != null;
+    if (isBakedVaName(model_name)) return false;
+    if (vaload.get(model_name) != null) return true;
+    if (findModel(models, model_name)) |m| return vaload.get(m.kind) != null;
+    return false;
 }
 
 fn isBakedVaName(name: []const u8) bool {
@@ -63,11 +67,19 @@ pub fn addDynDevices(b: *Builder, arena: std.mem.Allocator, nl: types.Netlist) !
             else => continue,
         };
         if (isBakedVaName(model_name)) continue;
-        const vt = vaload.get(model_name) orelse continue;
+        // Either the card names the VA module directly, or it names a .model
+        // card whose kind is the VA module (`.model psp103n psp103va ...`).
+        const model_card = findModel(nl.models, model_name);
+        const vt = vaload.get(model_name) orelse
+            (if (model_card) |m| vaload.get(m.kind) else null) orelse continue;
 
         const mblob = try arena.alignedAlloc(u8, .@"16", vt.model_size);
         vt.init_model(mblob.ptr);
-        if (findModel(nl.models, model_name)) |m| applyKvDyn(vt.set_model_param, mblob.ptr, m.kv);
+        if (model_card) |m| applyKvDyn(vt.set_model_param, mblob.ptr, m.kv);
+        // Card kv overrides .model card: VA "instance" params are Model
+        // fields (the generated Instance holds only temp), so a card's
+        // R=100 must land in the model blob to take effect.
+        applyKvDyn(vt.set_model_param, mblob.ptr, dl.kv[di]);
         const iblob = try arena.alignedAlloc(u8, .@"16", vt.instance_size);
         vt.init_instance(iblob.ptr);
         applyKvDyn(vt.set_instance_param, iblob.ptr, dl.kv[di]);
@@ -243,7 +255,7 @@ pub const NetBuilder = struct {
         // Baked or runtime-loaded Verilog-A/Verilog device instance: handled
         // by addVaDevices/addDynDevices after NetBuilder runs, regardless of
         // card letter.
-        if (isVaDevice(dev) or isDynDevice(dev)) return;
+        if (isVaDevice(dev) or isDynDevice(dev, self.nl.models)) return;
         const letter = dev.letter();
         if (devices.letter_map.get(&.{letter}) == null) {
             if (inferDeviceFromModel(dev, self.nl.models) == null)
