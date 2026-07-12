@@ -80,26 +80,29 @@ allowlisted). Landed form drops the draft's `gen: u8` field — return
 position k IS generator k. Device implementations + the collectNoise
 consumption path below are still pending.
 
-Contract extension (device-side, optional — devices without it keep the
-declarative `noise_gens` thermal path):
+Landed shape (verbatim, contract.zig:279 + validation :611–614):
 
 ```zig
+/// One generator's PSD at a given state vector, returned by the optional
+/// device `noisePsd` hook (position k = noise_gens[k]):
+///   S(f) = white + flicker / f^ef   [A²/Hz]
 pub const PsdTerm = struct {
-    gen: u8,            // index into noise_gens (branch + kind)
-    white: f64,         // frequency-flat PSD [A²/Hz] at this x
-                        //   thermal: 4kT·g   shot: 2q|I|   (device computes it)
-    flicker: f64 = 0,   // 1/f numerator: PSD(f) = white + flicker / f^ef
-    ef: f64 = 1,        // flicker frequency exponent
-    corr_with: ?u8 = null, // partner gen index (correlated pair)
-    corr: f64 = 0,      // real correlation coeff c (Sxy = c·sqrt(Sxx·Syy);
-                        //   complex c when a reference demands it: add corr_im)
+    white: f64,            // thermal 4kT·g, shot 2q|I| — device computes it
+    flicker: f64 = 0,
+    ef: f64 = 1,
+    corr_with: ?u8 = null, // partner generator index (BSIM4 tnoiMod, PSP igid)
+    corr: f64 = 0,         // real coeff until a reference demands complex
 };
 
-/// Pure function of ANY state vector — same signature family as eval/q.
-/// No allocation, no state writes; prep-cache reuse like evalFromPrep.
+// device hook (validated when declared; requires noise_gens):
 pub fn noisePsd(x: [n_u]f64, model: *const Model, instance: *const Instance)
     [noise_gens.len]PsdTerm
 ```
+
+**Positional return**: `terms[k]` belongs to `noise_gens[k]` — branch
+and kind come from the declaration; a generator inactive at this bias
+returns `white = 0`. Devices without the hook keep the declarative
+thermal-off-the-Jacobian path.
 
 Design points:
 
@@ -125,8 +128,9 @@ fn collectNoise(batch, x, list):
         xl = gather(x, gath[id*n_u..])
         if D.has(noisePsd):
             terms = D.noisePsd(xl, &models[id], &instances[id])
-            for t in terms:
-                g = noise_gens[t.gen]
+            for k, t in enumerate(terms):          # positional: k = gen index
+                g = noise_gens[k]
+                if t.white == 0 and t.flicker == 0: continue
                 list.append({ node_p: gath[id*n_u+g.row],
                               node_n: gath[id*n_u+g.col],
                               white: t.white, flicker: t.flicker, ef: t.ef,
