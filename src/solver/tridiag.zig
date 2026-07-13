@@ -39,9 +39,12 @@ pub const TriDiag = struct {
     mul: []f64,
     cv: []f64,
 
+    /// `SingularMatrix`: a modified pivot is zero or non-finite. Thomas
+    /// does not pivot, so this covers nonsingular matrices too.
     pub const FactorError = error{SingularMatrix};
 
-    /// Builds the slot maps. The pattern must pass `isTridiag`.
+    /// Builds the slot maps. The pattern must pass `isTridiag`; asserts
+    /// n >= 3. Borrows nothing. Free with `deinit`.
     pub fn init(gpa: Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32) !Self {
         std.debug.assert(n >= 3);
 
@@ -86,13 +89,14 @@ pub const TriDiag = struct {
         return self;
     }
 
+    /// Frees the slot maps and factors.
     pub fn deinit(self: *Self, gpa: Allocator) void {
         inline for (.{ self.a_pos, self.b_pos, self.c_pos }) |s| gpa.free(s);
         inline for (.{ self.bp, self.mul, self.cv }) |s| gpa.free(s);
     }
 
-    /// Thomas forward sweep. Fails when a modified pivot is zero or
-    /// non-finite.
+    /// Thomas forward sweep, O(n). Fails when a modified pivot is zero or
+    /// non-finite; the factors are then unusable.
     pub fn factor(self: *Self, vals: []const f64) FactorError!void {
         const n = self.n;
 
@@ -111,7 +115,7 @@ pub const TriDiag = struct {
         }
     }
 
-    /// x = A^-1 x after a successful `factor`.
+    /// x = A^-1 x after a successful `factor`, O(n).
     pub fn solve(self: *Self, x: []f64) void {
         const n = self.n;
         for (1..n) |i| x[i] -= self.mul[i] * x[i - 1];
@@ -136,3 +140,59 @@ pub const TriDiag = struct {
         }
     }
 };
+
+test "TriDiag: random diagonally dominant ladders solve both ways; NaN, Inf and absent entries" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x7d1a);
+    const r = prng.random();
+    var col_ptr: [65]u32 = undefined;
+    var row_idx: [3 * 64]u32 = undefined;
+    var vals: [3 * 64]f64 = undefined;
+    var dense: [64][64]f64 = undefined;
+    for (3..65) |n| {
+        // Band entries, each off-diagonal absent one time in five.
+        for (0..n) |i| @memset(dense[i][0..n], 0);
+        for (0..n) |i| {
+            for ([_]usize{ i -| 1, i + 1 }) |j| {
+                if (j == i or j >= n or r.uintLessThan(u8, 5) == 0) continue;
+                dense[i][j] = 2 * r.float(f64) - 1;
+            }
+            dense[i][i] = 3 + r.float(f64);
+        }
+        var p: u32 = 0;
+        col_ptr[0] = 0;
+        for (0..n) |j| {
+            for (j -| 1..@min(j + 2, n)) |i| {
+                if (i != j and dense[i][j] == 0) continue;
+                row_idx[p] = @intCast(i);
+                vals[p] = dense[i][j];
+                p += 1;
+            }
+            col_ptr[j + 1] = p;
+        }
+        const nn: u32 = @intCast(n);
+        try testing.expect(isTridiag(nn, col_ptr[0 .. n + 1], row_idx[0..p]));
+        var td = try TriDiag.init(gpa, nn, col_ptr[0 .. n + 1], row_idx[0..p]);
+        defer td.deinit(gpa);
+        try td.factor(vals[0..p]);
+        var x: [64]f64 = undefined;
+        var b: [64]f64 = undefined;
+        for (b[0..n]) |*v| v.* = 2 * r.float(f64) - 1;
+        inline for (.{ false, true }) |transpose| {
+            @memcpy(x[0..n], b[0..n]);
+            if (transpose) td.solveT(x[0..n]) else td.solve(x[0..n]);
+            for (0..n) |i| {
+                var ri = b[i];
+                for (0..n) |j| ri -= (if (transpose) dense[j][i] else dense[i][j]) * x[j];
+                try testing.expect(@abs(ri) < 1e-13);
+            }
+        }
+        // A non-finite entry anywhere in the band poisons a pivot.
+        const bad = r.uintLessThan(u32, p);
+        const keep = vals[bad];
+        vals[bad] = if (r.boolean()) std.math.nan(f64) else std.math.inf(f64);
+        try testing.expectError(error.SingularMatrix, td.factor(vals[0..p]));
+        vals[bad] = keep;
+    }
+}

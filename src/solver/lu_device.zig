@@ -8,16 +8,20 @@ const gompute = @import("gompute");
 const lu = @import("lu_kernels.zig");
 
 const Sy = struct {
+    /// Kernel arguments live in the global address space.
     pub const P = gompute.GlobalPtr;
+    /// `__syncthreads`; every lane of the block must reach it.
     pub inline fn barrier() void {
         gompute.builtins.barrier();
     }
+    /// A ~64 ns backoff, whatever the spin count.
     pub inline fn pause(_: u32) void {
         gompute.builtins.spinPause();
     }
     /// Device scope: the done stamps never leave the device, and Zig's own
     /// atomics lower to system scope on NVPTX (7.1 vs 3.7 ms on a refactor).
     pub const acquire = gompute.builtins.loadAcquireDevice;
+    /// Device-scope release store, paired with `acquire`.
     pub const release = gompute.builtins.storeReleaseDevice;
 };
 const P = gompute.GlobalPtr;
