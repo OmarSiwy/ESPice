@@ -94,7 +94,7 @@ pub const FreqSolver = struct {
     /// A solver over the CSC pattern `col_ptr`/`row_idx` (n columns,
     /// borrowed for the solver's lifetime) with G and C given per slot, for
     /// callers whose planes are not a circuit evaluation. Nothing is
-    /// evaluated.
+    /// evaluated. Caller frees with `deinit` and the same allocator.
     pub fn fromPlanes(allocator: Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32, g: []const f64, c: []const f64) !Self {
         const Planes = struct {
             n: usize,
@@ -123,7 +123,9 @@ pub const FreqSolver = struct {
     /// Linearizes `ckt` at `x_op` (one eval; its G and C planes are the
     /// linearization) and builds the solver from copies of them, so the
     /// circuit may be re-evaluated afterwards. The sparse path borrows
-    /// the circuit's CSC pattern for the solver's lifetime.
+    /// the circuit's CSC pattern for the solver's lifetime, and so does the
+    /// dense one, to place `Dyn` entries and `setPlanes`. Caller frees with
+    /// `deinit` and the same allocator.
     pub fn fromCircuit(allocator: Allocator, ckt: anytype, x_op: []const f64) !Self {
         try ckt.linearizeAc(x_op);
         const n: u32 = @intCast(ckt.n);
@@ -208,6 +210,8 @@ pub const FreqSolver = struct {
         };
     }
 
+    /// Frees everything the solver owns; `allocator` must be the one it was
+    /// built with, which `factorEach` must also have been given.
     pub fn deinit(self: *Self, allocator: Allocator) void {
         self.held_id.deinit(allocator);
         switch (self.strategy) {
@@ -235,14 +239,16 @@ pub const FreqSolver = struct {
         }
     }
 
-    /// `setOmega` then `solveRhs`.
+    /// `setOmega` then `solveRhs`, for one right-hand side at one ω.
     pub fn solve(self: *Self, omega: f64, rhs: []const f64, x_out: []f64) !void {
         try self.setOmega(omega);
         try self.solveRhs(rhs, x_out);
     }
 
     /// Assembles and factors G + jωC. Right-hand sides at this ω then
-    /// need only `solveRhs`/`solveRhsT`.
+    /// need only `solveRhs`/`solveRhsT`. Fails with `error.Singular`
+    /// (dense) or `error.SingularMatrix` (sparse) on a singular A(ω), after
+    /// which `solveRhs` must not run until a `setOmega` succeeds.
     pub fn setOmega(self: *Self, omega: f64) !void {
         try self.setOmegaDyn(omega, .{}, 0);
     }
@@ -255,7 +261,8 @@ pub const FreqSolver = struct {
         }
     }
 
-    /// Solves with the current factorization. `rhs` and `x_out` may alias.
+    /// Solves with the current factorization, which `setOmega` must have
+    /// left; both slices are 2n long and may alias.
     pub fn solveRhs(self: *Self, rhs: []const f64, x_out: []f64) !void {
         switch (self.strategy) {
             .dense => |*d| dense_lu.solveFactored(self.nn, d.a_lu, d.piv, rhs, x_out),
@@ -298,7 +305,9 @@ pub const FreqSolver = struct {
     /// `solveRhsT`), not A^T: conjugate the solution for A^T's. The dense
     /// strategy, a non-LU engine and any lane whose refactor fails take the
     /// per-ω scalar path. The scalar factorization afterwards holds some ω
-    /// of the batch.
+    /// of the batch. Allocates the lane planes on first use. Asserts that
+    /// `rhs` is a positive multiple of 2n long, that `x_out` holds
+    /// `omegas.len` times that, and that `dyn` has one term per entry per ω.
     pub fn solveBatch(self: *Self, omegas: []const f64, dyn: Dyn, rhs: []const f64, x_out: []f64, adjoint: bool) !void {
         const nn: usize = self.nn;
         const m = rhs.len;
@@ -405,7 +414,9 @@ pub const FreqSolver = struct {
     /// repivoted at its ω, at most twice; a lane that still fails, or a
     /// singular dense block, is held as the identity and listed in
     /// `held_id`. Any other factor or solve on `self` invalidates the held
-    /// factors.
+    /// factors. Asserts that `omegas` is not empty; the sparse strategy
+    /// fails with `error.UnsupportedEngine` when the 2n system did not get
+    /// the sparse LU, the only engine LaneLu replays.
     pub fn factorEach(self: *Self, allocator: Allocator, omegas: []const f64) !void {
         std.debug.assert(omegas.len > 0);
         self.held_id.clearRetainingCapacity();
@@ -471,7 +482,9 @@ pub const FreqSolver = struct {
     /// Solves right-hand side k (the stacked 2n vector at `rhs[k*2n..]`)
     /// against `factorEach`'s factor k into the same rows of `x_out`, for
     /// every held ω; `adjoint` solves the stacked-real transpose, which is
-    /// A^H. The identity lanes copy their right-hand side.
+    /// A^H. The identity lanes copy their right-hand side, so `rhs` and
+    /// `x_out` must not overlap. `rhs` holds exactly one vector per ω
+    /// `factorEach` was given.
     pub fn solveEach(self: *Self, rhs: []const f64, x_out: []f64, adjoint: bool) void {
         const nn: usize = self.nn;
         switch (self.strategy) {
@@ -511,6 +524,7 @@ pub const FreqSolver = struct {
         sp.held = &.{};
     }
 
+    /// Private kernels and types for tests.zig; void outside test builds.
     pub const test_access = if (@import("builtin").is_test) .{
         .W = W,
         .solveBatchSerial = solveBatchSerial,
@@ -702,7 +716,10 @@ pub fn Stacked(comptime L: usize) type {
     };
 }
 
-/// The column of CSC slot `slot` in the pattern `col_ptr` describes.
+/// The column of CSC slot `slot` in the pattern `col_ptr` describes, by
+/// binary search (O(log n)); empty columns are skipped. A slot at or past
+/// nnz returns n, one past the last column, so callers filter ground slots
+/// first.
 pub fn slotCol(col_ptr: []const u32, slot: u32) usize {
     return std.sort.upperBound(u32, col_ptr, slot, struct {
         fn order(key: u32, item: u32) std.math.Order {

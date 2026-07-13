@@ -170,7 +170,8 @@ pub const Result = struct {
 /// A converged `x` is the last linearization point x_k, not the x_k+1 of the
 /// final solve, which only feeds the acceptance gates. ngspice's NIiter
 /// returns before swapping CKTrhs into CKTrhsOld (niiter.c), and CKTdump and
-/// every device state read CKTrhsOld.
+/// every device state read CKTrhsOld. A NaN or infinite iterate never
+/// converges. `ws` must come from `Workspace.init` on `sys`'s n and pattern.
 pub fn newton(
     sys: anytype,
     ws: *Workspace,
@@ -313,7 +314,8 @@ fn finalizeStep(
         // The delta test alone governs such rows, as in ngspice NIconvTest.
         if (scale == 0) continue;
         const tol = @max(opts.residual_tol, 10.0 * scale * (opts.reltol * @abs(x[i]) + opts.vntol));
-        if (@abs(residual[i]) > tol) return .{ .converged = false, .scaled = scaled, .why = .residual };
+        // Negated, so a NaN residual fails too.
+        if (!(@abs(residual[i]) <= tol)) return .{ .converged = false, .scaled = scaled, .why = .residual };
     }
     if (!load_ok) return .{ .converged = false, .scaled = scaled, .why = .device };
     if (comptime @hasDecl(S, "checkConvergence")) {
@@ -334,11 +336,12 @@ const gmres_restart = 30;
 const sqrt_eps: f64 = 0x1p-26; // sqrt(f64 machine epsilon)
 const inf = std.math.inf(f64);
 
-/// Jacobian-free Newton-Krylov: each step solves J dx = -F by restarted-free
-/// GMRES(min(30, n)) with finite-difference products J v, right-preconditioned
+/// Jacobian-free Newton-Krylov: each step solves J dx = -F by one unrestarted cycle of
+/// GMRES(min(30, n)) with finite-difference products J v, left-preconditioned
 /// by the factored Jacobian (Jacobi only under ESPICE_SOLVER=jfnk-nolu).
-/// Same gates as `newton`, with the residual gate on F. A failed
-/// checkpoint returns `error.QueryCancelled`.
+/// Same gates as `newton`, with the residual gate on F, but a converged `x`
+/// is x_k+1. A failed checkpoint returns `error.QueryCancelled`; the first
+/// call on a workspace allocates its GMRES scratch (`error.OutOfMemory`).
 pub fn jfnk(
     sys: anytype,
     ws: *Workspace,
@@ -612,18 +615,21 @@ fn residualConverged(sys: anytype, hook: anytype, x: []const f64, residual: []co
     return ok;
 }
 
+/// Private kernels for tests.zig; void outside test builds.
 pub const test_access = if (@import("builtin").is_test) .{ .updateAndNorm = updateAndNorm } else {};
 
 /// x_old = x; x += dx; returns max |dx| / (reltol * max(|x|, |x_old|) + atol),
-/// atol = abstol on current rows, vntol elsewhere. Max is exact and
-/// order-independent, so the vector body and scalar tail agree bitwise with
-/// a plain scalar loop.
+/// atol = abstol on current rows, vntol elsewhere. A row whose new x or dx
+/// is NaN or infinite scores inf: `@max` lowers to maxnum, which would drop
+/// a NaN and pass a diverged step. Max is exact and order-independent, so
+/// the vector body and scalar tail agree bitwise with a plain scalar loop.
 fn updateAndNorm(x: []f64, dx: []const f64, x_old: []f64, current_row: []const bool, reltol: f64, abstol: f64, vntol: f64) f64 {
     const W = std.simd.suggestVectorLength(f64) orelse 1;
     const V = @Vector(W, f64);
     const rel: V = @splat(reltol);
     const abs_i: V = @splat(abstol);
     const abs_v: V = @splat(vntol);
+    const inf_v: V = @splat(inf);
     var worst_v: V = @splat(0);
     var i: usize = 0;
     while (i + W <= x.len) : (i += W) {
@@ -634,7 +640,8 @@ fn updateAndNorm(x: []f64, dx: []const f64, x_old: []f64, current_row: []const b
         x_old[i..][0..W].* = xo;
         x[i..][0..W].* = xn;
         const tol = rel * @max(@abs(xn), @abs(xo)) + @select(f64, cur, abs_i, abs_v);
-        worst_v = @max(worst_v, @abs(d) / tol);
+        const finite = (@abs(xn) < inf_v) & (@abs(d) < inf_v);
+        worst_v = @max(worst_v, @select(f64, finite, @abs(d) / tol, inf_v));
     }
     var worst: f64 = @reduce(.Max, worst_v);
     for (x[i..], dx[i..], x_old[i..], current_row[i..x.len]) |*xi, dxi, *xoi, is_cur| {
@@ -643,7 +650,8 @@ fn updateAndNorm(x: []f64, dx: []const f64, x_old: []f64, current_row: []const b
         xi.* = xo + dxi;
         const atol = if (is_cur) abstol else vntol;
         const tol = reltol * @max(@abs(xi.*), @abs(xo)) + atol;
-        worst = @max(worst, @abs(dxi) / tol);
+        const finite = @abs(xi.*) < inf and @abs(dxi) < inf;
+        worst = @max(worst, if (finite) @abs(dxi) / tol else inf);
     }
     return worst;
 }
@@ -690,7 +698,8 @@ pub const Workspace = struct {
     factored_sig: u64 = 0,
     prof: Prof = .{},
 
-    /// Borrows `col_ptr` and `row_idx` for the workspace's lifetime.
+    /// Borrows `col_ptr` and `row_idx` for the workspace's lifetime. Caller
+    /// frees with `deinit` and the same allocator.
     pub fn init(gpa: std.mem.Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32, bbd: ?BbdInfo) !Workspace {
         const dx = try gpa.alloc(f64, n);
         errdefer gpa.free(dx);
@@ -726,6 +735,8 @@ pub const Workspace = struct {
         return self.a_vals[0..nnz];
     }
 
+    /// Frees every buffer, the lazily grown ones included; `gpa` must be the
+    /// allocator `init` got.
     pub fn deinit(self: *Workspace, gpa: std.mem.Allocator) void {
         self.slv.deinit();
         gpa.free(self.dx);
@@ -735,3 +746,38 @@ pub const Workspace = struct {
         self.* = undefined;
     }
 };
+
+test "FdQuot and mul run on stdpp's SIMD path and match its pull path bitwise" {
+    const builtin = @import("builtin");
+    if (builtin.zig_backend == .stage2_llvm or builtin.zig_backend == .stage2_x86_64) {
+        const e: []const f64 = &.{};
+        const pair = z.fromSlice(f64, e).zip(z.fromSlice(f64, e));
+        comptime std.debug.assert(@TypeOf(pair.map(FdQuot{ .inv = 0 })).lane_count != null);
+        comptime std.debug.assert(@TypeOf(pair.map(mul)).lane_count != null);
+    }
+    var prng = std.Random.DefaultPrng.init(0xFD);
+    const r = prng.random();
+    var left: [84]f64 = undefined;
+    var right: [84]f64 = undefined;
+    for (&left, &right) |*u, *v| {
+        u.* = r.float(f64) - 0.5;
+        v.* = r.float(f64) - 0.5;
+    }
+    left[5] = std.math.nan(f64);
+    right[40] = std.math.inf(f64);
+    var fast: [84]f64 = undefined;
+    var slow: [84]f64 = undefined;
+    // Past 4 unrolled blocks of the widest f64 vector, at every misalignment.
+    for (0..81) |len| for (0..4) |off| {
+        const lv = left[off..][0..len];
+        const rv = right[off..][0..len];
+        inline for (.{ FdQuot{ .inv = 1e7 }, mul }) |f| {
+            var it = z.fromSlice(f64, lv).zip(z.fromSlice(f64, rv)).map(f);
+            try std.testing.expectEqual(len, it.writeInto(fast[0..len]));
+            var src = z.fromSlice(f64, lv);
+            var pull = src.byRef().zip(z.fromSlice(f64, rv)).map(f);
+            try std.testing.expectEqual(len, pull.writeInto(slow[0..len]));
+            for (fast[0..len], slow[0..len]) |a, b| try std.testing.expectEqual(@as(u64, @bitCast(b)), @as(u64, @bitCast(a)));
+        }
+    };
+}
