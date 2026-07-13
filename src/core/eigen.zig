@@ -4,17 +4,20 @@ const std = @import("std");
 const num = @import("numerics.zig");
 const Complex = num.Complex;
 
-const W = std.simd.suggestVectorLength(f64) orelse 8;
-const V = @Vector(W, f64);
+/// Lanes of the reflector kernels; `w = 1` instantiates their scalar
+/// oracle (AGENTS.md lane doctrine).
+const W = std.simd.suggestVectorLength(f64) orelse 1;
 
 /// How many eigenvalues were written, and whether all of them were.
 pub const Eigs = struct { count: usize, converged: bool };
 
-/// Writes the eigenvalues of `a` (n×n, destroyed) into `out[0..count]`;
-/// `out` needs n slots. A subdiagonal entry below `tol` relative to its
-/// diagonal pair, or below eps·max|H|, deflates. `converged` is false when
-/// one block exhausted `max_iter` Francis steps; its eigenvalues are then
-/// missing.
+/// Writes the eigenvalues of `a` (n×n, destroyed) into `out[0..count]`,
+/// in no particular order; `out` needs n slots. A subdiagonal entry below
+/// `tol` relative to its diagonal pair, or below eps·max|H|, deflates.
+/// `converged` is false when one block exhausted `max_iter` Francis steps;
+/// its eigenvalues and those of every block above it are then missing.
+/// O(n³), no allocation. A non-finite entry gives meaningless eigenvalues
+/// (or `converged` false), never a hang.
 pub fn eigenvalues(n: usize, a: []f64, out: []Complex, tol: f64, max_iter: u32) Eigs {
     const exact = isolate(n, a, out);
     const rest = francis(n - exact, a, out[exact..], tol, max_iter);
@@ -156,7 +159,8 @@ fn balance(n: usize, a: []f64) void {
                 c += @abs(a[j * n + i]);
                 r += @abs(a[i * n + j]);
             }
-            if (c == 0 or r == 0) continue;
+            // An infinite sum would never leave the scaling loops below.
+            if (c == 0 or r == 0 or !std.math.isFinite(c + r)) continue;
             const s = c + r;
             var f: f64 = 1;
             var g = r / radix;
@@ -191,9 +195,13 @@ fn extract2x2(a: []const f64, n: usize, offset: usize, out: *[2]Complex) void {
     const disc = tr * tr - 4.0 * det;
 
     if (disc >= 0) {
-        const sq = @sqrt(disc);
-        out[0] = .{ .re = (tr + sq) / 2.0, .im = 0 };
-        out[1] = .{ .re = (tr - sq) / 2.0, .im = 0 };
+        // The root away from zero by the formula, its partner from the
+        // product of the two: (tr - sq) / 2 cancels to noise when the roots
+        // are decades apart, as an MNA pencil's are.
+        const big = (tr + std.math.copysign(@sqrt(disc), tr)) / 2.0;
+        const small = if (big != 0) det / big else 0;
+        out[0] = .{ .re = @max(big, small), .im = 0 };
+        out[1] = .{ .re = @min(big, small), .im = 0 };
     } else {
         const sq = @sqrt(-disc);
         out[0] = .{ .re = tr / 2.0, .im = sq / 2.0 };
@@ -205,8 +213,13 @@ fn extract2x2(a: []const f64, n: usize, offset: usize, out: *[2]Complex) void {
 /// Householder similarities; the eigenvalues are unchanged and every entry
 /// below the subdiagonal is an exact zero. `v_buf` is scratch of at least n
 /// entries: a contiguous copy of each reflector, so its reads are vector
-/// loads rather than stride-n gathers.
+/// loads rather than stride-n gathers. O(n³).
 pub fn hessenbergReduce(n: usize, a: []f64, v_buf: []f64) void {
+    hessenbergLanes(W, n, a, v_buf);
+}
+
+fn hessenbergLanes(comptime w: usize, n: usize, a: []f64, v_buf: []f64) void {
+    const V = @Vector(w, f64);
     if (n <= 2) return;
 
     for (0..n - 2) |k| {
@@ -239,10 +252,10 @@ pub fn hessenbergReduce(n: usize, a: []f64, v_buf: []f64) void {
             };
             var dot_acc: V = @splat(0.0);
             var i: usize = 0;
-            while (i + W <= m) : (i += W) {
+            while (i + w <= m) : (i += w) {
                 var av: V = undefined;
-                inline for (0..W) |wi| av[wi] = a[(k + 1 + i + wi) * n + j];
-                dot_acc += @as(V, v[i..][0..W].*) * av;
+                inline for (0..w) |wi| av[wi] = a[(k + 1 + i + wi) * n + j];
+                dot_acc += @as(V, v[i..][0..w].*) * av;
             }
             var dot: f64 = @reduce(.Add, dot_acc);
             while (i < m) : (i += 1) dot += v[i] * a[(k + 1 + i) * n + j];
@@ -255,15 +268,15 @@ pub fn hessenbergReduce(n: usize, a: []f64, v_buf: []f64) void {
             const ar = a[row * n + k + 1 ..][0..m];
             var dot_acc: V = @splat(0.0);
             var i: usize = 0;
-            while (i + W <= m) : (i += W)
-                dot_acc += @as(V, ar[i..][0..W].*) * @as(V, v[i..][0..W].*);
+            while (i + w <= m) : (i += w)
+                dot_acc += @as(V, ar[i..][0..w].*) * @as(V, v[i..][0..w].*);
             var dot: f64 = @reduce(.Add, dot_acc);
             while (i < m) : (i += 1) dot += ar[i] * v[i];
             dot *= beta;
             const dv: V = @splat(dot);
             i = 0;
-            while (i + W <= m) : (i += W)
-                ar[i..][0..W].* = @as(V, ar[i..][0..W].*) - dv * @as(V, v[i..][0..W].*);
+            while (i + w <= m) : (i += w)
+                ar[i..][0..w].* = @as(V, ar[i..][0..w].*) - dv * @as(V, v[i..][0..w].*);
             while (i < m) : (i += 1) ar[i] -= dot * v[i];
         }
 
@@ -315,9 +328,9 @@ fn francisStep(n: usize, a: []f64, lo: usize, nn: usize, iter: u32) void {
         }
 
         if (k + 2 < nn) {
-            applyReflector3(n, a, lo, nn, k, x, y, z, nr);
+            applyReflector3(W, n, a, lo, nn, k, x, y, z, nr);
         } else {
-            applyReflector2(n, a, lo, nn, k, x, y);
+            applyReflector2(W, n, a, lo, nn, k, x, y);
         }
 
         if (k + 1 < nn - 1) {
@@ -330,7 +343,8 @@ fn francisStep(n: usize, a: []f64, lo: usize, nn: usize, iter: u32) void {
 
 /// Applies the 3-element Householder reflector that zeroes (y, z) against x
 /// to rows and columns k..k+2 of the active block.
-fn applyReflector3(n: usize, a: []f64, lo: usize, nn: usize, k: usize, x_in: f64, y_in: f64, z_in: f64, nr: f64) void {
+fn applyReflector3(comptime w: usize, n: usize, a: []f64, lo: usize, nn: usize, k: usize, x_in: f64, y_in: f64, z_in: f64, nr: f64) void {
+    const V = @Vector(w, f64);
     const sign_x: f64 = if (x_in >= 0) 1.0 else -1.0;
     const v0 = x_in + sign_x * nr;
     const v1 = y_in;
@@ -349,15 +363,15 @@ fn applyReflector3(n: usize, a: []f64, lo: usize, nn: usize, k: usize, x_in: f64
     // subdiagonal entry and undo the split.
     const col_start = if (k > lo) k - 1 else lo;
     var j: usize = col_start;
-    while (j + W <= nn) : (j += W) {
-        const r0: V = a[k * n + j ..][0..W].*;
-        const r1: V = a[(k + 1) * n + j ..][0..W].*;
-        const r2: V = a[(k + 2) * n + j ..][0..W].*;
+    while (j + w <= nn) : (j += w) {
+        const r0: V = a[k * n + j ..][0..w].*;
+        const r1: V = a[(k + 1) * n + j ..][0..w].*;
+        const r2: V = a[(k + 2) * n + j ..][0..w].*;
         const dot_v = v0v * r0 + v1v * r1 + v2v * r2;
         const tv = betav * dot_v;
-        const p0: *[W]f64 = a[k * n + j ..][0..W];
-        const p1: *[W]f64 = a[(k + 1) * n + j ..][0..W];
-        const p2: *[W]f64 = a[(k + 2) * n + j ..][0..W];
+        const p0: *[w]f64 = a[k * n + j ..][0..w];
+        const p1: *[w]f64 = a[(k + 1) * n + j ..][0..w];
+        const p2: *[w]f64 = a[(k + 2) * n + j ..][0..w];
         p0.* = r0 - tv * v0v;
         p1.* = r1 - tv * v1v;
         p2.* = r2 - tv * v2v;
@@ -385,7 +399,8 @@ fn applyReflector3(n: usize, a: []f64, lo: usize, nn: usize, k: usize, x_in: f64
 
 /// The 2-element reflector at the bottom of the chase, rows and columns
 /// k..k+1.
-fn applyReflector2(n: usize, a: []f64, lo: usize, nn: usize, k: usize, x_in: f64, y_in: f64) void {
+fn applyReflector2(comptime w: usize, n: usize, a: []f64, lo: usize, nn: usize, k: usize, x_in: f64, y_in: f64) void {
+    const V = @Vector(w, f64);
     const nr = @sqrt(x_in * x_in + y_in * y_in);
     if (nr == 0) return;
 
@@ -403,13 +418,13 @@ fn applyReflector2(n: usize, a: []f64, lo: usize, nn: usize, k: usize, x_in: f64
     // Same column and row ranges as applyReflector3.
     const col_start = if (k > lo) k - 1 else lo;
     var j: usize = col_start;
-    while (j + W <= nn) : (j += W) {
-        const r0: V = a[k * n + j ..][0..W].*;
-        const r1: V = a[(k + 1) * n + j ..][0..W].*;
+    while (j + w <= nn) : (j += w) {
+        const r0: V = a[k * n + j ..][0..w].*;
+        const r1: V = a[(k + 1) * n + j ..][0..w].*;
         const dot_v = v0v * r0 + v1v * r1;
         const tv = betav * dot_v;
-        const p0: *[W]f64 = a[k * n + j ..][0..W];
-        const p1: *[W]f64 = a[(k + 1) * n + j ..][0..W];
+        const p0: *[w]f64 = a[k * n + j ..][0..w];
+        const p1: *[w]f64 = a[(k + 1) * n + j ..][0..w];
         p0.* = r0 - tv * v0v;
         p1.* = r1 - tv * v1v;
     }
@@ -427,4 +442,148 @@ fn applyReflector2(n: usize, a: []f64, lo: usize, nn: usize, k: usize, x_in: f64
         a[row * n + k] -= tv * v0;
         a[row * n + k + 1] -= tv * v1;
     }
+}
+
+const testing = std.testing;
+/// Past 3x the widest f64 vector (8 lanes on AVX-512), so every lane count
+/// sees full blocks and every tail length.
+const test_max_n = 3 * 8 + 2;
+
+test "hessenbergReduce at vector width matches its w = 1 oracle" {
+    var prng = std.Random.DefaultPrng.init(0xe16e);
+    const r = prng.random();
+    var a: [test_max_n * test_max_n]f64 = undefined;
+    var b: [test_max_n * test_max_n]f64 = undefined;
+    var scratch: [test_max_n]f64 = undefined;
+    for (0..test_max_n + 1) |n| {
+        for (a[0 .. n * n]) |*v| v.* = r.float(f64) * 2 - 1;
+        @memcpy(b[0 .. n * n], a[0 .. n * n]);
+        var trace: f64 = 0;
+        for (0..n) |i| trace += a[i * n + i];
+        hessenbergLanes(W, n, a[0 .. n * n], &scratch);
+        hessenbergLanes(1, n, b[0 .. n * n], &scratch);
+        var h_trace: f64 = 0;
+        for (0..n) |i| {
+            h_trace += a[i * n + i];
+            for (0..n) |j| {
+                // The vector dot regroups its sum, so agreement is to rounding.
+                try testing.expectApproxEqAbs(b[i * n + j], a[i * n + j], 1e-10);
+                if (i > j + 1) try testing.expectEqual(@as(f64, 0), a[i * n + j]);
+            }
+        }
+        try testing.expectApproxEqAbs(trace, h_trace, 1e-12 * @as(f64, @floatFromInt(n + 1)));
+    }
+}
+
+test "the bulge reflectors at vector width match their w = 1 oracle bit for bit" {
+    // Their vector bodies are elementwise, in the scalar loop's operation
+    // order, so nothing may differ.
+    var prng = std.Random.DefaultPrng.init(0x3eff);
+    const r = prng.random();
+    var a: [test_max_n * test_max_n]f64 = undefined;
+    var b: [test_max_n * test_max_n]f64 = undefined;
+    for (3..test_max_n + 1) |n| for (0..n - 2) |lo| {
+        for (a[0 .. n * n]) |*v| v.* = r.float(f64) * 2 - 1;
+        @memcpy(b[0 .. n * n], a[0 .. n * n]);
+        const x = r.float(f64) - 0.5;
+        const y = r.float(f64) - 0.5;
+        const z = r.float(f64) - 0.5;
+        const nr = @sqrt(x * x + y * y + z * z);
+        for (lo..n - 2) |k| {
+            applyReflector3(W, n, a[0 .. n * n], lo, n, k, x, y, z, nr);
+            applyReflector3(1, n, b[0 .. n * n], lo, n, k, x, y, z, nr);
+        }
+        applyReflector2(W, n, a[0 .. n * n], lo, n, n - 2, x, y);
+        applyReflector2(1, n, b[0 .. n * n], lo, n, n - 2, x, y);
+        try testing.expectEqualSlices(f64, b[0 .. n * n], a[0 .. n * n]);
+    };
+}
+
+test "eigenvalues sum to the trace, and their squares to tr(A²)" {
+    // Certificate: both sums are similarity invariants, and a backward
+    // stable QR keeps them to rounding whatever each eigenvalue's
+    // conditioning.
+    var prng = std.Random.DefaultPrng.init(0xa11);
+    const r = prng.random();
+    var a: [144]f64 = undefined;
+    var out: [12]Complex = undefined;
+    for (0..13) |n| for (0..4) |_| {
+        const m = a[0 .. n * n];
+        for (m) |*v| v.* = r.float(f64) * 2 - 1;
+        var tr1: f64 = 0;
+        var tr2: f64 = 0;
+        for (0..n) |i| {
+            tr1 += m[i * n + i];
+            for (0..n) |k| tr2 += m[i * n + k] * m[k * n + i];
+        }
+        const res = eigenvalues(n, m, out[0..n], 1e-12, 1000);
+        try testing.expect(res.converged);
+        try testing.expectEqual(n, res.count);
+        var s1: Complex = .zero;
+        var s2: Complex = .zero;
+        for (out[0..n]) |l| {
+            s1 = s1.add(l);
+            s2 = s2.add(l.mul(l));
+        }
+        const tol = 1e-9 * @as(f64, @floatFromInt(n + 1));
+        try testing.expectApproxEqAbs(tr1, s1.re, tol);
+        try testing.expectApproxEqAbs(0, s1.im, tol);
+        try testing.expectApproxEqAbs(tr2, s2.re, tol);
+        try testing.expectApproxEqAbs(0, s2.im, tol);
+    };
+}
+
+test "a triangular matrix gives its diagonal exactly, with no QR step" {
+    var a = [_]f64{
+        1e9, 3,    -2, 5,
+        0,   1e-3, 7,  1,
+        0,   0,    -4, 2,
+        0,   0,    0,  2.5,
+    };
+    var out: [4]Complex = undefined;
+    const res = eigenvalues(4, &a, &out, 1e-12, 0);
+    try testing.expect(res.converged);
+    try testing.expectEqual(@as(usize, 4), res.count);
+    var re: [4]f64 = undefined;
+    for (out, &re) |l, *v| {
+        try testing.expectEqual(@as(f64, 0), l.im);
+        v.* = l.re;
+    }
+    std.mem.sort(f64, &re, {}, std.sort.asc(f64));
+    try testing.expectEqualSlices(f64, &.{ -4, 1e-3, 2.5, 1e9 }, &re);
+}
+
+test "degenerate sizes, an exhausted iteration budget, and a non-finite entry" {
+    var out: [3]Complex = undefined;
+    var one = [_]f64{-7};
+    try testing.expectEqual(Eigs{ .count = 0, .converged = true }, eigenvalues(0, one[0..0], out[0..0], 1e-12, 10));
+    try testing.expectEqual(Eigs{ .count = 1, .converged = true }, eigenvalues(1, &one, out[0..1], 1e-12, 10));
+    try testing.expectEqual(@as(f64, -7), out[0].re);
+    // No row or column isolates, so the 3x3 needs a Francis step it may not take.
+    var full = [_]f64{ 4, 1, 2, 3, 5, 7, 1, 8, 6 };
+    try testing.expect(!eigenvalues(3, &full, &out, 1e-12, 0).converged);
+    // An infinite column sum used to spin balance's scaling loop forever.
+    var inf_entry = [_]f64{ 1, 1, 1, std.math.inf(f64), 1, 1, 1, 1, 1 };
+    try testing.expect(eigenvalues(3, &inf_entry, &out, 1e-12, 50).count <= 3);
+}
+
+test extract2x2 {
+    // Companion matrices [[tr, -det], [1, 0]] with roots decades apart:
+    // (tr - sq) / 2 would lose 1e-5 of the small one to cancellation.
+    var out: [2]Complex = undefined;
+    for ([_]f64{ 1, -1 }) |sign| {
+        const big = sign * 3e11;
+        const small = sign * 1.3;
+        extract2x2(&.{ big + small, -(big * small), 1, 0 }, 2, 0, &out);
+        try testing.expectApproxEqRel(@max(big, small), out[0].re, 1e-14);
+        try testing.expectApproxEqRel(@min(big, small), out[1].re, 1e-14);
+    }
+    // A double root at zero has no product to divide.
+    extract2x2(&.{ 0, 0, 0, 0 }, 2, 0, &out);
+    try testing.expectEqual(@as(f64, 0), out[0].re);
+    try testing.expectEqual(@as(f64, 0), out[1].re);
+    // Complex pairs come out conjugate, positive imaginary part first.
+    extract2x2(&.{ 1, -4, 1, 1 }, 2, 0, &out);
+    try testing.expectEqual(Complex{ .re = 1, .im = 2 }, out[0]);
+    try testing.expectEqual(Complex{ .re = 1, .im = -2 }, out[1]);
 }

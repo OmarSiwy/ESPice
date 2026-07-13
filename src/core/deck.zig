@@ -261,6 +261,7 @@ pub const Check = struct {
     /// left out.
     expect: []const [2]f64 = &.{},
 
+    /// Which transitions count; `both` takes either.
     pub const Edge = enum(u8) { rise, fall, both };
 };
 
@@ -276,6 +277,7 @@ pub const MeasureRef = struct {
     field: Field,
     expr: []const MeasureOp,
 
+    /// The `MeasureClause` field the evaluated expression replaces.
     pub const Field = enum(u8) { val, td, from, to, at };
 };
 
@@ -367,3 +369,41 @@ pub const Measure = struct {
         return c.weight * (value - goal) / @max(@abs(goal), c.minval);
     }
 };
+
+test "Variants slice each row's writes out of the shared columns" {
+    const t = std.testing;
+    const v: Variants = .{
+        .labels = &.{ "p=1", "p=2", "p=3" },
+        .temp_c = &.{ null, 50, null },
+        .axis = &.{ 1, 2, 3 },
+        .starts = &.{ 0, 1, 3, 3 },
+        .refs = &.{ 4, 4, 7 },
+        .values = &.{ 1, 2, 0.5 },
+    };
+    try t.expectEqual(@as(u32, 3), v.count());
+    const row1 = v.writes(1);
+    try t.expectEqualSlices(u32, &.{ 4, 7 }, row1[0]);
+    try t.expectEqualSlices(f64, &.{ 2, 0.5 }, row1[1]);
+    // A row may write nothing and only move the temperature or the axis.
+    try t.expectEqual(@as(usize, 0), v.writes(2)[0].len);
+    try t.expectEqual(@as(u32, 0), (Variants{}).count());
+}
+
+test "goalError weighs the miss against the goal, floored at MINVAL, and is zero while a bound holds" {
+    const t = std.testing;
+    var m: Measure = .{ .analysis = .tran, .name = "m", .func = .find, .first = .{ .goal = 2, .weight = 3 } };
+    try t.expectEqual(@as(?f64, 3 * (2.5 - 2) / 2.0), m.goalError(2.5));
+    m.first.goal = 0;
+    try t.expectApproxEqRel(3e-3 / 1e-12, m.goalError(1e-3).?, 1e-15);
+    m.first.goal = 2;
+    m.first.goal_bound = .below;
+    try t.expectEqual(@as(?f64, 0), m.goalError(1));
+    try t.expectEqual(@as(?f64, 3.0 * (3 - 2) / 2.0), m.goalError(3));
+    m.first.goal_bound = .above;
+    try t.expectEqual(@as(?f64, 0), m.goalError(3));
+    // The goal may ride on the second clause; neither clause is no goal.
+    m.first = .{};
+    try t.expectEqual(@as(?f64, null), m.goalError(1));
+    m.second = .{ .goal = -4 };
+    try t.expectEqual(@as(?f64, (1.0 + 4) / 4.0), m.goalError(1));
+}
