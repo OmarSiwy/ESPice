@@ -16,6 +16,7 @@ pub const BindStatus = enum(u8) {
     non_finite_parameter,
     parameter_out_of_range,
 
+    /// Converts back to the caller's own error values.
     pub fn unwrap(self: BindStatus) error{ UnresolvedParameter, NonFiniteParameter, ParameterOutOfRange }!void {
         return switch (self) {
             .ok => {},
@@ -112,7 +113,8 @@ fn isScalar(comptime T: type) bool {
 
 /// Converts a card value to field type `T`. Integers round half up and must
 /// land in range, floats must stay finite after narrowing, and bools are
-/// `value != 0`.
+/// `value != 0`. Fails with `NonFiniteParameter` on NaN or infinity and
+/// `ParameterOutOfRange` when the value does not fit `T`.
 pub fn castField(comptime T: type, value: f64) !T {
     if (!std.math.isFinite(value)) return error.NonFiniteParameter;
     return switch (@typeInfo(T)) {
@@ -217,4 +219,60 @@ test "first pair wins; an alias applies only when the field's own key is absent"
     try std.testing.expectEqual(M{ .vt0 = 1, .cjo = 4, .cjo__given = true }, m);
     try std.testing.expectEqual(BindStatus.unresolved_parameter, apply(&m, &.{.{ .key = "vt0", .value = null }}));
     try std.testing.expectEqual(BindStatus.ok, apply(&m, &.{ .{ .key = "unknown", .value = null }, .{ .key = "", .value = null } }));
+}
+
+test castField {
+    const cast = castField;
+    try std.testing.expectEqual(@as(i32, 3), try cast(i32, 2.5));
+    try std.testing.expectEqual(@as(i32, -2), try cast(i32, -2.5));
+    try std.testing.expectEqual(@as(i32, 104), try cast(i32, 103.6));
+    try std.testing.expectEqual(@as(u8, 255), try cast(u8, 255.4));
+    try std.testing.expectError(error.ParameterOutOfRange, cast(u8, 255.5));
+    try std.testing.expectEqual(@as(u8, 0), try cast(u8, -0.5));
+    try std.testing.expectError(error.ParameterOutOfRange, cast(u8, -0.6));
+    try std.testing.expectEqual(@as(i8, -128), try cast(i8, -128.5));
+    try std.testing.expectError(error.ParameterOutOfRange, cast(i8, 127.5));
+    // The i64/u64 bounds are powers of two, exact in f64.
+    try std.testing.expectEqual(@as(i64, std.math.minInt(i64)), try cast(i64, -0x1p63));
+    try std.testing.expectError(error.ParameterOutOfRange, cast(i64, 0x1p63));
+    try std.testing.expectError(error.ParameterOutOfRange, cast(u64, 0x1p64));
+    try std.testing.expectEqual(@as(u64, 0xffff_ffff_ffff_f800), try cast(u64, 0x1.fffffffffffffp63));
+    try std.testing.expectError(error.ParameterOutOfRange, cast(f32, 1e39));
+    try std.testing.expectEqual(@as(f32, 0), try cast(f32, 1e-50));
+    try std.testing.expectEqual(true, try cast(bool, 0.5));
+    try std.testing.expectEqual(false, try cast(bool, -0.0));
+    inline for (.{ f64, f32, i32, u8, bool }) |T| {
+        try std.testing.expectError(error.NonFiniteParameter, cast(T, std.math.nan(f64)));
+        try std.testing.expectError(error.NonFiniteParameter, cast(T, -std.math.inf(f64)));
+    }
+}
+
+test "apply: errors by status, earlier fields keep their new values" {
+    const M = struct { a: f64 = 0, b: u8 = 0, c: f64 = 0, noisy: bool = true, noisy__given: bool = false };
+    var m: M = .{};
+    // Fields bind in declaration order: `a` lands before `b` fails.
+    try std.testing.expectEqual(BindStatus.parameter_out_of_range, apply(&m, &.{ .{ .key = "b", .value = 300 }, .{ .key = "a", .value = 1 } }));
+    try std.testing.expectEqual(@as(f64, 1), m.a);
+    try std.testing.expectEqual(BindStatus.non_finite_parameter, apply(&m, &.{.{ .key = "c", .value = std.math.inf(f64) }}));
+    // An unresolved alias is as fatal as an unresolved name.
+    try std.testing.expectEqual(BindStatus.unresolved_parameter, apply(&m, &.{.{ .key = "noise", .value = null }}));
+    try std.testing.expectEqual(BindStatus.ok, apply(&m, &.{.{ .key = "noise", .value = 0 }}));
+    try std.testing.expectEqual(M{ .a = 1, .noisy = false, .noisy__given = true }, m);
+    try std.testing.expectEqual(BindStatus.ok, apply(&m, &.{}));
+}
+
+test BindStatus {
+    inline for (@typeInfo(BindStatus).@"enum".field_names) |name| {
+        const status = @field(BindStatus, name);
+        if (status.unwrap()) |_| {
+            try std.testing.expectEqual(BindStatus.ok, status);
+        } else |err| {
+            try std.testing.expect(status != .ok);
+            try std.testing.expectEqual(status, switch (err) {
+                error.UnresolvedParameter => BindStatus.unresolved_parameter,
+                error.NonFiniteParameter => BindStatus.non_finite_parameter,
+                error.ParameterOutOfRange => BindStatus.parameter_out_of_range,
+            });
+        }
+    }
 }

@@ -7,17 +7,26 @@ const builtin = @import("builtin");
 const contract = @import("contract");
 const core = @import("core");
 
+/// The ground node id, re-exported because device code imports this module
+/// and not core.
 pub const GROUND = core.GROUND;
+/// A dense device-type id (`Library`), re-exported like `GROUND`.
 pub const DeviceType = core.DeviceType;
 
+/// The parameter binder, here so eval.zig compiles it into every device object.
 pub const bind = @import("bind.zig");
+/// One card `name=value` pair, as `DeviceVtable.bind_model` takes it.
 pub const Param = bind.Param;
+/// The binder's result, an enum because it crosses the object boundary.
 pub const BindStatus = bind.BindStatus;
 
 /// Threads per GPU block, shared by the kernel exports and the launcher.
 pub const gpu_block_size: u32 = 256;
 
+/// VerA's accepted-step control operation (`Hooks.state_ctl`).
 pub const StateCtlOp = contract.StateCtlOp;
+/// VerA's analysis state, passed by value to every device call; in
+/// `layoutHash` because GPU kernels take it too.
 pub const SimState = contract.SimState;
 
 /// A handle to one scalar parameter of one instance or model, for sweeps,
@@ -38,11 +47,13 @@ pub const ParamRef = struct {
     pelgrom_ap: f64 = 0,
     area_wl: f64 = 0,
 
+    /// The field's address, tagged by its width.
     pub const Ptr = union(enum) {
         f32: *f32,
         f64: *f64,
     };
 
+    /// Reads the parameter, widened to f64.
     pub fn get(self: ParamRef) f64 {
         return switch (self.ptr) {
             .f32 => |p| p.*,
@@ -72,6 +83,7 @@ pub const NoiseSource = struct {
     ef: f64 = 1,
 };
 
+/// The physical origin a device declares for a noise generator.
 pub const NoiseGenKind = enum { thermal, shot, flicker };
 /// A device's generator declaration: local rows `row`/`col` and its kind.
 pub const NoiseGen = struct { row: usize, col: usize, kind: NoiseGenKind };
@@ -129,6 +141,8 @@ pub fn DeviceResult(comptime T: type) type {
         out_of_memory: void,
         too_many_instances: void,
 
+        /// Encodes this compilation's error union for the trip across the
+        /// object boundary.
         pub fn fromLocal(value: error{ OutOfMemory, TooManyInstances }!T) @This() {
             return .{ .ok = value catch |err| return switch (err) {
                 error.OutOfMemory => .out_of_memory,
@@ -136,6 +150,8 @@ pub fn DeviceResult(comptime T: type) type {
             } };
         }
 
+        /// Decodes into the caller's own error values, whatever numbering the
+        /// compilation that produced it used.
         pub fn unwrap(self: @This()) error{ OutOfMemory, TooManyInstances }!T {
             return switch (self) {
                 .ok => |value| value,
@@ -273,9 +289,15 @@ pub const Hooks = struct {
 pub const Proto = struct {
     ctx: *anyopaque,
     type_name: []const u8,
+    /// Adds every staged instance's matrix entries; the allocator is the
+    /// builder's.
     pattern: *const fn (*anyopaque, std.mem.Allocator, *PatternBuilder) DeviceResult(void),
+    /// Builds the frozen batch, allocated with the given allocator, against
+    /// the final pattern. The proto still needs `destroy` afterwards.
     finalize: *const fn (*anyopaque, std.mem.Allocator, PatternView) DeviceResult(Batch),
     destroy: *const fn (*anyopaque, std.mem.Allocator) void,
+    /// Renumbers staged nodes through `perm` (old id to new); ids at or past
+    /// `perm.len`, ground among them, stay as they are.
     apply_perm: *const fn (*anyopaque, []const u32) void,
 };
 
@@ -287,8 +309,11 @@ pub const PatternView = struct {
     n: u32,
     trash_slot: u32,
 
-    /// Binary search in column `col`; asserts `col < n`.
+    /// The slot of (`row`, `col`), or null when the pattern lacks it. Binary
+    /// search, O(log) in the column's length.
+    /// Asserts that `col < n`.
     pub fn findSlot(self: PatternView, row: u32, col: u32) ?u32 {
+        std.debug.assert(col < self.n);
         var lo = self.col_ptr[col];
         var hi = self.col_ptr[col + 1];
         while (lo < hi) {
@@ -307,14 +332,17 @@ pub const PatternView = struct {
 pub const PatternBuilder = struct {
     keys: std.ArrayList(u64) = .empty,
 
+    /// Records entry (`row`, `col`); duplicates merge in `toCsc`.
     pub fn add(self: *PatternBuilder, gpa: std.mem.Allocator, row: u32, col: u32) !void {
         try self.keys.append(gpa, (@as(u64, col) << 32) | row); // col-major sort order
     }
 
+    /// Makes room for `extra` more `add`s.
     pub fn reserve(self: *PatternBuilder, gpa: std.mem.Allocator, extra: usize) !void {
         try self.keys.ensureUnusedCapacity(gpa, extra);
     }
 
+    /// Frees the keys; `gpa` must be the allocator every `add` used.
     pub fn deinit(self: *PatternBuilder, gpa: std.mem.Allocator) void {
         self.keys.deinit(gpa);
     }
@@ -366,8 +394,11 @@ pub const PatternBuilder = struct {
     }
 
     /// Sorts and dedups the keys into an `n`-column CSC pattern and returns
-    /// nnz. `gpa` owns `col_ptr_out`/`row_idx_out`; `scratch` is only used
-    /// during the call. Reorders `keys` in place.
+    /// nnz. Rows come out ascending within each column. O(keys).
+    /// Caller owns `col_ptr_out` (n + 1 entries) and `row_idx_out` (nnz) and
+    /// must free them with `gpa`; `scratch` is only used during the call.
+    /// Reorders `keys` in place.
+    /// Asserts that every column is below `n`.
     pub fn toCsc(self: *PatternBuilder, gpa: std.mem.Allocator, scratch: std.mem.Allocator, n: u32, col_ptr_out: *[]u32, row_idx_out: *[]u32) !u32 {
         const all = self.keys.items;
         try radixSort(scratch, all);
@@ -379,6 +410,8 @@ pub const PatternBuilder = struct {
             }
         }
         const nnz: u32 = @intCast(m);
+        // Sorted, so the last key holds the largest column.
+        std.debug.assert(m == 0 or all[m - 1] >> 32 < n);
 
         const col_ptr = try gpa.alloc(u32, n + 1);
         errdefer gpa.free(col_ptr);
@@ -468,12 +501,18 @@ pub const abi_version: u32 = 22;
 
 /// A device type's construction entry points, exported by each device object
 /// and by runtime-loaded `.so` devices.
+/// Every blob pointer it takes must be 16-byte aligned: the host aligns every
+/// Model and Instance blob to 16, and no device field needs more.
 pub const DeviceVtable = struct {
     name: []const u8,
+    /// Unknowns per instance: the ports, then the internal nodes.
     n_u: u32,
     num_ports: u32,
+    /// Bytes of the Model blob the model callbacks read and write.
     model_size: usize,
+    /// Bytes of the Instance blob.
     instance_size: usize,
+    /// Writes the declared defaults into a `model_size` blob.
     init_model: *const fn ([*]u8) void,
     init_instance: *const fn ([*]u8) void,
     /// Binds card pairs onto a Model / Instance blob (bind.zig).
@@ -488,6 +527,8 @@ pub const DeviceVtable = struct {
     /// it aliases, or -1.
     collapse: ?*const fn (model: [*]const u8, instance: [*]const u8, out: [*]i32) void,
     proto_create: *const fn (std.mem.Allocator) DeviceResult(Proto),
+    /// Stages one instance into a `proto_create` store, copying both blobs;
+    /// `nodes` holds `n_u` global unknowns.
     proto_add: *const fn (ctx: *anyopaque, gpa: std.mem.Allocator, model: [*]const u8, instance: [*]const u8, nodes: [*]const u32) DeviceResult(void),
 };
 
@@ -533,4 +574,103 @@ fn hashType(h0: u64, comptime T: type) u64 {
 
 test {
     _ = bind;
+}
+
+test DeviceResult {
+    const R = DeviceResult(u32);
+    try std.testing.expectEqual(@as(u32, 7), try R.fromLocal(7).unwrap());
+    try std.testing.expectError(error.OutOfMemory, R.fromLocal(error.OutOfMemory).unwrap());
+    try std.testing.expectError(error.TooManyInstances, R.fromLocal(error.TooManyInstances).unwrap());
+}
+
+test ParamRef {
+    var narrow: f32 = 0;
+    var wide: f64 = 0;
+    const a: ParamRef = .{ .ptr = .{ .f32 = &narrow }, .param_name = "w", .index = 0, .is_instance = true, .primary = false };
+    const b: ParamRef = .{ .ptr = .{ .f64 = &wide }, .param_name = "l", .index = 0, .is_instance = true, .primary = true };
+    a.set(0.1);
+    b.set(0.1);
+    try std.testing.expectEqual(@as(f64, @as(f32, 0.1)), a.get());
+    try std.testing.expectEqual(@as(f64, 0.1), b.get());
+}
+
+test "PatternView.findSlot: hits, misses and an empty column" {
+    // Column 0 holds rows {0, 2}, column 1 nothing, column 2 row {1}.
+    const v: PatternView = .{ .col_ptr = &.{ 0, 2, 2, 3 }, .row_idx = &.{ 0, 2, 1 }, .n = 3, .trash_slot = 3 };
+    const expectSlot = struct {
+        fn f(want: ?u32, got: ?u32) !void {
+            try std.testing.expectEqual(want, got);
+        }
+    }.f;
+    try expectSlot(0, v.findSlot(0, 0));
+    try expectSlot(1, v.findSlot(2, 0));
+    try expectSlot(null, v.findSlot(1, 0));
+    try expectSlot(null, v.findSlot(3, 0));
+    try expectSlot(null, v.findSlot(0, 1));
+    try expectSlot(2, v.findSlot(1, 2));
+    try expectSlot(null, v.findSlot(0, 2));
+    try expectSlot(null, v.findSlot(std.math.maxInt(u32), 2));
+}
+
+test "PatternBuilder.radixSort matches a comparison sort at every length and digit mix" {
+    const gpa = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x5eed);
+    const r = prng.random();
+    // Which 16-bit digits vary: none, one (an odd pass count, so the result
+    // lands in the temporary), rows and columns below 65536 (the middle
+    // digits skipped), rows and columns past it (three passes), all four.
+    const masks = [_]u64{ 0, 0xff, 0x0000_ffff_0000_ffff, 0x0003_0000_0003_ffff, std.math.maxInt(u64) };
+    // Around the 64-key cutoff to the comparison sort, and past it.
+    const lens = [_]usize{ 0, 1, 2, 63, 64, 65, 200, 1000 };
+    for (masks) |mask| {
+        for (lens) |len| {
+            const keys = try gpa.alloc(u64, len);
+            defer gpa.free(keys);
+            for (keys) |*k| k.* = r.int(u64) & mask;
+            const want = try gpa.dupe(u64, keys);
+            defer gpa.free(want);
+            std.mem.sortUnstable(u64, want, {}, std.sort.asc(u64));
+            try PatternBuilder.radixSort(gpa, keys);
+            try std.testing.expectEqualSlices(u64, want, keys);
+        }
+    }
+}
+
+fn toCscCase(gpa: std.mem.Allocator) !void {
+    var pb: PatternBuilder = .{};
+    defer pb.deinit(gpa);
+    // Column 1 stays empty; (2, 0) arrives twice and out of order.
+    for ([_][2]u32{ .{ 2, 0 }, .{ 0, 0 }, .{ 2, 2 }, .{ 2, 0 }, .{ 1, 2 } }) |rc| try pb.add(gpa, rc[0], rc[1]);
+    var col_ptr: []u32 = undefined;
+    var row_idx: []u32 = undefined;
+    const nnz = try pb.toCsc(gpa, gpa, 3, &col_ptr, &row_idx);
+    defer gpa.free(col_ptr);
+    defer gpa.free(row_idx);
+    try std.testing.expectEqual(@as(u32, 4), nnz);
+    try std.testing.expectEqualSlices(u32, &.{ 0, 2, 2, 4 }, col_ptr);
+    try std.testing.expectEqualSlices(u32, &.{ 0, 2, 1, 2 }, row_idx);
+}
+
+test "PatternBuilder.toCsc dedups, sorts rows and keeps empty columns" {
+    try toCscCase(std.testing.allocator);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, toCscCase, .{});
+}
+
+test "PatternBuilder.toCsc of no keys is all-empty columns" {
+    const gpa = std.testing.allocator;
+    var pb: PatternBuilder = .{};
+    defer pb.deinit(gpa);
+    var col_ptr: []u32 = undefined;
+    var row_idx: []u32 = undefined;
+    try std.testing.expectEqual(@as(u32, 0), try pb.toCsc(gpa, gpa, 2, &col_ptr, &row_idx));
+    defer gpa.free(col_ptr);
+    defer gpa.free(row_idx);
+    try std.testing.expectEqualSlices(u32, &.{ 0, 0, 0 }, col_ptr);
+    try std.testing.expectEqual(@as(usize, 0), row_idx.len);
+}
+
+test "hashType sees a field's width" {
+    const A = extern struct { a: u32, b: u32 };
+    const B = extern struct { a: u32, b: u64 };
+    try std.testing.expect(hashType(0, A) != hashType(0, B));
 }

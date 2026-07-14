@@ -28,9 +28,11 @@ const builtins = blk: {
     }
     break :blk list;
 };
+/// Built-in types, which hold ids [0, builtin_count); loaded ones follow.
 pub const builtin_count: u16 = builtins.len;
 
 /// A library holding the built-ins, each resolved through its linked object.
+/// Caller owns it and must `deinit` it.
 pub fn init(gpa: std.mem.Allocator) !Library {
     var lib: Library = .{ .gpa = gpa };
     errdefer lib.names.deinit(gpa);
@@ -46,6 +48,8 @@ pub fn init(gpa: std.mem.Allocator) !Library {
     return lib;
 }
 
+/// Frees the loaded names and the tables. Loaded libraries stay mapped, so
+/// vtables handed out stay valid.
 pub fn deinit(self: *Library) void {
     for (self.names.items[builtin_count..]) |name| self.gpa.free(name);
     self.names.deinit(self.gpa);
@@ -62,6 +66,8 @@ pub fn builtin(comptime name: []const u8) DeviceType {
     @compileError("device: no built-in model named '" ++ name ++ "'");
 }
 
+/// The vtable of type `t`, valid for the life of the process.
+/// Asserts that `t` is registered.
 pub fn vtable(self: *const Library, t: DeviceType) *const abi.DeviceVtable {
     return self.vtables.items[@backingInt(t)];
 }
@@ -79,7 +85,7 @@ pub fn find(self: *const Library, module: []const u8) ?DeviceType {
 /// Adds a device type under `module` (copied and lowercased) and returns its
 /// id; `is_digital` marks a `.v` design (`digital`). A name already loaded
 /// keeps its first vtable, flag and id. Fails with `TooManyDeviceTypes` when
-/// the id space is full.
+/// the id space is full. On failure nothing is added.
 pub fn register(self: *Library, module: []const u8, vt: *const abi.DeviceVtable, is_digital: bool) !DeviceType {
     if (self.find(module)) |t| return t;
     if (self.names.items.len >= @backingInt(DeviceType.unset)) return error.TooManyDeviceTypes;
@@ -145,4 +151,46 @@ fn cacheDir(a: std.mem.Allocator) ![]const u8 {
     if (env("XDG_CACHE_HOME")) |d| return std.fs.path.join(a, &.{ d, "espice", "hdl" });
     if (env("HOME")) |d| return std.fs.path.join(a, &.{ d, ".cache", "espice", "hdl" });
     return std.fs.path.join(a, &.{ env("TMPDIR") orelse "/tmp", "espice-cache", "hdl" });
+}
+
+test register {
+    var lib = try Library.init(std.testing.allocator);
+    defer lib.deinit();
+    var vts: [2]abi.DeviceVtable = undefined;
+    _ = &vts;
+    const a = try lib.register("MyRes", &vts[0], false);
+    try std.testing.expectEqual(builtin_count, @backingInt(a));
+    try std.testing.expectEqualStrings("myres", lib.names.items[@backingInt(a)]);
+    // A second spelling of a loaded name keeps the first registration.
+    try std.testing.expectEqual(a, try lib.register("myRES", &vts[1], true));
+    try std.testing.expect(lib.vtable(a) == &vts[0]);
+    try std.testing.expect(!lib.digital.items[@backingInt(a)]);
+    try std.testing.expectEqual(@as(?DeviceType, a), lib.find("MYRES"));
+    const d = try lib.register("logic", &vts[1], true);
+    try std.testing.expectEqual(builtin_count + 1, @backingInt(d));
+    try std.testing.expect(lib.digital.items[@backingInt(d)]);
+    try std.testing.expectEqual(lib.names.items.len, lib.vtables.items.len);
+    try std.testing.expectEqual(lib.names.items.len, lib.digital.items.len);
+}
+
+test "find searches loaded types only" {
+    var lib = try Library.init(std.testing.allocator);
+    defer lib.deinit();
+    try std.testing.expectEqualStrings("resistor", lib.names.items[@backingInt(builtin("resistor"))]);
+    try std.testing.expectEqual(@as(?DeviceType, null), lib.find("resistor"));
+    try std.testing.expectEqual(@as(?DeviceType, null), lib.find(""));
+}
+
+fn registerCase(gpa: std.mem.Allocator) !void {
+    var lib = try Library.init(gpa);
+    defer lib.deinit();
+    var vt: abi.DeviceVtable = undefined;
+    _ = &vt;
+    _ = try lib.register("a", &vt, false);
+    _ = try lib.register("b", &vt, true);
+    try std.testing.expectEqual(lib.names.items.len, lib.digital.items.len);
+}
+
+test "init and register free everything when an allocation fails" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, registerCase, .{});
 }

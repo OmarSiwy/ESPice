@@ -214,7 +214,7 @@ fn inputKey(io: std.Io, gpa: std.mem.Allocator, hdl: Hdl, path: []const u8, sour
     var h = std.crypto.hash.sha2.Sha256.init(.{});
     h.update(@tagName(hdl));
     const dir = std.fs.path.dirname(path) orelse ".";
-    if (!try hashCode(io, gpa, &h, hdl, dir, source, 0)) return null;
+    if (!try hashCode(io, gpa, &h, hdl, dir, path, source, 0)) return null;
     inline for (.{ "contract", "dyn", "gompute", "device_abi", "core", "stdpp", "zig" }) |f| {
         h.update(&.{0});
         h.update(@field(paths, f));
@@ -235,13 +235,19 @@ fn inputKey(io: std.Io, gpa: std.mem.Allocator, hdl: Hdl, path: []const u8, sour
 /// Hashes `text` without comments, then each file it `` `include``s, as
 /// VerA's `readInclude` finds it: absolute as written, else under `dir` (the
 /// loader's one include dir), else a built-in annex file by basename, which
-/// the binary identity already covers. False on anything it cannot follow.
-fn hashCode(io: std.Io, gpa: std.mem.Allocator, h: *std.crypto.hash.sha2.Sha256, hdl: Hdl, dir: []const u8, text: []const u8, depth: u8) !bool {
+/// the binary identity already covers. Text that reads `` `__FILE__`` also
+/// hashes `file`, its own path, which the macro expands to. False on anything
+/// it cannot follow.
+fn hashCode(io: std.Io, gpa: std.mem.Allocator, h: *std.crypto.hash.sha2.Sha256, hdl: Hdl, dir: []const u8, file: []const u8, text: []const u8, depth: u8) !bool {
     if (depth > max_include_depth) return false;
     const code = try normalizeCode(gpa, text);
     defer gpa.free(code);
     h.update(code);
     h.update(&.{0});
+    if (std.mem.indexOf(u8, code, "__FILE__") != null) {
+        h.update(file);
+        h.update(&.{0});
+    }
     var rest: []const u8 = code;
     while (std.mem.indexOf(u8, rest, "`include")) |at| {
         if (hdl == .v) return false;
@@ -261,7 +267,7 @@ fn hashCode(io: std.Io, gpa: std.mem.Allocator, h: *std.crypto.hash.sha2.Sha256,
             return false;
         };
         defer gpa.free(bytes);
-        if (!try hashCode(io, gpa, h, hdl, dir, bytes, depth + 1)) return false;
+        if (!try hashCode(io, gpa, h, hdl, dir, full, bytes, depth + 1)) return false;
     }
     return true;
 }
@@ -276,7 +282,8 @@ const fastvaf_builtin_includes = std.StaticStringMap(void).initComptime(.{
 /// newlines as VerA's preprocessor does; then each line has its runs of
 /// spaces and tabs (outside strings) collapsed and its ends trimmed, and
 /// blank lines are dropped. Newlines between code are kept, since one ends a
-/// `` `define``. A source that reads `__LINE__` keeps every line. Caller frees.
+/// `` `define``, and so is a blank line after a `\` continuation, which ends
+/// one too. A source that reads `__LINE__` keeps every line. Caller frees.
 fn normalizeCode(gpa: std.mem.Allocator, text: []const u8) ![]u8 {
     var bare: std.ArrayList(u8) = try .initCapacity(gpa, text.len);
     defer bare.deinit(gpa);
@@ -304,17 +311,31 @@ fn normalizeCode(gpa: std.mem.Allocator, text: []const u8) ![]u8 {
         }
     }
     const keep_lines = std.mem.indexOf(u8, bare.items, "__LINE__") != null;
-    var out: std.ArrayList(u8) = try .initCapacity(gpa, bare.items.len);
+    // Every line gets a '\n', the last one too when `bare` has none.
+    var out: std.ArrayList(u8) = try .initCapacity(gpa, bare.items.len + 1);
     errdefer out.deinit(gpa);
     var lines = std.mem.splitScalar(u8, bare.items, '\n');
+    var continued = false;
     while (lines.next()) |raw| {
         const line = std.mem.trim(u8, raw, " \t\r");
-        if (line.len == 0 and !keep_lines) continue;
+        if (line.len == 0 and !keep_lines and !continued) continue;
+        continued = line.len > 0 and line[line.len - 1] == '\\';
+        // Escapes as in the first pass: `"\\"` closes, `"\""` does not.
         var in_string = false;
+        var escape = false;
         var gap = false;
-        for (line, 0..) |ch, k| {
-            if (ch == '"' and (k == 0 or line[k - 1] != '\\')) in_string = !in_string;
-            if (!in_string and (ch == ' ' or ch == '\t' or ch == '\r')) {
+        for (line) |ch| {
+            if (in_string) {
+                if (escape) {
+                    escape = false;
+                } else if (ch == '\\') {
+                    escape = true;
+                } else if (ch == '"') {
+                    in_string = false;
+                }
+            } else if (ch == '"') {
+                in_string = true;
+            } else if (ch == ' ' or ch == '\t' or ch == '\r') {
                 gap = true;
                 continue;
             }
@@ -449,4 +470,72 @@ test "normalizeCode: comments and layout drop, code and line breaks stay" {
     const joined = try normalizeCode(g, "`define G 2.0 module m;\n  x = \"a  // b\";\nendmodule\n");
     defer g.free(joined);
     try std.testing.expect(!std.mem.eql(u8, plain, joined));
+}
+
+test "normalizeCode: corner cases" {
+    const g = std.testing.allocator;
+    const Norm = struct {
+        fn eql(a: []const u8, b: []const u8) !bool {
+            const na = try normalizeCode(std.testing.allocator, a);
+            defer std.testing.allocator.free(na);
+            const nb = try normalizeCode(std.testing.allocator, b);
+            defer std.testing.allocator.free(nb);
+            return std.mem.eql(u8, na, nb);
+        }
+    };
+    // A final line without '\n' and nothing to drop still fits the buffer.
+    const bare = try normalizeCode(g, "a");
+    defer g.free(bare);
+    try std.testing.expectEqualStrings("a\n", bare);
+    const empty = try normalizeCode(g, "");
+    defer g.free(empty);
+    try std.testing.expectEqualStrings("", empty);
+    // Unterminated strings and comments run to the end without overreading.
+    const open = try normalizeCode(g, "x = \"ab\\");
+    defer g.free(open);
+    try std.testing.expectEqualStrings("x = \"ab\\\n", open);
+    const comment = try normalizeCode(g, "/* never closed\n");
+    defer g.free(comment);
+    try std.testing.expectEqualStrings("", comment);
+    try std.testing.expect(try Norm.eql("a\r\nb\r\n", "a\nb\n"));
+    // Whitespace inside a string after an escaped backslash is the string's.
+    try std.testing.expect(!try Norm.eql("x = \"\\\\\"; y = \"a  b\";", "x = \"\\\\\"; y = \"a b\";"));
+    try std.testing.expect(!try Norm.eql("x = \"\\\"  \";", "x = \"\\\" \";"));
+    // A blank line ends a continued `define; dropping it would extend the body.
+    try std.testing.expect(!try Norm.eql("`define X a \\\n\nb\n", "`define X a \\\nb\n"));
+    // `__LINE__` keeps blank lines, since they move it.
+    try std.testing.expect(!try Norm.eql("`__LINE__\n\nx\n", "`__LINE__\nx\n"));
+    try std.testing.expect(try Norm.eql("x\n\ny\n", "x\ny\n"));
+}
+
+test "hashCode: includes it cannot follow, and __FILE__" {
+    const g = std.testing.allocator;
+    const io = std.testing.io;
+    const Sha = std.crypto.hash.sha2.Sha256;
+    var h = Sha.init(.{});
+    try std.testing.expect(try hashCode(io, g, &h, .va, ".", "m.va", "module m; endmodule\n", 0));
+    try std.testing.expect(!try hashCode(io, g, &h, .va, ".", "m.va", "`include `HDR\n", 0));
+    try std.testing.expect(!try hashCode(io, g, &h, .va, ".", "m.va", "`include \"x", 0));
+    try std.testing.expect(!try hashCode(io, g, &h, .v, ".", "m.v", "`include \"a.vh\"\n", 0));
+    try std.testing.expect(!try hashCode(io, g, &h, .va, ".", "m.va", "", max_include_depth + 1));
+    // Missing on disk: an annex header falls back to its name, anything else
+    // gives up.
+    const nowhere = "/nonexistent-espice-test-dir";
+    try std.testing.expect(try hashCode(io, g, &h, .va, nowhere, "m.va", "`include \"disciplines.vams\"\n", 0));
+    try std.testing.expect(!try hashCode(io, g, &h, .va, nowhere, "m.va", "`include \"nope.vh\"\n", 0));
+
+    // The same text keys apart under two names only when it reads `__FILE__`.
+    const Pair = struct {
+        fn differ(text: []const u8) !bool {
+            var a = Sha.init(.{});
+            var b = Sha.init(.{});
+            _ = try hashCode(std.testing.io, std.testing.allocator, &a, .va, ".", "a.va", text, 0);
+            _ = try hashCode(std.testing.io, std.testing.allocator, &b, .va, ".", "b.va", text, 0);
+            const da = a.finalResult();
+            const db = b.finalResult();
+            return !std.mem.eql(u8, &da, &db);
+        }
+    };
+    try std.testing.expect(try Pair.differ("s = `__FILE__;\n"));
+    try std.testing.expect(!try Pair.differ("s = 1;\n"));
 }

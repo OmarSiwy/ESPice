@@ -87,3 +87,24 @@ test "separately compiled topology check retains success and failure" {
     }
     return error.MissingResistance;
 }
+
+test "separately compiled binder and collapse cross the boundary by value" {
+    const vt = testDeviceVtable();
+    var model: [8]u8 align(16) = undefined;
+    var instance: [8]u8 align(16) = undefined;
+    vt.init_model(&model);
+    vt.init_instance(&instance);
+    try t.expectEqual(@as(usize, 8), vt.model_size);
+    try t.expectEqual(ir.BindStatus.unresolved_parameter, vt.bind_model(&model, &.{.{ .key = "r", .value = null }}));
+    try t.expectEqual(ir.BindStatus.non_finite_parameter, vt.bind_model(&model, &.{.{ .key = "r", .value = std.math.inf(f64) }}));
+    // The device collapses its internal node onto port 0 when r < 0.
+    var out = [_]i32{ 7, 7 };
+    try t.expectEqual(ir.BindStatus.ok, vt.bind_model(&model, &.{.{ .key = "r", .value = -1 }}));
+    vt.collapse.?(&model, &instance, &out);
+    try t.expectEqual(@as(i32, 0), out[1]);
+    try t.expectEqual(ir.BindStatus.ok, vt.bind_model(&model, &.{.{ .key = "r", .value = 5 }}));
+    vt.collapse.?(&model, &instance, &out);
+    try t.expectEqual(@as(i32, -1), out[1]);
+    // Ports are not collapse outputs.
+    try t.expectEqual(@as(i32, 7), out[0]);
+}
