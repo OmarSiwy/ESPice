@@ -677,3 +677,281 @@ test "analog initial reruns after a revert rolls its held results back" {
     fresh.hooks.copy_state(fresh.ctx, batch.ctx);
     try std.testing.expect(!fresh_typed.sim.analog_initial);
 }
+
+test "spicePwlBreak rounds from the request time as ngspice does" {
+    const spicePwlBreak = impl.test_access.spicePwlBreak;
+    const M = struct {
+        waveform: i64 = 4,
+        pwl_len: i64 = 3,
+        pwl_repeat: f64 = -1,
+        pwl_td: f64 = 0,
+        pwl_timesZ5b0Z5d: f64 = 0,
+        pwl_timesZ5b1Z5d: f64 = 1.0e-9,
+        pwl_timesZ5b2Z5d: f64 = 3.1e-9,
+        pwl_timesZ5b3Z5d: f64 = 0,
+    };
+    const mb = 1e-20;
+    var m: M = .{};
+    try std.testing.expectEqual(@as(?f64, 1.0e-9), spicePwlBreak(&m, 0, mb));
+    // `t_acc + (t_k - t_acc)`, not the table time itself.
+    const t_acc = 0.7e-9;
+    try std.testing.expectEqual(@as(?f64, t_acc + (3.1e-9 - t_acc)), spicePwlBreak(&m, t_acc, 1.0e-9 + mb));
+    try std.testing.expectEqual(@as(?f64, std.math.inf(f64)), spicePwlBreak(&m, 3.1e-9, 3.1e-9 + mb));
+    // TD delays every corner; the accepted time rounds it.
+    m.pwl_td = 0.3e-9;
+    try std.testing.expectEqual(@as(?f64, 0.3e-9), spicePwlBreak(&m, 0, mb));
+    try std.testing.expectEqual(@as(?f64, 0.3e-9 + 1.0e-9), spicePwlBreak(&m, 0.3e-9, 0.3e-9 + mb));
+    // `r=1n`: past the end the table replays [1n, 3.1n], period 2.1n.
+    m = .{ .pwl_repeat = 1.0e-9 };
+    const bp = spicePwlBreak(&m, 3.1e-9, 3.1e-9 + mb).?;
+    try std.testing.expectApproxEqRel(@as(f64, 5.2e-9), bp, 1e-12);
+    try std.testing.expectApproxEqRel(@as(f64, 7.3e-9), spicePwlBreak(&m, bp, bp + mb).?, 1e-12);
+    // `r=0` repeats the whole table (period 3.1n); a negative `r` is no repeat.
+    m = .{ .pwl_repeat = 0 };
+    try std.testing.expectApproxEqRel(@as(f64, 4.1e-9), spicePwlBreak(&m, 3.1e-9, 3.1e-9 + mb).?, 1e-12);
+    // An empty table or another waveform: the caller falls back.
+    m = .{ .pwl_len = 0 };
+    try std.testing.expectEqual(@as(?f64, null), spicePwlBreak(&m, 0, mb));
+    m = .{ .waveform = 1 };
+    try std.testing.expectEqual(@as(?f64, null), spicePwlBreak(&m, 0, mb));
+}
+
+test "spicePulseBreak rounds from the request time as ngspice does" {
+    const spicePulseBreak = impl.test_access.spicePulseBreak;
+    // tran/bench_tline_txl1_1_line's VS: PULSE(0 5 15.9n 0.2n 0.2n 15.8n 32n).
+    // Typed f64 fields, as on vsource's Model: comptime_float fields would
+    // fold the corner sums at f128 and round them once.
+    const P = struct {
+        waveform: i64 = 1,
+        pulse_phase: f64 = 0,
+        pulse_td: f64 = 15.9e-9,
+        pulse_tr: f64 = 0.2e-9,
+        pulse_tf: f64 = 0.2e-9,
+        pulse_pw: f64 = 15.8e-9,
+        pulse_per: f64 = 32e-9,
+    };
+    var m: P = .{};
+    const mb = 1e-20;
+    try std.testing.expectEqual(@as(?f64, 15.9e-9), spicePulseBreak(m, 0, mb));
+    try std.testing.expectEqual(@as(?f64, 1.61e-8), spicePulseBreak(m, 15.9e-9, 15.9e-9 + mb));
+    // The fall's end: ngspice lands one ulp below td+tr+pw+tf = 3.21e-8,
+    // at 32099.999... ps, which txlload.c truncates to 32099.
+    try std.testing.expectEqual(@as(?f64, 3.2099999999999996e-08), spicePulseBreak(m, 3.19e-8, 3.19e-8 + mb));
+    try std.testing.expectEqual(@as(?f64, 4.79e-8), spicePulseBreak(m, 3.2099999999999996e-08, 3.2099999999999996e-08 + mb));
+    // An anchor ngspice would not ask at yields nothing (caller falls back).
+    try std.testing.expectEqual(@as(?f64, null), spicePulseBreak(m, 0, 60e-9));
+    // A nonzero PHASE and any other waveform are left to the timers.
+    m.pulse_phase = 90;
+    try std.testing.expectEqual(@as(?f64, null), spicePulseBreak(m, 0, mb));
+    m = .{ .waveform = 4 };
+    try std.testing.expectEqual(@as(?f64, null), spicePulseBreak(m, 0, mb));
+}
+
+test "Dual: every partial matches a central difference of the value" {
+    // Independent of the contract's reference family: a wrong lane rule
+    // there and here would still disagree with the difference quotient.
+    const S = Dual(2, f64);
+    const core = struct {
+        fn f(a: f64, b: f64) S.Of(0b11) {
+            const x = S.probe(0, a);
+            const y = S.probe(1, b);
+            return x.mul(y).add(x.exp().scale(0.3)).sub(y.div(x.addC(2.5)))
+                .add(y.mul(y).addC(1.0).sqrt().pow(1.5))
+                .add(x.sin().mul(y.cos())).add(x.tanh().atan())
+                .add(x.mul(x).addC(1.0).log()).add(y.sinh().scale(0.1))
+                .add(x.cosh().scale(0.05)).add(x.expm1().scale(0.2))
+                .add(y.mul(y).log1p()).neg();
+        }
+    }.f;
+    for (0..9) |i| for (0..9) |j| {
+        const a = @as(f64, @floatFromInt(i)) * 0.3 - 1.2;
+        const b = @as(f64, @floatFromInt(j)) * 0.3 - 1.2;
+        const r = core(a, b);
+        const h = 1e-6;
+        const fd = [2]f64{
+            (core(a + h, b).val() - core(a - h, b).val()) / (2 * h),
+            (core(a, b + h).val() - core(a, b - h).val()) / (2 * h),
+        };
+        inline for (0..2) |u| {
+            const d = r.ddxAt(u);
+            try std.testing.expect(@abs(d - fd[u]) <= 1e-6 * @max(1.0, @abs(d)));
+        }
+    };
+}
+
+test "Dual: the padded sparse layout computes the dense layout's numbers" {
+    // Three lanes pad to four, and the operands below carry {0,2}, {1,2}
+    // and their join, so every spread shuffle and the pad lane are crossed.
+    const chain = struct {
+        fn f(comptime S: type, a: f64, b: f64, c: f64) S.Of(0b111) {
+            const x = S.probe(0, a);
+            const y = S.probe(1, b);
+            const z = S.probe(2, c);
+            const xz = x.mul(z).add(x.exp());
+            const yz = y.div(z.addC(3.0)).sub(y.pow(2.0));
+            const s = S.sel(x.lt(y), xz, yz);
+            return s.mul(xz).add(yz.mul(yz).addC(1.0).sqrt()).add(x.mul(S.con(2.5))).to(0b111);
+        }
+    }.f;
+    const Sparse3 = impl.test_access.Sparse3;
+    const grid = [_]f64{ -1.0, -0.5, 0.0, 0.5, 1.0 };
+    for (grid) |a| for (grid) |b| for (grid) |c| {
+        const dense = chain(Dual(3, f64), a, b, c);
+        const sparse = chain(Sparse3, a, b, c);
+        try std.testing.expectEqual(dense.val(), sparse.val());
+        inline for (0..3) |u| try std.testing.expectEqual(dense.ddxAt(u), sparse.ddxAt(u));
+    };
+}
+
+test "segmentSum: the eight-wide loads keep the plain loop's order, bit for bit" {
+    var prng = std.Random.DefaultPrng.init(0x5e65);
+    const r = prng.random();
+    var stage: [64]f64 = undefined;
+    // Mixed signs and magnitudes, so any reassociation changes the bits.
+    for (&stage) |*v| v.* = (r.float(f64) - 0.5) * std.math.pow(f64, 10, @floatFromInt(r.intRangeAtMost(i32, -8, 8)));
+    for (0..4) |off| for (0..3 * 8 + 2) |n| {
+        const first: u32 = @intCast(off);
+        const end: u32 = @intCast(off + n);
+        var want: f64 = 0;
+        for (stage[first..end]) |v| want += v;
+        const got = impl.test_access.segmentSum(&stage, first, end);
+        try std.testing.expectEqual(@as(u64, @bitCast(want)), @as(u64, @bitCast(got)));
+    };
+}
+
+test "repMask: one column per lane, an alias before its root, unlaned columns dropped" {
+    const repMask = impl.test_access.repMask;
+    const nl = contract.no_lane;
+    // Columns 0 and 1 share lane 0; column 1 is the alias, so it stamps.
+    try std.testing.expectEqual([3]u64{ 0b110, 0b010, 0 }, comptime repMask(3, .{ 0, 0, 1 }, .{ false, true, false }, .{ 0b111, 0b011, 0 }));
+    // No alias: the first column of the lane wins (the identity on the wide basis).
+    try std.testing.expectEqual([3]u64{ 0b101, 0b001, 0 }, comptime repMask(3, .{ 0, 0, 1 }, .{ false, false, false }, .{ 0b111, 0b011, 0 }));
+    // A column without a lane takes its partial from `jac_const`, not a stamp.
+    try std.testing.expectEqual([3]u64{ 0b101, 0b100, 0 }, comptime repMask(3, .{ 0, nl, 1 }, .{ false, false, false }, .{ 0b111, 0b110, 0 }));
+}
+
+/// A two-terminal conductance, the smallest device a batch accepts.
+const Conductance = struct {
+    pub const U = enum(u8) { p, n };
+    pub const num_ports: usize = 2;
+    pub const Model = struct { g: f64 = 1e-3 };
+    pub const Instance = struct {};
+    pub fn eval(comptime S: type, xv: *const [2]S.V, m: *const Model, _: *const Instance, _: SimState) contract.Rows(@This(), S) {
+        const x = contract.probes(@This(), S, xv);
+        const i = x[0].sub(x[1]).scale(m.g);
+        return contract.rows(@This(), S, .{ i, i.neg() });
+    }
+};
+
+/// A dense 3x3 pattern over nodes 0..2; slot 9 and row 3 take ground writes.
+const dense3: impl.test_access.PatternView = .{
+    .col_ptr = &.{ 0, 3, 6, 9 },
+    .row_idx = &.{ 0, 1, 2, 0, 1, 2, 0, 1, 2 },
+    .n = 3,
+    .trash_slot = 9,
+};
+
+test "scatter_bounds: the slot and row ranges a slice touches, ground excluded" {
+    const a = std.testing.allocator;
+    var proto: ProtoStore(Conductance) = .{};
+    // Floating, half grounded, fully grounded.
+    for ([_][2]u32{ .{ 1, 2 }, .{ 2, 0 }, .{ 0, 0 } }) |nodes| try proto.append(.{}, .{}, nodes);
+    const batch = try ProtoStore(Conductance).finalize(&proto, a, dense3).unwrap();
+    defer batch.hooks.deinit(batch.ctx, a);
+    const bounds = batch.hooks.scatter_bounds;
+    // Slot of (r, c) in the dense pattern is 3c + r.
+    try std.testing.expectEqual([4]u32{ 4, 9, 1, 3 }, bounds(batch.ctx, 0, 1, 9, 3));
+    try std.testing.expectEqual([4]u32{ 8, 9, 2, 3 }, bounds(batch.ctx, 1, 2, 9, 3));
+    try std.testing.expectEqual([4]u32{ 4, 9, 1, 3 }, bounds(batch.ctx, 0, 3, 9, 3));
+    // Only trash, or nothing at all: empty ranges.
+    try std.testing.expectEqual([4]u32{ 0, 0, 0, 0 }, bounds(batch.ctx, 2, 3, 9, 3));
+    try std.testing.expectEqual([4]u32{ 0, 0, 0, 0 }, bounds(batch.ctx, 1, 1, 9, 3));
+}
+
+test "ac_dyn: every frequency once, ragged tails included" {
+    const D = struct {
+        pub const U = Conductance.U;
+        pub const num_ports = Conductance.num_ports;
+        pub const Model = Conductance.Model;
+        pub const Instance = Conductance.Instance;
+        pub fn eval(comptime S: type, xv: *const [2]S.V, m: *const Model, _: *const Instance, _: SimState) contract.Rows(@This(), S) {
+            const x = contract.probes(@This(), S, xv);
+            const i = x[0].sub(x[1]).scale(m.g);
+            return contract.rows(@This(), S, .{ i, i.neg() });
+        }
+        pub const ac_dyn_slots = [_]usize{0};
+        pub fn acDyn(comptime V: type, _: *const Model, _: *const Instance, lx: *const [2]f64, _: SimState, ow: anytype, out: anytype) void {
+            const w: V = ow;
+            out[0] = .{ .re = w + @as(V, @splat(lx[0])), .im = -w };
+        }
+    };
+    const a = std.testing.allocator;
+    var proto: ProtoStore(D) = .{};
+    try proto.append(.{}, .{}, .{ 1, 2 });
+    try proto.append(.{}, .{}, .{ 2, 1 });
+    const batch = try ProtoStore(D).finalize(&proto, a, dense3).unwrap();
+    defer batch.hooks.deinit(batch.ctx, a);
+    const lw = std.simd.suggestVectorLength(f64) orelse 1;
+    const x = [_]f64{ 0, 10, 20 };
+    var omegas: [3 * lw + 1]f64 = undefined;
+    for (&omegas, 0..) |*w, i| w.* = @floatFromInt(i + 1);
+    var re: [2 * omegas.len]f64 = undefined;
+    var im: [2 * omegas.len]f64 = undefined;
+    for (0..omegas.len + 1) |nw| {
+        @memset(&re, std.math.nan(f64));
+        @memset(&im, std.math.nan(f64));
+        try std.testing.expectEqual(@as(usize, 2), batch.hooks.ac_dyn.?(batch.ctx, &x, omegas[0..nw], re[0 .. 2 * nw], im[0 .. 2 * nw]));
+        for (0..2) |id| for (0..nw) |i| {
+            try std.testing.expectEqual(omegas[i] + x[1 + id], re[id * nw + i]);
+            try std.testing.expectEqual(-omegas[i], im[id * nw + i]);
+        };
+        // Nothing past the entries asked for.
+        for (re[2 * nw ..]) |v| try std.testing.expect(std.math.isNan(v));
+    }
+}
+
+test "finalize leaves nothing of its allocator behind when an allocation fails" {
+    const D = struct {
+        pub const U = Conductance.U;
+        pub const num_ports = Conductance.num_ports;
+        pub const Model = Conductance.Model;
+        pub const Instance = Conductance.Instance;
+        pub fn eval(comptime S: type, xv: *const [2]S.V, m: *const Model, _: *const Instance, _: SimState) contract.Rows(@This(), S) {
+            const x = contract.probes(@This(), S, xv);
+            const i = x[0].sub(x[1]).scale(m.g);
+            return contract.rows(@This(), S, .{ i, i.neg() });
+        }
+        pub const State = struct { seen: f64 = 0 };
+        pub fn initState(_: *const Model, _: *const Instance) State {
+            return .{};
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn run(gpa: std.mem.Allocator) !void {
+            const proto = try gpa.create(ProtoStore(D));
+            proto.* = .{};
+            defer ProtoStore(D).destroy(proto, gpa);
+            try proto.append(.{}, .{}, .{ 1, 2 });
+            try proto.append(.{}, .{}, .{ 2, 0 });
+            const batch = try ProtoStore(D).finalize(proto, gpa, dense3).unwrap();
+            batch.hooks.deinit(batch.ctx, gpa);
+        }
+    }.run, .{});
+}
+
+test "finalize starts a batch before its analog initial block, whatever the allocator held" {
+    // A fixed buffer of set bits stands in for reused memory: `create` hands
+    // out the bytes as they are, so a field finalize skips reads as true.
+    var buf: [16 * 1024]u8 align(16) = @splat(0xff);
+    var fba = std.heap.FixedBufferAllocator.init(&buf);
+    const a = fba.allocator();
+    var proto: ProtoStore(Conductance) = .{};
+    try proto.append(.{}, .{}, .{ 1, 2 });
+    const batch = try ProtoStore(Conductance).finalize(&proto, a, dense3).unwrap();
+    defer batch.hooks.deinit(batch.ctx, a);
+    const typed: *DeviceBatch(Conductance) = @ptrCast(@alignCast(batch.ctx));
+    batch.hooks.set_sim_state(batch.ctx, .{});
+    try std.testing.expect(typed.sim.analog_initial);
+    try std.testing.expect(!typed.held_initial);
+    try std.testing.expect(!typed.committed_initial);
+}

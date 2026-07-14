@@ -113,22 +113,32 @@ fn DualFor(comptime F: type, comptime lane: []const u8, comptime layout: Layout,
             return if (u < 64) @as(u64, 1) << u else ~@as(u64, 0);
         }
 
+        /// The type of a value that depends on the unknowns in `m`: the
+        /// same type for every `m` when the layout is dense.
         pub fn Of(comptime m: u64) type {
             return Val(lanesOf(m));
         }
+        /// A constant: every lane +0.
         pub fn con(c: f64) Of(0) {
             return .{ .v = c, .d = @splat(0) };
         }
+        /// Unknown `u` at `v`, its lane seeded with 1. An unknown without a
+        /// lane (`contract.no_lane`) comes back as a constant.
         pub fn probe(comptime u: usize, v: f64) Of(unknownBit(u)) {
             const T = Of(unknownBit(u));
             var d: T.Lanes = @splat(0);
             if (comptime lane[u] != contract.no_lane) d[comptime T.pos(lane[u])] = 1;
             return .{ .v = v, .d = d };
         }
-        /// `a` where the indicator `c` is nonzero, else `b`, lanes included.
+        /// `a` where the indicator `c` is nonzero (NaN included), else `b`,
+        /// lanes included.
         pub fn sel(c: anytype, a: anytype, b: anytype) Val(@TypeOf(a).lanes | @TypeOf(b).lanes) {
             const r = @TypeOf(a).lanes | @TypeOf(b).lanes;
-            return if (c.v != 0.0) a.toLanes(r) else b.toLanes(r);
+            const pick = c.v != 0.0;
+            // A lane select, not a branch: on the GPU each thread's indicator
+            // differs, and selection is exact, so the bits are the branch's.
+            const d = if (comptime width(r) == 0) a.spread(r) else @select(F, @as(@Vector(width(r), bool), @splat(pick)), a.spread(r), b.spread(r));
+            return .{ .v = if (pick) a.v else b.v, .d = d };
         }
 
         /// A value carrying the lanes in `ls`, in ascending lane order.
@@ -140,6 +150,7 @@ fn DualFor(comptime F: type, comptime lane: []const u8, comptime layout: Layout,
                 /// nothing reads `d` through a pointer that needs it.
                 d: Lanes align(@alignOf(F)),
 
+                /// The lanes this value carries, one bit per lane.
                 pub const lanes = ls;
                 const Lanes = @Vector(width(ls), F);
                 const T = @This();
@@ -174,6 +185,8 @@ fn DualFor(comptime F: type, comptime lane: []const u8, comptime layout: Layout,
                     return .{ .v = a.v, .d = a.spread(to_ls) };
                 }
 
+                /// Widens to `Of(m)`, new lanes +0. A compile error when `m`
+                /// drops a lane this value carries.
                 pub fn to(a: T, comptime m: u64) Of(m) {
                     return a.toLanes(Of(m).lanes);
                 }
@@ -203,6 +216,9 @@ fn DualFor(comptime F: type, comptime lane: []const u8, comptime layout: Layout,
                 pub fn neg(a: T) T {
                     return .{ .v = -a.v, .d = -a.d };
                 }
+                /// Lanes by the product rule, fused into one rounding where
+                /// `fma_ok`, so they differ in the last bit between targets
+                /// with and without FMA; the value never does.
                 pub fn mul(a: T, b: anytype) Val(ls | @TypeOf(b).lanes) {
                     const B = @TypeOf(b);
                     const J = Val(ls | B.lanes);
@@ -243,6 +259,8 @@ fn DualFor(comptime F: type, comptime lane: []const u8, comptime layout: Layout,
                 pub fn log1p(a: T) T {
                     return map(a, dmath.log1p(a.v), 1.0 / (1.0 + a.v));
                 }
+                /// Slope `0.5/sqrt(x)`, and 0 rather than inf or NaN where
+                /// `sqrt(x)` is not positive.
                 pub fn sqrt(a: T) T {
                     const s = @sqrt(a.v);
                     return map(a, s, if (s > 0.0) 0.5 / s else 0.0);
@@ -277,12 +295,16 @@ fn DualFor(comptime F: type, comptime lane: []const u8, comptime layout: Layout,
                 }
                 // Comparisons return a 0/1 indicator without lanes; `sel`
                 // carries the lanes of the operand it picks.
+
+                /// 1 when `a < b`, else 0 (NaN on either side gives 0).
                 pub fn lt(a: T, b: anytype) Of(0) {
                     return con(@floatFromInt(@intFromBool(a.v < b.v)));
                 }
+                /// 1 when `a <= b`, else 0 (NaN on either side gives 0).
                 pub fn le(a: T, b: anytype) Of(0) {
                     return con(@floatFromInt(@intFromBool(a.v <= b.v)));
                 }
+                /// 1 when `a == b`, else 0 (NaN on either side gives 0).
                 pub fn eq(a: T, b: anytype) Of(0) {
                     return con(@floatFromInt(@intFromBool(a.v == b.v)));
                 }
@@ -416,11 +438,20 @@ pub fn gpuJacFloat(comptime D: type) type {
     return if (@hasDecl(D, "jac_f32") and D.jac_f32) f32 else f64;
 }
 
+// The ABI types a module importing only this file (the runtime `.so` shim,
+// the test suites) needs.
+
+/// `abi.NoiseSource`, one priced generator of `Hooks.collect_noise`.
 pub const NoiseSource = ir.NoiseSource;
+/// `abi.NoiseGen`, the entries of a device's `noise_gens`.
 pub const NoiseGen = ir.NoiseGen;
+/// `abi.PsdTerm`, what a device's `noisePsd` returns per generator.
 pub const PsdTerm = ir.PsdTerm;
+/// `abi.Planes`, the value planes `Batch.eval` stamps into.
 pub const Planes = ir.Planes;
+/// `abi.Batch`, what `ProtoStore.finalize` returns.
 pub const Batch = ir.Batch;
+/// `abi.Proto`, the staging handle `deviceVtable(...).proto_create` returns.
 pub const Proto = ir.Proto;
 const GROUND = ir.GROUND;
 const StateCtlOp = ir.StateCtlOp;
@@ -931,7 +962,9 @@ const staging_gpa = std.heap.smp_allocator;
 
 /// Moves `items[k]` to `items[dst[k]]` for every k by following each cycle
 /// of the permutation, one element in hand at a time. `seen` is scratch of
-/// the same length; its contents on entry do not matter.
+/// the same length; its contents on entry do not matter. O(n), no
+/// allocation. `dst` must be a permutation of `0..items.len`: a repeated
+/// target loops forever, an out-of-range one is out of bounds.
 pub fn permuteInPlace(comptime T: type, items: []T, dst: []const u32, seen: []bool) void {
     @memset(seen, false);
     for (0..items.len) |start| {
@@ -961,6 +994,8 @@ pub fn ProtoStore(comptime D: type) type {
 
         const Self = @This();
 
+        /// Stages one instance. The rows live on `staging_gpa`, never the
+        /// caller's allocator. On failure no column grows.
         pub fn append(self: *Self, model: D.Model, instance: D.Instance, nodes: [n_u]u32) !void {
             try self.models.append(staging_gpa, model);
             errdefer _ = self.models.pop();
@@ -999,7 +1034,11 @@ pub fn ProtoStore(comptime D: type) type {
 
         /// `Proto.finalize`: copies the staged rows into a new batch owned by
         /// `gpa`, builds its tapes against `pv`, and frees the staging rows.
-        /// Fails with `TooManyInstances` past `maxInt(u32)` rows.
+        /// Fails with `TooManyInstances` past `maxInt(u32)` rows. On
+        /// `OutOfMemory` nothing of `gpa` is left allocated, but the staging
+        /// columns already moved are gone, so the store is only fit for
+        /// `destroy`. Asserts that `pv` holds every non-ground (row, col)
+        /// the device's structural Jacobian can fill.
         pub fn finalize(ctx: *anyopaque, gpa: std.mem.Allocator, pv: PatternView) ir.DeviceResult(Batch) {
             return ir.DeviceResult(Batch).fromLocal(finalizeLocal(ctx, gpa, pv));
         }
@@ -1011,8 +1050,12 @@ pub fn ProtoStore(comptime D: type) type {
             const count = std.math.cast(u32, self.nodes.items.len) orelse return error.TooManyInstances;
             const store = try gpa.create(DeviceBatch(D));
 
+            // `create` returns undefined bytes, so every field is written here,
+            // the ones with struct defaults included.
             store.count = count;
             store.sim = .{};
+            store.held_initial = false;
+            store.committed_initial = false;
             store.owns_tapes = true;
             store.unshared = false;
             store.models_shared = &.{};
@@ -1321,55 +1364,6 @@ fn spicePwlBreak(m: anytype, t_acc: f64, tq: f64) ?f64 {
     return if (bp > tq) bp else null;
 }
 
-test "spicePwlBreak rounds from the request time as ngspice does" {
-    const M = struct {
-        waveform: i64 = 4,
-        pwl_len: i64 = 3,
-        pwl_repeat: f64 = -1,
-        pwl_td: f64 = 0,
-        pwl_timesZ5b0Z5d: f64 = 0,
-        pwl_timesZ5b1Z5d: f64 = 1.0e-9,
-        pwl_timesZ5b2Z5d: f64 = 3.1e-9,
-        pwl_timesZ5b3Z5d: f64 = 0,
-    };
-    const mb = 1e-20;
-    var m: M = .{};
-    try std.testing.expectEqual(@as(?f64, 1.0e-9), spicePwlBreak(&m, 0, mb));
-    // `t_acc + (t_k - t_acc)`, not the table time itself.
-    const t_acc = 0.7e-9;
-    try std.testing.expectEqual(@as(?f64, t_acc + (3.1e-9 - t_acc)), spicePwlBreak(&m, t_acc, 1.0e-9 + mb));
-    try std.testing.expectEqual(@as(?f64, std.math.inf(f64)), spicePwlBreak(&m, 3.1e-9, 3.1e-9 + mb));
-    // TD delays every corner; the accepted time rounds it.
-    m.pwl_td = 0.3e-9;
-    try std.testing.expectEqual(@as(?f64, 0.3e-9), spicePwlBreak(&m, 0, mb));
-    try std.testing.expectEqual(@as(?f64, 0.3e-9 + 1.0e-9), spicePwlBreak(&m, 0.3e-9, 0.3e-9 + mb));
-    // `r=1n`: past the end the table replays [1n, 3.1n], period 2.1n.
-    m = .{ .pwl_repeat = 1.0e-9 };
-    const bp = spicePwlBreak(&m, 3.1e-9, 3.1e-9 + mb).?;
-    try std.testing.expectApproxEqRel(@as(f64, 5.2e-9), bp, 1e-12);
-    try std.testing.expectApproxEqRel(@as(f64, 7.3e-9), spicePwlBreak(&m, bp, bp + mb).?, 1e-12);
-    // `r=0` repeats the whole table (period 3.1n); a negative `r` is no repeat.
-    m = .{ .pwl_repeat = 0 };
-    try std.testing.expectApproxEqRel(@as(f64, 4.1e-9), spicePwlBreak(&m, 3.1e-9, 3.1e-9 + mb).?, 1e-12);
-    // Not PWL: the caller falls back.
-    m.waveform = 1;
-    try std.testing.expectEqual(@as(?f64, null), spicePwlBreak(&m, 0, mb));
-}
-
-test "spicePulseBreak rounds from the request time as ngspice does" {
-    // tran/bench_tline_txl1_1_line's VS: PULSE(0 5 15.9n 0.2n 0.2n 15.8n 32n).
-    const m = .{ .waveform = @as(i64, 1), .pulse_phase = 0.0, .pulse_td = 15.9e-9, .pulse_tr = 0.2e-9, .pulse_tf = 0.2e-9, .pulse_pw = 15.8e-9, .pulse_per = 32e-9 };
-    const mb = 1e-20;
-    try std.testing.expectEqual(@as(?f64, 15.9e-9), spicePulseBreak(m, 0, mb));
-    try std.testing.expectEqual(@as(?f64, 1.61e-8), spicePulseBreak(m, 15.9e-9, 15.9e-9 + mb));
-    // The fall's end: ngspice lands one ulp below td+tr+pw+tf = 3.21e-8,
-    // at 32099.999... ps, which txlload.c truncates to 32099.
-    try std.testing.expectEqual(@as(?f64, 3.2099999999999996e-08), spicePulseBreak(m, 3.19e-8, 3.19e-8 + mb));
-    try std.testing.expectEqual(@as(?f64, 4.79e-8), spicePulseBreak(m, 3.2099999999999996e-08, 3.2099999999999996e-08 + mb));
-    // An anchor ngspice would not ask at yields nothing (caller falls back).
-    try std.testing.expectEqual(@as(?f64, null), spicePulseBreak(m, 0, 60e-9));
-}
-
 /// Whether D's `updateState` pushes delay-line history, which only accepted
 /// transient points may feed: LRM §4.5 `absdelay`, and the native lines that
 /// declare `unrevertible_state` (they have no `stateCtl`). A VerA ring would
@@ -1510,6 +1504,8 @@ pub fn DeviceBatch(comptime D: type) type {
             break :blk frozen;
         } else {};
 
+        /// The type's comptime hook table, shared by every batch of D. A hook
+        /// is null when D lacks what it needs, so callers test the optional.
         pub const hooks: Hooks = .{
             .instantiate = instantiate,
             .snapshot = snapshot,
@@ -2574,18 +2570,24 @@ fn ReduceKernel(comptime _: type, comptime block_size: u32) type {
             const tid = gompute.globalIdX(block_size);
             if (tid >= n_cells) return;
             const i: usize = @intCast(tid);
-            var sum: f64 = 0;
-            var k = seg[2 * i];
-            const end = seg[2 * i + 1];
-            while (k + 8 <= end) : (k += 8) {
-                var v: [8]f64 = undefined;
-                inline for (&v, 0..) |*e, j| e.* = stage[k + j];
-                inline for (v) |e| sum += e;
-            }
-            while (k < end) : (k += 1) sum += stage[k];
-            plane[i] = sum;
+            plane[i] = segmentSum(stage, seg[2 * i], seg[2 * i + 1]);
         }
     };
+}
+
+/// `stage[first..end]` summed strictly left to right, the loads issued eight at
+/// a time. Split out of `ReduceKernel` so the host tests it against the plain
+/// loop: tests/eval.zig.
+inline fn segmentSum(stage: gompute.GlobalPtr(f64), first: u32, end: u32) f64 {
+    var sum: f64 = 0;
+    var k = first;
+    while (k + 8 <= end) : (k += 8) {
+        var v: [8]f64 = undefined;
+        inline for (&v, 0..) |*e, j| e.* = stage[k + j];
+        inline for (v) |e| sum += e;
+    }
+    while (k < end) : (k += 1) sum += stage[k];
+    return sum;
 }
 
 /// GPU charge-tape kernel, one thread per instance: the LTE charges
@@ -2807,11 +2809,20 @@ comptime {
     }
 }
 
-/// Private decls exposed to the test suites.
+/// Private decls exposed to the test suites. Tests live in tests/eval.zig,
+/// not here: this file is a dependency module of every test root, and Zig
+/// runs only the root module's tests.
 pub const test_access = if (@import("builtin").is_test) .{
     .Real = Real,
     .Sparse = DualFor(f64, &.{ 0, 1 }, hostLayout(false), false),
     .SparseF32 = DualFor(f32, &.{ 0, 1 }, hostLayout(false), false),
+    // Three lanes pad to four: the shuffle path with a pad lane.
+    .Sparse3 = DualFor(f64, &.{ 0, 1, 2 }, hostLayout(false), false),
     .anyNonzero = anyNonzero,
+    .segmentSum = segmentSum,
+    .repMask = repMask,
+    .spicePulseBreak = spicePulseBreak,
+    .spicePwlBreak = spicePwlBreak,
     .ParamRef = ParamRef,
+    .PatternView = PatternView,
 } else {};
