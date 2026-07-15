@@ -1,4 +1,5 @@
-//! Frontend: source preparation and model-to-circuit construction.
+//! Frontend: source preparation and model-to-circuit construction. Leaves
+//! never import this root; it only re-exports what the facade calls.
 const preparation = @import("prepare.zig");
 pub const Source = preparation.Source;
 pub const Dialect = preparation.Dialect;
@@ -16,4 +17,7 @@ test {
     _ = @import("tests/models.zig");
     _ = @import("tests/variants.zig");
     _ = @import("variants.zig");
+    _ = @import("analyses.zig");
+    _ = @import("mosra.zig");
+    _ = @import("prepare.zig");
 }

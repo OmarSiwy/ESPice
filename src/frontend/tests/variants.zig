@@ -146,3 +146,27 @@ test "a top-level .if on a swept parameter holds only while its branch does" {
     const flips = try netlist.parse(pa.allocator(), try std.fmt.allocPrint(pa.allocator(), deck, .{"3"}), .ngspice);
     try t.expectError(error.UnsupportedCard, input.build(&lib, sa.allocator(), pa.allocator(), flips));
 }
+
+test "a MONTE run whose trial numbers pass u32 is refused, not wrapped" {
+    var sa = std.heap.ArenaAllocator.init(t.allocator);
+    defer sa.deinit();
+    var pa = std.heap.ArenaAllocator.init(t.allocator);
+    defer pa.deinit();
+    var lib = try device.Library.init(t.allocator);
+    defer lib.deinit();
+    const deck =
+        \\monte firstrun
+        \\v1 in 0 1
+        \\r1 in 0 1k
+        \\.tran 1n 10n sweep monte=3 firstrun={s}
+        \\.end
+    ;
+    const ok = try netlist.parse(pa.allocator(), try std.fmt.allocPrint(pa.allocator(), deck, .{"4294967293"}), .hspice);
+    var prepared = try input.build(&lib, sa.allocator(), pa.allocator(), ok);
+    defer prepared.deinit();
+    // The nominal run is no row; the three trials are.
+    try t.expectEqual(@as(u32, 3), prepared.deck.variants.count());
+    try t.expectEqualStrings("monte=4294967295", prepared.deck.variants.labels[2]);
+    const past = try netlist.parse(pa.allocator(), try std.fmt.allocPrint(pa.allocator(), deck, .{"4294967294"}), .hspice);
+    try t.expectError(error.UnsupportedCard, input.build(&lib, sa.allocator(), pa.allocator(), past));
+}

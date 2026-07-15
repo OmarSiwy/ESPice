@@ -20,7 +20,9 @@ const max_rel_times = 10_000;
 
 /// Resolves `nl.deck.mosra` against the frozen `circuit`, whose card table
 /// is `cards` and whose rows `nb` maps nets to. Lives in `sim`; `scratch`
-/// holds the lookups.
+/// holds the lookups. Asserts that `nl.deck.mosra` is set. Every deck the
+/// aging cannot bind (a source with no MOSRA card, a MOSFET without `delvto`,
+/// more than 10000 times) is `UnsupportedCard`.
 pub fn plan(sim: std.mem.Allocator, scratch: std.mem.Allocator, nl: *const Netlist, nb: *const builder.NetBuilder, circuit: *const device.Circuit, cards: []const core.query.CardRef, temp_c: f64) !Plan {
     const card = nl.deck.mosra.?;
     const line = card.line;
@@ -214,4 +216,36 @@ fn refKey(t: core.DeviceType, index: u32) u64 {
 fn refuse(line: []const u8, what: []const u8) error{UnsupportedCard} {
     if (!@import("builtin").is_test) std.log.err("netlist: .mosra: {s}: {s}", .{ what, line });
     return error.UnsupportedCard;
+}
+
+test binBase {
+    try std.testing.expectEqualStrings("nch", binBase("nch.3"));
+    try std.testing.expectEqualStrings("nch.a", binBase("nch.a"));
+    try std.testing.expectEqualStrings("nch.", binBase("nch."));
+    try std.testing.expectEqualStrings("nch", binBase("nch"));
+    try std.testing.expectEqualStrings("a.b", binBase("a.b.12"));
+}
+
+test refKey {
+    const a = refKey(@fromBackingInt(1), 2);
+    try std.testing.expect(a != refKey(@fromBackingInt(2), 1));
+    try std.testing.expectEqual(@as(u64, 1 << 32 | 2), a);
+}
+
+test readModel {
+    const kv = netlist.Kv;
+    const good = try readModel(.{ .name = "nra", .kind = "mosra", .kv = &[_]kv{
+        .{ .key = "level", .value = .{ .num = 1 } },
+        .{ .key = "tit0", .value = .{ .num = 1e-4 } },
+        .{ .key = "tn", .value = .{ .num = 0.25 } },
+    } }, "");
+    try std.testing.expectEqual(@as(f64, 1e-4), good.tit0);
+    try std.testing.expectEqual(@as(f64, 0.25), good.tn);
+    for ([_][]const kv{
+        &.{.{ .key = "level", .value = .{ .num = 2 } }},
+        &.{.{ .key = "bogus", .value = .{ .num = 1 } }},
+        &.{.{ .key = "tit0", .value = .{ .name = "x" } }},
+        &.{.{ .key = "tn", .value = .{ .num = 0 } }},
+        &.{.{ .key = "tit0", .value = .{ .num = -1 } }},
+    }) |pairs| try std.testing.expectError(error.UnsupportedCard, readModel(.{ .name = "nra", .kind = "mosra", .kv = pairs }, ""));
 }
