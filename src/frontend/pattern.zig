@@ -10,6 +10,13 @@ const std = @import("std");
 /// PWL points the source models hold (`pwl_times[0:63]` in vsource.va and
 /// isource.va).
 const max_points = 64;
+/// Expanded states a pattern may reach before it is refused, so `R=` with a
+/// huge count fails fast instead of exhausting memory. A pattern past
+/// `max_points` changes is refused anyway; this only caps long runs.
+const max_states = 1 << 20;
+/// `[ ... ]` nesting a pattern may use, so the recursive reader cannot
+/// overflow the stack.
+const max_depth = 32;
 
 const Error = error{ OutOfMemory, InvalidPattern };
 
@@ -32,13 +39,15 @@ const Comp = struct {
             if (c.list.len > 0) {
                 for (c.list[from..]) |child| try child.expand(arena, out);
             } else try out.appendSlice(arena, c.bits[from..]);
+            if (out.items.len > max_states) return error.InvalidPattern;
         }
     }
 };
 
 /// Rewrites, in place, every V/I card in `lines` (lowercased logical lines)
 /// that uses `PAT`. InvalidPattern for an undefined name, a `Z` state, an
-/// 8b/10b K-string, `R=-1` (forever) or a pattern past the PWL's 64 points.
+/// 8b/10b K-string, `R=-1` (forever), a pattern past the PWL's 64 points,
+/// over a million states long or nested over 32 deep.
 pub fn rewrite(arena: std.mem.Allocator, lines: [][]const u8) Error!void {
     var defs: std.StringHashMapUnmanaged(Comp) = .empty;
     for (lines) |line| {
@@ -118,19 +127,20 @@ fn level(arena: std.mem.Allocator, p: []const []const u8, state: u8) Error![]con
 /// list. `R=`/`RB=` apply to the component before them.
 fn group(arena: std.mem.Allocator, toks: []const []const u8, defs: std.StringHashMapUnmanaged(Comp)) Error!Comp {
     var i: usize = 0;
-    const list = try sequence(arena, toks, &i, defs);
+    const list = try sequence(arena, toks, &i, defs, 0);
     if (i != toks.len or list.len == 0) return error.InvalidPattern;
     return if (list.len == 1) list[0] else .{ .list = list };
 }
 
-fn sequence(arena: std.mem.Allocator, toks: []const []const u8, i: *usize, defs: std.StringHashMapUnmanaged(Comp)) Error![]Comp {
+fn sequence(arena: std.mem.Allocator, toks: []const []const u8, i: *usize, defs: std.StringHashMapUnmanaged(Comp), depth: u8) Error![]Comp {
     var out: std.ArrayList(Comp) = .empty;
     while (i.* < toks.len) {
         const t = toks[i.*];
         if (std.mem.eql(u8, t, "]")) break;
         i.* += 1;
         if (std.mem.eql(u8, t, "[")) {
-            const list = try sequence(arena, toks, i, defs);
+            if (depth == max_depth) return error.InvalidPattern;
+            const list = try sequence(arena, toks, i, defs, depth + 1);
             if (i.* == toks.len or list.len == 0) return error.InvalidPattern;
             i.* += 1;
             try out.append(arena, .{ .list = list });
@@ -209,4 +219,51 @@ test "pattern sources expand as the manual's examples" {
     try std.testing.expectEqualStrings("v1 1 0 pwl(0 '5' '(1n)+1*(5n)-(2n)/2' '5' '(1n)+1*(5n)+(2n)/2' '0')", lines[0]);
     var z = [_][]const u8{"v1 1 0 pat (5 0 0 1n 1n 5n b1z)"};
     try std.testing.expectError(error.InvalidPattern, rewrite(a, &z));
+}
+
+test "pattern corner cases" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Without parentheses, and one state: a constant PWL.
+    var one = [_][]const u8{"v1 1 0 pat 5 0 1n 1n 2n 5n b1"};
+    try rewrite(a, &one);
+    try std.testing.expectEqualStrings("v1 1 0 pwl(0 '5')", one[0]);
+    // `m` is the mid level, reached on the rising ramp.
+    var mid = [_][]const u8{"i1 1 0 pat (5 0 0 1n 2n 1n b0m)"};
+    try rewrite(a, &mid);
+    try std.testing.expect(std.mem.indexOf(u8, mid[0], "-(1n)/2' '0' '(0)+1*(1n)+(1n)/2' '0.5*((5)+(0))')") != null);
+    // Cards without PAT, and PAT in a node position, are left alone.
+    var plain = [_][]const u8{ "v1 1 0 pwl(0 0)", "vpat pat 0 1", "r1 pat 0 1" };
+    try rewrite(a, &plain);
+    try std.testing.expectEqualStrings("v1 1 0 pwl(0 0)", plain[0]);
+    try std.testing.expectEqualStrings("vpat pat 0 1", plain[1]);
+    var deep: std.ArrayList(u8) = .empty;
+    try deep.appendSlice(a, "v1 1 0 pat (5 0 0 1n 1n 1n ");
+    for (0..40) |_| try deep.appendSlice(a, "[ ");
+    try deep.appendSlice(a, "b1 ");
+    for (0..40) |_| try deep.appendSlice(a, "] ");
+    try deep.append(a, ')');
+    var toggles: std.ArrayList(u8) = .empty;
+    try toggles.appendSlice(a, "v1 1 0 pat (5 0 0 1n 1n 1n b");
+    for (0..40) |_| try toggles.appendSlice(a, "10");
+    try toggles.append(a, ')');
+    for ([_][]const u8{
+        "v1 1 0 pat (5 0 0 1n 1n 1n b1 r=2000000000)", // bounded, not 2 GB
+        "v1 1 0 pat (5 0 0 1n 1n 1n b10 rb=3)", // RB past the component
+        "v1 1 0 pat (5 0 0 1n 1n 1n b10 r=-1)", // forever
+        "v1 1 0 pat (5 0 0 1n 1n 1n nope)", // undefined name
+        "v1 1 0 pat (5 0 0 1n 1n 1n [b1)", // unclosed
+        "v1 1 0 pat (5 0 0 1n 1n 1n [])", // empty list
+        "v1 1 0 pat (5 0 0 1n 1n 1n r=1)", // R= with nothing before it
+        "v1 1 0 pat (5 0 0 1n 1n)", // too few fields
+        "v1 1 0 pat (5 0 0 1n 1n 1n b1",
+        deep.items,
+        toggles.items, // 80 changes, past the PWL's 64 points
+    }) |card| {
+        var lines = [_][]const u8{card};
+        try std.testing.expectError(error.InvalidPattern, rewrite(a, &lines));
+    }
+    var bad_def = [_][]const u8{".pat a b1"};
+    try std.testing.expectError(error.InvalidPattern, rewrite(a, &bad_def));
 }

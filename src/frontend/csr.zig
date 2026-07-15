@@ -10,9 +10,11 @@ const Allocator = std.mem.Allocator;
 /// Index of a net.
 pub const VertexId = enum(u32) {
     _,
+    /// Asserts `i` fits in u32.
     pub inline fn from(i: usize) VertexId {
         return @fromBackingInt(@intCast(@as(u32, @intCast(i))));
     }
+    /// Row of this net in the vertex columns.
     pub inline fn index(self: VertexId) u32 {
         return @backingInt(self);
     }
@@ -21,9 +23,11 @@ pub const VertexId = enum(u32) {
 /// Index of a device.
 pub const EdgeId = enum(u32) {
     _,
+    /// Asserts `i` fits in u32.
     pub inline fn from(i: usize) EdgeId {
         return @fromBackingInt(@intCast(@as(u32, @intCast(i))));
     }
+    /// Row of this device in the edge columns and `offsets`.
     pub inline fn index(self: EdgeId) u32 {
         return @backingInt(self);
     }
@@ -46,6 +50,7 @@ pub fn BipartiteHypergraph(comptime VertexData: type, comptime EdgeData: type) t
             edge_offsets: std.ArrayList(u32) = .empty,
             edge_members: std.ArrayList(VertexId) = .empty,
 
+            /// An empty builder whose tables allocate in `gpa`.
             pub fn init(gpa: Allocator) Allocator.Error!Builder {
                 var b: Builder = .{};
                 try b.edge_offsets.append(gpa, 0);
@@ -60,6 +65,8 @@ pub fn BipartiteHypergraph(comptime VertexData: type, comptime EdgeData: type) t
                 try self.edge_members.ensureTotalCapacity(gpa, incidence_count);
             }
 
+            /// Appends a vertex; ids are dense from 0 in call order.
+            /// Invalidates slices of `vertices` if it grows.
             pub fn addVertex(self: *Builder, gpa: Allocator, data: VertexData) Error!VertexId {
                 if (self.vertices.len >= std.math.maxInt(u32)) return error.TooManyVertices;
                 const id = VertexId.from(self.vertices.len);
@@ -67,8 +74,9 @@ pub fn BipartiteHypergraph(comptime VertexData: type, comptime EdgeData: type) t
                 return id;
             }
 
-            /// Stores `members` in the given order, repeats included.
-            /// All-or-nothing: on error the builder is unchanged.
+            /// Stores `members` in the given order, repeats included; an
+            /// empty list is a valid edge. All-or-nothing: on error the
+            /// builder is unchanged. Invalidates slices of `edges` if it grows.
             pub fn addEdge(self: *Builder, gpa: Allocator, data: EdgeData, members: []const VertexId) Error!EdgeId {
                 for (members) |v| if (v.index() >= self.vertices.len) return error.InvalidVertex;
                 if (self.edges.len >= std.math.maxInt(u32)) return error.TooManyEdges;
@@ -99,21 +107,25 @@ pub fn BipartiteHypergraph(comptime VertexData: type, comptime EdgeData: type) t
         };
 
         /// Frozen hypergraph. Edge `e`'s pins are `members[offsets[e]..offsets[e + 1]]`.
+        /// It has no deinit: the tables live as long as `finish`'s allocator,
+        /// which the frontend makes its parse arena.
         pub const Graph = struct {
             vertices: std.MultiArrayList(VertexData),
             edges: std.MultiArrayList(EdgeData),
             offsets: []const u32,
             members: []const VertexId,
 
+            /// Number of nets.
             pub inline fn vertexCount(self: Graph) u32 {
                 return @intCast(self.vertices.len);
             }
 
+            /// Number of devices.
             pub inline fn edgeCount(self: Graph) u32 {
                 return @intCast(self.edges.len);
             }
 
-            /// Pins of `e`, in terminal order.
+            /// Pins of `e`, in terminal order. Asserts `e` is an edge of this graph.
             pub inline fn pins(self: Graph, e: EdgeId) []const VertexId {
                 return self.members[self.offsets[e.index()]..self.offsets[e.index() + 1]];
             }
@@ -138,4 +150,37 @@ test "members keep order and repeats" {
     try std.testing.expectEqualSlices(VertexId, &.{ v[2], v[0], v[1] }, g.pins(.from(0)));
     try std.testing.expectEqualSlices(VertexId, &.{ v[3], v[2], v[2], v[2] }, g.pins(.from(1)));
     try std.testing.expectEqual(@as(u16, 2), g.edges.items(.year)[1]);
+}
+
+test "addEdge is all-or-nothing under allocation failure" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const H = BipartiteHypergraph(struct { x: u8 }, struct { y: u8 });
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var b = try H.Builder.init(arena.allocator());
+        const v0 = try b.addVertex(arena.allocator(), .{ .x = 0 });
+        const v1 = try b.addVertex(arena.allocator(), .{ .x = 1 });
+        var failing = std.testing.FailingAllocator.init(arena.allocator(), .{ .fail_index = fail_index, .resize_fail_index = fail_index });
+        if (b.addEdge(failing.allocator(), .{ .y = 7 }, &.{ v1, v0, v1 })) |e| {
+            try std.testing.expectEqual(@as(u32, 0), e.index());
+            break;
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            try std.testing.expectEqual(@as(usize, 0), b.edges.len);
+            try std.testing.expectEqual(@as(usize, 0), b.edge_members.items.len);
+            try std.testing.expectEqualSlices(u32, &.{0}, b.edge_offsets.items);
+        }
+    }
+    // An empty edge and an empty graph are both valid.
+    var b = try H.Builder.init(arena.allocator());
+    const g0 = try b.finish(arena.allocator());
+    try std.testing.expectEqual(@as(u32, 0), g0.edgeCount());
+    try std.testing.expectEqualSlices(u32, &.{0}, g0.offsets);
+    b = try H.Builder.init(arena.allocator());
+    try b.ensureTotalCapacity(arena.allocator(), 1, 1, 0);
+    _ = try b.addVertex(arena.allocator(), .{ .x = 0 });
+    const e = try b.addEdge(arena.allocator(), .{ .y = 0 }, &.{});
+    const g = try b.finish(arena.allocator());
+    try std.testing.expectEqual(@as(usize, 0), g.pins(e).len);
 }
