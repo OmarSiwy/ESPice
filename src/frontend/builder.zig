@@ -31,6 +31,10 @@ const GROUND = @as(u32, 0);
 const Circuit = device.Circuit;
 const Proto = batch.Proto;
 
+/// The backends stdpp runs vector blocks on; elsewhere `lane_count` is null
+/// and its pipelines take the scalar path.
+const simd_backend = @import("builtin").zig_backend == .stage2_llvm or @import("builtin").zig_backend == .stage2_x86_64;
+
 /// `node_instance` tag of a node shared by two subcircuit instances.
 const MULTI_INSTANCE: u32 = std.math.maxInt(u32);
 
@@ -43,7 +47,9 @@ const staging = std.heap.smp_allocator;
 /// Mutable circuit under construction: rows, device protos and card
 /// identities. `compilePerm` consumes it into a `Circuit`.
 pub const Builder = struct {
+    /// Allocates the protos, the BBD permutation and the frozen Circuit.
     gpa: std.mem.Allocator,
+    /// Device types and their vtables; outlives the Builder.
     lib: *const Library,
     /// Row count, ground included.
     n: u32,
@@ -67,7 +73,9 @@ pub const Builder = struct {
     /// `.options reltol/abstol/vntol`, for §9.15 `$simparam` in models;
     /// `deriveModel` copies them like `nom_temp_c`.
     reltol: f64 = 1e-3,
+    /// `.options abstol`, A; copied like `reltol`.
     abstol: f64 = 1e-12,
+    /// `.options vntol`, V; copied like `reltol`.
     vntol: f64 = 1e-6,
 
     /// (device type, instance ordinal) to card name, for `.sens` columns: a
@@ -199,7 +207,8 @@ pub const Builder = struct {
         };
     }
 
-    /// Appends an unlabelled row and returns it.
+    /// Appends an unlabelled row and returns it; TooManyNodes past the
+    /// u32 row space.
     pub fn addNode(self: *Builder) !u32 {
         if (self.n == std.math.maxInt(u32)) return error.TooManyNodes;
         const id = self.n;
@@ -268,7 +277,8 @@ pub const Builder = struct {
         return p;
     }
 
-    /// `compilePerm` for callers that recorded no node or branch row.
+    /// `compilePerm` for callers that recorded no node or branch row; the
+    /// permutation is freed here. Consumes the Builder on success.
     pub fn compile(self: *Builder) !Circuit {
         const gpa = self.gpa;
         var perm: ?[]const u32 = null;
@@ -280,14 +290,14 @@ pub const Builder = struct {
     /// Freezes into a Circuit, consuming the Builder. Protos and labels are
     /// renumbered by the BBD permutation (old row to frozen row), returned in
     /// `perm_out` (allocated with the Builder's allocator), or null when there
-    /// is none. Any row the caller recorded before the call must be mapped
-    /// through it.
+    /// is none, and on failure. Any row the caller recorded before the call
+    /// must be mapped through it.
     pub fn compilePerm(self: *Builder, perm_out: *?[]const u32) !Circuit {
         const gpa = self.gpa;
         perm_out.* = null;
         const n: usize = self.n;
 
-        var bbd = try self.computeBbd();
+        const bbd = try self.computeBbd();
         errdefer if (bbd.perm) |p| gpa.free(p);
         errdefer if (bbd.info) |inf| gpa.free(inf.blocks);
         if (bbd.perm) |perm| {
@@ -296,8 +306,6 @@ pub const Builder = struct {
             defer staging.free(old_labels);
             @memcpy(old_labels, self.node_labels.items);
             for (old_labels, perm) |label, new_i| self.node_labels.items[new_i] = label;
-            perm_out.* = perm;
-            bbd.perm = null; // the caller owns it now
         }
 
         // Frozen intern table: one byte blob and n+1 offsets.
@@ -321,7 +329,8 @@ pub const Builder = struct {
         for (ckt.batches, ckt.batch_types) |*b, t| b.digital = self.lib.digital.items[@backingInt(t)];
 
         self.deinitStorage(); // Circuit.freeze consumed the protos
-
+        // Handed over only now, so the errdefer above frees it on any failure.
+        perm_out.* = bbd.perm;
         return ckt;
     }
 };
@@ -357,7 +366,9 @@ const BoundCard = struct { type: DeviceType, model: *const anyopaque };
 pub const NetBuilder = struct {
     /// Scratch for everything recorded here; dies after `prepare.build`.
     arena: std.mem.Allocator,
+    /// The circuit under construction; every row recorded here is one of its.
     b: *Builder,
+    /// The parsed deck. Names recorded here borrow its arena.
     nl: Netlist,
     /// Circuit row of each net, 0 until a device touches it (ground is 0
     /// anyway). Rows follow stamping order, not net order.
@@ -498,6 +509,8 @@ pub const NetBuilder = struct {
 
     /// Adds the runtime-loaded (.hdl) devices, cards shaped `<name> node...
     /// <model>`, through their vtables. Call after `build`, before the freeze.
+    /// UnknownParameter for a card key neither blob declares, WrongNodeCount
+    /// for a node count other than the module's ports.
     pub fn addDynDevices(self: *NetBuilder) !void {
         const b = self.b;
         const arena = self.arena;
@@ -559,14 +572,19 @@ pub const NetBuilder = struct {
 
     /// What the deck keeps of the cards, in frozen rows.
     pub const Published = struct {
+        /// Source, sensed-name and `.sp` port tables, copied into the
+        /// publish arena.
         bindings: core.QueryBindings,
         /// Branch currents first, then every named node; parallel to
         /// `probe_labels`. Mutable so `.save` can narrow them in place.
         probes: []u32,
+        /// `i(card)` and `v(net)` names, parallel to `probes`.
         probe_labels: [][]const u8,
-        /// `acExcitation` over the frozen rows.
+        /// `acExcitation` over the frozen rows: `[re(0..n), im(0..n)]`.
         ac_drive: []const f64,
+        /// The first stamped V card's positive node, the `.op` ladder's anchor.
         source_node: u32,
+        /// That card's branch row; GROUND when the deck stamps no V card.
         source_branch: u32,
         /// Row of the last net the deck introduces.
         output_node: u32,
@@ -576,6 +594,7 @@ pub const NetBuilder = struct {
     /// `Builder.compilePerm` returned (null: none), then copies the deck's
     /// tables into `arena`. Call once, after the freeze: `frozenRow` answers
     /// in frozen rows from then on. `circuit` is the frozen result.
+    /// DuplicatePortNumber or MissingPortNumber for a gapped `.sp` port set.
     pub fn publish(self: *NetBuilder, arena: std.mem.Allocator, circuit: *const Circuit, perm: ?[]const u32) !Published {
         if (perm) |p| for ([_][]u32{
             self.v.items(.branch),       self.v.items(.pos),    self.v.items(.neg),  self.i.items(.pos),  self.i.items(.neg),
@@ -583,6 +602,15 @@ pub const NetBuilder = struct {
             (&self.source_branch)[0..1], self.rows,
         }) |rows| for (rows) |*row| {
             if (row.* < p.len) row.* = p[row.*];
+        };
+        // A port carries its own copy of the card's rows.
+        if (perm) |p| for (self.v.items(.port)) |*port| {
+            for ([_]*u32{ &port.node, &port.neg, &port.branch }) |row| {
+                if (row.* < p.len) row.* = p[row.*];
+            }
+            if (port.balanced) |*leg| for ([_]*u32{ &leg.node, &leg.branch }) |row| {
+                if (row.* < p.len) row.* = p[row.*];
+            };
         };
 
         // Probes: branch currents first, then every named node. ngspice gives every
@@ -669,6 +697,7 @@ pub const NetBuilder = struct {
     /// leaves `.sp` on its one-port fallback.
     fn portList(self: *const NetBuilder, arena: std.mem.Allocator) ![]requests.Port {
         var nums = z.fromSlice(u16, self.v.items(.portnum));
+        if (comptime simd_backend) comptime std.debug.assert(@TypeOf(nums).lane_count != null);
         const n_ports: usize = nums.max() orelse 0;
         if (n_ports == 0) return &.{};
         const ports = try arena.alloc(requests.Port, n_ports);
@@ -715,6 +744,9 @@ pub const NetBuilder = struct {
 
     /// Adds every built-in card, then checks the topology. V and L go
     /// first; F/H/W/K wait until the end so the rows they name exist.
+    /// Refuses a card it cannot bind, a loop of V/L shorts whose KVL sum
+    /// disagrees (VoltageSourceLoop) and a node only current sources reach
+    /// (CurrentSourceCutset); a capacitor-only node sets `needs_tran_op`.
     pub fn build(self: *NetBuilder) !void {
         for ("vlifhwkabcdegjmnopqrstuxyz") |c| for (self.nl.bucket(c)) |e| try self.addDevice(self.nl.device(e));
         try self.resolveDeferred();
@@ -728,16 +760,31 @@ pub const NetBuilder = struct {
         }
     }
 
-    /// Root and potential-to-root of `id0` in the weighted forest.
+    /// Root and potential-to-root of `id0` in the weighted forest. Points
+    /// the whole path at the root, so a chain of shorts listed against its
+    /// order cannot make every later lookup walk it again.
     fn topoRoot(self: *NetBuilder, id0: u32) struct { root: u32, pot: f64 } {
         const uf = self.topo.items(.uf);
-        var id = id0;
-        var pot: f64 = 0;
-        while (uf[id] != id) {
-            pot += self.topo.items(.pot)[id];
-            id = uf[id];
+        const pots = self.topo.items(.pot);
+        var root = id0;
+        var total: f64 = 0;
+        while (uf[root] != root) {
+            total += pots[root];
+            root = uf[root];
         }
-        return .{ .root = id, .pot = pot };
+        // Second pass: each node's potential to the root is the total less
+        // what lies between id0 and it.
+        var id = id0;
+        var walked: f64 = 0;
+        while (uf[id] != root) {
+            const next = uf[id];
+            const step = pots[id];
+            uf[id] = root;
+            pots[id] = total - walked;
+            walked += step;
+            id = next;
+        }
+        return .{ .root = root, .pot = total };
     }
 
     /// Classifies one card's nodes. `.dc` marks a DC path, `.cap` presence
@@ -763,7 +810,8 @@ pub const NetBuilder = struct {
             if (a.root == b_.root) {
                 const gap = (a.pot - b_.pot) - vshort;
                 if (@abs(gap) > 1e-9 * @max(1.0, @abs(vshort))) {
-                    std.log.err(
+                    // The test runner fails any test that logs an error.
+                    if (!@import("builtin").is_test) std.log.err(
                         "topology: '{s}' closes an inconsistent voltage-source/inductor loop ({d} V of KVL violation)",
                         .{ dev.name, gap },
                     );
@@ -785,7 +833,7 @@ pub const NetBuilder = struct {
         for (topo.items(.seen), topo.items(.dc), topo.items(.cur), 0..) |seen, dc, cur, id| {
             if (!seen or id == GROUND or dc) continue;
             if (cur) {
-                std.log.err("topology: node '{s}' is a current-source cutset — KCL has no DC path to satisfy it", .{self.b.node_labels.items[id]});
+                if (!@import("builtin").is_test) std.log.err("topology: node '{s}' is a current-source cutset — KCL has no DC path to satisfy it", .{self.b.node_labels.items[id]});
                 return error.CurrentSourceCutset;
             }
             self.b.needs_tran_op = true;
@@ -1069,6 +1117,9 @@ pub const NetBuilder = struct {
             isperl = kvNumber(m.kv, "isperl");
             rsperl = kvNumber(m.kv, "rsperl") orelse rsperl;
         }
+        // K = 1 makes the geometric sizing below 0/0, and K <= 0 sizes no
+        // ladder at all: refused rather than stamped as NaN resistors.
+        if (!(k > 0) or k == 1) return error.InvalidParameterValue;
         // ngspice defaults the length to 0 (0-ohm lumps); a card without l=
         // means a unit line here.
         const len = kvNumber(dev.kv, "l") orelse 1.0;
@@ -1353,7 +1404,8 @@ pub const NetBuilder = struct {
             const card = self.nl.findModel(name) orelse return refuseW(dev, "no .model named by RLGCMODEL");
             if (!std.mem.eql(u8, card.kind, "w")) return refuseW(dev, "RLGCMODEL names a model that is not type W");
             if (kvName(card.kv, "modeltype")) |t| if (!std.mem.eql(u8, t, "rlgc")) return refuseW(dev, "only MODELTYPE=RLGC is supported");
-            n = @intFromFloat(@max(0, (try numericParameter(card.kv, "n")) orelse 0));
+            // Clamped first: @intFromFloat of N=1e30 is illegal behaviour.
+            n = @intFromFloat(std.math.clamp((try numericParameter(card.kv, "n")) orelse 0, 0, wfit.max_n + 1));
             if (n == 0 or n > wfit.max_n) return refuseW(dev, "N must be 1 to 4");
             const tri = n * (n + 1) / 2;
             const keys = [_][2][]const u8{ .{ "lo", "l" }, .{ "co", "c" }, .{ "ro", "r" }, .{ "go", "g" }, .{ "rs", "" }, .{ "gd", "" } };
@@ -1458,7 +1510,7 @@ pub const NetBuilder = struct {
             std.fmt.parseInt(usize, ext[2 .. ext.len - 1], 10) catch null
         else
             null;
-        const p: usize = if (try numericParameter(card.kv, "n")) |n| @intFromFloat(@max(0, n)) else from_ext orelse return refuseS(dev, "the port count is neither N= nor a .sNp extension");
+        const p: usize = if (try numericParameter(card.kv, "n")) |n| @intFromFloat(std.math.clamp(n, 0, 5)) else from_ext orelse return refuseS(dev, "the port count is neither N= nor a .sNp extension");
         if (p == 0 or p > 4) return refuseS(dev, "1 to 4 ports are supported");
         if (dev.pins.len != p and dev.pins.len != p + 1) return refuseS(dev, "the node count is not N or N+1");
         const bytes = self.nl.dataFile(path) orelse return refuseS(dev, "TSTONEFILE was not read");
@@ -2602,4 +2654,14 @@ pub const test_access = if (@import("builtin").is_test) .{
     .Wave = Wave,
     .castField = castField,
     .bindKv = bindKv,
+    .waveKind = waveKind,
+    .sourceDc = sourceDc,
+    .sourceAc = sourceAc,
+    .sourceDisto = sourceDisto,
+    .sourcePort = sourcePort,
+    .isPortCard = isPortCard,
+    .rootProduct = rootProduct,
+    .cplVector = cplVector,
+    .parseRlgcFile = parseRlgcFile,
+    .WMatrices = WMatrices,
 } else {};

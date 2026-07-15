@@ -28,12 +28,19 @@ const Mat = [max_n][max_n]f64;
 
 /// Per-unit-length matrices (full, symmetric) of an N-conductor line.
 pub const Rlgc = struct {
+    /// Conductor count, 1 to `max_n`; entries past it are ignored.
     n: usize,
+    /// L0, H/m. Positive definite.
     l: Mat = @splat(@splat(0)),
+    /// C0, F/m. Positive definite.
     c: Mat = @splat(@splat(0)),
+    /// R0, Ω/m.
     r: Mat = @splat(@splat(0)),
+    /// G0, S/m.
     g: Mat = @splat(@splat(0)),
+    /// Skin-effect resistance, Ω/(m·√Hz).
     rs: Mat = @splat(@splat(0)),
+    /// Dielectric loss, S/(m·Hz).
     gd: Mat = @splat(@splat(0)),
     /// Dielectric-loss cutoff in Hz; 0 keeps Gd·f linear.
     fgd: f64 = 0,
@@ -42,7 +49,8 @@ pub const Rlgc = struct {
     /// Line length in meters.
     length: f64,
 
-    /// Z(jω) and Y(jω) per unit length.
+    /// Z(jω) and Y(jω) per unit length at `f` Hz (f ≥ 0: √f), over the
+    /// whole `max_n` square.
     pub fn zy(self: Rlgc, f: f64) struct { z: [max_n][max_n]Cx, y: [max_n][max_n]Cx } {
         var out: @TypeOf(self.zy(0)) = undefined;
         const sf = @sqrt(f);
@@ -59,8 +67,11 @@ pub const Rlgc = struct {
 
 /// d + Σ_k (num_k[1]·s + num_k[0]) / (den_k[2]·s² + den_k[1]·s + den_k[0]).
 pub const Rational = struct {
+    /// Direct term.
     d: f64,
+    /// Section k's `.{ num0, num1 }`, parallel to `den`.
     num: []const [2]f64,
+    /// Section k's `.{ den0, den1, den2 }`; den2 = 0 for a first-order one.
     den: []const [3]f64,
     /// RMS over the fit grid of the error relative to each sample (of Yc,
     /// and of 1 − P for the propagation).
@@ -82,9 +93,13 @@ pub const Mode = struct {
 /// A fitted line: modal voltages vm = Tv⁻¹·v = Tiᵀ·v, phase currents
 /// i = Ti·im, modal currents im = Tvᵀ·i.
 pub const Line = struct {
+    /// The conductor count it was fitted for.
     n: usize,
+    /// Voltage modal transform; each column scaled to unit max |entry|.
     tv: Mat = @splat(@splat(0)),
+    /// Current modal transform, Ti = Tv⁻ᵀ.
     ti: Mat = @splat(@splat(0)),
+    /// The first `n` are set.
     modes: [max_n]Mode = undefined,
     /// Lowest and highest fitted frequency, Hz (the grid also holds 0).
     /// Below the lowest, a lossy mode levels off to finite DC values.
@@ -95,8 +110,9 @@ pub const Line = struct {
 pub const Error = sparam.Error || error{NotPositiveDefinite};
 
 /// Fits `p`'s modes with at most `sections` second-order sections per
-/// function; allocates the section tables in `arena`. Fails when L0 or C0
-/// is not positive definite.
+/// function; allocates the section tables, and the fit scratch, in `arena`.
+/// Fails when L0 or C0 is not positive definite. Asserts that `p.n` is 1
+/// to `max_n`.
 pub fn fitLine(arena: Allocator, p: Rlgc, sections: usize) Error!Line {
     const n = p.n;
     std.debug.assert(n >= 1 and n <= max_n);
@@ -305,4 +321,41 @@ test "a symmetric coupled pair splits into even and odd modes" {
     const odd = 10 * @sqrt((9.13e-9 - 3.3e-9) * (0.365e-12 + 0.09e-12));
     try testing.expect(@abs(@max(taus[0], taus[1]) - @max(even, odd)) < 1e-15);
     try testing.expect(@abs(@min(taus[0], taus[1]) - @min(even, odd)) < 1e-15);
+}
+
+test "fitLine refuses an L0 or C0 that is not positive definite" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var p: Rlgc = .{ .n = 1, .length = 1 };
+    p.l[0][0] = 250e-9;
+    try testing.expectError(error.NotPositiveDefinite, fitLine(arena, p, 4)); // C0 = 0
+    p.c[0][0] = 100e-12;
+    p.l[0][0] = 0;
+    try testing.expectError(error.NotPositiveDefinite, fitLine(arena, p, 4));
+    // Indefinite coupled C0: |c12| > c11.
+    var q: Rlgc = .{ .n = 2, .length = 1 };
+    q.l = .{ .{ 9e-9, 3e-9, 0, 0 }, .{ 3e-9, 9e-9, 0, 0 }, @splat(0), @splat(0) };
+    q.c = .{ .{ 0.3e-12, 0.5e-12, 0, 0 }, .{ 0.5e-12, 0.3e-12, 0, 0 }, @splat(0), @splat(0) };
+    try testing.expectError(error.NotPositiveDefinite, fitLine(arena, q, 4));
+}
+
+test "Rlgc.zy: DC is R0 and G0, Gd rolls off at fgd, INCLUDERSIMAG drops the skin reactance" {
+    var p: Rlgc = .{ .n = 1, .length = 1, .fgd = 1e9, .rs_imag = false };
+    p.r[0][0] = 2;
+    p.l[0][0] = 1e-6;
+    p.c[0][0] = 1e-12;
+    p.g[0][0] = 1e-3;
+    p.rs[0][0] = 1e-3;
+    p.gd[0][0] = 1e-9;
+    const dc = p.zy(0);
+    try testing.expectEqual(Cx{ .re = 2, .im = 0 }, dc.z[0][0]);
+    try testing.expectEqual(Cx{ .re = 1e-3, .im = 0 }, dc.y[0][0]);
+    const at = p.zy(1e9);
+    const w = 2 * std.math.pi * 1e9;
+    try testing.expectApproxEqRel(@as(f64, 2 + 1e-3 * @sqrt(1e9)), at.z[0][0].re, 1e-12);
+    try testing.expectApproxEqRel(w * 1e-6, at.z[0][0].im, 1e-12);
+    try testing.expectApproxEqRel(1e-3 + 1e-9 * 1e9 / @sqrt(2.0), at.y[0][0].re, 1e-12);
+    p.rs_imag = true;
+    try testing.expectApproxEqRel(w * 1e-6 + 1e-3 * @sqrt(1e9), p.zy(1e9).z[0][0].im, 1e-12);
 }
