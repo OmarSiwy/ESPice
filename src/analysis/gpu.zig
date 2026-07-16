@@ -44,7 +44,8 @@ pub const Decline = enum {
     machine,
 };
 
-/// Classifies an `init` error.
+/// Classifies an `init` error. Anything outside `Error`, a driver or
+/// allocation failure included, is `.machine`.
 pub fn declineKind(e: anyerror) Decline {
     return switch (e) {
         Error.NotEnoughGpuWork => .policy,
@@ -79,6 +80,8 @@ const Stream = if (backend != null) Raw.Stream else void;
 /// narrower blocks (`evalBlock`).
 const block_size: u32 = device_ir.gpu_block_size;
 
+/// The refusals `GpuContext.init` makes on its own, before or instead of a
+/// driver error; `declineKind` sorts them.
 pub const Error = error{
     /// The build machine had no GPU, so no kernel images were emitted.
     NoGpuArtifacts,
@@ -345,8 +348,23 @@ const BatchGpu = struct {
 /// width, which its `globalIdX` bakes in. `ESPICE_GPU_BLOCK` overrides it.
 fn evalBlock() u32 {
     if (comptime backend != .cuda) return block_size;
-    const s = std.c.getenv("ESPICE_GPU_BLOCK") orelse return 64;
-    return std.fmt.parseInt(u32, std.mem.span(s), 10) catch 64;
+    return parseBlock(std.c.getenv("ESPICE_GPU_BLOCK"));
+}
+
+/// `ESPICE_GPU_BLOCK`'s width, or 64 when unset, unparsable or outside
+/// CUDA's 1..1024: a zero width would divide by zero in `Dim3.linear`.
+fn parseBlock(env: ?[*:0]const u8) u32 {
+    const v = std.fmt.parseInt(u32, std.mem.span(env orelse return 64), 10) catch return 64;
+    return if (v >= 1 and v <= 1024) v else 64;
+}
+
+/// `arp_qtp_<model>` for the eval kernel `arp_eval_<model>`, or null when
+/// the name has another shape or the result does not fit `buf` (the batch
+/// then keeps the row LTE).
+fn qtpName(buf: []u8, eval_kernel: []const u8) ?[]const u8 {
+    const prefix = "arp_eval_";
+    if (!std.mem.startsWith(u8, eval_kernel, prefix)) return null;
+    return std.fmt.bufPrint(buf, "arp_qtp_{s}", .{eval_kernel[prefix.len..]}) catch null;
 }
 
 /// The planes as the device and the pinned landing area lay them out: g, rhs,
@@ -491,6 +509,9 @@ pub const GpuContext = struct {
     resident_charge: bool,
 
     prof: Prof = .{},
+    /// False under `ESPICE_GPU_NOFUSE`: the unfused sequence, for A/B runs.
+    /// Read once at `init`, since `eval_follows` fires every iteration.
+    fuse: bool = true,
 
     const Self = @This();
 
@@ -504,7 +525,14 @@ pub const GpuContext = struct {
     /// cold images; otherwise `init` prices the query both ways (`Cost`,
     /// from `evals`, the caller's estimate of its device evals, and
     /// `threads` host lanes) and declines before the first driver call when
-    /// the CPU wins.
+    /// the CPU wins. The `auto` probe evaluates the eligible batches three
+    /// times on the host, which rewrites their `q_tape`.
+    ///
+    /// On success the circuit's four planes point into page-locked memory
+    /// owned by the context, carrying their values; slices of the old planes
+    /// taken before the call no longer see stamps. `ckt` must stay at its
+    /// address until `deinit`, which restores the circuit's own planes.
+    /// Caller owns the result and frees it with `deinit`.
     pub fn init(gpa: std.mem.Allocator, ckt: *Circuit, explicit: bool, threads: u32, evals: f64) !*Self {
         if (comptime backend == null) return Error.NoGpuArtifacts;
         const report = explicit or statsOn();
@@ -562,7 +590,16 @@ pub const GpuContext = struct {
         const n_planes: usize = if (resident_charge) 4 else 2;
         const x_bytes = (ckt.n + 1) * @sizeOf(f64);
 
-        const order = try Order.build(gpa, batches[0..n_up], ckt, layout, n_planes);
+        const order = blk: {
+            const tapes = try gpa.alloc([]const u32, 2 * n_up);
+            defer gpa.free(tapes);
+            for (batches[0..n_up], tapes[0..n_up], tapes[n_up..]) |*bg, *st, *rt| {
+                const p = bg.payload(bg.ctx);
+                st.* = p.slots;
+                rt.* = p.rhs_idx;
+            }
+            break :blk try Order.build(gpa, tapes[0..n_up], tapes[n_up..], ckt.trash_slot, ckt.n, layout, n_planes);
+        };
         defer order.deinit(gpa);
         // Same image as the eval kernels, so a miss is a stale build: fatal.
         var reduce = try gompute.rawKernelByName(backend.?, batches[0].payload(batches[0].ctx).reduce_kernel, 0);
@@ -653,6 +690,7 @@ pub const GpuContext = struct {
             .resident_charge = resident_charge,
             .chk = chk,
             .prof = .{ .on = statsOn(), .phases = if (std.c.getenv("ESPICE_GPU_STATS")) |v| std.mem.eql(u8, std.mem.span(v), "phases") else false },
+            .fuse = std.c.getenv("ESPICE_GPU_NOFUSE") == null,
         };
         driver_up = true;
         // Swap the circuit onto the pinned planes, carrying their contents.
@@ -696,15 +734,13 @@ pub const GpuContext = struct {
         // `arp_qtp_<model>` is named after the eval kernel, not carried in
         // the frozen payload; an older image without it keeps the row LTE.
         var qtp_name: [128]u8 = undefined;
-        const eval_prefix = "arp_eval_";
         var qtp_kernel: ?Raw = null;
-        if (b.hooks.q_tape != null and std.mem.startsWith(u8, p.kernel, eval_prefix)) {
-            const name = std.fmt.bufPrint(&qtp_name, "arp_qtp_{s}", .{p.kernel[eval_prefix.len..]}) catch unreachable;
+        if (b.hooks.q_tape != null) if (qtpName(&qtp_name, p.kernel)) |name| {
             qtp_kernel = gompute.rawKernelByName(backend.?, name, 0) catch |e| switch (e) {
                 error.KernelNotFound => null,
                 else => return e,
             };
-        }
+        };
         errdefer if (qtp_kernel) |*k| k.deinit();
         const tape: []f64 = if (qtp_kernel != null) @constCast(b.hooks.q_tape.?(b.ctx)) else &.{};
 
@@ -816,12 +852,18 @@ pub const GpuContext = struct {
                 stage_bytes / cost_stage_b_per_us + host_us * cost_kernel_ratio;
             const lanes = 1.0 + cost_lane_gain * @as(f64, @floatFromInt(@max(1, threads) - 1));
             const cpu_us = host_us / lanes;
-            if (cpu_us < cost_min_ratio * gpu_us or cost_margin * (init_us + evals * gpu_us) >= evals * cpu_us)
-                return decline(cpu_us, gpu_us, "the CPU is priced faster");
+            if (!gpuWins(cpu_us, gpu_us, evals, init_us)) return decline(cpu_us, gpu_us, "the CPU is priced faster");
             if (statsOn()) std.debug.print(
                 "gpu-stats: cost per eval cpu={d:.0} us gpu={d:.0} us, {d:.0} evals, setup {d:.0} ms: GPU\n",
                 .{ cpu_us, gpu_us, evals, init_us * 1e-3 },
             );
+        }
+
+        /// The GPU must beat the CPU by `cost_min_ratio` per eval and by
+        /// `cost_margin` over the whole query, setup included. Any NaN input
+        /// prices the CPU.
+        fn gpuWins(cpu_us: f64, gpu_us: f64, evals: f64, init_us: f64) bool {
+            return cpu_us >= cost_min_ratio * gpu_us and cost_margin * (init_us + evals * gpu_us) < evals * cpu_us;
         }
 
         fn decline(cpu_us: f64, gpu_us: f64, why: []const u8) Error {
@@ -888,18 +930,22 @@ pub const GpuContext = struct {
             }
         }
 
-        fn build(gpa: std.mem.Allocator, batches: []BatchGpu, ckt: *const Circuit, layout: Layout, n_planes: usize) !Order {
+        /// `slot_tapes[b]`/`row_tapes[b]` are resident batch b's `slots` and
+        /// `rhs_idx`, in `batches` order; `trash_slot`/`trash_row` the
+        /// cells that absorb ground and dead entries. Caller frees with
+        /// `deinit`.
+        fn build(gpa: std.mem.Allocator, slot_tapes: []const []const u32, row_tapes: []const []const u32, trash_slot: u32, trash_row: u32, layout: Layout, n_planes: usize) !Order {
+            std.debug.assert(slot_tapes.len == row_tapes.len);
+            std.debug.assert(n_planes == 2 or n_planes == 4);
             var n_slot: usize = 0;
+            for (slot_tapes) |t| n_slot += t.len;
             var n_row: usize = 0;
-            for (batches) |*bg| {
-                const p = bg.payload(bg.ctx);
-                n_slot += p.slots.len;
-                n_row += p.rhs_idx.len;
-            }
+            for (row_tapes) |t| n_row += t.len;
             const n_stage = if (n_planes == 2) n_slot + n_row else 2 * (n_slot + n_row);
-            // The u32 tapes and seg tables index the stage. Past u32 fall back
-            // to the CPU, never truncate.
-            if (n_stage > std.math.maxInt(u32)) return Error.CircuitNotEligible;
+            // The u32 tapes and seg tables index the stage, and a piece's end
+            // is computed as `at + chunk`. Past u32 fall back to the CPU,
+            // never truncate or wrap.
+            if (n_stage > std.math.maxInt(u32) - chunk) return Error.CircuitNotEligible;
 
             const perm_slot = try gpa.alloc(u32, n_slot);
             errdefer gpa.free(perm_slot);
@@ -910,8 +956,8 @@ pub const GpuContext = struct {
             defer gpa.free(seg_slot);
             const seg_row = try gpa.alloc(u32, layout.nr + 1);
             defer gpa.free(seg_row);
-            try permute(gpa, batches, true, ckt.trash_slot, seg_slot, perm_slot);
-            try permute(gpa, batches, false, ckt.n, seg_row, perm_row);
+            try permute(gpa, slot_tapes, trash_slot, seg_slot, perm_slot);
+            try permute(gpa, row_tapes, trash_row, seg_row, perm_row);
             const spaces = [2][]const u32{ seg_slot, seg_row };
 
             // g, rhs, c, q: slot, row, slot, row.
@@ -953,14 +999,12 @@ pub const GpuContext = struct {
         /// end). Trash contributions go to the tail after the runs, each on
         /// its own cell: the kernel stores through the tape unconditionally,
         /// and a shared cell would be a contended write.
-        fn permute(gpa: std.mem.Allocator, batches: []BatchGpu, slots_pass: bool, trash: u32, seg: []u32, perm: []u32) !void {
+        fn permute(gpa: std.mem.Allocator, tapes: []const []const u32, trash: u32, seg: []u32, perm: []u32) !void {
+            std.debug.assert(seg.len >= 1);
             @memset(seg, 0);
-            for (batches) |*bg| {
-                const p = bg.payload(bg.ctx);
-                for (if (slots_pass) p.slots else p.rhs_idx) |dest| {
-                    if (dest != trash) seg[dest + 1] += 1;
-                }
-            }
+            for (tapes) |tape| for (tape) |dest| {
+                if (dest != trash) seg[dest + 1] += 1;
+            };
             var run: u32 = 0;
             for (seg) |*s| {
                 run += s.*;
@@ -970,19 +1014,17 @@ pub const GpuContext = struct {
             defer gpa.free(cursor);
             var tail: u32 = run;
             var k: usize = 0;
-            for (batches) |*bg| {
-                const p = bg.payload(bg.ctx);
-                for (if (slots_pass) p.slots else p.rhs_idx) |dest| {
-                    if (dest == trash) {
-                        perm[k] = tail;
-                        tail += 1;
-                    } else {
-                        perm[k] = cursor[dest];
-                        cursor[dest] += 1;
-                    }
-                    k += 1;
+            for (tapes) |tape| for (tape) |dest| {
+                if (dest == trash) {
+                    perm[k] = tail;
+                    tail += 1;
+                } else {
+                    perm[k] = cursor[dest];
+                    cursor[dest] += 1;
                 }
-            }
+                k += 1;
+            };
+            std.debug.assert(k == perm.len and tail == perm.len);
         }
     };
 
@@ -1040,10 +1082,15 @@ pub const GpuContext = struct {
     }
 
     /// Restores the circuit's own planes (with the last values), then frees
-    /// every device and pinned buffer and `self`.
+    /// every device and pinned buffer and `self`. Clear `Circuit.gpu_hook`
+    /// first: the hook's `ctx` is `self`. Device-side state is dropped; call
+    /// `syncStatus` or `syncHostState` first to keep it.
     pub fn deinit(self: *Self) void {
         if (comptime backend == null) return;
         self.prof.print();
+        // `.commit`/`.revert` latches stay queued unwaited; drain them before
+        // their buffers go. A fault here was already reported or is moot.
+        self.stream.synchronize() catch {};
         const ckt = self.ckt;
         const hp = self.host_planes;
         copyPlanes(hp, ckt.ownPlanes());
@@ -1129,9 +1176,6 @@ pub const GpuContext = struct {
         self.prof.lap("host");
     }
 
-    /// Enqueues the device half without waiting: upload x, clear the stage,
-    /// launch every resident batch, reduce, download into the pinned planes.
-    /// Separate so `evalCheck` can replay the same pass.
     /// The circuit's analysis state at eval time `t`, as the host batches
     /// build it (`DeviceBatch.simAt`).
     fn simAt(self: *const Self, t: f64) SimState {
@@ -1140,6 +1184,9 @@ pub const GpuContext = struct {
         return sim;
     }
 
+    /// Enqueues the device half without waiting: upload x, clear the stage,
+    /// launch every resident batch, reduce, download into the pinned planes.
+    /// Separate so `evalCheck` can replay the same pass.
     fn enqueueEval(self: *Self, x: []const f64, t: f64, buf: u1, charge: bool) !void {
         if (comptime backend == null) return Error.NoGpuArtifacts;
         @memcpy(self.pin_x[buf][0..x.len], x);
@@ -1269,7 +1316,12 @@ pub const GpuContext = struct {
                     .{@errorName(e)},
                 );
             }
+            // The host stamp just wrote every batch's planes and `q_tape` at
+            // x; nothing the failed pass queued may stand in for it.
+            self.pre = null;
+            self.tape_buf = null;
             self.ckt.evalNewtonCpu(x, t);
+            self.tape_fresh = true;
         };
     }
 
@@ -1358,6 +1410,8 @@ pub const GpuContext = struct {
         const follow = self.follow;
         self.follow = null;
         self.pre = null;
+        // A prefetch whose wait failed holds no planes.
+        errdefer self.pre = null;
         if (self.poisoned) return error.GpuStateReject;
         if (self.params_dirty) try self.repack();
         const n = self.ckt.n;
@@ -1413,7 +1467,6 @@ pub const GpuContext = struct {
                 // A step reject the GPU path cannot deliver: `gpuEligible`
                 // admitted a device it should not have.
                 self.poisoned = true;
-                self.pre = null;
                 return error.GpuStateReject;
             }
             if (flags & 1 != 0) any = true;
@@ -1423,8 +1476,7 @@ pub const GpuContext = struct {
 
     fn evalFollowsHook(ctx: *anyopaque, x: []const f64, t: f64, charge: bool) void {
         const self: *Self = @ptrCast(@alignCast(ctx));
-        // `ESPICE_GPU_NOFUSE`: the unfused sequence, for A/B runs.
-        if (std.c.getenv("ESPICE_GPU_NOFUSE") != null) return;
+        if (!self.fuse) return;
         self.follow = .{ .x = x, .t = t, .charge = charge };
     }
 
@@ -1532,6 +1584,7 @@ pub const GpuContext = struct {
         const follow = self.follow;
         self.follow = null;
         self.pre = null;
+        errdefer self.pre = null;
         if (self.poisoned) return error.GpuStateReject;
         if (self.params_dirty) try self.repack();
         var launched = false;
@@ -1673,7 +1726,8 @@ pub const GpuContext = struct {
         self.params_dirty = true;
     }
 
-    /// Returns the dispatch table to install as `Circuit.gpu_hook`.
+    /// Returns the dispatch table to install as `Circuit.gpu_hook`. Its `ctx`
+    /// is `self`, so the hook is valid until `deinit`.
     pub fn hook(self: *Self) GpuHook {
         return .{
             .ctx = self,
@@ -1691,6 +1745,186 @@ pub const GpuContext = struct {
         };
     }
 };
+
+test declineKind {
+    try std.testing.expectEqual(Decline.policy, declineKind(Error.NotEnoughGpuWork));
+    try std.testing.expectEqual(Decline.capability, declineKind(Error.CircuitNotEligible));
+    try std.testing.expectEqual(Decline.machine, declineKind(Error.NoGpuArtifacts));
+    // Driver and allocator errors never come from `Error`.
+    try std.testing.expectEqual(Decline.machine, declineKind(error.InitFailed));
+    try std.testing.expectEqual(Decline.machine, declineKind(error.OutOfMemory));
+}
+
+test requestSupported {
+    try std.testing.expect(requestSupported(.cpu));
+    try std.testing.expect(requestSupported(.auto));
+    try std.testing.expectEqual(backend == .cuda, requestSupported(.cuda));
+    try std.testing.expectEqual(backend == .hip, requestSupported(.hip));
+    // The error an explicit request prints names what this binary carries.
+    const name = detectedName();
+    try std.testing.expect(std.mem.eql(u8, name, "none") == (backend == null));
+    if (backend) |be| try std.testing.expectEqualStrings(@tagName(be), name);
+}
+
+test parseBlock {
+    try std.testing.expectEqual(@as(u32, 64), parseBlock(null));
+    try std.testing.expectEqual(@as(u32, 32), parseBlock("32"));
+    try std.testing.expectEqual(@as(u32, 1), parseBlock("1"));
+    try std.testing.expectEqual(@as(u32, 1024), parseBlock("1024"));
+    for ([_][*:0]const u8{ "0", "1025", "", "-8", "64x", "99999999999" }) |bad|
+        try std.testing.expectEqual(@as(u32, 64), parseBlock(bad));
+}
+
+test qtpName {
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("arp_qtp_mos1", qtpName(&buf, "arp_eval_mos1").?);
+    try std.testing.expectEqualStrings("arp_qtp_", qtpName(&buf, "arp_eval_").?);
+    try std.testing.expect(qtpName(&buf, "arp_lim_mos1") == null);
+    try std.testing.expect(qtpName(&buf, "") == null);
+    // Too long for the buffer: no tape kernel, not a panic.
+    try std.testing.expect(qtpName(&buf, "arp_eval_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx") == null);
+}
+
+test "Layout puts g, rhs, c, q back to back" {
+    const l: Layout = .{ .ng = 5, .nr = 3 };
+    try std.testing.expectEqual(@as(usize, 0), l.off(.g));
+    try std.testing.expectEqual(@as(usize, 5), l.off(.rhs));
+    try std.testing.expectEqual(@as(usize, 8), l.off(.c));
+    try std.testing.expectEqual(@as(usize, 13), l.off(.q));
+    try std.testing.expectEqual(@as(usize, 8), l.cells(2));
+    try std.testing.expectEqual(@as(usize, 16), l.cells(4));
+}
+
+test "Cost.gpuWins needs both margins and refuses NaN" {
+    const W = GpuContext.Cost;
+    // 10x per eval, cheap setup: the GPU.
+    try std.testing.expect(W.gpuWins(1000, 100, 1000, 0));
+    // Under the per-eval ratio, however many evals.
+    try std.testing.expect(!W.gpuWins(199, 100, 1e9, 0));
+    // Fast per eval, but setup outweighs the query.
+    try std.testing.expect(!W.gpuWins(1000, 100, 10, cost_init_us));
+    try std.testing.expect(!W.gpuWins(std.math.nan(f64), 100, 1000, 0));
+    try std.testing.expect(!W.gpuWins(1000, std.math.nan(f64), 1000, 0));
+}
+
+/// Host model of the two `arp_reduce_*` levels over `order`'s tables: the
+/// device planes an eval would download from `stage`.
+fn reduceOnHost(gpa: std.mem.Allocator, order: GpuContext.Order, stage: []const f64, planes: []f64) !void {
+    const mid = try gpa.alloc(f64, order.n_pieces);
+    defer gpa.free(mid);
+    for (mid, 0..) |*m, j| {
+        m.* = 0;
+        for (stage[order.seg1[2 * j]..order.seg1[2 * j + 1]]) |v| m.* += v;
+    }
+    for (planes, 0..) |*c, i| {
+        c.* = 0;
+        for (mid[order.seg2[2 * i]..order.seg2[2 * i + 1]]) |v| c.* += v;
+    }
+}
+
+test "Order reduces each cell in the serial stamp's order" {
+    const gpa = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x5eed);
+    const rnd = prng.random();
+    // Run lengths across the level-1 chunk: empty, one, chunk +- 1, two
+    // chunks +- 1. The last cell of each space is its trash cell.
+    const slot_runs = [_]u32{ 0, 1, 63, 64, 65, 127, 128, 129, 2 };
+    const row_runs = [_]u32{ 3, 0, 64, 130, 1 };
+    const layout: Layout = .{ .ng = slot_runs.len + 1, .nr = row_runs.len + 1 };
+    const trash_slot: u32 = slot_runs.len;
+    const trash_row: u32 = row_runs.len;
+
+    var spaces: [2][]u32 = undefined;
+    for (&spaces, [_][]const u32{ &slot_runs, &row_runs }, [_]u32{ trash_slot, trash_row }) |*space, runs, trash| {
+        var dests: std.ArrayList(u32) = .empty;
+        errdefer dests.deinit(gpa);
+        for (runs, 0..) |r, cell| try dests.appendNTimes(gpa, @intCast(cell), r);
+        try dests.appendNTimes(gpa, trash, 7);
+        rnd.shuffle(u32, dests.items);
+        space.* = try dests.toOwnedSlice(gpa);
+    }
+    defer for (spaces) |sp| gpa.free(sp);
+    // Three batches, the middle one empty in both spaces.
+    const cut_s = spaces[0].len / 3;
+    const cut_r = spaces[1].len / 2;
+    const slot_tapes = [_][]const u32{ spaces[0][0..cut_s], &.{}, spaces[0][cut_s..] };
+    const row_tapes = [_][]const u32{ spaces[1][0..cut_r], &.{}, spaces[1][cut_r..] };
+
+    for ([_]usize{ 2, 4 }) |n_planes| {
+        const order = try GpuContext.Order.build(gpa, &slot_tapes, &row_tapes, trash_slot, trash_row, layout, n_planes);
+        defer order.deinit(gpa);
+        const n_cells = layout.cells(n_planes);
+        const plane_offs = [4]usize{ layout.off(.g), layout.off(.rhs), layout.off(.c), layout.off(.q) };
+        // Every piece is one nonempty chunk of one cell's run.
+        var pieces: usize = 0;
+        for (slot_runs ++ [_]u32{0}) |r| pieces += (r + GpuContext.Order.chunk - 1) / GpuContext.Order.chunk;
+        for (row_runs ++ [_]u32{0}) |r| pieces += (r + GpuContext.Order.chunk - 1) / GpuContext.Order.chunk;
+        try std.testing.expectEqual(pieces * (n_planes / 2), order.n_pieces);
+
+        // Each plane's contributions in tape order, scattered as the eval
+        // kernels do (`perm`), against the serial stamp's `+=`.
+        const stage = try gpa.alloc(f64, order.n_stage);
+        defer gpa.free(stage);
+        // Only the trash tails keep the NaN; a piece over them would read it.
+        @memset(stage, std.math.nan(f64));
+        const serial = try gpa.alloc(f64, n_cells);
+        defer gpa.free(serial);
+        @memset(serial, 0);
+        for (0..n_planes) |plane| {
+            const is_slot = plane % 2 == 0;
+            const tape = spaces[if (is_slot) 0 else 1];
+            const perm = if (is_slot) order.perm_slot else order.perm_row;
+            const trash = if (is_slot) trash_slot else trash_row;
+            const plane_off = plane_offs[plane];
+            for (tape, perm) |dest, at| {
+                const v = rnd.float(f64) * 2 - 1;
+                stage[order.stage_base[plane] + at] = v;
+                if (dest != trash) serial[plane_off + dest] += v;
+            }
+        }
+        const planes = try gpa.alloc(f64, n_cells);
+        defer gpa.free(planes);
+        try reduceOnHost(gpa, order, stage, planes);
+
+        for (0..n_planes) |plane| {
+            const runs: []const u32 = if (plane % 2 == 0) &(slot_runs ++ [_]u32{0}) else &(row_runs ++ [_]u32{0});
+            const plane_off = plane_offs[plane];
+            for (runs, 0..) |r, cell| {
+                const got = planes[plane_off + cell];
+                const want = serial[plane_off + cell];
+                if (r <= GpuContext.Order.chunk) {
+                    // One piece: the CPU's sum, bit for bit.
+                    try std.testing.expectEqual(@as(u64, @bitCast(want)), @as(u64, @bitCast(got)));
+                } else {
+                    // Two levels reassociate: the classic r^2 eps bound on |v| <= 1.
+                    const rf: f64 = @floatFromInt(r);
+                    try std.testing.expectApproxEqAbs(want, got, rf * rf * std.math.floatEps(f64));
+                }
+            }
+        }
+    }
+}
+
+test "Order.permute is a stable counting sort with trash in the tail" {
+    const gpa = std.testing.allocator;
+    const trash: u32 = 3;
+    const tapes = [_][]const u32{ &.{ 2, 3, 0, 2 }, &.{}, &.{ 3, 0, 2 } };
+    var seg: [5]u32 = undefined;
+    var perm: [7]u32 = undefined;
+    try GpuContext.Order.permute(gpa, &tapes, trash, &seg, &perm);
+    // Cells 0, 1, 2, trash: runs of 2, 0, 3, 0; the two trash entries after.
+    try std.testing.expectEqualSlices(u32, &.{ 0, 2, 2, 5, 5 }, &seg);
+    try std.testing.expectEqualSlices(u32, &.{ 2, 5, 0, 3, 6, 1, 4 }, &perm);
+}
+
+test "Order.permute on empty tapes" {
+    const gpa = std.testing.allocator;
+    const tapes = [_][]const u32{ &.{}, &.{} };
+    var seg: [3]u32 = undefined;
+    var perm: [0]u32 = .{};
+    try GpuContext.Order.permute(gpa, &tapes, 1, &seg, &perm);
+    try std.testing.expectEqualSlices(u32, &.{ 0, 0, 0 }, &seg);
+}
 
 /// Private access for the analysis test suite.
 pub const test_access = if (@import("builtin").is_test) .{
