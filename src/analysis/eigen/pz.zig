@@ -248,3 +248,60 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     }
     return .{ .plotname = "Pole-Zero Analysis", .varnames = names, .is_complex = true, .npoints = 1, .data = data };
 }
+
+/// det of a dense row-major n×n copy, by elimination with partial pivoting.
+fn testDet(comptime n: usize, m0: [n * n]f64) f64 {
+    var m = m0;
+    var det: f64 = 1;
+    for (0..n) |c| {
+        var p = c;
+        for (c + 1..n) |r| if (@abs(m[r * n + c]) > @abs(m[p * n + c])) {
+            p = r;
+        };
+        if (p != c) {
+            for (0..n) |j| std.mem.swap(f64, &m[c * n + j], &m[p * n + j]);
+            det = -det;
+        }
+        det *= m[c * n + c];
+        if (m[c * n + c] == 0) return 0;
+        for (c + 1..n) |r| {
+            const f = m[r * n + c] / m[c * n + c];
+            for (c..n) |j| m[r * n + j] -= f * m[c * n + j];
+        }
+    }
+    return det;
+}
+
+test numeratorPencil {
+    // Cramer's rule is the oracle: with y = G⁻¹d, the pencil's determinant
+    // at s = 0 is (y[out+] − y[out−])·det G, and each y[i] is det G with
+    // column i replaced by d. A `cur` drive into row 3 and a `vol` drive on
+    // branch row 3 are the same d = e₃.
+    const n = 4;
+    const g0 = [n * n]f64{ 1, 0, 0, 0, 0.5, 2, -1, 0.25, 0.3, -1, 3, 0.75, 0, 0.75, -0.25, 1.5 };
+    const c0 = [n * n]f64{ 0, 0, 0, 0, 0, 1, 0, 0.5, 0, 0, 2, 0, 0, 0.25, 0, 3 };
+    var with_d: [2][n * n]f64 = .{ g0, g0 };
+    for (with_d[0..], [_]usize{ 2, 1 }) |*m, col| {
+        for (0..n) |r| m[r * n + col] = if (r == 3) 1 else 0;
+    }
+    const want = testDet(n, with_d[0]) - testDet(n, with_d[1]);
+    for ([_]Options{
+        .{ .out_pos = 2, .out_neg = 1, .in_pos = 3, .want = .zeros },
+        .{ .out_pos = 2, .out_neg = 1, .drive_branch = 3, .want = .zeros },
+    }) |o| {
+        var g = g0;
+        var c = c0;
+        var w: Work = undefined;
+        w.n = n;
+        w.g = &g;
+        w.c = &c;
+        numeratorPencil(&w, o);
+        try std.testing.expectApproxEqAbs(want, testDet(n, g), 1e-13);
+        try std.testing.expectApproxEqAbs(@as(f64, -0.25), want, 1e-13);
+        // C: column out− absorbed column out+, which then holds nothing.
+        for (0..n) |r| {
+            try std.testing.expectEqual(c0[r * n + 1] + c0[r * n + 2], c[r * n + 1]);
+            try std.testing.expectEqual(@as(f64, 0), c[r * n + 2]);
+        }
+    }
+}
