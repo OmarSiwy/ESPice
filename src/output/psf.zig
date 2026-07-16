@@ -5,6 +5,7 @@ const std = @import("std");
 const Io = std.Io;
 const Plot = @import("types.zig").Plot;
 
+/// Writes `plot`, which must have passed `types.validatePlot(.psf, ...)`.
 pub fn encode(w: *Io.Writer, plot: Plot) !void {
     const names = plot.result.varnames;
     const complex = plot.result.is_complex;

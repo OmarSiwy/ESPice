@@ -3,6 +3,8 @@
 const std = @import("std");
 const core = @import("core");
 
+/// An output file format. `root.parseFormat` maps user names and aliases
+/// to it; `write.concatenates` says which formats hold several plots.
 pub const Format = enum(u8) { binary, ascii, csv, touchstone, psf, fsdb, sst2, citi, print };
 
 /// Where and how a session writes its plots. Fixed for the session's life.
@@ -23,18 +25,27 @@ pub const Plot = struct {
     /// 50 ohm on every port. Other formats ignore it.
     z0: []const f64 = &.{},
 
+    /// The plot's column layout with its point count known, as
+    /// `validateSchema` takes it.
     pub fn schema(self: Plot) Schema {
         return .{ .varnames = self.result.varnames, .is_complex = self.result.is_complex, .npoints = self.result.npoints };
     }
 
     /// Returns the samples of point `pt`: one f64 per variable, or a
-    /// (real, imaginary) pair per variable when complex.
+    /// (real, imaginary) pair per variable when complex. Borrows
+    /// `result.data`. Panics in safe builds when the point is past the
+    /// data, which `validatePlot` rules out.
     pub fn point(self: Plot, pt: usize) []const f64 {
         const stride = self.result.varnames.len * @as(usize, if (self.result.is_complex) 2 else 1);
         return self.result.data[pt * stride ..][0..stride];
     }
 };
 
+/// Why a format cannot hold a result. `DataLengthMismatch`: no variables,
+/// a sample count that overflows, or data whose length disagrees with the
+/// shape. `NotSParameterData`: Touchstone or CITI given anything but the
+/// S-matrix layout they need. `FormatLimitExceeded`: past fsdb's u32/u16
+/// fields or sst2's 64 name slots.
 pub const ValidationError = error{ DataLengthMismatch, NotSParameterData, FormatLimitExceeded };
 
 fn sampleCount(schema: Schema, npoints: usize) ValidationError!usize {
@@ -171,4 +182,59 @@ test "S-parameter labels accept both producers and reject malformed port identit
             .is_complex = true,
         }));
     }
+}
+
+test validateQuery {
+    const t = std.testing;
+    const sp: core.QuerySchema = .{ .kind = .sp, .columns = 5, .portless = false };
+    var tran = sp;
+    tran.kind = .tran;
+    try validateQuery(.touchstone, sp, "t", &.{});
+    try t.expectError(error.NotSParameterData, validateQuery(.citi, tran, "t", &.{}));
+    var portless = sp;
+    portless.portless = true;
+    try t.expectError(error.NoPorts, validateQuery(.touchstone, portless, "t", &.{}));
+    var none = tran;
+    none.columns = 0;
+    try validateQuery(.csv, none, "t", &.{});
+    try t.expectError(error.DataLengthMismatch, validateQuery(.sst2, none, "t", &.{}));
+    var wide = tran;
+    wide.columns = 65;
+    try t.expectError(error.FormatLimitExceeded, validateQuery(.sst2, wide, "t", &.{}));
+    try validateQuery(.fsdb, wide, "t", &.{});
+    const long: [std.math.maxInt(u16) + 1]u8 = @splat('x');
+    try t.expectError(error.FormatLimitExceeded, validateQuery(.fsdb, tran, &long, &.{}));
+    try t.expectError(error.FormatLimitExceeded, validateQuery(.fsdb, tran, "t", &.{&long}));
+    try validateQuery(.sst2, tran, &long, &.{&long});
+}
+
+test portCount {
+    const t = std.testing;
+    try t.expectEqual(@as(u32, 1), try portCount(.{ .varnames = &.{ "frequency", "S(1,1)" }, .is_complex = true }));
+    // Columns after the S block (`.lin`'s noise figures) are allowed.
+    try t.expectEqual(@as(u32, 1), try portCount(.{ .varnames = &.{ "frequency", "v(S_1_1)", "NFMIN" }, .is_complex = true }));
+    for ([_]Schema{
+        .{ .varnames = &.{ "frequency", "S(1,1)" }, .is_complex = false },
+        .{ .varnames = &.{"frequency"}, .is_complex = true },
+        .{ .varnames = &.{ "freq", "S(1,1)" }, .is_complex = true },
+        .{ .varnames = &.{ "frequency", "NFMIN" }, .is_complex = true },
+        .{ .varnames = &.{ "frequency", "S(1,1)", "S(2,1)", "S(1,2)", "S(2,2)" }, .is_complex = true },
+        .{ .varnames = &.{ "frequency", "S(1,1)", "S(1,2)", "S(2,2)" }, .is_complex = true },
+        .{ .varnames = &.{ "frequency", "S(1,2)" }, .is_complex = true },
+    }) |schema| try t.expectError(error.NotSParameterData, portCount(schema));
+}
+
+test validatePlot {
+    const t = std.testing;
+    var plot: Plot = .{ .title = "t", .result = .{ .plotname = "p", .varnames = &.{ "time", "v(a)" }, .is_complex = true, .npoints = 2, .data = &.{ 0, 0, 1, 2, 3, 0, 4, 5 } } };
+    try validatePlot(.binary, plot);
+    try t.expectEqualSlices(f64, &.{ 3, 0, 4, 5 }, plot.point(1));
+    try t.expectError(error.DataLengthMismatch, validatePlot(.binary, .{ .title = "t", .result = .{ .plotname = "p", .varnames = &.{}, .is_complex = false, .npoints = 0, .data = &.{} } }));
+    const long: [std.math.maxInt(u16) + 1]u8 = @splat('x');
+    plot.title = &long;
+    try validatePlot(.csv, plot);
+    try t.expectError(error.FormatLimitExceeded, validatePlot(.fsdb, plot));
+    plot.title = "t";
+    plot.result.plotname = &long;
+    try t.expectError(error.FormatLimitExceeded, validatePlot(.fsdb, plot));
 }
