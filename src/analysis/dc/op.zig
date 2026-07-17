@@ -15,7 +15,7 @@ const Ic = @import("core").Ic;
 const failed: converger.Result = .{ .converged = false, .iterations = 0, .max_dx = 0 };
 
 /// Zeroes `x`, then applies the SPICE MODEINITJCT junction seeds so the first
-/// iteration linearizes at vcrit/vto instead of 0.
+/// iteration linearizes at vcrit/vto instead of 0. `x.len` must be `ckt.n`.
 pub fn coldStart(ckt: *root.Circuit, x: []f64) void {
     root.zeroSimd(x);
     ckt.seedJunctions(x);
@@ -25,9 +25,12 @@ pub fn coldStart(ckt: *root.Circuit, x: []f64) void {
 /// `options.warm_start`), after a first solve that holds the `nodeset` rows
 /// at their guesses. When `options.tran_op`, every rung also holds the `ic`
 /// rows at their values, ngspice's MODETRANOP without MODEUIC (cktload.c);
-/// a standalone operating point ignores `ic`. On convergence the FSM devices commit their state,
-/// and the circuit is left in the static simulation state later evals at this
-/// point expect. `iterations` sums every rung tried.
+/// a standalone operating point ignores `ic`. On convergence the FSM devices
+/// commit their state, and the circuit is left in the static simulation state
+/// later evals at this point expect. `iterations` sums every rung tried,
+/// saturating at the u16 maximum. `x.len` must be `ckt.n`. Returns
+/// error.FloatingNode when a node has no DC path to ground outside a TRANOP;
+/// non-convergence is `converged = false`, not an error.
 pub fn solve(
     ckt: *root.Circuit,
     x: []f64,
@@ -132,7 +135,7 @@ pub fn solveLadder(
     const gpa = ws.slv.gpa;
     const x_good = try gpa.alloc(f64, ckt.n);
     defer gpa.free(x_good);
-    var total_iter: u16 = 0;
+    var total_iter: u16 = if (plain) |p| p.iterations else 0;
 
     // Rung 2: dynamic gmin stepping (ngspice cktop.c dynamic_gmin). Descend
     // gmin by `factor`; on a failed step, back up toward the last good gmin
@@ -202,7 +205,6 @@ pub fn solveLadder(
     // the last good lambda and x. The holds scale with the sources, as
     // ngspice's cktload.c multiplies each `.ic` by CKTsrcFact.
     coldStart(ckt, x);
-    total_iter = 0;
     {
         const scaled = try gpa.dupe(converger.Force, hold);
         defer gpa.free(scaled);
