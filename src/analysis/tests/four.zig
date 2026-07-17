@@ -176,3 +176,44 @@ test "four: analyze waveform from tran data" {
     try testing.expectApproxEqAbs(@as(f64, 0.0), result.dc, 0.05);
     try testing.expectApproxEqAbs(@as(f64, 0.0), result.thd_percent, 1.0);
 }
+
+test "four: interpolateAt on empty, one-point and strided columns" {
+    var cursor: usize = 0;
+    try testing.expectEqual(@as(f64, 0), interpolateAt(.of(&.{}), .of(&.{}), 1, &cursor));
+    try testing.expectEqual(@as(f64, 7), interpolateAt(.of(&.{2}), .of(&.{7}), 5, &cursor));
+    // Rows (t, v) read in place: t at stride 2 from 0, v from 1.
+    const rows = [_]f64{ 0, 10, 1, 20, 2, 40 };
+    const t: tran.Column = .{ .base = &rows, .stride = 2, .len = 3 };
+    const v: tran.Column = .{ .base = rows[1..], .stride = 2, .len = 3 };
+    cursor = 0;
+    try testing.expectEqual(@as(f64, 15), interpolateAt(t, v, 0.5, &cursor));
+    try testing.expectEqual(@as(f64, 30), interpolateAt(t, v, 1.5, &cursor));
+    try testing.expectEqual(@as(usize, 1), cursor);
+}
+
+test "four: analyze refuses a waveform shorter than one period" {
+    const allocator = testing.allocator;
+    var waveform = try tran.Waveform.init(allocator, 1, 8);
+    defer waveform.deinit();
+    const probes = [_]u32{0};
+    try testing.expectError(error.InsufficientData, analyze(&waveform, 0, 1, 9, allocator));
+    for (0..4) |k| try waveform.record(@as(f64, @floatFromInt(k)) * 0.1, &.{1}, &probes);
+    // 0.3 s recorded, a 1 s period asked for.
+    try testing.expectError(error.InsufficientData, analyze(&waveform, 0, 1, 9, allocator));
+}
+
+test "four: a 2-point FFT reads harmonics past Nyquist as zero" {
+    const s = try spectrumOf(&.{ 3, 1 }, 4, testing.allocator);
+    try testing.expectEqual(@as(f64, 2), s.dc);
+    try testing.expectEqual(@as(usize, 4), s.n_harmonics);
+    for (s.harmonics[1..4]) |h| try testing.expectEqual(@as(f64, 0), h.mag);
+    try testing.expectEqual(@as(f64, 0), s.thd_percent);
+    // n_harmonics is clamped to at least one.
+    try testing.expectEqual(@as(usize, 1), (try spectrumOf(&.{ 3, 1 }, 0, testing.allocator)).n_harmonics);
+}
+
+test {
+    // In-file tests of the other post-processors.
+    _ = @import("../post/disto.zig");
+    _ = @import("../post/fft.zig");
+}

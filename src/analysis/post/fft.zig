@@ -120,3 +120,25 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         .data = data,
     };
 }
+
+test "window: every kind is symmetric and peaks at 1 or less" {
+    const np = 64;
+    inline for (@typeInfo(Options.Window).@"enum".field_names) |name| {
+        const kind = @field(Options.Window, name);
+        for (0..np) |k| {
+            const w = window(kind, k, np, 3);
+            try std.testing.expectApproxEqAbs(window(kind, np - 1 - k, np, 3), w, 1e-12);
+            try std.testing.expect(w <= 1 + 1e-12 and w > -1e-12);
+        }
+    }
+    // Hann reaches 0 at both ends; rect and alfa = 0 Kaiser are flat.
+    try std.testing.expectApproxEqAbs(@as(f64, 0), window(.hann, 0, np, 0), 1e-15);
+    try std.testing.expectEqual(@as(f64, 1), window(.rect, 7, np, 0));
+    try std.testing.expectEqual(@as(f64, 1), window(.kaiser, 7, np, 0));
+}
+
+test "besselI0: series against reference values" {
+    try std.testing.expectEqual(@as(f64, 1), besselI0(0));
+    try std.testing.expectApproxEqRel(@as(f64, 1.2660658777520082), besselI0(1), 1e-15);
+    try std.testing.expectApproxEqRel(@as(f64, 2815.716628466254), besselI0(10), 1e-13);
+}

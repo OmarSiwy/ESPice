@@ -35,12 +35,13 @@ pub const Spectrum = struct {
     thd_percent: f64,
 };
 
-/// Spectrum of probe `probe_idx` over the last period of `waveform`.
-/// `n_harmonics` is clamped to 1..max_harmonics. Returns
-/// error.InsufficientData when the waveform is shorter than one period or the
-/// period holds fewer than two samples.
 const Column = tran.Column;
 
+/// Spectrum of probe `probe_idx` over the last period of `waveform`, which
+/// must hold that probe. `n_harmonics` is clamped to 1..max_harmonics.
+/// Returns error.InsufficientData when the waveform is shorter than one
+/// period or the period holds fewer than two samples. `allocator` backs two
+/// n_fft scratch rows, freed before return.
 pub fn analyze(waveform: *const tran.Waveform, probe_idx: u32, f_fund: f64, n_harmonics: usize, allocator: std.mem.Allocator) !Spectrum {
     // Both series are borrowed columns of the recording, never copied.
     const times = waveform.column(0);

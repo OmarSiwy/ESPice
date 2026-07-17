@@ -438,11 +438,10 @@ fn mixedCubic(
         const nrm = norm(d[0]);
         if (nrm == 0) continue;
         secondDirDeriv(ckt, x_op, d[0], 1.0 / nrm, h, gc0, g_work, g_tap, x_work);
+        // a + (w·s2)·g, the rounding the per-element loop had.
         const s2 = nrm * nrm;
-        for (m1, m2, g_work) |*a, *b, g| {
-            a.* += d[1] * s2 * g;
-            b.* += d[2] * s2 * g;
-        }
+        num.axpy(m1, d[1] * s2, g_work);
+        num.axpy(m2, d[2] * s2, g_work);
     }
     // Per plane Re = m1·c_re - m2·c_im, Im = m1·c_im + m2·c_re; then F + jω·Q.
     for (0..n) |row| {
@@ -690,4 +689,48 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         .npoints = n_points,
         .data = data,
     };
+}
+
+test "bilinear: complex form matches a dense per-term oracle" {
+    // Two rows over n = 2; row 1 has no terms and must come out zero.
+    const terms = [_]Term{
+        .{ .row = 0, .a = 0, .b = 1, .coeff = 2, .qcoeff = 0.5 },
+        .{ .row = 0, .a = 1, .b = 1, .coeff = -3, .qcoeff = 0 },
+    };
+    const row_start = [_]u32{ 0, 2, 2 };
+    const a_re = [_]f64{ 1, 2 };
+    const a_im = [_]f64{ 0.5, -1 };
+    const b_re = [_]f64{ 3, -2 };
+    const b_im = [_]f64{ 1, 0.25 };
+    var dst: [4]f64 = undefined;
+    bilinear(&terms, &row_start, &a_re, &a_im, &b_re, &b_im, -0.5, 10, &dst);
+
+    const C = std.math.Complex(f64);
+    var f = C.init(0, 0);
+    var q = C.init(0, 0);
+    for (terms) |t| {
+        const p = C.init(a_re[t.a], a_im[t.a]).mul(C.init(b_re[t.b], b_im[t.b]));
+        f = f.add(p.mul(C.init(t.coeff, 0)));
+        q = q.add(p.mul(C.init(t.qcoeff, 0)));
+    }
+    const want = f.add(C.init(0, 10).mul(q)).mul(C.init(-0.5, 0));
+    try std.testing.expectApproxEqRel(want.re, dst[0], 1e-15);
+    try std.testing.expectApproxEqRel(want.im, dst[2], 1e-15);
+    try std.testing.expectEqual(@as(f64, 0), dst[1]);
+    try std.testing.expectEqual(@as(f64, 0), dst[3]);
+}
+
+test "contract: row-major matrix-vector product, then scaled" {
+    const s = [_]f64{ 1, 2, 3, 4, 5, 6, 7, 8, 9 };
+    const w = [_]f64{ 1, 0, -1 };
+    var dst: [3]f64 = undefined;
+    contract(&s, &w, 2, &dst);
+    try std.testing.expectEqualSlices(f64, &.{ -4, -4, -4 }, &dst);
+}
+
+test "scatter: probes land point-major with (re, im) adjacent, doubled" {
+    var dst: [8]f64 = @splat(0);
+    const x = [_]f64{ 1, 2, 3, 10, 20, 30 }; // re | im, n = 3
+    scatter(&dst, 1, &.{ 2, 0 }, &x);
+    try std.testing.expectEqualSlices(f64, &.{ 0, 0, 0, 0, 6, 60, 2, 20 }, &dst);
 }

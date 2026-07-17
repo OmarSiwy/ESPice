@@ -167,3 +167,57 @@ test "age: constant stress is A t^n, and DegF inverts it" {
     const at_life = 1e-3 * @exp(0.5 * 1.2) * std.math.pow(f64, life, 0.25) + 2e-4 * std.math.pow(f64, life, 0.5);
     try std.testing.expectApproxEqRel(0.05, at_life, 1e-9);
 }
+
+test "age: a window that holds fewer than two samples is MosraEmptyWindow" {
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    var m = testMosra(false);
+    const data = [_]f64{ 0, 1.5, 1.2, 0, 1e-6, 1.5, 1.2, 0 };
+    const res: core.Result = .{ .plotname = "", .varnames = &.{ "time", "d", "g", "s" }, .is_complex = false, .npoints = 2, .data = &data };
+    m.aging_start = 2e-6; // no sample inside
+    try std.testing.expectError(error.MosraEmptyWindow, age(arena.allocator(), m, res));
+    m.aging_start = 1e-6; // one sample: zero span
+    try std.testing.expectError(error.MosraEmptyWindow, age(arena.allocator(), m, res));
+}
+
+test "age: a PMOS mirrored in every terminal ages by the negated NMOS shift" {
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const nmos = [_]f64{ 0, 1.5, 1.2, 0, 1e-6, 1.5, 1.2, 0 };
+    // Source at 1.5 V, drain and gate below it by what the NMOS sees.
+    const pmos = [_]f64{ 0, 0, 0.3, 1.5, 1e-6, 0, 0.3, 1.5 };
+    const names: []const []const u8 = &.{ "time", "d", "g", "s" };
+    const n = try age(arena.allocator(), testMosra(false), .{ .plotname = "", .varnames = names, .is_complex = false, .npoints = 2, .data = &nmos });
+    const p = try age(arena.allocator(), testMosra(true), .{ .plotname = "", .varnames = names, .is_complex = false, .npoints = 2, .data = &pmos });
+    try std.testing.expectApproxEqRel(-n.table.data[1], p.table.data[1], 1e-12);
+    try std.testing.expectApproxEqRel(n.table.data[2], p.table.data[2], 1e-12);
+}
+
+test "lifetime: inf when the degradation never reaches DegF" {
+    try std.testing.expectEqual(std.math.inf(f64), lifetime(.{ 0, 0 }, .{ 0.5, 0.25 }, 0.05));
+}
+
+fn testMosra(pmos: bool) core.Mosra {
+    const S = struct {
+        const md = [_]core.MosraModel{.{ .tit0 = 1e-3, .titfd = 0.5, .tn = 0.25, .hci0 = 2e-4, .hcin = 0.5, .hcimu = 0.1 }};
+        const p_true = [_]bool{true};
+        const p_false = [_]bool{false};
+    };
+    return .{
+        .tran = .{ .t_stop = 1e-6 },
+        .rel_times = &.{1e6},
+        .aged_runs = true,
+        .models = &S.md,
+        .names = &.{"m1"},
+        .terminals = &.{.{ 1, 2, 3 }},
+        .pmos = if (pmos) &S.p_true else &S.p_false,
+        .temp_k = &.{300},
+        .model = &.{0},
+        .delvto = &.{7},
+        .mulu0 = &.{8},
+        .delvto_fresh = &.{0},
+        .mulu0_fresh = &.{1},
+    };
+}
