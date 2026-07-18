@@ -17,6 +17,8 @@ pub const vera_validate_contract = @import("builtin").mode == .debug;
 /// glibc's `mallopt` (malloc.h); M_MMAP_THRESHOLD is -3.
 extern "c" fn mallopt(param: c_int, value: c_int) c_int;
 
+/// Runs every netlist named on the command line and returns the exit code:
+/// 0, 1 if any file failed to prepare or run, 2 on a usage error.
 pub fn main(init: std.process.Init) !u8 {
     // glibc raises its mmap threshold to each mmapped block it frees (up to
     // 32 MB), so after one query frees a big buffer the next ones come from
@@ -155,12 +157,15 @@ fn envThreads(comptime name: [:0]const u8) u32 {
 }
 
 /// The value of `short`/`long` given as `-r X`, `--rawfile X` or `--rawfile=X`.
-/// Outer null: `arg` is not this flag. Inner null: the value is missing.
+/// Outer null: `arg` is not this flag. Inner null: the value is missing or
+/// empty (`--rawfile=`), which is a usage error.
 fn optionValue(arg: []const u8, short: []const u8, long: []const u8, args: anytype) ??[]const u8 {
-    if ((short.len != 0 and std.mem.eql(u8, arg, short)) or std.mem.eql(u8, arg, long))
-        return @as(?[]const u8, args.next());
+    if ((short.len != 0 and std.mem.eql(u8, arg, short)) or std.mem.eql(u8, arg, long)) {
+        const value = args.next() orelse return @as(?[]const u8, null);
+        return if (value.len == 0) @as(?[]const u8, null) else value;
+    }
     if (std.mem.startsWith(u8, arg, long) and arg.len > long.len and arg[long.len] == '=')
-        return @as(?[]const u8, arg[long.len + 1 ..]);
+        return if (arg.len == long.len + 1) @as(?[]const u8, null) else arg[long.len + 1 ..];
     return null;
 }
 

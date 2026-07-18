@@ -296,10 +296,11 @@ export fn espice_copy_result(handle: ?*Handle, id: u32, values: ?[*]f64, capacit
 
 export fn espice_result_view(handle: ?*Handle, id: u32, data: ?*?[*]const f64, len: ?*usize) u32 {
     const h = handle orelse return status(error.InvalidArgument);
+    // The header promises *data NULL on any failure, a NULL len included.
+    if (data) |view| view.* = null;
+    if (len) |count| count.* = 0;
     const view = data orelse return h.fail(error.InvalidArgument);
     const count = len orelse return h.fail(error.InvalidArgument);
-    view.* = null;
-    count.* = 0;
     const values = (h.problem.result(@fromBackingInt(@intCast(id))) catch |err| return h.fail(err)).data;
     view.* = values.ptr;
     count.* = values.len;

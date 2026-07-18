@@ -509,3 +509,92 @@ test "HSPICE .op <time> counts its columns as .op does" {
     try p.run_all();
     try t.expectEqual(@as(usize, 64), (try p.result(@fromBackingInt(@intCast(0)))).varnames.len);
 }
+
+test "Problem: zero max_parallel fails before anything is parsed" {
+    try t.expectError(error.InvalidConcurrency, createLimited(deck, 0));
+    try t.expectError(error.InvalidConcurrency, createLimited("not a deck", 0));
+}
+
+test "Problem: invalid IDs, empty directives, inherited print limits and no variant runs" {
+    const p = try create(deck);
+    defer p.deinit();
+    const bad = api.requests.invalid_query;
+    try t.expectError(error.InvalidQuery, p.query_info(bad));
+    try t.expectError(error.InvalidQuery, p.result(bad));
+    try t.expectError(error.InvalidQuery, p.advance(bad));
+    try t.expectError(error.InvalidQuery, p.copy_result(bad, &.{}));
+    const count = p.query_count();
+    try t.expectError(error.InvalidAnalysisArguments, p.append_directives("", &.{}));
+    try t.expectEqual(count, p.query_count());
+    try t.expectEqualStrings("query fixture", p.title());
+    try t.expectEqual(@as(u32, 3), p.device_count());
+    // A null `limits` previews with the Problem's max_parallel (2 here), not
+    // the session default.
+    var inherited = std.Io.Writer.Allocating.init(t.allocator);
+    defer inherited.deinit();
+    var explicit = std.Io.Writer.Allocating.init(t.allocator);
+    defer explicit.deinit();
+    try p.print(&inherited.writer, .{});
+    try p.print(&explicit.writer, .{ .limits = .{ .max_parallel = 2 } });
+    try t.expectEqualSlices(u8, explicit.written(), inherited.written());
+    try p.run_all();
+    try t.expect(p.output_error() == null);
+    const runs = try p.run_results(t.allocator);
+    defer t.allocator.free(runs);
+    try t.expectEqual(@as(usize, 0), runs.len);
+}
+
+test "Problem: copy_result fills an exact or longer buffer and keeps its tail" {
+    const p = try create("copy\nV1 in 0 1\nR1 in 0 1k\n.op\n.end\n");
+    defer p.deinit();
+    try p.run_all();
+    const op = try find(p, .op);
+    const data = (try p.result(op)).data;
+    const buffer = try t.allocator.alloc(f64, data.len + 1);
+    defer t.allocator.free(buffer);
+    buffer[data.len] = -7;
+    try t.expectEqual(data.len, try p.copy_result(op, buffer));
+    try t.expectEqualSlices(f64, data, buffer[0..data.len]);
+    try t.expectEqual(@as(f64, -7), buffer[data.len]);
+    try t.expectEqual(data.len, try p.copy_result(op, buffer[0..data.len]));
+    try t.expectEqualSlices(f64, data, buffer[0..data.len]);
+}
+
+test "Problem: a final plan streams a lone transient but keeps one that .stim reads" {
+    const io = t.io;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const out = try std.fmt.allocPrint(t.allocator, ".zig-cache/tmp/{s}/a.raw", .{tmp.sub_path});
+    defer t.allocator.free(out);
+    {
+        const p = try api.Problem.init(t.allocator, io, .{
+            .source = .{ .bytes = .{ .data = "stream\nv1 a 0 pwl(0 0 1n 1)\nr1 a 0 1k\n.tran 0.1n 2n\n.end\n", .origin = "stream.cir" } },
+            .output = .{ .path = out },
+            .backend = .{ .final_plan = true },
+        });
+        defer p.deinit();
+        try p.run_all();
+        // The rows went to the raw file; the Result keeps only their count.
+        const r = try p.result(try find(p, .tran));
+        try t.expect(r.npoints > 1);
+        try t.expectEqual(@as(usize, 0), r.data.len);
+        const raw = try tmp.dir.readFileAlloc(io, "a.raw", t.allocator, .unlimited);
+        defer t.allocator.free(raw);
+        try t.expect(std.mem.indexOf(u8, raw, "Plotname: Transient Analysis\n") != null);
+    }
+    // `.stim` samples the transient after run_all, so streaming would leave
+    // it no rows to read.
+    const p = try api.Problem.init(t.allocator, io, .{
+        .source = .{ .bytes = .{ .data = "stim\nv1 a 0 pwl(0 0 1n 1)\nr1 a 0 1k\n.tran 0.1n 2n\n" ++
+            ".stim tran pwl filename=rc v0=v(a) node1=b node2=0 npoints=5\n.end\n", .origin = "stim.sp" } },
+        .dialect = .hspice,
+        .output = .{ .path = out },
+        .backend = .{ .final_plan = true },
+    });
+    defer p.deinit();
+    try p.run_all();
+    try t.expect((try p.result(try find(p, .tran))).data.len != 0);
+    const pwl = try tmp.dir.readFileAlloc(io, "rc.pwl0_tr0", t.allocator, .unlimited);
+    defer t.allocator.free(pwl);
+    try t.expectEqualStrings("* stim\n* written by .stim\nv0 b 0 pwl(\n+ 0e0 0e0\n+ 5e-10 5e-1\n+ 1e-9 1e0\n+ 1.5000000000000002e-9 1e0\n+ 2e-9 1e0)\n", pwl);
+}
