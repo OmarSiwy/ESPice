@@ -18,9 +18,6 @@ const integrator = @import("../tran/integrator.zig");
 const dense_lu = @import("solver").dense_lu;
 const Gmres = @import("solver").gmres.Gmres;
 
-const W = std.simd.suggestVectorLength(f64) orelse 8;
-const V = @Vector(W, f64);
-
 /// ponytail: node count at which the Newton solve switches from the dense FD
 /// Jacobian (n+1 period integrations, O(n^2) storage) to matrix-free GMRES
 /// (one integration per matvec).
@@ -40,11 +37,13 @@ const osc_kick: f64 = 1e-3;
 /// `osc_settle_periods` while the swing still grows by over 1 % a period.
 const max_settle_periods: usize = 2000;
 
+/// The `.pss` query. With `osc_node` set, `period` is only the first guess.
 pub const Options = @import("core").query.Pss;
 
 /// Outcome of a periodic solve (shared by pss, hb and qpss).
 pub const SolveResult = struct {
     converged: bool,
+    /// Newton (shooting or spectral) iterations taken.
     iterations: u16,
     /// Infinity norm of the final residual; inf when an integration failed.
     residual_norm: f64,
@@ -82,6 +81,7 @@ const PeriodHook = struct {
         }
     }
 
+    /// The step's matrix: G alone without charge, else G + alpha*C in `a_vals`.
     pub fn vals(self: PeriodHook, ckt: *root.Circuit) []f64 {
         if (!self.has_charge) return ckt.g_vals;
         ckt.combineGC(self.alpha, self.a_vals);
@@ -200,6 +200,7 @@ const ShootingKrylovCtx = struct {
     options: Options,
     n: usize,
 
+    /// The GMRES operator, `shootingMatvec`.
     pub const matvec = shootingMatvec;
 };
 
@@ -225,19 +226,15 @@ fn shootingMatvec(ctx: *ShootingKrylovCtx, v: []const f64, w: []f64) void {
         simdZero(w[0..n]);
         return;
     }
+    fdColumn(w[0..n], ctx.x_end_pert, ctx.x_pert, ctx.phi, inv_eps);
+}
 
-    const inv_v: V = @splat(inv_eps);
-    var i: usize = 0;
-    while (i + W <= n) : (i += W) {
-        const xe: V = ctx.x_end_pert[i..][0..W].*;
-        const xp: V = ctx.x_pert[i..][0..W].*;
-        const ph: V = ctx.phi[i..][0..W].*;
-        w[i..][0..W].* = ((xe - xp) - ph) * inv_v;
-    }
-    while (i < n) : (i += 1) {
-        const phi_pert = ctx.x_end_pert[i] - ctx.x_pert[i];
-        w[i] = (phi_pert - ctx.phi[i]) * inv_eps;
-    }
+/// out = ((x_end - x_start) - phi) * inv_eps, the FD derivative of phi;
+/// `out` may alias `x_end`.
+fn fdColumn(out: []f64, x_end: []const f64, x_start: []const f64, phi: []const f64, inv_eps: f64) void {
+    num.sub(out, x_end, x_start);
+    num.sub(out, out, phi);
+    num.scale(out, inv_eps, out);
 }
 
 /// Dense path: builds the FD Jacobian of phi column by column (n period
@@ -271,20 +268,9 @@ fn denseFdSolve(
         }
 
         // Column j is stride n in row-major J, so the store stays scalar.
-        const inv_v: V = @splat(inv_eps);
-        var row: usize = 0;
-        while (row + W <= n) : (row += W) {
-            const xep: V = x_end_pert[row..][0..W].*;
-            const x0p: V = x0_pert[row..][0..W].*;
-            const pv: V = phi[row..][0..W].*;
-            const diff: V = (xep - x0p - pv) * inv_v;
-            const arr: [W]f64 = diff;
-            for (0..W) |w| j_phi[(row + w) * n + j] = arr[w];
-        }
-        while (row < n) : (row += 1) {
-            const pp = x_end_pert[row] - x0_pert[row];
-            j_phi[row * n + j] = (pp - phi[row]) * inv_eps;
-        }
+        const col = x_end_pert[0..n];
+        fdColumn(col, col, x0_pert[0..n], phi[0..n], inv_eps);
+        for (col, 0..) |d, row| j_phi[row * n + j] = d;
     }
 
     try dense_lu.factorizeSolveNeg(n, j_phi, phi[0..n], dx0);
@@ -331,6 +317,8 @@ fn krylovSolve(
 /// left zeroed if that integration fails. An autonomous solve starts with
 /// `startOscillator` and returns its period as the last row's t;
 /// error.OscillatorDidNotStart when the circuit does not oscillate.
+/// Allocates O(n^2) below `krylov_threshold` unknowns, O(n * gmres_restart)
+/// past it, all freed before return. Asserts `wave` is empty or that size.
 pub fn solve(
     ckt: *root.Circuit,
     x_dc: []const f64,
@@ -435,7 +423,7 @@ pub fn solve(
     }
 
     simdCopy(x_end, x0);
-    _ = integrateOnePeriod(ckt, ws, &sc, x_end, probes, wave, opts);
+    if (!integrateOnePeriod(ckt, ws, &sc, x_end, probes, wave, opts)) simdZero(wave);
 
     return .{
         .converged = res_norm < options.shooting_tol,
@@ -557,7 +545,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     };
 }
 
-// Private implementation access for the analysis test suite.
+/// Private implementation access for the analysis test suite; void outside tests.
 pub const test_access = if (@import("builtin").is_test) .{
     .krylov_threshold = krylov_threshold,
     .shootingMatvec = shootingMatvec,

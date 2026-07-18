@@ -17,11 +17,10 @@ const dense_lu = @import("solver").dense_lu;
 const pac = @import("pac.zig");
 const mhb = @import("mhb.zig");
 
-const W = std.simd.suggestVectorLength(f64) orelse 8;
-const V = @Vector(W, f64);
-
+/// The `.hb` query; `extra_tones` or `phasors` route it to `mhb.zig`.
 pub const Options = @import("core").query.Hb;
 
+/// The Newton outcome, shared with pss and qpss.
 pub const SolveResult = @import("pss.zig").SolveResult;
 
 /// `solveSpectrum`'s outcome: the Newton status and the fundamental the
@@ -71,7 +70,8 @@ fn magnitude(spectrum: []const f64, k: u16) f64 {
 /// J_w^T y = e_w at the solution, J_w the Newton Jacobian with its f0
 /// column: the left null vector of the HB Jacobian, normalized so that
 /// y . dF/d(ln w0) = 1. phasenoise.zig turns it into the perturbation
-/// projection vector.
+/// projection vector. Asserts n_harmonics > 0 when autonomous (the
+/// phase condition lives on sin_1).
 pub fn solveSpectrum(
     ckt: *root.Circuit,
     x_hat: []f64,
@@ -87,6 +87,7 @@ pub fn solveSpectrum(
     const total_unknowns = n * nf;
     std.debug.assert(x_hat.len == total_unknowns);
     std.debug.assert(ppv.len == 0 or (ppv.len == total_unknowns and options.osc_node != root.GROUND));
+    std.debug.assert(options.osc_node == root.GROUND or nh > 0);
     if (options.osc_node == root.GROUND and useGmres(n, nf))
         return .{ .status = try mhb.solveOneTone(ckt, x_hat, options, allocator), .f0 = options.f0 };
 
@@ -195,33 +196,7 @@ pub fn solveSpectrum(
     var iter: u16 = 0;
     while (iter < options.max_iter) : (iter += 1) {
         if (iter != 0) try ckt.checkpoint(.{ .phase = .harmonic, .completed = iter });
-        // IDFT to node-major samples x_td[node * nt + k].
-        for (0..n) |node| {
-            const dc = x_hat[node * nf];
-            const cos_base = node * nf + 1;
-            for (0..nt) |k| {
-                var val: f64 = dc;
-                var hi: usize = 0;
-                while (hi + W <= nh) : (hi += W) {
-                    var bcv: V = undefined;
-                    var bsv: V = undefined;
-                    var cv: V = undefined;
-                    var sv: V = undefined;
-                    inline for (0..W) |w| {
-                        bcv[w] = basis_cos[(hi + w) * nt + k];
-                        bsv[w] = basis_sin[(hi + w) * nt + k];
-                        cv[w] = x_hat[cos_base + 2 * (hi + w)];
-                        sv[w] = x_hat[cos_base + 2 * (hi + w) + 1];
-                    }
-                    val += @reduce(.Add, cv * bcv + sv * bsv);
-                }
-                while (hi < nh) : (hi += 1) {
-                    val += x_hat[cos_base + 2 * hi] * basis_cos[hi * nt + k] +
-                        x_hat[cos_base + 2 * hi + 1] * basis_sin[hi * nt + k];
-                }
-                x_td[node * nt + k] = val;
-            }
-        }
+        idft(x_hat, nh, nt, basis_cos, basis_sin, x_td);
 
         const dt_sample = period / nt_f;
         // Sample k is the circuit at t_k = k*T/nt in the transient phase,
@@ -246,41 +221,16 @@ pub fn solveSpectrum(
         }
 
         // DFT of the residual; node-major f_td makes each node's samples one
-        // contiguous run.
+        // contiguous run. `project`'s DC is twice the mean.
+        const kc = gc[0 .. nh + 1];
+        const ks = gs[0 .. nh + 1];
         for (0..n) |node| {
-            const f_slice = f_td[node * nt ..][0..nt];
-
-            var dc_acc: V = @splat(0.0);
-            var k: usize = 0;
-            while (k + W <= nt) : (k += W) {
-                const fv: V = f_slice[k..][0..W].*;
-                dc_acc += fv;
-            }
-            var dc_sum: f64 = @reduce(.Add, dc_acc);
-            while (k < nt) : (k += 1) dc_sum += f_slice[k];
-            f_hat[node * nf] = dc_sum / nt_f;
-
-            for (0..nh) |hi| {
-                const bc_slice = basis_cos[hi * nt ..][0..nt];
-                const bs_slice = basis_sin[hi * nt ..][0..nt];
-                var cos_acc: V = @splat(0.0);
-                var sin_acc: V = @splat(0.0);
-                k = 0;
-                while (k + W <= nt) : (k += W) {
-                    const fv: V = f_slice[k..][0..W].*;
-                    const bcv: V = bc_slice[k..][0..W].*;
-                    const bsv: V = bs_slice[k..][0..W].*;
-                    cos_acc += fv * bcv;
-                    sin_acc += fv * bsv;
-                }
-                var cos_sum: f64 = @reduce(.Add, cos_acc);
-                var sin_sum: f64 = @reduce(.Add, sin_acc);
-                while (k < nt) : (k += 1) {
-                    cos_sum += f_slice[k] * bc_slice[k];
-                    sin_sum += f_slice[k] * bs_slice[k];
-                }
-                f_hat[node * nf + 2 * (hi + 1) - 1] = 2.0 * cos_sum / nt_f;
-                f_hat[node * nf + 2 * (hi + 1)] = 2.0 * sin_sum / nt_f;
+            project(f_td[node * nt ..][0..nt], basis_cos, basis_sin, kc, ks);
+            const spec = f_hat[node * nf ..][0..nf];
+            spec[0] = 0.5 * kc[0];
+            for (1..nh + 1) |h| {
+                spec[2 * h - 1] = kc[h];
+                spec[2 * h] = ks[h];
             }
         }
 
@@ -290,13 +240,11 @@ pub fn solveSpectrum(
         // They are linear in w0, so q_term is also dF/d(ln w0).
         root.zeroSimd(q_term);
         if (ckt.has_charge) for (0..n) |node| {
-            const q_slice = q_td[node * nt ..][0..nt];
-            for (0..nh) |hi| {
-                const q_cos = num.dot(q_slice, basis_cos[hi * nt ..][0..nt]);
-                const q_sin = num.dot(q_slice, basis_sin[hi * nt ..][0..nt]);
-                const omega_h = @as(f64, @floatFromInt(hi + 1)) * omega0;
-                q_term[node * nf + 2 * (hi + 1) - 1] = omega_h * (2.0 * q_sin / nt_f);
-                q_term[node * nf + 2 * (hi + 1)] = -omega_h * (2.0 * q_cos / nt_f);
+            project(q_td[node * nt ..][0..nt], basis_cos, basis_sin, kc, ks);
+            for (1..nh + 1) |h| {
+                const omega_h = @as(f64, @floatFromInt(h)) * omega0;
+                q_term[node * nf + 2 * h - 1] = omega_h * ks[h];
+                q_term[node * nf + 2 * h] = -omega_h * kc[h];
             }
         };
         num.axpy(f_hat, 1.0, q_term);
@@ -486,44 +434,34 @@ pub fn solveOscillator(ckt: *root.Circuit, x_dc: []const f64, x_hat: []f64, ppv:
     return solveSpectrum(ckt, x_hat, ppv, opts, allocator);
 }
 
-/// The spectrum of one pattern slot's samples `g` to harmonic 2K, in the
+/// x_td[node*nt + k] = dc + Σ_h c_h·basis_cos[h-1, k] + s_h·basis_sin[h-1, k]
+/// for every node of `x_hat` (`solveSpectrum`'s layout, harmonics 1..nh),
+/// one contiguous row per node.
+fn idft(x_hat: []const f64, nh: usize, nt: usize, basis_cos: []const f64, basis_sin: []const f64, x_td: []f64) void {
+    const nf = 2 * nh + 1;
+    const n = x_hat.len / nf;
+    for (0..n) |node| {
+        const spec = x_hat[node * nf ..][0..nf];
+        const row = x_td[node * nt ..][0..nt];
+        @memset(row, spec[0]);
+        for (0..nh) |hi| {
+            num.axpy(row, spec[2 * hi + 1], basis_cos[hi * nt ..][0..nt]);
+            num.axpy(row, spec[2 * hi + 2], basis_sin[hi * nt ..][0..nt]);
+        }
+    }
+}
+
+/// The spectrum of the samples `g` to harmonic gc.len - 1, in the
 /// Jacobian's convention: gc[0] = 2*mean(g), gs[0] = 0, and gc[k], gs[k]
 /// the 2/nt cos and sin projections on the harmonic-major bases.
 fn project(g: []const f64, basis_cos: []const f64, basis_sin: []const f64, gc: []f64, gs: []f64) void {
     const nt = g.len;
     const nt_f: f64 = @floatFromInt(nt);
-    var g_dc_acc: V = @splat(0.0);
-    var k2: usize = 0;
-    while (k2 + W <= nt) : (k2 += W) {
-        const gv: V = g[k2..][0..W].*;
-        g_dc_acc += gv;
-    }
-    var g_sum: f64 = @reduce(.Add, g_dc_acc);
-    while (k2 < nt) : (k2 += 1) g_sum += g[k2];
-    gc[0] = 2.0 * g_sum / nt_f;
+    gc[0] = 2.0 * num.sum(g) / nt_f;
     gs[0] = 0;
-
-    for (0..gc.len - 1) |hi| {
-        const bc_slice = basis_cos[hi * nt ..][0..nt];
-        const bs_slice = basis_sin[hi * nt ..][0..nt];
-        var g_cos_acc: V = @splat(0.0);
-        var g_sin_acc: V = @splat(0.0);
-        var k3: usize = 0;
-        while (k3 + W <= nt) : (k3 += W) {
-            const gv: V = g[k3..][0..W].*;
-            const bcv: V = bc_slice[k3..][0..W].*;
-            const bsv: V = bs_slice[k3..][0..W].*;
-            g_cos_acc += gv * bcv;
-            g_sin_acc += gv * bsv;
-        }
-        var g_cos_h: f64 = @reduce(.Add, g_cos_acc);
-        var g_sin_h: f64 = @reduce(.Add, g_sin_acc);
-        while (k3 < nt) : (k3 += 1) {
-            g_cos_h += g[k3] * bc_slice[k3];
-            g_sin_h += g[k3] * bs_slice[k3];
-        }
-        gc[hi + 1] = 2.0 * g_cos_h / nt_f;
-        gs[hi + 1] = 2.0 * g_sin_h / nt_f;
+    for (gc[1..], gs[1..], 0..) |*c, *s, hi| {
+        c.* = 2.0 * num.dot(g, basis_cos[hi * nt ..][0..nt]) / nt_f;
+        s.* = 2.0 * num.dot(g, basis_sin[hi * nt ..][0..nt]) / nt_f;
     }
 }
 
@@ -536,10 +474,13 @@ fn setOmega(omega0: *f64, period: *f64, omega: f64) void {
 /// Seeds `x_hat` for an autonomous solve from one period of the
 /// oscillator's shooting orbit: the first K harmonics of every unknown,
 /// time-shifted so the osc node's fundamental is a pure cosine (sin_1 = 0,
-/// the phase condition `solveSpectrum` holds).
+/// the phase condition `solveSpectrum` holds). Exact while the orbit
+/// samples more than 2K points per period; asserts x_hat.len is n * (2K+1)
+/// with K >= 1.
 pub fn seed(x_hat: []f64, orb: pac.Orbit, n: usize, osc: u32) void {
     const nf = x_hat.len / n;
     const nh = (nf - 1) / 2;
+    std.debug.assert(nf * n == x_hat.len and nh > 0);
     const ns = orb.samples(n);
     const ns_f: f64 = @floatFromInt(ns);
     root.zeroSimd(x_hat);
@@ -651,4 +592,64 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         .npoints = n_rows,
         .data = data,
     };
+}
+
+test idft {
+    // idft against the term-by-term sum, and back through `project`: on
+    // 2(2K+1) points the harmonics 0..K are orthogonal, so a band-limited
+    // spectrum round-trips. nt = 14 straddles every vector width.
+    const nh = 3;
+    const nf = 2 * nh + 1;
+    const nt = 2 * nf;
+    const n = 2;
+    var basis_cos: [2 * nh * nt]f64 = undefined;
+    var basis_sin: [2 * nh * nt]f64 = undefined;
+    for (0..2 * nh) |hi| for (0..nt) |k| {
+        const angle = 2.0 * std.math.pi * @as(f64, @floatFromInt((hi + 1) * k)) / nt;
+        basis_cos[hi * nt + k] = @cos(angle);
+        basis_sin[hi * nt + k] = @sin(angle);
+    };
+    var prng = std.Random.DefaultPrng.init(0x4B);
+    var x_hat: [n * nf]f64 = undefined;
+    for (&x_hat) |*v| v.* = prng.random().float(f64) * 2 - 1;
+    var x_td: [n * nt]f64 = undefined;
+    idft(&x_hat, nh, nt, &basis_cos, &basis_sin, &x_td);
+
+    var gc: [nh + 1]f64 = undefined;
+    var gs: [nh + 1]f64 = undefined;
+    for (0..n) |node| {
+        const spec = x_hat[node * nf ..][0..nf];
+        for (0..nt) |k| {
+            var want = spec[0];
+            for (0..nh) |hi| want += spec[2 * hi + 1] * basis_cos[hi * nt + k] + spec[2 * hi + 2] * basis_sin[hi * nt + k];
+            try std.testing.expectApproxEqAbs(want, x_td[node * nt + k], 1e-12);
+        }
+        project(x_td[node * nt ..][0..nt], &basis_cos, &basis_sin, &gc, &gs);
+        try std.testing.expectApproxEqAbs(spec[0], 0.5 * gc[0], 1e-12);
+        try std.testing.expectEqual(@as(f64, 0), gs[0]);
+        for (1..nh + 1) |h| {
+            try std.testing.expectApproxEqAbs(spec[2 * h - 1], gc[h], 1e-12);
+            try std.testing.expectApproxEqAbs(spec[2 * h], gs[h], 1e-12);
+        }
+    }
+}
+
+test orbit {
+    // orbit samples a spectrum whose osc node (1) is a pure cosine, and
+    // seed recovers it: the phase shift it applies is then the identity.
+    const gpa = std.testing.allocator;
+    const n = 2;
+    const nf = 7;
+    const ns = 32;
+    const x_hat = [n * nf]f64{ 0.5, 0.1, -0.2, 0.03, 0.04, -0.01, 0.02, 1.0, 0.8, 0, 0.1, -0.05, 0.02, 0.01 };
+    const orb = try orbit(&x_hat, n, 1e3, ns, true, gpa);
+    defer gpa.free(orb.wave);
+    try std.testing.expectEqual(@as(usize, ns), orb.samples(n));
+    try std.testing.expectApproxEqRel(@as(f64, 1e-3), orb.wave[ns * (n + 1)], 1e-15);
+    for (orb.state(0, n), orb.state(ns, n)) |a, b| try std.testing.expectApproxEqAbs(a, b, 1e-12);
+    // DC plus every amplitude at t = 0.
+    try std.testing.expectApproxEqAbs(@as(f64, 1.0 + 0.8 + 0.1 + 0.02), orb.state(0, n)[1], 1e-12);
+    var back: [n * nf]f64 = undefined;
+    seed(&back, orb, n, 1);
+    for (x_hat, back) |a, b| try std.testing.expectApproxEqAbs(a, b, 1e-12);
 }

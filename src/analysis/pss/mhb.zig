@@ -30,15 +30,19 @@ const FreqSolver = solvers.freq_solve.FreqSolver;
 const Gmres = solvers.gmres.Gmres;
 const gvProduct = @import("qpss.zig").gvProduct;
 
+/// The `.hb` query, read for its tone list (`f0` then `extra_tones`).
 pub const Options = @import("core").query.Hb;
 
+/// The Newton outcome, shared with pss and hb.
 pub const SolveResult = @import("pss.zig").SolveResult;
 
 /// The kept spectral lines, DC first, then by ascending frequency. Line j
 /// is `freqs[j]` Hz, the mixing product Σ_i mix[j*tones + i]·f_i.
 pub const Spectrum = struct {
+    /// At most `max_tones`.
     tones: u8,
     freqs: []f64,
+    /// Line-major, `tones` coefficients per line; |k_i| <= NHARMS_i <= i16 max.
     mix: []i16,
 
     /// Frees both tables; `gpa` is the allocator `spectrum` took.
@@ -307,12 +311,6 @@ fn addOmega(omegas: []const f64, q_hat: []const f64, dst: []f64) void {
     }
 }
 
-fn sum(x: []const f64) f64 {
-    var acc: f64 = 0;
-    for (x) |v| acc += v;
-    return acc;
-}
-
 /// The Newton linear system for GMRES: `matvec` is the HB Jacobian at the
 /// last residual's samples, `precond` the held G0 + jω_j·C0 blocks.
 const Operator = struct {
@@ -332,6 +330,7 @@ const Operator = struct {
     p_rhs: []f64,
     p_x: []f64,
 
+    /// w = J v: IDFT, G(t)·v and C(t)·v per sample, DFT, plus Ω on the charge.
     pub fn matvec(self: *Operator, v: []const f64, w: []f64) void {
         const nf = self.nf;
         const ckt = self.ckt;
@@ -416,7 +415,8 @@ const gmres_max_restarts: u32 = 20;
 /// converge. Newton takes `hb.zig`'s backtracking line search; each step
 /// is GMRES on the matrix-free Jacobian with the block-diagonal
 /// preconditioner. Memory is O(nnz·nt + m·LU) for the sampled planes and
-/// the held factors.
+/// the held factors. Asserts `spec` has two or more lines and x_hat.len is
+/// n·(2m-1).
 pub fn solve(ckt: *root.Circuit, x_hat: []f64, spec: Spectrum, tones: []const f64, options: Options, allocator: std.mem.Allocator) !SolveResult {
     const n: usize = ckt.n;
     const nnz: usize = ckt.nnz;
@@ -424,7 +424,7 @@ pub fn solve(ckt: *root.Circuit, x_hat: []f64, spec: Spectrum, tones: []const f6
     const nf = 2 * m - 1;
     const nt = transformSamples(spec);
     const total = n * nf;
-    std.debug.assert(x_hat.len == total);
+    std.debug.assert(x_hat.len == total and m >= 2);
 
     const sizes = [_]usize{
         nt + 2 * nt * nf, // transform
@@ -535,8 +535,8 @@ pub fn solve(ckt: *root.Circuit, x_hat: []f64, spec: Spectrum, tones: []const f6
         // every conductance's sign.
         const inv_nt = 1 / @as(f64, @floatFromInt(nt));
         for (0..nnz) |slot| {
-            g0[slot] = sum(g_td[slot * nt ..][0..nt]) * inv_nt;
-            c0[slot] = sum(c_td[slot * nt ..][0..nt]) * inv_nt;
+            g0[slot] = num.sum(g_td[slot * nt ..][0..nt]) * inv_nt;
+            c0[slot] = num.sum(c_td[slot * nt ..][0..nt]) * inv_nt;
         }
         fs.setPlanes(g0, c0);
         try fs.factorEach(allocator, omegas);
@@ -676,7 +676,7 @@ pub fn lineCount(gpa: std.mem.Allocator, opts: Options) !usize {
 }
 
 /// Solves one tone at f0 with K = `options.n_harmonics` through `solve`;
-/// `x_hat` in `hb.solveSpectrum`'s layout.
+/// `x_hat` in `hb.solveSpectrum`'s layout. Asserts K >= 1.
 pub fn solveOneTone(ckt: *root.Circuit, x_hat: []f64, options: Options, allocator: std.mem.Allocator) !SolveResult {
     const tones = [_]f64{options.f0};
     const spec = try spectrum(allocator, &tones, &.{options.n_harmonics}, 0, 1);
@@ -684,7 +684,7 @@ pub fn solveOneTone(ckt: *root.Circuit, x_hat: []f64, options: Options, allocato
     return solve(ckt, x_hat, spec, &tones, options, allocator);
 }
 
-// Private implementation access for the analysis test suite.
+/// Private implementation access for the analysis test suite; void outside tests.
 pub const test_access = if (@import("builtin").is_test) .{
     .transform = transform,
     .transformSamples = transformSamples,

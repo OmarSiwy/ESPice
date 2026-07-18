@@ -164,6 +164,128 @@ const PssTests = struct {
         for (0..10) |i| try testing.expectEqual(a[i], b[i]);
     }
 
+    const analysis = @import("../types.zig");
+    const hb = @import("../pss/hb.zig");
+    const converger = @import("solver").converger;
+    const Builder = @import("builder").Builder;
+    const Library = @import("device").Library;
+    const models = @import("models");
+
+    /// x_dc of `ckt` by DC Newton from zero; the caller frees it.
+    fn dcPoint(ckt: *analysis.Circuit, a: std.mem.Allocator) ![]f64 {
+        const x = try a.alloc(f64, ckt.n);
+        errdefer a.free(x);
+        @memset(x, 0);
+        try ckt.computeBaseline();
+        const ws = try ckt.workspace();
+        ckt.setSimState(.{ .kind = .dc });
+        _ = try converger.run(ckt, ws, x, 0, .{}, analysis.EvalHook{});
+        return x;
+    }
+
+    /// The certificate of a periodic solution: one period from the final
+    /// x0 ends where it started, on every probe.
+    fn expectPeriodic(wave: []const f64, n_samples: usize, cols: usize, tol: f64) !void {
+        for (wave[1..cols], wave[n_samples * cols + 1 ..][0 .. cols - 1]) |start, end|
+            try testing.expectApproxEqAbs(start, end, tol);
+    }
+
+    test "pss and hb: an RC low-pass lands on its analytic steady state" {
+        // v_in = sin(wt) through R into C: v_out = A sin(wt - phi) with
+        // A = 1/sqrt(1 + (wRC)^2), phi = atan(wRC), so the cos coefficient is
+        // -A sin(phi) and the sin coefficient A cos(phi).
+        const a = testing.allocator;
+        var lib = try Library.init(a);
+        defer lib.deinit();
+        var b = try Builder.init(a, &lib);
+        const vin = try b.addNode();
+        const out = try b.addNode();
+        const f: f64 = 1e3;
+        const r: f64 = 1e3;
+        const c: f64 = 1e-7;
+        try b.addDevice(models.vsource, "", .{ .dc = 0, .waveform = 2, .sin_vo = 0, .sin_va = 1, .sin_freq = f }, .{}, .{ vin, analysis.GROUND });
+        try b.addDevice(models.resistor, "", .{ .r = r }, .{}, .{ vin, out });
+        try b.addDevice(models.capacitor, "", .{ .c = c }, .{}, .{ out, analysis.GROUND });
+        var prepared = try b.compile();
+        defer prepared.deinit();
+        var ckt = try analysis.Circuit.instantiate(&prepared, a);
+        defer ckt.deinit();
+        const x_dc = try dcPoint(&ckt, a);
+        defer a.free(x_dc);
+
+        const wrc = 2 * std.math.pi * f * r * c;
+        const amp = 1 / @sqrt(1 + wrc * wrc);
+        const phi = std.math.atan(wrc);
+        const want_c = -amp * @sin(phi);
+        const want_s = amp * @cos(phi);
+
+        // Shooting: trapezoid at 128 steps is O((w dt)^2) ~ 2e-4 off.
+        const ns: usize = 128;
+        const wave = try a.alloc(f64, (ns + 1) * 2);
+        defer a.free(wave);
+        const res = try impl.solve(&ckt, x_dc, &.{out}, wave, .{ .period = 1 / f, .n_samples = ns }, a);
+        try testing.expect(res.converged);
+        try expectPeriodic(wave, ns, 2, 1e-6);
+        var c1: f64 = 0;
+        var s1: f64 = 0;
+        for (0..ns) |k| {
+            const ang = 2 * std.math.pi * @as(f64, @floatFromInt(k)) / @as(f64, @floatFromInt(ns));
+            c1 += 2 * wave[2 * k + 1] * @cos(ang) / @as(f64, @floatFromInt(ns));
+            s1 += 2 * wave[2 * k + 1] * @sin(ang) / @as(f64, @floatFromInt(ns));
+        }
+        try testing.expectApproxEqAbs(want_c, c1, 1e-3);
+        try testing.expectApproxEqAbs(want_s, s1, 1e-3);
+
+        // HB is exact for a linear circuit: the fundamental to roundoff,
+        // nothing at DC or above it.
+        const nf: usize = 17;
+        const x_hat = try a.alloc(f64, @as(usize, ckt.n) * nf);
+        defer a.free(x_hat);
+        const st = try hb.solveSpectrum(&ckt, x_hat, &.{}, .{ .f0 = f }, a);
+        try testing.expect(st.status.converged);
+        const spec = x_hat[@as(usize, out) * nf ..][0..nf];
+        try testing.expectApproxEqAbs(want_c, spec[1], 1e-9);
+        try testing.expectApproxEqAbs(want_s, spec[2], 1e-9);
+        try testing.expectApproxEqAbs(@as(f64, 0), spec[0], 1e-12);
+        for (spec[3..]) |v| try testing.expectApproxEqAbs(@as(f64, 0), v, 1e-12);
+    }
+
+    test "pss: the Krylov path converges to a periodic orbit" {
+        // An RC ladder past `krylov_threshold` unknowns takes matrix-free
+        // GMRES; its certificate is that the returned period closes.
+        const a = testing.allocator;
+        var lib = try Library.init(a);
+        defer lib.deinit();
+        var b = try Builder.init(a, &lib);
+        const vin = try b.addNode();
+        try b.addDevice(models.vsource, "", .{ .dc = 0.5, .waveform = 2, .sin_vo = 0.5, .sin_va = 1, .sin_freq = 1e3 }, .{}, .{ vin, analysis.GROUND });
+        var prev = vin;
+        var first = vin;
+        for (0..krylov_threshold + 10) |i| {
+            const mid = try b.addNode();
+            try b.addDevice(models.resistor, "", .{ .r = 100 }, .{}, .{ prev, mid });
+            try b.addDevice(models.capacitor, "", .{ .c = 1e-8 }, .{}, .{ mid, analysis.GROUND });
+            if (i == 0) first = mid;
+            prev = mid;
+        }
+        var prepared = try b.compile();
+        defer prepared.deinit();
+        var ckt = try analysis.Circuit.instantiate(&prepared, a);
+        defer ckt.deinit();
+        try testing.expect(ckt.n >= krylov_threshold);
+        const x_dc = try dcPoint(&ckt, a);
+        defer a.free(x_dc);
+
+        const ns: usize = 64;
+        const probes = [_]u32{ first, prev };
+        const wave = try a.alloc(f64, (ns + 1) * (1 + probes.len));
+        defer a.free(wave);
+        const res = try impl.solve(&ckt, x_dc, &probes, wave, .{ .period = 1e-3, .n_samples = ns }, a);
+        try testing.expect(res.converged);
+        try testing.expect(res.residual_norm < 1e-7);
+        try expectPeriodic(wave, ns, 1 + probes.len, 1e-6);
+    }
+
     test "pss: Options defaults are sane" {
         const opts = Options{ .period = 1e-9 };
         try testing.expect(opts.max_shooting_iter > 0);
