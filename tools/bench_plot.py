@@ -4,6 +4,8 @@
         [zig-out/benchmark-results.md] [tests/fixtures] [zig-out/bench-plots]
 
 Writes all.png (every fixture) and one <analysis>.png per analysis type.
+For `zig build bench-postlayout` output, pass zig-out/postlayout-results.md
+and zig-out/postlayout; groups are then family_model (chain_bsim4, ...).
 x is the device count after subcircuit expansion, y the median wall time;
 both axes log. The analysis comes from the deck's .expected.json, else
 its top-level directory.
@@ -63,7 +65,9 @@ def analysis(rel: str) -> str:
         a = json.loads(exp.read_text())["analysis"]
         return "+".join(a) if isinstance(a, list) else a
     except (OSError, KeyError, ValueError):
-        return rel.split("/")[0]
+        # Corpus decks: their directory. Post-layout decks (fam_model_size.sp,
+        # no oracle): fam_model.
+        return rel.split("/")[0] if "/" in rel else rel.rsplit("_", 1)[0]
 
 
 header, rows = None, []
