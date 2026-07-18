@@ -98,7 +98,8 @@ pub const ParEval = struct {
 
     /// Splits the batches into `n_lanes_req` (at least 1) lanes of roughly
     /// equal `count * instanceWeight` work, cut at instance boundaries in
-    /// ascending order. Threads start lazily on the first `run`.
+    /// ascending order. Threads start lazily on the first `run`. `batches`
+    /// must outlive it; free it with `deinit`.
     pub fn init(
         gpa: std.mem.Allocator,
         io: std.Io,
@@ -362,12 +363,12 @@ pub const ParEval = struct {
             const go = e * self.nnz1;
             const ro = e * self.n1;
             if (mode != .charge and s0 < s1) {
-                moveSimd(own_planes.g_vals[s0..s1], self.g_slab[go + s0 .. go + s1]);
-                if (self.has_charge) moveSimd(own_planes.c_vals[s0..s1], self.c_slab[go + s0 .. go + s1]);
+                moveSimd(vec_width, own_planes.g_vals[s0..s1], self.g_slab[go + s0 .. go + s1]);
+                if (self.has_charge) moveSimd(vec_width, own_planes.c_vals[s0..s1], self.c_slab[go + s0 .. go + s1]);
             }
             if (r0 < r1) {
-                if (mode != .charge) moveSimd(own_planes.rhs[r0..r1], self.rhs_slab[ro + r0 .. ro + r1]);
-                if (self.has_charge) moveSimd(own_planes.q_vec[r0..r1], self.q_slab[ro + r0 .. ro + r1]);
+                if (mode != .charge) moveSimd(vec_width, own_planes.rhs[r0..r1], self.rhs_slab[ro + r0 .. ro + r1]);
+                if (self.has_charge) moveSimd(vec_width, own_planes.q_vec[r0..r1], self.q_slab[ro + r0 .. ro + r1]);
             }
         }
     }
@@ -380,7 +381,9 @@ pub const ParEval = struct {
 /// ponytail: one static factor, so the lane cuts (and the reduce order)
 /// stay deterministic; per-type costs if a model family shows imbalance.
 fn instanceWeight(b: Batch) u64 {
-    const stamps = @as(u64, b.n_u) * b.n_u;
+    // At least 1: the lane cut divides by it, and an instance with no
+    // unknowns still costs a call.
+    const stamps = @max(@as(u64, b.n_u) * b.n_u, 1);
     return if (b.has_const_jacobian) stamps else 16 * stamps;
 }
 
@@ -413,8 +416,10 @@ const park_yields: u32 = 64;
 const vec_width = std.simd.suggestVectorLength(f64) orelse 4;
 
 /// Adds `src` into `dst` elementwise, then zeroes `src`. Equal lengths.
-fn moveSimd(dst: []f64, src: []f64) void {
-    const W = vec_width;
+/// `W == 1` is the scalar oracle and the tail. One pass over `src`: stdpp's
+/// `writeInto` has one output, so it would need a second pass to clear it.
+fn moveSimd(comptime W: usize, dst: []f64, src: []f64) void {
+    std.debug.assert(dst.len == src.len);
     const Vv = @Vector(W, f64);
     var i: usize = 0;
     while (i + W <= dst.len) : (i += W) {
@@ -423,8 +428,58 @@ fn moveSimd(dst: []f64, src: []f64) void {
         dst[i..][0..W].* = d + s;
         src[i..][0..W].* = @splat(0);
     }
-    while (i < dst.len) : (i += 1) {
-        dst[i] += src[i];
-        src[i] = 0;
-    }
+    if (comptime W > 1) moveSimd(1, dst[i..], src[i..]);
+}
+
+test share {
+    // The shares tile [0, len) in lane order, and every interior cut is on
+    // an 8-cell boundary.
+    for (0..200) |len| for (1..13) |lanes| {
+        var prev: usize = 0;
+        for (0..lanes) |lane| {
+            const r = share(len, @intCast(lane), @intCast(lanes));
+            try std.testing.expectEqual(prev, r[0]);
+            try std.testing.expect(r[1] >= r[0]);
+            if (lane + 1 < lanes) try std.testing.expectEqual(@as(usize, 0), r[1] % 8);
+            prev = r[1];
+        }
+        try std.testing.expectEqual(len, prev);
+    };
+}
+
+test moveSimd {
+    // Exact at any width: one add per cell. Lengths cover every tail and
+    // offsets every misalignment.
+    var random = std.Random.DefaultPrng.init(0x6d6f7665);
+    const r = random.random();
+    var src0: [3 * vec_width + 4]f64 = undefined;
+    var dst0: [src0.len]f64 = undefined;
+    var src1: [src0.len]f64 = undefined;
+    var dst1: [src0.len]f64 = undefined;
+    for (0..4) |off| for (0..src0.len - off + 1) |len| {
+        for (&src0, &dst0) |*s, *d| {
+            s.* = r.float(f64) - 0.5;
+            d.* = r.float(f64) - 0.5;
+        }
+        src0[0] = std.math.inf(f64);
+        src1 = src0;
+        dst1 = dst0;
+        moveSimd(1, dst0[off..][0..len], src0[off..][0..len]);
+        moveSimd(vec_width, dst1[off..][0..len], src1[off..][0..len]);
+        try std.testing.expectEqualSlices(f64, &dst0, &dst1);
+        try std.testing.expectEqualSlices(f64, &src0, &src1);
+        for (src1[off..][0..len]) |v| try std.testing.expectEqual(@as(f64, 0), v);
+    };
+}
+
+test instanceWeight {
+    // A zero-unknown batch still weighs 1, so the lane cut never divides by 0.
+    var b: Batch = undefined;
+    b.n_u = 0;
+    b.has_const_jacobian = true;
+    try std.testing.expectEqual(@as(u64, 1), instanceWeight(b));
+    b.n_u = 3;
+    try std.testing.expectEqual(@as(u64, 9), instanceWeight(b));
+    b.has_const_jacobian = false;
+    try std.testing.expectEqual(@as(u64, 144), instanceWeight(b));
 }
