@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "analysis": "noise",
+  "purpose": "LRM 4.6.4.3 noise_table: piecewise-linear PSD at tabulated and interior points",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Every element is a VA device with no thermal noise, so the only generator is the noise_table current source on branch (out,0) of Nt. Vin is a short in the small-signal problem, so the transfer impedance at out is Rs||Rl = 1000||1000 = 500 ohm exactly, flat in frequency (no reactance in the deck). Output PSD = 500^2 * S_I(f) V^2/Hz and onoise_spectrum = 500*sqrt(S_I(f)) V/sqrt(Hz). Table knots (1e3,1e-18) (5e3,9e-18) (9e3,4e-18); LRM 4.6.4.3 interpolates S_I linearly in f. Segment 1 slope = (9e-18-1e-18)/4000 = 2e-21 per Hz: S_I(2000)=1e-18+2e-21*1000=3e-18, S_I(3000)=5e-18, S_I(4000)=7e-18. Segment 2 slope = (4e-18-9e-18)/4000 = -1.25e-21 per Hz: S_I(6000)=9e-18-1.25e-18=7.75e-18, S_I(7000)=6.5e-18, S_I(8000)=5.25e-18. Then 500*sqrt of each."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Noise Spectral Density Curves",
+        "match": "exact",
+        "row_count": 9,
+        "axis": {
+          "name": "frequency",
+          "values": [
+            1000,
+            2000,
+            3000,
+            4000,
+            5000,
+            6000,
+            7000,
+            8000,
+            9000
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-09
+        },
+        "columns": {
+          "onoise_spectrum": {
+            "unit": "V/sqrt(Hz)",
+            "rtol": 1e-09,
+            "atol": 1e-18,
+            "values": [
+              5e-07,
+              8.660254037844387e-07,
+              1.118033988749895e-06,
+              1.3228756555322954e-06,
+              1.5e-06,
+              1.3919410907075056e-06,
+              1.2747548783981962e-06,
+              1.14564392373896e-06,
+              1e-06
+            ]
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "6660cb50b01683d9181810f983f1b21b2bc09ceda8a4b56d42bb4b45349dd50a"
+}

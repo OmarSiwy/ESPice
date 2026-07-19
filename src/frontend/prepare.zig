@@ -22,7 +22,7 @@ pub const Prepared = struct {
     /// Variant runs whose topology differs from `circuit` (an `.alter`
     /// that swaps elements, a point that collapses a node), each with its
     /// own circuit, deck and variant labels, in output order after this one.
-    runs: []const Prepared = &.{},
+    runs: []Prepared = &.{},
     /// The deck's HSPICE optimization, when it has one. It borrows the
     /// parse arena, which must then outlive the Prepared.
     tuner: ?*variants.Tuner = null,
@@ -30,7 +30,7 @@ pub const Prepared = struct {
     /// Releases this run's circuit and every nested run's. The deck slices
     /// stay with the session arena. Leaves `self` undefined.
     pub fn deinit(self: *Prepared) void {
-        for (self.runs) |*run| @constCast(run).deinit();
+        for (self.runs) |*run| run.deinit();
         self.circuit.deinit();
         self.* = undefined;
     }

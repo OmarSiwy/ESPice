@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "analysis": "noise",
+  "purpose": "LRM 4.6.4.4 noise_table_log: log-log interpolation, not linear, between knots",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Same 500 ohm flat transfer impedance as the linear decks. Table (1e3,1e-18) (1e6,1e-24). LRM 4.6.4.4: P = pow(10, log(p1) + (log(p2)-log(p1))*(log(f)-log(f1))/(log(f2)-log(f1))). Here log10(p2/p1) = -6 over log10(f2/f1) = 3, so the exponent is -2 and the closed form is S_I(f) = 1e-18*(f/1000)^-2. f=1000 is the first tabulated row: S_I = 1.0e-18 exactly (the formula degenerates to p1), onoise = 500*1e-9 = 5.0e-07. f=2000: S_I = 1e-18/4 = 2.5e-19, onoise = 500*sqrt(2.5e-19) = 2.5e-07. f=3000: S_I = 1e-18/9 = 1.1111111111111111e-19, onoise = 500*(1e-9/3) = 1.6666666666666667e-07. DISCRIMINATION: applying 4.6.4.3's linear rule to these same knots would give S_I(2000) = 1e-18 + (1e-24-1e-18)*1000/999000 = 9.98999e-19 and onoise = 4.9975e-07, a factor of 2 off, so this fixture separates the two clauses rather than merely exercising a lookup."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Noise Spectral Density Curves",
+        "match": "exact",
+        "row_count": 3,
+        "axis": {
+          "name": "frequency",
+          "values": [
+            1000,
+            2000,
+            3000
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-09
+        },
+        "columns": {
+          "onoise_spectrum": {
+            "unit": "V/sqrt(Hz)",
+            "rtol": 1e-09,
+            "atol": 1e-18,
+            "values": [
+              5e-07,
+              2.5e-07,
+              1.6666666666666668e-07
+            ]
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "f48af30c75d12235c89c4517f8f2d0466b155075bd3b78833762e61bc80da387"
+}

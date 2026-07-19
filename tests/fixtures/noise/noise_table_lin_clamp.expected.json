@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "analysis": "noise",
+  "purpose": "LRM 4.6.4.3 noise_table: outside the tabulated range the endpoint power is held",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Same 500 ohm flat transfer impedance as a06_ntab_lin_interior (Rs||Rl = 1000||1000, both noiseless VA devices). LRM 4.6.4.3: 'For frequencies lower than the lowest frequency in the value set, noise_table() returns the power specified for the lowest frequency, and for frequencies higher than the highest frequency, noise_table() returns the power specified for the highest frequency.' f=10 Hz < 1000 Hz so S_I = 1.0e-18 (the 1 kHz row), giving 500*sqrt(1e-18) = 5.0e-07 V/sqrt(Hz). f=90000 Hz > 9000 Hz so S_I = 4.0e-18 (the 9 kHz row), giving 500*sqrt(4e-18) = 1.0e-06 V/sqrt(Hz). The two clamps land on DIFFERENT values, so holding the wrong endpoint (or extrapolating the last slope, which at 90 kHz would go negative and is not a power at all) fails."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Noise Spectral Density Curves",
+        "match": "exact",
+        "row_count": 2,
+        "axis": {
+          "name": "frequency",
+          "values": [
+            10,
+            90000
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-09
+        },
+        "columns": {
+          "onoise_spectrum": {
+            "unit": "V/sqrt(Hz)",
+            "rtol": 1e-09,
+            "atol": 1e-18,
+            "values": [
+              5e-07,
+              1e-06
+            ]
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "7a2aa1195fd98bae4397f16d946196978f4ddbf77bb39d821f75de6fd5e9050a"
+}

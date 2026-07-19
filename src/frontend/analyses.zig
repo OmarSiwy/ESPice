@@ -472,7 +472,7 @@ fn foldOptions(config: []const netlist.Config, dialect: netlist.Dialect, line: *
     return o;
 }
 
-/// Copies the deck tolerances, temperature and integration method into `job`.
+/// Copies the deck tolerances and integration method into `job`.
 /// A `.tran` keeps a `dt_max` it already has; otherwise it takes DELMAX, then
 /// ngspice's min(tstep, tstop / 50).
 pub fn applyDeckOptions(job: *Job, o: DeckOptions) void {
@@ -482,7 +482,6 @@ pub fn applyDeckOptions(job: *Job, o: DeckOptions) void {
             if (comptime @hasField(@TypeOf(opts.*), "dc_options")) opts.dc_options.tol = o.tol;
         },
     }
-    if (job.* == .temp) job.temp.t_nom = o.temp_c orelse 27;
     if (job.* == .tran) {
         const t = &job.tran;
         if (o.method) |m| t.method = m;

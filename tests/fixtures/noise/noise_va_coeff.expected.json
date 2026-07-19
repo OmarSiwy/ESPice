@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "analysis": "noise",
+  "purpose": "LRM 4.6.4.6: the per-use factor of a noise contribution scales the PSD by its square",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Only noise: 2*white_noise(1e-18) on branch (out,0) of Nt, PSD 2^2*1e-18 = 4e-18 A^2/Hz. Vin is an AC short, so Z(out) = 1k||1k = 500 ohm, flat. onoise = 500*sqrt(4e-18) = 1e-6 V/sqrt(Hz). Ignoring the coefficient gives 5e-7."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Noise Spectral Density Curves",
+        "match": "exact",
+        "row_count": 2,
+        "axis": {
+          "name": "frequency",
+          "values": [
+            1000,
+            2000
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-09
+        },
+        "columns": {
+          "onoise_spectrum": {
+            "unit": "V/sqrt(Hz)",
+            "rtol": 1e-09,
+            "atol": 1e-18,
+            "values": [
+              1e-06,
+              1e-06
+            ]
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "7ad55242b3c738a603c5beed30594c9fba339daa678b5f5888d5317357bc6ea3"
+}

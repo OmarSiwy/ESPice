@@ -1,0 +1,17 @@
+// Two 1 kOhm conductances to ground driven by ONE noise source, with opposite
+// signs (LRM 4.6.4.6): both rows share a `source` id, coeff +1 and -1, so a
+// host must sum their transfers as phasors before squaring.
+`include "disciplines.vams"
+module corr_res(a, b);
+    inout a, b;
+    electrical a, b;
+
+    parameter real R = 1000.0 from (0:inf);
+    real nz;
+
+    analog begin
+        nz = white_noise(1.0e-18, "c");
+        I(a) <+ V(a) / R + nz;
+        I(b) <+ V(b) / R - nz;
+    end
+endmodule

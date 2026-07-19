@@ -1,0 +1,14 @@
+// LRM 4.6.4.3 noise_table: S_I linear in f between (1e3, 1e-18), (5e3, 9e-18)
+// and (9e3, 4e-18) A^2/Hz, held at the end powers outside. The knots are not
+// monotone, so a wrong slope sign or a clamp to the maximum shows.
+`include "disciplines.vams"
+module ntab_lin(p, n);
+    inout p, n;
+    electrical p, n;
+
+    parameter real R = 1000.0 from (0:inf);
+
+    analog begin
+        I(p, n) <+ V(p, n) / R + noise_table('{1000.0, 1.0e-18, 5000.0, 9.0e-18, 9000.0, 4.0e-18}, "tbl_lin");
+    end
+endmodule

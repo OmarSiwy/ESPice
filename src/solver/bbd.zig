@@ -14,7 +14,7 @@
 //! sits outside every block and joins the border.
 
 const std = @import("std");
-const root = @import("core").numerics;
+const num = @import("core").numerics;
 const dense_lu = @import("dense_lu.zig");
 
 const Allocator = std.mem.Allocator;
@@ -72,7 +72,7 @@ pub const Bbd = struct {
         n: u32,
         col_ptr: []const u32,
         row_idx: []const u32,
-        info: root.BbdInfo,
+        info: num.BbdInfo,
         limits: Limits,
     ) InitError!Self {
         const nb: u32 = @intCast(info.blocks.len);
@@ -268,7 +268,7 @@ pub const Bbd = struct {
     /// order, so the result does not depend on the schedule. Fails when a
     /// block or S is singular; the arena is then unusable until the next
     /// successful factor.
-    pub fn factorWithExecution(self: *Self, vals: []const f64, execution: root.Execution) error{SingularMatrix}!void {
+    pub fn factorWithExecution(self: *Self, vals: []const f64, execution: num.Execution) error{SingularMatrix}!void {
         simdZero(self.arena);
         for (vals, self.dst) |v, d| self.arena[d] += v;
 
@@ -312,7 +312,7 @@ pub const Bbd = struct {
         for (start..end) |bi| try self.factorBlock(bi);
     }
 
-    fn taskCount(self: *const Self, execution: root.Execution) usize {
+    fn taskCount(self: *const Self, execution: num.Execution) usize {
         if (execution.io == null or execution.threads < 2) return 1;
         var work: u64 = 0;
         for (self.blk_s, self.blk_m) |s, m| work += @as(u64, s) * s * (s + 3 * @as(u64, m));
@@ -393,7 +393,7 @@ pub const Bbd = struct {
             for (lo, 0..) |g, j| {
                 const xgj = self.bg[g];
                 if (xgj == 0) continue;
-                root.axpy(xi, -xgj, coupling[j * s ..][0..s]);
+                num.axpy(xi, -xgj, coupling[j * s ..][0..s]);
             }
             if (transpose) {
                 const a = self.arena[self.blk_a_off[bi]..][0 .. s * s];

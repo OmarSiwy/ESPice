@@ -1,0 +1,14 @@
+// A 1 kOhm conductance with no noise generator, so every bit of output noise
+// in these decks comes from the tabulated source (no kB, no T).
+// Ported from VerA tests/fixtures/ch04_expressions/a06_noisetables_*.
+`include "disciplines.vams"
+module noiseless_res(p, n);
+    inout p, n;
+    electrical p, n;
+
+    parameter real R = 1000.0 from (0:inf);
+
+    analog begin
+        I(p, n) <+ V(p, n) / R;
+    end
+endmodule

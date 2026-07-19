@@ -1,0 +1,14 @@
+// A one-terminal 1 kOhm conductance to ground carrying white_noise(4e-18).
+// A to-ground generator is exported as row == col (contract NoiseGen), so a
+// host that reads col as a second node sees zero transfer.
+`include "disciplines.vams"
+module ground_res(p);
+    inout p;
+    electrical p;
+
+    parameter real R = 1000.0 from (0:inf);
+
+    analog begin
+        I(p) <+ V(p) / R + white_noise(4.0e-18, "w");
+    end
+endmodule

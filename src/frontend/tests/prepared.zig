@@ -110,7 +110,6 @@ test "deck temperature and tolerances reach statistical and noise jobs" {
     const options: analyses.DeckOptions = .{ .temp_c = 85, .tol = .{ .reltol = 1e-5 } };
     var temp_job: Job = .{ .temp = .{} };
     analyses.applyDeckOptions(&temp_job, options);
-    try std.testing.expectEqual(@as(f64, 85), temp_job.temp.t_nom);
     try std.testing.expectEqual(options.tol.reltol, temp_job.temp.dc_options.tol.reltol);
 }
 

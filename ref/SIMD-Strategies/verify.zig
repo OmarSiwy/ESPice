@@ -428,6 +428,24 @@ pub fn main() void {
     // at w = 1..8, is in src/analysis/tests/eval.zig — same standalone-import
     // reason as LaneLu above.
 
+    // More differential cases that import src/, so they live with their
+    // kernels (same standalone-import reason as LaneLu above):
+    // - core: eigen's Hessenberg reduction and bulge reflectors against their
+    //   w = 1 oracles, bit for bit (src/core/eigen.zig); the numerics vector
+    //   helpers against the stdpp `.byRef()` pull path at every length and
+    //   offset (src/core/numerics.zig).
+    // - solver: FreqSolver.solveBatch at every length through 3W + 1, with
+    //   lanes LaneLu's pivot tape cannot replay (FreqSolveTests in
+    //   src/solver/tests.zig); `simdEql` in src/solver/direct.zig and FdQuot
+    //   and mul in src/solver/converger.zig against `.byRef()`.
+    // - device: Dual partials against a central difference, the padded sparse
+    //   Dual layout against the dense one, and `segmentSum` against the plain
+    //   loop (src/device/tests/eval.zig).
+    // - stdpp pipelines elsewhere, each against `.byRef()` with a
+    //   `lane_count` assert: tran `predict` (src/analysis/tests/transient.zig),
+    //   acmatch `diffQuot` (src/analysis/ac/acmatch.zig) and the builder's
+    //   port-number `max` (src/frontend/tests/builder.zig).
+
     // Mirror tran.zig integrator.rebaseCurrent; the same w=1 kernel is the
     // oracle. The real kernel has the same case in src/analysis/tests/transient.zig.
     {

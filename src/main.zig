@@ -173,3 +173,36 @@ fn usageFail() u8 {
     std.debug.print("Usage: espice [OPTION]... FILE...\nTry 'espice --help' for options.\n", .{});
     return 2;
 }
+
+test "optionValue: separate, joined, missing and empty values" {
+    const t = std.testing;
+    var args = std.mem.splitScalar(u8, "out.raw", ' ');
+    try t.expectEqualStrings("out.raw", optionValue("-r", "-r", "--rawfile", &args).?.?);
+    try t.expect(args.next() == null); // the value was consumed
+    // Value missing at the end of argv.
+    try t.expect(optionValue("--rawfile", "-r", "--rawfile", &args).? == null);
+    var empty = std.mem.splitScalar(u8, "", ' ');
+    try t.expect(optionValue("-r", "-r", "--rawfile", &empty).? == null);
+    try t.expectEqualStrings("a=b", optionValue("--rawfile=a=b", "-r", "--rawfile", &args).?.?);
+    try t.expect(optionValue("--rawfile=", "-r", "--rawfile", &args).? == null);
+    // Not this flag: a longer flag sharing the prefix, a bare value, and an
+    // empty short name that must not match an empty argument.
+    try t.expect(optionValue("--rawfilex", "-r", "--rawfile", &args) == null);
+    try t.expect(optionValue("out.raw", "-r", "--rawfile", &args) == null);
+    try t.expect(optionValue("", "", "--format", &args) == null);
+}
+
+test "envThreads: positive integers only, 1 otherwise" {
+    const libc = struct {
+        extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+        extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+    };
+    const name = "ESPICE_TEST_THREADS";
+    defer _ = libc.unsetenv(name);
+    _ = libc.unsetenv(name);
+    try std.testing.expectEqual(@as(u32, 1), envThreads(name));
+    for ([_]struct { [*:0]const u8, u32 }{ .{ "8", 8 }, .{ "0", 1 }, .{ "-3", 1 }, .{ "abc", 1 }, .{ "", 1 } }) |case| {
+        try std.testing.expectEqual(@as(c_int, 0), libc.setenv(name, case[0], 1));
+        try std.testing.expectEqual(case[1], envThreads(name));
+    }
+}

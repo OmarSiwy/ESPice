@@ -1,0 +1,14 @@
+// LRM 4.6.4.4 noise_table_log: a straight line on a log-log plot through
+// (1e3, 1e-18) and (1e6, 1e-24) A^2/Hz, so S_I(f) = 1e-18 * (f/1000)^-2
+// inside the table and the end powers outside.
+`include "disciplines.vams"
+module ntab_log(p, n);
+    inout p, n;
+    electrical p, n;
+
+    parameter real R = 1000.0 from (0:inf);
+
+    analog begin
+        I(p, n) <+ V(p, n) / R + noise_table_log('{1.0e3, 1.0e-18, 1.0e6, 1.0e-24}, "tbl_log");
+    end
+endmodule

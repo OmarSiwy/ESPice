@@ -131,6 +131,24 @@ buffers, ports, S-parameter blocks and lossy lines. Output-only cards
 and friends) are accepted and ignored, since every vector is written. An
 analysis card that fails to build logs its line before the error.
 
+## Divergences from ngspice
+
+These are deliberate. None of them changes speed, so there is nothing to
+measure; the test named beside each one pins it.
+
+| Input | ngspice | ESPice | Test |
+|---|---|---|---|
+| `0e400` (zero mantissa, exponent past f64) | 0 × inf = NaN | 0, at any exponent; `1e400` is still inf | `lines.zig` "number literals read as ngspice's INPevaluate" |
+| URC model with `K = 1` | lump sizing divides 0 by 0, so the ladder is NaN resistors | `InvalidParameterValue` | `tests/builder.zig` "cards the builder refuses instead of misbinding" |
+| URC model with `K <= 0` | no meaningful ladder | `InvalidParameterValue` | same branch (`!(k > 0) or k == 1` in `builder.zig addUrc`) |
+| URC card without `l=` | length 0, so 0-ohm lumps | unit length | none |
+| a `.temp` list and a single `.temp` in one deck | no list form (the list is HSPICE's) | the last card wins, list or single value | `analyses.zig` "deckOptions: a NaN RUNLVL fails, and the last .temp card wins" |
+
+For the URC cases, a deck that relied on ngspice's behaviour has to give a
+valid `K` (the default is 1.5), and `l=0` to get ngspice's zero length. A
+deck that mixed `.temp` forms and meant the earlier list has to drop the
+later single card.
+
 ## Pole-zero sources
 
 `E|G name out+ out- POLE in+ in- a az1,fz1 ... / b ap1,fp1 ...` [SA

@@ -430,6 +430,8 @@ fn packAdvance(h: *Handle, event: api.Advance) Advance {
 fn status(err: anyerror) u32 {
     const code: Code = switch (err) {
         error.InvalidArgument, error.InvalidConcurrency, error.InvalidComponent, error.QueryNotReady, error.DuplicateQuery => .invalid_argument,
+        // Malformed caller input (analysis cards, query options, directive edits), not a numerical failure.
+        error.InvalidAnalysisArguments, error.InvalidQueryOptions, error.UnsupportedDirectiveMutation => .invalid_argument,
         error.BufferTooSmall => .buffer_too_small,
         error.OutOfMemory => .out_of_memory,
         error.InvalidQuery => .invalid_query,

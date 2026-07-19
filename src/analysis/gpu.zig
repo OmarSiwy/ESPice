@@ -28,7 +28,7 @@ else
 
 /// What `--backend` can ask for. `auto` may decline for any reason and fall
 /// back to the CPU; `cuda`/`hip` are explicit and either run there or fail
-/// saying why (see `Decline`).
+/// saying why (see `fallsBack`).
 pub const Request = enum { cpu, auto, cuda, hip };
 
 /// Why `init` refused, in the three kinds a caller acts on differently.
@@ -36,11 +36,11 @@ pub const Decline = enum {
     /// A performance estimate (the CPU is faster). An explicit request
     /// overrides it, so only `auto` sees one.
     policy,
-    /// Nothing in this circuit has a kernel image. A reported CPU fallback,
-    /// whatever the flags.
+    /// Nothing in this circuit has a kernel image. A reported CPU fallback
+    /// under `auto`; `cuda`/`hip` fail.
     capability,
     /// The driver, hardware or build said no (including a build with no
-    /// images). An explicit request fails naming what was detected.
+    /// images). An explicit request fails naming the detected hardware.
     machine,
 };
 
@@ -54,9 +54,28 @@ pub fn declineKind(e: anyerror) Decline {
     };
 }
 
-/// Returns "cuda", "hip" or "none": the backend this binary carries.
-pub fn detectedName() []const u8 {
-    return if (backend) |be| @tagName(be) else "none";
+/// Whether a query runs on the CPU after `GpuContext.init` failed with
+/// `e`. `cuda` and `hip` never fall back. `auto` does unless `explicit` (the
+/// user named the GPU) and the machine said no.
+pub fn fallsBack(req: Request, explicit: bool, e: anyerror) bool {
+    return switch (req) {
+        .cpu => true,
+        .auto => !explicit or declineKind(e) != .machine,
+        .cuda, .hip => false,
+    };
+}
+
+/// Returns "cuda", "hip" or "none": the first driver that brings up a device
+/// on this machine, CUDA first, whatever this binary carries. Costs a driver
+/// init and retains device 0's primary context, so call it when reporting a
+/// failure.
+pub fn detectedHardware() []const u8 {
+    var compute = gompute.runtime.dynamic.Compute.init(null) catch return "none";
+    defer compute.deinit();
+    return switch (compute.backend) {
+        .cpu => "none",
+        .cuda, .hip => |b| @tagName(b),
+    };
 }
 
 /// False for an explicit `cuda`/`hip` this binary cannot serve, so the
@@ -317,8 +336,14 @@ const BatchGpu = struct {
     /// Host `seedJunctions` wrote the host lim plane; upload it before the
     /// next launch that reads it.
     lim_dirty: bool = false,
+    /// The Instance bytes host and device last agreed on, kept only when a
+    /// kernel writes the resident Instance (the status latch, the limit/state
+    /// pass or the accepted-step latch); empty otherwise. `syncInstances`
+    /// diffs the host against it to tell parameter writes from latches.
+    base: []u8,
 
-    fn deinit(self: *BatchGpu) void {
+    fn deinit(self: *BatchGpu, gpa: std.mem.Allocator) void {
+        gpa.free(self.base);
         self.d_models.free();
         self.d_model_of.free();
         self.d_instances.free();
@@ -560,11 +585,11 @@ pub const GpuContext = struct {
         var resident_charge = false;
         var tape_ok = true;
         var tape_len: usize = 0;
-        errdefer for (batches[0..n_up]) |*bg| bg.deinit();
+        errdefer for (batches[0..n_up]) |*bg| bg.deinit(gpa);
 
         for (ckt.batches) |b| {
             const bg = &batches[n_up];
-            const up = try loadBatch(bg, b, explicit, report);
+            const up = try loadBatch(gpa, bg, b, explicit, report);
             if (!up) {
                 cpu_batches[n_cpu] = b;
                 n_cpu += 1;
@@ -702,7 +727,7 @@ pub const GpuContext = struct {
     /// Loads batch `b`'s kernels and uploads its working set into `bg`.
     /// False when it stays on the host: no GPU payload, no image in this
     /// build, or (`auto`) an image the driver has not compiled yet.
-    fn loadBatch(bg: *BatchGpu, b: device_ir.Batch, explicit: bool, report: bool) !bool {
+    fn loadBatch(gpa: std.mem.Allocator, bg: *BatchGpu, b: device_ir.Batch, explicit: bool, report: bool) !bool {
         const get = b.hooks.gpu_payload orelse return false;
         const p = get(b.ctx);
         const image = imageOf(p.kernel) orelse {
@@ -764,7 +789,10 @@ pub const GpuContext = struct {
         errdefer d_lim.free();
         var d_states = try uploadBytes(&kernel, p.states);
         errdefer d_states.free();
-        const d_tape = try kernel.alloc(@max(tape.len * @sizeOf(f64), 1));
+        var d_tape = try kernel.alloc(@max(tape.len * @sizeOf(f64), 1));
+        errdefer d_tape.free();
+        const writes_instances = b.hooks.status != null or lim_kernel != null or ctl_kernel != null;
+        const base: []u8 = if (writes_instances) try gpa.dupe(u8, p.instances) else &.{};
 
         const block = evalBlock();
         bg.* = .{
@@ -792,6 +820,7 @@ pub const GpuContext = struct {
             .has_lim = p.lim_x.len > 0,
             .held = lim_kernel != null and b.hooks.apply_limits == null,
             .has_status = b.hooks.status != null,
+            .base = base,
         };
         return true;
     }
@@ -1107,7 +1136,7 @@ pub const GpuContext = struct {
         self.stream.deinit();
         for ([_]*Buffer{ &self.d_x[0], &self.d_x[1], &self.d_xold, &self.d_x2, &self.d_flags, &self.d_planes, &self.d_stage, &self.d_seg1, &self.d_seg2, &self.d_mid }) |b| b.free();
         self.reduce.deinit();
-        for (self.batches) |*bg| bg.deinit();
+        for (self.batches) |*bg| bg.deinit(self.gpa);
         if (self.chk.len > 0) self.gpa.free(self.chk);
         self.gpa.free(self.batches_owned);
         self.gpa.free(self.cpu_owned);
@@ -1574,11 +1603,6 @@ pub const GpuContext = struct {
     /// resident instance blobs and the host walk on the rest. The kernels OR
     /// each instance's verdict into `d_flags`, so `.query` costs one launch
     /// and a 4-byte sync.
-    ///
-    /// ponytail: a `repack` for a parameter write resets device pb/pq to the
-    /// host's stale copies. Harmless today (parameter writes happen only
-    /// before a transient or in static sweeps); a mid-transient write would
-    /// need `pullInstances` first.
     fn stateCtlOnGpu(self: *Self, op: device_ir.StateCtlOp) !bool {
         if (comptime backend == null) return false;
         const follow = self.follow;
@@ -1645,14 +1669,30 @@ pub const GpuContext = struct {
         }
     }
 
-    /// Downloads every resident batch's instances into the host batch.
-    fn pullInstances(self: *Self) !void {
+    /// Brings each resident batch's host and device Instance bytes to the
+    /// same value: a byte the host wrote since `BatchGpu.base` (a parameter
+    /// write, `recompute`) wins, and every other byte takes the device's (its
+    /// latches). A batch whose kernels never write instances downloads
+    /// nothing, because the host copy is current, and uploads only under
+    /// `push`.
+    fn syncInstances(self: *Self, push: bool) !void {
         if (comptime backend == null) return;
-        try self.sync();
+        var waited = false;
         for (self.batches) |*bg| {
             const p = bg.payload(bg.ctx);
-            if (p.instances.len != 0)
-                try bg.d_instances.download(@constCast(p.instances.ptr), p.instances.len);
+            if (p.instances.len == 0) continue;
+            const host: []u8 = @constCast(p.instances);
+            if (bg.base.len == 0) {
+                if (push) try bg.d_instances.upload(host.ptr, host.len);
+                continue;
+            }
+            if (!waited) try self.sync();
+            waited = true;
+            const dev = try self.gpa.alloc(u8, host.len);
+            defer self.gpa.free(dev);
+            try bg.d_instances.download(dev.ptr, dev.len);
+            if (mergeInstances(host, bg.base, dev)) try bg.d_instances.upload(host.ptr, host.len);
+            @memcpy(bg.base, host);
         }
     }
 
@@ -1674,7 +1714,7 @@ pub const GpuContext = struct {
         if (comptime backend == null) return;
         if (self.poisoned or self.warned_eval) return;
         for (self.batches) |bg| if (bg.has_status) {
-            self.pullInstances() catch {};
+            self.syncInstances(false) catch {};
             return;
         };
     }
@@ -1687,7 +1727,8 @@ pub const GpuContext = struct {
         if (comptime backend == null) return;
         if (self.poisoned or self.warned_eval or self.warned_state)
             return error.GpuStateUnavailable;
-        try self.pullInstances();
+        try self.sync();
+        try self.syncInstances(false);
         for (self.batches) |*batch| {
             const payload = batch.payload(batch.ctx);
             if (payload.states.len != 0)
@@ -1700,8 +1741,9 @@ pub const GpuContext = struct {
         }
     }
 
-    /// Re-uploads models and instances after a host parameter change. The
-    /// tapes never change.
+    /// Re-uploads models after a host parameter change and merges the
+    /// instances both ways (`syncInstances`), so the device keeps its
+    /// latches. The tapes never change.
     fn repack(self: *Self) !void {
         if (comptime backend == null) return;
         for (self.batches) |*bg| {
@@ -1715,8 +1757,8 @@ pub const GpuContext = struct {
                 if (rows.len > 0) try bg.d_model_of.upload(rows.ptr, rows.len);
                 bg.models_len = p.models.len;
             } else if (p.models.len > 0) try bg.d_models.upload(p.models.ptr, p.models.len);
-            if (p.instances.len > 0) try bg.d_instances.upload(p.instances.ptr, p.instances.len);
         }
+        try self.syncInstances(true);
         self.params_dirty = false;
     }
 
@@ -1746,6 +1788,44 @@ pub const GpuContext = struct {
     }
 };
 
+/// Three-way merges one batch's Instance bytes into `host`: a byte that
+/// differs from `base` was written by the host and stays; every other byte
+/// takes `device`'s. Returns whether the host wrote any byte, so the device
+/// needs the merged copy. All three are the same length.
+// ponytail: byte granularity, so a field both sides rewrote since `base`
+// would tear. The host writes parameters and derived values and the
+// device writes latches, so no field has two writers today.
+fn mergeInstances(host: []u8, base: []const u8, device: []const u8) bool {
+    std.debug.assert(host.len == base.len and base.len == device.len);
+    var wrote = false;
+    for (host, base, device) |*h, b, d| {
+        if (h.* != b) wrote = true else h.* = d;
+    }
+    return wrote;
+}
+
+test "mergeInstances keeps host parameter writes and device latches" {
+    // No padding: every byte compared is a field byte.
+    const Inst = extern struct { param: f64, status: u64, pq: f64 };
+    const base = [2]Inst{ .{ .param = 1, .status = 0, .pq = 0 }, .{ .param = 2, .status = 0, .pq = 0 } };
+    // The device latched a status and committed charge on both...
+    var device = base;
+    device[0].status = 3;
+    device[0].pq = 0.5;
+    device[1].pq = -0.25;
+    // ...while the host wrote instance 1's parameter after the last eval.
+    var host = base;
+    host[1].param = 7;
+    try std.testing.expect(mergeInstances(std.mem.asBytes(&host), std.mem.asBytes(&base), std.mem.asBytes(&device)));
+    try std.testing.expectEqual(Inst{ .param = 1, .status = 3, .pq = 0.5 }, host[0]);
+    try std.testing.expectEqual(Inst{ .param = 7, .status = 0, .pq = -0.25 }, host[1]);
+
+    // Nothing written on the host: a plain pull, and nothing to push.
+    var pulled = base;
+    try std.testing.expect(!mergeInstances(std.mem.asBytes(&pulled), std.mem.asBytes(&base), std.mem.asBytes(&device)));
+    try std.testing.expectEqualSlices(u8, std.mem.asBytes(&device), std.mem.asBytes(&pulled));
+}
+
 test declineKind {
     try std.testing.expectEqual(Decline.policy, declineKind(Error.NotEnoughGpuWork));
     try std.testing.expectEqual(Decline.capability, declineKind(Error.CircuitNotEligible));
@@ -1760,10 +1840,24 @@ test requestSupported {
     try std.testing.expect(requestSupported(.auto));
     try std.testing.expectEqual(backend == .cuda, requestSupported(.cuda));
     try std.testing.expectEqual(backend == .hip, requestSupported(.hip));
-    // The error an explicit request prints names what this binary carries.
-    const name = detectedName();
-    try std.testing.expect(std.mem.eql(u8, name, "none") == (backend == null));
-    if (backend) |be| try std.testing.expectEqualStrings(@tagName(be), name);
+}
+
+test fallsBack {
+    const errs = [_]anyerror{ Error.NotEnoughGpuWork, Error.CircuitNotEligible, Error.NoGpuArtifacts, error.InitFailed };
+    for (errs) |e| {
+        // An explicit backend never runs on the CPU, nothing eligible included.
+        try std.testing.expect(!fallsBack(.cuda, true, e));
+        try std.testing.expect(!fallsBack(.hip, true, e));
+        try std.testing.expect(fallsBack(.auto, false, e));
+        try std.testing.expectEqual(declineKind(e) != .machine, fallsBack(.auto, true, e));
+    }
+}
+
+test detectedHardware {
+    // Whatever the machine has, the answer is one of the three names and
+    // does not depend on the build's images.
+    const name = detectedHardware();
+    try std.testing.expect(std.mem.eql(u8, name, "none") or std.mem.eql(u8, name, "cuda") or std.mem.eql(u8, name, "hip"));
 }
 
 test parseBlock {

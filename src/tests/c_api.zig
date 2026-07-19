@@ -265,8 +265,8 @@ test "C calls on a live handle validate every pointer, scope and preview" {
     try t.expectEqual(invalid, c.espice_advance_ready(handle, &zero, 1, 65536, &event, 1, &n));
 
     try t.expectEqual(invalid, c.espice_append_directives(handle, .{ .data = null, .len = 3 }, null, 0, &n));
-    // No analysis card: a numerical-layer failure, named in the message.
-    try t.expectEqual(@as(u32, c.ESPICE_FAILED), c.espice_append_directives(handle, .{ .data = null, .len = 0 }, null, 0, &n));
+    // No analysis card: malformed input, named in the message.
+    try t.expectEqual(invalid, c.espice_append_directives(handle, .{ .data = null, .len = 0 }, null, 0, &n));
     try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_error_message(handle, &message, message.len, &n));
     try t.expectEqualStrings("InvalidAnalysisArguments", std.mem.sliceTo(&message, 0));
 
