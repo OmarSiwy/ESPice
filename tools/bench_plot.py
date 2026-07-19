@@ -82,10 +82,12 @@ if not rows:
     sys.exit(f"no rows in {report}")
 
 points = []  # (analysis, size, times)
+rows_used = []
 for rel, times in rows:
     deck = fixtures / rel
     if deck.exists():
         points.append((analysis(rel), devices(deck), times))
+        rows_used.append((rel, times))
 
 out.mkdir(parents=True, exist_ok=True)
 
@@ -106,7 +108,44 @@ def plot(name, pts):
     plt.close(fig)
 
 
+def speedup(pts):
+    """Reference time over espice time per deck: above 1, espice is faster."""
+    fig, ax = plt.subplots(figsize=(9, 5.5))
+    for i, sim in enumerate(header[1:], 1):
+        xy = sorted((s, t[i] / t[0]) for _, s, t in pts if t[0] and t[i])
+        if xy:
+            ax.plot(*zip(*xy), marker="o", ms=4, ls="none", alpha=0.6, label=f"{sim} / espice ({len(xy)})")
+    ax.axhline(1, color="k", lw=0.8)
+    ax.set(xscale="log", yscale="log", xlabel="devices (subcircuits expanded)",
+           ylabel="speedup (reference ms / espice ms)", title="espice speedup: above 1 is faster")
+    ax.grid(True, which="both", alpha=0.3)
+    if ax.lines:
+        ax.legend()
+    fig.tight_layout()
+    fig.savefig(out / "speedup.png", dpi=130)
+    plt.close(fig)
+
+
+def bars(pts):
+    """One group of bars per deck, smallest first; for short reports."""
+    rows = sorted(zip(pts, [r for r, _ in rows_used]), key=lambda pr: pr[0][1])
+    fig, ax = plt.subplots(figsize=(max(9, 0.6 * len(rows)), 5.5))
+    w = 0.8 / len(header)
+    for i, sim in enumerate(header):
+        ax.bar([k + i * w for k in range(len(rows))], [p[2][i] or 0 for p, _ in rows], w, label=sim)
+    ax.set_xticks([k + 0.4 - w / 2 for k in range(len(rows))], [r.removesuffix(".sp") for _, r in rows], rotation=60, ha="right")
+    ax.set(yscale="log", ylabel="median wall time, ms (missing bar: did not finish)", title="post-layout decks")
+    ax.grid(True, axis="y", which="both", alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(out / "bars.png", dpi=130)
+    plt.close(fig)
+
+
 plot("all", points)
+speedup(points)
+if len(points) <= 40:
+    bars(points)
 groups = defaultdict(list)
 for p in points:
     groups[p[0]].append(p)

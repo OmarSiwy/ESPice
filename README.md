@@ -147,61 +147,109 @@ declare, or a card with the wrong number of nodes, is an error.
 
 ## Accuracy and performance
 
-`tests/fixtures/` holds 616 netlists across 34 categories, each with a
-checked-in `.expected.json`. `zig build bench` runs every deck through ESPice,
-ngspice and VACASK, compares each shared output column by name, and reports
-speed and agreement together:
+`tests/fixtures/` holds 794 netlists in 43 categories, each with a checked-in
+`.expected.json`. `zig build test` scores every deck against its own oracle:
+787 pass, and the other 7 are known gaps marked in the deck (two VBIC model
+versions, and five noise decks waiting on a device-ABI change).
+
+`zig build bench` runs the same decks through ESPice, ngspice 45 and VACASK,
+times each one (median of 3 runs after a warm-up, process startup included),
+and compares every shared output column by name. The charts below come from
+one such run on an Intel i9-14900HX, ESPice on the CPU backend, at commit
+`91ee4d06`. To reproduce them:
 
 ```sh
 nix develop .#benchmarking
-zig build bench -- --iters 3 --out results.md
+zig build bench -- --iters 3            # zig-out/benchmark-results.md
+zig build bench-postlayout -- --iters 3 # zig-out/postlayout-results.md
+python3 tools/bench_plot.py zig-out/benchmark-results.md tests/fixtures docs/bench/corpus
+python3 tools/bench_plot.py zig-out/postlayout-results.md zig-out/postlayout docs/bench/postlayout
 ```
 
-The numbers below are one such run against ngspice 45 and VACASK 2026. A second
-full run returned all 1,848 verdicts identical, wall times within a few percent.
+### Speed against circuit size
 
-| Compared with | agree | DIFFER | incomplete | could not run it |
+Each point is one deck. The x axis is its device count after subcircuit
+expansion.
+
+![Wall time against circuit size, all decks](docs/bench/corpus/all.png)
+
+![ESPice speedup over ngspice and VACASK](docs/bench/corpus/speedup.png)
+
+| Compared with | decks both ran | ESPice faster | median speedup |
+|---|---:|---:|---:|
+| ngspice 45 | 473 | 459 | 2.4x |
+| VACASK 2026 | 270 | 268 | 2.8x |
+
+Most decks finish in under 30 ms, so at the small end the speedup is mostly
+process startup (the fastest deck takes 2.4 ms in ESPice, 6.6 in ngspice and
+7.6 in VACASK). The large
+circuits are where the comparison means something. Milliseconds:
+
+| Deck | devices | ESPice | ngspice | VACASK |
 |---|---:|---:|---:|---:|
-| ngspice 45 | 379 | 26 | 29 | 182 |
-| VACASK 2026 | 232 | 17 | 0 | 367 |
+| `resistor_grid_100x100` | 20k | 68 | 3,223 | 219 |
+| `sweep_opamp_wl_5000` | 30k | 607 | 5,937 | 4,802 |
+| `rc_ladder_100k` | 200k | 2,678 | 9,333 | 17,269 |
+| `inverter_chain_4k` | 12k | 3,551 | 7,455 | 106,265 |
+| `parallel_inverters_2000` | 6k | 1,536 | 2,216 | 8,032 |
+| `vacask_graetz` | 9 | 3,434 | 7,904 | n/a |
+| `vacask_rc` | 3 | 1,139 | 4,093 | 3,682 |
+| `bench_ngspice_mosamp` | 34 | 6,242 | 4,882 | n/a |
 
-"Could not run it" is mostly decks the other simulator has no counterpart for:
-`.ic`, `.trannoise`, `u`/`o`/`t`/`z` device cards, and PWL sources, which this
-VACASK build aborts on.
+`bench_ngspice_mosamp` is one of the 14 decks where ngspice is faster. ESPice
+and ngspice agree on all of these except where the VACASK column differs from
+both (`rc_ladder_100k`, `inverter_chain_4k`, `parallel_inverters_2000`).
 
-On speed, ESPice beat ngspice on 320 of the 439 decks both finished, median
-ratio 0.66, and VACASK on 267 shared decks at 0.47. Read those narrowly: most
-fixtures finish in 10 to 30 ms, which is mostly process startup for all three.
-The large circuits are where it means something. Milliseconds, median of 3 runs:
+### Per analysis
 
-| Fixture | ESPice | ngspice | VACASK | agreement |
-|---|---:|---:|---:|---|
-| `resistor_grid_100x100` | 72.4 | 1784.8 | 120.6 | agree |
-| `sweep_opamp_wl_5000` | 1017.7 | 4009.9 | 2563.7 | agree |
-| `rc_ladder_100k` | 2899.1 | 5632.6 | 10039.3 | agree |
-| `vacask_graetz` | 5433.2 | 2780.0 | n/a | agree |
-| `vacask_rc` | 4190.7 | 1581.4 | 1286.7 | agree |
-| `inverter_chain_256` | 432.9 | 365.4 | 2966.7 | DIFFER |
-| `inverter_chain_4k` | 106312.8 | 6802.8 | 79323.3 | DIFFER |
-| `vacask_ring` | n/a | 169.9 | n/a | ESPice produced nothing |
+One chart per analysis type, same axes:
 
-Large sparse DC and sweep problems are the strong case: 24x on the resistor
-grid, 4x on the opamp sweep, 2x on the RC ladder. Long MOS transient chains are
-the weak one, and `inverter_chain_4k` is bad enough to be a bug rather than a
-tuning gap: 106 seconds against ngspice's 6.8, and it disagrees, so the timing
-is not even like-for-like. `vacask_ring` produces nothing at all.
+| | | |
+|---|---|---|
+| ![op](docs/bench/corpus/op.png) | ![dc](docs/bench/corpus/dc.png) | ![ac](docs/bench/corpus/ac.png) |
+| ![tran](docs/bench/corpus/tran.png) | ![noise](docs/bench/corpus/noise.png) | ![sp](docs/bench/corpus/sp.png) |
+| ![pss](docs/bench/corpus/pss.png) | ![hb](docs/bench/corpus/hb.png) | ![pz](docs/bench/corpus/pz.png) |
+
+The other 35, mixed-analysis decks included, are in
+[docs/bench/corpus/](docs/bench/corpus/). The periodic analyses (pss, pac,
+pnoise, hb, qpss) ran in neither ngspice nor VACASK here, so those charts show
+ESPice alone.
+
+### Post-layout circuits
+
+`zig build bench-postlayout` generates synthetic extracted netlists: standard
+cells as subcircuits, RC-segmented signal nets, coupling caps and a meshed
+power grid. There are four families (inverter chains, ring oscillators, random
+logic, a 6T SRAM array), each with BSIM4 and PSP103 transistors, from 1k to
+100k cells. ngspice 45 has no PSP103, so it runs only the BSIM4 decks. Each run
+has a 300 s limit; a missing bar means the simulator timed out or could not run
+the deck.
+
+![Post-layout decks](docs/bench/postlayout/bars.png)
+
+![Post-layout wall time against size](docs/bench/postlayout/all.png)
+
+| Compared with | decks both ran | ESPice faster | median speedup | agree / differ |
+|---|---:|---:|---:|---:|
+| ngspice 45 (BSIM4 only) | 6 | 6 | 3.2x | 6 / 0 |
+| VACASK 2026 | 14 | 14 | 1.9x | 6 / 8 |
+
+The 8 differences against VACASK are every PSP103 deck where both finished, and
+`chain_bsim4_100k`. They are open: for PSP103 there is no third simulator here
+to say which side is right. ESPice timed out on `logic_psp103_10k` and
+`sram_psp103_10k`; `logic_bsim4_10k` finished only in ESPice.
 
 ### What is not claimed
 
-That table is a differential comparison against two simulators, not a
-conformance score, and it covers only decks all three engines can express.
-Separately, `zig build test` scores every deck against its own checked-in
-oracle: 560 of 616 pass at the time of writing, and `issues.md` indexes the
-56 failures by cause. That count is a snapshot of work in progress, not a
-release number. A model appearing in a dispatch table does not establish
-complete SPICE conformance; `docs/` carries per-area status labels, and the
-measured before/after numbers for each optimization sit on the topical pages
-(for example [solver-perf-2026-09.md](docs/solvers/solver-perf-2026-09.md)).
+The bench is a differential comparison against two simulators, and it covers
+only decks all three can express. "Could not run it" is mostly decks the other
+simulator has no counterpart for: `.ic`, `.trannoise`, `u`/`o`/`t`/`z` device
+cards, HSPICE-only syntax, and PWL sources, which this VACASK build aborts on.
+The bench runner also starts every deck in the ngspice dialect, so 14 HSPICE
+decks that pass in `zig build test` (which passes `--tokenizer hspice`) show as
+failures there. A model in the dispatch table does not establish full SPICE
+conformance; `docs/` carries per-area status labels and the measured
+before/after numbers for each optimization.
 
 ## Project structure
 
@@ -217,7 +265,7 @@ measured before/after numbers for each optimization sit on the topical pages
 │   ├── c_api.zig     # The C ABI behind include/espice.h
 │   └── main.zig      # CLI
 ├── models/           # Verilog-A device sources, compiled at build time
-├── tests/            # 616 fixture decks, pending decks, the correctness harness, the bench runner
+├── tests/            # 794 fixture decks, pending decks, the correctness harness, the bench runner
 ├── docs/             # Design notes and measured evidence
 └── ref/              # SIMD strategy reference
 ```
