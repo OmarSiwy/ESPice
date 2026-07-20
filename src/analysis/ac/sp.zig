@@ -438,10 +438,16 @@ fn linColumns(ctx: *const root.RunCtx, fs: *FreqSolver, basis: *const Basis, ome
             var c11: f64 = 0;
             var c22: f64 = 0;
             var c12 = Complex.zero;
-            for (srcs) |src| {
-                const psd = noise.sourcePsd(src, f);
-                const y1 = nodeV(pt.x[0..nn], n, src.node_p).sub(nodeV(pt.x[0..nn], n, src.node_n));
-                const y2 = nodeV(pt.x[nn..], n, src.node_p).sub(nodeV(pt.x[nn..], n, src.node_n));
+            var lead: usize = 0;
+            while (lead < srcs.len) {
+                const end = noise.NoiseSource.groupEnd(srcs, lead);
+                defer lead = end;
+                // One correlated group: its rows' transfers add as phasors.
+                const psd = noise.sourcePsd(srcs[lead], f);
+                const h1 = noise.transfer(srcs[lead..end], pt.x[0..nn], n);
+                const h2 = noise.transfer(srcs[lead..end], pt.x[nn..], n);
+                const y1: Complex = .{ .re = h1[0], .im = h1[1] };
+                const y2: Complex = .{ .re = h2[0], .im = h2[1] };
                 c11 += psd * y1.magSq();
                 c22 += psd * y2.magSq();
                 c12 = c12.add(y2.mul(.{ .re = y1.re, .im = -y1.im }).scale(psd));

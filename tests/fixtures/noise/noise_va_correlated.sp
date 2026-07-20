@@ -1,5 +1,4 @@
 * LRM 4.6.4.6 one noise source on two branches, anti-correlated
-* KNOWN GAP: rows sharing a contract `source` id are summed as independent powers: abi.NoiseSource carries neither `source` nor a signed coeff (and the to-ground rows read zero transfer).
 * Expected results: noise_va_correlated.expected.json
 .hdl "va_noise.assets/noiseless_res.va"
 .hdl "va_noise.assets/corr_res.va"

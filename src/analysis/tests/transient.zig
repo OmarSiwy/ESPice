@@ -970,12 +970,16 @@ const TranNoiseTests = struct {
         try testing.checkAllAllocationFailures(gpa, initFree, .{@as([]const NoiseSource, &sources)});
     }
 
-    test "covariance: stampPair skips ground, transpose is an involution" {
+    test "covariance: stampVec stamps v j j^T, transpose is an involution" {
         const Cov = impl.test_access.Covariance;
         var m: [9]f64 = @splat(0);
-        Cov.stampPair(&m, 3, 1, 0, 2);
-        Cov.stampPair(&m, 3, 1, 2, 1);
+        Cov.stampVec(&m, 3, &.{1}, &.{1}, 2);
+        Cov.stampVec(&m, 3, &.{ 1, 2 }, &.{ 1, -1 }, 1);
         try testing.expectEqualSlices(f64, &.{ 0, 0, 0, 0, 3, -1, 0, -1, 1 }, &m);
+        // A correlated group of weight 2 on node 0 and -1 on node 2.
+        @memset(&m, 0);
+        Cov.stampVec(&m, 3, &.{ 0, 2 }, &.{ 2, -1 }, 1);
+        try testing.expectEqualSlices(f64, &.{ 4, 0, -2, 0, 0, 0, -2, 0, 1 }, &m);
         var a = [_]f64{ 1, 2, 3, 4, 5, 6, 7, 8, 9 };
         Cov.transpose(&a, 3);
         try testing.expectEqualSlices(f64, &.{ 1, 4, 7, 2, 5, 8, 3, 6, 9 }, &a);

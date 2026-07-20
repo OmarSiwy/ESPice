@@ -132,6 +132,61 @@ const Flicker = struct {
     }
 };
 
+/// Where each noise group injects: group g's current enters node `node[e]`
+/// with weight `weight[e]` (the row's signed `coeff`, negated on the n
+/// side) for e in `ptr[g]..ptr[g + 1]`, ground entries dropped. A group is
+/// one generator, every row sharing a `NoiseSource.group`, and `lead[g]`
+/// is its first row, whose shape prices it. Free with `deinit` and the
+/// `init` allocator.
+const Injection = struct {
+    ptr: []u32,
+    node: []u32,
+    weight: []f64,
+    lead: []NoiseSource,
+
+    fn init(gpa: std.mem.Allocator, srcs: []const NoiseSource) !Injection {
+        var groups: usize = 0;
+        var i: usize = 0;
+        while (i < srcs.len) : (groups += 1) i = NoiseSource.groupEnd(srcs, i);
+        const ptr = try gpa.alloc(u32, groups + 1 + 2 * srcs.len);
+        errdefer gpa.free(ptr);
+        const weight = try gpa.alloc(f64, 2 * srcs.len);
+        errdefer gpa.free(weight);
+        const lead = try gpa.alloc(NoiseSource, groups);
+        const inj: Injection = .{ .ptr = ptr[0 .. groups + 1], .node = ptr[groups + 1 ..], .weight = weight, .lead = lead };
+        var e: u32 = 0;
+        var g: usize = 0;
+        i = 0;
+        while (i < srcs.len) : (g += 1) {
+            const end = NoiseSource.groupEnd(srcs, i);
+            defer i = end;
+            inj.ptr[g] = e;
+            lead[g] = srcs[i];
+            for (srcs[i..end]) |src| for ([2]u32{ src.node_p, src.node_n }, [2]f64{ src.coeff, -src.coeff }) |node, w| {
+                if (node == root.GROUND) continue;
+                inj.node[e] = node;
+                inj.weight[e] = w;
+                e += 1;
+            };
+        }
+        inj.ptr[groups] = e;
+        return inj;
+    }
+
+    fn deinit(inj: Injection, gpa: std.mem.Allocator) void {
+        gpa.free(inj.ptr.ptr[0 .. inj.ptr.len + inj.node.len]);
+        gpa.free(inj.weight);
+        gpa.free(inj.lead);
+    }
+
+    /// Group g's entries: its nodes and their weights.
+    fn of(inj: Injection, g: usize) struct { []const u32, []const f64 } {
+        const lo = inj.ptr[g];
+        const hi = inj.ptr[g + 1];
+        return .{ inj.node[lo..hi], inj.weight[lo..hi] };
+    }
+};
+
 /// METHOD=SDE: the covariance of the noise part of x through the same
 /// backward-Euler steps the sampled run takes, exact for the linearized
 /// circuit. With A = G + C/h and P = C/h at the step's end point, the white
@@ -152,12 +207,11 @@ const Covariance = struct {
     piv: []u32,
     /// Pole-major `poles x n`: row p is E[x y_p].
     kxy: []f64,
-    /// Injection endpoints and white PSD of each source, `NoiseHook` layout.
-    inj_nodes: []const u32,
-    white: []const f64,
+    /// Where each group injects; the white PSD is its lead's.
+    inj: Injection,
     n: usize,
 
-    fn init(gpa: std.mem.Allocator, n: usize, poles: usize, inj_nodes: []const u32, white: []const f64) !Covariance {
+    fn init(gpa: std.mem.Allocator, n: usize, poles: usize, inj: Injection) !Covariance {
         const buf = try gpa.alloc(f64, 3 * n * n + poles * n);
         errdefer gpa.free(buf);
         @memset(buf, 0);
@@ -167,8 +221,7 @@ const Covariance = struct {
             .a = buf[2 * n * n ..][0 .. n * n],
             .kxy = buf[3 * n * n ..],
             .piv = try gpa.alloc(u32, n),
-            .inj_nodes = inj_nodes,
-            .white = white,
+            .inj = inj,
             .n = n,
         };
     }
@@ -186,15 +239,12 @@ const Covariance = struct {
         }
     }
 
-    /// Adds v (e_a - e_b)(e_a - e_b)^T to the dense matrix m; ground rows
-    /// carry no noise.
-    pub fn stampPair(m: []f64, n: usize, a: u32, b: u32, v: f64) void {
-        if (a != root.GROUND) m[a * n + a] += v;
-        if (b != root.GROUND) m[b * n + b] += v;
-        if (a != root.GROUND and b != root.GROUND) {
-            m[a * n + b] -= v;
-            m[b * n + a] -= v;
-        }
+    /// Adds v j j^T to the dense matrix m, j the sparse vector with
+    /// `weights` at `nodes` (ground already dropped).
+    pub fn stampVec(m: []f64, n: usize, nodes: []const u32, weights: []const f64, v: f64) void {
+        for (nodes, weights) |a, wa| for (nodes, weights) |b, wb| {
+            m[a * n + b] += v * wa * wb;
+        };
     }
 
     /// In-place transpose of the row-major n x n matrix m.
@@ -215,30 +265,25 @@ const Covariance = struct {
         transpose(c.a, n);
         @memset(c.m, 0);
         for (0..n) |i| addCx(ckt, alpha, c.a[i * n ..][0..n], c.m[i * n ..][0..n]);
-        for (c.white, 0..) |w, s| stampPair(c.m, n, c.inj_nodes[2 * s], c.inj_nodes[2 * s + 1], w * scale * 0.5 * alpha);
-        for (flicker.source, flicker.rate, flicker.variance, 0..) |s, rate, v, p| {
-            const node_p = c.inj_nodes[2 * s];
-            const node_n = c.inj_nodes[2 * s + 1];
+        for (c.inj.lead, 0..) |src, g| {
+            const nodes, const weights = c.inj.of(g);
+            stampVec(c.m, n, nodes, weights, src.white * scale * 0.5 * alpha);
+        }
+        for (flicker.source, flicker.rate, flicker.variance, 0..) |g, rate, v, p| {
+            const nodes, const weights = c.inj.of(g);
             // u = D P Kxy[p]: the cross term P Kxy D J^T is u j_p^T.
             const row = c.kxy[p * n ..][0..n];
             const u = c.a[0..n];
             @memset(u, 0);
             addCx(ckt, alpha * @exp(-rate * h), row, u);
-            for (0..n) |i| {
-                if (node_p != root.GROUND) {
-                    c.m[i * n + node_p] += u[i];
-                    c.m[node_p * n + i] += u[i];
-                }
-                if (node_n != root.GROUND) {
-                    c.m[i * n + node_n] -= u[i];
-                    c.m[node_n * n + i] -= u[i];
-                }
-            }
-            stampPair(c.m, n, node_p, node_n, v);
+            for (0..n) |i| for (nodes, weights) |node, w| {
+                c.m[i * n + node] += w * u[i];
+                c.m[node * n + i] += w * u[i];
+            };
+            stampVec(c.m, n, nodes, weights, v);
             // Kxy[p] <- u + v j_p, solved below.
             numerics.copySimd(row, u);
-            if (node_p != root.GROUND) row[node_p] += v;
-            if (node_n != root.GROUND) row[node_n] -= v;
+            for (nodes, weights) |node, w| row[node] += w * v;
         }
         ckt.denseG(c.a);
         for (0..n) |j| for (ckt.col_ptr[j]..ckt.col_ptr[j + 1]) |p| {
@@ -266,9 +311,8 @@ const NoiseHook = struct {
     q_prev: []const f64,
     a_vals: []f64,
     has_charge: bool,
-    /// Injection endpoints (p0, n0, p1, n1, ...) in source order: the only
-    /// 8 bytes of each 32-byte `NoiseSource` this loop reads.
-    inj_nodes: []const u32,
+    /// Where each group's current enters, `noise_currents` in group order.
+    inj: Injection,
     noise_currents: []const f64,
 
     /// Stamps the planes at `x`, then the BE companion and this step's
@@ -279,11 +323,9 @@ const NoiseHook = struct {
             const n: usize = ckt.n;
             integrator.companionAt(.backward_euler, true, ckt.rhs[0..n], ckt.q_vec[0..n], self.q_prev[0..n], &.{}, &.{}, .{ .ag0 = self.alpha, .ag2 = 0 });
         }
-        for (self.noise_currents, 0..) |i_n, s| {
-            const node_p = self.inj_nodes[2 * s];
-            const node_n = self.inj_nodes[2 * s + 1];
-            if (node_p != root.GROUND) ckt.rhs[node_p] += i_n;
-            if (node_n != root.GROUND) ckt.rhs[node_n] -= i_n;
+        for (self.noise_currents, 0..) |i_n, g| {
+            const nodes, const weights = self.inj.of(g);
+            for (nodes, weights) |node, w| ckt.rhs[node] += w * i_n;
         }
     }
 
@@ -325,27 +367,24 @@ pub fn simulate(
     const x_try = try allocator.alloc(f64, n);
     defer allocator.free(x_try);
 
-    const noise_currents = try allocator.alloc(f64, noise_sources.len);
+    // Split the source table for the run, one entry per correlated group:
+    // sampling streams sqrt(white), the dt-independent factor of sigma, and
+    // injection streams the weighted endpoints. Valid because
+    // collectNoiseSources ran once on x_op.
+    // ponytail: a table row's PSD (`NoiseSource.table`) is not sampled; it
+    // needs a shaping filter per table. Add one when a transient-noise deck
+    // carries a noise_table.
+    const inj = try Injection.init(allocator, noise_sources);
+    defer inj.deinit(allocator);
+    const groups = inj.lead.len;
+    const noise_currents = try allocator.alloc(f64, groups);
     defer allocator.free(noise_currents);
-
-    // Split the source table for the run: sampling streams sqrt(white), the
-    // dt-independent factor of sigma, and injection streams the endpoints.
-    // Valid because collectNoiseSources ran once on x_op.
-    const noise_prefix = try allocator.alloc(f64, noise_sources.len);
+    const noise_prefix = try allocator.alloc(f64, groups);
     defer allocator.free(noise_prefix);
-    const inj_nodes = try allocator.alloc(u32, 2 * noise_sources.len);
-    defer allocator.free(inj_nodes);
-    for (noise_sources, 0..) |src, s| {
-        noise_prefix[s] = @sqrt(src.white * options.scale);
-        inj_nodes[2 * s] = src.node_p;
-        inj_nodes[2 * s + 1] = src.node_n;
-    }
-    var flicker = try Flicker.init(allocator, noise_sources, options);
+    for (inj.lead, noise_prefix) |src, *pfx| pfx.* = @sqrt(src.white * options.scale);
+    var flicker = try Flicker.init(allocator, inj.lead, options);
     defer flicker.deinit(allocator);
-    const white = try allocator.alloc(f64, noise_sources.len);
-    defer allocator.free(white);
-    for (noise_sources, white) |src, *w| w.* = src.white;
-    var cov: ?Covariance = if (options.sde) try Covariance.init(allocator, n, flicker.source.len, inj_nodes, white) else null;
+    var cov: ?Covariance = if (options.sde) try Covariance.init(allocator, n, flicker.source.len, inj) else null;
     defer if (cov) |*c| c.deinit(allocator);
     @memset(noise_currents, 0);
 
@@ -390,7 +429,7 @@ pub fn simulate(
             .q_prev = q_prev,
             .a_vals = a_vals,
             .has_charge = has_charge,
-            .inj_nodes = inj_nodes,
+            .inj = inj,
             .noise_currents = noise_currents,
         };
 

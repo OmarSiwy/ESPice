@@ -1380,6 +1380,32 @@ fn hasAbsdelayState(comptime D: type) bool {
     return hasInstanceField(D, "__analog_op__absdelay__");
 }
 
+/// The order `collect_noise` emits D's generators in: `gen[j]` is the
+/// `noise_gens` index of output row j, and `lead[j]` the row that starts
+/// its group. Rows sharing a non-null `source` are contiguous and lead by
+/// the first; the rest keep declaration order.
+fn noiseOrder(comptime D: type) struct { gen: [D.noise_gens.len]usize, lead: [D.noise_gens.len]u32 } {
+    const gens = D.noise_gens;
+    const has_source = @hasField(@typeInfo(@TypeOf(gens)).array.child, "source");
+    var gen: [gens.len]usize = undefined;
+    var lead: [gens.len]u32 = undefined;
+    var placed: [gens.len]bool = @splat(false);
+    var j: u32 = 0;
+    for (gens, 0..) |g, k| {
+        if (placed[k]) continue;
+        const first = j;
+        const src: ?u16 = if (has_source) g.source else null;
+        for (gens[k..], k..) |h, m| {
+            if (m != k and (src == null or h.source != src)) continue;
+            placed[m] = true;
+            gen[j] = m;
+            lead[j] = first;
+            j += 1;
+        }
+    }
+    return .{ .gen = gen, .lead = lead };
+}
+
 /// D's §4.5.4 `idt` operator unknowns, as local indices. VerA spells the
 /// k-th one `idt$k`, escaped to `idtZ24k` in `D.U`.
 // ponytail: name matching, as above, until VerA's contract marks operator
@@ -1497,9 +1523,14 @@ pub fn DeviceBatch(comptime D: type) type {
 
         const Self = @This();
 
+        const noise_order = if (@hasDecl(D, "noise_gens")) noiseOrder(D) else {};
+
         const noise_names = if (@hasDecl(D, "noise_gens")) blk: {
             var names: [D.noise_gens.len][]const u8 = undefined;
-            for (D.noise_gens, &names) |gen, *name| name.* = if (@hasField(@TypeOf(gen), "name")) gen.name else "";
+            for (noise_order.gen, &names) |k, *name| {
+                const gen = D.noise_gens[k];
+                name.* = if (@hasField(@TypeOf(gen), "name")) gen.name else "";
+            }
             const frozen = names;
             break :blk frozen;
         } else {};
@@ -2018,24 +2049,29 @@ pub fn DeviceBatch(comptime D: type) type {
 
         fn collectNoiseLocal(ctx: *anyopaque, x: []const f64, gpa: std.mem.Allocator, list: *std.ArrayList(NoiseSource)) error{OutOfMemory}!void {
             const self: *Self = @ptrCast(@alignCast(ctx));
+            try list.ensureUnusedCapacity(gpa, self.count * D.noise_gens.len);
             for (0..self.count) |id| {
+                const base: u32 = @intCast(list.items.len);
                 const terms = D.noisePsd(Real, self.localX(x, id), self.model(id), &self.instances[id], self.sim);
-                inline for (D.noise_gens, 0..) |gen, k| {
-                    // Term k belongs to generator k (noise-contract.md §3).
-                    // `@abs` matches ngspice nevalsrc.c:106. Correlation is
-                    // not transported, so generators are independent here.
-                    // Zero-power generators stay: their ordinal identifies
-                    // them across PSS samples.
-                    // The density is coeff² times the shape (contract
-                    // PsdTerm.coeff); a (u, u) branch is u to ground.
+                // Rows go out in `noise_order`, so a correlated generator's
+                // rows are contiguous. Term k belongs to generator k
+                // (noise-contract.md §3). `@abs` matches ngspice
+                // nevalsrc.c:106. Zero-power generators stay: their ordinal
+                // identifies them across PSS samples. A (u, u) branch is u to
+                // ground.
+                inline for (noise_order.gen, noise_order.lead) |k, lead| {
+                    const gen = D.noise_gens[k];
                     const t = terms[k];
-                    const c2 = t.coeff * t.coeff;
-                    try list.append(gpa, .{
+                    const table = comptime if (@hasField(@TypeOf(gen), "table")) gen.table else null;
+                    list.appendAssumeCapacity(.{
                         .node_p = self.gath[id * n_u + gen.row],
                         .node_n = if (gen.row == gen.col) GROUND else self.gath[id * n_u + gen.col],
-                        .white = c2 * @abs(t.white),
-                        .flicker = c2 * @abs(t.flicker),
+                        .white = @abs(t.white),
+                        .flicker = @abs(t.flicker),
                         .ef = t.ef,
+                        .coeff = t.coeff,
+                        .group = base + lead,
+                        .table = if (table) |i| D.noise_tables[i] else .{ .interp = .linear, .points = &.{} },
                     });
                 }
             }

@@ -90,11 +90,24 @@ pub fn diffusion(ckt: *root.Circuit, x_hat: []const f64, y: []f64, f0: f64, n_sa
             for (srcs, d.ef) |src, *ef| ef.* = src.ef;
         }
         if (srcs.len != d.dc.len) return error.NoiseTopologyChanged;
-        for (srcs, d.dc) |src, *dc| {
-            const vp = if (src.node_p != root.GROUND) v[src.node_p] else 0;
-            const vn = if (src.node_n != root.GROUND) v[src.node_n] else 0;
-            d.white += (vp - vn) * (vp - vn) * src.white / 2;
-            dc.* += (vp - vn) * pnoise.signedSqrt(src.flicker);
+        var lead: usize = 0;
+        while (lead < srcs.len) {
+            const end = root.NoiseSource.groupEnd(srcs, lead);
+            defer lead = end;
+            // One correlated group: the PPV projections of its rows add
+            // before squaring, priced by the first row.
+            var proj: f64 = 0;
+            for (srcs[lead..end]) |src| {
+                const vp = if (src.node_p != root.GROUND) v[src.node_p] else 0;
+                const vn = if (src.node_n != root.GROUND) v[src.node_n] else 0;
+                proj += src.coeff * (vp - vn);
+            }
+            // ponytail: a table row adds nothing here; the diffusion has a
+            // white and a 1/f^ef part only. Fit the table to them if a
+            // table-noise oscillator needs it.
+            const src = srcs[lead];
+            d.white += proj * proj * src.white / 2;
+            d.dc[lead] += proj * pnoise.signedSqrt(src.flicker);
         }
     }
     const inv: f64 = 1 / @as(f64, @floatFromInt(n_samples));

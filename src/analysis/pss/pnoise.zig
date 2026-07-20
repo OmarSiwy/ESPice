@@ -127,8 +127,8 @@ pub fn orbitSweep(
         for (srcs_k, noise_sources, 0..) |src, original, s| {
             if (src.node_p != original.node_p or src.node_n != original.node_n)
                 return error.NoiseTopologyChanged;
-            amp[s * n_samples + k] = signedSqrt(src.white);
-            amp[terms + s * n_samples + k] = signedSqrt(src.flicker);
+            amp[s * n_samples + k] = whiteAmp(src);
+            amp[terms + s * n_samples + k] = src.coeff * signedSqrt(src.flicker);
             // ponytail: the flicker exponent is a model constant in every
             // device, so sample 0 stands for the period.
             if (k == 0) exponent[s] = src.ef;
@@ -161,22 +161,26 @@ pub fn orbitSweep(
     for (freqs, density, 0..) |f_out, *total, fi| {
         const h = transfer[fi * nn ..][0..nn];
         total.* = 0;
-        for (noise_sources, exponent, 0..) |src, ef, s| {
+        var lead: usize = 0;
+        while (lead < n_srcs) {
+            const end = NoiseSource.groupEnd(noise_sources, lead);
+            defer lead = end;
             for (0..n_sb) |j| {
-                // Input sideband j: sum_m H_m A_{m-j}, white and flicker.
+                // Input sideband j: sum_m H_m A_{m-j}, white and flicker,
+                // over every row of the correlated group.
                 var w: Complex = .zero;
                 var fl: Complex = .zero;
-                for (0..n_sb) |m| {
+                for (noise_sources[lead..end], lead..) |src, s| for (0..n_sb) |m| {
                     const bin = pac.mapHarmonicToFftBin(@as(i32, @intCast(m)) - @as(i32, @intCast(j)), n_samples) orelse continue;
                     const hp = if (src.node_p != root.GROUND) h[m * n + src.node_p] else Complex.zero;
                     const hn = if (src.node_n != root.GROUND) h[m * n + src.node_n] else Complex.zero;
                     const hm = Complex.sub(hp, hn);
                     w = Complex.add(w, Complex.mul(hm, white_hat[bin * n_srcs + s]));
                     fl = Complex.add(fl, Complex.mul(hm, flicker_hat[bin * n_srcs + s]));
-                }
+                };
                 const f_sb = f_out + (@as(f64, @floatFromInt(j)) - @as(f64, @floatFromInt(m_max))) * options.f_fundamental;
                 // A 1/f shape is evaluated at the unfolded sideband f_sb.
-                total.* += sourcePsd(w.magSq(), fl.magSq(), ef, f_sb);
+                total.* += sourcePsd(w.magSq() * whiteShape(noise_sources[lead], f_sb), fl.magSq(), exponent[lead], f_sb);
             }
         }
         if (fi > 0) integrated_noise += 0.5 * (density[fi - 1] + total.*) * (f_out - freqs[fi - 1]);
@@ -245,28 +249,43 @@ fn strobed(
         };
         try pac.sweep(true, ckt, lin, drive, 0, out_freqs, transfer, pac_opts, allocator);
         var total: f64 = 0;
-        for (noise_sources, exponent, 0..) |src, ef, s| {
+        var lead: usize = 0;
+        while (lead < n_srcs) {
+            const end = NoiseSource.groupEnd(noise_sources, lead);
+            defer lead = end;
             for (hats, 0..) |hat, part| {
                 var g: Complex = .zero;
                 for (0..n_sb) |p| {
                     const h = transfer[p * nn ..][0..nn];
                     var inner: Complex = .zero;
-                    for (0..n_sb) |m| {
+                    for (noise_sources[lead..end], lead..) |src, s| for (0..n_sb) |m| {
                         const i = @as(i32, @intCast(m + p)) - 2 * @as(i32, @intCast(m_max));
                         const bin = pac.mapHarmonicToFftBin(i, n_samples) orelse continue;
                         const hp = if (src.node_p != root.GROUND) h[m * n + src.node_p] else Complex.zero;
                         const hn = if (src.node_n != root.GROUND) h[m * n + src.node_n] else Complex.zero;
                         inner = Complex.add(inner, Complex.mul(Complex.sub(hp, hn), hat[bin * n_srcs + s]));
-                    }
+                    };
                     g = Complex.add(g, Complex.mul(phase[p], inner));
                 }
-                total += if (part == 0) g.magSq() else sourcePsd(0, g.magSq(), ef, f);
+                total += if (part == 0) g.magSq() * whiteShape(noise_sources[lead], f) else sourcePsd(0, g.magSq(), exponent[lead], f);
             }
         }
         density[fi] = total;
         if (fi > 0) integrated += 0.5 * (density[fi - 1] + total) * (f - freqs[fi - 1]);
     }
     return @sqrt(integrated);
+}
+
+/// One orbit sample's white amplitude: coeff·sqrt(white), or coeff alone for
+/// a table row, whose spectrum `whiteShape` supplies.
+pub inline fn whiteAmp(src: NoiseSource) f64 {
+    return src.coeff * if (src.table.points.len != 0) 1 else signedSqrt(src.white);
+}
+
+/// The spectrum the white amplitude multiplies at sideband `f`: the table
+/// at |f| for a table row, else 1.
+pub inline fn whiteShape(src: NoiseSource, f: f64) f64 {
+    return if (src.table.points.len != 0) src.tableAt(@abs(f)) else 1;
 }
 
 /// sign(d)*sqrt(|d|): a source amplitude whose square is the density d.

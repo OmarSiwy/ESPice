@@ -278,6 +278,63 @@ test "equal cards share one Model row until a parameter is collected" {
     try std.testing.expectEqual(@as(f64, 1000), shared.models[2].r);
 }
 
+test "collect_noise emits a correlated source's rows contiguously, with coeff, group and table" {
+    const D = struct {
+        const Gen = struct { row: u8, col: u8, kind: enum { thermal, shot, flicker, table }, source: ?u16 = null, table: ?u16 = null, name: []const u8 = "" };
+        pub const noise_tables = [_]contract.NoiseTable{.{ .interp = .linear, .points = &.{ .{ 1, 2 }, .{ 3, 4 } } }};
+        // Generators 0 and 2 are one source; 1 is independent; 3 is a table.
+        pub const noise_gens = [_]Gen{
+            .{ .row = 0, .col = 1, .kind = .thermal, .source = 5, .name = "a" },
+            .{ .row = 1, .col = 0, .kind = .shot, .name = "b" },
+            .{ .row = 1, .col = 1, .kind = .thermal, .source = 5, .name = "c" },
+            .{ .row = 0, .col = 0, .kind = .table, .table = 0, .name = "t" },
+        };
+        pub fn noisePsd(comptime _: type, _: [2]f64, _: *const Model, _: *const Instance, _: SimState) [4]PsdTerm {
+            return .{ .{ .white = 1, .coeff = 2 }, .{ .white = 3 }, .{ .white = 1, .coeff = -2 }, .{ .white = 0, .coeff = 0.5 } };
+        }
+        pub const U = enum(u8) { p, n };
+        pub const num_ports: usize = 2;
+        pub const Model = struct { r: f64 = 1000 };
+        pub const Instance = struct {};
+        pub fn eval(comptime S: type, xv: *const [2]S.V, m: *const Model, _: *const Instance, _: SimState) contract.Rows(@This(), S) {
+            const x = contract.probes(@This(), S, xv);
+            const current = x[0].sub(x[1]).scale(1 / m.r);
+            return contract.rows(@This(), S, .{ current, current.neg() });
+        }
+    };
+    const a = std.testing.allocator;
+    var proto: ProtoStore(D) = .{};
+    try proto.append(.{}, .{}, .{ 1, 2 });
+    try proto.append(.{}, .{}, .{ 2, 1 });
+    const batch = try ProtoStore(D).finalize(&proto, a, .{
+        .col_ptr = &.{ 0, 3, 6, 9 },
+        .row_idx = &.{ 0, 1, 2, 0, 1, 2, 0, 1, 2 },
+        .n = 3,
+        .trash_slot = 9,
+    }).unwrap();
+    defer batch.hooks.deinit(batch.ctx, a);
+    try std.testing.expectEqualDeep(&[_][]const u8{ "a", "c", "b", "t" }, batch.hooks.noise_names);
+    var noise: std.ArrayList(NoiseSource) = .empty;
+    defer noise.deinit(a);
+    try noise.append(a, .{ .node_p = 0, .node_n = 0 }); // a row from an earlier batch
+    try batch.hooks.collect_noise.?(batch.ctx, &.{ 0, 0, 0 }, a, &noise).unwrap();
+    const s = noise.items[1..];
+    try std.testing.expectEqual(@as(usize, 8), s.len);
+    for (0..2) |id| {
+        const r = s[4 * id ..][0..4];
+        const base: u32 = @intCast(1 + 4 * id);
+        try std.testing.expectEqualSlices(f64, &.{ 2, -2, 1, 0.5 }, &.{ r[0].coeff, r[1].coeff, r[2].coeff, r[3].coeff });
+        try std.testing.expectEqualSlices(u32, &.{ base, base, base + 2, base + 3 }, &.{ r[0].group, r[1].group, r[2].group, r[3].group });
+        // (u, u) is u to ground; the table row carries the device's knots.
+        try std.testing.expectEqual(@as(u32, 0), r[1].node_n);
+        try std.testing.expectEqual(@as(f64, 3), r[3].tableAt(2));
+        try std.testing.expectEqual(@as(f64, 0), r[0].tableAt(2));
+        try std.testing.expectEqual(base + 2, NoiseSource.groupEnd(noise.items, base));
+    }
+    try std.testing.expectEqual(@as(u32, 1), s[0].node_p);
+    try std.testing.expectEqual(@as(u32, 2), s[4].node_p);
+}
+
 test "prepared device instances share tapes and isolate parameters and accepted history" {
     const D = struct {
         pub const noise_gens = [_]NoiseGen{

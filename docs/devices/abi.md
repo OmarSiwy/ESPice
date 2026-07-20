@@ -11,7 +11,7 @@ sides compile the same ABI source.
 
 `layoutHash()` hashes the size, alignment and field offsets of every
 boundary type, the Zig version, backend and optimize mode, whether error
-return tracing is on, and `abi_version` (22). Each device object exports it
+return tracing is on, and `abi_version` (23). Each device object exports it
 as `arp_layout_hash`. The runtime loader (`src/device/loader.zig`) refuses a
 shared library whose hash differs (`error.LayoutMismatch`), and the hash keys
 the runtime build cache, so a bump rebuilds every cached device once.
