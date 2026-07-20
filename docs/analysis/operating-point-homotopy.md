@@ -188,6 +188,29 @@ closest rung is OPtran (rung 5 below): a real transient with full sources,
 which lets the device capacitances do the conditioning. A dedicated PTC rung
 would reuse `TranHook` with SER dt control.
 
+### Model-visible gmin and source scale
+
+The gmin and source rungs also write the Verilog-A `$simparam("gmin")` and
+`$simparam("sourceScaleFactor")` values (VerA's host-written `gmin__` and
+`source_scale__` model fields, through `Hooks.set_homotopy`). During a gmin
+rung a model reads the stepped gmin; during a source rung it reads the ramp
+`lambda`. Both go back to the deck's `.options gmin` and 1 when the rung ends,
+error paths included, so the final clean solve sees the deck values.
+
+This diverges from ngspice. ngspice's gmin stepping (`cktop.c`) ramps
+`CKTdiagGmin`, a diagonal shunt, and leaves `CKTgmin`, the value its devices
+read, at the deck setting throughout. Converged operating points are the same,
+because the last solve uses the deck gmin in both; only the stepping path
+differs, for the roughly eleven built-in models that read `$simparam("gmin")`
+(bsim3, bsim4va, psp103, hisimhv, the b3soi models, the tline models). The
+fallback, if a deck's stepping path needs ngspice's behaviour, is to drop the
+`gmin__` write in `op.zig`'s gmin rung and keep only the restore.
+Pinned by `tests/fixtures/hdl/veriloga_simparam_homotopy.sp` and the
+`set_homotopy` test in `src/device/tests/eval.zig`.
+
+A parameter whose default is `$simparam("gmin")` keeps its build-time value
+during stepping, because `derive` does not rerun.
+
 ## 2. Flow explanation
 
 Every analysis converges through `src/solver/converger.zig`; the strategies
