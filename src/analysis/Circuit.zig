@@ -953,6 +953,23 @@ pub const Circuit = struct {
         self.markGpuDirty();
     }
 
+    /// Publishes the stepping rungs' gmin (S) and source factor to the models
+    /// that read §9.15 `$simparam("gmin")` or `("sourceScaleFactor")`. The
+    /// caller restores the deck's gmin and 1 when stepping ends. A circuit
+    /// without such a model is untouched; otherwise the constant-Jacobian
+    /// baseline is dropped, so call `computeBaseline` before the next solve.
+    pub fn setHomotopy(self: *Circuit, gmin: f64, source_scale: f64) void {
+        var any = false;
+        for (self.batches) |b| if (b.hooks.set_homotopy) |f| {
+            f(b.ctx, gmin, source_scale);
+            any = true;
+        };
+        if (!any) return;
+        self.lin.valid = false;
+        self.has_baseline = false;
+        self.markGpuDirty();
+    }
+
     fn markGpuDirty(self: *Circuit) void {
         if (self.gpu_hook) |gh| gh.mark_dirty(gh.ctx);
     }

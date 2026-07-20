@@ -1,0 +1,9 @@
+// Conductance read from the homotopy knobs (VAMS §9.15 $simparam):
+// G = gmin*1e6 + sourceScaleFactor S. The operating point steps both and
+// must hand the converged solve the deck's gmin and a factor of 1.
+`include "disciplines.vams"
+module va_ghom(p, n);
+    inout p, n;
+    electrical p, n;
+    analog I(p, n) <+ V(p, n) * ($simparam("gmin") * 1e6 + $simparam("sourceScaleFactor"));
+endmodule

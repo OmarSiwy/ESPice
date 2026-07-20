@@ -77,6 +77,9 @@ pub const Builder = struct {
     abstol: f64 = 1e-12,
     /// `.options vntol`, V; copied like `reltol`.
     vntol: f64 = 1e-6,
+    /// `.options gmin`, S: the `$simparam("gmin")` a model reads outside the
+    /// operating point's gmin-stepping rung, which writes its own.
+    gmin: f64 = 1e-12,
 
     /// (device type, instance ordinal) to card name, for `.sens` columns: a
     /// `ParamRef` only knows its ordinal (`resistor#0`). Names borrow the
@@ -1692,13 +1695,15 @@ fn setPolarity(comptime D: type, model: *D.Model) !void {
 }
 
 /// VerA's reserved Model fields for §9.15 `$simparam`, each with the Builder
-/// field it is copied from: tnom (degC), reltol, abstol (A), vntol (V). See
+/// field it is copied from: tnom (degC), reltol, abstol (A), vntol (V), gmin
+/// (S). `source_scale__` keeps its default 1 until source stepping. See
 /// VerA's `Lower.simparamHostField`.
 const simparam_fields = .{
     .{ "nom_temp__", "nom_temp_c" },
     .{ "reltol__", "reltol" },
     .{ "abstol__", "abstol" },
     .{ "vntol__", "vntol" },
+    .{ "gmin__", "gmin" },
 };
 
 /// Runs §6.3.4/§3.4.5 `derive` through the device's own object: calling

@@ -221,6 +221,10 @@ pub const Hooks = struct {
     state_ctl: ?*const fn (*anyopaque, StateCtlOp) bool = null,
     /// Sets every instance's temperature, in Celsius.
     set_temp: ?*const fn (*anyopaque, f32) void = null,
+    /// Sets §9.15 `$simparam("gmin")` (S) and `("sourceScaleFactor")` on
+    /// every Model row, for the operating point's stepping rungs. Null when
+    /// the model reads neither.
+    set_homotopy: ?*const fn (*anyopaque, gmin: f64, source_scale: f64) void = null,
     /// Stores the analysis state (`$abstime`, timestep, `analysis()`,
     /// initial/final step, Newton iteration) that every later device call
     /// of this batch receives. One store per batch, so it is cheap enough
@@ -497,7 +501,8 @@ pub const GpuPayload = struct {
 // 20: the slot tape holds only the device's pattern entries, not n_u^2.
 // 21: the lim plane holds only the unknowns `limit` writes, not n_u.
 // 22: `Hooks.status`, VerA's `$fatal`/`$error` channel.
-pub const abi_version: u32 = 22;
+// 23: `Hooks.set_homotopy`, VerA's host-written `gmin__`/`source_scale__`.
+pub const abi_version: u32 = 23;
 
 /// A device type's construction entry points, exported by each device object
 /// and by runtime-loaded `.so` devices.
