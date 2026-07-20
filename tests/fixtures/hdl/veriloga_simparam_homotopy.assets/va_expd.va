@@ -1,0 +1,8 @@
+// A junction with no $limit: plain Newton from zero overflows exp(), so
+// the operating point falls through to its stepping rungs.
+`include "disciplines.vams"
+module va_expd(p, n);
+    inout p, n;
+    electrical p, n;
+    analog I(p, n) <+ 1e-14 * (exp(V(p, n) / 0.025) - 1.0);
+endmodule

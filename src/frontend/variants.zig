@@ -740,6 +740,7 @@ pub fn circuitOf(lib: *const device.Library, gpa: std.mem.Allocator, scratch: st
     b.reltol = deck_opts.tol.reltol;
     b.abstol = deck_opts.tol.abstol;
     b.vntol = deck_opts.tol.vntol;
+    b.gmin = deck_opts.tol.gmin;
     try b.reserveNodes(nl.graph.vertexCount());
     var nb = try builder.NetBuilder.init(scratch, &b, nl.*);
     try nb.build();
