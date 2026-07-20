@@ -1565,6 +1565,7 @@ pub fn DeviceBatch(comptime D: type) type {
             // Only `updateState` writes `bound_step`.
             .bound_step = if (@hasDecl(D, "updateState") and @hasField(D.Instance, "bound_step") and !skipsTimerState(D)) boundStep else null,
             .set_temp = if (@hasField(D.Model, "temperature__")) setTemp else null,
+            .set_homotopy = if (@hasField(D.Model, "gmin__") or @hasField(D.Model, "source_scale__")) setHomotopy else null,
             .set_sim_state = setSimState,
             .min_delay = if (@hasDecl(D, "delays")) minDelay else null,
             .next_breakpoint = if (@hasDecl(D, "nextBreakpoint") or walksPending(D)) nextBreakpointFn else null,
@@ -1846,6 +1847,29 @@ pub fn DeviceBatch(comptime D: type) type {
             const self: *Self = @ptrCast(@alignCast(ctx));
             for (self.models) |*m| m.temperature__ = @as(f64, temp_c) + 273.15;
             self.reprep();
+        }
+
+        /// Writes the §9.15 homotopy knobs into every Model row, then reruns
+        /// `setup` when it caches either one (VerA `setup_simparams`).
+        /// Parameter defaults derived from them keep their build-time value.
+        fn setHomotopy(ctx: *anyopaque, gmin: f64, source_scale: f64) void {
+            const self: *Self = @ptrCast(@alignCast(ctx));
+            for (self.models) |*m| {
+                if (comptime @hasField(D.Model, "gmin__")) m.gmin__ = gmin;
+                if (comptime @hasField(D.Model, "source_scale__")) m.source_scale__ = source_scale;
+            }
+            const cached = comptime if (@hasDecl(D, "setup_simparams")) blk: {
+                for (D.setup_simparams) |n| {
+                    if (std.mem.eql(u8, n, "gmin") or std.mem.eql(u8, n, "sourceScaleFactor")) break :blk true;
+                }
+                break :blk false;
+            } else false;
+            if (cached) {
+                self.setupRows();
+                if (comptime @hasDecl(D, "precompute")) {
+                    for (self.instances, 0..) |*inst, id| D.precompute(inst, self.model(id));
+                }
+            }
         }
 
         fn setSimState(ctx: *anyopaque, st: SimState) void {

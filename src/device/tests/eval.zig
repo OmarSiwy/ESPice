@@ -545,6 +545,56 @@ test "iteration hooks gather each instance and preserve accepted-time state" {
     try std.testing.expectEqual(@as(f64, 3), typed.instances[0].previous);
 }
 
+test "set_homotopy writes gmin__ and source_scale__ on every row and reruns setup" {
+    const D = struct {
+        pub const U = enum(u8) { p, n };
+        pub const num_ports: usize = 2;
+        pub const Setup = struct { g: f64 = 0 };
+        pub const Model = struct { gmin__: f64 = 1e-12, source_scale__: f64 = 1, r: f64 = 1, su: Setup = .{} };
+        pub const Instance = struct {};
+        pub const setup_simparams = [_][]const u8{"gmin"};
+        pub fn setup(comptime _: type, m: *Model) void {
+            m.su.g = m.gmin__ * m.r;
+        }
+        pub fn eval(comptime S: type, xv: *const [2]S.V, m: *const Model, _: *const Instance, _: SimState) contract.Rows(@This(), S) {
+            const x = contract.probes(@This(), S, xv);
+            const current = x[0].sub(x[1]).scale(m.su.g + m.source_scale__);
+            return contract.rows(@This(), S, .{ current, current.neg() });
+        }
+    };
+    const a = std.testing.allocator;
+    var proto: ProtoStore(D) = .{};
+    try proto.append(.{ .r = 1 }, .{}, .{ 1, 2 });
+    try proto.append(.{ .r = 3 }, .{}, .{ 2, 1 });
+    const batch = try ProtoStore(D).finalize(&proto, a, .{
+        .col_ptr = &.{ 0, 3, 6, 9 },
+        .row_idx = &.{ 0, 1, 2, 0, 1, 2, 0, 1, 2 },
+        .n = 3,
+        .trash_slot = 9,
+    }).unwrap();
+    defer batch.hooks.deinit(batch.ctx, a);
+    const typed: *DeviceBatch(D) = @ptrCast(@alignCast(batch.ctx));
+    batch.hooks.set_homotopy.?(batch.ctx, 1e-3, 0.25);
+    try std.testing.expectEqual(@as(usize, 2), typed.models.len);
+    for (typed.models) |m| {
+        try std.testing.expectEqual(@as(f64, 1e-3), m.gmin__);
+        try std.testing.expectEqual(@as(f64, 0.25), m.source_scale__);
+        try std.testing.expectEqual(1e-3 * m.r, m.su.g);
+    }
+    // A model that reads neither knob costs the host nothing.
+    const Plain = struct {
+        pub const U = enum(u8) { p, n };
+        pub const num_ports: usize = 2;
+        pub const Model = struct {};
+        pub const Instance = struct {};
+        pub fn eval(comptime S: type, xv: *const [2]S.V, _: *const Model, _: *const Instance, _: SimState) contract.Rows(@This(), S) {
+            const x = contract.probes(@This(), S, xv);
+            return contract.rows(@This(), S, .{ x[0], x[0].neg() });
+        }
+    };
+    try std.testing.expect(DeviceBatch(Plain).hooks.set_homotopy == null);
+}
+
 test "a status-latch-only device stays GPU-eligible and reports its latched status" {
     const D = struct {
         pub const mutable_eval = true;

@@ -1,6 +1,8 @@
 //! End-to-end fixture runner: simulates every tests/fixtures deck in a child
 //! espice and checks the raw output against its embedded .expected.json
-//! oracle. An unsupported feature is a failure, never a skip. A deck whose
+//! oracle. An unsupported feature is a failure, never a skip. The one skip:
+//! under a GPU backend (`test-gpu`), a deck with nothing GPU-eligible, which
+//! an explicit `--backend cuda|hip` refuses by design. A deck whose
 //! header carries `* KNOWN GAP:` reports XFAIL when it fails, which does not
 //! fail the run, and XPASS when it passes, which does: drop the marker. From
 //! the root:
@@ -69,7 +71,7 @@ const Plot = struct {
 };
 
 // Workers claim independent indices; the result slots have one writer each.
-const Outcome = enum(u8) { unselected, pass, fail, xfail, xpass };
+const Outcome = enum(u8) { unselected, pass, fail, xfail, xpass, skip };
 const Runner = struct {
     io: Io,
     app: []const u8,
@@ -131,8 +133,8 @@ pub fn main(init: std.process.Init) !u8 {
     try group.await(init.io);
     var count = std.EnumArray(Outcome, u32).initFill(0);
     for (outcomes) |outcome| count.getPtr(outcome).* += 1;
-    std.debug.print("Correctness: {d} passed, {d} failed, {d} xfail, {d} xpass, {d} selected\n", .{
-        count.get(.pass), count.get(.fail), count.get(.xfail), count.get(.xpass), selected,
+    std.debug.print("Correctness: {d} passed, {d} failed, {d} xfail, {d} xpass, {d} skipped, {d} selected\n", .{
+        count.get(.pass), count.get(.fail), count.get(.xfail), count.get(.xpass), count.get(.skip), selected,
     });
     return if (count.get(.fail) == 0 and count.get(.xpass) == 0) 0 else 1;
 }
@@ -150,6 +152,11 @@ fn worker(runner: *Runner) void {
         defer diagnostics = null;
         const gap = knownGap(arena.allocator(), runner.io, path);
         runCase(arena.allocator(), runner.io, runner.app, path, expected_outputs[i], runner.timeout_seconds) catch |err| {
+            if (err == error.NotEligible) {
+                runner.outcomes[i] = .skip;
+                std.debug.print("SKIP {s}: nothing in the circuit runs on --backend {s}\n", .{ path, backend_name });
+                continue;
+            }
             runner.outcomes[i] = if (gap) .xfail else .fail;
             std.debug.print("{s} {s}: {s}\n{s}", .{ if (gap) "XFAIL" else "FAIL", path, @errorName(err), report.written() });
             continue;
@@ -194,6 +201,9 @@ fn runCase(a: Allocator, io: Io, app: []const u8, path: []const u8, expected: []
     const executable = try Io.Dir.cwd().realPathFileAlloc(io, app, a);
     const result = try simulate(a, io, executable, netlist, output, timeout_seconds, oracle.tokenizer);
     if (oracle.expect.status == .@"error") return checkRejection(oracle.expect.category.?, result);
+    // An explicit GPU backend refuses a circuit with no GPU-eligible device
+    // (no CPU fallback); under test-gpu that deck has nothing to compare.
+    if (!equal(backend_name, "cpu") and std.mem.indexOf(u8, result.stderr, "(CircuitNotEligible)") != null) return error.NotEligible;
     try requireSuccess(result);
     const bytes = try Io.Dir.cwd().readFileAlloc(io, output, a, .unlimited);
     const plots = try parseRaw(a, bytes);
