@@ -564,8 +564,18 @@ pub const NetBuilder = struct {
                 const col = try arena.alloc(i32, vt.n_u);
                 @memset(col, -1);
                 if (vt.collapse) |cf| cf(mblob.ptr, iblob.ptr, col.ptr);
-                for (vt.num_ports..vt.n_u) |u|
-                    nodes[u] = if (col[u] >= 0) nodes[@intCast(col[u])] else try b.addNode();
+                for (vt.num_ports..vt.n_u) |u| {
+                    if (col[u] >= 0) {
+                        nodes[u] = nodes[@intCast(col[u])];
+                        continue;
+                    }
+                    nodes[u] = try b.addNode();
+                    // An internal net publishes as ngspice names an OSDI
+                    // device's: `v(<instance>#<net>)`. Branch flows are not
+                    // node voltages.
+                    if (u < vt.unknown_names.len and !std.mem.startsWith(u8, vt.unknown_names[u], "flowZ28"))
+                        b.node_labels.items[nodes[u]] = try std.fmt.allocPrint(arena, "{s}#{s}", .{ dev.name, vt.unknown_names[u] });
+                }
             }
 
             const proto = try b.protoOf(t);

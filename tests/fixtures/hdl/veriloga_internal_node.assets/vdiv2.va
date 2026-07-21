@@ -1,0 +1,11 @@
+`include "disciplines.vams"
+module vdiv2(a, b);
+    inout a, b;
+    electrical a, b;
+    electrical mid;
+    parameter real r = 1000.0;
+    analog begin
+        I(a, mid) <+ V(a, mid) / r;
+        I(mid, b) <+ V(mid, b) / r;
+    end
+endmodule

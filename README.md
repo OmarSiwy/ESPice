@@ -136,13 +136,14 @@ unchanged model starts at once. The key covers the model and every file it
 `include`s, with comments and whitespace stripped, so a comment-only edit
 reuses the build and any code edit recompiles. VerA's diagnostics (file, line, code) print
 when a model does not compile. An instance parameter the module does not
-declare, or a card with the wrong number of nodes, is an error.
+declare, or a card with the wrong number of nodes, is an error. An internal net of the module
+publishes as `v(<instance>#<net>)`, the name ngspice gives an OSDI device's.
 
 ## Formats
 
 | | |
 |---|---|
-| Netlist dialects | ngspice, hspice, spectre |
+| Netlist dialects | ngspice, hspice, spectre; the sky130 PDK decks run as written ([docs/sky130.md](docs/sky130.md)) |
 | Output | binary raw, ASCII raw, CSV, Touchstone, PSF, FSDB, SST2, CITIfile, print |
 
 ## Accuracy and performance
