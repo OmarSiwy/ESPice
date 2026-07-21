@@ -1,40 +1,16 @@
 {
   "schema_version": 1,
   "analysis": "op",
-  "purpose": "pre_osdi loads the .va beside the named .osdi",
+  "purpose": "pre_osdi is an error (OsdiUnsupported): espice compiles Verilog-A through VerA and loads no OSDI, not even a .va beside the .osdi.",
   "oracle": {
-    "kind": "analytic",
-    "derivation": "va_rh with R=50 under 100 ohm divides 1 V to 1/3 V; i(vin) = -1/150 A."
+    "kind": "input_contract",
+    "derivation": "pre_osdi is an error (OsdiUnsupported): espice compiles Verilog-A through VerA and loads no OSDI."
   },
   "expect": {
-    "status": "success",
-    "plots": [
-      {
-        "name": "Operating Point",
-        "match": "exact",
-        "row_count": 1,
-        "columns": {
-          "v(out)": {
-            "values": [
-              0.3333333333333333
-            ],
-            "unit": "V",
-            "rtol": 0.002,
-            "atol": 1e-06
-          },
-          "i(vin)": {
-            "values": [
-              -0.006666666666666667
-            ],
-            "unit": "A",
-            "rtol": 0.002,
-            "atol": 1e-11
-          }
-        }
-      }
-    ],
-    "finite_values_required": true,
-    "all_requested_analyses_must_complete": true
+    "status": "error",
+    "category": "unsupported_input",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
   },
-  "netlist_sha256": "4086d5d9c1760c9452ec211a67290980fe3e1eebbee4e2afee050641014cb004"
+  "netlist_sha256": "9790722d5f775a55e5e20f6468d88b814e02900ddcbe43604384ce3fe0895da7"
 }

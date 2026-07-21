@@ -63,9 +63,8 @@ pub fn parseDialect(name: []const u8) ?Dialect {
 /// Reads, expands and flattens `input` into `session`, then loads its HDL
 /// models into `lib`. The netlist borrows `session`; release it once `build`
 /// has returned. Spectre input takes no `.include` expansion. Fails with
-/// `OsdiUnsupported` on an OSDI include that has no `.va` beside it and no
-/// built-in model of its name, and with the file error of an unreadable
-/// deck, include or data file.
+/// `OsdiUnsupported` on any OSDI include (`pre_osdi`, `osdi`), and with the
+/// file error of an unreadable deck, include or data file.
 pub fn prepare(io: std.Io, lib: *device.Library, session: std.mem.Allocator, input: Source, dialect: Dialect) !netlist.Netlist {
     const origin = switch (input) {
         .file => |path| path,
@@ -114,27 +113,11 @@ fn loadModels(io: std.Io, lib: *device.Library, session: std.mem.Allocator, fore
         switch (f.kind) {
             .data => {},
             .verilog_a, .verilog => try paths.append(session, path),
-            // ngspice loads a compiled OSDI binary; espice compiles Verilog-A
-            // itself, so it takes the `.va` beside one, or its built-in model
-            // of that name (`psp103va.osdi`: the `psp103va` kind runs psp103).
+            // ESPice compiles Verilog-A through VerA and never loads OSDI, so an
+            // OSDI reference is an error rather than a guess at a substitute.
             .osdi_include, .pre_osdi => {
-                const card = @tagName(f.kind);
-                const va = try std.mem.concat(session, u8, &.{ path[0 .. path.len - std.fs.path.extension(path).len], ".va" });
-                if (std.Io.Dir.cwd().access(io, va, .{})) |_| {
-                    std.log.warn("netlist: {s} {s}: loading {s} in its place; espice compiles Verilog-A directly", .{ card, f.path, va });
-                    try paths.append(session, va);
-                    continue;
-                } else |_| {}
-                const base = std.fs.path.stem(path);
-                const bare = if (std.ascii.endsWithIgnoreCase(base, "va")) base[0 .. base.len - 2] else base;
-                for (lib.names.items) |n| {
-                    if (!std.ascii.eqlIgnoreCase(n, base) and !std.ascii.eqlIgnoreCase(n, bare)) continue;
-                    std.log.warn("netlist: {s} {s}: using the built-in model {s}", .{ card, f.path, n });
-                    break;
-                } else {
-                    if (!@import("builtin").is_test) std.log.err("netlist: {s} {s}: espice cannot load OSDI binaries; it compiles Verilog-A directly, so load the source with .hdl \"model.va\"", .{ card, f.path });
-                    return error.OsdiUnsupported;
-                }
+                if (!@import("builtin").is_test) std.log.err("netlist: {s} {s}: espice does not load OSDI binaries; load the Verilog-A source with .hdl \"model.va\"", .{ @tagName(f.kind), f.path });
+                return error.OsdiUnsupported;
             },
         }
     }

@@ -116,11 +116,10 @@ by module name:
 N1 a 0 vres r=2k
 ```
 
-ESPice compiles the source itself; it does not load OSDI binaries. A
-`pre_osdi`/`osdi_include` card (or `pre_osdi` inside `.control`) loads the
-`.va` beside the `.osdi` if there is one, runs the built-in model of that
-name if there is one, and otherwise stops with an error. Other `.control`
-commands are skipped with a warning. The first load of a model builds a shared library, which
+ESPice compiles the source itself through VerA and never loads OSDI: a
+`pre_osdi`/`osdi_include` card (or `pre_osdi` inside `.control`) is an error
+(`OsdiUnsupported`) that names the `.hdl` card to use instead. Other
+`.control` commands are skipped with a warning. The first load of a model builds a shared library, which
 takes a few seconds and needs:
 
 - the Zig compiler espice was built with (0.17.0) on `PATH`, or its path in
