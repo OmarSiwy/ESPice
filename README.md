@@ -147,16 +147,19 @@ declare, or a card with the wrong number of nodes, is an error.
 
 ## Accuracy and performance
 
-`tests/fixtures/` holds 794 netlists in 43 categories, each with a checked-in
+`tests/fixtures/` holds 795 netlists in 43 categories, each with a checked-in
 `.expected.json`. `zig build test` scores every deck against its own oracle:
-787 pass, and the other 7 are known gaps marked in the deck (two VBIC model
-versions, and five noise decks waiting on a device-ABI change).
+793 pass, and the other 2 are known gaps marked in the deck (two VBIC model
+versions).
 
 `zig build bench` runs the same decks through ESPice, ngspice 45 and VACASK,
 times each one (median of 3 runs after a warm-up, process startup included),
 and compares every shared output column by name. The charts below come from
 one such run on an Intel i9-14900HX, ESPice on the CPU backend, at commit
-`91ee4d06`. To reproduce them:
+`91ee4d06`, on a quiet machine (wall times under load are not comparable).
+Later commits add correlated and tabulated noise sources and model-visible
+gmin stepping, which none of the timed decks below exercise. To reproduce
+them:
 
 ```sh
 nix develop .#benchmarking
@@ -245,9 +248,9 @@ The bench is a differential comparison against two simulators, and it covers
 only decks all three can express. "Could not run it" is mostly decks the other
 simulator has no counterpart for: `.ic`, `.trannoise`, `u`/`o`/`t`/`z` device
 cards, HSPICE-only syntax, and PWL sources, which this VACASK build aborts on.
-The bench runner also starts every deck in the ngspice dialect, so 14 HSPICE
-decks that pass in `zig build test` (which passes `--tokenizer hspice`) show as
-failures there. A model in the dispatch table does not establish full SPICE
+In the run charted here the bench runner read every deck in the ngspice
+dialect, so 14 HSPICE decks showed as ESPice failures; the runner now passes
+each deck's `--tokenizer`, as `zig build test` does, and they run. A model in the dispatch table does not establish full SPICE
 conformance; `docs/` carries per-area status labels and the measured
 before/after numbers for each optimization.
 
@@ -265,7 +268,7 @@ before/after numbers for each optimization.
 │   ├── c_api.zig     # The C ABI behind include/espice.h
 │   └── main.zig      # CLI
 ├── models/           # Verilog-A device sources, compiled at build time
-├── tests/            # 794 fixture decks, pending decks, the correctness harness, the bench runner
+├── tests/            # 795 fixture decks, pending decks, the correctness harness, the bench runner
 ├── docs/             # Design notes and measured evidence
 └── ref/              # SIMD strategy reference
 ```
