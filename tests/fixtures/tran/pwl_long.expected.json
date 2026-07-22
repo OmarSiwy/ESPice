@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "A PWL longer than the source's 64-point table is simulated whole: its later segments chain in series (V) and in parallel (I), not truncated.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Triangle wave through (k ns, k mod 2) for k = 0..150; linear between points. V across 1k is the waveform; the I source's 1 mA steps give the same volts across 1k."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "columns": {
+          "v(a)": {
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09,
+            "values": [
+              0.4999999999999982,
+              0.5,
+              0.0,
+              0.25,
+              0.5,
+              0.0,
+              0.25
+            ]
+          },
+          "v(b)": {
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09,
+            "values": [
+              0.4999999999999982,
+              0.5,
+              0.0,
+              0.25,
+              0.5,
+              0.0,
+              0.25
+            ]
+          }
+        },
+        "axis": {
+          "name": "time",
+          "values": [
+            1.05e-08,
+            6.35e-08,
+            6.4e-08,
+            1.0025e-07,
+            1.265e-07,
+            1.4e-07,
+            1.4975e-07
+          ],
+          "atol": 1e-15,
+          "rtol": 1e-09
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "5a969de71102f75ff7a5ab0024729dae9b1305f478b830bd4be070f0ae38366e"
+}

@@ -922,9 +922,24 @@ pub const NetBuilder = struct {
                     nodes[0] = try self.b.addNode();
                     try self.b.addDevice(devices.resistor, dev.name, .{ .r = port.?.z0, .noisy = 0 }, .{}, [2]u32{ pos, nodes[0] });
                 }
+                // A PWL past the table's capacity continues in sources of its
+                // later segments, in series between the card's source and n-.
+                const tail = try pwlTail(devices.vsource, self.arena, dev);
+                if (tail.len != 0 and (sensed or series)) {
+                    if (!@import("builtin").is_test) std.log.err("{s}: a PWL past {d} points on a sensed or port source", .{ dev.name, comptime pwlCapacity(devices.vsource.Model) });
+                    return error.UnsupportedCard;
+                }
+                const chain_end = nodes[1];
+                if (tail.len != 0) nodes[1] = try self.b.addNode();
                 const br = self.b.n;
                 if (balanced == null) port_branch = br;
                 if (!sensed) try self.b.addDevice(devices.vsource, dev.name, bound[0], bound[1], nodes);
+                var from = nodes[1];
+                for (tail, 0..) |seg, k| {
+                    const to = if (k + 1 == tail.len) chain_end else try self.b.addNode();
+                    try self.b.addDevice(devices.vsource, dev.name, seg, .{}, [2]u32{ from, to });
+                    from = to;
+                }
                 try self.v.append(self.arena, .{
                     .name = dev.name,
                     .pos = pos,
@@ -959,6 +974,8 @@ pub const NetBuilder = struct {
                 const bound = try self.bindSource(devices.isource, dev);
                 const nodes = try deviceNodes(self, devices.isource, dev);
                 try self.b.addDevice(devices.isource, dev.name, bound[0], bound[1], nodes);
+                // A PWL past the table's capacity: its later segments in parallel.
+                for (try pwlTail(devices.isource, self.arena, dev)) |seg| try self.b.addDevice(devices.isource, dev.name, seg, .{}, nodes);
                 if (sourceAc(dev)) |ac| try self.ac.append(self.arena, .{ .pos = nodes[0], .neg = nodes[1], .re = ac.re, .im = ac.im });
                 try self.i.append(self.arena, .{ .name = dev.name, .pos = nodes[0], .neg = if (nodes.len > 1) nodes[1] else GROUND });
             },
@@ -2275,6 +2292,57 @@ fn applyWaveArgs(comptime T: type, target: anytype, kind: Wave, args: []const Va
         },
         inline else => |cw| applyGroupArgs(T, target, args, comptime fieldPairs(cw)),
     }
+}
+
+/// The PWL points of `dev`'s `PWL(...)` group, or null when it has none.
+fn pwlArgs(dev: Device) ?[]const Value {
+    for (dev.positional, 0..) |v, i| switch (v) {
+        .group => |g| if (waveKind(g.name) == .pwl) return g.args,
+        .name => |nm| if (waveKind(nm) == .pwl) {
+            var end = i + 1;
+            while (end < dev.positional.len and dev.positional[end] == .num) end += 1;
+            return dev.positional[i + 1 .. end];
+        },
+        else => {},
+    };
+    return null;
+}
+
+/// Models for the segments of a PWL past `D`'s table capacity: segment k
+/// starts on the last point of the one before it and holds the change from
+/// there, so the card's source (the first `capacity` points) plus every
+/// segment is the whole waveform: in series for a V source, in parallel for
+/// an I source. Empty when the PWL fits. ngspice reads any length; a
+/// truncated table would end the waveform early without a word.
+fn pwlTail(comptime D: type, arena: std.mem.Allocator, dev: Device) ![]const D.Model {
+    if (comptime !@hasField(D.Model, pwlSlot("pwl_times", 0))) return &.{};
+    const cap = comptime pwlCapacity(D.Model);
+    const args = pwlArgs(dev) orelse return &.{};
+    const n = args.len / 2;
+    if (n <= cap) return &.{};
+    if (kvNumber(dev.kv, "r") != null) {
+        if (!@import("builtin").is_test) std.log.err("{s}: a PWL with r= holds at most {d} points", .{ dev.name, cap });
+        return error.UnsupportedCard;
+    }
+    const td = kvNumber(dev.kv, "td") orelse 0;
+    var out: std.ArrayList(D.Model) = .empty;
+    var start: usize = cap - 1;
+    while (start + 1 < n) : (start += cap - 1) {
+        const t0 = valueNumber(args[2 * start]) orelse return error.UnresolvedParameter;
+        const v0 = valueNumber(args[2 * start + 1]) orelse return error.UnresolvedParameter;
+        var m: D.Model = .{};
+        m.waveform = @backingInt(Wave.pwl);
+        m.pwl_td = td;
+        const len = @min(cap, n - start);
+        inline for (0..cap) |k| if (k < len) {
+            const j = start + k;
+            @field(m, pwlSlot("pwl_times", k)) = valueNumber(args[2 * j]) orelse t0;
+            @field(m, pwlSlot("pwl_values", k)) = (valueNumber(args[2 * j + 1]) orelse v0) - v0;
+        };
+        m.pwl_len = @intCast(len);
+        try out.append(arena, m);
+    }
+    return out.items;
 }
 
 /// Sets `dc` to the waveform's t = 0 value (each pre-TD branch of
