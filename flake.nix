@@ -87,7 +87,7 @@
 
           outputHashMode = "recursive";
           outputHashAlgo = "sha256";
-          outputHash = "sha256-50+Cy2UhgcPeCmAZkNHi4uSb9XCW62WyjU6ICQvF9b0=";
+          outputHash = "sha256-IkkUnW1gcZ0M7WXm9O1YDfD4lFCPzWPtIR9vDmlNFio=";
         };
 
         # GPU SUPPORT
