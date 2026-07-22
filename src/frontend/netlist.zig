@@ -282,6 +282,10 @@ pub const Deck = struct {
     /// HSPICE `.mosra` (the last one) and its `.appendmodel` bindings.
     mosra: ?Mosra = null,
     appendmodels: []const AppendModel = &.{},
+    /// ngspice dialect with `.option seed=N` and no Monte Carlo sweep: the
+    /// distribution calls are drawn once from that seed (`variants.drawOnce`)
+    /// instead of folding to their nominal, as ngspice draws them every run.
+    draw_seed: bool = false,
 };
 
 /// HSPICE `.mosra` options as read [SA Ch.29]; SimMode 0 or 2.
@@ -766,6 +770,35 @@ const LocalModel = struct { name: []const u8, line: u32, top: u32, shared: bool,
 /// A `.model` line and whether it sits under a subcircuit body's `.if`.
 const ModelLine = struct { line: u32, cond: bool };
 
+/// ngspice b_transformation_wanted (inpcom.c): `p` reads a node voltage,
+/// a branch current, `time`, `temper` or `hertz`, so a passive card holding
+/// it becomes a B source.
+/// A `.option`/`.options` card (lowercased) that sets `seed=`.
+fn seedOption(line: []const u8) bool {
+    if (!std.mem.startsWith(u8, line, ".opt")) return false;
+    var at: usize = 0;
+    while (std.mem.indexOfPos(u8, line, at, "seed")) |k| : (at = k + 4) {
+        if (k > 0 and (std.ascii.isAlphanumeric(line[k - 1]) or line[k - 1] == '_')) continue;
+        const rest = std.mem.trimStart(u8, line[k + 4 ..], " \t");
+        if (rest.len > 0 and rest[0] == '=') return true;
+    }
+    return false;
+}
+
+fn bTransformationWanted(p: []const u8) bool {
+    for (p, 0..) |c, i| {
+        if (std.mem.indexOfScalar(u8, "vith", c) == null) continue;
+        if (i > 0 and (std.ascii.isAlphanumeric(p[i - 1]) or p[i - 1] == '_')) continue;
+        const tail = p[i..];
+        if (std.mem.startsWith(u8, tail, "v(") or std.mem.startsWith(u8, tail, "i(")) return true;
+        for ([_][]const u8{ "temper", "hertz", "time" }) |w| {
+            if (!std.mem.startsWith(u8, tail, w)) continue;
+            if (tail.len == w.len or !(std.ascii.isAlphanumeric(tail[w.len]) or tail[w.len] == '_')) return true;
+        }
+    }
+    return false;
+}
+
 fn Reader(comptime S: type) type {
     const F = S.Split;
     return struct {
@@ -839,6 +872,8 @@ fn Reader(comptime S: type) type {
         live_ok: bool = false,
         /// Some card runs Monte Carlo.
         monte: bool = false,
+        /// `Deck.draw_seed`.
+        draw_seed: bool = false,
         optimize: ?Optimize = null,
         site_ops: std.ArrayList(u32) = .empty,
         site_keys: std.ArrayList(u64) = .empty,
@@ -901,6 +936,18 @@ fn Reader(comptime S: type) type {
             var directive_lines: std.ArrayList(u32) = .empty;
             try r.declarations(&top_devices, &model_lines, &directive_lines);
             const top: Frame = .{ .scopes = &r.global_scopes };
+            // ngspice draws agauss/gauss/unif/aunif on every run; a seed makes
+            // that one reproducible sample, so the draws need their sites,
+            // and the models read next (a PDK's shared bins) need them too.
+            // ponytail: a top-level `.param` read in walk 1 stays nominal;
+            // the PDK distributions sit in model cards and subcircuit params.
+            if (dialect == .ngspice and !r.monte) for (directive_lines.items) |i| {
+                if (seedOption(r.lines.items[i])) {
+                    r.monte = true;
+                    r.draw_seed = true;
+                    break;
+                }
+            };
             // Model lines and subcircuit bodies both run in line order.
             var s: usize = 0;
             for (model_lines.items) |ml| {
@@ -978,6 +1025,7 @@ fn Reader(comptime S: type) type {
                     .sample = r.sample,
                     .mosra = r.mosra,
                     .appendmodels = r.appendmodels.items,
+                    .draw_seed = r.draw_seed,
                 },
             };
         }
@@ -2500,6 +2548,45 @@ fn Reader(comptime S: type) type {
             };
         }
 
+        /// ngspice inp_compat: an R card whose value reads `v(`, `i(`,
+        /// `time`, `temper` or `hertz` is the B source
+        /// `b<name> n1 n2 i = v(n1,n2)/(eq) tc1=.. tc2=.. reciproctc=1`, its
+        /// temperature factor dividing the current; `m=` multiplies it
+        /// (reciprocm=0). Null for any other R card. sky130's poly resistors
+        /// (`rbody`) are written this way.
+        fn behaviouralResistor(r: *R, line: []const u8) Error!?[]const u8 {
+            var f = F.init(line);
+            const head = f.next() orelse return null;
+            const n1 = f.next() orelse return null;
+            const n2 = f.next() orelse return null;
+            if (!F.isWord(n1) or !F.isWord(n2) or !bTransformationWanted(f.rest())) return null;
+            var eq: ?[]const u8 = null;
+            var tc1: []const u8 = "0";
+            var tc2: []const u8 = "0";
+            var m: []const u8 = "1";
+            while (f.next()) |t| {
+                if (t[0] == '{') {
+                    if (eq == null) eq = F.body(t);
+                    continue;
+                }
+                if (!F.isWord(t) or !f.takeEq()) continue;
+                const v = f.next() orelse return error.ParseError;
+                const val = if (v[0] == '{') F.body(v) else v;
+                if (std.mem.eql(u8, t, "r") or std.mem.eql(u8, t, "resistance")) {
+                    eq = val;
+                } else if (std.mem.eql(u8, t, "tc1")) {
+                    tc1 = val;
+                } else if (std.mem.eql(u8, t, "tc2")) {
+                    tc2 = val;
+                } else if (std.mem.eql(u8, t, "m")) {
+                    m = val;
+                }
+            }
+            // Without braces it is not ngspice's form: the plain R path rejects it.
+            const e = eq orelse return null;
+            return try std.fmt.allocPrint(r.arena, "b{s} {s} {s} i={{v({s},{s})/({s})*({s})}} tc1={{{s}}} tc2={{{s}}} reciproctc=1", .{ head, n1, n2, n1, n2, e, m, tc1, tc2 });
+        }
+
         fn readDevice(r: *R, line: []const u8, frame: *const Frame) Error!void {
             const arena = r.arena;
             const port_card = r.dialect == .hspice and std.ascii.toLower(line[0]) == 'p';
@@ -2519,6 +2606,7 @@ fn Reader(comptime S: type) type {
             if (r.dialect == .hspice and std.mem.indexOfScalar(u8, "bu", letter) != null)
                 return r.unsupported(line, "unsupported HSPICE element");
             if (r.dialect == .hspice and (letter == 's' or letter == 'w')) return r.readDataElement(head, letter, &f, frame);
+            if (letter == 'r' and r.dialect == .ngspice) if (try r.behaviouralResistor(line)) |b| return r.readDevice(b, frame);
             if (std.mem.indexOfScalar(u8, "efgh", letter) != null) {
                 var probe = f;
                 _ = probe.next();
@@ -2568,6 +2656,12 @@ fn Reader(comptime S: type) type {
                     const eq = f.next() orelse return error.ParseError;
                     if (!F.isWord(out) or eq[0] != '=') return error.ParseError;
                     try r.card_kv.append(arena, .{ .key = out, .value = try r.exprValue(try r.exprRest(&f), frame, false) });
+                    // A braced expression may be followed by instance
+                    // parameters (`i={...} tc1=1m reciproctc=1`).
+                    while (f.next()) |t| {
+                        if (!F.isWord(t) or !f.takeEq()) return error.ParseError;
+                        try r.card_kv.append(arena, .{ .key = t, .value = try r.kvValue(&f, frame, false) });
+                    }
                     return r.commit(head, letter, frame);
                 }
             } else {

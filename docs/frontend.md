@@ -403,6 +403,15 @@ are written against it:
   unconditionally, since subcircuit dot cards are read once in walk 1.
 - `.model <name> psp103va` (the OSDI module name) selects the built-in
   PSP 103, as ngspice does after loading `psp103va.osdi`.
+- An R card whose braced value reads `v(`, `i(`, `time`, `temper` or
+  `hertz` becomes ngspice's B source `i={v(n1,n2)/(eq)*(m)}` with its
+  `tc1`/`tc2` and `reciproctc=1` (inpcom.c `inp_compat`); a B card takes
+  `key=value` parameters after a braced expression; in a B tape `pow()` is
+  |x|^y while `^` keeps the sign for an integer power (ptfuncs.c); `pwr(x,y)`
+  is sign(x)·|x|^y. With `.option seed=N` and no `MONTE` sweep the
+  distributions are drawn once from the seed instead of folding to their
+  nominal. The sky130 resistors and mismatch sections depend on these; see
+  [sky130.md](sky130.md).
 - `.meas`/`.measure` cards are parsed by `measure.zig` into `core.Measure`
   rows (`deck.measures`) and evaluated after the run by
   `src/output/measure.zig`, a port of com_measure2.c: the same event

@@ -50,7 +50,7 @@ pub const Code = enum(u8) {
 /// trial draws them instead (`eval`). `table(x, d, x1, y1, ...)` is the
 /// smoothed transfer of an E/G TABLE or PWL(1) card, built only by the
 /// B-source tape (models/bsource.va opcode 37).
-pub const Fn = enum(u8) { sqrt, abs, min, max, pow, exp, ln, log, log10, sin, cos, tan, atan, floor, ceil, ternary, tanh, agauss, gauss, unif, aunif, limit, table, other };
+pub const Fn = enum(u8) { sqrt, abs, min, max, pow, pwr, exp, ln, log, log10, sin, cos, tan, atan, floor, ceil, ternary, tanh, agauss, gauss, unif, aunif, limit, table, other };
 
 /// True for the functions a Monte Carlo trial draws.
 pub fn isDistribution(f: Fn) bool {
@@ -62,7 +62,7 @@ pub fn isDistribution(f: Fn) bool {
 
 const fns = std.StaticStringMap(Fn).initComptime(.{
     .{ "sqrt", .sqrt },   .{ "abs", .abs },       .{ "min", .min },     .{ "max", .max },
-    .{ "pow", .pow },     .{ "exp", .exp },       .{ "ln", .ln },       .{ "log", .log },
+    .{ "pow", .pow },     .{ "pwr", .pwr },       .{ "exp", .exp },       .{ "ln", .ln },       .{ "log", .log },
     .{ "log10", .log10 }, .{ "sin", .sin },       .{ "cos", .cos },     .{ "tan", .tan },
     .{ "atan", .atan },   .{ "floor", .floor },   .{ "ceil", .ceil },   .{ "ternary", .ternary },
     .{ "tanh", .tanh },   .{ "agauss", .agauss }, .{ "gauss", .gauss }, .{ "unif", .unif },
@@ -418,7 +418,7 @@ fn call(f: Fn, args: []const Val) Val {
         .agauss, .gauss, .unif, .aunif => return if (args.len >= 2 and args.len <= 4 and args[0].known) args[0] else .unknown(args.len >= 2 and all_nominal),
         .limit => return if (args.len == 2 and args[0].known) args[0] else .unknown(false),
         .ternary => 3,
-        .pow, .min, .max => 2,
+        .pow, .pwr, .min, .max => 2,
         else => 1,
     };
     if (args.len != want or !args[0].known) return .unknown(all_nominal);
@@ -435,6 +435,8 @@ fn call(f: Fn, args: []const Val) Val {
         .min => @min(a, b),
         .max => @max(a, b),
         .pow => std.math.pow(f64, a, b),
+        // ngspice: sign(a)*|a|^b.
+        .pwr => std.math.copysign(std.math.pow(f64, @abs(a), b), a),
         .exp => @exp(a),
         .ln, .log => @log(a),
         .log10 => @log10(a),
@@ -535,6 +537,7 @@ test "compile and fold: precedence, associativity and calls" {
         .{ "sqrt(16)", 4 },        .{ "max(1,min(5,3))", 3 },      .{ "pow(2,10)", 1024 },
         .{ "abs(-3)", 3 },         .{ "floor(2.5)+ceil(2.5)", 5 }, .{ "1k*2", 2000 },
         .{ "agauss(1,0.1,3)", 1 }, .{ "limit(2,1)", 2 },           .{ "1e-3*2", 2e-3 },
+        .{ "pwr(-4,0.5)", -2 },    .{ "pwr(9,0.5)", 3 },
     }) |case| {
         const v = try testFold(a, case[0]);
         try std.testing.expect(v.known);

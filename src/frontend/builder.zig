@@ -1847,8 +1847,8 @@ fn addTape(self: *NetBuilder, comptime B: type, dev: Device) !void {
                 t.n_ops = 1;
             },
             .expr => |span| {
-                const ops = self.nl.exprOps(span);
-                compileTape(self, ops, &t, &nodes) catch |err| switch (err) {
+                const folded = try foldConstants(self.arena, self.nl.exprOps(span), self.nl.consts);
+                compileTape(self, folded.ops, folded.consts, &t, &nodes) catch |err| switch (err) {
                     error.OutOfMemory => return err,
                     else => {
                         // The test runner fails any test that logs an error.
@@ -2087,7 +2087,55 @@ fn readsCurrent(nl: Netlist, dev: Device) bool {
 /// Translates a postfix card expression into the bsource tape, giving each
 /// distinct probed row (a net, or the branch an i() reads) a control port in
 /// `nodes`. Fails on anything the tape cannot express or hold.
-fn compileTape(self: *NetBuilder, ops: []const Op, model: *Tape, nodes: []u32) !void {
+/// `ops` with every constant subtree folded to one `.num`, the consts it
+/// reads renumbered into a fresh pool. A parameter spliced into a B
+/// expression arrives as its own postfix (sky130's `rbody` carries
+/// `mc_mm_switch*agauss(...)`), so without this the tape would hold
+/// distribution calls and spend its op budget on arithmetic of constants.
+/// Distributions fold to their nominal, as `expr.fold` does.
+fn foldConstants(arena: std.mem.Allocator, ops: []const Op, consts: []const f64) !struct { ops: []const Op, consts: []const f64 } {
+    var out: std.ArrayList(Op) = .empty;
+    var pool: std.ArrayList(f64) = .empty;
+    var stack: std.ArrayList(netlist.expr.Val) = .empty;
+    for (ops) |op| {
+        if (op.code == .num) {
+            try out.append(arena, .{ .code = .num, .a = @intCast(pool.items.len) });
+            try pool.append(arena, consts[op.a]);
+            continue;
+        }
+        const k = netlist.expr.arity(op);
+        const table = op.code == .call and @as(netlist.expr.Fn, @fromBackingInt(@intCast(op.a))) == .table;
+        const foldable = k > 0 and k <= out.items.len and !table and op.code != .live and
+            for (out.items[out.items.len - k ..]) |o| {
+                if (o.code != .num) break false;
+            } else true;
+        if (!foldable) {
+            try out.append(arena, op);
+            continue;
+        }
+        // The operands are the last k consts, in order.
+        var mini: [9]Op = undefined;
+        if (k + 1 > mini.len) {
+            try out.append(arena, op);
+            continue;
+        }
+        for (0..k) |i| mini[i] = .{ .code = .num, .a = @intCast(i) };
+        mini[k] = op;
+        const args = pool.items[pool.items.len - k ..];
+        const v = try netlist.expr.eval(arena, &stack, mini[0 .. k + 1], args, &.{}, null);
+        if (std.math.isNan(v)) {
+            try out.append(arena, op);
+            continue;
+        }
+        out.shrinkRetainingCapacity(out.items.len - k);
+        pool.shrinkRetainingCapacity(pool.items.len - k);
+        try out.append(arena, .{ .code = .num, .a = @intCast(pool.items.len) });
+        try pool.append(arena, v);
+    }
+    return .{ .ops = out.items, .consts = pool.items };
+}
+
+fn compileTape(self: *NetBuilder, ops: []const Op, consts: []const f64, model: *Tape, nodes: []u32) !void {
     var rows: [tape.max_probes]u32 = undefined;
     var n_rows: usize = 0;
     var n_consts: usize = 0;
@@ -2097,7 +2145,7 @@ fn compileTape(self: *NetBuilder, ops: []const Op, model: *Tape, nodes: []u32) !
         const code: tape.Code = switch (op.code) {
             .num => blk: {
                 if (n_consts == tape.max_consts) return error.TooManyConstants;
-                model.consts[n_consts] = self.nl.consts[op.a];
+                model.consts[n_consts] = consts[op.a];
                 model.op_a[n] = @intCast(n_consts);
                 n_consts += 1;
                 break :blk .num;
@@ -2155,6 +2203,15 @@ fn compileTape(self: *NetBuilder, ops: []const Op, model: *Tape, nodes: []u32) !
             n -= 1;
             if (e >= 0 and e <= 255 and e == @round(e)) {
                 n_consts -= 1;
+                // ngspice's pow() function is |x|^y whatever y is (ptfuncs.c
+                // PTpower); only the `^`/`**` operator keeps the sign of x
+                // for an integer exponent (PTpowerH). sky130's poly
+                // resistors cube a negative min(...) with pow().
+                if (op.code == .call and self.nl.deck.dialect == .ngspice) {
+                    if (n + 1 == tape.max_ops) return error.TooManyOps;
+                    model.op_code[n] = .abs;
+                    n += 1;
+                }
                 model.op_code[n] = .powi;
                 model.op_a[n] = @intFromFloat(e);
             } else model.op_code[n] = .powc;
@@ -2184,7 +2241,7 @@ fn stackDepth(t: Tape) usize {
 /// The tape op for a call of `f` with `argc` arguments.
 fn callCode(f: netlist.expr.Fn, argc: u32) !tape.Code {
     const want: u32 = switch (f) {
-        .min, .max, .pow => 2,
+        .min, .max, .pow, .pwr => 2,
         .ternary => 3,
         else => 1,
     };
@@ -2192,7 +2249,9 @@ fn callCode(f: netlist.expr.Fn, argc: u32) !tape.Code {
     return switch (f) {
         .ternary => .sel,
         .ln, .log => .ln,
-        .agauss, .gauss, .unif, .aunif, .limit, .table, .other => error.UnsupportedFunction,
+        // ponytail: pwr folds when its arguments are constant (sky130's
+        // pwr(l,0.5)); a tape opcode is needed only if one reads a probe.
+        .pwr, .agauss, .gauss, .unif, .aunif, .limit, .table, .other => error.UnsupportedFunction,
         inline else => |g| @field(tape.Code, @tagName(g)),
     };
 }

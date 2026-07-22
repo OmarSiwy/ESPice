@@ -31,7 +31,7 @@ retired paths and their replacements.
 
 | Area | Pages |
 |---|---|
-| Frontend | [frontend.md](frontend.md): netlist bytes to `Prepared`, stage by stage, with measurements; [preparation performance](Problem/preparation-performance.md) |
+| Frontend | [frontend.md](frontend.md): netlist bytes to `Prepared`, stage by stage, with measurements; [preparation performance](Problem/preparation-performance.md); [sky130.md](sky130.md): what the sky130 PDK decks need, and parity with ngspice on them |
 | Devices | [devices/models.md](devices/models.md): attribution, licensing and ngspice-conformance fixes per model; [devices/abi.md](devices/abi.md): the device ABI and its identity rules; [devices/iteration-lifecycle.md](devices/iteration-lifecycle.md): Verilog-AMS iteration hooks; [devices/gpu-evaluation.md](devices/gpu-evaluation.md): device planes on the GPU, the wait schedule and the `auto` cost model; [devices/verilog-digital.md](devices/verilog-digital.md): `.v` digital devices, A2D/D2A and the `ttol` cost; [devices/w-s-elements.md](devices/w-s-elements.md): HSPICE W and S elements, their rational fits and accuracy |
 | Analyses | [analysis/](analysis/README.md): one page per analysis |
 | Solvers | [solvers/](solvers/README.md): sparse LU, ordering, Newton, continuation, measured performance |
