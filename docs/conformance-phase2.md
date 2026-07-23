@@ -1,8 +1,9 @@
 # Conformance phase 2: root causes and fix recipes
 
-Root-cause digs against ngspice 44.2 for the decks indexed in `issues.md`
-section F. Group numbers are the r-conformance root-cause groups. Deck
-pass/fail status lives in `issues.md`; this page keeps the cause, the
+Root-cause digs against ngspice 44.2 for the decks the retired `issues.md`
+indexed in its section F. Group numbers are the r-conformance root-cause
+groups. Deck pass/fail status is what `zig build test` reports; this page
+keeps the cause, the
 ngspice reference and the recipe, and names the commit where a recipe
 landed. The topical docs carry the resulting behavior:
 [transient-integration](analysis/transient-integration.md),

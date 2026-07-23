@@ -188,8 +188,8 @@ reltol * max(|I_new|, |I_old|) + abstol on the device currents. On
 `tran/bench_tline_ltra1_1_line` and `tran/bench_tline_txl1_1_line` the gate
 allows about 1.5e-4 A on the affected rows, loose enough that the operating
 point accepts v(2) = 5.005 V over a 5 V supply. The gate is global, so
-loosening or tightening it needs its own full-corpus A/B. Tracked as F7/E7
-in `issues.md`.
+loosening or tightening it needs its own full-corpus A/B (formerly F7/E7
+in the retired `issues.md`).
 
 ---
 

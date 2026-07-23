@@ -181,7 +181,7 @@ VerA's `docs/CONFORMANCE.md` tracks incomplete VPI, accepted-point callbacks, mu
 ## Evidence
 
 ngspice 44.2 fixtures under `tests/fixtures/tran/` (current pass/fail status
-is in `issues.md`):
+is what `zig build test` reports):
 
 | Family | Fixture stems |
 |---|---|
