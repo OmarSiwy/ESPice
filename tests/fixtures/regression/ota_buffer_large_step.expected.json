@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "BSIM4 limiting: the sky130 OTA buffer's 0.5 V step bench (AnalogIOC tb_ota.py) starts from the physical operating point and settles as ngspice does.",
+  "oracle": {
+    "kind": "ngspice-45",
+    "derivation": "ngspice 45 (nixpkgs) on this deck and its assets. v(out) samples are reference accepted times read from the binary raw; vpre, vfinal and tsettle are ngspice's .meas results from a second run without -r.",
+    "command": "ngspice -n -b -r reference.raw ota_buffer_large_step.sp; ngspice -n -b ota_buffer_large_step.sp"
+  },
+  "origin": "AnalogIOC analog/ota/test/tb_ota.py buffer()",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 0.0,
+            "atol": 0.002,
+            "values": [
+              0.7000503707133592,
+              0.7000503707198296,
+              0.7000503707192689,
+              0.7018068656136641,
+              0.7283264925791306,
+              0.7837279590856727,
+              0.8351726682120909,
+              0.9297434325023354,
+              1.0308710904223326,
+              1.0720087004917676,
+              1.1268496933760221,
+              1.152181484795897,
+              1.172992521889726,
+              1.1798272730225916,
+              1.1822153325996887,
+              1.1834411412690562,
+              1.1835363212291494,
+              1.1835443209234315
+            ]
+          }
+        },
+        "axis": {
+          "name": "time",
+          "values": [
+            0.0,
+            5.0013999999999014e-08,
+            9.901400000000143e-08,
+            1.0050000000000002e-07,
+            1.0097500000000006e-07,
+            1.0197500000000013e-07,
+            1.029750000000002e-07,
+            1.0497500000000036e-07,
+            1.0797500000000058e-07,
+            1.0997500000000073e-07,
+            1.1497500000000111e-07,
+            1.1997500000000147e-07,
+            1.2997500000000222e-07,
+            1.3997500000000297e-07,
+            1.4997500000000372e-07,
+            1.749750000000056e-07,
+            1.9997500000000748e-07,
+            2.5000000000000004e-07
+          ],
+          "atol": 1e-15,
+          "rtol": 1e-09
+        }
+      }
+    ],
+    "checks": [
+      {
+        "kind": "measure",
+        "name": "vpre",
+        "value": 0.7000504,
+        "rtol": 0.0001,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "vfinal",
+        "value": 1.183544,
+        "rtol": 0.0001,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "tsettle",
+        "value": 4.382048e-08,
+        "rtol": 0.01,
+        "atol": 0
+      }
+    ]
+  },
+  "netlist_sha256": "9c0d20f095d513551f07972a0b0bc6868512d691515b1f7bcf6902f324c35f05"
+}

@@ -147,9 +147,9 @@ publishes as `v(<instance>#<net>)`, the name ngspice gives an OSDI device's.
 
 ## Accuracy and performance
 
-`tests/fixtures/` holds 795 netlists in 43 categories, each with a checked-in
+`tests/fixtures/` holds 799 netlists in 43 categories, each with a checked-in
 `.expected.json`. `zig build test` scores every deck against its own oracle:
-793 pass, and the other 2 are known gaps marked in the deck (two VBIC model
+797 pass, and the other 2 are known gaps marked in the deck (two VBIC model
 versions).
 
 `zig build bench` runs the same decks through ESPice, ngspice 45 and VACASK,
@@ -268,7 +268,7 @@ before/after numbers for each optimization.
 │   ├── c_api.zig     # The C ABI behind include/espice.h
 │   └── main.zig      # CLI
 ├── models/           # Verilog-A device sources, compiled at build time
-├── tests/            # 795 fixture decks, pending decks, the correctness harness, the bench runner
+├── tests/            # 799 fixture decks, pending decks, the correctness harness, the bench runner
 ├── docs/             # Design notes and measured evidence
 └── ref/              # SIMD strategy reference
 ```

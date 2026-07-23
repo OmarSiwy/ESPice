@@ -12,7 +12,7 @@ rbodymod =2
 gidlMod GISL:agisl, bgisl, cgisl, egisl, rgisl, kgisl, and fgisl
 
 Limitations:
-PNlim, Fetlim, such junction/fet current limitation function not implemented
+PNlim, Fetlim: added by ESPice (b4ld.c vgs/vds/vbs-vbd limiting, see "Get voltages"); the rbodyMod, rgateMod and rdsMod limits are not ported
 noise:lintnoi, tnoic, rnoic not required to support
 .option scale, scalem not applied to this VA model
 
@@ -1780,6 +1780,7 @@ module bsim4va(d, g, s, b);
     real vgdx,vgsx;
     real vbd, vbs, vds, vgb, vgd, vgs;
     real vdbs, vdbd, vsbs;
+    real vt0, vcrit;  // b4ld.c pnjlim constants (CONSTvt0, BSIM4vcrit)
     real vbs_jct, vbd_jct, SourceSatCurrent, DrainSatCurrent;
     real qgb, VgstNVt, ExpVgst, cdrain;
     real czbd, czbdsw, czbdswg, czbs, czbssw, czbsswg, evbd, evbs, arg, sarg;
@@ -6148,10 +6149,26 @@ module bsim4va(d, g, s, b);
             $strobe("New model main evaluation starts...\n");
         //New model main evaluation starts
 
-        // Get voltages:
-        vds  = BSIM4type * V(di,si);
-        vgs  = BSIM4type * V(gi,si);
-        vbs  = BSIM4type * V(bi,si);
+        // Get voltages, limited as b4ld.c does (ESPice): bsim3.va's ladder,
+        // "fetlimds" on both gate legs + "limvds" on the channel, then the
+        // "pnjlimds" bulk rung, with b4ld.c's MODEINITJCT seeds (vgs =
+        // type*vth0 + 0.1, vds = 0.1, vbs = 0) and BSIM4vcrit (b4temp.c).
+        // Unlimited, Newton jumps the gate and channel by volts per
+        // iteration and can land on a spurious equilibrium the model admits
+        // far outside the rails (a sky130 OTA buffer at V(out) = -17.6 V,
+        // where its zero-area junctions conduct only gmin). ponytail:
+        // fetlim's threshold is the zero-bias vth0 (b4ld.c uses the previous
+        // load's von), and the rbodyMod (vdbs/vsbs), rgateMod (vges/vgms)
+        // and rdsMod (vdes/vses) limits are not ported; port them if a deck
+        // runs away through those nodes.
+        vt0 = 1.38064852e-23 * 300.15 / 1.6021766208e-19;
+        vcrit = vt0 * ln(vt0 / (1.4142135623730951 * 1.0e-14));
+        vgs  = BSIM4type * $limit(V(gi,si), "fetlimds", BSIM4type * here_BSIM4vth0,
+                                  BSIM4type, BSIM4type * here_BSIM4vth0 + 0.1);
+        vgd  = BSIM4type * $limit(V(gi,di), "fetlimds", BSIM4type * here_BSIM4vth0, BSIM4type);
+        vds  = BSIM4type * $limit(V(di,si), "limvds", BSIM4type, 0.1);
+        vbs  = BSIM4type * $limit(V(bi,si), "pnjlimds", vt0, vcrit, BSIM4type, 0.0);
+        vbd  = BSIM4type * $limit(V(bi,di), "pnjlimds", vt0, vcrit, BSIM4type);
         vges = BSIM4type * V(g,si);
         vgms = BSIM4type * V(gm,si);
         //`ifdef __RBODYMOD__
