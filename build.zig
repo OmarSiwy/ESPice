@@ -666,7 +666,7 @@ fn deviceKernelImports(
 
 /// Absolute `sub_path` under `owner`'s package root (0.17 dropped
 /// `Build.pathFromRoot`). The runtime loader needs these as plain strings,
-/// and a dependency's root (`zig-pkg/...`, `../vera-pin1`) is relative to the
+/// and a dependency's root (`zig-pkg/...`, or a `--fork` checkout) is relative to the
 /// build root, so it is resolved against `b`'s.
 fn pathFromRoot(b: *std.Build, owner: *std.Build, sub_path: []const u8) []u8 {
     const top = b.root.root_dir.path orelse ".";
