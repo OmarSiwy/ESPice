@@ -4,6 +4,8 @@ A SPICE circuit simulator written in Zig. Netlists in, 24 kinds of analysis out,
 with device models compiled from Verilog-A at build time instead of hand-ported
 into the simulator.
 
+Nobody likes writing docs, see: https://deepwiki.com/OmarSiwy/ESPice
+
 ```sh
 espice my_circuit.sp --rawfile out.raw
 espice my_circuit.sp --format=touchstone --rawfile out.s2p
