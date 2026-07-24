@@ -12,7 +12,7 @@ espice my_circuit.sp --format=touchstone --rawfile out.s2p
 espice my_circuit.sp --jobs=8 --backend=cuda
 ```
 
-Pre-release, version 0.1.0. Every fixture is checked against ngspice and VACASK;
+Version 1.0.0; [CHANGELOGS.md](CHANGELOGS.md) lists what changed. Every fixture is checked against ngspice and VACASK;
 [Accuracy and performance](#accuracy-and-performance) gives the numbers.
 
 ## Why this one
@@ -158,7 +158,7 @@ versions).
 times each one (median of 3 runs after a warm-up, process startup included),
 and compares every shared output column by name. The charts below come from
 one such run on an Intel i9-14900HX, ESPice on the CPU backend, at commit
-`91ee4d06`, on a quiet machine (wall times under load are not comparable).
+`244d2805`, on a quiet machine (wall times under load are not comparable).
 Later commits add correlated and tabulated noise sources and model-visible
 gmin stepping, which none of the timed decks below exercise. To reproduce
 them:
@@ -306,6 +306,14 @@ Outside `zig build test`: `zig build test-benchmark` tests the reference
 adapters, `zig build bench-frontend` times netlist parsing, and
 `zig build vera -- FILE.va` runs the bundled VerA compiler. Decks that are
 written but not yet in the corpus wait in `tests/pending/`.
+
+## License
+
+ESPice is Apache-2.0 ([LICENSE](LICENSE)). The Verilog-A models in `models/`
+keep the licences of the code they come from, indexed in
+[models/LICENSES.md](models/LICENSES.md). Most are BSD or royalty-free, but
+`models/bsim4va.va` (Cogenda's VA-BSIM48, the BSIM4 behind `LEVEL=14`/`54`)
+is CC-BY-NC 4.0, so commercial users must replace it.
 
 ## Why the name
 
