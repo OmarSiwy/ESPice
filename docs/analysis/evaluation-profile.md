@@ -72,12 +72,12 @@ mask lowered through `vpermps`/`vpslld`/`vpmovsxdq`/`vmovmskpd`) is now
 
 ## Host-pass profile of 2026-09-23
 
-Callgrind 3.26.0, Zig 0.16.0, base `bcc13b3`. Attribution comes from a
+Callgrind 3.26.0, Zig 0.16.0, base `11661cc`. Attribution comes from a
 `-Ddebug-info=true -Dgpu=false` build, now buildable (`e5634f7` pins the host
 device objects stripped; before that every one SEGV'd the compiler). Its
 whole-process Ir is within 0.001% of the shipped default build, whose totals
 are the before/after numbers. Self Ir except where marked inclusive; symbol
-names are as profiled at `bcc13b3`, and some have since been renamed.
+names are as profiled at `11661cc`, and some have since been renamed.
 
 | Pass | mos6_inverter | share | parallel_inverters_100 | share |
 |---|---:|---:|---:|---:|

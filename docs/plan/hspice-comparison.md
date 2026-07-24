@@ -12,7 +12,7 @@ the two lists do not compete.
 
 Scope and sources:
 
-- ESPice: `main` at `5101ac9`. Paths are relative to the repository root.
+- ESPice: `main` at `febfa18`. Paths are relative to the repository root.
 - HSPICE: the E-2010.12 manual set, cross-checked against B-2008.09 and
   Z-2007.03 copies and the K-2015.06 Quick Reference. Citations use these
   keys (URLs under [Sources](#sources)):
@@ -28,8 +28,8 @@ Scope and sources:
   I found no command reference newer than K-2015.06 that I could read, so
   cards added after mid-2015 are missing here.
 - Behaviour marked "observed" comes from probe decks (§1) run with
-  `--tokenizer=hspice` on an ESPice binary built from `daa50f3`, which
-  differs from `5101ac9` only in `src/device` (PULSE breakpoints).
+  `--tokenizer=hspice` on an ESPice binary built from `2dee4bf`, which
+  differs from `febfa18` only in `src/device` (PULSE breakpoints).
 - Sizes are the ones [vacask-comparison.md](vacask-comparison.md) uses:
   S is under 300 lines of Zig, M is 300 to 1,000, L is over 1,000.
 

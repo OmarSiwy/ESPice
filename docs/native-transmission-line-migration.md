@@ -56,7 +56,7 @@ there, §4.6.1); under `uic` the first accepted point does.
 ## LTRA on Verilog-A
 
 `models/ltra.va` replaced `ltra_native.zig`. Diffed against the native device
-(`espice -r out.csv --format=csv`, native binary at d9f1a7c9), largest
+(`espice -r out.csv --format=csv`, native binary at 4cee2ba5), largest
 difference relative to the column's peak:
 
 | Deck | Points (VA, native) | Largest relative difference |
@@ -124,7 +124,7 @@ column's peak. Every CPL fixture passes with it.
 ## Cost
 
 Median wall time of 7 runs, `zig build -Dgpu=false` ReleaseFast, on a loaded
-machine; the native column is the last native build (d9f1a7c9), measured in
+machine; the native column is the last native build (4cee2ba5), measured in
 the same session:
 
 | Deck | Native | Verilog-A |

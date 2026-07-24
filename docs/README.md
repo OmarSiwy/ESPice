@@ -69,6 +69,6 @@ logs do not belong here: fold what lasts into the topical page and delete
 the rest.
 
 Older pages cite failing-deck IDs such as F9 or C5 from `issues.md`, which
-was retired on 2026-10-05; `git show 8ada7e9d:issues.md` has its last
+was retired on 2026-10-05; `git show 925a57ef:issues.md` has its last
 version. Deck status now comes from `zig build test`, and an expected miss
 carries a `* KNOWN GAP:` line in the deck.

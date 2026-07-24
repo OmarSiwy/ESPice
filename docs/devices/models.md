@@ -75,7 +75,7 @@ SWNQS=0 because SWNQS is a card parameter. The frontend
 (`resolveDeviceId`) therefore picks `psp103_nqs` only for a card whose
 instance or model sets SWNQS != 0; every other PSP card runs the QS device.
 The generated QS device is byte-identical to VerA's output for the pre-NQS
-`psp103.va` (08e8d80^), and the NQS one to the previous single NQS build
+`psp103.va` (04bc145^), and the NQS one to the previous single NQS build
 apart from its name.
 
 Checked against VACASK, which ran the same PSP 103.7 sources compiled by
@@ -89,7 +89,7 @@ NQS effect itself (SWNQS=1 minus SWNQS=0) is 9.011e-3 A in espice against
 Why two devices: the NQS build at SWNQS=0 costs 2-3x the QS one. Callgrind
 instructions, `stress/vacask_ring` cut to 50 ns (18 instances): 2.325e9 on
 the NQS device against 0.837e9 on the QS device (2.8x; 0.84e9 -> 2.32e9 when
-08e8d80 first switched NQS on). Full deck wall time, best of three on a host
+04bc145 first switched NQS on). Full deck wall time, best of three on a host
 at load average 15-25: 4.68 s NQS, 2.40 s QS. When NQS was on for every card,
 the post-layout `ring_psp103_1k` deck (960 instances, 200 ps) measured
 9.44e9 -> 19.7e9 instructions (2.1x). The NQS CUDA image is 34 MB of PTX
@@ -135,7 +135,7 @@ Colin McAndrew et al. (VBIC).
   first step's MODEINITTRAN iteration, the caps stamp nothing. A step that
   converges in two iterations publishes that first solve, so this shows in
   the output. Each cap carries a second `ddt()` site with a zero Jacobian
-  that holds the difference. Against main 6d0b951: `tran/device_mos6_inverter`
+  that holds the difference. Against main acca77e: `tran/device_mos6_inverter`
   goes 41.4x -> 0.105x (with `vera_nodiff` on mos6's caps, as on the others),
   `tran/bench_tline_txl1_1_line` 5.41x -> 0.0017x,
   `tran/bench_ngspice_mosmem` 0.073x -> 0.0002x. `tran/bench_ngspice_mosamp`
