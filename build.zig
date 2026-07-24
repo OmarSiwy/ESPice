@@ -455,6 +455,24 @@ pub fn build(b: *std.Build) void {
     run_postlayout.addPassthruArgs();
     run_postlayout.step.dependOn(&gen_postlayout.step);
     b.step("bench-postlayout", "Time ESPice on synthetic post-layout decks against ngspice and VACASK").dependOn(&run_postlayout.step);
+
+    // External suites (ngspice tests, CircuitSim90, power grids, CMC QA):
+    // fetched at pinned revisions into zig-out/suites, then timed like
+    // `bench`. `-Dsuite=NAME` limits the fetch to one suite.
+    const suite = b.option([]const u8, "suite", "bench-suites: one suite under tests/suites (default: all)");
+    const fetch_suites = b.addSystemCommand(&.{ "bash", "tests/suites/fetch.sh", "zig-out/suites" });
+    if (suite) |name| fetch_suites.addArg(name);
+    fetch_suites.setCwd(b.path("."));
+    fetch_suites.has_side_effects = true;
+    const run_suites = b.addRunArtifact(bench_runner);
+    run_suites.stdio = .inherit;
+    run_suites.setCwd(b.path("."));
+    run_suites.addArtifactArg2(exe, .{});
+    run_suites.setEnvironmentVariable("ZIG", b.graph.zig_exe);
+    run_suites.addArgs(&.{ if (suite) |name| b.fmt("zig-out/suites/{s}", .{name}) else "zig-out/suites", "--out", "zig-out/suites-results.md" });
+    run_suites.addPassthruArgs();
+    run_suites.step.dependOn(&fetch_suites.step);
+    b.step("bench-suites", "Fetch the external SPICE suites and time ESPice on them against ngspice and VACASK").dependOn(&run_suites.step);
     const run_bench_tests = t.run(M.make(b.path("tests/benchmark/runner.zig"), &.{}), &.{}, false);
     b.step("test-benchmark", "Test reference adapters and benchmark comparison").dependOn(&run_bench_tests.step);
     test_step.dependOn(&run_bench_tests.step);
