@@ -5,9 +5,6 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 ## Unreleased
 
-- Removed `ref/` (SIMD notes and the standalone `verify.zig`) and `.agents/`;
-  SIMD differential tests live in each module's `zig build test` suite.
-
 ## 1.0.0 (2026-10-05)
 
 - Zig 0.17.0. VerA (by its `v1.0.0` tag), Gompute and stdpp are pinned by git
@@ -38,3 +35,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
   against ngspice and VACASK.
 - `zig build bench-suites` fetches external SPICE suites at pinned revisions
   (`tests/suites/`) and benches ESPice against ngspice and VACASK on them.
+- Release CI installs Zig 0.17.0 instead of 0.16.0, and the tarballs ship
+  `LICENSE` and `CHANGELOGS.md` (#1).
+- Removed `ref/` (SIMD notes and the standalone `verify.zig`) and `.agents/`;
+  SIMD differential tests live in each module's `zig build test` suite.
