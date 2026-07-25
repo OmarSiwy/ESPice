@@ -5,6 +5,10 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 ## Unreleased
 
+- `bench-suites -Dsuite=cmcqa`: 3,218 single-device decks from the public CMC QA
+  sets (HICUM/L2 2.4.0, PSP 103) and the GF180MCU BSIM4 regression, each with
+  its reference results.
+
 ## 1.0.0 (2026-10-05)
 
 - Zig 0.17.0. VerA (by its `v1.0.0` tag), Gompute and stdpp are pinned by git
