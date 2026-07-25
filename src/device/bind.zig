@@ -180,8 +180,7 @@ fn aliasesOf(comptime field: []const u8) []const []const u8 {
                 n += 1;
             }
         }
-        // VerA appends `Z` to a VA name that is a Zig primitive or keyword
-        // (`u0`, `type`, `pub`); the card keeps the VA spelling.
+        // The card keeps the VA spelling of a name VerA escaped.
         if (escaped(field)) |va| {
             out[n] = va;
             n += 1;
@@ -191,21 +190,40 @@ fn aliasesOf(comptime field: []const u8) []const []const u8 {
     }
 }
 
+/// The lowercased VA name behind a VerA-sanitized field, or null when VerA
+/// left the name alone. VerA appends `Z` to a Zig primitive or keyword
+/// (`u0`, `type`, `pub`) and writes a literal `Z` and a leading, trailing or
+/// doubled `_` as `Z<hex><hex>` (`ab__cd` is `abZ5f_cd`, `Zin` is `Z5ain`).
 fn escaped(comptime field: []const u8) ?[]const u8 {
-    if (field.len < 2 or field[field.len - 1] != 'Z') return null;
-    const stem = field[0 .. field.len - 1];
-    if (std.zig.primitives.isPrimitive(stem) or std.zig.Token.getKeyword(stem) != null) return stem;
-    return null;
+    if (field.len >= 2 and field[field.len - 1] == 'Z') {
+        const stem = field[0 .. field.len - 1];
+        if (std.zig.primitives.isPrimitive(stem) or std.zig.Token.getKeyword(stem) != null) return stem;
+    }
+    var out: [field.len]u8 = undefined;
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < field.len) : (n += 1) {
+        const hex: ?u8 = if (field[i] == 'Z' and i + 2 < field.len)
+            std.fmt.parseInt(u8, field[i + 1 .. i + 3], 16) catch null
+        else
+            null;
+        out[n] = std.ascii.toLower(hex orelse field[i]);
+        i += if (hex == null) 1 else 3;
+    }
+    if (n == field.len) return null;
+    const frozen = out;
+    return frozen[0..n];
 }
 
 test "VerA escapes bind under the VA name; ordinary trailing Z does not" {
-    const M = struct { u0Z: f64 = 0, typeZ: i64 = 1, pubZ: f64 = 0, RZ: f64 = 0 };
+    const M = struct { u0Z: f64 = 0, typeZ: i64 = 1, pubZ: f64 = 0, RZ: f64 = 0, abZ5f_cd: f64 = 0, Z5ain: f64 = 0 };
     var m: M = .{};
     try apply(&m, &.{
         .{ .key = "u0", .value = 400 }, .{ .key = "type", .value = -1 },
         .{ .key = "pub", .value = 2 },  .{ .key = "r", .value = 5 },
+        .{ .key = "ab__cd", .value = 3 }, .{ .key = "zin", .value = 50 },
     }).unwrap();
-    try std.testing.expectEqual(M{ .u0Z = 400, .typeZ = -1, .pubZ = 2, .RZ = 0 }, m);
+    try std.testing.expectEqual(M{ .u0Z = 400, .typeZ = -1, .pubZ = 2, .RZ = 0, .abZ5f_cd = 3, .Z5ain = 50 }, m);
 }
 
 test "first pair wins; an alias applies only when the field's own key is absent" {
