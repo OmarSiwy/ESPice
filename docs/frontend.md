@@ -484,10 +484,8 @@ ASCII normalization and newline counting share one streaming vector pass
 (`lines.zig normalize(W, ...)`). The newline predicate becomes a bit mask
 followed by `@popCount`; this avoids the wrong line counts vector
 boolean-to-integer reduction gave under the Debug backend. `W = 1` is the
-scalar oracle and the tail. The differential case in
-`ref/SIMD-Strategies/verify.zig` covers widths 1, 16, 32 and 64, every input
-length through 257 bytes, and random non-ASCII bytes; the frontend test
-checks the production function. The LLVM assembly of the production function
+scalar oracle and the tail. The frontend test checks the production function against its
+`W = 1` oracle. The LLVM assembly of the production function
 contains `vpcmpeqb`, `vpmovmskb` and `popcnt`.
 
 The field splitter is scalar, driven by a 256-entry break table.
@@ -506,7 +504,6 @@ caching adds state this result does not justify.
 ```sh
 zig build bench-frontend -- tests/fixtures/stress/scaling_rc_ladder_100k.sp 11
 zig build bench-frontend -- tests/fixtures/stress/scaling_inverter_chain_4k.sp 11
-zig run ref/SIMD-Strategies/verify.zig -fllvm -OReleaseSafe -mcpu=native
 ```
 
 `bench-frontend` (`tests/benchmark/frontend.zig`) times parsing plus

@@ -5,6 +5,9 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 ## Unreleased
 
+- Removed `ref/` (SIMD notes and the standalone `verify.zig`) and `.agents/`;
+  SIMD differential tests live in each module's `zig build test` suite.
+
 ## 1.0.0 (2026-10-05)
 
 - Zig 0.17.0. VerA (by its `v1.0.0` tag), Gompute and stdpp are pinned by git

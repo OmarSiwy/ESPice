@@ -19,14 +19,11 @@ minimization last.
 1. `/data-oriented-design`. Answer the six questions in writing before any new
    struct or table. SoA by default, indices not pointers, arena by lifetime,
    narrowest type the stated range allows.
-2. `/simd-first` (local, `.claude/skills/simd-first`, reference in
-   `ref/SIMD-Strategies/`). Scalar oracle first, then the vector kernel, then
-   read the asm. Every kernel adds a differential case against its scalar
-   oracle: in `ref/SIMD-Strategies/verify.zig` when the kernel is
-   self-contained (that file runs standalone under `zig run`, so it can
-   import nothing from `src/`), otherwise in the owning module's test suite
-   (`src/solver/tests.zig`, `src/analysis/tests/`) with a pointer to it from
-   verify.zig. LaneLu is the worked example.
+2. `/simd-first`. Scalar oracle first, then the vector kernel, then read
+   the asm. Every kernel adds a differential case against its scalar oracle
+   in the owning module's test suite (an in-file `test`, `src/solver/tests.zig`
+   or `src/analysis/tests/`), so `zig build test` runs it. LaneLu is the
+   worked example.
 3. `/ponytail`. After the data layout and kernel strategy are fixed, write the
    least code that satisfies them. YAGNI applies to everything except
    correctness at trust boundaries and the conformance gates.
