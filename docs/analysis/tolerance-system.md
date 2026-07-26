@@ -57,6 +57,18 @@ source gain, and an exact solution still leaves O(gain * eps) residual there
 (a 1e9-gain E source reads 2.7e-8). The delta test alone governs those rows,
 as in ngspice.
 
+**Runaway gate (#3).** Every acceptance test above is relative: the delta
+test to |x|, the residual gate to the diagonal conductance. A Newton that
+runs away carries both with it. A 20 uA source into a diode-connected
+BSIM-CMG FET started from 0 V reached 5e24 V with 1e45 S diagonals, and its
+3e39 A residual passed, so the operating point was published with exit 0.
+An iterate with any |x| above 1e9 is now refused outright (`x_plausible` in
+`solver/converger.zig`, in both Newton and JFNK). The ladder then moves on to
+gmin stepping, which converges that deck to v(ibn) = 0.4945 V, the value
+the same circuit gives with its FETs in another order. ngspice has no such
+gate, since its device limiting keeps Newton from running away there. The
+corpus is unchanged: 797 passed, 2 xfail of 799, before and after.
+
 **Divergence from ngspice (open, issues.md F7).** ngspice's `NIconvTest` has
 no residual gate: besides the delta test it checks each device current as
 `reltol*max(|I_new|, |I_old|) + abstol`. The row-scaled gate here is a
