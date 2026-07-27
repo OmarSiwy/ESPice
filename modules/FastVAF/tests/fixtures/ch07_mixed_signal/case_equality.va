@@ -1,9 +1,0 @@
-module ch7_case_equality(p);
-  inout p; electrical p; integer state; real result;
-  analog begin
-    if (state === 1) result = 1.0;
-    else if (state !== 0) result = 0.5;
-    else result = 0.0;
-    I(p) <+ result + 0.0*V(p);
-  end
-endmodule

@@ -1,2 +1,0 @@
-module ch3_string_repl(p); inout p; electrical p; string s; analog begin s={3{"ab"}}; I(p)<+0.0*V(p); end endmodule
-// EXPECT: error -- normative syntax/restriction snapshot for this rule family.

@@ -1,9 +1,0 @@
-// EXPECT: error -- an instance default and selected port overrides may be combined.
-module annex_e_primitive_mixed_discipline(n1, gnd_e, shaft1, gnd_rot);
-  inout n1, gnd_e, shaft1, gnd_rot;
-  electrical n1, gnd_e; rotational_omega shaft1, gnd_rot;
-  (* port_discipline="electrical" *) vcvs #(.gain(1.45m)) motor1(
-      n1, gnd_e,
-      (* port_discipline="rotational_omega" *) shaft1,
-      (* port_discipline="rotational_omega" *) gnd_rot);
-endmodule

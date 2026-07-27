@@ -1,8 +1,0 @@
-module ch09_limit(p, n);
-  inout p, n; electrical p, n;
-  real limited;
-  analog begin
-    limited = $limit(V(p,n));
-    I(p,n) <+ exp(limited) - 1.0;
-  end
-endmodule

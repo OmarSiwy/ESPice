@@ -1,5 +1,0 @@
-// EXPECT: error
-module ch09_table_model_unsupported(p, n);
-  inout p, n; electrical p, n;
-  analog I(p,n) <+ $table_model(V(p,n), "sample.dat", "1LL");
-endmodule

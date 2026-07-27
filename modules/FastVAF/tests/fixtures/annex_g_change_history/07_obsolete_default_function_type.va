@@ -1,6 +1,0 @@
-// EXPECT: error
-`default_function_type_analog real
-module annex_g_obsolete_default_function_type(p, n);
-  inout p, n; electrical p, n;
-  analog I(p,n) <+ V(p,n);
-endmodule

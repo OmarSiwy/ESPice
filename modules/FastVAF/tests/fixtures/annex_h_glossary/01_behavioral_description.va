@@ -1,8 +1,0 @@
-module glossary_behavioral_description(p, n);
-  inout p, n; electrical p, n;
-  real intermediate;
-  analog begin
-    intermediate = 2.0*V(p,n);
-    I(p,n) <+ intermediate;
-  end
-endmodule

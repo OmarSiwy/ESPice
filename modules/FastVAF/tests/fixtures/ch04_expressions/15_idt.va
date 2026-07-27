@@ -1,6 +1,0 @@
-module ch04_idt(p, n);
-    inout p, n;
-    electrical p, n;
-
-    analog V(p, n) <+ idt(I(p, n), 0.0);
-endmodule

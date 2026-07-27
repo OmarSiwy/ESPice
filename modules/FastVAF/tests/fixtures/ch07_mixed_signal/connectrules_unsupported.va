@@ -1,4 +1,0 @@
-// EXPECT: error -- connectrules need post-elaboration insertion.
-connectrules ch7_rules;
-  connect ch7_a2d;
-endconnectrules

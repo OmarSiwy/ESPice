@@ -1,5 +1,0 @@
-// EXPECT: error -- absdelta is permitted only in digital initial/always.
-module ch8_absdelta(p);
-  inout p; electrical p; real sampled;
-  always @(absdelta(V(p), 0.1, 1p, 1u)) sampled = V(p);
-endmodule

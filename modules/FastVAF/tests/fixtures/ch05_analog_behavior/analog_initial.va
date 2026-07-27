@@ -1,5 +1,0 @@
-module ch5_analog_initial(p);
-  inout p; electrical p; real gain;
-  analog initial gain = 2.0;
-  analog I(p) <+ gain * V(p);
-endmodule

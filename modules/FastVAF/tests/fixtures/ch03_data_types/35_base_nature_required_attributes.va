@@ -1,3 +1,0 @@
-nature ch3_incomplete_nature; units="V"; access=IncompleteV; endnature
-discipline ch3_incomplete_disc; potential ch3_incomplete_nature; enddiscipline
-module ch3_incomplete(p); inout p; ch3_incomplete_disc p; analog IncompleteV(p)<+0.0; endmodule

@@ -1,5 +1,0 @@
-module ch09_atomic_tanh(p, n);
-  inout p, n; electrical p, n;
-  analog I(p,n) <+ V(p,n) + $tanh(V(p,n));
-endmodule
-

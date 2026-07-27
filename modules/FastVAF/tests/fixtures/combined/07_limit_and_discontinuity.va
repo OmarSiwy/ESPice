@@ -1,9 +1,0 @@
-module combined_limit_and_discontinuity(p, n);
-  inout p, n; electrical p, n;
-  real limited;
-  analog begin
-    $discontinuity(0);
-    limited = $limit(V(p,n), "pnjlim", $vt, 0.7);
-    I(p,n) <+ limexp(limited) - 1.0;
-  end
-endmodule

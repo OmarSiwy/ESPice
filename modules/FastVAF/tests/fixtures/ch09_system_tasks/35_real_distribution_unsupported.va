@@ -1,6 +1,0 @@
-// EXPECT: error
-module ch09_real_distribution_unsupported(p, n);
-  inout p, n; electrical p, n;
-  integer seed;
-  analog I(p,n) <+ $rdist_uniform(seed, 0.0, 1.0);
-endmodule

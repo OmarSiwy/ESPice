@@ -1,2 +1,0 @@
-primitive annex_b_udp(out,in); output out; input in; table 0:0; 1:1; endtable endprimitive
-// EXPECT: error -- normative syntax/restriction snapshot for this rule family.

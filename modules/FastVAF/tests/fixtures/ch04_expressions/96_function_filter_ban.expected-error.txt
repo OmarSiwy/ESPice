@@ -1,3 +1,0 @@
-# LRM 5.2.1/4.7.2: analog filters are analog operators and are forbidden
-# inside an analog function.
-E0422

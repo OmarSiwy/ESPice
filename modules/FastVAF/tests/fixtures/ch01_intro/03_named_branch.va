@@ -1,7 +1,0 @@
-module ch01_named_branch(a, b);
-    inout a, b;
-    electrical a, b;
-    branch (a, b) path_ab;
-
-    analog I(path_ab) <+ V(path_ab) / 50.0;
-endmodule

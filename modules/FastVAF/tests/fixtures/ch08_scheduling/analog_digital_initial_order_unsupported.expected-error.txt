@@ -1,4 +1,0 @@
-# annex C: the digital `initial` block is outside Verilog-A, so there is no
-# analog/digital initial ordering to schedule.
-E0205
-initial

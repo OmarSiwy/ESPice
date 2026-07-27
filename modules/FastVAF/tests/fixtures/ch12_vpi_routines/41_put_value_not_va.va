@@ -1,6 +1,0 @@
-// EXPECT: error
-module ch12_atomic_put_value(p, n);
-  inout p, n; electrical p, n;
-  analog I(p,n) <+ vpi_put_value(0);
-endmodule
-

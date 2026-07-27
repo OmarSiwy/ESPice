@@ -1,6 +1,0 @@
-// EXPECT: error -- supply-sensitive connectmodules require mixed-signal hierarchy.
-connectmodule ch7_supply_sensitive(cm, electrical_out);
-  input cm; output electrical_out;
-  ddiscrete cm; electrical electrical_out;
-  analog V(electrical_out) <+ V($root.global_supply.vdd) * transition(cm == 1);
-endmodule

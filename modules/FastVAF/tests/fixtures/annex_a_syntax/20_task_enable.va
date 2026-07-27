@@ -1,2 +1,0 @@
-module annex_a_task_enable(p); inout p; electrical p; task record; input real x; begin $display("%g",x); end endtask analog begin record(V(p)); I(p)<+V(p); end endmodule
-// EXPECT: error -- normative syntax/restriction snapshot for this rule family.

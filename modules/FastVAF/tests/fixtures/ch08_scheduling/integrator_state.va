@@ -1,4 +1,0 @@
-module ch8_integrator(p);
-  inout p; electrical p;
-  analog I(p) <+ idt(V(p), 0.0);
-endmodule

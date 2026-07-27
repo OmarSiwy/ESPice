@@ -1,1 +1,0 @@
-module ch5_ctrl_v(p,n,c); inout p,n,c; electrical p,n,c; analog V(p,n)<+3.0*V(c); endmodule

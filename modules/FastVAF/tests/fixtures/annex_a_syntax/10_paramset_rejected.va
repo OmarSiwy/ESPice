@@ -1,6 +1,0 @@
-// EXPECT: error
-paramset annex_a_parameters annex_a_target;
-endparamset
-
-module annex_a_paramset_rejected;
-endmodule

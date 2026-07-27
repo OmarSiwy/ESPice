@@ -1,3 +1,0 @@
-module annex_c_wreal_current_behavior;
-    wreal real_signal;
-endmodule

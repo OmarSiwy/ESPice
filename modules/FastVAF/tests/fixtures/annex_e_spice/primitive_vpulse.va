@@ -1,2 +1,0 @@
-// EXPECT: error -- Table E.1 primitive needs SPICE elaboration.
-module annex_e_primitive_vpulse(p,n); inout p,n; electrical p,n; vpulse #(.dc(0.0),.mag(1.0),.phase(0.0),.val0(0.0),.val1(1.0),.td(1n),.rise(1p),.fall(1p),.width(1n),.period(2n)) x(.p(p),.n(n)); endmodule

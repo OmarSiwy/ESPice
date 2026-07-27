@@ -1,9 +1,0 @@
-module ch02_base_sign_current_behavior(p, n);
-    inout p, n;
-    electrical p, n;
-    integer value;
-    analog begin
-        value = 8'd -6;
-        I(p, n) <+ value;
-    end
-endmodule

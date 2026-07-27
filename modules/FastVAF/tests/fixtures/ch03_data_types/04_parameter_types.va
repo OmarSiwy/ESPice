@@ -1,9 +1,0 @@
-module ch03_parameter_types(p, n);
-    inout p, n;
-    electrical p, n;
-    parameter real real_parameter = 10;
-    parameter integer integer_parameter = 16;
-    parameter string string_parameter = "mode-a";
-
-    analog I(p, n) <+ real_parameter + integer_parameter;
-endmodule

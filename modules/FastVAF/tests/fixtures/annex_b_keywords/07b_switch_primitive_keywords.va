@@ -1,5 +1,0 @@
-module annex_b_switches(a,b,c,d);
-  nmos g5(a,b,c); nor g6(a,b,c); notif0 g7(a,b,c); notif1 g8(a,b,c);
-  pmos g9(a,b,c); pulldown g10(a); pullup g11(a); rcmos g12(a,b,c,d); rnmos g13(a,b,c); rpmos g14(a,b,c);
-endmodule
-// EXPECT: error -- normative syntax/restriction snapshot for this rule family.

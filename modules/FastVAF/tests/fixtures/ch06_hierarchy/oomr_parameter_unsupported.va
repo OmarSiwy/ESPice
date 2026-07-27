@@ -1,5 +1,0 @@
-// EXPECT: error -- hierarchical parameter access requires an elaborated instance.
-module ch6_oomr_parameter(p);
-  inout p; electrical p;
-  analog I(p) <+ device.gain * V(p);
-endmodule

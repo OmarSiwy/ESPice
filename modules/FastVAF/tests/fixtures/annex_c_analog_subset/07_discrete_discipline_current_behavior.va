@@ -1,6 +1,0 @@
-discipline annex_c_discrete;
-    domain discrete;
-enddiscipline
-
-module annex_c_discrete_discipline_current_behavior;
-endmodule

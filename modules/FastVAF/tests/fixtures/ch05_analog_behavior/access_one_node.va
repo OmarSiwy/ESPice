@@ -1,4 +1,0 @@
-module ch5_access_one(p);
-  inout p; electrical p;
-  analog I(p) <+ V(p);
-endmodule

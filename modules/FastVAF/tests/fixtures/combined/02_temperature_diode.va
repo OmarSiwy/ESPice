@@ -1,9 +1,0 @@
-module combined_temperature_diode(p, n);
-  inout p, n; electrical p, n;
-  parameter real saturation = 1e-14;
-  real thermal_voltage;
-  analog begin
-    thermal_voltage = $vt($temperature);
-    I(p,n) <+ saturation*(limexp(V(p,n)/thermal_voltage)-1.0);
-  end
-endmodule

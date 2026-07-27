@@ -1,5 +1,0 @@
-// EXPECT: error -- absdelta is legal only in a digital initial/always block.
-module ch5_absdelta(p);
-  inout p; electrical p; real x;
-  analog @(absdelta(V(p), 1p)) x = V(p);
-endmodule

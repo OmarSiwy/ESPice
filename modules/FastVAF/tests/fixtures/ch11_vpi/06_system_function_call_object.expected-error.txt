@@ -1,3 +1,0 @@
-# ch11 VPI is outside the Verilog-A subset: a VPI-registered system function
-# has no compile-time definition, so it must be refused rather than faked.
-$fixture_vpi_function

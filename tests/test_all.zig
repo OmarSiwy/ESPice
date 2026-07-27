@@ -16,7 +16,7 @@ const td = @import("testdev.zig");
 const k_boltzmann = 1.380649e-23;
 
 test {
-    _ = @import("builder"); // src_new/builder.zig's own netlist-binding tests
+    _ = @import("builder"); // src/builder.zig's own netlist-binding tests
     _ = @import("builder.zig");
     _ = @import("analyses.zig");
     _ = @import("parallel.zig");

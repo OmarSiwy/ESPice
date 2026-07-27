@@ -1,7 +1,0 @@
-module ch04_limexp(p, n);
-    inout p, n;
-    electrical p, n;
-    parameter real saturation_current = 1e-14;
-
-    analog I(p, n) <+ saturation_current * (limexp(V(p, n) / $vt) - 1.0);
-endmodule

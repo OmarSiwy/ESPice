@@ -1,7 +1,0 @@
-module annex_c_analog_only_device(p, n);
-    inout p, n;
-    electrical p, n;
-    parameter real resistance = 1000.0 from (0:inf);
-
-    analog I(p, n) <+ V(p, n) / resistance;
-endmodule

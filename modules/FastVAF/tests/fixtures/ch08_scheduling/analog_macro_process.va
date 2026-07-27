@@ -1,4 +1,0 @@
-module ch8_macro(p, n);
-  inout p, n; electrical p, n;
-  analog I(p, n) <+ V(p, n);
-endmodule

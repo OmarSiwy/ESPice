@@ -1,7 +1,0 @@
-// EXPECT: error -- Verilog-AMS cannot pass a controlling instance name.
-module annex_e_unsupported_cccs(p, n);
-  inout p, n; electrical p, n;
-  // The controlling name denotes the concrete voltage-source instance below.
-  cccs f1(p, n, sense, 2.0);
-  vsine #(.dc(0.0)) sense(.p(p), .n(n));
-endmodule

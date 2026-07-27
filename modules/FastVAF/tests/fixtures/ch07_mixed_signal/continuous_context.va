@@ -1,4 +1,0 @@
-module ch7_continuous(p);
-  inout p; electrical p; real x;
-  analog begin x = V(p); I(p) <+ x; end
-endmodule

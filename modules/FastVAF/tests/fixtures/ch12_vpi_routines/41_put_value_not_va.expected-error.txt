@@ -1,2 +1,0 @@
-E0512
-vpi_put_value

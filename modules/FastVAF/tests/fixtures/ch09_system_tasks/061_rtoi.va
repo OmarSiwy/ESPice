@@ -1,5 +1,0 @@
-module ch09_atomic_rtoi(p, n);
-  inout p, n; electrical p, n;
-  analog I(p,n) <+ $rtoi(V(p,n));
-endmodule
-

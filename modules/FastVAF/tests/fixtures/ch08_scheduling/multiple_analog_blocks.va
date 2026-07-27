@@ -1,5 +1,0 @@
-module ch8_concurrent(p);
-  inout p; electrical p;
-  analog I(p) <+ V(p);
-  analog I(p) <+ ddt(V(p));
-endmodule

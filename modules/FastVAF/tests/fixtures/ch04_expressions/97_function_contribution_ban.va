@@ -1,1 +1,0 @@
-module ch4_fn_contrib(p); inout p; electrical p; analog function real drive; input x; real x; begin I(p)<+x; drive=x; end endfunction analog I(p)<+drive(V(p)); endmodule

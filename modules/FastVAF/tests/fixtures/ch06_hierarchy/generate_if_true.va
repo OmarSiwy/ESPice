@@ -1,1 +1,0 @@
-module ch6_gen_true(p); inout p; electrical p; generate if(1) begin I(p)<+V(p); end endgenerate endmodule

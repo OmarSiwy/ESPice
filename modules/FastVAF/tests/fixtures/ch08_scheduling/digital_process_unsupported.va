@@ -1,5 +1,0 @@
-// EXPECT: error -- digital processes are owned by the digital backend.
-module ch8_digital_process;
-  integer state;
-  always @(state) state = !state;
-endmodule

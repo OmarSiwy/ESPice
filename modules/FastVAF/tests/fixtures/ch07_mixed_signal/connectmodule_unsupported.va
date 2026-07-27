@@ -1,4 +1,0 @@
-// EXPECT: error -- connectmodules are handled by a mixed-signal elaborator.
-connectmodule ch7_a2d(a, d);
-  input a; output d; electrical a;
-endmodule

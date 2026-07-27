@@ -1,4 +1,0 @@
-// EXPECT: error -- the type string is only valid in a paramset, which FastVAF rejects.
-paramset ch09_rdist_type_string parameters;
-  .gain = $rdist_normal(-7, 0.0, 1.0, "global");
-endparamset

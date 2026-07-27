@@ -1,9 +1,0 @@
-module ch02_escaped_keyword(p, n);
-    inout p, n;
-    electrical p, n;
-    real \analog ;
-    analog begin
-        \analog  = 1.0;
-        I(p, n) <+ \analog ;
-    end
-endmodule

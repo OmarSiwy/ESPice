@@ -1,6 +1,0 @@
-// EXPECT: error
-module ch09_rdist_normal_unsupported(p, n);
-  inout p, n; electrical p, n;
-  integer seed;
-  analog I(p,n) <+ $rdist_normal(seed, 0.0, 1.0);
-endmodule

@@ -1,6 +1,0 @@
-# LRM 5.4.3: "The expression V(<a>) is invalid for ports and nets, where V is a
-# potential access function."  A port access function reads the FLOW into the
-# port and nothing else.  (The .va comment cites 4.4.2, which gives the access
-# function grammar; 5.4.3 is where the prohibition itself is stated.)
-E0507
-potential access function

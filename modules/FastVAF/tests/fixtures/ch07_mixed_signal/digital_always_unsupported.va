@@ -1,5 +1,0 @@
-// EXPECT: error -- a digital always process needs the digital backend.
-module ch7_digital_always;
-  reg state;
-  always @(state) state = !state;
-endmodule

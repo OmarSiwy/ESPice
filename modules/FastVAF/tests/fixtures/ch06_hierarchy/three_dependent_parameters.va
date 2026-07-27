@@ -1,1 +1,0 @@
-module ch6_param_chain(p); inout p; electrical p; parameter real a=2.0; parameter real b=a+1.0; parameter real c=a*b; analog I(p)<+c; endmodule

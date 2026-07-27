@@ -1,4 +1,0 @@
-# LRM 6.7.1: $root is an out-of-module reference and needs an elaborated
-# instance tree; Verilog-A does not permit it.
-E0208
-$root

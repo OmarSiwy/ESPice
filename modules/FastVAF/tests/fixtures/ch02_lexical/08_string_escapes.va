@@ -1,5 +1,0 @@
-module ch02_string_escapes;
-    string newline_tab = "line1\nline2\tend";
-    string quote_slash = "quote=\" slash=\\";
-    string octal_escape = "A\101";
-endmodule

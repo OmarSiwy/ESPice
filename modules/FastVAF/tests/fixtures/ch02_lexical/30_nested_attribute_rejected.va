@@ -1,2 +1,0 @@
-module ch2_nested_attr(p); inout p; electrical p; parameter real x = 1.0; analog I(p) <+ ((* outer = (1 + (* inner *) 2) *) x) * V(p); endmodule
-// EXPECT: error -- normative syntax/restriction snapshot for this rule family.

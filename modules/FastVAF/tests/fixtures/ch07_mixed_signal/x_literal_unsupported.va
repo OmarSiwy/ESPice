@@ -1,5 +1,0 @@
-// EXPECT: error -- FastVAF numeric IR cannot represent X.
-module ch7_x_literal(p);
-  inout p; electrical p; integer state;
-  analog begin state = 1'bx; I(p) <+ state; end
-endmodule

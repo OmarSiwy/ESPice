@@ -1,9 +1,0 @@
-module ch09_atomic_swrite(p, n);
-  inout p, n; electrical p, n;
-  string text;
-  analog begin
-    $swrite(text, "value=%g", V(p,n));
-    I(p,n) <+ V(p,n);
-  end
-endmodule
-

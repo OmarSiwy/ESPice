@@ -1,5 +1,0 @@
-// EXPECT: error
-module ch12_time_not_va(p, n);
-  inout p, n; electrical p, n;
-  analog I(p,n) <+ vpi_get_analog_time();
-endmodule

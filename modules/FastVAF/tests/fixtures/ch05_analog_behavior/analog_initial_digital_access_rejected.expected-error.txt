@@ -1,4 +1,0 @@
-# annex C: `reg` and the digital `initial` block are outside Verilog-A.
-E0205
-reg
-initial

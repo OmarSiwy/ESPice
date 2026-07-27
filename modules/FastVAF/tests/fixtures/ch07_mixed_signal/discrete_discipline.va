@@ -1,7 +1,0 @@
-discipline ch7_discrete;
-  domain discrete;
-enddiscipline
-module ch7_discrete_decl;
-  electrical p;
-  analog I(p) <+ V(p);
-endmodule

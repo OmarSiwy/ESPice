@@ -7,8 +7,8 @@
 set -u
 R=$(git rev-parse --show-toplevel)
 GOMPUTE=$(ls -d "$R"/zig-pkg/gompute-*/src/device.zig)
-CONTRACT="$R/src_new/devices/contract.zig"
-KERNELS="$R/src_new/devices/kernels.zig"
+CONTRACT="$R/src/devices/contract.zig"
+KERNELS="$R/src/devices/kernels.zig"
 KIR=${KIR:-/tmp/kir}
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT

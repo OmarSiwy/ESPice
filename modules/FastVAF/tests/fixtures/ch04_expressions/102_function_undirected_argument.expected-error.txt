@@ -1,3 +1,0 @@
-# LRM 4.7.2: every formal of an analog function must be declared input,
-# output or inout, so `real x;` alone declares a local, not an argument.
-E0511
