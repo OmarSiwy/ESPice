@@ -42,7 +42,7 @@ const MULTI_INSTANCE: u32 = std.math.maxInt(u32);
 /// Not `Builder.gpa`, usually the Problem's arena: an arena keeps every
 /// abandoned capacity alive for the run, 30 MB of card and label lists on
 /// the 200,000-device RC ladder.
-const staging = std.heap.smp_allocator;
+const staging = core.gpa;
 
 /// Mutable circuit under construction: rows, device protos and card
 /// identities. `compilePerm` consumes it into a `Circuit`.
@@ -2771,7 +2771,7 @@ fn applyKv(target: anytype, kv: []const Kv) !void {
 /// null, which it rejects for a key it knows.
 fn bindKv(bind: *const fn ([*]u8, []const batch.Param) batch.BindStatus, blob: [*]u8, kv: []const Kv) !void {
     var buf: [4096]u8 align(@alignOf(batch.Param)) = undefined;
-    var fallback: std.heap.BufferFirstAllocator = .init(&buf, std.heap.smp_allocator);
+    var fallback: std.heap.BufferFirstAllocator = .init(&buf, core.gpa);
     const a = fallback.allocator();
     const params = try a.alloc(batch.Param, kv.len);
     defer a.free(params);

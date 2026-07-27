@@ -13,7 +13,8 @@ pub const std_options: std.Options = .{ .signal_stack_size = if (@import("builti
 /// VerA's device/host contract checks (`contract.validating`), on in Debug
 /// only: off, a device build spends 0.4-1.8% fewer instructions.
 pub const vera_validate_contract = @import("builtin").mode == .debug;
-const allocator = std.heap.smp_allocator;
+/// `core.gpa`: SmpAllocator, or the page allocator single-threaded (wasm).
+const allocator = if (@import("builtin").single_threaded) std.heap.page_allocator else std.heap.smp_allocator;
 /// Bumped on any layout or semantics change; `espice_create` rejects a mismatch.
 const abi_version = 1;
 /// ESPICE_NO_QUERY, "no dependency" in `QueryInfo`, and ESPICE_PLOT_TITLE,

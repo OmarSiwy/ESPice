@@ -316,7 +316,7 @@ pub const Planner = struct {
         const alt = try p.scratch.create(Netlist);
         alt.* = try netlist.parse(p.scratch, text, p.nl.deck.dialect);
         if (!own and sameCards(p.nl, alt)) {
-            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            var arena = std.heap.ArenaAllocator.init(core.gpa);
             defer arena.deinit();
             var c = try circuitOf(p.lib, arena.allocator(), p.scratch, alt);
             defer c.deinit();
@@ -361,7 +361,7 @@ pub const Planner = struct {
                     if (@as(u64, @bitCast(x)) != @as(u64, @bitCast(p.refs[r].get()))) try p.set(r, x);
                 }
             } else {
-                var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+                var arena = std.heap.ArenaAllocator.init(core.gpa);
                 defer arena.deinit();
                 var c = try circuitOf(p.lib, arena.allocator(), p.scratch, p.nl);
                 defer c.deinit();
@@ -404,7 +404,7 @@ pub const Planner = struct {
             if (gop.found_existing) return .rebuild;
             gop.value_ptr.* = @intCast(k);
         }
-        var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+        var arena = std.heap.ArenaAllocator.init(core.gpa);
         defer arena.deinit();
         var c = try circuitOf(p.lib, arena.allocator(), p.scratch, p.nl);
         defer c.deinit();

@@ -58,7 +58,7 @@ pub fn freeze(
     if (n == 0 or intern_offs.len != @as(usize, n) + 1 or types.len != protos.len or
         intern_offs[n] != intern_bytes.len or !std.sort.isSorted(u32, intern_offs, {}, std.sort.asc(u32)))
         return error.InvalidCircuit;
-    const scratch = std.heap.smp_allocator;
+    const scratch = @import("core").gpa;
     var pattern: abi.PatternBuilder = .{};
     defer pattern.deinit(scratch);
     try pattern.reserve(scratch, n);

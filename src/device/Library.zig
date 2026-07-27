@@ -103,8 +103,10 @@ pub fn register(self: *Library, module: []const u8, vt: *const abi.DeviceVtable,
 /// The generated devices build against the sources `zig build` installs in
 /// `<exe>/../share/espice`, else against the source tree this espice was built
 /// from, with the compiler in `$ZIG`, else `zig` on PATH. Builds are cached
-/// under `cacheDir`.
+/// under `cacheDir`. Fails with `error.RuntimeHdlUnsupported` on wasm, which
+/// has no compiler to run and no dlopen; VerA and the loader compile out.
 pub fn load(self: *Library, io: std.Io, files: []const []const u8) !void {
+    if (comptime @import("builtin").cpu.arch.isWasm()) return error.RuntimeHdlUnsupported;
     var arena_state: std.heap.ArenaAllocator = .init(self.gpa);
     defer arena_state.deinit();
     const a = arena_state.allocator();
