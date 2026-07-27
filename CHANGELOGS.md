@@ -18,6 +18,9 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 - `bench-suites -Dsuite=ngspice`: 353 decks from ngspice-45's `tests/` and
   `examples/` and the Quality-page archives (paranoia, ISCAS85 on PTM 45 nm
   BSIM4, KiCad).
+- `bench-suites -Dsuite=powergrid`: IBM power grids (ibmpg1-3, ibmpg1t) and
+  SRAM-PG ssram with their reference solutions; `POWERGRID_LARGE=1` adds
+  ibmpg4-8, ibmpg2t-6t and the multi-million-node SRAM-PG designs.
 
 ## 1.0.0 (2026-10-05)
 
