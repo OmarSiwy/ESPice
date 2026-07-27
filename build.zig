@@ -476,6 +476,87 @@ pub fn build(b: *std.Build) void {
     const run_bench_tests = t.run(M.make(b.path("tests/benchmark/runner.zig"), &.{}), &.{}, false);
     b.step("test-benchmark", "Test reference adapters and benchmark comparison").dependOn(&run_bench_tests.step);
     test_step.dependOn(&run_bench_tests.step);
+
+    // `zig build wasm`: the docs playground's two modules in zig-out/wasm.
+    // espice.wasm is this graph again for wasm32-wasi: CPU only, single
+    // threaded (GitHub Pages cannot send the COOP/COEP headers shared memory
+    // needs), the built-in models, and the C API over in-memory netlists
+    // (tools/playground/espice.zig). cktimg.wasm comes from
+    // tools/playground/build.zig, a separate build root run as a child
+    // `zig build`, so cktImg stays out of this manifest and no other step,
+    // package or downstream user ever fetches it.
+    {
+        const wasm_step = b.step("wasm", "Build the docs playground (zig-out/wasm/espice.wasm, cktimg.wasm)");
+        const wt = b.resolveTargetQuery(.{
+            .cpu_arch = .wasm32,
+            .os_tag = .wasi,
+            .cpu_features_add = std.Target.wasm.featureSet(&.{.simd128}),
+        });
+        const wo: std.lang.Optimize = .small;
+        const wvera = b.dependency("vera", .{ .target = wt, .optimize = wo });
+        const wcontract: std.Build.Module.Import = .{ .name = "contract", .module = wvera.module("contract") };
+        const wgompute: std.Build.Module.Import = .{ .name = "gompute", .module = b.dependency("gompute", .{ .target = wt, .optimize = wo }).module("gompute") };
+        const W = @TypeOf(M){ .b = b, .target = wt, .optimize = wo, .strip = true, .stdpp = b.dependency("stdpp", .{ .target = wt, .optimize = wo }).module("stdpp") };
+        const WD = @TypeOf(M){ .b = b, .target = wt, .optimize = wo, .strip = true, .stdpp = null };
+        const wcore: std.Build.Module.Import = .{ .name = "core", .module = W.make(b.path("src/core/root.zig"), &.{}) };
+        const wabi: std.Build.Module.Import = .{ .name = "device_abi", .module = W.make(b.path("src/device/abi.zig"), &.{ wcontract, wcore }) };
+        const wmodels = W.make(models_mod.root_source_file.?, &.{});
+        const wroot = W.make(b.path("tools/playground/espice.zig"), &.{});
+        // One object per model, as on the host.
+        for (models, dev_mods, one_models) |m, dev, one| {
+            const wdev = WD.make(dev.root_source_file.?, &.{wcontract});
+            wmodels.addImport(m.name, wdev);
+            const wone = WD.make(one.root_source_file.?, &.{.{ .name = m.name, .module = wdev }});
+            const host = WD.make(b.path("src/device/eval.zig"), &.{ wcontract, wabi, wgompute, .{ .name = "models", .module = wone } });
+            host.link_libc = true; // as on the host
+            wroot.addObject(b.addObject(.{ .name = b.fmt("wasm_{s}", .{m.name}), .root_module = host }));
+        }
+        const wdevice: std.Build.Module.Import = .{ .name = "device", .module = W.make(b.path("src/device/root.zig"), &.{
+            .{ .name = "models", .module = wmodels },
+            wabi,
+            wcore,
+            .{ .name = "fastvaf", .module = wvera.module("vera") },
+            .{ .name = "vera_sim", .module = wvera.module("sim") },
+            .{ .name = "build_options", .module = build_options_mod },
+        }) };
+        const wnetlist: std.Build.Module.Import = .{ .name = "netlist", .module = W.make(b.path("src/frontend/netlist.zig"), &.{wcore}) };
+        const wespice = W.make(b.path("src/espice.zig"), &.{
+            wcore,
+            .{ .name = "analysis", .module = W.make(b.path("src/analysis/root.zig"), &.{
+                .{ .name = "solver", .module = W.make(b.path("src/solver/root.zig"), &.{wcore}) },
+                wcore,
+                wdevice,
+                wgompute,
+                // No kernels: the device path compiles out.
+                .{ .name = "gompute_kernels", .module = b.createModule(.{ .root_source_file = wf.add("wasm_kernels.zig", "pub const emitted = false;\npub const has_cuda = false;\npub const has_hip = false;\n") }) },
+            }) },
+            .{ .name = "frontend", .module = W.make(b.path("src/frontend/root.zig"), &.{
+                wcore,
+                wdevice,
+                wnetlist,
+                .{ .name = "builder", .module = W.make(b.path("src/frontend/builder.zig"), &.{ wcore, wdevice, wnetlist }) },
+            }) },
+            .{ .name = "output", .module = W.make(b.path("src/output/root.zig"), &.{wcore}) },
+        });
+        const wh: std.Build.Module.Import = .{ .name = "espice_h", .module = b.addTranslateC(.{ .root_source_file = b.path("include/espice.h"), .target = wt, .optimize = wo }).createModule() };
+        wroot.addImport("c_api", W.make(b.path("src/c_api.zig"), &.{ .{ .name = "espice", .module = wespice }, wh }));
+        wroot.addImport("espice_h", wh.module);
+        wroot.link_libc = true;
+        wroot.single_threaded = true;
+        const wexe = b.addExecutable(.{ .name = "espice", .root_module = wroot });
+        wexe.entry = .disabled;
+        wexe.rdynamic = true;
+        wexe.wasi_exec_model = .reactor;
+        wasm_step.dependOn(&b.addInstallArtifact(wexe, .{ .dest_dir = .{ .override = .{ .custom = "wasm" } } }).step);
+
+        const ck = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "--prefix" });
+        const ck_out = ck.addOutputDirectoryArg("playground");
+        // `-Dcktimg-fork=<checkout>`: build cktimg.wasm against a local cktImg.
+        if (b.option([]const u8, "cktimg-fork", "wasm: a local cktImg checkout to build cktimg.wasm against")) |fork| ck.addArg(b.fmt("--fork={s}", .{fork}));
+        ck.setCwd(b.path("tools/playground"));
+        for ([_][]const u8{ "build.zig", "build.zig.zon", "cktimg.zig" }) |f| ck.addFileInput(b.path(b.fmt("tools/playground/{s}", .{f})));
+        wasm_step.dependOn(&b.addInstallFileWithDir(ck_out.path(b, "wasm/cktimg.wasm"), .{ .custom = "wasm" }, "cktimg.wasm").step);
+    }
 }
 
 /// Builds one test binary from `m`, linked like the executable.
