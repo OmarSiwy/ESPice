@@ -1,0 +1,86 @@
+/* The ESPice playground widget (javascripts/playground.js). Colours come
+   from Material's variables, so it follows the light and dark schemes. */
+.esp-pg {
+  margin: 1em 0;
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 0.2rem;
+  padding: 0.6rem;
+}
+
+.esp-pg__top {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 0.6rem;
+  align-items: start;
+}
+
+@media (max-width: 44.9375em) {
+  .esp-pg__top { grid-template-columns: minmax(0, 1fr); }
+}
+
+.esp-pg__src {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  font-family: var(--md-code-font-family);
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: var(--md-code-fg-color);
+  background: var(--md-code-bg-color);
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 0.1rem;
+  padding: 0.5rem;
+  tab-size: 4;
+  white-space: pre;
+  overflow: auto;
+}
+
+/* cktImg draws on white; keep it legible in the dark scheme. */
+.esp-pg__sch {
+  background: #fff;
+  border-radius: 0.1rem;
+  min-height: 6rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+}
+
+.esp-pg__sch img { max-width: 100%; height: auto; }
+
+.esp-pg__bar {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  margin-top: 0.6rem;
+}
+
+.esp-pg__run { margin: 0; cursor: pointer; }
+.esp-pg__run:disabled { opacity: 0.6; cursor: progress; }
+
+.esp-pg__status { font-size: 0.7rem; color: var(--md-default-fg-color--light); }
+
+.esp-pg__title {
+  font-weight: 700;
+  font-size: 0.75rem;
+  margin: 0.8rem 0 0.3rem;
+}
+
+.esp-pg__plot { width: 100%; color: var(--md-default-fg-color); }
+
+.esp-pg__table { font-family: var(--md-code-font-family); font-size: 0.7rem; }
+.esp-pg__table td { padding: 0.1rem 0.8rem 0.1rem 0; }
+
+.esp-pg__error {
+  white-space: pre-wrap;
+  font-size: 0.72rem;
+  color: var(--md-typeset-color);
+  background: rgba(209, 73, 91, 0.12);
+  border-left: 0.2rem solid #d1495b;
+  padding: 0.4rem 0.6rem;
+  margin: 0.4rem 0;
+}
+
+.esp-pg__sch .esp-pg__error { color: #1d2330; margin: 0.4rem; }
+
+.esp-pg__stdout { font-size: 0.7rem; }
