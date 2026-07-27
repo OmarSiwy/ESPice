@@ -1,0 +1,3 @@
+module ch2_stmt_attr(p); inout p; electrical p; real x; analog begin (* assign_attr *) x=V(p); (* contribution_attr=1 *) I(p)<+x; end endmodule
+// Attribute instances may precede any statement (LRM 2.9.1); they are parsed
+// and skipped, so this must COMPILE.

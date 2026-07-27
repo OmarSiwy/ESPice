@@ -1,0 +1,3 @@
+# LRM 6.6.1: the genvar loop init, condition and step must all use the same
+# genvar; `j` in the step is not a constant expression of `i`.
+E0419

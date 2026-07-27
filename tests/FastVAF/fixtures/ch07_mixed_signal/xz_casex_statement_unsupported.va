@@ -1,0 +1,11 @@
+// EXPECT: error -- casex is part of full Verilog-AMS mixed-signal conversion.
+module ch7_xz_casex_statement(p, d);
+  inout p; electrical p; input d; wire d; real result;
+  analog begin
+    casex (d)
+      1'bx: result = 1.0;
+      default: result = 0.0;
+    endcase
+    I(p) <+ result;
+  end
+endmodule

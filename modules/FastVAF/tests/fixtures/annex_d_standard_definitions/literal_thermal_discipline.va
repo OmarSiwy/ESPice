@@ -1,0 +1,8 @@
+discipline thermal;
+  potential Temperature;
+  flow Power;
+enddiscipline
+module annex_d_literal_thermal(p);
+  inout p; thermal p;
+  analog Pwr(p) <+ Temp(p);
+endmodule

@@ -1,0 +1,11 @@
+`timescale 1ns/1ps
+`default_nettype wire
+`celldefine
+`pragma fixture harmless
+`line 100 "virtual.va" 0
+module ch10_ignored_standard_directives(p, n);
+  inout p, n; electrical p, n;
+  analog I(p,n) <+ V(p,n);
+endmodule
+`endcelldefine
+`nounconnected_drive

@@ -1,0 +1,8 @@
+module ch09_atomic_finish(p, n);
+  inout p, n; electrical p, n;
+  analog begin
+    if (V(p,n) > 1.0) $finish(2);
+    I(p,n) <+ V(p,n);
+  end
+endmodule
+

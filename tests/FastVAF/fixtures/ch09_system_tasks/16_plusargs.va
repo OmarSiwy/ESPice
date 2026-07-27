@@ -1,0 +1,9 @@
+module ch09_plusargs(p, n);
+  inout p, n; electrical p, n;
+  integer enabled, value;
+  analog begin
+    enabled = $test$plusargs("feature");
+    value = $value$plusargs("gain=%d", value);
+    I(p,n) <+ enabled + value + 0.0*V(p,n);
+  end
+endmodule

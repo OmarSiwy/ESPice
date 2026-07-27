@@ -1,0 +1,23 @@
+// Voltage-controlled voltage source (ngspice E element).
+// Nodes in ngspice card order: n+ n- nc+ nc-.
+//
+// Doc §1.5 / §3:  V(p,n) = gain * V(cp,cn), branch-current unknown via the
+// named branch (the KVL row the doc asks for). Constant stamp: no bias
+// dependence, no limiting, no charge.
+//
+// ponytail: no c0/c1/c2 POLY ladder here. §1.6 scopes the polynomial subset
+// to the B-source, and nothing in the netlist layer extracts POLY coefficients
+// for card letter E (builder.zig only fills the p1 slot:
+// `positionalNumber(dev, 0) orelse 0`). If E POLY(n) is ever wired up, it
+// belongs in bsource's expression route, not in another parameter ladder.
+module vcvs(p, n, cp, cn);
+    inout p, n, cp, cn;
+    electrical p, n, cp, cn;
+    branch (p, n) br;
+
+    parameter real gain = 0.0;  // POLY p1 / E card VALUE; ngspice has no default
+
+    analog begin
+        V(br) <+ gain * V(cp, cn);
+    end
+endmodule

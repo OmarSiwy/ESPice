@@ -1,0 +1,9 @@
+module ch09_atomic_test_plusargs(p, n);
+  inout p, n; electrical p, n;
+  integer enabled;
+  analog begin
+    enabled = $test$plusargs("feature");
+    I(p,n) <+ V(p,n) + enabled;
+  end
+endmodule
+

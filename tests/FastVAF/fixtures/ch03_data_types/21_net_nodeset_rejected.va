@@ -1,0 +1,4 @@
+// EXPECT: error
+module ch03_net_nodeset_rejected;
+    electrical node = 5.0;
+endmodule

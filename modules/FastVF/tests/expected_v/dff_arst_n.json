@@ -1,0 +1,79 @@
+{
+  "status": "compile_ok",
+  "module_name": "dff_arst_n",
+  "input_count": 6,
+  "output_count": 4,
+  "is_sequential": true,
+  "ports": [
+    {
+      "name": "clk",
+      "dir": "in",
+      "width": 1
+    },
+    {
+      "name": "rst_n",
+      "dir": "in",
+      "width": 1
+    },
+    {
+      "name": "d",
+      "dir": "in",
+      "width": 4
+    },
+    {
+      "name": "q",
+      "dir": "out",
+      "width": 4
+    }
+  ],
+  "vectors": [
+    {
+      "clk": 0,
+      "rst_n": 1,
+      "d": 5,
+      "q": 0
+    },
+    {
+      "clk": 1,
+      "rst_n": 1,
+      "d": 5,
+      "q": 5
+    },
+    {
+      "clk": 1,
+      "rst_n": 0,
+      "d": 5,
+      "q": 0
+    },
+    {
+      "clk": 0,
+      "rst_n": 0,
+      "d": 5,
+      "q": 0
+    },
+    {
+      "clk": 1,
+      "rst_n": 0,
+      "d": 5,
+      "q": 0
+    },
+    {
+      "clk": 1,
+      "rst_n": 1,
+      "d": 9,
+      "q": 0
+    },
+    {
+      "clk": 0,
+      "rst_n": 1,
+      "d": 9,
+      "q": 0
+    },
+    {
+      "clk": 1,
+      "rst_n": 1,
+      "d": 9,
+      "q": 9
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+// EXPECT: error -- a digital initial process needs the digital backend.
+module ch7_digital_initial;
+  integer state;
+  initial begin state = 1; end
+endmodule

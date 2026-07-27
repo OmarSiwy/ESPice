@@ -1,0 +1,4 @@
+nature ch3_shadow_n; units="V"; access=ShadowV; abstol=1u; endnature
+discipline ch3_shadow_d; potential ch3_shadow_n; enddiscipline
+module ch3_shadow(p); inout p; ch3_shadow_d p; real ShadowV; analog begin ShadowV=1.0; potential(p)<+ShadowV; end endmodule
+// EXPECT: error -- normative syntax/restriction snapshot for this rule family.

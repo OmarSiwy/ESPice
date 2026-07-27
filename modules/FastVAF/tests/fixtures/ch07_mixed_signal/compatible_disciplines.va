@@ -1,0 +1,22 @@
+nature ch7_potential;
+  units = "V";
+  access = V;
+  abstol = 1u;
+endnature
+nature ch7_flow;
+  units = "A";
+  access = I;
+  abstol = 1p;
+endnature
+discipline ch7_disc_a;
+  potential ch7_potential;
+  flow ch7_flow;
+enddiscipline
+discipline ch7_disc_b;
+  potential ch7_potential;
+  flow ch7_flow;
+enddiscipline
+module ch7_compatible(p);
+  inout p; ch7_disc_a p;
+  analog I(p) <+ V(p);
+endmodule

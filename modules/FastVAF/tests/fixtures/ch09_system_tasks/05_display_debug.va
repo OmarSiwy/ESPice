@@ -1,0 +1,7 @@
+module ch09_display_debug(p, n);
+  inout p, n; electrical p, n;
+  analog begin
+    $debug("iteration=%d value=%g", 1, V(p,n));
+    I(p,n) <+ V(p,n);
+  end
+endmodule

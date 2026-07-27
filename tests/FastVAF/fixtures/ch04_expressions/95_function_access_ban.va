@@ -1,0 +1,1 @@
+module ch4_fn_access(p); inout p; electrical p; analog function real probe; input x; real x; probe=V(p)+x; endfunction analog I(p)<+probe(1.0); endmodule

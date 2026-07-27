@@ -1,0 +1,34 @@
+// §4.5.7 absdelay — a pure transport delay. The input is a RAMP of one volt per
+// nanosecond, so the delayed output has a closed form that makes an off-by-one
+// sample impossible to miss: out(t) = in(t - td) = (t - td)/1n.
+//
+// Before the delay has elapsed the history ring holds only the samples taken so
+// far; the LRM leaves that startup unspecified, so the checks below only claim
+// the delayed identity from t >= td onward.
+//
+//! bias V(n) = 0
+//! wave V(in) = 0, 1, 2, 3, 4, 5, 6
+//! time 0, 1n, 2n, 3n, 4n, 5n, 6n
+//! analysis tran
+//! print none
+`include "check.vh"
+module ex065_absdelay(in, n);
+  inout in, n;
+  electrical in, n;
+  analog begin
+    $strobe("t=%g in=%g delayed=%g", $abstime / 1n, V(in, n), absdelay(V(in, n), 2n));
+    // Written WITHOUT a runtime conditional on purpose: LRM 5.8 forbids one
+    // around an analog operator ("if any of the conditionally-executed
+    // statements contains an analog operator, the conditional expression shall
+    // be an analysis_or_constant_expression"), and FastVAF does not yet
+    // diagnose the violation — it feeds the operator 0 on the steps its branch
+    // is off, silently corrupting the history. See tests/fixtures/TODO.md.
+    //
+    // `max(0, t - td)` covers the startup as well as the steady state: before
+    // the ring reaches back td seconds the kernel returns 0, which is what the
+    // clamp says.
+    `CHECKR("delayed by exactly td", absdelay(V(in, n), 2n),
+            max(0.0, $abstime / 1n - 2.0), 1e-12);
+    I(in, n) <+ 0.0;
+  end
+endmodule

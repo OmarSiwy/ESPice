@@ -1,0 +1,4 @@
+module ch5_port_flow(p);
+  inout p; electrical p;
+  analog I(p) <+ I(<p>) + V(p);
+endmodule

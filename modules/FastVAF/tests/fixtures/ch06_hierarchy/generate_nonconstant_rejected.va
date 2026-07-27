@@ -1,0 +1,7 @@
+// The snapshot exposes the missing constant-condition semantic diagnostic.
+module ch6_generate_nonconstant(p);
+  inout p; electrical p; integer runtime_value;
+  generate
+    if (runtime_value) I(p) <+ V(p);
+  endgenerate
+endmodule

@@ -1,0 +1,4 @@
+// EXPECT: error -- discipline-resolution connect statements are host rules.
+connectrules ch7_resolution;
+  connect electrical, thermal resolveto electrical;
+endconnectrules

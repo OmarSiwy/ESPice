@@ -1,0 +1,2 @@
+module ch4_fn_array_out(p); inout p; electrical p; real a,b,dummy; analog function real fill; input x; output [0:1] out; real x,out[0:1]; begin out[0]=x; out[1]=2.0*x; fill=x; end endfunction analog begin dummy=fill(V(p),'{a,b}); I(p)<+dummy+a+b; end endmodule
+// EXPECT: error -- normative syntax/restriction snapshot for this rule family.

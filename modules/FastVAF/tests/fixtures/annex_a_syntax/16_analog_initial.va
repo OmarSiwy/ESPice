@@ -1,0 +1,1 @@
+module annex_a_analog_initial(p); inout p; electrical p; real state; analog initial state=1.0; analog I(p)<+state*V(p); endmodule

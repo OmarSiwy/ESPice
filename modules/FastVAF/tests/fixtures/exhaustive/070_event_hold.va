@@ -1,0 +1,44 @@
+// §5.10 a variable assigned under an event control PERSISTS between analog
+// evaluations. That is the entire point of `@(cross(...)) x = V(p);` — the
+// event is active on one step out of thousands, and the value it captured has
+// to still be there on all the others. A module variable is otherwise
+// re-initialised from its declaration at the top of every evaluation, so
+// without a persistent slot the capture collapses back to 0 on the very next
+// step and the model silently computes with the initializer.
+//
+// Both types matter: `real` for a sampled level, `integer` because a counter or
+// an FSM code is the natural way to write the state an event advances.
+//
+// V(c) crosses zero upward between t = 1n and t = 2n, so `cross(V(c), +1)`
+// raises its flag on the step accepted at t = 2n and the guarded body therefore
+// runs during the evaluation at t = 3n (§4.5.2 — event state advances on the
+// ACCEPTED step). At t = 3n `held` takes V(p) = 5 and `fired` counts its one
+// event. At t = 4n the event is long gone and V(p) has moved to 6: BOTH must
+// still read exactly what the event left behind. That last point is the test —
+// before the fix it read `held = 0`, `fired = 0`.
+//
+//! bias V(n) = 0
+//! wave V(c) = -1, -1, 1, 1, 1
+//! wave V(p) = 2, 3, 4, 5, 6
+//! time 0, 1n, 2n, 3n, 4n
+//! analysis tran
+//! print none
+`include "check.vh"
+module ex070_event_hold(p, c, n);
+  inout p, c, n;
+  electrical p, c, n;
+  real held;
+  integer fired;
+  analog begin
+    @(cross(V(c, n), +1)) begin
+      held = V(p, n);
+      fired = fired + 1;
+    end
+    `CHECK("real captured by the event, held once it stops firing", held,
+           ($abstime < 2.5n) ? 0.0 : 5.0, 1e-15);
+    `CHECKI("integer counts the one event and does not reset", fired,
+            ($abstime < 2.5n) ? 0 : 1);
+    I(p, n) <+ 0.0;
+    I(c, n) <+ 0.0;
+  end
+endmodule

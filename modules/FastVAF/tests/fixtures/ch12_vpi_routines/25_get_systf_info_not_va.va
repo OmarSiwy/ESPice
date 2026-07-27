@@ -1,0 +1,6 @@
+// EXPECT: error
+module ch12_atomic_get_systf_info(p, n);
+  inout p, n; electrical p, n;
+  analog I(p,n) <+ vpi_get_systf_info(0);
+endmodule
+

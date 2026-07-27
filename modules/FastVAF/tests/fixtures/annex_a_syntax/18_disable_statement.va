@@ -1,0 +1,1 @@
+module annex_a_disable(p); inout p; electrical p; analog begin : work if(V(p)>1.0) disable work; I(p)<+V(p); end endmodule

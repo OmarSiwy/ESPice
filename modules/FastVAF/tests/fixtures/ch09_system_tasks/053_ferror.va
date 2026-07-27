@@ -1,0 +1,10 @@
+module ch09_atomic_ferror(p, n);
+  inout p, n; electrical p, n;
+  integer fd, code; string text;
+  analog begin
+    fd = $fopen("fixture.dat", "r");
+    code = $ferror(fd, text);
+    I(p,n) <+ V(p,n) + code;
+  end
+endmodule
+

@@ -1,0 +1,9 @@
+# LRM 5.6.7.2 "Indirect and direct contribution":
+#   "Indirect contribution statements is incompatible with direct contribution
+#    statements across the same pair of analog nets (or any of its parallel
+#    branches). Once a value is indirectly assigned to a branch, it cannot be
+#    contributed to using the branch contribution operator <+."
+# The fixture indirectly assigns V(p,n) and then contributes I(p,n) <+ 1u
+# across that same pair, which the paragraph above forbids outright.
+E0409
+indirectly assigned

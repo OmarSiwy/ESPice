@@ -1,0 +1,4 @@
+# §5.8.1 an analog operator under a condition that is not an
+# analysis_or_constant_expression. If this fixture ever COMPILES again, the
+# operator is back to being fed 0 on every step its branch was off.
+E0514

@@ -1,0 +1,20 @@
+nature ch03_override_voltage;
+    units = "V";
+    access = V;
+    abstol = 100u;
+endnature
+
+nature ch03_override_current;
+    units = "A";
+    access = I;
+    abstol = 1u;
+endnature
+
+discipline ch03_override_discipline;
+    potential ch03_override_voltage;
+    flow ch03_override_current;
+    flow.abstol = 10u;
+enddiscipline
+
+module ch03_discipline_override;
+endmodule

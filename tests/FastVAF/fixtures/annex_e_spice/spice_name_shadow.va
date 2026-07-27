@@ -1,0 +1,4 @@
+module resistor(p, n);
+  inout p, n; electrical p, n; parameter real r = 1k from (0:inf);
+  analog I(p, n) <+ V(p, n) / r;
+endmodule

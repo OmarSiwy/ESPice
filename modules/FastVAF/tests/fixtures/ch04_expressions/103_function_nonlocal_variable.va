@@ -1,0 +1,1 @@
+module ch4_fn_nonlocal(p); inout p; electrical p; real outer; analog function real nonlocal; input x; real x; nonlocal=x+outer; endfunction analog I(p)<+nonlocal(V(p)); endmodule

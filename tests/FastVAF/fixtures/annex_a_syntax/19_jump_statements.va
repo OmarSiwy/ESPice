@@ -1,0 +1,1 @@
+module annex_a_jumps(p); inout p; electrical p; integer i; analog begin for(i=0;i<3;i=i+1) begin if(i==1) continue; if(i==2) break; end return; I(p)<+V(p); end endmodule

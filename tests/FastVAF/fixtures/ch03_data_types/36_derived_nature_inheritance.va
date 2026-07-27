@@ -1,0 +1,4 @@
+nature ch3_parent_n; units="V"; access=ParentV; abstol=1u; endnature
+nature ch3_child_n:ch3_parent_n; endnature
+discipline ch3_child_d; potential ch3_child_n; enddiscipline
+module ch3_derived(p); inout p; ch3_child_d p; analog ParentV(p)<+0.0; endmodule

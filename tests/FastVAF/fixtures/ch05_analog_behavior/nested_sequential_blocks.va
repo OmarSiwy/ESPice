@@ -1,0 +1,1 @@
+module ch5_nested_blocks(p); inout p; electrical p; real x; analog begin x=1.0; begin x=x+V(p); begin I(p)<+x; end end end endmodule

@@ -1,0 +1,13 @@
+module combined_analysis_modes_and_severity(p, n);
+  inout p, n; electrical p, n;
+  parameter real conductance = 1m from [0:inf);
+  analog begin
+    if (analysis("dc", "static"))
+      I(p,n) <+ conductance * V(p,n);
+    else if (analysis("tran"))
+      I(p,n) <+ 2.0 * conductance * V(p,n);
+    else
+      I(p,n) <+ conductance * V(p,n);
+    if (conductance == 0.0) $info("zero conductance selected");
+  end
+endmodule

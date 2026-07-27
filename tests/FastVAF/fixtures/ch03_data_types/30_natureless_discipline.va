@@ -1,0 +1,2 @@
+discipline ch3_natureless; domain continuous; enddiscipline
+module ch3_natureless_structural; ch3_natureless link; endmodule

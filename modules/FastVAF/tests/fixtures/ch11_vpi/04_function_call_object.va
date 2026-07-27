@@ -1,0 +1,8 @@
+module ch11_function_call_object(p, n);
+  inout p, n; electrical p, n;
+  analog function real square;
+    input x; real x;
+    begin square = x*x; end
+  endfunction
+  analog I(p,n) <+ square(V(p,n));
+endmodule

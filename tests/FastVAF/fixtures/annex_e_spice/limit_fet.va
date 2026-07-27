@@ -1,0 +1,4 @@
+module annex_e_fetlim(p);
+  inout p; electrical p; real limited;
+  analog begin limited = $limit(V(p), "fetlim", 0.7); I(p) <+ limited; end
+endmodule

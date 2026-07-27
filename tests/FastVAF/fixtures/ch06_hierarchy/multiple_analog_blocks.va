@@ -1,0 +1,6 @@
+module ch6_concat(p);
+  inout p; electrical p;
+  analog I(p) <+ 1m;
+  analog I(p) <+ V(p);
+  analog I(p) <+ ddt(V(p));
+endmodule

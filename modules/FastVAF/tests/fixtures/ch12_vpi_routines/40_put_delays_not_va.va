@@ -1,0 +1,6 @@
+// EXPECT: error
+module ch12_atomic_put_delays(p, n);
+  inout p, n; electrical p, n;
+  analog I(p,n) <+ vpi_put_delays(0);
+endmodule
+

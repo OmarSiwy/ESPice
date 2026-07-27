@@ -1,0 +1,15 @@
+=== 040_exp_log_pow ===
+--- point 0 ---
+  x[p] = 0.000000e0
+  x[n] = 0.000000e0
+exp(1) got=2.7182818284590455 want=2.718281828459045 ok=1
+exp(0) got=1 want=1 ok=1
+ln(2) got=0.6931471805599453 want=0.6931471805599453 ok=1
+ln(1) got=0 want=0 ok=1
+log(1000) is base 10 got=3 want=3 ok=1
+sqrt(2) got=1.4142135623730951 want=1.4142135623730951 ok=1
+sqrt(4) got=2 want=2 ok=1
+pow integer exponent got=1024 want=1024 ok=1
+pow fractional exponent got=1.4142135623730951 want=1.4142135623730951 ok=1
+pow zero exponent got=1 want=1 ok=1
+hypot(3,4) got=5 want=5 ok=1

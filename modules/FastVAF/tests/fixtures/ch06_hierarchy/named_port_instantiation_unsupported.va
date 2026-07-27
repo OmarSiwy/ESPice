@@ -1,0 +1,5 @@
+// EXPECT: error -- named instance port connection needs hierarchy.
+module ch6_parent_named_port(p);
+  inout p; electrical p;
+  child u(.p(p));
+endmodule

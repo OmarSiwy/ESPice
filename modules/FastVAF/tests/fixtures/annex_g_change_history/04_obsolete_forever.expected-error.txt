@@ -1,0 +1,4 @@
+# LRM 5.9: the analog looping statements are repeat, while and for --
+# `forever` is not one of them.
+E0205
+forever

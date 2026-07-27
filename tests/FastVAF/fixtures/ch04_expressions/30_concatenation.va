@@ -1,0 +1,10 @@
+module ch04_concatenation(p, n);
+    inout p, n;
+    electrical p, n;
+    integer packed_value;
+
+    analog begin
+        packed_value = {4'b1010, 4'b0101};
+        I(p, n) <+ packed_value;
+    end
+endmodule

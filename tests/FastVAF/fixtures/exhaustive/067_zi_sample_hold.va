@@ -1,0 +1,32 @@
+// §4.5.12 zi_nd — a z-domain filter on its OWN timebase: "acts like a simple
+// sample-and-hold which samples every T seconds". With H(z) = 1 (a pure
+// sample-and-hold) and T = 2 ns, the output must be piecewise CONSTANT between
+// samples even though the input changes every nanosecond.
+//
+// Between samples the output does not depend on the current unknowns, so it
+// enters the residual as a constant — which is also why its Jacobian row is
+// empty and `print none` costs nothing here.
+//
+// The optional τ / t0 arguments are omitted deliberately: FastVAF REJECTS them
+// (§4.5.12) rather than ignoring them, because a dropped transition time is a
+// different waveform. Passing one is an expected-error fixture's job, not this
+// one's.
+//
+//! bias V(n) = 0
+//! wave V(in) = 0, 1, 2, 3, 4, 5, 6
+//! time 0, 1n, 2n, 3n, 4n, 5n, 6n
+//! analysis tran
+//! print none
+`include "check.vh"
+module ex067_zi(in, n);
+  inout in, n;
+  electrical in, n;
+  real y;
+  analog begin
+    y = zi_nd(V(in, n), {1.0}, {1.0}, 2n);
+    $strobe("t=%g in=%g held=%g", $abstime / 1n, V(in, n), y);
+    // A sample-and-hold can only ever produce a value the input actually had.
+    `CHECKI("output is a past input sample", (y >= 0.0) && (y <= V(in, n)), 1);
+    I(in, n) <+ 0.0;
+  end
+endmodule

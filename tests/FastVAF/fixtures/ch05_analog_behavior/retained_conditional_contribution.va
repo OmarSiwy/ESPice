@@ -1,0 +1,4 @@
+module ch5_retained(p, n, c);
+  inout p, n, c; electrical p, n, c;
+  analog if (V(c) > 0.0) I(p, n) <+ 1m;
+endmodule

@@ -1,0 +1,18 @@
+// §5.6.7 indirect branch contribution: `V(out) : V(out) == expr` asks the solver
+// to adjust a source until the equation holds. Its row is the CONSTRAINT alone
+// (probe minus equation), with no V(hi,lo) term — the branch voltage is exactly
+// what is being solved for.
+//
+//! bias V(in) = 0.75
+//! sweep V(out) = 0, 1.5
+`include "check.vh"
+module ex084_indirect(out, in);
+  inout out, in;
+  electrical out, in;
+  parameter real gain = 2.0;
+  analog begin
+    `CHECK("target value", gain * V(in), 1.5, 1e-15);
+    V(out) : V(out) == gain * V(in);
+    I(in) <+ V(in) * 1e-6;
+  end
+endmodule

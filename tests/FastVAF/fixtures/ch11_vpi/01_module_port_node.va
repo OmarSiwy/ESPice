@@ -1,0 +1,5 @@
+module ch11_module_port_node(p, n);
+  inout p, n;
+  electrical p, n;
+  analog I(p,n) <+ V(p,n);
+endmodule

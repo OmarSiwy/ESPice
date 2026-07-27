@@ -1,0 +1,9 @@
+// EXPECT: error -- blocking assignment delay/event controls use the active queue.
+module ch8_blocking_timing;
+  reg source, target;
+  initial begin
+    #1 target = source;
+    target = #1 source;
+    @(source) target = source;
+  end
+endmodule

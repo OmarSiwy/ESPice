@@ -1,0 +1,2 @@
+# LRM 5.2.1: contribution statements are forbidden in an analog initial block.
+E0405

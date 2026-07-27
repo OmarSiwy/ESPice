@@ -1,0 +1,5 @@
+`default_discipline electrical real
+module ch10_default_discipline_qualified(p, n);
+  inout p, n; electrical p, n;
+  analog I(p,n) <+ V(p,n);
+endmodule

@@ -1,0 +1,14 @@
+module ch04_numeric_conversions(p, n);
+    inout p, n;
+    electrical p, n;
+    integer rounded_positive, rounded_negative, integer_division;
+    real mixed_division;
+
+    analog begin
+        rounded_positive = 35.5;
+        rounded_negative = -1.5;
+        integer_division = 1 / 2;
+        mixed_division = 1 / 2.0;
+        I(p, n) <+ rounded_positive + rounded_negative + integer_division + mixed_division;
+    end
+endmodule

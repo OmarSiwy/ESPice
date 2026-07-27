@@ -1,0 +1,55 @@
+{
+  "status": "compile_ok",
+  "module_name": "mux2",
+  "input_count": 17,
+  "output_count": 8,
+  "is_sequential": false,
+  "ports": [
+    {
+      "name": "sel",
+      "dir": "in",
+      "width": 1
+    },
+    {
+      "name": "a",
+      "dir": "in",
+      "width": 8
+    },
+    {
+      "name": "b",
+      "dir": "in",
+      "width": 8
+    },
+    {
+      "name": "y",
+      "dir": "out",
+      "width": 8
+    }
+  ],
+  "vectors": [
+    {
+      "sel": 0,
+      "a": 170,
+      "b": 85,
+      "y": 170
+    },
+    {
+      "sel": 1,
+      "a": 170,
+      "b": 85,
+      "y": 85
+    },
+    {
+      "sel": 0,
+      "a": 0,
+      "b": 255,
+      "y": 0
+    },
+    {
+      "sel": 1,
+      "a": 0,
+      "b": 255,
+      "y": 255
+    }
+  ]
+}

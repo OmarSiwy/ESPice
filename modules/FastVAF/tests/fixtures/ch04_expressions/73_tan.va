@@ -1,0 +1,11 @@
+// tan() has poles at odd multiples of pi/2 (LRM 4.3.2 Table 4-15). A node
+// voltage is unbounded, so the call is guarded into the pole-free central
+// branch (-pi/2, pi/2).
+module ch04_tan(p, n);
+  inout p, n; electrical p, n;
+  analog begin
+    if (V(p, n) > -1.5)
+      if (V(p, n) < 1.5)
+        I(p, n) <+ tan(V(p, n));
+  end
+endmodule

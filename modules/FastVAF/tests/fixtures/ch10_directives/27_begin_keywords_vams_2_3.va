@@ -1,0 +1,8 @@
+// EXPECT: error
+// LRM 10.6: under a VAMS keyword set sin is a reserved keyword (Annex B), so a port named sin shall result in an error.
+`begin_keywords "VAMS-2.3"
+module ch10_begin_keywords_vams_2_3(sin, n);
+  inout sin, n; electrical sin, n;
+  analog I(sin,n) <+ V(sin,n);
+endmodule
+`end_keywords

@@ -1,0 +1,4 @@
+// EXPECT: error
+module annex_b_reserved_if_rejected;
+    real if;
+endmodule

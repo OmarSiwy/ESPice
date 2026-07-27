@@ -1,0 +1,5 @@
+// EXPECT: error -- a bus narrower than 31 bits is zero-extended on analog access.
+module ch7_discrete_bus_narrow(p, d);
+  inout p; electrical p; input [0:7] d; wire [0:7] d;
+  analog I(p) <+ d;
+endmodule

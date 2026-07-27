@@ -1,0 +1,27 @@
+=== 061_ddx_derivative ===
+--- point 0 ---
+  x[p] = 5.000000e-1
+  x[n] = 0.000000e0
+ddx of a linear term got=3 want=3 ok=1
+ddx of a square got=1 want=1 ok=1
+ddx wrt the other node got=-1 want=-1 ok=1
+ddx of a constant got=0 want=0 ok=1
+  res[p] = 1.500000e0
+    d res[p]/d x[p] = 3.000000e0
+    d res[p]/d x[n] = -3.000000e0
+  res[n] = -1.500000e0
+    d res[n]/d x[p] = -3.000000e0
+    d res[n]/d x[n] = 3.000000e0
+--- point 1 ---
+  x[p] = 2.000000e0
+  x[n] = 0.000000e0
+ddx of a linear term got=3 want=3 ok=1
+ddx of a square got=4 want=4 ok=1
+ddx wrt the other node got=-4 want=-4 ok=1
+ddx of a constant got=0 want=0 ok=1
+  res[p] = 6.000000e0
+    d res[p]/d x[p] = 3.000000e0
+    d res[p]/d x[n] = -3.000000e0
+  res[n] = -6.000000e0
+    d res[n]/d x[p] = -3.000000e0
+    d res[n]/d x[n] = 3.000000e0

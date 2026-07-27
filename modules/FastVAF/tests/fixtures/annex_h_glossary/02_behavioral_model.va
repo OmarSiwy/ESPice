@@ -1,0 +1,5 @@
+module glossary_behavioral_model(p, n);
+  inout p, n; electrical p, n;
+  parameter real resistance = 1k from (0:inf);
+  analog I(p,n) <+ V(p,n)/resistance;
+endmodule

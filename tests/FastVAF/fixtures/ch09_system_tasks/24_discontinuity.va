@@ -1,0 +1,8 @@
+module ch09_discontinuity(p, n);
+  inout p, n; electrical p, n;
+  analog begin
+    if (V(p,n) >= 0.0) $discontinuity(0);
+    else $discontinuity(-1);
+    I(p,n) <+ V(p,n);
+  end
+endmodule

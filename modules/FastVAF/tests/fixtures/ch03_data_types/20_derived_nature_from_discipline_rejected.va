@@ -1,0 +1,8 @@
+// Annex A.1.6 parent_nature ::= nature_identifier | discipline_identifier .
+// potential_or_flow, so deriving a nature from `<discipline>.potential` is legal
+// and this must COMPILE (file name is historical).
+nature ch03_derived_from_bound : ch03_base.potential;
+endnature
+
+module ch03_derived_nature_from_discipline_rejected;
+endmodule

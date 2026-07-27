@@ -1,0 +1,12 @@
+=== 120_environment ===
+--- point 0 ---
+  x[p] = 0.000000e0
+  x[n] = 0.000000e0
+$temperature follows the directive got=350 want=350 ok=1
+$vt with no argument uses $temperature got=0.030160666417508124 want=0.030160666417508124 ok=1
+$vt(T) uses its argument got=0.025851999786435535 want=0.025851999786435535 ok=1
+$abstime at the DC point got=0 want=0 ok=1
+$simparam gmin default got=0.000000000001 want=0.000000000001 ok=1
+$simparam tnom default got=300.15 want=300.15 ok=1
+$simparam scale default got=1 want=1 ok=1
+$simparam with an explicit default got=4.5 want=4.5 ok=1

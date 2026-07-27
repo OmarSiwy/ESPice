@@ -1,0 +1,9 @@
+module ch5_named_block(p);
+  inout p; electrical p;
+  analog begin : calc
+    parameter real scale = 2.0;
+    real local_value;
+    local_value = scale * V(p);
+    I(p) <+ local_value;
+  end
+endmodule

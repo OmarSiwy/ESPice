@@ -1,0 +1,5 @@
+module glossary_reference_node(p);
+  inout p; electrical p;
+  electrical gnd; ground gnd;
+  analog I(p,gnd) <+ V(p,gnd)/1000.0;
+endmodule

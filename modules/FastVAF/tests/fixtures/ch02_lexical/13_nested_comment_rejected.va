@@ -1,0 +1,4 @@
+// EXPECT: error
+module ch02_nested_comment_rejected;
+    /* outer /* nested */ still_outer */
+endmodule

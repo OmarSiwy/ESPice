@@ -1,0 +1,8 @@
+// EXPECT: error
+module ch10_file_macro_unsupported(p, n);
+  inout p, n; electrical p, n;
+  analog begin
+    $display("file=%s", `__FILE__);
+    I(p,n) <+ V(p,n);
+  end
+endmodule

@@ -1,0 +1,52 @@
+// §5.10.5 `timer(start_time, period)` is the ONLY thing in Verilog-A that says
+// "the simulator shall place a timepoint here": "the timer function schedules an
+// event at start_time, and every period after that". §9.17.2 `$bound_step`
+// bounds step SIZE, which is a bound and not a location, and §9.17.1
+// `$discontinuity` only announces one after it has already been stepped over.
+//
+// So a module with a timer, and only such a module, gets the host's
+// `nextBreakpoint(model, t)` hook (modules/devices/src/contract.zig). The hook
+// has no `Instance`, so it cannot read the live `__next` counter `updateState`
+// advances — it RECOMPUTES the schedule from the model, which is sound because
+// §4.5.14 makes an operator control argument a constant or parameter expression.
+// `tstart`/`tper` here are parameters exactly to exercise that path: the emitted
+// function reads `model.tstart`, not a folded literal.
+//
+// The `//! time` points below ARE the fire times (2n, 5n, 8n) plus two points
+// that are not, so the transcript pins down every case that matters:
+//
+//   t = 0     before the first fire      -> 2n
+//   t = 1n    still before it            -> 2n
+//   t = 2n    EXACTLY ON a fire time     -> 5n, never 2n again
+//   t = 3n    between fires              -> 5n
+//   t = 5n    EXACTLY ON a fire time     -> 8n
+//   t = 8n    EXACTLY ON a fire time     -> 11n
+//
+// The t-on-a-fire-time rows are the whole point. `nextBreakpoint` must answer
+// STRICTLY after `t`: modules/analysis/src/tran/matex.zig walks the breakpoint
+// list by `t = bp; nextBreakpoint(t)`, so an answer equal to `t` is a loop that
+// never advances.
+//
+// `fired` cross-checks the hook against the code that actually raises the
+// event. §4.5.2 advances event state on the ACCEPTED step, so the flag latched
+// by `updateState` at time T is read by `eval` at the NEXT time point — hence
+// the count steps one row after each fire above.
+//
+//! bias V(p) = 0
+//! time 0, 1n, 2n, 3n, 5n, 8n
+//! analysis tran
+//! print none
+`include "check.vh"
+module ex071_timer_periodic(p);
+  inout p;
+  electrical p;
+  parameter real tstart = 2n from [0:inf);
+  parameter real tper = 3n from (0:inf);
+  integer fired;
+  analog begin
+    @(timer(tstart, tper)) fired = fired + 1;
+    `CHECKI("timer fires once per breakpoint, one accepted step later", fired,
+            ($abstime < 2.5n) ? 0 : (($abstime < 5.5n) ? 1 : 2));
+    I(p) <+ 0.0;
+  end
+endmodule

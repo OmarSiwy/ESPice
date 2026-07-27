@@ -1,0 +1,2 @@
+module annex_a_case_generate(p); inout p; electrical p; parameter integer mode=1; generate case(mode) 0: analog I(p)<+0.0; 1,2: analog I(p)<+V(p); default: ; endcase endgenerate endmodule
+// EXPECT: error -- normative syntax/restriction snapshot for this rule family.

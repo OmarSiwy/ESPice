@@ -1,0 +1,1484 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Annex A (normative) Formal syntax definition — Verilog-AMS LRM 2023</title>
+<style>
+body { font-family: 'Segoe UI', system-ui, sans-serif; max-width: 900px; margin: 0 auto; padding: 2rem; background: #fafafa; color: #1a1a1a; line-height: 1.6; }
+h1 { border-bottom: 3px solid #2563eb; padding-bottom: 0.5rem; }
+h2 { color: #1e40af; margin-top: 2rem; border-bottom: 1px solid #ddd; padding-bottom: 0.3rem; }
+h3 { color: #374151; }
+h4 { color: #4b5563; }
+code { background: #e5e7eb; padding: 0.15rem 0.4rem; border-radius: 3px; font-size: 0.9em; }
+pre { background: #1e293b; color: #e2e8f0; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; }
+pre code { background: none; padding: 0; color: inherit; }
+table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+th, td { border: 1px solid #d1d5db; padding: 0.5rem 0.75rem; text-align: left; }
+th { background: #2563eb; color: white; }
+tr:nth-child(even) { background: #f3f4f6; }
+.syntax { background: #fffbeb; border-left: 4px solid #f59e0b; padding: 1rem; margin: 1rem 0; font-family: monospace; white-space: pre-wrap; }
+.note { background: #eff6ff; border-left: 4px solid #2563eb; padding: 0.75rem 1rem; margin: 1rem 0; }
+nav { background: #1e293b; padding: 1rem; border-radius: 6px; margin-bottom: 2rem; }
+nav a { color: #93c5fd; text-decoration: none; margin-right: 1rem; }
+nav a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<nav><a href="index.html">Index</a> <a href="ch12-vpi-routines.html">&larr; Prev</a> <a href="annex-b-keywords.html">Next &rarr;</a> </nav>
+<h1>Annex A (normative) Formal syntax definition</h1>
+
+<p>The formal syntax of Verilog-AMS HDL is described using Backus-Naur Form (BNF). The syntax of Verilog-AMS HDL source is derived from the starting symbol source_text. The syntax of a library map file is derived from the starting symbol library_text. The following grammar is designed as a presentation grammar and should not be interpreted as an unambiguous production grammar. The compiler developer will be required to implement the various semantic restrictions outlined throughout this reference manual to remove any ambiguities.</p>
+
+<div class="note">Transcription note: in the printed LRM, literal terminals (keywords and literal punctuation) are set in bold red type; they are rendered here in <b>bold</b>. Plain <code>[ ]</code>, <code>{ }</code>, and <code>|</code> are BNF meta-symbols (optional, repetition, alternative).</div>
+
+<h2 id="a-1">A.1 Source text</h2>
+
+<h3 id="a-1-1">A.1.1 Library source text</h3>
+<div class="syntax">library_text ::= { library_description }
+library_description ::=
+        library_declaration
+        | include_statement
+        | config_declaration
+library_declaration ::=
+        <b>library</b> library_identifier file_path_spec [ { <b>,</b> file_path_spec } ]
+        [ <b>-incdir</b> file_path_spec { <b>,</b> file_path_spec } ] <b>;</b>
+file_path_spec ::= file_path
+include_statement ::= <b>include</b> file_path_spec <b>;</b></div>
+
+<h3 id="a-1-2">A.1.2 Verilog source text</h3>
+<div class="syntax">source_text ::= { description }
+description ::=
+        module_declaration
+        | udp_declaration
+        | config_declaration
+        | paramset_declaration
+        | nature_declaration
+        | discipline_declaration
+        | connectrules_declaration
+module_declaration ::=
+        { attribute_instance } module_keyword module_identifier [ module_parameter_port_list ]
+            list_of_ports <b>;</b> { module_item }
+        <b>endmodule</b>
+        | { attribute_instance } module_keyword module_identifier [ module_parameter_port_list ]
+            [ list_of_port_declarations ] <b>;</b> { non_port_module_item }
+        <b>endmodule</b>
+module_keyword ::= <b>module</b> | <b>macromodule</b> | <b>connectmodule</b></div>
+
+<h3 id="a-1-3">A.1.3 Module parameters and ports</h3>
+<div class="syntax">module_parameter_port_list ::= <b>#</b> <b>(</b> parameter_declaration { <b>,</b> parameter_declaration } <b>)</b>
+list_of_ports ::= <b>(</b> port { <b>,</b> port } <b>)</b>
+list_of_port_declarations ::=
+        <b>(</b> port_declaration { <b>,</b> port_declaration } <b>)</b>
+port ::=
+        [ port_expression ]
+        | <b>.</b> port_identifier <b>(</b> [ port_expression ] <b>)</b>
+port_expression ::=
+        port_reference
+        | <b>{</b> port_reference { <b>,</b> port_reference } <b>}</b>
+port_reference ::=
+        port_identifier [ <b>[</b> constant_range_expression <b>]</b> ]
+port_declaration ::=
+        {attribute_instance} inout_declaration
+        | {attribute_instance} input_declaration
+        | {attribute_instance} output_declaration</div>
+
+<h3 id="a-1-4">A.1.4 Module items</h3>
+<div class="syntax">module_item ::=
+        port_declaration <b>;</b>
+        | non_port_module_item
+module_or_generate_item ::=
+        { attribute_instance } module_or_generate_item_declaration
+        | { attribute_instance } local_parameter_declaration <b>;</b>
+        | { attribute_instance } parameter_override
+        | { attribute_instance } continuous_assign
+        | { attribute_instance } gate_instantiation
+        | { attribute_instance } udp_instantiation
+        | { attribute_instance } module_instantiation
+        | { attribute_instance } initial_construct
+        | { attribute_instance } always_construct
+        | { attribute_instance } loop_generate_construct
+        | { attribute_instance } conditional_generate_construct
+        | { attribute_instance } analog_construct
+module_or_generate_item_declaration ::=
+        net_declaration
+        | reg_declaration
+        | integer_declaration
+        | real_declaration
+        | time_declaration
+        | realtime_declaration
+        | event_declaration
+        | genvar_declaration
+        | task_declaration
+        | function_declaration
+        | branch_declaration
+        | analog_function_declaration
+non_port_module_item ::=
+        module_or_generate_item
+        | generate_region
+        | specify_block
+        | { attribute_instance } parameter_declaration <b>;</b>
+        | { attribute_instance } specparam_declaration
+        | aliasparam_declaration
+parameter_override ::= <b>defparam</b> list_of_defparam_assignments <b>;</b></div>
+
+<h3 id="a-1-5">A.1.5 Configuration source text</h3>
+<div class="syntax">config_declaration ::=
+        <b>config</b> config_identifier <b>;</b>
+            design_statement
+            {config_rule_statement}
+        <b>endconfig</b>
+design_statement ::= <b>design</b> { [library_identifier<b>.</b>]cell_identifier } <b>;</b>
+config_rule_statement ::=
+        default_clause liblist_clause <b>;</b>
+        | inst_clause liblist_clause <b>;</b>
+        | inst_clause use_clause <b>;</b>
+        | cell_clause liblist_clause <b>;</b>
+        | cell_clause use_clause <b>;</b>
+default_clause ::= <b>default</b>
+inst_clause ::= <b>instance</b> inst_name
+inst_name ::= topmodule_identifier{<b>.</b>instance_identifier}
+cell_clause ::= <b>cell</b> [ library_identifier<b>.</b>]cell_identifier
+liblist_clause ::= <b>liblist</b> { library_identifier }
+use_clause ::= <b>use</b> [library_identifier<b>.</b>]cell_identifier[<b>:config</b>]</div>
+
+<h3 id="a-1-6">A.1.6 Nature Declaration</h3>
+<div class="syntax">nature_declaration ::=
+        <b>nature</b> nature_identifier [ <b>:</b> parent_nature ] [ <b>;</b> ]
+            { nature_item }
+        <b>endnature</b>
+parent_nature ::=
+        nature_identifier
+        | discipline_identifier <b>.</b> potential_or_flow
+nature_item ::= nature_attribute
+nature_attribute ::= nature_attribute_identifier <b>=</b> nature_attribute_expression <b>;</b></div>
+
+<h3 id="a-1-7">A.1.7 Discipline Declaration</h3>
+<div class="syntax">discipline_declaration ::=
+        <b>discipline</b> discipline_identifier [ <b>;</b> ]
+            { discipline_item }
+        <b>enddiscipline</b>
+discipline_item ::=
+        nature_binding
+        | discipline_domain_binding
+        | nature_attribute_override
+nature_binding ::= potential_or_flow nature_identifier <b>;</b>
+potential_or_flow ::= <b>potential</b> | <b>flow</b>
+discipline_domain_binding ::= <b>domain</b> discrete_or_continuous <b>;</b>
+discrete_or_continuous ::= <b>discrete</b> | <b>continuous</b>
+nature_attribute_override ::= potential_or_flow <b>.</b> nature_attribute</div>
+
+<h3 id="a-1-8">A.1.8 Connectrules Declaration</h3>
+<div class="syntax">connectrules_declaration ::=
+        <b>connectrules</b> connectrules_identifier <b>;</b>
+            { connectrules_item }
+        <b>endconnectrules</b>
+connectrules_item ::=
+        connect_insertion
+        | connect_resolution
+connect_insertion ::= <b>connect</b> connectmodule_identifier [ connect_mode ]
+            [ parameter_value_assignment ] [ connect_port_overrides ] <b>;</b>
+connect_mode ::= <b>merged</b> | <b>split</b>
+connect_port_overrides ::=
+        discipline_identifier <b>,</b> discipline_identifier
+        | <b>input</b> discipline_identifier <b>,</b> <b>output</b> discipline_identifier
+        | <b>output</b> discipline_identifier <b>,</b> <b>input</b> discipline_identifier
+        | <b>inout</b> discipline_identifier <b>,</b> <b>inout</b> discipline_identifier
+connect_resolution ::= <b>connect</b> discipline_identifier { <b>,</b> discipline_identifier } <b>resolveto</b>
+            discipline_identifier_or_exclude <b>;</b>
+discipline_identifier_or_exclude ::=
+        discipline_identifier
+        | <b>exclude</b></div>
+
+<h3 id="a-1-9">A.1.9 Paramset Declaration</h3>
+<div class="syntax">paramset_declaration ::=
+        { attribute_instance } <b>paramset</b> paramset_identifier module_or_paramset_identifier <b>;</b>
+            paramset_item_declaration { paramset_item_declaration }
+            paramset_statement { paramset_statement }
+        <b>endparamset</b>
+paramset_item_declaration ::=
+        { attribute_instance } parameter_declaration <b>;</b>
+        | { attribute_instance } local_parameter_declaration <b>;</b>
+        | aliasparam_declaration
+        | { attribute_instance } integer_declaration
+        | { attribute_instance } real_declaration
+paramset_statement ::=
+        <b>.</b>module_parameter_identifier <b>=</b> paramset_constant_expression <b>;</b>
+        | <b>.</b>module_output_variable_identifier <b>=</b> paramset_constant_expression <b>;</b>
+        | <b>.</b>system_parameter_identifier <b>=</b> paramset_constant_expression <b>;</b>
+        | analog_function_statement
+paramset_constant_expression ::=
+        constant_primary
+        | hierarchical_parameter_identifier
+        | unary_operator { attribute_instance } constant_primary
+        | paramset_constant_expression binary_operator { attribute_instance } paramset_constant_expression
+        | paramset_constant_expression <b>?</b> { attribute_instance } paramset_constant_expression <b>:</b> { attribute_instance } paramset_constant_expression</div>
+
+<h2 id="a-2">A.2 Declarations</h2>
+
+<h3 id="a-2-1">A.2.1 Declaration types</h3>
+
+<h4 id="a-2-1-1">A.2.1.1 Module parameter declarations</h4>
+<div class="syntax">local_parameter_declaration ::=
+        <b>localparam</b> [ <b>signed</b> ] [ range ] list_of_param_assignments
+        | <b>localparam</b> parameter_type list_of_param_assignments
+parameter_declaration ::=
+        <b>parameter</b> [ <b>signed</b> ] [ range ] list_of_param_assignments
+        | <b>parameter</b> parameter_type list_of_param_assignments
+specparam_declaration ::= <b>specparam</b> [ range ] list_of_specparam_assignments <b>;</b>
+parameter_type ::=
+        <b>integer</b> | <b>real</b> | <b>realtime</b> | <b>time</b> | <b>string</b>
+aliasparam_declaration ::= <b>aliasparam</b> parameter_identifier <b>=</b> parameter_identifier <b>;</b></div>
+
+<h4 id="a-2-1-2">A.2.1.2 Port declarations</h4>
+<div class="syntax">inout_declaration ::=
+        <b>inout</b> [ discipline_identifier ] [ net_type | <b>wreal</b> ] [ <b>signed</b> ] [ range ] list_of_port_identifiers
+input_declaration ::=
+        <b>input</b> [ discipline_identifier ] [ net_type | <b>wreal</b> ] [ <b>signed</b> ] [ range ] list_of_port_identifiers
+output_declaration ::=
+        <b>output</b> [ discipline_identifier ] [ net_type | <b>wreal</b> ] [ <b>signed</b> ] [ range ] list_of_port_identifiers
+        | <b>output</b> [ discipline_identifier ] <b>reg</b> [ <b>signed</b> ] [ range ] list_of_variable_port_identifiers
+        | <b>output</b> output_variable_type list_of_variable_port_identifiers</div>
+
+<h4 id="a-2-1-3">A.2.1.3 Type declarations</h4>
+<div class="syntax">branch_declaration ::=
+        <b>branch</b> <b>(</b> branch_terminal [ <b>,</b> branch_terminal ] <b>)</b> list_of_branch_identifiers <b>;</b>
+        | port_branch_declaration
+port_branch_declaration ::=
+        <b>branch</b> <b>(</b> <b>&lt;</b> port_identifier <b>&gt;</b> <b>)</b> list_of_branch_identifiers <b>;</b>
+        | <b>branch</b> <b>(</b> <b>&lt;</b> hierarchical_port_identifier <b>&gt;</b> <b>)</b> list_of_branch_identifiers <b>;</b>
+branch_terminal ::=
+        net_identifier
+        | net_identifier <b>[</b> constant_expression <b>]</b>
+        | net_identifier <b>[</b> constant_range_expression <b>]</b>
+        | hierarchical_net_identifier
+        | hierarchical_net_identifier <b>[</b> constant_expression <b>]</b>
+        | hierarchical_net_identifier <b>[</b> constant_range_expression <b>]</b>
+event_declaration ::= <b>event</b> list_of_event_identifiers <b>;</b>
+integer_declaration ::= <b>integer</b> list_of_variable_identifiers <b>;</b>
+net_declaration ::=
+        net_type [ discipline_identifier ] [ <b>signed</b> ]
+            [ delay3 ] list_of_net_identifiers <b>;</b>
+        | net_type [ discipline_identifier ] [ drive_strength ] [ <b>signed</b> ]
+            [ delay3 ] list_of_net_decl_assignments <b>;</b>
+        | net_type [ discipline_identifier ] [ <b>vectored</b> | <b>scalared</b> ] [ <b>signed</b> ]
+            range [ delay3 ] list_of_net_identifiers <b>;</b>
+        | net_type [ discipline_identifier ] [ drive_strength ] [ <b>vectored</b> | <b>scalared</b> ] [ <b>signed</b> ]
+            range [ delay3 ] list_of_net_decl_assignments <b>;</b>
+        | <b>trireg</b> [ discipline_identifier ] [ charge_strength ] [ <b>signed</b> ]
+            [ delay3 ] list_of_net_identifiers <b>;</b>
+        | <b>trireg</b> [ discipline_identifier ] [ drive_strength ] [ <b>signed</b> ]
+            [ delay3 ] list_of_net_decl_assignments <b>;</b>
+        | <b>trireg</b> [ discipline_identifier ] [ charge_strength ] [ <b>vectored</b> | <b>scalared</b> ] [ <b>signed</b> ]
+            range [ delay3 ] list_of_net_identifiers <b>;</b>
+        | <b>trireg</b> [ discipline_identifier ] [ drive_strength ] [ <b>vectored</b> | <b>scalared</b> ] [ <b>signed</b> ]
+            range [ delay3 ] list_of_net_decl_assignments <b>;</b>
+        | discipline_identifier [ range ] list_of_net_identifiers <b>;</b>
+        | discipline_identifier [ range ] list_of_net_decl_assignments <b>;</b>
+        | <b>wreal</b> [ discipline_identifier ] [ range ] list_of_net_identifiers <b>;</b>
+        | <b>wreal</b> [ discipline_identifier ] [ range ] list_of_net_decl_assignments <b>;</b>
+        | <b>ground</b> [ discipline_identifier ] [ range ] list_of_net_identifiers <b>;</b>
+real_declaration ::= <b>real</b> list_of_real_identifiers <b>;</b>
+realtime_declaration ::= <b>realtime</b> list_of_real_identifiers <b>;</b>
+reg_declaration ::= <b>reg</b> [ discipline_identifier ] [ <b>signed</b> ] [ range ]
+            list_of_variable_identifiers <b>;</b>
+time_declaration ::= <b>time</b> list_of_variable_identifiers <b>;</b></div>
+
+<h3 id="a-2-2">A.2.2 Declaration data types</h3>
+
+<h4 id="a-2-2-1">A.2.2.1 Net and variable types</h4>
+<div class="syntax">net_type ::=
+        <b>supply0</b> | <b>supply1</b> | <b>tri</b> | <b>triand</b> | <b>trior</b> | <b>tri0</b> | <b>tri1</b> | <b>uwire</b> | <b>wire</b> | <b>wand</b> | <b>wor</b>
+output_variable_type ::= <b>integer</b> | <b>time</b>
+real_type ::=
+        real_identifier { dimension } [ <b>=</b> constant_assignment_pattern ]
+        | real_identifier <b>=</b> constant_expression
+variable_type ::=
+        variable_identifier { dimension } [ <b>=</b> constant_assignment_pattern ]
+        | variable_identifier <b>=</b> constant_expression</div>
+
+<h4 id="a-2-2-2">A.2.2.2 Strengths</h4>
+<div class="syntax">drive_strength ::=
+        <b>(</b> strength0 <b>,</b> strength1 <b>)</b>
+        | <b>(</b> strength1 <b>,</b> strength0 <b>)</b>
+        | <b>(</b> strength0 <b>,</b> <b>highz1</b> <b>)</b>
+        | <b>(</b> strength1 <b>,</b> <b>highz0</b> <b>)</b>
+        | <b>(</b> <b>highz0</b> <b>,</b> strength1 <b>)</b>
+        | <b>(</b> <b>highz1</b> <b>,</b> strength0 <b>)</b>
+strength0 ::= <b>supply0</b> | <b>strong0</b> | <b>pull0</b> | <b>weak0</b>
+strength1 ::= <b>supply1</b> | <b>strong1</b> | <b>pull1</b> | <b>weak1</b>
+charge_strength ::= <b>( small )</b> | <b>( medium )</b> | <b>( large )</b></div>
+
+<h4 id="a-2-2-3">A.2.2.3 Delays</h4>
+<div class="syntax">delay3 ::=
+        <b>#</b> delay_value
+        | <b>#</b> <b>(</b> mintypmax_expression [ <b>,</b> mintypmax_expression [ <b>,</b> mintypmax_expression ] ] <b>)</b>
+delay2 ::=
+        <b>#</b> delay_value
+        | <b>#</b> <b>(</b> mintypmax_expression [ <b>,</b> mintypmax_expression ] <b>)</b>
+delay_value ::=
+        unsigned_number
+        | real_number
+        | identifier</div>
+
+<h3 id="a-2-3">A.2.3 Declaration lists</h3>
+<div class="syntax">list_of_branch_identifiers ::= branch_identifier [ range ] { <b>,</b> branch_identifier [ range ] }
+list_of_defparam_assignments ::= defparam_assignment { <b>,</b> defparam_assignment }
+list_of_event_identifiers ::= event_identifier { dimension } { <b>,</b> event_identifier { dimension } }
+list_of_net_decl_assignments ::= net_decl_assignment { <b>,</b> net_decl_assignment }
+list_of_net_identifiers ::= ams_net_identifier { <b>,</b> ams_net_identifier }
+list_of_param_assignments ::= param_assignment { <b>,</b> param_assignment }
+list_of_port_identifiers ::= port_identifier { <b>,</b> port_identifier }
+list_of_real_identifiers ::= real_type { <b>,</b> real_type }
+list_of_specparam_assignments ::= specparam_assignment { <b>,</b> specparam_assignment }
+list_of_variable_identifiers ::= variable_type { <b>,</b> variable_type }
+list_of_variable_port_identifiers ::= port_identifier [ <b>=</b> constant_expression ]
+            { <b>,</b> port_identifier [ <b>=</b> constant_expression ] }</div>
+
+<h3 id="a-2-4">A.2.4 Declaration assignments</h3>
+<div class="syntax">defparam_assignment ::= hierarchical_parameter_identifier <b>=</b> constant_mintypmax_expression
+net_decl_assignment ::= ams_net_identifier <b>=</b> expression
+param_assignment ::=
+        parameter_identifier <b>=</b> constant_mintypmax_expression { value_range }
+        | parameter_identifier range <b>=</b> constant_assignment_pattern { value_range }
+specparam_assignment ::=
+        specparam_identifier <b>=</b> constant_mintypmax_expression
+        | pulse_control_specparam
+pulse_control_specparam ::=
+        <b>PATHPULSE$</b> <b>=</b> <b>(</b> reject_limit_value [ <b>,</b> error_limit_value ] <b>)</b>
+        | <b>PATHPULSE$</b>specify_input_terminal_descriptor<b>$</b>specify_output_terminal_descriptor
+            <b>=</b> <b>(</b> reject_limit_value [ <b>,</b> error_limit_value ] <b>)</b>
+error_limit_value ::= limit_value
+reject_limit_value ::= limit_value
+limit_value ::= constant_mintypmax_expression</div>
+
+<h3 id="a-2-5">A.2.5 Declaration ranges</h3>
+<div class="syntax">dimension ::= <b>[</b> dimension_constant_expression <b>:</b> dimension_constant_expression <b>]</b>
+range ::= <b>[</b> msb_constant_expression <b>:</b> lsb_constant_expression <b>]</b>
+value_range ::=
+        value_range_type <b>(</b> value_range_expression <b>:</b> value_range_expression <b>)</b>
+        | value_range_type <b>(</b> value_range_expression <b>:</b> value_range_expression <b>]</b>
+        | value_range_type <b>[</b> value_range_expression <b>:</b> value_range_expression <b>)</b>
+        | value_range_type <b>[</b> value_range_expression <b>:</b> value_range_expression <b>]</b>
+        | value_range_type <b>'{</b> string { <b>,</b> string } <b>}</b>
+        | <b>exclude</b> constant_expression
+value_range_type ::= <b>from</b> | <b>exclude</b>
+value_range_expression ::= constant_expression | <b>-inf</b> | <b>inf</b></div>
+
+<h3 id="a-2-6">A.2.6 Function declarations</h3>
+<div class="syntax">analog_function_declaration ::=
+        <b>analog function</b> [ analog_function_type ] analog_function_identifier <b>;</b>
+            analog_function_item_declaration { analog_function_item_declaration }
+            analog_function_statement
+        <b>endfunction</b>
+analog_function_type ::= <b>integer</b> | <b>real</b> | <b>string</b>
+analog_function_item_declaration ::=
+        analog_block_item_declaration
+        | input_declaration <b>;</b>
+        | output_declaration <b>;</b>
+        | inout_declaration <b>;</b>
+function_declaration ::=
+        <b>function</b> [ <b>automatic</b> ] [ function_range_or_type ] function_identifier <b>;</b>
+            function_item_declaration { function_item_declaration }
+            function_statement
+        <b>endfunction</b>
+        | <b>function</b> [ <b>automatic</b> ] [ function_range_or_type ] function_identifier <b>(</b> function_port_list <b>)</b> <b>;</b>
+            { block_item_declaration }
+            function_statement
+        <b>endfunction</b>
+function_item_declaration ::=
+        block_item_declaration
+        | { attribute_instance } tf_input_declaration <b>;</b>
+function_port_list ::=
+        { attribute_instance } tf_input_declaration { <b>,</b> { attribute_instance } tf_input_declaration }
+function_range_or_type ::=
+        [ <b>signed</b> ] [ range ]
+        | <b>integer</b>
+        | <b>real</b>
+        | <b>realtime</b>
+        | <b>time</b></div>
+
+<h3 id="a-2-7">A.2.7 Task declarations</h3>
+<div class="syntax">task_declaration ::=
+        <b>task</b> [ <b>automatic</b> ] task_identifier <b>;</b>
+            { task_item_declaration }
+            statement_or_null
+        <b>endtask</b>
+        | <b>task</b> [ <b>automatic</b> ] task_identifier <b>(</b> [ task_port_list ] <b>)</b> <b>;</b>
+            { block_item_declaration }
+            statement_or_null
+        <b>endtask</b>
+task_item_declaration ::=
+        block_item_declaration
+        | { attribute_instance } tf_input_declaration <b>;</b>
+        | { attribute_instance } tf_output_declaration <b>;</b>
+        | { attribute_instance } tf_inout_declaration <b>;</b>
+task_port_list ::= task_port_item { <b>,</b> task_port_item }
+task_port_item ::=
+        { attribute_instance } tf_input_declaration
+        | { attribute_instance } tf_output_declaration
+        | { attribute_instance } tf_inout_declaration
+tf_input_declaration ::=
+        <b>input</b> [ discipline_identifier ] [ <b>reg</b> ] [ <b>signed</b> ] [ range ] list_of_port_identifiers
+        | <b>input</b> task_port_type list_of_port_identifiers
+tf_output_declaration ::=
+        <b>output</b> [ discipline_identifier ] [ <b>reg</b> ] [ <b>signed</b> ] [ range ] list_of_port_identifiers
+        | <b>output</b> task_port_type list_of_port_identifiers
+tf_inout_declaration ::=
+        <b>inout</b> [ discipline_identifier ] [ <b>reg</b> ] [ <b>signed</b> ] [ range ] list_of_port_identifiers
+        | <b>inout</b> task_port_type list_of_port_identifiers
+task_port_type ::=
+        <b>integer</b> | <b>real</b> | <b>realtime</b> | <b>time</b></div>
+
+<h3 id="a-2-8">A.2.8 Block item declarations</h3>
+<div class="syntax">analog_block_item_declaration ::=
+        { attribute_instance } parameter_declaration <b>;</b>
+        | { attribute_instance } integer_declaration
+        | { attribute_instance } real_declaration
+        | { attribute_instance } string_declaration
+block_item_declaration ::=
+        { attribute_instance } <b>reg</b> [ discipline_identifier ] [ <b>signed</b> ] [ range ]
+            list_of_block_variable_identifiers <b>;</b>
+        | { attribute_instance } <b>integer</b> list_of_block_variable_identifiers <b>;</b>
+        | { attribute_instance } <b>time</b> list_of_block_variable_identifiers <b>;</b>
+        | { attribute_instance } <b>real</b> list_of_block_real_identifiers <b>;</b>
+        | { attribute_instance } <b>realtime</b> list_of_block_real_identifiers <b>;</b>
+        | { attribute_instance } event_declaration
+        | { attribute_instance } local_parameter_declaration <b>;</b>
+        | { attribute_instance } parameter_declaration <b>;</b>
+list_of_block_variable_identifiers ::= block_variable_type { <b>,</b> block_variable_type }
+list_of_block_real_identifiers ::= block_real_type { <b>,</b> block_real_type }
+block_variable_type ::= variable_identifier { dimension }
+block_real_type ::= real_identifier { dimension }</div>
+
+<h2 id="a-3">A.3 Primitive instances</h2>
+
+<h3 id="a-3-1">A.3.1 Primitive instantiation and instances</h3>
+<div class="syntax">gate_instantiation ::=
+        cmos_switchtype [delay3] cmos_switch_instance { <b>,</b> cmos_switch_instance } <b>;</b>
+        | enable_gatetype [drive_strength] [delay3] enable_gate_instance { <b>,</b> enable_gate_instance } <b>;</b>
+        | mos_switchtype [delay3] mos_switch_instance { <b>,</b> mos_switch_instance } <b>;</b>
+        | n_input_gatetype [drive_strength] [delay2] n_input_gate_instance { <b>,</b> n_input_gate_instance } <b>;</b>
+        | n_output_gatetype [drive_strength] [delay2] n_output_gate_instance { <b>,</b> n_output_gate_instance } <b>;</b>
+        | pass_en_switchtype [delay2] pass_enable_switch_instance { <b>,</b> pass_enable_switch_instance } <b>;</b>
+        | pass_switchtype pass_switch_instance { <b>,</b> pass_switch_instance } <b>;</b>
+        | <b>pulldown</b> [pulldown_strength] pull_gate_instance { <b>,</b> pull_gate_instance } <b>;</b>
+        | <b>pullup</b> [pullup_strength] pull_gate_instance { <b>,</b> pull_gate_instance } <b>;</b>
+cmos_switch_instance ::= [ name_of_gate_instance ] <b>(</b> output_terminal <b>,</b> input_terminal <b>,</b>
+            ncontrol_terminal <b>,</b> pcontrol_terminal <b>)</b>
+enable_gate_instance ::= [ name_of_gate_instance ] <b>(</b> output_terminal <b>,</b> input_terminal <b>,</b> enable_terminal <b>)</b>
+mos_switch_instance ::= [ name_of_gate_instance ] <b>(</b> output_terminal <b>,</b> input_terminal <b>,</b> enable_terminal <b>)</b>
+n_input_gate_instance ::= [ name_of_gate_instance ] <b>(</b> output_terminal <b>,</b> input_terminal
+            { <b>,</b> input_terminal } <b>)</b>
+n_output_gate_instance ::= [ name_of_gate_instance ] <b>(</b> output_terminal { <b>,</b> output_terminal } <b>,</b>
+            input_terminal <b>)</b>
+pass_switch_instance ::= [ name_of_gate_instance ] <b>(</b> inout_terminal <b>,</b> inout_terminal <b>)</b>
+pass_enable_switch_instance ::= [ name_of_gate_instance ] <b>(</b> inout_terminal <b>,</b> inout_terminal <b>,</b>
+            enable_terminal <b>)</b>
+pull_gate_instance ::= [ name_of_gate_instance ] <b>(</b> output_terminal <b>)</b>
+name_of_gate_instance ::= gate_instance_identifier [ range ]</div>
+
+<h3 id="a-3-2">A.3.2 Primitive strengths</h3>
+<div class="syntax">pulldown_strength ::=
+        <b>(</b> strength0 <b>,</b> strength1 <b>)</b>
+        | <b>(</b> strength1 <b>,</b> strength0 <b>)</b>
+        | <b>(</b> strength0 <b>)</b>
+pullup_strength ::=
+        <b>(</b> strength0 <b>,</b> strength1 <b>)</b>
+        | <b>(</b> strength1 <b>,</b> strength0 <b>)</b>
+        | <b>(</b> strength1 <b>)</b></div>
+
+<h3 id="a-3-3">A.3.3 Primitive terminals</h3>
+<div class="syntax">enable_terminal ::= expression
+inout_terminal ::= net_lvalue
+input_terminal ::= expression
+ncontrol_terminal ::= expression
+output_terminal ::= net_lvalue
+pcontrol_terminal ::= expression</div>
+
+<h3 id="a-3-4">A.3.4 Primitive gate and switch types</h3>
+<div class="syntax">cmos_switchtype ::= <b>cmos</b> | <b>rcmos</b>
+enable_gatetype ::= <b>bufif0</b> | <b>bufif1</b> | <b>notif0</b> | <b>notif1</b>
+mos_switchtype ::= <b>nmos</b> | <b>pmos</b> | <b>rnmos</b> | <b>rpmos</b>
+n_input_gatetype ::= <b>and</b> | <b>nand</b> | <b>or</b> | <b>nor</b> | <b>xor</b> | <b>xnor</b>
+n_output_gatetype ::= <b>buf</b> | <b>not</b>
+pass_en_switchtype ::= <b>tranif0</b> | <b>tranif1</b> | <b>rtranif1</b> | <b>rtranif0</b>
+pass_switchtype ::= <b>tran</b> | <b>rtran</b></div>
+
+<h2 id="a-4">A.4 Module instantiation and generate construct</h2>
+
+<h3 id="a-4-1">A.4.1 Module instantiation</h3>
+<div class="syntax">module_instantiation ::=
+        module_or_paramset_identifier [ parameter_value_assignment ]
+            module_instance { <b>,</b> module_instance } <b>;</b>
+parameter_value_assignment ::= <b>#</b> <b>(</b> list_of_parameter_assignments <b>)</b>
+list_of_parameter_assignments ::=
+        ordered_parameter_assignment { <b>,</b> ordered_parameter_assignment }
+        | named_parameter_assignment { <b>,</b> named_parameter_assignment }
+ordered_parameter_assignment ::= expression
+named_parameter_assignment ::=
+        <b>.</b> parameter_identifier <b>(</b> [ mintypmax_expression ] <b>)</b>
+        | <b>.</b> system_parameter_identifier <b>(</b> [ constant_expression ] <b>)</b>
+module_instance ::= name_of_module_instance <b>(</b> [ list_of_port_connections ] <b>)</b>
+name_of_module_instance ::= module_instance_identifier [ range ]
+list_of_port_connections ::=
+        ordered_port_connection { <b>,</b> ordered_port_connection }
+        | named_port_connection { <b>,</b> named_port_connection }
+ordered_port_connection ::= { attribute_instance } [ expression ]
+named_port_connection ::= { attribute_instance } <b>.</b> port_identifier <b>(</b> [ expression ] <b>)</b></div>
+
+<h3 id="a-4-2">A.4.2 Generate construct</h3>
+<div class="syntax">generate_region ::=
+        <b>generate</b> { module_or_generate_item } <b>endgenerate</b>
+genvar_declaration ::=
+        <b>genvar</b> list_of_genvar_identifiers <b>;</b>
+list_of_genvar_identifiers ::=
+        genvar_identifier { <b>,</b> genvar_identifier }
+analog_loop_generate_statement ::=
+        <b>for</b> <b>(</b> genvar_initialization <b>;</b> genvar_expression <b>;</b> genvar_iteration <b>)</b>
+            analog_statement
+loop_generate_construct ::=
+        <b>for</b> <b>(</b> genvar_initialization <b>;</b> genvar_expression <b>;</b> genvar_iteration <b>)</b>
+            generate_block
+genvar_initialization ::=
+        genvar_identifier <b>=</b> constant_expression
+genvar_expression ::=
+        genvar_primary
+        | unary_operator { attribute_instance } genvar_primary
+        | genvar_expression binary_operator { attribute_instance } genvar_expression
+        | genvar_expression <b>?</b> { attribute_instance } genvar_expression <b>:</b> genvar_expression
+genvar_iteration ::=
+        genvar_identifier <b>=</b> genvar_expression
+genvar_primary ::=
+        constant_primary
+        | genvar_identifier
+conditional_generate_construct ::=
+        if_generate_construct
+        | case_generate_construct
+if_generate_construct ::=
+        <b>if</b> <b>(</b> constant_expression <b>)</b> generate_block_or_null
+        [ <b>else</b> generate_block_or_null ]
+case_generate_construct ::=
+        <b>case</b> <b>(</b> constant_expression <b>)</b> case_generate_item { case_generate_item } <b>endcase</b>
+case_generate_item ::=
+        constant_expression { <b>,</b> constant_expression } <b>:</b> generate_block_or_null
+        | <b>default</b> [ <b>:</b> ] generate_block_or_null
+generate_block ::=
+        module_or_generate_item
+        | <b>begin</b> [ <b>:</b> generate_block_identifier ] { module_or_generate_item } <b>end</b>
+generate_block_or_null ::=
+        generate_block
+        | <b>;</b></div>
+
+<h2 id="a-5">A.5 UDP declaration and instantiation</h2>
+
+<h3 id="a-5-1">A.5.1 UDP declaration</h3>
+<div class="syntax">udp_declaration ::=
+        { attribute_instance } <b>primitive</b> udp_identifier <b>(</b> udp_port_list <b>)</b> <b>;</b>
+            udp_port_declaration { udp_port_declaration }
+            udp_body
+        <b>endprimitive</b>
+        | { attribute_instance } <b>primitive</b> udp_identifier <b>(</b> udp_declaration_port_list <b>)</b> <b>;</b>
+            udp_body
+        <b>endprimitive</b></div>
+
+<h3 id="a-5-2">A.5.2 UDP ports</h3>
+<div class="syntax">udp_port_list ::= output_port_identifier <b>,</b> input_port_identifier { <b>,</b> input_port_identifier }
+udp_declaration_port_list ::=
+        udp_output_declaration <b>,</b> udp_input_declaration { <b>,</b> udp_input_declaration }
+udp_port_declaration ::=
+        udp_output_declaration <b>;</b>
+        | udp_input_declaration <b>;</b>
+        | udp_reg_declaration <b>;</b>
+udp_output_declaration ::=
+        { attribute_instance } <b>output</b> port_identifier
+        | { attribute_instance } <b>output</b> [ discipline_identifier ] <b>reg</b> port_identifier [ <b>=</b> constant_expression ]
+udp_input_declaration ::= { attribute_instance } <b>input</b> list_of_port_identifiers
+udp_reg_declaration ::= { attribute_instance } <b>reg</b> [ discipline_identifier ] variable_identifier</div>
+
+<h3 id="a-5-3">A.5.3 UDP body</h3>
+<div class="syntax">udp_body ::= combinational_body | sequential_body
+combinational_body ::= <b>table</b> combinational_entry { combinational_entry } <b>endtable</b>
+combinational_entry ::= level_input_list <b>:</b> output_symbol <b>;</b>
+sequential_body ::= [ udp_initial_statement ] <b>table</b> sequential_entry { sequential_entry } <b>endtable</b>
+udp_initial_statement ::= <b>initial</b> output_port_identifier <b>=</b> init_val <b>;</b>
+init_val ::= <b>1'b0</b> | <b>1'b1</b> | <b>1'bx</b> | <b>1'bX</b> | <b>1'B0</b> | <b>1'B1</b> | <b>1'Bx</b> | <b>1'BX</b> | <b>1</b> | <b>0</b>
+sequential_entry ::= seq_input_list <b>:</b> current_state <b>:</b> next_state <b>;</b>
+seq_input_list ::= level_input_list | edge_input_list
+level_input_list ::= level_symbol { level_symbol }
+edge_input_list ::= { level_symbol } edge_indicator { level_symbol }
+edge_indicator ::= <b>(</b> level_symbol level_symbol <b>)</b> | edge_symbol
+current_state ::= level_symbol
+next_state ::= output_symbol | <b>-</b>
+output_symbol ::= <b>0</b> | <b>1</b> | <b>x</b> | <b>X</b>
+level_symbol ::= <b>0</b> | <b>1</b> | <b>x</b> | <b>X</b> | <b>?</b> | <b>b</b> | <b>B</b>
+edge_symbol ::= <b>r</b> | <b>R</b> | <b>f</b> | <b>F</b> | <b>p</b> | <b>P</b> | <b>n</b> | <b>N</b> | <b>*</b></div>
+
+<h3 id="a-5-4">A.5.4 UDP instantiation</h3>
+<div class="syntax">udp_instantiation ::= udp_identifier [ drive_strength ] [ delay2 ] udp_instance { <b>,</b> udp_instance } <b>;</b>
+udp_instance ::= [ name_of_udp_instance ] <b>(</b> output_terminal <b>,</b> input_terminal { <b>,</b> input_terminal } <b>)</b>
+name_of_udp_instance ::= udp_instance_identifier [ range ]</div>
+
+<h2 id="a-6">A.6 Behavioral statements</h2>
+
+<h3 id="a-6-1">A.6.1 Continuous assignment statements</h3>
+<div class="syntax">continuous_assign ::= <b>assign</b> [ drive_strength ] [ delay3 ] list_of_net_assignments <b>;</b>
+list_of_net_assignments ::= net_assignment { <b>,</b> net_assignment }
+net_assignment ::= net_lvalue <b>=</b> expression</div>
+
+<h3 id="a-6-2">A.6.2 Procedural blocks and assignments</h3>
+<div class="syntax">analog_construct ::=
+        <b>analog</b> analog_statement
+        | <b>analog initial</b> analog_function_statement
+analog_procedural_assignment ::= analog_variable_assignment <b>;</b>
+analog_variable_assignment ::=
+        scalar_analog_variable_assignment
+        | array_analog_variable_assignment
+scalar_analog_variable_assignment ::= scalar_analog_variable_lvalue <b>=</b> analog_expression
+initial_construct ::= <b>initial</b> statement
+always_construct ::= <b>always</b> statement
+blocking_assignment ::= variable_lvalue <b>=</b> [ delay_or_event_control ] expression
+nonblocking_assignment ::= variable_lvalue <b>&lt;=</b> [ delay_or_event_control ] expression
+procedural_continuous_assignments ::=
+        <b>assign</b> variable_assignment
+        | <b>deassign</b> variable_lvalue
+        | <b>force</b> variable_assignment
+        | <b>force</b> net_assignment
+        | <b>release</b> variable_lvalue
+        | <b>release</b> net_lvalue
+variable_assignment ::= variable_lvalue <b>=</b> expression</div>
+
+<h3 id="a-6-3">A.6.3 Parallel and sequential blocks</h3>
+<div class="syntax">analog_seq_block ::= <b>begin</b> [ <b>:</b> analog_block_identifier { analog_block_item_declaration } ]
+            { analog_statement } <b>end</b>
+analog_event_seq_block ::=
+        <b>begin</b> [ <b>:</b> analog_block_identifier { analog_block_item_declaration } ]
+            { analog_event_statement} <b>end</b>
+analog_function_seq_block ::= <b>begin</b> [ <b>:</b> analog_block_identifier { analog_block_item_declaration } ]
+            { analog_function_statement } <b>end</b>
+par_block ::= <b>fork</b> [ <b>:</b> block_identifier
+            { block_item_declaration } ] { statement } <b>join</b>
+seq_block ::= <b>begin</b> [ <b>:</b> block_identifier
+            { block_item_declaration } ] { statement } <b>end</b></div>
+
+<h3 id="a-6-4">A.6.4 Statements</h3>
+<div class="syntax">analog_statement ::=
+        { attribute_instance } analog_loop_generate_statement
+        | { attribute_instance } analog_loop_statement
+        | { attribute_instance } analog_case_statement
+        | { attribute_instance } analog_conditional_statement
+        | { attribute_instance } analog_procedural_assignment
+        | { attribute_instance } analog_seq_block
+        | { attribute_instance } analog_system_task_enable
+        | { attribute_instance } contribution_statement
+        | { attribute_instance } indirect_contribution_statement
+        | { attribute_instance } analog_event_control_statement
+        | { attribute_instance } jump_statement
+analog_statement_or_null ::=
+        analog_statement
+        | { attribute_instance } <b>;</b>
+analog_event_statement ::=
+        { attribute_instance } analog_loop_statement
+        | { attribute_instance } analog_case_statement
+        | { attribute_instance } analog_conditional_statement
+        | { attribute_instance } analog_procedural_assignment
+        | { attribute_instance } analog_event_seq_block
+        | { attribute_instance } analog_system_task_enable
+        | { attribute_instance } disable_statement
+        | { attribute_instance } event_trigger
+        | { attribute_instance } <b>;</b>
+analog_function_statement ::=
+        { attribute_instance } analog_function_case_statement
+        | { attribute_instance } analog_function_conditional_statement
+        | { attribute_instance } analog_function_loop_statement
+        | { attribute_instance } analog_function_seq_block
+        | { attribute_instance } analog_procedural_assignment
+        | { attribute_instance } analog_system_task_enable
+        | { attribute_instance } jump_statement
+analog_function_statement_or_null ::=
+        analog_function_statement
+        | { attribute_instance } <b>;</b>
+statement ::=
+        { attribute_instance } blocking_assignment <b>;</b>
+        | { attribute_instance } case_statement
+        | { attribute_instance } conditional_statement
+        | { attribute_instance } disable_statement
+        | { attribute_instance } event_trigger
+        | { attribute_instance } loop_statement
+        | { attribute_instance } jump_statement
+        | { attribute_instance } nonblocking_assignment <b>;</b>
+        | { attribute_instance } par_block
+        | { attribute_instance } procedural_continuous_assignments <b>;</b>
+        | { attribute_instance } procedural_timing_control_statement
+        | { attribute_instance } seq_block
+        | { attribute_instance } system_task_enable
+        | { attribute_instance } task_enable
+        | { attribute_instance } wait_statement
+statement_or_null ::=
+        statement
+        | { attribute_instance } <b>;</b>
+function_statement<sup>1</sup> ::= statement</div>
+
+<h3 id="a-6-5">A.6.5 Timing control statements</h3>
+<div class="syntax">analog_event_control_statement ::= analog_event_control analog_event_statement
+analog_event_control ::=
+        <b>@</b> hierarchical_event_identifier
+        | <b>@</b> <b>(</b> analog_event_expression <b>)</b>
+analog_event_expression ::=
+        expression
+        | <b>posedge</b> expression
+        | <b>negedge</b> expression
+        | hierarchical_event_identifier
+        | <b>initial_step</b> [ <b>(</b> <b>"</b> analysis_identifier <b>"</b>{ <b>,</b> <b>"</b> analysis_identifier <b>"</b> } <b>)</b> ]
+        | <b>final_step</b> [ <b>(</b> <b>"</b> analysis_identifier <b>"</b> { <b>,</b> <b>"</b> analysis_identifier <b>"</b> } <b>)</b> ]
+        | analog_event_functions
+        | analog_event_expression <b>or</b> analog_event_expression
+        | analog_event_expression <b>,</b> analog_event_expression
+analog_event_functions ::=
+        <b>cross</b> <b>(</b> analog_expression [ <b>,</b> analog_expression_or_null
+            [ <b>,</b> analog_expression_or_null [ <b>,</b> analog_expression_or_null [ <b>,</b> analog_expression ] ] ] ] <b>)</b>
+        | <b>above</b> <b>(</b> analog_expression [ <b>,</b> analog_expression_or_null
+            [ <b>,</b> analog_expression_or_null [ <b>,</b> analog_expression ] ] ] <b>)</b>
+        | <b>timer</b> <b>(</b> analog_expression [ <b>,</b> analog_expression_or_null
+            [ <b>,</b> analog_expression_or_null [ <b>,</b> analog_expression ] ] ] <b>)</b>
+        | <b>absdelta</b> <b>(</b> analog_expression <b>,</b> analog_expression
+            [ <b>,</b> analog_expression_or_null [ <b>,</b> analog_expression_or_null [ <b>,</b> analog_expression ] ] ] <b>)</b>
+delay_control ::=
+        <b>#</b> delay_value
+        | <b>#</b> <b>(</b> mintypmax_expression <b>)</b>
+delay_or_event_control ::=
+        delay_control
+        | event_control
+        | <b>repeat</b> <b>(</b> expression <b>)</b> event_control
+disable_statement ::=
+        <b>disable</b> hierarchical_task_identifier <b>;</b>
+        | <b>disable</b> hierarchical_block_identifier <b>;</b>
+event_control ::=
+        <b>@</b> hierarchical_event_identifier
+        | <b>@</b> <b>(</b> event_expression <b>)</b>
+        | <b>@*</b>
+        | <b>@</b> <b>(*)</b>
+event_trigger ::=
+        <b>-&gt;</b> hierarchical_event_identifier { <b>[</b> expression <b>]</b> } <b>;</b>
+event_expression ::=
+        expression
+        | <b>posedge</b> expression
+        | <b>negedge</b> expression
+        | hierarchical_event_identifier
+        | event_expression <b>or</b> event_expression
+        | event_expression <b>,</b> event_expression
+        | analog_event_functions
+        | <b>driver_update</b> expression
+        | analog_variable_lvalue
+procedural_timing_control ::=
+        delay_control
+        | event_control
+procedural_timing_control_statement ::=
+        procedural_timing_control statement_or_null
+jump_statement ::=
+        <b>return</b> [ expression ] <b>;</b>
+        | <b>break</b> <b>;</b>
+        | <b>continue</b> <b>;</b>
+wait_statement ::=
+        <b>wait</b> <b>(</b> expression <b>)</b> statement_or_null</div>
+
+<h3 id="a-6-6">A.6.6 Conditional statements</h3>
+<div class="syntax">analog_conditional_statement ::=
+        <b>if</b> <b>(</b> analog_expression <b>)</b> analog_statement_or_null
+        { <b>else if</b> <b>(</b> analog_expression <b>)</b> analog_statement_or_null }
+        [ <b>else</b> analog_statement_or_null ]
+analog_function_conditional_statement ::=
+        <b>if</b> <b>(</b> analog_expression <b>)</b> analog_function_statement_or_null
+        { <b>else if</b> <b>(</b> analog_expression <b>)</b> analog_function_statement_or_null }
+        [ <b>else</b> analog_function_statement_or_null ]
+conditional_statement ::=
+        <b>if</b> <b>(</b> expression <b>)</b>
+            statement_or_null
+        [ <b>else</b> statement_or_null ]
+        | if_else_if_statement
+if_else_if_statement ::=
+        <b>if</b> <b>(</b> expression <b>)</b> statement_or_null
+        { <b>else if</b> <b>(</b> expression <b>)</b> statement_or_null }
+        [ <b>else</b> statement_or_null ]</div>
+
+<h3 id="a-6-7">A.6.7 Case statements</h3>
+<div class="syntax">analog_case_statement ::=
+        <b>case</b> <b>(</b> analog_expression <b>)</b> analog_case_item { analog_case_item } <b>endcase</b>
+        | <b>casex</b> <b>(</b> analog_expression <b>)</b> analog_case_item { analog_case_item } <b>endcase</b>
+        | <b>casez</b> <b>(</b> analog_expression <b>)</b> analog_case_item { analog_case_item } <b>endcase</b>
+analog_case_item ::=
+        analog_expression { <b>,</b> analog_expression } <b>:</b> analog_statement_or_null
+        | <b>default</b> [ <b>:</b> ] analog_statement_or_null
+analog_function_case_statement ::=
+        <b>case</b> <b>(</b> analog_expression <b>)</b> analog_function_case_item {analog_function_case_item} <b>endcase</b>
+analog_function_case_item ::=
+        analog_expression { <b>,</b> analog_expression } <b>:</b> analog_function_statement_or_null
+        | <b>default</b> [ <b>:</b> ] analog_function_statement_or_null
+case_statement ::=
+        <b>case</b> <b>(</b> expression <b>)</b> case_item { case_item } <b>endcase</b>
+        | <b>casez</b> <b>(</b> expression <b>)</b> case_item { case_item } <b>endcase</b>
+        | <b>casex</b> <b>(</b> expression <b>)</b> case_item { case_item } <b>endcase</b>
+case_item ::=
+        expression { <b>,</b> expression } <b>:</b> statement_or_null
+        | <b>default</b> [ <b>:</b> ] statement_or_null</div>
+
+<h3 id="a-6-8">A.6.8 Looping statements</h3>
+<div class="syntax">analog_loop_statement ::=
+        <b>repeat</b> <b>(</b> analog_expression <b>)</b> analog_statement
+        | <b>while</b> <b>(</b> analog_expression <b>)</b> analog_statement
+        | <b>for</b> <b>(</b> analog_variable_assignment <b>;</b> analog_expression <b>;</b> analog_variable_assignment <b>)</b>
+            analog_statement
+analog_function_loop_statement ::=
+        <b>repeat</b> <b>(</b> analog_expression <b>)</b> analog_function_statement
+        | <b>while</b> <b>(</b> analog_expression <b>)</b> analog_function_statement
+        | <b>for</b> <b>(</b> analog_variable_assignment <b>;</b> analog_expression <b>;</b> analog_variable_assignment <b>)</b>
+            analog_function_statement
+loop_statement ::=
+        <b>forever</b> statement
+        | <b>repeat</b> <b>(</b> expression <b>)</b> statement
+        | <b>while</b> <b>(</b> expression <b>)</b> statement
+        | <b>for</b> <b>(</b> variable_assignment <b>;</b> expression <b>;</b> variable_assignment <b>)</b> statement</div>
+
+<h3 id="a-6-9">A.6.9 Task enable statements</h3>
+<div class="syntax">analog_system_task_enable ::=
+        analog_system_task_identifier [ <b>(</b> [ analog_expression ] { <b>,</b> [ analog_expression ] } <b>)</b> ] <b>;</b>
+system_task_enable ::= system_task_identifier [ <b>(</b> [ expression ] { <b>,</b> [ expression ] } <b>)</b> ] <b>;</b>
+task_enable ::= hierarchical_task_identifier [ <b>(</b> expression { <b>,</b> expression } <b>)</b> ] <b>;</b></div>
+
+<h3 id="a-6-10">A.6.10 Contribution statements</h3>
+<div class="syntax">contribution_statement ::= branch_lvalue <b>&lt;+</b> analog_expression <b>;</b>
+indirect_contribution_statement ::= branch_lvalue <b>:</b> indirect_expression <b>==</b> analog_expression <b>;</b></div>
+
+<h2 id="a-7">A.7 Specify section</h2>
+
+<h3 id="a-7-1">A.7.1 Specify block declaration</h3>
+<div class="syntax">specify_block ::= <b>specify</b> { specify_item } <b>endspecify</b>
+specify_item ::=
+        specparam_declaration
+        | pulsestyle_declaration
+        | showcancelled_declaration
+        | path_declaration
+        | system_timing_check
+pulsestyle_declaration ::=
+        <b>pulsestyle_onevent</b> list_of_path_outputs <b>;</b></div>
+<div class="syntax">        | <b>pulsestyle_ondetect</b> list_of_path_outputs <b>;</b>
+showcancelled_declaration ::=
+        <b>showcancelled</b> list_of_path_outputs <b>;</b>
+        | <b>noshowcancelled</b> list_of_path_outputs <b>;</b></div>
+
+<h3 id="a-7-2">A.7.2 Specify path declarations</h3>
+<div class="syntax">path_declaration ::=
+        simple_path_declaration <b>;</b>
+        | edge_sensitive_path_declaration <b>;</b>
+        | state_dependent_path_declaration <b>;</b>
+simple_path_declaration ::=
+        parallel_path_description <b>=</b> path_delay_value
+        | full_path_description <b>=</b> path_delay_value
+parallel_path_description ::=
+        <b>(</b> specify_input_terminal_descriptor [ polarity_operator ] <b>=&gt;</b> specify_output_terminal_descriptor <b>)</b>
+full_path_description ::=
+        <b>(</b> list_of_path_inputs [ polarity_operator ] <b>*&gt;</b> list_of_path_outputs <b>)</b>
+list_of_path_inputs ::=
+        specify_input_terminal_descriptor { <b>,</b> specify_input_terminal_descriptor }
+list_of_path_outputs ::=
+        specify_output_terminal_descriptor { <b>,</b> specify_output_terminal_descriptor }</div>
+
+<h3 id="a-7-3">A.7.3 Specify block terminals</h3>
+<div class="syntax">specify_input_terminal_descriptor ::=
+        input_identifier [ <b>[</b> constant_range_expression <b>]</b> ]
+specify_output_terminal_descriptor ::=
+        output_identifier [ <b>[</b> constant_range_expression <b>]</b> ]
+input_identifier ::= input_port_identifier | inout_port_identifier
+output_identifier ::= output_port_identifier | inout_port_identifier</div>
+
+<h3 id="a-7-4">A.7.4 Specify path delays</h3>
+<div class="syntax">path_delay_value ::=
+        list_of_path_delay_expressions
+        | <b>(</b> list_of_path_delay_expressions <b>)</b>
+list_of_path_delay_expressions ::=
+        t_path_delay_expression
+        | trise_path_delay_expression <b>,</b> tfall_path_delay_expression
+        | trise_path_delay_expression <b>,</b> tfall_path_delay_expression <b>,</b> tz_path_delay_expression
+        | t01_path_delay_expression <b>,</b> t10_path_delay_expression <b>,</b> t0z_path_delay_expression <b>,</b>
+            tz1_path_delay_expression <b>,</b> t1z_path_delay_expression <b>,</b> tz0_path_delay_expression
+        | t01_path_delay_expression <b>,</b> t10_path_delay_expression <b>,</b> t0z_path_delay_expression <b>,</b>
+            tz1_path_delay_expression <b>,</b> t1z_path_delay_expression <b>,</b> tz0_path_delay_expression <b>,</b>
+            t0x_path_delay_expression <b>,</b> tx1_path_delay_expression <b>,</b> t1x_path_delay_expression <b>,</b>
+            tx0_path_delay_expression <b>,</b> txz_path_delay_expression <b>,</b> tzx_path_delay_expression
+t_path_delay_expression ::= path_delay_expression
+trise_path_delay_expression ::= path_delay_expression
+tfall_path_delay_expression ::= path_delay_expression
+tz_path_delay_expression ::= path_delay_expression
+t01_path_delay_expression ::= path_delay_expression
+t10_path_delay_expression ::= path_delay_expression
+t0z_path_delay_expression ::= path_delay_expression
+tz1_path_delay_expression ::= path_delay_expression
+t1z_path_delay_expression ::= path_delay_expression
+tz0_path_delay_expression ::= path_delay_expression
+t0x_path_delay_expression ::= path_delay_expression
+tx1_path_delay_expression ::= path_delay_expression
+t1x_path_delay_expression ::= path_delay_expression
+tx0_path_delay_expression ::= path_delay_expression
+txz_path_delay_expression ::= path_delay_expression
+tzx_path_delay_expression ::= path_delay_expression
+path_delay_expression ::= constant_mintypmax_expression
+edge_sensitive_path_declaration ::=
+        parallel_edge_sensitive_path_description <b>=</b> path_delay_value
+        | full_edge_sensitive_path_description <b>=</b> path_delay_value
+parallel_edge_sensitive_path_description ::=
+        <b>(</b> [ edge_identifier ] specify_input_terminal_descriptor <b>=&gt;</b>
+            <b>(</b> specify_output_terminal_descriptor [ polarity_operator ] <b>:</b> data_source_expression <b>)</b> <b>)</b>
+full_edge_sensitive_path_description ::=
+        <b>(</b> [ edge_identifier ] list_of_path_inputs <b>*&gt;</b>
+            <b>(</b> list_of_path_outputs [ polarity_operator ] <b>:</b> data_source_expression <b>)</b> <b>)</b>
+data_source_expression ::= expression
+edge_identifier ::= <b>posedge</b> | <b>negedge</b>
+state_dependent_path_declaration ::=
+        <b>if</b> <b>(</b> module_path_expression <b>)</b> simple_path_declaration
+        | <b>if</b> <b>(</b> module_path_expression <b>)</b> edge_sensitive_path_declaration
+        | <b>ifnone</b> simple_path_declaration
+polarity_operator ::= <b>+</b> | <b>-</b></div>
+
+<h3 id="a-7-5">A.7.5 System timing checks</h3>
+
+<h4 id="a-7-5-1">A.7.5.1 System timing check commands</h4>
+<div class="syntax">system_timing_check ::=
+        $setup_timing_check
+        | $hold_timing_check
+        | $setuphold_timing_check
+        | $recovery_timing_check
+        | $removal_timing_check
+        | $recrem_timing_check
+        | $skew_timing_check
+        | $timeskew_timing_check
+        | $fullskew_timing_check
+        | $period_timing_check
+        | $width_timing_check
+        | $nochange_timing_check
+$setup_timing_check ::=
+        <b>$setup</b> <b>(</b> data_event <b>,</b> reference_event <b>,</b> timing_check_limit [ <b>,</b> [ notifier ] ] <b>)</b> <b>;</b>
+$hold_timing_check ::=
+        <b>$hold</b> <b>(</b> reference_event <b>,</b> data_event <b>,</b> timing_check_limit [ <b>,</b> [ notifier ] ] <b>)</b> <b>;</b>
+$setuphold_timing_check ::=
+        <b>$setuphold</b> <b>(</b> reference_event <b>,</b> data_event <b>,</b> timing_check_limit <b>,</b> timing_check_limit
+            [ <b>,</b> [ notifier ] [ <b>,</b> [ stamptime_condition ] [ <b>,</b> [ checktime_condition ]
+            [ <b>,</b> [ delayed_reference ] [ <b>,</b> [ delayed_data ] ] ] ] ] ] <b>)</b> <b>;</b>
+$recovery_timing_check ::=
+        <b>$recovery</b> <b>(</b> reference_event <b>,</b> data_event <b>,</b> timing_check_limit [ <b>,</b> [ notifier ] ] <b>)</b> <b>;</b>
+$removal_timing_check ::=
+        <b>$removal</b> <b>(</b> reference_event <b>,</b> data_event <b>,</b> timing_check_limit [ <b>,</b> [ notifier ] ] <b>)</b> <b>;</b>
+$recrem_timing_check ::=
+        <b>$recrem</b> <b>(</b> reference_event <b>,</b> data_event <b>,</b> timing_check_limit <b>,</b> timing_check_limit
+            [ <b>,</b> [ notifier ] [ <b>,</b> [ stamptime_condition ] [ <b>,</b> [ checktime_condition ]
+            [ <b>,</b> [ delayed_reference ] [ <b>,</b> [ delayed_data ] ] ] ] ] ] <b>)</b> <b>;</b>
+$skew_timing_check ::=
+        <b>$skew</b> <b>(</b> reference_event <b>,</b> data_event <b>,</b> timing_check_limit [ <b>,</b> [ notifier ] ] <b>)</b> <b>;</b>
+$timeskew_timing_check ::=
+        <b>$timeskew</b> <b>(</b> reference_event <b>,</b> data_event <b>,</b> timing_check_limit
+            [ <b>,</b> [ notifier ] [ <b>,</b> [ event_based_flag ] [ <b>,</b> [ remain_active_flag ] ] ] ] <b>)</b> <b>;</b>
+$fullskew_timing_check ::=
+        <b>$fullskew</b> <b>(</b> reference_event <b>,</b> data_event <b>,</b> timing_check_limit <b>,</b> timing_check_limit
+            [ <b>,</b> [ notifier ] [ <b>,</b> [ event_based_flag ] [ <b>,</b> [ remain_active_flag ] ] ] ] <b>)</b> <b>;</b>
+$period_timing_check ::=
+        <b>$period</b> <b>(</b> controlled_reference_event <b>,</b> timing_check_limit [ <b>,</b> [ notifier ] ] <b>)</b> <b>;</b>
+$width_timing_check ::=
+        <b>$width</b> <b>(</b> controlled_reference_event <b>,</b> timing_check_limit [ <b>,</b> threshold [ <b>,</b> notifier ] ] <b>)</b> <b>;</b>
+$nochange_timing_check ::=
+        <b>$nochange</b> <b>(</b> reference_event <b>,</b> data_event <b>,</b> start_edge_offset <b>,</b>
+            end_edge_offset [ <b>,</b> [ notifier ] ] <b>)</b> <b>;</b></div>
+
+<h4 id="a-7-5-2">A.7.5.2 System timing check command arguments</h4>
+<div class="syntax">checktime_condition ::= mintypmax_expression
+controlled_reference_event ::= controlled_timing_check_event
+data_event ::= timing_check_event
+delayed_data ::=
+        terminal_identifier
+        | terminal_identifier <b>[</b> constant_mintypmax_expression <b>]</b>
+delayed_reference ::=
+        terminal_identifier
+        | terminal_identifier <b>[</b> constant_mintypmax_expression <b>]</b>
+end_edge_offset ::= mintypmax_expression
+event_based_flag ::= constant_expression
+notifier ::= variable_identifier
+reference_event ::= timing_check_event
+remain_active_flag ::= constant_expression
+stamptime_condition ::= mintypmax_expression
+start_edge_offset ::= mintypmax_expression
+threshold ::= constant_expression
+timing_check_limit ::= expression</div>
+
+<h4 id="a-7-5-3">A.7.5.3 System timing check event definitions</h4>
+<div class="syntax">timing_check_event ::=
+        [timing_check_event_control] specify_terminal_descriptor [ <b>&amp;&amp;&amp;</b> timing_check_condition ]
+controlled_timing_check_event ::=
+        timing_check_event_control specify_terminal_descriptor [ <b>&amp;&amp;&amp;</b> timing_check_condition ]
+timing_check_event_control ::=
+        <b>posedge</b>
+        | <b>negedge</b>
+        | edge_control_specifier
+specify_terminal_descriptor ::=
+        specify_input_terminal_descriptor
+        | specify_output_terminal_descriptor
+edge_control_specifier ::= <b>edge</b> <b>[</b> edge_descriptor { <b>,</b> edge_descriptor } <b>]</b>
+edge_descriptor<sup>2</sup> ::=
+        <b>01</b>
+        | <b>10</b>
+        | z_or_x zero_or_one
+        | zero_or_one z_or_x
+zero_or_one ::= <b>0</b> | <b>1</b>
+z_or_x ::= <b>x</b> | <b>X</b> | <b>z</b> | <b>Z</b>
+timing_check_condition ::=
+        scalar_timing_check_condition
+        | <b>(</b> scalar_timing_check_condition <b>)</b>
+scalar_timing_check_condition ::=
+        expression
+        | <b>~</b> expression
+        | expression <b>==</b> scalar_constant
+        | expression <b>===</b> scalar_constant
+        | expression <b>!=</b> scalar_constant
+        | expression <b>!==</b> scalar_constant
+scalar_constant ::=
+        <b>1'b0</b> | <b>1'b1</b> | <b>1'B0</b> | <b>1'B1</b> | <b>'b0</b> | <b>'b1</b> | <b>'B0</b> | <b>'B1</b> | <b>1</b> | <b>0</b></div>
+
+<h2 id="a-8">A.8 Expressions</h2>
+
+<h3 id="a-8-1">A.8.1 Concatenations and assignment patterns</h3>
+<div class="syntax">analog_concatenation ::= <b>{</b> analog_expression { <b>,</b> analog_expression } <b>}</b>
+analog_multiple_concatenation ::= <b>{</b> constant_expression analog_concatenation <b>}</b>
+concatenation ::= <b>{</b> expression { <b>,</b> expression } <b>}</b>
+constant_concatenation ::= <b>{</b> constant_expression { <b>,</b> constant_expression } <b>}</b>
+constant_multiple_concatenation ::= <b>{</b> constant_expression constant_concatenation <b>}</b>
+module_path_concatenation ::= <b>{</b> module_path_expression { <b>,</b> module_path_expression } <b>}</b>
+module_path_multiple_concatenation ::= <b>{</b> constant_expression module_path_concatenation <b>}</b>
+multiple_concatenation ::= <b>{</b> constant_expression concatenation <b>}</b>
+assignment_pattern ::=
+        <b>'{</b> expression { <b>,</b> expression } <b>}</b>
+        | <b>'{</b> constant_expression <b>{</b> expression { <b>,</b> expression } <b>}</b> <b>}</b>
+constant_assignment_pattern ::=
+        <b>'{</b> constant_expression { <b>,</b> constant_expression } <b>}</b>
+        | <b>'{</b> constant_expression <b>{</b> constant_expression { <b>,</b> constant_expression } <b>}</b> <b>}</b>
+constant_assignment_pattern_or_null ::= [ constant_assignment_pattern ]</div>
+
+<h3 id="a-8-2">A.8.2 Function calls</h3>
+<div class="syntax">analog_function_call ::=
+        analog_function_identifier { attribute_instance } <b>(</b> analog_expression { <b>,</b> analog_expression } <b>)</b>
+analog_system_function_call ::=
+        analog_system_function_identifier [ <b>(</b> [ analog_expression ] { <b>,</b> [ analog_expression ] } <b>)</b> ]
+analog_built_in_function_call ::=
+        analog_built_in_function_name <b>(</b> analog_expression [ <b>,</b> analog_expression ] <b>)</b>
+analog_built_in_function_name ::=
+        <b>ln</b> | <b>ln1p</b> | <b>log</b> | <b>exp</b> | <b>expm1</b> | <b>sqrt</b> | <b>min</b> | <b>max</b> | <b>abs</b> | <b>pow</b> | <b>floor</b> | <b>ceil</b>
+        | <b>sin</b> | <b>cos</b> | <b>tan</b> | <b>asin</b> | <b>acos</b> | <b>atan</b> | <b>atan2</b>
+        | <b>hypot</b> | <b>sinh</b> | <b>cosh</b> | <b>tanh</b> | <b>asinh</b> | <b>acosh</b> | <b>atanh</b>
+analysis_function_call ::= <b>analysis</b> <b>(</b> <b>"</b> analysis_identifier <b>"</b> { <b>,</b> <b>"</b> analysis_identifier <b>"</b> } <b>)</b>
+analog_filter_function_call ::=
+        <b>ddt</b> <b>(</b> analog_expression [ <b>,</b> abstol_expression ] <b>)</b>
+        | <b>ddx</b> <b>(</b> analog_expression <b>,</b> branch_probe_function_call <b>)</b>
+        | <b>idt</b> <b>(</b> analog_expression [ <b>,</b> analog_expression [ <b>,</b> analog_expression [ <b>,</b> abstol_expression ] ] ] <b>)</b>
+        | <b>idtmod</b> <b>(</b> analog_expression [ <b>,</b> analog_expression [ <b>,</b> analog_expression [ <b>,</b> analog_expression
+            [ <b>,</b> abstol_expression ] ] ] ] <b>)</b>
+        | <b>absdelay</b> <b>(</b> analog_expression <b>,</b> analog_expression [ <b>,</b> constant_expression ] <b>)</b>
+        | <b>transition</b> <b>(</b> analog_expression [ <b>,</b> analog_expression [ <b>,</b> analog_expression
+            [ <b>,</b> analog_expression [ <b>,</b> constant_expression ] ] ] ] <b>)</b>
+        | <b>slew</b> <b>(</b> analog_expression [ <b>,</b> analog_expression [ <b>,</b> analog_expression ] ] <b>)</b>
+        | <b>last_crossing</b> <b>(</b> analog_expression [ <b>,</b> analog_expression ] <b>)</b>
+        | <b>limexp</b> <b>(</b> analog_expression <b>)</b>
+        | laplace_filter_name <b>(</b> analog_expression <b>,</b> [ analog_filter_function_arg ] <b>,</b>
+            [ analog_filter_function_arg ] [ <b>,</b> constant_expression ] <b>)</b>
+        | zi_filter_name <b>(</b> analog_expression <b>,</b> [ analog_filter_function_arg ] <b>,</b>
+            [ analog_filter_function_arg ] <b>,</b> constant_expression
+            [ <b>,</b> analog_expression [ <b>,</b> constant_expression ] ] <b>)</b>
+analog_filter_function_arg ::=
+        parameter_identifier
+        | parameter_identifier <b>[</b> msb_constant_expression <b>:</b> lsb_constant_expression <b>]</b>
+        | constant_assignment_pattern_or_null
+analog_small_signal_function_call ::=
+        <b>ac_stim</b> <b>(</b> [ <b>"</b> analysis_identifier <b>"</b> [ <b>,</b> analog_expression [ <b>,</b> analog_expression ] ] ] <b>)</b>
+        | <b>white_noise</b> <b>(</b> analog_expression [ <b>,</b> string ] <b>)</b>
+        | <b>flicker_noise</b> <b>(</b> analog_expression <b>,</b> analog_expression [ <b>,</b> string ] <b>)</b>
+        | <b>noise_table</b> <b>(</b> noise_table_input_arg [ <b>,</b> string ] <b>)</b>
+        | <b>noise_table_log</b> <b>(</b> noise_table_input_arg [ <b>,</b> string ] <b>)</b>
+noise_table_input_arg ::=
+        parameter_identifier
+        | parameter_identifier <b>[</b> msb_constant_expression <b>:</b> lsb_constant_expression <b>]</b>
+        | string
+        | constant_assignment_pattern
+laplace_filter_name ::= <b>laplace_zd</b> | <b>laplace_zp</b> | <b>laplace_np</b> | <b>laplace_nd</b>
+zi_filter_name ::= <b>zi_zp</b> | <b>zi_zd</b> | <b>zi_np</b> | <b>zi_nd</b>
+nature_access_function ::=
+        nature_attribute_identifier
+        | <b>potential</b>
+        | <b>flow</b>
+branch_probe_function_call ::=
+        nature_access_function <b>(</b> branch_reference <b>)</b>
+        | nature_access_function <b>(</b> analog_net_reference [ <b>,</b> analog_net_reference ] <b>)</b>
+port_probe_function_call ::= nature_attribute_identifier <b>(</b> <b>&lt;</b> analog_port_reference <b>&gt;</b> <b>)</b>
+constant_analog_function_call ::=
+        analog_function_identifier { attribute_instance } <b>(</b> constant_expression { <b>,</b> constant_expression } <b>)</b>
+constant_function_call ::= function_identifier { attribute_instance }
+        <b>(</b> constant_expression { <b>,</b> constant_expression } <b>)</b>
+constant_system_function_call ::= system_function_identifier
+        <b>(</b> constant_expression { <b>,</b> constant_expression } <b>)</b>
+constant_analog_built_in_function_call ::=
+        analog_built_in_function_name <b>(</b> constant_expression [ <b>,</b> constant_expression ] <b>)</b>
+function_call ::= hierarchical_function_identifier{ attribute_instance }
+        <b>(</b> expression { <b>,</b> expression } <b>)</b>
+system_function_call ::= system_function_identifier
+        [ <b>(</b> expression { <b>,</b> expression } <b>)</b> ]</div>
+
+<h3 id="a-8-3">A.8.3 Expressions</h3>
+<div class="syntax">abstol_expression ::=
+        constant_expression
+        | nature_identifier
+analog_conditional_expression ::=
+        analog_expression <b>?</b> { attribute_instance } analog_expression <b>:</b> analog_expression
+analog_range_expression ::=
+        analog_expression
+        | msb_constant_expression <b>:</b> lsb_constant_expression
+analog_expression_or_null ::= [ analog_expression ]
+analog_expression ::=
+        analog_primary
+        | unary_operator { attribute_instance } analog_primary
+        | analog_expression binary_operator { attribute_instance } analog_expression
+        | analog_conditional_expression
+        | string
+base_expression ::= expression
+conditional_expression ::= expression1 <b>?</b> { attribute_instance } expression2 <b>:</b> expression3
+constant_base_expression ::= constant_expression
+constant_expression ::=
+        constant_primary
+        | unary_operator { attribute_instance } constant_primary
+        | constant_expression binary_operator { attribute_instance } constant_expression
+        | constant_expression <b>?</b> { attribute_instance } constant_expression <b>:</b> constant_expression
+analysis_or_constant_expression ::=
+        constant_primary
+        | analysis_function_call
+        | unary_operator { attribute_instance } analysis_or_constant_expression
+        | analysis_or_constant_expression binary_operator { attribute_instance }
+            analysis_or_constant_expression
+        | analysis_or_constant_expression <b>?</b> { attribute_instance } analysis_or_constant_expression <b>:</b>
+            analysis_or_constant_expression
+constant_mintypmax_expression ::=
+        constant_expression
+        | constant_expression <b>:</b> constant_expression <b>:</b> constant_expression
+constant_range_expression ::=
+        constant_expression
+        | msb_constant_expression <b>:</b> lsb_constant_expression
+        | constant_base_expression <b>+:</b> width_constant_expression
+        | constant_base_expression <b>-:</b> width_constant_expression
+dimension_constant_expression ::= constant_expression
+expression ::=
+        primary
+        | unary_operator { attribute_instance } primary
+        | expression binary_operator { attribute_instance } expression
+        | conditional_expression
+expression1 ::= expression
+expression2 ::= expression
+expression3 ::= expression
+indirect_expression ::=
+        branch_probe_function_call
+        | port_probe_function_call
+        | <b>ddt</b> <b>(</b> branch_probe_function_call [ <b>,</b> abstol_expression ] <b>)</b>
+        | <b>ddt</b> <b>(</b> port_probe_function_call [ <b>,</b> abstol_expression ] <b>)</b>
+        | <b>idt</b> <b>(</b> branch_probe_function_call [ <b>,</b> analog_expression
+            [ <b>,</b> analog_expression [ <b>,</b> abstol_expression ] ] ] <b>)</b>
+        | <b>idt</b> <b>(</b> port_probe_function_call [ <b>,</b> analog_expression [ <b>,</b> analog_expression
+            [ <b>,</b> abstol_expression ] ] ] <b>)</b>
+        | <b>idtmod</b> <b>(</b> branch_probe_function_call [ <b>,</b> analog_expression [ <b>,</b> analog_expression
+            [ <b>,</b> analog_expression [ <b>,</b> abstol_expression ] ] ] ] <b>)</b>
+        | <b>idtmod</b> <b>(</b> port_probe_function_call [ <b>,</b> analog_expression [ <b>,</b> analog_expression
+            [ <b>,</b> analog_expression [ <b>,</b> abstol_expression ] ] ] ] <b>)</b>
+lsb_constant_expression ::= constant_expression
+mintypmax_expression ::=
+        expression
+        | expression <b>:</b> expression <b>:</b> expression
+module_path_conditional_expression ::= module_path_expression <b>?</b> { attribute_instance }
+            module_path_expression <b>:</b> module_path_expression
+module_path_expression ::=
+        module_path_primary
+        | unary_module_path_operator { attribute_instance } module_path_primary
+        | module_path_expression binary_module_path_operator { attribute_instance }
+            module_path_expression
+        | module_path_conditional_expression
+module_path_mintypmax_expression ::=
+        module_path_expression
+        | module_path_expression <b>:</b> module_path_expression <b>:</b> module_path_expression
+msb_constant_expression ::= constant_expression
+nature_attribute_expression ::=
+        constant_expression
+        | nature_identifier
+        | nature_access_identifier
+range_expression ::=
+        expression
+        | msb_constant_expression <b>:</b> lsb_constant_expression
+        | base_expression <b>+:</b> width_constant_expression
+        | base_expression <b>-:</b> width_constant_expression
+width_constant_expression ::= constant_expression</div>
+
+<h3 id="a-8-4">A.8.4 Primaries</h3>
+<div class="syntax">analog_primary ::=
+        number
+        | analog_concatenation
+        | analog_multiple_concatenation
+        | variable_reference
+        | net_reference
+        | genvar_identifier
+        | parameter_reference
+        | nature_attribute_reference
+        | branch_probe_function_call
+        | port_probe_function_call
+        | analog_function_call
+        | analog_system_function_call
+        | analog_built_in_function_call
+        | analog_filter_function_call
+        | analog_small_signal_function_call
+        | analysis_function_call
+        | <b>(</b> analog_expression <b>)</b>
+constant_primary ::=
+        number
+        | parameter_identifier [ <b>[</b> constant_range_expression <b>]</b> ]
+        | specparam_identifier [ <b>[</b> constant_range_expression <b>]</b> ]
+        | constant_concatenation
+        | constant_multiple_concatenation
+        | constant_function_call
+        | constant_system_function_call
+        | constant_analog_built_in_function_call
+        | <b>(</b> constant_mintypmax_expression <b>)</b>
+        | string_literal
+        | system_parameter_identifier
+        | nature_attribute_reference
+        | constant_analog_function_call
+module_path_primary ::=
+        number
+        | identifier
+        | module_path_concatenation
+        | module_path_multiple_concatenation
+        | function_call
+        | system_function_call
+        | <b>(</b> module_path_mintypmax_expression <b>)</b>
+primary ::=
+        number
+        | hierarchical_identifier [ { <b>[</b> expression <b>]</b> } <b>[</b> range_expression <b>]</b> ]
+        | concatenation
+        | multiple_concatenation
+        | function_call
+        | system_function_call
+        | <b>(</b> mintypmax_expression <b>)</b>
+        | string
+        | branch_probe_function_call
+        | port_probe_function_call
+        | nature_attribute_reference
+        | analog_function_call
+        | analog_built_in_function_call</div>
+
+<h3 id="a-8-5">A.8.5 Expression left-side values</h3>
+<div class="syntax">analog_variable_lvalue ::=
+        variable_identifier
+        | variable_identifier <b>[</b> analog_expression <b>]</b> { <b>[</b> analog_expression <b>]</b> }
+array_analog_variable_assignment ::= array_analog_variable_lvalue <b>=</b> array_analog_variable_rvalue <b>;</b>
+array_analog_variable_rvalue ::=
+        array_variable_identifier
+        | array_ variable_identifier <b>[</b> analog_expression <b>]</b> { <b>[</b> analog_expression <b>]</b> }
+        | assignment_pattern
+branch_lvalue ::= branch_probe_function_call
+net_lvalue ::=
+        hierarchical_net_identifier [ { <b>[</b> constant_expression <b>]</b> } <b>[</b> constant_range_expression <b>]</b> ]
+        | <b>{</b> net_lvalue { <b>,</b> net_lvalue } <b>}</b>
+variable_lvalue ::=
+        hierarchical_variable_identifier [ { <b>[</b> expression <b>]</b> } <b>[</b> range_expression <b>]</b> ]
+        | <b>{</b> variable_lvalue { <b>,</b> variable_lvalue } <b>}</b></div>
+
+<h3 id="a-8-6">A.8.6 Operators</h3>
+<div class="syntax">unary_operator ::=
+        <b>+</b> | <b>-</b> | <b>!</b> | <b>~</b> | <b>&amp;</b> | <b>~&amp;</b> | <b>|</b> | <b>~|</b> | <b>^</b> | <b>~^</b> | <b>^~</b>
+binary_operator ::=
+        <b>+</b> | <b>-</b> | <b>*</b> | <b>/</b> | <b>%</b> | <b>==</b> | <b>!=</b> | <b>===</b> | <b>!==</b> | <b>&amp;&amp;</b> | <b>||</b> | <b>**</b>
+        | <b>&lt;</b> | <b>&lt;=</b> | <b>&gt;</b> | <b>&gt;=</b> | <b>&amp;</b> | <b>|</b> | <b>^</b> | <b>^~</b> | <b>~^</b> | <b>&gt;&gt;</b> | <b>&lt;&lt;</b> | <b>&gt;&gt;&gt;</b> | <b>&lt;&lt;&lt;</b>
+unary_module_path_operator ::=
+        <b>!</b> | <b>~</b> | <b>&amp;</b> | <b>~&amp;</b> | <b>|</b> | <b>~|</b> | <b>^</b> | <b>~^</b> | <b>^~</b>
+binary_module_path_operator ::=
+        <b>==</b> | <b>!=</b> | <b>&amp;&amp;</b> | <b>||</b> | <b>&amp;</b> | <b>|</b> | <b>^</b> | <b>^~</b> | <b>~^</b></div>
+
+<h3 id="a-8-7">A.8.7 Numbers</h3>
+<div class="syntax">number ::=
+        decimal_number
+        | octal_number
+        | binary_number
+        | hex_number
+        | real_number
+real_number<sup>2</sup> ::=
+        unsigned_number <b>.</b> unsigned_number
+        | unsigned_number [ <b>.</b> unsigned_number ] exp [ sign ] unsigned_number
+        | unsigned_number [ <b>.</b> unsigned_number ] scale_factor
+exp ::= <b>e</b> | <b>E</b>
+scale_factor ::= <b>T</b> | <b>G</b> | <b>M</b> | <b>K</b> | <b>k</b> | <b>m</b> | <b>u</b> | <b>n</b> | <b>p</b> | <b>f</b> | <b>a</b>
+decimal_number ::=
+        unsigned_number
+        | [ size ] decimal_base unsigned_number
+        | [ size ] decimal_base x_digit { <b>_</b> }
+        | [ size ] decimal_base z_digit { <b>_</b> }
+binary_number ::= [ size ] binary_base binary_value
+octal_number ::= [ size ] octal_base octal_value
+hex_number ::= [ size ] hex_base hex_value
+sign ::= <b>+</b> | <b>-</b>
+size ::= non_zero_unsigned_number
+non_zero_unsigned_number<sup>2</sup> ::= non_zero_decimal_digit { _ | decimal_digit}
+unsigned_number<sup>2</sup> ::= decimal_digit { <b>_</b> | decimal_digit }
+binary_value<sup>2</sup> ::= binary_digit { <b>_</b> | binary_digit }
+octal_value<sup>2</sup> ::= octal_digit { <b>_</b> | octal_digit }
+hex_value<sup>2</sup> ::= hex_digit { <b>_</b> | hex_digit }
+decimal_base<sup>2</sup> ::= <b>'[s|S]d</b> | <b>'[s|S]D</b>
+binary_base<sup>2</sup> ::= <b>'[s|S]b</b> | <b>'[s|S]B</b>
+octal_base<sup>2</sup> ::= <b>'[s|S]o</b> | <b>'[s|S]O</b>
+hex_base<sup>2</sup> ::= <b>'[s|S]h</b> | <b>'[s|S]H</b>
+non_zero_decimal_digit ::= <b>1</b> | <b>2</b> | <b>3</b> | <b>4</b> | <b>5</b> | <b>6</b> | <b>7</b> | <b>8</b> | <b>9</b>
+decimal_digit ::= <b>0</b> | <b>1</b> | <b>2</b> | <b>3</b> | <b>4</b> | <b>5</b> | <b>6</b> | <b>7</b> | <b>8</b> | <b>9</b>
+binary_digit ::= x_digit | z_digit | <b>0</b> | <b>1</b>
+octal_digit ::= x_digit | z_digit | <b>0</b> | <b>1</b> | <b>2</b> | <b>3</b> | <b>4</b> | <b>5</b> | <b>6</b> | <b>7</b>
+hex_digit ::=
+        x_digit | z_digit | <b>0</b> | <b>1</b> | <b>2</b> | <b>3</b> | <b>4</b> | <b>5</b> | <b>6</b> | <b>7</b> | <b>8</b> | <b>9</b>
+        | <b>a</b> | <b>b</b> | <b>c</b> | <b>d</b> | <b>e</b> | <b>f</b> | <b>A</b> | <b>B</b> | <b>C</b> | <b>D</b> | <b>E</b> | <b>F</b>
+x_digit ::= <b>x</b> | <b>X</b>
+z_digit ::= <b>z</b> | <b>Z</b> | <b>?</b></div>
+
+<h3 id="a-8-8">A.8.8 Strings</h3>
+<div class="syntax">string_literal ::= <b>"</b> { Any_ASCII_Characters } <b>"</b></div>
+
+<h3 id="a-8-9">A.8.9 Analog references</h3>
+<div class="syntax">nature_attribute_reference ::= net_identifier <b>.</b> potential_or_flow <b>.</b> nature_attribute_identifier
+analog_port_reference ::=
+        port_identifier
+        | port_identifier <b>[</b> constant_expression <b>]</b>
+        | hierarchical_port_identifier
+        | hierarchical_port_identifier <b>[</b> constant_expression <b>]</b>
+analog_net_reference ::=
+        port_identifier
+        | port_identifier <b>[</b> constant_expression <b>]</b>
+        | net_identifier
+        | net_identifier <b>[</b> constant_expression <b>]</b>
+        | hierarchical_port_identifier
+        | hierarchical_port_identifier <b>[</b> constant_expression <b>]</b>
+        | hierarchical_net_identifier
+        | hierarchical_net_identifier <b>[</b> constant_expression <b>]</b>
+branch_reference ::=
+        hierarchical_branch_identifier
+        | hierarchical_branch_identifier <b>[</b> constant_expression <b>]</b>
+        | hierarchical_unnamed_branch_reference
+hierarchical_unnamed_branch_reference ::=
+        hierarchical_inst_identifier<b>.branch</b> <b>(</b> branch_terminal [ <b>,</b> branch_terminal ] <b>)</b>
+        | hierarchical_inst_identifier<b>.branch</b> <b>(</b> <b>&lt;</b> port_identifier <b>&gt;</b> <b>)</b>
+        | hierarchical_inst_identifier<b>.branch</b> <b>(</b> <b>&lt;</b> hierarchical_port_identifier <b>&gt;</b> <b>)</b>
+parameter_reference ::=
+        parameter_identifier
+        | parameter_identifier <b>[</b> analog_expression <b>]</b>
+variable_reference ::=
+        variable_identifier
+        | variable_identifier <b>[</b> analog_expression <b>]</b> { <b>[</b> analog_expression <b>]</b> }
+        | real_identifier
+        | real_identifier <b>[</b> analog_expression <b>]</b> { <b>[</b> analog_expression <b>]</b> }
+net_reference ::=
+        hierarchical_net_identifier
+        | hierarchical_net_identifier <b>[</b> analog_range_expression <b>]</b>
+        | hierarchical_port_identifier
+        | hierarchical_port_identifier <b>[</b> analog_range_expression <b>]</b></div>
+
+<h2 id="a-9">A.9 General</h2>
+
+<h3 id="a-9-1">A.9.1 Attributes</h3>
+<div class="syntax">attribute_instance ::= <b>(*</b> attr_spec { <b>,</b> attr_spec } <b>*)</b>
+attr_spec ::= attr_name [ <b>=</b> constant_expression ]
+attr_name ::= identifier</div>
+
+<h3 id="a-9-2">A.9.2 Comments</h3>
+<div class="syntax">comment ::=
+        one_line_comment
+        | block_comment
+one_line_comment ::= <b>//</b> comment_text \n
+block_comment ::= <b>/*</b> comment_text <b>*/</b>
+comment_text ::= { Any_ASCII_character }</div>
+
+<h3 id="a-9-3">A.9.3 Identifiers</h3>
+<div class="syntax">ams_net_identifier ::=
+        net_identifier { dimension }
+        | hierarchical_net_identifier
+analog_block_identifier ::= block_identifier
+analog_function_identifier ::= identifier
+analog_system_task_identifier ::= system_task_identifier
+analog_system_function_identifier ::= system_function_identifier
+analysis_identifier ::= identifier
+block_identifier ::= identifier
+branch_identifier ::= identifier
+cell_identifier ::= identifier
+config_identifier ::= identifier
+connectmodule_identifier ::= module_identifier
+connectrules_identifier ::= identifier
+discipline_identifier ::= identifier
+escaped_identifier ::= <b>\</b> {Any_ASCII_character_except_white_space} white_space
+event_identifier ::= identifier
+function_identifier ::= identifier
+gate_instance_identifier ::= identifier
+generate_block_identifier ::= identifier
+genvar_identifier ::= identifier
+hierarchical_block_identifier ::= hierarchical_identifier
+hierarchical_branch_identifier ::= hierarchical_identifier
+hierarchical_event_identifier ::= hierarchical_identifier
+hierarchical_function_identifier ::= hierarchical_identifier
+hierarchical_identifier ::= [ <b>$root</b> <b>.</b> ] { identifier [ <b>[</b> constant_expression <b>]</b> ] <b>.</b> } identifier
+hierarchical_inst_identifier ::= hierarchical_identifier
+hierarchical_net_identifier ::= hierarchical_identifier
+hierarchical_parameter_identifier ::= hierarchical_identifier
+hierarchical_port_identifier ::= hierarchical_identifier
+hierarchical_variable_identifier ::= hierarchical_identifier
+hierarchical_task_identifier ::= hierarchical_identifier
+identifier ::=
+        simple_identifier
+        | escaped_identifier
+inout_port_identifier ::= identifier
+input_port_identifier ::= identifier
+instance_identifier ::= identifier
+library_identifier ::= identifier
+module_identifier ::= identifier
+module_instance_identifier ::= identifier
+module_or_paramset_identifier ::=
+        module_identifier
+        | paramset_identifier
+module_output_variable_identifier ::= identifier
+module_parameter_identifier ::= identifier
+nature_identifier ::= identifier
+nature_access_identifier ::= identifier
+nature_attribute_identifier ::= <b>abstol</b> | <b>access</b> | <b>ddt_nature</b> | <b>idt_nature</b> | <b>units</b> | identifier
+net_identifier ::= identifier
+output_port_identifier ::= identifier
+parameter_identifier ::= identifier
+paramset_identifier ::= identifier
+port_identifier ::= identifier
+real_identifier ::= identifier
+simple_identifier<sup>3</sup> ::= [ <b>a-zA-Z_</b> ] { [ <b>a-zA-Z0-9_$</b> ] }
+specparam_identifier ::= identifier
+system_function_identifier<sup>4</sup> ::= <b>$</b> [ <b>a-zA-Z0-9_$</b> ] { [ <b>a-zA-Z0-9_$</b> ] }
+system_parameter_identifier<sup>4</sup> ::= <b>$</b> [ <b>a-zA-Z0-9_$</b> ] { [ <b>a-zA-Z0-9_$</b> ] }
+system_task_identifier<sup>4</sup> ::= <b>$</b> [ <b>a-zA-Z0-9_$</b> ] { [ <b>a-zA-Z0-9_$</b> ] }
+task_identifier ::= identifier
+terminal_identifier ::= identifier
+text_macro_identifier ::=
+        identifier
+        | <b>__VAMS_ENABLE__</b>
+        | <b>__VAMS_COMPACT_MODELING__</b>
+topmodule_identifier ::= identifier
+udp_identifier ::= identifier
+udp_instance_identifier ::= identifier
+variable_identifier ::= identifier</div>
+
+<h3 id="a-9-4">A.9.4 White space</h3>
+<div class="syntax">white_space ::= space | tab | newline | eof<sup>5</sup></div>
+
+<h2 id="a-10">A.10 Details</h2>
+<ol>
+<li>Function statements are limited by the rules of 4.7.1.</li>
+<li>Embedded spaces are illegal.</li>
+<li>A simple_identifier shall start with an alpha or underscore ( _ ) character, shall have at least one character, and shall not have any spaces.</li>
+<li>The $ character in a system_function_identifier, system_task_identifier, or system_parameter_identifier shall not be followed by white_space. A system_function_identifier or system_task_identifier shall not be escaped.</li>
+<li>End of file.</li>
+</ol>
+
+</body></html>

@@ -9,9 +9,6 @@
         "build.zig.zon",
         "src",
         "tests",
-        "conformance_va",
-        "conformance_v",
         "docs",
-        "README.md",
     },
 }

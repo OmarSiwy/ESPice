@@ -1,0 +1,5 @@
+// EXPECT: error
+module ch02_real_dot_exponent_rejected;
+    real value;
+    analog value = 4.E3;
+endmodule

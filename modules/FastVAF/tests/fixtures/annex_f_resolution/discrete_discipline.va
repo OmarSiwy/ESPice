@@ -1,0 +1,7 @@
+discipline annex_f_discrete;
+  domain discrete;
+enddiscipline
+module annex_f_discrete_marker;
+  electrical p;
+  analog I(p) <+ V(p);
+endmodule

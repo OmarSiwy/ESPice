@@ -1,0 +1,1 @@
+module ch2_upper_bases(p); inout p; electrical p; integer x; analog begin x=8'HAf+8'B1010+8'O17+8'D12; I(p)<+x+0.0*V(p); end endmodule

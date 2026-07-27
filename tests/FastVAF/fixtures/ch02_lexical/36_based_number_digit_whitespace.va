@@ -1,0 +1,2 @@
+module ch2_based_ws(p); inout p; electrical p; integer x; analog begin x=8'h Af + 8'b 1010 + 8'o 17 + 8'd 12; I(p)<+x+0.0*V(p); end endmodule
+// EXPECT: error -- normative syntax/restriction snapshot for this rule family.

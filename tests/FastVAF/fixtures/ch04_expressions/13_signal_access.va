@@ -1,0 +1,10 @@
+module ch04_signal_access(p, n);
+    inout p, n;
+    electrical p, n;
+    branch (p, n) named_path;
+
+    analog begin
+        I(named_path) <+ V(named_path) / 10.0;
+        I(p, n) <+ V(p, n);
+    end
+endmodule

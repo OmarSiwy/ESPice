@@ -1,0 +1,11 @@
+module combined_file_and_display_side_effects(p, n);
+  inout p, n; electrical p, n;
+  integer fd;
+  analog begin
+    fd = $fopen("combined.log", "a");
+    $fdisplay(fd, "t=%e v=%g", $abstime, V(p,n));
+    $display("v=%g", V(p,n));
+    $fclose(fd);
+    I(p,n) <+ V(p,n);
+  end
+endmodule

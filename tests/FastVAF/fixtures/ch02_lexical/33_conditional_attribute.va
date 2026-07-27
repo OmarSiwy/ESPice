@@ -1,0 +1,3 @@
+module ch2_cond_attr(p); inout p; electrical p; analog I(p)<+(V(p)>0.0 ? (* no_glitch *) 1.0 : 0.0); endmodule
+// Annex A.8.3 allows `{ attribute_instance }` after the `?` of a conditional
+// expression (LRM 2.9.1), so this must COMPILE.

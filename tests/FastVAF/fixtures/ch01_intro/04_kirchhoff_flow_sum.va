@@ -1,0 +1,9 @@
+module ch01_kirchhoff_flow_sum(p, n, control);
+    inout p, n, control;
+    electrical p, n, control;
+
+    analog begin
+        I(p, n) <+ V(p, n) / 1000.0;
+        I(p, n) <+ 2.0 * V(control, n) / 1000.0;
+    end
+endmodule

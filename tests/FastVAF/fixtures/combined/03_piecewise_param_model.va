@@ -1,0 +1,13 @@
+module combined_piecewise_param_model(p, n);
+  inout p, n; electrical p, n;
+  parameter real gain = 2.0;
+  parameter real threshold = 0.5;
+  real response;
+  analog begin
+    if ($param_given(gain) && V(p,n) > threshold)
+      response = gain*V(p,n);
+    else
+      response = V(p,n);
+    I(p,n) <+ response;
+  end
+endmodule

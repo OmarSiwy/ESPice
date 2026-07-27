@@ -1,0 +1,1 @@
+module ch5_for_zero(p); inout p; electrical p; integer i; real x; analog begin x=V(p); for(i=0;i<0;i=i+1)x=x+1.0; I(p)<+x; end endmodule

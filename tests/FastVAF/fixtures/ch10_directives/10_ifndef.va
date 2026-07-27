@@ -1,0 +1,10 @@
+module ch10_ifndef(p, n);
+  inout p, n; electrical p, n;
+  analog begin
+`ifndef DISABLE_GAIN
+    I(p,n) <+ 5.0*V(p,n);
+`else
+    I(p,n) <+ V(p,n);
+`endif
+  end
+endmodule

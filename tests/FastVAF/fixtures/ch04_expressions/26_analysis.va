@@ -1,0 +1,11 @@
+module ch04_analysis(p, n);
+    inout p, n;
+    electrical p, n;
+
+    analog begin
+        if (analysis("dc", "static"))
+            I(p, n) <+ V(p, n);
+        else if (analysis("tran"))
+            I(p, n) <+ 2.0 * V(p, n);
+    end
+endmodule

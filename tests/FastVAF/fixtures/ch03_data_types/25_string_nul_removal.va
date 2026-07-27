@@ -1,0 +1,1 @@
+module ch3_string_nul(p); inout p; electrical p; string joined="hello\0world"; string empty="\0"; analog I(p)<+0.0*V(p); endmodule

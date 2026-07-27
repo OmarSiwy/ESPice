@@ -1,0 +1,6 @@
+// EXPECT: error -- post-order signal traversal requires hierarchy elaboration.
+module annex_f_default(sig);
+  electrical sig;
+  analog_leaf a(sig);
+  digital_leaf d(sig);
+endmodule

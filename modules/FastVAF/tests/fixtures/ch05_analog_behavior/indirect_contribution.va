@@ -1,0 +1,4 @@
+module ch5_indirect(p, n, ctrl);
+  inout p, n, ctrl; electrical p, n, ctrl;
+  analog V(p, n) : V(ctrl) == 2.0 * V(p, n);
+endmodule

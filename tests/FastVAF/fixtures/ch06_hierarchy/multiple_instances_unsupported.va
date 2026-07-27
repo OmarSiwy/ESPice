@@ -1,0 +1,5 @@
+// EXPECT: error -- multiple instances in one statement require hierarchy elaboration.
+module ch6_multiple_instances_parent(p, n);
+  inout p, n; electrical p, n;
+  ch6_child first(p), second(n);
+endmodule

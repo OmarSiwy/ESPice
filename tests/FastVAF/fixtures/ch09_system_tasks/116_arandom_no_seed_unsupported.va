@@ -1,0 +1,5 @@
+// EXPECT: error
+module ch09_arandom_no_seed_unsupported(p, n);
+  inout p, n; electrical p, n;
+  analog I(p,n) <+ $arandom;
+endmodule

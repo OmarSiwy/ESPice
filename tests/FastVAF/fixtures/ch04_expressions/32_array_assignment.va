@@ -1,0 +1,10 @@
+module ch04_array_assignment(p, n);
+    inout p, n;
+    electrical p, n;
+    real values[0:2];
+
+    analog begin
+        values = '{V(p, n), 2.0, 3.0};
+        I(p, n) <+ values[0];
+    end
+endmodule

@@ -1,0 +1,10 @@
+module ch10_predefined_vams_enable(p, n);
+  inout p, n; electrical p, n;
+  analog begin
+`ifdef __VAMS_ENABLE__
+    I(p,n) <+ 1.0*V(p,n);
+`else
+    I(p,n) <+ 2.0*V(p,n);
+`endif
+  end
+endmodule

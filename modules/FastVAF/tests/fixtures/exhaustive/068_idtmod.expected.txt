@@ -1,0 +1,42 @@
+=== 068_idtmod ===
+--- point 0 ---
+  x[p] = 0.000000e0
+  x[n] = 0.000000e0
+t=0 raw=0 wrapped=0
+idtmod == idt wrapped into [0,m) got=0 want=0 ok=1
+stays inside the modulus got=1 want=1 ok=1
+--- point 1 ---
+  x[p] = 0.000000e0
+  x[n] = 0.000000e0
+  t = 5.000000e-1  dt = 5.000000e-1
+t=0.5 raw=1 wrapped=1
+idtmod == idt wrapped into [0,m) got=1 want=1 ok=1
+stays inside the modulus got=1 want=1 ok=1
+--- point 2 ---
+  x[p] = 0.000000e0
+  x[n] = 0.000000e0
+  t = 1.000000e0  dt = 5.000000e-1
+t=1 raw=2 wrapped=2
+idtmod == idt wrapped into [0,m) got=2 want=2 ok=1
+stays inside the modulus got=1 want=1 ok=1
+--- point 3 ---
+  x[p] = 0.000000e0
+  x[n] = 0.000000e0
+  t = 1.500000e0  dt = 5.000000e-1
+t=1.5 raw=3 wrapped=0
+idtmod == idt wrapped into [0,m) got=0 want=0 ok=1
+stays inside the modulus got=1 want=1 ok=1
+--- point 4 ---
+  x[p] = 0.000000e0
+  x[n] = 0.000000e0
+  t = 2.000000e0  dt = 5.000000e-1
+t=2 raw=4 wrapped=1
+idtmod == idt wrapped into [0,m) got=1 want=1 ok=1
+stays inside the modulus got=1 want=1 ok=1
+--- point 5 ---
+  x[p] = 0.000000e0
+  x[n] = 0.000000e0
+  t = 2.500000e0  dt = 5.000000e-1
+t=2.5 raw=5 wrapped=2
+idtmod == idt wrapped into [0,m) got=2 want=2 ok=1
+stays inside the modulus got=1 want=1 ok=1

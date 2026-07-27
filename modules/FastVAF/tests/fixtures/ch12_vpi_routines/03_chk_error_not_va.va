@@ -1,0 +1,5 @@
+// EXPECT: error
+module ch12_chk_error_not_va(p, n);
+  inout p, n; electrical p, n;
+  analog I(p,n) <+ vpi_chk_error(0);
+endmodule

@@ -1,0 +1,1 @@
+module ch5_case_default(p); inout p; electrical p; integer mode; real x; analog begin mode=2; case(mode) default:x=V(p); endcase I(p)<+x; end endmodule

@@ -1,0 +1,51 @@
+{
+  "status": "compile_ok",
+  "module_name": "vhd_dff",
+  "input_count": 2,
+  "output_count": 1,
+  "is_sequential": true,
+  "ports": [
+    {
+      "name": "clk",
+      "dir": "in",
+      "width": 1
+    },
+    {
+      "name": "d",
+      "dir": "in",
+      "width": 1
+    },
+    {
+      "name": "q",
+      "dir": "out",
+      "width": 1
+    }
+  ],
+  "vectors": [
+    {
+      "clk": 0,
+      "d": 1,
+      "q": 0
+    },
+    {
+      "clk": 1,
+      "d": 1,
+      "q": 1
+    },
+    {
+      "clk": 1,
+      "d": 0,
+      "q": 1
+    },
+    {
+      "clk": 0,
+      "d": 0,
+      "q": 1
+    },
+    {
+      "clk": 1,
+      "d": 0,
+      "q": 0
+    }
+  ]
+}

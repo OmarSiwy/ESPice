@@ -1,0 +1,35 @@
+// §4.2 real arithmetic and §4.1 operator precedence. Every want here is an
+// exact binary double, so the comparison is `==`: a rounding difference would
+// mean the operator itself is wrong, not that the tolerance was too tight.
+//
+//! print none
+`include "check.vh"
+module ex020_real_arithmetic(p, n);
+  inout p, n;
+  electrical p, n;
+  analog begin
+    `CHECKX("add", 1.5 + 2.25, 3.75);
+    `CHECKX("sub", 1.5 - 2.25, -0.75);
+    `CHECKX("mul", 1.5 * 2.25, 3.375);
+    `CHECKX("div", 4.5 / 1.5, 3.0);
+    `CHECKX("unary minus", -(1.5), -1.5);
+    `CHECKX("unary plus", +(1.5), 1.5);
+    // §4.1.1: * binds tighter than +, and + is left-associative.
+    `CHECKX("precedence * over +", 2.0 + 3.0 * 4.0, 14.0);
+    `CHECKX("parens override", (2.0 + 3.0) * 4.0, 20.0);
+    `CHECKX("left assoc -", 10.0 - 3.0 - 2.0, 5.0);
+    `CHECKX("unary binds tightest", -2.0 * 3.0, -6.0);
+    `CHECKX("pow operator", 2.0 ** 10.0, 1024.0);
+    // §4.2.2: "All operators associate left to right with the exception of the
+    // conditional operator which associates right to left." `**` is not
+    // excepted — §4.2.12 names `?:` as the only right-associative operator — so
+    // this is `(2**3)**2 == 64`, not the `2**(3**2) == 512` IEEE 1800 would
+    // give. This line used to assert 512: FastVAF's own behaviour written down
+    // as if it were the rule.
+    `CHECKX("pow associates LEFT to right (2**3)**2", 2.0 ** 3.0 ** 2.0, 64.0);
+    // §4.2.4 % keeps the sign of the LEFT operand.
+    `CHECKX("real mod positive", 7.5 % 2.0, 1.5);
+    `CHECKX("real mod negative lhs", -7.5 % 2.0, -1.5);
+    I(p, n) <+ 0.0;
+  end
+endmodule

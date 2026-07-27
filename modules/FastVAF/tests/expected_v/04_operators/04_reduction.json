@@ -1,7 +1,0 @@
-{
-    "status": "compile_ok",
-    "module_name": "reduction",
-    "input_count": 4,
-    "output_count": 3,
-    "is_sequential": false
-}

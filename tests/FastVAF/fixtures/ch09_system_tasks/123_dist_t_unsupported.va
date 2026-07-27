@@ -1,0 +1,6 @@
+// EXPECT: error
+module ch09_dist_t_unsupported(p, n);
+  inout p, n; electrical p, n;
+  integer seed;
+  analog I(p,n) <+ $dist_t(seed, 4);
+endmodule

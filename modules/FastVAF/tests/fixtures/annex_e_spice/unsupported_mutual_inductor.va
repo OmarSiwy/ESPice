@@ -1,0 +1,5 @@
+// EXPECT: error -- SPICE objects require hierarchy/SPICE elaboration.
+module annex_e_unsupported_mutual_inductor(p, n);
+  inout p, n; electrical p, n;
+  mutual_inductor k1(p, n);
+endmodule

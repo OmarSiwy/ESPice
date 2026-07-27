@@ -1,0 +1,4 @@
+// EXPECT: error -- OOC discipline paths are resolved by a hierarchy elaborator.
+module annex_f_ooc;
+  electrical top.middle.bottom.sig;
+endmodule

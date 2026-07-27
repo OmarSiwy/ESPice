@@ -1,0 +1,8 @@
+// Linear capacitor. i(p,n) = c * d/dt V(p,n).
+module capacitor(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real c = 1e-12 from [0:inf);
+
+    analog I(p, n) <+ c * ddt(V(p, n));
+endmodule

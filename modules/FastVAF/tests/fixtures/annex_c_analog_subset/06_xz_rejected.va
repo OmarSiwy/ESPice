@@ -1,0 +1,5 @@
+// EXPECT: error
+module annex_c_xz_rejected;
+    integer value;
+    analog value = 4'b0x1z;
+endmodule

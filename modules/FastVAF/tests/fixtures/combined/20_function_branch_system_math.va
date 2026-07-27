@@ -1,0 +1,9 @@
+module combined_function_branch_system_math(p, n);
+  inout p, n; electrical p, n;
+  branch (p,n) path;
+  analog function real soft_clip;
+    input x; real x;
+    soft_clip = $tanh(x);
+  endfunction
+  analog I(path) <+ soft_clip(V(path)) + $min(V(path), 0.0) + $max(V(path), 0.0);
+endmodule

@@ -1,0 +1,1 @@
+module ch4_fn_out_actual(p); inout p; electrical p; real dummy; analog function real f; input x; output y; real x,y; begin y=x; f=x; end endfunction analog begin dummy=f(V(p),V(p)); I(p)<+dummy; end endmodule

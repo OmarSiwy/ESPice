@@ -1,0 +1,9 @@
+module ch09_atomic_sformat(p, n);
+  inout p, n; electrical p, n;
+  string text;
+  analog begin
+    $sformat(text, "value=%10.4e", V(p,n));
+    I(p,n) <+ V(p,n);
+  end
+endmodule
+

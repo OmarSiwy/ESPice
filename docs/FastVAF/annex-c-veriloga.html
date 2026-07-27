@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Annex C (normative) Analog language subset — Verilog-AMS LRM 2023</title>
+<style>
+body { font-family: 'Segoe UI', system-ui, sans-serif; max-width: 900px; margin: 0 auto; padding: 2rem; background: #fafafa; color: #1a1a1a; line-height: 1.6; }
+h1 { border-bottom: 3px solid #2563eb; padding-bottom: 0.5rem; }
+h2 { color: #1e40af; margin-top: 2rem; border-bottom: 1px solid #ddd; padding-bottom: 0.3rem; }
+h3 { color: #374151; }
+h4 { color: #4b5563; }
+code { background: #e5e7eb; padding: 0.15rem 0.4rem; border-radius: 3px; font-size: 0.9em; }
+pre { background: #1e293b; color: #e2e8f0; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; }
+pre code { background: none; padding: 0; color: inherit; }
+table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+th, td { border: 1px solid #d1d5db; padding: 0.5rem 0.75rem; text-align: left; }
+th { background: #2563eb; color: white; }
+tr:nth-child(even) { background: #f3f4f6; }
+.syntax { background: #fffbeb; border-left: 4px solid #f59e0b; padding: 1rem; margin: 1rem 0; font-family: monospace; white-space: pre-wrap; }
+.note { background: #eff6ff; border-left: 4px solid #2563eb; padding: 0.75rem 1rem; margin: 1rem 0; }
+nav { background: #1e293b; padding: 1rem; border-radius: 6px; margin-bottom: 2rem; }
+nav a { color: #93c5fd; text-decoration: none; margin-right: 1rem; }
+nav a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<nav><a href="index.html">Index</a> <a href="annex-b-keywords.html">&larr; Prev</a> <a href="annex-d-stddefs.html">Next &rarr;</a> </nav>
+<h1>Annex C (normative) Analog language subset</h1>
+
+<p>This annex defines a working subset of Verilog-AMS HDL for analog-only products.</p>
+
+<h2 id="sC-1">C.1 Verilog-A overview</h2>
+
+<p>This Verilog-A subset defines a behavioral language for analog only systems. Verilog-A is derived from the IEEE Std 1364 Verilog specification using a minimum number of constructs for analog and mixed-signal behavioral descriptions. This Annex is intended to cover the definition and semantics of Verilog-A.</p>
+
+<p>The intent of Verilog-A is to let designers of analog systems and integrated circuits create and use modules which encapsulate high-level behavioral descriptions of systems and components. The behavior of each module can be described mathematically in terms of its terminals and external parameters applied to the module. These behavioral descriptions can be used in many disciplines such as electrical, mechanical, fluid dynamics, and thermodynamics.</p>
+
+<p>Verilog-A has been defined to be applicable to both electrical and non-electrical systems description. It supports conservative and signal-flow descriptions by using the terminology for these descriptions using the concepts of nodes, branches, and terminals. The solution of analog behaviors which obey the laws of conservation fall within the generalized form of Kirchhoff&rsquo;s Potential and Flow Laws (KPL and KFL). Both of these are defined in terms of the quantities associated with the analog behaviors.</p>
+
+<h2 id="sC-2">C.2 Verilog-A language features</h2>
+
+<p>The Verilog-A subset provides access to a salient set of features of the full modeling language that allow analog designers the ability to model analog systems:</p>
+<ul>
+<li>Verilog-A modules are compatible with Verilog-AMS HDL.</li>
+<li>Analog behavioral modeling descriptions are contained in separate <code>analog</code> blocks.</li>
+<li>Branches can be named for easy selection and access.</li>
+<li>Parameters can be specified with valid range limits.</li>
+<li>Systems can be modeled by using expressions consisting of operators, variables, and signals:
+<ul>
+<li>a full set of operators including trigonometric functions, integrals, and derivatives;</li>
+<li>a set of waveform filters to modify the waveform results for faster and more accurate simulation like transition, slew, Laplace, and Z-domain;</li>
+<li>a set of events to control when certain code is simulated;</li>
+<li>selection of the simulation time step for simulation control;</li>
+<li>support for accessing SPICE primitives from within the language.</li>
+</ul>
+</li>
+</ul>
+
+<h2 id="sC-3">C.3 Lexical conventions</h2>
+
+<p>With the exception of certain keywords required for Verilog-AMS HDL, Clause 2 shall be applicable to both Verilog-A and Verilog-AMS HDL. All Verilog-AMS HDL keywords shall be supported by Verilog-A as reserved words, but IEEE Std 1364 Verilog and Verilog-AMS HDL specific keywords are not used in Verilog-A. The following Verilog-AMS HDL keywords are not required to be supported for a fully compliant Verilog-A subset:</p>
+
+<p>From 2.6, Numbers: support for <code>x</code> and <code>z</code> values is limited in the <code>analog</code> block to the mixed signal context, as defined in 7.3.2. In the same paragraph, the use of the question mark character as an alternative for z is also limited to the mixed signal context.</p>
+
+<p>From 2.8.2, Keywords: certain keywords are not applicable in Verilog-A, as defined in Annex C.16.</p>
+
+<h2 id="sC-4">C.4 Data types</h2>
+
+<p>The data types of Clause 3 are applicable to both Verilog-AMS HDL and Verilog-A with the following exceptions:</p>
+<ul>
+<li>From 3.6.2.2, Domain binding: the domain binding type <code>discrete</code> shall be an error in Verilog-A.</li>
+<li>From 3.7, Real net declarations: the <code>wreal</code> data type is not supported in Verilog-A.</li>
+<li>From 3.8, Default discipline: the <code>`default_discipline</code> compiler directive is not supported in Verilog-A. All Verilog-A modules shall have a discipline defined for each module.</li>
+</ul>
+
+<p>This feature allows the use of digital modules in Verilog-AMS HDL without editing them to add a discipline.</p>
+
+<h2 id="sC-5">C.5 Expressions</h2>
+
+<p>The expressions defined in Clause 4 are applicable to both Verilog-AMS HDL and Verilog-A with the following exception:</p>
+
+<p>The case equality operators (<code>===</code>, <code>!==</code>) are not supported in Verilog-A.</p>
+
+<h2 id="sC-6">C.6 Analog signals</h2>
+
+<p>The signals defined in 5.4 are applicable to both Verilog-AMS HDL and Verilog-A.</p>
+
+<h2 id="sC-7">C.7 Analog behavior</h2>
+
+<p>The analog behavior defined in Clause 5 are applicable to both Verilog-AMS HDL and Verilog-A with the following exceptions:</p>
+<ul>
+<li>No digital behavior or events are supported in Verilog-A.</li>
+<li><code>casex</code> and <code>casez</code> are not supported in Verilog-A.</li>
+</ul>
+
+<h2 id="sC-8">C.8 Hierarchical structures</h2>
+
+<p>The hierarchical structure defined in Clause 6 is applicable to both Verilog-AMS HDL and Verilog-A, except support for <em>real value ports</em> is only applicable to Verilog-AMS HDL and IEEE Std 1364 Verilog (see 6.5.3).</p>
+
+<h2 id="sC-9">C.9 Mixed signal</h2>
+
+<p>Clause 7 only applies to Verilog-AMS HDL.</p>
+
+<h2 id="sC-10">C.10 Scheduling semantics</h2>
+
+<p>The analog simulation cycle is applicable to both Verilog-AMS HDL and Verilog-A. The mixed-signal simulation cycle from 8.2 is only applicable to Verilog-AMS HDL.</p>
+
+<h2 id="sC-11">C.11 System tasks and functions</h2>
+
+<p>All system tasks and functions in Clause 9 that are applicable in the analog context are applicable to Verilog-A.</p>
+
+<h2 id="sC-12">C.12 Compiler directives</h2>
+
+<p>The compiler directives of Clause 10 are applicable to both Verilog-AMS HDL and Verilog-A.</p>
+
+<h2 id="sC-13">C.13 Using VPI routines</h2>
+
+<p>The analog behavior defined in Clause 11 is applicable to both Verilog-AMS HDL and Verilog-A.</p>
+
+<h2 id="sC-14">C.14 VPI routine definitions</h2>
+
+<p>The analog behavior defined in Clause 12 is applicable to both Verilog-AMS HDL and Verilog-A.</p>
+
+<h2 id="sC-15">C.15 Analog language subset</h2>
+
+<p>This annex (Annex C) defines the differences between Verilog-AMS HDL and Verilog-A. Annex A defines the BNF for Verilog-AMS HDL.</p>
+
+<h2 id="sC-16">C.16 List of keywords</h2>
+
+<p>The keywords in Annex B are the complete set of Verilog-AMS HDL keywords, including those from IEEE Std 1364 Verilog. The following keywords as defined in this LRM are not used by Verilog-A:</p>
+
+<pre><code>connect
+connectmodule
+connectrules
+driver_update
+endconnectrules
+merged
+resolveto
+split
+wreal</code></pre>
+
+<div class="note">NOTE&mdash;All keywords of Verilog-AMS HDL are reserved words for Verilog-A.</div>
+
+<h2 id="sC-17">C.17 Standard definitions</h2>
+
+<p>The definitions of Annex D are applicable to both Verilog-AMS HDL and Verilog-A, with the exception of those disciplines with a domain of <code>discrete</code>. A Verilog-A implementation shall silently ignore any definition of a discipline with a domain of <code>discrete</code>.</p>
+
+<h2 id="sC-18">C.18 SPICE compatibility</h2>
+
+<p>Annex E defines the SPICE compatibility for both Verilog-A and Verilog-AMS HDL.</p>
+
+<h2 id="sC-19">C.19 Changes from previous Verilog-A LRM versions</h2>
+
+<p>Annex G describes the changes from previous LRM versions for both Verilog-A and Verilog-AMS HDL.</p>
+
+<h2 id="sC-20">C.20 Obsolete functionality</h2>
+
+<p>Annex G also describes the statements that are no longer supported in the current version of Verilog-AMS HDL as well as the analog language subset.</p>
+
+</body></html>

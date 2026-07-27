@@ -1,0 +1,18 @@
+=== 020_real_arithmetic ===
+--- point 0 ---
+  x[p] = 0.000000e0
+  x[n] = 0.000000e0
+add got=3.75 want=3.75 ok=1
+sub got=-0.75 want=-0.75 ok=1
+mul got=3.375 want=3.375 ok=1
+div got=3 want=3 ok=1
+unary minus got=-1.5 want=-1.5 ok=1
+unary plus got=1.5 want=1.5 ok=1
+precedence * over + got=14 want=14 ok=1
+parens override got=20 want=20 ok=1
+left assoc - got=5 want=5 ok=1
+unary binds tightest got=-6 want=-6 ok=1
+pow operator got=1024 want=1024 ok=1
+pow associates LEFT to right (2**3)**2 got=64 want=64 ok=1
+real mod positive got=1.5 want=1.5 ok=1
+real mod negative lhs got=-1.5 want=-1.5 ok=1

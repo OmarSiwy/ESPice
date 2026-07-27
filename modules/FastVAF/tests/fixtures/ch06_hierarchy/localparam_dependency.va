@@ -1,0 +1,1 @@
+module ch6_localparam(p); inout p; electrical p; parameter real base=2.0; localparam real doubled=2.0*base; analog I(p)<+doubled*V(p); endmodule

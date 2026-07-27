@@ -1,0 +1,10 @@
+module annex_c_case_equality_current_behavior(p, n);
+    inout p, n;
+    electrical p, n;
+    integer equal;
+
+    analog begin
+        equal = V(p, n) === 0.0;
+        I(p, n) <+ equal;
+    end
+endmodule

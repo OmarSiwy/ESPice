@@ -1,0 +1,5 @@
+// EXPECT: error -- net.potential.abstol is not represented by the AST.
+module ch5_nature_attribute(p);
+  inout p; electrical p;
+  analog I(p) <+ ddt(V(p), p.potential.abstol);
+endmodule

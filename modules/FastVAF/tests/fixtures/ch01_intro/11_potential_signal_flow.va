@@ -1,0 +1,4 @@
+nature ch1_sf_voltage_n; units="V"; access=SV; abstol=1u; endnature
+discipline ch1_voltage_sf; potential ch1_sf_voltage_n; enddiscipline
+module ch1_potential_sf(input ch1_voltage_sf inp, output ch1_voltage_sf outp); analog SV(outp) <+ 5.0 + SV(inp); endmodule
+// EXPECT: error -- normative syntax/restriction snapshot for this rule family.

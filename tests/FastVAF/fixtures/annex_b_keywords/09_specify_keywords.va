@@ -1,0 +1,9 @@
+module annex_b_specify(input a, output y);
+specify
+  specparam delay=1;
+  ifnone (edge a *> y) = delay;
+  pulsestyle_ondetect y; pulsestyle_onevent y;
+  showcancelled y; noshowcancelled y;
+endspecify
+endmodule
+// EXPECT: error -- normative syntax/restriction snapshot for this rule family.

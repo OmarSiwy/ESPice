@@ -1,0 +1,14 @@
+=== 122_bit_conversions ===
+--- point 0 ---
+  x[p] = 0.000000e0
+  x[n] = 0.000000e0
+$rtoi truncates, not rounds got=1 want=1 ok=1
+$itor got=-5 want=-5 ok=1
+$realtobits(1.0) got=4607182418800017408 want=4607182418800017408 ok=1
+$bitstoreal round trip got=0.1 want=0.1 ok=1
+round trip of a negative got=-2.5 want=-2.5 ok=1
+$clog2(1) got=0 want=0 ok=1
+$clog2(2) got=1 want=1 ok=1
+$clog2(5) got=3 want=3 ok=1
+$clog2(8) got=3 want=3 ok=1
+$clog2(9) got=4 want=4 ok=1

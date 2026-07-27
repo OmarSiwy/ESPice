@@ -1,0 +1,5 @@
+`default_transition 1n
+module ch10_default_transition(p, n);
+  inout p, n; electrical p, n;
+  analog I(p,n) <+ V(p,n);
+endmodule

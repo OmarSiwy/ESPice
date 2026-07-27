@@ -1,0 +1,7 @@
+module ch5_rlc(p, n);
+  inout p, n; electrical p, n;
+  parameter real r = 10.0 from (0:inf);
+  parameter real c = 1p from (0:inf);
+  parameter real l = 1n from (0:inf);
+  analog I(p, n) <+ V(p, n)/r + c*ddt(V(p, n)) + idt(V(p, n)/l, 0.0);
+endmodule

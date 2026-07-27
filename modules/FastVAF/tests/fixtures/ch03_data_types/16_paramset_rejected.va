@@ -1,0 +1,7 @@
+// EXPECT: error
+paramset ch03_values ch03_target;
+    .gain = 2.0;
+endparamset
+
+module ch03_paramset_rejected;
+endmodule

@@ -1,0 +1,11 @@
+module ch04_correlated_noise(a, b, c);
+    inout a, b, c;
+    electrical a, b, c;
+    real shared_noise;
+
+    analog begin
+        shared_noise = white_noise(1e-18, "shared");
+        I(a, b) <+ shared_noise;
+        I(b, c) <+ 2.0 * shared_noise;
+    end
+endmodule

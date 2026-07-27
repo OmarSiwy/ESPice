@@ -1,0 +1,43 @@
+// Voltage-controlled current source (ngspice G element). i(p,n) = m*gain*V(cp,cn).
+//
+// Port order is the netlist order: G<name> p n cp cn <gain>.
+//
+// Doc §1.5 / §2 / §4: G is a *constant stamp* — "no bias dependence, no
+// limiting, no charge", and the batched kernel writes its Jacobian as
+// consts(P[i]). So this module stays first-order in V(cp,cn); any engine path
+// that caches the G entry as a constant is then exactly right.
+//
+// ponytail: no c0/c1/c2 POLY ladder here. §1.6 scopes the polynomial subset
+// f = c0 + c1*vc + c2*vc^2 to the B-source, and bsource.va already implements
+// it over one control pair with imode=1 (current output) — a G POLY(1) card
+// belongs there, not duplicated as a second quadratic. The netlist layer agrees:
+// builder.zig routes letter 'g' through addSingleDevice, which fills only
+// `gain` (builder.zig:816); extractPolyCoeffs writes bsource's coefficients
+// only. A POLY ladder in this file was dead parameters.
+//
+// `m` is ngspice's parallel multiplier folded into the transfer exactly as the
+// sibling cccs.va does (cccspar.c: `coeff = value; if (mGiven) coeff *= m`).
+// With the POLY terms gone it scales the one linear coefficient, so there is no
+// question of m touching coefficients ngspice's ASRC translation never sees.
+//
+// Zero control current (infinite input impedance) is implicit: nothing is
+// contributed to the (cp, cn) branch. No charge, no limiting, no state.
+module vccs(p, n, cp, cn);
+    inout p, n, cp, cn;
+    electrical p, n, cp, cn;
+
+    // ngspice has no default for the G card VALUE (as for E, see vcvs.va);
+    // rejecting a valueless card is the netlist layer's job (builder.zig:816,
+    // `positionalNumber(dev, 0) orelse 0`), which overrides this default
+    // unconditionally — so this number is never the one a G card sees.
+    parameter real gain = 0.0;              // transconductance, A/V
+    parameter real m    = 1.0 from (0:inf); // parallel multiplier
+
+    real k;
+    analog begin
+        // Bias-independent parameter prep, hoisted out of the I() chain.
+        k = m * gain;
+
+        I(p, n) <+ k * V(cp, cn);
+    end
+endmodule

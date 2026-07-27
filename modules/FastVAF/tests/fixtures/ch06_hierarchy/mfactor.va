@@ -1,0 +1,4 @@
+module ch6_mfactor(p);
+  inout p; electrical p;
+  analog I(p) <+ V(p) + 0.0 * $mfactor;
+endmodule

@@ -1,0 +1,6 @@
+// Named events need the digital scheduler; this snapshots the missing diagnostic.
+module ch5_named_event(p);
+  inout p; electrical p;
+  event tick;
+  analog @(tick) I(p) <+ 1m + 0.0*V(p);
+endmodule

@@ -1,0 +1,1 @@
+module ch4_fn_untyped(p); inout p; electrical p; analog function real untyped; input x; untyped=x; endfunction analog I(p)<+untyped(V(p)); endmodule

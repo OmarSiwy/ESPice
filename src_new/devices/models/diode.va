@@ -1,0 +1,19 @@
+// Shockley diode. i(a,c) = is * (exp(V/(n*vt)) - 1) + gmin*V.
+// Junction limiting is the solver's job (companion linearization); this is
+// the pure device law.
+module diode(a, c);
+    inout a, c;
+    electrical a, c;
+    parameter real is = 1e-14 from (0:inf);
+    parameter real n  = 1.0    from (0:inf);
+    parameter real tnom = 300.15 from (0:inf);
+    parameter real gmin = 1e-12 from [0:inf);
+
+    real vt;
+    real vd;
+    analog begin
+        vt = 1.380649e-23 * tnom / 1.602176634e-19;
+        vd = V(a, c);
+        I(a, c) <+ is * (exp(vd / (n * vt)) - 1.0) + gmin * vd;
+    end
+endmodule

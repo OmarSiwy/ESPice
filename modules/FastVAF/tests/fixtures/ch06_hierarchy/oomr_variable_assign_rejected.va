@@ -1,0 +1,8 @@
+// EXPECT: error -- LRM 6.7.1 forbids out-of-module references.
+module ch6_oomr_variable_assign(p);
+  inout p; electrical p;
+  analog begin
+    device.local_value = V(p);
+    I(p) <+ V(p);
+  end
+endmodule

@@ -1,0 +1,4 @@
+// EXPECT: error -- split connector names use SigName__InstName__PortName.
+module ch7_connect_generated_split_name;
+  defparam signal__receiver__input.threshold = 0.6;
+endmodule

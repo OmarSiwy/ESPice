@@ -1,0 +1,4 @@
+module ch09_temperature_vt(p, n);
+  inout p, n; electrical p, n;
+  analog I(p,n) <+ $temperature + $vt + $vt(300.0) + 0.0*V(p,n);
+endmodule

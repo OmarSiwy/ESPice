@@ -1,0 +1,20 @@
+=== 069_last_crossing_direction ===
+--- point 0 ---
+  x[in] = -1.000000e0
+  x[n] = 0.000000e0
++1 ignores the falling crossing and reports the rising one got=-1 want=-1 ok=1
+--- point 1 ---
+  x[in] = -1.000000e0
+  x[n] = 0.000000e0
+  t = 1.000000e-9  dt = 1.000000e-9
++1 ignores the falling crossing and reports the rising one got=-1 want=-1 ok=1
+--- point 2 ---
+  x[in] = 1.000000e0
+  x[n] = 0.000000e0
+  t = 2.000000e-9  dt = 1.000000e-9
++1 ignores the falling crossing and reports the rising one got=-1 want=-1 ok=1
+--- point 3 ---
+  x[in] = 1.000000e0
+  x[n] = 0.000000e0
+  t = 3.000000e-9  dt = 1.000000e-9
++1 ignores the falling crossing and reports the rising one got=0.0000000015000000000000002 want=0.0000000015000000000000002 ok=1

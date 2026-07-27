@@ -1,0 +1,18 @@
+nature Temperature;
+  units = "K";
+  access = Temp;
+  abstol = 1e-4;
+endnature
+nature Power;
+  units = "W";
+  access = Pwr;
+  abstol = 1e-9;
+endnature
+discipline thermal_d;
+  potential Temperature;
+  flow Power;
+enddiscipline
+module annex_d_thermal(p);
+  inout p; thermal p;
+  analog Pwr(p) <+ Temp(p);
+endmodule

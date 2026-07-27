@@ -1,0 +1,8 @@
+module ch6_typed(p, heat);
+  inout electrical p;
+  inout thermal heat;
+  analog begin
+    I(p) <+ V(p);
+    Pwr(heat) <+ Temp(heat);
+  end
+endmodule

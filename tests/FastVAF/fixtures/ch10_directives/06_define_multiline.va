@@ -1,0 +1,6 @@
+`define POLY(x) ((x)*(x) + \
+                 2.0*(x) + 1.0)
+module ch10_define_multiline(p, n);
+  inout p, n; electrical p, n;
+  analog I(p,n) <+ `POLY(V(p,n));
+endmodule

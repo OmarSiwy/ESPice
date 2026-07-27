@@ -1,0 +1,10 @@
+module ch09_atomic_fflush(p, n);
+  inout p, n; electrical p, n;
+  integer fd;
+  analog begin
+    fd = $fopen("fixture.dat", "a");
+    $fflush(fd);
+    I(p,n) <+ V(p,n);
+  end
+endmodule
+

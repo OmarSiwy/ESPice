@@ -1,0 +1,9 @@
+`define DEFAULT_R 1k
+module combined_resistor_with_directives(p, n);
+  inout p, n; electrical p, n;
+  parameter real resistance = `DEFAULT_R from (0:inf);
+  analog begin
+    $bound_step(1u);
+    I(p,n) <+ V(p,n)/resistance;
+  end
+endmodule

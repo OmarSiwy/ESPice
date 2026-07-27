@@ -1,0 +1,5 @@
+// EXPECT: error
+module ch12_callback_not_va(p, n);
+  inout p, n; electrical p, n;
+  analog I(p,n) <+ vpi_register_cb(0);
+endmodule

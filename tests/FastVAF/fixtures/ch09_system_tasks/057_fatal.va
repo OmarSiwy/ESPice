@@ -1,0 +1,8 @@
+module ch09_atomic_fatal(p, n);
+  inout p, n; electrical p, n;
+  analog begin
+    if (V(p,n) > 1.0) $fatal(1, "fatal voltage=%g", V(p,n));
+    I(p,n) <+ V(p,n);
+  end
+endmodule
+

@@ -1,0 +1,12 @@
+discipline rotational;
+  potential Angle;
+  flow Angular_Force;
+enddiscipline
+discipline rotational_omega;
+  potential Angular_Velocity;
+  flow Angular_Force;
+enddiscipline
+module annex_d_literal_rotational;
+  electrical p;
+  analog I(p) <+ V(p);
+endmodule

@@ -1,0 +1,8 @@
+`define SQUARE(value) ((value) * (value))
+module combined_macro_alias_parameter_ranges(p, n);
+  inout p, n; electrical p, n;
+  parameter real scale = 2.0 from (0:inf) exclude 10.0;
+  aliasparam gain = scale;
+  parameter real offset = 0.1 from [-1:1];
+  analog I(p,n) <+ gain * `SQUARE(V(p,n)) + offset;
+endmodule

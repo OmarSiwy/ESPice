@@ -1,0 +1,1 @@
+module ch5_vccs(op,on,cp,cn); inout op,on,cp,cn; electrical op,on,cp,cn; analog I(op,on)<+2m*V(cp,cn); endmodule

@@ -1,0 +1,13 @@
+(* annex = "A.9" *)
+module annex_a_general(p, n);
+    // line comment
+    /* block comment */
+    inout p, n;
+    electrical p, n;
+    real \punctuated+identifier ;
+
+    analog begin
+        \punctuated+identifier  = 1.0;
+        I(p, n) <+ \punctuated+identifier ;
+    end
+endmodule

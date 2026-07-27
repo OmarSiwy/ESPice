@@ -1,0 +1,4 @@
+module ch09_simparam(p, n);
+  inout p, n; electrical p, n;
+  analog I(p,n) <+ $simparam("gmin", 1e-12) + $simparam("scale") + 0.0*V(p,n);
+endmodule

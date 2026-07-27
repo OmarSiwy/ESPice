@@ -1,0 +1,4 @@
+module ch5_generic_access(p);
+  inout p; electrical p;
+  analog potential(p) <+ flow(p) * 25.0;
+endmodule

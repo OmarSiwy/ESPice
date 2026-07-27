@@ -1,0 +1,10 @@
+=== 024_conditional_operator ===
+--- point 0 ---
+  x[p] = 0.000000e0
+  x[n] = 0.000000e0
+true arm got=10 want=10 ok=1
+false arm got=20 want=20 ok=1
+nested got=4 want=4 ok=1
+condition is a real got=1 want=1 ok=1
+zero real condition got=2 want=2 ok=1
+integer result got=7 want=7 ok=1

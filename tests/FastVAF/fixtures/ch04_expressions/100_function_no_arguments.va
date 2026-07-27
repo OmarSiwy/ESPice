@@ -1,0 +1,1 @@
+module ch4_fn_noargs(p); inout p; electrical p; analog function real noargs; noargs=1.0; endfunction analog I(p)<+noargs(); endmodule

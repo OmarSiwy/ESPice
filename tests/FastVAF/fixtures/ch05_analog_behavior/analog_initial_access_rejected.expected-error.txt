@@ -1,0 +1,2 @@
+# LRM 5.2.1: access functions are forbidden in an analog initial block.
+E0421

@@ -1,0 +1,8 @@
+// EXPECT: error -- deassign removes a procedural continuous assignment.
+module ch8_procedural_deassign;
+  reg source, target;
+  initial begin
+    assign target = source;
+    deassign target;
+  end
+endmodule

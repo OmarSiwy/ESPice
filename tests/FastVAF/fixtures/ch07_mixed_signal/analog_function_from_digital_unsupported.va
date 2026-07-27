@@ -1,0 +1,9 @@
+// EXPECT: error -- LRM 7.3.7 forbids calling an analog function from digital.
+module ch7_analog_function_from_digital;
+  real sampled;
+  analog function real analog_scale;
+    input real value;
+    analog_scale = 2.0 * value;
+  endfunction
+  initial sampled = analog_scale(1.0);
+endmodule

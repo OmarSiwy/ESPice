@@ -1,0 +1,8 @@
+// EXPECT: error -- 7.3.2 permits explicit X testing with case equality.
+module ch7_x_case_equality(p, d);
+  inout p; electrical p; input d; wire d; real result;
+  analog begin
+    result = (d === 1'bx) ? 1.0 : 0.0;
+    I(p) <+ result;
+  end
+endmodule

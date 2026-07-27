@@ -1,0 +1,11 @@
+module annex_c_analog_event(p, n);
+    inout p, n;
+    electrical p, n;
+    integer state;
+
+    analog begin
+        @(initial_step) state = 0;
+        @(cross(V(p, n), 1)) state = 1;
+        I(p, n) <+ state;
+    end
+endmodule

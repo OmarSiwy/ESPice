@@ -1,0 +1,7 @@
+module annex_c_named_branch(p, n);
+    inout p, n;
+    electrical p, n;
+    branch (p, n) path;
+
+    analog I(path) <+ V(path);
+endmodule

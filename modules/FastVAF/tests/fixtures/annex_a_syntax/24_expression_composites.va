@@ -1,0 +1,2 @@
+module annex_a_composites(p); inout p; electrical p; integer bits; real x; analog begin bits={4'b1010,4'b0101}; bits={2{4'b0011}}; x=(~bits)+(bits<<1)+(bits&3)+(V(p)>0.0?1.0:-1.0); I(p)<+x; end endmodule
+// EXPECT: error -- normative syntax/restriction snapshot for this rule family.

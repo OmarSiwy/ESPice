@@ -1,0 +1,4 @@
+module ch12_user_systf_function_call(p, n);
+  inout p, n; electrical p, n;
+  analog I(p,n) <+ $fixture_vpi_gain(V(p,n));
+endmodule

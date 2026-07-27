@@ -1,0 +1,14 @@
+nature Magneto_Motive_Force;
+  units = "A*turn";
+  access = MMF;
+  abstol = 1e-12;
+endnature
+discipline magnetic_d;
+  potential Magneto_Motive_Force;
+  // Annex D uses the electrical Flux nature here; there is no Magnetic_Flux.
+  flow Flux;
+enddiscipline
+module annex_d_magnetic;
+  electrical p;
+  analog I(p) <+ V(p);
+endmodule

@@ -1,0 +1,5 @@
+# LRM 2.7: "A string literal is a sequence of characters enclosed by double
+# quotes and contained on a single line."
+ParseError
+E0138
+a string literal may not span lines

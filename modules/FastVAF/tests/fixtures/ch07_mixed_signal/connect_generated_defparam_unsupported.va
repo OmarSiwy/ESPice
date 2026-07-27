@@ -1,0 +1,4 @@
+// EXPECT: error -- generated connector names make per-instance defparam possible.
+module ch7_connect_generated_defparam;
+  defparam signal__converter__ddiscrete.threshold = 0.6;
+endmodule

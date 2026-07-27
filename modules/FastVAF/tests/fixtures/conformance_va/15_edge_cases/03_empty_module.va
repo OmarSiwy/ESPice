@@ -1,4 +1,0 @@
-// Conformance: edge — Empty module
-// EXPECT: compile_ok
-module conf_edge_empty;
-endmodule

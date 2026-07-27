@@ -1,0 +1,2 @@
+// EXPECT: error -- Table E.1 primitive needs SPICE elaboration.
+module annex_e_primitive_tline(t1,b1,t2,b2); inout t1,b1,t2,b2; electrical t1,b1,t2,b2; tline #(.z0(50.0),.td(1n),.f(1G),.nl(1.0)) x(.t1(t1),.b1(b1),.t2(t2),.b2(b2)); endmodule

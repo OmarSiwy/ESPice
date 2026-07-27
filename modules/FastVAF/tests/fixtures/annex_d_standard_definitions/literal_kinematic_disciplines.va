@@ -1,0 +1,12 @@
+discipline kinematic;
+  potential Position;
+  flow Force;
+enddiscipline
+discipline kinematic_v;
+  potential Velocity;
+  flow Force;
+enddiscipline
+module annex_d_literal_kinematic;
+  electrical p;
+  analog I(p) <+ V(p);
+endmodule

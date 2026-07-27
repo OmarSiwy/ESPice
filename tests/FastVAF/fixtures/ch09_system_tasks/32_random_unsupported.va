@@ -1,0 +1,6 @@
+// EXPECT: error
+module ch09_random_unsupported(p, n);
+  inout p, n; electrical p, n;
+  integer seed;
+  analog I(p,n) <+ $random(seed);
+endmodule

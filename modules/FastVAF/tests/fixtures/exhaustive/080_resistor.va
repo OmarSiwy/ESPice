@@ -1,0 +1,19 @@
+// §5.6 the simplest conserved device: a flow contribution between two nodes.
+// The transcript's residual IS the KCL stamp (§1.3.2) and its derivative IS the
+// conductance the solver puts in the Jacobian, so this fixture pins the whole
+// contribution-to-stamp path with numbers anyone can verify by Ohm's law.
+//
+//! param r = 2k
+//! bias V(n) = 0
+//! sweep V(p) = -1, 0, 1
+`include "check.vh"
+module ex080_resistor(p, n);
+  inout p, n;
+  electrical p, n;
+  parameter real r = 1k from (0:inf);
+  analog begin
+    `CHECK("I = V/R", V(p, n) / r, V(p, n) / 2000.0, 1e-18);
+    `CHECK("conductance", 1.0 / r, 5e-4, 1e-18);
+    I(p, n) <+ V(p, n) / r;
+  end
+endmodule

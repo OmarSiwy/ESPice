@@ -1,0 +1,5 @@
+// EXPECT: error -- branch probes may be OOMRs only after hierarchy resolution.
+module ch6_oomr_branch_probe(p);
+  inout p; electrical p;
+  analog I(p) <+ V(device.path);
+endmodule

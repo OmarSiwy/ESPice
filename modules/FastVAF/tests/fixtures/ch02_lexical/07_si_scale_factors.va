@@ -1,0 +1,10 @@
+module ch02_si_scale_factors(p, n);
+    inout p, n;
+    electrical p, n;
+    real scaled;
+
+    analog begin
+        scaled = 1T + 1G + 1M + 1K + 1k + 1m + 1u + 1n + 1p + 1f + 1a;
+        I(p, n) <+ scaled;
+    end
+endmodule

@@ -1,0 +1,5 @@
+module ch09_atomic_cosh(p, n);
+  inout p, n; electrical p, n;
+  analog I(p,n) <+ V(p,n) + $cosh(V(p,n));
+endmodule
+

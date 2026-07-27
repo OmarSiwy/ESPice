@@ -1,0 +1,5 @@
+module glossary_module_parameter(p, n);
+  inout p, n; electrical p, n;
+  parameter real gain = 3.0;
+  analog I(p,n) <+ gain*V(p,n);
+endmodule

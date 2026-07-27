@@ -1,0 +1,13 @@
+=== 023_bitwise_shift ===
+--- point 0 ---
+  x[p] = 0.000000e0
+  x[n] = 0.000000e0
+and got=8 want=8 ok=1
+or got=14 want=14 ok=1
+xor got=6 want=6 ok=1
+not got=-1 want=-1 ok=1
+xnor got=-7 want=-7 ok=1
+shl got=48 want=48 ok=1
+shr got=3 want=3 ok=1
+shr zero-fills a negative, over a 32-bit integer got=1073741820 want=1073741820 ok=1
+shr zero-fills -1 to the whole mask got=2147483647 want=2147483647 ok=1

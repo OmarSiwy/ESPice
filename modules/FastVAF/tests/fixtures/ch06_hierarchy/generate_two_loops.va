@@ -1,0 +1,1 @@
+module ch6_two_loops(p); inout p; electrical[0:1] p; genvar i,j; generate for(i=0;i<1;i=i+1) I(p[i])<+V(p[i]); for(j=1;j<2;j=j+1) I(p[j])<+V(p[j]); endgenerate endmodule

@@ -1,0 +1,19 @@
+nature annex_a_voltage;
+    units = "V";
+    access = V;
+    abstol = 1u;
+endnature
+
+discipline annex_a_electrical;
+    domain continuous;
+    potential annex_a_voltage;
+enddiscipline
+
+module annex_a_first;
+endmodule
+
+module annex_a_source_text(p, n);
+    inout p, n;
+    electrical p, n;
+    analog I(p, n) <+ V(p, n);
+endmodule

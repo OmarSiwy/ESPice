@@ -1,0 +1,4 @@
+module ch11_operation_access_objects(p, n);
+  inout p, n; electrical p, n;
+  analog I(p,n) <+ abs(V(p,n)) + V(p,n) * V(p,n);
+endmodule

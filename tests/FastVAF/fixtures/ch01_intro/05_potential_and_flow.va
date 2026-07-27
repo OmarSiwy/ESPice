@@ -1,0 +1,7 @@
+module ch01_potential_and_flow(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real resistance = 10.0;
+
+    analog V(p, n) <+ resistance * I(p, n);
+endmodule

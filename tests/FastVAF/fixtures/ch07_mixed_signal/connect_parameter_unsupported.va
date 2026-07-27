@@ -1,0 +1,4 @@
+// EXPECT: error -- connect rule parameter passing needs insertion support.
+connectrules ch7_parameters;
+  connect ch7_a2d #(.threshold(0.5));
+endconnectrules

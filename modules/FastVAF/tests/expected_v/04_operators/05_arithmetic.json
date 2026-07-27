@@ -1,7 +1,0 @@
-{
-    "status": "compile_ok",
-    "module_name": "arith",
-    "input_count": 16,
-    "output_count": 24,
-    "is_sequential": false
-}

@@ -1,0 +1,7 @@
+module ch6_dependent(p);
+  inout p; electrical p;
+  parameter real width = 2u;
+  parameter real area = width * width;
+  parameter real conductance = area / 1u;
+  analog I(p) <+ conductance * V(p);
+endmodule

@@ -1,0 +1,5 @@
+// EXPECT: error
+module ch10_undefined_macro(p, n);
+  inout p, n; electrical p, n;
+  analog I(p,n) <+ `MISSING*V(p,n);
+endmodule

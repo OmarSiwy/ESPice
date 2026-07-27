@@ -1,0 +1,7 @@
+module ch11_system_task_call_object_atomic(p, n);
+  inout p, n; electrical p, n;
+  analog begin
+    $fixture_vpi_task_object(V(p,n));
+    I(p,n) <+ V(p,n);
+  end
+endmodule

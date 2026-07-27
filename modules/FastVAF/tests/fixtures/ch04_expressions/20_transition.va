@@ -1,0 +1,10 @@
+module ch04_transition(p, n);
+    inout p, n;
+    electrical p, n;
+    integer level;
+
+    analog begin
+        level = V(p, n) > 0.0;
+        I(p, n) <+ transition(level, 1n, 2n, 3n);
+    end
+endmodule

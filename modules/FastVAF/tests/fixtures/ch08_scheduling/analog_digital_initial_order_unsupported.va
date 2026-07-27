@@ -1,0 +1,7 @@
+// EXPECT: error -- analog initial completes before time-zero digital initial.
+module ch8_analog_digital_initial_order(p);
+  inout p; electrical p; real analog_value; integer digital_value;
+  analog initial analog_value = 1.0;
+  initial digital_value = 1;
+  analog I(p) <+ analog_value + digital_value;
+endmodule

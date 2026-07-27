@@ -1,0 +1,7 @@
+module ch6_generate_loop(p);
+  inout p; electrical [0:2] p; genvar i;
+  generate
+    for (i = 0; i < 3; i = i + 1)
+      I(p[i]) <+ V(p[i]);
+  endgenerate
+endmodule
