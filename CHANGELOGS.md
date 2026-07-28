@@ -10,6 +10,9 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
   gmin stepping (#3).
 - `zig build wasm`: espice.wasm (CPU, single-threaded, built-in models) and
   cktimg.wasm for the docs playground; `docs/playground.md` runs every spice block.
+- Nix flake: `nix run github:OmarSiwy/ESPice`, `packages.espice` (CPU) and
+  `espice-cuda` (CUDA), `overlays.default`, smoke `checks`; CI pushes builds
+  to the `omarsiwy` Cachix cache.
 - `.hdl` parameters named with `__`, a leading or trailing `_`, or a capital
   `Z` bind from the instance card instead of failing as unknown (#2).
 - `bench-suites -Dsuite=cmcqa`: 3,218 single-device decks from the public CMC QA
