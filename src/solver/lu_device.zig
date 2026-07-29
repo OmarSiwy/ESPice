@@ -1,4 +1,4 @@
-//! GPU kernel root for the device LU (docs/solvers/gpu-lu.md): exports
+//! GPU kernel root for the device LU (dev/solvers/gpu-lu.md): exports
 //! `arp_lu_refactor` (one block per pivot step, any grid size: blocks take
 //! their step by ticket, so a block that starts late never holds a step an
 //! earlier one waits on) and `arp_lu_lsolve`/`arp_lu_usolve` (one block of

@@ -1,6 +1,6 @@
 //! Circuit variants over one prepared circuit: `.step` points, HSPICE
 //! `SWEEP`/`.data` points, `.alter` runs and Monte Carlo trials
-//! (docs/analysis/variants.md). Each point re-evaluates the netlist's live
+//! (dev/analysis/variants.md). Each point re-evaluates the netlist's live
 //! values (no re-parse), rebinds the devices and keeps only the parameters
 //! that moved, as `core.Variants` rows the executor writes through
 //! `ParamRef`. A point whose topology moves becomes its own `Prepared` run.
@@ -570,7 +570,7 @@ pub const Planner = struct {
 };
 
 /// Turns optimizer points into variant rows (HSPICE `OPTIMIZE=`,
-/// docs/analysis/optimize.md): each point sets the optimized parameters'
+/// dev/analysis/optimize.md): each point sets the optimized parameters'
 /// live values and goes through `Planner.add`, so it takes the same
 /// probe-mapped fast path as a `.step` point. Lives in the parse arena,
 /// with the netlist it re-evaluates.

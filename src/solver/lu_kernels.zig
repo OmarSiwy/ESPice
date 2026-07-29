@@ -1,4 +1,4 @@
-//! The device LU of docs/solvers/gpu-lu.md, stage 1: a replay of
+//! The device LU of dev/solvers/gpu-lu.md, stage 1: a replay of
 //! `SparseLu`'s refactor and both triangular solves, written once for the
 //! GPU (`lu_device.zig`) and for host threads (`runHost`). Each value slot
 //! receives its subtractions in the host's order and no expression is
@@ -18,7 +18,7 @@ const std = @import("std");
 
 /// Lanes per device refactor block. E2 on logic_bsim4_10k and
 /// chain_bsim4_10k: 128 or 256 lanes were 1.0-1.8x slower
-/// (docs/solvers/gpu-lu.md).
+/// (dev/solvers/gpu-lu.md).
 pub const refactor_block = 64;
 /// The widest column a refactor block accumulates in shared memory (8
 /// bytes a slot); wider columns work in `val`. A 2048-slot scratch (fewer
@@ -641,7 +641,7 @@ const HostFactor = struct {
     }
 };
 
-/// The refactor kernel body as a multicore host refactor (docs/solvers/
+/// The refactor kernel body as a multicore host refactor (dev/solvers/
 /// gpu-lu.md option 3). Its factors are bitwise `SparseLu.refactor`'s, so
 /// callers may pick it by speed.
 pub const HostRefactor = struct {

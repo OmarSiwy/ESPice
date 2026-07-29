@@ -12,7 +12,7 @@
 // reference cuts corners (the h2 interval mismatch at i == auxindex, the
 // duplicated straight-line check in the maxSafeStep bisection). On the LTRA
 // decks it reproduces that device to 1e-12 relative
-// (docs/native-transmission-line-migration.md).
+// (dev/native-transmission-line-migration.md).
 //
 // erfc is an analog function below (not a VAMS builtin), within 1.9e-13 of
 // libm, so the RC kernels are not bit-equal to ngspice's.

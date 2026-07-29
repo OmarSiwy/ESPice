@@ -7,7 +7,7 @@
 //   ngspice: Copyright Regents of the University of California and others,
 //   modified BSD license.
 //
-// Spec: docs/jfet-mesfet-hfet.md §1.4 (structural) + §1.5 (temperature/
+// Spec: dev/jfet-mesfet-hfet.md §1.4 (structural) + §1.5 (temperature/
 // limiting) and §3 (`fet_eval` spine). §1.4 defers the equations to ngspice,
 // so they follow mesaload.c/mesatemp.c with the parameter names, defaults and
 // units of mesa.c's IOP table. §3's spine:

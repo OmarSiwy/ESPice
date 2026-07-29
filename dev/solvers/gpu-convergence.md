@@ -919,7 +919,7 @@ inside the eval launch.
   and `zig build bench` wall time before and after per feature. A deck that
   passes conformant but fails GPU-native blocks the feature, not the deck.
 - **Record.** Every divergence from ngspice this mode introduces (grid,
-  iterate count, OP selection rule) is recorded in `docs/` with its
+  iterate count, OP selection rule) is recorded in `dev/` with its
   measurement and fallback, per the proof rule.
 
 ## 9. Census results

@@ -39,7 +39,7 @@ const min_step: f64 = 1.0 / 1024.0;
 /// True when a driven solve of n unknowns and nf = 2K+1 coefficients each
 /// takes `mhb.zig`'s preconditioned GMRES instead of the dense Jacobian.
 /// The dense LU is O((n·nf)^3) a step and GMRES O(iterations·n·nf^2), so
-/// n decides. Callgrind (docs/analysis/multitone-hb.md): a 4-node diode
+/// n decides. Callgrind (dev/analysis/multitone-hb.md): a 4-node diode
 /// clipper at K = 32 is 1.23x cheaper dense, a 6-node rectifier at K = 32
 /// 1.31x; the diode-RC ladders are cheaper on GMRES by 2.2x at 14 nodes and
 /// K = 8, 3.6x at 9 nodes and K = 32, and 16x at 44 nodes and K = 8.

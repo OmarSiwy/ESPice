@@ -220,7 +220,7 @@ the `.tran` card gives no tmax, and `gmindc`, `absv`, `relv`, `absi` and
 `method=bdf` alias `gmin`, `vntol`, `reltol`, `abstol` and Gear.
 Divergence: ESPice's `.tran` segments share the finest segment's step cap.
 `.option runlvl`, `accurate` and `fast` set the transient's `trtol`
-(docs/analysis/tolerance-system.md, "HSPICE RUNLVL").
+(dev/analysis/tolerance-system.md, "HSPICE RUNLVL").
 
 `.option search='dir'` [CR .OPTION SEARCH] adds a directory where
 `.include`, `.lib` and `.load` look for a file not found beside the file

@@ -245,7 +245,7 @@ pub const Circuit = struct {
     /// ponytail: hfet1's cdhat leaves out the -ggdpp*delvgdpp its cd
     /// carries (hfetload.c:211-216), a first-order miss on every gate-drain
     /// swing that makes ngspice iterate more; a row test cannot see
-    /// branches, so that quirk is not reproduced. docs/devices/models.md.
+    /// branches, so that quirk is not reproduced. dev/devices/models.md.
     pub fn loadCheck(self: *Circuit, x: []const f64, vals: []const f64, rhs: []const f64, reltol: f64, abstol: f64) bool {
         const lc = if (self.load_check) |*l| l else return true;
         var ok = lc.valid;

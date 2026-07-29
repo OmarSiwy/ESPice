@@ -14,7 +14,7 @@ On this RTX 4060 (FP64 at 1/64) its kernels lost to 8 host threads in
 isolation (E2), but end to end it wins 2-4x over the host LU that `cuda`
 runs by default ("E3, host"), so stage 2 was not started and stage 1
 ships. The GPU otherwise only evaluates device
-planes (`docs/devices/gpu-evaluation.md`). This page answers one question:
+planes (`dev/devices/gpu-evaluation.md`). This page answers one question:
 if the host sparse LU dominates on post-layout netlists (extracted RC plus
 many transistors), how should espice factor and solve on the GPU? The
 theory behind level-set GPU LU (GLU, NICSLU) is in `gpu-sparse-lu.md` and is
@@ -778,7 +778,7 @@ iteration.
   form for wide columns (§4.2) comes before any tuning.
 
 E1 ran on 2026-09-27 (`ZP_LU_STATS` census, `--timing-in-depth` split);
-the tables are in `docs/devices/gpu-evaluation.md`, "Post-layout results".
+the tables are in `dev/devices/gpu-evaluation.md`, "Post-layout results".
 Refactor plus solve reached 40% of wall time under `cuda` on 14 of 20
 decks (all synthetic 10k and 100k ones) and on none of the three real
 ones; `Bbd.init` declined every deck; `S_r` was within 10x of n on the
@@ -1238,8 +1238,8 @@ Our code and docs, read at `96807bd`: `src/solver/sparse_lu.zig`
 inventory of it; ZINC (MIT), `src/cuda/cuda_shim.c` (graph capture, update
 and launch), `src/rocm/rocm_shim.c` (the hipGraph twin),
 `src/compute/forward_cuda.zig` (`decodeBatchGraph` and the capture notes);
-`docs/devices/gpu-evaluation.md`, `docs/solvers/gpu-convergence.md`,
-`docs/solvers/solver-perf-2026-09.md`, `docs/solvers/gpu-sparse-lu.md`.
+`dev/devices/gpu-evaluation.md`, `dev/solvers/gpu-convergence.md`,
+`dev/solvers/solver-perf-2026-09.md`, `dev/solvers/gpu-sparse-lu.md`.
 
 External, each read at the source:
 

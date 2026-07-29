@@ -25,7 +25,7 @@
 *
 * Half-budget is the point. The margin is one Jacobian perturbation wide.
 *
-* Reduction evidence (docs/perf/ladder-deck-2026-09-10.md): deleting ANY of
+* Reduction evidence (dev/perf/ladder-deck-2026-09-10.md): deleting ANY of
 * these ten devices, or swapping any pair of them for resistors, drops plain
 * Newton to ~20 iterations and the discrimination vanishes. Seven purpose-built
 * smaller latches (6- and 8-device) were measured and none reproduced it.

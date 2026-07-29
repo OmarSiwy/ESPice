@@ -10,7 +10,7 @@
 * abstol of 1e-12 A, so the operating point is resolved and the AC result
 * compares the MODEL. Do not lower VBIAS below VTO: see
 * benchmark/fixtures/convergence/ota_cutoff_abstol and
-* docs/perf/fixture-bias-2026-09-10.md.
+* dev/perf/fixture-bias-2026-09-10.md.
 *
 .model nch NMOS(level=1 VTO=0.7 KP=110u GAMMA=0.4 LAMBDA=0.04 PHI=0.65)
 .model pch PMOS(level=1 VTO=-0.7 KP=50u GAMMA=0.57 LAMBDA=0.05 PHI=0.65)

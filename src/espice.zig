@@ -546,7 +546,7 @@ pub const Problem = struct {
     }
 
     /// Runs the deck's HSPICE optimizations once, before any query advances
-    /// (docs/analysis/optimize.md), one per `Tuner.bases` entry in turn.
+    /// (dev/analysis/optimize.md), one per `Tuner.bases` entry in turn.
     /// Each batch of optimizer points is one session of the optimized
     /// card's queries, a variant row per point, run `max_parallel` at a
     /// time. Each optimum's writes then fill the rows its optimized card
@@ -599,7 +599,7 @@ pub const Problem = struct {
     }
 
     /// HSPICE MOSRA, once before any query advances
-    /// (docs/analysis/mosra.md): runs the stress transient with the bound
+    /// (dev/analysis/mosra.md): runs the stress transient with the bound
     /// MOSFETs' terminals as its only outputs, fills the aged rows'
     /// `delvto`/`mulu0` writes and publishes the degradation table.
     /// ponytail: the stress transient repeats the fresh one; fold them

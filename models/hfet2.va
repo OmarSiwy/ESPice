@@ -8,7 +8,7 @@
 //   ngspice: Copyright Regents of the University of California and others,
 //   modified BSD license.
 //
-// Spec: docs/jfet-mesfet-hfet.md §1.4 (structural: HEMT-class charge-control
+// Spec: dev/jfet-mesfet-hfet.md §1.4 (structural: HEMT-class charge-control
 // channel, DIBL, velocity saturation, two Schottky diodes, W-D gate charge)
 // and §3 (the fet_eval chain: bias -> gate diodes -> mode select -> channel ->
 // gate charges -> stamps). §1.4 leaves the algebra to hfet2load.c, which is

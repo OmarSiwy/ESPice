@@ -325,7 +325,7 @@ pub const DeckOptions = struct {
 /// `trtol` at HSPICE RUNLVL 1..6 [CR .OPTION RUNLVL]. HSPICE scales its
 /// tolerances by level without publishing the factors, so these are
 /// ESPice's: level 3 is the default 7 and each level halves or doubles the
-/// LTE bound (docs/analysis/tolerance-system.md has the measurements).
+/// LTE bound (dev/analysis/tolerance-system.md has the measurements).
 const runlvl_trtol = [6]f64{ 28, 14, 7, 3.5, 1.75, 0.875 };
 
 /// Option names outside this list are not simulated; the HSPICE dialect

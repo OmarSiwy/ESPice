@@ -38,7 +38,7 @@ was the OP falling through to its transient rung (24k steps in `dc/op.zig`)
 at about 1 ms per Newton iteration, the same per-iteration cost as the
 2000-stage chain. The OP ladder fix that followed (gmin and source stepping
 on itl2 with cktop.c's factor rules) finishes that OP on the gmin rung in
-15 s; see `docs/conformance-phase2.md` group 6.
+15 s; see `dev/conformance-phase2.md` group 6.
 
 ## Frequency lanes: LaneLu and FreqSolver.solveBatch
 

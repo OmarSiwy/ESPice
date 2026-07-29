@@ -200,11 +200,18 @@ build, `zig build test-gpu` and CUDA-vs-CPU results as they were.
 Every performance claim ships with a measured before/after in the commit
 message: `zig build bench` for wall time, callgrind instruction counts when
 the machine is too noisy for wall time. Every intentional divergence from
-ngspice or VACASK, and every retired experiment, is recorded in `docs/` with
+ngspice or VACASK, and every retired experiment, is recorded in `dev/` with
 its measurements and fallback. "It feels cleaner" proves nothing. Deliberate
 shortcuts carry a `ponytail:` comment naming the ceiling and upgrade path.
-Session notes and handoffs do not go in `docs/`: fold their durable facts
+Session notes and handoffs do not go in `dev/`: fold their durable facts
 into the topical page before the branch merges.
+
+`dev/` holds the design notes: maths, root-cause digs, plans and measured
+evidence. `docs/` is the user documentation (the GitHub Pages site, built by
+`mkdocs.yml`). Keep it in sync with user-visible behaviour: a change to a
+card, flag, analysis, output format or error a user can hit updates the
+matching `docs/` page in the same commit, and every example under
+`docs/examples/` must still run.
 
 ## Verification
 

@@ -3,7 +3,7 @@
 One page per analysis: the mathematical formulation, the flow through
 `src/analysis/`, CPU pseudo-code, parallel design notes, and a
 **Solvers used** section that maps each phase onto
-[docs/solvers/](../solvers/README.md). Every page ends with its sources,
+[dev/solvers/](../solvers/README.md). Every page ends with its sources,
 per-section verification status, and pointers to the implementation and
 fixtures under `tests/fixtures/`.
 
@@ -59,4 +59,4 @@ Nonlinear analyses converge through `src/solver/converger.zig`: one
 and two strategies (direct Newton by default, JFNK under
 `ESPICE_SOLVER=jfnk` and as rung 4 of the OP ladder). Frequency-domain
 analyses share `ac/freq.zig Stream` over `FreqSolver.solveBatch`. Linear
-solver theory lives in [docs/solvers/](../solvers/README.md).
+solver theory lives in [dev/solvers/](../solvers/README.md).

@@ -1,4 +1,4 @@
-//! HSPICE MOSRA (docs/analysis/mosra.md): binds the `.appendmodel`ed
+//! HSPICE MOSRA (dev/analysis/mosra.md): binds the `.appendmodel`ed
 //! MOSFETs to their `.model ... MOSRA LEVEL=1` cards and plans the aged runs
 //! as variant rows whose `delvto`/`mulu0` values the facade fills from the
 //! stress transient.

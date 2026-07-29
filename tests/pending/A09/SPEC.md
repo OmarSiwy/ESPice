@@ -1,6 +1,6 @@
 # A09 — Accepted/rejected state lifecycle
 
-Plan row: **A09** (`ARPice/docs/verilog-ams-conformance-plan.md`, "Analog behaviour" section).
+Plan row: **A09** (`ARPice/dev/verilog-ams-conformance-plan.md`, "Analog behaviour" section).
 Scope: **host (ARPice) transient lifecycle**, exercised through `.hdl` Verilog-A models.
 
 Nine fixtures, all positive (each asserts a concrete hand-derived value). No refusal

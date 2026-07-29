@@ -118,7 +118,7 @@ Nine pass, all thirteen exit 0. The four failures are the deliverable:
 2. **`ltra_ac_lossy_telegrapher` — 24 of 24 values wrong.** The host returns
    `v(a)=0.545454545+0j` and `v(b)=0.454545455+0j` at every frequency, which is
    exactly `60/110` and `50/110`, the DC solution. This reproduces and quantifies
-   the "AC probe" paragraph of `docs/native-transmission-line-migration.md`
+   the "AC probe" paragraph of `dev/native-transmission-line-migration.md`
    against a dual oracle, for both the lossless-limit and the genuinely lossy line.
 3. **`txl_tran_long_run_past_2048` — `v(b)` at 10.9 ns is `0.5`, expected `0`.**
    The far end publishes the wavefront at 8.0585 ns instead of 11.0055 ns. The

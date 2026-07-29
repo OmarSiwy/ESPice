@@ -267,7 +267,7 @@ fn parWorthIt(lu: *const sparse_lu.SparseLu) bool {
 }
 
 /// Measured on the post-layout and stress decks, 2 to 8 threads
-/// (docs/solvers/gpu-lu.md, "Multicore host refactor"): F/n = 445 and up
+/// (dev/solvers/gpu-lu.md, "Multicore host refactor"): F/n = 445 and up
 /// wins at every thread count from F = 0.78M (sram_bsim4_1k); F/n = 152
 /// breaks even at 4 and 8 threads and loses at 2; F/n <= 95 loses up to 12x
 /// (the columns form a chain, and every handoff is a wait). ponytail: one
