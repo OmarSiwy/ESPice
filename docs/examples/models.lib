@@ -1,0 +1,8 @@
+* Two corners of one diode, as .lib sections.
+.lib typ
+.model dlib D(IS=1e-14 N=1.0)
+.endl typ
+
+.lib slow
+.model dlib D(IS=5e-15 N=1.1)
+.endl slow

@@ -3,7 +3,9 @@
     nix develop .#benchmarking --command python3 tools/bench_plot.py \
         [zig-out/benchmark-results.md] [tests/fixtures] [zig-out/bench-plots]
 
-Writes all.png (every fixture) and one <analysis>.png per analysis type.
+Writes all.png (every fixture), one <analysis>.png per analysis type, and
+summary.md: the speedup and agreement table per reference simulator and the
+largest decks, which the docs Benchmarks page includes as written.
 For `zig build bench-postlayout` output, pass zig-out/postlayout-results.md
 and zig-out/postlayout; groups are then family_model (chain_bsim4, ...).
 x is the device count after subcircuit expansion, y the median wall time;
@@ -70,14 +72,16 @@ def analysis(rel: str) -> str:
         return rel.split("/")[0] if "/" in rel else rel.rsplit("_", 1)[0]
 
 
-header, rows = None, []
+header, rows, verdict_cols, verdicts = None, [], [], {}
 for line in report.read_text().splitlines():
     cells = [c.strip() for c in line.strip().strip("|").split("|")]
     if cells[0] == "Fixture":
         header = [c.removesuffix(" ms") for c in cells if c.endswith(" ms")]
+        verdict_cols = cells[1 + len(header) :]
     elif header and line.startswith("| ") and not line.startswith("|---"):
         times = [float(c) if re.fullmatch(r"[\d.]+", c) else None for c in cells[1 : 1 + len(header)]]
         rows.append((cells[0], times))
+        verdicts[cells[0]] = dict(zip(verdict_cols, cells[1 + len(header) :]))
 if not rows:
     sys.exit(f"no rows in {report}")
 
@@ -142,7 +146,34 @@ def bars(pts):
     plt.close(fig)
 
 
+def summary(pts):
+    """summary.md: per reference simulator, the decks both ran, how many
+    espice ran faster, the median speedup and the agree/differ verdicts;
+    then the largest decks by device count."""
+    lines = ["| Compared with | Decks both ran | ESPice faster | Median speedup | Agree / differ |",
+             "|---|---:|---:|---:|---:|"]
+    for i, sim in enumerate(header[1:], 1):
+        both = [(rel, t) for rel, t in rows_used if t[0] and t[i]]
+        if not both:
+            continue
+        ratios = sorted(t[i] / t[0] for _, t in both)
+        mid = len(ratios) // 2
+        median = ratios[mid] if len(ratios) % 2 else (ratios[mid - 1] + ratios[mid]) / 2
+        col = next((c for c in verdict_cols if c.lower() == f"{header[0]}/{sim}".lower()), None)
+        said = [verdicts[rel].get(col, "").lower() for rel, _ in both] if col else []
+        lines.append(f"| {sim} | {len(both)} | {sum(r > 1 for r in ratios)} | {median:.1f}x | "
+                     f"{said.count('agree')} / {said.count('differ')} |")
+    lines += ["", "| Deck | Devices | " + " | ".join(f"{h} ms" for h in header) + " |",
+              "|---|---:|" + "---:|" * len(header)]
+    big = sorted(zip(pts, rows_used), key=lambda pr: -pr[0][1])[:8]
+    for (_, size, t), (rel, _) in big:
+        cells = [f"{x:,.0f}" if x is not None else "n/a" for x in t]
+        lines.append(f"| `{rel}` | {size:,} | " + " | ".join(cells) + " |")
+    (out / "summary.md").write_text("\n".join(lines) + "\n")
+
+
 plot("all", points)
+summary(points)
 speedup(points)
 if len(points) <= 40:
     bars(points)

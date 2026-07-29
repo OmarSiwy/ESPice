@@ -13,6 +13,11 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 - Nix flake: `nix run github:OmarSiwy/ESPice`, `packages.espice` (CPU) and
   `espice-cuda` (CUDA), `overlays.default`, smoke `checks`; CI pushes builds
   to the `omarsiwy` Cachix cache.
+- User documentation at https://omarsiwy.github.io/ESPice/: a SPICE tutorial,
+  the CLI, dialect and card reference, analyses, devices, output, GPU, errors,
+  the C API and the benchmarks, with runnable examples in `docs/examples/`.
+- `zig build c-example` builds and runs the C API example; the package exports
+  `libespice` as a named lazy path for Zig consumers.
 - The developer design notes moved from `docs/` to `dev/`.
 - `.hdl` parameters named with `__`, a leading or trailing `_`, or a capital
   `Z` bind from the instance card instead of failing as unknown (#2).
