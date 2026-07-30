@@ -7,7 +7,7 @@ device is left under `models/`. Parity with the retired native devices is
 measured in
 [native-transmission-line-migration.md](native-transmission-line-migration.md).
 
-`build.zig.zon` pins VerA to its v1.0.0 release (`git+https://github.com/OmarSiwy/VerA#998a3223`, contract abi_version 6).
+`build.zig.zon` pins VerA to main at `2692a15b` (`git+https://github.com/OmarSiwy/VerA#3c0d279989ce1d9b42bcc6d4aaaec9ca427cae19`, contract abi_version 6).
 
 ## Status
 

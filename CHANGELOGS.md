@@ -5,6 +5,11 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 ## Unreleased
 
+- `.hdl` Verilog-A, VerA pin v1.0.0 -> 2692a15b: an instance port may connect a bit- or
+  part-select of a vector net (`.d0(r[0])`, `.d(bus[7:4])`, `r[i +: 4]`), which was E0906;
+  a `$table_model` capture is kept only from an accepted iteration (VerA VD-095), not from
+  the first Newton iterate; a VAMS 2.x `{...}` laplace/zi coefficient vector is refused
+  (E0572: write `'{...}`) (#116).
 - An operating point whose Newton ran away (node voltages near 1e24 V) is
   refused instead of being published with exit 0; the ladder falls through to
   gmin stepping (#3).
