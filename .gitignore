@@ -43,3 +43,7 @@ result-*
 vgcore.*
 obj_dir/
 *.out
+
+# MkDocs (the Pages workflow builds these)
+/site/
+/docs/wasm/
