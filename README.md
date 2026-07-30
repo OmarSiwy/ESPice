@@ -188,9 +188,9 @@ python3 tools/bench_plot.py zig-out/postlayout-results.md zig-out/postlayout dev
 Each point is one deck. The x axis is its device count after subcircuit
 expansion.
 
-![Wall time against circuit size, all decks](dev/bench/corpus/all.png)
+![Wall time against circuit size, all decks](docs/performance/bench/corpus/all.png)
 
-![ESPice speedup over ngspice and VACASK](dev/bench/corpus/speedup.png)
+![ESPice speedup over ngspice and VACASK](docs/performance/bench/corpus/speedup.png)
 
 | Compared with | decks both ran | ESPice faster | median speedup |
 |---|---:|---:|---:|
@@ -223,12 +223,12 @@ One chart per analysis type, same axes:
 
 | | | |
 |---|---|---|
-| ![op](dev/bench/corpus/op.png) | ![dc](dev/bench/corpus/dc.png) | ![ac](dev/bench/corpus/ac.png) |
-| ![tran](dev/bench/corpus/tran.png) | ![noise](dev/bench/corpus/noise.png) | ![sp](dev/bench/corpus/sp.png) |
-| ![pss](dev/bench/corpus/pss.png) | ![hb](dev/bench/corpus/hb.png) | ![pz](dev/bench/corpus/pz.png) |
+| ![op](docs/performance/bench/corpus/op.png) | ![dc](docs/performance/bench/corpus/dc.png) | ![ac](docs/performance/bench/corpus/ac.png) |
+| ![tran](docs/performance/bench/corpus/tran.png) | ![noise](docs/performance/bench/corpus/noise.png) | ![sp](docs/performance/bench/corpus/sp.png) |
+| ![pss](docs/performance/bench/corpus/pss.png) | ![hb](docs/performance/bench/corpus/hb.png) | ![pz](docs/performance/bench/corpus/pz.png) |
 
 The other 35, mixed-analysis decks included, are in
-[dev/bench/corpus/](dev/bench/corpus/). The periodic analyses (pss, pac,
+[dev/bench/corpus/](docs/performance/bench/corpus/). The periodic analyses (pss, pac,
 pnoise, hb, qpss) ran in neither ngspice nor VACASK here, so those charts show
 ESPice alone.
 
@@ -242,9 +242,9 @@ logic, a 6T SRAM array), each with BSIM4 and PSP103 transistors, from 1k to
 has a 300 s limit; a missing bar means the simulator timed out or could not run
 the deck.
 
-![Post-layout decks](dev/bench/postlayout/bars.png)
+![Post-layout decks](docs/performance/bench/postlayout/bars.png)
 
-![Post-layout wall time against size](dev/bench/postlayout/all.png)
+![Post-layout wall time against size](docs/performance/bench/postlayout/all.png)
 
 | Compared with | decks both ran | ESPice faster | median speedup | agree / differ |
 |---|---:|---:|---:|---:|
