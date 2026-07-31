@@ -5,6 +5,11 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 ## Unreleased
 
+- Source stepping in the operating-point ladder scales the independent V and I sources;
+  it ran at full sources before, so a deck that only source stepping solves failed (#104).
+- The JFET channel no longer runs `limvds`, which clamped a negative vds even at the fixed
+  point (inverse mode read 1.225 mA for 0.625); limited values within a few ulps of the
+  iterate are the iterate, so converged points skip the limiting correction (#49).
 - MOS levels 1-9 match ngspice 45 on card spellings and temperature: `U0`/`UO` on every
   level, `DELVT0` on 3 and 9, instance `temp=`/`dtemp=` on 1, 2, 6 and 9, MOS6 `TNOM` in
   degC, `LAMBDA0=0` kept, PHI from ni(TNOM) on 3 and 9, MOS2 VMAX with the TNOM mobility (#114).

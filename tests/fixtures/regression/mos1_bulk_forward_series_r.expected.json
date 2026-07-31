@@ -1,0 +1,73 @@
+{
+ "schema_version": 1,
+ "analysis": "op",
+ "purpose": "#104: MOS1 with forward-biased bulk junctions converges where the junction law holds, not at a limited bias.",
+ "oracle": {
+  "kind": "analytic",
+  "derivation": "Independent three-node Newton solve of the two-junction network (channel off), see the .sp header."
+ },
+ "origin": "tests/fixtures/regression/mos1_bulk_forward_series_r.sp",
+ "expect": {
+  "status": "success",
+  "plots": [
+   {
+    "name": "Operating Point",
+    "match": "exact",
+    "row_count": 1,
+    "columns": {
+     "v(bi)": {
+      "values": [
+       3.047027053487852
+      ],
+      "unit": "V",
+      "rtol": 1e-06,
+      "atol": 1e-09
+     },
+     "v(di)": {
+      "values": [
+       2.1249633022492214
+      ],
+      "unit": "V",
+      "rtol": 1e-06,
+      "atol": 1e-09
+     },
+     "v(si)": {
+      "values": [
+       2.192930504975506
+      ],
+      "unit": "V",
+      "rtol": 1e-06,
+      "atol": 1e-09
+     },
+     "i(vd)": {
+      "values": [
+       30.356618603560303
+      ],
+      "unit": "A",
+      "rtol": 1e-06,
+      "atol": 1e-09
+     },
+     "i(vs)": {
+      "values": [
+       2.192930504975506
+      ],
+      "unit": "A",
+      "rtol": 1e-06,
+      "atol": 1e-09
+     },
+     "i(vb)": {
+      "values": [
+       -32.54954910853581
+      ],
+      "unit": "A",
+      "rtol": 1e-06,
+      "atol": 1e-09
+     }
+    }
+   }
+  ],
+  "finite_values_required": true,
+  "all_requested_analyses_must_complete": true
+ },
+ "netlist_sha256": "ea1491cd4de54a17e15faa1b74dbc3e1fe771c530712a406b04d03e05066a20d"
+}

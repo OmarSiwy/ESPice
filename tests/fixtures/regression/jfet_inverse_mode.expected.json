@@ -1,0 +1,51 @@
+{
+ "schema_version": 1,
+ "analysis": "op",
+ "purpose": "#49: JFET inverse mode; the channel is not limvds-clamped at the fixed point (Shichman-Hodges -0.625 mA).",
+ "oracle": {
+  "kind": "ngspice-45",
+  "derivation": "Independent ngspice-45 run of this deck. Stored binary raw doubles, selected by column name.",
+  "command": "ngspice -n -b -r reference.raw circuit.sp",
+  "source_sha256": "a99a8178988fc6fd197f9a553fc37b3fd0328c49be466d6836f2b00c20eedf3c"
+ },
+ "origin": "tests/fixtures/regression/jfet_inverse_mode.sp",
+ "expect": {
+  "status": "success",
+  "plots": [
+   {
+    "name": "Operating Point",
+    "match": "exact",
+    "row_count": 1,
+    "columns": {
+     "i(vs)": {
+      "values": [
+       -0.0006250000025099999
+      ],
+      "unit": "A",
+      "rtol": 1e-06,
+      "atol": 1e-12
+     },
+     "i(vg)": {
+      "values": [
+       -2.4856220292162083e-06
+      ],
+      "unit": "A",
+      "rtol": 1e-06,
+      "atol": 1e-12
+     },
+     "i(vd)": {
+      "values": [
+       0.0006250000025100001
+      ],
+      "unit": "A",
+      "rtol": 1e-06,
+      "atol": 1e-12
+     }
+    }
+   }
+  ],
+  "finite_values_required": true,
+  "all_requested_analyses_must_complete": true
+ },
+ "netlist_sha256": "a99a8178988fc6fd197f9a553fc37b3fd0328c49be466d6836f2b00c20eedf3c"
+}

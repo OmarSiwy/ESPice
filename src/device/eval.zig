@@ -908,6 +908,22 @@ fn evalQRange(comptime D: type, comptime S: type, sink: anytype, first: u32, end
     }
 }
 
+/// Writes back `cur[u]` for every written unknown whose limited value lies
+/// within 16 ulps of the instance's largest read. At a fixed point every
+/// limiter returns its probe, but a derived leg rebuilt from it (x_d = x_s +
+/// vds) rounds, and that few-ulp gap would run the limiting correction at
+/// every converged iterate (#49). A real clamp is orders larger.
+pub inline fn snapLimited(comptime n_u: usize, comptime reads: u64, comptime writes: u64, lx: *[n_u]f64, cur: [n_u]f64) void {
+    var scale: f64 = 0;
+    inline for (0..n_u) |u| if (comptime (reads >> u) & 1 != 0) {
+        scale = @max(scale, @abs(cur[u]));
+    };
+    const tol = 16 * std.math.floatEps(f64) * scale;
+    inline for (0..n_u) |u| if (comptime ((writes & reads) >> u) & 1 != 0) {
+        if (@abs(lx[u] - cur[u]) <= tol) lx[u] = cur[u];
+    };
+}
+
 /// SPICE-style limiting over instances `[first, end)`: `lim = D.limit(cur,
 /// old)`, where `cur` is the local x and `old` is the previous limited value
 /// (once limiting is active) or the local `x_old`. Returns 1.0 when any
@@ -944,7 +960,8 @@ fn limitRange(comptime D: type, sink: anytype, first: u32, end: u32, lim_active:
         };
         // A plain call on purpose. LLVM inlines it anyway; forcing
         // `.always_inline` measured 0.2-0.3% slower.
-        const lm = D.limit(Real, sink.model(id), sink.inst(id), cur, old, sim);
+        var lm = D.limit(Real, sink.model(id), sink.inst(id), cur, old, sim);
+        snapLimited(n_u, reads, writes, &lm.x, cur);
         if (!lm.converged) flag = 1;
         inline for (0..n_u) |u| if (comptime (writes >> u) & 1 != 0) {
             sink.setLim(id, u, lm.x[u]);
@@ -2590,7 +2607,8 @@ fn StateKernel(comptime D: type, comptime block_size: u32) type {
                 } else {
                     old[u] = x_old[gath[id * n_u + u]];
                 };
-                const lm = D.limit(Real, model, inst_c, cur, old, sim);
+                var lm = D.limit(Real, model, inst_c, cur, old, sim);
+                snapLimited(n_u, comptime contract.limitReads(D), writes, &lm.x, cur);
                 if (!lm.converged) flag |= 1;
                 inline for (0..n_u) |u| if (comptime (writes >> u) & 1 != 0) {
                     lim[id * LimMap(D).k + comptime LimMap(D).at(u)] = lm.x[u];

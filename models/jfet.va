@@ -136,15 +136,17 @@ module jfet(d, g, s);
         f2     = pow(1.0 - fcx, 1.5);
         f3     = 1.0 - 1.5 * fcx;
 
-        // ---- bias + limiting, jfetload.c order: fetlim(vgs), fetlim(vgd),
-        // limvds, then pnjlim on both gate junctions. $limit hands the
+        // ---- bias + limiting. jfetload.c runs pnjlim then fetlim on vgs
+        // and vgd and takes vds = vgs - vgd, with no limvds (which clamps a
+        // negative vds even at the fixed point, #49). One $limit cannot chain
+        // two algorithms, so the channel takes fetlim and the junctions
+        // pnjlim, each returning its probe at convergence. $limit hands the
         // algorithm to the host and returns the probe unchanged if the host
         // declines. MODEINITJCT's vgs = -1 / OFF seed has no Verilog-A
         // spelling; it belongs to the host's limiter.
         vgsc = jtype * $limit(V(g, sp), "fetlim", vto_t);
         vgdc = jtype * $limit(V(g, dp), "fetlim", vto_t);
-        vdsc = jtype * $limit(V(dp, sp), "limvds");
-        vgdc = vgsc - vdsc;                     // limvds feeds back into vgd
+        vdsc = vgsc - vgdc;
         vgs  = jtype * $limit(V(g, sp), "pnjlim", nvt, vcrit);
         vgd  = jtype * $limit(V(g, dp), "pnjlim", nvt, vcrit);
 

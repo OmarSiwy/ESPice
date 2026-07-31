@@ -1062,3 +1062,13 @@ test "finalize starts a batch before its analog initial block, whatever the allo
     try std.testing.expect(!typed.held_initial);
     try std.testing.expect(!typed.committed_initial);
 }
+
+test "snapLimited returns the iterate for a few-ulp limited leg and keeps a real clamp" {
+    // Unknowns 0 and 1 are read and written, 2 only read (it sets the scale).
+    const cur = [3]f64{ 1.0, 2.0, 3.0 };
+    var lx = [3]f64{ 1.0 + 4 * std.math.floatEps(f64), 2.1, 99.0 };
+    impl.snapLimited(3, 0b111, 0b011, &lx, cur);
+    try std.testing.expectEqual(@as(f64, 1.0), lx[0]);
+    try std.testing.expectEqual(@as(f64, 2.1), lx[1]);
+    try std.testing.expectEqual(@as(f64, 99.0), lx[2]);
+}

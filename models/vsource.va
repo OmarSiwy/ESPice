@@ -324,7 +324,9 @@ module vsource(p, n);
                 out = 0.0;
         end
 
-        V(p, n) <+ out;
+        // Source stepping (ngspice CKTsrcFact): the OP ladder's homotopy
+        // scales every independent source; 1 everywhere else.
+        V(p, n) <+ out * $simparam("sourceScaleFactor", 1.0);
     end
 endmodule
 
