@@ -239,9 +239,18 @@ with `ltra_native.zig`; `ltra.va` matches that device on the full run.
   old generated route gave `v(b) = 0.49504950495049505` at every point, while
   ngspice 44.2 gave about 0.49407254-j0.03108544, 0.40049541-j0.29098868 and
   0.49502493-j0.000003939. Native AC is not an oracle.
-- History capacity is fixed: 8192 points for LTRA (`ltra.va` keeps it), 2048
-  for TXL and CPL. Past it, the code discards samples when no safe retention
-  path remains.
+- History capacity is fixed: 8192 points for LTRA, 2048 for TXL and CPL.
+  Points behind the delay window go first (LTRA: ngspice's straight-line
+  compaction, then the oldest once the delayed read no longer reaches it).
+  When every point is still live, the one whose removal changes the
+  interpolation least goes (LTRA: the smallest straight-line ratio; TXL/CPL:
+  the smallest linear-interpolation error, currents weighed at Z0, or 50 ohm
+  for CPL). ngspice grows its history instead, so a run past the capacity is
+  lossy but keeps the window sampled: `tran/{ltra_tran_long_run_past_8192,
+  txl_tran_long_run_past_2048, cpl_tran_history_past_2048}` (1 ps steps
+  against 5-10 ns delays) match the closed form, and the CPL deck matches
+  ngspice 45. The LTRA deck takes 8 s, the full O(capacity) scan per step
+  that the old drop-the-oldest rule also paid on curved waveforms (#105).
 
 ## Gates still open for the Verilog-A lines
 

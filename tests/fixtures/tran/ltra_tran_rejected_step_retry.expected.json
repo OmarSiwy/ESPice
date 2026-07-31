@@ -69,9 +69,7 @@
     "finite_values_required": true,
     "all_requested_analyses_must_complete": true,
     "checks": [
-      {
-        "kind": "repeatability"
-      }
+      {"kind": "repeatability", "same_netlist": true, "comparison": "bitwise_numeric_results"}
     ]
   },
   "netlist_sha256": "6fbbd1481cb2f13c6b9ed18142f22f46f9e069bd766bba0b7c9dacbba145e742"

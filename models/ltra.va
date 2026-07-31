@@ -18,7 +18,8 @@
 // libm, so the RC kernels are not bit-equal to ngspice's.
 //
 // ponytail: fixed history of cap = 8192 points with ngspice's straight-line
-// compaction past it, as ngspice and the native device did. Growable
+// compaction past it, then dead-front or least-bent drops that keep the
+// delay window sampled (ngspice grows its history instead). Growable
 // per-instance storage would lift the ceiling; VerA has none.
 //
 // State model: every variable a later evaluation reads is held (§5.10): an
@@ -240,16 +241,23 @@ module ltra(p1, n1, p2, n2);
         end
     endfunction
 
-    // Triangle-vs-quadrilateral collinearity test (LTRAstraightLineCheck).
-    analog function integer straight;
+    // Triangle-vs-quadrilateral collinearity test (LTRAstraightLineCheck),
+    // as a ratio: below 1 is straight.
+    analog function real bend;
         input x1, y1, x2, y2, x3, y3, rtol, atol;
         real x1, y1, x2, y2, x3, y3, rtol, atol, q1, q2, q3;
         begin
             q1 = (abs(y2) + abs(y1)) * 0.5 * abs(x2 - x1);
             q2 = (abs(y3) + abs(y2)) * 0.5 * abs(x3 - x2);
             q3 = (abs(y3) + abs(y1)) * 0.5 * abs(x3 - x1);
-            straight = (q1 + q2) * rtol + atol > abs(q3 - q1 - q2);
+            bend = abs(q3 - q1 - q2) / ((q1 + q2) * rtol + atol);
         end
+    endfunction
+
+    analog function integer straight;
+        input x1, y1, x2, y2, x3, y3, rtol, atol;
+        real x1, y1, x2, y2, x3, y3, rtol, atol;
+        straight = bend(x1, y1, x2, y2, x3, y3, rtol, atol) < 1.0;
     endfunction
 
     // Quadratic Lagrange weights at t over (t1, t2, t3) (LTRAquadInterp).
@@ -306,7 +314,8 @@ module ltra(p1, n1, p2, n2);
     real dv1, dv2, di1, di2, f, q1, q2, q3, qd;
     real v1, v2, ib1, ib2, bs, tnext;
     real w1, w2, w3, s1, s2, dtn, dtn1, wmax, wmin;
-    integer trip, port;
+    integer trip, port, kbest;
+    real bk, bmin;
 
     analog initial begin
         if (wave) begin
@@ -633,17 +642,29 @@ module ltra(p1, n1, p2, n2);
         end else begin
             if (nh == cap) begin
                 // Full: drop the first interior point whose four signals
-                // are all collinear with their neighbours, else the oldest.
+                // are all collinear with their neighbours. Failing that, the
+                // oldest when the delayed read no longer reaches it, else the
+                // least bent point, so the window t - td stays sampled.
+                // ponytail: lossy past cap (ngspice grows); VerA has no
+                // growable held storage.
                 drop = 1;
                 found = 0;
-                for (k = 1; k + 1 < nh && !found; k = k + 1)
-                    if (straight(ht[k - 1], hv1[k - 1], ht[k], hv1[k], ht[k + 1], hv1[k + 1], compactrel, compactabs)
-                        && straight(ht[k - 1], hv2[k - 1], ht[k], hv2[k], ht[k + 1], hv2[k + 1], compactrel, compactabs)
-                        && straight(ht[k - 1], hi1[k - 1], ht[k], hi1[k], ht[k + 1], hi1[k + 1], compactrel, compactabs)
-                        && straight(ht[k - 1], hi2[k - 1], ht[k], hi2[k], ht[k + 1], hi2[k + 1], compactrel, compactabs)) begin
+                bmin = 1e300;
+                for (k = 1; k + 1 < nh && !found; k = k + 1) begin
+                    bk = max(max(bend(ht[k - 1], hv1[k - 1], ht[k], hv1[k], ht[k + 1], hv1[k + 1], compactrel, compactabs),
+                                  bend(ht[k - 1], hv2[k - 1], ht[k], hv2[k], ht[k + 1], hv2[k + 1], compactrel, compactabs)),
+                             max(bend(ht[k - 1], hi1[k - 1], ht[k], hi1[k], ht[k + 1], hi1[k + 1], compactrel, compactabs),
+                                 bend(ht[k - 1], hi2[k - 1], ht[k], hi2[k], ht[k + 1], hi2[k + 1], compactrel, compactabs)));
+                    if (bk < 1.0) begin
                         drop = k;
                         found = 1;
+                    end else if (bk < bmin) begin
+                        bmin = bk;
+                        kbest = k;
                     end
+                end
+                if (!found && t - ht[4] <= td)
+                    drop = kbest;
                 for (k = drop; k < cap - 1; k = k + 1) begin
                     ht[k] = ht[k + 1]; hv1[k] = hv1[k + 1]; hv2[k] = hv2[k + 1];
                     hi1[k] = hi1[k + 1]; hi2[k] = hi2[k + 1];

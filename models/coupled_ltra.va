@@ -59,6 +59,14 @@ module `CPL_MODULE(p1, r1, p2, r2);
     parameter real g[0:9] = '{0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
     parameter real length = 0.0 from [0:inf);
 
+    // |y1 - linear interpolation of (x0, y0)-(x2, y2) at x1|: the error of
+    // dropping the middle sample.
+    analog function real lerpdev;
+        input x0, y0, x1, y1, x2, y2;
+        real x0, y0, x1, y1, x2, y2;
+        lerpdev = abs(y1 - y0 - (y2 - y0) * (x1 - x0) / (x2 - x0));
+    endfunction
+
     analog function real eval2;
         input a, b, c0, x;
         real a, b, c0, x;
@@ -614,7 +622,8 @@ module `CPL_MODULE(p1, r1, p2, r2);
     real vprev_i[0:n-1], vprev_o[0:n-1], dv_i[0:n-1], dv_o[0:n-1], dc1[0:n-1], dc2[0:n-1];
     real stg_v1[0:n-1], stg_v2[0:n-1], stg_i1[0:n-1], stg_i2[0:n-1];   // the staged accepted point
     real ht[0:cap-1], hvi[0:n-1][0:cap-1], hvo[0:n-1][0:cap-1], hii[0:n-1][0:cap-1], hio[0:n-1][0:cap-1];
-    integer nh, drop, staged, rebuild;
+    integer nh, drop, staged, rebuild, kbest;
+    real bk, bmin;
     real tacc;   // label of the staged point, integer ps
 
     // ---- per-evaluation rebuild (right_consts) ----
@@ -852,8 +861,34 @@ module `CPL_MODULE(p1, r1, p2, r2);
                     cutoff = tacc - max_taul;
                     drop = 0;
                     while (drop + 1 < nh && ht[drop + 1] < cutoff) drop = drop + 1;
-                    if (drop > 64 || nh == cap) begin
-                        if (nh == cap && drop == 0) drop = 1;
+                    if (nh == cap && drop == 0) begin
+                        // Full and all live: drop the interior point whose
+                        // linear interpolation loses least, currents weighed
+                        // at a nominal 50 ohm. ponytail: lossy past cap
+                        // (ngspice grows); VerA has no growable held storage.
+                        bmin = 1e300;
+                        kbest = 1;
+                        for (k = 1; k + 1 < nh; k = k + 1) begin
+                            bk = 0.0;
+                            for (m = 0; m < n; m = m + 1)
+                                bk = max(bk, max(lerpdev(ht[k - 1], hvi[m][k - 1], ht[k], hvi[m][k], ht[k + 1], hvi[m][k + 1]),
+                                                 lerpdev(ht[k - 1], hvo[m][k - 1], ht[k], hvo[m][k], ht[k + 1], hvo[m][k + 1]))
+                                    + 50.0 * max(lerpdev(ht[k - 1], hii[m][k - 1], ht[k], hii[m][k], ht[k + 1], hii[m][k + 1]),
+                                                 lerpdev(ht[k - 1], hio[m][k - 1], ht[k], hio[m][k], ht[k + 1], hio[m][k + 1])));
+                            if (bk < bmin) begin
+                                bmin = bk;
+                                kbest = k;
+                            end
+                        end
+                        for (k = kbest; k + 1 < nh; k = k + 1) begin
+                            ht[k] = ht[k + 1];
+                            for (m = 0; m < n; m = m + 1) begin
+                                hvi[m][k] = hvi[m][k + 1]; hvo[m][k] = hvo[m][k + 1];
+                                hii[m][k] = hii[m][k + 1]; hio[m][k] = hio[m][k + 1];
+                            end
+                        end
+                        nh = nh - 1;
+                    end else if (drop > 64 || nh == cap) begin
                         for (k = 0; k + drop < nh; k = k + 1) begin
                             ht[k] = ht[k + drop];
                             for (m = 0; m < n; m = m + 1) begin

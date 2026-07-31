@@ -5,6 +5,9 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 ## Unreleased
 
+- LTRA, TXL and CPL runs whose delay spans more accepted points than the history holds
+  (8192 LTRA, 2048 TXL/CPL) keep the entries the delay still reads; a full history drops
+  the point that loses least instead of the oldest live one (#105).
 - `.hdl` Verilog-A, VerA pin v1.0.0 -> 2692a15b: an instance port may connect a bit- or
   part-select of a vector net (`.d0(r[0])`, `.d(bus[7:4])`, `r[i +: 4]`), which was E0906;
   a `$table_model` capture is kept only from an accepted iteration (VerA VD-095), not from

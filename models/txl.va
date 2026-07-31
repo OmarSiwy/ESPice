@@ -39,6 +39,14 @@ module txl(p1, n1, p2, n2);
 
     localparam integer cap = 2048;   // history capacity (native CAP)
 
+    // |y1 - linear interpolation of (x0, y0)-(x2, y2) at x1|: the error of
+    // dropping the middle sample.
+    analog function real lerpdev;
+        input x0, y0, x1, y1, x2, y2;
+        real x0, y0, x1, y1, x2, y2;
+        lerpdev = abs(y1 - y0 - (y2 - y0) * (x1 - x0) / (x2 - x0));
+    endfunction
+
     analog function real eval2;
         input a, b, c0, x;
         real a, b, c0, x;
@@ -202,7 +210,8 @@ module txl(p1, n1, p2, n2);
     real cnv1_i[0:2], cnv1_o[0:2], cnv2_i[0:2], cnv2_o[0:2], cnv3_i[0:5], cnv3_o[0:5];
     real vprev_i, vprev_o, dv_i, dv_o, dc1, dc2, sv1, sv2, si1, si2;
     real ht[0:cap-1], hvi[0:cap-1], hvo[0:cap-1], hii[0:cap-1], hio[0:cap-1];
-    integer nh, drop, j, staged;
+    integer nh, drop, j, staged, kbest;
+    real bk, bmin;
 
     // ---- per-evaluation rebuild (right_consts_txl) ----
     integer rebuild;
@@ -409,8 +418,29 @@ module txl(p1, n1, p2, n2);
                     cutoff = tacc - taul;
                     drop = 0;
                     while (drop + 1 < nh && ht[drop + 1] < cutoff) drop = drop + 1;
-                    if (drop > 64 || nh == cap) begin
-                        if (nh == cap && drop == 0) drop = 1;
+                    if (nh == cap && drop == 0) begin
+                        // Full and all live: drop the interior point whose
+                        // linear interpolation loses least (current as I*Z0).
+                        // ponytail: lossy past cap (ngspice grows); VerA has
+                        // no growable held storage.
+                        bmin = 1e300;
+                        kbest = 1;
+                        for (k = 1; k + 1 < nh; k = k + 1) begin
+                            bk = max(lerpdev(ht[k - 1], hvi[k - 1], ht[k], hvi[k], ht[k + 1], hvi[k + 1]),
+                                     lerpdev(ht[k - 1], hvo[k - 1], ht[k], hvo[k], ht[k + 1], hvo[k + 1]))
+                               + max(lerpdev(ht[k - 1], hii[k - 1], ht[k], hii[k], ht[k + 1], hii[k + 1]),
+                                     lerpdev(ht[k - 1], hio[k - 1], ht[k], hio[k], ht[k + 1], hio[k + 1])) / sqtcdl;
+                            if (bk < bmin) begin
+                                bmin = bk;
+                                kbest = k;
+                            end
+                        end
+                        for (k = kbest; k + 1 < nh; k = k + 1) begin
+                            ht[k] = ht[k + 1]; hvi[k] = hvi[k + 1]; hvo[k] = hvo[k + 1];
+                            hii[k] = hii[k + 1]; hio[k] = hio[k + 1];
+                        end
+                        nh = nh - 1;
+                    end else if (drop > 64 || nh == cap) begin
                         for (k = 0; k + drop < nh; k = k + 1) begin
                             ht[k] = ht[k + drop]; hvi[k] = hvi[k + drop]; hvo[k] = hvo[k + drop];
                             hii[k] = hii[k + drop]; hio[k] = hio[k + drop];
