@@ -1,0 +1,67 @@
+{
+ "schema_version": 1,
+ "analysis": "op",
+ "purpose": "#113: a bare number after the Q card's model name is the area.",
+ "oracle": {
+  "kind": "ngspice-45",
+  "derivation": "Independent ngspice-45 run of this deck. Stored binary raw doubles, selected by column name.",
+  "command": "ngspice -n -b -r reference.raw circuit.sp",
+  "source_sha256": "b02bb553d38023479755103f84fb6ce9bb4b145299dedb9cfead864ecdac6992"
+ },
+ "origin": "tests/fixtures/op/bjt_instance_area.sp",
+ "expect": {
+  "status": "success",
+  "plots": [
+   {
+    "name": "Operating Point",
+    "match": "exact",
+    "row_count": 1,
+    "columns": {
+     "i(vb4)": {
+      "values": [
+       -1.00894138876928e-07
+      ],
+      "unit": "A",
+      "rtol": 1e-06,
+      "atol": 1e-14
+     },
+     "i(vb2)": {
+      "values": [
+       -3.026838158448619e-07
+      ],
+      "unit": "A",
+      "rtol": 1e-06,
+      "atol": 1e-14
+     },
+     "i(ve)": {
+      "values": [
+       6.507017147328042e-13
+      ],
+      "unit": "A",
+      "rtol": 1e-06,
+      "atol": 1e-14
+     },
+     "i(vc)": {
+      "values": [
+       -6.684183426608481e-05
+      ],
+      "unit": "A",
+      "rtol": 1e-06,
+      "atol": 1e-14
+     },
+     "i(vb)": {
+      "values": [
+       -4.035786541067843e-07
+      ],
+      "unit": "A",
+      "rtol": 1e-06,
+      "atol": 1e-14
+     }
+    }
+   }
+  ],
+  "finite_values_required": true,
+  "all_requested_analyses_must_complete": true
+ },
+ "netlist_sha256": "b02bb553d38023479755103f84fb6ce9bb4b145299dedb9cfead864ecdac6992"
+}

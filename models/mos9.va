@@ -33,11 +33,13 @@ module mos9(d, g, s, b);
     parameter integer tpg    = 1 from [-1:1];            // gate type: +1 opposite, -1 same, 0 Al
     parameter real    vto    = 0.0;                      // zero-bias threshold (0: from wkfngs) [V]
     parameter real    delvto = 0.0;                      // threshold shift [V]
+    aliasparam delvt0 = delvto;
     parameter real    nss    = 0.0 from [0:inf);         // surface state density [cm^-2]
     parameter real    kp     = 2.0e-5;                   // transconductance (not given: from uo) [A/V^2]
     parameter real    gamma  = 0.0 from [0:inf);         // body effect (0 + nsub: derived) [sqrt(V)]
     parameter real    phi    = 0.6;                      // surface potential (not given: from nsub) [V]
     parameter real    uo     = 600.0 from (0:inf);       // surface mobility [cm^2/Vs]
+    aliasparam u0 = uo;
     parameter real    theta  = 0.0 from [0:inf);         // mobility modulation [1/V]
     parameter real    eta    = 0.0 from [0:inf);         // static feedback (DIBL)
     parameter real    kappa  = 0.2 from [0:inf);         // saturation-field factor
@@ -77,6 +79,8 @@ module mos9(d, g, s, b);
 
     // ---- temperature ------------------------------------------------------
     parameter real    tnom   = $simparam("tnom");        // parameter extraction temp [degC]
+    parameter real    temp   = 27.0;                 // instance temperature, overrides $temperature [degC]
+    parameter real    dtemp  = 0.0;                  // instance offset from $temperature [K]
     parameter real    gmin   = 1.0e-12 from [0:inf);     // junction conductance floor [S]
 
     // ---- instance ---------------------------------------------------------
@@ -94,7 +98,7 @@ module mos9(d, g, s, b);
     parameter real    m   = 1.0 from (0:inf);     // parallel multiplicity
 
     // bias-independent
-    real ty, tnomk, vtnom, egnom, coxp, kpx, phix, gammax, wkfngs, vtox;
+    real ty, tnomk, vtnom, egnom, nitnom, coxp, kpx, phix, gammax, wkfngs, vtox;
     real tk, vt, vt300, eg, fact1, fact2, pbfact1, pbfact, ratio;
     real phit, pbo, pbt, sqphit, vbit, kpt, uot, ist, gmaold, gmanew, capf, capfsw;
     real leff, weff, cox, beta0, alpha, xd, etac, narrow, csonco;
@@ -166,8 +170,11 @@ module mos9(d, g, s, b);
         // take mos9temp.c:66-68's UO derivation or the NSUB-derived PHI.
         if ($param_given(kp)) kpx = kp;
         else kpx = uo * coxp * 1.0e-4;
-        if ($param_given(phi) || nsub <= 1.45e10) phix = phi;
-        else phix = max(0.1, 2.0 * vtnom * ln(nsub * 1.0e6 / 1.45e16));
+        // ni at TNOM (mos9temp.c:50-54), the doping-derived PHI's reference.
+        nitnom = 1.45e16 * (tnomk / 300.0) * sqrt(tnomk / 300.0)
+                 * exp(0.5 * egnom * (1.0 / 300.0 - 1.0 / tnomk) / (1.38064852e-23 / 1.6021766208e-19));
+        if ($param_given(phi) || nsub * 1.0e6 <= nitnom) phix = phi;
+        else phix = max(0.1, 2.0 * vtnom * ln(nsub * 1.0e6 / nitnom));
         gammax = ((gamma <= 0.0) && (nsub > 0.0))
                  ? sqrt(2.0 * 11.7 * 8.854214871e-12 * 1.6021766208e-19 * nsub * 1.0e6) / coxp
                  : gamma;
@@ -181,7 +188,10 @@ module mos9(d, g, s, b);
                : vto;
 
         // ============ temperature scaling (mos9temp.c) =====================
-        tk = $temperature;
+        // Device temperature: the instance TEMP, else the circuit's plus DTEMP
+        // (ngspice CKTtemp + dtemp rule).
+        if ($param_given(temp)) tk = temp + 273.15;
+        else tk = $temperature + dtemp;
         vt = tk * (1.38064852e-23 / 1.6021766208e-19);
         vt300 = 300.15 * (1.38064852e-23 / 1.6021766208e-19);
         eg = 1.16 - 7.02e-4 * tk * tk / (tk + 1108.0);

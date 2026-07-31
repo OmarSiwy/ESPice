@@ -5,6 +5,13 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 ## Unreleased
 
+- MOS levels 1-9 match ngspice 45 on card spellings and temperature: `U0`/`UO` on every
+  level, `DELVT0` on 3 and 9, instance `temp=`/`dtemp=` on 1, 2, 6 and 9, MOS6 `TNOM` in
+  degC, `LAMBDA0=0` kept, PHI from ni(TNOM) on 3 and 9, MOS2 VMAX with the TNOM mobility (#114).
+- A bare number after a Q, D, J or Z card's model name is the area, as ngspice reads it (#113).
+- Diodes take `area`, `pj`/`perim`, `jsw`/`ns`, `cjp`/`php`/`mjsw`/`fcs`, `ikr`, LEVEL=3
+  `w`/`l`/`xw` and plate caps, instance `temp`/`dtemp`, and the reverse cubic tail; JFET2
+  follows the circuit temperature and drops a drain-source gmin ngspice lacks (#79).
 - LTRA, TXL and CPL runs whose delay spans more accepted points than the history holds
   (8192 LTRA, 2048 TXL/CPL) keep the entries the delay still reads; a full history drops
   the point that loses least instead of the oldest live one (#105).

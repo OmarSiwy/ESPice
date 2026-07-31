@@ -30,6 +30,7 @@ module mos6(d, g, s, b);
     parameter real    kc      = 5e-5 from [0:inf);  // Idsat coefficient [A/V^nc]
     parameter real    nc      = 1.0;                // Idsat exponent
     parameter real    u0      = 600.0;              // mobility, for the KC default [cm^2/Vs]
+    aliasparam uo = u0;
     parameter real    nsub    = 0.0 from [0:inf);   // substrate doping [cm^-3]
     parameter real    nss     = 0.0 from [0:inf);   // surface states [cm^-2]
     parameter real    tpg     = 1.0 from [-1:1];    // gate: +1 opp, -1 same, 0 Al
@@ -69,7 +70,9 @@ module mos6(d, g, s, b);
     parameter real    cgdo = 0.0 from [0:inf);                         // gate-drain overlap [F/m]
     parameter real    cgbo = 0.0 from [0:inf);                         // gate-bulk overlap [F/m]
     parameter real    ld   = 0.0 from [0:inf);                         // lateral diffusion [m]
-    parameter real    tnom = $simparam("tnom") + 273.15 from (0:inf);  // nominal temperature [K]
+    parameter real    tnom = $simparam("tnom");     // nominal temperature [degC]
+    parameter real    temp   = 27.0;                 // instance temperature, overrides $temperature [degC]
+    parameter real    dtemp  = 0.0;                  // instance offset from $temperature [K]
 
     // ---- noise ------------------------------------------------------------
     parameter real    kf = 0.0 from [0:inf);  // flicker coefficient
@@ -86,7 +89,7 @@ module mos6(d, g, s, b);
     parameter real    ps = 0.0 from [0:inf);   // source perimeter [m]
 
     // bias-independent
-    real ty, coxp, vtnom, egnom, kcx, phix, gammax, vtox;
+    real ty, coxp, tnomk, vtnom, egnom, kcx, phix, gammax, vtox;
     real fermis, fermig, wkfng, wkfngs, vfb;
     real tk, vt, eg, fact1, fact2, arg1, argt, pbfact1, pbfactt;
     real phio, phit, sqphi, vbit, pbo, pbt, gmaold, gmanew, capf, capfsw, ist;
@@ -150,8 +153,9 @@ module mos6(d, g, s, b);
         // intrinsic Meyer caps, as in ngspice (oxideCapFactor stays 0).
         if (tox > 0.0) coxp = 3.9 * 8.854214871e-12 / tox;
         else coxp = 0.0;
-        vtnom = tnom * (1.38064852e-23 / 1.6021766208e-19);
-        egnom = 1.16 - 7.02e-4 * tnom * tnom / (tnom + 1108.0);
+        tnomk = tnom + 273.15;
+        vtnom = tnomk * (1.38064852e-23 / 1.6021766208e-19);
+        egnom = 1.16 - 7.02e-4 * tnomk * tnomk / (tnomk + 1108.0);
 
         phix   = phi;
         gammax = gamma;
@@ -179,15 +183,18 @@ module mos6(d, g, s, b);
         else kcx = 0.5 * u0 * coxp * 1e-4;
 
         // ============ temperature scaling (mos1temp.c) =====================
-        // Identity at T = TNOM; TNOM is in kelvin on this card.
-        tk    = $temperature;
+        // Identity at T = TNOM.
+        // Device temperature: the instance TEMP, else the circuit's plus DTEMP
+        // (ngspice CKTtemp + dtemp rule).
+        if ($param_given(temp)) tk = temp + 273.15;
+        else tk = $temperature + dtemp;
         vt    = tk * (1.38064852e-23 / 1.6021766208e-19);
         eg    = 1.16 - 7.02e-4 * tk * tk / (tk + 1108.0);
-        fact1 = tnom / 300.15;
+        fact1 = tnomk / 300.15;
         fact2 = tk / 300.15;
         // arg is ngspice's literal 1/Joule form; the q factor below converts it,
         // so it must NOT already be divided by q.
-        arg1    = -egnom / (2.0 * 1.38064852e-23 * tnom)
+        arg1    = -egnom / (2.0 * 1.38064852e-23 * tnomk)
                   + 1.1150877 / (2.0 * 1.38064852e-23 * 300.15);
         argt    = -eg / (2.0 * 1.38064852e-23 * tk)
                   + 1.1150877 / (2.0 * 1.38064852e-23 * 300.15);
@@ -207,9 +214,9 @@ module mos6(d, g, s, b);
         gmaold = (pb - pbo) / pbo;
         gmanew = (pbt - pbo) / pbo;
         capf   = (1.0 + mj * (4e-4 * (tk - 300.15) - gmanew))
-                 / (1.0 + mj * (4e-4 * (tnom - 300.15) - gmaold));
+                 / (1.0 + mj * (4e-4 * (tnomk - 300.15) - gmaold));
         capfsw = (1.0 + mjsw * (4e-4 * (tk - 300.15) - gmanew))
-                 / (1.0 + mjsw * (4e-4 * (tnom - 300.15) - gmaold));
+                 / (1.0 + mjsw * (4e-4 * (tnomk - 300.15) - gmaold));
 
         // Saturation-current temperature factor.
         ist = exp(-eg / vt + egnom / vtnom);
@@ -247,10 +254,10 @@ module mos6(d, g, s, b);
 
         // Channel prefactor: betac = KC * W * m / Leff, KC temperature-scaled
         // like MOS1's KP: KP(T) = KP / (T/Tnom)^1.5.
-        betac = kcx * weff * m / (leff * pow(tk / tnom, 1.5));
+        betac = kcx * weff * m / (leff * pow(tk / tnomk, 1.5));
 
-        // lamda0 defaults to LAMBDA when not given (mos6set.c).
-        if (lambda0 != 0.0) lam0 = lambda0;
+        // lamda0 defaults to LAMBDA when not given (mos6set.c); a given 0 stays.
+        if ($param_given(lambda0)) lam0 = lambda0;
         else lam0 = lambda;
 
         // ============ series resistance ===================================

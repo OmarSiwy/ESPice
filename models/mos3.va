@@ -38,11 +38,13 @@ module mos3(d, g, s, b);
     parameter real    theta  = 0.0;                      // mobility degradation [1/V]
     parameter real    kappa  = 0.2;                      // channel-length modulation
     parameter real    u0     = 600.0 from (0:inf);       // low-field mobility [cm^2/Vs]
+    aliasparam uo = u0;
     parameter real    vmax   = 0.0 from [0:inf);         // max drift velocity [m/s]
     parameter real    xj     = 0.0 from [0:inf);         // junction depth [m]
     parameter real    xd     = 0.0 from [0:inf);         // depletion coeff (= sqrt(alpha)) [m/sqrt(V)]
     parameter real    alpha  = 0.0 from [0:inf);         // 2*eps_si/(q*Nsub) [m^2/V]
     parameter real    delvto = 0.0;                      // threshold adjust [V]
+    aliasparam delvt0 = delvto;
 
     // ---- instance, with the LD/XL/WD/XW/TOX geometry adjustments ---------
     parameter real    l   = 1e-4 from (0:inf);  // drawn length [m]
@@ -93,7 +95,7 @@ module mos3(d, g, s, b);
     parameter real    dtemp = 0.0;                // instance offset from $temperature [K]
 
     // bias-independent
-    real tk, tnomk, vt, vtnom, vt300, ratio, egfet, egfet1, fact1, fact2;
+    real nitnom, tk, tnomk, vt, vtnom, vt300, ratio, egfet, egfet1, fact1, fact2;
     real pbfact1, pbfact, pbo, gmaold, gmanew, cfb, cfsw;
     real phix, gammax, vtox, kpx, fermis, fermig, wkfng, wkfngs;
     real phit, sqphit, pbt, vbit;
@@ -165,9 +167,12 @@ module mos3(d, g, s, b);
         phix   = phi;
         gammax = gamma;
         vtox   = vto;
-        if ($param_given(nsub) && nsub * 1e6 > 1.45e16) begin
+        // ni at TNOM (mos3temp.c:50-54), the doping-derived PHI's reference.
+        nitnom = 1.45e16 * (tnomk / 300.0) * sqrt(tnomk / 300.0)
+                 * exp(0.5 * egfet1 * (1.0 / 300.0 - 1.0 / tnomk) / (1.38064852e-23 / 1.6021766208e-19));
+        if ($param_given(nsub) && nsub * 1e6 > nitnom) begin
             if (!$param_given(phi))
-                phix = max(0.1, 2.0 * vtnom * ln(nsub * 1e6 / 1.45e16));
+                phix = max(0.1, 2.0 * vtnom * ln(nsub * 1e6 / nitnom));
             if (!$param_given(gamma))
                 gammax = sqrt(2.0 * 11.7 * 8.854214871e-12
                               * 1.6021766208e-19 * nsub * 1e6) / coxp;

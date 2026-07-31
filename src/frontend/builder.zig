@@ -1795,6 +1795,14 @@ fn addSingleDevice(self: *NetBuilder, comptime D: type, dev: Device) !void {
     }
     if (dev.model) |m| model = try boundCard(self, D, model, m, dev.model_row);
     _ = try setParam(D, &model, &instance, "gain", positionalNumber(dev, 0) orelse 0);
+    // INP2Q/D/J/Z: a bare number after the model name is the area; area=
+    // below still wins.
+    switch (dev.kind) {
+        'q', 'd', 'j', 'z' => if (positionalNumber(dev, 1)) |a| {
+            _ = try setParam(D, &model, &instance, "area", a);
+        },
+        else => {},
+    }
     // Card pairs go to both structs: VerA puts every Verilog-A `parameter`
     // (W and L included) on Model. `model` is a per-device copy, so this
     // overrides the model card for this instance only.
