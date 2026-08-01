@@ -579,12 +579,13 @@ module bsim2(d, g, s, b);
                   + white_noise(4.0 * 1.38064852e-23 * tk * gsource, "rs");
 
         // ============ noise (mos1noi.c form) ==============================
-        // The flicker denominator is W*m*Leff*Cox'^2.
-        I(di, si) <+ white_noise(4.0 * 1.38064852e-23 * tk * 2.0 / 3.0 * abs(gmch),
+        // The flicker denominator is Weff*Leff*Cox'^2.
+        // Both sources carry m, as b2noi.c's B2m (#48).
+        I(di, si) <+ white_noise(4.0 * 1.38064852e-23 * tk * 2.0 / 3.0 * m * abs(gmch),
                                  "channel");
         if (kf > 0.0) begin
-            I(di, si) <+ flicker_noise(kf * pow(abs(id), af)
-                                       / (weff * m * leff * cox * cox),
+            I(di, si) <+ flicker_noise(kf * m * pow(abs(id), af)
+                                       / (weff * leff * cox * cox),
                                        1.0, "flicker");
         end
 

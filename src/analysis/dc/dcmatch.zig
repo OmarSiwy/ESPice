@@ -129,6 +129,8 @@ pub const Groups = struct {
 /// The parameter's mismatch sigma (not sigma^2): A_P / sqrt(W·L).
 inline fn pelgromSigma(ref: root.ParamRef) f64 {
     if (ref.pelgrom_ap > 0 and ref.area_wl > 0) return ref.pelgrom_ap / @sqrt(ref.area_wl);
+    // The device count is drawn, not a process variable.
+    if (std.mem.eql(u8, ref.param_name, "mfactor")) return 0.0;
     // ponytail: unit sigma when the parameter carries no Pelgrom data; wire
     // a per-model coefficient when a deck needs a real one.
     return 1.0;

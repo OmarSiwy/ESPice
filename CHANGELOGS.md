@@ -5,6 +5,10 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 ## Unreleased
 
+- `m=` multiplies every device: on models without an `m` of their own (BSIM4, BSIM-SOI,
+  HICUM, HiSIM) and where `m` is a shape (diode grading, HFET/MESA knee) it is the
+  instance's `$mfactor`, scaling every stamp, charge, AC term and noise source; BJT and
+  JFET2 junction gmin and BSIM2 channel noise scale with m as in ngspice (#48).
 - Source stepping in the operating-point ladder scales the independent V and I sources;
   it ran at full sources before, so a deck that only source stepping solves failed (#104).
 - The JFET channel no longer runs `limvds`, which clamped a negative vds even at the fixed

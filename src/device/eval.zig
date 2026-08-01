@@ -703,6 +703,16 @@ fn canNarrow(comptime D: type) bool {
     return true;
 }
 
+/// LRM §6.3.6 `$mfactor` of one instance: every row it stamps (residual,
+/// charge, both Jacobians, LTE charges, AC terms, noise PSDs) scales by it,
+/// which is exactly `mfactor` parallel copies, since an instance's internal
+/// rows are homogeneous in their own unknowns. VerA scales hierarchical
+/// children itself and leaves the top-level instance to the host. A model
+/// with its own `m` parameter keeps `mfactor` at 1.
+pub inline fn mfactorOf(comptime D: type, inst: anytype) f64 {
+    return if (comptime @hasField(D.Instance, "mfactor")) inst.mfactor else 1.0;
+}
+
 /// Evaluates instances `[first, end)` of D and stamps residual, charge and
 /// both Jacobians through `sink`. The one physics body: the host sink adds
 /// into the planes, the GPU sink writes per-contribution staging cells.
@@ -775,6 +785,7 @@ fn evalRange(comptime D: type, comptime narrow: bool, comptime F: type, comptime
         // one test skips the correction dot products.
         const corr_live = use_lim and anyNonzero(W, corr);
         const model = sink.model(id);
+        const mf = mfactorOf(D, sink.inst(id));
 
         // `q` returns one charge per ddt site. The planes take the rows
         // (`qRows`); the host `q_tape` takes the LTE sites.
@@ -805,13 +816,13 @@ fn evalRange(comptime D: type, comptime narrow: bool, comptime F: type, comptime
                 // lanes has zero gradient, so it has no correction either.
                 if (corr_live) val += @reduce(.Add, head(W, out[ru].toLanes(full).grad()) * corr);
             }
-            sink.scatterRes(row, val);
+            sink.scatterRes(row, val * mf);
             if (comptime !SinkT.skip_g and jac_pat[ru] != 0) {
                 inline for (0..n_u) |cu| if (!mask_ground or active[cu]) {
                     if (comptime (jac_rep[ru] >> cu) & 1 != 0) {
-                        sink.scatterJac(id, ru, cu, out[ru].ddxAt(cu));
+                        sink.scatterJac(id, ru, cu, out[ru].ddxAt(cu) * mf);
                     } else if (comptime constEntry(D, ru, cu)) |e| {
-                        if (comptime e.g != 0) if (contract.jacConstApplies(D, e, model, S.collapse_applied)) sink.scatterJac(id, ru, cu, e.g);
+                        if (comptime e.g != 0) if (contract.jacConstApplies(D, e, model, S.collapse_applied)) sink.scatterJac(id, ru, cu, e.g * mf);
                     }
                 };
             }
@@ -827,14 +838,14 @@ fn evalRange(comptime D: type, comptime narrow: bool, comptime F: type, comptime
                 if (comptime has_limit and @TypeOf(qo[ru]).lanes != 0) {
                     if (corr_live) qv += @reduce(.Add, head(W, qo[ru].toLanes(full).grad()) * corr);
                 }
-                sink.scatterQ(row, qv);
+                sink.scatterQ(row, qv * mf);
                 if (comptime !SinkT.skip_c and q_pat[ru] != 0) {
                     if (!mask_ground or active[ru]) {
                         inline for (0..n_u) |cu| if (!mask_ground or active[cu]) {
                             if (comptime (q_rep[ru] >> cu) & 1 != 0) {
-                                sink.scatterQJac(id, ru, cu, qo[ru].ddxAt(cu));
+                                sink.scatterQJac(id, ru, cu, qo[ru].ddxAt(cu) * mf);
                             } else if (comptime constEntry(D, ru, cu)) |e| {
-                                if (comptime e.c != 0) if (contract.jacConstApplies(D, e, model, S.collapse_applied)) sink.scatterQJac(id, ru, cu, e.c);
+                                if (comptime e.c != 0) if (contract.jacConstApplies(D, e, model, S.collapse_applied)) sink.scatterQJac(id, ru, cu, e.c * mf);
                             }
                         };
                     }
@@ -845,7 +856,7 @@ fn evalRange(comptime D: type, comptime narrow: bool, comptime F: type, comptime
                 if (comptime has_limit and @TypeOf(qs[k]).lanes != 0) {
                     if (corr_live) qv += @reduce(.Add, head(W, qs[k].toLanes(full).grad()) * corr);
                 }
-                sink.tapeQ(id, j, qv);
+                sink.tapeQ(id, j, qv * mf);
             };
         }
     }
@@ -902,9 +913,10 @@ fn evalQRange(comptime D: type, comptime S: type, sink: anytype, first: u32, end
         else
             D.acceptQ(S, &lx, sink.model(id), &batch.instances[id], &batch.states[id], sim);
         const qo = contract.qRows(D, S, qs);
+        const mf = mfactorOf(D, sink.inst(id));
         // Same `q_row` gate as `evalRange`, or the two passes would differ.
-        inline for (0..n_u) |ru| if (comptime q_row[ru]) sink.scatterQ(sink.rhsRow(id, ru), qo[ru].v);
-        inline for (comptime lteSites(D), 0..) |k, j| sink.tapeQ(id, j, qs[k].v);
+        inline for (0..n_u) |ru| if (comptime q_row[ru]) sink.scatterQ(sink.rhsRow(id, ru), qo[ru].v * mf);
+        inline for (comptime lteSites(D), 0..) |k, j| sink.tapeQ(id, j, qs[k].v * mf);
     }
 }
 
@@ -2095,6 +2107,9 @@ pub fn DeviceBatch(comptime D: type) type {
             for (0..self.count) |id| {
                 const base: u32 = @intCast(list.items.len);
                 const terms = D.noisePsd(Real, self.localX(x, id), self.model(id), &self.instances[id], self.sim);
+                // m copies are m independent generators: m times the power.
+                // A table row's PSD is the table, so its amplitude takes sqrt(m).
+                const mf = mfactorOf(D, &self.instances[id]);
                 // Rows go out in `noise_order`, so a correlated generator's
                 // rows are contiguous. Term k belongs to generator k
                 // (noise-contract.md §3). `@abs` matches ngspice
@@ -2108,10 +2123,10 @@ pub fn DeviceBatch(comptime D: type) type {
                     list.appendAssumeCapacity(.{
                         .node_p = self.gath[id * n_u + gen.row],
                         .node_n = if (gen.row == gen.col) GROUND else self.gath[id * n_u + gen.col],
-                        .white = @abs(t.white),
-                        .flicker = @abs(t.flicker),
+                        .white = @abs(t.white) * mf,
+                        .flicker = @abs(t.flicker) * mf,
                         .ef = t.ef,
-                        .coeff = t.coeff,
+                        .coeff = if (table != null) t.coeff * @sqrt(mf) else t.coeff,
                         .group = base + lead,
                         .table = if (table) |i| D.noise_tables[i] else .{ .interp = .linear, .points = &.{} },
                     });
@@ -2147,10 +2162,11 @@ pub fn DeviceBatch(comptime D: type) type {
                     for (0..LW) |l| ow[l] = omegas[j + @min(l, cnt - 1)];
                     var out: [K]std.math.Complex(V) = undefined;
                     D.acDyn(V, self.model(id), &self.instances[id], &lx, sim, ow, &out);
+                    const mf: V = @splat(mfactorOf(D, &self.instances[id]));
                     for (out, 0..) |o, k| {
                         const e = (id * K + k) * nw + j;
-                        const r: [LW]f64 = o.re;
-                        const i: [LW]f64 = o.im;
+                        const r: [LW]f64 = o.re * mf;
+                        const i: [LW]f64 = o.im * mf;
                         @memcpy(re[e..][0..cnt], r[0..cnt]);
                         @memcpy(im[e..][0..cnt], i[0..cnt]);
                     }
@@ -2699,7 +2715,8 @@ fn QTapeKernel(comptime D: type, comptime block_size: u32) type {
             var lx: [n_u]f64 = undefined;
             inline for (0..n_u) |u| lx[u] = xs[gath[id * n_u + u]];
             const qs = D.q(S, &lx, @addrSpaceCast(&models[model_of[id]]), @addrSpaceCast(&instances[id]), sim);
-            inline for (sites, 0..) |k, j| tape[id * sites.len + j] = qs[k].v;
+            const mf = mfactorOf(D, &instances[id]);
+            inline for (sites, 0..) |k, j| tape[id * sites.len + j] = qs[k].v * mf;
         }
     };
 }

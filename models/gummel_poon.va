@@ -252,12 +252,12 @@ module gummel_poon(c, b, e, s);
 
         // ---- junction currents; GMIN on the leakage/substrate parts --------
         cbe   = pnj(vbe, is_t * ai, nf * vt);
-        cben  = pnj(vbe, ise_t * ai, ne * vt) + gmin * vbe;
+        cben  = pnj(vbe, ise_t * ai, ne * vt) + m * gmin * vbe;
         cbc   = pnj(vbc, is_t * ai, nr * vt);
-        cbcn  = pnj(vbc, isc_t * abc, nc * vt) + gmin * vbc;
+        cbcn  = pnj(vbc, isc_t * abc, nc * vt) + m * gmin * vbc;
         // The substrate current keeps the emitter area (bjtload.c); only the
         // substrate cap swaps to areac/areab.
-        cdsub = pnj(vsub, iss_t * ai, ns * vt) + gmin * vsub;
+        cdsub = pnj(vsub, iss_t * ai, ns * vt) + m * gmin * vsub;
 
         // ---- base charge: Early + Webster high injection -------------------
         q1 = 1.0 / (1.0 - vbc * inv_vaf - vbe * inv_var);

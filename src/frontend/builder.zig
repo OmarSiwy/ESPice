@@ -1806,8 +1806,26 @@ fn addSingleDevice(self: *NetBuilder, comptime D: type, dev: Device) !void {
     // Card pairs go to both structs: VerA puts every Verilog-A `parameter`
     // (W and L included) on Model. `model` is a per-device copy, so this
     // overrides the model card for this instance only.
-    try applyKv(&model, dev.kv);
-    try applyKv(&instance, dev.kv);
+    // LRM §6.3.6: `m=` on the instance card is the multiplier. A model
+    // without an `m` of its own (bsim4va, hicum, hisim, bsimsoi), or whose
+    // `m` is a shape (diode grading, hfet/mesa knee), takes it as the
+    // instance's $mfactor (#48); the shape keeps the model card's value.
+    const shape_m = comptime D == devices.DeviceId.Type(.diode) or D == devices.DeviceId.Type(.hfet1) or
+        D == devices.DeviceId.Type(.hfet2) or D == devices.DeviceId.Type(.mesa);
+    const to_mfactor = comptime (!@hasField(D.Model, "m") or shape_m) and @hasField(D.Instance, "mfactor");
+    var kv = dev.kv;
+    if (to_mfactor) if (kvNumber(dev.kv, "m")) |mv| {
+        instance.mfactor = mv;
+        const rest = try self.arena.alloc(Kv, dev.kv.len);
+        var n: usize = 0;
+        for (dev.kv) |item| if (!std.mem.eql(u8, item.key, "m")) {
+            rest[n] = item;
+            n += 1;
+        };
+        kv = rest[0..n];
+    };
+    try applyKv(&model, kv);
+    try applyKv(&instance, kv);
     // §6.3.4/§3.4.5: derived parameters after the last write; explicit card
     // values win through `__given`.
     deriveModel(D, &model, b, dev.pins.len);
