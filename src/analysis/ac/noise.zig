@@ -331,7 +331,9 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
             }
         }
         names[2 * n_cols] = "v(onoise_total)";
-        names[2 * n_cols + 1] = "v(inoise_total)";
+        // ngspice types the input-referred total by the input source: a
+        // current source's is i(inoise_total) (noisean.c, #84).
+        names[2 * n_cols + 1] = if (opts.in_nodes != null) "i(inoise_total)" else "v(inoise_total)";
         data[2 * n_cols] = @sqrt(integrated.onoise);
         data[2 * n_cols + 1] = @sqrt(integrated.inoise);
         return .{

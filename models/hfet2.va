@@ -174,7 +174,9 @@ module hfet2(d, g, s);
         vgsr = type_nfet * $limit(V(g, sp), "pnjlim", 1.38064852e-23 * 300.15 / 1.6021766208e-19, vcrit, type_nfet);
         vgdr = type_nfet * $limit(V(g, dp), "pnjlim", 1.38064852e-23 * 300.15 / 1.6021766208e-19, vcrit, type_nfet);
         vdsr = vgsr - vgdr;
-        vds  = max(abs(vdsr), 1e-30);
+        // |vds| as mode*vdsr, nudged off 0 for pow() below: a max() floor
+        // would make gds 0 exactly at vds = 0, the x = 0 start (#47).
+        vds  = ((vdsr < 0.0) ? -vdsr : vdsr) + 1e-30;
 
         // ---- Schottky gate diodes, both sides, on the *raw* (pre-swap)
         // biases: forward exponential + GGR reverse-leakage term. hfeta2()

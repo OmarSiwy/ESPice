@@ -88,6 +88,8 @@ module mos3(d, g, s, b);
     // ---- noise ---------------------------------------------------------
     parameter real    kf = 0.0 from [0:inf);  // flicker coefficient
     parameter real    af = 1.0 from (0:inf);  // flicker exponent
+    parameter integer nlev = 2 from [0:3];    // noise model selection
+    parameter real    gdsnoi = 1.0 from [0:inf);  // channel shot noise coefficient (NLEV=3)
 
     // ---- temperature ---------------------------------------------------
     parameter real    tnom  = $simparam("tnom");  // parameter measurement temp [degC]
@@ -107,7 +109,7 @@ module mos3(d, g, s, b);
     real sarg, phibs, wps, wpxj, wcxj, arga, argb, argc, fshort;
     real gammas, fbody, qbonco, vbix, vth, xn, von, vgseff;
     real onfg, fgate, avds, vdsc, vdsat, vdson, cdo, id, fdrain;
-    real gdsat, emax, delxl, clfact, gmch;
+    real gdsat, emax, delxl, clfact, gmch, sid, alphan, fln, wn, ln_;
     real ibs, ibd, qbs, qbd;
     real vgst, vdsp, cgsh, cgdh, cgbh, chgs, chgd, capgs, capgd, capgb;
     real pcapgs, pcapgd, pcapgb, vgsf, vgdf, vgbf;
@@ -560,12 +562,25 @@ module mos3(d, g, s, b);
             I(d, di) <+ white_noise(4.0 * 1.38064852e-23 * tk * gdrain, "rd");
         if (gsource > 0.0)
             I(s, si) <+ white_noise(4.0 * 1.38064852e-23 * tk * gsource, "rs");
+        // Channel: Sid = (2/3)|gm| (NLEV < 3) or the gdsnoi form (NLEV = 3);
+        // flicker per NLEV on mos3noi.c's W - 2*WD and L - 2*LD (#84). The
+        // KF*|id|^AF/(W L Cox'^2) form was ngspice's compat-s3 branch only.
         gmch = m * abs(ddx(id, V(g)));
-        I(di, si) <+ white_noise(4.0 * 1.38064852e-23 * tk * (2.0 / 3.0) * gmch,
-                                 "channel");
-        if (kf > 0.0)
-            I(di, si) <+ flicker_noise(kf * pow(abs(m * id), af)
-                                       / (weff * m * leff * coxp * coxp),
-                                       1.0, "flicker");
+        wn = w - 2.0 * wd;
+        ln_ = l - 2.0 * ld;
+        if (nlev < 3) sid = 2.0 / 3.0 * gmch;
+        else if (vgst > 0.0) begin
+            if (vgst <= vdsx) alphan = 0.0;
+            else alphan = 1.0 - vdsx / vdsat;
+            sid = 2.0 / 3.0 * kpt * m * w / ln_ * vgst * (1.0 + alphan + alphan * alphan) / (1.0 + alphan) * gdsnoi;
+        end else sid = 0.0;
+        I(di, si) <+ white_noise(4.0 * 1.38064852e-23 * tk * sid, "channel");
+        if (nlev == 0)
+            fln = kf * m * pow(abs(id), af) / (ln_ * ln_ * coxp);
+        else if (nlev == 1)
+            fln = kf * m * pow(abs(id), af) / (wn * ln_ * coxp);
+        else
+            fln = kf * gmch * gmch / (m * wn * ln_ * coxp);
+        I(di, si) <+ flicker_noise(fln, (nlev < 2) ? 1.0 : af, "flicker");
     end
 endmodule

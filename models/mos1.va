@@ -59,6 +59,12 @@ module mos1(d, g, s, b);
     // ---- temperature ---------------------------------------------------
     parameter real    tnom   = $simparam("tnom");    // parameter measurement temp [degC]
     parameter real    gmin   = 1.0e-12;              // junction conductance floor [S]
+
+    // ---- noise (mos1noi.c) ---------------------------------------------
+    parameter real    kf     = 0.0 from [0:inf);     // flicker coefficient
+    parameter real    af     = 1.0 from (0:inf);     // flicker exponent
+    parameter integer nlev   = 2 from [0:3];         // noise model selection
+    parameter real    gdsnoi = 1.0 from [0:inf);     // channel shot noise coefficient (NLEV=3)
     parameter real    temp   = 27.0;                 // instance temperature, overrides $temperature [degC]
     parameter real    dtemp  = 0.0;                  // instance offset from $temperature [K]
 
@@ -81,6 +87,7 @@ module mos1(d, g, s, b);
     real leff, beta, cox, isats, isatd, czbd, czbs, czbdsw, czbssw;
     real depcap, argf, sargb, sargs, f2d, f3d, f4d, f2s, f3s, f4s;
     real gdrain, gsource;
+    real gmn, sid, alpha, coxn, fln;
     // bias-dependent
     real vgs, vds, vbs, vbd, vgd, mode, vdsx, vgsx, vbx, vcrits, vcritd;
     real vonp, sarg, sarg0, vbx0, von, vgst, vdsat, bp, id, ibs, ibd, qbs, qbd;
@@ -455,5 +462,35 @@ module mos1(d, g, s, b);
         else V(d, di) <+ 0.0;
         if (gsource > 0.0) I(s, si) <+ gsource * V(s, si);
         else V(s, si) <+ 0.0;
+
+        // ============ noise (mos1noi.c, #84) ==============================
+        // RD/RS thermal; channel 4kT*Sid with Sid = (2/3)|gm| (NLEV < 3) or
+        // the gdsnoi form (NLEV = 3); flicker per NLEV, Cox' of a 1e-7 oxide
+        // when TOX is not given. gm and id carry m, as MOS1gm and MOS1cd do.
+        // The noise temperature is the device's, without mos1noi.c's
+        // TNOM-degree offset under an instance TEMP (an ngspice 45 bug).
+        if (gdrain > 0.0) I(d, di) <+ white_noise(4.0 * 1.38064852e-23 * tk * gdrain, "rd");
+        if (gsource > 0.0) I(s, si) <+ white_noise(4.0 * 1.38064852e-23 * tk * gsource, "rs");
+        // gm as mos1load.c computes it. ddx() would read 0 here: VerA's
+        // noisePsd evaluates on unseeded values.
+        if (vgst <= 0.0) gmn = 0.0;
+        else if (vgst <= vdsx) gmn = bp * vgst;
+        else gmn = bp * vdsx;
+        if (nlev < 3) sid = 2.0 / 3.0 * gmn;
+        else if (vgst > 0.0) begin
+            if (vgst <= vdsx) alpha = 0.0;
+            else alpha = 1.0 - vdsx / vdsat;
+            sid = 2.0 / 3.0 * beta * vgst * (1.0 + alpha + alpha * alpha) / (1.0 + alpha) * gdsnoi;
+        end else sid = 0.0;
+        I(di, si) <+ white_noise(4.0 * 1.38064852e-23 * tk * sid, "id");
+        coxn = (coxp > 0.0) ? coxp : 3.9 * 8.854214871e-12 / 1.0e-7;
+        if (nlev == 0)
+            fln = kf * m * pow(abs(id) / m, af) / (leff * leff * coxn);
+        else if (nlev == 1)
+            fln = kf * m * pow(abs(id) / m, af) / (w * leff * coxn);
+        else
+            fln = kf * gmn * gmn / (m * w * leff * coxn);
+        // NLEV 0/1: 1/f; NLEV 2/3: 1/f^AF.
+        I(di, si) <+ flicker_noise(fln, (nlev < 2) ? 1.0 : af, "1overf");
     end
 endmodule

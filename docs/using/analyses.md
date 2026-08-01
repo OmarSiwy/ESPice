@@ -194,7 +194,8 @@ source, the input reference. A nonzero `pts` (or HSPICE `inter`) adds each
 device's contribution as a column. Two plots: `Noise Spectral Density
 Curves` (`onoise_spectrum`, `inoise_spectrum` in V/√Hz, and
 `onoise_<inst>_<generator>`, `onoise_<inst>` with contributions) and
-`Integrated Noise` (`v(onoise_total)`, `v(inoise_total)` in V rms).
+`Integrated Noise` (`v(onoise_total)`, `v(inoise_total)` in V rms; with an
+I source as the input, `i(inoise_total)` in A rms, as ngspice names it).
 `.acphasenoise` is the same solve read as phase noise (`AC Phase Noise
 Analysis`, `phnoise`). `.sample` folds the spectrum for sampled systems.
 

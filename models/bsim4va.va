@@ -77,6 +77,9 @@ Attribution-NonCommercial 4.0 International (CC-BY-NC 4.0)
 
 // For now, set NOISE to 0 to disable noise.
 `define NOISE 1
+// ponytail: tnoiMod=1 reads Gm/Gds/Gmb, which only this hand-derivative
+// path computes, and it is off from b4noi.c by up to 6x in PSD; ddx() would
+// do, once VerA's noisePsd seeds its lanes (#119).
 //`define NOISE_DERIVATIVES 1
 `define KboQ 8.617087e-5
 `define Charge_q 1.60219e-19
@@ -1173,7 +1176,9 @@ module bsim4va(d, g, s, b);
     `MPRnb( peu  ,0.0              ,""                                             ,"Cross-term dependence of eu")
     `MPRcc( noia  ,6.25e41              ,""            ,0.0           ,1.0e60            ,"Flicker noise parameter")
     `MPRcc( noib  ,3.125e26              ,""            ,0.0           ,1.0e40            ,"Flicker noise parameter")
-    `MPRcc( noic  ,8.75              ,""            ,0.0           ,100.0            ,"Flicker noise parameter")
+    // ngspice b4set.c defaults NOIC to 8.75e9, the oracle; the upstream VA had
+    // 8.75 within [0, 100] (#80).
+    `MPRco( noic  ,8.75e9            ,""            ,0.0           ,inf              ,"Flicker noise parameter")
     `MPRcc( tnoia  ,1.5              ,""            ,0.0           ,10.0           ,"Thermal noise parameter")
     `MPRcc( tnoib  ,3.5              ,""            ,0.0           ,10.0           ,"Thermal noise parameter")
     `MPRcc( tnoic  ,0.0              ,""            ,0.0           ,1.0           ,"Thermal noise parameter")
@@ -1804,7 +1809,7 @@ module bsim4va(d, g, s, b);
     real Theta0, TempRatio;
     real DIBL_Sft, dDIBL_Sft_dVd, Lambda;
     real a1l, PvagTerm;
-    real Vgsteff, here_Vgsteff, Vdseff, here_Vdseff, VdseffCV, VbseffCV;
+    real Vgsteff, here_Vgsteff, Vdseff, here_Vdseff, VdseffCV, VbseffCV, kdVdseff;
     real diffVds, dAbulk_dVg;
     real beta, gche, fgche1, fgche2, Idl;
     real Idsa, Ids, Gm, Gds, Gmb, devbs_dvb, devbd_dvb;
@@ -7421,8 +7426,14 @@ module bsim4va(d, g, s, b);
             Vdseff = Vdsat * T5;
         end
 
-        if (Vds == 0.0)
-            Vdseff = 0.0;
+        // b4ld.c zeroes Vdseff and its Vg/Vb partials at Vds == 0 but keeps
+        // dVdseff_dVd; a constant 0 would drop that partial too, and with it
+        // gds at the x = 0 point (#47). Vds*kd has value 0 and only the Vd
+        // partial; Vds = type*V(di,si) in mode 1, hence the type.
+        if (Vds == 0.0) begin
+            (* vera_nodiff *) kdVdseff = BSIM4type * ddx(Vdseff, V(di));
+            Vdseff = Vds * kdVdseff;
+        end
 
         if (Vdseff > Vds)
             Vdseff = Vds;
@@ -8855,8 +8866,10 @@ module bsim4va(d, g, s, b);
                 T5 = Vdsat * T3 / (T1 - T0);
                 Vdseff = Vdsat * T4;
             end
-            if (Vds == 0.0)
-                Vdseff = 0.0;
+            if (Vds == 0.0) begin
+                (* vera_nodiff *) kdVdseff = BSIM4type * ddx(Vdseff, V(di));
+                Vdseff = Vds * kdVdseff;
+            end
 
             T0 = Abulk * Vdseff;
             T1 = 12.0 * (Vgsteff - 0.5 * T0 + 1.0e-20);
@@ -9094,8 +9107,10 @@ module bsim4va(d, g, s, b);
                     VdseffCV = VdsatCV * T4;
                 end
 
-                if (Vds == 0.0)
-                    VdseffCV = 0.0;
+                if (Vds == 0.0) begin
+                    (* vera_nodiff *) kdVdseff = BSIM4type * ddx(VdseffCV, V(di));
+                    VdseffCV = Vds * kdVdseff;
+                end
 
                 T0 = AbulkCV * VdseffCV;
                 T1 = 12.0 * (Vgsteff - 0.5 * T0 + 1.0e-20);
@@ -9230,8 +9245,10 @@ module bsim4va(d, g, s, b);
                     VdseffCV = VdsatCV * T4;
                 end
 
-                if (Vds == 0.0)
-                    VdseffCV = 0.0;
+                if (Vds == 0.0) begin
+                    (* vera_nodiff *) kdVdseff = BSIM4type * ddx(VdseffCV, V(di));
+                    VdseffCV = Vds * kdVdseff;
+                end
 
                 T0 = AbulkCV * VdseffCV;
                 T1 = VgDP;
@@ -9295,10 +9312,10 @@ module bsim4va(d, g, s, b);
         MJSWD = BSIM4DbulkJctSideGradingCoeff;
         MJSWGD = BSIM4DbulkJctGateSideGradingCoeff;
 
-        /* Source Bulk Junction */
-        if (vbs_jct == 0.0)
-            BSIM4qbs = 0.0;
-        else if (vbs_jct < 0.0) begin
+        /* Source Bulk Junction. b4ld.c's vbs_jct == 0 arm (qbs = 0, capbs =
+           the zero-bias sum) is the >= 0 arm below at v = 0; a separate
+           constant arm would zero the AD derivative (#47). */
+        if (vbs_jct < 0.0) begin
             if (czbs > 0.0) begin
                 arg = 1.0 - vbs_jct / BSIM4PhiBS;
                 if (MJS == 0.5)
@@ -9335,11 +9352,8 @@ module bsim4va(d, g, s, b);
 
         end // else: !if(vbs_jct < 0.0)
 
-        /* Drain Bulk Junction */
-        if (vbd_jct == 0.0) begin
-            BSIM4qbd = 0.0;
-        end
-        else if (vbd_jct < 0.0) begin
+        /* Drain Bulk Junction, as the source one. */
+        if (vbd_jct < 0.0) begin
             if (czbd > 0.0) begin
                 arg = 1.0 - vbd_jct / BSIM4PhiBD;
                 if (MJD == 0.5)
@@ -9633,6 +9647,11 @@ module bsim4va(d, g, s, b);
 
             npart_beta  = BSIM4rnoia * (1.0 + T5 * BSIM4tnoia * Leff);
             npart_theta = BSIM4rnoib * (1.0 + T5 * BSIM4tnoib * Leff);
+            // b4noi.c (4.6.2): theta <= 0.9 and <= 0.9*beta (#80).
+            if (npart_theta > 0.9)
+                npart_theta = 0.9;
+            if (npart_theta > 0.9 * npart_beta)
+                npart_theta = 0.9 * npart_beta;
 
             if (BSIM4rdsMod == 0) begin
                 gspr = BSIM4sourceConductance;
@@ -9642,17 +9661,23 @@ module bsim4va(d, g, s, b);
                 gspr = BSIM4gstot;
                 gdpr = BSIM4gdtot;
             end
+            // b4noi.c multiplies (the BSIM4.8 VA divided); ngspice 45 is
+            // the oracle here (#80).
             if (vds >= 0.0)
-                gspr = gspr / (1.0 + npart_theta * npart_theta * gspr / IdovVds);
+                gspr = gspr * (1.0 + npart_theta * npart_theta * gspr / IdovVds);
             else
-                gdpr = gdpr / (1.0 + npart_theta * npart_theta * gdpr / IdovVds);
+                gdpr = gdpr * (1.0 + npart_theta * npart_theta * gdpr / IdovVds);
         end
 
         I(br_i_d_di) <+ white_noise(4 * 1.38064852e-23 * T * gdpr, "Rd");
         I(br_i_s_si) <+ white_noise(4 * 1.38064852e-23 * T * gspr, "Rs");
 
-        if ((BSIM4rgateMod == 1) || (BSIM4rgateMod == 2))
+        if (BSIM4rgateMod == 1)
             I(gi, g) <+ white_noise(4 * 1.38064852e-23 * T * BSIM4grgeltd, "Rg");
+        else if (BSIM4rgateMod == 2)
+            // b4noi.c: grgeltd/(1 + grgeltd/gcrg)^2.
+            I(gi, g) <+ white_noise(4 * 1.38064852e-23 * T * BSIM4grgeltd
+                / ((1.0 + BSIM4grgeltd / BSIM4gcrg) * (1.0 + BSIM4grgeltd / BSIM4gcrg)), "Rg");
         else if (BSIM4rgateMod == 3)
             I(gm, g) <+ white_noise(4 * 1.38064852e-23 * T * BSIM4grgeltd, "Rg");
 
@@ -9707,6 +9732,10 @@ module bsim4va(d, g, s, b);
                 else begin
                     T0 = ((((Vds - here_Vdseff) / BSIM4litl) + BSIM4em) / esat);
                     DelClm = BSIM4litl * ln(max(T0, `N_MINLOG));
+                    // b4noi.c's Eval1ovFNoise "bugfix": a negative DelClm
+                    // (triode, Vds ~ Vdseff) would cut Ssi (#80, #84).
+                    if (DelClm < 0.0)
+                        DelClm = 0.0;
                 end
                 T1 = 1.6021766208e-19 * 1.6021766208e-19 * 1.38064852e-23 * abs(cdrain) * T * ueff;
                 T2 = 1.0e10 * here_Abulk * BSIM4coxe * Leff * Leff;
@@ -9718,14 +9747,15 @@ module bsim4va(d, g, s, b);
                 T4 = BSIM4oxideTrapDensityB * (N0 - Nl);
                 T5 = BSIM4oxideTrapDensityC * 0.5 * (N0 * N0 - Nl * Nl);
                 T6 = 1.38064852e-23 * T * cdrain * cdrain;
-                T7 = 1.0e10 * Leff * Leff * Weff;
+                // b4noi.c: pParam weff * nf, not the bias-dependent Weff.
+                T7 = 1.0e10 * Leff * Leff * BSIM4weff * BSIM4nf;
                 T8 = BSIM4oxideTrapDensityA + BSIM4oxideTrapDensityB * Nl +
                 BSIM4oxideTrapDensityC * Nl * Nl;
                 T9 = (Nl + BSIM4nstar) * (Nl + BSIM4nstar);
                 Ssi = T1 / T2 * (T3 + T4 + T5) + T6 / T7 * DelClm * T8 / T9;
 
                 T10 = BSIM4oxideTrapDensityA * 1.38064852e-23 * T;
-                T11 = Weff * Leff * 1.0e10 * BSIM4nstar * BSIM4nstar;
+                T11 = BSIM4weff * BSIM4nf * Leff * 1.0e10 * BSIM4nstar * BSIM4nstar;
                 Swi = T10 / T11 * cdrain * cdrain;
                 T1 = Swi + Ssi;
                 if (T1 > 0.0)

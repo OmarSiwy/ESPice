@@ -1,0 +1,61 @@
+{
+ "schema_version": 1,
+ "analysis": "ac",
+ "purpose": "#47: HFET2 gds at vds = 0 is the channel conductance, not 0.",
+ "oracle": {
+  "kind": "ngspice-45",
+  "derivation": "Independent ngspice-45 run of this deck. Stored binary raw doubles, selected by column name.",
+  "command": "ngspice -n -b -r reference.raw circuit.sp",
+  "source_sha256": "868be481c3b0c0c0252432627b47d994ddf1eb8eaf8e6b9f5f5dc680e5efbada"
+ },
+ "origin": "tests/fixtures/ac/hfet2_zero_vds_gds.sp",
+ "expect": {
+  "status": "success",
+  "plots": [
+   {
+    "name": "AC Analysis",
+    "match": "exact",
+    "row_count": 4,
+    "axis": {
+     "name": "frequency",
+     "values": [
+      1000.0,
+      9999.999999999998,
+      99999.99999999997,
+      999999.9999999995
+     ],
+     "atol": 1e-15,
+     "rtol": 1e-08
+    },
+    "columns": {
+     "i(vd)": {
+      "values": [
+       [
+        -3.466135395627257e-06,
+        -8.200731389736659e-13
+       ],
+       [
+        -3.466135395627257e-06,
+        -8.200731389736658e-12
+       ],
+       [
+        -3.466135395627257e-06,
+        -8.200731389736658e-11
+       ],
+       [
+        -3.466135395627257e-06,
+        -8.200731389736656e-10
+       ]
+      ],
+      "unit": "A",
+      "rtol": 1e-05,
+      "atol": 1e-18
+     }
+    }
+   }
+  ],
+  "finite_values_required": true,
+  "all_requested_analyses_must_complete": true
+ },
+ "netlist_sha256": "868be481c3b0c0c0252432627b47d994ddf1eb8eaf8e6b9f5f5dc680e5efbada"
+}

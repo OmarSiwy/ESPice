@@ -5,6 +5,12 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 ## Unreleased
 
+- MOS1 has noise (RD/RS, channel per NLEV with GDSNOI, flicker per NLEV, KF/AF); MOS3 takes
+  mos3noi.c's NLEV forms; BSIM4 matches ngspice 45's default NOIC (8.75e9), clamps the
+  flicker DelClm and the tnoiMod=1 npart_theta, and scales Rd/Rs noise as b4noi.c does;
+  `.noise` with a current-source input names its total `i(inoise_total)` (#84, #80).
+- BSIM4 at exactly zero bias keeps its junction capacitance and the dVdseff/dVd partial
+  (gds and the channel cap at vds = 0); HFET2's gds at vds = 0 is no longer 0 (#47).
 - `m=` multiplies every device: on models without an `m` of their own (BSIM4, BSIM-SOI,
   HICUM, HiSIM) and where `m` is a shape (diode grading, HFET/MESA knee) it is the
   instance's `$mfactor`, scaling every stamp, charge, AC term and noise source; BJT and
