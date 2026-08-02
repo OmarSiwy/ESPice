@@ -243,7 +243,10 @@ pub fn newton(
         }
         if (!on_device) slv.solveNeg(sys.rhs, dx);
         prof.lap(.solve);
-        const st = finalizeStep(sys, x, dx, x_old, sys.rhs, v, iter, t, opts, load_ok);
+        // The INITFIX pass does not stage: its converged iterate is not the
+        // answer, and staging there restarted a Newton-history limiter from a
+        // stale value, so the extra pass solved F(lim(x)) = 0 (#53).
+        const st = finalizeStep(sys, x, dx, x_old, sys.rhs, v, iter, t, opts, load_ok, !init_fix);
         prof.lap(.update);
         if (opdbg()) {
             var fi: usize = 0;
@@ -293,7 +296,7 @@ fn plausible(x: []const f64) bool {
 /// Applies `dx` and runs the acceptance gates in order: device limiting,
 /// first iterate, per-row delta, row-scaled residual, the device load test
 /// (`load_ok`, `sys.loadCheck` at the assembled x), device convergence,
-/// then state staging.
+/// then state staging, skipped when `stage` is false.
 fn finalizeStep(
     sys: anytype,
     x: []f64,
@@ -305,6 +308,7 @@ fn finalizeStep(
     t: f64,
     opts: Options,
     load_ok: bool,
+    stage: bool,
 ) Step {
     const S = Deref(@TypeOf(sys));
     const n = sys.n;
@@ -343,9 +347,9 @@ fn finalizeStep(
     // scaling/parallel_inverters_100), and devices whose core reads the
     // staged latches (cswitch/vswitch hysteresis) saw F change mid-solve.
     // A device that flips here forces one more iterate.
-    if (comptime @hasDecl(S, "updateStates")) {
+    if (comptime @hasDecl(S, "updateStates")) if (stage) {
         if (sys.updateStates(x_old[0..n])) |_| return .{ .converged = false, .scaled = scaled, .flipped = true, .why = .flipped };
-    }
+    };
     return .{ .converged = true, .scaled = scaled };
 }
 

@@ -145,3 +145,39 @@ test "jfnk: 100-diode ladder converges" {
 
     try testing.expectApproxEqAbs(@as(f64, 5.0), x[vin], 1e-3);
 }
+
+test "generated limiter: a cold OP converges where F(x) = 0, not at the limited image" {
+    // #53: the INITFIX pass staged state at its converged iterate, and the
+    // extra pass staged again, restarting the Newton-history limiter from a
+    // stale previous value; the published x then solved F(lim(x)) = 0.
+    var lib = try Library.init(t.allocator);
+    defer lib.deinit();
+    var b = try Builder.init(t.allocator, &lib);
+    const out = try b.addNode();
+    const vt = eval.deviceVtable(D, "va_limit_state");
+    const proto = try b.protoOf(try lib.register("va_limit_state", vt, false));
+    const model: D.Model = .{};
+    const instance: D.Instance = .{};
+    const nodes = [_]u32{ out, analysis.GROUND };
+    try vt.proto_add(proto.ctx, t.allocator, @ptrCast(&model), @ptrCast(&instance), &nodes).unwrap();
+    var prepared = try b.compile();
+    defer prepared.deinit();
+    var ckt = try analysis.Circuit.instantiate(&prepared, t.allocator);
+    defer ckt.deinit();
+    try ckt.computeBaseline();
+    var ws = try converger.Workspace.init(t.allocator, ckt.n, ckt.col_ptr, ckt.row_idx, ckt.bbd);
+    defer ws.deinit(t.allocator);
+    const x = try t.allocator.alloc(f64, ckt.n);
+    defer t.allocator.free(x);
+    @memset(x, 0);
+    ckt.setSimState(.{ .t = 0, .dt = 1, .kind = .dc });
+    const r = try converger.newton(&ckt, &ws, x, 0, .{ .gmin = 0, .max_iter = 100, .init_fix = true }, analysis.EvalHook{});
+    try t.expect(r.converged);
+    // exp(V) = exp(2) puts the root at V = 2 on the device's node.
+    var at_root = false;
+    for (x) |xi| at_root = at_root or @abs(xi - 2.0) <= 1e-6;
+    try t.expect(at_root);
+    ckt.clearLimits();
+    ckt.eval(x, 0);
+    for (ckt.rhs[0..ckt.n]) |ri| try t.expect(@abs(ri) <= 1e-9 * @exp(2.0));
+}
