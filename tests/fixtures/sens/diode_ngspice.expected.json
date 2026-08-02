@@ -1,0 +1,83 @@
+{
+ "schema_version": 1,
+ "analysis": "sens",
+ "purpose": "#71: .sens column names and values against ngspice 45 on a diode divider.",
+ "oracle": {
+  "kind": "ngspice-45",
+  "derivation": "Independent ngspice-45 run of this deck. Stored binary raw doubles, selected by column name.",
+  "command": "ngspice -n -b -r reference.raw circuit.sp",
+  "source_sha256": "bd89e3f35107cb585f9361b2f9dcb173584e7fe17809532cc8c46da9584c3e1a"
+ },
+ "origin": "tests/fixtures/sens/diode_ngspice.sp",
+ "expect": {
+  "status": "success",
+  "plots": [
+   {
+    "name": "Sensitivity Analysis",
+    "match": "exact",
+    "row_count": 1,
+    "columns": {
+     "v(d1:is)": {
+      "values": [
+       -2741237532622.843
+      ],
+      "unit": "V",
+      "rtol": 0.0001,
+      "atol": 1e-12
+     },
+     "v(d1:tnom)": {
+      "values": [
+       0.003494487170047665
+      ],
+      "unit": "V",
+      "rtol": 0.0001,
+      "atol": 1e-12
+     },
+     "v(d1:n)": {
+      "values": [
+       0.5472696530944207
+      ],
+      "unit": "V",
+      "rtol": 0.0001,
+      "atol": 1e-12
+     },
+     "v(d1_m)": {
+      "values": [
+       -0.029655509189581476
+      ],
+      "unit": "V",
+      "rtol": 0.0001,
+      "atol": 1e-12
+     },
+     "v(r1)": {
+      "values": [
+       -2.9654505562872224e-05
+      ],
+      "unit": "V",
+      "rtol": 0.0001,
+      "atol": 1e-12
+     },
+     "v(r1_m)": {
+      "values": [
+       0.02965453521299613
+      ],
+      "unit": "V",
+      "rtol": 0.0001,
+      "atol": 1e-12
+     },
+     "v(v1)": {
+      "values": [
+       0.11680963642642266
+      ],
+      "unit": "V",
+      "rtol": 0.0001,
+      "atol": 1e-12
+     }
+    }
+   }
+  ],
+  "finite_values_required": true,
+  "all_requested_analyses_must_complete": true
+ },
+ "netlist_sha256": "bd89e3f35107cb585f9361b2f9dcb173584e7fe17809532cc8c46da9584c3e1a"
+}

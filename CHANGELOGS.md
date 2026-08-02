@@ -5,6 +5,8 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 ## Unreleased
 
+- `.sens` names its columns as ngspice does: only R, C, L, V and I have a bare principal
+  column, so a diode IS is `v(d1:is)`; the multiplier column is `v(r1_m)` (#71).
 - A device whose `limit` keeps Newton history (a generated `$limit` with state) no longer
   converges its OP to the limited image: the INITFIX pass does not stage state (#53).
 - `.hdl` Verilog-A, VerA pin 2692a15b -> 53e61b89 (GitHub main, package 0.9.0): 164

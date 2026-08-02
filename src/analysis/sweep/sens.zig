@@ -116,6 +116,14 @@ pub fn solve(
     return sens;
 }
 
+/// ngspice's IF_PRINCIPAL parameter (IOPP/IOPAP in res.c, cap.c, ind.c,
+/// vsrc.c, isrc.c) by device type; every other device has none, so all its
+/// columns are `<card>:<param>` (`v(d1:is)`, #71).
+const principal = std.StaticStringMap([]const u8).initComptime(.{
+    .{ "resistor", "r" },  .{ "capacitor", "c" }, .{ "inductor", "l" },
+    .{ "vsource", "dc" }, .{ "isource", "dc" },
+});
+
 /// Contract entry: one real point, one column per collected device parameter
 /// holding dVout/dp. Columns carry ngspice's names (cktsens.c:224-238):
 ///   model parameter                  -> `<card>:<param>`   (r1:tc1)
@@ -136,16 +144,21 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         const card = root.CardRef.lookup(opts.cards, ref.type, ref.index);
         const dev = card orelse try std.fmt.allocPrint(scratch, "{s}#{d}", .{ ctx.circuit.typeName(ref.type), ref.index });
         defer if (card == null) scratch.free(dev);
-        // `primary` rather than is_instance: ngspice's IF_PRINCIPAL flag lives
+        // The table rather than is_instance: ngspice's IF_PRINCIPAL flag lives
         // on the instance parameter table, but VerA puts every Verilog-A
-        // `parameter` on Model, so `primary` is where that flag ends up. The
-        // `v(...)` wrapper is ngspice's too: cktsens.c hands the raw writer a
-        // UID_OTHER name, which types as a voltage, so readers of an ngspice
-        // raw look the column up as `v(r1)`.
-        name.* = if (ref.primary)
+        // `parameter` on Model. The `v(...)` wrapper is ngspice's too:
+        // cktsens.c hands the raw writer a UID_OTHER name, which types as a
+        // voltage, so readers of an ngspice raw look the column up as
+        // `v(r1)`. The instance's $mfactor is ngspice's instance parameter `m`.
+        const pname = if (std.mem.eql(u8, ref.param_name, "mfactor")) "m" else ref.param_name;
+        const is_principal = if (principal.get(ctx.circuit.typeName(ref.type))) |pp|
+            std.mem.eql(u8, ref.param_name, pp)
+        else
+            false;
+        name.* = if (is_principal)
             try std.fmt.allocPrint(a, "v({s})", .{dev})
         else
-            try std.fmt.allocPrint(a, "v({s}{s}{s})", .{ dev, if (ref.is_instance) "_" else ":", ref.param_name });
+            try std.fmt.allocPrint(a, "v({s}{s}{s})", .{ dev, if (ref.is_instance) "_" else ":", pname });
         done += 1;
     }
     const data = try a.dupe(f64, sens);

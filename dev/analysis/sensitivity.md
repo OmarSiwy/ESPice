@@ -176,3 +176,25 @@ frequency points on top, as in
 
 - `src/analysis/sweep/sens.zig`: adjoint DC sensitivity with FD stamps.
 - Fixtures: `tests/fixtures/sens/`, `tests/fixtures/multi_analysis/bench_sens_diffpair`.
+
+## Against ngspice 45
+
+`sens/diode_ngspice` pins the names and values that agree (#71). Column
+names follow cktsens.c: `<card>:<param>` for a model parameter,
+`<card>_<param>` for an instance one, the bare `<card>` for the
+IF_PRINCIPAL parameter. Only R (`r`), C (`c`), L (`l`), V and I (`dc`)
+have a principal parameter (`sens.zig`'s table), so a diode's IS is
+`v(d1:is)`. The instance `$mfactor` is ngspice's `m`: `v(r1_m)`.
+
+Known differences, kept:
+
+- Verilog-A parameters all land on VerA's Model, so an instance-only
+  parameter of a VA device (the diode's `area`, `pj`) is named
+  `v(d1:area)` where ngspice writes `v(d1_area)`; the values agree.
+- A parameter whose nominal is 0 and whose effect switches on at any
+  nonzero value has no derivative there. IKF = 0 (knee off): espice reports
+  the forward difference at its 1e-12 step (~3e10), ngspice reports NaN.
+  ISR = 0: espice's value is the slope of the recombination current it
+  turns on (about 1e8 on the deck above); ngspice's is exactly 1e6 larger,
+  which no step of the linear dependence explains. Neither deck column is
+  pinned.
