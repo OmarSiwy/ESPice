@@ -182,6 +182,9 @@ const ArnoldiResult = struct {
     m: u32,
     /// ||v||.
     beta: f64,
+    /// Lucky breakdown or an accepted posterior; false when m_max was hit
+    /// first, which fails the step (`Options.m_max`).
+    converged: bool,
 };
 
 /// Arnoldi on (C + gamma*G)^-1 C from v, with modified Gram-Schmidt. Each
@@ -209,7 +212,7 @@ fn arnoldi(
     const nn: usize = n;
 
     const beta = @sqrt(num.dot(v[0..nn], v[0..nn]));
-    if (beta < 1e-300) return .{ .m = 0, .beta = 0 };
+    if (beta < 1e-300) return .{ .m = 0, .beta = 0, .converged = true };
 
     num.scale(V_basis[0..nn], 1.0 / beta, v[0..nn]);
 
@@ -234,8 +237,10 @@ fn arnoldi(
         const h_jp1_j = @sqrt(num.dot(tmp2[0..nn], tmp2[0..nn]));
         // Lucky breakdown: the subspace is invariant. The test is relative,
         // since orthogonalization leaves a residual of round-off size, and a
-        // normalized round-off vector would put a spurious zero in H_m.
-        if (h_jp1_j <= 1e-12 * w_norm) return .{ .m = j + 1, .beta = beta };
+        // normalized round-off vector would put a spurious near-zero on H_m's
+        // diagonal that its inverse blows up to inf (#51: a 1.13e-11 residual
+        // on a rank-3 C reached m = 4). sqrt(eps)-scale, as expokit's btol.
+        if (h_jp1_j <= 1e-8 * w_norm) return .{ .m = j + 1, .beta = beta, .converged = true };
 
         H[(jj + 1) * m_max + jj] = h_jp1_j;
         num.scale(V_basis[(jj + 1) * nn ..][0..nn], 1.0 / h_jp1_j, tmp2[0..nn]);
@@ -244,11 +249,12 @@ fn arnoldi(
         // see posteriorOk for what it approximates.
         if (j >= 3 and (j + 1) % 5 == 0) {
             if (posteriorOk(j + 1, m_max, H, h_jp1_j, h_step, beta, krylov_tol, tmp1, piv))
-                return .{ .m = j + 1, .beta = beta };
+                return .{ .m = j + 1, .beta = beta, .converged = true };
         }
     }
 
-    return .{ .m = m_max, .beta = beta };
+    // A space as large as the system is the exact one.
+    return .{ .m = m_max, .beta = beta, .converged = m_max >= n };
 }
 
 /// Accepts the m-dimensional Krylov approximation when
@@ -531,6 +537,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
             piv_all,
         );
 
+        if (!ar.converged) return error.MatexDidNotConverge;
         if (ar.m == 0) {
             // Zero vector: only the correction terms remain.
             root.zeroSimd(x_new[0..n]);
@@ -593,6 +600,9 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
             }
         }
 
+        // A non-finite step is a failed step, not a waveform (#51).
+        // NaN and inf propagate through the sum.
+        if (!std.math.isFinite(num.sum(x_new[0..n]))) return error.MatexDidNotConverge;
         simdCopy(x[0..n], x_new[0..n]);
         t += h;
         steps += 1;

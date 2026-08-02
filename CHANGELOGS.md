@@ -5,6 +5,9 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 ## Unreleased
 
+- `.matex` no longer returns NaN on stiff circuits: a round-off Krylov breakdown is caught,
+  and a step that needs more than `m_max` vectors or comes out non-finite fails with
+  `MatexDidNotConverge` (#51).
 - VBIC decks are checked against VACASK running the VBIC 1.3 reference Verilog-A; the
   ngspice VBIC 1.2/45 differences (avalm, excess phase, noise density total) are recorded
   in dev/devices/models.md (#16, #86).

@@ -82,6 +82,7 @@ Error: bad_source.sp: AnalysisSourceNotFound
 | `TimestepTooSmall` | the transient step fell below its minimum without converging: a discontinuity too sharp for the tolerances, or a model misbehaving |
 | `OpDidNotConverge` | the operating point failed even after gmin and source stepping |
 | `HbDidNotConverge`, `QpssDidNotConverge`, `PzDidNotConverge`, `EnvelopeDidNotConverge`, `PacDidNotConverge` | the named analysis did not converge |
+| `MatexDidNotConverge` | a `.matex` step needed a Krylov space larger than its limit, or came out non-finite (stiffness beyond the exponential integrator); run `.tran` instead |
 | `OscillatorDidNotStart` | an autonomous `.pss` or `.hbosc` found no oscillation |
 
 For convergence trouble:

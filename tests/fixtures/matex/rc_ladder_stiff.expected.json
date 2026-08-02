@@ -1,0 +1,80 @@
+{
+ "schema_version": 1,
+ "analysis": "tran",
+ "purpose": "#51: MATEX stays finite on a stiff RC ladder and agrees with the transient.",
+ "oracle": {
+  "kind": "ngspice-45",
+  "derivation": "ngspice 45 .tran 5e-06 0.001 0 5e-08 of the same circuit, linearly interpolated at the sample times."
+ },
+ "origin": "tests/fixtures/matex/rc_ladder_stiff.sp",
+ "expect": {
+  "status": "success",
+  "plots": [
+   {
+    "name": "MATEX Transient Analysis",
+    "match": "samples",
+    "axis": {
+     "name": "time",
+     "values": [
+      0.0001,
+      0.0002,
+      0.00035,
+      0.0005,
+      0.0006,
+      0.0008,
+      0.00099
+     ],
+     "rtol": 1e-09,
+     "atol": 1e-15
+    },
+    "columns": {
+     "v(a)": {
+      "values": [
+       0.999010908523852,
+       0.99902073929061,
+       3.276129633918173e-05,
+       3.2274080952964163e-05,
+       3.19533027743921e-05,
+       3.1321279552862494e-05,
+       3.073244052908889e-05
+      ],
+      "unit": "V",
+      "rtol": 0.0001,
+      "atol": 1e-05
+     },
+     "v(b)": {
+      "values": [
+       0.009929312324109235,
+       0.01976981165004773,
+       0.032793730385811064,
+       0.03230603265095884,
+       0.031984936898433215,
+       0.03135228796690652,
+       0.03076286598597039
+      ],
+      "unit": "V",
+      "rtol": 0.0001,
+      "atol": 1e-05
+     },
+     "v(c)": {
+      "values": [
+       0.009830405153462169,
+       0.019671887536426992,
+       0.03279700644996253,
+       0.03230925999454561,
+       0.0319881321648433,
+       0.031355420032257726,
+       0.03076593916859617
+      ],
+      "unit": "V",
+      "rtol": 0.0001,
+      "atol": 1e-05
+     }
+    }
+   }
+  ],
+  "finite_values_required": true,
+  "all_requested_analyses_must_complete": true
+ },
+ "netlist_sha256": "d2f0c2887fda86fa5aa6c4936e0ed6c1dbf23231d441352b866706ed7f171509"
+}
