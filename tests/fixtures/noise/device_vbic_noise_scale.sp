@@ -1,6 +1,8 @@
 VBIC Noise Scale Test
-* KNOWN GAP: ngspice inconsistency — ngspice omits RS and ICCP noise from the density total (vbicnoise.c:167-177) but integrates them in the totals; espice keeps them in both.
-* This correctness test should currently fail; implement support to match the expected output.
+* ngspice omits the RS and ICCP generators from its density total
+* (vbicnoise.c:167-177) but integrates them; espice keeps them in both
+* (#16, dev/devices/models.md). So the oracle pins the integrated totals,
+* where the two agree to 1e-6, and not the density curves (0.35% apart).
 * Expected results: device_vbic_noise_scale.expected.json
 * Origin: benchmark/fixtures/devices/vbic_noise_scale/circuit.sp
 

@@ -213,26 +213,20 @@ Intentional divergences, kept rather than matched:
   Wall time, best of 5 against native: four/polynomial_3 23 -> 29 ms,
   pss/ring_oscillator 37 -> 42 ms with 16 slots (57 and 105 ms with 64). Upgrade: an uninitialized scratch form in
   VerA (requested), which leaves the per-op dispatch as the only overhead.
-- `vbic13_4t` keeps VBIC 1.3's `avalm` smoothing, which shifts the smooth
-  max by `vminm` (lines ~753-757); `dc/device_vbic_forced_output`'s ngspice
-  44.2 oracle runs VBIC 1.2 (vbicload.c:3597), which has no such shift.
-- `regression/mos1_bulk_forward_series_r` (#104): with both MOS1 bulk
-  junctions forward at ~0.9 V behind milliohm resistors, ngspice 45 needs
-  source stepping and settles at v(di) = 2.12480, where its own bulk-drain
-  law gives 30.736 A against the 30.354 A RD carries (1.2%): it accepted
-  the pnjlim-clamped bias. espice settles at v(di) = 2.1249633, within 3e-9
-  of an independent solve of the junction network, so the deck's oracle is
-  that solve, not ngspice. Getting there needed the sources to scale under
-  source stepping at all (vsource/isource read `sourceScaleFactor`); before,
-  the rung ran at full sources and the deck failed to converge.
-- `jfet`: no `limvds` on the channel. jfetload.c runs pnjlim then fetlim on
-  vgs and vgd; one `$limit` cannot chain two algorithms, so the channel
-  takes fetlim and the junctions pnjlim, each a fixed point at convergence.
-  `regression/jfet_inverse_mode` matches ngspice 45 (limvds clamped the
-  negative vds at -0.5 V even at the fixed point: -1.225 mA for -0.625).
+- VBIC is checked against VACASK running the VBIC 1.3 reference Verilog-A
+  (`vbic_1p3_4t.osdi`), not against ngspice's VBIC 1.2 (#16, #86):
+  `dc/device_vbic_forced_output` agrees to 3e-6 at reltol=1e-10 (7e-4 at
+  the default 1e-3, in deep saturation) and `multi_analysis/device_vbic_ce_amp`
+  to 8e-8 with excess phase on. Against ngspice: 1.3's `avalm` shifts the
+  smooth max by `vminm` (lines ~753-757) where 1.2 (vbicload.c:3597) does
+  not; and ngspice 45 rewrote 1.2's excess-phase network (two voltage nodes
+  xf1/xf2, vbicsetup.c:509-522, where 44.2 had a branch current), which on
+  the CE amplifier moves i(vmeas) by up to 0.58% (at 1.07 GHz, TD = 2e-11)
+  from espice; 44.2 agreed with espice within the old oracle's tolerance.
 - `noise/device_vbic_noise_scale`: ngspice's own noise density total omits
   the RS and ICCP contributions that its integrated totals include
-  (vbicnoise.c:167-177); espice keeps them in both.
+  (vbicnoise.c:167-177); espice keeps them in both, so the deck pins the
+  integrated totals (1e-6 apart) and not the density curves (0.35%).
 
 ## Physical constants
 

@@ -5,6 +5,9 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 ## Unreleased
 
+- VBIC decks are checked against VACASK running the VBIC 1.3 reference Verilog-A; the
+  ngspice VBIC 1.2/45 differences (avalm, excess phase, noise density total) are recorded
+  in dev/devices/models.md (#16, #86).
 - MOS1 has noise (RD/RS, channel per NLEV with GDSNOI, flicker per NLEV, KF/AF); MOS3 takes
   mos3noi.c's NLEV forms; BSIM4 matches ngspice 45's default NOIC (8.75e9), clamps the
   flicker DelClm and the tnoiMod=1 npart_theta, and scales Rd/Rs noise as b4noi.c does;

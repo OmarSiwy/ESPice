@@ -1,5 +1,9 @@
 VBIC Pole Zero Test
 * Expected results: device_vbic_ce_amp.expected.json
+* VBIC 1.3 with excess phase (TD > 0) against VACASK running the VBIC 1.3
+* reference Verilog-A (#86): espice agrees to 8e-8. ngspice 45 rewrote
+* VBIC 1.2's excess-phase network and differs by up to 0.58% (at 1.07 GHz);
+* see dev/devices/models.md.
 * Origin: benchmark/fixtures/devices/vbic_ce_amp/circuit.sp
 
 Vcc    3 0 5
@@ -11,7 +15,7 @@ Cshunt 4 0 .1u
 
 Q1  2 1 0 0 N1
 
-.OPTIONS NOACCT
+.OPTIONS NOACCT reltol=1e-10 vntol=1e-12 abstol=1e-15
 
 .ac dec 100 0.1Meg 10G
 .print ac db(i(vmeas))

@@ -1,6 +1,9 @@
 VBIC Output Test
-* KNOWN GAP: model version — models/vbic13_4t.va (VBIC 1.3) avalm shifts the smooth max by vminm (lines ~753-757); the ngspice oracle is VBIC 1.2 (vbicload.c:3597) with no shift.
-* This correctness test should currently fail; implement support to match the expected output.
+* VBIC 1.3 (models/vbic13_4t.va) against VACASK running the same VBIC 1.3
+* reference Verilog-A (vbic_1p3_4t.osdi), not ngspice's VBIC 1.2 (#16): 1.3's
+* avalm shifts the smooth max by vminm, 1.2 (vbicload.c:3597) does not
+* (dev/devices/models.md). Tight tolerances on both sides: at the default
+* reltol=1e-3 the deep-saturation points move by up to 7e-4.
 * Expected results: device_vbic_forced_output.expected.json
 * Origin: benchmark/fixtures/devices/vbic_forced_output/circuit.sp
 V1 V1_P V1_N 0.0
@@ -8,7 +11,7 @@ VB V1_N 0 0.5
 VC Q1_C 0 0.0
 Q1 Q1_C V1_P 0 N1
 
-.OPTIONS NOACCT
+.OPTIONS NOACCT reltol=1e-10 vntol=1e-12 abstol=1e-15
 
 .DC VC 0 5 50M VB 700M 1 50M
 
