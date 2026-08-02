@@ -5,6 +5,9 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 ## Unreleased
 
+- `.hdl` Verilog-A, VerA pin 2692a15b -> 53e61b89 (GitHub main, package 0.9.0): 164
+  upstream commits (connect modules on primitives, wide regs, $fdebug/$debug per iteration,
+  absdelay revert, deep-nesting limits).
 - `.matex` no longer returns NaN on stiff circuits: a round-off Krylov breakdown is caught,
   and a step that needs more than `m_max` vectors or comes out non-finite fails with
   `MatexDidNotConverge` (#51).
