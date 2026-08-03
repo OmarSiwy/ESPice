@@ -72,7 +72,15 @@ pub fn plan(p: *Planner) !Plan {
         p.card = @intCast(ci);
         switch (a.sweep) {
             .none, .optimize => unreachable,
-            .step => |st| for (st.values) |v| try p.add(try p.stepPoint(&.{st}, &.{v})),
+            .step => |st| {
+                for (st.values) |v| try p.add(try p.stepPoint(&.{st}, &.{v}));
+                // `.dc param start stop incr`: the parameter is the axis.
+                if (lanes) span.lanes = .{ .axis = switch (st.target) {
+                    .param => |k| nl.live.names[k],
+                    .card => |c| c,
+                    .temp => "temp",
+                }, .dc_plot = true };
+            },
             .data => |name| {
                 const table = for (deck.data) |d| {
                     if (std.mem.eql(u8, d.name, name)) break d;

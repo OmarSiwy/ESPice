@@ -1,0 +1,47 @@
+{
+ "schema_version": 1,
+ "analysis": "dc",
+ "purpose": "#94: HSPICE .DC over a .param, the parameter as the sweep axis.",
+ "oracle": {
+  "kind": "analytic",
+  "derivation": "Level-1 square law in saturation, LAMBDA = 0: Id = KP/2 * W/L * (Vgs - VTO)^2 = 32 A/m * W; i(vd) = -Id (the 2 V drain junction gmin, 2e-12 A, is under atol)."
+ },
+ "origin": "tests/fixtures/dc/param_sweep.sp",
+ "expect": {
+  "status": "success",
+  "plots": [
+   {
+    "name": "DC transfer characteristic",
+    "match": "exact",
+    "row_count": 4,
+    "axis": {
+     "name": "wn",
+     "values": [
+      1e-06,
+      2e-06,
+      3e-06,
+      4e-06
+     ],
+     "rtol": 1e-09,
+     "atol": 1e-15
+    },
+    "columns": {
+     "i(vd)": {
+      "values": [
+       -3.2e-05,
+       -6.4e-05,
+       -9.6e-05,
+       -0.000128
+      ],
+      "unit": "A",
+      "rtol": 1e-06,
+      "atol": 1e-11
+     }
+    }
+   }
+  ],
+  "finite_values_required": true,
+  "all_requested_analyses_must_complete": true
+ },
+ "netlist_sha256": "8d5cfe1c085efbdc976351126c442a0fdfbc13e51446678f4467c24ec074a14d"
+}

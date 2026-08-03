@@ -5,6 +5,8 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 ## Unreleased
 
+- `.dc <param> start stop step` sweeps a `.param` (HSPICE `.DC`), with the parameter as
+  the plot axis (#94).
 - `.sens` names its columns as ngspice does: only R, C, L, V and I have a bare principal
   column, so a diode IS is `v(d1:is)`; the multiplier column is `v(r1_m)` (#71).
 - A device whose `limit` keeps Newton history (a generated `$limit` with state) no longer

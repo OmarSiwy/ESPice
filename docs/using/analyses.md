@@ -45,13 +45,17 @@ the sources down, as ngspice does.
 .dc src LIN|DEC|OCT N start stop
 .dc src POI N v1 v2 ...
 .dc src START=a STOP=b STEP=c
+.dc param start stop step
 .dc DATA=name | MONTE=n
 ```
 
 Sweeps a source's DC value, a resistor's resistance or `TEMP`, solving
 the operating point at each point. A second source and range nest an
 outer sweep (the first varies fastest). Plot `DC transfer characteristic`;
-the first column, `v(v-sweep)`, is the swept value.
+the first column, `v(v-sweep)`, is the swept value. Naming a `.param`
+instead of a source (HSPICE `.DC`) re-evaluates the netlist at each value;
+the first column is then the parameter's name (`.dc wn 1u 4u 1u` writes
+`wn`).
 
 ```text
 .dc VIN 0 1.8 0.01 VDD 1.6 2.0 0.2
