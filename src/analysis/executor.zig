@@ -41,7 +41,9 @@ pub const Config = struct {
 pub fn validateBackend(config: Config) !void {
     if (!gpu.requestSupported(config.backend)) {
         const name = @tagName(config.backend);
-        std.debug.print("Error: --backend {s}: this build has no {s} kernels; detected GPU hardware: {s}\n", .{ name, name, gpu.detectedHardware() });
+        // The library's diagnostic channel, which an embedder routes with
+        // its own `std_options.logFn`; the CLI's prints to stderr (#13).
+        std.log.warn("--backend {s}: this build has no {s} kernels; detected GPU hardware: {s}", .{ name, name, gpu.detectedHardware() });
         return error.GpuBackendUnavailable;
     }
     if (config.solver_threads == 0 or config.device_threads == 0) return error.InvalidThreadCount;
@@ -327,11 +329,11 @@ pub const Executor = struct {
         const explicit = self.config.gpu_explicit or self.config.backend != .auto;
         const context = gpu.GpuContext.init(self.allocator, &self.circuit, explicit, self.config.device_threads, expectedEvals(self.job)) catch |err| {
             if (!gpu.fallsBack(self.config.backend, explicit, err)) {
-                std.debug.print("Error: --backend {s}: GPU unavailable ({s}); detected GPU hardware: {s}\n", .{ @tagName(self.config.backend), @errorName(err), gpu.detectedHardware() });
+                std.log.warn("--backend {s}: GPU unavailable ({s}); detected GPU hardware: {s}", .{ @tagName(self.config.backend), @errorName(err), gpu.detectedHardware() });
                 return err;
             }
             if (gpu.declineKind(err) != .policy)
-                std.debug.print("warning: GPU unavailable ({s}); running on the CPU\n", .{@errorName(err)});
+                std.log.warn("GPU unavailable ({s}); running on the CPU", .{@errorName(err)});
             return null;
         };
         self.circuit.gpu_hook = context.hook();

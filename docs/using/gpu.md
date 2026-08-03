@@ -48,7 +48,7 @@ runs on a machine with an NVIDIA card:
 ```text
 $ espice --backend=cuda divider.sp
 note: GPU batch 'resistor' (2 instances) stays on the CPU: no kernel image in this build
-Error: --backend cuda: GPU unavailable (CircuitNotEligible); detected GPU hardware: cuda
+warning: --backend cuda: GPU unavailable (CircuitNotEligible); detected GPU hardware: cuda
 Error: divider.sp: CircuitNotEligible
 ```
 

@@ -257,16 +257,24 @@ pub const Session = struct {
         return dep == none or self.rows.items(.status)[@backingInt(dep)] == .complete;
     }
 
-    /// Copies the ready queries in `scope` into `ids` in scheduler order and
-    /// returns how many there are. When `ids` is too short, writes nothing and
-    /// returns the required length.
-    pub fn readyQueries(self: *const Session, scope: Scope, ids: []QueryId) !usize {
+    /// How many queries in `scope` can advance now: the length
+    /// `readyQueries` needs.
+    pub fn readyCount(self: *const Session, scope: Scope) !usize {
         try self.validateScope(scope);
         var n: usize = 0;
         for (0..self.rows.len) |i| if (self.contains(scope, i) and self.ready(i)) {
             n += 1;
         };
-        if (ids.len < n) return n;
+        return n;
+    }
+
+    /// Copies the ready queries in `scope` into `ids` in scheduler order and
+    /// returns how many there are. Fails with `error.BufferTooSmall`, writing
+    /// nothing, when `ids` is shorter than `readyCount`, as every other
+    /// copying call here does (#13).
+    pub fn readyQueries(self: *const Session, scope: Scope, ids: []QueryId) !usize {
+        const n = try self.readyCount(scope);
+        if (ids.len < n) return error.BufferTooSmall;
         var out: usize = 0;
         for (0..self.rows.len) |offset| {
             const i = (offset + self.cursor) % self.rows.len;

@@ -242,8 +242,15 @@ pub const Problem = struct {
         return self.session.info(id);
     }
 
+    /// How many queries in `scope` can advance now: the length
+    /// `ready_queries` needs.
+    pub fn ready_count(self: *const Problem, scope: Scope) !usize {
+        return self.session.readyCount(scope);
+    }
+
     /// Writes the queries in `scope` that can advance now into `ids` and
-    /// returns how many there are. If that exceeds `ids.len`, `ids` is untouched.
+    /// returns how many there are. Fails with `error.BufferTooSmall`, `ids`
+    /// untouched, when `ids` is shorter than `ready_count`.
     pub fn ready_queries(self: *const Problem, scope: Scope, ids: []QueryId) !usize {
         return self.session.readyQueries(scope, ids);
     }
@@ -536,12 +543,14 @@ pub const Problem = struct {
         return self.session.result(id);
     }
 
-    /// Copies a result's data into `buffer` and returns its length. A buffer
-    /// shorter than that receives nothing; a longer one keeps its tail.
-    /// `error.ResultUnavailable` until the query completes.
+    /// Copies a result's data into `buffer` and returns its length
+    /// (`result(id).data.len`); a longer buffer keeps its tail. Fails with
+    /// `error.BufferTooSmall`, `buffer` untouched, when it is shorter, and
+    /// with `error.ResultUnavailable` until the query completes.
     pub fn copy_result(self: *const Problem, id: QueryId, buffer: []f64) !usize {
         const data = (try self.result(id)).data;
-        if (buffer.len >= data.len) @memcpy(buffer[0..data.len], data);
+        if (buffer.len < data.len) return error.BufferTooSmall;
+        @memcpy(buffer[0..data.len], data);
         return data.len;
     }
 

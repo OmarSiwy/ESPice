@@ -327,9 +327,10 @@ pub const Builder = struct {
         }
         intern_offs[n] = off;
 
-        var ckt = try Circuit.freeze(gpa, self.n, intern_bytes, intern_offs, self.protos.items, self.proto_types.items, bbd.info);
-        ckt.needs_tran_op = self.needs_tran_op;
-        for (ckt.batches, ckt.batch_types) |*b, t| b.digital = self.lib.digital.items[@backingInt(t)];
+        const ckt = try Circuit.freeze(gpa, self.n, intern_bytes, intern_offs, self.protos.items, self.proto_types.items, bbd.info, .{
+            .needs_tran_op = self.needs_tran_op,
+            .digital = self.lib.digital.items,
+        });
 
         self.deinitStorage(); // Circuit.freeze consumed the protos
         // Handed over only now, so the errdefer above frees it on any failure.

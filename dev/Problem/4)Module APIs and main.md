@@ -55,6 +55,7 @@ device_count() u32
 output_error() ?anyerror
 query_count() u32
 query_info(id) !QueryInfo
+ready_count(scope) !usize
 ready_queries(scope, ids) !usize
 append_queries(queries, ids) !usize
 append_directives(text, ids) !usize

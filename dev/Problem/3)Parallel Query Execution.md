@@ -5,14 +5,14 @@ ready set; analysis owns the mutable state and starts independent workers.
 `max_parallel` limits simultaneously advancing queries and defaults to one.
 
 ```zig
-const required = try p.ready_queries(.all, ids);
-// Supply enough IDs before using the returned set.
-const count = try p.advance_ready(ids[0..required],
+const n = try p.ready_queries(.all, ids); // ids.len >= p.ready_count(.all)
+const count = try p.advance_ready(ids[0..n],
     .{ .max_parallel = 2 }, events);
 ```
 
-`ready_queries(scope, ids)` returns the required capacity and makes no partial
-copy when the buffer is too small. Scopes are `.all`, `.query = id` (the target
+`ready_count(scope)` is the capacity `ready_queries(scope, ids)` needs; a
+shorter `ids` fails with `error.BufferTooSmall` and no partial copy, as every
+other copying call does. Scopes are `.all`, `.query = id` (the target
 and its prerequisite), or `.component = component_id`. Query information
 provides the component ID. The returned order is the scheduler's rotating
 order, not completion order.

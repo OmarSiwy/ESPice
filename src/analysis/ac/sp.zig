@@ -76,7 +76,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const data = try a.alloc(f64, n_points * row_len);
 
     var fs = try FreqSolver.fromCircuit(scratch, ckt, ctx.x_op);
-    defer fs.deinit(scratch);
+    defer fs.deinit();
     // Series z0 inside each ideal port source: the branch row gains −z0·i_br.
     if (!opts.net) for (ports) |port| if (!port.series_z0) fs.addDiagG(port.branch, -port.z0);
 

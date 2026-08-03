@@ -1173,7 +1173,7 @@ pub fn init(
     types: []const device_ir.DeviceType,
     bbd: ?BbdInfo,
 ) !Circuit {
-    var prepared = try Prepared.freeze(gpa, n, intern_bytes, intern_offs, protos, types, bbd);
+    var prepared = try Prepared.freeze(gpa, n, intern_bytes, intern_offs, protos, types, bbd, .{});
     errdefer prepared.deinit();
     return Circuit.allocate(prepared, prepared.allocator, prepared.batches, true);
 }

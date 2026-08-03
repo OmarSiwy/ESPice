@@ -27,7 +27,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     std.debug.assert(ctx.ac_drive.len == nn or ctx.ac_drive.len == 0);
 
     var fs = try FreqSolver.fromCircuit(scratch, ckt, ctx.x_op);
-    defer fs.deinit(scratch);
+    defer fs.deinit();
 
     const rhs = try scratch.alloc(f64, nn);
     defer scratch.free(rhs);

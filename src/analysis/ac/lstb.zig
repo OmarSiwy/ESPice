@@ -118,7 +118,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     if (opts.local_gnd >= n) return error.InvalidProbe;
 
     var fs = try FreqSolver.fromCircuit(scratch, ckt, ctx.x_op);
-    defer fs.deinit(scratch);
+    defer fs.deinit();
 
     const n_points: usize = opts.sweep.count();
     const axis = try scratch.alloc(f64, 2 * n_points);

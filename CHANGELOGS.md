@@ -5,6 +5,8 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 ## Unreleased
 
+- API: `Problem.ready_queries` and `copy_result` fail with `error.BufferTooSmall` on a short
+  buffer (`ready_count` gives the size); GPU backend messages go through `std.log` (#13).
 - `.dc <param> start stop step` sweeps a `.param` (HSPICE `.DC`), with the parameter as
   the plot axis (#94).
 - `.sens` names its columns as ngspice does: only R, C, L, V and I have a bare principal

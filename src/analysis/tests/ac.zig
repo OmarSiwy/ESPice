@@ -13,7 +13,7 @@ const StreamTests = struct {
         const g = try a.dupe(f64, &.{ 2, 1, 0, 3 });
         const c = try a.dupe(f64, &.{ 0.1, 0, 0.02, 0.3 });
         var fs = try FreqSolver.initDense(a, 2, g, c);
-        defer fs.deinit(a);
+        defer fs.deinit();
         var frequencies: [2 * quantum + 3]f64 = undefined;
         for (&frequencies, 0..) |*f, i| f.* = @floatFromInt(i);
         const rhs = [_]f64{ 1, 2, 0, 0 };
@@ -73,7 +73,7 @@ const StreamTests = struct {
         const g = try a.dupe(f64, &.{ 2, 1, 0, 3 });
         const c = try a.dupe(f64, &.{ 0.1, 0, 0.02, 0.3 });
         var fs = try FreqSolver.initDense(a, 2, g, c);
-        defer fs.deinit(a);
+        defer fs.deinit();
         const W = FreqSolver.W;
         var omegas: [3 * W + 1]f64 = undefined;
         for (&omegas, 0..) |*w, i| w.* = 1e3 * @as(f64, @floatFromInt(i + 1));

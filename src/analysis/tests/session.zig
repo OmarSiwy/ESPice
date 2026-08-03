@@ -162,9 +162,10 @@ test "session shares one OP prerequisite and gates its dependents on it" {
     try t.expectError(error.InvalidQuery, s.info(@fromBackingInt(3)));
     try t.expectError(error.InvalidComponent, s.readyQueries(.{ .component = 7 }, &ids));
 
-    // Only the OP is ready; a short buffer gets the count and no writes.
+    // Only the OP is ready; a short buffer fails and readyCount sizes it.
     var ready: [3]requests.QueryId = undefined;
-    try t.expectEqual(@as(usize, 1), try s.readyQueries(.all, ready[0..0]));
+    try t.expectEqual(@as(usize, 1), try s.readyCount(.all));
+    try t.expectError(error.BufferTooSmall, s.readyQueries(.all, ready[0..0]));
     try t.expectEqual(@as(usize, 1), try s.readyQueries(.all, &ready));
     try t.expectEqual(op_id, ready[0]);
     var events: [2]@import("../session.zig").Advance = undefined;

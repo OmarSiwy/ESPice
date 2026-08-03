@@ -70,7 +70,7 @@ test "Problem: pure preview, automatic prerequisite, independent frontier and re
     try t.expectEqual(api.Status.pending, (try p.query_info(tran)).status);
     try p.run_all();
     const result = try p.result(ac);
-    const copied = try t.allocator.alloc(f64, try p.copy_result(ac, &.{}));
+    const copied = try t.allocator.alloc(f64, (try p.result(ac)).data.len);
     defer t.allocator.free(copied);
     _ = try p.copy_result(ac, copied);
     try t.expectEqualSlices(f64, result.data, copied);
@@ -150,7 +150,8 @@ test "Problem: short copy-out buffers and invalid scopes leave caller storage un
     const p = try create(deck);
     defer p.deinit();
     var ids = [_]api.QueryId{api.requests.invalid_query};
-    try t.expectEqual(@as(usize, 2), try p.ready_queries(.all, &ids));
+    try t.expectEqual(@as(usize, 2), try p.ready_count(.all));
+    try t.expectError(error.BufferTooSmall, p.ready_queries(.all, &ids));
     try t.expectEqual(api.requests.invalid_query, ids[0]);
     try t.expectError(error.InvalidQuery, p.ready_queries(.{ .query = api.requests.invalid_query }, &ids));
     try t.expectError(error.InvalidComponent, p.ready_queries(.{ .component = p.query_count() }, &ids));
@@ -162,8 +163,8 @@ test "Problem: short copy-out buffers and invalid scopes leave caller storage un
     try t.expectError(error.ResultUnavailable, p.copy_result(ac, &values));
     try t.expectEqual(@as(f64, -123), values[0]);
     try p.run_all();
-    const result = try p.result(ac);
-    try t.expectEqual(result.data.len, try p.copy_result(ac, &values));
+    _ = try p.result(ac);
+    try t.expectError(error.BufferTooSmall, p.copy_result(ac, &values));
     try t.expectEqual(@as(f64, -123), values[0]);
     try t.expectEqual(@as(usize, 0), try p.ready_queries(.all, &ids));
 }

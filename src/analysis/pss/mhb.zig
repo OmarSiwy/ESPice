@@ -481,7 +481,7 @@ pub fn solve(ckt: *root.Circuit, x_hat: []f64, spec: Spectrum, tones: []const f6
     }
 
     var fs = try FreqSolver.fromCircuit(allocator, ckt, x_sample);
-    defer fs.deinit(allocator);
+    defer fs.deinit();
     var gmres = try Gmres.init(allocator, @intCast(total), @intCast(@min(total, gmres_restart)));
     defer gmres.deinit(allocator);
     var op: Operator = .{
@@ -539,7 +539,7 @@ pub fn solve(ckt: *root.Circuit, x_hat: []f64, spec: Spectrum, tones: []const f6
             c0[slot] = num.sum(c_td[slot * nt ..][0..nt]) * inv_nt;
         }
         fs.setPlanes(g0, c0);
-        try fs.factorEach(allocator, omegas);
+        try fs.factorEach(omegas);
 
         num.scale(f_hat, -1, f_hat);
         root.zeroSimd(dx);

@@ -57,7 +57,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     if (opts.output_neg != root.GROUND) e_out[opts.output_neg] = -1;
     {
         var fs = try FreqSolver.fromCircuit(scratch, ckt, ctx.x_op);
-        defer fs.deinit(scratch);
+        defer fs.deinit();
         for ([_]bool{ false, true }, [_][]const f64{ drive, e_out }) |adjoint, rhs| {
             var stream = try freq.Stream.init(scratch, &fs, ckt, ctx.x_op, omegas, rhs, adjoint);
             defer stream.deinit(scratch);

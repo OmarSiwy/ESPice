@@ -101,7 +101,7 @@ pub fn sweep(
     // Adjoint: A^H y = e_out per omega. The conjugate drops out of |H|^2, so
     // the stacked-real transpose solve is enough.
     var fs = try FreqSolver.fromCircuit(allocator, ckt, x_op);
-    defer fs.deinit(allocator);
+    defer fs.deinit();
 
     const omegas = try allocator.alloc(f64, n_points);
     defer allocator.free(omegas);

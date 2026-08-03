@@ -230,8 +230,10 @@ export fn espice_ready_queries(handle: ?*Handle, scope: Scope, ids: ?[*]u32, cap
     count.* = 0;
     const buffer = mutableSlice(u32, ids, capacity) catch |err| return h.fail(err);
     const selection = decodeScope(scope) catch |err| return h.fail(err);
-    count.* = h.problem.ready_queries(selection, @ptrCast(buffer)) catch |err| return h.fail(err);
-    return if (count.* > capacity) h.fail(error.BufferTooSmall) else 0;
+    count.* = h.problem.ready_count(selection) catch |err| return h.fail(err);
+    if (count.* > capacity) return h.fail(error.BufferTooSmall);
+    _ = h.problem.ready_queries(selection, @ptrCast(buffer)) catch |err| return h.fail(err);
+    return 0;
 }
 
 export fn espice_advance(handle: ?*Handle, id: u32, out: ?*Advance) u32 {
@@ -291,8 +293,11 @@ export fn espice_copy_result(handle: ?*Handle, id: u32, values: ?[*]f64, capacit
     const count = required orelse return h.fail(error.InvalidArgument);
     count.* = 0;
     const buffer = mutableSlice(f64, values, capacity) catch |err| return h.fail(err);
-    count.* = h.problem.copy_result(@fromBackingInt(@intCast(id)), buffer) catch |err| return h.fail(err);
-    return if (count.* > capacity) h.fail(error.BufferTooSmall) else 0;
+    const qid: api.QueryId = @fromBackingInt(@intCast(id));
+    count.* = (h.problem.result(qid) catch |err| return h.fail(err)).data.len;
+    if (count.* > capacity) return h.fail(error.BufferTooSmall);
+    _ = h.problem.copy_result(qid, buffer) catch |err| return h.fail(err);
+    return 0;
 }
 
 export fn espice_result_view(handle: ?*Handle, id: u32, data: ?*?[*]const f64, len: ?*usize) u32 {

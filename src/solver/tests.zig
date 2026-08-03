@@ -1227,7 +1227,7 @@ const FreqSolveTests = struct {
         const c = try allocator.dupe(f64, &[_]f64{ 0.1, 0, 0, 0.1 });
 
         var fs = try FreqSolver.initDense(allocator, 2, g, c);
-        defer fs.deinit(allocator);
+        defer fs.deinit();
 
         const rhs = [_]f64{ 1, 0, 0, 0 };
         var x: [4]f64 = undefined;
@@ -1247,14 +1247,14 @@ const FreqSolveTests = struct {
         const c = try allocator.dupe(f64, &[_]f64{ 0.1, 0.2, 0.3, 0.4 });
 
         var fs = try FreqSolver.initDense(allocator, 2, g, c);
-        defer fs.deinit(allocator);
+        defer fs.deinit();
 
         const omega: f64 = 5.0;
         try fs.setOmega(omega);
 
         const rhs = [_]f64{ 1, 0, 0, 1 };
         var y: [4]f64 = undefined;
-        try fs.solveRhsT(&rhs, &y);
+        fs.solveRhsT(&rhs, &y);
 
         // Verify: build A explicitly, check A^T y ≈ rhs.
         const nn: usize = 4;
@@ -1293,7 +1293,7 @@ const FreqSolveTests = struct {
         const c = try allocator.dupe(f64, &[_]f64{ 0.5, 0, 0, 0.5 });
 
         var fs = try FreqSolver.initDense(allocator, 2, g, c);
-        defer fs.deinit(allocator);
+        defer fs.deinit();
 
         try fs.setOmega(3.0);
 
@@ -1307,7 +1307,7 @@ const FreqSolveTests = struct {
         };
         for (rhs_list) |rhs| {
             var x: [4]f64 = undefined;
-            try fs.solveRhs(&rhs, &x);
+            fs.solveRhs(&rhs, &x);
 
             // Check A x ≈ rhs
             for (0..4) |row| {
@@ -1323,7 +1323,7 @@ const FreqSolveTests = struct {
         const g = try allocator.dupe(f64, &[_]f64{ 5, 1, 2, 4 });
         const c = try allocator.dupe(f64, &[_]f64{ 0.3, 0.1, 0.0, 0.2 });
         var fs = try FreqSolver.initDense(allocator, 2, g, c);
-        defer fs.deinit(allocator);
+        defer fs.deinit();
 
         const omegas = [_]f64{ 1.0, 3.0, 7.0, 13.0, 21.0 };
         const nn: usize = 4;
@@ -1394,7 +1394,7 @@ const FreqSolveTests = struct {
             .c_vals = c_vals.items,
         };
         var fs = try FreqSolver.fromCircuit(allocator, ckt, &.{});
-        defer fs.deinit(allocator);
+        defer fs.deinit();
         // The same matrices, dense, for the multi-rhs check below.
         const gd = try allocator.alloc(f64, n * n);
         const cd = try allocator.alloc(f64, n * n);
@@ -1405,7 +1405,7 @@ const FreqSolveTests = struct {
             cd[row_idx.items[p] * n + j] = c_vals.items[p];
         };
         var fd = try FreqSolver.initDense(allocator, n, gd, cd);
-        defer fd.deinit(allocator);
+        defer fd.deinit();
         // A re-evaluated circuit cannot reach the solver's snapshot.
         @memset(g_vals.items, std.math.nan(f64));
         @memset(c_vals.items, std.math.nan(f64));
@@ -1605,7 +1605,7 @@ const FreqSolveTests = struct {
             };
             const ckt = Ckt{ .n = n, .nnz = row_idx.items.len, .col_ptr = col_ptr.items, .row_idx = row_idx.items, .g_vals = g_vals.items, .c_vals = c_vals.items };
             var fs = try FreqSolver.fromCircuit(allocator, ckt, &.{});
-            defer fs.deinit(allocator);
+            defer fs.deinit();
             // The planes arrive through setPlanes, not the circuit.
             fs.setPlanes(g_vals.items, c_vals.items);
 
@@ -1618,23 +1618,23 @@ const FreqSolveTests = struct {
             const x_ref = try allocator.alloc(f64, rhs.len);
             defer allocator.free(x_ref);
 
-            try fs.factorEach(allocator, &omegas);
+            try fs.factorEach(&omegas);
             try testing.expectEqual(@as(usize, 0), fs.held_id.items.len);
             // Twice: the held factors survive a solve. Then the adjoint.
             for (0..2) |_| fs.solveEach(rhs, x, false);
             for (omegas, 0..) |w, k| try fs.solve(w, rhs[k * nn ..][0..nn], x_ref[k * nn ..][0..nn]);
             for (x, x_ref) |a, b| try testing.expectApproxEqRel(b, a, 1e-11);
-            try fs.factorEach(allocator, &omegas);
+            try fs.factorEach(&omegas);
             fs.solveEach(rhs, x, true);
             for (omegas, 0..) |w, k| {
                 try fs.setOmega(w);
-                try fs.solveRhsT(rhs[k * nn ..][0..nn], x_ref[k * nn ..][0..nn]);
+                fs.solveRhsT(rhs[k * nn ..][0..nn], x_ref[k * nn ..][0..nn]);
             }
             for (x, x_ref) |a, b| try testing.expectApproxEqRel(b, a, 1e-11);
             // The same planes through fromPlanes, no circuit.
             var fp = try FreqSolver.fromPlanes(allocator, n, col_ptr.items, row_idx.items, g_vals.items, c_vals.items);
-            defer fp.deinit(allocator);
-            try fp.factorEach(allocator, &omegas);
+            defer fp.deinit();
+            try fp.factorEach(&omegas);
             fp.solveEach(rhs, x, true);
             for (x, x_ref) |a, b| try testing.expectApproxEqRel(b, a, 1e-11);
         }
@@ -1672,7 +1672,7 @@ const FreqSolveTests = struct {
             col_ptr[j + 1] = @intCast(2 * (j + 1));
         }
         var fs = try FreqSolver.fromPlanes(allocator, n, &col_ptr, &row_idx, &g_vals, &c_vals);
-        defer fs.deinit(allocator);
+        defer fs.deinit();
 
         const nn: usize = 2 * n;
         var rhs: [nn]f64 = undefined;

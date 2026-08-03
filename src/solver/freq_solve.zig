@@ -39,6 +39,9 @@ pub const FreqSolver = struct {
     /// first in runs of W.
     pub const W = std.simd.suggestVectorLength(f64) orelse 1;
 
+    /// Every allocation the solver owns or makes later (`factorEach`,
+    /// `deinit`) uses this, the allocator it was built with (#13).
+    gpa: Allocator,
     n: u32,
     nn: u32,
     strategy: Strategy,
@@ -173,6 +176,7 @@ pub const FreqSolver = struct {
         slv.dropBypass();
 
         return .{
+            .gpa = allocator,
             .n = n,
             .nn = nn,
             .strategy = .{ .sp = .{
@@ -199,6 +203,7 @@ pub const FreqSolver = struct {
         const piv = try allocator.alloc(u32, nnu);
 
         return .{
+            .gpa = allocator,
             .n = n,
             .nn = nn,
             .strategy = .{ .dense = .{
@@ -210,9 +215,9 @@ pub const FreqSolver = struct {
         };
     }
 
-    /// Frees everything the solver owns; `allocator` must be the one it was
-    /// built with, which `factorEach` must also have been given.
-    pub fn deinit(self: *Self, allocator: Allocator) void {
+    /// Frees everything the solver owns.
+    pub fn deinit(self: *Self) void {
+        const allocator = self.gpa;
         self.held_id.deinit(allocator);
         switch (self.strategy) {
             .dense => |*d| {
@@ -242,7 +247,7 @@ pub const FreqSolver = struct {
     /// `setOmega` then `solveRhs`, for one right-hand side at one ω.
     pub fn solve(self: *Self, omega: f64, rhs: []const f64, x_out: []f64) !void {
         try self.setOmega(omega);
-        try self.solveRhs(rhs, x_out);
+        self.solveRhs(rhs, x_out);
     }
 
     /// Assembles and factors G + jωC. Right-hand sides at this ω then
@@ -263,7 +268,7 @@ pub const FreqSolver = struct {
 
     /// Solves with the current factorization, which `setOmega` must have
     /// left; both slices are 2n long and may alias.
-    pub fn solveRhs(self: *Self, rhs: []const f64, x_out: []f64) !void {
+    pub fn solveRhs(self: *Self, rhs: []const f64, x_out: []f64) void {
         switch (self.strategy) {
             .dense => |*d| dense_lu.solveFactored(self.nn, d.a_lu, d.piv, rhs, x_out),
             .sp => |*s| s.slv.solve(rhs, x_out),
@@ -274,7 +279,7 @@ pub const FreqSolver = struct {
     /// stacked-real system, which as a complex system is A^H x = rhs
     /// (A = G + jωC, so A^H = G^T − jωC^T). A caller that needs A^T's
     /// solution conjugates this one; |x| is the same either way.
-    pub fn solveRhsT(self: *Self, rhs: []const f64, x_out: []f64) !void {
+    pub fn solveRhsT(self: *Self, rhs: []const f64, x_out: []f64) void {
         switch (self.strategy) {
             .dense => |*d| dense_lu.solveFactoredT(self.nn, d.a_lu, d.piv, rhs, x_out),
             .sp => |*s| s.slv.solveT(rhs, x_out),
@@ -417,7 +422,8 @@ pub const FreqSolver = struct {
     /// factors. Asserts that `omegas` is not empty; the sparse strategy
     /// fails with `error.UnsupportedEngine` when the 2n system did not get
     /// the sparse LU, the only engine LaneLu replays.
-    pub fn factorEach(self: *Self, allocator: Allocator, omegas: []const f64) !void {
+    pub fn factorEach(self: *Self, omegas: []const f64) !void {
+        const allocator = self.gpa;
         std.debug.assert(omegas.len > 0);
         self.held_id.clearRetainingCapacity();
         switch (self.strategy) {
@@ -438,12 +444,14 @@ pub const FreqSolver = struct {
                         try self.held_id.append(allocator, @intCast(k));
                 }
             },
-            .sp => |*sp| try self.factorEachSparse(allocator, sp, omegas),
+            .sp => |*sp| try self.factorEachSparse(sp, omegas),
         }
     }
 
-    fn factorEachSparse(self: *Self, allocator: Allocator, sp: *Sparse, omegas: []const f64) !void {
-        const gpa = sp.slv.gpa;
+    fn factorEachSparse(self: *Self, sp: *Sparse, omegas: []const f64) !void {
+        const gpa = self.gpa;
+        // The sparse solver was built from the same gpa.
+        std.debug.assert(sp.slv.gpa.ptr == gpa.ptr);
         const LL = lane_lu.LaneLu(W);
         const nn: usize = self.nn;
         if (sp.lane_work.len == 0)
@@ -472,7 +480,7 @@ pub const FreqSolver = struct {
                 for (0..W) |l| ow[l] = omegas[base + @min(l, cnt - 1)];
                 const bad = h.refactor(Stacked(W).of(sp, ow, .{}, base, cnt), sp.slv.params.refactor_growth_limit);
                 for (0..cnt) |l| if ((bad >> @intCast(l)) & 1 != 0)
-                    try self.held_id.append(allocator, @intCast(base + l));
+                    try self.held_id.append(gpa, @intCast(base + l));
             }
             if (self.held_id.items.len == 0 or tries == 2) return;
             tape = self.held_id.items[0];
@@ -544,7 +552,7 @@ pub const FreqSolver = struct {
             while (r < m) : (r += nn) {
                 const b = rhs[r..][0..nn];
                 const x = x_out[k * m + r ..][0..nn];
-                if (adjoint) try self.solveRhsT(b, x) else try self.solveRhs(b, x);
+                if (adjoint) self.solveRhsT(b, x) else self.solveRhs(b, x);
             }
         }
     }

@@ -37,15 +37,26 @@ has_charge: bool,
 /// must restamp q after `update_state`/`commit_state`.
 has_state_q: bool,
 /// The builder found a node with only capacitors to it, so the operating
-/// point falls back to ngspice's OPtran. Set after the freeze.
+/// point falls back to ngspice's OPtran. From `Facts` at the freeze.
 needs_tran_op: bool = false,
+
+/// Topology facts `freeze` records on the Circuit.
+pub const Facts = struct {
+    /// A node has no DC path (a capacitor-only island): only the transient's
+    /// own operating point is defined.
+    needs_tran_op: bool = false,
+    /// Per `DeviceType`, whether the type runs a digital engine
+    /// (`Library.digital`); types past its end are analog.
+    digital: []const bool = &.{},
+};
 
 /// Builds the pattern from every proto and finalizes each into a batch
 /// allocated with `allocator`. On success it destroys the protos and takes
 /// ownership of `intern_bytes`, `intern_offs` and `bbd`; on failure the caller
 /// keeps all of them. Fails with `InvalidCircuit` when `n` is 0 or the tables
 /// do not match: `intern_offs` must hold n + 1 ascending offsets ending at
-/// `intern_bytes.len`, and `types` one id per proto.
+/// `intern_bytes.len`, and `types` one id per proto. `facts` carries what the
+/// netlist decided beside the protos, so no caller sets it afterwards (#13).
 pub fn freeze(
     allocator: std.mem.Allocator,
     n: u32,
@@ -54,6 +65,7 @@ pub fn freeze(
     protos: []const abi.Proto,
     types: []const abi.DeviceType,
     bbd: ?numerics.BbdInfo,
+    facts: Facts,
 ) !Circuit {
     if (n == 0 or intern_offs.len != @as(usize, n) + 1 or types.len != protos.len or
         intern_offs[n] != intern_bytes.len or !std.sort.isSorted(u32, intern_offs, {}, std.sort.asc(u32)))
@@ -108,7 +120,12 @@ pub fn freeze(
     const ac_dyn_slots = try ac_dyn.toOwnedSlice(allocator);
 
     for (protos) |proto| proto.destroy(proto.ctx, allocator);
+    for (batches, batch_types) |*b, t| {
+        const i: usize = @backingInt(t);
+        b.digital = t != .unset and i < facts.digital.len and facts.digital[i];
+    }
     return .{
+        .needs_tran_op = facts.needs_tran_op,
         .allocator = allocator,
         .n = n,
         .nnz = nnz,
@@ -226,7 +243,7 @@ fn freezeCase(gpa: std.mem.Allocator) !void {
         return err;
     };
     // On failure the caller keeps the names.
-    var ckt = freeze(gpa, 2, bytes, offs, &protos, &.{@fromBackingInt(0)}, null) catch |err| {
+    var ckt = freeze(gpa, 2, bytes, offs, &protos, &.{@fromBackingInt(0)}, null, .{}) catch |err| {
         gpa.free(bytes);
         gpa.free(offs);
         return err;
@@ -265,9 +282,9 @@ test "freeze rejects inconsistent tables before touching a proto" {
     var offs = [_]u32{ 0, 1, 2 };
     var past_end = [_]u32{ 0, 1, 3 };
     var descending = [_]u32{ 0, 3, 2 };
-    try t.expectError(error.InvalidCircuit, freeze(t.allocator, 0, &bytes, &short, &.{}, &.{}, null));
-    try t.expectError(error.InvalidCircuit, freeze(t.allocator, 2, &bytes, &short, &protos, one, null));
-    try t.expectError(error.InvalidCircuit, freeze(t.allocator, 2, &bytes, &offs, &protos, &.{}, null));
-    try t.expectError(error.InvalidCircuit, freeze(t.allocator, 2, &bytes, &past_end, &protos, one, null));
-    try t.expectError(error.InvalidCircuit, freeze(t.allocator, 2, &bytes, &descending, &protos, one, null));
+    try t.expectError(error.InvalidCircuit, freeze(t.allocator, 0, &bytes, &short, &.{}, &.{}, null, .{}));
+    try t.expectError(error.InvalidCircuit, freeze(t.allocator, 2, &bytes, &short, &protos, one, null, .{}));
+    try t.expectError(error.InvalidCircuit, freeze(t.allocator, 2, &bytes, &offs, &protos, &.{}, null, .{}));
+    try t.expectError(error.InvalidCircuit, freeze(t.allocator, 2, &bytes, &past_end, &protos, one, null, .{}));
+    try t.expectError(error.InvalidCircuit, freeze(t.allocator, 2, &bytes, &descending, &protos, one, null, .{}));
 }

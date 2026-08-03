@@ -174,7 +174,7 @@ fn sweepKrylov(
         c.* = ch.re;
     }
     var fs = try FreqSolver.fromPlanes(allocator, @intCast(n), lin.col_ptr, lin.row_idx, g0, c0);
-    defer fs.deinit(allocator);
+    defer fs.deinit();
     var gmres = try Gmres.init(allocator, @intCast(2 * nn), @intCast(@min(2 * nn, krylov_restart)));
     defer gmres.deinit(allocator);
     var op: ConversionOp(adjoint) = .{ .lin = lin, .n = n, .n_sb = n_sb, .omegas = omegas, .fs = &fs, .p_rhs = p_rhs, .p_x = p_x };
@@ -184,7 +184,7 @@ fn sweepKrylov(
     while (sw.next()) |f_in| : (fi += 1) {
         if (fi != 0) try ckt.checkpoint(.{ .phase = .frequency, .completed = fi, .total = freqs.len });
         for (omegas, 0..) |*w, p| w.* = 2.0 * std.math.pi * (f_in + @as(f64, @floatFromInt(@as(i32, @intCast(p)) - @as(i32, @intCast(n_harm)))) * options.f_lo);
-        try fs.factorEach(allocator, omegas);
+        try fs.factorEach(omegas);
         root.zeroSimd(rhs);
         if (drive.len != 0) {
             @memcpy(rhs[n_harm * n ..][0..n], drive[0..n]);
