@@ -1,0 +1,212 @@
+/* Site theme over Material: a plain white (or near-black) page, one copper
+   accent, hairline rules instead of coloured bars and shadows. Material's
+   palette is set to "custom" in mkdocs.yml, so these variables are the
+   whole colour scheme. */
+
+:root {
+  --esp-bg: #ffffff;
+  --esp-fg: #1a1a1a;
+  --esp-muted: #5f6368;
+  --esp-faint: #9aa0a6;
+  --esp-rule: #e6e6e6;
+  --esp-code-bg: #f6f6f4;
+  --esp-accent: #b4530f;
+  --esp-accent-tint: rgba(180, 83, 15, 0.08);
+}
+
+[data-md-color-scheme="slate"] {
+  --esp-bg: #121212;
+  --esp-fg: #e4e4e2;
+  --esp-muted: #9a9a96;
+  --esp-faint: #6b6b68;
+  --esp-rule: #2a2a2a;
+  --esp-code-bg: #1b1b1b;
+  --esp-accent: #e8924a;
+  --esp-accent-tint: rgba(232, 146, 74, 0.1);
+}
+
+/* Both schemes map Material's variables onto the ones above. */
+[data-md-color-scheme] {
+  --md-default-bg-color: var(--esp-bg);
+  --md-default-fg-color: var(--esp-fg);
+  --md-default-fg-color--light: var(--esp-muted);
+  --md-default-fg-color--lighter: var(--esp-faint);
+  --md-default-fg-color--lightest: var(--esp-rule);
+  --md-typeset-color: var(--esp-fg);
+  --md-typeset-a-color: var(--esp-accent);
+  --md-primary-fg-color: var(--esp-bg);
+  --md-primary-fg-color--light: var(--esp-bg);
+  --md-primary-fg-color--dark: var(--esp-bg);
+  --md-primary-bg-color: var(--esp-fg);
+  --md-primary-bg-color--light: var(--esp-muted);
+  --md-accent-fg-color: var(--esp-accent);
+  --md-accent-fg-color--transparent: var(--esp-accent-tint);
+  --md-default-bg-color--light: var(--esp-bg);
+  --md-code-hl-comment-color: var(--esp-muted);
+  --md-code-bg-color: var(--esp-code-bg);
+  --md-code-fg-color: var(--esp-fg);
+  --md-typeset-table-color: var(--esp-rule);
+  --md-footer-bg-color: var(--esp-bg);
+  --md-footer-bg-color--dark: var(--esp-bg);
+  --md-footer-fg-color: var(--esp-fg);
+  --md-footer-fg-color--light: var(--esp-muted);
+  --md-footer-fg-color--lighter: var(--esp-muted);
+}
+
+/* Header and tabs: same colour as the page, one rule underneath. */
+.md-header,
+.md-tabs {
+  background: var(--esp-bg);
+  color: var(--esp-fg);
+  box-shadow: none;
+}
+.md-header { border-bottom: 1px solid var(--esp-rule); }
+.md-header--shadow { box-shadow: none; }
+.md-tabs { border-bottom: 1px solid var(--esp-rule); }
+.md-header__button.md-logo { display: none; }
+.md-header__title { font-weight: 600; letter-spacing: -0.01em; }
+@media screen and (min-width: 76.25em) {
+  .md-header__title { margin-left: 0.8rem; }
+}
+
+.md-tabs__link {
+  opacity: 1;
+  color: var(--esp-muted);
+  font-size: 0.68rem;
+  margin-top: 0.55rem;
+}
+.md-tabs__link:hover,
+.md-tabs__item--active .md-tabs__link { color: var(--esp-fg); }
+.md-tabs__item--active .md-tabs__link {
+  box-shadow: inset 0 -2px 0 var(--esp-accent);
+  padding-bottom: 0.45rem;
+}
+
+/* Search: a quiet field, not a dark slab. */
+.md-search__form {
+  background: var(--esp-code-bg);
+  border: 1px solid var(--esp-rule);
+  border-radius: 6px;
+  height: 1.7rem;
+}
+.md-search__form:hover { background: var(--esp-code-bg); }
+.md-search__input { font-size: 0.7rem; }
+.md-search__input::placeholder,
+.md-search__icon { color: var(--esp-muted); }
+[data-md-toggle="search"]:checked ~ .md-header .md-search__form {
+  border-radius: 6px 6px 0 0;
+}
+.md-search__output { border-radius: 0 0 6px 6px; }
+.md-source { font-size: 0.6rem; color: var(--esp-muted); }
+
+/* Body text. */
+.md-typeset { font-size: 0.8rem; line-height: 1.7; }
+.md-typeset h1,
+.md-typeset h2,
+.md-typeset h3 {
+  color: var(--esp-fg);
+  letter-spacing: -0.02em;
+}
+.md-typeset h1 { font-weight: 700; font-size: 1.9em; margin-bottom: 0.8em; }
+.md-typeset h2 {
+  font-weight: 650;
+  font-size: 1.35em;
+  margin-top: 2.2em;
+  padding-top: 1.2em;
+  border-top: 1px solid var(--esp-rule);
+}
+.md-typeset h3 { font-weight: 600; font-size: 1.05em; }
+.md-typeset a { text-underline-offset: 0.18em; }
+.md-typeset a:hover { text-decoration: underline; }
+.md-typeset .headerlink { color: var(--md-default-fg-color--lighter); }
+
+/* Code: hairline border, small radius, no grey slab inside prose. */
+.md-typeset pre > code {
+  border: 1px solid var(--esp-rule);
+  border-radius: 6px;
+  padding: 0.8em 1em;
+  font-size: 0.72rem;
+}
+.md-typeset code { border-radius: 4px; font-size: 0.82em; }
+.md-typeset :not(pre) > code {
+  background: var(--esp-code-bg);
+  border: 1px solid var(--esp-rule);
+  padding: 0.05em 0.3em;
+}
+.md-clipboard { color: var(--md-default-fg-color--lighter); }
+
+/* Tables: rules between rows, no box, no shadow. */
+.md-typeset table:not([class]) {
+  border: none;
+  box-shadow: none;
+  font-size: 0.75rem;
+  border-radius: 0;
+}
+.md-typeset table:not([class]) th {
+  background: none;
+  font-weight: 600;
+  border-bottom: 1px solid var(--esp-fg);
+}
+.md-typeset table:not([class]) th,
+.md-typeset table:not([class]) td { padding: 0.4em 1.2em 0.4em 0; }
+.md-typeset table:not([class]) td { border-top: 1px solid var(--esp-rule); vertical-align: top; }
+.md-typeset table:not([class]) tbody tr:hover { background: none; box-shadow: none; }
+
+/* Admonitions: a thin left rule in the accent, no icons, no tinted title bar. */
+.md-typeset .admonition,
+.md-typeset details {
+  border: none;
+  /* !important: Material colours each type (tip, warning, ...) separately. */
+  border-left: 2px solid var(--esp-accent) !important;
+  border-radius: 0;
+  box-shadow: none;
+  background: none;
+  font-size: 0.78rem;
+  padding: 0 0 0 1rem;
+}
+[dir] .md-typeset .admonition-title,
+[dir] .md-typeset summary {
+  background: none !important;
+  border: none;
+  padding-left: 0;
+  font-weight: 600;
+}
+.md-typeset .admonition-title::before,
+.md-typeset summary::before { display: none; }
+.md-typeset summary { padding-right: 1.6rem; cursor: pointer; }
+.md-typeset details > summary::after { background-color: var(--esp-muted) !important; }
+
+/* Navigation sidebars. */
+.md-nav { font-size: 0.68rem; }
+.md-nav__title { color: var(--esp-fg); }
+.md-nav__link { color: var(--esp-muted); }
+.md-nav__link:hover { color: var(--esp-fg); }
+.md-nav__link--active,
+.md-nav__item .md-nav__link--active { color: var(--esp-accent); font-weight: 500; }
+.md-nav--secondary .md-nav__title { color: var(--esp-muted); font-weight: 500; }
+
+/* Buttons (the playground's Run). */
+.md-typeset .md-button {
+  border-radius: 6px;
+  border-width: 1px;
+  font-weight: 600;
+  font-size: 0.72rem;
+  padding: 0.35em 1.2em;
+}
+.md-typeset .md-button--primary {
+  background: var(--esp-fg);
+  border-color: var(--esp-fg);
+  color: var(--esp-bg);
+}
+.md-typeset .md-button--primary:hover {
+  background: var(--esp-accent);
+  border-color: var(--esp-accent);
+  color: #fff;
+}
+
+/* Footer: a rule, not a dark band. */
+.md-footer { border-top: 1px solid var(--esp-rule); }
+.md-footer-meta { background: var(--esp-bg); border-top: 1px solid var(--esp-rule); }
+.md-footer__link { opacity: 1; }
+.md-footer__title { color: var(--esp-fg); }
+.md-footer__direction { color: var(--esp-muted); }

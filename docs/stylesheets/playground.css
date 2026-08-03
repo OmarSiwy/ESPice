@@ -3,7 +3,7 @@
 .esp-pg {
   margin: 1em 0;
   border: 1px solid var(--md-default-fg-color--lightest);
-  border-radius: 0.2rem;
+  border-radius: 6px;
   padding: 0.6rem;
 }
 
@@ -28,7 +28,7 @@
   color: var(--md-code-fg-color);
   background: var(--md-code-bg-color);
   border: 1px solid var(--md-default-fg-color--lightest);
-  border-radius: 0.1rem;
+  border-radius: 4px;
   padding: 0.5rem;
   tab-size: 4;
   white-space: pre;
@@ -38,7 +38,7 @@
 /* cktImg draws on white; keep it legible in the dark scheme. */
 .esp-pg__sch {
   background: #fff;
-  border-radius: 0.1rem;
+  border-radius: 4px;
   min-height: 6rem;
   display: flex;
   align-items: center;
