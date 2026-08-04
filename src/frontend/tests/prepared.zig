@@ -516,16 +516,17 @@ test "control source binding retains first exact duplicate and distinct mixed-ca
     defer arena.deinit();
     const a = arena.allocator();
     const nl = try netlist.parse(a,
-        \\VCase first 0 2
-        \\vcase second 0 3
-        \\VCase duplicate 0 9
-        \\R1 first 0 1k
-        \\R2 second 0 1k
-        \\R3 duplicate 0 1k
-        \\F1 out1 0 VCase 1
-        \\F2 out2 0 vcase 1
-        \\R4 out1 0 1k
-        \\R5 out2 0 1k
+        \\// Spectre keeps case: VCase and vcase are two sources
+        \\VCase (first 0) vsource dc=2
+        \\vcase (second 0) vsource dc=3
+        \\VCase (duplicate 0) vsource dc=9
+        \\R1 (first 0) resistor r=1k
+        \\R2 (second 0) resistor r=1k
+        \\R3 (duplicate 0) resistor r=1k
+        \\F1 (out1 0) cccs probe=VCase gain=1
+        \\F2 (out2 0) cccs probe=vcase gain=1
+        \\R4 (out1 0) resistor r=1k
+        \\R5 (out2 0) resistor r=1k
     , .spectre);
     var prepared = try build(a, a, nl);
     defer prepared.deinit();

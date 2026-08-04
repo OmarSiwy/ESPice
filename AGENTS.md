@@ -234,6 +234,10 @@ matching `docs/` page in the same commit, and every example under
   reports as XFAIL; the step exits nonzero on any FAIL or XPASS, so a green
   exit code is the gate. No deck on the pass list may start failing. All
   `disto` decks pass; the analysis-contract suite is `src/tests/analyses.zig`.
+- A frontend change that alters what a syntax means updates its grammar in
+  `tests/grammar/*.peg` first; `zig build test-grammar` (part of `zig build
+  test`) fails on any disagreement, one-sided refusal or unmatched grammar
+  alternative (dev/frontend.md, "Grammar oracle").
 - The numeric corpus is `tests/fixtures/**`. A deck whose feature is
   missing says so in the deck (`* KNOWN GAP: ...`) and is expected to fail
   until the feature lands. The marker line names the cause; there is no

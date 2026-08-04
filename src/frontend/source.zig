@@ -3,8 +3,10 @@
 //! that names them, then against each HSPICE `.option search=` directory.
 const std = @import("std");
 const Io = std.Io;
-const Fields = @import("lines.zig").Fields("\"'", false);
+const lines_mod = @import("lines.zig");
+const Fields = lines_mod.Fields("\"'", false);
 const vec = @import("vec.zig");
+const switchesTo = @import("spectre.zig").switchesTo;
 const Directive = enum { include, lib, endl, load, data, vec };
 const directives = std.StaticStringMap(Directive).initComptime(.{
     .{ ".include", .include }, .{ ".inc", .include }, .{ ".lib", .lib }, .{ ".endl", .endl },
@@ -37,8 +39,177 @@ pub fn expand(io: Io, arena: std.mem.Allocator, origin: []const u8, src: []const
 
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(std.heap.page_allocator);
-    try appendContents(io, try searchDirs(arena, origin, src), origin, src, null, 0, &out);
+    try appendContents(io, .{ .dirs = try searchDirs(arena, origin, src), .deck = origin }, origin, src, null, 0, &out);
     return try arena.dupe(u8, out.items);
+}
+
+/// `expand` for a Spectre deck: inlines `include "file" [section=name]`
+/// (dev/research/spectre-syntax.md §3.3, §3.4) and expands a `simulator
+/// lang=spice` region's SPICE includes as `expand` does. An included file
+/// reads in Spectre mode when it ends in `.scs` or opens with `simulator
+/// lang=spectre`, in SPICE mode otherwise (its `section=` then selects a
+/// `.lib` section), and the includer's mode resumes after it. Returns `src`
+/// itself when it names nothing, else a copy in `arena`. `expand`'s errors,
+/// with InvalidInclude for a malformed `include`.
+pub fn expandSpectre(io: Io, arena: std.mem.Allocator, origin: []const u8, src: []const u8) ![]const u8 {
+    const title_end = std.mem.indexOfScalar(u8, src, '\n') orelse return src;
+    var lines = std.mem.splitScalar(u8, src[title_end + 1 ..], '\n');
+    while (lines.next()) |line| {
+        const t = std.mem.trim(u8, line, " \t\r");
+        // Any line that may name a file; `appendSpectre` reads it in its mode
+        // (`include a 0 1m` in a SPICE region is a current source).
+        if (directiveOf(t) != null or std.mem.startsWith(u8, t, "include")) break;
+    } else return src;
+
+    const gpa = std.heap.page_allocator;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    try out.appendSlice(gpa, src[0 .. title_end + 1]);
+    _ = try appendSpectre(io, .{ .dirs = &.{}, .deck = origin }, origin, src[title_end + 1 ..], null, 0, &out);
+    return try arena.dupe(u8, out.items);
+}
+
+const SpectreInclude = struct { file: []const u8, section: ?[]const u8 };
+
+/// `include "file" [section = name] [// comment]`; null for any other line.
+fn spectreInclude(line: []const u8) !?SpectreInclude {
+    const blanks = " \t";
+    if (!std.mem.startsWith(u8, line, "include")) return null;
+    var rest = line["include".len..];
+    if (rest.len == 0 or std.mem.indexOfScalar(u8, blanks, rest[0]) == null) return null;
+    rest = std.mem.trimStart(u8, rest, blanks);
+    if (rest.len == 0 or rest[0] != '"') return error.InvalidInclude;
+    const close = std.mem.indexOfScalarPos(u8, rest, 1, '"') orelse return error.InvalidInclude;
+    const file = rest[1..close];
+    rest = std.mem.trim(u8, rest[close + 1 ..], blanks);
+    if (rest.len == 0 or std.mem.startsWith(u8, rest, "//")) return .{ .file = file, .section = null };
+    if (!std.mem.startsWith(u8, rest, "section")) return error.InvalidInclude;
+    rest = std.mem.trimStart(u8, rest["section".len..], blanks);
+    if (rest.len == 0 or rest[0] != '=') return error.InvalidInclude;
+    rest = std.mem.trimStart(u8, rest[1..], blanks);
+    const end = std.mem.indexOfAny(u8, rest, " \t/") orelse rest.len;
+    const tail = std.mem.trim(u8, rest[end..], blanks);
+    if (end == 0 or (tail.len > 0 and !std.mem.startsWith(u8, tail, "//"))) return error.InvalidInclude;
+    return .{ .file = file, .section = rest[0..end] };
+}
+
+/// One file's lines in Spectre mode: `include` inlined, `section` selected
+/// (case kept, as Spectre compares names), a SPICE region handed to
+/// `appendContents` whole. Returns whether the file ends in SPICE mode.
+// ponytail: `ahdl_include` paths stay as written, so one in an included
+// file elsewhere resolves against the deck; rewrite them here when a PDK
+// needs it.
+fn appendSpectre(io: Io, search: Search, path: []const u8, src: []const u8, section: ?[]const u8, depth: u8, out: *std.ArrayList(u8)) anyerror!bool {
+    const gpa = std.heap.page_allocator;
+    var region: std.ArrayList(u8) = .empty;
+    defer region.deinit(gpa);
+    var spice = false;
+    var selected = section == null;
+    var found = selected;
+    var open = false;
+    var lines = std.mem.splitScalar(u8, chomp(src), '\n');
+    while (lines.next()) |line| {
+        const t = std.mem.trim(u8, line, " \t\r");
+        if (spice and switchesTo(t, "spectre")) {
+            spice = false;
+            if (!selected) continue;
+            try appendContents(io, search, path, chomp(region.items), null, depth, out);
+            region.clearRetainingCapacity();
+        } else if (spice) {
+            if (selected) {
+                try region.appendSlice(gpa, line);
+                try region.append(gpa, '\n');
+            }
+            continue;
+        } else if (switchesTo(t, "spice")) {
+            spice = true;
+        } else if (section) |wanted| {
+            const w = firstWord(t);
+            if (std.mem.eql(u8, w, "library") or std.mem.eql(u8, w, "endlibrary")) continue;
+            if (std.mem.eql(u8, w, "section")) {
+                if (open) return error.InvalidLibrarySection;
+                open = true;
+                selected = std.mem.eql(u8, firstWord(std.mem.trimStart(u8, t[w.len..], " \t")), wanted);
+                if (selected and found) return error.DuplicateLibrarySection;
+                found = found or selected;
+                continue;
+            }
+            if (std.mem.eql(u8, w, "endsection")) {
+                if (!open) return error.InvalidLibrarySection;
+                open = false;
+                selected = false;
+                continue;
+            }
+        }
+        if (!selected) continue;
+        // An `include` continued with `\` (§1.4) reads as its joined lines;
+        // they pass through as written when they are not one.
+        var stmt = t;
+        var joined: std.ArrayList(u8) = .empty;
+        defer joined.deinit(gpa);
+        var raw: std.ArrayList(u8) = .empty;
+        defer raw.deinit(gpa);
+        if (std.mem.startsWith(u8, t, "include") and continues(t)) {
+            try raw.appendSlice(gpa, line);
+            try joined.appendSlice(gpa, t);
+            while (continues(joined.items)) {
+                const more = lines.next() orelse break;
+                try raw.append(gpa, '\n');
+                try raw.appendSlice(gpa, more);
+                joined.items[joined.items.len - 1] = ' ';
+                try joined.appendSlice(gpa, std.mem.trim(u8, more, " \t\r"));
+            }
+            stmt = std.mem.trim(u8, joined.items, " \t");
+        }
+        if (try spectreInclude(stmt)) |inc| {
+            if (depth == 31) return error.IncludeDepthExceeded;
+            const resolved = try locate(io, search, path, inc.file);
+            defer gpa.free(resolved);
+            const text = try Io.Dir.cwd().readFileAlloc(io, resolved, gpa, .unlimited);
+            defer gpa.free(text);
+            const first = std.mem.trim(u8, firstLine(text), " \t\r");
+            if (std.ascii.eqlIgnoreCase(std.fs.path.extension(resolved), ".scs") or switchesTo(first, "spectre")) {
+                if (try appendSpectre(io, search, resolved, text, inc.section, depth + 1, out)) try out.appendSlice(gpa, "simulator lang=spectre\n");
+            } else {
+                try out.appendSlice(gpa, "simulator lang=spice\n");
+                try appendContents(io, search, resolved, chomp(text), inc.section, depth + 1, out);
+                try out.appendSlice(gpa, "simulator lang=spectre\n");
+            }
+            continue;
+        }
+        try out.appendSlice(gpa, if (raw.items.len > 0) raw.items else line);
+        try out.append(gpa, '\n');
+    }
+    if (spice and selected) try appendContents(io, search, path, chomp(region.items), null, depth, out);
+    if (open) return error.InvalidLibrarySection;
+    if (!found) return error.LibrarySectionNotFound;
+    return spice;
+}
+
+/// Whether a trimmed Spectre line continues on the next (§1.4): it ends
+/// in an odd run of backslashes and holds no `//` comment outside quotes.
+fn continues(t: []const u8) bool {
+    var quoted = false;
+    for (t, 0..) |c, i| {
+        if (c == '"') quoted = !quoted;
+        if (!quoted and std.mem.startsWith(u8, t[i..], "//")) return false;
+    }
+    var run: usize = 0;
+    while (run < t.len and t[t.len - 1 - run] == '\\') run += 1;
+    return run % 2 == 1;
+}
+
+/// `text` without its final newline, so splitting it yields no empty last
+/// line.
+fn chomp(text: []const u8) []const u8 {
+    return if (std.mem.endsWith(u8, text, "\n")) text[0 .. text.len - 1] else text;
+}
+
+/// The first non-blank line of `text`.
+fn firstLine(text: []const u8) []const u8 {
+    var lines = std.mem.tokenizeAny(u8, text, "\r\n");
+    while (lines.next()) |line| if (std.mem.trim(u8, line, " \t").len > 0) return line;
+    return "";
 }
 
 /// Whether any line after the title starts with `.alter`.
@@ -73,14 +244,19 @@ fn searchDirs(arena: std.mem.Allocator, origin: []const u8, src: []const u8) ![]
     return dirs.items;
 }
 
+/// Where a file a deck names is looked for: beside the file naming it, then
+/// in `dirs`; `deck` is the top-level deck, whose stem names `.load`'s
+/// default file.
+const Search = struct { dirs: []const []const u8, deck: []const u8 };
+
 /// `name` beside `path`, else in the first search directory holding it;
 /// beside `path` when none does, so the open reports the usual error.
-fn locate(io: Io, search: []const []const u8, path: []const u8, name: []const u8) ![]u8 {
+fn locate(io: Io, search: Search, path: []const u8, name: []const u8) ![]u8 {
     const gpa = std.heap.page_allocator;
     const here = try std.fs.path.resolve(gpa, &.{ std.fs.path.dirname(path) orelse ".", name });
-    if (search.len == 0 or std.fs.path.isAbsolute(name)) return here;
+    if (search.dirs.len == 0 or std.fs.path.isAbsolute(name)) return here;
     if (Io.Dir.cwd().access(io, here, .{})) |_| return here else |_| {}
-    for (search) |dir| {
+    for (search.dirs) |dir| {
         const there = try std.fs.path.resolve(gpa, &.{ dir, name });
         if (Io.Dir.cwd().access(io, there, .{})) |_| {
             gpa.free(here);
@@ -248,7 +424,7 @@ pub fn foreignKindForPath(path: []const u8) ?ForeignKind {
     return null;
 }
 
-fn appendFile(io: Io, search: []const []const u8, path: []const u8, section: ?[]const u8, depth: u8, out: *std.ArrayList(u8)) anyerror!void {
+fn appendFile(io: Io, search: Search, path: []const u8, section: ?[]const u8, depth: u8, out: *std.ArrayList(u8)) anyerror!void {
     // ponytail: bounded recursion; iterative include stack if real PDKs exceed 32.
     if (depth == 32) return error.IncludeDepthExceeded;
     const gpa = std.heap.page_allocator;
@@ -258,11 +434,12 @@ fn appendFile(io: Io, search: []const []const u8, path: []const u8, section: ?[]
 }
 
 /// HSPICE `.load [FILE=f] [RUN=...]` [CR .LOAD]: inlines the `.nodeset`/`.ic`
-/// cards an earlier `.save` wrote, `<stem of path>.ic0` by default. A file
-/// not there yet (the run that first saves it) is skipped with a warning.
-/// RUN= only picks between `.alter` runs' files, which ESPice does not
-/// number; it is accepted and unused.
-fn appendLoad(io: Io, search: []const []const u8, path: []const u8, tokens: *Fields, depth: u8, out: *std.ArrayList(u8)) anyerror!void {
+/// cards an earlier `.save` wrote: `<top deck's stem>.ic0` by default, and
+/// `x.ic0` for `FILE=x.ic` (the `.ic#` family). A file not there yet (the
+/// run that first saves it) is skipped with a warning. RUN= only picks
+/// between `.alter` runs' files, which ESPice does not number; it is
+/// accepted and unused.
+fn appendLoad(io: Io, search: Search, path: []const u8, tokens: *Fields, depth: u8, out: *std.ArrayList(u8)) anyerror!void {
     const gpa = std.heap.page_allocator;
     var file: ?[]const u8 = null;
     while (tokens.next()) |key| {
@@ -270,10 +447,13 @@ fn appendLoad(io: Io, search: []const []const u8, path: []const u8, tokens: *Fie
         const value = (try word(tokens)) orelse return error.InvalidInclude;
         if (std.ascii.eqlIgnoreCase(key, "file")) file = value else if (!std.ascii.eqlIgnoreCase(key, "run")) return error.InvalidInclude;
     }
-    const stem = std.fs.path.stem(path);
-    const default = try std.mem.concat(gpa, u8, &.{ stem, ".ic0" });
-    defer gpa.free(default);
-    const resolved = try locate(io, search, path, file orelse default);
+    // `FILE=x.ic` names the `.ic#` family; ESPice writes and reads `#` = 0.
+    const name = if (file) |f|
+        try std.mem.concat(gpa, u8, &.{ f, if (std.ascii.eqlIgnoreCase(std.fs.path.extension(f), ".ic")) "0" else "" })
+    else
+        try std.mem.concat(gpa, u8, &.{ std.fs.path.stem(search.deck), ".ic0" });
+    defer gpa.free(name);
+    const resolved = try locate(io, search, path, name);
     defer gpa.free(resolved);
     appendFile(io, search, resolved, null, depth + 1, out) catch |err| switch (err) {
         error.FileNotFound => std.log.warn(".load: {s} not found; no saved operating point", .{resolved}),
@@ -287,9 +467,11 @@ fn appendLoad(io: Io, search: []const []const u8, path: []const u8, tokens: *Fie
 /// files' rows, and a file inherits the previous file's columns for names
 /// it does not give; LAM puts the files side by side, row for row, each
 /// name from the file that gives it. A missing value is 0. Data files hold
-/// blank- or comma-separated numbers, one row per line. `header` holds the
+/// blank- or comma-separated numbers, one row per line; a line starting
+/// with `*` or `$` is a comment. FILE= resolves as `.include` does (beside
+/// this file, then `.option search=`). `header` holds the
 /// rest of the `.data` line; `lines` is left after `.enddata`.
-fn appendData(io: Io, path: []const u8, name: []const u8, lam: bool, header: Fields, lines: *std.mem.SplitIterator(u8, .scalar), out: *std.ArrayList(u8)) !void {
+fn appendData(io: Io, search: Search, path: []const u8, name: []const u8, lam: bool, header: Fields, lines: *std.mem.SplitIterator(u8, .scalar), out: *std.ArrayList(u8)) !void {
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
@@ -305,14 +487,26 @@ fn appendData(io: Io, path: []const u8, name: []const u8, lam: bool, header: Fie
             if (!Fields.isWord(key) or !tokens.takeEq()) return error.InvalidData;
             const value = (try word(&tokens)) orelse return error.InvalidData;
             if (std.ascii.eqlIgnoreCase(key, "file")) {
-                const resolved = try std.fs.path.resolve(a, &.{ std.fs.path.dirname(path) orelse ".", value });
+                const resolved = try locate(io, search, path, value);
+                defer std.heap.page_allocator.free(resolved);
                 const text = try Io.Dir.cwd().readFileAlloc(io, resolved, a, .unlimited);
                 var rows: std.ArrayList([]const []const u8) = .empty;
                 var it = std.mem.splitScalar(u8, text, '\n');
+                var line_no: u32 = 0;
                 while (it.next()) |row| {
+                    line_no += 1;
+                    // `*` and `$` lines are comments, as in a netlist.
+                    const body = std.mem.trimStart(u8, row, " \t");
+                    if (body.len > 0 and (body[0] == '*' or body[0] == '$')) continue;
                     var cells: std.ArrayList([]const u8) = .empty;
                     var c = std.mem.tokenizeAny(u8, row, " \t,\r");
-                    while (c.next()) |v| try cells.append(a, v);
+                    while (c.next()) |v| {
+                        if (lines_mod.hspice.parseNum(v) == null) {
+                            if (!@import("builtin").is_test) std.log.err(".data {s}: {s}:{d}: '{s}' is not a number", .{ name, resolved, line_no, v });
+                            return error.InvalidData;
+                        }
+                        try cells.append(a, v);
+                    }
                     if (cells.items.len != 0) try rows.append(a, cells.items);
                 }
                 var cols: std.ArrayList(u32) = .empty;
@@ -320,7 +514,7 @@ fn appendData(io: Io, path: []const u8, name: []const u8, lam: bool, header: Fie
                 try files.append(a, .{ .rows = rows.items, .cols = cols });
             } else if (std.ascii.eqlIgnoreCase(key, "out")) {
                 // ponytail: OUT= (write the merged table back) is refused; add when a flow needs the file.
-                std.log.err(".data {s}: OUT= is not supported", .{name});
+                if (!@import("builtin").is_test) std.log.err(".data {s}: OUT= is not supported", .{name});
                 return error.InvalidData;
             } else {
                 if (files.items.len == 0) return error.InvalidData;
@@ -395,7 +589,7 @@ fn appendVec(io: Io, path: []const u8, out: *std.ArrayList(u8)) anyerror!void {
     try out.appendSlice(std.heap.page_allocator, text);
 }
 
-fn appendContents(io: Io, search: []const []const u8, path: []const u8, src: []const u8, section: ?[]const u8, depth: u8, out: *std.ArrayList(u8)) anyerror!void {
+fn appendContents(io: Io, search: Search, path: []const u8, src: []const u8, section: ?[]const u8, depth: u8, out: *std.ArrayList(u8)) anyerror!void {
     const gpa = std.heap.page_allocator;
     var lines = std.mem.splitScalar(u8, src, '\n');
     var selected = section == null;
@@ -418,7 +612,7 @@ fn appendContents(io: Io, search: []const []const u8, path: []const u8, src: []c
                 const mode = tokens.next() orelse "";
                 const lam = std.ascii.eqlIgnoreCase(mode, "lam");
                 if (selected and (lam or std.ascii.eqlIgnoreCase(mode, "mer"))) {
-                    try appendData(io, path, name, lam, tokens, &lines, out);
+                    try appendData(io, search, path, name, lam, tokens, &lines, out);
                 } else if (selected) {
                     try out.appendSlice(gpa, line);
                     try out.append(gpa, '\n');
@@ -495,6 +689,49 @@ test "directives and alter keys" {
     try std.testing.expectEqual(plain.ptr, (try expand(std.testing.io, a, "deck.sp", plain)).ptr);
 }
 
+test ".load: the top deck names the default file, FILE=x.ic reads x.ic0" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try tmp.dir.writeFile(io, .{ .sub_path = "deck.ic0", .data = ".nodeset\n+ a= 1.0000\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "run.ic0", .data = ".ic v(b)=2\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "inc.sp", .data = ".load\n" });
+    const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/deck.sp", .{tmp.sub_path});
+    // Each inlined file ends in blank lines; only the cards matter here.
+    try std.testing.expectEqualStrings("t\n.nodeset\n+ a= 1.0000", std.mem.trimEnd(u8, try expand(io, a, path, "t\n.include 'inc.sp'\n"), "\n"));
+    try std.testing.expectEqualStrings("t\n.ic v(b)=2", std.mem.trimEnd(u8, try expand(io, a, path, "t\n.load file='run.ic'\n"), "\n"));
+}
+
+test "Spectre include: sections, SPICE files, and the includer's mode after" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try tmp.dir.writeFile(io, .{ .sub_path = "lib.scs", .data = "library l\nsection tt\nr1 (a 0) resistor r=1\ninclude \"r.sp\"\nendsection tt\nsection ss\nr1 (a 0) resistor r=2\nendsection\nendlibrary l\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "r.sp", .data = "r2 a 0 3\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "c.inc", .data = "simulator lang=spectre\nc1 (a 0) capacitor c=1p\nsimulator lang=spice\nc2 a 0 2p\n" });
+    const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/deck.scs", .{tmp.sub_path});
+    const Case = struct { []const u8, anyerror![]const u8 };
+    for ([_]Case{
+        .{ "t\ninclude \"lib.scs\" section=tt // corner\n", "t\nr1 (a 0) resistor r=1\nsimulator lang=spice\nr2 a 0 3\nsimulator lang=spectre\n" },
+        .{ "t\ninclude \"c.inc\"\nv1 (a 0) vsource dc=1\n", "t\nsimulator lang=spectre\nc1 (a 0) capacitor c=1p\nsimulator lang=spice\nc2 a 0 2p\nsimulator lang=spectre\nv1 (a 0) vsource dc=1\n" },
+        .{ "t\nsimulator lang=spice\n.include 'r.sp'\nsimulator lang=spectre\n", "t\nsimulator lang=spice\nr2 a 0 3\n\nsimulator lang=spectre\n" },
+        .{ "t\ninclude \"lib.scs\" section=TT\n", error.LibrarySectionNotFound },
+        .{ "t\ninclude lib.scs\n", error.InvalidInclude },
+        .{ "t\ninclude \"lib.scs\" corner=tt\n", error.InvalidInclude },
+    }) |case| {
+        const got = expandSpectre(io, a, path, case[0]);
+        if (case[1]) |want| try std.testing.expectEqualStrings(want, try got) else |err| try std.testing.expectError(err, got);
+    }
+    const plain = "t\nr1 (a 0) resistor r=1\n";
+    try std.testing.expectEqual(plain.ptr, (try expandSpectre(io, a, path, plain)).ptr);
+}
+
 test "external .data: MER stacks files, LAM sets them side by side" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -504,6 +741,8 @@ test "external .data: MER stacks files, LAM sets them side by side" {
     const a = arena.allocator();
     try tmp.dir.writeFile(io, .{ .sub_path = "a.txt", .data = "1 2\n3,4\n" });
     try tmp.dir.writeFile(io, .{ .sub_path = "b.txt", .data = "5 6\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "c.txt", .data = "* sweep points\n$ x\n-1.5k\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "h.txt", .data = "x\n1\n" });
     const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/deck.sp", .{tmp.sub_path});
     const Case = struct { []const u8, anyerror![]const u8 };
     for ([_]Case{
@@ -512,6 +751,8 @@ test "external .data: MER stacks files, LAM sets them side by side" {
         .{ "t\n.data d MER FILE='a.txt' x=0\n.enddata\n", error.InvalidData },
         .{ "t\n.data d MER x=1\n.enddata\n", error.InvalidData },
         .{ "t\n.data d MER FILE='a.txt'\n.enddata\n", error.InvalidData },
+        .{ "t\n.data d MER FILE='c.txt' x=1\n.enddata\n", "t\n.data d x\n+ -1.5k\n.enddata\n\n" },
+        .{ "t\n.data d MER FILE='h.txt' x=1\n.enddata\n", error.InvalidData },
     }) |case| {
         try tmp.dir.writeFile(io, .{ .sub_path = "deck.sp", .data = case[0] });
         const got = load(io, a, path);

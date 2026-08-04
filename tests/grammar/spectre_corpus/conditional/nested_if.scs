@@ -1,0 +1,10 @@
+// a structural if nested inside another conditional body
+simulator lang=spectre
+if ( a > 0 ) {
+    r0 (a b) resistor r=1k
+    if ( b > 0 ) {
+        c0 (b 0) capacitor c=1n
+    }
+} else {
+    r0 (a b) resistor r=2k
+}

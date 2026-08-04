@@ -1,0 +1,3 @@
+// A trailing instance parameter name without '=value' is a bare flag parameter.
+// Rust-led relaxation (see spectre_models.md); Julia backport pending.
+R1 (a b) resistor r=1k foo

@@ -1,0 +1,4 @@
+// Backslash continuation across the node/master boundary: the bare run folds
+// the continued line, so the master still sits immediately before the params.
+irmeter optin optout rPowerdBm \
+    irmeter_sub modes=2 chn=chn

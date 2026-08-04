@@ -1,0 +1,42 @@
+# HSPICE external `.data` (MER, LAM): the card's lines from `.data` to
+# `.enddata`, and the data files they read. Sources: dev/research/
+# data-file-syntax.md §4 (CR = HSPICE Command Reference, .DATA p.64-70).
+# An inline `.data` table is the card grammar's (spice_cards.peg Block).
+#
+# Captures: Block (Name, Mode, FileGroup (FileName, ParamCol (Key, Col)),
+# Out); ExtFile (Row (Cell)).
+
+Block      <- '.data'i s Name s Mode !wchar (sep (FileGroup / Out))+ sep End
+# CR p.69-70: a line inside the block may omit its `+`; a `*` line is a
+# comment, and `$` or `;` ends a line's fields.
+sep        <- (s / comment? nl (s? ('*' (!nl .)*)? nl)* s? '+'?)+
+comment    <- [$;] (!nl .)*
+Mode       <- 'mer'i / 'lam'i
+# CR p.64, p.69: `FILE=f`, then the `name=column` pairs that file gives
+# (1-based); a later MER file inherits the earlier file's columns.
+FileGroup  <- 'file'i eq FileName (sep ParamCol)*
+ParamCol   <- !(('file'i / 'out'i) eq) Key eq Col
+# CR p.64: OUT= writes the merged table back; ESPice refuses it.
+Out        <- 'out'i eq FileName
+End        <- '.enddata'i (s (!nl .)*)? nl?
+eq         <- s? '=' s?
+# CR p.66: quotes are optional.
+FileName   <- "'" (!"'" !nl .)* "'" / '"' (!'"' !nl .)* '"' / (![ \t\r\n'"=$;] .)+
+Key        <- [a-zA-Z_] wchar*
+Col        <- [0-9]+
+Name       <- (![ \t\r\n] .)+
+wchar      <- [a-zA-Z0-9_]
+s          <- [ \t]+
+nl         <- '\r'? '\n'
+
+# CR p.69: "columns of data", one row per line. ESPice: blanks or commas
+# between cells, and a `*` or `$` line is a comment (§4, D3). A cell is a
+# SPICE number: digits with one `.`, an exponent (`e` or `d`, a sign then a
+# digit when signed), then any suffix (a scale, or letters as a unit).
+ExtFile    <- (fline '\n')* fline? !.
+fline      <- [ \t]* [*$] (!'\n' .)* / cellsep? (Row cellsep?)?
+Row        <- Cell (cellsep Cell)*
+cellsep    <- [ \t,\r]+
+Cell       <- [+\-]? Mantissa (Exponent / !([eEdD] [+\-])) (![ \t,\r\n] .)*
+Mantissa   <- [0-9]+ ('.' [0-9]*)? / '.' [0-9]+
+Exponent   <- [eEdD] [+\-]? [0-9]+

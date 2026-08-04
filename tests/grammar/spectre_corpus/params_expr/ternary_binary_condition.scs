@@ -1,0 +1,7 @@
+// ternary condition may itself be a binary expression (no extra parens)
+// PDK shape: `oplen = max((l>0?l:pleqn),oprrlmin)`
+simulator lang=spectre
+parameters l=1 pleqn=2
+parameters q=l>0?l:pleqn
+parameters w=(layer_sig == 1 || layer_sig == 2) ? 1 : 0
+parameters z=a+b*c?d:e

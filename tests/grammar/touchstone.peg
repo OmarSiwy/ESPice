@@ -1,0 +1,45 @@
+# Touchstone 1.0 (`.sNp`): file bytes -> the option line and the value
+# stream. Sources: dev/research/data-file-syntax.md §1 (TS1.1 = Touchstone
+# File Format Specification 1.1, TS2.0 = 2.0, IBIS Open Forum); checked
+# against `sparam.readTouchstone`. Case-insensitive throughout (TS1.1 §2
+# rule 1).
+#
+# Captures: Option (its Unit, Param, Format and Ref tokens; only the first
+# option line counts, later ones are ignored, TS1.1 p.4), Num (every data
+# value, in order). Splitting the stream into 1 + 2N² value records, and the
+# 2-port noise block after them, is the lowering's (TS2.0 p.13, TS1.1 p.10).
+
+File       <- skip* (Option rest_after / rest_none) !.
+
+# TS1.1 p.4: the option line is the first non-comment line, and an option
+# line after it is ignored; TS2.0 p.7: it precedes any data.
+rest_after <- (skip / extra / data)*
+rest_none  <- (skip / data)*
+
+# `# <unit> <parameter> <format> R <n>`, any order, each optional; a bare
+# `#` is legal (TS1.1 p.5).
+Option     <- ws? '#' (ws? otoken (ws otoken)*)? ws? comment? eolx
+otoken     <- Unit / Param / Format / Ref
+Unit       <- ('ghz'i / 'mhz'i / 'khz'i / 'hz'i) !wchar
+# H and G are legal Touchstone (TS2.0 p.7, 2-ports only); ESPice refuses
+# them, so the grammar accepts only what it reads.
+Param      <- [sSyYzZ] !wchar
+Format     <- ('db'i / 'ma'i / 'ri'i) !wchar
+Ref        <- 'r'i ws Num
+
+extra      <- ws? '#' (!eol .)* eolx
+
+# TS2.0 rule 6: numbers in plain or scientific notation; no SPICE scale
+# suffixes, no `inf`/`nan`/hex.
+data       <- ws? Num (ws Num)* ws? comment? eolx
+Num        <- [+\-]? ([0-9]+ ('.' [0-9]*)? / '.' [0-9]+) ([eE] [+\-]? [0-9]+)? !wchar
+
+# TS1.1 §2 rule 3: `!` comments to the end of the line; blank lines allowed
+# (TS2.0 rule 9). A line starting `[` is Touchstone 2.0 and matches nothing.
+skip       <- ws? comment? eol / ws? comment !.  / ws+ !.
+comment    <- '!' (!eol .)*
+wchar      <- [a-zA-Z0-9_.+\-]
+ws         <- [ \t]+
+# TS2.0 rule 2: LF, CR+LF or a lone CR.
+eol        <- '\r\n' / '\n' / '\r'
+eolx       <- eol / !.

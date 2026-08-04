@@ -1,0 +1,2 @@
+// Numeric node names in a bare (unparenthesised) instance.
+rma 1 2 resistor r=1k

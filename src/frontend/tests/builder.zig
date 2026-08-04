@@ -100,7 +100,9 @@ test "control source sensing ignores case while binding rejects missing and inex
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
         const a = arena.allocator();
-        const source = try std.fmt.allocPrint(a, "VCase in 0 2\nRin in 0 1k\nF1 out 0 {s}\nRout out 0 1k\n", .{control});
+        // Spectre keeps case, so `vcase` does not name `VCase`.
+        const probe = if (control.len == 0) "" else try std.fmt.allocPrint(a, " probe={s} gain=1", .{control});
+        const source = try std.fmt.allocPrint(a, "// sensing\nVCase (in 0) vsource dc=2\nRin (in 0) resistor r=1k\nF1 (out 0) cccs{s}\nRout (out 0) resistor r=1k\n", .{probe});
         const nl = try netlist.parse(a, source, .spectre);
         const lib = try device.Library.init(a);
         var b = try Builder.init(a, &lib);
@@ -444,22 +446,6 @@ test "CPL and RLGC matrices read their packed triangles" {
     try std.testing.expectError(error.UnsupportedTransmissionLineParameters, ta.cplVector(&kv, "r", out[0..2]));
     try std.testing.expectError(error.NonFiniteParameter, ta.cplVector(&.{.{ .key = "g", .value = .{ .num = std.math.inf(f64) } }}, "g", &out));
     try std.testing.expectError(error.InvalidParameterValue, ta.cplVector(&.{.{ .key = "g", .value = .{ .name = "x" } }}, "g", &out));
-
-    var m: ta.WMatrices = .{};
-    try std.testing.expectEqual(@as(usize, 1), try ta.parseRlgcFile("* one line\n1\n2.5e-7 * L\n1e-10, 5\n", &m));
-    try std.testing.expectEqual(@as(f64, 2.5e-7), m.tri[0][0]);
-    try std.testing.expectEqual(@as(f64, 1e-10), m.tri[1][0]);
-    try std.testing.expectEqual(@as(f64, 5), m.tri[2][0]);
-    try std.testing.expectEqual(@as(usize, 2), try ta.parseRlgcFile("2 (1 2 3) [4 5 6]", &m));
-    try std.testing.expectEqualSlices(f64, &.{ 4, 5, 6 }, m.tri[1][0..3]);
-    for ([_][]const u8{
-        "", // no N
-        "5 1 2", // N past 4
-        "1.5 1 2", // fractional N
-        "1 1", // L alone: C is required
-        "2 1 2 3 4", // not whole triangles
-        "1 1 2 3 4 5 6 7", // seven matrices
-    }) |bytes| try std.testing.expectError(error.InvalidParameterValue, ta.parseRlgcFile(bytes, &m));
 }
 
 /// Builds `source` (title line first) and returns `needs_tran_op`. The

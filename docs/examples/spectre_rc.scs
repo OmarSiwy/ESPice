@@ -1,7 +1,6 @@
-// RC low-pass read with --tokenizer=spectre: no title line,
-// case kept, C++ comments, and M means mega.
-V1 in 0 DC 0 AC 1
-R1 in out 1K
-C1 out 0 159n /* about 1 kHz */
-.ac dec 10 10 1M
-.end
+// RC low-pass in Spectre syntax: the first line is the title
+simulator lang=spectre
+V1 (in 0) vsource dc=0 mag=1
+R1 (in out) resistor r=1K
+C1 (out 0) capacitor c=159n  // about 1 kHz
+lowpass ac start=10 stop=1M dec=10

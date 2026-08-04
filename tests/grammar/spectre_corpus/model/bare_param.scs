@@ -1,0 +1,3 @@
+// A model parameter name without '=' is a bare flag parameter.
+// Rust-led relaxation (see spectre_models.md); Julia backport pending.
+model RMOD resistor tc1 5

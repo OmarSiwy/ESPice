@@ -98,19 +98,6 @@ test "devices are hyperedges over nets in file order; ground is net 0" {
     try std.testing.expectError(error.ParseError, parse(a, "invalid\n1bad out 0 1k\n"));
 }
 
-test "spectre: block comments are stripped span-wise" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const a = arena_state.allocator();
-    const strip = lines.spectre.Lines.stripBlockComments;
-    try std.testing.expectEqualStrings("r1 a b 1k", try strip(a, "r1 a b 1k"));
-    try std.testing.expectEqualStrings("r1  a b  1k", try strip(a, "r1 /*x*/ a b /*y*/ 1k"));
-    try std.testing.expectEqualStrings("ad", try strip(a, "a/**//*c*/d"));
-    try std.testing.expectEqualStrings("", try strip(a, "/**/"));
-    try std.testing.expectEqualStrings("a", try strip(a, "a /*b c"));
-    try std.testing.expectEqualStrings("", try strip(a, "/*"));
-}
-
 test "source: nested relative includes select only requested case-insensitive corner" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -632,14 +619,63 @@ test "continuations join across comment and blank lines; tails are stripped" {
         \\+ B   $ tail comment
         \\+ 2K ; another
         \\.end
-        \\r2 after end is never read !!
+        \\r2 a b 1k
     );
-    try std.testing.expectEqual(@as(u32, 1), nl.deviceCount());
+    // ngspice turns `.end` into a comment and reads on (#121,
+    // dev/research/ngspice-syntax.md §1.7); HSPICE's `.end` ends the run.
+    try std.testing.expectEqual(@as(u32, 2), nl.deviceCount());
     const r1 = try device(nl, "r1");
     var buf: [2][]const u8 = undefined;
     try std.testing.expectEqualStrings("a", pinNames(nl, r1, &buf)[0]);
     try std.testing.expectEqualStrings("b", pinNames(nl, r1, &buf)[1]);
     try std.testing.expectEqual(@as(f64, 2000), try numeric(r1.positional[0]));
+    const hs = try netlist.parse(arena.allocator(), "t\nr1 a b 1k\n.end\nr2 a b 1k\n", .hspice);
+    try std.testing.expectEqual(@as(u32, 1), hs.deviceCount());
+}
+
+test "nested .subckt definitions flatten through both levels (#121)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const nl = try parse(arena.allocator(),
+        \\t
+        \\.subckt outer a
+        \\.subckt inner b
+        \\r1 b 0 1k
+        \\.ends inner
+        \\xi a inner
+        \\c1 a 0 1p
+        \\.ends outer
+        \\x1 n outer
+        \\.macro m p
+        \\r2 p 0 2k
+        \\.eom
+        \\x2 n m
+    );
+    // The inner body is the inner subcircuit's, read once per `xi`.
+    try std.testing.expectEqual(@as(u32, 3), nl.deviceCount());
+    const r1 = try device(nl, "r.x1.xi.r1");
+    var buf: [2][]const u8 = undefined;
+    try std.testing.expectEqualStrings("n", pinNames(nl, r1, &buf)[0]);
+    _ = try device(nl, "c.x1.c1");
+    _ = try device(nl, "r.x2.r2");
+}
+
+test "user functions: .func and .param f(x)= expand where they are called (#121)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const nl = try parse(arena.allocator(),
+        \\t
+        \\.param k=10
+        \\r1 a 0 {twice(3)+add(1,k)}
+        \\.func add(x, y) {x+y}
+        \\.param twice(x)={add(x,x)} x=100
+        \\b1 a 0 i={add(v(a),1)}
+    );
+    // Formals shadow a parameter of the same name; a later definition works.
+    try std.testing.expectEqual(@as(f64, 17), try numeric((try device(nl, "r1")).positional[0]));
+    // Over a probe the body stays an expression for the B source.
+    try std.testing.expect((try device(nl, "b1")).kv[0].value == .expr);
+    try std.testing.expectError(error.ParseError, parse(arena.allocator(), "t\n.func f(x) {x}\nr1 a 0 {f(1,2)}\n"));
 }
 
 test "malformed cards fail with ParseError, never a panic" {
@@ -649,7 +685,7 @@ test "malformed cards fail with ParseError, never a panic" {
         "t\n.\n",
         "t\n.subckt\n",
         "t\n.ends\n",
-        "t\n.subckt a p\n.subckt b q\n.ends\n.ends\n",
+        "t\n.subckt a p\n.subckt b q\n.ends\n",
         "t\n.subckt a p\nr1 p 0 1\n",
         "t\n.param a\n",
         "t\n.param a=\n",

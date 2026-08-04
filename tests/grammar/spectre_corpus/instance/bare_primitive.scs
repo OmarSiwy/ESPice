@@ -1,0 +1,4 @@
+// Bare primitive instances: `name n1 n2 master params` (master is the last
+// bare token before the parameter list).
+rth t 0 resistor r=1e12
+rwirea a a0 resistor r=0

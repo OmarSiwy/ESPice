@@ -31,6 +31,10 @@ pub const Code = enum(u8) {
     sub,
     mul,
     div,
+    /// `a % b`: a - b·trunc(a/b), as numparam's `%` (ngspice-syntax.md §2.2).
+    mod,
+    /// `a \ b`: trunc(|a/b|), numparam's integer division.
+    idiv,
     pow,
     lt,
     gt,
@@ -42,6 +46,11 @@ pub const Code = enum(u8) {
     @"or",
     /// a: `Fn`, b: argument count.
     call,
+    /// A call to a function outside `Fn`, as compiled: a is its name (an
+    /// index into `Scratch.names`), b the argument count. netlist.zig
+    /// `subst` inlines a `.func` it names and turns any other into a
+    /// `call` of `Fn.other`, so final ops never hold one.
+    ucall,
 };
 
 /// Built-in functions; `other` is any name the table does not know. The
@@ -50,7 +59,7 @@ pub const Code = enum(u8) {
 /// trial draws them instead (`eval`). `table(x, d, x1, y1, ...)` is the
 /// smoothed transfer of an E/G TABLE or PWL(1) card, built only by the
 /// B-source tape (models/bsource.va opcode 37).
-pub const Fn = enum(u8) { sqrt, abs, min, max, pow, pwr, exp, ln, log, log10, sin, cos, tan, atan, floor, ceil, ternary, tanh, agauss, gauss, unif, aunif, limit, table, other };
+pub const Fn = enum(u8) { sqrt, abs, min, max, pow, pwr, exp, ln, log, log10, sin, cos, tan, atan, floor, ceil, ternary, tanh, sqr, int, nint, sgn, sinh, cosh, asin, acos, asinh, acosh, atanh, agauss, gauss, unif, aunif, limit, table, other };
 
 /// True for the functions a Monte Carlo trial draws.
 pub fn isDistribution(f: Fn) bool {
@@ -67,6 +76,11 @@ const fns = std.StaticStringMap(Fn).initComptime(.{
     .{ "atan", .atan },   .{ "floor", .floor },   .{ "ceil", .ceil },   .{ "ternary", .ternary },
     .{ "tanh", .tanh },   .{ "agauss", .agauss }, .{ "gauss", .gauss }, .{ "unif", .unif },
     .{ "aunif", .aunif }, .{ "limit", .limit },   .{ "table", .table },
+    // numparam's other built-ins (ngspice-syntax.md §2.2, xpressn.c fmathS).
+    .{ "sqr", .sqr },     .{ "int", .int },       .{ "nint", .nint },   .{ "sgn", .sgn },
+    .{ "sinh", .sinh },   .{ "cosh", .cosh },     .{ "asin", .asin },   .{ "acos", .acos },
+    .{ "asinh", .asinh }, .{ "acosh", .acosh },   .{ "atanh", .atanh }, .{ "arctan", .atan },
+    .{ "ternary_fcn", .ternary },
 });
 
 /// One postfix op.
@@ -164,7 +178,7 @@ fn Compiler(comptime parseNum: fn ([]const u8) ?f64) type {
                     '&' => 2,
                     '<', '>', '=', '!' => 3,
                     '+', '-' => 4,
-                    '*', '/' => if (power) 6 else 5,
+                    '*', '/', '%', '\\' => if (power) 6 else 5,
                     '^' => 6,
                     else => break,
                 };
@@ -181,6 +195,8 @@ fn Compiler(comptime parseNum: fn ([]const u8) ?f64) type {
                     '-' => .sub,
                     '*' => if (power) .pow else .mul,
                     '/' => .div,
+                    '%' => .mod,
+                    '\\' => .idiv,
                     else => .pow,
                 };
                 if (p.pos < p.text.len) {
@@ -189,6 +205,10 @@ fn Compiler(comptime parseNum: fn ([]const u8) ?f64) type {
                     if (next == '=' and (c == '<' or c == '>' or c == '=' or c == '!')) {
                         if (c == '<') code = .le;
                         if (c == '>') code = .ge;
+                        p.pos += 1;
+                    } else if (c == '<' and next == '>') {
+                        // `<>` is `!=` in numparam and B sources (§2.2, §2.6).
+                        code = .ne;
                         p.pos += 1;
                     } else if (c == '=' or c == '!') return error.ParseError;
                     if (c == '&' or c == '|') {
@@ -284,7 +304,8 @@ fn Compiler(comptime parseNum: fn ([]const u8) ?f64) type {
             if (p.peek() != ')') return error.ParseError;
             p.pos += 1;
             if (probe) |code| return p.emit(.{ .code = code, .a = args[0], .b = args[1] });
-            try p.emit(.{ .code = .call, .a = @backingInt(fns.get(word) orelse .other), .b = argc });
+            if (fns.get(word)) |f| return p.emit(.{ .code = .call, .a = @backingInt(f), .b = argc });
+            try p.emit(.{ .code = .ucall, .a = try p.name(word), .b = argc });
         }
     };
 }
@@ -376,6 +397,11 @@ fn step(stack: *std.ArrayList(Val), op: Op, consts: []const f64, geometry: bool,
             stack.shrinkRetainingCapacity(stack.items.len - argc);
             break :blk result;
         },
+        // An unknown function, before `subst`: nothing to fold it with.
+        .ucall => blk: {
+            stack.shrinkRetainingCapacity(stack.items.len - op.b);
+            break :blk .unknown(false);
+        },
         else => blk: {
             const b = stack.pop().?;
             const a = stack.pop().?;
@@ -389,6 +415,8 @@ fn step(stack: *std.ArrayList(Val), op: Op, consts: []const f64, geometry: bool,
                 .sub => x - y,
                 .mul => x * y,
                 .div => x / y,
+                .mod => x - y * @trunc(x / y),
+                .idiv => @trunc(@abs(x / y)),
                 .pow => std.math.pow(f64, x, y),
                 .lt => bool01(x < y),
                 .gt => bool01(x > y),
@@ -413,7 +441,7 @@ fn call(f: Fn, args: []const Val) Val {
         all_known = all_known and a.known;
     }
     const want: usize = switch (f) {
-        .tanh, .table, .other => return .unknown(false),
+        .table, .other => return .unknown(false),
         // ponytail: nominal only; Monte Carlo sampling (C3) draws here.
         .agauss, .gauss, .unif, .aunif => return if (args.len >= 2 and args.len <= 4 and args[0].known) args[0] else .unknown(args.len >= 2 and all_nominal),
         .limit => return if (args.len == 2 and args[0].known) args[0] else .unknown(false),
@@ -446,8 +474,27 @@ fn call(f: Fn, args: []const Val) Val {
         .atan => std.math.atan(a),
         .floor => @floor(a),
         .ceil => @ceil(a),
-        .ternary, .tanh, .agauss, .gauss, .unif, .aunif, .limit, .table, .other => unreachable,
+        .tanh => std.math.tanh(a),
+        .sqr => a * a,
+        .int => @trunc(a),
+        .nint => roundHalfEven(a),
+        .sgn => std.math.sign(a),
+        .sinh => std.math.sinh(a),
+        .cosh => std.math.cosh(a),
+        .asin => std.math.asin(a),
+        .acos => std.math.acos(a),
+        .asinh => std.math.asinh(a),
+        .acosh => std.math.acosh(a),
+        .atanh => std.math.atanh(a),
+        .ternary, .agauss, .gauss, .unif, .aunif, .limit, .table, .other => unreachable,
     });
+}
+
+/// numparam's `nint` (§2.2): to the nearest integer, a half to the even one.
+fn roundHalfEven(a: f64) f64 {
+    const r = @round(a);
+    if (@abs(a - @trunc(a)) != 0.5) return r;
+    return if (@mod(r, 2) == 0) r else r - std.math.sign(a);
 }
 
 /// Operands an op pops.
@@ -455,7 +502,7 @@ pub fn arity(op: Op) u32 {
     return switch (op.code) {
         .num, .ident, .live, .vprobe, .iprobe => 0,
         .neg, .not => 1,
-        .call => op.b,
+        .call, .ucall => op.b,
         else => 2,
     };
 }
@@ -538,13 +585,20 @@ test "compile and fold: precedence, associativity and calls" {
         .{ "abs(-3)", 3 },         .{ "floor(2.5)+ceil(2.5)", 5 }, .{ "1k*2", 2000 },
         .{ "agauss(1,0.1,3)", 1 }, .{ "limit(2,1)", 2 },           .{ "1e-3*2", 2e-3 },
         .{ "pwr(-4,0.5)", -2 },    .{ "pwr(9,0.5)", 3 },
+        // numparam's operators and built-ins (#121).
+        .{ "7%3", 1 },             .{ "-7%3", -1 },                .{ "7\\2", 3 },
+        .{ "1<>2", 1 },            .{ "2<>2", 0 },                 .{ "tanh(0)", 0 },
+        .{ "sqr(3)", 9 },          .{ "int(-2.7)", -2 },           .{ "nint(2.5)", 2 },
+        .{ "nint(3.5)", 4 },       .{ "nint(-2.5)", -2 },          .{ "sgn(-3)", -1 },
+        .{ "sinh(0)+cosh(0)", 1 }, .{ "arctan(0)+asin(0)", 0 },    .{ "acos(1)+asinh(0)+atanh(0)", 0 },
+        .{ "acosh(1)", 0 },        .{ "ternary_fcn(0,2,3)", 3 },
     }) |case| {
         const v = try testFold(a, case[0]);
         try std.testing.expect(v.known);
         try std.testing.expectEqual(case[1], v.num);
     }
     // Names, probes, unknown functions and wrong arities stay symbolic.
-    for ([_][]const u8{ "x+1", "v(a)", "i(v1)*2", "foo(1)", "sqrt()", "min(1)", "tanh(0)", "agauss(1)" }) |text|
+    for ([_][]const u8{ "x+1", "v(a)", "i(v1)*2", "foo(1)", "sqrt()", "min(1)", "agauss(1)" }) |text|
         try std.testing.expect(!(try testFold(a, text)).known);
     for ([_][]const u8{ "", "1+", "(1", "1)", "a=b", "a|b", "a&b", "1 2", "1?2", "f(1,", "#", "'1" }) |text| {
         var s: Scratch = .{};

@@ -1,0 +1,7 @@
+// statistics block with a named `process` group of `vary` statements
+statistics {
+  process {
+    vary xdist dist=gauss std=1/3
+    vary ydist dist=gauss std=mc_std
+  }
+}

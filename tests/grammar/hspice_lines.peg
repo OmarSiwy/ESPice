@@ -1,0 +1,74 @@
+# HSPICE: physical lines -> the title and logical statements.
+#
+# The executable spec of the line rules in dev/research/hspice-syntax.md §1
+# (rule ids L1-L9 below), checked against `lines.hspice.Lines` by
+# tests/grammar/lines.zig. Case is folded after this stage (L7).
+#
+# Captures: Title; Line, one logical statement, made of Piece (joined to
+# the previous part with a blank) and Glue (joined with nothing, after
+# `\\`); NextRun, the text after `.END` (L9: a further simulation run,
+# which ESPice does not read).
+
+File       <- Title (eol body)? !.
+
+# L1: line 1 of the top-level file is the title, whatever it holds.
+Title      <- (!eol .)*
+
+body       <- (EndRun / Line / skip)*
+
+# L9: `.END` ends the run. The rest of its line is a comment; any line after
+# it opens the next run, title first.
+EndRun     <- blank* '.end'i ![a-zA-Z0-9_] (!eol .)* (eol skip* NextRun?)?
+NextRun    <- .+
+
+# L2: a comment line (`*` or `$` as the first non-blank character) or a
+# blank line. Neither ends a pending statement (L5).
+skip       <- blank* [*$] (!eol .)* eolx
+            / blank* eol
+            / blank+ !.
+
+# A statement: its first physical line, then its continuations, then an
+# optional `$` comment.
+Line       <- blank* ![+*$] Piece more* comment? eolx
+more       <- glue_break Glue
+            / keep_break Piece
+            / plus_break Piece?
+
+# L6: a trailing `\\` joins the next line with nothing between; a trailing
+# `\` after a blank joins it keeping the blank. Neither line needs a `+`. On
+# the last line the break joins nothing and is dropped.
+glue_break <- blank* '\\\\' blank* eolx blank*
+keep_break <- blank+ '\\' blank* eolx
+
+# L5: `+` as the first non-blank character continues the statement, past
+# any comment and blank lines in between.
+plus_break <- comment? eol skip* blank* '+'
+
+Piece      <- chunk+
+Glue       <- chunk*
+
+# T1: blanks, comma, `=` and parentheses separate tokens; L6: a blank run
+# right before a trailing `\` or `\\` belongs to the break, not to the text.
+chunk      <- quoted / sep / numtok / word
+sep        <- blank+ !('\\' blank* eolx) !('\\\\' blank* eolx) / [,=()]
+
+# L3: `$` starts a comment after a separator or right after a number
+# (`1k$c` is 1k, `1w$c` is 1 with the unit `w`); inside a name it is a name
+# character (`a$b`).
+numtok     <- [+\-]? (digit+ ('.' digit*)? / '.' digit+) ([eEdD] [+\-]? digit+)? [a-zA-Z]* &'$'
+word       <- !'$' !glue_end wchar (!glue_end wchar)*
+wchar      <- ![ \t,=()'"\r\n] .
+glue_end   <- '\\\\' blank* eolx
+comment    <- '$' (!eol .)*
+
+# T2: `'...'` and `"..."` quote; `$` is not a comment inside (XDM), and L6
+# continues a quoted string too (the oracle removes the break when it joins).
+quoted     <- "'" (qbreak / !"'" !eol .)* "'"
+            / '"' (qbreak / !'"' !eol .)* '"'
+qbreak     <- '\\\\' blank* eol blank*
+            / blank '\\' blank* eol
+
+digit      <- [0-9]
+blank      <- [ \t]
+eol        <- '\r'? '\n'
+eolx       <- eol / !.

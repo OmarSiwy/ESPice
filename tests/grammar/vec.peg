@@ -1,0 +1,82 @@
+# HSPICE digital vector file (`.vec`): file bytes -> statements. Source:
+# dev/research/data-file-syntax.md §3 (SA = HSPICE Simulation and Analysis
+# User Guide Ch.9 p.261-271, CR = Command Reference Ch.4 p.735-766);
+# checked against `vec.expand`, through `.vec` expansion, by
+# tests/grammar/vec_check.zig.
+#
+# Captures: one row per statement (Radix Vname Io Tunit Period Tskip Enable
+# Cbc Wave Vref Row) and its fields (Digits Bus Id Group From To IoChars
+# Mult Unit Num TKey RKey SNum Mask Node Cell Verilog).
+#
+# Rules outside the grammar, which the lowering checks (§3 "Constraints"):
+# RADIX comes first and once; VNAME names fill the RADIX bits in order, a
+# bus |from - to| + 1 bits and a plain name one single-bit digit; IO and
+# every mask carry one character per radix digit; a row carries one state
+# per digit after its time (none under PERIOD unless TSKIP); row times
+# increase. ESPice's own choices: with no VNAME, vector k is `vk` and a
+# multi-bit one's bits are `vk[w-1]`..`vk[0]`; the time group and the
+# levels take plain numbers, OUT and TRIZ HSPICE numbers (open question 10).
+
+File       <- (skipln / stmt)* !.
+
+# SA p.268: `;` comments to the end of the line; a line starting with `+`
+# continues the statement, and blank or comment lines between do not end it.
+stmt       <- blank* !'+' statement s? eos
+eos        <- comment? ('\r'? '\n' / !.)
+skipln     <- blank* comment? '\r'? '\n' / blank+ comment? !. / comment !.
+s          <- (blank+ / comment? '\r'? '\n' (blank* comment? '\r'? '\n')* blank* '+')+
+comment    <- ';' (!'\n' .)*
+blank      <- [ \t]
+tchar      <- ![ \t\r\n;] .
+
+# Keywords are case-insensitive (SA p.261) and come before the data row,
+# which under PERIOD may start with a letter.
+statement  <- Radix / Vname / Io / Tunit / Period / Tskip / Enable / Cbc / Wave / Vref / Row
+
+# CR p.744: each digit 1-4 is one vector of that many bits, glued or spaced.
+Radix      <- 'radix'i !tchar (s Digits)+
+Digits     <- [1-4]+ !tchar
+
+# CR p.759-760: `id`, or a bus whose innermost `[from:to]` is the range,
+# expanded in the order written, inside any balanced `[] {} () <>`.
+Vname      <- 'vname'i !tchar (s (Bus / Id !tchar))+
+Bus        <- Id Group !tchar
+Group      <- '[' From ':' To ']' / '[' Group ']' / '{' Group '}' / '(' Group ')' / '<' Group '>'
+From       <- [0-9]+
+To         <- [0-9]+
+Id         <- [a-zA-Z_] [a-zA-Z0-9_]*
+
+# CR p.739: input, output, bidirectional, unused, one per vector.
+Io         <- 'io'i !tchar (s IoChars)+
+IoChars    <- [iobuIOBU]+ !tchar
+
+# CR p.755-756: `tunit 999ns`, `tunit .99 ps`; not `tunit .99eps`.
+Tunit      <- 'tunit'i !tchar s (Mult s?)? Unit !tchar
+Mult       <- ([0-9]+ ('.' [0-9]*)? / '.' [0-9]+) ([eE] [+\-]? [0-9]+)?
+Unit       <- [fpnumFPNUM] [sS]
+
+# CR p.743, p.754.
+Period     <- 'period'i !tchar s Num
+Tskip      <- 'tskip'i !tchar
+
+# CR p.736, SA p.267: bidirectional control, which ESPice does not read.
+Enable     <- 'enable'i !tchar s '~'? Id !tchar (s Mask)*
+Cbc        <- 'option'i !tchar s 'cbc'i !tchar
+
+# CR p.737-766: `KEY value [mask]`, a mask hex digit per radix digit. OUT
+# and TRIZ take HSPICE numbers (`TRIZ 15.1Meg`, CR p.753).
+Wave       <- TKey s Num (s Mask)* / RKey s SNum (s Mask)*
+TKey       <- ('tdelay'i / 'idelay'i / 'odelay'i / 'slope'i / 'trise'i / 'tfall'i
+            / 'vih'i / 'vil'i / 'voh'i / 'vol'i / 'vth'i) !tchar
+RKey       <- ('outz'i / 'out'i / 'triz'i) !tchar
+Vref       <- 'vref'i !tchar s Node (s Mask)*
+Node       <- tchar+
+Mask       <- [0-9a-fA-F]+ !tchar
+Num        <- [+\-]? Mult !tchar
+SNum       <- [+\-]? Mult [a-zA-Z]* !tchar
+
+# SA p.262-265: `[time] states...`; a state digit per radix digit, blanks
+# only grouping them, or a Verilog-sized value.
+Row        <- Cell (s Cell)*
+Cell       <- Verilog / tchar+
+Verilog    <- [0-9]+ "'" [bBoOhH] [0-9a-fA-FxXzZ_]+ !tchar

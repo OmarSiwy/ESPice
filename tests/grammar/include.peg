@@ -1,0 +1,108 @@
+# Include expansion: a file's physical lines -> the lines that pull other
+# files in, before any line joining. Sources: dev/research/hspice-syntax.md
+# and ngspice-syntax.md (`.include`, `.lib`, `.load`, `.vec`, `.data`),
+# spectre-syntax.md §3.1-§3.4 (`include`, `library`, `section`, `simulator
+# lang=`), and the doc comments of src/frontend/source.zig, whose `expand`
+# and `expandSpectre` tests/grammar/include_check.zig checks this against.
+#
+# One row per physical line (a Spectre `include` continued with `\` spans
+# its lines). Captures the oracle reads:
+#   SPICE    Title Include Lib Endl Load LoadPair LoadTail Vec Data Merge
+#            EndData Option Search Other; arguments Quoted Word Missing BadArg
+#   Spectre  Title Region SpiceOn RegionLine SInclude IncFile IncSection
+#            SecName IncBad Section SName EndSection Library EndLibrary Other
+#   ModeSniff, which an included Spectre-side file matches when it opens with
+#   `simulator lang=spectre`.
+
+# --- SPICE (ngspice, HSPICE) ----------------------------------------------
+
+# Line 1 of the top deck is the title, opaque even when it reads `.include`.
+SpiceDeck  <- Title ('\n' sbody)? !.
+SpiceFile  <- sbody !.
+Title      <- [^\n]*
+sbody      <- sline ('\n' sline)*
+
+# A directive is the line's first blank-separated word, any case; anything
+# else passes through.
+sline      <- [ \t]* (Include / Lib / Endl / Load / Vec / Data / EndData / Option) / Other
+Other      <- [^\n]*
+kend       <- &([ \t] / eolx)
+
+# `.include file` / `.inc file`: one argument, the rest of the line unread.
+Include    <- ('.include'i / '.inc'i) kend arg [^\n]*
+# `.lib file section` reads a section of a file; `.lib name` opens section
+# `name`, closed by `.endl` (whose name ngspice does not check).
+Lib        <- '.lib'i kend arg arg [^\n]*
+Endl       <- '.endl'i kend [^\n]*
+# HSPICE `.load [FILE=f] [RUN=r]`: inlines a saved `.ic0`; any other field
+# is an error, so the unread tail is captured.
+Load       <- '.load'i kend ([ \t]* LoadPair)* LoadTail
+LoadPair   <- Key [ \t]* '=' arg
+Key        <- wchar+
+LoadTail   <- [^\n]*
+# HSPICE `.vec file`: a digital vector file, turned into sources.
+Vec        <- '.vec'i kend arg [^\n]*
+# `.data name MER|LAM` reads external files up to `.enddata`; any other
+# `.data` is an inline table and passes through.
+Data       <- '.data'i kend [ \t]* field? [ \t]* (Merge / field?) [^\n]*
+Merge      <- ('mer'i / 'lam'i) &([ \t=(),'"] / eolx)
+EndData    <- '.enddata'i kend [^\n]*
+
+# HSPICE `.option search=dir`: where `.include` and `.load` look next. Read
+# off the top deck, field by field: a `key=value` pair consumes its value.
+Option     <- ('.options'i / '.option'i / '.opt'i) &([ \t=(),'"] / eolx) ([ \t]* (Search / pair / field))* [^\n]*
+Search     <- 'search'i !wchar [ \t]* '=' [ \t]* ![$;] (Quoted / Word)
+pair       <- wchar+ [ \t]* '=' [ \t]* ![$;] (qraw / wchar+)
+
+# A file or section argument: quoted (to its quote, or the end of the
+# line), a bare word, missing (end of line or a `$`/`;` comment), or a
+# punctuation field, which is an error.
+arg        <- [ \t]* (Missing / Quoted / BadArg / Word)
+Missing    <- &([$;] / eolx)
+Quoted     <- qraw
+BadArg     <- [=(),]
+Word       <- wchar+
+qraw       <- '"' [^"\n]* '"'? / "'" [^'\n]* "'"?
+field      <- qraw / [=(),] / wchar+
+wchar      <- ![ \t=(),'"\n] !eolx .
+eolx       <- [ \t\r]* ('\n' / !.)
+
+# --- Spectre --------------------------------------------------------------
+
+SpectreDeck <- Title ('\n' tbody)? !.
+SpectreFile <- tbody !.
+tbody      <- tstmt ('\n' tstmt)*
+
+# §3.1: `simulator lang=spice` holds until `simulator lang=spectre`; the
+# region's lines are SPICE (read by the rules above), the switch back is a
+# Spectre line.
+tstmt      <- Region / [ \t]* (SInclude / Section / EndSection / Library / EndLibrary) / Other
+Region     <- [ \t]* SpiceOn ('\n' !([ \t]* spectre_on) RegionLine)*
+SpiceOn    <- 'simulator'i [ \t]+ 'lang'i [ \t]* '=' [ \t]* 'spice'i !swchar [^\n]*
+spectre_on <- 'simulator'i [ \t]+ 'lang'i [ \t]* '=' [ \t]* 'spectre'i !swchar
+RegionLine <- [^\n]*
+swchar     <- ![ \t=(),"\n] !eolx .
+
+# §3.3: `include "file" [section=name] [// comment]`; the name must be
+# quoted. A `\` ending the line (an odd run, outside a `//` comment)
+# continues the statement (§1.4). Anything else after `include` and a
+# blank is malformed.
+SInclude   <- 'include' (bsnl / [ \t])+ !eolx (IncFile sp (IncSection sp)? ('//' [^\n]*)? &eolx [^\n]* / IncBad)
+sp         <- (bsnl / [ \t])*
+bsnl       <- '\\' [ \t]* '\r'? '\n'
+IncFile    <- '"' (bsnl / [^"\n])* '"'
+IncSection <- 'section' sp '=' sp SecName
+SecName    <- (!bsnl ![ \t/\n] !eolx .)+
+IncBad     <- [^\n]*
+
+# §3.4: a library file's `library`/`endlibrary` wrapper and its sections,
+# matched by name, case kept.
+Section    <- 'section' kend [ \t]* SName? [^\n]*
+SName      <- (![ \t\n] !eolx .)+
+EndSection <- 'endsection' kend [^\n]*
+Library    <- 'library' kend [^\n]*
+EndLibrary <- 'endlibrary' kend [^\n]*
+
+# §3.3: an included file reads in Spectre mode when its first non-blank
+# line switches to Spectre (or its name ends in `.scs`).
+ModeSniff  <- ([ \t]* [\r\n])* [ \t]* spectre_on .*

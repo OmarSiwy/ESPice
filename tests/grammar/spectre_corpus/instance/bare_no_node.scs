@@ -1,0 +1,4 @@
+// No-node instances (optical ports): `name master param=value` with no
+// connection nodes at all.
+opt opticalport struct=opt
+opt2 opticalport struct=opt

@@ -1,0 +1,8 @@
+// node-voltage checks: assert statements inside a structural if
+simulator lang=spectre
+if (gbv_f == 1) {
+    vds_check assert dev=nfet expr="re(V(d,s))" min=-pvdslim max=pvdslim \
+        message="Vds exceeds limit" duration=duration_gbv level=warning
+    vgs_check assert dev=nfet expr="re(V(g,s))" min=-pvglim max=pvglim \
+        message="Vgs exceeds limit" duration=duration_gbv level=warning
+}

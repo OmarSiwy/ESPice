@@ -412,6 +412,16 @@ pub fn build(b: *std.Build) void {
     }
     b.step("test-c-api", "Run C ABI boundary tests").dependOn(&run_c_api_tests.step);
 
+    // The grammar oracle: each tests/grammar/*.peg against the frontend, over
+    // the fixture corpus (read from the repo root) and generated inputs.
+    const run_grammar = t.run(M.make(b.path("tests/grammar/root.zig"), &.{
+        .{ .name = "netlist", .module = netlist_mod },
+        .{ .name = "wfit", .module = M.make(b.path("src/frontend/wfit.zig"), &.{core_import}) },
+    }), &.{}, false);
+    run_grammar.setCwd(b.path("."));
+    b.step("test-grammar", "Check every input grammar against the frontend").dependOn(&run_grammar.step);
+    test_step.dependOn(&run_grammar.step);
+
     // The correctness and benchmark runners share one build-time fixture catalog.
     const fixture_catalog = @import("tests/fixture_catalog.zig").create(b);
     const fixture_imports: []const std.Build.Module.Import = &.{.{ .name = "fixture_catalog", .module = fixture_catalog }};

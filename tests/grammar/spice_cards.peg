@@ -1,0 +1,139 @@
+# SPICE cards: logical lines -> statements. Shared by the ngspice and HSPICE
+# dialects, which ESPice reads with one card table (src/frontend/netlist.zig
+# `cards`); `ngspice.peg` and `hspice.peg` add the rules that differ (numbers,
+# quoting, expressions). Input: the lines stage's logical lines, lowercased,
+# each ended by `\n`; the title is not part of it.
+#
+# Sources: dev/research/ngspice-syntax.md (§ numbers), hspice-syntax.md (rule
+# ids). `# ESPice:` marks where ESPice reads more than the dialect does.
+#
+# Captures the lowering reads (tests/grammar/lower.zig):
+#   statements  Element Model Subckt Param Func Options Temp Ic Nodeset Global
+#               Include Save Analysis Cond Control Block Other
+#   fields      Name Word Number Pair Key Group Expr Str
+# A field list is what both readers share: positional values and `key=value`
+# pairs in card order, `name(args)` groups, `{...}`/quoted expressions.
+
+Deck       <- card*
+card       <- (Subckt / Control / Block / Cond / dotcard / Element) nl
+
+# §2.5, D1: `.subckt name nodes [params:] defaults` ... `.ends [name]`;
+# `.macro`/`.eom` are the same. Definitions nest.
+Subckt     <- ('.subckt' / '.macro') s Name ports nl body Ends
+ports      <- (s? !pairstart !'params:' field)* (s? ('params:' s?)? fields)?
+body       <- (!ends card)*
+ends       <- ('.ends' / '.eom') !namechar
+Ends       <- ends rest
+
+# §4.1: a `.control` block is ngspice's interpreter; its lines are skipped.
+Control    <- '.control' rest nl (!('.endc' !namechar) rest nl)* '.endc' rest
+
+# D4, .data/.enddata and .variation/.end_variation: rows the variant runner
+# reads (src/frontend/variants.zig).
+Block      <- '.data' rest nl (!('.enddata' !namechar) rest nl)* '.enddata' rest
+            / '.variation' rest nl (!('.end_variation' !namechar) rest nl)* '.end_variation' rest
+
+# §4.1, D4: `.if (cond)` ... `.elseif (cond)` ... `.else` ... `.endif`.
+Cond       <- '.if' s? cond nl body (Elseif nl body)* (Else nl body)? '.endif' rest
+Elseif     <- '.elseif' s? cond
+Else       <- '.else' rest
+cond       <- '(' x Ternary x ')' rest / Ternary rest
+
+dotcard    <- Model / Param / Func / Options / Temp / Ic / Nodeset / Global
+            / Include / Save / Analysis / Other
+
+# §4.1, D2: `.model name type [(] params [)]`; parentheses and commas are
+# separators. A CPL or W model's matrices are blank-separated numbers
+# (`c=1e-10 -6e-11 1e-10`: three entries, not a subtraction), so their keys
+# take one token each (`LPair`); ESPice reads them so (netlist.zig readModel).
+Model      <- '.model' s Name s &(('cpl' / 'w') !wordchar) Word (s? (LPair / field))*
+            / '.model' s Name s Word fields?
+LPair      <- &(('lo' / 'co' / 'ro' / 'go' / 'rs' / 'gd' / [lcrg]) !namechar) Key s? '=' s? (Expr / Word)
+
+# §2.3, X4: `.param a=1 b='a*2' f(x)='x*2'`.
+Param      <- ('.parameters' / '.parameter' / '.param') (s (Assign / FuncDef))+
+Assign     <- Key s? '=' s? value
+FuncDef    <- Key s? '(' s? (Key (s? ',' s? Key)*)? s? ')' s? '=' s? value
+
+# §2.4: `.func name(args) [=] body`.
+Func       <- '.func' s Key s? '(' s? (Key (s? ',' s? Key)*)? s? ')' s? ('=' s?)? value
+
+# §4.3: `.options a=1 b`.
+Options    <- ('.options' / '.option' / '.opts' / '.opt') fields?
+
+# §4.2: `.temp t` (HSPICE: a list, each run once).
+Temp       <- ('.temperature' / '.temp') (s? '=')? fields?
+
+# §4.4: `.ic v(n)=x ...`; `.dcvolt` is `.ic`.
+Ic         <- ('.ic' / '.dcvolt') fields?
+Nodeset    <- '.nodeset' fields?
+
+Global     <- '.global' fields?
+
+# §4.1, D3: include-like cards: the path as written. `.include`/`.inc` of a
+# netlist, `.lib` and HSPICE `.load` are expanded before this stage
+# (frontend/source.zig); an `.include` left here names an HDL model.
+Include    <- ('.include' / '.hdl' / '.osdi_include' / '.pre_osdi' / '.verilog') rest
+
+# §4.5: output selection.
+Save       <- '.save' fields?
+
+# §4.6 and the HSPICE analysis forms: `.<kind> fields`. The kind table is
+# the frontend's (`cards` in netlist.zig); each card's own argument rules
+# are the analysis builder's, not the card syntax's.
+Analysis   <- '.' Kind !namechar fields?
+Kind       <- 'acphasenoise' / 'acmatch' / 'acxf' / 'ac' / 'dcmatch' / 'dcinc' / 'dcsens' / 'dcxf' / 'dc'
+            / 'disto' / 'envelope' / 'envlp' / 'four' / 'fft' / 'hbac' / 'hbnoise' / 'hbxf'
+            / 'hbosc' / 'hblin' / 'hb' / 'lstb' / 'lin' / 'matex' / 'montecarlo' / 'mc' / 'net'
+            / 'noise' / 'op' / 'pac' / 'phasenoise' / 'pnoise' / 'pss' / 'ptdnoise' / 'pxf' / 'pz'
+            / 'qpss' / 'sens' / 'snac' / 'snnoise' / 'snosc' / 'snxf' / 'sn' / 'sp' / 'stb'
+            / 'tf' / 'trannoise' / 'tran_noise' / 'tran'
+
+# Every other dot card ESPice reads, by its own parser or by ignoring it
+# (netlist.zig `cards` and `variant_cards`): its text is kept, not split
+# into fields. A dot card outside the list is refused, as ngspice refuses one
+# ("unimplemented dot command", §4).
+Other      <- '.' OtherKind !namechar rest
+OtherKind  <- 'measure' / 'meas' / 'jitter' / 'check' / 'dout' / 'biaschk' / 'power' / 'stimuli' / 'stim'
+            / 'store' / 'sample' / 'mosra' / 'appendmodel' / 'connect' / 'pat' / 'print' / 'plot'
+            / 'probe' / 'graph' / 'width' / 'title' / 'protect' / 'unprotect' / 'prot' / 'unprot'
+            / 'step'
+
+# §3.1: `name nodes... tail`: a field list. Which fields are nodes, which
+# the model, is decided by model lookup (§3.1 table), not by syntax.
+Element    <- &[a-zA-Z] Name fields?
+
+# Fields, §1.8: blanks, `,`, `=`, `(` and `)` separate; `=` pairs a key with
+# its value and `(` after a word opens a group.
+# `field` (and `gfield`, a field inside a group) are the dialect file's:
+# a bare `"..."` is a field in ngspice and an expression in HSPICE.
+fields     <- (s? field)+
+pairstart  <- Key s? '=' !'='
+Pair       <- &(pathkey !namechar) Key s? '=' s? Path
+            / &(tolkey !namechar) Key s? '=' s? Word
+            / Key s? '=' s? value
+# HSPICE `DEV[/dist]=` and `LOT[/dist]=` take one word (`30%`), the
+# frontend's devLot reads it raw (hspice-syntax.md D2).
+tolkey     <- ('dev' / 'lot') ('/' [a-z]+)?
+# HSPICE S and W data files (`TSTONEFILE=`, `RLGCFILE=`, `CITIFILE=`): a path,
+# never an expression (`a/b.s2p` is no division).
+pathkey    <- 'tstonefile' / 'rlgcfile' / 'citifile'
+Path       <- Str / (![ \t\n,()] .)+
+# `value`, a pair's value, is the dialect file's: the frontend compiles it
+# as an expression unless it is braced, quoted or a lone number, so
+# `f(1, 2)` there is a call, not a group.
+# Inside a group, `(` opens only a nested group and `)` closes this one.
+Group      <- Word s? '(' s? (gfield (s? gfield)*)? s? ')'
+Name       <- namechar+
+Key        <- [a-zA-Z_] namechar*
+Word       <- Number !wordchar / Ident
+# A bracket pair inside a word is part of it (`b[1]`, a bus bit the `.vec`
+# expansion names); an unpaired `]` ends it (`[1, -1]`).
+Ident      <- (wordchar / '[' wordchar* ']')+
+Str        <- '"' (!'"' .)* '"'
+
+namechar   <- ![ \t\n,=()'"{}] .
+wordchar   <- ![ \t\n,=()'"{}\[\]] .
+s          <- [ \t]+
+rest       <- (!nl .)*
+nl         <- '\n'

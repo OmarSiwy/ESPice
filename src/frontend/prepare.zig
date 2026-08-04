@@ -62,7 +62,8 @@ pub fn parseDialect(name: []const u8) ?Dialect {
 
 /// Reads, expands and flattens `input` into `session`, then loads its HDL
 /// models into `lib`. The netlist borrows `session`; release it once `build`
-/// has returned. Spectre input takes no `.include` expansion. Fails with
+/// has returned. Spectre input expands its `include`s
+/// (`source.expandSpectre`). Fails with
 /// `OsdiUnsupported` on any OSDI include (`pre_osdi`, `osdi`), and with the
 /// file error of an unreadable deck, include or data file.
 pub fn prepare(io: std.Io, lib: *device.Library, session: std.mem.Allocator, input: Source, dialect: Dialect) !netlist.Netlist {
@@ -75,7 +76,7 @@ pub fn prepare(io: std.Io, lib: *device.Library, session: std.mem.Allocator, inp
         .bytes => |bytes| try session.dupe(u8, bytes.data),
     };
     if (dialect == .spectre) {
-        const nl = try netlist.parse(session, raw, dialect);
+        const nl = try netlist.parse(session, try netlist.source.expandSpectre(io, session, origin, raw), dialect);
         try loadModels(io, lib, session, nl.deck.foreign, origin);
         return nl;
     }

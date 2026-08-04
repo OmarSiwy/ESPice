@@ -1,0 +1,2 @@
+// Dotted (hierarchical) node names in a bare instance.
+r1 s1.r1 0 resistor r=1meg

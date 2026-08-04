@@ -1,0 +1,6 @@
+// structural if body with more than one statement (instance + include)
+simulator lang=spectre
+if ( sxcalc > 0 ) {
+    xsub (a b) sxmodel l=1u
+    include "./extra.scs"
+}

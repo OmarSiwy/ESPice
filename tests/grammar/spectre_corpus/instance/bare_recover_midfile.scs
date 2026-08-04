@@ -1,0 +1,5 @@
+// Recovery across a valid parenthesised instance, a bare no-node instance, and
+// a valid parenthesised instance again.
+V1 (1 0) vsource dc=1
+bogus junk here
+R1 (1 0) resistor r=1k

@@ -5,6 +5,20 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 ## Unreleased
 
+- `.vec`: VNAME names fill bits (`radix 144`, `<[4:1]>` groupings), V1, V2... without VNAME, `tunit 2 ns`,
+  IO `u`, TSKIP, Z on outputs; SLOPE defaults to 0.1 ns, VOH/VOL replace VTH, plain numbers only (#121).
+- `--tokenizer=spectre` reads Spectre netlists: a title line, instances, `parameters`, `model` groups,
+  `subckt`, functions, `if`/`else`, `include ... section=`, `simulator lang=spice` regions, tran/dc/ac/noise (#121).
+- HSPICE lines: a `$` line, `$` after a number or comma, and quoted `$` read as HSPICE does; ` \`
+  continues with a blank, `\\` without; a commented line no longer continues (#121).
+- ngspice lines: `#`/`;` comment lines, `//` and quote-aware `;`/`$` comments, `\\` joins, `@` and a stray
+  `+` as ngspice reads them; cards after `.end` are read (#121).
+- Numbers take the `a` (atto) suffix and the `d` exponent; expressions take `%`, `\`, `<>`, `.func`
+  and `.param f(x)=`, and 13 more numparam functions; `.macro`, `.parameters`, `.temperature` (#121).
+- Nested `.subckt` definitions flatten; a diode's thermal node is read; Touchstone and RLGC files
+  are checked as their specs say (option line, record counts, conductor count) (#121).
+- `.data` MER/LAM files resolve through `.option search=`, skip `*`/`$` lines and refuse a cell that
+  is not a number; `.load` defaults to the top deck's `.ic0`, and `FILE=x.ic` means `x.ic0` (#121).
 - API: `Problem.ready_queries` and `copy_result` fail with `error.BufferTooSmall` on a short
   buffer (`ready_count` gives the size); GPU backend messages go through `std.log` (#13).
 - `.dc <param> start stop step` sweeps a `.param` (HSPICE `.DC`), with the parameter as

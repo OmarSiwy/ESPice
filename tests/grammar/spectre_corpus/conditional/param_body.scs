@@ -1,0 +1,7 @@
+// conditionally selected parameter set (parameters block in the body)
+simulator lang=spectre
+if (pcpitch == 3) {
+    parameters
+    + tox_n = 1.87e-09  tox_tol = 0.06e-09
+    + tox = tox_fc - dtox*tox_tol
+}

@@ -1448,7 +1448,12 @@ pub const NetBuilder = struct {
             }
         } else if (kvName(dev.kv, "rlgcfile")) |path| {
             const bytes = self.nl.dataFile(path) orelse return refuseW(dev, "RLGCFILE was not read");
-            n = parseRlgcFile(bytes, &m) catch return refuseW(dev, "malformed RLGC file");
+            const file = wfit.readRlgcFile(bytes) catch |err| return refuseW(dev, switch (err) {
+                error.TooManyConductors => "N must be 1 to 4",
+                error.InvalidRlgcFile => "malformed RLGC file",
+            });
+            n = file.n;
+            for (file.tri[0..file.mats], m.tri[0..file.mats]) |src, *dst| @memcpy(dst[0..src.len], &src);
         } else return refuseW(dev, "only RLGCMODEL= and RLGCFILE= are supported (TABLEMODEL, UMODEL, FSMODEL and SMODEL are not)");
         if (try numericParameter(dev.kv, "n")) |nn| if (nn != @as(f64, @floatFromInt(n))) return refuseW(dev, "N differs from the model's");
         if (dev.pins.len != 2 * n + 2) return refuseW(dev, "the node count is not 2N+2");
@@ -2219,7 +2224,11 @@ fn compileTape(self: *NetBuilder, ops: []const Op, consts: []const f64, model: *
                 model.op_b[n] = @intCast(k / 2);
                 break :blk .pwl;
             },
-            .live => return error.UnsupportedOperand,
+            // The tape has no opcode for numparam's `%` and `\`; they fold
+            // when their operands are constant.
+            .live, .mod, .idiv => return error.UnsupportedOperand,
+            // `subst` resolves every one; none reaches a tape.
+            .ucall => return error.UnsupportedFunction,
             inline else => |c| @field(tape.Code, @tagName(c)),
         };
         model.op_code[n] = code;
@@ -2279,6 +2288,9 @@ fn callCode(f: netlist.expr.Fn, argc: u32) !tape.Code {
         // ponytail: pwr folds when its arguments are constant (sky130's
         // pwr(l,0.5)); a tape opcode is needed only if one reads a probe.
         .pwr, .agauss, .gauss, .unif, .aunif, .limit, .table, .other => error.UnsupportedFunction,
+        // numparam built-ins with no tape opcode: they fold when their
+        // arguments are constant, and a B source reading a probe refuses them.
+        .sqr, .int, .nint, .sgn, .sinh, .cosh, .asin, .acos, .asinh, .acosh, .atanh => error.UnsupportedFunction,
         inline else => |g| @field(tape.Code, @tagName(g)),
     };
 }
@@ -2734,31 +2746,6 @@ fn refuseS(dev: Device, why: []const u8) error{UnsupportedCard} {
     return error.UnsupportedCard;
 }
 
-/// An HSPICE RLGC file [SI Ch.3, Table 4]: N, then the lower triangles of
-/// L, C and optionally Ro, Go, Rs, Gd, as plain numbers (no scale
-/// suffixes). `*` comments to end of line; any of ` \t\n,;()[]{}`
-/// separates. Returns N.
-fn parseRlgcFile(bytes: []const u8, m: *WMatrices) !usize {
-    var nums: [1 + 6 * 10]f64 = undefined;
-    var count: usize = 0;
-    var lines_it = std.mem.splitScalar(u8, bytes, '\n');
-    while (lines_it.next()) |raw| {
-        const line = raw[0 .. std.mem.indexOfScalar(u8, raw, '*') orelse raw.len];
-        var it = std.mem.tokenizeAny(u8, line, " \t\r,;()[]{}");
-        while (it.next()) |t| {
-            if (count == nums.len) return error.InvalidParameterValue;
-            nums[count] = try std.fmt.parseFloat(f64, t);
-            count += 1;
-        }
-    }
-    if (count == 0) return error.InvalidParameterValue;
-    const n: usize = if (nums[0] >= 1 and nums[0] <= 4 and @floor(nums[0]) == nums[0]) @intFromFloat(nums[0]) else return error.InvalidParameterValue;
-    const tri = n * (n + 1) / 2;
-    const mats = (count - 1) / tri;
-    if ((count - 1) % tri != 0 or mats < 2 or mats > 6) return error.InvalidParameterValue;
-    for (0..mats) |k| @memcpy(m.tri[k][0..tri], nums[1 + k * tri ..][0..tri]);
-    return n;
-}
 
 fn kvName(kv: []const Kv, key: []const u8) ?[]const u8 {
     for (kv) |item| if (std.mem.eql(u8, item.key, key)) return switch (item.value) {
@@ -2831,6 +2818,4 @@ pub const test_access = if (@import("builtin").is_test) .{
     .isPortCard = isPortCard,
     .rootProduct = rootProduct,
     .cplVector = cplVector,
-    .parseRlgcFile = parseRlgcFile,
-    .WMatrices = WMatrices,
 } else {};

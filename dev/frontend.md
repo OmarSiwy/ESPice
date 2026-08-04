@@ -388,6 +388,115 @@ past 64 points, as are sensed and port sources.
 Test: `src/tests/espice.zig` (".stim writes PWL sources and a .data
 table"); unconfirmed against HSPICE.
 
+## Spectre dialect
+
+`--tokenizer=spectre` reads Spectre's own language (dev/research/
+spectre-syntax.md, cited by §; tests/grammar/spectre_lines.peg and
+spectre.peg are its grammar). The lines stage is `lines.spectre.Lines`: the
+title line, `*` comments in the first column, `//` comments, `\` and `+`
+continuation, case kept, and HSPICE's line rules inside a `simulator
+lang=spice` region. `/* */` is not a Spectre comment (§1.3) and is not read.
+
+`frontend/spectre.zig` then rewrites each Spectre statement into the SPICE
+card the rest of netlist.zig reads, as `pattern.zig` rewrites a PAT source.
+A Spectre instance name says nothing about its device, so a rewritten
+card's letter is kept beside it (`Kinds`, by line) and its name is kept
+whole: `load (a b) resistor r=1k` is a resistor named `load`.
+
+| Spectre | SPICE card |
+|---|---|
+| `parameters a=1 b` | `.param a=1`; in a subcircuit, defaults on its `.subckt` line (no default: none) |
+| `model m master k=v` | `.model m <type> level=<n> k=v`, the table below; `type=` picks n/p, npn/pnp |
+| `model m master {1: ... 2: ...}` | `.model m.1 ...`, `.model m.2 ...`, binned as ngspice bins (divergence: Spectre takes the first match, `lmin <= l < lmax`) |
+| `[inline] subckt s (a b)` ... `ends` | `.subckt s a b <defaults>` ... `.ends` (`inline` naming is not modeled) |
+| `x1 (n...) master k=v` | the card for the master: a primitive, a model's device, a subcircuit (X), or an `ahdl_include` module (N, with `.model master master`) |
+| `global g n...` | `.global n...`, and ground `g` joined to `0` when it is not `0` |
+| `ic n=v`, `nodeset n=v` | `.ic v(n)=v`, `.nodeset v(n)=v` |
+| `if (c) {` ... `} else {` ... `}` | `.if (c)` ... `.else` ... `.endif` |
+| `real f(real a) { return e }` | `.func f(a) e` |
+| `ahdl_include "f.va"` | `.hdl "f.va"` |
+| `opts options k=v` | `.options k=v`; `temp=` is `.temp`, `vabstol`/`iabstol` are `vntol`/`abstol` |
+| `save ...`, `info`, `set`, `shell`, `check`, `checklimit`, `assert`, `paramtest` | read and not acted on (every vector is written) |
+| `statistics { ... }` | read and set aside, with a warning (no Monte Carlo variations yet) |
+
+Primitives: `resistor` (r), `capacitor` (c), `inductor` (l), `vsource` and
+`isource` (`dc`, `mag`/`phase` as `ac`, `type=pulse|sine|exp|pwl` as the
+SPICE waveform), `vcvs` (`gain`), `vccs` (`gm`), `ccvs` (`probe`, `rm`),
+`cccs` (`probe`, `gain`), `mutual_inductor` (`ind1`, `ind2`, `coupling`),
+`iprobe` (a 0 V source), `bsource` (`v=` or `i=`), `tline` (`z0`, `td`).
+
+| Model master | SPICE type | LEVEL |
+|---|---|---|
+| `resistor`, `capacitor`, `inductor` | r, c, l | |
+| `diode` | d | 1 |
+| `bjt`, `vbic`, `hicum` | npn or pnp | 1, 4, 8 |
+| `mos1`, `mos2`, `mos3` | nmos or pmos | 1, 2, 3 |
+| `bsim3v3`, `bsim4`, `bsimsoi` | nmos or pmos | 8, 54, 10 |
+| `hisim2`, `hisimhv`, `psp103` | nmos or pmos | 68, 73, 1040 |
+| `jfet` | njf or pjf | 1 |
+
+Analyses: `name dc` alone is `.op`; with `dev=`, `param=` (a netlist
+parameter or `temp`), `start`/`stop` and `step`, `lin` (steps) or
+`values=[...]` it is `.dc`. `name ac start= stop=` with `dec`, `lin` or
+`values` is `.ac`. `name tran stop=` with `step`, `start`, `maxstep` is
+`.tran step stop start maxstep`, `step` defaulting to stop/50. `name (p n)
+noise iprobe=src` with an AC sweep is `.noise v(p,n) src ...`. Every other
+analysis, `alter`, `altergroup`, `paramset`, `sweep` and `montecarlo` is
+refused by name, as is `include` until Spectre include expansion lands.
+
+Expressions are parsed with Spectre's precedence (§6.1: unary binds tighter
+than `**`, which is right-associative; `==` below `<`) and written out fully
+parenthesized, so ESPice's expression compiler sees the same tree. Numbers
+are read with Spectre's case-sensitive suffixes and written plain. `M_*` and
+`P_*` constants are their values, `temp` is `temper`, `$time` is `time`,
+`fmod` is `%`, `hypot(a,b)` is `sqrt(a*a+b*b)`. The bitwise and shift
+operators are refused.
+
+## Grammar oracle
+
+`tests/grammar/` holds a PEG grammar for every syntax the frontend reads,
+and a test that runs each input through both the grammar and the frontend
+and compares the results (#121). It works the way Zig checks its parser
+against `doc/langref/grammar.peg`: the grammar is the spec, written once and
+readable, and the hand-written reader has to agree with it.
+`zig build test-grammar` runs it, and `zig build test` includes it.
+
+| Syntax | Grammar | Compared against | Compared on |
+|---|---|---|---|
+| physical → logical lines | `{ngspice,hspice,spectre}_lines.peg` | `lines.Syntax(d).Lines` | logical lines |
+| SPICE cards | `spice_cards.peg` + `ngspice.peg` / `hspice.peg` | `netlist.parse` | canonical netlist (`canon.zig`) |
+| Spectre statements | `spectre.peg` | `netlist.parse(.spectre)` | canonical netlist, via the oracle's own Spectre→SPICE translation (`lower_spectre.zig`) |
+| includes, `.lib`, Spectre `include` | `include.peg` | `source.expand`, `expandSpectre` | expanded lines |
+| external `.data` | `extdata.peg` | `source.expand` | merged table |
+| `.ic0` | `ic0.peg` | the HSPICE card comparison | canonical netlist |
+| `.vec` | `vec.peg` | `vec.expand` | expanded cards |
+| Touchstone, RLGC | `touchstone.peg`, `rlgc.peg` | `sparam.readTouchstone`, `wfit.readRlgcFile` | the parsed file |
+
+`peg.zig` interprets the grammars. CamelCase rules are captured into the
+tree the lowering reads, and lowercase rules are lexical. The lowerings
+(`lower.zig`, `lower_spectre.zig`, `data.zig`, the `*_check.zig` files) are
+independent of the frontend: they share no code with it beyond the
+`Netlist` type that both sides print.
+
+The inputs are the fixture corpus, the vendored Spectre corpus
+(`spectre_corpus/`, from NetlistParse.rs, MIT), a case list per grammar
+rule, and bounded-exhaustive enumerations of small inputs. Each test has
+three gates:
+
+- the two readers agree on every input, or both refuse it;
+- the frontend refuses nothing the oracle reads, and the other way round;
+- every grammar alternative matched at least once (`peg.gaps`). A gap means
+  a rule nobody tests, or one the stage before makes unreachable; add a
+  case, or delete the alternative.
+
+To add syntax: write the rule in the grammar with its source (manual page
+or research section), add the case that reaches it, lower it in the
+oracle, then make the frontend agree. Where ESPice deliberately reads
+something differently from the manual, the grammar comment says so with
+`ESPice:` or `ponytail:`. `spectre_divergences` in `root.zig` lists the
+corpus decks the Spectre grammar reads differently from NetlistParse.rs,
+with the reason for each.
+
 ## PDK conveniences
 
 These follow ngspice 45, because the open PDKs (sky130, GF180, IHP SG13G2)

@@ -1,0 +1,23 @@
+# HSPICE `.ic0`: the operating point `.save` writes and `.load` inlines.
+# Sources: dev/research/data-file-syntax.md §5 (CR .SAVE p.266-267, .LOAD
+# p.158-159; SA Appendix B, Example.ic0 p.910). The file is netlist text,
+# so after this check its cards go through the HSPICE card oracle.
+#
+# Captures: Ic0File; Option, Init (Kind, Assign (Node, Value)).
+
+Ic0File    <- (line nl)* line? !.
+line       <- s? (Comment / Option / Init)? s?
+Comment    <- '*' (!nl .)*
+# SA p.910: `.option` then `+ gmindc= 1.0000p`.
+Option     <- '.option'i (s Assign)* cont*
+# CR p.228, p.138: `.nodeset`/`.ic`, bare `node= value` or `v(node)=value`;
+# HSPICE writes one `+` line per node, ESPice one card per node.
+Init       <- Kind (s Assign)* cont*
+Kind       <- '.nodeset'i / '.ic'i
+cont       <- s? nl s? '+' (s? Assign)+
+Assign     <- ('v'i '(' Node ')' / Node) s? '=' s? Value
+Node       <- (![ \t\r\n=()] .)+
+# T3: an HSPICE number (`0.`, `1.0000p`, `2.5e-1`).
+Value      <- [+\-]? ([0-9]+ ('.' [0-9]*)? / '.' [0-9]+) ([eEdD] [+\-]? [0-9]+)? [a-zA-Z]*
+s          <- [ \t]+
+nl         <- '\r'? '\n'

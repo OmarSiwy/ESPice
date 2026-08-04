@@ -1,0 +1,67 @@
+# ngspice: physical lines -> the title and logical statements.
+#
+# The executable spec of the line layer in dev/research/ngspice-syntax.md §1
+# (section numbers below), checked against `lines.ngspice.Lines` by
+# tests/grammar/lines.zig. Case is folded after this stage (§1.4).
+#
+# Captures: Title; Line, one logical statement, made of Piece (joined to
+# the previous part with a blank: ngspice joins every continuation so).
+
+File       <- Title (eol body)? !.
+
+# §1.2: line 1 of the top-level file is the title, whatever it holds.
+Title      <- (!eol .)*
+
+body       <- (stop / Line / skip)*
+
+# §1.3: a line whose first non-blank character is `@` ends the file.
+stop       <- blank* '@' .*
+
+# §1.5: a comment line. `*`, `#`, `$` and `;` are silent; the punctuation
+# `= [ ] ? ( ) & % " ! : ,` and form feed are turned into comments with a
+# warning. §1.3: blank lines are dropped. §1.6: a `+` line with no statement
+# to continue is ignored ("Illegal continuation line").
+skip       <- blank* [*#$;=\[\]?()&%"!:,\x0c] (!eol .)* eolx
+            / end
+            / blank* eol
+            / blank+ !.
+            / blank* '+' (!eol .)* eolx
+
+# §1.7: `.end` (alone or followed by a blank) becomes a comment, and
+# reading goes on: a card after it is still in the circuit.
+end        <- blank* '.end'i ![^ \t\r\n] (!eol .)* eolx
+
+# A statement: its first physical line, then its continuations.
+Line       <- blank* ![+*#$;@=\[\]?()&%"!:,\x0c] !end !eolx Piece comment? more* eolx
+
+# §1.6: `+` as the first non-blank character continues the statement, past
+# comment and blank lines; a trailing `\\` continues it too (the backslashes
+# become blanks), even after an end-of-line comment, which is stripped later.
+more       <- glue_break blank* Piece comment?
+            / eol skip_cont* blank* '+' Piece comment?
+glue_break <- '\\\\' blank* eolx
+skip_cont  <- blank* [*#$] (!eol .)* eol / blank* eol
+
+Piece      <- chunk*
+chunk      <- quoted ('$' wchar*)? / sepr / word
+sepr       <- [ \t,]
+# A `$` inside a word is a name character (`a$b`), and so is one right
+# after a closing quote; one that would start a word follows a separator
+# and starts a comment instead.
+word       <- !'$' wchar+
+wchar      <- !sepr !';' !'//' !glue_end !eol !['"] .
+glue_end   <- '\\\\' blank* eolx
+
+# §1.5: end-of-line comments, outside quotes: `$` after a blank, tab or
+# comma; `;` and `//` anywhere. Braces do not protect them.
+comment    <- ('$' / ';' / '//') (!glue_end !eol .)*
+
+# §1.5, §1.9: single and double quotes protect comment characters; a
+# backslash escapes the quote. An unclosed quote protects the rest of the
+# line, short of a trailing `\\`, which pass 2 has already taken.
+quoted     <- "'" (!glue_end ('\\' !eol !glue_end . / !"'" !eol .))* ("'" / &(glue_end / eolx))
+            / '"' (!glue_end ('\\' !eol !glue_end . / !'"' !eol .))* ('"' / &(glue_end / eolx))
+
+blank      <- [ \t\r]
+eol        <- '\r'? '\n'
+eolx       <- eol / !.

@@ -1,0 +1,5 @@
+// A no-node instance whose master looks like an analysis keyword. With no
+// parentheses the name+master is an instance, not an analysis: Spectre keeps
+// the keyword/identifier distinction in the parser, and only a leading name
+// immediately followed by the keyword makes an analysis.
+probe1 transient stop=1u

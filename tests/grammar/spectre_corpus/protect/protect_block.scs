@@ -1,0 +1,9 @@
+//pragma protect begin_protected
+//pragma protect data_method   = AES
+//pragma protect data_keyowner = Cadence Design Systems.
+//pragma protect data_keyversion = 4
+//pragma protect data_block
+QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo+
+bW9yZSBnYXJiYWdlLWJhc2U2NC1kYXRhLys=
+//pragma protect end_protected
+model nch bsimsoi type=n

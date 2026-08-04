@@ -1,0 +1,4 @@
+// `assert` named control statement, with a line continuation
+vds_check assert dev=nfet expr="re(V(d,s))" min=-pvds max=pvds
+vgs_check assert dev=nfet expr="re(V(g,s))" min=-pvgs \
+    max=pvgs

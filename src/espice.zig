@@ -157,7 +157,12 @@ pub const Problem = struct {
         self.save_path = null;
         self.out_dir = try a.dupe(u8, if (options.output.path) |out| std.fs.path.dirname(out) orelse "." else ".");
         if (self.prepared.deck.save_op) |save| {
-            const name = save.file orelse try std.mem.concat(a, u8, &.{ std.fs.path.stem(self.origin), ".ic0" });
+            // `FILE=x.ic` names the `.ic#` family (one file per `.alter` run in
+            // HSPICE); ESPice writes `#` = 0, which `.load FILE=x.ic` reads.
+            const name = if (save.file) |f|
+                try std.mem.concat(a, u8, &.{ f, if (std.ascii.eqlIgnoreCase(std.fs.path.extension(f), ".ic")) "0" else "" })
+            else
+                try std.mem.concat(a, u8, &.{ std.fs.path.stem(self.origin), ".ic0" });
             self.save_path = try std.fs.path.resolve(a, &.{ self.out_dir, name });
         }
         self.delivery = try output.Session.init(allocator, options.output);

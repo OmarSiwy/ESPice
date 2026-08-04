@@ -1,0 +1,6 @@
+// model library with a nested section (PDK `allModels.scs` shape)
+library global
+section cmos
+model nch bsimsoi type=n
+endsection cmos
+endlibrary global

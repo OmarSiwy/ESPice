@@ -20,13 +20,20 @@ element cards
 ```
 
 Logical lines: a line starting with `+` continues the one before it.
-Comments: `*` at the start of a line; `$` or `;` cuts the rest of a line
-(ngspice dialect). The [dialects](dialects.md) page has the HSPICE and
+Comments: `*` at the start of a line; `;` cuts the rest of a line, and so
+do `$` and `//` after a blank or a comma, outside quotes (ngspice dialect). The [dialects](dialects.md) page has the HSPICE and
 Spectre rules.
 
-Values: a number with an optional scale suffix (`t g meg k m mil u n p f`,
-any case; `m` is milli), a parameter name, `{expression}` or
-`'expression'`.
+Values: a number with an optional scale suffix (`t g meg k m mil u n p f a`,
+any case; `m` is milli; `1d-3` is `1e-3`), a parameter name, `{expression}`
+or `'expression'`.
+
+Expressions: `+ - * / ^ **`, `%` (remainder) and `\` (integer division),
+`== != <> < <= > >=`, `&& || !` and `?:`, with `sqrt exp ln log log10 abs
+floor ceil min max pow sin cos tan atan` (or `arctan`) `tanh ternary_fcn`.
+Values that fold to a constant also take `pwr sqr int nint sgn sinh cosh
+asin acos asinh acosh atanh`, `%`, `\` and the user functions of `.func`;
+a behavioural source reading a probe refuses those.
 
 Nodes: any word or number; `0`, `gnd` and `ground` are ground. Names inside
 a subcircuit instance are prefixed with the instance path (`x1.n3`).
@@ -127,9 +134,11 @@ selected by the instance's L and W; `.option scale=` scales them.
 
 | Card | Syntax | Notes |
 |---|---|---|
-| `.end` | `.end` | ends the deck; later lines are ignored |
+| `.end` | `.end` | HSPICE: ends the deck. ngspice dialect: skipped, and the cards after it are read, as in ngspice |
 | `.subckt` / `.ends` | `.subckt name ports... [p=v ...]` ... `.ends [name]` | nested up to 32 levels |
-| `.param` | `.param name=value [name=value ...]` | global at top level, per instance inside a subcircuit |
+| `.param` | `.param name=value [name=value ...]` | global at top level, per instance inside a subcircuit; also `.parameter`, `.parameters` |
+| `.func` | `.func name(a, b) {expr}`, or `.param name(a, b)=expr` | a user function, expanded where it is called |
+| `.macro` / `.eom` | as `.subckt` / `.ends` | |
 | `.model` | `.model name type [(]params[)]` | |
 | `.global` | `.global n1 n2 ...` | nets shared through every subcircuit level |
 | `.connect` | `.connect a b` | joins two top-level nets |
@@ -144,7 +153,7 @@ selected by the instance's L and W; `.option scale=` scales them.
 | `.endl` | `.endl [section]` | closes the open section |
 | `.hdl` | `.hdl "model.va"` | compiles and loads a Verilog-A (or Verilog `.v`) module |
 | `.verilog` | `.verilog "design.v"` | loads a digital Verilog design |
-| `.load` | `.load [FILE=]f [RUN=]` | HSPICE: pastes a saved `.ic`/`.nodeset` file; skipped with a warning when missing |
+| `.load` | `.load [FILE=]f [RUN=]` | HSPICE: pastes a saved `.ic`/`.nodeset` file, `<deck>.ic0` by default and `x.ic0` for `FILE=x.ic`; skipped with a warning when missing |
 | `.vec` | `.vec 'file'` | HSPICE digital vector file, rewritten to PWL sources and `.dout` checks |
 | `.alter` | `.alter` ... | HSPICE: the cards after it modify the deck for one more run; blocks are cumulative |
 | `.osdi_include`, `.pre_osdi` | | refused: OSDI is never loaded |
@@ -190,7 +199,7 @@ Other names are ignored (the HSPICE dialect warns about each).
 | `.ic` | `.ic v(n1)=v1 v(n2)=v2 ...` | the start state of a `.tran ... uic` |
 | `.dcvolt` | `.dcvolt v(n)=v ...` or `.dcvolt n v ...` | the same as `.ic` |
 | `.nodeset` | `.nodeset v(n)=v ...` | a starting guess for the operating point's first Newton solve |
-| `.temp` | `.temp t` | one value: the circuit temperature. Three values (ngspice): a temperature sweep analysis. A list (HSPICE): every analysis at each |
+| `.temp`, `.temperature` | `.temp t` | one value: the circuit temperature. Three values (ngspice): a temperature sweep analysis. A list (HSPICE): every analysis at each |
 
 ### Output
 

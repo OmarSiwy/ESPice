@@ -9,7 +9,8 @@ espice --tokenizer=spectre deck.scs   # or scs
 ```
 
 The dialect is a property of the whole run: an `.include`d file is read in
-the same dialect as the deck that includes it. All three share one card
+the same dialect as the deck that includes it (a Spectre `include` picks
+Spectre or SPICE mode per file, below). All three share one card
 table, so most of the language is the same; the dialect changes how lines
 are split and a handful of meanings.
 
@@ -17,20 +18,21 @@ are split and a handful of meanings.
 
 | | ngspice | HSPICE | Spectre |
 |---|---|---|---|
-| First line | title | title | a card (no title) |
+| First line | title | title | title |
 | Case | ignored | ignored | kept |
-| Line comment | `*` at line start | `*` at line start | `//`, or `*` at line start |
-| Inline comment | `$` or `;` anywhere | `$` after a blank | `//`, and `/* ... */` |
-| Continuation | `+` on the next line | `+` on the next line, or `\\` at line end | `+` on the next line, or `\` at line end |
-| Quotes | `'...'` | `'...'` and `"..."` | `"..."` |
-| Expressions | `{...}`, `'...'` or a bare parameter name | `'...'` or a bare parameter name; braces are not read | as ngspice |
+| Statements | SPICE cards | SPICE cards | Spectre statements; SPICE cards after `simulator lang=spice` |
+| Line comment | `*`, `#` or `;` at line start | `*` or `$` at line start | `*` in the first column, or a `//` line |
+| Inline comment | `;` anywhere; `$` or `//` after a blank or comma | `$` after a blank, a comma or a number | `//` |
+| Continuation | `+` on the next line; `\\` at line end joins with no blank | `+` on the next line; ` \` at line end, or `\\` to join with no blank | `+` on the next line, or `\` at line end |
+| Quotes | `'...'` and `"..."` keep comment characters | `'...'` and `"..."` keep `$` | `"..."` strings |
+| Expressions | `{...}`, `'...'` or a bare parameter name | `'...'` or a bare parameter name; braces are not read | bare (`r=2*a`) |
 | `M` / `m` suffix | milli, either case | milli, either case | `M` mega, `m` milli |
 | `x` suffix | none | mega | none |
-| `.include`, `.lib`, `.alter` | yes | yes | no |
+| Includes, `.alter` | `.include`, `.lib`, `.alter` | `.include`, `.lib`, `.alter` | `include "f" [section=s]`; no `.alter` |
 | Default TNOM, circuit temperature | 27 °C, 27 °C | 25 °C, run at TNOM | 27 °C, 27 °C |
 
-The ngspice and HSPICE suffix tables are `t g meg k m mil u n p f`
-(case-insensitive). Spectre's are case-sensitive: `P` (peta), `T`, `G`,
+The ngspice and HSPICE suffix tables are `t g meg k m mil u n p f a`
+(case-insensitive), and `d` works as an exponent (`1d-3`). Spectre's are case-sensitive: `P` (peta), `T`, `G`,
 `M` (mega), `K` or `k`, `m` (milli), `u`, `n`, `p`, `f`, `a` (atto), and
 `%` or `c` for 10^-2.
 
@@ -130,13 +132,33 @@ collides with an ngspice spelling:
 
 ## Spectre
 
-`--tokenizer=spectre` reads SPICE cards with Spectre's lexical rules: no
-title line, case kept (so `R1` and `r1` are different elements),
-C-style comments and Spectre's case-sensitive suffixes. The card syntax is
-still SPICE's (`R1 a b 1K`, `.ac dec 10 10 1M`); Spectre's own instance
-syntax (`r1 (a b) resistor r=1k`), `simulator lang=` switching and its
-analysis statements are not read. `.include`, `.lib` and `.alter` are not
-expanded in this dialect.
+`--tokenizer=spectre` reads Spectre netlists: the first line is the title
+and case is kept (`R1` and `r1` are different elements). ESPice reads each
+Spectre statement as the SPICE card it stands for, so a Spectre deck and its
+SPICE counterpart build the same circuit. It reads:
+
+- instances, `name (nodes) master key=value ...` (parentheses optional),
+  of the primitives (`resistor`, `capacitor`, `inductor`, `vsource`,
+  `isource`, `vcvs`, `vccs`, `ccvs`, `cccs`, `mutual_inductor`, `iprobe`,
+  `bsource`, ...), of models, of subcircuits and of `ahdl_include`d
+  Verilog-A modules;
+- `parameters`, `model` (with `{ 1: ... 2: ... }` bin groups), `subckt` /
+  `inline subckt` ... `ends`, `real f(real a) { return ... }`, `if` /
+  `else`, `global`, `ic`, `nodeset`, `save`, `options`;
+- `include "file" [section=name]`: a `.scs` file, or one opening with
+  `simulator lang=spectre`, reads as Spectre, any other as SPICE, and the
+  includer's mode resumes after it;
+- `simulator lang=spice` ... `simulator lang=spectre`: SPICE cards with
+  HSPICE's line rules;
+- the `tran`, `dc`, `ac` and `noise` analyses.
+
+Refused with `UnsupportedCard`: the other analyses (`pss`, `hb`, `sweep`,
+`montecarlo`, ...), child statements in an analysis's `{ }`, `alter`,
+`altergroup`, `paramset`, `atan2`, the bitwise operators, and an
+`inst:terminal` signal in `ic` or `nodeset`. `statistics` blocks are read
+and set aside with a warning; `info`, `set`, `shell`, `check`, `checklimit`,
+`assert` and `paramtest` are accepted and ignored. `/* ... */` is not a
+comment in Spectre.
 
 ```text
 --8<-- "examples/spectre_rc.scs"
@@ -147,11 +169,9 @@ espice --tokenizer=spectre spectre_rc.scs
 ```
 
 ```text
-: 3 devices
+// RC low-pass in Spectre syntax: the first line is the title: 3 devices
   AC Analysis: 51 points, 4 variables
 ```
-
-The summary starts with `:` because a Spectre deck has no title.
 
 ## What is not supported, or differs
 
@@ -180,7 +200,7 @@ anyway.
 | `PAT` Z states, K-strings, `R=-1`, LFSR; `.vec` bidirectional signals, Z/L/H inputs | supported | refused |
 | PWL with `r=` past 64 points | repeats | refused |
 | `.dout` with no threshold | n/a | 1.65 V |
-| `.vec` edges with no rate given | n/a | 0.1 time units |
+| `.vec` edges with no rate given | 0.1 ns | 0.1 ns |
 | `.measure DERIV` | ngspice 45 rejects it | slope of the sample pair around the point |
 | `.measure ERR3` | the manual gives no reduction | RMS, as `ERR1` |
 | `.meas` with `-r` in batch mode | ngspice refuses | always evaluated and printed |

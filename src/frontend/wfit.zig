@@ -18,13 +18,84 @@
 //! sections, which live in the build arena and die after the build.
 
 const std = @import("std");
-const sparam = @import("sparam.zig");
+/// The S-element reader and fitter this file builds on, re-exported for
+/// the grammar oracle (tests/grammar), which imports this module alone.
+pub const sparam = @import("sparam.zig");
 const Cx = std.math.Complex(f64);
 const Allocator = std.mem.Allocator;
 
 /// Maximum conductor count, the largest models/wline_N.va.
 pub const max_n = 4;
 const Mat = [max_n][max_n]f64;
+
+/// An HSPICE RLGC file [SI Ch.3, Table 4] as written: N, then the lower
+/// triangles of L, C, Ro, Go, Rs and Gd in that order, row-wise; L and C
+/// required, an optional matrix only after every one before it.
+pub const RlgcFile = struct {
+    /// Conductors, 1 to `max_n`.
+    n: usize,
+    /// Matrices given, 2 to 6; the rest are zero.
+    mats: usize,
+    /// Each matrix's N(N+1)/2 lower-triangle entries, row-wise.
+    tri: [6][max_n * (max_n + 1) / 2]f64 = @splat(@splat(0)),
+};
+
+/// `InvalidRlgcFile`: not the Table 4 layout (a number with a scale suffix,
+/// a fractional N, a partial triangle, fewer than two or more than six
+/// matrices); `TooManyConductors`: N past `max_n`, a limit of ESPice's
+/// line models, not of the format.
+pub const RlgcError = error{ InvalidRlgcFile, TooManyConductors };
+
+/// Reads an RLGC file. `*` comments out the rest of a line; blanks, tabs,
+/// newlines, `,`, `;` and brackets separate numbers, which are plain or
+/// scientific with no scale suffix [SI p.107, p.109].
+/// tests/grammar/rlgc.peg is the syntax.
+pub fn readRlgcFile(bytes: []const u8) RlgcError!RlgcFile {
+    var nums: [1 + 6 * 10]f64 = undefined;
+    var count: usize = 0;
+    var lines = std.mem.splitScalar(u8, bytes, '\n');
+    while (lines.next()) |raw| {
+        const line = raw[0 .. std.mem.indexOfScalar(u8, raw, '*') orelse raw.len];
+        var it = std.mem.tokenizeAny(u8, line, " \t\r,;()[]{}");
+        while (it.next()) |t| {
+            // Past the largest file ESPice reads; the count check refuses it.
+            if (count == nums.len) return error.InvalidRlgcFile;
+            nums[count] = sparam.plainNumber(t) orelse return error.InvalidRlgcFile;
+            count += 1;
+        }
+    }
+    if (count == 0 or !(nums[0] >= 1) or @floor(nums[0]) != nums[0]) return error.InvalidRlgcFile;
+    if (nums[0] > max_n) return error.TooManyConductors;
+    const n: usize = @intFromFloat(nums[0]);
+    const tri = n * (n + 1) / 2;
+    const mats = (count - 1) / tri;
+    if ((count - 1) % tri != 0 or mats < 2 or mats > 6) return error.InvalidRlgcFile;
+    var file: RlgcFile = .{ .n = n, .mats = mats };
+    for (0..mats) |k| @memcpy(file.tri[k][0..tri], nums[1 + k * tri ..][0..tri]);
+    std.debug.assert(file.n >= 1 and file.n <= max_n);
+    return file;
+}
+
+test readRlgcFile {
+    const one = try readRlgcFile("* one line\n1\n2.5e-7 * L\n1e-10, 5\n");
+    try std.testing.expectEqual(@as(usize, 1), one.n);
+    try std.testing.expectEqual(@as(f64, 2.5e-7), one.tri[0][0]);
+    try std.testing.expectEqual(@as(f64, 1e-10), one.tri[1][0]);
+    try std.testing.expectEqual(@as(f64, 5), one.tri[2][0]);
+    const two = try readRlgcFile("2 (1 2 3) [4 5 6]");
+    try std.testing.expectEqual(@as(usize, 2), two.n);
+    try std.testing.expectEqualSlices(f64, &.{ 4, 5, 6 }, two.tri[1][0..3]);
+    try std.testing.expectError(error.TooManyConductors, readRlgcFile("5 1 2")); // #121: not "malformed"
+    for ([_][]const u8{
+        "", // no N
+        "1.5 1 2", // fractional N
+        "1 1", // L alone: C is required
+        "2 1 2 3 4", // not whole triangles
+        "1 1 2 3 4 5 6 7", // seven matrices
+        "1 1n 2", // no scale suffixes (SI p.109, #121)
+        "1 nan 2", // not a number
+    }) |bytes| try std.testing.expectError(error.InvalidRlgcFile, readRlgcFile(bytes));
+}
 
 /// Per-unit-length matrices (full, symmetric) of an N-conductor line.
 pub const Rlgc = struct {

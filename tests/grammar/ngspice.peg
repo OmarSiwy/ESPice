@@ -1,0 +1,59 @@
+# ngspice: the dialect rules spice_cards.peg leaves open: numbers, quoting
+# and the expression language. Sources: dev/research/ngspice-syntax.md.
+
+# §1.10: INPevaluate's number. `d` is an exponent letter; the scale factor is
+# T G MEG K MIL M U N P F A, and the rest of the token is ignored (`10v`,
+# `1k5` = 1000, `3.3.0` = 3.3).
+Number     <- [+\-]? Mantissa Exponent? Scale? [a-z0-9_.]*
+Mantissa   <- [0-9]+ ('.' [0-9]*)? / '.' [0-9]+
+Exponent   <- [ed] [+\-]? [0-9]+
+Scale      <- 'meg' / 'mil' / [tgkmunpfa]
+
+# §1.9, §2.1: `{expr}` is an expression, and so is `'expr'` (ngspice turns
+# the quotes into braces).
+Expr       <- '{' x Ternary x '}' / "'" x Ternary x "'"
+
+# ESPice: an unbraced expression after `key=` (`w=2*l`, `r = a + b`);
+# ngspice braces only a bare word there (§2.1, auto-bracing).
+pairexpr   <- &([a-zA-Z_.0-9(+\-!$]) Ternary !wordchar
+
+# §2.2, numparam precedence, loosest first. Unary `-`/`+` take a power chain
+# (`-2^2` = -4) and `!` takes one operand (`!2^0` = 1), as numparam and the
+# frontend's expr.zig agree; `^` and `**` are left-associative (`2^3^2` =
+# 64). ESPice: `-` after any operator, not only before a number (`a*-b`).
+Ternary    <- Or (x '?' x Ternary x ':' x Ternary)?
+Or         <- And (x OrOp x And)*
+And        <- Cmp (x AndOp x Cmp)*
+Cmp        <- Add (x CmpOp x Add)*              # one level for all of them (§2.2)
+Add        <- Mul (x AddOp x Mul)*
+Mul        <- Pow (x MulOp x Pow)*
+Pow        <- Unary (x PowOp x Unary)*
+Unary      <- SignOp x Pow / NotOp x Unary / atom
+atom       <- Paren / Probe / Call / Num / Ref
+Paren      <- '(' x Ternary x ')'
+# §2.6: `v(a)`, `v(a,b)`, `i(vname)`: node and device names, never numbers.
+Probe      <- [vi] x '(' x Pname (x ',' x Pname)? x ')'
+Pname      <- (![ \t,()\n] .)+
+Call       <- Ref x '(' x (Ternary (x ',' x Ternary)*)? x ')'
+Num        <- Mantissa ([e] [+\-]? [0-9]+)? [a-z]*
+Ref        <- [a-zA-Z_$] [a-zA-Z0-9_.$!]*
+x          <- [ \t]*
+
+OrOp       <- '||'
+AndOp      <- '&&'
+# ngspice also reads a lone `=` as equality (§2.2); ESPice does not, since
+# in a card it cannot be told from `key=value`.
+CmpOp      <- '==' / '!=' / '<>' / '<=' / '>=' / '<' / '>'
+AddOp      <- [+\-]
+MulOp      <- '*' !'*' / [/%\\]
+PowOp      <- '^' / '**'
+SignOp     <- [+\-]
+NotOp      <- '!' !'='
+
+# A field, a field inside a group, and a pair's value (spice_cards.peg).
+# `"..."` is a word to ngspice (§1.9); a group holds no `key=value` (§3.1:
+# a vector ends at its first non-number, and `r=`/`td=` follow it); a pair's
+# value is an expression unless braced, quoted or a lone number.
+field      <- Pair / Group / Expr / Str / Word / [,()=]
+gfield     <- Group / Expr / Str / Word / [,=]
+value      <- Expr / Str / pairexpr / Word

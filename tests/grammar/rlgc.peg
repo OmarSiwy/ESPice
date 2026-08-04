@@ -1,0 +1,17 @@
+# HSPICE W-element RLGC file (`RLGCFILE=`): file bytes -> N and the
+# lower-triangle matrices. Source: dev/research/data-file-syntax.md §2
+# (SI = HSPICE Signal Integrity User Guide A-2007.12, Ch.3 Table 4,
+# p.106-109); checked against `wfit.readRlgcFile`.
+#
+# Captures: Num, every number in order. The first is N; the rest are k
+# whole triangles of N(N+1)/2, 2 <= k <= 6, in the order L C Ro Go Rs Gd:
+# the lowering's count rules (SI p.107).
+
+File       <- sep* (Num (sep+ Num)*)? sep* !.
+
+# SI p.107: `*` comments out the rest of a line; blanks, tabs, newlines,
+# `,`, `;` and brackets separate. No continuation character.
+sep        <- [ \t\r\n,;()\[\]{}] / '*' (!'\n' .)*
+
+# SI p.109: no scale suffixes, no parameters; a number ends at a separator.
+Num        <- [+\-]? ([0-9]+ ('.' [0-9]*)? / '.' [0-9]+) ([eE] [+\-]? [0-9]+)? &(sep / !.)

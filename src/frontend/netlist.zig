@@ -7,6 +7,8 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 /// Logical lines and fields per dialect, re-exported for the frontend tests.
 pub const lines = @import("lines.zig");
+/// The Spectre statement rewrite, re-exported for the grammar oracle.
+pub const spectre_rewrite = @import("spectre.zig");
 /// Deck loading and include expansion, re-exported for the frontend tests.
 pub const source = @import("source.zig");
 const csr = @import("csr.zig");
@@ -14,6 +16,7 @@ const csr = @import("csr.zig");
 pub const expr = @import("expr.zig");
 const measure = @import("measure.zig");
 const pattern = @import("pattern.zig");
+const spectre = @import("spectre.zig");
 const core = @import("core");
 const Name = core.Name;
 const InternPool = @import("core").InternPool;
@@ -250,7 +253,7 @@ pub const DataFile = struct { path: []const u8, bytes: []const u8 };
 
 /// Deck data: everything that is not circuit topology.
 pub const Deck = struct {
-    /// The first line as written, original case; "" for Spectre.
+    /// The first line as written, original case.
     title: []const u8,
     dialect: Dialect,
     analyses: []const Analysis,
@@ -461,6 +464,12 @@ fn nameKey(owner: u64, name: []const u8) u64 {
 }
 
 /// True for `0`, `gnd` and `ground`, case-insensitively.
+/// True for a name that is ground in `dialect`: only `0` in Spectre, where
+/// `gnd` is ground only when `global` names it first (spectre-syntax.md §7).
+pub fn isGround(dialect: Dialect, name: []const u8) bool {
+    return if (dialect == .spectre) std.mem.eql(u8, name, "0") else isGroundName(name);
+}
+
 pub fn isGroundName(name: []const u8) bool {
     return std.mem.eql(u8, name, "0") or
         std.ascii.eqlIgnoreCase(name, "gnd") or
@@ -476,7 +485,7 @@ pub fn nameIndex(names: []const []const u8, target: []const u8) ?usize {
 
 /// `ignored`: a card that only shapes printed output, which ESPice writes
 /// in full anyway.
-const Card = union(enum) { end, ends, subckt, param, model, include, osdi_include, pre_osdi, verilog, control, endc, options, ic, nodeset, global, connect, save, store, sample, meas, ignored, mosra, appendmodel, step, data, enddata, variation, end_variation, analysis: Kind, cond: CondCard };
+const Card = union(enum) { end, ends, subckt, param, func, model, include, osdi_include, pre_osdi, verilog, control, endc, options, ic, nodeset, global, connect, save, store, sample, meas, ignored, mosra, appendmodel, step, data, enddata, variation, end_variation, analysis: Kind, cond: CondCard };
 
 const CondCard = enum { @"if", elseif, @"else", endif };
 
@@ -513,6 +522,10 @@ const port_source_words = std.StaticStringMap(void).initComptime(.{
 /// Every dot card the three dialects accept, looked up lowercased.
 const cards = std.StaticStringMap(Card).initComptime(.{
     .{ "end", .end },                .{ "ends", .ends },                 .{ "subckt", .subckt },
+    // HSPICE's `.macro`/`.eom` and `.parameter(s)`/`.temperature` spellings,
+    // ngspice's too for `.macro` (hspice-syntax.md D1, X4, D4; #121).
+    .{ "macro", .subckt },           .{ "eom", .ends },                  .{ "parameter", .param },
+    .{ "parameters", .param },       .{ "temperature", an(.temp) },      .{ "func", .func },
     .{ "param", .param },            .{ "model", .model },               .{ "include", .include },
     .{ "hdl", .include },            .{ "osdi_include", .osdi_include }, .{ "pre_osdi", .pre_osdi },
     .{ "verilog", .verilog },        .{ "option", .options },            .{ "options", .options },
@@ -711,14 +724,14 @@ fn resolve(a: *Analysis, lookup: anytype) void {
         a.pos = 0;
         for (a.args[0..a.args.len -| 1], 1..) |v, i| if (v == .name and std.ascii.eqlIgnoreCase(v.name, "localgnd")) {
             const n = nodeText(a.args[i], &buf) orelse continue;
-            a.pos = if (isGroundName(n)) 0 else lookup.node(n);
+            a.pos = if (isGround(a.dialect, n)) 0 else lookup.node(n);
         };
     }
     if (a.kind != .pz) return;
     for (&a.ports, 0..) |*id, i| {
         if (i >= a.args.len) break;
         const port = nodeText(a.args[i], &buf) orelse continue;
-        id.* = if (isGroundName(port)) 0 else lookup.node(port);
+        id.* = if (isGround(a.dialect, port)) 0 else lookup.node(port);
     }
 }
 
@@ -740,6 +753,10 @@ const Frame = struct {
     models_mark: u32 = 0,
 };
 
+/// Nested `.subckt` definitions past this depth are refused; ngspice's
+/// syntax check warns past 10 (ngspice-syntax.md §4.1).
+const subckt_depth_max = 16;
+
 const Subckt = struct {
     name: []const u8,
     ports: []const []const u8,
@@ -754,6 +771,9 @@ const Subckt = struct {
     /// Some line in the body is an `.if` chain card: `expand` reads the dot
     /// cards only then, since a PDK wrapper carries ~180 `.model` bins.
     has_cond: bool = false,
+    /// The body holds a nested `.subckt` definition, whose lines `expand`
+    /// skips (they are that subcircuit's).
+    has_nested: bool = false,
 };
 
 const ModelRow = struct { name: []const u8, kind: []const u8, kv: Span };
@@ -768,7 +788,12 @@ const ModelRow = struct { name: []const u8, kind: []const u8, kv: Span };
 const LocalModel = struct { name: []const u8, line: u32, top: u32, shared: bool, cond: bool };
 
 /// A `.model` line and whether it sits under a subcircuit body's `.if`.
-const ModelLine = struct { line: u32, cond: bool };
+/// A `.model` line, the innermost subcircuit whose body holds it (`top`
+/// for none), and whether an `.if` there guards it.
+const ModelLine = struct { line: u32, cond: bool, owner: u16 = top_level };
+
+/// `ModelLine.owner` of a model outside every subcircuit.
+const top_level = std.math.maxInt(u16);
 
 /// ngspice b_transformation_wanted (inpcom.c): `p` reads a node voltage,
 /// a branch current, `time`, `temper` or `hertz`, so a passive card holding
@@ -845,6 +870,13 @@ fn Reader(comptime S: type) type {
         meas_lines: std.ArrayList([]const u8) = .empty,
         /// `.global` names: one net at every subcircuit level.
         global_nets: std.StringHashMapUnmanaged(void) = .empty,
+        /// The device letter of each card `spectre.translate` wrote whose
+        /// name does not carry it, by the card's address.
+        kinds: spectre.Kinds = .empty,
+        /// `.func` and `.param f(x)=` definitions, by name.
+        funcs: std.StringHashMapUnmanaged(Func) = .empty,
+        /// The formals of the user functions `subst` is inside, innermost last.
+        bindings: std.ArrayList(Binding) = .empty,
         saves: std.ArrayList([]const u8) = .empty,
         save_all: bool = false,
         save_op: ?core.SaveOp = null,
@@ -893,6 +925,12 @@ fn Reader(comptime S: type) type {
 
         const max_group_depth = 32;
 
+        /// A user function: its formals and its body as written.
+        const Func = struct { formals: []const []const u8, body: []const u8 };
+        /// A formal of the function `subst` is expanding, bound to the
+        /// argument's final ops.
+        const Binding = struct { name: []const u8, ops: []const expr.Op };
+
         fn init(arena: Allocator, orig: []const u8, text: []const u8, dialect: Dialect) Allocator.Error!R {
             var r: R = .{ .arena = arena, .dialect = dialect, .orig = orig, .text = text, .hg = try .init(arena) };
             const zero = try r.pool.intern(arena, "0");
@@ -923,6 +961,12 @@ fn Reader(comptime S: type) type {
             }
             try r.lines.ensureTotalCapacity(arena, line_hint);
             while (try split.next()) |line| try r.lines.append(arena, line);
+            // Spectre statements become the SPICE cards the walks read.
+            if (dialect == .spectre) {
+                const translated = try spectre.translate(arena, r.lines.items, &r.kinds);
+                r.lines = .empty;
+                try r.lines.appendSlice(arena, translated);
+            }
             pattern.rewrite(arena, r.lines.items) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.InvalidPattern => return error.ParseError,
@@ -948,22 +992,21 @@ fn Reader(comptime S: type) type {
                     break;
                 }
             };
-            // Model lines and subcircuit bodies both run in line order.
-            var s: usize = 0;
-            for (model_lines.items) |ml| {
-                const subs = r.subckts.items;
-                while (s < subs.len and subs[s].end <= ml.line) s += 1;
-                const local = s < subs.len and ml.line >= subs[s].first;
-                try r.readModel(r.lines.items[ml.line], &top, !local);
-                if (!local) continue;
+            // Global models in line order, then each subcircuit's own, kept
+            // together: `models_lo..models_hi` is one range per subcircuit,
+            // nested definitions included.
+            for (model_lines.items) |ml| if (ml.owner == top_level) try r.readModel(r.lines.items[ml.line], &top, true);
+            for (r.subckts.items, 0..) |*sub, id| for (model_lines.items) |ml| {
+                if (ml.owner != id) continue;
+                try r.readModel(r.lines.items[ml.line], &top, false);
                 const row: u32 = @intCast(r.models.items.len - 1);
                 const name = r.models.items[row].name;
-                const shared = !ml.cond and !r.unresolved(r.models.items[row].kv) and !r.namesParam(r.models.items[row].kv, subs[s]);
-                if (subs[s].models_hi == 0) subs[s].models_lo = @intCast(r.local_models.items.len);
+                const shared = !ml.cond and !r.unresolved(r.models.items[row].kv) and !r.namesParam(r.models.items[row].kv, sub.*);
+                if (sub.models_hi == 0) sub.models_lo = @intCast(r.local_models.items.len);
                 try r.local_models.append(arena, .{ .name = name, .line = ml.line, .top = row, .shared = shared, .cond = ml.cond });
-                subs[s].models_hi = @intCast(r.local_models.items.len);
+                sub.models_hi = @intCast(r.local_models.items.len);
                 try r.local_names.put(arena, name, {});
-            }
+            };
             for (r.blocks.items) |b| try r.readBlock(b);
             for (directive_lines.items) |i| try r.readDirective(r.lines.items[i]);
             try r.binOptions();
@@ -991,7 +1034,7 @@ fn Reader(comptime S: type) type {
                 next[k - 'a'] += 1;
             }
 
-            const nets: NetLookup = .{ .pool = &r.pool, .net_of = r.net_of.items };
+            const nets: NetLookup = .{ .pool = &r.pool, .net_of = r.net_of.items, .dialect = dialect };
             for (r.analyses.items) |*a| resolve(a, nets);
 
             return .{
@@ -1057,8 +1100,9 @@ fn Reader(comptime S: type) type {
         const NetLookup = struct {
             pool: *const InternPool,
             net_of: []const u32,
+            dialect: Dialect,
             pub fn node(self: NetLookup, name: []const u8) u32 {
-                if (isGroundName(name)) return 0;
+                if (isGround(self.dialect, name)) return 0;
                 const n = self.pool.find(name) orelse return none;
                 return self.net_of[n.index()];
             }
@@ -1068,15 +1112,17 @@ fn Reader(comptime S: type) type {
 
         fn declarations(r: *R, top: *std.ArrayList(u32), models: *std.ArrayList(ModelLine), directives: *std.ArrayList(u32)) Error!void {
             const arena = r.arena;
-            var open: ?u16 = null;
-            var defaults: std.ArrayList(@typeInfo(@FieldType(Subckt, "defaults")).pointer.child) = .empty;
+            // Open `.subckt` definitions, innermost last (§2.5, D1: they nest),
+            // each with the defaults its header and `.param` lines give.
+            const Open = struct { id: u16, defaults: std.ArrayList(@typeInfo(@FieldType(Subckt, "defaults")).pointer.child) = .empty, ifs: u8 = 0 };
+            var opens: [subckt_depth_max]Open = undefined;
+            var depth: usize = 0;
             // Top-level `.if` conditions see the `.param` cards above them.
             // Inside a subcircuit they are left to `expand`, per instance;
             // `sub_ifs` counts the open ones so a `.model` there is marked.
             // ponytail: a `.param` under a subcircuit's `.if` applies
             // unconditionally; scope it when a PDK needs it.
             var branches: Branches = .{};
-            var sub_ifs: u8 = 0;
             const global: Frame = .{ .scopes = &r.global_scopes };
             // An open `.data` or `.variation` block: its closing card and first line.
             var block: ?struct { close: Card, first: u32 } = null;
@@ -1100,13 +1146,13 @@ fn Reader(comptime S: type) type {
                     var bf = F.init(line);
                     const c = cardOf(bf.next().?[1..]) orelse continue;
                     if (std.meta.activeTag(c) != std.meta.activeTag(b.close)) continue;
-                    if (open == null and branches.active()) try r.blocks.append(arena, .{ b.first, i });
+                    if (depth == 0 and branches.active()) try r.blocks.append(arena, .{ b.first, i });
                     block = null;
                     continue;
                 }
-                const live = open != null or branches.active();
+                const live = depth > 0 or branches.active();
                 if (line[0] != '.') {
-                    if (open == null and live) try top.append(arena, i);
+                    if (depth == 0 and live) try top.append(arena, i);
                     continue;
                 }
                 var f = F.init(line);
@@ -1117,11 +1163,12 @@ fn Reader(comptime S: type) type {
                     continue;
                 };
                 if (card == .cond) {
-                    if (open) |id| {
-                        r.subckts.items[id].has_cond = true;
+                    if (depth > 0) {
+                        const o = &opens[depth - 1];
+                        r.subckts.items[o.id].has_cond = true;
                         switch (card.cond) {
-                            .@"if" => sub_ifs +|= 1,
-                            .endif => sub_ifs -|= 1,
+                            .@"if" => o.ifs +|= 1,
+                            .endif => o.ifs -|= 1,
                             else => {},
                         }
                     } else try r.branch(&branches, card.cond, &f, &global);
@@ -1137,19 +1184,22 @@ fn Reader(comptime S: type) type {
                 }
                 if (!live) continue;
                 switch (card) {
-                    .end => break,
+                    // HSPICE: `.end` ends the run. ngspice turns it into a
+                    // comment and reads on, so a card after it still counts
+                    // (dev/research/ngspice-syntax.md §1.7).
+                    .end => if (r.dialect == .hspice) break,
                     .ends => {
-                        const id = open orelse return error.ParseError;
-                        r.subckts.items[id].end = i;
-                        r.subckts.items[id].defaults = defaults.items;
-                        open = null;
-                        sub_ifs = 0;
+                        if (depth == 0) return error.ParseError;
+                        depth -= 1;
+                        const o = opens[depth];
+                        r.subckts.items[o.id].end = i;
+                        r.subckts.items[o.id].defaults = o.defaults.items;
                     },
                     .subckt => {
-                        if (open != null) return error.ParseError;
+                        if (depth == subckt_depth_max) return error.ParseError;
                         const name = f.next() orelse return error.ParseError;
                         var ports: std.ArrayList([]const u8) = .empty;
-                        defaults = .empty;
+                        var defaults: @FieldType(Open, "defaults") = .empty;
                         while (f.next()) |t| {
                             if (t[0] == '(' or t[0] == ')') continue;
                             if (!F.isWord(t)) return error.ParseError;
@@ -1160,22 +1210,37 @@ fn Reader(comptime S: type) type {
                                 try ports.append(arena, t);
                         }
                         if (!F.isWord(name)) return error.ParseError;
-                        if (r.subckts.items.len == std.math.maxInt(u16)) return error.CircuitTooLarge;
-                        open = @intCast(r.subckts.items.len);
+                        if (r.subckts.items.len == top_level) return error.CircuitTooLarge;
+                        if (depth > 0) r.subckts.items[opens[depth - 1].id].has_nested = true;
+                        const id: u16 = @intCast(r.subckts.items.len);
+                        opens[depth] = .{ .id = id, .defaults = defaults };
+                        depth += 1;
                         try r.subckts.append(arena, .{ .name = name, .ports = ports.items, .defaults = &.{}, .first = i + 1, .end = i + 1 });
-                        try r.subckt_ids.put(arena, name, open.?);
+                        try r.subckt_ids.put(arena, name, id);
                     },
-                    .param => while (f.next()) |key| {
+                    .func => try r.readFunc(&f, false),
+                    .param => while (true) {
+                        const at = f.pos;
+                        const key = f.next() orelse break;
                         if (!F.isWord(key)) return error.ParseError;
+                        // `.param f(x)=body` defines a function (§2.3, X4).
+                        if (f.nextByte() == '(') {
+                            f.pos = at;
+                            try r.readFunc(&f, true);
+                            continue;
+                        }
                         const eq = f.next() orelse return error.ParseError;
                         if (eq[0] != '=') return error.ParseError;
                         const text = try r.paramText(&f);
-                        if (open != null)
-                            try defaults.append(arena, .{ .key = key, .text = text })
+                        if (depth > 0)
+                            try opens[depth - 1].defaults.append(arena, .{ .key = key, .text = text })
                         else
                             try r.globals.put(arena, key, .{ .text = text });
                     },
-                    .model => try models.append(arena, .{ .line = i, .cond = open != null and sub_ifs > 0 }),
+                    .model => try models.append(arena, if (depth > 0)
+                        .{ .line = i, .cond = opens[depth - 1].ifs > 0, .owner = opens[depth - 1].id }
+                    else
+                        .{ .line = i, .cond = false }),
                     .include, .osdi_include, .pre_osdi, .verilog => {
                         const path = try r.pathOf(&f);
                         const kind: ForeignKind = switch (card) {
@@ -1189,7 +1254,7 @@ fn Reader(comptime S: type) type {
                     else => try directives.append(arena, i),
                 }
             }
-            if (open != null or branches.depth != 0 or block != null or control) return error.ParseError;
+            if (depth != 0 or branches.depth != 0 or block != null or control) return error.ParseError;
         }
 
         /// Applies one `.if`/`.elseif`/`.else`/`.endif` card to `b`. A
@@ -1241,6 +1306,27 @@ fn Reader(comptime S: type) type {
         }
 
         /// The text a parameter definition is re-read from on every use.
+        /// `name(a, b) [=] body`: a user function, from `.func` or from
+        /// `.param` (`eq` set: its `=` is required). ngspice expands it as
+        /// a textual macro wherever it is called (ngspice-syntax.md §2.4).
+        // ponytail: functions are global even when defined in a subcircuit;
+        // scope them when a deck reuses a name per subcircuit.
+        fn readFunc(r: *R, f: *F, eq: bool) Error!void {
+            const name = f.next() orelse return error.ParseError;
+            if (!F.isWord(name)) return error.ParseError;
+            if ((f.next() orelse return error.ParseError)[0] != '(') return error.ParseError;
+            var formals: std.ArrayList([]const u8) = .empty;
+            while (true) {
+                const t = f.next() orelse return error.ParseError;
+                if (t[0] == ')') break;
+                if (t[0] == ',') continue;
+                if (!F.isWord(t)) return error.ParseError;
+                try formals.append(r.arena, t);
+            }
+            if (f.takeEq()) {} else if (eq) return error.ParseError;
+            try r.funcs.put(r.arena, name, .{ .formals = formals.items, .body = try r.paramText(f) });
+        }
+
         fn paramText(r: *R, f: *F) Error![]const u8 {
             const rest = f.rest();
             if (rest.len == 0) return error.ParseError;
@@ -2270,7 +2356,7 @@ fn Reader(comptime S: type) type {
                 if (!std.mem.eql(u8, f.next() orelse continue, name)) continue;
                 const p = f.next() orelse return error.ParseError;
                 const n = f.next() orelse return error.ParseError;
-                if (isGroundName(n)) return std.fmt.allocPrint(r.arena, "par('v({s})*i({s})')", .{ p, name });
+                if (isGround(r.dialect, n)) return std.fmt.allocPrint(r.arena, "par('v({s})*i({s})')", .{ p, name });
                 return std.fmt.allocPrint(r.arena, "par('(v({s})-v({s}))*i({s})')", .{ p, n, name });
             }
             return error.ParseError;
@@ -2403,6 +2489,11 @@ fn Reader(comptime S: type) type {
                     .num => try r.emitNum(r.scratch.consts.items[op.a]),
                     .ident => {
                         const name = r.scratch.names.items[op.a];
+                        // A formal of the function being expanded: its argument.
+                        if (bound(r.bindings.items, name)) |ops| {
+                            try r.ops.appendSlice(r.arena, ops);
+                            continue;
+                        }
                         const hit = find(scopes, name) orelse {
                             try r.ops.append(r.arena, .{ .code = .ident, .a = ident_class.get(name) orelse 0 });
                             continue;
@@ -2427,10 +2518,16 @@ fn Reader(comptime S: type) type {
                                 }
                                 r.site_owner = nameKey(nameKey(0, levelPath(frame, hit.level)), name);
                                 r.site_ordinal = 0;
+                                // A parameter's text never sees the formals of a
+                                // function that reads it.
+                                const saved = r.bindings;
+                                r.bindings = .empty;
+                                defer r.bindings = saved;
                                 try r.subst(mark.ops, r.scratch.ops.items.len, frame, scopes[0 .. hit.level + 1], depth + 1);
                             },
                         }
                     },
+                    .ucall => try r.inline_(op, frame, scopes, depth),
                     // The device by its flattened card name (`commit`), for a B-source tape.
                     .iprobe => {
                         const a = if (op.a == none) none else a: {
@@ -2455,6 +2552,45 @@ fn Reader(comptime S: type) type {
                     },
                 }
             }
+        }
+
+        /// The ops a formal named `name` stands for, the innermost binding.
+        fn bound(bindings: []const Binding, name: []const u8) ?[]const expr.Op {
+            var i = bindings.len;
+            while (i > 0) {
+                i -= 1;
+                if (std.mem.eql(u8, bindings[i].name, name)) return bindings[i].ops;
+            }
+            return null;
+        }
+
+        /// Emits a call `op` of a function outside `expr.Fn`: a `.func`
+        /// expands to its body with each formal bound to its argument (the
+        /// arguments' final ops, the last `op.b` subtrees emitted); any
+        /// other stays a `call` of `Fn.other`, which nothing folds.
+        fn inline_(r: *R, op: expr.Op, frame: *const Frame, scopes: []const *const Scope, depth: u8) Error!void {
+            const name = r.scratch.names.items[op.a];
+            const func = r.funcs.get(name) orelse
+                return r.ops.append(r.arena, .{ .code = .call, .a = @backingInt(expr.Fn.other), .b = op.b });
+            if (func.formals.len != op.b) return error.ParseError;
+            // Lift the argument subtrees off the output, last argument first.
+            const args = try r.arena.alloc([]const expr.Op, op.b);
+            var end = r.ops.items.len;
+            var k = args.len;
+            while (k > 0) {
+                k -= 1;
+                const start = expr.subtreeStart(r.ops.items[0..end], end - 1);
+                args[k] = try r.arena.dupe(expr.Op, r.ops.items[start..end]);
+                end = start;
+            }
+            r.ops.shrinkRetainingCapacity(end);
+            const mark = r.scratch.mark();
+            defer r.scratch.reset(mark);
+            try expr.compileAll(S.parseNum, r.arena, &r.scratch, func.body);
+            const outer = r.bindings.items.len;
+            defer r.bindings.shrinkRetainingCapacity(outer);
+            for (func.formals, args) |formal, a| try r.bindings.append(r.arena, .{ .name = formal, .ops = a });
+            try r.subst(mark.ops, r.scratch.ops.items.len, frame, scopes, depth + 1);
         }
 
         /// The instance path whose scope sits at `level` of `frame`'s
@@ -2485,7 +2621,7 @@ fn Reader(comptime S: type) type {
         }
 
         fn intern(r: *R, s: []const u8) Error!VertexId {
-            if (isGroundName(s)) return ground;
+            if (isGround(r.dialect, s)) return ground;
             const n = try r.internName(s);
             const slot = &r.net_of.items[n.index()];
             if (slot.* == none) {
@@ -2504,7 +2640,7 @@ fn Reader(comptime S: type) type {
         fn connect(r: *R, a: []const u8, b: []const u8) Error!void {
             // Name rows, not pointers into `net_of`: interning `b` can grow it.
             var rows: [2]?u32 = .{ null, null };
-            for ([_][]const u8{ a, b }, &rows) |name, *row| if (!isGroundName(name)) {
+            for ([_][]const u8{ a, b }, &rows) |name, *row| if (!isGround(r.dialect, name)) {
                 row.* = (try r.internName(try r.arena.dupe(u8, name))).index();
             };
             var ids: [2]u32 = .{ 0, 0 };
@@ -2527,7 +2663,7 @@ fn Reader(comptime S: type) type {
         fn netOf(r: *R, frame: *const Frame, node: []const u8) Error!VertexId {
             const path = frame.path orelse return r.intern(node);
             for (frame.ports, frame.actuals) |p, a| if (std.mem.eql(u8, p, node)) return a;
-            if (isGroundName(node) or r.global_nets.contains(node)) return r.intern(node);
+            if (isGround(r.dialect, node) or r.global_nets.contains(node)) return r.intern(node);
             return r.intern(try r.joined(&.{ path, ".", node }));
         }
 
@@ -2608,8 +2744,9 @@ fn Reader(comptime S: type) type {
             r.site_ordinal = 0;
             if (!F.isWord(head) or !std.ascii.isAlphabetic(head[0])) return error.ParseError;
             // HSPICE's P element is a port: a V card that `port=` numbers
-            // for `.lin` (`P1 in 0 port=1 z0=50`).
-            const letter = if (port_card) 'v' else std.ascii.toLower(head[0]);
+            // for `.lin` (`P1 in 0 port=1 z0=50`). A Spectre card's letter
+            // is its master's, kept beside it.
+            const letter = if (port_card) 'v' else r.kinds.get(@intFromPtr(line.ptr)) orelse std.ascii.toLower(head[0]);
             // HSPICE reads these letters as IBIS buffers and lumped lines,
             // neither of which is built.
             if (r.dialect == .hspice and std.mem.indexOfScalar(u8, "bu", letter) != null)
@@ -2705,7 +2842,9 @@ fn Reader(comptime S: type) type {
                 }
             }
             if (letter == 'x') return r.expand(head, frame, kv_text.items);
-            if (letter == 'q' or letter == 'm') try r.splitTerminals();
+            // A D card's third node is its thermal node `tj` when a model
+            // name follows it (ngspice-syntax.md §3.2, #121).
+            if (letter == 'q' or letter == 'm' or letter == 'd') try r.splitTerminals();
             return r.commit(head, letter, frame);
         }
 
@@ -2906,7 +3045,7 @@ fn Reader(comptime S: type) type {
             if (by_current) return w.print(r.arena, "i({s})", .{try r.word(f)});
             const a = try r.word(f);
             const b = try r.word(f);
-            if (isGroundName(b)) return w.print(r.arena, "v({s})", .{a});
+            if (isGround(r.dialect, b)) return w.print(r.arena, "v({s})", .{a});
             try w.print(r.arena, "v({s},{s})", .{ a, b });
         }
 
@@ -3133,10 +3272,12 @@ fn Reader(comptime S: type) type {
                 if (m.cond) break true;
             } else false) {
                 var kept: Branches = .{};
+                var nested: u32 = 0;
                 for (r.lines.items[sub.first..sub.end], sub.first..) |line, i| {
                     if (line[0] != '.') continue;
                     var f = F.init(line);
                     const card = cardOf(f.next().?[1..]) orelse continue;
+                    if (sub.has_nested and skipNested(card, &nested)) continue;
                     switch (card) {
                         .cond => |c| try r.branch(&kept, c, &f, &child),
                         .model => if (kept.active()) for (locals) |m| {
@@ -3147,17 +3288,36 @@ fn Reader(comptime S: type) type {
                 }
             }
             var branches: Branches = .{};
+            var nested: u32 = 0;
             for (r.lines.items[sub.first..sub.end]) |line| {
                 if (line[0] != '.') {
-                    if (branches.active()) try r.readDevice(line, &child);
+                    if (nested == 0 and branches.active()) try r.readDevice(line, &child);
                     continue;
                 }
-                if (!sub.has_cond) continue;
+                if (!sub.has_cond and !sub.has_nested) continue;
                 var f = F.init(line);
                 const card = cardOf(f.next().?[1..]) orelse continue;
+                if (sub.has_nested and skipNested(card, &nested)) continue;
                 if (card == .cond) try r.branch(&branches, card.cond, &f, &child);
             }
             if (branches.depth != 0) return error.ParseError;
+        }
+
+        /// Tracks nested `.subckt` ... `.ends` while reading a body: true
+        /// for every card from a nested definition's header to its `.ends`.
+        fn skipNested(card: Card, nested: *u32) bool {
+            switch (card) {
+                .subckt => {
+                    nested.* += 1;
+                    return true;
+                },
+                .ends => if (nested.* > 0) {
+                    nested.* -= 1;
+                    return true;
+                },
+                else => {},
+            }
+            return nested.* > 0;
         }
 
         // After the walk: shunts and model bins.
@@ -3436,6 +3596,7 @@ test {
     _ = csr;
     _ = measure;
     _ = pattern;
+    _ = spectre;
     _ = @import("vec.zig");
     _ = @import("tests/netlist.zig");
 }

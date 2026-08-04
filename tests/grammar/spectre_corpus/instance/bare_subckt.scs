@@ -1,0 +1,2 @@
+// Bare subckt call with several nodes and spaced '=' parameters.
+xdetector c a x opt detector_va l = l dtemp = dtemp wi = wi

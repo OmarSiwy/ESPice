@@ -49,55 +49,148 @@ pub const Network = struct {
 /// usable data; SingularSParameters: I + S (or Z) is singular at a point.
 pub const Error = error{ OutOfMemory, InvalidTouchstone, SingularSParameters };
 
-/// Parses a Touchstone 1.0 file of `ports` ports (the `.sNp` extension's N)
-/// into admittance samples. The option line `# <unit> <S|Y|Z> <MA|DB|RI> R
-/// <z0>` defaults to `GHz S MA R 50`; Y and Z data are normalized to R, as
-/// version 1.0 writes them. A two-port's entries come in the column order
-/// N11 N21 N12 N22; the noise block after a 2-port's data (frequencies
-/// starting over) is skipped. The tables, and the parse scratch, live in
-/// `arena`.
-pub fn parseTouchstone(arena: Allocator, bytes: []const u8, ports: usize) Error!Network {
+/// A Touchstone 1.0 file as written: the option line's settings and the
+/// network records, before any conversion. tests/grammar/touchstone.peg is
+/// the syntax; the rules cite dev/research/data-file-syntax.md §1 (TS1.1 =
+/// Touchstone 1.1, TS2.0 = 2.0).
+pub const Raw = struct {
+    /// Hz per frequency unit: 1, 1e3, 1e6 or 1e9 (default GHz).
+    unit: f64 = 1e9,
+    /// `s`, `y` or `z` (default S).
+    kind: u8 = 's',
+    format: Format = .ma,
+    /// The `R` reference, > 0 (default 50).
+    z0: f64 = 50,
+    /// Network records, each a frequency then N² value pairs: `nf` rows of
+    /// 1 + 2N² numbers, frequencies strictly ascending.
+    values: []const f64,
+    nf: usize,
+
+    /// The data format the option line names.
+    pub const Format = enum { ma, db, ri };
+};
+
+/// Reads a Touchstone 1.0 file of `ports` ports (the `.sNp` extension's N)
+/// to its option line and records. The option line is the first non-comment
+/// line and later ones are ignored (TS1.1 p.4); one after the data is
+/// malformed. A frequency that does not ascend ends the network data, and
+/// what follows must be a 2-port's noise block, five values a row (TS1.1
+/// p.10-11). Lines end at LF, CR+LF or a lone CR (TS2.0 rule 2); numbers are
+/// plain or scientific, with no scale suffix (TS2.0 rule 6). Fails with
+/// `InvalidTouchstone` on anything else, H and G data included (legal, not
+/// read).
+pub fn readTouchstone(arena: Allocator, bytes: []const u8, ports: usize) Error!Raw {
     if (ports == 0 or ports > 64) return error.InvalidTouchstone;
-    var unit: f64 = 1e9;
-    var kind: u8 = 's';
-    var format: enum { ma, db, ri } = .ma;
-    var z0: f64 = 50;
+    var raw: Raw = .{ .values = &.{}, .nf = 0 };
     var nums: std.ArrayList(f64) = .empty;
-    var lines = std.mem.splitScalar(u8, bytes, '\n');
-    while (lines.next()) |raw| {
-        const line = std.mem.trim(u8, raw[0 .. std.mem.indexOfScalar(u8, raw, '!') orelse raw.len], " \t\r");
+    var option_seen = false;
+    var rest = bytes;
+    while (rest.len > 0) {
+        const nl = std.mem.indexOfAny(u8, rest, "\r\n") orelse rest.len;
+        const raw_line = rest[0..nl];
+        rest = rest[nl..];
+        if (std.mem.startsWith(u8, rest, "\r\n")) rest = rest[2..] else if (rest.len > 0) rest = rest[1..];
+        const line = std.mem.trim(u8, raw_line[0 .. std.mem.indexOfScalar(u8, raw_line, '!') orelse raw_line.len], " \t");
         if (line.len == 0) continue;
         if (line[0] == '[') return error.InvalidTouchstone; // Touchstone 2.0 keywords
-        var it = std.mem.tokenizeAny(u8, line, " \t");
         if (line[0] == '#') {
-            _ = it.next();
+            // Only the first option line counts, and it precedes the data.
+            if (option_seen) continue;
+            if (nums.items.len > 0) return error.InvalidTouchstone;
+            option_seen = true;
+            var it = std.mem.tokenizeAny(u8, line[1..], " \t");
             while (it.next()) |t| {
                 var buf: [8]u8 = undefined;
                 if (t.len > buf.len) return error.InvalidTouchstone;
                 const w = std.ascii.lowerString(&buf, t);
-                if (std.mem.eql(u8, w, "hz")) unit = 1 else if (std.mem.eql(u8, w, "khz")) unit = 1e3 else if (std.mem.eql(u8, w, "mhz")) unit = 1e6 else if (std.mem.eql(u8, w, "ghz")) unit = 1e9 else if (std.mem.eql(u8, w, "s") or std.mem.eql(u8, w, "y") or std.mem.eql(u8, w, "z")) kind = w[0] else if (std.mem.eql(u8, w, "ma")) format = .ma else if (std.mem.eql(u8, w, "db")) format = .db else if (std.mem.eql(u8, w, "ri")) format = .ri else if (std.mem.eql(u8, w, "r")) {
-                    z0 = std.fmt.parseFloat(f64, it.next() orelse return error.InvalidTouchstone) catch return error.InvalidTouchstone;
+                const units = std.StaticStringMap(f64).initComptime(.{ .{ "hz", 1 }, .{ "khz", 1e3 }, .{ "mhz", 1e6 }, .{ "ghz", 1e9 } });
+                const formats = std.StaticStringMap(Raw.Format).initComptime(.{ .{ "ma", .ma }, .{ "db", .db }, .{ "ri", .ri } });
+                if (units.get(w)) |u| {
+                    raw.unit = u;
+                } else if (formats.get(w)) |f| {
+                    raw.format = f;
+                } else if (std.mem.eql(u8, w, "s") or std.mem.eql(u8, w, "y") or std.mem.eql(u8, w, "z")) {
+                    raw.kind = w[0];
+                } else if (std.mem.eql(u8, w, "r")) {
+                    raw.z0 = plainNumber(it.next() orelse return error.InvalidTouchstone) orelse return error.InvalidTouchstone;
                 } else return error.InvalidTouchstone;
             }
             continue;
         }
-        while (it.next()) |t| try nums.append(arena, std.fmt.parseFloat(f64, t) catch return error.InvalidTouchstone);
+        var it = std.mem.tokenizeAny(u8, line, " \t");
+        while (it.next()) |t| try nums.append(arena, plainNumber(t) orelse return error.InvalidTouchstone);
     }
-    if (!(z0 > 0)) return error.InvalidTouchstone;
-    const pp = ports * ports;
-    const stride = 1 + 2 * pp;
+    if (!(raw.z0 > 0) or !std.math.isFinite(raw.z0)) return error.InvalidTouchstone;
+    const stride = 1 + 2 * ports * ports;
+    const all = nums.items;
     var nf: usize = 0;
-    while ((nf + 1) * stride <= nums.items.len) : (nf += 1) {
-        const f = nums.items[nf * stride];
-        if (nf > 0 and !(f > nums.items[(nf - 1) * stride])) break;
+    while ((nf + 1) * stride <= all.len) : (nf += 1) {
+        const f = all[nf * stride];
+        if (nf > 0 and !(f > all[(nf - 1) * stride])) break;
     }
     if (nf == 0) return error.InvalidTouchstone;
+    // After the network data: nothing, or a 2-port's noise rows starting at
+    // or below the last network frequency, ascending (TS1.1 p.10-11).
+    const tail = all[nf * stride ..];
+    if (tail.len > 0) {
+        if (ports != 2 or tail.len % 5 != 0) return error.InvalidTouchstone;
+        if (!(tail[0] <= all[(nf - 1) * stride])) return error.InvalidTouchstone;
+        var k: usize = 5;
+        while (k < tail.len) : (k += 5) if (!(tail[k] > tail[k - 5])) return error.InvalidTouchstone;
+    }
+    raw.values = all[0 .. nf * stride];
+    raw.nf = nf;
+    return raw;
+}
+
+/// A plain number: decimal or scientific notation (Touchstone 2.0 rule 6;
+/// an HSPICE RLGC file's too), and nothing parseFloat also takes (`inf`,
+/// `nan`, hex, `_`). Null for anything else.
+pub fn plainNumber(t: []const u8) ?f64 {
+    var i: usize = 0;
+    if (i < t.len and (t[i] == '+' or t[i] == '-')) i += 1;
+    const int_start = i;
+    while (i < t.len and std.ascii.isDigit(t[i])) i += 1;
+    const int_digits = i > int_start;
+    var frac_digits = false;
+    if (i < t.len and t[i] == '.') {
+        i += 1;
+        const frac_start = i;
+        while (i < t.len and std.ascii.isDigit(t[i])) i += 1;
+        frac_digits = i > frac_start;
+    }
+    if (!int_digits and !frac_digits) return null;
+    if (i < t.len and (t[i] == 'e' or t[i] == 'E')) {
+        i += 1;
+        if (i < t.len and (t[i] == '+' or t[i] == '-')) i += 1;
+        const exp_start = i;
+        while (i < t.len and std.ascii.isDigit(t[i])) i += 1;
+        if (i == exp_start) return null;
+    }
+    if (i != t.len) return null;
+    return std.fmt.parseFloat(f64, t) catch null;
+}
+
+/// Parses a Touchstone 1.0 file of `ports` ports (`readTouchstone`) into
+/// admittance samples. Y and Z data are normalized to R, as version 1.0
+/// writes them. A two-port's entries come in the column order N11 N21 N12
+/// N22. The tables, and the parse scratch, live in `arena`.
+pub fn parseTouchstone(arena: Allocator, bytes: []const u8, ports: usize) Error!Network {
+    const raw = try readTouchstone(arena, bytes, ports);
+    const unit = raw.unit;
+    const kind = raw.kind;
+    const format = raw.format;
+    const z0 = raw.z0;
+    const pp = ports * ports;
+    const stride = 1 + 2 * pp;
+    const nf = raw.nf;
+    const nums = raw.values;
     const freq = try arena.alloc(f64, nf);
     const re = try arena.alloc(f64, pp * nf);
     const im = try arena.alloc(f64, pp * nf);
     const m = try arena.alloc(Cx, 2 * pp);
     for (0..nf) |k| {
-        const row = nums.items[k * stride ..][0..stride];
+        const row = nums[k * stride ..][0..stride];
         freq[k] = row[0] * unit;
         if (!std.math.isFinite(freq[k]) or freq[k] < 0) return error.InvalidTouchstone;
         for (0..pp) |q| {
@@ -1081,4 +1174,34 @@ test "enforcePassivity lifts a negative direct term to the margin" {
     var f: Fit = .{ .poles = &.{}, .res = try arena.alloc(Cx, 0), .d = &d };
     try testing.expect(try enforcePassivity(arena, net, &f));
     try testing.expect(d[0] >= 0 and d[0] < 1e-6);
+}
+
+test "touchstone: option-line and data rules follow the 1.1 spec (#121)" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // A unit glued to `#` still counts (it read as GHz, 1000x off).
+    try testing.expectEqual(@as(f64, 1e6), (try readTouchstone(arena, "#MHz S RI R 50\n1 0 0\n", 1)).unit);
+    // Only the first option line counts (TS1.1 p.4).
+    const twice = try readTouchstone(arena, "# Hz S RI R 50\n# GHz Y MA R 75\n1 0 0\n", 1);
+    try testing.expectEqual(@as(f64, 1), twice.unit);
+    try testing.expectEqual(@as(u8, 's'), twice.kind);
+    try testing.expectEqual(@as(f64, 50), twice.z0);
+    // A lone CR ends a line (TS2.0 rule 2).
+    try testing.expectEqual(@as(usize, 2), (try readTouchstone(arena, "# Hz S RI R 50\r1 0 0 ! c\r2 0 0\r", 1)).nf);
+    for ([_][]const u8{
+        "1 0 0\n# Hz S RI R 50\n2 0 0\n", // option line after the data
+        "# Hz S RI R 50\n1 nan 0\n", // not a Touchstone number
+        "# Hz S RI R 50\n1 0x1p3 0\n",
+        "# Hz S RI R 50\n1 1k 0\n", // no scale suffixes
+        "# Hz S RI R 50\n2 0 0\n1 0 0\n", // a 1-port's frequencies must ascend
+        "# Hz S RI R 50\n1 0 0\n2 0\n", // a short trailing record
+        "# Hz H RI R 50\n1 0 0\n", // H data is not read
+    }) |file| try testing.expectError(error.InvalidTouchstone, readTouchstone(arena, file, 1));
+    // A 2-port's noise rows: five values, starting at or below the last
+    // network frequency, ascending.
+    const two = "# Hz S RI R 50\n1 0 0 0.5 0 0.5 0 0 0\n2 0 0 0.5 0 0.5 0 0 0\n";
+    try testing.expectEqual(@as(usize, 2), (try readTouchstone(arena, two ++ "2 2.0 0.5 0 0.1\n", 2)).nf);
+    try testing.expectError(error.InvalidTouchstone, readTouchstone(arena, two ++ "1 2.0 0.5 0\n", 2));
+    try testing.expectError(error.InvalidTouchstone, readTouchstone(arena, two ++ "1 2 0.5 0 0.1\n1 2 0.5 0 0.1\n", 2));
 }

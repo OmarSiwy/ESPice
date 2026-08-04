@@ -1,0 +1,3 @@
+// `name node master` with no recognised keyword is a bare instance: there is
+// no statement keyword to disambiguate, so the last bare token is the master.
+foo bar baz

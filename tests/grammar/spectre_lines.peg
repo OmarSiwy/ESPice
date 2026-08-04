@@ -1,0 +1,74 @@
+# Spectre: physical lines -> the title and logical statements.
+#
+# The executable spec of dev/research/spectre-syntax.md §1 and §3.1 (UG =
+# Spectre User Guide 5.1.41), checked against `lines.spectre.Lines` by
+# tests/grammar/lines.zig. Spectre mode keeps case (§2.1).
+#
+# Captures: Title; Line, a Spectre-mode statement, made of Piece (joined to
+# the previous part with a blank); SpiceLine, a statement in a `simulator
+# lang=spice` region, made of HPiece and HGlue under HSPICE's line rules.
+
+File       <- Title (eol body)? !.
+
+# §1.2: line 1 of the top-level netlist is the title (UG p.29, p.50).
+Title      <- (!eol .)*
+
+body       <- (spice_region / Line / skip)*
+
+# §3.1: `simulator lang=spice` holds until `simulator lang=spectre`, which a
+# SPICE region writes without a dot (UG p.53).
+spice_region <- &to_spice Line (!to_spectre (SpiceLine / hskip))* spice_back?
+spice_back <- &to_spectre SpiceLine
+to_spice   <- blank* 'simulator' blank+ 'lang' blank* '=' blank* 'spice' !wchar
+to_spectre <- blank* 'simulator'i blank+ 'lang'i blank* '=' blank* 'spectre'i !wchar
+
+# §1.3: `*` in the first column comments the line (UG p.59); so does a
+# line holding only a `//` comment. Blank lines are skipped. Neither ends a
+# pending statement before its `+` continuation.
+skip       <- '*' (!eol .)* eolx
+            / blank* '//' (!eol .)* eolx
+            / blank* eol
+            / blank+ !.
+
+Line       <- ![*] blank* !'+' !'//' !eolx Piece comment? more* eolx
+more       <- bs_break Piece comment?
+            / eol skip_cont* blank* '+' Piece comment?
+
+# §1.4: a backslash ending the line joins the next one (UG p.59, the
+# preferred style), and so does `+` starting the next line.
+bs_break   <- '\\' blank* eolx
+skip_cont  <- '*' (!eol .)* eol / blank* '//' (!eol .)* eol / blank* eol
+
+Piece      <- chunk*
+chunk      <- string / escape / !'//' !bs_end !eol .
+# §2.2: a backslash before any other byte is part of a name (`\2N2222`).
+escape     <- !bs_end '\\' ![\r\n] .
+bs_end     <- '\\' blank* eolx
+# §1.3: `//` to the end of the line, outside strings (UG p.59 asks for a
+# space before it; ESPice and NetlistParse.rs take it anywhere).
+comment    <- '//' (!eol .)*
+# §2.5: double-quoted strings, a backslash escaping a quote.
+# An unclosed string runs to the end of the line, short of a backslash
+# that ends it (a break, §1.4).
+string     <- '"' (!bs_end ('\\' !eol . / !'"' !eol .))* ('"' / &(bs_end / eolx))
+
+# §3.2: a SPICE region reads as HSPICE does (hspice_lines.peg L2-L6).
+SpiceLine  <- blank* ![+*$] HPiece hmore* hcomment? eolx
+hmore      <- blank* '\\\\' blank* eolx blank* HGlue
+            / blank+ '\\' blank* eolx HPiece
+            / hcomment? eol hskip* blank* '+' HPiece?
+hskip      <- blank* [*$] (!eol .)* eolx / blank* eol / blank+ !.
+HPiece     <- hchunk+
+HGlue      <- hchunk*
+hchunk     <- hquoted / hsep / hnum / hword
+hsep       <- blank+ !('\\' blank* eolx) !('\\\\' blank* eolx) / [,=()]
+hnum       <- [+\-]? ([0-9]+ ('.' [0-9]*)? / '.' [0-9]+) ([eEdD] [+\-]? [0-9]+)? [a-zA-Z]* &'$'
+hword      <- !'$' !('\\\\' blank* eolx) hwchar (!('\\\\' blank* eolx) hwchar)*
+hwchar     <- ![ \t,=()'"\r\n] .
+hcomment   <- '$' (!eol .)*
+hquoted    <- "'" (!"'" !eol .)* "'" / '"' (!'"' !eol .)* '"'
+
+wchar      <- [a-zA-Z0-9_!]
+blank      <- [ \t]
+eol        <- '\r'? '\n'
+eolx       <- eol / !.

@@ -1,0 +1,5 @@
+// Spectre allows a `return` expression without a trailing ';'.
+// Rust-led relaxation (see spectre_models.md); Julia backport pending.
+real bad( real a ) {
+    return a*a
+}

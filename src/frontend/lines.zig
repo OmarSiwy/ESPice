@@ -117,8 +117,10 @@ pub fn Fields(comptime quotes: []const u8, comptime braces: bool) type {
 
 const NumParts = struct { base: f64, suffix: []const u8 };
 
-/// The leading decimal literal of `text` and the suffix after it.
-fn parseNumBase(text: []const u8) ?NumParts {
+/// The leading decimal literal of `text` and the suffix after it. With
+/// `d_exp`, `d` is an exponent letter like `e` (`1d3`), as SPICE reads it
+/// (ngspice inpeval.c INPevaluate; HSPICE User Guide B-2008.09 p. 49).
+fn parseNumBase(text: []const u8, comptime d_exp: bool) ?NumParts {
     if (text.len == 0) return null;
     var end: usize = 0;
     var seen_digit = false;
@@ -130,7 +132,7 @@ fn parseNumBase(text: []const u8) ?NumParts {
             seen_digit = true;
         } else if (c == '.' and !seen_dot and !seen_exp) {
             seen_dot = true;
-        } else if ((c == 'e' or c == 'E') and !seen_exp and seen_digit and end + 1 < text.len and
+        } else if ((c == 'e' or c == 'E' or d_exp and (c == 'd' or c == 'D')) and !seen_exp and seen_digit and end + 1 < text.len and
             (std.ascii.isDigit(text[end + 1]) or text[end + 1] == '-' or text[end + 1] == '+'))
         {
             seen_exp = true;
@@ -145,14 +147,23 @@ fn parseNumBase(text: []const u8) ?NumParts {
         }
     }
     if (!seen_digit) return null;
-    const base = std.fmt.parseFloat(f64, text[0..end]) catch return null;
+    var buf: [64]u8 = undefined;
+    // parseFloat reads only `e`; a `d` exponent is the same number.
+    const lit = if (d_exp and end <= buf.len) blk: {
+        @memcpy(buf[0..end], text[0..end]);
+        for (buf[0..end]) |*b| if (b.* == 'd' or b.* == 'D') {
+            b.* = 'e';
+        };
+        break :blk buf[0..end];
+    } else text[0..end];
+    const base = std.fmt.parseFloat(f64, lit) catch return null;
     return .{ .base = base, .suffix = text[end..] };
 }
 
 /// A number with a SPICE scale suffix (`10meg`, `2.5u`); HSPICE also reads
 /// `x` as 1e6. An unknown suffix scales by 1.
 inline fn parseSpiceNum(text: []const u8, comptime hspice_suffix: bool) ?f64 {
-    const parsed = parseNumBase(text) orelse return null;
+    const parsed = parseNumBase(text, true) orelse return null;
     const s = parsed.suffix;
     const scale_exp: i32 = if (s.len == 0)
         0
@@ -170,6 +181,7 @@ inline fn parseSpiceNum(text: []const u8, comptime hspice_suffix: bool) ?f64 {
         'n' => -9,
         'p' => -12,
         'f' => -15,
+        'a' => -18,
         else => 0,
     };
     const lit = text[0 .. text.len - s.len];
@@ -280,43 +292,97 @@ pub const ngspice = struct {
     pub const Split = Fields("'", true);
 
     /// Logical-line iterator; a joined line is allocated in `arena`.
+    /// tests/grammar/ngspice_lines.peg is the spec; section numbers cite
+    /// dev/research/ngspice-syntax.md.
     pub const Lines = struct {
         rest: []const u8,
         arena: std.mem.Allocator,
 
-        /// Cuts at the first `$` or `;`. One scalar pass: cards are short, and
-        /// two stdlib vector scans cost more in setup than they save.
+        /// A first byte that makes the line a comment [§1.5]: `*`, `#`, `$`,
+        /// `;` silently, and the punctuation ngspice rewrites to `*` with a
+        /// warning.
+        fn isCommentLead(c: u8) bool {
+            return std.mem.indexOfScalar(u8, "*#$;=[]?()&%\"!:,\x0c", c) != null;
+        }
+
+        /// `line` up to its end-of-line comment [§1.5], trimmed: `;` or `//`
+        /// anywhere, `$` at the start or after a blank, tab or comma, all
+        /// outside quotes (a backslash escapes a quote). Braces do not
+        /// protect. One scalar pass: cards are short, and stdlib vector
+        /// scans cost more in setup than they save.
         fn stripComment(line: []const u8) []const u8 {
-            const cut = for (line, 0..) |c, i| {
-                if (c == '$' or c == ';') break i;
-            } else line.len;
-            return std.mem.trim(u8, line[0..cut], " \t");
+            var quote: u8 = 0;
+            var i: usize = 0;
+            while (i < line.len) : (i += 1) {
+                const c = line[i];
+                if (quote != 0) {
+                    if (c == '\\') {
+                        i += 1;
+                    } else if (c == quote) quote = 0;
+                    continue;
+                }
+                switch (c) {
+                    '\'', '"' => quote = c,
+                    ';' => break,
+                    '/' => if (i + 1 < line.len and line[i + 1] == '/') break,
+                    '$' => if (i == 0 or line[i - 1] == ' ' or line[i - 1] == '\t' or line[i - 1] == ',') break,
+                    else => {},
+                }
+            }
+            return std.mem.trim(u8, line[0..@min(i, line.len)], " \t");
+        }
+
+        /// True when `line` ends in `\\` and blanks [§1.6]: it continues on
+        /// the next line, whatever comment sits before the backslashes.
+        fn endsGlued(line: []const u8) bool {
+            return std.mem.endsWith(u8, std.mem.trimEnd(u8, line, " \t"), "\\\\");
+        }
+
+        /// `line` without its trailing `\\` and blanks.
+        fn unglued(line: []const u8) []const u8 {
+            const t = std.mem.trimEnd(u8, line, " \t");
+            return t[0 .. t.len - 2];
         }
 
         /// The next logical line, continuations joined; null at the end.
         pub fn next(self: *Lines) !?[]const u8 {
-            var head: []const u8 = undefined;
+            var t: []const u8 = undefined;
             while (true) {
                 const raw = nextPhysicalLine(&self.rest) orelse return null;
-                const t = std.mem.trim(u8, raw, " \t");
-                if (t.len == 0 or t[0] == '*') continue;
-                head = stripComment(t);
-                if (head.len == 0) continue;
+                t = std.mem.trim(u8, raw, " \t");
+                if (t.len == 0 or isCommentLead(t[0])) continue;
+                // §1.3: a line starting with `@` ends the file.
+                if (t[0] == '@') {
+                    self.rest = "";
+                    return null;
+                }
+                // §1.6: a `+` line with nothing to continue is ignored.
+                if (t[0] == '+') continue;
                 break;
             }
+            var glued = endsGlued(t);
+            const head = stripComment(if (glued) unglued(t) else t);
             var joined: ?std.ArrayList(u8) = null;
-            while (true) {
+            // Each pass consumes a physical line or ends the statement.
+            const passes_max = self.rest.len + 1;
+            var passes: usize = 0;
+            while (true) : (passes += 1) {
+                std.debug.assert(passes <= passes_max);
                 const save = self.rest;
                 const raw = nextPhysicalLine(&self.rest) orelse break;
-                const t = std.mem.trim(u8, raw, " \t");
-                if (t.len > 0 and t[0] == '+') {
-                    try join(self.arena, &joined, head, stripComment(t[1..]));
-                } else if (t.len == 0 or t[0] == '*') {
+                var u = std.mem.trim(u8, raw, " \t");
+                if (glued) {
+                    // §1.6: the line after a `\\` continues the statement as is.
+                } else if (u.len > 0 and u[0] == '+') {
+                    u = u[1..];
+                } else if (u.len == 0 or u[0] == '*' or u[0] == '#' or u[0] == '$') {
                     continue;
                 } else {
                     self.rest = save;
                     break;
                 }
+                glued = endsGlued(u);
+                try join(self.arena, &joined, head, stripComment(if (glued) unglued(u) else u));
             }
             return if (joined) |j| j.items else head;
         }
@@ -329,7 +395,9 @@ pub const ngspice = struct {
 };
 
 /// HSPICE: like ngspice, but `"` also quotes, `$` starts a comment only after
-/// a blank, and a trailing `\\` continues the line.
+/// a separator or a number, and a trailing `\` or `\\` continues the line
+/// (tests/grammar/hspice_lines.peg is the spec; rule ids L2-L6 cite
+/// dev/research/hspice-syntax.md).
 pub const hspice = struct {
     /// The first line is the deck title, not a card.
     pub const title_line = true;
@@ -343,62 +411,124 @@ pub const hspice = struct {
         rest: []const u8,
         arena: std.mem.Allocator,
 
-        fn stripComment(line: []const u8) []const u8 {
-            var cut = line.len;
-            var i: usize = 1;
-            while (i < line.len) : (i += 1) {
-                if (line[i] == '$' and (line[i - 1] == ' ' or line[i - 1] == '\t')) {
-                    cut = i;
-                    break;
-                }
+        /// A token that ends in a `$` comment [L3]: a number with optional
+        /// scale and unit letters (`1k`, `1w`, `.5e-3v`).
+        fn isNumberToken(t: []const u8) bool {
+            var i: usize = 0;
+            if (i < t.len and (t[i] == '+' or t[i] == '-')) i += 1;
+            const mantissa = i;
+            while (i < t.len and std.ascii.isDigit(t[i])) i += 1;
+            const int_digits = i > mantissa;
+            if (i < t.len and t[i] == '.') i += 1;
+            const frac = i;
+            while (i < t.len and std.ascii.isDigit(t[i])) i += 1;
+            if (!int_digits and i == frac) return false;
+            if (i + 1 < t.len and std.ascii.toLower(t[i]) == 'e' or i + 1 < t.len and std.ascii.toLower(t[i]) == 'd') {
+                var j = i + 1;
+                if (t[j] == '+' or t[j] == '-') j += 1;
+                const exp = j;
+                while (j < t.len and std.ascii.isDigit(t[j])) j += 1;
+                if (j > exp) i = j;
             }
-            return std.mem.trim(u8, line[0..cut], " \t");
+            while (i < t.len and std.ascii.isAlphabetic(t[i])) i += 1;
+            return i == t.len;
         }
 
-        fn stripTrailingBackslash(line: []const u8) struct { text: []const u8, continues: bool } {
-            if (line.len >= 2 and line[line.len - 2] == '\\' and line[line.len - 1] == '\\') {
-                return .{ .text = std.mem.trimEnd(u8, line[0 .. line.len - 2], " \t"), .continues = true };
+        /// A physical line's text and how it continues.
+        const Part = struct { text: []const u8, brk: Break };
+
+        /// `line` up to its inline `$` comment [L3], trimmed, and its trailing
+        /// break [L6]. The comment is a `$` after a separator (blank, comma,
+        /// `=`, parenthesis), after a closing quote or after a number token,
+        /// outside quotes; a `$` inside a name is a name character (`a$b`).
+        /// A line with a comment has no break: the backslashes are not at its
+        /// end. `quote` is the quote byte open at the start of the line (0
+        /// for none) and is left as the one open at its end, so a string
+        /// continued by a backslash keeps its `$` signs.
+        fn read(line: []const u8, quote: *u8) Part {
+            const text = stripComment(line, quote);
+            if (text.len < std.mem.trimEnd(u8, line, " \t").len) return .{ .text = text, .brk = .none };
+            return trailingBreak(text);
+        }
+
+        fn stripComment(line: []const u8, quote: *u8) []const u8 {
+            var token: usize = 0;
+            for (line, 0..) |c, i| {
+                if (quote.* != 0) {
+                    if (c == quote.*) {
+                        quote.* = 0;
+                        token = i + 1;
+                    }
+                    continue;
+                }
+                switch (c) {
+                    '\'', '"' => quote.* = c,
+                    ' ', '\t', ',', '=', '(', ')' => token = i + 1,
+                    '$' => if (token == i or isNumberToken(line[token..i])) return std.mem.trim(u8, line[0..i], " \t"),
+                    else => {},
+                }
             }
-            return .{ .text = line, .continues = false };
+            return std.mem.trim(u8, line, " \t");
+        }
+
+        /// How a stripped line continues [L6]: `\\` joins the next line with
+        /// nothing between, a blank and `\` with one blank.
+        const Break = enum { none, glue, keep };
+
+        fn trailingBreak(line: []const u8) Part {
+            if (std.mem.endsWith(u8, line, "\\\\"))
+                return .{ .text = std.mem.trimEnd(u8, line[0 .. line.len - 2], " \t"), .brk = .glue };
+            if (line.len >= 2 and line[line.len - 1] == '\\' and (line[line.len - 2] == ' ' or line[line.len - 2] == '\t'))
+                return .{ .text = std.mem.trimEnd(u8, line[0 .. line.len - 1], " \t"), .brk = .keep };
+            return .{ .text = line, .brk = .none };
         }
 
         /// The next logical line, continuations joined; null at the end.
         pub fn next(self: *Lines) !?[]const u8 {
-            var head: []const u8 = undefined;
-            var trailing_cont = false;
+            var part: Part = undefined;
+            var quote: u8 = 0;
+            // L2: comment lines (`*` or `$` first) and blank lines are skipped.
             while (true) {
                 const raw = nextPhysicalLine(&self.rest) orelse return null;
                 const t = std.mem.trim(u8, raw, " \t");
-                if (t.len == 0 or t[0] == '*') continue;
-                const stripped = stripComment(t);
-                if (stripped.len == 0) continue;
-                const bs = stripTrailingBackslash(stripped);
-                head = bs.text;
-                trailing_cont = bs.continues;
+                if (t.len == 0 or t[0] == '*' or t[0] == '$') continue;
+                part = read(t, &quote);
                 break;
             }
+            const head = part.text;
             var joined: ?std.ArrayList(u8) = null;
-            while (true) {
-                if (!trailing_cont) {
-                    const save = self.rest;
+            // Each pass consumes a physical line or ends the statement.
+            const passes_max = self.rest.len + 1;
+            var passes: usize = 0;
+            while (true) : (passes += 1) {
+                std.debug.assert(passes <= passes_max);
+                if (part.brk != .none) {
+                    // L6: the next physical line is text, `+` and all.
                     const raw = nextPhysicalLine(&self.rest) orelse break;
-                    const t = std.mem.trim(u8, raw, " \t");
-                    if (t.len > 0 and t[0] == '+') {
-                        try join(self.arena, &joined, head, stripComment(t[1..]));
-                        const bs = stripTrailingBackslash(joined.?.items);
-                        trailing_cont = bs.continues;
-                        if (trailing_cont) joined.?.shrinkRetainingCapacity(bs.text.len);
-                    } else if (t.len == 0 or t[0] == '*') {
-                        continue;
-                    } else {
-                        self.rest = save;
-                        break;
-                    }
+                    const brk = part.brk;
+                    part = read(std.mem.trim(u8, raw, " \t"), &quote);
+                    if (brk == .glue) {
+                        if (joined == null) {
+                            joined = .empty;
+                            try joined.?.appendSlice(self.arena, head);
+                        }
+                        try joined.?.appendSlice(self.arena, part.text);
+                    } else try join(self.arena, &joined, head, part.text);
+                    continue;
+                }
+                // L5: a `+` line continues the statement, past comment and blank lines.
+                const save = self.rest;
+                const raw = nextPhysicalLine(&self.rest) orelse break;
+                const t = std.mem.trim(u8, raw, " \t");
+                if (t.len > 0 and t[0] == '+') {
+                    quote = 0;
+                    part = read(t[1..], &quote);
+                    try join(self.arena, &joined, head, part.text);
+                } else if (t.len == 0 or t[0] == '*' or t[0] == '$') {
+                    continue;
                 } else {
-                    const raw = nextPhysicalLine(&self.rest) orelse break;
-                    const bs = stripTrailingBackslash(stripComment(std.mem.trim(u8, raw, " \t")));
-                    try join(self.arena, &joined, head, bs.text);
-                    trailing_cont = bs.continues;
+                    self.rest = save;
+                    break;
                 }
             }
             return if (joined) |j| j.items else head;
@@ -411,99 +541,129 @@ pub const hspice = struct {
     }
 };
 
-/// Spectre: no title line, case kept, `//` and `/* */` comments, `\` or `+`
-/// continuation.
+/// Spectre: the title line, case kept, `*` comment lines, `//` comments, `\`
+/// or `+` continuation, and HSPICE's rules in a `simulator lang=spice`
+/// region (tests/grammar/spectre_lines.peg is the spec; § cite
+/// dev/research/spectre-syntax.md).
 pub const spectre = struct {
-    /// No title line: the first line is already a card.
-    pub const title_line = false;
+    /// §1.2: line 1 of the top-level netlist is the title (UG p.29, p.50).
+    pub const title_line = true;
     /// Cards are case-sensitive: the text is parsed as written.
     pub const fold_case = false;
     /// Field splitter over one logical line.
     pub const Split = Fields("\"", false);
 
-    /// Logical-line iterator; a joined or comment-stripped line is
-    /// allocated in `arena`.
+    /// Logical-line iterator; a joined line is allocated in `arena`.
     pub const Lines = struct {
         rest: []const u8,
         arena: std.mem.Allocator,
+        /// Inside a `simulator lang=spice` region (§3.1).
+        spice: bool = false,
 
+        /// `line` up to its `//` comment, outside strings (a backslash
+        /// escapes a quote or any byte of a name), trimmed.
         fn stripComment(line: []const u8) []const u8 {
             var i: usize = 0;
+            var quoted = false;
             while (i < line.len) : (i += 1) {
-                if (i + 1 < line.len and line[i] == '/' and line[i + 1] == '/') {
+                const c = line[i];
+                if (c == '\\') {
+                    i += 1;
+                } else if (c == '"') {
+                    quoted = !quoted;
+                } else if (!quoted and c == '/' and i + 1 < line.len and line[i + 1] == '/') {
                     return std.mem.trim(u8, line[0..i], " \t");
                 }
-                if (line[i] == '"') {
-                    i += 1;
-                    while (i < line.len and line[i] != '"') : (i += 1) {}
-                }
             }
-            if (line.len > 0 and line[0] == '*') return "";
             return std.mem.trim(u8, line, " \t");
         }
 
-        /// Removes `/* */` comments, copying the spans between them. An
-        /// unterminated `/*` discards the rest of the line.
-        pub fn stripBlockComments(arena: std.mem.Allocator, line: []const u8) ![]const u8 {
-            var open = std.mem.indexOf(u8, line, "/*") orelse return line;
-            var buf: std.ArrayList(u8) = .empty;
-            try buf.appendSlice(arena, line[0..open]);
-            while (std.mem.indexOfPos(u8, line, open + 2, "*/")) |close| {
-                const keep = close + 2;
-                open = std.mem.indexOfPos(u8, line, keep, "/*") orelse line.len;
-                try buf.appendSlice(arena, line[keep..open]);
-                if (open == line.len) break;
-            }
-            return std.mem.trim(u8, buf.items, " \t");
+        /// A line the statement skips: blank, `*` in the first column, or
+        /// only a `//` comment (§1.3).
+        fn isSkip(raw: []const u8) bool {
+            return (raw.len > 0 and raw[0] == '*') or stripComment(raw).len == 0;
         }
 
-        // Both helpers receive trimmed output from stripBlockComments.
-        fn hasContinuation(line: []const u8) bool {
-            return line.len > 0 and line[line.len - 1] == '\\';
+        /// A physical line's text: up to its comment, and without the
+        /// backslash that continues it (§1.4) when it has one. The
+        /// backslash must end the line, so a line with a comment has none.
+        fn read(raw: []const u8) struct { []const u8, bool } {
+            const text = stripComment(raw);
+            if (text.len < std.mem.trim(u8, raw, " \t").len) return .{ text, false };
+            return trailingBackslash(text);
         }
 
-        fn trimContinuation(line: []const u8) []const u8 {
-            if (hasContinuation(line)) return std.mem.trimEnd(u8, line[0 .. line.len - 1], " \t");
-            return line;
+        /// `text` without the backslash that continues it, and whether it
+        /// had one. A pair of backslashes is an escaped one, a name
+        /// character (§2.2), so only an odd run ends in a break.
+        fn trailingBackslash(text: []const u8) struct { []const u8, bool } {
+            var run: usize = 0;
+            while (run < text.len and text[text.len - 1 - run] == '\\') run += 1;
+            if (run % 2 == 1)
+                return .{ std.mem.trimEnd(u8, text[0 .. text.len - 1], " \t"), true };
+            return .{ text, false };
+        }
+
+        /// True for `simulator lang=<lang>`, case-blind as a SPICE region
+        /// writes it.
+        fn switchesTo(line: []const u8, lang: []const u8) bool {
+            var f = Fields("\"", false).init(line);
+            const words = [_][]const u8{ "simulator", "lang", "=" };
+            for (words) |w| if (!std.ascii.eqlIgnoreCase(f.next() orelse return false, w)) return false;
+            return std.ascii.eqlIgnoreCase(f.next() orelse return false, lang);
         }
 
         /// The next logical line, continuations joined; null at the end.
         pub fn next(self: *Lines) !?[]const u8 {
-            var head: []const u8 = undefined;
-            var trailing_cont = false;
-            while (true) {
-                const raw = nextPhysicalLine(&self.rest) orelse return null;
-                const clean = try stripBlockComments(self.arena, stripComment(raw));
-                if (clean.len == 0) continue;
-                trailing_cont = hasContinuation(clean);
-                head = trimContinuation(clean);
-                if (head.len == 0) continue;
-                break;
-            }
-            var joined: ?std.ArrayList(u8) = null;
-            while (true) {
-                const line = if (trailing_cont)
-                    nextPhysicalLine(&self.rest) orelse break
-                else blk: {
-                    const save = self.rest;
-                    const raw = nextPhysicalLine(&self.rest) orelse break;
-                    const t = std.mem.trim(u8, raw, " \t");
-                    if (t.len > 0 and t[0] == '+') break :blk t[1..];
-                    if (t.len == 0 or t[0] == '*') continue;
-                    self.rest = save;
-                    break;
+            if (self.spice) {
+                // §3.2: a SPICE region reads as HSPICE does.
+                var h: hspice.Lines = .{ .rest = self.rest, .arena = self.arena };
+                const line = try h.next();
+                self.rest = h.rest;
+                if (line) |l| if (switchesTo(l, "spectre")) {
+                    self.spice = false;
                 };
-                const clean = try stripBlockComments(self.arena, stripComment(line));
-                trailing_cont = hasContinuation(clean);
-                try join(self.arena, &joined, head, trimContinuation(clean));
+                return line;
             }
-            return if (joined) |j| j.items else head;
+            var raw: []const u8 = undefined;
+            while (true) {
+                raw = nextPhysicalLine(&self.rest) orelse return null;
+                if (!isSkip(raw)) break;
+            }
+            var text, var cont = read(raw);
+            const head = text;
+            var joined: ?std.ArrayList(u8) = null;
+            // Each pass consumes a physical line or ends the statement.
+            const passes_max = self.rest.len + 1;
+            var passes: usize = 0;
+            while (true) : (passes += 1) {
+                std.debug.assert(passes <= passes_max);
+                const save = self.rest;
+                const next_raw = nextPhysicalLine(&self.rest) orelse break;
+                if (cont) {
+                    text, cont = read(next_raw);
+                } else {
+                    const t = std.mem.trimStart(u8, next_raw, " \t");
+                    if (t.len > 0 and t[0] == '+') {
+                        text, cont = read(t[1..]);
+                    } else if (isSkip(next_raw)) {
+                        continue;
+                    } else {
+                        self.rest = save;
+                        break;
+                    }
+                }
+                try join(self.arena, &joined, head, text);
+            }
+            const line = if (joined) |j| j.items else head;
+            if (switchesTo(line, "spice")) self.spice = true;
+            return line;
         }
     };
 
     /// A number literal with a case-sensitive Spectre suffix (`M` mega, `m` milli).
     pub fn parseNum(text: []const u8) ?f64 {
-        const parsed = parseNumBase(text) orelse return null;
+        const parsed = parseNumBase(text, false) orelse return null;
         const s = parsed.suffix;
         const scale: f64 = if (s.len == 0) 1 else switch (s[0]) {
             'P' => 1e15,
@@ -574,6 +734,10 @@ test "number literals read as ngspice's INPevaluate" {
     try std.testing.expectEqual(0.5, n("+.5").?);
     try std.testing.expectEqual(-3, n("-3").?);
     try std.testing.expectEqual(5, n("5v").?); // an unknown suffix scales by 1
+    try std.testing.expectEqual(2e-18, n("2a").?); // atto (#121)
+    try std.testing.expectEqual(1000, n("1d3").?); // `d` exponent (#121)
+    try std.testing.expectEqual(2.5e-3, hspice.parseNum("2.5D-3").?);
+    try std.testing.expectEqual(1, spectre.parseNum("1d3").?); // not a Spectre exponent
     try std.testing.expectEqual(1, n("1x").?);
     try std.testing.expectEqual(1e6, hspice.parseNum("1x").?);
     try std.testing.expectApproxEqRel(25.4e-6, n("1mil").?, 1e-15);
@@ -601,6 +765,12 @@ fn expectLines(comptime S: type, src: []const u8, want: []const []const u8) !voi
 test "logical lines per dialect" {
     try expectLines(ngspice, "", &.{});
     try expectLines(ngspice, "* c\nr1 a b 1k $ tail\n+ 2 ; more\n\n* mid\n+ 3\n$ only\nc1 x y 1p\r\n", &.{ "r1 a b 1k 2 3", "c1 x y 1p" });
-    try expectLines(hspice, "r1 a b$c 1k $ tail\nr2 a \\\\\nb 2\n+ 3\n", &.{ "r1 a b$c 1k", "r2 a b 2 3" });
-    try expectLines(spectre, "r1 (a b) resistor r=1k // c\nr2 \"x//y\" b \\\n  r=2\n+ m=1\n/* gone */\n", &.{ "r1 (a b) resistor r=1k", "r2 \"x//y\" b r=2 m=1" });
+    // `\\` squeezes the blanks out of the join, ` \` keeps one (HSPICE User
+    // Guide B-2008.09 p. 40); `$` after a number or a comma is a comment (p. 56).
+    try expectLines(hspice, "r1 a b$c 1k $ tail\nr2 a \\\\\nb 2\n+ 3\n", &.{ "r1 a b$c 1k", "r2 ab 2 3" });
+    try expectLines(hspice, "$ note\nr3 a b \\\n  2k$c\nr4 a b 1,$c\n", &.{ "r3 a b 2k", "r4 a b 1," });
+    // No `/* */` in Spectre (spectre-syntax.md §1.3); `*` comments only in
+    // the first column; a SPICE region reads as HSPICE does.
+    try expectLines(spectre, "r1 (a b) resistor r=1k // c\nr2 \"x//y\" b \\\n  r=2\n// note\n+ m=1\n* gone\n", &.{ "r1 (a b) resistor r=1k", "r2 \"x//y\" b r=2 m=1" });
+    try expectLines(spectre, "simulator lang=spice\nR1 a b 1k $ c\n+ tc1=1\nsimulator lang=spectre\nr2 (a b) resistor r=1 $x\n", &.{ "simulator lang=spice", "R1 a b 1k tc1=1", "simulator lang=spectre", "r2 (a b) resistor r=1 $x" });
 }

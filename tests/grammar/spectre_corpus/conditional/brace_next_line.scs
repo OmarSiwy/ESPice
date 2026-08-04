@@ -1,0 +1,9 @@
+// the opening brace may sit on the line after the condition (PDK style)
+simulator lang=spectre
+if ( rxjogsw < 0.5 )
+{
+    include "./lle_equation.scs"
+    include "./lle_param.lib.scs" section=nfet
+} else {
+    include "./lle_param.lib.scs" section=nfet_low
+}

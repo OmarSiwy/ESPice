@@ -1,0 +1,59 @@
+# HSPICE: the dialect rules spice_cards.peg leaves open: numbers, quoting
+# and the expression language. Sources: dev/research/hspice-syntax.md
+# (rule ids T3, T2, X1, X2).
+
+# T3: a number with an exponent (`E` or `D`) or a scale factor: T G MEG X K
+# MIL M U N P F A (`X` and `MEG` are both 1e6); trailing letters are a unit
+# comment (`10pf`, `1.5volts`). HSPICE forbids an exponent and a scale
+# together (`1e-6u`); ESPice: reads it as ngspice does, the scale applied.
+Number     <- [+\-]? Mantissa Exponent? Scale? [a-z0-9_.]*
+Mantissa   <- [0-9]+ ('.' [0-9]*)? / '.' [0-9]+
+Exponent   <- [ed] [+\-]? [0-9]+
+Scale      <- 'meg' / 'mil' / [tgxkmunpfa]
+
+# T2, X1: `'expr'` and `"expr"` are expressions; braces are not (HSPICE turns
+# `{}` into `[]` inside names).
+Expr       <- "'" x Ternary x "'" / '"' x Ternary x '"'
+
+# X1: after `key=`, an unquoted expression (`x=cos(2)+sin(2)`). ESPice:
+# blanks may sit around its operators.
+pairexpr   <- &([a-zA-Z_.0-9(+\-!$]) Ternary !wordchar
+
+# X2: HSPICE documents the operators (`+ - * / ** ^ < <= > >= == != && ||
+# ?:`) but no precedence. ESPice compiles every dialect's expressions with
+# one compiler (src/frontend/expr.zig), whose levels are numparam's
+# (dev/research/ngspice-syntax.md §2.2): this is that table.
+Ternary    <- Or (x '?' x Ternary x ':' x Ternary)?
+Or         <- And (x OrOp x And)*
+And        <- Cmp (x AndOp x Cmp)*
+Cmp        <- Add (x CmpOp x Add)*
+Add        <- Mul (x AddOp x Mul)*
+Mul        <- Pow (x MulOp x Pow)*
+Pow        <- Unary (x PowOp x Unary)*
+Unary      <- SignOp x Pow / NotOp x Unary / atom
+atom       <- Paren / Probe / Call / Num / Ref
+Paren      <- '(' x Ternary x ')'
+Probe      <- [vi] x '(' x Pname (x ',' x Pname)? x ')'
+Pname      <- (![ \t,()\n] .)+
+Call       <- Ref x '(' x (Ternary (x ',' x Ternary)*)? x ')'
+Num        <- Mantissa ([e] [+\-]? [0-9]+)? [a-z]*
+Ref        <- [a-zA-Z_$] [a-zA-Z0-9_.$!]*
+x          <- [ \t]*
+
+OrOp       <- '||'
+AndOp      <- '&&'
+CmpOp      <- '==' / '!=' / '<=' / '>=' / '<' / '>'
+AddOp      <- [+\-]
+# ESPice: `%` and `\` too, as in every dialect (one expression compiler).
+MulOp      <- '*' !'*' / [/%\\]
+PowOp      <- '^' / '**'
+SignOp     <- [+\-]
+NotOp      <- '!' !'='
+
+# A field, a field inside a group, a pair's value, and HSPICE's `[a, b]`
+# vector (`hblin=[1, -1]` on a P port) (spice_cards.peg). A quote only
+# delimits an expression or a path (T2): strings are `str('...')`, not read.
+field      <- Pair / Group / Expr / Word / [,()=]
+gfield     <- Group / Expr / Word / [,=]
+value      <- Expr / Vec / pairexpr / Word
+Vec        <- '[' s? (gfield (s? gfield)*)? s? ']'
