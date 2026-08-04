@@ -74,6 +74,11 @@ typedef struct {
     uint32_t source_kind, dialect, backend, explicit_gpu;
     uint32_t output_format, max_parallel;
     espice_bytes source, origin, output_path;
+    /* Runtime .hdl toolchain: the Zig compiler, and the share/espice
+     * directory of evaluator sources. Empty keeps $ZIG and the paths found
+     * beside the executable. Callers built before these fields pass a
+     * struct_size that ends at output_path and get the defaults. */
+    espice_bytes zig_path, share_path;
 } espice_create_options;
 typedef struct { uint32_t kind, id; } espice_scope;
 typedef struct {

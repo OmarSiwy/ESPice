@@ -74,14 +74,15 @@ fn prepareOne(lib: *const Library, gpa: std.mem.Allocator, io: std.Io, path: []c
     const arena = arena_state.allocator();
 
     // The same FastVAF calls as tools/compile_va.zig, so a loaded model and a
-    // built-in one are the same device.
+    // built-in one are the same device, except that a loaded one keeps its
+    // §9.4 display tasks as `say` (`Hooks.say`, #102).
     var va: ?fastvaf.CompileResult = null;
     defer if (va) |*r| r.deinit();
     var v: digital.DeviceZig = undefined;
     const module_name = switch (hdl) {
         .va => blk: {
             const dir = std.fs.path.dirname(path) orelse ".";
-            va = fastvaf.compileSourceOpts(gpa, source, .build, .{ .file_name = path, .include_dirs = &.{dir}, .diags = &bag }) catch |err| {
+            va = fastvaf.compileSourceOpts(gpa, source, .build, .{ .file_name = path, .include_dirs = &.{dir}, .diags = &bag, .display = .record }) catch |err| {
                 printDiags(&bag);
                 return err;
             };
@@ -392,17 +393,21 @@ fn recordInputs(io: std.Io, work_root: []const u8, key: [32]u8, module_name: []c
 }
 
 /// Compiles and loads every source not yet in `lib`, in parallel, then
-/// registers the results in `files` order. The first error wins; nothing is
-/// registered after it.
+/// registers the results in `files` order. A source named twice, here or in
+/// an earlier call, compiles once (`pending`). The first error wins; nothing
+/// is registered after it.
 pub fn ensureAllLoaded(lib: *Library, io: std.Io, files: []const []const u8, paths: BuildPaths) !void {
     const gpa = lib.gpa;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const todo = try pending(lib, arena_state.allocator(), files);
     const Result = anyerror!?Prepared;
-    const results = try gpa.alloc(Result, files.len);
+    const results = try gpa.alloc(Result, todo.files.len);
     defer gpa.free(results);
 
     var group: std.Io.Group = .init;
     defer group.cancel(io);
-    for (files, results) |path, *slot| {
+    for (todo.files, results) |path, *slot| {
         group.async(io, struct {
             fn run(inner_io: std.Io, ctx: struct { l: *const Library, g: std.mem.Allocator, p: []const u8, s: *Result, bp: BuildPaths }) void {
                 ctx.s.* = prepareOne(ctx.l, ctx.g, inner_io, ctx.p, ctx.bp);
@@ -411,9 +416,37 @@ pub fn ensureAllLoaded(lib: *Library, io: std.Io, files: []const []const u8, pat
     }
     try group.await(io);
 
-    for (results) |result| {
+    try lib.sources.ensureUnusedCapacity(gpa, todo.resolved.len);
+    for (results, todo.resolved) |result, resolved| {
         if (try result) |prepared| _ = try lib.register(prepared.name(), prepared.vtable, prepared.digital);
+        lib.sources.appendAssumeCapacity(try gpa.dupe(u8, resolved));
     }
+}
+
+/// The sources of `files` still to compile, each once, in first-seen order:
+/// `files` entries as given (for messages), and their resolved paths, the
+/// identity `Library.sources` keeps. Both live in `arena`.
+// ponytail: lexical resolution, so a symlinked second spelling still
+// compiles (and then registers nothing, the module name being taken);
+// key on the file's inode if that shows up.
+fn pending(lib: *const Library, arena: std.mem.Allocator, files: []const []const u8) !struct { files: []const []const u8, resolved: []const []const u8 } {
+    var todo: std.ArrayList([]const u8) = try .initCapacity(arena, files.len);
+    var resolved: std.ArrayList([]const u8) = try .initCapacity(arena, files.len);
+    // ponytail: linear scans; a deck names a handful of HDL sources.
+    for (files) |f| {
+        const r = try std.fs.path.resolve(arena, &.{f});
+        if (has(lib.sources.items, r) or has(resolved.items, r)) continue;
+        todo.appendAssumeCapacity(f);
+        resolved.appendAssumeCapacity(r);
+    }
+    std.debug.assert(todo.items.len == resolved.items.len);
+    std.debug.assert(todo.items.len <= files.len);
+    return .{ .files = todo.items, .resolved = resolved.items };
+}
+
+fn has(list: []const []const u8, path: []const u8) bool {
+    for (list) |p| if (std.mem.eql(u8, p, path)) return true;
+    return false;
 }
 
 /// VerA's `.v` contract device for `source`: 4-state, under the static
@@ -457,6 +490,24 @@ fn loadDevice(path: []const u8) !*const DeviceVtable {
     const get_vt = lib.lookup(*const fn () callconv(.c) *const DeviceVtable, "arp_device") orelse
         return error.NotArpDevice;
     return get_vt();
+}
+
+test "pending: a source named twice, or loaded before, compiles once" {
+    var lib = try Library.init(std.testing.allocator);
+    defer lib.deinit();
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    // The same file under three spellings, as several `.lib` sections name it.
+    const first = try pending(&lib, a, &.{ "lib/m.va", "lib/./m.va", "other.va", "lib/sub/../m.va" });
+    try std.testing.expectEqual(@as(usize, 2), first.files.len);
+    try std.testing.expectEqualStrings("lib/m.va", first.files[0]);
+    try std.testing.expectEqualStrings("other.va", first.files[1]);
+    // A later load skips what an earlier one handled.
+    for (first.resolved) |r| try lib.sources.append(lib.gpa, try lib.gpa.dupe(u8, r));
+    const again = try pending(&lib, a, &.{ "other.va", "lib/m.va", "new.va" });
+    try std.testing.expectEqual(@as(usize, 1), again.files.len);
+    try std.testing.expectEqualStrings("new.va", again.files[0]);
 }
 
 test "normalizeCode: comments and layout drop, code and line breaks stay" {

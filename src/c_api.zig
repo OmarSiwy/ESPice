@@ -73,6 +73,9 @@ const CreateOptions = extern struct {
     source: Bytes,
     origin: Bytes,
     output_path: Bytes,
+    /// Added after ABI 1 shipped: read only when `struct_size` covers them.
+    zig_path: Bytes,
+    share_path: Bytes,
 };
 comptime {
     if (@sizeOf(CreateOptions) != @sizeOf(header.espice_create_options)) @compileError("espice_create_options drifted from CreateOptions");
@@ -158,10 +161,15 @@ export fn espice_create(options: ?*const CreateOptions, out: ?*?*Handle, diagnos
 }
 
 fn create(options: *const CreateOptions) !*Handle {
-    if (options.abi_version != abi_version or options.struct_size < @sizeOf(CreateOptions)) return error.AbiMismatch;
+    // A caller built before the toolchain fields passes a struct ending at
+    // `output_path`; the fields past its size are never read.
+    if (options.abi_version != abi_version or options.struct_size < @offsetOf(CreateOptions, "zig_path")) return error.AbiMismatch;
+    const toolchain = options.struct_size >= @sizeOf(CreateOptions);
     const source = try constSlice(u8, options.source.data, options.source.len);
     const origin = try constSlice(u8, options.origin.data, options.origin.len);
     const path = try constSlice(u8, options.output_path.data, options.output_path.len);
+    const zig_path = if (toolchain) try constSlice(u8, options.zig_path.data, options.zig_path.len) else "";
+    const share_path = if (toolchain) try constSlice(u8, options.share_path.data, options.share_path.len) else "";
     if (source.len == 0 or options.explicit_gpu > 1) return error.InvalidArgument;
     const config: api.Options = .{
         .source = switch (options.source_kind) {
@@ -179,6 +187,10 @@ fn create(options: *const CreateOptions) !*Handle {
             .path = if (path.len == 0) null else path,
         },
         .max_parallel = try concurrency(options.max_parallel),
+        .hdl_toolchain = .{
+            .zig = if (zig_path.len == 0) null else zig_path,
+            .share = if (share_path.len == 0) null else share_path,
+        },
     };
     const handle = try allocator.create(Handle);
     errdefer allocator.destroy(handle);

@@ -121,6 +121,7 @@ Error: measure  t50 : out of interval
 | Message | Cause |
 |---|---|
 | `CompilerGone` | the Zig compiler could not be started for `.hdl`: put Zig 0.17.0 on `PATH` or set `ZIG` |
+| `HdlShareNotFound` | an embedder's toolchain share path (`Options.hdl_toolchain`, C `share_path`) holds no `device/eval.zig`; point it at the installed `share/espice` |
 | VerA diagnostics (file, line, error code) | the Verilog-A source does not compile |
 
 See [Verilog-A](devices.md#your-own-verilog-a) for the requirements.

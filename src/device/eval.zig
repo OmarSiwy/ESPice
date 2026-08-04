@@ -1600,6 +1600,7 @@ pub fn DeviceBatch(comptime D: type) type {
             .min_delay = if (@hasDecl(D, "delays")) minDelay else null,
             .next_breakpoint = if (@hasDecl(D, "nextBreakpoint") or walksPending(D)) nextBreakpointFn else null,
             .status = if (@hasDecl(D, "status_sites")) statusFn else null,
+            .say = if (@hasDecl(D, "say")) sayFn else null,
             .collect_params = collectParams,
             // A generator is only priced by the device's own `noisePsd`.
             .collect_noise = if (@hasDecl(D, "noise_gens")) blk: {
@@ -1823,6 +1824,28 @@ pub fn DeviceBatch(comptime D: type) type {
             self.held_initial = true;
             self.sim.analog_initial = false;
             return min_reject;
+        }
+
+        /// Values one `say` call can record: every site once, or 256, so a
+        /// task in a loop has room too. More counts as lost (`formatSay`).
+        const say_len = if (@hasDecl(D, "say")) blk: {
+            var n: usize = 0;
+            for (D.say_sites) |site| n += 1 + site.nargs;
+            break :blk @max(n, 256);
+        } else 0;
+
+        /// `Hooks.say`: instance `id`'s display tasks at x, rendered to `w`.
+        /// Reads the host Instance copy; a device with `say` is never
+        /// resident (the built-ins are generated without it).
+        fn sayFn(ctx: *anyopaque, x: []const f64, id: u32, name: []const u8, w: *std.Io.Writer) void {
+            const self: *Self = @ptrCast(@alignCast(ctx));
+            std.debug.assert(id < self.count);
+            var buf: [say_len]f64 = undefined;
+            var out: contract.Say = .{ .buf = &buf };
+            const lx = self.localX(x, id);
+            D.say(Real, &lx, self.model(id), &self.instances[id], self.sim, &out);
+            std.debug.assert(out.len <= buf.len);
+            contract.formatSay(D, &out, name, w) catch {}; // a failed writer drops the text
         }
 
         /// `Hooks.status`. Reads the host Instance copy; for a resident batch

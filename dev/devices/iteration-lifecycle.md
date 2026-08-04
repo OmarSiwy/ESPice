@@ -80,3 +80,22 @@ These tests cover the Newton hooks. They do not establish full Verilog-AMS
 conformance, a digital event engine, arbitrary history/convolution support, or
 bit-for-bit agreement with ngspice transmission-line algorithms. The full
 compiler backlog is VerA's `docs/CONFORMANCE.md`.
+
+## Display tasks
+
+LRM §9.4.6: "All the display tasks, except $debug, shall not display output
+unless an iteration has been accepted." A runtime `.hdl` device is built with
+VerA's `display = .record`, which keeps each `$strobe`/`$display`/`$write`/
+`$debug`/`$warning`/`$info` as records its `say` writes (`Hooks.say`).
+`Circuit.updateStates` calls it per instance at the converged x, before
+`updateState` advances the instance, and stages the rendered text in
+`Circuit.Display`; `stateCtl(.commit)` writes it to stdout and `.revert`
+drops it. A staging call after a flip reverts first, so it replaces the
+earlier text. The OPtran rung (`transientOp`) runs with the display off: its
+steps are not accepted points of any analysis. `$debug` prints at accepted
+points only (`SayPass.all`); a per-iteration `.iteration` pass is not wired.
+
+The built-in models are generated with `--display=drop`: their display tasks
+are parameter warnings that would print at every accepted point, and `say`
+reruns the model core per instance. A device with `say` is therefore never
+GPU-resident, and the host Instance it reads is current.

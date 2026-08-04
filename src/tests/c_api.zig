@@ -20,7 +20,7 @@ test "C creation validates versions, tags and pointer lengths" {
     options.backend = 99;
     try std.testing.expectEqual(@as(u32, c.ESPICE_INVALID_ARGUMENT), c.espice_create(&options, &handle, &diagnostic, diagnostic.len));
     options.backend = 0;
-    options.struct_size = @sizeOf(c.espice_create_options) - 1;
+    options.struct_size = @offsetOf(c.espice_create_options, "zig_path") - 1;
     try std.testing.expectEqual(@as(u32, c.ESPICE_ABI_MISMATCH), c.espice_create(&options, &handle, &diagnostic, diagnostic.len));
     options.struct_size = @sizeOf(c.espice_create_options);
     options.max_parallel = 65536;
@@ -206,7 +206,7 @@ test "C entry points reject NULL handles and malformed options" {
     try t.expectEqualStrings("Inv", std.mem.sliceTo(&diagnostic, 0));
     try t.expectEqual(invalid, c.espice_create(&good, &handle, null, 1));
     try t.expect(handle == null);
-    for (0..8) |case| {
+    for (0..10) |case| {
         var bad = good;
         switch (case) {
             0 => bad.source_kind = 2,
@@ -217,15 +217,38 @@ test "C entry points reject NULL handles and malformed options" {
             5 => bad.source.len = 0,
             6 => bad.origin = .{ .data = null, .len = 1 },
             7 => bad.output_path = .{ .data = null, .len = 1 },
+            8 => bad.zig_path = .{ .data = null, .len = 1 },
+            9 => bad.share_path = .{ .data = null, .len = 1 },
             else => unreachable,
         }
         try t.expectEqual(invalid, c.espice_create(&bad, &handle, null, 0));
         try t.expect(handle == null);
     }
+    // A caller built before the toolchain fields: they are never read.
+    var old = good;
+    old.struct_size = @offsetOf(c.espice_create_options, "zig_path");
+    old.zig_path = .{ .data = null, .len = 1 };
+    try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_create(&old, &handle, null, 0));
+    c.espice_destroy(handle);
     // A newer caller's larger struct is accepted; only our prefix is read.
     good.struct_size += 16;
     try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_create(&good, &handle, null, 0));
     c.espice_destroy(handle);
+}
+
+test "C creation hands the toolchain paths to .hdl loading (#13)" {
+    const deck = "C toolchain\n.hdl \"m.va\"\nN1 1 0 m\nR1 1 0 1k\n.op\n.end\n";
+    const share = "/nonexistent-espice-test-dir/share/espice";
+    var options: c.espice_create_options = undefined;
+    c.espice_default_options(&options);
+    options.source_kind = c.ESPICE_BYTES;
+    options.source = .{ .data = deck.ptr, .len = deck.len };
+    options.share_path = .{ .data = share.ptr, .len = share.len };
+    var handle: ?*c.espice_problem = null;
+    var diagnostic: [64]u8 = undefined;
+    try std.testing.expectEqual(@as(u32, c.ESPICE_FAILED), c.espice_create(&options, &handle, &diagnostic, diagnostic.len));
+    try std.testing.expect(handle == null);
+    try std.testing.expectEqualStrings("HdlShareNotFound", std.mem.sliceTo(&diagnostic, 0));
 }
 
 test "C calls on a live handle validate every pointer, scope and preview" {

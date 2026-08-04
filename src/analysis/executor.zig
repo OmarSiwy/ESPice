@@ -254,6 +254,13 @@ pub const Executor = struct {
             self.circuit.lu_hook = null;
             if (lu_context) |l| l.deinit();
         }
+        // §9.4 display tasks print to stdout, unbuffered, so each accepted
+        // point's lines land in order with the rest of the run's output.
+        var stdout: std.Io.File.Writer = .initStreaming(.stdout(), self.io, &.{});
+        var display: types.Display = .{ .names = try self.sayNames(), .staged = .init(self.allocator), .out = &stdout.interface };
+        defer display.staged.deinit();
+        if (display.names.len != 0) self.circuit.display = &display;
+        defer self.circuit.display = null;
         if (self.config.timing_in_depth) (try self.circuit.workspace()).prof.io = self.io;
         defer if (self.config.timing_in_depth) printNewtonSplit(&self.circuit.ws.?, self.job);
         const transient = if (self.job == .op) self.job.op.tran_op else @as(requests.Kind, self.job).transient();
@@ -301,6 +308,27 @@ pub const Executor = struct {
         if (queryTemp(self.job)) |temp| res.plotname = try std.fmt.allocPrint(self.results.allocator(), "{s} (temp={d})", .{ res.plotname, temp });
         if (queryVariant(self.job)) |v| res.plotname = try std.fmt.allocPrint(self.results.allocator(), "{s} ({s})", .{ res.plotname, self.deck.variants.labels[v] });
         return res;
+    }
+
+    /// `Display.names` from the deck's cards, an unlisted instance under its
+    /// type name; empty when no batch has `Hooks.say`.
+    fn sayNames(self: *Executor) ![]const []const []const u8 {
+        const batches = self.circuit.batches;
+        for (batches) |b| {
+            if (b.hooks.say != null) break;
+        } else return &.{};
+        const a = self.work.allocator();
+        const names = try a.alloc([]const []const u8, batches.len);
+        for (names, batches, self.circuit.batch_types) |*row, b, t| {
+            if (b.hooks.say == null) {
+                row.* = &.{};
+                continue;
+            }
+            const own = try a.alloc([]const u8, b.count);
+            for (own, 0..) |*name, i| name.* = requests.CardRef.lookup(self.deck.cards, t, @intCast(i)) orelse b.type_name;
+            row.* = own;
+        }
+        return names;
     }
 
     /// The device LU: `ESPICE_GPU_LU=1` forces it on under a GPU backend,

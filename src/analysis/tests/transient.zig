@@ -901,6 +901,59 @@ const TranTests = struct {
             if (wf.time(i) == tc) break;
         } else return error.TestExpectedLanding;
     }
+
+    // #102: a device's $strobe prints once per accepted point, at that
+    // point, and never for an attempt the step control threw away.
+    test "transient: display tasks print once per accepted step, none for a rejected attempt" {
+        const gpa = testing.allocator;
+        const tc: f64 = 0.375;
+        const D = struct {
+            pub const U = enum(u8) { p, n };
+            pub const num_ports: usize = 2;
+            pub const Model = struct {};
+            pub const Instance = struct {};
+            pub const State = struct {};
+            pub fn initState(_: *const Model, _: *const Instance) State {
+                return .{};
+            }
+            pub fn eval(comptime S: type, xv: *const [2]S.V, _: *const Model, _: *const Instance, _: contract.SimState) contract.Rows(@This(), S) {
+                const v = contract.probes(@This(), S, xv);
+                const current = v[0].sub(v[1]);
+                return contract.rows(@This(), S, .{ current, current.neg() });
+            }
+            pub fn updateState(comptime _: type, _: *const Model, _: *Instance, _: [2]f64, _: *State, sim: contract.SimState) contract.UpdateResult {
+                return if (sim.kind == .tran and sim.t > tc and sim.t - sim.dt < tc) .{ .request_reject_at = tc } else .ok;
+            }
+            pub const say_sites = [_]contract.SaySite{.{ .fmt = "%m t=%.17g\n", .file = "t.va", .line = 1, .nargs = 1 }};
+            pub fn say(comptime S: type, _: *const [2]S.V, _: *const Model, _: *const Instance, sim: contract.SimState, out: *contract.Say) void {
+                out.put(0, &.{sim.t});
+            }
+        };
+        var ckt = try oneDevice(D, gpa);
+        defer ckt.deinit();
+        var sink: std.Io.Writer.Allocating = .init(gpa);
+        defer sink.deinit();
+        var display: root.Display = .{ .names = &.{&.{"n1"}}, .staged = .init(gpa), .out = &sink.writer };
+        defer display.staged.deinit();
+        ckt.display = &display;
+        const x = try gpa.alloc(f64, 2);
+        defer gpa.free(x);
+        root.zeroSimd(x);
+        const probes = [_]u32{1};
+        var wf = try Waveform.init(gpa, 1, 256);
+        defer wf.deinit();
+        const sim = try simulate(&ckt, x, &probes, &wf, .{ .t_stop = 1, .dt_init = 0.1, .uic = true }, gpa);
+        try testing.expect(sim.completed);
+        // uic commits t = 0 without a solve, so every later sample prints once,
+        // in order, the step that overshot tc never.
+        var lines = std.mem.splitScalar(u8, sink.written(), '\n');
+        for (1..wf.len) |i| {
+            const line = lines.next() orelse return error.TestMissingLine;
+            try testing.expect(std.mem.startsWith(u8, line, "n1 t="));
+            try testing.expectEqual(wf.time(i), try std.fmt.parseFloat(f64, line["n1 t=".len..]));
+        }
+        try testing.expectEqualStrings("", lines.rest());
+    }
 };
 
 const TranNoiseTests = struct {

@@ -102,6 +102,17 @@ pub const LuHook = struct {
     solve: *const fn (*anyopaque, slv: *direct.Solver, vals: []const f64, rhs: []const f64, dx: []f64, need: bool) ?bool,
 };
 
+/// The LRM §9.4 display output of the devices with `Hooks.say` (#102),
+/// executor-owned. `updateStates` renders each converged point's lines into
+/// `staged`; `stateCtl(.commit)` writes them to `out` and `.revert` drops
+/// them, so only accepted points print, each once.
+pub const Display = struct {
+    /// Card name of each instance, by batch; empty for a batch without `say`.
+    names: []const []const []const u8,
+    staged: std.Io.Writer.Allocating,
+    out: *std.Io.Writer,
+};
+
 /// Frozen topology plus the mutable device and solver state of one query.
 ///
 /// Field order is the hot/cold split: the pattern, the planes, the batch table
@@ -164,6 +175,8 @@ pub const Circuit = struct {
     gpu_hook: ?GpuHook = null,
     /// Executor-owned device LU; null means the host factors.
     lu_hook: ?LuHook = null,
+    /// Executor-owned display output; null when no batch has `Hooks.say`.
+    display: ?*Display = null,
     /// The temperature `setCircuitTemp` last installed, in degrees Celsius;
     /// the devices' own 27 until then. A sweep restores it from here.
     temp_c: f32 = 27,
@@ -868,6 +881,7 @@ pub const Circuit = struct {
     pub fn updateStates(self: *Circuit, x: []const f64) ?f64 {
         if (self.state_staged) _ = self.stateCtl(.revert);
         self.state_staged = true;
+        if (self.display) |d| self.say(d, x);
         // The transient reads q at the converged point next, so get it from
         // the staging pass's core run. ponytail: serial; a ParEval `.accept`
         // mode would keep it threaded when lanes are on.
@@ -876,6 +890,17 @@ pub const Circuit = struct {
         if (!self.land_rejects) return tr;
         self.reject_at = tr;
         return null;
+    }
+
+    /// Stages every `Hooks.say` line at x, before `updateState` moves the
+    /// instances on from the state eval saw.
+    fn say(self: *const Circuit, d: *Display, x: []const f64) void {
+        std.debug.assert(d.names.len == self.batches.len);
+        for (self.batches, d.names) |b, names| {
+            const f = b.hooks.say orelse continue;
+            std.debug.assert(names.len == b.count);
+            for (names, 0..) |name, i| f(b.ctx, x, @intCast(i), name, &d.staged.writer);
+        }
     }
 
     /// `updateBatches` plus `evalQ` at x and the published time: `accept_q`
@@ -912,6 +937,11 @@ pub const Circuit = struct {
     /// flip moved the working state off the last accepted one.
     pub fn stateCtl(self: *Circuit, sop: StateCtlOp) bool {
         if (sop != .query) self.state_staged = false;
+        if (self.display) |d| if (sop != .query) {
+            // ponytail: a failed write to `out` drops the point's lines.
+            if (sop == .commit) d.out.writeAll(d.staged.written()) catch {};
+            d.staged.clearRetainingCapacity();
+        };
         if (self.gpu_hook) |gh| return gh.state_ctl(gh.ctx, sop);
         return stateCtlBatches(self.batches, sop);
     }

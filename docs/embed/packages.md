@@ -50,7 +50,11 @@ does not work: the package installs both the `espice` executable and the
 The dependency builds every built-in Verilog-A model, so the first build
 takes a while; later builds hit the Zig cache. `.hdl` models need more at
 run time (the Zig compiler and the evaluator sources); see
-[Verilog-A](../using/devices.md#your-own-verilog-a).
+[Verilog-A](../using/devices.md#your-own-verilog-a). A host that ships
+them in its own bundle passes their paths in `zig_path` and `share_path`
+(`Options.hdl_toolchain` from Zig) instead of relying on `$ZIG` and the
+executable's location. Their display-task lines print on the process's
+standard output; no option redirects them yet (#127).
 
 ## As a Nix flake input
 

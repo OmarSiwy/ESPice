@@ -19,6 +19,11 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
   are checked as their specs say (option line, record counts, conductor count) (#121).
 - `.data` MER/LAM files resolve through `.option search=`, skip `*`/`$` lines and refuse a cell that
   is not a number; `.load` defaults to the top deck's `.ic0`, and `FILE=x.ic` means `x.ic0` (#121).
+- `.hdl` models print their `$strobe`/`$display`/`$write`/`$warning`/`$info` lines to
+  stdout once per accepted point (OP, DC point, transient step), `%m` as the instance (#102, device ABI 26).
+- API: `Options.hdl_toolchain`, and C `espice_create_options.zig_path`/`share_path`, set the
+  Zig compiler and `share/espice` directory `.hdl` builds use; empty keeps `$ZIG` (#13).
+- `.hdl`: a source named more than once (several `.lib` sections) compiles once per deck.
 - API: `Problem.ready_queries` and `copy_result` fail with `error.BufferTooSmall` on a short
   buffer (`ready_count` gives the size); GPU backend messages go through `std.log` (#13).
 - `.dc <param> start stop step` sweeps a `.param` (HSPICE `.DC`), with the parameter as

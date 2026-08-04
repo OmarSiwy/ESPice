@@ -275,6 +275,13 @@ pub const Hooks = struct {
     /// truncated to fit. Null when the type has no status sites; those types
     /// are `mutable_eval`, so their instances live on the host.
     status: ?*const fn (*anyopaque, msg: []u8) ?StatusHit = null,
+    /// Runs instance `index`'s LRM §9.4 display tasks at x (VerA's `say`)
+    /// and writes the lines they print to `w`, `name` standing for `%m`.
+    /// The host calls it at each converged point before `update_state`, and
+    /// prints the text only once the point is accepted. Null when the
+    /// device has no display tasks; the built-ins are generated without
+    /// them, so it is host-only.
+    say: ?*const fn (*anyopaque, x: []const f64, index: u32, name: []const u8, w: *std.Io.Writer) void = null,
     /// Charge per instance and LTE site (`ddt()` sites not marked
     /// `vera_lte = 0`) from the last eval, instance-major. Lets the transient
     /// run its LTE per charge state, as ngspice's CKTterr does, instead of
@@ -538,7 +545,8 @@ pub const GpuPayload = struct {
 // 24: `NoiseSource.coeff` (no longer folded into white/flicker), `.group`
 //    (correlated rows contiguous) and `.table`.
 // 25: `DeviceVtable.unknown_names`.
-pub const abi_version: u32 = 25;
+// 26: `Hooks.say`, VerA's display tasks.
+pub const abi_version: u32 = 26;
 
 /// A device type's construction entry points, exported by each device object
 /// and by runtime-loaded `.so` devices.
@@ -595,7 +603,7 @@ pub fn layoutHash() u64 {
             PatternBuilder,      ParamRef,            NoiseSource,
             std.mem.Allocator,   DeviceStatus,        DeviceResult(void),
             DeviceResult(Batch), DeviceResult(Proto), Param,
-            SimState,            StatusHit,
+            SimState,            StatusHit,           std.Io.Writer,
         }) |T| h = hashType(h, T);
         h = mix(h, abi_version);
         break :blk h;

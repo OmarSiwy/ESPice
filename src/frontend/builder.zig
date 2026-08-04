@@ -249,14 +249,7 @@ pub const Builder = struct {
         const t = comptime Library.builtin(device.modelName(D) orelse
             @compileError(@typeName(D) ++ " is not a catalog device"));
         const vt = self.lib.vtable(t);
-        {
-            const i = @backingInt(t);
-            if (self.card_counts.items.len <= i)
-                try self.card_counts.appendNTimes(staging, 0, i + 1 - self.card_counts.items.len);
-            const ordinal = &self.card_counts.items[i];
-            if (card.len != 0) try self.cards.append(staging, .{ .type = t, .index = ordinal.*, .name = card });
-            ordinal.* += 1;
-        }
+        try self.countCard(t, card);
         if (comptime n_u > D.num_ports) {
             var col: [n_u]i32 = @splat(-1);
             if (vt.collapse) |collapse| collapse(@ptrCast(&model), @ptrCast(&instance), &col);
@@ -265,6 +258,16 @@ pub const Builder = struct {
         }
         const proto = try self.protoOf(t);
         try vt.proto_add(proto.ctx, self.gpa, @ptrCast(&model), @ptrCast(&instance), &all).unwrap();
+    }
+
+    /// Counts one instance of `t` and records its card name, if any.
+    fn countCard(self: *Builder, t: DeviceType, card: []const u8) !void {
+        const i = @backingInt(t);
+        if (self.card_counts.items.len <= i)
+            try self.card_counts.appendNTimes(staging, 0, i + 1 - self.card_counts.items.len);
+        const ordinal = &self.card_counts.items[i];
+        if (card.len != 0) try self.cards.append(staging, .{ .type = t, .index = ordinal.*, .name = card });
+        ordinal.* += 1;
     }
 
     /// Returns the proto of device type `t`, creating it on first use.
@@ -581,6 +584,9 @@ pub const NetBuilder = struct {
 
             const proto = try b.protoOf(t);
             try vt.proto_add(proto.ctx, b.gpa, mblob.ptr, iblob.ptr, nodes.ptr).unwrap();
+            // `%m` in a display task and a `$fatal` refusal name the
+            // instance by its card, as for a built-in device.
+            try b.countCard(t, dev.name);
         }
     }
 

@@ -309,6 +309,10 @@ fn transientOp(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, options: 
     const saved = try ckt.saveState(opa);
     defer saved.deinit(opa);
     const op_sim = ckt.sim;
+    // Its steps are no analysis's accepted points, so display tasks stay quiet.
+    const display = ckt.display;
+    ckt.display = null;
+    defer ckt.display = display;
     const sim = tran.simulate(ckt, x, &.{}, &wf, .{
         .tol = options.tol,
         .t_stop = 1e-6,

@@ -128,6 +128,23 @@ an unchanged model starts at once. The cache key covers the model and every
 file it includes, with comments and whitespace stripped: a comment-only
 edit reuses the build, any code edit recompiles.
 
+A source named more than once, by several `.lib` sections or `.include`s,
+compiles and loads once.
+
+A model's display tasks print to standard output: `$strobe`, `$display`,
+`$write`, `$warning` and `$info` once at each accepted point (the operating
+point, each DC sweep point, each transient step), never for a Newton
+iterate or a rejected step, with `%m` as the instance name. A model with
+
+```verilog
+$strobe("%m vdrop = %g", V(p, n));
+```
+
+prints `n1 vdrop = 0.35` for instance `N1` at its operating point. `$debug`
+prints at the accepted points too, not per Newton iteration, and
+`$monitor` does not print (VerA warns W0850). The built-in models keep
+their display tasks silent.
+
 When a model does not compile, VerA's diagnostics (file, line, error code)
 print and the deck fails. An instance parameter the module does not
 declare, or a card with the wrong number of nodes, is an error

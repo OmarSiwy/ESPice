@@ -31,7 +31,36 @@ fn construct(allocator: std.mem.Allocator) !void {
 
 test "Problem: construction releases partial ownership at every allocation failure" {
     try construct(t.allocator);
-    try t.checkAllAllocationFailures(t.allocator, construct, .{});
+    try t.checkAllAllocationFailures(fixed_growth, construct, .{});
+}
+
+/// `t.allocator` that never grows or shrinks a block in place. Whether a
+/// large block grows in place depends on the address space around it, so
+/// through `t.allocator` an arena's chunk count, and with it the allocation
+/// count `checkAllAllocationFailures` replays, can change between runs.
+const fixed_growth: std.mem.Allocator = .{ .ptr = undefined, .vtable = &.{
+    .alloc = struct {
+        fn alloc(_: *anyopaque, n: usize, a: std.mem.Alignment, ra: usize) ?[*]u8 {
+            return t.allocator.rawAlloc(n, a, ra);
+        }
+    }.alloc,
+    .resize = std.mem.Allocator.noResize,
+    .remap = std.mem.Allocator.noRemap,
+    .free = struct {
+        fn free(_: *anyopaque, m: []u8, a: std.mem.Alignment, ra: usize) void {
+            t.allocator.rawFree(m, a, ra);
+        }
+    }.free,
+} };
+
+test "Problem: .hdl builds with the embedder's toolchain paths (#13)" {
+    const source = "hdl toolchain\n.hdl \"m.va\"\nN1 1 0 m\nR1 1 0 1k\n.op\n.end\n";
+    // The share path is used as given, never swapped for the build tree: one
+    // without the evaluator sources fails before anything compiles.
+    try t.expectError(error.HdlShareNotFound, api.Problem.init(t.allocator, t.io, .{
+        .source = .{ .bytes = .{ .data = source, .origin = "toolchain.cir" } },
+        .hdl_toolchain = .{ .zig = "/nonexistent/zig", .share = "/nonexistent-espice-test-dir/share/espice" },
+    }));
 }
 
 test "Problem: compiled device callbacks preserve allocation errors" {

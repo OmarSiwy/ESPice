@@ -141,6 +141,11 @@ pub fn build(b: *std.Build) void {
             // W0850 ($display in hisim-class devices). Re-proving the models
             // clears them.
             run.addArgs(&.{ "--allow=W0650", "--allow=W0651", "--allow=W0850", "--color=never", "--check" });
+            // No `say` for the built-ins: their display tasks are parameter
+            // warnings that would print at every accepted point, and `say`
+            // reruns the model core per instance. Runtime `.hdl` devices keep
+            // theirs (loader.zig, #102).
+            run.addArg("--display=drop");
             // `--check` spawns zig; the one running this build, not PATH's.
             run.addArgs(&.{ "--zig", b.graph.zig_exe, "--contract" });
             run.addFileArg(vera.path("tools/contract.zig"));

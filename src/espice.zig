@@ -57,7 +57,13 @@ pub const Options = struct {
     max_parallel: u16 = 1,
     /// Print per-phase wall times to stderr.
     timing_in_depth: bool = false,
+    /// The Zig compiler and `share/espice` directory a `.hdl` model builds
+    /// with; null fields read `$ZIG` and the executable's path (#13).
+    hdl_toolchain: HdlToolchain = .{},
 };
+
+/// Where runtime `.hdl` compilation finds its toolchain (`Options.hdl_toolchain`).
+pub const HdlToolchain = frontend.Library.Toolchain;
 
 /// A prepared circuit, its query DAG and the output its results go to.
 ///
@@ -149,6 +155,10 @@ pub const Problem = struct {
         const scratch = parse_arena.allocator();
         self.library = try frontend.Library.init(allocator);
         errdefer self.library.deinit();
+        self.library.toolchain = .{
+            .zig = if (options.hdl_toolchain.zig) |z| try a.dupe(u8, z) else null,
+            .share = if (options.hdl_toolchain.share) |d| try a.dupe(u8, d) else null,
+        };
         const ast = try frontend.prepare(io, &self.library, scratch, options.source, options.dialect);
         timingLap(io, &lap, "frontend (source, parsing, HDL)");
         self.prepared = try frontend.build(&self.library, a, scratch, ast);

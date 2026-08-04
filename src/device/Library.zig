@@ -19,6 +19,27 @@ vtables: std.ArrayList(*const abi.DeviceVtable) = .empty,
 /// Whether each type runs a digital engine (a `.v` design), parallel to
 /// `names`; it becomes `Batch.digital` at the freeze.
 digital: std.ArrayList(bool) = .empty,
+/// Every HDL source `load` has handled, as resolved paths (owned), so one
+/// named again, by another `.lib` section or a later `load`, does not
+/// compile again.
+sources: std.ArrayList([]const u8) = .empty,
+/// Where `load` finds the Zig compiler and the evaluator sources. Borrowed;
+/// it must outlive every `load`.
+toolchain: Toolchain = .{},
+
+/// Overrides for what `load` otherwise reads from the environment and the
+/// executable's path, so a host that ships ESPice in its own bundle can point
+/// at the files inside it (#13). A null field keeps the default.
+pub const Toolchain = struct {
+    /// The Zig compiler that builds a loaded device; null reads `$ZIG`, else
+    /// runs `zig` from PATH. It must be the version this espice was built
+    /// with.
+    zig: ?[]const u8 = null,
+    /// The `share/espice` directory `zig build` installs, which holds
+    /// `device/eval.zig`; null looks in `<exe>/../share/espice`, then falls
+    /// back to the source tree this espice was built from.
+    share: ?[]const u8 = null,
+};
 
 /// Catalog entries with an evaluator, in catalog order.
 const builtins = blk: {
@@ -52,6 +73,8 @@ pub fn init(gpa: std.mem.Allocator) !Library {
 /// vtables handed out stay valid.
 pub fn deinit(self: *Library) void {
     for (self.names.items[builtin_count..]) |name| self.gpa.free(name);
+    for (self.sources.items) |path| self.gpa.free(path);
+    self.sources.deinit(self.gpa);
     self.names.deinit(self.gpa);
     self.vtables.deinit(self.gpa);
     self.digital.deinit(self.gpa);
@@ -100,24 +123,29 @@ pub fn register(self: *Library, module: []const u8, vt: *const abi.DeviceVtable,
 }
 
 /// Compiles, opens and registers each HDL source not loaded yet (loader.zig).
-/// The generated devices build against the sources `zig build` installs in
-/// `<exe>/../share/espice`, else against the source tree this espice was built
-/// from, with the compiler in `$ZIG`, else `zig` on PATH. Builds are cached
-/// under `cacheDir`. Fails with `error.RuntimeHdlUnsupported` on wasm, which
+/// The generated devices build against `toolchain.share`, else the sources
+/// `zig build` installs in `<exe>/../share/espice`, else the source tree this
+/// espice was built from, with the compiler `toolchain.zig`, else `$ZIG`, else
+/// `zig` on PATH. Builds are cached under `cacheDir`. Fails with
+/// `error.HdlShareNotFound` when `toolchain.share` holds no
+/// `device/eval.zig`, and with `error.RuntimeHdlUnsupported` on wasm, which
 /// has no compiler to run and no dlopen; VerA and the loader compile out.
 pub fn load(self: *Library, io: std.Io, files: []const []const u8) !void {
     if (comptime @import("builtin").cpu.arch.isWasm()) return error.RuntimeHdlUnsupported;
     var arena_state: std.heap.ArenaAllocator = .init(self.gpa);
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    const zig = if (std.c.getenv("ZIG")) |z| std.mem.span(z) else "zig";
+    const zig = self.toolchain.zig orelse if (std.c.getenv("ZIG")) |z| std.mem.span(z) else "zig";
     const work_dir = try cacheDir(a);
-    const exe_dir = std.process.executableDirPathAlloc(io, a) catch "";
-    const share = try std.fs.path.join(a, &.{ exe_dir, "..", "share", "espice" });
+    const share = self.toolchain.share orelse
+        try std.fs.path.join(a, &.{ std.process.executableDirPathAlloc(io, a) catch "", "..", "share", "espice" });
     const installed = if (std.Io.Dir.cwd().access(io, try std.fs.path.join(a, &.{ share, "device", "eval.zig" }), .{})) |_| true else |_| false;
-    // ponytail: exe-relative, so a host of libespice finds no share/ and
-    // falls back to the build tree; pass the prefix through the C API if an
-    // installed library ever needs runtime .hdl.
+    // An explicit share that does not hold the sources is the caller's
+    // mistake; building against the source tree instead would hide it.
+    if (self.toolchain.share != null and !installed) {
+        if (!@import("builtin").is_test) std.log.warn("hdl: {s} holds no device/eval.zig; point the toolchain share path at the share/espice directory zig build installs", .{share});
+        return error.HdlShareNotFound;
+    }
     try loader.ensureAllLoaded(self, io, files, if (installed) .{
         .work_dir = work_dir,
         .contract = try std.fs.path.join(a, &.{ share, "vera", "tools", "contract.zig" }),
@@ -173,6 +201,15 @@ test register {
     try std.testing.expect(lib.digital.items[@backingInt(d)]);
     try std.testing.expectEqual(lib.names.items.len, lib.vtables.items.len);
     try std.testing.expectEqual(lib.names.items.len, lib.digital.items.len);
+}
+
+test "an explicit share path must hold the evaluator sources" {
+    if (comptime @import("builtin").cpu.arch.isWasm()) return error.SkipZigTest;
+    var lib = try Library.init(std.testing.allocator);
+    defer lib.deinit();
+    lib.toolchain = .{ .share = "/nonexistent-espice-test-dir/share/espice", .zig = "/nonexistent/zig" };
+    try std.testing.expectError(error.HdlShareNotFound, lib.load(std.testing.io, &.{"m.va"}));
+    try std.testing.expectEqual(@as(usize, builtin_count), lib.names.items.len);
 }
 
 test "find searches loaded types only" {
