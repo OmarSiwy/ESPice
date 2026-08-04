@@ -13,26 +13,37 @@ in `tests/benchmark/`.
 ## Skills: load these before implementing, every session
 
 Load these skills with the Skill tool before writing or reviewing any code
-here, every time. The order matters: design constraints first, code
-minimization last.
+here, every time (other agents: read `~/.claude/skills/<name>/SKILL.md`). The
+order matters: design constraints first, code minimization last.
 
 1. `/data-oriented-design`. Answer the six questions in writing before any new
    struct or table. SoA by default, indices not pointers, arena by lifetime,
    narrowest type the stated range allows.
-2. `/simd-first`. Scalar oracle first, then the vector kernel, then read
-   the asm. Every kernel adds a differential case against its scalar oracle
-   in the owning module's test suite (an in-file `test`, `src/solver/tests.zig`
-   or `src/analysis/tests/`), so `zig build test` runs it. LaneLu is the
-   worked example.
-3. `/ponytail`. After the data layout and kernel strategy are fixed, write the
+2. `/codebase-clean-code`. Owners, spines and seams before code: every new
+   seam names its ladder rung and a change drill it passes. The DAG below is
+   this skill applied.
+3. `/spice-engine`. Stamping, LU replay, Newton limiting, step control and
+   oracle testing against ngspice, with `* KNOWN GAP:` semantics.
+4. `/zig`. Zig 0.17 idioms, memory discipline, and `zero-cost.md`: an
+   abstraction at ladder rung 5 or above enters a hot path only with an
+   `asm_probe` verdict (FOLDED, IDENTICAL, EQUIVALENT or NEGATIVE). Its
+   `simd-first.md` is the lane-axis doctrine below: scalar oracle first (the
+   `W == 1` instantiation), then the vector kernel, then read the asm. Every
+   kernel adds a differential case against its scalar oracle in the owning
+   module's test suite (an in-file `test`, `src/solver/tests.zig` or
+   `src/analysis/tests/`), so `zig build test` runs it. LaneLu is the worked
+   example. Per-loop tactics: `/simd-loops`, after `/branchless`.
+5. `/assertions`. Programmer errors assert; stated capacities; bounded loops.
+6. `/ponytail`. After the data layout and kernel strategy are fixed, write the
    least code that satisfies them. YAGNI applies to everything except
    correctness at trust boundaries and the conformance gates.
-4. Clean code: `/code-review` before merging, `/simplify` after a phase
+7. Clean code: `/code-review` before merging, `/simplify` after a phase
    lands, `/doc-comments` for every `pub` declaration, and `/humanizer` for
    docs and comments.
 
 Conflict rule: data layout beats code brevity. Ponytail decides how little
-code we write, never what shape the data takes.
+code we write, never what shape the data takes. The remaining rulings are in
+`/codebase-rules`.
 
 ## The dependency DAG (enforced by build.zig wiring)
 
