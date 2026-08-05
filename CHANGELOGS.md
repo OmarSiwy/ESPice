@@ -5,6 +5,8 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 ## Unreleased
 
+- `.hdl` Verilog-A devices with more than 64 unknowns compile and run (dense Jacobian, one
+  derivative lane per unknown) (#117).
 - API: `Options.live_params` + `Problem.set_params`, and C `live_params` + `espice_set_params`, change
   global `.param` values on a live Problem without a re-parse: a sky130 sizing point 6 ms, was 87 (#101).
 - A binned MOSFET whose L/W reads a swept or set `.param` takes the bin each point selects, on its

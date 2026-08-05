@@ -1,0 +1,9 @@
+`include "disciplines.vams"
+module ladder70(a, b);
+    inout a, b; electrical a, b; electrical [1:68] n; genvar i;
+    analog begin
+        I(a, n[1]) <+ V(a, n[1])/1k;
+        for (i = 1; i < 68; i = i + 1) I(n[i], n[i+1]) <+ V(n[i], n[i+1])/1k;
+        I(n[68], b) <+ V(n[68], b)/1k;
+    end
+endmodule

@@ -86,8 +86,11 @@ fn laneCount(comptime lane: []const u8) usize {
 /// for GPU throughput; see `jacFloat` and `gpuJacFloat` for who takes it.
 fn DualFor(comptime F: type, comptime lane: []const u8, comptime layout: Layout, comptime collapsed: bool) type {
     const n_lanes = laneCount(lane);
-    if (n_lanes > 64) @compileError("Dual: more than 64 derivative lanes");
-    const all: u64 = if (n_lanes == 64) ~@as(u64, 0) else (@as(u64, 1) << n_lanes) - 1;
+    // A lane set, one bit per lane. Past 64 lanes VerA declares every value
+    // at the all-ones mask, so the family is dense (#117).
+    const L = Mask(n_lanes);
+    const dense = layout.dense or n_lanes > 64;
+    const all: L = lowBits(n_lanes);
     return struct {
         /// Read by the generated device: the builder already applied
         /// `D.collapse` to the scatter tapes.
@@ -95,16 +98,16 @@ fn DualFor(comptime F: type, comptime lane: []const u8, comptime layout: Layout,
         pub const V = f64;
 
         /// The lanes the unknowns in `m` occupy, one bit per lane.
-        fn lanesOf(comptime m: u64) u64 {
-            if (layout.dense) return all;
-            var s: u64 = 0;
+        fn lanesOf(comptime m: u64) L {
+            if (dense) return all;
+            var s: L = 0;
             for (lane, 0..) |l, u| {
-                if (u < 64 and (m >> u) & 1 != 0 and l != contract.no_lane) s |= @as(u64, 1) << l;
+                if (u < 64 and (m >> u) & 1 != 0 and l != contract.no_lane) s |= @as(L, 1) << l;
             }
             return s;
         }
 
-        fn width(comptime ls: u64) usize {
+        fn width(comptime ls: L) usize {
             const n = @popCount(ls);
             return if (layout.pad and n != 0) std.math.ceilPowerOfTwoAssert(usize, n) else n;
         }
@@ -142,7 +145,7 @@ fn DualFor(comptime F: type, comptime lane: []const u8, comptime layout: Layout,
         }
 
         /// A value carrying the lanes in `ls`, in ascending lane order.
-        fn Val(comptime ls: u64) type {
+        fn Val(comptime ls: L) type {
             return struct {
                 v: f64,
                 /// Aligned to the element, not the vector: natural vector
@@ -157,7 +160,7 @@ fn DualFor(comptime F: type, comptime lane: []const u8, comptime layout: Layout,
 
                 /// Where lane `l` sits in `d`.
                 fn pos(comptime l: usize) usize {
-                    return @popCount(ls & ((@as(u64, 1) << l) - 1));
+                    return @popCount(ls & ((@as(L, 1) << l) - 1));
                 }
                 inline fn k(c: f64) Lanes {
                     return @splat(@floatCast(c));
@@ -166,22 +169,22 @@ fn DualFor(comptime F: type, comptime lane: []const u8, comptime layout: Layout,
                     return .{ .v = v, .d = a.d * k(c) };
                 }
                 /// These lanes laid out as `to_ls`'s. New and pad lanes are +0.
-                inline fn spread(a: T, comptime to_ls: u64) @Vector(width(to_ls), F) {
+                inline fn spread(a: T, comptime to_ls: L) @Vector(width(to_ls), F) {
                     if (ls & ~to_ls != 0) @compileError("Dual: lanes do not widen");
                     if (ls == to_ls) return a.d;
                     if (ls == 0) return @splat(0);
                     const idx = comptime blk: {
                         var idx: [width(to_ls)]i32 = @splat(-1);
                         var j: usize = 0;
-                        for (0..64) |l| if ((to_ls >> l) & 1 != 0) {
-                            if ((ls >> l) & 1 != 0) idx[j] = pos(l);
+                        for (0..n_lanes) |l| if (has(to_ls, l)) {
+                            if (has(ls, l)) idx[j] = pos(l);
                             j += 1;
                         };
                         break :blk idx;
                     };
                     return @shuffle(F, a.d, @as(@Vector(1, F), @splat(0)), idx);
                 }
-                fn toLanes(a: T, comptime to_ls: u64) Val(to_ls) {
+                fn toLanes(a: T, comptime to_ls: L) Val(to_ls) {
                     return .{ .v = a.v, .d = a.spread(to_ls) };
                 }
 
@@ -196,7 +199,7 @@ fn DualFor(comptime F: type, comptime lane: []const u8, comptime layout: Layout,
                 /// The partial with respect to unknown `u`, widened to f64.
                 pub fn ddxAt(a: T, comptime u: usize) f64 {
                     const l = lane[u];
-                    if (comptime l == contract.no_lane or (ls >> l) & 1 == 0) return 0.0;
+                    if (comptime l == contract.no_lane or !has(ls, l)) return 0.0;
                     return a.d[comptime pos(l)];
                 }
                 /// Every lane widened to f64, pad lanes included, so `F`
@@ -491,7 +494,31 @@ fn tapeBounds(slots: []const u32, rhs_idx: []const u32, trash_slot: u32, trash_r
 /// only the entries `pat` sets, row-major, `slots.len / count` per instance
 /// (`SlotMap`); a ground one goes to `pv.trash_slot`. Asserts every other
 /// (row, col) is in the pattern.
-fn buildTapes(nodes: []const u32, n_u: usize, pat: []const u64, pv: PatternView, gath: []u32, rhs_idx: []u32, slots: []u32) void {
+/// The host's mask over `n` unknowns or lanes: u64, wider past 64 (#117).
+fn Mask(comptime n: usize) type {
+    return @Int(.unsigned, @max(64, n));
+}
+
+/// Widens a VerA u64 mask over `n` unknowns: past 64 unknowns VerA declares
+/// every mask dense (all ones), and the bits it cannot hold are set too.
+fn widen(comptime n: usize, m: u64) Mask(n) {
+    const M = Mask(n);
+    if (n <= 64) return m;
+    return if (m == std.math.maxInt(u64)) std.math.maxInt(M) else m;
+}
+
+/// The low `n` bits of `Mask(n)`.
+fn lowBits(comptime n: usize) Mask(n) {
+    const M = Mask(n);
+    return if (n == @bitSizeOf(M)) std.math.maxInt(M) else (@as(M, 1) << @intCast(n)) - 1;
+}
+
+/// Bit `u` of `m`.
+inline fn has(m: anytype, u: usize) bool {
+    return (m >> @intCast(u)) & 1 != 0;
+}
+
+fn buildTapes(comptime M: type, nodes: []const u32, n_u: usize, pat: []const M, pv: PatternView, gath: []u32, rhs_idx: []u32, slots: []u32) void {
     const count = nodes.len / n_u;
     var k: usize = 0;
     for (0..count) |id| {
@@ -501,7 +528,7 @@ fn buildTapes(nodes: []const u32, n_u: usize, pat: []const u64, pv: PatternView,
             rhs_idx[id * n_u + u] = if (node == GROUND) pv.n else node;
         }
         for (nd, 0..) |r, ru| for (nd, 0..) |c, cu| {
-            if ((pat[ru] >> @intCast(cu)) & 1 == 0) continue;
+            if (!has(pat[ru], cu)) continue;
             slots[k] = if (r == GROUND or c == GROUND) pv.trash_slot else pv.findSlot(r, c).?;
             k += 1;
         };
@@ -516,23 +543,22 @@ fn buildTapes(nodes: []const u32, n_u: usize, pat: []const u64, pv: PatternView,
 fn SlotMap(comptime D: type) type {
     const n_u = contract.nU(D);
     return struct {
-        pub const k: usize = blk: {
-            var n: usize = 0;
-            for (jacPattern(D)) |row| n += @popCount(row & (std.math.maxInt(u64) >> @intCast(64 - n_u)));
-            break :blk n;
+        const pat = jacPattern(D);
+        /// Row `ru`'s first position, so `at` is O(1): a dense device past
+        /// 64 unknowns calls it n_u^2 times (#117).
+        const row_start: [n_u + 1]usize = blk: {
+            @setEvalBranchQuota(100_000);
+            var s: [n_u + 1]usize = undefined;
+            s[0] = 0;
+            for (pat, 0..) |row, r| s[r + 1] = s[r] + @popCount(row & lowBits(n_u));
+            break :blk s;
         };
+        pub const k: usize = row_start[n_u];
         /// Entry (ru, cu)'s position; a compile error for a structural zero.
         pub fn at(comptime ru: usize, comptime cu: usize) usize {
             comptime {
-                // One row scan per call; a wide device (wline_4's laplace
-                // sections, every one an `ac_dyn_slots` entry) passes 1000.
-                @setEvalBranchQuota(100_000);
-                const pat = jacPattern(D);
-                if ((pat[ru] >> cu) & 1 == 0) @compileError(@typeName(D) ++ " stamps an entry outside its jac/q pattern");
-                var n: usize = 0;
-                for (0..ru) |r| n += @popCount(pat[r] & (std.math.maxInt(u64) >> @intCast(64 - n_u)));
-                n += @popCount(pat[ru] & ((@as(u64, 1) << cu) - 1));
-                return n;
+                if (!has(pat[ru], cu)) @compileError(@typeName(D) ++ " stamps an entry outside its jac/q pattern");
+                return row_start[ru] + @popCount(pat[ru] & ((@as(Mask(n_u), 1) << @intCast(cu)) - 1));
             }
         }
     };
@@ -542,13 +568,14 @@ fn SlotMap(comptime D: type) type {
 /// writes (`contract.limitWrites`), and `at(u)` unknown u's position among
 /// them. Nothing reads a lim value `limit` does not write.
 fn LimMap(comptime D: type) type {
-    const writes = contract.limitWrites(D) & (std.math.maxInt(u64) >> @intCast(64 - contract.nU(D)));
+    const n_u = contract.nU(D);
+    const writes = limitWritesOf(D);
     return struct {
         pub const k: usize = @popCount(writes);
         pub fn at(comptime u: usize) usize {
             comptime {
-                if ((writes >> u) & 1 == 0) @compileError(@typeName(D) ++ " reads a lim value its `limit` does not write");
-                return @popCount(writes & ((@as(u64, 1) << u) - 1));
+                if (!has(writes, u)) @compileError(@typeName(D) ++ " reads a lim value its `limit` does not write");
+                return @popCount(writes & ((@as(Mask(n_u), 1) << @intCast(u)) - 1));
             }
         }
     };
@@ -556,7 +583,7 @@ fn LimMap(comptime D: type) type {
 
 /// D's structural Jacobian, resistive and reactive combined: bit `cu` of row
 /// `ru` is set when the device can write local entry (ru, cu).
-fn jacPattern(comptime D: type) [contract.nU(D)]u64 {
+fn jacPattern(comptime D: type) [contract.nU(D)]Mask(contract.nU(D)) {
     var out = rowPattern(D, "jac_pattern");
     // Without `q` there is no reactive half; `rowPattern` would call it dense.
     if (@hasDecl(D, "q")) {
@@ -568,9 +595,20 @@ fn jacPattern(comptime D: type) [contract.nU(D)]u64 {
 
 /// The pattern decl `name` (`jac_pattern` or `q_pattern`), or all ones (dense)
 /// when D does not declare it.
-fn rowPattern(comptime D: type, comptime name: []const u8) [contract.nU(D)]u64 {
-    if (!@hasDecl(D, name)) return @splat(std.math.maxInt(u64));
-    return @field(D, name);
+fn rowPattern(comptime D: type, comptime name: []const u8) [contract.nU(D)]Mask(contract.nU(D)) {
+    const n_u = contract.nU(D);
+    if (!@hasDecl(D, name)) return @splat(lowBits(n_u));
+    var out: [n_u]Mask(n_u) = undefined;
+    for (&out, @field(D, name)) |*o, m| o.* = widen(n_u, m) & lowBits(n_u);
+    return out;
+}
+
+/// The unknowns `limit` writes and reads, as host masks.
+fn limitWritesOf(comptime D: type) Mask(contract.nU(D)) {
+    return widen(contract.nU(D), contract.limitWrites(D)) & lowBits(contract.nU(D));
+}
+fn limitReadsOf(comptime D: type) Mask(contract.nU(D)) {
+    return widen(contract.nU(D), contract.limitReads(D)) & lowBits(contract.nU(D));
 }
 
 /// Which residual rows D's `eval` (`jac_rows`) or `q` (`q_rows`) ever writes;
@@ -582,9 +620,9 @@ fn rowPattern(comptime D: type, comptime name: []const u8) [contract.nU(D)]u64 {
 /// {0, 0}` and still stamps its current into both rows.
 fn writtenRows(comptime D: type, comptime name: []const u8) [contract.nU(D)]bool {
     if (!@hasDecl(D, name)) return @splat(true);
-    const mask: u64 = @field(D, name);
+    const mask = widen(contract.nU(D), @field(D, name));
     var out: [contract.nU(D)]bool = @splat(true);
-    for (&out, 0..) |*o, ru| o.* = (mask >> @intCast(ru)) & 1 != 0;
+    for (&out, 0..) |*o, ru| o.* = has(mask, ru);
     return out;
 }
 
@@ -651,18 +689,18 @@ fn basisOf(comptime D: type, comptime narrow: bool) Basis {
 /// tied to its drain) sums in the same order and the output stays
 /// byte-identical. `alias[cu]` is `collapse_full[cu] != null`; all-false makes
 /// this the identity on the laned columns.
-fn repMask(comptime n_u: usize, comptime lane: [n_u]u8, comptime alias: [n_u]bool, comptime pat: [n_u]u64) [n_u]u64 {
-    var out: [n_u]u64 = @splat(0);
+fn repMask(comptime n_u: usize, comptime lane: [n_u]u8, comptime alias: [n_u]bool, comptime pat: [n_u]Mask(n_u)) [n_u]Mask(n_u) {
+    var out: [n_u]Mask(n_u) = @splat(0);
     for (&out, pat) |*m, row| {
         var rep: [n_u]?usize = @splat(null);
         for (0..n_u) |cu| {
-            if ((row >> @intCast(cu)) & 1 == 0 or lane[cu] == contract.no_lane) continue;
+            if (!has(row, cu) or lane[cu] == contract.no_lane) continue;
             const cur = rep[lane[cu]];
             // First column of the lane wins, then any alias beats a root.
             if (cur == null or (!alias[cur.?] and alias[cu])) rep[lane[cu]] = cu;
         }
         for (rep) |c| if (c) |cu| {
-            m.* |= @as(u64, 1) << @intCast(cu);
+            m.* |= @as(Mask(n_u), 1) << @intCast(cu);
         };
     }
     return out;
@@ -694,8 +732,8 @@ fn canNarrow(comptime D: type) bool {
     if (b.w > 4 or b.w >= comptime basisOf(D, false).w) return false;
     if (@hasDecl(D, "limit")) {
         var seen: [n_u]bool = @splat(false);
-        const writes = contract.limitWrites(D);
-        for (0..n_u) |u| if ((writes >> @intCast(u)) & 1 != 0) {
+        const writes = limitWritesOf(D);
+        for (0..n_u) |u| if (has(writes, u)) {
             if (seen[b.lane[u]]) return false;
             seen[b.lane[u]] = true;
         };
@@ -750,7 +788,7 @@ fn evalRange(comptime D: type, comptime narrow: bool, comptime F: type, comptime
     // Every lane of the basis: the layout the limiting correction sums in.
     const full = comptime S.Of(reads).lanes;
     const use_lim = if (comptime has_limit) limiting else false;
-    const lim_writes = comptime if (has_limit) contract.limitWrites(D) else 0;
+    const lim_writes = comptime if (has_limit) limitWritesOf(D) else 0;
     const has_q = comptime @hasDecl(D, "q");
     // `evalQ` computes both halves from one call into the model core; calling
     // `eval` and `q` separately runs the core twice.
@@ -775,7 +813,7 @@ fn evalRange(comptime D: type, comptime narrow: bool, comptime F: type, comptime
             lx[u] = xg;
             // Only unknowns `limit` writes have a limited image; the other
             // lanes of `corr` stay zero.
-            if (comptime (lim_writes >> u) & 1 != 0) if (use_lim) {
+            if (comptime has(lim_writes, u)) if (use_lim) {
                 const l = sink.lim(id, u);
                 lx[u] = l;
                 corr[lane[u]] = xg - l;
@@ -819,7 +857,7 @@ fn evalRange(comptime D: type, comptime narrow: bool, comptime F: type, comptime
             sink.scatterRes(row, val * mf);
             if (comptime !SinkT.skip_g and jac_pat[ru] != 0) {
                 inline for (0..n_u) |cu| if (!mask_ground or active[cu]) {
-                    if (comptime (jac_rep[ru] >> cu) & 1 != 0) {
+                    if (comptime has(jac_rep[ru], cu)) {
                         sink.scatterJac(id, ru, cu, out[ru].ddxAt(cu) * mf);
                     } else if (comptime constEntry(D, ru, cu)) |e| {
                         if (comptime e.g != 0) if (contract.jacConstApplies(D, e, model, S.collapse_applied)) sink.scatterJac(id, ru, cu, e.g * mf);
@@ -842,7 +880,7 @@ fn evalRange(comptime D: type, comptime narrow: bool, comptime F: type, comptime
                 if (comptime !SinkT.skip_c and q_pat[ru] != 0) {
                     if (!mask_ground or active[ru]) {
                         inline for (0..n_u) |cu| if (!mask_ground or active[cu]) {
-                            if (comptime (q_rep[ru] >> cu) & 1 != 0) {
+                            if (comptime has(q_rep[ru], cu)) {
                                 sink.scatterQJac(id, ru, cu, qo[ru].ddxAt(cu) * mf);
                             } else if (comptime constEntry(D, ru, cu)) |e| {
                                 if (comptime e.c != 0) if (contract.jacConstApplies(D, e, model, S.collapse_applied)) sink.scatterQJac(id, ru, cu, e.c * mf);
@@ -925,13 +963,13 @@ fn evalQRange(comptime D: type, comptime S: type, sink: anytype, first: u32, end
 /// limiter returns its probe, but a derived leg rebuilt from it (x_d = x_s +
 /// vds) rounds, and that few-ulp gap would run the limiting correction at
 /// every converged iterate (#49). A real clamp is orders larger.
-pub inline fn snapLimited(comptime n_u: usize, comptime reads: u64, comptime writes: u64, lx: *[n_u]f64, cur: [n_u]f64) void {
+pub inline fn snapLimited(comptime n_u: usize, comptime reads: Mask(n_u), comptime writes: Mask(n_u), lx: *[n_u]f64, cur: [n_u]f64) void {
     var scale: f64 = 0;
-    inline for (0..n_u) |u| if (comptime (reads >> u) & 1 != 0) {
+    inline for (0..n_u) |u| if (comptime has(reads, u)) {
         scale = @max(scale, @abs(cur[u]));
     };
     const tol = 16 * std.math.floatEps(f64) * scale;
-    inline for (0..n_u) |u| if (comptime ((writes & reads) >> u) & 1 != 0) {
+    inline for (0..n_u) |u| if (comptime has(writes & reads, u)) {
         if (@abs(lx[u] - cur[u]) <= tol) lx[u] = cur[u];
     };
 }
@@ -950,8 +988,8 @@ fn limitRange(comptime D: type, sink: anytype, first: u32, end: u32, lim_active:
     const n_u = comptime contract.nU(D);
     // The device's read and write sets; a MOS ladder reads 4 of its 8
     // unknowns and writes 2. All ones when the device does not declare them.
-    const reads = comptime contract.limitReads(D);
-    const writes = comptime contract.limitWrites(D);
+    const reads = comptime limitReadsOf(D);
+    const writes = comptime limitWritesOf(D);
     // f64 rather than bool: measured +0.1% instructions with a bool here.
     var flag: f64 = 0;
     var id: u32 = first;
@@ -960,10 +998,10 @@ fn limitRange(comptime D: type, sink: anytype, first: u32, end: u32, lim_active:
         // their outputs fall outside `writes`, so nothing stores them.
         var cur: [n_u]f64 = undefined;
         var old: [n_u]f64 = undefined;
-        inline for (0..n_u) |u| if (comptime (reads >> u) & 1 != 0) {
+        inline for (0..n_u) |u| if (comptime has(reads, u)) {
             const gi = sink.gath(id, u);
             cur[u] = sink.x(gi);
-            old[u] = if (comptime (writes >> u) & 1 == 0)
+            old[u] = if (comptime !has(writes, u))
                 sink.xOld(gi)
             else if (lim_active)
                 sink.lim(id, u)
@@ -975,7 +1013,7 @@ fn limitRange(comptime D: type, sink: anytype, first: u32, end: u32, lim_active:
         var lm = D.limit(Real, sink.model(id), sink.inst(id), cur, old, sim);
         snapLimited(n_u, reads, writes, &lm.x, cur);
         if (!lm.converged) flag = 1;
-        inline for (0..n_u) |u| if (comptime (writes >> u) & 1 != 0) {
+        inline for (0..n_u) |u| if (comptime has(writes, u)) {
             sink.setLim(id, u, lm.x[u]);
         };
     }
@@ -1047,7 +1085,7 @@ pub fn ProtoStore(comptime D: type) type {
             const pat = comptime jacPattern(D);
             const nnz = comptime blk: {
                 var k: usize = 0;
-                for (pat) |m| k += @popCount(m & (std.math.maxInt(u64) >> (63 - (n_u - 1))));
+                for (pat) |m| k += @popCount(m & lowBits(n_u));
                 break :blk k;
             };
             try pb.reserve(gpa, self.nodes.items.len * nnz);
@@ -1055,7 +1093,7 @@ pub fn ProtoStore(comptime D: type) type {
             // for every device only costs comptime quota.
             for (self.nodes.items) |nd| {
                 for (0..n_u) |ru| for (0..n_u) |cu| {
-                    if ((pat[ru] >> @intCast(cu)) & 1 == 0) continue;
+                    if (!has(pat[ru], cu)) continue;
                     if (nd[ru] != GROUND and nd[cu] != GROUND)
                         try pb.add(gpa, nd[ru], nd[cu]);
                 };
@@ -1136,7 +1174,7 @@ pub fn ProtoStore(comptime D: type) type {
             store.rhs_idx = try gpa.alloc(u32, count * n_u);
             store.slots = try gpa.alloc(u32, count * SlotMap(D).k);
             const flat_nodes = @as([*]const u32, @ptrCast(self.nodes.items.ptr))[0 .. count * n_u];
-            buildTapes(flat_nodes, n_u, &jacPattern(D), pv, store.gath, store.rhs_idx, store.slots);
+            buildTapes(Mask(n_u), flat_nodes, n_u, &jacPattern(D), pv, store.gath, store.rhs_idx, store.slots);
             if (comptime has_q) {
                 store.q_tape = try gpa.alloc(f64, count * comptime lteSites(D).len);
                 @memset(store.q_tape, 0);
@@ -1739,10 +1777,10 @@ pub fn DeviceBatch(comptime D: type) type {
             const self: *Self = @ptrCast(@alignCast(ctx));
             if (comptime has_limit) {
                 // Only the slots `limitRange` maintains are ever read back.
-                const writes = comptime contract.limitWrites(D);
+                const writes = comptime limitWritesOf(D);
                 for (0..self.count) |id| {
                     const sv = D.seed(Real, self.model(id), &self.instances[id], self.sim);
-                    inline for (0..n_u) |u| if (comptime (writes >> u) & 1 != 0) {
+                    inline for (0..n_u) |u| if (comptime has(writes, u)) {
                         self.lim_x[id * LimMap(D).k + comptime LimMap(D).at(u)] = sv[u] orelse x[self.gath[id * n_u + u]];
                     };
                 }
@@ -1772,19 +1810,15 @@ pub fn DeviceBatch(comptime D: type) type {
         /// same node is also one of the instance's voltage unknowns.
         fn markCurrentRows(ctx: *anyopaque, mask: []bool) void {
             const self: *Self = @ptrCast(@alignCast(ctx));
+            // Runtime loops: n_u^2 unrolled overflows the quota past 64 unknowns.
             for (0..self.count) |id| {
-                inline for (0..n_u) |u| {
-                    if (comptime D.u_kinds[u] != .voltage) {
-                        const node = self.gath[id * n_u + u];
-                        const voltage_alias = blk: {
-                            inline for (0..n_u) |v| {
-                                if (comptime D.u_kinds[v] == .voltage)
-                                    if (self.gath[id * n_u + v] == node) break :blk true;
-                            }
-                            break :blk false;
-                        };
-                        if (node != GROUND and !voltage_alias) mask[node] = true;
-                    }
+                const nd = self.gath[id * n_u ..][0..n_u];
+                for (nd, D.u_kinds) |node, kind| {
+                    if (kind == .voltage or node == GROUND) continue;
+                    const voltage_alias = for (nd, D.u_kinds) |other, k| {
+                        if (k == .voltage and other == node) break true;
+                    } else false;
+                    if (!voltage_alias) mask[node] = true;
                 }
             }
         }
@@ -2161,8 +2195,14 @@ pub fn DeviceBatch(comptime D: type) type {
             const self: *Self = @ptrCast(@alignCast(ctx));
             list.ensureUnusedCapacity(gpa, self.count * D.ac_dyn_slots.len) catch return .out_of_memory;
             const k = SlotMap(D).k;
+            const pos = comptime blk: {
+                @setEvalBranchQuota(10_000_000);
+                var p: [D.ac_dyn_slots.len]u32 = undefined;
+                for (&p, D.ac_dyn_slots) |*o, s| o.* = SlotMap(D).at(s / n_u, s % n_u);
+                break :blk p;
+            };
             for (0..self.count) |id| {
-                inline for (D.ac_dyn_slots) |s| list.appendAssumeCapacity(self.slots[id * k + comptime SlotMap(D).at(s / n_u, s % n_u)]);
+                for (pos) |p| list.appendAssumeCapacity(self.slots[id * k + p]);
             }
             return .{ .ok = {} };
         }
@@ -2638,18 +2678,18 @@ fn StateKernel(comptime D: type, comptime block_size: u32) type {
             if (comptime has_limit) {
                 // Must use the same write set as `limitRange`: host and
                 // device share one `lim_x` plane.
-                const writes = comptime contract.limitWrites(D);
+                const writes = comptime limitWritesOf(D);
                 const inst_c: *const D.Instance = @addrSpaceCast(&instances[id]);
                 var old: [n_u]f64 = undefined;
-                inline for (0..n_u) |u| if (comptime (writes >> u) & 1 != 0) {
+                inline for (0..n_u) |u| if (comptime has(writes, u)) {
                     old[u] = if (lim_active != 0) lim[id * LimMap(D).k + comptime LimMap(D).at(u)] else x_old[gath[id * n_u + u]];
                 } else {
                     old[u] = x_old[gath[id * n_u + u]];
                 };
                 var lm = D.limit(Real, model, inst_c, cur, old, sim);
-                snapLimited(n_u, comptime contract.limitReads(D), writes, &lm.x, cur);
+                snapLimited(n_u, comptime limitReadsOf(D), writes, &lm.x, cur);
                 if (!lm.converged) flag |= 1;
-                inline for (0..n_u) |u| if (comptime (writes >> u) & 1 != 0) {
+                inline for (0..n_u) |u| if (comptime has(writes, u)) {
                     lim[id * LimMap(D).k + comptime LimMap(D).at(u)] = lm.x[u];
                 };
             }
