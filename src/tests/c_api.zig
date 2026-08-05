@@ -325,3 +325,44 @@ test "C calls on a live handle validate every pointer, scope and preview" {
     try t.expectEqual(invalid, c.espice_result_view(handle, 0, &view, null));
     try t.expect(view == null);
 }
+
+test "C set_params runs later queries at new .param values without a re-parse (#101)" {
+    const t = std.testing;
+    const deck = "C live\n.param rv=1k\nV1 in 0 1\nR1 in out {rv}\nR2 out 0 1k\n.op\n.end\n";
+    const live = [_]c.espice_bytes{.{ .data = "rv", .len = 2 }};
+    var options: c.espice_create_options = undefined;
+    c.espice_default_options(&options);
+    options.source_kind = c.ESPICE_BYTES;
+    options.source = .{ .data = deck.ptr, .len = deck.len };
+    options.live_params = &live;
+    options.live_param_count = 1;
+    var handle: ?*c.espice_problem = null;
+    var diagnostic: [64]u8 = undefined;
+    try t.expectEqual(@as(u32, 0), c.espice_create(&options, &handle, &diagnostic, diagnostic.len));
+    defer c.espice_destroy(handle);
+    try t.expectEqual(@as(u32, 0), c.espice_run_all(handle));
+    const op = ".op";
+    for ([_]f64{ 3e3, 9e3 }) |rv| {
+        try t.expectEqual(@as(u32, 0), c.espice_set_params(handle, &live, &rv, 1));
+        var id: u32 = c.ESPICE_NO_QUERY;
+        var needed: usize = 0;
+        try t.expectEqual(@as(u32, 0), c.espice_append_directives(handle, .{ .data = op, .len = op.len }, &id, 1, &needed));
+        try t.expectEqual(@as(u32, 0), c.espice_run_all(handle));
+        var values: [8]f64 = undefined;
+        try t.expectEqual(@as(u32, 0), c.espice_copy_result(handle, id, &values, values.len, &needed));
+        var name: [16]u8 = undefined;
+        const out = for (0..needed) |k| {
+            var len: usize = 0;
+            try t.expectEqual(@as(u32, 0), c.espice_copy_result_name(handle, id, @intCast(k), &name, name.len, &len));
+            if (std.mem.eql(u8, std.mem.sliceTo(&name, 0), "v(out)")) break values[k];
+        } else return error.MissingColumn;
+        try t.expectApproxEqRel(1e3 / (1e3 + rv), out, 1e-12);
+    }
+    const bad = std.math.nan(f64);
+    try t.expectEqual(@as(u32, c.ESPICE_INVALID_ARGUMENT), c.espice_set_params(handle, &live, &bad, 1));
+    const unknown = [_]c.espice_bytes{.{ .data = "nope", .len = 4 }};
+    const one: f64 = 1;
+    try t.expectEqual(@as(u32, c.ESPICE_INVALID_ARGUMENT), c.espice_set_params(handle, &unknown, &one, 1));
+    try t.expectEqual(@as(u32, c.ESPICE_INVALID_ARGUMENT), c.espice_set_params(handle, null, null, 1));
+    try t.expectEqual(@as(u32, c.ESPICE_INVALID_ARGUMENT), c.espice_set_params(null, null, null, 0));
+}

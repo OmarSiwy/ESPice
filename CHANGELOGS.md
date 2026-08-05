@@ -5,6 +5,10 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 ## Unreleased
 
+- API: `Options.live_params` + `Problem.set_params`, and C `live_params` + `espice_set_params`, change
+  global `.param` values on a live Problem without a re-parse: a sky130 sizing point 6 ms, was 87 (#101).
+- A binned MOSFET whose L/W reads a swept or set `.param` takes the bin each point selects, on its
+  own circuit, where `.step` used to refuse it (#101).
 - `.vec`: VNAME names fill bits (`radix 144`, `<[4:1]>` groupings), V1, V2... without VNAME, `tunit 2 ns`,
   IO `u`, TSKIP, Z on outputs; SLOPE defaults to 0.1 ns, VOH/VOL replace VTH, plain numbers only (#121).
 - `--tokenizer=spectre` reads Spectre netlists: a title line, instances, `parameters`, `model` groups,

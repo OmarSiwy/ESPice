@@ -58,6 +58,7 @@ Set what you need, then call `espice_create`:
 | `output_format`, `output_path` | write results to a file as the CLI's `--format` and `--rawfile` do; an empty path writes nothing |
 | `max_parallel` | queries that may run at once, as `--jobs` |
 | `zig_path`, `share_path` | for decks that load `.hdl` models: the Zig compiler, and the `share/espice` directory of evaluator sources, inside your own bundle. Empty keeps `$ZIG` (else `zig` on `PATH`) and the `share/espice` beside the executable. A `share_path` without `device/eval.zig` fails with `HdlShareNotFound` |
+| `live_params`, `live_param_count` | the global `.param` names `espice_set_params` may change later (see [Sizing loops](#sizing-loops)). A name no `.param` defines fails with `UnknownParameter` |
 
 `espice_create` parses the deck, builds the circuit and plans the queries.
 On failure it returns a status, leaves `*out` NULL and writes the error
@@ -105,6 +106,9 @@ To drive the schedule yourself, step instead:
 circuit, and returns the new query IDs. It is transactional: a bad card
 adds nothing. Device cards are refused.
 
+**Change parameters.** `espice_set_params` gives global `.param` values
+new values for the queries appended after it; see [Sizing loops](#sizing-loops).
+
 **Results.** Once a query is complete:
 
 - `espice_get_result_info` gives `variable_count`, `point_count`,
@@ -119,6 +123,57 @@ adds nothing. Device cards are refused.
 
 **Destroy.** `espice_destroy` cancels and joins any paused work and frees
 everything, including result views.
+
+## Sizing loops
+
+A sizing or centering loop changes a few `.param` values and runs the
+same analyses again, hundreds of times. Re-creating the problem for each
+point re-reads the whole deck, which with a PDK like sky130 is most of
+the run. Instead, name the parameters you will change when you create
+the problem, then set them on the live one:
+
+```c
+const espice_bytes live[] = {{"wn", 2}, {"wp", 2}};
+options.live_params = live;
+options.live_param_count = 2;
+espice_create(&options, &p, diagnostic, sizeof diagnostic);
+
+const char *cards = ".op\n.ac dec 10 1 1g\n";
+for (int i = 0; i < n; i++) {
+    double values[2] = {wn[i], wp[i]};
+    espice_set_params(p, live, values, 2);
+    espice_append_directives(p, (espice_bytes){cards, strlen(cards)}, ids, 2, &required);
+    espice_run_all(p);
+    /* read ids[0], ids[1] */
+}
+```
+
+`espice_set_params(p, names, values, count)` sets each name for every
+query appended afterwards; names you leave out keep their last values,
+and queries appended earlier keep the values they were appended with, so
+their results stay valid. Append the analyses again after each call.
+Their plots are named after the point, `Operating Point (wn=1, wp=2)`.
+Names match case-insensitively, except in the Spectre dialect.
+
+Nothing is parsed again. The point is evaluated from the prepared deck as a
+`.step` point is: usually a handful of parameter writes, sometimes a rebuild
+of the circuit from the prepared netlist. A binned MOSFET (sky130's
+`sky130_fd_pr__nfet_01v8`, say) whose L or W moves takes the bin the new
+size selects. Sizing a sky130 OTA's input pair this way, an `.op` point
+costs about 6 ms against about 87 ms for re-creating the problem.
+
+The call is all-or-nothing. `ESPICE_INVALID_ARGUMENT` means a name not in
+`live_params` or a value that is not finite. `ESPICE_FAILED` means no model
+bin holds the new size (`ModelBinNotFound`), or the values would change
+the circuit's topology or flip a top-level `.if` (`UnsupportedCard`). A
+parameter an analysis card, `.meas`, `.ic` or `.options` reads cannot be
+live: `espice_create` refuses it with `UnsupportedCard`, as `.step` does.
+
+Each call keeps one variant row (and, after a bin change, one circuit)
+until `espice_destroy`.
+
+From Zig the same calls are `Options.live_params` and
+`Problem.set_params(names, values)`.
 
 ## Conventions
 

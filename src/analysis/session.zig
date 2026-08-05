@@ -81,6 +81,9 @@ const Row = struct {
     progress: ?progress.Event = null,
     failure: ?anyerror = null,
     executor: ?*execution.Executor = null,
+    /// The circuit the query instantiates: 0 for `topology`, k for
+    /// `templates[k - 1]`.
+    template: u32 = 0,
 };
 
 /// The query graph over one prepared circuit and deck, both borrowed for the
@@ -102,6 +105,10 @@ pub const Session = struct {
     /// under `config.final_plan` its last root query evaluates the template's
     /// own batches instead of a copy (`Circuit.instantiateMove`).
     last_template_reader: bool = false,
+    /// Circuits with `topology`'s pattern that rows appended after
+    /// `addTemplate` instantiate instead (a model bin that moved under
+    /// `Problem.set_params`), oldest first; each must outlive the session.
+    templates: std.ArrayList(*const Circuit) = .empty,
     /// A transient or AC query that writes its rows to `writer` as it records them
     /// instead of keeping them; its Result has empty `data`. Set before the
     /// query starts.
@@ -124,6 +131,7 @@ pub const Session = struct {
         }
         self.rows.deinit(self.allocator);
         self.outputs.deinit(self.allocator);
+        self.templates.deinit(self.allocator);
         for (self.request_arenas.items) |*arena| arena.deinit();
         self.request_arenas.deinit(self.allocator);
         self.* = undefined;
@@ -148,24 +156,26 @@ pub const Session = struct {
         try candidate.ensureTotalCapacity(self.allocator, max_rows);
         for (0..self.rows.len) |i| candidate.appendAssumeCapacity(self.rows.get(i));
         const new_ids = try a.alloc(QueryId, jobs.len);
+        const template: u32 = @intCast(self.templates.items.len);
         for (jobs, new_ids) |job, *id| {
             try validateDeck(job, self.topology.n, self.deck);
             const owned = try copyValue(a, job);
             var dependency = none;
             if (prerequisite(owned)) |op| {
-                dependency = findOp(candidate, op) orelse blk: {
+                dependency = findOp(candidate, op, template) orelse blk: {
                     const dep: QueryId = @fromBackingInt(@intCast(candidate.len));
                     candidate.appendAssumeCapacity(.{
                         .job = .{ .op = op },
                         .component = @backingInt(dep),
                         .requested = false,
+                        .template = template,
                     });
                     break :blk dep;
                 };
             }
             // An explicit OP can expose an already shared prerequisite product.
             if (owned == .op) {
-                if (findOp(candidate, owned.op)) |existing| {
+                if (findOp(candidate, owned.op, template)) |existing| {
                     candidate.items(.requested)[@backingInt(existing)] = true;
                     id.* = existing;
                     continue;
@@ -177,6 +187,7 @@ pub const Session = struct {
                 .dependency = dependency,
                 .component = if (dependency == none) @backingInt(id.*) else candidate.items(.component)[@backingInt(dependency)],
                 .requested = true,
+                .template = template,
             });
         }
         try self.outputs.ensureUnusedCapacity(self.allocator, jobs.len);
@@ -190,6 +201,15 @@ pub const Session = struct {
         self.request_arenas.appendAssumeCapacity(arena);
         @memcpy(ids[0..jobs.len], new_ids);
         return jobs.len;
+    }
+
+    /// Makes `circuit` the template of every row appended from now on.
+    /// Asserts that it has `topology`'s node count and pattern size; the
+    /// caller keeps it alive for the session's lifetime.
+    pub fn addTemplate(self: *Session, circuit: *const Circuit) !void {
+        std.debug.assert(circuit.n == self.topology.n);
+        std.debug.assert(circuit.nnz == self.topology.nnz);
+        try self.templates.append(self.allocator, circuit);
     }
 
     /// Returns the row count, implicit prerequisites included.
@@ -309,10 +329,11 @@ pub const Session = struct {
         const started = if (self.config.timing_in_depth) std.Io.Timestamp.now(self.io, .awake) else null;
         const dep = self.rows.items(.dependency)[i];
         const initial = if (dep == none) null else self.rows.items(.executor)[@backingInt(dep)];
+        const template = self.rows.items(.template)[i];
         self.rows.items(.executor)[i] = try execution.Executor.create(
             self.allocator,
             self.io,
-            self.topology,
+            if (template == 0) self.topology else self.templates.items[template - 1],
             self.deck,
             self.rows.items(.job)[i],
             initial,
@@ -530,8 +551,8 @@ pub const Session = struct {
     }
 };
 
-fn findOp(rows: std.MultiArrayList(Row), op: requests.Op) ?QueryId {
-    for (rows.items(.job), 0..) |job, i| if (job == .op and std.meta.eql(job.op, op)) return @fromBackingInt(@intCast(i));
+fn findOp(rows: std.MultiArrayList(Row), op: requests.Op, template: u32) ?QueryId {
+    for (rows.items(.job), rows.items(.template), 0..) |job, t, i| if (job == .op and t == template and std.meta.eql(job.op, op)) return @fromBackingInt(@intCast(i));
     return null;
 }
 

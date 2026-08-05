@@ -103,9 +103,10 @@ parameter writes that turn the nominal circuit into that variant:
    parameters that differ. `force_rebuild` makes this the oracle of the
    fast path's differential test (`frontend/tests/variants.zig`).
 4. If the rebuilt circuit's pattern, node count or devices per type
-   differ, or a B-source expression reads a live name (its tape is not
-   `ParamRef` storage), the point becomes its own `Prepared` run with its
-   own session, published after the main one.
+   differ, a B-source expression reads a live name (its tape is not
+   `ParamRef` storage), or a binned M card's live L/W picks another bin
+   (below), the point becomes its own `Prepared` run with its own session,
+   published after the main one.
 5. Source/element targets, `.data` card columns and Monte Carlo
    `DEV`/`LOT`/`.variation` draws add their writes on top.
 
@@ -117,6 +118,17 @@ separate run that plans its own variants.
 At run time a query carries `Tolerances.variant`; its executor writes the
 row through `ParamRef.set`, sets the row's temperature, and recomputes
 once. Dependent queries copy the OP circuit, variant included.
+
+**Bins.** An M card on a binned model whose L, W or NF reads a live
+name (or a distribution) keeps its candidate bins in `Live.bins`: every
+global `nm.<n>` of its base name, or, for bins inside a subcircuit
+(sky130), every bin whose fixed dimension holds, each read under the
+instance's parameters at parse time. `Netlist.setLive` picks the bin
+again after the slots, last-declared first as `modelBins` does. A point
+whose bin moved cannot be parameter writes: bins differ in which model
+parameters they give (sky130's nfet_01v8 bins give 300 to 350 keys), and
+`ParamRef` carries no `$param_given` flags. So it takes a circuit of its
+own.
 
 `.dc DATA=` and `.dc MONTE=` run their rows as one `Mc` query on the
 structural lanes (`sweep/lanes.zig`), each lane warm-started from the
@@ -148,8 +160,10 @@ query on its own circuit copy.
   name is re-evaluated at every point; a point where it would select another
   branch is refused, because the branches can change the topology and a
   point never re-parses. HSPICE re-reads the netlist per point there.
-- A swept or sampled `l`/`w` on an M card whose model is binned is refused:
-  a variant never re-picks the bin.
+- A point that moves a binned card's bin pays a bind and freeze of its
+  own. For subcircuit bins, a card whose L and W are both live reads every
+  bin of its base name under its instance at parse time (sky130 nfet_01v8:
+  180); one live dimension reads only the bins the other allows.
 - `.data ... MER|LAM` reads external files but refuses `OUT=` (writing
   the merged table back).
 - The manual's two `MONTE=list(10 20:30 35:40 50)` examples [CR .DC]
@@ -165,3 +179,58 @@ query on its own circuit copy.
 - Runs with their own topology are summarized on stderr after the main
   session's results, in output order, and their Monte Carlo trials count
   toward the `.meas` statistics.
+
+## 5. Live parameters on a Problem (#101)
+
+`Options.live_params` (C `live_params`) names global `.param`s a caller
+will change; `prepare` registers them live before any model, directive
+or device reads them, so the deck builds exactly as before and a card
+that could not follow a later value (an analysis, `.ic`, `.options`) is
+refused. `Problem.set_params(names, values)` then runs
+`variants.Tuning.set`:
+
+1. The new live vector (the last one with the named entries replaced)
+   goes through `Planner.load`, the same fast path or rebuild diff a
+   `.step` point takes, against the current template.
+2. Where no writes can make the point (a bin moved, or a kept B-source
+   expression reads a moved value), the circuit built at it with
+   `circuitOf` becomes a new template, after a `sameTopology` check, and
+   the planner re-opens over it in its other arena (two, so a failed
+   re-open keeps the old one). Later points diff against it.
+3. The row is appended to `Deck.variants`. `Problem.append_queries` stamps
+   that row on every later query without a variant of its own;
+   `Session.addTemplate` makes every later row instantiate the new
+   template (`Row.template`; OP dedup is per template).
+
+Earlier queries keep their row and template, so their results stay valid.
+The call is all-or-nothing: the table grows only once the row is whole.
+Labels name every live parameter: `Operating Point (wn=1, wp=2)`.
+
+Measured 2026-10-17, ReleaseFast CPU-only build, load average 7-11
+(other builds running), sky130A `fa87f8f4` full `sky130.lib.spice tt`, the
+OTA buffer of `regression/ota_buffer_large_step` with its input-pair W
+live, 20 `.op` points over W = 0.42..1.2 um (L = 0.3, so the pair crosses
+bins), three runs, harness linked against `libespice.a`:
+
+| Loop | per point |
+|---|---|
+| re-create the Problem per point (before) | 85.5-90.0 ms |
+| one Problem, `espice_set_params` + `.op` (after) | 6.1-6.3 ms, plus 80-81 ms once to create |
+
+Over W = 0.55..0.6 um (two runs, load average 26) the loop measured
+114-121 ms per point before and 4.7-4.9 ms after.
+
+Every point agrees with a fresh parse at that value to 2.4e-8 relative in
+v(xxdut.d1): the first point's `.op` runs second on the template and
+converges along another Newton path; points on a new template agree to
+1e-13. sky130's mismatch terms (`MC_MM_SWITCH*AGAUSS(...)`) are zero-valued
+slots, so the probe never maps the fast path there and each point that keeps
+its bins pays a rebuild diff.
+
+- `ponytail:` every template stays alive until `deinit`, and a point
+  that needs one always builds a new one, so a loop oscillating across a
+  bin edge grows by a circuit per crossing; reuse templates by bin
+  selection or free them (#129).
+- `ponytail:` the probe refuses the fast path when any slot's nominal is
+  zero (sky130's mismatch terms); mapping only the slots that moved would
+  let a sizing point skip the rebuild (#130).

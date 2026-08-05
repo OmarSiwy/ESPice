@@ -661,3 +661,143 @@ test "an R reading v() is ngspice's B source: pow() takes |x|, tc divides, m mul
     const i = try opValue(deck_text, "i(v1)");
     try t.expectApproxEqRel(@as(f64, -0.5 * 2 / (1017.28 * 1.035178)), i, 1e-12);
 }
+
+/// Column `name` of `r`'s first point.
+fn column(r: api.Result, name: []const u8) !f64 {
+    for (r.varnames, 0..) |v, i| if (std.mem.eql(u8, v, name)) return r.data[i];
+    return error.MissingColumn;
+}
+
+/// Creates `body` at `values[0]` with `name` live, then for each later
+/// value sets it and runs one more `.op`, checking it against a fresh
+/// Problem parsed at that value (the re-parse oracle). Returns how many
+/// templates the calls built.
+fn expectTunedAsParsed(comptime body: []const u8, name: []const u8, values: []const f64) !usize {
+    const first = try std.fmt.allocPrint(t.allocator, body, .{values[0]});
+    defer t.allocator.free(first);
+    const p = try api.Problem.init(t.allocator, t.io, .{ .source = .{ .bytes = .{ .data = first, .origin = "tuned.cir" } }, .live_params = &.{name} });
+    defer p.deinit();
+    try p.run_all();
+    for (values[1..]) |v| {
+        try p.set_params(&.{name}, &.{v});
+        var id: [1]api.QueryId = undefined;
+        _ = try p.append_directives(".op", &id);
+        try p.run_all();
+        const text = try std.fmt.allocPrint(t.allocator, body, .{v});
+        defer t.allocator.free(text);
+        const q = try create(text);
+        defer q.deinit();
+        try q.run_all();
+        const want = (try q.result(@fromBackingInt(0))).data;
+        const got = (try p.result(id[0])).data;
+        try t.expectEqual(want.len, got.len);
+        for (want, got) |a, b| try t.expectApproxEqRel(a, b, 1e-12);
+    }
+    return p.session.templates.items.len;
+}
+
+test "Problem.set_params: later queries run at the new values, earlier ones keep theirs (#101)" {
+    const p = try api.Problem.init(t.allocator, t.io, .{
+        .source = .{ .bytes = .{ .data = "tuned\n.param rv=1k\nV1 in 0 1\nR1 in out {rv}\nR2 out 0 1k\n.op\n.end\n", .origin = "tuned.cir" } },
+        .live_params = &.{"RV"},
+    });
+    defer p.deinit();
+    try p.run_all();
+    const nominal: api.QueryId = @fromBackingInt(0);
+    for ([_]f64{ 3e3, 1e3, 9e3 }) |rv| {
+        try p.set_params(&.{"rv"}, &.{rv});
+        var id: [1]api.QueryId = undefined;
+        _ = try p.append_directives(".op", &id);
+        try p.run_all();
+        try t.expectApproxEqRel(1e3 / (1e3 + rv), try column(try p.result(id[0]), "v(out)"), 1e-12);
+        try t.expect(std.mem.indexOf(u8, (try p.result(id[0])).plotname, "(rv=") != null);
+    }
+    try t.expectApproxEqRel(0.5, try column(try p.result(nominal), "v(out)"), 1e-12);
+    // A failed call changes nothing: the next query still runs at 9k.
+    try t.expectError(error.UnknownParameter, p.set_params(&.{"nope"}, &.{1}));
+    try t.expectError(error.InvalidArgument, p.set_params(&.{"rv"}, &.{std.math.inf(f64)}));
+    try t.expectError(error.InvalidArgument, p.set_params(&.{"rv"}, &.{}));
+    var id: [1]api.QueryId = undefined;
+    _ = try p.append_directives(".op", &id);
+    try p.run_all();
+    try t.expectApproxEqRel(0.1, try column(try p.result(id[0]), "v(out)"), 1e-12);
+    // The fast path writes the resistor; no circuit was rebuilt.
+    try t.expectEqual(@as(usize, 0), p.session.templates.items.len);
+}
+
+test "Problem.set_params: no live names, an unknown one, or one an analysis card reads" {
+    const p = try create("plain\n.param rv=1k\nV1 in 0 1\nR1 in 0 {rv}\n.op\n.end\n");
+    defer p.deinit();
+    try t.expectError(error.UnknownParameter, p.set_params(&.{"rv"}, &.{2e3}));
+    const source: api.Source = .{ .bytes = .{ .data = "plain\n.param rv=1k\nV1 in 0 1\nR1 in 0 {rv}\n.tran 1n {rv*1n}\n.end\n", .origin = "plain.cir" } };
+    try t.expectError(error.UnknownParameter, api.Problem.init(t.allocator, t.io, .{ .source = source, .live_params = &.{"nope"} }));
+    try t.expectError(error.UnsupportedCard, api.Problem.init(t.allocator, t.io, .{ .source = source, .live_params = &.{"rv"} }));
+}
+
+test "Problem.set_params: a binned MOSFET takes the bin its new W selects (#101, #63)" {
+    // nm.1 and nm.2 differ in VTO; W=2u moves M1 to nm.2 and back.
+    const global =
+        \\bins
+        \\.param wn={d}
+        \\V1 d 0 1
+        \\V2 g 0 2
+        \\M1 d g 0 0 nm l=1u w={{wn}}
+        \\.model nm.1 nmos level=1 lmin=0.9u lmax=1.1u wmin=0.9u wmax=1.1u vto=0.5
+        \\.model nm.2 nmos level=1 lmin=0.9u lmax=1.1u wmin=1.9u wmax=2.1u vto=1.7
+        \\.op
+        \\.end
+        \\
+    ;
+    try t.expectEqual(@as(usize, 2), try expectTunedAsParsed(global, "wn", &.{ 1e-6, 2e-6, 1.05e-6, 1e-6 }));
+    // The same with sky130's layout: bins inside the subcircuit, a model
+    // value read under each instance's parameters, and `.option scale`.
+    const local =
+        \\local bins
+        \\.option scale=1u
+        \\.param wn={d}
+        \\.subckt nfet d g s b l=1 w=1
+        \\.model nmod.1 nmos level=1 lmin=0.9e-6 lmax=1.1e-6 wmin=0.9e-6 wmax=1.1e-6 vto={{0.5+0*w}}
+        \\.model nmod.2 nmos level=1 lmin=0.9e-6 lmax=1.1e-6 wmin=1.9e-6 wmax=2.1e-6 vto={{1.7+0*w}}
+        \\m1 d g s b nmod l={{l}} w={{w}}
+        \\.ends
+        \\X1 d g 0 0 nfet w={{wn}} l=1
+        \\V1 d 0 1
+        \\V2 g 0 2
+        \\.op
+        \\.end
+        \\
+    ;
+    try t.expectEqual(@as(usize, 2), try expectTunedAsParsed(local, "wn", &.{ 1, 2, 1.05, 1 }));
+    // The bins really differ: the drain current moves with them.
+    var buf: [512]u8 = undefined;
+    const narrow = try opValue(try std.fmt.bufPrint(&buf, global, .{1e-6}), "i(v1)");
+    const wide = try opValue(try std.fmt.bufPrint(&buf, global, .{2e-6}), "i(v1)");
+    try t.expect(@abs(wide) < @abs(narrow));
+}
+
+test ".step over W on a binned model runs a point whose bin moves on its own circuit (#63)" {
+    const stepped =
+        \\stepped bins
+        \\.param wn=1u
+        \\V1 d 0 1
+        \\V2 g 0 2
+        \\M1 d g 0 0 nm l=1u w={wn}
+        \\.model nm.1 nmos level=1 lmin=0.9u lmax=1.1u wmin=0.9u wmax=1.1u vto=0.5
+        \\.model nm.2 nmos level=1 lmin=0.9u lmax=1.1u wmin=1.9u wmax=2.1u vto=1.7
+        \\.step param wn list 1.05u 2u
+        \\.op
+        \\.end
+        \\
+    ;
+    const p = try create(stepped);
+    defer p.deinit();
+    try p.run_all();
+    const runs = try p.run_results(t.allocator);
+    defer t.allocator.free(runs);
+    try t.expectEqual(@as(usize, 1), runs.len);
+    var buf: [512]u8 = undefined;
+    const body = "fresh\nV1 d 0 1\nV2 g 0 2\nM1 d g 0 0 nm l=1u w={s}\n.model nm.1 nmos level=1 lmin=0.9u lmax=1.1u wmin=0.9u wmax=1.1u vto=0.5\n" ++
+        ".model nm.2 nmos level=1 lmin=0.9u lmax=1.1u wmin=1.9u wmax=2.1u vto=1.7\n.op\n.end\n";
+    try t.expectApproxEqRel(try opValue(try std.fmt.bufPrint(&buf, body, .{"1.05u"}), "i(v1)"), try column(try p.result(try find(p, .op)), "i(v1)"), 1e-12);
+    try t.expectApproxEqRel(try opValue(try std.fmt.bufPrint(&buf, body, .{"2u"}), "i(v1)"), try column(runs[0], "i(v1)"), 1e-12);
+}

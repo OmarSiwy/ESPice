@@ -186,6 +186,22 @@ pub const Live = struct {
     /// evaluated that reads a live name. A variant keeps the nominal
     /// branches only while each still has its nominal truth value.
     conds: []const Span = &.{},
+    bins: Bins = .{},
+
+    /// M cards on a binned model whose L or W reads a live name, and the
+    /// bins each may take; `setLive` picks the bin again at every point.
+    pub const Bins = struct {
+        /// Edge of card k.
+        edges: []const u32 = &.{},
+        /// Card k's candidate model rows are `rows[starts[k]..starts[k+1]]`,
+        /// last-declared first (ngspice's order), with their lmin, lmax,
+        /// wmin and wmax in `bounds`.
+        starts: []const u32 = &.{},
+        rows: []const u32 = &.{},
+        bounds: []const [4]f64 = &.{},
+        /// Card k divides W by NF before the bin test (`wnflag`).
+        per_finger: []const bool = &.{},
+    };
 };
 
 /// An analysis card. `pos`/`neg` are the output `v(a[,b])` nets, `ports` the
@@ -335,6 +351,9 @@ pub const Netlist = struct {
     model_ids: std.StringHashMapUnmanaged(u32),
     deck: Deck,
     live: Live = .{},
+    /// Rows of `live.names` the caller asked to set on the prepared
+    /// circuit (`parseLive`), in the caller's order.
+    tunable: []const u32 = &.{},
     /// The `ForeignKind.data` files, as `prepare` read them.
     files: []const DataFile = &.{},
 
@@ -407,8 +426,11 @@ pub const Netlist = struct {
     /// (`null` keeps nominals). Returns true when some value changed.
     /// `stack` is scratch, grown with `gpa`. Writes through `const`: the
     /// live slots and `consts` rows live in the parse arena, so every
-    /// `View` and `Model` read before the call sees the new values.
-    /// Asserts that `values.len` equals `live.names.len`.
+    /// `View` and `Model` read before the call sees the new values. A
+    /// binned M card whose L or W is live takes the bin its new geometry
+    /// selects (`Live.bins`); `ModelBinNotFound` when none holds it, with
+    /// the values already rewritten. Asserts that `values.len` equals
+    /// `live.names.len`.
     pub fn setLive(nl: *const Netlist, gpa: Allocator, stack: *std.ArrayList(expr.Val), values: []const f64, draw: anytype) !bool {
         const live = nl.live;
         const pool: []f64 = @constCast(nl.consts);
@@ -425,6 +447,26 @@ pub const Netlist = struct {
                 try expr.eval(gpa, stack, ops, nl.consts, values, SiteDraw(@TypeOf(draw)){ .inner = draw, .base = span.start, .ops = live.site_ops, .keys = live.site_keys });
             changed = changed or slot.num != x;
             slot.* = .{ .num = x };
+        }
+        // Each binned card with live geometry takes the bin its new L and W
+        // select, read off the card as the slots above left them (scaled).
+        const R = Reader(lines.ngspice);
+        const bins = live.bins;
+        const model_of = nl.graph.edges.items(.model);
+        for (bins.edges, bins.per_finger, 0..) |e, per_finger, k| {
+            const d = nl.graph.edges.get(e);
+            const kv = nl.kvs[d.kv.start..][0..d.kv.len];
+            const l = R.number(kv, "l") orelse return error.ParseError;
+            const nf = if (per_finger) R.number(kv, "nf") orelse 1 else 1;
+            const w = (R.number(kv, "w") orelse return error.ParseError) / nf;
+            const lo = bins.starts[k];
+            const hi = bins.starts[k + 1];
+            const row = for (bins.rows[lo..hi], bins.bounds[lo..hi]) |row, b| {
+                if (R.binHolds(b, l, w)) break row;
+            } else return error.ModelBinNotFound;
+            changed = changed or model_of[e] != row;
+            model_of[e] = row;
+            @constCast(nl.values)[d.positional.start] = .{ .name = nl.models[row].name };
         }
         return changed;
     }
@@ -649,8 +691,18 @@ fn cardOf(head: []const u8) ?Card {
 /// an arena: nothing is freed piecewise. Fails per `Error`; partial
 /// results stay in the arena.
 pub fn parse(arena: Allocator, src: []const u8, dialect: Dialect) Error!Netlist {
+    return parseLive(arena, src, dialect, &.{}) catch |err| switch (err) {
+        error.UnknownParameter => unreachable,
+        else => |e| return e,
+    };
+}
+
+/// `parse`, with the global `.param` names in `live` kept live as a
+/// swept name is (`Netlist.tunable`), so a later `setLive` can move them.
+/// `UnknownParameter` for a name no global `.param` defines.
+pub fn parseLive(arena: Allocator, src: []const u8, dialect: Dialect, live: []const []const u8) (Error || error{UnknownParameter})!Netlist {
     return switch (dialect) {
-        inline else => |d| Reader(lines.Syntax(d)).run(arena, src, d),
+        inline else => |d| Reader(lines.Syntax(d)).run(arena, src, d, live),
     };
 }
 
@@ -897,6 +949,12 @@ fn Reader(comptime S: type) type {
         /// Swept global parameters, registered before any device is read.
         live_names: std.StringArrayHashMapUnmanaged(void) = .empty,
         live_nominal: std.ArrayList(f64) = .empty,
+        /// `Live.bins`, column by column.
+        bin_edges: std.ArrayList(u32) = .empty,
+        bin_starts: std.ArrayList(u32) = .empty,
+        bin_rows: std.ArrayList(u32) = .empty,
+        bin_bounds: std.ArrayList([4]f64) = .empty,
+        bin_per_finger: std.ArrayList(bool) = .empty,
         /// A device or model value is being read: one that reads a live name
         /// or (under `monte`) a distribution keeps its postfix.
         in_card: bool = false,
@@ -939,7 +997,7 @@ fn Reader(comptime S: type) type {
             return r;
         }
 
-        fn run(arena: Allocator, src: []const u8, dialect: Dialect) Error!Netlist {
+        fn run(arena: Allocator, src: []const u8, dialect: Dialect, live_params: []const []const u8) (Error || error{UnknownParameter})!Netlist {
             var line_hint: usize = undefined;
             const text: []const u8 = if (S.fold_case) blk: {
                 const buf = try arena.alloc(u8, src.len);
@@ -992,6 +1050,18 @@ fn Reader(comptime S: type) type {
                     break;
                 }
             };
+            // The caller's live names, registered before any model,
+            // directive or device reads them, so a card that cannot follow a
+            // later value (an analysis, `.ic`, `.options`) is refused.
+            const tunable = try arena.alloc(u32, live_params.len);
+            for (live_params, tunable) |name, *k| {
+                // The live table keeps the key; the caller's bytes may not outlive the call.
+                const key = if (S.fold_case) try std.ascii.allocLowerString(arena, name) else try arena.dupe(u8, name);
+                k.* = try r.liveParam(key) orelse {
+                    if (!@import("builtin").is_test) std.log.err("netlist: live parameter '{s}': no global .param defines it", .{name});
+                    return error.UnknownParameter;
+                };
+            }
             // Global models in line order, then each subcircuit's own, kept
             // together: `models_lo..models_hi` is one range per subcircuit,
             // nested definitions included.
@@ -1017,6 +1087,7 @@ fn Reader(comptime S: type) type {
             var live = try r.resolveLive();
             live.conds = try r.liveConds();
             try r.modelBins(live);
+            live.bins = .{ .edges = r.bin_edges.items, .starts = r.bin_starts.items, .rows = r.bin_rows.items, .bounds = r.bin_bounds.items, .per_finger = r.bin_per_finger.items };
 
             const graph = try r.hg.finish(arena);
             const models = try arena.alloc(Model, r.models.items.len);
@@ -1049,6 +1120,7 @@ fn Reader(comptime S: type) type {
                 .models = models,
                 .model_ids = r.model_ids,
                 .live = live,
+                .tunable = tunable,
                 .deck = .{
                     .title = title,
                     .dialect = dialect,
@@ -1424,11 +1496,16 @@ fn Reader(comptime S: type) type {
             if (letter != 'm') return r.model_ids.get(name) orelse none;
             // ngspice prepends model declarations (inpmkmod.c): the last
             // matching bin wins, as in `modelBins`.
+            // Read before any `localRow`, which reuses the card scratch.
             const kv = r.card_kv.items;
-            const l = (number(kv, "l") orelse return r.model_ids.get(name) orelse none) * r.scale;
+            const lg = try r.cardLength(kv, "l") orelse return r.model_ids.get(name) orelse none;
             const use_nf = if (number(kv, "wnflag")) |flag| flag != 0 else r.wnflag;
-            const nf = if (use_nf) number(kv, "nf") orelse 1 else 1;
-            const w = (number(kv, "w") orelse return r.model_ids.get(name) orelse none) * r.scale / nf;
+            const nfg: Geometry = if (use_nf) try r.cardLength(kv, "nf") orelse .{ .num = 1 } else .{ .num = 1 };
+            const wg = try r.cardLength(kv, "w") orelse return r.model_ids.get(name) orelse none;
+            const l = lg.num * r.scale;
+            const w = wg.num * r.scale / nfg.num;
+            const w_live = wg.live or nfg.live;
+            var picked: ?u32 = null;
             var k = locals.len;
             while (k > 0) {
                 k -= 1;
@@ -1437,11 +1514,64 @@ fn Reader(comptime S: type) type {
                 // ponytail: bounds from the global-scope read; a bin whose
                 // bounds need instance parameters is never picked.
                 const b = binBounds(r.kvs.items[r.models.items[m.top].kv.start..][0..r.models.items[m.top].kv.len]) orelse continue;
-                if (!binHolds(b, l, w)) continue;
-                r.values.items[pos] = .{ .name = m.name };
-                return r.localRow(m, frame);
+                if (!lg.live and !w_live) {
+                    if (!binHolds(b, l, w)) continue;
+                    r.values.items[pos] = .{ .name = m.name };
+                    return r.localRow(m, frame);
+                }
+                // Live geometry: every bin the fixed dimension allows is a
+                // candidate a point may pick (`Live.bins`), read now under
+                // this instance's parameters.
+                if (!lg.live and !binHolds(b, l, b[2])) continue;
+                if (!w_live and !binHolds(b, b[0], w)) continue;
+                const row = try r.localRow(m, frame);
+                try r.bin_rows.append(r.arena, row);
+                try r.bin_bounds.append(r.arena, b);
+                if (picked == null and binHolds(b, l, w)) {
+                    picked = row;
+                    r.values.items[pos] = .{ .name = m.name };
+                }
             }
-            return r.model_ids.get(name) orelse none;
+            if (r.bin_rows.items.len != r.binsEnd()) try r.closeBins(@intCast(r.hg.edges.len), use_nf);
+            return picked orelse r.model_ids.get(name) orelse none;
+        }
+
+        /// One past the last candidate of the cards `Live.bins` holds.
+        fn binsEnd(r: *const R) u32 {
+            const starts = r.bin_starts.items;
+            return if (starts.len == 0) 0 else starts[starts.len - 1];
+        }
+
+        /// Records the candidates appended since `binsEnd` as edge `e`'s.
+        /// `starts` opens on the first card, so a deck without one
+        /// allocates nothing here.
+        fn closeBins(r: *R, e: u32, per_finger: bool) Error!void {
+            std.debug.assert(r.bin_rows.items.len > r.binsEnd());
+            if (r.bin_starts.items.len == 0) try r.bin_starts.append(r.arena, 0);
+            try r.bin_edges.append(r.arena, e);
+            try r.bin_per_finger.append(r.arena, per_finger);
+            try r.bin_starts.append(r.arena, @intCast(r.bin_rows.items.len));
+        }
+
+        const Geometry = struct { num: f64, live: bool = false };
+
+        /// Card value `key` as a number: as written, or, when it reads a
+        /// live name, folded at the nominal values (`live` set). Null when
+        /// the card lacks it or it does not fold.
+        fn cardLength(r: *R, kv: []const Kv, key: []const u8) Error!?Geometry {
+            for (kv) |item| if (std.mem.eql(u8, item.key, key)) switch (item.value) {
+                .num => |n| return .{ .num = n },
+                .expr => |span| {
+                    const ops = r.ops.items[span.start..][0..span.len];
+                    var reads = false;
+                    for (ops) |op| reads = reads or op.code == .live;
+                    if (!reads) return null;
+                    const v = try expr.fold(r.arena, &r.stack, ops, r.consts.items, false, r.live_nominal.items);
+                    return if (v.known) .{ .num = v.num, .live = true } else null;
+                },
+                else => return null,
+            };
+            return null;
         }
 
         /// The row of local model `m` for the instance `frame` expands: the
@@ -3410,7 +3540,7 @@ fn Reader(comptime S: type) type {
                 .{ "ad", 2 }, .{ "as", 2 },
             });
             const edges = r.hg.edges.slice();
-            for (edges.items(.kind), edges.items(.positional), edges.items(.kv), edges.items(.model)) |kind, ps, ks, *model| {
+            for (edges.items(.kind), edges.items(.positional), edges.items(.kv), edges.items(.model), 0..) |kind, ps, ks, *model, ei| {
                 if (kind != 'm') continue;
                 const kv = r.kvs.items[ks.start..][0..ks.len];
                 var swept_geometry = false;
@@ -3429,15 +3559,20 @@ fn Reader(comptime S: type) type {
                 if (first.* != .name) continue;
                 var bin = names.get(first.name) orelse continue;
                 if (std.mem.eql(u8, first.name, models[bin].name)) continue;
-                // A variant rewrites values, never the bin a card picked.
-                if (swept_geometry) {
-                    if (!@import("builtin").is_test) std.log.err("netlist: a swept or sampled l/w on binned model '{s}'", .{first.name});
-                    return error.UnsupportedCard;
-                }
                 const l = number(kv, "l") orelse return error.ParseError;
                 const use_nf = if (number(kv, "wnflag")) |flag| flag != 0 else wnflag;
                 const nf = if (use_nf) number(kv, "nf") orelse 1 else 1;
                 const w = (number(kv, "w") orelse return error.ParseError) / nf;
+                // A swept or sampled l/w: every bin is a candidate a point
+                // may pick (`Live.bins`).
+                if (swept_geometry) {
+                    var c = bin;
+                    while (c != none) : (c = next[c]) {
+                        try r.bin_rows.append(arena, r.model_ids.get(models[c].name) orelse none);
+                        try r.bin_bounds.append(arena, bounds[c]);
+                    }
+                    try r.closeBins(@intCast(ei), use_nf);
+                }
                 while (bin != none) : (bin = next[bin]) {
                     if (binHolds(bounds[bin], l, w)) {
                         first.* = .{ .name = models[bin].name };

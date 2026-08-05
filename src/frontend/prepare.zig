@@ -26,11 +26,17 @@ pub const Prepared = struct {
     /// The deck's HSPICE optimization, when it has one. It borrows the
     /// parse arena, which must then outlive the Prepared.
     tuner: ?*variants.Tuner = null,
+    /// The live `.param` values a caller sets on the prepared circuit
+    /// (`prepare`'s `live`); null without any. It borrows the parse arena,
+    /// which must then outlive the Prepared.
+    tuning: ?*variants.Tuning = null,
 
-    /// Releases this run's circuit and every nested run's. The deck slices
-    /// stay with the session arena. Leaves `self` undefined.
+    /// Releases this run's circuit and every nested run's, and the tuning's
+    /// templates. The deck slices stay with the session arena. Leaves
+    /// `self` undefined.
     pub fn deinit(self: *Prepared) void {
         for (self.runs) |*run| run.deinit();
+        if (self.tuning) |t| t.deinit();
         self.circuit.deinit();
         self.* = undefined;
     }
@@ -61,12 +67,15 @@ pub fn parseDialect(name: []const u8) ?Dialect {
 }
 
 /// Reads, expands and flattens `input` into `session`, then loads its HDL
-/// models into `lib`. The netlist borrows `session`; release it once `build`
-/// has returned. Spectre input expands its `include`s
-/// (`source.expandSpectre`). Fails with
-/// `OsdiUnsupported` on any OSDI include (`pre_osdi`, `osdi`), and with the
-/// file error of an unreadable deck, include or data file.
-pub fn prepare(io: std.Io, lib: *device.Library, session: std.mem.Allocator, input: Source, dialect: Dialect) !netlist.Netlist {
+/// models into `lib`. The global `.param` names in `live` stay live, so
+/// the built circuit takes new values for them without a re-parse
+/// (`Prepared.tuning`). The netlist borrows `session`; release it once
+/// `build` has returned, or with the Prepared when `live` is not empty.
+/// Spectre input expands its `include`s (`source.expandSpectre`). Fails with
+/// `OsdiUnsupported` on any OSDI include (`pre_osdi`, `osdi`),
+/// `UnknownParameter` for a `live` name no global `.param` defines, and
+/// with the file error of an unreadable deck, include or data file.
+pub fn prepare(io: std.Io, lib: *device.Library, session: std.mem.Allocator, input: Source, dialect: Dialect, live: []const []const u8) !netlist.Netlist {
     const origin = switch (input) {
         .file => |path| path,
         .bytes => |bytes| bytes.origin,
@@ -76,12 +85,12 @@ pub fn prepare(io: std.Io, lib: *device.Library, session: std.mem.Allocator, inp
         .bytes => |bytes| try session.dupe(u8, bytes.data),
     };
     if (dialect == .spectre) {
-        const nl = try netlist.parse(session, try netlist.source.expandSpectre(io, session, origin, raw), dialect);
+        const nl = try netlist.parseLive(session, try netlist.source.expandSpectre(io, session, origin, raw), dialect, live);
         try loadModels(io, lib, session, nl.deck.foreign, origin);
         return nl;
     }
     const runs = try netlist.source.splitAlters(session, raw);
-    var nl = try netlist.parse(session, try netlist.source.expand(io, session, origin, runs[0]), dialect);
+    var nl = try netlist.parseLive(session, try netlist.source.expand(io, session, origin, runs[0]), dialect, live);
     const alters = try session.alloc([]const u8, runs.len - 1);
     for (alters, runs[1..]) |*text, run| text.* = try netlist.source.expand(io, session, origin, run);
     nl.deck.alters = alters;
@@ -249,6 +258,8 @@ pub fn buildRun(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_
         }
         break :blk planned;
     } else .{};
+    const tuning = if (nl.tunable.len != 0 and run.point == null and run.prefix.len == 0) try variants.Tuning.init(core.gpa, lib, sim_arena, parse_arena, nl, &circuit, cards) else null;
+    errdefer if (tuning) |t| t.deinit();
     const queries = sampled(try analyses.queries(sim_arena, cards_rows, false, out.bindings, cards, card_opts, plan.fanout), nl.deck.sample);
     if (aging) |*a| a.mosra.tran = for (queries) |q| {
         if (q == .tran and q.tran.tol.variant == null) break q.tran;
@@ -256,7 +267,7 @@ pub fn buildRun(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_
         if (!@import("builtin").is_test) std.log.err("netlist: .mosra needs a .tran to stress the devices: {s}", .{nl.deck.mosra.?.line});
         return error.UnsupportedCard;
     };
-    return .{ .circuit = circuit, .runs = plan.runs, .tuner = tuner, .deck = .{
+    return .{ .circuit = circuit, .runs = plan.runs, .tuner = tuner, .tuning = tuning, .deck = .{
         .probes = out.probes,
         .probe_labels = out.probe_labels,
         .source_node = out.source_node,

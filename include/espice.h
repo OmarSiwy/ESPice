@@ -79,6 +79,11 @@ typedef struct {
      * beside the executable. Callers built before these fields pass a
      * struct_size that ends at output_path and get the defaults. */
     espice_bytes zig_path, share_path;
+    /* Global .param names espice_set_params may change later, copied
+     * during create. Callers built before these fields pass a struct_size
+     * that ends at share_path and declare none. */
+    const espice_bytes *live_params;
+    size_t live_param_count;
 } espice_create_options;
 typedef struct { uint32_t kind, id; } espice_scope;
 typedef struct {
@@ -139,6 +144,15 @@ espice_status espice_advance_ready(espice_problem *, const uint32_t *ids, size_t
 espice_status espice_run_all(espice_problem *);
 espice_status espice_append_directives(espice_problem *, espice_bytes directives,
     uint32_t *ids, size_t capacity, size_t *required);
+/* Sets names[i] (a live_params name, case-insensitive but in Spectre) to
+ * values[i] for every query appended afterwards; other names keep their last
+ * values, and queries appended earlier keep theirs. The deck is not parsed
+ * again; a binned MOSFET whose L or W moves takes its new bin. All-or-nothing:
+ * INVALID_ARGUMENT for a name not declared live or a non-finite value,
+ * FAILED when no bin holds a new geometry or the values would flip a .if or
+ * change the topology. */
+espice_status espice_set_params(espice_problem *, const espice_bytes *names,
+    const double *values, size_t count);
 espice_status espice_get_result_info(espice_problem *, uint32_t id, espice_result_info *out);
 /* Point-major data; complex values use adjacent real/imaginary doubles. */
 espice_status espice_copy_result(espice_problem *, uint32_t id,

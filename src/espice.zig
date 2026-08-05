@@ -60,6 +60,11 @@ pub const Options = struct {
     /// The Zig compiler and `share/espice` directory a `.hdl` model builds
     /// with; null fields read `$ZIG` and the executable's path (#13).
     hdl_toolchain: HdlToolchain = .{},
+    /// Global `.param` names `set_params` may change later. Each stays live
+    /// through the build, as a `.step` name does, so a name an analysis
+    /// card, `.meas`, `.ic` or `.options` reads is `error.UnsupportedCard`,
+    /// and one no `.param` defines is `error.UnknownParameter`.
+    live_params: []const []const u8 = &.{},
 };
 
 /// Where runtime `.hdl` compilation finds its toolchain (`Options.hdl_toolchain`).
@@ -91,6 +96,9 @@ pub const Problem = struct {
     delivery_error: ?anyerror = null,
     /// The query whose rows stream to the output as it runs (`openStream`).
     streaming: ?QueryId = null,
+    /// The variant row `set_params` last made, which queries appended
+    /// since then run at; null before any call.
+    variant: ?u32 = null,
     timing_in_depth: bool = false,
     /// Where an HSPICE `.save` writes the operating point; null without one.
     save_path: ?[]const u8 = null,
@@ -159,7 +167,7 @@ pub const Problem = struct {
             .zig = if (options.hdl_toolchain.zig) |z| try a.dupe(u8, z) else null,
             .share = if (options.hdl_toolchain.share) |d| try a.dupe(u8, d) else null,
         };
-        const ast = try frontend.prepare(io, &self.library, scratch, options.source, options.dialect);
+        const ast = try frontend.prepare(io, &self.library, scratch, options.source, options.dialect, options.live_params);
         timingLap(io, &lap, "frontend (source, parsing, HDL)");
         self.prepared = try frontend.build(&self.library, a, scratch, ast);
         timingLap(io, &lap, "Problem creation (expansion, binding, topology)");
@@ -181,13 +189,16 @@ pub const Problem = struct {
         self.next_output = 0;
         self.delivery_error = null;
         self.streaming = null;
+        self.variant = null;
         var execution = options.backend;
         execution.timing_in_depth = options.timing_in_depth;
         self.session = analysis.session.Session.init(self.workerAllocator(), io, &self.prepared.circuit, &self.prepared.deck, execution);
         errdefer self.session.deinit();
         // An optimization's sessions run before this one; nothing after it
         // instantiates the template.
-        self.session.last_template_reader = true;
+        // `set_params` diffs later points against the template, so it is
+        // never handed to a query to keep.
+        self.session.last_template_reader = self.prepared.tuning == null;
         const jobs = if (self.prepared.deck.queries.len == 0)
             &[_]Query{.{ .op = .{ .tol = self.prepared.deck.deck_tol } }}
         else
@@ -204,7 +215,7 @@ pub const Problem = struct {
             _ = try run.session.append(prep.deck.queries, try scratch.alloc(QueryId, prep.deck.queries.len));
         }
         timingLap(io, &lap, "query graph and output setup");
-        if (self.prepared.tuner != null) self.parse_arena = parse_arena;
+        if (self.prepared.tuner != null or self.prepared.tuning != null) self.parse_arena = parse_arena;
         return self;
     }
 
@@ -276,11 +287,55 @@ pub const Problem = struct {
     /// When `ids` is too short this is a sizing call: nothing is validated or
     /// added. Otherwise the append is all-or-nothing: a query the output
     /// format cannot hold, or any other failure, leaves the DAG and `ids`
-    /// unchanged. An existing identical query returns its old ID.
+    /// unchanged. An existing identical query returns its old ID. After
+    /// `set_params`, a query that names no variant of its own runs at the
+    /// values the last call set.
     pub fn append_queries(self: *Problem, queries: []const Query, ids: []QueryId) !usize {
         if (ids.len < queries.len) return queries.len;
-        try self.checkOutput(&self.prepared, queries);
-        return self.session.append(queries, ids);
+        const jobs: []const Query = if (self.variant) |v| blk: {
+            const copy = try self.allocator.dupe(Query, queries);
+            for (copy) |*q| switch (q.*) {
+                inline else => |*o| if (o.tol.variant == null) {
+                    o.tol.variant = v;
+                },
+            };
+            break :blk copy;
+        } else queries;
+        defer if (self.variant != null) self.allocator.free(jobs);
+        try self.checkOutput(&self.prepared, jobs);
+        return self.session.append(jobs, ids);
+    }
+
+    /// Sets each global `.param` in `names` to the matching value for
+    /// every query appended afterwards; the others keep their last values.
+    /// Queries appended earlier, finished or not, keep the values they were
+    /// appended with, so a sizing loop appends its analyses again after
+    /// each call (their plots are named `<plot> (<name>=<value>, ...)`).
+    ///
+    /// Nothing is re-parsed: the point is re-evaluated from the prepared
+    /// netlist like a `.step` point, a binned MOSFET whose L or W moves
+    /// takes its new bin, and the circuit is rebuilt only when parameter
+    /// writes cannot express the point (dev/analysis/variants.md §5).
+    ///
+    /// All-or-nothing. Fails with `error.UnknownParameter` for a name not
+    /// in `Options.live_params` (nor a `.step` name), `error.InvalidArgument`
+    /// when the lengths differ or a value is not finite,
+    /// `error.ModelBinNotFound` when no bin holds a new geometry, and
+    /// `error.UnsupportedCard` when the values would flip a top-level `.if`
+    /// or change the topology. Each call keeps one row (and, after a bin
+    /// change, one circuit) until `deinit`.
+    pub fn set_params(self: *Problem, names: []const []const u8, values: []const f64) !void {
+        const tuning = self.prepared.tuning orelse return error.UnknownParameter;
+        if (names.len != values.len) return error.InvalidArgument;
+        // The optimizer and MOSRA rewrite the variant table once; let them
+        // run before rows are appended to it.
+        try self.optimize();
+        try self.age();
+        try self.session.templates.ensureUnusedCapacity(self.session.allocator, 1);
+        const change = try tuning.set(&self.prepared.circuit, self.prepared.deck.variants, names, values);
+        if (change.template) |c| self.session.addTemplate(c) catch unreachable;
+        self.prepared.deck.variants = change.variants;
+        self.variant = change.variants.count() - 1;
     }
 
     /// Refuses, before anything runs, the first of `queries` whose result

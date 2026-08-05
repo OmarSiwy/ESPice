@@ -76,6 +76,9 @@ const CreateOptions = extern struct {
     /// Added after ABI 1 shipped: read only when `struct_size` covers them.
     zig_path: Bytes,
     share_path: Bytes,
+    /// Added after the toolchain fields, read under the same rule.
+    live_params: ?[*]const Bytes,
+    live_param_count: usize,
 };
 comptime {
     if (@sizeOf(CreateOptions) != @sizeOf(header.espice_create_options)) @compileError("espice_create_options drifted from CreateOptions");
@@ -164,12 +167,17 @@ fn create(options: *const CreateOptions) !*Handle {
     // A caller built before the toolchain fields passes a struct ending at
     // `output_path`; the fields past its size are never read.
     if (options.abi_version != abi_version or options.struct_size < @offsetOf(CreateOptions, "zig_path")) return error.AbiMismatch;
-    const toolchain = options.struct_size >= @sizeOf(CreateOptions);
+    const toolchain = options.struct_size >= @offsetOf(CreateOptions, "live_params");
+    const live = options.struct_size >= @sizeOf(CreateOptions);
     const source = try constSlice(u8, options.source.data, options.source.len);
     const origin = try constSlice(u8, options.origin.data, options.origin.len);
     const path = try constSlice(u8, options.output_path.data, options.output_path.len);
     const zig_path = if (toolchain) try constSlice(u8, options.zig_path.data, options.zig_path.len) else "";
     const share_path = if (toolchain) try constSlice(u8, options.share_path.data, options.share_path.len) else "";
+    const live_bytes = if (live) try constSlice(Bytes, options.live_params, options.live_param_count) else &.{};
+    const live_params = try allocator.alloc([]const u8, live_bytes.len);
+    defer allocator.free(live_params);
+    for (live_bytes, live_params) |b, *name| name.* = try constSlice(u8, b.data, b.len);
     if (source.len == 0 or options.explicit_gpu > 1) return error.InvalidArgument;
     const config: api.Options = .{
         .source = switch (options.source_kind) {
@@ -191,6 +199,7 @@ fn create(options: *const CreateOptions) !*Handle {
             .zig = if (zig_path.len == 0) null else zig_path,
             .share = if (share_path.len == 0) null else share_path,
         },
+        .live_params = live_params,
     };
     const handle = try allocator.create(Handle);
     errdefer allocator.destroy(handle);
@@ -285,6 +294,17 @@ export fn espice_append_directives(handle: ?*Handle, directives: Bytes, ids: ?[*
     const buffer = mutableSlice(u32, ids, capacity) catch |err| return h.fail(err);
     count.* = h.problem.append_directives(text, @ptrCast(buffer)) catch |err| return h.fail(err);
     return if (count.* > capacity) h.fail(error.BufferTooSmall) else 0;
+}
+
+export fn espice_set_params(handle: ?*Handle, names: ?[*]const Bytes, values: ?[*]const f64, count: usize) u32 {
+    const h = handle orelse return status(error.InvalidArgument);
+    const name_bytes = constSlice(Bytes, names, count) catch |err| return h.fail(err);
+    const numbers = constSlice(f64, values, count) catch |err| return h.fail(err);
+    const keys = allocator.alloc([]const u8, count) catch |err| return h.fail(err);
+    defer allocator.free(keys);
+    for (name_bytes, keys) |b, *key| key.* = constSlice(u8, b.data, b.len) catch |err| return h.fail(err);
+    h.problem.set_params(keys, numbers) catch |err| return h.fail(err);
+    return 0;
 }
 
 export fn espice_get_result_info(handle: ?*Handle, id: u32, out: ?*ResultInfo) u32 {
@@ -450,6 +470,8 @@ fn status(err: anyerror) u32 {
         error.InvalidArgument, error.InvalidConcurrency, error.InvalidComponent, error.QueryNotReady, error.DuplicateQuery => .invalid_argument,
         // Malformed caller input (analysis cards, query options, directive edits), not a numerical failure.
         error.InvalidAnalysisArguments, error.InvalidQueryOptions, error.UnsupportedDirectiveMutation => .invalid_argument,
+        // A live parameter name the deck does not define or declare.
+        error.UnknownParameter => .invalid_argument,
         error.BufferTooSmall => .buffer_too_small,
         error.OutOfMemory => .out_of_memory,
         error.InvalidQuery => .invalid_query,

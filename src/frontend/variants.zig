@@ -1,9 +1,10 @@
 //! Circuit variants over one prepared circuit: `.step` points, HSPICE
-//! `SWEEP`/`.data` points, `.alter` runs and Monte Carlo trials
-//! (dev/analysis/variants.md). Each point re-evaluates the netlist's live
-//! values (no re-parse), rebinds the devices and keeps only the parameters
-//! that moved, as `core.Variants` rows the executor writes through
-//! `ParamRef`. A point whose topology moves becomes its own `Prepared` run.
+//! `SWEEP`/`.data` points, `.alter` runs, Monte Carlo trials and the live
+//! `.param` values a caller sets on a Problem (dev/analysis/variants.md).
+//! Each point re-evaluates the netlist's live values (no re-parse),
+//! rebinds the devices and keeps only the parameters that moved, as
+//! `core.Variants` rows the executor writes through `ParamRef`. A point
+//! whose topology or model bins move becomes its own `Prepared` run.
 const std = @import("std");
 const core = @import("core");
 const device = @import("device");
@@ -162,6 +163,8 @@ pub const Planner = struct {
     /// run rebuilt at a point opens with that point's values here, not the
     /// deck's, so its own row does not read as moved and rebuild again.
     nominal_pool: []const f64 = &.{},
+    /// Each `Live.bins` card's model row in the nominal circuit.
+    nominal_bins: []const u32 = &.{},
     fast: Fast = .untested,
     /// Rebuild every moved point; the differential test's oracle.
     force_rebuild: bool = false,
@@ -190,7 +193,20 @@ pub const Planner = struct {
         const nominal_pool = try scratch.alloc(f64, nl.live.pool_rows.len);
         for (nominal_pool, nl.live.pool_rows) |*v, row| v.* = if (row == netlist.none) 0 else nl.consts[row];
         p.nominal_pool = nominal_pool;
+        const nominal_bins = try scratch.alloc(u32, nl.live.bins.edges.len);
+        const model_of = nl.graph.edges.items(.model);
+        for (nominal_bins, nl.live.bins.edges) |*row, e| row.* = model_of[e];
+        p.nominal_bins = nominal_bins;
         return p;
+    }
+
+    /// Whether a binned card's live geometry picked another bin than the
+    /// nominal circuit's: a change parameter writes cannot make, since the
+    /// bins differ in which model parameters they give.
+    fn binsMoved(p: *const Planner) bool {
+        const model_of = p.nl.graph.edges.items(.model);
+        for (p.nominal_bins, p.nl.live.bins.edges) |row, e| if (model_of[e] != row) return true;
+        return false;
     }
 
     fn count(p: *const Planner) u32 {
@@ -326,10 +342,10 @@ pub const Planner = struct {
         if (!own and sameCards(p.nl, alt)) {
             var arena = std.heap.ArenaAllocator.init(core.gpa);
             defer arena.deinit();
-            var c = try circuitOf(p.lib, arena.allocator(), p.scratch, alt);
+            var c = try circuitOf(p.lib, arena.allocator(), arena.allocator(), alt);
             defer c.deinit();
             if (sameTopology(p.nominal, &c)) {
-                try p.diff(&c);
+                try p.diff(arena.allocator(), &c);
                 return p.closeRow(label, @floatFromInt(k), null);
             }
         }
@@ -340,6 +356,20 @@ pub const Planner = struct {
     /// values change the topology or storage `ParamRef` cannot reach.
     pub fn add(p: *Planner, pt: Point) !void {
         const label = if (p.prefix.len == 0) try p.sim.dupe(u8, pt.label) else try std.fmt.allocPrint(p.sim, "{s}, {s}", .{ p.prefix, pt.label });
+        if (try p.load(pt, label) == .circuit) return p.addRun(label, pt);
+        try p.pointWrites(pt);
+        try p.closeRow(label, pt.axis, pt.temp);
+    }
+
+    const Load = enum { row, circuit };
+
+    /// Sets `pt`'s live values (and the bins they pick), then appends to
+    /// the open row the parameter writes that turn the nominal circuit into
+    /// it. `.circuit` when only a circuit of its own can hold the point: a
+    /// model bin moved, a kept expression reads a moved value, or the
+    /// topology changed; the open row is then partial. `UnsupportedCard`
+    /// (naming `label`) when a top-level `.if` would take another branch.
+    fn load(p: *Planner, pt: Point, label: []const u8) !Load {
         // ponytail: a point that flips a top-level `.if` is refused; re-parse
         // it as its own run if a deck needs branch selection per point.
         for (p.nl.live.conds) |span| {
@@ -358,27 +388,27 @@ pub const Planner = struct {
         for (p.nl.live.pool_rows, pt.live, p.nominal_pool) |row, v, nominal| {
             if (row != netlist.none) moved = moved or v != nominal;
         }
-        if (moved) {
-            if (p.nl.live.opaque_reads) return p.addRun(label, pt);
-            if (p.fast == .untested) p.fast = try p.probe(pt);
-            // A value that reaches or leaves zero may collapse a node:
-            // only a rebuild can tell.
-            if (p.fast == .identity and !crossed) {
-                for (p.fast_slots, p.fast_refs) |k, r| {
-                    const x = p.nl.live.slots[k].num;
-                    if (@as(u64, @bitCast(x)) != @as(u64, @bitCast(p.refs[r].get()))) try p.set(r, x);
-                }
-            } else {
-                var arena = std.heap.ArenaAllocator.init(core.gpa);
-                defer arena.deinit();
-                var c = try circuitOf(p.lib, arena.allocator(), p.scratch, p.nl);
-                defer c.deinit();
-                if (!sameTopology(p.nominal, &c)) return p.addRun(label, pt);
-                try p.diff(&c);
+        if (!moved) return .row;
+        if (p.nl.live.opaque_reads or p.binsMoved()) return .circuit;
+        if (p.fast == .untested) p.fast = try p.probe(pt);
+        // A value that reaches or leaves zero may collapse a node: only a
+        // rebuild can tell.
+        if (p.fast == .identity and !crossed) {
+            for (p.fast_slots, p.fast_refs) |k, r| {
+                const x = p.nl.live.slots[k].num;
+                if (@as(u64, @bitCast(x)) != @as(u64, @bitCast(p.refs[r].get()))) try p.set(r, x);
             }
+            return .row;
         }
-        try p.pointWrites(pt);
-        try p.closeRow(label, pt.axis, pt.temp);
+        // The rebuild's tables die with it, so a long run of points does
+        // not grow `scratch`.
+        var arena = std.heap.ArenaAllocator.init(core.gpa);
+        defer arena.deinit();
+        var c = try circuitOf(p.lib, arena.allocator(), arena.allocator(), p.nl);
+        defer c.deinit();
+        if (!sameTopology(p.nominal, &c)) return .circuit;
+        try p.diff(arena.allocator(), &c);
+        return .row;
     }
 
     fn setLive(p: *Planner, pt: Point) !void {
@@ -404,6 +434,8 @@ pub const Planner = struct {
         var by_bits: std.AutoHashMapUnmanaged(u64, u32) = .empty;
         defer by_bits.deinit(p.scratch);
         for (slots, p.nominal_slots, 0..) |slot, nominal, k| {
+            // ponytail: a zero slot (sky130's mismatch terms) refuses the
+            // fast path for every point; perturb only the slots that move (#130).
             if (nominal == 0 or !std.math.isFinite(nominal)) return .rebuild;
             // A distinct nearby value per slot, far from any rounding tie.
             const x = nominal * (1 + @as(f64, @floatFromInt(k + 1)) * 0x1.0p-24);
@@ -414,10 +446,10 @@ pub const Planner = struct {
         }
         var arena = std.heap.ArenaAllocator.init(core.gpa);
         defer arena.deinit();
-        var c = try circuitOf(p.lib, arena.allocator(), p.scratch, p.nl);
+        var c = try circuitOf(p.lib, arena.allocator(), arena.allocator(), p.nl);
         defer c.deinit();
         if (!sameTopology(p.nominal, &c)) return .rebuild;
-        const moved = try collect(p.scratch, &c);
+        const moved = try collect(arena.allocator(), &c);
         var pair_slots: std.ArrayList(u32) = .empty;
         var pair_refs: std.ArrayList(u32) = .empty;
         for (p.refs, moved, 0..) |a, b, i| {
@@ -447,9 +479,10 @@ pub const Planner = struct {
         try p.runs.append(p.scratch, try prepare.buildRun(p.lib, p.sim, p.scratch, p.nl, .{ .prefix = label, .point = pt, .card = p.card }));
     }
 
-    /// Appends a write for every parameter `c` holds at another value.
-    fn diff(p: *Planner, c: *const device.Circuit) !void {
-        const moved = try collect(p.scratch, c);
+    /// Appends a write for every parameter `c` holds at another value;
+    /// `scratch` holds `c`'s parameter table.
+    fn diff(p: *Planner, scratch: std.mem.Allocator, c: *const device.Circuit) !void {
+        const moved = try collect(scratch, c);
         for (p.refs, moved, 0..) |a, b, i| {
             const x = b.get();
             if (@as(u64, @bitCast(a.get())) == @as(u64, @bitCast(x))) continue;
@@ -653,6 +686,165 @@ pub const Tuner = struct {
             if (p.runs.items.len != 0) return p.refuse(p.nl.deck.analyses[t.card].line, "an optimized value that changes the topology");
         }
         return p.table();
+    }
+};
+
+/// Global `.param` values set on a prepared circuit (`Problem.set_params`,
+/// #101; dev/analysis/variants.md §5). Each call re-evaluates the netlist
+/// at the new values as a `.step` point does, never re-parsing, and becomes
+/// one more row of the deck's variant table over the current template:
+/// the probe-mapped writes or a rebuild's diff. When no writes can make the
+/// point (a model bin moved, or a kept expression reads a moved value) the
+/// circuit built at it becomes the template that row and later rows run
+/// on. Lives in the parse arena, with the netlist it re-evaluates.
+pub const Tuning = struct {
+    gpa: std.mem.Allocator,
+    /// The planner's tables, in `arenas[current]`; a new template builds
+    /// its planner in the other one, so a failure keeps the old planner.
+    arenas: [2]std.heap.ArenaAllocator,
+    current: u1 = 0,
+    planner: Planner,
+    /// Every live name's value now, and the call's candidate values.
+    values: []f64,
+    next: []f64,
+    /// The `.option seed` draw (trial 1), when the deck takes one, so a
+    /// point keeps the nominal circuit's mismatch sample.
+    trial: ?Trial,
+    /// Templates built where no writes could make the point, oldest first.
+    // ponytail: kept until deinit, so a loop that keeps crossing a bin edge
+    // grows by a circuit per crossing; reuse or free them (#129).
+    circuits: std.ArrayList(*device.Circuit) = .empty,
+    /// The deck's variant table with each call's row appended, in the
+    /// session arena (`Planner.sim`); seeded on the first call.
+    seeded: bool = false,
+    labels: std.ArrayList([]const u8) = .empty,
+    temps: std.ArrayList(?f64) = .empty,
+    axes: std.ArrayList(f64) = .empty,
+    starts: std.ArrayList(u32) = .empty,
+    refs: std.ArrayList(u32) = .empty,
+    write_values: std.ArrayList(f64) = .empty,
+
+    /// What one call changed: the whole variant table, whose last row is
+    /// the call's, and the template that row runs on when it is new.
+    pub const Change = struct { variants: core.Variants, template: ?*const device.Circuit };
+
+    /// A tuning over `nl`, whose nominal circuit is `nominal` with card
+    /// table `cards`. `scratch` (the parse arena) holds the result; `sim`
+    /// (the session arena) holds the variant table. Asserts that `nl` has
+    /// tunable names. The caller releases it with `deinit`.
+    pub fn init(gpa: std.mem.Allocator, lib: *const device.Library, sim: std.mem.Allocator, scratch: std.mem.Allocator, nl: *const Netlist, nominal: *const device.Circuit, cards: []const core.query.CardRef) !*Tuning {
+        std.debug.assert(nl.tunable.len != 0);
+        const t = try scratch.create(Tuning);
+        t.* = .{ .gpa = gpa, .arenas = .{ .init(gpa), .init(gpa) }, .planner = undefined, .values = try scratch.dupe(f64, nl.live.nominal), .next = try scratch.dupe(f64, nl.live.nominal), .trial = null };
+        errdefer for (&t.arenas) |*a| a.deinit();
+        t.planner = try Planner.init(lib, sim, t.arenas[0].allocator(), nl, nominal, cards, "");
+        if (nl.deck.draw_seed) {
+            const sampler = try scratch.create(Sampler);
+            sampler.* = try Sampler.init(scratch, nl.deck.config, 1);
+            t.trial = .{ .sampler = sampler, .trial = 1, .index = 0 };
+        }
+        return t;
+    }
+
+    /// Frees the templates and the planner. The variant table stays with
+    /// the session arena.
+    pub fn deinit(t: *Tuning) void {
+        for (t.circuits.items) |c| {
+            c.deinit();
+            t.gpa.destroy(c);
+        }
+        t.circuits.deinit(t.gpa);
+        for (&t.arenas) |*a| a.deinit();
+    }
+
+    /// Sets each live name in `names` to the matching value, keeping every
+    /// other at its last value, and returns the table with the point's row
+    /// appended. `nominal` is the prepared circuit (template 0); `current`
+    /// is the deck's table, read on the first call only. Names compare as
+    /// the dialect spells them (case-insensitively but in Spectre).
+    ///
+    /// All-or-nothing: on failure the values, the table and the template
+    /// stay as they were. `UnknownParameter` for a name that is not live,
+    /// `InvalidArgument` for a non-finite value, `ModelBinNotFound` when no
+    /// bin holds a new L/W, `UnsupportedCard` when the point flips a
+    /// top-level `.if` or changes the topology. Asserts that `names` and
+    /// `values` have the same length.
+    pub fn set(t: *Tuning, nominal: *const device.Circuit, current: core.Variants, names: []const []const u8, values: []const f64) !Change {
+        std.debug.assert(names.len == values.len);
+        const p = &t.planner;
+        const nl = p.nl;
+        @memcpy(t.next, t.values);
+        for (names, values) |name, v| {
+            if (!std.math.isFinite(v)) return error.InvalidArgument;
+            const k = for (nl.live.names, 0..) |live, k| {
+                const same = if (nl.deck.dialect == .spectre) std.mem.eql(u8, live, name) else std.ascii.eqlIgnoreCase(live, name);
+                if (same) break k;
+            } else return error.UnknownParameter;
+            t.next[k] = v;
+        }
+        var label: std.ArrayList(u8) = .empty;
+        for (nl.tunable, 0..) |k, i| try label.print(p.sim, "{s}{s}={d}", .{ if (i == 0) "" else ", ", nl.live.names[k], t.next[k] });
+        const template = if (t.circuits.items.len != 0) t.circuits.items[t.circuits.items.len - 1] else nominal;
+        p.nominal = template;
+        // The open row starts empty; a failed call may have left writes.
+        for (p.write_refs.items) |r| p.row_at[r] = netlist.none;
+        p.write_refs.clearRetainingCapacity();
+        p.write_values.clearRetainingCapacity();
+        const pt: Point = .{ .label = label.items, .axis = 0, .live = t.next, .trial = t.trial };
+        // Room for the row and a template first, so nothing fails after
+        // the planner moves on.
+        if (!t.seeded) {
+            try t.labels.appendSlice(p.sim, current.labels);
+            try t.temps.appendSlice(p.sim, current.temp_c);
+            try t.axes.appendSlice(p.sim, current.axis);
+            try t.starts.appendSlice(p.sim, if (current.starts.len == 0) &.{0} else current.starts);
+            try t.refs.appendSlice(p.sim, current.refs);
+            try t.write_values.appendSlice(p.sim, current.values);
+            t.seeded = true;
+        }
+        try t.labels.ensureUnusedCapacity(p.sim, 1);
+        try t.temps.ensureUnusedCapacity(p.sim, 1);
+        try t.axes.ensureUnusedCapacity(p.sim, 1);
+        try t.starts.ensureUnusedCapacity(p.sim, 1);
+        try t.circuits.ensureUnusedCapacity(t.gpa, 1);
+        var built: ?*device.Circuit = null;
+        switch (try p.load(pt, label.items)) {
+            .row => try p.pointWrites(pt),
+            .circuit => {
+                const c = try t.gpa.create(device.Circuit);
+                errdefer t.gpa.destroy(c);
+                var scratch = std.heap.ArenaAllocator.init(t.gpa);
+                defer scratch.deinit();
+                c.* = try circuitOf(p.lib, t.gpa, scratch.allocator(), nl);
+                errdefer c.deinit();
+                if (!sameTopology(template, c)) return p.refuse(label.items, "a parameter value that changes the topology");
+                // The point is the new template's nominal: later points
+                // diff against it.
+                const next = &t.arenas[~t.current];
+                _ = next.reset(.free_all);
+                const planner = try Planner.init(p.lib, p.sim, next.allocator(), nl, c, p.cards, "");
+                _ = t.arenas[t.current].reset(.free_all);
+                t.current = ~t.current;
+                p.* = planner;
+                built = c;
+            },
+        }
+        try t.refs.appendSlice(p.sim, p.write_refs.items);
+        try t.write_values.appendSlice(p.sim, p.write_values.items);
+        if (built) |c| t.circuits.appendAssumeCapacity(c);
+        t.labels.appendAssumeCapacity(label.items);
+        t.temps.appendAssumeCapacity(null);
+        t.axes.appendAssumeCapacity(0);
+        t.starts.appendAssumeCapacity(@intCast(t.refs.items.len));
+        @memcpy(t.values, t.next);
+        return .{ .template = built, .variants = .{
+            .labels = t.labels.items,
+            .temp_c = t.temps.items,
+            .axis = t.axes.items,
+            .starts = t.starts.items,
+            .refs = t.refs.items,
+            .values = t.write_values.items,
+        } };
     }
 };
 
