@@ -326,7 +326,7 @@ The architecture is free to change; the observable results are not. **Every fixt
 
 ### 2.8 The module DAG is the build graph
 
-A module can only import what `build.zig` hands it, so the wiring is the DAG, and the `module_specs` resolver in `build.zig` panics on a forward import (Principle 14.4). `ARCHITECTURE.md` holds the current graph, owners and spines; this section holds the rules that graph must keep:
+A module can only import what `build.zig` hands it, so the wiring is the DAG. A module must exist before it is handed on, so only a late `addImport` could close a cycle; `checkModuleGraph` in `build.zig` walks the shipped graphs at configure time and panics on a cycle or on an edge its `restricted_imports` table forbids (Principle 14.4). A new rule below is a new row in that table. `tests/fitness.zig` checks what the build cannot see inside a module (leaf → root imports, `else =>` notes, `//!` headers). `ARCHITECTURE.md` holds the current graph, owners and spines; this section holds the rules that graph must keep:
 
 - **Only `analysis` imports `solver`.** Cross-layer tests that need solvers belong inside analysis.
 - **Only `device` deals with devices.** It owns the neutral ABI (`abi.zig`), the evaluator (`eval.zig`, also the per-model host-object, GPU-kernel and runtime `.so` build root), the parameter binder, HDL loading, the frozen `Circuit` and the per-Problem `Library` (one dense `DeviceType` per device type). The SPICE letter and LEVEL policy stays in the frontend. The runtime loader rebuilds `eval.zig` by path, so the `dyn_path`, `device_abi_path`, `core_path`, `stdpp_path` and `gompute_path` build options follow any move of those files.

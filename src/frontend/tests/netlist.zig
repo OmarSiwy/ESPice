@@ -1,3 +1,4 @@
+//! Netlist tests: deck text → `Netlist` (parse, expand, live values), against hand-worked netlists; includes the allocation-failure test of `parse`.
 const std = @import("std");
 const netlist = @import("../netlist.zig");
 const lines = netlist.lines;

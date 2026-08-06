@@ -1,3 +1,4 @@
+//! SPICE letter and LEVEL dispatch tests: card letter + LEVEL → device type (`spice.zig` policy), against ngspice's mapping.
 const std = @import("std");
 const devices = @import("builder").spice;
 const DeviceId = devices.DeviceId;

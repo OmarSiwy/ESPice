@@ -451,6 +451,41 @@ pub fn build(b: *std.Build) void {
     run_gpu_corpus.addPassthruArgs();
     b.step("test-gpu", "Run the numeric SPICE fixtures with --backend cuda").dependOn(&run_gpu_corpus.step);
 
+    // Residue probes (tests/codegen.zig): fixed target and mode, so the
+    // verdict depends on neither -Doptimize nor the host. The modules are
+    // rebuilt for that target rather than shared with the host graph.
+    {
+        const pt = b.resolveTargetQuery(.{
+            .cpu_arch = .x86_64,
+            .os_tag = .linux,
+            .cpu_model = .{ .explicit = &std.Target.x86.cpu.x86_64_v3 },
+        });
+        const P = @TypeOf(M){ .b = b, .target = pt, .optimize = .fast, .strip = false, .stdpp = b.dependency("stdpp", .{ .target = pt, .optimize = .fast }).module("stdpp") };
+        const pcontract: std.Build.Module.Import = .{ .name = "contract", .module = b.dependency("vera", .{ .target = pt, .optimize = .fast }).module("contract") };
+        const pcore: std.Build.Module.Import = .{ .name = "core", .module = P.make(b.path("src/core/root.zig"), &.{}) };
+        const pabi: std.Build.Module.Import = .{ .name = "device_abi", .module = P.make(b.path("src/device/abi.zig"), &.{ pcontract, pcore }) };
+        const peval = P.make(b.path("src/device/eval.zig"), &.{ pcontract, pabi, .{ .name = "gompute", .module = gompute.module("gompute") } });
+        const probe = b.addObject(.{ .name = "codegen-probe", .root_module = P.make(b.path("tests/codegen.zig"), &.{.{ .name = "device_eval", .module = peval }}) });
+        const residue = b.addSystemCommand(&.{"python3"});
+        residue.addFileArg(b.path("tools/asm_probe.py"));
+        residue.addFileArg(probe.getEmittedAsm());
+        // One gen=hand pair per probed seam (dev/decisions.md).
+        residue.addArgs(&.{"gen_dual_mul=hand_dual_mul"});
+        b.step("test-codegen", "Judge the residue probes in tests/codegen.zig").dependOn(&residue.step);
+        test_step.dependOn(&residue.step);
+    }
+
+    // Architecture fitness (tests/fitness.zig): headers, root imports and
+    // catch-all arms, by name against tests/FITNESS.tsv.
+    const fitness = b.addExecutable(.{ .name = "fitness", .root_module = M.make(b.path("tests/fitness.zig"), &.{}) });
+    const run_fitness = b.addRunArtifact(fitness);
+    run_fitness.setCwd(b.path("."));
+    run_fitness.has_side_effects = true; // it reads the tree, which the cache does not track
+    run_fitness.addPassthruArgs();
+    run_fitness.step.dependOn(&t.run(M.make(b.path("tests/fitness.zig"), &.{}), &.{}, false).step);
+    b.step("test-fitness", "Check file headers, root imports and catch-all arms against tests/FITNESS.tsv").dependOn(&run_fitness.step);
+    test_step.dependOn(&run_fitness.step);
+
     const run_harness_tests = t.run(M.make(b.path("tests/test_correctness.zig"), fixture_imports), &.{}, false);
     run_harness_tests.setCwd(b.path("."));
     run_correctness.step.dependOn(&run_harness_tests.step);
@@ -582,6 +617,66 @@ pub fn build(b: *std.Build) void {
         for ([_][]const u8{ "build.zig", "build.zig.zon", "cktimg.zig" }) |f| ck.addFileInput(b.path(b.fmt("tools/playground/{s}", .{f})));
         wasm_step.dependOn(&b.addInstallFileWithDir(ck_out.path(b, "wasm/cktimg.wasm"), .{ .custom = "wasm" }, "cktimg.wasm").step);
     }
+
+    // Last, so every addImport above is in the graph it checks.
+    checkModuleGraph(b, exe.root_module);
+    checkModuleGraph(b, c_api_mod);
+}
+
+/// The AGENTS.md §2.8 edges, as "a module importing `name` must be rooted
+/// under one of `allowed`". Test binaries may cross layers and are not
+/// checked; only the shipped graphs are.
+const restricted_imports = [_]struct { name: []const u8, allowed: []const []const u8 }{
+    .{ .name = "solver", .allowed = &.{"src/analysis/"} },
+    .{ .name = "analysis", .allowed = &.{"src/espice.zig"} },
+    .{ .name = "frontend", .allowed = &.{"src/espice.zig"} },
+    .{ .name = "output", .allowed = &.{"src/espice.zig"} },
+    .{ .name = "netlist", .allowed = &.{"src/frontend/"} },
+    .{ .name = "builder", .allowed = &.{"src/frontend/"} },
+    .{ .name = "espice", .allowed = &.{ "src/main.zig", "src/c_api.zig" } },
+};
+
+/// Panics at configure time when the module graph under `root` has a cycle
+/// or an edge `restricted_imports` forbids, so the DAG in ARCHITECTURE.md is
+/// what the build wires, `addImport` after creation included (Principle 14.4).
+fn checkModuleGraph(b: *std.Build, root: *std.Build.Module) void {
+    const Color = enum { open, done };
+    var color: std.AutoHashMapUnmanaged(*std.Build.Module, Color) = .empty;
+    const Walk = struct {
+        fn visit(bb: *std.Build, colors: *@TypeOf(color), m: *std.Build.Module, depth: u32) void {
+            // The graph is a few dozen modules deep at most; a deeper walk is a cycle the colors missed.
+            std.debug.assert(depth < 256);
+            if (colors.get(m)) |c| switch (c) {
+                .done => return,
+                .open => std.debug.panic("module graph: cycle through {s}", .{rootName(bb, m)}),
+            };
+            colors.put(bb.allocator, m, .open) catch @panic("OOM");
+            var it = m.import_table.iterator();
+            while (it.next()) |e| {
+                const from = rootName(bb, m);
+                // A dependency's own graph (VerA has a `frontend` too) is not ours to restrict.
+                if (from.len != 0) for (restricted_imports) |rule| {
+                    if (!std.mem.eql(u8, rule.name, e.key_ptr.*)) continue;
+                    for (rule.allowed) |prefix| {
+                        if (std.mem.startsWith(u8, from, prefix)) break;
+                    } else std.debug.panic("module graph: {s} imports {s}, which restricted_imports in build.zig forbids (AGENTS.md §2.8)", .{ from, rule.name });
+                };
+                visit(bb, colors, e.value_ptr.*, depth + 1);
+            }
+            colors.put(bb.allocator, m, .done) catch @panic("OOM");
+        }
+    };
+    Walk.visit(b, &color, root, 0);
+}
+
+/// A module's root as a path inside this build, or "" for a generated or
+/// dependency root.
+fn rootName(b: *std.Build, m: *std.Build.Module) []const u8 {
+    const root = m.root_source_file orelse return "";
+    return switch (root) {
+        .src_path => |p| if (p.owner == b) p.sub_path else "",
+        .generated, .cwd_relative, .dependency, .relative => "",
+    };
 }
 
 /// Builds one test binary from `m`, linked like the executable.

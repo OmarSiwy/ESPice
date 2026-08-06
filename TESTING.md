@@ -29,7 +29,7 @@ Status: **have** (exists, with file), **gap** (plan block that adds it).
 |---|---|---|---|---|---|
 | Wrong analysis result, plausible range | ngspice / VACASK values recorded in `.expected.json` with provenance | differential (golden with provenance) | merge | `tests/test_correctness.zig` over `tests/fixtures/**` | have |
 | Wrong result, simple circuits | closed form (RC step, divider, RLC resonance) | spec example | merge | `analytic` fixtures in the corpus | have |
-| Fixture verdict silently changes | the name list `tests/VERDICTS.tsv` | ratchet | merge | `tools/verdicts.sh` | gap: P1 |
+| Fixture verdict silently changes | the name list `tests/VERDICTS.tsv` | ratchet | merge | `tests/test_correctness.zig` (full CPU run) | have |
 | Converged OP is wrong | KCL residual of the accepted point under a plain device evaluation | certificate | merge | `analysis/tests/` | gap: P4 (#53 is the known trip) |
 | Linear solve is wrong | scaled residual ‖Ax − b‖ / (‖A‖‖x‖ε) ≤ 30 on generated matrices of controlled condition | certificate | merge | `solver/tests.zig` | gap: P4 (dense-reference checks exist) |
 | Wrong device derivative | central finite difference | certificate | merge | `device/tests/eval.zig:857` (sampled models) | partial: P4 extends to every model |
@@ -48,9 +48,9 @@ Status: **have** (exists, with file), **gap** (plan block that adds it).
 | CPU and CUDA disagree | the CPU backend on the same deck | differential | nightly (needs the GPU) | `zig build test-gpu` (shared expectations only) | partial: P4 adds direct CPU-vs-CUDA |
 | HIP wrong | none: no hardware | — | — | — | unsupported (Technique 21.14) |
 | Shipped ISA differs | same suite at each `-Dcpu` of `release.yml` | target matrix | release | `release.yml` smoke | gap: P1 runs the suite per target |
-| Abstraction leaves residue | `asm_probe.py` verdict | codegen probe | merge | new `tests/codegen/` | gap: P1 |
+| Abstraction leaves residue | `tools/asm_probe.py` verdict | codegen probe | merge | `tests/codegen.zig` (`zig build test-codegen`) | partial: `normInf`, `Dual.mul`; one pair per rung-5 seam as its block lands |
 | Hot struct grows | comptime `@sizeOf` assert | compile | merge | in the owning file | gap: P1 |
-| Architecture degrades | build-graph resolver, `else =>` annotation scan, `//!` header scan | fitness function | merge | `build.zig` `module_specs`, `tools/fitness.zig` | gap: P1 |
+| Architecture degrades | configure-time graph check, `else =>` / root-import ratchet, `//!` header scan | fitness function | merge | `build.zig` `checkModuleGraph`, `tests/fitness.zig` + `tests/FITNESS.tsv` | have |
 | Performance regression | `zig build bench` medians vs ngspice/VACASK, callgrind Ir | benchmark | nightly | `tests/benchmark/` | have (no threshold yet: P6) |
 | Tests that cannot fail | mutation (flip one comparison, expect red) | mutation | weekly | new script | gap: P5 |
 

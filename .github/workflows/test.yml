@@ -1,0 +1,43 @@
+name: test
+
+# The merge gate (TESTING.md § Gates): every unit suite, the codegen probes,
+# the fitness check and the full fixture corpus with its verdict name list,
+# in the shipped mode (ReleaseSafe) and in Debug for the unit suites.
+# ponytail: x86_64-linux CPU only; the GPU corpus (`zig build test-gpu`) needs
+# an NVIDIA runner and runs locally until one exists (TESTING.md, nightly).
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  release-safe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - uses: cachix/cachix-action@v15
+        with:
+          name: omarsiwy
+          skipPush: true
+      - run: nix develop .#ci -c zig build test -Dgpu=false -Doptimize=ReleaseSafe --summary failures
+
+  debug-units:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - uses: cachix/cachix-action@v15
+        with:
+          name: omarsiwy
+          skipPush: true
+      - run: nix develop .#ci -c zig build test-core test-solver test-output test-device test-frontend test-analysis test-espice test-fitness -Dgpu=false -Doptimize=Debug --summary failures

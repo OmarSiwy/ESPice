@@ -1,3 +1,4 @@
+//! Builder tests: netlist devices → `device.Circuit` stamps and source waveforms, against hand-worked values.
 const std = @import("std");
 const builder = @import("builder");
 const devices = @import("builder").spice;

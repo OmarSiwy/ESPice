@@ -151,11 +151,18 @@
             commonInputs
             ++ [
               pkgs.llvmPackages_21.llvm
+              pkgs.python3 # tools/asm_probe.py (the codegen probe step of `zig build test`)
             ]
             ++ cudaPkgs
             ++ rocmPkgs;
           LD_LIBRARY_PATH = gpuLibPath;
         });
+
+        # The merge gate (.github/workflows/test.yml): Zig, plus python3 for
+        # tools/asm_probe.py. No GPU toolkits: CI builds -Dgpu=false.
+        devShells.ci = pkgs.mkShell {
+          packages = commonInputs ++ [ pkgs.python3 ];
+        };
 
         # Benchmarking: adds ngspice + perf + flamegraph on top.
         devShells.benchmarking = pkgs.mkShell ({

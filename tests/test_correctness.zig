@@ -8,6 +8,11 @@
 //! the root:
 //!   zig build test -- --jobs 8 --filter op/
 //!   zig build test -- --list
+//! A full CPU run (no `--filter`) also checks every deck's verdict by name
+//! against tests/VERDICTS.tsv (AGENTS.md §2.7), and fails on any difference:
+//! a deck added, removed, or moved between PASS and XFAIL. After a measured
+//! run whose differences are intended, rewrite the file from that run:
+//!   zig build test -- --update-verdicts
 const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -97,11 +102,12 @@ pub fn main(init: std.process.Init) !u8 {
     var jobs: u16 = 8;
     var timeout_seconds: u32 = 300;
     var list = equal(app, "--list");
-    const Flag = enum(u8) { list, filter, jobs, timeout, backend };
+    var update_verdicts = false;
+    const Flag = enum(u8) { list, filter, jobs, timeout, backend, update_verdicts };
     const flags = std.StaticStringMap(Flag).initComptime(.{
         .{ "--list", .list },       .{ "--filter", .filter },
         .{ "--jobs", .jobs },       .{ "--timeout", .timeout },
-        .{ "--backend", .backend },
+        .{ "--backend", .backend }, .{ "--update-verdicts", .update_verdicts },
     });
     while (args.next()) |arg| {
         switch (flags.get(arg) orelse return error.UnknownArgument) {
@@ -110,6 +116,7 @@ pub fn main(init: std.process.Init) !u8 {
             .jobs => jobs = try std.fmt.parseInt(u16, args.next() orelse return error.MissingArgument, 10),
             .timeout => timeout_seconds = try std.fmt.parseInt(u32, args.next() orelse return error.MissingArgument, 10),
             .backend => backend_name = args.next() orelse return error.MissingArgument,
+            .update_verdicts => update_verdicts = true,
         }
     }
     if (jobs == 0) return error.InvalidWorkerCount;
@@ -136,7 +143,90 @@ pub fn main(init: std.process.Init) !u8 {
     std.debug.print("Correctness: {d} passed, {d} failed, {d} xfail, {d} xpass, {d} skipped, {d} selected\n", .{
         count.get(.pass), count.get(.fail), count.get(.xfail), count.get(.xpass), count.get(.skip), selected,
     });
-    return if (count.get(.fail) == 0 and count.get(.xpass) == 0) 0 else 1;
+    const clean = count.get(.fail) == 0 and count.get(.xpass) == 0;
+    // The name list holds only for the whole corpus on the CPU path.
+    if (filter.len != 0 or !equal(backend_name, "cpu")) return if (clean) 0 else 1;
+    const current = try verdictList(init.gpa, outcomes);
+    defer init.gpa.free(current);
+    if (update_verdicts) {
+        if (!clean) return error.UncleanRun; // the file records only PASS and XFAIL
+        try Io.Dir.cwd().writeFile(init.io, .{ .sub_path = verdicts_path, .data = current });
+        std.debug.print("Correctness: wrote {s}\n", .{verdicts_path});
+        return 0;
+    }
+    const recorded = Io.Dir.cwd().readFileAlloc(init.io, verdicts_path, init.gpa, .unlimited) catch |err| {
+        std.debug.print("Correctness: cannot read {s} ({s}); run with --update-verdicts\n", .{ verdicts_path, @errorName(err) });
+        return 1;
+    };
+    defer init.gpa.free(recorded);
+    var stderr_buf: [256]u8 = undefined;
+    var stderr = Io.File.stderr().writer(init.io, &stderr_buf);
+    const same = reportVerdictDiff(&stderr.interface, recorded, current);
+    stderr.interface.flush() catch {};
+    return if (clean and same) 0 else 1;
+}
+
+/// The verdict name list, one `PASS<TAB>path` or `XFAIL<TAB>path` per line in
+/// catalog order (the build sorts the catalog), so a diff names the decks.
+const verdicts_path = "tests/VERDICTS.tsv";
+
+fn verdictList(gpa: Allocator, outcomes: []const Outcome) ![]u8 {
+    std.debug.assert(outcomes.len == spice_files.len);
+    var out: Io.Writer.Allocating = .init(gpa);
+    errdefer out.deinit();
+    try out.writer.writeAll("# Measured by tests/test_correctness.zig; rewrite with `zig build test -- --update-verdicts`.\n");
+    for (outcomes, spice_files) |outcome, path| switch (outcome) {
+        .pass => try out.writer.print("PASS\t{s}\n", .{path}),
+        .xfail => try out.writer.print("XFAIL\t{s}\n", .{path}),
+        // A full CPU run selects every deck and skips none.
+        .unselected, .skip => unreachable,
+        // A clean run has none; an unclean one already fails.
+        .fail, .xpass => {},
+    };
+    return out.toOwnedSlice();
+}
+
+/// Prints every line in one list and not the other; true when the two hold
+/// the same lines. Zero recorded lines means the file broke, not a pass.
+fn reportVerdictDiff(out: *Io.Writer, recorded: []const u8, current: []const u8) bool {
+    var same = true;
+    var rec_lines: u32 = 0;
+    var it = std.mem.splitScalar(u8, recorded, '\n');
+    while (it.next()) |row| {
+        if (row.len == 0 or row[0] == '#') continue;
+        rec_lines += 1;
+        if (!containsLine(current, row)) {
+            out.print("VERDICT recorded, not measured: {s}\n", .{row}) catch {};
+            same = false;
+        }
+    }
+    if (rec_lines == 0) {
+        out.print("VERDICT {s} lists no decks\n", .{verdicts_path}) catch {};
+        return false;
+    }
+    it = std.mem.splitScalar(u8, current, '\n');
+    while (it.next()) |row| {
+        if (row.len == 0 or row[0] == '#') continue;
+        if (!containsLine(recorded, row)) {
+            out.print("VERDICT measured, not recorded: {s}\n", .{row}) catch {};
+            same = false;
+        }
+    }
+    return same;
+}
+
+fn containsLine(text: []const u8, want: []const u8) bool {
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |l| if (std.mem.eql(u8, l, want)) return true;
+    return false;
+}
+
+test "verdict diff names both directions and refuses an empty list" {
+    var sink: std.Io.Writer.Discarding = .init(&.{});
+    try std.testing.expect(reportVerdictDiff(&sink.writer, "PASS\ta.sp\nXFAIL\tb.sp\n", "PASS\ta.sp\nXFAIL\tb.sp\n"));
+    try std.testing.expect(!reportVerdictDiff(&sink.writer, "PASS\ta.sp\nPASS\tb.sp\n", "PASS\ta.sp\nXFAIL\tb.sp\n"));
+    try std.testing.expect(!reportVerdictDiff(&sink.writer, "PASS\ta.sp\n", "PASS\ta.sp\nPASS\tc.sp\n"));
+    try std.testing.expect(!reportVerdictDiff(&sink.writer, "# header only\n", "PASS\ta.sp\n"));
 }
 
 fn worker(runner: *Runner) void {

@@ -26,10 +26,10 @@ espice    core, frontend, analysis, output        (src/espice.zig, the Problem f
 main      espice                                  (src/main.zig; src/c_api.zig likewise)
 ```
 
-Enforced by: the hand wiring in `build.zig` (a module sees only the imports
-it is handed). **Target (P1):** a `module_specs` array in dependency order
-whose resolver panics on a forward import, so a cycle cannot be written in
-`build.zig` either (Principle 14.4).
+Enforced by: the wiring in `build.zig` (a module sees only the imports it is
+handed) and `checkModuleGraph`, which panics at configure time on a cycle or
+on an edge `restricted_imports` forbids. Inside a module, `tests/fitness.zig`
+ratchets leaf → root imports against `tests/FITNESS.tsv`.
 
 Inside modules, three cycles exist today. **Target (P3):** none.
 

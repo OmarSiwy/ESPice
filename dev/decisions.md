@@ -46,7 +46,7 @@ breaks §2.1 names its target rung and the plan block that moves it.
   - change radius for one more case: 0 bodies (a new instantiation)
   - interface weight: the `Of(mask)` / `to(mask)` contract VerA emits against
 - **Drills passed**: D2 fails (more than 64 unknowns, below)
-- **Proof**: pending, P1 (`gen_` = `DeviceBatch(diode).eval` through `Dual` vs `hand_` = the same stamp over plain f64 and an explicit gradient array). Bit-identity with the scalar path is tested (`src/device/tests/eval.zig:105`).
+- **Proof**: `Dual(2, f64).mul` against the value and 2-lane gradient written out: see `tests/codegen.zig` `gen_dual_mul=hand_dual_mul`, Zig 0.17.0 `-O ReleaseFast -mcpu=x86_64_v3`. The first probe read RESIDUE on instruction order alone (the same 11 instructions, 2 vector, scheduled differently); with the hand version written in the family's operand order the verdict is the one `zig build test-codegen` prints. Pending P6: a whole `DeviceBatch(diode).eval` against a hand-written diode stamp. Bit-identity with the scalar path is tested (`src/device/tests/eval.zig:105`).
 - **Revisit when**: a device has more than 64 unknowns (#117).
 
 ### S4: device target
@@ -148,6 +148,20 @@ breaks §2.1 names its target rung and the plan block that moves it.
 - **Drills passed**: D2 (the failure is in S3, not here)
 - **Proof**: n/a (rung 9); `layout_hash` refuses a mismatched `.so`
 - **Revisit when**: untrusted models must be sandboxed.
+
+### S11: stdpp pipelines in `core.numerics`
+
+- **Axis**: policy: one lanewise callback per helper (`axpy`, `scale`, `sub`, `dot`, `sum`, `normInf`) over stdpp's comptime pipeline.
+- **Evidence**: six helpers today, each with a `.byRef()` differential test.
+- **Owner**: core (`src/core/numerics.zig`).
+- **Rung**: 5, comptime-fused iterator pipeline. The vectorizer is off in Zig 0.17 (§2.11), so a plain loop (rung 1) is scalar.
+- **Cost**:
+  - residue: **measured, not zero.** `normInf` (2026-10-17, `-mcpu=x86_64_v3`): `gen` 67 instructions, 1 call: an out-of-line `foldVector` call per invocation for lengths ≥ 64, scalar inline below. A hand 4-wide, 4-accumulator loop: 108 instructions, 0 calls. The residue is one call and a 32-byte stack spill per `normInf`, never per element. The vector body sits in the helper.
+  - change radius for one more helper: 0 bodies
+  - interface weight: the lanewise callback contract
+- **Drills passed**: none drilled
+- **Proof**: RESIDUE, per call. Not gated, because the helper's symbol name (`foldVector__func_N`) changes between builds. **P6:** probe the helper body by a stable name (an `export` wrapper in `tests/codegen.zig` around `foldAssoc` itself), or inline it, then gate. Hot-path standing: `normInf` runs once per Newton iteration (`converger.zig:217`), O(n), against an O(fill) factor.
+- **Revisit when**: stdpp exposes the fold body by a stable name, or a profile shows the call.
 
 ## Drills
 
