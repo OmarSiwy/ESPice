@@ -5,6 +5,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 ## Unreleased
 
+- Device evaluation no longer copies a deduplicated model row onto itself, undefined behaviour in release builds (#122).
 - `.hdl` Verilog-A devices with more than 64 unknowns compile and run (dense Jacobian, one
   derivative lane per unknown) (#117).
 - API: `Options.live_params` + `Problem.set_params`, and C `live_params` + `espice_set_params`, change

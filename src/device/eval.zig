@@ -1222,8 +1222,9 @@ pub fn ProtoStore(comptime D: type) type {
                 const gop = seen.getOrPutAssumeCapacityAdapted(m, Ctx{ .rows = items[0..n] });
                 if (!gop.found_existing) {
                     // Bytes, padding included; n <= this row, so no row
-                    // still to be read is overwritten.
-                    @memcpy(std.mem.asBytes(&items[n]), std.mem.asBytes(m));
+                    // still to be read is overwritten. A row already in
+                    // place is left alone: @memcpy forbids overlap (#122).
+                    if (&items[n] != m) @memcpy(std.mem.asBytes(&items[n]), std.mem.asBytes(m));
                     gop.key_ptr.* = n;
                     n += 1;
                 }
