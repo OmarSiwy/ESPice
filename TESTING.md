@@ -1,0 +1,75 @@
+# Testing
+
+What "correct" means for ESPice: for every deck, the analysis results agree
+with an independent oracle (ngspice, VACASK, or an analytic answer) within a
+tolerance justified per quantity, on every shipped target and backend, and an
+invalid deck is refused with a named diagnostic. `AGENTS.md` §2.6–§2.7 are
+the rules; this file is the plan (`test-plan` step 7). Counts are never typed
+here: `zig build test` prints them, and `tests/VERDICTS.tsv` holds the
+measured name list.
+
+## Domains
+
+| Component | Domain (`test-plan/DOMAINS.md`) |
+|---|---|
+| frontend: lines, expr, netlist, source, analyses, measure | parser / compiler frontend |
+| device: eval, bind, ABI, loader; `models/` via VerA | numerical (derivatives), plugin ABI |
+| solver: sparse/dense/lane/BBD LU, converger, GMRES, FFT | numerical solvers |
+| analysis: OP, DC, AC, tran, PSS/HB, noise, sweeps | numerical simulator, stateful/concurrent (session, workers) |
+| analysis/gpu, solver/lu_device, device kernels | GPU multi-backend |
+| lane kernels, stdpp pipelines | SIMD |
+| espice.zig, c_api.zig | library / FFI boundary |
+| output | encoders (round-trip, golden) |
+
+## Bug classes → oracle → layer
+
+Status: **have** (exists, with file), **gap** (plan block that adds it).
+
+| Bug class | Oracle | Layer | Tier | Harness | Status |
+|---|---|---|---|---|---|
+| Wrong analysis result, plausible range | ngspice / VACASK values recorded in `.expected.json` with provenance | differential (golden with provenance) | merge | `tests/test_correctness.zig` over `tests/fixtures/**` | have |
+| Wrong result, simple circuits | closed form (RC step, divider, RLC resonance) | spec example | merge | `analytic` fixtures in the corpus | have |
+| Fixture verdict silently changes | the name list `tests/VERDICTS.tsv` | ratchet | merge | `tools/verdicts.sh` | gap: P1 |
+| Converged OP is wrong | KCL residual of the accepted point under a plain device evaluation | certificate | merge | `analysis/tests/` | gap: P4 (#53 is the known trip) |
+| Linear solve is wrong | scaled residual ‖Ax − b‖ / (‖A‖‖x‖ε) ≤ 30 on generated matrices of controlled condition | certificate | merge | `solver/tests.zig` | gap: P4 (dense-reference checks exist) |
+| Wrong device derivative | central finite difference | certificate | merge | `device/tests/eval.zig:857` (sampled models) | partial: P4 extends to every model |
+| Lane kernel differs from scalar | `W == 1` instantiation, bitwise | differential | merge | `solver/tests.zig` LaneLu, `device/tests/eval.zig:105` Dual | have |
+| stdpp pipeline differs from scalar | the same pipeline on `.byRef()`, lengths 0…3×lanes, misalignments, NaN/inf | differential, exhaustive small domain | merge | `core/numerics.zig` tests | have |
+| Integrator order wrong | manufactured solution, three step sizes, observed order (BE 1, trap 2, gear k) | convergence order | merge | `analysis/tests/transient.zig` | gap: P4 |
+| Threading changes results | `solver_threads = 1` and `device_threads = 1` vs N, byte-identical output | determinism | merge | `analysis/tests/circuit.zig:152` (device threads only) | partial: P4 |
+| Run-to-run drift | run twice, byte-compare the raw file | determinism | merge | new | gap: P4 |
+| Node order changes results | renumber nodes / permute device order → same named results | metamorphic | nightly | new | gap: P4 |
+| Parser crash, hang, leak, undeclared error | assertions + declared error set; structure-aware generator | fuzz (Smith) with corpus replay | merge (replay), nightly (long) | new `frontend/tests/fuzz.zig` | gap: P4 |
+| Invalid deck accepted or mis-diagnosed | the input contract per deck | example | merge | `tests/fixtures/invalid/` | have |
+| Frontend grammar drifts from the dialect | PEG grammar oracle | differential | merge | `tests/grammar/` (#121) | partial |
+| Swallowed OOM, leak on error path | `checkAllAllocationFailures` | fault injection | merge | intern, netlist.parse, facade construct, solver, device freeze | partial: P4 adds source, builder, analyses, loader, session, C ABI |
+| Non-convergence, singular matrix, NaN device output handled | injected faults return named errors | fault injection | merge | `tests/fixtures/convergence/` | partial: P4 |
+| C ABI misuse (stale handle, short buffer, bad version) | the header's documented error codes; a model of valid handle states | stateful property | merge | `src/tests/c_api.zig` | partial: P3 (generational handles) + P4 |
+| CPU and CUDA disagree | the CPU backend on the same deck | differential | nightly (needs the GPU) | `zig build test-gpu` (shared expectations only) | partial: P4 adds direct CPU-vs-CUDA |
+| HIP wrong | none: no hardware | — | — | — | unsupported (Technique 21.14) |
+| Shipped ISA differs | same suite at each `-Dcpu` of `release.yml` | target matrix | release | `release.yml` smoke | gap: P1 runs the suite per target |
+| Abstraction leaves residue | `asm_probe.py` verdict | codegen probe | merge | new `tests/codegen/` | gap: P1 |
+| Hot struct grows | comptime `@sizeOf` assert | compile | merge | in the owning file | gap: P1 |
+| Architecture degrades | build-graph resolver, `else =>` annotation scan, `//!` header scan | fitness function | merge | `build.zig` `module_specs`, `tools/fitness.zig` | gap: P1 |
+| Performance regression | `zig build bench` medians vs ngspice/VACASK, callgrind Ir | benchmark | nightly | `tests/benchmark/` | have (no threshold yet: P6) |
+| Tests that cannot fail | mutation (flip one comparison, expect red) | mutation | weekly | new script | gap: P5 |
+
+## Gates
+
+| Tier | Budget | Runs | Command |
+|---|---|---|---|
+| Local | < 10 s per touched module | `zig build test-<suite>` for the touched module (`zig build --help` lists them) | `nix develop -c zig build test-solver` etc. |
+| Merge | < 15 min | full `zig build test` (units + corpus) in Debug and ReleaseSafe, `-Dgpu=false`; verdict ratchet; fuzz corpus replay; probes; fitness functions | `.github/workflows/test.yml` (P1) |
+| Nightly | hours | long fuzz per target; metamorphic suite; `zig build test-gpu` on the NVIDIA runner; `zig build bench` with thresholds | P4/P6 |
+| Release | unbounded | release exit criteria below; `release.yml` target matrix runs the suite | `release.yml` |
+
+## Exit criteria (release)
+
+1. `zig build test` exits 0 on every `release.yml` target, and `tests/VERDICTS.tsv` has no PASS → XFAIL move since the last release.
+2. Every fuzz target has run ≥ 24 CPU-hours with no new crash, and its corpus growth has plateaued.
+3. Every fixture agrees with its oracle within its recorded tolerance; every disagreement is a KNOWN GAP with an issue.
+4. Threaded and serial runs are byte-identical on the determinism decks.
+5. CPU vs CUDA within each deck's tolerance on the local GPU; HIP labelled unsupported.
+6. No probe verdict is RESIDUE; no benchmark median regresses past its threshold.
+7. Zero open crash bugs; zero quarantined tests.
+8. The KNOWN GAP markers are the written list of known gaps.
