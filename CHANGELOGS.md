@@ -5,6 +5,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 ## Unreleased
 
+- `.tran` with MATEX fails the step instead of hanging when the Krylov matrix overflows to inf (#125).
 - Device evaluation no longer copies a deduplicated model row onto itself, undefined behaviour in release builds (#122).
 - `.hdl` Verilog-A devices with more than 64 unknowns compile and run (dense Jacobian, one
   derivative lane per unknown) (#117).

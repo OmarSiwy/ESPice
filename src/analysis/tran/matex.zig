@@ -5,6 +5,7 @@
 //! ponytail: no nonlinear (EPIRK) path; add one when a const-Jacobian check
 //! says a circuit needs linearization.
 const std = @import("std");
+const assert = std.debug.assert;
 const root = @import("../types.zig");
 const simdCopy = root.copySimd;
 const num = @import("core").numerics;
@@ -45,8 +46,10 @@ fn cscMulVec(
 /// U = H*(b1*I + b3*H^2 + b5*H^4), V = b0*I + b2*H^2 + b4*H^4 + b6*H^6,
 /// expm = (V - U)^-1 (V + U); four matmuls and one dense LU. Writes `out`,
 /// destroys H. `scratch` holds at least 5*m*m, `piv_buf` at least m. A
-/// singular V - U yields the identity.
-fn expmSmall(m: usize, H: []f64, out: []f64, scratch: []f64, piv_buf: []u32) void {
+/// singular V - U yields the identity. Returns false, writing nothing, when
+/// H holds an inf: no scaling brings it under 0.5 (#125). A NaN entry passes
+/// through to `out`, where the callers' finiteness checks see it.
+fn expmSmall(m: usize, H: []f64, out: []f64, scratch: []f64, piv_buf: []u32) bool {
     // b_j = (12-j)! 6! / (12! j! (6-j)!)
     const b = [_]f64{
         1.0,
@@ -61,8 +64,12 @@ fn expmSmall(m: usize, H: []f64, out: []f64, scratch: []f64, piv_buf: []u32) voi
     // Scale until max |H_ij| <= 0.5.
     // ponytail: the max element suffices for the scaling decision.
     var norm_h = num.normInf(H[0 .. m * m]);
+    if (!std.math.isFinite(norm_h)) return false;
+    // A finite f64 is below 2^1024, so 1025 halvings bring it under 0.5.
+    const halvings_max = 1025;
     var s: u32 = 0;
     while (norm_h > 0.5) : (s += 1) {
+        assert(s < halvings_max);
         norm_h *= 0.5;
         num.scale(H[0 .. m * m], 0.5, H[0 .. m * m]);
     }
@@ -133,7 +140,7 @@ fn expmSmall(m: usize, H: []f64, out: []f64, scratch: []f64, piv_buf: []u32) voi
     dense_lu.factorize(m, H, piv) catch {
         @memset(out[0..mm], 0);
         for (0..m) |i| out[i * m + i] = 1;
-        return;
+        return true;
     };
 
     // Solve (V - U) X = (V + U) one column at a time, in place in `out`.
@@ -150,6 +157,7 @@ fn expmSmall(m: usize, H: []f64, out: []f64, scratch: []f64, piv_buf: []u32) voi
         simdCopy(H2[0..mm], out[0..mm]);
         denseMatMul(m, H2, H2, out);
     }
+    return true;
 }
 
 /// C = A*B for m x m row-major matrices; C must not alias A or B.
@@ -290,7 +298,7 @@ fn posteriorOk(
 
     num.scale(H_copy[0..msq], h_step, H_copy[0..msq]);
 
-    expmSmall(mm, H_copy, expm_out, expm_scratch, piv);
+    if (!expmSmall(mm, H_copy, expm_out, expm_scratch, piv)) return false;
 
     const last_elem = @abs(expm_out[(mm - 1) * mm]);
     const err = beta * h_mp1_m * last_elem;
@@ -575,7 +583,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
             num.scale(H_copy[0..msq], -scale, H_inv[0..msq]);
             for (0..m) |i| H_copy[i * m + i] += scale;
 
-            expmSmall(m, H_copy, expm_out, expm_scratch, piv_all);
+            if (!expmSmall(m, H_copy, expm_out, expm_scratch, piv_all)) return error.MatexDidNotConverge;
 
             // x_new = beta * V_m * expm(T) * u
             root.zeroSimd(x_new[0..n]);
