@@ -38,7 +38,7 @@ jobs:
       - name: Build
         run: >
           zig build
-          -Doptimize=ReleaseFast
+          -Doptimize=ReleaseSafe
           -Dtarget=${{ matrix.target }}
           -Dcpu=${{ matrix.cpu }}
           -Dcuda-arch=${{ matrix.cuda }}

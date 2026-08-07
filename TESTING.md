@@ -59,7 +59,7 @@ Status: **have** (exists, with file), **gap** (plan block that adds it).
 | Tier | Budget | Runs | Command |
 |---|---|---|---|
 | Local | < 10 s per touched module | `zig build test-<suite>` for the touched module (`zig build --help` lists them) | `nix develop -c zig build test-solver` etc. |
-| Merge | < 15 min | full `zig build test` (units + corpus) in Debug and ReleaseSafe, `-Dgpu=false`; verdict ratchet; fuzz corpus replay; probes; fitness functions | `.github/workflows/test.yml` (P1) |
+| Merge | < 15 min | full `zig build test` (units + corpus) in ReleaseSafe, `-Dgpu=false`; verdict ratchet; fuzz corpus replay; probes; fitness functions. Debug joins when #25 (self-hosted backend divergence) closes | `.github/workflows/test.yml` |
 | Nightly | hours | long fuzz per target; metamorphic suite; `zig build test-gpu` on the NVIDIA runner; `zig build bench` with thresholds | P4/P6 |
 | Release | unbounded | release exit criteria below; `release.yml` target matrix runs the suite | `release.yml` |
 

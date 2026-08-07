@@ -5,6 +5,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 ## Unreleased
 
+- Builds default to `-Doptimize=ReleaseSafe`, and releases ship it, so every internal check runs; `zig build bench` needs `-Doptimize=ReleaseFast`.
 - Device evaluation no longer copies a deduplicated model row onto itself, undefined behaviour in release builds (#122).
 - `.hdl` Verilog-A devices with more than 64 unknowns compile and run (dense Jacobian, one
   derivative lane per unknown) (#117).

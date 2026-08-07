@@ -60,7 +60,7 @@ Build options (`zig build --help` lists them all):
 
 | Option | Default | Effect |
 |---|---|---|
-| `-Doptimize=` | `ReleaseFast` | Zig optimize mode |
+| `-Doptimize=` | `ReleaseSafe` | Zig optimize mode; `zig build bench` needs `ReleaseFast` |
 | `-Dgpu=false` | `true` | skip the CUDA/HIP device kernels; a CPU-only build is much faster to compile |
 | `-Dcuda-arch=` | `auto` | CUDA arch (`sm_75`, ...), `auto` probes the build machine, `none` omits CUDA |
 | `-Dhip-arch=` | `gfx1100` | HIP arch, `none` omits HIP |

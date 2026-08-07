@@ -204,7 +204,7 @@
           let
             flags = toString (
               [
-                "-Doptimize=ReleaseFast"
+                "-Doptimize=ReleaseSafe"
                 "-Dtarget=${zigTarget}"
                 "--cache-dir .zig-cache"
                 # Zig defaults to every core and each heavy model's LLVM job
