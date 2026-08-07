@@ -19,7 +19,7 @@ header:
 ```zig
 const espice = b.dependency("espice", .{
     .target = target,
-    .optimize = .safe, // ReleaseSafe, the shipped mode; .fast drops the asserts
+    .optimize = .fast, // ReleaseFast
     .gpu = false, // skip the CUDA/HIP kernels; much faster to build
 });
 

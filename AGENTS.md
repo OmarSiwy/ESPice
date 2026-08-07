@@ -302,7 +302,7 @@ A **seam** is introduced at the second real case today or when a drill needs it 
 
 ### 2.5 Build modes and runtime checks
 
-The check budget in Principle 17.10 is the project policy, with one ruling (user, 2026-10-17): **ReleaseSafe is the default and the shipped mode.** `zig build`, the flake package and `release.yml` build `-O ReleaseSafe`, so every `std.debug.assert` executes in the binary users run. `zig build bench` and its siblings build ReleaseFast, because they compare against `-O2` ngspice. A hot kernel recovers its speed only by a scoped `@setRuntimeSafety(false)`, and only after fuzz, property and differential tests have exercised it with checks on; each such scope is a recorded decision in the block's review with its benchmark. Comptime assertions are always on. `assertions/zig.md` governs what each assert compiles to per build mode.
+The check budget in Principle 17.10 is the project policy, with one ruling (user, 2026-10-17): **ReleaseFast is the default and the shipped mode; ReleaseSafe is the test mode.** `zig build`, the flake package and `release.yml` build ReleaseFast, because the product is compared against `-O2` ngspice and a safe build measured up to 2.2× slower (`stress/scaling_rc_ladder_100k` 2.15 s → 4.65 s; the 4k inverter chain +16%). Every gate runs ReleaseSafe (`zig build test -Doptimize=ReleaseSafe`, the CI job), so every `std.debug.assert` and safety check executes on the whole suite and corpus before a merge; a ReleaseSafe failure is a bug even when ReleaseFast passes (it found #122, #123, #124). Debug joins the gate once #25 (self-hosted backend divergence) closes. Boundary code (the netlist parser, the C ABI, the session) may later opt into safety in the shipped binary with a scoped `@setRuntimeSafety(true)`, each with a benchmark in its review. Comptime assertions are always on. `assertions/zig.md` governs what each assert compiles to per build mode.
 
 ### 2.6 Testing rules that every change obeys
 
@@ -378,7 +378,7 @@ Every performance claim ships with a measured before/after in the commit message
 
 ### 2.14 Verification
 
-- `zig build && zig build test` after every step. `zig build test` runs the unit suites and then the numeric corpus; its exit code is the gate, and `tests/VERDICTS.tsv` is the name list it must keep (§2.7).
+- `zig build && zig build test -Doptimize=ReleaseSafe` after every step (§2.5). `zig build test` runs the unit suites, the codegen probes, the fitness check and then the numeric corpus; its exit code is the gate (in Zig 0.17 output, `run test w` with a `failed command:` line only shows a step's stderr), and `tests/VERDICTS.tsv` is the name list it must keep (§2.7).
 - A CPU-only build (`-Dgpu=false`) compiles much faster and is enough for host-only changes (§2.9 names the exceptions).
 - A frontend change that alters what a syntax means updates its grammar in `tests/grammar/*.peg` first; `zig build test-grammar` (part of `zig build test`) fails on any disagreement, one-sided refusal or unmatched grammar alternative (dev/frontend.md, "Grammar oracle").
 - Every example under `docs/examples/` must still run.

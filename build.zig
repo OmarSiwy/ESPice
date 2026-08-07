@@ -5,22 +5,10 @@ const gompute_build = @import("gompute");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
-    // ReleaseSafe by default and when shipped (AGENTS.md §2.5): every assert
-    // runs in the binary users run. The bench steps refuse anything but
-    // ReleaseFast (`benchStep`), since they compare against -O2 ngspice; a
-    // Debug espice is 10-40x slower. Not `standardOptimizeOption`: in 0.16
-    // its preferred mode applies only under `-Drelease`.
-    const optimize = b.option(std.lang.Optimize, "optimize", "Prioritize performance, safety, or binary size") orelse .safe;
-    const benchStep = struct {
-        fn add(bb: *std.Build, mode: std.lang.Optimize, name: []const u8, desc: []const u8, run: *std.Build.Step) void {
-            const step = bb.step(name, desc);
-            if (mode != .fast) {
-                step.dependOn(&bb.addFail(bb.fmt("zig build {s} times ReleaseFast against -O2 ngspice and VACASK: pass -Doptimize=ReleaseFast", .{name})).step);
-                return;
-            }
-            step.dependOn(run);
-        }
-    }.add;
+    // ReleaseFast by default: `zig build bench` compares against -O2 ngspice,
+    // and a Debug espice is 10-40x slower. Not `standardOptimizeOption`: in
+    // 0.16 its preferred mode applies only under `-Drelease`.
+    const optimize = b.option(std.lang.Optimize, "optimize", "Prioritize performance, safety, or binary size") orelse .fast;
     // Mixed precision (dev/perf/jac-width-2026-09-10.md). The Jacobian width
     // is a property of the instantiation, not of the device, hence two lists.
     //
@@ -117,7 +105,7 @@ pub fn build(b: *std.Build) void {
     });
     const run_frontend_bench = b.addRunArtifact(frontend_bench);
     run_frontend_bench.addPassthruArgs();
-    benchStep(b, optimize, "bench-frontend", "Measure netlist parsing and expansion (-Doptimize=ReleaseFast)", &run_frontend_bench.step);
+    b.step("bench-frontend", "Measure netlist parsing and expansion").dependOn(&run_frontend_bench.step);
 
     // Devices: every models/* file compiled to Zig at build time, whatever its
     // HDL. `wf` collects the generated roots: one models.zig re-exporting all
@@ -513,7 +501,7 @@ pub fn build(b: *std.Build) void {
     run_bench.setEnvironmentVariable("ZIG", b.graph.zig_exe); // runtime .hdl builds
     run_bench.addArg("tests/fixtures");
     run_bench.addPassthruArgs();
-    benchStep(b, optimize, "bench", "Compare ESPice with ngspice and VACASK (nix develop .#benchmarking, -Doptimize=ReleaseFast)", &run_bench.step);
+    b.step("bench", "Compare ESPice with ngspice and VACASK (nix develop .#benchmarking)").dependOn(&run_bench.step);
     // Synthetic post-layout decks (no oracles, so not fixtures): generated
     // into zig-out/postlayout, then timed like `bench`.
     const gen_postlayout = b.addSystemCommand(&.{ "python3", "tests/benchmark/postlayout/gen.py", "zig-out/postlayout" });
@@ -526,7 +514,7 @@ pub fn build(b: *std.Build) void {
     run_postlayout.addArgs(&.{ "zig-out/postlayout", "--out", "zig-out/postlayout-results.md" });
     run_postlayout.addPassthruArgs();
     run_postlayout.step.dependOn(&gen_postlayout.step);
-    benchStep(b, optimize, "bench-postlayout", "Time ESPice on synthetic post-layout decks against ngspice and VACASK (-Doptimize=ReleaseFast)", &run_postlayout.step);
+    b.step("bench-postlayout", "Time ESPice on synthetic post-layout decks against ngspice and VACASK").dependOn(&run_postlayout.step);
 
     // External suites (ngspice tests, CircuitSim90, power grids, CMC QA):
     // fetched at pinned revisions into zig-out/suites, then timed like
@@ -544,7 +532,7 @@ pub fn build(b: *std.Build) void {
     run_suites.addArgs(&.{ if (suite) |name| b.fmt("zig-out/suites/{s}", .{name}) else "zig-out/suites", "--out", "zig-out/suites-results.md" });
     run_suites.addPassthruArgs();
     run_suites.step.dependOn(&fetch_suites.step);
-    benchStep(b, optimize, "bench-suites", "Fetch the external SPICE suites and time ESPice on them against ngspice and VACASK (-Doptimize=ReleaseFast)", &run_suites.step);
+    b.step("bench-suites", "Fetch the external SPICE suites and time ESPice on them against ngspice and VACASK").dependOn(&run_suites.step);
     const run_bench_tests = t.run(M.make(b.path("tests/benchmark/runner.zig"), &.{}), &.{}, false);
     b.step("test-benchmark", "Test reference adapters and benchmark comparison").dependOn(&run_bench_tests.step);
     test_step.dependOn(&run_bench_tests.step);

@@ -98,7 +98,7 @@ Build options (`zig build --help` lists them all):
 
 | Option | Default | Effect |
 |---|---|---|
-| `-Doptimize=` | `ReleaseSafe` | Zig optimize mode. `.hdl` decks need a release mode, not `Debug`; `zig build bench` needs `ReleaseFast` |
+| `-Doptimize=` | `ReleaseFast` | Zig optimize mode. `.hdl` decks need a release mode, not `Debug` |
 | `-Dgpu=false` | `true` | skip the CUDA and HIP device kernels |
 | `-Dcuda-arch=` | `auto` | CUDA arch (`sm_75`, ...); `auto` probes the build machine, `none` omits CUDA |
 | `-Dhip-arch=` | `gfx1100` | HIP arch; `none` omits HIP |
