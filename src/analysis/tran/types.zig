@@ -1,6 +1,7 @@
 //! Transient data types shared by tran.zig, integrator.zig, matex.zig and
 //! the post-processors, kept apart from the driver so they import no solver.
 const std = @import("std");
+const assert = std.debug.assert;
 
 /// The integration method a `.tran` card selects (core/query.zig).
 pub const Method = @import("core").query.Method;
@@ -36,8 +37,12 @@ pub const Column = struct {
     }
 
     /// The column from element `i` on. `i == len` gives an empty column.
+    /// Asserts that `i <= len`.
     pub fn from(c: Column, i: usize) Column {
-        return .{ .base = c.base[i * c.stride ..], .stride = c.stride, .len = c.len - i };
+        assert(i <= c.len);
+        // A strided base ends at the last element, (len-1)*stride+1 values,
+        // so the start of an empty tail is clamped to the base (#123).
+        return .{ .base = c.base[@min(i * c.stride, c.base.len)..], .stride = c.stride, .len = c.len - i };
     }
 
     /// The first index whose value is >= `v`, or `len` when none is; the
