@@ -161,7 +161,7 @@ test "age: constant stress is A t^n, and DegF inverts it" {
         try std.testing.expectApproxEqRel(0.02 + hci + bti, aged.values[2 * k], 1e-12);
         try std.testing.expectApproxEqRel(0.5 / (1 + 0.1 * hci), aged.values[2 * k + 1], 1e-12);
         try std.testing.expectApproxEqRel(hci + bti, aged.table.data[4 * k + 1], 1e-12);
-        try std.testing.expectApproxEqRel(t, aged.table.data[4 * k], 0);
+        try std.testing.expectEqual(t, aged.table.data[4 * k]);
     }
     const life = aged.table.data[3];
     const at_life = 1e-3 * @exp(0.5 * 1.2) * std.math.pow(f64, life, 0.25) + 2e-4 * std.math.pow(f64, life, 0.5);
