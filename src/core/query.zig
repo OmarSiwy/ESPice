@@ -3,8 +3,8 @@
 //! and the analysis drivers. Node and branch fields are MNA rows.
 const std = @import("std");
 const Tolerances = @import("numerics.zig").Tolerances;
-const DeviceType = @import("root.zig").DeviceType;
-const GROUND = @import("root.zig").GROUND;
+const DeviceType = @import("ids.zig").DeviceType;
+const GROUND = @import("ids.zig").GROUND;
 
 /// Dense id of a query within one session.
 pub const QueryId = enum(u32) { _ };

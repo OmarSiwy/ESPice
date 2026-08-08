@@ -53,7 +53,7 @@ pub const Stim = struct {
 /// (a resistor's `ac=`). Stored by identity; each analysis clone resolves
 /// its own parameter pointer.
 pub const AcOverride = struct {
-    type: @import("root.zig").DeviceType,
+    type: @import("ids.zig").DeviceType,
     /// Instance index within `type`.
     index: u32,
     param_name: []const u8,

@@ -12,8 +12,6 @@ else	src/analysis/tran/tran.zig	1
 else	src/analysis/tran/tran_noise.zig	1
 else	src/analysis/validate.zig	2
 else	src/c_api.zig	4
-root-import	src/core/deck.zig
-root-import	src/core/query.zig
 else	src/core/query.zig	1
 root-import	src/device/Library.zig
 else	src/device/abi.zig	1
