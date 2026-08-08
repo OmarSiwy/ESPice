@@ -59,7 +59,7 @@ const hdl_extensions = std.StaticStringMap(Hdl).initComptime(.{ .{ ".va", .va },
 /// concurrently. Returns null when the module is already in `loaded`. A `.v`
 /// design VerA cannot make a device (E1103) prints its diagnostics and fails
 /// with `DigitalFailed`.
-fn prepareOne(loaded: []const []const u8, gpa: std.mem.Allocator, io: std.Io, path: []const u8, paths: BuildPaths) !?Prepared {
+fn prepareOne(loaded: []const []const u8, gpa: std.mem.Allocator, io: std.Io, path: []const u8, paths: BuildPaths) Error!?Prepared {
     const hdl = hdl_extensions.get(std.fs.path.extension(path)) orelse return error.UnsupportedHdlExtension;
 
     const source = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(64 * 1024 * 1024));
@@ -393,9 +393,52 @@ fn recordInputs(io: std.Io, work_root: []const u8, key: [32]u8, module_name: []c
     std.Io.Dir.cwd().writeFile(io, .{ .sub_path = index, .data = body }) catch return;
 }
 
+/// Why one source did not load. The loader's own refusals:
+///
+/// - `UnsupportedHdlExtension`: the file is not `.va` or `.v`.
+/// - `NameTooLong`: the module name is over 128 bytes.
+/// - `DigitalFailed`: VerA cannot make a device of the `.v` design (E1103);
+///   its diagnostics are printed.
+/// - `HdlCodegenRefused`: VerA's codegen refused the model (E0515); printed.
+/// - `HdlNeedsLlvmHost`: this espice was not built with LLVM.
+/// - `GeneratedDeviceDoesNotCompile`: the generated device failed to build,
+///   an engine bug; the compiler's errors are printed.
+/// - `NotArpDevice`, `WrongAbiVersion`, `LayoutMismatch`: the built library
+///   lacks an `arp_*` symbol or was built against another device ABI.
+///
+/// The rest are forwarded unchanged from the steps that fail them: reading
+/// the source and its includes, statting this executable for the cache key,
+/// VerA's compile and codegen (`fastvaf.Error`, `digital.Error`), the build
+/// directory and its lock, VerA's orchestrator build (`CompilerGone` and
+/// `ProtocolMismatch` print what to fix), and `dlopen`. On any error nothing
+/// is registered; a build tree may be left in the cache, and the next load
+/// rebuilds it.
+pub const Error = error{
+    UnsupportedHdlExtension,
+    NameTooLong,
+    HdlCodegenRefused,
+    HdlNeedsLlvmHost,
+    GeneratedDeviceDoesNotCompile,
+    NotArpDevice,
+    WrongAbiVersion,
+    LayoutMismatch,
+} || std.Io.Dir.ReadFileAllocError ||
+    std.process.ExecutablePathAllocError ||
+    std.Io.Dir.StatFileError ||
+    fastvaf.Error ||
+    digital.Error ||
+    std.Io.Dir.CreateDirPathError ||
+    std.Io.Dir.OpenError ||
+    std.Io.Dir.DeleteFileError ||
+    OrchestratorError ||
+    std.DynLib.Error;
+
+/// VerA's `orchestrator.compileRelease` infers its error set; this names it.
+const OrchestratorError = @typeInfo(@typeInfo(@TypeOf(fastvaf.orchestrator.compileRelease)).@"fn".return_type.?).error_union.error_set;
+
 /// What `prepareAll` leaves per file: the opened device, null when its module
 /// was already loaded, or the error that stopped it.
-pub const Result = anyerror!?Prepared;
+pub const Result = Error!?Prepared;
 
 /// Compiles and opens every file in `files` in parallel into `results`
 /// (parallel to `files`), skipping modules named in `loaded` (lowercased, as
@@ -429,7 +472,7 @@ fn isLoaded(loaded: []const []const u8, name: []const u8) bool {
 // ponytail: lexical resolution, so a symlinked second spelling still
 // compiles (and then registers nothing, the module name being taken);
 // key on the file's inode if that shows up.
-pub fn pending(sources: []const []const u8, arena: std.mem.Allocator, files: []const []const u8) !struct { files: []const []const u8, resolved: []const []const u8 } {
+pub fn pending(sources: []const []const u8, arena: std.mem.Allocator, files: []const []const u8) std.mem.Allocator.Error!struct { files: []const []const u8, resolved: []const []const u8 } {
     var todo: std.ArrayList([]const u8) = try .initCapacity(arena, files.len);
     var resolved: std.ArrayList([]const u8) = try .initCapacity(arena, files.len);
     // ponytail: linear scans; a deck names a handful of HDL sources.

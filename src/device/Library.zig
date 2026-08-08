@@ -109,7 +109,7 @@ pub fn find(self: *const Library, module: []const u8) ?DeviceType {
 /// id; `is_digital` marks a `.v` design (`digital`). A name already loaded
 /// keeps its first vtable, flag and id. Fails with `TooManyDeviceTypes` when
 /// the id space is full. On failure nothing is added.
-pub fn register(self: *Library, module: []const u8, vt: *const abi.DeviceVtable, is_digital: bool) !DeviceType {
+pub fn register(self: *Library, module: []const u8, vt: *const abi.DeviceVtable, is_digital: bool) (error{TooManyDeviceTypes} || std.mem.Allocator.Error)!DeviceType {
     if (self.find(module)) |t| return t;
     if (self.names.items.len >= @backingInt(DeviceType.unset)) return error.TooManyDeviceTypes;
     const owned = try std.ascii.allocLowerString(self.gpa, module);
@@ -122,6 +122,11 @@ pub fn register(self: *Library, module: []const u8, vt: *const abi.DeviceVtable,
     return @fromBackingInt(@intCast(self.names.items.len - 1));
 }
 
+/// Why `load` failed: `RuntimeHdlUnsupported` on wasm, `TooManyDeviceTypes`
+/// when the id space is full, or the first file's `loader.Error` in `files`
+/// order. Files before the failing one stay registered; none after it are.
+pub const LoadError = error{ RuntimeHdlUnsupported, HdlShareNotFound, TooManyDeviceTypes } || std.mem.Allocator.Error || std.Io.Cancelable || loader.Error;
+
 /// Compiles, opens and registers each HDL source not loaded yet (loader.zig).
 /// The generated devices build against `toolchain.share`, else the sources
 /// `zig build` installs in `<exe>/../share/espice`, else the source tree this
@@ -130,7 +135,7 @@ pub fn register(self: *Library, module: []const u8, vt: *const abi.DeviceVtable,
 /// `error.HdlShareNotFound` when `toolchain.share` holds no
 /// `device/eval.zig`, and with `error.RuntimeHdlUnsupported` on wasm, which
 /// has no compiler to run and no dlopen; VerA and the loader compile out.
-pub fn load(self: *Library, io: std.Io, files: []const []const u8) !void {
+pub fn load(self: *Library, io: std.Io, files: []const []const u8) LoadError!void {
     if (comptime @import("builtin").cpu.arch.isWasm()) return error.RuntimeHdlUnsupported;
     var arena_state: std.heap.ArenaAllocator = .init(self.gpa);
     defer arena_state.deinit();
@@ -169,8 +174,8 @@ pub fn load(self: *Library, io: std.Io, files: []const []const u8) !void {
 
 /// `load` against explicit build paths: compiles and opens every file not
 /// loaded yet in parallel (`loader.prepareAll`), then registers the results
-/// in `files` order. The first error wins; nothing is registered after it.
-pub fn loadWith(self: *Library, io: std.Io, files: []const []const u8, paths: loader.BuildPaths) !void {
+/// in `files` order. Fails as `load` does, wasm aside.
+pub fn loadWith(self: *Library, io: std.Io, files: []const []const u8, paths: loader.BuildPaths) LoadError!void {
     var arena_state: std.heap.ArenaAllocator = .init(self.gpa);
     defer arena_state.deinit();
     // A source named twice, here or in an earlier call, compiles once.

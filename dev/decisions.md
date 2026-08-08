@@ -144,7 +144,7 @@ breaks §2.1 names its target rung and the plan block that moves it.
 - **Cost**:
   - residue: one `dlopen` and symbol lookup per model per Problem (cold); evaluation then runs through S2
   - change radius for one more HDL: 0 bodies (VerA's frontend)
-  - interface weight: `arp_abi_version`, `arp_layout_hash`, `arp_device`
+  - interface weight: `arp_abi_version`, `arp_layout_hash`, `arp_device`; host side, `loader.Error` (named, forwarding VerA's and std's sets by name) and `Library.LoadError`
 - **Drills passed**: D2 (the failure is in S3, not here)
 - **Proof**: n/a (rung 9); `layout_hash` refuses a mismatched `.so`
 - **Revisit when**: untrusted models must be sandboxed.

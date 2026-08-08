@@ -95,7 +95,7 @@ Full records: `dev/decisions.md`.
 - Every plane or parameter writer clears `Circuit.lin.x_ptr`/`lin.valid`.
 - A lane kernel's `W == 1` instantiation is its oracle; failed lanes peel to the scalar path.
 - **Target (P3):** no file-scope mutable state (today: converger env caches, `numerics.opaque_zero`, `gpu.zig driver_up`, `eval.zig staging_gpa`), and no `getenv` below the facade: environment knobs are read once into the execution `Config`.
-- **Target (P3):** no `anyerror` across a module boundary (today: espice.zig, session/worker, gpu, loader, prepare).
+- **Target (P3):** no `anyerror` across a module boundary (today: espice.zig, session/worker, gpu, prepare).
 
 ## Adding a feature
 
