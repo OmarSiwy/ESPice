@@ -146,8 +146,10 @@ const cost_margin: f64 = 1.3;
 const cost_min_ratio: f64 = 2.0;
 
 /// A context came up in this process, so the driver setup is paid. Queries
-/// on other threads may race on it; a stale read only overprices one query.
-var driver_up = false;
+/// on other threads read it while one sets it: monotonic is enough, since a
+/// stale read only overprices one query (#126).
+// ponytail: a process-wide fact as a global; it moves to its owner with the P3 global-state work.
+var driver_up: std.atomic.Value(bool) = .init(false);
 
 /// `ESPICE_GPU_STATS`: print the cost model's inputs and the residency split,
 /// and the wall-time split at teardown.
@@ -717,7 +719,7 @@ pub const GpuContext = struct {
             .prof = .{ .on = statsOn(), .phases = if (std.c.getenv("ESPICE_GPU_STATS")) |v| std.mem.eql(u8, std.mem.span(v), "phases") else false },
             .fuse = std.c.getenv("ESPICE_GPU_NOFUSE") == null,
         };
-        driver_up = true;
+        driver_up.store(true, .monotonic);
         // Swap the circuit onto the pinned planes, carrying their contents.
         copyPlanes(self.pinnedPlanes(0), ckt.ownPlanes());
         self.bindPlanes(0);
@@ -837,7 +839,7 @@ pub const GpuContext = struct {
     /// query with too few evals is declined before the probe.
     const Cost = struct {
         fn admit(gpa: std.mem.Allocator, ckt: *const Circuit, threads: u32, evals: f64) !void {
-            const init_us: f64 = if (driver_up) 0 else cost_init_us;
+            const init_us: f64 = if (driver_up.load(.monotonic)) 0 else cost_init_us;
             // The probe costs three host evals; a query with few more than
             // that cannot repay the setup.
             if (evals < 20) return decline(0, 0, "too few evals");
