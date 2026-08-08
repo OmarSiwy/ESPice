@@ -59,20 +59,37 @@ nothing beyond the repo-wide gates.
 
 ### Bugs found by the sweep (each gets an issue + regression test + oracle)
 
-1. `analysis/tran/matex.zig:65` loops forever when `norm_h` is inf.
-2. `device/eval.zig:1004 permuteInPlace` loops forever on a non-permutation.
-3. `analysis/par_eval.zig:403` spin-wait has no bound.
-4. `analysis/gpu.zig:150 driver_up` data race.
-5. C ABI: raw `*Handle`, so use-after-destroy / double destroy is UB; four
-   `catch unreachable` in `espice.zig deliverFrom` reachable from
-   `espice_advance*`.
-6. Docs promise asserts that do not exist (15 in frontend,
-   `Library.vtable`).
+| # | Bug | Status |
+|---|---|---|
+| 1 | `analysis/tran/matex.zig` expmSmall loops forever when H holds an inf | #125, fixed in P2 |
+| 2 | `device/eval.zig permuteInPlace` loops forever on a non-permutation | open; waits for #117 (eval.zig is being changed by another session) |
+| 3 | `analysis/par_eval.zig waitCount` spin has no iteration bound | not a bug: every lane runs infallible work and a dead worker panics the process, so the wait ends; it gets a comment stating the progress argument in P5. Its worker-spawn `@panic` on a thread failure is an operating error to return (P5) |
+| 4 | `analysis/gpu.zig driver_up` data race | #126, atomic in P2; the global moves to its owner in P3 |
+| 5 | C ABI raw handles (use-after-destroy is UB); `catch unreachable` in `espice.zig deliverFrom` reachable from `espice_advance*` | P3 (generational handles, named errors) |
+| 6 | Docs promise asserts that do not exist (15 in frontend, `Library.vtable`) | P5 |
+| 7 | `device/eval.zig dedupModels` `@memcpy` onto itself (UB; 99 aborts in a safety-checked build) | #122, fixed |
+| 8 | `analysis/tran/types.zig Column.from(len)` slices past a strided base | #123, fixed |
+| 9 | mosra test passes tolerance 0 to `expectApproxEqRel` | #124, fixed |
+
+7–9 were found by running the suites with safety checks on (Debug), which is
+why the gate now runs ReleaseSafe (AGENTS.md §2.5). Debug itself also shows
+self-hosted-backend divergence (#25): three numeric mismatches, a
+`pthread_create` EINVAL under `std.testing.io`, and a
+`NondeterministicMemoryUsage`; Debug joins the gate when #25 closes.
 
 ## Plan (step 3)
 
-Each phase lands as one-step commits with `zig build test` green and the
-corpus name lists unchanged.
+Each phase lands as one-step commits with `zig build test -Doptimize=ReleaseSafe`
+green and the corpus name lists unchanged. P3–P6 blocks run as agents in their
+own worktrees branched from `standard` (at most two building at once), merged
+back by name-list-checked gates.
+
+### Progress (2026-10-17)
+
+- P0 done: AGENTS.md, dev/principles.md, ARCHITECTURE.md, dev/decisions.md, GLOSSARY.md, TESTING.md.
+- P1 done: `checkModuleGraph`, tests/VERDICTS.tsv ratchet, tests/fitness.zig + FITNESS.tsv, tests/codegen.zig (`Dual.mul` IDENTICAL), CI test.yml. ReleaseFast stays the default (user); the gate runs ReleaseSafe.
+- P2: #122–#126 fixed; 2, 5, 6 scheduled as above.
+- P3 running: `p3-cycles` (core/device cycles, loader error set), `p3-solver` (S7 union, env knobs to Config).
 
 **P0 Adopt the standard (docs only).** AGENTS.md becomes the VerAReWrite
 standard with an ESPice §0.3 (Zig 0.17 via `nix develop`, ngspice/VACASK
