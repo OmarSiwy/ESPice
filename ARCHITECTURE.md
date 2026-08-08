@@ -31,12 +31,11 @@ handed) and `checkModuleGraph`, which panics at configure time on a cycle or
 on an edge `restricted_imports` forbids. Inside a module, `tests/fitness.zig`
 ratchets leaf → root imports against `tests/FITNESS.tsv`.
 
-Inside modules, two cycles exist today. **Target (P3):** none.
+Inside modules, one cycle exists today. **Target (P3):** none.
 
 | Cycle | Fix |
 |---|---|
 | `frontend/prepare.zig` ↔ `frontend/variants.zig` (through `buildRun`) | variants returns points; the prepare spine loops over them and calls `buildRun`. `buildRun` gets a named error set |
-| `device/root.zig` ↔ `Library.zig` ↔ `loader.zig` | catalog moves to a leaf `device/catalog.zig`; `loader` returns loaded vtables as values and `Library.register` consumes them |
 
 ## Spines
 

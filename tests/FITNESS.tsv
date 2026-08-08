@@ -13,12 +13,10 @@ else	src/analysis/tran/tran_noise.zig	1
 else	src/analysis/validate.zig	2
 else	src/c_api.zig	4
 else	src/core/query.zig	1
-root-import	src/device/Library.zig
 else	src/device/abi.zig	1
 else	src/device/bind.zig	2
 else	src/device/eval.zig	3
 else	src/device/loader.zig	2
-root-import	src/device/tests/catalog.zig
 else	src/espice.zig	4
 else	src/frontend/analyses.zig	22
 else	src/frontend/builder.zig	21

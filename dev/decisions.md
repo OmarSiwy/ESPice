@@ -139,7 +139,7 @@ breaks §2.1 names its target rung and the plan block that moves it.
 
 - **Axis**: plugin: `.hdl` Verilog-A/Verilog compiled at run time into a `.so`.
 - **Evidence**: runtime-loaded devices in `tests/fixtures/hdl/` today.
-- **Owner**: device (`src/device/loader.zig`, `Library.load`).
+- **Owner**: device. `src/device/loader.zig` compiles and opens (`prepareAll`), returning one `Prepared` value or error per file, and reads only the names already loaded; `Library.load` (`loadWith` for explicit paths) registers the values in file order. The loader does not import `Library.zig`, so the two no longer import each other (P3, 2026-10-17); registration stays with the table's owner.
 - **Rung**: 9, ABI boundary. Separately built code: it cannot be a build-time parameter.
 - **Cost**:
   - residue: one `dlopen` and symbol lookup per model per Problem (cold); evaluation then runs through S2

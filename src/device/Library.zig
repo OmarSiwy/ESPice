@@ -4,7 +4,7 @@
 //! HDL module appends one.
 const std = @import("std");
 const abi = @import("device_abi");
-const catalog = @import("root.zig");
+const catalog = @import("catalog.zig");
 const loader = @import("loader.zig");
 const build_options = @import("build_options");
 const DeviceType = abi.DeviceType;
@@ -146,7 +146,7 @@ pub fn load(self: *Library, io: std.Io, files: []const []const u8) !void {
         if (!@import("builtin").is_test) std.log.warn("hdl: {s} holds no device/eval.zig; point the toolchain share path at the share/espice directory zig build installs", .{share});
         return error.HdlShareNotFound;
     }
-    try loader.ensureAllLoaded(self, io, files, if (installed) .{
+    try self.loadWith(io, files, if (installed) .{
         .work_dir = work_dir,
         .contract = try std.fs.path.join(a, &.{ share, "vera", "tools", "contract.zig" }),
         .dyn = try std.fs.path.join(a, &.{ share, "device", "eval.zig" }),
@@ -165,6 +165,24 @@ pub fn load(self: *Library, io: std.Io, files: []const []const u8) !void {
         .stdpp = build_options.stdpp_path,
         .zig = zig,
     });
+}
+
+/// `load` against explicit build paths: compiles and opens every file not
+/// loaded yet in parallel (`loader.prepareAll`), then registers the results
+/// in `files` order. The first error wins; nothing is registered after it.
+pub fn loadWith(self: *Library, io: std.Io, files: []const []const u8, paths: loader.BuildPaths) !void {
+    var arena_state: std.heap.ArenaAllocator = .init(self.gpa);
+    defer arena_state.deinit();
+    // A source named twice, here or in an earlier call, compiles once.
+    const todo = try loader.pending(self.sources.items, arena_state.allocator(), files);
+    const results = try self.gpa.alloc(loader.Result, todo.files.len);
+    defer self.gpa.free(results);
+    try loader.prepareAll(self.gpa, io, todo.files, self.names.items[builtin_count..], paths, results);
+    try self.sources.ensureUnusedCapacity(self.gpa, todo.resolved.len);
+    for (results, todo.resolved) |result, resolved| {
+        if (try result) |prepared| _ = try self.register(prepared.name(), prepared.vtable, prepared.digital);
+        self.sources.appendAssumeCapacity(try self.gpa.dupe(u8, resolved));
+    }
 }
 
 /// The runtime HDL build cache: `$ESPICE_CACHE/hdl`, else
