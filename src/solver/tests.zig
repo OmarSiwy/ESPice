@@ -68,7 +68,7 @@ fn identity(comptime n: usize) [n]u32 {
     return q;
 }
 
-fn checkSolve(comptime n: usize, a: [n][n]f64, b: [n]f64, lu: *@import("root.zig").sparse_lu.SparseLu) !void {
+fn checkSolve(comptime n: usize, a: [n][n]f64, b: [n]f64, lu: *@import("sparse_lu.zig").SparseLu) !void {
     var x: [n]f64 = undefined;
     lu.solve(&b, &x);
     const xref = denseSolve(n, a, b);
@@ -76,13 +76,13 @@ fn checkSolve(comptime n: usize, a: [n][n]f64, b: [n]f64, lu: *@import("root.zig
 }
 
 const BbdTests = struct {
-    const impl = @import("root.zig").bbd;
+    const impl = @import("bbd.zig");
     const Allocator = std.mem.Allocator;
     const Bbd = impl.Bbd;
     const Limits = impl.Limits;
     const root = @import("core").numerics;
 
-    const direct = @import("root.zig").direct;
+    const direct = @import("direct.zig");
 
     /// Synthetic BBD system: ground node 0, `nb` blocks of size `s`, `ncpl`
     /// coupling nodes at the end. Deterministic values from a seeded PRNG;
@@ -406,7 +406,7 @@ const BbdTests = struct {
 };
 
 const ConvergerTests = struct {
-    const impl = @import("root.zig").converger;
+    const impl = @import("converger.zig");
     const Workspace = impl.Workspace;
     const jfnk = impl.jfnk;
     const newton = impl.newton;
@@ -758,7 +758,7 @@ const ConvergerTests = struct {
 };
 
 const DenseLuTests = struct {
-    const impl = @import("root.zig").dense_lu;
+    const impl = @import("dense_lu.zig");
     const buildComplexAdmittance = impl.buildComplexAdmittance;
     const factorize = impl.factorize;
     const factorizeSolve = impl.factorizeSolve;
@@ -1023,10 +1023,10 @@ const DenseLuTests = struct {
 };
 
 const DirectTests = struct {
-    const impl = @import("root.zig").direct;
+    const impl = @import("direct.zig");
     const Allocator = std.mem.Allocator;
     const Solver = impl.Solver;
-    const sparse_lu = @import("root.zig").sparse_lu;
+    const sparse_lu = @import("sparse_lu.zig");
 
     test "solver construction releases storage on every allocation failure" {
         try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
@@ -1063,7 +1063,7 @@ const DirectTests = struct {
 };
 
 const FftTests = struct {
-    const impl = @import("root.zig").fft;
+    const impl = @import("fft.zig");
     const fft = impl.fft;
     const ifft = impl.ifft;
     const math = std.math;
@@ -1213,9 +1213,9 @@ const FftTests = struct {
 };
 
 const FreqSolveTests = struct {
-    const impl = @import("root.zig").freq_solve;
+    const impl = @import("freq_solve.zig");
     const FreqSolver = impl.FreqSolver;
-    const dense_lu = @import("root.zig").dense_lu;
+    const dense_lu = @import("dense_lu.zig");
 
     test "FreqSolver: single-shot solve (dense, 2x2)" {
         // System: (G + jωC) x = b in stacked-real form.
@@ -1500,7 +1500,7 @@ const FreqSolveTests = struct {
         // SparseLu refactor of `setOmegaSparse`'s values, lane by lane, and
         // so does its W = 1 instantiation: the solves agree exactly (equal
         // as values; a zero may differ in sign, see `LaneLu.solve`).
-        const lane_lu = @import("root.zig").lane_lu;
+        const lane_lu = @import("lane_lu.zig");
         const b_lane = try allocator.alloc(@Vector(W, f64), nn2);
         defer allocator.free(b_lane);
         const x_lane = try allocator.alloc(@Vector(W, f64), nn2);
@@ -1652,7 +1652,7 @@ const FreqSolveTests = struct {
         // at w = 0, so neither tape replays the other and those lanes peel to
         // the serial path.
         const allocator = testing.allocator;
-        const lane_lu = @import("root.zig").lane_lu;
+        const lane_lu = @import("lane_lu.zig");
         const ta = FreqSolver.test_access;
         const W = ta.W;
         const n: u32 = 20;
@@ -1702,7 +1702,7 @@ const FreqSolveTests = struct {
 };
 
 const GmresTests = struct {
-    const impl = @import("root.zig").gmres;
+    const impl = @import("gmres.zig");
     const Gmres = impl.Gmres;
 
     fn denseMatvec(a: []const f64, n: usize, v: []const f64, w: []f64) void {
@@ -1979,10 +1979,10 @@ const GmresTests = struct {
 };
 
 const LaneLuTests = struct {
-    const impl = @import("root.zig").lane_lu;
+    const impl = @import("lane_lu.zig");
     const Allocator = std.mem.Allocator;
     const LaneLu = impl.LaneLu;
-    const sparse_lu = @import("root.zig").sparse_lu;
+    const sparse_lu = @import("sparse_lu.zig");
 
     test "LaneLu construction releases storage on every allocation failure" {
         const gpa = testing.allocator;
@@ -2249,7 +2249,7 @@ const LaneLuTests = struct {
 };
 
 const OrderTests = struct {
-    const impl = @import("root.zig").order;
+    const impl = @import("order.zig");
     const Ws = impl.Ws;
     const amd = impl.amd;
     const order = impl.order;
@@ -2449,11 +2449,11 @@ const OrderTests = struct {
 };
 
 const SparseTests = struct {
-    const impl = @import("root.zig").sparse_lu;
+    const impl = @import("sparse_lu.zig");
     const Allocator = std.mem.Allocator;
     const SparseLu = impl.SparseLu;
 
-    const order = @import("root.zig").order;
+    const order = @import("order.zig");
 
     test "3x3: factor + solve verified against dense reference" {
         const gpa = testing.allocator;
@@ -3069,7 +3069,7 @@ const SparseTests = struct {
 };
 
 const TridiagTests = struct {
-    const impl = @import("root.zig").tridiag;
+    const impl = @import("tridiag.zig");
     const TriDiag = impl.TriDiag;
     const isTridiag = impl.isTridiag;
 
@@ -3126,9 +3126,9 @@ const TridiagTests = struct {
 /// on one thread (every ticket in order) and on four (real waits).
 /// dev/solvers/gpu-lu.md §4.6.
 const LuKernelTests = struct {
-    const SparseLu = @import("root.zig").sparse_lu.SparseLu;
-    const K = @import("root.zig").lu_kernels;
-    const order = @import("root.zig").order;
+    const SparseLu = @import("sparse_lu.zig").SparseLu;
+    const K = @import("lu_kernels.zig");
+    const order = @import("order.zig");
 
     const Case = struct {
         n: u32,

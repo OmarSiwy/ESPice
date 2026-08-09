@@ -35,7 +35,6 @@ else	src/output/measure.zig	12
 else	src/output/types.zig	1
 else	src/output/write.zig	2
 else	src/solver/lane_lu.zig	1
-root-import	src/solver/tests.zig
 else	src/solver/tests.zig	2
 else	src/tests/c_api.zig	1
 else	tests/benchmark/runner.zig	2
