@@ -4,25 +4,41 @@
 //! Each point re-evaluates the netlist's live values (no re-parse),
 //! rebinds the devices and keeps only the parameters that moved, as
 //! `core.Variants` rows the executor writes through `ParamRef`. A point
-//! whose topology or model bins move becomes its own `Prepared` run.
+//! whose topology moves becomes a `Rebuild` request, which the prepare
+//! spine builds as its own run; a live value whose model bins move becomes
+//! a new template (`Tuning`).
 const std = @import("std");
 const core = @import("core");
 const device = @import("device");
 const netlist = @import("netlist");
 const builder = @import("builder");
 const analyses = @import("analyses.zig");
-const prepare = @import("prepare.zig");
 const expr = netlist.expr;
 const Netlist = netlist.Netlist;
 const ParamRef = device.abi.ParamRef;
 
 /// A run's variants: the table, how each card fans out over it, and the
-/// points that needed their own circuit.
+/// runs that need their own circuit, for the caller to build in order.
 pub const Plan = struct {
     variants: core.Variants = .{},
     fanout: analyses.Fanout = .{},
-    runs: []prepare.Prepared = &.{},
+    rebuilds: []const Rebuild = &.{},
 };
+
+/// Which run of a deck `prepare.buildRun` builds.
+pub const Run = struct {
+    /// Label of the run's rows: `alter=2`, or a rebuilt point's own.
+    prefix: []const u8 = "",
+    /// A point whose circuit differs from the nominal one: the run sets
+    /// its live values before it builds, and the run is that one row.
+    point: ?Point = null,
+    /// The point belongs to this analysis card's sweep alone.
+    card: ?u32 = null,
+};
+
+/// A run the plan could not hold as rows: an `.alter` netlist, or the
+/// planned netlist at one point. Both live in the planner's scratch arena.
+pub const Rebuild = struct { nl: *const Netlist, run: Run };
 
 /// What one point sets, before it becomes a row.
 pub const Point = struct {
@@ -49,7 +65,7 @@ pub fn any(deck: netlist.Deck) bool {
 
 /// Plans every variant of `p`'s deck: each card's own sweep, then the
 /// `.step` grid, then the `.alter` runs, as rows over `p.nominal` and runs
-/// of their own where the topology moves. `p.prefix` labels an `.alter`
+/// to rebuild where the topology moves. `p.prefix` labels an `.alter`
 /// run's rows. `p.nl`'s live values are nominal again on success.
 /// `UnsupportedCard` for a combination the plan cannot hold (SWEEP with
 /// `.step`, a DC ensemble whose topology moves, a trial number past u32).
@@ -66,7 +82,7 @@ pub fn plan(p: *Planner) !Plan {
         if (deck.steps.len != 0) return p.refuse(a.line, "SWEEP together with .step");
         swept = true;
         span.first = p.count();
-        const runs_before = p.runs.items.len;
+        const runs_before = p.rebuilds.items.len;
         const lanes = a.kind == .dc and a.args.len == 0;
         // Only Monte Carlo keeps the nominal run beside its trials.
         span.nominal = a.sweep == .monte and !lanes;
@@ -95,19 +111,22 @@ pub fn plan(p: *Planner) !Plan {
             .monte => |m| if (m.list.len != 0) {
                 // A listed trial t is trial t of a `MONTE=max` run, Latin
                 // hypercube stratum included.
-                var sampler = try Sampler.init(p.scratch, deck.config, std.mem.max(u32, m.list));
-                for (m.list) |t| try p.addTrial(&sampler, t, t - 1);
+                // A rebuilt trial draws from it after `plan` returns.
+                const sampler = try p.scratch.create(Sampler);
+                sampler.* = try .init(p.scratch, deck.config, std.mem.max(u32, m.list));
+                for (m.list) |t| try p.addTrial(sampler, t, t - 1);
                 if (lanes) span.lanes = .{ .axis = "run", .dc_plot = false };
             } else {
-                var sampler = try Sampler.init(p.scratch, deck.config, m.n);
+                const sampler = try p.scratch.create(Sampler);
+                sampler.* = try .init(p.scratch, deck.config, m.n);
                 if (m.n > std.math.maxInt(u32) - m.first + 1) return p.refuse(a.line, "a MONTE trial number past 4294967295");
-                for (0..m.n) |k| try p.addTrial(&sampler, m.first + @as(u32, @intCast(k)), @intCast(k));
+                for (0..m.n) |k| try p.addTrial(sampler, m.first + @as(u32, @intCast(k)), @intCast(k));
                 if (lanes) span.lanes = .{ .axis = "run", .dc_plot = false };
             },
         }
         p.card = null;
         span.count = p.count() - span.first;
-        if (lanes and p.runs.items.len != runs_before) return p.refuse(a.line, "a DC ensemble point that changes the topology");
+        if (lanes and p.rebuilds.items.len != runs_before) return p.refuse(a.line, "a DC ensemble point that changes the topology");
     }
     if (swept) fanout.cards = try p.sim.dupe(analyses.Fanout.Span, card_spans);
     if (deck.steps.len != 0) {
@@ -130,11 +149,11 @@ pub fn plan(p: *Planner) !Plan {
         fanout.global = .{ .first = 0, .count = 1, .nominal = false };
     }
     _ = try nl.setLive(p.scratch, &p.stack, nl.live.nominal, null);
-    return .{ .variants = try p.table(), .fanout = fanout, .runs = try p.sim.dupe(prepare.Prepared, p.runs.items) };
+    return .{ .variants = try p.table(), .fanout = fanout, .rebuilds = p.rebuilds.items };
 }
 
 /// Planning state: the netlist, the nominal circuit's parameters, and the
-/// rows and runs so far.
+/// rows and rebuilds so far.
 pub const Planner = struct {
     lib: *const device.Library,
     sim: std.mem.Allocator,
@@ -153,7 +172,7 @@ pub const Planner = struct {
     starts: std.ArrayList(u32) = .empty,
     write_refs: std.ArrayList(u32) = .empty,
     write_values: std.ArrayList(f64) = .empty,
-    runs: std.ArrayList(prepare.Prepared) = .empty,
+    rebuilds: std.ArrayList(Rebuild) = .empty,
     /// (type, parameter) to the ordinal of its instance 0, for card and
     /// variation writes.
     by_name: std.StringHashMapUnmanaged(u32) = .empty,
@@ -246,7 +265,7 @@ pub const Planner = struct {
                 try std.fmt.allocPrint(p.scratch, "optimize={s}, {s}", .{ deck.optimize.?.name, pt.label });
             try p.add(row);
         };
-        if (p.runs.items.len != 0) return p.refuse(deck.analyses[card.?].line, "OPTIMIZE over a .step point that changes the topology");
+        if (p.rebuilds.items.len != 0) return p.refuse(deck.analyses[card.?].line, "OPTIMIZE over a .step point that changes the topology");
         return .{ .variants = try p.table(), .fanout = .{ .cards = spans } };
     }
 
@@ -333,8 +352,8 @@ pub const Planner = struct {
     }
 
     /// `.alter` run `k`. Without variants of its own, a run whose circuit
-    /// matches the nominal one becomes a row; otherwise it is a separate
-    /// run that plans its own variants.
+    /// matches the nominal one becomes a row; otherwise it is a rebuild
+    /// that plans its own variants.
     fn addAlter(p: *Planner, text: []const u8, k: usize, own: bool) !void {
         const label = try std.fmt.allocPrint(p.sim, "alter={d}", .{k});
         const alt = try p.scratch.create(Netlist);
@@ -349,11 +368,11 @@ pub const Planner = struct {
                 return p.closeRow(label, @floatFromInt(k), null);
             }
         }
-        try p.runs.append(p.scratch, try prepare.buildRun(p.lib, p.sim, p.scratch, alt, .{ .prefix = label }));
+        try p.rebuilds.append(p.scratch, .{ .nl = alt, .run = .{ .prefix = label } });
     }
 
-    /// Turns `pt` into a row, or into a run of its own when its live
-    /// values change the topology or storage `ParamRef` cannot reach.
+    /// Turns `pt` into a row, or into a rebuild when its live values
+    /// change the topology or storage `ParamRef` cannot reach.
     pub fn add(p: *Planner, pt: Point) !void {
         const label = if (p.prefix.len == 0) try p.sim.dupe(u8, pt.label) else try std.fmt.allocPrint(p.sim, "{s}, {s}", .{ p.prefix, pt.label });
         if (try p.load(pt, label) == .circuit) return p.addRun(label, pt);
@@ -412,9 +431,7 @@ pub const Planner = struct {
     }
 
     fn setLive(p: *Planner, pt: Point) !void {
-        if (pt.trial) |t| {
-            _ = try p.nl.setLive(p.scratch, &p.stack, pt.live, TrialDraw{ .trial = t });
-        } else _ = try p.nl.setLive(p.scratch, &p.stack, pt.live, null);
+        try setPoint(p.scratch, &p.stack, p.nl, pt);
     }
 
     /// Finds, with one rebuild at perturbed live values, whether every
@@ -474,9 +491,9 @@ pub const Planner = struct {
         try p.starts.append(p.scratch, @intCast(p.write_refs.items.len));
     }
 
-    /// A point with its own circuit, built from the netlist as `pt` left it.
+    /// A point with its own circuit, rebuilt from the netlist at `pt`.
     fn addRun(p: *Planner, label: []const u8, pt: Point) !void {
-        try p.runs.append(p.scratch, try prepare.buildRun(p.lib, p.sim, p.scratch, p.nl, .{ .prefix = label, .point = pt, .card = p.card }));
+        try p.rebuilds.append(p.scratch, .{ .nl = p.nl, .run = .{ .prefix = label, .point = pt, .card = p.card } });
     }
 
     /// Appends a write for every parameter `c` holds at another value;
@@ -683,7 +700,7 @@ pub const Tuner = struct {
         while (at < points.len) : (at += n) {
             for (t.spec.live, points[at..][0..n]) |k, v| live[k] = v;
             try p.add(.{ .label = "", .axis = 0, .live = live, .temp = b.temp, .cards = b.cards });
-            if (p.runs.items.len != 0) return p.refuse(p.nl.deck.analyses[t.card].line, "an optimized value that changes the topology");
+            if (p.rebuilds.items.len != 0) return p.refuse(p.nl.deck.analyses[t.card].line, "an optimized value that changes the topology");
         }
         return p.table();
     }
@@ -1031,6 +1048,14 @@ pub const Sampler = struct {
         return perm;
     }
 };
+
+/// Sets `nl`'s live values to `pt`'s, drawing its Monte Carlo trial if it
+/// has one. `stack` is evaluation scratch, grown with `scratch`.
+pub fn setPoint(scratch: std.mem.Allocator, stack: *std.ArrayList(expr.Val), nl: *const Netlist, pt: Point) !void {
+    if (pt.trial) |t| {
+        _ = try nl.setLive(scratch, stack, pt.live, TrialDraw{ .trial = t });
+    } else _ = try nl.setLive(scratch, stack, pt.live, null);
+}
 
 /// Draws every distribution site of `nl` once, as trial 1 of the deck's
 /// `.option seed`, into its live values (`Deck.draw_seed`). `scratch` holds

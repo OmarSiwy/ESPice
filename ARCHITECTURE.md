@@ -31,24 +31,24 @@ handed) and `checkModuleGraph`, which panics at configure time on a cycle or
 on an edge `restricted_imports` forbids. Inside a module, `tests/fitness.zig`
 ratchets leaf → root imports against `tests/FITNESS.tsv`.
 
-Inside modules, one cycle exists today. **Target (P3):** none.
-
-| Cycle | Fix |
-|---|---|
-| `frontend/prepare.zig` ↔ `frontend/variants.zig` (through `buildRun`) | variants returns points; the prepare spine loops over them and calls `buildRun`. `buildRun` gets a named error set |
+Inside modules, no file imports one that imports it back. The last such
+cycle, `frontend/prepare.zig` ↔ `variants.zig`, went in P3: the plan
+returns the runs it needs rebuilt (`variants.Rebuild`), and `buildRun`
+builds each.
 
 ## Spines
 
 - **Problem** (`espice.zig Problem.init`): `frontend.prepare` → `analysis.Session.init` → `Session.append(queries)` → `runSession` (advance until finished) → `output.write` per result.
 - **Prepare** (`frontend/prepare.zig prepare`): `source.splitAlters` → `source.expand` → `netlist.parse` → `loadModels` (device `Library.load`) → `loadData` → `buildRun` per run.
-- **Build one run** (`prepare.buildRun`): `analyses.deckOptions` → `Builder.init` → `NetBuilder.build` → `tagSubcircuitNodes` → `addDynDevices` → `Builder.compilePerm` (`device.Circuit.freeze`) → `NetBuilder.publish` → resolve analysis rows → variant `Planner` → `analyses.queries`.
+- **Build one run** (`prepare.buildRun`): `variants.setPoint` (a rebuilt point) → `buildOne` → `buildRun` per `variants.Rebuild` the plan returned → `setPoint` back to nominal.
+- **One run's circuit** (`prepare.buildOne`): `analyses.deckOptions` → `Builder.init` → `NetBuilder.build` → `tagSubcircuitNodes` → `addDynDevices` → `Builder.compilePerm` (`device.Circuit.freeze`) → `NetBuilder.publish` → resolve analysis rows → variant `Planner` → `analyses.queries`.
 - **Query** (`analysis/executor.zig run`): `module(kind).run(ctx, job)`, one comptime-dispatched leaf per analysis kind (`dc/op`, `ac/*`, `tran/*`, `pss/*`, `sweep/*`, `post/*`, `eigen/pz`).
 - **Newton step** (`solver/converger.zig newton`): `hook.assemble` (→ `Circuit.evalNewton` → device `Batch.eval` per batch) → gmin and force stamps → `normInf(rhs)` → `loadCheck` → `direct.Solver.factor`/`refactor` → `solveNeg` → limit and update `x` → convergence test.
 - **Transient step** (`analysis/tran/tran.zig simulate`): `integrator.companionAt` → Newton → `integrator.stepBound` (LTE) → accept (`advanceCurrent`) or reject and shrink.
 - **Frequency sweep** (`analysis/ac/freq.zig`): `FreqSolver.setOmega` per lane block → `LaneLu(W)` replay of one pivot tape → `solveBatch` → per-lane failure mask → scalar peel.
 
 The spines are written down here but not yet one-line-per-transform in code
-everywhere: `buildRun` and `converger.newton` interleave transforms with
+everywhere: `buildOne` and `converger.newton` interleave transforms with
 which-work branches. **Target (P3/P6):** the which-work branches move into
 the spine as named lines; transforms become straight loops.
 
@@ -95,7 +95,7 @@ Full records: `dev/decisions.md`.
 - Every plane or parameter writer clears `Circuit.lin.x_ptr`/`lin.valid`.
 - A lane kernel's `W == 1` instantiation is its oracle; failed lanes peel to the scalar path.
 - **Target (P3):** no file-scope mutable state (today: converger env caches, `numerics.opaque_zero`, `gpu.zig driver_up`, `eval.zig staging_gpa`), and no `getenv` below the facade: environment knobs are read once into the execution `Config`.
-- **Target (P3):** no `anyerror` across a module boundary (today: espice.zig, session/worker, gpu, prepare).
+- **Target (P3):** no `anyerror` across a module boundary (today: espice.zig, session/worker, gpu).
 
 ## Adding a feature
 

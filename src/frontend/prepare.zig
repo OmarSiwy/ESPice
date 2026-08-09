@@ -166,21 +166,49 @@ pub fn build(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_are
 }
 
 /// Which run of a deck `buildRun` builds.
-pub const Run = struct {
-    /// Label of the run's rows: `alter=2`, or a rebuilt point's own.
-    prefix: []const u8 = "",
-    /// A point whose circuit differs from the nominal one: `nl` already
-    /// holds its live values, and the run is that one row.
-    point: ?variants.Point = null,
-    /// The point belongs to this analysis card's sweep alone.
-    card: ?u32 = null,
-};
+pub const Run = variants.Run;
+
+/// What `buildRun` can fail with: the errors of the stages one run goes
+/// through (`buildOne`, and setting a point's live values), each raised and
+/// logged with its card by the stage that owns it. A failed build releases
+/// every circuit it froze; its slices stay in the arenas until they die.
+pub const BuildError = ErrorOf(buildOne) || ErrorOf(variants.setPoint);
+
+fn ErrorOf(comptime f: anytype) type {
+    return @typeInfo(@typeInfo(@TypeOf(f)).@"fn".return_type.?).error_union.error_set;
+}
 
 /// `build` for one run of the deck in `nl`, which must outlive the result
 /// when the deck has an HSPICE optimization (`Prepared.tuner` borrows it).
-/// `CircuitTooLarge` when the deck has more analysis cards than a u32 job
-/// index can fan out.
-pub fn buildRun(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_arena: std.mem.Allocator, nl: *const netlist.Netlist, run: Run) anyerror!Prepared {
+/// A `run.point` sets `nl`'s live values first; they are nominal again
+/// when a run with rebuilt points returns.
+pub fn buildRun(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_arena: std.mem.Allocator, nl: *const netlist.Netlist, run: Run) BuildError!Prepared {
+    var stack: std.ArrayList(netlist.expr.Val) = .empty;
+    if (run.point) |pt| try variants.setPoint(parse_arena, &stack, nl, pt);
+    var one = try buildOne(lib, sim_arena, parse_arena, nl, run);
+    errdefer one.prepared.deinit();
+    // Points the plan could not hold as rows, each its own run. A rebuilt
+    // `.alter` netlist has no `.alter` of its own and a point run plans no
+    // rebuilds, so this recursion is at most two runs deep.
+    const runs = try sim_arena.alloc(Prepared, one.rebuilds.len);
+    var built: usize = 0;
+    errdefer for (runs[0..built]) |*r| r.deinit();
+    for (one.rebuilds, runs) |r, *dst| {
+        dst.* = try buildRun(lib, sim_arena, parse_arena, r.nl, r.run);
+        built += 1;
+    }
+    for (one.rebuilds) |r| if (r.run.point != null) {
+        try variants.setPoint(parse_arena, &stack, nl, .{ .label = "", .axis = 0, .live = nl.live.nominal });
+        break;
+    };
+    one.prepared.runs = runs;
+    return one.prepared;
+}
+
+/// One run without its rebuilt points: the prepared run and the runs its
+/// plan asks for. `CircuitTooLarge` when the deck has more analysis cards
+/// than a u32 job index can fan out.
+fn buildOne(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_arena: std.mem.Allocator, nl: *const netlist.Netlist, run: Run) !struct { prepared: Prepared, rebuilds: []const variants.Rebuild } {
     if (nl.deck.analyses.len > (std.math.maxInt(u32) - 1) / 3) return error.CircuitTooLarge;
     const deck_opts = try analyses.deckOptions(nl.deck.config, nl.deck.dialect);
     var b = try Builder.init(sim_arena, lib);
@@ -267,7 +295,7 @@ pub fn buildRun(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_
         if (!@import("builtin").is_test) std.log.err("netlist: .mosra needs a .tran to stress the devices: {s}", .{nl.deck.mosra.?.line});
         return error.UnsupportedCard;
     };
-    return .{ .circuit = circuit, .runs = plan.runs, .tuner = tuner, .tuning = tuning, .deck = .{
+    return .{ .rebuilds = plan.rebuilds, .prepared = .{ .circuit = circuit, .tuner = tuner, .tuning = tuning, .deck = .{
         .probes = out.probes,
         .probe_labels = out.probe_labels,
         .source_node = out.source_node,
@@ -294,7 +322,7 @@ pub fn buildRun(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_
             break :blk own;
         } else null,
         .stims = try stims(sim_arena, nl.deck.stims),
-    } };
+    } } };
 }
 
 /// `.stim` cards with their strings copied out of the parse arena.
