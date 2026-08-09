@@ -342,7 +342,7 @@ pub fn build(b: *std.Build) void {
     // pulls in its siblings. The Verilog-A conformance oracles live in VerA
     // (`zig build conformance`, `zig build exhaustive` there).
     const test_step = b.step("test", "Run every suite and the numeric SPICE fixtures");
-    const t: HostTest = .{ .b = b, .exe = exe, .objs = host_objs };
+    const t: HostTest = .{ .b = b, .exe = exe, .objs = host_objs, .check = b.step("check", "Type-check every test root without emitting binaries (use with --watch -fincremental)") };
 
     const c_api_test_mod = M.make(b.path("src/tests/c_api.zig"), &.{.{ .name = "espice_h", .module = espice_h }});
     c_api_test_mod.link_libc = true;
@@ -690,8 +690,27 @@ const HostTest = struct {
     b: *std.Build,
     exe: *std.Build.Step.Compile,
     objs: []const *std.Build.Step.Compile,
+    /// `zig build check`: every test root compiled with no binary, so
+    /// `zig build check --watch -fincremental` reports compile errors
+    /// within seconds of an edit. Nothing may request these outputs.
+    check: *std.Build.Step,
 
     fn run(self: HostTest, m: *std.Build.Module, extra: []const std.Build.Module.Import, devices: bool) *std.Build.Step.Run {
+        // Semantic analysis only: no device objects, no LLVM.
+        // Include dirs stay out: a linked library's headers would build it.
+        const check_test = self.b.addTest(.{ .name = "check", .root_module = self.copy(m, extra), .use_llvm = false });
+        self.check.dependOn(&check_test.step);
+
+        const mod = self.copy(m, extra);
+        mod.link_objects.appendSlice(self.b.allocator, m.link_objects.items) catch @panic("OOM");
+        mod.include_dirs.appendSlice(self.b.allocator, m.include_dirs.items) catch @panic("OOM");
+        if (devices) for (self.objs) |o| mod.addObject(o);
+        const t = self.b.addTest(.{ .root_module = mod, .use_llvm = self.exe.use_llvm, .use_lld = self.exe.use_lld });
+        return self.b.addRunArtifact(t);
+    }
+
+    /// A fresh module with `m`'s root, settings and imports plus `extra`.
+    fn copy(self: HostTest, m: *std.Build.Module, extra: []const std.Build.Module.Import) *std.Build.Module {
         const mod = self.b.createModule(.{
             .root_source_file = m.root_source_file,
             .target = m.resolved_target,
@@ -704,11 +723,7 @@ const HostTest = struct {
         for (extra) |e| mod.addImport(e.name, e.module);
         // `emitKernels` wires `gompute_kernels` into the exe's root module only.
         if (self.exe.root_module.import_table.get("gompute_kernels")) |k| mod.addImport("gompute_kernels", k);
-        mod.link_objects.appendSlice(self.b.allocator, m.link_objects.items) catch @panic("OOM");
-        mod.include_dirs.appendSlice(self.b.allocator, m.include_dirs.items) catch @panic("OOM");
-        if (devices) for (self.objs) |o| mod.addObject(o);
-        const t = self.b.addTest(.{ .root_module = mod, .use_llvm = self.exe.use_llvm, .use_lld = self.exe.use_lld });
-        return self.b.addRunArtifact(t);
+        return mod;
     }
 };
 

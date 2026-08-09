@@ -58,6 +58,7 @@ Status: **have** (exists, with file), **gap** (plan block that adds it).
 
 | Tier | Budget | Runs | Command |
 |---|---|---|---|
+| Edit loop | < 1 s | `zig build check --watch -fincremental`: semantic analysis of every test root, no binaries | `nix develop -c zig build check -Dgpu=false --watch -fincremental` |
 | Local | < 10 s per touched module | `zig build test-<suite>` for the touched module (`zig build --help` lists them) | `nix develop -c zig build test-solver` etc. |
 | Merge | < 15 min | full `zig build test` (units + corpus) in ReleaseSafe, `-Dgpu=false`; verdict ratchet; fuzz corpus replay; probes; fitness functions. Debug joins when #25 (self-hosted backend divergence) closes | `.github/workflows/test.yml` |
 | Nightly | hours | long fuzz per target; metamorphic suite; `zig build test-gpu` on the NVIDIA runner; `zig build bench` with thresholds | P4/P6 |

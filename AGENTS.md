@@ -379,6 +379,7 @@ Every performance claim ships with a measured before/after in the commit message
 ### 2.14 Verification
 
 - `zig build && zig build test -Doptimize=ReleaseSafe` after every step (§2.5). `zig build test` runs the unit suites, the codegen probes, the fitness check and then the numeric corpus; its exit code is the gate (in Zig 0.17 output, `run test w` with a `failed command:` line only shows a step's stderr), and `tests/VERDICTS.tsv` is the name list it must keep (§2.7).
+- While editing, keep `nix develop -c zig build check -Dgpu=false --watch -fincremental` running in the worktree: it type-checks every test root without binaries, about a minute for the first pass, then under a second per edit. It catches compile errors only; the gate is still the ReleaseSafe `zig build test`.
 - A CPU-only build (`-Dgpu=false`) compiles much faster and is enough for host-only changes (§2.9 names the exceptions).
 - A frontend change that alters what a syntax means updates its grammar in `tests/grammar/*.peg` first; `zig build test-grammar` (part of `zig build test`) fails on any disagreement, one-sided refusal or unmatched grammar alternative (dev/frontend.md, "Grammar oracle").
 - Every example under `docs/examples/` must still run.
