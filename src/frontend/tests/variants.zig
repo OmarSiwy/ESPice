@@ -170,3 +170,46 @@ test "a MONTE run whose trial numbers pass u32 is refused, not wrapped" {
     const past = try netlist.parse(pa.allocator(), try std.fmt.allocPrint(pa.allocator(), deck, .{"4294967294"}), .hspice);
     try t.expectError(error.UnsupportedCard, input.build(&lib, sa.allocator(), pa.allocator(), past));
 }
+
+/// The first parameter called `name` in each rebuilt run of `prepared`.
+fn rebuilt(gpa: std.mem.Allocator, prepared: input.Prepared, name: []const u8) ![]const f64 {
+    const out = try gpa.alloc(f64, prepared.runs.len);
+    for (prepared.runs, out) |run, *r| {
+        const refs = try variants.collect(gpa, &run.circuit);
+        r.* = for (refs) |ref| {
+            if (std.mem.eql(u8, ref.param_name, name)) break ref.get();
+        } else return error.TestUnexpectedResult;
+    }
+    return out;
+}
+
+test "points a B source reads rebuild as runs of their own, at their own values" {
+    var sa = std.heap.ArenaAllocator.init(t.allocator);
+    defer sa.deinit();
+    var pa = std.heap.ArenaAllocator.init(t.allocator);
+    defer pa.deinit();
+    var lib = try device.Library.init(t.allocator);
+    defer lib.deinit();
+    // `g` folds into the B tape's constant pool, so no ParamRef reaches it.
+    const step = try netlist.parse(pa.allocator(),
+        \\step rebuild
+        \\.param g=1
+        \\v1 a 0 1
+        \\bout out 0 v=g*v(a)
+        \\r1 out 0 '1k*g'
+        \\.step param g list 1 2 3
+        \\.op
+        \\.end
+    , .ngspice);
+    var stepped = try input.build(&lib, sa.allocator(), pa.allocator(), step);
+    defer stepped.deinit();
+    // The nominal point stays a row; the two others rebuild.
+    try t.expectEqual(@as(u32, 1), stepped.deck.variants.count());
+    try t.expectEqual(@as(usize, 2), stepped.runs.len);
+    try t.expectEqualStrings("g=2", stepped.runs[0].deck.variants.labels[0]);
+    try t.expectEqualStrings("g=3", stepped.runs[1].deck.variants.labels[0]);
+    try t.expectEqualSlices(f64, &.{ 2e3, 3e3 }, try rebuilt(pa.allocator(), stepped, "r"));
+    // The netlist holds its nominal values again.
+    try t.expectEqual(@as(f64, 1e3), step.live.slots[0].num);
+    try t.expectEqual(@as(f64, 1), step.consts[step.live.pool_rows[0]]);
+}
