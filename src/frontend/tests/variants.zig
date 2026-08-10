@@ -47,7 +47,7 @@ fn expectFastMatchesRebuild(src: []const u8, fast_expected: bool) !void {
     defer pa.deinit();
     var lib = try device.Library.init(t.allocator);
     defer lib.deinit();
-    const nl = try netlist.parse(pa.allocator(), src, .ngspice);
+    var nl = try netlist.parse(pa.allocator(), src, .ngspice);
     var prepared = try input.build(&lib, sa.allocator(), pa.allocator(), nl);
     defer prepared.deinit();
     var planner = try variants.Planner.init(&lib, sa.allocator(), pa.allocator(), &nl, &prepared.circuit, prepared.deck.cards, "");

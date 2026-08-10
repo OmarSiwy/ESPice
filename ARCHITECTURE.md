@@ -58,7 +58,7 @@ the spine as named lines; transforms become straight loops.
 |---|---|---|---|---|---|
 | expanded source text | frontend/source.zig | `expand` | netlist | include depth 32 | parse |
 | Netlist: pool, graph (csr), values, kvs, ops, consts, models | frontend/netlist.zig | `parse` | builder, analyses, variants | expr depth 512, group depth 32 | session |
-| Netlist live values (`live`, `live.scale`, consts) | frontend/netlist.zig | **current:** netlist, and variants/prepare through `@constCast`; **target (P3):** `netlist.applyLive` draining a `live_requests` table that variants appends | builder | per deck | session |
+| Netlist live values (`live` slots, `live.scale`, `consts` pool rows) | frontend/netlist.zig | the parse; then only `Netlist.setLive` and `setSlots`, on a `*Netlist` (variants sets each point, prepare a rebuilt one and nominal after) | builder, variants | per deck | session |
 | `core.Deck` | frontend (netlist, prepare) | parse, `prepare` (alters, files) | analysis, output | per deck | session |
 | `Job[]` (analysis cards) | frontend/analyses.zig | **current:** analyses, and prepare.zig:320 through `@constCast`; **target (P3):** prepare writes resolved rows into its own table | prepare | cards ≤ (2³²−1)/3 | parse |
 | InternPool | core/intern.zig | frontend | all | u32 ids | session |

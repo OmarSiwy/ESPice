@@ -344,8 +344,9 @@ pub const Netlist = struct {
     kvs: []const Kv,
     /// Postfix of every unfolded expression, addressed by `Value.expr`.
     ops: []const expr.Op,
-    /// Constant pool the `num` ops index.
-    consts: []const f64,
+    /// Constant pool the `num` ops index. `setLive` rewrites the rows that
+    /// stand in for live names (`Live.pool_rows`).
+    consts: []f64,
     models: []const Model,
     /// Model name to its first `.model` row.
     model_ids: std.StringHashMapUnmanaged(u32),
@@ -424,16 +425,15 @@ pub const Netlist = struct {
     /// Rewrites every live value for one variant: `values[k]` is live name
     /// k, and `draw.sample(site, f, args)` answers each distribution call
     /// (`null` keeps nominals). Returns true when some value changed.
-    /// `stack` is scratch, grown with `gpa`. Writes through `const`: the
-    /// live slots and `consts` rows live in the parse arena, so every
-    /// `View` and `Model` read before the call sees the new values. A
-    /// binned M card whose L or W is live takes the bin its new geometry
-    /// selects (`Live.bins`); `ModelBinNotFound` when none holds it, with
-    /// the values already rewritten. Asserts that `values.len` equals
-    /// `live.names.len`.
-    pub fn setLive(nl: *const Netlist, gpa: Allocator, stack: *std.ArrayList(expr.Val), values: []const f64, draw: anytype) !bool {
+    /// `stack` is scratch, grown with `gpa`. The live slots and `consts`
+    /// rows live in the parse arena, so every `View` and `Model` read
+    /// before the call sees the new values. A binned M card whose L or W is
+    /// live takes the bin its new geometry selects (`Live.bins`);
+    /// `ModelBinNotFound` when none holds it, with the values already
+    /// rewritten. Asserts that `values.len` equals `live.names.len`.
+    pub fn setLive(nl: *Netlist, gpa: Allocator, stack: *std.ArrayList(expr.Val), values: []const f64, draw: anytype) !bool {
         const live = nl.live;
-        const pool: []f64 = @constCast(nl.consts);
+        const pool = nl.consts;
         var changed = false;
         for (live.pool_rows, values) |row, v| if (row != none) {
             changed = changed or pool[row] != v;
@@ -469,6 +469,14 @@ pub const Netlist = struct {
             @constCast(nl.values)[d.positional.start] = .{ .name = nl.models[row].name };
         }
         return changed;
+    }
+
+    /// Sets live slot k to `values[k]` without evaluating its postfix, as
+    /// a probe point; `setLive` restores the evaluated values. Asserts
+    /// that `values.len` equals `live.slots.len`.
+    pub fn setSlots(nl: *Netlist, values: []const f64) void {
+        std.debug.assert(values.len == nl.live.slots.len);
+        for (nl.live.slots, values) |slot, x| slot.* = .{ .num = x };
     }
 };
 
@@ -1086,7 +1094,10 @@ fn Reader(comptime S: type) type {
             try r.readMeasures();
             var live = try r.resolveLive();
             live.conds = try r.liveConds();
-            try r.modelBins(live);
+            const scale = try r.arena.alloc(f64, live.slots.len);
+            @memset(scale, 1);
+            try r.modelBins(live.slots, scale);
+            live.scale = scale;
             live.bins = .{ .edges = r.bin_edges.items, .starts = r.bin_starts.items, .rows = r.bin_rows.items, .bounds = r.bin_bounds.items, .per_finger = r.bin_per_finger.items };
 
             const graph = try r.hg.finish(arena);
@@ -2150,9 +2161,6 @@ fn Reader(comptime S: type) type {
             for (r.kvs.items) |*kv| try r.liveSlot(&kv.value, &slots, &spans, pool_rows, &out);
             out.slots = slots.items;
             out.ops = spans.items;
-            const scale = try r.arena.alloc(f64, slots.items.len);
-            @memset(scale, 1);
-            out.scale = scale;
             out.site_ops = r.site_ops.items;
             out.site_keys = r.site_keys.items;
             out.pool_rows = pool_rows;
@@ -2161,6 +2169,8 @@ fn Reader(comptime S: type) type {
 
         fn liveSlot(r: *R, v: *Value, slots: *std.ArrayList(*Value), spans: *std.ArrayList(Span), pool_rows: []u32, out: *Live) Error!void {
             switch (v.*) {
+                // `valueAt` built the arguments in the parse arena, mutable;
+                // `Group` types them const for every reader after the parse.
                 .group => |g| for (g.args) |*a| try r.liveSlot(@constCast(a), slots, spans, pool_rows, out),
                 .expr => |span| {
                     const ops = r.ops.items[span.start..][0..span.len];
@@ -2178,7 +2188,7 @@ fn Reader(comptime S: type) type {
                         v.* = .{ .num = folded.num };
                         return;
                     }
-                    for (@constCast(ops)) |*op| if (op.code == .live) {
+                    for (ops) |*op| if (op.code == .live) {
                         if (pool_rows[op.a] == none) {
                             try r.consts.append(r.arena, r.live_nominal.items[op.a]);
                             pool_rows[op.a] = @intCast(r.consts.items.len - 1);
@@ -3507,12 +3517,13 @@ fn Reader(comptime S: type) type {
         /// `.option scale` and ngspice model binning (INPgetModBin): an M card
         /// naming `nm` takes the last-declared global `nm.<n>` whose L/W
         /// bounds hold it, within 1 nm. `modelRow` already binned the cards
-        /// that name a subcircuit's own bins.
-        fn modelBins(r: *R, live: Live) Error!void {
+        /// that name a subcircuit's own bins. Writes the factor each live
+        /// slot of `slots` takes into `slot_scale`, parallel to it.
+        fn modelBins(r: *R, slots: []const *Value, slot_scale: []f64) Error!void {
             const scale = r.scale;
             // Slot of each live table value, for the scale and the bin check.
             var slot_of: std.AutoHashMapUnmanaged(*const Value, u32) = .empty;
-            for (live.slots, 0..) |slot, k| try slot_of.put(r.arena, slot, @intCast(k));
+            for (slots, 0..) |slot, k| try slot_of.put(r.arena, slot, @intCast(k));
             const wnflag = r.wnflag;
             const arena = r.arena;
             const models = r.models.items;
@@ -3549,7 +3560,7 @@ fn Reader(comptime S: type) type {
                     if (item.value != .num) return error.ParseError;
                     const factor = if (power == 2) scale * scale else scale;
                     if (slot_of.get(&item.value)) |k| {
-                        @constCast(live.scale)[k] = factor;
+                        slot_scale[k] = factor;
                         swept_geometry = swept_geometry or std.mem.eql(u8, item.key, "l") or std.mem.eql(u8, item.key, "w");
                     }
                     if (scale != 1) item.value.num *= factor;

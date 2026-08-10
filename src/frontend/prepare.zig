@@ -182,7 +182,7 @@ fn ErrorOf(comptime f: anytype) type {
 /// when the deck has an HSPICE optimization (`Prepared.tuner` borrows it).
 /// A `run.point` sets `nl`'s live values first; they are nominal again
 /// when a run with rebuilt points returns.
-pub fn buildRun(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_arena: std.mem.Allocator, nl: *const netlist.Netlist, run: Run) BuildError!Prepared {
+pub fn buildRun(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_arena: std.mem.Allocator, nl: *netlist.Netlist, run: Run) BuildError!Prepared {
     var stack: std.ArrayList(netlist.expr.Val) = .empty;
     if (run.point) |pt| try variants.setPoint(parse_arena, &stack, nl, pt);
     var one = try buildOne(lib, sim_arena, parse_arena, nl, run);
@@ -208,7 +208,7 @@ pub fn buildRun(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_
 /// One run without its rebuilt points: the prepared run and the runs its
 /// plan asks for. `CircuitTooLarge` when the deck has more analysis cards
 /// than a u32 job index can fan out.
-fn buildOne(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_arena: std.mem.Allocator, nl: *const netlist.Netlist, run: Run) !struct { prepared: Prepared, rebuilds: []const variants.Rebuild } {
+fn buildOne(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_arena: std.mem.Allocator, nl: *netlist.Netlist, run: Run) !struct { prepared: Prepared, rebuilds: []const variants.Rebuild } {
     if (nl.deck.analyses.len > (std.math.maxInt(u32) - 1) / 3) return error.CircuitTooLarge;
     const deck_opts = try analyses.deckOptions(nl.deck.config, nl.deck.dialect);
     var b = try Builder.init(sim_arena, lib);

@@ -38,7 +38,7 @@ pub const Run = struct {
 
 /// A run the plan could not hold as rows: an `.alter` netlist, or the
 /// planned netlist at one point. Both live in the planner's scratch arena.
-pub const Rebuild = struct { nl: *const Netlist, run: Run };
+pub const Rebuild = struct { nl: *Netlist, run: Run };
 
 /// What one point sets, before it becomes a row.
 pub const Point = struct {
@@ -158,7 +158,9 @@ pub const Planner = struct {
     lib: *const device.Library,
     sim: std.mem.Allocator,
     scratch: std.mem.Allocator,
-    nl: *const Netlist,
+    /// The netlist each point is set on in turn; nominal again when
+    /// `plan` returns.
+    nl: *Netlist,
     nominal: *const device.Circuit,
     cards: []const core.query.CardRef,
     prefix: []const u8 = "",
@@ -200,7 +202,7 @@ pub const Planner = struct {
 
     /// A planner over `nl`, whose nominal circuit is `nominal` with card
     /// table `cards`; `prefix` labels an `.alter` run's rows.
-    pub fn init(lib: *const device.Library, sim: std.mem.Allocator, scratch: std.mem.Allocator, nl: *const Netlist, nominal: *const device.Circuit, cards: []const core.query.CardRef, prefix: []const u8) !Planner {
+    pub fn init(lib: *const device.Library, sim: std.mem.Allocator, scratch: std.mem.Allocator, nl: *Netlist, nominal: *const device.Circuit, cards: []const core.query.CardRef, prefix: []const u8) !Planner {
         var p: Planner = .{ .lib = lib, .sim = sim, .scratch = scratch, .nl = nl, .nominal = nominal, .cards = cards, .prefix = prefix };
         p.refs = try collect(scratch, nominal);
         p.row_at = try scratch.alloc(u32, p.refs.len);
@@ -447,20 +449,20 @@ pub const Planner = struct {
     }
 
     fn probeIdentity(p: *Planner) !Fast {
-        const slots = p.nl.live.slots;
+        const probe_at = try p.scratch.alloc(f64, p.nominal_slots.len);
         var by_bits: std.AutoHashMapUnmanaged(u64, u32) = .empty;
         defer by_bits.deinit(p.scratch);
-        for (slots, p.nominal_slots, 0..) |slot, nominal, k| {
+        for (probe_at, p.nominal_slots, 0..) |*x, nominal, k| {
             // ponytail: a zero slot (sky130's mismatch terms) refuses the
             // fast path for every point; perturb only the slots that move (#130).
             if (nominal == 0 or !std.math.isFinite(nominal)) return .rebuild;
             // A distinct nearby value per slot, far from any rounding tie.
-            const x = nominal * (1 + @as(f64, @floatFromInt(k + 1)) * 0x1.0p-24);
-            slot.* = .{ .num = x };
-            const gop = try by_bits.getOrPut(p.scratch, @bitCast(x));
+            x.* = nominal * (1 + @as(f64, @floatFromInt(k + 1)) * 0x1.0p-24);
+            const gop = try by_bits.getOrPut(p.scratch, @bitCast(x.*));
             if (gop.found_existing) return .rebuild;
             gop.value_ptr.* = @intCast(k);
         }
+        p.nl.setSlots(probe_at);
         var arena = std.heap.ArenaAllocator.init(core.gpa);
         defer arena.deinit();
         var c = try circuitOf(p.lib, arena.allocator(), arena.allocator(), p.nl);
@@ -1051,7 +1053,7 @@ pub const Sampler = struct {
 
 /// Sets `nl`'s live values to `pt`'s, drawing its Monte Carlo trial if it
 /// has one. `stack` is evaluation scratch, grown with `scratch`.
-pub fn setPoint(scratch: std.mem.Allocator, stack: *std.ArrayList(expr.Val), nl: *const Netlist, pt: Point) !void {
+pub fn setPoint(scratch: std.mem.Allocator, stack: *std.ArrayList(expr.Val), nl: *Netlist, pt: Point) !void {
     if (pt.trial) |t| {
         _ = try nl.setLive(scratch, stack, pt.live, TrialDraw{ .trial = t });
     } else _ = try nl.setLive(scratch, stack, pt.live, null);
@@ -1060,7 +1062,7 @@ pub fn setPoint(scratch: std.mem.Allocator, stack: *std.ArrayList(expr.Val), nl:
 /// Draws every distribution site of `nl` once, as trial 1 of the deck's
 /// `.option seed`, into its live values (`Deck.draw_seed`). `scratch` holds
 /// the sampler and the evaluation stack.
-pub fn drawOnce(scratch: std.mem.Allocator, nl: *const Netlist) !void {
+pub fn drawOnce(scratch: std.mem.Allocator, nl: *Netlist) !void {
     var sampler = try Sampler.init(scratch, nl.deck.config, 1);
     var stack: std.ArrayList(expr.Val) = .empty;
     _ = try nl.setLive(scratch, &stack, nl.live.nominal, TrialDraw{ .trial = .{ .sampler = &sampler, .trial = 1, .index = 0 } });
