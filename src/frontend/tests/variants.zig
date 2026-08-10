@@ -212,4 +212,21 @@ test "points a B source reads rebuild as runs of their own, at their own values"
     // The netlist holds its nominal values again.
     try t.expectEqual(@as(f64, 1e3), step.live.slots[0].num);
     try t.expectEqual(@as(f64, 1), step.consts[step.live.pool_rows[0]]);
+
+    // No point is nominal, so every one rebuilds and the main run keeps no
+    // query; its job table used to be sized 0 and written anyway (#132).
+    const all = try netlist.parse(pa.allocator(),
+        \\every point rebuilds
+        \\.param g=1
+        \\v1 a 0 1
+        \\bout out 0 v=g*v(a)
+        \\.step param g list 2 3
+        \\.op
+        \\.end
+    , .ngspice);
+    var rebuilt_all = try input.build(&lib, sa.allocator(), pa.allocator(), all);
+    defer rebuilt_all.deinit();
+    try t.expectEqual(@as(usize, 0), rebuilt_all.deck.queries.len);
+    try t.expectEqual(@as(usize, 2), rebuilt_all.runs.len);
+    for (rebuilt_all.runs) |run| try t.expectEqual(@as(usize, 1), run.deck.queries.len);
 }

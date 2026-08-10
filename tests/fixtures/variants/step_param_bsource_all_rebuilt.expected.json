@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "A .step whose every point rebuilds runs only the rebuilt points; the main run keeps no query (#132).",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "v(out) = g * v(a) = g; i(bout) = -g/1k."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point (g=2)",
+        "match": "exact",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09,
+            "values": [
+              2.0
+            ]
+          },
+          "i(bout)": {
+            "unit": "A",
+            "rtol": 1e-06,
+            "atol": 1e-12,
+            "values": [
+              -0.002
+            ]
+          }
+        },
+        "row_count": 1
+      },
+      {
+        "name": "Operating Point (g=3)",
+        "match": "exact",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09,
+            "values": [
+              3.0
+            ]
+          },
+          "i(bout)": {
+            "unit": "A",
+            "rtol": 1e-06,
+            "atol": 1e-12,
+            "values": [
+              -0.003
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ]
+  },
+  "netlist_sha256": "480df7ee7f6a337486166eb68dc80cb396c5341d3fddef28c4c92657c31ab890"
+}

@@ -84,7 +84,9 @@ pub fn queries(arena: std.mem.Allocator, cards: []const netlist.Analysis, append
     const temps = @max(deck_opts.temp_list.len, 1);
     var per_card: usize = fan;
     for (fanout.cards) |span| per_card = @max(per_card, fan * (span.count + 1));
-    const rows = fanout.global.count + @intFromBool(fanout.global.nominal);
+    // The nominal jobs are built before they are copied over the rows, so
+    // the table holds one row even when none survives (#132).
+    const rows = @max(fanout.global.count + @intFromBool(fanout.global.nominal), 1);
     // `.trannoise SAMPLES=` and the variant counts are deck input, so the
     // product can overflow before the allocator ever sees it.
     var len: usize = cards.len;
@@ -154,7 +156,7 @@ pub fn queries(arena: std.mem.Allocator, cards: []const netlist.Analysis, append
                 applyDeckOptions(&jobs[n], deck_opts);
                 n += 1;
             }
-            if (span.count != 0) n = first + copyVariants(jobs[first..], n - first, span);
+            n = first + copyVariants(jobs[first..], n - first, span);
             continue;
         }
         // HSPICE `.trannoise ... SAMPLES=n`: one run per Monte Carlo index
@@ -170,7 +172,7 @@ pub fn queries(arena: std.mem.Allocator, cards: []const netlist.Analysis, append
                 jobs[n] = .{ .tran_noise = o };
                 n += 1;
             }
-            if (span.count != 0) n = first + copyVariants(jobs[first..], n - first, span);
+            n = first + copyVariants(jobs[first..], n - first, span);
             continue;
         }
         // HSPICE `.ptdnoise TIME=<sweep>`: one strobed noise query per time.
@@ -183,7 +185,7 @@ pub fn queries(arena: std.mem.Allocator, cards: []const netlist.Analysis, append
                 jobs[n].pnoise.strobe = t;
                 n += 1;
             }
-            if (span.count != 0) n = first + copyVariants(jobs[first..], n - first, span);
+            n = first + copyVariants(jobs[first..], n - first, span);
             continue;
         }
         jobs[n] = job;
@@ -211,9 +213,9 @@ pub fn queries(arena: std.mem.Allocator, cards: []const netlist.Analysis, append
                 n += 1;
             }
         }
-        if (span.count != 0) n = first + copyVariants(jobs[first..], n - first, span);
+        n = first + copyVariants(jobs[first..], n - first, span);
     }
-    if (fanout.global.count != 0) n = copyVariants(jobs, n, fanout.global);
+    n = copyVariants(jobs, n, fanout.global);
     if (deck_opts.sample) |s| sampleNoise(jobs[0..n], s);
     if (temps == 1) return jobs[0..n];
     // An HSPICE `.temp` list runs every query once per temperature [CR .TEMP].
@@ -271,7 +273,9 @@ fn snapshot(t: f64, tran: ?requests.Tran) Job {
 }
 
 /// Rewrites the first `n` jobs of `jobs` as their copies over `span`'s rows,
-/// row-major, after the originals when `span.nominal`, and returns the count.
+/// row-major, after the originals when `span.nominal`, and returns the count:
+/// `n` for a span with no rows that keeps the nominal, 0 for one that keeps
+/// neither (every point rebuilt as its own run).
 fn copyVariants(jobs: []Job, n: usize, span: Fanout.Span) usize {
     const skip: usize = @intFromBool(span.nominal);
     // Back to front, so no copy overwrites a job not yet copied.
@@ -1746,6 +1750,9 @@ test copyVariants {
     try testing.expectEqual(@as(usize, 4), copyVariants(&jobs, 2, .{ .first = 5, .count = 2, .nominal = false }));
     for (jobs[0..4], [_]?u32{ 5, 5, 6, 6 }) |j, want| try testing.expectEqual(want, j.op.tol.variant);
     try testing.expectEqual(@as(usize, 0), copyVariants(&jobs, 0, .{ .count = 3, .nominal = true }));
+    // No rows: the nominal stays, or nothing does.
+    try testing.expectEqual(@as(usize, 2), copyVariants(&jobs, 2, .{}));
+    try testing.expectEqual(@as(usize, 0), copyVariants(&jobs, 2, .{ .nominal = false }));
 }
 
 test checkStep {
@@ -1921,6 +1928,11 @@ test queries {
     const rows = try queries(a, &.{op}, false, none, &.{}, .{}, .{ .global = .{ .first = 0, .count = 2, .nominal = true } });
     try testing.expectEqual(@as(usize, 3), rows.len);
     for (rows, [_]?u32{ null, 0, 1 }) |j, want| try testing.expectEqual(want, j.op.tol.variant);
+    // Every row rebuilt as its own run: no jobs left here, and none
+    // written past the table (#132).
+    try testing.expectEqual(@as(usize, 0), (try queries(a, &.{op}, false, none, &.{}, .{}, .{ .global = .{ .first = 0, .count = 0, .nominal = false } })).len);
+    const cards: []const Fanout.Span = &.{.{ .count = 0, .nominal = false }};
+    try testing.expectEqual(@as(usize, 0), (try queries(a, &.{op}, false, none, &.{}, .{}, .{ .cards = cards })).len);
     // `only` keeps one card's jobs.
     const only = try queries(a, &.{ op, .{ .kind = .dcinc, .args = &.{} } }, false, none, &.{}, .{}, .{ .only = 1 });
     try testing.expectEqual(@as(usize, 1), only.len);
