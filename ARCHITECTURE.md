@@ -58,8 +58,9 @@ the spine as named lines; transforms become straight loops.
 |---|---|---|---|---|---|
 | expanded source text | frontend/source.zig | `expand` | netlist | include depth 32 | parse |
 | Netlist: pool, graph (csr), values, kvs, ops, consts, models | frontend/netlist.zig | `parse` | builder, analyses, variants | expr depth 512, group depth 32 | session |
+| Netlist `deck.alters`, `files` | frontend/prepare.zig | `prepare`, once, before it returns the netlist: they are file reads (each `.alter` run expanded, each `.data` file), and `parse` reads no files | variants, builder (`dataFile`) | per deck | session |
 | Netlist live values (`live` slots, `live.scale`, `consts` pool rows) | frontend/netlist.zig | the parse; then only `Netlist.setLive` and `setSlots`, on a `*Netlist` (variants sets each point, prepare a rebuilt one and nominal after) | builder, variants | per deck | session |
-| `core.Deck` | frontend (netlist, prepare) | parse, `prepare` (alters, files) | analysis, output | per deck | session |
+| `core.Deck` | frontend/prepare.zig | `buildOne`; **current:** also espice.zig, which rewrites `variants` with the optimizer's and `.mosra`'s rows | analysis, output | per deck | session |
 | `Job[]` (analysis cards) | frontend/analyses.zig | `analyses.queries` alone, from the cards and `DeckOptions` (`.sample` included) | prepare, analysis | cards ≤ (2³²−1)/3 | session |
 | InternPool | core/intern.zig | frontend | all | u32 ids | session |
 | device `Library` (names, vtables) | device/Library.zig | `builtin`, `register`, `load` | builder, analysis | one `DeviceType` per type | Problem |
