@@ -25,7 +25,7 @@ else	src/frontend/lines.zig	3
 else	src/frontend/measure.zig	6
 else	src/frontend/netlist.zig	44
 else	src/frontend/pattern.zig	2
-else	src/frontend/prepare.zig	2
+else	src/frontend/prepare.zig	1
 else	src/frontend/source.zig	1
 else	src/frontend/sparam.zig	1
 else	src/frontend/tests/builder.zig	1

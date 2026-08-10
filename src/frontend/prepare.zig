@@ -288,7 +288,8 @@ fn buildOne(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_aren
     } else .{};
     const tuning = if (nl.tunable.len != 0 and run.point == null and run.prefix.len == 0) try variants.Tuning.init(core.gpa, lib, sim_arena, parse_arena, nl, &circuit, cards) else null;
     errdefer if (tuning) |t| t.deinit();
-    const queries = sampled(try analyses.queries(sim_arena, cards_rows, false, out.bindings, cards, card_opts, plan.fanout), nl.deck.sample);
+    card_opts.sample = nl.deck.sample;
+    const queries = try analyses.queries(sim_arena, cards_rows, false, out.bindings, cards, card_opts, plan.fanout);
     if (aging) |*a| a.mosra.tran = for (queries) |q| {
         if (q == .tran and q.tran.tol.variant == null) break q.tran;
     } else {
@@ -352,18 +353,6 @@ fn nodeRows(arena: std.mem.Allocator, nb: *const builder.NetBuilder, items: []co
         try out.append(arena, .{ .node = row, .value = item.value });
     }
     return out.items;
-}
-
-/// `queries` with HSPICE `.sample` set on every `.noise` spectrum.
-fn sampled(queries: []const Job, sample: ?requests.NoiseSample) []const Job {
-    const s = sample orelse return queries;
-    for (@constCast(queries)) |*q| switch (q.*) {
-        .noise => |*n| if (!n.integrated) {
-            n.sample = s;
-        },
-        else => {},
-    };
-    return queries;
 }
 
 /// `.meas` cards with their strings copied out of the parse arena.
@@ -479,20 +468,6 @@ test keepSaved {
     try std.testing.expectEqualStrings(long, labels[1]);
     try keepSaved(arena.allocator(), &probes, &labels, &.{"v(none)"});
     try std.testing.expectEqual(@as(usize, 0), probes.len);
-}
-
-test sampled {
-    const sweep: core.numerics.FreqSweep = .{ .f_start = 1, .f_stop = 10 };
-    var jobs = [_]Job{
-        .{ .noise = .{ .out_node = 1, .sweep = sweep } },
-        .{ .noise = .{ .out_node = 1, .sweep = sweep, .integrated = true } },
-        .{ .op = .{} },
-    };
-    try std.testing.expect(sampled(&jobs, null)[0].noise.sample == null);
-    const out = sampled(&jobs, .{ .fs = 1e6 });
-    try std.testing.expectEqual(@as(f64, 1e6), out[0].noise.sample.?.fs);
-    // The integrated plot keeps the plain band.
-    try std.testing.expect(out[1].noise.sample == null);
 }
 
 test namesNoOutput {

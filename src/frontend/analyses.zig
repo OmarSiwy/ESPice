@@ -214,6 +214,7 @@ pub fn queries(arena: std.mem.Allocator, cards: []const netlist.Analysis, append
         if (span.count != 0) n = first + copyVariants(jobs[first..], n - first, span);
     }
     if (fanout.global.count != 0) n = copyVariants(jobs, n, fanout.global);
+    if (deck_opts.sample) |s| sampleNoise(jobs[0..n], s);
     if (temps == 1) return jobs[0..n];
     // An HSPICE `.temp` list runs every query once per temperature [CR .TEMP].
     const base = n;
@@ -320,6 +321,8 @@ pub const DeckOptions = struct {
     trtol: ?f64 = null,
     /// The variation block as `.dcmatch`, `.acmatch` and `.dcsens` groups.
     variations: requests.Variations = .{},
+    /// HSPICE `.sample`, set on every `.noise` spectrum.
+    sample: ?requests.NoiseSample = null,
 };
 
 /// `trtol` at HSPICE RUNLVL 1..6 [CR .OPTION RUNLVL]. HSPICE scales its
@@ -1711,6 +1714,27 @@ fn argv(comptime xs: anytype) []const Value {
         break :blk out;
     };
     return &final;
+}
+
+/// Sets HSPICE `.sample` on every `.noise` spectrum of `jobs`; the
+/// integrated plot keeps the plain band.
+fn sampleNoise(jobs: []Job, sample: requests.NoiseSample) void {
+    for (jobs) |*q| if (q.* == .noise and !q.noise.integrated) {
+        q.noise.sample = sample;
+    };
+}
+
+test sampleNoise {
+    const sweep: core.numerics.FreqSweep = .{ .f_start = 1, .f_stop = 10 };
+    var jobs = [_]Job{
+        .{ .noise = .{ .out_node = 1, .sweep = sweep } },
+        .{ .noise = .{ .out_node = 1, .sweep = sweep, .integrated = true } },
+        .{ .op = .{} },
+    };
+    sampleNoise(&jobs, .{ .fs = 1e6 });
+    try testing.expectEqual(@as(f64, 1e6), jobs[0].noise.sample.?.fs);
+    // The integrated plot keeps the plain band.
+    try testing.expect(jobs[1].noise.sample == null);
 }
 
 test copyVariants {

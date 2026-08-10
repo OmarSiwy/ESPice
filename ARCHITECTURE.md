@@ -60,7 +60,7 @@ the spine as named lines; transforms become straight loops.
 | Netlist: pool, graph (csr), values, kvs, ops, consts, models | frontend/netlist.zig | `parse` | builder, analyses, variants | expr depth 512, group depth 32 | session |
 | Netlist live values (`live` slots, `live.scale`, `consts` pool rows) | frontend/netlist.zig | the parse; then only `Netlist.setLive` and `setSlots`, on a `*Netlist` (variants sets each point, prepare a rebuilt one and nominal after) | builder, variants | per deck | session |
 | `core.Deck` | frontend (netlist, prepare) | parse, `prepare` (alters, files) | analysis, output | per deck | session |
-| `Job[]` (analysis cards) | frontend/analyses.zig | **current:** analyses, and prepare.zig:320 through `@constCast`; **target (P3):** prepare writes resolved rows into its own table | prepare | cards ≤ (2³²−1)/3 | parse |
+| `Job[]` (analysis cards) | frontend/analyses.zig | `analyses.queries` alone, from the cards and `DeckOptions` (`.sample` included) | prepare, analysis | cards ≤ (2³²−1)/3 | session |
 | InternPool | core/intern.zig | frontend | all | u32 ids | session |
 | device `Library` (names, vtables) | device/Library.zig | `builtin`, `register`, `load` | builder, analysis | one `DeviceType` per type | Problem |
 | frozen `device.Circuit` (pattern CSC, batches, slots, diag_slots) | device/Circuit.zig | `freeze` | analysis | u32 rows/slots | session |
