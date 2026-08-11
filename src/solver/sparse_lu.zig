@@ -114,6 +114,8 @@ pub const SparseLu = struct {
     /// A re-pivot whose L plus U grows past `fill_cap * base_lu` is
     /// abandoned for the previous pivot sequence. 0 disables the cap.
     fill_cap: f64 = 0,
+    /// Print every full factor's fill and census (`direct.Knobs.stats`).
+    stats: bool = false,
 
     // DFS workspace, `factor` only.
     flag: []u32, // epoch visited marker
@@ -245,7 +247,7 @@ pub const SparseLu = struct {
             cap = @intFromFloat(@min(self.fill_cap * @as(f64, @floatFromInt(self.base_lu)), 1e18));
         }
         if (try self.factorPass(gpa, col_ptr, row_idx, vals, pivot_tol, cap, false)) {
-            if (comptime @import("builtin").link_libc) if (std.c.getenv("ZP_LU_STATS") != null)
+            if (self.stats)
                 std.debug.print("lu-stats: re-pivot passed {d} L+U entries; keeping the previous pivots\n", .{cap});
             _ = try self.factorPass(gpa, col_ptr, row_idx, vals, pivot_tol, std.math.maxInt(usize), true);
         }
@@ -537,10 +539,9 @@ pub const SparseLu = struct {
 
         try self.buildTape(gpa, col_ptr);
 
-        // ZP_LU_STATS=1 prints n, nnz and fill per full factor, then the
-        // structural census of dev/solvers/gpu-lu.md E1. The test module
-        // builds without libc, hence the guard.
-        if (comptime @import("builtin").link_libc) if (std.c.getenv("ZP_LU_STATS") != null) {
+        // ZP_LU_STATS prints n, nnz and fill per full factor, then the
+        // structural census of dev/solvers/gpu-lu.md E1.
+        if (self.stats) {
             std.debug.print("lu-stats: n={d} nnz={d} L={d} U={d} fill={d:.1}x\n", .{
                 n,                 col_ptr[n],
                 self.li.items.len, self.ui.items.len,
@@ -548,7 +549,7 @@ pub const SparseLu = struct {
                     @as(f64, @floatFromInt(col_ptr[n])),
             });
             self.census(gpa, col_ptr, row_idx) catch {};
-        };
+        }
 
         self.pattern_epoch +%= 1;
         self.factored = true;

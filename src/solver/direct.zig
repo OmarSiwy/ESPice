@@ -27,6 +27,19 @@ pub const Params = struct {
     repivot_fill_cap: f64 = 3,
 };
 
+/// Developer switches. The facade reads them from the environment once
+/// (`espice.zig`); the solver reads no environment.
+pub const Knobs = struct {
+    /// `ZP_LU_STATS`: print the BBD census and every full factor's fill.
+    stats: bool = false,
+    /// `ESPICE_NO_BBD`: force the flat LU, for A/B comparisons.
+    no_bbd: bool = false,
+    /// `ESPICE_LU_PAR=0/1`: force the multicore refactor off or on.
+    par: ?bool = null,
+    /// `ESPICE_LU_PAR_STATS`: print the multicore refactor's admission.
+    par_stats: bool = false,
+};
+
 /// One linear engine, picked from the pattern by `Solver.init`.
 pub const Engine = union(enum) {
     lu: sparse_lu.SparseLu,
@@ -52,6 +65,7 @@ pub const Solver = struct {
     /// True once a factorization matches `vcopy`.
     factored: bool = false,
     params: Params = .{},
+    knobs: Knobs,
     /// Owned column ordering handed to the LU; empty until the LU exists.
     q: []u32 = &.{},
     /// Values of the last factorization, for the unchanged-matrix bypass.
@@ -73,11 +87,11 @@ pub const Solver = struct {
     /// ordering fails with `OutOfWorkspace` on pathological fill). Borrows
     /// `col_ptr` and `row_idx`, which must outlive the solver; free with
     /// `deinit`.
-    pub fn init(gpa: Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32, bbd: ?num.BbdInfo) !Self {
-        var self: Self = .{ .n = n, .col_ptr = col_ptr, .row_idx = row_idx, .engine = undefined, .gpa = gpa };
+    pub fn init(gpa: Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32, bbd: ?num.BbdInfo, knobs: Knobs) !Self {
+        var self: Self = .{ .n = n, .col_ptr = col_ptr, .row_idx = row_idx, .engine = undefined, .gpa = gpa, .knobs = knobs };
         if (tridiag_mod.isTridiag(n, col_ptr, row_idx)) {
             self.engine = .{ .tri = try TriDiag.init(gpa, n, col_ptr, row_idx) };
-        } else if (try initBbd(gpa, n, col_ptr, row_idx, bbd)) |eng| {
+        } else if (try initBbd(gpa, n, col_ptr, row_idx, bbd, knobs)) |eng| {
             self.engine = .{ .bbd = eng };
         } else {
             errdefer gpa.free(self.q);
@@ -99,7 +113,9 @@ pub const Solver = struct {
     /// Orders the pattern (once) and builds the general LU on it.
     fn initLu(self: *Self) !SparseLu {
         if (self.q.len == 0) self.q = try computeOrdering(self.gpa, self.n, self.col_ptr, self.row_idx);
-        return SparseLu.init(self.gpa, self.n, self.col_ptr, self.row_idx, self.q);
+        var lu = try SparseLu.init(self.gpa, self.n, self.col_ptr, self.row_idx, self.q);
+        lu.stats = self.knobs.stats;
+        return lu;
     }
 
     /// Swaps a singular structured engine for the general LU, for good. The
@@ -115,24 +131,20 @@ pub const Solver = struct {
         self.factored = false;
     }
 
-    fn initBbd(gpa: Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32, bbd: ?num.BbdInfo) !?BbdEng {
+    fn initBbd(gpa: Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32, bbd: ?num.BbdInfo, knobs: Knobs) !?BbdEng {
         const info = bbd orelse {
-            if (comptime @import("builtin").link_libc) if (std.c.getenv("ZP_LU_STATS") != null) std.debug.print("lu-census: no BbdInfo\n", .{});
+            if (knobs.stats) std.debug.print("lu-census: no BbdInfo\n", .{});
             return null;
         };
-        // ESPICE_NO_BBD forces the flat LU for A/B comparisons.
-        if (comptime @import("builtin").link_libc) {
-            if (std.c.getenv("ESPICE_NO_BBD") != null) return null;
-        }
-        const stats = comptime @import("builtin").link_libc;
+        if (knobs.no_bbd) return null;
         const eng = BbdEng.init(gpa, n, col_ptr, row_idx, info, .{}) catch |err| switch (err) {
             error.NotApplicable => {
-                if (stats) if (std.c.getenv("ZP_LU_STATS") != null) std.debug.print("lu-census: BbdInfo emitted; Bbd.init declined (NotApplicable)\n", .{});
+                if (knobs.stats) std.debug.print("lu-census: BbdInfo emitted; Bbd.init declined (NotApplicable)\n", .{});
                 return null;
             },
             error.OutOfMemory => return error.OutOfMemory,
         };
-        if (stats) if (std.c.getenv("ZP_LU_STATS") != null) std.debug.print("lu-census: BbdInfo emitted; Bbd.init accepted\n", .{});
+        if (knobs.stats) std.debug.print("lu-census: BbdInfo emitted; Bbd.init accepted\n", .{});
         return eng;
     }
 
@@ -232,7 +244,7 @@ pub const Solver = struct {
             if (self.par) |*p| p.deinit(self.gpa);
             self.par = null;
             // Out of memory for the tables: stay serial this epoch.
-            if (parWorthIt(lu)) self.par = lu_kernels.HostRefactor.init(self.gpa, lu, self.col_ptr, growth) catch null;
+            if (parWorthIt(lu, self.knobs)) self.par = lu_kernels.HostRefactor.init(self.gpa, lu, self.col_ptr, growth) catch null;
         }
         const p = if (self.par) |*p| p else return lu.refactor(self.col_ptr, vals, growth);
         return p.run(lu, vals, io, threads);
@@ -276,17 +288,15 @@ pub const Solver = struct {
 
 /// The multicore refactor's admission: enough flops per refactor to pay
 /// for the handoffs, and enough per column that the columns are not a
-/// dependent chain. `ESPICE_LU_PAR=0/1` forces it off or on.
-fn parWorthIt(lu: *const sparse_lu.SparseLu) bool {
+/// dependent chain. `Knobs.par` forces it off or on.
+fn parWorthIt(lu: *const sparse_lu.SparseLu, knobs: Knobs) bool {
     var flops: u64 = 0;
     for (lu.ui.items) |i| flops += lu.lp[i + 1] - lu.lp[i];
     // Tape-sized factors refactor in microseconds.
     var ok = lu.tv.items.len == 0 and flops >= par_min_flops and flops >= par_min_per_col * @as(u64, lu.n) and flops <= par_max_flops;
-    if (comptime @import("builtin").link_libc) {
-        if (std.c.getenv("ESPICE_LU_PAR")) |v| ok = v[0] == '1';
-        if (std.c.getenv("ESPICE_LU_PAR_STATS") != null)
-            std.debug.print("lu-par: n={d} F={d} F/n={d} admit={}\n", .{ lu.n, flops, flops / @max(lu.n, 1), ok });
-    }
+    if (knobs.par) |forced| ok = forced;
+    if (knobs.par_stats)
+        std.debug.print("lu-par: n={d} F={d} F/n={d} admit={}\n", .{ lu.n, flops, flops / @max(lu.n, 1), ok });
     return ok;
 }
 
@@ -385,7 +395,7 @@ test "Solver: a tridiagonal pattern with a zero diagonal demotes to the pivoting
     const col_ptr = [_]u32{ 0, 2, 5, 7 };
     const row_idx = [_]u32{ 0, 1, 0, 1, 2, 1, 2 };
     var vals = [_]f64{ 0, 1, 1, 2, 1, 4, 3 };
-    var s = try Solver.init(gpa, 3, &col_ptr, &row_idx, null);
+    var s = try Solver.init(gpa, 3, &col_ptr, &row_idx, null, .{});
     defer s.deinit();
     try testing.expect(s.engine == .tri);
     try s.factor(&vals, .{});

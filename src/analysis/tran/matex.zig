@@ -400,13 +400,13 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         num.scale(combined_vals[0..nnz], gamma, ckt.g_vals[0..nnz]);
     combined_vals[nnz] = 0;
 
-    var slv = try Solver.init(ctx.scratch_allocator, nn, ckt.col_ptr, ckt.row_idx, ckt.bbd);
+    var slv = try Solver.init(ctx.scratch_allocator, nn, ckt.col_ptr, ckt.row_idx, ckt.bbd, ckt.knobs.lu);
     defer slv.deinit();
     try slv.factor(combined_vals, ckt.solver_execution);
 
     // G alone carries the particular solution: the source terms of eq. 5
     // are A^-1 C^-1 b = -G^-1 b and A^-2 C^-1 b = G^-1 C G^-1 b.
-    var slv_g = try Solver.init(ctx.scratch_allocator, nn, ckt.col_ptr, ckt.row_idx, ckt.bbd);
+    var slv_g = try Solver.init(ctx.scratch_allocator, nn, ckt.col_ptr, ckt.row_idx, ckt.bbd, ckt.knobs.lu);
     defer slv_g.deinit();
     try slv_g.factor(ckt.g_vals, ckt.solver_execution);
 

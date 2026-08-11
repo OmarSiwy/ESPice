@@ -153,7 +153,7 @@ pub fn simulate(
     // n_qt == 0 (no charge, or a GPU plane-stamp hook that bypasses the host
     // batches) runs the same kernel over the row plane. ZP_NO_QTAPE forces
     // that fallback for A/B runs; `n_qt` in the stats line says which is live.
-    const n_qt: usize = if (has_charge and std.c.getenv("ZP_NO_QTAPE") == null) ckt.qTapeLen() else 0;
+    const n_qt: usize = if (has_charge and !ckt.knobs.no_qtape) ckt.qTapeLen() else 0;
     // Coupled inductors: ngspice truncates one state per inductor, INDflux =
     // L*i + sum M*i_other (indload.c:72-76; MUT has no trunc routine). The
     // tape holds L*i and each M*i as separate states, which bind where
@@ -319,7 +319,7 @@ pub fn simulate(
     var dt_prev: f64 = effective_dt_max;
     var dt_prev2: f64 = effective_dt_max;
     var steps: u32 = 0;
-    const stats_on = std.c.getenv("ZP_TRAN_STATS") != null;
+    const stats_on = ckt.knobs.tran_stats;
     var st: Stats = .{};
     // Order control: start at BE, promote to the configured method when the
     // LTE allows, and drop back to BE at breakpoints so trap does not ring

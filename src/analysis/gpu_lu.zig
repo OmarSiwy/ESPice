@@ -9,6 +9,7 @@ const std = @import("std");
 const gompute = @import("gompute");
 const solver = @import("solver");
 const numerics = @import("core").numerics;
+const Knobs = @import("types.zig").Knobs;
 
 const K = solver.lu_kernels;
 const direct = solver.direct;
@@ -24,10 +25,6 @@ fn nowNs() u64 {
     var ts: std.c.timespec = undefined;
     _ = std.c.clock_gettime(.MONOTONIC, &ts);
     return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
-}
-
-fn envOn(name: [*:0]const u8) bool {
-    return std.c.getenv(name) != null;
 }
 
 /// Per-query device LU context: kernels, a stream, the per-iteration
@@ -71,6 +68,7 @@ pub const GpuLu = struct {
     /// A driver call failed: the rest of the query solves on the host.
     poisoned: bool = false,
     check: bool,
+    knobs: Knobs,
     bench: ?*Bench = null,
     st: struct { calls: u64 = 0, refactors: u64 = 0, peels: u64 = 0, epochs: u64 = 0, mismatches: u64 = 0 } = .{},
 
@@ -79,7 +77,7 @@ pub const GpuLu = struct {
     /// build without kernel images, or with the driver's error. Every solver
     /// it later serves must be n by n with nnz entries. Caller owns the
     /// result; free with `deinit`.
-    pub fn init(gpa: std.mem.Allocator, n: u32, nnz: u32) !*Self {
+    pub fn init(gpa: std.mem.Allocator, n: u32, nnz: u32, knobs: Knobs) !*Self {
         if (comptime backend == null) return error.NoGpuArtifacts;
         const be = backend.?;
         var k_ref = try gompute.rawKernelByName(be, "arp_lu_refactor", 0);
@@ -123,9 +121,10 @@ pub const GpuLu = struct {
             .d_rhs = d_rhs,
             .d_y = d_y,
             .d_dx = d_dx,
-            .check = envOn("ESPICE_GPU_LU_CHECK"),
+            .check = knobs.gpu_lu_check,
+            .knobs = knobs,
         };
-        if (envOn("ESPICE_GPU_LU_BENCH")) self.bench = Bench.init(gpa, &self.k_ref) catch null;
+        if (knobs.gpu_lu_bench) |limit| self.bench = Bench.init(gpa, &self.k_ref, limit, knobs.gpu_lu_threads) catch null;
         return self;
     }
 
@@ -139,7 +138,7 @@ pub const GpuLu = struct {
     /// the hook's `ctx` is `self`.
     pub fn deinit(self: *Self) void {
         if (comptime backend == null) return;
-        if (envOn("ESPICE_GPU_STATS") or self.check or self.bench != null) std.debug.print(
+        if (self.knobs.gpu_stats != .off or self.check or self.bench != null) std.debug.print(
             "gpu-lu: calls={d} refactors={d} peels={d} epochs={d} F={d} check_mismatches={d}{s}\n",
             .{ self.st.calls, self.st.refactors, self.st.peels, self.st.epochs, self.flops, self.st.mismatches, if (self.check) "" else " (unchecked)" },
         );
@@ -268,8 +267,8 @@ pub const GpuLu = struct {
         // E2 calibration knobs: ESPICE_GPU_LU_TAIL=m fixes the solves' tail
         // at m steps, ESPICE_GPU_LU_NOGATHER keeps every column in stored
         // order.
-        var opt: K.Options = .{ .gather = !envOn("ESPICE_GPU_LU_NOGATHER") };
-        if (std.c.getenv("ESPICE_GPU_LU_TAIL")) |v| opt.tail = lu.n - @min(lu.n, std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0);
+        var opt: K.Options = .{ .gather = !self.knobs.gpu_lu_nogather };
+        if (self.knobs.gpu_lu_tail) |m| opt.tail = lu.n - @min(lu.n, m);
         var tb = try K.build(self.gpa, lu, slv.col_ptr, slv.params.refactor_growth_limit, opt);
         defer tb.deinit(self.gpa);
         self.tab = tb.tab;
@@ -376,13 +375,11 @@ const Bench = struct {
     /// `GpuLu.st.epochs` the buffers above are sized for.
     epoch: u64 = 0,
 
-    fn init(gpa: std.mem.Allocator, k: *Raw) !*Bench {
+    fn init(gpa: std.mem.Allocator, k: *Raw, limit: usize, threads: u32) !*Bench {
         if (!k.hasEvents()) return error.Unsupported;
         const b = try gpa.create(Bench);
         errdefer gpa.destroy(b);
-        b.* = .{ .ev = undefined, .threads = 8 };
-        if (std.c.getenv("ESPICE_GPU_LU_THREADS")) |v| b.threads = std.fmt.parseInt(u32, std.mem.span(v), 10) catch 8;
-        if (std.c.getenv("ESPICE_GPU_LU_BENCH")) |v| b.limit = std.fmt.parseInt(usize, std.mem.span(v), 10) catch 0;
+        b.* = .{ .ev = undefined, .threads = threads, .limit = limit };
         var made: usize = 0;
         errdefer for (b.ev[0..made]) |*e| e.deinit();
         for (&b.ev) |*e| {

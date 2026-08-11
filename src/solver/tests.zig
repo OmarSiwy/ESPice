@@ -200,7 +200,7 @@ const BbdTests = struct {
     const relaxed = Limits{ .min_blocks = 2 };
 
     fn expectMatchesFlat(gpa: Allocator, sy: *const Synth, eng: *Bbd) !void {
-        var flat = try direct.Solver.init(gpa, sy.n, sy.col_ptr, sy.row_idx, null);
+        var flat = try direct.Solver.init(gpa, sy.n, sy.col_ptr, sy.row_idx, null, .{});
         defer flat.deinit();
         try flat.factor(sy.vals, .{});
         try eng.factorWithExecution(sy.vals, .{});
@@ -339,10 +339,10 @@ const BbdTests = struct {
         var sy = try Synth.build(gpa, 8, 5, 4, 29, .{});
         defer sy.free(gpa);
 
-        var s_bbd = try direct.Solver.init(gpa, sy.n, sy.col_ptr, sy.row_idx, sy.info);
+        var s_bbd = try direct.Solver.init(gpa, sy.n, sy.col_ptr, sy.row_idx, sy.info, .{});
         defer s_bbd.deinit();
         try testing.expect(s_bbd.engine == .bbd);
-        var s_flat = try direct.Solver.init(gpa, sy.n, sy.col_ptr, sy.row_idx, null);
+        var s_flat = try direct.Solver.init(gpa, sy.n, sy.col_ptr, sy.row_idx, null, .{});
         defer s_flat.deinit();
 
         try s_bbd.factor(sy.vals, .{});
@@ -373,7 +373,7 @@ const BbdTests = struct {
         var sy = try Synth.build(gpa, 8, 5, 4, 31, .{ .singular_block = 2 });
         defer sy.free(gpa);
 
-        var s = try direct.Solver.init(gpa, sy.n, sy.col_ptr, sy.row_idx, sy.info);
+        var s = try direct.Solver.init(gpa, sy.n, sy.col_ptr, sy.row_idx, sy.info, .{});
         defer s.deinit();
         try testing.expect(s.engine == .bbd);
 
@@ -383,7 +383,7 @@ const BbdTests = struct {
         try testing.expect(s.engine != .bbd);
         try testing.expect(s.engine == .lu);
 
-        var flat = try direct.Solver.init(gpa, sy.n, sy.col_ptr, sy.row_idx, null);
+        var flat = try direct.Solver.init(gpa, sy.n, sy.col_ptr, sy.row_idx, null, .{});
         defer flat.deinit();
         try flat.factor(sy.vals, .{});
 
@@ -512,7 +512,7 @@ const ConvergerTests = struct {
             for ([_]f64{ 0, 2 }) |target| {
                 var rhs = [_]f64{0};
                 var sys: IterationSystem = .{ .target = target, .rhs = &rhs };
-                var ws = try Workspace.init(a, 1, &.{ 0, 1 }, &.{0}, null);
+                var ws = try Workspace.init(a, 1, &.{ 0, 1 }, &.{0}, null, .{}, .{});
                 defer ws.deinit(a);
                 for (0..2) |_| {
                     var x = [_]f64{0};
@@ -538,7 +538,7 @@ const ConvergerTests = struct {
         const a = std.testing.allocator;
         var rhs = [_]f64{0};
         var sys: IterationSystem = .{ .target = 1e-14, .slope = 1e16, .rhs = &rhs };
-        var ws = try Workspace.init(a, 1, &.{ 0, 1 }, &.{0}, null);
+        var ws = try Workspace.init(a, 1, &.{ 0, 1 }, &.{0}, null, .{}, .{});
         defer ws.deinit(a);
         var x = [_]f64{0};
         const result = try jfnk(&sys, &ws, &x, 0, .{
@@ -616,7 +616,7 @@ const ConvergerTests = struct {
         const a = std.testing.allocator;
         var rhs = [_]f64{ 0, 0 };
         var sys: CircleSystem = .{ .rhs = &rhs };
-        var ws = try Workspace.init(a, 2, &.{ 0, 2, 4 }, &.{ 0, 1, 0, 1 }, null);
+        var ws = try Workspace.init(a, 2, &.{ 0, 2, 4 }, &.{ 0, 1, 0, 1 }, null, .{}, .{});
         defer ws.deinit(a);
         var x = [_]f64{ 3, 3 };
         const r = try jfnk(&sys, &ws, &x, 0, .{ .gmin = 0 }, CircleSystem.Hook{});
@@ -635,7 +635,7 @@ const ConvergerTests = struct {
         inline for (.{ newton, jfnk }) |solve| {
             var rhs = [_]f64{ 0, 0 };
             var sys: GainRowSystem = .{ .rhs = &rhs };
-            var ws = try Workspace.init(a, 2, &.{ 0, 2, 4 }, &.{ 0, 1, 0, 1 }, null);
+            var ws = try Workspace.init(a, 2, &.{ 0, 2, 4 }, &.{ 0, 1, 0, 1 }, null, .{}, .{});
             defer ws.deinit(a);
             var x = [_]f64{ 0, 0 };
             const r = try solve(&sys, &ws, &x, 0, .{ .gmin = 0, .max_iter = 32 }, GainRowSystem.Hook{});
@@ -688,7 +688,7 @@ const ConvergerTests = struct {
         inline for (.{ newton, jfnk }) |solve| {
             var rhs = [_]f64{0};
             var sys: NanSystem = .{ .rhs = &rhs };
-            var ws = try Workspace.init(a, 1, &.{ 0, 1 }, &.{0}, null);
+            var ws = try Workspace.init(a, 1, &.{ 0, 1 }, &.{0}, null, .{}, .{});
             defer ws.deinit(a);
             var x = [_]f64{0};
             const r = try solve(&sys, &ws, &x, 0, .{ .gmin = 0, .max_iter = 6 }, NanSystem.Hook{});
@@ -727,7 +727,7 @@ const ConvergerTests = struct {
         const a = std.testing.allocator;
         var rhs = [_]f64{0};
         var sys: RunawaySystem = .{ .rhs = &rhs };
-        var ws = try Workspace.init(a, 1, &.{ 0, 1 }, &.{0}, null);
+        var ws = try Workspace.init(a, 1, &.{ 0, 1 }, &.{0}, null, .{}, .{});
         defer ws.deinit(a);
         var x = [_]f64{5e24};
         const r = try newton(&sys, &ws, &x, 0, .{ .gmin = 0, .max_iter = 6 }, RunawaySystem.Hook{});
@@ -745,7 +745,7 @@ const ConvergerTests = struct {
     }
 
     fn workspaceLifecycle(gpa: std.mem.Allocator) !void {
-        var ws = try Workspace.init(gpa, 2, &.{ 0, 2, 4 }, &.{ 0, 1, 0, 1 }, null);
+        var ws = try Workspace.init(gpa, 2, &.{ 0, 2, 4 }, &.{ 0, 1, 0, 1 }, null, .{}, .{});
         defer ws.deinit(gpa);
         try testing.expectEqual(@as(usize, 4), (try ws.ensureAVals(4)).len);
         try testing.expectEqual(@as(usize, 2), (try ws.ensureAVals(2)).len);
@@ -1031,7 +1031,7 @@ const DirectTests = struct {
     test "solver construction releases storage on every allocation failure" {
         try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
             fn run(gpa: Allocator) !void {
-                var solver = try Solver.init(gpa, 4, &.{ 0, 2, 3, 4, 6 }, &.{ 0, 3, 1, 2, 0, 3 }, null);
+                var solver = try Solver.init(gpa, 4, &.{ 0, 2, 3, 4, 6 }, &.{ 0, 3, 1, 2, 0, 3 }, null, .{});
                 defer solver.deinit();
             }
         }.run, .{});
@@ -1044,7 +1044,7 @@ const DirectTests = struct {
         const row_idx = csc.row_idx[0..csc.nnz()];
         const vals = csc.vals[0..csc.nnz()];
 
-        var s = try Solver.init(gpa, 2, col_ptr, row_idx, null);
+        var s = try Solver.init(gpa, 2, col_ptr, row_idx, null, .{});
         defer s.deinit();
         try s.factor(vals, .{});
         var x: [2]f64 = undefined;

@@ -12,6 +12,7 @@ const gompute = @import("gompute");
 
 const Circuit = analysis.Circuit;
 const GpuHook = analysis.GpuHook;
+const Knobs = analysis.Knobs;
 const Planes = device_ir.Planes;
 const SimState = device_ir.SimState;
 
@@ -153,8 +154,8 @@ var driver_up: std.atomic.Value(bool) = .init(false);
 
 /// `ESPICE_GPU_STATS`: print the cost model's inputs and the residency split,
 /// and the wall-time split at teardown.
-fn statsOn() bool {
-    return std.c.getenv("ESPICE_GPU_STATS") != null;
+fn statsOn(knobs: Knobs) bool {
+    return knobs.gpu_stats != .off;
 }
 
 /// Names a batch that has a GPU payload but stays on the host, where it is
@@ -256,25 +257,25 @@ fn imageOf(kernel: []const u8) ?[:0]const u8 {
 /// ponytail: the driver cache also keys on the driver version, so an upgrade
 /// leaves stale markers and `auto` pays one cold JIT; key on the version too
 /// if that ever matters.
-fn markerPath(buf: []u8, image: []const u8) ?[:0]const u8 {
+fn markerPath(buf: []u8, image: []const u8, knobs: Knobs) ?[:0]const u8 {
     const hash = std.hash.Wyhash.hash(0, image);
-    if (std.c.getenv("XDG_CACHE_HOME")) |x|
-        return std.mem.printSentinel(buf, "{s}/espice/gpu-jit/{x:0>16}", .{ std.mem.span(x), hash }, 0) catch null;
-    const home = std.c.getenv("HOME") orelse return null;
-    return std.mem.printSentinel(buf, "{s}/.cache/espice/gpu-jit/{x:0>16}", .{ std.mem.span(home), hash }, 0) catch null;
+    if (knobs.xdg_cache_home) |x|
+        return std.mem.printSentinel(buf, "{s}/espice/gpu-jit/{x:0>16}", .{ x, hash }, 0) catch null;
+    const home = knobs.home orelse return null;
+    return std.mem.printSentinel(buf, "{s}/.cache/espice/gpu-jit/{x:0>16}", .{ home, hash }, 0) catch null;
 }
 
-fn imageWarm(image: []const u8) bool {
+fn imageWarm(image: []const u8, knobs: Knobs) bool {
     var buf: [512]u8 = undefined;
-    const path = markerPath(&buf, image) orelse return false;
+    const path = markerPath(&buf, image, knobs) orelse return false;
     return std.c.access(path, 0) == 0;
 }
 
 /// Records `image` as compiled. Best effort: a missing marker only means the
 /// next `auto` run keeps that batch on the CPU.
-fn markWarm(image: []const u8) void {
+fn markWarm(image: []const u8, knobs: Knobs) void {
     var buf: [512]u8 = undefined;
-    const path = markerPath(&buf, image) orelse return;
+    const path = markerPath(&buf, image, knobs) orelse return;
     // mkdir -p for `espice/` and `gpu-jit/`; EEXIST is the common case.
     const jit_dir = std.mem.lastIndexOfScalar(u8, path, '/') orelse return;
     const app_dir = std.mem.lastIndexOfScalar(u8, path[0..jit_dir], '/') orelse return;
@@ -372,17 +373,11 @@ const BatchGpu = struct {
 /// file; 2000 instances were then 8 blocks on 24 SMs. 64 spreads any batch
 /// over every SM: per eval against 256, bsim4va 679 us against 866, psp103
 /// 1071 against 1284; 32 measured the same as 64. HIP keeps the exported
-/// width, which its `globalIdX` bakes in. `ESPICE_GPU_BLOCK` overrides it.
-fn evalBlock() u32 {
+/// width, which its `globalIdX` bakes in. `ESPICE_GPU_BLOCK` overrides it
+/// (`Knobs.gpu_block`).
+fn evalBlock(knobs: Knobs) u32 {
     if (comptime backend != .cuda) return block_size;
-    return parseBlock(std.c.getenv("ESPICE_GPU_BLOCK"));
-}
-
-/// `ESPICE_GPU_BLOCK`'s width, or 64 when unset, unparsable or outside
-/// CUDA's 1..1024: a zero width would divide by zero in `Dim3.linear`.
-fn parseBlock(env: ?[*:0]const u8) u32 {
-    const v = std.fmt.parseInt(u32, std.mem.span(env orelse return 64), 10) catch return 64;
-    return if (v >= 1 and v <= 1024) v else 64;
+    return knobs.gpu_block;
 }
 
 /// `arp_qtp_<model>` for the eval kernel `arp_eval_<model>`, or null when
@@ -562,7 +557,8 @@ pub const GpuContext = struct {
     /// Caller owns the result and frees it with `deinit`.
     pub fn init(gpa: std.mem.Allocator, ckt: *Circuit, explicit: bool, threads: u32, evals: f64) !*Self {
         if (comptime backend == null) return Error.NoGpuArtifacts;
-        const report = explicit or statsOn();
+        const knobs = ckt.knobs;
+        const report = explicit or statsOn(knobs);
 
         var n_gpu: usize = 0;
         for (ckt.batches) |b| {
@@ -591,7 +587,7 @@ pub const GpuContext = struct {
 
         for (ckt.batches) |b| {
             const bg = &batches[n_up];
-            const up = try loadBatch(gpa, bg, b, explicit, report);
+            const up = try loadBatch(gpa, bg, b, explicit, report, knobs);
             if (!up) {
                 cpu_batches[n_cpu] = b;
                 n_cpu += 1;
@@ -605,7 +601,7 @@ pub const GpuContext = struct {
 
         // Every eligible batch demoted; `batches[0]` below needs one.
         if (n_up == 0) return Error.CircuitNotEligible;
-        if (statsOn()) std.debug.print(
+        if (statsOn(knobs)) std.debug.print(
             "gpu-stats: resident batches={d} host batches={d} charge planes={s} lte tape={s}\n",
             .{ n_up, n_cpu, if (resident_charge) "device" else "host-only", if (tape_ok) "device" else "row-plane" },
         );
@@ -672,12 +668,12 @@ pub const GpuContext = struct {
         errdefer d_mid.free();
         var stream = try k0.createStream();
         errdefer stream.deinit();
-        const chk: []f64 = if (std.c.getenv("ESPICE_GPU_EVAL_CHECK") != null)
+        const chk: []f64 = if (knobs.gpu_eval_check)
             try gpa.alloc(f64, layout.cells(n_planes))
         else
             &.{};
 
-        if (statsOn()) std.debug.print("gpu-stats: stage={d} pieces={d} cells={d}\n", .{ order.n_stage, order.n_pieces, layout.cells(n_planes) });
+        if (statsOn(knobs)) std.debug.print("gpu-stats: stage={d} pieces={d} cells={d}\n", .{ order.n_stage, order.n_pieces, layout.cells(n_planes) });
         // Charge-free planes read zero until a host batch stamps them.
         @memset(pin_planes, 0);
         var v_stage: [4]Buffer = undefined;
@@ -716,8 +712,8 @@ pub const GpuContext = struct {
             .stream = stream,
             .resident_charge = resident_charge,
             .chk = chk,
-            .prof = .{ .on = statsOn(), .phases = if (std.c.getenv("ESPICE_GPU_STATS")) |v| std.mem.eql(u8, std.mem.span(v), "phases") else false },
-            .fuse = std.c.getenv("ESPICE_GPU_NOFUSE") == null,
+            .prof = .{ .on = statsOn(knobs), .phases = knobs.gpu_stats == .phases },
+            .fuse = !knobs.gpu_nofuse,
         };
         driver_up.store(true, .monotonic);
         // Swap the circuit onto the pinned planes, carrying their contents.
@@ -729,7 +725,7 @@ pub const GpuContext = struct {
     /// Loads batch `b`'s kernels and uploads its working set into `bg`.
     /// False when it stays on the host: no GPU payload, no image in this
     /// build, or (`auto`) an image the driver has not compiled yet.
-    fn loadBatch(gpa: std.mem.Allocator, bg: *BatchGpu, b: device_ir.Batch, explicit: bool, report: bool) !bool {
+    fn loadBatch(gpa: std.mem.Allocator, bg: *BatchGpu, b: device_ir.Batch, explicit: bool, report: bool, knobs: Knobs) !bool {
         const get = b.hooks.gpu_payload orelse return false;
         const p = get(b.ctx);
         const image = imageOf(p.kernel) orelse {
@@ -737,21 +733,21 @@ pub const GpuContext = struct {
             return false;
         };
         const heavy = image.len >= heavy_image_bytes;
-        if (heavy and !explicit and !imageWarm(image)) {
+        if (heavy and !explicit and !imageWarm(image, knobs)) {
             std.debug.print(
                 "note: GPU kernel for '{s}' is not compiled yet ({d} MB of PTX); `--backend cuda` compiles it once per build\n",
                 .{ b.type_name, image.len >> 20 },
             );
             return false;
         }
-        if (heavy and report and !imageWarm(image)) std.debug.print(
+        if (heavy and report and !imageWarm(image, knobs)) std.debug.print(
             "note: compiling the GPU kernel for '{s}' ({d} MB of PTX); the driver caches it for later runs\n",
             .{ b.type_name, image.len >> 20 },
         );
 
         var kernel = try gompute.rawKernelByName(backend.?, p.kernel, 0);
         errdefer kernel.deinit();
-        if (heavy) markWarm(image);
+        if (heavy) markWarm(image, knobs);
         // The other entry points share the eval kernel's image, so a missing
         // one means a stale image: fail rather than run half-resident.
         var lim_kernel: ?Raw = if (p.lim_kernel.len > 0) try gompute.rawKernelByName(backend.?, p.lim_kernel, 0) else null;
@@ -796,7 +792,7 @@ pub const GpuContext = struct {
         const writes_instances = b.hooks.status != null or lim_kernel != null or ctl_kernel != null;
         const base: []u8 = if (writes_instances) try gpa.dupe(u8, p.instances) else &.{};
 
-        const block = evalBlock();
+        const block = evalBlock(knobs);
         bg.* = .{
             .kernel = kernel,
             .lim_kernel = lim_kernel,
@@ -839,10 +835,11 @@ pub const GpuContext = struct {
     /// query with too few evals is declined before the probe.
     const Cost = struct {
         fn admit(gpa: std.mem.Allocator, ckt: *const Circuit, threads: u32, evals: f64) !void {
+            const stats = statsOn(ckt.knobs);
             const init_us: f64 = if (driver_up.load(.monotonic)) 0 else cost_init_us;
             // The probe costs three host evals; a query with few more than
             // that cannot repay the setup.
-            if (evals < 20) return decline(0, 0, "too few evals");
+            if (evals < 20) return decline(stats, 0, 0, "too few evals");
             var slots: u64 = 0;
             for (ckt.batches) |b| {
                 const get = b.hooks.gpu_payload orelse continue;
@@ -883,8 +880,8 @@ pub const GpuContext = struct {
                 stage_bytes / cost_stage_b_per_us + host_us * cost_kernel_ratio;
             const lanes = 1.0 + cost_lane_gain * @as(f64, @floatFromInt(@max(1, threads) - 1));
             const cpu_us = host_us / lanes;
-            if (!gpuWins(cpu_us, gpu_us, evals, init_us)) return decline(cpu_us, gpu_us, "the CPU is priced faster");
-            if (statsOn()) std.debug.print(
+            if (!gpuWins(cpu_us, gpu_us, evals, init_us)) return decline(stats, cpu_us, gpu_us, "the CPU is priced faster");
+            if (stats) std.debug.print(
                 "gpu-stats: cost per eval cpu={d:.0} us gpu={d:.0} us, {d:.0} evals, setup {d:.0} ms: GPU\n",
                 .{ cpu_us, gpu_us, evals, init_us * 1e-3 },
             );
@@ -897,8 +894,8 @@ pub const GpuContext = struct {
             return cpu_us >= cost_min_ratio * gpu_us and cost_margin * (init_us + evals * gpu_us) < evals * cpu_us;
         }
 
-        fn decline(cpu_us: f64, gpu_us: f64, why: []const u8) Error {
-            if (statsOn()) std.debug.print("gpu-stats: cost per eval cpu={d:.0} us gpu={d:.0} us: CPU ({s})\n", .{ cpu_us, gpu_us, why });
+        fn decline(stats: bool, cpu_us: f64, gpu_us: f64, why: []const u8) Error {
+            if (stats) std.debug.print("gpu-stats: cost per eval cpu={d:.0} us gpu={d:.0} us: CPU ({s})\n", .{ cpu_us, gpu_us, why });
             return Error.NotEnoughGpuWork;
         }
     };
@@ -1862,12 +1859,13 @@ test detectedHardware {
     try std.testing.expect(std.mem.eql(u8, name, "none") or std.mem.eql(u8, name, "cuda") or std.mem.eql(u8, name, "hip"));
 }
 
-test parseBlock {
+test "Knobs.parseBlock" {
+    const parseBlock = Knobs.parseBlock;
     try std.testing.expectEqual(@as(u32, 64), parseBlock(null));
     try std.testing.expectEqual(@as(u32, 32), parseBlock("32"));
     try std.testing.expectEqual(@as(u32, 1), parseBlock("1"));
     try std.testing.expectEqual(@as(u32, 1024), parseBlock("1024"));
-    for ([_][*:0]const u8{ "0", "1025", "", "-8", "64x", "99999999999" }) |bad|
+    for ([_][]const u8{ "0", "1025", "", "-8", "64x", "99999999999" }) |bad|
         try std.testing.expectEqual(@as(u32, 64), parseBlock(bad));
 }
 

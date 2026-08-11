@@ -250,7 +250,7 @@ pub fn solveSpectrum(
         num.axpy(f_hat, 1.0, q_term);
 
         const max_residual = num.normInf(f_hat);
-        if (converger.hbTrace()) std.debug.print("HB iter={d} res={e} step={e} normx={e}\n", .{ iter, max_residual, step, num.normInf(x_hat) });
+        if (ckt.knobs.hb_trace) std.debug.print("HB iter={d} res={e} step={e} normx={e}\n", .{ iter, max_residual, step, num.normInf(x_hat) });
         if (max_residual < options.hb_tol) {
             solved = .{ .status = .{ .converged = true, .iterations = iter + 1, .residual_norm = max_residual }, .f0 = if (osc == root.GROUND) options.f0 else omega0 / (2.0 * std.math.pi) };
             if (ppv.len == 0) return solved.?;

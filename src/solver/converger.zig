@@ -32,52 +32,28 @@ const FdQuot = struct {
 
 /// `ESPICE_SOLVER` overrides `run`'s choice: direct, jfnk (LU-preconditioned
 /// GMRES) or jfnk-nolu (Jacobi-preconditioned, no factorization at all).
-const SolverPin = enum { auto, direct, jfnk, jfnk_nolu };
+pub const SolverPin = enum {
+    auto,
+    direct,
+    jfnk,
+    jfnk_nolu,
 
-/// Read once per process; concurrent first readers may repeat the lookup.
-var solver_pin_cache: std.atomic.Value(u8) = .init(std.math.maxInt(u8));
+    /// The `ESPICE_SOLVER` spellings; anything else is `.auto`.
+    pub const names = std.StaticStringMap(SolverPin).initComptime(.{
+        .{ "direct", .direct }, .{ "jfnk", .jfnk }, .{ "jfnk-nolu", .jfnk_nolu },
+    });
+};
 
-fn solverPin() SolverPin {
-    const cached = solver_pin_cache.load(.monotonic);
-    if (cached != std.math.maxInt(u8)) return @fromBackingInt(@intCast(cached));
-    const p: SolverPin = blk: {
-        const s = std.c.getenv("ESPICE_SOLVER") orelse break :blk .auto;
-        break :blk std.StaticStringMap(SolverPin).initComptime(.{
-            .{ "direct", .direct }, .{ "jfnk", .jfnk }, .{ "jfnk-nolu", .jfnk_nolu },
-        }).get(std.mem.span(s)) orelse .auto;
-    };
-    solver_pin_cache.store(@backingInt(p), .monotonic);
-    return p;
-}
-
-// Debug flags, read once: they are tested per Newton iterate, and glibc's
-// getenv is a linear scan of environ (0.35% of a devices/mos6_inverter run).
-// 0 = unread, 1 = unset, 2 = set.
-var opdbg_cache: std.atomic.Value(u8) = .init(0);
-var newton_dbg_cache: std.atomic.Value(u8) = .init(0);
-var hb_trace_cache: std.atomic.Value(u8) = .init(0);
-
-/// `ZP_OPDBG`: trace operating-point iterates and continuation rungs.
-pub fn opdbg() bool {
-    return envFlag(&opdbg_cache, "ZP_OPDBG");
-}
-
-fn newtonDbg() bool {
-    return envFlag(&newton_dbg_cache, "ZP_NEWTON_DEBUG");
-}
-
-/// `ESPICE_HB_TRACE`: trace harmonic-balance iterates.
-pub fn hbTrace() bool {
-    return envFlag(&hb_trace_cache, "ESPICE_HB_TRACE");
-}
-
-fn envFlag(cache: *std.atomic.Value(u8), name: [*:0]const u8) bool {
-    const cached = cache.load(.monotonic);
-    if (cached != 0) return cached == 2;
-    const v = std.c.getenv(name) != null;
-    cache.store(@as(u8, @intFromBool(v)) + 1, .monotonic);
-    return v;
-}
+/// Developer switches (`Workspace.knobs`). The facade reads them from the
+/// environment once (`espice.zig`); the solver reads no environment.
+pub const Knobs = struct {
+    /// `ESPICE_SOLVER`.
+    pin: SolverPin = .auto,
+    /// `ZP_OPDBG`: trace operating-point iterates and continuation rungs.
+    opdbg: bool = false,
+    /// `ZP_NEWTON_DEBUG`: trace every Newton iterate.
+    newton_debug: bool = false,
+};
 
 /// Which gate refused an iterate, for the `ZP_OPDBG` trace. ngspice's
 /// NIconvTest (maths/ni/niconv.c) has only the delta test, the first-iterate
@@ -213,10 +189,10 @@ pub fn newton(
             sys.rhs[f.row] += force_g * (x[f.row] - f.value);
         }
         var norm_f: f64 = 0; // read only by the traces
-        if (newtonDbg() or opdbg()) {
+        if (ws.knobs.newton_debug or ws.knobs.opdbg) {
             norm_f = num.normInf(sys.rhs[0..sys.n]);
         }
-        if (newtonDbg())
+        if (ws.knobs.newton_debug)
             std.debug.print("  it={d} |F|={e} x={any}\n", .{ iter, norm_f, x[0..@min(sys.n, 8)] });
         // Before the factor and solve, which may overwrite `v` and `rhs`.
         const load_ok = if (comptime @hasDecl(S, "loadCheck")) sys.loadCheck(x, v, sys.rhs[0..sys.n], opts.reltol, opts.abstol) else true;
@@ -228,7 +204,7 @@ pub fn newton(
         if (on_device and need) ws.factored_sig = opts.matrix_sig;
         if (!on_device and need) {
             slv.factor(v, executionOf(sys)) catch |e| {
-                if (opdbg()) {
+                if (ws.knobs.opdbg) {
                     var nan_cnt: usize = 0;
                     for (v[0..sys.nnz]) |vi| {
                         if (!std.math.isFinite(vi)) nan_cnt += 1;
@@ -248,7 +224,7 @@ pub fn newton(
         // stale value, so the extra pass solved F(lim(x)) = 0 (#53).
         const st = finalizeStep(sys, x, dx, x_old, sys.rhs, v, iter, t, opts, load_ok, !init_fix);
         prof.lap(.update);
-        if (opdbg()) {
+        if (ws.knobs.opdbg) {
             var fi: usize = 0;
             var di: usize = 0;
             for (0..sys.n) |i| {
@@ -396,7 +372,7 @@ pub fn jfnk(
     const x_old = ws.x_old[0..n];
     const x = x_full[0..n];
     // A null solver is what makes this matrix-free.
-    const slv: ?*direct.Solver = if (solverPin() == .jfnk_nolu) null else &ws.slv;
+    const slv: ?*direct.Solver = if (ws.knobs.pin == .jfnk_nolu) null else &ws.slv;
 
     if (comptime @hasDecl(S, "beginSolve")) sys.beginSolve();
     @memcpy(x_old, x);
@@ -548,7 +524,7 @@ pub fn run(
     // Function scope: a defer inside an `if` block would run before the solve.
     defer if (comptime @hasDecl(S, "clearLimits")) sys.clearLimits();
 
-    const pin = solverPin();
+    const pin = ws.knobs.pin;
     if (pin == .jfnk or pin == .jfnk_nolu) {
         if (jfnk(sys, ws, x, t, opts, hook)) |r| {
             if (r.converged) return r;
@@ -718,18 +694,20 @@ pub const Workspace = struct {
     /// `Options.matrix_sig` of the current factorization; 0 = none.
     factored_sig: u64 = 0,
     prof: Prof = .{},
+    knobs: Knobs,
 
     /// Borrows `col_ptr` and `row_idx` for the workspace's lifetime. Caller
     /// frees with `deinit` and the same allocator.
-    pub fn init(gpa: std.mem.Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32, bbd: ?BbdInfo) !Workspace {
+    pub fn init(gpa: std.mem.Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32, bbd: ?BbdInfo, knobs: Knobs, lu_knobs: direct.Knobs) !Workspace {
         const dx = try gpa.alloc(f64, n);
         errdefer gpa.free(dx);
         const x_old = try gpa.alloc(f64, n);
         errdefer gpa.free(x_old);
         return .{
-            .slv = try direct.Solver.init(gpa, n, col_ptr, row_idx, bbd),
+            .slv = try direct.Solver.init(gpa, n, col_ptr, row_idx, bbd, lu_knobs),
             .dx = dx,
             .x_old = x_old,
+            .knobs = knobs,
         };
     }
 

@@ -515,7 +515,7 @@ pub fn solve(ckt: *root.Circuit, x_hat: []f64, spec: Spectrum, tones: []const f6
         }
 
         const residual = num.normInf(f_hat);
-        if (converger.hbTrace()) std.debug.print("MHB iter={d} res={e} step={e}\n", .{ iter, residual, step });
+        if (ckt.knobs.hb_trace) std.debug.print("MHB iter={d} res={e} step={e}\n", .{ iter, residual, step });
         if (residual < options.hb_tol) return .{ .converged = true, .iterations = iter + 1, .residual_norm = residual };
 
         if (iter != 0 and !(residual <= prev_residual) and step > min_step) {
@@ -544,7 +544,7 @@ pub fn solve(ckt: *root.Circuit, x_hat: []f64, spec: Spectrum, tones: []const f6
         num.scale(f_hat, -1, f_hat);
         root.zeroSimd(dx);
         const gr = gmres.solve(&op, f_hat, dx, gmres_tol, gmres_max_restarts);
-        if (converger.hbTrace()) std.debug.print("  gmres it={d} res={e} conv={}\n", .{ gr.iterations, gr.residual, gr.converged });
+        if (ckt.knobs.hb_trace) std.debug.print("  gmres it={d} res={e} conv={}\n", .{ gr.iterations, gr.residual, gr.converged });
         root.copySimd(x_prev, x_hat);
         num.axpy(x_hat, step, dx);
     }

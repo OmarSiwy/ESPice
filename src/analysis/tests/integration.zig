@@ -28,7 +28,7 @@ test "generated limiter: failed trial rollback and retry match an untried circui
         defer clean.deinit();
         try tried.computeBaseline();
         try clean.computeBaseline();
-        var ws = try converger.Workspace.init(t.allocator, tried.n, tried.col_ptr, tried.row_idx, tried.bbd);
+        var ws = try converger.Workspace.init(t.allocator, tried.n, tried.col_ptr, tried.row_idx, tried.bbd, .{}, .{});
         defer ws.deinit(t.allocator);
         const xs = try t.allocator.alloc(f64, tried.n);
         defer t.allocator.free(xs);
@@ -86,7 +86,7 @@ test "jfnk vs newton: divider OP agrees to 1e-9" {
 
     try ckt.computeBaseline();
 
-    var ws_n = try converger.Workspace.init(testing.allocator, ckt.n, ckt.col_ptr, ckt.row_idx, ckt.bbd);
+    var ws_n = try converger.Workspace.init(testing.allocator, ckt.n, ckt.col_ptr, ckt.row_idx, ckt.bbd, .{}, .{});
     defer ws_n.deinit(testing.allocator);
     const x_n = try testing.allocator.alloc(f64, ckt.n);
     defer testing.allocator.free(x_n);
@@ -94,7 +94,7 @@ test "jfnk vs newton: divider OP agrees to 1e-9" {
     const nr = try converger.newton(&ckt, &ws_n, x_n, 0, .{}, analysis.EvalHook{});
     try testing.expect(nr.converged);
 
-    var ws_j = try converger.Workspace.init(testing.allocator, ckt.n, ckt.col_ptr, ckt.row_idx, ckt.bbd);
+    var ws_j = try converger.Workspace.init(testing.allocator, ckt.n, ckt.col_ptr, ckt.row_idx, ckt.bbd, .{}, .{});
     defer ws_j.deinit(testing.allocator);
     const x_j = try testing.allocator.alloc(f64, ckt.n);
     defer testing.allocator.free(x_j);
@@ -131,7 +131,7 @@ test "jfnk: 100-diode ladder converges" {
     defer ckt.deinit();
     try ckt.computeBaseline();
 
-    var ws = try converger.Workspace.init(testing.allocator, ckt.n, ckt.col_ptr, ckt.row_idx, ckt.bbd);
+    var ws = try converger.Workspace.init(testing.allocator, ckt.n, ckt.col_ptr, ckt.row_idx, ckt.bbd, .{}, .{});
     defer ws.deinit(testing.allocator);
     const x = try testing.allocator.alloc(f64, ckt.n);
     defer testing.allocator.free(x);
@@ -165,7 +165,7 @@ test "generated limiter: a cold OP converges where F(x) = 0, not at the limited 
     var ckt = try analysis.Circuit.instantiate(&prepared, t.allocator);
     defer ckt.deinit();
     try ckt.computeBaseline();
-    var ws = try converger.Workspace.init(t.allocator, ckt.n, ckt.col_ptr, ckt.row_idx, ckt.bbd);
+    var ws = try converger.Workspace.init(t.allocator, ckt.n, ckt.col_ptr, ckt.row_idx, ckt.bbd, .{}, .{});
     defer ws.deinit(t.allocator);
     const x = try t.allocator.alloc(f64, ckt.n);
     defer t.allocator.free(x);

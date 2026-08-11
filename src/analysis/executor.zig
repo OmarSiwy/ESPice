@@ -32,6 +32,8 @@ pub const Config = struct {
     /// completed prerequisite's device state may move into its last
     /// dependent instead of being copied. Appending callers keep copies.
     final_plan: bool = false,
+    /// Developer switches the facade read from the environment.
+    knobs: types.Knobs = .{},
 };
 
 /// Fails with `error.GpuBackendUnavailable` for a backend this binary has no
@@ -112,6 +114,7 @@ pub const Executor = struct {
         // solver's own count is set (ESPICE_SOLVER_THREADS).
         const lu_threads: u8 = @intCast(@min(if (config.solver_threads > 1) config.solver_threads else config.device_threads, 16));
         self.circuit.solver_execution = .{ .io = io, .threads = config.solver_threads, .lu_threads = lu_threads };
+        self.circuit.knobs = config.knobs;
         if (initial) |source| self.x = try self.work.allocator().dupe(f64, source.operatingPoint().?);
         // A dependent copies its prerequisite's circuit, variant included.
         if (initial == null) try self.installVariant();
@@ -331,19 +334,19 @@ pub const Executor = struct {
         return names;
     }
 
-    /// The device LU: `ESPICE_GPU_LU=1` forces it on under a GPU backend,
-    /// `=0` off; otherwise it runs where the matrix is big enough to be
+    /// The device LU: `Knobs.gpu_lu` (`ESPICE_GPU_LU=1`) forces it on under a
+    /// GPU backend, any other value off; otherwise it runs where the matrix is big enough to be
     /// worth asking the driver, on every pivot epoch with enough flops per
     /// column (`GpuLu.min_per_col`), whatever the card's FP64 rate. A
     /// driver that refuses leaves the host LU.
     fn prepareGpuLu(self: *Executor) ?*gpu_lu.GpuLu {
         if (self.config.backend == .cpu) return null;
         var forced = false;
-        if (std.c.getenv("ESPICE_GPU_LU")) |env| {
-            if (!std.mem.eql(u8, std.mem.span(env), "1")) return null;
+        if (self.config.knobs.gpu_lu) |on| {
+            if (!on) return null;
             forced = true;
         } else if (self.circuit.n < gpu_lu_min_n) return null;
-        const context = gpu_lu.GpuLu.init(self.allocator, self.circuit.n, self.circuit.nnz) catch |err| {
+        const context = gpu_lu.GpuLu.init(self.allocator, self.circuit.n, self.circuit.nnz, self.config.knobs) catch |err| {
             if (forced) std.debug.print("warning: device LU unavailable ({s})\n", .{@errorName(err)});
             return null;
         };

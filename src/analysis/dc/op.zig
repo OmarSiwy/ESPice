@@ -125,7 +125,7 @@ pub fn solveLadder(
         error.SingularMatrix => null,
         else => return e,
     };
-    if (converger.opdbg())
+    if (ws.knobs.opdbg)
         std.debug.print("ladder: plain conv={?}\n", .{if (plain) |p| p.converged else null});
     if (plain) |p| {
         if (p.converged) return p;
@@ -163,7 +163,7 @@ pub fn solveLadder(
                 else => return e,
             };
             total_iter +|= r.iterations;
-            if (converger.opdbg())
+            if (ws.knobs.opdbg)
                 std.debug.print("ladder: gmin={e:.3} conv={} it={d}\n", .{ gmin_val, r.converged, r.iterations });
             if (r.converged) {
                 if (gmin_val <= gtarget) {
@@ -236,7 +236,7 @@ pub fn solveLadder(
                 },
             };
             total_iter +|= sr.iterations;
-            if (converger.opdbg())
+            if (ws.knobs.opdbg)
                 std.debug.print("ladder: src lambda={e:.3} conv={} it={d}\n", .{ lambda, sr.converged, sr.iterations });
             if (sr.converged) {
                 if (lambda >= 1.0) break; // full sources reached
@@ -460,7 +460,7 @@ fn forceNodeset(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, options:
         error.SingularMatrix => failed,
         else => return e,
     };
-    if (converger.opdbg()) std.debug.print("ladder: nodeset conv={} it={d}\n", .{ r.converged, r.iterations });
+    if (ws.knobs.opdbg) std.debug.print("ladder: nodeset conv={} it={d}\n", .{ r.converged, r.iterations });
     if (!r.converged) copySimd(x, start);
     return r.converged;
 }

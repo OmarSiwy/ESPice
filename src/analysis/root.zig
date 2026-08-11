@@ -3,6 +3,8 @@
 /// The query graph and its scheduler (`Session`).
 pub const session = @import("session.zig");
 pub const ExecutionConfig = @import("executor.zig").Config;
+/// Developer switches `ExecutionConfig.knobs` carries; the facade fills them.
+pub const Knobs = @import("types.zig").Knobs;
 pub const validateBackend = @import("executor.zig").validateBackend;
 /// The result shape of a query, without running it.
 pub const schemaOf = session.schemaOf;

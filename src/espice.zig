@@ -192,6 +192,7 @@ pub const Problem = struct {
         self.variant = null;
         var execution = options.backend;
         execution.timing_in_depth = options.timing_in_depth;
+        execution.knobs = knobsFromEnv();
         self.session = analysis.session.Session.init(self.workerAllocator(), io, &self.prepared.circuit, &self.prepared.deck, execution);
         errdefer self.session.deinit();
         // An optimization's sessions run before this one; nothing after it
@@ -978,4 +979,42 @@ fn timingLap(io: std.Io, start: *?std.Io.Timestamp, label: []const u8) void {
     const elapsed = before.durationTo(now).nanoseconds;
     std.debug.print("timing: {s}: {d:.6}ms\n", .{ label, @as(f64, @floatFromInt(elapsed)) / 1e6 });
     start.* = std.Io.Timestamp.now(io, .awake);
+}
+
+/// The developer switches (`analysis.Knobs`), read from the environment once
+/// per Problem. Nothing below the facade reads the environment, so every
+/// knob is parsed here; the field docs name each variable.
+fn knobsFromEnv() analysis.Knobs {
+    const env = struct {
+        fn get(name: [:0]const u8) ?[]const u8 {
+            return std.mem.span(std.c.getenv(name) orelse return null);
+        }
+        fn on(name: [:0]const u8) bool {
+            return std.c.getenv(name) != null;
+        }
+    };
+    var k: analysis.Knobs = .{};
+    if (env.get("ESPICE_SOLVER")) |s| k.newton.pin = @TypeOf(k.newton.pin).names.get(s) orelse .auto;
+    k.newton.opdbg = env.on("ZP_OPDBG");
+    k.newton.newton_debug = env.on("ZP_NEWTON_DEBUG");
+    k.lu.stats = env.on("ZP_LU_STATS");
+    k.lu.no_bbd = env.on("ESPICE_NO_BBD");
+    if (env.get("ESPICE_LU_PAR")) |v| k.lu.par = v.len > 0 and v[0] == '1';
+    k.lu.par_stats = env.on("ESPICE_LU_PAR_STATS");
+    k.hb_trace = env.on("ESPICE_HB_TRACE");
+    k.no_qtape = env.on("ZP_NO_QTAPE");
+    k.tran_stats = env.on("ZP_TRAN_STATS");
+    if (env.get("ESPICE_GPU_LU")) |v| k.gpu_lu = std.mem.eql(u8, v, "1");
+    k.gpu_lu_check = env.on("ESPICE_GPU_LU_CHECK");
+    k.gpu_lu_nogather = env.on("ESPICE_GPU_LU_NOGATHER");
+    if (env.get("ESPICE_GPU_LU_TAIL")) |v| k.gpu_lu_tail = std.fmt.parseInt(u32, v, 10) catch 0;
+    if (env.get("ESPICE_GPU_LU_BENCH")) |v| k.gpu_lu_bench = std.fmt.parseInt(usize, v, 10) catch 0;
+    if (env.get("ESPICE_GPU_LU_THREADS")) |v| k.gpu_lu_threads = std.fmt.parseInt(u32, v, 10) catch 8;
+    if (env.get("ESPICE_GPU_STATS")) |v| k.gpu_stats = if (std.mem.eql(u8, v, "phases")) .phases else .on;
+    k.gpu_block = analysis.Knobs.parseBlock(env.get("ESPICE_GPU_BLOCK"));
+    k.gpu_eval_check = env.on("ESPICE_GPU_EVAL_CHECK");
+    k.gpu_nofuse = env.on("ESPICE_GPU_NOFUSE");
+    k.xdg_cache_home = env.get("XDG_CACHE_HOME");
+    k.home = env.get("HOME");
+    return k;
 }

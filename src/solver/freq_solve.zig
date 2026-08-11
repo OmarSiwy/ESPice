@@ -169,7 +169,12 @@ pub const FreqSolver = struct {
 
         buildStackedRealPattern(n, ckt.col_ptr, ckt.row_idx, col_ptr, row_idx);
 
-        var slv = try direct.Solver.init(allocator, nn, col_ptr, row_idx, null);
+        // The analysis Circuit carries the facade's switches; a bare planes
+        // view takes the defaults.
+        const T = @TypeOf(ckt);
+        const C = if (@typeInfo(T) == .pointer) @typeInfo(T).pointer.child else T;
+        const knobs: direct.Knobs = if (comptime @hasField(C, "knobs")) ckt.knobs.lu else .{};
+        var slv = try direct.Solver.init(allocator, nn, col_ptr, row_idx, null, knobs);
         errdefer slv.deinit();
         // Each ω's values are new; the bypass copy would be nnz2 f64s
         // (3.7 MB on sweep_opamp_wl_5000) that never match.
