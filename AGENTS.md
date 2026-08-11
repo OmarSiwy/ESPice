@@ -379,7 +379,7 @@ Every performance claim ships with a measured before/after in the commit message
 ### 2.14 Verification
 
 - `zig build && zig build test -Doptimize=ReleaseSafe` after every step (§2.5). `zig build test` runs the unit suites, the codegen probes, the fitness check and then the numeric corpus; its exit code is the gate (in Zig 0.17 output, `run test w` with a `failed command:` line only shows a step's stderr), and `tests/VERDICTS.tsv` is the name list it must keep (§2.7).
-- While editing, keep `nix develop -c zig build check -Dgpu=false --watch -fincremental` running in the worktree: it type-checks every test root without binaries, about a minute for the first pass, then under a second per edit. It catches compile errors only; the gate is still the ReleaseSafe `zig build test`.
+- While editing, run the fast loop in §2.16; the gate is still the ReleaseSafe `zig build test`.
 - A CPU-only build (`-Dgpu=false`) compiles much faster and is enough for host-only changes (§2.9 names the exceptions).
 - A frontend change that alters what a syntax means updates its grammar in `tests/grammar/*.peg` first; `zig build test-grammar` (part of `zig build test`) fails on any disagreement, one-sided refusal or unmatched grammar alternative (dev/frontend.md, "Grammar oracle").
 - Every example under `docs/examples/` must still run.
@@ -393,3 +393,18 @@ Every performance claim ships with a measured before/after in the commit message
 - **Every user-visible change gets a `CHANGELOGS.md` bullet** under `## Unreleased`, in the same commit: one line, kept light. Every fix cites its GitHub issue as `(#123)`; open the issue first (`gh issue create`) if none exists. A release renames `Unreleased` to the version and date and starts a new empty `Unreleased`.
 - `docs/` stays in sync with user-visible behaviour: a change to a card, flag, analysis, output format or error a user can hit updates the matching `docs/` page in the same commit.
 - Every file opens with a `//!` header: its transformation (in → out) and what it cites (ngspice/VACASK source, papers, `dev/` notes, decision records). Implementation notes go in `//` comments inside the body.
+
+### 2.16 Fast builds, one agent or many
+
+Several agents (or people) work at once, each in its own worktree. What keeps the build fast, in the order it pays:
+
+1. **One worktree per agent, one build per worktree.** `git worktree add -b <branch> ../espice-<topic> standard`, then `cp -r ../espice-standard/zig-pkg ../espice-<topic>/` so nothing is re-fetched. Two builds in one worktree race on its `.zig-cache` and `zig-out`. Never share one working tree between agents: another agent's half-made edit breaks your build.
+2. **The global cache is shared.** `~/.cache/zig` serves every worktree, so the pinned dependencies (VerA, Gompute, stdpp) and the `vera` executable build once per machine. Each worktree's own `.zig-cache` is cold on its first build and grows to about 10 GB; delete it (`rm -rf <worktree>/.zig-cache`) when the branch is merged.
+3. **`-Dgpu=false`** for every host-only change: compiling the models for NVPTX and AMDGCN is most of a full build. Only a change §2.9 names needs the default build, and that runs once, at integration.
+4. **The edit loop: `zig build check --watch -fincremental`.** Run `nix develop -c zig build check -Dgpu=false --watch -fincremental` in the background of the worktree. It type-checks every test root with no binaries and no LLVM, so incremental compilation applies: about a minute for the first pass, then about a second from saving a file to its compile errors, in every root that sees the code. It finds compile errors only.
+5. **The test loop: the touched module's suite** (`zig build test-<module> -Dgpu=false`; `zig build --help` lists them), and a filtered corpus (`zig build test -- --filter <dir>/`) for the decks the change touches. Zig caches a test run whose inputs did not change, and each model is its own object, so an edit outside `src/device/` does not recompile the models.
+6. **The gate, once per commit:** `zig build test -Dgpu=false -Doptimize=ReleaseSafe` (§2.14). It is the slow step (the full corpus) and it is not skipped.
+7. **A machine-wide cap on concurrent gates.** A gate peaks at several GB of RAM and takes every core, so on the 32-core, 31 GB development machine at most two or three gate-sized builds run at once; a third agent edits and runs its `check` loop while it waits. Check `free -g` before starting another.
+8. **Integration on one branch.** Agents branch from `standard` and never merge each other's work. The integrator rebases a finished branch onto `standard`, fast-forwards it and runs the gate once on the result, so a combination is tested exactly once.
+
+Dead ends, measured 2026-10-17: `zig build check` without `--watch` re-analyses the whole compilation unit (about 240 s per edit, the generated models included). `-fincremental` does not apply to the ReleaseSafe/ReleaseFast LLVM builds. Debug uses the self-hosted backend but diverges from LLVM (#25), so it is not a substitute gate.
