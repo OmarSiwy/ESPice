@@ -59,7 +59,12 @@ const Scale = struct {
 const inline_len = 64;
 const vec_len = std.simd.suggestVectorLength(f64) orelse 1;
 /// Read through a volatile so LLVM cannot turn the zeroing loop back into
-/// a `memset` call.
+/// a `memset` call. Never written. It is a `var` on purpose: Zig folds a
+/// volatile read of a comptime-known `const` at compile time (the load
+/// disappears from the asm, checked 2026-10-17), and a local `var` would
+/// add a stack store per call. ponytail: an immutable global as an
+/// optimizer barrier; drop it once LLVM stops turning the loop into a
+/// `memset` (re-check on 0.18, which turns the loop vectorizer back on).
 var opaque_zero: f64 = 0;
 
 /// Zeroes `buf` with ordinary (temporal) stores, so a plane that is read

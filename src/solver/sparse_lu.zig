@@ -1025,7 +1025,9 @@ pub const SparseLu = struct {
     // The tape buffers are a few hundred bytes, where a memset or memcpy
     // call costs more than the copy (760 Ir per memset on vacask_mul's
     // 100 slots). LLVM turns a plain loop back into that call, so the
-    // lanes are spelled out and the zero is read through a volatile.
+    // lanes are spelled out and the zero is read through a volatile. Never
+    // written; a `var` because Zig folds a volatile read of a `const`
+    // (see `numerics.opaque_zero`).
     var opaque_zero: f64 = 0;
     inline fn fillZero(dst: []f64) void {
         const W = comptime std.simd.suggestVectorLength(f64) orelse 1;

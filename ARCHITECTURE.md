@@ -96,7 +96,7 @@ Full records: `dev/decisions.md`.
 - Every plane or parameter writer clears `Circuit.lin.x_ptr`/`lin.valid`.
 - A lane kernel's `W == 1` instantiation is its oracle; failed lanes peel to the scalar path.
 - `solver` and `analysis` read no environment: `espice.zig knobsFromEnv` reads the developer switches once per Problem into `ExecutionConfig.knobs` (`analysis.Knobs`), and they reach the code as `Circuit.knobs`, `Workspace.knobs` and `Solver.knobs`.
-- **Target (P3):** no file-scope mutable state (today: `numerics.opaque_zero`, `gpu.zig driver_up`, `eval.zig staging_gpa`), and no `getenv` in `device` either (today: `Library.zig` reads `ZIG` and the HDL cache directory).
+- **Target (P3):** no file-scope mutable state (today: `gpu.zig driver_up`, `eval.zig staging_gpa`; `numerics.opaque_zero` and `SparseLu.opaque_zero` are never written, and stay `var` as optimizer barriers because Zig folds a volatile read of a `const`), and no `getenv` in `device` either (today: `Library.zig` reads `ZIG` and the HDL cache directory).
 - **Target (P3):** no `anyerror` across a module boundary (today: espice.zig, session/worker, gpu).
 
 ## Adding a feature
