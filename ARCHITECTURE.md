@@ -83,7 +83,7 @@ Full records: `dev/decisions.md`.
 | Device target (`Sink(comptime device)`) | backend: host, CUDA, HIP | 5 | S4 |
 | GPU evaluation hook (`GpuHook`, `LuHook`) | backend at runtime | 8 today, with one implementation each (`gpu.zig`, `gpu_lu.zig`), so speculative; **target (P3):** concrete optional contexts, the host/GPU branch hoisted into the callers | S5 |
 | Frequency lane width (`LaneLu(W)`) | policy: W = 1 (oracle) … 4 | 5 | S6 |
-| Linear engine (`direct.Solver`) | kind: sparse LU, tridiagonal, BBD | 4 implicit (three optionals); **target (P3):** `union(enum)` | S7 |
+| Linear engine (`direct.Solver`) | kind: sparse LU, tridiagonal, BBD | 4, `direct.Engine` `union(enum)` | S7 |
 | Netlist dialect | dialect: ngspice, HSPICE, Spectre | 3 (keyword tables per dialect) | S8 |
 | Output format | kind: 9 encoders | 4 switch in `output/write.zig` | S9 |
 | Runtime HDL devices (`loader.zig`, `.so` + `layout_hash`) | plugin | 9 | S10 |
@@ -104,7 +104,7 @@ Full records: `dev/decisions.md`.
 - **A new built-in device** → a `.va` in `models/` (discovered by `build.zig`); the SPICE letter/LEVEL mapping row in `frontend/spice.zig`; fixtures against ngspice.
 - **A new netlist card or option** → a row in the `cards` `StaticStringMap` (`frontend/netlist.zig`) and its parse transform; an unsupported one is refused by name with a `tests/fixtures/invalid/` case.
 - **A new output format** → an encoder file in `output/`, a `Format` tag, the compiler-listed arm in `output/write.zig`, a schema check in `validateQuery`.
-- **A new linear engine** → a `direct.Solver` variant (after S7 lands) and its compiler-listed arms.
+- **A new linear engine** → a `direct.Engine` variant and its compiler-listed arms.
 - **Outside code needs to change a table** → a request table its owner drains.
 
 ## Change drill

@@ -95,16 +95,15 @@ breaks §2.1 names its target rung and the plan block that moves it.
 ### S7: linear engine
 
 - **Axis**: kind: sparse LU, tridiagonal, bordered block diagonal (BBD).
-- **Evidence**: three engines today (`src/solver/direct.zig:43-45`).
+- **Evidence**: three engines today (`src/solver/direct.zig` `Engine`).
 - **Owner**: solver (`src/solver/direct.zig` `Solver`).
-- **Rung**: 4 in substance, written as three optionals with an "at most one live" comment. This is an implicit union: the type allows zero or several live engines.
-- **Target (P3)**: `engine: union(enum) { sparse: SparseLu, tridiag: Tridiag, bbd: Bbd }` with exhaustive switches in `factor`, `refactor`, `solve`, `solveT`. Same code, and the compiler enforces "exactly one".
+- **Rung**: 4, `engine: Engine`, a `union(enum) { lu, tri, bbd }` with exhaustive switches in `deinit`, `factorInner`, `solveInPlace` and `solveT`. Exactly one engine is live by type; a singular structured engine is swapped for the LU by `demote`, which builds the LU before freeing the old engine. Callers that need the LU itself (LaneLu, the device LU, the timing line) go through `Solver.sparse()`, null for the structured engines. Rung 3 fails: the engine is per circuit, not per element, so there is no table to bucket.
 - **Cost**:
-  - residue: one switch per factor and per solve, as today
-  - change radius for one more engine: 4 compiler-listed arms
-  - interface weight: unchanged for callers
+  - residue: one switch per factor and per solve, as before (measured below)
+  - change radius for one more engine: 4 compiler-listed arms plus `sparse()`
+  - interface weight: unchanged for callers (`sparse()` replaces reading `lu` directly)
 - **Drills passed**: none drilled
-- **Proof**: pending, P3 (probe the union switch against the current optional checks: expected IDENTICAL or NEGATIVE)
+- **Proof**: NEGATIVE: `tests/codegen.zig` `gen_engine_solve=hand_engine_solve` (the union switch against the three optionals it replaced, in their old check order), Zig 0.17.0 `-O ReleaseFast -mcpu=x86_64_v3`: 114 vs 115 instructions, 1 vs 2 calls, 12 branches each. Callgrind Ir, ReleaseFast `-Dcpu=x86_64_v3`, before → after, raw files byte-identical: `tran/device_mos6_inverter` 114,190,666 → 114,151,878; `stress/scaling_parallel_inverters_100` 358,735,713 → 358,594,795; `stress/scaling_inverter_chain_256` 3,044,906,004 → 3,043,618,826 (−0.03 to −0.04%).
 - **Revisit when**: engines differ per matrix block rather than per circuit.
 
 ### S8: netlist dialect

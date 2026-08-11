@@ -187,8 +187,8 @@ pub const GpuLu = struct {
 
     fn trySolve(self: *Self, slv: *direct.Solver, vals: []const f64, rhs: []const f64, dx: []f64, need: bool) !?bool {
         if (comptime backend == null) return null;
-        const lu = if (slv.lu) |*l| l else return null;
-        if (slv.tri != null or slv.bbd_eng != null or !slv.factored or !lu.factored) return null;
+        const lu = slv.sparse() orelse return null;
+        if (!slv.factored or !lu.factored) return null;
         // Tape-sized factors refactor in microseconds on the host.
         if (lu.tv.items.len != 0) return null;
         if (self.epoch != lu.pattern_epoch) try self.load(slv);
@@ -255,7 +255,7 @@ pub const GpuLu = struct {
     /// declines it (`declined`) past `max_flops` or, unless `forced`, under
     /// `min_per_col` flops per column.
     fn load(self: *Self, slv: *direct.Solver) !void {
-        const lu = &slv.lu.?;
+        const lu = slv.sparse().?;
         self.dropTables();
         self.epoch = lu.pattern_epoch;
         self.declined = true;
@@ -315,7 +315,7 @@ pub const GpuLu = struct {
     /// values and compares the factors and dx bitwise, printing the first
     /// mismatch. Leaves the host factors current.
     fn checkAgainstHost(self: *Self, slv: *direct.Solver, rhs: []const f64, dx: []const f64) !void {
-        const lu = &slv.lu.?;
+        const lu = slv.sparse().?;
         const t = self.tab;
         const val = try self.gpa.alloc(f64, t.n_val);
         defer self.gpa.free(val);
@@ -411,7 +411,7 @@ const Bench = struct {
         try b.s[1].append(gpa, try Event.elapsedUs(&b.ev[1], &b.ev[3]));
         try b.s[7].append(gpa, try Event.elapsedUs(&b.ev[1], &b.ev[2]));
         try b.s[2].append(gpa, @as(f64, @floatFromInt(wall_ns)) * 1e-3);
-        const lu = &slv.lu.?;
+        const lu = slv.sparse().?;
         var t0 = nowNs();
         try lu.refactor(slv.col_ptr, vals, slv.params.refactor_growth_limit);
         var t1 = nowNs();

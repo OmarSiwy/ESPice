@@ -341,7 +341,7 @@ const BbdTests = struct {
 
         var s_bbd = try direct.Solver.init(gpa, sy.n, sy.col_ptr, sy.row_idx, sy.info);
         defer s_bbd.deinit();
-        try testing.expect(s_bbd.bbd_eng != null);
+        try testing.expect(s_bbd.engine == .bbd);
         var s_flat = try direct.Solver.init(gpa, sy.n, sy.col_ptr, sy.row_idx, null);
         defer s_flat.deinit();
 
@@ -375,13 +375,13 @@ const BbdTests = struct {
 
         var s = try direct.Solver.init(gpa, sy.n, sy.col_ptr, sy.row_idx, sy.info);
         defer s.deinit();
-        try testing.expect(s.bbd_eng != null);
+        try testing.expect(s.engine == .bbd);
 
         // block 2 singular but the full matrix is regular through the border:
         // factor must succeed via the flat fallback
         try s.factor(sy.vals, .{});
-        try testing.expect(s.bbd_eng == null);
-        try testing.expect(s.lu != null);
+        try testing.expect(s.engine != .bbd);
+        try testing.expect(s.engine == .lu);
 
         var flat = try direct.Solver.init(gpa, sy.n, sy.col_ptr, sy.row_idx, null);
         defer flat.deinit();
@@ -399,7 +399,7 @@ const BbdTests = struct {
 
         // second factor stays flat (refactor path) and still works
         try s.factor(sy.vals, .{});
-        try testing.expect(s.bbd_eng == null);
+        try testing.expect(s.engine != .bbd);
         s.solve(b_rhs, x);
         for (x, x_ref) |xi, ri| try testing.expectApproxEqAbs(ri, xi, 1e-11);
     }
@@ -1524,7 +1524,7 @@ const FreqSolveTests = struct {
                 scalar_vals[l] = try allocator.dupe(f64, sp.vals);
             }
             defer for (scalar_vals[0..cnt]) |v| allocator.free(v);
-            const lu = &sp.slv.lu.?;
+            const lu = sp.slv.sparse().?;
             var ow: [W]f64 = undefined;
             for (0..W) |l| ow[l] = omegas[base + @min(l, cnt - 1)];
             var lw = try lane_lu.LaneLu(W).init(allocator, lu);
@@ -1693,7 +1693,7 @@ const FreqSolveTests = struct {
         const sp = &fs.strategy.sp;
         sp.slv.factored = false;
         try ta.setOmegaSparse(n, sp, 1e6, .{}, 0);
-        var lanes = try lane_lu.LaneLu(W).init(allocator, &sp.slv.lu.?);
+        var lanes = try lane_lu.LaneLu(W).init(allocator, sp.slv.sparse().?);
         defer lanes.deinit(allocator);
         const zeros: [W]f64 = @splat(0);
         const bad = lanes.refactor(impl.Stacked(W).of(sp, zeros, .{}, 0, W), 1e-12);

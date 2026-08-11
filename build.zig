@@ -465,12 +465,13 @@ pub fn build(b: *std.Build) void {
         const pcore: std.Build.Module.Import = .{ .name = "core", .module = P.make(b.path("src/core/root.zig"), &.{}) };
         const pabi: std.Build.Module.Import = .{ .name = "device_abi", .module = P.make(b.path("src/device/abi.zig"), &.{ pcontract, pcore }) };
         const peval = P.make(b.path("src/device/eval.zig"), &.{ pcontract, pabi, .{ .name = "gompute", .module = gompute.module("gompute") } });
-        const probe = b.addObject(.{ .name = "codegen-probe", .root_module = P.make(b.path("tests/codegen.zig"), &.{.{ .name = "device_eval", .module = peval }}) });
+        const psolver = P.make(b.path("src/solver/root.zig"), &.{pcore});
+        const probe = b.addObject(.{ .name = "codegen-probe", .root_module = P.make(b.path("tests/codegen.zig"), &.{ .{ .name = "device_eval", .module = peval }, .{ .name = "solver", .module = psolver } }) });
         const residue = b.addSystemCommand(&.{"python3"});
         residue.addFileArg(b.path("tools/asm_probe.py"));
         residue.addFileArg(probe.getEmittedAsm());
         // One gen=hand pair per probed seam (dev/decisions.md).
-        residue.addArgs(&.{"gen_dual_mul=hand_dual_mul"});
+        residue.addArgs(&.{ "gen_dual_mul=hand_dual_mul", "gen_engine_solve=hand_engine_solve" });
         b.step("test-codegen", "Judge the residue probes in tests/codegen.zig").dependOn(&residue.step);
         test_step.dependOn(&residue.step);
     }

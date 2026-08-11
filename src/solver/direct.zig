@@ -27,6 +27,13 @@ pub const Params = struct {
     repivot_fill_cap: f64 = 3,
 };
 
+/// One linear engine, picked from the pattern by `Solver.init`.
+pub const Engine = union(enum) {
+    lu: sparse_lu.SparseLu,
+    tri: tridiag_mod.TriDiag,
+    bbd: bbd_mod.Bbd,
+};
+
 /// Sparse direct solver on one frozen CSC pattern.
 pub const Solver = struct {
     const Self = @This();
@@ -38,16 +45,14 @@ pub const Solver = struct {
     /// Borrowed CSC pattern; must outlive the solver.
     col_ptr: []const u32,
     row_idx: []const u32,
-    /// At most one engine is live. `lu` is built lazily when a structured
+    /// The live engine. The general LU is built only when a structured
     /// engine is demoted, so BBD and tridiagonal systems never pay for it.
-    lu: ?SparseLu,
-    tri: ?TriDiag,
-    bbd_eng: ?BbdEng = null,
+    engine: Engine,
     gpa: Allocator,
     /// True once a factorization matches `vcopy`.
     factored: bool = false,
     params: Params = .{},
-    /// Owned column ordering handed to `lu`; empty until `lu` exists.
+    /// Owned column ordering handed to the LU; empty until the LU exists.
     q: []u32 = &.{},
     /// Values of the last factorization, for the unchanged-matrix bypass.
     vcopy: []f64 = &.{},
@@ -59,7 +64,7 @@ pub const Solver = struct {
     par: ?lu_kernels.HostRefactor = null,
     /// Pivot epoch the cost model last judged.
     par_epoch: u32 = 0,
-    /// A device factored `vcopy` and `lu` still holds older values. The
+    /// A device factored `vcopy` and the LU still holds older values. The
     /// next host use refactors from `vcopy` first (bitwise the device's).
     host_stale: bool = false,
 
@@ -69,18 +74,45 @@ pub const Solver = struct {
     /// `col_ptr` and `row_idx`, which must outlive the solver; free with
     /// `deinit`.
     pub fn init(gpa: Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32, bbd: ?num.BbdInfo) !Self {
-        var self: Self = .{ .n = n, .col_ptr = col_ptr, .row_idx = row_idx, .lu = null, .tri = null, .gpa = gpa };
-        errdefer self.deinit();
+        var self: Self = .{ .n = n, .col_ptr = col_ptr, .row_idx = row_idx, .engine = undefined, .gpa = gpa };
         if (tridiag_mod.isTridiag(n, col_ptr, row_idx)) {
-            self.tri = try TriDiag.init(gpa, n, col_ptr, row_idx);
+            self.engine = .{ .tri = try TriDiag.init(gpa, n, col_ptr, row_idx) };
         } else if (try initBbd(gpa, n, col_ptr, row_idx, bbd)) |eng| {
-            self.bbd_eng = eng;
+            self.engine = .{ .bbd = eng };
         } else {
-            self.q = try computeOrdering(gpa, n, col_ptr, row_idx);
-            self.lu = try SparseLu.init(gpa, n, col_ptr, row_idx, self.q);
+            errdefer gpa.free(self.q);
+            self.engine = .{ .lu = try self.initLu() };
         }
+        errdefer self.deinit();
         self.vcopy = try gpa.alloc(f64, col_ptr[n]);
         return self;
+    }
+
+    /// The general LU, or null while a structured engine is live.
+    pub fn sparse(self: *Self) ?*SparseLu {
+        return switch (self.engine) {
+            .lu => |*lu| lu,
+            .tri, .bbd => null,
+        };
+    }
+
+    /// Orders the pattern (once) and builds the general LU on it.
+    fn initLu(self: *Self) !SparseLu {
+        if (self.q.len == 0) self.q = try computeOrdering(self.gpa, self.n, self.col_ptr, self.row_idx);
+        return SparseLu.init(self.gpa, self.n, self.col_ptr, self.row_idx, self.q);
+    }
+
+    /// Swaps a singular structured engine for the general LU, for good. The
+    /// LU is built first, so out of memory leaves the old engine live.
+    fn demote(self: *Self) !void {
+        const lu = try self.initLu();
+        switch (self.engine) {
+            .lu => unreachable,
+            .tri => |*tri| tri.deinit(self.gpa),
+            .bbd => |*eng| eng.deinit(),
+        }
+        self.engine = .{ .lu = lu };
+        self.factored = false;
     }
 
     fn initBbd(gpa: Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32, bbd: ?num.BbdInfo) !?BbdEng {
@@ -107,9 +139,11 @@ pub const Solver = struct {
     /// Frees every engine and copy; the borrowed pattern stays the caller's.
     pub fn deinit(self: *Self) void {
         if (self.par) |*p| p.deinit(self.gpa);
-        if (self.lu) |*lu| lu.deinit(self.gpa);
-        if (self.tri) |*tri| tri.deinit(self.gpa);
-        if (self.bbd_eng) |*eng| eng.deinit();
+        switch (self.engine) {
+            .lu => |*lu| lu.deinit(self.gpa),
+            .tri => |*tri| tri.deinit(self.gpa),
+            .bbd => |*eng| eng.deinit(),
+        }
         self.gpa.free(self.q);
         self.gpa.free(self.vcopy);
         self.* = undefined;
@@ -148,47 +182,33 @@ pub const Solver = struct {
         self.vcopy = &.{};
     }
 
-    /// Brings `lu` up to `vcopy` after a device factor. The device ran
+    /// Brings the LU up to `vcopy` after a device factor. The device ran
     /// this refactor's exact operations and passed its tests, so it cannot
     /// fail here.
     fn syncHost(self: *Self) void {
         if (!self.host_stale) return;
-        self.lu.?.refactor(self.col_ptr, self.vcopy, self.params.refactor_growth_limit) catch
+        self.sparse().?.refactor(self.col_ptr, self.vcopy, self.params.refactor_growth_limit) catch
             @panic("device LU passed a refactor the host fails");
         self.host_stale = false;
     }
 
     fn factorInner(self: *Self, vals: []const f64, execution: num.Execution) !void {
-        if (self.tri) |*tri| {
-            if (tri.factor(vals)) |_| {
+        switch (self.engine) {
+            .lu => {},
+            // Thomas has no pivoting, so an MNA branch row's zero diagonal
+            // fails here. ponytail: vsource-bearing ladders lose the
+            // tridiagonal speed; a 2x2-block-pivot Thomas would recover it.
+            .tri => |*tri| if (tri.factor(vals)) |_| {
                 self.factored = true;
                 return;
-            } else |_| {
-                // Thomas has no pivoting, so an MNA branch row's zero
-                // diagonal lands here. Demote to the pivoting LU for good.
-                // ponytail: vsource-bearing ladders lose the tridiagonal
-                // speed; a 2x2-block-pivot Thomas would recover it.
-                tri.deinit(self.gpa);
-                self.tri = null;
-                self.factored = false;
-            }
-        }
-        if (self.bbd_eng) |*eng| {
-            if (eng.factorWithExecution(vals, execution)) |_| {
+            } else |_| try self.demote(),
+            // A singular block.
+            .bbd => |*eng| if (eng.factorWithExecution(vals, execution)) |_| {
                 self.factored = true;
                 return;
-            } else |_| {
-                // A singular block: demote to the flat LU for good.
-                eng.deinit();
-                self.bbd_eng = null;
-                self.factored = false;
-            }
+            } else |_| try self.demote(),
         }
-        if (self.lu == null) {
-            if (self.q.len == 0) self.q = try computeOrdering(self.gpa, self.n, self.col_ptr, self.row_idx);
-            self.lu = try SparseLu.init(self.gpa, self.n, self.col_ptr, self.row_idx, self.q);
-        }
-        const lu = &self.lu.?;
+        const lu = &self.engine.lu;
         lu.fill_cap = self.params.repivot_fill_cap;
         const ptol = self.params.pivot_tol;
         if (self.factored) {
@@ -202,7 +222,7 @@ pub const Solver = struct {
     /// `lu.refactor`, on `execution.lu_threads` workers when the flop-count
     /// model below prices that faster. Bitwise the same either way.
     fn refactorLu(self: *Self, vals: []const f64, execution: num.Execution) error{SingularMatrix}!void {
-        const lu = &self.lu.?;
+        const lu = &self.engine.lu;
         const growth = self.params.refactor_growth_limit;
         const threads = execution.lu_threads;
         const io = execution.io orelse return lu.refactor(self.col_ptr, vals, growth);
@@ -221,9 +241,11 @@ pub const Solver = struct {
     /// Solves in place with whichever engine is live.
     fn solveInPlace(self: *Self, x: []f64) void {
         self.syncHost();
-        if (self.tri) |*tri| return tri.solve(x[0..self.n]);
-        if (self.bbd_eng) |*eng| return eng.solveInPlace(x[0..self.n]);
-        self.lu.?.solve(x[0..self.n], x[0..self.n]);
+        switch (self.engine) {
+            .lu => |*lu| lu.solve(x[0..self.n], x[0..self.n]),
+            .tri => |*tri| tri.solve(x[0..self.n]),
+            .bbd => |*eng| eng.solveInPlace(x[0..self.n]),
+        }
     }
 
     /// x = -A^-1 rhs, the Newton step. `rhs` and `x` may alias. Requires a
@@ -244,9 +266,11 @@ pub const Solver = struct {
     pub fn solveT(self: *Self, rhs: []const f64, x: []f64) void {
         if (rhs.ptr != x.ptr) @memcpy(x[0..self.n], rhs[0..self.n]);
         self.syncHost();
-        if (self.tri) |*tri| return tri.solveT(x[0..self.n]);
-        if (self.bbd_eng) |*eng| return eng.solveTInPlace(x[0..self.n]);
-        self.lu.?.solveT(x[0..self.n], x[0..self.n]);
+        switch (self.engine) {
+            .lu => |*lu| lu.solveT(x[0..self.n], x[0..self.n]),
+            .tri => |*tri| tri.solveT(x[0..self.n]),
+            .bbd => |*eng| eng.solveTInPlace(x[0..self.n]),
+        }
     }
 };
 
@@ -363,9 +387,9 @@ test "Solver: a tridiagonal pattern with a zero diagonal demotes to the pivoting
     var vals = [_]f64{ 0, 1, 1, 2, 1, 4, 3 };
     var s = try Solver.init(gpa, 3, &col_ptr, &row_idx, null);
     defer s.deinit();
-    try testing.expect(s.tri != null);
+    try testing.expect(s.engine == .tri);
     try s.factor(&vals, .{});
-    try testing.expect(s.tri == null and s.lu != null);
+    try testing.expect(s.engine == .lu);
 
     // A [1 2 3] = [2 17 11], A^T [1 2 3] = [2 8 17].
     var x: [3]f64 = undefined;

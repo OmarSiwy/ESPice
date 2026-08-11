@@ -11,6 +11,7 @@
 
 const std = @import("std");
 const eval = @import("device_eval");
+const solver = @import("solver");
 
 // ---- device Dual(2, f64).mul (S3): the product rule through the AD family
 // against a value plus a 2-lane gradient written out. ----
@@ -35,4 +36,29 @@ export fn hand_dual_mul(a: *const [3]f64, b: *const [3]f64, out: *[3]f64) void {
     const bd: V = .{ b[1], b[2] };
     const d = @mulAdd(V, bd, @splat(av), ad * @as(V, @splat(bv)));
     out.* = .{ v, d[0], d[1] };
+}
+
+// ---- solver engine dispatch (S7): `direct.Engine`'s exhaustive switch
+// against the three optionals it replaced, checked in their old order. ----
+
+const Engine = solver.direct.Engine;
+
+export fn gen_engine_solve(e: *Engine, x: [*]f64, n: u32) void {
+    switch (e.*) {
+        .lu => |*lu| lu.solve(x[0..n], x[0..n]),
+        .tri => |*tri| tri.solve(x[0..n]),
+        .bbd => |*bbd| bbd.solveInPlace(x[0..n]),
+    }
+}
+
+const HandEngines = struct {
+    lu: ?solver.sparse_lu.SparseLu,
+    tri: ?solver.tridiag.TriDiag,
+    bbd: ?solver.bbd.Bbd,
+};
+
+export fn hand_engine_solve(e: *HandEngines, x: [*]f64, n: u32) void {
+    if (e.tri) |*tri| return tri.solve(x[0..n]);
+    if (e.bbd) |*bbd| return bbd.solveInPlace(x[0..n]);
+    e.lu.?.solve(x[0..n], x[0..n]);
 }

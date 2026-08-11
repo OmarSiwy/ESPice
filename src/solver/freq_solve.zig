@@ -350,7 +350,7 @@ pub const FreqSolver = struct {
                 continue;
             };
             // LaneLu replays SparseLu only, not the tridiagonal engine.
-            const lu = if (sp.slv.lu) |*l| l else {
+            const lu = sp.slv.sparse() orelse {
                 try self.solveBatchSerial(omegas, dyn, base, cnt, rhs, x_out, adjoint);
                 continue;
             };
@@ -463,7 +463,7 @@ pub const FreqSolver = struct {
             // A full factor at omegas[tape] lays down a fresh pivot tape.
             sp.slv.factored = false;
             try setOmegaSparse(self.n, sp, omegas[tape], .{}, 0);
-            const lu = if (sp.slv.lu) |*l| l else return error.UnsupportedEngine;
+            const lu = sp.slv.sparse() orelse return error.UnsupportedEngine;
             freeHeld(gpa, sp);
             sp.held = try gpa.alloc(LL, groups);
             for (sp.held, 0..) |*h, g| h.* = LL.init(gpa, lu) catch |err| {

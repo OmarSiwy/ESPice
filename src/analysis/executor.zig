@@ -398,7 +398,10 @@ fn printNewtonSplit(ws: *const converger.Workspace, job: requests.Query) void {
     }.f;
     std.debug.print("timing: {s} newton: iterations={d} factors={d} eval={d:.3}ms load={d:.3}ms factor={d:.3}ms solve={d:.3}ms update={d:.3}ms n={d} lu_nnz={d}\n", .{
         @tagName(job),                                                       p.counts[0], p.counts[1], ms(p.ns[0]), ms(p.ns[1]), ms(p.ns[2]), ms(p.ns[3]), ms(p.ns[4]), ws.dx.len,
-        if (ws.slv.lu) |lu| lu.li.items.len + lu.ui.items.len + lu.n else 0,
+        switch (ws.slv.engine) {
+            .lu => |lu| lu.li.items.len + lu.ui.items.len + lu.n,
+            .tri, .bbd => 0,
+        },
     });
 }
 
