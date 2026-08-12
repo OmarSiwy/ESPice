@@ -140,6 +140,64 @@ test "source: nested relative includes select only requested case-insensitive co
     try std.testing.expectEqualStrings(plain, unchanged);
 }
 
+/// `std.testing.allocator` that never grows or shrinks a block in place, so
+/// the allocation count of a run cannot depend on where earlier blocks
+/// landed, which `checkAllAllocationFailures` needs.
+const no_remap: std.mem.Allocator = .{ .ptr = undefined, .vtable = &.{
+    .alloc = struct {
+        fn alloc(_: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+            return std.testing.allocator.rawAlloc(len, alignment, ra);
+        }
+    }.alloc,
+    .resize = std.mem.Allocator.noResize,
+    .remap = std.mem.Allocator.noRemap,
+    .free = struct {
+        fn free(_: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) void {
+            std.testing.allocator.rawFree(memory, alignment, ra);
+        }
+    }.free,
+} };
+
+fn expandAll(gpa: std.mem.Allocator, io: std.Io, path: []const u8, src: []const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const text = try source.expand(io, gpa, arena.allocator(), path, src);
+    try std.testing.expect(std.mem.indexOf(u8, text, "R1 out 0 1k") != null);
+}
+
+test "source.expand: every allocation failure surfaces as OutOfMemory" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "Models");
+    try tmp.dir.createDirPath(io, "Search");
+    try tmp.dir.writeFile(io, .{ .sub_path = "Models/lib.sp", .data = ".lib ss\n.include missing.sp\n.endl\n.lib tt\n.inc 'res.sp'\n.include 'm.va'\n.endl\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "Models/res.sp", .data = "R1 out 0 1k\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "Search/found.sp", .data = "R2 out 0 2k\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.dat", .data = "1 1k\n2 3k\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "b.dat", .data = "9k, 0.5\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "deck.ic0", .data = ".ic v(out)=0.5\n" });
+    const path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/deck.sp", .{tmp.sub_path});
+    defer std.testing.allocator.free(path);
+    const src =
+        \\expand under allocation failure
+        \\.option search='Search'
+        \\.lib 'Models/lib.sp' tt
+        \\.include 'found.sp'
+        \\.data rows MER
+        \\+ FILE='a.dat' rl=2 v1=1
+        \\+ FILE='b.dat' rl=1
+        \\.enddata
+        \\.data lam LAM FILE='a.dat' x=1 FILE='b.dat' y=2
+        \\.enddata
+        \\.load
+        \\.load file=absent.ic0
+        \\.end
+        \\
+    ;
+    try std.testing.checkAllAllocationFailures(no_remap, expandAll, .{ io, path, src });
+}
+
 test "parameters: unsigned and signed exponents preserve following operators" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

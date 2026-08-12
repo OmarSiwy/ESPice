@@ -254,6 +254,7 @@ const Search = struct { dirs: []const []const u8, deck: []const u8 };
 /// beside `path` when none does, so the open reports the usual error.
 fn locate(io: Io, gpa: std.mem.Allocator, search: Search, path: []const u8, name: []const u8) ![]u8 {
     const here = try std.fs.path.resolve(gpa, &.{ std.fs.path.dirname(path) orelse ".", name });
+    errdefer gpa.free(here);
     if (search.dirs.len == 0 or std.fs.path.isAbsolute(name)) return here;
     if (Io.Dir.cwd().access(io, here, .{})) |_| return here else |_| {}
     for (search.dirs) |dir| {
