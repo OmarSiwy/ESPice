@@ -63,6 +63,42 @@ test "Problem: .hdl builds with the embedder's toolchain paths (#13)" {
     }));
 }
 
+/// Parse, subcircuit expansion, the builder's freeze and permutation, the
+/// `.step` variant runs, `analyses.queries` and `Session.append`: each
+/// allocation on that path fails once.
+// ponytail: construction only; add `try p.run_all()` once #134 and #135
+// stop the transient and the session renaming OutOfMemory.
+fn constructDeck(allocator: std.mem.Allocator) !void {
+    const p = try api.Problem.init(allocator, t.io, .{
+        .source = .{ .bytes = .{ .data =
+        \\construct under allocation failure
+        \\.param rv=1k
+        \\.subckt cell a b r=1k
+        \\R1 a m {r}
+        \\C1 m b 1n
+        \\.ends
+        \\V1 in 0 dc 1 ac 1
+        \\X1 in out cell r={2*rv}
+        \\D1 out 0 dn
+        \\.model dn d is=1e-14
+        \\B1 o2 0 v={v(out)*2}
+        \\R2 o2 0 1k
+        \\.op
+        \\.ac dec 2 1 1k
+        \\.tran 1u 4u
+        \\.step param rv 1k 2k 1k
+        \\.end
+        , .origin = "run.cir" } },
+        .max_parallel = 1,
+    });
+    defer p.deinit();
+}
+
+test "Problem: subcircuits, models, .step and three analyses construct under every allocation failure" {
+    try constructDeck(t.allocator);
+    try t.checkAllAllocationFailures(t.allocator, constructDeck, .{});
+}
+
 test "Problem: compiled device callbacks preserve allocation errors" {
     const p = try create(deck);
     defer p.deinit();
