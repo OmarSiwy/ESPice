@@ -90,9 +90,9 @@ pub fn prepare(io: std.Io, lib: *device.Library, session: std.mem.Allocator, inp
         return nl;
     }
     const runs = try netlist.source.splitAlters(session, raw);
-    var nl = try netlist.parseLive(session, try netlist.source.expand(io, session, origin, runs[0]), dialect, live);
+    var nl = try netlist.parseLive(session, try netlist.source.expand(io, std.heap.page_allocator, session, origin, runs[0]), dialect, live);
     const alters = try session.alloc([]const u8, runs.len - 1);
-    for (alters, runs[1..]) |*text, run| text.* = try netlist.source.expand(io, session, origin, run);
+    for (alters, runs[1..]) |*text, run| text.* = try netlist.source.expand(io, std.heap.page_allocator, session, origin, run);
     nl.deck.alters = alters;
     try loadModels(io, lib, session, nl.deck.foreign, origin);
     nl.files = try loadData(io, session, nl.deck.foreign, origin);
