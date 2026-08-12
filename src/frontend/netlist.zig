@@ -3745,4 +3745,5 @@ test {
     _ = spectre;
     _ = @import("vec.zig");
     _ = @import("tests/netlist.zig");
+    _ = @import("tests/fuzz.zig");
 }
