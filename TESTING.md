@@ -39,10 +39,10 @@ Status: **have** (exists, with file), **gap** (plan block that adds it).
 | Threading changes results | `solver_threads = 1` and `device_threads = 1` vs N, byte-identical output | determinism | merge | `analysis/tests/circuit.zig:152` (device threads only) | partial: P4 |
 | Run-to-run drift | run twice, byte-compare the raw file | determinism | merge | new | gap: P4 |
 | Node order changes results | renumber nodes / permute device order → same named results | metamorphic | nightly | new | gap: P4 |
-| Parser crash, hang, leak, undeclared error | assertions + declared error set; structure-aware generator | fuzz (Smith) with corpus replay | merge (replay), nightly (long) | new `frontend/tests/fuzz.zig` | gap: P4 |
+| Parser crash, hang, leak, undeclared error | assertions + declared error set; structure-aware generator | fuzz (Smith) with corpus replay, seeded generator run | merge (replay), nightly (long: `zig build test-frontend --fuzz=<N>`) | `src/frontend/tests/fuzz.zig`, `src/frontend/tests/fuzz_corpus/` | have (`netlist.parse` only; `prepare`/`build` not fuzzed) |
 | Invalid deck accepted or mis-diagnosed | the input contract per deck | example | merge | `tests/fixtures/invalid/` | have |
 | Frontend grammar drifts from the dialect | PEG grammar oracle | differential | merge | `tests/grammar/` (#121) | partial |
-| Swallowed OOM, leak on error path | `checkAllAllocationFailures` | fault injection | merge | intern, netlist.parse, facade construct, solver, device freeze | partial: P4 adds source, builder, analyses, loader, session, C ABI |
+| Swallowed OOM, leak on error path | `checkAllAllocationFailures` | fault injection | merge | intern, netlist.parse, `source.expand` (`frontend/tests/netlist.zig`), facade construct incl. builder, `.step` runs, `analyses.queries`, `Session.append` (`src/tests/espice.zig`), solver, device freeze | partial: a query run waits on #134 and #135; loader (compiles HDL) and C ABI not covered |
 | Non-convergence, singular matrix, NaN device output handled | injected faults return named errors | fault injection | merge | `tests/fixtures/convergence/` | partial: P4 |
 | C ABI misuse (stale handle, short buffer, bad version) | the header's documented error codes; a model of valid handle states | stateful property | merge | `src/tests/c_api.zig` | partial: P3 (generational handles) + P4 |
 | CPU and CUDA disagree | the CPU backend on the same deck | differential | nightly (needs the GPU) | `zig build test-gpu` (shared expectations only) | partial: P4 adds direct CPU-vs-CUDA |
