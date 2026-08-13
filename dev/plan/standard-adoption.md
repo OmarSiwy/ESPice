@@ -81,7 +81,7 @@ self-hosted-backend divergence (#25): three numeric mismatches, a
 
 Each phase lands as one-step commits with `zig build test -Doptimize=ReleaseSafe`
 green and the corpus name lists unchanged. P3–P6 blocks run as agents in their
-own worktrees branched from `standard` (at most two building at once), merged
+own worktrees branched from `main` (at most two building at once), merged
 back by name-list-checked gates.
 
 ### Progress (2026-10-17)
