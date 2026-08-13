@@ -196,3 +196,26 @@ test "session shares one OP prerequisite and gates its dependents on it" {
     try t.expect(!s.finished());
     try t.expectEqual(null, s.failure());
 }
+
+test "a failed implicit OP's own error is the session failure, not DependencyFailed" {
+    const t = std.testing;
+    var lib = try Library.init(t.allocator);
+    defer lib.deinit();
+    var b = try Builder.init(t.allocator, &lib);
+    const vin = try b.addNode();
+    try b.addDevice(models.vsource, "", .{ .dc = 1 }, .{}, .{ vin, GROUND });
+    var prepared = try b.compile();
+    defer prepared.deinit();
+    const deck = bareDeck(&.{vin}, &.{"v(vin)"});
+    var s = Session.init(t.allocator, t.io, &prepared, &deck, .{});
+    defer s.deinit();
+    var ids: [1]requests.QueryId = undefined;
+    _ = try s.append(&.{.{ .ac = .{ .sweep = .{ .f_start = 1, .f_stop = 1e3 } } }}, &ids);
+    const op_id: requests.QueryId = @fromBackingInt(0);
+    try t.expect(!(try s.info(op_id)).requested);
+    // The OP prerequisite ends as a worker records an allocation failure.
+    s.rows.items(.status)[0] = .failed;
+    s.rows.items(.failure)[0] = error.OutOfMemory;
+    try t.expectEqual(Status.dependency_failed, (try s.info(ids[0])).status);
+    try t.expectEqual(error.OutOfMemory, s.failure().?);
+}

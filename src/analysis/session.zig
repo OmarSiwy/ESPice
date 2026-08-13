@@ -435,13 +435,19 @@ pub const Session = struct {
     }
 
     /// Returns the error of the first requested query that ended without a
-    /// result, or null.
+    /// result, or null. A query whose prerequisite failed reports the
+    /// prerequisite's error, so an implicit OP's OutOfMemory is not renamed
+    /// DependencyFailed.
     pub fn failure(self: *const Session) ?anyerror {
         for (self.outputs.items) |id| {
             const i = @backingInt(id);
             const status = self.effectiveStatus(i);
             if (status == .complete or !status.terminal()) continue;
-            return self.rows.items(.failure)[i] orelse if (status == .cancelled) error.QueryCancelled else error.DependencyFailed;
+            if (self.rows.items(.failure)[i]) |err| return err;
+            if (status == .cancelled) return error.QueryCancelled;
+            const dep = self.rows.items(.dependency)[i];
+            if (dep != none) if (self.rows.items(.failure)[@backingInt(dep)]) |err| return err;
+            return error.DependencyFailed;
         }
         return null;
     }
