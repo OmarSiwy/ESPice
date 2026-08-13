@@ -122,7 +122,7 @@ fn oracle(a: Allocator, io: Io, g: peg.Grammar, dir: []const u8, card: []const u
 /// The frontend: the deck expanded, its `.data` block read back.
 fn frontend(a: Allocator, io: Io, origin: []const u8, card: []const u8) !Table {
     const deck = try std.mem.concat(a, u8, &.{ "t\n", card });
-    const text = netlist.source.expand(io, a, origin, deck) catch return null;
+    const text = netlist.source.expand(io, std.heap.page_allocator, a, origin, deck) catch return null;
     var names: []const []const u8 = &.{};
     var rows: std.ArrayList([]const []const u8) = .empty;
     var lines = std.mem.splitScalar(u8, text, '\n');

@@ -751,7 +751,7 @@ pub const Tuning = struct {
     /// table `cards`. `scratch` (the parse arena) holds the result; `sim`
     /// (the session arena) holds the variant table. Asserts that `nl` has
     /// tunable names. The caller releases it with `deinit`.
-    pub fn init(gpa: std.mem.Allocator, lib: *const device.Library, sim: std.mem.Allocator, scratch: std.mem.Allocator, nl: *const Netlist, nominal: *const device.Circuit, cards: []const core.query.CardRef) !*Tuning {
+    pub fn init(gpa: std.mem.Allocator, lib: *const device.Library, sim: std.mem.Allocator, scratch: std.mem.Allocator, nl: *Netlist, nominal: *const device.Circuit, cards: []const core.query.CardRef) !*Tuning {
         std.debug.assert(nl.tunable.len != 0);
         const t = try scratch.create(Tuning);
         t.* = .{ .gpa = gpa, .arenas = .{ .init(gpa), .init(gpa) }, .planner = undefined, .values = try scratch.dupe(f64, nl.live.nominal), .next = try scratch.dupe(f64, nl.live.nominal), .trial = null };

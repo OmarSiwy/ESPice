@@ -302,7 +302,7 @@ fn joinBreaks(a: Allocator, s: []const u8) ![]const u8 {
 const Outcome = union(enum) { text: []const u8, err: anyerror };
 
 fn frontend(a: Allocator, io: Io, spectre: bool, origin: []const u8, src: []const u8) Outcome {
-    const r = if (spectre) netlist.source.expandSpectre(io, a, origin, src) else netlist.source.expand(io, a, origin, src);
+    const r = if (spectre) netlist.source.expandSpectre(io, a, origin, src) else netlist.source.expand(io, std.heap.page_allocator, a, origin, src);
     return if (r) |t| .{ .text = t } else |e| .{ .err = e };
 }
 

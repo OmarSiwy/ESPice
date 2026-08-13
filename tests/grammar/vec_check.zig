@@ -309,7 +309,7 @@ const Check = struct {
             else => return e,
         };
         try c.tmp.dir.writeFile(io, .{ .sub_path = "x.vec", .data = src });
-        const got: ?[]const u8 = if (netlist.source.expand(io, a, c.deck, "t\n.vec 'x.vec'\n")) |text| text[2..] else |_| null;
+        const got: ?[]const u8 = if (netlist.source.expand(io, std.heap.page_allocator, a, c.deck, "t\n.vec 'x.vec'\n")) |text| text[2..] else |_| null;
         if (want == null and got == null) return;
         if (want != null and got != null and same(want.?, got.?)) return;
         c.bad += 1;

@@ -698,8 +698,8 @@ test ".load: the top deck names the default file, FILE=x.ic reads x.ic0" {
     try tmp.dir.writeFile(io, .{ .sub_path = "inc.sp", .data = ".load\n" });
     const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/deck.sp", .{tmp.sub_path});
     // Each inlined file ends in blank lines; only the cards matter here.
-    try std.testing.expectEqualStrings("t\n.nodeset\n+ a= 1.0000", std.mem.trimEnd(u8, try expand(io, a, path, "t\n.include 'inc.sp'\n"), "\n"));
-    try std.testing.expectEqualStrings("t\n.ic v(b)=2", std.mem.trimEnd(u8, try expand(io, a, path, "t\n.load file='run.ic'\n"), "\n"));
+    try std.testing.expectEqualStrings("t\n.nodeset\n+ a= 1.0000", std.mem.trimEnd(u8, try expand(io, std.testing.allocator, a, path, "t\n.include 'inc.sp'\n"), "\n"));
+    try std.testing.expectEqualStrings("t\n.ic v(b)=2", std.mem.trimEnd(u8, try expand(io, std.testing.allocator, a, path, "t\n.load file='run.ic'\n"), "\n"));
 }
 
 test "Spectre include: sections, SPICE files, and the includer's mode after" {

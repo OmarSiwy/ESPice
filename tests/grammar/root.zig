@@ -314,7 +314,7 @@ fn printDiff(want: []const u8, got: []const u8) void {
 fn compareDeck(a: std.mem.Allocator, comptime d: netlist.Dialect, lg: peg.Grammar, cg: peg.Grammar, path: []const u8, src: []const u8) !enum { same, differ, oracle_refused, frontend_refused, both_refused } {
     const origin = try std.fmt.allocPrint(a, "tests/fixtures/{s}", .{path});
     const runs = try netlist.source.splitAlters(a, src);
-    const text = netlist.source.expand(std.testing.io, a, origin, runs[0]) catch return .both_refused;
+    const text = netlist.source.expand(std.testing.io, std.heap.page_allocator, a, origin, runs[0]) catch return .both_refused;
     var diag: peg.Diag = .{};
     // The oracle's refusal, printed only when the frontend reads the deck.
     var why: std.Io.Writer.Allocating = .init(a);
