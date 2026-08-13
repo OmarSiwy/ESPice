@@ -46,8 +46,8 @@ pub fn solveLanes(
             ckt.seedJunctions(xl);
         }
         results[k] = converger.run(ckt, ws, xl, 0, opts, root.EvalHook{}) catch |err| switch (err) {
-            error.QueryCancelled => return err,
-            else => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 },
+            error.QueryCancelled, error.OutOfMemory => return err,
+            else => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 }, // else: a numerical failure marks the lane unconverged
         };
     }
     setup.restore();

@@ -6,6 +6,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 ## Unreleased
 
 - A `.step` whose every point needs its own circuit runs just those points, instead of writing past the query table (#132).
+- Running out of memory during a transient, PSS, HB, DC homotopy or sweep step reports `OutOfMemory` instead of a convergence failure such as `TimestepTooSmall` (#134).
 - A run whose implicit operating point fails reports that failure, not `DependencyFailed` (#135).
 - `.tran` with MATEX fails the step instead of hanging when the Krylov matrix overflows to inf (#125).
 - Device evaluation no longer copies a deduplicated model row onto itself, undefined behaviour in release builds (#122).

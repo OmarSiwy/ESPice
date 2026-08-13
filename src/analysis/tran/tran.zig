@@ -387,8 +387,8 @@ pub fn simulate(
         nr_opts.residual_tol = std.math.inf(f64);
         ckt.reject_at = null;
         const nr = converger.run(ckt, ws, trial, t + dt, nr_opts, hook) catch |err| switch (err) {
-            error.QueryCancelled => return err,
-            else => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 },
+            error.QueryCancelled, error.OutOfMemory => return err,
+            else => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 }, // else: a numerical failure retries the step
         };
         st.attempts += 1;
         st.nr_iters += nr.iterations;

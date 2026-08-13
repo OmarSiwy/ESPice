@@ -172,8 +172,8 @@ pub fn solveLadder(
                     ckt.setHomotopy(gtarget, 1.0);
                     try ckt.computeBaseline();
                     const clean = newtonRun(ckt, ws, x, options.tol, hold, 0.0, &.{}, null, false) catch |err| switch (err) {
-                        error.QueryCancelled => return err,
-                        else => failed,
+                        error.QueryCancelled, error.OutOfMemory => return err,
+                        else => failed, // else: a numerical failure ends the ladder
                     };
                     total_iter +|= clean.iterations;
                     if (clean.converged)
@@ -320,8 +320,8 @@ fn transientOp(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, options: 
         .dt_max = 1e-8,
         .uic = true,
     }, opa) catch |err| switch (err) {
-        error.QueryCancelled => return err,
-        else => null,
+        error.QueryCancelled, error.OutOfMemory => return err,
+        else => null, // else: a numerical failure fails this rung
     };
     // The transient left .tran device state behind; the op contract is a
     // static circuit whatever the outcome.
@@ -338,8 +338,8 @@ fn transientOp(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, options: 
         return .{ .converged = true, .iterations = 0, .max_dx = 0 };
     }
     return newtonRun(ckt, ws, x, options.tol, hold, 0.0, &.{}, null, false) catch |err| switch (err) {
-        error.QueryCancelled => return err,
-        else => failed,
+        error.QueryCancelled, error.OutOfMemory => return err,
+        else => failed, // else: a numerical failure fails this rung
     };
 }
 

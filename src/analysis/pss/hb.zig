@@ -163,7 +163,10 @@ pub fn solveSpectrum(
         const ws = try ckt.workspace();
         ckt.setSimState(.{ .kind = .dc });
         root.zeroSimd(x_sample);
-        _ = converger.run(ckt, ws, x_sample, 0, converger.optionsFromTolerances(options.tol, null), root.EvalHook{}) catch {};
+        _ = converger.run(ckt, ws, x_sample, 0, converger.optionsFromTolerances(options.tol, null), root.EvalHook{}) catch |err| switch (err) {
+            error.QueryCancelled, error.OutOfMemory => return err,
+            else => {}, // else: the DC seed is best effort
+        };
         for (0..n) |node| x_hat[node * nf] = x_sample[node];
     }
 

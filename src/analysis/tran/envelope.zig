@@ -92,8 +92,8 @@ fn newtonAt(
         break :blk converger.run(ckt, ws, x, t, opts, root.EvalHook{});
     };
     const r = nr catch |err| switch (err) {
-        error.QueryCancelled => return err,
-        else => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 },
+        error.QueryCancelled, error.OutOfMemory => return err,
+        else => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 }, // else: a numerical failure rejects the step
     };
     if (!r.converged) {
         _ = ckt.stateCtl(.revert);

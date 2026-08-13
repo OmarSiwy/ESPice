@@ -107,7 +107,7 @@ fn integrateOnePeriod(
     probes: []const u32,
     wave: []f64,
     options: Options,
-) bool {
+) error{ QueryCancelled, OutOfMemory }!bool {
     const n: usize = ckt.n;
     const steps: usize = options.n_samples;
     const dt = options.period / @as(f64, @floatFromInt(steps));
@@ -151,7 +151,10 @@ fn integrateOnePeriod(
         const nr = converger.run(ckt, ws, x, t, .{
             .max_iter = options.max_newton_iter,
             .abstol = options.newton_tol,
-        }, hook) catch null;
+        }, hook) catch |err| switch (err) {
+            error.QueryCancelled, error.OutOfMemory => |e| return e,
+            else => null, // else: a numerical failure fails the period
+        };
         if (nr == null or !nr.?.converged) {
             _ = ckt.stateCtl(.revert);
             return false;
@@ -180,7 +183,7 @@ inline fn integrateFrom(
     x0: []const f64,
     x_end: []f64,
     options: Options,
-) bool {
+) error{ QueryCancelled, OutOfMemory }!bool {
     simdCopy(x_end, x0);
     return integrateOnePeriod(ckt, ws, sc, x_end, &.{}, &.{}, options);
 }
@@ -199,6 +202,9 @@ const ShootingKrylovCtx = struct {
     x_end_pert: []f64,
     options: Options,
     n: usize,
+    /// Set when an integration fails on cancellation or memory, which the
+    /// void matvec cannot return; `krylovSolve` returns it.
+    failure: ?error{ QueryCancelled, OutOfMemory } = null,
 
     /// The GMRES operator, `shootingMatvec`.
     pub const matvec = shootingMatvec;
@@ -221,7 +227,11 @@ fn shootingMatvec(ctx: *ShootingKrylovCtx, v: []const f64, w: []f64) void {
         opts.period *= 1 + ctx.options.fd_epsilon * v[osc];
     }
 
-    if (!integrateFrom(ctx.ckt, ctx.ws, ctx.sc, ctx.x_pert, ctx.x_end_pert, opts)) {
+    const ok = integrateFrom(ctx.ckt, ctx.ws, ctx.sc, ctx.x_pert, ctx.x_end_pert, opts) catch |err| blk: {
+        ctx.failure = ctx.failure orelse err;
+        break :blk false;
+    };
+    if (!ok) {
         // ponytail: a zero column is safer than propagating NaN.
         simdZero(w[0..n]);
         return;
@@ -262,7 +272,7 @@ fn denseFdSolve(
         var opts = options;
         if (options.osc_node != root.GROUND and j == options.osc_node) opts.period *= 1 + eps else x0_pert[j] += eps;
 
-        if (!integrateFrom(ckt, ws, sc, x0_pert, x_end_pert, opts)) {
+        if (!try integrateFrom(ckt, ws, sc, x0_pert, x_end_pert, opts)) {
             for (0..n) |row| j_phi[row * n + j] = if (row == j) @as(f64, 1.0) else @as(f64, 0.0);
             continue;
         }
@@ -291,7 +301,7 @@ fn krylovSolve(
     neg_phi: []f64,
     krylov: *Gmres,
     options: Options,
-) void {
+) error{ QueryCancelled, OutOfMemory }!void {
     num.scale(neg_phi[0..n], -1.0, phi[0..n]);
 
     var ctx = ShootingKrylovCtx{
@@ -309,6 +319,7 @@ fn krylovSolve(
     simdZero(dx0[0..n]);
 
     _ = krylov.solve(&ctx, neg_phi[0..n], dx0[0..n], options.gmres_tol, options.gmres_max_restarts);
+    if (ctx.failure) |err| return err;
 }
 
 /// Shooting Newton from x_dc. A non-empty `wave`, sized
@@ -390,7 +401,7 @@ pub fn solve(
 
     while (iter < options.max_shooting_iter) : (iter += 1) {
         if (iter != 0) try ckt.checkpoint(.{ .phase = .periodic, .completed = iter });
-        if (!integrateFrom(ckt, ws, &sc, x0, x_end, opts)) {
+        if (!try integrateFrom(ckt, ws, &sc, x0, x_end, opts)) {
             return .{
                 .converged = false,
                 .iterations = iter,
@@ -407,7 +418,7 @@ pub fn solve(
 
         if (use_krylov) {
             // ponytail: unpreconditioned; add an ILU preconditioner if GMRES stalls.
-            krylovSolve(ckt, ws, &sc, n, x0, phi, x0_pert, x_end_pert, dx0, neg_phi, &krylov.?, opts);
+            try krylovSolve(ckt, ws, &sc, n, x0, phi, x0_pert, x_end_pert, dx0, neg_phi, &krylov.?, opts);
         } else {
             try denseFdSolve(ckt, ws, &sc, n, x0, phi, x0_pert, x_end_pert, dx0, j_phi, opts);
         }
@@ -423,7 +434,7 @@ pub fn solve(
     }
 
     simdCopy(x_end, x0);
-    if (!integrateOnePeriod(ckt, ws, &sc, x_end, probes, wave, opts)) simdZero(wave);
+    if (!try integrateOnePeriod(ckt, ws, &sc, x_end, probes, wave, opts)) simdZero(wave);
 
     return .{
         .converged = res_norm < options.shooting_tol,
@@ -452,14 +463,14 @@ fn startOscillator(
     const steps: usize = options.n_samples;
     x[osc] += osc_kick;
     for (0..options.osc_settle_periods) |_|
-        if (!integrateOnePeriod(ckt, ws, sc, x, &.{}, &.{}, options)) return error.OscillatorDidNotStart;
+        if (!try integrateOnePeriod(ckt, ws, sc, x, &.{}, &.{}, options)) return error.OscillatorDidNotStart;
     // A weakly unstable tank grows from the kick over many periods: keep
     // settling until the osc node's swing moves under 1 % a period.
     const swing = try allocator.alloc(f64, 2 * (steps + 1));
     defer allocator.free(swing);
     var prev_swing: f64 = 0;
     for (0..max_settle_periods) |_| {
-        if (!integrateOnePeriod(ckt, ws, sc, x, &.{osc}, swing, options)) return error.OscillatorDidNotStart;
+        if (!try integrateOnePeriod(ckt, ws, sc, x, &.{osc}, swing, options)) return error.OscillatorDidNotStart;
         var lo = std.math.inf(f64);
         var hi = -std.math.inf(f64);
         for (0..steps + 1) |k| {
@@ -477,7 +488,7 @@ fn startOscillator(
     const record = try allocator.alloc(f64, measure_periods * stride);
     defer allocator.free(record);
     for (0..measure_periods) |p|
-        if (!integrateOnePeriod(ckt, ws, sc, x, rows, record[p * stride ..][0..stride], options)) return error.OscillatorDidNotStart;
+        if (!try integrateOnePeriod(ckt, ws, sc, x, rows, record[p * stride ..][0..stride], options)) return error.OscillatorDidNotStart;
 
     // Sample g of the record is row g % steps of period g / steps; the last
     // row of each period repeats the next period's first.
