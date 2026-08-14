@@ -63,19 +63,18 @@ breaks §2.1 names its target rung and the plan block that moves it.
 - **Proof**: pending, P1 (host `Sink` vs a hand-written host stamp loop)
 - **Revisit when**: a backend needs a different kernel shape, not just a different sink.
 
-### S5: GPU evaluation and LU hooks
+### S5: GPU evaluation and LU contexts
 
 - **Axis**: backend at runtime: host walk or a live GPU context.
-- **Evidence**: one implementation each (`analysis/gpu.zig`, `analysis/gpu_lu.zig`). The "host" case is the absence of a hook.
-- **Owner**: analysis (`src/analysis/Circuit.zig:63` `GpuHook`, `:98` `LuHook`).
-- **Rung**: 8 today (`*anyopaque` plus 11 function pointers). This **breaks §2.1**: rung 8 is forbidden on a hot path, and `eval_planes` runs once per Newton evaluation. With one adapter the seam is speculative.
-- **Target (P3)**: concrete optional contexts (`?*gpu.Context`, `?*gpu_lu.GpuLu`) owned by the executor; the which-backend branch moves into the spine that calls `evalNewton`, so `Circuit` no longer knows about the GPU. Rung 1 with one branch per evaluation.
-- **Cost (target)**:
-  - residue: one predictable branch per evaluation
+- **Evidence**: one implementation each (`analysis/gpu.zig` `GpuContext`, `analysis/gpu_lu.zig` `GpuLu`). The "host" case is the absence of a context.
+- **Owner**: analysis (`src/analysis/Circuit.zig` fields `gpu: ?*GpuContext`, `lu: ?*GpuLu`; the executor creates, attaches and frees both).
+- **Rung**: 1, concrete optional contexts. Each evaluation entry (`eval`, `evalQ`, `evalNewton`, `applyLimits`, `updateStates`, `stateCtl`, `seedJunctions`, `clearLimits`, `snapshotQTape`, `qTapeLen`, `evalFollows`, `restoreState`) branches once on `gpuContext()`, which is comptime null in a build without kernel images (`gpu.available`), so there the branch folds away; `deviceSolve` branches on `lu`. Was rung 8 (`GpuHook`, `*anyopaque` plus 11 function pointers, and `LuHook`), which broke §2.1 on the Newton path. The branch stays inside the `Circuit` methods rather than in their callers: 65 call sites across the analyses reach these 12 methods, and hoisting would copy the branch into each. gpu.zig does not import the circuit (`GpuContext.init` reads a `gpu.Host` view; the shared host walks are in walk.zig, the knobs in knobs.zig), so the file graph has no cycle. The `GpuContext` entry points are `noinline`: inlined into the Newton and transient loops, the GPU branch's body cost the host path registers.
+- **Cost**:
+  - residue: one predictable branch per evaluation entry in a GPU build, none in a host-only build. Callgrind Ir, ReleaseFast `-Dcpu=x86_64_v3 -Dhip-arch=none -Dcuda-arch=none`, `--backend cpu`, before (f05c47f) → after, raw files byte-identical: `tran/device_mos6_inverter` 113,988,293 → 113,956,155 (−0.03%); `stress/scaling_parallel_inverters_100` 358,515,839 → 358,535,625 (+0.006%). An earlier draft without the fold and with the entry points inlined measured +94k Ir on the second deck.
   - change radius for a second GPU backend: 0 (HIP and CUDA already share `gpu.zig` through gompute)
-  - interface weight: −1 (`GpuHook` removed)
+  - interface weight: −2 (`GpuHook`, `LuHook` removed)
 - **Drills passed**: D3 is open
-- **Proof**: n/a at rung 1
+- **Proof**: n/a at rung 1; the Ir pair above
 - **Revisit when**: a second, structurally different accelerator path exists.
 
 ### S6: frequency lane width

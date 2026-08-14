@@ -27,7 +27,7 @@ on top of the downloaded planes.
   which is what the state and control kernels carry. It admits
   held-variable devices without `limit` (bsim4va, psp103; vbic13_4t
   limits and stays on the host). Their state kernel runs once per
-  converged solve, from `GpuHook.update_states`, never fused into
+  converged solve, from `GpuContext.updateStates`, never fused into
   the per-iterate limit pass, and `stateCtl(.revert)` takes it back on a
   rejected step.
 - VerA ABI 5 passes `SimState` to every kernel by value (eval, state, charge

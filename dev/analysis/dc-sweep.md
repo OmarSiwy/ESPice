@@ -115,7 +115,7 @@ dc_sweep(ckt, param, start, stop, step, tol):
 
 Today the sweep loop runs serially on the host; inside each Newton iterate
 the device evaluation can run on `ParEval` threads or on the GPU
-(`Circuit.gpu_hook.eval_planes`).
+(`GpuContext.eval`).
 
 Not implemented (design note): sweep points are almost independent, since
 only the warm-start guess couples them. Splitting the sweep into $L$

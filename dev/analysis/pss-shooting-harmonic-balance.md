@@ -282,7 +282,7 @@ hb(ckt, f0, K):
 
 Today everything runs on the host: the shooting and HB Newton loops, the
 dense LUs and GMRES. Device evaluation inside each inner Newton iterate can
-use `ParEval` threads or the GPU plane hook (`Circuit.gpu_hook.eval_planes`).
+use `ParEval` threads or the GPU plane hook (`GpuContext.eval`).
 
 Not implemented (design notes):
 

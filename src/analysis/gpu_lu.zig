@@ -9,7 +9,7 @@ const std = @import("std");
 const gompute = @import("gompute");
 const solver = @import("solver");
 const numerics = @import("core").numerics;
-const Knobs = @import("types.zig").Knobs;
+const Knobs = @import("knobs.zig").Knobs;
 
 const K = solver.lu_kernels;
 const direct = solver.direct;
@@ -134,8 +134,8 @@ pub const GpuLu = struct {
     }
 
     /// Prints the `ESPICE_GPU_STATS`/check/bench summary, then frees every
-    /// device and pinned buffer and `self`. Clear `Circuit.lu_hook` first:
-    /// the hook's `ctx` is `self`.
+    /// device and pinned buffer and `self`. Detach it first
+    /// (`Circuit.attachLu(null)`).
     pub fn deinit(self: *Self) void {
         if (comptime backend == null) return;
         if (self.knobs.gpu_stats != .off or self.check or self.bench != null) std.debug.print(
@@ -173,8 +173,7 @@ pub const GpuLu = struct {
     /// `slv.factored`, so the host goes straight to the full factor its own
     /// refactor would have fallen back to. A driver error warns once and
     /// returns null for the rest of the query.
-    pub fn solve(ctx: *anyopaque, slv: *direct.Solver, vals: []const f64, rhs: []const f64, dx: []f64, need: bool) ?bool {
-        const self: *Self = @ptrCast(@alignCast(ctx));
+    pub fn solve(self: *Self, slv: *direct.Solver, vals: []const f64, rhs: []const f64, dx: []f64, need: bool) ?bool {
         if (self.poisoned) return null;
         return self.trySolve(slv, vals, rhs, dx, need) catch |e| {
             std.debug.print("warning: device LU off for this query ({s})\n", .{@errorName(e)});

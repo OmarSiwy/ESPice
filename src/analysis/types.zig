@@ -10,7 +10,6 @@ const device_ir = @import("device").abi;
 pub const Circuit = circuit_mod.Circuit;
 pub const Knobs = circuit_mod.Knobs;
 pub const EvalHook = circuit_mod.EvalHook;
-pub const GpuHook = circuit_mod.GpuHook;
 pub const Display = circuit_mod.Display;
 pub const AcParam = circuit_mod.AcParam;
 pub const GROUND = circuit_mod.GROUND;

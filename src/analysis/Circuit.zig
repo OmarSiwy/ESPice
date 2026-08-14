@@ -8,6 +8,10 @@ const device_ir = @import("device").abi;
 const Prepared = @import("device").Circuit;
 const progress_api = @import("progress.zig");
 const par_eval = @import("par_eval.zig");
+const walk = @import("walk.zig");
+const gpu_mod = @import("gpu.zig");
+const GpuContext = gpu_mod.GpuContext;
+const GpuLu = @import("gpu_lu.zig").GpuLu;
 const converger = @import("solver").converger;
 const freq_solve = @import("solver").freq_solve;
 const direct = @import("solver").direct;
@@ -26,52 +30,8 @@ pub const zeroSimd = numerics.zeroSimd;
 /// `numerics.copySimd`, re-exported like `zeroSimd`.
 pub const copySimd = numerics.copySimd;
 
-/// Developer switches, read from the environment once by the facade
-/// (`espice.zig` `knobsFromEnv`) and carried by `Config.knobs` into
-/// `Circuit.knobs`, so nothing below the facade reads the environment. Each
-/// field names its variable; dev/ notes cite them.
-pub const Knobs = struct {
-    newton: converger.Knobs = .{},
-    lu: direct.Knobs = .{},
-    /// `ESPICE_HB_TRACE`: trace harmonic-balance iterates.
-    hb_trace: bool = false,
-    /// `ZP_NO_QTAPE`: run the LTE over the row plane, not the charge tape.
-    no_qtape: bool = false,
-    /// `ZP_TRAN_STATS`: print the transient step statistics.
-    tran_stats: bool = false,
-    /// `ESPICE_GPU_LU`: `1` forces the device LU on, any other value off;
-    /// null leaves it to the size gate.
-    gpu_lu: ?bool = null,
-    /// `ESPICE_GPU_LU_CHECK`: check every device solve against the host.
-    gpu_lu_check: bool = false,
-    /// `ESPICE_GPU_LU_NOGATHER`: refactor without the gather kernel.
-    gpu_lu_nogather: bool = false,
-    /// `ESPICE_GPU_LU_TAIL`: dense-tail columns (0 when unparsable).
-    gpu_lu_tail: ?u32 = null,
-    /// `ESPICE_GPU_LU_BENCH`: time the device LU, stopping after this many
-    /// samples (0, or unparsable: never).
-    gpu_lu_bench: ?usize = null,
-    /// `ESPICE_GPU_LU_THREADS`: host refactor threads the bench compares.
-    gpu_lu_threads: u32 = 8,
-    /// `ESPICE_GPU_STATS`: set, or `phases` for the per-phase wall split.
-    gpu_stats: enum { off, on, phases } = .off,
-    /// `ESPICE_GPU_BLOCK`: the CUDA block width, 1..1024.
-    gpu_block: u32 = 64,
-    /// `ESPICE_GPU_EVAL_CHECK`: check every device eval against the host.
-    gpu_eval_check: bool = false,
-    /// `ESPICE_GPU_NOFUSE`: launch the eval kernels unfused.
-    gpu_nofuse: bool = false,
-    /// `XDG_CACHE_HOME` and `HOME`, where the GPU JIT warm markers live.
-    xdg_cache_home: ?[]const u8 = null,
-    home: ?[]const u8 = null,
-
-    /// `ESPICE_GPU_BLOCK`'s width, or 64 when unset, unparsable or outside
-    /// CUDA's 1..1024: a zero width would divide by zero in `Dim3.linear`.
-    pub fn parseBlock(env: ?[]const u8) u32 {
-        const v = std.fmt.parseInt(u32, env orelse return 64, 10) catch return 64;
-        return if (v >= 1 and v <= 1024) v else 64;
-    }
-};
+/// The developer switches; see knobs.zig.
+pub const Knobs = @import("knobs.zig").Knobs;
 
 /// Row and column index of the ground node in every pattern.
 pub const GROUND: u32 = 0;
@@ -101,52 +61,6 @@ pub const EvalHook = struct {
     pub fn diagAt(_: EvalHook, ckt: *Circuit, slot: u32) f64 {
         return ckt.g_vals[slot];
     }
-};
-
-/// Dispatch table the executor installs when a GPU context is live
-/// (implementation in gpu.zig). Each entry replaces the host walk of the
-/// `Circuit` method it is named after; on a driver fault the implementation
-/// falls back to the host walk itself, so none of these can fail.
-pub const GpuHook = struct {
-    ctx: *anyopaque,
-    /// Every resident batch that has a host `q_tape` gets it from the device
-    /// through `sync_q_tape`; false keeps the transient on the row-plane LTE.
-    q_tape: bool,
-    /// Stamps all four planes, ground pin included. Serves both `eval` and
-    /// `evalNewton`: the device path never uses the constant-Jacobian baseline.
-    eval_planes: *const fn (*anyopaque, x: []const f64, t: f64) void,
-    /// Brings the resident batches' host `q_tape` up to the last eval.
-    sync_q_tape: *const fn (*anyopaque) void,
-    /// Announces an eval at `x` and `t` right after the next `apply_limits`
-    /// or `state_ctl(.query)` (`Circuit.evalFollows`).
-    eval_follows: *const fn (*anyopaque, x: []const f64, t: f64, charge: bool) void,
-    /// `eval_planes` for `Circuit.evalQ`: also brings the resident batches'
-    /// host `q_tape` to x, on the same wait.
-    eval_charge: *const fn (*anyopaque, x: []const f64, t: f64) void,
-    /// Runs the device limit pass fused with the path-latch staging.
-    apply_limits: *const fn (*anyopaque, x: []f64, x_old: []const f64) bool,
-    /// Runs the resident held-variable batches' state pass and walks the
-    /// host ones; the fused limit launch already staged the rest.
-    update_states: *const fn (*anyopaque, x: []const f64) ?f64,
-    clear_limits: *const fn (*anyopaque) void,
-    seed_junctions: *const fn (*anyopaque, x: []f64) void,
-    /// Accepted-step latches mutate device-resident instance blobs, so a host
-    /// walk cannot stand in for a resident batch.
-    state_ctl: *const fn (*anyopaque, op: StateCtlOp) bool,
-    /// Marks the resident models and instances stale after a host parameter
-    /// write; the context re-uploads before its next launch.
-    mark_dirty: *const fn (*anyopaque) void,
-};
-
-/// The device LU the executor installs (gpu_lu.zig), independent of
-/// `GpuHook`: a deck whose devices all evaluate on the host can still factor
-/// on the device.
-pub const LuHook = struct {
-    ctx: *anyopaque,
-    /// dx = -A^-1 rhs on the device: true when solved, false when the
-    /// host must run its exact factor and solve, null when the device did
-    /// not try. See `GpuLu.solve`.
-    solve: *const fn (*anyopaque, slv: *direct.Solver, vals: []const f64, rhs: []const f64, dx: []f64, need: bool) ?bool,
 };
 
 /// The LRM §9.4 display output of the devices with `Hooks.say` (#102),
@@ -220,10 +134,13 @@ pub const Circuit = struct {
     knobs: Knobs = .{},
     /// Executor-owned threaded stamp; null means serial eval.
     par_eval: ?*ParEval = null,
-    /// Executor-owned GPU context; null means CPU only.
-    gpu_hook: ?GpuHook = null,
-    /// Executor-owned device LU; null means the host factors.
-    lu_hook: ?LuHook = null,
+    /// The executor's GPU evaluation context, borrowed while attached
+    /// (`attachGpu`); null means every batch stamps on the host.
+    gpu: ?*GpuContext = null,
+    /// The executor's device LU, borrowed while attached (`attachLu`),
+    /// independent of `gpu`: a deck whose devices all evaluate on the host
+    /// can still factor on the device. Null means the host factors.
+    lu: ?*GpuLu = null,
     /// Executor-owned display output; null when no batch has `Hooks.say`.
     display: ?*Display = null,
     /// The temperature `setCircuitTemp` last installed, in degrees Celsius;
@@ -273,11 +190,11 @@ pub const Circuit = struct {
     ac_params: []AcParam = &.{},
 
     /// `newton`'s device path: factors `vals` (when `need`) and solves
-    /// dx = -A^-1 rhs on the device. Null without a `lu_hook`; see
-    /// `LuHook.solve` for true and false.
+    /// dx = -A^-1 rhs on the device. Null without a device LU; see
+    /// `GpuLu.solve` for true and false.
     pub fn deviceSolve(self: *Circuit, slv: *direct.Solver, vals: []const f64, dx: []f64, need: bool) ?bool {
-        const h = self.lu_hook orelse return null;
-        return h.solve(h.ctx, slv, vals, self.rhs[0..self.n], dx, need);
+        const lu = self.lu orelse return null;
+        return lu.solve(slv, vals, self.rhs[0..self.n], dx, need);
     }
 
     /// Returns the shared Newton/JFNK workspace, building it (and the
@@ -364,16 +281,34 @@ pub const Circuit = struct {
         self.display = display;
     }
 
-    /// Routes device evaluation through `hook`, or the host walk when null.
-    /// The hook's context is borrowed; detach before freeing it.
-    pub fn attachGpu(self: *Circuit, hook: ?GpuHook) void {
-        self.gpu_hook = hook;
+    /// Evaluates the resident batches through `g` from now on and moves the
+    /// planes into its page-locked buffers, which `GpuContext.init` filled
+    /// with their values. `g` is borrowed: `detachGpu` before freeing it.
+    pub fn attachGpu(self: *Circuit, g: *GpuContext) void {
+        std.debug.assert(self.gpu == null);
+        self.gpu = g;
+        self.bindPlanes(g.planes());
     }
 
-    /// Routes `deviceSolve` through `hook`, or nowhere when null. The hook's
-    /// context is borrowed; detach before freeing it.
-    pub fn attachLu(self: *Circuit, hook: ?LuHook) void {
-        self.lu_hook = hook;
+    /// The attached GPU context, or null; comptime null in a build without
+    /// kernel images (`gpu.zig` `available`), so every GPU branch below
+    /// folds away there.
+    inline fn gpuContext(self: *const Circuit) ?*GpuContext {
+        return if (comptime gpu_mod.available) self.gpu else null;
+    }
+
+    /// Returns the planes to the circuit's own allocations, carrying their
+    /// last values, and evaluates on the host again. No-op when detached.
+    pub fn detachGpu(self: *Circuit) void {
+        const g = self.gpu orelse return;
+        self.gpu = null;
+        self.bindPlanes(g.restorePlanes());
+    }
+
+    /// Routes `deviceSolve` through `lu`, or nowhere when null. `lu` is
+    /// borrowed: attach null before freeing it.
+    pub fn attachLu(self: *Circuit, lu: ?*GpuLu) void {
+        self.lu = lu;
     }
 
     /// Makes `updateStates` record a device's step-reject time in `reject_at`
@@ -581,7 +516,7 @@ pub const Circuit = struct {
     // left where it is; download it (`syncHostState`) and re-upload states
     // too when a GPU-resident device carries history that must rewind.
     pub fn restoreState(self: *Circuit, saved: SavedState) void {
-        if (self.gpu_hook != null) return;
+        if (self.gpuContext() != null) return;
         for (self.batches, saved.batches) |dst, src| dst.hooks.copy_state(dst.ctx, src.ctx);
         self.state_staged = false;
         self.lin.valid = false;
@@ -601,7 +536,7 @@ pub const Circuit = struct {
     /// Points the four planes at `planes`, values as they stand there: the
     /// GPU context's page-locked buffers while it lives, the circuit's own
     /// allocations again when it goes. Asserts the lengths match.
-    pub fn bindPlanes(self: *Circuit, planes: Planes) void {
+    fn bindPlanes(self: *Circuit, planes: Planes) void {
         std.debug.assert(planes.g_vals.len == self.g_vals.len);
         std.debug.assert(planes.c_vals.len == self.c_vals.len);
         std.debug.assert(planes.rhs.len == self.rhs.len);
@@ -622,10 +557,10 @@ pub const Circuit = struct {
     /// batch-major.
     ///
     /// Zero when nothing carries charge, and zero under a GPU plane hook that
-    /// cannot fill the resident batches' tapes (`GpuHook.q_tape`). The
+    /// cannot fill the resident batches' tapes (`GpuContext.tape_ok`). The
     /// transient reads zero as "use per-row LTE on the summed q plane".
     pub fn qTapeLen(self: *const Circuit) u32 {
-        if (self.gpu_hook) |gh| if (!gh.q_tape) return 0;
+        if (self.gpuContext()) |g| if (!g.tape_ok) return 0;
         var total: u32 = 0;
         for (self.batches) |b| {
             if (b.hooks.q_tape) |f| total += @intCast(f(b.ctx).len);
@@ -636,7 +571,7 @@ pub const Circuit = struct {
     /// Concatenates every batch's live charge tape into `dst`. Asserts `dst`
     /// holds exactly `qTapeLen()` entries.
     pub fn snapshotQTape(self: *const Circuit, dst: []f64) void {
-        if (self.gpu_hook) |gh| gh.sync_q_tape(gh.ctx);
+        if (self.gpuContext()) |g| g.syncQTape(self.sim);
         var off: usize = 0;
         for (self.batches) |b| {
             const f = b.hooks.q_tape orelse continue;
@@ -662,8 +597,17 @@ pub const Circuit = struct {
         // Callers also eval at points other than x_op (disto, pss, pac, ...),
         // so the linearization memo cannot survive this.
         self.lin.valid = false;
-        if (self.gpu_hook) |gh| return gh.eval_planes(gh.ctx, x, t);
+        if (self.gpuContext()) |g| return self.evalGpu(g, x, t, false);
         self.stamp(x, t, .full);
+    }
+
+    /// The device stamp at `x` (`GpuContext.eval`), then the ground pin, or
+    /// the host stamp after a driver fault `g` has already reported. The
+    /// planes follow the buffer the device wrote, which a prefetch moves.
+    fn evalGpu(self: *Circuit, g: *GpuContext, x: []const f64, t: f64, charge: bool) void {
+        const ok = g.eval(x, t, self.sim, charge);
+        self.bindPlanes(g.planes());
+        if (ok) self.groundStamp(x) else self.evalNewtonCpu(x, t);
     }
 
     /// Clears the planes `mode` writes, or seeds g/c from the baseline for
@@ -711,7 +655,7 @@ pub const Circuit = struct {
     /// the full pass.
     pub fn evalQ(self: *Circuit, x: []const f64, t: f64) void {
         self.lin.valid = false;
-        if (self.gpu_hook) |gh| return gh.eval_charge(gh.ctx, x, t);
+        if (self.gpuContext()) |g| return self.evalGpu(g, x, t, true);
         self.stamp(x, t, .charge);
     }
 
@@ -781,7 +725,7 @@ pub const Circuit = struct {
         // The device path ignores the baseline: `g_base` includes the resident
         // batches too, and the GPU sink cannot skip them, so it zeroes and
         // restamps instead.
-        if (self.gpu_hook) |gh| return gh.eval_planes(gh.ctx, x, t);
+        if (self.gpuContext()) |g| return self.evalGpu(g, x, t, false);
         self.evalNewtonCpu(x, t);
     }
 
@@ -890,31 +834,14 @@ pub const Circuit = struct {
     /// wrong promise costs one wasted device eval, never a wrong stamp: the
     /// eval checks its x and t.
     pub fn evalFollows(self: *const Circuit, x: []const f64, t: f64, charge: bool) void {
-        if (self.gpu_hook) |gh| gh.eval_follows(gh.ctx, x, t, charge);
+        if (self.gpuContext()) |g| g.evalFollows(x, t, charge);
     }
 
     /// Limits the Newton update in place (pnjlim/fetlim). Returns true when any
     /// device clamped `x`.
     pub fn applyLimits(self: *const Circuit, x: []f64, x_old: []const f64) bool {
-        if (self.gpu_hook) |gh| return gh.apply_limits(gh.ctx, x, x_old);
-        return limitBatches(self.batches, x, x_old);
-    }
-
-    // Host walks over a batch slice. `Circuit` walks every batch; the GPU
-    // context walks its host-resident ones, or every batch after a fault.
-
-    /// `applyLimits` over `batches` on the host.
-    pub fn limitBatches(batches: []const Batch, x: []f64, x_old: []const f64) bool {
-        var any_limited = false;
-        for (batches) |b| if (b.hooks.apply_limits) |f| {
-            if (f(b.ctx, x, x_old)) any_limited = true;
-        };
-        return any_limited;
-    }
-
-    /// `seedJunctions` over `batches` on the host.
-    pub fn seedBatches(batches: []const Batch, x: []f64) void {
-        for (batches) |b| if (b.hooks.seed) |f| f(b.ctx, x);
+        if (self.gpuContext()) |g| return g.applyLimits(x, x_old, self.sim);
+        return walk.limitBatches(self.batches, x, x_old);
     }
 
     /// Sets every `idt` state unknown with an ic to that ic (`Hooks.seed_ic`):
@@ -924,50 +851,19 @@ pub const Circuit = struct {
         for (self.batches) |b| if (b.hooks.seed_ic) |f| f(b.ctx, x);
     }
 
-    /// `clearLimits` over `batches` on the host.
-    pub fn clearLimitBatches(batches: []const Batch) void {
-        for (batches) |b| if (b.hooks.clear_limits) |f| f(b.ctx);
-    }
-
-    /// `updateStates`' device walk over `batches`: the earliest reject time,
-    /// or null. Stages state for the next `stateCtl`.
-    pub fn updateBatches(batches: []const Batch, x: []const f64) ?f64 {
-        return minReject(batches, "update_state", x);
-    }
-
-    /// `stateCtl` over `batches` on the host.
-    pub fn stateCtlBatches(batches: []const Batch, sop: StateCtlOp) bool {
-        var dirty = false;
-        for (batches) |b| if (b.hooks.state_ctl) |f| {
-            if (f(b.ctx, sop)) dirty = true;
-        };
-        return dirty;
-    }
-
-    /// Earliest step-reject time any batch's `hook` returns, or null.
-    fn minReject(batches: []const Batch, comptime hook: []const u8, x: []const f64) ?f64 {
-        var min_reject: ?f64 = null;
-        for (batches) |b| {
-            if (@field(b.hooks, hook)) |f| if (f(b.ctx, x)) |tr| {
-                min_reject = if (min_reject) |cur| @min(cur, tr) else tr;
-            };
-        }
-        return min_reject;
-    }
-
     /// SPICE MODEINITJCT: devices write junction seed voltages into a zeroed
     /// `x`, so iteration 1 linearizes at vcrit/vto instead of 0 and the
     /// limiters clamp against the seed. Cold starts only.
     pub fn seedJunctions(self: *const Circuit, x: []f64) void {
-        if (self.gpu_hook) |gh| return gh.seed_junctions(gh.ctx, x);
-        seedBatches(self.batches, x);
+        if (self.gpuContext()) |g| return g.seedJunctions(x);
+        walk.seedBatches(self.batches, x);
     }
 
     /// Resets device-private limiting state after a Newton solve, so later
     /// evals (waveform, AC, noise) see the node vector itself.
     pub fn clearLimits(self: *const Circuit) void {
-        if (self.gpu_hook) |gh| return gh.clear_limits(gh.ctx);
-        clearLimitBatches(self.batches);
+        if (self.gpuContext()) |g| return g.clearLimits();
+        walk.clearLimitBatches(self.batches);
     }
 
     /// Starts a nonlinear solve: `$simparam("iteration")` reads 1.
@@ -1015,8 +911,8 @@ pub const Circuit = struct {
         // The transient reads q at the converged point next, so get it from
         // the staging pass's core run. ponytail: serial; a ParEval `.accept`
         // mode would keep it threaded when lanes are on.
-        const fuse = self.land_rejects and self.has_charge and self.gpu_hook == null and self.par_eval == null;
-        const tr = if (self.gpu_hook) |gh| gh.update_states(gh.ctx, x) else if (fuse) self.acceptStates(x) else updateBatches(self.batches, x);
+        const fuse = self.land_rejects and self.has_charge and self.gpuContext() == null and self.par_eval == null;
+        const tr = if (self.gpuContext()) |g| g.updateStates(x, self.sim) else if (fuse) self.acceptStates(x) else walk.updateBatches(self.batches, x);
         if (!self.land_rejects) return tr;
         self.reject_at = tr;
         return null;
@@ -1058,7 +954,7 @@ pub const Circuit = struct {
     /// static solve may push (`Hooks.commit_state`). The transient calls it
     /// once per accepted point, before `stateCtl(.commit)`.
     pub fn commitStates(self: *const Circuit, x: []const f64) ?f64 {
-        return minReject(self.batches, "commit_state", x);
+        return walk.minReject(self.batches, "commit_state", x);
     }
 
     /// Commits, reverts or queries the accepted device state. `.commit` at
@@ -1072,8 +968,8 @@ pub const Circuit = struct {
             if (sop == .commit) d.out.writeAll(d.staged.written()) catch {};
             d.staged.clearRetainingCapacity();
         };
-        if (self.gpu_hook) |gh| return gh.state_ctl(gh.ctx, sop);
-        return stateCtlBatches(self.batches, sop);
+        if (self.gpuContext()) |g| return g.stateCtl(sop, self.sim);
+        return walk.stateCtlBatches(self.batches, sop);
     }
 
     /// Returns the smallest model delay (`D.delays`) in the circuit, or null.
@@ -1131,7 +1027,7 @@ pub const Circuit = struct {
     }
 
     fn markGpuDirty(self: *Circuit) void {
-        if (self.gpu_hook) |gh| gh.mark_dirty(gh.ctx);
+        if (self.gpuContext()) |g| g.markDirty();
     }
 
     /// Publishes the analysis state (`$abstime`, timestep, `analysis()`,

@@ -243,14 +243,12 @@ pub const Executor = struct {
             if (par) |*p| p.deinit();
         }
         const gpu_context = try self.prepareGpu();
-        defer {
-            self.circuit.attachGpu(null);
-            if (gpu_context) |g| {
-                // `refuseLatched` reads statuses off the host instances.
-                g.syncStatus();
-                g.deinit();
-            }
-        }
+        defer if (gpu_context) |g| {
+            // `refuseLatched` reads statuses off the host instances.
+            g.syncStatus();
+            self.circuit.detachGpu();
+            g.deinit();
+        };
         const lu_context = self.prepareGpuLu();
         defer {
             self.circuit.attachLu(null);
@@ -350,14 +348,16 @@ pub const Executor = struct {
             return null;
         };
         context.forced = forced;
-        self.circuit.attachLu(.{ .ctx = context, .solve = gpu_lu.GpuLu.solve });
+        self.circuit.attachLu(context);
         return context;
     }
 
     fn prepareGpu(self: *Executor) !?*gpu.GpuContext {
         if (self.config.backend == .cpu) return null;
         const explicit = self.config.gpu_explicit or self.config.backend != .auto;
-        const context = gpu.GpuContext.init(self.allocator, &self.circuit, explicit, self.config.device_threads, expectedEvals(self.job)) catch |err| {
+        const c = &self.circuit;
+        const host: gpu.Host = .{ .batches = c.batches, .planes = c.ownPlanes(), .n = c.n, .trash_slot = c.trash_slot, .has_charge = c.has_charge, .knobs = c.knobs };
+        const context = gpu.GpuContext.init(self.allocator, host, explicit, self.config.device_threads, expectedEvals(self.job)) catch |err| {
             if (!gpu.fallsBack(self.config.backend, explicit, err)) {
                 std.log.warn("--backend {s}: GPU unavailable ({s}); detected GPU hardware: {s}", .{ @tagName(self.config.backend), @errorName(err), gpu.detectedHardware() });
                 return err;
@@ -366,7 +366,7 @@ pub const Executor = struct {
                 std.log.warn("GPU unavailable ({s}); running on the CPU", .{@errorName(err)});
             return null;
         };
-        self.circuit.attachGpu(context.hook());
+        self.circuit.attachGpu(context);
         return context;
     }
 };

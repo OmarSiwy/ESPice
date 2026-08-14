@@ -325,7 +325,7 @@ fn computeResidual(
 /// ponytail: the QPSS hot loop, O(nnz*nf) for the G products plus two
 /// O(n*nf^2) transforms per call, all on the CPU. A GPU version would keep
 /// the spectral slab resident and fuse IDFT, the nf batched G*v products and
-/// the DFT into one launch; it needs a gpu_hook entry point for it. Add when
+/// the DFT into one launch; it needs a `GpuContext` entry point for it. Add when
 /// a profile shows host-device latency dominating.
 fn jacobianMatvec(ctx: *OperatorCtx, v: []const f64, w: []f64) void {
     const n = ctx.n;

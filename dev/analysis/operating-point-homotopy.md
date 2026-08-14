@@ -369,7 +369,7 @@ newton(ckt, x, gmin, max_iter):
 The ladder is sequential: rungs are causally ordered, and each rung's
 Newton iterates depend on the previous one. Inside an iterate, device
 evaluation runs in parallel: `ParEval` worker threads on the CPU, or the GPU
-through `Circuit.gpu_hook.eval_planes` (`src/analysis/gpu.zig`), which ships
+through `GpuContext.eval` (`src/analysis/gpu.zig`), which ships
 `x` up and the value planes down. The factorization, solve, limiting
 decisions, gates and the ladder itself run on the host.
 

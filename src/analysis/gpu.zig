@@ -6,13 +6,11 @@
 //! circuit size; `init` prices both sides before `auto` commits.
 
 const std = @import("std");
-const analysis = @import("types.zig");
 const device_ir = @import("device").abi;
 const gompute = @import("gompute");
+const walk = @import("walk.zig");
 
-const Circuit = analysis.Circuit;
-const GpuHook = analysis.GpuHook;
-const Knobs = analysis.Knobs;
+const Knobs = @import("knobs.zig").Knobs;
 const Planes = device_ir.Planes;
 const SimState = device_ir.SimState;
 
@@ -26,6 +24,9 @@ else if (artifacts.has_hip)
     .hip
 else
     null;
+
+/// This binary carries kernel images, so a context can exist at all.
+pub const available = backend != null;
 
 /// What `--backend` can ask for. `auto` may decline for any reason and fall
 /// back to the CPU; `cuda`/`hip` are explicit and either run there or fail
@@ -411,11 +412,37 @@ const Layout = struct {
     }
 };
 
-/// The resident device state of one query and the `GpuHook` it installs.
-/// Heap-allocated; the hook and `ckt` hold its address until `deinit`.
+/// What `GpuContext.init` reads off the analysis circuit. The context keeps
+/// `batches` (borrowed: the circuit's own, which outlive it) and the plane
+/// allocations, and copies the rest.
+pub const Host = struct {
+    /// Every batch, resident or not; the fallback walks run over all of them.
+    batches: []const device_ir.Batch,
+    /// The circuit's own planes, with their current values.
+    planes: Planes,
+    n: u32,
+    trash_slot: u32,
+    has_charge: bool,
+    knobs: Knobs,
+};
+
+/// The resident device state of one query. Heap-allocated; the circuit it
+/// is attached to (`Circuit.attachGpu`) holds its address until detached.
+/// Every entry point that launches takes the circuit's analysis state
+/// (`sim`) as it stands at the call. The entry points are `noinline`: the
+/// circuit's methods inline into the Newton and transient loops, and an
+/// inlined GPU branch costs those loops registers on the host path
+/// (dev/decisions.md S5). Out of line, each is the opaque call the old
+/// function-pointer hook was, without the indirection.
 pub const GpuContext = struct {
     gpa: std.mem.Allocator,
-    ckt: *Circuit,
+    /// The circuit's batches (`Host.batches`), for the fallback walks.
+    all_batches: []const device_ir.Batch,
+    n: u32,
+    /// Some batch, resident or not, carries charge (`Host.has_charge`).
+    has_charge: bool,
+    /// The analysis state of the entry point running now, for the launches.
+    sim: SimState = .{},
     /// The eligible batches, resident on the device.
     batches: []BatchGpu,
     /// Everything else: whatever `eval.gpuEligible` turns down, plus eligible
@@ -550,22 +577,20 @@ pub const GpuContext = struct {
     /// the CPU wins. The `auto` probe evaluates the eligible batches three
     /// times on the host, which rewrites their `q_tape`.
     ///
-    /// On success the circuit's four planes point into page-locked memory
-    /// owned by the context, carrying their values; slices of the old planes
-    /// taken before the call no longer see stamps. `ckt` must stay at its
-    /// address until `deinit`, which restores the circuit's own planes.
-    /// Caller owns the result and frees it with `deinit`.
-    pub fn init(gpa: std.mem.Allocator, ckt: *Circuit, explicit: bool, threads: u32, evals: f64) !*Self {
+    /// On success the page-locked planes (`planes`) hold `host.planes`'
+    /// values, ready for `Circuit.attachGpu`; `restorePlanes` copies them
+    /// back. Caller owns the result and frees it with `deinit`.
+    pub fn init(gpa: std.mem.Allocator, host: Host, explicit: bool, threads: u32, evals: f64) !*Self {
         if (comptime backend == null) return Error.NoGpuArtifacts;
-        const knobs = ckt.knobs;
+        const knobs = host.knobs;
         const report = explicit or statsOn(knobs);
 
         var n_gpu: usize = 0;
-        for (ckt.batches) |b| {
+        for (host.batches) |b| {
             if (b.hooks.gpu_payload != null) n_gpu += 1;
         }
         if (n_gpu == 0) return Error.CircuitNotEligible;
-        if (!explicit) try Cost.admit(gpa, ckt, threads, evals);
+        if (!explicit) try Cost.admit(gpa, host, threads, evals);
         raiseJitCache();
 
         const self = try gpa.create(Self);
@@ -575,7 +600,7 @@ pub const GpuContext = struct {
         errdefer gpa.free(batches);
         // Sized for every batch: an eligible model with no image, or a cold
         // one under `auto`, demotes into this array below.
-        const cpu_batches = try gpa.alloc(device_ir.Batch, ckt.batches.len);
+        const cpu_batches = try gpa.alloc(device_ir.Batch, host.batches.len);
         errdefer gpa.free(cpu_batches);
 
         var n_up: usize = 0;
@@ -585,7 +610,7 @@ pub const GpuContext = struct {
         var tape_len: usize = 0;
         errdefer for (batches[0..n_up]) |*bg| bg.deinit(gpa);
 
-        for (ckt.batches) |b| {
+        for (host.batches) |b| {
             const bg = &batches[n_up];
             const up = try loadBatch(gpa, bg, b, explicit, report, knobs);
             if (!up) {
@@ -609,9 +634,9 @@ pub const GpuContext = struct {
         // Every handle allocates from the same primary context, so buffers
         // made through batch 0 are valid in every launch.
         const k0 = &batches[0].kernel;
-        const layout: Layout = .{ .ng = ckt.g_vals.len, .nr = ckt.rhs.len };
+        const layout: Layout = .{ .ng = host.planes.g_vals.len, .nr = host.planes.rhs.len };
         const n_planes: usize = if (resident_charge) 4 else 2;
-        const x_bytes = (ckt.n + 1) * @sizeOf(f64);
+        const x_bytes = (host.n + 1) * @sizeOf(f64);
 
         const order = blk: {
             const tapes = try gpa.alloc([]const u32, 2 * n_up);
@@ -621,7 +646,7 @@ pub const GpuContext = struct {
                 st.* = p.slots;
                 rt.* = p.rhs_idx;
             }
-            break :blk try Order.build(gpa, tapes[0..n_up], tapes[n_up..], ckt.trash_slot, ckt.n, layout, n_planes);
+            break :blk try Order.build(gpa, tapes[0..n_up], tapes[n_up..], host.trash_slot, host.n, layout, n_planes);
         };
         defer order.deinit(gpa);
         // Same image as the eval kernels, so a miss is a stale build: fatal.
@@ -634,13 +659,13 @@ pub const GpuContext = struct {
         // which the batch errdefer above releases after these run.
         const pin_planes = try pinnedF64(k0, 2 * layout.cells(4));
         errdefer k0.freePinned(std.mem.sliceAsBytes(pin_planes));
-        const pin_x0 = try pinnedF64(k0, ckt.n + 1);
+        const pin_x0 = try pinnedF64(k0, host.n + 1);
         errdefer k0.freePinned(std.mem.sliceAsBytes(pin_x0));
-        const pin_x1 = try pinnedF64(k0, ckt.n + 1);
+        const pin_x1 = try pinnedF64(k0, host.n + 1);
         errdefer k0.freePinned(std.mem.sliceAsBytes(pin_x1));
-        const pin_xold = try pinnedF64(k0, ckt.n + 1);
+        const pin_xold = try pinnedF64(k0, host.n + 1);
         errdefer k0.freePinned(std.mem.sliceAsBytes(pin_xold));
-        const pin_x2 = try pinnedF64(k0, ckt.n + 1);
+        const pin_x2 = try pinnedF64(k0, host.n + 1);
         errdefer k0.freePinned(std.mem.sliceAsBytes(pin_x2));
         const pin_flags = try k0.allocPinned(4);
         errdefer k0.freePinned(pin_flags);
@@ -681,12 +706,14 @@ pub const GpuContext = struct {
 
         self.* = .{
             .gpa = gpa,
-            .ckt = ckt,
+            .all_batches = host.batches,
+            .n = host.n,
+            .has_charge = host.has_charge,
             .batches = batches[0..n_up],
             .cpu_batches = cpu_batches[0..n_cpu],
             .batches_owned = batches,
             .cpu_owned = cpu_batches,
-            .host_planes = ckt.ownPlanes(),
+            .host_planes = host.planes,
             .pin_planes = pin_planes,
             .layout = layout,
             .pin_x = .{ pin_x0, pin_x1 },
@@ -716,9 +743,8 @@ pub const GpuContext = struct {
             .fuse = !knobs.gpu_nofuse,
         };
         driver_up.store(true, .monotonic);
-        // Swap the circuit onto the pinned planes, carrying their contents.
-        copyPlanes(self.pinnedPlanes(0), ckt.ownPlanes());
-        self.bindPlanes(0);
+        // The pinned planes start from the circuit's values.
+        copyPlanes(self.pinnedPlanes(0), host.planes);
         return self;
     }
 
@@ -834,47 +860,49 @@ pub const GpuContext = struct {
     /// per process. Both are multiplied by the caller's eval estimate. A
     /// query with too few evals is declined before the probe.
     const Cost = struct {
-        fn admit(gpa: std.mem.Allocator, ckt: *const Circuit, threads: u32, evals: f64) !void {
-            const stats = statsOn(ckt.knobs);
+        fn admit(gpa: std.mem.Allocator, host: Host, threads: u32, evals: f64) !void {
+            const stats = statsOn(host.knobs);
             const init_us: f64 = if (driver_up.load(.monotonic)) 0 else cost_init_us;
             // The probe costs three host evals; a query with few more than
             // that cannot repay the setup.
             if (evals < 20) return decline(stats, 0, 0, "too few evals");
             var slots: u64 = 0;
-            for (ckt.batches) |b| {
+            for (host.batches) |b| {
                 const get = b.hooks.gpu_payload orelse continue;
                 const p = get(b.ctx);
                 slots += p.slots.len;
             }
             // Scratch planes: the probe must not disturb a linearization a
             // prerequisite query left behind.
-            const g = try gpa.alloc(f64, 2 * ckt.g_vals.len + 2 * ckt.rhs.len);
+            const ng = host.planes.g_vals.len;
+            const nr = host.planes.rhs.len;
+            const g = try gpa.alloc(f64, 2 * ng + 2 * nr);
             defer gpa.free(g);
             @memset(g, 0);
             const pl: Planes = .{
-                .g_vals = g[0..ckt.g_vals.len],
-                .c_vals = g[ckt.g_vals.len..][0..ckt.g_vals.len],
-                .rhs = g[2 * ckt.g_vals.len ..][0..ckt.rhs.len],
-                .q_vec = g[2 * ckt.g_vals.len + ckt.rhs.len ..][0..ckt.rhs.len],
+                .g_vals = g[0..ng],
+                .c_vals = g[ng..][0..ng],
+                .rhs = g[2 * ng ..][0..nr],
+                .q_vec = g[2 * ng + nr ..][0..nr],
             };
             // Spread, not zero: at x = 0 every MOSFET sits in cutoff, which
             // evaluates in half the time of the operating mix (mos1: 197 us
             // against ~400 us per eval on parallel_inverters_2000).
-            const x = try gpa.alloc(f64, ckt.n + 1);
+            const x = try gpa.alloc(f64, host.n + 1);
             defer gpa.free(x);
             for (x, 0..) |*xi, i| xi.* = @as(f64, @floatFromInt(i % 7)) * 0.3;
             var host_ns: u64 = std.math.maxInt(u64);
             for (0..3) |_| {
                 const t0 = nowNs();
-                for (ckt.batches) |b| {
+                for (host.batches) |b| {
                     if (b.hooks.gpu_payload != null) b.eval(b.ctx, &pl, 0, b.count, x, 0);
                 }
                 host_ns = @min(host_ns, nowNs() - t0);
             }
             const host_us = @as(f64, @floatFromInt(host_ns)) * 1e-3;
 
-            const n_planes: usize = if (ckt.has_charge) 4 else 2;
-            const bus_bytes: f64 = @floatFromInt((n_planes * (ckt.g_vals.len + ckt.rhs.len) / 2 + 2 * ckt.n) * @sizeOf(f64));
+            const n_planes: usize = if (host.has_charge) 4 else 2;
+            const bus_bytes: f64 = @floatFromInt((n_planes * (ng + nr) / 2 + 2 * host.n) * @sizeOf(f64));
             const stage_bytes: f64 = @floatFromInt(slots * n_planes / 2 * @sizeOf(f64));
             const gpu_us = cost_fixed_us + bus_bytes / cost_bus_b_per_us +
                 stage_bytes / cost_stage_b_per_us + host_us * cost_kernel_ratio;
@@ -1092,10 +1120,22 @@ pub const GpuContext = struct {
         };
     }
 
-    /// Points the circuit's planes at buffer `buf`.
-    fn bindPlanes(self: *Self, buf: u1) void {
-        self.cur = buf;
-        self.ckt.bindPlanes(self.pinnedPlanes(buf));
+    /// The planes the last eval wrote, which the attached circuit points at
+    /// (`Circuit.attachGpu`, `Circuit.evalGpu`).
+    pub fn planes(self: *const Self) Planes {
+        return self.pinnedPlanes(self.cur);
+    }
+
+    /// Drains the stream and copies the current planes into the circuit's
+    /// own allocations (`Host.planes`), which it returns for
+    /// `Circuit.detachGpu` to rebind. Call once, before `deinit`.
+    pub fn restorePlanes(self: *Self) Planes {
+        if (comptime backend == null) return self.host_planes;
+        // `.commit`/`.revert` latches stay queued unwaited. A fault here was
+        // already reported or is moot.
+        self.stream.synchronize() catch {};
+        copyPlanes(self.host_planes, self.planes());
+        return self.host_planes;
     }
 
     fn copyPlanes(dst: Planes, src: Planes) void {
@@ -1105,20 +1145,15 @@ pub const GpuContext = struct {
         @memcpy(dst.q_vec, src.q_vec);
     }
 
-    /// Restores the circuit's own planes (with the last values), then frees
-    /// every device and pinned buffer and `self`. Clear `Circuit.gpu_hook`
-    /// first: the hook's `ctx` is `self`. Device-side state is dropped; call
-    /// `syncStatus` or `syncHostState` first to keep it.
+    /// Frees every device and pinned buffer and `self`. Detach it first
+    /// (`Circuit.detachGpu`, which takes the planes back). Device-side state
+    /// is dropped; call `syncStatus` or `syncHostState` first to keep it.
     pub fn deinit(self: *Self) void {
         if (comptime backend == null) return;
         self.prof.print();
         // `.commit`/`.revert` latches stay queued unwaited; drain them before
         // their buffers go. A fault here was already reported or is moot.
         self.stream.synchronize() catch {};
-        const ckt = self.ckt;
-        const hp = self.host_planes;
-        copyPlanes(hp, ckt.ownPlanes());
-        ckt.bindPlanes(hp);
         // Pinned memory first, while batch 0's handle that owns it is alive.
         const k0 = &self.batches[0].kernel;
         for ([_][]f64{ self.pin_planes, self.pin_x[0], self.pin_x[1], self.pin_x2, self.pin_xold, self.pin_tape }) |p| {
@@ -1146,7 +1181,7 @@ pub const GpuContext = struct {
 
     /// Stamps all four planes: the resident batches on the device, whose one
     /// download lands straight in the circuit's planes, then the host batches
-    /// on top and the ground pin. Always zero and restamp, never the
+    /// on top; the circuit adds the ground pin. Always zero and restamp, never the
     /// constant-Jacobian baseline. Limit devices read their resident lim
     /// plane while `lim_active`, like the host eval.
     ///
@@ -1159,7 +1194,6 @@ pub const GpuContext = struct {
         self.follow = null;
         if (self.poisoned) return error.GpuStateReject;
         if (self.params_dirty) try self.repack();
-        const ckt = self.ckt;
         self.prof.start();
         self.prof.evals += 1;
 
@@ -1171,7 +1205,7 @@ pub const GpuContext = struct {
         if (pre != null and pre.?.t == t and
             std.mem.eql(u8, std.mem.sliceAsBytes(x), std.mem.sliceAsBytes(self.pin_x[self.cur ^ 1][0..x.len])))
         {
-            self.bindPlanes(self.cur ^ 1);
+            self.cur ^= 1;
             self.tape_buf = if (pre.?.charge) self.cur else null;
             self.prof.fused += 1;
         } else {
@@ -1182,25 +1216,24 @@ pub const GpuContext = struct {
         }
         // The device writes neither c nor q when no resident batch has
         // charge; the host batches stamp them from zero.
-        if (!self.resident_charge and ckt.has_charge) {
-            @memset(ckt.c_vals, 0);
-            @memset(ckt.q_vec, 0);
+        const pl = self.planes();
+        if (!self.resident_charge and self.has_charge) {
+            @memset(pl.c_vals, 0);
+            @memset(pl.q_vec, 0);
         }
         self.tape_fresh = false;
         self.last_t = t;
 
         if (self.chk.len > 0) try self.evalCheck(x, t);
 
-        const pl = ckt.ownPlanes();
         for (self.cpu_batches) |b| b.eval(b.ctx, &pl, 0, b.count, x, t);
-        ckt.groundStamp(x);
         self.prof.lap("host");
     }
 
     /// The circuit's analysis state at eval time `t`, as the host batches
     /// build it (`DeviceBatch.simAt`).
     fn simAt(self: *const Self, t: f64) SimState {
-        var sim = self.ckt.sim;
+        var sim = self.sim;
         sim.t = t;
         return sim;
     }
@@ -1317,18 +1350,14 @@ pub const GpuContext = struct {
         @memcpy(first, self.chk);
     }
 
-    /// The `eval_planes` hook. No analysis can unwind from a driver fault
-    /// mid-solve, so a failure restamps on the CPU and warns once.
-    fn evalPlanes(ctx: *anyopaque, x: []const f64, t: f64) void {
-        evalHook(ctx, x, t, false);
-    }
-
-    fn evalChargeHook(ctx: *anyopaque, x: []const f64, t: f64) void {
-        evalHook(ctx, x, t, true);
-    }
-
-    fn evalHook(ctx: *anyopaque, x: []const f64, t: f64, charge: bool) void {
-        const self: *Self = @ptrCast(@alignCast(ctx));
+    /// Stamps all four planes at `x`, ground pin aside; with `charge`, also
+    /// brings the resident batches' host `q_tape` to x on the same wait
+    /// (`Circuit.evalQ`). Serves `eval`, `evalNewton` and `evalQ`: the
+    /// device path never uses the constant-Jacobian baseline. False after a
+    /// driver fault, warned once: no analysis can unwind from one mid-solve,
+    /// so the caller restamps on the host instead (`Circuit.evalGpu`).
+    pub noinline fn eval(self: *Self, x: []const f64, t: f64, sim: SimState, charge: bool) bool {
+        self.sim = sim;
         self.evalOnGpu(x, t, charge) catch |e| {
             if (!self.warned_eval) {
                 self.warned_eval = true;
@@ -1337,13 +1366,15 @@ pub const GpuContext = struct {
                     .{@errorName(e)},
                 );
             }
-            // The host stamp just wrote every batch's planes and `q_tape` at
-            // x; nothing the failed pass queued may stand in for it.
+            // The host stamp the caller runs next writes every batch's
+            // planes and `q_tape` at x; nothing the failed pass queued may
+            // stand in for it.
             self.pre = null;
             self.tape_buf = null;
-            self.ckt.evalNewtonCpu(x, t);
             self.tape_fresh = true;
+            return false;
         };
+        return true;
     }
 
     /// Fills every resident batch's host `q_tape` with the LTE charges at the
@@ -1391,11 +1422,12 @@ pub const GpuContext = struct {
         self.tape_buf = buf;
     }
 
-    /// The `sync_q_tape` hook. A fault leaves the resident tapes at their
-    /// last value for this step, warns once, and poisons the context so every
-    /// later step runs on the host.
-    fn syncTapeHook(ctx: *anyopaque) void {
-        const self: *Self = @ptrCast(@alignCast(ctx));
+    /// Brings the resident batches' host `q_tape` up to the last eval. A
+    /// fault leaves the resident tapes at their last value for this step,
+    /// warns once, and poisons the context so every later step runs on the
+    /// host.
+    pub noinline fn syncQTape(self: *Self, sim: SimState) void {
+        self.sim = sim;
         self.syncTape() catch {
             self.warnStateFallback();
             self.poisoned = true;
@@ -1435,7 +1467,7 @@ pub const GpuContext = struct {
         errdefer self.pre = null;
         if (self.poisoned) return error.GpuStateReject;
         if (self.params_dirty) try self.repack();
-        const n = self.ckt.n;
+        const n = self.n;
         self.prof.start();
         self.prof.lims += 1;
         defer self.prof.lap("lim");
@@ -1456,7 +1488,7 @@ pub const GpuContext = struct {
             try syncSeededLim(bg);
             var count: u64 = bg.count;
             var lim_active: u64 = @intFromBool(bg.lim_active);
-            var sim = self.ckt.sim;
+            var sim = self.sim;
             try bg.launch(lk, &self.stream, &.{
                 gompute.interface.arg(&count),
                 self.d_x2.argPtr(),
@@ -1477,7 +1509,7 @@ pub const GpuContext = struct {
         if (launched)
             try self.d_flags.downloadAtAsync(self.pin_flags.ptr, 0, 4, &self.stream);
 
-        var any = Circuit.limitBatches(self.cpu_batches, x, x_old);
+        var any = walk.limitBatches(self.cpu_batches, x, x_old);
 
         if (launched) {
             // Without a limit launch there is no wait to share.
@@ -1495,8 +1527,9 @@ pub const GpuContext = struct {
         return any;
     }
 
-    fn evalFollowsHook(ctx: *anyopaque, x: []const f64, t: f64, charge: bool) void {
-        const self: *Self = @ptrCast(@alignCast(ctx));
+    /// Announces an eval at `x` and `t` right after the next `applyLimits`
+    /// or `stateCtl(.query)` (`Circuit.evalFollows`).
+    pub noinline fn evalFollows(self: *Self, x: []const f64, t: f64, charge: bool) void {
         if (!self.fuse) return;
         self.follow = .{ .x = x, .t = t, .charge = charge };
     }
@@ -1508,14 +1541,15 @@ pub const GpuContext = struct {
         self.pre = .{ .t = f.t, .charge = f.charge };
     }
 
-    /// The `apply_limits` hook. A fault falls back to the host walk over every
+    /// Runs the device limit pass fused with the path-latch staging, and the
+    /// host walk on the rest. A fault falls back to the host walk over every
     /// batch; the resident batches' stale host lim/state self-heal, since
     /// limiting restarts from x_old and the latches recompute from x alone.
-    fn applyLimitsHook(ctx: *anyopaque, x: []f64, x_old: []const f64) bool {
-        const self: *Self = @ptrCast(@alignCast(ctx));
+    pub noinline fn applyLimits(self: *Self, x: []f64, x_old: []const f64, sim: SimState) bool {
+        self.sim = sim;
         return self.applyLimitsOnGpu(x, x_old) catch {
             self.warnStateFallback();
-            return Circuit.limitBatches(self.ckt.batches, x, x_old);
+            return walk.limitBatches(self.all_batches, x, x_old);
         };
     }
 
@@ -1524,9 +1558,9 @@ pub const GpuContext = struct {
     /// limit launch. A resident batch cannot ask for a step reject: the
     /// kernel flags any non-`.ok` `updateState` as a fault instead.
     fn updateStatesOnGpu(self: *Self, x: []const f64) !?f64 {
-        if (comptime backend == null) return Circuit.updateBatches(self.cpu_batches, x);
+        if (comptime backend == null) return walk.updateBatches(self.cpu_batches, x);
         if (self.poisoned) return error.GpuStateReject;
-        const n = self.ckt.n;
+        const n = self.n;
         var launched = false;
         for (self.batches) |*bg| {
             const lk = if (bg.lim_kernel) |*k| k else continue;
@@ -1541,7 +1575,7 @@ pub const GpuContext = struct {
             }
             var count: u64 = bg.count;
             var lim_active: u64 = 0;
-            var sim = self.ckt.sim;
+            var sim = self.sim;
             try bg.launch(lk, &self.stream, &.{
                 gompute.interface.arg(&count),
                 self.d_x2.argPtr(),
@@ -1569,26 +1603,28 @@ pub const GpuContext = struct {
                 return error.GpuStateReject;
             }
         }
-        return Circuit.updateBatches(self.cpu_batches, x);
+        return walk.updateBatches(self.cpu_batches, x);
     }
 
-    /// The `update_states` hook; every batch walks on the host once poisoned.
-    fn updateStatesHook(ctx: *anyopaque, x: []const f64) ?f64 {
-        const self: *Self = @ptrCast(@alignCast(ctx));
+    /// Runs the resident held-variable batches' state pass and walks the
+    /// host ones; the fused limit launch already staged the rest. Every
+    /// batch walks on the host once poisoned.
+    pub noinline fn updateStates(self: *Self, x: []const f64, sim: SimState) ?f64 {
+        self.sim = sim;
         return self.updateStatesOnGpu(x) catch {
             self.warnStateFallback();
-            return Circuit.updateBatches(self.ckt.batches, x);
+            return walk.updateBatches(self.all_batches, x);
         };
     }
 
-    fn clearLimitsHook(ctx: *anyopaque) void {
-        const self: *Self = @ptrCast(@alignCast(ctx));
+    /// Disarms device limiting and walks the host batches' `clearLimits`.
+    pub noinline fn clearLimits(self: *Self) void {
         self.pre = null;
         for (self.batches) |*bg| {
             bg.lim_active = false;
             bg.lim_dirty = false;
         }
-        Circuit.clearLimitBatches(if (self.poisoned) self.ckt.batches else self.cpu_batches);
+        walk.clearLimitBatches(if (self.poisoned) self.all_batches else self.cpu_batches);
     }
 
     /// Runs the accepted-step latch (path commit `pb <- wb, pq += wq`) on the
@@ -1634,7 +1670,7 @@ pub const GpuContext = struct {
             if (follow) |f| try self.prefetch(f);
         }
 
-        var dirty = Circuit.stateCtlBatches(self.cpu_batches, op);
+        var dirty = walk.stateCtlBatches(self.cpu_batches, op);
         if (wait) {
             try self.sync();
             if (std.mem.readInt(u32, self.pin_flags[0..4], .little) != 0) dirty = true;
@@ -1642,20 +1678,22 @@ pub const GpuContext = struct {
         return dirty;
     }
 
-    fn stateCtlHook(ctx: *anyopaque, op: device_ir.StateCtlOp) bool {
-        const self: *Self = @ptrCast(@alignCast(ctx));
+    /// Commits, reverts or queries the accepted state: accepted-step
+    /// latches mutate device-resident instance blobs, so a host walk cannot
+    /// stand in for a resident batch. A fault walks every batch on the host.
+    pub noinline fn stateCtl(self: *Self, op: device_ir.StateCtlOp, sim: SimState) bool {
+        self.sim = sim;
         return self.stateCtlOnGpu(op) catch {
             self.warnStateFallback();
-            return Circuit.stateCtlBatches(self.ckt.batches, op);
+            return walk.stateCtlBatches(self.all_batches, op);
         };
     }
 
-    /// The `seed_junctions` hook: every batch seeds the host `x`, then each
-    /// resident lim plane is marked for upload before its next launch.
-    fn seedJunctionsHook(ctx: *anyopaque, x: []f64) void {
-        const self: *Self = @ptrCast(@alignCast(ctx));
+    /// Every batch seeds the host `x`, then each resident lim plane is
+    /// marked for upload before its next launch.
+    pub noinline fn seedJunctions(self: *Self, x: []f64) void {
         self.pre = null;
-        Circuit.seedBatches(self.ckt.batches, x);
+        walk.seedBatches(self.all_batches, x);
         for (self.batches) |*bg| {
             if (bg.has_lim) bg.lim_dirty = true;
         }
@@ -1754,29 +1792,11 @@ pub const GpuContext = struct {
         self.params_dirty = false;
     }
 
-    fn markDirty(ctx: *anyopaque) void {
-        const self: *Self = @ptrCast(@alignCast(ctx));
+    /// Marks the resident models and instances stale after a host
+    /// parameter write; the context re-uploads before its next launch.
+    pub noinline fn markDirty(self: *Self) void {
         self.pre = null;
         self.params_dirty = true;
-    }
-
-    /// Returns the dispatch table to install as `Circuit.gpu_hook`. Its `ctx`
-    /// is `self`, so the hook is valid until `deinit`.
-    pub fn hook(self: *Self) GpuHook {
-        return .{
-            .ctx = self,
-            .q_tape = self.tape_ok,
-            .eval_planes = evalPlanes,
-            .sync_q_tape = syncTapeHook,
-            .eval_follows = evalFollowsHook,
-            .eval_charge = evalChargeHook,
-            .apply_limits = applyLimitsHook,
-            .update_states = updateStatesHook,
-            .clear_limits = clearLimitsHook,
-            .seed_junctions = seedJunctionsHook,
-            .state_ctl = stateCtlHook,
-            .mark_dirty = markDirty,
-        };
     }
 };
 

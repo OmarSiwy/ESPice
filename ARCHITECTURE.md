@@ -66,7 +66,7 @@ the spine as named lines; transforms become straight loops.
 | device `Library` (names, vtables) | device/Library.zig | `builtin`, `register`, `load` | builder, analysis | one `DeviceType` per type | Problem |
 | frozen `device.Circuit` (pattern CSC, batches, slots, diag_slots) | device/Circuit.zig | `freeze` | analysis | u32 rows/slots | session |
 | `DeviceBatch` planes, tapes, limiter state | device/eval.zig | `eval`, `updateState` | analysis Circuit | per batch | query |
-| analysis `Circuit` planes (`g`, `c`, `rhs`, `q`, `lin`, `sim`) | analysis/Circuit.zig | Circuit transforms only: the executor installs its contexts through `configure`, `setProgress`, `bindAcParams`, `attachParEval`, `attachDisplay`, `attachGpu`/`attachLu`; the GPU context rebinds the planes through `bindPlanes`; dc/op through `rebuildBaseline` and `attachDisplay`, the transient through `landRejects`/`clearRejectAt` | solvers, analyses | nnz, n | query |
+| analysis `Circuit` planes (`g`, `c`, `rhs`, `q`, `lin`, `sim`) | analysis/Circuit.zig | Circuit transforms only: the executor installs its contexts through `configure`, `setProgress`, `bindAcParams`, `attachParEval`, `attachDisplay`, `attachGpu`/`detachGpu` (which move the planes onto the GPU context's page-locked buffers and back) and `attachLu`; dc/op through `rebuildBaseline` and `attachDisplay`, the transient through `landRejects`/`clearRejectAt` | solvers, analyses | nnz, n | query |
 | SparseLu pivot tape, L/U values | solver/sparse_lu.zig | `factor`, `refactor` | direct, lane_lu | nnz fill | query |
 | Session rows, Results | analysis/session.zig | executor results | facade, output | u32 query ids | result |
 | output streams | output/session.zig | `publish` | writers | per format | Problem |
@@ -81,7 +81,7 @@ Full records: `dev/decisions.md`.
 | Device type evaluation (`Batch` + `Hooks`) | kind (one per `DeviceType`, loaded at runtime too) | 7, once per batch per eval | S2 |
 | Device derivative scalar `Dual(N, F)` | policy (derivative lanes, f32/f64 Jacobian) | 5 | S3 |
 | Device target (`Sink(comptime device)`) | backend: host, CUDA, HIP | 5 | S4 |
-| GPU evaluation hook (`GpuHook`, `LuHook`) | backend at runtime | 8 today, with one implementation each (`gpu.zig`, `gpu_lu.zig`), so speculative; **target (P3):** concrete optional contexts, the host/GPU branch hoisted into the callers | S5 |
+| GPU evaluation and LU contexts (`Circuit.gpu`, `Circuit.lu`) | backend at runtime | 1, concrete optional contexts; one branch per evaluation entry, folded away in a host-only build | S5 |
 | Frequency lane width (`LaneLu(W)`) | policy: W = 1 (oracle) … 4 | 5 | S6 |
 | Linear engine (`direct.Solver`) | kind: sparse LU, tridiagonal, BBD | 4, `direct.Engine` `union(enum)` | S7 |
 | Netlist dialect | dialect: ngspice, HSPICE, Spectre | 3 (keyword tables per dialect) | S8 |

@@ -54,7 +54,7 @@ its core with seven spinning threads.
 
 **GPU.** Every eligible batch's models, instances and tapes are uploaded once
 and stay resident. Per Newton iteration the bus carries `x` up and the value
-planes down (`Circuit.gpu_hook.eval_planes`); the sparse LU, Newton update
+planes down (`GpuContext.eval`); the sparse LU, Newton update
 and convergence test stay on the CPU. That round trip is the floor, so the
 GPU pays off on device count, not circuit size. A GPU plane stamp bypasses
 the host batches, so the transient LTE falls back to per-row charge (see
@@ -62,7 +62,7 @@ the host batches, so the transient LTE falls back to per-row charge (see
 iteration hooks are excluded from GPU residency
 ([iteration lifecycle](../devices/iteration-lifecycle.md)). The earlier
 GPU Newton, JFNK, transient and batched-solve routes were deleted; the
-GPU reaches Newton only through `eval_planes`.
+GPU reaches Newton only through `GpuContext.eval`.
 
 ## Decisions kept on purpose
 

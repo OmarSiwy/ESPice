@@ -214,8 +214,9 @@ value. The upgrade is to take only the inductor rows once `Circuit` exposes
 the tape's `rhs_idx`.
 
 **Divergence 2: a GPU plane stamp keeps per-row LTE.** `Circuit.qTapeLen()`
-returns 0 when a `gpu_hook.eval_planes` stamp is installed, because the host
-batches never run and the tapes would be stale. Closing it means adding the
+returns 0 under an attached GPU context that cannot fill the resident
+batches' tapes (`GpuContext.tape_ok`), because the host batches never run
+and the tapes would be stale. Closing it means adding the
 tape to `DeviceKernel.run`, a GPU ABI change.
 
 **Not a divergence: ground-side charge.** The per-row path excluded the trash
@@ -363,7 +364,7 @@ simulate(ckt, x, t_stop, tol):
 Time stepping is sequential: step $m{+}1$ needs the accepted $q$ history of
 step $m$. What runs in parallel is device evaluation inside each Newton
 iterate: `ParEval` worker threads on the CPU, or the GPU through
-`Circuit.gpu_hook.eval_planes`, which ships `x` up and the value planes down
+`GpuContext.eval`, which ships `x` up and the value planes down
 per iterate. The Newton update, sparse LU, LTE, order control and breakpoint
 logic all run on the host.
 

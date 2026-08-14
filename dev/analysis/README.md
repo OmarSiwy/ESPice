@@ -8,7 +8,7 @@ per-section verification status, and pointers to the implementation and
 fixtures under `tests/fixtures/`.
 
 Every solve runs on the host. The GPU evaluates device planes only
-(`Circuit.gpu_hook.eval_planes`, `src/analysis/gpu.zig`); §4 of each page
+(`GpuContext.eval`, `src/analysis/gpu.zig`); §4 of each page
 separates what runs in parallel today (device evaluation on `ParEval`
 threads or the GPU, SIMD frequency lanes) from design notes that are not
 implemented.

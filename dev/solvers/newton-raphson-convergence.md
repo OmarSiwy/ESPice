@@ -175,7 +175,7 @@ jfnk(ckt, x, opts, hook):                       # GMRES(m), right-precond
 ## 4. GPU
 
 None. The GPU evaluates device planes (`src/analysis/gpu.zig`, reached
-through `Circuit.gpu_hook.eval_planes`); the linear solve, the Newton update
+through `GpuContext.eval`); the linear solve, the Newton update
 and the convergence test always run on the host. The on-device JFNK kernel
 this section once described was removed.
 
