@@ -181,8 +181,8 @@ test "threaded stamps match the serial stamp and repeat bit for bit" {
     for ([_]u32{ 0, 1, 2, 3, 5, 8, 24 }) |lanes| {
         var par = try ParEval.init(t.allocator, t.io, ckt.batches, nnz, n, ckt.has_charge, ckt.trash_slot, lanes);
         defer par.deinit();
-        ckt.par_eval = &par;
-        defer ckt.par_eval = null;
+        ckt.attachParEval(&par);
+        defer ckt.attachParEval(null);
 
         ckt.eval(x, 0);
         try expectClose(g, ckt.g_vals[0..nnz]);

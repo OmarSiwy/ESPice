@@ -222,16 +222,14 @@ pub fn solveLadder(
         while (solves < 100) : (solves += 1) {
             ckt.applyAttempt(lambda);
             ckt.setHomotopy(options.tol.gmin, lambda);
-            ckt.has_baseline = false;
-            try ckt.computeBaseline();
+            try ckt.rebuildBaseline();
             for (scaled, hold) |*s, h| s.value = h.value * lambda;
             const sr = newtonRun(ckt, ws, x, options.tol, scaled, 0.0, &.{}, options.tol.itl2, lambda_good < 0.0) catch |e| switch (e) {
                 error.SingularMatrix => failed,
                 else => {
                     ckt.restoreModels();
                     ckt.setHomotopy(options.tol.gmin, 1.0);
-                    ckt.has_baseline = false;
-                    try ckt.computeBaseline();
+                    try ckt.rebuildBaseline();
                     return e;
                 },
             };
@@ -257,8 +255,7 @@ pub fn solveLadder(
     }
     ckt.restoreModels();
     ckt.setHomotopy(options.tol.gmin, 1.0);
-    ckt.has_baseline = false;
-    try ckt.computeBaseline();
+    try ckt.rebuildBaseline();
 
     const final = newtonRun(ckt, ws, x, options.tol, hold, 0.0, &.{}, null, false) catch |e| switch (e) {
         error.SingularMatrix => failed,
@@ -311,8 +308,8 @@ fn transientOp(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, options: 
     const op_sim = ckt.sim;
     // Its steps are no analysis's accepted points, so display tasks stay quiet.
     const display = ckt.display;
-    ckt.display = null;
-    defer ckt.display = display;
+    ckt.attachDisplay(null);
+    defer ckt.attachDisplay(display);
     const sim = tran.simulate(ckt, x, &.{}, &wf, .{
         .tol = options.tol,
         .t_stop = 1e-6,
@@ -327,8 +324,7 @@ fn transientOp(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, options: 
     // static circuit whatever the outcome.
     ckt.restoreState(saved);
     ckt.setSimState(op_sim);
-    ckt.has_baseline = false;
-    try ckt.computeBaseline();
+    try ckt.rebuildBaseline();
     if (sim == null or !sim.?.completed) return failed;
     // Holds can pin the floating nodes, as they do in ngspice, so a held
     // solve tries the static rungs before settling.

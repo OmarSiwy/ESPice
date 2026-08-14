@@ -113,14 +113,13 @@ pub const Executor = struct {
         // The multicore refactor follows the device threads unless the
         // solver's own count is set (ESPICE_SOLVER_THREADS).
         const lu_threads: u8 = @intCast(@min(if (config.solver_threads > 1) config.solver_threads else config.device_threads, 16));
-        self.circuit.solver_execution = .{ .io = io, .threads = config.solver_threads, .lu_threads = lu_threads };
-        self.circuit.knobs = config.knobs;
+        self.circuit.configure(.{ .io = io, .threads = config.solver_threads, .lu_threads = lu_threads }, config.knobs);
         if (initial) |source| self.x = try self.work.allocator().dupe(f64, source.operatingPoint().?);
         // A dependent copies its prerequisite's circuit, variant included.
         if (initial == null) try self.installVariant();
         try self.bindAcOverrides();
         self.controller = Controller.init(io, self, execute, .{ .report_nonlinear = job == .op });
-        self.circuit.progress = self.controller.callback();
+        self.circuit.setProgress(self.controller.callback());
         return self;
     }
 
@@ -161,7 +160,7 @@ pub const Executor = struct {
                 }
             } else return error.InvalidAcOverride;
         }
-        self.circuit.ac_params = mapped;
+        self.circuit.bindAcParams(mapped);
     }
 
     /// Runs the query up to where `quantum` lets it stop, without waiting.
@@ -237,15 +236,15 @@ pub const Executor = struct {
         var par: ?ParEval = null;
         if (self.config.device_threads > 1) {
             par = try ParEval.init(self.allocator, self.io, self.circuit.batches, self.circuit.nnz, self.circuit.n, self.circuit.has_charge, self.circuit.trash_slot, self.config.device_threads);
-            self.circuit.par_eval = &par.?;
+            self.circuit.attachParEval(&par.?);
         }
         defer {
-            self.circuit.par_eval = null;
+            self.circuit.attachParEval(null);
             if (par) |*p| p.deinit();
         }
         const gpu_context = try self.prepareGpu();
         defer {
-            self.circuit.gpu_hook = null;
+            self.circuit.attachGpu(null);
             if (gpu_context) |g| {
                 // `refuseLatched` reads statuses off the host instances.
                 g.syncStatus();
@@ -254,7 +253,7 @@ pub const Executor = struct {
         }
         const lu_context = self.prepareGpuLu();
         defer {
-            self.circuit.lu_hook = null;
+            self.circuit.attachLu(null);
             if (lu_context) |l| l.deinit();
         }
         // §9.4 display tasks print to stdout, unbuffered, so each accepted
@@ -262,8 +261,8 @@ pub const Executor = struct {
         var stdout: std.Io.File.Writer = .initStreaming(.stdout(), self.io, &.{});
         var display: types.Display = .{ .names = try self.sayNames(), .staged = .init(self.allocator), .out = &stdout.interface };
         defer display.staged.deinit();
-        if (display.names.len != 0) self.circuit.display = &display;
-        defer self.circuit.display = null;
+        if (display.names.len != 0) self.circuit.attachDisplay(&display);
+        defer self.circuit.attachDisplay(null);
         if (self.config.timing_in_depth) (try self.circuit.workspace()).prof.io = self.io;
         defer if (self.config.timing_in_depth) printNewtonSplit(&self.circuit.ws.?, self.job);
         const transient = if (self.job == .op) self.job.op.tran_op else @as(requests.Kind, self.job).transient();
@@ -351,7 +350,7 @@ pub const Executor = struct {
             return null;
         };
         context.forced = forced;
-        self.circuit.lu_hook = .{ .ctx = context, .solve = gpu_lu.GpuLu.solve };
+        self.circuit.attachLu(.{ .ctx = context, .solve = gpu_lu.GpuLu.solve });
         return context;
     }
 
@@ -367,7 +366,7 @@ pub const Executor = struct {
                 std.log.warn("GPU unavailable ({s}); running on the CPU", .{@errorName(err)});
             return null;
         };
-        self.circuit.gpu_hook = context.hook();
+        self.circuit.attachGpu(context.hook());
         return context;
     }
 };

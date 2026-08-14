@@ -330,6 +330,65 @@ pub const Circuit = struct {
         return ok;
     }
 
+    // The executor's setup, one transform per field it used to assign. None
+    // touches the planes or a device parameter, so none clears `lin`.
+
+    /// Installs the query's solver threading and the facade's developer
+    /// switches. Call before the first `workspace`, which reads `knobs`.
+    pub fn configure(self: *Circuit, execution: numerics.Execution, knobs: Knobs) void {
+        std.debug.assert(self.ws == null);
+        self.solver_execution = execution;
+        self.knobs = knobs;
+    }
+
+    /// Routes `checkpoint` to `callback`, or nowhere when null.
+    pub fn setProgress(self: *Circuit, callback: ?progress_api.Callback) void {
+        self.progress = callback;
+    }
+
+    /// Installs the parameters `linearizeAc` swaps to their AC values.
+    /// `params` must outlive every `linearizeAc` (the query work arena).
+    pub fn bindAcParams(self: *Circuit, params: []AcParam) void {
+        self.ac_params = params;
+    }
+
+    /// Stamps through `par` from now on, or serially when null. `par` is
+    /// borrowed and must outlive the attachment; detach before freeing it.
+    pub fn attachParEval(self: *Circuit, par: ?*ParEval) void {
+        self.par_eval = par;
+    }
+
+    /// Stages the devices' display lines in `display` from now on, or drops
+    /// them when null. `display` is borrowed: attach null before freeing it.
+    pub fn attachDisplay(self: *Circuit, display: ?*Display) void {
+        self.display = display;
+    }
+
+    /// Routes device evaluation through `hook`, or the host walk when null.
+    /// The hook's context is borrowed; detach before freeing it.
+    pub fn attachGpu(self: *Circuit, hook: ?GpuHook) void {
+        self.gpu_hook = hook;
+    }
+
+    /// Routes `deviceSolve` through `hook`, or nowhere when null. The hook's
+    /// context is borrowed; detach before freeing it.
+    pub fn attachLu(self: *Circuit, hook: ?LuHook) void {
+        self.lu_hook = hook;
+    }
+
+    /// Makes `updateStates` record a device's step-reject time in `reject_at`
+    /// for the transient to land on, instead of returning it (`on`), or
+    /// return it again (`!on`).
+    pub fn landRejects(self: *Circuit, on: bool) void {
+        self.land_rejects = on;
+    }
+
+    /// Forgets the reject time the last `updateStates` recorded, before an
+    /// attempt that may fail without staging any.
+    pub fn clearRejectAt(self: *Circuit) void {
+        self.reject_at = null;
+    }
+
     /// Reports progress to the owning worker. Fails only when the query was
     /// cancelled.
     pub fn checkpoint(self: *Circuit, event: progress_api.Event) error{QueryCancelled}!void {
@@ -537,6 +596,20 @@ pub const Circuit = struct {
             std.log.warn("{s}: device type '{s}' holds digital state, whose time cannot rewind", .{ analysis, b.type_name });
             return error.DigitalDeviceUnsupported;
         };
+    }
+
+    /// Points the four planes at `planes`, values as they stand there: the
+    /// GPU context's page-locked buffers while it lives, the circuit's own
+    /// allocations again when it goes. Asserts the lengths match.
+    pub fn bindPlanes(self: *Circuit, planes: Planes) void {
+        std.debug.assert(planes.g_vals.len == self.g_vals.len);
+        std.debug.assert(planes.c_vals.len == self.c_vals.len);
+        std.debug.assert(planes.rhs.len == self.rhs.len);
+        std.debug.assert(planes.q_vec.len == self.q_vec.len);
+        self.g_vals = planes.g_vals;
+        self.c_vals = planes.c_vals;
+        self.rhs = planes.rhs;
+        self.q_vec = planes.q_vec;
     }
 
     /// Returns a view of this circuit's own value planes.
@@ -752,6 +825,14 @@ pub const Circuit = struct {
         }
         // No ground pin here: `stamp` adds it after copying the baseline.
         self.has_baseline = true;
+    }
+
+    /// Drops the baseline and computes it again: for a caller that moved
+    /// device parameters the baseline reads (`applyAttempt`, a restored
+    /// state). Fails as `computeBaseline` does.
+    pub fn rebuildBaseline(self: *Circuit) !void {
+        self.has_baseline = false;
+        try self.computeBaseline();
     }
 
     /// Returns one `G + alpha*C` entry, the same expression `combineGC` uses,

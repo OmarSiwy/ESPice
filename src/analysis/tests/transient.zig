@@ -954,7 +954,7 @@ const TranTests = struct {
         defer sink.deinit();
         var display: root.Display = .{ .names = &.{&.{"n1"}}, .staged = .init(gpa), .out = &sink.writer };
         defer display.staged.deinit();
-        ckt.display = &display;
+        ckt.attachDisplay(&display);
         const x = try gpa.alloc(f64, 2);
         defer gpa.free(x);
         root.zeroSimd(x);

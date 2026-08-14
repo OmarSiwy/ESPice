@@ -34,7 +34,7 @@ const StreamTests = struct {
         // The stream reads only the checkpoint callback and the (empty)
         // frequency-dependent table from Circuit.
         var ckt: root.Circuit = undefined;
-        ckt.progress = .{ .ctx = &probe, .yield_fn = Probe.checkpoint };
+        ckt.setProgress(.{ .ctx = &probe, .yield_fn = Probe.checkpoint });
         ckt.ac_dyn_slots = &.{};
         for ([_]bool{ false, true }) |adjoint| {
             const whole = try a.alloc(f64, frequencies.len * 4);
@@ -80,7 +80,7 @@ const StreamTests = struct {
         const rhs = [_]f64{ 1, 0, 0, 0, 0, 1, 0, 0.5 };
         var whole: [omegas.len * rhs.len]f64 = undefined;
         var ckt: root.Circuit = undefined;
-        ckt.progress = null;
+        ckt.setProgress(null);
         ckt.ac_dyn_slots = &.{};
         for (0..omegas.len + 1) |len| {
             try fs.solveBatch(omegas[0..len], .{}, &rhs, whole[0 .. len * rhs.len], true);

@@ -121,8 +121,8 @@ pub fn simulate(
 
     const ws = try ckt.workspace();
     // A device's `request_reject_at` retries the step ending at that time.
-    ckt.land_rejects = true;
-    defer ckt.land_rejects = false;
+    ckt.landRejects(true);
+    defer ckt.landRejects(false);
     const x_try = try allocator.alloc(f64, n);
     defer allocator.free(x_try);
     // The accepted point before `cur`, for the predictor. Equal to `cur`
@@ -385,7 +385,7 @@ pub fn simulate(
         // is not iterated again.
         var nr_opts = converger.optionsFromTolerances(options.tol, options.tol.itl4);
         nr_opts.residual_tol = std.math.inf(f64);
-        ckt.reject_at = null;
+        ckt.clearRejectAt();
         const nr = converger.run(ckt, ws, trial, t + dt, nr_opts, hook) catch |err| switch (err) {
             error.QueryCancelled, error.OutOfMemory => return err,
             else => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 }, // else: a numerical failure retries the step

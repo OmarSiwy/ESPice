@@ -66,7 +66,7 @@ the spine as named lines; transforms become straight loops.
 | device `Library` (names, vtables) | device/Library.zig | `builtin`, `register`, `load` | builder, analysis | one `DeviceType` per type | Problem |
 | frozen `device.Circuit` (pattern CSC, batches, slots, diag_slots) | device/Circuit.zig | `freeze` | analysis | u32 rows/slots | session |
 | `DeviceBatch` planes, tapes, limiter state | device/eval.zig | `eval`, `updateState` | analysis Circuit | per batch | query |
-| analysis `Circuit` planes (`g`, `c`, `rhs`, `q`, `lin`, `sim`) | analysis/Circuit.zig | **current:** Circuit methods, plus direct field writes from executor.zig, dc/op.zig, tran/tran.zig; **target (P3):** Circuit transforms only | solvers, analyses | nnz, n | query |
+| analysis `Circuit` planes (`g`, `c`, `rhs`, `q`, `lin`, `sim`) | analysis/Circuit.zig | Circuit transforms only: the executor installs its contexts through `configure`, `setProgress`, `bindAcParams`, `attachParEval`, `attachDisplay`, `attachGpu`/`attachLu`; the GPU context rebinds the planes through `bindPlanes`; dc/op through `rebuildBaseline` and `attachDisplay`, the transient through `landRejects`/`clearRejectAt` | solvers, analyses | nnz, n | query |
 | SparseLu pivot tape, L/U values | solver/sparse_lu.zig | `factor`, `refactor` | direct, lane_lu | nnz fill | query |
 | Session rows, Results | analysis/session.zig | executor results | facade, output | u32 query ids | result |
 | output streams | output/session.zig | `publish` | writers | per format | Problem |

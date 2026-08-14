@@ -1095,11 +1095,7 @@ pub const GpuContext = struct {
     /// Points the circuit's planes at buffer `buf`.
     fn bindPlanes(self: *Self, buf: u1) void {
         self.cur = buf;
-        const pp = self.pinnedPlanes(buf);
-        self.ckt.g_vals = pp.g_vals;
-        self.ckt.c_vals = pp.c_vals;
-        self.ckt.rhs = pp.rhs;
-        self.ckt.q_vec = pp.q_vec;
+        self.ckt.bindPlanes(self.pinnedPlanes(buf));
     }
 
     fn copyPlanes(dst: Planes, src: Planes) void {
@@ -1122,10 +1118,7 @@ pub const GpuContext = struct {
         const ckt = self.ckt;
         const hp = self.host_planes;
         copyPlanes(hp, ckt.ownPlanes());
-        ckt.g_vals = hp.g_vals;
-        ckt.c_vals = hp.c_vals;
-        ckt.rhs = hp.rhs;
-        ckt.q_vec = hp.q_vec;
+        ckt.bindPlanes(hp);
         // Pinned memory first, while batch 0's handle that owns it is alive.
         const k0 = &self.batches[0].kernel;
         for ([_][]f64{ self.pin_planes, self.pin_x[0], self.pin_x[1], self.pin_x2, self.pin_xold, self.pin_tape }) |p| {
