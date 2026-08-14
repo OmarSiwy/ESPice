@@ -59,6 +59,20 @@ valgrind --tool=callgrind --callgrind-out-file=/tmp/mos1.callgrind zig-out/bin/e
 callgrind_annotate --auto=no --tree=both /tmp/mos6.callgrind
 ```
 
+Build the profiled binary with an explicit CPU and no GPU arches:
+
+```sh
+nix develop -c ~/.local/bin/zigq build -Doptimize=ReleaseFast -Dcpu=x86_64_v3 -Dhip-arch=none -Dcuda-arch=none --prefix /tmp/espice-prof
+```
+
+A native build (`-Dcpu` unset) emits GFNI instructions on this machine, and
+valgrind 3.26 cannot decode them, so callgrind dies at the first one. `-Dcpu`
+with the HIP arch left on aborts LLVM while it compiles the AMDGCN kernels,
+so both GPU arches go off. Such a build carries no kernel images, so the
+circuit's GPU branches fold away (`gpu.available`, dev/decisions.md S5): it
+measures the host-only binary, which differs from a GPU build's host path
+by those branches.
+
 The original profiles, raw results, logs, and MOS6 assembly are under
 `/tmp/espice-src-cleanup/` as `mos6-eval-before.*`, `mos1-eval-before.*`, and
 `mos6-host.s`. These are local investigation artifacts, not tracked fixtures.
