@@ -53,7 +53,8 @@ run time (the Zig compiler and the evaluator sources); see
 [Verilog-A](../using/devices.md#your-own-verilog-a). A host that ships
 them in its own bundle passes their paths in `zig_path` and `share_path`
 (`Options.hdl_toolchain` from Zig) instead of relying on `$ZIG` and the
-executable's location. Their display-task lines print on the process's
+executable's location; from Zig, `hdl_toolchain.cache_dir` also replaces
+the `$ESPICE_CACHE` build cache. Their display-task lines print on the process's
 standard output; no option redirects them yet (#127).
 
 ## As a Nix flake input

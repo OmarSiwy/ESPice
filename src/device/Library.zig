@@ -27,18 +27,22 @@ sources: std.ArrayList([]const u8) = .empty,
 /// it must outlive every `load`.
 toolchain: Toolchain = .{},
 
-/// Overrides for what `load` otherwise reads from the environment and the
-/// executable's path, so a host that ships ESPice in its own bundle can point
-/// at the files inside it (#13). A null field keeps the default.
+/// Where `load` finds its compiler, sources and build cache, so a host that
+/// ships ESPice in its own bundle can point at the files inside it (#13). A
+/// null field keeps the default. The library reads no environment: the
+/// facade fills `zig` and `cache_dir` from it when the embedder leaves them
+/// null (`espice.zig` `toolchainFromEnv`).
 pub const Toolchain = struct {
-    /// The Zig compiler that builds a loaded device; null reads `$ZIG`, else
-    /// runs `zig` from PATH. It must be the version this espice was built
-    /// with.
+    /// The Zig compiler that builds a loaded device; null runs `zig` from
+    /// PATH. It must be the version this espice was built with.
     zig: ?[]const u8 = null,
     /// The `share/espice` directory `zig build` installs, which holds
     /// `device/eval.zig`; null looks in `<exe>/../share/espice`, then falls
     /// back to the source tree this espice was built from.
     share: ?[]const u8 = null,
+    /// The directory loaded devices' builds are cached in; null uses
+    /// `/tmp/espice-cache/hdl`.
+    cache_dir: ?[]const u8 = null,
 };
 
 /// Catalog entries with an evaluator, in catalog order.
@@ -130,8 +134,8 @@ pub const LoadError = error{ RuntimeHdlUnsupported, HdlShareNotFound, TooManyDev
 /// Compiles, opens and registers each HDL source not loaded yet (loader.zig).
 /// The generated devices build against `toolchain.share`, else the sources
 /// `zig build` installs in `<exe>/../share/espice`, else the source tree this
-/// espice was built from, with the compiler `toolchain.zig`, else `$ZIG`, else
-/// `zig` on PATH. Builds are cached under `cacheDir`. Fails with
+/// espice was built from, with the compiler `toolchain.zig`, else `zig` on
+/// PATH. Builds are cached under `toolchain.cache_dir`. Fails with
 /// `error.HdlShareNotFound` when `toolchain.share` holds no
 /// `device/eval.zig`, and with `error.RuntimeHdlUnsupported` on wasm, which
 /// has no compiler to run and no dlopen; VerA and the loader compile out.
@@ -140,8 +144,8 @@ pub fn load(self: *Library, io: std.Io, files: []const []const u8) LoadError!voi
     var arena_state: std.heap.ArenaAllocator = .init(self.gpa);
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    const zig = self.toolchain.zig orelse if (std.c.getenv("ZIG")) |z| std.mem.span(z) else "zig";
-    const work_dir = try cacheDir(a);
+    const zig = self.toolchain.zig orelse "zig";
+    const work_dir = self.toolchain.cache_dir orelse "/tmp/espice-cache/hdl";
     const share = self.toolchain.share orelse
         try std.fs.path.join(a, &.{ std.process.executableDirPathAlloc(io, a) catch "", "..", "share", "espice" });
     const installed = if (std.Io.Dir.cwd().access(io, try std.fs.path.join(a, &.{ share, "device", "eval.zig" }), .{})) |_| true else |_| false;
@@ -188,22 +192,6 @@ pub fn loadWith(self: *Library, io: std.Io, files: []const []const u8, paths: lo
         if (try result) |prepared| _ = try self.register(prepared.name(), prepared.vtable, prepared.digital);
         self.sources.appendAssumeCapacity(try self.gpa.dupe(u8, resolved));
     }
-}
-
-/// The runtime HDL build cache: `$ESPICE_CACHE/hdl`, else
-/// `$XDG_CACHE_HOME/espice/hdl`, else `$HOME/.cache/espice/hdl`, else
-/// `$TMPDIR/espice-cache/hdl` (default `/tmp`).
-fn cacheDir(a: std.mem.Allocator) ![]const u8 {
-    const env = struct {
-        fn get(name: [*:0]const u8) ?[]const u8 {
-            const v = std.mem.span(std.c.getenv(name) orelse return null);
-            return if (v.len == 0) null else v;
-        }
-    }.get;
-    if (env("ESPICE_CACHE")) |d| return std.fs.path.join(a, &.{ d, "hdl" });
-    if (env("XDG_CACHE_HOME")) |d| return std.fs.path.join(a, &.{ d, "espice", "hdl" });
-    if (env("HOME")) |d| return std.fs.path.join(a, &.{ d, ".cache", "espice", "hdl" });
-    return std.fs.path.join(a, &.{ env("TMPDIR") orelse "/tmp", "espice-cache", "hdl" });
 }
 
 test register {

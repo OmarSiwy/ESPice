@@ -34,6 +34,9 @@ pub const Config = struct {
     final_plan: bool = false,
     /// Developer switches the facade read from the environment.
     knobs: types.Knobs = .{},
+    /// The facade's record of whether the GPU driver is up, shared by every
+    /// query of the Problem; null prices the driver setup in every query.
+    gpu_driver: ?*gpu.Driver = null,
 };
 
 /// Fails with `error.GpuBackendUnavailable` for a backend this binary has no
@@ -357,7 +360,7 @@ pub const Executor = struct {
         const explicit = self.config.gpu_explicit or self.config.backend != .auto;
         const c = &self.circuit;
         const host: gpu.Host = .{ .batches = c.batches, .planes = c.ownPlanes(), .n = c.n, .trash_slot = c.trash_slot, .has_charge = c.has_charge, .knobs = c.knobs };
-        const context = gpu.GpuContext.init(self.allocator, host, explicit, self.config.device_threads, expectedEvals(self.job)) catch |err| {
+        const context = gpu.GpuContext.init(self.allocator, host, self.config.gpu_driver, explicit, self.config.device_threads, expectedEvals(self.job)) catch |err| {
             if (!gpu.fallsBack(self.config.backend, explicit, err)) {
                 std.log.warn("--backend {s}: GPU unavailable ({s}); detected GPU hardware: {s}", .{ @tagName(self.config.backend), @errorName(err), gpu.detectedHardware() });
                 return err;

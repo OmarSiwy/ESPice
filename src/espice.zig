@@ -122,6 +122,9 @@ pub const Problem = struct {
     bisection: []core.bisect.Bisect = &.{},
     /// The MOSRA degradation table, once `age` has run.
     degradation: ?Result = null,
+    /// Whether a query of this Problem brought the GPU driver up, which every
+    /// session's queries read through `ExecutionConfig.gpu_driver`.
+    gpu_driver: analysis.GpuDriver = .{},
 
     /// A variant run's queries and its next result to publish.
     const Run = struct { session: analysis.session.Session, next_output: usize = 0 };
@@ -163,10 +166,7 @@ pub const Problem = struct {
         const scratch = parse_arena.allocator();
         self.library = try frontend.Library.init(allocator);
         errdefer self.library.deinit();
-        self.library.toolchain = .{
-            .zig = if (options.hdl_toolchain.zig) |z| try a.dupe(u8, z) else null,
-            .share = if (options.hdl_toolchain.share) |d| try a.dupe(u8, d) else null,
-        };
+        self.library.toolchain = try toolchainFromEnv(a, options.hdl_toolchain);
         const ast = try frontend.prepare(io, &self.library, scratch, options.source, options.dialect, options.live_params);
         timingLap(io, &lap, "frontend (source, parsing, HDL)");
         self.prepared = try frontend.build(&self.library, a, scratch, ast);
@@ -193,6 +193,9 @@ pub const Problem = struct {
         var execution = options.backend;
         execution.timing_in_depth = options.timing_in_depth;
         execution.knobs = knobsFromEnv();
+        self.gpu_driver = .{};
+        execution.gpu_driver = &self.gpu_driver;
+        if (analysis.gpu_available and execution.backend != .cpu) raiseJitCache();
         self.session = analysis.session.Session.init(self.workerAllocator(), io, &self.prepared.circuit, &self.prepared.deck, execution);
         errdefer self.session.deinit();
         // An optimization's sessions run before this one; nothing after it
@@ -979,6 +982,48 @@ fn timingLap(io: std.Io, start: *?std.Io.Timestamp, label: []const u8) void {
     const elapsed = before.durationTo(now).nanoseconds;
     std.debug.print("timing: {s}: {d:.6}ms\n", .{ label, @as(f64, @floatFromInt(elapsed)) / 1e6 });
     start.* = std.Io.Timestamp.now(io, .awake);
+}
+
+/// `given` with each null path the environment sets filled in, copied into
+/// `a`: `zig` from `$ZIG`, and `cache_dir` from `$ESPICE_CACHE/hdl`, else
+/// `$XDG_CACHE_HOME/espice/hdl`, else `$HOME/.cache/espice/hdl`, else
+/// `$TMPDIR/espice-cache/hdl` (default `/tmp`). An empty variable counts as
+/// unset for the cache, as `$ZIG` never is.
+fn toolchainFromEnv(a: std.mem.Allocator, given: HdlToolchain) !HdlToolchain {
+    const env = struct {
+        fn get(name: [*:0]const u8) ?[]const u8 {
+            const v = std.mem.span(std.c.getenv(name) orelse return null);
+            return if (v.len == 0) null else v;
+        }
+    }.get;
+    const cache_dir = if (given.cache_dir) |d| try a.dupe(u8, d) else if (env("ESPICE_CACHE")) |d|
+        try std.fs.path.join(a, &.{ d, "hdl" })
+    else if (env("XDG_CACHE_HOME")) |d|
+        try std.fs.path.join(a, &.{ d, "espice", "hdl" })
+    else if (env("HOME")) |d|
+        try std.fs.path.join(a, &.{ d, ".cache", "espice", "hdl" })
+    else
+        try std.fs.path.join(a, &.{ env("TMPDIR") orelse "/tmp", "espice-cache", "hdl" });
+    const zig = given.zig orelse if (std.c.getenv("ZIG")) |z| std.mem.span(z) else null;
+    return .{
+        .zig = if (zig) |z| try a.dupe(u8, z) else null,
+        .share = if (given.share) |d| try a.dupe(u8, d) else null,
+        .cache_dir = cache_dir,
+    };
+}
+
+/// Keeps the driver's JIT cache (`~/.nv/ComputeCache`) from evicting the
+/// compact-model kernels, whose cold compiles take 15 s (bsim4va) to 1001 s
+/// (hisimhv_va). The default cap is 256 MiB on older drivers and this
+/// machine's cache already held 321 MB before they were added. 4 GiB is the
+/// driver's maximum. A user's own setting wins. It must run before the
+/// driver initializes, which the first GPU query of the process does, so
+/// `Problem.init` calls it whenever the backend may use the GPU.
+fn raiseJitCache() void {
+    const setenv = struct {
+        extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+    }.setenv;
+    _ = setenv("CUDA_CACHE_MAXSIZE", "4294967296", 0);
 }
 
 /// The developer switches (`analysis.Knobs`), read from the environment once

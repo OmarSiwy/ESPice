@@ -5,6 +5,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 ## Unreleased
 
+- API: `Options.hdl_toolchain.cache_dir` sets where `.hdl` builds are cached, in place of `$ESPICE_CACHE` and its fallbacks.
 - A `.step` whose every point needs its own circuit runs just those points, instead of writing past the query table (#132).
 - Running out of memory during a transient, PSS, HB, DC homotopy or sweep step reports `OutOfMemory` instead of a convergence failure such as `TimestepTooSmall` (#134).
 - A run whose implicit operating point fails reports that failure, not `DependencyFailed` (#135).

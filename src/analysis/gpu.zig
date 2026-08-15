@@ -129,7 +129,7 @@ const cost_stage_b_per_us: f64 = 100_000;
 /// against ~7.3 ms.
 const cost_kernel_ratio: f64 = 0.12;
 /// One-time driver setup (cuInit, the context, module loads) in the first
-/// query of a process; later queries reuse it.
+/// query of a Problem (`Driver`); later queries reuse it.
 const cost_init_us: f64 = 350_000;
 /// Host lanes ParEval is worth per thread past the first. Measured on 8
 /// threads against 1: bsim4_2000 3.3x, psp103_2000 1.8x, bsim3_2000 and the
@@ -147,11 +147,14 @@ const cost_margin: f64 = 1.3;
 /// clear this easily: bsim3_2000 5.8x, bsim4va and psp103 ~5x.
 const cost_min_ratio: f64 = 2.0;
 
-/// A context came up in this process, so the driver setup is paid. Queries
-/// on other threads read it while one sets it: monotonic is enough, since a
-/// stale read only overprices one query (#126).
-// ponytail: a process-wide fact as a global; it moves to its owner with the P3 global-state work.
-var driver_up: std.atomic.Value(bool) = .init(false);
+/// Whether a context came up, so `auto`'s cost model stops pricing the
+/// driver setup. The facade owns one per Problem and lends it to every query
+/// (`Config.gpu_driver`). Queries on other threads read it while one sets
+/// it: monotonic is enough, since a stale read only overprices one query
+/// (#126).
+pub const Driver = struct {
+    up: std.atomic.Value(bool) = .init(false),
+};
 
 /// `ESPICE_GPU_STATS`: print the cost model's inputs and the residency split,
 /// and the wall-time split at teardown.
@@ -224,18 +227,6 @@ const Prof = struct {
         );
     }
 };
-
-/// Keeps the driver's JIT cache (`~/.nv/ComputeCache`) from evicting the
-/// compact-model kernels, whose cold compiles take 15 s (bsim4va) to 1001 s
-/// (hisimhv_va). The default cap is 256 MiB on older drivers and this
-/// machine's cache already held 321 MB before they were added. 4 GiB is the
-/// driver's maximum. A user's own setting wins.
-fn raiseJitCache() void {
-    const setenv = struct {
-        extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-    }.setenv;
-    _ = setenv("CUDA_CACHE_MAXSIZE", "4294967296", 0);
-}
 
 /// Kernel images larger than this JIT for seconds to minutes on first use
 /// (bsim4va 3.6 MB of PTX in 15 s, psp103 7.8 MB in 35 s, hisimhv_va
@@ -579,8 +570,10 @@ pub const GpuContext = struct {
     ///
     /// On success the page-locked planes (`planes`) hold `host.planes`'
     /// values, ready for `Circuit.attachGpu`; `restorePlanes` copies them
-    /// back. Caller owns the result and frees it with `deinit`.
-    pub fn init(gpa: std.mem.Allocator, host: Host, explicit: bool, threads: u32, evals: f64) !*Self {
+    /// back. A success marks `driver` up, which later queries' cost models
+    /// read; a null `driver` prices the setup every time. Caller owns the
+    /// result and frees it with `deinit`.
+    pub fn init(gpa: std.mem.Allocator, host: Host, driver: ?*Driver, explicit: bool, threads: u32, evals: f64) !*Self {
         if (comptime backend == null) return Error.NoGpuArtifacts;
         const knobs = host.knobs;
         const report = explicit or statsOn(knobs);
@@ -590,8 +583,7 @@ pub const GpuContext = struct {
             if (b.hooks.gpu_payload != null) n_gpu += 1;
         }
         if (n_gpu == 0) return Error.CircuitNotEligible;
-        if (!explicit) try Cost.admit(gpa, host, threads, evals);
-        raiseJitCache();
+        if (!explicit) try Cost.admit(gpa, host, threads, evals, if (driver) |d| d.up.load(.monotonic) else false);
 
         const self = try gpa.create(Self);
         errdefer gpa.destroy(self);
@@ -742,7 +734,7 @@ pub const GpuContext = struct {
             .prof = .{ .on = statsOn(knobs), .phases = knobs.gpu_stats == .phases },
             .fuse = !knobs.gpu_nofuse,
         };
-        driver_up.store(true, .monotonic);
+        if (driver) |d| d.up.store(true, .monotonic);
         // The pinned planes start from the circuit's values.
         copyPlanes(self.pinnedPlanes(0), host.planes);
         return self;
@@ -857,12 +849,12 @@ pub const GpuContext = struct {
     /// refills first (the transient evals at its start). The device side is
     /// modelled per eval (`cost_*`: launch and wait, bus, staging, kernels
     /// at `cost_kernel_ratio` of the host time) plus the driver setup once
-    /// per process. Both are multiplied by the caller's eval estimate. A
+    /// per Problem (`Driver`). Both are multiplied by the caller's eval estimate. A
     /// query with too few evals is declined before the probe.
     const Cost = struct {
-        fn admit(gpa: std.mem.Allocator, host: Host, threads: u32, evals: f64) !void {
+        fn admit(gpa: std.mem.Allocator, host: Host, threads: u32, evals: f64, driver_up: bool) !void {
             const stats = statsOn(host.knobs);
-            const init_us: f64 = if (driver_up.load(.monotonic)) 0 else cost_init_us;
+            const init_us: f64 = if (driver_up) 0 else cost_init_us;
             // The probe costs three host evals; a query with few more than
             // that cannot repay the setup.
             if (evals < 20) return decline(stats, 0, 0, "too few evals");

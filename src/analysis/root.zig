@@ -6,6 +6,12 @@ pub const ExecutionConfig = @import("executor.zig").Config;
 /// Developer switches `ExecutionConfig.knobs` carries; the facade fills them.
 pub const Knobs = @import("types.zig").Knobs;
 pub const validateBackend = @import("executor.zig").validateBackend;
+/// Whether the GPU driver came up; the facade owns one per Problem and
+/// lends it through `ExecutionConfig.gpu_driver`.
+pub const GpuDriver = @import("gpu.zig").Driver;
+/// This build carries GPU kernel images, so a non-`cpu` backend can use the
+/// driver at all.
+pub const gpu_available = @import("gpu.zig").available;
 /// The result shape of a query, without running it.
 pub const schemaOf = session.schemaOf;
 /// HSPICE MOSRA level 1 aging over a stress transient.
