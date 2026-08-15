@@ -650,11 +650,6 @@ pub const Problem = struct {
         const deck = &self.prepared.deck;
         const n = t.bases.len;
         if (t.method == .lm) self.optimization = try a.alloc(core.lm.Lm, n) else self.bisection = try a.alloc(core.bisect.Bisect, n);
-        // Rows 0..n and n..2n take each base's optimum; 2n.. keep the plan's.
-        const planned = deck.variants;
-        var starts: std.ArrayList(u32) = .empty;
-        var refs: std.ArrayList(u32) = .empty;
-        var values: std.ArrayList(f64) = .empty;
         const best = try a.alloc(core.Variants, n);
         var template: std.ArrayList(Query) = .empty;
         for (best, 0..) |*row, base| {
@@ -678,16 +673,7 @@ pub const Problem = struct {
             };
             row.* = try t.rows(a, &self.prepared.circuit, x, base);
         }
-        try starts.append(a, 0);
-        for (0..planned.starts.len - 1) |v| {
-            const w_refs, const w_values = if (v < 2 * n) best[v % n].writes(0) else planned.writes(@intCast(v));
-            try refs.appendSlice(a, w_refs);
-            try values.appendSlice(a, w_values);
-            try starts.append(a, @intCast(refs.items.len));
-        }
-        deck.variants.starts = starts.items;
-        deck.variants.refs = refs.items;
-        deck.variants.values = values.items;
+        deck.variants = try frontend.Tuner.optimized(a, deck.variants, best);
     }
 
     /// HSPICE MOSRA, once before any query advances

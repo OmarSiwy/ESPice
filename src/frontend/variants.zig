@@ -706,6 +706,29 @@ pub const Tuner = struct {
         }
         return p.table();
     }
+
+    /// `planned` (the deck's variant table) with each optimum installed:
+    /// rows `0..n` and `n..2n` take `best[v % n]`'s writes, one optimum per
+    /// `bases` entry (`n = best.len`), and the rows after keep the plan's.
+    /// Labels, temperatures and axes stay the plan's. Allocated in `arena`.
+    pub fn optimized(arena: std.mem.Allocator, planned: core.Variants, best: []const core.Variants) !core.Variants {
+        const n = best.len;
+        var starts: std.ArrayList(u32) = .empty;
+        var refs: std.ArrayList(u32) = .empty;
+        var values: std.ArrayList(f64) = .empty;
+        try starts.append(arena, 0);
+        for (0..planned.starts.len - 1) |v| {
+            const w_refs, const w_values = if (v < 2 * n) best[v % n].writes(0) else planned.writes(@intCast(v));
+            try refs.appendSlice(arena, w_refs);
+            try values.appendSlice(arena, w_values);
+            try starts.append(arena, @intCast(refs.items.len));
+        }
+        var out = planned;
+        out.starts = starts.items;
+        out.refs = refs.items;
+        out.values = values.items;
+        return out;
+    }
 };
 
 /// Global `.param` values set on a prepared circuit (`Problem.set_params`,
