@@ -59,6 +59,7 @@ const Code = enum(u32) {
     result_unavailable = 5,
     failed = 6,
     abi_mismatch = 7,
+    invalid_handle = 8,
 };
 const Bytes = extern struct { data: ?[*]const u8, len: usize };
 const CreateOptions = extern struct {
@@ -122,8 +123,92 @@ const PrintOptions = extern struct {
 // The extern records above are AoS on purpose: each crosses the boundary
 // whole, once per call.
 
-/// What `espice_problem *` points at. `threaded` lives here, at a stable
-/// address, because the Problem's Io points into it.
+/// `espice_problem`: a C handle is a `handles` token, never an address.
+const Token = opaque {};
+
+/// Every live problem, so a destroyed or foreign handle is an error code
+/// rather than a use-after-free (#143). A token packs a slot index into its
+/// low `index_bits` and the slot's generation above them. Slot 0 is never
+/// handed out, so no token is NULL. Destroy bumps the slot's generation, so
+/// every copy of the old token stops matching; a slot whose generation
+/// would wrap is retired instead of reused. One lock guards the table, and
+/// every critical section is O(1): it never allocates, calls out or waits
+/// on anything but the lock.
+const handles = struct {
+    const index_bits = 12;
+    /// Slots, slot 0 included; `capacity - 1` problems can be live at once.
+    const capacity = 1 << index_bits;
+    const Index = std.meta.Int(.unsigned, index_bits);
+    const Generation = std.meta.Int(.unsigned, @bitSizeOf(usize) - index_bits);
+
+    var mutex: std.Io.Mutex = .init;
+    var live: [capacity]?*Handle = @splat(null);
+    var generation: [capacity]Generation = @splat(0);
+    /// Slots `remove` released, reused before `fresh` advances.
+    var free: [capacity]Index = undefined;
+    var free_len: u32 = 0;
+    /// The lowest slot never handed out.
+    var fresh: u32 = 1;
+
+    /// The futex behind `mutex`; the single-threaded Io still supplies real
+    /// futexes (see `create`).
+    fn io() std.Io {
+        return std.Io.Threaded.global_single_threaded.io();
+    }
+
+    /// Registers `h` and returns its token. `error.TooManyProblems` when
+    /// every slot is live or retired.
+    fn insert(h: *Handle) error{TooManyProblems}!*Token {
+        mutex.lockUncancelable(io());
+        defer mutex.unlock(io());
+        const index: Index = if (free_len > 0) reuse: {
+            free_len -= 1;
+            break :reuse free[free_len];
+        } else if (fresh < capacity) next: {
+            fresh += 1;
+            break :next @intCast(fresh - 1);
+        } else return error.TooManyProblems;
+        std.debug.assert(index != 0 and live[index] == null);
+        live[index] = h;
+        return @ptrFromInt(@as(usize, generation[index]) << index_bits | index);
+    }
+
+    /// The handle `token` names. NULL is `error.InvalidArgument`; a
+    /// destroyed token, or any value whose bits name no live slot at its
+    /// current generation, is `error.InvalidHandle`.
+    fn get(token: ?*Token) error{ InvalidArgument, InvalidHandle }!*Handle {
+        const bits = @intFromPtr(token orelse return error.InvalidArgument);
+        mutex.lockUncancelable(io());
+        defer mutex.unlock(io());
+        return live[try find(bits)].?;
+    }
+
+    /// Unregisters `token`'s handle and returns it; the token goes stale.
+    fn remove(token: *Token) error{InvalidHandle}!*Handle {
+        mutex.lockUncancelable(io());
+        defer mutex.unlock(io());
+        const index = try find(@intFromPtr(token));
+        const h = live[index].?;
+        live[index] = null;
+        // Retired: its last token keeps failing `find` on the null slot.
+        if (generation[index] == std.math.maxInt(Generation)) return h;
+        generation[index] += 1;
+        std.debug.assert(free_len < capacity);
+        free[free_len] = index;
+        free_len += 1;
+        return h;
+    }
+
+    /// The live slot `bits` names. Caller holds `mutex`.
+    fn find(bits: usize) error{InvalidHandle}!Index {
+        const index: Index = @truncate(bits);
+        if (live[index] == null or generation[index] != @as(Generation, @truncate(bits >> index_bits))) return error.InvalidHandle;
+        return index;
+    }
+};
+
+/// What a token names. `threaded` lives here, at a stable address, because
+/// the Problem's Io points into it.
 const Handle = struct {
     threaded: std.Io.Threaded,
     problem: *api.Problem,
@@ -148,7 +233,7 @@ export fn espice_default_options(out: ?*CreateOptions) void {
     options.max_parallel = 1;
 }
 
-export fn espice_create(options: ?*const CreateOptions, out: ?*?*Handle, diagnostic: ?[*]u8, diagnostic_capacity: usize) u32 {
+export fn espice_create(options: ?*const CreateOptions, out: ?*?*Token, diagnostic: ?[*]u8, diagnostic_capacity: usize) u32 {
     const destination = out orelse return status(error.InvalidArgument);
     destination.* = null;
     const buffer = mutableSlice(u8, diagnostic, diagnostic_capacity) catch return status(error.InvalidArgument);
@@ -163,7 +248,7 @@ export fn espice_create(options: ?*const CreateOptions, out: ?*?*Handle, diagnos
     return 0;
 }
 
-fn create(options: *const CreateOptions) !*Handle {
+fn create(options: *const CreateOptions) !*Token {
     // A caller built before the toolchain fields passes a struct ending at
     // `output_path`; the fields past its size are never read.
     if (options.abi_version != abi_version or options.struct_size < @offsetOf(CreateOptions, "zig_path")) return error.AbiMismatch;
@@ -210,25 +295,28 @@ fn create(options: *const CreateOptions) !*Handle {
     errdefer handle.threaded.deinit();
     handle.last_error = null;
     handle.problem = try api.Problem.init(allocator, handle.threaded.io(), config);
-    return handle;
+    errdefer handle.problem.deinit();
+    return handles.insert(handle);
 }
 
-export fn espice_destroy(handle: ?*Handle) void {
-    const h = handle orelse return;
+export fn espice_destroy(handle: ?*Token) u32 {
+    // NULL is a no-op, as for free().
+    const h = handles.remove(handle orelse return 0) catch |err| return status(err);
     h.problem.deinit();
     h.threaded.deinit();
     allocator.destroy(h);
+    return 0;
 }
 
-export fn espice_query_count(handle: ?*Handle, out: ?*u32) u32 {
-    const h = handle orelse return status(error.InvalidArgument);
+export fn espice_query_count(handle: ?*Token, out: ?*u32) u32 {
+    const h = handles.get(handle) catch |err| return status(err);
     const destination = out orelse return h.fail(error.InvalidArgument);
     destination.* = h.problem.query_count();
     return 0;
 }
 
-export fn espice_get_query_info(handle: ?*Handle, id: u32, out: ?*QueryInfo) u32 {
-    const h = handle orelse return status(error.InvalidArgument);
+export fn espice_get_query_info(handle: ?*Token, id: u32, out: ?*QueryInfo) u32 {
+    const h = handles.get(handle) catch |err| return status(err);
     const destination = out orelse return h.fail(error.InvalidArgument);
     const q = h.problem.query_info(@fromBackingInt(@intCast(id))) catch |err| return h.fail(err);
     destination.* = .{
@@ -245,8 +333,8 @@ export fn espice_get_query_info(handle: ?*Handle, id: u32, out: ?*QueryInfo) u32
     return 0;
 }
 
-export fn espice_ready_queries(handle: ?*Handle, scope: Scope, ids: ?[*]u32, capacity: usize, required: ?*usize) u32 {
-    const h = handle orelse return status(error.InvalidArgument);
+export fn espice_ready_queries(handle: ?*Token, scope: Scope, ids: ?[*]u32, capacity: usize, required: ?*usize) u32 {
+    const h = handles.get(handle) catch |err| return status(err);
     const count = required orelse return h.fail(error.InvalidArgument);
     count.* = 0;
     const buffer = mutableSlice(u32, ids, capacity) catch |err| return h.fail(err);
@@ -257,16 +345,16 @@ export fn espice_ready_queries(handle: ?*Handle, scope: Scope, ids: ?[*]u32, cap
     return 0;
 }
 
-export fn espice_advance(handle: ?*Handle, id: u32, out: ?*Advance) u32 {
-    const h = handle orelse return status(error.InvalidArgument);
+export fn espice_advance(handle: ?*Token, id: u32, out: ?*Advance) u32 {
+    const h = handles.get(handle) catch |err| return status(err);
     const destination = out orelse return h.fail(error.InvalidArgument);
     const event = h.problem.advance(@fromBackingInt(@intCast(id))) catch |err| return h.fail(err);
     destination.* = packAdvance(h, event);
     return 0;
 }
 
-export fn espice_advance_ready(handle: ?*Handle, ids: ?[*]const u32, count: usize, max_parallel: u32, events: ?[*]Advance, capacity: usize, required: ?*usize) u32 {
-    const h = handle orelse return status(error.InvalidArgument);
+export fn espice_advance_ready(handle: ?*Token, ids: ?[*]const u32, count: usize, max_parallel: u32, events: ?[*]Advance, capacity: usize, required: ?*usize) u32 {
+    const h = handles.get(handle) catch |err| return status(err);
     const needed = required orelse return h.fail(error.InvalidArgument);
     needed.* = count;
     const selected = constSlice(u32, ids, count) catch |err| return h.fail(err);
@@ -280,14 +368,14 @@ export fn espice_advance_ready(handle: ?*Handle, ids: ?[*]const u32, count: usiz
     return 0;
 }
 
-export fn espice_run_all(handle: ?*Handle) u32 {
-    const h = handle orelse return status(error.InvalidArgument);
+export fn espice_run_all(handle: ?*Token) u32 {
+    const h = handles.get(handle) catch |err| return status(err);
     h.problem.run_all() catch |err| return h.fail(err);
     return 0;
 }
 
-export fn espice_append_directives(handle: ?*Handle, directives: Bytes, ids: ?[*]u32, capacity: usize, required: ?*usize) u32 {
-    const h = handle orelse return status(error.InvalidArgument);
+export fn espice_append_directives(handle: ?*Token, directives: Bytes, ids: ?[*]u32, capacity: usize, required: ?*usize) u32 {
+    const h = handles.get(handle) catch |err| return status(err);
     const count = required orelse return h.fail(error.InvalidArgument);
     count.* = 0;
     const text = constSlice(u8, directives.data, directives.len) catch |err| return h.fail(err);
@@ -296,8 +384,8 @@ export fn espice_append_directives(handle: ?*Handle, directives: Bytes, ids: ?[*
     return if (count.* > capacity) h.fail(error.BufferTooSmall) else 0;
 }
 
-export fn espice_set_params(handle: ?*Handle, names: ?[*]const Bytes, values: ?[*]const f64, count: usize) u32 {
-    const h = handle orelse return status(error.InvalidArgument);
+export fn espice_set_params(handle: ?*Token, names: ?[*]const Bytes, values: ?[*]const f64, count: usize) u32 {
+    const h = handles.get(handle) catch |err| return status(err);
     const name_bytes = constSlice(Bytes, names, count) catch |err| return h.fail(err);
     const numbers = constSlice(f64, values, count) catch |err| return h.fail(err);
     const keys = allocator.alloc([]const u8, count) catch |err| return h.fail(err);
@@ -307,8 +395,8 @@ export fn espice_set_params(handle: ?*Handle, names: ?[*]const Bytes, values: ?[
     return 0;
 }
 
-export fn espice_get_result_info(handle: ?*Handle, id: u32, out: ?*ResultInfo) u32 {
-    const h = handle orelse return status(error.InvalidArgument);
+export fn espice_get_result_info(handle: ?*Token, id: u32, out: ?*ResultInfo) u32 {
+    const h = handles.get(handle) catch |err| return status(err);
     const destination = out orelse return h.fail(error.InvalidArgument);
     const result = h.problem.result(@fromBackingInt(@intCast(id))) catch |err| return h.fail(err);
     destination.* = .{
@@ -320,8 +408,8 @@ export fn espice_get_result_info(handle: ?*Handle, id: u32, out: ?*ResultInfo) u
     return 0;
 }
 
-export fn espice_copy_result(handle: ?*Handle, id: u32, values: ?[*]f64, capacity: usize, required: ?*usize) u32 {
-    const h = handle orelse return status(error.InvalidArgument);
+export fn espice_copy_result(handle: ?*Token, id: u32, values: ?[*]f64, capacity: usize, required: ?*usize) u32 {
+    const h = handles.get(handle) catch |err| return status(err);
     const count = required orelse return h.fail(error.InvalidArgument);
     count.* = 0;
     const buffer = mutableSlice(f64, values, capacity) catch |err| return h.fail(err);
@@ -332,8 +420,8 @@ export fn espice_copy_result(handle: ?*Handle, id: u32, values: ?[*]f64, capacit
     return 0;
 }
 
-export fn espice_result_view(handle: ?*Handle, id: u32, data: ?*?[*]const f64, len: ?*usize) u32 {
-    const h = handle orelse return status(error.InvalidArgument);
+export fn espice_result_view(handle: ?*Token, id: u32, data: ?*?[*]const f64, len: ?*usize) u32 {
+    const h = handles.get(handle) catch |err| return status(err);
     // The header promises *data NULL on any failure, a NULL len included.
     if (data) |view| view.* = null;
     if (len) |count| count.* = 0;
@@ -345,15 +433,15 @@ export fn espice_result_view(handle: ?*Handle, id: u32, data: ?*?[*]const f64, l
     return 0;
 }
 
-export fn espice_copy_result_name(handle: ?*Handle, id: u32, variable: u32, buffer: ?[*]u8, capacity: usize, required: ?*usize) u32 {
-    const h = handle orelse return status(error.InvalidArgument);
+export fn espice_copy_result_name(handle: ?*Token, id: u32, variable: u32, buffer: ?[*]u8, capacity: usize, required: ?*usize) u32 {
+    const h = handles.get(handle) catch |err| return status(err);
     const result = h.problem.result(@fromBackingInt(@intCast(id))) catch |err| return h.fail(err);
     const name = if (variable == no_query) result.plotname else if (variable < result.varnames.len) result.varnames[variable] else return h.fail(error.InvalidArgument);
     return copyString(h, name, buffer, capacity, required);
 }
 
-export fn espice_print(handle: ?*Handle, options: ?*const PrintOptions, buffer: ?[*]u8, capacity: usize, required: ?*usize) u32 {
-    const h = handle orelse return status(error.InvalidArgument);
+export fn espice_print(handle: ?*Token, options: ?*const PrintOptions, buffer: ?[*]u8, capacity: usize, required: ?*usize) u32 {
+    const h = handles.get(handle) catch |err| return status(err);
     if (required == null or (buffer == null and capacity != 0)) return h.fail(error.InvalidArgument);
     var config: api.PrintOptions = .{};
     if (options) |o| {
@@ -374,16 +462,16 @@ export fn espice_print(handle: ?*Handle, options: ?*const PrintOptions, buffer: 
     return copyString(h, writer.written(), buffer, capacity, required);
 }
 
-export fn espice_error_message(handle: ?*Handle, buffer: ?[*]u8, capacity: usize, required: ?*usize) u32 {
-    const h = handle orelse return status(error.InvalidArgument);
+export fn espice_error_message(handle: ?*Token, buffer: ?[*]u8, capacity: usize, required: ?*usize) u32 {
+    const h = handles.get(handle) catch |err| return status(err);
     // Querying an error must not replace it with the sizing call's error.
     const saved = h.last_error;
     defer h.last_error = saved;
     return copyString(h, if (saved) |err| @errorName(err) else "", buffer, capacity, required);
 }
 
-export fn espice_query_error_message(handle: ?*Handle, id: u32, buffer: ?[*]u8, capacity: usize, required: ?*usize) u32 {
-    const h = handle orelse return status(error.InvalidArgument);
+export fn espice_query_error_message(handle: ?*Token, id: u32, buffer: ?[*]u8, capacity: usize, required: ?*usize) u32 {
+    const h = handles.get(handle) catch |err| return status(err);
     const q = h.problem.query_info(@fromBackingInt(@intCast(id))) catch |err| return h.fail(err);
     return copyString(h, if (q.failure) |err| @errorName(err) else "", buffer, capacity, required);
 }
@@ -477,6 +565,9 @@ fn status(err: anyerror) u32 {
         error.InvalidQuery => .invalid_query,
         error.ResultUnavailable => .result_unavailable,
         error.AbiMismatch => .abi_mismatch,
+        error.InvalidHandle => .invalid_handle,
+        // A full handle table is a capacity, reported like any allocation.
+        error.TooManyProblems => .out_of_memory,
         else => .failed,
     };
     return @backingInt(code);

@@ -26,7 +26,7 @@ test "C creation validates versions, tags and pointer lengths" {
     options.max_parallel = 65536;
     try std.testing.expectEqual(@as(u32, c.ESPICE_INVALID_ARGUMENT), c.espice_create(&options, &handle, &diagnostic, diagnostic.len));
     try std.testing.expectEqual(@as(u32, c.ESPICE_INVALID_ARGUMENT), c.espice_query_count(null, null));
-    c.espice_destroy(null);
+    _ = c.espice_destroy(null);
 }
 
 test "C lifecycle copies metadata, advances prerequisites and appends transactionally" {
@@ -40,7 +40,7 @@ test "C lifecycle copies metadata, advances prerequisites and appends transactio
     var handle: ?*c.espice_problem = null;
     var diagnostic: [128]u8 = undefined;
     try std.testing.expectEqual(@as(u32, 0), c.espice_create(&options, &handle, &diagnostic, diagnostic.len));
-    defer c.espice_destroy(handle);
+    defer _ = c.espice_destroy(handle);
     var count: u32 = 0;
     try std.testing.expectEqual(@as(u32, 0), c.espice_query_count(handle, &count));
     var ac_id: u32 = c.ESPICE_NO_QUERY;
@@ -137,7 +137,7 @@ test "C short buffers and invalid frontiers do not modify IDs, events or query s
     options.origin = .{ .data = "frontier.cir", .len = "frontier.cir".len };
     var handle: ?*c.espice_problem = null;
     try std.testing.expectEqual(@as(u32, c.ESPICE_OK), c.espice_create(&options, &handle, null, 0));
-    defer c.espice_destroy(handle);
+    defer _ = c.espice_destroy(handle);
     var required: usize = 0;
     var ids = [_]u32{ c.ESPICE_NO_QUERY, c.ESPICE_NO_QUERY };
     const all: c.espice_scope = .{ .kind = c.ESPICE_ALL, .id = 0 };
@@ -229,11 +229,11 @@ test "C entry points reject NULL handles and malformed options" {
     old.struct_size = @offsetOf(c.espice_create_options, "zig_path");
     old.zig_path = .{ .data = null, .len = 1 };
     try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_create(&old, &handle, null, 0));
-    c.espice_destroy(handle);
+    _ = c.espice_destroy(handle);
     // A newer caller's larger struct is accepted; only our prefix is read.
     good.struct_size += 16;
     try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_create(&good, &handle, null, 0));
-    c.espice_destroy(handle);
+    _ = c.espice_destroy(handle);
 }
 
 test "C creation hands the toolchain paths to .hdl loading (#13)" {
@@ -260,7 +260,7 @@ test "C calls on a live handle validate every pointer, scope and preview" {
     options.source = .{ .data = deck.ptr, .len = deck.len };
     var handle: ?*c.espice_problem = null;
     try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_create(&options, &handle, null, 0));
-    defer c.espice_destroy(handle);
+    defer _ = c.espice_destroy(handle);
     const invalid: u32 = c.ESPICE_INVALID_ARGUMENT;
     var n: usize = 0;
     var message: [64]u8 = undefined;
@@ -339,7 +339,7 @@ test "C set_params runs later queries at new .param values without a re-parse (#
     var handle: ?*c.espice_problem = null;
     var diagnostic: [64]u8 = undefined;
     try t.expectEqual(@as(u32, 0), c.espice_create(&options, &handle, &diagnostic, diagnostic.len));
-    defer c.espice_destroy(handle);
+    defer _ = c.espice_destroy(handle);
     try t.expectEqual(@as(u32, 0), c.espice_run_all(handle));
     const op = ".op";
     for ([_]f64{ 3e3, 9e3 }) |rv| {

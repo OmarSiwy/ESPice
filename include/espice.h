@@ -20,11 +20,16 @@ typedef struct espice_problem espice_problem;
 typedef uint32_t espice_status;
 /* espice_status. INVALID_ARGUMENT also covers malformed analysis text:
  * no analysis card, bad query options, or an unsupported directive edit
- * (espice_error_message names which). FAILED is a numerical or I/O failure. */
+ * (espice_error_message names which), and a NULL problem. FAILED is a
+ * numerical or I/O failure. INVALID_HANDLE is a problem that
+ * espice_destroy already released, or a value espice_create never returned;
+ * the call does nothing else. OUT_OF_MEMORY also covers create with 4095
+ * problems already live (diagnostic "TooManyProblems"). */
 enum {
     ESPICE_OK = 0, ESPICE_INVALID_ARGUMENT = 1, ESPICE_BUFFER_TOO_SMALL = 2,
     ESPICE_OUT_OF_MEMORY = 3, ESPICE_INVALID_QUERY = 4,
-    ESPICE_RESULT_UNAVAILABLE = 5, ESPICE_FAILED = 6, ESPICE_ABI_MISMATCH = 7
+    ESPICE_RESULT_UNAVAILABLE = 5, ESPICE_FAILED = 6, ESPICE_ABI_MISMATCH = 7,
+    ESPICE_INVALID_HANDLE = 8
 };
 /* espice_create_options.source_kind: a path, or netlist text named by origin. */
 enum { ESPICE_FILE = 0, ESPICE_BYTES = 1 };
@@ -115,7 +120,12 @@ typedef struct {
 
 /* All calls on one handle must be serialized, including reads and destroy.
  * Parallelism is selected within advance_ready/run_all. Different handles are
- * independent. Input bytes are copied during create/append. The only borrowed
+ * independent: calls on them may run concurrently from any threads. A handle
+ * is a generation-checked token into one process-wide table, never an
+ * address; every call checks it under a lock held for O(1) work. A destroyed
+ * handle returns INVALID_HANDLE from every call, destroy included, and is
+ * never handed out again; a value create never returned is rejected the same
+ * way unless its bits happen to equal a live handle's. Input bytes are copied during create/append. The only borrowed
  * pointer is espice_result_view's, valid until destroy. Destroy cancels and
  * joins any paused workers.
  *
@@ -131,7 +141,9 @@ void espice_default_options(espice_create_options *options);
  * and may be truncated. A successful create consumes its source immediately. */
 espice_status espice_create(const espice_create_options *options,
     espice_problem **out, char *diagnostic, size_t diagnostic_capacity);
-void espice_destroy(espice_problem *problem);
+/* OK, or INVALID_HANDLE for a handle already destroyed (it changes nothing).
+ * NULL is a no-op returning OK. */
+espice_status espice_destroy(espice_problem *problem);
 espice_status espice_query_count(espice_problem *, uint32_t *out);
 espice_status espice_get_query_info(espice_problem *, uint32_t id, espice_query_info *out);
 espice_status espice_ready_queries(espice_problem *, espice_scope,
