@@ -25,6 +25,11 @@ pub const NoiseSource = device_ir.NoiseSource;
 pub const AnalysisKind = @FieldType(device_ir.SimState, "kind");
 pub const Result = @import("core").Result;
 
+/// The error set `f` returns, so a module boundary can name an inferred set.
+pub fn ErrorOf(comptime f: anytype) type {
+    return @typeInfo(@typeInfo(@TypeOf(f)).@"fn".return_type.?).error_union.error_set;
+}
+
 /// Everything an analysis needs, resolved before dispatch.
 pub const RunCtx = struct {
     circuit: *Circuit,

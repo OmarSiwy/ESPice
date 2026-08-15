@@ -10,9 +10,23 @@ const op = @import("dc/op.zig");
 const gpu = @import("gpu.zig");
 const gpu_lu = @import("gpu_lu.zig");
 const ParEval = @import("par_eval.zig").ParEval;
-const Controller = @import("worker.zig").Worker(types.Result);
+const Controller = @import("worker.zig").Worker(QueryError, types.Result);
 const Quantum = @import("worker.zig").Quantum;
 const converger = @import("solver").converger;
+
+/// Why a started query ended without a result: whatever an analysis leaf
+/// or its setup in `runQuery` can return (`error.QueryCancelled` for a
+/// cancel, `error.OutOfMemory`, the numerical failures such as
+/// `error.TimestepTooSmall`), or `error.DeviceRefused` when a device latched
+/// `$fatal`/`$error`. Names are part of the API: `c_api.zig` maps some to
+/// status codes.
+// Spelled from runQuery's parts, not `ErrorOf(Executor.runQuery)`: the
+// executor holds its worker, whose type needs this set, so naming its own
+// method's inferred set is a dependency loop. A part missing here fails
+// to compile at `execute`.
+pub const QueryError = types.ErrorOf(run) || types.ErrorOf(op.solve) || types.ErrorOf(ParEval.init) ||
+    gpu.InitError || types.ErrorOf(gpu.GpuContext.syncHostState) || types.ErrorOf(types.Circuit.workspace) ||
+    std.mem.Allocator.Error || error{ OpDidNotConverge, DeviceRefused, QueryCancelled };
 
 /// Per-problem execution settings, shared by every query.
 pub const Config = struct {
@@ -210,7 +224,7 @@ pub const Executor = struct {
     // ponytail: checked once per query, not per eval; a refused device
     // costs the analysis's own failure path first. Check per Newton
     // iterate if that turns out slow.
-    fn execute(ctx: *anyopaque) !types.Result {
+    fn execute(ctx: *anyopaque) QueryError!types.Result {
         const self: *Executor = @ptrCast(@alignCast(ctx));
         const res = self.runQuery() catch |err| {
             try self.refuseLatched();

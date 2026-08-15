@@ -46,9 +46,14 @@ pub const Decline = enum {
     machine,
 };
 
+/// Why `GpuContext.init` failed: one of `Error`, `error.OutOfMemory`, or a
+/// driver error gompute reports (bringing up the device, loading a module,
+/// allocating or copying device memory). `declineKind` sorts them.
+pub const InitError = Error || std.mem.Allocator.Error || gompute.Error;
+
 /// Classifies an `init` error. Anything outside `Error`, a driver or
 /// allocation failure included, is `.machine`.
-pub fn declineKind(e: anyerror) Decline {
+pub fn declineKind(e: InitError) Decline {
     return switch (e) {
         Error.NotEnoughGpuWork => .policy,
         Error.CircuitNotEligible => .capability,
@@ -59,7 +64,7 @@ pub fn declineKind(e: anyerror) Decline {
 /// Whether a query runs on the CPU after `GpuContext.init` failed with
 /// `e`. `cuda` and `hip` never fall back. `auto` does unless `explicit` (the
 /// user named the GPU) and the machine said no.
-pub fn fallsBack(req: Request, explicit: bool, e: anyerror) bool {
+pub fn fallsBack(req: Request, explicit: bool, e: InitError) bool {
     return switch (req) {
         .cpu => true,
         .auto => !explicit or declineKind(e) != .machine,
@@ -573,7 +578,7 @@ pub const GpuContext = struct {
     /// back. A success marks `driver` up, which later queries' cost models
     /// read; a null `driver` prices the setup every time. Caller owns the
     /// result and frees it with `deinit`.
-    pub fn init(gpa: std.mem.Allocator, host: Host, driver: ?*Driver, explicit: bool, threads: u32, evals: f64) !*Self {
+    pub fn init(gpa: std.mem.Allocator, host: Host, driver: ?*Driver, explicit: bool, threads: u32, evals: f64) InitError!*Self {
         if (comptime backend == null) return Error.NoGpuArtifacts;
         const knobs = host.knobs;
         const report = explicit or statsOn(knobs);
@@ -1847,7 +1852,7 @@ test requestSupported {
 }
 
 test fallsBack {
-    const errs = [_]anyerror{ Error.NotEnoughGpuWork, Error.CircuitNotEligible, Error.NoGpuArtifacts, error.InitFailed };
+    const errs = [_]InitError{ Error.NotEnoughGpuWork, Error.CircuitNotEligible, Error.NoGpuArtifacts, error.InitFailed };
     for (errs) |e| {
         // An explicit backend never runs on the CPU, nothing eligible included.
         try std.testing.expect(!fallsBack(.cuda, true, e));

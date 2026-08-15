@@ -13,6 +13,15 @@ const types = @import("types.zig");
 const Result = types.Result;
 const validateDeck = @import("validate.zig").validateDeck;
 
+/// Why a query ended without a result: its run failed (`QueryError`,
+/// `error.QueryCancelled` included), its executor could not be built
+/// (`Executor.create`: `error.OutOfMemory`, `error.InvalidOperatingPoint`,
+/// a bad variant or AC override) or started (a thread spawn), or its
+/// prerequisite ended without one (`error.DependencyFailed`). Names are part
+/// of the API: `c_api.zig` maps some to status codes.
+pub const Failure = execution.QueryError || types.ErrorOf(execution.Executor.create) ||
+    types.ErrorOf(execution.Executor.start) || error{DependencyFailed};
+
 /// A row index into the session, stable for its lifetime.
 pub const QueryId = requests.QueryId;
 const none = requests.invalid_query;
@@ -59,7 +68,7 @@ pub const QueryInfo = struct {
     component: u32,
     requested: bool,
     progress: ?progress.Event,
-    failure: ?anyerror,
+    failure: ?Failure,
 };
 /// What one advancement did: `advanced` may be the prerequisite of
 /// `requested`, and `target_status` is the requested query's status after it.
@@ -68,9 +77,11 @@ pub const Advance = struct {
     advanced: QueryId,
     status: Status,
     target_status: Status,
+    /// The facade's first output failure (`espice.Problem.output_error`);
+    /// analysis cannot name the output module's error set.
     delivery_error: ?anyerror = null,
     progress: ?progress.Event = null,
-    failure: ?anyerror = null,
+    failure: ?Failure = null,
 };
 const Row = struct {
     job: requests.Query,
@@ -79,7 +90,7 @@ const Row = struct {
     requested: bool,
     status: Status = .pending,
     progress: ?progress.Event = null,
-    failure: ?anyerror = null,
+    failure: ?Failure = null,
     executor: ?*execution.Executor = null,
     /// The circuit the query instantiates: 0 for `topology`, k for
     /// `templates[k - 1]`.
@@ -438,7 +449,7 @@ pub const Session = struct {
     /// result, or null. A query whose prerequisite failed reports the
     /// prerequisite's error, so an implicit OP's OutOfMemory is not renamed
     /// DependencyFailed.
-    pub fn failure(self: *const Session) ?anyerror {
+    pub fn failure(self: *const Session) ?Failure {
         for (self.outputs.items) |id| {
             const i = @backingInt(id);
             const status = self.effectiveStatus(i);

@@ -26,16 +26,19 @@ pub const Options = struct {
     timing_query: ?requests.QueryId = null,
 };
 
-/// A resumable run of `run(ctx)` producing `Product`. Must stay at a fixed
-/// address from `callback` until `deinit`: the thread and the callback hold it.
+/// A resumable run of `run(ctx)` producing `Product` or failing with one of
+/// `Error`, which must hold `error.QueryCancelled` (a cancel finishes the run
+/// with it). Must stay at a fixed address from `callback` until `deinit`: the
+/// thread and the callback hold it.
 ///
 /// ponytail: one retained thread stack per started query; move to explicit
 /// phase storage if stacks become the limiting resource.
-pub fn Worker(comptime Product: type) type {
+pub fn Worker(comptime Error: type, comptime Product: type) type {
+    comptime std.debug.assert(@typeInfo(Error) == .error_set);
     return struct {
         io: std.Io,
         ctx: *anyopaque,
-        run: *const fn (*anyopaque) anyerror!Product,
+        run: *const fn (*anyopaque) Error!Product,
         options: Options,
         mutex: std.Io.Mutex = .init,
         changed: std.Io.Condition = .init,
@@ -53,7 +56,7 @@ pub fn Worker(comptime Product: type) type {
             created,
             running,
             paused: progress.Event,
-            finished: anyerror!Product,
+            finished: Error!Product,
         };
 
         /// What one `wait` returns: a parked checkpoint, the product, the
@@ -61,13 +64,13 @@ pub fn Worker(comptime Product: type) type {
         pub const Outcome = union(enum(u8)) {
             progress: progress.Event,
             complete: Product,
-            failed: anyerror,
+            failed: Error,
             cancelled,
         };
 
         /// An unstarted worker; nothing runs until `start`. `ctx` must
         /// outlive it.
-        pub fn init(io: std.Io, ctx: *anyopaque, execute_fn: *const fn (*anyopaque) anyerror!Product, options: Options) Self {
+        pub fn init(io: std.Io, ctx: *anyopaque, execute_fn: *const fn (*anyopaque) Error!Product, options: Options) Self {
             return .{ .io = io, .ctx = ctx, .run = execute_fn, .options = options };
         }
 

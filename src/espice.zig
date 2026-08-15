@@ -67,6 +67,15 @@ pub const Options = struct {
     live_params: []const []const u8 = &.{},
 };
 
+/// Why publication stopped (`Problem.output_error`): an encoder or file
+/// error from the output session (`publish`, `endStream`) or the Touchstone
+/// file writer (`output.write`), `error.OutOfMemory` included.
+pub const DeliveryError = errorOf(output.Session.publish) || errorOf(output.Session.endStream) || errorOf(output.write);
+
+fn errorOf(comptime f: anytype) type {
+    return @typeInfo(@typeInfo(@TypeOf(f)).@"fn".return_type.?).error_union.error_set;
+}
+
 /// Where runtime `.hdl` compilation finds its toolchain (`Options.hdl_toolchain`).
 pub const HdlToolchain = frontend.Library.Toolchain;
 
@@ -93,7 +102,7 @@ pub const Problem = struct {
     /// publish in request order, so a finished query waits for earlier ones.
     next_output: usize = 0,
     /// First output failure. Once set, nothing else is published.
-    delivery_error: ?anyerror = null,
+    delivery_error: ?DeliveryError = null,
     /// The query whose rows stream to the output as it runs (`openStream`).
     streaming: ?QueryId = null,
     /// The variant row `set_params` last made, which queries appended
@@ -251,7 +260,7 @@ pub const Problem = struct {
     }
 
     /// The output failure that stopped publication, if any.
-    pub fn output_error(self: *const Problem) ?anyerror {
+    pub fn output_error(self: *const Problem) ?DeliveryError {
         return self.delivery_error;
     }
 

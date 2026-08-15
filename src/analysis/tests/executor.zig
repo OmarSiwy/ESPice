@@ -5,7 +5,7 @@ const progress = @import("../progress.zig");
 const std = @import("std");
 
 test "worker resumes preserved stack state and runs only once" {
-    const W = Worker(u64);
+    const W = Worker(anyerror, u64);
     const Context = struct {
         callback: progress.Callback = undefined,
         calls: u8 = 0,
@@ -54,7 +54,7 @@ test "cancel wakes a parked worker and unwinds cleanup" {
         }
     };
     var ctx: Context = .{};
-    var worker = Worker(void).init(std.testing.io, &ctx, Context.run, .{});
+    var worker = Worker(anyerror, void).init(std.testing.io, &ctx, Context.run, .{});
     defer worker.deinit();
     ctx.callback = worker.callback();
     try std.testing.expect((try worker.advance()) == .progress);
@@ -76,7 +76,7 @@ test "worker reports an analysis error after progress" {
         }
     };
     var ctx: Context = .{};
-    var worker = Worker(void).init(std.testing.io, &ctx, Context.run, .{});
+    var worker = Worker(anyerror, void).init(std.testing.io, &ctx, Context.run, .{});
     defer worker.deinit();
     ctx.callback = worker.callback();
     try std.testing.expect((try worker.advance()) == .progress);
@@ -113,9 +113,9 @@ test "independent workers enter concurrently and preserve separate state" {
     var barrier: Barrier = .{ .io = io };
     var first: Context = .{ .barrier = &barrier, .value = 10 };
     var second: Context = .{ .barrier = &barrier, .value = 20 };
-    var one = Worker(u32).init(io, &first, Context.run, .{});
+    var one = Worker(anyerror, u32).init(io, &first, Context.run, .{});
     defer one.deinit();
-    var two = Worker(u32).init(io, &second, Context.run, .{});
+    var two = Worker(anyerror, u32).init(io, &second, Context.run, .{});
     defer two.deinit();
     first.callback = one.callback();
     second.callback = two.callback();
@@ -138,7 +138,7 @@ test "cancel before first resume never invokes the analysis" {
         }
     };
     var ctx: Context = .{};
-    var worker = Worker(void).init(std.testing.io, &ctx, Context.run, .{});
+    var worker = Worker(anyerror, void).init(std.testing.io, &ctx, Context.run, .{});
     defer worker.deinit();
     worker.cancel();
     try std.testing.expect((try worker.advance()) == .cancelled);
@@ -163,7 +163,7 @@ test "suppressed nonlinear checkpoints still observe cancellation" {
         }
     };
     var ctx: Context = .{};
-    var worker = Worker(void).init(std.testing.io, &ctx, Context.run, .{});
+    var worker = Worker(anyerror, void).init(std.testing.io, &ctx, Context.run, .{});
     defer worker.deinit();
     ctx.callback = worker.callback();
     try worker.start(.checkpoint);
@@ -183,7 +183,7 @@ test "OP can publish nonlinear iteration progress" {
         }
     };
     var ctx: Context = .{};
-    var worker = Worker(void).init(std.testing.io, &ctx, Context.run, .{
+    var worker = Worker(anyerror, void).init(std.testing.io, &ctx, Context.run, .{
         .report_nonlinear = true,
     });
     defer worker.deinit();
@@ -210,7 +210,7 @@ test "timed worker excludes paused time when cancelled" {
         }
     };
     var ctx: Context = .{};
-    var worker = Worker(void).init(std.testing.io, &ctx, Context.run, .{ .timing_query = @fromBackingInt(@intCast(0)) });
+    var worker = Worker(anyerror, void).init(std.testing.io, &ctx, Context.run, .{ .timing_query = @fromBackingInt(@intCast(0)) });
     defer worker.deinit();
     ctx.callback = worker.callback();
     const outcome = try worker.advance();
@@ -236,7 +236,7 @@ test "a second start while a quantum runs is refused" {
         }
     };
     var ctx: Context = .{};
-    var worker = Worker(u8).init(std.testing.io, &ctx, Context.run, .{});
+    var worker = Worker(anyerror, u8).init(std.testing.io, &ctx, Context.run, .{});
     defer worker.deinit();
     ctx.callback = worker.callback();
     try worker.start(.checkpoint);
@@ -264,7 +264,7 @@ test "a completion quantum runs through every checkpoint" {
         }
     };
     var ctx: Context = .{};
-    var worker = Worker(u32).init(std.testing.io, &ctx, Context.run, .{});
+    var worker = Worker(anyerror, u32).init(std.testing.io, &ctx, Context.run, .{});
     defer worker.deinit();
     ctx.callback = worker.callback();
     try worker.start(.completion);

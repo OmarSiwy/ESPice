@@ -97,7 +97,7 @@ Full records: `dev/decisions.md`.
 - A lane kernel's `W == 1` instantiation is its oracle; failed lanes peel to the scalar path.
 - Nothing below the facade reads or writes the environment. `espice.zig` reads the developer switches once per Problem (`knobsFromEnv`) into `ExecutionConfig.knobs` (`analysis.Knobs`), which reach the code as `Circuit.knobs`, `Workspace.knobs` and `Solver.knobs`; fills `Library.toolchain`'s `zig` and `cache_dir` (`toolchainFromEnv`); and raises `CUDA_CACHE_MAXSIZE` (`raiseJitCache`) before any query can bring the driver up.
 - No file-scope mutable state, with one exception, `device/eval.zig staging_gpa` (**target:** a later block). Whether the GPU driver is up is the Problem's (`Problem.gpu_driver`, lent to every query through `ExecutionConfig.gpu_driver`). `numerics.opaque_zero` and `SparseLu.opaque_zero` are never written, and stay `var` as optimizer barriers because Zig folds a volatile read of a `const`.
-- **Target (P3):** no `anyerror` across a module boundary (today: espice.zig, session/worker, gpu).
+- Module boundaries name their error sets: `executor.QueryError` (a query's run, which `Worker` carries), `session.Failure` (a row's stored failure and `Session.failure`), `gpu.InitError` (`GpuContext.init`, sorted by `declineKind`), `espice.DeliveryError` (`Problem.output_error`). Each is spelled from its parts' sets, so a new error in a part fails to compile where it crosses. One `anyerror` is left, `session.Advance.delivery_error`: the facade stores its `DeliveryError` there, and analysis cannot name the output module's set.
 
 ## Adding a feature
 
