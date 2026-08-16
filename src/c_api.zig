@@ -251,6 +251,9 @@ export fn espice_create(options: ?*const CreateOptions, out: ?*?*Token, diagnost
 }
 
 /// `espice_create` over `gpa`, which the handle keeps for its own free.
+/// Not exported: every C entry point passes `allocator` (SmpAllocator, the
+/// page allocator on single-threaded wasm); only the in-file allocation
+/// sweep passes another.
 fn create(gpa: std.mem.Allocator, options: *const CreateOptions) !*Token {
     // A caller built before the toolchain fields passes a struct ending at
     // `output_path`; the fields past its size are never read.
