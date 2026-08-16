@@ -149,7 +149,9 @@ espice_status espice_get_query_info(espice_problem *, uint32_t id, espice_query_
 espice_status espice_ready_queries(espice_problem *, espice_scope,
     uint32_t *ids, size_t capacity, size_t *required);
 /* OK means the operation returned an event. Inspect its numerical status and
- * output_error separately; a failed query still produces a valid event. */
+ * output_error separately; a failed query still produces a valid event.
+ * output_error is an espice_status; INVALID_QUERY or RESULT_UNAVAILABLE there
+ * means the library's query bookkeeping broke (a bug), reported, not aborted. */
 espice_status espice_advance(espice_problem *, uint32_t id, espice_advance_event *out);
 espice_status espice_advance_ready(espice_problem *, const uint32_t *ids, size_t count,
     uint32_t max_parallel, espice_advance_event *events, size_t capacity, size_t *required);

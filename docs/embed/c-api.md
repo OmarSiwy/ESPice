@@ -122,7 +122,11 @@ new values for the queries appended after it; see [Sizing loops](#sizing-loops).
   (`v(out)`), or the plot title with `ESPICE_PLOT_TITLE`.
 
 **Destroy.** `espice_destroy` cancels and joins any paused work and frees
-everything, including result views.
+everything, including result views. Afterwards the handle is dead: every
+call on it, a second `espice_destroy` included, returns
+`ESPICE_INVALID_HANDLE` and does nothing, even after a later
+`espice_create` reuses its slot. `espice_destroy(NULL)` is a no-op that
+returns `ESPICE_OK`.
 
 ## Sizing loops
 
@@ -182,16 +186,20 @@ From Zig the same calls are `Options.live_params` and
 | Status | Meaning |
 |---|---|
 | `ESPICE_OK` | success |
-| `ESPICE_INVALID_ARGUMENT` | a bad pointer, tag or option, or malformed analysis text |
+| `ESPICE_INVALID_ARGUMENT` | a bad pointer (a NULL problem included), tag or option, or malformed analysis text |
 | `ESPICE_BUFFER_TOO_SMALL` | the buffer is too short; `required` says how long it must be |
-| `ESPICE_OUT_OF_MEMORY` | |
+| `ESPICE_OUT_OF_MEMORY` | allocation failed, or `espice_create` with 4095 problems already live (`TooManyProblems`) |
 | `ESPICE_INVALID_QUERY` | an ID outside the problem |
 | `ESPICE_RESULT_UNAVAILABLE` | the query has not completed |
 | `ESPICE_FAILED` | a numerical or I/O failure |
 | `ESPICE_ABI_MISMATCH` | the header and the library disagree (`abi_version`, `struct_size`) |
+| `ESPICE_INVALID_HANDLE` | the problem was destroyed, or the value never came from `espice_create` |
 
 `espice_error_message` returns the last failing call's error name;
-`espice_query_error_message` a failed query's own.
+`espice_query_error_message` a failed query's own. An advance event's
+`output_error` uses the same codes; `ESPICE_INVALID_QUERY` or
+`ESPICE_RESULT_UNAVAILABLE` there means ESPice's own query bookkeeping
+broke, which is a bug worth reporting.
 
 **Buffers.** Calls that copy out take `(buffer, capacity, &required)`. On
 `ESPICE_OK` or `ESPICE_BUFFER_TOO_SMALL` they set `required` (strings
@@ -200,7 +208,12 @@ once with capacity 0, allocate `required`, call again. NULL is allowed
 only with capacity 0.
 
 **Threads.** Calls on one handle must not overlap, reads and destroy
-included. Different handles are independent. Parallelism happens inside
+included. Different handles are independent, and calls on them may run
+on any threads at once. A handle is a generation-checked token into one
+process-wide table, not an address; each call checks it under a lock that
+guards a few loads, so the check costs nothing next to a simulation. A
+value that never came from `espice_create` is rejected unless its bits
+happen to match a live handle's. Parallelism happens inside
 `espice_run_all` and `espice_advance_ready`.
 
 **Output.** A `.hdl` model's display-task lines (`$strobe`, `$display`
