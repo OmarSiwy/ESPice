@@ -7,7 +7,7 @@ else	src/analysis/pss/pac.zig	2
 else	src/analysis/session.zig	5
 else	src/analysis/tests/transient.zig	1
 else	src/analysis/validate.zig	2
-else	src/c_api.zig	4
+else	src/c_api.zig	3
 else	src/core/query.zig	1
 else	src/device/abi.zig	1
 else	src/device/bind.zig	2

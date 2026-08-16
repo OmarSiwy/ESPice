@@ -568,7 +568,10 @@ fn status(err: anyerror) u32 {
         error.InvalidHandle => .invalid_handle,
         // A full handle table is a capacity, reported like any allocation.
         error.TooManyProblems => .out_of_memory,
-        else => .failed,
+        // `err` is anyerror (Handle.last_error keeps any name), so no
+        // exhaustive switch exists: every error not named above is a
+        // numerical, I/O or output failure.
+        else => .failed, // else: FAILED in include/espice.h
     };
     return @backingInt(code);
 }

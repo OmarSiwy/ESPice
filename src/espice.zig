@@ -69,8 +69,11 @@ pub const Options = struct {
 
 /// Why publication stopped (`Problem.output_error`): an encoder or file
 /// error from the output session (`publish`, `endStream`) or the Touchstone
-/// file writer (`output.write`), `error.OutOfMemory` included.
-pub const DeliveryError = errorOf(output.Session.publish) || errorOf(output.Session.endStream) || errorOf(output.write);
+/// file writer (`output.write`), `error.OutOfMemory` included. The session
+/// lookups' `error.InvalidQuery` and `error.ResultUnavailable` mean the
+/// query bookkeeping broke (a bug), reported instead of a panic.
+pub const DeliveryError = errorOf(output.Session.publish) || errorOf(output.Session.endStream) || errorOf(output.write) ||
+    errorOf(analysis.session.Session.info) || errorOf(analysis.session.Session.result) || errorOf(analysis.session.Session.query);
 
 fn errorOf(comptime f: anytype) type {
     return @typeInfo(@typeInfo(@TypeOf(f)).@"fn".return_type.?).error_union.error_set;
@@ -753,6 +756,8 @@ pub const Problem = struct {
             output.measureValues(deck.measures, info.kind, try session.result(id), values);
             for (t.results, out[p * m ..][0..m]) |card, *r| {
                 const measure = deck.measures[card];
+                // Never null: Tuner.init refuses a RESULTS card without GOAL=
+                // (`goalError(0) != null`), and only the goal decides null.
                 if (measure.analysis == info.kind) r.* = measure.goalError(values[card]).?;
             }
         };
@@ -766,36 +771,42 @@ pub const Problem = struct {
 
     fn deliverFrom(self: *Problem, session: *const analysis.session.Session, next_output: *usize, deck_title: []const u8) void {
         if (self.delivery_error != null) return;
-        while (next_output.* < session.outputs.items.len) {
-            const id = session.outputs.items[next_output.*];
-            const status = (session.info(id) catch unreachable).status;
-            if (!status.terminal()) return;
-            if (session == &self.session and self.streaming == id) {
-                self.streaming = null;
-                if (status != .complete) self.delivery.abortStream() else {
-                    const res = session.result(id) catch unreachable;
-                    self.delivery.endStream(self.io, res.npoints, res.varnames.len) catch |err| {
-                        self.delivery_error = err;
-                        return;
-                    };
-                }
-            } else if (status == .complete) {
-                const res = session.result(id) catch unreachable;
-                var lap = if (self.timing_in_depth) std.Io.Timestamp.now(self.io, .awake) else null;
-                defer timingLap(self.io, &lap, "output delivery");
-                self.delivery.publish(self.io, .{ .title = deck_title, .result = res }) catch |err| {
-                    self.delivery_error = err;
-                    return;
-                };
-                const job = session.query(id) catch unreachable;
-                if (job == .sp) if (job.sp.lin) |lin| if (lin.touchstone)
-                    self.writeTouchstone(lin.file, job.sp.ports, .{ .title = deck_title, .result = res }) catch |err| {
-                        self.delivery_error = err;
-                        return;
-                    };
-            }
-            next_output.* += 1;
+        while (next_output.* < session.outputs.items.len) : (next_output.* += 1) {
+            const delivered = self.deliverOne(session, session.outputs.items[next_output.*], deck_title) catch |err| {
+                self.delivery_error = err;
+                return;
+            };
+            if (!delivered) return;
         }
+    }
+
+    /// Publishes (or ends the stream of) `id` once it is terminal; false
+    /// while it still runs. `session.outputs` holds only appended ids, and a
+    /// row reads `.complete` only after its executor published, so the
+    /// session lookups fail only if Session breaks that bookkeeping; the
+    /// error then stops delivery like any output failure instead of
+    /// aborting a C host.
+    fn deliverOne(self: *Problem, session: *const analysis.session.Session, id: QueryId, deck_title: []const u8) DeliveryError!bool {
+        const status = (try session.info(id)).status;
+        if (!status.terminal()) return false;
+        if (session == &self.session and self.streaming == id) {
+            self.streaming = null;
+            if (status != .complete) {
+                self.delivery.abortStream();
+                return true;
+            }
+            const res = try session.result(id);
+            try self.delivery.endStream(self.io, res.npoints, res.varnames.len);
+        } else if (status == .complete) {
+            const res = try session.result(id);
+            var lap = if (self.timing_in_depth) std.Io.Timestamp.now(self.io, .awake) else null;
+            defer timingLap(self.io, &lap, "output delivery");
+            try self.delivery.publish(self.io, .{ .title = deck_title, .result = res });
+            const job = try session.query(id);
+            if (job == .sp) if (job.sp.lin) |lin| if (lin.touchstone)
+                try self.writeTouchstone(lin.file, job.sp.ports, .{ .title = deck_title, .result = res });
+        }
+        return true;
     }
 
     /// Writes a `.lin format=touchstone` result as `<file>.s<N>p` beside the
