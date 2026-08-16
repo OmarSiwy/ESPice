@@ -210,6 +210,8 @@ const handles = struct {
 /// What a token names. `threaded` lives here, at a stable address, because
 /// the Problem's Io points into it.
 const Handle = struct {
+    /// What `create` allocated the handle and its Problem from.
+    gpa: std.mem.Allocator,
     threaded: std.Io.Threaded,
     problem: *api.Problem,
     /// Read by `espice_error_message`; set by every failing call.
@@ -238,7 +240,7 @@ export fn espice_create(options: ?*const CreateOptions, out: ?*?*Token, diagnost
     destination.* = null;
     const buffer = mutableSlice(u8, diagnostic, diagnostic_capacity) catch return status(error.InvalidArgument);
     writeTruncated(buffer, "");
-    destination.* = create(options orelse {
+    destination.* = create(allocator, options orelse {
         writeTruncated(buffer, "InvalidArgument");
         return status(error.InvalidArgument);
     }) catch |err| {
@@ -248,7 +250,8 @@ export fn espice_create(options: ?*const CreateOptions, out: ?*?*Token, diagnost
     return 0;
 }
 
-fn create(options: *const CreateOptions) !*Token {
+/// `espice_create` over `gpa`, which the handle keeps for its own free.
+fn create(gpa: std.mem.Allocator, options: *const CreateOptions) !*Token {
     // A caller built before the toolchain fields passes a struct ending at
     // `output_path`; the fields past its size are never read.
     if (options.abi_version != abi_version or options.struct_size < @offsetOf(CreateOptions, "zig_path")) return error.AbiMismatch;
@@ -260,8 +263,8 @@ fn create(options: *const CreateOptions) !*Token {
     const zig_path = if (toolchain) try constSlice(u8, options.zig_path.data, options.zig_path.len) else "";
     const share_path = if (toolchain) try constSlice(u8, options.share_path.data, options.share_path.len) else "";
     const live_bytes = if (live) try constSlice(Bytes, options.live_params, options.live_param_count) else &.{};
-    const live_params = try allocator.alloc([]const u8, live_bytes.len);
-    defer allocator.free(live_params);
+    const live_params = try gpa.alloc([]const u8, live_bytes.len);
+    defer gpa.free(live_params);
     for (live_bytes, live_params) |b, *name| name.* = try constSlice(u8, b.data, b.len);
     if (source.len == 0 or options.explicit_gpu > 1) return error.InvalidArgument;
     const config: api.Options = .{
@@ -286,15 +289,16 @@ fn create(options: *const CreateOptions) !*Token {
         },
         .live_params = live_params,
     };
-    const handle = try allocator.create(Handle);
-    errdefer allocator.destroy(handle);
+    const handle = try gpa.create(Handle);
+    errdefer gpa.destroy(handle);
     // Query workers use std.Thread directly. The single-threaded Io still
     // supplies real futexes, and unlike Threaded.init it installs no
     // process-wide signal handlers inside the host application.
+    handle.gpa = gpa;
     handle.threaded = .init_single_threaded;
     errdefer handle.threaded.deinit();
     handle.last_error = null;
-    handle.problem = try api.Problem.init(allocator, handle.threaded.io(), config);
+    handle.problem = try api.Problem.init(gpa, handle.threaded.io(), config);
     errdefer handle.problem.deinit();
     return handles.insert(handle);
 }
@@ -304,7 +308,7 @@ export fn espice_destroy(handle: ?*Token) u32 {
     const h = handles.remove(handle orelse return 0) catch |err| return status(err);
     h.problem.deinit();
     h.threaded.deinit();
-    allocator.destroy(h);
+    h.gpa.destroy(h);
     return 0;
 }
 
@@ -574,4 +578,51 @@ fn status(err: anyerror) u32 {
         else => .failed, // else: FAILED in include/espice.h
     };
     return @backingInt(code);
+}
+
+// Expected: every induced failure surfaces as OUT_OF_MEMORY from the call
+// that hit it, and destroy then frees everything (the C contract for a
+// failed call, include/espice.h); the testing allocator checks the frees.
+test "create, append and run_all report OUT_OF_MEMORY at every allocation failure and leak nothing" {
+    const backing: std.mem.Allocator = .{ .ptr = std.testing.allocator.ptr, .vtable = &sweep_vtable };
+    try std.testing.checkAllAllocationFailures(backing, createAppendRun, .{});
+}
+
+/// std.testing.allocator with resize and remap refused: every growth is a
+/// counted allocation, so the sweep's count is deterministic.
+const sweep_vtable: std.mem.Allocator.VTable = .{
+    .alloc = sweepAlloc,
+    .resize = std.mem.Allocator.noResize,
+    .remap = std.mem.Allocator.noRemap,
+    .free = sweepFree,
+};
+
+fn sweepAlloc(_: *anyopaque, n: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
+    return std.testing.allocator.rawAlloc(n, alignment, ret);
+}
+
+fn sweepFree(_: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
+    std.testing.allocator.rawFree(memory, alignment, ret);
+}
+
+fn createAppendRun(gpa: std.mem.Allocator) !void {
+    const deck = "C sweep\nV1 in 0 dc 1 ac 1\nR1 in out 1k\nC1 out 0 1u\n.op\n.end\n";
+    var options: CreateOptions = undefined;
+    espice_default_options(&options);
+    options.source_kind = 1;
+    options.source = .{ .data = deck.ptr, .len = deck.len };
+    const token = try create(gpa, &options);
+    defer std.debug.assert(espice_destroy(token) == 0);
+    const ac = ".ac dec 1 1 10\n";
+    var ids: [1]u32 = undefined;
+    var n: usize = 0;
+    try expectOk(espice_append_directives(token, .{ .data = ac, .len = ac.len }, &ids, ids.len, &n));
+    try expectOk(espice_run_all(token));
+}
+
+/// OUT_OF_MEMORY as `error.OutOfMemory`, which the sweep expects at an
+/// induced failure; any other failing code fails the test.
+fn expectOk(code: u32) !void {
+    if (code == @backingInt(Code.out_of_memory)) return error.OutOfMemory;
+    if (code != 0) return error.UnexpectedStatus;
 }

@@ -348,6 +348,9 @@ pub fn build(b: *std.Build) void {
     c_api_test_mod.link_libc = true;
     c_api_test_mod.linkLibrary(c_api_lib);
     const run_c_api_tests = t.run(c_api_test_mod, &.{}, false);
+    // c_api.zig's in-file tests (the allocation-failure sweep); its module
+    // already carries the device objects.
+    const run_c_api_unit_tests = t.run(c_api_mod, &.{}, false);
 
     // analysis_mod predates emitKernels, so its `gompute_kernels` import is wired here.
     if (exe.root_module.import_table.get("gompute_kernels")) |artifacts|
@@ -377,6 +380,7 @@ pub fn build(b: *std.Build) void {
             &.{
                 t.run(M.make(b.path("src/tests/espice.zig"), &.{.{ .name = "espice", .module = espice_mod }}), &.{}, true),
                 run_c_api_tests,
+                run_c_api_unit_tests,
                 // The CLI's own tests; the exe's module already carries the device objects.
                 t.run(exe.root_module, &.{}, false),
             },
@@ -415,7 +419,9 @@ pub fn build(b: *std.Build) void {
         for (suite[2]) |r| step.dependOn(&r.step);
         test_step.dependOn(step);
     }
-    b.step("test-c-api", "Run C ABI boundary tests").dependOn(&run_c_api_tests.step);
+    const c_api_step = b.step("test-c-api", "Run C ABI boundary tests");
+    c_api_step.dependOn(&run_c_api_tests.step);
+    c_api_step.dependOn(&run_c_api_unit_tests.step);
 
     // The grammar oracle: each tests/grammar/*.peg against the frontend, over
     // the fixture corpus (read from the repo root) and generated inputs.

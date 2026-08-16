@@ -366,3 +366,151 @@ test "C set_params runs later queries at new .param values without a re-parse (#
     try t.expectEqual(@as(u32, c.ESPICE_INVALID_ARGUMENT), c.espice_set_params(handle, null, null, 1));
     try t.expectEqual(@as(u32, c.ESPICE_INVALID_ARGUMENT), c.espice_set_params(null, null, null, 0));
 }
+
+/// A problem over netlist text; fails the test unless create returns OK.
+fn createDeck(deck: []const u8) !*c.espice_problem {
+    var options: c.espice_create_options = undefined;
+    c.espice_default_options(&options);
+    options.source_kind = c.ESPICE_BYTES;
+    options.source = .{ .data = deck.ptr, .len = deck.len };
+    var handle: ?*c.espice_problem = null;
+    try std.testing.expectEqual(@as(u32, c.ESPICE_OK), c.espice_create(&options, &handle, null, 0));
+    return handle.?;
+}
+
+// Red before #143: the old espice_destroy freed the handle, and every later
+// call read the freed memory (an OK from stale bytes, or a crash) and a
+// second destroy freed it twice. Status 8 did not exist, so no outcome of
+// the old code could equal INVALID_HANDLE.
+test "C calls on a destroyed handle, and a second destroy, return INVALID_HANDLE (#143)" {
+    const t = std.testing;
+    const stale_code: u32 = c.ESPICE_INVALID_HANDLE;
+    const deck = "C stale\nV1 in 0 1\nR1 in 0 1k\n.op\n.end\n";
+    const handle = try createDeck(deck);
+    try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_destroy(handle));
+    var u: u32 = 0;
+    var n: usize = 0;
+    var info: c.espice_query_info = undefined;
+    var event: c.espice_advance_event = undefined;
+    var result: c.espice_result_info = undefined;
+    var view: [*c]const f64 = null;
+    const all: c.espice_scope = .{ .kind = c.ESPICE_ALL, .id = 0 };
+    const empty: c.espice_bytes = .{ .data = null, .len = 0 };
+    try t.expectEqual(stale_code, c.espice_query_count(handle, &u));
+    try t.expectEqual(stale_code, c.espice_get_query_info(handle, 0, &info));
+    try t.expectEqual(stale_code, c.espice_ready_queries(handle, all, null, 0, &n));
+    try t.expectEqual(stale_code, c.espice_advance(handle, 0, &event));
+    try t.expectEqual(stale_code, c.espice_advance_ready(handle, null, 0, 1, null, 0, &n));
+    try t.expectEqual(stale_code, c.espice_run_all(handle));
+    try t.expectEqual(stale_code, c.espice_append_directives(handle, empty, null, 0, &n));
+    try t.expectEqual(stale_code, c.espice_set_params(handle, null, null, 0));
+    try t.expectEqual(stale_code, c.espice_get_result_info(handle, 0, &result));
+    try t.expectEqual(stale_code, c.espice_copy_result(handle, 0, null, 0, &n));
+    try t.expectEqual(stale_code, c.espice_result_view(handle, 0, &view, &n));
+    try t.expectEqual(stale_code, c.espice_copy_result_name(handle, 0, 0, null, 0, &n));
+    try t.expectEqual(stale_code, c.espice_print(handle, null, null, 0, &n));
+    try t.expectEqual(stale_code, c.espice_error_message(handle, null, 0, &n));
+    try t.expectEqual(stale_code, c.espice_query_error_message(handle, 0, null, 0, &n));
+    try t.expectEqual(stale_code, c.espice_destroy(handle));
+    // The next problem may take the same slot; the old token stays stale.
+    const next = try createDeck(deck);
+    defer _ = c.espice_destroy(next);
+    try t.expect(next != handle);
+    try t.expectEqual(stale_code, c.espice_query_count(handle, &u));
+    try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_query_count(next, &u));
+    // Slot 0 is never handed out, so this value names no problem.
+    const foreign: *c.espice_problem = @ptrFromInt(0x1000);
+    try t.expectEqual(stale_code, c.espice_query_count(foreign, &u));
+    try t.expectEqual(stale_code, c.espice_destroy(foreign));
+    try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_destroy(null));
+}
+
+// Each step's expected code comes from the model, not from the
+// implementation: a live token answers OK, a destroyed one INVALID_HANDLE;
+// a query is pending after append, complete after run_all, and unknown
+// after advance (one quantum may or may not finish it, or its prerequisite).
+test "C random create/append/advance/result/destroy sequences match a model of valid states" {
+    const t = std.testing;
+    const ok: u32 = c.ESPICE_OK;
+    const deck = "C model\nV1 in 0 dc 1 ac 1\nR1 in out 1k\nC1 out 0 1u\n.op\n.end\n";
+    const ac = ".ac dec 1 1 10\n";
+    const State = enum { pending, complete, unknown };
+    const Live = struct { token: *c.espice_problem, ids: [8]u32 = undefined, states: [8]State = undefined, n: u8 = 0 };
+    for ([_]u64{ 1, 2, 3 }) |seed| {
+        var prng = std.Random.DefaultPrng.init(seed);
+        const random = prng.random();
+        var live: [3]Live = undefined;
+        var live_len: usize = 0;
+        var stale: [64]*c.espice_problem = undefined;
+        var stale_len: usize = 0;
+        defer for (live[0..live_len]) |p| {
+            _ = c.espice_destroy(p.token);
+        };
+        for (0..120) |_| {
+            const step = random.uintLessThan(u8, 6);
+            if (live_len == 0 or (step == 0 and live_len < live.len)) {
+                const token = try createDeck(deck);
+                for (stale[0..stale_len]) |old| try t.expect(token != old);
+                live[live_len] = .{ .token = token };
+                // The deck's .op is query 0.
+                live[live_len].ids[0] = 0;
+                live[live_len].states[0] = .pending;
+                live[live_len].n = 1;
+                live_len += 1;
+                continue;
+            }
+            const p = &live[random.uintLessThan(usize, live_len)];
+            const k = random.uintLessThan(u8, p.n);
+            var n: usize = 0;
+            switch (step) {
+                0, 1 => if (p.n < p.ids.len) {
+                    var id: u32 = c.ESPICE_NO_QUERY;
+                    try t.expectEqual(ok, c.espice_append_directives(p.token, .{ .data = ac, .len = ac.len }, &id, 1, &n));
+                    try t.expectEqual(@as(usize, 1), n);
+                    for (p.ids[0..p.n]) |earlier| try t.expect(id != earlier);
+                    p.ids[p.n] = id;
+                    p.states[p.n] = .pending;
+                    p.n += 1;
+                },
+                2 => {
+                    var event: c.espice_advance_event = undefined;
+                    try t.expectEqual(ok, c.espice_advance(p.token, p.ids[k], &event));
+                    try t.expectEqual(p.ids[k], event.requested);
+                    for (p.states[0..p.n]) |*s| if (s.* == .pending) {
+                        s.* = .unknown;
+                    };
+                },
+                3 => {
+                    try t.expectEqual(ok, c.espice_run_all(p.token));
+                    @memset(p.states[0..p.n], .complete);
+                },
+                4 => {
+                    var result: c.espice_result_info = undefined;
+                    const code = c.espice_get_result_info(p.token, p.ids[k], &result);
+                    switch (p.states[k]) {
+                        .pending => try t.expectEqual(@as(u32, c.ESPICE_RESULT_UNAVAILABLE), code),
+                        .complete => try t.expectEqual(ok, code),
+                        .unknown => try t.expect(code == ok or code == @as(u32, c.ESPICE_RESULT_UNAVAILABLE)),
+                    }
+                },
+                5 => {
+                    try t.expectEqual(ok, c.espice_destroy(p.token));
+                    if (stale_len < stale.len) {
+                        stale[stale_len] = p.token;
+                        stale_len += 1;
+                    }
+                    p.* = live[live_len - 1];
+                    live_len -= 1;
+                },
+                else => unreachable, // else: uintLessThan(u8, 6)
+            }
+            // Every destroyed token stays stale, whatever reused its slot.
+            if (stale_len > 0) {
+                var u: u32 = 0;
+                const old = stale[random.uintLessThan(usize, stale_len)];
+                try t.expectEqual(@as(u32, c.ESPICE_INVALID_HANDLE), c.espice_query_count(old, &u));
+                try t.expectEqual(@as(u32, c.ESPICE_INVALID_HANDLE), c.espice_destroy(old));
+            }
+        }
+    }
+}
