@@ -88,6 +88,33 @@ pub fn Dual(comptime N: usize) type {
         pub fn log(a: Self) Self {
             return .{ .v = dmath.log(a.v), .d = a.d * splat(1.0 / a.v) };
         }
+        /// LRM 4.3.1 Table 4-14 names the C library forms, and `contract.zig`
+        /// requires them of the S protocol as PRIMITIVES rather than `exp(x)-1`
+        /// and `log(1+x)`, because those two compositions cancel: at x = 1e-17,
+        /// `1+x` rounds to 1 and `log(1+x)` answers 0 where the true value is
+        /// 1e-17. A VerA-generated device calls these directly (that is what
+        /// `no field or member function named 'log1p'` was), so their absence
+        /// here was a hole in this host's half of the contract, not a device bug.
+        ///
+        /// `gompute.math` has no `log1p`/`expm1` and this type also compiles for
+        /// nvptx, so `std.math` is out. These are the standard Kahan corrections,
+        /// which need only `exp`/`log` and are accurate to within an ulp or two
+        /// across the range where the naive form loses everything.
+        pub fn expm1(a: Self) Self {
+            const u = dmath.exp(a.v);
+            const v = if (u == 1.0) a.v // x so small that e^x rounded to 1
+            else if (u - 1.0 == -1.0) -1.0 // x so negative that e^x rounded to 0
+            else (u - 1.0) * a.v / dmath.log(u);
+            // d/dx (e^x - 1) = e^x, and `u` is that derivative already.
+            return .{ .v = v, .d = a.d * splat(u) };
+        }
+        pub fn log1p(a: Self) Self {
+            const u = 1.0 + a.v;
+            // `a.v / (u - 1.0)` is the correction for the rounding of 1 + x: it
+            // is 1 when 1+x is exact and slightly off when it is not.
+            const v = if (u == 1.0) a.v else dmath.log(u) * (a.v / (u - 1.0));
+            return .{ .v = v, .d = a.d * splat(1.0 / u) };
+        }
         pub fn sqrt(a: Self) Self {
             const s = @sqrt(a.v);
             return .{ .v = s, .d = a.d * splat(if (s > 0.0) 0.5 / s else 0.0) };
@@ -147,6 +174,8 @@ pub const StateCtlOp = contract.StateCtlOp;
 pub const UpdateResult = contract.UpdateResult;
 pub const AnalysisKind = contract.AnalysisKind;
 pub const SimState = contract.SimState;
+pub const LimitResult = contract.LimitResult;
+pub const Constant = contract.Constant;
 
 // ===========================================================================
 // Circuit-facing types
@@ -566,8 +595,12 @@ fn evalRange(comptime D: type, sink: anytype, first: u32, end: u32, t: f64, limi
 }
 
 /// SPICE-style limiting pass: cur = local(x); old = lim (once engaged) else
-/// local(x_old); lim = D.limit(cur, old). Returns 1.0 if any FLAGGED component
-/// was limited (pnjlim forces another Newton iteration; fetlim/limvds do not).
+/// local(x_old); lim = D.limit(cur, old). Returns 1.0 if any instance reported
+/// `converged = false` — the DEVICE decides whether its clamp was significant
+/// enough to force another Newton iteration (pnjlim says yes, a cosmetic
+/// fetlim/limvds clamp says no). This replaces the old `limit_flag_unknowns`
+/// table, which could only answer that positionally and so could not tell a
+/// large clamp from a small one on the same unknown.
 fn limitRange(comptime D: type, sink: anytype, first: u32, end: u32, lim_active: bool) f64 {
     const n_u = comptime contract.nU(D);
     var flag: f64 = 0;
@@ -581,17 +614,8 @@ fn limitRange(comptime D: type, sink: anytype, first: u32, end: u32, lim_active:
             old[u] = if (lim_active) sink.lim(id, u) else sink.xOld(gi);
         }
         const lm = D.limit(sink.model(id), sink.inst(id), cur, old);
-        inline for (0..n_u) |u| {
-            const flags: bool = comptime blk: {
-                if (!@hasDecl(D, "limit_flag_unknowns")) break :blk true;
-                for (D.limit_flag_unknowns) |fu| {
-                    if (@intFromEnum(fu) == u) break :blk true;
-                }
-                break :blk false;
-            };
-            if (flags and lm[u] != cur[u]) flag = 1;
-            sink.setLim(id, u, lm[u]);
-        }
+        if (!lm.converged) flag = 1;
+        inline for (0..n_u) |u| sink.setLim(id, u, lm.x[u]);
     }
     return flag;
 }
@@ -628,8 +652,8 @@ pub fn ProtoStore(comptime D: type) type {
         pub fn finalize(ctx: *anyopaque, gpa: std.mem.Allocator, pv: PatternView) anyerror!Batch {
             const has_prep_cache = @hasDecl(D, "PrepCache");
             const has_q = @hasDecl(D, "q");
-            const const_g = @hasDecl(D, "constant_g") and D.constant_g;
-            const const_c = @hasDecl(D, "constant_c") and D.constant_c;
+            const const_g = @hasDecl(D, "constant") and D.constant.g;
+            const const_c = @hasDecl(D, "constant") and D.constant.c;
             const has_attempt_decl = @hasDecl(D, "attempt");
             const self: *Self = @ptrCast(@alignCast(ctx));
             const count = self.models.items.len;
@@ -765,6 +789,23 @@ pub fn ProtoStore(comptime D: type) type {
     };
 }
 
+// ponytail: the two predicates below are PROVABLY FALSE for every device the
+// contract now admits — `histInject` and `PrepCache` were deleted from
+// `contract.allowed_pub_decls`, so a device declaring either fails validation
+// as a stray pub decl. Everything they gate (HistoryBuffer/HistLookup, the
+// prep-cache dedup, the per-lane eval cache, `gpuEligible`'s first and third
+// terms) is therefore comptime-dead and compiles to nothing.
+//
+// Kept rather than deleted on purpose: it is ~270 lines threaded through the
+// hot eval loop and the ParEval lane machinery, the deletion has zero
+// behavioural payoff, and the risk sits in the one file where a mistake is
+// silent and fast. See VerA/TODO.md "Dead code in the consumer" — delete it
+// with the history-subsystem landing that also touches Circuit/tran/pss, not
+// piecemeal.
+//
+// FastVAF owns delay history now: `absdelay` lowers to a private ring in
+// `Instance` advanced by `updateState`, not to a host callback.
+
 fn hasHistoryDecl(comptime D: type) bool {
     return @hasDecl(D, "histInject");
 }
@@ -783,8 +824,8 @@ pub fn DeviceBatch(comptime D: type) type {
     const has_state = @hasDecl(D, "State");
     const has_hist = hasHistoryDecl(D);
     const has_prep_cache = @hasDecl(D, "PrepCache");
-    const const_g = @hasDecl(D, "constant_g") and D.constant_g;
-    const const_c = @hasDecl(D, "constant_c") and D.constant_c;
+    const const_g = @hasDecl(D, "constant") and D.constant.g;
+    const const_c = @hasDecl(D, "constant") and D.constant.c;
     const can_dedup = canDedup(D);
     const can_dedup_q = canDedupQ(D);
 
@@ -1829,7 +1870,11 @@ fn addSimd(dst: []f64, src: []const f64) void {
 // type-erased Proto the builtin path uses. layoutHash() guards ABI drift.
 // ===========================================================================
 
-pub const abi_version: u32 = 4;
+// Bumped 4 -> 5 for the `derive` slot below: `DeviceVtable` grew a field, and a
+// `.so` built against version 4 returns a pointer to its own shorter struct, so
+// reading the new field off it is UB. The check in `DynDevice.open` is what makes
+// the bump load-bearing rather than decorative.
+pub const abi_version: u32 = 5;
 
 pub const DeviceVtable = struct {
     name: []const u8,
@@ -1841,6 +1886,13 @@ pub const DeviceVtable = struct {
     init_instance: *const fn ([*]u8) void,
     set_model_param: *const fn ([*]u8, []const u8, f64) bool,
     set_instance_param: *const fn ([*]u8, []const u8, f64) bool,
+    /// LRM 6.3.4 / 3.4.5: a parameter whose value is an expression over OTHER
+    /// parameters, plus every localparam. The Model is a flat struct, so a host
+    /// write to a base parameter cannot reach what was declared over it — the
+    /// device closes that gap here, and the contract requires the host to call it
+    /// once after the last `set_model_param` and before anything READS the model.
+    /// Null when the module has no such parameter, which is the common case.
+    derive: ?*const fn (model: [*]u8) void,
     collapse: ?*const fn (model: [*]const u8, instance: [*]const u8, out: [*]i32) void,
     proto_create: *const fn (std.mem.Allocator) anyerror!Proto,
     proto_add: *const fn (ctx: *anyopaque, gpa: std.mem.Allocator, model: [*]const u8, instance: [*]const u8, nodes: [*]const u32) anyerror!void,
@@ -1929,6 +1981,7 @@ fn Impl(comptime D: type, comptime device_name: []const u8) type {
             .init_instance = initBlob(D.Instance),
             .set_model_param = setParam(D.Model),
             .set_instance_param = setParam(D.Instance),
+            .derive = if (@hasDecl(D, "derive")) deriveFn else null,
             .collapse = if (@hasDecl(D, "collapse")) collapseFn else null,
             .proto_create = protoCreate,
             .proto_add = protoAdd,
@@ -1968,6 +2021,11 @@ fn Impl(comptime D: type, comptime device_name: []const u8) type {
                     return false;
                 }
             }.f;
+        }
+
+        fn deriveFn(model: [*]u8) void {
+            const m: *D.Model = @ptrCast(@alignCast(model));
+            D.derive(m);
         }
 
         fn collapseFn(model: [*]const u8, instance: [*]const u8, out: [*]i32) void {

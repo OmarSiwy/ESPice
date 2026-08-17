@@ -44,10 +44,17 @@ module coupled_tlines(p1, p2, pr, n1, n2, nr);
 
     // §1.5: this topology IS the 2-conductor even/odd special case. ngspice's
     // instance parameter `dimension` (cpl.c CPL_DIM, "number of coupled
-    // lines") is declared with a [2:2] range so a dimension=3 card is a
-    // parameter-range error at bind time instead of silently running a 3-line
-    // P card on 2-line topology (the 7.5e34 blowup of §1.5 lines 99-103).
-    parameter integer dimension = 2 from [2:2];
+    // lines") is range-limited so a dimension=3 card is a parameter-range error
+    // at bind time instead of silently running a 3-line P card on 2-line
+    // topology (the 7.5e34 blowup of §1.5 lines 99-103).
+    //
+    // The range is `[2:3)` and not `[2:2]`, which is what it used to say: LRM
+    // 3.4.2 requires that "the first expression in the range shall be
+    // numerically smaller than the second expression in the range", so a
+    // both-ends-inclusive single-value range is not a legal spelling of "exactly
+    // 2" — VerA refuses it with E0347. On an INTEGER parameter `[2:3)` is the
+    // same one-element set, because 2 is included and 3 is not.
+    parameter integer dimension = 2 from [2:3);
 
     // Per-unit-length RLGC. Ranges are permissive because ngspice does not
     // reject out-of-range entries, it floors them (see rc/rmc below).
