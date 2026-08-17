@@ -255,11 +255,11 @@ pub const FreqSolver = struct {
         self.solveRhs(rhs, x_out);
     }
 
-    /// Assembles and factors G + jωC. Right-hand sides at this ω then
-    /// need only `solveRhs`/`solveRhsT`. Fails with `error.Singular`
-    /// (dense) or `error.SingularMatrix` (sparse) on a singular A(ω), after
-    /// which `solveRhs` must not run until a `setOmega` succeeds.
-    pub fn setOmega(self: *Self, omega: f64) !void {
+    // Assembles and factors G + jωC. Right-hand sides at this ω then
+    // need only `solveRhs`/`solveRhsT`. Fails with `error.Singular`
+    // (dense) or `error.SingularMatrix` (sparse) on a singular A(ω), after
+    // which `solveRhs` must not run until a `setOmega` succeeds.
+    fn setOmega(self: *Self, omega: f64) !void {
         try self.setOmegaDyn(omega, .{}, 0);
     }
 
@@ -271,20 +271,20 @@ pub const FreqSolver = struct {
         }
     }
 
-    /// Solves with the current factorization, which `setOmega` must have
-    /// left; both slices are 2n long and may alias.
-    pub fn solveRhs(self: *Self, rhs: []const f64, x_out: []f64) void {
+    // Solves with the current factorization, which `setOmega` must have
+    // left; both slices are 2n long and may alias.
+    fn solveRhs(self: *Self, rhs: []const f64, x_out: []f64) void {
         switch (self.strategy) {
             .dense => |*d| dense_lu.solveFactored(self.nn, d.a_lu, d.piv, rhs, x_out),
             .sp => |*s| s.slv.solve(rhs, x_out),
         }
     }
 
-    /// Adjoint solve with the current factorization: the transpose of the
-    /// stacked-real system, which as a complex system is A^H x = rhs
-    /// (A = G + jωC, so A^H = G^T − jωC^T). A caller that needs A^T's
-    /// solution conjugates this one; |x| is the same either way.
-    pub fn solveRhsT(self: *Self, rhs: []const f64, x_out: []f64) void {
+    // Adjoint solve with the current factorization: the transpose of the
+    // stacked-real system, which as a complex system is A^H x = rhs
+    // (A = G + jωC, so A^H = G^T − jωC^T). A caller that needs A^T's
+    // solution conjugates this one; |x| is the same either way.
+    fn solveRhsT(self: *Self, rhs: []const f64, x_out: []f64) void {
         switch (self.strategy) {
             .dense => |*d| dense_lu.solveFactoredT(self.nn, d.a_lu, d.piv, rhs, x_out),
             .sp => |*s| s.slv.solveT(rhs, x_out),
@@ -311,8 +311,9 @@ pub const FreqSolver = struct {
     /// (nr stacked 2n vectors), with `dyn`'s terms added to each A(ω), W
     /// frequencies per LaneLu pass;
     /// `x_out[(k*nr + r)*2n..][0..2n]` receives ω_k for rhs r, so one
-    /// factorization serves every rhs. `adjoint` selects A^H (see
-    /// `solveRhsT`), not A^T: conjugate the solution for A^T's. The dense
+    /// factorization serves every rhs. `adjoint` solves the transpose of the
+    /// stacked-real system, A^H = G^T − jωC^T, not A^T: conjugate the
+    /// solution for A^T's (|x| is the same either way). The dense
     /// strategy, a non-LU engine and any lane whose refactor fails take the
     /// per-ω scalar path. The scalar factorization afterwards holds some ω
     /// of the batch. Allocates the lane planes on first use. Asserts that
@@ -540,6 +541,9 @@ pub const FreqSolver = struct {
     /// Private kernels and types for tests.zig; void outside test builds.
     pub const test_access = if (@import("builtin").is_test) .{
         .W = W,
+        .setOmega = setOmega,
+        .solveRhs = solveRhs,
+        .solveRhsT = solveRhsT,
         .solveBatchSerial = solveBatchSerial,
         .setOmegaSparse = setOmegaSparse,
         .indexDyn = indexDyn,

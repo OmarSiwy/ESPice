@@ -15,6 +15,7 @@
 //! std only: the kernel root compiles this file for NVPTX and AMDGCN.
 
 const std = @import("std");
+const assert = std.debug.assert;
 
 /// Lanes per device refactor block. E2 on logic_bsim4_10k and
 /// chain_bsim4_10k: 128 or 256 lanes were 1.0-1.8x slower
@@ -551,9 +552,15 @@ pub fn runHost(t: Tab, b: HostBufs, stamp: u32, threads: u32) !?u32 {
     return runHostCap(col_max, t, b, stamp, threads);
 }
 
-/// `runHost` with the refactor's scratch capped at `cap` slots; 0 runs
-/// every column in `val`, the path the device takes past `col_max`.
-pub fn runHostCap(comptime cap: u32, t: Tab, b: HostBufs, stamp: u32, threads: u32) !?u32 {
+/// Private functions for tests.zig; void outside test builds.
+pub const test_access = if (@import("builtin").is_test) .{ .runHostCap = runHostCap } else {};
+
+// `runHost` with the refactor's scratch capped at `cap` slots; 0 runs
+// every column in `val`, the path the device takes past `col_max`.
+fn runHostCap(comptime cap: u32, t: Tab, b: HostBufs, stamp: u32, threads: u32) !?u32 {
+    assert(b.idx.len >= t.n_idx);
+    assert(b.val.len >= t.n_val);
+    assert(b.sync.len >= t.syncLen());
     const H = Kernels(HostSy, cap, 1);
     @memset(b.sync[0..sync_header], 0);
     const x = @constCast(b.idx.ptr);

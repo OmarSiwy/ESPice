@@ -31,7 +31,7 @@ pub const Ws = struct {
     }
 
     /// `alloc`, every word set to `fill`.
-    pub fn allocSet(w: *Ws, m: usize, fill: u32) Error![]u32 {
+    fn allocSet(w: *Ws, m: usize, fill: u32) Error![]u32 {
         const s = try w.alloc(m);
         @memset(s, fill);
         return s;
@@ -48,7 +48,13 @@ pub const Ws = struct {
     }
 };
 
-/// Slab length for `order` or `amd` on an n x n pattern with nnz entries.
+/// Private functions for tests.zig; void outside test builds.
+pub const test_access = if (@import("builtin").is_test) .{
+    .amd = amd,
+    .allocSet = Ws.allocSet,
+} else {};
+
+/// Slab length for `order` on an n x n pattern with nnz entries.
 /// A pathological fill can still exceed it (`error.OutOfWorkspace`).
 pub fn wsSize(n: usize, nnz: usize) usize {
     return 48 * n + 8 * nnz + 64;
@@ -210,11 +216,11 @@ const DegLists = struct {
 // ponytail: element lists grow by relocation in `ea` without compaction;
 // pathological fill can exhaust the slab. A compaction pass is the upgrade.
 
-/// AMD on the symmetrized pattern; writes q[k] = column eliminated at step k.
-/// Quotient graph with approximate external degrees, aggressive absorption,
-/// hashed supervariable detection and dense-row deferral (rows of degree
-/// >= max(16, 10 sqrt(n)) go last). Restores `ws` on return.
-pub fn amd(n: u32, col_ptr: []const u32, row_idx: []const u32, q: []u32, ws: *Ws) Error!void {
+// AMD on the symmetrized pattern; writes q[k] = column eliminated at step k.
+// Quotient graph with approximate external degrees, aggressive absorption,
+// hashed supervariable detection and dense-row deferral (rows of degree
+// >= max(16, 10 sqrt(n)) go last). Restores `ws` on return.
+fn amd(n: u32, col_ptr: []const u32, row_idx: []const u32, q: []u32, ws: *Ws) Error!void {
     if (n == 0) return;
     const base = ws.mark();
     defer ws.release(base);

@@ -108,13 +108,13 @@ of the operating-point ladder in `src/analysis/dc/op.zig`.
   `solveFactored`, `solveFactoredT`, `buildComplexAdmittance`. Used by tf,
   pz, disto, HB, PAC/PXF, pnoise, MATEX projections and the dense PSS
   shooting Jacobian.
-- `fft`: `fft`, `ifft`, `nextPow2`. Used by `.four` and PAC.
+- `fft`: `fft`, `nextPow2`. Used by `.four` and PAC.
 - `gmres`: `Gmres.init(gpa, n, m)` then `solve(&op, b, x, tol,
   max_restarts)`, where `op` has `matvec(v, w)` and, for a right
   preconditioned solve, `precond(r)`. Used without a preconditioner by
   matrix-free PSS shooting (above 50 unknowns) and QPSS. JFNK carries its own
   GMRES(30) inside `converger.zig`, in `Workspace.gmres`.
-- `order`: `order` (BTF + AMD) and `amd` on a caller-supplied `Ws` slab of
+- `order`: `order` (BTF, then AMD per block) on a caller-supplied `Ws` slab of
   `wsSize(n, nnz)` u32s.
 
 ## Environment variables

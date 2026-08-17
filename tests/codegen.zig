@@ -52,9 +52,9 @@ export fn gen_engine_solve(e: *Engine, x: [*]f64, n: u32) void {
 }
 
 const HandEngines = struct {
-    lu: ?solver.sparse_lu.SparseLu,
-    tri: ?solver.tridiag.TriDiag,
-    bbd: ?solver.bbd.Bbd,
+    lu: ?@FieldType(Engine, "lu"),
+    tri: ?@FieldType(Engine, "tri"),
+    bbd: ?@FieldType(Engine, "bbd"),
 };
 
 export fn hand_engine_solve(e: *HandEngines, x: [*]f64, n: u32) void {

@@ -3,8 +3,8 @@
 //! as in ngspice and numpy (cos(2 pi t / T) over N points gives X[1] = N/2).
 
 const std = @import("std");
+const assert = std.debug.assert;
 const math = std.math;
-const scale = @import("core").numerics.scale;
 
 const W = std.simd.suggestVectorLength(f64) orelse 1;
 const V = @Vector(W, f64);
@@ -13,23 +13,10 @@ const V = @Vector(W, f64);
 /// same length N and that N is a power of two (N = 1 is the identity).
 pub fn fft(re: []f64, im: []f64) void {
     const n = re.len;
-    std.debug.assert(n == im.len);
-    std.debug.assert(n > 0 and n & (n - 1) == 0);
+    assert(n == im.len);
+    assert(math.isPowerOfTwo(n));
     bitReverse(re, im);
-    butterflyPass(re, im, false);
-}
-
-/// Inverse DFT in place, scaled by 1/N, so `ifft` undoes `fft`. Asserts
-/// what `fft` does.
-pub fn ifft(re: []f64, im: []f64) void {
-    const n = re.len;
-    std.debug.assert(n == im.len);
-    std.debug.assert(n > 0 and n & (n - 1) == 0);
-    bitReverse(re, im);
-    butterflyPass(re, im, true);
-    const inv = 1.0 / @as(f64, @floatFromInt(n));
-    scale(re, inv, re);
-    scale(im, inv, im);
+    butterflyPass(re, im);
 }
 
 /// Smallest power of two >= n, the length to zero-pad an `fft` input to.
@@ -40,6 +27,7 @@ pub fn nextPow2(n: usize) usize {
 
 fn bitReverse(re: []f64, im: []f64) void {
     const n = re.len;
+    assert(im.len == n);
     // N = 1 would shift by the full word width.
     if (n < 2) return;
     const log_n: math.Log2Int(usize) = @intCast(@ctz(n));
@@ -55,12 +43,12 @@ fn bitReverse(re: []f64, im: []f64) void {
 
 /// All butterfly stages. Stages whose half-width reaches W run W butterflies
 /// per vector op; half is a power of two, so there is no remainder.
-fn butterflyPass(re: []f64, im: []f64, comptime inverse: bool) void {
+fn butterflyPass(re: []f64, im: []f64) void {
     const n = re.len;
-    const sign: f64 = if (inverse) 1.0 else -1.0;
+    assert(im.len == n);
     var half: usize = 1;
     while (half < n) : (half *= 2) {
-        const angle_step = sign * math.pi / @as(f64, @floatFromInt(half));
+        const angle_step = -math.pi / @as(f64, @floatFromInt(half));
         if (W > 1 and half >= W) {
             butterflyStageVec(re, im, half, angle_step);
         } else {
@@ -71,6 +59,7 @@ fn butterflyPass(re: []f64, im: []f64, comptime inverse: bool) void {
 
 fn butterflyStageScalar(re: []f64, im: []f64, half: usize, angle_step: f64) void {
     const n = re.len;
+    assert(half < n);
     const dwr = @cos(angle_step);
     const dwi = @sin(angle_step);
     var group: usize = 0;
@@ -98,6 +87,9 @@ fn butterflyStageScalar(re: []f64, im: []f64, half: usize, angle_step: f64) void
 /// per-element one.
 fn butterflyStageVec(re: []f64, im: []f64, half: usize, angle_step: f64) void {
     const n = re.len;
+    // Whole vectors per group half: half and W are powers of two, half >= W.
+    assert(half % W == 0);
+    assert(half < n);
     var twr0: [W]f64 = undefined;
     var twi0: [W]f64 = undefined;
     for (0..W) |l| {

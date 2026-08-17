@@ -1065,7 +1065,6 @@ const DirectTests = struct {
 const FftTests = struct {
     const impl = @import("fft.zig");
     const fft = impl.fft;
-    const ifft = impl.ifft;
     const math = std.math;
 
     test "fft: impulse response is flat spectrum" {
@@ -1111,24 +1110,6 @@ const FftTests = struct {
         try testing.expectApproxEqAbs(@as(f64, 8.0), im[n - 2], 1e-11);
     }
 
-    test "fft/ifft: round-trip recovers original signal" {
-        const n = 32;
-        var re: [n]f64 = undefined;
-        var im = @as([n]f64, @splat(0));
-        var orig: [n]f64 = undefined;
-        for (0..n) |k| {
-            const t = @as(f64, @floatFromInt(k)) / @as(f64, @floatFromInt(n));
-            re[k] = @sin(2.0 * math.pi * 5.0 * t) + 0.3 * @cos(2.0 * math.pi * 11.0 * t);
-            orig[k] = re[k];
-        }
-        fft(&re, &im);
-        ifft(&re, &im);
-        for (0..n) |k| {
-            try testing.expectApproxEqAbs(orig[k], re[k], 1e-12);
-            try testing.expectApproxEqAbs(@as(f64, 0.0), im[k], 1e-12);
-        }
-    }
-
     test "fft: N=1024 Parseval and bin accuracy" {
         const n = 1024;
         var re: [n]f64 = undefined;
@@ -1172,7 +1153,7 @@ const FftTests = struct {
         }
     }
 
-    test "fft: every power of two through 512 matches a naive DFT, and ifft inverts it" {
+    test "fft: every power of two through 512 matches a naive DFT" {
         // N = 1 and 2 run no vector stage; from N = 2W up both stage kinds run.
         var prng = std.Random.DefaultPrng.init(0xF17);
         const r = prng.random();
@@ -1197,11 +1178,6 @@ const FftTests = struct {
             for (0..n) |k| {
                 try testing.expectApproxEqAbs(dre[k], re[k], tol);
                 try testing.expectApproxEqAbs(dim[k], im[k], tol);
-            }
-            ifft(re[0..n], im[0..n]);
-            for (0..n) |k| {
-                try testing.expectApproxEqAbs(re0[k], re[k], tol);
-                try testing.expectApproxEqAbs(im0[k], im[k], tol);
             }
         }
     }
@@ -1250,11 +1226,11 @@ const FreqSolveTests = struct {
         defer fs.deinit();
 
         const omega: f64 = 5.0;
-        try fs.setOmega(omega);
+        try FreqSolver.test_access.setOmega(&fs, omega);
 
         const rhs = [_]f64{ 1, 0, 0, 1 };
         var y: [4]f64 = undefined;
-        fs.solveRhsT(&rhs, &y);
+        FreqSolver.test_access.solveRhsT(&fs, &rhs, &y);
 
         // Verify: build A explicitly, check A^T y ≈ rhs.
         const nn: usize = 4;
@@ -1295,7 +1271,7 @@ const FreqSolveTests = struct {
         var fs = try FreqSolver.initDense(allocator, 2, g, c);
         defer fs.deinit();
 
-        try fs.setOmega(3.0);
+        try FreqSolver.test_access.setOmega(&fs, 3.0);
 
         // Solve two different RHS and verify Ax = rhs for each.
         var a: [16]f64 = undefined;
@@ -1307,7 +1283,7 @@ const FreqSolveTests = struct {
         };
         for (rhs_list) |rhs| {
             var x: [4]f64 = undefined;
-            fs.solveRhs(&rhs, &x);
+            FreqSolver.test_access.solveRhs(&fs, &rhs, &x);
 
             // Check A x ≈ rhs
             for (0..4) |row| {
@@ -1627,8 +1603,8 @@ const FreqSolveTests = struct {
             try fs.factorEach(&omegas);
             fs.solveEach(rhs, x, true);
             for (omegas, 0..) |w, k| {
-                try fs.setOmega(w);
-                fs.solveRhsT(rhs[k * nn ..][0..nn], x_ref[k * nn ..][0..nn]);
+                try FreqSolver.test_access.setOmega(&fs, w);
+                FreqSolver.test_access.solveRhsT(&fs, rhs[k * nn ..][0..nn], x_ref[k * nn ..][0..nn]);
             }
             for (x, x_ref) |a, b| try testing.expectApproxEqRel(b, a, 1e-11);
             // The same planes through fromPlanes, no circuit.
@@ -2251,7 +2227,7 @@ const LaneLuTests = struct {
 const OrderTests = struct {
     const impl = @import("order.zig");
     const Ws = impl.Ws;
-    const amd = impl.amd;
+    const amd = impl.test_access.amd;
     const order = impl.order;
     const wsSize = impl.wsSize;
 
@@ -2373,7 +2349,7 @@ const OrderTests = struct {
         const a = try ws_val.alloc(4);
         a[0] = 7;
         const m = ws_val.mark();
-        _ = try ws_val.allocSet(3, 0);
+        _ = try impl.test_access.allocSet(&ws_val, 3, 0);
         try testing.expectError(error.OutOfWorkspace, ws_val.alloc(2));
         ws_val.release(m);
         _ = try ws_val.alloc(4);
@@ -3226,7 +3202,7 @@ const LuKernelTests = struct {
         // Shared-scratch columns on 1 and 4 threads; every column in `val`.
         inline for (.{ .{ K.col_max, 1 }, .{ K.col_max, 4 }, .{ 0, 4 } }) |run| {
             stamp.* += 1;
-            const fail = try K.runHostCap(run[0], t, .{ .idx = tb.idx, .val = val, .a = vals, .rhs = rhs, .y = y, .dx = dx, .sync = sync }, stamp.*, run[1]);
+            const fail = try K.test_access.runHostCap(run[0], t, .{ .idx = tb.idx, .val = val, .a = vals, .rhs = rhs, .y = y, .dx = dx, .sync = sync }, stamp.*, run[1]);
             try testing.expectEqual(ok, fail == null);
             // Every step below the failing one holds the oracle's values.
             for (0..fail orelse n) |k| {
