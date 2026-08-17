@@ -1,6 +1,7 @@
 //! Net and device names, each stored once: bytes plus u32 offsets,
 //! deduplicated through a map keyed by the dense id itself.
 const std = @import("std");
+const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 
 /// Dense id of an interned name, in first-seen order.
@@ -13,7 +14,8 @@ pub const Name = enum(u32) {
 };
 
 /// Deduplicating string table. Names live in one byte buffer; the map holds
-/// only ids and hashes the stored bytes on demand.
+/// only ids and hashes the stored bytes on demand. Capacity: maxInt(u32)
+/// bytes of names in all, the reach of a u32 offset.
 pub const InternPool = struct {
     bytes: std.ArrayList(u8) = .empty,
     /// `offs[i]` starts name i; one trailing entry ends the last name.
@@ -50,8 +52,8 @@ pub const InternPool = struct {
         p.* = undefined;
     }
 
-    /// Returns the id of `s`, adding it on first sight. May invalidate
-    /// slices returned by `str`. Leaves the pool unchanged on error.
+    /// Returns the id of `s`, adding it on first sight. Invalidates slices
+    /// returned by `str` when it adds. Leaves the pool unchanged on error.
     pub fn intern(p: *InternPool, gpa: Allocator, s: []const u8) Allocator.Error!Name {
         if (p.offs.items.len == 0) try p.offs.append(gpa, 0);
         const gop = try p.map.getOrPutContextAdapted(gpa, s, Adapter{ .pool = p }, .{ .pool = p });
@@ -62,6 +64,8 @@ pub const InternPool = struct {
         errdefer p.bytes.shrinkRetainingCapacity(p.bytes.items.len - s.len);
         try p.offs.append(gpa, @intCast(p.bytes.items.len));
         gop.key_ptr.* = n;
+        assert(p.offs.items.len == n.index() + 2);
+        assert(p.str(n).len == s.len);
         return n;
     }
 
@@ -75,9 +79,10 @@ pub const InternPool = struct {
         return p.map.getKeyAdapted(s, Adapter{ .pool = p });
     }
 
-    /// Returns the bytes of `n`. Valid until the next `intern`. Asserts `n`
-    /// came from this pool.
+    /// Returns the bytes of `n`. Valid until the next `intern` that adds a
+    /// name. Asserts that `n` is an id this pool handed out.
     pub fn str(p: *const InternPool, n: Name) []const u8 {
+        assert(n.index() + 1 < p.offs.items.len);
         return p.bytes.items[p.offs.items[n.index()]..p.offs.items[n.index() + 1]];
     }
 };

@@ -2,6 +2,7 @@
 //! arithmetic, the frequency grid, solver tolerances and the BBD partition.
 
 const std = @import("std");
+const assert = std.debug.assert;
 
 /// Thread budget a solver may use; both fields are read together at dispatch.
 pub const Execution = struct {
@@ -58,6 +59,11 @@ const Scale = struct {
 /// small deck's plane reset (vacask_graetz: 4% of its instructions).
 const inline_len = 64;
 const vec_len = std.simd.suggestVectorLength(f64) orelse 1;
+comptime {
+    // The inline loops step by whole vectors and finish with a scalar tail.
+    assert(std.math.isPowerOfTwo(vec_len));
+    assert(inline_len >= vec_len);
+}
 /// Read through a volatile so LLVM cannot turn the zeroing loop back into
 /// a `memset` call. Never written. It is a `var` on purpose: Zig folds a
 /// volatile read of a comptime-known `const` at compile time (the load
@@ -78,41 +84,51 @@ pub fn zeroSimd(buf: []f64) void {
 }
 
 /// Copies the common prefix of `src` into `dst`; exact aliasing is a no-op.
-/// Any other overlap is illegal: above 64 entries this is a `@memcpy`,
-/// which asserts the buffers are disjoint.
+/// Asserts that the prefixes do not otherwise overlap.
 pub fn copySimd(dst: []f64, src: []const f64) void {
     const n = @min(dst.len, src.len);
     if (dst.ptr == src.ptr) return;
+    const d = @intFromPtr(dst.ptr);
+    const s = @intFromPtr(src.ptr);
+    assert(d + n * @sizeOf(f64) <= s or s + n * @sizeOf(f64) <= d);
     if (n > inline_len) return @memcpy(dst[0..n], src[0..n]);
     var i: usize = 0;
     while (i + vec_len <= n) : (i += vec_len) dst[i..][0..vec_len].* = src[i..][0..vec_len].*;
     while (i < n) : (i += 1) dst[i] = src[i];
 }
 
-/// dst[i] += a * src[i] over dst.len. `src` needs at least dst.len
-/// entries and may be `dst` itself; a shifted overlap is unspecified,
-/// since the vector path loads a block before it stores it.
+/// dst[i] += a * src[i] over dst.len. `src` may be `dst` itself; a shifted
+/// overlap is unspecified, since the vector path loads a block before it
+/// stores it. Asserts that `src` has at least dst.len entries.
 pub fn axpy(dst: []f64, a: f64, src: []const f64) void {
+    assert(src.len >= dst.len);
     var it = z.fromSlice(f64, dst).zip(z.fromSlice(f64, src[0..dst.len])).map(Axpy{ .a = a });
     _ = it.writeInto(dst);
 }
 
-/// dst[i] = a * src[i] over dst.len. Aliasing and length as `axpy`.
+/// dst[i] = a * src[i] over dst.len. Aliasing as `axpy`. Asserts that
+/// `src` has at least dst.len entries.
 pub fn scale(dst: []f64, a: f64, src: []const f64) void {
+    assert(src.len >= dst.len);
     var it = z.fromSlice(f64, src[0..dst.len]).map(Scale{ .a = a });
     _ = it.writeInto(dst);
 }
 
-/// dst[i] = a[i] - b[i] over dst.len. Each input needs dst.len entries
-/// and may be `dst` itself; a shifted overlap is unspecified.
+/// dst[i] = a[i] - b[i] over dst.len. Either input may be `dst` itself; a
+/// shifted overlap is unspecified. Asserts that `a` and `b` each have at
+/// least dst.len entries.
 pub fn sub(dst: []f64, a: []const f64, b: []const f64) void {
+    assert(a.len >= dst.len);
+    assert(b.len >= dst.len);
     var it = z.fromSlice(f64, a[0..dst.len]).zip(z.fromSlice(f64, b[0..dst.len])).map(diff);
     _ = it.writeInto(dst);
 }
 
-/// Σ a[i]·b[i] over a.len; `b` needs at least a.len entries. Reassociated:
-/// fixed per target, but not the rounding of an ordered loop.
+/// Σ a[i]·b[i] over a.len. Reassociated: fixed per target, but not the
+/// rounding of an ordered loop. Asserts that `b` has at least a.len
+/// entries.
 pub fn dot(a: []const f64, b: []const f64) f64 {
+    assert(b.len >= a.len);
     var it = z.fromSlice(f64, a).zip(z.fromSlice(f64, b[0..a.len])).map(mul);
     return it.foldAssoc(@as(f64, 0), add);
 }
@@ -127,7 +143,9 @@ pub fn sum(buf: []const f64) f64 {
 pub fn normInf(buf: []const f64) f64 {
     // Max is exact, so any lane grouping equals the scalar fold bit for bit.
     var it = z.fromSlice(f64, buf);
-    return it.foldAssoc(@as(f64, 0), absMax);
+    const m = it.foldAssoc(@as(f64, 0), absMax);
+    assert(m >= 0); // The fold starts at 0 and @max skips NaN.
+    return m;
 }
 
 test "vector helpers run on stdpp's SIMD path" {
@@ -183,6 +201,9 @@ pub const BbdBlock = struct {
     /// Rows.
     size: u32,
 };
+comptime {
+    assert(@sizeOf(BbdBlock) == 8);
+}
 
 /// Bordered-block-diagonal partition of the MNA rows: independent diagonal
 /// blocks plus the coupling border `[coupling_start, coupling_start + coupling_size)`.
@@ -239,6 +260,10 @@ pub const Complex = struct {
         return .{ .re = self.re * s, .im = self.im * s };
     }
 };
+comptime {
+    // Complex planes are stored as interleaved (re, im) f64 pairs.
+    assert(@sizeOf(Complex) == 2 * @sizeOf(f64));
+}
 
 /// SPICE's `.ac`/`.noise`/`.sp` grid spellings, plus HSPICE's POI point list.
 pub const SweepKind = enum { dec, oct, lin, poi };
@@ -276,13 +301,19 @@ pub const FreqSweep = struct {
         // lose its last point to a 1-ulp shortfall. The cap keeps an absurd
         // span (`dec 4294967295 1e-300 1e300`) inside u32 instead of trapping.
         const capped = @min(@floor(steps + 1e-9), @as(f64, std.math.maxInt(u32) - 1));
+        assert(capped >= 0);
         return @as(u32, @intFromFloat(capped)) + 1;
     }
 
-    /// Frequency of point `k`, in Hz. `k` is not range-checked.
+    /// Frequency of point `k`, in Hz. Asserts that `k < count()`, and for
+    /// `poi` that `list` holds point `k`.
     pub fn at(self: FreqSweep, k: u32) f64 {
-        if (self.kind == .poi) return self.list[k];
+        if (self.kind == .poi) {
+            assert(k < self.list.len);
+            return self.list[k];
+        }
         const n = self.count();
+        assert(k < n);
         if (self.kind == .lin) {
             if (n <= 1) return self.f_start;
             const frac = @as(f64, @floatFromInt(k)) / @as(f64, @floatFromInt(n - 1));
@@ -294,9 +325,13 @@ pub const FreqSweep = struct {
     }
 
     /// Writes each grid frequency (Hz) into `freqs`, when given, and its
-    /// angular frequency (rad/s) into `omegas`. Both need `count()` entries.
+    /// angular frequency (rad/s) into `omegas`. Asserts that each holds at
+    /// least `count()` entries.
     pub fn fill(self: FreqSweep, freqs: ?[]f64, omegas: []f64) void {
-        for (0..self.count()) |i| {
+        const n = self.count();
+        assert(omegas.len >= n);
+        if (freqs) |fr| assert(fr.len >= n);
+        for (0..n) |i| {
             const f = self.at(@intCast(i));
             if (freqs) |fr| fr[i] = f;
             omegas[i] = 2.0 * std.math.pi * f;
@@ -316,6 +351,7 @@ pub const FreqSweep = struct {
 
         /// Null once all `n` points are out.
         pub fn next(self: *Iter) ?f64 {
+            assert(self.k <= self.n);
             if (self.k >= self.n) return null;
             defer self.k += 1;
             return self.sweep.at(self.k);

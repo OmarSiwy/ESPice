@@ -5,6 +5,7 @@
 //! out the values to test and `feed` takes their goal errors back. The two
 //! limits go out as one batch, then one midpoint per iteration.
 const std = @import("std");
+const assert = std.debug.assert;
 const Options = @import("lm.zig").Options;
 
 /// The `.model OPT` search: LEVEL=1 (Levenberg-Marquardt), LEVEL=2 or
@@ -63,23 +64,27 @@ pub const Bisect = struct {
     };
 
     /// Searches [lo, hi]; the manual ignores the initial value. `scale`
-    /// converts a goal error to measure units for ABSOUT. Asserts the
-    /// method is not `lm` and lo <= hi.
+    /// converts a goal error to measure units for ABSOUT. Asserts that the
+    /// method is not `lm` and that lo <= hi.
     pub fn init(arena: std.mem.Allocator, method: Method, lo: f64, hi: f64, scale: f64, opts: Options) Bisect {
-        std.debug.assert(method != .lm and lo <= hi);
+        assert(method != .lm);
+        assert(lo <= hi);
         return .{ .method = method, .opts = opts, .scale = scale, .lo = lo, .hi = hi, .range = hi - lo, .x = lo, .pts = .{ lo, hi }, .arena = arena };
     }
 
     /// The values to test next. Empty once `status` is no longer `running`.
     pub fn points(s: *const Bisect) []const f64 {
+        assert(s.pending <= s.pts.len);
         return if (s.status == .running) s.pts[0..s.pending] else &.{};
     }
 
     /// Takes the goal errors of `points()` in order; NaN marks a test whose
     /// measure found no value or whose simulation failed. Fails only when
-    /// the arena cannot grow `history`. Asserts one error per point.
+    /// the arena cannot grow `history`. Asserts that the search is still
+    /// running and that there is one error per point.
     pub fn feed(s: *Bisect, residuals: []const f64) !void {
-        std.debug.assert(residuals.len == s.pending);
+        assert(s.status == .running);
+        assert(residuals.len == s.pending);
         s.evaluations += s.pending;
         if (s.method == .bisection) for (residuals) |r| if (std.math.isNan(r)) return s.stop(.failed);
         if (s.pending == 2) {
@@ -105,6 +110,8 @@ pub const Bisect = struct {
             if (s.converged(r)) return s.stop(.converged);
             if (s.opts.absin == 0 and s.iterations >= s.opts.itropt) return s.stop(.itropt);
         }
+        assert(s.lo <= s.hi);
+        assert(s.x == s.lo or s.x == s.hi);
         s.pts[0] = s.lo + (s.hi - s.lo) / 2;
         s.pending = 1;
     }
@@ -125,6 +132,7 @@ pub const Bisect = struct {
     /// lifts ITROPT, would otherwise never stop below one ulp.
     fn converged(s: *const Bisect, r: f64) bool {
         const step = s.hi - s.lo;
+        assert(step >= 0);
         const mid = s.lo + step / 2;
         const resolved = mid == s.lo or mid == s.hi;
         if (s.opts.absin > 0) return step <= s.opts.absin or resolved;
@@ -134,6 +142,7 @@ pub const Bisect = struct {
     }
 
     fn stop(s: *Bisect, status: Status) void {
+        assert(status != .running);
         s.status = status;
         s.pending = 0;
     }
@@ -142,6 +151,8 @@ pub const Bisect = struct {
 /// Runs `s` to completion against `f`, a test oracle.
 fn solve(s: *Bisect, f: anytype) !void {
     var buf: [2]f64 = undefined;
+    // Terminates: every feed past the limits halves the window, and a
+    // window f64 cannot halve further converges.
     while (s.points().len != 0) {
         const pts = s.points();
         for (pts, buf[0..pts.len]) |x, *r| r.* = f.eval(x);

@@ -1,6 +1,7 @@
 //! Everything a deck says besides its topology: probes, sources, options,
 //! queries and the bindings later directives resolve against.
 const std = @import("std");
+const assert = std.debug.assert;
 const requests = @import("query.zig");
 const numerics = @import("numerics.zig");
 
@@ -78,15 +79,21 @@ pub const Variants = struct {
     refs: []const u32 = &.{},
     values: []const f64 = &.{},
 
-    /// Number of variants (rows).
+    /// Number of variants (rows). Asserts that a non-empty table has one
+    /// `starts` entry more than rows.
     pub fn count(self: Variants) u32 {
+        if (self.labels.len != 0) assert(self.starts.len == self.labels.len + 1);
         return @intCast(self.labels.len);
     }
 
-    /// The parameter writes of variant `v`: `.{ refs, values }`.
+    /// The parameter writes of variant `v`: `.{ refs, values }`. Asserts
+    /// that `starts` holds row `v`.
     pub fn writes(self: Variants, v: u32) struct { []const u32, []const f64 } {
+        assert(v + 1 < self.starts.len);
+        assert(self.refs.len == self.values.len);
         const lo = self.starts[v];
         const hi = self.starts[v + 1];
+        assert(lo <= hi);
         return .{ self.refs[lo..hi], self.values[lo..hi] };
     }
 };

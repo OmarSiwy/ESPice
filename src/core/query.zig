@@ -535,7 +535,9 @@ pub const PhaseNoise = struct {
     };
 
     /// The autonomous `.hb` solve the phase noise is computed about.
+    /// Asserts that `osc_node` is not GROUND.
     pub fn hb(self: PhaseNoise) Hb {
+        std.debug.assert(self.osc_node != GROUND);
         return .{ .tol = self.tol, .f0 = self.f0, .n_harmonics = self.n_harmonics, .max_iter = self.max_iter, .hb_tol = self.hb_tol, .osc_node = self.osc_node };
     }
 };

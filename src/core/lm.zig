@@ -6,6 +6,7 @@
 //! clamping each step into the box and holding a parameter fixed while it
 //! sits on a limit its gradient pushes it past.
 const std = @import("std");
+const assert = std.debug.assert;
 const dot = @import("numerics.zig").dot;
 
 /// The optimizer knobs of an HSPICE `.model m OPT` card, with its defaults.
@@ -104,12 +105,18 @@ pub const Lm = struct {
 
     /// Starts at `x0` (clamped into [lo, hi]) with `m` residuals per point.
     /// Slices are copied into `arena`. Asserts at least one parameter, equal
-    /// slice lengths, lo <= hi, and CUT > 1 (anything less never grows the
-    /// Marquardt parameter past MAX, so a rejected step would retry forever).
+    /// slice lengths, lo <= hi, CLOSE > 0 and CUT > 1 (anything less never
+    /// grows the Marquardt parameter past MAX, so a rejected step would
+    /// retry forever).
     pub fn init(arena: std.mem.Allocator, x0: []const f64, lo: []const f64, hi: []const f64, dels: []const f64, m: u32, opts: Options) !Lm {
         const n: u32 = @intCast(x0.len);
-        std.debug.assert(n > 0 and lo.len == n and hi.len == n and dels.len == n);
-        std.debug.assert(opts.cut > 1);
+        assert(n > 0);
+        assert(lo.len == n);
+        assert(hi.len == n);
+        assert(dels.len == n);
+        for (lo, hi) |l, u| assert(l <= u);
+        assert(opts.close > 0);
+        assert(opts.cut > 1);
         var s: Lm = .{
             .n = n,
             .m = m,
@@ -140,16 +147,20 @@ pub const Lm = struct {
     /// `status` is no longer `running`.
     pub fn points(s: *const Lm) []const f64 {
         if (s.status != .running) return &.{};
+        assert(s.pending >= 1);
+        assert(s.pending <= s.n);
         return s.pts[0 .. @as(usize, s.pending) * s.n];
     }
 
     /// Takes the residuals of `points()`, `m` per point in the same order;
     /// a NaN marks a point that could not be evaluated. Fails only when the
-    /// arena cannot grow `history`. Asserts one residual vector per point.
+    /// arena cannot grow `history`. Asserts that the run is still going and
+    /// that there is one residual vector per point.
     pub fn feed(s: *Lm, residuals: []const f64) !void {
         const n = s.n;
         const m = s.m;
-        std.debug.assert(residuals.len == @as(usize, s.pending) * m);
+        assert(s.status == .running);
+        assert(residuals.len == @as(usize, s.pending) * m);
         s.evaluations += s.pending;
         switch (s.phase) {
             .start => {
@@ -203,6 +214,7 @@ pub const Lm = struct {
     /// pulled it past (-1 lower, +1 upper), else 0: its goals are out of
     /// reach inside its range. Asserts j < n.
     pub fn pinned(s: *const Lm, j: usize) i2 {
+        assert(j < s.n);
         if (s.x[j] <= s.lo[j] and s.g[j] > 0) return -1;
         if (s.x[j] >= s.hi[j] and s.g[j] < 0) return 1;
         return 0;
@@ -216,10 +228,12 @@ pub const Lm = struct {
             const v = g * @max(@abs(x), s.opts.parmin);
             norm += v * v;
         };
+        assert(!(norm < 0));
         return @sqrt(norm);
     }
 
     fn stop(s: *Lm, status: Status) void {
+        assert(status != .running);
         s.status = status;
         s.pending = 0;
     }
@@ -229,6 +243,7 @@ pub const Lm = struct {
         try s.history.lambda.append(s.arena, s.lambda);
         try s.history.evaluations.append(s.arena, s.evaluations);
         try s.history.x.appendSlice(s.arena, s.x);
+        assert(s.history.x.items.len == s.history.rss.items.len * s.n);
     }
 
     /// One point per parameter, stepped forward, or backward from an upper
@@ -237,6 +252,7 @@ pub const Lm = struct {
     /// (lo == hi) steps outside it.
     fn jacobianPoints(s: *Lm) void {
         const n = s.n;
+        assert(s.status == .running);
         for (0..n) |j| {
             var h = if (s.dels[j] != 0) @abs(s.dels[j]) else s.opts.difsiz * @max(@abs(s.x[j]), s.opts.parmin);
             if (s.x[j] + h > s.hi[j]) {
@@ -244,6 +260,8 @@ pub const Lm = struct {
                 const down = s.x[j] - s.lo[j];
                 if (down >= h) h = -h else if (up >= down and up > 0) h = up else if (down > 0) h = -down;
             }
+            // DIFSIZ and PARMIN are positive, so a zero step is a bug here.
+            assert(h != 0);
             s.h[j] = h;
             const p = s.pts[j * n ..][0..n];
             @memcpy(p, s.x);
@@ -258,6 +276,8 @@ pub const Lm = struct {
     fn trialPoint(s: *Lm) void {
         const n = s.n;
         const m = s.m;
+        // Terminates: each failed factorization multiplies λ by CUT > 1,
+        // and λ past MAX stops the run (init asserts both).
         while (true) {
             for (0..n) |j| for (0..n) |k| {
                 s.a[j * n + k] = if (!s.free[j] or !s.free[k])
@@ -271,7 +291,9 @@ pub const Lm = struct {
                 s.delta[j] = if (s.free[j]) -0.5 * s.g[j] else 0;
             }
             if (cholesky(s.a, s.delta, n)) break;
+            const before = s.lambda;
             s.lambda *= s.opts.cut;
+            assert(s.lambda > before);
             if (s.lambda > s.opts.max) return s.stop(.max);
         }
         const t = s.pts[0..n];
@@ -289,6 +311,8 @@ pub const Lm = struct {
 /// Solves the symmetric positive definite `a` (n x n, row-major, destroyed)
 /// against `b` in place. False when `a` is not positive definite.
 fn cholesky(a: []f64, b: []f64, n: usize) bool {
+    assert(a.len == n * n);
+    assert(b.len == n);
     for (0..n) |j| {
         var d = a[j * n + j];
         for (0..j) |k| d -= a[j * n + k] * a[j * n + k];
@@ -319,6 +343,7 @@ fn cholesky(a: []f64, b: []f64, n: usize) bool {
 /// Runs `lm` to completion against `f`, a test oracle.
 fn solve(lm: *Lm, f: anytype) !void {
     var buf: [64]f64 = undefined;
+    // Terminates: ITROPT caps the accepted steps, MAX the rejected ones.
     while (lm.points().len != 0) {
         const pts = lm.points();
         const count = pts.len / lm.n;

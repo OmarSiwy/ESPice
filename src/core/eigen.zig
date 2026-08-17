@@ -1,6 +1,7 @@
 //! Dense real eigenvalues: balance, Hessenberg reduction, Francis
 //! double-shift QR. Row-major n×n input, destroyed in place.
 const std = @import("std");
+const assert = std.debug.assert;
 const num = @import("numerics.zig");
 const Complex = num.Complex;
 
@@ -17,11 +18,17 @@ pub const Eigs = struct { count: usize, converged: bool };
 /// `converged` is false when one block exhausted `max_iter` Francis steps;
 /// its eigenvalues and those of every block above it are then missing.
 /// O(n³), no allocation. A non-finite entry gives meaningless eigenvalues
-/// (or `converged` false), never a hang.
+/// (or `converged` false), never a hang. Asserts that `a` holds n×n entries
+/// and `out` at least n.
 pub fn eigenvalues(n: usize, a: []f64, out: []Complex, tol: f64, max_iter: u32) Eigs {
+    assert(a.len >= n * n);
+    assert(out.len >= n);
     const exact = isolate(n, a, out);
     const rest = francis(n - exact, a, out[exact..], tol, max_iter);
-    return .{ .count = exact + rest.count, .converged = rest.converged };
+    const count = exact + rest.count;
+    assert(count <= n);
+    if (rest.converged) assert(count == n);
+    return .{ .count = count, .converged = rest.converged };
 }
 
 /// dgebal's permutation step. A row or column whose off-diagonal part inside
@@ -39,6 +46,7 @@ fn isolate(n: usize, a: []f64, out: []Complex) usize {
     var lo: usize = 0;
     var hi: usize = n;
     var count: usize = 0;
+    // Terminates: every `continue` shrinks [lo, hi) by one.
     search: while (lo < hi) {
         for (lo..hi) |i| {
             for (lo..hi) |j| {
@@ -67,12 +75,15 @@ fn isolate(n: usize, a: []f64, out: []Complex) usize {
     // Read offsets only grow and never fall behind the write offset, so the
     // in-place copy never overwrites an entry it has yet to read.
     const m = hi - lo;
+    assert(count + m == n);
     for (0..m) |r| std.mem.copyForwards(f64, a[r * m ..][0..m], a[(lo + r) * n + lo ..][0..m]);
     return count;
 }
 
 /// Symmetric permutation: swaps rows i, k and columns i, k.
 fn swap(n: usize, a: []f64, i: usize, k: usize) void {
+    assert(i < n);
+    assert(k < n);
     if (i == k) return;
     for (0..n) |j| std.mem.swap(f64, &a[i * n + j], &a[k * n + j]);
     for (0..n) |r| std.mem.swap(f64, &a[r * n + i], &a[r * n + k]);
@@ -102,6 +113,8 @@ fn francis(n: usize, a: []f64, out: []Complex, tol: f64, max_iter: u32) Eigs {
     var nn = n;
     var iter: u32 = 0;
 
+    // Terminates: each pass deflates one or two rows (resetting `iter`) or
+    // spends one of the block's `max_iter` Francis steps.
     while (nn > 0) {
         // Top of the active block: the largest l whose subdiagonal entry is
         // negligible. Chasing the bulge from row 0 would sweep a deflated
@@ -130,10 +143,12 @@ fn francis(n: usize, a: []f64, out: []Complex, tol: f64, max_iter: u32) Eigs {
             iter = 0;
         } else {
             if (iter >= max_iter) return .{ .count = count, .converged = false };
+            assert(nn - l >= 3);
             francisStep(n, a, l, nn, iter);
             iter += 1;
         }
     }
+    assert(count == n);
     return .{ .count = count, .converged = true };
 }
 
@@ -164,6 +179,7 @@ fn balance(n: usize, a: []f64) void {
             const s = c + r;
             var f: f64 = 1;
             var g = r / radix;
+            // Both loops end: c moves 4x per step toward g, finite and positive.
             while (c < g) {
                 f *= radix;
                 c *= radix_sq;
@@ -185,6 +201,7 @@ fn balance(n: usize, a: []f64) void {
 
 /// Eigenvalues of the 2x2 block at (offset, offset).
 fn extract2x2(a: []const f64, n: usize, offset: usize, out: *[2]Complex) void {
+    assert(offset + 1 < n);
     const a11 = a[offset * n + offset];
     const a12 = a[offset * n + offset + 1];
     const a21 = a[(offset + 1) * n + offset];
@@ -213,13 +230,16 @@ fn extract2x2(a: []const f64, n: usize, offset: usize, out: *[2]Complex) void {
 /// Householder similarities; the eigenvalues are unchanged and every entry
 /// below the subdiagonal is an exact zero. `v_buf` is scratch of at least n
 /// entries: a contiguous copy of each reflector, so its reads are vector
-/// loads rather than stride-n gathers. O(n³).
+/// loads rather than stride-n gathers. O(n³). Asserts that `a` holds n×n
+/// entries and `v_buf` at least n.
 pub fn hessenbergReduce(n: usize, a: []f64, v_buf: []f64) void {
     hessenbergLanes(W, n, a, v_buf);
 }
 
 fn hessenbergLanes(comptime w: usize, n: usize, a: []f64, v_buf: []f64) void {
     const V = @Vector(w, f64);
+    assert(a.len >= n * n);
+    assert(v_buf.len >= n);
     if (n <= 2) return;
 
     for (0..n - 2) |k| {
@@ -291,6 +311,8 @@ fn hessenbergLanes(comptime w: usize, n: usize, a: []f64, v_buf: []f64) void {
 /// One Francis double-shift bulge chase over the active block, rows and
 /// columns [lo, nn).
 fn francisStep(n: usize, a: []f64, lo: usize, nn: usize, iter: u32) void {
+    assert(nn <= n);
+    assert(lo + 3 <= nn);
     // Shift polynomial from trailing 2x2 block.
     const am = a[(nn - 2) * n + (nn - 2)];
     const bm = a[(nn - 2) * n + (nn - 1)];
@@ -345,6 +367,8 @@ fn francisStep(n: usize, a: []f64, lo: usize, nn: usize, iter: u32) void {
 /// to rows and columns k..k+2 of the active block.
 fn applyReflector3(comptime w: usize, n: usize, a: []f64, lo: usize, nn: usize, k: usize, x_in: f64, y_in: f64, z_in: f64, nr: f64) void {
     const V = @Vector(w, f64);
+    assert(k + 2 < nn);
+    assert(nn <= n);
     const sign_x: f64 = if (x_in >= 0) 1.0 else -1.0;
     const v0 = x_in + sign_x * nr;
     const v1 = y_in;
@@ -401,6 +425,8 @@ fn applyReflector3(comptime w: usize, n: usize, a: []f64, lo: usize, nn: usize, 
 /// k..k+1.
 fn applyReflector2(comptime w: usize, n: usize, a: []f64, lo: usize, nn: usize, k: usize, x_in: f64, y_in: f64) void {
     const V = @Vector(w, f64);
+    assert(k + 1 < nn);
+    assert(nn <= n);
     const nr = @sqrt(x_in * x_in + y_in * y_in);
     if (nr == 0) return;
 
