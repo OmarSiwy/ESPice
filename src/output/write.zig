@@ -27,7 +27,7 @@ pub fn append(io: Io, path: []const u8, format: types.Format, plot: types.Plot) 
 pub fn concatenates(format: types.Format) bool {
     return switch (format) {
         .binary, .ascii, .print => true,
-        else => false,
+        .csv, .touchstone, .psf, .fsdb, .sst2, .citi => false,
     };
 }
 
@@ -51,7 +51,7 @@ fn put(io: Io, path: []const u8, format: types.Format, plot: types.Plot, keep: b
     if (keep) copy: {
         const old = Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
             error.FileNotFound => break :copy,
-            else => return err,
+            else => return err, // else: any other open failure is the caller's
         };
         defer old.close(io);
         var rbuf: [8192]u8 = undefined;

@@ -853,7 +853,7 @@ pub const Kind = enum(u8) {
     pub fn transient(kind: Kind) bool {
         return switch (kind) {
             .tran, .four, .fft, .tran_noise, .envelope, .pss, .qpss, .pnoise, .pac, .pxf => true,
-            else => false,
+            .ac, .dc, .dcmatch, .disto, .hb, .matex, .mc, .noise, .op, .pz, .sens, .sp, .stb, .temp, .tf, .hbac, .hbnoise, .hbxf, .phasenoise, .lstb, .acxf, .dcxf, .dcinc, .acmatch, .dcsens, .hblin => false,
         };
     }
 };

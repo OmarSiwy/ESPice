@@ -113,7 +113,7 @@ pub fn validateSchema(format: Format, schema: Schema) ValidationError!void {
         },
         // sst2.zig has 64 fixed name slots.
         .sst2 => if (schema.varnames.len > 64) return error.FormatLimitExceeded,
-        else => {},
+        .binary, .ascii, .csv, .psf, .print => {},
     }
 }
 

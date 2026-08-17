@@ -289,7 +289,7 @@ test "LaneLu(W) lane l is the scalar replay of lane l on random systems, NaN and
             const bad_val: f64 = switch (r.uintLessThan(u8, 6)) {
                 0 => std.math.nan(f64),
                 1 => -std.math.inf(f64),
-                else => continue,
+                else => continue, // else: the other four draws keep the lane finite
             };
             lane_vals[r.uintLessThan(usize, nnz)][l] = bad_val;
             finite[l] = false;

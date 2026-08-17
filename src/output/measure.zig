@@ -37,7 +37,7 @@ pub fn print(out: *Writer, err: *Writer, measures: []const core.Measure, analysi
                 .lstb => "Loop Stability",
                 .phasenoise => "Phase Noise",
                 .pnoise => "Periodic Time-Dependent Noise",
-                else => "DC",
+                else => "DC", // else: any other analysis takes the DC heading; a kind with its own title adds an arm
             }});
         }
         const w: Wave = .{ .result = result, .analysis = analysis, .values = &values };
@@ -297,7 +297,7 @@ const Edges = struct {
                     e.state = .high;
                 },
                 .unknown => e.state = if (y1 <= e.lo) .low else if (y1 >= e.hi) .high else .unknown,
-                else => {},
+                .low, .high => {},
             }
         }
         return null;
@@ -343,11 +343,11 @@ fn evaluateCont(out: *Writer, m: core.Measure, w: Wave) EvalError!f64 {
             },
             .find, .deriv => one.second = nth(m.second, k) orelse break,
             .when => one.first = nth(m.first, k) orelse break,
-            else => return evaluate(out, one, w),
+            else => return evaluate(out, one, w), // else: a function without event vectors runs once
         }
         const v = evaluate(out, one, w) catch |e| switch (e) {
             error.OutOfInterval => break,
-            else => return e,
+            else => return e, // else: every other failure is the caller's
         };
         if (k == 0) first = v;
         if (lastEvent(m.first) or lastEvent(m.second)) break;
@@ -404,7 +404,7 @@ fn fftFigure(mag: Column, freq: Column, n: usize, c: Clause, func: core.MeasureF
         .sndr => sndr,
         .enob => (sndr - 1.76) / 6.02,
         .sfdr => 20 * std.math.log10(fund / spur),
-        else => unreachable,
+        else => unreachable, // else: `fftFigure` is called with the five FFT functions only
     };
 }
 
@@ -417,7 +417,7 @@ fn paramValue(ops: []const core.MeasureOp, values: []const f64) f64 {
             return switch (op) {
                 .num => |x| x,
                 .measure => |k| if (k < s.values.len) s.values[k] else nan,
-                else => nan,
+                .vector, .neg, .add, .sub, .mul, .div, .pow => nan,
             };
         }
     }{ .values = values });
@@ -441,7 +441,7 @@ fn fold(ops: []const core.MeasureOp, leaves: anytype) f64 {
             if (n == 0) return nan;
             stack[n - 1] = -stack[n - 1];
         },
-        else => {
+        .add, .sub, .mul, .div, .pow => {
             if (n < 2) return nan;
             n -= 1;
             const b = stack[n];
@@ -452,7 +452,7 @@ fn fold(ops: []const core.MeasureOp, leaves: anytype) f64 {
                 .mul => x.* * b,
                 .div => x.* / b,
                 .pow => std.math.pow(f64, x.*, b),
-                else => unreachable,
+                .num, .measure, .vector, .neg => unreachable,
             };
         },
     };
@@ -493,7 +493,7 @@ const Column = struct {
             'p' => std.math.atan2(im, re),
             'd' => 20 * std.math.log10(std.math.hypot(re, im)),
             'g' => std.math.radiansToDegrees(std.math.atan2(im, re)),
-            else => re,
+            else => re, // else: 'r' and an untyped column read the real part
         };
     }
 };
@@ -513,7 +513,7 @@ const Sample = struct {
                 break :blk c.get(s.i);
             },
             .measure => nan,
-            else => unreachable,
+            .neg, .add, .sub, .mul, .div, .pow => unreachable,
         };
     }
 };
@@ -712,7 +712,7 @@ const Wave = struct {
                 n += 1;
                 try out.print("  {s} violation: expected {d} at {f}, got {f}\n", .{ name, @as(u8, @intFromFloat(e[1])), sci(e[0], 6), sci(v, 6) });
             },
-            else => unreachable,
+            else => unreachable, // else: `violations` is called with the check functions only
         }
         return n;
     }
@@ -1092,7 +1092,7 @@ test "every function over a result with no samples reads NaN or zero, never pani
             // ngspice measure_minMaxAvg reports 0 over an empty window, and
             // a check over no samples counts no violation.
             .avg, .min, .max, .min_at, .max_at, .pp, .check_slew, .check_forbid, .check_require, .check_level, .dout => try std.testing.expectEqual(0, v),
-            else => try std.testing.expect(std.math.isNan(v)),
+            else => try std.testing.expect(std.math.isNan(v)), // else: every other function has no value over no samples
         };
         try print(&sink.writer, &sink.writer, &cards, .tran, result);
         var out: [3]f64 = undefined;

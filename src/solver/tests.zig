@@ -2898,7 +2898,7 @@ const SparseTests = struct {
                 for (&rhs, 0..) |*x, i| x.* = switch (i % 5) {
                     0 => 0,
                     1 => -0.0,
-                    else => r.float(f64) - 0.5,
+                    else => r.float(f64) - 0.5, // else: three in five entries are random
                 };
                 var xa: [n]f64 = undefined;
                 var xb: [n]f64 = undefined;
@@ -3251,7 +3251,7 @@ const LuKernelTests = struct {
                 for (rhs, 0..) |*x, i| x.* = switch (i % 5) {
                     0 => 0,
                     1 => -0.0,
-                    else => r.float(f64) - 0.5,
+                    else => r.float(f64) - 0.5, // else: three in five entries are random
                 };
                 // Round 3 puts the first step from 40 on with an A entry
                 // below its pivot under the growth limit: those grow 1e20.
