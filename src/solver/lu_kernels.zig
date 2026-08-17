@@ -40,6 +40,15 @@ pub const scaled_bit: u32 = 2;
 /// ticket and the fail word, `n - k` for the lowest failing pivot step k,
 /// 0 when every step passed.
 pub const sync_header = 2;
+comptime {
+    // The column-max reduction halves the lane count down to one.
+    assert(std.math.isPowerOfTwo(refactor_block));
+    assert(std.math.isPowerOfTwo(solve_block));
+    // `SolveShared` and a refactor block's `Shared` fit the 48 KB a block
+    // may declare.
+    assert(tail_max * @sizeOf(f64) <= 40 * 1024);
+    assert((col_max + 1 + refactor_block) * @sizeOf(f64) <= 48 * 1024);
+}
 
 /// Offsets (in u32 words) of every table inside the one index buffer, plus
 /// the scalars the kernels read. Passed to each kernel by value.
@@ -118,6 +127,10 @@ pub const Tab = extern struct {
         return sync_header + t.n;
     }
 };
+comptime {
+    // Passed to every kernel by value: the layout is the device ABI.
+    assert(@sizeOf(Tab) == 168);
+}
 
 /// The kernel bodies over the pointer type `Sy.P` (a global pointer on the
 /// device, a plain one on the host), `Sy.barrier`/`Sy.pause(spins)` and the done
@@ -138,6 +151,9 @@ pub fn Kernels(comptime Sy: type, comptime cap: u32, comptime lanes: u32) type {
         pub const SolveShared = struct { y: [tail_max]f64 };
 
         inline fn wait(p: anytype, stamp: u32) void {
+            // Ends: the awaited column belongs to an earlier ticket, and a
+            // step waits only on earlier ones, so the earliest unfinished
+            // step never waits and always publishes.
             var spins: u32 = 0;
             while (Sy.acquire(p) != stamp) : (spins +%= 1) Sy.pause(spins);
         }
@@ -547,7 +563,8 @@ pub const HostBufs = struct {
 /// then leave `y` and `dx` untouched. One thread is the scalar oracle: it
 /// takes every ticket in order, so no wait ever spins. A thread that fails
 /// to spawn leaves its tickets to the others. Fails only when the solve
-/// scratch (40 KB) cannot be allocated.
+/// scratch (40 KB) cannot be allocated. Asserts that `b` holds the index,
+/// value and sync lengths `t` names.
 pub fn runHost(t: Tab, b: HostBufs, stamp: u32, threads: u32) !?u32 {
     return runHostCap(col_max, t, b, stamp, threads);
 }
@@ -585,6 +602,7 @@ fn runHostCap(comptime cap: u32, t: Tab, b: HostBufs, stamp: u32, threads: u32) 
     H.lsolve(t, x, b.val.ptr, @constCast(b.rhs.ptr), b.y.ptr, b.sync.ptr, ssh, 0, 1);
     H.usolve(t, x, b.val.ptr, b.y.ptr, b.dx.ptr, b.sync.ptr, ssh, 0, 1);
     const f = b.sync[1];
+    assert(f <= t.n);
     return if (f == 0) null else t.n - f;
 }
 
@@ -615,6 +633,7 @@ const HostFactor = struct {
         errdefer gpa.free(val);
         const sync = try gpa.alloc(u32, tb.tab.syncLen());
         @memset(sync, 0);
+        assert(tb.idx.len == tb.tab.n_idx);
         return .{ .epoch = lu.pattern_epoch, .tb = tb, .val = val, .sync = sync };
     }
 
@@ -630,6 +649,8 @@ const HostFactor = struct {
     /// `threads - 1` tasks of `io` (none when null). False when a pivot
     /// test fails; the factors are then unusable.
     pub fn refactor(self: *Self, a: []const f64, io: ?std.Io, threads: u32) bool {
+        assert(self.sync.len == self.tb.tab.syncLen());
+        assert(self.val.len == self.tb.tab.n_val);
         const W = struct {
             fn work(t: Tab, x: [*]u32, val: [*]f64, av: [*]f64, sy: [*]u32, stamp: u32) void {
                 var sh: H.Shared = undefined;
@@ -644,6 +665,7 @@ const HostFactor = struct {
         for (futures[0..extra]) |*f| f.* = io.?.async(W.work, args);
         @call(.auto, W.work, args);
         for (futures[0..extra]) |*f| f.await(io.?);
+        assert(self.sync[1] <= self.tb.tab.n);
         return self.sync[1] == 0;
     }
 };
@@ -671,7 +693,8 @@ pub const HostRefactor = struct {
     /// unusable, as after a failed `refactor`. Asserts that `lu` is factored
     /// on the epoch the tables were built from.
     pub fn run(self: *HostRefactor, lu: *SparseLu, vals: []const f64, io: std.Io, threads: u32) error{SingularMatrix}!void {
-        std.debug.assert(lu.factored and lu.pattern_epoch == self.f.epoch);
+        assert(lu.factored);
+        assert(lu.pattern_epoch == self.f.epoch);
         for (lu.void_slots.items) |p| {
             if (vals[p] != 0) return error.SingularMatrix;
         }
@@ -729,7 +752,8 @@ pub const Tables = struct {
 /// them stale.
 pub fn build(gpa: std.mem.Allocator, lu: *const SparseLu, col_ptr: []const u32, growth: f64, opt: Options) !Tables {
     const lanes = refactor_block;
-    std.debug.assert(lu.factored);
+    assert(lu.factored);
+    assert(col_ptr.len == @as(usize, lu.n) + 1);
     const n = lu.n;
     const lp = lu.lp;
     const up = lu.up;
@@ -851,7 +875,8 @@ pub fn build(gpa: std.mem.Allocator, lu: *const SparseLu, col_ptr: []const u32, 
             }
         }
     }
-    std.debug.assert(n - t0 <= tail_max);
+    assert(t0 <= n);
+    assert(n - t0 <= tail_max);
     const l_levels = headLevels(lu, t0, false, level, len);
     const l_sched = try bucket(ar, level[0..n], l_levels);
     const u_levels = headLevels(lu, t0, true, level, len);
@@ -913,6 +938,7 @@ pub fn build(gpa: std.mem.Allocator, lu: *const SparseLu, col_ptr: []const u32, 
     tab.n_idx = std.math.cast(u32, total) orelse return error.OutOfMemory;
     const idx = try gpa.alloc(u32, total);
     inline for (parts) |part| @memcpy(idx[@field(tab, part[0])..][0..part[1].len], part[1]);
+    assert(idx.len == tab.n_idx);
     return .{ .idx = idx, .tab = tab };
 }
 
@@ -927,7 +953,10 @@ const tail_step_cost = 3;
 /// t0 for U, all rows for L, whose tail rows run their head part) and the
 /// head entries per row into `len`. Returns the level count.
 fn headLevels(lu: *const SparseLu, t0: u32, comptime upper: bool, level: []u32, len: []u32) u32 {
+    assert(t0 <= lu.n);
     const rows: u32 = if (upper) t0 else lu.n;
+    assert(level.len >= rows);
+    assert(len.len >= rows);
     @memset(level[0..rows], 0);
     @memset(len[0..rows], 0);
     var levels: u32 = @intFromBool(rows > 0);
@@ -946,6 +975,8 @@ fn headLevels(lu: *const SparseLu, t0: u32, comptime upper: bool, level: []u32, 
         len[r] += 1;
         levels = @max(levels, level[r] + 1);
     };
+    // A level holds at least one row.
+    assert(levels <= rows);
     return levels;
 }
 
@@ -957,6 +988,7 @@ fn solveCost(lu: *const SparseLu, t0: u32, level: []u32, len: []u32, scratch: []
     var cost: u64 = 0;
     inline for (.{ false, true }) |upper| {
         const levels = headLevels(lu, t0, upper, level, len);
+        assert(2 * levels <= scratch.len);
         const width = scratch[0..levels];
         const chain = scratch[levels..][0..levels];
         @memset(width, 0);
@@ -987,6 +1019,7 @@ fn bucket(ar: std.mem.Allocator, level: []const u32, levels: u32) !struct { rows
         rows[cur[v]] = @intCast(r);
         cur[v] += 1;
     }
+    assert(lev[levels] == level.len);
     return .{ .rows = rows, .lev = lev };
 }
 
@@ -1015,6 +1048,9 @@ fn gatherColumn(
     const li = lu.li.items;
     const ui = lu.ui.items;
     const void_k = lu.void_col[k];
+    assert(k < lu.n);
+    assert(lvl.len >= width);
+    assert(cnt.len >= width);
     const L = lvl[0..width];
     const C = cnt[0..width];
     @memset(L, 0);

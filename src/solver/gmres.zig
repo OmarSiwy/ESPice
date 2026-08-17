@@ -4,6 +4,7 @@
 //! dev/solvers/monodromy-krylov.md.
 
 const std = @import("std");
+const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const num = @import("core").numerics;
 
@@ -42,8 +43,8 @@ pub const Gmres = struct {
     /// Allocates (m + 1)(n + m) + 2n + 4m + 1 f64s. Asserts that n and m
     /// are positive. Caller frees with `deinit` and the same allocator.
     pub fn init(gpa: Allocator, n: u32, m: u32) !Self {
-        std.debug.assert(n > 0);
-        std.debug.assert(m > 0);
+        assert(n > 0);
+        assert(m > 0);
         const nu: usize = n;
         const mu: usize = m;
 
@@ -103,8 +104,8 @@ pub const Gmres = struct {
         const n: usize = self.n;
         const m: usize = self.m;
         const has_precond = comptime @hasDecl(std.meta.Child(@TypeOf(op)), "precond");
-        std.debug.assert(b.len >= n);
-        std.debug.assert(x.len >= n);
+        assert(b.len >= n);
+        assert(x.len >= n);
 
         const b_norm = vecNorm(b[0..n]);
         if (b_norm == 0) {
@@ -185,6 +186,8 @@ pub const Gmres = struct {
             }
 
             const k = j; // Arnoldi steps completed, at least 1
+            assert(k >= 1);
+            assert(k <= m);
             const singular = self.solveUpperTriangular(k);
             self.updateSolution(x[0..n], k, op);
 
@@ -200,21 +203,25 @@ pub const Gmres = struct {
         op.matvec(x[0..n], self.r[0..n]);
         self.residual(b[0..n]);
         const final_res = vecNorm(self.r[0..n]);
+        assert(total_iters <= (@as(u64, max_restarts) + 1) * self.m);
         return .{ .iterations = total_iters, .residual = final_res / b_norm, .converged = final_res <= abs_tol };
     }
 
     /// r = b - r.
     fn residual(self: *Self, b: []const f64) void {
+        assert(b.len == self.n);
         num.sub(self.r[0..b.len], b, self.r[0..b.len]);
     }
 
     inline fn getV(self: *Self, i: u32) []f64 {
+        assert(i <= self.m);
         const off: usize = @as(usize, i) * @as(usize, self.n);
         return self.v_basis[off..][0..self.n];
     }
 
     /// Applies rotations 0..j-1 to column j of H.
     fn applyPreviousGivens(self: *Self, j: u32) void {
+        assert(j < self.m);
         const m: usize = self.m;
         const ju: usize = j;
         for (0..ju) |i| {
@@ -231,6 +238,8 @@ pub const Gmres = struct {
     /// eps times the largest (a singular operator; rounding rarely leaves
     /// an exact zero) sets that component to zero. Returns whether one did.
     fn solveUpperTriangular(self: *Self, k: u32) bool {
+        assert(k >= 1);
+        assert(k <= self.m);
         const m: usize = self.m;
         const ku: usize = k;
         var d_max: f64 = 0;
@@ -263,6 +272,8 @@ pub const Gmres = struct {
         op: anytype,
     ) void {
         const n: usize = self.n;
+        assert(x.len == n);
+        assert(k <= self.m);
         if (comptime @hasDecl(std.meta.Child(@TypeOf(op)), "precond")) {
             @memset(self.w[0..n], 0);
             for (0..k) |j| {

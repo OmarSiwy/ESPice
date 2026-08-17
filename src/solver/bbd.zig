@@ -14,6 +14,7 @@
 //! sits outside every block and joins the border.
 
 const std = @import("std");
+const assert = std.debug.assert;
 const num = @import("core").numerics;
 const dense_lu = @import("dense_lu.zig");
 
@@ -66,7 +67,7 @@ pub const Bbd = struct {
     /// Classifies the pattern against `info` and lays out the arena.
     /// Borrows nothing; `col_ptr`/`row_idx` may be freed afterwards. Keeps
     /// `gpa` for `deinit`. Arena offsets are u32: a larger arena is
-    /// `NotApplicable`.
+    /// `NotApplicable`. Asserts that `col_ptr` has n + 1 entries.
     pub fn init(
         gpa: Allocator,
         n: u32,
@@ -75,6 +76,7 @@ pub const Bbd = struct {
         info: num.BbdInfo,
         limits: Limits,
     ) InitError!Self {
+        assert(col_ptr.len == @as(usize, n) + 1);
         const nb: u32 = @intCast(info.blocks.len);
         if (nb < limits.min_blocks) return error.NotApplicable;
         const b: u32 = info.coupling_size + 1;
@@ -167,6 +169,8 @@ pub const Bbd = struct {
             piv_len += ib.size;
             loc_len += @intCast(m);
         }
+        assert(piv_len < n);
+        assert(loc_len <= col_ptr[n]);
         const s_off: u32 = @intCast(arena_len);
         arena_len += @as(usize, b) * b;
         if (arena_len > arena_max) return error.NotApplicable;
@@ -267,12 +271,14 @@ pub const Bbd = struct {
     /// on `execution.io`; the Schur reduction is always serial in block
     /// order, so the result does not depend on the schedule. Fails when a
     /// block or S is singular; the arena is then unusable until the next
-    /// successful factor.
+    /// successful factor. Asserts one value per pattern entry.
     pub fn factorWithExecution(self: *Self, vals: []const f64, execution: num.Execution) error{SingularMatrix}!void {
+        assert(vals.len == self.dst.len);
         simdZero(self.arena);
         for (vals, self.dst) |v, d| self.arena[d] += v;
 
         const tasks = self.taskCount(execution);
+        if (tasks > 1) assert(execution.io != null);
         if (tasks > 1) try self.factorBlocksScheduled(execution.io.?, tasks);
         const nblocks = self.nb;
         const bsz: usize = self.b;
@@ -296,6 +302,7 @@ pub const Bbd = struct {
     }
 
     inline fn factorBlock(self: *const Self, bi: usize) error{SingularMatrix}!void {
+        assert(bi < self.nb);
         const s: usize = self.blk_s[bi];
         const m: usize = self.blk_m[bi];
         const a = self.arena[self.blk_a_off[bi]..][0 .. s * s];
@@ -309,6 +316,8 @@ pub const Bbd = struct {
     }
 
     fn factorBlocks(self: *const Self, start: usize, end: usize) error{SingularMatrix}!void {
+        assert(start <= end);
+        assert(end <= self.nb);
         for (start..end) |bi| try self.factorBlock(bi);
     }
 
@@ -316,13 +325,20 @@ pub const Bbd = struct {
         if (execution.io == null or execution.threads < 2) return 1;
         var work: u64 = 0;
         for (self.blk_s, self.blk_m) |s, m| work += @as(u64, s) * s * (s + 3 * @as(u64, m));
-        return @intCast(@max(1, @min(execution.threads, 16, self.nb, work / 131_072)));
+        const tasks: usize = @intCast(@max(1, @min(execution.threads, tasks_max, self.nb, work / 131_072)));
+        assert(tasks <= tasks_max);
+        return tasks;
     }
+
+    /// Block-factor tasks per factor at most: the futures live on the stack.
+    const tasks_max = 16;
 
     fn factorBlocksScheduled(self: *const Self, io: std.Io, tasks: usize) error{SingularMatrix}!void {
         // ponytail: at most 16 equal block ranges; weight them by block
         // cost if mixed sizes ever show measurable worker imbalance.
-        var futures: [16]std.Io.Future(error{SingularMatrix}!void) = undefined;
+        assert(tasks >= 2);
+        assert(tasks <= tasks_max);
+        var futures: [tasks_max]std.Io.Future(error{SingularMatrix}!void) = undefined;
         for (0..tasks) |i| {
             futures[i] = io.async(factorBlocks, .{ self, self.nb * i / tasks, self.nb * (i + 1) / tasks });
         }
@@ -335,19 +351,23 @@ pub const Bbd = struct {
         return result;
     }
 
-    /// x = A^-1 x after a successful factor; `x` holds all n unknowns.
+    /// x = A^-1 x after a successful factor. Asserts that `x` holds all n
+    /// unknowns.
     pub fn solveInPlace(self: *Self, x: []f64) void {
         self.solve(false, x);
     }
 
     /// x = A^-T x after a successful factor. The transposed Schur
     /// complement is S^T, and W^T = E^T A^-T takes F's role, so the
-    /// border reduction reads the raw b_i before any block solve.
+    /// border reduction reads the raw b_i before any block solve. Asserts
+    /// as `solveInPlace` does.
     pub fn solveTInPlace(self: *Self, x: []f64) void {
         self.solve(true, x);
     }
 
     inline fn solve(self: *Self, comptime transpose: bool, x: []f64) void {
+        // The last border node is the last unknown (init requires it).
+        assert(x.len > self.border_node[self.b - 1]);
         const bsz: usize = self.b;
         const sd = self.arena[self.s_off..][0 .. bsz * bsz];
         const nblocks = self.nb;
@@ -413,7 +433,7 @@ pub const Bbd = struct {
     }
 
     fn dotSimd(a: []const f64, c: []const f64) f64 {
-        std.debug.assert(a.len == c.len);
+        assert(a.len == c.len);
         var acc: Vec = @splat(0);
         var i: usize = 0;
         while (i + VecLen <= a.len) : (i += VecLen) {
@@ -429,6 +449,7 @@ pub const Bbd = struct {
 
 /// Appends `v` unless present.
 fn addToSet(gpa: Allocator, s: *std.ArrayList(u32), v: u32) error{OutOfMemory}!void {
+    assert(v != NONE);
     // ponytail: linear scan over a few border nodes; a bitset if they grow.
     if (std.mem.findScalar(u32, s.items, v) != null) return;
     try s.append(gpa, v);

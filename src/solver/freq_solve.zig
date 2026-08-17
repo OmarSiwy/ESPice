@@ -4,6 +4,7 @@
 //! and C planes. Batches of frequencies run as SIMD lanes through LaneLu.
 
 const std = @import("std");
+const assert = std.debug.assert;
 const dense_lu = @import("dense_lu.zig");
 const direct = @import("direct.zig");
 const lane_lu = @import("lane_lu.zig");
@@ -26,6 +27,8 @@ pub const Dyn = struct {
 
     /// Entry e's term at ω index k.
     fn at(self: Dyn, e: usize, k: usize) struct { re: f64, im: f64 } {
+        assert(e < self.slots.len);
+        assert(k < self.re.len / self.slots.len);
         const i = e * (self.re.len / self.slots.len) + k;
         return .{ .re = self.re[i], .im = self.im[i] };
     }
@@ -97,8 +100,12 @@ pub const FreqSolver = struct {
     /// A solver over the CSC pattern `col_ptr`/`row_idx` (n columns,
     /// borrowed for the solver's lifetime) with G and C given per slot, for
     /// callers whose planes are not a circuit evaluation. Nothing is
-    /// evaluated. Caller frees with `deinit` and the same allocator.
+    /// evaluated. Caller frees with `deinit` and the same allocator. Asserts
+    /// that `col_ptr` has n + 1 entries and `g` and `c` one value per slot.
     pub fn fromPlanes(allocator: Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32, g: []const f64, c: []const f64) !Self {
+        assert(col_ptr.len == @as(usize, n) + 1);
+        assert(g.len >= col_ptr[n]);
+        assert(c.len >= col_ptr[n]);
         const Planes = struct {
             n: usize,
             nnz: usize,
@@ -168,6 +175,7 @@ pub const FreqSolver = struct {
         errdefer allocator.free(c_vals);
 
         buildStackedRealPattern(n, ckt.col_ptr, ckt.row_idx, col_ptr, row_idx);
+        assert(col_ptr[nn] == total_nnz);
 
         // The analysis Circuit carries the facade's switches; a bare planes
         // view takes the defaults.
@@ -197,8 +205,11 @@ pub const FreqSolver = struct {
     }
 
     /// Dense solver over row-major n x n `g` and `c`, allocated with
-    /// `allocator`; takes ownership of both, also on error.
+    /// `allocator`; takes ownership of both, also on error. Asserts that `g`
+    /// and `c` are n x n.
     pub fn initDense(allocator: Allocator, n: u32, g: []f64, c: []f64) !Self {
+        assert(g.len == @as(usize, n) * n);
+        assert(c.len == g.len);
         errdefer allocator.free(g);
         errdefer allocator.free(c);
         const nn: u32 = 2 * n;
@@ -249,8 +260,13 @@ pub const FreqSolver = struct {
         }
     }
 
-    /// `setOmega` then `solveRhs`, for one right-hand side at one ω.
+    /// Factors A(ω) = G + jωC and solves one stacked right-hand side; `rhs`
+    /// and `x_out` are 2n long and may alias. Fails with `error.Singular`
+    /// (dense) or `error.SingularMatrix` (sparse) on a singular A(ω),
+    /// leaving `x_out` untouched. Asserts that both slices hold 2n entries.
     pub fn solve(self: *Self, omega: f64, rhs: []const f64, x_out: []f64) !void {
+        assert(rhs.len >= self.nn);
+        assert(x_out.len >= self.nn);
         try self.setOmega(omega);
         self.solveRhs(rhs, x_out);
     }
@@ -265,6 +281,7 @@ pub const FreqSolver = struct {
 
     /// `setOmega` plus `dyn`'s terms at ω index `k`.
     fn setOmegaDyn(self: *Self, omega: f64, dyn: Dyn, k: usize) !void {
+        if (dyn.slots.len != 0) assert(k < dyn.re.len / dyn.slots.len);
         switch (self.strategy) {
             .dense => |*d| try setOmegaDense(self.n, self.nn, d, omega, dyn, k),
             .sp => |*s| try setOmegaSparse(self.n, s, omega, dyn, k),
@@ -293,8 +310,9 @@ pub const FreqSolver = struct {
 
     /// Adds `v` to entry (i, i) of the solver's copy of G; the circuit is
     /// untouched. Call it before the first solve: a factorization already
-    /// held does not see it.
+    /// held does not see it. Asserts that `i < n`.
     pub fn addDiagG(self: *Self, i: u32, v: f64) void {
+        assert(i < self.n);
         switch (self.strategy) {
             .dense => |*d| d.g_dense[@as(usize, i) * self.n + i] += v,
             .sp => |*s| {
@@ -322,10 +340,12 @@ pub const FreqSolver = struct {
     pub fn solveBatch(self: *Self, omegas: []const f64, dyn: Dyn, rhs: []const f64, x_out: []f64, adjoint: bool) !void {
         const nn: usize = self.nn;
         const m = rhs.len;
-        std.debug.assert(m > 0 and m % nn == 0);
-        std.debug.assert(x_out.len == omegas.len * m);
+        assert(m > 0);
+        assert(m % nn == 0);
+        assert(x_out.len == omegas.len * m);
         if (omegas.len == 0) return;
-        std.debug.assert(dyn.re.len == dyn.slots.len * omegas.len and dyn.im.len == dyn.re.len);
+        assert(dyn.re.len == dyn.slots.len * omegas.len);
+        assert(dyn.im.len == dyn.re.len);
         const sp: *Sparse = switch (self.strategy) {
             .sp => |*s| s,
             .dense => return self.solveBatchSerial(omegas, dyn, 0, omegas.len, rhs, x_out, adjoint),
@@ -397,11 +417,15 @@ pub const FreqSolver = struct {
     /// Replaces the solver's G and C with `g` and `c`, indexed by CSC slot
     /// of the source pattern (a circuit's `g_vals`/`c_vals` layout). The
     /// dense strategy places them through the pattern `fromCircuit`
-    /// borrowed.
+    /// borrowed. Asserts that the solver has that pattern (not
+    /// `initDense`'s) and that `g` and `c` cover it.
     pub fn setPlanes(self: *Self, g: []const f64, c: []const f64) void {
+        assert(g.len == c.len);
         switch (self.strategy) {
             .dense => |*d| {
                 const n: usize = self.n;
+                assert(d.src_col_ptr.len == n + 1);
+                assert(g.len >= d.src_col_ptr[n]);
                 @memset(d.g_dense, 0);
                 @memset(d.c_mat, 0);
                 for (0..n) |j| for (d.src_col_ptr[j]..d.src_col_ptr[j + 1]) |p| {
@@ -411,6 +435,7 @@ pub const FreqSolver = struct {
                 };
             },
             .sp => |*s| {
+                assert(g.len >= s.g_vals.len);
                 @memcpy(s.g_vals, g[0..s.g_vals.len]);
                 @memcpy(s.c_vals, c[0..s.c_vals.len]);
             },
@@ -430,7 +455,7 @@ pub const FreqSolver = struct {
     /// the sparse LU, the only engine LaneLu replays.
     pub fn factorEach(self: *Self, omegas: []const f64) !void {
         const allocator = self.gpa;
-        std.debug.assert(omegas.len > 0);
+        assert(omegas.len > 0);
         self.held_id.clearRetainingCapacity();
         switch (self.strategy) {
             .dense => |*d| {
@@ -452,12 +477,13 @@ pub const FreqSolver = struct {
             },
             .sp => |*sp| try self.factorEachSparse(sp, omegas),
         }
+        assert(self.held_id.items.len <= omegas.len);
     }
 
     fn factorEachSparse(self: *Self, sp: *Sparse, omegas: []const f64) !void {
         const gpa = self.gpa;
         // The sparse solver was built from the same gpa.
-        std.debug.assert(sp.slv.gpa.ptr == gpa.ptr);
+        assert(sp.slv.gpa.ptr == gpa.ptr);
         const LL = lane_lu.LaneLu(W);
         const nn: usize = self.nn;
         if (sp.lane_work.len == 0)
@@ -465,7 +491,9 @@ pub const FreqSolver = struct {
         const groups = (omegas.len + W - 1) / W;
         var tape = omegas.len / 2;
         var tries: u8 = 0;
+        // Bounded: the third try (tries == 2) returns whatever it held.
         while (true) : (tries += 1) {
+            assert(tries <= 2);
             // A full factor at omegas[tape] lays down a fresh pivot tape.
             sp.slv.factored = false;
             try setOmegaSparse(self.n, sp, omegas[tape], .{}, 0);
@@ -497,10 +525,20 @@ pub const FreqSolver = struct {
     /// against `factorEach`'s factor k into the same rows of `x_out`, for
     /// every held ω; `adjoint` solves the stacked-real transpose, which is
     /// A^H. The identity lanes copy their right-hand side, so `rhs` and
-    /// `x_out` must not overlap. `rhs` holds exactly one vector per ω
-    /// `factorEach` was given.
+    /// `x_out` must not overlap. Asserts that `rhs` holds exactly one
+    /// vector per ω `factorEach` was given and `x_out` as many, and that
+    /// the two do not overlap.
     pub fn solveEach(self: *Self, rhs: []const f64, x_out: []f64, adjoint: bool) void {
         const nn: usize = self.nn;
+        assert(rhs.len % nn == 0);
+        assert(x_out.len >= rhs.len);
+        const r0 = @intFromPtr(rhs.ptr);
+        const x0 = @intFromPtr(x_out.ptr);
+        assert(r0 + rhs.len * @sizeOf(f64) <= x0 or x0 + rhs.len * @sizeOf(f64) <= r0);
+        switch (self.strategy) {
+            .dense => |d| assert(d.held_piv.len == rhs.len),
+            .sp => |sp| assert(sp.held.len == (rhs.len / nn + W - 1) / W),
+        }
         switch (self.strategy) {
             .dense => |*d| for (0..d.held_piv.len / nn) |k| {
                 const lu = d.held[k * nn * nn ..][0 .. nn * nn];
@@ -555,6 +593,8 @@ pub const FreqSolver = struct {
     fn solveBatchSerial(self: *Self, omegas: []const f64, dyn: Dyn, first: usize, count: usize, rhs: []const f64, x_out: []f64, adjoint: bool) !void {
         const nn: usize = self.nn;
         const m = rhs.len;
+        assert(first + count <= omegas.len);
+        assert(m % nn == 0);
         for (first..first + count) |k| {
             try self.setOmegaDyn(omegas[k], dyn, k);
             var r: usize = 0;
@@ -602,6 +642,7 @@ pub const FreqSolver = struct {
         }
         std.mem.copyForwards(u32, ptr[0..n], ptr[1..]);
         ptr[n] = @intCast(s.dyn_ent.len);
+        assert(ptr[0] == 0);
     }
 
     fn setOmegaDense(n: u32, nn: u32, d: *Dense, omega: f64, dyn: Dyn, k: usize) !void {
@@ -648,6 +689,7 @@ pub const FreqSolver = struct {
             s.vals[q[2]] -= t.im;
             s.vals[q[3]] += t.re;
         }
+        assert(p == s.vals.len);
 
         try s.slv.factor(s.vals, .{});
     }
@@ -675,7 +717,10 @@ pub fn Stacked(comptime L: usize) type {
 
         /// The fill of `sp` at `omega`; `dyn` must be the one `indexDyn`
         /// grouped into `sp`, with lane l at ω index `base + min(l, cnt - 1)`.
+        /// Asserts that 1 <= cnt <= L.
         pub fn of(sp: anytype, omega: V, dyn: Dyn, base: usize, cnt: usize) @This() {
+            assert(cnt >= 1);
+            assert(cnt <= L);
             return .{
                 .src_col_ptr = sp.src_col_ptr,
                 .col_ptr = sp.col_ptr,
@@ -736,18 +781,22 @@ pub fn Stacked(comptime L: usize) type {
 /// The column of CSC slot `slot` in the pattern `col_ptr` describes, by
 /// binary search (O(log n)); empty columns are skipped. A slot at or past
 /// nnz returns n, one past the last column, so callers filter ground slots
-/// first.
+/// first. Asserts that `col_ptr` opens at 0.
 pub fn slotCol(col_ptr: []const u32, slot: u32) usize {
-    return std.sort.upperBound(u32, col_ptr, slot, struct {
+    assert(col_ptr[0] == 0);
+    const j = std.sort.upperBound(u32, col_ptr, slot, struct {
         fn order(key: u32, item: u32) std.math.Order {
             return std.math.order(key, item);
         }
     }.order) - 1;
+    assert(j < col_ptr.len);
+    return j;
 }
 
 /// Source slot `slot`'s four stacked-real positions: column j's G and ωC
 /// entries, then column n + j's -ωC and G entries.
 fn stackedPos(src_col_ptr: []const u32, slot: u32) [4]usize {
+    assert(slot < src_col_ptr[src_col_ptr.len - 1]);
     const j = slotCol(src_col_ptr, slot);
     const cs: usize = src_col_ptr[j];
     const len: usize = src_col_ptr[j + 1] - cs;
@@ -758,7 +807,11 @@ fn stackedPos(src_col_ptr: []const u32, slot: u32) [4]usize {
 
 /// Adds re + j·im at entry (row, col) of the row-major 2n x 2n stacked-real
 /// `a`, [Re -Im; Im Re], the layout `buildComplexAdmittance` writes.
+/// Asserts that nn = 2n and that (row, col) lies in the n x n block.
 pub fn addDense(n: usize, nn: usize, a: []f64, row: usize, col: usize, re: f64, im: f64) void {
+    assert(nn == 2 * n);
+    assert(row < n);
+    assert(col < n);
     a[row * nn + col] += re;
     a[(n + row) * nn + col] += im;
     a[row * nn + n + col] -= im;
@@ -776,6 +829,8 @@ inline fn buildStackedRealPattern(
     sr_row_idx: []u32,
 ) void {
     const nu: usize = n;
+    assert(sr_col_ptr.len == 2 * nu + 1);
+    assert(sr_row_idx.len == 4 * @as(usize, col_ptr[n]));
     var p: u32 = 0;
     sr_col_ptr[0] = 0;
 
@@ -792,4 +847,5 @@ inline fn buildStackedRealPattern(
             sr_col_ptr[half * nu + j + 1] = p;
         }
     }
+    assert(p == sr_row_idx.len);
 }

@@ -5,6 +5,7 @@
 //! Background: dev/solvers/btf-permutation.md, amd-ordering.md.
 
 const std = @import("std");
+const assert = std.debug.assert;
 
 /// The slab from `wsSize` was too small for this pattern's fill.
 pub const Error = error{OutOfWorkspace};
@@ -27,6 +28,7 @@ pub const Ws = struct {
         if (w.used + m > w.buf.len) return error.OutOfWorkspace;
         const s = w.buf[w.used .. w.used + m];
         w.used += m;
+        assert(w.used <= w.buf.len);
         return s;
     }
 
@@ -42,8 +44,10 @@ pub const Ws = struct {
         return w.used;
     }
 
-    /// Frees everything allocated since `mark` returned `m`.
+    /// Frees everything allocated since `mark` returned `m`. Asserts that
+    /// `m` is at or below the current top.
     pub fn release(w: *Ws, m: usize) void {
+        assert(m <= w.used);
         w.used = m;
     }
 };
@@ -64,9 +68,11 @@ pub fn wsSize(n: usize, nnz: usize) usize {
 /// the graph j -> i for A(i,j) != 0, sink block first, each block's columns
 /// AMD-ordered. Requires a structurally full diagonal (the pattern merge
 /// guarantees it), so no matching step is needed. Restores `ws` on return.
+/// Asserts that `q` has n entries and `col_ptr` n + 1.
 pub fn order(n: u32, col_ptr: []const u32, row_idx: []const u32, q: []u32, ws: *Ws) Error!void {
     if (n == 0) return;
-    std.debug.assert(q.len == n);
+    assert(q.len == n);
+    assert(col_ptr.len == @as(usize, n) + 1);
     const base = ws.mark();
     defer ws.release(base);
 
@@ -122,7 +128,10 @@ pub fn order(n: u32, col_ptr: []const u32, row_idx: []const u32, q: []u32, ws: *
             }
             // v is finished; if it roots an SCC, pop that block.
             if (low[v] == num[v]) {
+                // Terminates: v is still on the SCC stack, below everything
+                // pushed after it.
                 while (true) {
+                    assert(sp > 0);
                     sp -= 1;
                     const m = scc_stack[sp];
                     on[m] = 0;
@@ -139,6 +148,11 @@ pub fn order(n: u32, col_ptr: []const u32, row_idx: []const u32, q: []u32, ws: *
             }
         }
     }
+
+    // Every vertex landed in exactly one block.
+    assert(no == n);
+    assert(sp == 0);
+    assert(block_ptr[nb] == n);
 
     // AMD inside each non-singleton block, on the block's sub-pattern.
     const blk_of = try ws.alloc(n);
@@ -197,6 +211,7 @@ const DegLists = struct {
     prev: []u32,
 
     fn insert(s: *DegLists, d: u32, i: u32) void {
+        assert(s.head[d] != i);
         s.next[i] = s.head[d];
         s.prev[i] = NONE;
         if (s.head[d] != NONE) s.prev[s.head[d]] = i;
@@ -204,6 +219,7 @@ const DegLists = struct {
     }
 
     fn remove(s: *DegLists, d: u32, i: u32) void {
+        if (s.prev[i] == NONE) assert(s.head[d] == i);
         if (s.prev[i] != NONE)
             s.next[s.prev[i]] = s.next[i]
         else
@@ -222,6 +238,8 @@ const DegLists = struct {
 // >= max(16, 10 sqrt(n)) go last). Restores `ws` on return.
 fn amd(n: u32, col_ptr: []const u32, row_idx: []const u32, q: []u32, ws: *Ws) Error!void {
     if (n == 0) return;
+    assert(q.len == n);
+    assert(col_ptr.len == @as(usize, n) + 1);
     const base = ws.mark();
     defer ws.release(base);
 
@@ -358,8 +376,13 @@ fn amd(n: u32, col_ptr: []const u32, row_idx: []const u32, q: []u32, ws: *Ws) Er
     var mindeg: u32 = 0;
     var k: u32 = 0;
 
+    // Terminates: each pass eliminates p, so k grows by at least one.
     while (k < n_amd) {
-        while (dl.head[mindeg] == NONE) mindeg += 1;
+        // Some live variable remains, so a bucket at or above mindeg holds it.
+        while (dl.head[mindeg] == NONE) {
+            mindeg += 1;
+            assert(mindeg <= n);
+        }
         const p = dl.head[mindeg];
         dl.remove(deg[p], p);
 
@@ -493,6 +516,7 @@ fn amd(n: u32, col_ptr: []const u32, row_idx: []const u32, q: []u32, ws: *Ws) Er
                     nv[i] += nv[j];
                     nv[j] = 0;
                     var tail = j;
+                    // Merge chains are acyclic: each variable joins one once.
                     while (mlink[tail] != NONE) tail = mlink[tail];
                     mlink[tail] = mlink[i];
                     mlink[i] = j;
@@ -517,6 +541,7 @@ fn amd(n: u32, col_ptr: []const u32, row_idx: []const u32, q: []u32, ws: *Ws) Er
         }
     }
 
+    assert(k == n_amd);
     @memcpy(q[k..][0..ndense], lp_buf[dense_start..][0..ndense]);
 }
 
@@ -534,6 +559,7 @@ fn sameAdj(
     i: u32,
     j: u32,
 ) bool {
+    assert(i != j);
     if (va_len[i] != va_len[j] or ea_len[i] != ea_len[j]) return false;
     inline for (.{ va, ea }, .{ va_pe, ea_pe }, .{ va_len, ea_len }) |adj, pos, len| {
         era.* += 1;

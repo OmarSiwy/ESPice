@@ -8,13 +8,17 @@
 //! them on the scalar path (freq_solve.zig `solveBatch`).
 
 const std = @import("std");
+const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const sparse_lu = @import("sparse_lu.zig");
 
 /// W numeric factorizations sharing one SparseLu pattern. W is at most 64,
 /// the width of the failure mask.
 pub fn LaneLu(comptime W: usize) type {
-    comptime std.debug.assert(W >= 1 and W <= 64);
+    comptime {
+        assert(W >= 1);
+        assert(W <= 64);
+    }
     return struct {
         const Self = @This();
         const Base = sparse_lu.SparseLu;
@@ -35,11 +39,11 @@ pub fn LaneLu(comptime W: usize) type {
         w: []V,
         y: []V,
 
-        /// Sizes the value planes from `base`, which must be factored. A later
-        /// full factor of `base` can change its L/U lengths; the caller then
-        /// rebuilds the LaneLu.
+        /// Sizes the value planes from `base`. A later full factor of `base`
+        /// can change its L/U lengths; the caller then rebuilds the LaneLu.
+        /// Asserts that `base` is factored.
         pub fn init(gpa: Allocator, base: *const Base) !Self {
-            std.debug.assert(base.factored);
+            assert(base.factored);
             const n = base.n;
             var self: Self = .{
                 .base = base,
@@ -57,7 +61,13 @@ pub fn LaneLu(comptime W: usize) type {
             self.w = try gpa.alloc(V, n);
             self.y = try gpa.alloc(V, n);
             @memset(self.w, @as(V, @splat(0)));
+            assert(self.planesMatch());
             return self;
+        }
+
+        /// True while `base` has the L/U lengths the planes were sized for.
+        fn planesMatch(self: *const Self) bool {
+            return self.lx.len == self.base.lx.items.len and self.ux.len == self.base.ux.items.len;
         }
 
         /// Frees the value planes; `base` stays the caller's.
@@ -89,9 +99,12 @@ pub fn LaneLu(comptime W: usize) type {
         /// value plane. Returns the mask of lanes whose pivot was zero,
         /// non-finite or below `growth_limit` times its column max (bit l =
         /// lane l); their factors are garbage. A void pivot in the base fails
-        /// every lane.
+        /// every lane. Asserts that `base` still has the L/U lengths `init`
+        /// sized the planes for.
         pub fn refactor(self: *Self, src: anytype, growth_limit: f64) u64 {
             const b = self.base;
+            assert(b.factored);
+            assert(self.planesMatch());
             const li = b.li.items;
             const ui = b.ui.items;
             const up = b.up;
@@ -154,6 +167,7 @@ pub fn LaneLu(comptime W: usize) type {
                     }
                 }
             }
+            assert(bad & ~all_lanes == 0);
             return bad;
         }
 
@@ -161,9 +175,13 @@ pub fn LaneLu(comptime W: usize) type {
         /// scalar path there is no zero skip in either sweep, so a zero result
         /// can differ from SparseLu's in sign, and a lane whose factors hold
         /// an Inf or NaN can turn 0 * Inf into NaN where SparseLu skipped it.
-        /// A lane `refactor` masked holds garbage.
+        /// A lane `refactor` masked holds garbage. Asserts that `b_in` has n
+        /// entries, `x` at least n, and that the planes still fit `base`.
         pub fn solve(self: *Self, b_in: []const V, x: []V) void {
             const b = self.base;
+            assert(b_in.len == self.n);
+            assert(x.len >= self.n);
+            assert(self.planesMatch());
             const li = b.li.items;
             const ui = b.ui.items;
             const lp = b.lp;
@@ -191,9 +209,13 @@ pub fn LaneLu(comptime W: usize) type {
         }
 
         /// SparseLu.solveT for W lanes, bitwise its result per lane. `b_in`
-        /// and `x` may alias. A lane `refactor` masked holds garbage.
+        /// and `x` may alias. A lane `refactor` masked holds garbage. Asserts
+        /// as `solve` does.
         pub fn solveT(self: *Self, b_in: []const V, x: []V) void {
             const b = self.base;
+            assert(b_in.len == self.n);
+            assert(x.len >= self.n);
+            assert(self.planesMatch());
             const li = b.li.items;
             const ui = b.ui.items;
             const lp = b.lp;

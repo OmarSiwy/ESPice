@@ -3,12 +3,15 @@
 //! demotes the system to the pivoting sparse LU.
 
 const std = @import("std");
+const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 
 const NONE: u32 = std.math.maxInt(u32);
 
-/// True when every entry has |row - col| <= 1 and n >= 3. O(nnz).
+/// True when every entry has |row - col| <= 1 and n >= 3. O(nnz). Asserts
+/// that `col_ptr` has n + 1 entries.
 pub fn isTridiag(n: u32, col_ptr: []const u32, row_idx: []const u32) bool {
+    assert(col_ptr.len == @as(usize, n) + 1);
     if (n < 3) return false;
     for (0..n) |j| {
         for (col_ptr[j]..col_ptr[j + 1]) |p| {
@@ -43,10 +46,10 @@ pub const TriDiag = struct {
     /// does not pivot, so this covers nonsingular matrices too.
     pub const FactorError = error{SingularMatrix};
 
-    /// Builds the slot maps. The pattern must pass `isTridiag`; asserts
-    /// n >= 3. Borrows nothing. Free with `deinit`.
+    /// Builds the slot maps. Borrows nothing. Free with `deinit`. Asserts
+    /// that the pattern passes `isTridiag`, which needs n >= 3.
     pub fn init(gpa: Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32) !Self {
-        std.debug.assert(n >= 3);
+        assert(isTridiag(n, col_ptr, row_idx));
 
         const a_pos = try gpa.alloc(u32, n);
         errdefer gpa.free(a_pos);
@@ -99,6 +102,7 @@ pub const TriDiag = struct {
     /// non-finite; the factors are then unusable.
     pub fn factor(self: *Self, vals: []const f64) FactorError!void {
         const n = self.n;
+        assert(n >= 3);
 
         self.bp[0] = triVal(self.b_pos[0], vals);
         if (self.bp[0] == 0 or !std.math.isFinite(self.bp[0])) return error.SingularMatrix;
@@ -115,9 +119,11 @@ pub const TriDiag = struct {
         }
     }
 
-    /// x = A^-1 x after a successful `factor`, O(n).
+    /// x = A^-1 x after a successful `factor`, O(n). Asserts that `x` has n
+    /// entries.
     pub fn solve(self: *Self, x: []f64) void {
         const n = self.n;
+        assert(x.len == n);
         for (1..n) |i| x[i] -= self.mul[i] * x[i - 1];
         x[n - 1] /= self.bp[n - 1];
         var i: usize = n - 1;
@@ -128,9 +134,11 @@ pub const TriDiag = struct {
     }
 
     /// x = A^-T x after a successful `factor`: forward through U^T
-    /// (diagonal bp, sub-diagonal cv), then back through unit L^T.
+    /// (diagonal bp, sub-diagonal cv), then back through unit L^T. Asserts
+    /// that `x` has n entries.
     pub fn solveT(self: *Self, x: []f64) void {
         const n = self.n;
+        assert(x.len == n);
         x[0] /= self.bp[0];
         for (1..n) |i| x[i] = (x[i] - self.cv[i - 1] * x[i - 1]) / self.bp[i];
         var i: usize = n - 1;

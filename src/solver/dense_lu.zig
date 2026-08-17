@@ -4,6 +4,7 @@
 //! runs in rank-8 panels; the unblocked loops are its bitwise oracle.
 
 const std = @import("std");
+const assert = std.debug.assert;
 const scale = @import("core").numerics.scale;
 
 // ponytail: rank-8 panels are the only blocking; 2-D register tiling of the
@@ -19,13 +20,14 @@ const singular_tol: f64 = std.math.floatEps(f64) * std.math.floatEps(f64);
 
 /// x = A^-1 b in one elimination pass, O(n^3). Destroys `a`; `b` and `x`
 /// must not alias. `Singular` when a pivot falls below eps^2 in absolute
-/// terms (a NaN pivot passes); `x` is then partial.
+/// terms (a NaN pivot passes); `x` is then partial. Asserts that `a` holds
+/// n x n entries, `b` and `x` at least n each, and that `b` is not `x`.
 pub fn factorizeSolve(n: usize, a: []f64, b: []const f64, x: []f64) Error!void {
     return factorizeSolveImpl(n, a, b, x, false);
 }
 
 /// x = -A^-1 b, the Newton step. Destroys `a`; `b` and `x` must not
-/// alias.
+/// alias. Asserts as `factorizeSolve` does.
 pub fn factorizeSolveNeg(n: usize, a: []f64, b: []const f64, x: []f64) Error!void {
     return factorizeSolveImpl(n, a, b, x, true);
 }
@@ -33,8 +35,11 @@ pub fn factorizeSolveNeg(n: usize, a: []f64, b: []const f64, x: []f64) Error!voi
 /// PA = LU in place: unit-lower L below the diagonal, U on and above
 /// it. `piv[k]` is the row swapped with row k at step k (LAPACK
 /// convention). O(n^3). `Singular` as in `factorizeSolve`; on error `a`
-/// and `piv` are partial.
+/// and `piv` are partial. Asserts that `a` holds n x n entries and `piv`
+/// at least n.
 pub fn factorize(n: usize, a: []f64, piv: []u32) Error!void {
+    assert(a.len >= n * n);
+    assert(piv.len >= n);
     if (n >= blocked_min) return eliminateBlocked(n, a, piv, &.{}, .factor);
     for (0..n) |k| {
         const max_row = pivotRow(n, a, k);
@@ -54,8 +59,13 @@ pub fn factorize(n: usize, a: []f64, piv: []u32) Error!void {
     }
 }
 
-/// x = A^-1 b from `factorize` output. `b` and `x` may alias.
+/// x = A^-1 b from `factorize` output. `b` and `x` may alias. Asserts that
+/// `lu` holds n x n entries and `piv`, `b` and `x` at least n each.
 pub fn solveFactored(n: usize, lu: []const f64, piv: []const u32, b: []const f64, x: []f64) void {
+    assert(lu.len >= n * n);
+    assert(piv.len >= n);
+    assert(b.len >= n);
+    assert(x.len >= n);
     if (x.ptr != b.ptr) @memcpy(x[0..n], b[0..n]);
 
     // All swaps first: interleaving them with the elimination is
@@ -75,8 +85,12 @@ pub fn solveFactored(n: usize, lu: []const f64, piv: []const u32, b: []const f64
 
 /// x = A^-T b from `factorize` output: A^T = U^T L^T P, so forward
 /// through U^T, back through L^T, then undo the swaps. `b` and `x`
-/// may alias.
+/// may alias. Asserts as `solveFactored` does.
 pub fn solveFactoredT(n: usize, lu: []const f64, piv: []const u32, b: []const f64, x: []f64) void {
+    assert(lu.len >= n * n);
+    assert(piv.len >= n);
+    assert(b.len >= n);
+    assert(x.len >= n);
     if (x.ptr != b.ptr) @memcpy(x[0..n], b[0..n]);
 
     for (0..n) |i| {
@@ -98,7 +112,8 @@ pub fn solveFactoredT(n: usize, lu: []const f64, piv: []const u32, b: []const f6
 
 /// Writes the stacked-real admittance [G, -ωC; ωC, G] into `a`
 /// (row-major, stride nn = 2n) from n x n row-major G and C. Every entry
-/// of the 2n x 2n block is written.
+/// of the 2n x 2n block is written. Asserts that nn = 2n and that each
+/// slice holds its matrix.
 pub fn buildComplexAdmittance(
     n: usize,
     nn: usize,
@@ -107,6 +122,10 @@ pub fn buildComplexAdmittance(
     omega: f64,
     a: []f64,
 ) void {
+    assert(nn == 2 * n);
+    assert(g_dense.len >= n * n);
+    assert(c_mat.len >= n * n);
+    assert(a.len >= nn * nn);
     const neg_omega = -omega;
     const omega_v: V = @splat(omega);
     const neg_omega_v: V = @splat(neg_omega);
@@ -144,6 +163,8 @@ pub fn buildComplexAdmittance(
 /// x[i] - sum over j in [start, end) of lu[j*n + i] * x[j]: W-lane
 /// partial sums, one reduce, then the scalar tail.
 inline fn subtractColumnDot(n: usize, lu: []const f64, x: []const f64, i: usize, start: usize, end: usize) f64 {
+    assert(i < n);
+    assert(end <= n);
     var acc: V = @splat(0.0);
     var j = start;
     // ponytail: strided column gather; keep a transposed factor copy
@@ -162,6 +183,10 @@ inline fn subtractColumnDot(n: usize, lu: []const f64, x: []const f64, i: usize,
 
 /// Carries x through the elimination instead of recording pivots.
 fn factorizeSolveImpl(n: usize, a: []f64, b: []const f64, x: []f64, comptime negate: bool) Error!void {
+    assert(a.len >= n * n);
+    assert(b.len >= n);
+    assert(x.len >= n);
+    if (n > 0) assert(b.ptr != x.ptr);
     if (negate) {
         scale(x[0..n], -1, b[0..n]);
     } else {
@@ -198,6 +223,11 @@ const block = 8;
 /// Below this order the unblocked loops win: panel bookkeeping costs
 /// more than the row traffic it saves (Ir crossover between 32 and 48).
 const blocked_min = 5 * block;
+comptime {
+    // The vector row loops step by whole vectors inside one panel.
+    assert(std.math.isPowerOfTwo(W));
+    assert(blocked_min >= block);
+}
 
 const Mode = enum { factor, solve };
 
@@ -208,6 +238,8 @@ const Mode = enum { factor, solve };
 /// same multipliers, so results are bitwise the unblocked loops'.
 /// `.factor` records swaps in `piv`; `.solve` carries `x` instead.
 fn eliminateBlocked(n: usize, a: []f64, piv: []u32, x: []f64, comptime mode: Mode) Error!void {
+    assert(n >= blocked_min);
+    if (mode == .factor) assert(piv.len >= n) else assert(x.len >= n);
     var k0: usize = 0;
     while (k0 < n) : (k0 += block) {
         const kb = @min(k0 + block, n);
@@ -227,6 +259,8 @@ fn eliminateBlocked(n: usize, a: []f64, piv: []u32, x: []f64, comptime mode: Mod
 /// row update stopped at the panel edge `kb`. Always stores the
 /// multiplier, which `panelUpdate` reads. False on a singular pivot.
 inline fn panelStep(n: usize, a: []f64, piv: []u32, x: []f64, k: usize, kb: usize, comptime mode: Mode) bool {
+    assert(k < kb);
+    assert(kb <= n);
     const max_row = pivotRow(n, a, k);
     if (mode == .factor) piv[k] = @intCast(max_row);
     if (@abs(a[max_row * n + k]) < singular_tol) return false;
@@ -283,6 +317,7 @@ inline fn panelUpdate(row: []f64, a: []const f64, n: usize, k0: usize, kb: usize
 
 /// First row i in [k, n) maximizing |a[i*n + k]|.
 fn pivotRow(n: usize, a: []const f64, k: usize) usize {
+    assert(k < n);
     var max_val: f64 = @abs(a[k * n + k]);
     var max_row: usize = k;
     for (k + 1..n) |i| {
@@ -292,12 +327,15 @@ fn pivotRow(n: usize, a: []const f64, k: usize) usize {
             max_row = i;
         }
     }
+    assert(max_row >= k);
     return max_row;
 }
 
 /// U x = y in place: per row, W-lane partial sums, one reduce, the
 /// scalar tail, then the divide.
 fn backSubstitute(n: usize, a: []const f64, x: []f64) void {
+    assert(a.len >= n * n);
+    assert(x.len >= n);
     var ki: usize = n;
     while (ki > 0) {
         ki -= 1;
@@ -329,6 +367,8 @@ inline fn elimRowSimd(row_i: []f64, row_k: []const f64, factor: f64, start: usiz
 }
 
 fn swapRowsSimd(a: []f64, n: usize, r1: usize, r2: usize) void {
+    assert(r1 < n);
+    assert(r2 < n);
     var j: usize = 0;
     while (j + W <= n) : (j += W) {
         const p1: *[W]f64 = a[r1 * n + j ..][0..W];
@@ -342,6 +382,7 @@ fn swapRowsSimd(a: []f64, n: usize, r1: usize, r2: usize) void {
 
 /// x[i] -= xk * lu[i*n + k] for i in (k, n), gathering column k.
 fn fmsSolveSimd(lu: []const f64, x: []f64, n: usize, k: usize, xk: f64) void {
+    assert(k < n);
     const xkv: V = @splat(xk);
     var ii = k + 1;
     while (ii + W <= n) : (ii += W) {

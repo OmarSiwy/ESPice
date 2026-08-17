@@ -4,6 +4,7 @@
 //! Background: dev/solvers/gilbert-peierls-lu.md, klu-pipeline.md.
 
 const std = @import("std");
+const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 
 const NONE: u32 = std.math.maxInt(u32);
@@ -21,6 +22,9 @@ pub const SparseLu = struct {
     /// the block rows of steps first+1..last (slot t-first-1), then the
     /// rest. Values are column-major, `nrows` per member step.
     const Panel = struct { first: u32, last: u32, row_off: u32, val_off: u32 };
+    comptime {
+        assert(@sizeOf(Panel) == 16);
+    }
     /// A panel opens only on an L column at least this long, and the
     /// factor switches to its supernodal loop only after one appears.
     /// Short supernodes (a complex AC entry's 2x2 real block) lose to
@@ -129,7 +133,8 @@ pub const SparseLu = struct {
     pattern_epoch: u32 = 0,
 
     /// Allocates every workspace. `q` is borrowed and must outlive the
-    /// SparseLu; `row_idx` is unused until `factor`.
+    /// SparseLu; `row_idx` is unused until `factor`. Asserts that `q` has n
+    /// entries and `col_ptr` n + 1.
     pub fn init(
         gpa: Allocator,
         n: u32,
@@ -138,6 +143,8 @@ pub const SparseLu = struct {
         q: []const u32,
     ) !Self {
         _ = row_idx;
+        assert(q.len == n);
+        assert(col_ptr.len == @as(usize, n) + 1);
         const nnz = col_ptr[n];
         // ponytail: pre-size L and U to max(nnz, 2n), typical circuit
         // fill; tune from a fill profile if first factors reallocate.
@@ -230,6 +237,9 @@ pub const SparseLu = struct {
     /// diverging Newton steps (values up to 1e60): threshold pivoting
     /// sent 4,503 of 44,925 columns off the diagonal and filled 34x
     /// against 2.6x (dev/solvers/gilbert-peierls-lu.md, "Re-pivoting").
+    ///
+    /// Asserts that the pattern is the one `init` was sized for and that
+    /// `pivot_tol` lies in [0, 1].
     pub fn factor(
         self: *Self,
         gpa: Allocator,
@@ -238,6 +248,12 @@ pub const SparseLu = struct {
         vals: []const f64,
         pivot_tol: f64,
     ) FactorError!void {
+        assert(col_ptr.len == @as(usize, self.n) + 1);
+        assert(col_ptr[self.n] == self.prow.len);
+        assert(row_idx.len >= self.prow.len);
+        assert(vals.len >= self.prow.len);
+        assert(pivot_tol >= 0);
+        assert(pivot_tol <= 1);
         try self.holdScratch(gpa);
         defer self.dropScratch(gpa);
         const repivot = self.factored and self.fill_cap > 0 and self.base_lu > 0;
@@ -251,6 +267,7 @@ pub const SparseLu = struct {
                 std.debug.print("lu-stats: re-pivot passed {d} L+U entries; keeping the previous pivots\n", .{cap});
             _ = try self.factorPass(gpa, col_ptr, row_idx, vals, pivot_tol, std.math.maxInt(usize), true);
         }
+        assert(self.factored);
         if (!repivot) self.base_lu = self.li.items.len + self.ui.items.len;
     }
 
@@ -260,6 +277,7 @@ pub const SparseLu = struct {
     const scratch_u32 = .{ "flag", "topo", "stack", "pstack", "want", "want_of", "lend", "sn_of", "sn_slot" };
 
     fn holdScratch(self: *Self, gpa: Allocator) Allocator.Error!void {
+        assert(self.flag.len == 0);
         errdefer self.dropScratch(gpa);
         inline for (scratch_u32) |name| @field(self, name) = try gpa.alloc(u32, self.n);
         self.rscale = try gpa.alloc(f64, self.n);
@@ -288,6 +306,8 @@ pub const SparseLu = struct {
         keep_prev: bool,
     ) FactorError!bool {
         const n = self.n;
+        assert(self.flag.len == n);
+        assert(self.rscale.len == n);
         self.factored = false;
         @memset(self.pinv, NONE);
         @memset(self.flag, 0);
@@ -358,6 +378,9 @@ pub const SparseLu = struct {
                     // An unpivoted row has no L column: the empty range [0, 0).
                     pstack[sp] = if (pinv[r] == NONE) 0 else lp[pinv[r]];
                     flag[r] = mark;
+                    // Terminates: each pass pushes a row not yet marked for
+                    // this column (at most n of them) or finishes the top
+                    // one, so it runs at most 2n times and sp stays below n.
                     while (true) {
                         r = stack[sp];
                         const kc = pinv[r];
@@ -502,7 +525,10 @@ pub const SparseLu = struct {
                     }
                     w[r] = 0;
                 }
-                if (self.li.items.len + self.ui.items.len > cap) return true;
+                if (self.li.items.len + self.ui.items.len > cap) {
+                    assert(!self.factored);
+                    return true;
+                }
                 if (!sn) {
                     if (self.li.items.len - lp[k] >= panel_min_rows) {
                         k += 1;
@@ -518,6 +544,8 @@ pub const SparseLu = struct {
         }
         self.lp[n] = @intCast(self.li.items.len);
         self.up[n] = @intCast(self.ui.items.len);
+        // Every row pivoted exactly once: k ran to n and each step set one.
+        assert(k == n);
 
         for (self.li.items) |*r| r.* = self.pinv[r.*];
         for (row_idx[0..self.prow.len], self.prow) |r, *pr| pr.* = self.pinv[r];
@@ -551,6 +579,8 @@ pub const SparseLu = struct {
             self.census(gpa, col_ptr, row_idx) catch {};
         }
 
+        assert(self.lx.items.len == self.li.items.len);
+        assert(self.ux.items.len == self.ui.items.len);
         self.pattern_epoch +%= 1;
         self.factored = true;
         return false;
@@ -565,6 +595,8 @@ pub const SparseLu = struct {
     /// entries (rails); and the §4.1 epoch bytes.
     fn census(self: *const Self, gpa: Allocator, col_ptr: []const u32, row_idx: []const u32) Allocator.Error!void {
         const n = self.n;
+        assert(col_ptr.len == @as(usize, n) + 1);
+        assert(self.lp[n] == self.li.items.len);
         const scratch = try gpa.alloc(u32, 4 * @as(usize, n));
         defer gpa.free(scratch);
         const finish = scratch[0..n];
@@ -637,6 +669,8 @@ pub const SparseLu = struct {
     /// form a supernode. A row of L[:,k] is exactly a row this column's
     /// walk reached (flag == mark) that is still unpivoted.
     fn linkStep(self: *Self, gpa: Allocator, k: u32, piv: u32, mark: u32) Allocator.Error!void {
+        assert(k > 0);
+        assert(k < self.n);
         const s = k - 1;
         const col = self.li.items[self.lp[s]..self.lp[k]];
         var at: u32 = NONE; // piv's offset in L[:,s]
@@ -658,6 +692,8 @@ pub const SparseLu = struct {
     /// Opens a panel at k-1 if none is open, moves `piv` to block slot
     /// k-first-1 and appends column k.
     fn growPanel(self: *Self, gpa: Allocator, k: u32, piv: u32) Allocator.Error!void {
+        assert(k > 0);
+        assert(self.sn_of[k] == NONE);
         const lp = self.lp;
         const li = self.li.items;
         const lx = self.lx.items;
@@ -699,6 +735,7 @@ pub const SparseLu = struct {
         @memset(dst, 0);
         // lp[k + 1] is not written yet: column k ends at the list's end.
         for (li[lp[k]..], lx[lp[k]..]) |r, v| dst[slot[r]] = v;
+        assert(pan.last + 1 == k);
         pan.last = k;
         self.sn_of[k] = pid;
     }
@@ -709,6 +746,7 @@ pub const SparseLu = struct {
     /// subtractions happen in step order, so the result is bitwise the
     /// column-at-a-time loop's.
     fn panelRun(self: *Self, w: []f64, topo: []const u32, idx0: u32, kc: u32) u32 {
+        assert(self.sn_of[kc] != NONE);
         const pan = self.panels.items[self.sn_of[kc]];
         const nrows = self.lp[pan.first + 1] - self.lp[pan.first];
         const m = pan.last - pan.first + 1;
@@ -740,6 +778,7 @@ pub const SparseLu = struct {
         var i: u32 = m - 1;
         while (i + W <= nrows) : (i += W) panelRows(W, w, rows, vals[c0..], nrows, i, u);
         while (i < nrows) : (i += 1) panelRows(1, w, rows, vals[c0..], nrows, i, u);
+        assert(len <= m - b0);
         return idx0 - (len - 1);
     }
 
@@ -781,6 +820,7 @@ pub const SparseLu = struct {
         vals: []const f64,
         c: u32,
     ) bool {
+        assert(c < self.n);
         if (self.pinv[c] != NONE) return false;
         for (col_ptr[c]..col_ptr[c + 1]) |p| {
             if (vals[p] != 0) return false;
@@ -825,15 +865,18 @@ pub const SparseLu = struct {
     /// non-finite, falls below `growth_limit` times its column max, or a
     /// fabricated pivot's row or column turned nonzero; the caller then
     /// runs a full `factor`, and the old factors are unusable until it
-    /// does. Asserts that the last `factor` succeeded.
-    /// Allocates nothing and leaves `w` all-zero on every path.
+    /// does. Asserts that a `factor` has succeeded and that `col_ptr` and
+    /// `vals` cover its pattern. Allocates nothing and leaves `w` all-zero
+    /// on every path.
     pub fn refactor(
         self: *Self,
         col_ptr: []const u32,
         vals: []const f64,
         growth_limit: f64,
     ) error{SingularMatrix}!void {
-        std.debug.assert(self.factored);
+        assert(self.factored);
+        assert(col_ptr.len == @as(usize, self.n) + 1);
+        assert(vals.len >= self.prow.len);
         for (self.void_slots.items) |p| {
             if (vals[p] != 0) return error.SingularMatrix;
         }
@@ -849,6 +892,8 @@ pub const SparseLu = struct {
         vals: []const f64,
         growth_limit: f64,
     ) error{SingularMatrix}!void {
+        assert(self.factored);
+        assert(vals.len >= self.prow.len);
         const li = self.li.items;
         const lx = self.lx.items;
         const ui = self.ui.items;
@@ -937,6 +982,11 @@ pub const SparseLu = struct {
     /// streams from L2 and loses to the column loop
     /// (dev/solvers/refactor-tape-2026-09.md).
     const tape_max_flops = 2048;
+    comptime {
+        // 24 KB of tape: inside a 32 KB L1d with room for the slot values.
+        assert(@sizeOf([3]u32) == 12);
+        assert(tape_max_flops * @sizeOf([3]u32) <= 24 * 1024);
+    }
 
     /// Records the refactor as flat slot operations. Every A entry and
     /// flop target of column k is a slot of column k's pattern (U rows,
@@ -981,6 +1031,7 @@ pub const SparseLu = struct {
                 self.amap[a] = if (void_k and r > k) discard else pos[r];
             }
         }
+        assert(self.tape.items.len == flops);
         self.tape_col[n] = @intCast(self.tape.items.len);
     }
 
@@ -995,6 +1046,8 @@ pub const SparseLu = struct {
         const lp = self.lp;
         const nu = self.ux.items.len;
         const lx0 = nu + n;
+        assert(tv.len == lx0 + self.lx.items.len + 1);
+        assert(vals.len >= self.amap.len);
         fillZero(tv);
         for (self.amap, vals[0..self.amap.len]) |s, v| tv[s] = v;
         for (0..n) |k| {
@@ -1037,6 +1090,7 @@ pub const SparseLu = struct {
         while (i < dst.len) : (i += 1) dst[i] = z;
     }
     inline fn copyOut(dst: []f64, src: []const f64) void {
+        assert(src.len >= dst.len);
         const W = comptime std.simd.suggestVectorLength(f64) orelse 1;
         var i: usize = 0;
         while (i + W <= dst.len) : (i += W) dst[i..][0..W].* = src[i..][0..W].*;
@@ -1045,7 +1099,12 @@ pub const SparseLu = struct {
 
     /// x = A^-1 b. `b` and `x` may alias. Requires the last `factor` or
     /// `refactor` to have succeeded; garbage otherwise. O(nnz(L+U)).
+    /// Asserts that a `factor` has succeeded, that `b` has n entries and
+    /// `x` at least n.
     pub fn solve(self: *Self, b: []const f64, x: []f64) void {
+        assert(self.factored);
+        assert(b.len == self.n);
+        assert(x.len >= self.n);
         const li = self.li.items;
         const lx = self.lx.items;
         const ui = self.ui.items;
@@ -1087,9 +1146,12 @@ pub const SparseLu = struct {
     }
 
     /// x = A^-T b, for adjoint analyses. A = P^-1 L U Q^-1, so
-    /// A^-T = P^T L^-T U^-T Q^T. `b` and `x` may alias. Same precondition
-    /// as `solve`.
+    /// A^-T = P^T L^-T U^-T Q^T. `b` and `x` may alias. Same preconditions
+    /// and asserts as `solve`.
     pub fn solveT(self: *Self, b: []const f64, x: []f64) void {
+        assert(self.factored);
+        assert(b.len == self.n);
+        assert(x.len >= self.n);
         const li = self.li.items;
         const lx = self.lx.items;
         const ui = self.ui.items;
@@ -1128,7 +1190,7 @@ const TestSystem = struct {
 
     /// Caller owns the result; free with `deinit`. Asserts n <= 64.
     pub fn init(gpa: Allocator, r: std.Random, n: u32, density: f64) !TestSystem {
-        std.debug.assert(n <= 64);
+        assert(n <= 64);
         var mask: [64]u64 = @splat(0);
         var nnz: u32 = 0;
         for (0..n) |j| {

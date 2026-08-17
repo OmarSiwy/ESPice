@@ -11,6 +11,7 @@
 //! a residual-only evaluation.
 
 const std = @import("std");
+const assert = std.debug.assert;
 const direct = @import("direct.zig");
 const BbdInfo = @import("core").numerics.BbdInfo;
 const Execution = @import("core").numerics.Execution;
@@ -81,6 +82,7 @@ pub const Tolerances = @import("core").numerics.Tolerances;
 /// 100 (niiter.c:38), so ITL2 and ITL4 only steer the callers' own
 /// iteration-count heuristics, never the Newton loop itself.
 pub fn optionsFromTolerances(tol: Tolerances, max_iter_override: ?u16) Options {
+    comptime assert(100 <= std.math.maxInt(u16));
     return .{
         .max_iter = @max(max_iter_override orelse tol.itl1, 100),
         .abstol = tol.abstol,
@@ -148,6 +150,7 @@ pub const Result = struct {
 /// returns before swapping CKTrhs into CKTrhsOld (niiter.c), and CKTdump and
 /// every device state read CKTrhsOld. A NaN or infinite iterate never
 /// converges. `ws` must come from `Workspace.init` on `sys`'s n and pattern.
+/// Asserts that `ws` and `x` are sized for `sys`.
 pub fn newton(
     sys: anytype,
     ws: *Workspace,
@@ -157,6 +160,10 @@ pub fn newton(
     hook: anytype,
 ) !Result {
     const S = Deref(@TypeOf(sys));
+    assert(ws.slv.n == sys.n);
+    assert(ws.dx.len >= sys.n);
+    assert(ws.x_old.len >= sys.n);
+    assert(x.len >= sys.n);
     const slv = &ws.slv;
     const dx = ws.dx;
     const x_old = ws.x_old;
@@ -288,6 +295,8 @@ fn finalizeStep(
 ) Step {
     const S = Deref(@TypeOf(sys));
     const n = sys.n;
+    assert(residual.len >= n);
+    assert(vals.len >= sys.nnz);
     const scaled = updateAndNorm(x[0..n], dx[0..n], x_old[0..n], sys.current_row[0..n], opts.reltol, opts.abstol, opts.vntol);
 
     // The first-iterate and delta gates are already decided and neither
@@ -326,6 +335,9 @@ fn finalizeStep(
     if (comptime @hasDecl(S, "updateStates")) if (stage) {
         if (sys.updateStates(x_old[0..n])) |_| return .{ .converged = false, .scaled = scaled, .flipped = true, .why = .flipped };
     };
+    // The first-iterate and delta gates passed.
+    assert(iter > 0);
+    assert(!(scaled >= 1.0));
     return .{ .converged = true, .scaled = scaled };
 }
 
@@ -339,6 +351,7 @@ const inf = std.math.inf(f64);
 /// Same gates as `newton`, with the residual gate on F, but a converged `x`
 /// is x_k+1. A failed checkpoint returns `error.QueryCancelled`; the first
 /// call on a workspace allocates its GMRES scratch (`error.OutOfMemory`).
+/// Asserts that `ws` and `x_full` are sized for `sys`.
 pub fn jfnk(
     sys: anytype,
     ws: *Workspace,
@@ -349,6 +362,8 @@ pub fn jfnk(
 ) !Result {
     const S = Deref(@TypeOf(sys));
     const n: usize = sys.n;
+    assert(ws.slv.n == n);
+    assert(x_full.len >= n);
     const m: usize = @min(gmres_restart, n);
     const buf = try ws.ensureGmres(n);
     var off: usize = 0;
@@ -368,6 +383,7 @@ pub fn jfnk(
     const x_pert = take(buf, &off, n);
     const f0 = take(buf, &off, n); // F(x) + gmin * x at the outer iterate
     const diag = take(buf, &off, n); // Jacobi inverse diagonal
+    assert(off == buf.len); // `ensureGmres` sized exactly these
     const r = ws.dx[0..n]; // becomes dx after the Krylov solve
     const x_old = ws.x_old[0..n];
     const x = x_full[0..n];
@@ -553,6 +569,7 @@ pub fn run(
 
 /// Residual at x plus gmin * x into `sys.rhs`.
 fn assembleShifted(sys: anytype, x: []const f64, t: f64, opts: Options, hook: anytype) void {
+    assert(x.len == sys.n);
     if (@hasDecl(@TypeOf(hook), "residual"))
         hook.residual(sys, x, t)
     else
@@ -563,6 +580,7 @@ fn assembleShifted(sys: anytype, x: []const f64, t: f64, opts: Options, hook: an
 }
 
 fn buildDiagPreconditioner(sys: anytype, hook: anytype, opts: Options, diag: []f64) void {
+    assert(diag.len >= sys.n);
     const v = hook.vals(sys);
     for (0..sys.n) |i| {
         var d = v[sys.diag_slots[i]];
@@ -573,6 +591,7 @@ fn buildDiagPreconditioner(sys: anytype, hook: anytype, opts: Options, diag: []f
 
 /// r = M^-1 r: the LU when it factored, else the Jacobi diagonal.
 fn applyPreconditioner(r: []f64, diag: []const f64, slv: ?*direct.Solver) void {
+    assert(diag.len >= r.len);
     if (slv) |s| {
         if (s.factored) {
             s.solve(r, r);
@@ -602,6 +621,7 @@ fn acceptStep(sys: anytype, x: []f64) bool {
 /// Row-scaled residual gate, as in `finalizeStep`, that also rejects a
 /// non-finite residual or iterate.
 fn residualConverged(sys: anytype, hook: anytype, x: []const f64, residual: []const f64, opts: Options) bool {
+    assert(x.len == sys.n);
     var ok = true;
     for (x, residual, 0..) |xi, ri, i| {
         const scale = @abs(hook.diagAt(sys, sys.diag_slots[i]));
@@ -627,6 +647,10 @@ fn updateAndNorm(x: []f64, dx: []const f64, x_old: []f64, current_row: []const b
     const abs_i: V = @splat(abstol);
     const abs_v: V = @splat(vntol);
     const inf_v: V = @splat(inf);
+    // Up front, so the vector body carries no per-slice bounds checks.
+    assert(dx.len >= x.len);
+    assert(x_old.len >= x.len);
+    assert(current_row.len >= x.len);
     var worst_v: V = @splat(0);
     var i: usize = 0;
     while (i + W <= x.len) : (i += W) {
@@ -650,6 +674,7 @@ fn updateAndNorm(x: []f64, dx: []const f64, x_old: []f64, current_row: []const b
         const finite = @abs(xi.*) < inf and @abs(dxi) < inf;
         worst = @max(worst, if (finite) @abs(dxi) / tol else inf);
     }
+    assert(!(worst < 0));
     return worst;
 }
 
@@ -675,6 +700,7 @@ pub const Prof = struct {
     }
 
     fn lap(p: *Prof, phase: Phase) void {
+        comptime assert(@typeInfo(Phase).@"enum".field_names.len == @typeInfo(@FieldType(Prof, "ns")).array.len);
         const io = p.io orelse return;
         const now: std.Io.Timestamp = .now(io, .awake);
         p.ns[@backingInt(phase)] += @intCast(p.last.durationTo(now).nanoseconds);
@@ -697,8 +723,10 @@ pub const Workspace = struct {
     knobs: Knobs,
 
     /// Borrows `col_ptr` and `row_idx` for the workspace's lifetime. Caller
-    /// frees with `deinit` and the same allocator.
+    /// frees with `deinit` and the same allocator. Asserts that `col_ptr`
+    /// has n + 1 entries.
     pub fn init(gpa: std.mem.Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32, bbd: ?BbdInfo, knobs: Knobs, lu_knobs: direct.Knobs) !Workspace {
+        assert(col_ptr.len == @as(usize, n) + 1);
         const dx = try gpa.alloc(f64, n);
         errdefer gpa.free(dx);
         const x_old = try gpa.alloc(f64, n);

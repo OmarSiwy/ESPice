@@ -4,6 +4,7 @@
 //! demotes to the general LU when a structured engine meets a singular pivot.
 
 const std = @import("std");
+const assert = std.debug.assert;
 const sparse_lu = @import("sparse_lu.zig");
 const tridiag_mod = @import("tridiag.zig");
 const order_mod = @import("order.zig");
@@ -86,8 +87,11 @@ pub const Solver = struct {
     /// when `bbd` describes a profitable split, else sparse LU (whose AMD
     /// ordering fails with `OutOfWorkspace` on pathological fill). Borrows
     /// `col_ptr` and `row_idx`, which must outlive the solver; free with
-    /// `deinit`.
+    /// `deinit`. Asserts that `col_ptr` has n + 1 entries and `row_idx`
+    /// covers them.
     pub fn init(gpa: Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32, bbd: ?num.BbdInfo, knobs: Knobs) !Self {
+        assert(col_ptr.len == @as(usize, n) + 1);
+        assert(row_idx.len >= col_ptr[n]);
         var self: Self = .{ .n = n, .col_ptr = col_ptr, .row_idx = row_idx, .engine = undefined, .gpa = gpa, .knobs = knobs };
         if (tridiag_mod.isTridiag(n, col_ptr, row_idx)) {
             self.engine = .{ .tri = try TriDiag.init(gpa, n, col_ptr, row_idx) };
@@ -99,6 +103,7 @@ pub const Solver = struct {
         }
         errdefer self.deinit();
         self.vcopy = try gpa.alloc(f64, col_ptr[n]);
+        assert(!self.factored);
         return self;
     }
 
@@ -113,6 +118,7 @@ pub const Solver = struct {
     /// Orders the pattern (once) and builds the general LU on it.
     fn initLu(self: *Self) !SparseLu {
         if (self.q.len == 0) self.q = try computeOrdering(self.gpa, self.n, self.col_ptr, self.row_idx);
+        assert(self.q.len == self.n);
         var lu = try SparseLu.init(self.gpa, self.n, self.col_ptr, self.row_idx, self.q);
         lu.stats = self.knobs.stats;
         return lu;
@@ -129,6 +135,7 @@ pub const Solver = struct {
         }
         self.engine = .{ .lu = lu };
         self.factored = false;
+        assert(self.sparse() != null);
     }
 
     fn initBbd(gpa: Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32, bbd: ?num.BbdInfo, knobs: Knobs) !?BbdEng {
@@ -170,11 +177,14 @@ pub const Solver = struct {
     /// multicore refactor; `.{}` runs serially. A structured engine that
     /// meets a singular pivot is freed for good and the call retries on the
     /// general LU. `SingularMatrix` leaves no usable factorization: solve
-    /// only after a successful `factor`. Asserts `vals.len >= nnz`.
+    /// only after a successful `factor`. Asserts that `vals` holds the
+    /// pattern's nnz entries.
     pub fn factor(self: *Self, vals: []const f64, execution: num.Execution) !void {
+        assert(vals.len >= self.col_ptr[self.n]);
         const nnz = self.vcopy.len;
         if (nnz != 0 and self.factored and !self.host_stale and simdEql(self.vcopy, vals[0..nnz])) return;
         try self.factorInner(vals, execution);
+        assert(self.factored);
         self.host_stale = false;
         num.copySimd(self.vcopy, vals[0..nnz]);
         self.gen +%= 1;
@@ -199,6 +209,7 @@ pub const Solver = struct {
     /// fail here.
     fn syncHost(self: *Self) void {
         if (!self.host_stale) return;
+        assert(self.factored);
         self.sparse().?.refactor(self.col_ptr, self.vcopy, self.params.refactor_growth_limit) catch
             @panic("device LU passed a refactor the host fails");
         self.host_stale = false;
@@ -234,6 +245,7 @@ pub const Solver = struct {
     /// `lu.refactor`, on `execution.lu_threads` workers when the flop-count
     /// model below prices that faster. Bitwise the same either way.
     fn refactorLu(self: *Self, vals: []const f64, execution: num.Execution) error{SingularMatrix}!void {
+        assert(self.factored);
         const lu = &self.engine.lu;
         const growth = self.params.refactor_growth_limit;
         const threads = execution.lu_threads;
@@ -252,6 +264,8 @@ pub const Solver = struct {
 
     /// Solves in place with whichever engine is live.
     fn solveInPlace(self: *Self, x: []f64) void {
+        assert(self.factored);
+        assert(x.len >= self.n);
         self.syncHost();
         switch (self.engine) {
             .lu => |*lu| lu.solve(x[0..self.n], x[0..self.n]),
@@ -260,22 +274,29 @@ pub const Solver = struct {
         }
     }
 
-    /// x = -A^-1 rhs, the Newton step. `rhs` and `x` may alias. Requires a
-    /// successful `factor`.
+    /// x = -A^-1 rhs, the Newton step. `rhs` and `x` may alias. Asserts that
+    /// the last `factor` succeeded and that both slices hold n entries.
     pub fn solveNeg(self: *Self, rhs: []const f64, x: []f64) void {
+        assert(rhs.len >= self.n);
+        assert(x.len >= self.n);
         num.scale(x[0..self.n], -1, rhs[0..self.n]);
         self.solveInPlace(x);
     }
 
-    /// x = A^-1 rhs. `rhs` and `x` may alias. Requires a successful `factor`.
+    /// x = A^-1 rhs. `rhs` and `x` may alias. Asserts as `solveNeg` does.
     pub fn solve(self: *Self, rhs: []const f64, x: []f64) void {
+        assert(rhs.len >= self.n);
+        assert(x.len >= self.n);
         if (rhs.ptr != x.ptr) @memcpy(x[0..self.n], rhs[0..self.n]);
         self.solveInPlace(x);
     }
 
-    /// x = A^-T rhs, for adjoint analyses. `rhs` and `x` may alias. Requires
-    /// a successful `factor`.
+    /// x = A^-T rhs, for adjoint analyses. `rhs` and `x` may alias. Asserts
+    /// as `solveNeg` does.
     pub fn solveT(self: *Self, rhs: []const f64, x: []f64) void {
+        assert(self.factored);
+        assert(rhs.len >= self.n);
+        assert(x.len >= self.n);
         if (rhs.ptr != x.ptr) @memcpy(x[0..self.n], rhs[0..self.n]);
         self.syncHost();
         switch (self.engine) {
@@ -290,6 +311,7 @@ pub const Solver = struct {
 /// for the handoffs, and enough per column that the columns are not a
 /// dependent chain. `Knobs.par` forces it off or on.
 fn parWorthIt(lu: *const sparse_lu.SparseLu, knobs: Knobs) bool {
+    assert(lu.factored);
     var flops: u64 = 0;
     for (lu.ui.items) |i| flops += lu.lp[i + 1] - lu.lp[i];
     // Tape-sized factors refactor in microseconds.
@@ -310,6 +332,11 @@ const par_min_flops = 500_000;
 const par_min_per_col = 300;
 /// 4 bytes of tables per flop.
 const par_max_flops = 400_000_000;
+comptime {
+    assert(par_min_flops <= par_max_flops);
+    // The multicore tables hold u32 offsets.
+    assert(par_max_flops <= std.math.maxInt(u32));
+}
 
 /// BTF + AMD column ordering; caller owns the result.
 fn computeOrdering(gpa: Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32) ![]u32 {
@@ -319,6 +346,7 @@ fn computeOrdering(gpa: Allocator, n: u32, col_ptr: []const u32, row_idx: []cons
     defer gpa.free(ws_buf);
     var ws = order_mod.Ws.init(ws_buf);
     try order_mod.order(n, col_ptr, row_idx, q, &ws);
+    assert(ws.used == 0); // order restores the slab
     return q;
 }
 
