@@ -519,6 +519,11 @@ inline fn has(m: anytype, u: usize) bool {
 }
 
 fn buildTapes(comptime M: type, nodes: []const u32, n_u: usize, pat: []const M, pv: PatternView, gath: []u32, rhs_idx: []u32, slots: []u32) void {
+    std.debug.assert(n_u > 0);
+    std.debug.assert(pat.len == n_u);
+    std.debug.assert(nodes.len % n_u == 0);
+    std.debug.assert(gath.len == nodes.len);
+    std.debug.assert(rhs_idx.len == nodes.len);
     const count = nodes.len / n_u;
     var k: usize = 0;
     for (0..count) |id| {
@@ -1131,6 +1136,10 @@ pub fn ProtoStore(comptime D: type) type {
             const has_q = @hasDecl(D, "q");
             const has_attempt_decl = @hasDecl(D, "attempt");
             const self: *Self = @ptrCast(@alignCast(ctx));
+            // `append` grows the three columns together.
+            std.debug.assert(self.models.items.len == self.nodes.items.len);
+            std.debug.assert(self.instances.items.len == self.nodes.items.len);
+            std.debug.assert(pv.col_ptr.len == @as(usize, pv.n) + 1);
             const count = std.math.cast(u32, self.nodes.items.len) orelse return error.TooManyInstances;
             const store = try gpa.create(DeviceBatch(D));
 
@@ -1210,6 +1219,10 @@ pub fn ProtoStore(comptime D: type) type {
                 for (0..count) |i| D.precompute(&store.instances[i], store.model(i));
             }
 
+            // Shared rows never outnumber the instances, and any instance has one.
+            std.debug.assert(store.models.len <= count);
+            if (count > 0) std.debug.assert(store.models.len > 0);
+            std.debug.assert(store.model_of.len == count);
             return DeviceBatch(D).binding(store);
         }
 
@@ -1718,6 +1731,8 @@ pub fn DeviceBatch(comptime D: type) type {
 
         fn scatterBounds(ctx: *anyopaque, first: u32, last: u32, trash_slot: u32, trash_row: u32) [4]u32 {
             const self: *Self = @ptrCast(@alignCast(ctx));
+            std.debug.assert(first <= last);
+            std.debug.assert(last <= self.count);
             const k = SlotMap(D).k;
             return tapeBounds(self.slots[first * k .. last * k], self.rhs_idx[first * n_u .. last * n_u], trash_slot, trash_row);
         }
@@ -1729,6 +1744,9 @@ pub fn DeviceBatch(comptime D: type) type {
 
         fn evalInner(ctx: *anyopaque, pl: *const Planes, first: u32, last: u32, x: []const f64, t: f64, comptime skip_const: bool) void {
             const self: *Self = @ptrCast(@alignCast(ctx));
+            // Once per batch call, outside the per-instance loop.
+            std.debug.assert(first <= last);
+            std.debug.assert(last <= self.count);
             const limiting = if (comptime has_limit) self.lim_active else false;
             var sink = Sink(D, false, skip_const).host(self, pl, x, undefined);
             const F = jacFloat(D);

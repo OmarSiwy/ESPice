@@ -68,6 +68,11 @@ pub const ParamRef = struct {
             .f32 => |p| p.* = @floatCast(v),
             .f64 => |p| p.* = v,
         }
+        // The write pairs with `get`: what lands is v at the field's width.
+        std.debug.assert(std.math.isNan(v) or self.get() == @as(f64, switch (self.ptr) {
+            .f32 => @as(f32, @floatCast(v)),
+            .f64 => v,
+        }));
     }
 };
 
@@ -109,9 +114,12 @@ pub const NoiseSource = struct {
     /// `[lead, end)` are one correlated generator. Asserts that `lead` starts
     /// a group.
     pub fn groupEnd(srcs: []const NoiseSource, lead: usize) usize {
+        std.debug.assert(lead < srcs.len);
         std.debug.assert(srcs[lead].group == lead or srcs[lead].group == std.math.maxInt(u32));
         var end = lead + 1;
         while (end < srcs.len and srcs[end].group == lead) end += 1;
+        std.debug.assert(end > lead);
+        std.debug.assert(end <= srcs.len);
         return end;
     }
 };
@@ -355,16 +363,23 @@ pub const PatternView = struct {
 
     /// The slot of (`row`, `col`), or null when the pattern lacks it. Binary
     /// search, O(log) in the column's length.
-    /// Asserts that `col < n`.
+    /// Asserts that `col < n`, that `col_ptr` has n + 1 entries, and that
+    /// column `col` is a well-formed range.
     pub fn findSlot(self: PatternView, row: u32, col: u32) ?u32 {
         std.debug.assert(col < self.n);
+        std.debug.assert(self.col_ptr.len == @as(usize, self.n) + 1);
         var lo = self.col_ptr[col];
         var hi = self.col_ptr[col + 1];
+        std.debug.assert(lo <= hi);
         while (lo < hi) {
             const mid = lo + (hi - lo) / 2;
             if (self.row_idx[mid] < row) lo = mid + 1 else hi = mid;
         }
-        if (lo < self.col_ptr[col + 1] and self.row_idx[lo] == row) return lo;
+        if (lo < self.col_ptr[col + 1] and self.row_idx[lo] == row) {
+            // A real slot is never the trash slot ground entries scatter into.
+            std.debug.assert(lo < self.trash_slot);
+            return lo;
+        }
         return null;
     }
 };
@@ -384,6 +399,7 @@ pub const PatternBuilder = struct {
     /// Makes room for `extra` more `add`s.
     pub fn reserve(self: *PatternBuilder, gpa: std.mem.Allocator, extra: usize) !void {
         try self.keys.ensureUnusedCapacity(gpa, extra);
+        std.debug.assert(self.keys.capacity - self.keys.items.len >= extra);
     }
 
     /// Frees the keys; `gpa` must be the allocator every `add` used.
@@ -442,7 +458,7 @@ pub const PatternBuilder = struct {
     /// Caller owns `col_ptr_out` (n + 1 entries) and `row_idx_out` (nnz) and
     /// must free them with `gpa`; `scratch` is only used during the call.
     /// Reorders `keys` in place.
-    /// Asserts that every column is below `n`.
+    /// Asserts that every row and column is below `n`.
     pub fn toCsc(self: *PatternBuilder, gpa: std.mem.Allocator, scratch: std.mem.Allocator, n: u32, col_ptr_out: *[]u32, row_idx_out: *[]u32) !u32 {
         const all = self.keys.items;
         try radixSort(scratch, all);
@@ -463,9 +479,12 @@ pub const PatternBuilder = struct {
         @memset(col_ptr, 0);
         for (all[0..m], 0..) |k, p| {
             row_idx[p] = @truncate(k);
+            std.debug.assert(row_idx[p] < n);
             col_ptr[@intCast((k >> 32) + 1)] += 1;
         }
         for (0..n) |j| col_ptr[j + 1] += col_ptr[j];
+        std.debug.assert(col_ptr[0] == 0);
+        std.debug.assert(col_ptr[n] == nnz);
         col_ptr_out.* = col_ptr;
         row_idx_out.* = row_idx;
         return nnz;

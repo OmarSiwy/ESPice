@@ -82,6 +82,9 @@ pub fn freeze(
     const nnz = try pattern.toCsc(allocator, scratch, n, &col_ptr, &row_idx);
     errdefer allocator.free(col_ptr);
     errdefer allocator.free(row_idx);
+    // Every diagonal is in the pattern, so it holds at least n entries.
+    std.debug.assert(nnz >= n);
+    std.debug.assert(row_idx.len == nnz);
     const view: abi.PatternView = .{
         .col_ptr = col_ptr,
         .row_idx = row_idx,
@@ -119,6 +122,7 @@ pub fn freeze(
         try collect(batch.ctx, allocator, &ac_dyn).unwrap();
     const ac_dyn_slots = try ac_dyn.toOwnedSlice(allocator);
 
+    std.debug.assert(count == protos.len);
     for (protos) |proto| proto.destroy(proto.ctx, allocator);
     for (batches, batch_types) |*b, t| {
         const i: usize = @backingInt(t);
@@ -146,6 +150,8 @@ pub fn freeze(
 
 /// Frees every batch and table, the adopted node names and `bbd` included.
 pub fn deinit(self: *Circuit) void {
+    std.debug.assert(self.batch_types.len == self.batches.len);
+    std.debug.assert(self.intern_offs.len == @as(usize, self.n) + 1);
     const allocator = self.allocator;
     for (self.batches) |batch| batch.hooks.deinit(batch.ctx, allocator);
     allocator.free(self.batches);
@@ -164,6 +170,8 @@ pub fn deinit(self: *Circuit) void {
 /// The name of `node`, or "" when out of range.
 pub fn nodeName(self: Circuit, node: u32) []const u8 {
     if (node >= self.n) return "";
+    std.debug.assert(self.intern_offs[node] <= self.intern_offs[node + 1]);
+    std.debug.assert(self.intern_offs[node + 1] <= self.intern_bytes.len);
     return self.intern_bytes[self.intern_offs[node]..self.intern_offs[node + 1]];
 }
 

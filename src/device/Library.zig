@@ -70,12 +70,16 @@ pub fn init(gpa: std.mem.Allocator) !Library {
         lib.names.appendAssumeCapacity(name);
         lib.vtables.appendAssumeCapacity(catalog.vtable(name));
     }
+    std.debug.assert(lib.names.items.len == builtin_count);
+    std.debug.assert(lib.vtables.items.len == builtin_count);
     return lib;
 }
 
 /// Frees the loaded names and the tables. Loaded libraries stay mapped, so
 /// vtables handed out stay valid.
 pub fn deinit(self: *Library) void {
+    std.debug.assert(self.names.items.len >= builtin_count);
+    std.debug.assert(self.vtables.items.len == self.names.items.len);
     for (self.names.items[builtin_count..]) |name| self.gpa.free(name);
     for (self.sources.items) |path| self.gpa.free(path);
     self.sources.deinit(self.gpa);
@@ -103,8 +107,12 @@ pub fn vtable(self: *const Library, t: DeviceType) *const abi.DeviceVtable {
 /// searched: a netlist reaches them through SPICE letters and LEVELs.
 // ponytail: linear scan; a deck loads a handful of HDL modules.
 pub fn find(self: *const Library, module: []const u8) ?DeviceType {
+    std.debug.assert(self.names.items.len >= builtin_count);
     for (self.names.items[builtin_count..], builtin_count..) |n, i| {
-        if (std.ascii.eqlIgnoreCase(n, module)) return @fromBackingInt(@intCast(i));
+        if (std.ascii.eqlIgnoreCase(n, module)) {
+            std.debug.assert(i < self.vtables.items.len);
+            return @fromBackingInt(@intCast(i));
+        }
     }
     return null;
 }
@@ -114,6 +122,8 @@ pub fn find(self: *const Library, module: []const u8) ?DeviceType {
 /// keeps its first vtable, flag and id. Fails with `TooManyDeviceTypes` when
 /// the id space is full. On failure nothing is added.
 pub fn register(self: *Library, module: []const u8, vt: *const abi.DeviceVtable, is_digital: bool) (error{TooManyDeviceTypes} || std.mem.Allocator.Error)!DeviceType {
+    std.debug.assert(self.vtables.items.len == self.names.items.len);
+    std.debug.assert(self.digital.items.len == self.names.items.len);
     if (self.find(module)) |t| return t;
     if (self.names.items.len >= @backingInt(DeviceType.unset)) return error.TooManyDeviceTypes;
     const owned = try std.ascii.allocLowerString(self.gpa, module);
@@ -123,6 +133,8 @@ pub fn register(self: *Library, module: []const u8, vt: *const abi.DeviceVtable,
     try self.names.append(self.gpa, owned);
     self.vtables.appendAssumeCapacity(vt);
     self.digital.appendAssumeCapacity(is_digital);
+    std.debug.assert(self.vtables.items.len == self.names.items.len);
+    std.debug.assert(self.names.items.len > builtin_count);
     return @fromBackingInt(@intCast(self.names.items.len - 1));
 }
 
@@ -184,6 +196,7 @@ pub fn loadWith(self: *Library, io: std.Io, files: []const []const u8, paths: lo
     defer arena_state.deinit();
     // A source named twice, here or in an earlier call, compiles once.
     const todo = try loader.pending(self.sources.items, arena_state.allocator(), files);
+    std.debug.assert(todo.files.len == todo.resolved.len);
     const results = try self.gpa.alloc(loader.Result, todo.files.len);
     defer self.gpa.free(results);
     try loader.prepareAll(self.gpa, io, todo.files, self.names.items[builtin_count..], paths, results);
@@ -192,6 +205,7 @@ pub fn loadWith(self: *Library, io: std.Io, files: []const []const u8, paths: lo
         if (try result) |prepared| _ = try self.register(prepared.name(), prepared.vtable, prepared.digital);
         self.sources.appendAssumeCapacity(try self.gpa.dupe(u8, resolved));
     }
+    std.debug.assert(self.vtables.items.len == self.names.items.len);
 }
 
 test register {

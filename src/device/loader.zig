@@ -98,6 +98,7 @@ fn prepareOne(loaded: []const []const u8, gpa: std.mem.Allocator, io: std.Io, pa
     var out: Prepared = .{ .vtable = undefined, .name_buf = undefined, .name_len = undefined, .digital = hdl == .v };
     if (module_name.len > out.name_buf.len) return error.NameTooLong;
     out.name_len = @intCast(std.ascii.lowerString(&out.name_buf, module_name).len);
+    std.debug.assert(out.name_len == module_name.len);
     // Only the compiled MIR knows a `.va` module's name, so `compileSource`
     // must run before this check; codegen and the build are skipped.
     if (isLoaded(loaded, out.name())) return null;
@@ -198,6 +199,7 @@ fn prepareOne(loaded: []const []const u8, gpa: std.mem.Allocator, io: std.Io, pa
         },
     };
     out.vtable = try loadDevice(art.so_path);
+    std.debug.assert(out.vtable.n_u >= out.vtable.num_ports);
     if (key) |k| recordInputs(io, paths.work_dir, k, module_name, &std.fmt.bytesToHex(digest, .lower));
     return out;
 }
@@ -241,6 +243,8 @@ fn inputKey(io: std.Io, gpa: std.mem.Allocator, hdl: Hdl, path: []const u8, sour
 /// hashes `file`, its own path, which the macro expands to. False on anything
 /// it cannot follow.
 fn hashCode(io: std.Io, gpa: std.mem.Allocator, h: *std.crypto.hash.sha2.Sha256, hdl: Hdl, dir: []const u8, file: []const u8, text: []const u8, depth: u8) !bool {
+    // Each level recurses only from depth <= max, so one past it is the deepest call.
+    std.debug.assert(depth <= max_include_depth + 1);
     if (depth > max_include_depth) return false;
     const code = try normalizeCode(gpa, text);
     defer gpa.free(code);
@@ -312,6 +316,8 @@ fn normalizeCode(gpa: std.mem.Allocator, text: []const u8) ![]u8 {
             i += 1;
         }
     }
+    // A comment shrinks to one space plus its newlines, never more.
+    std.debug.assert(bare.items.len <= text.len);
     const keep_lines = std.mem.indexOf(u8, bare.items, "__LINE__") != null;
     // Every line gets a '\n', the last one too when `bare` has none.
     var out: std.ArrayList(u8) = try .initCapacity(gpa, bare.items.len + 1);
@@ -347,6 +353,7 @@ fn normalizeCode(gpa: std.mem.Allocator, text: []const u8) ![]u8 {
         }
         out.appendAssumeCapacity('\n');
     }
+    std.debug.assert(out.items.len <= bare.items.len + 1);
     return out.toOwnedSlice(gpa);
 }
 
@@ -365,6 +372,7 @@ fn cachedLoad(loaded: []const []const u8, gpa: std.mem.Allocator, io: std.Io, wo
     var out: Prepared = .{ .vtable = undefined, .name_buf = undefined, .name_len = undefined, .digital = digital_dev };
     if (module_name.len > out.name_buf.len) return null;
     out.name_len = @intCast(std.ascii.lowerString(&out.name_buf, module_name).len);
+    std.debug.assert(out.name_len == module_name.len);
     if (isLoaded(loaded, out.name())) return @as(?Prepared, null);
 
     const work_dir = std.fs.path.join(gpa, &.{ work_root, digest }) catch return null;
@@ -383,6 +391,9 @@ fn cachedLoad(loaded: []const []const u8, gpa: std.mem.Allocator, io: std.Io, wo
 /// Writes `key`'s index (module name, build directory) after a full build.
 /// Best effort: a failed write only costs the next run its fast path.
 fn recordInputs(io: std.Io, work_root: []const u8, key: [32]u8, module_name: []const u8, digest_hex: []const u8) void {
+    // The pair of `cachedLoad`'s checks on reading the index back.
+    std.debug.assert(module_name.len > 0);
+    std.debug.assert(digest_hex.len == 64);
     var buf: [512]u8 = undefined;
     const dir = std.fmt.bufPrint(&buf, "{s}/inputs", .{work_root}) catch return;
     std.Io.Dir.cwd().createDirPath(io, dir) catch return;

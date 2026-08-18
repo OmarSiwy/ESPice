@@ -80,6 +80,9 @@ fn applyKv(target: anytype, params: []const Param) !void {
 /// Errors rather than letting a recognized field fall back to its default.
 /// `seen` is the `keyBit` union of `params`' keys.
 fn number(params: []const Param, seen: u64, key: []const u8) !?f64 {
+    // Keys are field names and aliases, never empty: "" has no `keyBit`, so
+    // it would always read as absent.
+    std.debug.assert(key.len > 0);
     if (seen & keyBit(key) == 0) return null;
     for (params) |p| if (std.mem.eql(u8, p.key, key)) {
         const value = p.value orelse return error.UnresolvedParameter;

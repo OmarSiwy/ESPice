@@ -2,6 +2,7 @@
 //! module, reflected at comptime into (binding name, device type) rows, and
 //! each built-in's vtable from its separately compiled object. A leaf, so
 //! `Library.zig` reads it without importing `root.zig` (AGENTS.md §2.8).
+const std = @import("std");
 const abi = @import("device_abi");
 
 /// Every build-time device type, one decl per binding name.
@@ -40,7 +41,11 @@ pub fn vtable(comptime name: []const u8) *const abi.DeviceVtable {
     const get = @extern(*const fn () callconv(.c) *const abi.DeviceVtable, .{
         .name = "arp_device_" ++ name,
     });
-    return get();
+    const vt = get();
+    // The ports come first among the unknowns, and the names cover all or none.
+    std.debug.assert(vt.n_u >= vt.num_ports);
+    std.debug.assert(vt.unknown_names.len == 0 or vt.unknown_names.len == vt.n_u);
+    return vt;
 }
 
 /// The device type registered as `name`; a compile error when there is none.
