@@ -1031,22 +1031,38 @@ const staging_gpa = if (builtin.single_threaded) std.heap.page_allocator else st
 /// Moves `items[k]` to `items[dst[k]]` for every k by following each cycle
 /// of the permutation, one element in hand at a time. `seen` is scratch of
 /// the same length; its contents on entry do not matter. O(n), no
-/// allocation. `dst` must be a permutation of `0..items.len`: a repeated
-/// target loops forever, an out-of-range one is out of bounds.
+/// allocation. Asserts that `dst` and `seen` have `items.len` entries and
+/// that `dst` is a permutation of `0..items.len` (every target in range,
+/// none repeated): a repeated target would otherwise walk a cycle forever
+/// (#142).
 pub fn permuteInPlace(comptime T: type, items: []T, dst: []const u32, seen: []bool) void {
+    std.debug.assert(dst.len == items.len);
+    std.debug.assert(seen.len == items.len);
+    // The permutation check costs one flag write per row, against the walk's
+    // one `T` swap per row, and runs once per column at freeze time.
     @memset(seen, false);
+    for (dst) |d| {
+        std.debug.assert(d < items.len);
+        std.debug.assert(!seen[d]);
+        seen[d] = true;
+    }
+    @memset(seen, false);
+    var moved: usize = 0;
     for (0..items.len) |start| {
         if (seen[start]) continue;
         var held = items[start];
         var j = start;
-        while (true) {
+        // A cycle visits each row at most once, so it closes within len steps.
+        for (0..items.len) |_| {
             seen[j] = true;
             const d = dst[j];
             std.mem.swap(T, &held, &items[d]);
+            moved += 1;
             j = d;
             if (j == start) break;
-        }
+        } else unreachable;
     }
+    std.debug.assert(moved == items.len);
 }
 
 /// Construction-time rows for one device type: each instance's Model,

@@ -711,6 +711,28 @@ test "permuteInPlace: moves every row to dst[k], cycles and fixed points alike" 
     }
 }
 
+test "permuteInPlace: a permutation then its inverse restores every row (#142)" {
+    // dst must be a permutation of 0..len; a repeated or out-of-range target
+    // is a programmer error the function asserts on, so only the valid side
+    // is testable here. The expectation is the identity: inv[dst[k]] = k
+    // undoes the move of row k, whatever the cycle structure.
+    var prng = std.Random.DefaultPrng.init(0x142);
+    const r = prng.random();
+    for (0..40) |len| {
+        var dst: [40]u32 = undefined;
+        for (dst[0..len], 0..) |*d, i| d.* = @intCast(i);
+        r.shuffle(u32, dst[0..len]);
+        var inv: [40]u32 = undefined;
+        for (dst[0..len], 0..) |d, k| inv[d] = @intCast(k);
+        var items: [40]u64 = undefined;
+        for (items[0..len], 0..) |*v, i| v.* = i * 7 + 1;
+        var seen: [40]bool = undefined;
+        impl.permuteInPlace(u64, items[0..len], dst[0..len], seen[0..len]);
+        impl.permuteInPlace(u64, items[0..len], inv[0..len], seen[0..len]);
+        for (items[0..len], 0..) |v, i| try std.testing.expectEqual(@as(u64, i * 7 + 1), v);
+    }
+}
+
 test "analog initial reruns after a revert rolls its held results back" {
     // Stands in for a VerA device: `updateState` holds what the §5.2.1 block
     // computes, `stateCtl` commits and reverts it like any held value.
