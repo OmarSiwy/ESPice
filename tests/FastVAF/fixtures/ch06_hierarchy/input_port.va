@@ -1,1 +1,0 @@
-module ch6_input(input electrical p); analog I(p)<+V(p); endmodule

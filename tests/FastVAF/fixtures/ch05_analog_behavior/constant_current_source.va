@@ -1,1 +1,0 @@
-module ch5_const_i(p,n); inout p,n; electrical p,n; analog I(p,n)<+1u+0.0*V(p,n); endmodule

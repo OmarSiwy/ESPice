@@ -16,11 +16,11 @@ const dc = analysis.dc;
 
 const k_boltzmann = 1.380649e-23;
 
-fn findParam(refs: []const analysis.ParamRef, dtype: []const u8, pname: []const u8, index: u32) *f32 {
+fn findParam(refs: []const analysis.ParamRef, dtype: []const u8, pname: []const u8, index: u32) analysis.ParamRef {
     for (refs) |r| {
         if (std.mem.eql(u8, r.device_type, dtype) and
             std.mem.eql(u8, r.param_name, pname) and r.index == index)
-            return r.ptr;
+            return r;
     }
     unreachable;
 }
@@ -1496,7 +1496,7 @@ test "temp_sweep: parameters restored after sweep" {
     });
 
     // After sweep, R1 should be restored to its base value
-    try testing.expectApproxEqAbs(@as(f64, 1000.0), @as(f64, r1_ptr.*), 1e-15);
+    try testing.expectApproxEqAbs(@as(f64, 1000.0), r1_ptr.get(), 1e-15);
 }
 
 // ============================================================================

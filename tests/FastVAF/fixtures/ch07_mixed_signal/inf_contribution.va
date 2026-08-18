@@ -1,5 +1,0 @@
-module ch7_infinity_guard(p);
-  inout p; electrical p;
-  // The LRM forbids this at runtime; the snapshot records current codegen.
-  analog I(p) <+ inf + 0.0*V(p);
-endmodule

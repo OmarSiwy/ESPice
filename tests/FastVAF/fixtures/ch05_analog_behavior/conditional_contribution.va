@@ -1,4 +1,0 @@
-module ch5_conditional(p, c);
-  inout p, c; electrical p, c;
-  analog if (V(c) >= 0.0) I(p) <+ V(p); else I(p) <+ -V(p);
-endmodule

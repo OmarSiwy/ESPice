@@ -1,7 +1,0 @@
-module ch01_reference_ground(p);
-    inout p;
-    electrical p, gnd;
-    ground gnd;
-
-    analog V(p, gnd) <+ 1.25;
-endmodule

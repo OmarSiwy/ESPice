@@ -1,5 +1,0 @@
-module ch8_nonlinear(p, n);
-  inout p, n; electrical p, n;
-  parameter real scale = 1m;
-  analog I(p, n) <+ scale * limexp(V(p, n));
-endmodule

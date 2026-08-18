@@ -1,7 +1,0 @@
-module ch5_timer(p);
-  inout p; electrical p; real state;
-  analog begin
-    @(timer(0.0, 1n, 1p)) state = 1.0 - state;
-    V(p) <+ transition(state, 0.0, 1p, 2p);
-  end
-endmodule

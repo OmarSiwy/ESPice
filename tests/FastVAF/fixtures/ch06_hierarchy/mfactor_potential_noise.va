@@ -1,4 +1,0 @@
-module ch6_mfactor_potential_noise(p, n);
-  inout p, n; electrical p, n;
-  analog V(p, n) <+ white_noise(1e-18, "potential_noise");
-endmodule

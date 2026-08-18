@@ -1,7 +1,0 @@
-module ch8_above(p, c);
-  inout p, c; electrical p, c; real sample;
-  analog begin
-    @(above(V(c) - 0.5)) sample = V(p);
-    I(p) <+ sample;
-  end
-endmodule

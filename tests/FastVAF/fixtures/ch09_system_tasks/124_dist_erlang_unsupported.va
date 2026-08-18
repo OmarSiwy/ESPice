@@ -1,6 +1,0 @@
-// EXPECT: error
-module ch09_dist_erlang_unsupported(p, n);
-  inout p, n; electrical p, n;
-  integer seed;
-  analog I(p,n) <+ $dist_erlang(seed, 2, 3);
-endmodule

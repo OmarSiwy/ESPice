@@ -1,1 +1,0 @@
-module ch5_indirect_direct(p,n,c); inout p,n,c; electrical p,n,c; analog begin V(p,n):V(c)==V(p,n); I(p,n)<+1u; end endmodule

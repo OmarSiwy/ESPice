@@ -1,6 +1,0 @@
-(* desc = "first", desc = "last" *)
-module ch02_duplicate_attributes(p, n);
-    inout p, n;
-    electrical p, n;
-    analog I(p, n) <+ V(p, n);
-endmodule

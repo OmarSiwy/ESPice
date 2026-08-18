@@ -1,8 +1,0 @@
-module ch5_while(p);
-  inout p; electrical p; integer i; real x;
-  analog begin
-    i = 0; x = 0.0;
-    while (i < 3) begin x = x + V(p); i = i + 1; end
-    I(p) <+ x;
-  end
-endmodule

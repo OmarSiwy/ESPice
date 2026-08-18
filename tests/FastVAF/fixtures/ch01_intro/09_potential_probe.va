@@ -1,5 +1,0 @@
-module ch01_potential_probe(p, n, out);
-    inout p, n, out;
-    electrical p, n, out;
-    analog V(out, n) <+ V(p, n);
-endmodule

@@ -1,9 +1,0 @@
-(* optimize_power = 1 *)
-module ch02_attributes(p, n);
-    (* desc = "positive terminal" *) inout p, n;
-    (* desc = "disciplined terminals" *) electrical p, n;
-    (* desc = "conductance", units = "S", op = "yes", multiplicity = "none" *)
-    parameter real conductance = 1m;
-
-    analog I(p, n) <+ conductance * V(p, n);
-endmodule

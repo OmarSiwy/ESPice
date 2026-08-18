@@ -1,8 +1,0 @@
-module ch01_series_potentials(p, mid, n);
-    inout p, mid, n;
-    electrical p, mid, n;
-    analog begin
-        V(p, mid) <+ 1.0;
-        V(mid, n) <+ 2.0;
-    end
-endmodule

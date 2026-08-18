@@ -182,7 +182,18 @@ pub const Constant = contract.Constant;
 // ===========================================================================
 
 pub const ParamRef = struct {
-    ptr: *f32,
+    /// Tagged because BOTH widths are live: VerA emits `f64` parameters, while
+    /// hand-written devices (tests/testdev.zig, and any device written straight
+    /// against the contract) still use `f32`. A single-width `*f32` here is what
+    /// silently emptied `collectParams` for every generated device and took
+    /// `.dc` sweep, Monte Carlo, sensitivity and dcmatch down with it — those
+    /// four read the circuit's parameters through this and got nothing back.
+    ///
+    /// The accessors below are the whole interface; nothing outside should
+    /// switch on the tag. Values move as `f64` because that is what the callers
+    /// compute in — an `f32` field round-trips through `@floatCast`, which is
+    /// exactly the precision the device declared.
+    ptr: Ptr,
     device_type: []const u8,
     param_name: []const u8,
     index: u32,
@@ -190,6 +201,25 @@ pub const ParamRef = struct {
     primary: bool,
     pelgrom_ap: f64 = 0,
     area_wl: f64 = 0,
+
+    pub const Ptr = union(enum) {
+        f32: *f32,
+        f64: *f64,
+    };
+
+    pub fn get(self: ParamRef) f64 {
+        return switch (self.ptr) {
+            .f32 => |p| p.*,
+            .f64 => |p| p.*,
+        };
+    }
+
+    pub fn set(self: ParamRef, v: f64) void {
+        switch (self.ptr) {
+            .f32 => |p| p.* = @floatCast(v),
+            .f64 => |p| p.* = v,
+        }
+    }
 };
 
 pub const NoiseSource = struct {
@@ -263,6 +293,12 @@ pub const Hooks = struct {
     collect_params: *const fn (*anyopaque, std.mem.Allocator, *std.ArrayList(ParamRef)) anyerror!void,
     collect_noise: ?*const fn (*anyopaque, []const f64, std.mem.Allocator, *std.ArrayList(NoiseSource)) anyerror!void = null,
     recompute: ?*const fn (*anyopaque) void = null,
+    /// This batch's device-resident working set, or null when the device type
+    /// is not `gpuEligible` — the launcher reads a null here as "this batch
+    /// stays on the CPU" and declines the whole circuit rather than splitting a
+    /// solve across both, which would cost a plane round-trip per iteration to
+    /// merge.
+    gpu_payload: ?*const fn (*anyopaque) GpuPayload = null,
     apply_attempt: ?*const fn (*anyopaque, f64) void = null,
     restore_models: ?*const fn (*anyopaque) void = null,
     deinit: *const fn (*anyopaque, std.mem.Allocator) void,
@@ -883,6 +919,7 @@ pub fn DeviceBatch(comptime D: type) type {
             .collect_params = collectParams,
             .collect_noise = if (@hasDecl(D, "noise_gens")) collectNoise else null,
             .recompute = if (@hasDecl(D, "precompute") or has_prep_cache) recomputePrecomputed else null,
+            .gpu_payload = if (gpuEligible(D)) gpuPayload else null,
             .apply_attempt = if (has_attempt) applyAttempt else null,
             .restore_models = if (has_attempt) restoreAttempt else null,
             .deinit = destroy,
@@ -1195,6 +1232,23 @@ pub fn DeviceBatch(comptime D: type) type {
             self.reprep();
         }
 
+        /// Hand the launcher this batch's working set. Slices, not copies —
+        /// the batch keeps owning them; the launcher only reads them to stage
+        /// device memory (and re-reads `models`/`instances` on `repack`).
+        fn gpuPayload(ctx: *anyopaque) GpuPayload {
+            const self: *Self = @ptrCast(@alignCast(ctx));
+            return .{
+                .kernel = comptime kernelName(D),
+                .count = @intCast(self.count),
+                .n_u = n_u,
+                .models = std.mem.sliceAsBytes(self.models),
+                .instances = std.mem.sliceAsBytes(self.instances),
+                .gath = self.gath,
+                .rhs_idx = self.rhs_idx,
+                .slots = self.slots,
+            };
+        }
+
         fn recomputePrecomputed(ctx: *anyopaque) void {
             const self: *Self = @ptrCast(@alignCast(ctx));
             self.reprep();
@@ -1271,7 +1325,10 @@ pub fn DeviceBatch(comptime D: type) type {
                         is_instance and field_idx == 0;
                     for (items, 0..) |*it, idx| {
                         try list.append(gpa, .{
-                            .ptr = &@field(it, field.name),
+                            .ptr = if (field.type == f32)
+                                .{ .f32 = &@field(it, field.name) }
+                            else
+                                .{ .f64 = &@field(it, field.name) },
                             .device_type = type_name,
                             .param_name = field.name,
                             .index = @intCast(idx),
@@ -1285,7 +1342,7 @@ pub fn DeviceBatch(comptime D: type) type {
         }
 
         fn paramField(comptime T: type, comptime field: std.builtin.Type.StructField) bool {
-            if (field.type != f32) return false;
+            if (field.type != f32 and field.type != f64) return false;
             const dflt = @field(T{}, field.name);
             return dflt > -1e30 and dflt < 1e30;
         }
@@ -1366,6 +1423,44 @@ pub fn gpuEligible(comptime D: type) bool {
     return !@hasDecl(D, "PrepCache") and !@hasDecl(D, "State") and
         !hasHistoryDecl(D) and !@hasDecl(D, "limit");
 }
+
+/// The kernel symbol for device D — `arp_eval_<model>`.
+///
+/// Derived from the TYPE, and called by both sides: `kernels.zig` to export the
+/// symbol into the GPU image, and `gpuPayload` below to name the symbol the
+/// launcher looks up. One function so the two cannot drift into a green build
+/// that fails with `error.KernelNotFound` on a machine with a GPU.
+pub fn kernelName(comptime D: type) [:0]const u8 {
+    const full = @typeName(D);
+    const base = if (std.mem.lastIndexOfScalar(u8, full, '.')) |dot| full[dot + 1 ..] else full;
+    return "arp_eval_" ++ base;
+}
+
+/// One batch's device-resident working set, type-erased.
+///
+/// Everything here is written by the builder and then FROZEN for the life of
+/// the solve, which is what lets the launcher upload it once and leave it on
+/// the GPU: the tapes are pattern, and `models`/`instances` only change when a
+/// sweep mutates a parameter (see the `repack` hook). Per Newton iteration the
+/// launcher moves `x` in and the value planes out, and nothing else.
+pub const GpuPayload = struct {
+    /// `arp_eval_<model>`, from `kernelName`.
+    kernel: []const u8,
+    /// Instances in this batch — one GPU thread each.
+    count: u32,
+    /// Unknowns per instance. Fixes the tape strides below.
+    n_u: u32,
+    /// `[]D.Model` / `[]D.Instance` as bytes. POD by contract (§5 rule 3), so a
+    /// byte copy is the whole upload.
+    models: []const u8,
+    instances: []const u8,
+    /// count * n_u — global row each local unknown gathers x from.
+    gath: []const u32,
+    /// count * n_u — residual row each local unknown scatters to.
+    rhs_idx: []const u32,
+    /// count * n_u * n_u — CSC slot each Jacobian entry scatters to.
+    slots: []const u32,
+};
 
 /// Atomic-scatter sink over flat device buffers — the GPU counterpart of
 /// HostSink. Same method surface `evalRange` consumes; scatter uses atomicRmw
@@ -1942,9 +2037,45 @@ fn hashType(h0: u64, comptime T: type) u64 {
     return h;
 }
 
+// ===========================================================================
+// The host half of the contract (CONSUMING §4.2)
+// ===========================================================================
+
+/// This simulator's VPI application, and it deliberately has no `systf`.
+///
+/// §2.8.3 lets a `.va` call a `$name` no compiler defines, to be supplied
+/// through §12.32 `vpi_register_analog_systf`. ARPice registers none, so the
+/// right answer is to say so ONCE, in a type, and let `validateHost` turn a
+/// model that needs one into a build error naming the function — instead of a
+/// null `Instance.systf` reached at the first Newton step, or worse a value
+/// invented out of thin air inside the residual.
+///
+/// A named empty struct rather than `DeviceBatch(D)`: `validateHost` only ever
+/// looks for a `systf` decl, and routing the check through the batch type would
+/// instantiate every model's SoA store at comptime just to ask that question.
+///
+/// ponytail: no VPI application until a model wants one. The day `checkHost`
+/// errors, declare `pub fn systf(*const Model) ?*const contract.SystfHost` here
+/// and fill EVERY partial (§12.22.1) — a slot left alone is a derivative
+/// claimed and not computed.
+pub const VpiHost = struct {};
+
+/// Assert this host can supply everything `D` calls. A no-op for a device that
+/// names no `$systf`, so every device site carries it unconditionally.
+///
+/// `contract.validate(D)` cannot ask this: it runs where the DEVICE is defined,
+/// and a `.va` compiled to a `.so` does not know which simulator loads it. The
+/// requirement only exists where the two meet — here.
+pub fn checkHost(comptime D: type) void {
+    contract.validateHost(VpiHost, D);
+}
+
 /// Export a contract-shaped device under the runtime ABI. The generated shim
 /// is one line: `comptime { engine.exportDevice(@import("device"), "name"); }`.
 pub fn exportDevice(comptime D: type, comptime device_name: []const u8) void {
+    // The dynamic half. Builtins are checked over the catalog in root.zig;
+    // this covers the `.so`, which root.zig never sees.
+    comptime checkHost(D);
     const impl = Impl(D, device_name);
     @export(&impl.abiVersion, .{ .name = "arp_abi_version" });
     @export(&impl.layoutHashC, .{ .name = "arp_layout_hash" });

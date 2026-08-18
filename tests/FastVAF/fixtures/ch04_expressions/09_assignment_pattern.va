@@ -1,7 +1,0 @@
-module ch04_assignment_pattern(p, n);
-    inout p, n;
-    electrical p, n;
-    parameter real data[0:4] = '{3.4, 5.6, 2.3, 4.5, 7.1};
-
-    analog I(p, n) <+ data[0] + data[4];
-endmodule

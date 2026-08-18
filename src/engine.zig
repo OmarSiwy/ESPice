@@ -11,6 +11,7 @@ const analysis = @import("analysis");
 const devices = @import("devices");
 const types = @import("frontend/types.zig");
 const netlist = @import("builder.zig");
+const gpu_context = @import("gpu_context.zig");
 
 const Circuit = analysis.Circuit;
 const Job = analysis.Job;
@@ -32,9 +33,7 @@ const Sources = struct {
     v_names: []const []const u8,
     v_ports: []const u32,
     v_branches: []const u32,
-    v_dc: []const *f32,
     i_names: []const []const u8,
-    i_dc: []const *f32,
 };
 
 pub const SimConfig = struct {
@@ -58,13 +57,13 @@ pub const Simulation = struct {
     n_results: u32,
     /// Parallel eval context (policy: created here, referenced by Circuit).
     par_eval: ?devices.par.ParEval,
+    /// `--gpu`. Acted on in `run()`, not here: `fromNetlist` returns by value,
+    /// so a context holding `&sim.circuit` taken now would dangle — the same
+    /// reason `par_eval` is attached late.
+    gpu_requested: bool,
+    gpu_ctx: ?*gpu_context.GpuContext,
 
     pub fn fromNetlist(arena: std.mem.Allocator, nl: types.Netlist, io: ?std.Io, config: SimConfig) !Simulation {
-        // Kept in the signature, unused for now: `config.gpu` drove the
-        // megakernel probe that used to live below. See the note at the
-        // `errdefer` further down — GPU moved to per-device kernels in
-        // modules/devices, which have not been wired to a launcher yet.
-        _ = config;
         var b = Builder.init(arena);
         var compiled_ok = false;
         errdefer if (!compiled_ok) b.deinit();
@@ -88,13 +87,9 @@ pub const Simulation = struct {
         sim.circuit = try b.compile();
         compiled_ok = true;
 
-        // ponytail: `--gpu` is accepted but inert. The megakernel driver it
-        // used to start (src/gpu.zig + the `compute` module + a baked
-        // `arp_solve` image) is gone; GPU now means the per-device
-        // `arp_eval_<name>` kernels in modules/devices, which own their own
-        // launch. Until that launcher lands, `circuit.gpu_hook` stays null and
-        // every analysis takes its existing CPU path.
         errdefer sim.circuit.deinit();
+        sim.gpu_requested = config.gpu;
+        sim.gpu_ctx = null;
 
         // Sources: convert builder arrays to frozen slices
         sim.source_node = nb.source_node;
@@ -103,9 +98,7 @@ pub const Simulation = struct {
             .v_names = nb.v_names[0..nb.n_v],
             .v_ports = nb.v_ports[0..nb.n_v],
             .v_branches = nb.v_branches[0..nb.n_v],
-            .v_dc = try collectDcRefs(&sim.circuit, arena, devices.vsource, false, nb.n_v),
             .i_names = nb.i_names[0..nb.n_i],
-            .i_dc = try collectDcRefs(&sim.circuit, arena, devices.isource, true, nb.n_i),
         };
 
         // Probes: every named node (branch unknowns have no label)
@@ -155,6 +148,8 @@ pub const Simulation = struct {
 
     pub fn deinit(self: *Simulation) void {
         self.circuit.par_eval = null;
+        self.circuit.gpu_hook = null;
+        if (self.gpu_ctx) |g| g.deinit();
         if (self.par_eval) |*p| p.deinit();
         self.circuit.deinit();
     }
@@ -163,6 +158,34 @@ pub const Simulation = struct {
         // Attach here, not in fromNetlist: sim is returned by value there, so
         // a &self.par_eval taken earlier would dangle. `self` is stable now.
         if (self.par_eval) |*p| self.circuit.par_eval = p;
+
+        // Same stability rule for the GPU context, which holds `&self.circuit`
+        // and uploads the whole circuit to the device at init.
+        //
+        // A failure here is NOT fatal — every analysis has a CPU path and
+        // `converger.run` falls back on its own. It is printed rather than
+        // swallowed so `--gpu` never silently means "ran on the CPU": that is
+        // exactly how the benchmark came to report CPU timings in its GPU
+        // column.
+        if (self.gpu_requested) {
+            if (gpu_context.GpuContext.init(self.arena, &self.circuit)) |g| {
+                self.gpu_ctx = g;
+                self.circuit.gpu_hook = g.hook();
+                self.circuit.gpu_active = true;
+            } else |e| if (e == gpu_context.Error.NotEnoughGpuWork) {
+                // A DECISION, not a failure: the circuit has kernels, there is
+                // just not enough of it to beat the round trip. Worth saying
+                // out loud (and worth naming the override) so a small `--gpu`
+                // run does not look like a broken driver.
+                std.debug.print(
+                    "note: --gpu declined; too little device work to beat the PCIe round trip " ++
+                        "(override with ZPICEY_GPU_MIN_WORK=<n>)\n",
+                    .{},
+                );
+            } else {
+                std.debug.print("warning: --gpu unavailable ({s}); running on the CPU\n", .{@errorName(e)});
+            }
+        }
         var ctx = RunCtx{
             .circuit = &self.circuit,
             .x_op = null,
@@ -271,33 +294,4 @@ fn buildJob(dir: types.Directive, sim: *const Simulation) ?Job {
     };
 }
 
-// ---------------------------------------------------------------------------
-// DC ref collection — stable pointers into frozen batches
-// ---------------------------------------------------------------------------
-
-fn collectDcRefs(
-    ckt: *const Circuit,
-    allocator: std.mem.Allocator,
-    comptime D: type,
-    comptime is_instance: bool,
-    count: u32,
-) ![]const *f32 {
-    // Collect from the matching batch only — collecting every param of every
-    // device (and doing it twice, for V and I sources) dominated build time
-    // and memory on large netlists.
-    var list: std.ArrayList(analysis.ParamRef) = .empty;
-    defer list.deinit(allocator);
-    for (ckt.batches) |b| {
-        if (!std.mem.eql(u8, b.type_name, @typeName(D))) continue;
-        try b.hooks.collect_params(b.ctx, allocator, &list);
-    }
-    const refs = list.items;
-    const out = try allocator.alloc(*f32, count);
-    for (refs) |ref| {
-        if (ref.is_instance != is_instance) continue;
-        if (!std.mem.eql(u8, ref.param_name, "dc")) continue;
-        if (ref.index < count) out[ref.index] = ref.ptr;
-    }
-    return out;
-}
 

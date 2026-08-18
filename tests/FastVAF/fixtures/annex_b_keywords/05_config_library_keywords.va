@@ -1,8 +1,0 @@
-library annex_b_lib "models/*.v" -incdir "include";
-config annex_b_cfg;
-  design work.top;
-  default liblist work annex_b_lib;
-  cell work.block use annex_b_lib.block:config;
-  instance top.u use work.special;
-endconfig
-// EXPECT: error -- normative syntax/restriction snapshot for this rule family.

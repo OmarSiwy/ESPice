@@ -1,4 +1,0 @@
-// §5.10.3.1: `cross()` "maintains its internal state and has the same
-// restrictions as analog operators" — an event body runs only when the event
-// fires, so `ddt` inside one misses every other step. Rejected as E0514.
-module ch4_op_event(p); inout p; electrical p; real x; analog begin @(cross(V(p),1)) x=ddt(V(p)); I(p)<+x; end endmodule

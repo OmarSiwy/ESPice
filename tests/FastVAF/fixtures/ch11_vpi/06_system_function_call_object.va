@@ -1,4 +1,0 @@
-module ch11_system_function_call_object(p, n);
-  inout p, n; electrical p, n;
-  analog I(p,n) <+ $fixture_vpi_function(V(p,n));
-endmodule

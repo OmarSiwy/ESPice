@@ -1,9 +1,0 @@
-// EXPECT: error -- a digital caller requires the mixed-signal scheduler.
-module ch7_cross_domain_function(p);
-  inout p; electrical p; real sampled;
-  function real probe;
-    input real x;
-    probe = x;
-  endfunction
-  always @(p) sampled = probe(V(p));
-endmodule

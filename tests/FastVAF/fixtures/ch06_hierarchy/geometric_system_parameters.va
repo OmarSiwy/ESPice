@@ -1,1 +1,0 @@
-module ch6_geometry(p); inout p; electrical p; analog I(p)<+V(p)+0.0*$xposition+0.0*$yposition+0.0*$angle+0.0*$hflip+0.0*$vflip; endmodule

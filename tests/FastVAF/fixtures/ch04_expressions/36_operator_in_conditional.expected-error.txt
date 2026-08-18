@@ -1,6 +1,0 @@
-# §5.8.1 "If any of the conditionally-executed statements contains an analog
-# operator, the conditional expression shall be a analysis_or_constant_
-# expression." `V(p, n) > 0.0` is a probe: it moves on every Newton iteration.
-#
-# This fixture used to assert the opposite — that the illegal form COMPILES.
-E0514

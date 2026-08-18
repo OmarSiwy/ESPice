@@ -1,8 +1,0 @@
-module combined_optional_port_environment(p, n);
-  inout p, n; electrical p, n;
-  parameter real fallback = 1e-12;
-  analog begin
-    if ($port_connected(p)) I(p,n) <+ $simparam("gmin", fallback)*V(p,n);
-    else I(p,n) <+ 0.0;
-  end
-endmodule

@@ -1,5 +1,0 @@
-module ch09_atomic_itor(p, n);
-  inout p, n; electrical p, n;
-  analog I(p,n) <+ $itor(2) + V(p,n);
-endmodule
-

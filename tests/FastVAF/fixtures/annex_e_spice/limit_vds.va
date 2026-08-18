@@ -1,4 +1,0 @@
-module annex_e_vdslim(p);
-  inout p; electrical p; real limited;
-  analog begin limited = $limit(V(p), "vdslim"); I(p) <+ limited; end
-endmodule

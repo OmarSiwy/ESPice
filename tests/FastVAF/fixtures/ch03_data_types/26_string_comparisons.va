@@ -1,1 +1,0 @@
-module ch3_string_compare(p); inout p; electrical p; string a="a",b="b"; integer r; analog begin r=(a==b)+(a!=b)+(a<b)+(a<=b)+(a>b)+(a>=b); I(p)<+r+0.0*V(p); end endmodule

@@ -1,8 +1,0 @@
-module ch09_atomic_analog_port_alias(p, n);
-  inout p, n; electrical p, n;
-  electrical local_node; integer status;
-  analog initial begin
-    status = $analog_port_alias(local_node, "$root.top.dev.p");
-  end
-  analog I(p,n) <+ V(local_node) + status * 0.0;
-endmodule

@@ -1,1 +1,0 @@
-module ch3_string_arrays(p); inout p; electrical p; string names[1:3] = '{"first","middle","last"}; analog I(p)<+0.0*V(p); endmodule

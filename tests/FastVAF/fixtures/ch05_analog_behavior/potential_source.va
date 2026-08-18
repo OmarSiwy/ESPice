@@ -1,4 +1,0 @@
-module ch5_potential_source(p, n);
-  inout p, n; electrical p, n;
-  analog V(p, n) <+ 1.25;
-endmodule

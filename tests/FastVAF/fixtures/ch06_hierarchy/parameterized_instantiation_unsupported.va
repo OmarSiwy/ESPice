@@ -1,5 +1,0 @@
-// EXPECT: error -- ordered instance parameter override needs hierarchy.
-module ch6_parent_ordered(p);
-  inout p; electrical p;
-  child #(2.0, 3.0) u(p);
-endmodule

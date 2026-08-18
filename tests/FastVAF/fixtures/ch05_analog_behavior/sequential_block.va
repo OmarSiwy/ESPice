@@ -1,8 +1,0 @@
-module ch5_sequential(p);
-  inout p; electrical p; real a;
-  analog begin
-    a = 1.0;
-    a = a + 2.0;
-    I(p) <+ a;
-  end
-endmodule

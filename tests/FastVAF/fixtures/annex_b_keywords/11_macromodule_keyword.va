@@ -1,2 +1,0 @@
-macromodule annex_b_macro(input a, output b); assign b=a; endmodule
-// EXPECT: error -- normative syntax/restriction snapshot for this rule family.

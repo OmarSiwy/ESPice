@@ -1,3 +1,0 @@
-// §5.9: "Analog filter functions are not allowed" in repeat/while/non-genvar
-// for. Rejected as E0514.
-module ch4_op_while(p); inout p; electrical p; integer i; real x; analog begin i=0; while(i<2) begin x=ddt(V(p)); i=i+1; end I(p)<+x; end endmodule

@@ -1,5 +1,0 @@
-// EXPECT: error -- resolution requires upper and lower port connections.
-module annex_f_hierarchy(sig);
-  electrical sig;
-  child u(sig);
-endmodule

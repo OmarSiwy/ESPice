@@ -1,5 +1,0 @@
-module ch6_parameter(p);
-  inout p; electrical p;
-  parameter real resistance = 1k from (0:inf);
-  analog I(p) <+ V(p) / resistance;
-endmodule

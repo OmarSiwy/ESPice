@@ -1,2 +1,0 @@
-module ch3_vector_branches(a,b); inout a,b; electrical [3:1] a; electrical [1:3] b; branch(a,b) paths; analog I(paths[0])<+V(paths[1]); endmodule
-// EXPECT: error -- normative syntax/restriction snapshot for this rule family.

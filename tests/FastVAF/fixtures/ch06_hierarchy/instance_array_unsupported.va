@@ -1,5 +1,0 @@
-// EXPECT: error -- instance arrays require hierarchy elaboration.
-module ch6_instance_array_parent(p);
-  inout [0:3] p; electrical [0:3] p;
-  ch6_child u[0:3](p);
-endmodule

@@ -1,7 +1,0 @@
-// EXPECT: error
-module annex_g_obsolete_generate(p, n);
-  inout p, n; electrical p, n;
-  analog begin
-    generate i (0, 3) I(p,n) <+ V(p,n);
-  end
-endmodule

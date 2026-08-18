@@ -1,7 +1,0 @@
-module ch8_cross_wakeup(p);
-  inout p; electrical p; real state;
-  analog begin
-    @(cross(V(p) - 0.5, 0, 1p, 1u)) state = 1.0;
-    I(p) <+ state;
-  end
-endmodule

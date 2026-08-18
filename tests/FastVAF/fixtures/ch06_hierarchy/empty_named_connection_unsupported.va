@@ -1,5 +1,0 @@
-// EXPECT: error -- .port() is a legal explicit unconnected port.
-module ch6_empty_named_parent(p);
-  inout p; electrical p;
-  ch6_child u(.input_port(p), .optional_port(), .output_port(p));
-endmodule

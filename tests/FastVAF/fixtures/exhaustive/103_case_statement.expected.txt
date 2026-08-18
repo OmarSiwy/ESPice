@@ -1,7 +1,0 @@
-=== 103_case_statement ===
---- point 0 ---
-  x[p] = 0.000000e0
-  x[n] = 0.000000e0
-case picks the matching arm got=30 want=30 ok=1
-case falls to default got=2 want=2 ok=1
-a multi-label arm matches any of its labels got=1 want=1 ok=1

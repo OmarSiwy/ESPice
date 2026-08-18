@@ -1,9 +1,0 @@
-module ch09_math_binary(p, n);
-  inout p, n; electrical p, n;
-  real x;
-  analog begin
-    x = $pow(V(p,n), 2.0) + $atan2(V(p,n), 1.0) + $hypot(V(p,n), 1.0);
-    x = x + $min(V(p,n), 0.0) + $max(V(p,n), 0.0);
-    I(p,n) <+ x;
-  end
-endmodule

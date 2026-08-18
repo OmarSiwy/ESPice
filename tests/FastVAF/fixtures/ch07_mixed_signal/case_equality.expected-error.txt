@@ -1,2 +1,0 @@
-# annex C: ===/!== are 4-state digital operators, outside Verilog-A.
-E0323

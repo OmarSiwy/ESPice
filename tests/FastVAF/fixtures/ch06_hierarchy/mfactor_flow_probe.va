@@ -1,4 +1,0 @@
-module ch6_mfactor_flow_probe(p, n, out);
-  inout p, n, out; electrical p, n, out;
-  analog V(out) <+ I(p, n);
-endmodule

@@ -56,17 +56,17 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     // Locate the DC param pointer for the source at opts.source_index.
     const refs = try ckt.collectParams();
-    var target: ?*f32 = null;
+    var target: ?root.ParamRef = null;
     for (refs) |ref| {
         if (std.mem.eql(u8, ref.param_name, "dc") and ref.index == opts.source_index) {
-            target = ref.ptr;
+            target = ref;
             break;
         }
     }
     const t = target orelse return error.DcSweepSourceNotFound;
-    const saved = t.*;
+    const saved = t.get();
     defer {
-        t.* = saved;
+        t.set(saved);
         ckt.recompute();
     }
 
@@ -104,7 +104,7 @@ fn runBatchGpu(
     ctx: *const root.RunCtx,
     ckt: *root.Circuit,
     a: std.mem.Allocator,
-    t: *f32,
+    t: root.ParamRef,
     gh: root.GpuHook,
     sb: *const fn (*anyopaque, [][]f64, f64, converger.Options, []converger.Result) anyerror!void,
     opts: Options,
@@ -125,7 +125,7 @@ fn runBatchGpu(
     // and prepare a cold-started x-vector.
     for (0..npoints) |pt| {
         const v = opts.start + @as(f64, @floatFromInt(pt)) * opts.step;
-        t.* = @floatCast(v);
+        t.set(v);
         ckt.has_baseline = false;
         ckt.recompute();
         try ckt.computeBaseline();
@@ -160,7 +160,7 @@ fn runSerial(
     ctx: *const root.RunCtx,
     ckt: *root.Circuit,
     a: std.mem.Allocator,
-    t: *f32,
+    t: root.ParamRef,
     opts: Options,
     npoints: usize,
     ncols: usize,
@@ -181,7 +181,7 @@ fn runSerial(
     var cold = true;
     for (0..npoints) |pt| {
         const v = opts.start + @as(f64, @floatFromInt(pt)) * opts.step;
-        t.* = @floatCast(v);
+        t.set(v);
         // Per-point: invalidate baseline and recompute device params so
         // constant-Jacobian stamps reflect the new swept value.
         ckt.has_baseline = false;

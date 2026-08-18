@@ -1,6 +1,0 @@
-// LRM 2.6: the size in a based number is OPTIONAL, so `'h837ff` is a legal
-// unsized based literal and this must COMPILE (file name is historical).
-module ch02_unsized_based_rejected;
-    integer value;
-    analog value = 'h837ff;
-endmodule

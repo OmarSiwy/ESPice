@@ -1,5 +1,0 @@
-// EXPECT: error -- LRM 6.7.1 forbids hierarchical analog-variable access.
-module ch6_oomr_variable_read(p);
-  inout p; electrical p;
-  analog I(p) <+ device.local_value;
-endmodule

@@ -4,6 +4,11 @@
 const std = @import("std");
 const root = @import("analysis");
 
+/// Limiting result for the 2-unknown test devices. `converged` is the device's
+/// own verdict on whether its clamp was significant enough to require another
+/// Newton iteration — see contract.LimitResult.
+const Lim2 = root.devices.batch.LimitResult(2);
+
 /// Linear resistor. F_p = g(vp-vn), F_n = -that. Declares its thermal
 /// noise generator so noise tests have a source (builtin device noise).
 pub const R = struct {
@@ -24,7 +29,7 @@ pub const R = struct {
 pub const Rc = struct {
     pub const U = enum(u8) { p, n };
     pub const num_ports: usize = 2;
-    pub const constant_g = true;
+    pub const constant: root.devices.batch.Constant = .{ .g = true };
     pub const Model = struct { r: f32 = 1000 };
     pub const Instance = struct {};
     pub fn eval(comptime S: type, x: [2]S, m: *const Model, _: *const Instance, _: f64) [2]S {
@@ -48,7 +53,7 @@ pub const Dp = struct {
         const id = x[0].sub(x[1]).minC(0.9).scale(pc.inv_vt).exp().addC(-1.0).scale(pc.is);
         return .{ id, id.neg() };
     }
-    pub fn limit(_: *const Model, _: *const Instance, cur: [2]f64, old: [2]f64) [2]f64 {
+    pub fn limit(_: *const Model, _: *const Instance, cur: [2]f64, old: [2]f64) Lim2 {
         return D.limit(undefined, undefined, cur, old);
     }
 };
@@ -106,18 +111,20 @@ pub const D = struct {
     }
     /// pnjlim-style junction limiting: without it Newton ping-pongs between
     /// the exp wall and the off region and never converges.
-    pub fn limit(_: *const Model, _: *const Instance, cur: [2]f64, old: [2]f64) [2]f64 {
+    pub fn limit(_: *const Model, _: *const Instance, cur: [2]f64, old: [2]f64) Lim2 {
         const vt = 0.02585;
         const vcrit = 0.6;
         const v_old = old[0] - old[1];
-        var v = cur[0] - cur[1];
+        const v_in = cur[0] - cur[1];
+        var v = v_in;
         if (v > vcrit and @abs(v - v_old) > 2 * vt) {
             v = if (v_old > 0) blk: {
                 const arg = 1.0 + (v - v_old) / vt;
                 break :blk if (arg > 0) v_old + vt * @log(arg) else vcrit;
             } else vcrit;
         }
-        return .{ cur[1] + v, cur[1] };
+        // pnjlim clamped: the iterate was moved, so Newton must go round again.
+        return .{ .x = .{ cur[1] + v, cur[1] }, .converged = v == v_in };
     }
 };
 

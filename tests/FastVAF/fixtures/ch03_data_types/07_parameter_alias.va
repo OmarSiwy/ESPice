@@ -1,8 +1,0 @@
-module ch03_parameter_alias(p, n);
-    inout p, n;
-    electrical p, n;
-    parameter real dtemp = 0 from [-273.15:inf);
-    aliasparam trise = dtemp;
-
-    analog I(p, n) <+ dtemp + V(p, n);
-endmodule

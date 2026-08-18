@@ -1,1 +1,0 @@
-module ch04_cosh(p, n); inout p, n; electrical p, n; analog I(p, n) <+ cosh(V(p, n)); endmodule

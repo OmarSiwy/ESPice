@@ -1,9 +1,0 @@
-module glossary_node_port_terminal(terminal_p, terminal_n);
-  inout terminal_p, terminal_n;
-  electrical terminal_p, terminal_n;
-  electrical internal_node;
-  analog begin
-    V(internal_node,terminal_n) <+ V(terminal_p,terminal_n);
-    I(terminal_p,terminal_n) <+ V(internal_node,terminal_n);
-  end
-endmodule

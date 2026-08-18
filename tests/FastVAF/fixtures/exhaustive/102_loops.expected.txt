@@ -1,8 +1,0 @@
-=== 102_loops ===
---- point 0 ---
-  x[p] = 0.000000e0
-  x[n] = 0.000000e0
-for sums 1..5 got=15 want=15 ok=1
-while runs 4 times got=8 want=8 ok=1
-6! by loop got=720 want=720 ok=1
-a loop body may change the counter got=5 want=5 ok=1

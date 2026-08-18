@@ -1,2 +1,0 @@
-// EXPECT: error -- Table E.1 primitive needs SPICE elaboration.
-module annex_e_primitive_isine(p,n); inout p,n; electrical p,n; isine #(.dc(0.0),.mag(1.0),.phase(0.0),.offset(0.0),.ampl(1m),.freq(1k),.td(1n),.damp(1k),.sinephase(0.0),.ammodindex(0.1),.ammodfreq(10k),.ammodphase(0.0),.fmmodindex(0.2),.fmmodfreq(20k)) x(.p(p),.n(n)); endmodule

@@ -1,5 +1,0 @@
-module annex_a_module_ports(input electrical sense, output electrical drive, inout electrical common);
-    analog begin
-        V(drive, common) <+ V(sense, common);
-    end
-endmodule

@@ -1,5 +1,0 @@
-// EXPECT: error -- attributes are parsed, primitive instantiation remains unsupported.
-module annex_e_primitive_discipline(p, n);
-  inout p, n; electrical p, n;
-  (* port_discipline="rotational" *) resistor #(.r(1k)) r1(p, n);
-endmodule

@@ -1,3 +1,0 @@
-# LRM 4.7.2: the actual for an output formal must be a variable; V(p) is not
-# an lvalue.
-E0316

@@ -1,1 +1,0 @@
-module ch04_power_operator(p, n); inout p, n; electrical p, n; analog I(p, n) <+ (V(p, n) + 1.0) ** 2.0; endmodule

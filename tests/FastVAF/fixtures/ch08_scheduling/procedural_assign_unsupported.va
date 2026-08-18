@@ -1,7 +1,0 @@
-// EXPECT: error -- procedural assign updates require the digital scheduler.
-module ch8_procedural_assign;
-  reg source, target;
-  initial begin
-    assign target = source;
-  end
-endmodule

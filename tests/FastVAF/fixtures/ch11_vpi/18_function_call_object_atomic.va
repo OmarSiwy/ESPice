@@ -1,8 +1,0 @@
-module ch11_function_call_object_atomic(p, n);
-  inout p, n; electrical p, n;
-  analog function real square;
-    input x; real x;
-    square = x * x;
-  endfunction
-  analog I(p,n) <+ square(V(p,n));
-endmodule

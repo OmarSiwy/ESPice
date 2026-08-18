@@ -1,1 +1,0 @@
-module ch2_real_underscores(p); inout p; electrical p; parameter real a=1_234.5_67; parameter real b=236.123_763_e-12; analog I(p)<+(a+b)*V(p); endmodule

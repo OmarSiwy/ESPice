@@ -1,8 +1,0 @@
-// EXPECT: error -- posedge is a digital event expression.
-module ch7_digital_event(p);
-  inout p; electrical p; integer d; real held;
-  analog begin
-    @(posedge d) held = V(p);
-    I(p) <+ held;
-  end
-endmodule

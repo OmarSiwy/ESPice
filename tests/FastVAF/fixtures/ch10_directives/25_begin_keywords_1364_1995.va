@@ -1,6 +1,0 @@
-`begin_keywords "1364-1995"
-module ch10_begin_keywords_1364_1995(sin, n);
-  inout sin, n; electrical sin, n;
-  analog I(sin,n) <+ V(sin,n);
-endmodule
-`end_keywords

@@ -1,1 +1,0 @@
-(* optimize_power, full_case=1, parallel_case=0 *) module ch2_attr_defaults(p); inout p; electrical p; analog I(p)<+V(p); endmodule

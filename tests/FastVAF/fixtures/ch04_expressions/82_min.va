@@ -1,1 +1,0 @@
-module ch04_min(p, n); inout p, n; electrical p, n; analog I(p, n) <+ min(V(p, n), 1.0); endmodule

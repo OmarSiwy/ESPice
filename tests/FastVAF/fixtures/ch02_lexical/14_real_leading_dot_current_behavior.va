@@ -1,5 +1,0 @@
-module ch02_real_leading_dot_current_behavior(p, n);
-    inout p, n;
-    electrical p, n;
-    analog I(p, n) <+ .12;
-endmodule

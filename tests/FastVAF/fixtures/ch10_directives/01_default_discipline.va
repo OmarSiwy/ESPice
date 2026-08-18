@@ -1,5 +1,0 @@
-`default_discipline electrical
-module ch10_default_discipline(p, n);
-  inout p, n; electrical p, n;
-  analog I(p,n) <+ V(p,n);
-endmodule

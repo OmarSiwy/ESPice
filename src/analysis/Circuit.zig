@@ -74,6 +74,14 @@ pub const GpuHook = struct {
     freq_solve_batch: ?*const fn (*anyopaque, g_vals: []const f64, c_vals: []const f64, omegas: []const f64, rhs: []const f64, x_out: [][]f64, n: u32) anyerror!void = null,
     /// Adjoint variant: (G + jωC)^H y = rhs per frequency.
     freq_solve_adjoint_batch: ?*const fn (*anyopaque, g_vals: []const f64, c_vals: []const f64, omegas: []const f64, rhs: []const f64, y_out: [][]f64, n: u32) anyerror!void = null,
+    /// Stamp the planes on the device — the GPU half of `Circuit.eval` /
+    /// `Circuit.evalNewton`, ground pin included.
+    ///
+    /// Void, not `anyerror!void`, because a stamp sits under every analysis in
+    /// the tree and none of them are shaped to handle a driver fault mid-solve.
+    /// The implementation falls back to the CPU stamp for the failing call and
+    /// warns once, so a fault costs speed and not an answer.
+    eval_planes: ?*const fn (*anyopaque, x: []const f64, t: f64) void = null,
     /// Repack device-resident payloads after parameter mutation (sweeps).
     repack: ?*const fn (*anyopaque) anyerror!void = null,
 };
@@ -214,7 +222,30 @@ pub const Circuit = struct {
         self.rhs[0] += x[0];
     }
 
+    /// Stamp the planes for state `x` at time `t`.
+    ///
+    /// Both this and `evalNewton` route to the device when a GPU context is
+    /// attached, and that is the ONLY place the GPU enters an analysis. Putting
+    /// it here rather than behind a whole parallel Newton loop is what lets
+    /// transient use the GPU at all: `tran.TranHook.assemble` calls
+    /// `evalNewton` and then does its own companion-RHS math on the planes, so
+    /// a GPU path that replaced the SOLVE would have skipped that math, while
+    /// one that replaces only the STAMP composes with it untouched. Same for
+    /// `combineGC`, limiting, history injection and every other host-side step
+    /// layered on top of a stamp.
+    ///
+    /// For the GPU the two functions are the same work — `gpuEligible` admits
+    /// no device with a `limit` decl, so `eval` and `eval_newton` agree — hence
+    /// one hook for both.
     pub fn eval(self: *Circuit, x: []const f64, t: f64) void {
+        if (self.gpu_hook) |gh| if (gh.eval_planes) |ev| {
+            ev(gh.ctx, x, t);
+            return;
+        };
+        self.evalCpu(x, t);
+    }
+
+    pub fn evalCpu(self: *Circuit, x: []const f64, t: f64) void {
         if (self.par_eval) |p| {
             p.eval(self.batches, self.ownPlanes(), self.has_charge, x, t);
             self.groundStamp(x);
@@ -232,6 +263,20 @@ pub const Circuit = struct {
     }
 
     pub fn evalNewton(self: *Circuit, x: []const f64, t: f64) void {
+        // The device path deliberately ignores `has_baseline`. `g_base` holds
+        // the constant contribution of EVERY batch, GPU-eligible ones included,
+        // so starting from it and then letting the kernels stamp on top would
+        // double-count them — the GPU sink has no `skip_g`. It zeroes and
+        // restamps instead, which costs the baseline optimization and is why
+        // `computeBaseline` is not worth suppressing when the GPU is live.
+        if (self.gpu_hook) |gh| if (gh.eval_planes) |ev| {
+            ev(gh.ctx, x, t);
+            return;
+        };
+        self.evalNewtonCpu(x, t);
+    }
+
+    pub fn evalNewtonCpu(self: *Circuit, x: []const f64, t: f64) void {
         if (self.par_eval) |p| {
             p.evalNewton(self.batches, self.ownPlanes(), self.has_charge, self.has_baseline, self.g_base, self.c_base, x, t);
             self.groundStamp(x);

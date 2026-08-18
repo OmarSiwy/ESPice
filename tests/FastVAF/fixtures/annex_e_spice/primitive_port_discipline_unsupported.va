@@ -1,7 +1,0 @@
-// EXPECT: error -- port_discipline may be attached to individual primitive ports.
-module annex_e_primitive_port_discipline(node1, node2);
-  inout node1, node2; electrical node1, node2;
-  resistor #(.r(1k)) r1(
-      (* port_discipline="rotational" *) node1,
-      (* port_discipline="rotational" *) node2);
-endmodule

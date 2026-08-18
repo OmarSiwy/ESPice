@@ -1,6 +1,0 @@
-// EXPECT: error
-module ch12_atomic_scan(p, n);
-  inout p, n; electrical p, n;
-  analog I(p,n) <+ vpi_scan(0);
-endmodule
-

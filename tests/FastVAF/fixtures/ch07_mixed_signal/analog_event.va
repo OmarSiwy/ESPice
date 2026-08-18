@@ -1,7 +1,0 @@
-module ch7_analog_event(p, threshold);
-  inout p, threshold; electrical p, threshold; real held;
-  analog begin
-    @(cross(V(threshold), +1)) held = V(p);
-    I(p) <+ held;
-  end
-endmodule

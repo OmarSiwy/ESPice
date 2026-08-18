@@ -1,6 +1,0 @@
-// EXPECT: error -- a discrete-owned real is readable as real in analog context.
-module ch7_discrete_real_from_analog(p);
-  inout p; electrical p; real digital_real;
-  initial digital_real = 1.25;
-  analog I(p) <+ digital_real;
-endmodule

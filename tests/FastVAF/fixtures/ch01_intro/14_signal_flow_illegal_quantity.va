@@ -1,4 +1,0 @@
-nature ch1_only_v_n; units="V"; access=OnlyV; abstol=1u; endnature
-discipline ch1_only_v; potential ch1_only_v_n; enddiscipline
-module ch1_illegal_sf(output ch1_only_v outp); analog flow(outp) <+ 1.0; endmodule
-// EXPECT: error -- normative syntax/restriction snapshot for this rule family.

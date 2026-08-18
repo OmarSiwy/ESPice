@@ -1,7 +1,0 @@
-module ch03_parameter_array(p, n);
-    inout p, n;
-    electrical p, n;
-    parameter real coefficients[0:3] = '{1.0, 3.198, 4.554, 2.0};
-
-    analog I(p, n) <+ coefficients[0] * V(p, n) + coefficients[3];
-endmodule

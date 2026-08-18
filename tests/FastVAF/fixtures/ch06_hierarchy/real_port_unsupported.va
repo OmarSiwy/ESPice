@@ -1,6 +1,0 @@
-// EXPECT: error -- real-valued ports are not in the analog-device ABI.
-module ch6_real_port(x);
-  input real x;
-  electrical p;
-  analog I(p) <+ x;
-endmodule

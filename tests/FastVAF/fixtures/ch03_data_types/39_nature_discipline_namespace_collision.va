@@ -1,3 +1,0 @@
-nature ch3_collision; units="V"; access=CollisionV; abstol=1u; endnature
-discipline ch3_collision; domain continuous; enddiscipline
-module ch3_collision_user; endmodule

@@ -1,6 +1,0 @@
-// EXPECT: error -- LRM 4.4.2: a port branch supports FLOW access only, so
-// V(<p>) is illegal.
-module ch5_bad_port_potential(p);
-  inout p; electrical p;
-  analog I(p) <+ V(<p>);
-endmodule

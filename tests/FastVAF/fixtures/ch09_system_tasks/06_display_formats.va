@@ -1,8 +1,0 @@
-module ch09_display_formats(p, n);
-  inout p, n; electrical p, n;
-  analog begin
-    $display("bin=%b oct=%o dec=%d hex=%h char=%c str=%s", 5, 5, 5, 5, 65, "A");
-    $display("real=%10.3g exp=%e fixed=%f eng=%r percent=%% name=%m octal=\\11 tab=\\t quote=\\\"");
-    I(p,n) <+ V(p,n);
-  end
-endmodule
