@@ -3,10 +3,14 @@
 //! variable as a TRACE.
 const std = @import("std");
 const Io = std.Io;
+const assert = std.debug.assert;
 const Plot = @import("types.zig").Plot;
 
 /// Writes `plot`, which must have passed `types.validatePlot(.psf, ...)`.
+/// Asserts that it has variables and one sample row per point.
 pub fn encode(w: *Io.Writer, plot: Plot) !void {
+    assert(plot.result.varnames.len > 0);
+    assert(plot.result.data.len == plot.result.npoints * plot.stride());
     const names = plot.result.varnames;
     const complex = plot.result.is_complex;
     try w.writeAll("HEADER\n");

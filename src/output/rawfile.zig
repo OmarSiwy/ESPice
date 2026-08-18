@@ -2,6 +2,7 @@
 //! f64. ascii_raw.zig shares the header.
 const std = @import("std");
 const Io = std.Io;
+const assert = std.debug.assert;
 const Plot = @import("types.zig").Plot;
 
 /// ngspice's variable type for a name: time, frequency, current for `i(...)`
@@ -15,14 +16,19 @@ fn varType(name: []const u8) []const u8 {
 }
 
 /// Writes `plot`, which must have passed `types.validatePlot(.binary, ...)`.
+/// Asserts that it has variables and one sample row per point.
 pub fn encode(w: *Io.Writer, plot: Plot) !void {
+    assert(plot.result.varnames.len > 0);
+    assert(plot.result.data.len == plot.result.npoints * plot.stride());
     try writeHeader(w, plot, true);
     try w.writeAll(std.mem.sliceAsBytes(plot.result.data));
 }
 
 /// Writes the raw header up to and including `Binary:` or `Values:`.
-/// The date is fixed so output is reproducible.
+/// The date is fixed so output is reproducible. Reads no samples, so a
+/// streamed plot's empty data is fine. Asserts that `plot` has variables.
 pub fn writeHeader(w: *Io.Writer, plot: Plot, comptime binary: bool) !void {
+    assert(plot.result.varnames.len > 0);
     try w.print("Title: {s}\n", .{plot.title});
     try w.writeAll("Date: Thu Jan  1 00:00:00 1970\n");
     try w.print("Plotname: {s}\n", .{plot.result.plotname});

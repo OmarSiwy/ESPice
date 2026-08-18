@@ -3,6 +3,7 @@
 //! plot's rows as they are computed (`beginStream`).
 const std = @import("std");
 const Io = std.Io;
+const assert = std.debug.assert;
 const types = @import("types.zig");
 const dispatch = @import("write.zig");
 
@@ -141,6 +142,7 @@ pub const Session = struct {
     /// or not it succeeds; a file error fails the session. Asserts that a
     /// stream is open.
     pub fn endStream(self: *Session, io: Io, npoints: usize, columns: usize) !void {
+        assert(self.stream != null);
         const s = self.stream.?;
         defer self.abortStream();
         if (s.atomic) |*atomic| {

@@ -2,10 +2,14 @@
 //! variable becomes a `_re` and an `_im` column.
 const std = @import("std");
 const Io = std.Io;
+const assert = std.debug.assert;
 const Plot = @import("types.zig").Plot;
 
 /// Writes `plot`, which must have passed `types.validatePlot(.csv, ...)`.
+/// Asserts that it has variables and one sample row per point.
 pub fn encode(w: *Io.Writer, plot: Plot) !void {
+    assert(plot.result.varnames.len > 0);
+    assert(plot.result.data.len == plot.result.npoints * plot.stride());
     for (plot.result.varnames, 0..) |name, i| {
         if (i > 0) try w.writeByte(',');
         if (plot.result.is_complex) {

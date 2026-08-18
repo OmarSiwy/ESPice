@@ -5,14 +5,18 @@
 //! libfsdb. Link it when real FSDB interchange is required.
 const std = @import("std");
 const Io = std.Io;
+const assert = std.debug.assert;
 const Plot = @import("types.zig").Plot;
 
 const magic = "FSDB";
 const version: u32 = 0x0300;
 
-/// Writes `plot`. Expects the u32/u16 limits `types.validatePlot`
-/// enforces for fsdb; a longer string panics in safe builds.
+/// Writes `plot`. Asserts the u32 counts and u16 string lengths
+/// `types.validatePlot(.fsdb, ...)` checks, and one sample row per point.
 pub fn encode(w: *Io.Writer, plot: Plot) !void {
+    assert(plot.result.varnames.len <= std.math.maxInt(u32));
+    assert(plot.result.npoints <= std.math.maxInt(u32));
+    assert(plot.result.data.len == plot.result.npoints * plot.stride());
     try w.writeAll(magic);
     try w.writeInt(u32, version, .little);
     try w.writeInt(u32, @intCast(plot.result.varnames.len), .little);
@@ -25,6 +29,7 @@ pub fn encode(w: *Io.Writer, plot: Plot) !void {
 }
 
 fn writeString(w: *Io.Writer, s: []const u8) !void {
+    assert(s.len <= std.math.maxInt(u16));
     try w.writeInt(u16, @intCast(s.len), .little);
     try w.writeAll(s);
 }

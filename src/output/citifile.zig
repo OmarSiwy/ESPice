@@ -2,12 +2,15 @@
 //! S-parameter variable. Variables that are not S parameters are skipped.
 const std = @import("std");
 const Io = std.Io;
+const assert = std.debug.assert;
 const types = @import("types.zig");
 const Plot = types.Plot;
 
-/// Writes `plot`, which must have passed `types.validatePlot(.citi, ...)`:
-/// complex, `frequency` first.
+/// Writes `plot`, which must have passed `types.validatePlot(.citi, ...)`.
+/// Asserts that it is complex with one sample row per point.
 pub fn encode(w: *Io.Writer, plot: Plot) !void {
+    assert(plot.result.is_complex);
+    assert(plot.result.data.len == plot.result.npoints * plot.stride());
     try w.writeAll("CITIFILE A.01.01\n");
     try w.print("NAME {s}\n", .{plot.result.plotname});
     try w.print("VAR frequency MAG {d}\n", .{plot.result.npoints});

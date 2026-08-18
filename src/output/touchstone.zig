@@ -4,14 +4,17 @@
 //! 1.0 cannot express. Needs the complete matrix `types.portCount` checks for.
 const std = @import("std");
 const Io = std.Io;
+const assert = std.debug.assert;
 const types = @import("types.zig");
 const Plot = types.Plot;
 
 /// Writes `plot`, which must have passed `types.validatePlot(.touchstone,
 /// ...)`. `DataLengthMismatch` when `plot.z0` is neither empty nor one
-/// impedance per port.
+/// impedance per port. Asserts that `plot` has one sample row per point.
 pub fn encode(w: *Io.Writer, plot: Plot) !void {
+    assert(plot.result.data.len == plot.result.npoints * plot.stride());
     const n_ports = try types.portCount(plot.schema());
+    assert(n_ports > 0);
     if (plot.z0.len != 0 and plot.z0.len != n_ports) return error.DataLengthMismatch;
     const z0 = if (plot.z0.len == 0) 50.0 else plot.z0[0];
     const v2 = for (plot.z0) |z| {

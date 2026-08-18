@@ -8,6 +8,7 @@ const Writer = std.Io.Writer;
 const Clause = core.MeasureClause;
 const Kind = core.query.Kind;
 const nan = std.math.nan(f64);
+const assert = std.debug.assert;
 
 /// Writes every card in `measures` that targets `analysis`, evaluated over
 /// `result`, under ngspice's heading. Writes nothing when none targets it.
@@ -62,7 +63,7 @@ pub fn print(out: *Writer, err: *Writer, measures: []const core.Measure, analysi
 /// whose event never happens, reads NaN.
 /// Asserts that `out.len == measures.len`.
 pub fn evaluateAll(measures: []const core.Measure, analysis: Kind, result: core.Result, out: []f64) void {
-    std.debug.assert(out.len == measures.len);
+    assert(out.len == measures.len);
     @memset(out, nan);
     var discard_buf: [64]u8 = undefined;
     var discard: Writer.Discarding = .init(&discard_buf);
@@ -75,9 +76,10 @@ pub fn evaluateAll(measures: []const core.Measure, analysis: Kind, result: core.
 /// Clause `c`'s waveform over transient `result` at each time in `at`,
 /// interpolated linearly and held flat past either end. A result with no
 /// samples (none computed, or streamed to a file) reads NaN everywhere.
-/// `NoSuchVector` when `c` names a vector the result lacks. Panics in safe
-/// builds when `at.len != out.len`.
+/// `NoSuchVector` when `c` names a vector the result lacks. Asserts that
+/// `at.len == out.len`.
 pub fn sample(c: Clause, result: core.Result, at: []const f64, out: []f64) error{NoSuchVector}!void {
+    assert(at.len == out.len);
     const w: Wave = .{ .result = result, .analysis = .tran };
     const x = w.scale();
     const y = try w.waveform(c.vec, c.ops, c.vectype);
@@ -329,9 +331,15 @@ fn resolve(c: Clause, values: []const f64) !Clause {
 /// A `_CONT` card: the event it names and every later one, printed as
 /// `name[k]`. Returns the first; OutOfInterval when there is none.
 fn evaluateCont(out: *Writer, m: core.Measure, w: Wave) EvalError!f64 {
+    assert(m.cont);
     var first: f64 = nan;
     var buf: [96]u8 = undefined;
     var k: i32 = 0;
+    // Ends when the events run out: `nth` is null past an AT clause, and
+    // event k + 1 needs k + 1 crossings, so once k passes the sample count
+    // `when` finds none and `evaluate` fails OutOfInterval. A FIND or DERIV
+    // with AT= reads no event from `second`, so it never runs out: a known
+    // hang, not yet fixed.
     while (true) : (k += 1) {
         var one = m;
         one.cont = false;
@@ -362,6 +370,7 @@ fn lastEvent(c: Clause) bool {
 /// `c` counting `k` events past the one it names (CROSS=1 when it names
 /// none); null for an `AT=` clause past its one value.
 fn nth(c: Clause, k: i32) ?Clause {
+    assert(k >= 0);
     if (c.at != core.measure_no_at) return if (k == 0) c else null;
     var r = c;
     if (c.rise > 0) r.rise = c.rise + k else if (c.fall > 0) r.fall = c.fall + k else if (c.cross > 0) r.cross = c.cross + k else if (!lastEvent(c)) r.cross = 1 + k;
@@ -383,6 +392,7 @@ fn fftFigure(mag: Column, freq: Column, n: usize, c: Clause, func: core.MeasureF
         k0 = k;
     };
     if (k0 == 0) return nan;
+    assert(k0 < n);
     const fund = mag.get(k0);
     var harmonics: f64 = 0;
     var noise: f64 = 0;
@@ -456,6 +466,8 @@ fn fold(ops: []const core.MeasureOp, leaves: anytype) f64 {
             };
         },
     };
+    assert(n <= stack.len);
+    assert(vectors <= ops.len);
     return if (n == 1) stack[0] else nan;
 }
 
@@ -570,6 +582,7 @@ const Wave = struct {
                 c.par_count += 1;
             }
         };
+        assert(c.par_count <= c.par_cols.len);
         return c;
     }
 
@@ -852,6 +865,7 @@ const Wave = struct {
             if (std.math.isNan(t)) break;
             times[n] = t;
         }
+        assert(n <= times.len);
         if (n < 3) return error.OutOfInterval;
         const count: f64 = @floatFromInt(n);
         var sx: f64 = 0;
@@ -926,6 +940,8 @@ const Wave = struct {
         while (win.hi < n and !(c.to != 0 and x.get(win.hi) > c.to)) win.hi += 1;
         win.cut = win.hi < n;
         if (win.cut) win.hi += 1;
+        assert(win.lo <= win.hi);
+        assert(win.hi <= n);
         const count = win.hi - win.lo;
         var sum: [3]f64 = .{ 0, 0, 0 };
         var k: usize = 0;
@@ -995,6 +1011,7 @@ const Window = struct {
 /// ngspice measure_interpolate, 'y' mode: the line through samples i and j
 /// at scale value `at`, in slope-intercept form for the same rounding.
 fn interpolate(x: Column, y: Column, i: usize, j: usize, at: f64) f64 {
+    assert(i < j);
     const slope = (y.get(j) - y.get(i)) / (x.get(j) - x.get(i));
     const intercept = y.get(i) - slope * x.get(i);
     return slope * at + intercept;

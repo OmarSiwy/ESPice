@@ -5,12 +5,16 @@
 //! more. Match a real HSPICE file when a reader rejects this one.
 const std = @import("std");
 const Io = std.Io;
+const assert = std.debug.assert;
 const Plot = @import("types.zig").Plot;
 
 /// Width of one name slot; names are cut to 15 bytes plus a NUL.
 const name_slot = 16;
+/// Name slots in the names record (`types.validateSchema` enforces it).
+const names_max = 64;
 
 fn writeRecord(w: *Io.Writer, data: []const u8) !void {
+    assert(data.len <= std.math.maxInt(i32));
     try w.writeInt(i32, @intCast(data.len), .little);
     try w.writeAll(data);
     try w.writeInt(i32, @intCast(data.len), .little);
@@ -22,10 +26,12 @@ fn writeRecordI32(w: *Io.Writer, value: i32) !void {
     try writeRecord(w, &buf);
 }
 
-/// Writes `plot`. Expects at most 64 variables (`types.validateSchema`
-/// enforces it); more panic in safe builds.
+/// Writes `plot`. Asserts at most 64 variables (`types.validateSchema`
+/// enforces it) and one sample row per point.
 pub fn encode(w: *Io.Writer, plot: Plot) !void {
     const nvars = plot.result.varnames.len;
+    assert(nvars <= names_max);
+    assert(plot.result.data.len == plot.result.npoints * plot.stride());
     const header = "SST2 {s} {s} nvars={d} npoints={d}";
     const args = .{ plot.title, plot.result.plotname, nvars, plot.result.npoints };
     const header_len: i32 = @intCast(std.fmt.count(header, args));
@@ -34,7 +40,7 @@ pub fn encode(w: *Io.Writer, plot: Plot) !void {
     try w.writeInt(i32, header_len, .little);
 
     try writeRecordI32(w, @intCast(nvars));
-    var names: [name_slot * 64]u8 = @splat(0);
+    var names: [name_slot * names_max]u8 = @splat(0);
     for (plot.result.varnames, 0..) |name, i| {
         const len = @min(name.len, name_slot - 1);
         @memcpy(names[i * name_slot ..][0..len], name[0..len]);

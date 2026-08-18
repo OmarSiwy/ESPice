@@ -2,11 +2,15 @@
 //! variable, each point's first line led by the point index.
 const std = @import("std");
 const Io = std.Io;
+const assert = std.debug.assert;
 const rawfile = @import("rawfile.zig");
 const Plot = @import("types.zig").Plot;
 
 /// Writes `plot`, which must have passed `types.validatePlot(.ascii, ...)`.
+/// Asserts that it has variables and one sample row per point.
 pub fn encode(w: *Io.Writer, plot: Plot) !void {
+    assert(plot.result.varnames.len > 0);
+    assert(plot.result.data.len == plot.result.npoints * plot.stride());
     try rawfile.writeHeader(w, plot, false);
     for (0..plot.result.npoints) |pt| {
         const row = plot.point(pt);

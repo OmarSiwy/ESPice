@@ -1,6 +1,7 @@
 //! Shared output data and the checks that decide whether a format can hold a
 //! result. Writers and producers import this leaf, never root.zig.
 const std = @import("std");
+const assert = std.debug.assert;
 const core = @import("core");
 
 /// An output file format. `root.parseFormat` maps user names and aliases
@@ -31,13 +32,19 @@ pub const Plot = struct {
         return .{ .varnames = self.result.varnames, .is_complex = self.result.is_complex, .npoints = self.result.npoints };
     }
 
+    /// Returns the f64s per point: one per variable, two when complex.
+    pub fn stride(self: Plot) usize {
+        return self.result.varnames.len * @as(usize, if (self.result.is_complex) 2 else 1);
+    }
+
     /// Returns the samples of point `pt`: one f64 per variable, or a
     /// (real, imaginary) pair per variable when complex. Borrows
-    /// `result.data`. Panics in safe builds when the point is past the
-    /// data, which `validatePlot` rules out.
+    /// `result.data`. Asserts that `pt < result.npoints`; a plot that
+    /// passed `validatePlot` then has the samples.
     pub fn point(self: Plot, pt: usize) []const f64 {
-        const stride = self.result.varnames.len * @as(usize, if (self.result.is_complex) 2 else 1);
-        return self.result.data[pt * stride ..][0..stride];
+        assert(pt < self.result.npoints);
+        const n = self.stride();
+        return self.result.data[pt * n ..][0..n];
     }
 };
 

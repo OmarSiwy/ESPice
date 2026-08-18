@@ -2,10 +2,14 @@
 //! rule, then one tab-separated row per point.
 const std = @import("std");
 const Io = std.Io;
+const assert = std.debug.assert;
 const Plot = @import("types.zig").Plot;
 
 /// Writes `plot`, which must have passed `types.validatePlot(.print, ...)`.
+/// Asserts that it has variables and one sample row per point.
 pub fn encode(w: *Io.Writer, plot: Plot) !void {
+    assert(plot.result.varnames.len > 0);
+    assert(plot.result.data.len == plot.result.npoints * plot.stride());
     try w.print("{s}: {s}\n", .{ plot.result.plotname, plot.title });
     try w.writeAll("Index");
     for (plot.result.varnames) |name| {
@@ -14,8 +18,7 @@ pub fn encode(w: *Io.Writer, plot: Plot) !void {
         if (plot.result.is_complex) try w.writeAll("\t(imag)");
     }
     try w.writeAll("\n-----");
-    const columns = plot.result.varnames.len * @as(usize, if (plot.result.is_complex) 2 else 1);
-    for (0..columns) |_| try w.writeAll("\t---------------");
+    for (0..plot.stride()) |_| try w.writeAll("\t---------------");
     try w.writeByte('\n');
     for (0..plot.result.npoints) |pt| {
         try w.print("{d}", .{pt});
