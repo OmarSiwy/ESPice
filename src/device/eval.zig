@@ -37,7 +37,7 @@ const fma_ok = switch (builtin.target.cpu.arch) {
     .x86_64 => std.Target.x86.featureSetHas(builtin.target.cpu.features, .fma),
     .aarch64, .aarch64_be => true,
     .nvptx64, .amdgcn => true,
-    else => false,
+    else => false, // else: no shipped target beyond these has a fused multiply-add guaranteed
 };
 
 /// A `Dual` family over lanes `0..n` with unknown u on lane u, every value
@@ -1939,7 +1939,7 @@ pub fn DeviceBatch(comptime D: type) type {
                     self.held_initial = self.committed_initial;
                     self.sim.analog_initial = !self.held_initial;
                 },
-                else => {},
+                .query => {},
             }
             return dirty;
         }
@@ -2715,7 +2715,7 @@ fn StateKernel(comptime D: type, comptime block_size: u32) type {
                 const st: *StateT = @addrSpaceCast(&states[id]);
                 switch (D.updateState(Real, model, inst_m, cur, st, sim)) {
                     .ok => {},
-                    else => flag |= 2,
+                    .request_reject_at => flag |= 2,
                 }
             }
             if (flag != 0) _ = @atomicRmw(u32, &flags[0], .Or, flag, .monotonic);

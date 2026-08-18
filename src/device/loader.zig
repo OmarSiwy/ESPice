@@ -176,13 +176,13 @@ fn prepareOne(loaded: []const []const u8, gpa: std.mem.Allocator, io: std.Io, pa
     defer gpa.free(library);
     dir.deleteFile(io, library) catch |err| switch (err) {
         error.FileNotFound => {},
-        else => return err,
+        else => return err, // else: any other unlink failure aborts the build (see above)
     };
     var built = fastvaf.orchestrator.compileRelease(gpa, io, options, device, generation) catch |err| {
         switch (err) {
             error.CompilerGone => std.debug.print("loader: the Zig compiler '{s}' did not start or exited mid-build; runtime .hdl needs zig {s} on PATH, or its path in $ZIG\n", .{ paths.zig, builtin.zig_version_string }),
             error.ProtocolMismatch => std.debug.print("loader: '{s}' is not zig {s}, the compiler this espice was built with; put that version on PATH or in $ZIG\n", .{ paths.zig, builtin.zig_version_string }),
-            else => {},
+            else => {}, // else: the remaining errors name themselves; the caller reports them
         }
         return err;
     };

@@ -620,7 +620,7 @@ fn hashType(h0: u64, comptime T: type) u64 {
         .@"struct" => |si| inline for (si.field_names, si.field_types, si.field_attrs) |name, FT, attrs| {
             if (!attrs.@"comptime" and @sizeOf(FT) > 0) h = mix(h, @offsetOf(T, name));
         },
-        else => {},
+        else => {}, // else: a non-struct type hashes by size and alignment only
     }
     return h;
 }

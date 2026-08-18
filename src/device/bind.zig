@@ -107,7 +107,7 @@ pub fn markGiven(target: anytype, comptime field: []const u8) void {
 fn isScalar(comptime T: type) bool {
     return switch (@typeInfo(T)) {
         .float, .int, .bool => true,
-        else => false,
+        else => false, // else: every other type is a non-scalar field
     };
 }
 
@@ -134,7 +134,7 @@ pub fn castField(comptime T: type, value: f64) !T {
             break :blk @intFromFloat(rounded);
         },
         .bool => value != 0,
-        else => @compileError("unsupported numeric field type"),
+        else => @compileError("unsupported numeric field type"), // else: binding a non-numeric field is a compile error by design
     };
 }
 
