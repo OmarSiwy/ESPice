@@ -221,6 +221,46 @@ Here each matvec is a residual eval, so 30 of them cost 30× more *device* work
 than the single eval `direct` needs — making device eval faster makes JFNK's
 cost structure worse relative to direct, not better.
 
+### The default path pays for this on every solve
+
+Worse than "JFNK is a bad option" — it is the option `converger.run` reaches
+for **first**, on every solve, GPU or not:
+
+```zig
+if (jfnk(sys, ws, x, t, opts, hook)) |r| {
+    if (r.converged) return r;
+} else |_| {}
+return newton(sys, ws, x, t, opts, hook);
+```
+
+A failed attempt is not free. It costs the *full* JFNK price — up to 30 GMRES
+matvecs per Newton step, each a device eval, plus `CpuEnv.precondBuild` doing a
+complete sparse `s.factor` — and then direct Newton runs anyway. Measured with
+`ZPICEY_SOLVER` flipping only that choice:
+
+| fixture | `auto` | `direct` | |
+|---|---|---|---|
+| `ensemble/pvt_corners` (**9 devices**) | 13.97 s | 0.07 s | **199.6×** |
+| `scaling/rc_ladder_1k` | 5.73 s | 0.29 s | 19.8× |
+| `scaling/rc_ladder_10k` | timed out > 400 s | 2.57 s | — |
+| `scaling/rc_chain_500` | 1.81 s | 0.16 s | 11.3× |
+| `ensemble/opamp_mc` | 2.42 s | 0.32 s | 7.6× |
+| `sweep/cmos_inv_sizing` | 0.38 s | 0.08 s | 4.8× |
+| `mosfet/cmos_inverter` | 0.16 s | 5.01 s | **0.03×** |
+
+A nine-device circuit paying 199× for a solver attempt that never succeeds is
+the clearest statement of the problem. But the last row is why **"always
+direct" is not the fix** — JFNK genuinely rescues some circuits, and there the
+ordering is load-bearing. What is wrong is trying it *first, unconditionally*;
+the existing comment justifies JFNK-first for "large sparse systems where LU
+fill-in dominates" and then applies it to everything.
+
+This also retired a wrong diagnosis. These same ladder fixtures first looked
+like a **sparse-LU fill-in catastrophe** — >780× against ngspice and getting
+worse with size. With JFNK skipped the superlinearity disappears entirely and
+the residual gap is a flat ~5–7× across a 20× size range. The lesson is worth
+keeping: measure the *strategy* before blaming the *kernel*.
+
 ## 8. What is not done, and what it would take
 
 `solve_batch` (Monte Carlo, corners, temperature sweep) and `freq_solve_batch`
@@ -234,8 +274,35 @@ component — a batched direct sparse solver on the device: one symbolic
 factorization on the host (the sparsity pattern is identical across lanes),
 then batched numeric factorization and solve, one block per lane. That is a
 substantial piece of work with real risk (partial pivoting, fill-in,
-shared-memory blocking), and it is the single thing standing between this tree
-and the 10–50× that MC and frequency sweeps should give.
+shared-memory blocking).
+
+**Do not build it yet.** The workloads it targets are the worst in the corpus,
+and that is an argument *against* starting here, not for it:
+
+| fixture | zpicey | ngspice | |
+|---|---|---|---|
+| `ensemble/pvt_corners` | 13.862 s | 22.75 ms | 609× slower |
+| `ensemble/opamp_mc` | 2.407 s | 11.74 ms | 205× slower |
+| `sweep/opamp_wl_200` | 1.767 s | 28.31 ms | 62× slower |
+| `sweep/opamp_wl_1000` | 9.052 s | 237.58 ms | 38× slower |
+
+ngspice reaches those numbers on **one CPU core with no batching whatsoever**.
+A 609× deficit against an unbatched single-threaded competitor is not evidence
+that GPU parallelism is missing — it is evidence that the per-solve cost is
+wrong. §7 already accounts for most of it: `pvt_corners` drops from 13.97 s to
+0.07 s by changing nothing but the solver-strategy choice. Batching a 199×
+overhead across lanes would multiply the wrong quantity.
+
+Fix strategy selection first, re-measure, and only then ask whether batching
+still has a case.
+
+Also, before anyone fills `solve_batch`: **`runBatchGpu` in `dc.zig` is not
+implementable as written.** It calls `repack` once per lane inside a loop and
+then calls `solve_batch` once — but `repack` overwrites the single
+device-resident parameter copy, so only the last lane's parameters survive.
+Per-lane parameter storage has to enter the contract before that hook can be
+filled, and for a large sweep that is `n_lanes × sizeof(models + instances)` of
+device memory, which is its own budget question.
 
 A tractable subset exists for `freq_solve_batch`: batched **dense** complex LU,
 one block per frequency, for `n` below ~1000 with a CPU fallback above. It only
