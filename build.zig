@@ -21,6 +21,13 @@ pub fn build(b: *std.Build) void {
     // the .va that produced bad code, instead of surfacing as an error inside a
     // generated file in the build cache with nothing naming the source.
     const check_va = b.option(bool, "check-va", "Type-check each generated device at its .va (default: on)") orelse true;
+    // Mixed precision (docs/gpu-device-eval.md, "Mixed precision"). Comma-listed
+    // model stems get vera's `--jac-f32`, which emits `pub const jac_f32 = true`
+    // and nothing else; `engine.jacFloat` reads it and gives that device a
+    // `Dual` whose DERIVATIVE half is f32. The residual is f64 either way.
+    // Empty by default: this is opt-in per model because only the physics knows
+    // whether its unknowns fit in f32's ~7 digits.
+    const jac_f32_list = b.option([]const u8, "jac-f32", "Comma-separated model stems to build with an f32 Jacobian") orelse "";
 
     const gompute = b.dependency("gompute", .{});
 
@@ -104,6 +111,7 @@ pub fn build(b: *std.Build) void {
         // and rejects the rest rather than pretending to honour them.
         if (m.hdl == .verilog_a) {
             run.addArgs(&.{ "--emit-zig", "--color=never" });
+            if (inCsv(jac_f32_list, m.name)) run.addArg("--jac-f32");
             if (check_va) {
                 run.addArg("--check");
                 run.addArg("--contract");
@@ -378,6 +386,15 @@ const Model = struct {
     /// scheduling hint.
     size: u64,
 };
+
+/// Is `name` one of the comma-separated entries of `csv`? (`-Djac-f32=a,b`.)
+fn inCsv(csv: []const u8, name: []const u8) bool {
+    var it = std.mem.splitScalar(u8, csv, ',');
+    while (it.next()) |e| {
+        if (std.mem.eql(u8, std.mem.trim(u8, e, " "), name)) return true;
+    }
+    return false;
+}
 
 /// Source size past which a model's GPU compilation is `heavy` — chained into
 /// `heavy_lanes` rather than run alongside every other big one.

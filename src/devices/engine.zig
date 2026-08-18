@@ -35,16 +35,27 @@ const dmath = gompute.math;
 
 /// Forward-mode dual satisfying the device scalar interface S: one eval pass
 /// yields residual + all analytic partials. Lane u carries ∂/∂x[u].
-pub fn Dual(comptime N: usize) type {
+///
+/// MIXED PRECISION. `F` is the width of the DERIVATIVE half only; the value
+/// half is always f64 and every boundary of the contract's S protocol
+/// (`con`/`scale`/`addC`/`val`/`ddxAt`) is f64, so a device never sees `F`.
+/// `F = f32` is the inexact-Newton construction: Newton converges to the
+/// accuracy of the RESIDUAL, and an approximate Jacobian costs iteration count
+/// rather than the answer. It exists because sm_89 runs f32 at 69x its f64 rate
+/// (docs/gpu-device-eval.md §1), which is the only route by which a compact
+/// model beats this CPU. `jacFloat` decides per device — the permission is the
+/// device's `jac_f32`, because only the physics knows whether its unknowns fit
+/// in f32's ~7 digits.
+pub fn Dual(comptime N: usize, comptime F: type) type {
     return struct {
         v: f64,
         d: V,
 
-        const V = @Vector(N, f64);
+        const V = @Vector(N, F);
         const Self = @This();
 
         inline fn splat(c: f64) V {
-            return @splat(c);
+            return @splat(@floatCast(c));
         }
         pub fn seed(value: f64, comptime u: usize) Self {
             var d: V = @splat(0);
@@ -54,9 +65,18 @@ pub fn Dual(comptime N: usize) type {
         pub fn con(c: f64) Self {
             return .{ .v = c, .d = splat(0) };
         }
+        /// One of the three places the Jacobian widens back to f64 — the
+        /// solver's `g_vals` is `[]f64` and feeds a sparse LU. The other two are
+        /// `evalRange`'s scatter and its limiting correction.
         pub fn ddxAt(a: Self, col: usize) f64 {
-            const lanes: [N]f64 = a.d;
+            const lanes: [N]F = a.d;
             return lanes[col];
+        }
+        /// The whole derivative, widened. Callers that need f64 partials (the
+        /// scatter, the limiting correction, the dedup cache, noise) go through
+        /// this rather than reading `.d`, so `F` stays private to the arithmetic.
+        pub inline fn grad(a: Self) @Vector(N, f64) {
+            return if (F == f64) a.d else @floatCast(a.d);
         }
         pub fn add(a: Self, b: Self) Self {
             return .{ .v = a.v + b.v, .d = a.d + b.d };
@@ -167,6 +187,14 @@ pub fn Dual(comptime N: usize) type {
 // ===========================================================================
 // Constants + contract re-exports
 // ===========================================================================
+
+/// Width of the derivative half of `Dual` for device D. `pub const jac_f32` is
+/// VerA's `--jac-f32` permission (contract.zig, "THE WIDTHS INSIDE S ARE THE
+/// HOST'S"); a device that does not declare it gets f64, which is what a host
+/// must assume.
+pub fn jacFloat(comptime D: type) type {
+    return if (@hasDecl(D, "jac_f32") and D.jac_f32) f32 else f64;
+}
 
 pub const GROUND: u32 = 0;
 
@@ -559,7 +587,7 @@ fn evalRange(comptime D: type, sink: anytype, first: u32, end: u32, t: f64, limi
     @setFloatMode(if (SinkT.optimized_float) .optimized else .strict);
     const n_u = comptime contract.nU(D);
     const has_limit = comptime @hasDecl(D, "limit");
-    const S = Dual(n_u);
+    const S = Dual(n_u, jacFloat(D));
     const use_lim = if (comptime has_limit) limiting else false;
 
     var id: u32 = first;
@@ -583,11 +611,7 @@ fn evalRange(comptime D: type, sink: anytype, first: u32, end: u32, t: f64, limi
         }
 
         var xv: [n_u]S = undefined;
-        inline for (0..n_u) |u| {
-            var d: @Vector(n_u, f64) = @splat(0);
-            d[u] = 1;
-            xv[u] = .{ .v = lx[u], .d = d };
-        }
+        inline for (0..n_u) |u| xv[u] = S.seed(lx[u], u);
 
         const out = if (comptime @hasDecl(D, "evalFromPrep"))
             D.evalFromPrep(S, xv, sink.prep(id), sink.model(id), sink.inst(id), t)
@@ -598,11 +622,14 @@ fn evalRange(comptime D: type, sink: anytype, first: u32, end: u32, t: f64, limi
             const row = sink.rhsRow(id, ru);
             var val = out[ru].v;
             if (comptime has_limit) {
-                if (use_lim) val += @reduce(.Add, out[ru].d * corr);
+                // Widened FIRST: this term lands on the residual, which stays
+                // f64 whatever the Jacobian is carried in.
+                if (use_lim) val += @reduce(.Add, out[ru].grad() * corr);
             }
             sink.scatterRes(row, val);
             if (comptime !SinkT.skip_g) {
-                inline for (0..n_u) |cu| sink.scatterJac(id, ru, cu, row, out[ru].d[cu]);
+                const g = out[ru].grad();
+                inline for (0..n_u) |cu| sink.scatterJac(id, ru, cu, row, g[cu]);
             }
         }
         if (comptime SinkT.dedup) sink.store(id, &out);
@@ -617,11 +644,12 @@ fn evalRange(comptime D: type, sink: anytype, first: u32, end: u32, t: f64, limi
                     const row = sink.rhsRow(id, ru);
                     var qv = qo[ru].v;
                     if (comptime has_limit) {
-                        if (use_lim) qv += @reduce(.Add, qo[ru].d * corr);
+                        if (use_lim) qv += @reduce(.Add, qo[ru].grad() * corr);
                     }
                     sink.scatterQ(row, qv);
                     if (comptime !SinkT.skip_c) {
-                        inline for (0..n_u) |cu| sink.scatterQJac(id, ru, cu, row, qo[ru].d[cu]);
+                        const gq = qo[ru].grad();
+                        inline for (0..n_u) |cu| sink.scatterQJac(id, ru, cu, row, gq[cu]);
                     }
                 }
                 if (comptime SinkT.dedup) sink.storeQ(id, &qo);
@@ -856,7 +884,7 @@ fn canDedupQ(comptime D: type) bool {
 
 pub fn DeviceBatch(comptime D: type) type {
     const n_u = comptime uCount(D);
-    const S = Dual(n_u);
+    const S = Dual(n_u, jacFloat(D));
     const has_state = @hasDecl(D, "State");
     const has_hist = hasHistoryDecl(D);
     const has_prep_cache = @hasDecl(D, "PrepCache");
@@ -1069,8 +1097,7 @@ pub fn DeviceBatch(comptime D: type) type {
                     s.b.eval_cache_hash[s.cur_group] = s.cur_hash;
                     inline for (0..n_u) |ru| {
                         s.b.eval_cache_rhs[s.cur_group][ru] = out[ru].v;
-                        inline for (0..n_u) |cu|
-                            s.b.eval_cache_jac[s.cur_group][ru][cu] = out[ru].d[cu];
+                        s.b.eval_cache_jac[s.cur_group][ru] = out[ru].grad();
                     }
                 }
                 pub inline fn storeQ(s: *Sk, id: u32, qo: anytype) void {
@@ -1079,8 +1106,7 @@ pub fn DeviceBatch(comptime D: type) type {
                     if (!s.dedup_on) return;
                     inline for (0..n_u) |ru| {
                         s.b.eval_cache_q_rhs[s.cur_group][ru] = qo[ru].v;
-                        inline for (0..n_u) |cu|
-                            s.b.eval_cache_q_jac[s.cur_group][ru][cu] = qo[ru].d[cu];
+                        s.b.eval_cache_q_jac[s.cur_group][ru] = qo[ru].grad();
                     }
                 }
             };
@@ -1351,16 +1377,12 @@ pub fn DeviceBatch(comptime D: type) type {
             const self: *Self = @ptrCast(@alignCast(ctx));
             for (0..self.count) |id| {
                 var xd: [n_u]S = undefined;
-                inline for (0..n_u) |u| {
-                    var d: @Vector(n_u, f64) = @splat(0);
-                    d[u] = 1;
-                    xd[u] = .{ .v = x[self.gath[id * n_u + u]], .d = d };
-                }
+                inline for (0..n_u) |u| xd[u] = S.seed(x[self.gath[id * n_u + u]], u);
                 const out = D.eval(S, xd, &self.models[id], &self.instances[id], 0);
                 inline for (D.noise_gens) |gen| {
                     switch (gen.kind) {
                         .thermal => {
-                            const g = @abs(out[gen.row].d[gen.col]);
+                            const g = @abs(out[gen.row].ddxAt(gen.col));
                             if (g > 0) try list.append(gpa, .{
                                 .node_p = self.gath[id * n_u + gen.row],
                                 .node_n = self.gath[id * n_u + gen.col],
@@ -2216,6 +2238,32 @@ pub const LoadedDevice = struct {
         self.* = undefined;
     }
 };
+
+test "Dual: an f32 Jacobian leaves the residual bit-identical" {
+    // The one invariant the whole mixed-precision construction rests on
+    // (docs/gpu-device-eval.md §9): `F` is the width of the DERIVATIVE, and the
+    // residual is f64 on both instantiations. Not a tolerance — every operation
+    // on `.v` is the same f64 arithmetic, so the values must be EQUAL. If this
+    // ever needs a tolerance, the split has leaked into the residual.
+    const core = struct {
+        // The diode's own core, which is what the prototype ships:
+        // is·(exp(v/vt) − 1) + gmin·v.
+        fn f(comptime S: type, bias: f64) S {
+            const x = [2]S{ S.seed(bias, 0), S.seed(0, 1) };
+            const v = x[0].sub(x[1]);
+            return S.con(1e-14).mul(v.div(S.con(0.025851999786450736)).exp().addC(-1.0))
+                .add(v.scale(1e-12));
+        }
+    }.f;
+    for (0..17) |i| {
+        const bias = @as(f64, @floatFromInt(i)) * 0.05;
+        const a = core(Dual(2, f64), bias);
+        const b = core(Dual(2, f32), bias);
+        try std.testing.expectEqual(a.val(), b.val());
+        // …and the Jacobian degrades to f32 precision, and only to that.
+        for (0..2) |c| try std.testing.expectApproxEqRel(a.ddxAt(c), b.ddxAt(c), 1e-6);
+    }
+}
 
 test "dyn vtable: blob init, param set by name, proto add" {
     const R = struct {
