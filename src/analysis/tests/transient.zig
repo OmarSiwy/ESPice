@@ -1067,9 +1067,109 @@ const TranNoiseTests = struct {
     }
 };
 
+/// Integrator order by a manufactured solution, through `Session`: an RC
+/// discharge from v(0) = 1 with the closed form exp(-t/τ). The LTE bound is
+/// switched off (trtol huge), so the grid is the start-up ramp from h/100
+/// doubling to dt_max = h, and every grid is the same grid scaled by h. The
+/// max error over the accepted points then scales as h^p; the observed p
+/// over h = τ/50, τ/100, τ/200 must sit within 0.05 of the method's order.
+/// The next error term pulls p low by O(h/τ): measured 0.984 and 0.992 for
+/// backward Euler, 1.986 and 1.993 for trapezoidal and Gear-2, so the band
+/// is three times the worst gap and a wrong order (off by 1) cannot pass.
+const OrderTests = struct {
+    const std = @import("std");
+    const t = std.testing;
+    const core = @import("core");
+    const requests = core.query;
+    const Session = @import("../session.zig").Session;
+    const Builder = @import("builder").Builder;
+    const Library = @import("device").Library;
+    const models = @import("models");
+    const GROUND = @import("../types.zig").GROUND;
+
+    const tau: f64 = 1e-3;
+    const t_stop = 2 * tau;
+
+    /// Max |v - exp(-t/τ)| over the accepted points of one run at step `h`.
+    fn maxError(lib: *const Library, method: requests.Method, h: f64) !f64 {
+        var b = try Builder.init(t.allocator, lib);
+        const out = try b.addNode();
+        try b.addDevice(models.resistor, "", .{ .r = 1e3 }, .{}, .{ out, GROUND });
+        try b.addDevice(models.capacitor, "", .{ .c = 1e-6 }, .{}, .{ out, GROUND });
+        var prepared = try b.compile();
+        defer prepared.deinit();
+        const deck: core.Deck = .{
+            .probes = &.{out},
+            .probe_labels = &.{"v(out)"},
+            .source_node = 0,
+            .source_branch = 0,
+            .output_node = 0,
+            .ac_drive = &.{},
+            .title = "",
+            .n_devices = 2,
+            .ic = &.{.{ .node = out, .value = 1 }},
+            .deck_tol = .{},
+            .deck_temp = null,
+            .deck_method = null,
+            .queries = &.{},
+            .bindings = .{ .v_names = &.{}, .i_names = &.{}, .v_branches = &.{}, .v_pos = &.{}, .v_neg = &.{}, .i_pos = &.{}, .i_neg = &.{}, .v_distof1 = &.{}, .ports = &.{} },
+            .cards = &.{},
+            .ac_overrides = &.{},
+        };
+        var s = Session.init(t.allocator, t.io, &prepared, &deck, .{});
+        defer s.deinit();
+        const query: requests.Query = .{ .tran = .{
+            .t_stop = t_stop,
+            .dt_init = h,
+            .dt_max = h,
+            .method = method,
+            .uic = true,
+            .tol = .{ .trtol = 1e30 },
+        } };
+        var ids: [1]requests.QueryId = undefined;
+        _ = try s.append(&.{query}, &ids);
+        var advances: u32 = 0;
+        while (!(try s.info(ids[0])).status.terminal()) : (advances += 1) {
+            try t.expect(advances < 1_000_000);
+            _ = try s.advance(ids[0]);
+        }
+        const res = try s.result(ids[0]);
+        try t.expectEqual(@as(usize, 2), res.varnames.len);
+        // h/100 doubling to h, then h steps: about t_stop / h points.
+        try t.expect(res.npoints >= @as(usize, @intFromFloat(t_stop / h)));
+        var worst: f64 = 0;
+        for (0..res.npoints) |i| {
+            const time = res.data[2 * i];
+            worst = @max(worst, @abs(res.data[2 * i + 1] - @exp(-time / tau)));
+        }
+        try t.expect(worst > 0);
+        return worst;
+    }
+
+    test "integrators converge at their theoretical order on an RC discharge" {
+        var lib = try Library.init(t.allocator);
+        defer lib.deinit();
+        const cases = [_]struct { requests.Method, f64 }{
+            .{ .backward_euler, 1 },
+            .{ .trapezoidal, 2 },
+            .{ .gear_2, 2 },
+        };
+        for (cases) |case| {
+            const method, const order = case;
+            var errs: [3]f64 = undefined;
+            for (&errs, 0..) |*e, k| e.* = try maxError(&lib, method, t_stop / 100 / std.math.pow(f64, 2, @floatFromInt(k)));
+            for (0..2) |k| {
+                const observed = std.math.log2(errs[k] / errs[k + 1]);
+                try t.expect(@abs(observed - order) <= 0.05);
+            }
+        }
+    }
+};
+
 test {
     _ = EnvelopeTests;
     _ = MatexTests;
+    _ = OrderTests;
     _ = TranTests;
     _ = TranNoiseTests;
 }

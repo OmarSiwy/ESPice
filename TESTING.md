@@ -35,7 +35,7 @@ Status: **have** (exists, with file), **gap** (plan block that adds it).
 | Wrong device derivative | central finite difference | certificate | merge | `device/tests/eval.zig:857` (sampled models) | partial: P4 extends to every model |
 | Lane kernel differs from scalar | `W == 1` instantiation, bitwise | differential | merge | `solver/tests.zig` LaneLu, `device/tests/eval.zig:105` Dual | have |
 | stdpp pipeline differs from scalar | the same pipeline on `.byRef()`, lengths 0…3×lanes, misalignments, NaN/inf | differential, exhaustive small domain | merge | `core/numerics.zig` tests | have |
-| Integrator order wrong | manufactured solution, three step sizes, observed order (BE 1, trap 2, gear k) | convergence order | merge | `analysis/tests/transient.zig` | gap: P4 |
+| Integrator order wrong | RC discharge vs exp(−t/τ) through `Session`, LTE off, h = τ/50, τ/100, τ/200: observed order within 0.05 of BE 1, trap 2, Gear-2 2 | convergence order | merge | `analysis/tests/transient.zig` `OrderTests` | have |
 | Threading changes results | `solver_threads = 1` and `device_threads = 1` vs N, byte-identical output | determinism | merge | `analysis/tests/circuit.zig:152` (device threads only) | partial: P4 |
 | Run-to-run drift | run twice, byte-compare the raw file | determinism | merge | new | gap: P4 |
 | Node order changes results | renumber nodes / permute device order → same named results | metamorphic | nightly | new | gap: P4 |
