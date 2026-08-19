@@ -141,6 +141,12 @@ pub const Planes = struct {
     q_vec: []f64,
 };
 
+comptime {
+    // Every eval call receives a `*const Planes`; nothing beyond the four
+    // plane slices may ride along on that path.
+    std.debug.assert(@sizeOf(Planes) == 4 * @sizeOf([]f64));
+}
+
 /// One device type's frozen batch, made by `Proto.finalize`. `eval` and
 /// `eval_newton` stamp instances `[first, last)` into the given planes, so the
 /// same entry serves the serial path and a ParEval lane; `eval_newton` skips
@@ -165,6 +171,13 @@ pub const Batch = struct {
     /// `Library.digital` at the freeze.
     digital: bool = false,
 };
+
+comptime {
+    // Every Newton iteration walks the circuit's `[]Batch` and calls
+    // `eval` through each; one cache line per batch (59 bytes of fields on
+    // a 64-bit target, 64 with padding) keeps that walk one line per type.
+    std.debug.assert(@sizeOf(Batch) <= 64);
+}
 
 /// Where `Hooks.status` found a latched status: the instance index within
 /// the batch and the length of the message it wrote.
