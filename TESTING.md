@@ -31,7 +31,7 @@ Status: **have** (exists, with file), **gap** (plan block that adds it).
 | Wrong result, simple circuits | closed form (RC step, divider, RLC resonance) | spec example | merge | `analytic` fixtures in the corpus | have |
 | Fixture verdict silently changes | the name list `tests/VERDICTS.tsv` | ratchet | merge | `tests/test_correctness.zig` (full CPU run) | have |
 | Converged OP is wrong | KCL residual of the accepted point under a plain device evaluation | certificate | merge | `analysis/tests/` | gap: P4 (#53 is the known trip) |
-| Linear solve is wrong | scaled residual ‖Ax − b‖ / (‖A‖‖x‖ε) ≤ 30 on generated matrices of controlled condition | certificate | merge | `solver/tests.zig` | gap: P4 (dense-reference checks exist) |
+| Linear solve is wrong | scaled residual ‖Ax − b‖∞ / (‖A‖∞‖x‖∞ n ε) ≤ 30, `solve` and `solveT`, on generated matrices of exact κ₂ (Givens of a geometric Σ, row-permuted, badly scaled) through `direct.Solver`: sparse LU and Thomas to κ 1e15, BBD to block κ 1e4 | certificate | merge | `solver/residual_tests.zig` | have (BBD past block κ 1e4: #136) |
 | Wrong device derivative | central finite difference | certificate | merge | `device/tests/eval.zig:857` (sampled models) | partial: P4 extends to every model |
 | Lane kernel differs from scalar | `W == 1` instantiation, bitwise | differential | merge | `solver/tests.zig` LaneLu, `device/tests/eval.zig:105` Dual | have |
 | stdpp pipeline differs from scalar | the same pipeline on `.byRef()`, lengths 0…3×lanes, misalignments, NaN/inf | differential, exhaustive small domain | merge | `core/numerics.zig` tests | have |

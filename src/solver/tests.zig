@@ -3358,4 +3358,5 @@ test {
     _ = OrderTests;
     _ = SparseTests;
     _ = TridiagTests;
+    _ = @import("residual_tests.zig");
 }
