@@ -489,11 +489,6 @@ fn tapeBounds(slots: []const u32, rhs_idx: []const u32, trash_slot: u32, trash_r
     return .{ slot_lo, slot_hi, row_lo, row_hi };
 }
 
-/// Fills the gather, residual-row and Jacobian-slot tapes from the flat node
-/// list (`[id * n_u + u]`). Ground rows go to row `pv.n`. The slot tape holds
-/// only the entries `pat` sets, row-major, `slots.len / count` per instance
-/// (`SlotMap`); a ground one goes to `pv.trash_slot`. Asserts every other
-/// (row, col) is in the pattern.
 /// The host's mask over `n` unknowns or lanes: u64, wider past 64 (#117).
 fn Mask(comptime n: usize) type {
     return @Int(.unsigned, @max(64, n));
@@ -518,6 +513,12 @@ inline fn has(m: anytype, u: usize) bool {
     return (m >> @intCast(u)) & 1 != 0;
 }
 
+/// Fills the gather, residual-row and Jacobian-slot tapes from the flat node
+/// list (`[id * n_u + u]`). Ground rows go to row `pv.n`. The slot tape holds
+/// only the entries `pat` sets, row-major, `slots.len / count` per instance
+/// (`SlotMap`); a ground one goes to `pv.trash_slot`. Asserts every other
+/// (row, col) is in the pattern, that `pat` has `n_u` rows, and that
+/// `gath` and `rhs_idx` match `nodes` and `slots` fills exactly.
 fn buildTapes(comptime M: type, nodes: []const u32, n_u: usize, pat: []const M, pv: PatternView, gath: []u32, rhs_idx: []u32, slots: []u32) void {
     std.debug.assert(n_u > 0);
     std.debug.assert(pat.len == n_u);
@@ -1127,7 +1128,8 @@ pub fn ProtoStore(comptime D: type) type {
         /// `OutOfMemory` nothing of `gpa` is left allocated, but the staging
         /// columns already moved are gone, so the store is only fit for
         /// `destroy`. Asserts that `pv` holds every non-ground (row, col)
-        /// the device's structural Jacobian can fill.
+        /// the device's structural Jacobian can fill and that `pv.col_ptr`
+        /// has `pv.n + 1` entries.
         pub fn finalize(ctx: *anyopaque, gpa: std.mem.Allocator, pv: PatternView) ir.DeviceResult(Batch) {
             return ir.DeviceResult(Batch).fromLocal(finalizeLocal(ctx, gpa, pv));
         }

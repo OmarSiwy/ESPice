@@ -98,8 +98,10 @@ pub fn builtin(comptime name: []const u8) DeviceType {
 }
 
 /// The vtable of type `t`, valid for the life of the process.
-/// Asserts that `t` is registered.
+/// Asserts that `t` is registered (`.unset` never is).
 pub fn vtable(self: *const Library, t: DeviceType) *const abi.DeviceVtable {
+    std.debug.assert(t != .unset);
+    std.debug.assert(@backingInt(t) < self.vtables.items.len);
     return self.vtables.items[@backingInt(t)];
 }
 

@@ -111,8 +111,8 @@ pub const NoiseSource = struct {
     }
 
     /// Returns the end of the group starting at `srcs[lead]`: rows
-    /// `[lead, end)` are one correlated generator. Asserts that `lead` starts
-    /// a group.
+    /// `[lead, end)` are one correlated generator. Asserts that `lead` is in
+    /// range and starts a group.
     pub fn groupEnd(srcs: []const NoiseSource, lead: usize) usize {
         std.debug.assert(lead < srcs.len);
         std.debug.assert(srcs[lead].group == lead or srcs[lead].group == std.math.maxInt(u32));
@@ -144,7 +144,7 @@ pub const Planes = struct {
 /// One device type's frozen batch, made by `Proto.finalize`. `eval` and
 /// `eval_newton` stamp instances `[first, last)` into the given planes, so the
 /// same entry serves the serial path and a ParEval lane; `eval_newton` skips
-/// a constant Jacobian half.
+/// a constant Jacobian half. Both assert `first <= last <= count`.
 pub const Batch = struct {
     // hot
     ctx: *anyopaque,
@@ -219,7 +219,8 @@ pub const Hooks = struct {
     /// Syncs the host limiting flag after GPU state is downloaded.
     set_limit_active: ?*const fn (*anyopaque, bool) void = null,
     /// `{slot_lo, slot_hi, row_lo, row_hi}` touched by instances
-    /// `[first, last)`, the trash slot and row excluded.
+    /// `[first, last)`, the trash slot and row excluded. Asserts
+    /// `first <= last <= count`.
     scatter_bounds: *const fn (*anyopaque, first: u32, last: u32, trash_slot: u32, trash_row: u32) [4]u32,
     apply_limits: ?*const fn (*anyopaque, []f64, []const f64) bool = null,
     clear_limits: ?*const fn (*anyopaque) void = null,
