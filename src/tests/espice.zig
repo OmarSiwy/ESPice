@@ -836,3 +836,58 @@ test ".step over W on a binned model runs a point whose bin moves on its own cir
     try t.expectApproxEqRel(try opValue(try std.fmt.bufPrint(&buf, body, .{"1.05u"}), "i(v1)"), try column(try p.result(try find(p, .op)), "i(v1)"), 1e-12);
     try t.expectApproxEqRel(try opValue(try std.fmt.bufPrint(&buf, body, .{"2u"}), "i(v1)"), try column(runs[0], "i(v1)"), 1e-12);
 }
+
+/// Every completed result of `path` at the given thread counts, its data
+/// concatenated as bits. Caller frees it.
+fn runThreaded(path: []const u8, device_threads: u32, solver_threads: u8) ![]const u64 {
+    const p = try api.Problem.init(t.allocator, t.io, .{
+        .source = .{ .file = path },
+        .backend = .{ .device_threads = device_threads, .solver_threads = solver_threads },
+    });
+    defer p.deinit();
+    // device_threads > 1 always builds a ParEval; with four instances per
+    // lane, every lane stamps.
+    try t.expect(p.device_count() >= 4 * device_threads);
+    try p.run_all();
+    var bits: std.ArrayList(u64) = .empty;
+    errdefer bits.deinit(t.allocator);
+    for (0..p.query_count()) |i| {
+        const r = try p.result(@fromBackingInt(@intCast(i)));
+        try t.expect(r.npoints > 0);
+        try bits.appendSlice(t.allocator, @ptrCast(r.data));
+    }
+    try t.expect(bits.items.len > 0);
+    return bits.toOwnedSlice(t.allocator);
+}
+
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+
+test "same deck, same bytes: run twice, any solver_threads, any fixed device_threads" {
+    // MOS transients and an AC sweep, 200 to 512 devices. ESPICE_LU_PAR=1
+    // forces the multicore refactor past its cost model; ESPICE_LU_PAR_STATS
+    // shows it admitted on all three. device_threads 1 against N is not
+    // byte-identical (ParEval regroups the stamp sums, up to 24554 ulp
+    // here, and a different point count on vacask_ring): #137.
+    const decks = [_][]const u8{
+        "tests/fixtures/stress/scaling_parallel_inverters_100.sp",
+        "tests/fixtures/stress/scaling_inverter_chain_256.sp",
+        "tests/fixtures/stress/sweep_opamp_wl_200.sp",
+    };
+    try t.expectEqual(@as(c_int, 0), setenv("ESPICE_LU_PAR", "1", 1));
+    defer _ = unsetenv("ESPICE_LU_PAR");
+    for (decks) |deck_path| {
+        const serial = try runThreaded(deck_path, 1, 1);
+        defer t.allocator.free(serial);
+        for ([_]u8{ 1, 2, 4 }) |solver_threads| {
+            const again = try runThreaded(deck_path, 1, solver_threads);
+            defer t.allocator.free(again);
+            try t.expectEqualSlices(u64, serial, again);
+        }
+        const lanes = try runThreaded(deck_path, 4, 1);
+        defer t.allocator.free(lanes);
+        const lanes_again = try runThreaded(deck_path, 4, 1);
+        defer t.allocator.free(lanes_again);
+        try t.expectEqualSlices(u64, lanes, lanes_again);
+    }
+}

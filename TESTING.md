@@ -36,8 +36,8 @@ Status: **have** (exists, with file), **gap** (plan block that adds it).
 | Lane kernel differs from scalar | `W == 1` instantiation, bitwise | differential | merge | `solver/tests.zig` LaneLu, `device/tests/eval.zig:105` Dual | have |
 | stdpp pipeline differs from scalar | the same pipeline on `.byRef()`, lengths 0…3×lanes, misalignments, NaN/inf | differential, exhaustive small domain | merge | `core/numerics.zig` tests | have |
 | Integrator order wrong | RC discharge vs exp(−t/τ) through `Session`, LTE off, h = τ/50, τ/100, τ/200: observed order within 0.05 of BE 1, trap 2, Gear-2 2 | convergence order | merge | `analysis/tests/transient.zig` `OrderTests` | have |
-| Threading changes results | `solver_threads = 1` and `device_threads = 1` vs N, byte-identical output | determinism | merge | `analysis/tests/circuit.zig:152` (device threads only) | partial: P4 |
-| Run-to-run drift | run twice, byte-compare the raw file | determinism | merge | new | gap: P4 |
+| Threading changes results | `solver_threads` 1, 2, 4 (multicore refactor forced) byte-identical; `device_threads` 4 twice byte-identical; 1 vs N within 1e-12 per stamp | determinism | merge | `tests/espice.zig` (three stress decks), `analysis/tests/circuit.zig:152` (stamps) | partial: `device_threads` 1 vs N differs, #137 |
+| Run-to-run drift | run twice through `Problem`, every result's data bitwise | determinism | merge | `tests/espice.zig` "same deck, same bytes" | have |
 | Node order changes results | renumber nodes / permute device order → same named results | metamorphic | nightly | new | gap: P4 |
 | Parser crash, hang, leak, undeclared error | assertions + declared error set; structure-aware generator | fuzz (Smith) with corpus replay, seeded generator run | merge (replay), nightly (long: `zig build test-frontend --fuzz=<N>`) | `src/frontend/tests/fuzz.zig`, `src/frontend/tests/fuzz_corpus/` | have (`netlist.parse` only; `prepare`/`build` not fuzzed) |
 | Invalid deck accepted or mis-diagnosed | the input contract per deck | example | merge | `tests/fixtures/invalid/` | have |
