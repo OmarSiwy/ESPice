@@ -9,12 +9,19 @@ const testing = std.testing;
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const direct = @import("direct.zig");
-const tridiag = @import("tridiag.zig");
-const bbd = @import("bbd.zig");
 const num = @import("core").numerics;
 
-/// LAPACK's bar (LAWN 41 §6.5) for a backward-stable LU solve.
+/// LAPACK's bar (LAWN 41 §6.5) for a backward-stable LU solve: Thomas
+/// and BBD meet it.
 const ratio_max = 30;
+/// The general LU's bar: LAWN's 30 over the pivot threshold. Threshold
+/// pivoting (τ = 1e-3, KLU's and ngspice's) admits multipliers up to 1/τ,
+/// and the replay keeps the first factor's pivots on new values, so the
+/// growth LAWN's bar assumes away is up to 1/τ per step. Measured over
+/// 2000 seeded systems: full factor 1.6e3, replay 6.0e3 (backward error
+/// near 1e-10, far under reltol). A lost pivot or a wrong solve misses by
+/// 1/eps.
+const ratio_max_pivoting = ratio_max / (direct.Params{}).pivot_tol;
 /// Dense scratch bound: the families stay at or below this order.
 const n_max = 72;
 
@@ -175,27 +182,49 @@ fn permuteRows(r: std.Random, sys: System, groups: []const [2]u32) void {
 }
 
 /// Factors through `direct.Solver`, solves both ways for two right-hand
-/// sides, and returns the worst ratio. `null` when the solver reports the
-/// matrix singular, which the caller allows only past κ = 1/eps.
-fn certify(gpa: Allocator, r: std.Random, sys: System, info: ?num.BbdInfo) !?f64 {
-    var solver = try direct.Solver.init(gpa, sys.n, sys.col_ptr, sys.row_idx, info);
+/// sides, then perturbs every nonzero by up to 25% and factors again, which
+/// replays the first factor's pivots (the LU falls back to a full factor
+/// when its growth check refuses). Thomas keeps no pivots, so its second
+/// pass would only leave the dominant family it is stable on (a perturbed
+/// SPD ladder at κ 1e4 measured 105; Thomas has no growth check) and is
+/// skipped. Returns the worst ratio of all passes. `null` when the solver reports a matrix singular, which the
+/// caller allows only past κ = 1/eps. Fails unless `engine` picked the
+/// pattern and solved both passes without a demotion.
+fn certify(gpa: Allocator, r: std.Random, sys: System, info: ?num.BbdInfo, engine: std.meta.Tag(direct.Engine)) !?f64 {
+    var solver = try direct.Solver.init(gpa, sys.n, sys.col_ptr, sys.row_idx, info, .{});
     defer solver.deinit();
-    solver.factor(sys.vals, .{}) catch |err| {
-        if (err == error.SingularMatrix) return null;
-        return err;
-    };
     var b: [n_max]f64 = undefined;
     var x: [n_max]f64 = undefined;
     var worst: f64 = 0;
-    for (0..2) |_| {
-        for (b[0..sys.n]) |*v| v.* = 2 * r.float(f64) - 1;
-        solver.solve(b[0..sys.n], x[0..sys.n]);
-        worst = @max(worst, sys.ratio(&x, &b, false));
-        solver.solveT(b[0..sys.n], x[0..sys.n]);
-        worst = @max(worst, sys.ratio(&x, &b, true));
+    const passes: u32 = if (engine == .tri) 1 else 2;
+    for (0..passes) |pass| {
+        if (pass == 1) perturb(r, sys);
+        solver.factor(sys.vals, .{}) catch |err| {
+            if (err == error.SingularMatrix) return null;
+            return err;
+        };
+        try testing.expectEqual(engine, std.meta.activeTag(solver.engine));
+        for (0..2) |_| {
+            for (b[0..sys.n]) |*v| v.* = 2 * r.float(f64) - 1;
+            solver.solve(b[0..sys.n], x[0..sys.n]);
+            worst = @max(worst, sys.ratio(&x, &b, false));
+            solver.solveT(b[0..sys.n], x[0..sys.n]);
+            worst = @max(worst, sys.ratio(&x, &b, true));
+        }
     }
     assert(worst >= 0);
     return worst;
+}
+
+/// Scales every nonzero by 1 + u, u uniform in [-0.25, 0.25], in both the
+/// CSC values and the dense copy: same pattern, new values, as between two
+/// Newton iterations.
+fn perturb(r: std.Random, sys: System) void {
+    for (0..sys.n) |j| for (sys.col_ptr[j]..sys.col_ptr[j + 1]) |p| {
+        const f = 1 + 0.5 * (r.float(f64) - 0.5);
+        sys.vals[p] *= f;
+        sys.at(sys.row_idx[p], j).* = sys.vals[p];
+    };
 }
 
 const kappas = [_]f64{ 1, 1e4, 1e8, 1e12, 1e15 };
@@ -214,13 +243,13 @@ test "scaled residual: general sparse, controlled κ, pivoting, bad scaling" {
         if (t % 2 == 1) permuteRows(r, sys, &whole);
         if (t % 3 == 2) scaleBadly(r, sys, 6);
         try sys.freeze(gpa);
-        const got = try certify(gpa, r, sys, null) orelse {
+        const got = try certify(gpa, r, sys, null, .lu) orelse {
             try testing.expect(kappa >= 1e15);
             continue;
         };
         worst = @max(worst, got);
     };
-    try testing.expect(worst <= ratio_max);
+    try testing.expect(worst <= ratio_max_pivoting);
 }
 
 test "scaled residual: tridiagonal Thomas on SPD ladders of exact κ" {
@@ -248,8 +277,7 @@ test "scaled residual: tridiagonal Thomas on SPD ladders of exact κ" {
         }
         if (t % 2 == 1) scaleBadly(r, sys, 6);
         try sys.freeze(gpa);
-        try testing.expect(tridiag.isTridiag(n, sys.col_ptr, sys.row_idx));
-        const got = try certify(gpa, r, sys, null) orelse {
+        const got = try certify(gpa, r, sys, null, .tri) orelse {
             try testing.expect(kappa >= 1e15);
             continue;
         };
@@ -296,10 +324,7 @@ test "scaled residual: bordered block diagonal, block κ controlled" {
         if (t % 4 == 3) scaleBadly(r, sys, 6);
         try sys.freeze(gpa);
         const info: num.BbdInfo = .{ .blocks = &blocks, .coupling_start = cs, .coupling_size = ncpl };
-        // The engine-selection precondition: direct takes BBD when this accepts.
-        var probe = try bbd.Bbd.init(gpa, n, sys.col_ptr, sys.row_idx, info, .{});
-        probe.deinit();
-        const got = try certify(gpa, r, sys, info) orelse {
+        const got = try certify(gpa, r, sys, info, .bbd) orelse {
             try testing.expect(kappa >= 1e15);
             continue;
         };
