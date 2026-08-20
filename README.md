@@ -256,6 +256,38 @@ The 8 differences against VACASK are every PSP103 deck where both finished, and
 to say which side is right. ESPice timed out on `logic_psp103_10k` and
 `sram_psp103_10k`; `logic_bsim4_10k` finished only in ESPice.
 
+### On a GPU built for FP64 (projected)
+
+The charts above are the CPU backend. The GPU backend has only been
+measured on an RTX 4060 Laptop GPU, which, like every consumer card, runs double precision at 1/64 of its single-precision
+rate, about 0.23 TFLOPS. SPICE needs FP64, so on that card one PSP103
+evaluation takes 250 ns against 63 ns on the 24-thread CPU, and the GPU
+never catches up however large the circuit. Datacenter cards run FP64 at
+half rate or better. Scaling the measured kernel by each card's FP64
+throughput and memory bandwidth gives:
+
+| GPU | FP64 TFLOPS | ns per device | device eval vs the 24-thread CPU | faster than the CPU from |
+|---|---:|---:|---:|---:|
+| RTX 4060 Laptop (measured) | 0.23 | 250 | 0.25x | never |
+| V100 | 7.8 | 7.4 | 8.5x | ~900 devices |
+| A100 | 9.7 | 5.9 | 11x | ~900 devices |
+| H100 SXM | 34 | 1.7 | 35x | ~800 devices |
+| MI300X | 82 | 0.7 to 1.2 | 54 to 89x | ~800 devices |
+
+At a million devices that is 6 ms of device evaluation per Newton iteration
+on an A100 and 1.9 ms on an H100, against 63 ms on the CPU. Above about a
+thousand devices the GPU's fixed per-iteration cost is paid back, and it
+stays ahead at every larger size.
+
+These are projections, not measurements: nobody has run ESPice on these
+cards yet. They hold only while the matrix is assembled on the GPU (sending
+every stamp across PCIe to a host LU cuts the gain to 1.5x to 7x), and they
+cover device evaluation, not the sparse LU, which takes a larger share of a
+post-layout run as parasitic nodes grow. Whether the whole simulation wins
+depends on how the LU scales on the GPU, and that needs the hardware.
+The model, its assumptions and a test protocol for an A100-class card are
+in [dev/research/gpu-ensemble.md](dev/research/gpu-ensemble.md) (#99).
+
 ### What is not claimed
 
 The bench is a differential comparison against two simulators, and it covers
