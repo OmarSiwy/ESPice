@@ -29,6 +29,7 @@ test {
     _ = @import("tests/sweep.zig");
     _ = @import("tests/transient.zig");
     _ = @import("tests/integration.zig");
+    _ = @import("tests/jacobian.zig");
     _ = @import("post/mosra.zig");
     _ = @import("par_eval.zig");
     _ = @import("session.zig");
