@@ -45,7 +45,7 @@ def spec_lines(path):
 
 def params(text):
     """name=value pairs from a parameter file or a modelParameters line."""
-    text = re.sub(r'[()+]', ' ', text)
+    text = re.sub(r'(?m)^\s*\+|[()]', ' ', text)  # continuation `+`, never an exponent's
     return re.findall(r'([A-Za-z_]\w*)\s*=\s*(\S+)', text)
 
 
@@ -222,7 +222,7 @@ def gf180(testing, out):
 def selftest():
     assert sweep('0.3,1.05,0.02')[-2:] == ['1.04', '1.05'] and len(sweep('1.0,-0.7,-0.05')) == 35
     assert pinval('V(coll)=0.5,1.0') == ('coll', '0.5,1.0')
-    assert params('+ c10 = ( 9.074e-030 )\nTR=27.0') == [('c10', '9.074e-030'), ('TR', '27.0')]
+    assert params('+ c10 = ( 9.074e-030 )\nTR=27.0 NSUBO=3.0E+23') == [('c10', '9.074e-030'), ('TR', '27.0'), ('NSUBO', '3.0E+23')]
     assert blocks(['a', 'vgs =1', 'vgs =2', '', 'x', 'vgs =1'], 'vgs =') == [1, 5]
     print('ok')
 
