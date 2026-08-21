@@ -256,6 +256,54 @@ The 8 differences against VACASK are every PSP103 deck where both finished, and
 to say which side is right. ESPice timed out on `logic_psp103_10k` and
 `sram_psp103_10k`; `logic_bsim4_10k` finished only in ESPice.
 
+### On a GPU built for FP64 (projected)
+
+The charts above are the CPU backend. The GPU backend has only been
+measured on an RTX 4060 Laptop GPU, a consumer card that runs double
+precision at 1/64 of its single-precision rate. Even so, per Newton
+iteration of PSP103 device evaluation (fit T(N) = a + b·N from 30 to 1M
+transistors):
+
+| backend | fixed cost per iteration | per transistor |
+|---|---:|---:|
+| CPU, best thread count | 18 µs | 659 ns (721 ns at 1M) |
+| RTX 4060 Laptop | 279 µs | 305 ns |
+
+So the 4060 overtakes the CPU's device evaluation at about 740
+transistors and keeps a 2x lead out to a million. Cards built for FP64
+should do much better. Scaling the measured kernel's FP64 share by each
+card's FP64 rate, and the rest by its compute and memory bandwidth:
+
+| GPU | per transistor, matrix on the GPU | per transistor, LU on the host | ahead of today's CPU from |
+|---|---:|---:|---:|
+| RTX 4060 Laptop (model) | 179 ns | 247 ns | ~740 (measured) |
+| V100 | 43 to 79 ns | 133 to 169 ns | ~450 |
+| A100 | 20 to 60 ns | 63 to 103 ns | ~440 |
+| H100 SXM | 12 to 35 ns | 33 to 56 ns | ~420 |
+| MI300X | 7 to 15 ns | 29 to 36 ns | ~410 |
+
+At a million transistors that is 12 to 35 ms of device evaluation per
+iteration on an H100, against about 720 ms on the CPU.
+
+These are projections, not measurements: ESPice has not run on these
+cards. Three things limit them:
+
+- The CPU number is ESPice as it is today, where one circuit's evaluation
+  scales only 1.7 to 2x over one thread. A CPU that spread one circuit
+  over 24 cores as well as separate processes do (63 ns per transistor)
+  would beat every card above unless the matrix stays on the GPU, and
+  would push the crossover on an H100 to 5k to 9k transistors.
+- The sparse LU runs on the host and grows faster than the circuit
+  (local exponent 2.2 from 300k to 500k transistors). At a million it is
+  about 9 s per iteration, so a faster device evaluation alone gains the
+  whole run little; the GPU's total lead on the 4060 peaks at about 1.25x.
+  The gain at post-layout scale depends on moving the LU to the GPU too.
+- The 4060's kernel reaches 22 % of its FP64 peak, so the projections
+  scale only that share with FP64 rate.
+
+The fits, the model and a test protocol for an A100-class card are in
+[dev/research/gpu-ensemble.md](dev/research/gpu-ensemble.md) (#99).
+
 ### What is not claimed
 
 The bench is a differential comparison against two simulators, and it covers

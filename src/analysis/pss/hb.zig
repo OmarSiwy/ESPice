@@ -458,13 +458,51 @@ fn idft(x_hat: []const f64, nh: usize, nt: usize, basis_cos: []const f64, basis_
 /// Jacobian's convention: gc[0] = 2*mean(g), gs[0] = 0, and gc[k], gs[k]
 /// the 2/nt cos and sin projections on the harmonic-major bases.
 fn project(g: []const f64, basis_cos: []const f64, basis_sin: []const f64, gc: []f64, gs: []f64) void {
+    projectLanes(project_lanes, g, basis_cos, basis_sin, gc, gs);
+}
+
+const project_lanes = std.simd.suggestVectorLength(f64) orelse 4;
+
+/// `project` on W lanes; W == 1 is the scalar oracle. A hand kernel, not
+/// `num.dot`: nt is 2(2K+1), 34 at the default K = 8, under stdpp's
+/// 64-element scalar cutoff, and this kernel measured 2.2x faster there
+/// and 1.2x at K = 16 and 32 (#14). One pass over g yields both the cos
+/// and the sin sum.
+fn projectLanes(comptime W: comptime_int, g: []const f64, basis_cos: []const f64, basis_sin: []const f64, gc: []f64, gs: []f64) void {
+    const V = @Vector(W, f64);
     const nt = g.len;
+    std.debug.assert(gc.len == gs.len and gc.len >= 1);
+    std.debug.assert(basis_cos.len >= (gc.len - 1) * nt and basis_sin.len >= (gc.len - 1) * nt);
     const nt_f: f64 = @floatFromInt(nt);
-    gc[0] = 2.0 * num.sum(g) / nt_f;
+    const body = nt - nt % W;
+
+    var dc: V = @splat(0);
+    var k: usize = 0;
+    while (k < body) : (k += W) dc += g[k..][0..W].*;
+    var dc_sum: f64 = @reduce(.Add, dc);
+    for (g[body..]) |v| dc_sum += v;
+    gc[0] = 2.0 * dc_sum / nt_f;
     gs[0] = 0;
+
     for (gc[1..], gs[1..], 0..) |*c, *s, hi| {
-        c.* = 2.0 * num.dot(g, basis_cos[hi * nt ..][0..nt]) / nt_f;
-        s.* = 2.0 * num.dot(g, basis_sin[hi * nt ..][0..nt]) / nt_f;
+        const bc = basis_cos[hi * nt ..][0..nt];
+        const bs = basis_sin[hi * nt ..][0..nt];
+        var cv: V = @splat(0);
+        var sv: V = @splat(0);
+        k = 0;
+        while (k < body) : (k += W) {
+            const gv: V = g[k..][0..W].*;
+            cv += gv * @as(V, bc[k..][0..W].*);
+            sv += gv * @as(V, bs[k..][0..W].*);
+        }
+        var c_sum: f64 = @reduce(.Add, cv);
+        var s_sum: f64 = @reduce(.Add, sv);
+        for (g[body..], bc[body..], bs[body..]) |gv, cb, sb| {
+            c_sum += gv * cb;
+            s_sum += gv * sb;
+        }
+        c.* = 2.0 * c_sum / nt_f;
+        s.* = 2.0 * s_sum / nt_f;
     }
 }
 
@@ -655,4 +693,38 @@ test orbit {
     var back: [n * nf]f64 = undefined;
     seed(&back, orb, n, 1);
     for (x_hat, back) |a, b| try std.testing.expectApproxEqAbs(a, b, 1e-12);
+}
+
+test projectLanes {
+    // The vector kernel against its W == 1 oracle. Small integers keep every
+    // partial sum exact, so any lane grouping must agree bit for bit; nt
+    // runs past 3x the widest lane count at every misalignment, and a NaN
+    // or inf sample must reach every output that reads it.
+    const nh = 3;
+    var buf: [4 + 64 + 2 * nh * 64]f64 = undefined;
+    var prng = std.Random.DefaultPrng.init(0x14);
+    for (&buf) |*v| v.* = @floatFromInt(prng.random().intRangeAtMost(i8, -8, 8));
+    for (0..4) |skew| for (1..64) |nt| {
+        const g = buf[skew..][0..nt];
+        const bc = buf[skew + nt ..][0 .. nh * nt];
+        const bs = buf[skew + nt + nh * nt ..][0 .. nh * nt];
+        var want_c: [nh + 1]f64 = undefined;
+        var want_s: [nh + 1]f64 = undefined;
+        var got_c: [nh + 1]f64 = undefined;
+        var got_s: [nh + 1]f64 = undefined;
+        projectLanes(1, g, bc, bs, &want_c, &want_s);
+        projectLanes(project_lanes, g, bc, bs, &got_c, &got_s);
+        try std.testing.expectEqualSlices(f64, &want_c, &got_c);
+        try std.testing.expectEqualSlices(f64, &want_s, &got_s);
+    };
+    var g: [19]f64 = @splat(1);
+    const basis: [nh * 19]f64 = @splat(1);
+    var gc: [nh + 1]f64 = undefined;
+    var gs: [nh + 1]f64 = undefined;
+    g[17] = std.math.nan(f64);
+    projectLanes(project_lanes, &g, &basis, &basis, &gc, &gs);
+    for (gc) |v| try std.testing.expect(std.math.isNan(v));
+    g[17] = std.math.inf(f64);
+    projectLanes(project_lanes, &g, &basis, &basis, &gc, &gs);
+    for (gc) |v| try std.testing.expect(std.math.isPositiveInf(v));
 }
