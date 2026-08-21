@@ -37,6 +37,12 @@ python3 "$HERE/gen.py" cmc src/hicum/setup/qaSpec src/hicum/results hicum hicum 
 for v in sym_nmos:NMOS sym_pmos:PMOS asym_nmos:NMOS asym_pmos:PMOS; do
   python3 "$HERE/gen.py" cmc "$PSP/${v%%:*}/qaSpec" "$PSP/${v%%:*}/reference" psp "psp_${v%%:*}" "${v##*:}" 1040
 done
+# The self-heating variants run once the build registers PSP103TVA (psp103t).
+if grep -q '"psp103tva"' "$HERE/../../../src/frontend/spice.zig"; then
+  for v in sym_nmos_t:NMOS sym_pmos_t:PMOS asym_nmos_t:NMOS asym_pmos_t:PMOS; do
+    python3 "$HERE/gen.py" cmc "$PSP/${v%%:*}/qaSpec" "$PSP/${v%%:*}/reference" psp "psp_${v%%:*}" "${v##*:}" psp103tva
+  done
+fi
 GT=src/gf180/models/ngspice
 cp "$GT/design.ngspice" "$GT/sm141064.ngspice" gf180/
 python3 "$HERE/gen.py" gf180 "$GT/testing" gf180

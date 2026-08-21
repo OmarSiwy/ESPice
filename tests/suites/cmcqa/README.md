@@ -37,7 +37,11 @@ How the decks are built:
   test's `.standard` file.
 - **PSP**: PSP has no ngspice LEVEL; it is OSDI-only in ngspice-45, and the
   bench runner refuses any `level=1040` deck for ngspice. ESPice maps 1040
-  to `psp103`.
+  to `psp103`. The self-heating `_t` variants (pins `d g s b dt`, `dt`
+  floating) need PSP103TVA: `fetch.sh` generates them once
+  `src/frontend/spice.zig` maps `psp103tva` (the `models-upstream`
+  work), as N cards on `.model qamod psp103tva type=1|-1`, 456 decks per
+  variant. Their `idvdh_dt` tests read `V(dt)`, the temperature rise.
 - **GF180**: the `mos_iv_vgs` (Id vs Vds, stepped Vgs) and `mos_iv_vbs` (Id
   vs Vgs, stepped Vbs) Id templates are rendered the way upstream
   `models_regression.py` renders them. Upstream wraps the sweep in a
@@ -64,7 +68,7 @@ but the CMC reference covers the whole sweep.
 - **Not generated**:
   - noise tests (13 HICUM, 8 PSP per variant);
   - the HICUM pnp polarity check;
-  - the PSP self-heating `*_t` variants, because ESPice has no `psp103t`;
+  - the PSP self-heating `*_t` variants until ESPice has `psp103t`;
   - the PSP pin-flip and m-factor variants;
   - the other GF180 regressions (BJT, diode, MIM/MOS caps, resistors, MOS
     CV, Rds). Each needs its own xlsx column mapping, ported from its

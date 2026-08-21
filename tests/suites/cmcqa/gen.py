@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """CMC QA specs and the GF180MCU regression templates to ngspice-dialect decks.
 
-  gen.py cmc QASPEC REFDIR OUT PREFIX NPN|NMOS|PMOS LEVEL
+  gen.py cmc QASPEC REFDIR OUT PREFIX NPN|NMOS|PMOS LEVEL|MODULE
   gen.py gf180 TESTING OUT
   gen.py selftest
 
@@ -12,9 +12,12 @@ holds one copy of the device per biasList value (DC; the biasSweep pin of
 every copy hangs off the swept source vsweep through a 0 V ammeter), or
 per biasList value x biasSweep value x driven pin (AC: the copy's source
 on the driven pin carries ac 1). A comment above each copy names its bias.
+A LEVEL selects the built-in model from `.model qamod nmos level=LEVEL`; a
+MODULE (psp103tva) is an N card on `.model qamod MODULE type=1|-1`.
 CMC sign conventions: I(p) = -i(v<p>_<k>), G(i,j) = Re(-i(v<i>_<k>)) of
 the copy driven on j, C(i,j) = -Im(...)/w on the diagonal and +Im(...)/w
-off it. Noise tests are skipped.
+off it, V(p) = v(p_<k>) (a floating pin such as PSP's thermal node dt).
+Noise tests are skipped.
 
 gf180: the mos_iv_vgs and mos_iv_vbs Id templates rendered for every W/L
 row of the foundry xlsx (temperature 25, -40, 125 by thirds, as the
@@ -86,18 +89,21 @@ def cmc(qaspec, refdir, out, prefix, mtype, level):
     pins = glob['pins'].split()
     floating = set(glob.get('float', '').split())
     letter = glob['keyLetter']
+    if not level.isdigit():  # a Verilog-A module name: an N card on `.model qamod <module> type=+-1`
+        letter = 'n'
     made = 0
     for t in tests:
         outs = t['outputs'].split()
-        if any(o[0] in 'NV' for o in outs):
-            continue  # ponytail: noise and thermal-node outputs; add .noise decks when the oracle wants them
+        if any(o[0] == 'N' for o in outs):
+            continue  # ponytail: noise outputs; add .noise decks when the oracle wants them
         ref = os.path.join(refdir, t['name'] + '.standard')
         if not os.path.isfile(ref):
             print('cmcqa: no reference for', t['name'], file=sys.stderr)
             continue
         model = dict((k.lower(), (k, v)) for k, v in t['model'])
         model.pop('level', None); model.pop('type', None)
-        card = '.model qamod %s level=%s\n' % (mtype.lower(), level) + ''.join('+ %s=%s\n' % kv for kv in model.values())
+        head_card = '%s level=%s' % (mtype.lower(), level) if level.isdigit() else '%s type=%d' % (level, -1 if mtype == 'PMOS' else 1)
+        card = '.model qamod %s\n' % head_card + ''.join('+ %s=%s\n' % kv for kv in model.values())
         sw_pin, sw = pinval(t['biasSweep']) if 'biasSweep' in t else (None, None)
         li_pin, li = pinval(t['biasList']) if 'biasList' in t else (None, '')
         lvals = li.split(',') if li_pin else [None]
