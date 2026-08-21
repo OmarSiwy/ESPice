@@ -714,8 +714,8 @@ test projectLanes {
         try std.testing.expectEqualSlices(f64, &want_c, &got_c);
         try std.testing.expectEqualSlices(f64, &want_s, &got_s);
     };
-    var g = [_]f64{1} ** 19;
-    const basis = [_]f64{1} ** (nh * 19);
+    var g: [19]f64 = @splat(1);
+    const basis: [nh * 19]f64 = @splat(1);
     var gc: [nh + 1]f64 = undefined;
     var gs: [nh + 1]f64 = undefined;
     g[17] = std.math.nan(f64);
