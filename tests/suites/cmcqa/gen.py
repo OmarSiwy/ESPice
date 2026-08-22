@@ -19,10 +19,16 @@ the copy driven on j, C(i,j) = -Im(...)/w on the diagonal and +Im(...)/w
 off it, V(p) = v(p_<k>) (a floating pin such as PSP's thermal node dt).
 Noise tests are skipped.
 
-gf180: the mos_iv_vgs and mos_iv_vbs Id templates rendered for every W/L
-row of the foundry xlsx (temperature 25, -40, 125 by thirds, as the
-upstream models_regression.py does), .control replaced by its dc sweep.
-The reference is the matching foundry Id block (|Id|, ngspice -i(Vds)).
+gf180: each regression's templates rendered the way its upstream
+models_regression.py renders them (geometry, temperature and corner per
+foundry xlsx row), the .control block replaced by the sweep it runs.
+The reference is that row's foundry block: the sweep column, then one
+column per stepped bias (or the corner's column). Blocks are found by
+their quantity header and the device label under it, never by column
+offset. MOS Id and Rds, BJT Ic/Ib and diode I(V) are read off the .dc
+output; MOS CV, BJT and diode junction capacitances are operating-point
+device quantities, named on the deck's `* reference quantity:` line;
+MIM/MOS capacitors are a .meas; resistors are one copy per row.
 """
 import math, os, re, sys, zipfile
 import xml.etree.ElementTree as ET
@@ -175,9 +181,68 @@ def xlsx(path):
     return rows
 
 
-def blocks(header, prefix):
-    """Start columns of each run of header cells that begin with prefix."""
-    return [i for i, h in enumerate(header) if h.startswith(prefix) and not header[i - 1].startswith(prefix)]
+class Block:
+    """One data block of a foundry xlsx: header cells [quantity, bias,
+    sweep, value...] after a blank one. Row 1 under the quantity names the
+    device; `cols` are the sweep column and the value columns."""
+    def __init__(self, rows, c):
+        h = rows[0]
+        w = 1
+        while c + w < len(h) and h[c + w]:
+            w += 1
+        self.q, self.label, self.cols = h[c], rows[1][c].split()[0], list(range(c + 2, c + w))
+        self.step = h[c + 3].split('=')[0].strip()
+
+
+def blocks(rows):
+    """Every data block right of the summary columns, in sheet order."""
+    h = rows[0]
+    return [Block(rows, c) for c in range(5, len(h)) if h[c] and not h[c - 1] and len(rows[1]) > c and rows[1][c]]
+
+
+def left(rows, every_corner=False):
+    """Rows of the summary table (the first, down to a blank or repeated
+    `corners` cell) that carry a device label, as (label, row); only the
+    first corner's unless every_corner."""
+    out = []
+    for r in rows[1:]:
+        if len(r) < 4 or r[3] in ('', 'corners'):
+            break
+        if r[2].strip() and (every_corner or r[3] == rows[1][3]):
+            out.append((r[2].split()[0], r))
+    return out
+
+
+def table(rows, cols, names=None):
+    """The reference text: a header from row 0 (or names), then every row
+    until the first column runs out."""
+    out = [' '.join(n.replace(' ', '') for n in (names or [rows[0][c] for c in cols]))]
+    for r in rows[1:]:
+        if len(r) <= cols[0] or r[cols[0]] == '':
+            break
+        out.append(' '.join(r[c] if c < len(r) else '' for c in cols))
+    return '\n'.join(out) + '\n'
+
+
+def ctl_dc(tmpl):
+    """The template with its .control block replaced by the sweep it runs:
+    a `dc` line, or a `DC` line over `let` bounds stepped again by an
+    `alter` of a `compose`d vector (the outer source of a nested .dc).
+    A template whose own .DC card stays (or that has none) loses the block."""
+    ctl = re.search(r'^\.control\b.*?^\.endc\b[^\n]*\n?', tmpl, re.S | re.M | re.I)
+    if ctl:
+        body = ctl.group()
+        lets = dict(re.findall(r'^\s*let\s+(\w+)\s*=\s*(\S+)', body, re.M))
+        dc = re.search(r'^\s*dc\s+(.*)$', body, re.M | re.I)
+        card = ''
+        if dc:
+            args = [lets.get(t[2:], t) if t.startswith('$&') else t for t in dc.group(1).split()]
+            m = re.search(r'compose\s+(\w+)\s+start=\s*(\S+)\s+stop=\s*(\S+)\s+step=\s*(\S+)', body)
+            if m:
+                args += [re.search(r'alter\s+(\w+)\s*=\s*%s\[' % m.group(1), body).group(1)] + list(m.groups()[1:])
+            card = '.dc ' + ' '.join(args) + '\n'
+        tmpl = tmpl.replace(body, card)
+    return re.sub(r'"(\.\./)+', '"', tmpl)
 
 
 def num(x):
@@ -186,42 +251,154 @@ def num(x):
 
 def gf180(testing, out):
     reg = os.path.join(testing, 'regression')
+    data = os.path.join(testing, '180MCU_SPICE_DATA')
     made = 0
-    for fam, prefix in (('mos_iv_vgs', 'vgs ='), ('mos_iv_vbs', 'vbs =')):
-        tdir = os.path.join(reg, fam, 'device_netlists_Id')
+
+    def deck(name, tmpl, vals, ref, quantity=None):
+        nonlocal made
+        text = re.sub(r'\{\{\s*(\w+)\s*\}\}', lambda m: str(vals[m.group(1)]), tmpl)
+        if quantity:  # an operating-point device quantity: the .dc output alone does not carry it
+            text = '* reference quantity: %s\n' % quantity + text
+        open(os.path.join(out, name + '.sp'), 'w').write(text)
+        open(os.path.join(out, name + '.sp.reference'), 'w').write(ref)
+        made += 1
+
+    def paired(what, rws, bl):
+        if len(bl) != len(rws) or any(b.label != r[0] for b, r in zip(bl, rws)):
+            print('cmcqa: gf180 %s: %d blocks for %d devices' % (what, len(bl), len(rws)), file=sys.stderr)
+            return []
+        return list(zip(rws, bl))
+
+    def quarter(i, n, temps):  # upstream splits the rows into len(temps) equal runs, the remainder in the last
+        return temps[min(i // max(n // len(temps), 1), len(temps) - 1)]
+
+    # MOS Id (mos_iv_vgs, mos_iv_vbs) and Rds (mos_iv_vgs/device_netlists_Rds,
+    # Rds = 1/gds: dId/dVds off the Id sweep).
+    # The 6 V sheets hold |Gds| where the 3.3 V ones hold |Rds|.
+    for fam, sub, qs, step, tag in (('mos_iv_vgs', 'Id', ('Id (A)', '-Id (A)'), 'vgs', 'vgs'),
+                                    ('mos_iv_vbs', 'Id', ('Id (A)', '-Id (A)'), 'vbs', 'vbs'),
+                                    ('mos_iv_vgs', 'Rds', ('|Rds (Ohm)|', '|Gds (S)|'), 'vgs', 'rds')):
+        tdir = os.path.join(reg, fam, 'device_netlists_' + sub)
         for tf in sorted(os.listdir(tdir)):
             dev = tf[:-len('.spice')]
-            rows = xlsx(os.path.join(testing, '180MCU_SPICE_DATA', 'MOS', dev + '.nl_out.xlsx'))
-            dims = [r[:2] for r in rows[1:] if len(r) > 1 and r[1]]
-            bl = blocks(rows[0], prefix)
-            if len(bl) != 2 * len(dims):
-                print('cmcqa: gf180 %s: %d blocks for %d sizes' % (dev, len(bl), len(dims)), file=sys.stderr)
+            rows = xlsx(os.path.join(data, 'MOS', dev + '.nl_out.xlsx'))
+            pairs = paired(dev + ' ' + tag, left(rows), [b for b in blocks(rows) if b.q in qs and b.step == step])
+            tmpl = ctl_dc(open(os.path.join(tdir, tf)).read())
+            for i, ((_, r), b) in enumerate(pairs):
+                ad, pd = float(r[0]) * 0.24, 2 * (float(r[0]) + 0.24)
+                vals = dict(width=num(r[0]), length=num(r[1]), temp=quarter(i, len(pairs), (25, -40, 125)), i=i, AD=ad, PD=pd, AS=ad, PS=pd)
+                deck('gf180_%s_%s_%d' % (tag, dev, i), tmpl, vals, table(rows, b.cols),
+                     tag == 'rds' and ('|Rds| (Ohm) = 1/@mn[gds]' if 'Rds' in b.q else '|Gds| (S) = @mn[gds]'))
+
+    # MOS CV (mos_cv): Cgc, Cgs and Cgd of each 3.3 V device. Upstream's Cgs
+    # and Cgd templates hardcode W=200u L=0.28u nf=20 for every row; the
+    # row's own geometry (nf from its label) replaces it here.
+    rows = xlsx(os.path.join(reg, 'mos_cv', 'measured_data', '3p3_cv.nl_out.xlsx'))
+    for kind in ('Cgc', 'Cgs', 'Cgd'):
+        tdir = os.path.join(reg, 'mos_cv', 'device_netlists_' + kind)
+        for tf in sorted(os.listdir(tdir)):
+            dev = tf[:-len('_cv.spice')]
+            pairs = paired(dev + ' ' + kind, [x for x in left(rows) if x[0] == dev], [b for b in blocks(rows) if b.label == dev and b.q == kind + ' (fF)'])
+            tmpl = re.sub(r'W = \S+ L = \S+ nf=\S+', 'W = {{width}}u L = {{length}}u nf={{nf}}', ctl_dc(open(os.path.join(tdir, tf)).read()))
+            for i, ((_, r), b) in enumerate(pairs):
+                vals = dict(width=num(r[0]), length=num(r[1]), nf=re.search(r'nf=(\d+)', r[2]).group(1), i=i)
+                deck('gf180_cv_%s_%s_%d' % (kind.lower(), dev, i), tmpl, vals, table(rows, b.cols), '%s (fF) = @mn[%s]*1e15' % (kind, 'cgb' if kind == 'Cgc' else kind.lower()))
+
+    # BJT Ic(Vc) at stepped Ib (bjt_iv) and Ic, Ib against Vb at stepped Vc
+    # (bjt_beta, both blocks side by side in one reference).
+    bjt = os.path.join(data, 'BJT')
+    for pol in ('npn', 'pnp'):
+        rows = xlsx(os.path.join(bjt, 'bjt_%s_icvc_f.nl_out.xlsx' % pol))
+        pairs = paired(pol + ' icvc', left(rows), blocks(rows))
+        tmpl = ctl_dc(open(os.path.join(reg, 'bjt_iv', 'device_netlists', pol + '.spice')).read())
+        for i, ((dev, _), b) in enumerate(pairs):
+            deck('gf180_icvc_%s_%d' % (dev, i), tmpl, dict(device=dev, i=i, temp=quarter(i, len(pairs), (25, -40, 125, 175))), table(rows, b.cols))
+        rows = xlsx(os.path.join(bjt, 'bjt_%s_beta_f.nl_out.xlsx' % pol))
+        bl = blocks(rows)
+        ic = paired(pol + ' beta Ic', left(rows), [b for b in bl if 'Ic' in b.q])
+        ib = paired(pol + ' beta Ib', left(rows), [b for b in bl if 'Ib' in b.q])
+        tmpl = ctl_dc(open(os.path.join(reg, 'bjt_beta', 'device_netlists', pol + '.spice')).read())
+        for i, (((dev, _), c), (_, b)) in enumerate(zip(ic, ib)):
+            cols = c.cols + b.cols[1:]
+            names = [rows[0][c.cols[0]]] + ['Ic:' + rows[0][k] for k in c.cols[1:]] + ['Ib:' + rows[0][k] for k in b.cols[1:]]
+            deck('gf180_beta_%s_%d' % (dev, i), tmpl, dict(device=dev, i=i, temp=quarter(i, len(ic), (25, -40, 125, 175))), table(rows, cols, names))
+
+        # BJT junction capacitance (bjt_cj): one block per junction, device
+        # and temperature (25, -40, 175 in turn), a column per corner.
+        rows = xlsx(os.path.join(bjt, 'bjt_cv_%s.nl_out.xlsx' % pol))
+        bl = blocks(rows)
+        for k, b in enumerate(bl):
+            _, junction, size = b.label.split('_', 2)
+            t = os.path.join(reg, 'bjt_cj', 'device_netlists', '%s_%s.spice' % (pol, junction))
+            if not os.path.isfile(t):
                 continue
-            tmpl = open(os.path.join(tdir, tf)).read()
-            ctl = re.search(r'^\.control\n(.*?)^\.endc\n', tmpl, re.S | re.M)
-            dc = re.search(r'^dc .*$', ctl.group(1), re.M).group()
-            tmpl = tmpl.replace(ctl.group(), '.' + dc + '\n')
-            tmpl = re.sub(r'"\.\./\.\./\.\./', '"', tmpl)
-            third = len(dims) // 3
-            for i, (w, l) in enumerate(dims):
-                temp = 25 if i < third else -40 if i < 2 * third else 125
-                ad = float(w) * 0.24
-                pd = 2 * (float(w) + 0.24)
-                vals = dict(width=num(w), length=num(l), temp=temp, i=i, AD=ad, PD=pd, AS=ad, PS=pd)
-                deck = re.sub(r'\{\{\s*(\w+)\s*\}\}', lambda m: str(vals[m.group(1)]), tmpl)
-                name = 'gf180_%s_%s_%d' % (fam[-3:], dev, i)
-                open(os.path.join(out, name + '.sp'), 'w').write(deck)
-                c = bl[2 * i]
-                width = 1
-                while c + width < len(rows[0]) and rows[0][c + width].startswith(prefix):
-                    width += 1
-                ref = [' '.join(h.replace(' ', '') for h in rows[0][c - 1:c + width])]
-                for r in rows[1:]:
-                    if len(r) <= c or r[c - 1] == '':
-                        break
-                    ref.append(' '.join(r[c - 1:c + width]))
-                open(os.path.join(out, name + '.sp.reference'), 'w').write('\n'.join(ref) + '\n')
-                made += 1
+            dev, temp = 'v%s_%s' % (pol, size), quarter(k, len(bl), (25, -40, 175))
+            tmpl = ctl_dc(open(t).read())
+            for corner in ('typical', 'ff', 'ss'):
+                col = next(c for c in b.cols if rows[0][c] == 'bjt_' + corner)
+                deck('gf180_cj_%s_%s_%s_T%s' % (dev, junction, corner, str(temp).replace('-', 'm')), tmpl,
+                     dict(device=dev, i=k, temp=temp, corner=corner, cv_sim='cv'), table(rows, [b.cols[0], col]),
+                     'Cj (fF) = @q.xq1.q0[%s]*1e15' % {'EBJ': 'cpi', 'CBJ': 'cmu', 'CSJ': 'csub'}[junction])
+
+    # Diode I(V) and C(V) (diode), temperatures -40, 25, 125, 175 in turn,
+    # a column per corner.
+    for dev in ('dnwps', 'dnwpw', 'np_3p3', 'np_6p0', 'nwp_3p3', 'nwp_6p0', 'pn_3p3', 'pn_6p0', 'sc_diode'):
+        for kind in ('iv', 'cv'):
+            rows = xlsx(os.path.join(reg, 'diode', '0_measured_data', '%s_%s.nl_out.xlsx' % (dev, kind)))
+            pairs = paired(dev + ' ' + kind, left(rows), blocks(rows))
+            tmpl = ctl_dc(open(os.path.join(reg, 'diode', 'device_netlists', kind + '.spice')).read())
+            for i, ((_, r), b) in enumerate(pairs):
+                for corner in ('typical', 'ff', 'ss'):
+                    col = next(c for c in b.cols if rows[0][c].endswith('diode_' + corner))
+                    vals = dict(device=dev, area=num(r[0]), pj=num(r[1]), i=i, temp=(-40, 25, 125, 175)[i % 4], Id_sim=kind, corner=corner)
+                    deck('gf180_diode_%s_%s_%s_%d' % (dev, kind, corner, i), tmpl, vals, table(rows, [b.cols[0], col]),
+                         'Cj (fF) = @dn[cd]*1e15' if kind == 'cv' else None)
+
+    # MIM and MOS capacitors (mimcap_c, moscap_c): a .tran charging ramp
+    # whose .meas is the capacitance. The label carries W x L; the first
+    # row per device, size and corner is the 25 C one upstream reads.
+    cap = os.path.join(data, 'Cap')
+    for fam, xs in (('mimcap', ('mimcap_fc',)), ('moscap', ('moscap_cv_3p3', 'moscap_cv_6p0'))):
+        tmpl = ctl_dc(open(os.path.join(reg, fam + '_c', 'device_netlists', fam + '.spice')).read())
+        for x in xs:
+            rows = xlsx(os.path.join(cap, x + '.nl_out.xlsx'))
+            seen = set()
+            for dev, r in left(rows, every_corner=True):
+                w, l = re.search(r'\((\S+)u x(\S+)u', r[2]).groups()
+                corner = r[3].split('_', 1)[1]
+                if (dev, w, l, corner) in seen:
+                    continue
+                seen.add((dev, w, l, corner))
+                deck('gf180_cap_%s_w%s_l%s_%s' % (dev, w, l, corner), tmpl, dict(device=dev, width=w, length=l, corner=corner),
+                     'CV(fF)\n%s\n' % r[4])
+
+    # Resistors (resistor_r): sheet resistance against W/L at 25 C (RES*a)
+    # and against temperature (RES*b). One deck per file, corner and
+    # temperature holds a copy per row: Vn drives r1_k (1 Mohm) into the
+    # resistor, Rs = 1M*V(p_k)/(V(n)-V(p_k)) * w/l. Upstream's polarity list
+    # is off by one in its wl half; p-type resistors take -3.3 V here, as in
+    # its temp half.
+    res = os.path.join(data, 'Resistor')
+    for x in sorted(f for f in os.listdir(res) if re.match(r'RES\d+(a-wl|b-temp)-(?!nom)', f)):
+        dev = x.split('-', 2)[2].split('.')[0]
+        sign = '-' if dev.startswith(('pplus', 'ppolyf')) else ''
+        term = '0 ' if not dev.startswith(('rm', 'tm')) else ''
+        rows = xlsx(os.path.join(res, x))
+        geo = []
+        for _, r in left(rows):
+            kv = dict(re.findall(r'(\w)=([-\d.]+)', r[2]))
+            geo.append((kv['T'], kv['w'], kv['l'], r))
+        for corner in ('typical', 'ff', 'ss'):
+            col = rows[0].index('res_%s Rev9 ' % corner)
+            for temp in dict.fromkeys(g[0] for g in geo):
+                d = ['* GF180 %s sheet resistance, res_%s, T=%s C (generated by tests/suites/cmcqa/gen.py)' % (dev, corner, temp),
+                     '.temp %s' % temp, '.options tnom=%s' % temp, 'vn n 0 dc %s3.3' % sign]
+                ref = ['w l Rs(ohm/sq)']
+                for k, (t, w, l, r) in enumerate(g for g in geo if g[0] == temp):
+                    d += ['r1_%d n p_%d 1M' % (k, k), 'xrn_%d p_%d 0 %s%s r_width=%su r_length=%su' % (k, k, term, dev, w, l)]
+                    ref.append('%s %s %s' % (w, l, r[col]))
+                d += ['.op', '.include "design.ngspice"', '.lib "sm141064.ngspice" res_%s' % corner, '.end']
+                deck('gf180_res_%s_%s_T%s' % (x.split('-')[0], corner, temp.replace('-', 'm')), '\n'.join(d) + '\n', {}, '\n'.join(ref) + '\n')
     print('cmcqa: gf180: %d decks' % made, file=sys.stderr)
 
 
@@ -229,7 +406,15 @@ def selftest():
     assert sweep('0.3,1.05,0.02')[-2:] == ['1.04', '1.05'] and len(sweep('1.0,-0.7,-0.05')) == 35
     assert pinval('V(coll)=0.5,1.0') == ('coll', '0.5,1.0')
     assert params('+ c10 = ( 9.074e-030 )\nTR=27.0 NSUBO=3.0E+23') == [('c10', '9.074e-030'), ('TR', '27.0'), ('NSUBO', '3.0E+23')]
-    assert blocks(['a', 'vgs =1', 'vgs =2', '', 'x', 'vgs =1'], 'vgs =') == [1, 5]
+    rows = [['W', 'L', '', 'c', 'x', '', 'Id (A)', 'bias', 'vds', 'vgs =1', 'vgs =2', '', 'Id (A)', 'bias', 'vds', 'vgs =1'],
+            ['1', '2', 'n1\n(1u x2u)', 't', 'k', '', 'n1', 'lin', '0', '1e-6', '2e-6', '', 'n1', 'lin', '0', '3e-6'],
+            ['', '', '', '', '', '', '', '', '0.1', '4e-6', '5e-6']]
+    b = blocks(rows)
+    assert [(x.q, x.label, x.step, x.cols) for x in b] == [('Id (A)', 'n1', 'vgs', [8, 9, 10]), ('Id (A)', 'n1', 'vgs', [14, 15])]
+    assert left(rows) == [('n1', rows[1])]
+    assert table(rows, b[0].cols) == 'vds vgs=1 vgs=2\n0 1e-6 2e-6\n0.1 4e-6 5e-6\n'
+    assert ctl_dc('x\n.control\nlet a_min = 0\nlet a_max = 1\nlet a_step = 0.5\ncompose v start=1 stop=2 step=1\n'
+                  'alter vg = v[0]\nDC va $&a_min $&a_max $&a_step\n.endc\n.lib "../../../m" t\n') == 'x\n.dc va 0 1 0.5 vg 1 2 1\n.lib "m" t\n'
     print('ok')
 
 
