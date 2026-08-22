@@ -155,6 +155,7 @@ zig build bench-suites -Dsuite=cmcqa
 ```
 
 Each suite has a README under `tests/suites/<name>/` with its sources, pins,
-licences and known gaps. `cmcqa` is 3,218 single-device decks from the
-public CMC QA sets (HICUM/L2 2.4.0, PSP 103) and the GF180MCU BSIM4
-regression, each with its reference result.
+licences and known gaps. `cmcqa` is 5,645 single-device decks from the
+public CMC QA sets (HICUM/L2 2.4.0, PSP 103) and the GF180MCU model
+regressions (MOS, BJT, diode, capacitors, resistors), each with its
+reference result.
