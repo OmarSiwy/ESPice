@@ -26,8 +26,8 @@ G and C follow CMC's `runQaTests.pl`.
 
 | Model | LEVEL | Decks | Kinds | ngspice-45 |
 |---|---|---|---|---|
-| HICUM/L2 (`hicum_*`) | 8 | 520 (169 tests x temperature) | 390 DC, 130 AC | runs all 520; 514 finish |
-| PSP 103 (`psp_{sym,asym}_{nmos,pmos}_*`) | 1040 | 1,816 (454 per variant) | 1,664 DC, 152 AC | **cannot run: ESPice-only, compare against the CMC reference** |
+| HICUM/L2 (`hicum_*`) | 8 | 585 (169 tests x temperature, the 13 noise tests x 5 bias points) | 390 DC, 130 AC, 65 noise | runs all 585; 514 of the 520 DC/AC finish |
+| PSP 103 (`psp_{sym,asym}_{nmos,pmos}_*`) | 1040 | 1,944 (486 per variant) | 1,664 DC, 152 AC, 128 noise | **cannot run: ESPice-only, compare against the CMC reference** |
 | GF180 (`gf180_*`), via the PDK's `sm141064.ngspice` | BSIM4, GP BJT, diode 3, subckt R/C | 3,116 | DC (nested), OP, tran | runs every family (sampled) |
 
 The GF180 decks by family (upstream `models_regression.py` directory):
@@ -92,11 +92,26 @@ but the CMC reference covers the whole sweep.
   (HICUM `0.3,1.05,0.02`) ends on the stop value in the reference. ngspice's
   `.dc` stops at the last grid point, one row short.
 - **Not generated**:
-  - noise tests (13 HICUM, 8 PSP per variant);
   - the HICUM pnp polarity check;
   - the PSP self-heating `*_t` variants until ESPice has `psp103t`;
   - the PSP pin-flip and m-factor variants;
   - the GF180 `sc_regression` (standard cells) and `smoke_test`.
+- **Noise**: one deck per bias point, rigged as `runQaTests.pl` rigs
+  ngspice (`hn` turns the pin's ammeter current into `v(n_<pin>)`;
+  `N(pin) = onoise_spectrum^2` in A^2/Hz). Against the CMC reference,
+  ESPice at b397ecc (max relative error over the frequency sweep):
+  - HICUM: all 65 decks (13 tests) within 1e-3.
+  - PSP: 40 of 128 decks within 1%. The other 88 differ only at the top
+    decade (1e8 Hz, or 1e9 Hz for `*_fntexc`), by up to 65%: the
+    simulated spectrum lacks the f^2 rise of induced gate noise. Cause:
+    `models/psp103.va` is ngspice-45's ADMS flattening, which comments
+    out the correlated noise (`I(GP,SI|DI) <+ ddt(... CGeff * V(NOIC))`
+    and the `migid` drain term, "ngspice-adms: can't handle specific
+    noise contributions"). Upstream's PSP103_module.include keeps them.
+  - PSP `_t` on the models-upstream PSP 103.8.2 build: 88 of 128 within
+    1% (every `N(g)`); 40 `N(d)` decks still differ at the top decade, by
+    up to 28%, cause not isolated (the drain-gate correlation term, or
+    the 103.3 to 103.8 model changes).
 - **GF180 against ngspice-44.2** (one or two decks per family, ESPice at
   b397ecc): MOS Id, Rds and CV sweeps agree within 0.4% (12% on a 1.5 pA
   bulk leakage); the dnwps diode and the nplus/rm resistors agree to 1e-8.

@@ -5,6 +5,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 ## Unreleased
 
+- `bench-suites -Dsuite=cmcqa`: the HICUM and PSP noise tests, one `.noise` deck per bias point (#18).
 - `bench-suites -Dsuite=cmcqa`: the GF180 Rds, MOS CV, BJT, diode, MIM/MOS capacitor and resistor regressions, 2,234 more decks (#18).
 - `bench-suites -Dsuite=cmcqa`: PSP parameter cards keep their exponent signs (`NSUBO=3.0E+23` was read as `3.0E`) (#18).
 - API: `Options.live_params` + `Problem.set_params`, and C `live_params` + `espice_set_params`, change
