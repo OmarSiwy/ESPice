@@ -1,48 +1,240 @@
 # GPU ensemble mode: prototype measurements (#99)
 
-Measured 2026-10-17 on an RTX 4060 Laptop GPU (8 GiB, driver 595.71, CUDA
-13.2, PCIe 4.0 x8) and an i9-14900HX (8 P-cores, 16 E-cores, 32 threads).
-The ESPice binary is the default GPU build (ReleaseFast) at f8998e0. #101
-(live `.param` values, re-bin per point) landed after the measurements; it
-changes how per-point values would get in, not what is measured here.
+Measured 2026-10-17 on an RTX 4060 Laptop GPU (8 GiB, 24 SMs, driver
+595.71, CUDA 13.2, PCIe 4.0 x8) and an i9-14900HX (8 P-cores, 16 E-cores,
+32 threads). The ESPice binary is the default GPU build (ReleaseFast) at
+f8998e0. #101 (live `.param` values, re-bin per point) landed after the
+measurements; it changes how per-point values get in, not what is measured.
 
-The question: run N points that share one circuit topology (Monte Carlo
-samples, corners x Jacobian points) as one batched problem on the GPU,
-with one batched device eval and one batched refactor per Newton
-iteration, instead of N CPU runs. Is that faster, and from what N?
+The target is post-layout: extracted netlists with up to millions of
+transistors and ten R or C per transistor. The question has two parts.
+First, does one such point run faster with device evaluation (and the
+device LU) on the GPU than on the CPU at its best thread count? Second,
+does batching N same-pattern points (Monte Carlo, corners x Jacobian)
+still pay once one point fills the GPU? A secondary section keeps the
+small-circuit ensemble measurements (5 to 1,000 transistors per point).
 
 ## Answer
 
-Not on this hardware, at any N or circuit size measured.
+**One post-layout point.** The GPU wins device evaluation by 1.7x at 10k
+transistors and 2.3x from 100k to 500k, against eight P-cores. It barely
+moves the run: 1.12 to 1.22x wall time. From 100k up the host LU is 60 to
+80 % of the run and grows faster than the circuit (14 % of a 100k run is
+eval, 7 % of a 500k run). Removing eval entirely would cap the 500k
+speedup at 1.22x. The existing device LU (`gpu_lu.zig`) is slower than the
+host at 10k and 100k, and declines from 300k on (its tables cost 4 bytes
+per multiply-add and it refuses past 400M).
 
-- **Against one CPU thread** the batched GPU run wins from N = 1 to 30,
-  depending on circuit size, and reaches up to 4.9x (PSP103) and 8.6x
-  (BSIM3).
-- **Against N CPU runs spread over the cores** (24 processes, which is how
-  anyone would run N independent points) it loses on every corners deck,
-  by 1.3x to 10x. The CPU runs scale 11 to 17x over one thread; the GPU never
-  got past 8.6x at any N, so the Monte Carlo decks lose too (inferred from
-  that scaling; par24 was run only on the corners decks).
-- The device eval alone, before any LU, already takes longer than the whole
-  parallel CPU ensemble: 32.3 s against 12.4 s on the largest PSP103 deck,
-  1.77 s against 0.63 s on the largest BSIM3 deck. A free batched LU would
-  not close that gap.
-- The cause is FP64 throughput. A consumer Ada GPU runs FP64 at 1/64 of
-  its FP32 rate, about 0.2 TFLOPS. Measured, a PSP103 instance evaluates in
-  0.25 us on the GPU (batched, 55,000 instances per launch) and in 0.88 us
-  on one P-core, so the whole GPU is worth about 3.5 cores.
-- The batched refactor kernel (pivot-tape replay, one thread per point)
-  breaks even with one CPU core at N = 250 to 400 on every pattern from
-  n = 10 to n = 8,505, and saturates at 15 to 28x one core. If the matrix
-  values cross PCIe every iteration, the bus caps it at about 4x one core,
-  so the values have to be assembled on the device.
+**1M transistors** was not run. Extrapolated from 100k to 500k: about 9
+GiB of device memory (more than this card has, so not even one point fits)
+and about 19 GB of host memory, too close to what this shared machine had
+free. The extrapolated LU is 7 to 10G multiply-adds per refactor, 5.5 to
+8 s per Newton iteration on one core, against about 0.35 s of GPU eval
+(0.8 s on eight P-cores).
 
-Recommendation: do not build a GPU ensemble mode for consumer GPUs. Spend
-the effort on host-thread parallelism across sweep points (`sweep/lanes.zig`
-runs lanes serially today). Re-measure with the kept harness on an
-FP64-class card (A100, H100: FP64 at 1/2 of FP32) before reopening.
+**Ensembles at post-layout scale: no.** The eval kernel is saturated by
+10k instances (200 ns per instance there, 147 ns at 100k), so N points
+cost N times one point; batching saves launches and nothing else. The card
+holds 8 points of 100k eval-only, 2 of 300k, none of 1M. The LU is one
+large factor per point, so a pivot-tape replay with one thread per point
+is useless: each thread would run 107M multiply-adds serially. Run points
+one after another, each filling the GPU; stream or tile one point when it
+outgrows the card.
 
-## Method
+**Datacenter extrapolation (not measured).** The PSP103 eval kernel runs
+at about 22 % of this card's FP64 peak, so FP64 rate is not its only
+limit. Scaled to an H100 from the measured flop and byte counts, the eval
+kernel gets 4.5 to 16x faster and the LU refactor could get about 18x
+faster than one host core, if the 400M cap goes. For a post-layout point
+the GPU case is the LU, not ensemble batching (see "FP64").
+
+**Small circuits** (secondary section): the batched GPU run beats one CPU
+thread from N = 1 to 30, but loses to 24 CPU processes on every deck.
+
+Recommendation:
+
+1. Do not build an ensemble mode that batches points on the GPU. At
+   post-layout size one point fills the device; for small circuits, CPU
+   processes win.
+2. The post-layout bottleneck is the per-point LU: host refactor at
+   0.77 ns per multiply-add on one core, the multicore refactor not
+   admitted (F/n is 85 at 100k and 196 at 300k, under its 300 bar), and the
+   device LU capped at 400M multiply-adds with slow triangular solves.
+   That is where GPU or host effort pays.
+3. BSIM4 is still host-only under a GPU backend (`gpuEligible` rejects
+   models that hold variables and limit), so a sky130 BSIM4 post-layout
+   deck puts only its R and C on the device. On the GPU path the host
+   batches then evaluate on one thread whatever `ESPICE_THREADS` says
+   (BSIM4 10k chain: 6.0 ms per eval on the host against 1.9 ms per
+   iteration for the whole eval on eight P-cores).
+
+## Post-layout: one point
+
+**Decks.** `tests/benchmark/postlayout/gen.py chain psp103 <size>`:
+parallel 50-stage inverter chains on PSP103 (GPU-resident), every net
+split into pi segments with coupling caps and the rails extracted as a
+mesh. The `.tran` window is cut to 50 ps from `uic` (100 ps with an
+operating point at 10k), so every deck runs about 145 Newton iterations.
+The per-iteration costs below are the transient's `--timing-in-depth`
+split divided by its iteration count.
+
+**Configurations.** `cpu1`: one thread pinned to a P-core. `cpu8P`: eight
+threads pinned to the eight P-cores (the best count measured on this CPU,
+`dev/devices/gpu-evaluation.md`). `cuda`: device eval, one host thread,
+host LU. `cudalu`: as `cuda` with `ESPICE_GPU_LU=1`. Device memory is the
+peak `nvidia-smi` reading above idle; host memory is max RSS.
+
+Per Newton iteration, milliseconds:
+
+| FETs | R + C | n | L+U | refactor multiply-adds | eval cpu1 | eval cpu8P | eval cuda | GPU vs 8P | host LU | device LU |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 10k | 105k | 124,925 | 1.38M | 4.5M | 9.9 | 6.1 | 3.6 | 1.71x | 8.0 | 14.2 |
+| 100k | 1.04M | 1.25M | 14.5M | 107M | 99.3 | 72.3 | 32.1 | 2.25x | 136 | 153 |
+| 300k | 3.13M | 3.74M | 46.0M | 734M | 297 | 215 | 95.1 | 2.26x | 625 | declined |
+| 500k | 5.2M | 6.23M | 81.5M | about 2.3G | - | 390 | 171 | 2.28x | 1,868 | declined |
+
+"host LU" is factor plus solve on one thread (eight threads do not change
+it: the multicore refactor is not admitted). "device LU" is the median
+device call (refactor, solves, transfers) from `ESPICE_GPU_LU_BENCH`. At
+100k the device refactor kernel beats the host refactor (59 against
+111 ms), but the device triangular solves lose (84 against 16 ms). The
+500k multiply-add count is estimated from its host refactor time at the
+300k rate.
+
+Whole run, seconds, and memory:
+
+| FETs | wall cpu1 | wall cpu8P | wall cuda | cuda vs 8P | LU share of cuda run | device memory | host RSS |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 10k | 17.2 | 14.5 | 11.9 | 1.22x | 58 % | 0.43 GiB | 0.2 GB |
+| 100k | 45.6 | 36.7 | 32.9 | 1.12x | 60 % | 1.18 GiB | 1.9 GB |
+| 300k | 172.0 | 145.1 | 129.8 | 1.12x | 70 % | 2.83 GiB | 5.6 GB |
+| 500k | - | 380.1 | 336.8 | 1.13x | 80 % | 4.57 GiB | 9.4 GB |
+
+The 10k run includes its operating point (688 iterations), which the
+larger decks skip with `uic`.
+
+One device eval at 100k (`ESPICE_GPU_STATS=phases`): upload and clear
+1.6 ms, kernels 14.7 ms, two reduces 3.6 ms, plane download 9.8 ms. The
+download is the PCIe link at its limit: 132 staged cells (1,056 bytes) per
+PSP103 instance per eval, measured at 15.8 GB/s.
+
+## Post-layout: ensembles
+
+**VRAM-bound N.** A chain point costs 8.9 KiB of device memory per
+transistor (marginal, 300k to 500k, R and C included) over a 0.35 GiB
+context. On this 8 GiB card that is N = 8 at 100k, 2 at 300k, 1 at 500k
+and 0 at 1M (8.8 GiB, extrapolated). Adding the device LU (4 bytes per
+refactor multiply-add of tables plus 8 bytes per L+U entry) brings 100k
+down to 5 points, and from 300k it is over the 400M cap anyway. An 80 GB
+card holds about 8 eval-only 1M points.
+
+**Does batching pay once a point fills the GPU?** No. Per-instance kernel
+time stops falling by 10k instances (200 ns at 10k, 147 ns at 100k, 160 ns
+for 100k bare PSP103 instances), which is where the kernel stops being
+latency bound (`dev/devices/gpu-evaluation.md`, "Limits"). Above that, N
+points take N times as long, plus N times the plane download. What
+batching saves is launch and sync overhead, a few hundred microseconds per
+eval against tens of milliseconds of work.
+
+**Design.** At this scale the shape is one point at a time on the device.
+A point bigger than the card streams: eval in instance tiles whose planes
+are scattered as they land, since the eval already reduces into staging
+cells per instance and the scatter needs no other tile. The LU is the part
+that does not tile cleanly, and it already dominates.
+
+**What the batched pivot-tape replay buys.** Nothing for post-layout. The
+replay kernel of the secondary section gives each point one GPU thread
+that runs the whole refactor serially. That breaks even with a CPU core at
+250 to 400 points on small patterns, and a 107M multiply-add refactor per
+thread would need thousands of resident points that do not fit. The useful
+form at this size is the level-scheduled refactor `gpu_lu.zig` already
+has, which parallelises inside one matrix. Folding a few points into its
+levels (columns x points per level) would hide level latency: its 100k
+refactor runs 59 ms where moving the 107M multiply-adds' operands once
+(about 24 bytes each at 256 GB/s) would take about 10 ms. But only about
+5 such points fit, and its solves, not its refactor, are its slow half.
+Raising the 400M cap, faster device solves, and a host refactor that
+parallelises at F/n under 300 matter more than a point axis.
+
+## FP64 and the datacenter extrapolation
+
+Measured flop counts (`perf stat` FP_ARITH counters, FMA counted as two,
+from the difference between 10k and 20k parallel instances on fixed
+sources, one P-core):
+
+| model | FP64 flops per instance per Newton iteration | instructions | CPU time | GPU kernel time |
+|---|---:|---:|---:|---:|
+| PSP103 | 9,300 | 11,800 | 893 ns (10.4 GFLOPS) | about 143 ns (65 GFLOPS) |
+| BSIM4 | 6,100 | 9,000 | - | host only |
+
+The GPU kernel time is the per-iteration eval (247 ns per instance, 100k
+bare PSP103 instances) times the kernels' 58 % share of a phased eval. The
+4060 Laptop peaks at about 0.30 TFLOPS FP64 (24 SMs x 2 FP64 lanes x 2
+flops x 3.1 GHz), so the kernel uses about 22 % of it. FP64 rate is a large
+part of the kernel's time, not all of it; the rest is latency and the
+large per-thread state (`dev/devices/gpu-evaluation.md`, "Limits"). Device
+state is 5.3 KiB per bare PSP103 instance, and each eval downloads 1,056
+bytes per instance.
+
+**Extrapolation to an H100 SXM (not measured; FP64 34 TFLOPS without
+tensor cores, 3.35 TB/s, 132 SMs at about 1.98 GHz, 80 GB, PCIe 5.0 x16 at
+about 55 GB/s):**
+
+- Eval kernel: the FP64 share (22 %) shrinks 113x; the remaining 78 %
+  scales between SM count x clock (3.5x, if it stays latency bound) and
+  memory bandwidth (13x). That gives 9 to 32 ns per instance per iteration,
+  4.5 to 16x the 4060.
+- Plane download: 1,056 bytes per instance per eval at 55 GB/s is 19 ms
+  per eval for 1M instances. With the kernel at 9 to 32 ms per iteration,
+  the bus becomes the limit unless the matrix is assembled on the device
+  (`dev/solvers/gpu-lu.md` option (f)).
+- LU at 1M (multiply-adds extrapolated to 7 to 10G): the host takes 5.5
+  to 8 s per refactor. A device refactor moving 24 bytes per multiply-add
+  at 3.35 TB/s has a 50 to 70 ms floor; the 4060's ran 6x above its own
+  floor, which would put an H100 at 0.3 to 0.45 s, about 18x the host
+  core. The tables (28 to 40 GB at 4 bytes per multiply-add) fit in 80 GB,
+  but only if the 400M cap is raised.
+- A 1M point per iteration then comes to roughly 0.05 to 0.1 s of eval
+  plus 0.3 to 0.45 s of LU on an H100, against about 0.8 s of eval and 5.5
+  to 8 s of LU on eight P-cores. The gain comes from the LU. With about 8
+  eval-only 1M points (2 with LU tables) in 80 GB, batching across points
+  still has nothing to amortise.
+
+## Design questions at post-layout scale
+
+- **Transient and Newton lockstep** only matter if points are batched, and
+  at post-layout size they are not (above). The small-circuit
+  measurements below still say what lockstep would cost: shared steps add
+  0 to 28 %, masked Newton 1 to 30 %, and a point that needs continuation
+  must peel out.
+- **Memory:** per point, 8.9 KiB of device memory per transistor for eval,
+  plus 8 bytes per L+U entry and 4 bytes per refactor multiply-add if the
+  device LU runs. Batch size, where it applies, is
+  `floor((VRAM - context) / per_point)`.
+- **Determinism:** two GPU runs of the same deck are bitwise identical
+  (checked on the small decks). Device eval is not bitwise the host's, so
+  long transients diverge between CPU and GPU at the level of the deck's
+  truncation error. The H14 oracle compares at the deck's tolerance.
+- **Place in the module DAG** (if an ensemble driver is ever built):
+  `analysis` owns the driver beside `sweep/lanes.zig`, a batched replay
+  goes beside `analysis/gpu_lu.zig` with its scalar oracle at one point,
+  `solver` keeps the host oracle and pivot tape, and `device/eval.zig`
+  evaluates points x instances through `evalRange`. Points are more
+  instances, so the GPU ABI does not change.
+
+## Small circuits: N independent points (secondary)
+
+The first round measured ensembles of small circuits, 5 to 1,000
+transistors per point, where N points rather than one point fill the GPU.
+Against one CPU thread the batched GPU run wins from N = 1 to 30 and
+reaches 4.9x (PSP103) and 8.6x (BSIM3). Against 24 CPU processes it loses
+on every corners x Jacobian deck, by 1.3x to 10x, and the device eval
+alone outlasts the parallel CPU ensemble (32.3 s against 12.4 s on the
+largest PSP103 deck). The batched refactor kernel breaks even with one
+core at N = 250 to 400 and is capped at about 4x one core by PCIe unless
+the matrix is assembled on the device.
+
+### Method
 
 There is no ensemble engine yet, so the prototype is a proxy plus a
 kernel.
@@ -97,7 +289,7 @@ host oracle; it matched `SparseLu` refactor + solve bitwise on all six
 patterns, and the device matched it bitwise on sampled points at every N
 (see Determinism for the one condition).
 
-## Results: corners x Jacobian (55 points)
+### Results: corners x Jacobian (55 points)
 
 Low machine load (4.6 to 7.8). Milliseconds.
 
@@ -128,7 +320,7 @@ asynchronous, so its wait lands in `update`) and 598 ms in the host LU;
 PSP103 chains10 spends 32,267 ms in eval plus update and 39,655 ms in the
 host LU of the 55-block matrix.
 
-## Results: Monte Carlo, by N
+### Results: Monte Carlo, by N
 
 Speedup of cuda stacked over singles (one CPU thread), in parentheses with
 the device LU (cudalu). These ran while three other sessions were building
@@ -158,7 +350,7 @@ LU in all but one cell: it exposes parallelism inside one matrix, and a
 block-diagonal stack of small blocks is shallow and wide, which the host
 handles in microseconds.
 
-### Break-even N per circuit size
+#### Break-even N per circuit size
 
 | circuit | n (bsim3 / psp103) | vs one CPU thread | vs 24 CPU processes |
 |---|---|---|---|
@@ -172,7 +364,7 @@ break-even N barely moves with circuit size, because the kernel is latency
 bound until the GPU is full: below about N = 2,048 its time is one GPU
 thread's serial refactor, 200 to 400 times slower than a CPU core.
 
-## Results: batched refactor and solve kernel
+### Results: batched refactor and solve kernel
 
 Per point, nanoseconds. "host" is the same replay on one P-core (g++ -O3),
 which tracks `SparseLu` (ESPice's own refactor + solve, from
@@ -198,9 +390,9 @@ matrix on the device (`dev/solvers/gpu-lu.md` option (f)) for the batched
 LU to pay. At the 55 points of a corners x Jacobian run the kernel is about
 5 to 6x slower per point than one core on every pattern.
 
-## Design questions
+### Design questions
 
-### Transient lockstep
+#### Transient lockstep
 
 Measured option: one shared step for all points (the stacked deck's step
 control accepts a step only when every point's LTE passes, so the step is
@@ -222,7 +414,7 @@ chain50). OTA tran and every `.op` agree to under 1.3 uV. Comparisons must
 therefore use the deck's tolerance, not the single run as an exact
 reference.
 
-### Newton lockstep
+#### Newton lockstep
 
 Masked lockstep (iterate until every point converges) cost 1 to 30 % in
 iterations whenever every point converged on plain Newton: the mean
@@ -239,7 +431,7 @@ lockstep for the plain Newton rung, and a point that fails it peels to the
 scalar host path (the lane doctrine), never dragging the batch through
 continuation.
 
-### Memory and batch size
+#### Memory and batch size
 
 Per point the device holds the LU values, the matrix, five n-vectors and the
 device planes: `8 (L+U + nnz + 5n)` bytes plus the eval state. Sampled with
@@ -251,7 +443,7 @@ Batch size is `floor((VRAM - context - shared tables) / per_point)`, capped
 at the N where the kernels saturate (2,048 to 8,192 here). The VRAM cap
 binds only on the largest circuits.
 
-### Determinism
+#### Determinism
 
 - Fixed batch size: two cuda runs of every checked stacked deck were
   bitwise identical.
@@ -269,44 +461,31 @@ binds only on the largest circuits.
   as the deck's own truncation error. BSIM3 chain50 tran: 0.08 ps, no
   mismatched counts. PSP103 tran and every `.op`: within 1.2e-13 V. The oracle has to compare at the deck's tolerance.
 
-### Place in the module DAG
-
-The proxy shows the device side needs no ABI change: points are more
-instances, with per-point Model rows (bit-identical rows still share one
-through `model_of`), and #101 supplies per-point parameter values. So:
-
-- `analysis` owns the ensemble driver: the point table, the convergence and
-  step masks, the peel to the host path. It sits beside `sweep/lanes.zig`,
-  which already owns the structural lane axis for MC, temp, sens and
-  dcmatch.
-- The batched replay kernel goes beside `analysis/gpu_lu.zig`, which
-  already owns the device LU and its Gompute plumbing. Its scalar oracle is
-  the same function at one point (stride 1), checked against
-  `SparseLu.refactor` + `solve`, as `LaneLu(1)` is in `solver`.
-- `solver` keeps the host oracle and the pivot tape; `device/eval.zig`
-  keeps evaluating through `evalRange`, now over points x instances.
-
 ## What was not measured
 
-- A real ensemble engine. The stacked proxy has no masks, no peel and no
-  batched LU; the batched LU kernel was timed apart from the eval, and the
-  two were not combined in one run.
-- BSIM4 and sky130 decks.
-- A data-center GPU. The answer above depends on FP64 throughput and should
-  be re-measured there with the kept harness before anything is built.
-- The `psp103_chains10_cj_tran` lockstep check (55 singles plus two stacked
-  GPU runs, about 15 minutes); the chain50 check covers the same circuit.
-- The tran BSIM3 checks in the original sweep reported only the last-row
-  difference (1.99 V, a node mid-edge at t = 4 ns); the numbers above come
-  from rerunning them with crossing times.
+- 1M transistors (device and host memory, above), and any post-layout
+  deck other than the PSP103 chain. BSIM4 decks would put only their R and
+  C on the GPU.
+- Any datacenter GPU: every H100 number above is an extrapolation.
+- A real ensemble engine. The small-circuit proxy has no masks, no peel
+  and no batched LU; the batched LU kernel was timed apart from the eval.
+- The `psp103_chains10_cj_tran` lockstep check (about 15 minutes); the
+  chain50 check covers the same circuit.
 
 ## Reproducing
 
 ```sh
+# post-layout, one point
+python3 tests/benchmark/postlayout/gen.py /tmp/pl chain psp103 100k
+ESPICE_THREADS=8 taskset -c 0,2,4,6,8,10,12,14 zig-out/bin/espice --backend=cpu --timing-in-depth /tmp/pl/chain_psp103_100k.sp
+ESPICE_THREADS=1 ESPICE_GPU_LU=0 zig-out/bin/espice --backend=cuda --timing-in-depth /tmp/pl/chain_psp103_100k.sp
+ESPICE_GPU_LU=1 ESPICE_GPU_LU_BENCH=20 zig-out/bin/espice --backend=cuda /tmp/pl/chain_psp103_100k.sp
+# small-circuit ensembles
 G=tests/benchmark/ensemble
-python3 $G/gen.py --selftest
 python3 $G/gen.py /tmp/ens psp103 chain50 cj tran 0
 python3 $G/run.py zig-out/bin/espice /tmp/ens singles par24 cpu1 cuda cudalu check
 ```
 
-On NixOS the CUDA runtime needs `LD_LIBRARY_PATH=/run/opengl-driver/lib`.
+The post-layout timings above cut each deck's `.tran` to 50 ps (100 ps
+at 10k). On NixOS the CUDA runtime needs
+`LD_LIBRARY_PATH=/run/opengl-driver/lib`.
