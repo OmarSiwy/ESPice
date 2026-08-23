@@ -761,6 +761,8 @@ PASS	fixtures/tran/dc_only.sp
 PASS	fixtures/tran/device_coupled_tlines.sp
 PASS	fixtures/tran/device_cswitch.sp
 PASS	fixtures/tran/device_hfet_inverter.sp
+PASS	fixtures/tran/device_ic_no_uic.sp
+PASS	fixtures/tran/device_ic_uic.sp
 PASS	fixtures/tran/device_inductor.sp
 PASS	fixtures/tran/device_kinduc.sp
 PASS	fixtures/tran/device_lossy_tline.sp

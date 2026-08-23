@@ -211,6 +211,9 @@ pub const Deck = struct {
     title: []const u8,
     n_devices: u32,
     ic: []const Ic,
+    /// C and L `ic=` values on their rows (a C's node, an L's branch). Only
+    /// a `uic` start applies them, after `ic`; ngspice ignores them otherwise.
+    uic_ic: []const Ic = &.{},
     /// `.nodeset` guesses: where the operating point's first solve holds
     /// each node.
     nodeset: []const Ic = &.{},

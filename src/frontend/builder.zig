@@ -403,6 +403,9 @@ pub const NetBuilder = struct {
     ac: std.MultiArrayList(struct { pos: u32, neg: u32, re: f64, im: f64 }) = .empty,
     /// One row per L card; `value` is the inductance, for a K card's M = k*sqrt(L1*L2).
     l: std.MultiArrayList(struct { name: []const u8, branch: u32, value: f64 }) = .empty,
+    /// C and L `ic=` (ngspice CAPinitCond, INDinitCond) as rows for a `uic`
+    /// start: a C's n+ row (n- negated when n+ is ground), an L's branch row.
+    dev_ic: std.ArrayList(core.Ic) = .empty,
     /// F/H/W/K cards, added after every other card so V and L rows exist.
     deferred: std.ArrayList(Device) = .empty,
     /// Per `Netlist.models` row, the Model its card binds to (`.{}`, the
@@ -608,6 +611,8 @@ pub const NetBuilder = struct {
         source_branch: u32,
         /// Row of the last net the deck introduces.
         output_node: u32,
+        /// `dev_ic` over the frozen rows.
+        uic_ic: []const core.Ic,
     };
 
     /// Maps every row recorded so far through `perm`, the BBD permutation
@@ -622,6 +627,9 @@ pub const NetBuilder = struct {
             (&self.source_branch)[0..1], self.rows,
         }) |rows| for (rows) |*row| {
             if (row.* < p.len) row.* = p[row.*];
+        };
+        if (perm) |p| for (self.dev_ic.items) |*ic| {
+            if (ic.node < p.len) ic.node = p[ic.node];
         };
         // A port carries its own copy of the card's rows.
         if (perm) |p| for (self.v.items(.port)) |*port| {
@@ -683,6 +691,7 @@ pub const NetBuilder = struct {
             .source_node = self.source_node,
             .source_branch = self.source_branch,
             .output_node = self.frozenRow(last_net),
+            .uic_ic = try arena.dupe(core.Ic, self.dev_ic.items),
         };
     }
 
@@ -887,9 +896,20 @@ pub const NetBuilder = struct {
 
         switch (letter) {
             'r' => _ = try self.addPassive(devices.resistor, dev, "r", "resist"),
-            'c' => _ = try self.addPassive(devices.capacitor, dev, "c", "cap"),
+            'c' => {
+                _ = try self.addPassive(devices.capacitor, dev, "c", "cap");
+                // ponytail: a floating C sets its n+ node, not only its own
+                // charge as ngspice's CAPload under MODEUIC does, so another
+                // charge on that node starts charged too. Exact for a grounded
+                // C; a per-device charge seed in the uic start is the upgrade.
+                if (try numericParameter(dev.kv, "ic")) |ic| {
+                    const p = try self.rowOf(dev.pins[0]);
+                    try self.dev_ic.append(self.arena, if (p != GROUND) .{ .node = p, .value = ic } else .{ .node = try self.rowOf(dev.pins[1]), .value = -ic });
+                }
+            },
             'l' => {
                 const br = try self.addPassive(devices.inductor, dev, "l", "inductance");
+                if (try numericParameter(dev.kv, "ic")) |ic| try self.dev_ic.append(self.arena, .{ .node = br, .value = ic });
                 try self.l.append(self.arena, .{ .name = dev.name, .branch = br, .value = positionalNumber(dev, 0) orelse
                     kvNumber(dev.kv, "inductance") orelse kvNumber(dev.kv, "l") orelse 0 });
             },

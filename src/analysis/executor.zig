@@ -305,6 +305,7 @@ pub const Executor = struct {
             self.x = try self.work.allocator().alloc(f64, self.circuit.n);
             @memset(self.x.?, 0);
             for (self.deck.ic) |ic| self.x.?[ic.node] = ic.value;
+            for (self.deck.uic_ic) |ic| self.x.?[ic.node] = ic.value;
         }
         const run_ctx: types.RunCtx = .{
             .circuit = &self.circuit,

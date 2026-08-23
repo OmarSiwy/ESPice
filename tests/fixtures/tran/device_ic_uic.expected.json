@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "C and L instance ic= seed a uic transient",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "tau=RC=L/R=1us. v(out)=0.5*exp(-t/tau); i(l1)=1m*exp(-t/tau), v(n)=-R*i(l1). ngspice 44.2 (nix develop .#benchmarking): v(out)(1u)=0.1839386, v(out)(2u)=0.06766667, v(n)(1u)=-0.3678772, v(n)(2u)=-0.1353333."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 0.002,
+            "atol": 1e-06,
+            "values": [
+              0.18393972058572117,
+              0.06766764161830635,
+              0.0033689734995427305
+            ]
+          },
+          "v(n)": {
+            "unit": "V",
+            "rtol": 0.002,
+            "atol": 1e-06,
+            "values": [
+              -0.36787944117144233,
+              -0.1353352832366127,
+              -0.006737946999085461
+            ]
+          },
+          "i(l1)": {
+            "unit": "A",
+            "rtol": 0.002,
+            "atol": 1e-09,
+            "values": [
+              0.00036787944117144236,
+              0.0001353352832366127,
+              6.737946999085461e-06
+            ]
+          }
+        },
+        "axis": {
+          "name": "time",
+          "values": [
+            1e-06,
+            2e-06,
+            5e-06
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "414372b16a1bbc30f8f494bae3b05c3f8f7eb4ed2007e374662d7bd76a44d858"
+}

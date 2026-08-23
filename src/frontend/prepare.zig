@@ -307,6 +307,7 @@ fn buildOne(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_aren
         .n_devices = nl.deviceCount(),
         .ic = try nodeRows(sim_arena, &nb, nl.deck.ic),
         .nodeset = try nodeRows(sim_arena, &nb, nl.deck.nodeset),
+        .uic_ic = out.uic_ic,
         .deck_tol = deck_opts.tol,
         .deck_temp = deck_opts.temp_c,
         .deck_method = deck_opts.method,

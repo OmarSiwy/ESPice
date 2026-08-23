@@ -108,6 +108,13 @@ the `.ic` values, with every other node at zero. (Without `uic`, ESPice
 does not use `.ic` at all; ngspice would hold those nodes during the
 operating point instead.)
 
+A capacitor's or inductor's own `ic=` (`C1 out 0 1n ic=0.5`,
+`L1 n 0 1m ic=1m`) also applies only under `uic`: the capacitor's node (its
+n+ node, or n- negated when n+ is ground) or the inductor's current starts at
+that value. A capacitor between two non-ground nodes sets its n+ node, so
+another charge on that node starts charged too, where ngspice sets the
+capacitor's charge alone.
+
 ```spice
 --8<-- "examples/rc_ic.sp"
 ```
