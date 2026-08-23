@@ -41,12 +41,35 @@ is useless: each thread would run 107M multiply-adds serially. Run points
 one after another, each filling the GPU; stream or tile one point when it
 outgrows the card.
 
-**Datacenter extrapolation (not measured).** The PSP103 eval kernel runs
+**Crossover.** The hypothesis holds on this card against the engine as
+it is: the GPU's eval costs a fixed 279 us per iteration plus 305 ns per
+PSP103 instance, against 18 us plus 659 ns for the CPU at its best thread
+count, so the GPU wins device evaluation from about 740 instances on and
+keeps a 2x lead to 1M (the CPU's slope rises 25 % at 1M, the GPU's stays
+flat). Two things limit what that buys. The CPU slope is that high only
+because one circuit's eval scales 1.7 to 2.0x on eight cores; against an
+ideal 24-core host (63 ns per instance) the GPU's slope is the larger one
+and there is no crossover at any size. And the whole run is set by the
+host LU, which is superlinear (exponent rising from 1.07 to 2.2 between 1k
+and 500k): the GPU leads the total by 1.09 to 1.25x, most at 30k to 100k,
+and the lead shrinks toward 1.05x at 1M.
+
+**Projected for FP64 cards (not measured).** The PSP103 eval kernel runs
 at about 22 % of this card's FP64 peak, so FP64 rate is not its only
-limit. Scaled to an H100 from the measured flop and byte counts, the eval
-kernel gets 4.5 to 16x faster and the LU refactor could get about 18x
-faster than one host core, if the 400M cap goes. For a post-layout point
-the GPU case is the LU, not ensemble batching (see "FP64").
+limit. Scaled from the measured flop and byte counts, an H100's eval slope
+is 12 to 35 ns per instance with the matrix assembled on the device (33 to
+56 ns with a host LU), which crosses an ideal 24-core CPU at 5k to 9k
+instances (9k to 39k with a host LU). The V100 and A100 never cross it
+with a host LU. The LU refactor could get about 18x faster than one host
+core on an H100 if the 400M cap goes; at post-layout size that, not
+eval, sets the run.
+
+**Mixed precision (hypothetical).** FP32 throughout cannot meet a 1e-12 A
+KCL residual. FP32 Jacobians with FP64 residuals kept Newton iteration
+counts and DC answers (to 1e-9) on 11 of 12 decks checked on the CPU, but
+lost a diode bridge transient, so the step needs an FP64 fallback. On the
+4060 it would move the eval slope only from 247 to 170 to 220 ns. The
+note gives the A100 test protocol.
 
 **Small circuits** (secondary section): the batched GPU run beats one CPU
 thread from N = 1 to 30, but loses to 24 CPU processes on every deck.
@@ -118,6 +141,98 @@ One device eval at 100k (`ESPICE_GPU_STATS=phases`): upload and clear
 download is the PCIe link at its limit: 132 staged cells (1,056 bytes) per
 PSP103 instance per eval, measured at 15.8 GB/s.
 
+## Post-layout: is there a crossover?
+
+The hypothesis: GPU time is a large fixed cost plus a small slope per
+device, `T(N) = a + b N`, so past some size N* the GPU wins and keeps
+winning. N* = (a_gpu - a_cpu) / (b_cpu - b_gpu); if b_gpu >= b_cpu there is
+no crossover at any size.
+
+Two sweeps, all on the transient's Newton iterations (about 2.3 per
+accepted step on every deck here, so per step is 2.3x these numbers):
+
+- **Bare PSP103 instances** (`N` transistors in parallel between two
+  fixed sources, the postlayout generator's PSP103 card, `.tran 1p 10p`,
+  116 iterations; 30 to 1M): device evaluation alone, nothing else in the
+  matrix.
+- **The post-layout chain** (1k to 500k transistors, ten R or C per
+  transistor): device terms, LU, and the whole iteration.
+
+"Device" is eval + load + update from `--timing-in-depth` (the GPU's
+limiting and the CPU's single-thread limiting both land in update). The
+CPU is shown at 1 thread, at 8 threads on the P-cores, and at 24 threads.
+"Best CPU" is the fastest of the three at each size, which is the CPU at
+its best thread count.
+
+**Device term, bare PSP103, ms per Newton iteration:**
+
+| N | cpu1 | cpu8P | cpu24 | best CPU | GPU | GPU vs best CPU |
+|---:|---:|---:|---:|---:|---:|---:|
+| 30 | 0.045 | 0.627 | 0.034 | 0.034 | 0.285 | 8.4x slower |
+| 100 | 0.125 | 0.635 | 0.290 | 0.125 | 0.367 | 2.9x slower |
+| 300 | 0.358 | 1.249 | 0.696 | 0.358 | 0.392 | 1.1x slower |
+| 1k | 1.243 | 1.450 | 0.662 | 0.662 | 0.499 | 1.3x faster |
+| 3k | 3.735 | 1.929 | 1.624 | 1.624 | 1.000 | 1.6x faster |
+| 10k | 12.81 | 7.381 | 6.994 | 6.994 | 3.492 | 2.0x faster |
+| 100k | - | 65.45 | 106.2 | 65.45 | 32.41 | 2.0x faster |
+| 300k | - | 180.8 | 293.3 | 180.8 | 102.6 | 1.8x faster |
+| 1M | - | 685.3 | - | 685.3 | 331.0 | 2.1x faster |
+
+Fits (weighted by relative error, all sizes):
+
+| backend | a (fixed, per iteration) | b (per instance) | marginal b, 300k to 1M |
+|---|---:|---:|---:|
+| best CPU | 18 us | 659 ns | 721 ns (cpu8P) |
+| GPU (4060) | 279 us | 305 ns | 326 ns |
+
+**N* = 740 PSP103 instances** for device evaluation. The shape holds:
+the GPU's fixed cost is 15x one CPU thread's (launches, syncs, the plane
+download's latency), and its slope is half the CPU's. Past 1M it stays
+that way. The CPU's slope rises 25 % between 300k and 1M (581 to 721 ns
+marginal: its working set leaves the caches), while the GPU's stays flat,
+so the eval ratio holds at about 2x out to 1M. The fixed cost is measured
+at 279 us per iteration here, not the 50 us first assumed.
+
+b_cpu is 659 ns, not 880 / 24 = 37 ns, because evaluating one circuit does
+not scale across cores in the engine: eight P-cores give 1.7 to 2.0x one
+thread on these decks, and 24 threads are slower than eight from 10k up
+(E-cores, and twice the RSS). Against an ideal 24-core CPU slope, 63 ns
+(the 14x the small-circuit ensembles reached as separate processes),
+b_gpu = 247 to 305 ns is the larger slope, and there is **no crossover at
+any size** on this card. So the crossover exists against the engine as it
+is, and the size of the GPU's lead is bounded by how badly one circuit's
+eval scales on the host. A host ParEval that scaled would erase it.
+
+**Post-layout chain, ms per Newton iteration:**
+
+| FETs | device: best CPU | device: GPU | LU: CPU (host) | LU: GPU run (host) | total: best CPU | total: GPU | total ratio |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1k | 0.661 (cpu24) | 0.598 | 0.706 | 0.655 | 1.367 | 1.252 | 1.09x |
+| 3k | 2.384 (cpu24) | 1.272 | 2.433 | 2.134 | 4.687 (cpu8P) | 3.406 | 1.38x |
+| 10k | 7.002 (cpu8P) | 4.733 | 8.955 | 8.551 | 15.96 | 13.28 | 1.20x |
+| 30k | 26.63 (cpu8P) | 14.49 | 34.74 | 34.67 | 61.37 | 49.15 | 1.25x |
+| 100k | 82.43 (cpu8P) | 42.76 | 140.0 | 136.3 | 222.4 | 179.1 | 1.24x |
+| 300k | 245.8 (cpu8P) | 126.7 | 657.1 | 624.7 | 902.9 | 751.5 | 1.20x |
+| 500k | 451.4 (cpu8P) | 226.0 | 2,024 | 1,868 | 2,475 | 2,094 | 1.18x |
+
+Fits on the chain (cpu8P against GPU):
+
+| term | CPU | GPU | crossover |
+|---|---|---|---|
+| device, linear | a = 0.32 ms, b = 791 ns per FET | a = 0.13 ms, b = 437 ns per FET | under 1k: the GPU leads at every size measured |
+| LU, power law | 1.09e-4 ms x N^1.24 | 9.4e-5 ms x N^1.25 | none: both are the host LU |
+| total, power law | 5.5e-4 ms x N^1.14 | 2.9e-4 ms x N^1.18 | GPU leads at every size, by a shrinking margin |
+
+On the chain the GPU's device term leads from 1k up, because the per-FET
+work includes about ten R and C, which the GPU also evaluates. The LU is
+the same host LU on both backends, and it is superlinear and getting
+steeper: local exponents 1.07 (1k to 10k), 1.19 (10k to 100k), 1.41
+(100k to 300k), 2.2 (300k to 500k). So the total ratio peaks near 1.25x
+at 30k to 100k and falls after that, toward 1.05x at 1M (extrapolated:
+device 0.9 s against 0.45 s, LU about 9 s). The crossover exists for the
+total too, but the LU term flattens it: past 100k the GPU's lead in the
+whole run shrinks with size instead of growing.
+
 ## Post-layout: ensembles
 
 **VRAM-bound N.** A chain point costs 8.9 KiB of device memory per
@@ -156,49 +271,190 @@ refactor runs 59 ms where moving the 107M multiply-adds' operands once
 Raising the 400M cap, faster device solves, and a host refactor that
 parallelises at F/n under 300 matter more than a point axis.
 
-## FP64 and the datacenter extrapolation
+## Projected: GPUs built for FP64
 
-Measured flop counts (`perf stat` FP_ARITH counters, FMA counted as two,
-from the difference between 10k and 20k parallel instances on fixed
-sources, one P-core):
+Everything in this section is a projection from the 4060 measurements, not
+a measurement.
 
-| model | FP64 flops per instance per Newton iteration | instructions | CPU time | GPU kernel time |
-|---|---:|---:|---:|---:|
-| PSP103 | 9,300 | 11,800 | 893 ns (10.4 GFLOPS) | about 143 ns (65 GFLOPS) |
-| BSIM4 | 6,100 | 9,000 | - | host only |
+**Measured inputs (4060, PSP103, per instance per Newton iteration):**
 
-The GPU kernel time is the per-iteration eval (247 ns per instance, 100k
-bare PSP103 instances) times the kernels' 58 % share of a phased eval. The
-4060 Laptop peaks at about 0.30 TFLOPS FP64 (24 SMs x 2 FP64 lanes x 2
-flops x 3.1 GHz), so the kernel uses about 22 % of it. FP64 rate is a large
-part of the kernel's time, not all of it; the rest is latency and the
-large per-thread state (`dev/devices/gpu-evaluation.md`, "Limits"). Device
-state is 5.3 KiB per bare PSP103 instance, and each eval downloads 1,056
-bytes per instance.
+| input | value | how |
+|---|---:|---|
+| FP64 flops | 9,300 | `perf stat` FP_ARITH counters on one P-core, FMA counted as two, 20k minus 10k bare instances |
+| instructions (CPU) | 11,800 | same |
+| BSIM4 FP64 flops | 6,100 | same (BSIM4 is host-only on the GPU path) |
+| CPU time, one P-core | 893 ns (10.4 GFLOPS) | eval-only deck, 100k |
+| GPU slope, whole eval | 247 ns | 100k bare instances: 143 ns kernels, 36 ns upload and reduces, 68 ns plane download |
+| GPU kernel FP64 rate | 65 GFLOPS, 22 % of peak | the 4060 Laptop peaks at about 0.30 TFLOPS FP64 (24 SMs x 2 FP64 lanes x 2 x 3.1 GHz) |
+| device state | 5.3 KiB per instance | `nvidia-smi`, 10k to 100k bare instances |
+| plane download | 1,056 B per instance per eval | 132 staged cells, at 15.8 GB/s (PCIe 4.0 x8) |
+| GPU fixed cost | 279 us per iteration | fit above |
 
-**Extrapolation to an H100 SXM (not measured; FP64 34 TFLOPS without
-tensor cores, 3.35 TB/s, 132 SMs at about 1.98 GHz, 80 GB, PCIe 5.0 x16 at
-about 55 GB/s):**
+**Model.** The kernels spend 22 % of their time on FP64 work, which scales
+with the card's FP64 rate. The other 78 % (latency, the large per-thread
+state in local memory) scales somewhere between the card's SM count x
+clock (if it stays latency bound) and its memory bandwidth (if it becomes
+bandwidth bound); the two ends give the ranges below. Upload and reduces
+scale with bandwidth. With a host LU, the plane download crosses PCIe at
+the card's link rate; with the matrix assembled on the device it does not.
+The fixed cost is taken as the 4060's 279 us.
 
-- Eval kernel: the FP64 share (22 %) shrinks 113x; the remaining 78 %
-  scales between SM count x clock (3.5x, if it stays latency bound) and
-  memory bandwidth (13x). That gives 9 to 32 ns per instance per iteration,
-  4.5 to 16x the 4060.
-- Plane download: 1,056 bytes per instance per eval at 55 GB/s is 19 ms
-  per eval for 1M instances. With the kernel at 9 to 32 ms per iteration,
-  the bus becomes the limit unless the matrix is assembled on the device
-  (`dev/solvers/gpu-lu.md` option (f)).
-- LU at 1M (multiply-adds extrapolated to 7 to 10G): the host takes 5.5
-  to 8 s per refactor. A device refactor moving 24 bytes per multiply-add
-  at 3.35 TB/s has a 50 to 70 ms floor; the 4060's ran 6x above its own
-  floor, which would put an H100 at 0.3 to 0.45 s, about 18x the host
-  core. The tables (28 to 40 GB at 4 bytes per multiply-add) fit in 80 GB,
-  but only if the 400M cap is raised.
-- A 1M point per iteration then comes to roughly 0.05 to 0.1 s of eval
-  plus 0.3 to 0.45 s of LU on an H100, against about 0.8 s of eval and 5.5
-  to 8 s of LU on eight P-cores. The gain comes from the LU. With about 8
-  eval-only 1M points (2 with LU tables) in 80 GB, batching across points
-  still has nothing to amortise.
+The CPU slope has two references: the engine as measured (659 ns per
+instance, eight P-cores) and an ideal 24-core host (63 ns: 880 ns over the
+14x that separate processes reach).
+
+| card | FP64 TF | HBM TB/s | link GB/s | slope, device-assembled LU | slope, host LU | N* vs engine CPU | N* vs ideal CPU, device LU | N* vs ideal CPU, host LU | eval per iteration at 1M (device / host LU) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| RTX 4060 Laptop (measured) | 0.30 | 0.26 | 15.8 | 179 ns | 247 ns | 740 (measured) | never | never | 0.18 s / 0.33 s (host LU measured) |
+| V100 | 7.8 | 0.90 | 12 | 43-79 ns | 133-169 ns | ~450 | 13,000 to never | never | 43-80 ms / 133-169 ms |
+| A100 | 9.7 | 1.94 | 25 | 20-60 ns | 63-103 ns | ~440 | 6,200-94,000 | never | 21-60 ms / 64-103 ms |
+| H100 SXM | 34 | 3.35 | 50 | 12-35 ns | 33-56 ns | ~420 | 5,100-9,300 | 8,700-39,000 | 12-35 ms / 33-57 ms |
+| MI300X | 81.7 | 5.3 | 50 | 7-15 ns | 29-36 ns | ~410 | 4,700-5,400 | 7,600-9,800 | 8-15 ms / 29-37 ms |
+
+Against the CPU at 1M: the engine takes 685 ms of device time per
+iteration on eight P-cores (measured), an ideal 24-core host 63 ms.
+
+What the table says:
+
+- Against the engine's CPU, every card crosses over at a few hundred
+  instances, because the host side scales so poorly.
+- Against an ideal CPU, an FP64 card crosses over at 5k to 10k instances
+  if the matrix is assembled on the device. With a host LU, the plane
+  download over PCIe keeps the V100 and A100 from ever crossing, and puts
+  the H100 at 9k to 39k.
+- The first-cut projection that scaled the whole 250 ns slope with FP64
+  rate (H100 at 1.7 ns per instance, 35x the ideal CPU) overstates the
+  gain: only 22 % of the kernel time is FP64, so the H100 lands at 12 to
+  35 ns, 1.8 to 5x under the ideal CPU's 63 ns, not 35x.
+
+**The whole simulation is set by the LU.** Device eval at 1M on an H100 is
+12 to 57 ms per iteration. The chain's host LU extrapolates to about 9 s
+per iteration at 1M (5.5 to 9 s depending on the fit), unchanged by any
+GPU. A device refactor moving 24 bytes per multiply-add at 3.35 TB/s has a
+50 to 70 ms floor for the 7 to 10G multiply-adds of a 1M chain. The
+4060's refactor ran 6x above its own floor, which would put an H100 at
+0.3 to 0.45 s, about 18x the host core. Its tables (4 bytes per
+multiply-add, 28 to 40 GB) fit in 80 GB but not under the current 400M
+cap. On an FP64 card the whole-run gain at post-layout size is about how
+far the LU goes onto the device, not about eval.
+
+## Mixed precision (hypothetical)
+
+Nothing here is an engine change. The real test needs an A100-class card,
+which we do not have, so this is an analysis, a CPU-side check of one
+step, and a protocol.
+
+**Why FP32 throughout fails.** Newton converges when KCL balances at every
+node to about abstol, 1e-12 A. At a node where milliamp currents cancel,
+FP32's relative error of about 6e-8 leaves about 6e-11 A of rounding in
+the residual: 60x abstol, so the convergence test can never pass. The
+same holds for charge sums and the integrator's history. FP32 can carry
+work whose error Newton tolerates, and nothing else.
+
+**The candidate split.**
+
+1. *Device derivatives in FP32, values in FP64.* A mixed `Dual(N, F)` with
+   an f64 value lane and f32 derivative lanes. The Jacobian then carries
+   relative errors of about 6e-8; inexact-Jacobian Newton still converges
+   to the FP64 answer, because the residual it drives to zero stays FP64,
+   as long as the error in J^-1 times the residual contracts, roughly
+   cond(J) x 6e-8 < 1. Share of eval work that moves: in a `Dual(N, F)` an
+   add costs one value op and N derivative ops, a multiply one and 3N, and
+   a transcendental 20 to 40 value ops and N. With PSP103's N, 70 to 90 %
+   of the 9,300 flops per instance per iteration sit in derivative lanes
+   (estimated from that op mix, not measured).
+2. *The LU in FP32 with FP64 refinement.* Factor in FP32 (or TF32 on tensor
+   cores, dense fronts only), then iterative refinement or GMRES-IR with
+   FP64 residuals. Plain refinement converges while cond(A) x 6e-8 < 1,
+   about cond 1e7; GMRES-IR reaches further. Circuit matrices with gmin
+   (1e-12 S) beside on-transistor conductances (1e-3 S) and ideal sources
+   can exceed 1e7. A refinement that has not converged in a fixed number
+   of steps falls back to an FP64 factor of that matrix.
+3. *Double-float emulation* (an f32 pair, about 48-bit mantissa) as the
+   fallback for work that must stay accurate on a card with weak FP64.
+   It only pays where FP64 is 1/32 rate or worse, as on the 4060.
+4. *Stays FP64:* the residual, the convergence test, transient charges and
+   integration history, the solution x, and the LTE estimate.
+
+**CPU check of step 1 (measured).** A throwaway build rounded every
+Jacobian value to FP32 just before the factor (`converger.zig`, after
+the load check; the residual untouched), so the LU sees an FP32-accurate
+Jacobian in FP64 arithmetic. Not committed.
+
+| deck | Newton iterations FP64 / FP32 Jacobian | result difference |
+|---|---:|---|
+| op/bench_bjt_cascode | 17 / 17 | 1e-11 relative |
+| dc/bench_bjt_diff_amp | 115 / 115 | 1e-9 relative |
+| op/device_bsim4 | 7 / 7 | 3e-13 relative |
+| dc/device_bsim4_output | 1,354 / 1,354 | bitwise equal |
+| op/device_hicum2 | 4 / 4 | 3e-11 relative |
+| dc/device_hicum2_gummel | 266 / 269 | 4e-10 relative |
+| tran/bench_ngspice_mosamp | 215,778 / 215,710 | 3e-5 of the signal range (time-aligned) |
+| stress/vacask_mul | 1,018,450 / 1,018,456 | 6e-9 of the signal range (time-aligned) |
+| stress/vacask_ring (PSP103) | 66,817 / 66,146 | rising edges 37 ps apart after 290 periods of 3.45 ns (the corpus checks the period at rtol 3e-3) |
+| stress/scaling_inverter_chain_256 | 4,980 / 4,874 | rising edges 3.3 ps apart |
+| stress/vacask_graetz (diode bridge) | 2,000,024 / failed | `TimestepTooSmall` after 71,937 iterations |
+| post-layout chain_psp103_10k | 152 / 153 | 1.1 mV at the accepted points |
+
+The DC and operating-point decks keep their iteration counts and move by
+1e-9 or less. Transients take slightly different steps, so their results
+differ at the level of the step control: 3 to 37 ps on edges, well inside
+what the corpus checks. The full corpus was not rerun with the FP32
+Jacobian (two queued runs were killed before they started); that is the
+protocol's first item. The diode bridge is the warning: an FP32 Jacobian of a stiff,
+widely scaled matrix (1u steps over 1 s, diodes switching between gmin
+and on) lost Newton convergence on a step and the run died. Step 1 needs
+the fallback (re-evaluate that iteration's Jacobian in FP64 when Newton
+stalls) from the start, not as an afterthought.
+
+**Predicted effect on N* (prediction, not measured).**
+
+- *RTX 4060* (FP32 64x FP64). With 80 % of eval flops in FP32, the FP64
+  share of the kernel (22 %, 31 ns per instance) drops to about 7 ns, so
+  the kernel goes from 143 to about 118 ns and the slope from 247 to about
+  222 ns. Halving the derivative lanes' bytes could also cut the
+  latency-bound remainder, by up to 45 %, to about 172 ns. Either way it
+  stays above the ideal CPU's 63 ns: no crossover against an ideal host,
+  and against the engine's CPU N* moves from 740 to about 550 to 600. The
+  first-cut estimate of 53 ns assumed the whole kernel was FP64 bound; it
+  is not.
+- *A100 / H100* (FP32 2x FP64, TF32 tensor cores). FP64 is already a
+  small share of the kernel on these cards, so FP32 derivatives save
+  little compute (A100 kernel 15 to 55 ns from 20 to 60; H100 9 to 32 ns
+  from 12 to 35). The gain would come from halving the derivative bytes in
+  a kernel that is latency or bandwidth bound, and from an FP32 or TF32 LU
+  with refinement, which is where the run's time is. Predicted N* against
+  an ideal CPU, with the matrix assembled on the device and if halving the
+  derivative bytes cuts the non-FP64 remainder by 45 %: about 5k to 9k
+  (A100) and 5k to 6k (H100), from 6k to 94k and 5k to 9k today.
+
+**Test protocol for an A100-class card.**
+
+1. *Decks.* The full corpus (`zig build test`, CPU and `test-gpu`); the
+   post-layout families from `tests/benchmark/postlayout/gen.py` (chain,
+   ring, logic, sram) on PSP103 at 10k, 100k, 300k and 1M, with BSIM4
+   added once it is GPU-resident; c7552 on sky130 and IHP from `fetch.sh`;
+   the bare-instance sweep (30 to 1M) of this note for the eval fits.
+2. *Builds.* Default GPU build as the FP64 reference; one build option per
+   step (`-Djac_f32` for mixed `Dual`, `-Dlu_f32ir` for the FP32 factor with
+   refinement, `-Dlu_tf32` for tensor-core fronts), each with its FP64
+   fallback live. Run each at `ESPICE_THREADS` = the host's best count.
+3. *Measure.* `T(N) = a + b N` fits for device eval, power-law fits for
+   the LU, and the total, per build; Newton iterations per accepted step;
+   accepted steps; refinement iterations per factor and the fallback rate;
+   results against the FP64 build at each deck's tolerance (the corpus
+   verdicts), and for the post-layout decks the mid-swing crossing times
+   against the FP64 run, compared with that deck's own truncation error
+   (default against reltol 1e-5).
+4. *Adopt a step only if:* no corpus verdict changes (PASS stays PASS);
+   median Newton iterations per step rise under 5 % and no deck over 25 %;
+   fallbacks under 1 % of iterations (or of factors, for the LU steps); no
+   post-layout crossing moves more than its deck's own truncation error;
+   and the measured slope (eval steps) or LU time (LU steps) improves by at
+   least 1.3x at 100k and up. Otherwise drop the step and record why in
+   this note.
+5. The CPU check above is the protocol's step 0, already run: it found one
+   corpus deck that needs the fallback.
 
 ## Design questions at post-layout scale
 
@@ -463,10 +719,15 @@ binds only on the largest circuits.
 
 ## What was not measured
 
-- 1M transistors (device and host memory, above), and any post-layout
-  deck other than the PSP103 chain. BSIM4 decks would put only their R and
-  C on the GPU.
-- Any datacenter GPU: every H100 number above is an extrapolation.
+- 1M transistors on the post-layout chain (device and host memory, above),
+  and post-layout families other than the chain. The 1M point of the
+  crossover is bare PSP103 instances. BSIM4 decks would put only their R
+  and C on the GPU.
+- Any FP64-class GPU: every V100, A100, H100 and MI300X number is a
+  projection.
+- Mixed precision on a GPU. The FP32-Jacobian check ran on the CPU on 12
+  decks; the full corpus with it was not run (two queued runs were killed
+  before they started).
 - A real ensemble engine. The small-circuit proxy has no masks, no peel
   and no batched LU; the batched LU kernel was timed apart from the eval.
 - The `psp103_chains10_cj_tran` lockstep check (about 15 minutes); the
