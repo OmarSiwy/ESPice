@@ -7,8 +7,7 @@ else	src/analysis/pss/pac.zig	2
 else	src/analysis/session.zig	5
 else	src/analysis/tests/transient.zig	1
 else	src/analysis/validate.zig	2
-else	src/c_api.zig	4
-else	src/core/query.zig	1
+else	src/c_api.zig	3
 else	src/espice.zig	4
 else	src/frontend/analyses.zig	22
 else	src/frontend/builder.zig	21
@@ -25,11 +24,6 @@ else	src/frontend/tests/builder.zig	1
 else	src/frontend/tests/netlist.zig	1
 else	src/frontend/variants.zig	4
 else	src/frontend/vec.zig	2
-else	src/output/measure.zig	12
-else	src/output/types.zig	1
-else	src/output/write.zig	2
-else	src/solver/lane_lu.zig	1
-else	src/solver/tests.zig	2
 else	src/tests/c_api.zig	1
 else	tests/benchmark/runner.zig	2
 else	tests/benchmark/vacask.zig	2
