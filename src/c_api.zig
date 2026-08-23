@@ -138,8 +138,8 @@ const handles = struct {
     const index_bits = 12;
     /// Slots, slot 0 included; `capacity - 1` problems can be live at once.
     const capacity = 1 << index_bits;
-    const Index = std.meta.Int(.unsigned, index_bits);
-    const Generation = std.meta.Int(.unsigned, @bitSizeOf(usize) - index_bits);
+    const Index = @Int(.unsigned, index_bits);
+    const Generation = @Int(.unsigned, @bitSizeOf(usize) - index_bits);
 
     var mutex: std.Io.Mutex = .init;
     var live: [capacity]?*Handle = @splat(null);

@@ -1138,11 +1138,13 @@ pub fn ProtoStore(comptime D: type) type {
             const has_q = @hasDecl(D, "q");
             const has_attempt_decl = @hasDecl(D, "attempt");
             const self: *Self = @ptrCast(@alignCast(ctx));
+            // The count guard runs first: a row count past u32 fails before any
+            // column or the pattern is read.
+            const count = std.math.cast(u32, self.nodes.items.len) orelse return error.TooManyInstances;
             // `append` grows the three columns together.
             std.debug.assert(self.models.items.len == self.nodes.items.len);
             std.debug.assert(self.instances.items.len == self.nodes.items.len);
             std.debug.assert(pv.col_ptr.len == @as(usize, pv.n) + 1);
-            const count = std.math.cast(u32, self.nodes.items.len) orelse return error.TooManyInstances;
             const store = try gpa.create(DeviceBatch(D));
 
             // `create` returns undefined bytes, so every field is written here,
