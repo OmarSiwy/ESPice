@@ -228,6 +228,7 @@ PASS	fixtures/envelope/rc_startup_1e-05.sp
 PASS	fixtures/envelope/sine.sp
 PASS	fixtures/envelope/zero.sp
 PASS	fixtures/four/dc_only.sp
+PASS	fixtures/four/deck_tran_window.sp
 PASS	fixtures/four/harmonic_count_1.sp
 PASS	fixtures/four/harmonic_count_16.sp
 PASS	fixtures/four/harmonic_count_3.sp

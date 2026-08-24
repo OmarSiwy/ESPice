@@ -317,8 +317,10 @@ first column `time`.
 .four f0 v(out) [v(out2) ...] [nharm]
 ```
 
-Fourier coefficients of the last period of the transient, from DC to
-`nharm` harmonics (default 9). One plot per output, `Fourier Analysis
+Fourier coefficients of the last period of the deck's `.tran` (its stop
+time, `uic` and `.ic` included), from DC to `nharm` harmonics (default 9).
+A deck without a `.tran` runs five periods of `f0` at 200 points per
+period. One plot per output, `Fourier Analysis
 (THD = x %)` (`Fourier Analysis v(out) (THD = ...)` for several outputs):
 `harmonic`, `frequency`, `magnitude`, `phase_deg`.
 

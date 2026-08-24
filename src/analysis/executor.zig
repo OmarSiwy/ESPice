@@ -301,7 +301,7 @@ pub const Executor = struct {
             // The OP ladder publishes its own sim state (`initial_step`);
             // restore the plain one that dependents inherit.
             self.circuit.setSimState(.{ .kind = if (transient) .ic else .dc });
-        } else if (self.job == .tran and self.job.tran.uic) {
+        } else if (self.job.uic()) {
             self.x = try self.work.allocator().alloc(f64, self.circuit.n);
             @memset(self.x.?, 0);
             for (self.deck.ic) |ic| self.x.?[ic.node] = ic.value;

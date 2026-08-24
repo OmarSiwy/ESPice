@@ -574,9 +574,9 @@ fn findOp(rows: std.MultiArrayList(Row), op: requests.Op, template: u32) ?QueryI
 }
 
 /// The OP a query needs first: its tolerances, transient-flavoured for
-/// time-domain kinds. Null for `.op` itself and `.tran uic`.
+/// time-domain kinds. Null for `.op` itself and a `uic` start.
 fn prerequisite(job: requests.Query) ?requests.Op {
-    if (job == .op or (job == .tran and job.tran.uic)) return null;
+    if (job == .op or job.uic()) return null;
     return .{ .tol = switch (job) {
         inline else => |o| o.tol,
     }, .tran_op = @as(requests.Kind, job).transient() };

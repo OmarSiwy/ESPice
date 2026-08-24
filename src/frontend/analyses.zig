@@ -1456,6 +1456,7 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
                 .output_node = try outputNode(node_id),
                 .n_harmonics = try count(u16, args, 2, 9),
                 .label = if (a.split) try outputLabel(ctx.arena, args[1]) else "",
+                .tran_opts = ctx.tran,
             } };
         },
         .fft => return .{ .fft = try fft(ctx, args, node_id, node_neg) },

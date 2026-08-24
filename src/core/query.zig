@@ -732,8 +732,9 @@ pub const Four = struct {
     f_fundamental: f64,
     n_harmonics: u16 = 9,
     output_node: u32 = 0,
-    /// Transient window to analyze. Null means 5 fundamental periods at
-    /// 200 points per period.
+    /// The deck's `.tran`, whose last period is analyzed, as ngspice's
+    /// `.four` reads the tran plot (dotcards.c). Null, for a deck without a
+    /// `.tran`, means 5 fundamental periods at 200 points per period.
     tran_opts: ?Tran = null,
     /// The output as written (`v(b)`) when the card named several: it goes
     /// into the plot name so the plots stay apart. Empty for one output.
@@ -896,6 +897,16 @@ pub const Query = union(Kind) {
     acmatch: Acmatch,
     dcsens: Dcsens,
     hblin: Hblin,
+
+    /// The run starts from the `.ic` values with no operating point: a
+    /// `.tran ... uic`, or a `.four` over one.
+    pub fn uic(job: Query) bool {
+        return switch (job) {
+            .tran => |o| o.uic,
+            .four => |o| if (o.tran_opts) |t| t.uic else false,
+            else => false, // else: no other query skips its operating point
+        };
+    }
 };
 
 test "CardRef.lookup keys on type and index together" {

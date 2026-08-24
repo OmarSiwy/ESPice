@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "analysis": "four",
+  "purpose": ".four analyses the last period of the deck's .tran",
+  "oracle": {
+    "kind": "ngspice",
+    "derivation": "ngspice 44.2 (nix develop .#benchmarking), ngspice -b on this deck: Fourier analysis for v(in), THD 11.5787 %, magnitudes as listed (Gridsize 200, interpolation degree 1)."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Fourier Analysis",
+        "match": "exact",
+        "row_count": 10,
+        "columns": {
+          "magnitude": {
+            "unit": "V",
+            "rtol": 0.005,
+            "atol": 2e-05,
+            "values": [
+              0.036093,
+              0.23181,
+              0.0243387,
+              0.0092222,
+              0.00493137,
+              0.00308676,
+              0.00211935,
+              0.00154735,
+              0.00118055,
+              0.00093107
+            ]
+          }
+        },
+        "axis": {
+          "name": "harmonic",
+          "values": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true,
+    "checks": [
+      {
+        "kind": "fourier_thd",
+        "percent_min": 11.4,
+        "percent_max": 11.8
+      }
+    ]
+  },
+  "netlist_sha256": "08b6dfed0360c2c9a8ba7343fe049f5210667538ea3dd61bda25a02c3da4bd81"
+}
