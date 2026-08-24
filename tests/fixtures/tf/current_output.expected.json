@@ -4,7 +4,7 @@
   "purpose": "Current-output DC transconductance",
   "oracle": {
     "kind": "analytic",
-    "derivation": "dI(Vmeasure)/dVin=1/1000 A/V, with current positive from out to ground."
+    "derivation": "dI(Vmeasure)/dVin=1/1000 A/V, with current positive from out to ground. Output resistance: the 1k R1 to the dead (shorted) Vin, seen by Vmeasure; ngspice 44.2 prints 1e20 here (tfanal.c, 1/MAX(1e-20, i)), a divergence recorded in dev/analysis/tf.md."
   },
   "expect": {
     "status": "success",
@@ -22,6 +22,14 @@
             ]
           },
           "input_resistance": {
+            "unit": "ohm",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              1000
+            ]
+          },
+          "output_resistance": {
             "unit": "ohm",
             "rtol": 2e-05,
             "atol": 1e-09,

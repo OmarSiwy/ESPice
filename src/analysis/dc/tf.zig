@@ -18,7 +18,8 @@ pub const Values = struct {
 
 /// DC transfer function at the operating point `x_op`. The gain and Rin come
 /// from a unit drive on the input, Rout from the adjoint solve with e_out.
-/// Rin is +inf when the unit drive moves no input-branch current. Returns
+/// Rin, and Rout for a current output, are +inf when the unit drive moves no
+/// branch current. Returns
 /// error.SingularMatrix when G is singular.
 pub fn solve(
     ckt: *root.Circuit,
@@ -75,10 +76,19 @@ pub fn solve(
     }
     dense_lu.solveFactoredT(n, jac, piv, x, x);
 
+    // A current output reads the resistance its sensing source sees: y[br]
+    // is (J^-1)[br][br], the branch current a unit volt on that source moves
+    // (the same diagonal either way round), and as for Rin the current
+    // delivered is -y[br]. ngspice's tfanal.c takes 1/MAX(1e-20, y[br]),
+    // which is 1e20 for every passive circuit (dev/analysis/tf.md).
+    const output_resistance = if (options.output_branch) |br|
+        (if (x[br] != 0) -1.0 / x[br] else std.math.inf(f64))
+    else
+        outputOf(x, options, output_node, output_neg);
     return .{
         .gain = gain,
         .input_resistance = input_resistance,
-        .output_resistance = outputOf(x, options, output_node, output_neg),
+        .output_resistance = output_resistance,
     };
 }
 

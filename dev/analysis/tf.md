@@ -44,6 +44,18 @@ generalizes to any output/source pair at one solve each). The input source
 is "dead" automatically: its branch row clamps $\delta V_{\text{in}} = 0$
 when the RHS entry is zero.
 
+A current output `i(Vx)` puts $e_{\text{out}}$ on Vx's branch row: a unit
+volt on the sensing source. $y[br] = (G^{-1})_{br,br}$ is the branch current
+that volt moves, and as for $R_{\text{in}}$ the resistance Vx sees is
+$R_{\text{out}} = -1/y[br]$ ($+\infty$ when $y[br] = 0$).
+
+Divergence: ngspice's `tfanal.c` reports $1/\max(10^{-20}, y[br])$ for a
+current output. A passive circuit always gives $y[br] < 0$ under that sign,
+so ngspice prints `1e20` where the resistance is finite (#149): R1 1k and R2
+1k in series to the sensing source read 2k here, 1e20 there. A deck that
+relied on ngspice's value has nothing to change but its expectation; the
+fixture `tf/current_output` pins the 1k case.
+
 Error criteria: direct linear solves: accuracy inherited from the OP and
 the factorization; no iteration.
 

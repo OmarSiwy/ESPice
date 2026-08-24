@@ -7,6 +7,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 - C API: a destroyed or foreign `espice_problem` returns the new `ESPICE_INVALID_HANDLE` instead of undefined behaviour; `espice_destroy` returns a status (#143).
 - API: `Options.hdl_toolchain.cache_dir` sets where `.hdl` builds are cached, in place of `$ESPICE_CACHE` and its fallbacks.
+- `.tf` with a current output `i(Vx)` reports the resistance Vx sees, where it reported the negated conductance (#149).
 - `.options tnom` (and HSPICE's default TNOM of 25 C) reaches R `tc1`/`tc2`; it was ignored at 27 C (#146).
 - `.four` phases use ngspice's sine reference: `sin(0 1 1k)` reads 0 degrees, was -90 (#148).
 - `.four` analyses the last period of the deck's `.tran` (stop time, `uic`, `.ic`) instead of its own 5-period run (#147).
