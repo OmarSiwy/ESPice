@@ -41,10 +41,16 @@ sit on every other harmonic). The error budget is therefore:
 - **non-periodicity leakage**: if the transient has not settled, the last
   period is not truly periodic and energy leaks off-bin: the classic
   wrong-THD failure. The convention (spice3/ngspice): analyze the final
-  period only, after running several periods (default here: 5).
+  period of the deck's `.tran` only; a deck without one runs 5 periods.
 
-Phase convention: bin $k$ of the FFT of $A\cos(2\pi k f_0 t + \phi)$ is
-$(NA/2)e^{+j\phi}$, so phase = $+\mathrm{atan2}(\Im, \Re)$: no negation.
+Phase convention: a **sine** reference, as ngspice's. `CKTfour`
+(ngspice `src/frontend/fourier.c`) accumulates $S_k = \sum v_i \sin(2\pi k i/N)$
+and $C_k = \sum v_i \cos(2\pi k i/N)$ and reports
+$\mathrm{atan2}(C_k, S_k)$, so $A\sin(2\pi k f_0 t + \phi)$ reads $\phi$
+(a cosine reads $\phi + 90°$). The FFT bin is $X_k = \sum v_i e^{-j2\pi k i/N}
+= C_k - jS_k$, so phase $= \mathrm{atan2}(\Re X_k, -\Im X_k)$. The phase is
+relative to the window start $t_{\text{end}} - T$, as in ngspice; it equals
+the phase against $t = 0$ only when the window starts on a whole period.
 
 Windowing (Hann etc.) is deliberately **not** applied for .FOUR-style
 single-period harmonic extraction: windows trade bin-exactness for leakage
@@ -56,8 +62,8 @@ harmonic-table one.
 
 `src/analysis/post/four.zig`:
 
-**Phases.** (1) Run (or receive) a transient: default window
-$5/f_0$ at 200 pts/period: `solve()` drives
+**Phases.** (1) Run (or receive) a transient: the deck's `.tran`, else
+$5/f_0$ at 200 pts/period: `run()` drives
 `tran.simulate` directly; `analyze()` accepts any recorded `Waveform`.
 (2) Extract the final period: find the first sample $\ge t_{\text{end}}-T$;
 fewer than 2 samples in the window → `error.InsufficientData` (never a
@@ -84,7 +90,7 @@ four(waveform, f0):
         u[k] = linear_interp(window, t_k)     # binary-searched bracket
     X = fft(u)
     dc   = Re X[0] / N
-    mag_k = 2*|X[k]|/N,  phase_k = atan2(Im X[k], Re X[k])   # k = 1..H
+    mag_k = 2*|X[k]|/N,  phase_k = atan2(Re X[k], -Im X[k])  # k = 1..H, sine ref
     THD  = sqrt(sum_{k=2..9} mag_k^2) / mag_1 * 100
 ```
 
@@ -126,9 +132,10 @@ kernel four_batched(lanes = probes x trials):
 
 **Per-section verification**
 
-- §1 estimator, resampling, no-window rationale, phase convention:
-  verified against `four.zig` source (incl. its unit tests pinning cosine
-  THD=0 and square-wave ≈48.3 %).
+- §1 estimator, resampling, no-window rationale: verified against
+  `four.zig` source (incl. its unit tests pinning cosine THD=0 and
+  square-wave ≈48.3 %). Phase convention: ngspice `fourier.c` `CKTfour`,
+  read; `tests/fixtures/four/phase_*` pin it.
 - §2/§3: direct transcription. §4: design notes.
 
 **Our implementation**

@@ -4,7 +4,7 @@
   "purpose": "Absolute Fourier phase relative to simulation time origin",
   "oracle": {
     "kind": "analytic",
-    "derivation": "Cosine-reference Fourier phase of sin(wt+phi) is phi-90 degrees, modulo 360. Peak fundamental magnitude is 1."
+    "derivation": "Sine-reference Fourier phase (ngspice fourier.c CKTfour: atan2(sum v*cos, sum v*sin)) of sin(wt+phi) is phi, modulo 360. Peak fundamental magnitude is 1."
   },
   "expect": {
     "status": "success",
@@ -61,7 +61,7 @@
         ],
         "column": "phase_deg",
         "values": [
-          -60
+          30
         ],
         "atol": 0.25,
         "period": 360

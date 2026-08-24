@@ -322,7 +322,8 @@ time, `uic` and `.ic` included), from DC to `nharm` harmonics (default 9).
 A deck without a `.tran` runs five periods of `f0` at 200 points per
 period. One plot per output, `Fourier Analysis
 (THD = x %)` (`Fourier Analysis v(out) (THD = ...)` for several outputs):
-`harmonic`, `frequency`, `magnitude`, `phase_deg`.
+`harmonic`, `frequency`, `magnitude`, `phase_deg`. The phase is against a
+sine starting at the window, as ngspice's: `sin(0 1 1k)` reads 0 degrees.
 
 ```text
 .four 1k v(out)

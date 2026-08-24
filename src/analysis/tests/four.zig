@@ -137,12 +137,13 @@ test "four: known amplitude and phase" {
     const n = 512;
     var samples: [n]f64 = undefined;
 
-    // 2.0*cos(2*pi*t + pi/4) = fundamental with amplitude 2.0 and phase 45 deg
+    // 2.0*sin(2*pi*t + pi/4): amplitude 2.0, phase 45 deg against ngspice's
+    // sine reference (fourier.c CKTfour)
     const amp = 2.0;
     const phase_rad = math.pi / 4.0;
     for (0..n) |k| {
         const t = @as(f64, @floatFromInt(k)) / @as(f64, @floatFromInt(n));
-        samples[k] = amp * @cos(2.0 * math.pi * t + phase_rad);
+        samples[k] = amp * @sin(2.0 * math.pi * t + phase_rad);
     }
 
     const result = try spectrumOf(&samples, 9, allocator);

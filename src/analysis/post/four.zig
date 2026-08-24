@@ -8,7 +8,8 @@ const tran = @import("../tran/tran.zig");
 
 const math = std.math;
 
-/// One harmonic: sinusoid amplitude and phase in degrees (cosine reference).
+/// One harmonic: sinusoid amplitude and phase in degrees (sine reference,
+/// as ngspice's).
 pub const Harmonic = struct {
     mag: f64,
     phase_deg: f64,
@@ -154,12 +155,7 @@ fn extractSpectrum(re: []const f64, im: []const f64, n_fft: usize, n_harmonics: 
 
     const n_harm = std.math.clamp(n_harmonics, 1, max_harmonics);
     var harmonics: [max_harmonics]Harmonic = undefined;
-    // The FFT gives X[1] = (N*A/2)·e^{+j·phi} for A·cos(2π·f0·t + phi), so
-    // the phase is +atan2 with no negation.
-    harmonics[0] = .{
-        .mag = fund_mag,
-        .phase_deg = math.radiansToDegrees(math.atan2(im[1], re[1])),
-    };
+    harmonics[0] = .{ .mag = fund_mag, .phase_deg = sinePhase(re[1], im[1]) };
 
     // Harmonic h + 1 sits in bin h + 1. The THD numerator is every harmonic
     // the deck asked to see, as ngspice's is.
@@ -171,8 +167,7 @@ fn extractSpectrum(re: []const f64, im: []const f64, n_fft: usize, n_harmonics: 
             continue;
         }
         const mag = @sqrt(re[bin] * re[bin] + im[bin] * im[bin]) * scale;
-        const phase = math.radiansToDegrees(math.atan2(im[bin], re[bin]));
-        harmonics[h] = .{ .mag = mag, .phase_deg = phase };
+        harmonics[h] = .{ .mag = mag, .phase_deg = sinePhase(re[bin], im[bin]) };
         thd_sum_sq += mag * mag;
     }
 
@@ -185,6 +180,14 @@ fn extractSpectrum(re: []const f64, im: []const f64, n_fft: usize, n_harmonics: 
         .n_harmonics = n_harm,
         .thd_percent = thd_percent,
     };
+}
+
+/// Phase in degrees of FFT bin `re + j·im` against a sine, ngspice's
+/// reference: CKTfour (fourier.c) takes atan2(Σ v·cos, Σ v·sin), so
+/// A·sin(2π·f0·t + phi) reads phi. The FFT's bin is Σ v·e^{-jθ}, so
+/// Σ v·cos = re and Σ v·sin = -im.
+fn sinePhase(re: f64, im: f64) f64 {
+    return math.radiansToDegrees(math.atan2(re, -im));
 }
 
 /// Linear interpolation of `values` at `t` on sorted `times`, advancing

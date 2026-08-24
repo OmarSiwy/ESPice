@@ -4,7 +4,7 @@
   "purpose": ".four analyses the last period of the deck's .tran",
   "oracle": {
     "kind": "ngspice",
-    "derivation": "ngspice 44.2 (nix develop .#benchmarking), ngspice -b on this deck: Fourier analysis for v(in), THD 11.5787 %, magnitudes as listed (Gridsize 200, interpolation degree 1)."
+    "derivation": "ngspice 44.2 (nix develop .#benchmarking), ngspice -b on this deck: Fourier analysis for v(in), THD 11.5787 %, magnitudes as listed (Gridsize 200, interpolation degree 1). Phases (sine reference): 4.54829, -77.923, -83.176 deg for harmonics 1-3."
   },
   "expect": {
     "status": "success",
@@ -54,6 +54,24 @@
     "finite_values_required": true,
     "all_requested_analyses_must_complete": true,
     "checks": [
+      {
+        "kind": "selected_values",
+        "plot": "Fourier Analysis",
+        "axis": "harmonic",
+        "coordinates": [
+          1,
+          2,
+          3
+        ],
+        "column": "phase_deg",
+        "values": [
+          4.54829,
+          -77.923,
+          -83.176
+        ],
+        "atol": 0.25,
+        "period": 360
+      },
       {
         "kind": "fourier_thd",
         "percent_min": 11.4,

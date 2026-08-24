@@ -7,6 +7,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 - C API: a destroyed or foreign `espice_problem` returns the new `ESPICE_INVALID_HANDLE` instead of undefined behaviour; `espice_destroy` returns a status (#143).
 - API: `Options.hdl_toolchain.cache_dir` sets where `.hdl` builds are cached, in place of `$ESPICE_CACHE` and its fallbacks.
+- `.four` phases use ngspice's sine reference: `sin(0 1 1k)` reads 0 degrees, was -90 (#148).
 - `.four` analyses the last period of the deck's `.tran` (stop time, `uic`, `.ic`) instead of its own 5-period run (#147).
 - C and L instance `ic=` seeds a `.tran ... uic` start instead of being dropped (#145).
 - A `.step` whose every point needs its own circuit runs just those points, instead of writing past the query table (#132).
