@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "HSPICE's default TNOM=25 reaches R tc1/tc2",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "HSPICE TNOM defaults to 25 C: R=1k*(1+0.01*(125-25))=2k, i(v1)=-0.5 mA. ngspice's TNOM=27 would give 1.98k."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "row_count": 1,
+        "columns": {
+          "v(a)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              1
+            ]
+          },
+          "i(v1)": {
+            "unit": "A",
+            "rtol": 2e-05,
+            "atol": 1e-12,
+            "values": [
+              -0.0005
+            ]
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "9678b129841e93497ed5492a50415eac9cc4d0139eee462f059bf9cf8423cba2"
+}

@@ -1307,6 +1307,9 @@ pub const NetBuilder = struct {
         _ = try setParam(D, &model, &instance, value_field, value);
         try applyKv(&model, dev.kv);
         try applyKv(&instance, dev.kv);
+        // `$simparam` defaults after the last write: `tnom` is ngspice's
+        // CKTnomTemp for R's tc1/tc2 (restemp.c), a card TNOM still wins.
+        deriveModel(D, &model, self.b, dev.pins.len);
         const nodes = try deviceNodes(self, D, dev);
         const br = self.b.n;
         try self.b.addDevice(D, dev.name, model, instance, nodes);

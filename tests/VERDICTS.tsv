@@ -341,6 +341,7 @@ PASS	fixtures/hspice/power.sp
 PASS	fixtures/hspice/ptdnoise_diode.sp
 PASS	fixtures/hspice/ptdnoise_time_sweep.sp
 PASS	fixtures/hspice/pz_source.sp
+PASS	fixtures/hspice/resistor_default_tnom.sp
 PASS	fixtures/hspice/s_element.sp
 PASS	fixtures/hspice/s_element_tran.sp
 PASS	fixtures/hspice/sample_rc.sp
@@ -711,6 +712,7 @@ PASS	fixtures/temp/resistor_tc_-0p001_0.sp
 PASS	fixtures/temp/resistor_tc_0_1e-05.sp
 PASS	fixtures/temp/resistor_tc_0p001_0.sp
 PASS	fixtures/temp/resistor_tc_0p001_1e-05.sp
+PASS	fixtures/temp/resistor_tnom.sp
 PASS	fixtures/temp/wide.sp
 PASS	fixtures/tf/balanced.sp
 PASS	fixtures/tf/bench_tf_r_ladder.sp
