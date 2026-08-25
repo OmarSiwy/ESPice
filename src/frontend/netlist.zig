@@ -3345,10 +3345,11 @@ fn Reader(comptime S: type) type {
             const positional = try appendSpan(Value, arena, &r.values, r.positional.items);
             const kv = try appendSpan(Kv, arena, &r.kvs, r.card_kv.items);
             // After the spans: reading an instance model reuses the card scratch.
-            const model: u32 = if (r.positional.items.len > 0 and r.positional.items[0] == .name)
-                try r.modelRow(letter, r.positional.items[0].name, positional.start, frame)
-            else
-                none;
+            // An R, C or L card may name its model after its value
+            // (`R1 a b 1k rmod`, ngspice INP2R/INP2C/INP2L).
+            const pv = r.positional.items;
+            const model_at: ?usize = if (pv.len > 0 and pv[0] == .name) 0 else if (std.mem.indexOfScalar(u8, "rcl", letter) != null and pv.len > 1 and pv[0] == .num and pv[1] == .name) 1 else null;
+            const model: u32 = if (model_at) |k| try r.modelRow(letter, pv[k].name, positional.start, frame) else none;
             // A behavioural E/F/G/H is built as a B card but keeps its own
             // letter in a flattened name, which is what its i() probes use.
             const name_letter = if (letter == 'b') std.ascii.toLower(head[0]) else letter;

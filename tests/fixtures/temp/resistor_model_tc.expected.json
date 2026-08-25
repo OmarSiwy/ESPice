@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "A resistor .model card's TC1/TC2/TNOM reach the instance",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "At 85 C: rm R=1k*(1+2e-3*58+1e-5*58^2)=1149.64, i(v1)=-8.69838e-4; rn (TNOM=35) R=1k*(1+0.01*50)=1.5k, i(v2)=-6.66667e-4. ngspice 44.2 prints the same."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "row_count": 1,
+        "columns": {
+          "i(v1)": {
+            "unit": "A",
+            "rtol": 2e-05,
+            "atol": 1e-12,
+            "values": [
+              -0.0008698375143523189
+            ]
+          },
+          "i(v2)": {
+            "unit": "A",
+            "rtol": 2e-05,
+            "atol": 1e-12,
+            "values": [
+              -0.0006666666666666666
+            ]
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "b0f319948f8986a83689913781f9077ec9210ffc97926f72bb92d8fa68318e1a"
+}

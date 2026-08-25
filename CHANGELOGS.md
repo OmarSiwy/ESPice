@@ -7,6 +7,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 - C API: a destroyed or foreign `espice_problem` returns the new `ESPICE_INVALID_HANDLE` instead of undefined behaviour; `espice_destroy` returns a status (#143).
 - API: `Options.hdl_toolchain.cache_dir` sets where `.hdl` builds are cached, in place of `$ESPICE_CACHE` and its fallbacks.
+- A resistor `.model` card's `TC1`, `TC2`, `TCE` and `TNOM` apply to its instances; they were ignored (#159).
 - Spectre `tran` maps `method=`, `skipdc=yes|no` and `errpreset=moderate`, and refuses any other parameter by name instead of dropping it (#151).
 - `.options abstol=0`, `vntol=0` and `chgtol=0` run as in ngspice; `reltol=0` and `trtol=0` fail at their card instead of as a bare `InvalidQueryOptions` (#150).
 - `.tf` with a current output `i(Vx)` reports the resistance Vx sees, where it reported the negated conductance (#149).

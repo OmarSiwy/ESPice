@@ -710,6 +710,7 @@ PASS	fixtures/syntax/ngspice_syntax.sp
 PASS	fixtures/syntax/subckt_params.sp
 PASS	fixtures/temp/fine.sp
 PASS	fixtures/temp/nominal.sp
+PASS	fixtures/temp/resistor_model_tc.sp
 PASS	fixtures/temp/resistor_tc_-0p001_0.sp
 PASS	fixtures/temp/resistor_tc_0_1e-05.sp
 PASS	fixtures/temp/resistor_tc_0p001_0.sp

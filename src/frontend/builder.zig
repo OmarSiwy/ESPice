@@ -1304,6 +1304,9 @@ pub const NetBuilder = struct {
                 try self.ac_res.append(self.arena, .{ .name = dev.name, .value = ac_value });
             }
         }
+        // The model card first (`.model rm R(TC1=2e-3 TNOM=25)`), so the card
+        // value and instance pairs win over it, as in ngspice's RESmodel.
+        if (dev.model) |m| try applyKv(&model, m.kv);
         _ = try setParam(D, &model, &instance, value_field, value);
         try applyKv(&model, dev.kv);
         try applyKv(&instance, dev.kv);
